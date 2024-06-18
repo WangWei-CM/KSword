@@ -1,13 +1,16 @@
-#include<iostream>
-#include<bits/stdc++.h>
-#include<cstring>
-#include<windows.h>
-#include<time.h>
-#include<conio.h>
-#include<stdlib.h>
+/*
+#include <iostream>
+#include <bits/stdc++.h>
+#include <cstring>
+#include <windows.h>
+#include <time.h>
+#include <conio.h>
+#include <stdlib.h>
 #include <userenv.h>
 #include <lmcons.h>
 #include <cctype>
+*/
+#include "./libs/total.h"
 using namespace std;
 
 int pw();
