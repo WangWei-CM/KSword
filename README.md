@@ -17,7 +17,9 @@ cprint("[ * ]",9);
 使用 `cprint（char,int）` 可以输出彩色的文字。
 
 4. 对于所有用户输入，我们以第一个空格分割，前面的内容赋值给 `string` 类的 `nowcmd` 变量，后面的全部赋值给 `cmdpara` 变量。
-如：输入：`apt-get install g++`
-`nowcmd`中内容：`apt-get`
+
+如：输入：`apt-get install g++`，`nowcmd`中内容：`apt-get`;
+
 `cmdpara` 中内容：`install g++`
+
 需要自行处理 `cmdpara` 中的内容。
