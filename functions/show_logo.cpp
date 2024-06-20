@@ -2,9 +2,8 @@
 
 #define _SHOW_LOGO_CPP_
 
-#endif
-
 // Shows the logo of "Kali" for you.
+// Author: Wangwei_CM.
 
 int show_logo()
 {
@@ -189,3 +188,5 @@ int show_logo()
     cout << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~";
     cout << endl;
 }
+
+#endif

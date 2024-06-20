@@ -2,17 +2,16 @@
 
 #define _TOTAL_H_
 
-#include <iostream>
-#include <cstring>
-#include <windows.h>
-#include <time.h>
-#include <conio.h>
-#include <stdlib.h>
-#include <userenv.h>
-#include <lmcons.h>
+#include "../functions/show_logo.cpp"
 #include <cctype>
-
-#endif // !_TOTAL_H_
+#include <conio.h>
+#include <cstring>
+#include <iostream>
+#include <lmcons.h>
+#include <stdlib.h>
+#include <time.h>
+#include <userenv.h>
+#include <windows.h>
 
 int pw();
 int options();
@@ -32,3 +31,5 @@ void cutpth(string, const char);           // has something with cmd"cd" and "cd
 bool directoryExists(const std::string &); // input a output a bool.
 
 string getCmdResult(const string &); // get cmd result.Need a command in string'
+
+#endif // !_TOTAL_H_
