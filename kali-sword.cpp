@@ -331,23 +331,18 @@ shellstart:
         newDir += cmdpara;
         if (directoryExists(newDir))
         {
-            // ������ڣ�����cmdpth
             if (cmdpara.find('\\') != std::string::npos)
             {
-                size_t startPos = 0; // ��ʼλ��
+                size_t startPos = 0;
                 size_t endPos = cmdpara.find_first_of('\\');
                 while (endPos != std::string::npos)
                 {
-                    // ���ҵ��Ĳ������ӵ�������
                     cmdpth[++cmdpthtop] = cmdpara.substr(startPos, endPos - startPos);
-                    // ������ʼλ�ã�����������һ����б��
                     startPos = endPos + 1;
                     endPos = cmdpara.find_first_of('\\', startPos);
                 }
-                // �������һ������
                 cmdpth[++cmdpthtop] = cmdpara.substr(startPos);
             }
-            // �����һ���������ӵ�������
             else
             {
                 cmdpth[++cmdpthtop] += cmdpara;
