@@ -1,12 +1,16 @@
 #ifndef _SHOW_LOGO_CPP_
 
 #define _SHOW_LOGO_CPP_
+#include "../libs/total.h"
+#include <iostream>
 
 // Shows the logo of "Kali" for you.
 // Author: Wangwei_CM.
 
 int show_logo()
 {
+    using std::cout;
+    using std::endl;
     cprint("====================Kali Sword V1.3 For Public=====================", 87);
     cout << endl;
     cout << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" << endl;

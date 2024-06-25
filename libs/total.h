@@ -32,4 +32,39 @@ bool directoryExists(const std::string &); // input a output a bool.
 
 string getCmdResult(const string &); // get cmd result.Need a command in string'
 
+int wintop()
+{
+    HWND hWnd = GetConsoleWindow();
+    if (hWnd != NULL)
+    {
+        SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    }
+    return 0;
+}
+
+int winuntop()
+{
+    HWND hWnd = GetConsoleWindow();
+    if (hWnd != NULL)
+    {
+        SetWindowPos(hWnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    }
+    return 0;
+}
+
+int fread()
+{
+    int x = 0, f = 1;
+    char ch = getchar();
+    while (ch < 48 || ch > 57)
+    {
+        if (ch == '-')
+            f = -1;
+        ch = getchar();
+    }
+    while (ch >= 48 && ch <= 57)
+        x = (x << 3) + (x << 1) + (ch ^ 48), ch = getchar();
+    return x * f;
+}
+
 #endif // !_TOTAL_H_
