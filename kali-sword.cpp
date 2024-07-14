@@ -295,7 +295,7 @@ shellstart:
     {
         int tmp;
         cprint("[ ! ]", 6);
-        cout << "This command is broken.Continur?(0/1):";
+        cout << "This command is broken.Continue?(0/1):";
         cin >> tmp;
         cout << endl;
         if (tmp == 0)
