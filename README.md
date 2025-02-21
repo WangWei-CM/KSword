@@ -1,692 +1,139 @@
-# Ksword v 3.1操作说明及实现方法说明
+Ksword使用说明
+# 0.工具编写意义
+##	1.作为管理工具
+Ksword集成了大量对于窗口、进程的管理功能，并且使用控制台窗口界面代替图形界面，做到了待机不到**0.1%CPU**利用率、程序内存占用不到**0.5MB**的极限优化，并且**重写输入输出流**，实现了**后台输入**，无论在什么电脑上都能提供独一无二的管理协助。
+##	2.作为维权工具
+很多时候我们的电脑上会被安装一些奇怪的软件，它们会禁用CMD，禁用任务管理器，甚至在我们工作的时候把电脑桌面锁住，这样即使我们坐在电脑面前也不能正常使用我们的电脑。进入PE系统当然是不错的选择，但是有没有更加简单强势的方法呢？有的兄弟，有的，Ksword可以在以上工具被禁用的时候进行紧急帮助修复，让我们可以不用重启进行快捷操作。
+##	3.安全测试
+在哔哩哔哩人均手搓PE系统，免杀火绒的情况下，我们当然不能落后时代了。Ksword可以协助进行安全测试，drivermgr提供了驱动挂载功能，也可以在需要的时候快速调用系统命令。
+# 1.运行前检查
+##	1.支持的系统架构
+Ksword Release支持X64系统架构。其源代码在32位系统上也能正常工作，但是由于身边已经很少有X86的机器了，所以公布的版本全部使用X64 release进行封装，并且**不对32位系统进行错误测试**。
+##	2.Windows系统版本
+Ksword与Windows系统结合紧密，**不可以**在其它系统上运行。由于不同系统的Windows API函数行为差距较大，我们只对目前使用最广泛的```Windows10```进行全面兼容，并对```Windows11```进行测试。强烈建议使用```Windows10```进行测试。
+在其他的系统上可能会出现的问题包括但不限于：
+- 图形界面渲染异常：为了避免```DLL```注入，同时最大化降低Ksword系统占用，Ksword采用了控制台窗口，没有消息循环，因此Ksword在老旧的控制台窗口上无法设置为指定的窗口尺寸。对于所有```Windows10```版本均可以正常使用。
+- 部分功能执行异常：```WindowsAPI```函数随着系统更迭，部分函数的行为可能不符合预期。在Win8.1或者更早的版本上可能功能不完整。
+- 无法使用联网更新：Ksword为了最大化缩减文件体积，联网更新使用Windows自带的curl，而这在```Windows10 1809```后才被包含在系统内。
 
-------------
-## 1. 软件用途
-软件可以用于多个用途。可以安装在自己的电脑上，作为一个快捷工具，也可以稍加改造，用作近源渗透。
-## 2.操作说明及功能介绍
-有关详细的功能和一些其他没有介绍道的用法，可以在控制台输入help获取帮助。
-###软件支持的版本
-要完全使用“apt”相关功能，请确保Windows 10 1809及以上或安装了curl到环境变量；
-要达到潜伏的目的，请确保Windows 8及以上的操作系统；
-要使用用户监视器功能，请确保不是Windows11或更新版本。
-建议的操作系统是Windows10 1809~22H2。
-###如何进入软件界面
-如果是Windows7及以下系统，双击即可运行弹出软件主界面；
-如果是Windows8及以上系统，软件会首先调用粘滞键。启用或关闭粘滞键窗口过后5秒内连续按下3次左ctrl键可以显示控制台窗口，否则程序退出。
-输入用户对应的密码进入控制台界面，否则程序退出。
-### 工作目录
-软件设计为命令行交互模式，使用与Windows Powershell一样的语法来切换工作目录。支持的命令：
-```shell
-    cd
-    cd..
-    cd ..
-    x:\
-```
-与cmd的命令方式基本一样。细节方面更加接近powershell风格。
-###用户身份与权限
-软件运行时会要求一次密码输入。每个用户应该有对应的密码，并且互不相同。
-Admin账户拥有最高的权限；软件的权限划分为垂直权限划分，即1~10级权限依次增高。部分权限较低的用户无法执行一些指令。
-Admin账户可以通过命令行启动而不必输入密码。命令行应为```<程序名> AdminPassword```。
-命令```runas```支持某些用户以其他人身份操作控制台。如果目标用户的权限比当前用户高，那么需要输入高权限用户的密码。
-
-### 3Ctrl控制全局隐藏
-无论在软件的哪个运行阶段，连续按下3次ctrl键都可以使应用程序隐藏或显示。
-### 资源监视器
-一个有些简陋的资源监视器，监视cpu和内存利用率，每秒钟刷新显示窗口。
-使用命令```cpu```启动，当前进程会转变为一个资源监视器的窗口。如果仍然需要控制台窗口，需要再次启动ksword。
-### 用户登录监视器
-监视当前计算机中有哪些用户登录，给出新用户登陆时间或用户退出登陆时间。使用命令```net```启动。
-### 查看当前时间
-使用命令```time```输出当前时间。
-### 状态信息条
-每次唤出新的会话的时候都会显示状态信息条。其格式为
-```
-┌ [<软件内账户名>@<程序版本>]~[<当前进程的系统用户名>@<当前主机名>][Admin]
-```
-其中，[Admin]字样只会在当前进程拥有管理员权限时打印。特别的，如果软件内账户名是最高权限Admin，那么会用红色字体突出显示；如果当前进程的系统用户名是SYSTEM，也会用红色字体突出显示。
-### cmd命令执行
-该控制台程序在对输入命令识别之后，如果不是该程序所支持的命令，那么就会将这个命令附带当前的工作路径给cmd.exe执行。使用特殊方法连接到cmd.exe而不是使用```system("<command>")```，这样做能使cmd结果实时回显。该功能是阻塞的。cmd命令执行时拥有和当前程序相等的权限。
-### 提权（需要软件内最高权限账户）
-在软件中，使用```getsys```命令以提升当前权限。如果该软件当前没有管理员权限（可以通过[admin]是否显示来证实），首次执行该命令需要通过UAC防护。如果当前已经拥有管理员权限，新弹出的窗口将会是system权限的窗口（可以通过用户名处是否为标红SYSTEM来证实）。
-### 置顶与取消置顶
-默认启动时会拥有置顶的窗口。如果需要取消置顶或者重新置顶，应使用```top```与```untop```指令。
-### 资源包管理器
-沿用了著名的Linux软件包管理器的名字apt。软件启动时首先扫描所有盘下是否有```kswordrc```目录是否存在，如果没有或需要手动更改工作目录，使用```setrcpath```命令，然后输入一个以\结尾的路径。如果设置了根目录为路径，请确保拥有管理员权限，否则功能无法正常运行。
-使用```apt update```到默认镜像地址服务器（http://159.75.66.16:80/kswordrc ）下下载version.txt，这里面包含了最新的软件版本号与相关的资源信息。如果使用时ksword不是最新版本，那么命令将拒绝更新。更新完成后，使用```apt upgrade```将配置文件中的内容载入进程。或者使用```apt install <资源名称>```直接安装对应的资源，ksword将会自动读取并重新加载配置文件，然后到镜像地址进行更新。
-## 3.实现
-### 工作目录
-使用了一个string类变量```path```来跟踪路径。
-在每次输出的时候，校验是否有连续重复的"\"存在：
-```cpp
-    bool inConsecutive = false; // 标记是否处于连续反斜杠序列中
-    for (size_t i = 0; i < path.length(); ++i) {
-        // 检查当前字符是否为反斜杠
-        if (path[i] == '\\') {
-            // 如果已经处于连续反斜杠序列中，则跳过这个字符
-            if (inConsecutive) {
-                continue;
-            }
-            // 否则，添加一个反斜杠到结果字符串，并标记进入连续序列
-            result += '\\';
-            inConsecutive = true;
-        } else {
-            // 如果当前字符不是反斜杠，添加到结果字符串，并重置标记
-            result += path[i];
-            inConsecutive = false;
-        }
-    }
-    path=result;
+## 3.Win11特殊情况
+Ksword使用控制台窗口，但是在所有win11系统上，控制台窗口均会被终端捕获，无法执行预期的控制台窗口操作函数。**为此，强烈建议在Win11上右键使用管理员身份运行，或者先打开cmd，在终端的设置中设置默认的控制台程序为Windows主机而不是终端。**（通常情况下管理员运行的程序不会被终端捕获，但是在部分win11系统上被全部捕获了，因此如果发现密码输入界面被终端捕获，请在设置里面禁用以打到最好的使用效果。）
+##	4.最重要的：杀毒软件与Defender
+由于数字签名需要一大笔费用，而Ksword版本更迭极快，上报给杀毒软件白名单将不会是明智的选择。我们已经做到了火绒等绝大多数主流安全软件免杀，28个安全引擎仅3检出，但是360和defender依然会进行拦截。**请在运行的时候手动加入白名单，并且禁用Defender**（defender在运行其他安全软件的时候会被自动接管）。否则可能出现”此文件包含潜在的病毒或者垃圾软件“的提示。
+**Ksword从始至终秉持开源、共享、安全、合作的原则，可以放心添加到白名单；如果有较高的安全要求，可以进行源码审查。**
+# 2.运行时
+##	1.初始密码
+如果未在配置文件中设置密码，那么默认密码是```wwcm```。在配置文件中修改密码的方式见2.6。
+##	2.输入模式
+出于特殊的使用场景需求和安全需求，Ksword实现了两套输入方式，即使在后台甚至被锁屏的时候都能提供可靠的输入实现。下面对输入模式进行详细介绍。
+1.在```Ksword配置文件```中修改```inputmode```输入模式选项，或者在Ksword运行时键入inputmode进行选择。
+- 0：默认的输入方式，基于钩子实现。部分行为分析工具认为这是危险行为（```SetWindowsHookEx```）而进行恶意判定。这可以提供可靠的输入，尤其是它的响应速度。注意事项将在后文提到。
+- 1：更加极端的输入方式，基于轮询键盘按键状态实现（```GetAnsyKeyCode```）。这样输入的响应速度不是最快的，并且其灵敏程度与CPU利用率成反比，因此可能产生输入卡顿，不是安全的。但是这样的输入方式也有优点。在任何时候，即使被软件恶意锁定屏幕和键盘，Ksword也可以读取输入，除了驱动层面没有方法可以拦截。
+- 2：常规输入方式（```getline```），不再赘述。
+##		2.钩子输入方式使用注意事项
+1：使用方向键上下可以读取上次或者下一次的输入，和你在CMD中用到的一样。
+2：由于只能读取单个按键状态，因此shift不起作用。
+3：右```shift```清空输入（显示黄色```[reinput]```后输入缓冲区被重置，无需顾虑已经产生输出的部分）。
+4：右```CTRL```中断输入，再次触发输入的时候将会继续上一次的输入进度。中断输入过后窗口**如果隐藏过**，则需要按下三次~按键重新激活输入（即使软件当前在后台）。**不用担心按下了多次~，Ksword会自动删除命令开头的所有~。**
+5：Tab键粘贴剪贴板内容。
+6：由于编写难度太大，左右方向键暂时不支持。要想更改以前的内容只能删掉，或者使用reinput选项。
+##		3.getline方式使用注意事项：
+Ksword使用置顶和鼠标穿透，因此即使看起来Ksword正常显示了，当前焦点窗口也**大概率并不是**Ksword主程序窗口。按下```Alt+Tab```可以定向焦点窗口到Ksword。
+####	3.交互方式
+1：Ksword全程只能使用键盘交互。并且Ksword是**点击穿透**的，因此在整个使用过程中不要尝试点击Ksword中的任何内容。
+2：由于Ksword可能还不够完善，可能会出现无响应/卡死的情况等，任何时候```ESC```均可退出Ksword主程序。
+3：右```Ctrl```和右```Alt```可以隐藏。两者的区别是右```Ctrl```隐藏会中断当前的输入（如果正在输入的话），而```Alt```只会隐藏窗口。
+4：主程序输入```exit```退出，或者在输入密码的时候输入任何错误的密码可以直接退出。前者和```esc```是一样的。
+##	4.命令相关
+Ksword有一次性命令输入方式和交互形式。如果你是初次使用Ksword，可以使用交互形式以获得最好的指引体验。支持交互的命令会在3.命令中指明，包括```threadmgr```,```procmgr```, ```guimgr```, ```drivermgr```, ```netmgr```。
+##	5.资源目录
+Ksword不需要安装，你可以从任何地方直接复制过来双击运行。但是Ksword本身支持扩展。在任意盘符下新建目录```<盘符>:\kswordrc```，Ksword将会寻找到资源目录。命令```apt```将会使用这个目录。Ksword配置文件也在这个目录中。
+# 3.命令
+##	0.独特的语法规范：
+Ksword的关键字是~。命令之间使用~进行分割，Ksword会顺次执行所有命令。
+##	1.getsys：
+获取系统权限。如果当前没有管理员权限则会请求管理权限。
+##	2.sethc：
+替换掉系统粘滞键。替换过后可以按下5次Shift运行Ksword，相当强大，因为在```Ctrl+Alt+Del```安全界面甚至是锁屏界面都可以调出Ksword应用程序。这也就是为什么Ksword启动时候要求输入密码。
+##	3.ai：
+向Kimi提问。```API Key```如果按下回车不输入任何内容，将会使用我的默认API key。结合tab快速粘贴的功能，可以以最快的速度向Kimi提问。
+##	4.apt：
+借鉴了Linux的软件包管理器的名字，可以联网从服务器端下载其他组件。详细命令如下：
+```bash
+		apt [OPTION] [OPTION PARA]...
+		option：
+			update 更新软件列表。
+			upgrade 程序读入软件列表。
+			install <package>：联网下载指定的软件包。
+	其他操作：setrcpath设置资源目录。默认会在所有硬盘根目录下查找kswordrc文件夹。
+	setserver设置服务器IP地址。域名也可以，会使用Windows自带的DNS解析。
 ```
 
-在每次输出的时候，为了获取正确大小写的地址：
-```cpp
-    string tmpcmd;
-	//这里是为了处理傻逼的cmd兼容问题，这里通过调用cmd执行一次切换目录+打印目录的方式更新，但是如果是根目录的话该命令会报错，因为cmd使用```d:```来切换盘符。因此这里直接输出单层路径。 
-    
-    if(path[0]=='c'){
-    	tmpcmd="cd "+path+" && cd";
-	}else{
-		tmpcmd+=path[0];
-		tmpcmd+=": && cd "+path+" && cd";
-	}
-    const string& refpath=tmpcmd;
-    if(path.length()>3){
-	string pathtmp;
-	pathtmp=run_cmd(refpath);
-	if(pathtmp.length()!=0)
-	pathtmp.pop_back();
-	cout<<pathtmp;}
-	else cout<<path;
-```
+##	5.guimgr：管理屏幕上的窗口状态。
+选择你要操作的对象（PID）（输入```self```以对自己操作，输入```tasklist```以查看当前的进程快 照,输入```scr```以遍历屏幕上的窗口，输入```exit```以退出）；
+输入一个字母可以查找所有以这个字母开头的进程。
+选择```self```过后，有以下几种可供选择的方案：
 
-cd命令相关处理：
-```cpp
-	else if (nowcmd==cmd[9])
-	{
-		if(cmdpara==""){//没有命令参数，只输入了cd，那么进行处理，回到根目录 
-	    size_t firstBackslashPos = path.find('\\'); // 查找第一个反斜杠的位置
-	    if (firstBackslashPos != std::string::npos) {
-	        // 如果找到了反斜杠，截取从开始到反斜杠之前的内容
-	        path=path.substr(0, firstBackslashPos);
-	        path+="\\";//保证路径规范，以\结尾 
-	    }
-	    goto shellstart;
-		}
-		if(cmdpara==".."){//cd ..，回到上一个目录 
-		size_t secondSlashPos = path.find_last_of('\\', path.length() - 2);
-    	// 如果找到了第二个"\"，并且它不是最后一个字符
-    	if (secondSlashPos != std::string::npos && secondSlashPos < path.length() - 1) {
-        // 删除从第二个"\"之后的所有内容
-        path=path.substr(0, secondSlashPos + 1);
-		}goto shellstart;
-		}
-    const std::string& constpath = cmdpara;
-    if(cmdpara[cmdpara.length()-1]!='\\')cmdpara+='\\';
-	if(directoryExists(constpath)){path=cmdpara;goto shellstart;}//进入下一级或者多层目录，先检验目录是否存在，然后修改全局变量 
-	else{
-		string tmppath=path;
-		tmppath+=cmdpara;
-		const std::string& constpath = tmppath;
-		if(directoryExists(constpath)){path=tmppath;goto shellstart;}
-	}
-	}
-	else if (nowcmd=="cd.."){//兼容cd..，实际和cd ..没有任何区别。 
-		size_t secondSlashPos = path.find_last_of('\\', path.length() - 2);
-    	// 如果找到了第二个"\"，并且它不是最后一个字符
-    	if (secondSlashPos != std::string::npos && secondSlashPos < path.length() - 1) {
-        // 删除从第二个"\"之后的所有内容
-        path=path.substr(0, secondSlashPos + 1);
-	}
-	}
-	else if ((nowcmd.length()==2) && (nowcmd[1]==':')){
-		path=nowcmd+"\\";
-	}//比如a:,b:,c:等等，切换盘符。应该没有哪个大聪明来个1:吧？
-```
-### 内部权限管理
-使用```pw()```函数来进行用户身份验证，返回值对应相应的用户。所有人的密码被明文储存，因为即使加密也可以被轻松修改。Admin的密码被常量定义。
-此外，输入密码时使用一些小手段来防止被看到。相关代码如下
-```c++
-string password;
-	char ch;
-    printf("Enter password:");
-	int i = 0;
-	bool flag=1;
-	while (flag)
-	{
-		ch=getch();
-		switch((int)ch)
-		{
-			case 8:
-				if(password.empty())
-				  break;
-				password.erase(password.end()-1);
-				putchar('\b');
-				putchar(' ');
-				putchar('\b');
-				break;
-			case 27:
-				exit(0);
-				break;
-			case 13:
-				flag=0;
-				break;
-			default :password+=ch;putchar('*');break;
-		}
-	}
-    if (password==usrlist[1][1]){
-		return 1;}
-    if (password==usrlist[0][1]){
-		return 0;}
-	if (password==usrlist[2][1]){
-		return 2;}
-	else return 100;
-}
-```
-### 资源监视器
-进行CPU资源的监视，使用```wmic cpu get loadpercentage```命令实时获取CPU利用率。
-```cpp
-	char MsgBuff[1024];
-	int MsgLen=1020;
-	FILE * fp;
-	if (cmd == NULL)
-	{
-		return -1;
-	}
-	if ((fp = _popen(cmd, "r")) == NULL)
-	{
-		return -2;
-	}
-	else
-	{
-		memset(MsgBuff, 0, MsgLen);
-		fgets(MsgBuff, MsgLen, fp);
-		if (fgets(MsgBuff, MsgLen, fp) != NULL)
-		{
-			int cpuusg = charArrayToInt(MsgBuff, sizeof(MsgBuff));
-			MEMORYSTATUSEX memInfo;
-    		memInfo.dwLength = sizeof(MEMORYSTATUSEX);
-    		if (GlobalMemoryStatusEx(&memInfo)) {
-        	double memoryLoad = (double)memInfo.dwMemoryLoad / (double)100;
-			printcpu(cpuusg,memoryLoad*100);}
-		}
-		if(_pclose(fp) == -1)
-		{
-			return -3;
-		}
-	}
-	return 0;
-```
-再使用图形界面实时刷新。
-```cpp
-void printcpu(int c,int m){
-	c*=5;
-	c/=3;
-	system("cls");
-	int num=c/10;
-	if(c<10){
-		cout<<"CPU";cprintforcpu(c,47);
-	}
-	else if(c<=70) {
-		cout<<"CP";cprintforcpu(c,47);
-	}
-	else if(c<=90){
-		cout<<"CP";cprintforcpu(c,109);
-	}
-	else if(c<=99){
-		cout<<"CP";cprintforcpu(c,71);
-	}
-	else if(c>=100){
-		cout<<"C";cprintforcpu(100,71);
-	}
-	for(int i=1;i<=num;i++){
-		cout<<"▉";
-	}
-	if((c-10*num)>=3){
-		cout<<"▋";
-	}
-	cout<<endl;
-	int numb=m/10;
-	if(m<10){
-		cout<<"RAM";cprintforcpu(m,47);
-	}
-	else if(m<=70) {
-		cout<<"RA";cprintforcpu(m,47);
-	}
-	else if(m<=90){
-		cout<<"RA";cprintforcpu(m,109);
-	}
-	else if(m<=99){
-		cout<<"RA";cprintforcpu(m,71);
-	}
-	else if(m==100){
-		cout<<"R";cprintforcpu(m,71);
-	}
-	for(int i=1;i<=numb;i++){
-		cout<<"▉";
-	}
-	if((m-10*numb)>=3){
-		cout<<"▋";
-	}
-	
-}
-```
-最后使用WindowsAPI调整窗口大小等相关内容，代码如下：(由于是早期史山，没有注释)
-```cpp
-HWND hwnd = GetConsoleWindow();
-LONG style = GetWindowLong(hwnd, GWL_STYLE);
-style &= ~(WS_BORDER|WS_CAPTION|WS_THICKFRAME);
-SetWindowLong(hwnd, GWL_STYLE, style);
-SetWindowPos( hwnd, NULL, 0,0,0,0,SWP_NOSIZE|SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED ); 
-CONSOLE_CURSOR_INFO CursorInfo;
-	CONSOLE_CURSOR_INFO cursor;    
-	cursor.bVisible = FALSE;    
-	cursor.dwSize = sizeof(cursor);    
-	HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);    
-	HWND hWnd = GetConsoleWindow();
-    if (hWnd != NULL) {SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 60, SWP_NOMOVE | SWP_NOSIZE);}
-   int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-   int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-   int x = screenWidth - 700;
-   int y = screenHeight - 200;
-   HWND consoleWindow = GetConsoleWindow();
-   SetWindowPos(consoleWindow, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
-   SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 80, LWA_COLORKEY);
-SetConsoleCursorInfo(handle, &cursor);
-system("mode con cols=80 lines=6");
-system("color a");
-SetWindowLongPtrA(GetConsoleWindow(), GWL_STYLE, GetWindowLongPtrA(GetConsoleWindow(),GWL_STYLE)& ~WS_SIZEBOX & ~WS_MAXIMIZEBOX & ~WS_MINIMIZEBOX);
-system("cls"); 
-```
-### 实时显示用户
-实现原理非常简单，和上面几乎没有任何区别。调用cmd的```query user```命令。
-### 3ctrl全局隐藏及初始潜伏
-程序运行时，首先执行以下代码以停止显示窗口：
-```cpp
-ShowWindow(GetConsoleWindow(), SW_HIDE);
-```
-然后，调用粘滞键应用程序。通常情况下我们认为sethc.exe是粘滞键应用程序，但是跟踪其行为后我们发现真正的粘滞键应用程序是```EaseOfAccessDialog.exe```，并且捕获其参数为```211```。因此使用
-```cpp
-system("EaseOfAccessDialog.exe 211");
-```
-来进行调用。调用完后，使用一段代码检测是否按下3次ctrl键并且是否显示窗口。
-```cpp
-	    bool ctrlPressed = false;
-	    int pressCount = 0;
-	    const int requiredPresses = 3;
-	    const int waitTime = 3000;
-	    for (int i = 0; i < 3000; i += 100) {
-        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) {
-            pressCount++;
-            if (pressCount >= 3) {
-                break; // 达到3次按下，退出循环
-            }
-        }
-        Sleep(100); // 休眠100毫秒，减少CPU占用
-    }
-	    // 根据按下次数决定是否显示控制台窗口
-	    if (pressCount >= requiredPresses) {
-	        ShowWindow(GetConsoleWindow(), SW_SHOW);
-	    } else {
-	        std::exit(0);
-	    }}
-```
-对于运行时的全局隐藏，我们启用一个专门的线程来监控。
-```cpp
-thread listenerThread(keyboardListener);
-```
-其中```keyboardListener```函数实现如下：
-```cpp
-void keyboardListener() {
-	using namespace std::chrono;
-    milliseconds keyPressInterval(2000); // 设置2秒的检测间隔
-    milliseconds keyRepeatInterval(100); // 设置100ms的按键检测间隔
-    steady_clock::time_point lastKeyPressTime = steady_clock::now();
+	1>普通置顶
+	2>超级置顶
+	3>恢复正常控制台样式
+	4>恢复Ksword样式
+	5>统一显示所有窗口
+	6>设置此窗口透明度
+选择其他进程过后，有以下几种可供选择的方案：
 
-    while (true) {
-        if (GetAsyncKeyState(VK_CONTROL) & 0x8000) { // 检测Ctrl键是否被按下
-            auto currentTime = steady_clock::now();
-            if (currentTime - lastKeyPressTime < keyPressInterval) {
-                ctrlCount++; // 增加按键计数
-            } else {
-                ctrlCount = 0; // 如果超过2秒，重置按键计数
-            }
-            lastKeyPressTime = currentTime; // 更新最后按下时间
-            while (GetAsyncKeyState(VK_CONTROL) & 0x8000) {
-                std::this_thread::sleep_for(milliseconds(50)); // 等待Ctrl键释放，减少CPU占用
-            }
+	1>隐藏窗口
+	2>显示窗口
+	3>置顶窗口
+	4>取消置顶
+	5>请求关闭
+	6>设置透明度（透明0~256不透明）
+	7>结束进程
+6.```procmgr```：管理系统中的进程
+请选择你要操作的进程（PID），```exit```退出，```tasklist```列出所有任务，```bat```批量管理进程；
+输入一个字母可以查找所有以这个字母开头的进程。
+确定进程过后有以下几种可供选择的方案：
 
-            if (ctrlCount >= 3) {
-                if (windowsshow) {
-                    hideWindow();
-                    windowsshow = false;
-                } else {
-                    showWindow();
-                    windowsshow = true;
-                }
-                ctrlCount = 0; // 重置按键计数
-            }
-        }
+	1>检查DLL
+	2>结束进程
+	3>挂起进程
+	4>恢复进程
+	5>查看进程相关信息
+	6>设为关键进程
+	7>取消关键进程
+如果输入选择```bat```，将会进入批处理模式：
 
-        std::this_thread::sleep_for(keyRepeatInterval); // 每100ms检测一次
-    }
-}
-```
+	1>add <PID>：向进程列表中添加进程PID
+	2>rm <PID>：从进程列表中移除PID
+	3>结束进程并清空进程列表
+	4>多线程批量挂起进程
+	5>多线程批量恢复进程
+	6>清空进程列表
+	7>添加区间的进程PID
+	8>查看已经选中的进程列表
+7.```threadmgr```：管理ksword中的所有线程
+Ksword在执行程序断网、隐藏/显示切换、超级置顶的时候使用了多线程。你可以在这里面管理所有的线程。停止信号可能对有的线程无效。
 
-### 状态信息条
-首先，输出部分实现如下：
-```cpp
-	getpcname(lchostname,lcusrname);
-	if(doname!=usrname)
-	{
-	cout<<"┌ ";
-	cout<<"[";
-	cprint(charusrname,70);
-	cout<<"=>";
-	cprint(chardoname,60);
-	cout<<"@";
-	cout<<Kswordversion;
-	cout<<"]";
-	}
-	else
-	{
-	cout<<"┌ ";
-	cout<<"[";
-	cprint(charusrname,70);
-	cout<<"@";
-	cout<<Kswordversion;
-	cout<<"]";
-	}
-	cout<<"~[";
-	if(lcusrname=="SYSTEM")
-	cprint("System",70);
-	else cout<<lcusrname;
-	cout<<'@'<<lchostname<<']';
-	if (adminyn()){
-		cprint("[Admin]",2);
-	}
-	cout<<endl;
-	cout<<"└ ";
-```
-然后，	我们调用WindowsAPI实现获取计算机名的操作，```getpcname```函数实现如下：
-```cpp
-void getpcname(std::string &lchostname, std::string &lcusrname) {
-    // 获取计算机名
-    TCHAR computerName[MAX_COMPUTERNAME_LENGTH + 1];
-    DWORD size = sizeof(computerName) / sizeof(computerName[0]);
-    if (GetComputerName(computerName, &size)) {
-        lchostname = computerName;
-    } else {
-        lchostname = "Unknown";
-    }
+	1>发送停止信号
+	2>发送开始信号
+	3>打印线程列表
+8.```netmgr```：管理你的电脑的网络连接
 
-    // 获取当前用户名称
-    TCHAR username[UNLEN + 1];
-    size = sizeof(username) / sizeof(username[0]);
-    if (GetUserName(username, &size)) {
-        lcusrname = username;
-    } else {
-        lcusrname = "Unknown";
-    }
-}
-```
-另外，我们使用函数```adminyn```判断当前程序是否拥有跟管理员权限。调用相关的WindowsAPI：
-```cpp
-bool adminyn(){
-	BOOL isElevated = FALSE;
-    HANDLE hToken = NULL;
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
-        TOKEN_ELEVATION elevation;
-        DWORD dwSize;
-        if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &dwSize)) {
-            isElevated = elevation.TokenIsElevated;
-        }
-    }
-    if (hToken) {
-        CloseHandle(hToken);
-    }
-    return isElevated;
-}
-```
-### cmd执行命令并实时回显结果：
-```cpp
-int out_run_cmd(const char * cmd){
-	char MsgBuff[1024];
-	int MsgLen=1020;
-	FILE * fp;
-	if (cmd == NULL)
-	{
-		return -1;
-	}
-	if ((fp = _popen(cmd, "r")) == NULL)
-	{
-		return -2;
-	}
-	else
-	{
-		memset(MsgBuff, 0, MsgLen);
+	1>监听并拦截指定进程的所有TCP请求
+	2>列举指定进程的TCP连接
+	3>输出指定端口的占用情况
+	使用1可以对指定进程进行断网。
+9.```drivermgr```：管理驱动程序
 
-		while (fgets(MsgBuff, MsgLen, fp) != NULL)
-		{
-			printf("%s", MsgBuff);
-		}
-		if(_pclose(fp) == -1)
-		{
-			return -3;
-		}
-	}
-	return 0;
-}
-```
-### 提权
-首先，调用adminyn函数确认是否管理员权限。相关函数不再赘述。如果没有管理员权限，那么使用下面的代码调用WindowsAPI请求管理员权限，即UAC：
-```cpp
-int RequestAdministrator() {
-    SHELLEXECUTEINFOW sei = {0};
-    sei.cbSize = sizeof(SHELLEXECUTEINFOW);
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-    sei.hwnd = NULL;
-    sei.lpVerb = L"runas"; // 请求提升权限
-    sei.lpFile = ExePath; // 程序路径
-    sei.nShow = SW_NORMAL;
-	size_t argsLength = strlen(AdminPassword) + 1;
-    wchar_t* wideArguments = new wchar_t[argsLength];
-    // 将 char* 类型的宏定义转换为 wchar_t*
-    argsLength = mbstowcs(wideArguments, AdminPassword, argsLength);
-    // 检查转换是否成功
-    if (argsLength == (size_t)-1) {
-        // 转换失败，处理错误
-        std::wcerr << L"Conversion from multi-byte to wide-char string failed." << std::endl;
-        delete[] wideArguments;
-        return 1;
-    }
-    // 现在可以使用转换后的宽字符字符串作为参数
-    sei.lpParameters = wideArguments;
-    if (!ShellExecuteExW(&sei)) {
-        return 1; // 失败
-    }
+	1>加载驱动
+	2>卸载驱动
+	3>启动服务
+	4>停止服务
+	5>安装证书
+**注意：这个功能不建议轻易使用，因为可能危害电脑安全，并且大概率会失败。Ksword的配套驱动程序已经研发完成，但是因为没有数字签名，启用测试模式+手动安装证书太过麻烦，因此不对外提供使用。**
+4.应用场景示例
 
-    WaitForSingleObject(sei.hProcess, INFINITE);
-    CloseHandle(sei.hProcess);
-    return 0; // 成功
-}
-```
-值得注意的是程序如何获取自己的路径。相关代码如下，储存在全局变量。
-```cpp
-void getexepath(){
-	TCHAR szExePath[MAX_PATH];
-    DWORD dwSize = GetModuleFileName(NULL, szExePath, MAX_PATH);
-    if (dwSize > 0) {
-	        std::string exePathStr = std::string(szExePath);
-			const char* cstr = exePathStr.c_str();
-	int bufferSize = MultiByteToWideChar(CP_UTF8, 0, cstr, -1, NULL, 0);
-	wchar_t* wideCstr = new wchar_t[bufferSize];
-	MultiByteToWideChar(CP_UTF8, 0, cstr, -1, wideCstr, bufferSize);
-	ExePath=wideCstr;
-}
-}
-```
-然后，调用```runassys```函数获取system权限。相关代码如下：
-```cpp
-void runassys()
-{
-	TCHAR szExePath[MAX_PATH];
-    DWORD dwSize = GetModuleFileName(NULL, szExePath, MAX_PATH);
-    if (dwSize > 0) {
-	        std::string exePathStr = std::string(szExePath);
-	        exePathStr+=' ';
-	        exePathStr+=AdminPassword;
-			const char* cstr = exePathStr.c_str();
-	//提权到Debug以获取进程句柄
-	HANDLE hToken;
-	LUID Luid;
-	TOKEN_PRIVILEGES tp;
-	OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken);
-	LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &Luid);
-	tp.PrivilegeCount = 1;
-	tp.Privileges[0].Luid = Luid;
-	tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-	AdjustTokenPrivileges(hToken, false, &tp, sizeof(tp), NULL, NULL);
-	CloseHandle(hToken);
-	
-	//枚举进程获取lsass.exe的ID和winlogon.exe的ID，它们是少有的可以直接打开句柄的系统进程
-	DWORD idL, idW;
-	PROCESSENTRY32 pe;
-	pe.dwSize = sizeof(PROCESSENTRY32);
-	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-	if (Process32First(hSnapshot, &pe)) {
-		do {
-			if (0 == _stricmp(pe.szExeFile, "lsass.exe")) {
-				idL = pe.th32ProcessID;
-			}else if (0 == _stricmp(pe.szExeFile, "winlogon.exe")) {
-				idW = pe.th32ProcessID;
-			}
-		} while (Process32Next(hSnapshot, &pe));
-	}
-	CloseHandle(hSnapshot);
-	
-	//获取句柄，先试lsass再试winlogon
-	HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, idL);
-	if(!hProcess)hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, idW);
-	HANDLE hTokenx;
-	//获取令牌
-	OpenProcessToken(hProcess, TOKEN_DUPLICATE, &hTokenx);
-	//复制令牌
-	DuplicateTokenEx(hTokenx, MAXIMUM_ALLOWED, NULL, SecurityIdentification, TokenPrimary, &hToken);
-	CloseHandle(hProcess);
-	CloseHandle(hTokenx);
-	//启动信息
-	STARTUPINFOW si;
-	PROCESS_INFORMATION pi;
-	ZeroMemory(&si, sizeof(STARTUPINFOW));
-	si.cb = sizeof(STARTUPINFOW);
-	si.lpDesktop = L"winsta0\\default";//显示窗口
-	//启动进程，不能用CreateProcessAsUser否则报错1314无特权
-	int bufferSize = MultiByteToWideChar(CP_UTF8, 0, cstr, -1, NULL, 0);
-	wchar_t* wideCstr = new wchar_t[bufferSize];
-// 转换字符串
-	MultiByteToWideChar(CP_UTF8, 0, cstr, -1, wideCstr, bufferSize);
-if (!CreateProcessWithTokenW(hToken, LOGON_NETCREDENTIALS_ONLY, NULL, wideCstr, NORMAL_PRIORITY_CLASS, NULL, NULL, &si, &pi)) {
-    // 处理错误
-    std::cerr << "CreateProcessWithTokenW failed with error code: " << GetLastError() << std::endl;
-}
-	CloseHandle(hToken);
-}}
-```
-### 资源管理命令apt
-首先，程序运行时查找资源路径。实现非常简单，依次查找```<盘符>:\kswordrc```目录是否存在。检验是否存在，调用了WindowsAPI函数，相关代码如下：
-```cpp
-bool DirectoryExists(const std::wstring& path) {
-    DWORD dwAttrib = GetFileAttributesW(path.c_str());
-    return (dwAttrib != INVALID_FILE_ATTRIBUTES && 
-            (dwAttrib & FILE_ATTRIBUTE_DIRECTORY));
-}
-```
-然后，程序拼接命令并使用curl工具从镜像站点获取资源。
-```cpp
-else if(nowcmd=="apt"){
-			if(cmdpara=="update"){
-				string updatecmd;
-				updatecmd+="curl -o "+localadd+"version.txt "+"http://"+serverip+":80/kswordrc/"+"version.txt";
-				cprint("[ * ]",9);cout<<updatecmd<<endl;
-				out_run_cmd(updatecmd.c_str());
-				cout<<"Update finished."<<endl;
-			}
-			else if(cmdpara=="upgrade"){
-				string path;path=localadd+"version.txt";
-				cprint("[ * ]",9);cout<<"start to update..."<<endl;
-				readFile(path);
-    		}
-    		else if(cmdpara.find("install")==0){
-    			cmdpara.erase(0, 8);
-    			string path;path=localadd+"version.txt";
-				cprint("[ * ]",9);cout<<"start to update..."<<endl;
-				readFile(path);
-				string pkgname;
-				pkgname=cmdpara;
-				for(int i=1;i<=rcnumber;i++){
-					cprint("[ * ]",9);cout<<aptinfo[i].filename<<aptinfo[i].year<<aptinfo[i].month<<aptinfo[i].day<<aptinfo[i].filesize<<endl;
-					if(pkgname==aptinfo[i].filename){
-						string installcmd;
-						installcmd+="curl -o "+localadd+aptinfo[i].filename+" "+"http://"+serverip+":80/kswordrc/"+aptinfo[i].filename;
-						cprint("[ * ]",9);cout<<installcmd<<endl;
-						cprint("[ * ]",9);cout<<"Recources found."<<aptinfo[i].filesize<<"MB disk space will be used.Continue?(y/n)";
-						char yon;
-						cin>>yon;
-						if((yon=='N')or(yon=='n'))break;
-						if((yon=='Y')or(yon=='y')){
-							out_run_cmd(installcmd.c_str());
-							goto shellstart;
-						}
-					}}
-			cprint("[ x ]",4);cout<<"Can't find such recuorse."<<endl;
-    		}
-		}
-	else if(nowcmd=="setrcpath"){
-			string userinput;
-			cin>>userinput;
-			const string& userinputref = userinput;
-			if (directoryExists(userinputref))localadd=userinput;
-			else {cprint("[ x ]",4);cout<<"Dir not exist!"<<endl;}	
-			goto shellstart;
-	} 
-	else if(nowcmd=="check"){
-		string checkcmd;
-		checkcmd+="ping "+serverip;
-		out_run_cmd(checkcmd.c_str());
-	}
-```
-其中，aptinfo是定义的结构体，它用于装载文件中的配置信息。定义如下：
-```cpp
-struct FileInfo {
-    string filename;
-    int year, month, day;
-    int filesize;
-};
-```
-有关镜像站点的配置，只需要非常简单地使用有公网IP的服务器创建IIS站点，然后将文件资源放到80端口下```/kswordrc```目录中。更新也非常简单，只需要添加文件并且向配置文件中添加相关信息即可。
-这是不调用网站API和使用websocket进行交互的最简单的方式，有效减小了维护负担和服务器压力。此外，没有提供命令来切换镜像地址，有自定义需求的用户应该有能力修改源代码并且自行编译。
-### 置顶
-相关函数非常简单，使用了WindowsAPI。
-```cpp
-int wintop() {
-    HWND hWnd = GetConsoleWindow(); // 获取控制台窗口句柄
-    if (hWnd != NULL) {
-        // 将窗口置顶
-        SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-    }
-    return 0;
-}
-int winuntop() {
-    HWND hWnd = GetConsoleWindow(); // 获取控制台窗口句柄
-    if (hWnd != NULL) {
-        // 取消窗口置顶
-        SetWindowPos(hWnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-    }
-    return 0;
-}
-```
-
-##有关作者
-此程序由作品提交人王伟懿独立编写完成，参考了部分CSDN上的实现源码。所有历史版本均开源分享至Github。
-[Github相关链接](https://github.com/WangWei-CM/KSword "Github相关链接")
-
+	1.编程时快查问题
+	2.杀死双进程保护
+	3.（安全研究）断网指定进程
+	4.忘记密码
