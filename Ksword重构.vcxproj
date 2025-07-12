@@ -1,0 +1,313 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="packages\Microsoft.CodeAnalysis.FxCopAnalyzers.3.3.2\build\Microsoft.CodeAnalysis.FxCopAnalyzers.props" Condition="Exists('packages\Microsoft.CodeAnalysis.FxCopAnalyzers.3.3.2\build\Microsoft.CodeAnalysis.FxCopAnalyzers.props')" />
+  <Import Project="packages\Microsoft.NetFramework.Analyzers.3.3.2\build\Microsoft.NetFramework.Analyzers.props" Condition="Exists('packages\Microsoft.NetFramework.Analyzers.3.3.2\build\Microsoft.NetFramework.Analyzers.props')" />
+  <Import Project="packages\Microsoft.NetCore.Analyzers.3.3.2\build\Microsoft.NetCore.Analyzers.props" Condition="Exists('packages\Microsoft.NetCore.Analyzers.3.3.2\build\Microsoft.NetCore.Analyzers.props')" />
+  <Import Project="packages\Microsoft.CodeQuality.Analyzers.3.3.2\build\Microsoft.CodeQuality.Analyzers.props" Condition="Exists('packages\Microsoft.CodeQuality.Analyzers.3.3.2\build\Microsoft.CodeQuality.Analyzers.props')" />
+  <Import Project="packages\Microsoft.CodeAnalysis.VersionCheckAnalyzer.3.3.2\build\Microsoft.CodeAnalysis.VersionCheckAnalyzer.props" Condition="Exists('packages\Microsoft.CodeAnalysis.VersionCheckAnalyzer.3.3.2\build\Microsoft.CodeAnalysis.VersionCheckAnalyzer.props')" />
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{aa1e298f-e2fd-43f2-ba13-311623ad8e89}</ProjectGuid>
+    <RootNamespace>Ksword重构</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>ReKsword</ProjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+    <EnableASAN>false</EnableASAN>
+    <SpectreMitigation>false</SpectreMitigation>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <LinkIncremental>true</LinkIncremental>
+    <TargetName>KswordRelease</TargetName>
+    <GenerateManifest>false</GenerateManifest>
+    <EmbedManifest>false</EmbedManifest>
+    <IncludePath>E:\软件安装处\DX9SDK\Include;$(IncludePath)</IncludePath>
+    <LibraryPath>E:\软件安装处\DX9SDK\Lib\x64;$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <TargetName>Ksword_x32</TargetName>
+    <RunCodeAnalysis>true</RunCodeAnalysis>
+    <IncludePath>E:\软件安装处\DX9SDK\Include;$(IncludePath)</IncludePath>
+    <LibraryPath>E:\软件安装处\DX9SDK\Lib\x64;$(LibraryPath)</LibraryPath>
+    <ReferencePath>$(ReferencePath)</ReferencePath>
+    <ExternalIncludePath>$(ExternalIncludePath)</ExternalIncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <IncludePath>E:\软件安装处\DX9SDK\Include;$(IncludePath)</IncludePath>
+    <LibraryPath>E:\软件安装处\DX9SDK\Lib\x64;$(LibraryPath)</LibraryPath>
+    <ReferencePath>$(ReferencePath)</ReferencePath>
+    <ExternalIncludePath>$(ExternalIncludePath)</ExternalIncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <IncludePath>E:\软件安装处\DX9SDK\Include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
+    <LibraryPath>E:\软件安装处\DX9SDK\Lib\x64;$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64)</LibraryPath>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>E:\软件安装处\DX9SDK\Include</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <AdditionalIncludeDirectories>E:\软件安装处\DX9SDK\Include</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>_DEBUG;_CRT_SECURE_NO_WARNINGS;KSWORD_WITH_COMMAND;_WINSOCK_DEPRECATED_NO_WARNINGS;_CONSOLE;WINNT;D3DX_USE_STATIC_LIB;CURL_STATICLIB;BUILDING_LIBCURL;HTTP_ONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>C:\Users\33251\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <InlineFunctionExpansion>Disabled</InlineFunctionExpansion>
+      <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>C:\Program Files %28x86%29\Microsoft DirectX SDK %28June 2010%29\Lib\x64;C:\Users\33251\vcpkg\packages\curl_x64-windows\lib\</AdditionalLibraryDirectories>
+      <AdditionalDependencies>Psapi.lib;User32.lib;Crypt32.lib;winmm.lib;wldap32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>false</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;D3DX_USE_STATIC_LIB;_CONSOLE;WINNT;CURL_STATICLIB;KSWORD_WITH_COMMAND;BUILDING_LIBCURL;HTTP_ONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <Optimization>Disabled</Optimization>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
+      <InlineFunctionExpansion>Disabled</InlineFunctionExpansion>
+      <EnableFiberSafeOptimizations>false</EnableFiberSafeOptimizations>
+      <MinimalRebuild>false</MinimalRebuild>
+      <AdditionalOptions>/MP %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>C:\Users\33251\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>Psapi.lib;User32.lib;Crypt32.lib;winmm.lib;wldap32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>C:\Program Files %28x86%29\Microsoft DirectX SDK %28June 2010%29\Lib\x64;C:\Users\33251\vcpkg\packages\curl_x64-windows\lib\</AdditionalLibraryDirectories>
+      <ShowProgress>NotSet</ShowProgress>
+      <DelayLoadDLLs>
+      </DelayLoadDLLs>
+    </Link>
+    <Manifest>
+      <VerboseOutput>false</VerboseOutput>
+    </Manifest>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="AI\AiAPI.cpp" />
+    <ClCompile Include="imgui\imgui.cpp" />
+    <ClCompile Include="imgui\imgui_demo.cpp" />
+    <ClCompile Include="imgui\imgui_draw.cpp" />
+    <ClCompile Include="imgui\imgui_impl_dx9.cpp" />
+    <ClCompile Include="imgui\imgui_impl_win32.cpp" />
+    <ClCompile Include="imgui\imgui_tables.cpp" />
+    <ClCompile Include="imgui\imgui_widgets.cpp" />
+    <ClCompile Include="KswordDriver\KswordDriver.cpp" />
+    <ClCompile Include="Main\AVTest.cpp" />
+    <ClCompile Include="Main\GUIFunction\Ksword5GUI.cpp" />
+    <ClCompile Include="Main\GUIFunction\Ksword5Title.cpp" />
+    <ClCompile Include="Main\GUIFunction\KswordGUIInit.cpp" />
+    <ClCompile Include="Main\GUIFunction\KswordGUIProcess.cpp" />
+    <ClCompile Include="Main\GUIFunction\KswordPointerWindow.cpp" />
+    <ClCompile Include="Main\GUIFunction\KswordText.cpp" />
+    <ClCompile Include="Main\GUIFunction\LogConsole.cpp" />
+    <ClCompile Include="Main\GUIFunction\Process\GUIprocessCore.cpp" />
+    <ClCompile Include="Main\GUIFunction\Process\KswordToolBar.cpp" />
+    <ClCompile Include="Main\Ksword5Main.cpp" />
+    <ClCompile Include="Main\ShellFunction\Command-avkill\Command-avkill.cpp" />
+    <ClCompile Include="Main\ShellFunction\Command-drivermgr\Command-drivermgr.cpp" />
+    <ClCompile Include="Main\ShellFunction\Command-guimgr\Command-guimgr-enumwindow.cpp" />
+    <ClCompile Include="Main\ShellFunction\Command-handlemgr\Command-handlemgr.cpp" />
+    <ClCompile Include="Main\ShellFunction\Command-help\Command-help.cpp" />
+    <ClCompile Include="Main\ShellFunction\Command-netmgr\Command-netmgr.cpp" />
+    <ClCompile Include="Main\ShellFunction\Command-procmgr\Command-procmgr.cpp" />
+    <ClCompile Include="Main\ShellFunction\Command-threadmgr\Command-threadmgr.cpp" />
+    <ClCompile Include="Main\SupportFunction\Ksword5SupportFunction.cpp" />
+    <ClCompile Include="Main\TextEditor\TextEditor.cpp" />
+    <ClCompile Include="Support\ksword.cpp" />
+    <ClCompile Include="CUIManage\KswordCUIManager.cpp" />
+    <ClCompile Include="SubProc\KswordMain1.cpp" />
+    <ClCompile Include="SubProc\KswordMain2.cpp" />
+    <ClCompile Include="Main\Socket\KswordSelfSocket.cpp" />
+    <ClCompile Include="Main\Socket\KswordSelfSocket7.cpp" />
+    <ClCompile Include="Main\SupportFunction\MainSupportFunction.cpp" />
+    <ClCompile Include="Main\ReKsword.cpp" />
+    <ClCompile Include="Environment\Environment.cpp" />
+    <ClCompile Include="SubProc\KswordMain7.cpp" />
+    <ClCompile Include="Main\Security\security.cpp" />
+    <ClCompile Include="Main\Socket\KswordSelfSocket2.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="AI\AiAPI.h" />
+    <ClInclude Include="imgui\imconfig.h" />
+    <ClInclude Include="imgui\imgui.h" />
+    <ClInclude Include="imgui\imgui_impl_dx9.h" />
+    <ClInclude Include="imgui\imgui_impl_win32.h" />
+    <ClInclude Include="imgui\imgui_internal.h" />
+    <ClInclude Include="imgui\imstb_rectpack.h" />
+    <ClInclude Include="imgui\imstb_textedit.h" />
+    <ClInclude Include="imgui\imstb_truetype.h" />
+    <ClInclude Include="KswordDriver\KswordDriver.h" />
+    <ClInclude Include="Main\GUIFunction\GUIFunction.h" />
+    <ClInclude Include="Main\Ksword5core.h" />
+    <ClInclude Include="Main\ShellFunction\Command-apt\Command-apt.h" />
+    <ClInclude Include="Main\ShellFunction\Command-avkill\Command-avkill.h" />
+    <ClInclude Include="Main\ShellFunction\Command-cd\Command-cd.h" />
+    <ClInclude Include="Main\ShellFunction\Command-drivermgr\Command-drivermgr.h" />
+    <ClInclude Include="Main\ShellFunction\Command-guimgr\Command-guimgr.h" />
+    <ClInclude Include="Main\ShellFunction\Command-handlemgr\Command-handlemgr.h" />
+    <ClInclude Include="Main\ShellFunction\Command-help\Command-help.h" />
+    <ClInclude Include="Main\ShellFunction\Command-netmgr\Command-netmgr.h" />
+    <ClInclude Include="Main\ShellFunction\Command-procmgr\Command-procmgr.h" />
+    <ClInclude Include="Main\ShellFunction\Command-threadmgr\Command-threadmgr.h" />
+    <ClInclude Include="CUIManage\KswordCUIManager.h" />
+    <ClInclude Include="KswordSelfManager.h" />
+    <ClInclude Include="Main\Socket\KswordSelfSocket.h" />
+    <ClInclude Include="Main\stb_image.h" />
+    <ClInclude Include="Main\stb_image_write.h" />
+    <ClInclude Include="Main\TextEditor\TextEditor.h" />
+    <ClInclude Include="resource.h" />
+    <ClInclude Include="Support\ksword.h" />
+    <ClInclude Include="Environment\Environment.h" />
+    <ClInclude Include="Main\KswordTotalHead.h" />
+    <ClInclude Include="Main\SupportFunction\MainSupportFunction.h" />
+    <ClInclude Include="Main\Security\security.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="icon1.ico" />
+    <Image Include="Icon\DEV.ico" />
+    <Image Include="Icon\normal.ico" />
+    <Image Include="Icon\PRE.ico" />
+    <Image Include="Icon\PRO.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="ReKsword.rc" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="packages\Microsoft.CodeAnalysis.VersionCheckAnalyzer.3.3.2\build\Microsoft.CodeAnalysis.VersionCheckAnalyzer.targets" Condition="Exists('packages\Microsoft.CodeAnalysis.VersionCheckAnalyzer.3.3.2\build\Microsoft.CodeAnalysis.VersionCheckAnalyzer.targets')" />
+    <Import Project="packages\Microsoft.CodeQuality.Analyzers.3.3.2\build\Microsoft.CodeQuality.Analyzers.targets" Condition="Exists('packages\Microsoft.CodeQuality.Analyzers.3.3.2\build\Microsoft.CodeQuality.Analyzers.targets')" />
+    <Import Project="packages\Microsoft.NetCore.Analyzers.3.3.2\build\Microsoft.NetCore.Analyzers.targets" Condition="Exists('packages\Microsoft.NetCore.Analyzers.3.3.2\build\Microsoft.NetCore.Analyzers.targets')" />
+    <Import Project="packages\Microsoft.NetFramework.Analyzers.3.3.2\build\Microsoft.NetFramework.Analyzers.targets" Condition="Exists('packages\Microsoft.NetFramework.Analyzers.3.3.2\build\Microsoft.NetFramework.Analyzers.targets')" />
+    <Import Project="packages\Microsoft.CodeAnalysis.FxCopAnalyzers.3.3.2\build\Microsoft.CodeAnalysis.FxCopAnalyzers.targets" Condition="Exists('packages\Microsoft.CodeAnalysis.FxCopAnalyzers.3.3.2\build\Microsoft.CodeAnalysis.FxCopAnalyzers.targets')" />
+  </ImportGroup>
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>这台计算机上缺少此项目引用的 NuGet 程序包。使用“NuGet 程序包还原”可下载这些程序包。有关更多信息，请参见 http://go.microsoft.com/fwlink/?LinkID=322105。缺少的文件是 {0}。</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('packages\Microsoft.CodeAnalysis.VersionCheckAnalyzer.3.3.2\build\Microsoft.CodeAnalysis.VersionCheckAnalyzer.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.CodeAnalysis.VersionCheckAnalyzer.3.3.2\build\Microsoft.CodeAnalysis.VersionCheckAnalyzer.props'))" />
+    <Error Condition="!Exists('packages\Microsoft.CodeAnalysis.VersionCheckAnalyzer.3.3.2\build\Microsoft.CodeAnalysis.VersionCheckAnalyzer.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.CodeAnalysis.VersionCheckAnalyzer.3.3.2\build\Microsoft.CodeAnalysis.VersionCheckAnalyzer.targets'))" />
+    <Error Condition="!Exists('packages\Microsoft.CodeQuality.Analyzers.3.3.2\build\Microsoft.CodeQuality.Analyzers.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.CodeQuality.Analyzers.3.3.2\build\Microsoft.CodeQuality.Analyzers.props'))" />
+    <Error Condition="!Exists('packages\Microsoft.CodeQuality.Analyzers.3.3.2\build\Microsoft.CodeQuality.Analyzers.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.CodeQuality.Analyzers.3.3.2\build\Microsoft.CodeQuality.Analyzers.targets'))" />
+    <Error Condition="!Exists('packages\Microsoft.NetCore.Analyzers.3.3.2\build\Microsoft.NetCore.Analyzers.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.NetCore.Analyzers.3.3.2\build\Microsoft.NetCore.Analyzers.props'))" />
+    <Error Condition="!Exists('packages\Microsoft.NetCore.Analyzers.3.3.2\build\Microsoft.NetCore.Analyzers.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.NetCore.Analyzers.3.3.2\build\Microsoft.NetCore.Analyzers.targets'))" />
+    <Error Condition="!Exists('packages\Microsoft.NetFramework.Analyzers.3.3.2\build\Microsoft.NetFramework.Analyzers.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.NetFramework.Analyzers.3.3.2\build\Microsoft.NetFramework.Analyzers.props'))" />
+    <Error Condition="!Exists('packages\Microsoft.NetFramework.Analyzers.3.3.2\build\Microsoft.NetFramework.Analyzers.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.NetFramework.Analyzers.3.3.2\build\Microsoft.NetFramework.Analyzers.targets'))" />
+    <Error Condition="!Exists('packages\Microsoft.CodeAnalysis.FxCopAnalyzers.3.3.2\build\Microsoft.CodeAnalysis.FxCopAnalyzers.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.CodeAnalysis.FxCopAnalyzers.3.3.2\build\Microsoft.CodeAnalysis.FxCopAnalyzers.props'))" />
+    <Error Condition="!Exists('packages\Microsoft.CodeAnalysis.FxCopAnalyzers.3.3.2\build\Microsoft.CodeAnalysis.FxCopAnalyzers.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.CodeAnalysis.FxCopAnalyzers.3.3.2\build\Microsoft.CodeAnalysis.FxCopAnalyzers.targets'))" />
+  </Target>
+</Project>
