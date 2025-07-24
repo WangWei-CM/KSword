@@ -26,7 +26,6 @@
 
 #include "ksword.h"
 
-
 #define KSWORD_VERSION_A 0
 #define KSWORD_VERSION_B 0
 #define KSWORD_VERSION_C 0
@@ -156,7 +155,7 @@ void KMesInfo(const char* text) {
 	if(KSWORD_MES_LEVEL<=0){
 	cprint("[ * ]", 9, 0);
 	std::cout << text << std::endl;
-	
+	kLog.Add(Info, C(text));
 #ifdef KSWORD_WITH_COMMAND
 	if(!isGUI)
 	KswordSend1("报告了一个信息：" + std::string(text));
@@ -175,7 +174,7 @@ void KMesWarn(const char* text) {
 	if(KSWORD_MES_LEVEL<=0){
 	cprint("[ ! ]", 6, 0);
 	std::cout << text << std::endl;
-	
+	kLog.Add(Warn, C(text));
 #ifdef KSWORD_WITH_COMMAND
 	if (!isGUI)
 	KswordSend1("报告了一个警告：" + std::string(text));
@@ -191,6 +190,7 @@ void KMesErr(const char* text) {
 	if(KSWORD_MES_LEVEL<=0){
 	cprint("[ × ]", 4, 0);
 	std::cout << text << std::endl;
+	kLog.Add(Err, C(text));
 #ifdef KSWORD_WITH_COMMAND
 	if (!isGUI)
 
@@ -2986,6 +2986,7 @@ bool KillProcess1(DWORD PID) {
 	cmd += std::to_string(PID);
 	returnString+=RunCmdNow(cmd.c_str());
 	KMesInfo(returnString);
+	
 	return KSWORD_SUCCESS_EXIT;
 }
 bool KillProcess2(DWORD PID) {

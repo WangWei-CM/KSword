@@ -74,7 +74,7 @@
     <ClCompile Include="imgui\imgui_widgets.cpp" />
     <ClCompile Include="Main\GUIFunction\Ksword5GUI.cpp" />
     <ClCompile Include="Main\GUIFunction\KswordGUIInit.cpp" />
-    <ClCompile Include="Main\GUIFunction\KswordGUIProcess.cpp" />
+    <ClCompile Include="Main\GUIFunction\Process\KswordGUIProcess.cpp" />
     <ClCompile Include="Main\SupportFunction\Ksword5SupportFunction.cpp" />
     <ClCompile Include="Main\GUIFunction\KswordPointerWindow.cpp" />
     <ClCompile Include="Main\GUIFunction\Process\GUIprocessCore.cpp" />
@@ -151,6 +151,7 @@
     <ClInclude Include="Main\stb_image_write.h" />
     <ClInclude Include="Main\TextEditor\TextEditor.h" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="Main\GUIFunction\Process\Process.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Environment">
