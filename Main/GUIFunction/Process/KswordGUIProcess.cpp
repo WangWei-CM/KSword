@@ -1,10 +1,10 @@
-﻿#include "../KswordTotalHead.h"
+﻿#include "../../KswordTotalHead.h"
 
-struct ProcessInfo {
-    std::string name;
-    int    pid;
-    std::string user;
-};
+//struct ProcessInfo {
+//    std::string name;
+//    int    pid;
+//    std::string user;
+//};
 
 // 排序类型
 enum SortType {
@@ -13,14 +13,14 @@ enum SortType {
     SortType_User,
     SortType_None
 };
-std::vector<ProcessInfo> GetProcessList();
+std::vector<kProcess> GetProcessList();
 static char filter_text[128] = "";
 static SortType current_sort = SortType_PID;
 static bool sort_ascending = true;
 static int selected_pid = -1;
 
 // 全局状态
-static std::vector<ProcessInfo> dummy_processes = GetProcessList();
+static std::vector<kProcess> dummy_processes = GetProcessList();
 
 std::string WCharToUTF8(const WCHAR* wstr) {
     if (!wstr || *wstr == L'\0')
@@ -43,8 +43,8 @@ std::string WCharToUTF8(const WCHAR* wstr) {
 
 
 
-std::vector<ProcessInfo> GetProcessList() {
-    std::vector<ProcessInfo> processes;
+std::vector<kProcess> GetProcessList() {
+    std::vector<kProcess> processes;
 
     // 创建进程快照
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -61,50 +61,7 @@ std::vector<ProcessInfo> GetProcessList() {
     }
 
     do {
-        ProcessInfo info{};
-        info.pid = pe32.th32ProcessID;
-
-        if (!pe32.szExeFile) continue;
-        info.name = WCharToUTF8(pe32.szExeFile);
-
-        // 获取用户信息
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-            FALSE, info.pid);
-        if (hProcess) {
-            HANDLE hToken;
-            if (OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
-                DWORD neededSize = 0;
-                GetTokenInformation(hToken, TokenUser, NULL, 0, &neededSize);
-
-                if (neededSize > 0) {
-                    std::vector<BYTE> tokenUserBuf(neededSize);
-                    PTOKEN_USER pTokenUser = (PTOKEN_USER)tokenUserBuf.data();
-
-                    if (GetTokenInformation(hToken, TokenUser, pTokenUser, neededSize, &neededSize)) {
-                        WCHAR userName[256] = { 0 };
-                        WCHAR domainName[256] = { 0 };
-                        DWORD userNameSize = 256;
-                        DWORD domainNameSize = 256;
-                        SID_NAME_USE sidType;
-
-                        if (LookupAccountSidW(
-                            NULL,
-                            pTokenUser->User.Sid,
-                            userName,
-                            &userNameSize,
-                            domainName,
-                            &domainNameSize,
-                            &sidType))
-                        {
-                            info.user = WCharToUTF8(userName);
-                        }
-                    }
-                }
-                CloseHandle(hToken);
-            }
-            CloseHandle(hProcess);
-        }
-
+        kProcess info(pe32.th32ProcessID);
         processes.push_back(std::move(info));
     } while (Process32NextW(hSnapshot, &pe32));
 
@@ -113,16 +70,16 @@ std::vector<ProcessInfo> GetProcessList() {
 }
 
 
-static void UpdateFilterAndSort(std::vector<const ProcessInfo*>& filtered,
+static void UpdateFilterAndSort(std::vector<kProcess*>& filtered,
     const char* filter, SortType sort_type, bool ascending)
 {
     filtered.clear();
 
     // 过滤
-    for (const auto& proc : dummy_processes) {
+    for (auto& proc : dummy_processes) {
         if (filter[0] == '\0' ||
-            strstr(proc.name.data(), filter) ||
-            strstr(proc.user.data(), filter)) {
+            strstr(proc.Name().data(), filter) ||
+            strstr(proc.User().data(), filter)) {
             filtered.push_back(&proc);
         }
     }
@@ -130,12 +87,12 @@ static void UpdateFilterAndSort(std::vector<const ProcessInfo*>& filtered,
     // 排序
     if (sort_type != SortType_None) {
         std::sort(filtered.begin(), filtered.end(),
-            [sort_type, ascending](const ProcessInfo* a, const ProcessInfo* b) {
+            [sort_type, ascending](const kProcess* a, const kProcess* b) {
                 int cmp = 0;
                 switch (sort_type) {
-                case SortType_Name: cmp = strcmp(a->name.data(), b->name.data()); break;
-                case SortType_PID:  cmp = a->pid - b->pid; break;
-                case SortType_User: cmp = strcmp(a->user.data(), b->user.data()); break;
+                case SortType_Name: cmp = strcmp(a->Name().data(), b->Name().data()); break;
+                case SortType_PID:  cmp = a->pid() - b->pid(); break;
+                case SortType_User: cmp = strcmp(a->User().data(), b->User().data()); break;
                 default: break;
                 }
                 return ascending ? (cmp < 0) : (cmp > 0);
@@ -158,7 +115,7 @@ void KswordGUIProcess() {
         }
 
         // 准备过滤和排序后的数据
-        static std::vector<const ProcessInfo*> filtered_processes;
+        static std::vector< kProcess*> filtered_processes;
         UpdateFilterAndSort(filtered_processes, filter_text, current_sort, sort_ascending);
 
         // 表格设置
@@ -211,11 +168,11 @@ void KswordGUIProcess() {
             while (clipper.Step()) {
                 for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
                    
-                    const ProcessInfo* proc = filtered_processes[row];
+                    kProcess* proc = filtered_processes[row];
 
                     ImGui::TableNextRow();
                     // 高亮选中行
-                    bool is_selected = (selected_pid == proc->pid);
+                    bool is_selected = (selected_pid == proc->pid());
                     if (is_selected) {
                         ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
                             ImGui::GetColorU32(ImGuiCol_Header));
@@ -227,20 +184,25 @@ void KswordGUIProcess() {
                     if (ImGui::BeginPopupContextWindow("RowContextMenu")) {
                         if (ImGui::BeginMenu("Terminate")) {
                             if (ImGui::MenuItem("taskkill")) {
-                                std::thread(KillProcessByTaskkill,proc->pid).detach();
+                                std::thread(KillProcessByTaskkill,proc->pid()).detach();
                             }
                             if (ImGui::MenuItem("taskkill /f")) {
                                 // 优雅关闭逻辑
-
+                                proc->Terminate(kTaskkillF);
+								kLog.Add(Info, C(("使用taskkill /f终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()));
                             }
                             if (ImGui::MenuItem("Terminate Process")) {
-                                // 优雅关闭逻辑
+
+								kLog.Add(Info, C(("使用Terminate终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()));
+                           		proc->Terminate(kTerminate);
                             }
                             if (ImGui::MenuItem("Terminate Thread")) {
-                                // 优雅关闭逻辑
+								kLog.Add(Info, C(("使用TerminateThread终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()));
+								proc->Terminate(kTerminateThread);
                             }
                             if (ImGui::MenuItem("NT Terminate")) {
-                                // 优雅关闭逻辑
+								kLog.Add(Info, C(("使用NT Terminate终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()));
+								proc->Terminate(kNTTerminate);
                             }
                             ImGui::EndMenu();
                         }
@@ -261,15 +223,15 @@ void KswordGUIProcess() {
 
                     // 名称列
                     ImGui::TableSetColumnIndex(0);
-                    ImGui::Text("%s", proc->name.c_str());
+                    ImGui::Text("%s", proc->Name().c_str());
 
                     // PID列（右对齐）
                     ImGui::TableSetColumnIndex(1);
-                    ImGui::Text("%d", proc->pid);
+                    ImGui::Text("%d", proc->pid());
 
                     // 用户列
                     ImGui::TableSetColumnIndex(2);
-                    ImGui::Text("%s", proc->user.c_str());
+                    ImGui::Text("%s", proc->User().c_str());
 
                 }
             }
@@ -285,6 +247,7 @@ void KswordGUIProcess() {
         ImGui::SameLine(ImGui::GetWindowWidth() - 120);
         if (ImGui::SmallButton("Refresh")) {
             dummy_processes = GetProcessList();
+            kLog.Add(Info, C("刷新进程列表"));
             // 刷新逻辑
         }
 

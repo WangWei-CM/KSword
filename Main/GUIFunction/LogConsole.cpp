@@ -66,32 +66,121 @@ void Logger::Draw() {
             std::lock_guard<std::mutex> lock(mtx);
             logs.clear();
         }
+        ImGui::SameLine();
+        if (ImGui::Button(C("复制全部内容"))) {
+            std::string all_content;
+            {
+                std::lock_guard<std::mutex> lock(mtx); // 仅在访问logs时加锁
+                int index = 0;
+                for (const auto& log : logs) {
+                    if (!level_visible[log.level]) continue;
+
+                    const char* level_str = (log.level == Info) ? "Info" :
+                        (log.level == Warn) ? "Warn" : "Error";
+
+                    // 用\t分割列，每行末尾添加换行
+                    char line[512];
+                    sprintf(line, "%d\t%s\t%.1fs\t%s\n",
+                        index++,
+                        level_str,
+                        log.timestamp,
+                        log.message.c_str());
+                    all_content += line;
+                }
+            }
+            ImGui::SetClipboardText(all_content.c_str());
+            kLog.Add(Info, C("已复制全部内容到剪贴板"));
+        }
+
 
         // 日志显示区
         ImGui::Separator();
         ImGui::BeginChild("scrolling", ImVec2(0, 0), false,
             ImGuiWindowFlags_HorizontalScrollbar);
-
-        // 等级颜色定义
-        const ImVec4 colors[] = {
-            ImVec4(0.4f, 1.0f, 0.6f, 1.0f), // 信息-绿
-            ImVec4(1.0f, 0.8f, 0.0f, 1.0f), // 警告-黄
-            ImVec4(1.0f, 0.3f, 0.3f, 1.0f)  // 错误-红
-        };
-
-        // 渲染日志
+        // 表格设置：4列，前三列窄，第四列自适应
+        if (ImGui::BeginTable("LogTable", 4,
+            ImGuiTableFlags_Borders |          // 边框
+            ImGuiTableFlags_RowBg |           // 行背景
+            ImGuiTableFlags_SizingFixedFit |  // 固定列宽模式
+            ImGuiTableFlags_NoSavedSettings)) // 不保存设置
         {
-            std::lock_guard<std::mutex> lock(mtx);
-            for (const auto& log : logs) {
+            // 配置列宽：前三列窄，第四列占剩余空间
+            ImGui::TableSetupColumn(C("序号"), ImGuiTableColumnFlags_WidthFixed, 50);    // 序号列（极窄）
+            ImGui::TableSetupColumn(C("等级"), ImGuiTableColumnFlags_WidthFixed, 80);    // 严重程度列（窄）
+            ImGui::TableSetupColumn(C("时间"), ImGuiTableColumnFlags_WidthFixed, 80);    // 时间列（窄）
+            ImGui::TableSetupColumn(C("内容"), ImGuiTableColumnFlags_WidthStretch);      // 内容列（自适应拉伸）
+            ImGui::TableHeadersRow();
+
+            // 等级颜色定义（作为行背景色）
+            const ImVec4 bg_colors[] = {
+                ImVec4(0.4f, 1.0f, 0.6f, 0.9f),  // 信息-浅绿色背景
+                ImVec4(1.0f, 0.8f, 0.0f, 0.9f),  // 警告-浅黄色背景
+                ImVec4(1.0f, 0.3f, 0.3f, 0.9f)   // 错误-浅红色背景
+            };
+            // 文字统一用黑色
+            const ImVec4 text_color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);  // 黑色文字
+
+            // 渲染日志行
+            
+            int log_index = 0;  // 序号计数器
+            std::vector<LogEntry> local_logs; // 假设日志条目类型为LogEntry
+            {
+                std::lock_guard<std::mutex> lock(mtx); // 仅在此作用域加锁
+                local_logs = logs; // 复制到局部容器
+            }
+            for (const auto& log : local_logs) {
                 if (!level_visible[log.level]) continue;
 
-                ImGui::PushStyleColor(ImGuiCol_Text, colors[log.level]);
-                ImGui::Text("[%.1fs] %s",
-                    log.timestamp,
-                    log.message.c_str());
+                // 开始新行
+                ImGui::TableNextRow();
+                // 为当前行创建唯一ID（用于右键菜单）
+                ImGui::PushID(log_index);
+
+                // 设置行背景色
+                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                    ImGui::GetColorU32(bg_colors[log.level]));
+
+                // 1. 序号列
+                ImGui::TableSetColumnIndex(0);
+                ImGui::PushStyleColor(ImGuiCol_Text, text_color);
+                ImGui::Text("%d", log_index++);
                 ImGui::PopStyleColor();
+
+                // 2. 严重程度列
+                ImGui::TableSetColumnIndex(1);
+                ImGui::PushStyleColor(ImGuiCol_Text, text_color);
+                switch (log.level) {
+                case Info:  ImGui::Text("Info"); break;
+                case Warn:  ImGui::Text("Warn"); break;
+                case Err:   ImGui::Text("Error"); break;
+                }
+                ImGui::PopStyleColor();
+
+                // 3. 时间列
+                ImGui::TableSetColumnIndex(2);
+                ImGui::PushStyleColor(ImGuiCol_Text, text_color);
+                ImGui::Text("%.1fs", log.timestamp);
+                ImGui::PopStyleColor();
+
+                // 4. 内容列
+                ImGui::TableSetColumnIndex(3);
+                ImGui::PushStyleColor(ImGuiCol_Text, text_color);
+                ImGui::TextWrapped("%s", log.message.c_str());  // 自动换行
+                ImGui::PopStyleColor();
+                if (ImGui::BeginPopupContextItem("LogMenuRightClick")) {  // 使用当前ID的上下文菜单
+                    if (ImGui::MenuItem(C("复制内容"))) {
+                        // 将日志内容复制到剪贴板
+                        ImGui::SetClipboardText(log.message.c_str());
+                        kLog.Add(Info, C("已复制到剪贴板"));
+                    }
+
+                    ImGui::EndPopup();
+                }ImGui::PopID();
             }
+
+            ImGui::EndTable();
         }
+
 
         // 自动滚动到底部
         if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {

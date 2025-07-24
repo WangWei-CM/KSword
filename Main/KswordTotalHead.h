@@ -27,7 +27,7 @@
 #include "../resource.h"
 #endif
 #include "GUIFunction/GUIFunction.h"
-
+#include "Ksword5core.h"
 
 #include "../imgui/imconfig.h"
 #include "../imgui/imgui.h"
