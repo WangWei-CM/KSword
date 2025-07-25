@@ -11,6 +11,42 @@ enum kProcKillMethod{
 enum kEnumProcMethod {
 	kEnumProcByCreateSnapTool
 };
+
+class kThread {
+private:
+	HANDLE hThread;         // 线程句柄
+	DWORD TID;              // 线程ID
+	int priority;           // 线程优先级（-2到2对应Windows的THREAD_PRIORITY_*）
+	int statusCode;         // 线程操作状态码（0表示成功，其他为错误码）
+	std::string modulePath; // 线程所属模块路径
+
+public:
+	// 构造函数：通过线程ID初始化
+	kThread(DWORD tid);
+	// 构造函数：通过进程句柄初始化（获取进程的主线程）
+	kThread(HANDLE hProcess);
+	// 析构函数：释放资源
+	~kThread();
+
+	// 终止线程
+	int Terminate(UINT exitCode = 0);
+	// 挂起线程
+	int Suspend();
+	// 恢复线程
+	int UnSuspend();
+
+	// 获取私有成员的函数
+	HANDLE GetHandle() const;
+	DWORD GetTID() const;
+	int GetPriority() const;
+	int GetStatusCode() const;
+	std::string GetModulePath() const;
+
+private:
+	// 初始化线程信息（内部使用）
+	void InitThreadInfo();
+};
+
 class kProcess {
 public:
 	kProcess(DWORD pid);
@@ -25,7 +61,6 @@ public:
 	bool CancelKeyProc();
 
 	std::string GetProcessName();
-	// 移动构造和移动赋值（允许移动）
 	kProcess(kProcess&& other) noexcept;
 	kProcess& operator=(kProcess&& other) noexcept;
 

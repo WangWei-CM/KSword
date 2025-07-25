@@ -158,6 +158,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateMapFile>true</GenerateMapFile>
       <MapExports>true</MapExports>
+      <DelayLoadDLLs>D3DX9_43.DLL</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -189,8 +190,7 @@
       <AdditionalDependencies>Psapi.lib;User32.lib;Crypt32.lib;winmm.lib;wldap32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>C:\Program Files %28x86%29\Microsoft DirectX SDK %28June 2010%29\Lib\x64;C:\Users\33251\vcpkg\packages\curl_x64-windows\lib\</AdditionalLibraryDirectories>
       <ShowProgress>NotSet</ShowProgress>
-      <DelayLoadDLLs>
-      </DelayLoadDLLs>
+      <DelayLoadDLLs>D3DX9_43.DLL</DelayLoadDLLs>
     </Link>
     <Manifest>
       <VerboseOutput>false</VerboseOutput>
@@ -278,6 +278,9 @@
     <ClInclude Include="Main\Security\security.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="d3dx9_43.dll" />
+    <None Include="imgui.ini" />
+    <None Include="KswordGUI.ini" />
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>

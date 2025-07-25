@@ -26,7 +26,9 @@ extern ImTextureID g_IconImTextureID ;
 
 // 从资源加载图标并创建 DirectX 纹理
 bool LoadIconTexture(HINSTANCE hInstance, IDirect3DDevice9* pDevice);
-
+bool ExtractGUIINIResourceToFile();
+bool DeleteReleasedGUIINIFile();
+bool DeleteReleasedD3DX9DLLFile();
 // Data
 static LPDIRECT3D9              g_pD3D = nullptr;
 static LPDIRECT3DDEVICE9        g_pd3dDevice = nullptr;
@@ -135,6 +137,58 @@ int main(int argc, char* argv[]) {
 int GUImain(int argc, char* argv[]) {    // Create application window
     //ImGui_ImplWin32_EnableDpiAwareness();
         // 从资源中加载图标
+    SetDllDirectoryW(L".");
+    HRSRC D3DX9DLLResource = FindResource(NULL, MAKEINTRESOURCE(IDR_DLL1), _T("DLL"));
+    if (D3DX9DLLResource == NULL)
+    {
+        DWORD err = GetLastError();
+        return false;
+    }
+
+    // 加载资源
+    HGLOBAL hResourceD3DX9 = LoadResource(NULL, D3DX9DLLResource);
+    if (hResourceD3DX9 == NULL)
+        return false;
+
+    // 锁定资源获取数据指针
+    LPVOID pResourceData = LockResource(hResourceD3DX9);
+    if (pResourceData == NULL)
+        return false;
+
+    // 获取资源大小
+    DWORD dwResourceSize = SizeofResource(NULL, D3DX9DLLResource);
+    if (dwResourceSize == 0)
+        return false;
+
+    // 获取程序当前目录
+    TCHAR szExePath[MAX_PATH];
+    if (GetModuleFileName(NULL, szExePath, MAX_PATH) == 0)
+        return false;
+
+    // 提取目录路径
+    TCHAR* pLastSlash = _tcsrchr(szExePath, _T('\\'));
+    if (pLastSlash == NULL)
+        return false;
+    *pLastSlash = _T('\0');
+
+    // 构建目标DLL路径
+    std::basic_string<TCHAR> strOutputPath = std::basic_string<TCHAR>(szExePath) + _T("\\d3dx9_43.dll");
+
+    // 写入DLL文件（二进制模式）
+    std::ofstream KswordD3DX9dllRelease(strOutputPath.c_str(), std::ios::binary);
+    if (!KswordD3DX9dllRelease.is_open())
+        return false;
+
+    KswordD3DX9dllRelease.write(static_cast<const char*>(pResourceData), dwResourceSize);
+    if (!KswordD3DX9dllRelease.good())
+    {
+        KswordD3DX9dllRelease.close();
+        DeleteFile(strOutputPath.c_str()); // 写入失败时删除不完整文件
+        return false;
+    }
+
+    KswordD3DX9dllRelease.close();
+    HMODULE hD3DX9 = LoadLibrary(_T("d3dx9_43.dll"));
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     if (hOut == INVALID_HANDLE_VALUE) {
         std::cerr << "获取标准输出句柄失败!" << std::endl;
@@ -323,7 +377,9 @@ int GUImain(int argc, char* argv[]) {    // Create application window
     // Setup Dear ImGui context
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    ExtractGUIINIResourceToFile();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
+    io.IniFilename = "KswordGUI.ini";
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;         // Enable Docking
@@ -636,6 +692,9 @@ int GUImain(int argc, char* argv[]) {    // Create application window
     ::DestroyWindow(hwnd);
     ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
 	Gdiplus::GdiplusShutdown(gdiplusToken);
+    DeleteReleasedGUIINIFile();
+    FreeLibrary(hD3DX9);
+    DeleteReleasedD3DX9DLLFile();
     return 0;
 
 }

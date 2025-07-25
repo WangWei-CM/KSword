@@ -12,6 +12,143 @@ std::string WideCharToMultiByte(const std::wstring& wstr) {
     return str;
 }
 
+
+// 通过线程ID初始化
+kThread::kThread(DWORD tid) : hThread(NULL), TID(tid), priority(0), statusCode(0) {
+    // 通过线程ID打开线程句柄（需要THREAD_QUERY_INFORMATION权限）
+    hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, tid);
+    if (hThread == NULL) {
+        statusCode = GetLastError();
+        return;
+    }
+    InitThreadInfo();
+}
+
+// 通过进程句柄初始化（获取主线程）
+kThread::kThread(HANDLE hProcess) : hThread(NULL), TID(0), priority(0), statusCode(0) {
+    if (hProcess == NULL || hProcess == INVALID_HANDLE_VALUE) {
+        statusCode = ERROR_INVALID_HANDLE;
+        return;
+    }
+
+    // 创建线程快照查找主线程
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) {
+        statusCode = GetLastError();
+        return;
+    }
+
+    THREADENTRY32 te32;
+    te32.dwSize = sizeof(THREADENTRY32);
+    if (Thread32First(hSnapshot, &te32)) {
+        do {
+            if (te32.th32OwnerProcessID == GetProcessId(hProcess)) {
+                // 找到进程的第一个线程作为主线程
+                TID = te32.th32ThreadID;
+                hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, TID);
+                if (hThread != NULL) {
+                    break;
+                }
+            }
+        } while (Thread32Next(hSnapshot, &te32));
+    }
+
+    CloseHandle(hSnapshot);
+
+    if (hThread == NULL) {
+        statusCode = GetLastError();
+        return;
+    }
+
+    InitThreadInfo();
+}
+
+// 析构函数：释放线程句柄
+kThread::~kThread() {
+    if (hThread != NULL && hThread != INVALID_HANDLE_VALUE) {
+        CloseHandle(hThread);
+        hThread = NULL;
+    }
+}
+
+// 初始化线程信息（优先级、模块路径等）
+void kThread::InitThreadInfo() {
+    // 获取线程优先级
+    int prio = GetThreadPriority(hThread);
+    if (prio != THREAD_PRIORITY_ERROR_RETURN) {
+        priority = prio;
+    }
+    else {
+        statusCode = GetLastError();
+    }
+
+    // 获取线程所属模块路径
+    HMODULE hModule;
+    DWORD bytesNeeded;
+    if (EnumProcessModulesEx(GetCurrentProcess(), &hModule, sizeof(hModule), &bytesNeeded, LIST_MODULES_ALL)) {
+        char path[MAX_PATH];
+        if (GetModuleFileNameExA(GetCurrentProcess(), hModule, path, MAX_PATH)) {
+            modulePath = path;
+        }
+    }
+}
+
+// 终止线程
+int kThread::Terminate(UINT exitCode) {
+    if (hThread == NULL) {
+        return statusCode = ERROR_INVALID_HANDLE;
+    }
+
+    if (::TerminateThread(hThread, exitCode)) {
+        statusCode = 0;
+        return 0;
+    }
+    else {
+        statusCode = GetLastError();
+        return statusCode;
+    }
+}
+
+// 挂起线程
+int kThread::Suspend() {
+    if (hThread == NULL) {
+        return statusCode = ERROR_INVALID_HANDLE;
+    }
+
+    if (SuspendThread(hThread) != (DWORD)-1) {
+        statusCode = 0;
+        return 0;
+    }
+    else {
+        statusCode = GetLastError();
+        return statusCode;
+    }
+}
+
+// 恢复线程
+int kThread::UnSuspend() {
+    if (hThread == NULL) {
+        return statusCode = ERROR_INVALID_HANDLE;
+    }
+
+    if (ResumeThread(hThread) != (DWORD)-1) {
+        statusCode = 0;
+        return 0;
+    }
+    else {
+        statusCode = GetLastError();
+        return statusCode;
+    }
+}
+
+// 获取成员变量的实现
+HANDLE kThread::GetHandle() const { return hThread; }
+DWORD kThread::GetTID() const { return TID; }
+int kThread::GetPriority() const { return priority; }
+int kThread::GetStatusCode() const { return statusCode; }
+std::string kThread::GetModulePath() const { return modulePath; }
+
+
 // 辅助函数：检查进程是否是否具有管理员权限
 bool CheckProcessAdminRights(HANDLE handle) {
     if (handle == INVALID_HANDLE_VALUE) return false;
