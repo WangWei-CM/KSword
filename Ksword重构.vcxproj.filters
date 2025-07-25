@@ -217,6 +217,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
+    <None Include="imgui.ini" />
+    <None Include="KswordGUI.ini" />
+    <None Include="d3dx9_43.dll" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="icon1.ico" />

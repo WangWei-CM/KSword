@@ -6,7 +6,138 @@ std::vector<WorkItemUI> WorkProgressManager::ProcessUI;
 std::vector<int> WorkProgressManager::ShowUI;
 std::vector<int> WorkProgressManager::UIreturnValue;
 std::mutex WorkProgressManager::data_mutex;
+bool DeleteReleasedGUIINIFile() {
+    // 获取当前程序执行目录
+    char szExePath[MAX_PATH];
+    if (GetModuleFileNameA(NULL, szExePath, MAX_PATH) == 0) {
+        return false; // 获取路径失败
+    }
 
+    // 提取目录路径
+    char* pLastSlash = strrchr(szExePath, '\\');
+    if (pLastSlash == NULL) {
+        return false; // 路径格式错误
+    }
+    *pLastSlash = '\0'; // 截断为目录路径
+
+    // 构建INI文件完整路径
+    std::string strIniPath = std::string(szExePath) + "\\KswordGUI.ini";
+
+    // 检查文件是否存在
+    if (GetFileAttributesA(strIniPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return false; // 文件不存在
+    }
+
+    // 删除文件
+    if (DeleteFileA(strIniPath.c_str())) {
+        return true; // 删除成功
+    }
+    else {
+        return false; // 删除失败
+    }
+}
+bool DeleteReleasedD3DX9DLLFile() {
+    // 获取当前程序执行目录
+    char szExePath[MAX_PATH];
+    if (GetModuleFileNameA(NULL, szExePath, MAX_PATH) == 0) {
+        return false; // 获取路径失败
+    }
+
+    // 提取目录路径
+    char* pLastSlash = strrchr(szExePath, '\\');
+    if (pLastSlash == NULL) {
+        return false; // 路径格式错误
+    }
+    *pLastSlash = '\0'; // 截断为目录路径
+
+    // 构建INI文件完整路径
+    std::string strIniPath = std::string(szExePath) + "\\d3dx9_43.dll";
+
+    // 检查文件是否存在
+    if (GetFileAttributesA(strIniPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return false; // 文件不存在
+    }
+
+    // 删除文件
+    if (DeleteFileA(strIniPath.c_str())) {
+        return true; // 删除成功
+    }
+    else {
+        return false; // 删除失败
+    }
+}
+
+// 宽字符版本（支持Unicode路径）
+bool DeleteReleasedIniFileW() {
+    WCHAR szExePath[MAX_PATH];
+    if (GetModuleFileNameW(NULL, szExePath, MAX_PATH) == 0) {
+        return false;
+    }
+
+    WCHAR* pLastSlash = wcsrchr(szExePath, L'\\');
+    if (pLastSlash == NULL) {
+        return false;
+    }
+    *pLastSlash = L'\0';
+
+    std::wstring strIniPath = std::wstring(szExePath) + L"\\KswordGUI.ini";
+
+    if (GetFileAttributesW(strIniPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
+
+    return DeleteFileW(strIniPath.c_str()) ? true : false;
+}
+
+
+bool ExtractGUIINIResourceToFile()
+{
+    // 查找资源
+    HRSRC hResource = FindResource(NULL, MAKEINTRESOURCE(IDR_INI1), L"INI");
+    if (hResource == NULL)
+        return false;
+
+    // 加载资源
+    HGLOBAL hLoadedResource = LoadResource(NULL, hResource);
+    if (hLoadedResource == NULL)
+        return false;
+
+    // 锁定资源并获取数据指针
+    LPVOID pResourceData = LockResource(hLoadedResource);
+    if (pResourceData == NULL)
+        return false;
+
+    // 获取资源大小
+    DWORD dwResourceSize = SizeofResource(NULL, hResource);
+    if (dwResourceSize == 0)
+        return false;
+
+    // 获取当前程序执行目录
+    char szExePath[MAX_PATH];
+    if (GetModuleFileNameA(NULL, szExePath, MAX_PATH) == 0)
+        return false;
+
+    // 提取目录路径
+    char* pLastSlash = strrchr(szExePath, '\\');
+    if (pLastSlash == NULL)
+        return false;
+    *pLastSlash = '\0';
+
+    // 构建目标文件路径
+    std::string strOutputPath = std::string(szExePath) + "\\KswordGUI.ini";
+
+    // 写入文件
+    std::ofstream outFile(strOutputPath, std::ios::binary);
+    if (!outFile)
+        return false;
+
+    outFile.write(static_cast<const char*>(pResourceData), dwResourceSize);
+    outFile.close();
+
+    // 不需要调用FreeResource，系统会自动处理
+
+    return true;
+}
 int WorkProgressManager::AddProcess(WorkItem item) {
     std::lock_guard<std::mutex> lock(data_mutex);
     ProcessList .push_back(item);
