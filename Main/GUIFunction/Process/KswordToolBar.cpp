@@ -50,7 +50,7 @@ inline void KswordToolBar() {
                 0, 0, 0, 0,       // 保留原位置和尺寸
                 SWP_NOMOVE | SWP_NOSIZE
             );
-            //first_done = 0;
+            first_done = 0;
         }
         // 1. 退出按钮 - 顶部
         if (ImGui::Button("Exit", ImVec2(-1, 0)))

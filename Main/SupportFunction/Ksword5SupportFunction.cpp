@@ -214,14 +214,16 @@ void WorkProgressManager::Render() {
         if (ProcessList[i].progress != 1.0f)showWorkWindow = 1;
     }
     if (showWorkWindow) {
-        ImGui::Begin("任务进度监控", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+        ImGui::Begin(C("任务进度监控"), nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
         for (size_t i = 0; i < ProcessList.size(); ++i) {
             if (ProcessList[i].progress == 1.0f)continue;
             ImGui::PushID(static_cast<int>(i));
 
             // 显示任务信息
-            ImGui::Text(C("正在执行: %s"), C(ProcessList[i].currentStep.c_str()));
+            ImGui::Text(C("正在执行: "));
+            ImGui::SameLine();
+            ImGui::Text(ProcessList[i].currentStep.c_str());
             ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.8f, 0.4f, 1.0f));
             ImGui::ProgressBar(ProcessList[i].progress, ImVec2(200, 20));
             ImGui::PopStyleColor();
