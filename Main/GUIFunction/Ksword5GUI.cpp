@@ -1,13 +1,10 @@
 #include "../KswordTotalHead.h"
 #include "GUIfunction.h"
-std::string protocolText = C("该版本用户使用协议\n"
-"这里可以添加更多的协议内容...\n"
-"协议的详细信息可以在这里继续扩展...\n"
-"更多的协议内容...\n");
+std::string protocolText = C("该版本用户使用协议\n");
 
-std::vector<std::string> coreDevelopers = { "A.b.c", "D.e.f", "G.h.i", "更多核心开发人员..." };
-std::vector<std::string> contributors = { C("贡献者1"), C("贡献者2")};
-std::vector<std::string> donors = { C("捐赠者1"), C("捐赠者2") };
+std::vector<std::string> coreDevelopers = {/* "A.b.c", "D.e.f", "G.h.i", "更多核心开发人员..."*/ };
+std::vector<std::string> contributors = {/* C("贡献者1"), C("贡献者2")*/};
+std::vector<std::string> donors = { /*C("捐赠者1"), C("捐赠者2") */};
 
 IDirect3DTexture9* g_IconTexture = nullptr;
 ImTextureID g_IconImTextureID = 0;

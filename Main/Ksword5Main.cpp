@@ -509,7 +509,7 @@ int GUImain(int argc, char* argv[]) {    // Create application window
             if (KswordShowNotpadWindow) m_editor.Render("TextEditor", ImVec2(0, 0), true);
             
             
-            ImGui::Begin("Ksword V5.0 Dever Version ｜ Built 2025-5-24",nullptr,
+            ImGui::Begin("Ksword 5 Dever",nullptr,
                 //ImGuiWindowFlags_NoCollapse |
                 //ImGuiWindowFlags_NoBackground /*|*/
             //ImGuiWindowFlags_NoSavedSettings

@@ -2360,7 +2360,7 @@ int UnSuspendProcess(DWORD dwProcessId){
 			CloseHandle(hThreadSnap);
 			CloseHandle(hProcess);
 			CloseHandle(hProcessSnap);
-			KMesInfo("成功挂起目标进程");
+			KMesInfo("成功启动目标进程");
 			return KSWORD_SUCCESS_EXIT;
 		}
 	} while (Process32Next(hProcessSnap, &pe32));
