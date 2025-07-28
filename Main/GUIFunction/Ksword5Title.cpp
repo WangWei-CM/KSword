@@ -91,7 +91,10 @@ inline void Ksword5Title() {
         ImGuiWindowFlags_NoScrollbar | 
         ImGuiWindowFlags_NoCollapse);
     const float window_height = ImGui::GetFrameHeight();
-
+    ImVec2 currentSize = ImGui::GetWindowSize();
+    if (currentSize.y != 30) {
+        ImGui::SetWindowSize(ImVec2(currentSize.x, 30));
+    }
 
     // 获取当前窗口位置和大小
     ImVec2 windowPos = ImGui::GetWindowPos();
@@ -256,7 +259,6 @@ inline void Ksword5Title() {
     }
     ImGui::PopStyleColor(3); // 恢复颜色
 
-    ImGui::Text(C("被你发现啦"));
 
     // 恢复原始样式
     style.Colors[ImGuiCol_Button] = orig_button;

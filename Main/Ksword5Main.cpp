@@ -3,6 +3,7 @@
 #include <gdiplus.h> // 需链接gdiplus.lib
 #pragma comment(lib, "gdiplus.lib")
 #include "KswordTotalHead.h"
+#include <winsock.h>
 #include "TextEditor/TextEditor.h"
 //
 bool isGUI;
@@ -604,19 +605,22 @@ int GUImain(int argc, char* argv[]) {    // Create application window
             //}
             ImGui::SetCursorPos(ImVec2(0, 30)); // 重置到同一位置
             
-            if (ImGui::BeginTabBar("MainTabs"))
+            if (ImGui::BeginTabBar(C("MainTabs")))
             {
-            if (ImGui::BeginTabItem("Welcome"))
+            if (ImGui::BeginTabItem(C("欢迎")))
                 {
                      KswordLogo5();
                      KswordGUIShowStatus();
                     ImGui::EndTabItem();
                 }
-            if (ImGui::BeginTabItem("Process"))
+            if (ImGui::BeginTabItem(C("进程")))
             {
                 KswordGUIProcess();
             }
-
+            if (ImGui::BeginTabItem(C("监控")))
+            {
+                KswordMonitorMain();
+            }
             // Spy++ 标签
             if (ImGui::BeginTabItem("Test"))
             {

@@ -210,6 +210,7 @@
     <ClCompile Include="Main\GUIFunction\Ksword5GUI.cpp" />
     <ClCompile Include="Main\GUIFunction\Ksword5Title.cpp" />
     <ClCompile Include="Main\GUIFunction\KswordGUIInit.cpp" />
+    <ClCompile Include="Main\GUIFunction\Monitor\MonitorMain.cpp" />
     <ClCompile Include="Main\GUIFunction\Process\KswordGUIProcess.cpp" />
     <ClCompile Include="Main\GUIFunction\KswordPointerWindow.cpp" />
     <ClCompile Include="Main\GUIFunction\KswordText.cpp" />
@@ -252,6 +253,7 @@
     <ClInclude Include="imgui\imstb_truetype.h" />
     <ClInclude Include="KswordDriver\KswordDriver.h" />
     <ClInclude Include="Main\GUIFunction\GUIFunction.h" />
+    <ClInclude Include="Main\GUIFunction\Monitor\MonitorMain.h" />
     <ClInclude Include="Main\GUIFunction\Process\Process.h" />
     <ClInclude Include="Main\Ksword5core.h" />
     <ClInclude Include="Main\ShellFunction\Command-apt\Command-apt.h" />

@@ -30,3 +30,4 @@ extern bool ret;
 extern ImVec4 StyleColor;
 
 #include "process/process.h"
+#include "Monitor/MonitorMain.h"
