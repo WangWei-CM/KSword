@@ -83,6 +83,7 @@
     <ClCompile Include="Main\GUIFunction\KswordText.cpp" />
     <ClCompile Include="Main\GUIFunction\Ksword5Title.cpp" />
     <ClCompile Include="Main\GUIFunction\LogConsole.cpp" />
+    <ClCompile Include="Main\GUIFunction\Monitor\MonitorMain.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Main\Socket\KswordSelfSocket.h">
@@ -152,6 +153,7 @@
     <ClInclude Include="Main\TextEditor\TextEditor.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="Main\GUIFunction\Process\Process.h" />
+    <ClInclude Include="Main\GUIFunction\Monitor\MonitorMain.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Environment">
