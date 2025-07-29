@@ -138,6 +138,7 @@ int main(int argc, char* argv[]) {
 int GUImain(int argc, char* argv[]) {    // Create application window
     //ImGui_ImplWin32_EnableDpiAwareness();
         // 从资源中加载图标
+    
     SetDllDirectoryW(L".");
     HRSRC D3DX9DLLResource = FindResource(NULL, MAKEINTRESOURCE(IDR_DLL1), _T("DLL"));
     if (D3DX9DLLResource == NULL)

@@ -3,7 +3,7 @@
 static ImVec2 TitleHighLightStartPos;
 
 //imgui绘制矩形
-
+static char TitleCMDInput[512] = {};
 
 void drawGradientRectangle(ImDrawList* drawList, ImVec2 pos, ImVec2 size, ImU32 leftColor, ImU32 rightColor) {
     int steps = 20; // 渐变步数，步数越多渐变越平滑
@@ -64,8 +64,8 @@ inline void ToggleFullscreen()
 ImVec2 KswordTitleHighLightSize(0, 0);
 inline void Ksword5Title() {
         ImGui::SetNextWindowSizeConstraints(
-        ImVec2(200,30),  // 最小宽度为0（完全自适应）
-        ImVec2(FLT_MAX, 30) // 最大宽度无限制
+        ImVec2(200,60),  // 最小宽度为0（完全自适应）
+        ImVec2(FLT_MAX, 60) // 最大宽度无限制
     );
 
 
@@ -92,8 +92,8 @@ inline void Ksword5Title() {
         ImGuiWindowFlags_NoCollapse);
     const float window_height = ImGui::GetFrameHeight();
     ImVec2 currentSize = ImGui::GetWindowSize();
-    if (currentSize.y != 30) {
-        ImGui::SetWindowSize(ImVec2(currentSize.x, 30));
+    if (currentSize.y != 60) {
+        ImGui::SetWindowSize(ImVec2(currentSize.x, 60));
     }
 
     // 获取当前窗口位置和大小
@@ -114,6 +114,7 @@ inline void Ksword5Title() {
     );
     ImGui::SetCursorPos(ImVec2(30, 8)); // 图标右侧(5+30+5=40)
     ImGui::Text("Ksword 5.0");
+
     // 获取当前主题颜色并转换为 ImVec4
     ImVec4 bgColor = ImGui::ColorConvertU32ToFloat4(ImGui::GetColorU32(ImGuiCol_WindowBg));
     ImVec4 textColor = ImGui::ColorConvertU32ToFloat4(ImGui::GetColorU32(ImGuiCol_Text));
@@ -141,6 +142,30 @@ inline void Ksword5Title() {
     const float button_size_x = 50.0f;  // 按钮尺寸
     const float button_size_y = 30.0f;  // 按钮尺寸
     const float spacing = 2.0f;       // 按钮间距
+
+    ImVec2 cmdInputPos = ImVec2(window_pos.x +(window_size.x-70)*0.35, window_pos.y + 3);
+    float cmdInputWidth = window_size.x * 0.3f;
+    ImGui::SetCursorScreenPos(cmdInputPos);
+    float windowWidth = ImGui::GetWindowSize().x;
+    float minInputWidth = windowWidth * 0.35f;
+    float maxInputWidth = windowWidth * 0.65f;
+
+    // 设置输入框宽度（取范围内合适值，这里直接用50%示例，可根据需要调整）
+    float inputWidth = windowWidth * 0.4f;
+    inputWidth =std::clamp(inputWidth, minInputWidth, maxInputWidth);
+    ImGui::SetNextItemWidth(inputWidth);
+    
+    // 蓝色边框样式（边框颜色+显示边框）
+    ImGui::PushStyleColor(ImGuiCol_Border, STYLE_COLOR); // 蓝色边框
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 5.0f); // 稍宽的边框
+    if (ImGui::InputText("##CmdInput", TitleCMDInput, IM_ARRAYSIZE(TitleCMDInput), ImGuiInputTextFlags_EnterReturnsTrue, nullptr, nullptr)) {
+        RunCmdAsyn(std::string(TitleCMDInput)); // 执行命令
+    }
+    ImGui::SetItemDefaultFocus();
+    ImGui::SameLine();
+    // 恢复样式
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
 
     // 计算按钮组位置（右上角）
     ImVec2 button_group_pos = ImVec2(
@@ -272,13 +297,60 @@ inline void Ksword5Title() {
     TitleHighLightStartPos.y = ImGui::GetWindowPos().y;
     ImVec2 size(150, 30);
 
-    // 定义左边和右边的颜色，这里左边透明度为0，右边透明度为1// 左边：透明的霓虹蓝（带Alpha渐变）
+    // 定义左边和右边的颜色，这里左边透明度为0，右边透明度为1
     ImU32 leftColor = ImGui::ColorConvertFloat4ToU32(ImVec4(StyleColor.w, StyleColor.x, StyleColor.y, 0.00f));
-    // 右边：不透明的亮紫色
     ImU32 rightColor = ImGui::ColorConvertFloat4ToU32(ImVec4(StyleColor.w, StyleColor.x, StyleColor.y, 0.50f));
 
     drawGradientRectangle(drawList, TitleHighLightStartPos, size, leftColor, rightColor);
     drawGradientRectangle(drawList, ImVec2(TitleHighLightStartPos.x+150,TitleHighLightStartPos.y), size, rightColor, leftColor);
     // 绘制渐变矩形
+
+
+    ImGui::SetCursorPos(ImVec2(0, 30));
+
+    //第二栏
+    if (ImGui::BeginMainMenuBar()) {
+
+        // 文件菜单    
+        ImGui::PushStyleColor(ImGuiCol_MenuBarBg, ImVec4(0.15f, 0.15f, 0.15f, 1.0f));  // 深色背景
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.9f, 0.9f, 1.0f));  // 浅色文字
+        if (ImGui::BeginMenu("文件")) {
+            if (ImGui::MenuItem("新建")) { /* 新建逻辑 */ }
+            if (ImGui::MenuItem("打开")) { /* 打开逻辑 */ }
+            if (ImGui::MenuItem("保存")) { /* 保存逻辑 */ }
+            ImGui::Separator(); // 分隔线
+            if (ImGui::MenuItem("退出")) { Ksword_main_should_exit = 1; } // 退出程序
+            ImGui::EndMenu();
+        }
+
+        // 编辑菜单
+        if (ImGui::BeginMenu("编辑")) {
+            if (ImGui::MenuItem("撤销")) { /* 撤销逻辑 */ }
+            if (ImGui::MenuItem("重做")) { /* 重做逻辑 */ }
+            ImGui::Separator();
+            if (ImGui::MenuItem("复制")) { /* 复制逻辑 */ }
+            if (ImGui::MenuItem("粘贴")) { /* 粘贴逻辑 */ }
+            ImGui::EndMenu();
+        }
+
+        // 视图菜单
+        if (ImGui::BeginMenu("视图")) {
+            ImGui::MenuItem("全屏模式", nullptr, &is_fullscreen); // 绑定全屏状态变量
+            if (ImGui::MenuItem("刷新")) { /* 刷新逻辑 */ }
+            ImGui::EndMenu();
+        }
+
+        // 帮助菜单
+        if (ImGui::BeginMenu("帮助")) {
+            if (ImGui::MenuItem("关于")) { /* 关于对话框 */ }
+            if (ImGui::MenuItem("文档")) { /* 打开文档 */ }
+            ImGui::EndMenu();
+        }
+        ImGui::PopStyleColor(2);
+        ImGui::EndMainMenuBar();
+    }
+    //ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
+    //ImGui::DockSpace(dockspace_id);
     ImGui::End();
+   
 }
