@@ -13,16 +13,17 @@
 #include <chrono>
 #include <iomanip>
 #include <algorithm>
-// 若 evntrace.h 未定义，手动添加（放在 #include 之后）
+#include <unordered_map>
+// 若 evntrace.h 未定义，补充定义，放在 #include 之后
 #ifndef EVENT_TRACE_ENABLE_INFO_DEFINED
 #define EVENT_TRACE_ENABLE_INFO_DEFINED
 
 typedef struct _EVENT_TRACE_ENABLE_INFO {
-    ULONG Version;               // 必须设为 EVENT_TRACE_ENABLE_INFO_VERSION (1)
-    ULONG EnableProperty;        // 启用的属性（如 EVENT_ENABLE_PROPERTY_STACK_TRACE）
+    ULONG Version;               // 必须为 EVENT_TRACE_ENABLE_INFO_VERSION (1)
+    ULONG EnableProperty;        // 启用的属性，如 EVENT_ENABLE_PROPERTY_STACK_TRACE等
 } EVENT_TRACE_ENABLE_INFO, * PEVENT_TRACE_ENABLE_INFO;
 
-// 版本常量（官方文档规定）
+// 版本号根据微软的规定填写
 #define EVENT_TRACE_ENABLE_INFO_VERSION 1
 
 #endif  // EVENT_TRACE_ENABLE_INFO_DEFINED
@@ -33,11 +34,11 @@ typedef struct _EVENT_TRACE_ENABLE_INFO {
 
 using BYTE = unsigned char;
 
-// 定义TCP/IP事件提供商GUID（缺失的定义）
-// 这是Microsoft-Windows-TCPIP提供商的GUID
+// 为TCP/IP事件提供器GUID未找到的情况做兼容
+// 使用Microsoft-Windows-TCPIP提供器的GUID
 const GUID GUID_TCPIP_EVENTS = { 0x2F07E2EE, 0x15DB, 0x40F1, {0x90, 0xE8, 0x65, 0x94, 0x1E, 0xAB, 0x2B, 0xBA} };
 
-// 事件记录类
+// 事件记录结构
 class EventRecord {
 public:
     std::string timestamp;
@@ -50,7 +51,7 @@ public:
     }
 };
 
-// 全局事件监控器（核心类）
+// 全局事件监控器类（单例模式）
 class EventMonitor {
 private:
     bool isRunning = false;
@@ -59,14 +60,14 @@ private:
     std::thread monitoringThread;
     std::vector<std::string> selectedEventTypes;
 
-    // WMI 相关变量
+    // WMI 相关接口
     IWbemLocator* pLoc = nullptr;
     IWbemServices* pSvc = nullptr;
     IUnsecuredApartment* pUnsecApp = nullptr;
     IUnknown* pStubUnk = nullptr;
     IWbemObjectSink* pStubSink = nullptr;
 
-    // ETW 相关变量
+    // ETW 相关接口
     TRACEHANDLE etwSession = 0;
     EVENT_TRACE_PROPERTIES* etwProps = nullptr;
     WCHAR etwSessionName[256] = L"KswordETWMonitor";
@@ -99,98 +100,194 @@ private:
                 AddRef();
                 return WBEM_S_NO_ERROR;
             }
+            kLog.Add(Err, C("EventSink QueryInterface 不支持的接口"));
             return E_NOINTERFACE;
         }
 
-        // IWbemObjectSink 接口方法
+        // IWbemObjectSink 接口实现
         HRESULT STDMETHODCALLTYPE Indicate(LONG lObjectCount, IWbemClassObject** apObjArray) override {
-            // 这里放入之前修正的事件解析逻辑
+            if (lObjectCount <= 0 || apObjArray == nullptr) {
+                kLog.Add(Warn, C("Indicate 接收事件数量无效或对象数组为空"));
+                return WBEM_S_NO_ERROR;
+            }
+
+            // 处理每个事件之前的通用逻辑
             for (int i = 0; i < lObjectCount; ++i) {
+                if (apObjArray[i] == nullptr) {
+                    kLog.Add(Warn, C("事件对象数组中存在空指针"));
+                    continue;
+                }
+
                 VARIANT vtProp;
                 std::string type, source, description;
 
                 // 1. 获取事件类型（__Class 属性）
-                if (SUCCEEDED(apObjArray[i]->Get(_bstr_t(L"__Class"), 0, &vtProp, 0, 0))) {
+                HRESULT hres = apObjArray[i]->Get(_bstr_t(L"__Class"), 0, &vtProp, 0, 0);
+                if (FAILED(hres)) {
+                    kLog.Add(Warn, C("获取事件__Class属性失败，错误代码: " + std::to_string(hres)));
+                }
+                else {
                     if (vtProp.vt == VT_BSTR) {
                         type = _com_util::ConvertBSTRToString(vtProp.bstrVal);
+                    }
+                    else {
+                        kLog.Add(Warn, C("事件__Class属性类型不是BSTR"));
                     }
                     VariantClear(&vtProp);
                 }
 
-                // 2. 解析实例事件（__InstanceXXXEvent）的 TargetInstance 属性
+                // 2. 处理实例事件（__InstanceXXXEvent）的 TargetInstance 属性
                 if (type == "__InstanceCreationEvent" || type == "__InstanceDeletionEvent" || type == "__InstanceModificationEvent") {
-                    // 获取 TargetInstance（实际的进程对象）
-                    if (SUCCEEDED(apObjArray[i]->Get(_bstr_t(L"TargetInstance"), 0, &vtProp, 0, 0))) {
-                        if (vtProp.vt == VT_DISPATCH) {
-                            IWbemClassObject* pTargetInstance = nullptr;
-                            if (SUCCEEDED(vtProp.pdispVal->QueryInterface(IID_IWbemClassObject, (void**)&pTargetInstance))) {
-                                // 从 TargetInstance 中获取进程名
-                                VARIANT vtName;
-                                if (SUCCEEDED(pTargetInstance->Get(_bstr_t(L"Name"), 0, &vtName, 0, 0))) {
-                                    if (vtName.vt == VT_BSTR) {
-                                        source = _com_util::ConvertBSTRToString(vtName.bstrVal);
-                                    }
-                                    VariantClear(&vtName);
-                                }
-                                pTargetInstance->Release();
-                            }
-                        }
+                    // 获取 TargetInstance 实际的对象引用
+                    HRESULT targetRes = apObjArray[i]->Get(_bstr_t(L"TargetInstance"), 0, &vtProp, 0, 0);
+                    if (FAILED(targetRes)) {
+                        kLog.Add(Warn, C("获取TargetInstance属性失败，错误代码: " + std::to_string(targetRes)));
                         VariantClear(&vtProp);
+                        continue;
                     }
-                    // 补充描述信息
+
+                    if (vtProp.vt == VT_DISPATCH) {
+                        IWbemClassObject* pTargetInstance = nullptr;
+                        HRESULT qiRes = vtProp.pdispVal->QueryInterface(IID_IWbemClassObject, (void**)&pTargetInstance);
+                        if (FAILED(qiRes)) {
+                            kLog.Add(Warn, C("TargetInstance查询IWbemClassObject接口失败，错误代码: " + std::to_string(qiRes)));
+                            VariantClear(&vtProp);
+                            continue;
+                        }
+
+                        // 从 TargetInstance 中获取名称
+                        VARIANT vtName;
+                        HRESULT nameRes = pTargetInstance->Get(_bstr_t(L"Name"), 0, &vtName, 0, 0);
+                        if (FAILED(nameRes)) {
+                            kLog.Add(Warn, C("获取TargetInstance名称失败，错误代码: " + std::to_string(nameRes)));
+                        }
+                        else {
+                            if (vtName.vt == VT_BSTR) {
+                                source = _com_util::ConvertBSTRToString(vtName.bstrVal);
+                            }
+                            else {
+                                kLog.Add(Warn, C("TargetInstance名称属性类型不是BSTR"));
+                            }
+                            VariantClear(&vtName);
+                        }
+                        pTargetInstance->Release();
+                    }
+                    else {
+                        kLog.Add(Warn, C("TargetInstance属性类型不是VT_DISPATCH"));
+                    }
+                    VariantClear(&vtProp);
+
+                    // 设置描述信息
                     if (type == "__InstanceCreationEvent") description = "Process started";
                     else if (type == "__InstanceDeletionEvent") description = "Process stopped";
-                    // 在EventSink::Indicate中添加
                     else if (type == "MSFT_NetConnectionCreate") {
-                        // 解析网络连接事件
-                        if (SUCCEEDED(apObjArray[i]->Get(L"ProcessId", 0, &vtProp, 0, 0))) {
-                            DWORD pid = vtProp.lVal;
-                            source = "PID: " + std::to_string(pid);
+                        // 处理网络连接事件
+                        HRESULT pidRes = apObjArray[i]->Get(L"ProcessId", 0, &vtProp, 0, 0);
+                        if (FAILED(pidRes)) {
+                            kLog.Add(Warn, C("获取MSFT_NetConnectionCreate事件的ProcessId失败，错误代码: " + std::to_string(pidRes)));
+                        }
+                        else {
+                            if (vtProp.vt == VT_I4) {
+                                DWORD pid = vtProp.lVal;
+                                source = "PID: " + std::to_string(pid);
+                            }
+                            else {
+                                kLog.Add(Warn, C("ProcessId属性类型不是整数"));
+                            }
                             VariantClear(&vtProp);
                         }
                         description = "Network connection created";
                     }
                     else description = "Process modified";
                 }
-                // 3. 解析 Win32_ProcessStartTrace/StopTrace 事件
+                // 3. 处理 Win32_ProcessStartTrace/StopTrace 事件
                 else if (type == "Win32_ProcessStartTrace" || type == "Win32_ProcessStopTrace") {
-                    if (SUCCEEDED(apObjArray[i]->Get(_bstr_t(L"ProcessName"), 0, &vtProp, 0, 0))) {
+                    HRESULT nameRes = apObjArray[i]->Get(_bstr_t(L"ProcessName"), 0, &vtProp, 0, 0);
+                    if (FAILED(nameRes)) {
+                        kLog.Add(Warn, C("获取ProcessName属性失败，错误代码: " + std::to_string(nameRes)));
+                    }
+                    else {
                         if (vtProp.vt == VT_BSTR) {
                             source = _com_util::ConvertBSTRToString(vtProp.bstrVal);
+                        }
+                        else {
+                            kLog.Add(Warn, C("ProcessName属性类型不是BSTR"));
                         }
                         VariantClear(&vtProp);
                     }
                     description = type == "Win32_ProcessStartTrace" ? "Process start traced" : "Process stop traced";
                 }
-
+                else if (type == "MSFT_NetConnectionCreate") {
+                    // 先判断类是否存在（通过尝试获取一个关键属性验证）
+                    HRESULT propRes = apObjArray[i]->Get(_bstr_t(L"RemoteAddress"), 0, &vtProp, 0, 0);
+                    if (FAILED(propRes)) {
+                        kLog.Add(Warn, C("MSFT_NetConnectionCreate 类或属性不存在，跳过解析（错误码: " + std::to_string(propRes) + "）"));
+                        VariantClear(&vtProp);
+                        // 仅记录事件类型，不添加详细信息（避免空数据）
+                        source = "Unsupported";
+                        description = "Network event class not supported on this system";
+                    }
+                    else {
+                        // 正常解析属性
+                        if (vtProp.vt == VT_BSTR) {
+                            source = _com_util::ConvertBSTRToString(vtProp.bstrVal);
+                        }
+                        else {
+                            source = "Unknown";
+                        }
+                        VariantClear(&vtProp);
+                        description = "Network connection created";
+                    }
+                }
+                // 5. 其他未处理事件类型
+                else {
+                    kLog.Add(Info, C("未处理的事件类型: " + type));
+                    source = "Unprocessed";
+                    description = "Event type not handled";
+                }
                 // 4. 生成时间戳
                 auto now = std::chrono::system_clock::now();
                 std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+                if (nowTime == -1) {
+                    kLog.Add(Warn, C("转换系统时间失败"));
+                    continue;
+                }
+                std::tm* localTime = std::localtime(&nowTime);
+                if (localTime == nullptr) {
+                    kLog.Add(Warn, C("获取本地时间失败"));
+                    continue;
+                }
                 std::stringstream ss;
-                ss << std::put_time(std::localtime(&nowTime), "%Y-%m-%d %H:%M:%S");
+                ss << std::put_time(localTime, "%Y-%m-%d %H:%M:%S");
 
-                // 5. 添加事件（确保有有效信息）
+                // 5. 添加事件到列表（确保有有效信息）
                 if (!source.empty()) {
                     parent->addEvent(EventRecord(ss.str(), type, source, description));
+                }
+                else {
+                    kLog.Add(Warn, C("事件源信息为空，跳过该事件"));
                 }
             }
             return WBEM_S_NO_ERROR;
         }
 
         HRESULT STDMETHODCALLTYPE SetStatus(LONG lFlags, HRESULT hResult, BSTR strParam, IWbemClassObject* pObjParam) override {
-            // 必须实现此方法（即使为空），否则类仍是抽象类
+            if (FAILED(hResult)) {
+                kLog.Add(Warn, C("SetStatus 返回错误，代码: " + std::to_string(hResult)));
+            }
             return WBEM_S_NO_ERROR;
         }
     };
 
-    // 初始化 WMI 连接
+    // 初始化 WMI 环境
     bool initializeWMI() {
         HRESULT hres = CoInitializeEx(0, COINIT_APARTMENTTHREADED);
         if (FAILED(hres)) {
-            kLog.Add(Err, C("未能成功初始化WMI连接，第1步出现问题"));
+            kLog.Add(Err, C("无法成功初始化WMI环境，错误1: " + std::to_string(hres)));
             return false;
         }
-        
+        kLog.Add(Info, C("CoInitializeEx 初始化成功"));
+
         hres = CoInitializeSecurity(
             NULL, -1, NULL, NULL,
             RPC_C_AUTHN_LEVEL_DEFAULT,
@@ -199,9 +296,10 @@ private:
         );
         if (FAILED(hres)) {
             CoUninitialize();
-            kLog.Add(Err, C("未能成功初始化WMI连接，第2步出现问题"));
+            kLog.Add(Err, C("无法成功初始化WMI环境，错误2: " + std::to_string(hres)));
             return false;
         }
+        kLog.Add(Info, C("CoInitializeSecurity 初始化成功"));
 
         hres = CoCreateInstance(
             CLSID_WbemLocator, NULL,
@@ -210,9 +308,10 @@ private:
         );
         if (FAILED(hres)) {
             CoUninitialize();
-            kLog.Add(Err, C("未能成功初始化WMI连接，第3步出现问题"));
+            kLog.Add(Err, C("无法成功初始化WMI环境，错误3: " + std::to_string(hres)));
             return false;
         }
+        kLog.Add(Info, C("CoCreateInstance 创建IWbemLocator成功"));
 
         hres = pLoc->ConnectServer(
             _bstr_t(L"ROOT\\CIMV2"),
@@ -221,9 +320,10 @@ private:
         if (FAILED(hres)) {
             pLoc->Release();
             CoUninitialize();
-            kLog.Add(Err, C("未能成功初始化WMI连接，第4步出现问题"));
+            kLog.Add(Err, C("无法成功初始化WMI环境，错误4: " + std::to_string(hres)));
             return false;
         }
+        kLog.Add(Info, C("ConnectServer 连接WMI服务成功"));
 
         hres = CoSetProxyBlanket(
             pSvc,
@@ -239,111 +339,157 @@ private:
             pSvc->Release();
             pLoc->Release();
             CoUninitialize();
-            kLog.Add(Err, C("未能成功初始化WMI连接，第5步出现问题"));
+            kLog.Add(Err, C("无法成功初始化WMI环境，错误5: " + std::to_string(hres)));
             return false;
         }
-        kLog.Add(Info, C("成功初始化WMI连接"));
+        kLog.Add(Info, C("成功初始化WMI环境"));
         return true;
     }
 
-    // 订阅 WMI 事件（动态拼接查询）
+    // 订阅 WMI 事件（动态拼接查询语句）
     bool subscribeToEvents() {
         HRESULT hres = CoCreateInstance(CLSID_UnsecuredApartment, NULL,
             CLSCTX_LOCAL_SERVER, IID_IUnsecuredApartment,
             reinterpret_cast<void**>(&pUnsecApp));
         if (FAILED(hres)) {
+            kLog.Add(Err, C("创建IUnsecuredApartment失败，错误代码: " + std::to_string(hres)));
             return false;
         }
+        kLog.Add(Info, C("创建IUnsecuredApartment成功"));
 
+        // 创建事件接收实例（用于处理接收到的事件类型）
         EventSink* pSink = new EventSink(this);
         pSink->AddRef();
 
         hres = pUnsecApp->CreateObjectStub(static_cast<IUnknown*>(pSink), &pStubUnk);
         if (FAILED(hres)) {
+            kLog.Add(Err, C("创建ObjectStub失败，错误代码: " + std::to_string(hres)));
             pSink->Release();
             return false;
         }
+        kLog.Add(Info, C("CreateObjectStub 成功"));
 
         hres = pStubUnk->QueryInterface(IID_IWbemObjectSink,
             reinterpret_cast<void**>(&pStubSink));
         if (FAILED(hres)) {
+            kLog.Add(Err, C("获取IWbemObjectSink接口失败，错误代码: " + std::to_string(hres)));
             pStubUnk->Release();
             pSink->Release();
             return false;
         }
+        kLog.Add(Info, C("获取IWbemObjectSink接口成功"));
 
-        // 动态构建 WMI 查询语句
-        std::vector<std::string> queries;
+        // 为实例事件和目标类建立映射
+        std::unordered_map<std::string, std::string> instanceEventTargetMap = {
+            {"__InstanceCreationEvent", "Win32_Process"},       // 进程创建
+            {"__InstanceDeletionEvent", "Win32_Process"},       // 进程删除
+            {"__InstanceModificationEvent", "Win32_Process"},   // 进程修改
+            {"RegistryKeyChangeEvent", "Win32_RegistryKey"}     // 注册表变更
+        };
+
+        // 处理每个事件类型（可修改，去掉UNION等复杂结构）
         for (const auto& eventType : selectedEventTypes) {
-            if (eventType == "Win32_ProcessStartTrace" || eventType == "Win32_ProcessStopTrace") {
-                // 指定命名空间
-                queries.push_back("SELECT * FROM \\\\.\\ROOT\\CIMV2:" + eventType);
+            std::string query;
+
+            // 构建事件查询语句
+            if (instanceEventTargetMap.count(eventType)) {
+                std::string targetClass = instanceEventTargetMap[eventType];
+                query = "SELECT * FROM " + eventType +
+                    " WITHIN 1 WHERE TargetInstance ISA '" + targetClass + "'";
             }
-            else if (eventType.find("__Instance") == 0) {
-                // 添加WITHIN子句
-                queries.push_back("SELECT * FROM " + eventType + " WITHIN 1 WHERE TargetInstance ISA 'Win32_Process'");
+            else if (eventType == "Win32_ProcessStartTrace") {
+                query = "SELECT * FROM Win32_ProcessStartTrace";
             }
             else {
-                queries.push_back("SELECT * FROM " + eventType);
+                query = "SELECT * FROM " + eventType + " WITHIN 1";
             }
-        }
-        // 拼接多事件查询
-        std::string combinedQuery;
-        for (size_t i = 0; i < queries.size(); ++i) {
-            if (i > 0) {
-                combinedQuery += " UNION ALL ";
-            }
-            combinedQuery += queries[i];
-        }
 
-        hres = pSvc->ExecNotificationQueryAsync(
-            _bstr_t(combinedQuery.c_str()),
-            _bstr_t(L"WQL"),
-            WBEM_FLAG_SEND_STATUS,
-            NULL,
-            pStubSink
-        );
-        if (FAILED(hres)) {
-            pStubSink->Release();
-            pStubUnk->Release();
-            pSink->Release();
-            return false;
+            // 为每个事件类型执行订阅
+            hres = pSvc->ExecNotificationQueryAsync(
+                _bstr_t(L"WQL"),  // 查询语言：WQL
+                _bstr_t(query.c_str()),  // 事件查询语句
+                WBEM_FLAG_SEND_STATUS,
+                NULL,
+                pStubSink  // 事件接收回调实例
+            );
+
+            // 若任一事件订阅失败，整体返回失败
+            if (FAILED(hres)) {
+                kLog.Add(Err, C("订阅事件 " + eventType + " 失败，错误代码: " + std::to_string(hres)));
+                pStubSink->Release();
+                pStubUnk->Release();
+                pSink->Release();
+                return false;
+            }
+            kLog.Add(Info, C("成功订阅事件: " + eventType));
         }
 
         return true;
     }
 
-    // 停止 WMI 订阅
+    // 停止 WMI 监控
     void stopWMI() {
+        kLog.Add(Info, C("开始停止WMI监控"));
         if (pSvc && pStubSink) {
-            pSvc->CancelAsyncCall(pStubSink);
+            HRESULT hres = pSvc->CancelAsyncCall(pStubSink);
+            if (FAILED(hres)) {
+                kLog.Add(Warn, C("取消WMI异步调用失败，错误代码: " + std::to_string(hres)));
+            }
+            else {
+                kLog.Add(Info, C("成功取消WMI异步调用"));
+            }
         }
 
-        // 释放资源顺序优化
-        if (pStubSink) pStubSink->Release();
-        if (pStubUnk) pStubUnk->Release();
-        if (pUnsecApp) pUnsecApp->Release();
-        if (pSvc) pSvc->Release();
-        if (pLoc) pLoc->Release();
+        // 释放资源（逆序释放）
+        if (pStubSink) {
+            pStubSink->Release();
+            pStubSink = nullptr;
+            kLog.Add(Info, C("释放pStubSink成功"));
+        }
+        if (pStubUnk) {
+            pStubUnk->Release();
+            pStubUnk = nullptr;
+            kLog.Add(Info, C("释放pStubUnk成功"));
+        }
+        if (pUnsecApp) {
+            pUnsecApp->Release();
+            pUnsecApp = nullptr;
+            kLog.Add(Info, C("释放pUnsecApp成功"));
+        }
+        if (pSvc) {
+            pSvc->Release();
+            pSvc = nullptr;
+            kLog.Add(Info, C("释放pSvc成功"));
+        }
+        if (pLoc) {
+            pLoc->Release();
+            pLoc = nullptr;
+            kLog.Add(Info, C("释放pLoc成功"));
+        }
 
-        // 仅在最后一次释放时取消初始化COM
+        // 最后释放COM初始化（确保只调用一次）
         static int comCount = 0;
         comCount--;
         if (comCount <= 0) {
             CoUninitialize();
             comCount = 0;
+            kLog.Add(Info, C("CoUninitialize 成功"));
         }
     }
 
     // ETW 事件回调函数
     static VOID WINAPI EtwEventCallback(EVENT_RECORD* pEventRecord) {
-        // 这里可以处理接收到的ETW事件
-        // 简单示例：将事件信息添加到事件列表
-        if (pEventRecord == nullptr) return;
+        if (pEventRecord == nullptr) {
+            kLog.Add(Warn, C("EtwEventCallback 接收空事件记录"));
+            return;
+        }
 
         // 获取当前实例指针
         EventMonitor* monitor = static_cast<EventMonitor*>(pEventRecord->UserContext);
-        if (monitor == nullptr) return;
+        if (monitor == nullptr) {
+            kLog.Add(Warn, C("EtwEventCallback 无法获取EventMonitor实例"));
+            return;
+        }
 
         // 格式化时间戳
         SYSTEMTIME st;
@@ -352,7 +498,10 @@ private:
         uli.QuadPart = pEventRecord->EventHeader.TimeStamp.QuadPart;
         ft.dwLowDateTime = uli.LowPart;
         ft.dwHighDateTime = uli.HighPart;
-        FileTimeToSystemTime(&ft, &st);
+        if (!FileTimeToSystemTime(&ft, &st)) {
+            kLog.Add(Warn, C("FileTimeToSystemTime 转换失败"));
+            return;
+        }
 
         std::stringstream ss;
         ss << std::setw(4) << std::setfill('0') << st.wYear << "-"
@@ -362,22 +511,56 @@ private:
             << std::setw(2) << std::setfill('0') << st.wMinute << ":"
             << std::setw(2) << std::setfill('0') << st.wSecond;
 
-        // 创建事件记录
+        // 记录事件信息
         std::string type = "ETW Event";
         std::string source = "TCP/IP";
         std::string description = "Network event captured";
 
         monitor->addEvent(EventRecord(ss.str(), type, source, description));
     }
+    void generateUniqueSessionName() {
+        // 基础名称
+        const WCHAR baseName[] = L"KswordETWMonitor_";
 
-    // 初始化 ETW 用于网络监控
+        // 获取当前系统时间
+        auto now = std::chrono::system_clock::now();
+        std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+        std::tm* localTime = std::localtime(&nowTime);
+
+        // 提取日期（年-月-日）和秒数
+        WCHAR timeSuffix[64] = { 0 };
+        swprintf_s(
+            timeSuffix,
+            L"%04d%02d%02d_%02d",  // 格式：年月日_秒（如20240730_15）
+            localTime->tm_year + 1900,
+            localTime->tm_mon + 1,
+            localTime->tm_mday,
+            localTime->tm_sec  // 秒数确保同一分钟内的唯一性
+        );
+
+        // 拼接完整会话名（基础名称+时间后缀）
+        swprintf_s(
+            etwSessionName,
+            L"%s%s",
+            baseName,
+            timeSuffix
+        );
+
+        //kLog.Add(Info, C(std::wstring(L"生成唯一ETW会话名: " )+ std::wstring(etwSessionName)));
+    }
+
+    // 初始化 ETW 监控会话
     bool initializeETW() {
-        // 1. 计算内存大小（包含会话名称）
+        kLog.Add(Info, C("开始初始化ETW监控"));
+        generateUniqueSessionName();
+        // 1. 计算内存大小，用于分配会话属性
         DWORD bufferSize = sizeof(EVENT_TRACE_PROPERTIES) + sizeof(etwSessionName);
         etwProps = (EVENT_TRACE_PROPERTIES*)LocalAlloc(LPTR, bufferSize);
         if (etwProps == nullptr) {
+            kLog.Add(Err, C("分配ETW属性内存失败"));
             return false;
         }
+        kLog.Add(Info, C("ETW属性内存分配成功"));
 
         // 2. 初始化事件跟踪会话属性
         ZeroMemory(etwProps, bufferSize);
@@ -390,40 +573,43 @@ private:
         // 3. 启动跟踪会话
         ULONG status = StartTrace(&etwSession, etwSessionName, etwProps);
         if (status != ERROR_SUCCESS) {
+            kLog.Add(Err, C("启动ETW会话失败，错误代码: " + std::to_string(status)));
             LocalFree(etwProps);
             etwProps = nullptr;
             return false;
         }
+        kLog.Add(Info, C("ETW会话启动成功"));
 
-        // 4. 配置TCP/IP事件提供商
+        // 4. 指定TCP/IP事件提供器
         const GUID providerGuid = { 0x2F07E2EE, 0x15DB, 0x40F1, {0x90, 0xE8, 0x65, 0x94, 0x1E, 0xAB, 0x2B, 0xBA} };
 
-        
-        // 5. 初始化ENABLE_TRACE_PARAMETERS（严格匹配你的结构体定义）
-        ENABLE_TRACE_PARAMETERS enableParams = { 0 };
-        enableParams.Version = 1;  // 低版本结构体版本号（无EnableInfo成员）
-        enableParams.EnableProperty = EVENT_ENABLE_PROPERTY_STACK_TRACE;  // 启用堆栈跟踪
-        // 其他成员按需设置（ControlFlags/SourceId等，此处保持默认）
 
-        // 6. 调用EnableTraceEx2（参数完全匹配结构体和函数定义）
+        // 5. 初始化ENABLE_TRACE_PARAMETERS结构（适配较新的系统）
+        ENABLE_TRACE_PARAMETERS enableParams = { 0 };
+        enableParams.Version = 1;  // 对应版本结构的版本号，包含EnableInfo成员
+        enableParams.EnableProperty = EVENT_ENABLE_PROPERTY_STACK_TRACE;  // 启用堆栈跟踪
+
+        // 6. 启用事件提供器
         status = EnableTraceEx2(
             etwSession,                          // 跟踪会话句柄
-            &providerGuid,                       // 提供商GUID
-            EVENT_CONTROL_CODE_ENABLE_PROVIDER,  // 启用提供商
-            TRACE_LEVEL_INFORMATION,             // 事件级别（直接作为参数）
-            0x1,                                 // MatchAnyKeyword（过滤关键字）
-            0x0,                                 // MatchAllKeyword（过滤关键字）
+            &providerGuid,                       // 提供器GUID
+            EVENT_CONTROL_CODE_ENABLE_PROVIDER,  // 启用提供器
+            TRACE_LEVEL_INFORMATION,             // 事件级别（这里为信息级）
+            0x1,                                 // MatchAnyKeyword（筛选关键字）
+            0x0,                                 // MatchAllKeyword
             0,                                   // 超时时间
-            &enableParams                        // 结构体参数（无EnableInfo，直接传自身）
+            &enableParams                        // 结构参数（包含扩展信息）
         );
 
         if (status != ERROR_SUCCESS) {
+            kLog.Add(Err, C("启用TCP/IP事件提供器失败，错误代码: " + std::to_string(status)));
             ControlTrace(etwSession, etwSessionName, etwProps, EVENT_TRACE_CONTROL_STOP);
             LocalFree(etwProps);
             etwProps = nullptr;
             etwSession = 0;
             return false;
         }
+        kLog.Add(Info, C("TCP/IP事件提供器启用成功"));
 
         // 7. 启动事件处理线程
         std::thread etwThread([this]() {
@@ -435,43 +621,65 @@ private:
 
             TRACEHANDLE traceHandle = OpenTrace(&traceLogFile);
             if (traceHandle == INVALID_PROCESSTRACE_HANDLE) {
+                kLog.Add(Err, C("打开ETW跟踪失败，错误代码: " + std::to_string(GetLastError())));
                 return;
             }
+            kLog.Add(Info, C("ETW跟踪打开成功"));
 
             // 处理事件直到停止
             while (isRunning) {
                 ULONG processStatus = ProcessTrace(&traceHandle, 1, nullptr, nullptr);
                 if (processStatus != ERROR_SUCCESS && processStatus != ERROR_MORE_DATA) {
+                    kLog.Add(Err, C("处理ETW事件失败，错误代码: " + std::to_string(processStatus)));
                     break;
                 }
             }
 
             CloseTrace(traceHandle);
+            kLog.Add(Info, C("ETW跟踪已关闭"));
             });
 
         etwThread.detach();
+        kLog.Add(Info, C("ETW事件处理线程启动成功"));
         return true;
     }
+
     // 停止 ETW 监控
     void stopETW() {
+        kLog.Add(Info, C("开始停止ETW监控"));
         if (etwSession != 0 && etwProps != nullptr) {
             // 停止跟踪会话
-            ControlTrace(etwSession, etwSessionName, etwProps, EVENT_TRACE_CONTROL_STOP);
+            ULONG status = ControlTrace(etwSession, etwSessionName, etwProps, EVENT_TRACE_CONTROL_STOP);
+            if (status != ERROR_SUCCESS) {
+                kLog.Add(Warn, C("停止ETW会话失败，错误代码: " + std::to_string(status)));
+            }
+            else {
+                kLog.Add(Info, C("ETW会话停止成功"));
+            }
             etwSession = 0;
         }
 
         if (etwProps != nullptr) {
             LocalFree(etwProps);
             etwProps = nullptr;
+            kLog.Add(Info, C("ETW属性内存释放成功"));
         }
     }
 
     // 安全添加事件到列表
     void addEvent(const EventRecord& event) {
-        std::lock_guard<std::mutex> lock(eventsMutex);
-        events.insert(events.begin(), event);
-        if (events.size() > 1000) {  // 限制最大事件数量
-            events.pop_back();
+        try {
+            std::lock_guard<std::mutex> lock(eventsMutex);
+            events.insert(events.begin(), event);
+            if (events.size() > 1000) {  // 限制事件数量
+                events.pop_back();
+            }
+        }
+        catch (const std::exception& e) {
+            kLog.Add(Err, C("添加事件到列表失败: " + std::string(e.what())));
+        }
+        catch (...) {
+            kLog.Add(Err, C("添加事件到列表时发生未知错误"));
         }
     }
 
@@ -483,14 +691,29 @@ public:
 
     // 启动监控（WMI + ETW）
     void startMonitoring(const std::vector<std::string>& eventTypes) {
-        if (isRunning) return;
+        if (isRunning) {
+            kLog.Add(Warn, C("监控已在运行，无需重复启动"));
+            return;
+        }
+
+        if (eventTypes.empty()) {
+            kLog.Add(Warn, C("未选择任何事件类型，启动监控失败"));
+            return;
+        }
 
         selectedEventTypes = eventTypes;
         isRunning = true;
+        kLog.Add(Info, C("开始启动监控线程"));
 
         monitoringThread = std::thread([this]() {
             bool wmiOk = initializeWMI() && subscribeToEvents();
             bool etwOk = initializeETW();
+
+            if (!wmiOk && !etwOk) {
+                kLog.Add(Err, C("WMI和ETW监控均初始化失败，监控无法启动"));
+                isRunning = false;
+                return;
+            }
 
             while (isRunning) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -502,29 +725,57 @@ public:
             if (etwOk) {
                 stopETW();
             }
+            kLog.Add(Info, C("监控线程已退出"));
             });
     }
 
     // 停止监控
     void stopMonitoring() {
-        if (!isRunning) return;
+        if (!isRunning) {
+            //kLog.Add(Warn, C("监控未在运行，无需停止"));
+            return;
+        }
 
+        //kLog.Add(Info, C("正在停止监控"));
         isRunning = false;
         if (monitoringThread.joinable()) {
             monitoringThread.join();
+            kLog.Add(Info, C("监控线程已成功join"));
+        }
+        else {
+            kLog.Add(Warn, C("监控线程不可join"));
         }
     }
 
     // 清空事件列表
     void clearEvents() {
-        std::lock_guard<std::mutex> lock(eventsMutex);
-        events.clear();
+        try {
+            std::lock_guard<std::mutex> lock(eventsMutex);
+            events.clear();
+            kLog.Add(Info, C("已清空事件列表"));
+        }
+        catch (const std::exception& e) {
+            kLog.Add(Err, C("清空事件列表失败: " + std::string(e.what())));
+        }
+        catch (...) {
+            kLog.Add(Err, C("清空事件列表时发生未知错误"));
+        }
     }
 
     // 获取当前事件列表
     std::vector<EventRecord> getEvents() {
-        std::lock_guard<std::mutex> lock(eventsMutex);
-        return events;
+        try {
+            std::lock_guard<std::mutex> lock(eventsMutex);
+            return events;
+        }
+        catch (const std::exception& e) {
+            kLog.Add(Err, C("获取事件列表失败: " + std::string(e.what())));
+            return {};
+        }
+        catch (...) {
+            kLog.Add(Err, C("获取事件列表时发生未知错误"));
+            return {};
+        }
     }
 
     // 查询是否正在监控
@@ -536,38 +787,44 @@ public:
 // 全局事件监控器实例
 EventMonitor g_eventMonitor;
 
-// 扩展事件类型列表（覆盖更多监控项）
+// 扩展事件类型列表（可根据需要增删）
 std::vector<std::pair<std::string, bool>> eventTypes = {
-    { "__InstanceCreationEvent", false },   // 实例创建（进程/线程等）
-    { "__InstanceDeletionEvent", false },   // 实例删除
-    { "__InstanceModificationEvent", false },// 实例修改
-    { "Win32_ProcessStartTrace", false },   // 进程启动追踪
-    { "Win32_ProcessStopTrace", false },    // 进程退出追踪
-    { "MSFT_NetConnectionCreate", false },  // 网络连接建立（Win10+）
-    { "CIM_DataFile", false },              // 文件操作（创建/删除等）
-    { "RegistryKeyChangeEvent", false },    // 注册表项修改
-    { "SecurityEvent", false },             // 安全审计事件
+    { "__InstanceCreationEvent", false },   // 实例创建事件（进程等）
+    { "__InstanceDeletionEvent", false },   // 实例删除事件
+    { "__InstanceModificationEvent", false },// 实例修改事件
+    { "Win32_ProcessStartTrace", false },   // 进程启动跟踪
+    { "Win32_ProcessStopTrace", false },    // 进程停止跟踪
+    { "MSFT_NetConnectionCreate", false },  // 网络连接创建（Win10+支持）
+    { "CIM_DataFile", false },              // 文件系统事件（创建/删除等）
+    { "RegistryKeyChangeEvent", false },    // 注册表键变更
+    { "SecurityEvent", false },             // 安全日志事件
 };
 
 
 void KswordMonitorMain() {
-    // 事件类型选择复选框
+    if (ImGui::GetCurrentContext() == nullptr) {
+        kLog.Add(Err, C("ImGui上下文未初始化，无法显示监控界面"));
+        return;
+    }
+
     ImGui::Text(C("选择要监控的事件类型:"));
     ImGui::Separator();
 
-    // 每行显示2个复选框 - 使用作用域确保Columns正确配对
+    // 每行显示2个选项 - 确保Columns正确使用
     {
         int columns = 2;
         ImGui::Columns(columns, NULL, false);  // Push columns
 
         for (size_t i = 0; i < eventTypes.size(); ++i) {
-            ImGui::Checkbox(eventTypes[i].first.c_str(), &eventTypes[i].second);
+            if (!ImGui::Checkbox(eventTypes[i].first.c_str(), &eventTypes[i].second)) {
+                // 不需要错误日志，Checkbox失败通常不影响流程
+            }
             if ((i + 1) % columns == 0) {
                 ImGui::NextColumn();
             }
         }
 
-        ImGui::Columns(1);  // Pop columns，恢复默认
+        ImGui::Columns(1);  // Pop columns回到默认
     }
 
     ImGui::Separator();
@@ -602,17 +859,16 @@ void KswordMonitorMain() {
         ImGui::TextColored(ImVec4(1.0f, 0.0f, 1.0f, 1.0f), C("未监控"));
     }
 
-    // 事件表格 - 确保表格的Begin/End正确配对
+    // 事件列表 - 确保Begin/End正确配对
     ImGui::Spacing();
     ImGui::Text(C("事件列表:"));
     ImGui::Separator();
 
     auto events = g_eventMonitor.getEvents();
 
-    // 表格操作使用独立作用域
-    // 在KswordMonitorMain中
-    ImGui::BeginTable("事件表格", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-        ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit); {
+    // 表格显示事件列表
+    if (ImGui::BeginTable("事件列表", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit)) {
         ImGui::TableSetupColumn(C("时间"), ImGuiTableColumnFlags_WidthFixed);
         ImGui::TableSetupColumn(C("类型"), ImGuiTableColumnFlags_WidthFixed);
         ImGui::TableSetupColumn(C("源"), ImGuiTableColumnFlags_WidthFixed);
@@ -635,8 +891,10 @@ void KswordMonitorMain() {
             ImGui::TextWrapped("%s", event.description.c_str());
         }
 
-        ImGui::EndTable();  // 确保表格被正确关闭
+        ImGui::EndTable();  // 确保表格正确关闭
+    }
+    else {
+        kLog.Add(Warn, C("创建事件列表表格失败"));
     }
     ImGui::EndTabItem();
 }
-
