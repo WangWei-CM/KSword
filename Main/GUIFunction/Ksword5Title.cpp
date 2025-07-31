@@ -3,7 +3,7 @@
 static ImVec2 TitleHighLightStartPos;
 
 //imgui绘制矩形
-
+static char TitleCMDInput[512] = {};
 
 void drawGradientRectangle(ImDrawList* drawList, ImVec2 pos, ImVec2 size, ImU32 leftColor, ImU32 rightColor) {
     int steps = 20; // 渐变步数，步数越多渐变越平滑
@@ -41,6 +41,9 @@ static ImVec2 original_size = ImVec2(0, 0);
 static bool first_run = true;
 static bool should_switch_to_full = false;
 static bool should_switch_to_normal = false;
+// 全局变量：存储目标窗口的专用dock容器ID
+static ImGuiID fixed_height_dock_id = 0;
+
 inline void ToggleFullscreen()
 {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -63,12 +66,6 @@ inline void ToggleFullscreen()
 }
 ImVec2 KswordTitleHighLightSize(0, 0);
 inline void Ksword5Title() {
-        ImGui::SetNextWindowSizeConstraints(
-        ImVec2(200,30),  // 最小宽度为0（完全自适应）
-        ImVec2(FLT_MAX, 30) // 最大宽度无限制
-    );
-
-
         if (should_switch_to_full == 1) {
             original_pos = ImGui::GetWindowPos();
             original_size = ImGui::GetWindowSize();
@@ -85,16 +82,68 @@ inline void Ksword5Title() {
             is_fullscreen = false;
             should_switch_to_normal = 0;
         }
+        static const float FIXED_HEIGHT = 60.0f;
+        if (fixed_height_dock_id == 0) {
+            // 获取主dock空间（假设你的主窗口有一个dockspace）
+            ImGuiID main_dockspace_id = ImGui::GetID("MainDockSpace");
+
+            // 在主dock空间中创建一个独立的垂直容器
+            fixed_height_dock_id = ImGui::DockBuilderSplitNode(
+                main_dockspace_id,
+                ImGuiDir_Up,  // 放在主空间的上方
+                0.05f,        // 初始占比（较小，后续会强制固定高度）
+                nullptr,
+                &main_dockspace_id
+            );
+
+            // 配置该容器为不可分割、垂直固定
+            ImGuiDockNode* fixed_node = ImGui::DockBuilderGetNode(fixed_height_dock_id);
+            if (fixed_node) {
+                fixed_node->LocalFlags |= ImGuiDockNodeFlags_NoResize | ImGuiDockNodeFlags_NoSplit;
+                fixed_node->Size.y = FIXED_HEIGHT;  // 强制固定高度
+            }
+        }
+
+        // 将窗口停靠到专用容器
+        ImGui::SetNextWindowDockID(fixed_height_dock_id, ImGuiCond_FirstUseEver);
+        // 非停靠状态的约束（双重保障）
+        ImGui::SetNextWindowSizeConstraints(ImVec2(0, FIXED_HEIGHT), ImVec2(FLT_MAX, FIXED_HEIGHT));
+
+
+        // 实时修正容器高度（防止意外修改）
 
         ImGui::Begin("Windows Style Window", nullptr,
         ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoScrollbar | 
         ImGuiWindowFlags_NoCollapse);
+        ImGuiDockNode* node = ImGui::DockBuilderGetNode(fixed_height_dock_id);
+        if (node && node->Size.y != FIXED_HEIGHT) {
+            node->Size.y = FIXED_HEIGHT;
+            node->WantLockSizeOnce = true;
+        }
+
+        ImGuiID dockId = ImGui::GetWindowDockID();
+        if (dockId != 0) {
+            ImGuiDockNode* node = ImGui::DockBuilderGetNode(dockId);
+            if (node != nullptr && node->IsLeafNode()) {  // 只处理叶子节点（直接包含窗口的容器）
+                // 1. 强制容器高度为固定值
+                if (node->Size.y != 60) {
+                    node->Size.y = 60;
+                    node->WantLockSizeOnce = true;  // 锁定本次大小修改
+                }
+
+                // 2. 禁用父容器的分割线（若存在），防止拖动改变高度
+                //if (node->ParentNode != nullptr) {
+                //    ImGuiDockNode* parent = node->ParentNode;
+                //    // 若父容器是垂直分割（影响高度），则禁用分割线交互
+                //    if (parent->SplitAxis == ImGuiAxis_Y) {
+                //        parent->LocalFlags |= ImGuiDockNodeFlags_NoResize;  // 禁用父容器的分割线调整
+                //    }
+                //}
+            }
+        }
     const float window_height = ImGui::GetFrameHeight();
     ImVec2 currentSize = ImGui::GetWindowSize();
-    if (currentSize.y != 30) {
-        ImGui::SetWindowSize(ImVec2(currentSize.x, 30));
-    }
 
     // 获取当前窗口位置和大小
     ImVec2 windowPos = ImGui::GetWindowPos();
@@ -114,6 +163,7 @@ inline void Ksword5Title() {
     );
     ImGui::SetCursorPos(ImVec2(30, 8)); // 图标右侧(5+30+5=40)
     ImGui::Text("Ksword 5.0");
+
     // 获取当前主题颜色并转换为 ImVec4
     ImVec4 bgColor = ImGui::ColorConvertU32ToFloat4(ImGui::GetColorU32(ImGuiCol_WindowBg));
     ImVec4 textColor = ImGui::ColorConvertU32ToFloat4(ImGui::GetColorU32(ImGuiCol_Text));
@@ -142,12 +192,36 @@ inline void Ksword5Title() {
     const float button_size_y = 30.0f;  // 按钮尺寸
     const float spacing = 2.0f;       // 按钮间距
 
+    ImVec2 cmdInputPos = ImVec2(window_pos.x +(window_size.x-70)*0.35, window_pos.y + 3);
+    float cmdInputWidth = window_size.x * 0.3f;
+    ImGui::SetCursorScreenPos(cmdInputPos);
+    float windowWidth = ImGui::GetWindowSize().x;
+    float minInputWidth = windowWidth * 0.35f;
+    float maxInputWidth = windowWidth * 0.65f;
+
+    // 设置输入框宽度（取范围内合适值，这里直接用50%示例，可根据需要调整）
+    float inputWidth = windowWidth * 0.4f;
+    inputWidth =std::clamp(inputWidth, minInputWidth, maxInputWidth);
+    ImGui::SetNextItemWidth(inputWidth);
+    
+    // 蓝色边框样式（边框颜色+显示边框）
+    ImGui::PushStyleColor(ImGuiCol_Border, STYLE_COLOR); // 蓝色边框
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 5.0f); // 稍宽的边框
+    if (ImGui::InputText("##CmdInput", TitleCMDInput, IM_ARRAYSIZE(TitleCMDInput), ImGuiInputTextFlags_EnterReturnsTrue, nullptr, nullptr)) {
+        RunCmdAsyn(std::string(TitleCMDInput)); // 执行命令
+    }
+    ImGui::SetItemDefaultFocus();
+    ImGui::SameLine();
+    // 恢复样式
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+
     // 计算按钮组位置（右上角）
     ImVec2 button_group_pos = ImVec2(
         window_pos.x + window_size.x - (button_size_x * 2 + spacing * 2),
         window_pos.y
     );
-
+    //StyleColor
     // 保存原始样式
     ImGuiStyle& style = ImGui::GetStyle();
     ImVec4 orig_button = style.Colors[ImGuiCol_Button];
@@ -161,9 +235,11 @@ inline void Ksword5Title() {
     style.ScrollbarSize = 0.0f;  // 完全隐藏滚动条[7,8](@ref)
     style.FrameRounding = 0.0f;         // 完全禁用圆角
     style.ItemSpacing = ImVec2(0, 0);    // 消除按钮间距
+    //style.FramePadding = ImVec2(0, 0);
     ImVec4 btnNormal = ImLerp(bgColor, accentColor, 0.6f); // 背景融合主题色
     ImVec4 btnHover = ImLerp(bgColor, accentColor, 0.8f);
     ImVec4 btnActive = ImLerp(bgColor, accentColor, 0.4f);
+
 
     ImGui::PushStyleColor(ImGuiCol_Button, btnNormal);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btnHover);
@@ -225,7 +301,10 @@ inline void Ksword5Title() {
     //ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.9f, 0.1f, 0.1f, 1.0f)); // 红色
     //ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.2f, 0.2f, 1.0f)); // 悬停加深
     //ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.8f, 0.0f, 0.0f, 1.0f)); // 按下加深
-
+    ImGui::SetCursorScreenPos(ImVec2(
+        window_pos.x + window_size.x - (button_size_x + spacing),
+        window_pos.y
+    ));
     if (ImGui::Button(C("##Exittitle"), ImVec2(button_size_x, button_size_y))) {
         Ksword_main_should_exit = 1;
     }
@@ -272,13 +351,15 @@ inline void Ksword5Title() {
     TitleHighLightStartPos.y = ImGui::GetWindowPos().y;
     ImVec2 size(150, 30);
 
-    // 定义左边和右边的颜色，这里左边透明度为0，右边透明度为1// 左边：透明的霓虹蓝（带Alpha渐变）
+    // 定义左边和右边的颜色，这里左边透明度为0，右边透明度为1
     ImU32 leftColor = ImGui::ColorConvertFloat4ToU32(ImVec4(StyleColor.w, StyleColor.x, StyleColor.y, 0.00f));
-    // 右边：不透明的亮紫色
     ImU32 rightColor = ImGui::ColorConvertFloat4ToU32(ImVec4(StyleColor.w, StyleColor.x, StyleColor.y, 0.50f));
 
     drawGradientRectangle(drawList, TitleHighLightStartPos, size, leftColor, rightColor);
     drawGradientRectangle(drawList, ImVec2(TitleHighLightStartPos.x+150,TitleHighLightStartPos.y), size, rightColor, leftColor);
     // 绘制渐变矩形
+
+
     ImGui::End();
+   
 }

@@ -63,7 +63,7 @@ void StyleColorsRedBlack(ImGuiStyle* dst/* = nullptr*/)
     style->TabRounding = 4.0f;      // Tab¿∏‘≤Ω«
 }
 
-inline void KswordGUIInit() {
+inline void KswordInitAdminMode() {
 	if (IsAdmin()) {
 		EnableDebugPrivilege(TRUE);
 	}

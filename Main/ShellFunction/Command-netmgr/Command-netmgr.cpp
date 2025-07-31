@@ -1,6 +1,6 @@
 #ifdef KSWORD_WITH_COMMAND
 #include "..\..\KswordTotalHead.h"
-//#include <WinSock2.h>
+
 using namespace std;
 void GetTcpConnectionsByPid(DWORD pid);
 void GetTcpConnectionsByPort(USHORT port);

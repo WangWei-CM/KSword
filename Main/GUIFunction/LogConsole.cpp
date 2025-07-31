@@ -3,6 +3,15 @@
 static int LastConsoleEvent;//上一个控制台事件，用于确认控制台标题的矩形颜色
 static int LogConsoleColorAttribute;//透明度，每一帧-1
 void Logger::Add(LogLevel level, const char* fmt, ...) {
+
+    // 这里应该做一下防御性编程，当部分对象持有 ImGui UI 对象的指针引用时候，
+    // 如果不正确处理 ImGui 的生命周期，上下文在其他功能模块析构前就已经被释放，
+    // 析构函数中调用日志记录等操作会导致访问空指针，导致空指针异常
+    if (ImGui::GetCurrentContext() == nullptr)
+    {
+        return;
+    }
+
     LastConsoleEvent = level;
     LogConsoleColorAttribute = 256;
     char buf[256];

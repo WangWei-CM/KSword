@@ -40,13 +40,23 @@ struct LogEntry {
 };
 
 // 日志管理类
-class Logger {
+class Logger : public ImGuiDependentModule {
 private:
     std::vector<LogEntry> logs;    // 日志存储
     std::mutex mtx;               // 线程安全锁
     bool level_visible[3] = { true, true, true }; // 等级过滤开关
+protected:
+    void onInitialize() override {
+        // 初始化日志系统
+    }
 
+    void onShutdown() override {
+        // 清理日志资源
+        std::lock_guard<std::mutex> lock(mtx);
+        logs.clear();
+    }
 public:
+    Logger() : ImGuiDependentModule("Logger") {}
     /**
      * @brief 添加日志条目
      * @param level 日志等级

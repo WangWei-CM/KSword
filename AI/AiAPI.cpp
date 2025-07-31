@@ -2,9 +2,6 @@
 #include "..\Main\KswordTotalHead.h"
 
 using namespace std;
-//#include <winsock2.h>
-#include <ws2tcpip.h>
-
 
 std::string gbk_to_utf8(const std::string& gbk_str) {
     int utf8_len = MultiByteToWideChar(CP_ACP, 0, gbk_str.c_str(), -1, nullptr, 0);
