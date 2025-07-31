@@ -2,6 +2,7 @@
 
 ImVec4 StyleColor;
 
+
 void StyleColorsRedBlack(ImGuiStyle* dst/* = nullptr*/)
 {
     StyleColor = ImVec4(0.50f, 0.00f, 0.00f, 0.50f);

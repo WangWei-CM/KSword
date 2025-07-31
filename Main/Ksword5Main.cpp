@@ -655,6 +655,10 @@ private:
                 {
                     KswordGUIProcess();
                 }
+                if(ImGui::BeginTabItem(C("模块")))
+                {
+                    KswordFile();
+				}
                 if (ImGui::BeginTabItem(C("监控")))
                 {
                     KswordMonitorMain();

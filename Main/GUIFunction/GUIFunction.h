@@ -31,6 +31,6 @@ extern ImVec4 StyleColor;
 
 #include "process/process.h"
 #include "Monitor/MonitorMain.h"
+#include "file/FileMain.h"
 
-
-#define STYLE_COLOR ImVec4(StyleColor.w, StyleColor.x, StyleColor.y, 0.00f)
+#define STYLE_COLOR ImVec4(StyleColor.w, StyleColor.x, StyleColor.y, 1.00f)
