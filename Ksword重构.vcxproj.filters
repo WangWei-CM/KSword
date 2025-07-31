@@ -84,6 +84,8 @@
     <ClCompile Include="Main\GUIFunction\Ksword5Title.cpp" />
     <ClCompile Include="Main\GUIFunction\LogConsole.cpp" />
     <ClCompile Include="Main\GUIFunction\Monitor\MonitorMain.cpp" />
+    <ClCompile Include="Main\FileExplorer\ImGuiFileDialog.cpp" />
+    <ClCompile Include="Main\GUIFunction\File\FileMain.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Main\Socket\KswordSelfSocket.h">
@@ -155,6 +157,12 @@
     <ClInclude Include="Main\GUIFunction\Process\Process.h" />
     <ClInclude Include="Main\GUIFunction\Monitor\MonitorMain.h" />
     <ClInclude Include="Main\global_module_helper.hpp" />
+    <ClInclude Include="Main\FileExplorer\dirent\dirent.h" />
+    <ClInclude Include="Main\FileExplorer\stb\stb_image.h" />
+    <ClInclude Include="Main\FileExplorer\stb\stb_image_resize2.h" />
+    <ClInclude Include="Main\FileExplorer\ImGuiFileDialog.h" />
+    <ClInclude Include="Main\FileExplorer\ImGuiFileDialogConfig.h" />
+    <ClInclude Include="Main\GUIFunction\File\FileMain.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Environment">

@@ -236,7 +236,34 @@ private:
                     }
                     description = type == "Win32_ProcessStartTrace" ? "Process start traced" : "Process stop traced";
                 }
-
+                else if (type == "MSFT_NetConnectionCreate") {
+                    // 先判断类是否存在（通过尝试获取一个关键属性验证）
+                    HRESULT propRes = apObjArray[i]->Get(_bstr_t(L"RemoteAddress"), 0, &vtProp, 0, 0);
+                    if (FAILED(propRes)) {
+                        kLog.Add(Warn, C("MSFT_NetConnectionCreate 类或属性不存在，跳过解析（错误码: " + std::to_string(propRes) + "）"));
+                        VariantClear(&vtProp);
+                        // 仅记录事件类型，不添加详细信息（避免空数据）
+                        source = "Unsupported";
+                        description = "Network event class not supported on this system";
+                    }
+                    else {
+                        // 正常解析属性
+                        if (vtProp.vt == VT_BSTR) {
+                            source = _com_util::ConvertBSTRToString(vtProp.bstrVal);
+                        }
+                        else {
+                            source = "Unknown";
+                        }
+                        VariantClear(&vtProp);
+                        description = "Network connection created";
+                    }
+                }
+                // 5. 其他未处理事件类型
+                else {
+                    kLog.Add(Info, C("未处理的事件类型: " + type));
+                    source = "Unprocessed";
+                    description = "Event type not handled";
+                }
                 // 4. 生成时间戳
                 auto now = std::chrono::system_clock::now();
                 std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
@@ -536,6 +563,36 @@ private:
         std::string description = "Network event captured";
 
         monitor->addEvent(EventRecord(ss.str(), type, source, description));
+    }
+    void generateUniqueSessionName() {
+        // 基础名称
+        const WCHAR baseName[] = L"KswordETWMonitor_";
+
+        // 获取当前系统时间
+        auto now = std::chrono::system_clock::now();
+        std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+        std::tm* localTime = std::localtime(&nowTime);
+
+        // 提取日期（年-月-日）和秒数
+        WCHAR timeSuffix[64] = { 0 };
+        swprintf_s(
+            timeSuffix,
+            L"%04d%02d%02d_%02d",  // 格式：年月日_秒（如20240730_15）
+            localTime->tm_year + 1900,
+            localTime->tm_mon + 1,
+            localTime->tm_mday,
+            localTime->tm_sec  // 秒数确保同一分钟内的唯一性
+        );
+
+        // 拼接完整会话名（基础名称+时间后缀）
+        swprintf_s(
+            etwSessionName,
+            L"%s%s",
+            baseName,
+            timeSuffix
+        );
+
+        //kLog.Add(Info, C(std::wstring(L"生成唯一ETW会话名: " )+ std::wstring(etwSessionName)));
     }
 
     // 初始化 ETW 监控会话

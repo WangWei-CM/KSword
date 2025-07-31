@@ -1,7 +1,7 @@
 ﻿#include "../KswordTotalHead.h"
 
 static ImVec2 TitleHighLightStartPos;
-
+static bool isAdmin = IsAdmin();
 //imgui绘制矩形
 static char TitleCMDInput[512] = {};
 
@@ -64,6 +64,22 @@ inline void ToggleFullscreen()
         should_switch_to_normal = 1;
     }
 }
+inline static void SetStyle(bool condition) {
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4 whiteColor = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+    if (condition) {
+        // 满足条件：主题色为底色，白色为字体色
+        style.Colors[ImGuiCol_Button] = STYLE_COLOR;
+        style.Colors[ImGuiCol_Text] = whiteColor;
+        style.Colors[ImGuiCol_TextDisabled] = whiteColor;
+    }
+    else {
+        // 不满足条件：白色为底色，主题色为字体色
+        style.Colors[ImGuiCol_Button] = whiteColor;
+        style.Colors[ImGuiCol_Text] = STYLE_COLOR;style.Colors[ImGuiCol_TextDisabled] = StyleColor;
+    }
+}
+
 ImVec2 KswordTitleHighLightSize(0, 0);
 inline void Ksword5Title() {
         if (should_switch_to_full == 1) {
@@ -206,7 +222,7 @@ inline void Ksword5Title() {
     
     // 蓝色边框样式（边框颜色+显示边框）
     ImGui::PushStyleColor(ImGuiCol_Border, STYLE_COLOR); // 蓝色边框
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 5.0f); // 稍宽的边框
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f); // 稍宽的边框
     if (ImGui::InputText("##CmdInput", TitleCMDInput, IM_ARRAYSIZE(TitleCMDInput), ImGuiInputTextFlags_EnterReturnsTrue, nullptr, nullptr)) {
         RunCmdAsyn(std::string(TitleCMDInput)); // 执行命令
     }
@@ -359,6 +375,78 @@ inline void Ksword5Title() {
     drawGradientRectangle(drawList, ImVec2(TitleHighLightStartPos.x+150,TitleHighLightStartPos.y), size, rightColor, leftColor);
     // 绘制渐变矩形
 
+
+    ImGui::SetCursorPos(ImVec2(0, 30));
+    if (ImGui::Button(C("文件"))) {
+        ImGui::OpenPopup("FileMenu");
+    }
+
+    // 下拉菜单内容
+    if (ImGui::BeginPopup("FileMenu")) {
+        if (ImGui::MenuItem(C("退出"))) {
+            Ksword_main_should_exit = 1;
+        }
+
+        ImGui::EndPopup();
+    }
+
+    //计算按钮组位置
+    ImVec2 buttonSize(60.0f, 24.0f);
+    //从左往右依次为 R3 R0 SYSTEM ADMIN DEBUG
+
+    ImGui::SetCursorPos(ImVec2(/*windowPos.x +*/ windowSize.x - buttonSize.x * 6 + 2 * 4, 33));
+
+    //备份原始样式
+    ImVec4 originalButtonColor = style.Colors[ImGuiCol_Button];
+    ImVec4 originalButtonHovered = style.Colors[ImGuiCol_ButtonHovered];
+    ImVec4 originalButtonActive = style.Colors[ImGuiCol_ButtonActive];
+    ImVec4 originalTextColor = style.Colors[ImGuiCol_Text];
+
+    SetStyle(0);
+    ImGui::Button(C("R0"), buttonSize); ImGui::SameLine();
+
+    SetStyle(1);
+    ImGui::Button(C("R3"), buttonSize); ImGui::SameLine();
+
+    SetStyle(AuthName == "SYSTEM");
+    if (ImGui::Button(C("SYSTEM"), buttonSize)) {
+        if (!IsAdmin()) {
+            if (RequestAdmin(StringToWString(GetSelfPath())) == KSWORD_ERROR_EXIT) {
+                kLog.Add(Err, C("请求管理员权限失败"));
+            }
+            else {
+                Ksword_main_should_exit = 1;
+            }
+        }
+        GetProgramPath();
+        if (GetSystem("") == KSWORD_SUCCESS_EXIT) {
+            Ksword_main_should_exit = 1;
+        }
+    } ImGui::SameLine();
+
+    SetStyle(isAdmin);
+    if (ImGui::Button(C("ADMIN"), buttonSize)) {
+        if (!IsAdmin()) {
+            if (RequestAdmin(StringToWString(GetSelfPath())) == KSWORD_ERROR_EXIT) {
+				kLog.Add(Err, C("请求管理员权限失败"));
+            }
+            else {
+                Ksword_main_should_exit = 1;
+            }
+        }
+
+    }
+    ; ImGui::SameLine();
+
+    SetStyle(HasDebugPrivilege());
+    ImGui::Button(C("DEBUG"), buttonSize); ImGui::SameLine();
+
+
+
+    style.Colors[ImGuiCol_Button] = originalButtonColor;
+    style.Colors[ImGuiCol_ButtonHovered] = originalButtonHovered;
+    style.Colors[ImGuiCol_ButtonActive] = originalButtonActive;
+    style.Colors[ImGuiCol_Text] = originalTextColor;
 
     ImGui::End();
    
