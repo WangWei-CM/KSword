@@ -6,7 +6,7 @@
 extern inline void KswordLogo5			();
 extern inline void RenderBoolRow		(const char* name, bool value);
 extern inline void KswordGUIShowStatus	();
-extern inline void KswordGUIInit		();
+extern inline void KswordInitAdminMode  ();
 extern		  void StyleColorsRedBlack  (ImGuiStyle* dst = nullptr);
 
 extern inline void KswordGUIProcess		();
@@ -31,3 +31,6 @@ extern ImVec4 StyleColor;
 
 #include "process/process.h"
 #include "Monitor/MonitorMain.h"
+
+
+#define STYLE_COLOR ImVec4(StyleColor.w, StyleColor.x, StyleColor.y, 0.00f)

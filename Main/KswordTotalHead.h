@@ -27,7 +27,6 @@
 #include "../resource.h"
 #endif
 #include "GUIFunction/GUIFunction.h"
-#include "Ksword5core.h"
 
 #include "../imgui/imconfig.h"
 #include "../imgui/imgui.h"
@@ -37,6 +36,9 @@
 #include "../imgui/imstb_rectpack.h"
 #include "../imgui/imstb_textedit.h"
 #include "../imgui/imstb_truetype.h"
+
+#include "global_module_helper.hpp"
+#include "Ksword5core.h"
 
 #include <d3d9.h>
 #include "Ksword5core.h"

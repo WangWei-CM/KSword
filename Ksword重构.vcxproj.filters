@@ -154,6 +154,7 @@
     <ClInclude Include="resource.h" />
     <ClInclude Include="Main\GUIFunction\Process\Process.h" />
     <ClInclude Include="Main\GUIFunction\Monitor\MonitorMain.h" />
+    <ClInclude Include="Main\global_module_helper.hpp" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Environment">
@@ -218,10 +219,10 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <None Include="packages.config" />
     <None Include="imgui.ini" />
     <None Include="KswordGUI.ini" />
     <None Include="d3dx9_43.dll" />
+    <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="icon1.ico" />

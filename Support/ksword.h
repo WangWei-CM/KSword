@@ -12,7 +12,10 @@
 #pragma comment (linker, "/OPT:ICF")
 
 
-#include <winsock2.h>
+
+//#include <winsock2.h>
+//#include <winsock.h>
+
 #pragma once
 #ifndef KSWORD_HEAD_FILE
 #define KSWORD_HEAD_FILE
@@ -192,6 +195,18 @@ const unsigned int ksword_md5_s[] = { 7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,2
 
 //#undef WIN32_LEAN_AND_MEANp
 //他奶奶的谁要把这个放到windows.h之后引用就是找shit
+
+//#if __has_include("WinSock2.h")
+//#else
+//#undef <winsock2.h>
+//#endif
+//
+//#if __has_include("ws2tcpip.h")
+//#include <ws2tcpip.h>
+//#endif
+
+
+
 #include <winternl.h>
 #include <windows.h>
 
