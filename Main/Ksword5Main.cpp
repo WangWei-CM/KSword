@@ -403,6 +403,7 @@ private:
         ExtractGUIINIResourceToFile();
         ImGuiIO& io = ImGui::GetIO(); (void)io;
         io.IniFilename = "KswordGUI.ini";
+
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;         // Enable Docking
@@ -667,9 +668,11 @@ private:
                 if (ImGui::BeginTabItem("Test"))
                 {
                     ImGui::Text(C("增加日志信息"));
-                    if (ImGui::Button("Info"))kLog.Add(Info, C("测试消息类型Info")); ImGui::SameLine();
-                    if (ImGui::Button("Warn"))kLog.Add(Warn, C("测试消息类型Warn")); ImGui::SameLine();
-                    if (ImGui::Button("Err"))kLog.Add(Err, C("测试消息类型Err")); ImGui::SameLine();
+                    if (ImGui::Button("Debug"))kLog.Add(Debug, C("测试消息类型Debug"), C("测试")); ImGui::SameLine();
+                    if (ImGui::Button("Info"))kLog.Add(Info, C("测试消息类型Info"), C("测试")); ImGui::SameLine();
+                    if (ImGui::Button("Warn"))kLog.Add(Warn, C("测试消息类型Warn"),C("测试")); ImGui::SameLine();
+                    if (ImGui::Button("Err"))kLog.Add(Err, C("测试消息类型Err"), C("测试")); ImGui::SameLine();
+                    if (ImGui::Button("Fatal"))kLog.Add(Fatal, C("测试消息类型Fatal"), C("测试")); ImGui::SameLine();
 
                     ImGui::EndTabItem();
                 }

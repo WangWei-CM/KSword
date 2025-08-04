@@ -1,5 +1,6 @@
 ﻿#include "../../KswordTotalHead.h"
 #include <shlobj.h> 
+#define CURRENT_MODULE "进程管理"
 //struct ProcessInfo {
 //    std::string name;
 //    int    pid;
@@ -280,19 +281,19 @@ void KswordGUIProcess() {
                             if (ImGui::MenuItem("taskkill /f")) {
                                 // 优雅关闭逻辑
                                 proc->Terminate(kTaskkillF);
-								kLog.Add(Info, C(("使用taskkill /f终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()));
+								kLog.Add(Info, C(("使用taskkill /f终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
                             }
                             if (ImGui::MenuItem("Terminate Process")) {
 
-								kLog.Add(Info, C(("使用Terminate终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()));
+								kLog.Add(Info, C(("使用Terminate终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
                            		proc->Terminate(kTerminate);
                             }
                             if (ImGui::MenuItem("Terminate Thread")) {
-								kLog.Add(Info, C(("使用TerminateThread终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()));
+								kLog.Add(Info, C(("使用TerminateThread终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
 								proc->Terminate(kTerminateThread);
                             }
                             if (ImGui::MenuItem("NT Terminate")) {
-								kLog.Add(Info, C(("使用NT Terminate终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()));
+								kLog.Add(Info, C(("使用NT Terminate终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
 								proc->Terminate(kNTTerminate);
                             }
                             ImGui::EndMenu();
@@ -338,7 +339,7 @@ void KswordGUIProcess() {
         ImGui::SameLine(ImGui::GetWindowWidth() - 120);
         if (ImGui::SmallButton("Refresh")) {
             dummy_processes = GetProcessList();
-            kLog.Add(Info, C("刷新进程列表"));
+            kLog.Add(Info, C("刷新进程列表"), C(CURRENT_MODULE));
             // 刷新逻辑
         }
 
@@ -582,7 +583,7 @@ void KswordGUIProcess() {
         if (flagStartfForceOffFeedback) g_startupInfo.dwFlags |= STARTF_FORCEOFFFEEDBACK;
         if (flagStartfUseStdHandles) g_startupInfo.dwFlags |= STARTF_USESTDHANDLES;
 
-        kLog.Add(Info, C("STARTUPINFOW 设置已应用"));
+        kLog.Add(Info, C("STARTUPINFOW 设置已应用"), C(CURRENT_MODULE));
     }
     // 6. 调用CreateProcess
     ImGui::Separator();
@@ -616,13 +617,13 @@ void KswordGUIProcess() {
 
         if (bSuccess)
         {
-            kLog.Add(Info, C(("CreateProcess 调用成功！PID:" + std::to_string(pi.dwProcessId)).c_str()));
+            kLog.Add(Info, C(("CreateProcess 调用成功！PID:" + std::to_string(pi.dwProcessId)).c_str()), C(CURRENT_MODULE));
             g_procInfo = pi;
             CloseHandle(pi.hThread); // 及时释放不需要的句柄
         }
         else
         {
-            kLog.Add(Err, C(("CreateProcess 调用失败！错误码:" + std::to_string(GetLastError())).c_str()));
+            kLog.Add(Err, C(("CreateProcess 调用失败！错误码:" + std::to_string(GetLastError())).c_str()), C(CURRENT_MODULE));
         }
         if (flagCreateSuspended == true) {
             std::thread(KCreateProcessWithSuspendFollower, pi.dwProcessId).detach();
@@ -634,3 +635,4 @@ void KswordGUIProcess() {
 
 }
 
+#undef CURRENT_MODULE

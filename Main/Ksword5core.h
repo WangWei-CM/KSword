@@ -26,16 +26,17 @@ namespace ImGuiColors
 #define KSWORD_BLUE_STYLE_B 234
 
 
-enum LogLevel { Info, Warn, Err };
+enum LogLevel { Debug,Info, Warn, Err,Fatal };
 
 // 日志条目结构
 struct LogEntry {
     LogLevel level;
     std::string message;
+	std::string module;
     float timestamp;
 
-    LogEntry(LogLevel lvl, const std::string& msg, float ts)
-        : level(lvl), message(msg), timestamp(ts) {
+    LogEntry(LogLevel lvl, const std::string& msg, const std::string& Module, float ts)
+        : level(lvl), message(msg), module(Module), timestamp(ts) {
     }
 };
 
@@ -44,7 +45,7 @@ class Logger : public ImGuiDependentModule {
 private:
     std::vector<LogEntry> logs;    // 日志存储
     std::mutex mtx;               // 线程安全锁
-    bool level_visible[3] = { true, true, true }; // 等级过滤开关
+    bool level_visible[5] = { true,true ,true, true, true }; // 等级过滤开关
 protected:
     void onInitialize() override {
         // 初始化日志系统
@@ -63,7 +64,7 @@ public:
      * @param fmt 格式化字符串（类似printf）
      * @param ... 可变参数
      */
-    void Add(LogLevel level, const char* fmt, ...);
+    void Add(LogLevel level, const char* fmt, const char* Module = "Unknown");
 
     /**
      * @brief 绘制日志窗口
