@@ -155,7 +155,7 @@ void KMesInfo(const char* text) {
     if(KSWORD_MES_LEVEL<=0){
     cprint("[ * ]", 9, 0);
     std::cout << text << std::endl;
-    kLog.Add(Info, C(text));
+    kLog.Add(Info, C(text), C("Ksword框架"));
 #ifdef KSWORD_WITH_COMMAND
     if(!isGUI)
     KswordSend1("报告了一个信息：" + std::string(text));
@@ -174,7 +174,7 @@ void KMesWarn(const char* text) {
     if(KSWORD_MES_LEVEL<=0){
     cprint("[ ! ]", 6, 0);
     std::cout << text << std::endl;
-    kLog.Add(Warn, C(text));
+    kLog.Add(Warn, C(text), C("Ksword框架"));
 #ifdef KSWORD_WITH_COMMAND
     if (!isGUI)
     KswordSend1("报告了一个警告：" + std::string(text));
@@ -190,7 +190,7 @@ void KMesErr(const char* text) {
     if(KSWORD_MES_LEVEL<=0){
     cprint("[ × ]", 4, 0);
     std::cout << text << std::endl;
-    kLog.Add(Err, C(text));
+    kLog.Add(Err, C(text), C("Ksword框架"));
 #ifdef KSWORD_WITH_COMMAND
     if (!isGUI)
 

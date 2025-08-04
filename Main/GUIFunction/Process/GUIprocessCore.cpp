@@ -222,7 +222,7 @@ void KillProcessByTaskkill(int pid) {
 	);
 	std::string tmp = "taskkill /pid " + std::to_string(pid);
 	std::string tmp1 = GetCmdResultWithUTF8(tmp);
-	kLog.Add(Info, C(tmp1.c_str()));
+	kLog.Add(Info, C(tmp1.c_str()),C("进程管理"));
 	return;
 }
 

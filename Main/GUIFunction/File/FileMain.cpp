@@ -6,7 +6,8 @@
 #include <cstring>
 #include <windows.h>
 #include <commdlg.h>
-
+const int vecSize = 10;
+int Vector[vecSize] = {};
 // ×Ö·û´®×ª»»: std::string µ½ LPCWSTR
 std::wstring s2ws(const std::string& s) {
     int len = MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, NULL, 0);
@@ -14,7 +15,6 @@ std::wstring s2ws(const std::string& s) {
     MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, &wstr[0], len);
     return wstr;
 }
-
 // ×Ö·û´®×ª»»: LPCWSTR µ½ std::string
 std::string ws2s(const std::wstring& ws) {
     int len = WideCharToMultiByte(CP_ACP, 0, ws.c_str(), -1, NULL, 0, NULL, NULL);
