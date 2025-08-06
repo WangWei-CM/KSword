@@ -7,7 +7,6 @@
 #define IDI_ICON3                       103
 #define IDI_ICON4                       104
 #define IDR_INI1                        105
-#define IDR_DLL1                        106
 
 // Next default values for new objects
 // 

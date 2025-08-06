@@ -213,7 +213,7 @@
     <ClCompile Include="Main\GUIFunction\KswordText.cpp" />
     <ClCompile Include="Main\GUIFunction\LogConsole.cpp" />
     <ClCompile Include="Main\GUIFunction\Process\GUIprocessCore.cpp" />
-    <ClCompile Include="Main\GUIFunction\Process\KswordToolBar.cpp" />
+    <ClCompile Include="Main\KswordToolBar.cpp" />
     <ClCompile Include="Main\Ksword5Main.cpp" />
     <ClCompile Include="Main\ShellFunction\Command-avkill\Command-avkill.cpp" />
     <ClCompile Include="Main\ShellFunction\Command-drivermgr\Command-drivermgr.cpp" />
@@ -284,7 +284,6 @@
     <ClInclude Include="Main\Security\security.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="d3dx9_43.dll" />
     <None Include="imgui.ini" />
     <None Include="KswordGUI.ini" />
     <None Include="packages.config" />
