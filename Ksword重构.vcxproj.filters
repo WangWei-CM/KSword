@@ -79,7 +79,7 @@
     <ClCompile Include="Main\GUIFunction\KswordPointerWindow.cpp" />
     <ClCompile Include="Main\GUIFunction\Process\GUIprocessCore.cpp" />
     <ClCompile Include="Main\TextEditor\TextEditor.cpp" />
-    <ClCompile Include="Main\GUIFunction\Process\KswordToolBar.cpp" />
+    <ClCompile Include="Main\KswordToolBar.cpp" />
     <ClCompile Include="Main\GUIFunction\KswordText.cpp" />
     <ClCompile Include="Main\GUIFunction\Ksword5Title.cpp" />
     <ClCompile Include="Main\GUIFunction\LogConsole.cpp" />
@@ -229,7 +229,6 @@
   <ItemGroup>
     <None Include="imgui.ini" />
     <None Include="KswordGUI.ini" />
-    <None Include="d3dx9_43.dll" />
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>

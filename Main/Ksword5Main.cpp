@@ -3,7 +3,7 @@
 #include <gdiplus.h> // 需链接gdiplus.lib
 #pragma comment(lib, "gdiplus.lib")
 #include "KswordTotalHead.h"
-
+extern int KswordRegToolBarWindow();
 #include "TextEditor/TextEditor.h"
 //
 bool isGUI;
@@ -159,7 +159,7 @@ private:
 
     // ImGui 之前的初始化和 SplashScreen Window
     int PreInitBeforeImGui()
-    {
+    {/*
         SetDllDirectoryW(L".");
         HRSRC D3DX9DLLResource = FindResource(NULL, MAKEINTRESOURCE(IDR_DLL1), _T("DLL"));
         if (D3DX9DLLResource == NULL)
@@ -210,8 +210,8 @@ private:
             return 0;
         }
 
-        KswordD3DX9dllRelease.close();
-        m_hD3DX9Module = LoadLibrary(_T("d3dx9_43.dll"));
+        KswordD3DX9dllRelease.close();*/
+        //m_hD3DX9Module = LoadLibrary(_T("d3dx9_43.dll"));
         HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
         if (hOut == INVALID_HANDLE_VALUE) {
             std::cerr << "获取标准输出句柄失败!" << std::endl;
@@ -375,6 +375,7 @@ private:
     }
 
     int initImGui() {
+        std::thread( KswordRegToolBarWindow).detach();
         ::RegisterClassExW(&wc);
         m_hMainWnd = ::CreateWindowW(
             wc.lpszClassName,
@@ -730,7 +731,7 @@ private:
         ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
         Gdiplus::GdiplusShutdown(s_gdiplusToken);
         DeleteReleasedGUIINIFile();
-        FreeLibrary(m_hD3DX9Module);
+        //FreeLibrary(m_hD3DX9Module);
         DeleteReleasedD3DX9DLLFile();
     }
 
