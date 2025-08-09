@@ -186,7 +186,7 @@ static void UpdateFilterAndSort(std::vector<kProcess*>& filtered,
 
 static void KCreateProcessWithSuspendFollower(DWORD pid) {
     int Kpid = kItem.AddProcess(C(std::string("PID为" + std::to_string(pid) + "的进程启动")),
-        std::string(C("取消挂起PID为" + std::to_string(pid) + "的进程启动")), NULL, 99.0f);
+        std::string(C("取消挂起PID为" + std::to_string(pid) + "的进程启动")), NULL, 0.98f);
     kItem.UI(Kpid,C( "点击按钮以继续运行该进程"), 1);
     UnSuspendProcess(pid);
     kItem.SetProcess(Kpid,"",1.00f);

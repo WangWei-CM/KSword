@@ -4,7 +4,7 @@ static ImVec2 TitleHighLightStartPos;
 static bool isAdmin = IsAdmin();
 //imgui绘制矩形
 static char TitleCMDInput[512] = {};
-
+extern bool SavedGuiIni;// 是否保存过ini文件
 void drawGradientRectangle(ImDrawList* drawList, ImVec2 pos, ImVec2 size, ImU32 leftColor, ImU32 rightColor) {
     int steps = 20; // 渐变步数，步数越多渐变越平滑
     float stepWidth = size.x / steps;
@@ -386,7 +386,10 @@ inline void Ksword5Title() {
         if (ImGui::MenuItem(C("退出"))) {
             Ksword_main_should_exit = 1;
         }
-
+        if (ImGui::MenuItem(C("保留配置文件并退出"))) {
+			SavedGuiIni = true;
+            Ksword_main_should_exit = 1;
+        }
         ImGui::EndPopup();
     }
 

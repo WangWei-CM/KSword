@@ -86,6 +86,8 @@
     <ClCompile Include="Main\GUIFunction\Monitor\MonitorMain.cpp" />
     <ClCompile Include="Main\FileExplorer\ImGuiFileDialog.cpp" />
     <ClCompile Include="Main\GUIFunction\File\FileMain.cpp" />
+    <ClCompile Include="Main\STKmain.cpp" />
+    <ClCompile Include="Main\SubProc\SecureDesktop.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Main\Socket\KswordSelfSocket.h">
@@ -163,6 +165,9 @@
     <ClInclude Include="Main\FileExplorer\ImGuiFileDialog.h" />
     <ClInclude Include="Main\FileExplorer\ImGuiFileDialogConfig.h" />
     <ClInclude Include="Main\GUIFunction\File\FileMain.h" />
+    <ClInclude Include="C:\Users\33251\Downloads\Driver.h" />
+    <ClInclude Include="Main\Driver.h" />
+    <ClInclude Include="Main\SubProc\SubProc.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Environment">

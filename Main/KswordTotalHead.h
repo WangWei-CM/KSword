@@ -54,3 +54,5 @@ extern bool KswordShowNotpadWindow;
 extern bool KswordShowToolBar;
 
 extern bool Ksword_main_should_exit;
+
+#include "SubProc/SubProc.h"

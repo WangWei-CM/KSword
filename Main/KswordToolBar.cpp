@@ -4,6 +4,7 @@ static bool Ksword_tool_bar_already_top = 0;
 static bool first_done = 1;
 static TCHAR szAppName[] = _T("FlatWindowApp");
 static HWND         hwnd;
+       bool isGuiSuspended = false;
 inline void KswordToolBar() {
     // 设置窗口位置和大小
     //const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -224,7 +225,7 @@ LRESULT CALLBACK KswordToolBarWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             120, 60, 60, 35,
             hwnd, (HMENU)ID_BTN_CMD, ((LPCREATESTRUCT)lParam)->hInstance, NULL);
-        hBtnEmergency = CreateWindow(_T("BUTTON"), _T("应急按钮"),
+        hBtnEmergency = CreateWindow(_T("BUTTON"), _T("应急按钮"),      
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             190, 60, 100, 35,
             hwnd, (HMENU)ID_BTN_EMERGENCY, ((LPCREATESTRUCT)lParam)->hInstance, NULL);
@@ -241,23 +242,48 @@ LRESULT CALLBACK KswordToolBarWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         switch (LOWORD(wParam))
         {
         case ID_BTN_EXIT:
-            // 退出逻辑，这里简单演示，可替换为实际退出程序等操作
-            MessageBox(hwnd, _T("你点击了退出按钮"), _T("提示"), MB_OK);
+            Ksword_main_should_exit = 1;
             break;
         case ID_BTN_RESTART:
-            MessageBox(hwnd, _T("你点击了重新启动按钮"), _T("提示"), MB_OK);
+            WinExec(GetSelfPath().c_str(),SW_SHOW);
+            Ksword_main_should_exit = 1;
             break;
         case ID_BTN_SUSPEND:
-            MessageBox(hwnd, _T("你点击了挂起界面按钮"), _T("提示"), MB_OK);
+            isGuiSuspended = !isGuiSuspended;
+            SetWindowText(hBtnSuspend, isGuiSuspended ? _T("恢复界面") : _T("挂起界面"));
             break;
         case ID_BTN_CMD:
-            MessageBox(hwnd, _T("你点击了CMD按钮"), _T("提示"), MB_OK);
+            RunCmdAsyn("cmd.exe");
             break;
         case ID_BTN_EMERGENCY:
             MessageBox(hwnd, _T("你点击了应急按钮"), _T("提示"), MB_OK);
             break;
         case ID_BTN_SAFE_DESK:
-            MessageBox(hwnd, _T("你点击了安全桌面按钮"), _T("提示"), MB_OK);
+        {
+            STARTUPINFO si = { sizeof(si) };
+            PROCESS_INFORMATION pi;
+            wchar_t tmp[] = L"SecureJmp";
+            if (!CreateProcess(
+                CharToWChar(GetSelfPath().c_str()),
+                //const_cast<LPWSTR>(exePath.c_str()),
+                tmp,
+                nullptr,
+                nullptr,
+                FALSE,
+                CREATE_NEW_CONSOLE,
+                nullptr,
+                nullptr,
+                &si,
+                &pi
+            )) {
+                std::cerr << "CreateProcess failed. Error: " << GetLastError() << std::endl;
+            }
+            else {
+                WaitForSingleObject(pi.hProcess, 10000);
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+            }
+        }
             break;
         case ID_BTN_VERSION:
             MessageBox(hwnd, _T("你点击了Ksword5.0开发者版本按钮"), _T("提示"), MB_OK);
@@ -274,7 +300,6 @@ LRESULT CALLBACK KswordToolBarWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         TCHAR text[256];
         GetWindowText(pDIS->hwndItem, text, sizeof(text) / sizeof(TCHAR));
         DrawFlatButton(pDIS->hDC, pDIS->rcItem, text, (pDIS->itemState & ODS_PRESSED) != 0,hFont);
-            // 添加缺失的 ODS_PRESSED 宏定义（如果未包含 <windows.h> 或 <commctrl.h> 时）
 
     }
     return 0;

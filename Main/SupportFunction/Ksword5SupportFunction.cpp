@@ -92,6 +92,24 @@ bool DeleteReleasedIniFileW() {
 
 bool ExtractGUIINIResourceToFile()
 {
+    // 获取当前程序执行目录
+    char szExePath[MAX_PATH];
+    if (GetModuleFileNameA(NULL, szExePath, MAX_PATH) == 0)
+        return false;
+
+    // 提取目录路径
+    char* pLastSlash = strrchr(szExePath, '\\');
+    if (pLastSlash == NULL)
+        return false;
+    *pLastSlash = '\0';
+
+    // 构建目标文件路径
+    std::string strOutputPath = std::string(szExePath) + "\\KswordGUI.ini";
+
+    // 检查文件是否已存在，存在则直接返回true
+    if (GetFileAttributesA(strOutputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return true;
+
     // 查找资源
     HRSRC hResource = FindResource(NULL, MAKEINTRESOURCE(IDR_INI1), L"INI");
     if (hResource == NULL)
@@ -112,20 +130,6 @@ bool ExtractGUIINIResourceToFile()
     if (dwResourceSize == 0)
         return false;
 
-    // 获取当前程序执行目录
-    char szExePath[MAX_PATH];
-    if (GetModuleFileNameA(NULL, szExePath, MAX_PATH) == 0)
-        return false;
-
-    // 提取目录路径
-    char* pLastSlash = strrchr(szExePath, '\\');
-    if (pLastSlash == NULL)
-        return false;
-    *pLastSlash = '\0';
-
-    // 构建目标文件路径
-    std::string strOutputPath = std::string(szExePath) + "\\KswordGUI.ini";
-
     // 写入文件
     std::ofstream outFile(strOutputPath, std::ios::binary);
     if (!outFile)
@@ -133,8 +137,6 @@ bool ExtractGUIINIResourceToFile()
 
     outFile.write(static_cast<const char*>(pResourceData), dwResourceSize);
     outFile.close();
-
-    // 不需要调用FreeResource，系统会自动处理
 
     return true;
 }

@@ -7,6 +7,7 @@ extern int KswordRegToolBarWindow();
 #include "TextEditor/TextEditor.h"
 //
 bool isGUI;
+extern bool isGuiSuspended;
 ImFont* LOGOfont;
 TextEditor m_editor;
 WorkProgressManager kItem;
@@ -39,6 +40,8 @@ static D3DPRESENT_PARAMETERS    g_d3dpp = {};
 HWND MainWindow;
 
 bool Ksword_main_should_exit = false;
+
+bool SavedGuiIni = false;// 是否保存过ini文件
 
 #ifdef KSWORD_WITH_COMMAND
 extern int KSCMDmain(int, char* []);
@@ -212,6 +215,18 @@ private:
 
         KswordD3DX9dllRelease.close();*/
         //m_hD3DX9Module = LoadLibrary(_T("d3dx9_43.dll"));
+        {//检查用户是否保存过配置文件
+            char szExePath[MAX_PATH];
+            if (GetModuleFileNameA(NULL, szExePath, MAX_PATH) == 0)
+                return false;
+            char* pLastSlash = strrchr(szExePath, '\\');
+            if (pLastSlash == NULL)
+                return false;
+            *pLastSlash = '\0';
+            std::string strOutputPath = std::string(szExePath) + "\\KswordGUI.ini";
+            if (GetFileAttributesA(strOutputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+                SavedGuiIni = true;
+        }
         HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
         if (hOut == INVALID_HANDLE_VALUE) {
             std::cerr << "获取标准输出句柄失败!" << std::endl;
@@ -375,13 +390,14 @@ private:
     }
 
     int initImGui() {
+
         std::thread( KswordRegToolBarWindow).detach();
         ::RegisterClassExW(&wc);
         m_hMainWnd = ::CreateWindowW(
             wc.lpszClassName,
             L"Ksword5Internal",
             WS_OVERLAPPEDWINDOW,
-            100, 100,
+            ScreenX, ScreenY,
             100, 100, nullptr, nullptr, wc.hInstance, nullptr);
         MainWindow = m_hMainWnd;
         // Initialize Direct3D
@@ -391,9 +407,10 @@ private:
             ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
             return 1;
         }
-
+        
         // Show the window
-        //::ShowWindow(hwnd, SW_HIDE);
+        SetLayeredWindowAttributes(m_hMainWnd, 0, 1, LWA_ALPHA);
+        ::ShowWindow(m_hMainWnd, SW_SHOW);
         ::UpdateWindow(m_hMainWnd);
 
         m_mainWindowCreated = true;
@@ -461,13 +478,16 @@ private:
         m_editor.SetText("// Welcome to Text Editor\n#include <iostream>\n\nint main() {\n  std::cout << \"Hello World!\\n\";\n  return 0;\n}");
 
         LoadIconTexture(wc.hInstance, g_pd3dDevice);
-        return 0;
+        //FreeConsole();
+        //AllocConsole();
+         return 0;
     }
 
     void mainLoop()
     {
         while (!m_mainWindowClosed)
         {
+			while (isGuiSuspended)Sleep(100);
             // Poll and handle messages (inputs, window resize, etc.)
             // See the WndProc() function below for our to dispatch events to the Win32 backend.
             MSG msg;
@@ -730,7 +750,8 @@ private:
         ::DestroyWindow(m_hMainWnd);
         ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
         Gdiplus::GdiplusShutdown(s_gdiplusToken);
-        DeleteReleasedGUIINIFile();
+        if(!SavedGuiIni)
+			DeleteReleasedGUIINIFile();//如果用户没有保存过配置文件那么删除释放的配置文件
         //FreeLibrary(m_hD3DX9Module);
         DeleteReleasedD3DX9DLLFile();
     }
@@ -837,11 +858,14 @@ int main(int argc, char* argv[]) {
         else
             //否则启动图形界面版本
 #endif
-        {
+        if (strcmp(argv[0], "SecureJmp") == 0)return KswordMainSecureDesktop();//跳转到安全桌面的中转进程
+        else if (strcmp(argv[0], "SecureDesktopMain") == 0)KswordShowSecureFlag();
+
+
             Application app;
             app.run();
             return 0;
-        }
+        
 #ifdef KSWORD_WITH_COMMAND
 
     }
