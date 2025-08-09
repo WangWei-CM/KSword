@@ -78,8 +78,8 @@
     <TargetName>KswordRelease</TargetName>
     <GenerateManifest>false</GenerateManifest>
     <EmbedManifest>false</EmbedManifest>
-    <IncludePath>E:\软件安装处\DX9SDK\Include;$(IncludePath)</IncludePath>
-    <LibraryPath>E:\软件安装处\DX9SDK\Lib\x64;$(LibraryPath)</LibraryPath>
+    <IncludePath>E:\软件安装处\DX9SDK\Include;G:\vcpkg-master\installed\x64-windows\include;$(IncludePath)</IncludePath>
+    <LibraryPath>G:\vcpkg-master\installed\x64-windows\lib;E:\软件安装处\DX9SDK\Lib\x64;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <TargetName>Ksword_x32</TargetName>
@@ -96,8 +96,8 @@
     <ExternalIncludePath>$(ExternalIncludePath)</ExternalIncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>E:\软件安装处\DX9SDK\Include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
-    <LibraryPath>E:\软件安装处\DX9SDK\Lib\x64;$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64)</LibraryPath>
+    <IncludePath>E:\软件安装处\DX9SDK\Include;G:\vcpkg-master\installed\x64-windows\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
+    <LibraryPath>G:\vcpkg-master\installed\x64-windows\lib;E:\软件安装处\DX9SDK\Lib\x64;$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64)</LibraryPath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -148,7 +148,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>C:\Program Files %28x86%29\Microsoft DirectX SDK %28June 2010%29\Lib\x64;C:\Users\33251\vcpkg\packages\curl_x64-windows\lib\</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>G:\vcpkg-master\installed\x64-windows\lib;C:\Program Files %28x86%29\Microsoft DirectX SDK %28June 2010%29\Lib\x64;C:\Users\33251\vcpkg\packages\curl_x64-windows\lib\</AdditionalLibraryDirectories>
       <AdditionalDependencies>Psapi.lib;User32.lib;Crypt32.lib;winmm.lib;wldap32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateMapFile>true</GenerateMapFile>
@@ -183,7 +183,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>Psapi.lib;User32.lib;Crypt32.lib;winmm.lib;wldap32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>C:\Program Files %28x86%29\Microsoft DirectX SDK %28June 2010%29\Lib\x64;C:\Users\33251\vcpkg\packages\curl_x64-windows\lib\</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>G:\vcpkg-master\installed\x64-windows\lib;C:\Program Files %28x86%29\Microsoft DirectX SDK %28June 2010%29\Lib\x64;C:\Users\33251\vcpkg\packages\curl_x64-windows\lib\</AdditionalLibraryDirectories>
       <ShowProgress>NotSet</ShowProgress>
       <DelayLoadDLLs>D3DX9_43.DLL</DelayLoadDLLs>
     </Link>
@@ -223,6 +223,8 @@
     <ClCompile Include="Main\ShellFunction\Command-netmgr\Command-netmgr.cpp" />
     <ClCompile Include="Main\ShellFunction\Command-procmgr\Command-procmgr.cpp" />
     <ClCompile Include="Main\ShellFunction\Command-threadmgr\Command-threadmgr.cpp" />
+    <ClCompile Include="Main\STKmain.cpp" />
+    <ClCompile Include="Main\SubProc\SecureDesktop.cpp" />
     <ClCompile Include="Main\SupportFunction\Ksword5SupportFunction.cpp" />
     <ClCompile Include="Main\TextEditor\TextEditor.cpp" />
     <ClCompile Include="Support\ksword.cpp" />
@@ -240,6 +242,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AI\AiAPI.h" />
+    <ClInclude Include="C:\Users\33251\Downloads\Driver.h" />
     <ClInclude Include="imgui\imconfig.h" />
     <ClInclude Include="imgui\imgui.h" />
     <ClInclude Include="imgui\imgui_impl_dx9.h" />
@@ -249,6 +252,7 @@
     <ClInclude Include="imgui\imstb_textedit.h" />
     <ClInclude Include="imgui\imstb_truetype.h" />
     <ClInclude Include="KswordDriver\KswordDriver.h" />
+    <ClInclude Include="Main\Driver.h" />
     <ClInclude Include="Main\FileExplorer\dirent\dirent.h" />
     <ClInclude Include="Main\FileExplorer\ImGuiFileDialog.h" />
     <ClInclude Include="Main\FileExplorer\ImGuiFileDialogConfig.h" />
@@ -275,6 +279,7 @@
     <ClInclude Include="Main\Socket\KswordSelfSocket.h" />
     <ClInclude Include="Main\stb_image.h" />
     <ClInclude Include="Main\stb_image_write.h" />
+    <ClInclude Include="Main\SubProc\SubProc.h" />
     <ClInclude Include="Main\TextEditor\TextEditor.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="Support\ksword.h" />
