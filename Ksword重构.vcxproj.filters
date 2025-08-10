@@ -88,6 +88,12 @@
     <ClCompile Include="Main\GUIFunction\File\FileMain.cpp" />
     <ClCompile Include="Main\STKmain.cpp" />
     <ClCompile Include="Main\SubProc\SecureDesktop.cpp" />
+    <ClCompile Include="Main\GUIFunction\Network\ETW.cpp" />
+    <ClCompile Include="Main\GUIFunction\Memory\MemoryMain.cpp" />
+    <ClCompile Include="Main\GUIFunction\Network\Network.cpp" />
+    <ClCompile Include="Main\GUIFunction\DLL\DLLMain.cpp" />
+    <ClCompile Include="Main\GUIFunction\Register\Register.cpp" />
+    <ClCompile Include="Main\GUIFunction\Process\ProcessInformation.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Main\Socket\KswordSelfSocket.h">
@@ -168,6 +174,11 @@
     <ClInclude Include="C:\Users\33251\Downloads\Driver.h" />
     <ClInclude Include="Main\Driver.h" />
     <ClInclude Include="Main\SubProc\SubProc.h" />
+    <ClInclude Include="Main\GUIFunction\Network\Network.h" />
+    <ClInclude Include="Main\GUIFunction\Memory\Memory.h" />
+    <ClInclude Include="Main\GUIFunction\DLL\DLL.h" />
+    <ClInclude Include="Main\GUIFunction\Register\Register.h" />
+    <ClInclude Include="Main\GUIFunction\Process\ProcessDetail.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Environment">

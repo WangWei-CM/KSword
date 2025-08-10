@@ -14,7 +14,7 @@ inline void KswordToolBar() {
     // 设置窗口标志 - 不参与布局保存
     ImGuiWindowFlags window_flags =
         ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoSavedSettings |
+        //ImGuiWindowFlags_NoSavedSettings |
         //ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_NoDocking |
         //ImGuiWindowFlags_Tooltip |

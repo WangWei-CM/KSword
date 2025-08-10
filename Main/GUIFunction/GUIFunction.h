@@ -3,6 +3,18 @@
 #include "../TextEditor/TextEditor.h"
 #include <D3dx9tex.h>
 #pragma comment(lib, "D3dx9")
+
+
+#include "process/process.h"
+#include "Process/ProcessDetail.h"
+#include "Monitor/MonitorMain.h"
+#include "Network/Network.h"
+#include "file/FileMain.h"
+#include "Memory/Memory.h"
+#include "DLL/DLL.h"
+#include "Register/Register.h"
+
+
 extern inline void KswordLogo5			();
 extern inline void RenderBoolRow		(const char* name, bool value);
 extern inline void KswordGUIShowStatus	();
@@ -29,8 +41,8 @@ extern PDIRECT3DTEXTURE9 my_texture ;
 extern bool ret;
 extern ImVec4 StyleColor;
 
-#include "process/process.h"
-#include "Monitor/MonitorMain.h"
-#include "file/FileMain.h"
+extern ProcessDetailManager kProcDtl;
+
+
 
 #define STYLE_COLOR ImVec4(StyleColor.w, StyleColor.x, StyleColor.y, 1.00f)
