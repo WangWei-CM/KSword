@@ -677,15 +677,30 @@ private:
                 {
                     KswordGUIProcess();
                 }
-                if(ImGui::BeginTabItem(C("模块")))
-                {
-                    KswordFile();
-				}
                 if (ImGui::BeginTabItem(C("监控")))
                 {
                     KswordMonitorMain();
                 }
-                // Spy++ 标签
+                if(ImGui::BeginTabItem(C("文件")))
+                {
+                    KswordFile();
+				}
+                if (ImGui::BeginTabItem(C("网络")))
+                {
+                    KswordNetworkMain();
+                }
+                if (ImGui::BeginTabItem(C("DLL")))
+                {
+                    KswordDLLMain();
+                }
+                if (ImGui::BeginTabItem(C("内存")))
+                {
+                    KswordMemoryMain();
+                }
+                if (ImGui::BeginTabItem(C("注册表")))
+                {
+                    KswordRegMain();
+                }
                 if (ImGui::BeginTabItem("Test"))
                 {
                     ImGui::Text(C("增加日志信息"));

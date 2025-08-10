@@ -1,11 +1,12 @@
 ﻿#include "../../KswordTotalHead.h"
 #include <shlobj.h> 
 #define CURRENT_MODULE "进程管理"
-//struct ProcessInfo {
-//    std::string name;
-//    int    pid;
-//    std::string user;
-//};
+#include "Process.h"
+#include "ProcessDetail.h"
+
+ProcessDetailManager kProcDtl;
+
+
 
 // 排序类型
 enum SortType {
@@ -194,11 +195,14 @@ static void KCreateProcessWithSuspendFollower(DWORD pid) {
     
 }
 
+static kProcess* SelectedProcess;//右键菜单所在进程
+
 void KswordGUIProcess() {
+    //渲染详细信息
+    kProcDtl.renderAll();
     if (ImGui::TreeNode("Process List"))
     {
         // 设置表格（三列，带边框）
-// 假设的进程数据结构
                         // 过滤输入框
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 15);
         if (ImGui::InputTextWithHint("##filter", "Search (name/user)...",
@@ -259,72 +263,110 @@ void KswordGUIProcess() {
             clipper.Begin(filtered_processes.size());
             while (clipper.Step()) {
                 for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
-                   
                     kProcess* proc = filtered_processes[row];
 
                     ImGui::TableNextRow();
-                    // 高亮选中行
-                    bool is_selected = (selected_pid == proc->pid());
-                    if (is_selected) {
-                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
-                            ImGui::GetColorU32(ImGuiCol_Header));
-                    }
-                    ImGui::PushID(row);  // 为每行设置唯一标识
-                   
+                    ImGui::PushID(proc->pid()); // 行ID作用域开始
 
+                    // 保存初始光标位置
+                    ImVec2 initial_cursor_pos = ImGui::GetCursorPos();
+
+                    // 第一列：整行选择项
+                    ImGui::TableSetColumnIndex(0);
+
+                    //ImGui::SetCursorPos(initial_cursor_pos); // 重置到初始位置
+                    ImGui::Text("%s", proc->Name().c_str()); ImGui::SameLine();
+                    // 创建整行选择项
+                    bool is_selected = (selected_pid == proc->pid());
+                    bool row_clicked = ImGui::Selectable(
+                        "##row_selectable",
+                        is_selected,
+                        ImGuiSelectableFlags_SpanAllColumns |
+                        ImGuiSelectableFlags_AllowItemOverlap,
+                        ImVec2(0, ImGui::GetTextLineHeight())
+                    );
+
+                    // 处理行点击
+                    if (row_clicked) {
+                        selected_pid = proc->pid();
+                    }
+
+                    // 悬停效果
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                            ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+                    }
+
+                    // 右键菜单
                     // 定义右键菜单内容
-                    if (ImGui::BeginPopupContextWindow("RowContextMenu")) {
+                    if (ImGui::BeginPopupContextItem("##RowContextMenu")) {
+                        SelectedProcess = proc; // 保存当前选中的进程
                         if (ImGui::BeginMenu("Terminate")) {
                             if (ImGui::MenuItem("taskkill")) {
-                                std::thread(KillProcessByTaskkill,proc->pid()).detach();
+                                std::thread(KillProcessByTaskkill, SelectedProcess->pid()).detach();
                             }
                             if (ImGui::MenuItem("taskkill /f")) {
                                 // 优雅关闭逻辑
-                                proc->Terminate(kTaskkillF);
-								kLog.Add(Info, C(("使用taskkill /f终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
+                                SelectedProcess->Terminate(kTaskkillF);
+                                kLog.Add(Info, C(("使用taskkill /f终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
                             }
-                            if (ImGui::MenuItem("Terminate Process")) {
+                            if (ImGui::MenuItem("Terminate")) {
 
-								kLog.Add(Info, C(("使用Terminate终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
-                           		proc->Terminate(kTerminate);
+                                kLog.Add(Info, C(("使用Terminate终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
+                                SelectedProcess->Terminate(kTerminate);
                             }
                             if (ImGui::MenuItem("Terminate Thread")) {
-								kLog.Add(Info, C(("使用TerminateThread终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
-								proc->Terminate(kTerminateThread);
+                                kLog.Add(Info, C(("使用TerminateThread终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
+                                SelectedProcess->Terminate(kTerminateThread);
                             }
                             if (ImGui::MenuItem("NT Terminate")) {
-								kLog.Add(Info, C(("使用NT Terminate终止pid为" + std::to_string(proc->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
-								proc->Terminate(kNTTerminate);
+                                kLog.Add(Info, C(("使用NT Terminate终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
+                                SelectedProcess->Terminate(kNTTerminate);
                             }
                             ImGui::EndMenu();
                         }
-                        if (ImGui::MenuItem("Suspend")) {
-                            // 执行编辑逻辑，例如弹出输入框
+                        if (ImGui::MenuItem(C("挂起进程"))) {
+							SelectedProcess->Suspend();
                         }
                         if (ImGui::MenuItem(C("取消挂起"))) {
-                            // 执行编辑逻辑，例如弹出输入框
+                            SelectedProcess->Resume();
                         }
-                        if (ImGui::MenuItem("Information")) {
-                            // 执行编辑逻辑，例如弹出输入框
+                        if (ImGui::MenuItem(C("设置关键进程"))) {
+                            SelectedProcess->SetKeyProc();
+                        }
+                        if (ImGui::MenuItem(C("取消关键进程"))) {
+                            SelectedProcess->CancelKeyProc();
+                        }
+                        if(ImGui::MenuItem(C("打开所在位置"))) {
+                            size_t lastSlashPos = SelectedProcess->ExePath().find_last_of("\\/");
+                            if (lastSlashPos == std::string::npos) {
+                                kLog.Add(Err, C("无法找到文件所在目录"), C(CURRENT_MODULE));
+                            }
+                            std::string folderPath = SelectedProcess->ExePath().substr(0, lastSlashPos);
+
+                            HINSTANCE result = ShellExecuteA(NULL, "explore", folderPath.c_str(), NULL, NULL, SW_SHOWDEFAULT);
+						}
+                        if (ImGui::MenuItem(C("详细信息"))) {
+                            kProcDtl.add(SelectedProcess->pid());
                         }
                         ImGui::EndPopup();
                     }
 
-                    ImGui::PopID();
+                    // 在各列相同位置绘制内容
+                    // 列1：进程名称
 
 
-                    // 名称列
-                    ImGui::TableSetColumnIndex(0);
-                    ImGui::Text("%s", proc->Name().c_str());
-
-                    // PID列（右对齐）
+                    // 列2：PID
                     ImGui::TableSetColumnIndex(1);
+                    //ImGui::SetCursorPos(initial_cursor_pos); // 重置到初始位置
                     ImGui::Text("%d", proc->pid());
 
-                    // 用户列
+                    // 列3：用户
                     ImGui::TableSetColumnIndex(2);
+                    //ImGui::SetCursorPos(initial_cursor_pos); // 重置到初始位置
                     ImGui::Text("%s", proc->User().c_str());
 
+                    ImGui::PopID(); // 行ID作用域结束
                 }
             }
             clipper.End();
