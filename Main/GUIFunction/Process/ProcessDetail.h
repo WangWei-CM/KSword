@@ -44,11 +44,29 @@ private:
     std::string processName;       // 进程名称
     bool firstShow = true;
 	std::string commandLine;           // 命令行参数
+
+    // 新增：扩展进程信息
+    FILETIME creationTime;         // 创建时间
+    FILETIME exitTime;             // 退出时间
+    FILETIME kernelTime;           // 内核态时间
+    FILETIME userTime;             // 用户态时间
+    DWORD threadCount;             // 线程数
+    DWORD handleCount;             // 句柄数
+    LONG basePriority;             // 基本优先级
+    NTSTATUS exitStatus;           // 退出状态
+    ULONG_PTR affinityMask;        // 亲和性掩码
+    DWORD sessionId;               // 会话ID
+    DWORD parentPid;             // 父进程PID
+    std::string parentProcessName; // 父进程名称
+
+
 public:
     std::string GetCommandLine();
     // 仅支持PID初始化
     explicit kProcessDetail(DWORD pid);
-
+    std::string FileTimeToString(FILETIME ft);  // FILETIME转字符串
+    bool GetProcessExtendedInfo();              // 获取扩展信息
+    bool GetParentProcessInfo();
     // 渲染进程信息窗口
     void Render();
 	ProcessOpenTest openTest; // 进程权限测试实例
