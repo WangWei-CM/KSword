@@ -344,7 +344,7 @@ void KswordGUIProcess() {
                             }
                             std::string folderPath = SelectedProcess->ExePath().substr(0, lastSlashPos);
 
-                            HINSTANCE result = ShellExecuteA(NULL, "explore", folderPath.c_str(), NULL, NULL, SW_SHOWDEFAULT);
+                            HINSTANCE result = ShellExecuteA(NULL, "explorer", folderPath.c_str(), NULL, NULL, SW_SHOWDEFAULT);
 						}
                         if (ImGui::MenuItem(C("详细信息"))) {
                             kProcDtl.add(SelectedProcess->pid());
