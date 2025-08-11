@@ -150,8 +150,8 @@ int KswordRegToolBarWindow()
     // 创建固定大小窗口，计算居中位置
     int windowWidth = 350;
     int windowHeight = 190;
-    int x = 200;
-    int y = 200;
+    int x = 00;
+    int y = 00;
 
     hwnd = CreateWindow(szAppName, _T("Ksword控制面板"),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, // 更清晰的样式

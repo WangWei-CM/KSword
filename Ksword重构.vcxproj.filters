@@ -10,26 +10,6 @@
     <ClCompile Include="Main\SupportFunction\MainSupportFunction.cpp">
       <Filter>Main\SupportFunction</Filter>
     </ClCompile>
-    <ClCompile Include="Main\ShellFunction\Command-guimgr\Command-guimgr-enumwindow.cpp">
-      <Filter>Main\ShellFunction\Command::guimgr</Filter>
-    </ClCompile>
-    <ClCompile Include="Main\ShellFunction\Command-help\Command-help.cpp">
-      <Filter>Main\ShellFunction\Command::help</Filter>
-    </ClCompile>
-    <ClCompile Include="Main\ShellFunction\Command-procmgr\Command-procmgr.cpp">
-      <Filter>Main\ShellFunction\Command:procmgr</Filter>
-    </ClCompile>
-    <ClCompile Include="Main\ShellFunction\Command-drivermgr\Command-drivermgr.cpp">
-      <Filter>Main\ShellFunction\Command::drivermgr</Filter>
-    </ClCompile>
-    <ClCompile Include="Main\ShellFunction\Command-netmgr\Command-netmgr.cpp">
-      <Filter>Main\ShellFunction\Command::netmgr</Filter>
-    </ClCompile>
-    <ClCompile Include="Main\ShellFunction\Command-threadmgr\Command-threadmgr.cpp">
-      <Filter>Main\ShellFunction\Command::threadmgr</Filter>
-    </ClCompile>
-    <ClCompile Include="Main\ShellFunction\Command-avkill\Command-avkill.cpp" />
-    <ClCompile Include="Main\ShellFunction\Command-handlemgr\Command-handlemgr.cpp" />
     <ClCompile Include="Main\Ksword5Main.cpp" />
     <ClCompile Include="imgui\imgui.cpp" />
     <ClCompile Include="imgui\imgui_demo.cpp" />
@@ -67,39 +47,10 @@
     <ClInclude Include="Support\ksword.h">
       <Filter>Support</Filter>
     </ClInclude>
-    <ClInclude Include="Main\ShellFunction\Command-cd\Command-cd.h">
-      <Filter>Main\ShellFunction\Command::cd</Filter>
-    </ClInclude>
-    <ClInclude Include="Main\ShellFunction\Command-apt\Command-apt.h">
-      <Filter>Main\ShellFunction\Command::apt</Filter>
-    </ClInclude>
     <ClInclude Include="Main\SupportFunction\MainSupportFunction.h">
       <Filter>Main\SupportFunction</Filter>
     </ClInclude>
     <ClInclude Include="Main\KswordTotalHead.h" />
-    <ClInclude Include="Main\ShellFunction\Command-guimgr\Command-guimgr.h">
-      <Filter>Main\ShellFunction\Command::guimgr</Filter>
-    </ClInclude>
-    <ClInclude Include="Main\ShellFunction\Command-help\Command-help.h">
-      <Filter>Main\ShellFunction\Command::help</Filter>
-    </ClInclude>
-    <ClInclude Include="Main\ShellFunction\Command-procmgr\Command-procmgr.h">
-      <Filter>Main\ShellFunction\Command:procmgr</Filter>
-    </ClInclude>
-    <ClInclude Include="KswordSelfManager.h">
-      <Filter>Main\ShellFunction\Command::selfmgr</Filter>
-    </ClInclude>
-    <ClInclude Include="Main\ShellFunction\Command-drivermgr\Command-drivermgr.h">
-      <Filter>Main\ShellFunction\Command::drivermgr</Filter>
-    </ClInclude>
-    <ClInclude Include="Main\ShellFunction\Command-netmgr\Command-netmgr.h">
-      <Filter>Main\ShellFunction\Command::netmgr</Filter>
-    </ClInclude>
-    <ClInclude Include="Main\ShellFunction\Command-threadmgr\Command-threadmgr.h">
-      <Filter>Main\ShellFunction\Command::threadmgr</Filter>
-    </ClInclude>
-    <ClInclude Include="Main\ShellFunction\Command-avkill\Command-avkill.h" />
-    <ClInclude Include="Main\ShellFunction\Command-handlemgr\Command-handlemgr.h" />
     <ClInclude Include="imgui\imconfig.h" />
     <ClInclude Include="imgui\imgui.h" />
     <ClInclude Include="imgui\imgui_impl_dx9.h" />
@@ -124,7 +75,6 @@
     <ClInclude Include="Main\FileExplorer\ImGuiFileDialogConfig.h" />
     <ClInclude Include="Main\GUIFunction\File\FileMain.h" />
     <ClInclude Include="C:\Users\33251\Downloads\Driver.h" />
-    <ClInclude Include="Main\Driver.h" />
     <ClInclude Include="Main\SubProc\SubProc.h" />
     <ClInclude Include="Main\GUIFunction\Network\Network.h" />
     <ClInclude Include="Main\GUIFunction\Memory\Memory.h" />

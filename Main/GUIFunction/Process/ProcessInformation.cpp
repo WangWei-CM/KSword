@@ -1,21 +1,22 @@
 #include "../../KswordTotalHead.h"
 #include "Process.h"
 #include "ProcessDetail.h"
-#include <winnt.h>  // è¡¥å……Windowsæƒé™å¸¸é‡å®šä¹‰
-#define CURRENT_MODULE "è¿›ç¨‹è¯¦ç»†ä¿¡æ¯ç®¡ç†"
+#include <winnt.h>  // ²¹³äWindowsÈ¨ÏŞ³£Á¿¶¨Òå
+#define CURRENT_MODULE "½ø³ÌÏêÏ¸ĞÅÏ¢¹ÜÀí"
 
-
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
 typedef NTSTATUS(NTAPI* _NtQueryInformationProcess)(
     HANDLE           ProcessHandle,
     DWORD            ProcessInformationClass,
     PVOID            ProcessInformation,
     ULONG            ProcessInformationLength,
     PULONG           ReturnLength);
+// ĞŞÕıºóµÄ PROCESS_BASIC_INFORMATION ¶¨Òå
 typedef struct _PROCESS_BASIC_INFORMATION {
     NTSTATUS ExitStatus;
     PVOID PebBaseAddress;
     ULONG_PTR AffinityMask;
-    PVOID BasePriority;
+    PVOID BasePriority;  // ±£³ÖÎª PVOID ÀàĞÍ
     ULONG_PTR UniqueProcessId;
     ULONG_PTR InheritedFromUniqueProcessId;
 } PROCESS_BASIC_INFORMATION;
@@ -51,55 +52,229 @@ typedef struct _RTL_USER_PROCESS_PARAMETERS {
     UNICODE_STRING ImagePathName;
     UNICODE_STRING CommandLine;
 } RTL_USER_PROCESS_PARAMETERS, * PRTL_USER_PROCESS_PARAMETERS;
+// ĞÂÔö£ºNtQueryInformationProcessËùĞèµÄĞÅÏ¢Àà³£Á¿
+const DWORD ProcessThreadCount = 0x03;
+const DWORD ProcessHandleCount = 0x04;
+const DWORD ProcessBasePriority = 0x05;
+const DWORD ProcessExitStatus = 0x01;
+const DWORD ProcessAffinityMask = 0x1D;
+const DWORD ProcessSessionInformation = 0x1D;  // ²»Í¬ÏµÍ³¿ÉÄÜÓĞ²îÒì£¬Ğè²âÊÔ
+
+// ĞÂÔö£ºÏß³ÌÊıĞÅÏ¢½á¹¹Ìå
+typedef struct _PROCESS_THREAD_COUNT_INFORMATION {
+    ULONG ThreadCount;
+} PROCESS_THREAD_COUNT_INFORMATION, * PPROCESS_THREAD_COUNT_INFORMATION;
+
+// ĞÂÔö£º¾ä±úÊıĞÅÏ¢½á¹¹Ìå
+typedef struct _PROCESS_HANDLE_COUNT_INFORMATION {
+    ULONG HandleCount;
+} PROCESS_HANDLE_COUNT_INFORMATION, * PPROCESS_HANDLE_COUNT_INFORMATION;
+
+// ĞÂÔö£º»á»°ĞÅÏ¢½á¹¹Ìå
+typedef struct _PROCESS_SESSION_INFORMATION {
+    DWORD SessionId;
+} PROCESS_SESSION_INFORMATION, * PPROCESS_SESSION_INFORMATION;
+// ĞÂÔö£ºFILETIME×ª±¾µØÊ±¼ä×Ö·û´®
+std::string kProcessDetail::FileTimeToString(FILETIME ft) {
+    if (ft.dwLowDateTime == 0 && ft.dwHighDateTime == 0) {
+        return "N/A";  // Î´ÉèÖÃ£¨ÈçÔËĞĞÖĞ½ø³ÌµÄÍË³öÊ±¼ä£©
+    }
+
+    SYSTEMTIME stLocal;
+    FileTimeToLocalFileTime(&ft, &ft);  // ×ª»»Îª±¾µØÊ±¼ä
+    FileTimeToSystemTime(&ft, &stLocal);
+
+    char buf[64];
+    sprintf_s(buf, sizeof(buf),
+        "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+        stLocal.wYear, stLocal.wMonth, stLocal.wDay,
+        stLocal.wHour, stLocal.wMinute, stLocal.wSecond,
+        stLocal.wMilliseconds);
+    return buf;
+}
+bool kProcessDetail::GetParentProcessInfo() {
+    HANDLE hProcess = OpenProcess(
+        PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION,
+        FALSE,
+        pid()
+    );
+    if (!hProcess) {
+        kLog.err(C("ÎŞ·¨´ò¿ª½ø³Ì»ñÈ¡¸¸½ø³ÌĞÅÏ¢"), CURRENT_MODULE);
+        parentPid = 0;
+        return false;
+    }
+
+    // Ê¹ÓÃNtQueryInformationProcess»ñÈ¡PROCESS_BASIC_INFORMATION
+    typedef struct _PROCESS_BASIC_INFORMATION {
+        PVOID Reserved1;
+        PVOID PebBaseAddress;
+        PVOID Reserved2[2];
+        ULONG_PTR UniqueProcessId;   // µ±Ç°½ø³ÌPID£¨ÑéÖ¤ÓÃ£©
+        ULONG_PTR InheritedFromUniqueProcessId; // ¸¸½ø³ÌPID
+    } PROCESS_BASIC_INFORMATION, * PPROCESS_BASIC_INFORMATION;
+
+    typedef NTSTATUS(NTAPI* _NtQueryInformationProcess)(
+        HANDLE, INT, PVOID, ULONG, PULONG);
+    _NtQueryInformationProcess NtQIP = (_NtQueryInformationProcess)GetProcAddress(
+        GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
+
+    if (!NtQIP) {
+        CloseHandle(hProcess);
+        parentPid = 0;
+        return false;
+    }
+
+    PROCESS_BASIC_INFORMATION pbi = { 0 };
+    ULONG returnLength = 0;
+    NTSTATUS status = NtQIP(
+        hProcess,
+        0,  // 0 = ProcessBasicInformation
+        &pbi,
+        sizeof(pbi),
+        &returnLength
+    );
+
+    if (NT_SUCCESS(status)) {
+        // ÑéÖ¤µ±Ç°½ø³ÌPIDÊÇ·ñÆ¥Åä£¨È·±£»ñÈ¡ÕıÈ·£©
+        if (pbi.UniqueProcessId == (ULONG_PTR)pid()) {
+            parentPid = (DWORD)pbi.InheritedFromUniqueProcessId;
+            // Í¨¹ı¸¸½ø³ÌPID²éÑ¯Ãû³Æ
+            parentProcessName = GetProcessNameByPID(parentPid);
+        }
+        else {
+            parentPid = 0;
+            parentProcessName = "»ñÈ¡Ê§°Ü£¨PID²»Æ¥Åä£©";
+        }
+    }
+    else {
+        parentPid = 0;
+        parentProcessName = "»ñÈ¡Ê§°Ü£¨NtQuery´íÎó£©";
+    }
+
+    CloseHandle(hProcess);
+    return true;
+}
+// ĞÂÔö£º»ñÈ¡À©Õ¹½ø³ÌĞÅÏ¢
+bool kProcessDetail::GetProcessExtendedInfo() {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid());
+    if (!hProcess) {
+        kLog.err(C("ÎŞ·¨´ò¿ª½ø³Ì»ñÈ¡À©Õ¹ĞÅÏ¢"), CURRENT_MODULE);
+        return false;
+    }
+
+    // ³õÊ¼»¯ËùÓĞĞÅÏ¢ÎªÄ¬ÈÏÖµ
+    creationTime = { 0, 0 };
+    exitTime = { 0, 0 };
+    kernelTime = { 0, 0 };
+    userTime = { 0, 0 };
+    threadCount = 0;
+    handleCount = 0;
+    basePriority = -1;   // ĞŞÕıÎª -1 ±íÊ¾Î´Öª
+    exitStatus = -1;
+    affinityMask = 0;
+    sessionId = -1;
+
+    // »ñÈ¡»ù±¾Ê±¼ä£¨´´½¨¡¢ÍË³ö¡¢ÄÚºË¡¢ÓÃ»§Ê±¼ä£©
+    if (!GetProcessTimes(hProcess, &creationTime, &exitTime, &kernelTime, &userTime)) {
+        kLog.warn(C("GetProcessTimes µ÷ÓÃÊ§°Ü"), CURRENT_MODULE);
+    }
+
+    // Ê¹ÓÃ NtQueryInformationProcess »ñÈ¡À©Õ¹ĞÅÏ¢
+    typedef NTSTATUS(NTAPI* _NtQueryInformationProcess)(
+        HANDLE, INT, PVOID, ULONG, PULONG);
+    _NtQueryInformationProcess NtQIP = (_NtQueryInformationProcess)GetProcAddress(
+        GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
+    if (!NtQIP) {
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    // »ñÈ¡ PROCESS_BASIC_INFORMATION ÒÔ»ñÈ¡»ù±¾ÓÅÏÈ¼¶¡¢Ç×ºÍĞÔÑÚÂëµÈ
+    PROCESS_BASIC_INFORMATION pbi = { 0 };
+    ULONG returnLength = 0;
+    NTSTATUS status = NtQIP(hProcess, 0, &pbi, sizeof(pbi), &returnLength);
+    if (NT_SUCCESS(status)) {
+        // ½« PVOID ÀàĞÍµÄ BasePriority ×ª»»ÎªÊµ¼ÊÓÅÏÈ¼¶Öµ
+        // ÔÚ x86 ÏµÍ³ÉÏÖ±½Ó×ª»»Îª LONG£¬ÔÚ x64 ÉÏĞèÒª´¦ÀíÖ¸Õë´óĞ¡
+#ifdef _WIN64
+        basePriority = (LONG)((INT_PTR)pbi.BasePriority);
+#else
+        basePriority = (LONG)((DWORD)pbi.BasePriority);
+#endif
+
+        affinityMask = pbi.AffinityMask;
+        exitStatus = pbi.ExitStatus;
+    }
 
 
-std::string kProcessDetail::GetCommandLine() {
+    // »ñÈ¡Ïß³ÌÊı£¨Ìæ´ú·½·¨£ºÊ¹ÓÃ ToolHelp API£©
+    THREADENTRY32 te32;
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnapshot != INVALID_HANDLE_VALUE) {
+        te32.dwSize = sizeof(THREADENTRY32);
+        if (Thread32First(hSnapshot, &te32)) {
+            do {
+                if (te32.th32OwnerProcessID == pid()) {
+                    threadCount++;
+                }
+            } while (Thread32Next(hSnapshot, &te32));
+        }
+        CloseHandle(hSnapshot);
+    }
+
+    // »ñÈ¡¾ä±úÊı£¨Ê¹ÓÃ¹«¿ªAPI£©
+    GetProcessHandleCount(hProcess, &handleCount);
+
+    // »ñÈ¡»á»°ID£¨Ê¹ÓÃ¹«¿ªAPI£©
+    ProcessIdToSessionId(pid(), &sessionId);    CloseHandle(hProcess);
+    return true;
+}std::string kProcessDetail::GetCommandLine() {
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid());
     if (!hProcess) {
-        return "æ— æ³•æ‰“å¼€è¿›ç¨‹ (æƒé™ä¸è¶³)";
+        return "ÎŞ·¨´ò¿ª½ø³Ì (È¨ÏŞ²»×ã)";
     }
     _NtQueryInformationProcess NtQIP = (_NtQueryInformationProcess)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
     if (!NtQIP) {
         CloseHandle(hProcess);
-        return "GetProcAddress å¤±è´¥: NtQueryInformationProcess API ä¸å¯ç”¨";
+        return "GetProcAddress Ê§°Ü: NtQueryInformationProcess API ²»¿ÉÓÃ";
     }
 
-    // è·å– ProcessBasicInformation ä»¥å®šä½ PEB
+    // »ñÈ¡ ProcessBasicInformation ÒÔ¶¨Î» PEB
     PROCESS_BASIC_INFORMATION pbi;
     ULONG len;
     NTSTATUS status = NtQIP(hProcess, 0, &pbi, sizeof(pbi), &len);
     if (status != 0) {
         CloseHandle(hProcess);
-        return "æ— æ³•è·å–è¿›ç¨‹ä¿¡æ¯";
+        return "ÎŞ·¨»ñÈ¡½ø³ÌĞÅÏ¢";
     }
 
-    // è¯»å– PEB åœ°å€
+    // ¶ÁÈ¡ PEB µØÖ·
     PEB peb;
     if (!ReadProcessMemory(hProcess, pbi.PebBaseAddress, &peb, sizeof(peb), nullptr)) {
         CloseHandle(hProcess);
-        return "æ— æ³•è¯»å– PEB";
+        return "ÎŞ·¨¶ÁÈ¡ PEB";
     }
 
-    // è¯»å–è¿›ç¨‹å‚æ•°
+    // ¶ÁÈ¡½ø³Ì²ÎÊı
     RTL_USER_PROCESS_PARAMETERS upp;
     if (!ReadProcessMemory(hProcess, peb.ProcessParameters, &upp, sizeof(upp), nullptr)) {
         CloseHandle(hProcess);
-        return "æ— æ³•è¯»å–è¿›ç¨‹å‚æ•°";
+        return "ÎŞ·¨¶ÁÈ¡½ø³Ì²ÎÊı";
     }
 
-    // é•¿åº¦æ£€æŸ¥
+    // ³¤¶È¼ì²é
     if (upp.CommandLine.Length == 0 ||
         upp.CommandLine.Length > 0xFFFF) {
         CloseHandle(hProcess);
         return "No command line";
     }
 
-    // è¯»å–å‘½ä»¤è¡Œ
+    // ¶ÁÈ¡ÃüÁîĞĞ
     std::wstring wcmd;
     wcmd.resize(upp.CommandLine.Length / sizeof(WCHAR));
     if (!ReadProcessMemory(hProcess, upp.CommandLine.Buffer, wcmd.data(), upp.CommandLine.Length, nullptr)) {
         CloseHandle(hProcess);
-        return "æ— æ³•è¯»å–å‘½ä»¤è¡Œ";
+        return "ÎŞ·¨¶ÁÈ¡ÃüÁîĞĞ";
     }
     CloseHandle(hProcess);
     return std::string(wcmd.begin(), wcmd.end());
@@ -111,133 +286,160 @@ kProcessDetail::kProcessDetail(DWORD pid) : kProcess(pid) {
 }
 
 void kProcessDetail::InitDetailInfo() {
-    // ä»çˆ¶ç±»è·å–è¿›ç¨‹è¯¦ç»†ä¿¡æ¯
+    // ´Ó¸¸Àà»ñÈ¡½ø³ÌÏêÏ¸ĞÅÏ¢
     processName = Name();
     processExePath = ExePath();
     processUser = User();
     isAdmin = IsAdmin();
 	commandLine = GetCommandLine();
+    GetProcessExtendedInfo();  // ĞÂÔö£º³õÊ¼»¯À©Õ¹ĞÅÏ¢
+	GetParentProcessInfo();    // ĞÂÔö£º»ñÈ¡¸¸½ø³ÌĞÅÏ¢
 }
 
 
 void kProcessDetail::Render() {
-    // çª—å£æ ‡é¢˜ä½¿ç”¨è¿›ç¨‹åç§°+PID
+    // ´°¿Ú±êÌâÊ¹ÓÃ½ø³ÌÃû³Æ+PID
     std::string windowTitle = processName + " (" + std::to_string(pid()) + ")";
 
     if (firstShow) {
-        ImGui::SetNextWindowPos(ImVec2(200, 200)); // è®¾ç½®é»˜è®¤ä½ç½®
-		ImGui::SetNextWindowSize(ImVec2(800, 400)); // è®¾ç½®é»˜è®¤å¤§å°
-        firstShow = false; // ä»…é¦–æ¬¡æ˜¾ç¤ºæ—¶ç”Ÿæ•ˆ
+        ImGui::SetNextWindowPos(ImVec2(200, 200)); // ÉèÖÃÄ¬ÈÏÎ»ÖÃ
+		ImGui::SetNextWindowSize(ImVec2(800, 400)); // ÉèÖÃÄ¬ÈÏ´óĞ¡
+        firstShow = false; // ½öÊ×´ÎÏÔÊ¾Ê±ÉúĞ§
     }
     ImGui::Begin(C(windowTitle.c_str()), nullptr, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking);
 
-    // è¿›ç¨‹åç§°è¡Œ
-    ImGui::Text(C("è¿›ç¨‹åç§°:"));
+    // ½ø³ÌÃû³ÆĞĞ
+    ImGui::Text(C("½ø³ÌÃû³Æ:"));
     ImGui::SameLine();
-    // ä½¿ç”¨ä¸å¯ç¼–è¾‘çš„è¾“å…¥æ¡†æ˜¾ç¤ºè¿›ç¨‹åç§°
-    char processNameBuf[256]; // æ ¹æ®å®é™…éœ€æ±‚è°ƒæ•´ç¼“å†²åŒºå¤§å°
+    // Ê¹ÓÃ²»¿É±à¼­µÄÊäÈë¿òÏÔÊ¾½ø³ÌÃû³Æ
+    char processNameBuf[256]; // ¸ù¾İÊµ¼ÊĞèÇóµ÷Õû»º³åÇø´óĞ¡
     strcpy(processNameBuf, processName.c_str());
     ImGui::InputText("##ReadOnlyInputBox", processNameBuf, IM_ARRAYSIZE(processNameBuf), ImGuiInputTextFlags_ReadOnly);
     ImGui::SameLine();
-    if (ImGui::Button(C("å¤åˆ¶"))) {
+    if (ImGui::Button(C("¸´ÖÆ"))) {
         ImGui::SetClipboardText(processName.c_str());
     }
 
-    // PIDè¡Œ
-    ImGui::Text(C("è¿›ç¨‹PID:"));
+    // PIDĞĞ
+    ImGui::Text(C("½ø³ÌPID:"));
     ImGui::SameLine();
-    // ä½¿ç”¨ä¸å¯ç¼–è¾‘çš„è¾“å…¥æ¡†æ˜¾ç¤ºPID
-    char pidBuf[32]; // PID é•¿åº¦è¾ƒçŸ­ï¼Œç¼“å†²åŒºå¯å°ä¸€äº›
+    // Ê¹ÓÃ²»¿É±à¼­µÄÊäÈë¿òÏÔÊ¾PID
+    char pidBuf[32]; // PID ³¤¶È½Ï¶Ì£¬»º³åÇø¿ÉĞ¡Ò»Ğ©
     sprintf(pidBuf, "%d", pid());
     ImGui::InputText("ProcessPID##ReadOnlyInputBox", pidBuf, IM_ARRAYSIZE(pidBuf), ImGuiInputTextFlags_ReadOnly);
     ImGui::SameLine();
-    if (ImGui::Button(C("å¤åˆ¶##pid"))) {
+    if (ImGui::Button(C("¸´ÖÆ##pid"))) {
         ImGui::SetClipboardText(std::to_string(pid()).c_str());
     }
 
-    // è¿›ç¨‹è·¯å¾„è¡Œ
-    ImGui::Text(C("è¿›ç¨‹ä½ç½®:"));
+    // ½ø³ÌÂ·¾¶ĞĞ
+    ImGui::Text(C("½ø³ÌÎ»ÖÃ:"));
     ImGui::SameLine();
-    // ä½¿ç”¨ä¸å¯ç¼–è¾‘çš„è¾“å…¥æ¡†æ˜¾ç¤ºè¿›ç¨‹è·¯å¾„
-    char processExePathBuf[1024]; // æ ¹æ®å®é™…éœ€æ±‚è°ƒæ•´ç¼“å†²åŒºå¤§å°
+    // Ê¹ÓÃ²»¿É±à¼­µÄÊäÈë¿òÏÔÊ¾½ø³ÌÂ·¾¶
+    char processExePathBuf[1024]; // ¸ù¾İÊµ¼ÊĞèÇóµ÷Õû»º³åÇø´óĞ¡
     strcpy(processExePathBuf, C(processExePath.c_str()));
     ImGui::InputText("ProcessFilePath##ReadOnlyInputBox", processExePathBuf, IM_ARRAYSIZE(processExePathBuf), ImGuiInputTextFlags_ReadOnly);
     ImGui::SameLine();
-    if (ImGui::Button(C("å¤åˆ¶##path"))) {
+    if (ImGui::Button(C("¸´ÖÆ##path"))) {
         ImGui::SetClipboardText(C(processExePath.c_str()));
     }
     ImGui::SameLine();
-    if (ImGui::Button(C("æ‰“å¼€ä½ç½®"))) {
-        // æ‰“å¼€æ–‡ä»¶æ‰€åœ¨ç›®å½•
+    if (ImGui::Button(C("´ò¿ªÎ»ÖÃ"))) {
+        // ´ò¿ªÎÄ¼şËùÔÚÄ¿Â¼
         size_t lastSlashPos = processExePath.find_last_of("\\/");
         if (lastSlashPos == std::string::npos) {
-            kLog.Add(Err, C("æ— æ³•æ‰¾åˆ°æ–‡ä»¶æ‰€åœ¨ç›®å½•"), C(CURRENT_MODULE));
+            kLog.Add(Err, C("ÎŞ·¨ÕÒµ½ÎÄ¼şËùÔÚÄ¿Â¼"), C(CURRENT_MODULE));
         }
         std::string folderPath = processExePath.substr(0, lastSlashPos);
         HINSTANCE result = ShellExecuteA(NULL, "explore", folderPath.c_str(), NULL, NULL, SW_SHOWDEFAULT);
 
     }
 
-    // é¢å¤–è¯¦ç»†ä¿¡æ¯ï¼ˆæ‰©å±•å†…å®¹ï¼‰
+    // ¶îÍâÏêÏ¸ĞÅÏ¢£¨À©Õ¹ÄÚÈİ£©
     ImGui::Separator();
-    ImGui::Text(C("è¿›ç¨‹ç”¨æˆ·: %s"), C(processUser.c_str()));
-    ImGui::Text(C("ç®¡ç†å‘˜æƒé™: %s"), isAdmin ? C("æ˜¯") : C("å¦"));
-    // åœ¨Render()å‡½æ•°ä¸­æ·»åŠ 
-    ImGui::Text(C("è¿›ç¨‹å‘½ä»¤è¡Œ:"));ImGui::SameLine();
+    ImGui::Text(C("½ø³ÌÓÃ»§: %s"), C(processUser.c_str()));
+    ImGui::Text(C("¹ÜÀíÔ±È¨ÏŞ: %s"), isAdmin ? C("ÊÇ") : C("·ñ"));
+    // ÔÚRender()º¯ÊıÖĞÌí¼Ó
+    ImGui::Text(C("½ø³ÌÃüÁîĞĞ:"));ImGui::SameLine();
     std::string cmdLine = commandLine;
     char cmdLineBuf[1024] = { 0 };
     strncpy(cmdLineBuf, C(cmdLine.c_str()), sizeof(cmdLineBuf) - 1);
-    ImGui::InputText("", cmdLineBuf, sizeof(cmdLineBuf), ImGuiInputTextFlags_ReadOnly);
+    ImGui::InputText("##SelectedProcessCommandLine", cmdLineBuf, sizeof(cmdLineBuf), ImGuiInputTextFlags_ReadOnly);
     ImGui::SameLine();
-    if (ImGui::Button(C("å¤åˆ¶##cmd"))) {
+    if (ImGui::Button(C("¸´ÖÆ##cmd"))) {
         ImGui::SetClipboardText(C(cmdLine.c_str()));
     }
-    if(ImGui::Button(C("é”€æ¯è¯¦ç»†ä¿¡æ¯å®ä¾‹"))) {
-		kProcDtl.remove(pid());
-    };
+    ImGui::Separator();
+    // Ê±¼äĞÅÏ¢
+    ImGui::Text(C("´´½¨Ê±¼ä: %s"), C(FileTimeToString(creationTime).c_str()));
+    ImGui::Text(C("ÍË³öÊ±¼ä: %s"), C(FileTimeToString(exitTime).c_str()));
+    ImGui::Text(C("ÄÚºËÌ¬Ê±¼ä: %s"), C(FileTimeToString(kernelTime).c_str()));
+    ImGui::Text(C("ÓÃ»§Ì¬Ê±¼ä: %s"), C(FileTimeToString(userTime).c_str()));
+
+    // ×ÊÔ´ĞÅÏ¢
+    ImGui::Text(C("Ïß³ÌÊı: %d"), threadCount);
+    ImGui::Text(C("¾ä±úÊı: %d"), handleCount);
+
+    // ÓÅÏÈ¼¶ºÍ×´Ì¬
+    ImGui::Text(C("»ù±¾ÓÅÏÈ¼¶: %d"), basePriority != -1 ? basePriority : -1);
+    ImGui::Text(C("ÍË³ö×´Ì¬: 0x%08X"), exitStatus != -1 ? exitStatus : 0);
+
+    // ÆäËûĞÅÏ¢
+    ImGui::Text(C("Ç×ºÍĞÔÑÚÂë: 0x%08X"), affinityMask);
+    ImGui::Text(C("»á»°ID: %d"), sessionId);
+    ImGui::Text(C("¸¸½ø³ÌPID: %u"), parentPid);
+    ImGui::Text(C("¸¸½ø³ÌÃû³Æ: %s"), C(parentProcessName.c_str()));
+    if (ImGui::Button(C("Ë¢ĞÂ½ø³ÌÏêÏ¸ĞÅÏ¢"))) {
+		GetProcessExtendedInfo();
+    }
+
+	ImGui::Separator();
 	openTest.SetTargetPID(pid());
 	openTest.ShowWindow();
+    if (ImGui::Button(C("Ïú»ÙÏêÏ¸ĞÅÏ¢ÊµÀı"))) {
+        kProcDtl.remove(pid());
+    }
     ImGui::End();
 }
 
-//æµ‹è¯•ä»¤ç‰Œæ‰“å¼€æƒé™===============================================================================================
-// // æ„é€ å‡½æ•°ï¼šåˆå§‹åŒ–æ‰€æœ‰å¸¸è§è¿›ç¨‹æƒé™æµ‹è¯•é¡¹
+//²âÊÔÁîÅÆ´ò¿ªÈ¨ÏŞ===============================================================================================
+// // ¹¹Ôìº¯Êı£º³õÊ¼»¯ËùÓĞ³£¼û½ø³ÌÈ¨ÏŞ²âÊÔÏî
 static const std::map<DWORD, std::string> errorCodeMap = {
-    {ERROR_SUCCESS, "æ“ä½œæˆåŠŸå®Œæˆ"},
-    {ERROR_ACCESS_DENIED, "è®¿é—®è¢«æ‹’ç»"},
-    {ERROR_INVALID_HANDLE, "æ— æ•ˆçš„å¥æŸ„"},
-    {ERROR_INVALID_PARAMETER, "æ— æ•ˆçš„å‚æ•°"},
-    //{ERROR_PROCESS_NOT_FOUND, "æ‰¾ä¸åˆ°æŒ‡å®šçš„è¿›ç¨‹"},
-    {ERROR_INSUFFICIENT_BUFFER, "ç¼“å†²åŒºä¸è¶³"},
-    {ERROR_NOT_ENOUGH_MEMORY, "å†…å­˜ä¸è¶³"},
-    {ERROR_OPERATION_ABORTED, "æ“ä½œå·²ä¸­æ­¢"}
+    {ERROR_SUCCESS, "²Ù×÷³É¹¦Íê³É"},
+    {ERROR_ACCESS_DENIED, "·ÃÎÊ±»¾Ü¾ø"},
+    {ERROR_INVALID_HANDLE, "ÎŞĞ§µÄ¾ä±ú"},
+    {ERROR_INVALID_PARAMETER, "ÎŞĞ§µÄ²ÎÊı"},
+    //{ERROR_PROCESS_NOT_FOUND, "ÕÒ²»µ½Ö¸¶¨µÄ½ø³Ì"},
+    {ERROR_INSUFFICIENT_BUFFER, "»º³åÇø²»×ã"},
+    {ERROR_NOT_ENOUGH_MEMORY, "ÄÚ´æ²»×ã"},
+    {ERROR_OPERATION_ABORTED, "²Ù×÷ÒÑÖĞÖ¹"}
 };
 
 ProcessOpenTest::ProcessOpenTest() : targetPID(0), showTestWindow(true) {
-    // åˆå§‹åŒ–æ‰€æœ‰Windowsè¿›ç¨‹æƒé™ï¼ˆå®Œæ•´åˆ—è¡¨ï¼‰
+    // ³õÊ¼»¯ËùÓĞWindows½ø³ÌÈ¨ÏŞ£¨ÍêÕûÁĞ±í£©
     testItems = {
-        // åŸºç¡€æŸ¥è¯¢æƒé™
+        // »ù´¡²éÑ¯È¨ÏŞ
         {"PROCESS_QUERY_INFORMATION", PROCESS_QUERY_INFORMATION, "", false},
         {"PROCESS_QUERY_LIMITED_INFORMATION", PROCESS_QUERY_LIMITED_INFORMATION, "", false},
 
-        // å†…å­˜æ“ä½œæƒé™
+        // ÄÚ´æ²Ù×÷È¨ÏŞ
         {"PROCESS_VM_READ", PROCESS_VM_READ, "", false},
         {"PROCESS_VM_WRITE", PROCESS_VM_WRITE, "", false},
         {"PROCESS_VM_OPERATION", PROCESS_VM_OPERATION, "", false},
 
-        // è¿›ç¨‹æ§åˆ¶æƒé™
+        // ½ø³Ì¿ØÖÆÈ¨ÏŞ
         {"PROCESS_TERMINATE", PROCESS_TERMINATE, "", false},
         {"PROCESS_CREATE_THREAD", PROCESS_CREATE_THREAD, "", false},
         {"PROCESS_SET_INFORMATION", PROCESS_SET_INFORMATION, "", false},
         {"PROCESS_SUSPEND_RESUME", PROCESS_SUSPEND_RESUME, "", false},
 
-        // å¥æŸ„å’Œæ¨¡å—æƒé™
+        // ¾ä±úºÍÄ£¿éÈ¨ÏŞ
         {"PROCESS_DUP_HANDLE", PROCESS_DUP_HANDLE, "", false},
         {"PROCESS_CREATE_PROCESS", PROCESS_CREATE_PROCESS, "", false},
         {"PROCESS_SET_QUOTA", PROCESS_SET_QUOTA, "", false},
         {"PROCESS_SET_SESSIONID", PROCESS_SET_SESSIONID, "", false},
 
-        // ç»¼åˆæƒé™
+        // ×ÛºÏÈ¨ÏŞ
         {"PROCESS_ALL_ACCESS", PROCESS_ALL_ACCESS, "", false}
     };
 }
@@ -251,13 +453,13 @@ std::string ProcessOpenTest::GetErrorString(DWORD errorCode) {
     }
 
     std::stringstream ss;
-    ss << "æœªçŸ¥é”™è¯¯ (0x" << std::hex << errorCode << ")";
+    ss << "Î´Öª´íÎó (0x" << std::hex << errorCode << ")";
     return ss.str();
 }
 
 void ProcessOpenTest::RunTest(OpenProcessTestItem& item) {
     if (targetPID == 0) {
-        item.result = "è¯·è¾“å…¥ç›®æ ‡PID";
+        item.result = "ÇëÊäÈëÄ¿±êPID";
         item.tested = true;
         return;
     }
@@ -270,11 +472,11 @@ void ProcessOpenTest::RunTest(OpenProcessTestItem& item) {
 
     if (hProcess == NULL) {
         DWORD errorCode = GetLastError();
-        item.result = "å¤±è´¥: " + GetErrorString(errorCode);
+        item.result = "Ê§°Ü: " + GetErrorString(errorCode);
     }
     else {
         std::stringstream ss;
-        ss << "æˆåŠŸ: å¥æŸ„ 0x" << std::hex << (UINT_PTR)hProcess;
+        ss << "³É¹¦: ¾ä±ú 0x" << std::hex << (UINT_PTR)hProcess;
         item.result = ss.str();
         CloseHandle(hProcess);
     }
@@ -283,97 +485,96 @@ void ProcessOpenTest::RunTest(OpenProcessTestItem& item) {
 
 void ProcessOpenTest::ShowWindow() {
     if (!showTestWindow) return;
+    if (ImGui::TreeNode(C("´ò¿ª½ø³Ì¾ä±ú²âÊÔ"))) {
 
+        // ½á¹ûÏÔÊ¾±í¸ñ
+        if (ImGui::BeginTable("permission_table", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
+            ImGui::TableSetupColumn(C("È¨ÏŞÃû³Æ"), ImGuiTableColumnFlags_WidthFixed, 220);
+            ImGui::TableSetupColumn(C("È¨ÏŞÖµ(Ê®Áù½øÖÆ)"), ImGuiTableColumnFlags_WidthFixed, 120);
+            ImGui::TableSetupColumn(C("²âÊÔ½á¹û"), ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn(C("²Ù×÷"), ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableHeadersRow();
 
+            for (size_t i = 0; i < testItems.size(); ++i) {
+                auto& item = testItems[i];
+                ImGui::TableNextRow();
 
+                // È¨ÏŞÃû³Æ
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Text("%s", item.name.c_str());
 
-    // ç»“æœæ˜¾ç¤ºè¡¨æ ¼
-    if (ImGui::BeginTable("permission_table", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
-        ImGui::TableSetupColumn(C("æƒé™åç§°"), ImGuiTableColumnFlags_WidthFixed, 220);
-        ImGui::TableSetupColumn(C("æƒé™å€¼(åå…­è¿›åˆ¶)"), ImGuiTableColumnFlags_WidthFixed, 120);
-        ImGui::TableSetupColumn(C("æµ‹è¯•ç»“æœ"), ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn(C("æ“ä½œ"), ImGuiTableColumnFlags_WidthFixed, 80);
-        ImGui::TableHeadersRow();
+                // È¨ÏŞÖµ
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("0x%08X", item.accessRight);
 
-        for (size_t i = 0; i < testItems.size(); ++i) {
-            auto& item = testItems[i];
-            ImGui::TableNextRow();
-
-            // æƒé™åç§°
-            ImGui::TableSetColumnIndex(0);
-            ImGui::Text("%s", item.name.c_str());
-
-            // æƒé™å€¼
-            ImGui::TableSetColumnIndex(1);
-            ImGui::Text("0x%08X", item.accessRight);
-
-            // æµ‹è¯•ç»“æœï¼ˆå¸¦é¢œè‰²ï¼‰
-            ImGui::TableSetColumnIndex(2);
-            if (item.tested) {
-                if (item.result.find(C("æˆåŠŸ")) != std::string::npos) {
-                    ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "%s", C(item.result.c_str()));
+                // ²âÊÔ½á¹û£¨´øÑÕÉ«£©
+                ImGui::TableSetColumnIndex(2);
+                if (item.tested) {
+                    if (item.result.find(C("³É¹¦")) != std::string::npos) {
+                        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "%s", C(item.result.c_str()));
+                    }
+                    else {
+                        ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "%s", C(item.result.c_str()));
+                    }
                 }
                 else {
-                    ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "%s", C(item.result.c_str()));
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), C("Î´²âÊÔ"));
+                }
+
+                // µ¥¶À²âÊÔ°´Å¥
+                ImGui::TableSetColumnIndex(3);
+                if (ImGui::Button((C("²âÊÔ##" + std::to_string(i))))) {
+                    RunTest(item);
                 }
             }
-            else {
-                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), C("æœªæµ‹è¯•"));
-            }
 
-            // å•ç‹¬æµ‹è¯•æŒ‰é’®
-            ImGui::TableSetColumnIndex(3);
-            if (ImGui::Button((C("æµ‹è¯•##" + std::to_string(i))))) {
+            ImGui::EndTable();
+        }
+
+        // ²âÊÔ¿ØÖÆÇø
+        ImGui::BeginGroup();
+        if (ImGui::Button(C("Ö´ĞĞËùÓĞ²âÊÔ"))) {
+            for (auto& item : testItems) {
                 RunTest(item);
             }
         }
-
-        ImGui::EndTable();
-    }
-
-    // æµ‹è¯•æ§åˆ¶åŒº
-    ImGui::BeginGroup();
-    if (ImGui::Button(C("æ‰§è¡Œæ‰€æœ‰æµ‹è¯•"))) {
-        for (auto& item : testItems) {
-            RunTest(item);
+        ImGui::SameLine();
+        if (ImGui::Button(C("Çå¿Õ½á¹û"))) {
+            for (auto& item : testItems) {
+                item.result.clear();
+                item.tested = false;
+            }
         }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button(C("æ¸…ç©ºç»“æœ"))) {
-        for (auto& item : testItems) {
-            item.result.clear();
-            item.tested = false;
+        ImGui::SameLine();
+        if (ImGui::Button(C("¸´ÖÆËùÓĞ½á¹û"))) {
+            std::string allResults;
+            for (const auto& item : testItems) {
+                allResults += item.name + ": " + item.result + "\n";
+            }
+            ImGui::SetClipboardText(C(allResults.c_str()));
         }
+        ImGui::EndGroup();
+		ImGui::TreePop();
     }
-	ImGui::SameLine();
-    if (ImGui::Button(C("å¤åˆ¶æ‰€æœ‰ç»“æœ"))) {
-        std::string allResults;
-        for (const auto& item : testItems) {
-            allResults += item.name + ": " + item.result + "\n";
-        }
-        ImGui::SetClipboardText(C(allResults.c_str()));
-    }
-    ImGui::EndGroup();
-
 }
 
 
-//è¯¦ç»†ä¿¡æ¯ç®¡ç†æ–¹æ¡ˆ===============================================================================================
+//ÏêÏ¸ĞÅÏ¢¹ÜÀí·½°¸===============================================================================================
 void ProcessDetailManager::add(DWORD pid) {
-    // é¿å…æ·»åŠ é‡å¤PID
+    // ±ÜÃâÌí¼ÓÖØ¸´PID
     for (const auto& detail : processDetails) {
         if (detail->pid() == pid) {
-            kLog.warn(C("è¿›ç¨‹å·²åœ¨åˆ—è¡¨ä¸­ï¼ŒPID: " + std::to_string(pid)), C("ProcessDetailManager"));
+            kLog.warn(C("½ø³ÌÒÑÔÚÁĞ±íÖĞ£¬PID: " + std::to_string(pid)), C("ProcessDetailManager"));
             return;
         }
     }
-    // åˆå§‹åŒ–å¹¶æ·»åŠ è¿›ç¨‹è¯¦æƒ…
+    // ³õÊ¼»¯²¢Ìí¼Ó½ø³ÌÏêÇé
     processDetails.emplace_back(std::make_unique<kProcessDetail>(pid));
-    kLog.info(C("æ·»åŠ è¿›ç¨‹åˆ°è¯¦æƒ…åˆ—è¡¨ï¼ŒPID: " + std::to_string(pid)), C("ProcessDetailManager"));
+    kLog.info(C("Ìí¼Ó½ø³Ìµ½ÏêÇéÁĞ±í£¬PID: " + std::to_string(pid)), C("ProcessDetailManager"));
 }
 
 bool ProcessDetailManager::remove(DWORD pid) {
-    // æŸ¥æ‰¾å¹¶ç§»é™¤æŒ‡å®šPIDçš„è¿›ç¨‹
+    // ²éÕÒ²¢ÒÆ³ıÖ¸¶¨PIDµÄ½ø³Ì
     auto it = std::remove_if(processDetails.begin(), processDetails.end(),
         [pid](const std::unique_ptr<kProcessDetail>& detail) {
             return detail->pid() == pid;
@@ -381,16 +582,16 @@ bool ProcessDetailManager::remove(DWORD pid) {
 
     if (it != processDetails.end()) {
         processDetails.erase(it, processDetails.end());
-        kLog.info(C("ä»è¯¦æƒ…åˆ—è¡¨ç§»é™¤è¿›ç¨‹ï¼ŒPID: " + std::to_string(pid)), C("ProcessDetailManager"));
+        kLog.info(C("´ÓÏêÇéÁĞ±íÒÆ³ı½ø³Ì£¬PID: " + std::to_string(pid)), C("ProcessDetailManager"));
         return true;
     }
 
-    kLog.warn(C("æœªæ‰¾åˆ°è¿›ç¨‹ï¼Œç§»é™¤å¤±è´¥ï¼ŒPID: " + std::to_string(pid)), C("ProcessDetailManager"));
+    kLog.warn(C("Î´ÕÒµ½½ø³Ì£¬ÒÆ³ıÊ§°Ü£¬PID: " + std::to_string(pid)), C("ProcessDetailManager"));
     return false;
 }
 
 void ProcessDetailManager::renderAll() {
-    // æ¸²æŸ“æ‰€æœ‰è¿›ç¨‹çš„è¯¦æƒ…çª—å£
+    // äÖÈ¾ËùÓĞ½ø³ÌµÄÏêÇé´°¿Ú
     for (const auto& detail : processDetails) {
         detail->Render();
     }
