@@ -183,7 +183,7 @@ void kProcessDetail::Render() {
     ImGui::Text(C("进程用户: %s"), C(processUser.c_str()));
     ImGui::Text(C("管理员权限: %s"), isAdmin ? C("是") : C("否"));
     // 在Render()函数中添加
-    ImGui::Text(C("启动参数:"));ImGui::SameLine();
+    ImGui::Text(C("进程命令行:"));ImGui::SameLine();
     std::string cmdLine = commandLine;
     char cmdLineBuf[1024] = { 0 };
     strncpy(cmdLineBuf, C(cmdLine.c_str()), sizeof(cmdLineBuf) - 1);
