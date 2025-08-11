@@ -5,33 +5,104 @@
 #define CURRENT_MODULE "进程详细信息管理"
 
 
+typedef NTSTATUS(NTAPI* _NtQueryInformationProcess)(
+    HANDLE           ProcessHandle,
+    DWORD            ProcessInformationClass,
+    PVOID            ProcessInformation,
+    ULONG            ProcessInformationLength,
+    PULONG           ReturnLength);
+typedef struct _PROCESS_BASIC_INFORMATION {
+    NTSTATUS ExitStatus;
+    PVOID PebBaseAddress;
+    ULONG_PTR AffinityMask;
+    PVOID BasePriority;
+    ULONG_PTR UniqueProcessId;
+    ULONG_PTR InheritedFromUniqueProcessId;
+} PROCESS_BASIC_INFORMATION;
+typedef struct _PEB {
+    BYTE                          Reserved1[2];
+    BYTE                          BeingDebugged;
+    BYTE                          Reserved2[1];
+    PVOID                         Reserved3[2];
+    PVOID                         Ldr;
+    PVOID                         ProcessParameters;
+    PVOID                         Reserved4[3];
+    PVOID                         AtlThunkSListPtr;
+    PVOID                         Reserved5;
+    ULONG                         Reserved6;
+    PVOID                         Reserved7;
+    ULONG                         Reserved8;
+    ULONG                         AtlThunkSListPtr32;
+    PVOID                         Reserved9[45];
+    BYTE                          Reserved10[96];
+    PVOID                         PostProcessInitRoutine;
+    BYTE                          Reserved11[128];
+    PVOID                         Reserved12[1];
+    ULONG                         SessionId;
+} PEB, * PPEB;
+typedef struct _UNICODE_STRING {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR  Buffer;
+} UNICODE_STRING;
+typedef struct _RTL_USER_PROCESS_PARAMETERS {
+    BYTE           Reserved1[16];
+    PVOID          Reserved2[10];
+    UNICODE_STRING ImagePathName;
+    UNICODE_STRING CommandLine;
+} RTL_USER_PROCESS_PARAMETERS, * PRTL_USER_PROCESS_PARAMETERS;
 
 
 std::string kProcessDetail::GetCommandLine() {
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid());
-    if (hProcess == NULL) {
+    if (!hProcess) {
         return "无法打开进程 (权限不足)";
     }
-
-    // 首先获取命令行长度
-    DWORD cmdLineLength = 0;
-    GetProcessImageFileNameA(hProcess, NULL, 0); // 先触发失败获取所需长度
-    cmdLineLength = GetLastError() == ERROR_INSUFFICIENT_BUFFER ? GetLastError() : 0;
-
-    if (cmdLineLength == 0) {
+    _NtQueryInformationProcess NtQIP = (_NtQueryInformationProcess)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
+    if (!NtQIP) {
         CloseHandle(hProcess);
-        return "无法获取命令行长度";
+        return "GetProcAddress 失败: NtQueryInformationProcess API 不可用";
     }
 
-    // 分配缓冲区并获取命令行
-    std::vector<char> cmdLineBuf(cmdLineLength + 1);
-    if (GetProcessImageFileNameA(hProcess, cmdLineBuf.data(), cmdLineLength) == 0) {
+    // 获取 ProcessBasicInformation 以定位 PEB
+    PROCESS_BASIC_INFORMATION pbi;
+    ULONG len;
+    NTSTATUS status = NtQIP(hProcess, 0, &pbi, sizeof(pbi), &len);
+    if (status != 0) {
         CloseHandle(hProcess);
-        return "无法获取命令行参数";
+        return "无法获取进程信息";
     }
 
+    // 读取 PEB 地址
+    PEB peb;
+    if (!ReadProcessMemory(hProcess, pbi.PebBaseAddress, &peb, sizeof(peb), nullptr)) {
+        CloseHandle(hProcess);
+        return "无法读取 PEB";
+    }
+
+    // 读取进程参数
+    RTL_USER_PROCESS_PARAMETERS upp;
+    if (!ReadProcessMemory(hProcess, peb.ProcessParameters, &upp, sizeof(upp), nullptr)) {
+        CloseHandle(hProcess);
+        return "无法读取进程参数";
+    }
+
+    // 长度检查
+    if (upp.CommandLine.Length == 0 ||
+        upp.CommandLine.Length > 0xFFFF) {
+        CloseHandle(hProcess);
+        return "No command line";
+    }
+
+    // 读取命令行
+    std::wstring wcmd;
+    wcmd.resize(upp.CommandLine.Length / sizeof(WCHAR));
+    if (!ReadProcessMemory(hProcess, upp.CommandLine.Buffer, wcmd.data(), upp.CommandLine.Length, nullptr)) {
+        CloseHandle(hProcess);
+        return "无法读取命令行";
+    }
     CloseHandle(hProcess);
-    return std::string(cmdLineBuf.data());
+    return std::string(wcmd.begin(), wcmd.end());
 }
 
 
@@ -112,7 +183,7 @@ void kProcessDetail::Render() {
     ImGui::Text(C("进程用户: %s"), C(processUser.c_str()));
     ImGui::Text(C("管理员权限: %s"), isAdmin ? C("是") : C("否"));
     // 在Render()函数中添加
-    ImGui::Text(C("启动参数:"));ImGui::SameLine();
+    ImGui::Text(C("进程命令行:"));ImGui::SameLine();
     std::string cmdLine = commandLine;
     char cmdLineBuf[1024] = { 0 };
     strncpy(cmdLineBuf, C(cmdLine.c_str()), sizeof(cmdLineBuf) - 1);

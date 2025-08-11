@@ -1,35 +1,14 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="Main\Socket\KswordSelfSocket.cpp">
-      <Filter>Main\Socket</Filter>
-    </ClCompile>
     <ClCompile Include="Environment\Environment.cpp">
       <Filter>Environment</Filter>
-    </ClCompile>
-    <ClCompile Include="Main\ReKsword.cpp">
-      <Filter>Main</Filter>
-    </ClCompile>
-    <ClCompile Include="SubProc\KswordMain1.cpp">
-      <Filter>SubProc</Filter>
     </ClCompile>
     <ClCompile Include="Support\ksword.cpp">
       <Filter>Support</Filter>
     </ClCompile>
-    <ClCompile Include="CUIManage\KswordCUIManager.cpp">
-      <Filter>CUIManage</Filter>
-    </ClCompile>
     <ClCompile Include="Main\SupportFunction\MainSupportFunction.cpp">
       <Filter>Main\SupportFunction</Filter>
-    </ClCompile>
-    <ClCompile Include="SubProc\KswordMain7.cpp">
-      <Filter>SubProc</Filter>
-    </ClCompile>
-    <ClCompile Include="Main\Socket\KswordSelfSocket7.cpp">
-      <Filter>Main\Socket</Filter>
-    </ClCompile>
-    <ClCompile Include="Main\Security\security.cpp">
-      <Filter>Main\Security</Filter>
     </ClCompile>
     <ClCompile Include="Main\ShellFunction\Command-guimgr\Command-guimgr-enumwindow.cpp">
       <Filter>Main\ShellFunction\Command::guimgr</Filter>
@@ -40,15 +19,6 @@
     <ClCompile Include="Main\ShellFunction\Command-procmgr\Command-procmgr.cpp">
       <Filter>Main\ShellFunction\Command:procmgr</Filter>
     </ClCompile>
-    <ClCompile Include="SubProc\KswordMain2.cpp">
-      <Filter>SubProc</Filter>
-    </ClCompile>
-    <ClCompile Include="Main\Socket\KswordSelfSocket2.cpp">
-      <Filter>Main\Socket</Filter>
-    </ClCompile>
-    <ClCompile Include="Main\AVTest.cpp">
-      <Filter>Main</Filter>
-    </ClCompile>
     <ClCompile Include="Main\ShellFunction\Command-drivermgr\Command-drivermgr.cpp">
       <Filter>Main\ShellFunction\Command::drivermgr</Filter>
     </ClCompile>
@@ -58,10 +28,6 @@
     <ClCompile Include="Main\ShellFunction\Command-threadmgr\Command-threadmgr.cpp">
       <Filter>Main\ShellFunction\Command::threadmgr</Filter>
     </ClCompile>
-    <ClCompile Include="KswordDriver\KswordDriver.cpp">
-      <Filter>KswordDriver</Filter>
-    </ClCompile>
-    <ClCompile Include="AI\AiAPI.cpp" />
     <ClCompile Include="Main\ShellFunction\Command-avkill\Command-avkill.cpp" />
     <ClCompile Include="Main\ShellFunction\Command-handlemgr\Command-handlemgr.cpp" />
     <ClCompile Include="Main\Ksword5Main.cpp" />
@@ -86,7 +52,6 @@
     <ClCompile Include="Main\GUIFunction\Monitor\MonitorMain.cpp" />
     <ClCompile Include="Main\FileExplorer\ImGuiFileDialog.cpp" />
     <ClCompile Include="Main\GUIFunction\File\FileMain.cpp" />
-    <ClCompile Include="Main\STKmain.cpp" />
     <ClCompile Include="Main\SubProc\SecureDesktop.cpp" />
     <ClCompile Include="Main\GUIFunction\Network\ETW.cpp" />
     <ClCompile Include="Main\GUIFunction\Memory\MemoryMain.cpp" />
@@ -96,9 +61,6 @@
     <ClCompile Include="Main\GUIFunction\Process\ProcessInformation.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Main\Socket\KswordSelfSocket.h">
-      <Filter>Main\Socket</Filter>
-    </ClInclude>
     <ClInclude Include="Environment\Environment.h">
       <Filter>Environment</Filter>
     </ClInclude>
@@ -115,9 +77,6 @@
       <Filter>Main\SupportFunction</Filter>
     </ClInclude>
     <ClInclude Include="Main\KswordTotalHead.h" />
-    <ClInclude Include="Main\Security\security.h">
-      <Filter>Main\Security</Filter>
-    </ClInclude>
     <ClInclude Include="Main\ShellFunction\Command-guimgr\Command-guimgr.h">
       <Filter>Main\ShellFunction\Command::guimgr</Filter>
     </ClInclude>
@@ -130,9 +89,6 @@
     <ClInclude Include="KswordSelfManager.h">
       <Filter>Main\ShellFunction\Command::selfmgr</Filter>
     </ClInclude>
-    <ClInclude Include="CUIManage\KswordCUIManager.h">
-      <Filter>CUIManage</Filter>
-    </ClInclude>
     <ClInclude Include="Main\ShellFunction\Command-drivermgr\Command-drivermgr.h">
       <Filter>Main\ShellFunction\Command::drivermgr</Filter>
     </ClInclude>
@@ -142,10 +98,6 @@
     <ClInclude Include="Main\ShellFunction\Command-threadmgr\Command-threadmgr.h">
       <Filter>Main\ShellFunction\Command::threadmgr</Filter>
     </ClInclude>
-    <ClInclude Include="KswordDriver\KswordDriver.h">
-      <Filter>KswordDriver</Filter>
-    </ClInclude>
-    <ClInclude Include="AI\AiAPI.h" />
     <ClInclude Include="Main\ShellFunction\Command-avkill\Command-avkill.h" />
     <ClInclude Include="Main\ShellFunction\Command-handlemgr\Command-handlemgr.h" />
     <ClInclude Include="imgui\imconfig.h" />

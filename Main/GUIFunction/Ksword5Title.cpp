@@ -102,7 +102,16 @@ inline void Ksword5Title() {
         if (fixed_height_dock_id == 0) {
             // 获取主dock空间（假设你的主窗口有一个dockspace）
             ImGuiID main_dockspace_id = ImGui::GetID("MainDockSpace");
-
+            ImGuiDockNode* main_node = ImGui::DockBuilderGetNode(main_dockspace_id);
+            if (main_node == nullptr) {
+                // 首次创建主dock节点（确保节点存在）
+                main_dockspace_id = ImGui::DockBuilderAddNode(main_dockspace_id, ImGuiDockNodeFlags_DockSpace);
+                main_node = ImGui::DockBuilderGetNode(main_dockspace_id);
+                // 初始化主节点大小为当前视口大小
+                ImGuiViewport* viewport = ImGui::GetMainViewport();
+                main_node->Size = viewport->Size;
+                main_node->Pos = viewport->Pos;
+            }
             // 在主dock空间中创建一个独立的垂直容器
             fixed_height_dock_id = ImGui::DockBuilderSplitNode(
                 main_dockspace_id,
