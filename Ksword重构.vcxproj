@@ -192,7 +192,6 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="AI\AiAPI.cpp" />
     <ClCompile Include="imgui\imgui.cpp" />
     <ClCompile Include="imgui\imgui_demo.cpp" />
     <ClCompile Include="imgui\imgui_draw.cpp" />
@@ -200,8 +199,6 @@
     <ClCompile Include="imgui\imgui_impl_win32.cpp" />
     <ClCompile Include="imgui\imgui_tables.cpp" />
     <ClCompile Include="imgui\imgui_widgets.cpp" />
-    <ClCompile Include="KswordDriver\KswordDriver.cpp" />
-    <ClCompile Include="Main\AVTest.cpp" />
     <ClCompile Include="Main\FileExplorer\ImGuiFileDialog.cpp" />
     <ClCompile Include="Main\GUIFunction\DLL\DLLMain.cpp" />
     <ClCompile Include="Main\GUIFunction\File\FileMain.cpp" />
@@ -229,25 +226,14 @@
     <ClCompile Include="Main\ShellFunction\Command-netmgr\Command-netmgr.cpp" />
     <ClCompile Include="Main\ShellFunction\Command-procmgr\Command-procmgr.cpp" />
     <ClCompile Include="Main\ShellFunction\Command-threadmgr\Command-threadmgr.cpp" />
-    <ClCompile Include="Main\STKmain.cpp" />
     <ClCompile Include="Main\SubProc\SecureDesktop.cpp" />
     <ClCompile Include="Main\SupportFunction\Ksword5SupportFunction.cpp" />
     <ClCompile Include="Main\TextEditor\TextEditor.cpp" />
     <ClCompile Include="Support\ksword.cpp" />
-    <ClCompile Include="CUIManage\KswordCUIManager.cpp" />
-    <ClCompile Include="SubProc\KswordMain1.cpp" />
-    <ClCompile Include="SubProc\KswordMain2.cpp" />
-    <ClCompile Include="Main\Socket\KswordSelfSocket.cpp" />
-    <ClCompile Include="Main\Socket\KswordSelfSocket7.cpp" />
     <ClCompile Include="Main\SupportFunction\MainSupportFunction.cpp" />
-    <ClCompile Include="Main\ReKsword.cpp" />
     <ClCompile Include="Environment\Environment.cpp" />
-    <ClCompile Include="SubProc\KswordMain7.cpp" />
-    <ClCompile Include="Main\Security\security.cpp" />
-    <ClCompile Include="Main\Socket\KswordSelfSocket2.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="AI\AiAPI.h" />
     <ClInclude Include="C:\Users\33251\Downloads\Driver.h" />
     <ClInclude Include="imgui\imconfig.h" />
     <ClInclude Include="imgui\imgui.h" />
@@ -257,7 +243,6 @@
     <ClInclude Include="imgui\imstb_rectpack.h" />
     <ClInclude Include="imgui\imstb_textedit.h" />
     <ClInclude Include="imgui\imstb_truetype.h" />
-    <ClInclude Include="KswordDriver\KswordDriver.h" />
     <ClInclude Include="Main\Driver.h" />
     <ClInclude Include="Main\FileExplorer\dirent\dirent.h" />
     <ClInclude Include="Main\FileExplorer\ImGuiFileDialog.h" />
@@ -285,9 +270,7 @@
     <ClInclude Include="Main\ShellFunction\Command-netmgr\Command-netmgr.h" />
     <ClInclude Include="Main\ShellFunction\Command-procmgr\Command-procmgr.h" />
     <ClInclude Include="Main\ShellFunction\Command-threadmgr\Command-threadmgr.h" />
-    <ClInclude Include="CUIManage\KswordCUIManager.h" />
     <ClInclude Include="KswordSelfManager.h" />
-    <ClInclude Include="Main\Socket\KswordSelfSocket.h" />
     <ClInclude Include="Main\stb_image.h" />
     <ClInclude Include="Main\stb_image_write.h" />
     <ClInclude Include="Main\SubProc\SubProc.h" />
@@ -297,7 +280,6 @@
     <ClInclude Include="Environment\Environment.h" />
     <ClInclude Include="Main\KswordTotalHead.h" />
     <ClInclude Include="Main\SupportFunction\MainSupportFunction.h" />
-    <ClInclude Include="Main\Security\security.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="imgui.ini" />

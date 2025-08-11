@@ -2,30 +2,10 @@
 //#include <d3d9.h>
 
 #include "../support/ksword.h"
-#ifdef KSWORD_WITH_COMMAND
-#include "../main/Security/security.h"
-#endif
+
 
 #include "../environment/Environment.h"
-#ifdef KSWORD_WITH_COMMAND
-#include "../main/Socket/KswordSelfSocket.h"
-#include "../CUImanage/KswordCUIManager.h"
-#include "../Main/SupportFunction/MainSupportFunction.h"
-#include "../Main/ShellFunction/Command-apt/Command-apt.h"
-#include "../Main/ShellFunction/Command-cd/Command-cd.h"
-#include "../Main/ShellFunction/Command-guimgr/Command-guimgr.h"
-#include "../Main/ShellFunction/Command-help/Command-help.h"
-#include "../Main/ShellFunction/Command-procmgr/Command-procmgr.h"
-#include "../Main/ShellFunction/Command-drivermgr/Command-drivermgr.h"
-#include "../Main/ShellFunction/Command-handlemgr/Command-handlemgr.h"
-#include "../KswordSelfManager.h"
-#include "../Main/ShellFunction/Command-avkill/Command-avkill.h"
-#include "../Main/ShellFunction/Command-netmgr/Command-netmgr.h"
-#include "../Main/ShellFunction/Command-threadmgr/Command-threadmgr.h"
-#include "../KswordDriver/KswordDriver.h"
-#include "../AI/AiAPI.h"
-#include "../resource.h"
-#endif
+
 #include "GUIFunction/GUIFunction.h"
 
 #include "../imgui/imconfig.h"
