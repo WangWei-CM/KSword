@@ -1,6 +1,8 @@
 ﻿
 #include <d3d9.h>
-#include <gdiplus.h> // 需链接gdiplus.lib
+#include <Shlwapi.h>
+#pragma comment(lib, "shlwapi.lib")
+#include <gdiplus.h> 
 #pragma comment(lib, "gdiplus.lib")
 #include "KswordTotalHead.h"
 extern int KswordRegToolBarWindow();
@@ -26,6 +28,11 @@ std::string currentFilePath;
 extern IDirect3DTexture9* g_IconTexture;
 extern ImTextureID g_IconImTextureID ;
 
+//保留控制台原始样式
+LONG originalConsoleStyle = 0;
+WORD originalTextAttribute = 0;
+
+
 // 从资源加载图标并创建 DirectX 纹理
 bool LoadIconTexture(HINSTANCE hInstance, IDirect3DDevice9* pDevice);
 bool ExtractGUIINIResourceToFile();
@@ -33,7 +40,7 @@ bool DeleteReleasedGUIINIFile();
 bool DeleteReleasedD3DX9DLLFile();
 // Data
 static LPDIRECT3D9              g_pD3D = nullptr;
-static LPDIRECT3DDEVICE9        g_pd3dDevice = nullptr;
+/*static*/ LPDIRECT3DDEVICE9        g_pd3dDevice = nullptr;
 static bool                     g_DeviceLost = false;
 static UINT                     g_ResizeWidth = 0, g_ResizeHeight = 0;
 static D3DPRESENT_PARAMETERS    g_d3dpp = {};
@@ -43,9 +50,7 @@ bool Ksword_main_should_exit = false;
 
 bool SavedGuiIni = false;// 是否保存过ini文件
 
-#ifdef KSWORD_WITH_COMMAND
-extern int KSCMDmain(int, char* []);
-#endif
+
 #include <D3dx9tex.h>
 #pragma comment(lib, "D3dx9")
 
@@ -162,7 +167,7 @@ private:
 
     // ImGui 之前的初始化和 SplashScreen Window
     int PreInitBeforeImGui()
-    {/*
+    {
         SetDllDirectoryW(L".");
         HRSRC D3DX9DLLResource = FindResource(NULL, MAKEINTRESOURCE(IDR_DLL1), _T("DLL"));
         if (D3DX9DLLResource == NULL)
@@ -213,8 +218,8 @@ private:
             return 0;
         }
 
-        KswordD3DX9dllRelease.close();*/
-        //m_hD3DX9Module = LoadLibrary(_T("d3dx9_43.dll"));
+        KswordD3DX9dllRelease.close();
+        m_hD3DX9Module = LoadLibrary(_T("d3dx9_43.dll"));
         {//检查用户是否保存过配置文件
             char szExePath[MAX_PATH];
             if (GetModuleFileNameA(NULL, szExePath, MAX_PATH) == 0)
@@ -227,82 +232,65 @@ private:
             if (GetFileAttributesA(strOutputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
                 SavedGuiIni = true;
         }
+        originalConsoleStyle = GetWindowLong(GetConsoleWindow(), GWL_STYLE);
+        // 保存原始文本属性
         HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_SCREEN_BUFFER_INFO csbi;
+        if (GetConsoleScreenBufferInfo(hOut, &csbi)) originalTextAttribute = csbi.wAttributes;
+		// 设置控制台窗口样式==========================================================================
         if (hOut == INVALID_HANDLE_VALUE) {
             std::cerr << "获取标准输出句柄失败!" << std::endl;
             return 1;
         }
-
-        // 设置控制台缓冲区大小为40x12
-        SMALL_RECT srctWindow = { 0, 0, 39, 11 }; // 坐标从0开始，宽度40和高度12对应的最大索引是39和11
+        SMALL_RECT srctWindow = { 0, 0, 39, 11 };
         if (!SetConsoleWindowInfo(hOut, TRUE, &srctWindow)) {
             std::cerr << "设置窗口信息失败!" << std::endl;
             return 1;
         }
-
         COORD coord = { 40, 12 }; // 缓冲区大小设置为40列12行
         if (!SetConsoleScreenBufferSize(hOut, coord)) {
             std::cerr << "设置缓冲区大小失败!" << std::endl;
             return 1;
         }
-
-        // 获取当前控制台字体信息
         CONSOLE_FONT_INFOEX cfi{};
         cfi.cbSize = sizeof(cfi);
         if (!GetCurrentConsoleFontEx(hOut, FALSE, &cfi)) {
             std::cerr << "获取当前字体信息失败!" << std::endl;
             return 1;
         }
-
-        // 获取字体尺寸
         int fontWidth = cfi.dwFontSize.X;
         int fontHeight = cfi.dwFontSize.Y;
-
-        // 获取屏幕尺寸
         int screenWidth = GetSystemMetrics(SM_CXSCREEN);
         int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-
-        // 计算控制台窗口像素尺寸
         int windowWidth = 40 * fontWidth;
         int windowHeight = 12 * fontHeight;
-
-        // 计算窗口左上角位置（居中）
         int windowX = (screenWidth - windowWidth) / 2;
         int windowY = (screenHeight - windowHeight) / 2;
-
-        // 获取控制台窗口句柄
         HWND Consolehwnd = GetConsoleWindow();
         if (!Consolehwnd) {
             std::cerr << "获取控制台窗口句柄失败!" << std::endl;
             return 1;
         }
-
-        // 隐藏标题栏 (WS_POPUP 样式没有标题栏和边框)
         LONG Consolestyle = GetWindowLong(Consolehwnd, GWL_STYLE);
         Consolestyle &= ~WS_OVERLAPPEDWINDOW; // 移除标准窗口样式
         Consolestyle |= WS_POPUP;             // 添加弹出窗口样式
         SetWindowLong(Consolehwnd, GWL_STYLE, Consolestyle);
-
-        // 应用新样式
         SetWindowPos(
             Consolehwnd, NULL, windowX, windowY,
             windowWidth, windowHeight,
             SWP_FRAMECHANGED | SWP_SHOWWINDOW
         );
-
-        // 设置白色背景 (黑底白字)
         WORD textAttribute = BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE;
         if (!SetConsoleTextAttribute(hOut, textAttribute)) {
             std::cerr << "设置颜色属性失败!" << std::endl;
             return 1;
         }
-
-        // 清除屏幕并填充白色背景
         COORD origin = { 0, 0 };
         DWORD charsWritten;
         FillConsoleOutputCharacter(hOut, ' ', 40 * 12, origin, &charsWritten);
         FillConsoleOutputAttribute(hOut, textAttribute, 40 * 12, origin, &charsWritten);
         system("cls");
+        //绘制假UI界面=====================================================================================
         for (int i = 1; i <= 40 * 12; i++) {
             std::cout << " ";
         }
@@ -386,12 +374,13 @@ private:
         }
         ReleaseDC(GetConsoleWindow(), hdc);
         DestroyIcon(hIcon);
+
         return 0;
     }
 
     int initImGui() {
 
-        std::thread( KswordRegToolBarWindow).detach();
+        //std::thread( KswordRegToolBarWindow).detach();
         ::RegisterClassExW(&wc);
         m_hMainWnd = ::CreateWindowW(
             wc.lpszClassName,
@@ -464,23 +453,39 @@ private:
         //io.Fonts->AddFontFromFileTTF("../../misc/fonts/DroidSans.ttf", 16.0f);
         //io.Fonts->AddFontFromFileTTF("../../misc/fonts/Roboto-Medium.ttf", 16.0f);
         //io.Fonts->AddFontFromFileTTF("../../misc/fonts/Cousine-Regular.ttf", 15.0f);
-        ImFont* font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\msyh.ttc", 18.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-        LOGOfont = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\consola.ttf", 72.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-        IM_ASSERT(font != nullptr);
+        //LOGOfont = io.Fonts->AddFontFromFileTTF("%SYSTEMDRIVE%\\Windows\\Fonts\\consola.ttf", 72.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
+        // 先获取系统盘路径
+        char systemDrive[4]; // 足够存储 "C:" 这类路径
+        GetEnvironmentVariableA("SYSTEMDRIVE", systemDrive, sizeof(systemDrive));
+        std::string logoFontPath = std::string(systemDrive) + "\\Windows\\Fonts\\consola.ttf";
+        std::string FontPath = std::string(systemDrive) + "\\Windows\\Fonts\\msyh.ttc";
+        ImFont* font = io.Fonts->AddFontFromFileTTF(FontPath.c_str(), 18.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
+        LOGOfont = io.Fonts->AddFontFromFileTTF(logoFontPath.c_str(), 72.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
+
+        //IM_ASSERT(font != nullptr);
+        {
+            WCHAR exePath[MAX_PATH];
+            if (GetModuleFileNameW(NULL, exePath, MAX_PATH) == 0) return false;
+            if (!PathRemoveFileSpecW(exePath)) return false;
+            if (!SetCurrentDirectoryW(exePath))return false;
+        }
+
         ImGui::LoadIniSettingsFromDisk("KswordGUI.ini");  // 动态加载布局
         // Main loop
         bool m_mainWindowClosed = false;
 #ifdef KSWORD_GUI_USE_BACKGROUND
         // 加载背景纹理
-        ret = LoadTextureFromFile("C:\\Users\\WangWei_CM\\Desktop\\Ksword5.0\\x64\\Release\\fengyuanwanye.jpg", &my_texture, &my_image_width, &my_image_height);
+        ret = LoadTextureFromFile("%SYSTEMDRIVE%\\Users\\WangWei_CM\\Desktop\\Ksword5.0\\x64\\Release\\fengyuanwanye.jpg", &my_texture, &my_image_width, &my_image_height);
 #endif
         m_editor.SetLanguageDefinition(TextEditor::LanguageDefinition::CPlusPlus());
         m_editor.SetText("// Welcome to Text Editor\n#include <iostream>\n\nint main() {\n  std::cout << \"Hello World!\\n\";\n  return 0;\n}");
 
         LoadIconTexture(wc.hInstance, g_pd3dDevice);
-        //FreeConsole();
-        //AllocConsole();
-         return 0;
+
+        
+
+
+        return 0;
     }
 
     void mainLoop()
@@ -740,7 +745,40 @@ private:
 
         if (!m_runOnceHideMainWnd) {
             m_runOnceHideMainWnd = true;
-            HideWindow();
+            COORD coord = { 80, 25 };
+            if (!SetConsoleScreenBufferSize(GetStdHandle(STD_OUTPUT_HANDLE), coord)) {
+                std::cerr << "设置缓冲区大小失败!" << std::endl;
+                return;
+            }
+            if (GetConsoleWindow() && originalConsoleStyle != 0) {
+                // 恢复原始窗口样式
+                SetWindowLong(GetConsoleWindow(), GWL_STYLE, originalConsoleStyle);
+                CONSOLE_FONT_INFOEX cfi{};
+                cfi.cbSize = sizeof(cfi);
+                if (!GetCurrentConsoleFontEx(GetStdHandle(STD_OUTPUT_HANDLE), FALSE, &cfi)) {
+                    std::cerr << "获取当前字体信息失败!" << std::endl;
+                    return;
+                }
+                int fontWidth = cfi.dwFontSize.X;
+                int fontHeight = cfi.dwFontSize.Y;
+                int windowWidth = 80 * fontWidth;
+                int windowHeight = 25 * fontHeight;
+                // 应用样式变更
+                SetWindowPos(
+                    GetConsoleWindow(), NULL, 0, 0, windowWidth, windowHeight,
+                    SWP_NOMOVE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
+                );
+            }
+            if (originalTextAttribute != 0) {
+                SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), originalTextAttribute);
+            }
+            // 清屏并重置光标位置
+            system("cls");
+            {
+                COORD origin = { 0, 0 };
+                SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), origin);
+            }
+            KPrintLogo();
         }
     }
 
@@ -767,7 +805,7 @@ private:
         Gdiplus::GdiplusShutdown(s_gdiplusToken);
         if(!SavedGuiIni)
 			DeleteReleasedGUIINIFile();//如果用户没有保存过配置文件那么删除释放的配置文件
-        //FreeLibrary(m_hD3DX9Module);
+        FreeLibrary(m_hD3DX9Module);
         DeleteReleasedD3DX9DLLFile();
     }
 

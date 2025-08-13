@@ -1411,7 +1411,7 @@ int FreeSpaceOfDrive(char driveLetter) {
     ULARGE_INTEGER freeBytesAvailable;
     ULARGE_INTEGER totalNumberOfBytes;
     ULARGE_INTEGER totalNumberOfFreeBytes;
-    // 构建驱动器路径，如 "C:\"
+    // 构建驱动器路径，如 "%SYSTEMDRIVE%\"
     wchar_t drivePath[4] = { driveLetter, ':', '\\', '\0' };
     //如果你是dev-c++编译者，请启用char而不是wchar_t
     //char drivePath[4] = { driveLetter, ':', '\\', '\0' };
@@ -1551,7 +1551,7 @@ void Ktasklist()
     do
     {
         std::string processName1 = WstringToString(pe.szExeFile);
-        cprint("Proc:", 2, 0); std::cout << processName1 << "\t"; cprint("PID:", 1, 0); std::cout << pe.th32ProcessID;
+        cprint("Pro%SYSTEMDRIVE%", 2, 0); std::cout << processName1 << "\t"; cprint("PID:", 1, 0); std::cout << pe.th32ProcessID;
         if (Process32Next(hSnapshot, &pe)){
             std::string processName2 = WstringToString(pe.szExeFile);
             std::cout << "\t";cprint("Proc:", 2, 0);std::cout << processName2 << "\t"; cprint("PID:", 1, 0);std::cout << pe.th32ProcessID << std::endl;

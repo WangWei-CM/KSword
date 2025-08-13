@@ -420,7 +420,7 @@ inline void Ksword5Title() {
     SetStyle(1);
     ImGui::Button(C("R3"), buttonSize); ImGui::SameLine();
 
-    SetStyle(AuthName == "SYSTEM");
+    SetStyle(!strcmp(AuthName.c_str(), "SYSTEM"));
     if (ImGui::Button(C("SYSTEM"), buttonSize)) {
         if (!IsAdmin()) {
             if (RequestAdmin(StringToWString(GetSelfPath())) == KSWORD_ERROR_EXIT) {

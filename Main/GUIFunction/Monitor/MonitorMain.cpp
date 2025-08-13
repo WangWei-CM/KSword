@@ -2038,7 +2038,7 @@ void KswordMonitorMain() {
     // [NEW] 限高的子窗口，避免挤压下面的事件表
     // 高度按 ~8 行控件估算，你也可以做成配置项
     const float rowH = ImGui::GetTextLineHeightWithSpacing();
-    const float childH = rowH * 8.0f + ImGui::GetStyle().FramePadding.y * 2.0f;
+    const float childH = rowH * 8.0f + ImGui::GetStyle().FramePadding.y *  1.0f;
     if (ImGui::BeginChild("EventTypeList", ImVec2(0, childH), true,
         ImGuiWindowFlags_AlwaysVerticalScrollbar)) {
 
