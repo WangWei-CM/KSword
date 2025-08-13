@@ -2,7 +2,7 @@
 #include "GUIfunction.h"
 std::string protocolText = C("该版本用户使用协议\n");
 
-std::vector<std::string> coreDevelopers = {/* "A.b.c", "D.e.f", "G.h.i", "更多核心开发人员..."*/ };
+std::vector<std::string> coreDevelopers = { "WangWei_CM.", "wwwab123", "LianYou_Alex" };
 std::vector<std::string> contributors = {/* C("贡献者1"), C("贡献者2")*/};
 std::vector<std::string> donors = { /*C("捐赠者1"), C("捐赠者2") */};
 
@@ -116,6 +116,7 @@ inline void KswordGUIShowStatus() {
     ImGui::NextColumn();
     if (ImGui::Button(C("开发者QQ群"))) {
         // 处理按钮点击事件
+        ShellExecute(NULL, L"open", L"https://qm.qq.com/q/FvM86aiPK2", NULL, NULL, SW_SHOWNORMAL);
     }
     ImGui::NextColumn();
     ImGui::Spacing();

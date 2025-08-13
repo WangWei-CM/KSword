@@ -222,7 +222,6 @@
     <ClCompile Include="Main\SupportFunction\Ksword5SupportFunction.cpp" />
     <ClCompile Include="Main\TextEditor\TextEditor.cpp" />
     <ClCompile Include="Support\ksword.cpp" />
-    <ClCompile Include="Main\SupportFunction\MainSupportFunction.cpp" />
     <ClCompile Include="Environment\Environment.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -262,6 +261,7 @@
     <ClInclude Include="Main\SupportFunction\MainSupportFunction.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="D3DX9_43.dll" />
     <None Include="imgui.ini" />
     <None Include="KswordGUI.ini" />
     <None Include="packages.config" />

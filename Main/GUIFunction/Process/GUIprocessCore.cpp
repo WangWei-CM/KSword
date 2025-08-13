@@ -1,5 +1,8 @@
 #include "../../KswordTotalHead.h"
 #include "Process.h"
+#define CURRENT_MODULE "进程核心管理"
+extern LPDIRECT3DTEXTURE9 GetCachedProcessIcon(DWORD pid);
+
 
 extern BOOL TerminateAllThreads(HANDLE hProcess);
 extern BOOL NtTerminate(HANDLE hProcess);
@@ -12,8 +15,52 @@ std::string WideCharToMultiByte(const std::wstring& wstr) {
     return str;
 }
 
+// GUIprocessCore.cpp 新增函数
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
 
-// 通过线程ID初始化
+void kProcess::UpdateMemoryInfo() {
+
+}
+// GUIprocessCore.cpp 新增函数
+// 文件顶部添加常量定义（或在类声明中添加）
+const double FILETIME_SECOND_FACTOR = 10000000.0;  // 100ns = 10^-7秒的转换因子
+
+
+    static uint64_t FileTimeToUInt64(const FILETIME& ft) {
+        return (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    }
+// 在构造函数中初始化核心数
+
+    static uint64_t convert_time_format(const FILETIME* ftime)
+    {
+        LARGE_INTEGER li;
+
+        li.LowPart = ftime->dwLowDateTime;
+        li.HighPart = ftime->dwHighDateTime;
+        return li.QuadPart;
+    }
+
+double kProcess::UpdateCPUUsage() {
+    ULONGLONG lastKernel_ = 0, lastUser_ = 0;
+    ULONGLONG lastTick_ = 0;
+    FILETIME createTime, exitTime, kernelTime, userTime;
+    if (!GetProcessTimes(handle, &createTime, &exitTime, &kernelTime, &userTime))
+        return -1;
+
+    ULONGLONG currentKernel = *(ULONGLONG*)&kernelTime;
+    ULONGLONG currentUser = *(ULONGLONG*)&userTime;
+    ULONGLONG delta = (currentKernel + currentUser) - (lastKernel_ + lastUser_);
+
+    // 计算时间差（单位：100纳秒）
+    ULONGLONG timePassed = GetTickCount64() - lastTick_;
+    lastTick_ = GetTickCount64();
+    lastKernel_ = currentKernel;
+    lastUser_ = currentUser;
+
+    if (timePassed == 0) return 0.0f;
+    return (delta / 10000.0f) / timePassed * 100.0f; // 转换为百分比
+}
 kThread::kThread(DWORD tid) : hThread(NULL), TID(tid), priority(0), statusCode(0) {
     // 通过线程ID打开线程句柄（需要THREAD_QUERY_INFORMATION权限）
     hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, tid);
@@ -226,7 +273,9 @@ void KillProcessByTaskkill(int pid) {
 	return;
 }
 
-kProcess::kProcess(DWORD pid) : PID(pid), handle(INVALID_HANDLE_VALUE), isAdmin(false) {
+kProcess::kProcess(DWORD pid) : PID(pid), handle(INVALID_HANDLE_VALUE), isAdmin(false)
+, cpuUsage(0.0)                  // CPU使用率初始化为0
+{
     handle = GetProcessHandleByPID(pid);
     if (handle != INVALID_HANDLE_VALUE) {
         // 获取进程名称并赋值给name
@@ -243,11 +292,22 @@ kProcess::kProcess(DWORD pid) : PID(pid), handle(INVALID_HANDLE_VALUE), isAdmin(
 
         // 获取进程所属用户名称
         AuthName = GetProcessUserName(handle);
+        UpdateMemoryInfo();    // 新增：初始化内存信息
+        cpuUsage=UpdateCPUUsage();      // 新增：初始化CPU信息
+
+        //GetCachedProcessIcon(PID);
     }
 }
+void kProcess::UpdateStats() {
+    UpdateMemoryInfo();
+    cpuUsage=UpdateCPUUsage();
+}
+
 
 // 构造函数：通过进程句柄初始化
-kProcess::kProcess(HANDLE hProc) : handle(hProc), isAdmin(false), PID(0) {
+kProcess::kProcess(HANDLE hProc) : handle(hProc), isAdmin(false), PID(0)
+, cpuUsage(0.0)                  // CPU使用率初始化为0
+{
     if (handle != INVALID_HANDLE_VALUE && handle != NULL) {
         PID = GetProcessId(hProc);
         name = GetProcessName();
@@ -263,6 +323,9 @@ kProcess::kProcess(HANDLE hProc) : handle(hProc), isAdmin(false), PID(0) {
 
         // 获取进程所属用户名称
         AuthName = GetProcessUserName(handle);
+        UpdateMemoryInfo();    // 新增：初始化内存信息
+        cpuUsage=UpdateCPUUsage();      // 新增：初始化CPU信息
+        //GetCachedProcessIcon(PID);
     }
 }
 bool kProcess::Terminate(kProcKillMethod method, UINT uExitCode)
@@ -425,3 +488,4 @@ bool kProcess::IsAdmin() const
 {
     return isAdmin;
 }
+#undef CURRENT_MODULE   

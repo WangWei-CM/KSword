@@ -7,7 +7,7 @@
 ProcessDetailManager kProcDtl;
 
 
-
+static std::unordered_map<DWORD, LPDIRECT3DTEXTURE9> g_ProcessIconTextures;
 // 排序类型
 enum SortType {
     SortType_Name,
@@ -15,7 +15,7 @@ enum SortType {
     SortType_User,
     SortType_None
 };
-std::vector<kProcess> GetProcessList();
+void GetProcessList();
 static char filter_text[128] = "";
 static SortType current_sort = SortType_PID;
 static bool sort_ascending = true;
@@ -31,7 +31,7 @@ static std::wstring g_workingDir;          // 工作目录
 static STARTUPINFOW g_startupInfo = { 0 };   // STARTUPINFO
 static PROCESS_INFORMATION g_procInfo = { 0 };// PROCESS_INFORMATION
 // 全局输入框变量（扩大作用域）
-static char modulePathUtf8[1024] = "C:\\Windows\\System32\\cmd.exe";
+static char modulePathUtf8[1024] = "%SYSTEMDRIVE%\\Windows\\System32\\cmd.exe";
 static char cmdLineUtf8[1024] = "";
 static char workDirUtf8[1024] = "";
 static char envPid[32] = "";
@@ -66,7 +66,166 @@ static bool flagStartfUseStdHandles = false;
 static int showWindowMode = SW_SHOW;
 
 // 全局状态
-static std::vector<kProcess> dummy_processes = GetProcessList();
+static std::vector<kProcess> dummy_processes;
+
+// 从文件路径提取16×16图标（返回HICON，需手动释放）
+HICON Get16x16IconFromPath(const std::wstring& path) {
+    // 方案1：使用SHGetFileInfo提取文件关联图标
+    SHFILEINFOW shfi = { 0 };
+    DWORD_PTR res = SHGetFileInfoW(
+        path.c_str(),
+        0,
+        &shfi,
+        sizeof(shfi),
+        SHGFI_ICON | SHGFI_SMALLICON // SMALLICON对应16×16
+    );
+    if (res != 0) {
+        return shfi.hIcon; // 成功获取16×16图标
+    }
+
+    // 方案2：若失败，使用系统默认应用程序图标
+    return (HICON)LoadImageW(
+        NULL,
+        IDI_APPLICATION,
+        IMAGE_ICON,
+        16, 16, // 强制16×16尺寸
+        LR_SHARED
+    );
+}
+
+/**
+ * 将HICON（16×16图标）转换为DX9纹理
+ * @param hIcon 图标句柄（需提前获取16×16尺寸）
+ * @return 成功返回IDirect3DTexture9*，失败返回nullptr
+ */
+extern LPDIRECT3DDEVICE9        g_pd3dDevice;
+LPDIRECT3DTEXTURE9 IconToD3D9Texture(HICON hIcon) {
+    if (!g_pd3dDevice || !hIcon) return nullptr;
+
+    // 1. 创建16×16的D3D纹理（格式：A8R8G8B8，带alpha通道）
+    LPDIRECT3DTEXTURE9 pTexture = nullptr;
+    HRESULT hr = g_pd3dDevice->CreateTexture(
+        16, 16,          // 宽×高（固定16×16）
+        1,               // 层级（仅1级）
+        D3DUSAGE_DYNAMIC, // 动态纹理（可锁定更新）
+        D3DFMT_A8R8G8B8, // 像素格式（内存中实际为BGRA顺序）
+        D3DPOOL_DEFAULT, // 默认内存池
+        &pTexture,
+        nullptr
+    );
+    if (FAILED(hr)) {
+        kLog.err("创建D3D纹理失败！", CURRENT_MODULE);
+        return nullptr;
+    }
+
+    // 2. 将图标绘制到临时位图（获取像素数据）
+    HDC hdcScreen = GetDC(nullptr);
+    HDC hdcMem = CreateCompatibleDC(hdcScreen);
+    BITMAPINFO bmi = { 0 };
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = 16;
+    bmi.bmiHeader.biHeight = -16; // Top-Down（原点在左上角）
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32; // 32位BGRA格式（含Alpha）
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* pBits = nullptr;
+    HBITMAP hbmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
+    if (!hbmp) {
+        kLog.err("创建DIB位图失败！", CURRENT_MODULE);
+        ReleaseDC(nullptr, hdcScreen);
+        DeleteDC(hdcMem);
+        pTexture->Release();
+        return nullptr;
+    }
+    HGDIOBJ hOldBmp = SelectObject(hdcMem, hbmp);
+
+    // 2.2 绘制图标到DIB（带透明背景）
+    // 关键：用透明色填充背景（而非白色），避免图标边缘残留底色
+    RECT rcIcon = { 0, 0, 16, 16 };
+    HBRUSH hTransBrush = CreateSolidBrush(RGB(0, 0, 0)); // 临时黑色背景（后续会被图标覆盖）
+    FillRect(hdcMem, &rcIcon, hTransBrush);
+    DeleteObject(hTransBrush);
+
+    // 绘制图标（自动处理透明通道）
+    DrawIconEx(
+        hdcMem, 0, 0, hIcon,
+        16, 16, 0, nullptr, DI_NORMAL | DI_COMPAT
+    );
+
+    // 3. 将位图数据直接复制到D3D纹理（无需格式转换，两者都是BGRA）
+    D3DLOCKED_RECT lockedRect;
+    hr = pTexture->LockRect(
+        0,
+        &lockedRect,
+        nullptr,
+        D3DLOCK_DISCARD // 动态纹理推荐使用此标志
+    );
+    if (FAILED(hr)) {
+        kLog.err("锁定D3D纹理失败！", CURRENT_MODULE);
+        SelectObject(hdcMem, hOldBmp);
+        DeleteObject(hbmp);
+        DeleteDC(hdcMem);
+        ReleaseDC(nullptr, hdcScreen);
+        pTexture->Release();
+        return nullptr;
+    }
+
+    // 3.1 直接复制像素数据（GDI的BGRA与DX9的A8R8G8B8内存布局完全一致）
+    // 注意：lockedRect.Pitch可能大于16*4（存在内存对齐），需按行复制
+    BYTE* pSrc = (BYTE*)pBits;
+    BYTE* pDst = (BYTE*)lockedRect.pBits;
+    for (int y = 0; y < 16; y++) {
+        // 每行复制16个像素（每个像素4字节）
+        memcpy(
+            &pDst[y * lockedRect.Pitch],  // D3D纹理当前行地址
+            &pSrc[y * 16 * 4],            // GDI位图当前行地址（16*4字节/行）
+            16 * 4                         // 每行字节数
+        );
+    }
+
+    // 3.2 解锁纹理并清理资源
+    pTexture->UnlockRect(0);
+    SelectObject(hdcMem, hOldBmp);
+    DeleteObject(hbmp);
+    DeleteDC(hdcMem);
+    ReleaseDC(nullptr, hdcScreen);
+
+    return pTexture;
+}static std::wstring GetProcessPathByPID(DWORD pid) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (hProcess == NULL) return L"";
+
+    WCHAR szPath[MAX_PATH] = { 0 };
+    GetModuleFileNameExW(hProcess, NULL, szPath, MAX_PATH);
+    CloseHandle(hProcess);
+    return szPath;
+}
+
+LPDIRECT3DTEXTURE9 GetCachedProcessIcon(DWORD pid) {
+    // 检查缓存，存在则直接返回
+    auto it = g_ProcessIconTextures.find(pid);
+    if (it != g_ProcessIconTextures.end()) {
+        //OutputDebugStringA("成功命中缓存\n");
+        return it->second;
+    }
+
+    // 不存在则创建并缓存
+
+	//OutputDebugStringA("缓存未命中\n");
+    std::wstring path = GetProcessPathByPID(pid);
+    HICON hIcon = Get16x16IconFromPath(path);
+    LPDIRECT3DTEXTURE9 pTexture = nullptr;
+    if (hIcon) {
+        pTexture = IconToD3D9Texture(hIcon);
+        DestroyIcon(hIcon); // 释放HICON资源
+    }
+
+    // 存入缓存（即使失败也存入nullptr避免重复尝试）
+    g_ProcessIconTextures[pid] = pTexture;
+    return pTexture;
+}
+
 bool SelectExecutableFile(wchar_t* outPath, size_t maxLen) {
     OPENFILENAMEW ofn = { sizeof(OPENFILENAMEW) };
     wchar_t fileName[1024] = L"";
@@ -126,32 +285,99 @@ std::string WCharToUTF8(const WCHAR* wstr) {
     return str;
 }
 
+// 在程序退出或不再需要图标时调用
+static void ReleaseIconTextures() {
+    for (auto& [pid, pTexture] : g_ProcessIconTextures) {
+        if (pTexture) {
+            pTexture->Release(); // 释放D3D纹理
+        }
+    }
+    g_ProcessIconTextures.clear();
+}
+
+void RenderProcessIconInTable(DWORD pid) {
+    LPDIRECT3DTEXTURE9 pTexture = GetCachedProcessIcon(pid);
+    if (pTexture) {
+        // ImGui::Image参数：纹理指针（转换为ImTextureID）、尺寸
+        ImGui::Image(
+            (ImTextureID)pTexture,  // DX9纹理指针直接作为ImTextureID
+            ImVec2(16, 16)          // 16×16显示尺寸
+        );
+    }
+    else {
+        // 图标获取失败时显示占位符
+        ImGui::Text("[Icon]");
+    }
+}
 
 
-std::vector<kProcess> GetProcessList() {
+
+std::vector<kProcess> GetProcessListCore() {
     std::vector<kProcess> processes;
+
+    // 添加进度显示任务
+    int Kpid = kItem.AddProcess(
+        C("获取进程列表"),
+        std::string(C("初始化快照...")),
+        NULL,  // 此任务不可取消
+        0.1f   // 初始进度10%
+    );
 
     // 创建进程快照
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE) {
+        // 更新进度为失败状态并返回
+        kItem.SetProcess(Kpid, C("创建快照失败"), 1.00f);
         return processes;
     }
+
+    // 更新进度：快照创建成功
+    kItem.SetProcess(Kpid, C("正在枚举进程..."), 0.3f);
 
     PROCESSENTRY32W pe32{};
     pe32.dwSize = sizeof(PROCESSENTRY32W);
 
     if (!Process32FirstW(hSnapshot, &pe32)) {
         CloseHandle(hSnapshot);
+        kItem.SetProcess(Kpid, C("获取进程信息失败"), 1.00f);
         return processes;
     }
 
+    // 计算总进程数用于进度更新（先枚举一次获取总数）
+    DWORD totalCount = 0;
+    do {
+        totalCount++;
+    } while (Process32NextW(hSnapshot, &pe32));
+
+    // 重置快照到起始位置
+    Process32FirstW(hSnapshot, &pe32);
+
+    // 更新进度：开始处理进程信息
+    kItem.SetProcess(Kpid, C("处理进程信息..."), 0.4f);
+
+    DWORD currentCount = 0;
     do {
         kProcess info(pe32.th32ProcessID);
         processes.push_back(std::move(info));
+
+        // 实时更新进度
+        currentCount++;
+        float progress = 0.4f + (0.5f * (float)currentCount / totalCount); // 40%到90%区间
+        kItem.SetProcess(Kpid, C("正在处理进程..."), progress);
     } while (Process32NextW(hSnapshot, &pe32));
 
     CloseHandle(hSnapshot);
+    dummy_processes.swap(processes);
+    // 恢复processes为原容器（如果需要返回原内容）
+    //processes.swap(dummy_processes);
+
+    // 完成进度
+    kItem.SetProcess(Kpid, C("进程列表获取完成"), 1.00f);
+
     return processes;
+}
+void GetProcessList() {
+    std::thread(GetProcessListCore).detach(); // 异步获取进程列表
 }
 
 
@@ -222,7 +448,7 @@ void KswordGUIProcess() {
             ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar);
 
-        if (ImGui::BeginTable("ProcessTable", 3,
+        if (ImGui::BeginTable("ProcessTable", 5,
             ImGuiTableFlags_Borders |
             ImGuiTableFlags_RowBg |
             ImGuiTableFlags_SizingFixedFit |
@@ -236,6 +462,8 @@ void KswordGUIProcess() {
             ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 0.0f, SortType_Name);
             ImGui::TableSetupColumn("PID", ImGuiTableColumnFlags_WidthFixed, 80.0f, SortType_PID);
             ImGui::TableSetupColumn("User", ImGuiTableColumnFlags_WidthStretch, 0.0f, SortType_User);
+            ImGui::TableSetupColumn("CPU(%)", ImGuiTableColumnFlags_WidthFixed, 80.0f);  // 新增CPU列
+            ImGui::TableSetupColumn("RAM(MB)", ImGuiTableColumnFlags_WidthFixed, 100.0f); // 新增内存列
             ImGui::TableSetupScrollFreeze(0, 1);
             if (ImGuiTableSortSpecs* sorts_specs = ImGui::TableGetSortSpecs())
             {
@@ -273,7 +501,7 @@ void KswordGUIProcess() {
 
                     // 第一列：整行选择项
                     ImGui::TableSetColumnIndex(0);
-
+                    RenderProcessIconInTable(proc->pid()); ImGui::SameLine();
                     //ImGui::SetCursorPos(initial_cursor_pos); // 重置到初始位置
                     ImGui::Text("%s", proc->Name().c_str()); ImGui::SameLine();
                     // 创建整行选择项
@@ -366,6 +594,13 @@ void KswordGUIProcess() {
                     //ImGui::SetCursorPos(initial_cursor_pos); // 重置到初始位置
                     ImGui::Text("%s", proc->User().c_str());
 
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%.1f", proc->GetCPUUsage());
+
+                    // 第5列：内存使用（转换为MB）
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::Text("%.2f MB", 0.0 / (1024 * 1024));
+
                     ImGui::PopID(); // 行ID作用域结束
                 }
             }
@@ -380,7 +615,7 @@ void KswordGUIProcess() {
         ImGui::Text("Processes: %d / %d", filtered_processes.size(), dummy_processes.size());
         ImGui::SameLine(ImGui::GetWindowWidth() - 120);
         if (ImGui::SmallButton("Refresh")) {
-            dummy_processes = GetProcessList();
+            /*dummy_processes = */GetProcessList();
             kLog.Add(Info, C("刷新进程列表"), C(CURRENT_MODULE));
             // 刷新逻辑
         }
@@ -389,7 +624,7 @@ void KswordGUIProcess() {
 
     }
     if (ImGui::TreeNode("CreateProcess")){
-    ImGui::InputTextWithHint(C("##ModulePath"), C("模块路径（如C:\\Windows\\notepad.exe）"), modulePathUtf8, sizeof(modulePathUtf8));
+    ImGui::InputTextWithHint(C("##ModulePath"), C("模块路径（如%SYSTEMDRIVE%\\Windows\\notepad.exe）"), modulePathUtf8, sizeof(modulePathUtf8));
     ImGui::SameLine();
     if (ImGui::Button(C("浏览文件 ##CreateProcess1"))) {
         wchar_t selectedPath[1024] = L"";
@@ -401,7 +636,7 @@ void KswordGUIProcess() {
     ImGui::SameLine();
     if (ImGui::Button(C("粘贴 ##CreateProcess2")))
     {
-        const wchar_t* demoPath = L"C:\\粘贴的路径.exe";
+        const wchar_t* demoPath = L"%SYSTEMDRIVE%\\粘贴的路径.exe";
         g_modulePath = demoPath;
         WideCharToMultiByte(CP_UTF8, 0, demoPath, -1, modulePathUtf8, sizeof(modulePathUtf8), nullptr, nullptr);
     }
@@ -511,7 +746,7 @@ void KswordGUIProcess() {
     ImGui::SameLine();
     if (ImGui::Button(C("粘贴 ##CreateProcess5")))
     {
-        const wchar_t* demoDir = L"C:\\粘贴的目录";
+        const wchar_t* demoDir = L"%SYSTEMDRIVE%\\粘贴的目录";
         g_workingDir = demoDir;
         WideCharToMultiByte(CP_UTF8, 0, demoDir, -1, workDirUtf8, sizeof(workDirUtf8), nullptr, nullptr);
     }

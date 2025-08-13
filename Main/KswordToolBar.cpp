@@ -47,11 +47,11 @@ inline void KswordToolBar() {
         HWND hwnd = (HWND)viewport->PlatformHandle;          // 转换为 Windows 句柄
         if (first_done) {
 
-            if (!SetWindowPos(::hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE
-            )) {
-                const std::wstring a = L"窗口属性设置失败！" + std::to_wstring(GetLastError());
-                MessageBox(NULL, a.c_str(), szAppName, MB_ICONERROR);
-            }
+            //if (!SetWindowPos(::hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE
+            //)) {
+            //    const std::wstring a = L"窗口属性设置失败！" + std::to_wstring(GetLastError());
+            //    MessageBox(NULL, a.c_str(), szAppName, MB_ICONERROR);
+            //}
             //2. 调用系统 API 置顶
             SetWindowPos(
                 hwnd,
@@ -165,8 +165,8 @@ int KswordRegToolBarWindow()
         SetWindowLong(hwnd, GWL_EXSTYLE, exStyle);
 
         // 2. 设置窗口置顶
-        if(!SetWindowPos(hwnd, HWND_TOPMOST, 0, 0,0,0, SWP_NOMOVE | SWP_NOSIZE
-        ))MessageBox(NULL, _T("窗口属性设置失败！"), szAppName, MB_ICONERROR);
+        //if(!SetWindowPos(hwnd, HWND_TOPMOST, 0, 0,0,0, SWP_NOMOVE | SWP_NOSIZE
+        //))MessageBox(NULL, _T("窗口属性设置失败！"), szAppName, MB_ICONERROR);
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
     }

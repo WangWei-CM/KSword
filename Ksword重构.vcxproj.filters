@@ -7,9 +7,6 @@
     <ClCompile Include="Support\ksword.cpp">
       <Filter>Support</Filter>
     </ClCompile>
-    <ClCompile Include="Main\SupportFunction\MainSupportFunction.cpp">
-      <Filter>Main\SupportFunction</Filter>
-    </ClCompile>
     <ClCompile Include="Main\Ksword5Main.cpp" />
     <ClCompile Include="imgui\imgui.cpp" />
     <ClCompile Include="imgui\imgui_demo.cpp" />
@@ -148,6 +145,7 @@
     <None Include="imgui.ini" />
     <None Include="KswordGUI.ini" />
     <None Include="packages.config" />
+    <None Include="D3DX9_43.dll" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="icon1.ico" />

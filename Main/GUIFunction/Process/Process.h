@@ -20,6 +20,9 @@ private:
 	int statusCode;         // 线程操作状态码（0表示成功，其他为错误码）
 	std::string modulePath; // 线程所属模块路径
 
+
+
+
 public:
 	// 构造函数：通过线程ID初始化
 	kThread(DWORD tid);
@@ -49,7 +52,9 @@ private:
 
 class kProcess {
 public:
+
 	kProcess(DWORD pid);
+
 	kProcess(HANDLE hProc);
 
 	bool Terminate(kProcKillMethod method = kTerminateThread, UINT uExitCode = 0);
@@ -80,6 +85,11 @@ public:
 	HANDLE Handle() const;
 	bool IsAdmin() const;
 
+	double GetCPUUsage() const { return cpuUsage; }
+
+	void UpdateMemoryInfo();
+	double UpdateCPUUsage();
+	void UpdateStats();
 private:
 	int PID;
 	std::string AuthName;
@@ -87,4 +97,8 @@ private:
 	bool isAdmin;
 	HANDLE handle;
 	std::string name;
+
+	//性能计数器
+	double cpuUsage;
+
 };
