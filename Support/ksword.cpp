@@ -246,6 +246,7 @@ bool KTopWindow() {
     return KSWORD_SUCCESS_EXIT;
 //原文链接：https://blog.csdn.net/weixin_45525272/article/details/116452142
 }
+
 //隐藏与取消隐藏函数
 bool HideWindow() {
     HWND hWnd = GetConsoleWindow();
