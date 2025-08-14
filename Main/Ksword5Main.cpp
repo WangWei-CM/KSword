@@ -590,7 +590,7 @@ private:
                 //ImGuiWindowFlags_NoCollapse |
                 //ImGuiWindowFlags_NoBackground /*|*/
             //ImGuiWindowFlags_NoSavedSettings
-                0
+                ImGuiWindowFlags_AlwaysVerticalScrollbar
             );
             // 绘制背景
             // 在ImGui渲染循环中
