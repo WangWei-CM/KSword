@@ -392,8 +392,7 @@ void kProcessDetail::Render() {
     if (ImGui::Button(C("刷新进程详细信息"))) {
 		GetProcessExtendedInfo();
     }
-
-	ImGui::Separator();
+    ImGui::Separator();
 	openTest.SetTargetPID(pid());
 	openTest.ShowWindow();
     if (ImGui::Button(C("销毁详细信息实例"))) {
