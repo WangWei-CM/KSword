@@ -706,6 +706,10 @@ private:
                 {
                     KswordRegMain();
                 }
+                if (ImGui::BeginTabItem(C("内核")))
+                {
+                    KswordNTMain();
+                }
                 if (ImGui::BeginTabItem("Test"))
                 {
                     ImGui::Text(C("增加日志信息"));

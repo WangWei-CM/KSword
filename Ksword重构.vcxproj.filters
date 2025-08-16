@@ -36,6 +36,7 @@
     <ClCompile Include="Main\GUIFunction\DLL\DLLMain.cpp" />
     <ClCompile Include="Main\GUIFunction\Register\Register.cpp" />
     <ClCompile Include="Main\GUIFunction\Process\ProcessInformation.cpp" />
+    <ClCompile Include="Main\GUIFunction\NT\NT.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Environment\Environment.h">
@@ -78,6 +79,7 @@
     <ClInclude Include="Main\GUIFunction\DLL\DLL.h" />
     <ClInclude Include="Main\GUIFunction\Register\Register.h" />
     <ClInclude Include="Main\GUIFunction\Process\ProcessDetail.h" />
+    <ClInclude Include="Main\GUIFunction\NT\nt.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Environment">

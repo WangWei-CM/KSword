@@ -13,7 +13,7 @@
 #include "Memory/Memory.h"
 #include "DLL/DLL.h"
 #include "Register/Register.h"
-
+#include "NT/NT.h"
 
 extern inline void KswordLogo5			();
 extern inline void RenderBoolRow		(const char* name, bool value);
