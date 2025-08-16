@@ -12,15 +12,15 @@ typedef NTSTATUS(NTAPI* _NtQueryInformationProcess)(
     ULONG            ProcessInformationLength,
     PULONG           ReturnLength);
 // 修正后的 PROCESS_BASIC_INFORMATION 定义
-typedef struct _PROCESS_BASIC_INFORMATION {
+typedef struct _MY_PROCESS_BASIC_INFORMATION {
     NTSTATUS ExitStatus;
     PVOID PebBaseAddress;
     ULONG_PTR AffinityMask;
     PVOID BasePriority;  // 保持为 PVOID 类型
     ULONG_PTR UniqueProcessId;
     ULONG_PTR InheritedFromUniqueProcessId;
-} PROCESS_BASIC_INFORMATION;
-typedef struct _PEB {
+} _MY_PROCESS_BASIC_INFORMATION;
+typedef struct _MY_PEB {
     BYTE                          Reserved1[2];
     BYTE                          BeingDebugged;
     BYTE                          Reserved2[1];
@@ -40,18 +40,18 @@ typedef struct _PEB {
     BYTE                          Reserved11[128];
     PVOID                         Reserved12[1];
     ULONG                         SessionId;
-} PEB, * PPEB;
-typedef struct _UNICODE_STRING {
-    USHORT Length;
-    USHORT MaximumLength;
-    PWSTR  Buffer;
-} UNICODE_STRING;
-typedef struct _RTL_USER_PROCESS_PARAMETERS {
+} _MY_PEB, * _MY_PPEB;
+//typedef struct _UNICODE_STRING {
+//    USHORT Length;
+//    USHORT MaximumLength;
+//    PWSTR  Buffer;
+//} UNICODE_STRING;
+typedef struct _MY_RTL_USER_PROCESS_PARAMETERS {
     BYTE           Reserved1[16];
     PVOID          Reserved2[10];
     UNICODE_STRING ImagePathName;
     UNICODE_STRING CommandLine;
-} RTL_USER_PROCESS_PARAMETERS, * PRTL_USER_PROCESS_PARAMETERS;
+} _MY_RTL_USER_PROCESS_PARAMETERS, * _MY_PRTL_USER_PROCESS_PARAMETERS;
 // 新增：NtQueryInformationProcess所需的信息类常量
 const DWORD ProcessThreadCount = 0x03;
 const DWORD ProcessHandleCount = 0x04;
@@ -190,7 +190,7 @@ bool kProcessDetail::GetProcessExtendedInfo() {
     }
 
     // 获取 PROCESS_BASIC_INFORMATION 以获取基本优先级、亲和性掩码等
-    PROCESS_BASIC_INFORMATION pbi = { 0 };
+    _MY_PROCESS_BASIC_INFORMATION pbi = { 0 };
     ULONG returnLength = 0;
     NTSTATUS status = NtQIP(hProcess, 0, &pbi, sizeof(pbi), &returnLength);
     if (NT_SUCCESS(status)) {
@@ -256,7 +256,7 @@ bool kProcessDetail::GetProcessExtendedInfo() {
     }
 
     // 读取进程参数
-    RTL_USER_PROCESS_PARAMETERS upp;
+    _MY_RTL_USER_PROCESS_PARAMETERS upp;
     if (!ReadProcessMemory(hProcess, peb.ProcessParameters, &upp, sizeof(upp), nullptr)) {
         CloseHandle(hProcess);
         return "无法读取进程参数";

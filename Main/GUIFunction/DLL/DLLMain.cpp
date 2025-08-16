@@ -7,6 +7,10 @@
 #include <windows.h>
 #include <winver.h>
 #pragma comment(lib, "version.lib")
+#include <wintrust.h> 
+#include <softpub.h>
+#pragma comment(lib, "wintrust.lib")
+
 // 静态数据存储
 namespace KswordDebugger
 {
@@ -439,21 +443,67 @@ void KswordDLLMain()
                 s_sortColumn = sortSpecs->Specs[0].ColumnIndex;
                 s_sortAscending = sortSpecs->Specs[0].SortDirection == ImGuiSortDirection_Ascending;
             }
-
             for (size_t i = 0; i < filteredModules.size(); ++i)
             {
+                ImGui::PushID(i);
                 const auto& mod = filteredModules[i];
                 ImGui::TableNextRow();
 
                 // 模块路径
                 ImGui::TableSetColumnIndex(0);
                 bool isSelected = (s_showModuleDetails && s_selectedModule.path == mod.path);
-                if (ImGui::Selectable(mod.path.c_str(), isSelected,
+                if (ImGui::Selectable(C(mod.path.c_str()), isSelected,
                     ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap))
                 {
                     s_selectedModule = mod;
                     s_showModuleDetails = true;
                 }
+                if (ImGui::BeginPopupContextItem("DLLModuleRightClick")) {  // 使用当前ID的上下文菜单
+                    if (ImGui::MenuItem(C("显示详情"))) {
+                        s_showModuleDetails = true;
+                    }
+                    if (ImGui::MenuItem(C("复制模块路径"))) {
+                        ImGui::SetClipboardText(C(mod.path.c_str()));
+                        kLog.info(C("已复制模块路径到剪贴板"), C("ModuleView"));
+                    }
+                    if (ImGui::MenuItem(C("复制基地址"))) {
+                        char addrStr[32];
+                        sprintf_s(addrStr, "0x%p", (void*)mod.baseAddr);
+                        ImGui::SetClipboardText(addrStr);
+                    }
+                    if (ImGui::MenuItem(C("复制大小"))) {
+                        ImGui::SetClipboardText(FormatSize(mod.size).c_str());
+                    }
+                    if (ImGui::MenuItem(C("复制版本"))) {
+                        ImGui::SetClipboardText(mod.version.c_str());
+                    }
+                    if (ImGui::MenuItem(C("复制整行"))) {
+                        std::stringstream ss;
+                        ss << mod.path << "\t"
+                            << FormatAddress(mod.baseAddr) << "\t"
+                            << FormatSize(mod.size) << "\t"
+                            << mod.version << "\t"
+                            << (mod.isSigned ? C("已签名") : C("未签名")) << "\t"
+                            << (mod.is64Bit ? C("64位") : C("32位"));
+                        ImGui::SetClipboardText(ss.str().c_str());
+                        kLog.info(C("已复制模块整行到剪贴板"), C("ModuleView"));
+                    }
+                    if (ImGui::MenuItem(C("复制全部"))) {
+                        std::stringstream ss;
+                        for (const auto& mod : filteredModules) {
+                            ss << C(mod.path) << "\t"
+                                << FormatAddress(mod.baseAddr) << "\t"
+                                << FormatSize(mod.size) << "\t"
+                                << mod.version << "\t"
+                                << (mod.isSigned ? C("已签名") : C("未签名")) << "\t"
+                                << (mod.is64Bit ? C("64位") : C("32位")) << "\n";
+                        }
+                        ImGui::SetClipboardText(ss.str().c_str());
+                        kLog.info(C("已复制全部模块信息到剪贴板"), C("ModuleView"));
+                    }
+
+                    ImGui::EndPopup();
+                }ImGui::PopID();
 
                 // 基地址
                 ImGui::TableSetColumnIndex(1);
@@ -524,6 +574,7 @@ void KswordDLLMain()
                         kLog.err(C(logMsg), C("ModuleView"));
                     }
                 }
+
             }
             ImGui::EndTable();
         }
@@ -869,8 +920,31 @@ static void RefreshAllData()
                         if (module.version.empty())
                             module.version = C("未知版本");
 
-                        // 简化处理：假设系统模块已签名（实际需调用签名验证API）
-                        module.isSigned = (module.path.find("Windows\\system32") != std::string::npos);
+                            auto isModuleSigned = [](const std::string& filePath) -> bool {
+                            WINTRUST_FILE_INFO fileInfo = { 0 };
+                            fileInfo.cbStruct = sizeof(WINTRUST_FILE_INFO);
+                            fileInfo.pcwszFilePath = std::wstring(filePath.begin(), filePath.end()).c_str();
+                            fileInfo.hFile = NULL;
+                            fileInfo.pgKnownSubject = NULL;
+
+                            WINTRUST_DATA winTrustData = { 0 };
+                            winTrustData.cbStruct = sizeof(WINTRUST_DATA);
+                            winTrustData.dwUIChoice = WTD_UI_NONE;
+                            winTrustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+                            winTrustData.dwUnionChoice = WTD_CHOICE_FILE;
+                            winTrustData.pFile = &fileInfo;
+                            winTrustData.dwStateAction = WTD_STATEACTION_IGNORE;
+                            winTrustData.dwProvFlags = WTD_SAFER_FLAG;
+                            winTrustData.hWVTStateData = NULL;
+                            winTrustData.pwszURLReference = NULL;
+
+                            GUID policyGUID = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+                            LONG status = WinVerifyTrust(NULL, &policyGUID, &winTrustData);
+                            return status == ERROR_SUCCESS;
+                            };
+
+                        // 替换原有判断
+                        module.isSigned = isModuleSigned(module.path);
                         module.is64Bit = s_is64BitProcess;  // 与进程位数一致
 
                         s_modules.push_back(module);
@@ -1049,6 +1123,373 @@ static void FilterAndSortModules(std::vector<KswordModuleInfo>& filteredModules)
     }
 }
 
+static DWORD RvaToFileOffset(LPVOID base, DWORD rva) {
+    if (rva == 0) return 0;
+
+    IMAGE_DOS_HEADER* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    IMAGE_NT_HEADERS* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(
+        reinterpret_cast<BYTE*>(base) + dos->e_lfanew);
+    IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(nt);
+
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        IMAGE_SECTION_HEADER* section = &sections[i];
+        if (rva >= section->VirtualAddress &&
+            rva < section->VirtualAddress + section->Misc.VirtualSize) {
+            return rva - section->VirtualAddress + section->PointerToRawData;
+        }
+    }
+    return 0;
+}
+
+static void ShowExportTable(const std::string& modulePath) {
+#define CURRENT_MODULE C("导出表解析")
+    std::vector<std::string> exportNames;
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+    HANDLE hMapping = NULL;
+    LPVOID base = NULL;
+
+    kLog.info(C("开始解析模块导出表: " + modulePath), CURRENT_MODULE);
+
+    // 打开文件
+    hFile = CreateFileA(modulePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        kLog.err(C("文件打开失败，错误码: " + std::to_string(GetLastError())), CURRENT_MODULE);
+        // 直接进入资源清理流程
+    }
+    else {
+        // 创建文件映射
+        hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+        if (!hMapping) {
+            kLog.err(C("文件映射创建失败，错误码: " + std::to_string(GetLastError())), CURRENT_MODULE);
+        }
+        else {
+            // 映射视图
+            base = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
+            if (!base) {
+                kLog.err(C("文件视图映射失败，错误码: " + std::to_string(GetLastError())), CURRENT_MODULE);
+            }
+            else {
+                // 解析DOS头
+                IMAGE_DOS_HEADER* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+                if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+                    kLog.err(C("无效的DOS签名 (不是PE文件)"), CURRENT_MODULE);
+                }
+                else {
+                    // 解析NT头
+                    IMAGE_NT_HEADERS* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(
+                        reinterpret_cast<BYTE*>(base) + dos->e_lfanew);
+                    if (nt->Signature != IMAGE_NT_SIGNATURE) {
+                        kLog.err(C("无效的NT签名 (PE结构损坏)"), CURRENT_MODULE);
+                    }
+                    else {
+                        // 检查导出表目录
+                        IMAGE_DATA_DIRECTORY& exportDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+                        if (exportDir.VirtualAddress == 0 || exportDir.Size == 0) {
+                            kLog.info(C("模块没有导出表"), CURRENT_MODULE);
+                        }
+                        else {
+                            // 转换导出表RVA为文件偏移
+                            DWORD exportTableOffset = RvaToFileOffset(base, exportDir.VirtualAddress);
+                            if (exportTableOffset == 0) {
+                                kLog.err(C("导出表RVA转换文件偏移失败 (无效地址)"), CURRENT_MODULE);
+                            }
+                            else {
+                                // 验证导出表地址有效性
+                                SIZE_T fileSize = GetFileSize(hFile, NULL);
+                                if (exportTableOffset + sizeof(IMAGE_EXPORT_DIRECTORY) > fileSize) {
+                                    kLog.err(C("导出表地址超出文件范围 (文件损坏)"), CURRENT_MODULE);
+                                }
+                                else {
+                                    // 获取导出表
+                                    IMAGE_EXPORT_DIRECTORY* exp = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(
+                                        reinterpret_cast<BYTE*>(base) + exportTableOffset);
+
+                                    // 转换AddressOfNames的RVA为文件偏移
+                                    DWORD namesOffset = RvaToFileOffset(base, exp->AddressOfNames);
+                                    if (namesOffset == 0) {
+                                        kLog.err(C("AddressOfNames RVA转换失败 (无效地址)"), CURRENT_MODULE);
+                                    }
+                                    else if (namesOffset + exp->NumberOfNames * sizeof(DWORD) > fileSize) {
+                                        kLog.err(C("导出名称表超出文件范围 (文件损坏)"), CURRENT_MODULE);
+                                    }
+                                    else {
+                                        // 解析导出名称
+                                        DWORD* names = reinterpret_cast<DWORD*>(
+                                            reinterpret_cast<BYTE*>(base) + namesOffset);
+                                        for (DWORD i = 0; i < exp->NumberOfNames; ++i) {
+                                            DWORD nameOffset = RvaToFileOffset(base, names[i]);
+                                            if (nameOffset == 0 || nameOffset >= fileSize) {
+                                                kLog.warn(C("跳过无效的导出名称 (索引: " + std::to_string(i) + ")"), CURRENT_MODULE);
+                                                continue;
+                                            }
+                                            exportNames.push_back(reinterpret_cast<char*>(base) + nameOffset);
+                                        }
+                                        kLog.info(C("导出表解析成功，共找到 " + std::to_string(exportNames.size()) + " 个导出项"), CURRENT_MODULE);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // 释放映射视图
+                UnmapViewOfFile(base);
+                base = NULL;
+            }
+            // 关闭文件映射
+            CloseHandle(hMapping);
+            hMapping = NULL;
+        }
+        // 关闭文件句柄
+        CloseHandle(hFile);
+        hFile = INVALID_HANDLE_VALUE;
+    }
+
+    // 显示弹窗
+    ImGui::OpenPopup(C("导出表"));
+    if (ImGui::BeginPopupModal(C("导出表"), NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text(C("模块: %s"), modulePath.c_str());
+        ImGui::Separator();
+
+        if (exportNames.empty()) {
+            ImGui::TextColored(ImVec4(1, 0, 0, 1), C("未找到导出表或解析失败"));
+        }
+        else {
+            for (const auto& name : exportNames) {
+                ImGui::Text("%s", name.c_str());
+            }
+        }
+
+        if (ImGui::Button(C("关闭"))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+#undef CURRENT_MODULE
+}
+static void ShowImportTable(const std::string& modulePath) {
+    // 简单PE导入表解析，仅显示导入DLL和函数名
+    std::vector<std::string> importList;
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+    HANDLE hMapping = NULL;
+    LPVOID base = NULL;
+
+    // 打开文件
+    hFile = CreateFileA(modulePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        importList.push_back("无法打开文件");
+    }
+    else {
+        // 创建文件映射
+        hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+        if (!hMapping) {
+            importList.push_back("无法创建文件映射");
+            CloseHandle(hFile);
+            hFile = INVALID_HANDLE_VALUE;
+        }
+        else {
+            // 映射文件视图
+            base = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
+            if (!base) {
+                importList.push_back("无法映射文件视图");
+                CloseHandle(hMapping);
+                CloseHandle(hFile);
+                hMapping = NULL;
+                hFile = INVALID_HANDLE_VALUE;
+            }
+            else {
+                // 解析PE结构
+                IMAGE_DOS_HEADER* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+                if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+                    importList.push_back("不是有效的DOS签名");
+                }
+                else {
+                    IMAGE_NT_HEADERS* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(
+                        reinterpret_cast<BYTE*>(base) + dos->e_lfanew);
+
+                    if (nt->Signature != IMAGE_NT_SIGNATURE) {
+                        importList.push_back("不是有效的NT签名");
+                    }
+                    else {
+                        // 获取导入表目录项
+                        IMAGE_DATA_DIRECTORY& importDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+                        if (importDir.VirtualAddress == 0 || importDir.Size == 0) {
+                            importList.push_back("没有导入表数据");
+                        }
+                        else {
+                            // 将虚拟地址转换为文件中的实际偏移
+                            // 获取节表
+                            IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(nt);
+                            DWORD numSections = nt->FileHeader.NumberOfSections;
+
+                            // 找到包含导入表的节
+                            DWORD importRva = importDir.VirtualAddress;
+                            DWORD importOffset = 0;
+                            bool foundSection = false;
+
+                            for (DWORD i = 0; i < numSections; ++i) {
+                                if (importRva >= sections[i].VirtualAddress &&
+                                    importRva < sections[i].VirtualAddress + sections[i].SizeOfRawData) {
+                                    importOffset = importRva - sections[i].VirtualAddress + sections[i].PointerToRawData;
+                                    foundSection = true;
+                                    break;
+                                }
+                            }
+
+                            if (!foundSection) {
+                                importList.push_back("找不到导入表所在的节");
+                            }
+                            else {
+                                // 计算导入描述符的实际地址
+                                IMAGE_IMPORT_DESCRIPTOR* imp = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
+                                    reinterpret_cast<BYTE*>(base) + importOffset);
+
+                                // 遍历导入描述符，最多遍历合理数量的描述符防止无限循环
+                                DWORD maxImports = 1024; // 合理的上限
+                                DWORD importCount = 0;
+
+                                // 导入表以全零的描述符结束
+                                while ((imp->Name != 0 || imp->FirstThunk != 0) && importCount < maxImports) {
+                                    if (imp->Name != 0) {
+                                        // 计算DLL名称的实际地址
+                                        DWORD nameRva = imp->Name;
+                                        DWORD nameOffset = 0;
+                                        bool foundNameSection = false;
+
+                                        for (DWORD i = 0; i < numSections; ++i) {
+                                            if (nameRva >= sections[i].VirtualAddress &&
+                                                nameRva < sections[i].VirtualAddress + sections[i].SizeOfRawData) {
+                                                nameOffset = nameRva - sections[i].VirtualAddress + sections[i].PointerToRawData;
+                                                foundNameSection = true;
+                                                break;
+                                            }
+                                        }
+
+                                        if (foundNameSection) {
+                                            char* dllNamePtr = reinterpret_cast<char*>(
+                                                reinterpret_cast<BYTE*>(base) + nameOffset);
+                                            std::string dllName = dllNamePtr;
+
+                                            // 处理导入函数
+                                            if (imp->OriginalFirstThunk != 0) {
+                                                DWORD thunkRva = imp->OriginalFirstThunk;
+                                                DWORD thunkOffset = 0;
+                                                bool foundThunkSection = false;
+
+                                                for (DWORD i = 0; i < numSections; ++i) {
+                                                    if (thunkRva >= sections[i].VirtualAddress &&
+                                                        thunkRva < sections[i].VirtualAddress + sections[i].SizeOfRawData) {
+                                                        thunkOffset = thunkRva - sections[i].VirtualAddress + sections[i].PointerToRawData;
+                                                        foundThunkSection = true;
+                                                        break;
+                                                    }
+                                                }
+
+                                                if (foundThunkSection) {
+                                                    IMAGE_THUNK_DATA* thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(
+                                                        reinterpret_cast<BYTE*>(base) + thunkOffset);
+
+                                                    // 遍历导入函数，限制最大数量防止无限循环
+                                                    DWORD maxFunctions = 4096;
+                                                    DWORD funcCount = 0;
+
+                                                    while (thunk->u1.AddressOfData != 0 && funcCount < maxFunctions) {
+                                                        // 检查是否是按名称导入(最高位为0)
+                                                        if (!(thunk->u1.Ordinal & IMAGE_ORDINAL_FLAG)) {
+                                                            DWORD funcRva = thunk->u1.AddressOfData;
+                                                            DWORD funcOffset = 0;
+                                                            bool foundFuncSection = false;
+
+                                                            for (DWORD i = 0; i < numSections; ++i) {
+                                                                if (funcRva >= sections[i].VirtualAddress &&
+                                                                    funcRva < sections[i].VirtualAddress + sections[i].SizeOfRawData) {
+                                                                    funcOffset = funcRva - sections[i].VirtualAddress + sections[i].PointerToRawData;
+                                                                    foundFuncSection = true;
+                                                                    break;
+                                                                }
+                                                            }
+
+                                                            if (foundFuncSection) {
+                                                                IMAGE_IMPORT_BY_NAME* importByName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
+                                                                    reinterpret_cast<BYTE*>(base) + funcOffset);
+
+                                                                if (importByName && importByName->Name[0] != '\0') {
+                                                                    importList.push_back(dllName + " : " + reinterpret_cast<char*>(importByName->Name));
+                                                                }
+                                                                else {
+                                                                    importList.push_back(dllName + " : [未知函数]");
+                                                                }
+                                                            }
+                                                            else {
+                                                                importList.push_back(dllName + " : [函数地址无效]");
+                                                            }
+                                                        }
+                                                        else {
+                                                            // 按序号导入
+                                                            DWORD ordinal = thunk->u1.Ordinal & 0xFFFF;
+                                                            importList.push_back(dllName + " : #" + std::to_string(ordinal));
+                                                        }
+
+                                                        ++thunk;
+                                                        ++funcCount;
+                                                    }
+                                                }
+                                                else {
+                                                    importList.push_back(dllName + " : [导入函数表地址无效]");
+                                                }
+                                            }
+                                            else {
+                                                importList.push_back(dllName + " : [没有原始导入函数表]");
+                                            }
+                                        }
+                                        else {
+                                            importList.push_back("[DLL名称地址无效]");
+                                        }
+                                    }
+
+                                    ++imp;
+                                    ++importCount;
+                                }
+
+                                if (importCount >= maxImports) {
+                                    importList.push_back("[导入表项数量超出合理范围，可能是畸形PE文件]");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 清理资源
+                UnmapViewOfFile(base);
+                base = NULL;
+                CloseHandle(hMapping);
+                hMapping = NULL;
+                CloseHandle(hFile);
+                hFile = INVALID_HANDLE_VALUE;
+            }
+        }
+    }
+
+    // 显示导入表弹窗
+    ImGui::OpenPopup(C("导入表"));
+    if (ImGui::BeginPopupModal(C("导入表"), NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text(C("模块: %s"), modulePath.c_str());
+        ImGui::Separator();
+
+        if (importList.empty()) {
+            ImGui::TextColored(ImVec4(1, 0, 0, 1), C("未找到导入表或解析失败"));
+        }
+        else {
+            for (const auto& info : importList) {
+                ImGui::Text("%s", info.c_str());
+            }
+        }
+
+        if (ImGui::Button(C("关闭"))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
 static void DrawModuleDetails()
 {
     ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_FirstUseEver);
@@ -1067,12 +1508,12 @@ static void DrawModuleDetails()
 
         if (ImGui::Button(C("查看导出表")))
         {
-            kLog.info(C(("查看模块导出表: " + s_selectedModule.path).c_str()), C("ModuleView"));
+            ShowExportTable(s_selectedModule.path);
         }
         ImGui::SameLine();
         if (ImGui::Button(C("查看导入表")))
         {
-            kLog.info(C(("查看模块导入表: " + s_selectedModule.path).c_str()), C("ModuleView"));
+            ShowImportTable(s_selectedModule.path);
         }
         ImGui::SameLine();
         if (ImGui::Button(C("在内存中查看")))
@@ -1082,6 +1523,7 @@ static void DrawModuleDetails()
         }
     }
     ImGui::End();
+
 }
 static bool first_show_memory_window = 1;
 static void DrawMemoryEditor()

@@ -207,8 +207,8 @@ const unsigned int ksword_md5_s[] = { 7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,2
 
 
 
-#include <winternl.h>
 #include <windows.h>
+#include <winternl.h>
 
 #include <VersionHelpers.h>
 
