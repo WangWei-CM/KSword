@@ -9,6 +9,7 @@
 #pragma comment(lib, "version.lib")
 #include <wintrust.h> 
 #include <softpub.h>
+#include <softpub.h>
 #pragma comment(lib, "wintrust.lib")
 
 // 静态数据存储
@@ -326,7 +327,7 @@ void KswordDLLMain()
                 }
 
                 CloseHandle(hProcess);
-                RefreshAllData();  // 刷新目标进程的数据
+                std::thread(RefreshAllData).detach();  // 刷新目标进程的数据
             }
 
         }
@@ -846,6 +847,13 @@ void KswordDLLMain()
 // 数据刷新实现
 static void RefreshAllData()
 {
+    int kPid=kItem.AddProcess
+    (
+        C("刷新PID为"+std::to_string(s_currentPID)+"的进程数据"),
+        std::string(C("打开目标进程")),
+        NULL,/*取消任务的变量。如果这个进程无法取消，那么传递NULL。*/
+        0.00f
+    );
     // 清空现有数据
     s_modules.clear();
     s_threads.clear();
@@ -868,7 +876,7 @@ static void RefreshAllData()
     // 1. 刷新模块列表（真实枚举目标进程模块）
     HMODULE* moduleList = nullptr;
     DWORD bytesNeeded = 0;
-
+    kItem.SetProcess(kPid, C("刷新模块"), 0.20f);
     // 第一次调用获取所需缓冲区大小
     if (EnumProcessModulesEx(hProcess, moduleList, 0, &bytesNeeded, LIST_MODULES_ALL))
     {
@@ -882,6 +890,8 @@ static void RefreshAllData()
                 DWORD moduleCount = bytesNeeded / sizeof(HMODULE);
                 for (DWORD i = 0; i < moduleCount; ++i)
                 {
+
+
                     KswordModuleInfo module;
                     char modulePath[MAX_PATH] = { 0 };
 
@@ -889,6 +899,8 @@ static void RefreshAllData()
                     if (GetModuleFileNameExA(hProcess, moduleList[i], modulePath, MAX_PATH))
                     {
                         module.path = modulePath;
+                        kItem.SetProcess(kPid, C("获取模块："+module.path), 0.20f + (float)((float)i / moduleCount) * 0.50f);
+                        
 
                         // 获取模块基地址和大小
                         MODULEINFO modInfo = { 0 };
@@ -960,6 +972,7 @@ static void RefreshAllData()
         kLog.warn(C("枚举模块失败，错误码: " + std::to_string(error)), C("DataRefresh"));
     }
 
+    kItem.SetProcess(kPid, C("获取线程"), 0.70f);
     // 2. 刷新线程列表（真实枚举目标进程线程）
     HANDLE hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (hThreadSnap != INVALID_HANDLE_VALUE)
@@ -1021,7 +1034,7 @@ static void RefreshAllData()
         DWORD error = GetLastError();
         kLog.warn(C("枚举线程失败，错误码: " + std::to_string(error)), C("DataRefresh"));
     }
-
+    kItem.SetProcess(kPid, C("获取内存"), 0.90f);
     // 3. 刷新内存区域（真实查询目标进程内存）
     MEMORY_BASIC_INFORMATION mbi = { 0 };
     uintptr_t addr = 0;
@@ -1069,7 +1082,7 @@ static void RefreshAllData()
         if (addr < (uintptr_t)mbi.BaseAddress)
             break;
     }
-
+    kItem.SetProcess(kPid, C("枚举内存完成"), 1.00f);
     CloseHandle(hProcess);
     kLog.info(C("已刷新目标进程数据，PID: " + std::to_string(s_currentPID)), C("DataRefresh"));
 }
@@ -1122,7 +1135,8 @@ static void FilterAndSortModules(std::vector<KswordModuleInfo>& filteredModules)
         }
     }
 }
-
+static bool showExpTable = false;
+static bool showImpTable = false;
 static DWORD RvaToFileOffset(LPVOID base, DWORD rva) {
     if (rva == 0) return 0;
 
@@ -1140,10 +1154,12 @@ static DWORD RvaToFileOffset(LPVOID base, DWORD rva) {
     }
     return 0;
 }
-
-static void ShowExportTable(const std::string& modulePath) {
+static int ExpTableselectedIndex = -1;//储存选中对象
+static std::vector<std::string> exportNames;
+static std::string expModulePath; // 储存模块路径
+static void SearchExportTable(const std::string& modulePath) {
 #define CURRENT_MODULE C("导出表解析")
-    std::vector<std::string> exportNames;
+	expModulePath = modulePath;
     HANDLE hFile = INVALID_HANDLE_VALUE;
     HANDLE hMapping = NULL;
     LPVOID base = NULL;
@@ -1245,30 +1261,96 @@ static void ShowExportTable(const std::string& modulePath) {
     }
 
     // 显示弹窗
-    ImGui::OpenPopup(C("导出表"));
-    if (ImGui::BeginPopupModal(C("导出表"), NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text(C("模块: %s"), modulePath.c_str());
-        ImGui::Separator();
-
-        if (exportNames.empty()) {
-            ImGui::TextColored(ImVec4(1, 0, 0, 1), C("未找到导出表或解析失败"));
-        }
-        else {
-            for (const auto& name : exportNames) {
-                ImGui::Text("%s", name.c_str());
-            }
-        }
-
-        if (ImGui::Button(C("关闭"))) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
 #undef CURRENT_MODULE
 }
-static void ShowImportTable(const std::string& modulePath) {
+static void ShowExportTable() {
+    if (showExpTable)
+    {
+        // 开始一个独立窗口
+        ImGui::Begin(C("导出表"), &showExpTable);
+
+        ImGui::Text(C("模块: %s"), expModulePath.c_str());
+        ImGui::Separator();
+
+        if (exportNames.empty())
+        {
+            ImGui::TextColored(ImVec4(1, 0, 0, 1), "未找到导出表或解析失败");
+        }
+        else
+        {
+            // 开始表格，两列（序号和名称）
+            if (ImGui::BeginTable("ExportTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+            {
+                // 设置列头
+                ImGui::TableSetupColumn(C("序号"), ImGuiTableColumnFlags_WidthFixed, 60.0f);
+                ImGui::TableSetupColumn(C("导出名称"), ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableHeadersRow();
+
+                // 遍历导出名称并填充表格
+                for (size_t i = 0; i < exportNames.size(); ++i)
+                {
+                    ImGui::TableNextRow();
+                    ImGui::PushID(static_cast<int>(i));
+
+                    // 行选择区域 - 跨列选择
+                    ImGui::TableSetColumnIndex(0);
+                    bool isSelected = (ExpTableselectedIndex == i);
+                    if (ImGui::Selectable(
+                        std::to_string(i + 1).c_str(),  // 显示序号
+                        isSelected,
+                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap
+                    )) {
+                        ExpTableselectedIndex = i;  // 更新选中索引
+                    }
+
+                    // 右键菜单 - 关联到Selectable的上下文
+                    if (ImGui::BeginPopupContextItem("ExportContextMenu")) {
+                        if (ImGui::MenuItem(C("复制"))) {
+                            if (ExpTableselectedIndex >= 0 && ExpTableselectedIndex < exportNames.size()) {
+                                ImGui::SetClipboardText(exportNames[ExpTableselectedIndex].c_str());
+                            }
+                        }
+                        ImGui::EndPopup();
+                    }
+
+
+
+                    // 名称列
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text(C("%s"), exportNames[i].c_str());
+
+                    // 检测当前行是否被右键点击
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+                    {
+                        ImGui::OpenPopup("ExportContextMenu");
+                        // 存储当前选中的项
+                        ExpTableselectedIndex = -1;
+                        ExpTableselectedIndex = i;
+                    }
+					ImGui::PopID();  // 恢复ID栈
+                }
+
+                ImGui::EndTable();
+            }
+
+
+        }
+
+        // 关闭按钮
+        if (ImGui::Button(C("关闭")))
+        {
+            showExpTable = false;
+        }
+
+        ImGui::End(); // 结束窗口
+    }
+
+}
+static std::vector<std::string> importList;
+static std::string impModulePath; // 储存模块路径
+static void SearchImportTable(const std::string& modulePath) {
     // 简单PE导入表解析，仅显示导入DLL和函数名
-    std::vector<std::string> importList;
+	impModulePath = modulePath;
     HANDLE hFile = INVALID_HANDLE_VALUE;
     HANDLE hMapping = NULL;
     LPVOID base = NULL;
@@ -1470,25 +1552,80 @@ static void ShowImportTable(const std::string& modulePath) {
     }
 
     // 显示导入表弹窗
-    ImGui::OpenPopup(C("导入表"));
-    if (ImGui::BeginPopupModal(C("导入表"), NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text(C("模块: %s"), modulePath.c_str());
+}
+static int ImpTableselectedIndex = -1;  // 用于记录选中的行索引
+static void ShowImportTable() {
+
+    // 独立窗口渲染代码
+    if (showImpTable)
+    {
+        // 开始独立窗口
+        ImGui::Begin(C("导入表"), &showImpTable);
+
+        ImGui::Text(C("模块: %s"), impModulePath.c_str());
         ImGui::Separator();
 
-        if (importList.empty()) {
+        if (importList.empty())
+        {
             ImGui::TextColored(ImVec4(1, 0, 0, 1), C("未找到导入表或解析失败"));
         }
-        else {
-            for (const auto& info : importList) {
-                ImGui::Text("%s", info.c_str());
+        else
+        {
+            // 开始表格，包含序号和导入信息两列
+            if (ImGui::BeginTable("ImportTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+            {
+                ImGui::TableSetupColumn(C("序号"), ImGuiTableColumnFlags_WidthFixed, 60.0f);
+                ImGui::TableSetupColumn(C("导入信息"), ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableHeadersRow();
+
+                // 遍历导入列表填充表格
+                for (size_t i = 0; i < importList.size(); ++i)
+                {
+                    ImGui::TableNextRow();
+                    ImGui::PushID(static_cast<int>(i));  // 为每行设置唯一ID
+
+                    // 序号列 - 实现整行选择
+                    ImGui::TableSetColumnIndex(0);
+                    bool isSelected = (ImpTableselectedIndex == i);
+                    if (ImGui::Selectable(
+                        std::to_string(i + 1).c_str(),
+                        isSelected,
+                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap
+                    )) {
+                        ImpTableselectedIndex = static_cast<int>(i);  // 更新选中索引
+                    }
+
+                    // 右键菜单 - 复制功能
+                    if (ImGui::BeginPopupContextItem(C("ImportContextMenu"))) {
+                        if (ImGui::MenuItem(C("复制"))) {
+                            // 检查索引有效性
+                            if (ImpTableselectedIndex >= 0 && ImpTableselectedIndex < importList.size()) {
+                                ImGui::SetClipboardText(importList[ImpTableselectedIndex].c_str());
+                            }
+                        }
+                        ImGui::EndPopup();
+                    }
+
+                    // 导入信息列
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%s", importList[i].c_str());
+
+                    ImGui::PopID();  // 弹出ID
+                }
+
+                ImGui::EndTable();
             }
         }
 
-        if (ImGui::Button(C("关闭"))) {
-            ImGui::CloseCurrentPopup();
+        // 关闭按钮
+        if (ImGui::Button(C("关闭")))
+        {
+            showImpTable = false;
         }
-        ImGui::EndPopup();
+
+        ImGui::End();  // 结束窗口
     }
+
 }
 static void DrawModuleDetails()
 {
@@ -1505,15 +1642,18 @@ static void DrawModuleDetails()
         ImGui::Text(C("位数: %s"), s_selectedModule.is64Bit ? C("64位") : C("32位"));
 
         ImGui::Separator();
-
+        if(showExpTable)ShowExportTable();
+        if(showImpTable)ShowImportTable();
         if (ImGui::Button(C("查看导出表")))
         {
-            ShowExportTable(s_selectedModule.path);
+			SearchExportTable(s_selectedModule.path);
+            showExpTable = true;
         }
         ImGui::SameLine();
         if (ImGui::Button(C("查看导入表")))
         {
-            ShowImportTable(s_selectedModule.path);
+			SearchImportTable(s_selectedModule.path);
+            showImpTable = true;
         }
         ImGui::SameLine();
         if (ImGui::Button(C("在内存中查看")))

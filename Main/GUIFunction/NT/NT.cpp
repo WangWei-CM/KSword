@@ -9,9 +9,11 @@
 #pragma comment(lib, "ntdll.lib")
 
 // 全局变量
-std::map<UCHAR, std::wstring> g_typeMap;
-bool g_isQueryCompleted = false;
-bool g_isQuerySuccess = false;
+static std::map<UCHAR, std::wstring> g_typeMap;
+static bool g_isQueryCompleted = false;
+static bool g_isQuerySuccess = false;
+
+static bool KswordNTInited = false;
 
 // 复用原代码中的QueryObjectTypeIndexMap方法
 std::map<UCHAR, std::wstring> QueryObjectTypeIndexMap() {
@@ -63,53 +65,40 @@ std::map<UCHAR, std::wstring> QueryObjectTypeIndexMap() {
 void KswordNTMain()
 {
     // 查询按钮
-    if (ImGui::Button(C("查询类型索引")) && !g_isQueryCompleted) {
-        int kpid = kItem.AddProcess(
-            C("正在查询内核对象类型"),
-            std::string(C("获取类型信息中...")),
-            NULL,
-            0.0f
-        );
+    if (ImGui::CollapsingHeader(C("内存索引类型查询"), ImGuiTreeNodeFlags_DefaultOpen)) {
+        if(!KswordNTInited){
 
-        g_typeMap = QueryObjectTypeIndexMap();
-        g_isQueryCompleted = true;
-        g_isQuerySuccess = !g_typeMap.empty();
+            g_typeMap = QueryObjectTypeIndexMap();
+            g_isQueryCompleted = true;
+            g_isQuerySuccess = !g_typeMap.empty();
+			KswordNTInited = true;
+        }
 
-        kItem.SetProcess(kpid, std::string(C("查询完成")), 1.00f);
-    }
+        // 显示查询结果
+        if (g_isQueryCompleted) {
+            if (g_isQuerySuccess) {
+                ImGui::Text(C("共找到 %d 种对象类型"), g_typeMap.size());
 
-    // 显示查询结果
-    if (g_isQueryCompleted) {
-        if (g_isQuerySuccess) {
-            ImGui::Text(C("共找到 %d 种对象类型"), g_typeMap.size());
+                if (ImGui::BeginTable(C("类型索引表"), 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                    ImGui::TableSetupColumn(C("类型索引"));
+                    ImGui::TableSetupColumn(C("类型名称"));
+                    ImGui::TableHeadersRow();
 
-            if (ImGui::BeginTable(C("类型索引表"), 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-                ImGui::TableSetupColumn(C("类型索引"));
-                ImGui::TableSetupColumn(C("类型名称"));
-                ImGui::TableHeadersRow();
-
-                for (const auto& [idx, name] : g_typeMap) {
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0);
-                    ImGui::Text("%d", idx);
-                    ImGui::TableSetColumnIndex(1);
-                    ImGui::Text(C(WCharToString(name.c_str())));  // 直接显示宽字符串
+                    for (const auto& [idx, name] : g_typeMap) {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::Text("%d", idx);
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text(C(WCharToString(name.c_str())));  // 直接显示宽字符串
+                    }
+                    ImGui::EndTable();
                 }
-                ImGui::EndTable();
+            }
+            else {
+                ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), C("查询失败，请检查权限或系统环境"));
             }
         }
-        else {
-            ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), C("查询失败，请检查权限或系统环境"));
-        }
-
-        // 重置按钮
-        if (ImGui::Button(C("重置查询"))) {
-            g_typeMap.clear();
-            g_isQueryCompleted = false;
-            g_isQuerySuccess = false;
-        }
     }
-
     // 主窗口
     ImGui::EndTabItem();
     return;

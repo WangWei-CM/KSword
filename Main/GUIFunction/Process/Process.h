@@ -102,3 +102,10 @@ private:
 	double cpuUsage;
 
 };
+struct ServiceInfo {
+	std::wstring serviceName;       // 服务名称（短名）
+	std::wstring userName;          // 服务运行账户名
+	std::wstring displayName;       // 服务显示名称
+	std::wstring description;       // 服务描述
+	DWORD pid;                      // 服务对应的进程PID
+};

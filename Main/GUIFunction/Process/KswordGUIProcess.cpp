@@ -31,7 +31,7 @@ static std::wstring g_workingDir;          // 工作目录
 static STARTUPINFOW g_startupInfo = { 0 };   // STARTUPINFO
 static PROCESS_INFORMATION g_procInfo = { 0 };// PROCESS_INFORMATION
 // 全局输入框变量（扩大作用域）
-static char modulePathUtf8[1024] = "%SYSTEMDRIVE%\\Windows\\System32\\cmd.exe";
+static char modulePathUtf8[1024] = "C:\\Windows\\System32\\cmd.exe";
 static char cmdLineUtf8[1024] = "";
 static char workDirUtf8[1024] = "";
 static char envPid[32] = "";
@@ -65,8 +65,11 @@ static bool flagStartfForceOffFeedback = false;
 static bool flagStartfUseStdHandles = false;
 static int showWindowMode = SW_SHOW;
 
+static bool KswordProcessTabInited = false;
+
 // 全局状态
 static std::vector<kProcess> dummy_processes;
+
 
 // 从文件路径提取16×16图标（返回HICON，需手动释放）
 HICON Get16x16IconFromPath(const std::wstring& path) {
@@ -378,6 +381,8 @@ std::vector<kProcess> GetProcessListCore() {
 }
 void GetProcessList() {
     std::thread(GetProcessListCore).detach(); // 异步获取进程列表
+    KswordProcessTabInited = true;
+
 }
 
 
@@ -425,8 +430,13 @@ static kProcess* SelectedProcess;//右键菜单所在进程
 
 void KswordGUIProcess() {
     //渲染详细信息
+    if(KswordProcessTabInited == false)
+    {
+		std::thread (GetProcessList).detach();
+        
+	}
     kProcDtl.renderAll();
-    if (ImGui::TreeNode("Process List"))
+    if (ImGui::CollapsingHeader(C("进程列表"), ImGuiTreeNodeFlags_DefaultOpen))
     {
         // 设置表格（三列，带边框）
                         // 过滤输入框
@@ -620,11 +630,9 @@ void KswordGUIProcess() {
             // 刷新逻辑
         }
 
-        ImGui::TreePop();
-
     }
-    if (ImGui::TreeNode("CreateProcess")){
-    ImGui::InputTextWithHint(C("##ModulePath"), C("模块路径（如%SYSTEMDRIVE%\\Windows\\notepad.exe）"), modulePathUtf8, sizeof(modulePathUtf8));
+    if (ImGui::CollapsingHeader(C("CreateProcess函数")) ){
+    ImGui::InputTextWithHint(C("##ModulePath"), C("模块路径（如C:\\Windows\\notepad.exe）"), modulePathUtf8, sizeof(modulePathUtf8));
     ImGui::SameLine();
     if (ImGui::Button(C("浏览文件 ##CreateProcess1"))) {
         wchar_t selectedPath[1024] = L"";
@@ -636,7 +644,7 @@ void KswordGUIProcess() {
     ImGui::SameLine();
     if (ImGui::Button(C("粘贴 ##CreateProcess2")))
     {
-        const wchar_t* demoPath = L"%SYSTEMDRIVE%\\粘贴的路径.exe";
+        const wchar_t* demoPath = L"C:\\粘贴的路径.exe";
         g_modulePath = demoPath;
         WideCharToMultiByte(CP_UTF8, 0, demoPath, -1, modulePathUtf8, sizeof(modulePathUtf8), nullptr, nullptr);
     }
@@ -746,7 +754,7 @@ void KswordGUIProcess() {
     ImGui::SameLine();
     if (ImGui::Button(C("粘贴 ##CreateProcess5")))
     {
-        const wchar_t* demoDir = L"%SYSTEMDRIVE%\\粘贴的目录";
+        const wchar_t* demoDir = L"C:\\粘贴的目录";
         g_workingDir = demoDir;
         WideCharToMultiByte(CP_UTF8, 0, demoDir, -1, workDirUtf8, sizeof(workDirUtf8), nullptr, nullptr);
     }
@@ -906,7 +914,6 @@ void KswordGUIProcess() {
             std::thread(KCreateProcessWithSuspendFollower, pi.dwProcessId).detach();
         }
     }
-    ImGui::TreePop();
     }    
     ImGui::EndTabItem();
 

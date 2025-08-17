@@ -8,6 +8,67 @@ extern BOOL TerminateAllThreads(HANDLE hProcess);
 extern BOOL NtTerminate(HANDLE hProcess);
 extern BOOL TerminateProcessViaJob(HANDLE hProcess);
 
+bool GetServiceInfoByPID(DWORD pid, ServiceInfo& info) {
+    // 打开服务控制管理器
+    SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ENUMERATE_SERVICE);
+    if (!hSCM) return false;
+
+    DWORD bytesNeeded = 0;
+    DWORD servicesReturned = 0;
+    // 第一次调用获取缓冲区大小
+    EnumServicesStatusExW(
+        hSCM,
+        SC_ENUM_PROCESS_INFO,
+        SERVICE_WIN32,
+        SERVICE_STATE_ALL,
+        nullptr,
+        0,
+        &bytesNeeded,
+        &servicesReturned,
+        nullptr,
+        nullptr
+    );
+    if (GetLastError() != ERROR_MORE_DATA) {
+        CloseServiceHandle(hSCM);
+        return false;
+    }
+
+    // 分配缓冲区并枚举服务
+    std::vector<BYTE> buffer(bytesNeeded);
+    auto pServices = reinterpret_cast<LPENUM_SERVICE_STATUS_PROCESSW>(buffer.data());
+    if (!EnumServicesStatusExW(
+        hSCM,
+        SC_ENUM_PROCESS_INFO,
+        SERVICE_WIN32,
+        SERVICE_STATE_ALL,
+        buffer.data(),
+        bytesNeeded,
+        &bytesNeeded,
+        &servicesReturned,
+        nullptr,
+        nullptr
+    )) {
+        CloseServiceHandle(hSCM);
+        return false;
+    }
+
+    // 匹配PID对应的服务
+    for (DWORD i = 0; i < servicesReturned; ++i) {
+        if (pServices[i].ServiceStatusProcess.dwProcessId == pid) {
+            info.serviceName = pServices[i].lpServiceName;
+            info.displayName = pServices[i].lpDisplayName;
+
+            // 服务默认运行账户（可根据实际场景扩展）
+            info.userName = L"NT AUTHORITY\\SYSTEM";
+            CloseServiceHandle(hSCM);
+            return true;
+        }
+    }
+
+    CloseServiceHandle(hSCM);
+    return false;
+}
+
 std::string WideCharToMultiByte(const std::wstring& wstr) {
     int bufferSize = WideCharToMultiByte(CP_ACP, 0, wstr.c_str(), -1, NULL, 0, NULL, NULL);
     std::string str(bufferSize, 0);
@@ -308,7 +369,10 @@ void kProcess::UpdateStats() {
 kProcess::kProcess(HANDLE hProc) : handle(hProc), isAdmin(false), PID(0)
 , cpuUsage(0.0)                  // CPU使用率初始化为0
 {
-    if (handle != INVALID_HANDLE_VALUE && handle != NULL) {
+    bool isService = false;
+    ServiceInfo serviceInfo;
+
+    if (1/*handle != INVALID_HANDLE_VALUE && handle != NULL*/) {
         PID = GetProcessId(hProc);
         name = GetProcessName();
 
@@ -327,6 +391,26 @@ kProcess::kProcess(HANDLE hProc) : handle(hProc), isAdmin(false), PID(0)
         cpuUsage=UpdateCPUUsage();      // 新增：初始化CPU信息
         //GetCachedProcessIcon(PID);
     }
+    if (GetServiceInfoByPID(PID, serviceInfo)) {
+        isService = true;
+        // 常规方法获取失败时，用服务信息填充
+        if (name.empty()) {
+            name = WideCharToMultiByte(serviceInfo.displayName); // 显示名称作为进程名
+        }
+        if (exePath.empty()) {
+            exePath = "Service: " + WideCharToMultiByte(serviceInfo.serviceName); // 服务名称作为路径
+        }
+        if (AuthName.empty()) {
+            AuthName = WideCharToMultiByte(serviceInfo.userName); // 服务运行账户
+        }
+    }
+
+    // 特殊处理：如果是服务进程但仍有信息缺失，强制填充默认值
+    if (isService) {
+        if (name.empty()) name = "Service Process";
+        if (AuthName.empty()) AuthName = "NT AUTHORITY\\SYSTEM";
+    }
+
 }
 bool kProcess::Terminate(kProcKillMethod method, UINT uExitCode)
 {
