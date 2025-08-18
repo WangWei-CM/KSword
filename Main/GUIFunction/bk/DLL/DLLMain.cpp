@@ -49,266 +49,13 @@ using namespace KswordDebugger;
 static void RefreshAllData();
 static void FilterAndSortModules(std::vector<KswordModuleInfo>& filteredModules);
 static void DrawModuleDetails();
-
-// 工具函数声明（与MemoryMain.cpp保持一致）
+static void DrawMemoryEditor();
 static std::string FormatSize(size_t size);
 static std::string FormatAddress(uintptr_t addr);
 static bool AddBreakpoint(uintptr_t address);
 static bool RemoveBreakpoint(uintptr_t address);
 static bool ToggleBreakpoint(uintptr_t address);
-static void DrawMemoryEditor();
 
-// 工具函数实现（与MemoryMain.cpp保持一致）
-static std::string FormatSize(size_t size) {
-    char buf[32];
-    if (size < 1024)
-        sprintf_s(buf, "%zu B", size);
-    else if (size < 1024 * 1024)
-        sprintf_s(buf, "%.2f KB", size / 1024.0);
-    else if (size < 1024 * 1024 * 1024)
-        sprintf_s(buf, "%.2f MB", size / 1024.0 / 1024.0);
-    else
-        sprintf_s(buf, "%.2f GB", size / 1024.0 / 1024.0 / 1024.0);
-    return buf;
-}
-static std::string FormatAddress(uintptr_t addr) {
-    std::stringstream ss;
-    ss << "0x" << std::hex << std::setw(sizeof(uintptr_t)*2) << std::setfill('0') << addr;
-    return ss.str();
-}
-static bool AddBreakpoint(uintptr_t address) {
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, s_currentPID);
-    if (!hProcess) return false;
-    for (const auto& bp : s_breakpoints) {
-        if (bp.address == address) { CloseHandle(hProcess); return false; }
-    }
-    uint8_t orig = 0;
-    SIZE_T read = 0;
-    ReadProcessMemory(hProcess, (LPCVOID)address, &orig, 1, &read);
-    uint8_t cc = 0xCC;
-    SIZE_T written = 0;
-    WriteProcessMemory(hProcess, (LPVOID)address, &cc, 1, &written);
-    KswordBreakpointInfo info;
-    info.address = address;
-    info.module = "";
-    info.symbol = "";
-    info.enabled = true;
-    info.hitCount = 0;
-    info.originalByte = orig;
-    s_breakpoints.push_back(info);
-    CloseHandle(hProcess);
-    return true;
-}
-static bool RemoveBreakpoint(uintptr_t address) {
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, s_currentPID);
-    if (!hProcess) return false;
-    auto it = std::find_if(s_breakpoints.begin(), s_breakpoints.end(), [&](const KswordBreakpointInfo& bp) {
-        return bp.address == address;
-    });
-    if (it != s_breakpoints.end()) {
-        uint8_t orig = it->originalByte;
-        SIZE_T written = 0;
-        WriteProcessMemory(hProcess, (LPVOID)address, &orig, 1, &written);
-        s_breakpoints.erase(it);
-        CloseHandle(hProcess);
-        return true;
-    }
-    CloseHandle(hProcess);
-    return false;
-}
-static bool ToggleBreakpoint(uintptr_t address) {
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, s_currentPID);
-    if (!hProcess) return false;
-    for (auto& bp : s_breakpoints) {
-        if (bp.address == address) {
-            SIZE_T written = 0;
-            if (bp.enabled) {
-                WriteProcessMemory(hProcess, (LPVOID)address, &bp.originalByte, 1, &written);
-                bp.enabled = false;
-            } else {
-                uint8_t cc = 0xCC;
-                WriteProcessMemory(hProcess, (LPVOID)address, &cc, 1, &written);
-                bp.enabled = true;
-            }
-            CloseHandle(hProcess);
-            return true;
-        }
-    }
-    CloseHandle(hProcess);
-    return false;
-}
-static void DrawMemoryEditor() {
-    static std::vector<uint8_t> memBuffer;
-    static uintptr_t lastAddr = 0;
-    static int pageSize = 256; // 每页显示字节数
-    static int pageOffset = 0; // 当前页偏移
-    static char jumpAddrInput[32] = "";
-    static bool editMode = false;
-    static std::vector<std::string> hexEdits(pageSize, "");
-    static int activeEditIndex = -1; // 当前激活的输入框索引
-    ImGui::SetNextWindowSize(ImVec2(800, 500), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin(C("内存编辑器"), &s_showMemoryEditor, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoScrollbar)) {
-        ImGui::Text(C("地址:"));
-        ImGui::SameLine();
-        ImGui::InputText("##memAddr", s_memoryAddr, IM_ARRAYSIZE(s_memoryAddr));
-        ImGui::SameLine();
-        if (ImGui::Button(C("跳转"))) {
-            strncpy_s(jumpAddrInput, sizeof(jumpAddrInput), s_memoryAddr, _TRUNCATE);
-            uintptr_t jumpAddr = 0;
-            sscanf_s(jumpAddrInput, "%p", (void**)&jumpAddr);
-            if (jumpAddr != 0) {
-                lastAddr = 0; // 强制刷新
-                pageOffset = 0;
-            }
-        }
-        ImGui::SameLine();
-        ImGui::InputInt(C("页大小"), &pageSize, 16, 64);
-        if (pageSize < 16) pageSize = 16;
-        if (pageSize > 4096) pageSize = 4096;
-        ImGui::SameLine();
-        if (ImGui::Button(C("上一页"))) {
-            pageOffset -= pageSize;
-            if (pageOffset < 0) pageOffset = 0;
-            lastAddr = 0;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button(C("下一页"))) {
-            pageOffset += pageSize;
-            lastAddr = 0;
-        }
-        uintptr_t addr = 0;
-        sscanf_s(s_memoryAddr, "%p", (void**)&addr);
-        addr += pageOffset;
-        // 读取内存
-        if (addr != 0 && addr != lastAddr) {
-            memBuffer.clear();
-            HANDLE hProcess = OpenProcess(PROCESS_VM_READ, FALSE, s_currentPID);
-            if (hProcess) {
-                memBuffer.resize(pageSize);
-                SIZE_T read = 0;
-                ReadProcessMemory(hProcess, (LPCVOID)addr, memBuffer.data(), memBuffer.size(), &read);
-                memBuffer.resize(read);
-                CloseHandle(hProcess);
-            }
-            lastAddr = addr;
-            hexEdits.resize(pageSize);
-            for (size_t i = 0; i < memBuffer.size(); ++i) {
-                char buf[4];
-                sprintf_s(buf, "%02X", memBuffer[i]);
-                hexEdits[i] = buf;
-            }
-            activeEditIndex = -1;
-        }
-        ImGui::Separator();
-        ImGui::Checkbox(C("编辑模式"), &editMode);
-        ImGui::SameLine();
-        if (ImGui::Button(C("写入全部修改")) && editMode) {
-            // 写回全部修改
-            std::vector<uint8_t> newBuffer(memBuffer.size());
-            for (size_t i = 0; i < memBuffer.size(); ++i) {
-                int val = 0;
-                sscanf_s(hexEdits[i].c_str(), "%x", &val);
-                newBuffer[i] = (uint8_t)val;
-            }
-            HANDLE hProcess = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, s_currentPID);
-            if (hProcess) {
-                SIZE_T written = 0;
-                WriteProcessMemory(hProcess, (LPVOID)addr, newBuffer.data(), newBuffer.size(), &written);
-                CloseHandle(hProcess);
-                lastAddr = 0; // 强制刷新
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button(C("复制全部"))) {
-            std::stringstream ss;
-            for (size_t i = 0; i < memBuffer.size(); ++i) {
-                ss << std::setw(2) << std::setfill('0') << std::hex << (int)memBuffer[i] << " ";
-            }
-            ImGui::SetClipboardText(ss.str().c_str());
-        }
-        // 表格显示
-        if (ImGui::BeginTable("MemoryEditTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
-            ImGui::TableSetupColumn(C("地址"), ImGuiTableColumnFlags_WidthFixed, 120.0f);
-            ImGui::TableSetupColumn(C("十六进制"), ImGuiTableColumnFlags_WidthStretch, 400.0f);
-            ImGui::TableSetupColumn(C("ASCII"), ImGuiTableColumnFlags_WidthFixed, 120.0f);
-            ImGui::TableHeadersRow();
-            for (size_t i = 0; i < memBuffer.size(); i += 16) {
-                ImGui::TableNextRow();
-                // 地址列
-                ImGui::TableSetColumnIndex(0);
-                std::string addrStr = FormatAddress(addr + i);
-                ImGui::Text("%s", C(addrStr.c_str()));
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                    ImGui::SetClipboardText(addrStr.c_str());
-                }
-                // 十六进制列
-                ImGui::TableSetColumnIndex(1);
-                for (size_t j = 0; j < 16 && i + j < memBuffer.size(); ++j) {
-                    int idx = (int)(i + j);
-                    ImGui::PushID(idx);
-                    if (editMode) {
-                        ImGui::SetNextItemWidth(32);
-                        bool isActive = (activeEditIndex == idx);
-                        ImGuiInputTextFlags flags = ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_AutoSelectAll;
-                        if (ImGui::InputText("", &hexEdits[idx][0], 3, flags | ImGuiInputTextFlags_CallbackAlways,
-                            [](ImGuiInputTextCallbackData* data) -> int {
-                                // 覆盖模式：始终覆盖光标后面的内容
-                                if (data->EventChar >= '0' && data->EventChar <= '9' ||
-                                    data->EventChar >= 'a' && data->EventChar <= 'f' ||
-                                    data->EventChar >= 'A' && data->EventChar <= 'F') {
-                                    data->Buf[0] = data->EventChar;
-                                    data->Buf[1] = '\0';
-                                    data->CursorPos = 1;
-                                    // 自动跳到下一个输入框
-                                    *((int*)data->UserData) = data->UserData ? *((int*)data->UserData) + 1 : -1;
-                                }
-                                return 0;
-                            }, &activeEditIndex)) {
-                            // 单字节写入
-                            int val = 0;
-                            sscanf_s(hexEdits[idx].c_str(), "%x", &val);
-                            uint8_t byteVal = (uint8_t)val;
-                            HANDLE hProcess = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, s_currentPID);
-                            if (hProcess) {
-                                SIZE_T written = 0;
-                                WriteProcessMemory(hProcess, (LPVOID)(addr + idx), &byteVal, 1, &written);
-                                CloseHandle(hProcess);
-                                lastAddr = 0;
-                            }
-                            // 自动跳到下一个输入框
-                            activeEditIndex = idx + 1 < (int)memBuffer.size() ? idx + 1 : -1;
-                        }
-                        if (isActive) {
-                            ImGui::SetKeyboardFocusHere(-1);
-                        }
-                        ImGui::SameLine();
-                    } else {
-                        ImGui::Text("%s", hexEdits[idx].c_str());
-                        ImGui::SameLine();
-                    }
-                    ImGui::PopID();
-                }
-                ImGui::NewLine();
-                // ASCII列
-                ImGui::TableSetColumnIndex(2);
-                std::string asciistr;
-                for (size_t j = 0; j < 16 && i + j < memBuffer.size(); ++j) {
-                    char c = memBuffer[i + j];
-                    asciistr += (c >= 32 && c <= 126) ? c : '.';
-                }
-                ImGui::Text("%s", C(asciistr.c_str()));
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                    ImGui::SetClipboardText(asciistr.c_str());
-                }
-            }
-            ImGui::EndTable();
-        }
-        if (ImGui::Button(C("关闭"))) {
-            s_showMemoryEditor = false;
-        }
-    }
-    ImGui::End();
-}
 
 // 卸载模块的实际实现函数
 bool UnloadModule(DWORD pid, HMODULE hModule) {
@@ -877,9 +624,6 @@ void KswordDLLMain()
             kLog.warn(C("DLL路径为空，注入失败"), C("ModuleView"));
         }
     }
-    if (s_showMemoryEditor) {
-        DrawMemoryEditor();
-    }
 
     // 进程控制区域
     ImGui::Separator();
@@ -887,6 +631,8 @@ void KswordDLLMain()
     ImGui::BeginGroup();
     if (ImGui::Button(C("终止进程"), ImVec2(100, 0)))
     {
+        //if (ImGui::GetIO().KeyCtrl)
+        //{
             if(kProcess(s_currentPID).Terminate())
             {
                 kLog.info(C(("成功终止进程: " + std::to_string(s_currentPID)).c_str()), C("ModuleView"));
@@ -989,7 +735,11 @@ void KswordDLLMain()
         }
     }
 
-
+    // 显示内存编辑窗口
+    if (s_showMemoryEditor)
+    {
+        DrawMemoryEditor();
+    }
 
     // 线程信息区域
     if (ImGui::CollapsingHeader(C("线程信息")))
@@ -1514,69 +1264,85 @@ static void SearchExportTable(const std::string& modulePath) {
 #undef CURRENT_MODULE
 }
 static void ShowExportTable() {
-    static char exportFilter[128] = "";
     if (showExpTable)
     {
+        // 开始一个独立窗口
         ImGui::Begin(C("导出表"), &showExpTable);
+
         ImGui::Text(C("模块: %s"), expModulePath.c_str());
         ImGui::Separator();
-        ImGui::InputTextWithHint("##exportFilter", C("筛选导出项(支持模糊匹配)"), exportFilter, IM_ARRAYSIZE(exportFilter));
+
         if (exportNames.empty())
         {
             ImGui::TextColored(ImVec4(1, 0, 0, 1), "未找到导出表或解析失败");
         }
         else
         {
-            // 过滤导出项
-            std::vector<std::string> filteredExportNames;
-            std::string filterStr = exportFilter;
-            std::transform(filterStr.begin(), filterStr.end(), filterStr.begin(), ::tolower);
-            for (const auto& name : exportNames) {
-                std::string nameLower = name;
-                std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
-                if (filterStr.empty() || nameLower.find(filterStr) != std::string::npos) {
-                    filteredExportNames.push_back(name);
-                }
-            }
+            // 开始表格，两列（序号和名称）
             if (ImGui::BeginTable("ExportTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
             {
+                // 设置列头
                 ImGui::TableSetupColumn(C("序号"), ImGuiTableColumnFlags_WidthFixed, 60.0f);
                 ImGui::TableSetupColumn(C("导出名称"), ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableHeadersRow();
-                for (size_t i = 0; i < filteredExportNames.size(); ++i)
+
+                // 遍历导出名称并填充表格
+                for (size_t i = 0; i < exportNames.size(); ++i)
                 {
                     ImGui::TableNextRow();
                     ImGui::PushID(static_cast<int>(i));
+
+                    // 行选择区域 - 跨列选择
                     ImGui::TableSetColumnIndex(0);
                     bool isSelected = (ExpTableselectedIndex == i);
-                    if (ImGui::Selectable(std::to_string(i + 1).c_str(), isSelected,
-                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap)) {
-                        ExpTableselectedIndex = i;
+                    if (ImGui::Selectable(
+                        std::to_string(i + 1).c_str(),  // 显示序号
+                        isSelected,
+                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap
+                    )) {
+                        ExpTableselectedIndex = i;  // 更新选中索引
                     }
+
+                    // 右键菜单 - 关联到Selectable的上下文
                     if (ImGui::BeginPopupContextItem("ExportContextMenu")) {
                         if (ImGui::MenuItem(C("复制"))) {
-                            if (ExpTableselectedIndex >= 0 && ExpTableselectedIndex < filteredExportNames.size()) {
-                                ImGui::SetClipboardText(filteredExportNames[ExpTableselectedIndex].c_str());
+                            if (ExpTableselectedIndex >= 0 && ExpTableselectedIndex < exportNames.size()) {
+                                ImGui::SetClipboardText(exportNames[ExpTableselectedIndex].c_str());
                             }
                         }
                         ImGui::EndPopup();
                     }
+
+
+
+                    // 名称列
                     ImGui::TableSetColumnIndex(1);
-                    ImGui::Text(C("%s"), filteredExportNames[i].c_str());
-                    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                    ImGui::Text(C("%s"), exportNames[i].c_str());
+
+                    // 检测当前行是否被右键点击
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+                    {
                         ImGui::OpenPopup("ExportContextMenu");
+                        // 存储当前选中的项
+                        ExpTableselectedIndex = -1;
                         ExpTableselectedIndex = i;
                     }
-                    ImGui::PopID();
+					ImGui::PopID();  // 恢复ID栈
                 }
+
                 ImGui::EndTable();
             }
+
+
         }
+
+        // 关闭按钮
         if (ImGui::Button(C("关闭")))
         {
             showExpTable = false;
         }
-        ImGui::End();
+
+        ImGui::End(); // 结束窗口
     }
 
 }
@@ -1659,7 +1425,7 @@ static void SearchImportTable(const std::string& modulePath) {
                                 IMAGE_IMPORT_DESCRIPTOR* imp = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
                                     reinterpret_cast<BYTE*>(base) + importOffset);
 
-                                // 遍历导入描述符， 最多遍历合理数量的描述符防止无限循环
+                                // 遍历导入描述符，最多遍历合理数量的描述符防止无限循环
                                 DWORD maxImports = 1024; // 合理的上限
                                 DWORD importCount = 0;
 
@@ -1798,55 +1564,60 @@ static void ShowImportTable() {
 
         ImGui::Text(C("模块: %s"), impModulePath.c_str());
         ImGui::Separator();
-		static char importFilter[128] = "";  // 用于筛选导入项的输入框
-        ImGui::InputTextWithHint("##importFilter", C("筛选导入项(支持模糊匹配)"), importFilter, IM_ARRAYSIZE(importFilter));
+
         if (importList.empty())
         {
             ImGui::TextColored(ImVec4(1, 0, 0, 1), C("未找到导入表或解析失败"));
         }
         else
         {
-            // 过滤导入项
-            std::vector<std::string> filteredImportList;
-            std::string filterStr = importFilter;
-            std::transform(filterStr.begin(), filterStr.end(), filterStr.begin(), ::tolower);
-            for (const auto& item : importList) {
-                std::string itemLower = item;
-                std::transform(itemLower.begin(), itemLower.end(), itemLower.begin(), ::tolower);
-                if (filterStr.empty() || itemLower.find(filterStr) != std::string::npos) {
-                    filteredImportList.push_back(item);
-                }
-            }
+            // 开始表格，包含序号和导入信息两列
             if (ImGui::BeginTable("ImportTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
             {
                 ImGui::TableSetupColumn(C("序号"), ImGuiTableColumnFlags_WidthFixed, 60.0f);
                 ImGui::TableSetupColumn(C("导入信息"), ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableHeadersRow();
-                for (size_t i = 0; i < filteredImportList.size(); ++i)
+
+                // 遍历导入列表填充表格
+                for (size_t i = 0; i < importList.size(); ++i)
                 {
                     ImGui::TableNextRow();
-                    ImGui::PushID(static_cast<int>(i));
+                    ImGui::PushID(static_cast<int>(i));  // 为每行设置唯一ID
+
+                    // 序号列 - 实现整行选择
                     ImGui::TableSetColumnIndex(0);
                     bool isSelected = (ImpTableselectedIndex == i);
-                    if (ImGui::Selectable(std::to_string(i + 1).c_str(), isSelected,
-                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap)) {
-                        ImpTableselectedIndex = static_cast<int>(i);
+                    if (ImGui::Selectable(
+                        std::to_string(i + 1).c_str(),
+                        isSelected,
+                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap
+                    )) {
+                        ImpTableselectedIndex = static_cast<int>(i);  // 更新选中索引
                     }
+
+                    // 右键菜单 - 复制功能
                     if (ImGui::BeginPopupContextItem(C("ImportContextMenu"))) {
                         if (ImGui::MenuItem(C("复制"))) {
-                            if (ImpTableselectedIndex >= 0 && ImpTableselectedIndex < filteredImportList.size()) {
-                                ImGui::SetClipboardText(filteredImportList[ImpTableselectedIndex].c_str());
+                            // 检查索引有效性
+                            if (ImpTableselectedIndex >= 0 && ImpTableselectedIndex < importList.size()) {
+                                ImGui::SetClipboardText(importList[ImpTableselectedIndex].c_str());
                             }
                         }
                         ImGui::EndPopup();
                     }
+
+                    // 导入信息列
                     ImGui::TableSetColumnIndex(1);
-                    ImGui::Text("%s", filteredImportList[i].c_str());
-                    ImGui::PopID();
+                    ImGui::Text("%s", importList[i].c_str());
+
+                    ImGui::PopID();  // 弹出ID
                 }
+
                 ImGui::EndTable();
             }
         }
+
+        // 关闭按钮
         if (ImGui::Button(C("关闭")))
         {
             showImpTable = false;
@@ -1859,7 +1630,7 @@ static void ShowImportTable() {
 static void DrawModuleDetails()
 {
     ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin(C("模块详情"), &s_showModuleDetails,ImGuiWindowFlags_NoDocking))
+    if (ImGui::Begin(C("模块详情"), &s_showModuleDetails))
     {
         ImGui::Text(C("模块路径: %s"), s_selectedModule.path.c_str());
         ImGui::Text(C("基地址: %s"), FormatAddress(s_selectedModule.baseAddr).c_str());
@@ -1893,4 +1664,301 @@ static void DrawModuleDetails()
     }
     ImGui::End();
 
+}
+static bool first_show_memory_window = 1;
+static void DrawMemoryEditor()
+{
+    if(first_show_memory_window)
+    {
+    ImGui::SetNextWindowSize(ImVec2(800, 600), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowPos(ImVec2(50, 50));
+    first_show_memory_window = 0;
+	}
+    if (ImGui::Begin(C("内存编辑器"), &s_showMemoryEditor, ImGuiWindowFlags_NoSavedSettings))
+    {
+        ImGui::Text(C("地址: %s"), s_memoryAddr);
+        ImGui::SameLine();
+        if (ImGui::Button(C("刷新")))
+        {
+            uintptr_t addr = 0;
+            sscanf_s(s_memoryAddr, "%p", (void**)&addr);
+            if (addr == 0)
+            {
+                kLog.warn(C("无效的内存地址，无法刷新"), C("MemoryEditor"));
+                return;
+            }
+
+            // 读取目标进程内存
+            HANDLE hProcess = OpenProcess(PROCESS_VM_READ, FALSE, s_currentPID);
+            if (!hProcess || hProcess == INVALID_HANDLE_VALUE)
+            {
+                kLog.err(C(("打开进程失败，无法读取内存: " + std::to_string(GetLastError())).c_str()), C("MemoryEditor"));
+                return;
+            }
+
+            // 读取0x100字节内存数据
+            static std::vector<uint8_t> memoryData(0x100, 0);
+            SIZE_T bytesRead = 0;
+            if (ReadProcessMemory(hProcess, (LPCVOID)addr, memoryData.data(), memoryData.size(), &bytesRead))
+            {
+                kLog.info(C(("成功读取内存: " + FormatAddress(addr) + " 长度: " + std::to_string(bytesRead)).c_str()), C("MemoryEditor"));
+            }
+            else
+            {
+                kLog.err(C(("读取内存失败: " + std::to_string(GetLastError())).c_str()), C("MemoryEditor"));
+            }
+            CloseHandle(hProcess);
+        }
+
+        ImGui::SameLine();
+        static char modifyValue[32] = "";
+        ImGui::InputTextWithHint("##modifyValue", C("输入新值(十六进制)"), modifyValue, IM_ARRAYSIZE(modifyValue));
+        ImGui::SameLine();
+        if (ImGui::Button(C("修改")))
+        {
+            uintptr_t addr = 0;
+            sscanf_s(s_memoryAddr, "%p", (void**)&addr);
+            if (addr == 0)
+            {
+                kLog.warn(C("无效的内存地址，无法修改"), C("MemoryEditor"));
+                return;
+            }
+
+            // 解析输入的十六进制值
+            uint8_t value = 0;
+            if (sscanf_s(modifyValue, "%hhX", &value) != 1)
+            {
+                kLog.warn(C("无效的十六进制值"), C("MemoryEditor"));
+                return;
+            }
+
+            // 写入目标进程内存
+            HANDLE hProcess = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, s_currentPID);
+            if (!hProcess || hProcess == INVALID_HANDLE_VALUE)
+            {
+                kLog.err(C(("打开进程失败，无法写入内存: " + std::to_string(GetLastError())).c_str()), C("MemoryEditor"));
+                return;
+            }
+
+            SIZE_T bytesWritten = 0;
+            if (WriteProcessMemory(hProcess, (LPVOID)addr, &value, sizeof(value), &bytesWritten) && bytesWritten == sizeof(value))
+            {
+                kLog.info(C(("成功修改内存: " + FormatAddress(addr) + " 新值: 0x" + std::to_string(value)).c_str()), C("MemoryEditor"));
+            }
+            else
+            {
+                kLog.err(C(("写入内存失败: " + std::to_string(GetLastError())).c_str()), C("MemoryEditor"));
+            }
+            CloseHandle(hProcess);
+        }
+
+        ImGui::Separator();
+
+        // 显示内存数据（使用实际读取的数据）
+        ImGui::BeginChild(C("MemoryView"), ImVec2(0, 0), true);
+        ImGuiListClipper clipper;
+        static std::vector<uint8_t> memoryData(0x100, 0); // 存储实际读取的内存数据
+        clipper.Begin(memoryData.size() / 16);
+        while (clipper.Step())
+        {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+            {
+                uintptr_t addr = 0;
+                sscanf_s(s_memoryAddr, "%p", (void**)&addr);
+                addr += i * 16;
+
+                ImGui::Text("%s: ", FormatAddress(addr).c_str());
+                ImGui::SameLine();
+
+                // 十六进制显示
+                for (int j = 0; j < 16; j++)
+                {
+                    int idx = i * 16 + j;
+                    if (idx < memoryData.size())
+                        ImGui::Text("%02X ", memoryData[idx]);
+                    else
+                        ImGui::Text("   ");
+                    if (j == 7) ImGui::SameLine();
+                }
+
+                ImGui::SameLine();
+
+                // ASCII显示
+                std::string ascii;
+                for (int j = 0; j < 16; j++)
+                {
+                    int idx = i * 16 + j;
+                    if (idx < memoryData.size())
+                    {
+                        uint8_t c = memoryData[idx];
+                        ascii += (c >= 32 && c <= 126) ? (char)c : '.';
+                    }
+                    else
+                    {
+                        ascii += ' ';
+                    }
+                }
+                ImGui::Text("%s", ascii.c_str());
+            }
+        }
+        ImGui::EndChild();
+    }
+    ImGui::End();
+}
+static std::string FormatSize(size_t size)
+{
+    if (size >= 1024 * 1024 * 1024)
+        return std::to_string((double)size / (1024 * 1024 * 1024)) + " GB";
+    else if (size >= 1024 * 1024)
+        return std::to_string((double)size / (1024 * 1024)) + " MB";
+    else if (size >= 1024)
+        return std::to_string((double)size / 1024) + " KB";
+    else
+        return std::to_string(size) + " B";
+}
+// 格式化地址（0xXXXXXXXX 或 0xXXXXXXXXXXXXXXXX 格式）
+static std::string FormatAddress(uintptr_t addr)
+{
+    std::stringstream ss;
+    ss << "0x" << std::hex << std::uppercase
+        << std::setw(s_is64BitProcess ? 16 : 8)  // 64位地址16个十六进制位，32位8个
+        << std::setfill('0') << addr;
+    return ss.str();
+}
+
+// 添加断点（需管理员权限，实际修改目标进程内存）
+static bool AddBreakpoint(uintptr_t address)
+{
+    // 检查断点是否已存在
+    auto it = std::find_if(s_breakpoints.begin(), s_breakpoints.end(),
+        [address](const KswordBreakpointInfo& bp) { return bp.address == address; });
+    if (it != s_breakpoints.end())
+    {
+        kLog.warn(C("断点已存在: " + FormatAddress(address)), C("Breakpoint"));
+        return false;
+    }
+
+    // 打开目标进程获取内存操作权限
+    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, s_currentPID);
+    if (!hProcess || hProcess == INVALID_HANDLE_VALUE)
+    {
+        kLog.err(C("无法打开进程以添加断点，错误: " + std::to_string(GetLastError())), C("Breakpoint"));
+        return false;
+    }
+
+    // 读取原始指令字节（断点会替换为INT3指令0xCC）
+    BYTE originalByte;
+    SIZE_T bytesRead;
+    if (!ReadProcessMemory(hProcess, (LPCVOID)address, &originalByte, 1, &bytesRead) || bytesRead != 1)
+    {
+        kLog.err(C("读取内存失败，无法添加断点: " + FormatAddress(address)), C("Breakpoint"));
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    // 写入INT3指令设置断点
+    BYTE int3 = 0xCC;
+    SIZE_T bytesWritten;
+    if (!WriteProcessMemory(hProcess, (LPVOID)address, &int3, 1, &bytesWritten) || bytesWritten != 1)
+    {
+        kLog.err(C("写入内存失败，无法添加断点: " + FormatAddress(address)), C("Breakpoint"));
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    // 查找地址所属模块
+    std::string moduleName = "未知模块";
+    for (const auto& mod : s_modules)
+    {
+        if (address >= mod.baseAddr && address < mod.baseAddr + mod.size)
+        {
+            size_t lastSlash = mod.path.find_last_of("\\/");
+            moduleName = (lastSlash != std::string::npos) ? mod.path.substr(lastSlash + 1) : mod.path;
+            break;
+        }
+    }
+
+    // 保存断点信息（包含原始字节用于恢复）
+    s_breakpoints.push_back({
+        address,
+        moduleName,
+        "软件断点 (INT3)",
+        true,
+        0,
+        originalByte  // 新增：保存原始指令字节
+        });
+
+    kLog.info(C("已添加断点: " + FormatAddress(address)), C("Breakpoint"));
+    CloseHandle(hProcess);
+    return true;
+}
+
+// 移除断点（恢复原始指令）
+static bool RemoveBreakpoint(uintptr_t address)
+{
+    auto it = std::find_if(s_breakpoints.begin(), s_breakpoints.end(),
+        [address](const KswordBreakpointInfo& bp) { return bp.address == address; });
+    if (it == s_breakpoints.end())
+    {
+        kLog.warn(C("未找到断点: " + FormatAddress(address)), C("Breakpoint"));
+        return false;
+    }
+
+    // 打开进程恢复原始指令
+    HANDLE hProcess = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, s_currentPID);
+    if (!hProcess || hProcess == INVALID_HANDLE_VALUE)
+    {
+        kLog.err(C("无法打开进程以移除断点，错误: " + std::to_string(GetLastError())), C("Breakpoint"));
+        return false;
+    }
+
+    // 恢复原始字节
+    SIZE_T bytesWritten;
+    if (!WriteProcessMemory(hProcess, (LPVOID)address, &it->originalByte, 1, &bytesWritten) || bytesWritten != 1)
+    {
+        kLog.err(C("恢复内存失败，无法移除断点: " + FormatAddress(address)), C("Breakpoint"));
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    s_breakpoints.erase(it);
+    kLog.info(C("已移除断点: " + FormatAddress(address)), C("Breakpoint"));
+    CloseHandle(hProcess);
+    return true;
+}
+
+// 切换断点启用/禁用状态（动态修改内存）
+static bool ToggleBreakpoint(uintptr_t address)
+{
+    auto it = std::find_if(s_breakpoints.begin(), s_breakpoints.end(),
+        [address](const KswordBreakpointInfo& bp) { return bp.address == address; });
+    if (it == s_breakpoints.end())
+    {
+        kLog.warn(C("未找到断点: " + FormatAddress(address)), C("Breakpoint"));
+        return false;
+    }
+
+    // 打开进程准备修改内存
+    HANDLE hProcess = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_VM_READ, FALSE, s_currentPID);
+    if (!hProcess || hProcess == INVALID_HANDLE_VALUE)
+    {
+        kLog.err(C("无法打开进程以切换断点，错误: " + std::to_string(GetLastError())), C("Breakpoint"));
+        return false;
+    }
+
+    bool newState = !it->enabled;
+    BYTE targetByte = newState ? 0xCC : it->originalByte;  // 启用则写入INT3，禁用则恢复原始字节
+
+    SIZE_T bytesWritten;
+    if (!WriteProcessMemory(hProcess, (LPVOID)address, &targetByte, 1, &bytesWritten) || bytesWritten != 1)
+    {
+        kLog.err(C("切换断点状态失败: " + FormatAddress(address)), C("Breakpoint"));
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    it->enabled = newState;
+    kLog.info(C((newState ? "已启用断点: " : "已禁用断点: ") + FormatAddress(address)), C("Breakpoint"));
+    CloseHandle(hProcess);
+    return true;
 }
