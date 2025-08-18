@@ -57,7 +57,7 @@
 #define KSWORD_MD5_B 0xefcdab89
 #define KSWORD_MD5_C 0x98badcfe
 #define KSWORD_MD5_D 0x10325476
-const char ksword_md5_str16[] = "0123456789abcdef";
+const char ksword_md5_str16[17] = "0123456789abcdef";
 const unsigned int ksword_md5_T[] = {
 	0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,
 	0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
@@ -169,7 +169,6 @@ const unsigned int ksword_md5_s[] = { 7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,2
 #include <system_error>
 #include <thread>
 #include <tuple>
-#include <typeindex>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -477,4 +476,4 @@ int TakeOwnership(const char*);
 	bool ExistProcess(HANDLE hProcess);
 
 	bool SetProcessAndThreadsToRealtimePriority();
-#endif
+#endif#endif
