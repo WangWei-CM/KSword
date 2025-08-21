@@ -65,11 +65,11 @@ public:
      * @param ... 可变参数
      */
     void Add(LogLevel level, const char* fmt, const char* Module = "Unknown");
-    void dbg(const char* fmt, const char* Module = "Unknown");
-	void info(const char* fmt, const char* Module = "Unknown");
-	void warn(const char* fmt, const char* Module = "Unknown");
-	void err(const char* fmt, const char* Module = "Unknown");
-	void fatal(const char* fmt, const char* Module = "Unknown");
+    void dbg(std::string fmt, const char* Module = "Unknown");
+	void info(std::string fmt, const char* Module = "Unknown");
+	void warn(std::string fmt, const char* Module = "Unknown");
+	void err(std::string fmt, const char* Module = "Unknown");
+	void fatal(std::string fmt, const char* Module = "Unknown");
     /**
      * @brief 绘制日志窗口
      */

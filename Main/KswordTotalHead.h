@@ -35,4 +35,8 @@ extern bool KswordShowToolBar;
 
 extern bool Ksword_main_should_exit;
 
+extern bool isR0;
+
 #include "SubProc/SubProc.h"
+
+#include "../Driver/KswordDriver.h"

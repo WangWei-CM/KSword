@@ -1,4 +1,4 @@
-﻿
+﻿#include "../resource.h"
 #include <d3d9.h>
 #include <Shlwapi.h>
 #pragma comment(lib, "shlwapi.lib")
@@ -31,6 +31,9 @@ extern ImTextureID g_IconImTextureID ;
 //保留控制台原始样式
 LONG originalConsoleStyle = 0;
 WORD originalTextAttribute = 0;
+extern HWND KswordInitLigoWindowHwnd;
+extern int showInitLogoWindow(HINSTANCE hInstance , HINSTANCE hPrevInstance,
+    LPTSTR szCmdLine , int iCmdShow);
 
 
 // 从资源加载图标并创建 DirectX 纹理
@@ -149,7 +152,7 @@ public:
 private:
     void initialize() {
         // 1. 初始化核心系统
-
+        HideWindow();
         // Ksword逻辑初始化
         isGUI = TRUE;
         KEnviProb();
@@ -235,146 +238,9 @@ private:
         originalConsoleStyle = GetWindowLong(GetConsoleWindow(), GWL_STYLE);
         // 保存原始文本属性
         HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-        CONSOLE_SCREEN_BUFFER_INFO csbi;
-        if (GetConsoleScreenBufferInfo(hOut, &csbi)) originalTextAttribute = csbi.wAttributes;
-		// 设置控制台窗口样式==========================================================================
-        if (hOut == INVALID_HANDLE_VALUE) {
-            std::cerr << "获取标准输出句柄失败!" << std::endl;
-            return 1;
-        }
-        SMALL_RECT srctWindow = { 0, 0, 39, 11 };
-        if (!SetConsoleWindowInfo(hOut, TRUE, &srctWindow)) {
-            std::cerr << "设置窗口信息失败!" << std::endl;
-            return 1;
-        }
-        COORD coord = { 40, 12 }; // 缓冲区大小设置为40列12行
-        if (!SetConsoleScreenBufferSize(hOut, coord)) {
-            std::cerr << "设置缓冲区大小失败!" << std::endl;
-            return 1;
-        }
-        CONSOLE_FONT_INFOEX cfi{};
-        cfi.cbSize = sizeof(cfi);
-        if (!GetCurrentConsoleFontEx(hOut, FALSE, &cfi)) {
-            std::cerr << "获取当前字体信息失败!" << std::endl;
-            return 1;
-        }
-        int fontWidth = cfi.dwFontSize.X;
-        int fontHeight = cfi.dwFontSize.Y;
-        int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-        int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-        int windowWidth = 40 * fontWidth;
-        int windowHeight = 12 * fontHeight;
-        int windowX = (screenWidth - windowWidth) / 2;
-        int windowY = (screenHeight - windowHeight) / 2;
-        HWND Consolehwnd = GetConsoleWindow();
-        if (!Consolehwnd) {
-            std::cerr << "获取控制台窗口句柄失败!" << std::endl;
-            return 1;
-        }
-        LONG Consolestyle = GetWindowLong(Consolehwnd, GWL_STYLE);
-        Consolestyle &= ~WS_OVERLAPPEDWINDOW; // 移除标准窗口样式
-        Consolestyle |= WS_POPUP;             // 添加弹出窗口样式
-        SetWindowLong(Consolehwnd, GWL_STYLE, Consolestyle);
-        SetWindowPos(
-            Consolehwnd, NULL, windowX, windowY,
-            windowWidth, windowHeight,
-            SWP_FRAMECHANGED | SWP_SHOWWINDOW
-        );
-        WORD textAttribute = BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE;
-        if (!SetConsoleTextAttribute(hOut, textAttribute)) {
-            std::cerr << "设置颜色属性失败!" << std::endl;
-            return 1;
-        }
-        COORD origin = { 0, 0 };
-        DWORD charsWritten;
-        FillConsoleOutputCharacter(hOut, ' ', 40 * 12, origin, &charsWritten);
-        FillConsoleOutputAttribute(hOut, textAttribute, 40 * 12, origin, &charsWritten);
-        system("cls");
-        //绘制假UI界面=====================================================================================
-        for (int i = 1; i <= 40 * 12; i++) {
-            std::cout << " ";
-        }
-        SetCursor(0, 11);
-        std::cout << "[ * ]Ksword5.0 开发者版本 正在启动……"; Sleep(50);
-        Gdiplus::GdiplusStartupInput gdiplusStartupInput;
-
-        Gdiplus::GdiplusStartup(&s_gdiplusToken, &gdiplusStartupInput, NULL);
-        HICON hIcon = (HICON)LoadImage(
-            GetModuleHandle(NULL),
-            MAKEINTRESOURCE(IDI_ICON1),
-            IMAGE_ICON,
-            256,
-            256,
-            LR_DEFAULTCOLOR
-        );
-        if (!hIcon) {
-            printf("加载图标失败！错误代码: %d\n", GetLastError());
-            return -2;
-        }
-
-        // 获取图标尺寸
-        ICONINFO iconInfo;
-        if (!GetIconInfo(hIcon, &iconInfo)) {
-            printf("获取图标信息失败！\n");
-            DestroyIcon(hIcon);
-            return -3;
-        }
-
-        // 获取图标宽度和高度
-        BITMAP bm{};
-        GetObject(iconInfo.hbmColor, sizeof(bm), &bm);
-        int originalWidth = bm.bmWidth;
-        int originalHeight = bm.bmHeight;
-
-        // 释放图标信息中创建的位图
-        if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
-        if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
-
-        // 计算放大5倍后的尺寸
-        int scaledWidth = originalWidth * 0.5;
-        int scaledHeight = originalHeight * 0.55;
-
-        // 获取控制台窗口客户区尺寸
-        RECT rect;
-        GetClientRect(GetConsoleWindow(), &rect);
-        int clientWidth = rect.right - rect.left;
-        int clientHeight = rect.bottom - rect.top;
-
-        // 计算图标居中显示的位置
-        int x = (clientWidth - scaledWidth) / 2;
-        int y = 24;
-        HDC hdc = GetDC(GetConsoleWindow());
-        if (!hdc) {
-            printf("获取设备上下文失败！\n");
-            DestroyIcon(hIcon);
-            return -4;
-        }
-
-        // 创建GDI+ Graphics对象
-        {
-            Gdiplus::Graphics graphics(hdc);
-
-            // 设置高质量插值模式
-            graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-
-            // 从HICON创建GDI+ Bitmap
-            Gdiplus::Bitmap* pBitmap = Gdiplus::Bitmap::FromHICON(hIcon);
-            if (!pBitmap || pBitmap->GetLastStatus() != Gdiplus::Ok) {
-                printf("从图标创建位图失败！\n");
-                ReleaseDC(GetConsoleWindow(), hdc);
-                DestroyIcon(hIcon);
-                return -5;
-            }
-
-            // 使用GDI+高质量缩放绘制图标
-            graphics.DrawImage(pBitmap, x, y, scaledWidth, scaledHeight);
-
-            // 清理资源
-            delete pBitmap;
-        }
-        ReleaseDC(GetConsoleWindow(), hdc);
-        DestroyIcon(hIcon);
-
+        std::thread([=]{
+            showInitLogoWindow(GetModuleHandle(NULL), NULL, NULL, SW_SHOW);
+        }).detach();
         return 0;
     }
 
@@ -683,8 +549,9 @@ private:
                     KswordGUIProcess();
                 }
                 if (ImGui::BeginTabItem(C("监控")))
-                {
+                {ETWMonitorMain();
                     KswordMonitorMain();
+                    
                 }
                 if(ImGui::BeginTabItem(C("文件")))
                 {
@@ -749,39 +616,8 @@ private:
 
         if (!m_runOnceHideMainWnd) {
             m_runOnceHideMainWnd = true;
-            COORD coord = { 80, 25 };
-            if (!SetConsoleScreenBufferSize(GetStdHandle(STD_OUTPUT_HANDLE), coord)) {
-                std::cerr << "设置缓冲区大小失败!" << std::endl;
-                return;
-            }
-            if (GetConsoleWindow() && originalConsoleStyle != 0) {
-                // 恢复原始窗口样式
-                SetWindowLong(GetConsoleWindow(), GWL_STYLE, originalConsoleStyle);
-                CONSOLE_FONT_INFOEX cfi{};
-                cfi.cbSize = sizeof(cfi);
-                if (!GetCurrentConsoleFontEx(GetStdHandle(STD_OUTPUT_HANDLE), FALSE, &cfi)) {
-                    std::cerr << "获取当前字体信息失败!" << std::endl;
-                    return;
-                }
-                int fontWidth = cfi.dwFontSize.X;
-                int fontHeight = cfi.dwFontSize.Y;
-                int windowWidth = 80 * fontWidth;
-                int windowHeight = 25 * fontHeight;
-                // 应用样式变更
-                SetWindowPos(
-                    GetConsoleWindow(), NULL, 0, 0, windowWidth, windowHeight,
-                    SWP_NOMOVE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
-                );
-            }
-            if (originalTextAttribute != 0) {
-                SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), originalTextAttribute);
-            }
-            // 清屏并重置光标位置
-            system("cls");
-            {
-                COORD origin = { 0, 0 };
-                SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), origin);
-            }
+			ShowWindow(KswordInitLigoWindowHwnd, SW_HIDE);
+            //ShowWindow();
             KPrintLogo();
         }
     }
@@ -811,6 +647,10 @@ private:
 			DeleteReleasedGUIINIFile();//如果用户没有保存过配置文件那么删除释放的配置文件
         FreeLibrary(m_hD3DX9Module);
         DeleteReleasedD3DX9DLLFile();
+        if (isR0) {
+            StopDriver();
+            UnloadDriver();
+        }
     }
 
     // Helper functions

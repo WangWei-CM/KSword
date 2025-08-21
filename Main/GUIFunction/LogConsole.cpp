@@ -24,25 +24,25 @@ void Logger::Add(LogLevel level, const char* fmt, const char* Module /*= "Unknow
     logs.emplace_back(level, std::string(fmt),Module, static_cast<float>(ImGui::GetTime()));
 }
 
-void Logger::dbg(const char* fmt, const char* Module)
+void Logger::dbg(std::string fmt, const char* Module)
 {
-	Add(Debug, fmt, Module);
+	Add(Debug, fmt.c_str(), Module);
 }
-void Logger::info(const char* fmt, const char* Module)
+void Logger::info(std::string fmt, const char* Module)
 {
-    Add(Info, fmt, Module);
+    Add(Info, fmt.c_str(), Module);
 }
-void Logger::warn(const char* fmt, const char* Module)
+void Logger::warn(std::string fmt, const char* Module)
 {
-    Add(Warn, fmt, Module);
+    Add(Warn, fmt.c_str(), Module);
 }
-void Logger::err(const char* fmt, const char* Module)
+void Logger::err(std::string fmt, const char* Module)
 {
-    Add(Err, fmt, Module);
+    Add(Err, fmt.c_str(), Module);
 }
-void Logger::fatal(const char* fmt, const char* Module)
+void Logger::fatal(std::string fmt, const char* Module)
 {
-    Add(Fatal, fmt, Module);
+    Add(Fatal, fmt.c_str(), Module);
 }
 
 
