@@ -1,10 +1,11 @@
 ﻿#include "../KswordTotalHead.h"
-
+#include "../../Driver/KswordDriver.h"
 static ImVec2 TitleHighLightStartPos;
 static bool isAdmin = IsAdmin();
 //imgui绘制矩形
 static char TitleCMDInput[512] = {};
 extern bool SavedGuiIni;// 是否保存过ini文件
+
 void drawGradientRectangle(ImDrawList* drawList, ImVec2 pos, ImVec2 size, ImU32 leftColor, ImU32 rightColor) {
     int steps = 20; // 渐变步数，步数越多渐变越平滑
     float stepWidth = size.x / steps;
@@ -414,10 +415,14 @@ inline void Ksword5Title() {
     ImVec4 originalButtonActive = style.Colors[ImGuiCol_ButtonActive];
     ImVec4 originalTextColor = style.Colors[ImGuiCol_Text];
 
-    SetStyle(0);
-    ImGui::Button(C("R0"), buttonSize); ImGui::SameLine();
+    SetStyle(isR0);
+    if (ImGui::Button(C("R0"), buttonSize)) {
+		KswordDriverInit();
+    }
+    
+    ImGui::SameLine();
 
-    SetStyle(1);
+    SetStyle(!isR0);
     ImGui::Button(C("R3"), buttonSize); ImGui::SameLine();
 
     SetStyle(!strcmp(AuthName.c_str(), "SYSTEM"));
@@ -463,3 +468,4 @@ inline void Ksword5Title() {
     ImGui::End();
    
 }
+

@@ -192,6 +192,7 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="Driver\KswordDriver.cpp" />
     <ClCompile Include="imgui\imgui.cpp" />
     <ClCompile Include="imgui\imgui_demo.cpp" />
     <ClCompile Include="imgui\imgui_draw.cpp" />
@@ -206,6 +207,7 @@
     <ClCompile Include="Main\GUIFunction\Ksword5Title.cpp" />
     <ClCompile Include="Main\GUIFunction\KswordGUIInit.cpp" />
     <ClCompile Include="Main\GUIFunction\Memory\MemoryMain.cpp" />
+    <ClCompile Include="Main\GUIFunction\Monitor\ETWMonitor.cpp" />
     <ClCompile Include="Main\GUIFunction\Monitor\MonitorMain.cpp" />
     <ClCompile Include="Main\GUIFunction\Network\ETW.cpp" />
     <ClCompile Include="Main\GUIFunction\Network\Network.cpp" />
@@ -226,7 +228,7 @@
     <ClCompile Include="Environment\Environment.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="C:\Users\33251\Downloads\Driver.h" />
+    <ClInclude Include="Driver\KswordDriver.h" />
     <ClInclude Include="imgui\imconfig.h" />
     <ClInclude Include="imgui\imgui.h" />
     <ClInclude Include="imgui\imgui_impl_dx9.h" />
@@ -267,9 +269,13 @@
     <None Include="imgui.ini" />
     <None Include="KswordGUI.ini" />
     <None Include="packages.config" />
+    <None Include="x64\Release\DriverSign.pfx" />
+    <None Include="x64\Release\KswordKernel.sys" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="icon1.ico" />
+    <Image Include="Icon\ARK_Logo_Console.bmp" />
+    <Image Include="icon\bitmap1.bmp" />
     <Image Include="Icon\DEV.ico" />
     <Image Include="Icon\normal.ico" />
     <Image Include="Icon\PRE.ico" />

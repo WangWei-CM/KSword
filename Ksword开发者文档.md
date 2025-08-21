@@ -4,23 +4,25 @@
 ```cpp
 ImGui::Text(C("示例文本"));
 ```
-本质上C被定义为GBK转UTF-8的函数。
+本质上C被定义为GBK转UTF-8的函数。转换完成后是const char*。
 ## 创建日志记录
 在ImGui完成初始化过后，可以使用以下代码添加日志记录：
 ```cpp
 #define CURRENT_MODULE C("测试")
 	enum LogLevel { Debug,Info, Warn, Err,Fatal };
     kLog.Add(Debug, C("测试消息类型Debug"), C(CURRENT_MODULE));
+    
     //其中，Debug代表消息严重级别，然后第二个参数是消息内容，最后可选参数是当前模块名称。
     //如果不填当前模块，那么默认为Unknown
     //在最新的版本中，添加了如下选项：
-    kLog.dbg(...);
-    kLog.info(...);
-    kLog.warn(...);
-    kLog.err(...);
-    kLog.fatal(...);
+    kLog.dbg(C("测试消息类型Debug"), C(CURRENT_MODULE));
+    kLog.info(C("测试消息类型Info"), C(CURRENT_MODULE));
+    kLog.warn(C("测试消息类型Warning"), C(CURRENT_MODULE));
+    kLog.err(C("测试消息类型Error"), C(CURRENT_MODULE));
+    kLog.fatal(C("测试消息类型Fatal"), C(CURRENT_MODULE));
     //其他参数语法和Add无异。
-
+    //不支持可变参数。
+    //请务必转换为const char*然后传入。
 #undef CURRENT_MODULE
 ```
 ## 创建带进度显示的任务

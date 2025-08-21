@@ -37,6 +37,8 @@
     <ClCompile Include="Main\GUIFunction\Register\Register.cpp" />
     <ClCompile Include="Main\GUIFunction\Process\ProcessInformation.cpp" />
     <ClCompile Include="Main\GUIFunction\NT\NT.cpp" />
+    <ClCompile Include="Main\GUIFunction\Monitor\ETWMonitor.cpp" />
+    <ClCompile Include="Driver\KswordDriver.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Environment\Environment.h">
@@ -72,7 +74,6 @@
     <ClInclude Include="Main\FileExplorer\ImGuiFileDialog.h" />
     <ClInclude Include="Main\FileExplorer\ImGuiFileDialogConfig.h" />
     <ClInclude Include="Main\GUIFunction\File\FileMain.h" />
-    <ClInclude Include="C:\Users\33251\Downloads\Driver.h" />
     <ClInclude Include="Main\SubProc\SubProc.h" />
     <ClInclude Include="Main\GUIFunction\Network\Network.h" />
     <ClInclude Include="Main\GUIFunction\Memory\Memory.h" />
@@ -80,6 +81,7 @@
     <ClInclude Include="Main\GUIFunction\Register\Register.h" />
     <ClInclude Include="Main\GUIFunction\Process\ProcessDetail.h" />
     <ClInclude Include="Main\GUIFunction\NT\nt.h" />
+    <ClInclude Include="Driver\KswordDriver.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Environment">
@@ -148,6 +150,8 @@
     <None Include="KswordGUI.ini" />
     <None Include="packages.config" />
     <None Include="D3DX9_43.dll" />
+    <None Include="x64\Release\KswordKernel.sys" />
+    <None Include="x64\Release\DriverSign.pfx" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="icon1.ico" />
@@ -155,6 +159,8 @@
     <Image Include="Icon\normal.ico" />
     <Image Include="Icon\PRE.ico" />
     <Image Include="Icon\PRO.ico" />
+    <Image Include="icon\bitmap1.bmp" />
+    <Image Include="Icon\ARK_Logo_Console.bmp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="ReKsword.rc" />
