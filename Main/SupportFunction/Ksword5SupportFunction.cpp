@@ -217,7 +217,7 @@ void WorkProgressManager::Render() {
         if (ProcessList[i].progress != 1.0f)showWorkWindow = 1;
     }
     if (showWorkWindow) {
-        ImGui::Begin(C("任务进度监控"), nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+        ImGui::Begin(C("任务进度监控"), nullptr, ImGuiWindowFlags_AlwaysAutoResize |ImGuiWindowFlags_NoDocking);
 
         for (size_t i = 0; i < ProcessList.size(); ++i) {
             if (ProcessList[i].progress == 1.0f)continue;
@@ -277,7 +277,7 @@ int showInitLogoWindow(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     wndclass.cbWndExtra = 0;
     wndclass.hInstance = hInstance;
     wndclass.hIcon = LoadIcon(NULL, IDI_INFORMATION);
-    //wndclass.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wndclass.hCursor = LoadCursor(NULL, IDC_ARROW);
     wndclass.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
     wndclass.lpszMenuName = NULL;
     wndclass.lpszClassName = szAppName;
