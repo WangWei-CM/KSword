@@ -2083,8 +2083,8 @@ void KswordMonitorMain() {
                         }
                     }
                 }
-                ImGui::EndTable();
-            }
+                
+            }ImGui::EndTable();
         }
         ImGui::EndChild();
 
@@ -2195,43 +2195,43 @@ void KswordMonitorMain() {
                     filteredTypeIndices.push_back(static_cast<int>(i));
                 }
             }
-            if (ImGui::BeginChild("EventTypeListFilter", ImVec2(0, childH), true,
-                ImGuiWindowFlags_AlwaysVerticalScrollbar)) {
-                if (ImGui::BeginTable("EvtTypeFilterTable", cols,
-                    ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
+
+            if (ImGui::BeginTable("EvtTypeFilterTable", cols,
+                ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
 
 
-                    // 初始化裁剪器
-                    ImGuiListClipper clipper;
-                    clipper.Begin((int)((filteredTypeIndices.size() + cols - 1) / cols), rowH);
+                // 初始化裁剪器
+                ImGuiListClipper clipper;
+                clipper.Begin((int)((filteredTypeIndices.size() + cols - 1) / cols), rowH);
 
-                    while (clipper.Step()) {
-                        for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r) {
-                            ImGui::TableNextRow();
-                            for (int c = 0; c < cols; ++c) {
-                                const int idx = r * cols + c;
-                                if (idx >= (int)filteredTypeIndices.size()) break;
+                while (clipper.Step()) {
+                    for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r) {
+                        ImGui::TableNextRow();
+                        for (int c = 0; c < cols; ++c) {
+                            const int idx = r * cols + c;
+                            if (idx >= (int)filteredTypeIndices.size()) break;
 
-                                const int typeIdx = filteredTypeIndices[idx];
-                                const auto& type = eventTypes[typeIdx];
+                            const int typeIdx = filteredTypeIndices[idx];
+                            const auto& type = eventTypes[typeIdx];
 
-                                ImGui::TableSetColumnIndex(c);
-                                bool& isChecked = s_typeFilters[type.first];
+                            ImGui::TableSetColumnIndex(c);
+                            bool& isChecked = s_typeFilters[type.first];
 
-                                // 显示复选框并支持悬浮提示
-                                ImGui::Checkbox(C(type.first.c_str()), &isChecked);
-                                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                                    ImGui::SetTooltip("%s", C(type.first.c_str()));
-                                }
+                            // 显示复选框并支持悬浮提示
+                            ImGui::Checkbox(C(type.first.c_str()), &isChecked);
+                            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                                ImGui::SetTooltip("%s", C(type.first.c_str()));
                             }
                         }
                     }
-                    ImGui::EndTable();
                 }
-                ImGui::EndChild();
+                
             }
+            ImGui::EndTable();
             ImGui::TreePop();
         }
+
+
         // 自动滚动选项
         ImGui::Checkbox(C("自动滚动"), &s_autoScroll);
 
@@ -2244,73 +2244,74 @@ void KswordMonitorMain() {
             ImGuiTableFlags_RowBg |
             ImGuiTableFlags_ScrollY |
             ImGuiTableFlags_Resizable;
+        if (ImGui::BeginChild("WMIEventTablescrolling", ImVec2(0, ScreenY * 0.3f), false,
+            ImGuiWindowFlags_HorizontalScrollbar)) {
+            if (ImGui::BeginTable("WMIEventsTable", 5, tblFlags, ImVec2(0, ScreenY*0.3f), ImGuiTableFlags_Resizable
+                |ImGuiTableFlags_ScrollY))
+            {
+                ImGui::TableSetupColumn(C("ID"), ImGuiTableColumnFlags_WidthFixed, 30.0f);
+                ImGui::TableSetupColumn(C("时间"), ImGuiTableColumnFlags_WidthFixed, 120.0f);
+                ImGui::TableSetupColumn(C("类型"), ImGuiTableColumnFlags_WidthFixed, 180.0f);
+                ImGui::TableSetupColumn(C("源"), ImGuiTableColumnFlags_WidthFixed, 180.0f);
+                ImGui::TableSetupColumn(C("描述"), ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableHeadersRow();
 
-        if (ImGui::BeginTable("EventsTable", 5, tblFlags, outerSize, ImGuiTableFlags_Resizable |        // 允许列宽调整
-            ImGuiTableFlags_ScrollY))
-        {
-            ImGui::TableSetupColumn(C("ID"), ImGuiTableColumnFlags_WidthFixed, 30.0f);
-            ImGui::TableSetupColumn(C("时间"), ImGuiTableColumnFlags_WidthFixed, 120.0f);
-            ImGui::TableSetupColumn(C("类型"), ImGuiTableColumnFlags_WidthFixed, 180.0f);
-            ImGui::TableSetupColumn(C("源"), ImGuiTableColumnFlags_WidthFixed, 180.0f);
-            ImGui::TableSetupColumn(C("描述"), ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableHeadersRow();
+                auto events = g_eventMonitor.GetEvents();
+                const int n = static_cast<int>(events.size());
+                bool hasVisibleEvents = false;
+                bool anyFilterChecked = false;
 
-            auto events = g_eventMonitor.GetEvents();
-            const int n = static_cast<int>(events.size());
-            bool hasVisibleEvents = false;
-            bool anyFilterChecked = false;
-
-            // 检查是否有勾选的筛选器
-            for (const auto& filter : s_typeFilters) {
-                if (filter.second) {
-                    anyFilterChecked = true;
-                    break;
-                }
-            }
-
-            // 遍历事件并显示符合条件的项
-            for (int i = n - 1; i >= 0; --i) {
-                const auto& ev = events[i];
-
-                // 文本搜索筛选
-                bool textMatch = (s_eventFilter[0] == '\0') ||
-                    (ev.type.find(s_eventFilter) != std::string::npos) ||
-                    (ev.source.find(s_eventFilter) != std::string::npos) ||
-                    (ev.description.find(s_eventFilter) != std::string::npos);
-
-                // 类型筛选（未勾选任何筛选器时显示全部）
-                bool typeMatch = !anyFilterChecked;
-                if (anyFilterChecked && s_typeFilters.count(ev.type)) {
-                    typeMatch = s_typeFilters[ev.type];
-                }
-
-                // 显示符合条件的事件
-                if (textMatch && typeMatch) {
-                    hasVisibleEvents = true;
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0); ImGui::Text("%llu", (unsigned long long)ev.id);
-                    ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(C(DmtfToReadable(ev.timestamp.c_str()).c_str()));
-                    ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted(C(ev.type.c_str()));
-                    ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted(C(ev.source.c_str()));
-                    ImGui::TableSetColumnIndex(4); ImGui::TextWrapped("%s", C(ev.description.c_str()));
-
-                    // 自动滚动到最新项
-                    if (s_autoScroll && i == 0) {
-                        ImGui::SetScrollHereY(1.0f);
+                // 检查是否有勾选的筛选器
+                for (const auto& filter : s_typeFilters) {
+                    if (filter.second) {
+                        anyFilterChecked = true;
+                        break;
                     }
                 }
+
+                // 遍历事件并显示符合条件的项
+                for (int i = n - 1; i >= 0; --i) {
+                    const auto& ev = events[i];
+
+                    // 文本搜索筛选
+                    bool textMatch = (s_eventFilter[0] == '\0') ||
+                        (ev.type.find(s_eventFilter) != std::string::npos) ||
+                        (ev.source.find(s_eventFilter) != std::string::npos) ||
+                        (ev.description.find(s_eventFilter) != std::string::npos);
+
+                    // 类型筛选（未勾选任何筛选器时显示全部）
+                    bool typeMatch = !anyFilterChecked;
+                    if (anyFilterChecked && s_typeFilters.count(ev.type)) {
+                        typeMatch = s_typeFilters[ev.type];
+                    }
+
+                    // 显示符合条件的事件
+                    if (textMatch && typeMatch) {
+                        hasVisibleEvents = true;
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0); ImGui::Text("%llu", (unsigned long long)ev.id);
+                        ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(C(DmtfToReadable(ev.timestamp.c_str()).c_str()));
+                        ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted(C(ev.type.c_str()));
+                        ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted(C(ev.source.c_str()));
+                        ImGui::TableSetColumnIndex(4); ImGui::TextWrapped("%s", C(ev.description.c_str()));
+
+                        // 自动滚动到最新项
+                        if (s_autoScroll && i == 0) {
+                            ImGui::SetScrollHereY(1.0f);
+                        }
+                    }
+                }
+                // 无符合条件的事件时显示提示
+                if (!hasVisibleEvents) {
+                    ImGui::TableNextRow();
+                    //ImGui::TableSetColumnIndex(0, true); // 合并所有列
+                    //ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), C("没有找到符合条件的事件"));
+                }
+                ImGui::EndTable();
             }
 
-            // 无符合条件的事件时显示提示
-            if (!hasVisibleEvents) {
-                ImGui::TableNextRow();
-                //ImGui::TableSetColumnIndex(0, true); // 合并所有列
-                //ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), C("没有找到符合条件的事件"));
-            }
+        }            ImGui::EndChild();
+    }
 
-            ImGui::EndTable();
-        }
-
-    }        ImGui::EndTabItem();
 }
 

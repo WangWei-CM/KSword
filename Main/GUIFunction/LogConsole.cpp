@@ -141,7 +141,7 @@ void Logger::Draw() {
 
         // 日志显示区
         ImGui::Separator();
-        ImGui::BeginChild("scrolling", ImVec2(0, 0), false,
+        ImGui::BeginChild("LogConsolescrolling", ImVec2(0, 0), false,
             ImGuiWindowFlags_HorizontalScrollbar);
         // 表格设置：4列，前三列窄，第四列自适应
         if (ImGui::BeginTable("LogTable", 5,
