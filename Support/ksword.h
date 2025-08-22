@@ -12,7 +12,7 @@
 #pragma comment (linker, "/OPT:ICF")
 
 
-
+#include <windows.h>
 //#include <winsock2.h>
 //#include <winsock.h>
 
@@ -206,7 +206,7 @@ const unsigned int ksword_md5_s[] = { 7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,2
 
 
 
-#include <windows.h>
+
 #include <winternl.h>
 
 #include <VersionHelpers.h>
