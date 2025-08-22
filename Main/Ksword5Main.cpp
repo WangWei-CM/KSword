@@ -549,9 +549,10 @@ private:
                     KswordGUIProcess();
                 }
                 if (ImGui::BeginTabItem(C("监控")))
-                {ETWMonitorMain();
+                {
+                    ETWMonitorMain();
                     KswordMonitorMain();
-                    
+                    ImGui::EndTabItem();
                 }
                 if(ImGui::BeginTabItem(C("文件")))
                 {
