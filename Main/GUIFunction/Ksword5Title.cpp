@@ -5,30 +5,8 @@ static bool isAdmin = IsAdmin();
 //imgui绘制矩形
 static char TitleCMDInput[512] = {};
 extern bool SavedGuiIni;// 是否保存过ini文件
-
-void drawGradientRectangle(ImDrawList* drawList, ImVec2 pos, ImVec2 size, ImU32 leftColor, ImU32 rightColor) {
-    int steps = 20; // 渐变步数，步数越多渐变越平滑
-    float stepWidth = size.x / steps;
-
-    for (int i = 0; i < steps; ++i) {
-        float t = static_cast<float>(i) / steps;
-        ImU32 color = ImGui::ColorConvertFloat4ToU32(
-            ImVec4(
-                // 线性插值计算颜色
-                ImGui::ColorConvertU32ToFloat4(leftColor).x + t * (ImGui::ColorConvertU32ToFloat4(rightColor).x - ImGui::ColorConvertU32ToFloat4(leftColor).x),
-                ImGui::ColorConvertU32ToFloat4(leftColor).y + t * (ImGui::ColorConvertU32ToFloat4(rightColor).y - ImGui::ColorConvertU32ToFloat4(leftColor).y),
-                ImGui::ColorConvertU32ToFloat4(leftColor).z + t * (ImGui::ColorConvertU32ToFloat4(rightColor).z - ImGui::ColorConvertU32ToFloat4(leftColor).z),
-                ImGui::ColorConvertU32ToFloat4(leftColor).w + t * (ImGui::ColorConvertU32ToFloat4(rightColor).w - ImGui::ColorConvertU32ToFloat4(leftColor).w)
-            )
-        );
-        drawList->AddRectFilled(
-            ImVec2(pos.x + i * stepWidth, pos.y),
-            ImVec2(pos.x + (i + 1) * stepWidth, pos.y + size.y),
-            color
-        );
-    }
-}
-
+extern bool EasyMode;// 简易模式
+extern void drawGradientRectangle(ImDrawList* drawList, ImVec2 pos, ImVec2 size, ImU32 leftColor, ImU32 rightColor);
 void MinimizeMainWindow() {
     HWND hwnd = (HWND)ImGui::GetMainViewport()->PlatformHandle;
     ShowWindow(hwnd, SW_MINIMIZE);
@@ -407,7 +385,7 @@ inline void Ksword5Title() {
     ImVec2 buttonSize(60.0f, 24.0f);
     //从左往右依次为 R3 R0 SYSTEM ADMIN DEBUG
 
-    ImGui::SetCursorPos(ImVec2(/*windowPos.x +*/ windowSize.x - buttonSize.x * 6 + 2 * 4, 33));
+    ImGui::SetCursorPos(ImVec2(/*windowPos.x +*/ windowSize.x - buttonSize.x * 7 + 2 * 4, 33));
 
     //备份原始样式
     ImVec4 originalButtonColor = style.Colors[ImGuiCol_Button];
@@ -415,6 +393,11 @@ inline void Ksword5Title() {
     ImVec4 originalButtonActive = style.Colors[ImGuiCol_ButtonActive];
     ImVec4 originalTextColor = style.Colors[ImGuiCol_Text];
 
+    SetStyle(EasyMode);
+    if (ImGui::Button(C("简易"), buttonSize)) {
+        EasyMode = !EasyMode;
+	}
+    ImGui::SameLine();
     SetStyle(isR0);
     if (ImGui::Button(C("R0"), buttonSize)) {
 		KswordDriverInit();

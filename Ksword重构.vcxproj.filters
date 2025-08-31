@@ -39,6 +39,8 @@
     <ClCompile Include="Main\GUIFunction\NT\NT.cpp" />
     <ClCompile Include="Main\GUIFunction\Monitor\ETWMonitor.cpp" />
     <ClCompile Include="Driver\KswordDriver.cpp" />
+    <ClCompile Include="Main\MainConsole\MainColsole.cpp" />
+    <ClCompile Include="Main\MainConsole\ConsoleHelper.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Environment\Environment.h">
@@ -82,6 +84,7 @@
     <ClInclude Include="Main\GUIFunction\Process\ProcessDetail.h" />
     <ClInclude Include="Main\GUIFunction\NT\nt.h" />
     <ClInclude Include="Driver\KswordDriver.h" />
+    <ClInclude Include="Main\MainConsole\ConsolePainter.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Environment">

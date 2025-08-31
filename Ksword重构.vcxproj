@@ -136,7 +136,7 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_CONSOLE;WINNT;D3DX_USE_STATIC_LIB;CURL_STATICLIB;BUILDING_LIBCURL;HTTP_ONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_CONSOLE;WINNT;D3DX_USE_STATIC_LIB;CURL_STATICLIB;BUILDING_LIBCURL;HTTP_ONLY;%(PreprocessorDefinitions);KSWORD_GUI_USE_BACKGROUND</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <LanguageStandard>stdcpp20</LanguageStandard>
@@ -162,7 +162,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>false</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;D3DX_USE_STATIC_LIB;_CONSOLE;WINNT;CURL_STATICLIB;BUILDING_LIBCURL;HTTP_ONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;D3DX_USE_STATIC_LIB;_CONSOLE;WINNT;CURL_STATICLIB;BUILDING_LIBCURL;HTTP_ONLY;%(PreprocessorDefinitions);KSWORD_GUI_USE_BACKGROUND</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
@@ -221,6 +221,8 @@
     <ClCompile Include="Main\GUIFunction\Register\Register.cpp" />
     <ClCompile Include="Main\KswordToolBar.cpp" />
     <ClCompile Include="Main\Ksword5Main.cpp" />
+    <ClCompile Include="Main\MainConsole\ConsoleHelper.cpp" />
+    <ClCompile Include="Main\MainConsole\MainColsole.cpp" />
     <ClCompile Include="Main\SubProc\SecureDesktop.cpp" />
     <ClCompile Include="Main\SupportFunction\Ksword5SupportFunction.cpp" />
     <ClCompile Include="Main\TextEditor\TextEditor.cpp" />
@@ -254,6 +256,7 @@
     <ClInclude Include="Main\GUIFunction\Process\ProcessDetail.h" />
     <ClInclude Include="Main\GUIFunction\Register\Register.h" />
     <ClInclude Include="Main\Ksword5core.h" />
+    <ClInclude Include="Main\MainConsole\ConsolePainter.h" />
     <ClInclude Include="Main\stb_image.h" />
     <ClInclude Include="Main\stb_image_write.h" />
     <ClInclude Include="Main\SubProc\SubProc.h" />
