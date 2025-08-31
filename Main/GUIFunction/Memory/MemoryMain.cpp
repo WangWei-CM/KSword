@@ -212,9 +212,8 @@ static void RefreshAllData() {
                     thread.id = te32.th32ThreadID;
                     HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION | THREAD_GET_CONTEXT, FALSE, te32.th32ThreadID);
                     if (hThread) {
-                        DWORD suspendCount = te32.cntSuspendCount;
-                        thread.status = (suspendCount > 0) ? "挂起" : "运行";
-                        thread.priority = GetThreadPriority(hThread);
+                        thread.status = "未知"; // Or use other logic to determine status
+                        thread.priority = te32.tpBasePri; // Use tpBasePri for priority
                         thread.entryAddr = "";
                         thread.moduleName = "";
                         CloseHandle(hThread);

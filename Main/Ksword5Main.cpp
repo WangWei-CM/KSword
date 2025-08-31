@@ -24,6 +24,7 @@ int KswordStyle;
 bool showSaveDialog = false;
 bool showOpenDialog = false;
 std::string currentFilePath;
+bool EasyMode = false;// 简易模式
 
 extern IDirect3DTexture9* g_IconTexture;
 extern ImTextureID g_IconImTextureID ;
@@ -34,7 +35,7 @@ WORD originalTextAttribute = 0;
 extern HWND KswordInitLigoWindowHwnd;
 extern int showInitLogoWindow(HINSTANCE hInstance , HINSTANCE hPrevInstance,
     LPTSTR szCmdLine , int iCmdShow);
-
+extern void RenderEasyModeFrame();
 
 // 从资源加载图标并创建 DirectX 纹理
 bool LoadIconTexture(HINSTANCE hInstance, IDirect3DDevice9* pDevice);
@@ -341,7 +342,7 @@ private:
         bool m_mainWindowClosed = false;
 #ifdef KSWORD_GUI_USE_BACKGROUND
         // 加载背景纹理
-        ret = LoadTextureFromFile("%SYSTEMDRIVE%\\Users\\WangWei_CM\\Desktop\\Ksword5.0\\x64\\Release\\fengyuanwanye.jpg", &my_texture, &my_image_width, &my_image_height);
+        ret = LoadTextureFromFile("kBackground.jpg", &my_texture, &my_image_width, &my_image_height);
 #endif
         m_editor.SetLanguageDefinition(TextEditor::LanguageDefinition::CPlusPlus());
         m_editor.SetText("// Welcome to Text Editor\n#include <iostream>\n\nint main() {\n  std::cout << \"Hello World!\\n\";\n  return 0;\n}");
@@ -402,9 +403,10 @@ private:
             ImGui_ImplWin32_NewFrame();
             bool window_collapsed = 0;
             ImGui::NewFrame();
-
+            if(!EasyMode)
             RenderPrepareUIFrame();
-
+            else
+				RenderEasyModeFrame();
             ImGui::EndFrame();
             g_pd3dDevice->SetRenderState(D3DRS_ZENABLE, FALSE);
             g_pd3dDevice->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
@@ -452,88 +454,63 @@ private:
             if (KswordShowNotpadWindow) m_editor.Render("TextEditor", ImVec2(0, 0), true);
 
 
-            ImGui::Begin("Ksword 5 Dever", nullptr,
+            ImGui::Begin("Ksword 5 Dever", nullptr
                 //ImGuiWindowFlags_NoCollapse |
                 //ImGuiWindowFlags_NoBackground /*|*/
             //ImGuiWindowFlags_NoSavedSettings
-                ImGuiWindowFlags_AlwaysVerticalScrollbar
             );
             // 绘制背景
             // 在ImGui渲染循环中
             ImVec2 window_size = ImGui::GetContentRegionAvail();
 
-            //if (my_texture) {
-            //    // 计算原始图片宽高比
-            //    float image_aspect = (float)my_image_width / (float)my_image_height;
-            //    // 计算窗口宽高比
-            //    float window_aspect = window_size.x / window_size.y;
-            //    // 计算自适应尺寸（保持纵横比）
-            //    ImVec2 display_size;
-            //    if (window_aspect > image_aspect) {
-            //        // 窗口更宽，按高度填充
-            //        display_size.y = window_size.y;
-            //        display_size.x = window_size.y * image_aspect;
-            //    }
-            //    else {
-            //        // 窗口更高，按宽度填充
-            //        display_size.x = window_size.x;
-            //        display_size.y = window_size.x / image_aspect;
-            //    }
-            //    // 计算居中位置
-            //    ImVec2 pos = ImVec2(
-            //        (window_size.x - display_size.x) * 0.5f,
-            //        (window_size.y - display_size.y) * 0.5f
-            //    );
-            //    ImGui::Image((ImTextureID)(intptr_t)my_texture, display_size);
-            //}
-            //if (my_texture) {
-            //    ImVec4 tint_color = ImVec4(1.0f, 1.0f, 1.0f, 0.5f); // RGB=白色, Alpha=0.3
-            //    ImVec2 window_size = ImGui::GetContentRegionAvail();
-            //    window_size.x += 40;
-            //    window_size.y += 40;
-            //    // 计算图片原始宽高比
-            //    float image_aspect = (float)my_image_width / (float)my_image_height;
-            //    // 计算窗口宽高比
-            //    float window_aspect = window_size.x / window_size.y;
-            //    // 计算覆盖填充的裁剪尺寸
-            //    ImVec2 display_size;
-            //    if (window_aspect > image_aspect) {
-            //        // 窗口更宽 -> 按宽度填充，高度裁剪
-            //        display_size.x = window_size.x;
-            //        display_size.y = window_size.x / image_aspect;  // 图片高度需要扩展
-            //        // 超出窗口高度的部分会被裁剪
-            //    }
-            //    else {
-            //        // 窗口更高 -> 按高度填充，宽度裁剪
-            //        display_size.y = window_size.y;
-            //        display_size.x = window_size.y * image_aspect;  // 图片宽度需要扩展
-            //        // 超出窗口宽度的部分会被裁剪
-            //    }
-            //    // 计算偏移量（使裁剪居中）
-            //    ImVec2 offset = ImVec2(
-            //        (display_size.x - window_size.x) * 0.5f,
-            //        (display_size.y - window_size.y) * 0.5f
-            //    );
-            //    // 反转偏移量得到UV坐标
-            //    ImVec2 uv0 = ImVec2( 
-            //        offset.x > 0 ? offset.x / display_size.x : 0.0f,
-            //        offset.y > 0 ? offset.y / display_size.y : 0.0f
-            //    );
-            //    ImVec2 uv1 = ImVec2(
-            //        offset.x > 0 ? 1.0f - offset.x / display_size.x : 1.0f,
-            //        offset.y > 0 ? 1.0f - offset.y / display_size.y : 1.0f
-            //    );
-            //    // 使用完整的窗口大小绘制图片（自动裁剪超出部分）
-            //    ImGui::SetCursorPos(ImVec2(0, 0));
-            //    ImGui::Image(
-            //        (ImTextureID)(intptr_t)my_texture,
-            //        window_size,   // 使用窗口尺寸（裁剪效果来源于此）
-            //        uv0,           // UV起始坐标（定义裁剪区域）
-            //        uv1,            // UV结束坐标（定义裁剪区域）
-            //        tint_color,
-            //        ImVec4(0, 0, 0, 0)
-            //    );
-            //}
+            if (my_texture) {
+                ImVec4 tint_color = ImVec4(1.0f, 1.0f, 1.0f, 0.5f); // RGB=白色, Alpha=0.3
+                ImVec2 window_size = ImGui::GetContentRegionAvail();
+                window_size.x += 40;
+                window_size.y += 40;
+                // 计算图片原始宽高比
+                float image_aspect = (float)my_image_width / (float)my_image_height;
+                // 计算窗口宽高比
+                float window_aspect = window_size.x / window_size.y;
+                // 计算覆盖填充的裁剪尺寸
+                ImVec2 display_size;
+                if (window_aspect > image_aspect) {
+                    // 窗口更宽 -> 按宽度填充，高度裁剪
+                    display_size.x = window_size.x;
+                    display_size.y = window_size.x / image_aspect;  // 图片高度需要扩展
+                    // 超出窗口高度的部分会被裁剪
+                }
+                else {
+                    // 窗口更高 -> 按高度填充，宽度裁剪
+                    display_size.y = window_size.y;
+                    display_size.x = window_size.y * image_aspect;  // 图片宽度需要扩展
+                    // 超出窗口宽度的部分会被裁剪
+                }
+                // 计算偏移量（使裁剪居中）
+                ImVec2 offset = ImVec2(
+                    (display_size.x - window_size.x) * 0.5f,
+                    (display_size.y - window_size.y) * 0.5f
+                );
+                // 反转偏移量得到UV坐标
+                ImVec2 uv0 = ImVec2( 
+                    offset.x > 0 ? offset.x / display_size.x : 0.0f,
+                    offset.y > 0 ? offset.y / display_size.y : 0.0f
+                );
+                ImVec2 uv1 = ImVec2(
+                    offset.x > 0 ? 1.0f - offset.x / display_size.x : 1.0f,
+                    offset.y > 0 ? 1.0f - offset.y / display_size.y : 1.0f
+                );
+                // 使用完整的窗口大小绘制图片（自动裁剪超出部分）
+                ImGui::SetCursorPos(ImVec2(0, 0));
+                ImGui::Image(
+                    (ImTextureID)(intptr_t)my_texture,
+                    window_size,   // 使用窗口尺寸（裁剪效果来源于此）
+                    uv0,           // UV起始坐标（定义裁剪区域）
+                    uv1,            // UV结束坐标（定义裁剪区域）
+                    tint_color,
+                    ImVec4(0, 0, 0, 0)
+                );
+            }
             ImGui::SetCursorPos(ImVec2(0, 30)); // 重置到同一位置
 
             if (ImGui::BeginTabBar(C("MainTabs")))
