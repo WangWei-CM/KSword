@@ -245,7 +245,7 @@ LRESULT CALLBACK KswordToolBarWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             Ksword_main_should_exit = 1;
             break;
         case ID_BTN_RESTART:
-            WinExec(GetSelfPath().c_str(),SW_SHOW);
+			CreateProcess(GetSelfPath().c_str(), NULL, NULL, NULL, FALSE, 0, NULL, NULL, NULL, NULL);
             Ksword_main_should_exit = 1;
             break;
         case ID_BTN_SUSPEND:
@@ -264,7 +264,7 @@ LRESULT CALLBACK KswordToolBarWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             PROCESS_INFORMATION pi;
             wchar_t tmp[] = L"SecureJmp";
             if (!CreateProcess(
-                CharToWChar(GetSelfPath().c_str()),
+                GetSelfPath().c_str(),
                 //const_cast<LPWSTR>(exePath.c_str()),
                 tmp,
                 nullptr,

@@ -358,7 +358,7 @@ int FreeSpaceOfDrive(char);
 	bool IsInsideVPC();
 	bool IsInsideVMWare();
 //探测自身路径
-std::string GetSelfPath();
+std::wstring GetSelfPath();
 //探测是否管理员权限
 bool IsAdmin();
 //探测用户名

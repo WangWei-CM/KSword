@@ -340,7 +340,7 @@ kProcess::kProcess(DWORD pid) : PID(pid), handle(INVALID_HANDLE_VALUE), isAdmin(
     handle = GetProcessHandleByPID(pid);
     if (handle != INVALID_HANDLE_VALUE) {
         // 获取进程名称并赋值给name
-        name = GetProcessName();
+        name = C(GetProcessName());
 
         // 获取进程可执行文件路径
         WCHAR pathBuf[MAX_PATH] = { 0 };
@@ -572,4 +572,7 @@ bool kProcess::IsAdmin() const
 {
     return isAdmin;
 }
+
+
+
 #undef CURRENT_MODULE   

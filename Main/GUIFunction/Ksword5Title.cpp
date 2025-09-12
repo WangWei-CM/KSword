@@ -411,7 +411,7 @@ inline void Ksword5Title() {
     SetStyle(!strcmp(AuthName.c_str(), "SYSTEM"));
     if (ImGui::Button(C("SYSTEM"), buttonSize)) {
         if (!IsAdmin()) {
-            if (RequestAdmin(StringToWString(GetSelfPath())) == KSWORD_ERROR_EXIT) {
+            if (RequestAdmin(GetSelfPath()) == KSWORD_ERROR_EXIT) {
                 kLog.Add(Err, C("请求管理员权限失败"), C("Ksword核心"));
             }
             else {
@@ -427,7 +427,7 @@ inline void Ksword5Title() {
     SetStyle(isAdmin);
     if (ImGui::Button(C("ADMIN"), buttonSize)) {
         if (!IsAdmin()) {
-            if (RequestAdmin(StringToWString(GetSelfPath())) == KSWORD_ERROR_EXIT) {
+            if (RequestAdmin(GetSelfPath()) == KSWORD_ERROR_EXIT) {
 				kLog.Add(Err, C("请求管理员权限失败"), C("Ksword核心"));
             }
             else {

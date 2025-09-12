@@ -2,7 +2,7 @@
 #include "Environment.h"
 std::string AuthName;
 std::string HostName;
-std::string ExePath;
+std::wstring ExePath;
 int ScreenX;
 int ScreenY;
 bool IsAuthAdmin;

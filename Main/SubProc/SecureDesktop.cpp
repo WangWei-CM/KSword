@@ -30,13 +30,13 @@ inline int KswordMainSecureDesktop(){
         STARTUPINFO si = { sizeof(si) };
         PROCESS_INFORMATION pi;
         std::wstring desktopName = StringToWString("KswordSecureDesktop1");
-        std::wstring exePath = StringToWString(GetSelfPath());
+        std::wstring exePath = GetSelfPath();
 
         si.lpDesktop = const_cast<LPWSTR>(desktopName.c_str()); // °²È«ÒÆ³ý const
 
         wchar_t tmp[] = L"SecureDesktopMain";
         if (!CreateProcess(
-            CharToWChar(GetSelfPath().c_str()),
+            GetSelfPath().c_str(),
             //const_cast<LPWSTR>(exePath.c_str()),
             tmp,
             nullptr,

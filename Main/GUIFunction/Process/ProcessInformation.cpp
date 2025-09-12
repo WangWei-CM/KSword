@@ -2,6 +2,8 @@
 #include "Process.h"
 #include "ProcessDetail.h"
 #include <winnt.h>  // 补充Windows权限常量定义
+#include <sddl.h>
+#include <comutil.h>
 #define CURRENT_MODULE "进程详细信息管理"
 
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -282,6 +284,7 @@ bool kProcessDetail::GetProcessExtendedInfo() {
 
 
 kProcessDetail::kProcessDetail(DWORD pid) : kProcess(pid) {
+    InitTokenInfo();
     InitDetailInfo();
 }
 
@@ -395,8 +398,84 @@ void kProcessDetail::Render() {
     ImGui::Separator();
 	openTest.SetTargetPID(pid());
 	openTest.ShowWindow();
+    if (ImGui::TreeNode(C("令牌读取测试"))) {
+
+    // 创建可滚动区域
+        if (ImGui::BeginChild("TokenInfoScrollArea", ImVec2(0, 300), true))
+        {
+            // 创建表格
+            if (ImGui::BeginTable("TokenInfoTable", 4,
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollX))
+            {
+                // 设置表头
+                ImGui::TableSetupColumn(C("枚举值"), ImGuiTableColumnFlags_WidthFixed, 150);
+                ImGui::TableSetupColumn(C("描述"), ImGuiTableColumnFlags_WidthFixed, 200);
+                ImGui::TableSetupColumn(C("数据类型"), ImGuiTableColumnFlags_WidthFixed, 180);
+                ImGui::TableSetupColumn(C("值"), ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableHeadersRow();
+                ImGui::TableSetupScrollFreeze(0, 1);
+                // 计算行高（根据实际内容调整，这里使用文本行高）
+                const float rowHeight = ImGui::GetTextLineHeightWithSpacing();
+
+                // 初始化裁剪器，指定总数据量和行高
+                ImGuiListClipper clipper;
+                clipper.Begin((int)m_tokenInfos.size(), rowHeight);
+
+                // 只渲染可见区域的行
+                while (clipper.Step())
+                {
+                    for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+                    {
+                        const auto& info = m_tokenInfos[i];
+                        ImGui::TableNextRow();
+
+                        // 枚举值列
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::Text("%s", info.enumName.c_str());
+
+                        // 描述列
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%s", C(info.description.c_str()));
+
+                        // 数据类型列
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::Text("%s", info.dataType.c_str());
+
+                        // 值列
+                        ImGui::TableSetColumnIndex(3);
+                        if (info.success)
+                        {
+                            if (info.value.empty())
+                                ImGui::Text("No data");
+                            else
+                                ImGui::TextWrapped(C("%s"), C(info.value.c_str()));
+                        }
+                        else
+                        {
+                            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 100, 100, 255)); // 红色错误文本
+                            ImGui::Text(C("Error: %s (0x%08X)"), C(FormatError(info.errorCode).c_str()), info.errorCode);
+                            ImGui::PopStyleColor();
+                        }
+                    }
+                }
+
+                ImGui::EndTable();
+            }
+        }    ImGui::EndChild();
+		ImGui::TreePop();
+    }
+
+    // 右上角关闭按钮
+    float buttonWidth = ImGui::CalcTextSize(C("销毁详细信息实例")).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    ImVec2 windowPos = ImGui::GetWindowPos();
+    ImVec2 windowSize = ImGui::GetWindowSize();
+    ImGui::SetCursorPos(ImVec2(windowSize.x - buttonWidth - 10.0f, 10.0f)); // 10像素边距
+
     if (ImGui::Button(C("销毁详细信息实例"))) {
         kProcDtl.remove(pid());
+        ImGui::End(); // 立即关闭窗口，防止后续渲染
+        return;
     }
     ImGui::End();
 }
@@ -595,4 +674,333 @@ void ProcessDetailManager::renderAll() {
         detail->Render();
     }
 }
+
+std::string kProcessDetail::SidToString(PSID sid)
+{
+    if (sid == nullptr)
+        return "Invalid SID";
+
+    // 显式使用 ANSI 版本函数，确保返回 char* 类型
+    LPSTR sidString = nullptr;
+    if (ConvertSidToStringSidA(sid, &sidString))  // 使用 A 后缀的 ANSI 版本
+    {
+        std::string result(sidString);  // 现在可以直接构造 std::string
+        LocalFree(sidString);
+        return result;
+    }
+
+    return "Failed to convert SID to string (Error: " + std::to_string(GetLastError()) + ")";
+}
+
+std::string kProcessDetail::LuidToString(LUID luid)
+{
+    std::stringstream ss;
+    ss << "0x" << std::hex << std::setw(8) << std::setfill('0') << luid.HighPart
+        << ":" << std::setw(8) << std::setfill('0') << luid.LowPart;
+    return ss.str();
+}
+
+std::string kProcessDetail ::GetPrivilegeName(LUID luid)
+{
+    CHAR name[256] = { 0 };
+    DWORD nameSize = sizeof(name);
+    CHAR displayName[256] = { 0 };
+    DWORD displayNameSize = sizeof(displayName);
+    // 获取特权名称（4个参数）
+    if (!LookupPrivilegeNameA(nullptr, &luid, name, &nameSize))
+    {
+        return "Unknown privilege (Error: " + std::to_string(GetLastError()) + ")";
+    }
+
+    DWORD languageId = 0;
+
+    if (LookupPrivilegeDisplayNameA(nullptr, name, displayName, &displayNameSize, &languageId))
+    {
+        return std::string(name) + " (" + displayName + ")";
+    }
+    else
+    {
+        // 如果获取显示名称失败，至少返回基础名称
+        return std::string(name);
+    }
+    return "Unknown privilege (LUID: " + LuidToString(luid) + ")";
+}
+
+std::string kProcessDetail::FormatError(DWORD errorCode)
+{
+    LPSTR messageBuffer = nullptr;
+    size_t size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER |
+        FORMAT_MESSAGE_FROM_SYSTEM |
+        FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, errorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        (LPSTR)&messageBuffer, 0, nullptr);
+
+    std::string message(messageBuffer, size);
+
+    LocalFree(messageBuffer);
+    return message;
+}
+
+bool kProcessDetail::InitTokenInfo()
+{
+
+    // 打开进程
+    
+    // 打开进程令牌
+    if (!OpenProcessToken(handle, TOKEN_QUERY, &m_hToken))
+    {
+        std::cerr << "OpenProcessToken failed. Error: " << GetLastError() << std::endl;
+        return false;
+    }
+
+    // 定义所有需要查询的令牌信息类型
+    struct TokenInfoType
+    {
+        TOKEN_INFORMATION_CLASS infoClass;
+        std::string enumName;
+        std::string description;
+        std::string dataType;
+    };
+
+    std::vector<TokenInfoType> infoTypes = {
+        {TokenUser, "TokenUser", "用户信息", "TOKEN_USER"},
+        {TokenGroups, "TokenGroups", "组信息", "TOKEN_GROUPS"},
+        {TokenPrivileges, "TokenPrivileges", "特权信息", "TOKEN_PRIVILEGES"},
+        {TokenOwner, "TokenOwner", "所有者信息", "PSID"},
+        {TokenPrimaryGroup, "TokenPrimaryGroup", "主要组信息", "PSID"},
+        {TokenDefaultDacl, "TokenDefaultDacl", "默认DACL", "PACL"},
+        {TokenSource, "TokenSource", "令牌源", "TOKEN_SOURCE"},
+        {TokenType, "TokenType", "令牌类型", "TOKEN_TYPE"},
+        {TokenImpersonationLevel, "TokenImpersonationLevel", "模拟级别", "SECURITY_IMPERSONATION_LEVEL"},
+        {TokenStatistics, "TokenStatistics", "令牌统计", "TOKEN_STATISTICS"},
+        {TokenRestrictedSids, "TokenRestrictedSids", "受限SID", "TOKEN_GROUPS"},
+        {TokenSessionId, "TokenSessionId", "会话ID", "DWORD"},
+        {TokenGroupsAndPrivileges, "TokenGroupsAndPrivileges", "组和特权", "TOKEN_GROUPS_AND_PRIVILEGES"},
+        {TokenSessionReference, "TokenSessionReference", "会话引用", "DWORD"},
+        {TokenSandBoxInert, "TokenSandBoxInert", "沙箱惰性", "BOOL"},
+        {TokenAuditPolicy, "TokenAuditPolicy", "审计策略", "TOKEN_AUDIT_POLICY"},
+        {TokenOrigin, "TokenOrigin", "令牌起源", "TOKEN_ORIGIN"},
+        {TokenElevationType, "TokenElevationType", "提升类型", "TOKEN_ELEVATION_TYPE"},
+        {TokenLinkedToken, "TokenLinkedToken", "链接令牌", "HANDLE"},
+        {TokenElevation, "TokenElevation", "提升状态", "TOKEN_ELEVATION"},
+        {TokenHasRestrictions, "TokenHasRestrictions", "有否限制", "BOOL"},
+        {TokenAccessInformation, "TokenAccessInformation", "访问信息", "TOKEN_ACCESS_INFORMATION"},
+        {TokenVirtualizationAllowed, "TokenVirtualizationAllowed", "允许虚拟化", "BOOL"},
+        {TokenVirtualizationEnabled, "TokenVirtualizationEnabled", "已启用虚拟化", "BOOL"},
+        {TokenIntegrityLevel, "TokenIntegrityLevel", "完整性级别", "DWORD"},
+        {TokenUIAccess, "TokenUIAccess", "UI访问权限", "BOOL"},
+        {TokenMandatoryPolicy, "TokenMandatoryPolicy", "强制策略", "TOKEN_MANDATORY_POLICY"},
+        {TokenLogonSid, "TokenLogonSid", "登录SID", "PSID"},
+        {TokenIsAppContainer, "TokenIsAppContainer", "是否为应用容器", "BOOL"},
+        {TokenCapabilities, "TokenCapabilities", "功能", "TOKEN_CAPABILITIES"},
+        {TokenAppContainerSid, "TokenAppContainerSid", "应用容器SID", "PSID"},
+        {TokenAppContainerNumber, "TokenAppContainerNumber", "应用容器编号", "DWORD"},
+        {TokenUserClaimAttributes, "TokenUserClaimAttributes", "用户声明属性", "CLAIM_SECURITY_ATTRIBUTES_INFORMATION"},
+        {TokenDeviceClaimAttributes, "TokenDeviceClaimAttributes", "设备声明属性", "CLAIM_SECURITY_ATTRIBUTES_INFORMATION"},
+        {TokenRestrictedUserClaimAttributes, "TokenRestrictedUserClaimAttributes", "受限用户声明属性", "CLAIM_SECURITY_ATTRIBUTES_INFORMATION"},
+        {TokenRestrictedDeviceClaimAttributes, "TokenRestrictedDeviceClaimAttributes", "受限设备声明属性", "CLAIM_SECURITY_ATTRIBUTES_INFORMATION"},
+        {TokenDeviceGroups, "TokenDeviceGroups", "设备组", "TOKEN_GROUPS"},
+        {TokenRestrictedDeviceGroups, "TokenRestrictedDeviceGroups", "受限设备组", "TOKEN_GROUPS"},
+        {TokenSecurityAttributes, "TokenSecurityAttributes", "安全属性", "SECURITY_ATTRIBUTES"},
+        {TokenIsRestricted, "TokenIsRestricted", "是否受限", "BOOL"}
+    };
+
+    // 逐个查询令牌信息
+    for (const auto& infoType : infoTypes)
+    {
+        TokenInfo tokenInfo;
+        tokenInfo.enumName = infoType.enumName;
+        tokenInfo.description = infoType.description;
+        tokenInfo.dataType = infoType.dataType;
+        tokenInfo.success = false;
+        tokenInfo.errorCode = 0;
+
+        // 首先获取所需缓冲区大小
+        DWORD bufferSize = 0;
+        GetTokenInformation(m_hToken, infoType.infoClass, nullptr, 0, &bufferSize);
+        DWORD lastError = GetLastError();
+
+        if (lastError != ERROR_INSUFFICIENT_BUFFER)
+        {
+            tokenInfo.errorCode = lastError;
+            m_tokenInfos.push_back(tokenInfo);
+            continue;
+        }
+
+        // 分配缓冲区
+        std::vector<BYTE> buffer(bufferSize);
+
+        // 获取令牌信息
+        if (GetTokenInformation(m_hToken, infoType.infoClass, buffer.data(), bufferSize, &bufferSize))
+        {
+            tokenInfo.success = true;
+
+            // 根据不同的信息类型解析数据
+            switch (infoType.infoClass)
+            {
+            case TokenUser:
+            {
+                PTOKEN_USER pUser = reinterpret_cast<PTOKEN_USER>(buffer.data());
+                tokenInfo.value = SidToString(pUser->User.Sid);
+                break;
+            }
+
+            case TokenUIAccess:
+            {
+                BOOL* pUiAccess = reinterpret_cast<BOOL*>(buffer.data());
+                tokenInfo.value = (*pUiAccess) ? "True" : "False";
+                break;
+            }
+
+            case TokenType:
+            {
+                TOKEN_TYPE* pType = reinterpret_cast<TOKEN_TYPE*>(buffer.data());
+                tokenInfo.value = (*pType == TokenPrimary) ? "TokenPrimary" : "TokenImpersonation";
+                break;
+            }
+
+            case TokenSessionId:
+            {
+                DWORD* pSessionId = reinterpret_cast<DWORD*>(buffer.data());
+                tokenInfo.value = std::to_string(*pSessionId);
+                break;
+            }
+
+            case TokenIntegrityLevel:
+            {
+                PTOKEN_MANDATORY_LABEL pLabel = reinterpret_cast<PTOKEN_MANDATORY_LABEL>(buffer.data());
+                tokenInfo.value = SidToString(pLabel->Label.Sid);
+                break;
+            }
+
+            case TokenElevation:
+            {
+                PTOKEN_ELEVATION pElevation = reinterpret_cast<PTOKEN_ELEVATION>(buffer.data());
+                tokenInfo.value = (pElevation->TokenIsElevated) ? "Elevated" : "Not elevated";
+                break;
+            }
+
+            case TokenElevationType:
+            {
+                TOKEN_ELEVATION_TYPE* pType = reinterpret_cast<TOKEN_ELEVATION_TYPE*>(buffer.data());
+                switch (*pType)
+                {
+                case TokenElevationTypeDefault: tokenInfo.value = "TokenElevationTypeDefault"; break;
+                case TokenElevationTypeFull: tokenInfo.value = "TokenElevationTypeFull"; break;
+                case TokenElevationTypeLimited: tokenInfo.value = "TokenElevationTypeLimited"; break;
+                default: tokenInfo.value = "Unknown";
+                }
+                break;
+            }
+
+            case TokenPrivileges:
+            {
+                PTOKEN_PRIVILEGES pPrivileges = reinterpret_cast<PTOKEN_PRIVILEGES>(buffer.data());
+                std::stringstream ss;
+
+                for (DWORD i = 0; i < pPrivileges->PrivilegeCount; ++i)
+                {
+                    ss << GetPrivilegeName(pPrivileges->Privileges[i].Luid) << " - ";
+
+                    switch (pPrivileges->Privileges[i].Attributes)
+                    {
+                    case SE_PRIVILEGE_ENABLED: ss << "Enabled"; break;
+                    //case SE_PRIVILEGE_DISABLED: ss << "Disabled"; break;
+                    case SE_PRIVILEGE_REMOVED: ss << "Removed"; break;
+                    default: ss << "0x" << std::hex << pPrivileges->Privileges[i].Attributes;
+                    }
+
+                    if (i < pPrivileges->PrivilegeCount - 1)
+                        ss << "\n";
+                }
+
+                tokenInfo.value = ss.str();
+                break;
+            }
+
+            case TokenGroups:
+            {
+                PTOKEN_GROUPS pGroups = reinterpret_cast<PTOKEN_GROUPS>(buffer.data());
+                std::stringstream ss;
+
+                for (DWORD i = 0; i < pGroups->GroupCount; ++i)
+                {
+                    ss << SidToString(pGroups->Groups[i].Sid) << " - ";
+
+                    if (pGroups->Groups[i].Attributes & SE_GROUP_ENABLED)
+                        ss << "Enabled";
+                    //else if (pGroups->Groups[i].Attributes & SE_GROUP_DISABLED)
+                    //    ss << "Disabled";
+                    else
+                        ss << "0x" << std::hex << pGroups->Groups[i].Attributes;
+
+                    if (i < pGroups->GroupCount - 1)
+                        ss << "\n";
+                }
+
+                tokenInfo.value = ss.str();
+                break;
+            }
+
+            case TokenIsAppContainer:
+            {
+                BOOL* pIsAppContainer = reinterpret_cast<BOOL*>(buffer.data());
+                tokenInfo.value = (*pIsAppContainer) ? "True" : "False";
+                break;
+            }
+
+            case TokenAppContainerSid:
+            {
+                PSID pSid = reinterpret_cast<PSID>(buffer.data());
+                tokenInfo.value = SidToString(pSid);
+                break;
+            }
+
+            case TokenOwner:
+            {
+                PSID pOwner = reinterpret_cast<PSID>(buffer.data());
+                tokenInfo.value = SidToString(pOwner);
+                break;
+            }
+
+            case TokenPrimaryGroup:
+            {
+                PSID pGroup = reinterpret_cast<PSID>(buffer.data());
+                tokenInfo.value = SidToString(pGroup);
+                break;
+            }
+
+            case TokenImpersonationLevel:
+            {
+                SECURITY_IMPERSONATION_LEVEL* pLevel = reinterpret_cast<SECURITY_IMPERSONATION_LEVEL*>(buffer.data());
+                switch (*pLevel)
+                {
+                case SecurityAnonymous: tokenInfo.value = "SecurityAnonymous"; break;
+                case SecurityIdentification: tokenInfo.value = "SecurityIdentification"; break;
+                case SecurityImpersonation: tokenInfo.value = "SecurityImpersonation"; break;
+                case SecurityDelegation: tokenInfo.value = "SecurityDelegation"; break;
+                default: tokenInfo.value = "Unknown";
+                }
+                break;
+            }
+
+            // 对于其他类型，我们只显示"数据可用"
+            default:
+                tokenInfo.value = "Data available (not fully parsed)";
+                break;
+            }
+        }
+        else
+        {
+            tokenInfo.errorCode = GetLastError();
+        }
+
+        m_tokenInfos.push_back(tokenInfo);
+    }
+
+    m_isValid = true;
+    return true;
+}
+
+
 #undef CURRENT_MODULE

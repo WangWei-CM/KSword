@@ -491,7 +491,7 @@ void KswordGUIProcess() {
             if (current_sort != SortType_None) {
                 ImGui::TableSetColumnIndex(current_sort);
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                const char* sort_order = sort_ascending ? " (ASC)" : " (DESC)";
+                const char* sort_order = sort_ascending ? " " : " ";
                 ImGui::TextDisabled(sort_order);
                 ImGui::PopStyleVar();
             }
