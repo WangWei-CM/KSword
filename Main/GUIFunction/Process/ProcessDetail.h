@@ -35,9 +35,26 @@ public:
     void ToggleWindow() { showTestWindow = !showTestWindow; }
 };
 
+// 定义存储令牌信息的结构体
+struct TokenInfo
+{
+    std::string enumName;
+    std::string description;
+    std::string dataType;
+    std::string value;
+    bool success;
+    DWORD errorCode;
+};
+
+
 
 class kProcessDetail : public kProcess {
 private:
+
+    HANDLE m_hToken;
+    bool m_isValid;
+    std::vector<TokenInfo> m_tokenInfos;
+
     std::string processUser;       // 进程所属用户
     std::string processExePath;    // 进程完整路径
     bool isAdmin;                  // 是否为管理员权限
@@ -70,8 +87,21 @@ public:
     // 渲染进程信息窗口
     void Render();
 	ProcessOpenTest openTest; // 进程权限测试实例
+    // 辅助函数：将SID转换为字符串
+    std::string SidToString(PSID sid);
+
+    // 辅助函数：将LUID转换为字符串
+    std::string LuidToString(LUID luid);
+
+    // 辅助函数：获取特权名称
+    std::string GetPrivilegeName(LUID luid);
+
+    // 辅助函数：格式化错误代码
+    std::string FormatError(DWORD errorCode);
 
 private:
+    // 初始化并获取令牌信息
+    bool InitTokenInfo();
     // 初始化详细进程信息
     void InitDetailInfo();
 };

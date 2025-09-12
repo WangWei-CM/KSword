@@ -5,7 +5,7 @@
 
 extern std::string AuthName;
 extern std::string HostName;
-extern std::string ExePath;
+extern std::wstring ExePath;
 extern int ScreenX;
 extern int ScreenY;
 extern bool IsAuthAdmin;

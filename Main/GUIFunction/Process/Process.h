@@ -90,7 +90,7 @@ public:
 	void UpdateMemoryInfo();
 	double UpdateCPUUsage();
 	void UpdateStats();
-private:
+protected:
 	int PID;
 	std::string AuthName;
 	std::string exePath;

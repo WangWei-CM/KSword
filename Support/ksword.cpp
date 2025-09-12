@@ -1446,10 +1446,10 @@ bool IsInsideVMWare() {
 }
 
 //探测自身路径
-std::string GetSelfPath() {
+std::wstring GetSelfPath() {
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(NULL, path, MAX_PATH);
-    return WCharToString(path);
+    return std::wstring(path);
 }
 
 bool IsAdmin()
@@ -2386,8 +2386,6 @@ std::string GetProgramPath() {
 //获取system权限并启动自己（需要管理员权限）
 int GetSystem(const char* Para) {
 
-    std::string SelfPathTemp=GetSelfPath();
-    const char* cstr = SelfPathTemp.c_str();
     //// 计算两个字符串的长度
     //size_t len1 = std::strlen(cstr);
     //size_t len2 = std::strlen(Para);
@@ -2412,7 +2410,6 @@ int GetSystem(const char* Para) {
     tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
     AdjustTokenPrivileges(hToken, false, &tp, sizeof(tp), NULL, NULL);
     //CloseHandle(hToken);
-    std::cout << "当前路径为" << GetSelfPath()<<std::endl;
     //枚举进程获取lsass.exe的ID和winlogon.exe的ID，它们是少有的可以直接打开句柄的系统进程
     DWORD idL = 0, idW = 0;
     PROCESSENTRY32 pe{};
@@ -2478,7 +2475,7 @@ int GetSystem(const char* Para) {
     si.cb = sizeof(STARTUPINFOW);
     wchar_t lpDesktopTmp[] = L"winsta0\\default";
     si.lpDesktop = lpDesktopTmp; // 显示窗口
-
+    const char* cstr = std::string(Para).c_str();
     int bufferSize = MultiByteToWideChar(CP_UTF8, 0, cstr, -1, NULL, 0);
     wchar_t* wideCstr = new wchar_t[bufferSize];
     if (MultiByteToWideChar(CP_UTF8, 0, cstr, -1, wideCstr, bufferSize) == 0) {
@@ -2567,7 +2564,7 @@ if (LookupPrivilegeValue(NULL, SE_ASSIGNPRIMARYTOKEN_NAME, &luid)) {
         si.cb = sizeof(STARTUPINFOW);
         si.lpDesktop = LPWSTR(L"winsta0\\default");//显示窗口
         //启动进程，不能用CreateProcessAsUser否则报错1314无特权
-        CreateProcessWithTokenW(token, LOGON_NETCREDENTIALS_ONLY, CharToWChar(GetSelfPath().c_str()), LPWSTR(CharToWChar(CommandLine.c_str())), NORMAL_PRIORITY_CLASS | CREATE_NEW_PROCESS_GROUP, NULL, NULL, &si, &pi);
+        CreateProcessWithTokenW(token, LOGON_NETCREDENTIALS_ONLY, GetSelfPath().c_str(), LPWSTR(CharToWChar(CommandLine.c_str())), NORMAL_PRIORITY_CLASS | CREATE_NEW_PROCESS_GROUP, NULL, NULL, &si, &pi);
         CloseHandle(token);
 #ifdef KSWORD_WITH_COMMAND
         MainExit();
