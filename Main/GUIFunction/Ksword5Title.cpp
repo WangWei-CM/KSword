@@ -413,17 +413,20 @@ inline void Ksword5Title() {
         if (!IsAdmin()) {
             if (RequestAdmin(GetSelfPath()) == KSWORD_ERROR_EXIT) {
                 kLog.Add(Err, C("请求管理员权限失败"), C("Ksword核心"));
+
             }
             else {
                 Ksword_main_should_exit = 1;
             }
         }
-        GetProgramPath();
-        if (GetSystem("") == KSWORD_SUCCESS_EXIT) {
-            Ksword_main_should_exit = 1;
+        else {
+            GetProgramPath();
+            if (GetSystem("") == KSWORD_SUCCESS_EXIT) {
+                Ksword_main_should_exit = 1;
+            }
         }
     } ImGui::SameLine();
-
+    
     SetStyle(isAdmin);
     if (ImGui::Button(C("ADMIN"), buttonSize)) {
         if (!IsAdmin()) {

@@ -299,6 +299,8 @@ void kProcessDetail::InitDetailInfo() {
 	GetParentProcessInfo();    // 新增：获取父进程信息
 }
 
+static int is_selected = -1;
+static int selectedToken = -1;
 
 void kProcessDetail::Render() {
     // 窗口标题使用进程名称+PID
@@ -432,6 +434,49 @@ void kProcessDetail::Render() {
 
                         // 枚举值列
                         ImGui::TableSetColumnIndex(0);
+                        bool is_selected = (selectedToken == i);
+                        bool row_clicked = ImGui::Selectable(
+                            "##row_selectable",
+                            is_selected,
+                            ImGuiSelectableFlags_SpanAllColumns |
+                            ImGuiSelectableFlags_AllowItemOverlap,
+                            ImVec2(0, ImGui::GetTextLineHeight())
+                        );
+
+                        // 处理行点击
+                        if (row_clicked) {
+                            selectedToken = i;
+                        }
+                        // 悬停效果
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                                ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+                        }
+
+                        // 右键菜单
+                        // 定义右键菜单内容
+                        if (ImGui::BeginPopupContextItem("##RowContextMenu")) {
+							selectedToken = i; // 记录右键点击的行
+                            if (ImGui::BeginMenu(C("复制"))) {
+                                if (ImGui::MenuItem(C("Token名称"))) {
+									ImGui::SetClipboardText(C(info.enumName.c_str()));
+                                }
+                                if (ImGui::MenuItem(C("描述"))) {
+									ImGui::SetClipboardText(C(info.description.c_str()));
+                                }
+                                if (ImGui::MenuItem(C("数据类型"))) {
+									ImGui::SetClipboardText(C(info.dataType.c_str()));
+                                }
+                                if (ImGui::MenuItem(C("值"))) {
+									ImGui::SetClipboardText(C(info.value.c_str()));
+                                }
+
+                                ImGui::EndMenu();
+                            }
+                            ImGui::EndPopup();
+                        }
+
+
                         ImGui::Text("%s", info.enumName.c_str());
 
                         // 描述列
