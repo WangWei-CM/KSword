@@ -695,12 +695,16 @@ private:
         case WM_DPICHANGED:
             if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_DpiEnableScaleViewports)
             {
-                //const int dpi = HIWORD(wParam);
-                //printf("WM_DPICHANGED to %d (%.0f%%)\n", dpi, (float)dpi / 96.0f * 100.0f);
+                // DPI变化时自动调整窗口大小
                 const RECT* suggested_rect = (RECT*)lParam;
-                ::SetWindowPos(hWnd, nullptr, suggested_rect->left, suggested_rect->top, suggested_rect->right - suggested_rect->left, suggested_rect->bottom - suggested_rect->top, SWP_NOZORDER | SWP_NOACTIVATE);
+                ::SetWindowPos(hWnd, nullptr,
+                    suggested_rect->left, suggested_rect->top,
+                    suggested_rect->right - suggested_rect->left,
+                    suggested_rect->bottom - suggested_rect->top,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
             }
-            break;
+            return 0;
+        
         }
         return ::DefWindowProcW(hWnd, msg, wParam, lParam);
     }

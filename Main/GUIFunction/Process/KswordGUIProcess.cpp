@@ -427,209 +427,275 @@ static void KCreateProcessWithSuspendFollower(DWORD pid) {
 }
 
 static kProcess* SelectedProcess;//右键菜单所在进程
-
 void KswordGUIProcess() {
     //渲染详细信息
     if(KswordProcessTabInited == false)
     {
 		std::thread (GetProcessList).detach();
-        
 	}
     kProcDtl.renderAll();
+
     if (ImGui::CollapsingHeader(C("进程列表"), ImGuiTreeNodeFlags_DefaultOpen))
     {
-        // 设置表格（三列，带边框）
-                        // 过滤输入框
+        // 过滤输入框
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 15);
+        static char filter_text[256] = "";
         if (ImGui::InputTextWithHint("##filter", "Search (name/user)...",
             filter_text, IM_ARRAYSIZE(filter_text))) {
-            // 过滤文本变化时自动更新
+            // 过滤文本变化时重置滚动位置
         }
 
         // 准备过滤和排序后的数据
-        static std::vector< kProcess*> filtered_processes;
+        static std::vector<kProcess*> filtered_processes;
         UpdateFilterAndSort(filtered_processes, filter_text, current_sort, sort_ascending);
+        const int totalRows = filtered_processes.size();  // 使用实际数据行数
 
         // 表格设置
         const float footer_height = ImGui::GetStyle().ItemSpacing.y +
-            ImGui::GetFrameHeightWithSpacing();
+            ImGui::GetFrameHeightWithSpacing()+30;
         ImGui::BeginChild("##table_container",
             ImVec2(0, -footer_height), // 留出底部空间
             ImGuiChildFlags_None,
-            ImGuiWindowFlags_NoScrollbar);
-
-        if (ImGui::BeginTable("ProcessTable", 5,
-            ImGuiTableFlags_Borders |
-            ImGuiTableFlags_RowBg |
-            ImGuiTableFlags_SizingFixedFit |
-
-            ImGuiTableFlags_Resizable |
-            ImGuiTableFlags_ScrollY |
-            ImGuiTableFlags_Sortable))
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );  // 禁用内置滚动条
         {
-            // 表头
+            // 获取子窗口的实际可用高度（表格可占用的最大高度）
+            const float childAvailHeight = ImGui::GetContentRegionAvail().y;
+            // 计算单行高度（包含行间距）
+            const float rowHeight = ImGui::GetTextLineHeightWithSpacing();
+            // 计算表头高度（约等于一个 frame 高度）
+            const float headerHeight = ImGui::GetFrameHeight();
+            // 动态计算可见行数：(子窗口高度 - 表头高度) / 单行高度（向上取整）
+            const int visibleRows = (int)max(1.0f, std::floor((childAvailHeight - headerHeight) / rowHeight));
 
-            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 0.0f, SortType_Name);
-            ImGui::TableSetupColumn("PID", ImGuiTableColumnFlags_WidthFixed, 80.0f, SortType_PID);
-            ImGui::TableSetupColumn("User", ImGuiTableColumnFlags_WidthStretch, 0.0f, SortType_User);
-            ImGui::TableSetupColumn("CPU(%)", ImGuiTableColumnFlags_WidthFixed, 80.0f);  // 新增CPU列
-            ImGui::TableSetupColumn("RAM(MB)", ImGuiTableColumnFlags_WidthFixed, 100.0f); // 新增内存列
-            ImGui::TableSetupScrollFreeze(0, 1);
-            if (ImGuiTableSortSpecs* sorts_specs = ImGui::TableGetSortSpecs())
+            static float scrollPos = 0.0f;  // 确保在此处定义scrollPos
+            const float scrollbarWidth = 15.0f;  // 滚动条宽度
+            const float columnSpacing = ImGui::GetStyle().ItemSpacing.x;  // 列间距
+
+            // 处理鼠标滚轮事件（控制滚动）
+            if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) { // 精确判断子窗口hover
+                // 独占鼠标事件，阻止父窗口响应
+                ImGui::SetNextFrameWantCaptureMouse(true);
+
+                if (ImGui::GetIO().MouseWheel != 0) {
+                    float scrollSpeed = 1.0f / (totalRows > visibleRows ? totalRows - visibleRows : 1);
+                    scrollPos += ImGui::GetIO().MouseWheel * scrollSpeed;
+                    scrollPos = std::clamp(scrollPos, 0.0f, 1.0f);
+
+                    // 双重保险：清空滚轮值
+                    ImGui::GetIO().MouseWheel = 0.0f;
+                }
+            }
+
+
+            // 计算滚动偏移
+            int scrollOffset = 0;
+            if (totalRows > visibleRows) {
+                //scrollOffset = (int)(scrollPos * (totalRows - visibleRows));
+                // 关键修改：反转滚动条与表格内容的对应关系
+                const float maxOffset = totalRows > visibleRows ? (totalRows - visibleRows) : 0;
+                // 用1 - scrollPos计算偏移量，实现滑块位置反转
+                scrollOffset = (int)((1 - scrollPos) * maxOffset); // 核心修改行
+                scrollOffset = std::clamp(scrollOffset, 0, (int)maxOffset);
+            }
+
+            ImGui::BeginColumns("TableWithScroll", 2, ImGuiOldColumnFlags_NoBorder);
             {
-                if (sorts_specs->SpecsDirty)
+                ImGuiWindow* window = ImGui::GetCurrentWindow();
+                float windowWidth = window->Size.x;
+                float windowPaddingX = ImGui::GetStyle().WindowPadding.x * 2;
+                float availableWidth = windowWidth - windowPaddingX;
+                float tableColumnWidth = availableWidth - scrollbarWidth /*- columnSpacing*/;
+                ImGui::SetColumnWidth(0, tableColumnWidth);
+                ImGui::SetColumnWidth(1, scrollbarWidth);
+
+                // 表格标志中移除ScrollY，使用自定义滚动
+                if (ImGui::BeginTable("ProcessTable", 5,
+                    ImGuiTableFlags_Borders |
+                    ImGuiTableFlags_RowBg |
+                    ImGuiTableFlags_SizingFixedFit |
+                    ImGuiTableFlags_Resizable |
+                    ImGuiTableFlags_Sortable))
                 {
-                    // 获取最新的排序设置
-                    current_sort = static_cast<SortType>(sorts_specs->Specs[0].ColumnUserID);
-                    sort_ascending = (sorts_specs->Specs[0].SortDirection == ImGuiSortDirection_Ascending);
-                    sorts_specs->SpecsDirty = false;
+                    // 表头设置
+                    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 0.0f, SortType_Name);
+                    ImGui::TableSetupColumn("PID", ImGuiTableColumnFlags_WidthFixed, 80.0f, SortType_PID);
+                    ImGui::TableSetupColumn("User", ImGuiTableColumnFlags_WidthStretch, 0.0f, SortType_User);
+                    ImGui::TableSetupColumn("CPU(%)", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                    ImGui::TableSetupColumn("RAM(MB)", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                    ImGui::TableSetupScrollFreeze(0, 1);
+
+                    // 排序逻辑
+                    if (ImGuiTableSortSpecs* sorts_specs = ImGui::TableGetSortSpecs())
+                    {
+                        if (sorts_specs->SpecsDirty)
+                        {
+                            current_sort = static_cast<SortType>(sorts_specs->Specs[0].ColumnUserID);
+                            sort_ascending = (sorts_specs->Specs[0].SortDirection == ImGuiSortDirection_Ascending);
+                            sorts_specs->SpecsDirty = false;
+                            scrollPos = 0.0f;  // 排序后重置滚动位置
+                        }
+                    }
+                    ImGui::TableHeadersRow();
+
+                    // 排序指示
+                    if (current_sort != SortType_None) {
+                        ImGui::TableSetColumnIndex(current_sort);
+                        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+                        const char* sort_order = sort_ascending ? "↑" : "↓";
+                        ImGui::TextDisabled(sort_order);
+                        ImGui::PopStyleVar();
+                    }
+
+                    // 根据滚动偏移绘制可见行
+                    int endRow = scrollOffset + visibleRows;
+                    if (endRow > totalRows) endRow = totalRows;
+
+                    for (int row = scrollOffset; row < endRow; row++) {
+                        kProcess* proc = filtered_processes[row];
+                        if (!proc) continue;
+
+                        ImGui::TableNextRow();
+                        ImGui::PushID(proc->pid());
+
+                        // 行选择逻辑
+                        ImVec2 initial_cursor_pos = ImGui::GetCursorPos();
+                        ImGui::TableSetColumnIndex(0);
+                        RenderProcessIconInTable(proc->pid()); ImGui::SameLine();
+                        ImGui::Text("%s", proc->Name().c_str()); ImGui::SameLine();
+
+                        bool is_selected = (selected_pid == proc->pid());
+                        bool row_clicked = ImGui::Selectable(
+                            "##row_selectable",
+                            is_selected,
+                            ImGuiSelectableFlags_SpanAllColumns |
+                            ImGuiSelectableFlags_AllowItemOverlap,
+                            ImVec2(0, ImGui::GetTextLineHeight())
+                        );
+
+                        if (row_clicked) {
+                            selected_pid = proc->pid();
+                        }
+
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                                ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+                        }
+
+                        if (ImGui::BeginPopupContextItem("##RowContextMenu")) {
+                            SelectedProcess = proc; // 保存当前选中的进程
+                            if (ImGui::BeginMenu("Terminate")) {
+                                if (ImGui::MenuItem("taskkill")) {
+                                    std::thread(KillProcessByTaskkill, SelectedProcess->pid()).detach();
+                                }
+                                if (ImGui::MenuItem("taskkill /f")) {
+                                    // 优雅关闭逻辑
+                                    SelectedProcess->Terminate(kTaskkillF);
+                                    kLog.Add(Info, C(("使用taskkill /f终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
+                                }
+                                if (ImGui::MenuItem("Terminate")) {
+
+                                    kLog.Add(Info, C(("使用Terminate终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
+                                    SelectedProcess->Terminate(kTerminate);
+                                }
+                                if (ImGui::MenuItem("Terminate Thread")) {
+                                    kLog.Add(Info, C(("使用TerminateThread终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
+                                    SelectedProcess->Terminate(kTerminateThread);
+                                }
+                                if (ImGui::MenuItem("NT Terminate")) {
+                                    kLog.Add(Info, C(("使用NT Terminate终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
+                                    SelectedProcess->Terminate(kNTTerminate);
+                                }
+                                ImGui::EndMenu();
+                            }
+                            if (ImGui::MenuItem(C("挂起进程"))) {
+                                SelectedProcess->Suspend();
+                            }
+                            if (ImGui::MenuItem(C("取消挂起"))) {
+                                SelectedProcess->Resume();
+                            }
+                            if (ImGui::MenuItem(C("设置关键进程"))) {
+                                SelectedProcess->SetKeyProc();
+                            }
+                            if (ImGui::MenuItem(C("取消关键进程"))) {
+                                SelectedProcess->CancelKeyProc();
+                            }
+                            if (ImGui::MenuItem(C("打开所在位置"))) {
+                                size_t lastSlashPos = SelectedProcess->ExePath().find_last_of("\\/");
+                                if (lastSlashPos == std::string::npos) {
+                                    kLog.Add(Err, C("无法找到文件所在目录"), C(CURRENT_MODULE));
+                                }
+                                std::string folderPath = SelectedProcess->ExePath().substr(0, lastSlashPos);
+
+                                HINSTANCE result = ShellExecuteA(NULL, "explore", folderPath.c_str(), NULL, NULL, SW_SHOWDEFAULT);
+                            }
+                            if (ImGui::MenuItem(C("详细信息"))) {
+                                kProcDtl.add(SelectedProcess->pid());
+                            }
+                            ImGui::EndPopup();
+                        }
+                        // 其他列内容
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%d", proc->pid());
+
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::Text("%s", proc->User().c_str());
+
+                        ImGui::TableSetColumnIndex(3);
+                        ImGui::Text("%.1f", proc->GetCPUUsage());
+
+                        ImGui::TableSetColumnIndex(4);
+                        // 替换为kProcess实际的内存获取方式
+                        // 例如：如果内存以字节存储在mem_size成员中
+                        ImGui::Text("%.2f MB", 114514 / (1024.0f * 1024.0f));
+
+                        ImGui::PopID();
+                    }
+
+                    ImGui::EndTable();
                 }
             }
-            ImGui::TableHeadersRow();
+            ImGui::NextColumn();
 
-            // 排序指示
-            if (current_sort != SortType_None) {
-                ImGui::TableSetColumnIndex(current_sort);
+            // 滚动条控制区域
+            {
+                // 计算表格实际高度（包含表头）
+                float rowHeight = ImGui::GetTextLineHeightWithSpacing();
+                float tableHeight = rowHeight * (visibleRows)+ImGui::GetFrameHeight();  // 表头高度
+
+                // 当数据不足一屏时禁用滚动条
+                ImGui::PushItemFlag(ImGuiItemFlags_Disabled, totalRows <= visibleRows);
+                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, totalRows <= visibleRows ? 0.5f : 1.0f);
+
+                // 美化滚动条样式
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                const char* sort_order = sort_ascending ? " " : " ";
-                ImGui::TextDisabled(sort_order);
-                ImGui::PopStyleVar();
-            }
+                ImGui::PushStyleColor(ImGuiCol_SliderGrab, IM_COL32(100, 150, 255, 255));
+                ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, IM_COL32(150, 200, 255, 255));
 
-            // 内容行（使用clipper优化滚动性能）
-            ImGuiListClipper clipper;
-            clipper.Begin(filtered_processes.size());
-            while (clipper.Step()) {
-                for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
-                    kProcess* proc = filtered_processes[row];
-
-                    ImGui::TableNextRow();
-                    ImGui::PushID(proc->pid()); // 行ID作用域开始
-
-                    // 保存初始光标位置
-                    ImVec2 initial_cursor_pos = ImGui::GetCursorPos();
-
-                    // 第一列：整行选择项
-                    ImGui::TableSetColumnIndex(0);
-                    RenderProcessIconInTable(proc->pid()); ImGui::SameLine();
-                    //ImGui::SetCursorPos(initial_cursor_pos); // 重置到初始位置
-                    ImGui::Text("%s", proc->Name().c_str()); ImGui::SameLine();
-                    // 创建整行选择项
-                    bool is_selected = (selected_pid == proc->pid());
-                    bool row_clicked = ImGui::Selectable(
-                        "##row_selectable",
-                        is_selected,
-                        ImGuiSelectableFlags_SpanAllColumns |
-                        ImGuiSelectableFlags_AllowItemOverlap,
-                        ImVec2(0, ImGui::GetTextLineHeight())
-                    );
-
-                    // 处理行点击
-                    if (row_clicked) {
-                        selected_pid = proc->pid();
-                    }
-
-                    // 悬停效果
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
-                            ImGui::GetColorU32(ImGuiCol_HeaderHovered));
-                    }
-
-                    // 右键菜单
-                    // 定义右键菜单内容
-                    if (ImGui::BeginPopupContextItem("##RowContextMenu")) {
-                        SelectedProcess = proc; // 保存当前选中的进程
-                        if (ImGui::BeginMenu("Terminate")) {
-                            if (ImGui::MenuItem("taskkill")) {
-                                std::thread(KillProcessByTaskkill, SelectedProcess->pid()).detach();
-                            }
-                            if (ImGui::MenuItem("taskkill /f")) {
-                                // 优雅关闭逻辑
-                                SelectedProcess->Terminate(kTaskkillF);
-                                kLog.Add(Info, C(("使用taskkill /f终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
-                            }
-                            if (ImGui::MenuItem("Terminate")) {
-
-                                kLog.Add(Info, C(("使用Terminate终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
-                                SelectedProcess->Terminate(kTerminate);
-                            }
-                            if (ImGui::MenuItem("Terminate Thread")) {
-                                kLog.Add(Info, C(("使用TerminateThread终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
-                                SelectedProcess->Terminate(kTerminateThread);
-                            }
-                            if (ImGui::MenuItem("NT Terminate")) {
-                                kLog.Add(Info, C(("使用NT Terminate终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
-                                SelectedProcess->Terminate(kNTTerminate);
-                            }
-                            ImGui::EndMenu();
-                        }
-                        if (ImGui::MenuItem(C("挂起进程"))) {
-							SelectedProcess->Suspend();
-                        }
-                        if (ImGui::MenuItem(C("取消挂起"))) {
-                            SelectedProcess->Resume();
-                        }
-                        if (ImGui::MenuItem(C("设置关键进程"))) {
-                            SelectedProcess->SetKeyProc();
-                        }
-                        if (ImGui::MenuItem(C("取消关键进程"))) {
-                            SelectedProcess->CancelKeyProc();
-                        }
-                        if(ImGui::MenuItem(C("打开所在位置"))) {
-                            size_t lastSlashPos = SelectedProcess->ExePath().find_last_of("\\/");
-                            if (lastSlashPos == std::string::npos) {
-                                kLog.Add(Err, C("无法找到文件所在目录"), C(CURRENT_MODULE));
-                            }
-                            std::string folderPath = SelectedProcess->ExePath().substr(0, lastSlashPos);
-
-                            HINSTANCE result = ShellExecuteA(NULL, "explore", folderPath.c_str(), NULL, NULL, SW_SHOWDEFAULT);
-						}
-                        if (ImGui::MenuItem(C("详细信息"))) {
-                            kProcDtl.add(SelectedProcess->pid());
-                        }
-                        ImGui::EndPopup();
-                    }
-
-                    // 在各列相同位置绘制内容
-                    // 列1：进程名称
-
-
-                    // 列2：PID
-                    ImGui::TableSetColumnIndex(1);
-                    //ImGui::SetCursorPos(initial_cursor_pos); // 重置到初始位置
-                    ImGui::Text("%d", proc->pid());
-
-                    // 列3：用户
-                    ImGui::TableSetColumnIndex(2);
-                    //ImGui::SetCursorPos(initial_cursor_pos); // 重置到初始位置
-                    ImGui::Text("%s", proc->User().c_str());
-
-                    ImGui::TableSetColumnIndex(3);
-                    ImGui::Text("%.1f", proc->GetCPUUsage());
-
-                    // 第5列：内存使用（转换为MB）
-                    ImGui::TableSetColumnIndex(4);
-                    ImGui::Text("%.2f MB", 0.0 / (1024 * 1024));
-
-                    ImGui::PopID(); // 行ID作用域结束
+                // 滑块控制逻辑
+                if (ImGui::VSliderFloat("##Scrollbar", ImVec2(scrollbarWidth, tableHeight), &scrollPos, 0.0f, 1.0f, "")) {
+                    // 滑块拖动时自动限制范围
+                    scrollPos = std::clamp(scrollPos, 0.0f, 1.0f);  // 使用std::clamp替代ImGui::Clamp
                 }
+
+                // 恢复样式
+                ImGui::PopStyleColor(2);
+                ImGui::PopStyleVar(2);
+                ImGui::PopItemFlag();
             }
-            clipper.End();
 
-            ImGui::EndTable();
+            ImGui::EndColumns();
+            ImGui::EndChild();
+
+            // 底部状态栏
+            ImGui::Separator();
+            ImGui::Text("Processes: %d / %d", filtered_processes.size(), dummy_processes.size());
+            ImGui::SameLine(ImGui::GetWindowWidth() - 120);
+            if (ImGui::SmallButton("Refresh")) {
+                GetProcessList();
+                kLog.Add(Info, C("刷新进程列表"), C(CURRENT_MODULE));
+                scrollPos = 0.0f;  // 刷新后重置滚动位置
+            }
         }
-        ImGui::EndChild();
-
-        // 底部状态栏
-        ImGui::Separator();
-        ImGui::Text("Processes: %d / %d", filtered_processes.size(), dummy_processes.size());
-        ImGui::SameLine(ImGui::GetWindowWidth() - 120);
-        if (ImGui::SmallButton("Refresh")) {
-            /*dummy_processes = */GetProcessList();
-            kLog.Add(Info, C("刷新进程列表"), C(CURRENT_MODULE));
-            // 刷新逻辑
-        }
-
     }
     if (ImGui::CollapsingHeader(C("CreateProcess函数")) ){
     ImGui::InputTextWithHint(C("##ModulePath"), C("模块路径（如C:\\Windows\\notepad.exe）"), modulePathUtf8, sizeof(modulePathUtf8));
