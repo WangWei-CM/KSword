@@ -2,6 +2,16 @@
 static float SelectedWindowAlpha = 1.0f;
 static bool showPointerWindowDetail = false;
 extern LPDIRECT3DTEXTURE9 GetCachedProcessIcon(DWORD pid);
+
+// 你现在看到的是困扰了开发者两个世纪的头号难题。今天，2025-09-20，一个伟大的日子，伟大的WangWei_CM.终于解决了这个问题。
+// 切换到不同桌面的时候，Dx9纹理可能失效，因此要特殊判断。
+extern LPDIRECT3DDEVICE9    g_pd3dDevice;
+static bool IsDeviceValid(LPDIRECT3DDEVICE9 device) {
+    if (!device) return false;
+    return device->TestCooperativeLevel() == D3D_OK;
+}
+
+
 static inline BOOL CALLBACK EnumWorkerWProc(_In_ HWND hwndWorkerW, _In_ LPARAM lParam) {
     char className[256] = { 0 };
     GetClassNameA(hwndWorkerW, className, sizeof(className));
@@ -184,6 +194,26 @@ inline void RenderPointerWindowInfo(HWND hwnd) {
     }
 }static    HWND hwnd = NULL;
     ImVec2 mouse_pos = {};
+    static
+        HDESK hDesk = GetThreadDesktop(GetCurrentThreadId());
+
+static bool IsCurrentDesktop() {
+    HDESK currentDesk = GetThreadDesktop(GetCurrentThreadId());
+    if (!currentDesk) return false;
+
+    // 获取当前桌面名称
+    DWORD needed = 0;
+    GetUserObjectInformationA(currentDesk, UOI_NAME, NULL, 0, &needed);
+    if (needed == 0) return false;
+
+    std::vector<char> name(needed);
+    if (!GetUserObjectInformationA(currentDesk, UOI_NAME, name.data(), needed, &needed))
+        return false;
+
+    // 检查是否为默认桌面
+    return strcmp(name.data(), "Default") == 0;
+}
+
 extern void PointerWindow() {
     POINT mouse_pos_windows;
 
@@ -264,14 +294,15 @@ extern void PointerWindow() {
             GetWindowThreadProcessId(hwnd, &pid);
             ImGui::Text(GBKtoUTF8("   %d").c_str(), pid); ImGui::SameLine();
 
-
-            LPDIRECT3DTEXTURE9 pTexture = GetCachedProcessIcon(pid);
-            if (pTexture) {
-                // ImGui::Image参数：纹理指针（转换为ImTextureID）、尺寸
-                ImGui::Image(
-                    (ImTextureID)pTexture,  // DX9纹理指针直接作为ImTextureID
-                    ImVec2(16, 16)          // 16×16显示尺寸
-                );
+            if (hDesk == GetThreadDesktop(GetCurrentThreadId()) && IsCurrentDesktop) {
+                LPDIRECT3DTEXTURE9 pTexture = GetCachedProcessIcon(pid);
+                if (pTexture && IsDeviceValid(g_pd3dDevice)) {
+                    // ImGui::Image参数：纹理指针（转换为ImTextureID）、尺寸
+                    ImGui::Image(
+                        (ImTextureID)pTexture,  // DX9纹理指针直接作为ImTextureID
+                        ImVec2(16, 16)          // 16×16显示尺寸
+                    );
+                }
             }
 			ImGui::SameLine();
             if(ImGui::Button(("+"), ImVec2(16, 16))) {
