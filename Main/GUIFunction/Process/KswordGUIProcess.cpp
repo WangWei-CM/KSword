@@ -70,6 +70,7 @@ static bool KswordProcessTabInited = false;
 // 全局状态
 static std::vector<kProcess> dummy_processes;
 
+static void ReleaseIconTextures();
 
 // 从文件路径提取16×16图标（返回HICON，需手动释放）
 HICON Get16x16IconFromPath(const std::wstring& path) {
@@ -204,8 +205,25 @@ LPDIRECT3DTEXTURE9 IconToD3D9Texture(HICON hIcon) {
     CloseHandle(hProcess);
     return szPath;
 }
-
+static bool IsDeviceValid(LPDIRECT3DDEVICE9 device) {
+    if (!device) return false;
+    HRESULT hr = device->TestCooperativeLevel();
+    return (hr == D3D_OK || hr == D3DERR_DEVICENOTRESET);
+}
+static 
+HDESK hDesk = GetThreadDesktop(GetCurrentThreadId());
+extern LPDIRECT3DDEVICE9    g_pd3dDevice;
 LPDIRECT3DTEXTURE9 GetCachedProcessIcon(DWORD pid) {
+    HRESULT hr = g_pd3dDevice->TestCooperativeLevel();
+    if (hr == D3DERR_DEVICELOST) {
+        // 设备丢失，清理所有缓存的纹理
+        ReleaseIconTextures();
+        return NULL;
+    }
+    else if (hr == D3DERR_DEVICENOTRESET) {
+        // 设备需要重置，返回NULL
+        return NULL;
+    }
     // 检查缓存，存在则直接返回
     auto it = g_ProcessIconTextures.find(pid);
     if (it != g_ProcessIconTextures.end()) {
@@ -215,7 +233,7 @@ LPDIRECT3DTEXTURE9 GetCachedProcessIcon(DWORD pid) {
 
     // 不存在则创建并缓存
 
-	//OutputDebugStringA("缓存未命中\n");
+    //OutputDebugStringA("缓存未命中\n");
     std::wstring path = GetProcessPathByPID(pid);
     HICON hIcon = Get16x16IconFromPath(path);
     LPDIRECT3DTEXTURE9 pTexture = nullptr;
@@ -228,6 +246,8 @@ LPDIRECT3DTEXTURE9 GetCachedProcessIcon(DWORD pid) {
     g_ProcessIconTextures[pid] = pTexture;
     return pTexture;
 }
+
+
 
 bool SelectExecutableFile(wchar_t* outPath, size_t maxLen) {
     OPENFILENAMEW ofn = { sizeof(OPENFILENAMEW) };

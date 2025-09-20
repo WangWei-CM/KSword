@@ -44,7 +44,7 @@ bool DeleteReleasedGUIINIFile();
 bool DeleteReleasedD3DX9DLLFile();
 // Data
 static LPDIRECT3D9              g_pD3D = nullptr;
-/*static*/ LPDIRECT3DDEVICE9        g_pd3dDevice = nullptr;
+/*static*/ LPDIRECT3DDEVICE9    g_pd3dDevice = nullptr;
 static bool                     g_DeviceLost = false;
 static UINT                     g_ResizeWidth = 0, g_ResizeHeight = 0;
 static D3DPRESENT_PARAMETERS    g_d3dpp = {};
@@ -404,10 +404,11 @@ private:
             bool window_collapsed = 0;
             ImGui::NewFrame();
             if(!EasyMode)
-            RenderPrepareUIFrame();
+                RenderPrepareUIFrame();
             else
 				RenderEasyModeFrame();
             ImGui::EndFrame();
+
             g_pd3dDevice->SetRenderState(D3DRS_ZENABLE, FALSE);
             g_pd3dDevice->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
             g_pd3dDevice->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
@@ -446,7 +447,8 @@ private:
         if (luminance < 0.5f)m_editor.SetPalette(
             TextEditor::GetDarkPalette());
         else m_editor.SetPalette(TextEditor::GetLightPalette());
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f); {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+ {
             Ksword5Title();
             if (KswordShowPointerWindow)
                 PointerWindow();
@@ -454,134 +456,131 @@ private:
             if (KswordShowNotpadWindow) m_editor.Render("TextEditor", ImVec2(0, 0), true);
 
 
-            ImGui::Begin("Ksword 5 Dever", nullptr
-                //ImGuiWindowFlags_NoCollapse |
-                //ImGuiWindowFlags_NoBackground /*|*/
-            //ImGuiWindowFlags_NoSavedSettings
-            );
-            // 绘制背景
-            // 在ImGui渲染循环中
-            ImVec2 window_size = ImGui::GetContentRegionAvail();
-
-            if (my_texture) {
-                ImVec4 tint_color = ImVec4(1.0f, 1.0f, 1.0f, 0.5f); // RGB=白色, Alpha=0.3
-                ImVec2 window_size = ImGui::GetContentRegionAvail();
-                window_size.x += 40;
-                window_size.y += 40;
-                // 计算图片原始宽高比
-                float image_aspect = (float)my_image_width / (float)my_image_height;
-                // 计算窗口宽高比
-                float window_aspect = window_size.x / window_size.y;
-                // 计算覆盖填充的裁剪尺寸
-                ImVec2 display_size;
-                if (window_aspect > image_aspect) {
-                    // 窗口更宽 -> 按宽度填充，高度裁剪
-                    display_size.x = window_size.x;
-                    display_size.y = window_size.x / image_aspect;  // 图片高度需要扩展
-                    // 超出窗口高度的部分会被裁剪
-                }
-                else {
-                    // 窗口更高 -> 按高度填充，宽度裁剪
-                    display_size.y = window_size.y;
-                    display_size.x = window_size.y * image_aspect;  // 图片宽度需要扩展
-                    // 超出窗口宽度的部分会被裁剪
-                }
-                // 计算偏移量（使裁剪居中）
-                ImVec2 offset = ImVec2(
-                    (display_size.x - window_size.x) * 0.5f,
-                    (display_size.y - window_size.y) * 0.5f
-                );
-                // 反转偏移量得到UV坐标
-                ImVec2 uv0 = ImVec2( 
-                    offset.x > 0 ? offset.x / display_size.x : 0.0f,
-                    offset.y > 0 ? offset.y / display_size.y : 0.0f
-                );
-                ImVec2 uv1 = ImVec2(
-                    offset.x > 0 ? 1.0f - offset.x / display_size.x : 1.0f,
-                    offset.y > 0 ? 1.0f - offset.y / display_size.y : 1.0f
-                );
-                // 使用完整的窗口大小绘制图片（自动裁剪超出部分）
-                ImGui::SetCursorPos(ImVec2(0, 0));
-                ImGui::Image(
-                    (ImTextureID)(intptr_t)my_texture,
-                    window_size,   // 使用窗口尺寸（裁剪效果来源于此）
-                    uv0,           // UV起始坐标（定义裁剪区域）
-                    uv1,            // UV结束坐标（定义裁剪区域）
-                    tint_color,
-                    ImVec4(0, 0, 0, 0)
-                );
-            }
-            ImGui::SetCursorPos(ImVec2(0, 30)); // 重置到同一位置
-
-            if (ImGui::BeginTabBar(C("MainTabs")))
+            ImGui::Begin("Ksword 5 Dever", nullptr);
             {
-                if (ImGui::BeginTabItem(C("欢迎")))
-                {
-                    KswordLogo5();
-                    KswordGUIShowStatus();
-                    ImGui::EndTabItem();
-                }
-                if (ImGui::BeginTabItem(C("进程")))
-                {
-                    KswordGUIProcess();
-                }
-                if (ImGui::BeginTabItem(C("监控")))
-                {
-                    ETWMonitorMain();
-                    KswordMonitorMain();
-                    ImGui::EndTabItem();
-                }
-                if(ImGui::BeginTabItem(C("文件")))
-                {
-                    KswordFile();
-				}
-                if (ImGui::BeginTabItem(C("网络")))
-                {
-                    KswordNetworkMain();
-                }
-                if (ImGui::BeginTabItem(C("DLL")))
-                {
-                    KswordDLLMain();
-                }
-                if (ImGui::BeginTabItem(C("内存")))
-                {
-                    KswordMemoryMain();
-                }
-                if (ImGui::BeginTabItem(C("注册表")))
-                {
-                    KswordRegMain();
-                }
-                if (ImGui::BeginTabItem(C("内核")))
-                {
-                    KswordNTMain();
-                }
-                if (ImGui::BeginTabItem("Test"))
-                {
-                    ImGui::Text(C("增加日志信息"));
-                    if (ImGui::Button("Debug"))kLog.Add(Debug, C("测试消息类型Debug"), C("测试")); ImGui::SameLine();
-                    if (ImGui::Button("Info"))kLog.Add(Info, C("测试消息类型Info"), C("测试")); ImGui::SameLine();
-                    if (ImGui::Button("Warn"))kLog.Add(Warn, C("测试消息类型Warn"),C("测试")); ImGui::SameLine();
-                    if (ImGui::Button("Err"))kLog.Add(Err, C("测试消息类型Err"), C("测试")); ImGui::SameLine();
-                    if (ImGui::Button("Fatal"))kLog.Add(Fatal, C("测试消息类型Fatal"), C("测试")); ImGui::SameLine();
+                // 绘制背景
+                // 在ImGui渲染循环中
+                ImVec2 window_size = ImGui::GetContentRegionAvail();
 
-                    ImGui::EndTabItem();
+                if (my_texture) {
+                    ImVec4 tint_color = ImVec4(1.0f, 1.0f, 1.0f, 0.5f); // RGB=白色, Alpha=0.3
+                    ImVec2 window_size = ImGui::GetContentRegionAvail();
+                    window_size.x += 40;
+                    window_size.y += 40;
+                    // 计算图片原始宽高比
+                    float image_aspect = (float)my_image_width / (float)my_image_height;
+                    // 计算窗口宽高比
+                    float window_aspect = window_size.x / window_size.y;
+                    // 计算覆盖填充的裁剪尺寸
+                    ImVec2 display_size;
+                    if (window_aspect > image_aspect) {
+                        // 窗口更宽 -> 按宽度填充，高度裁剪
+                        display_size.x = window_size.x;
+                        display_size.y = window_size.x / image_aspect;  // 图片高度需要扩展
+                        // 超出窗口高度的部分会被裁剪
+                    }
+                    else {
+                        // 窗口更高 -> 按高度填充，宽度裁剪
+                        display_size.y = window_size.y;
+                        display_size.x = window_size.y * image_aspect;  // 图片宽度需要扩展
+                        // 超出窗口宽度的部分会被裁剪
+                    }
+                    // 计算偏移量（使裁剪居中）
+                    ImVec2 offset = ImVec2(
+                        (display_size.x - window_size.x) * 0.5f,
+                        (display_size.y - window_size.y) * 0.5f
+                    );
+                    // 反转偏移量得到UV坐标
+                    ImVec2 uv0 = ImVec2(
+                        offset.x > 0 ? offset.x / display_size.x : 0.0f,
+                        offset.y > 0 ? offset.y / display_size.y : 0.0f
+                    );
+                    ImVec2 uv1 = ImVec2(
+                        offset.x > 0 ? 1.0f - offset.x / display_size.x : 1.0f,
+                        offset.y > 0 ? 1.0f - offset.y / display_size.y : 1.0f
+                    );
+                    // 使用完整的窗口大小绘制图片（自动裁剪超出部分）
+                    ImGui::SetCursorPos(ImVec2(0, 0));
+                    ImGui::Image(
+                        (ImTextureID)(intptr_t)my_texture,
+                        window_size,   // 使用窗口尺寸（裁剪效果来源于此）
+                        uv0,           // UV起始坐标（定义裁剪区域）
+                        uv1,            // UV结束坐标（定义裁剪区域）
+                        tint_color,
+                        ImVec4(0, 0, 0, 0)
+                    );
                 }
+                ImGui::SetCursorPos(ImVec2(0, 30)); // 重置到同一位置
 
-                // Exit 标签（带退出功能）
-                if (ImGui::BeginTabItem("Exit"))
+                if (ImGui::BeginTabBar(C("MainTabs")))
                 {
-                    Ksword_main_should_exit = true;
-                    ImGui::EndTabItem();
+                    if (ImGui::BeginTabItem(C("欢迎")))
+                    {
+                        KswordLogo5();
+                        KswordGUIShowStatus();
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem(C("进程")))
+                    {
+                        KswordGUIProcess();
+                    }
+                    if (ImGui::BeginTabItem(C("监控")))
+                    {
+                        ETWMonitorMain();
+                        KswordMonitorMain();
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem(C("文件")))
+                    {
+                        KswordFile();
+                    }
+                    if (ImGui::BeginTabItem(C("网络")))
+                    {
+                        KswordNetworkMain();
+                    }
+                    if (ImGui::BeginTabItem(C("DLL")))
+                    {
+                        KswordDLLMain();
+                    }
+                    if (ImGui::BeginTabItem(C("内存")))
+                    {
+                        KswordMemoryMain();
+                    }
+                    if (ImGui::BeginTabItem(C("注册表")))
+                    {
+                        KswordRegMain();
+                    }
+                    if (ImGui::BeginTabItem(C("内核")))
+                    {
+                        KswordNTMain();
+                    }
+                    if (ImGui::BeginTabItem("Test"))
+                    {
+                        ImGui::Text(C("增加日志信息"));
+                        if (ImGui::Button("Debug"))kLog.Add(Debug, C("测试消息类型Debug"), C("测试")); ImGui::SameLine();
+                        if (ImGui::Button("Info"))kLog.Add(Info, C("测试消息类型Info"), C("测试")); ImGui::SameLine();
+                        if (ImGui::Button("Warn"))kLog.Add(Warn, C("测试消息类型Warn"), C("测试")); ImGui::SameLine();
+                        if (ImGui::Button("Err"))kLog.Add(Err, C("测试消息类型Err"), C("测试")); ImGui::SameLine();
+                        if (ImGui::Button("Fatal"))kLog.Add(Fatal, C("测试消息类型Fatal"), C("测试")); ImGui::SameLine();
+
+                        ImGui::EndTabItem();
+                    }
+
+                    // Exit 标签（带退出功能）
+                    if (ImGui::BeginTabItem("Exit"))
+                    {
+                        Ksword_main_should_exit = true;
+                        ImGui::EndTabItem();
+                    }
+
+                    ImGui::EndTabBar();
                 }
 
-                ImGui::EndTabBar();
+                if (Ksword_main_should_exit)
+                    m_mainWindowClosed = true;
+
+                ImGui::End();
             }
-
-            if (Ksword_main_should_exit)
-                m_mainWindowClosed = true;
-
-            ImGui::End();
-
             //日志窗口
             if (KswordShowLogWindow) {
                 kLog.Draw();
@@ -665,6 +664,7 @@ private:
         if (hr == D3DERR_INVALIDCALL)
             IM_ASSERT(0);
         ImGui_ImplDX9_CreateDeviceObjects();
+
     }
 
     // Win32 message handler
