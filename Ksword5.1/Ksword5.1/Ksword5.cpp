@@ -1,4 +1,4 @@
-#include "Ksword5.h"
+﻿#include "Ksword5.h"
 
 Ksword5::Ksword5(QWidget *parent)
     : QMainWindow(parent)
@@ -8,4 +8,3 @@ Ksword5::Ksword5(QWidget *parent)
 
 Ksword5::~Ksword5()
 {}
-

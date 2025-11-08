@@ -15,8 +15,7 @@
     <Keyword>QtVS_v304</Keyword>
     <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">10.0</WindowsTargetPlatformVersion>
     <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">10.0</WindowsTargetPlatformVersion>
-    <QtMsBuild Condition="'$(QtMsBuild)'=='' OR !Exists('$(QtMsBuild)\qt.targets')"
-      >$(MSBuildProjectDirectory)\QtMsBuild</QtMsBuild>
+    <QtMsBuild Condition="'$(QtMsBuild)'=='' OR !Exists('$(QtMsBuild)\qt.targets')">$(MSBuildProjectDirectory)\QtMsBuild</QtMsBuild>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
@@ -38,19 +37,16 @@
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
     <QtInstall>Qt</QtInstall>
-    <QtModules>core;gui;widgets</QtModules>
+    <QtModules>core;gui;network;widgets;charts</QtModules>
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
     <QtInstall>Qt</QtInstall>
-    <QtModules>core;gui;widgets</QtModules>
+    <QtModules>core;gui;widgets;charts</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
-  <Target Name="QtMsBuildNotFound"
-    BeforeTargets="CustomBuild;ClCompile"
-    Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
-    <Message Importance="High"
-      Text="QtMsBuild: could not locate qt.targets, qt.props; project may not build correctly." />
+  <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
+    <Message Importance="High" Text="QtMsBuild: could not locate qt.targets, qt.props; project may not build correctly." />
   </Target>
   <ImportGroup Label="ExtensionSettings" />
   <ImportGroup Label="Shared" />
@@ -67,6 +63,22 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
   </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <LanguageStandard>stdcpp23</LanguageStandard>
+      <Optimization>MinSpace</Optimization>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <LanguageStandard>stdcpp23</LanguageStandard>
+      <Optimization>MinSpace</Optimization>
+      <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
     <ClCompile>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -96,12 +108,52 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <QtRcc Include="Ksword5.qrc"/>
-    <QtUic Include="Ksword5.ui"/>
-    <QtMoc Include="Ksword5.h"/>
-    <ClCompile Include="Ksword5.cpp"/>
-    <ClCompile Include="main.cpp"/>
-
+    <ClCompile Include="DriverDock\DriverDock.cpp" />
+    <ClCompile Include="FileDock\FileDock.cpp" />
+    <ClCompile Include="KernelDock\KernelDock.cpp" />
+    <ClCompile Include="MainWindow.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDock.cpp" />
+    <ClCompile Include="MonitorDock\MonitorDock.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.cpp" />
+    <ClCompile Include="OtherDock\OtherDock.cpp" />
+    <ClCompile Include="PrivilegeDock\PrivilegeDock.cpp" />
+    <ClCompile Include="ProcessDock\ProcessDock.cpp" />
+    <ClCompile Include="ProcessDock\Process_Tool.cpp" />
+    <ClCompile Include="SettingsDock\SettingsDock.cpp" />
+    <ClCompile Include="UI\UIBaseFunction.cpp" />
+    <ClCompile Include="WelcomeDock\WelcomeDock.cpp" />
+    <QtRcc Include="Ksword5.qrc" />
+    <QtUic Include="Ksword5.ui" />
+    <QtMoc Include="Ksword5.h" />
+    <QtMoc Include="Ksword5.cpp">
+      <DynamicSource Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">input</DynamicSource>
+      <QtMocFileName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">%(Filename).moc</QtMocFileName>
+      <DynamicSource Condition="'$(Configuration)|$(Platform)'=='Release|x64'">input</DynamicSource>
+      <QtMocFileName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">%(Filename).moc</QtMocFileName>
+    </QtMoc>
+    <ClCompile Include="main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <QtMoc Include="MainWindow.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="UI\UI_All.h" />
+    <QtMoc Include="DriverDock\DriverDock.h" />
+    <QtMoc Include="FileDock\FileDock.h" />
+    <QtMoc Include="KernelDock\KernelDock.h" />
+    <QtMoc Include="MemoryDock\MemoryDock.h" />
+    <QtMoc Include="MonitorDock\MonitorDock.h" />
+    <QtMoc Include="NetworkDock\NetworkDock.h" />
+    <QtMoc Include="OtherDock\OtherDock.h" />
+    <QtMoc Include="PrivilegeDock\PrivilegeDock.h" />
+    <QtMoc Include="ProcessDock\ProcessDock.h" />
+    <QtMoc Include="SettingsDock\SettingsDock.h" />
+    <ClInclude Include="ProcessDock\Process_Tool.h" />
+    <ClInclude Include="UI\UI.css\UI_css.h" />
+    <QtMoc Include="WelcomeDock\WelcomeDock.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="qtvars.pro" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">
