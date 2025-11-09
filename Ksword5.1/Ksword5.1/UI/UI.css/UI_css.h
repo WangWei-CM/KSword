@@ -1,47 +1,47 @@
-#pragma once
+ï»¿#pragma once
 #include <QString>
 #include <qstring.h>
-
 const QString QSS_MainWindow_TabWidget = R"(
-        /* ±êÇ©Ò³ÈİÆ÷ÑùÊ½ - °×É«±³¾° */
+        /* æ ‡ç­¾é¡µå®¹å™¨æ ·å¼ - ç™½è‰²èƒŒæ™¯ */
+
         QTabWidget::pane {
-            border: 1px solid #E0E0E0;  /* Ç³É«±ß¿òÔöÇ¿²ã´Î¸Ğ */
-            background-color: white;    /* °×É«±³¾° */
-            top: -1px;                  /* Ïû³ı±ß¿ò¼äÏ¶ */
-            border-radius: 0px;         /* È«·½½Ç */
+            border: 1px solid #E0E0E0;  /* æµ…è‰²è¾¹æ¡†å¢å¼ºå±‚æ¬¡æ„Ÿ */
+            background-color: white;    /* ç™½è‰²èƒŒæ™¯ */
+            top: -1px;                  /* æ¶ˆé™¤è¾¹æ¡†é—´éš™ */
+            border-radius: 0px;         /* å…¨æ–¹è§’ */
         }
 
-        /* ±êÇ©À¸ÑùÊ½ */
+        /* æ ‡ç­¾æ æ ·å¼ */
         QTabBar {
-            background-color: white;    /* ±êÇ©À¸°×É«±³¾° */
+            background-color: white;    /* æ ‡ç­¾æ ç™½è‰²èƒŒæ™¯ */
             border-bottom: 1px solid #E0E0E0;
         }
 
-        /* Î´Ñ¡ÖĞ±êÇ©ÑùÊ½ */
+        /* æœªé€‰ä¸­æ ‡ç­¾æ ·å¼ */
         QTabBar::tab {
-            background-color: white;    /* ±êÇ©°×É«±³¾° */
-            color: #666666;             /* »ÒÉ«ÎÄ×Ö */
-            padding: 8px 16px;          /* ÄÚ±ß¾à */
-            margin-right: 1px;          /* ±êÇ©¼ä¼äÏ¶ */
-            border: 1px solid transparent;  /* Í¸Ã÷±ß¿ò */
-            border-radius: 0px;         /* È«·½½Ç */
+            background-color: white;    /* æ ‡ç­¾ç™½è‰²èƒŒæ™¯ */
+            color: #666666;             /* ç°è‰²æ–‡å­— */
+            padding: 8px 16px;          /* å†…è¾¹è· */
+            margin-right: 1px;          /* æ ‡ç­¾é—´é—´éš™ */
+            border: 1px solid transparent;  /* é€æ˜è¾¹æ¡† */
+            border-radius: 0px;         /* å…¨æ–¹è§’ */
         }
 
-        /* Ñ¡ÖĞ±êÇ©ÑùÊ½ - Ö÷ÌâÉ«#43A0FF */
+        /* é€‰ä¸­æ ‡ç­¾æ ·å¼ - ä¸»é¢˜è‰²#43A0FF */
         QTabBar::tab:selected {
-            color: #43A0FF;             /* Ö÷ÌâÉ«ÎÄ×Ö */
-            border-bottom: 2px solid #43A0FF;  /* µ×²¿Ö÷ÌâÉ«¸ßÁÁÌõ */
+            color: #43A0FF;             /* ä¸»é¢˜è‰²æ–‡å­— */
+            border-bottom: 2px solid #43A0FF;  /* åº•éƒ¨ä¸»é¢˜è‰²é«˜äº®æ¡ */
         }
 
-        /* ±êÇ©ĞüÍ£Ğ§¹û */
+        /* æ ‡ç­¾æ‚¬åœæ•ˆæœ */
         QTabBar::tab:hover:!selected {
-            color: #43A0FF;             /* ĞüÍ£Ê±Ö÷ÌâÉ«ÎÄ×Ö */
+            color: #43A0FF;             /* æ‚¬åœæ—¶ä¸»é¢˜è‰²æ–‡å­— */
             border-bottom: 1px solid #E0E0E0;
         }
 
-        /* ¹Ø±Õ°´Å¥ÑùÊ½ */
+        /* å…³é—­æŒ‰é’®æ ·å¼ */
         QTabBar::close-button {
-            image: url(:/icons/close_normal.png);  /* ¿ÉÌæ»»Îª×Ô¶¨Òå¹Ø±ÕÍ¼±ê */
+            image: url(:/icons/close_normal.png);  /* å¯æ›¿æ¢ä¸ºè‡ªå®šä¹‰å…³é—­å›¾æ ‡ */
             subcontrol-position: right;
             subcontrol-origin: margin;
             width: 16px;
@@ -50,12 +50,13 @@ const QString QSS_MainWindow_TabWidget = R"(
         }
 
         QTabBar::close-button:hover {
-            image: url(:/icons/close_hover.png);   /* ĞüÍ£×´Ì¬¹Ø±ÕÍ¼±ê */
+            image: url(:/icons/close_hover.png);   /* æ‚¬åœçŠ¶æ€å…³é—­å›¾æ ‡ */
         }
     )"
     ;
 const QString QSS_MainWindow_dockStyle = R"(
-    /* Í£¿¿´°¿ÚÕûÌåÑùÊ½ */
+
+    /* åœé çª—å£æ•´ä½“æ ·å¼ */
     QDockWidget {
         border: 1px solid #E0E0E0;
         border-radius: 2px;
@@ -63,28 +64,28 @@ const QString QSS_MainWindow_dockStyle = R"(
         background-color: white;
     }
 
-    /* ±êÌâÀ¸»ù´¡ÑùÊ½ - ÓëÖ÷ÌâÉ«Ğ­µ÷ */
+    /* æ ‡é¢˜æ æ ·å¼ - å¼ºåˆ¶æ–‡å­—ä¸ºä¸»é¢˜è‰² */
     QDockWidget::title {
         background-color: white;
-        color: #666666; /* Î´Ñ¡ÖĞÊ±Óë±êÇ©Ò³±£³ÖÒ»ÖÂ */
+        color: #43A0FF !important; /* ä¸»é¢˜è‰²è“è‰²ï¼Œ!important ç¡®ä¿è¦†ç›–å…¶ä»–æ ·å¼ */
         padding: 6px 10px;
         border-bottom: 1px solid #E0E0E0;
         font-weight: 500;
     }
 
-    /* ¾Û¼¯Ê±Ñ¡ÖĞµÄ±êÌâÀ¸ - Í»³öÖ÷ÌâÉ« */
+    /* èšé›†æ—¶é€‰ä¸­çš„æ ‡é¢˜æ  - çªå‡ºä¸»é¢˜è‰² */
     QDockWidget::title:checked {
-        color: #43A0FF; /* Ö÷ÌâÉ« */
-        border-bottom: 2px solid #43A0FF; /* ¼Ó´ÖÖ÷ÌâÉ«ÏÂ»®Ïß */
+        color: #43A0FF; /* ä¸»é¢˜è‰² */
+        border-bottom: 2px solid #43A0FF; /* åŠ ç²—ä¸»é¢˜è‰²ä¸‹åˆ’çº¿ */
     }
 
-    /* ¾Û¼¯±êÇ©À¸ÕûÌåÑùÊ½ */
+    /* èšé›†æ ‡ç­¾æ æ•´ä½“æ ·å¼ */
     QDockWidget::tab-bar {
         background-color: white;
         border-bottom: 1px solid #E0E0E0;
     }
 
-    /* ¾Û¼¯Ê±Î´Ñ¡ÖĞ±êÇ© */
+    /* èšé›†æ—¶æœªé€‰ä¸­æ ‡ç­¾ */
     QDockWidget::tab {
         color: #666666;
         padding: 6px 16px;
@@ -92,34 +93,34 @@ const QString QSS_MainWindow_dockStyle = R"(
         border-bottom: 2px solid transparent;
     }
 
-    /* ¾Û¼¯Ê±Ñ¡ÖĞ±êÇ© - Ç¿»¯Ö÷ÌâÉ« */
+    /* èšé›†æ—¶é€‰ä¸­æ ‡ç­¾ - å¼ºåŒ–ä¸»é¢˜è‰² */
     QDockWidget::tab:selected {
-        color: #43A0FF; /* Ö÷ÌâÉ«ÎÄ×Ö */
-        border-bottom: 2px solid #43A0FF; /* Ö÷ÌâÉ«ÏÂ»®Ïß */
-        background-color: #F0F7FF; /* Ö÷ÌâÉ«Ç³É«±³¾° */
+        color: #43A0FF; /* ä¸»é¢˜è‰²æ–‡å­— */
+        border-bottom: 2px solid #43A0FF; /* ä¸»é¢˜è‰²ä¸‹åˆ’çº¿ */
+        background-color: #F0F7FF; /* ä¸»é¢˜è‰²æµ…è‰²èƒŒæ™¯ */
     }
 
-    /* ±êÇ©ĞüÍ£Ğ§¹û */
+    /* æ ‡ç­¾æ‚¬åœæ•ˆæœ */
     QDockWidget::tab:hover:!selected {
         color: #43A0FF;
         background-color: #F5F9FF;
     }
 
-    /* ÄÚÈİÇøÓòÑùÊ½ */
+    /* å†…å®¹åŒºåŸŸæ ·å¼ */
     QDockWidget > QWidget {
         background-color: white;
         border: none;
     }
 
-    /* ÊÖ±úÑùÊ½ - ¼ÓÈëÖ÷ÌâÉ«·´À¡ */
+    /* æ‰‹æŸ„æ ·å¼ - åŠ å…¥ä¸»é¢˜è‰²åé¦ˆ */
     QDockWidget::handle {
         background-color: #F5F5F5;
     }
     QDockWidget::handle:hover {
-        background-color: #E8F0FF; /* Ö÷ÌâÉ«Ç³É«±äÌå */
+        background-color: #E8F0FF; /* ä¸»é¢˜è‰²æµ…è‰²å˜ä½“ */
     }
 
-    /* °´Å¥ÑùÊ½ - Ö÷ÌâÉ«½»»¥·´À¡ */
+    /* æŒ‰é’®æ ·å¼ - ä¸»é¢˜è‰²äº¤äº’åé¦ˆ */
     QDockWidget::close-button,
     QDockWidget::float-button {
         width: 16px;
@@ -131,48 +132,48 @@ const QString QSS_MainWindow_dockStyle = R"(
     }
 
 
-    /* ¾Û¼¯±êÇ©À¸ÕûÌåÑùÊ½ */
+    /* èšé›†æ ‡ç­¾æ æ•´ä½“æ ·å¼ */
     QDockWidget::tab-bar {
         background-color: white;
-        border-bottom: 1px solid #E0E0E0; /* ÓëÖĞÑë±êÇ©À¸µ×²¿±ß¿òÒ»ÖÂ */
+        border-bottom: 1px solid #E0E0E0; /* ä¸ä¸­å¤®æ ‡ç­¾æ åº•éƒ¨è¾¹æ¡†ä¸€è‡´ */
     }
 
-    /* ¾Û¼¯Ê±Î´Ñ¡ÖĞ±êÇ© */
+    /* èšé›†æ—¶æœªé€‰ä¸­æ ‡ç­¾ */
     QDockWidget::tab {
         color: #666666;
-        padding: 6px 16px; /* ÓëÖĞÑë±êÇ©Ò³ÄÚ±ß¾àÆ¥Åä */
+        padding: 6px 16px; /* ä¸ä¸­å¤®æ ‡ç­¾é¡µå†…è¾¹è·åŒ¹é… */
         margin-right: 1px;
         border-bottom: 2px solid transparent;
     }
 
-    /* ¾Û¼¯Ê±Ñ¡ÖĞ±êÇ© */
+    /* èšé›†æ—¶é€‰ä¸­æ ‡ç­¾ */
     QDockWidget::tab:selected {
-        color: #43A0FF; /* Ö÷ÌâÉ«ÎÄ×Ö */
-        border-bottom: 2px solid #43A0FF; /* Ö÷ÌâÉ«ÏÂ»®Ïß */
-        background-color: #F0F7FF; /* Ö÷ÌâÉ«Ç³É«±³¾°£¬ÔöÇ¿Çø·Ö¶È */
+        color: #43A0FF; /* ä¸»é¢˜è‰²æ–‡å­— */
+        border-bottom: 2px solid #43A0FF; /* ä¸»é¢˜è‰²ä¸‹åˆ’çº¿ */
+        background-color: #F0F7FF; /* ä¸»é¢˜è‰²æµ…è‰²èƒŒæ™¯ï¼Œå¢å¼ºåŒºåˆ†åº¦ */
     }
 
-    /* ±êÇ©ĞüÍ£Ğ§¹û£¨Î´Ñ¡ÖĞÊ±£© */
+    /* æ ‡ç­¾æ‚¬åœæ•ˆæœï¼ˆæœªé€‰ä¸­æ—¶ï¼‰ */
     QDockWidget::tab:hover:!selected {
         color: #43A0FF;
-        background-color: #F5F9FF; /* ±ÈÑ¡ÖĞ×´Ì¬¸üÇ³µÄ±³¾° */
+        background-color: #F5F9FF; /* æ¯”é€‰ä¸­çŠ¶æ€æ›´æµ…çš„èƒŒæ™¯ */
     }
 
-    /* ÄÚÈİÇøÓòÑùÊ½ */
+    /* å†…å®¹åŒºåŸŸæ ·å¼ */
     QDockWidget > QWidget {
         background-color: white;
         border: none;
     }
 
-    /* ÊÖ±úÑùÊ½ */
+    /* æ‰‹æŸ„æ ·å¼ */
     QDockWidget::handle {
         background-color: #F5F5F5;
     }
     QDockWidget::handle:hover {
-        background-color: #E8F0FF; /* Ö÷ÌâÉ«ÑÜÉúÉ«£¬ÔöÇ¿½»»¥·´À¡ */
+        background-color: #E8F0FF; /* ä¸»é¢˜è‰²è¡ç”Ÿè‰²ï¼Œå¢å¼ºäº¤äº’åé¦ˆ */
     }
 
-    /* ¹Ø±Õ/¸¡¶¯°´Å¥ÑùÊ½ */
+    /* å…³é—­/æµ®åŠ¨æŒ‰é’®æ ·å¼ */
     QDockWidget::close-button,
     QDockWidget::float-button {
         width: 16px;
@@ -180,38 +181,107 @@ const QString QSS_MainWindow_dockStyle = R"(
         subcontrol-origin: padding;
         subcontrol-position: right;
         margin-right: 6px;
-        border-radius: 3px; /* ÇáÎ¢Ô²½Ç£¬ÔöÇ¿µã»÷¸Ğ */
+        border-radius: 3px; /* è½»å¾®åœ†è§’ï¼Œå¢å¼ºç‚¹å‡»æ„Ÿ */
     }
 
     QDockWidget::close-button:hover,
     QDockWidget::float-button:hover {
-        background-color: #E8F0FF; /* Ö÷ÌâÉ«±³¾°·´À¡ */
+        background-color: #E8F0FF; /* ä¸»é¢˜è‰²èƒŒæ™¯åé¦ˆ */
     }
 
     QDockWidget::close-button:hover,
     QDockWidget::float-button:hover {
-        background-color: #E8F0FF; /* Ö÷ÌâÉ«±³¾°·´À¡ */
+        background-color: #E8F0FF; /* ä¸»é¢˜è‰²èƒŒæ™¯åé¦ˆ */
     }
-QMainWindow QTabBar {  /* ÏŞ¶¨×÷ÓÃÓÚÖ÷´°¿ÚÄÚµÄ QTabBar£¨°üÀ¨Í£¿¿¾Û¼¯±êÇ©£© */
+QMainWindow QTabBar {  /* é™å®šä½œç”¨äºä¸»çª—å£å†…çš„ QTabBarï¼ˆåŒ…æ‹¬åœé èšé›†æ ‡ç­¾ï¼‰ */
     background-color: white;
     border-bottom: 1px solid #E0E0E0;
 }
 
-QMainWindow QTabBar::tab {  /* Í£¿¿¾Û¼¯µÄÎ´Ñ¡ÖĞ±êÇ© */
+QMainWindow QTabBar::tab {  /* åœé èšé›†çš„æœªé€‰ä¸­æ ‡ç­¾ */
     color: #666666;
     padding: 6px 16px;
     margin-right: 1px;
     border-bottom: 2px solid transparent;
 }
 
-QMainWindow QTabBar::tab:selected {  /* Í£¿¿¾Û¼¯µÄÑ¡ÖĞ±êÇ© */
+QMainWindow QTabBar::tab:selected {  /* åœé èšé›†çš„é€‰ä¸­æ ‡ç­¾ */
     color: #43A0FF;
     border-bottom: 2px solid #43A0FF;
     background-color: #F0F7FF;
 }
 
-QMainWindow QTabBar::tab:hover:!selected {  /* Í£¿¿¾Û¼¯±êÇ©µÄĞüÍ£Ğ§¹û */
+QMainWindow QTabBar::tab:hover:!selected {  /* åœé èšé›†æ ‡ç­¾çš„æ‚¬åœæ•ˆæœ */
     color: #43A0FF;
     background-color: #F5F9FF;
 }
+)";
+
+        // æµ…è‰²æŒ‰é’®ï¼šé»˜è®¤ç™½åº•è“å­— â†’ hover è“åº•ç™½å­—ï¼ˆæ·±è‰²æ ·å¼ï¼‰
+        const QString QSS_Buttons_Light = R"(
+    QPushButton {
+        background-color: white !important;
+        color: #43A0FF !important;
+        border: 1px solid #43A0FF !important;
+        padding: 6px 16px;
+        border-radius: 3px;
+        font-weight: 500;
+        outline: none; /* å»é™¤Tabç„¦ç‚¹è™šçº¿æ¡† */
+    }
+
+    /* hover åˆ‡æ¢ä¸ºæ·±è‰²æŒ‰é’®æ ·å¼ï¼ˆè“åº•ç™½å­—ï¼‰ */
+    QPushButton:hover {
+        background-color: #43A0FF !important;
+        color: white !important;
+        border-color: #43A0FF !important;
+    }
+
+    /* æŒ‰ä¸‹çŠ¶æ€ï¼šåœ¨ hover æ·±è‰²åŸºç¡€ä¸ŠåŠ æ·±èƒŒæ™¯ */
+    QPushButton:pressed {
+        background-color: #2880DD !important;
+        color: white !important;
+        padding-top: 7px;
+        padding-bottom: 5px;
+    }
+
+    QPushButton:disabled {
+        background-color: white !important;
+        color: #B3D1FF !important;
+        border: 1px solid #B3D1FF !important;
+        font-weight: normal;
+    }
+)";
+
+const QString QSS_Buttons_Dark = R"(
+    QPushButton {
+        background-color: #43A0FF !important;
+        color: white !important;
+        border: 1px solid #43A0FF !important;
+        padding: 6px 16px;
+        border-radius: 3px;
+        font-weight: 500;
+        outline: none; /* å»é™¤Tabç„¦ç‚¹è™šçº¿æ¡† */
+    }
+
+    /* hover åˆ‡æ¢ä¸ºæµ…è‰²æŒ‰é’®æ ·å¼ï¼ˆç™½åº•è“å­—ï¼‰ */
+    QPushButton:hover {
+        background-color: white !important;
+        color: #43A0FF !important;
+        border-color: #43A0FF !important;
+    }
+
+    /* æŒ‰ä¸‹çŠ¶æ€ï¼šåœ¨ hover æµ…è‰²åŸºç¡€ä¸ŠåŠ æ·±èƒŒæ™¯ */
+    QPushButton:pressed {
+        background-color: #E0E7FF !important;
+        color: #43A0FF !important;
+        padding-top: 7px;
+        padding-bottom: 5px;
+    }
+
+    QPushButton:disabled {
+        background-color: #B3D1FF !important;
+        color: white !important;
+        border: 1px solid #B3D1FF !important;
+        font-weight: normal;
+    }
 )";

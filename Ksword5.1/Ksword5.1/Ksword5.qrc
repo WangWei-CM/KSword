@@ -1,4 +1,6 @@
 <RCC>
-    <qresource prefix="Ksword5">
+    <qresource prefix="/Ksword5"/>
+    <qresource prefix="/Image">
+        <file>Resource/Logo/MainLogo.png</file>
     </qresource>
 </RCC>

@@ -1,14 +1,11 @@
-# 批量设置VS项目中头文件的自定义生成工具属性
-$projectPath = "Ksword5.1.vcxproj"  # 替换为实际项目文件路径
-$namespace = ""            # 若项目有命名空间可补充，否则留空
 
-# 读取项目文件
+$projectPath = "Ksword5.1.vcxproj"
+$namespace = ""
+
 [xml]$projXml = Get-Content $projectPath
 
-# 遍历所有头文件
 foreach ($item in $projXml.Project.ItemGroup.File) {
     if ($item.Include -like "*.h") {
-        # 创建CustomBuildTool节点
         $customBuild = $projXml.CreateElement("CustomBuild", $projXml.Project.XmlNamespaceURI)
         
         $command = $projXml.CreateElement("Command", $projXml.Project.XmlNamespaceURI)

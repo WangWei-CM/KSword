@@ -8,6 +8,7 @@
 #include <QMenu>
 #include <QAction>       // 补充QAction头文件（菜单动作需要）
 #include <QApplication>  // 补充QApplication头文件
+#include <QDragMoveEvent>  // 必须包含此头文件
 // 新增各dock头文件
 #include "WelcomeDock/WelcomeDock.h"
 #include "ProcessDock/ProcessDock.h"
@@ -33,6 +34,7 @@ private:
     void initMenus();
     void initCentralTab();
     void initDockWidgets();
+	void enableDockTabDragging();
 
     // 文档tab区域的dock
     QDockWidget* m_dockWelcome;
@@ -53,5 +55,6 @@ private:
     QDockWidget* m_dockImmediate;
     QDockWidget* m_dockMonitor;
 };
+
 
 #endif // MAINWINDOW_H

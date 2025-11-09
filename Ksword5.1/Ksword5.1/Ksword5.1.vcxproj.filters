@@ -138,4 +138,9 @@
   <ItemGroup>
     <None Include="qtvars.pro" />
   </ItemGroup>
+  <ItemGroup>
+    <QtUic Include="WelcomeDock\Welcome.ui">
+      <Filter>Form Files</Filter>
+    </QtUic>
+  </ItemGroup>
 </Project>

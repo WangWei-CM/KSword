@@ -10,21 +10,21 @@
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
-
     QWidget* centralWidget = takeCentralWidget();
     if (centralWidget) delete centralWidget;
-    // Ensure there is a central widget so dock areas and splitters work correctly
-    //setCentralWidget(new QWidget(this));
     QWidget* invisibleCentral = new QWidget(this);
-    // 关键：压缩尺寸到1x1像素（最小可交互尺寸）
     invisibleCentral->setFixedWidth(1);
-    // 背景完全透明，无边框，与主窗口融为一体
     invisibleCentral->setStyleSheet(
         "background: transparent;"
         "border: none;"
         "margin: 0px;"
         "padding: 0px;"
     );
+	// 上面是让中央区域不可见且不占空间。如果不删除，那么就会导致dock分割线拖动的时候留有空隙，但是如果完全删掉，监控面板无法正常拖动
+    // 因此设置宽度1
+    QPalette mainPalette = this->palette();
+    mainPalette.setColor(QPalette::Window, Qt::white); // Window 对应主窗口背景
+    this->setPalette(mainPalette);
     setCentralWidget(invisibleCentral);
 
     initMenus();
@@ -32,7 +32,7 @@ MainWindow::MainWindow(QWidget* parent)
     initDockWidgets();
     setWindowTitle("Ksword5.1");
     resize(1024, 768); // 初始窗口大小
-    setStyleSheet(QSS_MainWindow_TabWidget + QSS_MainWindow_dockStyle);
+    setStyleSheet(QSS_MainWindow_TabWidget + QSS_MainWindow_dockStyle + QSS_MainWindow_dockStyle);
 }
 
 MainWindow::~MainWindow()
@@ -207,3 +207,4 @@ void MainWindow::initDockWidgets()
     m_dockMonitor->show();
     // 原先的 splitDockWidget 可能将监视面板移动到不可见位置并导致尺寸为0，已移除。
 }
+
