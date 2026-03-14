@@ -1,13 +1,221 @@
 #pragma once
+
+// ============================================================
+// ProcessDock.h
+// 作用：
+// - 构建“进程”Dock 内的完整 R3 任务管理器界面；
+// - 提供异步刷新、树/列表视图、列管理、右键操作等能力；
+// - 与 ks::process Win32 封装层解耦，UI 层只做展示与交互。
+// ============================================================
+
+#include "../Framework.h"
+
+#include <QColor>
+#include <QHash>
+#include <QIcon>
+#include <QPointer>
+#include <QSize>
 #include <QWidget>
 
-#include "../ui/UI_All.h"
+#include <chrono>
+#include <cstdint>
+#include <unordered_map>
+#include <vector>
 
-#include "Process_Tool.h"
+// 前置声明：减少头文件编译开销。
+class QComboBox;
+class QHeaderView;
+class QLabel;
+class QPushButton;
+class QSlider;
+class QTabWidget;
+class QTimer;
+class QTreeWidget;
+class QTreeWidgetItem;
+class QVBoxLayout;
+class QHBoxLayout;
+class QPoint;
+class ProcessDetailWindow;
 
-class ProcessDock : public QWidget
+namespace ks::process
+{
+    struct CounterSample;
+    struct ProcessRecord;
+}
+
+class ProcessDock final : public QWidget
 {
     Q_OBJECT
+
 public:
+    // 构造函数作用：
+    // - 初始化侧边栏 Tab；
+    // - 初始化进程列表与控制栏；
+    // - 启动默认监视（性能计数器视图）。
     explicit ProcessDock(QWidget* parent = nullptr);
+
+private:
+    // TableColumn：统一定义表格列索引，避免硬编码魔法数。
+    enum class TableColumn : int
+    {
+        Name = 0,      // 进程名（含图标）。
+        Pid,           // PID。
+        Cpu,           // CPU 百分比。
+        Ram,           // RAM（MB）。
+        Disk,          // DISK（MB/s）。
+        Gpu,           // GPU（预留）。
+        Net,           // Net（预留）。
+        Signature,     // 数字签名状态。
+        Path,          // 可执行路径。
+        ParentPid,     // 父进程 PID。
+        CommandLine,   // 启动参数。
+        User,          // 用户名。
+        StartTime,     // 启动时间。
+        IsAdmin,       // 是否管理员。
+        Count          // 列总数。
+    };
+
+    // ViewMode：两种视图模式。
+    enum class ViewMode : int
+    {
+        Monitor = 0, // 监视视图（性能计数器列）。
+        Detail = 1   // 详细信息视图（展示所有补充字段）。
+    };
+
+    // DisplayRow：列表渲染层的数据结构（带状态标记）。
+    struct DisplayRow
+    {
+        ks::process::ProcessRecord* record = nullptr; // 指向缓存中的实体数据。
+        int depth = 0;                                // 树状列表下的缩进深度。
+        bool isNew = false;                           // 本轮新增进程（绿色高亮）。
+        bool isExited = false;                        // 本轮退出但保留一轮（灰色高亮）。
+    };
+
+    // CacheEntry：进程缓存条目（用于复用静态信息和退出保留）。
+    struct CacheEntry
+    {
+        ks::process::ProcessRecord record; // 完整进程记录。
+        int missingRounds = 0;             // 连续缺失轮次（1 表示“刚退出，保留显示”）。
+        bool isNewInLatestRound = false;   // 最新刷新中是否为新增。
+        bool isExitedInLatestRound = false;// 最新刷新中是否为退出保留。
+    };
+
+    // RefreshResult：后台线程刷新结果对象。
+    struct RefreshResult
+    {
+        std::unordered_map<std::string, CacheEntry> nextCache;                    // 下一轮缓存。
+        std::unordered_map<std::string, ks::process::CounterSample> nextCounters; // 下一轮计数器样本。
+
+        // ======== 统计字段（用于 UI 状态提示 + 详细日志） ========
+        std::size_t enumeratedCount = 0;        // 本轮枚举到的“当前存活”进程数。
+        std::size_t newProcessCount = 0;        // 本轮新增进程数量。
+        std::size_t exitedProcessCount = 0;     // 本轮退出保留数量（灰底保留一轮）。
+        std::size_t reusedProcessCount = 0;     // 本轮复用旧缓存的数量。
+        std::size_t staticFilledCount = 0;      // 本轮实际补齐静态详情的数量。
+        std::size_t staticDeferredCount = 0;    // 本轮因预算或模式延后的静态详情数量。
+        std::uint64_t workerElapsedMs = 0;      // 后台线程本轮构建结果耗时（毫秒）。
+        int selectedStrategyIndex = 0;          // UI 选择的策略下标（0/1/2）。
+        ks::process::ProcessEnumStrategy selectedStrategy{}; // 由下标映射的策略枚举。
+        ks::process::ProcessEnumStrategy actualStrategy{};   // 实际执行策略（Auto 下可能回退）。
+        bool detailModeEnabled = false;         // 本轮是否处于“详细信息视图”。
+    };
+
+private:
+    // ======== UI 初始化相关 ========
+    void initializeUi();
+    void initializeTopControls();
+    void initializeProcessTable();
+    void initializeConnections();
+    void initializeTimer();
+    void updateRefreshStateUi(bool refreshing, const QString& stateText);
+
+    // ======== 刷新与渲染 ========
+    void requestAsyncRefresh(bool forceRefresh);
+    void applyRefreshResult(const RefreshResult& refreshResult);
+    void rebuildTable();
+    std::vector<DisplayRow> buildDisplayOrder() const;
+    std::vector<DisplayRow> buildTreeDisplayOrder() const;
+    std::vector<DisplayRow> buildListDisplayOrder() const;
+
+    // ======== 视图控制 ========
+    void applyViewMode(ViewMode viewMode);
+    void applyDefaultColumnWidths();
+    bool isTreeModeEnabled() const;
+    ViewMode currentViewMode() const;
+
+    // ======== 表格交互 ========
+    void showTableContextMenu(const QPoint& localPosition);
+    void showHeaderContextMenu(const QPoint& localPosition);
+    void copyCurrentCell();
+    void copyCurrentRow();
+    void openProcessDetailsPlaceholder();
+    void openProcessDetailWindowByPid(std::uint32_t pid);
+    void updateUsageSummaryInHeader(const std::vector<DisplayRow>& displayRows);
+
+    // ======== 进程控制动作 ========
+    void executeTaskKillAction(bool forceKill);
+    void executeTerminateProcessAction();
+    void executeTerminateThreadsAction();
+    void executeInjectInvalidShellcodeAction();
+    void executeSuspendAction();
+    void executeResumeAction();
+    void executeSetCriticalAction(bool enableCritical);
+    void executeSetPriorityAction(int priorityActionId);
+    void executeOpenFolderAction();
+
+    // ======== 工具函数 ========
+    std::string selectedIdentityKey() const;
+    ks::process::ProcessRecord* selectedRecord();
+    QString formatColumnText(const ks::process::ProcessRecord& processRecord, TableColumn column, int depth) const;
+    QIcon resolveProcessIcon(const ks::process::ProcessRecord& processRecord);
+    QIcon blueTintedIcon(const char* iconPath, const QSize& iconSize = QSize(16, 16)) const;
+    void showActionResultMessage(const QString& title, bool actionOk, const std::string& detailText);
+    static std::string buildRulerPrefix(int depth);
+    static int toColumnIndex(TableColumn column);
+
+    // ======== 后台线程核心函数（静态） ========
+    static RefreshResult buildRefreshResult(
+        int strategyIndex,
+        bool detailModeEnabled,
+        int staticDetailFillBudget,
+        int progressTaskPid,
+        const std::unordered_map<std::string, CacheEntry>& previousCache,
+        const std::unordered_map<std::string, ks::process::CounterSample>& previousCounters,
+        std::uint32_t logicalCpuCount);
+
+private:
+    // ======== 顶层布局 ========
+    QVBoxLayout* m_rootLayout = nullptr;      // 根布局：只包含侧边栏 Tab。
+    QTabWidget* m_sideTabWidget = nullptr;    // 左侧 tab 栏（West），包含“进程列表”页。
+    QWidget* m_processListPage = nullptr;     // “进程列表”页容器。
+    QVBoxLayout* m_processPageLayout = nullptr; // 进程页主布局。
+
+    // ======== 控制栏 ========
+    QHBoxLayout* m_controlLayout = nullptr;   // 上方控制栏布局。
+    QComboBox* m_strategyCombo = nullptr;     // 进程遍历方案下拉框。
+    QPushButton* m_treeToggleButton = nullptr;// 树/列表切换按钮。
+    QComboBox* m_viewModeCombo = nullptr;     // 监视视图/详细视图下拉框。
+    QPushButton* m_startButton = nullptr;     // 开始监视按钮。
+    QPushButton* m_pauseButton = nullptr;     // 暂停监视按钮。
+    QLabel* m_refreshLabel = nullptr;         // 刷新间隔标签。
+    QSlider* m_refreshSlider = nullptr;       // 刷新间隔滑块（秒）。
+    QLabel* m_refreshStateLabel = nullptr;    // 刷新状态标签（明显展示“刷新中/空闲+耗时”）。
+
+    // ======== 进程表格 ========
+    QTreeWidget* m_processTable = nullptr;    // 进程列表表格（支持列拖动/排序/右键）。
+
+    // ======== 刷新调度 ========
+    QTimer* m_refreshTimer = nullptr;         // 周期刷新定时器。
+    bool m_monitoringEnabled = true;          // 当前是否处于监视状态。
+    bool m_refreshInProgress = false;         // 防止并发刷新的互斥标记。
+    std::uint64_t m_refreshTicket = 0;        // 刷新请求序号（防乱序）。
+    std::uint32_t m_logicalCpuCount = 1;      // CPU 核心数（CPU 百分比换算）。
+    std::chrono::steady_clock::time_point m_lastRefreshStartTime{}; // 主线程记录的刷新开始时刻。
+    int m_refreshProgressTaskPid = 0;         // 绑定到 kPro 的“进程刷新任务”PID。
+
+    // ======== 数据缓存 ========
+    std::unordered_map<std::string, CacheEntry> m_cacheByIdentity; // 进程缓存（PID+CreateTime）。
+    std::unordered_map<std::string, ks::process::CounterSample> m_counterSampleByIdentity; // 差值样本。
+    QHash<QString, QIcon> m_iconCacheByPath;  // 进程图标缓存，避免重复提取。
+    std::unordered_map<std::string, QPointer<ProcessDetailWindow>> m_detailWindowByIdentity; // 详情窗口缓存（同进程复用窗口）。
 };

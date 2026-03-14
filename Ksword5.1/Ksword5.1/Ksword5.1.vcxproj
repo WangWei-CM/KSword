@@ -143,11 +143,14 @@
     <ClCompile Include="NetworkDock\NetworkDock.cpp" />
     <ClCompile Include="OtherDock\OtherDock.cpp" />
     <ClCompile Include="PrivilegeDock\PrivilegeDock.cpp" />
+    <ClCompile Include="ProcessDock\ProcessDetailWindow.cpp" />
     <ClCompile Include="ProcessDock\ProcessDock.cpp" />
     <ClCompile Include="ProcessDock\Process_Tool.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.cpp" />
     <ClCompile Include="UI\UIBaseFunction.cpp" />
     <ClCompile Include="WelcomeDock\WelcomeDock.cpp" />
+    <ClCompile Include="ksword\process\process.cpp" />
+    <ClCompile Include="ksword\string\string.cpp" />
     <QtRcc Include="Ksword5.qrc" />
     <QtUic Include="Ksword5.ui" />
     <QtMoc Include="Ksword5.h" />
@@ -165,8 +168,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Framework.h" />
+    <ClInclude Include="Ksword.h" />
     <ClInclude Include="Framework\LogDockWidget.h" />
     <ClInclude Include="Framework\ProgressDockWidget.h" />
+    <ClInclude Include="ksword\ksword.h" />
+    <ClInclude Include="ksword\process\process.h" />
+    <ClInclude Include="ksword\string\string.h" />
     <ClInclude Include="theme.h" />
     <ClInclude Include="UI\UI_All.h" />
     <QtMoc Include="DriverDock\DriverDock.h" />
@@ -177,6 +184,7 @@
     <QtMoc Include="NetworkDock\NetworkDock.h" />
     <QtMoc Include="OtherDock\OtherDock.h" />
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h" />
+    <QtMoc Include="ProcessDock\ProcessDetailWindow.h" />
     <QtMoc Include="ProcessDock\ProcessDock.h" />
     <QtMoc Include="SettingsDock\SettingsDock.h" />
     <ClInclude Include="ProcessDock\Process_Tool.h" />

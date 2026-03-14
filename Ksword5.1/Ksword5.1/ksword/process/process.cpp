@@ -1,0 +1,2062 @@
+#include "process.h"
+
+#include "../string/string.h"
+
+// Win32 头：进程、线程、令牌、工具快照、Shell、签名等。
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#include <Psapi.h>
+#include <TlHelp32.h>
+#include <WinTrust.h>
+#include <Softpub.h>
+#include <Shellapi.h>
+#include <winternl.h>
+
+#include <algorithm>   // std::max/std::clamp：衍生指标计算。
+#include <chrono>      // steady_clock：跨刷新轮次计时。
+#include <filesystem>  // std::filesystem：路径存在性与目录判断。
+#include <fstream>     // std::ifstream：读取 PE 头计算入口 RVA。
+#include <iomanip>     // std::hex：格式化十六进制文本。
+#include <sstream>     // std::ostringstream：错误文本拼接。
+#include <vector>      // std::vector：系统信息缓冲与容器。
+
+// 链接依赖库：
+// - Psapi：GetProcessMemoryInfo；
+// - Wintrust/Crypt32：数字签名校验。
+#pragma comment(lib, "Psapi.lib")
+#pragma comment(lib, "Wintrust.lib")
+#pragma comment(lib, "Crypt32.lib")
+
+namespace
+{
+    // STATUS_INFO_LENGTH_MISMATCH：NtQuerySystemInformation 缓冲不足返回码。
+#ifndef STATUS_INFO_LENGTH_MISMATCH
+    constexpr NTSTATUS StatusInfoLengthMismatch = static_cast<NTSTATUS>(0xC0000004L);
+#else
+    constexpr NTSTATUS StatusInfoLengthMismatch = STATUS_INFO_LENGTH_MISMATCH;
+#endif
+
+    // PROCESS_SUSPEND_RESUME：旧头文件可能未定义，手动兜底。
+#ifndef PROCESS_SUSPEND_RESUME
+    constexpr DWORD ProcessSuspendResumeAccess = 0x0800;
+#else
+    constexpr DWORD ProcessSuspendResumeAccess = PROCESS_SUSPEND_RESUME;
+#endif
+
+    // ProcessBreakOnTermination：NtSetInformationProcess 的关键进程信息类。
+    constexpr PROCESSINFOCLASS ProcessBreakOnTerminationInfoClass = static_cast<PROCESSINFOCLASS>(29);
+
+    // NT_SUCCESS：判断 NTSTATUS 成功与否。
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#endif
+
+    // Nt 函数指针类型定义。
+    using NtQuerySystemInformationFn = NTSTATUS(NTAPI*)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
+    using NtQueryInformationProcessFn = NTSTATUS(NTAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+    using NtSuspendProcessFn = NTSTATUS(NTAPI*)(HANDLE);
+    using NtResumeProcessFn = NTSTATUS(NTAPI*)(HANDLE);
+    using NtSetInformationProcessFn = NTSTATUS(NTAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG);
+
+    // 读取远程命令行需要的最小结构定义（只保留必要字段）。
+    struct PebPartial
+    {
+        BYTE reserved1[2];
+        BYTE beingDebugged;
+        BYTE reserved2[1];
+        PVOID reserved3[2];
+        PVOID processParameters;
+    };
+
+    // 读取远程命令行需要的最小 ProcessParameters 结构。
+    struct RtlUserProcessParametersPartial
+    {
+        BYTE reserved1[16];
+        PVOID reserved2[10];
+        UNICODE_STRING imagePathName;
+        UNICODE_STRING commandLine;
+    };
+
+    // ProcessBasicInformation 结果结构（与 NtQueryInformationProcess 对应）。
+    struct ProcessBasicInformationLocal
+    {
+        PVOID reserved1 = nullptr;
+        PVOID pebBaseAddress = nullptr;
+        PVOID reserved2[2]{};
+        ULONG_PTR uniqueProcessId = 0;
+        PVOID reserved3 = nullptr;
+    };
+
+    // NtQuerySystemInformation(SystemProcessInformation) 的完整结构体定义。
+    // 说明：
+    // - 部分 SDK 的 _SYSTEM_PROCESS_INFORMATION 字段被裁剪；
+    // - 这里使用兼容版定义以读取创建时间、CPU 时间与 IO 计数器。
+    struct SystemProcessInformationRecord
+    {
+        ULONG NextEntryOffset;
+        ULONG NumberOfThreads;
+        LARGE_INTEGER WorkingSetPrivateSize;
+        ULONG HardFaultCount;
+        ULONG NumberOfThreadsHighWatermark;
+        ULONGLONG CycleTime;
+        LARGE_INTEGER CreateTime;
+        LARGE_INTEGER UserTime;
+        LARGE_INTEGER KernelTime;
+        UNICODE_STRING ImageName;
+        LONG BasePriority;
+        HANDLE UniqueProcessId;
+        HANDLE InheritedFromUniqueProcessId;
+        ULONG HandleCount;
+        ULONG SessionId;
+        ULONG_PTR UniqueProcessKey;
+        SIZE_T PeakVirtualSize;
+        SIZE_T VirtualSize;
+        ULONG PageFaultCount;
+        SIZE_T PeakWorkingSetSize;
+        SIZE_T WorkingSetSize;
+        SIZE_T QuotaPeakPagedPoolUsage;
+        SIZE_T QuotaPagedPoolUsage;
+        SIZE_T QuotaPeakNonPagedPoolUsage;
+        SIZE_T QuotaNonPagedPoolUsage;
+        SIZE_T PagefileUsage;
+        SIZE_T PeakPagefileUsage;
+        SIZE_T PrivatePageCount;
+        LARGE_INTEGER ReadOperationCount;
+        LARGE_INTEGER WriteOperationCount;
+        LARGE_INTEGER OtherOperationCount;
+        LARGE_INTEGER ReadTransferCount;
+        LARGE_INTEGER WriteTransferCount;
+        LARGE_INTEGER OtherTransferCount;
+    };
+
+    // 格式化 Win32 错误码文本，便于 UI 提示详细失败原因。
+    std::string FormatLastErrorMessage(const DWORD errorCode)
+    {
+        wchar_t* wideBuffer = nullptr;
+        const DWORD messageLength = ::FormatMessageW(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr,
+            errorCode,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            reinterpret_cast<LPWSTR>(&wideBuffer),
+            0,
+            nullptr);
+
+        if (messageLength == 0 || wideBuffer == nullptr)
+        {
+            std::ostringstream stream;
+            stream << "Win32Error=" << errorCode;
+            return stream.str();
+        }
+
+        std::wstring wideMessage(wideBuffer, messageLength);
+        ::LocalFree(wideBuffer);
+
+        std::string utf8Message = ks::str::Utf16ToUtf8(wideMessage);
+        utf8Message = ks::str::TrimCopy(utf8Message);
+
+        std::ostringstream stream;
+        stream << utf8Message << " (Code=" << errorCode << ")";
+        return stream.str();
+    }
+
+    // 格式化 NTSTATUS，避免 UI 只看到“失败”而不知道具体码值。
+    std::string FormatNtStatusMessage(const NTSTATUS statusCode, const char* prefixText)
+    {
+        std::ostringstream stream;
+        stream << (prefixText == nullptr ? "NTSTATUS failed" : prefixText)
+            << " (0x" << std::hex << static_cast<unsigned long>(statusCode) << ")";
+        return stream.str();
+    }
+
+    // 获取 ntdll 指定导出函数地址（懒加载）。
+    FARPROC GetNtdllProcAddress(const char* functionName)
+    {
+        HMODULE ntdllModule = ::GetModuleHandleW(L"ntdll.dll");
+        if (ntdllModule == nullptr)
+        {
+            ntdllModule = ::LoadLibraryW(L"ntdll.dll");
+        }
+        if (ntdllModule == nullptr)
+        {
+            return nullptr;
+        }
+        return ::GetProcAddress(ntdllModule, functionName);
+    }
+
+    // 查询是否可提升某特权（SeDebug 等），用于关键进程设置等高权限操作。
+    bool EnablePrivilege(const wchar_t* privilegeName)
+    {
+        if (privilegeName == nullptr)
+        {
+            return false;
+        }
+
+        HANDLE processToken = nullptr;
+        if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &processToken) == FALSE)
+        {
+            return false;
+        }
+
+        LUID privilegeLuid{};
+        if (::LookupPrivilegeValueW(nullptr, privilegeName, &privilegeLuid) == FALSE)
+        {
+            ::CloseHandle(processToken);
+            return false;
+        }
+
+        TOKEN_PRIVILEGES tokenPrivileges{};
+        tokenPrivileges.PrivilegeCount = 1;
+        tokenPrivileges.Privileges[0].Luid = privilegeLuid;
+        tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+        const BOOL adjustResult = ::AdjustTokenPrivileges(
+            processToken,
+            FALSE,
+            &tokenPrivileges,
+            sizeof(tokenPrivileges),
+            nullptr,
+            nullptr);
+        const DWORD adjustError = ::GetLastError();
+        ::CloseHandle(processToken);
+
+        return adjustResult != FALSE && adjustError == ERROR_SUCCESS;
+    }
+
+    // 读取进程可执行路径（UTF-8），失败返回空串。
+    std::string QueryProcessPathByHandle(const HANDLE processHandle)
+    {
+        if (processHandle == nullptr || processHandle == INVALID_HANDLE_VALUE)
+        {
+            return std::string();
+        }
+
+        std::wstring pathBuffer(32768, L'\0');
+        DWORD pathLength = static_cast<DWORD>(pathBuffer.size());
+        if (::QueryFullProcessImageNameW(processHandle, 0, pathBuffer.data(), &pathLength) == FALSE)
+        {
+            return std::string();
+        }
+
+        pathBuffer.resize(pathLength);
+        return ks::str::Utf16ToUtf8(pathBuffer);
+    }
+
+    // 通过令牌查询 DOMAIN\\User 形式用户名。
+    std::string QueryProcessUserNameByHandle(const HANDLE processHandle)
+    {
+        HANDLE processToken = nullptr;
+        if (::OpenProcessToken(processHandle, TOKEN_QUERY, &processToken) == FALSE)
+        {
+            return std::string();
+        }
+
+        DWORD requiredLength = 0;
+        ::GetTokenInformation(processToken, TokenUser, nullptr, 0, &requiredLength);
+        if (requiredLength == 0)
+        {
+            ::CloseHandle(processToken);
+            return std::string();
+        }
+
+        std::vector<BYTE> tokenBuffer(requiredLength);
+        if (::GetTokenInformation(processToken, TokenUser, tokenBuffer.data(), requiredLength, &requiredLength) == FALSE)
+        {
+            ::CloseHandle(processToken);
+            return std::string();
+        }
+
+        const auto* tokenUser = reinterpret_cast<const TOKEN_USER*>(tokenBuffer.data());
+        wchar_t accountName[256] = {};
+        wchar_t domainName[256] = {};
+        DWORD accountNameLength = static_cast<DWORD>(std::size(accountName));
+        DWORD domainNameLength = static_cast<DWORD>(std::size(domainName));
+        SID_NAME_USE sidUse = SidTypeUnknown;
+
+        const BOOL lookupResult = ::LookupAccountSidW(
+            nullptr,
+            tokenUser->User.Sid,
+            accountName,
+            &accountNameLength,
+            domainName,
+            &domainNameLength,
+            &sidUse);
+        ::CloseHandle(processToken);
+
+        if (lookupResult == FALSE)
+        {
+            return std::string();
+        }
+
+        std::wstring fullUserName(domainName);
+        if (!fullUserName.empty())
+        {
+            fullUserName += L"\\";
+        }
+        fullUserName += accountName;
+        return ks::str::Utf16ToUtf8(fullUserName);
+    }
+
+    // 查询进程令牌是否提升（管理员）。
+    bool QueryProcessIsElevatedByHandle(const HANDLE processHandle)
+    {
+        HANDLE processToken = nullptr;
+        if (::OpenProcessToken(processHandle, TOKEN_QUERY, &processToken) == FALSE)
+        {
+            return false;
+        }
+
+        TOKEN_ELEVATION tokenElevation{};
+        DWORD returnLength = 0;
+        const BOOL queryResult = ::GetTokenInformation(
+            processToken,
+            TokenElevation,
+            &tokenElevation,
+            sizeof(tokenElevation),
+            &returnLength);
+        ::CloseHandle(processToken);
+
+        if (queryResult == FALSE)
+        {
+            return false;
+        }
+        return tokenElevation.TokenIsElevated != 0;
+    }
+
+    // WinVerifyTrust 检查文件签名状态。
+    std::string QueryFileSignatureState(const std::string& utf8Path)
+    {
+        if (utf8Path.empty())
+        {
+            return "Unknown";
+        }
+
+        const std::wstring utf16Path = ks::str::Utf8ToUtf16(utf8Path);
+        if (utf16Path.empty())
+        {
+            return "Unknown";
+        }
+
+        WINTRUST_FILE_INFO fileInfo{};
+        fileInfo.cbStruct = sizeof(fileInfo);
+        fileInfo.pcwszFilePath = utf16Path.c_str();
+
+        WINTRUST_DATA trustData{};
+        trustData.cbStruct = sizeof(trustData);
+        trustData.dwUIChoice = WTD_UI_NONE;
+        trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+        trustData.dwUnionChoice = WTD_CHOICE_FILE;
+        trustData.pFile = &fileInfo;
+        trustData.dwStateAction = WTD_STATEACTION_IGNORE;
+        trustData.dwProvFlags = WTD_SAFER_FLAG;
+
+        GUID policyGuid = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+        const LONG verifyResult = ::WinVerifyTrust(nullptr, &policyGuid, &trustData);
+        if (verifyResult == ERROR_SUCCESS)
+        {
+            return "Signed";
+        }
+        if (verifyResult == TRUST_E_NOSIGNATURE || verifyResult == TRUST_E_SUBJECT_FORM_UNKNOWN)
+        {
+            return "Unsigned";
+        }
+        return "Unknown";
+    }
+
+    // 从远程进程读取命令行（读取 PEB / ProcessParameters）。
+    std::string QueryProcessCommandLineByHandle(const HANDLE processHandle)
+    {
+        const auto ntQueryInformationProcess = reinterpret_cast<NtQueryInformationProcessFn>(
+            GetNtdllProcAddress("NtQueryInformationProcess"));
+        if (ntQueryInformationProcess == nullptr)
+        {
+            return std::string();
+        }
+
+        ProcessBasicInformationLocal basicInfo{};
+        NTSTATUS queryStatus = ntQueryInformationProcess(
+            processHandle,
+            ProcessBasicInformation,
+            &basicInfo,
+            static_cast<ULONG>(sizeof(basicInfo)),
+            nullptr);
+        if (!NT_SUCCESS(queryStatus) || basicInfo.pebBaseAddress == nullptr)
+        {
+            return std::string();
+        }
+
+        // 读取 PEB，拿到 ProcessParameters 指针。
+        PebPartial pebSnapshot{};
+        SIZE_T bytesRead = 0;
+        if (::ReadProcessMemory(
+            processHandle,
+            basicInfo.pebBaseAddress,
+            &pebSnapshot,
+            sizeof(pebSnapshot),
+            &bytesRead) == FALSE ||
+            pebSnapshot.processParameters == nullptr)
+        {
+            return std::string();
+        }
+
+        // 读取 ProcessParameters，拿到 CommandLine UNICODE_STRING。
+        RtlUserProcessParametersPartial paramsSnapshot{};
+        if (::ReadProcessMemory(
+            processHandle,
+            pebSnapshot.processParameters,
+            &paramsSnapshot,
+            sizeof(paramsSnapshot),
+            &bytesRead) == FALSE)
+        {
+            return std::string();
+        }
+
+        if (paramsSnapshot.commandLine.Buffer == nullptr || paramsSnapshot.commandLine.Length == 0)
+        {
+            return std::string();
+        }
+
+        // 读取远程命令行 UTF-16 文本并转 UTF-8。
+        std::wstring commandLineText(
+            static_cast<std::size_t>(paramsSnapshot.commandLine.Length / sizeof(wchar_t)),
+            L'\0');
+        if (::ReadProcessMemory(
+            processHandle,
+            paramsSnapshot.commandLine.Buffer,
+            commandLineText.data(),
+            paramsSnapshot.commandLine.Length,
+            &bytesRead) == FALSE)
+        {
+            return std::string();
+        }
+
+        return ks::str::Utf16ToUtf8(commandLineText);
+    }
+
+    // 把 PID 转成 DWORD，统一并避免隐式窄化警告。
+    DWORD ToDwordPid(const std::uint32_t pid)
+    {
+        return static_cast<DWORD>(pid);
+    }
+
+    // 按路径提取文件名（进程名兜底用）。
+    std::string ExtractFileNameFromPath(const std::string& utf8Path)
+    {
+        if (utf8Path.empty())
+        {
+            return std::string();
+        }
+        const std::size_t lastSlash = utf8Path.find_last_of("\\/");
+        if (lastSlash == std::string::npos)
+        {
+            return utf8Path;
+        }
+        return utf8Path.substr(lastSlash + 1);
+    }
+
+    // 把进程优先级常量转换为可读文本。
+    std::string PriorityClassToText(const DWORD priorityClass)
+    {
+        switch (priorityClass)
+        {
+        case IDLE_PRIORITY_CLASS:
+            return "Idle";
+        case BELOW_NORMAL_PRIORITY_CLASS:
+            return "BelowNormal";
+        case NORMAL_PRIORITY_CLASS:
+            return "Normal";
+        case ABOVE_NORMAL_PRIORITY_CLASS:
+            return "AboveNormal";
+        case HIGH_PRIORITY_CLASS:
+            return "High";
+        case REALTIME_PRIORITY_CLASS:
+            return "Realtime";
+        default:
+            return "Unknown";
+        }
+    }
+
+    // 查询进程当前优先级文本。
+    std::string QueryPriorityTextByHandle(const HANDLE processHandle)
+    {
+        const DWORD priorityClass = ::GetPriorityClass(processHandle);
+        if (priorityClass == 0)
+        {
+            return "Unknown";
+        }
+        return PriorityClassToText(priorityClass);
+    }
+
+    // 按 machine 常量转换为架构文本。
+    std::string MachineToArchitectureText(const USHORT machineType)
+    {
+        switch (machineType)
+        {
+        case IMAGE_FILE_MACHINE_AMD64:
+            return "x64";
+        case IMAGE_FILE_MACHINE_I386:
+            return "x86";
+        case IMAGE_FILE_MACHINE_ARM64:
+            return "ARM64";
+        case IMAGE_FILE_MACHINE_ARM:
+            return "ARM";
+        default:
+            return "Unknown";
+        }
+    }
+
+    // 查询目标进程架构（优先 IsWow64Process2）。
+    std::string QueryProcessArchitectureByHandle(const HANDLE processHandle)
+    {
+        using IsWow64Process2Fn = BOOL(WINAPI*)(HANDLE, USHORT*, USHORT*);
+        const auto isWow64Process2Fn = reinterpret_cast<IsWow64Process2Fn>(
+            ::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"), "IsWow64Process2"));
+        if (isWow64Process2Fn != nullptr)
+        {
+            USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+            USHORT nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+            if (isWow64Process2Fn(processHandle, &processMachine, &nativeMachine) != FALSE)
+            {
+                // processMachine=UNKNOWN 表示“与系统原生架构一致”。
+                if (processMachine == IMAGE_FILE_MACHINE_UNKNOWN)
+                {
+                    return MachineToArchitectureText(nativeMachine);
+                }
+                return MachineToArchitectureText(processMachine);
+            }
+        }
+
+        // 回退旧 API：只能区分 WOW64 x86 与“非 WOW64”。
+        BOOL isWow64Process = FALSE;
+        if (::IsWow64Process(processHandle, &isWow64Process) == FALSE)
+        {
+            return "Unknown";
+        }
+
+#if defined(_WIN64)
+        return isWow64Process ? "x86" : "x64";
+#else
+        return isWow64Process ? "x86" : "x86";
+#endif
+    }
+
+    // 读取 PE 头并返回 AddressOfEntryPoint（RVA）。
+    std::uint32_t QueryImageEntryPointRvaByPath(const std::string& modulePath)
+    {
+        if (modulePath.empty())
+        {
+            return 0;
+        }
+
+        std::ifstream moduleFile(modulePath, std::ios::binary);
+        if (!moduleFile.is_open())
+        {
+            return 0;
+        }
+
+        IMAGE_DOS_HEADER dosHeader{};
+        moduleFile.read(reinterpret_cast<char*>(&dosHeader), sizeof(dosHeader));
+        if (!moduleFile.good() || dosHeader.e_magic != IMAGE_DOS_SIGNATURE)
+        {
+            return 0;
+        }
+
+        moduleFile.seekg(static_cast<std::streamoff>(dosHeader.e_lfanew), std::ios::beg);
+        DWORD ntSignature = 0;
+        moduleFile.read(reinterpret_cast<char*>(&ntSignature), sizeof(ntSignature));
+        if (!moduleFile.good() || ntSignature != IMAGE_NT_SIGNATURE)
+        {
+            return 0;
+        }
+
+        IMAGE_FILE_HEADER fileHeader{};
+        moduleFile.read(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader));
+        if (!moduleFile.good())
+        {
+            return 0;
+        }
+
+        WORD optionalMagic = 0;
+        moduleFile.read(reinterpret_cast<char*>(&optionalMagic), sizeof(optionalMagic));
+        if (!moduleFile.good())
+        {
+            return 0;
+        }
+        moduleFile.seekg(-static_cast<std::streamoff>(sizeof(optionalMagic)), std::ios::cur);
+
+        if (optionalMagic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+        {
+            IMAGE_OPTIONAL_HEADER64 optionalHeader{};
+            moduleFile.read(reinterpret_cast<char*>(&optionalHeader), sizeof(optionalHeader));
+            if (!moduleFile.good())
+            {
+                return 0;
+            }
+            return optionalHeader.AddressOfEntryPoint;
+        }
+
+        if (optionalMagic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+        {
+            IMAGE_OPTIONAL_HEADER32 optionalHeader{};
+            moduleFile.read(reinterpret_cast<char*>(&optionalHeader), sizeof(optionalHeader));
+            if (!moduleFile.good())
+            {
+                return 0;
+            }
+            return optionalHeader.AddressOfEntryPoint;
+        }
+
+        return 0;
+    }
+
+    // 把线程 ID 列表压缩为字符串，避免单元格过长。
+    std::string BuildThreadIdSummaryText(const std::vector<std::uint32_t>& threadIds)
+    {
+        if (threadIds.empty())
+        {
+            return "-";
+        }
+
+        constexpr std::size_t MaxDisplayCount = 8;
+        std::ostringstream stream;
+        const std::size_t displayCount = std::min(MaxDisplayCount, threadIds.size());
+        for (std::size_t index = 0; index < displayCount; ++index)
+        {
+            if (index > 0)
+            {
+                stream << ", ";
+            }
+            stream << threadIds[index];
+        }
+        if (threadIds.size() > MaxDisplayCount)
+        {
+            stream << " ... (+" << (threadIds.size() - MaxDisplayCount) << ")";
+        }
+        return stream.str();
+    }
+
+    // 路径是否指向目录。
+    bool IsDirectoryPath(const std::string& utf8Path)
+    {
+        if (utf8Path.empty())
+        {
+            return false;
+        }
+
+        const std::wstring utf16Path = ks::str::Utf8ToUtf16(utf8Path);
+        if (utf16Path.empty())
+        {
+            return false;
+        }
+
+        std::error_code errorCode;
+        return std::filesystem::is_directory(std::filesystem::path(utf16Path), errorCode);
+    }
+
+    // 在 Explorer 中打开文件夹或定位文件。
+    bool OpenInExplorerByPath(const std::string& targetPath, std::string* const errorMessage)
+    {
+        if (targetPath.empty())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Target path is empty.";
+            }
+            return false;
+        }
+
+        const std::wstring utf16Path = ks::str::Utf8ToUtf16(targetPath);
+        if (utf16Path.empty())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Path UTF-8 -> UTF-16 conversion failed.";
+            }
+            return false;
+        }
+
+        HINSTANCE shellResult = nullptr;
+        if (IsDirectoryPath(targetPath))
+        {
+            shellResult = ::ShellExecuteW(
+                nullptr,
+                L"open",
+                utf16Path.c_str(),
+                nullptr,
+                nullptr,
+                SW_SHOWNORMAL);
+        }
+        else
+        {
+            std::wstring parameters = L"/select,\"" + utf16Path + L"\"";
+            shellResult = ::ShellExecuteW(
+                nullptr,
+                L"open",
+                L"explorer.exe",
+                parameters.c_str(),
+                nullptr,
+                SW_SHOWNORMAL);
+        }
+
+        if (reinterpret_cast<std::intptr_t>(shellResult) > 32)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            std::ostringstream stream;
+            stream << "ShellExecute(explorer) failed, code=" << reinterpret_cast<std::intptr_t>(shellResult);
+            *errorMessage = stream.str();
+        }
+        return false;
+    }
+}
+
+namespace ks::process
+{
+    std::string BuildProcessIdentityKey(const std::uint32_t pid, const std::uint64_t creationTime100ns)
+    {
+        // identity 规则：PID#CreationTime100ns。
+        return std::to_string(pid) + "#" + std::to_string(creationTime100ns);
+    }
+
+    bool RefreshProcessDynamicCounters(ProcessRecord& processRecord)
+    {
+        // PID 为 0/4 等系统保留进程时，很多 API 可能无法打开句柄。
+        if (processRecord.pid == 0)
+        {
+            processRecord.dynamicCountersReady = false;
+            processRecord.ramMB = 0.0;
+            processRecord.diskMBps = 0.0;
+            processRecord.cpuPercent = 0.0;
+            processRecord.gpuPercent = 0.0;
+            processRecord.netKBps = 0.0;
+            return false;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+            FALSE,
+            ToDwordPid(processRecord.pid));
+        if (processHandle == nullptr)
+        {
+            processRecord.dynamicCountersReady = false;
+            return false;
+        }
+
+        // 读取创建时间 + CPU 累计时间。
+        FILETIME creationTime{};
+        FILETIME exitTime{};
+        FILETIME kernelTime{};
+        FILETIME userTime{};
+        if (::GetProcessTimes(processHandle, &creationTime, &exitTime, &kernelTime, &userTime) != FALSE)
+        {
+            processRecord.creationTime100ns = ks::str::FileTimeToUint64(
+                creationTime.dwHighDateTime,
+                creationTime.dwLowDateTime);
+            processRecord.rawCpuTime100ns =
+                ks::str::FileTimeToUint64(kernelTime.dwHighDateTime, kernelTime.dwLowDateTime) +
+                ks::str::FileTimeToUint64(userTime.dwHighDateTime, userTime.dwLowDateTime);
+            processRecord.startTimeText = ks::str::FileTime100nsToLocalText(processRecord.creationTime100ns);
+        }
+
+        // 读取 RAM 工作集。
+        PROCESS_MEMORY_COUNTERS_EX memoryCounters{};
+        if (::GetProcessMemoryInfo(
+            processHandle,
+            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memoryCounters),
+            sizeof(memoryCounters)) != FALSE)
+        {
+            processRecord.rawWorkingSetBytes = static_cast<std::uint64_t>(memoryCounters.WorkingSetSize);
+            processRecord.ramMB = static_cast<double>(processRecord.rawWorkingSetBytes) / (1024.0 * 1024.0);
+        }
+
+        // 读取 IO 累计字节。
+        IO_COUNTERS ioCounters{};
+        if (::GetProcessIoCounters(processHandle, &ioCounters) != FALSE)
+        {
+            processRecord.rawIoBytes =
+                static_cast<std::uint64_t>(ioCounters.ReadTransferCount) +
+                static_cast<std::uint64_t>(ioCounters.WriteTransferCount) +
+                static_cast<std::uint64_t>(ioCounters.OtherTransferCount);
+        }
+
+        // 若路径未填，顺带补一次路径。
+        if (processRecord.imagePath.empty())
+        {
+            processRecord.imagePath = QueryProcessPathByHandle(processHandle);
+        }
+
+        // 动态刷新阶段顺带更新优先级/架构文本，便于详情窗口实时展示。
+        processRecord.priorityText = QueryPriorityTextByHandle(processHandle);
+        if (processRecord.architectureText.empty() || processRecord.architectureText == "Unknown")
+        {
+            processRecord.architectureText = QueryProcessArchitectureByHandle(processHandle);
+        }
+        ::CloseHandle(processHandle);
+
+        // GPU/Net 当前预留，统一置零。
+        processRecord.gpuPercent = 0.0;
+        processRecord.netKBps = 0.0;
+        processRecord.dynamicCountersReady = true;
+        return true;
+    }
+
+    bool FillProcessStaticDetails(ProcessRecord& processRecord, const bool includeSignatureCheck)
+    {
+        // 静态详情阶段需要更多权限用于读取命令行/令牌信息。
+        if (processRecord.pid == 0)
+        {
+            // PID 0（Idle）没有常规用户态映像，签名逻辑也不适用。
+            processRecord.signatureState = includeSignatureCheck ? "Unknown" : "Pending";
+            processRecord.architectureText = "N/A";
+            processRecord.priorityText = "Idle";
+            processRecord.staticDetailsReady = true;
+            return true;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+            FALSE,
+            ToDwordPid(processRecord.pid));
+        if (processHandle == nullptr)
+        {
+            processRecord.staticDetailsReady = false;
+            return false;
+        }
+
+        // 可执行路径。
+        if (processRecord.imagePath.empty())
+        {
+            processRecord.imagePath = QueryProcessPathByHandle(processHandle);
+        }
+
+        // 进程名兜底：从路径提取文件名。
+        if (processRecord.processName.empty())
+        {
+            processRecord.processName = ExtractFileNameFromPath(processRecord.imagePath);
+        }
+
+        // 命令行、用户、管理员状态。
+        processRecord.commandLine = QueryProcessCommandLineByHandle(processHandle);
+        processRecord.userName = QueryProcessUserNameByHandle(processHandle);
+        processRecord.isAdmin = QueryProcessIsElevatedByHandle(processHandle);
+        processRecord.architectureText = QueryProcessArchitectureByHandle(processHandle);
+        processRecord.priorityText = QueryPriorityTextByHandle(processHandle);
+
+        // 若创建时间尚未填，尽量补齐。
+        if (processRecord.creationTime100ns == 0)
+        {
+            FILETIME creationTime{};
+            FILETIME exitTime{};
+            FILETIME kernelTime{};
+            FILETIME userTime{};
+            if (::GetProcessTimes(processHandle, &creationTime, &exitTime, &kernelTime, &userTime) != FALSE)
+            {
+                processRecord.creationTime100ns = ks::str::FileTimeToUint64(
+                    creationTime.dwHighDateTime,
+                    creationTime.dwLowDateTime);
+            }
+        }
+
+        if (!processRecord.startTimeText.empty() || processRecord.creationTime100ns == 0)
+        {
+            // 无需重复格式化。
+        }
+        else
+        {
+            processRecord.startTimeText = ks::str::FileTime100nsToLocalText(processRecord.creationTime100ns);
+        }
+
+        ::CloseHandle(processHandle);
+
+        // 数字签名校验通常相对耗时：
+        // - 详细模式：执行真实签名校验；
+        // - 快速模式：仅标记为 Pending，后续详细模式再补齐。
+        if (includeSignatureCheck)
+        {
+            processRecord.signatureState = QueryFileSignatureState(processRecord.imagePath);
+        }
+        else if (processRecord.signatureState.empty())
+        {
+            processRecord.signatureState = "Pending";
+        }
+
+        // 清理不可见字符，防止表格显示异常。
+        ks::str::ReplaceAllInPlace(processRecord.commandLine, "\r", " ");
+        ks::str::ReplaceAllInPlace(processRecord.commandLine, "\n", " ");
+        processRecord.commandLine = ks::str::TrimCopy(processRecord.commandLine);
+
+        // staticDetailsReady 在这里表示“基础静态字段可用”，
+        // 即便签名处于 Pending 也算可展示，后续可按需补签名。
+        processRecord.staticDetailsReady = true;
+        return true;
+    }
+
+    void UpdateDerivedCounters(
+        ProcessRecord& processRecord,
+        const CounterSample* previousSample,
+        CounterSample& nextSampleOut,
+        const std::uint32_t logicalCpuCount,
+        const std::uint64_t currentTick100ns)
+    {
+        // 先写入下一轮样本，保证调用方无论成功失败都可更新基准。
+        nextSampleOut.cpuTime100ns = processRecord.rawCpuTime100ns;
+        nextSampleOut.ioBytes = processRecord.rawIoBytes;
+        nextSampleOut.sampleTick100ns = currentTick100ns;
+
+        // RAM 直接由工作集实时换算。
+        processRecord.ramMB = static_cast<double>(processRecord.rawWorkingSetBytes) / (1024.0 * 1024.0);
+
+        // 无历史样本时，CPU/Disk 无法计算差值，置 0。
+        if (previousSample == nullptr)
+        {
+            processRecord.cpuPercent = 0.0;
+            processRecord.diskMBps = 0.0;
+            processRecord.gpuPercent = 0.0;
+            processRecord.netKBps = 0.0;
+            return;
+        }
+
+        // 采样间隔过小或时钟回退时，避免除零。
+        if (currentTick100ns <= previousSample->sampleTick100ns)
+        {
+            processRecord.cpuPercent = 0.0;
+            processRecord.diskMBps = 0.0;
+            processRecord.gpuPercent = 0.0;
+            processRecord.netKBps = 0.0;
+            return;
+        }
+
+        const std::uint64_t deltaTick100ns = currentTick100ns - previousSample->sampleTick100ns;
+        const std::uint64_t deltaCpu100ns =
+            (processRecord.rawCpuTime100ns >= previousSample->cpuTime100ns)
+            ? (processRecord.rawCpuTime100ns - previousSample->cpuTime100ns)
+            : 0;
+        const std::uint64_t deltaIoBytes =
+            (processRecord.rawIoBytes >= previousSample->ioBytes)
+            ? (processRecord.rawIoBytes - previousSample->ioBytes)
+            : 0;
+
+        // CPU 百分比换算：
+        // deltaCpu / deltaWall / logicalCpuCount * 100。
+        const double cpuCountSafe = std::max(1u, logicalCpuCount);
+        const double cpuPercent = (static_cast<double>(deltaCpu100ns) / static_cast<double>(deltaTick100ns)) * (100.0 / cpuCountSafe);
+        processRecord.cpuPercent = std::clamp(cpuPercent, 0.0, 100.0);
+
+        // 为避免“小于显示精度但非零”的进程看起来恒为 0，
+        // 只要 CPU 增量确实大于 0，就给一个最小可见值 0.01%。
+        if (deltaCpu100ns > 0 && processRecord.cpuPercent < 0.01)
+        {
+            processRecord.cpuPercent = 0.01;
+        }
+
+        // Disk 吞吐换算：deltaIoBytes / deltaSeconds -> MB/s。
+        const double deltaSeconds = static_cast<double>(deltaTick100ns) / 10000000.0;
+        if (deltaSeconds > 0.0)
+        {
+            processRecord.diskMBps = (static_cast<double>(deltaIoBytes) / deltaSeconds) / (1024.0 * 1024.0);
+        }
+        else
+        {
+            processRecord.diskMBps = 0.0;
+        }
+
+        // GPU/Net 当前预留，暂置 0；后续可接入 ETW/PDH。
+        processRecord.gpuPercent = 0.0;
+        processRecord.netKBps = 0.0;
+    }
+
+    std::vector<ProcessRecord> EnumerateProcesses(
+        const ProcessEnumStrategy strategy,
+        ProcessEnumStrategy* const actualStrategyOut)
+    {
+        // 内部 lambda：Toolhelp 路径。
+        const auto enumerateBySnapshot = []() -> std::vector<ProcessRecord>
+            {
+                std::vector<ProcessRecord> processList;
+
+                HANDLE snapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if (snapshotHandle == INVALID_HANDLE_VALUE)
+                {
+                    return processList;
+                }
+
+                PROCESSENTRY32W processEntry{};
+                processEntry.dwSize = sizeof(processEntry);
+                if (::Process32FirstW(snapshotHandle, &processEntry) == FALSE)
+                {
+                    ::CloseHandle(snapshotHandle);
+                    return processList;
+                }
+
+                // 遍历快照并补动态计数器。
+                do
+                {
+                    ProcessRecord processRecord{};
+                    processRecord.pid = static_cast<std::uint32_t>(processEntry.th32ProcessID);
+                    processRecord.parentPid = static_cast<std::uint32_t>(processEntry.th32ParentProcessID);
+                    processRecord.threadCount = static_cast<std::uint32_t>(processEntry.cntThreads);
+                    processRecord.processName = ks::str::Utf16ToUtf8(processEntry.szExeFile);
+
+                    DWORD sessionId = 0;
+                    if (::ProcessIdToSessionId(ToDwordPid(processRecord.pid), &sessionId) != FALSE)
+                    {
+                        processRecord.sessionId = static_cast<std::uint32_t>(sessionId);
+                    }
+
+                    // Snapshot 本身不给出 CPU/RAM/IO，需要额外查询。
+                    RefreshProcessDynamicCounters(processRecord);
+                    processList.push_back(std::move(processRecord));
+                } while (::Process32NextW(snapshotHandle, &processEntry) != FALSE);
+
+                ::CloseHandle(snapshotHandle);
+                return processList;
+            };
+
+        // 内部 lambda：NtQuerySystemInformation 路径。
+        const auto enumerateByNtQuery = []() -> std::vector<ProcessRecord>
+            {
+                std::vector<ProcessRecord> processList;
+
+                const auto ntQuerySystemInformation = reinterpret_cast<NtQuerySystemInformationFn>(
+                    GetNtdllProcAddress("NtQuerySystemInformation"));
+                if (ntQuerySystemInformation == nullptr)
+                {
+                    return processList;
+                }
+
+                // 缓冲区按返回码动态扩容。
+                ULONG bufferLength = 1 * 1024 * 1024;
+                std::vector<BYTE> informationBuffer(bufferLength);
+                NTSTATUS queryStatus = ntQuerySystemInformation(
+                    SystemProcessInformation,
+                    informationBuffer.data(),
+                    bufferLength,
+                    &bufferLength);
+
+                while (queryStatus == StatusInfoLengthMismatch)
+                {
+                    bufferLength = (bufferLength * 3) / 2 + 64 * 1024;
+                    informationBuffer.resize(bufferLength);
+                    queryStatus = ntQuerySystemInformation(
+                        SystemProcessInformation,
+                        informationBuffer.data(),
+                        bufferLength,
+                        &bufferLength);
+                }
+
+                if (!NT_SUCCESS(queryStatus))
+                {
+                    return processList;
+                }
+
+                // 按 NextEntryOffset 遍历链式结构。
+                BYTE* currentPointer = informationBuffer.data();
+                while (currentPointer != nullptr)
+                {
+                    const auto* processInfo = reinterpret_cast<const SystemProcessInformationRecord*>(currentPointer);
+                    ProcessRecord processRecord{};
+
+                    processRecord.pid = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(processInfo->UniqueProcessId));
+                    processRecord.parentPid = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(processInfo->InheritedFromUniqueProcessId));
+                    processRecord.threadCount = static_cast<std::uint32_t>(processInfo->NumberOfThreads);
+                    processRecord.handleCount = static_cast<std::uint32_t>(processInfo->HandleCount);
+                    processRecord.sessionId = static_cast<std::uint32_t>(processInfo->SessionId);
+                    processRecord.creationTime100ns = static_cast<std::uint64_t>(processInfo->CreateTime.QuadPart);
+                    processRecord.rawCpuTime100ns = static_cast<std::uint64_t>(processInfo->KernelTime.QuadPart + processInfo->UserTime.QuadPart);
+                    processRecord.rawWorkingSetBytes = static_cast<std::uint64_t>(processInfo->WorkingSetSize);
+                    processRecord.rawIoBytes =
+                        static_cast<std::uint64_t>(processInfo->ReadTransferCount.QuadPart) +
+                        static_cast<std::uint64_t>(processInfo->WriteTransferCount.QuadPart) +
+                        static_cast<std::uint64_t>(processInfo->OtherTransferCount.QuadPart);
+                    processRecord.ramMB = static_cast<double>(processRecord.rawWorkingSetBytes) / (1024.0 * 1024.0);
+                    processRecord.startTimeText = ks::str::FileTime100nsToLocalText(processRecord.creationTime100ns);
+                    processRecord.dynamicCountersReady = true;
+
+                    if (processInfo->ImageName.Buffer != nullptr && processInfo->ImageName.Length > 0)
+                    {
+                        const std::wstring imageName(
+                            processInfo->ImageName.Buffer,
+                            static_cast<std::size_t>(processInfo->ImageName.Length / sizeof(wchar_t)));
+                        processRecord.processName = ks::str::Utf16ToUtf8(imageName);
+                    }
+                    else
+                    {
+                        // 系统内核进程常见兜底命名。
+                        if (processRecord.pid == 0)
+                        {
+                            processRecord.processName = "System Idle Process";
+                        }
+                        else if (processRecord.pid == 4)
+                        {
+                            processRecord.processName = "System";
+                        }
+                        else
+                        {
+                            processRecord.processName = "Unknown";
+                        }
+                    }
+
+                    processList.push_back(std::move(processRecord));
+
+                    if (processInfo->NextEntryOffset == 0)
+                    {
+                        break;
+                    }
+                    currentPointer += processInfo->NextEntryOffset;
+                }
+
+                return processList;
+            };
+
+        // 按策略执行并处理回退逻辑。
+        if (strategy == ProcessEnumStrategy::SnapshotProcess32)
+        {
+            if (actualStrategyOut != nullptr)
+            {
+                *actualStrategyOut = ProcessEnumStrategy::SnapshotProcess32;
+            }
+            return enumerateBySnapshot();
+        }
+        if (strategy == ProcessEnumStrategy::NtQuerySystemInfo)
+        {
+            if (actualStrategyOut != nullptr)
+            {
+                *actualStrategyOut = ProcessEnumStrategy::NtQuerySystemInfo;
+            }
+            return enumerateByNtQuery();
+        }
+
+        // Auto：优先 NtQuery，失败回退 Snapshot。
+        std::vector<ProcessRecord> processList = enumerateByNtQuery();
+        if (!processList.empty())
+        {
+            if (actualStrategyOut != nullptr)
+            {
+                *actualStrategyOut = ProcessEnumStrategy::NtQuerySystemInfo;
+            }
+            return processList;
+        }
+        if (actualStrategyOut != nullptr)
+        {
+            *actualStrategyOut = ProcessEnumStrategy::SnapshotProcess32;
+        }
+        return enumerateBySnapshot();
+    }
+
+    std::string QueryProcessPathByPid(const std::uint32_t pid)
+    {
+        if (pid == 0)
+        {
+            return std::string();
+        }
+
+        const HANDLE processHandle = ::OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            return std::string();
+        }
+
+        std::string processPath = QueryProcessPathByHandle(processHandle);
+        ::CloseHandle(processHandle);
+        return processPath;
+    }
+
+    std::string GetProcessNameByPID(const std::uint32_t pid)
+    {
+        // 优先路径提取文件名，失败再回退快照枚举。
+        const std::string processPath = QueryProcessPathByPid(pid);
+        if (!processPath.empty())
+        {
+            return ExtractFileNameFromPath(processPath);
+        }
+
+        const std::vector<ProcessRecord> processList = EnumerateProcesses(ProcessEnumStrategy::SnapshotProcess32);
+        for (const ProcessRecord& processRecord : processList)
+        {
+            if (processRecord.pid == pid)
+            {
+                return processRecord.processName;
+            }
+        }
+        return std::string();
+    }
+
+    bool ExecuteTaskKill(const std::uint32_t pid, const bool forceKill, std::string* const errorMessage)
+    {
+        // 通过 cmd /C taskkill 执行，确保行为与用户手工命令一致。
+        std::wstring commandLine = L"cmd.exe /C taskkill /PID " + std::to_wstring(pid);
+        if (forceKill)
+        {
+            commandLine += L" /F";
+        }
+
+        STARTUPINFOW startupInfo{};
+        startupInfo.cb = sizeof(startupInfo);
+        PROCESS_INFORMATION processInfo{};
+
+        std::vector<wchar_t> mutableCommandLine(commandLine.begin(), commandLine.end());
+        mutableCommandLine.push_back(L'\0');
+
+        const BOOL createResult = ::CreateProcessW(
+            nullptr,
+            mutableCommandLine.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            nullptr,
+            &startupInfo,
+            &processInfo);
+        if (createResult == FALSE)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "CreateProcess(taskkill) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        ::WaitForSingleObject(processInfo.hProcess, 10000);
+        DWORD exitCode = 0;
+        ::GetExitCodeProcess(processInfo.hProcess, &exitCode);
+        ::CloseHandle(processInfo.hThread);
+        ::CloseHandle(processInfo.hProcess);
+
+        if (exitCode == 0)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            std::ostringstream stream;
+            stream << "taskkill failed, exit code=" << exitCode;
+            *errorMessage = stream.str();
+        }
+        return false;
+    }
+
+    bool TerminateProcessByWin32(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        const HANDLE processHandle = ::OpenProcess(PROCESS_TERMINATE, FALSE, ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(PROCESS_TERMINATE) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const BOOL terminateResult = ::TerminateProcess(processHandle, 1);
+        const DWORD terminateError = ::GetLastError();
+        ::CloseHandle(processHandle);
+
+        if (terminateResult != FALSE)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "TerminateProcess failed: " + FormatLastErrorMessage(terminateError);
+        }
+        return false;
+    }
+
+    bool TerminateAllThreadsByPid(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        HANDLE snapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snapshotHandle == INVALID_HANDLE_VALUE)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "CreateToolhelp32Snapshot(THREAD) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        THREADENTRY32 threadEntry{};
+        threadEntry.dwSize = sizeof(threadEntry);
+        if (::Thread32First(snapshotHandle, &threadEntry) == FALSE)
+        {
+            ::CloseHandle(snapshotHandle);
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Thread32First failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        std::uint32_t terminatedCount = 0;
+        do
+        {
+            if (threadEntry.th32OwnerProcessID != pid)
+            {
+                continue;
+            }
+
+            const HANDLE threadHandle = ::OpenThread(THREAD_TERMINATE, FALSE, threadEntry.th32ThreadID);
+            if (threadHandle == nullptr)
+            {
+                continue;
+            }
+
+            if (::TerminateThread(threadHandle, 1) != FALSE)
+            {
+                ++terminatedCount;
+            }
+            ::CloseHandle(threadHandle);
+        } while (::Thread32Next(snapshotHandle, &threadEntry) != FALSE);
+
+        ::CloseHandle(snapshotHandle);
+        if (terminatedCount > 0)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "No thread terminated (possible access denied or process has exited).";
+        }
+        return false;
+    }
+
+    bool InjectInvalidShellcode(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        const HANDLE processHandle = ::OpenProcess(
+            PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
+            FALSE,
+            ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(for injection) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        // 无效 shellcode：UD2 + RET，用于触发非法指令异常。
+        const BYTE invalidShellcode[] = { 0x0F, 0x0B, 0xC3 };
+        void* remoteMemory = ::VirtualAllocEx(
+            processHandle,
+            nullptr,
+            sizeof(invalidShellcode),
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE);
+        if (remoteMemory == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "VirtualAllocEx failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        SIZE_T bytesWritten = 0;
+        const BOOL writeResult = ::WriteProcessMemory(
+            processHandle,
+            remoteMemory,
+            invalidShellcode,
+            sizeof(invalidShellcode),
+            &bytesWritten);
+        if (writeResult == FALSE || bytesWritten != sizeof(invalidShellcode))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "WriteProcessMemory failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            ::VirtualFreeEx(processHandle, remoteMemory, 0, MEM_RELEASE);
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        // 启动远程线程执行无效代码。
+        const HANDLE remoteThread = ::CreateRemoteThread(
+            processHandle,
+            nullptr,
+            0,
+            reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteMemory),
+            nullptr,
+            0,
+            nullptr);
+        if (remoteThread == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "CreateRemoteThread failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            ::VirtualFreeEx(processHandle, remoteMemory, 0, MEM_RELEASE);
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        ::WaitForSingleObject(remoteThread, 1500);
+        ::CloseHandle(remoteThread);
+        ::CloseHandle(processHandle);
+
+        // 这里不释放 remoteMemory：目标进程可能已崩溃或退出，释放意义不大。
+        return true;
+    }
+
+    bool SuspendProcess(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        const auto ntSuspendProcess = reinterpret_cast<NtSuspendProcessFn>(
+            GetNtdllProcAddress("NtSuspendProcess"));
+        if (ntSuspendProcess == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "NtSuspendProcess not available.";
+            }
+            return false;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(ProcessSuspendResumeAccess, FALSE, ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(PROCESS_SUSPEND_RESUME) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const NTSTATUS suspendStatus = ntSuspendProcess(processHandle);
+        ::CloseHandle(processHandle);
+        if (NT_SUCCESS(suspendStatus))
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = FormatNtStatusMessage(suspendStatus, "NtSuspendProcess failed");
+        }
+        return false;
+    }
+
+    bool ResumeProcess(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        const auto ntResumeProcess = reinterpret_cast<NtResumeProcessFn>(
+            GetNtdllProcAddress("NtResumeProcess"));
+        if (ntResumeProcess == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "NtResumeProcess not available.";
+            }
+            return false;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(ProcessSuspendResumeAccess, FALSE, ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(PROCESS_SUSPEND_RESUME) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const NTSTATUS resumeStatus = ntResumeProcess(processHandle);
+        ::CloseHandle(processHandle);
+        if (NT_SUCCESS(resumeStatus))
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = FormatNtStatusMessage(resumeStatus, "NtResumeProcess failed");
+        }
+        return false;
+    }
+
+    bool SetProcessCriticalFlag(const std::uint32_t pid, const bool enableCritical, std::string* const errorMessage)
+    {
+        const auto ntSetInformationProcess = reinterpret_cast<NtSetInformationProcessFn>(
+            GetNtdllProcAddress("NtSetInformationProcess"));
+        if (ntSetInformationProcess == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "NtSetInformationProcess not available.";
+            }
+            return false;
+        }
+
+        // 设置关键进程通常需要 SeDebugPrivilege。
+        EnablePrivilege(SE_DEBUG_NAME);
+
+        const HANDLE processHandle = ::OpenProcess(PROCESS_SET_INFORMATION, FALSE, ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(PROCESS_SET_INFORMATION) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        ULONG criticalFlag = enableCritical ? 1UL : 0UL;
+        const NTSTATUS setStatus = ntSetInformationProcess(
+            processHandle,
+            ProcessBreakOnTerminationInfoClass,
+            &criticalFlag,
+            static_cast<ULONG>(sizeof(criticalFlag)));
+        ::CloseHandle(processHandle);
+
+        if (NT_SUCCESS(setStatus))
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = FormatNtStatusMessage(
+                setStatus,
+                enableCritical ? "Set critical process failed" : "Clear critical process failed");
+        }
+        return false;
+    }
+
+    bool SetProcessPriority(const std::uint32_t pid, const ProcessPriorityLevel priorityLevel, std::string* const errorMessage)
+    {
+        DWORD priorityClass = NORMAL_PRIORITY_CLASS;
+        switch (priorityLevel)
+        {
+        case ProcessPriorityLevel::Idle:
+            priorityClass = IDLE_PRIORITY_CLASS;
+            break;
+        case ProcessPriorityLevel::BelowNormal:
+            priorityClass = BELOW_NORMAL_PRIORITY_CLASS;
+            break;
+        case ProcessPriorityLevel::Normal:
+            priorityClass = NORMAL_PRIORITY_CLASS;
+            break;
+        case ProcessPriorityLevel::AboveNormal:
+            priorityClass = ABOVE_NORMAL_PRIORITY_CLASS;
+            break;
+        case ProcessPriorityLevel::High:
+            priorityClass = HIGH_PRIORITY_CLASS;
+            break;
+        case ProcessPriorityLevel::Realtime:
+            priorityClass = REALTIME_PRIORITY_CLASS;
+            break;
+        default:
+            priorityClass = NORMAL_PRIORITY_CLASS;
+            break;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(PROCESS_SET_INFORMATION, FALSE, ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(PROCESS_SET_INFORMATION) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const BOOL setResult = ::SetPriorityClass(processHandle, priorityClass);
+        const DWORD setError = ::GetLastError();
+        ::CloseHandle(processHandle);
+        if (setResult != FALSE)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "SetPriorityClass failed: " + FormatLastErrorMessage(setError);
+        }
+        return false;
+    }
+
+    bool OpenProcessFolder(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        const std::string processPath = QueryProcessPathByPid(pid);
+        if (processPath.empty())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Process path is empty or inaccessible.";
+            }
+            return false;
+        }
+
+        return OpenInExplorerByPath(processPath, errorMessage);
+    }
+
+    bool QueryProcessStaticDetailByPid(const std::uint32_t pid, ProcessRecord& outRecord)
+    {
+        outRecord = ProcessRecord{};
+        outRecord.pid = pid;
+        outRecord.processName = GetProcessNameByPID(pid);
+
+        // 先刷新动态计数器，保证创建时间/内存等字段尽可能可用。
+        RefreshProcessDynamicCounters(outRecord);
+
+        // 再补静态详情（签名默认开启）。
+        const bool staticOk = FillProcessStaticDetails(outRecord, true);
+
+        // 最后做一次兜底：若进程名仍为空，用 PID 文本占位。
+        if (outRecord.processName.empty())
+        {
+            outRecord.processName = "PID_" + std::to_string(pid);
+        }
+        return staticOk;
+    }
+
+    ProcessModuleSnapshot EnumerateProcessModulesAndThreads(
+        const std::uint32_t pid,
+        const bool includeSignatureCheck)
+    {
+        ProcessModuleSnapshot snapshot;
+        snapshot.modules.clear();
+        snapshot.threads.clear();
+
+        // 先枚举线程，供模块行填充 ThreadID 信息。
+        std::vector<std::uint32_t> threadIdList;
+        HANDLE threadSnapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (threadSnapshotHandle != INVALID_HANDLE_VALUE)
+        {
+            THREADENTRY32 threadEntry{};
+            threadEntry.dwSize = sizeof(threadEntry);
+            if (::Thread32First(threadSnapshotHandle, &threadEntry) != FALSE)
+            {
+                do
+                {
+                    if (threadEntry.th32OwnerProcessID != pid)
+                    {
+                        continue;
+                    }
+
+                    ProcessThreadRecord threadRecord{};
+                    threadRecord.threadId = static_cast<std::uint32_t>(threadEntry.th32ThreadID);
+                    threadRecord.ownerPid = static_cast<std::uint32_t>(threadEntry.th32OwnerProcessID);
+                    threadRecord.basePriority = static_cast<int>(threadEntry.tpBasePri);
+                    threadRecord.stateText = "Running";
+                    snapshot.threads.push_back(threadRecord);
+                    threadIdList.push_back(threadRecord.threadId);
+                } while (::Thread32Next(threadSnapshotHandle, &threadEntry) != FALSE);
+            }
+            ::CloseHandle(threadSnapshotHandle);
+        }
+
+        // 再枚举模块。
+        HANDLE moduleSnapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, ToDwordPid(pid));
+        if (moduleSnapshotHandle == INVALID_HANDLE_VALUE)
+        {
+            return snapshot;
+        }
+
+        MODULEENTRY32W moduleEntry{};
+        moduleEntry.dwSize = sizeof(moduleEntry);
+        if (::Module32FirstW(moduleSnapshotHandle, &moduleEntry) == FALSE)
+        {
+            ::CloseHandle(moduleSnapshotHandle);
+            return snapshot;
+        }
+
+        do
+        {
+            ProcessModuleRecord moduleRecord{};
+            moduleRecord.moduleName = ks::str::Utf16ToUtf8(moduleEntry.szModule);
+            moduleRecord.modulePath = ks::str::Utf16ToUtf8(moduleEntry.szExePath);
+            moduleRecord.moduleBaseAddress = reinterpret_cast<std::uint64_t>(moduleEntry.modBaseAddr);
+            moduleRecord.moduleSizeBytes = static_cast<std::uint32_t>(moduleEntry.modBaseSize);
+            moduleRecord.entryPointRva = QueryImageEntryPointRvaByPath(moduleRecord.modulePath);
+            moduleRecord.runningState = "Loaded";
+            moduleRecord.signatureState =
+                includeSignatureCheck
+                ? QueryFileSignatureState(moduleRecord.modulePath)
+                : "Pending";
+
+            moduleRecord.representativeThreadId = threadIdList.empty() ? 0 : threadIdList.front();
+            moduleRecord.threadIdText = BuildThreadIdSummaryText(threadIdList);
+            snapshot.modules.push_back(std::move(moduleRecord));
+        } while (::Module32NextW(moduleSnapshotHandle, &moduleEntry) != FALSE);
+
+        ::CloseHandle(moduleSnapshotHandle);
+        return snapshot;
+    }
+
+    bool UnloadModuleByBaseAddress(
+        const std::uint32_t pid,
+        const std::uint64_t moduleBaseAddress,
+        std::string* const errorMessage)
+    {
+        const HANDLE processHandle = ::OpenProcess(
+            PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ,
+            FALSE,
+            ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(for unload module) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        FARPROC freeLibraryAddress = ::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"), "FreeLibrary");
+        if (freeLibraryAddress == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "GetProcAddress(FreeLibrary) failed.";
+            }
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        HANDLE remoteThread = ::CreateRemoteThread(
+            processHandle,
+            nullptr,
+            0,
+            reinterpret_cast<LPTHREAD_START_ROUTINE>(freeLibraryAddress),
+            reinterpret_cast<LPVOID>(moduleBaseAddress),
+            0,
+            nullptr);
+        if (remoteThread == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "CreateRemoteThread(FreeLibrary) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        ::WaitForSingleObject(remoteThread, 5000);
+        DWORD threadExitCode = 0;
+        ::GetExitCodeThread(remoteThread, &threadExitCode);
+        ::CloseHandle(remoteThread);
+        ::CloseHandle(processHandle);
+
+        if (threadExitCode != 0)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "FreeLibrary returned 0, module may not be unloaded.";
+        }
+        return false;
+    }
+
+    bool SuspendThreadById(const std::uint32_t threadId, std::string* const errorMessage)
+    {
+        const HANDLE threadHandle = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
+        if (threadHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenThread(THREAD_SUSPEND_RESUME) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const DWORD suspendResult = ::SuspendThread(threadHandle);
+        ::CloseHandle(threadHandle);
+        if (suspendResult != static_cast<DWORD>(-1))
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "SuspendThread failed: " + FormatLastErrorMessage(::GetLastError());
+        }
+        return false;
+    }
+
+    bool ResumeThreadById(const std::uint32_t threadId, std::string* const errorMessage)
+    {
+        const HANDLE threadHandle = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
+        if (threadHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenThread(THREAD_SUSPEND_RESUME) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const DWORD resumeResult = ::ResumeThread(threadHandle);
+        ::CloseHandle(threadHandle);
+        if (resumeResult != static_cast<DWORD>(-1))
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ResumeThread failed: " + FormatLastErrorMessage(::GetLastError());
+        }
+        return false;
+    }
+
+    bool TerminateThreadById(const std::uint32_t threadId, std::string* const errorMessage)
+    {
+        const HANDLE threadHandle = ::OpenThread(THREAD_TERMINATE, FALSE, threadId);
+        if (threadHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenThread(THREAD_TERMINATE) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const BOOL terminateResult = ::TerminateThread(threadHandle, 1);
+        const DWORD terminateError = ::GetLastError();
+        ::CloseHandle(threadHandle);
+        if (terminateResult != FALSE)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "TerminateThread failed: " + FormatLastErrorMessage(terminateError);
+        }
+        return false;
+    }
+
+    bool InjectDllByPath(const std::uint32_t pid, const std::string& dllPath, std::string* const errorMessage)
+    {
+        if (dllPath.empty())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "DLL path is empty.";
+            }
+            return false;
+        }
+
+        const std::wstring dllPathWide = ks::str::Utf8ToUtf16(dllPath);
+        if (dllPathWide.empty())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "DLL path UTF-8 -> UTF-16 conversion failed.";
+            }
+            return false;
+        }
+
+        const DWORD pathAttributes = ::GetFileAttributesW(dllPathWide.c_str());
+        if (pathAttributes == INVALID_FILE_ATTRIBUTES || (pathAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "DLL path does not exist or points to a directory.";
+            }
+            return false;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(
+            PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
+            FALSE,
+            ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(for DLL inject) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const std::size_t byteCount = (dllPathWide.size() + 1) * sizeof(wchar_t);
+        void* remotePathMemory = ::VirtualAllocEx(
+            processHandle,
+            nullptr,
+            byteCount,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE);
+        if (remotePathMemory == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "VirtualAllocEx(for DLL path) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        SIZE_T bytesWritten = 0;
+        if (::WriteProcessMemory(
+            processHandle,
+            remotePathMemory,
+            dllPathWide.c_str(),
+            byteCount,
+            &bytesWritten) == FALSE ||
+            bytesWritten != byteCount)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "WriteProcessMemory(DLL path) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            ::VirtualFreeEx(processHandle, remotePathMemory, 0, MEM_RELEASE);
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        FARPROC loadLibraryAddress = ::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW");
+        if (loadLibraryAddress == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "GetProcAddress(LoadLibraryW) failed.";
+            }
+            ::VirtualFreeEx(processHandle, remotePathMemory, 0, MEM_RELEASE);
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        HANDLE remoteThread = ::CreateRemoteThread(
+            processHandle,
+            nullptr,
+            0,
+            reinterpret_cast<LPTHREAD_START_ROUTINE>(loadLibraryAddress),
+            remotePathMemory,
+            0,
+            nullptr);
+        if (remoteThread == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "CreateRemoteThread(LoadLibraryW) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            ::VirtualFreeEx(processHandle, remotePathMemory, 0, MEM_RELEASE);
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        ::WaitForSingleObject(remoteThread, 10000);
+        DWORD threadExitCode = 0;
+        ::GetExitCodeThread(remoteThread, &threadExitCode);
+        ::CloseHandle(remoteThread);
+        ::VirtualFreeEx(processHandle, remotePathMemory, 0, MEM_RELEASE);
+        ::CloseHandle(processHandle);
+
+        if (threadExitCode != 0)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "LoadLibraryW returned NULL, DLL may not be loaded.";
+        }
+        return false;
+    }
+
+    bool InjectShellcodeBuffer(
+        const std::uint32_t pid,
+        const std::vector<std::uint8_t>& shellcodeBuffer,
+        std::string* const errorMessage)
+    {
+        if (shellcodeBuffer.empty())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Shellcode buffer is empty.";
+            }
+            return false;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(
+            PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
+            FALSE,
+            ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(for shellcode inject) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        void* remoteMemory = ::VirtualAllocEx(
+            processHandle,
+            nullptr,
+            shellcodeBuffer.size(),
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE);
+        if (remoteMemory == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "VirtualAllocEx(for shellcode) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        SIZE_T bytesWritten = 0;
+        if (::WriteProcessMemory(
+            processHandle,
+            remoteMemory,
+            shellcodeBuffer.data(),
+            shellcodeBuffer.size(),
+            &bytesWritten) == FALSE ||
+            bytesWritten != shellcodeBuffer.size())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "WriteProcessMemory(shellcode) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            ::VirtualFreeEx(processHandle, remoteMemory, 0, MEM_RELEASE);
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        HANDLE remoteThread = ::CreateRemoteThread(
+            processHandle,
+            nullptr,
+            0,
+            reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteMemory),
+            nullptr,
+            0,
+            nullptr);
+        if (remoteThread == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "CreateRemoteThread(shellcode) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            ::VirtualFreeEx(processHandle, remoteMemory, 0, MEM_RELEASE);
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        ::WaitForSingleObject(remoteThread, 2000);
+        ::CloseHandle(remoteThread);
+        ::CloseHandle(processHandle);
+
+        // 为避免 shellcode 仍在执行时释放内存导致异常，此处不主动释放 remoteMemory。
+        return true;
+    }
+
+    bool OpenFolderByPath(const std::string& targetPath, std::string* const errorMessage)
+    {
+        return OpenInExplorerByPath(targetPath, errorMessage);
+    }
+}

@@ -67,6 +67,9 @@
     <ClCompile Include="PrivilegeDock\PrivilegeDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ProcessDock\ProcessDetailWindow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="ProcessDock\ProcessDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -92,6 +95,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Framework\ProgressDockWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ksword\process\process.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ksword\string\string.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -126,6 +135,9 @@
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <QtMoc Include="ProcessDock\ProcessDetailWindow.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
     <QtMoc Include="ProcessDock\ProcessDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
@@ -153,6 +165,18 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Framework\ProgressDockWidget.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Ksword.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ksword\ksword.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ksword\process\process.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ksword\string\string.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="theme.h">

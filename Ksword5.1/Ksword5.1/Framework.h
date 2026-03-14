@@ -19,6 +19,10 @@
 // Windows 平台下使用 GUID 作为事件唯一标识。
 #include <guiddef.h>
 
+// Ksword.h：统一包含 ksword/ 目录下的 Win32 工具封装（进程/字符串等）。
+// 规范要求：Framework.h 作为全局入口，需要级联引入 Ksword.h。
+#include "Ksword.h"
+
 // 日志等级枚举：用于统一控制颜色、图标、筛选与导出文本。
 enum class kLogLevel
 {

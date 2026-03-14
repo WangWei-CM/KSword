@@ -11,5 +11,23 @@
         <file alias="log_clipboard.svg">Resource/Icon/file/clipboard_line.svg</file>
         <file alias="log_track.svg">Resource/Icon/editor/list_search_line.svg</file>
         <file alias="log_cancel_track.svg">Resource/Icon/system/close_line.svg</file>
+
+        <!-- 进程面板图标资源 -->
+        <file alias="process_main.svg">Resource/Icon/system/process_line.svg</file>
+        <file alias="process_refresh.svg">Resource/Icon/system/refresh_3_line.svg</file>
+        <file alias="process_tree.svg">Resource/Icon/nature/tree_line.svg</file>
+        <file alias="process_list.svg">Resource/Icon/system/scrollable_list_line.svg</file>
+        <file alias="process_start.svg">Resource/Icon/media/play_line.svg</file>
+        <file alias="process_pause.svg">Resource/Icon/media/pause_line.svg</file>
+        <file alias="process_copy_cell.svg">Resource/Icon/file/copy_line.svg</file>
+        <file alias="process_copy_row.svg">Resource/Icon/file/clipboard_line.svg</file>
+        <file alias="process_terminate.svg">Resource/Icon/system/close_circle_line.svg</file>
+        <file alias="process_suspend.svg">Resource/Icon/media/pause_circle_line.svg</file>
+        <file alias="process_resume.svg">Resource/Icon/media/play_circle_line.svg</file>
+        <file alias="process_critical.svg">Resource/Icon/system/safe_shield_line.svg</file>
+        <file alias="process_uncritical.svg">Resource/Icon/system/shield_line.svg</file>
+        <file alias="process_open_folder.svg">Resource/Icon/file/folder_open_line.svg</file>
+        <file alias="process_priority.svg">Resource/Icon/system/settings_2_line.svg</file>
+        <file alias="process_details.svg">Resource/Icon/file/file_info_line.svg</file>
     </qresource>
 </RCC>
