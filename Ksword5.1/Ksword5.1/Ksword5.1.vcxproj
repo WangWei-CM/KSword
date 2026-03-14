@@ -134,6 +134,8 @@
     <ClCompile Include="FileDock\FileDock.cpp" />
     <ClCompile Include="Framework\Log.cpp" />
     <ClCompile Include="Framework\LogDockWidget.cpp" />
+    <ClCompile Include="Framework\Progress.cpp" />
+    <ClCompile Include="Framework\ProgressDockWidget.cpp" />
     <ClCompile Include="KernelDock\KernelDock.cpp" />
     <ClCompile Include="MainWindow.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.cpp" />
@@ -164,6 +166,8 @@
   <ItemGroup>
     <ClInclude Include="Framework.h" />
     <ClInclude Include="Framework\LogDockWidget.h" />
+    <ClInclude Include="Framework\ProgressDockWidget.h" />
+    <ClInclude Include="theme.h" />
     <ClInclude Include="UI\UI_All.h" />
     <QtMoc Include="DriverDock\DriverDock.h" />
     <QtMoc Include="FileDock\FileDock.h" />

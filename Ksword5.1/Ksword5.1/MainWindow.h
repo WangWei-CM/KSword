@@ -29,6 +29,7 @@
 #include "OtherDock/OtherDock.h"
 
 class LogDockWidget; // 前置声明：日志 Dock 面板类型。
+class ProgressDockWidget; // 前置声明：当前操作进度面板类型。
 
 class MainWindow : public QMainWindow
 {
@@ -76,6 +77,7 @@ private:
     SettingsDock* m_settingsWidget;
     OtherDock* m_otherWidget;
     LogDockWidget* m_logWidget; // 日志输出 Dock 的可视化日志面板。
+    ProgressDockWidget* m_progressWidget; // 当前操作 Dock 的任务进度卡片面板。
 };
 
 #endif // MAINWINDOW_H

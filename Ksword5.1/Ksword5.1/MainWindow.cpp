@@ -8,6 +8,7 @@
 #include "UI/UI.css/UI_css.h"
 #include "Framework.h"
 #include "Framework/LogDockWidget.h"
+#include "Framework/ProgressDockWidget.h"
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -96,6 +97,7 @@ void MainWindow::initDockWidgets()
     m_settingsWidget = new SettingsDock(this);
     m_otherWidget = new OtherDock(this);
     m_logWidget = new LogDockWidget(this);
+    m_progressWidget = new ProgressDockWidget(this);
 
     // 使用辅助函数创建Dock Widgets
     auto createDockWidget = [this](QWidget* widget, const QString& title) -> ads::CDockWidget* {
@@ -121,7 +123,7 @@ void MainWindow::initDockWidgets()
     m_dockOther = createDockWidget(m_otherWidget, "其它");
 
     // 创建右侧和底部的基本Widgets
-    m_dockCurrentOp = createDockWidget(new QWidget(), "当前操作");
+    m_dockCurrentOp = createDockWidget(m_progressWidget, "当前操作");
     m_dockLog = createDockWidget(m_logWidget, "日志输出");
     m_dockImmediate = createDockWidget(new QWidget(), "即时窗口");
     m_dockMonitor = createDockWidget(new QWidget(), "监视面板");

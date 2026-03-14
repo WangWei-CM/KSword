@@ -1,4 +1,5 @@
 #include "LogDockWidget.h"
+#include "../theme.h"
 
 #include <QAction>
 #include <QApplication>
@@ -20,6 +21,7 @@
 #include <QTableWidgetItem>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QSvgRenderer>
 
 // Windows 下优先使用原生 shell 保存对话框（满足需求中的 explorer 场景）。
 #ifdef _WIN32
@@ -48,6 +50,110 @@ namespace
     constexpr const char* IconClipboardPath = ":/Icon/log_clipboard.svg";
     constexpr const char* IconTrackPath = ":/Icon/log_track.svg";
     constexpr const char* IconCancelTrackPath = ":/Icon/log_cancel_track.svg";
+
+    // DefaultButtonIconSize：日志面板按钮与菜单图标默认尺寸。
+    constexpr QSize DefaultButtonIconSize(16, 16);
+
+    // createBlueThemedIcon 作用：
+    // - 把 qrc 中的单色 SVG 图标重新着色为主题蓝色；
+    // - 避免修改原始 SVG 文件，实现运行时统一换色。
+    // 参数 resourcePath：qrc 资源路径（如 :/Icon/log_copy.svg）。
+    // 参数 iconSize：输出图标尺寸。
+    // 返回值：重着色后的 QIcon；若渲染失败则回退原图标。
+    QIcon createBlueThemedIcon(const char* resourcePath, const QSize& iconSize = DefaultButtonIconSize)
+    {
+        const QString iconPath = QString::fromUtf8(resourcePath);
+
+        // 使用 Qt SVG 渲染器把矢量图绘制到透明像素缓冲。
+        QSvgRenderer svgRenderer(iconPath);
+        if (!svgRenderer.isValid())
+        {
+            // 资源异常时回退默认图标，避免功能不可见。
+            return QIcon(iconPath);
+        }
+
+        QPixmap tintedPixmap(iconSize);
+        tintedPixmap.fill(Qt::transparent);
+
+        // 第一步先渲染原 SVG；第二步用 SourceIn 把非透明像素统一染成主题蓝。
+        QPainter painter(&tintedPixmap);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        svgRenderer.render(&painter, QRectF(0, 0, iconSize.width(), iconSize.height()));
+        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        painter.fillRect(tintedPixmap.rect(), KswordTheme::PrimaryBlueColor);
+        painter.end();
+
+        return QIcon(tintedPixmap);
+    }
+
+    // buildBlueCheckBoxStyleSheet 作用：
+    // - 生成日志面板统一复选框蓝色样式（文字/边框/选中态）。
+    // 返回值：QSS 字符串。
+    QString buildBlueCheckBoxStyleSheet()
+    {
+        return QStringLiteral(
+            "QCheckBox {"
+            "  color: %1;"
+            "  spacing: 6px;"
+            "}"
+            "QCheckBox::indicator {"
+            "  width: 14px;"
+            "  height: 14px;"
+            "  border: 1px solid %2;"
+            "  border-radius: 2px;"
+            "  background: #FFFFFF;"
+            "}"
+            "QCheckBox::indicator:checked {"
+            "  border: 1px solid %2;"
+            "  background: %3;"
+            "}")
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::PrimaryBlueBorderHex)
+            .arg(KswordTheme::PrimaryBlueHex);
+    }
+
+    // buildBlueButtonStyleSheet 作用：
+    // - 生成日志面板按钮蓝色边框与交互样式。
+    // 返回值：QSS 字符串。
+    QString buildBlueButtonStyleSheet()
+    {
+        return QStringLiteral(
+            "QPushButton {"
+            "  color: %1;"
+            "  background: #FFFFFF;"
+            "  border: 1px solid %2;"
+            "  border-radius: 3px;"
+            "  padding: 4px 12px;"
+            "}"
+            "QPushButton:hover {"
+            "  background: %3;"
+            "}"
+            "QPushButton:pressed {"
+            "  background: %4;"
+            "  color: #FFFFFF;"
+            "  border: 1px solid %4;"
+            "}")
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::PrimaryBlueBorderHex)
+            .arg(KswordTheme::PrimaryBlueHoverHex)
+            .arg(KswordTheme::PrimaryBluePressedHex);
+    }
+
+    // buildBlueHeaderStyleSheet 作用：
+    // - 统一日志表格头部文本为主题蓝色。
+    // 返回值：QHeaderView section 样式字符串。
+    QString buildBlueHeaderStyleSheet()
+    {
+        return QStringLiteral(
+            "QHeaderView::section {"
+            "  color: %1;"
+            "  background: #FFFFFF;"
+            "  border: 1px solid #E6E6E6;"
+            "  padding: 4px;"
+            "  font-weight: 600;"
+            "}")
+            .arg(KswordTheme::PrimaryBlueHex);
+    }
 }
 
 LogDockWidget::LogDockWidget(QWidget* parent)
@@ -98,9 +204,9 @@ void LogDockWidget::initializeUi()
     m_actionLayout->setContentsMargins(6, 0, 6, 0);
     m_actionLayout->setSpacing(8);
 
-    m_exportButton = new QPushButton(QIcon(IconExportPath), "导出日志", this);
-    m_clearButton = new QPushButton(QIcon(IconClearPath), "清空日志列表", this);
-    m_copyVisibleButton = new QPushButton(QIcon(IconCopyPath), "复制可见", this);
+    m_exportButton = new QPushButton(createBlueThemedIcon(IconExportPath), "导出日志", this);
+    m_clearButton = new QPushButton(createBlueThemedIcon(IconClearPath), "清空日志列表", this);
+    m_copyVisibleButton = new QPushButton(createBlueThemedIcon(IconCopyPath), "复制可见", this);
     m_autoScrollCheck = new QCheckBox("保持滚动到最底端", this);
 
     // 按钮均设置图标与提示，满足“尽量用图标 + 悬停说明功能”。
@@ -110,10 +216,25 @@ void LogDockWidget::initializeUi()
     m_autoScrollCheck->setToolTip("开启后表格刷新将自动滚动到最后一行");
 
     // 图标尺寸统一，保证按钮视觉一致。
-    m_exportButton->setIconSize(QSize(16, 16));
-    m_clearButton->setIconSize(QSize(16, 16));
-    m_copyVisibleButton->setIconSize(QSize(16, 16));
+    m_exportButton->setIconSize(DefaultButtonIconSize);
+    m_clearButton->setIconSize(DefaultButtonIconSize);
+    m_copyVisibleButton->setIconSize(DefaultButtonIconSize);
     m_autoScrollCheck->setChecked(true);
+
+    // 把日志区按钮边框统一改为欢迎页同款蓝色。
+    const QString blueButtonStyle = buildBlueButtonStyleSheet();
+    m_exportButton->setStyleSheet(blueButtonStyle);
+    m_clearButton->setStyleSheet(blueButtonStyle);
+    m_copyVisibleButton->setStyleSheet(blueButtonStyle);
+
+    // 把复选框文字与指示器统一改为欢迎页同款蓝色。
+    const QString blueCheckBoxStyle = buildBlueCheckBoxStyleSheet();
+    m_debugCheck->setStyleSheet(blueCheckBoxStyle);
+    m_infoCheck->setStyleSheet(blueCheckBoxStyle);
+    m_warnCheck->setStyleSheet(blueCheckBoxStyle);
+    m_errorCheck->setStyleSheet(blueCheckBoxStyle);
+    m_fatalCheck->setStyleSheet(blueCheckBoxStyle);
+    m_autoScrollCheck->setStyleSheet(blueCheckBoxStyle);
 
     m_actionLayout->addWidget(m_exportButton);
     m_actionLayout->addWidget(m_clearButton);
@@ -138,6 +259,7 @@ void LogDockWidget::initializeUi()
     horizontalHeader->setSectionResizeMode(ContentColumn, QHeaderView::Interactive);
     horizontalHeader->setSectionResizeMode(FileColumn, QHeaderView::Interactive);
     horizontalHeader->setSectionResizeMode(FunctionColumn, QHeaderView::Interactive);
+    horizontalHeader->setStyleSheet(buildBlueHeaderStyleSheet());
 
     // 等级列只容纳彩色方块，因此锁定窄列宽。
     m_logTable->setColumnWidth(LevelColumn, 24);
@@ -383,8 +505,8 @@ void LogDockWidget::showTableContextMenu(const QPoint& position)
     }
 
     QMenu contextMenu(this);
-    QAction* copyCellAction = contextMenu.addAction(QIcon(IconCopyPath), "复制单元格");
-    QAction* copyRowAction = contextMenu.addAction(QIcon(IconClipboardPath), "复制行");
+    QAction* copyCellAction = contextMenu.addAction(createBlueThemedIcon(IconCopyPath), "复制单元格");
+    QAction* copyRowAction = contextMenu.addAction(createBlueThemedIcon(IconClipboardPath), "复制行");
 
     // 若未点中有效单元格，则复制操作不可用。
     const bool hasValidCell = row >= 0 && column >= 0 && row < static_cast<int>(m_visibleEvents.size());
@@ -395,11 +517,11 @@ void LogDockWidget::showTableContextMenu(const QPoint& position)
     QAction* trackAction = nullptr;
     if (m_isTracking)
     {
-        trackAction = contextMenu.addAction(QIcon(IconCancelTrackPath), "取消追踪");
+        trackAction = contextMenu.addAction(createBlueThemedIcon(IconCancelTrackPath), "取消追踪");
     }
     else
     {
-        trackAction = contextMenu.addAction(QIcon(IconTrackPath), "跟踪事件");
+        trackAction = contextMenu.addAction(createBlueThemedIcon(IconTrackPath), "跟踪事件");
         trackAction->setEnabled(hasValidCell);
     }
 
