@@ -2,42 +2,51 @@
 #include <QMenu>
 #include <QAction>
 #include <QTabWidget>
-#include <QDockWidget>
 #include <QApplication>
 #include <QWidget>
-
+#pragma warning(disable: 4996)
 #include "UI/UI.css/UI_css.h"
+#include "Framework.h"
+#include "Framework/LogDockWidget.h"
+
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
-    QWidget* centralWidget = takeCentralWidget();
-    if (centralWidget) delete centralWidget;
-    QWidget* invisibleCentral = new QWidget(this);
-    invisibleCentral->setFixedWidth(1);
-    invisibleCentral->setStyleSheet(
-        "background: transparent;"
-        "border: none;"
-        "margin: 0px;"
-        "padding: 0px;"
-    );
-	// 上面是让中央区域不可见且不占空间。如果不删除，那么就会导致dock分割线拖动的时候留有空隙，但是如果完全删掉，监控面板无法正常拖动
-    // 因此设置宽度1
-    QPalette mainPalette = this->palette();
-    mainPalette.setColor(QPalette::Window, Qt::white); // Window 对应主窗口背景
-    this->setPalette(mainPalette);
-    setCentralWidget(invisibleCentral);
+    // 记录主窗口启动日志，便于验证日志系统与 UI 联动是否生效。
+    // 注意：使用 kLogEvent，避免与 QObject::event 命名冲突。
+    kLogEvent startupEvent;
+    info << startupEvent << "MainWindow 构造开始，准备初始化 Dock 系统。" << eol;
 
-    initMenus();
-    initCentralTab();
-    initDockWidgets();
+    // 创建ADS Dock Manager
+    m_pDockManager = new ads::CDockManager(this);
+    // 把 DockManager 设置为主窗口中央控件，确保 Dock 区域可见并可交互。
+    setCentralWidget(m_pDockManager);
+
+    // 设置窗口标题和大小
     setWindowTitle("Ksword5.1");
-    resize(1024, 768); // 初始窗口大小
-    setStyleSheet(QSS_MainWindow_TabWidget + QSS_MainWindow_dockStyle + QSS_MainWindow_dockStyle);
+    resize(1024, 768);
+
+    // 初始化菜单
+    initMenus();
+
+    // 初始化Dock Widgets
+    initDockWidgets();
+
+    // 设置Dock布局
+    setupDockLayout();
+
+    // 应用样式表
+    setStyleSheet(QSS_MainWindow_TabWidget + QSS_MainWindow_dockStyle);
+
+    // 记录初始化完成日志，方便用户在“日志输出”面板直接看到结果。
+    // 注意：使用 kLogEvent，避免与 QObject::event 命名冲突。
+    kLogEvent readyEvent;
+    info << readyEvent << "MainWindow 初始化完成，日志面板已加载。" << eol;
 }
 
 MainWindow::~MainWindow()
 {
-    // Qt父对象会自动释放子部件，此处可省略手动delete
+    // ADS会自动管理内存，无需手动删除
 }
 
 void MainWindow::initMenus()
@@ -45,15 +54,15 @@ void MainWindow::initMenus()
     // 文件菜单
     QMenu* fileMenu = menuBar()->addMenu("文件(&F)");
 
-    // 新建动作：占位，无具体行为
+    // 新建动作
     QAction* newAction = new QAction("新建(&N)", this);
     newAction->setShortcut(Qt::CTRL | Qt::Key_N);
     connect(newAction, &QAction::triggered, this, [this]() {
-        // 当前不创建新的标签页，保留为占位实现
+        // 占位实现
         });
     fileMenu->addAction(newAction);
 
-    // 打开动作（预留）
+    // 打开动作
     QAction* openAction = new QAction("打开(&O)", this);
     openAction->setShortcut(Qt::CTRL | Qt::Key_O);
     fileMenu->addAction(openAction);
@@ -68,143 +77,107 @@ void MainWindow::initMenus()
 
     // 其他菜单
     menuBar()->addMenu("编辑(&E)");
-    menuBar()->addMenu("视图(&V)");
-    menuBar()->addMenu("关于(&H)");
-}
 
-void MainWindow::initCentralTab()
-{
-    // 创建11个dock，内容为自定义Widget（空实现）并添加到左侧，然后tabify为一个堆叠
-    m_dockWelcome = new QDockWidget("欢迎", this);
-    m_dockWelcome->setObjectName("Dock_Welcome");
-    m_dockWelcome->setWidget(new WelcomeDock(this));
-    addDockWidget(Qt::LeftDockWidgetArea, m_dockWelcome);
-
-    m_dockProcess = new QDockWidget("进程", this);
-    m_dockProcess->setObjectName("Dock_Process");
-    m_dockProcess->setWidget(new ProcessDock(this));
-    addDockWidget(Qt::LeftDockWidgetArea, m_dockProcess);
-
-    m_dockNetwork = new QDockWidget("网络", this);
-    m_dockNetwork->setObjectName("Dock_Network");
-    m_dockNetwork->setWidget(new NetworkDock(this));
-    addDockWidget(Qt::LeftDockWidgetArea, m_dockNetwork);
-
-    m_dockMemory = new QDockWidget("内存", this);
-    m_dockMemory->setObjectName("Dock_Memory");
-    m_dockMemory->setWidget(new MemoryDock(this));
-    addDockWidget(Qt::LeftDockWidgetArea, m_dockMemory);
-
-    m_dockFile = new QDockWidget("文件", this);
-    m_dockFile->setObjectName("Dock_File");
-    m_dockFile->setWidget(new FileDock(this));
-    addDockWidget(Qt::LeftDockWidgetArea, m_dockFile);
-
-    m_dockDriver = new QDockWidget("驱动", this);
-    m_dockDriver->setObjectName("Dock_Driver");
-    m_dockDriver->setWidget(new DriverDock(this));
-    addDockWidget(Qt::LeftDockWidgetArea, m_dockDriver);
-
-    m_dockKernel = new QDockWidget("内核", this);
-    m_dockKernel->setObjectName("Dock_Kernel");
-    m_dockKernel->setWidget(new KernelDock(this));
-    addDockWidget(Qt::LeftDockWidgetArea, m_dockKernel);
-
-    m_dockMonitorTab = new QDockWidget("监控", this);
-    m_dockMonitorTab->setObjectName("Dock_MonitorTab");
-    m_dockMonitorTab->setWidget(new MonitorDock(this));
-    addDockWidget(Qt::LeftDockWidgetArea, m_dockMonitorTab);
-
-    m_dockPrivilege = new QDockWidget("权限", this);
-    m_dockPrivilege->setObjectName("Dock_Privilege");
-    m_dockPrivilege->setWidget(new PrivilegeDock(this));
-    addDockWidget(Qt::LeftDockWidgetArea, m_dockPrivilege);
-
-    m_dockSettings = new QDockWidget("设置", this);
-    m_dockSettings->setObjectName("Dock_Settings");
-    m_dockSettings->setWidget(new SettingsDock(this));
-    addDockWidget(Qt::LeftDockWidgetArea, m_dockSettings);
-
-    m_dockOther = new QDockWidget("其它", this);
-    m_dockOther->setObjectName("Dock_Other");
-    m_dockOther->setWidget(new OtherDock(this));
-    addDockWidget(Qt::LeftDockWidgetArea, m_dockOther);
-
-    // 将其堆叠为tab（以欢迎为基准）
-    tabifyDockWidget(m_dockWelcome, m_dockProcess);
-    tabifyDockWidget(m_dockWelcome, m_dockNetwork);
-    tabifyDockWidget(m_dockWelcome, m_dockMemory);
-    tabifyDockWidget(m_dockWelcome, m_dockFile);
-    tabifyDockWidget(m_dockWelcome, m_dockDriver);
-    tabifyDockWidget(m_dockWelcome, m_dockKernel);
-    tabifyDockWidget(m_dockWelcome, m_dockMonitorTab);
-    tabifyDockWidget(m_dockWelcome, m_dockPrivilege);
-    tabifyDockWidget(m_dockWelcome, m_dockSettings);
-    tabifyDockWidget(m_dockWelcome, m_dockOther);
-    m_dockWelcome->raise(); // 默认显示第一个tab
-
-    // 统一样式与特性
-    QList<QDockWidget*> docDocks = { m_dockWelcome, m_dockProcess, m_dockNetwork, m_dockMemory, m_dockFile, m_dockDriver, m_dockKernel, m_dockMonitorTab, m_dockPrivilege, m_dockSettings, m_dockOther };
-    for (auto dock : docDocks) {
-        dock->setStyleSheet(QSS_MainWindow_dockStyle);
-        dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetFloatable);
-        if (dock->widget()) {
-            dock->widget()->setStyleSheet("background-color: white; border: none;");
-        }
-    }
+    // 视图菜单将在initDockWidgets后添加Dock切换动作
 }
 
 void MainWindow::initDockWidgets()
 {
-    m_dockMonitor = new QDockWidget("监视面板", this);
-    m_dockMonitor->setWidget(new QWidget());
-    //m_dockMonitor->setWidget(createBasicPlaceholder("监视面板预留区"));
-    m_dockMonitor->setStyleSheet(QSS_MainWindow_dockStyle);  // 应用样式
-    addDockWidget(Qt::BottomDockWidgetArea, m_dockMonitor);
+    // 创建自定义Widgets
+    m_welcomeWidget = new WelcomeDock(this);
+    m_processWidget = new ProcessDock(this);
+    m_networkWidget = new NetworkDock(this);
+    m_memoryWidget = new MemoryDock(this);
+    m_fileWidget = new FileDock(this);
+    m_driverWidget = new DriverDock(this);
+    m_kernelWidget = new KernelDock(this);
+    m_monitorWidget = new MonitorDock(this);
+    m_privilegeWidget = new PrivilegeDock(this);
+    m_settingsWidget = new SettingsDock(this);
+    m_otherWidget = new OtherDock(this);
+    m_logWidget = new LogDockWidget(this);
 
+    // 使用辅助函数创建Dock Widgets
+    auto createDockWidget = [this](QWidget* widget, const QString& title) -> ads::CDockWidget* {
+        ads::CDockWidget* dock = new ads::CDockWidget(title);
+        dock->setWidget(widget);
+        dock->setFeature(ads::CDockWidget::DockWidgetClosable, true);
+        dock->setFeature(ads::CDockWidget::DockWidgetMovable, true);
+        dock->setFeature(ads::CDockWidget::DockWidgetFloatable, true);
+        return dock;
+        };
 
-    // 右侧停靠窗口：当前操作
-    m_dockCurrentOp = new QDockWidget("当前操作", this);
-    m_dockCurrentOp->setWidget(new QWidget());
-    m_dockCurrentOp->setStyleSheet(QSS_MainWindow_dockStyle);  // 应用样式
-    addDockWidget(Qt::RightDockWidgetArea, m_dockCurrentOp);
+    // 创建所有Dock Widgets
+    m_dockWelcome = createDockWidget(m_welcomeWidget, "欢迎");
+    m_dockProcess = createDockWidget(m_processWidget, "进程");
+    m_dockNetwork = createDockWidget(m_networkWidget, "网络");
+    m_dockMemory = createDockWidget(m_memoryWidget, "内存");
+    m_dockFile = createDockWidget(m_fileWidget, "文件");
+    m_dockDriver = createDockWidget(m_driverWidget, "驱动");
+    m_dockKernel = createDockWidget(m_kernelWidget, "内核");
+    m_dockMonitorTab = createDockWidget(m_monitorWidget, "监控");
+    m_dockPrivilege = createDockWidget(m_privilegeWidget, "权限");
+    m_dockSettings = createDockWidget(m_settingsWidget, "设置");
+    m_dockOther = createDockWidget(m_otherWidget, "其它");
 
-    // 设置允许 tab 化 与 嵌套（Qt 版本中没有 QMainWindow::AllowFloatingDocks）
-    setDockOptions(QMainWindow::AllowTabbedDocks | QMainWindow::AllowNestedDocks);
+    // 创建右侧和底部的基本Widgets
+    m_dockCurrentOp = createDockWidget(new QWidget(), "当前操作");
+    m_dockLog = createDockWidget(m_logWidget, "日志输出");
+    m_dockImmediate = createDockWidget(new QWidget(), "即时窗口");
+    m_dockMonitor = createDockWidget(new QWidget(), "监视面板");
 
-    // 右侧停靠窗口：日志输出（与当前操作合并为标签）
-    m_dockLog = new QDockWidget("日志输出", this);
-    m_dockLog->setWidget(new QWidget());
-    m_dockLog->setStyleSheet(QSS_MainWindow_dockStyle);  // 应用样式
-    tabifyDockWidget(m_dockCurrentOp, m_dockLog); // QMainWindow的方法
+    // 将Dock Widget的切换动作添加到菜单
+    QMenu* viewMenu = menuBar()->addMenu("视图(&V)");
+    QList<ads::CDockWidget*> allDocks = {
+        m_dockWelcome, m_dockProcess, m_dockNetwork, m_dockMemory,
+        m_dockFile, m_dockDriver, m_dockKernel, m_dockMonitorTab,
+        m_dockPrivilege, m_dockSettings, m_dockOther,
+        m_dockCurrentOp, m_dockLog, m_dockImmediate, m_dockMonitor
+    };
 
-    // 右侧停靠窗口：即时窗口
-    m_dockImmediate = new QDockWidget("即时窗口", this);
-    m_dockImmediate->setWidget(new QWidget());
-    m_dockImmediate->setStyleSheet(QSS_MainWindow_dockStyle);  // 应用样式
-    tabifyDockWidget(m_dockLog, m_dockImmediate);
-
-
-
-    QList<QDockWidget*> docks = { m_dockCurrentOp, m_dockLog, m_dockImmediate, m_dockMonitor };
-    auto dockFeatures = QDockWidget::DockWidgetMovable |
-        QDockWidget::DockWidgetClosable |
-        QDockWidget::DockWidgetFloatable;
-
-    for (auto dock : docks) {
-        dock->setStyleSheet(QSS_MainWindow_dockStyle); // 统一应用样式
-        dock->setFeatures(dockFeatures);              // 统一设置特性
-        if (dock->widget()) {
-            dock->widget()->setStyleSheet("background-color: white; border: none;");
-        }
+    for (auto dock : allDocks) {
+        viewMenu->addAction(dock->toggleViewAction());
+    }
+}
+#define ADS_TABIFY_DOCK_WIDGET_AVAILABLE
+void MainWindow::setupDockLayout()
+{
+    // 1. 初始化DockManager（若未在构造函数中初始化）
+    if (!m_pDockManager) {
+        m_pDockManager = new ads::CDockManager(this);
+        setCentralWidget(m_pDockManager);
     }
 
+    // 2. 左侧区域：先添加第一个DockWidget，获取其所在的DockArea
+    auto leftDockArea = m_pDockManager->addDockWidget(ads::LeftDockWidgetArea, m_dockWelcome);
 
-    // Ensure right/bottom docks are visible (in case they were closed or hidden by layout)
-    m_dockCurrentOp->show();
-    m_dockLog->show();
-    m_dockImmediate->show();
-    m_dockMonitor->show();
-    // 原先的 splitDockWidget 可能将监视面板移动到不可见位置并导致尺寸为0，已移除。
+    // 3. 使用正确的方法将其他DockWidget添加到同一个DockArea形成标签页
+    // 方法1: 使用addDockWidgetTabToArea（推荐）
+    m_pDockManager->addDockWidgetTabToArea(m_dockProcess, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockNetwork, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockMemory, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockFile, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockDriver, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockKernel, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockMonitorTab, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockPrivilege, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockSettings, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockOther, leftDockArea);
+
+    // 方法2: 或者使用addDockWidget并指定CenterDockWidgetArea
+    // m_pDockManager->addDockWidget(ads::CenterDockWidgetArea, m_dockProcess, leftDockArea);
+
+    // 4. 右侧区域：同理
+    auto rightDockArea = m_pDockManager->addDockWidget(ads::RightDockWidgetArea, m_dockCurrentOp);
+
+    // 使用正确的方法添加标签页
+    m_pDockManager->addDockWidgetTabToArea(m_dockLog, rightDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockImmediate, rightDockArea);
+
+    // 5. 底部区域（单独显示，不合并到标签页）
+    m_pDockManager->addDockWidget(ads::BottomDockWidgetArea, m_dockMonitor);
+
+    // 6. 设置默认显示的标签页
+    m_dockWelcome->raise();
+    m_dockCurrentOp->raise();
 }
-

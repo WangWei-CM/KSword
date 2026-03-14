@@ -1,0 +1,12 @@
+<RCC>
+    <qresource prefix="/Taskbar"/>
+    <qresource prefix="/Image">
+        <file>Resource/Image/MainLogo.png</file>
+    </qresource>
+    <qresource prefix="/Icon">
+        <file>Resource/Icon/exit_fill.svg</file>
+        <file>Resource/Icon/lock_line.svg</file>
+        <file>Resource/Icon/tool_line.svg</file>
+        <file>Resource/Icon/user_2_line.svg</file>
+    </qresource>
+</RCC>

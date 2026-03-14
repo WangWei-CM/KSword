@@ -36,13 +36,24 @@
     <Import Project="$(QtMsBuild)\qt_defaults.props" />
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
-    <QtInstall>Qt</QtInstall>
-    <QtModules>core;gui;network;widgets;charts</QtModules>
+    <!--
+      QtInstall 解析优先级（便于命令行构建）：
+      1) KSWORD_QT_DIR 环境变量（推荐）
+      2) QTDIR 环境变量
+      3) 旧配置名 "Qt"（依赖 Qt VS Tools 注册表映射）
+    -->
+    <QtInstall Condition="'$(KSWORD_QT_DIR)' != ''">$(KSWORD_QT_DIR)</QtInstall>
+    <QtInstall Condition="'$(QtInstall)' == '' and '$(QTDIR)' != ''">$(QTDIR)</QtInstall>
+    <QtInstall Condition="'$(QtInstall)' == ''">Qt</QtInstall>
+    <QtModules>core;gui;network;widgets;charts;svg</QtModules>
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
-    <QtInstall>Qt</QtInstall>
-    <QtModules>core;gui;widgets;charts</QtModules>
+    <!-- Release 与 Debug 保持同样的 QtInstall 解析策略 -->
+    <QtInstall Condition="'$(KSWORD_QT_DIR)' != ''">$(KSWORD_QT_DIR)</QtInstall>
+    <QtInstall Condition="'$(QtInstall)' == '' and '$(QTDIR)' != ''">$(QTDIR)</QtInstall>
+    <QtInstall Condition="'$(QtInstall)' == ''">Qt</QtInstall>
+    <QtModules>core;gui;widgets;charts;svg</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
   <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
@@ -60,8 +71,12 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
+    <ReferencePath>$(ReferencePath)</ReferencePath>
+    <LibraryPath>H:\Project\Ksword5.1\Ksword5.1\Ksword5.1\lib;$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+    <ReferencePath>$(ReferencePath)</ReferencePath>
+    <LibraryPath>H:\Project\Ksword5.1\Ksword5.1\Ksword5.1\lib;$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64)</LibraryPath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -70,14 +85,21 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
     </ClCompile>
+    <Link>
+      <AdditionalDependencies>qtadvanceddockingd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <LanguageStandard>stdcpp23</LanguageStandard>
-      <Optimization>MinSpace</Optimization>
+      <Optimization>Disabled</Optimization>
       <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
-      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
+    <Link>
+      <AdditionalDependencies>qtadvanceddocking.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
     <ClCompile>
@@ -110,6 +132,8 @@
   <ItemGroup>
     <ClCompile Include="DriverDock\DriverDock.cpp" />
     <ClCompile Include="FileDock\FileDock.cpp" />
+    <ClCompile Include="Framework\Log.cpp" />
+    <ClCompile Include="Framework\LogDockWidget.cpp" />
     <ClCompile Include="KernelDock\KernelDock.cpp" />
     <ClCompile Include="MainWindow.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.cpp" />
@@ -138,6 +162,8 @@
     <QtMoc Include="MainWindow.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Framework.h" />
+    <ClInclude Include="Framework\LogDockWidget.h" />
     <ClInclude Include="UI\UI_All.h" />
     <QtMoc Include="DriverDock\DriverDock.h" />
     <QtMoc Include="FileDock\FileDock.h" />

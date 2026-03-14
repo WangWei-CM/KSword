@@ -6,10 +6,16 @@
 #include <QDockWidget>
 #include <QMenuBar>
 #include <QMenu>
-#include <QAction>       // 补充QAction头文件（菜单动作需要）
-#include <QApplication>  // 补充QApplication头文件
-#include <QDragMoveEvent>  // 必须包含此头文件
-// 新增各dock头文件
+#include <QAction>
+#include <QApplication>
+#include <QDragMoveEvent>
+
+// ADS头文件
+#include "include/ads/DockManager.h"
+#include "include/ads/DockWidget.h"
+#include "include/ads/DockAreaWidget.h"
+
+// 自定义Dock头文件
 #include "WelcomeDock/WelcomeDock.h"
 #include "ProcessDock/ProcessDock.h"
 #include "NetworkDock/NetworkDock.h"
@@ -22,6 +28,8 @@
 #include "SettingsDock/SettingsDock.h"
 #include "OtherDock/OtherDock.h"
 
+class LogDockWidget; // 前置声明：日志 Dock 面板类型。
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -32,29 +40,42 @@ public:
 
 private:
     void initMenus();
-    void initCentralTab();
     void initDockWidgets();
-	void enableDockTabDragging();
+    void setupDockLayout();
 
-    // 文档tab区域的dock
-    QDockWidget* m_dockWelcome;
-    QDockWidget* m_dockProcess;
-    QDockWidget* m_dockNetwork;
-    QDockWidget* m_dockMemory;
-    QDockWidget* m_dockFile;
-    QDockWidget* m_dockDriver;
-    QDockWidget* m_dockKernel;
-    QDockWidget* m_dockMonitorTab;
-    QDockWidget* m_dockPrivilege;
-    QDockWidget* m_dockSettings;
-    QDockWidget* m_dockOther;
+    // ADS Dock Manager
+    ads::CDockManager* m_pDockManager;
 
-    // 右侧和底部原有dock
-    QDockWidget* m_dockCurrentOp;
-    QDockWidget* m_dockLog;
-    QDockWidget* m_dockImmediate;
-    QDockWidget* m_dockMonitor;
+    // Dock Widgets
+    ads::CDockWidget* m_dockWelcome;
+    ads::CDockWidget* m_dockProcess;
+    ads::CDockWidget* m_dockNetwork;
+    ads::CDockWidget* m_dockMemory;
+    ads::CDockWidget* m_dockFile;
+    ads::CDockWidget* m_dockDriver;
+    ads::CDockWidget* m_dockKernel;
+    ads::CDockWidget* m_dockMonitorTab;
+    ads::CDockWidget* m_dockPrivilege;
+    ads::CDockWidget* m_dockSettings;
+    ads::CDockWidget* m_dockOther;
+    ads::CDockWidget* m_dockCurrentOp;
+    ads::CDockWidget* m_dockLog;
+    ads::CDockWidget* m_dockImmediate;
+    ads::CDockWidget* m_dockMonitor;
+
+    // 自定义Widgets
+    WelcomeDock* m_welcomeWidget;
+    ProcessDock* m_processWidget;
+    NetworkDock* m_networkWidget;
+    MemoryDock* m_memoryWidget;
+    FileDock* m_fileWidget;
+    DriverDock* m_driverWidget;
+    KernelDock* m_kernelWidget;
+    MonitorDock* m_monitorWidget;
+    PrivilegeDock* m_privilegeWidget;
+    SettingsDock* m_settingsWidget;
+    OtherDock* m_otherWidget;
+    LogDockWidget* m_logWidget; // 日志输出 Dock 的可视化日志面板。
 };
-
 
 #endif // MAINWINDOW_H

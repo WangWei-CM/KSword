@@ -1,6 +1,6 @@
-QT += widgets
-
-CONFIG += release c++14
+QT += widgets opengl openglwidgets
+win32:LIBS += -lopengl32
+CONFIG += release c++20
 
 TARGET = Ksword5
 
