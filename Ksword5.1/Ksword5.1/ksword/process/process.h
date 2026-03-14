@@ -34,6 +34,116 @@ namespace ks::process
         Realtime
     };
 
+    // TokenPrivilegeAction：令牌特权调整动作（用于 AdjustTokenPrivileges）。
+    enum class TokenPrivilegeAction
+    {
+        Keep = 0,   // 保持当前状态，不调整。
+        Enable,     // 启用该特权。
+        Disable,    // 禁用该特权。
+        Remove      // 从令牌中移除该特权（高风险）。
+    };
+
+    // TokenPrivilegeEdit：单个特权的调整请求。
+    struct TokenPrivilegeEdit
+    {
+        std::string privilegeName;               // 例如 "SeDebugPrivilege"。
+        TokenPrivilegeAction action = TokenPrivilegeAction::Keep;
+    };
+
+    // SecurityAttributesInput：CreateProcessW 两个 SECURITY_ATTRIBUTES 参数的输入镜像。
+    struct SecurityAttributesInput
+    {
+        bool useValue = false;                   // false -> 传 nullptr。
+        std::uint32_t nLength = 0;               // 0 表示实现层使用 sizeof(SECURITY_ATTRIBUTES)。
+        std::uint64_t securityDescriptor = 0;    // 指针地址（0 表示 nullptr）。
+        bool inheritHandle = false;              // bInheritHandle。
+    };
+
+    // StartupInfoInput：STARTUPINFOW 输入镜像（全部字段可由 UI 自定义）。
+    struct StartupInfoInput
+    {
+        bool useValue = false;                   // false -> lpStartupInfo 传 nullptr。
+        std::uint32_t cb = 0;                    // 0 表示使用 sizeof(STARTUPINFOW)。
+        std::string lpReserved;
+        std::string lpDesktop;
+        std::string lpTitle;
+        std::uint32_t dwX = 0;
+        std::uint32_t dwY = 0;
+        std::uint32_t dwXSize = 0;
+        std::uint32_t dwYSize = 0;
+        std::uint32_t dwXCountChars = 0;
+        std::uint32_t dwYCountChars = 0;
+        std::uint32_t dwFillAttribute = 0;
+        std::uint32_t dwFlags = 0;
+        std::uint16_t wShowWindow = 0;
+        std::uint16_t cbReserved2 = 0;
+        std::uint64_t lpReserved2 = 0;
+        std::uint64_t hStdInput = 0;
+        std::uint64_t hStdOutput = 0;
+        std::uint64_t hStdError = 0;
+    };
+
+    // ProcessInformationInput：PROCESS_INFORMATION 输入镜像。
+    // 说明：
+    // - 正常场景该结构应由 API 输出；
+    // - 此处保留“预填充字段”能力，满足 UI 100% 可编辑需求。
+    struct ProcessInformationInput
+    {
+        bool useValue = false;                   // false -> lpProcessInformation 传 nullptr。
+        std::uint64_t hProcess = 0;
+        std::uint64_t hThread = 0;
+        std::uint32_t dwProcessId = 0;
+        std::uint32_t dwThreadId = 0;
+    };
+
+    // CreateProcessRequest：创建进程参数对象（覆盖 CreateProcessW 全部参数 + Token 扩展）。
+    struct CreateProcessRequest
+    {
+        bool useApplicationName = false;         // false -> lpApplicationName 传 nullptr。
+        std::string applicationName;
+        bool useCommandLine = false;             // false -> lpCommandLine 传 nullptr。
+        std::string commandLine;
+
+        SecurityAttributesInput processAttributes;   // lpProcessAttributes。
+        SecurityAttributesInput threadAttributes;    // lpThreadAttributes。
+
+        bool inheritHandles = false;             // bInheritHandles。
+        std::uint32_t creationFlags = 0;         // dwCreationFlags。
+
+        bool useEnvironment = false;             // false -> lpEnvironment 传 nullptr。
+        bool environmentUnicode = true;          // true 时自动附加 CREATE_UNICODE_ENVIRONMENT。
+        std::vector<std::string> environmentEntries; // 每行一个 "KEY=VALUE"。
+
+        bool useCurrentDirectory = false;        // false -> lpCurrentDirectory 传 nullptr。
+        std::string currentDirectory;
+
+        StartupInfoInput startupInfo;            // lpStartupInfo。
+        ProcessInformationInput processInfo;     // lpProcessInformation。
+
+        // tokenModeEnabled=false 时调用 CreateProcessW；
+        // true 时执行 “打开 PID 令牌 + 可选调权 + CreateProcessAsUserW”。
+        bool tokenModeEnabled = false;
+        std::uint32_t tokenSourcePid = 0;
+        std::uint32_t tokenDesiredAccess = 0;    // 0 表示实现层使用默认访问掩码。
+        bool duplicatePrimaryToken = true;       // true 时先 DuplicateTokenEx(TokenPrimary)。
+        std::vector<TokenPrivilegeEdit> tokenPrivilegeEdits;
+    };
+
+    // CreateProcessResult：创建进程结果快照（供 UI 反馈和日志输出）。
+    struct CreateProcessResult
+    {
+        bool success = false;
+        std::uint32_t win32Error = 0;
+        std::string detailText;
+        bool usedTokenPath = false;
+        bool usedCreateProcessWithTokenFallback = false;
+        bool processInfoAvailable = false;
+        std::uint64_t hProcess = 0;
+        std::uint64_t hThread = 0;
+        std::uint32_t dwProcessId = 0;
+        std::uint32_t dwThreadId = 0;
+    };
+
     // ProcessRecord：单进程快照数据结构。
     struct ProcessRecord
     {
@@ -52,7 +162,15 @@ namespace ks::process
         std::string imagePath;             // 可执行文件完整路径。
         std::string commandLine;           // 启动参数（命令行）。
         std::string userName;              // 进程令牌用户（DOMAIN\\User）。
-        std::string signatureState;        // 数字签名状态（Signed/Unsigned/Unknown）。
+        // signatureState：用于 UI 直接显示的签名文本。
+        // 典型值：
+        // - "Microsoft Corporation (Trusted)"
+        // - "Unknown Publisher (Untrusted)"
+        // - "Unsigned"
+        // - "Pending"
+        std::string signatureState;
+        std::string signaturePublisher;    // 签名发布者（厂家）名称。
+        bool signatureTrusted = false;     // 是否被 Windows 信任链验证通过。
         std::string startTimeText;         // 启动时间文本（YYYY-MM-DD HH:MM:SS）。
         std::string architectureText;      // 架构文本（x64/x86/ARM/Unknown）。
         std::string priorityText;          // 优先级文本（Normal/High/...）。
@@ -81,7 +199,10 @@ namespace ks::process
         std::string moduleName;                // 模块名（文件名）。
         std::uint64_t moduleBaseAddress = 0;   // 模块加载基址。
         std::uint32_t moduleSizeBytes = 0;     // 模块映像大小（字节）。
-        std::string signatureState;            // 模块签名状态（Signed/Unsigned/Unknown）。
+        // 模块签名显示文本与发布者/可信标记，语义与 ProcessRecord 对齐。
+        std::string signatureState;            // 模块签名显示文本。
+        std::string signaturePublisher;        // 模块签名发布者（厂家）。
+        bool signatureTrusted = false;         // 模块签名是否受 Windows 信任。
         std::uint32_t entryPointRva = 0;       // 入口点 RVA（相对偏移）。
         std::string runningState;              // 运行状态文本（Loaded/Unknown）。
         std::uint32_t representativeThreadId = 0; // 代表线程 ID（用于线程操作快捷入口）。
@@ -102,6 +223,7 @@ namespace ks::process
     {
         std::vector<ProcessModuleRecord> modules; // 模块列表。
         std::vector<ProcessThreadRecord> threads; // 线程列表。
+        std::string diagnosticText;              // 刷新诊断文本（失败原因/回退路径）。
     };
 
     // CounterSample：用于跨刷新轮次计算差值的历史样本。
@@ -235,4 +357,21 @@ namespace ks::process
     // OpenFolderByPath 作用：
     // - 在资源管理器中定位到目标路径（文件或目录）。
     bool OpenFolderByPath(const std::string& targetPath, std::string* errorMessage);
+
+    // ApplyTokenPrivilegeEditsByPid 作用：
+    // - 打开指定 PID 的进程令牌（可选 DuplicateTokenEx）；
+    // - 按 edits 调整特权（AdjustTokenPrivileges）。
+    bool ApplyTokenPrivilegeEditsByPid(
+        std::uint32_t sourcePid,
+        std::uint32_t tokenDesiredAccess,
+        bool duplicatePrimaryToken,
+        const std::vector<TokenPrivilegeEdit>& edits,
+        std::string* errorMessage);
+
+    // LaunchProcess 作用：
+    // - 按 request 调用 CreateProcessW 或 Token 路径创建进程；
+    // - 对外统一返回 CreateProcessResult。
+    bool LaunchProcess(
+        const CreateProcessRequest& request,
+        CreateProcessResult* resultOut);
 }

@@ -11,23 +11,29 @@
 #include <TlHelp32.h>
 #include <WinTrust.h>
 #include <Softpub.h>
+#include <wincrypt.h>
 #include <Shellapi.h>
 #include <winternl.h>
 
 #include <algorithm>   // std::max/std::clamp：衍生指标计算。
 #include <chrono>      // steady_clock：跨刷新轮次计时。
+#include <cwchar>      // std::swprintf：拼接版本信息查询路径。
 #include <filesystem>  // std::filesystem：路径存在性与目录判断。
 #include <fstream>     // std::ifstream：读取 PE 头计算入口 RVA。
 #include <iomanip>     // std::hex：格式化十六进制文本。
+#include <iterator>    // std::size：静态数组长度。
 #include <sstream>     // std::ostringstream：错误文本拼接。
 #include <vector>      // std::vector：系统信息缓冲与容器。
 
 // 链接依赖库：
 // - Psapi：GetProcessMemoryInfo；
-// - Wintrust/Crypt32：数字签名校验。
+// - Wintrust/Crypt32：数字签名校验；
+// - Version：读取文件版本信息中的 CompanyName（厂家兜底）。
 #pragma comment(lib, "Psapi.lib")
 #pragma comment(lib, "Wintrust.lib")
 #pragma comment(lib, "Crypt32.lib")
+#pragma comment(lib, "Version.lib")
+#pragma comment(lib, "Advapi32.lib")
 
 namespace
 {
@@ -233,15 +239,29 @@ namespace
             return std::string();
         }
 
+        // 路径查询优先使用 QueryFullProcessImageNameW（支持 QUERY_LIMITED_INFORMATION）。
         std::wstring pathBuffer(32768, L'\0');
         DWORD pathLength = static_cast<DWORD>(pathBuffer.size());
-        if (::QueryFullProcessImageNameW(processHandle, 0, pathBuffer.data(), &pathLength) == FALSE)
+        if (::QueryFullProcessImageNameW(processHandle, 0, pathBuffer.data(), &pathLength) != FALSE)
         {
-            return std::string();
+            pathBuffer.resize(pathLength);
+            return ks::str::Utf16ToUtf8(pathBuffer);
         }
 
-        pathBuffer.resize(pathLength);
-        return ks::str::Utf16ToUtf8(pathBuffer);
+        // 回退路径：GetModuleFileNameExW（部分进程在前者失败时可读取）。
+        std::wstring modulePathBuffer(32768, L'\0');
+        const DWORD modulePathLength = ::GetModuleFileNameExW(
+            processHandle,
+            nullptr,
+            modulePathBuffer.data(),
+            static_cast<DWORD>(modulePathBuffer.size()));
+        if (modulePathLength > 0)
+        {
+            modulePathBuffer.resize(modulePathLength);
+            return ks::str::Utf16ToUtf8(modulePathBuffer);
+        }
+
+        return std::string();
     }
 
     // 通过令牌查询 DOMAIN\\User 形式用户名。
@@ -325,18 +345,119 @@ namespace
         return tokenElevation.TokenIsElevated != 0;
     }
 
-    // WinVerifyTrust 检查文件签名状态。
-    std::string QueryFileSignatureState(const std::string& utf8Path)
+    // FileSignatureInfo：单个文件签名信息聚合结构。
+    // 该结构用于同时携带：
+    // 1) 厂家（Publisher）；
+    // 2) 是否被 Windows 信任链接受；
+    // 3) UI 直接显示文本。
+    struct FileSignatureInfo
     {
+        bool hasSignature = false;         // 是否检测到签名。
+        bool trustedByWindows = false;     // 是否被 WinVerifyTrust 判定为受信任。
+        std::string publisher;             // 证书发布者/厂家名称。
+        std::string displayText;           // UI 显示文本（含厂家与可信状态）。
+    };
+
+    // QueryCompanyNameByVersion 作用：
+    // - 从文件版本信息读取 CompanyName；
+    // - 作为“证书发布者为空”时的厂家文本兜底。
+    std::string QueryCompanyNameByVersion(const std::wstring& utf16Path)
+    {
+        if (utf16Path.empty())
+        {
+            return std::string();
+        }
+
+        DWORD versionHandle = 0;
+        const DWORD versionInfoSize = ::GetFileVersionInfoSizeW(utf16Path.c_str(), &versionHandle);
+        if (versionInfoSize == 0)
+        {
+            return std::string();
+        }
+
+        std::vector<BYTE> versionInfoBuffer(versionInfoSize, 0);
+        if (::GetFileVersionInfoW(
+            utf16Path.c_str(),
+            0,
+            versionInfoSize,
+            versionInfoBuffer.data()) == FALSE)
+        {
+            return std::string();
+        }
+
+        // 优先读取语言代码页映射，确保拿到正确本地化字符串。
+        struct LangAndCodePage
+        {
+            WORD language = 0;
+            WORD codePage = 0;
+        };
+        LangAndCodePage* translation = nullptr;
+        UINT translationSize = 0;
+        if (::VerQueryValueW(
+            versionInfoBuffer.data(),
+            L"\\VarFileInfo\\Translation",
+            reinterpret_cast<LPVOID*>(&translation),
+            &translationSize) != FALSE &&
+            translation != nullptr &&
+            translationSize >= sizeof(LangAndCodePage))
+        {
+            wchar_t queryPath[96] = {};
+            std::swprintf(
+                queryPath,
+                std::size(queryPath),
+                L"\\StringFileInfo\\%04x%04x\\CompanyName",
+                translation[0].language,
+                translation[0].codePage);
+
+            LPVOID companyValue = nullptr;
+            UINT companyLength = 0;
+            if (::VerQueryValueW(
+                versionInfoBuffer.data(),
+                queryPath,
+                &companyValue,
+                &companyLength) != FALSE &&
+                companyValue != nullptr &&
+                companyLength > 0)
+            {
+                return ks::str::Utf16ToUtf8(static_cast<const wchar_t*>(companyValue));
+            }
+        }
+
+        // 语言映射缺失时，尝试常见英语代码页兜底。
+        LPVOID fallbackValue = nullptr;
+        UINT fallbackLength = 0;
+        if (::VerQueryValueW(
+            versionInfoBuffer.data(),
+            L"\\StringFileInfo\\040904B0\\CompanyName",
+            &fallbackValue,
+            &fallbackLength) != FALSE &&
+            fallbackValue != nullptr &&
+            fallbackLength > 0)
+        {
+            return ks::str::Utf16ToUtf8(static_cast<const wchar_t*>(fallbackValue));
+        }
+
+        return std::string();
+    }
+
+    // QueryFileSignatureInfo 作用：
+    // - 用 WinVerifyTrust 判断文件是否“Windows 信任”；
+    // - 解析签名链获取发布者（厂家）；
+    // - 构建统一显示文本，供表格与详情窗口直接展示。
+    FileSignatureInfo QueryFileSignatureInfo(const std::string& utf8Path)
+    {
+        FileSignatureInfo signatureInfo{};
+        signatureInfo.displayText = "Unknown";
+
         if (utf8Path.empty())
         {
-            return "Unknown";
+            return signatureInfo;
         }
 
         const std::wstring utf16Path = ks::str::Utf8ToUtf16(utf8Path);
         if (utf16Path.empty())
         {
-            return "Unknown";
+            return signatureInfo;
         }
 
         WINTRUST_FILE_INFO fileInfo{};
@@ -349,20 +470,81 @@ namespace
         trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
         trustData.dwUnionChoice = WTD_CHOICE_FILE;
         trustData.pFile = &fileInfo;
-        trustData.dwStateAction = WTD_STATEACTION_IGNORE;
-        trustData.dwProvFlags = WTD_SAFER_FLAG;
+        trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+        trustData.dwProvFlags = WTD_SAFER_FLAG | WTD_CACHE_ONLY_URL_RETRIEVAL;
 
         GUID policyGuid = WINTRUST_ACTION_GENERIC_VERIFY_V2;
         const LONG verifyResult = ::WinVerifyTrust(nullptr, &policyGuid, &trustData);
+
+        // 尝试通过签名链提取发布者名称（厂家）。
+        if (trustData.hWVTStateData != nullptr)
+        {
+            CRYPT_PROVIDER_DATA* providerData = ::WTHelperProvDataFromStateData(trustData.hWVTStateData);
+            if (providerData != nullptr)
+            {
+                CRYPT_PROVIDER_SGNR* signer = ::WTHelperGetProvSignerFromChain(providerData, 0, FALSE, 0);
+                if (signer != nullptr && signer->csCertChain > 0 && signer->pasCertChain != nullptr)
+                {
+                    const CERT_CONTEXT* certificateContext = signer->pasCertChain[0].pCert;
+                    if (certificateContext != nullptr)
+                    {
+                        wchar_t publisherBuffer[512] = {};
+                        const DWORD publisherLength = ::CertGetNameStringW(
+                            certificateContext,
+                            CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                            0,
+                            nullptr,
+                            publisherBuffer,
+                            static_cast<DWORD>(std::size(publisherBuffer)));
+                        if (publisherLength > 1)
+                        {
+                            signatureInfo.publisher = ks::str::Utf16ToUtf8(publisherBuffer);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 无论校验结果如何，都需要关闭 WinVerifyTrust 的状态句柄，避免泄漏。
+        trustData.dwStateAction = WTD_STATEACTION_CLOSE;
+        ::WinVerifyTrust(nullptr, &policyGuid, &trustData);
+
+        // 若证书链里拿不到发布者，则回退到文件版本 CompanyName。
+        if (signatureInfo.publisher.empty())
+        {
+            signatureInfo.publisher = QueryCompanyNameByVersion(utf16Path);
+        }
+        signatureInfo.publisher = ks::str::TrimCopy(signatureInfo.publisher);
+
         if (verifyResult == ERROR_SUCCESS)
         {
-            return "Signed";
+            signatureInfo.hasSignature = true;
+            signatureInfo.trustedByWindows = true;
+            if (signatureInfo.publisher.empty())
+            {
+                signatureInfo.publisher = "Unknown Publisher";
+            }
+            signatureInfo.displayText = signatureInfo.publisher + " (Trusted)";
+            return signatureInfo;
         }
+
         if (verifyResult == TRUST_E_NOSIGNATURE || verifyResult == TRUST_E_SUBJECT_FORM_UNKNOWN)
         {
-            return "Unsigned";
+            signatureInfo.hasSignature = false;
+            signatureInfo.trustedByWindows = false;
+            signatureInfo.displayText = "Unsigned";
+            return signatureInfo;
         }
-        return "Unknown";
+
+        // 其他失败码统一视为“有签名但不受信任”。
+        signatureInfo.hasSignature = true;
+        signatureInfo.trustedByWindows = false;
+        if (signatureInfo.publisher.empty())
+        {
+            signatureInfo.publisher = "Unknown Publisher";
+        }
+        signatureInfo.displayText = signatureInfo.publisher + " (Untrusted)";
+        return signatureInfo;
     }
 
     // 从远程进程读取命令行（读取 PEB / ProcessParameters）。
@@ -713,6 +895,341 @@ namespace
         }
         return false;
     }
+
+    // 统一默认令牌访问掩码（用于“按 PID 打开并创建新进程”场景）。
+    constexpr DWORD DefaultTokenDesiredAccess =
+        TOKEN_QUERY |
+        TOKEN_DUPLICATE |
+        TOKEN_ASSIGN_PRIMARY |
+        TOKEN_ADJUST_PRIVILEGES |
+        TOKEN_ADJUST_DEFAULT |
+        TOKEN_ADJUST_SESSIONID;
+
+    // 把 64 位整数和 HANDLE 互转，避免重复 reinterpret_cast。
+    HANDLE Uint64ToHandle(const std::uint64_t rawValue)
+    {
+        return reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(rawValue));
+    }
+
+    std::uint64_t HandleToUint64(const HANDLE handleValue)
+    {
+        return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(handleValue));
+    }
+
+    // 把 UI 传入的多行 KEY=VALUE 转为 Unicode 环境块（双 \0 结尾）。
+    std::vector<wchar_t> BuildUnicodeEnvironmentBlock(const std::vector<std::string>& entries)
+    {
+        std::vector<wchar_t> environmentBlock;
+        for (const std::string& entryText : entries)
+        {
+            const std::string trimmedEntry = ks::str::TrimCopy(entryText);
+            if (trimmedEntry.empty())
+            {
+                continue;
+            }
+
+            const std::wstring wideEntry = ks::str::Utf8ToUtf16(trimmedEntry);
+            if (wideEntry.empty())
+            {
+                continue;
+            }
+
+            environmentBlock.insert(environmentBlock.end(), wideEntry.begin(), wideEntry.end());
+            environmentBlock.push_back(L'\0');
+        }
+
+        // 环境块必须以双 \0 结束，即使没有任何条目也要保证格式正确。
+        environmentBlock.push_back(L'\0');
+        if (environmentBlock.size() == 1)
+        {
+            environmentBlock.push_back(L'\0');
+        }
+        return environmentBlock;
+    }
+
+    // SECURITY_ATTRIBUTES 构建：false 表示调用层应传 nullptr。
+    bool BuildSecurityAttributes(
+        const ks::process::SecurityAttributesInput& inputValue,
+        SECURITY_ATTRIBUTES& outputValue)
+    {
+        if (!inputValue.useValue)
+        {
+            return false;
+        }
+
+        outputValue = {};
+        outputValue.nLength = inputValue.nLength == 0
+            ? static_cast<DWORD>(sizeof(SECURITY_ATTRIBUTES))
+            : static_cast<DWORD>(inputValue.nLength);
+        outputValue.lpSecurityDescriptor = reinterpret_cast<LPVOID>(
+            static_cast<std::uintptr_t>(inputValue.securityDescriptor));
+        outputValue.bInheritHandle = inputValue.inheritHandle ? TRUE : FALSE;
+        return true;
+    }
+
+    // STARTUPINFOW 字符串缓存，保证 CreateProcess 调用期间指针有效。
+    struct StartupInfoBufferSet
+    {
+        std::wstring reservedText;
+        std::wstring desktopText;
+        std::wstring titleText;
+    };
+
+    // STARTUPINFOW 构建：false 表示调用层应传 nullptr。
+    bool BuildStartupInfo(
+        const ks::process::StartupInfoInput& inputValue,
+        STARTUPINFOW& outputValue,
+        StartupInfoBufferSet& bufferSet)
+    {
+        if (!inputValue.useValue)
+        {
+            return false;
+        }
+
+        outputValue = {};
+        outputValue.cb = inputValue.cb == 0
+            ? static_cast<DWORD>(sizeof(STARTUPINFOW))
+            : static_cast<DWORD>(inputValue.cb);
+
+        if (!inputValue.lpReserved.empty())
+        {
+            bufferSet.reservedText = ks::str::Utf8ToUtf16(inputValue.lpReserved);
+            if (!bufferSet.reservedText.empty())
+            {
+                outputValue.lpReserved = bufferSet.reservedText.data();
+            }
+        }
+        if (!inputValue.lpDesktop.empty())
+        {
+            bufferSet.desktopText = ks::str::Utf8ToUtf16(inputValue.lpDesktop);
+            if (!bufferSet.desktopText.empty())
+            {
+                outputValue.lpDesktop = bufferSet.desktopText.data();
+            }
+        }
+        if (!inputValue.lpTitle.empty())
+        {
+            bufferSet.titleText = ks::str::Utf8ToUtf16(inputValue.lpTitle);
+            if (!bufferSet.titleText.empty())
+            {
+                outputValue.lpTitle = bufferSet.titleText.data();
+            }
+        }
+
+        outputValue.dwX = static_cast<DWORD>(inputValue.dwX);
+        outputValue.dwY = static_cast<DWORD>(inputValue.dwY);
+        outputValue.dwXSize = static_cast<DWORD>(inputValue.dwXSize);
+        outputValue.dwYSize = static_cast<DWORD>(inputValue.dwYSize);
+        outputValue.dwXCountChars = static_cast<DWORD>(inputValue.dwXCountChars);
+        outputValue.dwYCountChars = static_cast<DWORD>(inputValue.dwYCountChars);
+        outputValue.dwFillAttribute = static_cast<DWORD>(inputValue.dwFillAttribute);
+        outputValue.dwFlags = static_cast<DWORD>(inputValue.dwFlags);
+        outputValue.wShowWindow = static_cast<WORD>(inputValue.wShowWindow);
+        outputValue.cbReserved2 = static_cast<WORD>(inputValue.cbReserved2);
+        outputValue.lpReserved2 = reinterpret_cast<LPBYTE>(
+            static_cast<std::uintptr_t>(inputValue.lpReserved2));
+        outputValue.hStdInput = Uint64ToHandle(inputValue.hStdInput);
+        outputValue.hStdOutput = Uint64ToHandle(inputValue.hStdOutput);
+        outputValue.hStdError = Uint64ToHandle(inputValue.hStdError);
+        return true;
+    }
+
+    // PROCESS_INFORMATION 构建：false 表示调用层应传 nullptr。
+    bool BuildProcessInfoInput(
+        const ks::process::ProcessInformationInput& inputValue,
+        PROCESS_INFORMATION& outputValue)
+    {
+        if (!inputValue.useValue)
+        {
+            return false;
+        }
+
+        outputValue = {};
+        outputValue.hProcess = Uint64ToHandle(inputValue.hProcess);
+        outputValue.hThread = Uint64ToHandle(inputValue.hThread);
+        outputValue.dwProcessId = static_cast<DWORD>(inputValue.dwProcessId);
+        outputValue.dwThreadId = static_cast<DWORD>(inputValue.dwThreadId);
+        return true;
+    }
+
+    // 打开指定 PID 的进程令牌。
+    bool OpenTokenByProcessPid(
+        const std::uint32_t pid,
+        const DWORD desiredAccess,
+        HANDLE& tokenOut,
+        std::string* const errorMessage)
+    {
+        tokenOut = nullptr;
+        if (pid == 0)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "tokenSourcePid cannot be 0.";
+            }
+            return false;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(for token) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const BOOL openTokenOk = ::OpenProcessToken(processHandle, desiredAccess, &tokenOut);
+        const DWORD openTokenError = ::GetLastError();
+        ::CloseHandle(processHandle);
+        if (openTokenOk == FALSE || tokenOut == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcessToken failed: " + FormatLastErrorMessage(openTokenError);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    // 可选把源令牌复制成 Primary Token（CreateProcessAsUserW 常用）。
+    bool DuplicatePrimaryToken(
+        const HANDLE sourceToken,
+        const DWORD desiredAccess,
+        HANDLE& duplicatedTokenOut,
+        std::string* const errorMessage)
+    {
+        duplicatedTokenOut = nullptr;
+        const BOOL duplicateOk = ::DuplicateTokenEx(
+            sourceToken,
+            desiredAccess,
+            nullptr,
+            SecurityImpersonation,
+            TokenPrimary,
+            &duplicatedTokenOut);
+        if (duplicateOk == FALSE || duplicatedTokenOut == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "DuplicateTokenEx(TokenPrimary) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+        return true;
+    }
+
+    // 对单个特权执行 AdjustTokenPrivileges 调整。
+    bool ApplySinglePrivilegeEdit(
+        const HANDLE tokenHandle,
+        const ks::process::TokenPrivilegeEdit& privilegeEdit,
+        std::string* const errorMessage)
+    {
+        if (privilegeEdit.action == ks::process::TokenPrivilegeAction::Keep)
+        {
+            return true;
+        }
+
+        const std::string privilegeNameUtf8 = ks::str::TrimCopy(privilegeEdit.privilegeName);
+        if (privilegeNameUtf8.empty())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Privilege name is empty.";
+            }
+            return false;
+        }
+
+        const std::wstring privilegeNameWide = ks::str::Utf8ToUtf16(privilegeNameUtf8);
+        if (privilegeNameWide.empty())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Privilege name UTF-8 -> UTF-16 conversion failed: " + privilegeNameUtf8;
+            }
+            return false;
+        }
+
+        LUID privilegeLuid{};
+        if (::LookupPrivilegeValueW(nullptr, privilegeNameWide.c_str(), &privilegeLuid) == FALSE)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "LookupPrivilegeValue failed(" + privilegeNameUtf8 + "): " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        TOKEN_PRIVILEGES tokenPrivileges{};
+        tokenPrivileges.PrivilegeCount = 1;
+        tokenPrivileges.Privileges[0].Luid = privilegeLuid;
+        switch (privilegeEdit.action)
+        {
+        case ks::process::TokenPrivilegeAction::Enable:
+            tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            break;
+        case ks::process::TokenPrivilegeAction::Disable:
+            tokenPrivileges.Privileges[0].Attributes = 0;
+            break;
+        case ks::process::TokenPrivilegeAction::Remove:
+            tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_REMOVED;
+            break;
+        case ks::process::TokenPrivilegeAction::Keep:
+        default:
+            tokenPrivileges.Privileges[0].Attributes = 0;
+            break;
+        }
+
+        ::SetLastError(ERROR_SUCCESS);
+        if (::AdjustTokenPrivileges(
+            tokenHandle,
+            FALSE,
+            &tokenPrivileges,
+            static_cast<DWORD>(sizeof(tokenPrivileges)),
+            nullptr,
+            nullptr) == FALSE)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "AdjustTokenPrivileges failed(" + privilegeNameUtf8 + "): " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const DWORD adjustError = ::GetLastError();
+        if (adjustError != ERROR_SUCCESS)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "AdjustTokenPrivileges returned error(" + privilegeNameUtf8 + "): " + FormatLastErrorMessage(adjustError);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    // 批量应用特权调整。
+    bool ApplyPrivilegeEdits(
+        const HANDLE tokenHandle,
+        const std::vector<ks::process::TokenPrivilegeEdit>& edits,
+        std::string* const errorMessage)
+    {
+        for (std::size_t editIndex = 0; editIndex < edits.size(); ++editIndex)
+        {
+            if (!ApplySinglePrivilegeEdit(tokenHandle, edits[editIndex], errorMessage))
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage = "PrivilegeEdit[" + std::to_string(editIndex) + "] failed: " + *errorMessage;
+                }
+                return false;
+            }
+        }
+        return true;
+    }
 }
 
 namespace ks::process
@@ -811,17 +1328,27 @@ namespace ks::process
         if (processRecord.pid == 0)
         {
             // PID 0（Idle）没有常规用户态映像，签名逻辑也不适用。
-            processRecord.signatureState = includeSignatureCheck ? "Unknown" : "Pending";
+            processRecord.signatureState = includeSignatureCheck ? "Unsigned" : "Pending";
+            processRecord.signaturePublisher = "System";
+            processRecord.signatureTrusted = false;
             processRecord.architectureText = "N/A";
             processRecord.priorityText = "Idle";
             processRecord.staticDetailsReady = true;
             return true;
         }
 
-        const HANDLE processHandle = ::OpenProcess(
+        // 先尝试 VM_READ 版本句柄（可读取命令行）；失败后回退到 limited 句柄。
+        HANDLE processHandle = ::OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
             FALSE,
             ToDwordPid(processRecord.pid));
+        if (processHandle == nullptr)
+        {
+            processHandle = ::OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                FALSE,
+                ToDwordPid(processRecord.pid));
+        }
         if (processHandle == nullptr)
         {
             processRecord.staticDetailsReady = false;
@@ -846,6 +1373,14 @@ namespace ks::process
         processRecord.isAdmin = QueryProcessIsElevatedByHandle(processHandle);
         processRecord.architectureText = QueryProcessArchitectureByHandle(processHandle);
         processRecord.priorityText = QueryPriorityTextByHandle(processHandle);
+        if (processRecord.sessionId == 0)
+        {
+            DWORD sessionId = 0;
+            if (::ProcessIdToSessionId(ToDwordPid(processRecord.pid), &sessionId) != FALSE)
+            {
+                processRecord.sessionId = static_cast<std::uint32_t>(sessionId);
+            }
+        }
 
         // 若创建时间尚未填，尽量补齐。
         if (processRecord.creationTime100ns == 0)
@@ -878,17 +1413,24 @@ namespace ks::process
         // - 快速模式：仅标记为 Pending，后续详细模式再补齐。
         if (includeSignatureCheck)
         {
-            processRecord.signatureState = QueryFileSignatureState(processRecord.imagePath);
+            const FileSignatureInfo signatureInfo = QueryFileSignatureInfo(processRecord.imagePath);
+            processRecord.signatureState = signatureInfo.displayText.empty() ? "Unknown" : signatureInfo.displayText;
+            processRecord.signaturePublisher = signatureInfo.publisher;
+            processRecord.signatureTrusted = signatureInfo.trustedByWindows;
         }
         else if (processRecord.signatureState.empty())
         {
             processRecord.signatureState = "Pending";
+            processRecord.signaturePublisher.clear();
+            processRecord.signatureTrusted = false;
         }
 
         // 清理不可见字符，防止表格显示异常。
         ks::str::ReplaceAllInPlace(processRecord.commandLine, "\r", " ");
         ks::str::ReplaceAllInPlace(processRecord.commandLine, "\n", " ");
         processRecord.commandLine = ks::str::TrimCopy(processRecord.commandLine);
+        processRecord.userName = ks::str::TrimCopy(processRecord.userName);
+        processRecord.signaturePublisher = ks::str::TrimCopy(processRecord.signaturePublisher);
 
         // staticDetailsReady 在这里表示“基础静态字段可用”，
         // 即便签名处于 Pending 也算可展示，后续可按需补签名。
@@ -1627,6 +2169,41 @@ namespace ks::process
         ProcessModuleSnapshot snapshot;
         snapshot.modules.clear();
         snapshot.threads.clear();
+        snapshot.diagnosticText.clear();
+
+        // appendDiagnostic 作用：
+        // - 累积模块刷新诊断文本；
+        // - 多段错误通过 " | " 拼接，便于 UI 一次展示完整上下文。
+        const auto appendDiagnostic = [&snapshot](const std::string& text)
+            {
+                if (text.empty())
+                {
+                    return;
+                }
+                if (!snapshot.diagnosticText.empty())
+                {
+                    snapshot.diagnosticText += " | ";
+                }
+                snapshot.diagnosticText += text;
+            };
+
+        // fillModuleSignature 作用：
+        // - 统一填充模块签名显示文本、厂家、可信标记；
+        // - includeSignatureCheck=false 时保持 Pending（快速模式）。
+        const auto fillModuleSignature = [includeSignatureCheck](ProcessModuleRecord& moduleRecord)
+            {
+                if (includeSignatureCheck)
+                {
+                    const FileSignatureInfo signatureInfo = QueryFileSignatureInfo(moduleRecord.modulePath);
+                    moduleRecord.signatureState = signatureInfo.displayText.empty() ? "Unknown" : signatureInfo.displayText;
+                    moduleRecord.signaturePublisher = signatureInfo.publisher;
+                    moduleRecord.signatureTrusted = signatureInfo.trustedByWindows;
+                    return;
+                }
+                moduleRecord.signatureState = "Pending";
+                moduleRecord.signaturePublisher.clear();
+                moduleRecord.signatureTrusted = false;
+            };
 
         // 先枚举线程，供模块行填充 ThreadID 信息。
         std::vector<std::uint32_t> threadIdList;
@@ -1656,41 +2233,155 @@ namespace ks::process
             ::CloseHandle(threadSnapshotHandle);
         }
 
-        // 再枚举模块。
+        // 第一优先：Toolhelp 模块枚举（常规路径）。
+        bool moduleEnumerated = false;
         HANDLE moduleSnapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, ToDwordPid(pid));
         if (moduleSnapshotHandle == INVALID_HANDLE_VALUE)
         {
-            return snapshot;
+            appendDiagnostic("CreateToolhelp32Snapshot(module) failed: " + FormatLastErrorMessage(::GetLastError()));
         }
-
-        MODULEENTRY32W moduleEntry{};
-        moduleEntry.dwSize = sizeof(moduleEntry);
-        if (::Module32FirstW(moduleSnapshotHandle, &moduleEntry) == FALSE)
+        else
         {
+            MODULEENTRY32W moduleEntry{};
+            moduleEntry.dwSize = sizeof(moduleEntry);
+            if (::Module32FirstW(moduleSnapshotHandle, &moduleEntry) == FALSE)
+            {
+                appendDiagnostic("Module32FirstW failed: " + FormatLastErrorMessage(::GetLastError()));
+            }
+            else
+            {
+                do
+                {
+                    ProcessModuleRecord moduleRecord{};
+                    moduleRecord.moduleName = ks::str::Utf16ToUtf8(moduleEntry.szModule);
+                    moduleRecord.modulePath = ks::str::Utf16ToUtf8(moduleEntry.szExePath);
+                    moduleRecord.moduleBaseAddress = reinterpret_cast<std::uint64_t>(moduleEntry.modBaseAddr);
+                    moduleRecord.moduleSizeBytes = static_cast<std::uint32_t>(moduleEntry.modBaseSize);
+                    moduleRecord.entryPointRva = QueryImageEntryPointRvaByPath(moduleRecord.modulePath);
+                    moduleRecord.runningState = "Loaded";
+                    fillModuleSignature(moduleRecord);
+
+                    moduleRecord.representativeThreadId = threadIdList.empty() ? 0 : threadIdList.front();
+                    moduleRecord.threadIdText = BuildThreadIdSummaryText(threadIdList);
+                    snapshot.modules.push_back(std::move(moduleRecord));
+                } while (::Module32NextW(moduleSnapshotHandle, &moduleEntry) != FALSE);
+                moduleEnumerated = true;
+                appendDiagnostic("Module source: Toolhelp");
+            }
             ::CloseHandle(moduleSnapshotHandle);
-            return snapshot;
         }
 
-        do
+        // Toolhelp 失败时，回退 PSAPI，解决“模块始终为 0”问题。
+        if (!moduleEnumerated)
         {
-            ProcessModuleRecord moduleRecord{};
-            moduleRecord.moduleName = ks::str::Utf16ToUtf8(moduleEntry.szModule);
-            moduleRecord.modulePath = ks::str::Utf16ToUtf8(moduleEntry.szExePath);
-            moduleRecord.moduleBaseAddress = reinterpret_cast<std::uint64_t>(moduleEntry.modBaseAddr);
-            moduleRecord.moduleSizeBytes = static_cast<std::uint32_t>(moduleEntry.modBaseSize);
-            moduleRecord.entryPointRva = QueryImageEntryPointRvaByPath(moduleRecord.modulePath);
-            moduleRecord.runningState = "Loaded";
-            moduleRecord.signatureState =
-                includeSignatureCheck
-                ? QueryFileSignatureState(moduleRecord.modulePath)
-                : "Pending";
+            const HANDLE processHandle = ::OpenProcess(
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                FALSE,
+                ToDwordPid(pid));
+            if (processHandle == nullptr)
+            {
+                appendDiagnostic("PSAPI fallback open process failed: " + FormatLastErrorMessage(::GetLastError()));
+                return snapshot;
+            }
 
-            moduleRecord.representativeThreadId = threadIdList.empty() ? 0 : threadIdList.front();
-            moduleRecord.threadIdText = BuildThreadIdSummaryText(threadIdList);
-            snapshot.modules.push_back(std::move(moduleRecord));
-        } while (::Module32NextW(moduleSnapshotHandle, &moduleEntry) != FALSE);
+            std::vector<HMODULE> moduleHandleBuffer(2048);
+            DWORD bytesNeeded = 0;
+            if (::EnumProcessModulesEx(
+                processHandle,
+                moduleHandleBuffer.data(),
+                static_cast<DWORD>(moduleHandleBuffer.size() * sizeof(HMODULE)),
+                &bytesNeeded,
+                LIST_MODULES_ALL) == FALSE)
+            {
+                appendDiagnostic("EnumProcessModulesEx failed: " + FormatLastErrorMessage(::GetLastError()));
+                ::CloseHandle(processHandle);
+                return snapshot;
+            }
 
-        ::CloseHandle(moduleSnapshotHandle);
+            const std::size_t moduleCount = static_cast<std::size_t>(bytesNeeded / sizeof(HMODULE));
+            if (moduleCount > moduleHandleBuffer.size())
+            {
+                moduleHandleBuffer.resize(moduleCount);
+                if (::EnumProcessModulesEx(
+                    processHandle,
+                    moduleHandleBuffer.data(),
+                    static_cast<DWORD>(moduleHandleBuffer.size() * sizeof(HMODULE)),
+                    &bytesNeeded,
+                    LIST_MODULES_ALL) == FALSE)
+                {
+                    appendDiagnostic("EnumProcessModulesEx(second pass) failed: " + FormatLastErrorMessage(::GetLastError()));
+                    ::CloseHandle(processHandle);
+                    return snapshot;
+                }
+            }
+
+            for (std::size_t moduleIndex = 0; moduleIndex < moduleCount; ++moduleIndex)
+            {
+                const HMODULE moduleHandle = moduleHandleBuffer[moduleIndex];
+                if (moduleHandle == nullptr)
+                {
+                    continue;
+                }
+
+                wchar_t modulePathBuffer[32768] = {};
+                const DWORD modulePathLength = ::GetModuleFileNameExW(
+                    processHandle,
+                    moduleHandle,
+                    modulePathBuffer,
+                    static_cast<DWORD>(std::size(modulePathBuffer)));
+                if (modulePathLength == 0)
+                {
+                    continue;
+                }
+
+                MODULEINFO moduleInfo{};
+                if (::GetModuleInformation(
+                    processHandle,
+                    moduleHandle,
+                    &moduleInfo,
+                    static_cast<DWORD>(sizeof(moduleInfo))) == FALSE)
+                {
+                    continue;
+                }
+
+                ProcessModuleRecord moduleRecord{};
+                moduleRecord.modulePath = ks::str::Utf16ToUtf8(std::wstring(modulePathBuffer, modulePathLength));
+                moduleRecord.moduleName = ExtractFileNameFromPath(moduleRecord.modulePath);
+                moduleRecord.moduleBaseAddress = reinterpret_cast<std::uint64_t>(moduleInfo.lpBaseOfDll);
+                moduleRecord.moduleSizeBytes = static_cast<std::uint32_t>(moduleInfo.SizeOfImage);
+
+                const std::uint64_t entryPointAddress = reinterpret_cast<std::uint64_t>(moduleInfo.EntryPoint);
+                const std::uint64_t baseAddress = moduleRecord.moduleBaseAddress;
+                if (entryPointAddress >= baseAddress)
+                {
+                    moduleRecord.entryPointRva = static_cast<std::uint32_t>(entryPointAddress - baseAddress);
+                }
+                else
+                {
+                    moduleRecord.entryPointRva = QueryImageEntryPointRvaByPath(moduleRecord.modulePath);
+                }
+
+                moduleRecord.runningState = "Loaded";
+                fillModuleSignature(moduleRecord);
+                moduleRecord.representativeThreadId = threadIdList.empty() ? 0 : threadIdList.front();
+                moduleRecord.threadIdText = BuildThreadIdSummaryText(threadIdList);
+                snapshot.modules.push_back(std::move(moduleRecord));
+            }
+
+            moduleEnumerated = true;
+            appendDiagnostic("Module source: PSAPI fallback");
+            ::CloseHandle(processHandle);
+        }
+
+        if (!moduleEnumerated)
+        {
+            appendDiagnostic("No module enumeration path succeeded.");
+        }
+        else if (snapshot.modules.empty())
+        {
+            appendDiagnostic("Module enumeration succeeded but module count is 0.");
+        }
+
         return snapshot;
     }
 
@@ -2058,5 +2749,307 @@ namespace ks::process
     bool OpenFolderByPath(const std::string& targetPath, std::string* const errorMessage)
     {
         return OpenInExplorerByPath(targetPath, errorMessage);
+    }
+
+    bool ApplyTokenPrivilegeEditsByPid(
+        const std::uint32_t sourcePid,
+        const std::uint32_t tokenDesiredAccess,
+        const bool duplicatePrimaryToken,
+        const std::vector<TokenPrivilegeEdit>& edits,
+        std::string* const errorMessage)
+    {
+        const DWORD desiredAccess = tokenDesiredAccess == 0
+            ? DefaultTokenDesiredAccess
+            : static_cast<DWORD>(tokenDesiredAccess);
+
+        HANDLE sourceToken = nullptr;
+        if (!OpenTokenByProcessPid(sourcePid, desiredAccess, sourceToken, errorMessage))
+        {
+            return false;
+        }
+
+        HANDLE workingToken = sourceToken;
+        HANDLE duplicatedToken = nullptr;
+        if (duplicatePrimaryToken)
+        {
+            if (!DuplicatePrimaryToken(sourceToken, desiredAccess, duplicatedToken, errorMessage))
+            {
+                ::CloseHandle(sourceToken);
+                return false;
+            }
+            workingToken = duplicatedToken;
+        }
+
+        const bool adjustOk = ApplyPrivilegeEdits(workingToken, edits, errorMessage);
+
+        if (duplicatedToken != nullptr)
+        {
+            ::CloseHandle(duplicatedToken);
+        }
+        if (sourceToken != nullptr)
+        {
+            ::CloseHandle(sourceToken);
+        }
+        if (adjustOk && errorMessage != nullptr)
+        {
+            std::ostringstream stream;
+            stream << "AdjustTokenPrivileges succeeded, edited privileges=" << edits.size();
+            *errorMessage = stream.str();
+        }
+        return adjustOk;
+    }
+
+    bool LaunchProcess(
+        const CreateProcessRequest& request,
+        CreateProcessResult* const resultOut)
+    {
+        CreateProcessResult localResult{};
+        localResult.usedTokenPath = request.tokenModeEnabled;
+
+        std::wstring applicationNameWide;
+        LPCWSTR applicationNamePtr = nullptr;
+        if (request.useApplicationName)
+        {
+            applicationNameWide = ks::str::Utf8ToUtf16(request.applicationName);
+            applicationNamePtr = applicationNameWide.empty() ? nullptr : applicationNameWide.c_str();
+        }
+
+        std::wstring commandLineWide;
+        std::vector<wchar_t> commandLineBuffer;
+        LPWSTR commandLinePtr = nullptr;
+        if (request.useCommandLine)
+        {
+            commandLineWide = ks::str::Utf8ToUtf16(request.commandLine);
+            commandLineBuffer.assign(commandLineWide.begin(), commandLineWide.end());
+            commandLineBuffer.push_back(L'\0');
+            commandLinePtr = commandLineBuffer.data();
+        }
+
+        SECURITY_ATTRIBUTES processSecurityAttributes{};
+        SECURITY_ATTRIBUTES threadSecurityAttributes{};
+        SECURITY_ATTRIBUTES* processSecurityPtr = BuildSecurityAttributes(
+            request.processAttributes,
+            processSecurityAttributes) ? &processSecurityAttributes : nullptr;
+        SECURITY_ATTRIBUTES* threadSecurityPtr = BuildSecurityAttributes(
+            request.threadAttributes,
+            threadSecurityAttributes) ? &threadSecurityAttributes : nullptr;
+
+        std::vector<wchar_t> environmentBlock;
+        LPVOID environmentPtr = nullptr;
+        DWORD creationFlags = static_cast<DWORD>(request.creationFlags);
+        if (request.useEnvironment)
+        {
+            environmentBlock = BuildUnicodeEnvironmentBlock(request.environmentEntries);
+            environmentPtr = environmentBlock.empty() ? nullptr : environmentBlock.data();
+            if (request.environmentUnicode)
+            {
+                creationFlags |= CREATE_UNICODE_ENVIRONMENT;
+            }
+        }
+
+        std::wstring currentDirectoryWide;
+        LPCWSTR currentDirectoryPtr = nullptr;
+        if (request.useCurrentDirectory)
+        {
+            currentDirectoryWide = ks::str::Utf8ToUtf16(request.currentDirectory);
+            currentDirectoryPtr = currentDirectoryWide.empty() ? nullptr : currentDirectoryWide.c_str();
+        }
+
+        STARTUPINFOW startupInfo{};
+        StartupInfoBufferSet startupBufferSet{};
+        STARTUPINFOW* startupInfoPtr = BuildStartupInfo(
+            request.startupInfo,
+            startupInfo,
+            startupBufferSet) ? &startupInfo : nullptr;
+
+        PROCESS_INFORMATION processInfo{};
+        PROCESS_INFORMATION* processInfoPtr = BuildProcessInfoInput(
+            request.processInfo,
+            processInfo) ? &processInfo : nullptr;
+
+        auto finalizeSuccess = [&localResult, processInfoPtr]() {
+            localResult.success = true;
+            if (processInfoPtr == nullptr)
+            {
+                return;
+            }
+
+            localResult.processInfoAvailable = true;
+            localResult.hProcess = HandleToUint64(processInfoPtr->hProcess);
+            localResult.hThread = HandleToUint64(processInfoPtr->hThread);
+            localResult.dwProcessId = static_cast<std::uint32_t>(processInfoPtr->dwProcessId);
+            localResult.dwThreadId = static_cast<std::uint32_t>(processInfoPtr->dwThreadId);
+
+            if (processInfoPtr->hThread != nullptr)
+            {
+                ::CloseHandle(processInfoPtr->hThread);
+                processInfoPtr->hThread = nullptr;
+            }
+            if (processInfoPtr->hProcess != nullptr)
+            {
+                ::CloseHandle(processInfoPtr->hProcess);
+                processInfoPtr->hProcess = nullptr;
+            }
+        };
+
+        if (!request.tokenModeEnabled)
+        {
+            const BOOL createOk = ::CreateProcessW(
+                applicationNamePtr,
+                commandLinePtr,
+                processSecurityPtr,
+                threadSecurityPtr,
+                request.inheritHandles ? TRUE : FALSE,
+                creationFlags,
+                environmentPtr,
+                currentDirectoryPtr,
+                startupInfoPtr,
+                processInfoPtr);
+
+            if (createOk == FALSE)
+            {
+                localResult.win32Error = static_cast<std::uint32_t>(::GetLastError());
+                localResult.detailText = "CreateProcessW failed: " + FormatLastErrorMessage(localResult.win32Error);
+                if (resultOut != nullptr)
+                {
+                    *resultOut = localResult;
+                }
+                return false;
+            }
+
+            localResult.detailText = "CreateProcessW succeeded.";
+            finalizeSuccess();
+            if (resultOut != nullptr)
+            {
+                *resultOut = localResult;
+            }
+            return true;
+        }
+
+        const DWORD desiredAccess = request.tokenDesiredAccess == 0
+            ? DefaultTokenDesiredAccess
+            : static_cast<DWORD>(request.tokenDesiredAccess);
+        HANDLE sourceToken = nullptr;
+        std::string tokenError;
+        if (!OpenTokenByProcessPid(request.tokenSourcePid, desiredAccess, sourceToken, &tokenError))
+        {
+            localResult.win32Error = static_cast<std::uint32_t>(::GetLastError());
+            localResult.detailText = tokenError;
+            if (resultOut != nullptr)
+            {
+                *resultOut = localResult;
+            }
+            return false;
+        }
+
+        HANDLE workingToken = sourceToken;
+        HANDLE duplicatedPrimaryToken = nullptr;
+        if (request.duplicatePrimaryToken)
+        {
+            if (!DuplicatePrimaryToken(sourceToken, desiredAccess, duplicatedPrimaryToken, &tokenError))
+            {
+                ::CloseHandle(sourceToken);
+                localResult.win32Error = static_cast<std::uint32_t>(::GetLastError());
+                localResult.detailText = tokenError;
+                if (resultOut != nullptr)
+                {
+                    *resultOut = localResult;
+                }
+                return false;
+            }
+            workingToken = duplicatedPrimaryToken;
+        }
+
+        if (!ApplyPrivilegeEdits(workingToken, request.tokenPrivilegeEdits, &tokenError))
+        {
+            if (duplicatedPrimaryToken != nullptr)
+            {
+                ::CloseHandle(duplicatedPrimaryToken);
+            }
+            ::CloseHandle(sourceToken);
+            localResult.win32Error = static_cast<std::uint32_t>(::GetLastError());
+            localResult.detailText = tokenError;
+            if (resultOut != nullptr)
+            {
+                *resultOut = localResult;
+            }
+            return false;
+        }
+
+        const BOOL createAsUserOk = ::CreateProcessAsUserW(
+            workingToken,
+            applicationNamePtr,
+            commandLinePtr,
+            processSecurityPtr,
+            threadSecurityPtr,
+            request.inheritHandles ? TRUE : FALSE,
+            creationFlags,
+            environmentPtr,
+            currentDirectoryPtr,
+            startupInfoPtr,
+            processInfoPtr);
+        if (createAsUserOk != FALSE)
+        {
+            localResult.detailText = "CreateProcessAsUserW succeeded.";
+            finalizeSuccess();
+            if (duplicatedPrimaryToken != nullptr)
+            {
+                ::CloseHandle(duplicatedPrimaryToken);
+            }
+            ::CloseHandle(sourceToken);
+            if (resultOut != nullptr)
+            {
+                *resultOut = localResult;
+            }
+            return true;
+        }
+
+        const DWORD createAsUserError = ::GetLastError();
+        // 兼容性回退：部分环境缺少 SeAssignPrimaryTokenPrivilege 时尝试 CreateProcessWithTokenW。
+        const BOOL createWithTokenOk = ::CreateProcessWithTokenW(
+            workingToken,
+            LOGON_WITH_PROFILE,
+            applicationNamePtr,
+            commandLinePtr,
+            creationFlags,
+            environmentPtr,
+            currentDirectoryPtr,
+            startupInfoPtr,
+            processInfoPtr);
+        if (createWithTokenOk != FALSE)
+        {
+            localResult.usedCreateProcessWithTokenFallback = true;
+            localResult.detailText = "CreateProcessAsUserW failed, fallback CreateProcessWithTokenW succeeded.";
+            finalizeSuccess();
+            if (duplicatedPrimaryToken != nullptr)
+            {
+                ::CloseHandle(duplicatedPrimaryToken);
+            }
+            ::CloseHandle(sourceToken);
+            if (resultOut != nullptr)
+            {
+                *resultOut = localResult;
+            }
+            return true;
+        }
+
+        const DWORD fallbackError = ::GetLastError();
+        std::ostringstream detailStream;
+        detailStream
+            << "CreateProcessAsUserW failed: " << FormatLastErrorMessage(createAsUserError)
+            << " | CreateProcessWithTokenW fallback failed: " << FormatLastErrorMessage(fallbackError);
+        localResult.win32Error = static_cast<std::uint32_t>(fallbackError);
+        localResult.detailText = detailStream.str();
+
+        if (duplicatedPrimaryToken != nullptr)
+        {
+            ::CloseHandle(duplicatedPrimaryToken);
+        }
+        ::CloseHandle(sourceToken);
+        if (resultOut != nullptr)
+        {
+            *resultOut = localResult;
+        }
+        return false;
     }
 }

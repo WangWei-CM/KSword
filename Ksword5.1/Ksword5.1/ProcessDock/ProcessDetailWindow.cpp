@@ -111,6 +111,37 @@ ProcessDetailWindow::ProcessDetailWindow(const ks::process::ProcessRecord& baseR
         m_baseRecord.pid,
         m_baseRecord.creationTime100ns);
 
+    // 详情窗口创建时尽量补齐静态字段，避免首次展示出现空路径/空命令行。
+    const bool needStaticQuery =
+        m_baseRecord.imagePath.empty() ||
+        m_baseRecord.commandLine.empty() ||
+        m_baseRecord.userName.empty() ||
+        m_baseRecord.signatureState.empty() ||
+        m_baseRecord.signatureState == "Pending";
+    if (needStaticQuery && m_baseRecord.pid != 0)
+    {
+        ks::process::ProcessRecord queriedRecord{};
+        if (ks::process::QueryProcessStaticDetailByPid(m_baseRecord.pid, queriedRecord))
+        {
+            if (!queriedRecord.processName.empty()) m_baseRecord.processName = queriedRecord.processName;
+            if (!queriedRecord.imagePath.empty()) m_baseRecord.imagePath = queriedRecord.imagePath;
+            if (!queriedRecord.commandLine.empty()) m_baseRecord.commandLine = queriedRecord.commandLine;
+            if (!queriedRecord.userName.empty()) m_baseRecord.userName = queriedRecord.userName;
+            if (!queriedRecord.startTimeText.empty()) m_baseRecord.startTimeText = queriedRecord.startTimeText;
+            if (!queriedRecord.architectureText.empty()) m_baseRecord.architectureText = queriedRecord.architectureText;
+            if (!queriedRecord.priorityText.empty()) m_baseRecord.priorityText = queriedRecord.priorityText;
+            if (!queriedRecord.signatureState.empty()) m_baseRecord.signatureState = queriedRecord.signatureState;
+            if (!queriedRecord.signaturePublisher.empty()) m_baseRecord.signaturePublisher = queriedRecord.signaturePublisher;
+            m_baseRecord.signatureTrusted = queriedRecord.signatureTrusted;
+            m_baseRecord.isAdmin = queriedRecord.isAdmin;
+            if (queriedRecord.parentPid != 0) m_baseRecord.parentPid = queriedRecord.parentPid;
+            if (queriedRecord.sessionId != 0) m_baseRecord.sessionId = queriedRecord.sessionId;
+            if (queriedRecord.threadCount != 0) m_baseRecord.threadCount = queriedRecord.threadCount;
+            if (queriedRecord.handleCount != 0) m_baseRecord.handleCount = queriedRecord.handleCount;
+            if (queriedRecord.creationTime100ns != 0) m_baseRecord.creationTime100ns = queriedRecord.creationTime100ns;
+        }
+    }
+
     // 按“建 UI -> 连信号 -> 填初值 -> 首次模块刷新”顺序初始化。
     initializeUi();
     initializeConnections();
@@ -120,8 +151,50 @@ ProcessDetailWindow::ProcessDetailWindow(const ks::process::ProcessRecord& baseR
 
 void ProcessDetailWindow::updateBaseRecord(const ks::process::ProcessRecord& baseRecord)
 {
-    // 外部推送新快照时，直接覆盖并刷新详情页文本。
-    m_baseRecord = baseRecord;
+    // 外部推送新快照时：
+    // 1) 先保留已有的“已补齐字段”；
+    // 2) 再合并新快照；
+    // 3) 必要时补查静态详情，避免字段被空值覆盖。
+    ks::process::ProcessRecord mergedRecord = baseRecord;
+    if (mergedRecord.imagePath.empty()) mergedRecord.imagePath = m_baseRecord.imagePath;
+    if (mergedRecord.commandLine.empty()) mergedRecord.commandLine = m_baseRecord.commandLine;
+    if (mergedRecord.userName.empty()) mergedRecord.userName = m_baseRecord.userName;
+    if (mergedRecord.startTimeText.empty()) mergedRecord.startTimeText = m_baseRecord.startTimeText;
+    if (mergedRecord.signatureState.empty()) mergedRecord.signatureState = m_baseRecord.signatureState;
+    if (mergedRecord.signaturePublisher.empty()) mergedRecord.signaturePublisher = m_baseRecord.signaturePublisher;
+    mergedRecord.signatureTrusted = mergedRecord.signatureTrusted || m_baseRecord.signatureTrusted;
+
+    const bool needStaticQuery =
+        mergedRecord.imagePath.empty() ||
+        mergedRecord.commandLine.empty() ||
+        mergedRecord.userName.empty() ||
+        mergedRecord.signatureState.empty() ||
+        mergedRecord.signatureState == "Pending";
+    if (needStaticQuery && mergedRecord.pid != 0)
+    {
+        ks::process::ProcessRecord queriedRecord{};
+        if (ks::process::QueryProcessStaticDetailByPid(mergedRecord.pid, queriedRecord))
+        {
+            if (!queriedRecord.processName.empty()) mergedRecord.processName = queriedRecord.processName;
+            if (!queriedRecord.imagePath.empty()) mergedRecord.imagePath = queriedRecord.imagePath;
+            if (!queriedRecord.commandLine.empty()) mergedRecord.commandLine = queriedRecord.commandLine;
+            if (!queriedRecord.userName.empty()) mergedRecord.userName = queriedRecord.userName;
+            if (!queriedRecord.startTimeText.empty()) mergedRecord.startTimeText = queriedRecord.startTimeText;
+            if (!queriedRecord.architectureText.empty()) mergedRecord.architectureText = queriedRecord.architectureText;
+            if (!queriedRecord.priorityText.empty()) mergedRecord.priorityText = queriedRecord.priorityText;
+            if (!queriedRecord.signatureState.empty()) mergedRecord.signatureState = queriedRecord.signatureState;
+            if (!queriedRecord.signaturePublisher.empty()) mergedRecord.signaturePublisher = queriedRecord.signaturePublisher;
+            mergedRecord.signatureTrusted = queriedRecord.signatureTrusted;
+            mergedRecord.isAdmin = queriedRecord.isAdmin;
+            if (queriedRecord.parentPid != 0) mergedRecord.parentPid = queriedRecord.parentPid;
+            if (queriedRecord.sessionId != 0) mergedRecord.sessionId = queriedRecord.sessionId;
+            if (queriedRecord.threadCount != 0) mergedRecord.threadCount = queriedRecord.threadCount;
+            if (queriedRecord.handleCount != 0) mergedRecord.handleCount = queriedRecord.handleCount;
+            if (queriedRecord.creationTime100ns != 0) mergedRecord.creationTime100ns = queriedRecord.creationTime100ns;
+        }
+    }
+
+    m_baseRecord = mergedRecord;
     m_identityKey = ks::process::BuildProcessIdentityKey(
         m_baseRecord.pid,
         m_baseRecord.creationTime100ns);
@@ -401,7 +474,7 @@ void ProcessDetailWindow::initializeModuleTab()
     // 列宽初始化。
     m_moduleTable->setColumnWidth(toModuleColumnIndex(ModuleColumn::Path), 560);
     m_moduleTable->setColumnWidth(toModuleColumnIndex(ModuleColumn::Size), 110);
-    m_moduleTable->setColumnWidth(toModuleColumnIndex(ModuleColumn::Signature), 110);
+    m_moduleTable->setColumnWidth(toModuleColumnIndex(ModuleColumn::Signature), 260);
     m_moduleTable->setColumnWidth(toModuleColumnIndex(ModuleColumn::EntryOffset), 120);
     m_moduleTable->setColumnWidth(toModuleColumnIndex(ModuleColumn::State), 90);
     m_moduleTable->setColumnWidth(toModuleColumnIndex(ModuleColumn::ThreadId), 180);
@@ -496,6 +569,10 @@ void ProcessDetailWindow::initializeConnections()
 
     // 模块刷新按钮。
     connect(m_refreshModuleButton, &QPushButton::clicked, this, [this]() {
+        kLogEvent logEvent;
+        info << logEvent
+            << "[ProcessDetailWindow] 用户点击“刷新模块”, pid=" << m_baseRecord.pid
+            << eol;
         requestAsyncModuleRefresh(true);
     });
 
@@ -515,13 +592,24 @@ void ProcessDetailWindow::refreshDetailTabTexts()
     m_processIconLabel->setPixmap(resolveProcessIcon(m_baseRecord.imagePath, 40).pixmap(40, 40));
 
     // 路径与命令行。
-    m_pathLineEdit->setText(QString::fromStdString(m_baseRecord.imagePath));
-    m_commandLineEdit->setText(QString::fromStdString(m_baseRecord.commandLine));
+    QString processPathText = QString::fromStdString(m_baseRecord.imagePath);
+    if (processPathText.trimmed().isEmpty() && m_baseRecord.pid != 0)
+    {
+        // 兜底再查一次路径，避免 UI 出现“路径始终为空”。
+        processPathText = QString::fromStdString(ks::process::QueryProcessPathByPid(m_baseRecord.pid));
+        if (!processPathText.trimmed().isEmpty())
+        {
+            m_baseRecord.imagePath = processPathText.toStdString();
+        }
+    }
+    m_pathLineEdit->setText(processPathText.trimmed().isEmpty() ? "-" : processPathText);
+    m_commandLineEdit->setText(QString::fromStdString(m_baseRecord.commandLine.empty() ? "-" : m_baseRecord.commandLine));
 
     // 详细字段赋值。
     m_detailStartTimeValue->setText(QString::fromStdString(m_baseRecord.startTimeText.empty() ? "-" : m_baseRecord.startTimeText));
     m_detailUserValue->setText(QString::fromStdString(m_baseRecord.userName.empty() ? "-" : m_baseRecord.userName));
-    m_detailAdminValue->setText(m_baseRecord.isAdmin ? "是" : "否");
+    m_detailAdminValue->setText(m_baseRecord.isAdmin ? "■ 是" : "■ 否");
+    m_detailAdminValue->setStyleSheet(m_baseRecord.isAdmin ? "color:#228B22; font-weight:700;" : "color:#DC322F; font-weight:700;");
     m_detailArchitectureValue->setText(QString::fromStdString(m_baseRecord.architectureText.empty() ? "Unknown" : m_baseRecord.architectureText));
     m_detailPriorityValue->setText(QString::fromStdString(m_baseRecord.priorityText.empty() ? "Unknown" : m_baseRecord.priorityText));
     m_detailSessionValue->setText(QString::number(m_baseRecord.sessionId));
@@ -531,6 +619,18 @@ void ProcessDetailWindow::refreshDetailTabTexts()
     m_detailRamValue->setText(formatDoubleText(m_baseRecord.ramMB, 1) + " MB");
     m_detailDiskValue->setText(formatDoubleText(m_baseRecord.diskMBps, 2) + " MB/s");
     m_detailSignatureValue->setText(QString::fromStdString(m_baseRecord.signatureState.empty() ? "Unknown" : m_baseRecord.signatureState));
+    if (!m_baseRecord.signatureTrusted && m_baseRecord.signatureState != "Pending")
+    {
+        m_detailSignatureValue->setStyleSheet("color:#DC322F; font-weight:700;");
+    }
+    else if (m_baseRecord.signatureTrusted)
+    {
+        m_detailSignatureValue->setStyleSheet("color:#228B22; font-weight:700;");
+    }
+    else
+    {
+        m_detailSignatureValue->setStyleSheet("color:#6F6F6F; font-weight:600;");
+    }
 
     // 刷新父进程信息区。
     refreshParentProcessSection();
@@ -670,13 +770,22 @@ void ProcessDetailWindow::applyModuleRefreshResult(const ModuleRefreshResult& re
     m_moduleRecords = refreshResult.moduleSnapshot.modules;
     rebuildModuleTable();
 
+    const QString diagnosticText = QString::fromStdString(refreshResult.moduleSnapshot.diagnosticText);
+
     // 更新状态标签：显示耗时、模块数量与线程数量。
-    updateModuleStatusLabel(
-        QString("● 刷新完成 %1 ms | 模块:%2 线程:%3")
+    QString statusText = QString("● 刷新完成 %1 ms | 模块:%2 线程:%3")
         .arg(refreshResult.elapsedMs)
         .arg(refreshResult.moduleSnapshot.modules.size())
-        .arg(refreshResult.moduleSnapshot.threads.size()),
-        false);
+        .arg(refreshResult.moduleSnapshot.threads.size());
+    if (!diagnosticText.trimmed().isEmpty())
+    {
+        statusText += QString(" | %1").arg(diagnosticText);
+    }
+    updateModuleStatusLabel(statusText, false);
+    if (refreshResult.moduleSnapshot.modules.empty())
+    {
+        m_moduleStatusLabel->setStyleSheet("color:#DC322F; font-weight:700;");
+    }
 
     // 首次刷新结束后隐藏对应进度任务卡片。
     if (!m_firstModuleRefreshDone)
@@ -695,7 +804,18 @@ void ProcessDetailWindow::applyModuleRefreshResult(const ModuleRefreshResult& re
         << ", moduleCount=" << refreshResult.moduleSnapshot.modules.size()
         << ", threadCount=" << refreshResult.moduleSnapshot.threads.size()
         << ", includeSignature=" << (refreshResult.includeSignatureCheck ? "true" : "false")
+        << ", diagnostic=" << refreshResult.moduleSnapshot.diagnosticText
         << eol;
+
+    // 模块数为 0 时额外输出告警日志，便于快速定位权限/跨位数问题。
+    if (refreshResult.moduleSnapshot.modules.empty())
+    {
+        kLogEvent warnEvent;
+        warn << warnEvent
+            << "[ProcessDetailWindow] 模块列表为空, pid=" << m_baseRecord.pid
+            << ", diagnostic=" << refreshResult.moduleSnapshot.diagnosticText
+            << eol;
+    }
 }
 
 void ProcessDetailWindow::rebuildModuleTable()
@@ -722,18 +842,18 @@ void ProcessDetailWindow::rebuildModuleTable()
             QVariant::fromValue<qulonglong>(moduleRecord.moduleBaseAddress));
         rowItem->setData(toModuleColumnIndex(ModuleColumn::Path), Qt::UserRole + 2, QVariant::fromValue(moduleRecord.representativeThreadId));
 
-        // 按签名状态上色，增强可读性。
-        if (moduleRecord.signatureState == "Signed")
+        // 按签名可信状态上色：可信绿色，不可信红色，Pending/未知灰色。
+        if (moduleRecord.signatureTrusted)
         {
             rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), QColor(34, 139, 34));
         }
-        else if (moduleRecord.signatureState == "Unsigned")
-        {
-            rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), QColor(200, 100, 20));
-        }
-        else if (moduleRecord.signatureState == "Pending")
+        else if (moduleRecord.signatureState == "Pending" || moduleRecord.signatureState == "Unknown")
         {
             rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), QColor(120, 120, 120));
+        }
+        else
+        {
+            rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), QColor(220, 50, 47));
         }
 
         m_moduleTable->addTopLevelItem(rowItem);
@@ -1048,7 +1168,12 @@ QIcon ProcessDetailWindow::resolveProcessIcon(const std::string& processPath, co
 {
     Q_UNUSED(iconPixelSize);
 
-    const QString pathText = QString::fromStdString(processPath);
+    // 优先使用传入路径；为空时按当前 PID 兜底查询一次。
+    QString pathText = QString::fromStdString(processPath);
+    if (pathText.trimmed().isEmpty() && m_baseRecord.pid != 0)
+    {
+        pathText = QString::fromStdString(ks::process::QueryProcessPathByPid(m_baseRecord.pid));
+    }
     if (pathText.isEmpty())
     {
         return QIcon(":/Icon/process_main.svg");
@@ -1060,8 +1185,13 @@ QIcon ProcessDetailWindow::resolveProcessIcon(const std::string& processPath, co
         return iconIt.value();
     }
 
-    QFileIconProvider iconProvider;
-    QIcon processIcon = iconProvider.icon(QFileInfo(pathText));
+    // 先尝试直接按 EXE 路径加载图标；失败再回退 QFileIconProvider。
+    QIcon processIcon(pathText);
+    if (processIcon.isNull())
+    {
+        QFileIconProvider iconProvider;
+        processIcon = iconProvider.icon(QFileInfo(pathText));
+    }
     if (processIcon.isNull())
     {
         processIcon = QIcon(":/Icon/process_main.svg");

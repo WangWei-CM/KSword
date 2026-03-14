@@ -24,17 +24,25 @@
 
 // 前置声明：减少头文件编译开销。
 class QComboBox;
+class QCheckBox;
+class QFormLayout;
+class QGroupBox;
 class QHeaderView;
 class QLabel;
+class QLineEdit;
+class QPlainTextEdit;
 class QPushButton;
 class QSlider;
+class QTableWidget;
 class QTabWidget;
+class QTextEdit;
 class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
 class QHBoxLayout;
 class QPoint;
+class QWidget;
 class ProcessDetailWindow;
 
 namespace ks::process
@@ -114,7 +122,7 @@ private:
         std::size_t staticFilledCount = 0;      // 本轮实际补齐静态详情的数量。
         std::size_t staticDeferredCount = 0;    // 本轮因预算或模式延后的静态详情数量。
         std::uint64_t workerElapsedMs = 0;      // 后台线程本轮构建结果耗时（毫秒）。
-        int selectedStrategyIndex = 0;          // UI 选择的策略下标（0/1/2）。
+        int selectedStrategyIndex = 0;          // UI 选择的策略下标（0/1）。
         ks::process::ProcessEnumStrategy selectedStrategy{}; // 由下标映射的策略枚举。
         ks::process::ProcessEnumStrategy actualStrategy{};   // 实际执行策略（Auto 下可能回退）。
         bool detailModeEnabled = false;         // 本轮是否处于“详细信息视图”。
@@ -125,9 +133,11 @@ private:
     void initializeUi();
     void initializeTopControls();
     void initializeProcessTable();
+    void initializeCreateProcessPage();
     void initializeConnections();
     void initializeTimer();
     void updateRefreshStateUi(bool refreshing, const QString& stateText);
+    void initializeCreateProcessConnections();
 
     // ======== 刷新与渲染 ========
     void requestAsyncRefresh(bool forceRefresh);
@@ -166,12 +176,24 @@ private:
     // ======== 工具函数 ========
     std::string selectedIdentityKey() const;
     ks::process::ProcessRecord* selectedRecord();
+    void bindContextActionToItem(QTreeWidgetItem* clickedItem);
+    void clearContextActionBinding();
     QString formatColumnText(const ks::process::ProcessRecord& processRecord, TableColumn column, int depth) const;
     QIcon resolveProcessIcon(const ks::process::ProcessRecord& processRecord);
     QIcon blueTintedIcon(const char* iconPath, const QSize& iconSize = QSize(16, 16)) const;
     void showActionResultMessage(const QString& title, bool actionOk, const std::string& detailText);
+    ks::process::CreateProcessRequest buildCreateProcessRequestFromUi(bool* buildOk, QString* errorTextOut) const;
+    void executeCreateProcessRequest();
+    void executeApplyTokenPrivilegeEditsOnly();
+    void appendCreateResultLine(const QString& lineText);
+    void browseCreateProcessApplicationPath();
+    void browseCreateProcessCurrentDirectory();
+    void resetCreateProcessForm();
     static std::string buildRulerPrefix(int depth);
     static int toColumnIndex(TableColumn column);
+    static bool parseUnsignedText(const QString& text, std::uint64_t& valueOut);
+    static std::uint32_t parseUInt32WithDefault(const QString& text, std::uint32_t defaultValue, bool* parseOkOut = nullptr);
+    static std::uint64_t parseUInt64WithDefault(const QString& text, std::uint64_t defaultValue, bool* parseOkOut = nullptr);
 
     // ======== 后台线程核心函数（静态） ========
     static RefreshResult buildRefreshResult(
@@ -189,6 +211,8 @@ private:
     QTabWidget* m_sideTabWidget = nullptr;    // 左侧 tab 栏（West），包含“进程列表”页。
     QWidget* m_processListPage = nullptr;     // “进程列表”页容器。
     QVBoxLayout* m_processPageLayout = nullptr; // 进程页主布局。
+    QWidget* m_createProcessPage = nullptr;   // “创建进程”页容器。
+    QVBoxLayout* m_createProcessPageLayout = nullptr; // 创建页主布局。
 
     // ======== 控制栏 ========
     QHBoxLayout* m_controlLayout = nullptr;   // 上方控制栏布局。
@@ -204,6 +228,73 @@ private:
     // ======== 进程表格 ========
     QTreeWidget* m_processTable = nullptr;    // 进程列表表格（支持列拖动/排序/右键）。
 
+    // ======== 创建进程页 - 通用参数 ========
+    QComboBox* m_createMethodCombo = nullptr; // CreateProcessW / Token 路径。
+    QLineEdit* m_applicationNameEdit = nullptr;
+    QPushButton* m_applicationBrowseButton = nullptr;
+    QCheckBox* m_useApplicationNameCheck = nullptr;
+    QLineEdit* m_commandLineEdit = nullptr;
+    QCheckBox* m_useCommandLineCheck = nullptr;
+    QLineEdit* m_currentDirectoryEdit = nullptr;
+    QPushButton* m_currentDirectoryBrowseButton = nullptr;
+    QCheckBox* m_useCurrentDirectoryCheck = nullptr;
+    QPlainTextEdit* m_environmentEditor = nullptr;
+    QCheckBox* m_useEnvironmentCheck = nullptr;
+    QCheckBox* m_environmentUnicodeCheck = nullptr;
+    QCheckBox* m_inheritHandleCheck = nullptr;
+    QLineEdit* m_creationFlagsEdit = nullptr;
+
+    // ======== 创建进程页 - SECURITY_ATTRIBUTES ========
+    QCheckBox* m_useProcessSecurityCheck = nullptr;
+    QLineEdit* m_processSecurityLengthEdit = nullptr;
+    QLineEdit* m_processSecurityDescriptorEdit = nullptr;
+    QCheckBox* m_processSecurityInheritCheck = nullptr;
+    QCheckBox* m_useThreadSecurityCheck = nullptr;
+    QLineEdit* m_threadSecurityLengthEdit = nullptr;
+    QLineEdit* m_threadSecurityDescriptorEdit = nullptr;
+    QCheckBox* m_threadSecurityInheritCheck = nullptr;
+
+    // ======== 创建进程页 - STARTUPINFOW ========
+    QCheckBox* m_useStartupInfoCheck = nullptr;
+    QLineEdit* m_siCbEdit = nullptr;
+    QLineEdit* m_siReservedEdit = nullptr;
+    QLineEdit* m_siDesktopEdit = nullptr;
+    QLineEdit* m_siTitleEdit = nullptr;
+    QLineEdit* m_siXEdit = nullptr;
+    QLineEdit* m_siYEdit = nullptr;
+    QLineEdit* m_siXSizeEdit = nullptr;
+    QLineEdit* m_siYSizeEdit = nullptr;
+    QLineEdit* m_siXCountCharsEdit = nullptr;
+    QLineEdit* m_siYCountCharsEdit = nullptr;
+    QLineEdit* m_siFillAttributeEdit = nullptr;
+    QLineEdit* m_siFlagsEdit = nullptr;
+    QLineEdit* m_siShowWindowEdit = nullptr;
+    QLineEdit* m_siCbReserved2Edit = nullptr;
+    QLineEdit* m_siReserved2PtrEdit = nullptr;
+    QLineEdit* m_siStdInputEdit = nullptr;
+    QLineEdit* m_siStdOutputEdit = nullptr;
+    QLineEdit* m_siStdErrorEdit = nullptr;
+
+    // ======== 创建进程页 - PROCESS_INFORMATION ========
+    QCheckBox* m_useProcessInfoCheck = nullptr;
+    QLineEdit* m_piProcessHandleEdit = nullptr;
+    QLineEdit* m_piThreadHandleEdit = nullptr;
+    QLineEdit* m_piPidEdit = nullptr;
+    QLineEdit* m_piTidEdit = nullptr;
+
+    // ======== 创建进程页 - Token 路径 ========
+    QLineEdit* m_tokenSourcePidEdit = nullptr;
+    QLineEdit* m_tokenDesiredAccessEdit = nullptr;
+    QCheckBox* m_tokenDuplicatePrimaryCheck = nullptr;
+    QTableWidget* m_tokenPrivilegeTable = nullptr;
+    QPushButton* m_applyTokenPrivilegeButton = nullptr;
+    QPushButton* m_resetTokenPrivilegeButton = nullptr;
+
+    // ======== 创建进程页 - 操作与输出 ========
+    QPushButton* m_launchProcessButton = nullptr;
+    QPushButton* m_resetCreateFormButton = nullptr;
+    QTextEdit* m_createResultOutput = nullptr;
+
     // ======== 刷新调度 ========
     QTimer* m_refreshTimer = nullptr;         // 周期刷新定时器。
     bool m_monitoringEnabled = true;          // 当前是否处于监视状态。
@@ -218,4 +309,10 @@ private:
     std::unordered_map<std::string, ks::process::CounterSample> m_counterSampleByIdentity; // 差值样本。
     QHash<QString, QIcon> m_iconCacheByPath;  // 进程图标缓存，避免重复提取。
     std::unordered_map<std::string, QPointer<ProcessDetailWindow>> m_detailWindowByIdentity; // 详情窗口缓存（同进程复用窗口）。
+
+    // ======== 右键菜单绑定状态 ========
+    std::string m_contextActionIdentityKey;      // 当前菜单动作绑定的 identityKey。
+    ks::process::ProcessRecord m_contextActionRecord{}; // identity 在刷新中失效时的兜底副本。
+    bool m_hasContextActionRecord = false;
+    bool m_contextMenuVisible = false;           // 菜单弹出期间用于冻结周期刷新。
 };

@@ -4,11 +4,59 @@
 #include <QTabWidget>
 #include <QApplication>
 #include <QWidget>
+#include <QHBoxLayout>
+#include <QMessageBox>
 #pragma warning(disable: 4996)
 #include "UI/UI.css/UI_css.h"
 #include "Framework.h"
 #include "Framework/LogDockWidget.h"
 #include "Framework/ProgressDockWidget.h"
+#include "theme.h"
+
+// 菜单栏权限按钮涉及 Windows 令牌权限查询与提权动作。
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#include <shellapi.h>
+#include <sddl.h>
+
+#include <array>
+#include <vector>
+
+namespace
+{
+    // buildPrivilegeButtonStyle 作用：
+    // - 按“当前是否具备权限”生成按钮样式；
+    // - true  -> 蓝底白字；
+    // - false -> 白底蓝字。
+    QString buildPrivilegeButtonStyle(const bool activeState)
+    {
+        const QString backgroundColor = activeState ? KswordTheme::PrimaryBlueHex : QStringLiteral("#FFFFFF");
+        const QString textColor = activeState ? QStringLiteral("#FFFFFF") : KswordTheme::PrimaryBlueHex;
+        return QStringLiteral(
+            "QPushButton {"
+            "  background:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  border-radius:3px;"
+            "  padding:2px 8px;"
+            "  font-weight:600;"
+            "}"
+            "QPushButton:hover {"
+            "  background:%4;"
+            "}"
+            "QPushButton:pressed {"
+            "  background:%5;"
+            "  color:#FFFFFF;"
+            "}")
+            .arg(backgroundColor)
+            .arg(textColor)
+            .arg(KswordTheme::PrimaryBlueBorderHex)
+            .arg(KswordTheme::PrimaryBlueHoverHex)
+            .arg(KswordTheme::PrimaryBluePressedHex);
+    }
+}
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -80,6 +128,388 @@ void MainWindow::initMenus()
     menuBar()->addMenu("编辑(&E)");
 
     // 视图菜单将在initDockWidgets后添加Dock切换动作
+
+    // 菜单栏右侧权限状态按钮（Admin/Debug/System）。
+    initPrivilegeStatusButtons();
+}
+
+void MainWindow::initPrivilegeStatusButtons()
+{
+    // 防重复初始化：若已创建容器则只刷新一次状态。
+    if (m_privilegeButtonContainer != nullptr)
+    {
+        refreshPrivilegeStatusButtons();
+        return;
+    }
+
+    // 在菜单栏右上角放置一个水平容器，承载权限状态按钮。
+    m_privilegeButtonContainer = new QWidget(menuBar());
+    QHBoxLayout* buttonLayout = new QHBoxLayout(m_privilegeButtonContainer);
+    buttonLayout->setContentsMargins(0, 0, 6, 0);
+    buttonLayout->setSpacing(6);
+
+    // 按钮文本采用纯文字，满足用户要求。
+    m_adminStatusButton = new QPushButton("Admin", m_privilegeButtonContainer);
+    m_debugStatusButton = new QPushButton("Debug", m_privilegeButtonContainer);
+    m_systemStatusButton = new QPushButton("System", m_privilegeButtonContainer);
+    m_tiStatusButton = new QPushButton("TI", m_privilegeButtonContainer);
+    m_pplStatusButton = new QPushButton("PPL", m_privilegeButtonContainer);
+
+    // 统一按钮尺寸，保证右上角布局整齐。
+    const std::array<QPushButton*, 5> statusButtons{
+        m_adminStatusButton,
+        m_debugStatusButton,
+        m_systemStatusButton,
+        m_tiStatusButton,
+        m_pplStatusButton
+    };
+    for (QPushButton* statusButton : statusButtons)
+    {
+        if (statusButton == nullptr)
+        {
+            continue;
+        }
+        statusButton->setFixedHeight(22);
+        statusButton->setMinimumWidth(56);
+        buttonLayout->addWidget(statusButton);
+    }
+
+    // 先占位说明：TI / PPL 状态位目前仅展示（后续可扩展实现）。
+    m_tiStatusButton->setToolTip("TrustedInstaller 状态位（预留）");
+    m_pplStatusButton->setToolTip("PPL 状态位（预留）");
+
+    // 把容器挂到菜单栏右上角。
+    menuBar()->setCornerWidget(m_privilegeButtonContainer, Qt::TopRightCorner);
+
+    // Admin 按钮：
+    // - 已是管理员：仅提示当前状态；
+    // - 非管理员：立刻触发 runas 重启提权。
+    connect(m_adminStatusButton, &QPushButton::clicked, this, [this]() {
+        if (hasAdminPrivilege())
+        {
+            QMessageBox::information(this, "Admin", "当前已是管理员权限。");
+            refreshPrivilegeStatusButtons();
+            return;
+        }
+
+        kLogEvent logEvent;
+        warn << logEvent << "[MainWindow] Admin 按钮触发提权重启。" << eol;
+        requestAdminElevationRestart();
+    });
+
+    // Debug 按钮：
+    // - 非管理员：按需求先执行 Admin 提权动作；
+    // - 已管理员：申请 SeDebugPrivilege。
+    connect(m_debugStatusButton, &QPushButton::clicked, this, [this]() {
+        if (!hasAdminPrivilege())
+        {
+            kLogEvent logEvent;
+            warn << logEvent << "[MainWindow] Debug 按钮检测到非管理员，转为执行 Admin 提权。" << eol;
+            requestAdminElevationRestart();
+            return;
+        }
+
+        std::string errorText;
+        const bool enableOk = enableSeDebugPrivilege(errorText);
+        if (enableOk)
+        {
+            kLogEvent logEvent;
+            info << logEvent << "[MainWindow] SeDebugPrivilege 申请成功。" << eol;
+            QMessageBox::information(this, "Debug", "SeDebugPrivilege 已启用。");
+        }
+        else
+        {
+            kLogEvent logEvent;
+            err << logEvent << "[MainWindow] SeDebugPrivilege 申请失败: " << errorText << eol;
+            QMessageBox::warning(this, "Debug", QString("SeDebugPrivilege 启用失败。\n%1").arg(QString::fromStdString(errorText)));
+        }
+        refreshPrivilegeStatusButtons();
+    });
+
+    // System 按钮仅展示状态，点击给出提示（普通用户态无法直接“切到 SYSTEM”）。
+    connect(m_systemStatusButton, &QPushButton::clicked, this, [this]() {
+        if (hasSystemPrivilege())
+        {
+            QMessageBox::information(this, "System", "当前进程已经是 LocalSystem 身份。");
+        }
+        else
+        {
+            QMessageBox::information(this, "System", "当前不是 LocalSystem 身份。");
+        }
+    });
+
+    // 定时刷新权限状态，保证按钮颜色与实际权限一致。
+    m_privilegeStatusTimer = new QTimer(this);
+    m_privilegeStatusTimer->setInterval(1500);
+    connect(m_privilegeStatusTimer, &QTimer::timeout, this, [this]() {
+        refreshPrivilegeStatusButtons();
+    });
+    m_privilegeStatusTimer->start();
+
+    refreshPrivilegeStatusButtons();
+}
+
+void MainWindow::refreshPrivilegeStatusButtons()
+{
+    // 读取当前权限状态。
+    const bool adminEnabled = hasAdminPrivilege();
+    const bool debugEnabled = hasDebugPrivilege();
+    const bool systemEnabled = hasSystemPrivilege();
+
+    // TI/PPL 暂为预留状态位（当前固定 false，仅展示 UI 占位）。
+    const bool trustedInstallerEnabled = false;
+    const bool pplEnabled = false;
+
+    // 按状态更新按钮样式与提示文本。
+    applyPrivilegeButtonStyle(m_adminStatusButton, adminEnabled);
+    applyPrivilegeButtonStyle(m_debugStatusButton, debugEnabled);
+    applyPrivilegeButtonStyle(m_systemStatusButton, systemEnabled);
+    applyPrivilegeButtonStyle(m_tiStatusButton, trustedInstallerEnabled);
+    applyPrivilegeButtonStyle(m_pplStatusButton, pplEnabled);
+
+    if (m_adminStatusButton != nullptr)
+    {
+        m_adminStatusButton->setToolTip(adminEnabled ? "管理员权限已启用" : "点击提权到管理员（重启当前程序）");
+    }
+    if (m_debugStatusButton != nullptr)
+    {
+        m_debugStatusButton->setToolTip(debugEnabled ? "SeDebugPrivilege 已启用" : "点击启用 SeDebugPrivilege");
+    }
+    if (m_systemStatusButton != nullptr)
+    {
+        m_systemStatusButton->setToolTip(systemEnabled ? "当前运行身份：LocalSystem" : "当前运行身份：非 LocalSystem");
+    }
+
+    // 仅在状态变化时写日志，避免定时器造成日志刷屏。
+    static bool hasPreviousState = false;
+    static bool previousAdmin = false;
+    static bool previousDebug = false;
+    static bool previousSystem = false;
+    if (!hasPreviousState ||
+        previousAdmin != adminEnabled ||
+        previousDebug != debugEnabled ||
+        previousSystem != systemEnabled)
+    {
+        hasPreviousState = true;
+        previousAdmin = adminEnabled;
+        previousDebug = debugEnabled;
+        previousSystem = systemEnabled;
+
+        kLogEvent logEvent;
+        info << logEvent
+            << "[MainWindow] 权限状态刷新, admin=" << (adminEnabled ? "true" : "false")
+            << ", debug=" << (debugEnabled ? "true" : "false")
+            << ", system=" << (systemEnabled ? "true" : "false")
+            << eol;
+    }
+}
+
+void MainWindow::applyPrivilegeButtonStyle(QPushButton* button, const bool activeState)
+{
+    if (button == nullptr)
+    {
+        return;
+    }
+    button->setStyleSheet(buildPrivilegeButtonStyle(activeState));
+}
+
+void MainWindow::requestAdminElevationRestart()
+{
+    // 获取当前可执行文件路径，作为 runas 重启目标。
+    wchar_t exePathBuffer[MAX_PATH] = {};
+    const DWORD pathLength = ::GetModuleFileNameW(nullptr, exePathBuffer, static_cast<DWORD>(std::size(exePathBuffer)));
+    if (pathLength == 0 || pathLength >= std::size(exePathBuffer))
+    {
+        const DWORD lastError = ::GetLastError();
+        QMessageBox::warning(this, "Admin", QString("读取当前程序路径失败，错误码: %1").arg(lastError));
+        return;
+    }
+
+    // 使用 ShellExecute("runas") 触发 UAC 提权。
+    HINSTANCE shellResult = ::ShellExecuteW(
+        nullptr,
+        L"runas",
+        exePathBuffer,
+        nullptr,
+        nullptr,
+        SW_SHOWNORMAL);
+    if (reinterpret_cast<std::intptr_t>(shellResult) <= 32)
+    {
+        QMessageBox::warning(this, "Admin", "提权启动失败，可能被用户取消或系统策略阻止。");
+        return;
+    }
+
+    // 新进程启动成功后，当前实例退出。
+    kLogEvent logEvent;
+    info << logEvent << "[MainWindow] 已触发管理员重启，当前实例即将退出。" << eol;
+    QApplication::quit();
+}
+
+bool MainWindow::hasAdminPrivilege() const
+{
+    HANDLE tokenHandle = nullptr;
+    if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &tokenHandle) == FALSE)
+    {
+        return false;
+    }
+
+    TOKEN_ELEVATION tokenElevation{};
+    DWORD returnLength = 0;
+    const BOOL queryOk = ::GetTokenInformation(
+        tokenHandle,
+        TokenElevation,
+        &tokenElevation,
+        sizeof(tokenElevation),
+        &returnLength);
+    ::CloseHandle(tokenHandle);
+    return queryOk != FALSE && tokenElevation.TokenIsElevated != 0;
+}
+
+bool MainWindow::hasDebugPrivilege() const
+{
+    HANDLE tokenHandle = nullptr;
+    if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &tokenHandle) == FALSE)
+    {
+        return false;
+    }
+
+    DWORD requiredLength = 0;
+    ::GetTokenInformation(tokenHandle, TokenPrivileges, nullptr, 0, &requiredLength);
+    if (requiredLength == 0)
+    {
+        ::CloseHandle(tokenHandle);
+        return false;
+    }
+
+    std::vector<BYTE> privilegeBuffer(requiredLength, 0);
+    if (::GetTokenInformation(
+        tokenHandle,
+        TokenPrivileges,
+        privilegeBuffer.data(),
+        requiredLength,
+        &requiredLength) == FALSE)
+    {
+        ::CloseHandle(tokenHandle);
+        return false;
+    }
+
+    LUID debugLuid{};
+    if (::LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &debugLuid) == FALSE)
+    {
+        ::CloseHandle(tokenHandle);
+        return false;
+    }
+
+    const TOKEN_PRIVILEGES* tokenPrivileges = reinterpret_cast<const TOKEN_PRIVILEGES*>(privilegeBuffer.data());
+    for (DWORD privilegeIndex = 0; privilegeIndex < tokenPrivileges->PrivilegeCount; ++privilegeIndex)
+    {
+        const LUID_AND_ATTRIBUTES& privilegeItem = tokenPrivileges->Privileges[privilegeIndex];
+        if (privilegeItem.Luid.LowPart == debugLuid.LowPart &&
+            privilegeItem.Luid.HighPart == debugLuid.HighPart)
+        {
+            const bool enabled = (privilegeItem.Attributes & SE_PRIVILEGE_ENABLED) != 0;
+            ::CloseHandle(tokenHandle);
+            return enabled;
+        }
+    }
+
+    ::CloseHandle(tokenHandle);
+    return false;
+}
+
+bool MainWindow::hasSystemPrivilege() const
+{
+    HANDLE tokenHandle = nullptr;
+    if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &tokenHandle) == FALSE)
+    {
+        return false;
+    }
+
+    DWORD requiredLength = 0;
+    ::GetTokenInformation(tokenHandle, TokenUser, nullptr, 0, &requiredLength);
+    if (requiredLength == 0)
+    {
+        ::CloseHandle(tokenHandle);
+        return false;
+    }
+
+    std::vector<BYTE> userBuffer(requiredLength, 0);
+    if (::GetTokenInformation(
+        tokenHandle,
+        TokenUser,
+        userBuffer.data(),
+        requiredLength,
+        &requiredLength) == FALSE)
+    {
+        ::CloseHandle(tokenHandle);
+        return false;
+    }
+
+    BYTE systemSidBuffer[SECURITY_MAX_SID_SIZE] = {};
+    DWORD systemSidLength = static_cast<DWORD>(std::size(systemSidBuffer));
+    if (::CreateWellKnownSid(
+        WinLocalSystemSid,
+        nullptr,
+        systemSidBuffer,
+        &systemSidLength) == FALSE)
+    {
+        ::CloseHandle(tokenHandle);
+        return false;
+    }
+
+    const TOKEN_USER* tokenUser = reinterpret_cast<const TOKEN_USER*>(userBuffer.data());
+    const bool isSystem = (::EqualSid(tokenUser->User.Sid, systemSidBuffer) != FALSE);
+    ::CloseHandle(tokenHandle);
+    return isSystem;
+}
+
+bool MainWindow::enableSeDebugPrivilege(std::string& errorTextOut) const
+{
+    errorTextOut.clear();
+
+    HANDLE tokenHandle = nullptr;
+    if (::OpenProcessToken(
+        ::GetCurrentProcess(),
+        TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+        &tokenHandle) == FALSE)
+    {
+        errorTextOut = "OpenProcessToken failed, error=" + std::to_string(::GetLastError());
+        return false;
+    }
+
+    LUID debugLuid{};
+    if (::LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &debugLuid) == FALSE)
+    {
+        errorTextOut = "LookupPrivilegeValue(SE_DEBUG_NAME) failed, error=" + std::to_string(::GetLastError());
+        ::CloseHandle(tokenHandle);
+        return false;
+    }
+
+    TOKEN_PRIVILEGES tokenPrivileges{};
+    tokenPrivileges.PrivilegeCount = 1;
+    tokenPrivileges.Privileges[0].Luid = debugLuid;
+    tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    if (::AdjustTokenPrivileges(
+        tokenHandle,
+        FALSE,
+        &tokenPrivileges,
+        sizeof(tokenPrivileges),
+        nullptr,
+        nullptr) == FALSE)
+    {
+        errorTextOut = "AdjustTokenPrivileges failed, error=" + std::to_string(::GetLastError());
+        ::CloseHandle(tokenHandle);
+        return false;
+    }
+
+    const DWORD adjustError = ::GetLastError();
+    ::CloseHandle(tokenHandle);
+    if (adjustError != ERROR_SUCCESS)
+    {
+        errorTextOut = "AdjustTokenPrivileges returned error=" + std::to_string(adjustError);
+        return false;
+    }
+    return true;
 }
 
 void MainWindow::initDockWidgets()
@@ -172,14 +602,15 @@ void MainWindow::setupDockLayout()
     // 4. 右侧区域：同理
     auto rightDockArea = m_pDockManager->addDockWidget(ads::RightDockWidgetArea, m_dockCurrentOp);
 
-    // 使用正确的方法添加标签页
-    m_pDockManager->addDockWidgetTabToArea(m_dockLog, rightDockArea);
+    // 右侧仅保留“当前操作 + 即时窗口”。
     m_pDockManager->addDockWidgetTabToArea(m_dockImmediate, rightDockArea);
 
-    // 5. 底部区域（单独显示，不合并到标签页）
-    m_pDockManager->addDockWidget(ads::BottomDockWidgetArea, m_dockMonitor);
+    // 5. 底部区域：把“日志输出”与“监视面板”合并为同一组标签页。
+    auto bottomDockArea = m_pDockManager->addDockWidget(ads::BottomDockWidgetArea, m_dockMonitor);
+    m_pDockManager->addDockWidgetTabToArea(m_dockLog, bottomDockArea);
 
     // 6. 设置默认显示的标签页
     m_dockWelcome->raise();
     m_dockCurrentOp->raise();
+    m_dockMonitor->raise();
 }

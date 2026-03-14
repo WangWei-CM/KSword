@@ -5,25 +5,38 @@
 
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QCursor>
+#include <QDateTime>
+#include <QFileDialog>
 #include <QFileIconProvider>
 #include <QFileInfo>
+#include <QFormLayout>
+#include <QFrame>
+#include <QGridLayout>
+#include <QGroupBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPainter>
+#include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
 #include <QPixmap>
 #include <QRunnable>
+#include <QScrollArea>
 #include <QSlider>
 #include <QSvgRenderer>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QTabWidget>
+#include <QTextEdit>
 #include <QThreadPool>
 #include <QTimer>
 #include <QStringList>
@@ -32,11 +45,18 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <set>
 #include <thread>
 #include <unordered_set>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
 
 namespace
 {
@@ -88,7 +108,7 @@ namespace
         case 1:
             return ks::process::ProcessEnumStrategy::NtQuerySystemInfo;
         default:
-            return ks::process::ProcessEnumStrategy::Auto;
+            return ks::process::ProcessEnumStrategy::NtQuerySystemInfo;
         }
     }
 
@@ -102,7 +122,7 @@ namespace
         case ks::process::ProcessEnumStrategy::NtQuerySystemInfo:
             return "NtQuerySystemInformation";
         case ks::process::ProcessEnumStrategy::Auto:
-            return "Auto";
+            return "Auto (NtQuery 优先, 失败回退 Toolhelp)";
         default:
             return "Unknown";
         }
@@ -146,6 +166,64 @@ namespace
             .arg(KswordTheme::PrimaryBluePressedHex)
             .arg(paddingText);
     }
+
+    // 下拉框主题描边样式，保持与按钮同色系。
+    QString buildBlueComboBoxStyle()
+    {
+        return QStringLiteral(
+            "QComboBox {"
+            "  border: 1px solid %1;"
+            "  border-radius: 4px;"
+            "  padding: 2px 8px;"
+            "  color: #1F4E7A;"
+            "  background: #FFFFFF;"
+            "}"
+            "QComboBox:hover {"
+            "  border-color: %2;"
+            "  background: %3;"
+            "}"
+            "QComboBox::drop-down {"
+            "  border: none;"
+            "  width: 20px;"
+            "}"
+            "QComboBox QAbstractItemView {"
+            "  border: 1px solid %1;"
+            "  selection-background-color: %3;"
+            "}")
+            .arg(KswordTheme::PrimaryBlueBorderHex)
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::PrimaryBlueHoverHex);
+    }
+
+    // 统一“普通输入框”主题边框。
+    QString buildBlueLineEditStyle()
+    {
+        return QStringLiteral(
+            "QLineEdit, QPlainTextEdit, QTextEdit {"
+            "  border: 1px solid #C8DDF4;"
+            "  border-radius: 3px;"
+            "  background: #FFFFFF;"
+            "  padding: 3px 5px;"
+            "}"
+            "QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {"
+            "  border: 1px solid %1;"
+            "}")
+            .arg(KswordTheme::PrimaryBlueHex);
+    }
+
+    // 常见令牌特权列表：用于“可视化调权”表格。
+    const QStringList CommonPrivilegeNames{
+        "SeDebugPrivilege",
+        "SeImpersonatePrivilege",
+        "SeAssignPrimaryTokenPrivilege",
+        "SeIncreaseQuotaPrivilege",
+        "SeTcbPrivilege",
+        "SeBackupPrivilege",
+        "SeRestorePrivilege",
+        "SeLoadDriverPrivilege",
+        "SeSecurityPrivilege",
+        "SeTakeOwnershipPrivilege"
+    };
 }
 
 ProcessDock::ProcessDock(QWidget* parent)
@@ -181,6 +259,7 @@ void ProcessDock::initializeUi()
     // 初始化上方控制栏和下方表格。
     initializeTopControls();
     initializeProcessTable();
+    initializeCreateProcessPage();
 
     m_rootLayout->addWidget(m_sideTabWidget);
 }
@@ -194,12 +273,11 @@ void ProcessDock::initializeTopControls()
     // 遍历策略下拉框：
     // 1) Toolhelp（CreateToolhelp32Snapshot + Process32First/Next）
     // 2) NtQuerySystemInformation
-    // 3) Auto（优先 NtQuery，失败回退 Toolhelp）
+    // 说明：不再默认 Auto，直接明确展示当前使用的方法。
     m_strategyCombo = new QComboBox(this);
-    m_strategyCombo->addItem(QIcon(IconRefresh), "Toolhelp Snapshot + Process32First/Next");
+    m_strategyCombo->addItem(QIcon(IconRefresh), "Toolhelp Snapshot / Process32First / Process32Next");
     m_strategyCombo->addItem(QIcon(IconRefresh), "NtQuerySystemInformation");
-    m_strategyCombo->addItem(QIcon(IconRefresh), "Auto");
-    m_strategyCombo->setCurrentIndex(2);
+    m_strategyCombo->setCurrentIndex(1);
     m_strategyCombo->setToolTip("指定进程遍历方案");
 
     // 树/列表切换按钮：按需求仅显示图标。
@@ -216,6 +294,10 @@ void ProcessDock::initializeTopControls()
     m_viewModeCombo->addItem(QIcon(IconProcessMain), "详细信息视图");
     m_viewModeCombo->setCurrentIndex(static_cast<int>(ViewMode::Monitor));
     m_viewModeCombo->setToolTip("切换监视视图 / 详细信息视图");
+
+    const QString comboStyle = buildBlueComboBoxStyle();
+    m_strategyCombo->setStyleSheet(comboStyle);
+    m_viewModeCombo->setStyleSheet(comboStyle);
 
     // 开始/暂停按钮：按需求仅显示图标。
     m_startButton = new QPushButton(QIcon(IconStart), "", this);
@@ -296,6 +378,318 @@ void ProcessDock::initializeProcessTable()
     // 满足需求 3.1：侧边栏 Tab 中包含“进程列表”页签。
     m_sideTabWidget->addTab(m_processListPage, QIcon(IconProcessMain), "进程列表");
     m_sideTabWidget->setCurrentIndex(0);
+}
+
+void ProcessDock::initializeCreateProcessPage()
+{
+    m_createProcessPage = new QWidget(this);
+    m_createProcessPageLayout = new QVBoxLayout(m_createProcessPage);
+    m_createProcessPageLayout->setContentsMargins(6, 6, 6, 6);
+    m_createProcessPageLayout->setSpacing(6);
+
+    QScrollArea* scrollArea = new QScrollArea(m_createProcessPage);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    m_createProcessPageLayout->addWidget(scrollArea, 1);
+
+    QWidget* contentWidget = new QWidget(scrollArea);
+    QVBoxLayout* contentLayout = new QVBoxLayout(contentWidget);
+    contentLayout->setContentsMargins(2, 2, 2, 2);
+    contentLayout->setSpacing(8);
+    scrollArea->setWidget(contentWidget);
+
+    const QString inputStyle = buildBlueLineEditStyle();
+    const QString comboStyle = buildBlueComboBoxStyle();
+    const QString buttonStyle = buildBlueButtonStyle(false);
+
+    // 1) 创建方式 + 令牌来源配置。
+    QGroupBox* methodGroup = new QGroupBox("创建方式 / 令牌来源", contentWidget);
+    QGridLayout* methodLayout = new QGridLayout(methodGroup);
+    methodLayout->setHorizontalSpacing(8);
+    methodLayout->setVerticalSpacing(6);
+    m_createMethodCombo = new QComboBox(methodGroup);
+    m_createMethodCombo->addItem("CreateProcessW");
+    m_createMethodCombo->addItem("CreateProcessAsTokenW (内部使用 CreateProcessAsUserW + fallback)");
+    m_createMethodCombo->setStyleSheet(comboStyle);
+    m_createMethodCombo->setCurrentIndex(0);
+    m_createMethodCombo->setToolTip("默认直接调用 CreateProcessW；切换到 Token 模式时会按 PID 打开并调整令牌。");
+
+    m_tokenSourcePidEdit = new QLineEdit("0", methodGroup);
+    m_tokenDesiredAccessEdit = new QLineEdit("0x00000FAB", methodGroup);
+    m_tokenDuplicatePrimaryCheck = new QCheckBox("DuplicateTokenEx 成 PrimaryToken", methodGroup);
+    m_tokenDuplicatePrimaryCheck->setChecked(true);
+    m_tokenSourcePidEdit->setStyleSheet(inputStyle);
+    m_tokenDesiredAccessEdit->setStyleSheet(inputStyle);
+
+    methodLayout->addWidget(new QLabel("API:", methodGroup), 0, 0);
+    methodLayout->addWidget(m_createMethodCombo, 0, 1, 1, 3);
+    methodLayout->addWidget(new QLabel("源 PID:", methodGroup), 1, 0);
+    methodLayout->addWidget(m_tokenSourcePidEdit, 1, 1);
+    methodLayout->addWidget(new QLabel("令牌访问掩码:", methodGroup), 1, 2);
+    methodLayout->addWidget(m_tokenDesiredAccessEdit, 1, 3);
+    methodLayout->addWidget(m_tokenDuplicatePrimaryCheck, 2, 0, 1, 4);
+    contentLayout->addWidget(methodGroup);
+
+    // 2) CreateProcessW 基础参数。
+    QGroupBox* basicGroup = new QGroupBox("CreateProcessW 参数（全部可选 Null）", contentWidget);
+    QGridLayout* basicLayout = new QGridLayout(basicGroup);
+    basicLayout->setHorizontalSpacing(8);
+    basicLayout->setVerticalSpacing(6);
+
+    m_useApplicationNameCheck = new QCheckBox("启用 lpApplicationName", basicGroup);
+    m_useCommandLineCheck = new QCheckBox("启用 lpCommandLine", basicGroup);
+    m_useCurrentDirectoryCheck = new QCheckBox("启用 lpCurrentDirectory", basicGroup);
+    m_useEnvironmentCheck = new QCheckBox("启用 lpEnvironment", basicGroup);
+    m_environmentUnicodeCheck = new QCheckBox("环境块按 Unicode 传递（CREATE_UNICODE_ENVIRONMENT）", basicGroup);
+    m_inheritHandleCheck = new QCheckBox("bInheritHandles=TRUE", basicGroup);
+
+    m_applicationNameEdit = new QLineEdit(basicGroup);
+    m_applicationBrowseButton = new QPushButton("浏览...", basicGroup);
+    m_commandLineEdit = new QLineEdit(basicGroup);
+    m_currentDirectoryEdit = new QLineEdit(basicGroup);
+    m_currentDirectoryBrowseButton = new QPushButton("浏览...", basicGroup);
+    m_environmentEditor = new QPlainTextEdit(basicGroup);
+    m_creationFlagsEdit = new QLineEdit("0x00000000", basicGroup);
+    m_environmentEditor->setPlaceholderText("每行一个 KEY=VALUE，留空则为 null。");
+    m_environmentEditor->setFixedHeight(72);
+
+    m_applicationNameEdit->setStyleSheet(inputStyle);
+    m_commandLineEdit->setStyleSheet(inputStyle);
+    m_currentDirectoryEdit->setStyleSheet(inputStyle);
+    m_environmentEditor->setStyleSheet(inputStyle);
+    m_creationFlagsEdit->setStyleSheet(inputStyle);
+    m_applicationBrowseButton->setStyleSheet(buttonStyle);
+    m_currentDirectoryBrowseButton->setStyleSheet(buttonStyle);
+
+    m_useApplicationNameCheck->setChecked(false);
+    m_useCommandLineCheck->setChecked(false);
+    m_useCurrentDirectoryCheck->setChecked(false);
+    m_useEnvironmentCheck->setChecked(false);
+    m_environmentUnicodeCheck->setChecked(true);
+
+    basicLayout->addWidget(m_useApplicationNameCheck, 0, 0);
+    basicLayout->addWidget(m_applicationNameEdit, 0, 1, 1, 2);
+    basicLayout->addWidget(m_applicationBrowseButton, 0, 3);
+    basicLayout->addWidget(m_useCommandLineCheck, 1, 0);
+    basicLayout->addWidget(m_commandLineEdit, 1, 1, 1, 3);
+    basicLayout->addWidget(m_useCurrentDirectoryCheck, 2, 0);
+    basicLayout->addWidget(m_currentDirectoryEdit, 2, 1, 1, 2);
+    basicLayout->addWidget(m_currentDirectoryBrowseButton, 2, 3);
+    basicLayout->addWidget(m_useEnvironmentCheck, 3, 0);
+    basicLayout->addWidget(m_environmentEditor, 3, 1, 2, 3);
+    basicLayout->addWidget(m_environmentUnicodeCheck, 5, 1, 1, 3);
+    basicLayout->addWidget(new QLabel("dwCreationFlags:", basicGroup), 6, 0);
+    basicLayout->addWidget(m_creationFlagsEdit, 6, 1);
+    basicLayout->addWidget(m_inheritHandleCheck, 6, 2, 1, 2);
+    contentLayout->addWidget(basicGroup);
+
+    // 3) PROCESS / THREAD SECURITY_ATTRIBUTES。
+    QGroupBox* securityGroup = new QGroupBox("SECURITY_ATTRIBUTES（Process / Thread）", contentWidget);
+    QGridLayout* securityLayout = new QGridLayout(securityGroup);
+    securityLayout->setHorizontalSpacing(8);
+    securityLayout->setVerticalSpacing(6);
+
+    m_useProcessSecurityCheck = new QCheckBox("启用 lpProcessAttributes", securityGroup);
+    m_processSecurityLengthEdit = new QLineEdit("0", securityGroup);
+    m_processSecurityDescriptorEdit = new QLineEdit("0", securityGroup);
+    m_processSecurityInheritCheck = new QCheckBox("Process SA inherit", securityGroup);
+
+    m_useThreadSecurityCheck = new QCheckBox("启用 lpThreadAttributes", securityGroup);
+    m_threadSecurityLengthEdit = new QLineEdit("0", securityGroup);
+    m_threadSecurityDescriptorEdit = new QLineEdit("0", securityGroup);
+    m_threadSecurityInheritCheck = new QCheckBox("Thread SA inherit", securityGroup);
+
+    m_processSecurityLengthEdit->setStyleSheet(inputStyle);
+    m_processSecurityDescriptorEdit->setStyleSheet(inputStyle);
+    m_threadSecurityLengthEdit->setStyleSheet(inputStyle);
+    m_threadSecurityDescriptorEdit->setStyleSheet(inputStyle);
+
+    securityLayout->addWidget(m_useProcessSecurityCheck, 0, 0);
+    securityLayout->addWidget(new QLabel("nLength", securityGroup), 0, 1);
+    securityLayout->addWidget(m_processSecurityLengthEdit, 0, 2);
+    securityLayout->addWidget(new QLabel("lpSecurityDescriptor", securityGroup), 0, 3);
+    securityLayout->addWidget(m_processSecurityDescriptorEdit, 0, 4);
+    securityLayout->addWidget(m_processSecurityInheritCheck, 0, 5);
+    securityLayout->addWidget(m_useThreadSecurityCheck, 1, 0);
+    securityLayout->addWidget(new QLabel("nLength", securityGroup), 1, 1);
+    securityLayout->addWidget(m_threadSecurityLengthEdit, 1, 2);
+    securityLayout->addWidget(new QLabel("lpSecurityDescriptor", securityGroup), 1, 3);
+    securityLayout->addWidget(m_threadSecurityDescriptorEdit, 1, 4);
+    securityLayout->addWidget(m_threadSecurityInheritCheck, 1, 5);
+    contentLayout->addWidget(securityGroup);
+
+    // 4) STARTUPINFOW 全字段。
+    QGroupBox* startupGroup = new QGroupBox("STARTUPINFOW（全部字段）", contentWidget);
+    QGridLayout* startupLayout = new QGridLayout(startupGroup);
+    startupLayout->setHorizontalSpacing(8);
+    startupLayout->setVerticalSpacing(6);
+    m_useStartupInfoCheck = new QCheckBox("启用 lpStartupInfo（取消则传 NULL）", startupGroup);
+    m_useStartupInfoCheck->setChecked(false);
+    m_useStartupInfoCheck->setToolTip("注意：Win32 通常要求该参数非空，传 NULL 主要用于测试极限场景。");
+
+    m_siCbEdit = new QLineEdit("0", startupGroup);
+    m_siReservedEdit = new QLineEdit(startupGroup);
+    m_siDesktopEdit = new QLineEdit(startupGroup);
+    m_siTitleEdit = new QLineEdit(startupGroup);
+    m_siXEdit = new QLineEdit("0", startupGroup);
+    m_siYEdit = new QLineEdit("0", startupGroup);
+    m_siXSizeEdit = new QLineEdit("0", startupGroup);
+    m_siYSizeEdit = new QLineEdit("0", startupGroup);
+    m_siXCountCharsEdit = new QLineEdit("0", startupGroup);
+    m_siYCountCharsEdit = new QLineEdit("0", startupGroup);
+    m_siFillAttributeEdit = new QLineEdit("0", startupGroup);
+    m_siFlagsEdit = new QLineEdit("0", startupGroup);
+    m_siShowWindowEdit = new QLineEdit("0", startupGroup);
+    m_siCbReserved2Edit = new QLineEdit("0", startupGroup);
+    m_siReserved2PtrEdit = new QLineEdit("0", startupGroup);
+    m_siStdInputEdit = new QLineEdit("0", startupGroup);
+    m_siStdOutputEdit = new QLineEdit("0", startupGroup);
+    m_siStdErrorEdit = new QLineEdit("0", startupGroup);
+
+    const QList<QLineEdit*> startupEdits{
+        m_siCbEdit, m_siReservedEdit, m_siDesktopEdit, m_siTitleEdit,
+        m_siXEdit, m_siYEdit, m_siXSizeEdit, m_siYSizeEdit,
+        m_siXCountCharsEdit, m_siYCountCharsEdit, m_siFillAttributeEdit,
+        m_siFlagsEdit, m_siShowWindowEdit, m_siCbReserved2Edit,
+        m_siReserved2PtrEdit, m_siStdInputEdit, m_siStdOutputEdit, m_siStdErrorEdit
+    };
+    for (QLineEdit* startupEdit : startupEdits)
+    {
+        startupEdit->setStyleSheet(inputStyle);
+    }
+
+    int startupRow = 0;
+    startupLayout->addWidget(m_useStartupInfoCheck, startupRow++, 0, 1, 6);
+    const auto addStartupField = [&startupLayout, &startupRow](const QString& labelText, QWidget* editorWidget, const int colOffset)
+        {
+            startupLayout->addWidget(new QLabel(labelText), startupRow, colOffset);
+            startupLayout->addWidget(editorWidget, startupRow, colOffset + 1);
+        };
+
+    addStartupField("cb", m_siCbEdit, 0);
+    addStartupField("lpReserved", m_siReservedEdit, 2);
+    addStartupField("lpDesktop", m_siDesktopEdit, 4);
+    ++startupRow;
+    addStartupField("lpTitle", m_siTitleEdit, 0);
+    addStartupField("dwX", m_siXEdit, 2);
+    addStartupField("dwY", m_siYEdit, 4);
+    ++startupRow;
+    addStartupField("dwXSize", m_siXSizeEdit, 0);
+    addStartupField("dwYSize", m_siYSizeEdit, 2);
+    addStartupField("dwXCountChars", m_siXCountCharsEdit, 4);
+    ++startupRow;
+    addStartupField("dwYCountChars", m_siYCountCharsEdit, 0);
+    addStartupField("dwFillAttribute", m_siFillAttributeEdit, 2);
+    addStartupField("dwFlags", m_siFlagsEdit, 4);
+    ++startupRow;
+    addStartupField("wShowWindow", m_siShowWindowEdit, 0);
+    addStartupField("cbReserved2", m_siCbReserved2Edit, 2);
+    addStartupField("lpReserved2", m_siReserved2PtrEdit, 4);
+    ++startupRow;
+    addStartupField("hStdInput", m_siStdInputEdit, 0);
+    addStartupField("hStdOutput", m_siStdOutputEdit, 2);
+    addStartupField("hStdError", m_siStdErrorEdit, 4);
+    ++startupRow;
+    contentLayout->addWidget(startupGroup);
+
+    // 5) PROCESS_INFORMATION 全字段。
+    QGroupBox* processInfoGroup = new QGroupBox("PROCESS_INFORMATION（输出结构体，支持自定义初值）", contentWidget);
+    QGridLayout* processInfoLayout = new QGridLayout(processInfoGroup);
+    processInfoLayout->setHorizontalSpacing(8);
+    processInfoLayout->setVerticalSpacing(6);
+
+    m_useProcessInfoCheck = new QCheckBox("启用 lpProcessInformation（取消则传 NULL）", processInfoGroup);
+    m_useProcessInfoCheck->setChecked(false);
+    m_useProcessInfoCheck->setToolTip("注意：Win32 通常要求该参数非空，传 NULL 会导致调用失败。");
+    m_piProcessHandleEdit = new QLineEdit("0", processInfoGroup);
+    m_piThreadHandleEdit = new QLineEdit("0", processInfoGroup);
+    m_piPidEdit = new QLineEdit("0", processInfoGroup);
+    m_piTidEdit = new QLineEdit("0", processInfoGroup);
+    m_piProcessHandleEdit->setStyleSheet(inputStyle);
+    m_piThreadHandleEdit->setStyleSheet(inputStyle);
+    m_piPidEdit->setStyleSheet(inputStyle);
+    m_piTidEdit->setStyleSheet(inputStyle);
+
+    processInfoLayout->addWidget(m_useProcessInfoCheck, 0, 0, 1, 4);
+    processInfoLayout->addWidget(new QLabel("hProcess", processInfoGroup), 1, 0);
+    processInfoLayout->addWidget(m_piProcessHandleEdit, 1, 1);
+    processInfoLayout->addWidget(new QLabel("hThread", processInfoGroup), 1, 2);
+    processInfoLayout->addWidget(m_piThreadHandleEdit, 1, 3);
+    processInfoLayout->addWidget(new QLabel("dwProcessId", processInfoGroup), 2, 0);
+    processInfoLayout->addWidget(m_piPidEdit, 2, 1);
+    processInfoLayout->addWidget(new QLabel("dwThreadId", processInfoGroup), 2, 2);
+    processInfoLayout->addWidget(m_piTidEdit, 2, 3);
+    contentLayout->addWidget(processInfoGroup);
+
+    // 6) Token 特权编辑器。
+    QGroupBox* tokenPrivilegeGroup = new QGroupBox("Token 特权调整（AdjustTokenPrivileges）", contentWidget);
+    QVBoxLayout* tokenPrivilegeLayout = new QVBoxLayout(tokenPrivilegeGroup);
+    m_tokenPrivilegeTable = new QTableWidget(CommonPrivilegeNames.size(), 2, tokenPrivilegeGroup);
+    m_tokenPrivilegeTable->setHorizontalHeaderLabels(QStringList{ "Privilege", "Action" });
+    m_tokenPrivilegeTable->horizontalHeader()->setStretchLastSection(true);
+    m_tokenPrivilegeTable->verticalHeader()->setVisible(false);
+    m_tokenPrivilegeTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_tokenPrivilegeTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_tokenPrivilegeTable->setAlternatingRowColors(true);
+
+    for (int row = 0; row < CommonPrivilegeNames.size(); ++row)
+    {
+        QTableWidgetItem* nameItem = new QTableWidgetItem(CommonPrivilegeNames.at(row));
+        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+        m_tokenPrivilegeTable->setItem(row, 0, nameItem);
+
+        QComboBox* actionCombo = new QComboBox(m_tokenPrivilegeTable);
+        actionCombo->addItem("保持", static_cast<int>(ks::process::TokenPrivilegeAction::Keep));
+        actionCombo->addItem("启用", static_cast<int>(ks::process::TokenPrivilegeAction::Enable));
+        actionCombo->addItem("禁用", static_cast<int>(ks::process::TokenPrivilegeAction::Disable));
+        actionCombo->addItem("移除", static_cast<int>(ks::process::TokenPrivilegeAction::Remove));
+        actionCombo->setCurrentIndex(0);
+        actionCombo->setStyleSheet(comboStyle);
+        m_tokenPrivilegeTable->setCellWidget(row, 1, actionCombo);
+    }
+
+    QHBoxLayout* tokenActionLayout = new QHBoxLayout();
+    m_applyTokenPrivilegeButton = new QPushButton("仅应用令牌调整（不创建）", tokenPrivilegeGroup);
+    m_resetTokenPrivilegeButton = new QPushButton("重置全部特权动作为保持", tokenPrivilegeGroup);
+    m_applyTokenPrivilegeButton->setStyleSheet(buttonStyle);
+    m_resetTokenPrivilegeButton->setStyleSheet(buttonStyle);
+    tokenActionLayout->addWidget(m_applyTokenPrivilegeButton);
+    tokenActionLayout->addWidget(m_resetTokenPrivilegeButton);
+    tokenActionLayout->addStretch(1);
+
+    tokenPrivilegeLayout->addWidget(m_tokenPrivilegeTable, 1);
+    tokenPrivilegeLayout->addLayout(tokenActionLayout);
+    contentLayout->addWidget(tokenPrivilegeGroup);
+
+    // 7) 操作按钮 + 输出日志。
+    QGroupBox* actionGroup = new QGroupBox("执行与结果", contentWidget);
+    QVBoxLayout* actionLayout = new QVBoxLayout(actionGroup);
+    QHBoxLayout* actionButtonLayout = new QHBoxLayout();
+    m_launchProcessButton = new QPushButton("执行创建进程", actionGroup);
+    m_resetCreateFormButton = new QPushButton("恢复默认配置", actionGroup);
+    m_launchProcessButton->setStyleSheet(buttonStyle);
+    m_resetCreateFormButton->setStyleSheet(buttonStyle);
+    actionButtonLayout->addWidget(m_launchProcessButton);
+    actionButtonLayout->addWidget(m_resetCreateFormButton);
+    actionButtonLayout->addStretch(1);
+
+    m_createResultOutput = new QTextEdit(actionGroup);
+    m_createResultOutput->setReadOnly(true);
+    m_createResultOutput->setMinimumHeight(140);
+    m_createResultOutput->setStyleSheet(inputStyle);
+    m_createResultOutput->setPlaceholderText("这里显示请求参数摘要、API 返回结果和失败错误码。");
+
+    actionLayout->addLayout(actionButtonLayout);
+    actionLayout->addWidget(m_createResultOutput, 1);
+    contentLayout->addWidget(actionGroup, 1);
+
+    // 默认值补充：命令行默认跟随 applicationName。
+    m_commandLineEdit->setPlaceholderText("例如: \"C:\\Windows\\System32\\notepad.exe\" C:\\test.txt");
+    m_applicationNameEdit->setPlaceholderText("可执行文件路径（可为空并传 null）");
+    m_currentDirectoryEdit->setPlaceholderText("工作目录（可为空并传 null）");
+
+    m_sideTabWidget->addTab(m_createProcessPage, QIcon(IconStart), "创建进程");
+    initializeCreateProcessConnections();
 }
 
 void ProcessDock::initializeConnections()
@@ -386,6 +780,94 @@ void ProcessDock::initializeConnections()
     });
 }
 
+void ProcessDock::initializeCreateProcessConnections()
+{
+    if (m_applicationBrowseButton != nullptr)
+    {
+        connect(m_applicationBrowseButton, &QPushButton::clicked, this, [this]() {
+            browseCreateProcessApplicationPath();
+            });
+    }
+    if (m_currentDirectoryBrowseButton != nullptr)
+    {
+        connect(m_currentDirectoryBrowseButton, &QPushButton::clicked, this, [this]() {
+            browseCreateProcessCurrentDirectory();
+            });
+    }
+    if (m_launchProcessButton != nullptr)
+    {
+        connect(m_launchProcessButton, &QPushButton::clicked, this, [this]() {
+            executeCreateProcessRequest();
+            });
+    }
+    if (m_resetCreateFormButton != nullptr)
+    {
+        connect(m_resetCreateFormButton, &QPushButton::clicked, this, [this]() {
+            resetCreateProcessForm();
+            });
+    }
+    if (m_applyTokenPrivilegeButton != nullptr)
+    {
+        connect(m_applyTokenPrivilegeButton, &QPushButton::clicked, this, [this]() {
+            executeApplyTokenPrivilegeEditsOnly();
+            });
+    }
+    if (m_resetTokenPrivilegeButton != nullptr && m_tokenPrivilegeTable != nullptr)
+    {
+        connect(m_resetTokenPrivilegeButton, &QPushButton::clicked, this, [this]() {
+            for (int row = 0; row < m_tokenPrivilegeTable->rowCount(); ++row)
+            {
+                QComboBox* actionCombo = qobject_cast<QComboBox*>(m_tokenPrivilegeTable->cellWidget(row, 1));
+                if (actionCombo != nullptr)
+                {
+                    actionCombo->setCurrentIndex(0);
+                }
+            }
+            appendCreateResultLine("已重置全部特权动作到“保持”。");
+            });
+    }
+
+    // 选择应用程序路径后，若 lpCommandLine 为空则自动填充便于快速执行。
+    if (m_applicationNameEdit != nullptr && m_commandLineEdit != nullptr)
+    {
+        connect(m_applicationNameEdit, &QLineEdit::textChanged, this, [this](const QString& textValue) {
+            if (textValue.trimmed().isEmpty())
+            {
+                return;
+            }
+            if (m_commandLineEdit->text().trimmed().isEmpty())
+            {
+                m_commandLineEdit->setText(QStringLiteral("\"%1\"").arg(textValue.trimmed()));
+            }
+            });
+    }
+
+    if (m_createMethodCombo != nullptr && m_tokenSourcePidEdit != nullptr)
+    {
+        connect(m_createMethodCombo, &QComboBox::currentIndexChanged, this, [this](const int indexValue) {
+            const bool tokenMode = (indexValue == 1);
+            m_tokenSourcePidEdit->setEnabled(tokenMode);
+            m_tokenDesiredAccessEdit->setEnabled(tokenMode);
+            m_tokenDuplicatePrimaryCheck->setEnabled(tokenMode);
+            m_tokenPrivilegeTable->setEnabled(tokenMode);
+            m_applyTokenPrivilegeButton->setEnabled(tokenMode);
+            m_resetTokenPrivilegeButton->setEnabled(tokenMode);
+            appendCreateResultLine(tokenMode
+                ? "已切换到 Token 创建模式。"
+                : "已切换到普通 CreateProcessW 模式。");
+            });
+        m_createMethodCombo->setCurrentIndex(0);
+    }
+
+    const bool tokenMode = (m_createMethodCombo != nullptr && m_createMethodCombo->currentIndex() == 1);
+    if (m_tokenSourcePidEdit != nullptr) m_tokenSourcePidEdit->setEnabled(tokenMode);
+    if (m_tokenDesiredAccessEdit != nullptr) m_tokenDesiredAccessEdit->setEnabled(tokenMode);
+    if (m_tokenDuplicatePrimaryCheck != nullptr) m_tokenDuplicatePrimaryCheck->setEnabled(tokenMode);
+    if (m_tokenPrivilegeTable != nullptr) m_tokenPrivilegeTable->setEnabled(tokenMode);
+    if (m_applyTokenPrivilegeButton != nullptr) m_applyTokenPrivilegeButton->setEnabled(tokenMode);
+    if (m_resetTokenPrivilegeButton != nullptr) m_resetTokenPrivilegeButton->setEnabled(tokenMode);
+}
+
 void ProcessDock::initializeTimer()
 {
     // 周期刷新定时器：默认 2 秒。
@@ -426,7 +908,7 @@ void ProcessDock::applyDefaultColumnWidths()
     m_processTable->setColumnWidth(toColumnIndex(TableColumn::Disk), 95);
     m_processTable->setColumnWidth(toColumnIndex(TableColumn::Gpu), 80);
     m_processTable->setColumnWidth(toColumnIndex(TableColumn::Net), 95);
-    m_processTable->setColumnWidth(toColumnIndex(TableColumn::Signature), 100);
+    m_processTable->setColumnWidth(toColumnIndex(TableColumn::Signature), 260);
     m_processTable->setColumnWidth(toColumnIndex(TableColumn::Path), 280);
     m_processTable->setColumnWidth(toColumnIndex(TableColumn::ParentPid), 90);
     m_processTable->setColumnWidth(toColumnIndex(TableColumn::CommandLine), 320);
@@ -456,18 +938,42 @@ void ProcessDock::applyViewMode(const ViewMode viewMode)
         return;
     }
 
-    // 详细信息视图：全部列展示。
-    for (int column = 0; column < static_cast<int>(TableColumn::Count); ++column)
-    {
-        m_processTable->setColumnHidden(column, false);
-    }
+    // 详细信息视图：按用户要求“不要性能计数器列”。
+    // 仅展示静态/管理相关信息列。
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::Name), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::Pid), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::Signature), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::Path), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::ParentPid), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::CommandLine), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::User), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::StartTime), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::IsAdmin), false);
 }
 
 void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
 {
+    // 需求：每次刷新前都检测 Ctrl，按下则跳过本轮（无论是否强制刷新）。
+    if ((::GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0)
+    {
+        kLogEvent logEvent;
+        dbg << logEvent << "[ProcessDock] 检测到 Ctrl 按下，本轮刷新跳过。" << eol;
+        updateRefreshStateUi(false, "● Ctrl 按下，跳过本轮刷新");
+        return;
+    }
+
     // 非强制刷新时，暂停监视或正在刷新则直接跳过。
     if (!forceRefresh)
     {
+        // 右键菜单弹出期间冻结周期刷新，防止菜单绑定项被重建后失效。
+        if (m_contextMenuVisible)
+        {
+            kLogEvent logEvent;
+            dbg << logEvent << "[ProcessDock] 右键菜单处于打开状态，本轮刷新跳过。" << eol;
+            updateRefreshStateUi(false, "● 菜单打开中，跳过本轮刷新");
+            return;
+        }
+
         if (!m_monitoringEnabled || m_refreshInProgress)
         {
             kLogEvent logEvent;
@@ -501,7 +1007,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     const bool isFirstRefresh = m_cacheByIdentity.empty();
     const int staticDetailFillBudget =
         detailModeEnabled
-        ? (isFirstRefresh ? 24 : 16)   // 详细视图允许更高预算，加速填充详情字段。
+        ? 4096                          // 详细视图尽量全量补齐，结合并行线程避免 Pending 堆积。
         : (isFirstRefresh ? 2 : 4);    // 监视视图优先速度，预算较低。
     const std::uint32_t cpuCount = m_logicalCpuCount;
     const auto previousCache = m_cacheByIdentity;
@@ -617,8 +1123,9 @@ void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult)
     // 刷新状态标签展示详细统计，明确告诉用户“刷新已完成”。
     updateRefreshStateUi(
         false,
-        QString("● 刷新完成 %1 ms | 枚举:%2 新增:%3 退出:%4")
+        QString("● 刷新完成 %1 ms | 方法:%2 | 枚举:%3 新增:%4 退出:%5")
         .arg(elapsedMs)
+        .arg(QString::fromUtf8(strategyToText(refreshResult.actualStrategy)))
         .arg(refreshResult.enumeratedCount)
         .arg(refreshResult.newProcessCount)
         .arg(refreshResult.exitedProcessCount));
@@ -683,17 +1190,22 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
     // - 预算用于限制“路径/命令行/用户/签名”等慢操作，避免首轮刷新过慢；
     // - 监视模式预算较低，详细模式预算较高。
     int remainingStaticBudget = std::max(0, staticDetailFillBudget);
-    std::size_t processIndex = 0;
 
-    // 先处理当前仍存在的进程，按 identity 复用旧静态详情。
-    for (ks::process::ProcessRecord& processRecord : latestProcessList)
+    // 第一阶段：预处理 identity、复用旧字段，并筛选“需要补静态详情”的 PID 列表。
+    std::vector<std::string> identityKeys(latestProcessList.size());
+    std::vector<bool> isNewProcess(latestProcessList.size(), false);
+    std::vector<bool> shouldFillStatic(latestProcessList.size(), false);
+    std::vector<bool> includeSignatureList(latestProcessList.size(), false);
+
+    for (std::size_t recordIndex = 0; recordIndex < latestProcessList.size(); ++recordIndex)
     {
-        ++processIndex;
+        ks::process::ProcessRecord& processRecord = latestProcessList[recordIndex];
 
         // 若 creationTime 未取到，仍可用 0 参与 key（稳定但区分度降低）。
         const std::string identityKey = ks::process::BuildProcessIdentityKey(
             processRecord.pid,
             processRecord.creationTime100ns);
+        identityKeys[recordIndex] = identityKey;
 
         const auto oldCacheIt = previousCache.find(identityKey);
         bool needsStaticFill = false;
@@ -706,6 +1218,8 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
             if (processRecord.commandLine.empty()) processRecord.commandLine = oldRecord.commandLine;
             if (processRecord.userName.empty()) processRecord.userName = oldRecord.userName;
             if (processRecord.signatureState.empty()) processRecord.signatureState = oldRecord.signatureState;
+            if (processRecord.signaturePublisher.empty()) processRecord.signaturePublisher = oldRecord.signaturePublisher;
+            processRecord.signatureTrusted = oldRecord.signatureTrusted;
             if (processRecord.startTimeText.empty()) processRecord.startTimeText = oldRecord.startTimeText;
             processRecord.isAdmin = oldRecord.isAdmin;
             processRecord.staticDetailsReady = oldRecord.staticDetailsReady;
@@ -720,18 +1234,25 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         {
             // 新出现进程：计数 + 依据预算决定是否补齐静态详情。
             ++refreshResult.newProcessCount;
+            isNewProcess[recordIndex] = true;
             needsStaticFill = true;
             includeSignatureCheck = detailModeEnabled;
         }
 
         if (needsStaticFill)
         {
-            if (remainingStaticBudget > 0)
+            // 详细信息视图中，允许全量补齐静态字段（路径/命令行/用户/签名）。
+            // 监视视图仍维持预算限制，避免整体刷新卡顿。
+            const bool allowFill =
+                detailModeEnabled ? true : (remainingStaticBudget > 0);
+            if (allowFill)
             {
-                // 预算内执行静态详情填充。监视模式会跳过签名，以提升首刷速度。
-                ks::process::FillProcessStaticDetails(processRecord, includeSignatureCheck);
-                --remainingStaticBudget;
-                ++refreshResult.staticFilledCount;
+                shouldFillStatic[recordIndex] = true;
+                includeSignatureList[recordIndex] = includeSignatureCheck;
+                if (!detailModeEnabled)
+                {
+                    --remainingStaticBudget;
+                }
             }
             else
             {
@@ -740,9 +1261,86 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
                 {
                     processRecord.signatureState = detailModeEnabled ? "Unknown" : "Pending";
                 }
+                if (!detailModeEnabled)
+                {
+                    processRecord.signaturePublisher.clear();
+                    processRecord.signatureTrusted = false;
+                }
                 ++refreshResult.staticDeferredCount;
             }
         }
+    }
+
+    // 第二阶段：把“路径/签名/参数”等慢静态操作并行化，减少详细视图卡顿。
+    std::vector<std::size_t> staticFillIndices;
+    staticFillIndices.reserve(latestProcessList.size());
+    for (std::size_t recordIndex = 0; recordIndex < shouldFillStatic.size(); ++recordIndex)
+    {
+        if (shouldFillStatic[recordIndex])
+        {
+            staticFillIndices.push_back(recordIndex);
+        }
+    }
+
+    if (progressTaskPid > 0)
+    {
+        kPro.set(progressTaskPid, "正在并行补齐路径/签名/参数...", 40, 0.40f);
+    }
+
+    if (!staticFillIndices.empty())
+    {
+        // 线程数量策略：
+        // - 详细视图：使用更多并行度，加速签名校验；
+        // - 监视视图：仅小并发，避免过度占用 CPU。
+        const unsigned int hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+        const unsigned int wantedThreads = detailModeEnabled
+            ? std::max(2u, hardwareThreads)
+            : 2u;
+        const unsigned int workerCount = std::max(
+            1u,
+            std::min<unsigned int>(wantedThreads, static_cast<unsigned int>(staticFillIndices.size())));
+
+        std::atomic<std::size_t> nextTaskIndex{ 0 };
+        std::vector<std::thread> workerThreads;
+        workerThreads.reserve(workerCount);
+
+        // 每个线程循环领取 PID 任务并调用 FillProcessStaticDetails。
+        for (unsigned int workerId = 0; workerId < workerCount; ++workerId)
+        {
+            workerThreads.emplace_back([&]() {
+                for (;;)
+                {
+                    const std::size_t taskOrder = nextTaskIndex.fetch_add(1);
+                    if (taskOrder >= staticFillIndices.size())
+                    {
+                        break;
+                    }
+
+                    const std::size_t recordIndex = staticFillIndices[taskOrder];
+                    ks::process::FillProcessStaticDetails(
+                        latestProcessList[recordIndex],
+                        includeSignatureList[recordIndex]);
+                }
+                });
+        }
+
+        for (std::thread& workerThread : workerThreads)
+        {
+            if (workerThread.joinable())
+            {
+                workerThread.join();
+            }
+        }
+        refreshResult.staticFilledCount += staticFillIndices.size();
+    }
+
+    // 第三阶段：计算性能差值并写回缓存（该阶段仍串行，保证逻辑简单稳定）。
+    std::size_t processIndex = 0;
+    for (std::size_t recordIndex = 0; recordIndex < latestProcessList.size(); ++recordIndex)
+    {
+        ++processIndex;
+        ks::process::ProcessRecord& processRecord = latestProcessList[recordIndex];
+        const std::string& identityKey = identityKeys[recordIndex];
 
         // 若当前策略未填动态计数器，则显式刷新一次。
         if (!processRecord.dynamicCountersReady)
@@ -766,17 +1364,17 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         CacheEntry cacheEntry{};
         cacheEntry.record = std::move(processRecord);
         cacheEntry.missingRounds = 0;
-        cacheEntry.isNewInLatestRound = (oldCacheIt == previousCache.end());
+        cacheEntry.isNewInLatestRound = isNewProcess[recordIndex];
         cacheEntry.isExitedInLatestRound = false;
         refreshResult.nextCache.emplace(identityKey, std::move(cacheEntry));
 
-        // 进度条阶段 2：按处理进度更新（频率做了抽样，避免过度抖动）。
+        // 进度条阶段 3：按处理进度更新（频率做了抽样，避免过度抖动）。
         if (progressTaskPid > 0 && (processIndex % 48 == 0 || processIndex == latestProcessList.size()))
         {
             const double ratio = latestProcessList.empty()
                 ? 1.0
                 : (static_cast<double>(processIndex) / static_cast<double>(latestProcessList.size()));
-            const float progressValue = static_cast<float>(0.30 + ratio * 0.55); // 30% -> 85%
+            const float progressValue = static_cast<float>(0.50 + ratio * 0.35); // 50% -> 85%
             kPro.set(progressTaskPid, "正在处理缓存与性能差值...", 55, progressValue);
         }
     }
@@ -892,14 +1490,23 @@ void ProcessDock::rebuildTable()
             rowItem->setText(columnIndex, formatColumnText(processRecord, column, displayRow.depth));
         }
 
-        // 监视视图优先刷新速度：默认使用统一图标，避免首轮大量提取系统图标导致卡顿。
-        if (currentViewMode() == ViewMode::Monitor)
+        // 进程名列固定显示目标 EXE 图标（命中缓存后开销可控）。
+        rowItem->setIcon(toColumnIndex(TableColumn::Name), resolveProcessIcon(processRecord));
+
+        // 管理员列：按要求使用“绿色/红色方块”直观显示状态。
+        rowItem->setTextAlignment(toColumnIndex(TableColumn::IsAdmin), Qt::AlignCenter);
+        rowItem->setForeground(
+            toColumnIndex(TableColumn::IsAdmin),
+            processRecord.isAdmin ? QColor(34, 139, 34) : QColor(220, 50, 47));
+
+        // 数字签名列：非受信任时标红，方便快速识别风险进程。
+        if (!processRecord.signatureTrusted && processRecord.signatureState != "Pending")
         {
-            rowItem->setIcon(toColumnIndex(TableColumn::Name), QIcon(":/Icon/process_main.svg"));
+            rowItem->setForeground(toColumnIndex(TableColumn::Signature), QColor(220, 50, 47));
         }
-        else
+        else if (processRecord.signatureTrusted)
         {
-            rowItem->setIcon(toColumnIndex(TableColumn::Name), resolveProcessIcon(processRecord));
+            rowItem->setForeground(toColumnIndex(TableColumn::Signature), QColor(34, 139, 34));
         }
 
         // 新增进程绿色高亮；退出保留进程灰色高亮。
@@ -987,32 +1594,41 @@ void ProcessDock::updateUsageSummaryInHeader(const std::vector<DisplayRow>& disp
         {
             continue;
         }
-        totalCpuPercent += displayRow.record->cpuPercent;
+
+        // CPU 汇总按用户要求排除“System Idle Process”(PID=0) 的空闲占比。
+        const bool isSystemIdleProcess =
+            (displayRow.record->pid == 0) ||
+            (QString::fromStdString(displayRow.record->processName).compare("System Idle Process", Qt::CaseInsensitive) == 0);
+        if (!isSystemIdleProcess)
+        {
+            totalCpuPercent += displayRow.record->cpuPercent;
+        }
+
         totalRamMB += displayRow.record->ramMB;
         totalDiskMBps += displayRow.record->diskMBps;
         totalGpuPercent += displayRow.record->gpuPercent;
         totalNetKBps += displayRow.record->netKBps;
     }
 
-    // 非占用列保持原始列名；占用列追加 Σ 汇总值。
+    // 非占用列保持原始列名；占用列追加“总和”文本（不使用 Σ 符号）。
     QTreeWidgetItem* headerItem = m_processTable->headerItem();
     headerItem->setText(toColumnIndex(TableColumn::Name), ProcessTableHeaders.at(toColumnIndex(TableColumn::Name)));
     headerItem->setText(toColumnIndex(TableColumn::Pid), ProcessTableHeaders.at(toColumnIndex(TableColumn::Pid)));
     headerItem->setText(
         toColumnIndex(TableColumn::Cpu),
-        QString("CPU Σ%1%").arg(totalCpuPercent, 0, 'f', 2));
+        QString("CPU %1%").arg(totalCpuPercent, 0, 'f', 2));
     headerItem->setText(
         toColumnIndex(TableColumn::Ram),
-        QString("RAM Σ%1 MB").arg(totalRamMB, 0, 'f', 1));
+        QString("RAM %1 MB").arg(totalRamMB, 0, 'f', 1));
     headerItem->setText(
         toColumnIndex(TableColumn::Disk),
-        QString("DISK Σ%1 MB/s").arg(totalDiskMBps, 0, 'f', 2));
+        QString("DISK %1 MB/s").arg(totalDiskMBps, 0, 'f', 2));
     headerItem->setText(
         toColumnIndex(TableColumn::Gpu),
-        QString("GPU Σ%1%").arg(totalGpuPercent, 0, 'f', 1));
+        QString("GPU %1%").arg(totalGpuPercent, 0, 'f', 1));
     headerItem->setText(
         toColumnIndex(TableColumn::Net),
-        QString("Net Σ%1 KB/s").arg(totalNetKBps, 0, 'f', 2));
+        QString("Net %1 KB/s").arg(totalNetKBps, 0, 'f', 2));
     headerItem->setText(toColumnIndex(TableColumn::Signature), ProcessTableHeaders.at(toColumnIndex(TableColumn::Signature)));
     headerItem->setText(toColumnIndex(TableColumn::Path), ProcessTableHeaders.at(toColumnIndex(TableColumn::Path)));
     headerItem->setText(toColumnIndex(TableColumn::ParentPid), ProcessTableHeaders.at(toColumnIndex(TableColumn::ParentPid)));
@@ -1170,9 +1786,16 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QTreeWidgetItem* clickedItem = m_processTable->itemAt(localPosition);
     if (clickedItem == nullptr)
     {
+        clearContextActionBinding();
         return;
     }
     m_processTable->setCurrentItem(clickedItem);
+    const int clickedColumn = m_processTable->columnAt(localPosition.x());
+    if (clickedColumn >= 0)
+    {
+        m_processTable->setCurrentItem(clickedItem, clickedColumn);
+    }
+    bindContextActionToItem(clickedItem);
 
     QMenu contextMenu(this);
     QAction* copyCellAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_copy_cell.svg"), "复制单元格");
@@ -1210,9 +1833,12 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
 
     QAction* detailsAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_details.svg"), "进程详细信息");
 
+    m_contextMenuVisible = true;
     QAction* selectedAction = contextMenu.exec(m_processTable->viewport()->mapToGlobal(localPosition));
+    m_contextMenuVisible = false;
     if (selectedAction == nullptr)
     {
+        clearContextActionBinding();
         return;
     }
 
@@ -1223,23 +1849,25 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
             << eol;
     }
 
-    if (selectedAction == copyCellAction) { copyCurrentCell(); return; }
-    if (selectedAction == copyRowAction) { copyCurrentRow(); return; }
-    if (selectedAction == taskkillAction) { executeTaskKillAction(false); return; }
-    if (selectedAction == taskkillForceAction) { executeTaskKillAction(true); return; }
-    if (selectedAction == terminateProcessAction) { executeTerminateProcessAction(); return; }
-    if (selectedAction == terminateThreadsAction) { executeTerminateThreadsAction(); return; }
-    if (selectedAction == injectInvalidShellcodeAction) { executeInjectInvalidShellcodeAction(); return; }
-    if (selectedAction == suspendAction) { executeSuspendAction(); return; }
-    if (selectedAction == resumeAction) { executeResumeAction(); return; }
-    if (selectedAction == setCriticalAction) { executeSetCriticalAction(true); return; }
-    if (selectedAction == clearCriticalAction) { executeSetCriticalAction(false); return; }
-    if (selectedAction == openFolderAction) { executeOpenFolderAction(); return; }
-    if (selectedAction == detailsAction) { openProcessDetailsPlaceholder(); return; }
-    if (selectedAction->parent() == prioritySubMenu)
+    if (selectedAction == copyCellAction) { copyCurrentCell(); }
+    else if (selectedAction == copyRowAction) { copyCurrentRow(); }
+    else if (selectedAction == taskkillAction) { executeTaskKillAction(false); }
+    else if (selectedAction == taskkillForceAction) { executeTaskKillAction(true); }
+    else if (selectedAction == terminateProcessAction) { executeTerminateProcessAction(); }
+    else if (selectedAction == terminateThreadsAction) { executeTerminateThreadsAction(); }
+    else if (selectedAction == injectInvalidShellcodeAction) { executeInjectInvalidShellcodeAction(); }
+    else if (selectedAction == suspendAction) { executeSuspendAction(); }
+    else if (selectedAction == resumeAction) { executeResumeAction(); }
+    else if (selectedAction == setCriticalAction) { executeSetCriticalAction(true); }
+    else if (selectedAction == clearCriticalAction) { executeSetCriticalAction(false); }
+    else if (selectedAction == openFolderAction) { executeOpenFolderAction(); }
+    else if (selectedAction == detailsAction) { openProcessDetailsPlaceholder(); }
+    else if (selectedAction->parent() == prioritySubMenu)
     {
         executeSetPriorityAction(selectedAction->data().toInt());
     }
+
+    clearContextActionBinding();
 }
 
 void ProcessDock::showHeaderContextMenu(const QPoint& localPosition)
@@ -1318,8 +1946,54 @@ void ProcessDock::copyCurrentRow()
         << eol;
 }
 
+void ProcessDock::bindContextActionToItem(QTreeWidgetItem* clickedItem)
+{
+    clearContextActionBinding();
+    if (clickedItem == nullptr)
+    {
+        return;
+    }
+
+    m_contextActionIdentityKey = clickedItem->data(0, Qt::UserRole).toString().toStdString();
+    if (m_contextActionIdentityKey.empty())
+    {
+        return;
+    }
+
+    const auto cacheIt = m_cacheByIdentity.find(m_contextActionIdentityKey);
+    if (cacheIt != m_cacheByIdentity.end())
+    {
+        m_contextActionRecord = cacheIt->second.record;
+        m_hasContextActionRecord = true;
+        return;
+    }
+
+    // 若刷新刚好重建导致 identity 缓存缺失，尝试用当前行 PID 兜底。
+    bool pidParseOk = false;
+    const std::uint32_t pidValue = clickedItem->text(toColumnIndex(TableColumn::Pid)).toUInt(&pidParseOk);
+    if (pidParseOk)
+    {
+        m_contextActionRecord = {};
+        m_contextActionRecord.pid = pidValue;
+        m_contextActionRecord.processName = clickedItem->text(toColumnIndex(TableColumn::Name)).toStdString();
+        m_hasContextActionRecord = true;
+    }
+}
+
+void ProcessDock::clearContextActionBinding()
+{
+    m_contextActionIdentityKey.clear();
+    m_hasContextActionRecord = false;
+    m_contextMenuVisible = false;
+}
+
 std::string ProcessDock::selectedIdentityKey() const
 {
+    if (!m_contextActionIdentityKey.empty())
+    {
+        return m_contextActionIdentityKey;
+    }
+
     QTreeWidgetItem* currentItem = m_processTable->currentItem();
     if (currentItem == nullptr)
     {
@@ -1339,6 +2013,10 @@ ks::process::ProcessRecord* ProcessDock::selectedRecord()
     auto cacheIt = m_cacheByIdentity.find(identityKey);
     if (cacheIt == m_cacheByIdentity.end())
     {
+        if (m_hasContextActionRecord)
+        {
+            return &m_contextActionRecord;
+        }
         return nullptr;
     }
     return &cacheIt->second.record;
@@ -1364,19 +2042,21 @@ QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processR
     case TableColumn::Net:
         return QString::number(processRecord.netKBps, 'f', 2) + " KB/s";
     case TableColumn::Signature:
+        // 显示“厂家 + 可信状态”文本，未填充时显示 Unknown。
         return QString::fromStdString(processRecord.signatureState.empty() ? "Unknown" : processRecord.signatureState);
     case TableColumn::Path:
-        return QString::fromStdString(processRecord.imagePath);
+        return QString::fromStdString(processRecord.imagePath.empty() ? "-" : processRecord.imagePath);
     case TableColumn::ParentPid:
         return QString::number(processRecord.parentPid);
     case TableColumn::CommandLine:
-        return QString::fromStdString(processRecord.commandLine);
+        return QString::fromStdString(processRecord.commandLine.empty() ? "-" : processRecord.commandLine);
     case TableColumn::User:
-        return QString::fromStdString(processRecord.userName);
+        return QString::fromStdString(processRecord.userName.empty() ? "-" : processRecord.userName);
     case TableColumn::StartTime:
         return QString::fromStdString(processRecord.startTimeText);
     case TableColumn::IsAdmin:
-        return processRecord.isAdmin ? "是" : "否";
+        // 用方块 + 文本表示管理员状态（颜色在重建表格时设置）。
+        return processRecord.isAdmin ? "■ 是" : "■ 否";
     default:
         return QString();
     }
@@ -1384,7 +2064,12 @@ QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processR
 
 QIcon ProcessDock::resolveProcessIcon(const ks::process::ProcessRecord& processRecord)
 {
-    const QString pathText = QString::fromStdString(processRecord.imagePath);
+    // 优先使用记录中的 imagePath；若为空则按 PID 实时查询一次路径兜底。
+    QString pathText = QString::fromStdString(processRecord.imagePath);
+    if (pathText.trimmed().isEmpty() && processRecord.pid != 0)
+    {
+        pathText = QString::fromStdString(ks::process::QueryProcessPathByPid(processRecord.pid));
+    }
     if (pathText.isEmpty())
     {
         return QIcon(":/Icon/process_main.svg");
@@ -1396,8 +2081,13 @@ QIcon ProcessDock::resolveProcessIcon(const ks::process::ProcessRecord& processR
         return iconIt.value();
     }
 
-    QFileIconProvider iconProvider;
-    QIcon processIcon = iconProvider.icon(QFileInfo(pathText));
+    // 先尝试直接从 EXE 路径构造图标（期望拿到真实程序图标）。
+    QIcon processIcon(pathText);
+    if (processIcon.isNull())
+    {
+        QFileIconProvider iconProvider;
+        processIcon = iconProvider.icon(QFileInfo(pathText));
+    }
     if (processIcon.isNull())
     {
         processIcon = QIcon(":/Icon/process_main.svg");
@@ -1457,6 +2147,525 @@ std::string ProcessDock::buildRulerPrefix(const int depth)
 int ProcessDock::toColumnIndex(const TableColumn column)
 {
     return static_cast<int>(column);
+}
+
+bool ProcessDock::parseUnsignedText(const QString& text, std::uint64_t& valueOut)
+{
+    QString normalizedText = text.trimmed();
+    if (normalizedText.isEmpty())
+    {
+        valueOut = 0;
+        return true;
+    }
+
+    int numberBase = 10;
+    if (normalizedText.startsWith("0x", Qt::CaseInsensitive))
+    {
+        normalizedText = normalizedText.mid(2);
+        numberBase = 16;
+    }
+    else if (normalizedText.endsWith(QStringLiteral("h"), Qt::CaseInsensitive))
+    {
+        normalizedText.chop(1);
+        numberBase = 16;
+    }
+
+    bool parseOk = false;
+    const std::uint64_t parsedValue = normalizedText.toULongLong(&parseOk, numberBase);
+    if (!parseOk)
+    {
+        valueOut = 0;
+        return false;
+    }
+    valueOut = parsedValue;
+    return true;
+}
+
+std::uint32_t ProcessDock::parseUInt32WithDefault(
+    const QString& text,
+    const std::uint32_t defaultValue,
+    bool* const parseOkOut)
+{
+    std::uint64_t parsedValue = 0;
+    if (!parseUnsignedText(text, parsedValue))
+    {
+        if (parseOkOut != nullptr)
+        {
+            *parseOkOut = false;
+        }
+        return defaultValue;
+    }
+    if (parsedValue > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+    {
+        if (parseOkOut != nullptr)
+        {
+            *parseOkOut = false;
+        }
+        return defaultValue;
+    }
+    if (parseOkOut != nullptr)
+    {
+        *parseOkOut = true;
+    }
+    return static_cast<std::uint32_t>(parsedValue);
+}
+
+std::uint64_t ProcessDock::parseUInt64WithDefault(
+    const QString& text,
+    const std::uint64_t defaultValue,
+    bool* const parseOkOut)
+{
+    std::uint64_t parsedValue = 0;
+    if (!parseUnsignedText(text, parsedValue))
+    {
+        if (parseOkOut != nullptr)
+        {
+            *parseOkOut = false;
+        }
+        return defaultValue;
+    }
+    if (parseOkOut != nullptr)
+    {
+        *parseOkOut = true;
+    }
+    return parsedValue;
+}
+
+void ProcessDock::appendCreateResultLine(const QString& lineText)
+{
+    if (m_createResultOutput == nullptr)
+    {
+        return;
+    }
+    const QString timeText = QDateTime::currentDateTime().toString("HH:mm:ss");
+    m_createResultOutput->append(QString("[%1] %2").arg(timeText, lineText));
+}
+
+void ProcessDock::browseCreateProcessApplicationPath()
+{
+    const QString filePath = QFileDialog::getOpenFileName(
+        this,
+        "选择可执行文件",
+        m_applicationNameEdit != nullptr ? m_applicationNameEdit->text().trimmed() : QString(),
+        "Executable (*.exe);;All Files (*.*)");
+    if (filePath.isEmpty())
+    {
+        return;
+    }
+
+    if (m_applicationNameEdit != nullptr)
+    {
+        m_applicationNameEdit->setText(filePath);
+    }
+    if (m_useApplicationNameCheck != nullptr)
+    {
+        m_useApplicationNameCheck->setChecked(true);
+    }
+}
+
+void ProcessDock::browseCreateProcessCurrentDirectory()
+{
+    const QString startPath = m_currentDirectoryEdit != nullptr
+        ? m_currentDirectoryEdit->text().trimmed()
+        : QString();
+    const QString directoryPath = QFileDialog::getExistingDirectory(
+        this,
+        "选择工作目录",
+        startPath);
+    if (directoryPath.isEmpty())
+    {
+        return;
+    }
+
+    if (m_currentDirectoryEdit != nullptr)
+    {
+        m_currentDirectoryEdit->setText(directoryPath);
+    }
+    if (m_useCurrentDirectoryCheck != nullptr)
+    {
+        m_useCurrentDirectoryCheck->setChecked(true);
+    }
+}
+
+void ProcessDock::resetCreateProcessForm()
+{
+    if (m_createMethodCombo != nullptr) m_createMethodCombo->setCurrentIndex(0);
+    if (m_useApplicationNameCheck != nullptr) m_useApplicationNameCheck->setChecked(false);
+    if (m_applicationNameEdit != nullptr) m_applicationNameEdit->clear();
+    if (m_useCommandLineCheck != nullptr) m_useCommandLineCheck->setChecked(false);
+    if (m_commandLineEdit != nullptr) m_commandLineEdit->clear();
+    if (m_useCurrentDirectoryCheck != nullptr) m_useCurrentDirectoryCheck->setChecked(false);
+    if (m_currentDirectoryEdit != nullptr) m_currentDirectoryEdit->clear();
+    if (m_useEnvironmentCheck != nullptr) m_useEnvironmentCheck->setChecked(false);
+    if (m_environmentUnicodeCheck != nullptr) m_environmentUnicodeCheck->setChecked(true);
+    if (m_environmentEditor != nullptr) m_environmentEditor->clear();
+    if (m_inheritHandleCheck != nullptr) m_inheritHandleCheck->setChecked(false);
+    if (m_creationFlagsEdit != nullptr) m_creationFlagsEdit->setText("0x00000000");
+
+    if (m_useProcessSecurityCheck != nullptr) m_useProcessSecurityCheck->setChecked(false);
+    if (m_processSecurityLengthEdit != nullptr) m_processSecurityLengthEdit->setText("0");
+    if (m_processSecurityDescriptorEdit != nullptr) m_processSecurityDescriptorEdit->setText("0");
+    if (m_processSecurityInheritCheck != nullptr) m_processSecurityInheritCheck->setChecked(false);
+    if (m_useThreadSecurityCheck != nullptr) m_useThreadSecurityCheck->setChecked(false);
+    if (m_threadSecurityLengthEdit != nullptr) m_threadSecurityLengthEdit->setText("0");
+    if (m_threadSecurityDescriptorEdit != nullptr) m_threadSecurityDescriptorEdit->setText("0");
+    if (m_threadSecurityInheritCheck != nullptr) m_threadSecurityInheritCheck->setChecked(false);
+
+    if (m_useStartupInfoCheck != nullptr) m_useStartupInfoCheck->setChecked(false);
+    if (m_siCbEdit != nullptr) m_siCbEdit->setText("0");
+    if (m_siReservedEdit != nullptr) m_siReservedEdit->clear();
+    if (m_siDesktopEdit != nullptr) m_siDesktopEdit->clear();
+    if (m_siTitleEdit != nullptr) m_siTitleEdit->clear();
+    if (m_siXEdit != nullptr) m_siXEdit->setText("0");
+    if (m_siYEdit != nullptr) m_siYEdit->setText("0");
+    if (m_siXSizeEdit != nullptr) m_siXSizeEdit->setText("0");
+    if (m_siYSizeEdit != nullptr) m_siYSizeEdit->setText("0");
+    if (m_siXCountCharsEdit != nullptr) m_siXCountCharsEdit->setText("0");
+    if (m_siYCountCharsEdit != nullptr) m_siYCountCharsEdit->setText("0");
+    if (m_siFillAttributeEdit != nullptr) m_siFillAttributeEdit->setText("0");
+    if (m_siFlagsEdit != nullptr) m_siFlagsEdit->setText("0");
+    if (m_siShowWindowEdit != nullptr) m_siShowWindowEdit->setText("0");
+    if (m_siCbReserved2Edit != nullptr) m_siCbReserved2Edit->setText("0");
+    if (m_siReserved2PtrEdit != nullptr) m_siReserved2PtrEdit->setText("0");
+    if (m_siStdInputEdit != nullptr) m_siStdInputEdit->setText("0");
+    if (m_siStdOutputEdit != nullptr) m_siStdOutputEdit->setText("0");
+    if (m_siStdErrorEdit != nullptr) m_siStdErrorEdit->setText("0");
+
+    if (m_useProcessInfoCheck != nullptr) m_useProcessInfoCheck->setChecked(false);
+    if (m_piProcessHandleEdit != nullptr) m_piProcessHandleEdit->setText("0");
+    if (m_piThreadHandleEdit != nullptr) m_piThreadHandleEdit->setText("0");
+    if (m_piPidEdit != nullptr) m_piPidEdit->setText("0");
+    if (m_piTidEdit != nullptr) m_piTidEdit->setText("0");
+
+    if (m_tokenSourcePidEdit != nullptr) m_tokenSourcePidEdit->setText("0");
+    if (m_tokenDesiredAccessEdit != nullptr) m_tokenDesiredAccessEdit->setText("0x00000FAB");
+    if (m_tokenDuplicatePrimaryCheck != nullptr) m_tokenDuplicatePrimaryCheck->setChecked(true);
+
+    if (m_tokenPrivilegeTable != nullptr)
+    {
+        for (int row = 0; row < m_tokenPrivilegeTable->rowCount(); ++row)
+        {
+            QComboBox* actionCombo = qobject_cast<QComboBox*>(m_tokenPrivilegeTable->cellWidget(row, 1));
+            if (actionCombo != nullptr)
+            {
+                actionCombo->setCurrentIndex(0);
+            }
+        }
+    }
+
+    if (m_createResultOutput != nullptr)
+    {
+        m_createResultOutput->clear();
+    }
+    appendCreateResultLine("已恢复创建进程表单默认值。");
+}
+
+ks::process::CreateProcessRequest ProcessDock::buildCreateProcessRequestFromUi(
+    bool* const buildOk,
+    QString* const errorTextOut) const
+{
+    ks::process::CreateProcessRequest request;
+    if (buildOk != nullptr)
+    {
+        *buildOk = false;
+    }
+
+    const auto failBuild = [errorTextOut](const QString& textValue) {
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = textValue;
+        }
+        };
+
+    request.useApplicationName = (m_useApplicationNameCheck != nullptr && m_useApplicationNameCheck->isChecked());
+    request.applicationName = (m_applicationNameEdit != nullptr) ? m_applicationNameEdit->text().trimmed().toStdString() : std::string();
+
+    request.useCommandLine = (m_useCommandLineCheck != nullptr && m_useCommandLineCheck->isChecked());
+    request.commandLine = (m_commandLineEdit != nullptr) ? m_commandLineEdit->text().trimmed().toStdString() : std::string();
+
+    request.useCurrentDirectory = (m_useCurrentDirectoryCheck != nullptr && m_useCurrentDirectoryCheck->isChecked());
+    request.currentDirectory = (m_currentDirectoryEdit != nullptr) ? m_currentDirectoryEdit->text().trimmed().toStdString() : std::string();
+
+    request.useEnvironment = (m_useEnvironmentCheck != nullptr && m_useEnvironmentCheck->isChecked());
+    request.environmentUnicode = (m_environmentUnicodeCheck != nullptr && m_environmentUnicodeCheck->isChecked());
+    if (request.useEnvironment && m_environmentEditor != nullptr)
+    {
+        const QStringList envLines = m_environmentEditor->toPlainText().split('\n');
+        for (const QString& lineText : envLines)
+        {
+            const QString trimmedText = lineText.trimmed();
+            if (!trimmedText.isEmpty())
+            {
+                request.environmentEntries.push_back(trimmedText.toStdString());
+            }
+        }
+    }
+
+    request.inheritHandles = (m_inheritHandleCheck != nullptr && m_inheritHandleCheck->isChecked());
+
+    bool parseOk = false;
+    request.creationFlags = parseUInt32WithDefault(
+        m_creationFlagsEdit != nullptr ? m_creationFlagsEdit->text() : QString(),
+        0,
+        &parseOk);
+    if (!parseOk)
+    {
+        failBuild("dwCreationFlags 解析失败，请输入十进制或 0x 十六进制。");
+        return request;
+    }
+
+    request.processAttributes.useValue = (m_useProcessSecurityCheck != nullptr && m_useProcessSecurityCheck->isChecked());
+    if (request.processAttributes.useValue)
+    {
+        request.processAttributes.nLength = parseUInt32WithDefault(
+            m_processSecurityLengthEdit != nullptr ? m_processSecurityLengthEdit->text() : QString(),
+            0,
+            &parseOk);
+        if (!parseOk)
+        {
+            failBuild("Process SECURITY_ATTRIBUTES.nLength 解析失败。");
+            return request;
+        }
+        request.processAttributes.securityDescriptor = parseUInt64WithDefault(
+            m_processSecurityDescriptorEdit != nullptr ? m_processSecurityDescriptorEdit->text() : QString(),
+            0,
+            &parseOk);
+        if (!parseOk)
+        {
+            failBuild("Process SECURITY_ATTRIBUTES.lpSecurityDescriptor 解析失败。");
+            return request;
+        }
+        request.processAttributes.inheritHandle = (m_processSecurityInheritCheck != nullptr && m_processSecurityInheritCheck->isChecked());
+    }
+
+    request.threadAttributes.useValue = (m_useThreadSecurityCheck != nullptr && m_useThreadSecurityCheck->isChecked());
+    if (request.threadAttributes.useValue)
+    {
+        request.threadAttributes.nLength = parseUInt32WithDefault(
+            m_threadSecurityLengthEdit != nullptr ? m_threadSecurityLengthEdit->text() : QString(),
+            0,
+            &parseOk);
+        if (!parseOk)
+        {
+            failBuild("Thread SECURITY_ATTRIBUTES.nLength 解析失败。");
+            return request;
+        }
+        request.threadAttributes.securityDescriptor = parseUInt64WithDefault(
+            m_threadSecurityDescriptorEdit != nullptr ? m_threadSecurityDescriptorEdit->text() : QString(),
+            0,
+            &parseOk);
+        if (!parseOk)
+        {
+            failBuild("Thread SECURITY_ATTRIBUTES.lpSecurityDescriptor 解析失败。");
+            return request;
+        }
+        request.threadAttributes.inheritHandle = (m_threadSecurityInheritCheck != nullptr && m_threadSecurityInheritCheck->isChecked());
+    }
+
+    request.startupInfo.useValue = (m_useStartupInfoCheck != nullptr && m_useStartupInfoCheck->isChecked());
+    if (request.startupInfo.useValue)
+    {
+        request.startupInfo.cb = parseUInt32WithDefault(m_siCbEdit != nullptr ? m_siCbEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.cb 解析失败。"); return request; }
+        request.startupInfo.lpReserved = (m_siReservedEdit != nullptr ? m_siReservedEdit->text() : QString()).toStdString();
+        request.startupInfo.lpDesktop = (m_siDesktopEdit != nullptr ? m_siDesktopEdit->text() : QString()).toStdString();
+        request.startupInfo.lpTitle = (m_siTitleEdit != nullptr ? m_siTitleEdit->text() : QString()).toStdString();
+        request.startupInfo.dwX = parseUInt32WithDefault(m_siXEdit != nullptr ? m_siXEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.dwX 解析失败。"); return request; }
+        request.startupInfo.dwY = parseUInt32WithDefault(m_siYEdit != nullptr ? m_siYEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.dwY 解析失败。"); return request; }
+        request.startupInfo.dwXSize = parseUInt32WithDefault(m_siXSizeEdit != nullptr ? m_siXSizeEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.dwXSize 解析失败。"); return request; }
+        request.startupInfo.dwYSize = parseUInt32WithDefault(m_siYSizeEdit != nullptr ? m_siYSizeEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.dwYSize 解析失败。"); return request; }
+        request.startupInfo.dwXCountChars = parseUInt32WithDefault(m_siXCountCharsEdit != nullptr ? m_siXCountCharsEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.dwXCountChars 解析失败。"); return request; }
+        request.startupInfo.dwYCountChars = parseUInt32WithDefault(m_siYCountCharsEdit != nullptr ? m_siYCountCharsEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.dwYCountChars 解析失败。"); return request; }
+        request.startupInfo.dwFillAttribute = parseUInt32WithDefault(m_siFillAttributeEdit != nullptr ? m_siFillAttributeEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.dwFillAttribute 解析失败。"); return request; }
+        request.startupInfo.dwFlags = parseUInt32WithDefault(m_siFlagsEdit != nullptr ? m_siFlagsEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.dwFlags 解析失败。"); return request; }
+        request.startupInfo.wShowWindow = static_cast<std::uint16_t>(
+            parseUInt32WithDefault(m_siShowWindowEdit != nullptr ? m_siShowWindowEdit->text() : QString(), 0, &parseOk));
+        if (!parseOk) { failBuild("STARTUPINFO.wShowWindow 解析失败。"); return request; }
+        request.startupInfo.cbReserved2 = static_cast<std::uint16_t>(
+            parseUInt32WithDefault(m_siCbReserved2Edit != nullptr ? m_siCbReserved2Edit->text() : QString(), 0, &parseOk));
+        if (!parseOk) { failBuild("STARTUPINFO.cbReserved2 解析失败。"); return request; }
+        request.startupInfo.lpReserved2 = parseUInt64WithDefault(m_siReserved2PtrEdit != nullptr ? m_siReserved2PtrEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.lpReserved2 解析失败。"); return request; }
+        request.startupInfo.hStdInput = parseUInt64WithDefault(m_siStdInputEdit != nullptr ? m_siStdInputEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.hStdInput 解析失败。"); return request; }
+        request.startupInfo.hStdOutput = parseUInt64WithDefault(m_siStdOutputEdit != nullptr ? m_siStdOutputEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.hStdOutput 解析失败。"); return request; }
+        request.startupInfo.hStdError = parseUInt64WithDefault(m_siStdErrorEdit != nullptr ? m_siStdErrorEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("STARTUPINFO.hStdError 解析失败。"); return request; }
+    }
+
+    request.processInfo.useValue = (m_useProcessInfoCheck != nullptr && m_useProcessInfoCheck->isChecked());
+    if (request.processInfo.useValue)
+    {
+        request.processInfo.hProcess = parseUInt64WithDefault(m_piProcessHandleEdit != nullptr ? m_piProcessHandleEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("PROCESS_INFORMATION.hProcess 解析失败。"); return request; }
+        request.processInfo.hThread = parseUInt64WithDefault(m_piThreadHandleEdit != nullptr ? m_piThreadHandleEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("PROCESS_INFORMATION.hThread 解析失败。"); return request; }
+        request.processInfo.dwProcessId = parseUInt32WithDefault(m_piPidEdit != nullptr ? m_piPidEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("PROCESS_INFORMATION.dwProcessId 解析失败。"); return request; }
+        request.processInfo.dwThreadId = parseUInt32WithDefault(m_piTidEdit != nullptr ? m_piTidEdit->text() : QString(), 0, &parseOk);
+        if (!parseOk) { failBuild("PROCESS_INFORMATION.dwThreadId 解析失败。"); return request; }
+    }
+
+    request.tokenModeEnabled = (m_createMethodCombo != nullptr && m_createMethodCombo->currentIndex() == 1);
+    if (request.tokenModeEnabled)
+    {
+        request.tokenSourcePid = parseUInt32WithDefault(
+            m_tokenSourcePidEdit != nullptr ? m_tokenSourcePidEdit->text() : QString(),
+            0,
+            &parseOk);
+        if (!parseOk)
+        {
+            failBuild("Token 模式 source PID 解析失败。");
+            return request;
+        }
+        request.tokenDesiredAccess = parseUInt32WithDefault(
+            m_tokenDesiredAccessEdit != nullptr ? m_tokenDesiredAccessEdit->text() : QString(),
+            0,
+            &parseOk);
+        if (!parseOk)
+        {
+            failBuild("Token 模式 desired access 解析失败。");
+            return request;
+        }
+        request.duplicatePrimaryToken = (m_tokenDuplicatePrimaryCheck != nullptr && m_tokenDuplicatePrimaryCheck->isChecked());
+
+        if (m_tokenPrivilegeTable != nullptr)
+        {
+            for (int row = 0; row < m_tokenPrivilegeTable->rowCount(); ++row)
+            {
+                QTableWidgetItem* privilegeItem = m_tokenPrivilegeTable->item(row, 0);
+                QComboBox* actionCombo = qobject_cast<QComboBox*>(m_tokenPrivilegeTable->cellWidget(row, 1));
+                if (privilegeItem == nullptr || actionCombo == nullptr)
+                {
+                    continue;
+                }
+
+                const auto actionValue = static_cast<ks::process::TokenPrivilegeAction>(
+                    actionCombo->currentData().toInt());
+                if (actionValue == ks::process::TokenPrivilegeAction::Keep)
+                {
+                    continue;
+                }
+
+                ks::process::TokenPrivilegeEdit editItem{};
+                editItem.privilegeName = privilegeItem->text().trimmed().toStdString();
+                editItem.action = actionValue;
+                request.tokenPrivilegeEdits.push_back(std::move(editItem));
+            }
+        }
+    }
+
+    if (buildOk != nullptr)
+    {
+        *buildOk = true;
+    }
+    if (errorTextOut != nullptr)
+    {
+        errorTextOut->clear();
+    }
+    return request;
+}
+
+void ProcessDock::executeApplyTokenPrivilegeEditsOnly()
+{
+    bool buildOk = false;
+    QString errorText;
+    const ks::process::CreateProcessRequest request = buildCreateProcessRequestFromUi(&buildOk, &errorText);
+    if (!buildOk)
+    {
+        appendCreateResultLine("参数解析失败: " + errorText);
+        QMessageBox::warning(this, "令牌调整", errorText);
+        return;
+    }
+    if (!request.tokenModeEnabled)
+    {
+        appendCreateResultLine("当前不是 Token 模式，无法仅应用令牌调整。");
+        QMessageBox::information(this, "令牌调整", "请先将 API 切换为 CreateProcessAsTokenW 模式。");
+        return;
+    }
+
+    std::string detailText;
+    const bool adjustOk = ks::process::ApplyTokenPrivilegeEditsByPid(
+        request.tokenSourcePid,
+        request.tokenDesiredAccess,
+        request.duplicatePrimaryToken,
+        request.tokenPrivilegeEdits,
+        &detailText);
+
+    appendCreateResultLine(QString("令牌调整结果: %1").arg(adjustOk ? "成功" : "失败"));
+    appendCreateResultLine(QString::fromStdString(detailText.empty() ? "无附加信息" : detailText));
+    QMessageBox::information(
+        this,
+        "令牌调整",
+        QString("%1\n%2")
+        .arg(adjustOk ? "令牌特权调整成功。" : "令牌特权调整失败。")
+        .arg(QString::fromStdString(detailText)));
+}
+
+void ProcessDock::executeCreateProcessRequest()
+{
+    bool buildOk = false;
+    QString errorText;
+    const ks::process::CreateProcessRequest request = buildCreateProcessRequestFromUi(&buildOk, &errorText);
+    if (!buildOk)
+    {
+        appendCreateResultLine("参数解析失败: " + errorText);
+        QMessageBox::warning(this, "创建进程", errorText);
+        return;
+    }
+
+    ks::process::CreateProcessResult createResult{};
+    const bool launchOk = ks::process::LaunchProcess(request, &createResult);
+    appendCreateResultLine(QString("调用结果: %1").arg(launchOk ? "成功" : "失败"));
+    appendCreateResultLine(QString("路径模式: %1").arg(createResult.usedTokenPath ? "Token" : "CreateProcessW"));
+    appendCreateResultLine(QString("错误码: %1").arg(createResult.win32Error));
+    appendCreateResultLine(QString::fromStdString(createResult.detailText));
+    if (createResult.processInfoAvailable)
+    {
+        appendCreateResultLine(
+            QString("输出 PI: pid=%1 tid=%2 hProcess=0x%3 hThread=0x%4")
+            .arg(createResult.dwProcessId)
+            .arg(createResult.dwThreadId)
+            .arg(QString::number(createResult.hProcess, 16))
+            .arg(QString::number(createResult.hThread, 16)));
+    }
+
+    kLogEvent logEvent;
+    (launchOk ? info : err) << logEvent
+        << "[ProcessDock] CreateProcess 请求完成, ok=" << (launchOk ? "true" : "false")
+        << ", tokenMode=" << (request.tokenModeEnabled ? "true" : "false")
+        << ", error=" << createResult.win32Error
+        << ", detail=" << createResult.detailText
+        << eol;
+
+    if (launchOk)
+    {
+        QMessageBox::information(
+            this,
+            "创建进程",
+            QString("创建进程成功。\n%1").arg(QString::fromStdString(createResult.detailText)));
+    }
+    else
+    {
+        QMessageBox::warning(
+            this,
+            "创建进程",
+            QString("创建进程失败。\n%1").arg(QString::fromStdString(createResult.detailText)));
+    }
+
+    if (launchOk)
+    {
+        requestAsyncRefresh(true);
+    }
 }
 
 bool ProcessDock::isTreeModeEnabled() const
@@ -1706,29 +2915,63 @@ void ProcessDock::openProcessDetailsPlaceholder()
         return;
     }
 
+    // 详情窗口展示前，主动补齐静态字段，避免“路径/用户/命令行为空”。
+    ks::process::ProcessRecord detailRecord = *processRecord;
+    const bool needStaticQuery =
+        detailRecord.imagePath.empty() ||
+        detailRecord.commandLine.empty() ||
+        detailRecord.userName.empty() ||
+        detailRecord.signatureState.empty() ||
+        detailRecord.signatureState == "Pending";
+    if (needStaticQuery)
+    {
+        ks::process::ProcessRecord queriedRecord{};
+        if (ks::process::QueryProcessStaticDetailByPid(detailRecord.pid, queriedRecord))
+        {
+            // 优先使用查询结果中的“非空字段”，其余保留原缓存。
+            if (!queriedRecord.processName.empty()) detailRecord.processName = queriedRecord.processName;
+            if (!queriedRecord.imagePath.empty()) detailRecord.imagePath = queriedRecord.imagePath;
+            if (!queriedRecord.commandLine.empty()) detailRecord.commandLine = queriedRecord.commandLine;
+            if (!queriedRecord.userName.empty()) detailRecord.userName = queriedRecord.userName;
+            if (!queriedRecord.startTimeText.empty()) detailRecord.startTimeText = queriedRecord.startTimeText;
+            if (!queriedRecord.architectureText.empty()) detailRecord.architectureText = queriedRecord.architectureText;
+            if (!queriedRecord.priorityText.empty()) detailRecord.priorityText = queriedRecord.priorityText;
+            if (!queriedRecord.signatureState.empty()) detailRecord.signatureState = queriedRecord.signatureState;
+            if (!queriedRecord.signaturePublisher.empty()) detailRecord.signaturePublisher = queriedRecord.signaturePublisher;
+            detailRecord.signatureTrusted = queriedRecord.signatureTrusted;
+            detailRecord.isAdmin = queriedRecord.isAdmin;
+            if (queriedRecord.creationTime100ns != 0) detailRecord.creationTime100ns = queriedRecord.creationTime100ns;
+            if (queriedRecord.parentPid != 0) detailRecord.parentPid = queriedRecord.parentPid;
+            if (queriedRecord.sessionId != 0) detailRecord.sessionId = queriedRecord.sessionId;
+            if (queriedRecord.threadCount != 0) detailRecord.threadCount = queriedRecord.threadCount;
+            if (queriedRecord.handleCount != 0) detailRecord.handleCount = queriedRecord.handleCount;
+            detailRecord.staticDetailsReady = queriedRecord.staticDetailsReady;
+        }
+    }
+
     // identityKey 用于“一进程一窗口”复用逻辑。
     const std::string identityKey = ks::process::BuildProcessIdentityKey(
-        processRecord->pid,
-        processRecord->creationTime100ns);
+        detailRecord.pid,
+        detailRecord.creationTime100ns);
 
     auto existingWindowIt = m_detailWindowByIdentity.find(identityKey);
     if (existingWindowIt != m_detailWindowByIdentity.end() && existingWindowIt->second != nullptr)
     {
-        existingWindowIt->second->updateBaseRecord(*processRecord);
+        existingWindowIt->second->updateBaseRecord(detailRecord);
         existingWindowIt->second->show();
         existingWindowIt->second->raise();
         existingWindowIt->second->activateWindow();
 
         kLogEvent logEvent;
         info << logEvent
-            << "[ProcessDock] 复用已存在进程详情窗口, pid=" << processRecord->pid
+            << "[ProcessDock] 复用已存在进程详情窗口, pid=" << detailRecord.pid
             << ", identity=" << identityKey
             << eol;
         return;
     }
 
     // 创建新的独立窗口（不属于 Docking System，可并行打开多个）。
-    ProcessDetailWindow* detailWindow = new ProcessDetailWindow(*processRecord, nullptr);
+    ProcessDetailWindow* detailWindow = new ProcessDetailWindow(detailRecord, nullptr);
     detailWindow->setAttribute(Qt::WA_DeleteOnClose, true);
     m_detailWindowByIdentity[identityKey] = detailWindow;
 
@@ -1748,7 +2991,7 @@ void ProcessDock::openProcessDetailsPlaceholder()
 
     kLogEvent logEvent;
     info << logEvent
-        << "[ProcessDock] 创建新的进程详情窗口, pid=" << processRecord->pid
+        << "[ProcessDock] 创建新的进程详情窗口, pid=" << detailRecord.pid
         << ", identity=" << identityKey
         << eol;
 }
@@ -1774,7 +3017,38 @@ void ProcessDock::openProcessDetailWindowByPid(const std::uint32_t pid)
             return;
         }
 
-        ProcessDetailWindow* detailWindow = new ProcessDetailWindow(cacheRecord, nullptr);
+        // 与当前选中逻辑一致：若缓存静态字段不完整，则开窗前补齐一次。
+        ks::process::ProcessRecord detailRecord = cacheRecord;
+        if (detailRecord.imagePath.empty() ||
+            detailRecord.commandLine.empty() ||
+            detailRecord.userName.empty() ||
+            detailRecord.signatureState.empty() ||
+            detailRecord.signatureState == "Pending")
+        {
+            ks::process::ProcessRecord queriedRecord{};
+            if (ks::process::QueryProcessStaticDetailByPid(detailRecord.pid, queriedRecord))
+            {
+                if (!queriedRecord.processName.empty()) detailRecord.processName = queriedRecord.processName;
+                if (!queriedRecord.imagePath.empty()) detailRecord.imagePath = queriedRecord.imagePath;
+                if (!queriedRecord.commandLine.empty()) detailRecord.commandLine = queriedRecord.commandLine;
+                if (!queriedRecord.userName.empty()) detailRecord.userName = queriedRecord.userName;
+                if (!queriedRecord.startTimeText.empty()) detailRecord.startTimeText = queriedRecord.startTimeText;
+                if (!queriedRecord.architectureText.empty()) detailRecord.architectureText = queriedRecord.architectureText;
+                if (!queriedRecord.priorityText.empty()) detailRecord.priorityText = queriedRecord.priorityText;
+                if (!queriedRecord.signatureState.empty()) detailRecord.signatureState = queriedRecord.signatureState;
+                if (!queriedRecord.signaturePublisher.empty()) detailRecord.signaturePublisher = queriedRecord.signaturePublisher;
+                detailRecord.signatureTrusted = queriedRecord.signatureTrusted;
+                detailRecord.isAdmin = queriedRecord.isAdmin;
+                if (queriedRecord.creationTime100ns != 0) detailRecord.creationTime100ns = queriedRecord.creationTime100ns;
+                if (queriedRecord.parentPid != 0) detailRecord.parentPid = queriedRecord.parentPid;
+                if (queriedRecord.sessionId != 0) detailRecord.sessionId = queriedRecord.sessionId;
+                if (queriedRecord.threadCount != 0) detailRecord.threadCount = queriedRecord.threadCount;
+                if (queriedRecord.handleCount != 0) detailRecord.handleCount = queriedRecord.handleCount;
+                detailRecord.staticDetailsReady = queriedRecord.staticDetailsReady;
+            }
+        }
+
+        ProcessDetailWindow* detailWindow = new ProcessDetailWindow(detailRecord, nullptr);
         detailWindow->setAttribute(Qt::WA_DeleteOnClose, true);
         m_detailWindowByIdentity[cachePair.first] = detailWindow;
         connect(detailWindow, &QObject::destroyed, this, [this, identityKey = cachePair.first]() {

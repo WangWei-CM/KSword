@@ -9,6 +9,9 @@
 #include <QAction>
 #include <QApplication>
 #include <QDragMoveEvent>
+#include <QPushButton>
+#include <QTimer>
+#include <string>
 
 // ADS头文件
 #include "include/ads/DockManager.h"
@@ -41,6 +44,14 @@ public:
 
 private:
     void initMenus();
+    void initPrivilegeStatusButtons();
+    void refreshPrivilegeStatusButtons();
+    void applyPrivilegeButtonStyle(QPushButton* button, bool activeState);
+    void requestAdminElevationRestart();
+    bool hasAdminPrivilege() const;
+    bool hasDebugPrivilege() const;
+    bool hasSystemPrivilege() const;
+    bool enableSeDebugPrivilege(std::string& errorTextOut) const;
     void initDockWidgets();
     void setupDockLayout();
 
@@ -78,6 +89,19 @@ private:
     OtherDock* m_otherWidget;
     LogDockWidget* m_logWidget; // 日志输出 Dock 的可视化日志面板。
     ProgressDockWidget* m_progressWidget; // 当前操作 Dock 的任务进度卡片面板。
+
+    // 顶部菜单栏右侧权限按钮（纯文字）：
+    // - Admin：管理员权限状态与提权入口；
+    // - Debug：SeDebugPrivilege 状态与申请入口；
+    // - System：是否 LocalSystem 身份；
+    // - TI/PPL：预留权限状态位（当前仅展示状态，不做切换）。
+    QWidget* m_privilegeButtonContainer = nullptr;
+    QPushButton* m_adminStatusButton = nullptr;
+    QPushButton* m_debugStatusButton = nullptr;
+    QPushButton* m_systemStatusButton = nullptr;
+    QPushButton* m_tiStatusButton = nullptr;
+    QPushButton* m_pplStatusButton = nullptr;
+    QTimer* m_privilegeStatusTimer = nullptr;
 };
 
 #endif // MAINWINDOW_H
