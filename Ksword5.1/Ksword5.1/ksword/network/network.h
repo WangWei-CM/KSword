@@ -7,6 +7,8 @@
 // - 提供“发送方向 TCP/UDP 报文抓取”的基础能力（IPv4 Raw Socket）；
 // - 提供“报文端口 -> 进程 PID”解析能力（IP Helper 表）；
 // - 提供“按 PID 软限速（Suspend/Resume）”的运行时控制能力；
+// - 提供“TCP/UDP 连接快照枚举 + TCP 连接终止”的工具能力；
+// - 提供“手动构造网络请求（TCP/UDP Winsock 参数可定制）”执行能力；
 // - 供 NetworkDock UI 直接调用，保持 UI 与底层抓包逻辑解耦。
 // ============================================================
 
@@ -27,6 +29,15 @@
 #include <unordered_set>// std::unordered_set：本机地址快速匹配。
 #include <utility>      // std::pair：容器辅助。
 #include <vector>       // std::vector：报文/表项容器。
+
+// 连接管理工具：
+// - TCP/UDP 连接快照枚举；
+// - TCP 连接终止（DELETE_TCB）。
+#include "network_connection_tools.h"
+
+// 手动请求工具：
+// - 提供可配置的 Winsock 请求执行封装。
+#include "network_request_tools.h"
 
 // Win32 + Winsock 头文件。
 // 注意：winsock2 需要先于 windows.h 链路中的 winsock.h。
