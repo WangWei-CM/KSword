@@ -421,11 +421,12 @@ void ProcessDock::initializeCreateProcessPage()
     m_tokenSourcePidEdit->setStyleSheet(inputStyle);
     m_tokenDesiredAccessEdit->setStyleSheet(inputStyle);
 
-    methodLayout->addWidget(new QLabel("API:", methodGroup), 0, 0);
+    // 方法选择区域补充中文语义，避免只看英文 API 名不易理解。
+    methodLayout->addWidget(new QLabel("API（创建方式）:", methodGroup), 0, 0);
     methodLayout->addWidget(m_createMethodCombo, 0, 1, 1, 3);
-    methodLayout->addWidget(new QLabel("源 PID:", methodGroup), 1, 0);
+    methodLayout->addWidget(new QLabel("源 PID（令牌来源进程）:", methodGroup), 1, 0);
     methodLayout->addWidget(m_tokenSourcePidEdit, 1, 1);
-    methodLayout->addWidget(new QLabel("令牌访问掩码:", methodGroup), 1, 2);
+    methodLayout->addWidget(new QLabel("令牌访问掩码（DesiredAccess）:", methodGroup), 1, 2);
     methodLayout->addWidget(m_tokenDesiredAccessEdit, 1, 3);
     methodLayout->addWidget(m_tokenDuplicatePrimaryCheck, 2, 0, 1, 4);
     contentLayout->addWidget(methodGroup);
@@ -436,12 +437,12 @@ void ProcessDock::initializeCreateProcessPage()
     basicLayout->setHorizontalSpacing(8);
     basicLayout->setVerticalSpacing(6);
 
-    m_useApplicationNameCheck = new QCheckBox("启用 lpApplicationName", basicGroup);
-    m_useCommandLineCheck = new QCheckBox("启用 lpCommandLine", basicGroup);
-    m_useCurrentDirectoryCheck = new QCheckBox("启用 lpCurrentDirectory", basicGroup);
-    m_useEnvironmentCheck = new QCheckBox("启用 lpEnvironment", basicGroup);
+    m_useApplicationNameCheck = new QCheckBox("启用 lpApplicationName（应用程序路径）", basicGroup);
+    m_useCommandLineCheck = new QCheckBox("启用 lpCommandLine（命令行参数）", basicGroup);
+    m_useCurrentDirectoryCheck = new QCheckBox("启用 lpCurrentDirectory（当前工作目录）", basicGroup);
+    m_useEnvironmentCheck = new QCheckBox("启用 lpEnvironment（环境变量块）", basicGroup);
     m_environmentUnicodeCheck = new QCheckBox("环境块按 Unicode 传递（CREATE_UNICODE_ENVIRONMENT）", basicGroup);
-    m_inheritHandleCheck = new QCheckBox("bInheritHandles=TRUE", basicGroup);
+    m_inheritHandleCheck = new QCheckBox("bInheritHandles（是否继承句柄）=TRUE", basicGroup);
 
     m_applicationNameEdit = new QLineEdit(basicGroup);
     m_applicationBrowseButton = new QPushButton("浏览...", basicGroup);
@@ -478,7 +479,7 @@ void ProcessDock::initializeCreateProcessPage()
     basicLayout->addWidget(m_useEnvironmentCheck, 3, 0);
     basicLayout->addWidget(m_environmentEditor, 3, 1, 2, 3);
     basicLayout->addWidget(m_environmentUnicodeCheck, 5, 1, 1, 3);
-    basicLayout->addWidget(new QLabel("dwCreationFlags:", basicGroup), 6, 0);
+    basicLayout->addWidget(new QLabel("dwCreationFlags（创建标志）:", basicGroup), 6, 0);
     basicLayout->addWidget(m_creationFlagsEdit, 6, 1);
     basicLayout->addWidget(m_inheritHandleCheck, 6, 2, 1, 2);
     contentLayout->addWidget(basicGroup);
@@ -489,15 +490,15 @@ void ProcessDock::initializeCreateProcessPage()
     securityLayout->setHorizontalSpacing(8);
     securityLayout->setVerticalSpacing(6);
 
-    m_useProcessSecurityCheck = new QCheckBox("启用 lpProcessAttributes", securityGroup);
+    m_useProcessSecurityCheck = new QCheckBox("启用 lpProcessAttributes（进程安全属性）", securityGroup);
     m_processSecurityLengthEdit = new QLineEdit("0", securityGroup);
     m_processSecurityDescriptorEdit = new QLineEdit("0", securityGroup);
-    m_processSecurityInheritCheck = new QCheckBox("Process SA inherit", securityGroup);
+    m_processSecurityInheritCheck = new QCheckBox("bInheritHandle（进程 SA）", securityGroup);
 
-    m_useThreadSecurityCheck = new QCheckBox("启用 lpThreadAttributes", securityGroup);
+    m_useThreadSecurityCheck = new QCheckBox("启用 lpThreadAttributes（线程安全属性）", securityGroup);
     m_threadSecurityLengthEdit = new QLineEdit("0", securityGroup);
     m_threadSecurityDescriptorEdit = new QLineEdit("0", securityGroup);
-    m_threadSecurityInheritCheck = new QCheckBox("Thread SA inherit", securityGroup);
+    m_threadSecurityInheritCheck = new QCheckBox("bInheritHandle（线程 SA）", securityGroup);
 
     m_processSecurityLengthEdit->setStyleSheet(inputStyle);
     m_processSecurityDescriptorEdit->setStyleSheet(inputStyle);
@@ -505,15 +506,15 @@ void ProcessDock::initializeCreateProcessPage()
     m_threadSecurityDescriptorEdit->setStyleSheet(inputStyle);
 
     securityLayout->addWidget(m_useProcessSecurityCheck, 0, 0);
-    securityLayout->addWidget(new QLabel("nLength", securityGroup), 0, 1);
+    securityLayout->addWidget(new QLabel("nLength（结构体长度）", securityGroup), 0, 1);
     securityLayout->addWidget(m_processSecurityLengthEdit, 0, 2);
-    securityLayout->addWidget(new QLabel("lpSecurityDescriptor", securityGroup), 0, 3);
+    securityLayout->addWidget(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), 0, 3);
     securityLayout->addWidget(m_processSecurityDescriptorEdit, 0, 4);
     securityLayout->addWidget(m_processSecurityInheritCheck, 0, 5);
     securityLayout->addWidget(m_useThreadSecurityCheck, 1, 0);
-    securityLayout->addWidget(new QLabel("nLength", securityGroup), 1, 1);
+    securityLayout->addWidget(new QLabel("nLength（结构体长度）", securityGroup), 1, 1);
     securityLayout->addWidget(m_threadSecurityLengthEdit, 1, 2);
-    securityLayout->addWidget(new QLabel("lpSecurityDescriptor", securityGroup), 1, 3);
+    securityLayout->addWidget(new QLabel("lpSecurityDescriptor（安全描述符指针）", securityGroup), 1, 3);
     securityLayout->addWidget(m_threadSecurityDescriptorEdit, 1, 4);
     securityLayout->addWidget(m_threadSecurityInheritCheck, 1, 5);
     contentLayout->addWidget(securityGroup);
@@ -523,7 +524,7 @@ void ProcessDock::initializeCreateProcessPage()
     QGridLayout* startupLayout = new QGridLayout(startupGroup);
     startupLayout->setHorizontalSpacing(8);
     startupLayout->setVerticalSpacing(6);
-    m_useStartupInfoCheck = new QCheckBox("启用 lpStartupInfo（取消则传 NULL）", startupGroup);
+    m_useStartupInfoCheck = new QCheckBox("启用 lpStartupInfo（启动信息结构体，取消则传 NULL）", startupGroup);
     m_useStartupInfoCheck->setChecked(false);
     m_useStartupInfoCheck->setToolTip("注意：Win32 通常要求该参数非空，传 NULL 主要用于测试极限场景。");
 
@@ -566,29 +567,29 @@ void ProcessDock::initializeCreateProcessPage()
             startupLayout->addWidget(editorWidget, startupRow, colOffset + 1);
         };
 
-    addStartupField("cb", m_siCbEdit, 0);
-    addStartupField("lpReserved", m_siReservedEdit, 2);
-    addStartupField("lpDesktop", m_siDesktopEdit, 4);
+    addStartupField("cb（结构体大小）", m_siCbEdit, 0);
+    addStartupField("lpReserved（保留字符串）", m_siReservedEdit, 2);
+    addStartupField("lpDesktop（目标桌面）", m_siDesktopEdit, 4);
     ++startupRow;
-    addStartupField("lpTitle", m_siTitleEdit, 0);
-    addStartupField("dwX", m_siXEdit, 2);
-    addStartupField("dwY", m_siYEdit, 4);
+    addStartupField("lpTitle（窗口标题）", m_siTitleEdit, 0);
+    addStartupField("dwX（窗口X坐标）", m_siXEdit, 2);
+    addStartupField("dwY（窗口Y坐标）", m_siYEdit, 4);
     ++startupRow;
-    addStartupField("dwXSize", m_siXSizeEdit, 0);
-    addStartupField("dwYSize", m_siYSizeEdit, 2);
-    addStartupField("dwXCountChars", m_siXCountCharsEdit, 4);
+    addStartupField("dwXSize（窗口宽）", m_siXSizeEdit, 0);
+    addStartupField("dwYSize（窗口高）", m_siYSizeEdit, 2);
+    addStartupField("dwXCountChars（控制台宽）", m_siXCountCharsEdit, 4);
     ++startupRow;
-    addStartupField("dwYCountChars", m_siYCountCharsEdit, 0);
-    addStartupField("dwFillAttribute", m_siFillAttributeEdit, 2);
-    addStartupField("dwFlags", m_siFlagsEdit, 4);
+    addStartupField("dwYCountChars（控制台高）", m_siYCountCharsEdit, 0);
+    addStartupField("dwFillAttribute（控制台属性）", m_siFillAttributeEdit, 2);
+    addStartupField("dwFlags（启动标志）", m_siFlagsEdit, 4);
     ++startupRow;
-    addStartupField("wShowWindow", m_siShowWindowEdit, 0);
-    addStartupField("cbReserved2", m_siCbReserved2Edit, 2);
-    addStartupField("lpReserved2", m_siReserved2PtrEdit, 4);
+    addStartupField("wShowWindow（显示方式）", m_siShowWindowEdit, 0);
+    addStartupField("cbReserved2（保留2长度）", m_siCbReserved2Edit, 2);
+    addStartupField("lpReserved2（保留2指针）", m_siReserved2PtrEdit, 4);
     ++startupRow;
-    addStartupField("hStdInput", m_siStdInputEdit, 0);
-    addStartupField("hStdOutput", m_siStdOutputEdit, 2);
-    addStartupField("hStdError", m_siStdErrorEdit, 4);
+    addStartupField("hStdInput（标准输入句柄）", m_siStdInputEdit, 0);
+    addStartupField("hStdOutput（标准输出句柄）", m_siStdOutputEdit, 2);
+    addStartupField("hStdError（标准错误句柄）", m_siStdErrorEdit, 4);
     ++startupRow;
     contentLayout->addWidget(startupGroup);
 
@@ -598,7 +599,7 @@ void ProcessDock::initializeCreateProcessPage()
     processInfoLayout->setHorizontalSpacing(8);
     processInfoLayout->setVerticalSpacing(6);
 
-    m_useProcessInfoCheck = new QCheckBox("启用 lpProcessInformation（取消则传 NULL）", processInfoGroup);
+    m_useProcessInfoCheck = new QCheckBox("启用 lpProcessInformation（进程信息输出结构，取消则传 NULL）", processInfoGroup);
     m_useProcessInfoCheck->setChecked(false);
     m_useProcessInfoCheck->setToolTip("注意：Win32 通常要求该参数非空，传 NULL 会导致调用失败。");
     m_piProcessHandleEdit = new QLineEdit("0", processInfoGroup);
@@ -611,13 +612,13 @@ void ProcessDock::initializeCreateProcessPage()
     m_piTidEdit->setStyleSheet(inputStyle);
 
     processInfoLayout->addWidget(m_useProcessInfoCheck, 0, 0, 1, 4);
-    processInfoLayout->addWidget(new QLabel("hProcess", processInfoGroup), 1, 0);
+    processInfoLayout->addWidget(new QLabel("hProcess（输出进程句柄）", processInfoGroup), 1, 0);
     processInfoLayout->addWidget(m_piProcessHandleEdit, 1, 1);
-    processInfoLayout->addWidget(new QLabel("hThread", processInfoGroup), 1, 2);
+    processInfoLayout->addWidget(new QLabel("hThread（输出线程句柄）", processInfoGroup), 1, 2);
     processInfoLayout->addWidget(m_piThreadHandleEdit, 1, 3);
-    processInfoLayout->addWidget(new QLabel("dwProcessId", processInfoGroup), 2, 0);
+    processInfoLayout->addWidget(new QLabel("dwProcessId（输出PID）", processInfoGroup), 2, 0);
     processInfoLayout->addWidget(m_piPidEdit, 2, 1);
-    processInfoLayout->addWidget(new QLabel("dwThreadId", processInfoGroup), 2, 2);
+    processInfoLayout->addWidget(new QLabel("dwThreadId（输出TID）", processInfoGroup), 2, 2);
     processInfoLayout->addWidget(m_piTidEdit, 2, 3);
     contentLayout->addWidget(processInfoGroup);
 
@@ -687,6 +688,18 @@ void ProcessDock::initializeCreateProcessPage()
     m_commandLineEdit->setPlaceholderText("例如: \"C:\\Windows\\System32\\notepad.exe\" C:\\test.txt");
     m_applicationNameEdit->setPlaceholderText("可执行文件路径（可为空并传 null）");
     m_currentDirectoryEdit->setPlaceholderText("工作目录（可为空并传 null）");
+
+    // 为关键 CreateProcess 参数补充中文解释 Tooltip，便于用户理解每个字段的语义。
+    m_applicationNameEdit->setToolTip("lpApplicationName：应用程序路径。可为 null，由命令行首段决定可执行文件。");
+    m_commandLineEdit->setToolTip("lpCommandLine：完整命令行。可执行路径 + 参数，传入后可能被 API 就地修改。");
+    m_currentDirectoryEdit->setToolTip("lpCurrentDirectory：子进程初始工作目录。");
+    m_environmentEditor->setToolTip("lpEnvironment：环境变量块。每行 KEY=VALUE；禁用时传 null。");
+    m_inheritHandleCheck->setToolTip("bInheritHandles：是否继承父进程可继承句柄。");
+    m_creationFlagsEdit->setToolTip("dwCreationFlags：创建标志位掩码，如 CREATE_SUSPENDED 等。");
+    m_useStartupInfoCheck->setToolTip("lpStartupInfo：启动信息结构体，控制窗口/标准句柄等行为。");
+    m_useProcessInfoCheck->setToolTip("lpProcessInformation：接收新进程与主线程句柄/PID/TID 的输出结构。");
+    m_useProcessSecurityCheck->setToolTip("lpProcessAttributes：进程对象安全属性。");
+    m_useThreadSecurityCheck->setToolTip("lpThreadAttributes：主线程对象安全属性。");
 
     m_sideTabWidget->addTab(m_createProcessPage, QIcon(IconStart), "创建进程");
     initializeCreateProcessConnections();
