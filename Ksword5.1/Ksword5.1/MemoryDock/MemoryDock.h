@@ -33,7 +33,9 @@ class QTableWidget;
 class QTabWidget;
 class QTextEdit;
 class QTimer;
+class QTreeWidget;
 class QVBoxLayout;
+class QEvent;
 
 // Windows 句柄类型前置声明。
 typedef void* HANDLE;
@@ -78,10 +80,16 @@ private:
     // - 作用：保存模块表格每一行的数据。
     struct ModuleEntry
     {
-        QString moduleName;             // 模块文件名。
-        std::uint64_t baseAddress = 0;  // 模块基址。
-        std::uint64_t sizeBytes = 0;    // 模块大小（字节）。
-        QString fullPath;               // 模块完整路径。
+        QString moduleName;                     // 模块文件名（路径末尾）。
+        QString fullPath;                       // 模块完整路径。
+        std::uint64_t baseAddress = 0;          // 模块基址（用于跳转与复制）。
+        std::uint64_t sizeBytes = 0;            // 模块大小（字节）。
+        QString signatureState;                 // 数字签名状态文本（Signed/Unknown/...）。
+        bool signatureTrusted = false;          // 签名是否可信（用于上色）。
+        std::uint64_t entryPointOffset = 0;     // 入口点偏移（RVA）。
+        QString runningState;                   // 运行状态文本（Running/Suspended/...）。
+        QString threadIdText;                   // 代表线程 ID 文本（可能包含多个）。
+        std::uint32_t representativeThreadId = 0; // 代表线程 ID（数值动作入口）。
     };
 
     // RegionEntry：
@@ -167,6 +175,18 @@ private:
         double upperBound = 0.0;       // 数值上界。
         double epsilon = 0.00001;      // 浮点误差阈值。
     };
+
+private:
+    // ========================================================
+    // QObject 事件过滤（用于自定义十六进制选择行为）
+    // ========================================================
+
+    // eventFilter：
+    // - 作用：拦截内存查看器表格鼠标拖拽，实现“文本式线性选择”。
+    // - 参数 watched：触发事件的对象（主要是 m_hexTable->viewport()）。
+    // - 参数 event：具体事件对象（按下/移动/释放）。
+    // - 返回：true 表示事件已处理；false 表示继续默认分发。
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     // ========================================================
@@ -386,6 +406,25 @@ private:
         std::uint8_t value,
         QString& errorTextOut);
 
+    // applyHexViewerDragSelection：
+    // - 作用：根据锚点与当前点，按“十六进制区/ASCII区”规则重建选择范围。
+    // - 参数 currentRow：当前鼠标所在行索引。
+    // - 参数 currentColumn：当前鼠标所在列索引。
+    // - 返回：无。
+    void applyHexViewerDragSelection(int currentRow, int currentColumn);
+
+    // isHexValueColumn：
+    // - 作用：判断列索引是否属于十六进制值列（1~16）。
+    // - 参数 column：列索引。
+    // - 返回：true=十六进制值列；false=非十六进制值列。
+    static bool isHexValueColumn(int column);
+
+    // isAsciiColumn：
+    // - 作用：判断列索引是否为 ASCII 列。
+    // - 参数 column：列索引。
+    // - 返回：true=ASCII列；false=其他列。
+    static bool isAsciiColumn(int column);
+
 private:
     // ========================================================
     // 断点与书签（Tab5）相关函数
@@ -527,7 +566,10 @@ private:
     QWidget* m_tabProcessModule = nullptr;    // Tab1 页面容器。
     QTableWidget* m_processTable = nullptr;   // 进程列表表格。
     QLineEdit* m_moduleFilterEdit = nullptr;  // 模块名称过滤输入框。
-    QTableWidget* m_moduleTable = nullptr;    // 模块列表表格。
+    QPushButton* m_moduleRefreshButton = nullptr; // 模块刷新按钮。
+    QCheckBox* m_moduleSignatureCheck = nullptr;  // 模块刷新时是否校验签名。
+    QLabel* m_moduleStatusLabel = nullptr;        // 模块刷新状态标签。
+    QTreeWidget* m_moduleTable = nullptr;         // 模块列表表格（树形表头风格）。
 
     // ========================================================
     // Tab2：内存区域
@@ -613,6 +655,10 @@ private:
     std::uint64_t m_currentViewerAddress = 0;          // Tab4 当前起始地址。
     QByteArray m_currentViewerPageBytes;               // Tab4 当前页原始字节缓存。
     bool m_hexTableProgrammaticUpdate = false;         // 防止表格回填触发递归编辑。
+    bool m_hexDragSelecting = false;                   // 是否正在进行自定义拖拽选择。
+    bool m_hexDragStartInAscii = false;                // 拖拽起点是否位于 ASCII 列。
+    int m_hexDragAnchorRow = -1;                       // 拖拽锚点行索引。
+    int m_hexDragAnchorColumn = -1;                    // 拖拽锚点列索引。
 
     std::vector<BreakpointEntry> m_breakpointCache;    // 断点缓存（Tab5）。
     std::vector<BookmarkEntry> m_bookmarkCache;        // 书签缓存（Tab5）。

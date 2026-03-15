@@ -14,3 +14,5 @@
 // 进程工具（枚举、详情、控制、优先级等 Win32 封装）。
 #include "process/process.h"
 
+// 网络工具（发送流量抓包、PID 映射、进程限速等）。
+#include "network/network.h"
