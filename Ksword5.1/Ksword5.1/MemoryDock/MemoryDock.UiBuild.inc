@@ -161,6 +161,7 @@ void MemoryDock::initializeProcessModuleTab()
     m_processTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_processTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_processTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_processTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_processTable->setSortingEnabled(true);
     m_processTable->setAlternatingRowColors(true);
     m_processTable->verticalHeader()->setVisible(false);

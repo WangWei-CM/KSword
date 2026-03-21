@@ -525,7 +525,8 @@ void MainWindow::initDockWidgets()
     m_monitorWidget = new MonitorDock(this);
     m_privilegeWidget = new PrivilegeDock(this);
     m_settingsWidget = new SettingsDock(this);
-    m_otherWidget = new OtherDock(this);
+    m_windowWidget = new WindowDock(this);
+    m_registryWidget = new RegistryDock(this);
     m_logWidget = new LogDockWidget(this);
     m_progressWidget = new ProgressDockWidget(this);
 
@@ -550,7 +551,8 @@ void MainWindow::initDockWidgets()
     m_dockMonitorTab = createDockWidget(m_monitorWidget, "监控");
     m_dockPrivilege = createDockWidget(m_privilegeWidget, "权限");
     m_dockSettings = createDockWidget(m_settingsWidget, "设置");
-    m_dockOther = createDockWidget(m_otherWidget, "其它");
+    m_dockWindow = createDockWidget(m_windowWidget, "窗口");
+    m_dockRegistry = createDockWidget(m_registryWidget, "注册表");
 
     // 创建右侧和底部的基本Widgets
     m_dockCurrentOp = createDockWidget(m_progressWidget, "当前操作");
@@ -563,7 +565,7 @@ void MainWindow::initDockWidgets()
     QList<ads::CDockWidget*> allDocks = {
         m_dockWelcome, m_dockProcess, m_dockNetwork, m_dockMemory,
         m_dockFile, m_dockDriver, m_dockKernel, m_dockMonitorTab,
-        m_dockPrivilege, m_dockSettings, m_dockOther,
+        m_dockPrivilege, m_dockSettings, m_dockWindow, m_dockRegistry,
         m_dockCurrentOp, m_dockLog, m_dockImmediate, m_dockMonitor
     };
 
@@ -594,7 +596,8 @@ void MainWindow::setupDockLayout()
     m_pDockManager->addDockWidgetTabToArea(m_dockMonitorTab, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockPrivilege, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockSettings, leftDockArea);
-    m_pDockManager->addDockWidgetTabToArea(m_dockOther, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockWindow, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockRegistry, leftDockArea);
 
     // 方法2: 或者使用addDockWidget并指定CenterDockWidgetArea
     // m_pDockManager->addDockWidget(ads::CenterDockWidgetArea, m_dockProcess, leftDockArea);

@@ -137,18 +137,21 @@
     <ClCompile Include="Framework\Progress.cpp" />
     <ClCompile Include="Framework\ProgressDockWidget.cpp" />
     <ClCompile Include="KernelDock\KernelDock.cpp" />
+    <ClCompile Include="KernelDock\KernelDockQueryWorker.cpp" />
     <ClCompile Include="MainWindow.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.cpp" />
     <ClCompile Include="MonitorDock\MonitorDock.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.cpp" />
     <ClCompile Include="OtherDock\OtherDock.cpp" />
     <ClCompile Include="PrivilegeDock\PrivilegeDock.cpp" />
+    <ClCompile Include="RegistryDock\RegistryDock.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.cpp" />
     <ClCompile Include="ProcessDock\ProcessDock.cpp" />
     <ClCompile Include="ProcessDock\Process_Tool.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.cpp" />
     <ClCompile Include="UI\UIBaseFunction.cpp" />
     <ClCompile Include="WelcomeDock\WelcomeDock.cpp" />
+    <ClCompile Include="WindowDock\WindowDock.cpp" />
     <ClCompile Include="ksword\process\process.cpp" />
     <ClCompile Include="ksword\string\string.cpp" />
     <QtRcc Include="Ksword5.qrc" />
@@ -171,6 +174,7 @@
     <ClInclude Include="Ksword.h" />
     <ClInclude Include="Framework\LogDockWidget.h" />
     <ClInclude Include="Framework\ProgressDockWidget.h" />
+    <ClInclude Include="KernelDock\KernelDockQueryWorker.h" />
     <ClInclude Include="ksword\ksword.h" />
     <ClInclude Include="ksword\process\process.h" />
     <ClInclude Include="ksword\string\string.h" />
@@ -184,11 +188,13 @@
     <QtMoc Include="NetworkDock\NetworkDock.h" />
     <QtMoc Include="OtherDock\OtherDock.h" />
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h" />
+    <QtMoc Include="RegistryDock\RegistryDock.h" />
     <QtMoc Include="ProcessDock\ProcessDetailWindow.h" />
     <QtMoc Include="ProcessDock\ProcessDock.h" />
     <QtMoc Include="SettingsDock\SettingsDock.h" />
     <ClInclude Include="ProcessDock\Process_Tool.h" />
     <ClInclude Include="UI\UI.css\UI_css.h" />
+    <ClInclude Include="WindowDock\WindowDock.h" />
     <QtMoc Include="WelcomeDock\WelcomeDock.h" />
   </ItemGroup>
   <ItemGroup>

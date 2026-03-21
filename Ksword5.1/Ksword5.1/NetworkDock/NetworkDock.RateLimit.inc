@@ -97,14 +97,28 @@ void NetworkDock::refreshRateLimitTable()
     const std::vector<ks::network::ProcessRateLimitSnapshot> snapshots =
         m_trafficService->SnapshotRateLimitRules();
 
-    m_rateLimitTable->setRowCount(0);
+    // PID -> 进程名静态缓存：
+    // - 降低定时刷新时重复 QueryProcessNameByPID 的调用成本；
+    // - 规则通常跟随 PID 长时间存在，缓存命中率高。
+    static std::unordered_map<std::uint32_t, std::string> s_processNameCacheByPid;
+
+    m_rateLimitTable->setUpdatesEnabled(false);
+    m_rateLimitTable->setRowCount(static_cast<int>(snapshots.size()));
     int rowIndex = 0;
     for (const ks::network::ProcessRateLimitSnapshot& snapshot : snapshots)
     {
-        m_rateLimitTable->insertRow(rowIndex);
-
         const std::uint32_t processId = snapshot.rule.processId;
-        const std::string processName = ks::process::GetProcessNameByPID(processId);
+        const auto cacheIterator = s_processNameCacheByPid.find(processId);
+        std::string processName;
+        if (cacheIterator != s_processNameCacheByPid.end())
+        {
+            processName = cacheIterator->second;
+        }
+        else
+        {
+            processName = ks::process::GetProcessNameByPID(processId);
+            s_processNameCacheByPid.insert({ processId, processName });
+        }
         const QString stateText = snapshot.currentlySuspended ? QStringLiteral("已挂起") : QStringLiteral("运行中");
 
         m_rateLimitTable->setItem(rowIndex, toRateLimitColumn(RateLimitTableColumn::Pid),
@@ -123,6 +137,9 @@ void NetworkDock::refreshRateLimitTable()
             createPacketCell(stateText));
         ++rowIndex;
     }
+
+    m_rateLimitTable->setUpdatesEnabled(true);
+    m_rateLimitTable->viewport()->update();
 }
 
 void NetworkDock::appendRateLimitActionLogLine(const QString& logLine)

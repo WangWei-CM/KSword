@@ -73,11 +73,14 @@ ProcessDetailWindow::ProcessDetailWindow(const ks::process::ProcessRecord& baseR
         }
     }
 
-    // 按“建 UI -> 连信号 -> 填初值 -> 首次模块刷新”顺序初始化。
+    // 按“建 UI -> 连信号 -> 填初值 -> 首次异步刷新”顺序初始化。
     initializeUi();
     initializeConnections();
     refreshDetailTabTexts();
     requestAsyncModuleRefresh(true);
+    requestAsyncThreadInspectRefresh();
+    requestAsyncTokenRefresh();
+    requestAsyncPebRefresh();
 
     // 构造结束日志：标记窗口初始化链路完成。
     kLogEvent ctorFinishEvent;
@@ -161,6 +164,9 @@ void ProcessDetailWindow::updateBaseRecord(const ks::process::ProcessRecord& bas
         m_baseRecord.pid,
         m_baseRecord.creationTime100ns);
     refreshDetailTabTexts();
+    requestAsyncThreadInspectRefresh();
+    requestAsyncTokenRefresh();
+    requestAsyncPebRefresh();
 
     // 更新结束日志：输出新 identity 与关键字段状态。
     kLogEvent updateRecordFinishEvent;
@@ -195,19 +201,25 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget = new QTabWidget(this);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
-    // 创建三个页面并分别初始化。
+    // 创建五个页面并分别初始化。
     m_detailTab = new QWidget(m_tabWidget);
     m_actionTab = new QWidget(m_tabWidget);
     m_moduleTab = new QWidget(m_tabWidget);
+    m_tokenTab = new QWidget(m_tabWidget);
+    m_pebTab = new QWidget(m_tabWidget);
 
     initializeDetailTab();
     initializeActionTab();
     initializeModuleTab();
+    initializeTokenTab();
+    initializePebTab();
 
     // 为 Tab 指定图标与标题文本。
     m_tabWidget->addTab(m_detailTab, QIcon(":/Icon/process_details.svg"), "详细信息");
     m_tabWidget->addTab(m_actionTab, QIcon(":/Icon/process_priority.svg"), "操作");
     m_tabWidget->addTab(m_moduleTab, QIcon(":/Icon/process_list.svg"), "模块");
+    m_tabWidget->addTab(m_tokenTab, QIcon(":/Icon/process_critical.svg"), "令牌");
+    m_tabWidget->addTab(m_pebTab, QIcon(":/Icon/process_tree.svg"), "PEB");
     m_tabWidget->setCurrentWidget(m_detailTab);
 
     updateWindowTitle();
@@ -306,6 +318,42 @@ void ProcessDetailWindow::initializeDetailTab()
     detailFormLayout->addRow("数字签名", m_detailSignatureValue);
 
     m_detailLayout->addWidget(detailGroup);
+
+    // 线程细节区域：对应开发计划中的线程 ID/状态/优先级/TEB/上下文展示。
+    QGroupBox* threadGroup = new QGroupBox("线程详细信息", m_detailTab);
+    QVBoxLayout* threadLayout = new QVBoxLayout(threadGroup);
+    threadLayout->setContentsMargins(8, 8, 8, 8);
+    threadLayout->setSpacing(6);
+
+    QHBoxLayout* threadTopBarLayout = new QHBoxLayout();
+    m_refreshThreadInspectButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), "刷新线程", threadGroup);
+    m_refreshThreadInspectButton->setToolTip("异步刷新线程状态、寄存器摘要与 TEB 地址");
+    m_threadInspectStatusLabel = new QLabel("● 尚未刷新", threadGroup);
+    m_threadInspectStatusLabel->setStyleSheet("color:#6F6F6F;");
+    threadTopBarLayout->addWidget(m_refreshThreadInspectButton);
+    threadTopBarLayout->addWidget(m_threadInspectStatusLabel, 1);
+    threadLayout->addLayout(threadTopBarLayout);
+
+    m_threadInspectTable = new QTableWidget(threadGroup);
+    m_threadInspectTable->setColumnCount(toThreadColumnIndex(ThreadRowColumn::Count));
+    m_threadInspectTable->setHorizontalHeaderLabels(ThreadInspectHeaders);
+    m_threadInspectTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_threadInspectTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_threadInspectTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_threadInspectTable->setAlternatingRowColors(true);
+    m_threadInspectTable->verticalHeader()->setVisible(false);
+    m_threadInspectTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+    m_threadInspectTable->horizontalHeader()->setStretchLastSection(true);
+    m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::ThreadId), 96);
+    m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::State), 82);
+    m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::Priority), 72);
+    m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::SwitchCount), 96);
+    m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::StartAddress), 130);
+    m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::TebAddress), 130);
+    m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::Affinity), 108);
+    threadLayout->addWidget(m_threadInspectTable, 1);
+    m_detailLayout->addWidget(threadGroup, 1);
+
     m_detailLayout->addStretch(1);
 
     const QString buttonStyle = buildBlueButtonStyle();
@@ -313,6 +361,7 @@ void ProcessDetailWindow::initializeDetailTab()
     m_openPathFolderButton->setStyleSheet(buttonStyle);
     m_copyCommandButton->setStyleSheet(buttonStyle);
     m_gotoParentButton->setStyleSheet(buttonStyle);
+    m_refreshThreadInspectButton->setStyleSheet(buttonStyle);
 }
 
 void ProcessDetailWindow::initializeActionTab()
@@ -490,6 +539,68 @@ void ProcessDetailWindow::initializeModuleTab()
     m_refreshModuleButton->setStyleSheet(buildBlueButtonStyle());
 }
 
+void ProcessDetailWindow::initializeTokenTab()
+{
+    // 令牌页初始化：专门展示 SID/特权/完整性级别等信息。
+    kLogEvent initTokenTabEvent;
+    info << initTokenTabEvent
+        << "[ProcessDetailWindow] initializeTokenTab: 构建令牌信息页面。"
+        << eol;
+
+    m_tokenLayout = new QVBoxLayout(m_tokenTab);
+    m_tokenLayout->setContentsMargins(6, 6, 6, 6);
+    m_tokenLayout->setSpacing(6);
+
+    QHBoxLayout* tokenTopBarLayout = new QHBoxLayout();
+    m_refreshTokenButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), "刷新令牌", m_tokenTab);
+    m_refreshTokenButton->setToolTip("异步刷新用户 SID、组、特权、完整性级别等令牌信息");
+    m_tokenStatusLabel = new QLabel("● 尚未刷新", m_tokenTab);
+    m_tokenStatusLabel->setStyleSheet("color:#6F6F6F; font-weight:600;");
+    tokenTopBarLayout->addWidget(m_refreshTokenButton);
+    tokenTopBarLayout->addWidget(m_tokenStatusLabel, 1);
+    m_tokenLayout->addLayout(tokenTopBarLayout);
+
+    m_tokenDetailOutput = new QPlainTextEdit(m_tokenTab);
+    m_tokenDetailOutput->setReadOnly(true);
+    m_tokenDetailOutput->setLineWrapMode(QPlainTextEdit::NoWrap);
+    m_tokenDetailOutput->setPlaceholderText("令牌详细信息将在此处显示。");
+    m_tokenLayout->addWidget(m_tokenDetailOutput, 1);
+
+    const QString buttonStyle = buildBlueButtonStyle();
+    m_refreshTokenButton->setStyleSheet(buttonStyle);
+}
+
+void ProcessDetailWindow::initializePebTab()
+{
+    // PEB 页初始化：展示 PEB 地址、参数块、环境变量等。
+    kLogEvent initPebTabEvent;
+    info << initPebTabEvent
+        << "[ProcessDetailWindow] initializePebTab: 构建 PEB 信息页面。"
+        << eol;
+
+    m_pebLayout = new QVBoxLayout(m_pebTab);
+    m_pebLayout->setContentsMargins(6, 6, 6, 6);
+    m_pebLayout->setSpacing(6);
+
+    QHBoxLayout* pebTopBarLayout = new QHBoxLayout();
+    m_refreshPebButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), "刷新PEB", m_pebTab);
+    m_refreshPebButton->setToolTip("异步刷新 PEB、命令行、当前目录、环境块与安全标志");
+    m_pebStatusLabel = new QLabel("● 尚未刷新", m_pebTab);
+    m_pebStatusLabel->setStyleSheet("color:#6F6F6F; font-weight:600;");
+    pebTopBarLayout->addWidget(m_refreshPebButton);
+    pebTopBarLayout->addWidget(m_pebStatusLabel, 1);
+    m_pebLayout->addLayout(pebTopBarLayout);
+
+    m_pebDetailOutput = new QPlainTextEdit(m_pebTab);
+    m_pebDetailOutput->setReadOnly(true);
+    m_pebDetailOutput->setLineWrapMode(QPlainTextEdit::NoWrap);
+    m_pebDetailOutput->setPlaceholderText("PEB 与地址空间摘要将在此处显示。");
+    m_pebLayout->addWidget(m_pebDetailOutput, 1);
+
+    const QString buttonStyle = buildBlueButtonStyle();
+    m_refreshPebButton->setStyleSheet(buttonStyle);
+}
+
 void ProcessDetailWindow::initializeConnections()
 {
     // 连接初始化日志：用于确认所有按钮信号都已挂接。
@@ -528,6 +639,21 @@ void ProcessDetailWindow::initializeConnections()
         }
         const std::uint32_t parentPid = parentPidVariant.toUInt();
         emit requestOpenProcessByPid(parentPid);
+    });
+
+    // 线程细节刷新按钮。
+    connect(m_refreshThreadInspectButton, &QPushButton::clicked, this, [this]() {
+        requestAsyncThreadInspectRefresh();
+    });
+
+    // 令牌页刷新按钮。
+    connect(m_refreshTokenButton, &QPushButton::clicked, this, [this]() {
+        requestAsyncTokenRefresh();
+    });
+
+    // PEB 页刷新按钮。
+    connect(m_refreshPebButton, &QPushButton::clicked, this, [this]() {
+        requestAsyncPebRefresh();
     });
 
     // 操作页按钮连接。

@@ -342,12 +342,28 @@ void MemoryDock::startNextScan()
     const auto scanStartTime = std::chrono::steady_clock::now();
     const int totalCount = static_cast<int>(m_searchResultCache.size());
     int processedCount = 0;
+    bool cancelled = false;
+
+    // 再次扫描也统一使用“扫描中”状态，确保取消按钮和顶部按钮行为一致。
+    m_scanInProgress.store(true);
+    m_scanCancelRequested.store(false);
+    m_firstScanButton->setEnabled(false);
+    m_nextScanButton->setEnabled(false);
+    m_resetScanButton->setEnabled(false);
+    m_cancelScanButton->setEnabled(true);
 
     m_scanProgressBar->setValue(0);
     m_scanStatusLabel->setText(QString("再次扫描中：总计 %1 条").arg(totalCount));
 
     for (const SearchResultEntry& oldEntry : m_searchResultCache)
     {
+        // 用户点击取消后尽快退出循环，保留当前缓存不被部分结果覆盖。
+        if (m_scanCancelRequested.load())
+        {
+            cancelled = true;
+            break;
+        }
+
         // 每条结果的读取长度遵循“上一轮值字节长度”，确保比较口径一致。
         const std::size_t readLength = std::max<std::size_t>(1, static_cast<std::size_t>(oldEntry.currentValueBytes.size()));
         QByteArray currentBytes(static_cast<int>(readLength), '\0');
@@ -361,6 +377,12 @@ void MemoryDock::startNextScan()
         if (readOk == FALSE || bytesRead != readLength)
         {
             ++processedCount;
+            if ((processedCount % 256) == 0 || processedCount == totalCount)
+            {
+                const int progressPercent = (totalCount <= 0) ? 100 : (processedCount * 100 / totalCount);
+                m_scanProgressBar->setValue(progressPercent);
+                QApplication::processEvents(QEventLoop::AllEvents, 1);
+            }
             continue;
         }
 
@@ -467,22 +489,50 @@ void MemoryDock::startNextScan()
             nextResultCache.push_back(std::move(nextEntry));
         }
 
-        // 每处理一条都更新进度条，数量很大时 Qt 会自动压缩 repaint 频率。
+        // 进度更新改为分批触发，降低 UI 线程重绘开销并保持界面响应。
         ++processedCount;
-        const int progressPercent = (totalCount <= 0) ? 100 : (processedCount * 100 / totalCount);
-        m_scanProgressBar->setValue(progressPercent);
+        if ((processedCount % 256) == 0 || processedCount == totalCount)
+        {
+            const int progressPercent = (totalCount <= 0) ? 100 : (processedCount * 100 / totalCount);
+            m_scanProgressBar->setValue(progressPercent);
+            QApplication::processEvents(QEventLoop::AllEvents, 1);
+        }
     }
 
-    // 将过滤结果提交到缓存并重绘表格。
-    m_searchResultCache = std::move(nextResultCache);
+    // 再次扫描统一收尾：恢复按钮状态并清理扫描标记。
+    m_scanInProgress.store(false);
+    m_scanCancelRequested.store(false);
+    m_firstScanButton->setEnabled(true);
+    m_resetScanButton->setEnabled(true);
+    m_cancelScanButton->setEnabled(false);
+
+    // 取消时保留上一轮结果，不覆盖缓存。
+    if (!cancelled)
+    {
+        m_searchResultCache = std::move(nextResultCache);
+    }
     rebuildSearchResultTable();
 
     const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - scanStartTime).count();
-    m_scanStatusLabel->setText(
-        QString("再次扫描完成：保留 %1 项，耗时 %2 ms")
-        .arg(m_searchResultCache.size())
-        .arg(elapsedMs));
+    QString finishText;
+    if (cancelled)
+    {
+        finishText = QString("再次扫描已取消：保留上一轮 %1 项，耗时 %2 ms")
+            .arg(m_searchResultCache.size())
+            .arg(elapsedMs);
+    }
+    else
+    {
+        finishText = QString("再次扫描完成：保留 %1 项，耗时 %2 ms")
+            .arg(m_searchResultCache.size())
+            .arg(elapsedMs);
+    }
+    if (m_searchResultCache.size() > m_searchResultVisibleCount)
+    {
+        finishText += QString("（仅显示前 %1 项）").arg(m_searchResultVisibleCount);
+    }
+    m_scanStatusLabel->setText(finishText);
 
     // 再次扫描完成日志：输出保留数量与耗时。
     kLogEvent nextScanFinishEvent;
@@ -491,6 +541,8 @@ void MemoryDock::startNextScan()
         << m_searchResultCache.size()
         << ", elapsedMs="
         << elapsedMs
+        << ", cancelled="
+        << (cancelled ? "true" : "false")
         << eol;
 }
 
@@ -543,11 +595,20 @@ void MemoryDock::rebuildSearchResultTable()
         << static_cast<int>(m_lastSearchValueType)
         << eol;
 
-    // 表格重建前先关闭排序，避免行插入期间地址和内容错位。
-    m_searchResultTable->setSortingEnabled(false);
-    m_searchResultTable->setRowCount(static_cast<int>(m_searchResultCache.size()));
+    // 为避免超大结果集导致界面长时间冻结，UI 层仅展示前 N 条。
+    constexpr std::size_t kSearchResultDisplayLimit = 50000;
+    const std::size_t totalCount = m_searchResultCache.size();
+    const std::size_t visibleCount = std::min<std::size_t>(totalCount, kSearchResultDisplayLimit);
+    const std::size_t hiddenCount = totalCount - visibleCount;
+    m_searchResultVisibleCount = visibleCount;
 
-    for (int row = 0; row < static_cast<int>(m_searchResultCache.size()); ++row)
+    // 表格重建前先关闭排序与绘制，降低批量 setItem 开销。
+    m_searchResultTable->setSortingEnabled(false);
+    m_searchResultTable->setUpdatesEnabled(false);
+    m_searchResultTable->clearContents();
+    m_searchResultTable->setRowCount(static_cast<int>(visibleCount));
+
+    for (int row = 0; row < static_cast<int>(visibleCount); ++row)
     {
         const SearchResultEntry& entry = m_searchResultCache[static_cast<std::size_t>(row)];
 
@@ -567,14 +628,32 @@ void MemoryDock::rebuildSearchResultTable()
 
         m_searchResultTable->setItem(row, 3, new QTableWidgetItem(entry.noteText));
     }
+    m_searchResultTable->setUpdatesEnabled(true);
+
+    // 当结果被截断显示时，在工具提示中给出明确说明。
+    if (hiddenCount > 0)
+    {
+        m_searchResultTable->setToolTip(
+            QString("结果总数 %1，当前仅显示前 %2 条以保持界面响应。")
+            .arg(totalCount)
+            .arg(visibleCount));
+    }
+    else
+    {
+        m_searchResultTable->setToolTip(QString());
+    }
 
     // 有结果时允许再次扫描；无结果时禁用该按钮避免误操作。
-    m_nextScanButton->setEnabled(!m_searchResultCache.empty());
+    m_nextScanButton->setEnabled(!m_searchResultCache.empty() && !m_scanInProgress.load());
 
     kLogEvent rebuildResultFinishEvent;
     dbg << rebuildResultFinishEvent
         << "[MemoryDock] rebuildSearchResultTable: 重建完成, nextScanEnabled="
         << (m_nextScanButton->isEnabled() ? "true" : "false")
+        << ", visibleCount="
+        << visibleCount
+        << ", hiddenCount="
+        << hiddenCount
         << eol;
 }
 
@@ -852,10 +931,14 @@ void MemoryDock::scanMemoryRegionsInBackground(
             selfGuard->m_scanProgressBar->setValue(100);
             selfGuard->m_searchResultCache = std::move(finalResults);
             selfGuard->rebuildSearchResultTable();
-            selfGuard->m_scanStatusLabel->setText(
-                QString("首次扫描完成：命中 %1 项，耗时 %2 ms")
+            QString finishText = QString("首次扫描完成：命中 %1 项，耗时 %2 ms")
                 .arg(selfGuard->m_searchResultCache.size())
-                .arg(elapsedMs));
+                .arg(elapsedMs);
+            if (selfGuard->m_searchResultCache.size() > selfGuard->m_searchResultVisibleCount)
+            {
+                finishText += QString("（仅显示前 %1 项）").arg(selfGuard->m_searchResultVisibleCount);
+            }
+            selfGuard->m_scanStatusLabel->setText(finishText);
 
             // UI 提交完成日志：确认结果已落地到缓存与表格。
             kLogEvent scanBackgroundUiFinishEvent;

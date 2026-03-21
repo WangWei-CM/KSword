@@ -29,5 +29,14 @@
         <file alias="process_open_folder.svg">Resource/Icon/file/folder_open_line.svg</file>
         <file alias="process_priority.svg">Resource/Icon/system/settings_2_line.svg</file>
         <file alias="process_details.svg">Resource/Icon/file/file_info_line.svg</file>
+
+        <!-- 文件模块新增导航与检索图标 -->
+        <file alias="file_nav_back.svg">Resource/Icon/arrow/left_line.svg</file>
+        <file alias="file_nav_forward.svg">Resource/Icon/arrow/right_line.svg</file>
+        <file alias="file_nav_up.svg">Resource/Icon/arrow/arrow_up_line.svg</file>
+        <file alias="file_regex.svg">Resource/Icon/editor/formula_line.svg</file>
+        <file alias="file_case.svg">Resource/Icon/editor/AZ_sort_ascending_letters_line.svg</file>
+        <file alias="file_find.svg">Resource/Icon/editor/list_search_line.svg</file>
+        <file alias="file_owner.svg">Resource/Icon/user/user_security_line.svg</file>
     </qresource>
 </RCC>

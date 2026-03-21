@@ -1,5 +1,15 @@
 void NetworkDock::refreshConnectionTables()
 {
+    // 连接快照枚举是相对昂贵操作：
+    // - 当连接管理页不可见时，直接跳过；
+    // - 避免后台定时器在隐藏页持续抢占 UI 线程。
+    if (m_sideTabWidget != nullptr &&
+        m_connectionManagePage != nullptr &&
+        m_sideTabWidget->currentWidget() != m_connectionManagePage)
+    {
+        return;
+    }
+
     // 统一入口：同一时刻刷新 TCP 与 UDP，保证两个表看到的是同一时间段快照。
     refreshTcpConnectionTable();
     refreshUdpEndpointTable();
@@ -49,13 +59,11 @@ void NetworkDock::refreshTcpConnectionTable()
     m_tcpConnectionCache = std::move(tcpSnapshot);
 
     m_tcpConnectionTable->setUpdatesEnabled(false);
-    m_tcpConnectionTable->setRowCount(0);
+    m_tcpConnectionTable->setRowCount(static_cast<int>(m_tcpConnectionCache.size()));
 
     int rowIndex = 0;
     for (const ks::network::TcpConnectionRecord& connectionRecord : m_tcpConnectionCache)
     {
-        m_tcpConnectionTable->insertRow(rowIndex);
-
         const QString stateText = toQString(connectionRecord.tcpStateText);
         const QString pidText = QString::number(connectionRecord.processId);
         const QString processNameText = toQString(connectionRecord.processName);
@@ -73,6 +81,7 @@ void NetworkDock::refreshTcpConnectionTable()
     }
 
     m_tcpConnectionTable->setUpdatesEnabled(true);
+    m_tcpConnectionTable->viewport()->update();
 }
 
 void NetworkDock::refreshUdpEndpointTable()
@@ -101,13 +110,11 @@ void NetworkDock::refreshUdpEndpointTable()
     m_udpEndpointCache = std::move(udpSnapshot);
 
     m_udpEndpointTable->setUpdatesEnabled(false);
-    m_udpEndpointTable->setRowCount(0);
+    m_udpEndpointTable->setRowCount(static_cast<int>(m_udpEndpointCache.size()));
 
     int rowIndex = 0;
     for (const ks::network::UdpEndpointRecord& endpointRecord : m_udpEndpointCache)
     {
-        m_udpEndpointTable->insertRow(rowIndex);
-
         const QString pidText = QString::number(endpointRecord.processId);
         const QString processNameText = toQString(endpointRecord.processName);
         const QString localEndpointText = formatEndpointText(endpointRecord.localAddressText, endpointRecord.localPort);
@@ -121,6 +128,7 @@ void NetworkDock::refreshUdpEndpointTable()
     }
 
     m_udpEndpointTable->setUpdatesEnabled(true);
+    m_udpEndpointTable->viewport()->update();
 }
 
 void NetworkDock::terminateSelectedTcpConnection()

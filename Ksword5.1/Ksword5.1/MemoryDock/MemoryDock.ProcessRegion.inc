@@ -178,46 +178,10 @@ void MemoryDock::updateProcessComboFromCache()
     }
 }
 
-bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
+void MemoryDock::rebuildModuleTableFromCache()
 {
-    // 模块刷新入口日志：便于排查跨位数或权限导致的失败。
-    kLogEvent refreshModuleStartEvent;
-    info << refreshModuleStartEvent
-        << "[MemoryDock] refreshModuleListForPid: 开始刷新模块, pid="
-        << pid
-        << eol;
-
-    // 每次刷新模块都先清空缓存，确保结果和 PID 一致。
-    m_moduleCache.clear();
-
-    // 模块数据源切换为 ks::process 统一接口，与 ProcessDetailWindow 保持一致。
-    const bool includeSignatureCheck =
-        (m_moduleSignatureCheck != nullptr) && m_moduleSignatureCheck->isChecked();
-    const ks::process::ProcessModuleSnapshot moduleSnapshot =
-        ks::process::EnumerateProcessModulesAndThreads(pid, includeSignatureCheck);
-
-    for (const ks::process::ProcessModuleRecord& moduleRecord : moduleSnapshot.modules)
-    {
-        ModuleEntry entry{};
-        entry.fullPath = QString::fromStdString(moduleRecord.modulePath);
-        entry.moduleName = QFileInfo(entry.fullPath).fileName();
-        entry.baseAddress = moduleRecord.moduleBaseAddress;
-        entry.sizeBytes = moduleRecord.moduleSizeBytes;
-        entry.signatureState = QString::fromStdString(moduleRecord.signatureState);
-        entry.signatureTrusted = moduleRecord.signatureTrusted;
-        entry.entryPointOffset = moduleRecord.entryPointRva;
-        entry.runningState = QString::fromStdString(moduleRecord.runningState);
-        entry.threadIdText = QString::fromStdString(moduleRecord.threadIdText);
-        entry.representativeThreadId = moduleRecord.representativeThreadId;
-        m_moduleCache.push_back(std::move(entry));
-    }
-
-    std::sort(m_moduleCache.begin(), m_moduleCache.end(), [](const ModuleEntry& left, const ModuleEntry& right) {
-        return left.baseAddress < right.baseAddress;
-        });
-
-    // 模块过滤：按名称包含匹配。
-    const QString filterText = m_moduleFilterEdit->text().trimmed();
+    // 仅用缓存重绘模块表：该路径不会触发 Win32 枚举，适合输入过滤时高频调用。
+    const QString filterText = (m_moduleFilterEdit == nullptr) ? QString() : m_moduleFilterEdit->text().trimmed();
     std::vector<const ModuleEntry*> filteredModules;
     filteredModules.reserve(m_moduleCache.size());
     for (const ModuleEntry& entry : m_moduleCache)
@@ -231,8 +195,12 @@ bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
         filteredModules.push_back(&entry);
     }
 
-    // 模块树表重建：列布局对齐 ProcessDetailWindow 模块页。
+    // 批量更新期间关闭绘制和信号，减少重排开销并避免多余回调。
+    m_moduleTable->setUpdatesEnabled(false);
+    const QSignalBlocker tableBlocker(m_moduleTable);
     m_moduleTable->clear();
+
+    // 图标按路径缓存，避免重建过滤时重复触发磁盘图标查询。
     static QHash<QString, QIcon> moduleIconCache;
     for (const ModuleEntry* moduleEntryPtr : filteredModules)
     {
@@ -250,7 +218,7 @@ bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
             toModuleTreeColumnIndex(ModuleTreeColumn::Path),
             resolveIconByPath(entry.fullPath, moduleIconCache));
 
-        // 保存基址与代表线程 ID，供双击跳转与右键动作使用。
+        // 保存基址与线程 ID，供双击跳转和右键动作反查。
         rowItem->setData(
             toModuleTreeColumnIndex(ModuleTreeColumn::Path),
             Qt::UserRole,
@@ -277,41 +245,185 @@ bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
 
         m_moduleTable->addTopLevelItem(rowItem);
     }
+
+    // 排序仍按路径列执行，和原先交互习惯保持一致。
     m_moduleTable->sortItems(toModuleTreeColumnIndex(ModuleTreeColumn::Path), Qt::AscendingOrder);
+    m_moduleTable->setUpdatesEnabled(true);
 
-    // 模块状态标签：展示模块数量、线程数量和诊断信息。
-    if (m_moduleStatusLabel != nullptr)
-    {
-        QString statusText = QString("● 模块:%1 线程:%2")
-            .arg(moduleSnapshot.modules.size())
-            .arg(moduleSnapshot.threads.size());
-        const QString diagnosticText = QString::fromStdString(moduleSnapshot.diagnosticText).trimmed();
-        if (!diagnosticText.isEmpty())
-        {
-            statusText += QString(" | %1").arg(diagnosticText);
-        }
-        m_moduleStatusLabel->setText(statusText);
-        m_moduleStatusLabel->setStyleSheet(moduleSnapshot.modules.empty()
-            ? "color:#DC322F; font-weight:700;"
-            : "color:#2F7D32; font-weight:600;");
-    }
-
-    // 模块刷新结束日志：包含原始模块数量和过滤后数量。
-    kLogEvent refreshModuleFinishEvent;
-    info << refreshModuleFinishEvent
-        << "[MemoryDock] refreshModuleListForPid: 刷新完成, pid="
-        << pid
-        << ", moduleCount="
+    // 重绘结束日志：用于确认过滤后可见数量。
+    kLogEvent rebuildModuleTableEvent;
+    dbg << rebuildModuleTableEvent
+        << "[MemoryDock] rebuildModuleTableFromCache: 完成, cacheCount="
         << m_moduleCache.size()
-        << ", filteredCount="
+        << ", visibleCount="
         << filteredModules.size()
-        << ", includeSignatureCheck="
-        << (includeSignatureCheck ? "true" : "false")
-        << ", diagnostic="
-        << moduleSnapshot.diagnosticText
+        << ", filterText="
+        << filterText.toStdString()
+        << eol;
+}
+
+bool MemoryDock::refreshModuleListForPid(const std::uint32_t pid)
+{
+    // 模块刷新改为异步，避免签名校验和模块枚举阻塞主线程。
+    kLogEvent refreshModuleStartEvent;
+    info << refreshModuleStartEvent
+        << "[MemoryDock] refreshModuleListForPid: 请求刷新模块, pid="
+        << pid
         << eol;
 
-    return !moduleSnapshot.modules.empty();
+    if (pid == 0)
+    {
+        // pid 为 0 表示当前无有效目标，直接清空缓存和表格。
+        m_moduleCache.clear();
+        rebuildModuleTableFromCache();
+        if (m_moduleStatusLabel != nullptr)
+        {
+            m_moduleStatusLabel->setText("● 未选择有效进程");
+            m_moduleStatusLabel->setStyleSheet("color:#DC322F; font-weight:700;");
+        }
+        return false;
+    }
+
+    // 每次请求生成一个递增 ticket；旧任务回调时会被丢弃。
+    const std::uint64_t refreshTicket = m_moduleRefreshTicket.fetch_add(1) + 1;
+    const bool includeSignatureCheck =
+        (m_moduleSignatureCheck != nullptr) && m_moduleSignatureCheck->isChecked();
+    m_moduleRefreshInProgress.store(true);
+
+    // 刷新期间更新状态栏并临时禁用按钮，避免用户误以为点击无效而反复触发。
+    if (m_moduleRefreshButton != nullptr)
+    {
+        m_moduleRefreshButton->setEnabled(false);
+    }
+    if (m_moduleStatusLabel != nullptr)
+    {
+        m_moduleStatusLabel->setText(
+            QString("● 正在刷新模块(PID=%1, 签名校验=%2)...")
+            .arg(pid)
+            .arg(includeSignatureCheck ? "开启" : "关闭"));
+        m_moduleStatusLabel->setStyleSheet(
+            QStringLiteral("color:%1; font-weight:700;").arg(KswordTheme::PrimaryBlueHex));
+    }
+
+    // 使用 QPointer 守护 this，避免窗口销毁后异步回调访问悬空对象。
+    const QPointer<MemoryDock> selfGuard(this);
+    std::thread([selfGuard, pid, includeSignatureCheck, refreshTicket]() {
+        if (selfGuard == nullptr)
+        {
+            return;
+        }
+
+        // 后台线程仅执行耗时枚举和数据转换，不直接操作任何 Qt 控件。
+        const auto refreshStartTime = std::chrono::steady_clock::now();
+        const ks::process::ProcessModuleSnapshot moduleSnapshot =
+            ks::process::EnumerateProcessModulesAndThreads(pid, includeSignatureCheck);
+
+        std::vector<ModuleEntry> moduleCache;
+        moduleCache.reserve(moduleSnapshot.modules.size());
+        for (const ks::process::ProcessModuleRecord& moduleRecord : moduleSnapshot.modules)
+        {
+            ModuleEntry entry{};
+            entry.fullPath = QString::fromStdString(moduleRecord.modulePath);
+            entry.moduleName = QFileInfo(entry.fullPath).fileName();
+            entry.baseAddress = moduleRecord.moduleBaseAddress;
+            entry.sizeBytes = moduleRecord.moduleSizeBytes;
+            entry.signatureState = QString::fromStdString(moduleRecord.signatureState);
+            entry.signatureTrusted = moduleRecord.signatureTrusted;
+            entry.entryPointOffset = moduleRecord.entryPointRva;
+            entry.runningState = QString::fromStdString(moduleRecord.runningState);
+            entry.threadIdText = QString::fromStdString(moduleRecord.threadIdText);
+            entry.representativeThreadId = moduleRecord.representativeThreadId;
+            moduleCache.push_back(std::move(entry));
+        }
+        std::sort(moduleCache.begin(), moduleCache.end(), [](const ModuleEntry& left, const ModuleEntry& right) {
+            return left.baseAddress < right.baseAddress;
+            });
+
+        const std::uint64_t elapsedMs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - refreshStartTime).count());
+        const std::size_t moduleCount = moduleSnapshot.modules.size();
+        const std::size_t threadCount = moduleSnapshot.threads.size();
+        const QString diagnosticText = QString::fromStdString(moduleSnapshot.diagnosticText).trimmed();
+
+        // 结果回到主线程落地，确保 Qt 视图更新线程安全。
+        QMetaObject::invokeMethod(selfGuard.data(), [selfGuard,
+            pid,
+            includeSignatureCheck,
+            refreshTicket,
+            elapsedMs,
+            moduleCount,
+            threadCount,
+            diagnosticText,
+            moduleCache = std::move(moduleCache)]() mutable {
+                if (selfGuard == nullptr)
+                {
+                    return;
+                }
+
+                // 如果 ticket 已过期，说明用户又发起了新刷新，旧结果直接丢弃。
+                if (refreshTicket < selfGuard->m_moduleRefreshTicket.load())
+                {
+                    kLogEvent staleModuleEvent;
+                    dbg << staleModuleEvent
+                        << "[MemoryDock] refreshModuleListForPid: 丢弃过期模块结果, ticket="
+                        << refreshTicket
+                        << ", latestTicket="
+                        << selfGuard->m_moduleRefreshTicket.load()
+                        << eol;
+                    return;
+                }
+
+                // 先覆盖缓存，再按当前过滤条件重建可见列表。
+                selfGuard->m_moduleCache = std::move(moduleCache);
+                selfGuard->rebuildModuleTableFromCache();
+
+                // 刷新收尾：恢复按钮并更新状态标签。
+                selfGuard->m_moduleRefreshInProgress.store(false);
+                if (selfGuard->m_moduleRefreshButton != nullptr)
+                {
+                    selfGuard->m_moduleRefreshButton->setEnabled(true);
+                }
+
+                if (selfGuard->m_moduleStatusLabel != nullptr)
+                {
+                    QString statusText = QString("● %1 ms | 模块:%2 线程:%3 显示:%4")
+                        .arg(elapsedMs)
+                        .arg(moduleCount)
+                        .arg(threadCount)
+                        .arg(selfGuard->m_moduleTable->topLevelItemCount());
+                    if (!diagnosticText.isEmpty())
+                    {
+                        statusText += QString(" | %1").arg(diagnosticText);
+                    }
+                    selfGuard->m_moduleStatusLabel->setText(statusText);
+                    selfGuard->m_moduleStatusLabel->setStyleSheet(moduleCount == 0
+                        ? "color:#DC322F; font-weight:700;"
+                        : "color:#2F7D32; font-weight:600;");
+                }
+
+                // 刷新完成日志：包含耗时、总数、过滤后数量和诊断文本。
+                kLogEvent refreshModuleFinishEvent;
+                info << refreshModuleFinishEvent
+                    << "[MemoryDock] refreshModuleListForPid: 刷新完成, pid="
+                    << pid
+                    << ", elapsedMs="
+                    << elapsedMs
+                    << ", moduleCount="
+                    << moduleCount
+                    << ", threadCount="
+                    << threadCount
+                    << ", visibleCount="
+                    << selfGuard->m_moduleTable->topLevelItemCount()
+                    << ", includeSignatureCheck="
+                    << (includeSignatureCheck ? "true" : "false")
+                    << ", diagnostic="
+                    << diagnosticText.toStdString()
+                    << eol;
+            }, Qt::QueuedConnection);
+        }).detach();
+
+    return true;
 }
 
 bool MemoryDock::attachToProcess(
@@ -424,6 +536,14 @@ void MemoryDock::detachProcess()
     // 先请求扫描取消，防止后台继续使用旧句柄。
     cancelCurrentScan();
 
+    // 同步抬高模块刷新 ticket，确保旧的异步模块回调不会覆盖“已分离”状态。
+    m_moduleRefreshTicket.fetch_add(1);
+    m_moduleRefreshInProgress.store(false);
+    if (m_moduleRefreshButton != nullptr)
+    {
+        m_moduleRefreshButton->setEnabled(true);
+    }
+
     if (m_attachedProcessHandle != nullptr)
     {
         ::CloseHandle(m_attachedProcessHandle);
@@ -438,9 +558,15 @@ void MemoryDock::detachProcess()
     m_moduleCache.clear();
     m_regionCache.clear();
     m_searchResultCache.clear();
+    m_searchResultVisibleCount = 0;
 
     // 清理表格展示，避免用户误操作旧数据。
     m_moduleTable->clear();
+    if (m_moduleStatusLabel != nullptr)
+    {
+        m_moduleStatusLabel->setText("● 未附加进程");
+        m_moduleStatusLabel->setStyleSheet("color:#5F5F5F; font-weight:600;");
+    }
     m_regionTable->setRowCount(0);
     m_searchResultTable->setRowCount(0);
     m_hexTable->clearContents();
@@ -481,6 +607,334 @@ HANDLE MemoryDock::openProcessHandleForRead(const std::uint32_t pid, QString* co
             << eol;
     }
     return processHandle;
+}
+
+void MemoryDock::showProcessTableContextMenu(const QPoint& localPosition)
+{
+    // 右键入口日志：记录触发位置，便于诊断菜单行为。
+    kLogEvent contextMenuEvent;
+    dbg << contextMenuEvent
+        << "[MemoryDock] showProcessTableContextMenu: x="
+        << localPosition.x()
+        << ", y="
+        << localPosition.y()
+        << eol;
+
+    if (m_processTable == nullptr)
+    {
+        return;
+    }
+
+    const QModelIndex index = m_processTable->indexAt(localPosition);
+    if (!index.isValid())
+    {
+        return;
+    }
+
+    const int row = index.row();
+    const QTableWidgetItem* pidItem = m_processTable->item(row, 1);
+    const QTableWidgetItem* nameItem = m_processTable->item(row, 0);
+    if (pidItem == nullptr || nameItem == nullptr)
+    {
+        return;
+    }
+
+    bool pidOk = false;
+    const std::uint32_t pid = pidItem->text().toUInt(&pidOk);
+    if (!pidOk || pid == 0)
+    {
+        return;
+    }
+    const QString processName = nameItem->text().trimmed();
+
+    QMenu contextMenu(this);
+    QAction* attachAction = contextMenu.addAction(
+        QIcon(":/Icon/process_start.svg"),
+        QStringLiteral("附加进程"));
+    QAction* dumpAction = contextMenu.addAction(
+        QIcon(":/Icon/process_details.svg"),
+        QStringLiteral("Dump内存到文件"));
+
+    QAction* selectedAction = contextMenu.exec(m_processTable->viewport()->mapToGlobal(localPosition));
+    if (selectedAction == nullptr)
+    {
+        return;
+    }
+
+    if (selectedAction == attachAction)
+    {
+        attachToProcess(pid, processName, true);
+        return;
+    }
+
+    if (selectedAction == dumpAction)
+    {
+        requestDumpProcessMemoryByPid(pid, processName);
+    }
+}
+
+void MemoryDock::requestDumpProcessMemoryByPid(const std::uint32_t pid, const QString& processName)
+{
+    // Dump 请求日志：记录 PID 与进程名，便于后续审计。
+    kLogEvent dumpRequestEvent;
+    info << dumpRequestEvent
+        << "[MemoryDock] requestDumpProcessMemoryByPid: pid="
+        << pid
+        << ", processName="
+        << processName.toStdString()
+        << eol;
+
+    const QString defaultFileName = QStringLiteral("%1_pid%2_%3.kmdump")
+        .arg(processName.isEmpty() ? QStringLiteral("process") : processName)
+        .arg(pid)
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
+
+    const QString outputPath = QFileDialog::getSaveFileName(
+        this,
+        QStringLiteral("保存进程内存Dump"),
+        defaultFileName,
+        QStringLiteral("Ksword Memory Dump (*.kmdump);;All Files (*.*)"));
+    if (outputPath.trimmed().isEmpty())
+    {
+        return;
+    }
+
+    if (m_dumpMemoryProgressPid == 0)
+    {
+        m_dumpMemoryProgressPid = kPro.add("内存", "Dump进程内存");
+    }
+    kPro.set(m_dumpMemoryProgressPid, "准备读取内存区域", 0, 5.0f);
+
+    QPointer<MemoryDock> guardThis(this);
+    std::thread([guardThis, pid, processName, outputPath]() {
+        if (guardThis == nullptr)
+        {
+            return;
+        }
+
+        QString errorText;
+        const bool dumpOk = guardThis->dumpProcessMemoryToFile(pid, outputPath, errorText);
+        QMetaObject::invokeMethod(qApp, [guardThis, dumpOk, pid, processName, outputPath, errorText]() {
+            if (guardThis == nullptr)
+            {
+                return;
+            }
+
+            if (dumpOk)
+            {
+                kPro.set(guardThis->m_dumpMemoryProgressPid, "Dump完成", 0, 100.0f);
+
+                kLogEvent dumpFinishEvent;
+                info << dumpFinishEvent
+                    << "[MemoryDock] Dump完成, pid="
+                    << pid
+                    << ", path="
+                    << outputPath.toStdString()
+                    << eol;
+
+                QMessageBox::information(
+                    guardThis,
+                    QStringLiteral("Dump完成"),
+                    QStringLiteral("进程 %1 (PID=%2) 内存已保存到：\n%3")
+                    .arg(processName)
+                    .arg(pid)
+                    .arg(outputPath));
+            }
+            else
+            {
+                kPro.set(guardThis->m_dumpMemoryProgressPid, "Dump失败", 0, 100.0f);
+
+                kLogEvent dumpFailEvent;
+                err << dumpFailEvent
+                    << "[MemoryDock] Dump失败, pid="
+                    << pid
+                    << ", error="
+                    << errorText.toStdString()
+                    << eol;
+
+                QMessageBox::warning(
+                    guardThis,
+                    QStringLiteral("Dump失败"),
+                    QStringLiteral("进程 %1 (PID=%2) Dump失败：\n%3")
+                    .arg(processName)
+                    .arg(pid)
+                    .arg(errorText));
+            }
+        }, Qt::QueuedConnection);
+    }).detach();
+}
+
+bool MemoryDock::dumpProcessMemoryToFile(
+    const std::uint32_t pid,
+    const QString& dumpFilePath,
+    QString& errorTextOut)
+{
+    errorTextOut.clear();
+
+    HANDLE processHandle = ::OpenProcess(
+        PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+        FALSE,
+        toDwordPid(pid));
+    if (processHandle == nullptr)
+    {
+        errorTextOut = QString("OpenProcess 失败, error=%1").arg(::GetLastError());
+        return false;
+    }
+
+    QFile outputFile(dumpFilePath);
+    if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    {
+        ::CloseHandle(processHandle);
+        errorTextOut = QString("无法写入文件: %1").arg(dumpFilePath);
+        return false;
+    }
+
+    // Dump 文件头结构：
+    // - magic：文件签名；
+    // - version：版本号（方便后续升级格式）；
+    // - pid：目标进程 PID；
+    // - timestamp100ns：创建时间戳；
+    // - regionCount：成功写入的区域数量。
+    struct DumpFileHeader final
+    {
+        char magic[8];
+        std::uint32_t version = 1;
+        std::uint32_t pid = 0;
+        std::uint64_t timestamp100ns = 0;
+        std::uint32_t regionCount = 0;
+        std::uint32_t reserved = 0;
+    };
+
+    struct DumpRegionHeader final
+    {
+        std::uint64_t baseAddress = 0;
+        std::uint64_t declaredRegionSize = 0;
+        std::uint64_t dumpedBytes = 0;
+        std::uint32_t protect = 0;
+        std::uint32_t state = 0;
+        std::uint32_t type = 0;
+        std::uint32_t reserved = 0;
+    };
+
+    FILETIME fileTime{};
+    ::GetSystemTimeAsFileTime(&fileTime);
+    ULARGE_INTEGER fileTimeValue{};
+    fileTimeValue.LowPart = fileTime.dwLowDateTime;
+    fileTimeValue.HighPart = fileTime.dwHighDateTime;
+
+    DumpFileHeader fileHeader{};
+    std::memcpy(fileHeader.magic, "KMDUMP1", 7);
+    fileHeader.magic[7] = '\0';
+    fileHeader.pid = pid;
+    fileHeader.timestamp100ns = fileTimeValue.QuadPart;
+
+    outputFile.write(reinterpret_cast<const char*>(&fileHeader), static_cast<qint64>(sizeof(fileHeader)));
+
+    SYSTEM_INFO systemInfo{};
+    ::GetSystemInfo(&systemInfo);
+    const std::uint64_t minAddress = reinterpret_cast<std::uintptr_t>(systemInfo.lpMinimumApplicationAddress);
+    const std::uint64_t maxAddress = reinterpret_cast<std::uintptr_t>(systemInfo.lpMaximumApplicationAddress);
+
+    constexpr SIZE_T kChunkSize = 256 * 1024;
+    std::vector<std::uint8_t> chunkBuffer(kChunkSize, 0);
+
+    std::uint64_t currentAddress = minAddress;
+    std::uint32_t dumpedRegionCount = 0;
+    while (currentAddress < maxAddress)
+    {
+        MEMORY_BASIC_INFORMATION mbi{};
+        const SIZE_T querySize = ::VirtualQueryEx(
+            processHandle,
+            reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(currentAddress)),
+            &mbi,
+            sizeof(mbi));
+        if (querySize != sizeof(mbi))
+        {
+            break;
+        }
+
+        const std::uint64_t regionBase = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+        const std::uint64_t regionSize = static_cast<std::uint64_t>(mbi.RegionSize);
+
+        if (mbi.State == MEM_COMMIT && isReadableProtect(static_cast<std::uint32_t>(mbi.Protect)))
+        {
+            DumpRegionHeader regionHeader{};
+            regionHeader.baseAddress = regionBase;
+            regionHeader.declaredRegionSize = regionSize;
+            regionHeader.protect = static_cast<std::uint32_t>(mbi.Protect);
+            regionHeader.state = static_cast<std::uint32_t>(mbi.State);
+            regionHeader.type = static_cast<std::uint32_t>(mbi.Type);
+
+            const qint64 headerPosition = outputFile.pos();
+            outputFile.write(reinterpret_cast<const char*>(&regionHeader), static_cast<qint64>(sizeof(regionHeader)));
+
+            std::uint64_t offsetInRegion = 0;
+            std::uint64_t dumpedBytes = 0;
+            while (offsetInRegion < regionSize)
+            {
+                const SIZE_T remainSize = static_cast<SIZE_T>(std::min<std::uint64_t>(regionSize - offsetInRegion, kChunkSize));
+                SIZE_T bytesRead = 0;
+                const BOOL readOk = ::ReadProcessMemory(
+                    processHandle,
+                    reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(regionBase + offsetInRegion)),
+                    chunkBuffer.data(),
+                    remainSize,
+                    &bytesRead);
+
+                if (readOk == FALSE || bytesRead == 0)
+                {
+                    break;
+                }
+
+                outputFile.write(reinterpret_cast<const char*>(chunkBuffer.data()), static_cast<qint64>(bytesRead));
+                dumpedBytes += static_cast<std::uint64_t>(bytesRead);
+                offsetInRegion += static_cast<std::uint64_t>(bytesRead);
+            }
+
+            regionHeader.dumpedBytes = dumpedBytes;
+            const qint64 endPosition = outputFile.pos();
+            outputFile.seek(headerPosition);
+            outputFile.write(reinterpret_cast<const char*>(&regionHeader), static_cast<qint64>(sizeof(regionHeader)));
+            outputFile.seek(endPosition);
+
+            if (dumpedBytes > 0)
+            {
+                ++dumpedRegionCount;
+            }
+        }
+
+        const std::uint64_t totalRange = maxAddress - minAddress;
+        if (totalRange > 0)
+        {
+            const float progressValue = static_cast<float>(
+                std::min<std::uint64_t>(
+                    95,
+                    ((regionBase - minAddress) * 95ULL) / totalRange));
+            kPro.set(m_dumpMemoryProgressPid, "读取并写入内存区域中", 0, progressValue);
+        }
+
+        const std::uint64_t nextAddress = regionBase + regionSize;
+        if (nextAddress <= currentAddress)
+        {
+            break;
+        }
+        currentAddress = nextAddress;
+    }
+
+    // 回写区域数量到文件头。
+    fileHeader.regionCount = dumpedRegionCount;
+    outputFile.seek(0);
+    outputFile.write(reinterpret_cast<const char*>(&fileHeader), static_cast<qint64>(sizeof(fileHeader)));
+    outputFile.close();
+
+    ::CloseHandle(processHandle);
+
+    if (dumpedRegionCount == 0)
+    {
+        errorTextOut = "未读取到可导出的有效区域。";
+        return false;
+    }
+    return true;
 }
 
 void MemoryDock::refreshMemoryRegionList(const bool forceRequery)

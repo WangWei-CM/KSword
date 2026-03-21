@@ -25,7 +25,8 @@ void NetworkDock::flushPendingPacketsToUi()
         }
 
         // 单次最多处理固定数量，避免 UI 一帧执行过久。
-        constexpr std::size_t kMaxConsumePerTick = 240;
+        // 这里把批量上限下调，优先保障主线程交互流畅性（按钮、拖拽、切页不卡顿）。
+        constexpr std::size_t kMaxConsumePerTick = 96;
         const std::size_t consumeCount = std::min<std::size_t>(kMaxConsumePerTick, m_pendingPacketQueue.size());
         packetBatch.reserve(consumeCount);
         for (std::size_t index = 0; index < consumeCount; ++index)
@@ -117,7 +118,11 @@ void NetworkDock::onRateLimitActionArrived(const ks::network::RateLimitActionEve
         .arg(toQString(actionEvent.detailText));
     appendRateLimitActionLogLine(logLine);
 
-    refreshRateLimitTable();
+    // 仅在限速页可见时立即刷新表格，避免隐藏页事件触发不必要重绘。
+    if (m_sideTabWidget != nullptr && m_sideTabWidget->currentWidget() == m_rateLimitPage)
+    {
+        refreshRateLimitTable();
+    }
 
     // 动作事件使用 warn 级别，方便在日志面板中显眼查看。
     kLogEvent actionEventLog;
@@ -136,8 +141,11 @@ void NetworkDock::appendPacketToMonitorTable(const ks::network::PacketRecord& pa
         return;
     }
 
+    // 追加场景改用“直接扩容 rowCount”而非 insertRow：
+    // - insertRow 会触发后续行移动；
+    // - setRowCount 在尾部追加时更轻量，适合高频写入场景。
     const int newRow = m_packetTable->rowCount();
-    m_packetTable->insertRow(newRow);
+    m_packetTable->setRowCount(newRow + 1);
     const QIcon processIcon = resolveProcessIconByPid(packetRecord.processId, packetRecord.processName);
     populatePacketRow(m_packetTable, newRow, packetRecord, packetRecord.sequenceId, processIcon);
 }
@@ -149,10 +157,9 @@ void NetworkDock::rebuildMonitorTableByFilter()
         return;
     }
 
-    m_packetTable->setUpdatesEnabled(false);
-    m_packetTable->setRowCount(0);
-
-    int writeRow = 0;
+    // 先收集通过过滤的记录列表，再一次性 setRowCount，减少反复 insertRow 开销。
+    std::vector<const ks::network::PacketRecord*> visibleRecordList;
+    visibleRecordList.reserve(m_packetSequenceOrder.size());
     for (const std::uint64_t sequenceId : m_packetSequenceOrder)
     {
         const auto iterator = m_packetBySequence.find(sequenceId);
@@ -165,10 +172,23 @@ void NetworkDock::rebuildMonitorTableByFilter()
         {
             continue;
         }
+        visibleRecordList.push_back(&packetRecord);
+    }
 
-        m_packetTable->insertRow(writeRow);
+    m_packetTable->setUpdatesEnabled(false);
+    m_packetTable->setRowCount(static_cast<int>(visibleRecordList.size()));
+
+    int writeRow = 0;
+    for (const ks::network::PacketRecord* packetRecordPtr : visibleRecordList)
+    {
+        if (packetRecordPtr == nullptr)
+        {
+            continue;
+        }
+
+        const ks::network::PacketRecord& packetRecord = *packetRecordPtr;
         const QIcon processIcon = resolveProcessIconByPid(packetRecord.processId, packetRecord.processName);
-        populatePacketRow(m_packetTable, writeRow, packetRecord, sequenceId, processIcon);
+        populatePacketRow(m_packetTable, writeRow, packetRecord, packetRecord.sequenceId, processIcon);
         ++writeRow;
     }
 
@@ -186,22 +206,61 @@ void NetworkDock::trimOldestPacketWhenNeeded()
         return;
     }
 
-    // 删除最老序号对应的缓存。
-    const std::uint64_t oldestSequenceId = m_packetSequenceOrder.front();
-    m_packetSequenceOrder.pop_front();
-    const auto oldestIterator = m_packetBySequence.find(oldestSequenceId);
-    if (oldestIterator == m_packetBySequence.end())
+    // 批量裁剪策略：
+    // - 避免“每来一包就 removeRow(0)”导致持续 O(n) 行移动；
+    // - 改为累计到阈值后一次性移除一批，显著降低 UI 抖动和卡顿。
+    constexpr std::size_t kTrimBatchCount = 320;
+    const std::size_t overflowCount = m_packetSequenceOrder.size() - kMaxPacketCacheCount;
+
+    // 只有当“溢出量达到批处理阈值”时才执行批量裁剪，
+    // 避免刚超 1 条就频繁触发重排。
+    if (overflowCount < kTrimBatchCount &&
+        m_packetSequenceOrder.size() < (kMaxPacketCacheCount + kTrimBatchCount))
     {
         return;
     }
 
-    const bool oldestWasVisible = packetPassesMonitorFilter(oldestIterator->second);
-    m_packetBySequence.erase(oldestIterator);
+    const std::size_t trimCount = std::max<std::size_t>(overflowCount, kTrimBatchCount);
 
-    // 表格保持插入顺序，因此可见最老项对应第一行，直接删除首行即可。
-    if (oldestWasVisible && m_packetTable != nullptr && m_packetTable->rowCount() > 0)
+    std::size_t visibleTrimCount = 0;
+    for (std::size_t trimIndex = 0; trimIndex < trimCount; ++trimIndex)
     {
-        m_packetTable->removeRow(0);
+        if (m_packetSequenceOrder.empty())
+        {
+            break;
+        }
+
+        const std::uint64_t oldestSequenceId = m_packetSequenceOrder.front();
+        m_packetSequenceOrder.pop_front();
+
+        const auto oldestIterator = m_packetBySequence.find(oldestSequenceId);
+        if (oldestIterator == m_packetBySequence.end())
+        {
+            continue;
+        }
+
+        if (packetPassesMonitorFilter(oldestIterator->second))
+        {
+            ++visibleTrimCount;
+        }
+        m_packetBySequence.erase(oldestIterator);
+    }
+
+    // 仅在当前表确有可见裁剪时才删除行，减少不必要的 UI 操作。
+    if (visibleTrimCount > 0 && m_packetTable != nullptr && m_packetTable->rowCount() > 0)
+    {
+        const int removeRows = std::min<int>(static_cast<int>(visibleTrimCount), m_packetTable->rowCount());
+        for (int removeIndex = 0; removeIndex < removeRows; ++removeIndex)
+        {
+            m_packetTable->removeRow(0);
+        }
+
+        kLogEvent trimEvent;
+        dbg << trimEvent
+            << "[NetworkDock] 报文缓存批量裁剪, trimCount=" << trimCount
+            << ", visibleTrimCount=" << visibleTrimCount
+            << ", remainCache=" << m_packetSequenceOrder.size()
+            << eol;
     }
 }
 

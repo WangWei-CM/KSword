@@ -432,8 +432,66 @@ void NetworkDock::initializeConnections()
             }
         });
 
+    // ARP 缓存页控制连接。
+    connect(m_refreshArpButton, &QPushButton::clicked, this, [this]()
+        {
+            refreshArpCacheTable();
+        });
+    connect(m_addArpButton, &QPushButton::clicked, this, [this]()
+        {
+            addArpCacheEntry();
+        });
+    connect(m_removeArpButton, &QPushButton::clicked, this, [this]()
+        {
+            removeSelectedArpCacheEntry();
+        });
+    connect(m_flushArpButton, &QPushButton::clicked, this, [this]()
+        {
+            flushArpCache();
+        });
+
+    // DNS 缓存页控制连接。
+    connect(m_refreshDnsButton, &QPushButton::clicked, this, [this]()
+        {
+            refreshDnsCacheTable();
+        });
+    connect(m_removeDnsButton, &QPushButton::clicked, this, [this]()
+        {
+            removeDnsCacheEntry();
+        });
+    connect(m_flushDnsButton, &QPushButton::clicked, this, [this]()
+        {
+            flushDnsCache();
+        });
+    connect(m_dnsTable, &QTableWidget::cellClicked, this, [this](const int row, const int /*column*/)
+        {
+            if (m_dnsEntryEdit == nullptr || m_dnsTable == nullptr || row < 0 || row >= m_dnsTable->rowCount())
+            {
+                return;
+            }
+            QTableWidgetItem* hostItem = m_dnsTable->item(row, 0);
+            if (hostItem != nullptr)
+            {
+                m_dnsEntryEdit->setText(hostItem->text());
+            }
+        });
+
+    // 存活主机扫描页连接。
+    connect(m_startAliveScanButton, &QPushButton::clicked, this, [this]()
+        {
+            startAliveHostScan();
+        });
+    connect(m_stopAliveScanButton, &QPushButton::clicked, this, [this]()
+        {
+            stopAliveHostScan();
+        });
+
     // 初始化按钮可用状态。
     updateMonitorButtonState();
+
+    // 初始化新增页首屏数据。
+    refreshArpCacheTable();
+    refreshDnsCacheTable();
 }
 
 void NetworkDock::startTrafficMonitor()
@@ -442,6 +500,23 @@ void NetworkDock::startTrafficMonitor()
     {
         return;
     }
+
+    // 正在停止时不允许立刻重启，避免服务线程状态在“停/启”间抖动。
+    if (m_monitorStopInProgress.load())
+    {
+        if (m_monitorStatusLabel != nullptr)
+        {
+            m_monitorStatusLabel->setText(QStringLiteral("状态：停止中，请稍候..."));
+        }
+        return;
+    }
+
+    // 若上次停止线程对象仍残留（通常已结束），这里做一次回收，避免线程句柄泄漏。
+    if (m_monitorStopThread != nullptr && m_monitorStopThread->joinable())
+    {
+        m_monitorStopThread->join();
+    }
+    m_monitorStopThread.reset();
 
     // 每次启动前清零“后台队列丢包计数”，便于观察本次运行状态。
     {
@@ -473,24 +548,75 @@ void NetworkDock::stopTrafficMonitor()
         return;
     }
 
-    m_trafficService->StopCapture();
+    // 线程正在停机时直接返回，避免重复点击导致多个 stop 线程并发。
+    if (m_monitorStopInProgress.exchange(true))
+    {
+        return;
+    }
+
+    // UI 立即切换到“停止中”，给用户及时反馈，避免误判“按钮没反应”。
     m_monitorRunning = false;
-    m_monitorStatusLabel->setText(QStringLiteral("状态：已停止"));
+    if (m_monitorStatusLabel != nullptr)
+    {
+        m_monitorStatusLabel->setText(QStringLiteral("状态：停止中..."));
+    }
     updateMonitorButtonState();
 
+    // 先回收上一次 stop 线程对象，确保本轮只保留一个 stop worker。
+    if (m_monitorStopThread != nullptr && m_monitorStopThread->joinable())
+    {
+        m_monitorStopThread->join();
+    }
+    m_monitorStopThread.reset();
+
+    // 把 StopCapture 放到后台线程，避免主线程 join 导致界面卡顿。
+    QPointer<NetworkDock> guardThis(this);
+    ks::network::TrafficMonitorService* trafficServicePtr = m_trafficService.get();
+    m_monitorStopThread = std::make_unique<std::thread>([guardThis, trafficServicePtr]() {
+        if (trafficServicePtr != nullptr)
+        {
+            trafficServicePtr->StopCapture();
+        }
+
+        QMetaObject::invokeMethod(qApp, [guardThis]() {
+            if (guardThis == nullptr)
+            {
+                return;
+            }
+
+            // stop 线程退出后再 join，保证不会在 UI 线程长时间阻塞。
+            if (guardThis->m_monitorStopThread != nullptr && guardThis->m_monitorStopThread->joinable())
+            {
+                guardThis->m_monitorStopThread->join();
+            }
+            guardThis->m_monitorStopThread.reset();
+            guardThis->m_monitorStopInProgress.store(false);
+            guardThis->m_monitorRunning = false;
+            if (guardThis->m_monitorStatusLabel != nullptr)
+            {
+                guardThis->m_monitorStatusLabel->setText(QStringLiteral("状态：已停止"));
+            }
+            guardThis->updateMonitorButtonState();
+
+            kLogEvent stopFinishedEvent;
+            info << stopFinishedEvent << "[NetworkDock] 后台停止流程完成，抓包线程已退出。" << eol;
+        }, Qt::QueuedConnection);
+    });
+
     kLogEvent stopEvent;
-    info << stopEvent << "[NetworkDock] 用户触发网络监控停止。" << eol;
+    info << stopEvent << "[NetworkDock] 用户触发网络监控停止（异步）。" << eol;
 }
 
 void NetworkDock::updateMonitorButtonState()
 {
+    const bool stopping = m_monitorStopInProgress.load();
     if (m_startMonitorButton != nullptr)
     {
-        m_startMonitorButton->setEnabled(!m_monitorRunning);
+        m_startMonitorButton->setEnabled(!m_monitorRunning && !stopping);
     }
     if (m_stopMonitorButton != nullptr)
     {
-        m_stopMonitorButton->setEnabled(m_monitorRunning);
+        m_stopMonitorButton->setEnabled(m_monitorRunning && !stopping);
     }
 }
 

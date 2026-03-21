@@ -26,8 +26,10 @@ class QFormLayout;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
+class QPlainTextEdit;
 class QPushButton;
 class QTabWidget;
+class QTableWidget;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
@@ -67,18 +69,58 @@ private:
         bool includeSignatureCheck = false;                // 本轮是否执行签名校验。
     };
 
+    // ThreadInspectItem：线程细节页单行数据。
+    struct ThreadInspectItem
+    {
+        std::uint32_t threadId = 0;        // 线程 ID。
+        QString stateText;                 // 状态文本（运行/结束/未知）。
+        int priorityValue = 0;             // 线程优先级值。
+        quint64 switchCount = 0;           // 上下文切换计数（当前实现可能为 0）。
+        QString startAddressText;          // 线程起始地址（十六进制）。
+        QString tebAddressText;            // 线程 TEB 地址（十六进制）。
+        QString affinityText;              // 线程亲和性文本。
+        QString registerSummaryText;       // 寄存器摘要文本。
+    };
+
+    // ThreadInspectRefreshResult：线程细节异步刷新结果。
+    struct ThreadInspectRefreshResult
+    {
+        std::vector<ThreadInspectItem> rows; // 线程行数据。
+        QString diagnosticText;              // 诊断文本。
+        std::uint64_t elapsedMs = 0;         // 刷新耗时（毫秒）。
+    };
+
+    // TextRefreshResult：令牌页/PEB 页文本刷新结果。
+    struct TextRefreshResult
+    {
+        QString detailText;               // 展示文本内容。
+        QString diagnosticText;           // 诊断文本。
+        std::uint64_t elapsedMs = 0;      // 刷新耗时（毫秒）。
+    };
+
 private:
     // ======== UI 初始化 ========
     void initializeUi();
     void initializeDetailTab();
     void initializeActionTab();
     void initializeModuleTab();
+    void initializeTokenTab();
+    void initializePebTab();
     void initializeConnections();
 
     // ======== 详情页刷新 ========
     void refreshDetailTabTexts();
     void refreshParentProcessSection();
     void updateWindowTitle();
+    void requestAsyncThreadInspectRefresh();
+    void applyThreadInspectResult(const ThreadInspectRefreshResult& refreshResult);
+    void updateThreadInspectStatusLabel(const QString& statusText, bool refreshing);
+
+    // ======== 令牌页/PEB页刷新 ========
+    void requestAsyncTokenRefresh();
+    void requestAsyncPebRefresh();
+    void applyTokenRefreshResult(const TextRefreshResult& refreshResult);
+    void applyPebRefreshResult(const TextRefreshResult& refreshResult);
 
     // ======== 模块页刷新 ========
     void requestAsyncModuleRefresh(bool forceRefresh);
@@ -127,6 +169,8 @@ private:
     QWidget* m_detailTab = nullptr;            // “详细信息”页。
     QWidget* m_actionTab = nullptr;            // “操作”页。
     QWidget* m_moduleTab = nullptr;            // “模块”页。
+    QWidget* m_tokenTab = nullptr;             // “令牌”页。
+    QWidget* m_pebTab = nullptr;               // “PEB”页。
 
     // ======== 详细信息页控件 ========
     QVBoxLayout* m_detailLayout = nullptr;     // 详细页总布局。
@@ -153,6 +197,9 @@ private:
     QLabel* m_detailRamValue = nullptr;        // RAM 当前占用值。
     QLabel* m_detailDiskValue = nullptr;       // DISK 当前占用值。
     QLabel* m_detailSignatureValue = nullptr;  // 数字签名状态值。
+    QPushButton* m_refreshThreadInspectButton = nullptr; // 刷新线程细节按钮。
+    QLabel* m_threadInspectStatusLabel = nullptr; // 线程细节刷新状态。
+    QTableWidget* m_threadInspectTable = nullptr; // 线程细节表格。
 
     // ======== 操作页控件 ========
     QVBoxLayout* m_actionLayout = nullptr;     // 操作页总布局。
@@ -192,7 +239,29 @@ private:
     std::uint64_t m_moduleRefreshTicket = 0;   // 模块刷新序号（防乱序）。
     int m_moduleRefreshProgressPid = 0;        // 首轮模块刷新对应的 kPro 任务 PID。
 
+    // ======== 线程细节刷新状态 ========
+    bool m_threadInspectRefreshing = false;        // 线程细节是否正在刷新。
+    std::uint64_t m_threadInspectRefreshTicket = 0;// 线程细节刷新序号。
+    int m_threadInspectRefreshProgressPid = 0;     // 线程细节刷新对应进度 PID。
+
+    // ======== 令牌页控件与状态 ========
+    QVBoxLayout* m_tokenLayout = nullptr;          // 令牌页布局。
+    QPushButton* m_refreshTokenButton = nullptr;   // 刷新令牌信息按钮。
+    QLabel* m_tokenStatusLabel = nullptr;          // 令牌页状态文本。
+    QPlainTextEdit* m_tokenDetailOutput = nullptr; // 令牌信息输出框。
+    bool m_tokenRefreshing = false;                // 令牌页刷新状态。
+    std::uint64_t m_tokenRefreshTicket = 0;        // 令牌页刷新序号。
+    int m_tokenRefreshProgressPid = 0;             // 令牌页刷新进度 PID。
+
+    // ======== PEB页控件与状态 ========
+    QVBoxLayout* m_pebLayout = nullptr;            // PEB 页布局。
+    QPushButton* m_refreshPebButton = nullptr;     // 刷新 PEB 信息按钮。
+    QLabel* m_pebStatusLabel = nullptr;            // PEB 页状态文本。
+    QPlainTextEdit* m_pebDetailOutput = nullptr;   // PEB 信息输出框。
+    bool m_pebRefreshing = false;                  // PEB 页刷新状态。
+    std::uint64_t m_pebRefreshTicket = 0;          // PEB 页刷新序号。
+    int m_pebRefreshProgressPid = 0;               // PEB 页刷新进度 PID。
+
     // 图标缓存：路径 -> 图标，避免重复读取系统图标。
     QHash<QString, QIcon> m_iconCacheByPath;
 };
-

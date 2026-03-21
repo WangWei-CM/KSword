@@ -13,6 +13,9 @@ void NetworkDock::initializeUi()
     initializeRateLimitTab();
     initializeConnectionManageTab();
     initializeManualRequestTab();
+    initializeArpCacheTab();
+    initializeDnsCacheTab();
+    initializeAliveHostScanTab();
 }
 
 void NetworkDock::initializeTrafficMonitorTab()
@@ -39,7 +42,8 @@ void NetworkDock::initializeTrafficMonitorTab()
     m_clearPacketButton->setToolTip(QStringLiteral("清空当前流量列表"));
 
     m_monitorStatusLabel = new QLabel(QStringLiteral("状态：未启动"), m_trafficMonitorPage);
-    m_monitorStatusLabel->setMinimumWidth(220);
+    // 状态标签不再设置较大最小宽度，避免窗口变窄时挤出横向滚动条。
+    m_monitorStatusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
     m_monitorControlLayout->addWidget(m_startMonitorButton);
     m_monitorControlLayout->addWidget(m_stopMonitorButton);
@@ -57,18 +61,23 @@ void NetworkDock::initializeTrafficMonitorTab()
     QLabel* pidFilterLabel = new QLabel(QStringLiteral("PID:"), m_trafficMonitorPage);
     m_pidFilterEdit = new QLineEdit(m_trafficMonitorPage);
     m_pidFilterEdit->setMaximumWidth(110);
+    m_pidFilterEdit->setMinimumWidth(66);
     m_pidFilterEdit->setPlaceholderText(QStringLiteral("可留空"));
     m_pidFilterEdit->setToolTip(QStringLiteral("按 PID 精确筛选，右键“跟踪此进程”会自动填写此项。"));
 
     QLabel* localIpFilterLabel = new QLabel(QStringLiteral("本地IP段:"), m_trafficMonitorPage);
     m_localIpFilterEdit = new QLineEdit(m_trafficMonitorPage);
     m_localIpFilterEdit->setMaximumWidth(240);
+    m_localIpFilterEdit->setMinimumWidth(120);
+    m_localIpFilterEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_localIpFilterEdit->setPlaceholderText(QStringLiteral("示例：192.168.1.0/24 或 192.168.1.10-192.168.1.50"));
     m_localIpFilterEdit->setToolTip(QStringLiteral("支持 CIDR、IP范围、单IP 三种格式。"));
 
     QLabel* remoteIpFilterLabel = new QLabel(QStringLiteral("远端IP段:"), m_trafficMonitorPage);
     m_remoteIpFilterEdit = new QLineEdit(m_trafficMonitorPage);
     m_remoteIpFilterEdit->setMaximumWidth(240);
+    m_remoteIpFilterEdit->setMinimumWidth(120);
+    m_remoteIpFilterEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_remoteIpFilterEdit->setPlaceholderText(QStringLiteral("示例：8.8.8.8 或 10.0.0.0/8"));
     m_remoteIpFilterEdit->setToolTip(QStringLiteral("支持 CIDR、IP范围、单IP 三种格式。"));
 
@@ -98,12 +107,14 @@ void NetworkDock::initializeTrafficMonitorTab()
     QLabel* localPortFilterLabel = new QLabel(QStringLiteral("本地端口:"), m_trafficMonitorPage);
     m_localPortFilterEdit = new QLineEdit(m_trafficMonitorPage);
     m_localPortFilterEdit->setMaximumWidth(140);
+    m_localPortFilterEdit->setMinimumWidth(90);
     m_localPortFilterEdit->setPlaceholderText(QStringLiteral("如 80 或 1000-2000"));
     m_localPortFilterEdit->setToolTip(QStringLiteral("支持单端口或端口范围。"));
 
     QLabel* remotePortFilterLabel = new QLabel(QStringLiteral("远端端口:"), m_trafficMonitorPage);
     m_remotePortFilterEdit = new QLineEdit(m_trafficMonitorPage);
     m_remotePortFilterEdit->setMaximumWidth(140);
+    m_remotePortFilterEdit->setMinimumWidth(90);
     m_remotePortFilterEdit->setPlaceholderText(QStringLiteral("如 443 或 5000-6000"));
     m_remotePortFilterEdit->setToolTip(QStringLiteral("支持单端口或端口范围。"));
 
@@ -125,7 +136,9 @@ void NetworkDock::initializeTrafficMonitorTab()
 
     QLabel* filterStateTitle = new QLabel(QStringLiteral("过滤状态:"), m_trafficMonitorPage);
     m_monitorFilterStateLabel = new QLabel(QStringLiteral("当前过滤：无"), m_trafficMonitorPage);
-    m_monitorFilterStateLabel->setMinimumWidth(320);
+    // 过滤状态标签支持换行并占据剩余空间，避免窄窗口下强制撑宽父布局。
+    m_monitorFilterStateLabel->setWordWrap(true);
+    m_monitorFilterStateLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     m_monitorFilterStateLabel->setToolTip(QStringLiteral("显示当前已应用的组合筛选条件。"));
 
     m_monitorFilterLayoutLine2->addWidget(localPortFilterLabel);
@@ -160,8 +173,12 @@ void NetworkDock::initializeTrafficMonitorTab()
     m_packetTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_packetTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_packetTable->verticalHeader()->setVisible(false);
+    // 性能与自适应说明：
+    // 1) 改为 Stretch，避免 ResizeToContents 在高频插入时反复全表测量导致卡顿；
+    // 2) 同时关闭横向滚动条，保证窄窗口下也保持“自适应压缩显示”。
     m_packetTable->horizontalHeader()->setStretchLastSection(true);
-    m_packetTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_packetTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    m_packetTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     m_trafficMonitorLayout->addWidget(m_packetTable, 1);
     m_sideTabWidget->addTab(m_trafficMonitorPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("流量监控"));
@@ -182,6 +199,7 @@ void NetworkDock::initializeRateLimitTab()
     m_rateLimitPidEdit = new QLineEdit(m_rateLimitPage);
     m_rateLimitPidEdit->setPlaceholderText(QStringLiteral("进程 PID"));
     m_rateLimitPidEdit->setMaximumWidth(110);
+    m_rateLimitPidEdit->setMinimumWidth(66);
 
     QLabel* kbpsLabel = new QLabel(QStringLiteral("限速KB/s:"), m_rateLimitPage);
     m_rateLimitKBpsSpin = new QSpinBox(m_rateLimitPage);
@@ -236,14 +254,19 @@ void NetworkDock::initializeRateLimitTab()
     m_rateLimitTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_rateLimitTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_rateLimitTable->verticalHeader()->setVisible(false);
+    // 限速表也使用 Stretch，降低定时刷新时的 UI 重排开销。
     m_rateLimitTable->horizontalHeader()->setStretchLastSection(true);
-    m_rateLimitTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_rateLimitTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    m_rateLimitTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_rateLimitLayout->addWidget(m_rateLimitTable, 1);
 
     // 限速动作日志：便于查看挂起/恢复执行结果。
     m_rateLimitLogOutput = new QPlainTextEdit(m_rateLimitPage);
     m_rateLimitLogOutput->setReadOnly(true);
     m_rateLimitLogOutput->setMaximumBlockCount(400);
+    // 日志框使用按控件宽度自动换行，避免窄窗口出现横向滚动条。
+    m_rateLimitLogOutput->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    m_rateLimitLogOutput->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_rateLimitLogOutput->setPlaceholderText(QStringLiteral("限速动作日志将显示在这里..."));
     m_rateLimitLayout->addWidget(m_rateLimitLogOutput, 1);
 
@@ -280,7 +303,8 @@ void NetworkDock::initializeConnectionManageTab()
     m_terminateTcpButton->setToolTip(QStringLiteral("终止当前选中的 TCP 连接（DELETE_TCB）"));
 
     m_connectionStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_connectionManagePage);
-    m_connectionStatusLabel->setMinimumWidth(260);
+    m_connectionStatusLabel->setWordWrap(true);
+    m_connectionStatusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
     m_connectionControlLayout->addWidget(m_refreshConnectionButton);
     m_connectionControlLayout->addWidget(m_autoRefreshConnectionButton);
@@ -309,7 +333,8 @@ void NetworkDock::initializeConnectionManageTab()
     m_tcpConnectionTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_tcpConnectionTable->verticalHeader()->setVisible(false);
     m_tcpConnectionTable->horizontalHeader()->setStretchLastSection(true);
-    m_tcpConnectionTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_tcpConnectionTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    m_tcpConnectionTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_connectionSubTabWidget->addTab(m_tcpConnectionTable, QIcon(":/Icon/process_main.svg"), QStringLiteral("TCP"));
 
     // UDP 表：PID、进程、本地端点。
@@ -326,7 +351,8 @@ void NetworkDock::initializeConnectionManageTab()
     m_udpEndpointTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_udpEndpointTable->verticalHeader()->setVisible(false);
     m_udpEndpointTable->horizontalHeader()->setStretchLastSection(true);
-    m_udpEndpointTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_udpEndpointTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    m_udpEndpointTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_connectionSubTabWidget->addTab(m_udpEndpointTable, QIcon(":/Icon/process_main.svg"), QStringLiteral("UDP"));
 
     m_sideTabWidget->addTab(m_connectionManagePage, QIcon(":/Icon/process_details.svg"), QStringLiteral("连接管理"));
@@ -343,23 +369,21 @@ void NetworkDock::initializeManualRequestTab()
     m_manualRequestLayout->setContentsMargins(6, 6, 6, 6);
     m_manualRequestLayout->setSpacing(6);
 
-    // 使用滚动区域承载大量 API 参数，避免窗口高度不足时字段被裁切。
-    QScrollArea* scrollArea = new QScrollArea(m_manualRequestPage);
-    scrollArea->setWidgetResizable(true);
-    scrollArea->setFrameShape(QFrame::NoFrame);
-    m_manualRequestLayout->addWidget(scrollArea, 1);
-
-    QWidget* contentWidget = new QWidget(scrollArea);
-    QVBoxLayout* contentLayout = new QVBoxLayout(contentWidget);
+    // 关键改动（响应“窄窗口不出现滚动条”）：
+    // 1) 移除外层 QScrollArea，避免页面在宽度变化时出现额外滚动条；
+    // 2) 改为直接把各功能分组挂到页面主布局，交给布局系统自适应压缩。
+    QWidget* contentWidget = m_manualRequestPage;
+    QVBoxLayout* contentLayout = m_manualRequestLayout;
     contentLayout->setContentsMargins(2, 2, 2, 2);
     contentLayout->setSpacing(8);
-    scrollArea->setWidget(contentWidget);
 
     // 1) API 与 socket 参数分组：支持模式切换和手动覆盖底层参数。
     QGroupBox* apiGroup = new QGroupBox(QStringLiteral("API 与 Socket 参数"), contentWidget);
     QGridLayout* apiLayout = new QGridLayout(apiGroup);
     apiLayout->setHorizontalSpacing(8);
     apiLayout->setVerticalSpacing(6);
+    apiLayout->setColumnStretch(1, 1);
+    apiLayout->setColumnStretch(3, 1);
 
     m_manualApiCombo = new QComboBox(apiGroup);
     m_manualApiCombo->addItem(QStringLiteral("WinSock TCP 请求"), static_cast<int>(ks::network::ManualNetworkApiKind::WinSockTcp));
@@ -374,6 +398,10 @@ void NetworkDock::initializeManualRequestTab()
     m_manualSocketTypeEdit = new QLineEdit(QStringLiteral("1"), apiGroup);        // SOCK_STREAM
     m_manualProtocolEdit = new QLineEdit(QStringLiteral("6"), apiGroup);          // IPPROTO_TCP
     m_manualSocketFlagsEdit = new QLineEdit(QStringLiteral("0x1"), apiGroup);     // WSA_FLAG_OVERLAPPED
+    m_manualAddressFamilyEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_manualSocketTypeEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_manualProtocolEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_manualSocketFlagsEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
     apiLayout->addWidget(new QLabel(QStringLiteral("请求模式:"), apiGroup), 0, 0);
     apiLayout->addWidget(m_manualApiCombo, 0, 1, 1, 3);
@@ -393,15 +421,19 @@ void NetworkDock::initializeManualRequestTab()
     QGridLayout* endpointLayout = new QGridLayout(endpointGroup);
     endpointLayout->setHorizontalSpacing(8);
     endpointLayout->setVerticalSpacing(6);
+    endpointLayout->setColumnStretch(1, 1);
+    endpointLayout->setColumnStretch(3, 1);
 
     m_manualEnableBindCheck = new QCheckBox(QStringLiteral("启用本地 bind"), endpointGroup);
     m_manualEnableBindCheck->setToolTip(QStringLiteral("勾选后先 bind(localAddress:localPort) 再执行连接/发送。"));
     m_manualLocalAddressEdit = new QLineEdit(QStringLiteral("0.0.0.0"), endpointGroup);
+    m_manualLocalAddressEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_manualLocalPortSpin = new QSpinBox(endpointGroup);
     m_manualLocalPortSpin->setRange(0, 65535);
     m_manualLocalPortSpin->setValue(0);
 
     m_manualRemoteAddressEdit = new QLineEdit(QStringLiteral("127.0.0.1"), endpointGroup);
+    m_manualRemoteAddressEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_manualRemotePortSpin = new QSpinBox(endpointGroup);
     m_manualRemotePortSpin->setRange(0, 65535);
     m_manualRemotePortSpin->setValue(80);
@@ -422,6 +454,8 @@ void NetworkDock::initializeManualRequestTab()
 
     m_manualSendFlagsEdit = new QLineEdit(QStringLiteral("0"), endpointGroup);
     m_manualReceiveFlagsEdit = new QLineEdit(QStringLiteral("0"), endpointGroup);
+    m_manualSendFlagsEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_manualReceiveFlagsEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
     endpointLayout->addWidget(m_manualEnableBindCheck, 0, 0, 1, 2);
     endpointLayout->addWidget(new QLabel(QStringLiteral("本地地址:"), endpointGroup), 1, 0);
@@ -450,6 +484,8 @@ void NetworkDock::initializeManualRequestTab()
     QGridLayout* payloadLayout = new QGridLayout(payloadGroup);
     payloadLayout->setHorizontalSpacing(8);
     payloadLayout->setVerticalSpacing(6);
+    payloadLayout->setColumnStretch(1, 1);
+    payloadLayout->setColumnStretch(4, 1);
 
     m_manualPayloadFormatCombo = new QComboBox(payloadGroup);
     m_manualPayloadFormatCombo->addItem(QStringLiteral("ASCII 文本"), static_cast<int>(ks::network::ManualPayloadFormat::AsciiText));
@@ -459,6 +495,8 @@ void NetworkDock::initializeManualRequestTab()
     m_manualPayloadEditor = new QPlainTextEdit(payloadGroup);
     m_manualPayloadEditor->setPlaceholderText(QStringLiteral("在此输入请求载荷。"));
     m_manualPayloadEditor->setFixedHeight(96);
+    m_manualPayloadEditor->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    m_manualPayloadEditor->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     m_manualReceiveAfterSendCheck = new QCheckBox(QStringLiteral("发送后读取响应"), payloadGroup);
     m_manualReceiveAfterSendCheck->setChecked(true);
@@ -497,6 +535,8 @@ void NetworkDock::initializeManualRequestTab()
     m_manualResultOutput = new QPlainTextEdit(actionGroup);
     m_manualResultOutput->setReadOnly(true);
     m_manualResultOutput->setMaximumBlockCount(800);
+    m_manualResultOutput->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    m_manualResultOutput->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_manualResultOutput->setPlaceholderText(QStringLiteral("执行结果、响应摘要和错误码会显示在这里。"));
 
     actionLayout->addLayout(actionButtonLayout);

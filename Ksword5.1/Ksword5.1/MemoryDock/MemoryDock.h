@@ -25,6 +25,7 @@ class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QMenu;
+class QPoint;
 class QProgressBar;
 class QPushButton;
 class QSplitter;
@@ -270,6 +271,12 @@ private:
     // - 返回：true 表示枚举成功；false 表示失败。
     bool refreshModuleListForPid(std::uint32_t pid);
 
+    // rebuildModuleTableFromCache：
+    // - 作用：按当前过滤条件把 m_moduleCache 重绘到模块表。
+    // - 说明：该函数只做“缓存 -> UI”投影，不做 Win32 枚举。
+    // - 返回：无。
+    void rebuildModuleTableFromCache();
+
     // attachToProcess：
     // - 作用：附加目标进程并缓存句柄。
     // - 参数 pid：目标 PID。
@@ -289,6 +296,30 @@ private:
     // - 参数 errorTextOut：失败时输出错误文本（可空）。
     // - 返回：成功返回有效 HANDLE；失败返回 nullptr。
     HANDLE openProcessHandleForRead(std::uint32_t pid, QString* errorTextOut = nullptr) const;
+
+    // showProcessTableContextMenu：
+    // - 作用：展示进程列表右键菜单（附加 / Dump 内存）。
+    // - 参数 localPosition：鼠标在进程表 viewport 内的坐标。
+    // - 返回：无。
+    void showProcessTableContextMenu(const QPoint& localPosition);
+
+    // requestDumpProcessMemoryByPid：
+    // - 作用：弹出保存文件对话框并异步执行目标进程内存转储。
+    // - 参数 pid：要转储的目标进程 PID。
+    // - 参数 processName：目标进程名（用于默认文件名和提示）。
+    // - 返回：无。
+    void requestDumpProcessMemoryByPid(std::uint32_t pid, const QString& processName);
+
+    // dumpProcessMemoryToFile：
+    // - 作用：执行真正的内存区域遍历与文件写入。
+    // - 参数 pid：目标 PID。
+    // - 参数 dumpFilePath：输出文件路径。
+    // - 参数 errorTextOut：失败时输出错误信息。
+    // - 返回：true=成功；false=失败。
+    bool dumpProcessMemoryToFile(
+        std::uint32_t pid,
+        const QString& dumpFilePath,
+        QString& errorTextOut);
 
 private:
     // ========================================================
@@ -643,9 +674,13 @@ private:
 
     std::vector<ProcessEntry> m_processCache; // 进程缓存（Tab1/工具栏复用）。
     std::vector<ModuleEntry> m_moduleCache;   // 模块缓存（Tab1 使用）。
+    std::atomic<bool> m_moduleRefreshInProgress{ false }; // 模块刷新是否进行中（异步任务状态）。
+    std::atomic<std::uint64_t> m_moduleRefreshTicket{ 0 }; // 模块刷新票据（丢弃过期结果）。
+    int m_dumpMemoryProgressPid = 0;        // Dump 内存任务的进度条 PID。
     std::vector<RegionEntry> m_regionCache;   // 区域缓存（Tab2/Tab3 复用）。
 
     std::vector<SearchResultEntry> m_searchResultCache; // 扫描结果缓存（Tab3）。
+    std::size_t m_searchResultVisibleCount = 0;         // 当前结果表实际显示条数（可能小于缓存总数）。
     SearchValueType m_lastSearchValueType = SearchValueType::Byte; // 最近一次扫描类型。
     std::atomic<bool> m_scanInProgress{ false };       // 当前是否正在扫描。
     std::atomic<bool> m_scanCancelRequested{ false };  // 扫描取消标志。
