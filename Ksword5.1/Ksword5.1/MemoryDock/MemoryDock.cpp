@@ -10,6 +10,9 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QEvent>
+#include <QEventLoop>
+#include <QFile>
+#include <QFileDialog>
 #include <QFileIconProvider>
 #include <QFileInfo>
 #include <QFormLayout>

@@ -1,5 +1,18 @@
 void NetworkDock::executeManualRequest()
 {
+    // 并发门控：
+    // - 同一时刻只允许 1 个手动请求在后台运行；
+    // - 防止重复点击导致多个阻塞请求同时堆积。
+    static std::atomic_bool s_manualRequestInFlight = false;
+    if (s_manualRequestInFlight.exchange(true))
+    {
+        appendManualRequestLogLine(QStringLiteral("已有请求正在执行，请稍候。"));
+
+        kLogEvent duplicateRequestEvent;
+        warn << duplicateRequestEvent << "[NetworkDock] 忽略重复执行请求：上一条请求尚未完成。" << eol;
+        return;
+    }
+
     // 保护性检查：若请求构造页控件尚未初始化，则直接返回。
     if (m_manualApiCombo == nullptr ||
         m_manualOverrideSocketParameterCheck == nullptr ||
@@ -25,6 +38,7 @@ void NetworkDock::executeManualRequest()
         m_manualReceiveMaxBytesSpin == nullptr ||
         m_manualShutdownSendCheck == nullptr)
     {
+        s_manualRequestInFlight.store(false);
         return;
     }
 
@@ -40,6 +54,9 @@ void NetworkDock::executeManualRequest()
                 << "[NetworkDock] 请求构造参数校验失败, detail="
                 << errorText.toStdString()
                 << eol;
+
+            // 参数错误属于快速失败路径，需要释放执行门控。
+            s_manualRequestInFlight.store(false);
         };
 
     // 1) 组装请求对象。
@@ -117,6 +134,7 @@ void NetworkDock::executeManualRequest()
         .arg(toQString(request.remoteAddress))
         .arg(request.remotePort)
         .arg(static_cast<qulonglong>(request.payloadText.size())));
+    appendManualRequestLogLine(QStringLiteral("请求已投递到后台线程，UI 保持可响应。"));
 
     kLogEvent requestStartEvent;
     info << requestStartEvent
@@ -126,39 +144,97 @@ void NetworkDock::executeManualRequest()
         << ", payloadFormat=" << ks::network::ManualPayloadFormatToString(request.payloadFormat)
         << eol;
 
-    // 3) 调用底层工具执行请求。
-    ks::network::ManualNetworkResult requestResult;
-    const bool executeOk = ks::network::ExecuteManualNetworkRequest(request, &requestResult);
-
-    // 4) 输出结果摘要。
-    appendManualRequestLogLine(QStringLiteral("执行结果：ok=%1, sent=%2, recv=%3, detail=%4")
-        .arg((executeOk && requestResult.succeeded) ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(static_cast<qulonglong>(requestResult.bytesSent))
-        .arg(static_cast<qulonglong>(requestResult.bytesReceived))
-        .arg(toQString(requestResult.detailText)));
-
-    if (!requestResult.responseBytes.empty())
+    // UI 反馈：后台执行期间禁用按钮，避免重复触发同一请求。
+    if (m_manualExecuteButton != nullptr)
     {
-        appendManualRequestLogLine(QStringLiteral("响应HEX预览：%1")
-            .arg(formatBytesToHexText(requestResult.responseBytes, 256)));
+        m_manualExecuteButton->setEnabled(false);
+        m_manualExecuteButton->setToolTip(QStringLiteral("请求执行中，请稍候..."));
     }
 
-    if (executeOk && requestResult.succeeded)
+    // 3) 后台线程执行网络请求：
+    // - 彻底避免 send/recv 超时等待阻塞 UI 事件循环；
+    // - 执行完成后再通过 QueuedConnection 把结果回传 UI 线程。
+    QPointer<NetworkDock> dockGuard(this);
+    try
     {
-        kLogEvent requestSuccessEvent;
-        info << requestSuccessEvent
-            << "[NetworkDock] 手动网络请求成功, sent=" << requestResult.bytesSent
-            << ", recv=" << requestResult.bytesReceived
-            << ", detail=" << requestResult.detailText
-            << eol;
+        std::thread([dockGuard, request]()
+            {
+                ks::network::ManualNetworkResult requestResult;
+                const bool executeOk = ks::network::ExecuteManualNetworkRequest(request, &requestResult);
+
+                NetworkDock* dockPointer = dockGuard.data();
+                if (dockPointer == nullptr)
+                {
+                    s_manualRequestInFlight.store(false);
+                    return;
+                }
+
+                QMetaObject::invokeMethod(
+                    dockPointer,
+                    [dockGuard, executeOk, requestResult = std::move(requestResult)]() mutable
+                    {
+                        NetworkDock* uiDock = dockGuard.data();
+                        if (uiDock == nullptr)
+                        {
+                            s_manualRequestInFlight.store(false);
+                            return;
+                        }
+
+                        // 4) 输出结果摘要（此处已回到 UI 线程）。
+                        uiDock->appendManualRequestLogLine(QStringLiteral("执行结果：ok=%1, sent=%2, recv=%3, detail=%4")
+                            .arg((executeOk && requestResult.succeeded) ? QStringLiteral("true") : QStringLiteral("false"))
+                            .arg(static_cast<qulonglong>(requestResult.bytesSent))
+                            .arg(static_cast<qulonglong>(requestResult.bytesReceived))
+                            .arg(toQString(requestResult.detailText)));
+
+                        if (!requestResult.responseBytes.empty())
+                        {
+                            uiDock->appendManualRequestLogLine(QStringLiteral("响应HEX预览：%1")
+                                .arg(formatBytesToHexText(requestResult.responseBytes, 256)));
+                        }
+
+                        if (executeOk && requestResult.succeeded)
+                        {
+                            kLogEvent requestSuccessEvent;
+                            info << requestSuccessEvent
+                                << "[NetworkDock] 手动网络请求成功, sent=" << requestResult.bytesSent
+                                << ", recv=" << requestResult.bytesReceived
+                                << ", detail=" << requestResult.detailText
+                                << eol;
+                        }
+                        else
+                        {
+                            kLogEvent requestFailEvent;
+                            warn << requestFailEvent
+                                << "[NetworkDock] 手动网络请求失败, wsaError=" << requestResult.wsaErrorCode
+                                << ", detail=" << requestResult.detailText
+                                << eol;
+                        }
+
+                        if (uiDock->m_manualExecuteButton != nullptr)
+                        {
+                            uiDock->m_manualExecuteButton->setEnabled(true);
+                            uiDock->m_manualExecuteButton->setToolTip(QStringLiteral("按上方参数立即执行一次网络请求。"));
+                        }
+
+                        s_manualRequestInFlight.store(false);
+                    },
+                    Qt::QueuedConnection);
+            }).detach();
     }
-    else
+    catch (...)
     {
-        kLogEvent requestFailEvent;
-        warn << requestFailEvent
-            << "[NetworkDock] 手动网络请求失败, wsaError=" << requestResult.wsaErrorCode
-            << ", detail=" << requestResult.detailText
-            << eol;
+        // 极端情况下线程创建失败，立即恢复 UI 状态并写日志。
+        if (m_manualExecuteButton != nullptr)
+        {
+            m_manualExecuteButton->setEnabled(true);
+            m_manualExecuteButton->setToolTip(QStringLiteral("按上方参数立即执行一次网络请求。"));
+        }
+        s_manualRequestInFlight.store(false);
+
+        appendManualRequestLogLine(QStringLiteral("后台线程创建失败，请稍后重试。"));
+        kLogEvent threadCreateFailEvent;
+        err << threadCreateFailEvent << "[NetworkDock] 手动请求后台线程创建失败。" << eol;
     }
 }
 

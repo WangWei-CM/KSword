@@ -258,6 +258,10 @@ void MemoryDock::initializeConnections()
         attachToProcess(pid, nameItem->text(), true);
         });
 
+    connect(m_processTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        showProcessTableContextMenu(localPosition);
+        });
+
     connect(m_moduleRefreshButton, &QPushButton::clicked, this, [this]() {
         // 模块刷新按钮：按当前下拉 PID 触发模块重载。
         const int comboIndex = m_processCombo->currentIndex();
@@ -295,22 +299,27 @@ void MemoryDock::initializeConnections()
         });
 
     connect(m_moduleFilterEdit, &QLineEdit::textChanged, this, [this](const QString&) {
-        // 模块过滤变更时按当前下拉 PID 重建模块列表。
-        const int comboIndex = m_processCombo->currentIndex();
-        if (comboIndex < 0)
-        {
-            return;
-        }
-        const std::uint32_t pid = static_cast<std::uint32_t>(
-            m_processCombo->itemData(comboIndex, Qt::UserRole).toUInt());
+        // 过滤输入改为“只重绘缓存”，避免每敲一个字都重新做模块枚举和签名校验。
         kLogEvent moduleFilterEvent;
         dbg << moduleFilterEvent
-            << "[MemoryDock] 模块过滤条件变化, pid="
-            << pid
-            << ", filter="
+            << "[MemoryDock] 模块过滤条件变化, filter="
             << m_moduleFilterEdit->text().trimmed().toStdString()
+            << ", cacheCount="
+            << m_moduleCache.size()
             << eol;
-        refreshModuleListForPid(pid);
+
+        rebuildModuleTableFromCache();
+        if (m_moduleStatusLabel != nullptr)
+        {
+            m_moduleStatusLabel->setText(
+                QString("● 模块:%1 显示:%2 (过滤)")
+                .arg(m_moduleCache.size())
+                .arg(m_moduleTable->topLevelItemCount()));
+            if (!m_moduleRefreshInProgress.load())
+            {
+                m_moduleStatusLabel->setStyleSheet("color:#2F7D32; font-weight:600;");
+            }
+        }
         });
 
     connect(m_moduleTable, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int column) {
@@ -564,7 +573,7 @@ void MemoryDock::initializeConnections()
 
     connect(m_searchResultTable, &QTableWidget::cellDoubleClicked, this, [this](int row, int column) {
         Q_UNUSED(column);
-        if (row < 0 || row >= static_cast<int>(m_searchResultCache.size()))
+        if (row < 0 || row >= static_cast<int>(m_searchResultVisibleCount))
         {
             return;
         }
@@ -584,7 +593,7 @@ void MemoryDock::initializeConnections()
         }
 
         const int row = clickedItem->row();
-        if (row < 0 || row >= static_cast<int>(m_searchResultCache.size()))
+        if (row < 0 || row >= static_cast<int>(m_searchResultVisibleCount))
         {
             return;
         }

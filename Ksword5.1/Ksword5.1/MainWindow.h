@@ -29,7 +29,8 @@
 #include "MonitorDock/MonitorDock.h"
 #include "PrivilegeDock/PrivilegeDock.h"
 #include "SettingsDock/SettingsDock.h"
-#include "OtherDock/OtherDock.h"
+#include "WindowDock/WindowDock.h"
+#include "RegistryDock/RegistryDock.h"
 
 class LogDockWidget; // 前置声明：日志 Dock 面板类型。
 class ProgressDockWidget; // 前置声明：当前操作进度面板类型。
@@ -69,7 +70,8 @@ private:
     ads::CDockWidget* m_dockMonitorTab;
     ads::CDockWidget* m_dockPrivilege;
     ads::CDockWidget* m_dockSettings;
-    ads::CDockWidget* m_dockOther;
+    ads::CDockWidget* m_dockWindow;
+    ads::CDockWidget* m_dockRegistry;
     ads::CDockWidget* m_dockCurrentOp;
     ads::CDockWidget* m_dockLog;
     ads::CDockWidget* m_dockImmediate;
@@ -86,7 +88,8 @@ private:
     MonitorDock* m_monitorWidget;
     PrivilegeDock* m_privilegeWidget;
     SettingsDock* m_settingsWidget;
-    OtherDock* m_otherWidget;
+    WindowDock* m_windowWidget;
+    RegistryDock* m_registryWidget;
     LogDockWidget* m_logWidget; // 日志输出 Dock 的可视化日志面板。
     ProgressDockWidget* m_progressWidget; // 当前操作 Dock 的任务进度卡片面板。
 

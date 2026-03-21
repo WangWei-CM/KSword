@@ -52,6 +52,9 @@
     <ClCompile Include="KernelDock\KernelDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="KernelDock\KernelDockQueryWorker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -135,6 +138,9 @@
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <QtMoc Include="RegistryDock\RegistryDock.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
     <QtMoc Include="ProcessDock\ProcessDetailWindow.h">
       <Filter>Header Files</Filter>
     </QtMoc>
@@ -165,6 +171,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Framework\ProgressDockWidget.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelDockQueryWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Ksword.h">

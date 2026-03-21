@@ -16,6 +16,7 @@
 #include <QIcon>
 #include <QWidget>
 
+#include <atomic>        // std::atomic_bool：存活主机扫描的并发状态控制。
 #include <cstdint>       // std::uint32_t/std::uint64_t：PID、序号与长度字段。
 #include <deque>         // std::deque：报文序号顺序缓存与后台待刷新队列。
 #include <memory>        // std::unique_ptr：后台监控服务对象托管。
@@ -32,6 +33,7 @@ class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
+class QProgressBar;
 class QPushButton;
 class QSpinBox;
 class QTableWidget;
@@ -143,6 +145,21 @@ private:
     // - 作用：构建“请求构造”页（手动 API 参数编辑 + 执行结果输出）。
     // - 返回：无。
     void initializeManualRequestTab();
+
+    // initializeArpCacheTab：
+    // - 作用：构建“ARP缓存”页（展示 + 编辑）。
+    // - 返回：无。
+    void initializeArpCacheTab();
+
+    // initializeDnsCacheTab：
+    // - 作用：构建“DNS缓存”页（展示 + 编辑）。
+    // - 返回：无。
+    void initializeDnsCacheTab();
+
+    // initializeAliveHostScanTab：
+    // - 作用：构建“存活主机发现”页（IP段 ICMP 扫描）。
+    // - 返回：无。
+    void initializeAliveHostScanTab();
 
     // initializeConnections：
     // - 作用：统一连接按钮、输入框、表格的信号槽。
@@ -304,6 +321,61 @@ private:
     // - 返回：无。
     void appendManualRequestLogLine(const QString& logLine);
 
+    // ========================= ARP/DNS/存活主机 ======================
+    // refreshArpCacheTable：
+    // - 作用：刷新 ARP 缓存表格。
+    // - 返回：无。
+    void refreshArpCacheTable();
+
+    // addArpCacheEntry：
+    // - 作用：新增静态 ARP 映射行。
+    // - 返回：无。
+    void addArpCacheEntry();
+
+    // removeSelectedArpCacheEntry：
+    // - 作用：删除 ARP 表当前选中行。
+    // - 返回：无。
+    void removeSelectedArpCacheEntry();
+
+    // flushArpCache：
+    // - 作用：清空系统 ARP 缓存。
+    // - 返回：无。
+    void flushArpCache();
+
+    // refreshDnsCacheTable：
+    // - 作用：刷新 DNS 解析缓存列表。
+    // - 返回：无。
+    void refreshDnsCacheTable();
+
+    // removeDnsCacheEntry：
+    // - 作用：按名称删除 DNS 缓存条目。
+    // - 返回：无。
+    void removeDnsCacheEntry();
+
+    // flushDnsCache：
+    // - 作用：清空 DNS 缓存。
+    // - 返回：无。
+    void flushDnsCache();
+
+    // startAliveHostScan：
+    // - 作用：启动指定 IP 段存活主机扫描。
+    // - 返回：无。
+    void startAliveHostScan();
+
+    // stopAliveHostScan：
+    // - 作用：停止当前存活主机扫描。
+    // - 返回：无。
+    void stopAliveHostScan();
+
+    // appendAliveHostRow：
+    // - 作用：向扫描结果表追加一行。
+    // - 返回：无。
+    void appendAliveHostRow(
+        const QString& ipText,
+        bool alive,
+        std::uint32_t rttMs,
+        const QString& detailText);
+
     // flushPendingPacketsToUi：
     // - 作用：批量消费后台积压报文并刷新 UI。
     // - 说明：通过定时器节流，避免高频逐包更新导致卡顿。
@@ -462,12 +534,49 @@ private:
     QPushButton* m_manualResetButton = nullptr;      // 重置参数按钮。
     QPlainTextEdit* m_manualResultOutput = nullptr;  // 请求执行结果输出框。
 
+    // ========================= Tab5：ARP 缓存 ====================
+    QWidget* m_arpCachePage = nullptr;            // ARP缓存页容器。
+    QVBoxLayout* m_arpCacheLayout = nullptr;      // ARP缓存页布局。
+    QHBoxLayout* m_arpCacheControlLayout = nullptr; // ARP控制栏布局。
+    QPushButton* m_refreshArpButton = nullptr;    // 刷新ARP按钮。
+    QPushButton* m_addArpButton = nullptr;        // 新增ARP按钮。
+    QPushButton* m_removeArpButton = nullptr;     // 删除选中ARP按钮。
+    QPushButton* m_flushArpButton = nullptr;      // 清空ARP按钮。
+    QLabel* m_arpStatusLabel = nullptr;           // ARP状态标签。
+    QTableWidget* m_arpTable = nullptr;           // ARP缓存表格。
+
+    // ========================= Tab6：DNS 缓存 ====================
+    QWidget* m_dnsCachePage = nullptr;            // DNS缓存页容器。
+    QVBoxLayout* m_dnsCacheLayout = nullptr;      // DNS缓存页布局。
+    QHBoxLayout* m_dnsCacheControlLayout = nullptr; // DNS控制栏布局。
+    QPushButton* m_refreshDnsButton = nullptr;    // 刷新DNS按钮。
+    QPushButton* m_removeDnsButton = nullptr;     // 删除DNS按钮。
+    QPushButton* m_flushDnsButton = nullptr;      // 清空DNS按钮。
+    QLineEdit* m_dnsEntryEdit = nullptr;          // DNS删除项输入框。
+    QLabel* m_dnsStatusLabel = nullptr;           // DNS状态标签。
+    QTableWidget* m_dnsTable = nullptr;           // DNS缓存表格。
+
+    // ========================= Tab7：存活主机发现 ====================
+    QWidget* m_aliveScanPage = nullptr;           // 存活主机扫描页容器。
+    QVBoxLayout* m_aliveScanLayout = nullptr;     // 存活主机扫描页布局。
+    QHBoxLayout* m_aliveScanControlLayout = nullptr; // 扫描控制栏布局。
+    QLineEdit* m_aliveScanStartIpEdit = nullptr;  // 扫描起始IP输入框。
+    QLineEdit* m_aliveScanEndIpEdit = nullptr;    // 扫描结束IP输入框。
+    QSpinBox* m_aliveScanTimeoutSpin = nullptr;   // ICMP超时输入框。
+    QPushButton* m_startAliveScanButton = nullptr; // 启动扫描按钮。
+    QPushButton* m_stopAliveScanButton = nullptr;  // 停止扫描按钮。
+    QProgressBar* m_aliveScanProgressBar = nullptr; // 扫描进度条。
+    QLabel* m_aliveScanStatusLabel = nullptr;     // 扫描状态标签。
+    QTableWidget* m_aliveScanTable = nullptr;     // 存活主机结果表。
+
     // ========================= 后台服务与缓存 ====================
     std::unique_ptr<ks::network::TrafficMonitorService> m_trafficService; // 抓包/限速后台服务对象。
     QTimer* m_rateLimitRefreshTimer = nullptr; // 限速规则轮询刷新定时器。
     QTimer* m_packetFlushTimer = nullptr;      // 报文批量刷新定时器（UI 节流关键）。
     QTimer* m_connectionRefreshTimer = nullptr; // 连接快照轮询刷新定时器（TCP/UDP）。
     bool m_monitorRunning = false;             // 抓包运行状态缓存。
+    std::atomic_bool m_monitorStopInProgress{ false }; // 停止流程进行中，避免重复 stop 导致 UI 抖动。
+    std::unique_ptr<std::thread> m_monitorStopThread;  // 异步 stop 的 join 线程，防止主线程等待卡顿。
 
     // 当前启用的组合过滤条件：
     // - 任一 optional 为空表示该条件“未启用”；
@@ -497,4 +606,9 @@ private:
 
     // PID 图标缓存：避免重复解析 EXE 图标导致 UI 卡顿。
     QHash<quint32, QIcon> m_processIconCacheByPid;
+
+    // 存活主机扫描状态：防止重复启动并支持用户中断。
+    std::atomic_bool m_aliveScanRunning{ false };
+    std::atomic_bool m_aliveScanCancel{ false };
+    int m_aliveScanProgressPid = 0;
 };

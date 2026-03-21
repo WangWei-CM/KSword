@@ -5,39 +5,60 @@
 #include <QAbstractItemView>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QColor>
 #include <QComboBox>
 #include <QDateTime>
 #include <QFileIconProvider>
 #include <QFileInfo>
 #include <QFontDatabase>
-#include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QGuiApplication>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QModelIndex>
+#include <QProgressBar>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
-#include <QScrollArea>
+#include <QRunnable>
+#include <QSizePolicy>
 #include <QSpinBox>
 #include <QStringList>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
+#include <QThreadPool>
 #include <QTimer>
 #include <QVariant>
 #include <QVBoxLayout>
 
 #include <algorithm> // std::min/std::max：预览长度与范围标准化。
+#include <atomic>    // std::atomic_bool：跨线程状态门控。
 #include <limits>    // std::numeric_limits：包长上限范围表达。
 #include <string>    // std::string：日志桥接文本类型。
+#include <thread>    // std::thread：长耗时请求放到后台执行。
+#include <unordered_set> // std::unordered_set：ARP接口索引去重。
 #include <vector>    // std::vector：批量刷新队列临时容器。
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#include <IcmpAPI.h>
+#include <Iphlpapi.h>
+#include <Windns.h>
+#include <Ws2tcpip.h>
+
+#pragma comment(lib, "Iphlpapi.lib")
+#pragma comment(lib, "Dnsapi.lib")
+#pragma comment(lib, "Ws2_32.lib")
 
 namespace
 {
@@ -522,9 +543,15 @@ NetworkDock::NetworkDock(QWidget* parent)
 
     // 限速页使用定时器轮询刷新规则状态（触发次数、当前窗口字节等）。
     m_rateLimitRefreshTimer = new QTimer(this);
-    m_rateLimitRefreshTimer->setInterval(700);
+    // 频率适度降低，减少后台快照 + UI 渲染对主线程的周期性压力。
+    m_rateLimitRefreshTimer->setInterval(1100);
     connect(m_rateLimitRefreshTimer, &QTimer::timeout, this, [this]()
         {
+            // 仅当“进程限速”页可见时刷新，避免隐藏页无意义占用 UI 线程。
+            if (m_sideTabWidget == nullptr || m_sideTabWidget->currentWidget() != m_rateLimitPage)
+            {
+                return;
+            }
             refreshRateLimitTable();
         });
     m_rateLimitRefreshTimer->start();
@@ -542,11 +569,16 @@ NetworkDock::NetworkDock(QWidget* parent)
 
     // 连接管理刷新定时器：
     // - 用于周期更新 TCP/UDP 表；
-    // - 自动刷新开关关闭时，定时器回调会直接跳过。
+    // - 自动刷新关闭或页面不可见时，定时器回调会直接跳过；
+    // - 目的是避免隐藏页持续枚举连接造成 UI 卡顿。
     m_connectionRefreshTimer = new QTimer(this);
-    m_connectionRefreshTimer->setInterval(1400);
+    m_connectionRefreshTimer->setInterval(2200);
     connect(m_connectionRefreshTimer, &QTimer::timeout, this, [this]()
         {
+            if (m_sideTabWidget == nullptr || m_sideTabWidget->currentWidget() != m_connectionManagePage)
+            {
+                return;
+            }
             if (m_autoRefreshConnectionButton != nullptr && !m_autoRefreshConnectionButton->isChecked())
             {
                 return;
@@ -589,12 +621,28 @@ NetworkDock::NetworkDock(QWidget* parent)
     kLogEvent initializeEvent;
     info << initializeEvent << "[NetworkDock] 网络面板初始化完成。" << eol;
 
-    // 首次加载主动刷新一次 TCP/UDP 快照，让连接管理页立即有数据。
-    refreshConnectionTables();
+    // 首次加载不再强制立刻枚举连接：
+    // - 如果当前就处于连接管理页，则仍执行一次首刷；
+    // - 否则延迟到用户切入该页后由自动刷新触发，减少主线程启动负担。
+    if (m_sideTabWidget != nullptr && m_sideTabWidget->currentWidget() == m_connectionManagePage)
+    {
+        refreshConnectionTables();
+    }
+    else if (m_connectionStatusLabel != nullptr)
+    {
+        m_connectionStatusLabel->setText(QStringLiteral("状态：进入此页面后自动刷新"));
+    }
 }
 
 NetworkDock::~NetworkDock()
 {
+    // 若有异步停止线程在执行，析构时同步等待一次，确保服务对象仍然有效。
+    if (m_monitorStopThread != nullptr && m_monitorStopThread->joinable())
+    {
+        m_monitorStopThread->join();
+    }
+    m_monitorStopThread.reset();
+
     // 窗口销毁前主动停止后台线程，避免析构后回调悬空。
     if (m_trafficService != nullptr)
     {
@@ -618,5 +666,6 @@ NetworkDock::~NetworkDock()
 #include "NetworkDock.RateLimit.inc"
 #include "NetworkDock.ConnectionManage.inc"
 #include "NetworkDock.ManualRequest.inc"
+#include "NetworkDock.NetworkDiagnostics.inc"
 #include "NetworkDock.DetailAndUtils.inc"
 

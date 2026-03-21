@@ -1,9 +1,224 @@
 #pragma once
+
+// ============================================================
+// FileDock.h
+// 作用：
+// 1) 实现双栏文件资源管理器（左右面板独立）；
+// 2) 提供导航、筛选、排序、基础文件操作与右键分析菜单；
+// 3) 提供列管理与文件详情窗口入口。
+// ============================================================
+
+#include "../Framework.h"
+
 #include <QWidget>
 
-class FileDock : public QWidget
+#include <cstdint>     // std::uint64_t：文件大小统计。
+#include <vector>      // std::vector：导航历史记录容器。
+
+// Qt 前置声明：降低头文件耦合。
+class QCheckBox;
+class QComboBox;
+class QDialog;
+class QFileSystemModel;
+class QHBoxLayout;
+class QLabel;
+class QLineEdit;
+class QMenu;
+class QPushButton;
+class QStackedWidget;
+class QSortFilterProxyModel;
+class QSplitter;
+class QStatusBar;
+class QTabWidget;
+class QTreeView;
+class QVBoxLayout;
+class QWidget;
+
+// ============================================================
+// FileDock
+// 说明：
+// - 左右两栏都用同一套 FilePanelWidgets 结构描述；
+// - 每个面板独立维护路径历史、过滤与排序状态。
+// ============================================================
+class FileDock final : public QWidget
 {
     Q_OBJECT
+
 public:
+    // 构造函数：
+    // - 作用：初始化双栏 UI 并设置默认目录。
+    // - 参数 parent：Qt 父控件。
     explicit FileDock(QWidget* parent = nullptr);
+
+    // 析构函数：
+    // - 作用：默认析构即可，所有子控件由 Qt 父子关系自动释放。
+    ~FileDock() override = default;
+
+private:
+    // FilePanelWidgets：
+    // - 作用：聚合单个文件面板的全部控件与运行时状态。
+    struct FilePanelWidgets
+    {
+        QWidget* rootWidget = nullptr;         // 面板根容器。
+        QVBoxLayout* rootLayout = nullptr;     // 面板主布局。
+
+        QWidget* navWidget = nullptr;          // 导航条容器。
+        QHBoxLayout* navLayout = nullptr;      // 导航条布局。
+        QPushButton* backButton = nullptr;     // 返回按钮。
+        QPushButton* forwardButton = nullptr;  // 前进按钮。
+        QPushButton* upButton = nullptr;       // 上级目录按钮。
+        QPushButton* refreshButton = nullptr;  // 刷新按钮。
+        QStackedWidget* pathStack = nullptr;   // 地址区域堆叠控件（面包屑/编辑框二选一）。
+        QLineEdit* pathEdit = nullptr;         // 地址栏输入框（编辑模式）。
+        QWidget* breadcrumbWidget = nullptr;   // 面包屑容器（展示模式）。
+        QHBoxLayout* breadcrumbLayout = nullptr; // 面包屑布局。
+        QPushButton* breadcrumbEditTriggerButton = nullptr; // 面包屑末尾空白点击热区。
+
+        QWidget* toolWidget = nullptr;         // 工具条容器。
+        QHBoxLayout* toolLayout = nullptr;     // 工具条布局。
+        QComboBox* viewModeCombo = nullptr;    // 视图模式选择（图标/列表/详情/树）。
+        QCheckBox* showSystemCheck = nullptr;  // 显示系统文件开关。
+        QCheckBox* showHiddenCheck = nullptr;  // 显示隐藏文件开关。
+        QComboBox* sortModeCombo = nullptr;    // 排序方式选择。
+        QLineEdit* filterEdit = nullptr;       // 文件名快速过滤输入框。
+
+        QTreeView* fileView = nullptr;         // 文件树视图。
+        QFileSystemModel* fsModel = nullptr;   // 原始文件系统模型。
+        QSortFilterProxyModel* proxyModel = nullptr; // 过滤代理模型。
+
+        QStatusBar* statusBar = nullptr;       // 面板状态栏。
+        QLabel* pathStatusLabel = nullptr;     // 当前路径状态。
+        QLabel* selectionStatusLabel = nullptr; // 选中数量/大小状态。
+        QLabel* diskStatusLabel = nullptr;     // 磁盘空间状态。
+
+        std::vector<QString> history;          // 路径历史列表。
+        int historyIndex = -1;                 // 当前历史索引。
+        QString currentPath;                   // 当前目录路径。
+        QString panelNameText;                 // 面板名称（日志与提示使用）。
+        QString lastStatusLogSignature;        // 状态栏日志去重签名。
+        QString lastFilterLogSignature;        // 过滤参数日志去重签名。
+        bool pathEditMode = false;             // 当前是否处于路径编辑模式。
+    };
+
+private:
+    // ======================= UI 初始化 ========================
+    // initializeUi：
+    // - 作用：构建双栏分割布局并初始化左右面板。
+    void initializeUi();
+
+    // initializePanel：
+    // - 作用：初始化一个文件面板的全部控件。
+    // - 参数 panel：待初始化面板结构体。
+    // - 参数 titleText：面板标题文本。
+    void initializePanel(FilePanelWidgets& panel, const QString& titleText);
+
+    // initializeConnections：
+    // - 作用：绑定单个面板的信号槽交互逻辑。
+    // - 参数 panel：目标面板。
+    void initializeConnections(FilePanelWidgets& panel);
+
+    // ======================= 导航与状态 =======================
+    // navigateToPath：
+    // - 作用：切换面板目录并可选写入历史。
+    // - 参数 panel：目标面板。
+    // - 参数 pathText：目标目录路径。
+    // - 参数 recordHistory：是否写入导航历史。
+    void navigateToPath(FilePanelWidgets& panel, const QString& pathText, bool recordHistory);
+
+    // refreshPanel：
+    // - 作用：刷新当前目录并重新应用过滤/排序。
+    void refreshPanel(FilePanelWidgets& panel);
+
+    // rebuildBreadcrumb：
+    // - 作用：按当前路径重建可点击面包屑。
+    void rebuildBreadcrumb(FilePanelWidgets& panel);
+
+    // setPathEditMode：
+    // - 作用：切换地址区显示模式（true=编辑框，false=面包屑）。
+    void setPathEditMode(FilePanelWidgets& panel, bool editMode);
+
+    // updatePanelStatus：
+    // - 作用：更新状态栏（路径、选中数量、容量等）。
+    void updatePanelStatus(FilePanelWidgets& panel);
+
+    // applyPanelFilterAndSort：
+    // - 作用：应用显示隐藏文件、名称过滤和排序模式。
+    void applyPanelFilterAndSort(FilePanelWidgets& panel);
+
+    // ======================= 文件操作 =========================
+    // showPanelContextMenu：
+    // - 作用：显示右键菜单（操作 + 分析子菜单）。
+    void showPanelContextMenu(FilePanelWidgets& panel, const QPoint& localPos);
+
+    // openSelectedItems：
+    // - 作用：打开当前选中项（支持多选，目录进入或系统打开）。
+    void openSelectedItems(FilePanelWidgets& panel);
+
+    // copySelectedItemPath：
+    // - 作用：复制选中项完整路径到剪贴板。
+    void copySelectedItemPath(FilePanelWidgets& panel);
+
+    // copySelectedItems：
+    // - 作用：复制选中项到内部剪贴板缓存（等待粘贴）。
+    void copySelectedItems(FilePanelWidgets& panel);
+
+    // cutSelectedItems：
+    // - 作用：剪切选中项到内部剪贴板缓存（粘贴后删除源文件）。
+    void cutSelectedItems(FilePanelWidgets& panel);
+
+    // pasteClipboardItems：
+    // - 作用：把内部剪贴板中的路径粘贴到当前目录。
+    void pasteClipboardItems(FilePanelWidgets& panel);
+
+    // createNewFileOrFolder：
+    // - 作用：在当前目录创建新文件或新文件夹。
+    void createNewFileOrFolder(FilePanelWidgets& panel, bool createFolder);
+
+    // renameSelectedItem：
+    // - 作用：重命名当前选中项。
+    void renameSelectedItem(FilePanelWidgets& panel);
+
+    // deleteSelectedItem：
+    // - 作用：删除当前选中项（当前实现走普通删除）。
+    void deleteSelectedItem(FilePanelWidgets& panel);
+
+    // takeOwnershipSelectedItems：
+    // - 作用：对当前选中项执行“取得所有权 + 授权完全控制”。
+    // - 说明：调用系统 takeown/icacls，失败信息会汇总提示。
+    void takeOwnershipSelectedItems(FilePanelWidgets& panel);
+
+    // showColumnManagerDialog：
+    // - 作用：弹出列管理器切换列显示状态。
+    void showColumnManagerDialog(FilePanelWidgets& panel);
+
+    // showFileDetailDialog：
+    // - 作用：打开文件详情窗口（多 Tab 信息展示）。
+    void showFileDetailDialog(const QString& filePath);
+
+    // ======================= 工具函数 =========================
+    // currentIndexPath：
+    // - 作用：获取面板当前选中索引对应的绝对路径。
+    // - 返回：若无选中则返回空字符串。
+    QString currentIndexPath(const FilePanelWidgets& panel) const;
+
+    // selectedPaths：
+    // - 作用：获取面板当前多选路径列表。
+    std::vector<QString> selectedPaths(const FilePanelWidgets& panel) const;
+
+    // formatSizeText：
+    // - 作用：格式化字节大小（B/KB/MB/GB）。
+    static QString formatSizeText(std::uint64_t sizeBytes);
+
+private:
+    // 根布局控件。
+    QVBoxLayout* m_rootLayout = nullptr;       // FileDock 根布局。
+    QSplitter* m_mainSplitter = nullptr;       // 左右分栏分割器。
+
+    // 左右面板实例。
+    FilePanelWidgets m_leftPanel;              // 左侧面板状态。
+    FilePanelWidgets m_rightPanel;             // 右侧面板状态。
+
+    // 跨面板复制/剪切缓存。
+    std::vector<QString> m_clipboardPaths;     // 剪贴板中的路径列表。
+    bool m_clipboardCutMode = false;           // true=剪切；false=复制。
 };
