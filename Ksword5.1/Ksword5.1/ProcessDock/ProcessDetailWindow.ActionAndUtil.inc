@@ -7,9 +7,9 @@
 
 void ProcessDetailWindow::executeTaskKillAction(const bool forceKill)
 {
-    // TaskKill 操作日志：记录是否强制结束。
-    kLogEvent taskKillStartEvent;
-    info << taskKillStartEvent
+    // TaskKill 操作日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
+    kLogEvent actionEvent;
+    info << actionEvent
         << "[ProcessDetailWindow] executeTaskKillAction: pid="
         << m_baseRecord.pid
         << ", forceKill="
@@ -18,105 +18,100 @@ void ProcessDetailWindow::executeTaskKillAction(const bool forceKill)
 
     std::string detailText;
     const bool actionOk = ks::process::ExecuteTaskKill(m_baseRecord.pid, forceKill, &detailText);
-    kLogEvent taskKillFinishEvent;
-    info << taskKillFinishEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] executeTaskKillAction: actionOk="
         << (actionOk ? "true" : "false")
         << ", detail="
         << detailText
         << eol;
-    showActionResultMessage(forceKill ? "Taskkill /f" : "Taskkill", actionOk, detailText);
+    showActionResultMessage(forceKill ? "Taskkill /f" : "Taskkill", actionOk, detailText, actionEvent);
 }
 
 void ProcessDetailWindow::executeTerminateProcessAction()
 {
-    // TerminateProcess 操作日志：用于风险动作审计。
-    kLogEvent terminateProcessStartEvent;
-    warn << terminateProcessStartEvent
+    // TerminateProcess 操作日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
+    kLogEvent actionEvent;
+    warn << actionEvent
         << "[ProcessDetailWindow] executeTerminateProcessAction: pid="
         << m_baseRecord.pid
         << eol;
 
     std::string detailText;
     const bool actionOk = ks::process::TerminateProcessByWin32(m_baseRecord.pid, &detailText);
-    kLogEvent terminateProcessFinishEvent;
-    info << terminateProcessFinishEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] executeTerminateProcessAction: actionOk="
         << (actionOk ? "true" : "false")
         << ", detail="
         << detailText
         << eol;
-    showActionResultMessage("TerminateProcess", actionOk, detailText);
+    showActionResultMessage("TerminateProcess", actionOk, detailText, actionEvent);
 }
 
 void ProcessDetailWindow::executeTerminateThreadsAction()
 {
-    // 全线程结束日志：记录目标 PID。
-    kLogEvent terminateThreadsStartEvent;
-    warn << terminateThreadsStartEvent
+    // 全线程结束日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
+    kLogEvent actionEvent;
+    warn << actionEvent
         << "[ProcessDetailWindow] executeTerminateThreadsAction: pid="
         << m_baseRecord.pid
         << eol;
 
     std::string detailText;
     const bool actionOk = ks::process::TerminateAllThreadsByPid(m_baseRecord.pid, &detailText);
-    kLogEvent terminateThreadsFinishEvent;
-    info << terminateThreadsFinishEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] executeTerminateThreadsAction: actionOk="
         << (actionOk ? "true" : "false")
         << ", detail="
         << detailText
         << eol;
-    showActionResultMessage("TerminateThread(全部线程)", actionOk, detailText);
+    showActionResultMessage("TerminateThread(全部线程)", actionOk, detailText, actionEvent);
 }
 
 void ProcessDetailWindow::executeSuspendProcessAction()
 {
-    // 挂起进程日志：记录执行请求。
-    kLogEvent suspendProcessEvent;
-    info << suspendProcessEvent
+    // 挂起进程日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
+    kLogEvent actionEvent;
+    info << actionEvent
         << "[ProcessDetailWindow] executeSuspendProcessAction: pid="
         << m_baseRecord.pid
         << eol;
 
     std::string detailText;
     const bool actionOk = ks::process::SuspendProcess(m_baseRecord.pid, &detailText);
-    kLogEvent suspendProcessFinishEvent;
-    info << suspendProcessFinishEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] executeSuspendProcessAction: actionOk="
         << (actionOk ? "true" : "false")
         << ", detail="
         << detailText
         << eol;
-    showActionResultMessage("挂起进程", actionOk, detailText);
+    showActionResultMessage("挂起进程", actionOk, detailText, actionEvent);
 }
 
 void ProcessDetailWindow::executeResumeProcessAction()
 {
-    // 恢复进程日志：记录执行请求。
-    kLogEvent resumeProcessEvent;
-    info << resumeProcessEvent
+    // 恢复进程日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
+    kLogEvent actionEvent;
+    info << actionEvent
         << "[ProcessDetailWindow] executeResumeProcessAction: pid="
         << m_baseRecord.pid
         << eol;
 
     std::string detailText;
     const bool actionOk = ks::process::ResumeProcess(m_baseRecord.pid, &detailText);
-    kLogEvent resumeProcessFinishEvent;
-    info << resumeProcessFinishEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] executeResumeProcessAction: actionOk="
         << (actionOk ? "true" : "false")
         << ", detail="
         << detailText
         << eol;
-    showActionResultMessage("恢复进程", actionOk, detailText);
+    showActionResultMessage("恢复进程", actionOk, detailText, actionEvent);
 }
 
 void ProcessDetailWindow::executeSetCriticalAction(const bool enableCritical)
 {
-    // 关键进程标记变更日志：高风险动作，使用警告级别记录。
-    kLogEvent criticalActionEvent;
-    warn << criticalActionEvent
+    // 关键进程标记变更日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
+    kLogEvent actionEvent;
+    warn << actionEvent
         << "[ProcessDetailWindow] executeSetCriticalAction: pid="
         << m_baseRecord.pid
         << ", enableCritical="
@@ -125,14 +120,13 @@ void ProcessDetailWindow::executeSetCriticalAction(const bool enableCritical)
 
     std::string detailText;
     const bool actionOk = ks::process::SetProcessCriticalFlag(m_baseRecord.pid, enableCritical, &detailText);
-    kLogEvent criticalActionFinishEvent;
-    info << criticalActionFinishEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] executeSetCriticalAction: actionOk="
         << (actionOk ? "true" : "false")
         << ", detail="
         << detailText
         << eol;
-    showActionResultMessage(enableCritical ? "设为关键进程" : "取消关键进程", actionOk, detailText);
+    showActionResultMessage(enableCritical ? "设为关键进程" : "取消关键进程", actionOk, detailText, actionEvent);
 }
 
 void ProcessDetailWindow::executeSetPriorityAction()
@@ -159,8 +153,9 @@ void ProcessDetailWindow::executeSetPriorityAction()
     default: priorityLevel = ks::process::ProcessPriorityLevel::Normal; break;
     }
 
-    kLogEvent setPriorityStartEvent;
-    info << setPriorityStartEvent
+    // 优先级设置日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
+    kLogEvent actionEvent;
+    info << actionEvent
         << "[ProcessDetailWindow] executeSetPriorityAction: pid="
         << m_baseRecord.pid
         << ", actionId="
@@ -169,35 +164,33 @@ void ProcessDetailWindow::executeSetPriorityAction()
 
     std::string detailText;
     const bool actionOk = ks::process::SetProcessPriority(m_baseRecord.pid, priorityLevel, &detailText);
-    kLogEvent setPriorityFinishEvent;
-    info << setPriorityFinishEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] executeSetPriorityAction: actionOk="
         << (actionOk ? "true" : "false")
         << ", detail="
         << detailText
         << eol;
-    showActionResultMessage("设置进程优先级", actionOk, detailText);
+    showActionResultMessage("设置进程优先级", actionOk, detailText, actionEvent);
 }
 
 void ProcessDetailWindow::executeInjectInvalidShellcodeAction()
 {
-    // 无效 shellcode 注入日志：用于测试动作追踪。
-    kLogEvent injectInvalidStartEvent;
-    warn << injectInvalidStartEvent
+    // 无效 shellcode 注入日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
+    kLogEvent actionEvent;
+    warn << actionEvent
         << "[ProcessDetailWindow] executeInjectInvalidShellcodeAction: pid="
         << m_baseRecord.pid
         << eol;
 
     std::string detailText;
     const bool actionOk = ks::process::InjectInvalidShellcode(m_baseRecord.pid, &detailText);
-    kLogEvent injectInvalidFinishEvent;
-    info << injectInvalidFinishEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] executeInjectInvalidShellcodeAction: actionOk="
         << (actionOk ? "true" : "false")
         << ", detail="
         << detailText
         << eol;
-    showActionResultMessage("注入无效shellcode", actionOk, detailText);
+    showActionResultMessage("注入无效shellcode", actionOk, detailText, actionEvent);
 }
 
 void ProcessDetailWindow::executeInjectDllAction()
@@ -213,8 +206,9 @@ void ProcessDetailWindow::executeInjectDllAction()
         return;
     }
 
-    kLogEvent injectDllStartEvent;
-    info << injectDllStartEvent
+    // DLL 注入日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
+    kLogEvent actionEvent;
+    info << actionEvent
         << "[ProcessDetailWindow] executeInjectDllAction: pid="
         << m_baseRecord.pid
         << ", dllPath="
@@ -226,14 +220,13 @@ void ProcessDetailWindow::executeInjectDllAction()
         m_baseRecord.pid,
         dllPath.toStdString(),
         &detailText);
-    kLogEvent injectDllFinishEvent;
-    info << injectDllFinishEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] executeInjectDllAction: actionOk="
         << (actionOk ? "true" : "false")
         << ", detail="
         << detailText
         << eol;
-    showActionResultMessage("DLL 注入", actionOk, detailText);
+    showActionResultMessage("DLL 注入", actionOk, detailText, actionEvent);
     if (actionOk)
     {
         requestAsyncModuleRefresh(true);
@@ -253,8 +246,9 @@ void ProcessDetailWindow::executeInjectShellcodeAction()
         return;
     }
 
-    kLogEvent injectShellcodeStartEvent;
-    info << injectShellcodeStartEvent
+    // Shellcode 注入日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
+    kLogEvent actionEvent;
+    info << actionEvent
         << "[ProcessDetailWindow] executeInjectShellcodeAction: pid="
         << m_baseRecord.pid
         << ", filePath="
@@ -263,14 +257,13 @@ void ProcessDetailWindow::executeInjectShellcodeAction()
 
     std::vector<std::uint8_t> shellcodeBuffer;
     std::string readErrorText;
-    if (!readBinaryFile(shellcodePath, shellcodeBuffer, readErrorText))
+    if (!readBinaryFile(shellcodePath, shellcodeBuffer, readErrorText, actionEvent))
     {
-        kLogEvent injectShellcodeReadFailEvent;
-        err << injectShellcodeReadFailEvent
+        err << actionEvent
             << "[ProcessDetailWindow] executeInjectShellcodeAction: 读取文件失败, error="
             << readErrorText
             << eol;
-        showActionResultMessage("Shellcode 注入", false, readErrorText);
+        showActionResultMessage("Shellcode 注入", false, readErrorText, actionEvent);
         return;
     }
 
@@ -279,8 +272,7 @@ void ProcessDetailWindow::executeInjectShellcodeAction()
         m_baseRecord.pid,
         shellcodeBuffer,
         &detailText);
-    kLogEvent injectShellcodeFinishEvent;
-    info << injectShellcodeFinishEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] executeInjectShellcodeAction: actionOk="
         << (actionOk ? "true" : "false")
         << ", shellcodeSize="
@@ -288,7 +280,7 @@ void ProcessDetailWindow::executeInjectShellcodeAction()
         << ", detail="
         << detailText
         << eol;
-    showActionResultMessage("Shellcode 注入", actionOk, detailText);
+    showActionResultMessage("Shellcode 注入", actionOk, detailText, actionEvent);
 }
 
 QIcon ProcessDetailWindow::resolveProcessIcon(const std::string& processPath, const int iconPixelSize)
@@ -362,11 +354,11 @@ QString ProcessDetailWindow::formatHexText(const std::uint64_t value) const
 bool ProcessDetailWindow::readBinaryFile(
     const QString& filePath,
     std::vector<std::uint8_t>& bufferOut,
-    std::string& errorTextOut) const
+    std::string& errorTextOut,
+    const kLogEvent& actionEvent) const
 {
-    // 文件读取入口日志：记录路径。
-    kLogEvent readBinaryStartEvent;
-    info << readBinaryStartEvent
+    // 文件读取入口日志：沿用调用方的 actionEvent，确保动作链路 GUID 连续。
+    info << actionEvent
         << "[ProcessDetailWindow] readBinaryFile: filePath="
         << filePath.toStdString()
         << eol;
@@ -378,8 +370,7 @@ bool ProcessDetailWindow::readBinaryFile(
     if (!fileObject.open(QIODevice::ReadOnly))
     {
         errorTextOut = "Open file failed: " + fileObject.errorString().toStdString();
-        kLogEvent readBinaryOpenFailEvent;
-        err << readBinaryOpenFailEvent
+        err << actionEvent
             << "[ProcessDetailWindow] readBinaryFile: 打开失败, error="
             << errorTextOut
             << eol;
@@ -390,8 +381,7 @@ bool ProcessDetailWindow::readBinaryFile(
     if (rawBytes.isEmpty())
     {
         errorTextOut = "File is empty.";
-        kLogEvent readBinaryEmptyEvent;
-        warn << readBinaryEmptyEvent
+        warn << actionEvent
             << "[ProcessDetailWindow] readBinaryFile: 文件为空。"
             << eol;
         return false;
@@ -402,8 +392,7 @@ bool ProcessDetailWindow::readBinaryFile(
         reinterpret_cast<const std::uint8_t*>(rawBytes.constData()),
         reinterpret_cast<const std::uint8_t*>(rawBytes.constData()) + rawBytes.size(),
         bufferOut.begin());
-    kLogEvent readBinaryFinishEvent;
-    info << readBinaryFinishEvent
+    info << actionEvent
         << "[ProcessDetailWindow] readBinaryFile: 读取成功, size="
         << bufferOut.size()
         << eol;
@@ -413,28 +402,19 @@ bool ProcessDetailWindow::readBinaryFile(
 void ProcessDetailWindow::showActionResultMessage(
     const QString& title,
     const bool actionOk,
-    const std::string& detailText)
+    const std::string& detailText,
+    const kLogEvent& actionEvent)
 {
-    // 统一弹窗日志：记录标题、成功状态和详情文本。
-    kLogEvent actionResultEvent;
-    info << actionResultEvent
+    // 动作反馈日志：按照规范不再弹窗，只输出日志，避免打断用户流程。
+    const std::string normalizedDetailText = detailText.empty() ? "无附加信息" : detailText;
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] showActionResultMessage: title="
         << title.toStdString()
         << ", actionOk="
         << (actionOk ? "true" : "false")
         << ", detail="
-        << detailText
+        << normalizedDetailText
         << eol;
-
-    const QString detail = QString::fromStdString(detailText.empty() ? "无附加信息" : detailText);
-    if (actionOk)
-    {
-        QMessageBox::information(this, title, "操作成功。\n" + detail);
-    }
-    else
-    {
-        QMessageBox::warning(this, title, "操作失败。\n" + detail);
-    }
 }
 
 ks::process::ProcessModuleRecord* ProcessDetailWindow::selectedModuleRecord()

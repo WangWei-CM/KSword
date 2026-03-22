@@ -4,7 +4,7 @@
 // NetworkDock.h
 // 作用：
 // 1) 构建“网络”Dock 的完整侧边栏 Tab UI；
-// 2) 展示全部发送方向 TCP/UDP 报文表格；
+// 2) 展示全部收发方向 TCP/UDP 报文表格；
 // 3) 提供组合过滤（PID/IP段/端口/包长）、进程限速、报文详情查看能力；
 // 4) 提供 TCP/UDP 连接监控与 TCP 连接终止；
 // 5) 提供“手动构造网络请求”可视化参数执行页。
@@ -310,6 +310,12 @@ private:
     // - 返回：无。
     void executeManualRequest();
 
+    // replayPacketToManualRequestByTableRow：
+    // - 作用：把抓包表指定行的报文快速回填到“请求构造”页，形成可编辑重放草稿；
+    // - 参数 row：抓包列表中的目标行号；
+    // - 返回：无。
+    void replayPacketToManualRequestByTableRow(int row);
+
     // resetManualRequestForm：
     // - 作用：恢复请求构造页默认参数。
     // - 返回：无。
@@ -589,7 +595,10 @@ private:
     std::optional<UInt32Range> m_activePacketSizeRangeFilter; // 报文总长度范围过滤（字节）。
 
     static constexpr std::size_t kMaxPacketCacheCount = 6000;          // 报文缓存上限。
-    static constexpr std::size_t kMaxPendingPacketQueueCount = 12000;  // 后台待刷新队列上限。
+    // 后台待刷新队列上限：
+    // - 适当放大到 80000，降低突发流量时“UI 来不及刷导致队列溢出”的丢包概率；
+    // - 仍保留硬上限，避免极端场景内存失控。
+    static constexpr std::size_t kMaxPendingPacketQueueCount = 80000;
     std::deque<std::uint64_t> m_packetSequenceOrder; // 报文序号按时间顺序缓存。
     std::unordered_map<std::uint64_t, ks::network::PacketRecord> m_packetBySequence; // 序号 -> 报文映射。
 

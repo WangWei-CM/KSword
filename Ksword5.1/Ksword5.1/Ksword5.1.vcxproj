@@ -94,7 +94,7 @@
       <LanguageStandard>stdcpp23</LanguageStandard>
       <Optimization>Disabled</Optimization>
       <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <Link>

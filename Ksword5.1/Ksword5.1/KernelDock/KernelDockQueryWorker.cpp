@@ -16,6 +16,7 @@
 #include <array>      // std::array：FormatMessage 固定缓冲。
 #include <cstdint>    // std::uintXX_t：明确位宽。
 #include <functional> // std::function：统一查询回调签名。
+#include <unordered_set> // std::unordered_set：检测 TypeIndex 冲突并兜底修复。
 #include <vector>     // std::vector：承载二进制与结果。
 
 #ifndef NOMINMAX
@@ -195,6 +196,62 @@ namespace
         }
         const std::size_t mask = alignment - 1;
         return (value + mask) & ~mask;
+    }
+
+    // isReadableMemoryRange：
+    // - 作用：检测一段内存是否可读，避免盲读指针导致访问冲突。
+    // - 说明：ObjectTypesInformation 在不同系统里可能返回缓冲区外指针，
+    //         这里先做可读性检测，再尝试解析类型名。
+    bool isReadableMemoryRange(const void* beginAddress, const std::size_t length)
+    {
+        // 空地址或零长度直接判定不可读，避免无意义的 VirtualQuery 调用。
+        if (beginAddress == nullptr || length == 0)
+        {
+            return false;
+        }
+
+        // 使用 uintptr_t 做地址计算，避免 32/64 位差异带来的截断问题。
+        std::uintptr_t currentAddress = reinterpret_cast<std::uintptr_t>(beginAddress);
+        const std::uintptr_t endAddress = currentAddress + length;
+        if (endAddress < currentAddress)
+        {
+            return false;
+        }
+
+        // 按内存区域逐段检查，确保整段范围都处于可读状态。
+        while (currentAddress < endAddress)
+        {
+            MEMORY_BASIC_INFORMATION memoryInfo{};
+            const SIZE_T querySize = ::VirtualQuery(
+                reinterpret_cast<LPCVOID>(currentAddress),
+                &memoryInfo,
+                sizeof(memoryInfo));
+            if (querySize != sizeof(memoryInfo))
+            {
+                return false;
+            }
+
+            // 仅允许已提交页；保护属性为 NOACCESS/GUARD 的区域视为不可读。
+            if (memoryInfo.State != MEM_COMMIT)
+            {
+                return false;
+            }
+            const DWORD protect = (memoryInfo.Protect & 0xFFU);
+            if (protect == PAGE_NOACCESS || protect == PAGE_GUARD)
+            {
+                return false;
+            }
+
+            // 跳转到当前区域末尾，继续检查下一个区域。
+            const std::uintptr_t regionBegin = reinterpret_cast<std::uintptr_t>(memoryInfo.BaseAddress);
+            const std::uintptr_t regionEnd = regionBegin + memoryInfo.RegionSize;
+            if (regionEnd <= currentAddress)
+            {
+                return false;
+            }
+            currentAddress = std::min(regionEnd, endAddress);
+        }
+        return true;
     }
 
     // parseUnicodeStringBuffer：
@@ -382,40 +439,67 @@ bool runKernelTypeSnapshotTask(std::vector<KernelObjectTypeEntry>& rowsOut, QStr
     }
 
     std::vector<KernelObjectTypeEntry> resultRows;
+    resultRows.reserve(reinterpret_cast<const RawObjectTypesHeader*>(buffer.data())->numberOfTypes);
+
+    // 这里按旧版本 Ksword5.0 的逻辑先做“头后指针对齐”，
+    // 这是修复乱码/错位的关键：x64 下 NumberOfTypes 后通常有 4 字节填充。
+    const std::uintptr_t bufferBase = reinterpret_cast<std::uintptr_t>(buffer.data());
+    const std::uintptr_t bufferEnd = bufferBase + buffer.size();
     const auto* header = reinterpret_cast<const RawObjectTypesHeader*>(buffer.data());
-    const std::uint8_t* cursor = buffer.data() + sizeof(RawObjectTypesHeader);
-    const std::uint8_t* end = buffer.data() + buffer.size();
-    resultRows.reserve(header->numberOfTypes);
+    std::uintptr_t entryAddress = alignUp(
+        bufferBase + sizeof(RawObjectTypesHeader),
+        sizeof(void*));
+
+    // usedTypeIndex 用于处理旧系统/特殊结构下 TypeIndex 无效或重复的情况。
+    std::unordered_set<std::uint32_t> usedTypeIndex;
+    usedTypeIndex.reserve(header->numberOfTypes);
 
     for (ULONG index = 0; index < header->numberOfTypes; ++index)
     {
-        if (cursor + sizeof(RawObjectTypeInformation) > end)
+        // 边界检查：剩余空间不足一个结构体时直接停止，避免越界。
+        if (entryAddress + sizeof(RawObjectTypeInformation) > bufferEnd)
         {
+            kLogEvent boundaryEvent;
+            warn << boundaryEvent
+                << "[KernelDockWorker] 解析对象类型提前结束：entryAddress越界，index="
+                << static_cast<unsigned long long>(index)
+                << eol;
             break;
         }
 
-        const auto* raw = reinterpret_cast<const RawObjectTypeInformation*>(cursor);
+        const auto* raw = reinterpret_cast<const RawObjectTypeInformation*>(entryAddress);
         QString typeName;
-        if (raw->typeName.Length > 0)
-        {
-            // 类型名解析优先级：
-            // 1) 优先按 TypeName.Buffer 指针直接解析（与用户提供 NT.cpp 逻辑一致）；
-            // 2) 若指针不在返回缓冲区，则回退到“结构体后紧跟字符串”方式，避免乱码。
-            const std::uint8_t* typeNameBegin = reinterpret_cast<const std::uint8_t*>(raw->typeName.Buffer);
-            const std::uint8_t* inlineTextBegin = cursor + sizeof(RawObjectTypeInformation);
-            const std::uint8_t* typeNameEnd = typeNameBegin + raw->typeName.Length;
-            const std::uint8_t* inlineTextEnd = inlineTextBegin + raw->typeName.Length;
 
-            if (typeNameBegin >= buffer.data() && typeNameEnd <= end)
+        // 先按旧项目逻辑优先使用 TypeName.Buffer 直接解码。
+        if (raw->typeName.Buffer != nullptr && raw->typeName.Length > 0)
+        {
+            const std::size_t nameByteLength = raw->typeName.Length;
+            const auto* directBuffer = raw->typeName.Buffer;
+
+            // 若 Buffer 指向返回缓冲区内，直接读取；否则做可读性探测后再读取。
+            const std::uintptr_t directAddress = reinterpret_cast<std::uintptr_t>(directBuffer);
+            const bool inReplyBuffer =
+                directAddress >= bufferBase &&
+                directAddress <= bufferEnd &&
+                nameByteLength <= (bufferEnd - directAddress);
+            const bool externalReadable = !inReplyBuffer &&
+                isReadableMemoryRange(directBuffer, nameByteLength);
+            if (inReplyBuffer || externalReadable)
             {
                 typeName = QString::fromWCharArray(
-                    reinterpret_cast<const wchar_t*>(typeNameBegin),
+                    directBuffer,
                     raw->typeName.Length / static_cast<USHORT>(sizeof(wchar_t)));
             }
-            else if (inlineTextBegin < end && inlineTextEnd <= end)
+        }
+
+        // 兼容回退：若 directBuffer 方案失败，尝试按“结构体后紧跟字符串”解析。
+        if (typeName.trimmed().isEmpty() && raw->typeName.Length > 0)
+        {
+            const std::uintptr_t inlineNameAddress = entryAddress + sizeof(RawObjectTypeInformation);
+            if (inlineNameAddress + raw->typeName.Length <= bufferEnd)
             {
                 typeName = QString::fromWCharArray(
-                    reinterpret_cast<const wchar_t*>(inlineTextBegin),
+                    reinterpret_cast<const wchar_t*>(inlineNameAddress),
                     raw->typeName.Length / static_cast<USHORT>(sizeof(wchar_t)));
             }
         }
@@ -424,8 +508,22 @@ bool runKernelTypeSnapshotTask(std::vector<KernelObjectTypeEntry>& rowsOut, QStr
             typeName = QStringLiteral("<UnknownType_%1>").arg(index);
         }
 
+        // 读取 TypeIndex：
+        // - 新系统一般可直接得到正确值；
+        // - 若为 0 或发生冲突，则按枚举序号分配兜底编号，保证“所有类型都有编号”。
+        std::uint32_t resolvedTypeIndex = static_cast<std::uint32_t>(raw->typeIndex);
+        if (resolvedTypeIndex == 0 || usedTypeIndex.find(resolvedTypeIndex) != usedTypeIndex.end())
+        {
+            resolvedTypeIndex = static_cast<std::uint32_t>(index + 1);
+            while (usedTypeIndex.find(resolvedTypeIndex) != usedTypeIndex.end())
+            {
+                ++resolvedTypeIndex;
+            }
+        }
+        usedTypeIndex.insert(resolvedTypeIndex);
+
         KernelObjectTypeEntry entry;
-        entry.typeIndex = static_cast<std::uint32_t>(raw->typeIndex);
+        entry.typeIndex = resolvedTypeIndex;
         entry.typeNameText = typeName;
         entry.totalObjectCount = raw->totalNumberOfObjects;
         entry.totalHandleCount = raw->totalNumberOfHandles;
@@ -437,12 +535,22 @@ bool runKernelTypeSnapshotTask(std::vector<KernelObjectTypeEntry>& rowsOut, QStr
         entry.defaultNonPagedPoolCharge = raw->defaultNonPagedPoolCharge;
         resultRows.push_back(std::move(entry));
 
-        std::uintptr_t nextAddress = reinterpret_cast<std::uintptr_t>(cursor);
-        nextAddress += sizeof(RawObjectTypeInformation);
-        nextAddress += raw->typeName.MaximumLength;
-        nextAddress = alignUp(static_cast<std::size_t>(nextAddress), sizeof(void*));
-        cursor = reinterpret_cast<const std::uint8_t*>(nextAddress);
-        if (cursor >= end)
+        // 按结构体 + TypeName.MaximumLength 前进，并按指针大小对齐到下一个条目。
+        const std::size_t entrySpan = alignUp(
+            sizeof(RawObjectTypeInformation) + static_cast<std::size_t>(raw->typeName.MaximumLength),
+            sizeof(void*));
+        if (entrySpan < sizeof(RawObjectTypeInformation))
+        {
+            kLogEvent spanEvent;
+            warn << spanEvent
+                << "[KernelDockWorker] 解析对象类型提前结束：entrySpan异常，index="
+                << static_cast<unsigned long long>(index)
+                << eol;
+            break;
+        }
+
+        entryAddress += entrySpan;
+        if (entryAddress >= bufferEnd)
         {
             break;
         }

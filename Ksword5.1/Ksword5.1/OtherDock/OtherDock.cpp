@@ -12,9 +12,11 @@
 #include "../theme.h"
 
 #include <QApplication>
+#include <QAbstractItemView>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
+#include <QCloseEvent>
 #include <QDateTime>
 #include <QDialog>
 #include <QFile>
@@ -44,6 +46,8 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTabWidget>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QTextStream>
 #include <QTimer>
 #include <QTimeZone>
@@ -57,6 +61,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -123,6 +128,149 @@ namespace
         return QStringLiteral("0x%1")
             .arg(static_cast<qulonglong>(hwndValue), 0, 16)
             .toUpper();
+    }
+
+    // toHexText64 作用：
+    // - 把 64 位整数统一格式化为 16 位十六进制字符串；
+    // - 用于消息监控表中显示 WPARAM/LPARAM/RESULT，便于直接比对内存值。
+    QString toHexText64(const quint64 numericValue)
+    {
+        return QStringLiteral("0x%1")
+            .arg(static_cast<qulonglong>(numericValue), 16, 16, QChar('0'))
+            .toUpper();
+    }
+
+    // windowMessageName 作用：
+    // - 把常见窗口消息 ID 映射为可读名称；
+    // - 未命中的消息返回 WM_0xXXXX 形式，保持可追踪性。
+    QString windowMessageName(const UINT messageId)
+    {
+        switch (messageId)
+        {
+        case WM_NULL: return QStringLiteral("WM_NULL");
+        case WM_CREATE: return QStringLiteral("WM_CREATE");
+        case WM_DESTROY: return QStringLiteral("WM_DESTROY");
+        case WM_MOVE: return QStringLiteral("WM_MOVE");
+        case WM_SIZE: return QStringLiteral("WM_SIZE");
+        case WM_ACTIVATE: return QStringLiteral("WM_ACTIVATE");
+        case WM_SETFOCUS: return QStringLiteral("WM_SETFOCUS");
+        case WM_KILLFOCUS: return QStringLiteral("WM_KILLFOCUS");
+        case WM_ENABLE: return QStringLiteral("WM_ENABLE");
+        case WM_SETREDRAW: return QStringLiteral("WM_SETREDRAW");
+        case WM_SETTEXT: return QStringLiteral("WM_SETTEXT");
+        case WM_GETTEXT: return QStringLiteral("WM_GETTEXT");
+        case WM_GETTEXTLENGTH: return QStringLiteral("WM_GETTEXTLENGTH");
+        case WM_PAINT: return QStringLiteral("WM_PAINT");
+        case WM_CLOSE: return QStringLiteral("WM_CLOSE");
+        case WM_QUERYENDSESSION: return QStringLiteral("WM_QUERYENDSESSION");
+        case WM_QUERYOPEN: return QStringLiteral("WM_QUERYOPEN");
+        case WM_ENDSESSION: return QStringLiteral("WM_ENDSESSION");
+        case WM_QUIT: return QStringLiteral("WM_QUIT");
+        case WM_ERASEBKGND: return QStringLiteral("WM_ERASEBKGND");
+        case WM_SYSCOLORCHANGE: return QStringLiteral("WM_SYSCOLORCHANGE");
+        case WM_SHOWWINDOW: return QStringLiteral("WM_SHOWWINDOW");
+        case WM_ACTIVATEAPP: return QStringLiteral("WM_ACTIVATEAPP");
+        case WM_SETCURSOR: return QStringLiteral("WM_SETCURSOR");
+        case WM_MOUSEACTIVATE: return QStringLiteral("WM_MOUSEACTIVATE");
+        case WM_GETMINMAXINFO: return QStringLiteral("WM_GETMINMAXINFO");
+        case WM_NCCREATE: return QStringLiteral("WM_NCCREATE");
+        case WM_NCDESTROY: return QStringLiteral("WM_NCDESTROY");
+        case WM_NCCALCSIZE: return QStringLiteral("WM_NCCALCSIZE");
+        case WM_NCHITTEST: return QStringLiteral("WM_NCHITTEST");
+        case WM_NCPAINT: return QStringLiteral("WM_NCPAINT");
+        case WM_NCACTIVATE: return QStringLiteral("WM_NCACTIVATE");
+        case WM_KEYDOWN: return QStringLiteral("WM_KEYDOWN");
+        case WM_KEYUP: return QStringLiteral("WM_KEYUP");
+        case WM_CHAR: return QStringLiteral("WM_CHAR");
+        case WM_SYSKEYDOWN: return QStringLiteral("WM_SYSKEYDOWN");
+        case WM_SYSKEYUP: return QStringLiteral("WM_SYSKEYUP");
+        case WM_SYSCHAR: return QStringLiteral("WM_SYSCHAR");
+        case WM_COMMAND: return QStringLiteral("WM_COMMAND");
+        case WM_SYSCOMMAND: return QStringLiteral("WM_SYSCOMMAND");
+        case WM_TIMER: return QStringLiteral("WM_TIMER");
+        case WM_HSCROLL: return QStringLiteral("WM_HSCROLL");
+        case WM_VSCROLL: return QStringLiteral("WM_VSCROLL");
+        case WM_INITMENU: return QStringLiteral("WM_INITMENU");
+        case WM_INITMENUPOPUP: return QStringLiteral("WM_INITMENUPOPUP");
+        case WM_MENUSELECT: return QStringLiteral("WM_MENUSELECT");
+        case WM_MENUCHAR: return QStringLiteral("WM_MENUCHAR");
+        case WM_ENTERIDLE: return QStringLiteral("WM_ENTERIDLE");
+        case WM_CHANGEUISTATE: return QStringLiteral("WM_CHANGEUISTATE");
+        case WM_UPDATEUISTATE: return QStringLiteral("WM_UPDATEUISTATE");
+        case WM_QUERYUISTATE: return QStringLiteral("WM_QUERYUISTATE");
+        case WM_CTLCOLORMSGBOX: return QStringLiteral("WM_CTLCOLORMSGBOX");
+        case WM_CTLCOLOREDIT: return QStringLiteral("WM_CTLCOLOREDIT");
+        case WM_CTLCOLORLISTBOX: return QStringLiteral("WM_CTLCOLORLISTBOX");
+        case WM_CTLCOLORBTN: return QStringLiteral("WM_CTLCOLORBTN");
+        case WM_CTLCOLORDLG: return QStringLiteral("WM_CTLCOLORDLG");
+        case WM_CTLCOLORSCROLLBAR: return QStringLiteral("WM_CTLCOLORSCROLLBAR");
+        case WM_CTLCOLORSTATIC: return QStringLiteral("WM_CTLCOLORSTATIC");
+        case WM_MOUSEMOVE: return QStringLiteral("WM_MOUSEMOVE");
+        case WM_LBUTTONDOWN: return QStringLiteral("WM_LBUTTONDOWN");
+        case WM_LBUTTONUP: return QStringLiteral("WM_LBUTTONUP");
+        case WM_LBUTTONDBLCLK: return QStringLiteral("WM_LBUTTONDBLCLK");
+        case WM_RBUTTONDOWN: return QStringLiteral("WM_RBUTTONDOWN");
+        case WM_RBUTTONUP: return QStringLiteral("WM_RBUTTONUP");
+        case WM_RBUTTONDBLCLK: return QStringLiteral("WM_RBUTTONDBLCLK");
+        case WM_MBUTTONDOWN: return QStringLiteral("WM_MBUTTONDOWN");
+        case WM_MBUTTONUP: return QStringLiteral("WM_MBUTTONUP");
+        case WM_MOUSEWHEEL: return QStringLiteral("WM_MOUSEWHEEL");
+        case WM_MOUSEHWHEEL: return QStringLiteral("WM_MOUSEHWHEEL");
+        case WM_INPUT: return QStringLiteral("WM_INPUT");
+        case WM_CAPTURECHANGED: return QStringLiteral("WM_CAPTURECHANGED");
+        case WM_ENTERSIZEMOVE: return QStringLiteral("WM_ENTERSIZEMOVE");
+        case WM_EXITSIZEMOVE: return QStringLiteral("WM_EXITSIZEMOVE");
+        case WM_DROPFILES: return QStringLiteral("WM_DROPFILES");
+        case WM_INPUTLANGCHANGE: return QStringLiteral("WM_INPUTLANGCHANGE");
+        case WM_IME_STARTCOMPOSITION: return QStringLiteral("WM_IME_STARTCOMPOSITION");
+        case WM_IME_COMPOSITION: return QStringLiteral("WM_IME_COMPOSITION");
+        case WM_IME_ENDCOMPOSITION: return QStringLiteral("WM_IME_ENDCOMPOSITION");
+        case WM_DEVICECHANGE: return QStringLiteral("WM_DEVICECHANGE");
+        case WM_COPYDATA: return QStringLiteral("WM_COPYDATA");
+        case WM_NOTIFY: return QStringLiteral("WM_NOTIFY");
+        case WM_APP: return QStringLiteral("WM_APP");
+        default:
+            return QStringLiteral("WM_0x%1")
+                .arg(static_cast<qulonglong>(messageId), 4, 16, QChar('0'))
+                .toUpper();
+        }
+    }
+
+    // winEventName 作用：
+    // - 为跨进程回退模式（WinEventHook）提供事件名映射；
+    // - 方便区分对象创建/焦点/显示等 GUI 事件。
+    QString winEventName(const DWORD eventId)
+    {
+        switch (eventId)
+        {
+        case EVENT_SYSTEM_FOREGROUND: return QStringLiteral("EVENT_SYSTEM_FOREGROUND");
+        case EVENT_SYSTEM_MENUSTART: return QStringLiteral("EVENT_SYSTEM_MENUSTART");
+        case EVENT_SYSTEM_MENUEND: return QStringLiteral("EVENT_SYSTEM_MENUEND");
+        case EVENT_SYSTEM_MOVESIZESTART: return QStringLiteral("EVENT_SYSTEM_MOVESIZESTART");
+        case EVENT_SYSTEM_MOVESIZEEND: return QStringLiteral("EVENT_SYSTEM_MOVESIZEEND");
+        case EVENT_SYSTEM_MINIMIZESTART: return QStringLiteral("EVENT_SYSTEM_MINIMIZESTART");
+        case EVENT_SYSTEM_MINIMIZEEND: return QStringLiteral("EVENT_SYSTEM_MINIMIZEEND");
+        case EVENT_OBJECT_CREATE: return QStringLiteral("EVENT_OBJECT_CREATE");
+        case EVENT_OBJECT_DESTROY: return QStringLiteral("EVENT_OBJECT_DESTROY");
+        case EVENT_OBJECT_SHOW: return QStringLiteral("EVENT_OBJECT_SHOW");
+        case EVENT_OBJECT_HIDE: return QStringLiteral("EVENT_OBJECT_HIDE");
+        case EVENT_OBJECT_REORDER: return QStringLiteral("EVENT_OBJECT_REORDER");
+        case EVENT_OBJECT_FOCUS: return QStringLiteral("EVENT_OBJECT_FOCUS");
+        case EVENT_OBJECT_SELECTION: return QStringLiteral("EVENT_OBJECT_SELECTION");
+        case EVENT_OBJECT_SELECTIONADD: return QStringLiteral("EVENT_OBJECT_SELECTIONADD");
+        case EVENT_OBJECT_SELECTIONREMOVE: return QStringLiteral("EVENT_OBJECT_SELECTIONREMOVE");
+        case EVENT_OBJECT_SELECTIONWITHIN: return QStringLiteral("EVENT_OBJECT_SELECTIONWITHIN");
+        case EVENT_OBJECT_STATECHANGE: return QStringLiteral("EVENT_OBJECT_STATECHANGE");
+        case EVENT_OBJECT_LOCATIONCHANGE: return QStringLiteral("EVENT_OBJECT_LOCATIONCHANGE");
+        case EVENT_OBJECT_NAMECHANGE: return QStringLiteral("EVENT_OBJECT_NAMECHANGE");
+        case EVENT_OBJECT_DESCRIPTIONCHANGE: return QStringLiteral("EVENT_OBJECT_DESCRIPTIONCHANGE");
+        case EVENT_OBJECT_VALUECHANGE: return QStringLiteral("EVENT_OBJECT_VALUECHANGE");
+        case EVENT_OBJECT_PARENTCHANGE: return QStringLiteral("EVENT_OBJECT_PARENTCHANGE");
+        default:
+            return QStringLiteral("EVENT_0x%1")
+                .arg(static_cast<qulonglong>(eventId), 4, 16, QChar('0'))
+                .toUpper();
+        }
     }
 
     // 列索引常量：
@@ -657,6 +805,14 @@ public:
 
         initializeUi();
         refreshRuntimeInfo();
+        startMessageMonitor();
+    }
+
+    // 析构函数：
+    // - 作用：确保关闭详情窗时释放消息钩子句柄，避免系统残留回调。
+    ~WindowDetailDialog() override
+    {
+        stopMessageMonitor();
     }
 
 private:
@@ -766,9 +922,116 @@ private:
         // ==================== 7. 消息钩子 Tab ====================
         QWidget* hookPage = new QWidget(m_tabWidget);
         QVBoxLayout* hookLayout = new QVBoxLayout(hookPage);
+
+        // 概览文本：保留原有消息队列状态、焦点等摘要，便于快速判断窗口活性。
         m_hookText = new QPlainTextEdit(hookPage);
         m_hookText->setReadOnly(true);
-        hookLayout->addWidget(m_hookText, 1);
+        m_hookText->setMaximumHeight(170);
+        hookLayout->addWidget(m_hookText, 0);
+
+        // 控制条：开始/停止/清空/自动滚动/最大行数，风格对齐其他按钮。
+        QHBoxLayout* monitorControlLayout = new QHBoxLayout();
+        m_messageStartButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), hookPage);
+        m_messageStopButton = new QPushButton(QIcon(":/Icon/process_pause.svg"), QString(), hookPage);
+        m_messageClearButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), hookPage);
+        m_messageStartButton->setToolTip(QStringLiteral("开始消息监控"));
+        m_messageStopButton->setToolTip(QStringLiteral("停止消息监控"));
+        m_messageClearButton->setToolTip(QStringLiteral("清空当前消息列表"));
+        m_messageStopButton->setEnabled(false);
+        for (QPushButton* controlButton : { m_messageStartButton, m_messageStopButton, m_messageClearButton })
+        {
+            controlButton->setStyleSheet(blueButtonStyle());
+            controlButton->setFixedWidth(34);
+            monitorControlLayout->addWidget(controlButton);
+        }
+
+        m_messageAutoScrollCheck = new QCheckBox(QStringLiteral("自动滚动到底部"), hookPage);
+        m_messageAutoScrollCheck->setChecked(true);
+        monitorControlLayout->addWidget(m_messageAutoScrollCheck, 0);
+
+        monitorControlLayout->addWidget(new QLabel(QStringLiteral("最大保留行数"), hookPage), 0);
+        m_messageMaxRowsSpin = new QSpinBox(hookPage);
+        m_messageMaxRowsSpin->setRange(200, 50000);
+        m_messageMaxRowsSpin->setValue(5000);
+        m_messageMaxRowsSpin->setStyleSheet(blueInputStyle());
+        monitorControlLayout->addWidget(m_messageMaxRowsSpin, 0);
+
+        m_messageModeLabel = new QLabel(QStringLiteral("采集模式：未启动"), hookPage);
+        m_messageCountLabel = new QLabel(QStringLiteral("已记录: 0, 丢弃: 0"), hookPage);
+        monitorControlLayout->addWidget(m_messageModeLabel, 0);
+        monitorControlLayout->addWidget(m_messageCountLabel, 0);
+        monitorControlLayout->addStretch(1);
+        hookLayout->addLayout(monitorControlLayout);
+
+        // 消息表：按行展示捕获数据，接近 Spy++ 的消息流视角。
+        m_messageTable = new QTableWidget(hookPage);
+        m_messageTable->setColumnCount(8);
+        m_messageTable->setHorizontalHeaderLabels(QStringList{
+            QStringLiteral("时间"),
+            QStringLiteral("通道"),
+            QStringLiteral("HWND"),
+            QStringLiteral("消息ID"),
+            QStringLiteral("消息名"),
+            QStringLiteral("WPARAM"),
+            QStringLiteral("LPARAM"),
+            QStringLiteral("结果/附加")
+        });
+        m_messageTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_messageTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        m_messageTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_messageTable->setAlternatingRowColors(true);
+        m_messageTable->setSortingEnabled(false);
+        m_messageTable->verticalHeader()->setVisible(false);
+        m_messageTable->horizontalHeader()->setStretchLastSection(true);
+        m_messageTable->setContextMenuPolicy(Qt::CustomContextMenu);
+        hookLayout->addWidget(m_messageTable, 1);
+
+        // 表格右键：支持复制整行，方便与日志或抓包结果做对比分析。
+        connect(m_messageTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+            if (m_messageTable == nullptr)
+            {
+                return;
+            }
+            QMenu menu;
+            QAction* copyRowAction = menu.addAction(QStringLiteral("复制选中行"));
+            QAction* selectedAction = menu.exec(m_messageTable->viewport()->mapToGlobal(pos));
+            if (selectedAction != copyRowAction)
+            {
+                return;
+            }
+
+            QStringList rowTexts;
+            const QList<QTableWidgetSelectionRange> selectionRanges = m_messageTable->selectedRanges();
+            for (const QTableWidgetSelectionRange& range : selectionRanges)
+            {
+                for (int row = range.topRow(); row <= range.bottomRow(); ++row)
+                {
+                    QStringList singleRow;
+                    for (int col = 0; col < m_messageTable->columnCount(); ++col)
+                    {
+                        QTableWidgetItem* item = m_messageTable->item(row, col);
+                        singleRow << (item == nullptr ? QString() : item->text());
+                    }
+                    rowTexts << singleRow.join('\t');
+                }
+            }
+            if (!rowTexts.isEmpty())
+            {
+                QApplication::clipboard()->setText(rowTexts.join('\n'));
+            }
+        });
+
+        // 监控控制绑定：开始/停止/清空动作。
+        connect(m_messageStartButton, &QPushButton::clicked, this, [this]() {
+            startMessageMonitor();
+        });
+        connect(m_messageStopButton, &QPushButton::clicked, this, [this]() {
+            stopMessageMonitor();
+        });
+        connect(m_messageClearButton, &QPushButton::clicked, this, [this]() {
+            clearMessageTable();
+        });
+
         m_tabWidget->addTab(hookPage, QStringLiteral("消息钩子"));
 
         // ==================== 8. 高级属性 Tab ====================
@@ -1157,6 +1420,493 @@ private:
             advancedText += QStringLiteral("Properties: <none>\n");
         }
         m_advancedText->setPlainText(advancedText);
+
+        // 刷新时同步更新消息监控状态标签，避免页面切换后显示陈旧模式文本。
+        updateMessageMonitorUiState();
+    }
+
+    // 清空消息表：重置可视列表与计数器。
+    void clearMessageTable()
+    {
+        if (m_messageTable != nullptr)
+        {
+            m_messageTable->setRowCount(0);
+        }
+        m_capturedMessageCount = 0;
+        m_droppedMessageCount = 0;
+        if (m_messageCountLabel != nullptr)
+        {
+            m_messageCountLabel->setText(QStringLiteral("已记录: 0, 丢弃: 0"));
+        }
+    }
+
+    // 启动消息监控：
+    // - 同进程窗口优先使用线程消息钩子（WH_CALLWNDPROC/WH_GETMESSAGE/WH_CALLWNDPROCRET）；
+    // - 跨进程窗口回退为 WinEvent 事件流（不注入 DLL，稳定但不等价于完整消息队列）。
+    void startMessageMonitor()
+    {
+        if (m_messageMonitorRunning.load())
+        {
+            return;
+        }
+
+        HWND windowHandle = toHwnd(m_info.hwndValue);
+        if (::IsWindow(windowHandle) == FALSE)
+        {
+            QMessageBox::warning(this, QStringLiteral("消息监控"), QStringLiteral("目标窗口句柄已失效，无法启动监控。"));
+            return;
+        }
+
+        bool monitorStarted = false;
+        m_messageMonitorMode = QStringLiteral("未启动");
+        m_winEventHookSnapshot = nullptr;
+        const DWORD currentPid = ::GetCurrentProcessId();
+        if (m_info.processId == currentPid && m_info.threadId != 0)
+        {
+            const HINSTANCE moduleHandle = ::GetModuleHandleW(nullptr);
+            m_callWndHook = ::SetWindowsHookExW(
+                WH_CALLWNDPROC,
+                &WindowDetailDialog::callWndHookProc,
+                moduleHandle,
+                static_cast<DWORD>(m_info.threadId));
+            m_getMessageHook = ::SetWindowsHookExW(
+                WH_GETMESSAGE,
+                &WindowDetailDialog::getMessageHookProc,
+                moduleHandle,
+                static_cast<DWORD>(m_info.threadId));
+            m_callWndRetHook = ::SetWindowsHookExW(
+                WH_CALLWNDPROCRET,
+                &WindowDetailDialog::callWndRetHookProc,
+                moduleHandle,
+                static_cast<DWORD>(m_info.threadId));
+
+            if (m_callWndHook != nullptr || m_getMessageHook != nullptr || m_callWndRetHook != nullptr)
+            {
+                registerThreadDialog(static_cast<DWORD>(m_info.threadId), this);
+                m_threadRegistered = true;
+                m_messageMonitorMode = QStringLiteral("线程消息钩子（同进程）");
+                monitorStarted = true;
+            }
+        }
+
+        if (!monitorStarted)
+        {
+            m_winEventHook = ::SetWinEventHook(
+                EVENT_MIN,
+                EVENT_MAX,
+                nullptr,
+                &WindowDetailDialog::winEventHookProc,
+                static_cast<DWORD>(m_info.processId),
+                static_cast<DWORD>(m_info.threadId),
+                WINEVENT_OUTOFCONTEXT);
+            if (m_winEventHook != nullptr)
+            {
+                registerEventHookDialog(m_winEventHook, this);
+                m_eventRegistered = true;
+                m_winEventHookSnapshot = m_winEventHook;
+                m_messageMonitorMode = QStringLiteral("WinEvent 回退（跨进程）");
+                monitorStarted = true;
+            }
+        }
+
+        if (!monitorStarted)
+        {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("消息监控"),
+                QStringLiteral("启动失败：目标线程不允许安装消息钩子，且 WinEvent 回退也失败。"));
+            return;
+        }
+
+        m_messageMonitorRunning.store(true);
+        updateMessageMonitorUiState();
+
+        kLogEvent logEvent;
+        info << logEvent
+            << "[WindowDetailDialog] 消息监控已启动, hwnd="
+            << hwndToText(m_info.hwndValue).toStdString()
+            << ", mode="
+            << m_messageMonitorMode.toStdString()
+            << eol;
+    }
+
+    // 停止消息监控：释放所有钩子并反注册回调映射。
+    void stopMessageMonitor()
+    {
+        const bool wasRunning = m_messageMonitorRunning.exchange(false);
+
+        if (m_callWndHook != nullptr)
+        {
+            ::UnhookWindowsHookEx(m_callWndHook);
+            m_callWndHook = nullptr;
+        }
+        if (m_getMessageHook != nullptr)
+        {
+            ::UnhookWindowsHookEx(m_getMessageHook);
+            m_getMessageHook = nullptr;
+        }
+        if (m_callWndRetHook != nullptr)
+        {
+            ::UnhookWindowsHookEx(m_callWndRetHook);
+            m_callWndRetHook = nullptr;
+        }
+        if (m_winEventHook != nullptr)
+        {
+            ::UnhookWinEvent(m_winEventHook);
+            m_winEventHook = nullptr;
+        }
+
+        if (m_threadRegistered)
+        {
+            unregisterThreadDialog(static_cast<DWORD>(m_info.threadId), this);
+            m_threadRegistered = false;
+        }
+        if (m_eventRegistered)
+        {
+            unregisterEventHookDialog(m_winEventHookSnapshot, this);
+            m_eventRegistered = false;
+            m_winEventHookSnapshot = nullptr;
+        }
+
+        if (wasRunning)
+        {
+            kLogEvent logEvent;
+            info << logEvent
+                << "[WindowDetailDialog] 消息监控已停止, hwnd="
+                << hwndToText(m_info.hwndValue).toStdString()
+                << eol;
+        }
+
+        m_messageMonitorMode = QStringLiteral("已停止");
+        updateMessageMonitorUiState();
+    }
+
+    // updateMessageMonitorUiState 作用：
+    // - 统一更新按钮状态与模式文本，避免多处散落状态刷新逻辑；
+    // - 同时刷新“已记录/丢弃”计数标签。
+    void updateMessageMonitorUiState()
+    {
+        const bool running = m_messageMonitorRunning.load();
+        if (m_messageStartButton != nullptr)
+        {
+            m_messageStartButton->setEnabled(!running);
+        }
+        if (m_messageStopButton != nullptr)
+        {
+            m_messageStopButton->setEnabled(running);
+        }
+        if (m_messageModeLabel != nullptr)
+        {
+            m_messageModeLabel->setText(
+                running
+                ? QStringLiteral("采集模式：%1").arg(m_messageMonitorMode)
+                : QStringLiteral("采集模式：%1").arg(m_messageMonitorMode));
+        }
+        if (m_messageCountLabel != nullptr)
+        {
+            m_messageCountLabel->setText(
+                QStringLiteral("已记录: %1, 丢弃: %2")
+                .arg(m_capturedMessageCount)
+                .arg(m_droppedMessageCount));
+        }
+    }
+
+    // appendMessageRow 作用：
+    // - 仅在 UI 线程向表格追加一条消息记录；
+    // - 当超过最大行数时删除最早行，并累计丢弃计数。
+    void appendMessageRow(
+        const QString& channelText,
+        const quint64 hwndValue,
+        const quint64 messageId,
+        const quint64 wParamValue,
+        const quint64 lParamValue,
+        const quint64 resultValue,
+        const QString& extraText)
+    {
+        if (m_messageTable == nullptr)
+        {
+            return;
+        }
+
+        const int maxRows = (m_messageMaxRowsSpin == nullptr) ? 5000 : m_messageMaxRowsSpin->value();
+        while (m_messageTable->rowCount() >= maxRows)
+        {
+            m_messageTable->removeRow(0);
+            ++m_droppedMessageCount;
+        }
+
+        const int rowIndex = m_messageTable->rowCount();
+        m_messageTable->insertRow(rowIndex);
+
+        const QString messageNameText = (channelText.contains(QStringLiteral("WinEvent")))
+            ? winEventName(static_cast<DWORD>(messageId))
+            : windowMessageName(static_cast<UINT>(messageId));
+
+        const QString messageIdText = channelText.contains(QStringLiteral("WinEvent"))
+            ? QStringLiteral("0x%1").arg(static_cast<qulonglong>(messageId), 4, 16, QChar('0')).toUpper()
+            : QStringLiteral("0x%1").arg(static_cast<qulonglong>(messageId), 4, 16, QChar('0')).toUpper();
+
+        const QString resultColumnText = extraText.trimmed().isEmpty()
+            ? toHexText64(resultValue)
+            : QStringLiteral("%1 | %2").arg(toHexText64(resultValue), extraText);
+
+        m_messageTable->setItem(rowIndex, 0, new QTableWidgetItem(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz"))));
+        m_messageTable->setItem(rowIndex, 1, new QTableWidgetItem(channelText));
+        m_messageTable->setItem(rowIndex, 2, new QTableWidgetItem(hwndToText(hwndValue)));
+        m_messageTable->setItem(rowIndex, 3, new QTableWidgetItem(messageIdText));
+        m_messageTable->setItem(rowIndex, 4, new QTableWidgetItem(messageNameText));
+        m_messageTable->setItem(rowIndex, 5, new QTableWidgetItem(toHexText64(wParamValue)));
+        m_messageTable->setItem(rowIndex, 6, new QTableWidgetItem(toHexText64(lParamValue)));
+        m_messageTable->setItem(rowIndex, 7, new QTableWidgetItem(resultColumnText));
+
+        ++m_capturedMessageCount;
+        updateMessageMonitorUiState();
+
+        if (m_messageAutoScrollCheck != nullptr && m_messageAutoScrollCheck->isChecked())
+        {
+            m_messageTable->scrollToBottom();
+        }
+    }
+
+    // threadHookDispatch 作用：
+    // - 由静态消息钩子回调调用；
+    // - 根据 threadId 找到对应详情窗，并把消息异步转发到 UI 线程。
+    static void threadHookDispatch(
+        const DWORD threadId,
+        const QString& channelText,
+        HWND targetHwnd,
+        const UINT messageId,
+        const WPARAM wParamValue,
+        const LPARAM lParamValue,
+        const LRESULT resultValue)
+    {
+        std::vector<WindowDetailDialog*> dialogList;
+        {
+            std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
+            const auto it = s_threadDialogMap.find(threadId);
+            if (it != s_threadDialogMap.end())
+            {
+                dialogList = it->second;
+            }
+        }
+
+        if (dialogList.empty() || targetHwnd == nullptr)
+        {
+            return;
+        }
+
+        for (WindowDetailDialog* dialog : dialogList)
+        {
+            if (dialog == nullptr || !dialog->m_messageMonitorRunning.load())
+            {
+                continue;
+            }
+            if (targetHwnd != dialog->targetWindowHandle())
+            {
+                continue;
+            }
+
+            const QPointer<WindowDetailDialog> guardDialog(dialog);
+            const quint64 hwndValue = static_cast<quint64>(reinterpret_cast<quintptr>(targetHwnd));
+            QMetaObject::invokeMethod(qApp, [guardDialog, channelText, hwndValue, messageId, wParamValue, lParamValue, resultValue]() {
+                if (guardDialog == nullptr)
+                {
+                    return;
+                }
+                guardDialog->appendMessageRow(
+                    channelText,
+                    hwndValue,
+                    static_cast<quint64>(messageId),
+                    static_cast<quint64>(wParamValue),
+                    static_cast<quint64>(lParamValue),
+                    static_cast<quint64>(resultValue),
+                    QString());
+                }, Qt::QueuedConnection);
+        }
+    }
+
+    // callWndHookProc：捕获 SendMessage 路径的入站消息（调用前）。
+    static LRESULT CALLBACK callWndHookProc(const int code, const WPARAM wParam, const LPARAM lParam)
+    {
+        if (code >= 0 && lParam != 0)
+        {
+            const CWPSTRUCT* callInfo = reinterpret_cast<const CWPSTRUCT*>(lParam);
+            if (callInfo != nullptr)
+            {
+                threadHookDispatch(
+                    ::GetCurrentThreadId(),
+                    QStringLiteral("WH_CALLWNDPROC"),
+                    callInfo->hwnd,
+                    callInfo->message,
+                    callInfo->wParam,
+                    callInfo->lParam,
+                    0);
+            }
+        }
+        return ::CallNextHookEx(nullptr, code, wParam, lParam);
+    }
+
+    // getMessageHookProc：捕获 PostMessage/消息队列路径消息。
+    static LRESULT CALLBACK getMessageHookProc(const int code, const WPARAM wParam, const LPARAM lParam)
+    {
+        if (code >= 0 && lParam != 0)
+        {
+            const MSG* msgInfo = reinterpret_cast<const MSG*>(lParam);
+            if (msgInfo != nullptr)
+            {
+                threadHookDispatch(
+                    ::GetCurrentThreadId(),
+                    QStringLiteral("WH_GETMESSAGE"),
+                    msgInfo->hwnd,
+                    msgInfo->message,
+                    msgInfo->wParam,
+                    msgInfo->lParam,
+                    static_cast<LRESULT>(wParam));
+            }
+        }
+        return ::CallNextHookEx(nullptr, code, wParam, lParam);
+    }
+
+    // callWndRetHookProc：捕获 SendMessage 返回后消息，可看到 lResult。
+    static LRESULT CALLBACK callWndRetHookProc(const int code, const WPARAM wParam, const LPARAM lParam)
+    {
+        if (code >= 0 && lParam != 0)
+        {
+            const CWPRETSTRUCT* retInfo = reinterpret_cast<const CWPRETSTRUCT*>(lParam);
+            if (retInfo != nullptr)
+            {
+                threadHookDispatch(
+                    ::GetCurrentThreadId(),
+                    QStringLiteral("WH_CALLWNDPROCRET"),
+                    retInfo->hwnd,
+                    retInfo->message,
+                    retInfo->wParam,
+                    retInfo->lParam,
+                    retInfo->lResult);
+            }
+        }
+        return ::CallNextHookEx(nullptr, code, wParam, lParam);
+    }
+
+    // winEventHookProc：跨进程回退模式回调（无 DLL 注入）。
+    static void CALLBACK winEventHookProc(
+        HWINEVENTHOOK hookHandle,
+        const DWORD eventId,
+        HWND windowHandle,
+        const LONG objectId,
+        const LONG childId,
+        const DWORD eventThreadId,
+        const DWORD eventTimeMs)
+    {
+        WindowDetailDialog* dialog = nullptr;
+        {
+            std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
+            const auto it = s_eventHookMap.find(hookHandle);
+            if (it != s_eventHookMap.end())
+            {
+                dialog = it->second;
+            }
+        }
+        if (dialog == nullptr || !dialog->m_messageMonitorRunning.load())
+        {
+            return;
+        }
+        if (windowHandle == nullptr || windowHandle != dialog->targetWindowHandle())
+        {
+            return;
+        }
+
+        const QPointer<WindowDetailDialog> guardDialog(dialog);
+        const quint64 hwndValue = static_cast<quint64>(reinterpret_cast<quintptr>(windowHandle));
+        const QString extraText = QStringLiteral("obj=%1, child=%2, thread=%3, time=%4")
+            .arg(objectId)
+            .arg(childId)
+            .arg(eventThreadId)
+            .arg(eventTimeMs);
+        QMetaObject::invokeMethod(qApp, [guardDialog, hwndValue, eventId, objectId, childId, eventThreadId, eventTimeMs, extraText]() {
+            if (guardDialog == nullptr)
+            {
+                return;
+            }
+            guardDialog->appendMessageRow(
+                QStringLiteral("WinEvent"),
+                hwndValue,
+                static_cast<quint64>(eventId),
+                static_cast<quint64>(static_cast<qint64>(objectId)),
+                static_cast<quint64>(static_cast<qint64>(childId)),
+                static_cast<quint64>(eventThreadId),
+                extraText + QStringLiteral(", tick=%1").arg(eventTimeMs));
+            }, Qt::QueuedConnection);
+    }
+
+    // 注册 thread -> dialog 映射：支持同一线程被多个详情窗同时观察。
+    static void registerThreadDialog(const DWORD threadId, WindowDetailDialog* dialog)
+    {
+        if (threadId == 0 || dialog == nullptr)
+        {
+            return;
+        }
+        std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
+        std::vector<WindowDetailDialog*>& dialogList = s_threadDialogMap[threadId];
+        const bool existed = std::find(dialogList.begin(), dialogList.end(), dialog) != dialogList.end();
+        if (!existed)
+        {
+            dialogList.push_back(dialog);
+        }
+    }
+
+    // 反注册 thread -> dialog 映射，避免对已关闭窗口继续投递消息。
+    static void unregisterThreadDialog(const DWORD threadId, WindowDetailDialog* dialog)
+    {
+        if (threadId == 0 || dialog == nullptr)
+        {
+            return;
+        }
+        std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
+        const auto it = s_threadDialogMap.find(threadId);
+        if (it == s_threadDialogMap.end())
+        {
+            return;
+        }
+
+        std::vector<WindowDetailDialog*>& dialogList = it->second;
+        dialogList.erase(std::remove(dialogList.begin(), dialogList.end(), dialog), dialogList.end());
+        if (dialogList.empty())
+        {
+            s_threadDialogMap.erase(it);
+        }
+    }
+
+    // 注册 WinEvent hook -> dialog 映射，供回调快速查找目标详情窗。
+    static void registerEventHookDialog(HWINEVENTHOOK hookHandle, WindowDetailDialog* dialog)
+    {
+        if (hookHandle == nullptr || dialog == nullptr)
+        {
+            return;
+        }
+        std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
+        s_eventHookMap[hookHandle] = dialog;
+    }
+
+    // 反注册 WinEvent 映射：窗口关闭或停止监控时必须调用。
+    static void unregisterEventHookDialog(HWINEVENTHOOK hookHandle, WindowDetailDialog* dialog)
+    {
+        if (hookHandle == nullptr || dialog == nullptr)
+        {
+            return;
+        }
+        std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
+        const auto it = s_eventHookMap.find(hookHandle);
+        if (it != s_eventHookMap.end() && it->second == dialog)
+        {
+            s_eventHookMap.erase(it);
+        }
+    }
+
+    // 目标窗口句柄访问器：统一从缓存快照里恢复 HWND。
+    HWND targetWindowHandle() const
+    {
+        return toHwnd(m_info.hwndValue);
     }
 
     // 应用改动：把标题、位置、置顶、透明度写回目标窗口。
@@ -1262,6 +2012,31 @@ private:
         text += QStringLiteral("[进程线程]\n%1\n\n").arg(m_processThreadText->toPlainText());
         text += QStringLiteral("[类信息]\n%1\n\n").arg(m_classText->toPlainText());
         text += QStringLiteral("[消息钩子]\n%1\n\n").arg(m_hookText->toPlainText());
+        text += QStringLiteral("[消息记录]\n");
+        if (m_messageTable != nullptr)
+        {
+            QStringList headerList;
+            for (int col = 0; col < m_messageTable->columnCount(); ++col)
+            {
+                const QTableWidgetItem* headerItem = m_messageTable->horizontalHeaderItem(col);
+                headerList << (headerItem == nullptr ? QStringLiteral("Col%1").arg(col) : headerItem->text());
+            }
+            text += headerList.join('\t');
+            text += QStringLiteral("\n");
+
+            for (int row = 0; row < m_messageTable->rowCount(); ++row)
+            {
+                QStringList rowTextList;
+                for (int col = 0; col < m_messageTable->columnCount(); ++col)
+                {
+                    QTableWidgetItem* item = m_messageTable->item(row, col);
+                    rowTextList << (item == nullptr ? QString() : item->text());
+                }
+                text += rowTextList.join('\t');
+                text += QStringLiteral("\n");
+            }
+        }
+        text += QStringLiteral("\n");
         text += QStringLiteral("[高级属性]\n%1\n").arg(m_advancedText->toPlainText());
         return text;
     }
@@ -1292,13 +2067,42 @@ private:
     QPlainTextEdit* m_processThreadText = nullptr; // 进程线程页文本。
     QPlainTextEdit* m_classText = nullptr;         // 类信息页文本。
     QPlainTextEdit* m_hookText = nullptr;          // 钩子页文本。
+    QPushButton* m_messageStartButton = nullptr;   // 消息监控开始按钮。
+    QPushButton* m_messageStopButton = nullptr;    // 消息监控停止按钮。
+    QPushButton* m_messageClearButton = nullptr;   // 消息列表清空按钮。
+    QCheckBox* m_messageAutoScrollCheck = nullptr; // 自动滚动复选框。
+    QSpinBox* m_messageMaxRowsSpin = nullptr;      // 消息表最大保留行数。
+    QLabel* m_messageModeLabel = nullptr;          // 当前采集模式标签。
+    QLabel* m_messageCountLabel = nullptr;         // 已记录/丢弃计数标签。
+    QTableWidget* m_messageTable = nullptr;        // 消息列表表格。
     QPlainTextEdit* m_advancedText = nullptr;      // 高级页文本。
 
     QPushButton* m_refreshButton = nullptr;    // 刷新按钮。
     QPushButton* m_applyButton = nullptr;      // 应用按钮。
     QPushButton* m_exportButton = nullptr;     // 导出按钮。
     QPushButton* m_closeButton = nullptr;      // 关闭按钮。
+
+    HHOOK m_callWndHook = nullptr;             // WH_CALLWNDPROC 句柄。
+    HHOOK m_getMessageHook = nullptr;          // WH_GETMESSAGE 句柄。
+    HHOOK m_callWndRetHook = nullptr;          // WH_CALLWNDPROCRET 句柄。
+    HWINEVENTHOOK m_winEventHook = nullptr;    // WinEvent 回退句柄。
+    HWINEVENTHOOK m_winEventHookSnapshot = nullptr; // 用于反注册映射的 hook 快照。
+    std::atomic_bool m_messageMonitorRunning{ false }; // 消息监控运行状态。
+    bool m_threadRegistered = false;           // 是否已注册 thread->dialog 映射。
+    bool m_eventRegistered = false;            // 是否已注册 eventHook->dialog 映射。
+    int m_capturedMessageCount = 0;            // 已写入消息表的消息数量。
+    int m_droppedMessageCount = 0;             // 因超过最大行数而丢弃的消息数量。
+    QString m_messageMonitorMode = QStringLiteral("未启动"); // 当前监控模式文本。
+
+    static std::mutex s_monitorRegistryMutex;  // 回调映射表互斥锁，防止并发竞态。
+    static std::unordered_map<DWORD, std::vector<WindowDetailDialog*>> s_threadDialogMap; // threadId -> 详情窗列表。
+    static std::unordered_map<HWINEVENTHOOK, WindowDetailDialog*> s_eventHookMap; // WinEvent hook -> 详情窗。
 };
+
+// 静态成员定义：统一管理消息回调分发映射。
+std::mutex WindowDetailDialog::s_monitorRegistryMutex;
+std::unordered_map<DWORD, std::vector<WindowDetailDialog*>> WindowDetailDialog::s_threadDialogMap;
+std::unordered_map<HWINEVENTHOOK, WindowDetailDialog*> WindowDetailDialog::s_eventHookMap;
 
 OtherDock::OtherDock(QWidget* parent)
     : QWidget(parent)
@@ -1771,8 +2575,9 @@ void OtherDock::refreshWindowListAsync()
         return;
     }
 
-    kLogEvent startEvent;
-    info << startEvent
+    // 异步刷新链路统一复用 refreshEvent，确保“开始/完成”日志可按同一 GUID 追踪。
+    kLogEvent refreshEvent;
+    info << refreshEvent
         << "[OtherDock] 启动异步窗口枚举, filterMode="
         << filterModeText(m_filterModeCombo->currentIndex()).toStdString()
         << ", groupMode="
@@ -1788,7 +2593,7 @@ void OtherDock::refreshWindowListAsync()
     kPro.set(m_refreshProgressPid, "开始枚举窗口", 0, 5.0f);
 
     QPointer<OtherDock> guardThis(this);
-    std::thread([guardThis]() {
+    std::thread([guardThis, refreshEvent]() {
         std::vector<WindowInfo> snapshot;
         snapshot.reserve(512);
 
@@ -1801,7 +2606,7 @@ void OtherDock::refreshWindowListAsync()
         {
             return;
         }
-        QMetaObject::invokeMethod(qApp, [guardThis, snapshot = std::move(snapshot)]() mutable {
+        QMetaObject::invokeMethod(qApp, [guardThis, snapshot = std::move(snapshot), refreshEvent]() mutable {
             if (guardThis == nullptr)
             {
                 return;
@@ -1877,8 +2682,7 @@ void OtherDock::refreshWindowListAsync()
             guardThis->m_refreshRunning.store(false);
             kPro.set(guardThis->m_refreshProgressPid, "窗口枚举完成", 0, 100.0f);
 
-            kLogEvent event;
-            info << event
+            info << refreshEvent
                 << "[OtherDock] 枚举完成，当前窗口="
                 << snapshot.size()
                 << ", 退出保留="
@@ -1948,8 +2752,9 @@ bool OtherDock::passFilter(const WindowInfo& info) const
 
 void OtherDock::rebuildWindowTreeFromSnapshot()
 {
-    kLogEvent startEvent;
-    dbg << startEvent
+    // 重建树链路统一复用 rebuildEvent，确保“开始/完成”日志可按同一 GUID 追踪。
+    kLogEvent rebuildEvent;
+    dbg << rebuildEvent
         << "[OtherDock] 重建窗口树开始, snapshotCount="
         << m_windowSnapshot.size()
         << ", filterMode="
@@ -2187,8 +2992,7 @@ void OtherDock::rebuildWindowTreeFromSnapshot()
         }
     }
 
-    kLogEvent finishEvent;
-    dbg << finishEvent
+    dbg << rebuildEvent
         << "[OtherDock] 重建窗口树完成, topLevelCount="
         << m_windowTree->topLevelItemCount()
         << eol;
@@ -2433,62 +3237,46 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
     }
     else if (selectedAction == terminateAction)
     {
-        kLogEvent event;
-        warn << event
-            << "[OtherDock] 执行操作：结束进程确认, pid="
+        // 结束进程动作：按规范仅写日志，不再弹窗确认或结果提示。
+        kLogEvent actionEvent;
+        warn << actionEvent
+            << "[OtherDock] 执行操作：结束进程, pid="
             << windowInfo->processId
             << eol;
-        const QMessageBox::StandardButton userChoice = QMessageBox::question(
-            this,
-            QStringLiteral("结束进程"),
-            QStringLiteral("确定结束 PID=%1 (%2) ?")
-                .arg(windowInfo->processId)
-                .arg(windowInfo->processNameText),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No);
-        if (userChoice == QMessageBox::Yes)
+
+        HANDLE processHandle = ::OpenProcess(PROCESS_TERMINATE, FALSE, windowInfo->processId);
+        if (processHandle == nullptr)
         {
-            HANDLE processHandle = ::OpenProcess(PROCESS_TERMINATE, FALSE, windowInfo->processId);
-            if (processHandle == nullptr)
-            {
-                kLogEvent openEvent;
-                err << openEvent
-                    << "[OtherDock] 结束进程失败：OpenProcess失败, pid="
-                    << windowInfo->processId
-                    << eol;
-                QMessageBox::warning(this, QStringLiteral("结束进程"), QStringLiteral("打开进程失败，可能权限不足。"));
-            }
-            else
-            {
-                const BOOL terminateOk = ::TerminateProcess(processHandle, 0);
-                ::CloseHandle(processHandle);
-                if (terminateOk == FALSE)
-                {
-                    kLogEvent terminateEvent;
-                    err << terminateEvent
-                        << "[OtherDock] 结束进程失败：TerminateProcess失败, pid="
-                        << windowInfo->processId
-                        << eol;
-                    QMessageBox::warning(this, QStringLiteral("结束进程"), QStringLiteral("TerminateProcess 调用失败。"));
-                }
-                else
-                {
-                    kLogEvent terminateEvent;
-                    warn << terminateEvent
-                        << "[OtherDock] 结束进程成功, pid="
-                        << windowInfo->processId
-                        << eol;
-                }
-            }
-        }
-        else
-        {
-            kLogEvent event;
-            dbg << event
-                << "[OtherDock] 结束进程操作已取消, pid="
+            err << actionEvent
+                << "[OtherDock] 结束进程失败：OpenProcess失败, pid="
                 << windowInfo->processId
                 << eol;
         }
+        else
+        {
+            const BOOL terminateOk = ::TerminateProcess(processHandle, 0);
+            ::CloseHandle(processHandle);
+            if (terminateOk == FALSE)
+            {
+                err << actionEvent
+                    << "[OtherDock] 结束进程失败：TerminateProcess失败, pid="
+                    << windowInfo->processId
+                    << eol;
+            }
+            else
+            {
+                warn << actionEvent
+                    << "[OtherDock] 结束进程成功, pid="
+                    << windowInfo->processId
+                    << eol;
+            }
+        }
+        dbg << actionEvent
+            << "[OtherDock] 结束进程操作处理完毕, pid="
+            << windowInfo->processId
+            << ", processName="
+            << windowInfo->processNameText.toStdString()
+            << eol;
     }
 
     // 任意状态类动作后都刷新一次，确保列表与真实状态一致。

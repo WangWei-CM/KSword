@@ -383,32 +383,126 @@ void NetworkDock::initializeConnections()
             openPacketDetailWindowFromTableRow(m_packetTable, row);
         });
 
-    // 右键菜单：查看详情 / 复制行 / 跟踪此进程 / 转到进程详细信息。
+    // 右键菜单：查看详情 / 复制行 / 批量复制ASCII/HEX / 重放到请求构造 / 跟踪此进程 / 转到进程详细信息。
     connect(m_packetTable, &QWidget::customContextMenuRequested, this,
         [this](const QPoint& position)
         {
-            const QModelIndex index = m_packetTable->indexAt(position);
-            if (!index.isValid())
+            if (m_packetTable == nullptr)
             {
                 return;
             }
 
+            const QModelIndex index = m_packetTable->indexAt(position);
+            const bool hasSelection =
+                (m_packetTable->selectionModel() != nullptr && m_packetTable->selectionModel()->hasSelection());
+            if (!index.isValid() && !hasSelection)
+            {
+                return;
+            }
+
+            // collectTargetRows 作用：
+            // - 收集本次右键动作要处理的行号集合；
+            // - 若已有多选则优先用多选结果；否则回退到当前右键行。
+            const auto collectTargetRows = [this, index]() -> std::vector<int>
+                {
+                    std::vector<int> rowList;
+                    if (m_packetTable != nullptr && m_packetTable->selectionModel() != nullptr)
+                    {
+                        const QModelIndexList selectedRowIndexList =
+                            m_packetTable->selectionModel()->selectedRows(toPacketColumn(PacketTableColumn::Time));
+                        rowList.reserve(static_cast<std::size_t>(selectedRowIndexList.size()));
+                        for (const QModelIndex& selectedRowIndex : selectedRowIndexList)
+                        {
+                            rowList.push_back(selectedRowIndex.row());
+                        }
+                    }
+                    if (rowList.empty() && index.isValid())
+                    {
+                        rowList.push_back(index.row());
+                    }
+
+                    std::sort(rowList.begin(), rowList.end());
+                    rowList.erase(std::unique(rowList.begin(), rowList.end()), rowList.end());
+                    return rowList;
+                };
+
+            // collectSequenceListByRows 作用：
+            // - 按行号提取报文 sequenceId（存于“时间列 UserRole”）；
+            // - 后续复制 ASCII/HEX 与打开详情都依赖该序号回查缓存实体。
+            const auto collectSequenceListByRows = [this](const std::vector<int>& rowList) -> std::vector<std::uint64_t>
+                {
+                    std::vector<std::uint64_t> sequenceList;
+                    sequenceList.reserve(rowList.size());
+                    for (const int row : rowList)
+                    {
+                        if (m_packetTable == nullptr || row < 0 || row >= m_packetTable->rowCount())
+                        {
+                            continue;
+                        }
+
+                        QTableWidgetItem* timeItem = m_packetTable->item(row, toPacketColumn(PacketTableColumn::Time));
+                        if (timeItem == nullptr)
+                        {
+                            continue;
+                        }
+
+                        const QVariant sequenceVariant = timeItem->data(Qt::UserRole);
+                        if (!sequenceVariant.isValid())
+                        {
+                            continue;
+                        }
+                        sequenceList.push_back(static_cast<std::uint64_t>(sequenceVariant.toULongLong()));
+                    }
+                    std::sort(sequenceList.begin(), sequenceList.end());
+                    sequenceList.erase(std::unique(sequenceList.begin(), sequenceList.end()), sequenceList.end());
+                    return sequenceList;
+                };
+
             QMenu contextMenu(this);
             QAction* detailAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("查看报文详情"));
             QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制行"));
+            QAction* copyAsciiAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制选中报文ASCII"));
+            // 仅正文复制动作：不拼接报文头部元信息，只输出 payload 的 ASCII 文本。
+            QAction* copyPayloadAsciiOnlyAction = contextMenu.addAction(
+                QIcon(":/Icon/process_copy_row.svg"),
+                QStringLiteral("复制选中payload ASCII（仅正文）"));
+            QAction* copyHexAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制选中报文16进制"));
+            // 报文重放动作：把单条报文自动填充到“请求构造”页，用户可二次编辑再执行。
+            QAction* replayToManualRequestAction = contextMenu.addAction(
+                QIcon(":/Icon/process_refresh.svg"),
+                QStringLiteral("重放到请求构造"));
+            replayToManualRequestAction->setToolTip(QStringLiteral("将当前报文填充到请求构造页，便于快速重放。"));
+            contextMenu.addSeparator();
             QAction* trackProcessAction = contextMenu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("跟踪此进程"));
             QAction* gotoProcessDetailAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
+
             QAction* selectedAction = contextMenu.exec(m_packetTable->viewport()->mapToGlobal(position));
+            if (selectedAction == nullptr)
+            {
+                return;
+            }
+
+            const std::vector<int> targetRows = collectTargetRows();
+            const int anchorRow = index.isValid() ? index.row() : (targetRows.empty() ? -1 : targetRows.front());
             if (selectedAction == detailAction)
             {
-                openPacketDetailWindowFromTableRow(m_packetTable, index.row());
+                if (anchorRow >= 0)
+                {
+                    openPacketDetailWindowFromTableRow(m_packetTable, anchorRow);
+                }
             }
             else if (selectedAction == copyRowAction)
             {
+                if (anchorRow < 0)
+                {
+                    return;
+                }
+
                 QStringList rowTextList;
+                rowTextList.reserve(m_packetTable->columnCount());
                 for (int columnIndex = 0; columnIndex < m_packetTable->columnCount(); ++columnIndex)
                 {
-                    QTableWidgetItem* item = m_packetTable->item(index.row(), columnIndex);
+                    QTableWidgetItem* item = m_packetTable->item(anchorRow, columnIndex);
                     rowTextList.push_back(item == nullptr ? QString() : item->text());
                 }
                 if (QGuiApplication::clipboard() != nullptr)
@@ -418,17 +512,114 @@ void NetworkDock::initializeConnections()
 
                 kLogEvent copyPacketRowEvent;
                 dbg << copyPacketRowEvent
-                    << "[NetworkDock] 已复制报文行, row=" << index.row()
+                    << "[NetworkDock] 已复制报文行, row=" << anchorRow
                     << ", columnCount=" << m_packetTable->columnCount()
                     << eol;
             }
+
+            else if (
+                selectedAction == copyAsciiAction ||
+                selectedAction == copyPayloadAsciiOnlyAction ||
+                selectedAction == copyHexAction)
+            {
+                const std::vector<std::uint64_t> sequenceList = collectSequenceListByRows(targetRows);
+                if (sequenceList.empty())
+                {
+                    return;
+                }
+
+                // copyAsciiWithHeaderMode 用途：是否复制“含报文头元信息”的 ASCII 模式。
+                const bool copyAsciiWithHeaderMode = (selectedAction == copyAsciiAction);
+                // copyPayloadAsciiOnlyMode 用途：是否复制“仅 payload 正文”的 ASCII 模式。
+                const bool copyPayloadAsciiOnlyMode = (selectedAction == copyPayloadAsciiOnlyAction);
+                // copyHexMode 用途：是否复制十六进制模式。
+                const bool copyHexMode = (selectedAction == copyHexAction);
+
+                // blockTextList 用途：按“每个报文一个文本块”拼接复制结果。
+                QStringList blockTextList;
+                blockTextList.reserve(static_cast<int>(sequenceList.size()));
+                for (const std::uint64_t sequenceId : sequenceList)
+                {
+                    const auto iterator = m_packetBySequence.find(sequenceId);
+                    if (iterator == m_packetBySequence.end())
+                    {
+                        continue;
+                    }
+
+                    const ks::network::PacketRecord& packetRecord = iterator->second;
+                    if (copyHexMode)
+                    {
+                        // 十六进制模式：始终保留报文头元信息，方便回溯上下文。
+                        blockTextList.push_back(QStringLiteral("%1\n%2")
+                            .arg(buildPacketCopyHeaderLine(packetRecord))
+                            .arg(buildPacketHexAsciiDumpText(packetRecord)));
+                        continue;
+                    }
+
+                    const QString payloadAsciiText = buildPayloadAsciiFullText(packetRecord);
+                    if (copyPayloadAsciiOnlyMode)
+                    {
+                        // 仅正文模式：不拼接任何报文头字段，只保留 payload ASCII。
+                        blockTextList.push_back(payloadAsciiText);
+                        continue;
+                    }
+
+                    if (copyAsciiWithHeaderMode)
+                    {
+                        // ASCII 标准模式：保留报文头元信息 + payload ASCII 正文。
+                        blockTextList.push_back(QStringLiteral("%1\n%2")
+                            .arg(buildPacketCopyHeaderLine(packetRecord))
+                            .arg(payloadAsciiText));
+                    }
+                }
+
+                if (blockTextList.isEmpty())
+                {
+                    return;
+                }
+
+                // blockJoinSeparator 用途：统一多报文块分隔符，避免复制后粘连难读。
+                const QString blockJoinSeparator = copyPayloadAsciiOnlyMode
+                    ? QStringLiteral("\n\n")
+                    : QStringLiteral("\n\n============================================================\n\n");
+                const QString finalText = blockTextList.join(blockJoinSeparator);
+                if (QGuiApplication::clipboard() != nullptr)
+                {
+                    QGuiApplication::clipboard()->setText(finalText);
+                }
+
+                // copyModeText 用途：日志输出的模式标识，便于后续问题定位。
+                const std::string copyModeText = copyHexMode
+                    ? "hex"
+                    : (copyPayloadAsciiOnlyMode ? "ascii_payload_only" : "ascii");
+
+                kLogEvent copyPacketBatchEvent;
+                info << copyPacketBatchEvent
+                    << "[NetworkDock] 批量复制报文内容, mode=" << copyModeText
+                    << ", packetCount=" << sequenceList.size()
+                    << ", outputChars=" << finalText.size()
+                    << eol;
+            }
+            else if (selectedAction == replayToManualRequestAction)
+            {
+                if (anchorRow >= 0)
+                {
+                    replayPacketToManualRequestByTableRow(anchorRow);
+                }
+            }
             else if (selectedAction == trackProcessAction)
             {
-                trackProcessByTableRow(index.row());
+                if (anchorRow >= 0)
+                {
+                    trackProcessByTableRow(anchorRow);
+                }
             }
             else if (selectedAction == gotoProcessDetailAction)
             {
-                gotoProcessDetailByTableRow(index.row());
+                if (anchorRow >= 0)
+                {
+                    gotoProcessDetailByTableRow(anchorRow);
+                }
             }
         });
 

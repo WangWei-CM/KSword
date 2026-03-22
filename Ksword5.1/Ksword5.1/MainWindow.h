@@ -8,6 +8,7 @@
 #include <QMenu>
 #include <QAction>
 #include <QApplication>
+#include <QCloseEvent>
 #include <QDragMoveEvent>
 #include <QPushButton>
 #include <QTimer>
@@ -43,6 +44,14 @@ public:
     MainWindow(QWidget* parent = nullptr);
     ~MainWindow();
 
+protected:
+    // closeEvent 作用：
+    // - 在主窗口关闭时明确触发应用退出；
+    // - 避免浮动 Dock 或后台窗口残留导致进程未结束。
+    // 调用方式：Qt 关闭窗口时自动回调。
+    // 入参 event：关闭事件对象，函数内会 accept 并触发 quit/exit。
+    void closeEvent(QCloseEvent* event) override;
+
 private:
     void initMenus();
     void initPrivilegeStatusButtons();
@@ -52,6 +61,7 @@ private:
     bool hasAdminPrivilege() const;
     bool hasDebugPrivilege() const;
     bool hasSystemPrivilege() const;
+    bool hasTrustedInstallerPrivilege() const;
     bool enableSeDebugPrivilege(std::string& errorTextOut) const;
     void initDockWidgets();
     void setupDockLayout();

@@ -76,7 +76,14 @@ namespace
     // formatEndpointText：把“地址 + 端口”格式化为地址端点文本。
     QString formatEndpointText(const std::string& ipAddress, const std::uint16_t portNumber)
     {
-        return QString("%1:%2").arg(toQString(ipAddress)).arg(portNumber);
+        // endpointAddress 用途：统一承载地址字符串，后续根据是否 IPv6 决定是否加方括号。
+        const QString endpointAddress = toQString(ipAddress);
+        if (endpointAddress.contains(':'))
+        {
+            // IPv6 端点采用 [addr]:port 形式，避免与地址内部冒号冲突。
+            return QString("[%1]:%2").arg(endpointAddress).arg(portNumber);
+        }
+        return QString("%1:%2").arg(endpointAddress).arg(portNumber);
     }
 
     // formatBytesToHexText：
@@ -105,29 +112,109 @@ namespace
         return hexText;
     }
 
-    // formatPacketPreview：
-    // - 生成报文负载短预览（十六进制）；
-    // - 只用于列表概览，不替代完整详情窗口。
-    QString formatPacketPreview(const ks::network::PacketRecord& packetRecord)
+    // isVisibleAsciiByte：
+    // - 判断字节是否属于可直接阅读的可见 ASCII 字符；
+    // - 用于预览提取和十六进制旁路 ASCII 渲染。
+    bool isVisibleAsciiByte(const std::uint8_t byteValue)
+    {
+        return byteValue >= 32 && byteValue <= 126;
+    }
+
+    // buildPayloadByteRange：
+    // - 统一计算 payload 在 packetBytes 中的安全区间；
+    // - 返回值 first=payload 起始偏移，second=payload 可读长度。
+    std::pair<std::size_t, std::size_t> buildPayloadByteRange(const ks::network::PacketRecord& packetRecord)
     {
         if (packetRecord.packetBytes.empty() || packetRecord.payloadOffset >= packetRecord.packetBytes.size())
+        {
+            return { 0, 0 };
+        }
+
+        const std::size_t payloadOffset = packetRecord.payloadOffset;
+        const std::size_t maxReadableLength = packetRecord.packetBytes.size() - payloadOffset;
+        const std::size_t expectedPayloadLength =
+            (packetRecord.payloadSize == 0)
+            ? maxReadableLength
+            : std::min<std::size_t>(static_cast<std::size_t>(packetRecord.payloadSize), maxReadableLength);
+        return { payloadOffset, expectedPayloadLength };
+    }
+
+    // normalizeAsciiCharForPreview：
+    // - 把单字节映射为预览可显示字符；
+    // - 非可见字符统一折叠为 '.'，换行/制表折叠为空格。
+    QChar normalizeAsciiCharForPreview(const std::uint8_t byteValue)
+    {
+        if (isVisibleAsciiByte(byteValue))
+        {
+            return QChar(byteValue);
+        }
+        if (byteValue == '\r' || byteValue == '\n' || byteValue == '\t')
+        {
+            return QChar(' ');
+        }
+        return QChar('.');
+    }
+
+    // buildPayloadAsciiPreviewText：
+    // - 生成抓包列表“内容预览”列文本；
+    // - 优先提取可读 ASCII 片段，让预览比纯十六进制更有语义。
+    QString buildPayloadAsciiPreviewText(const ks::network::PacketRecord& packetRecord)
+    {
+        const auto [payloadOffset, payloadLength] = buildPayloadByteRange(packetRecord);
+        if (payloadLength == 0)
         {
             return QStringLiteral("<empty>");
         }
 
-        constexpr std::size_t kPreviewBytes = 24;
-        const std::size_t maxReadableLength = packetRecord.packetBytes.size() - packetRecord.payloadOffset;
-        const std::size_t previewLength = std::min<std::size_t>(kPreviewBytes, maxReadableLength);
+        constexpr std::size_t kPreviewByteLimit = 180;
+        const std::size_t previewLength = std::min<std::size_t>(payloadLength, kPreviewByteLimit);
 
-        QString previewText;
+        // readableSegments 用途：收集长度足够的可见 ASCII 连续片段。
+        QStringList readableSegments;
+        QString currentSegment;
         for (std::size_t index = 0; index < previewLength; ++index)
         {
-            const std::uint8_t currentByte = packetRecord.packetBytes[packetRecord.payloadOffset + index];
-            previewText += QString("%1 ").arg(static_cast<unsigned>(currentByte), 2, 16, QChar('0')).toUpper();
+            const std::uint8_t byteValue = packetRecord.packetBytes[payloadOffset + index];
+            if (isVisibleAsciiByte(byteValue) || byteValue == ' ' || byteValue == '\t')
+            {
+                currentSegment.push_back(isVisibleAsciiByte(byteValue) ? QChar(byteValue) : QChar(' '));
+                continue;
+            }
+
+            if (currentSegment.trimmed().size() >= 4)
+            {
+                readableSegments.push_back(currentSegment.simplified());
+            }
+            currentSegment.clear();
+        }
+        if (currentSegment.trimmed().size() >= 4)
+        {
+            readableSegments.push_back(currentSegment.simplified());
         }
 
-        previewText = previewText.trimmed();
-        if (previewLength < maxReadableLength)
+        // previewText 用途：最终展示在列表列中的“可读预览文本”。
+        QString previewText;
+        if (!readableSegments.isEmpty())
+        {
+            previewText = readableSegments.join(QStringLiteral(" | "));
+        }
+        else
+        {
+            previewText.reserve(static_cast<int>(previewLength));
+            for (std::size_t index = 0; index < previewLength; ++index)
+            {
+                const std::uint8_t byteValue = packetRecord.packetBytes[payloadOffset + index];
+                previewText.push_back(normalizeAsciiCharForPreview(byteValue));
+            }
+            previewText = previewText.simplified();
+        }
+
+        if (previewText.isEmpty())
+        {
+            previewText = QStringLiteral("<binary payload>");
+        }
+
+        if (previewLength < payloadLength)
         {
             previewText += QStringLiteral(" ...");
         }
@@ -137,6 +224,157 @@ namespace
         }
         return previewText;
     }
+
+    // buildPayloadAsciiFullText：
+    // - 把 payload 转成可阅读 ASCII 文本（用于详情与批量复制）；
+    // - CRLF 会被保留为换行，非可打印字节会替换为 '.'.
+    QString buildPayloadAsciiFullText(const ks::network::PacketRecord& packetRecord)
+    {
+        const auto [payloadOffset, payloadLength] = buildPayloadByteRange(packetRecord);
+        if (payloadLength == 0)
+        {
+            return QStringLiteral("<empty>");
+        }
+
+        QString asciiText;
+        asciiText.reserve(static_cast<int>(payloadLength));
+        for (std::size_t index = 0; index < payloadLength; ++index)
+        {
+            const std::uint8_t byteValue = packetRecord.packetBytes[payloadOffset + index];
+            if (byteValue == '\r')
+            {
+                if (index + 1 < payloadLength && packetRecord.packetBytes[payloadOffset + index + 1] == '\n')
+                {
+                    ++index;
+                }
+                asciiText.push_back('\n');
+                continue;
+            }
+            if (byteValue == '\n')
+            {
+                asciiText.push_back('\n');
+                continue;
+            }
+            if (byteValue == '\t')
+            {
+                asciiText.push_back('\t');
+                continue;
+            }
+
+            asciiText.push_back(isVisibleAsciiByte(byteValue) ? QChar(byteValue) : QChar('.'));
+        }
+
+        if (packetRecord.packetBytesTruncated)
+        {
+            asciiText += QStringLiteral("\n[truncated capture]");
+        }
+        return asciiText;
+    }
+
+    // buildPayloadHexFullText：
+    // - 把 payload 原始字节完整转换为十六进制字符串（空格分隔）；
+    // - 供“抓包回放到请求构造”时直接填充 HEX 载荷输入框。
+    QString buildPayloadHexFullText(const ks::network::PacketRecord& packetRecord)
+    {
+        const auto [payloadOffset, payloadLength] = buildPayloadByteRange(packetRecord);
+        if (payloadLength == 0)
+        {
+            return QString();
+        }
+
+        // payloadHexParts 用途：逐字节收集 HEX 片段，最终 join 成单行文本。
+        QStringList payloadHexParts;
+        payloadHexParts.reserve(static_cast<int>(payloadLength));
+        for (std::size_t index = 0; index < payloadLength; ++index)
+        {
+            const std::uint8_t byteValue = packetRecord.packetBytes[payloadOffset + index];
+            payloadHexParts.push_back(
+                QStringLiteral("%1").arg(static_cast<unsigned>(byteValue), 2, 16, QChar('0')).toUpper());
+        }
+        return payloadHexParts.join(' ');
+    }
+
+    // buildPacketHexAsciiDumpText：
+    // - 生成完整“偏移 + 十六进制 + ASCII”文本转储；
+    // - 使用纯文本输出，支持像编辑器一样跨行选中复制。
+    QString buildPacketHexAsciiDumpText(const ks::network::PacketRecord& packetRecord)
+    {
+        const std::vector<std::uint8_t>& packetBytes = packetRecord.packetBytes;
+        if (packetBytes.empty())
+        {
+            return QStringLiteral("00000000  -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --  |<empty>|");
+        }
+
+        QStringList outputLines;
+        const std::size_t rowCount =
+            (packetBytes.size() + static_cast<std::size_t>(kHexBytesPerRow) - 1) /
+            static_cast<std::size_t>(kHexBytesPerRow);
+        outputLines.reserve(static_cast<int>(rowCount) + 1);
+        outputLines.push_back(QStringLiteral("偏移(h)   16进制字节                                              ASCII"));
+
+        for (std::size_t rowIndex = 0; rowIndex < rowCount; ++rowIndex)
+        {
+            const std::size_t rowOffset = rowIndex * static_cast<std::size_t>(kHexBytesPerRow);
+
+            // hexColumnText 用途：固定宽度拼接 16 个十六进制字节。
+            QString hexColumnText;
+            hexColumnText.reserve(kHexBytesPerRow * 3);
+            // asciiColumnText 用途：与 hexColumnText 同步输出人类可读字符。
+            QString asciiColumnText;
+            asciiColumnText.reserve(kHexBytesPerRow);
+
+            for (int byteColumn = 0; byteColumn < kHexBytesPerRow; ++byteColumn)
+            {
+                const std::size_t byteIndex = rowOffset + static_cast<std::size_t>(byteColumn);
+                if (byteIndex < packetBytes.size())
+                {
+                    const std::uint8_t byteValue = packetBytes[byteIndex];
+                    hexColumnText += QStringLiteral("%1 ").arg(static_cast<unsigned>(byteValue), 2, 16, QChar('0')).toUpper();
+                    asciiColumnText.push_back(isVisibleAsciiByte(byteValue) ? QChar(byteValue) : QChar('.'));
+                }
+                else
+                {
+                    hexColumnText += QStringLiteral("   ");
+                    asciiColumnText.push_back(' ');
+                }
+            }
+            if (!hexColumnText.isEmpty())
+            {
+                hexColumnText.chop(1);
+            }
+
+            const QString offsetText = QStringLiteral("%1").arg(static_cast<qulonglong>(rowOffset), 8, 16, QChar('0')).toUpper();
+            outputLines.push_back(QStringLiteral("%1  %2  |%3|")
+                .arg(offsetText)
+                .arg(hexColumnText)
+                .arg(asciiColumnText));
+        }
+
+        if (packetRecord.packetBytesTruncated)
+        {
+            outputLines.push_back(QStringLiteral("[truncated capture: original bytes exceed retain limit]"));
+        }
+        return outputLines.join('\n');
+    }
+
+    // buildPacketCopyHeaderLine：
+    // - 构建“复制到剪贴板”时每个报文块的元信息头。
+    QString buildPacketCopyHeaderLine(const ks::network::PacketRecord& packetRecord)
+    {
+        const QString timeText = QDateTime::fromMSecsSinceEpoch(
+            static_cast<qint64>(packetRecord.captureTimestampMs)).toString("yyyy-MM-dd HH:mm:ss.zzz");
+        return QStringLiteral("#%1 | 时间=%2 | PID=%3 | 协议=%4 | 方向=%5 | 本地=%6 | 远端=%7 | 长度=%8/%9")
+            .arg(packetRecord.sequenceId)
+            .arg(timeText)
+            .arg(packetRecord.processId)
+            .arg(toQString(ks::network::PacketProtocolToString(packetRecord.protocol)))
+            .arg(toQString(ks::network::PacketDirectionToString(packetRecord.direction)))
+            .arg(formatEndpointText(packetRecord.localAddress, packetRecord.localPort))
+            .arg(formatEndpointText(packetRecord.remoteAddress, packetRecord.remotePort))
+            .arg(packetRecord.payloadSize)
+            .arg(packetRecord.totalPacketSize);
+    }
+
 
     // formatIpv4HostOrder：
     // - 把主机序 IPv4 32 位值转成点分十进制文本；
@@ -333,103 +571,9 @@ namespace
         return tableItem;
     }
 
-    // createHexAsciiCell：
-    // - 报文详情十六进制表专用单元格创建；
-    // - 统一设定只读 + 对齐方式，减少重复代码。
-    QTableWidgetItem* createHexAsciiCell(const QString& cellText, const Qt::Alignment textAlignment)
-    {
-        QTableWidgetItem* tableItem = new QTableWidgetItem(cellText);
-        tableItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-        tableItem->setTextAlignment(textAlignment);
-        return tableItem;
-    }
-
-    // populatePacketHexAsciiTable：
-    // - 按“地址 + 16字节十六进制 + ASCII”渲染报文内容；
-    // - 渲染方式与内存模块十六进制查看器保持一致。
-    void populatePacketHexAsciiTable(QTableWidget* tableWidget, const ks::network::PacketRecord& packetRecord)
-    {
-        if (tableWidget == nullptr)
-        {
-            return;
-        }
-
-        const std::size_t totalBytes = packetRecord.packetBytes.size();
-        const int rowCount = (totalBytes == 0)
-            ? 1
-            : static_cast<int>((totalBytes + static_cast<std::size_t>(kHexBytesPerRow) - 1) /
-                static_cast<std::size_t>(kHexBytesPerRow));
-
-        tableWidget->setRowCount(rowCount);
-
-        // 数据为空时仍保留一行，防止详情窗口出现空白区域导致“像卡死”的误解。
-        if (totalBytes == 0)
-        {
-            tableWidget->setItem(0, 0, createHexAsciiCell(QStringLiteral("0x00000000"), Qt::AlignLeft | Qt::AlignVCenter));
-            for (int byteColumn = 0; byteColumn < kHexBytesPerRow; ++byteColumn)
-            {
-                tableWidget->setItem(0, byteColumn + 1, createHexAsciiCell(QStringLiteral("--"), Qt::AlignCenter));
-            }
-            tableWidget->setItem(0, kHexBytesPerRow + 1, createHexAsciiCell(QStringLiteral("<empty>"), Qt::AlignLeft | Qt::AlignVCenter));
-            return;
-        }
-
-        for (int row = 0; row < rowCount; ++row)
-        {
-            const std::size_t rowOffset = static_cast<std::size_t>(row * kHexBytesPerRow);
-
-            // 地址列显示“相对报文起始偏移”，便于定位字节位置。
-            tableWidget->setItem(
-                row,
-                0,
-                createHexAsciiCell(
-                    QString("0x%1").arg(static_cast<qulonglong>(rowOffset), 8, 16, QChar('0')).toUpper(),
-                    Qt::AlignLeft | Qt::AlignVCenter));
-
-            QString asciiText;
-            asciiText.reserve(kHexBytesPerRow);
-
-            // 每行固定渲染 16 个十六进制字节单元格。
-            for (int byteColumn = 0; byteColumn < kHexBytesPerRow; ++byteColumn)
-            {
-                const std::size_t absoluteByteIndex = rowOffset + static_cast<std::size_t>(byteColumn);
-                if (absoluteByteIndex < totalBytes)
-                {
-                    const std::uint8_t byteValue = packetRecord.packetBytes[absoluteByteIndex];
-                    tableWidget->setItem(
-                        row,
-                        byteColumn + 1,
-                        createHexAsciiCell(
-                            QString("%1").arg(static_cast<unsigned>(byteValue), 2, 16, QChar('0')).toUpper(),
-                            Qt::AlignCenter));
-
-                    // ASCII 区对不可打印字符统一显示 '.'，与内存查看器规则一致。
-                    if (byteValue >= 32 && byteValue <= 126)
-                    {
-                        asciiText.push_back(QChar(byteValue));
-                    }
-                    else
-                    {
-                        asciiText.push_back('.');
-                    }
-                }
-                else
-                {
-                    tableWidget->setItem(row, byteColumn + 1, createHexAsciiCell(QStringLiteral("--"), Qt::AlignCenter));
-                    asciiText.push_back(' ');
-                }
-            }
-
-            tableWidget->setItem(
-                row,
-                kHexBytesPerRow + 1,
-                createHexAsciiCell(asciiText, Qt::AlignLeft | Qt::AlignVCenter));
-        }
-    }
-
     // PacketDetailWindow：
     // - 报文详情独立窗口（show 非阻塞，不阻塞主 UI）；
-    // - 采用“十六进制 + ASCII”表格渲染，避免纯文本长报文难读。
+    // - 十六进制区使用纯文本编辑器，支持像文本一样跨行连续选择复制。
     class PacketDetailWindow final : public QWidget
     {
     public:
@@ -439,7 +583,7 @@ namespace
             setAttribute(Qt::WA_DeleteOnClose, true);
             setWindowFlag(Qt::Window, true);
             setWindowTitle(QStringLiteral("报文详情 - #%1").arg(packetRecord.sequenceId));
-            resize(1080, 680);
+            resize(1120, 760);
 
             QVBoxLayout* rootLayout = new QVBoxLayout(this);
             rootLayout->setContentsMargins(8, 8, 8, 8);
@@ -463,27 +607,63 @@ namespace
             metaLabel->setWordWrap(true);
             rootLayout->addWidget(metaLabel);
 
-            // 主体表格：地址 + 16 字节十六进制 + ASCII。
-            QTableWidget* hexAsciiTable = new QTableWidget(this);
-            hexAsciiTable->setColumnCount(kHexBytesPerRow + 2);
-            QStringList headers;
-            headers.push_back(QStringLiteral("偏移"));
-            for (int byteIndex = 0; byteIndex < kHexBytesPerRow; ++byteIndex)
-            {
-                headers.push_back(QString("%1").arg(byteIndex, 2, 16, QChar('0')).toUpper());
-            }
-            headers.push_back(QStringLiteral("ASCII"));
-            hexAsciiTable->setHorizontalHeaderLabels(headers);
-            hexAsciiTable->setSelectionBehavior(QAbstractItemView::SelectItems);
-            hexAsciiTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
-            hexAsciiTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-            hexAsciiTable->setAlternatingRowColors(true);
-            hexAsciiTable->verticalHeader()->setVisible(false);
-            hexAsciiTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-            hexAsciiTable->horizontalHeader()->setStretchLastSection(true);
-            hexAsciiTable->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-            populatePacketHexAsciiTable(hexAsciiTable, packetRecord);
-            rootLayout->addWidget(hexAsciiTable, 1);
+            // 可读摘要：先展示“内容预览列同款”的语义化 ASCII 摘要，便于快速判断协议文本。
+            QLabel* readablePreviewLabel = new QLabel(this);
+            readablePreviewLabel->setText(QStringLiteral("可读ASCII摘要: %1").arg(buildPayloadAsciiPreviewText(packetRecord)));
+            readablePreviewLabel->setWordWrap(true);
+            readablePreviewLabel->setToolTip(QStringLiteral("该摘要优先提取 payload 中可读 ASCII 片段。"));
+            rootLayout->addWidget(readablePreviewLabel);
+
+            // 详情页签：把十六进制视图与 ASCII 文本视图分开，提升阅读与复制体验。
+            QTabWidget* detailTabWidget = new QTabWidget(this);
+            rootLayout->addWidget(detailTabWidget, 1);
+
+            // 十六进制页：使用 QPlainTextEdit，支持跨行连续选择。
+            QWidget* hexPage = new QWidget(detailTabWidget);
+            QVBoxLayout* hexPageLayout = new QVBoxLayout(hexPage);
+            hexPageLayout->setContentsMargins(0, 0, 0, 0);
+            hexPageLayout->setSpacing(4);
+
+            QLabel* hexHintLabel = new QLabel(QStringLiteral("十六进制区支持像文本编辑器一样跨行拖拽选择。"), hexPage);
+            hexPageLayout->addWidget(hexHintLabel);
+
+            QPlainTextEdit* hexTextEditor = new QPlainTextEdit(hexPage);
+            hexTextEditor->setReadOnly(true);
+            hexTextEditor->setLineWrapMode(QPlainTextEdit::NoWrap);
+            hexTextEditor->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+            hexTextEditor->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+            hexTextEditor->setPlainText(buildPacketHexAsciiDumpText(packetRecord));
+            hexTextEditor->setToolTip(QStringLiteral("可直接 Ctrl+C 复制选中的十六进制文本。"));
+
+            // 按需求调大十六进制字号，提升长时间查看体验。
+            QFont hexFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+            const int basePointSize = (hexFont.pointSize() > 0) ? hexFont.pointSize() : 10;
+            hexFont.setPointSize(std::max(11, basePointSize + 2));
+            hexTextEditor->setFont(hexFont);
+            hexPageLayout->addWidget(hexTextEditor, 1);
+
+            detailTabWidget->addTab(hexPage, QStringLiteral("十六进制"));
+
+            // ASCII 页：展示 payload 的文本化内容，优先保留 CRLF 语义。
+            QWidget* asciiPage = new QWidget(detailTabWidget);
+            QVBoxLayout* asciiPageLayout = new QVBoxLayout(asciiPage);
+            asciiPageLayout->setContentsMargins(0, 0, 0, 0);
+            asciiPageLayout->setSpacing(4);
+
+            QLabel* asciiHintLabel = new QLabel(QStringLiteral("下方为 payload 的 ASCII 视图（不可打印字节以 '.' 代替）。"), asciiPage);
+            asciiHintLabel->setWordWrap(true);
+            asciiPageLayout->addWidget(asciiHintLabel);
+
+            QPlainTextEdit* asciiTextEditor = new QPlainTextEdit(asciiPage);
+            asciiTextEditor->setReadOnly(true);
+            asciiTextEditor->setLineWrapMode(QPlainTextEdit::NoWrap);
+            asciiTextEditor->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+            asciiTextEditor->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+            asciiTextEditor->setPlainText(buildPayloadAsciiFullText(packetRecord));
+            asciiTextEditor->setToolTip(QStringLiteral("可直接复制 payload 的 ASCII 文本内容。"));
+            asciiPageLayout->addWidget(asciiTextEditor, 1);
+
+            detailTabWidget->addTab(asciiPage, QStringLiteral("报文ASCII"));
         }
     };
 
@@ -512,7 +692,7 @@ namespace
         const QString remoteEndpointText = formatEndpointText(packetRecord.remoteAddress, packetRecord.remotePort);
         const QString packetSizeText = QString::number(packetRecord.totalPacketSize);
         const QString payloadSizeText = QString::number(packetRecord.payloadSize);
-        const QString previewText = formatPacketPreview(packetRecord);
+        const QString previewText = buildPayloadAsciiPreviewText(packetRecord);
 
         QTableWidgetItem* timeItem = createPacketCell(timeText);
         timeItem->setData(Qt::UserRole, static_cast<qulonglong>(sequenceId));
@@ -560,7 +740,7 @@ NetworkDock::NetworkDock(QWidget* parent)
     // - 由 UI 线程周期性批量消费后台队列；
     // - 避免“每包一个 invokeMethod”把事件循环塞爆。
     m_packetFlushTimer = new QTimer(this);
-    m_packetFlushTimer->setInterval(45);
+    m_packetFlushTimer->setInterval(20);
     connect(m_packetFlushTimer, &QTimer::timeout, this, [this]()
         {
             flushPendingPacketsToUi();

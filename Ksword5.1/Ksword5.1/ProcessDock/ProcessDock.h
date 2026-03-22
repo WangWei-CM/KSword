@@ -32,6 +32,7 @@ class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
+class QResizeEvent;
 class QSlider;
 class QTableWidget;
 class QTabWidget;
@@ -61,6 +62,15 @@ public:
     // - 初始化进程列表与控制栏；
     // - 启动默认监视（性能计数器视图）。
     explicit ProcessDock(QWidget* parent = nullptr);
+
+protected:
+    // resizeEvent 作用：
+    // - 在 Dock 尺寸变化时重新分配可见列宽；
+    // - 避免出现内部横向滚动条，保持“自适应宽度”体验。
+    // 调用方式：Qt 在窗口尺寸变化时自动触发。
+    // 参数 event：Qt 提供的尺寸变化事件对象（只读使用）。
+    // 返回值：无。
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
     // TableColumn：统一定义表格列索引，避免硬编码魔法数。
@@ -137,6 +147,7 @@ private:
     void initializeConnections();
     void initializeTimer();
     void updateRefreshStateUi(bool refreshing, const QString& stateText);
+    void applyAdaptiveColumnWidths();
     void initializeCreateProcessConnections();
 
     // ======== 刷新与渲染 ========
@@ -181,7 +192,11 @@ private:
     QString formatColumnText(const ks::process::ProcessRecord& processRecord, TableColumn column, int depth) const;
     QIcon resolveProcessIcon(const ks::process::ProcessRecord& processRecord);
     QIcon blueTintedIcon(const char* iconPath, const QSize& iconSize = QSize(16, 16)) const;
-    void showActionResultMessage(const QString& title, bool actionOk, const std::string& detailText);
+    // showActionResultMessage 作用：统一记录进程动作结果日志（不弹窗），复用同一 kLogEvent 保持调用链连续。
+    // 调用方式：在动作函数中创建 kLogEvent 后，将同一个事件对象传入本函数。
+    // 参数 title：动作标题；actionOk：动作是否成功；detailText：动作详情；actionEvent：本次动作全链路事件对象。
+    // 返回值：无。
+    void showActionResultMessage(const QString& title, bool actionOk, const std::string& detailText, const kLogEvent& actionEvent);
     ks::process::CreateProcessRequest buildCreateProcessRequestFromUi(bool* buildOk, QString* errorTextOut) const;
     void executeCreateProcessRequest();
     void executeApplyTokenPrivilegeEditsOnly();
@@ -189,6 +204,9 @@ private:
     void browseCreateProcessApplicationPath();
     void browseCreateProcessCurrentDirectory();
     void resetCreateProcessForm();
+    void bindBitmaskEditor(QLineEdit* valueEdit, std::vector<QCheckBox*>* checkBoxList, const QString& fieldDisplayName);
+    void syncEditValueFromBitmaskChecks(QLineEdit* valueEdit, const std::vector<QCheckBox*>* checkBoxList);
+    void syncBitmaskChecksFromEditValue(QLineEdit* valueEdit, const std::vector<QCheckBox*>* checkBoxList, const QString& fieldDisplayName);
     static std::string buildRulerPrefix(int depth);
     static int toColumnIndex(TableColumn column);
     static bool parseUnsignedText(const QString& text, std::uint64_t& valueOut);
@@ -215,7 +233,8 @@ private:
     QVBoxLayout* m_createProcessPageLayout = nullptr; // 创建页主布局。
 
     // ======== 控制栏 ========
-    QHBoxLayout* m_controlLayout = nullptr;   // 上方控制栏布局。
+    QHBoxLayout* m_controlLayout = nullptr;   // 上方“操作按钮”行布局。
+    QHBoxLayout* m_statusLayout = nullptr;    // 下方“监控状态”行布局。
     QComboBox* m_strategyCombo = nullptr;     // 进程遍历方案下拉框。
     QPushButton* m_treeToggleButton = nullptr;// 树/列表切换按钮。
     QComboBox* m_viewModeCombo = nullptr;     // 监视视图/详细视图下拉框。
@@ -243,6 +262,7 @@ private:
     QCheckBox* m_environmentUnicodeCheck = nullptr;
     QCheckBox* m_inheritHandleCheck = nullptr;
     QLineEdit* m_creationFlagsEdit = nullptr;
+    std::vector<QCheckBox*> m_creationFlagChecks; // dwCreationFlags 勾选集合。
 
     // ======== 创建进程页 - SECURITY_ATTRIBUTES ========
     QCheckBox* m_useProcessSecurityCheck = nullptr;
@@ -268,6 +288,8 @@ private:
     QLineEdit* m_siYCountCharsEdit = nullptr;
     QLineEdit* m_siFillAttributeEdit = nullptr;
     QLineEdit* m_siFlagsEdit = nullptr;
+    std::vector<QCheckBox*> m_startupFillAttributeChecks; // STARTUPINFO.dwFillAttribute 勾选集合。
+    std::vector<QCheckBox*> m_startupFlagChecks; // STARTUPINFO.dwFlags 勾选集合。
     QLineEdit* m_siShowWindowEdit = nullptr;
     QLineEdit* m_siCbReserved2Edit = nullptr;
     QLineEdit* m_siReserved2PtrEdit = nullptr;
@@ -286,6 +308,7 @@ private:
     QLineEdit* m_tokenSourcePidEdit = nullptr;
     QLineEdit* m_tokenDesiredAccessEdit = nullptr;
     QCheckBox* m_tokenDuplicatePrimaryCheck = nullptr;
+    std::vector<QCheckBox*> m_tokenDesiredAccessChecks; // Token DesiredAccess 勾选集合。
     QTableWidget* m_tokenPrivilegeTable = nullptr;
     QPushButton* m_applyTokenPrivilegeButton = nullptr;
     QPushButton* m_resetTokenPrivilegeButton = nullptr;

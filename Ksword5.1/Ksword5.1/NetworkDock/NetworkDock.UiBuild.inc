@@ -169,7 +169,8 @@ void NetworkDock::initializeTrafficMonitorTab()
         QStringLiteral("内容预览")
         });
     m_packetTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_packetTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    // 抓包列表改为支持多选，便于批量复制报文 ASCII / 十六进制内容。
+    m_packetTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_packetTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_packetTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_packetTable->verticalHeader()->setVisible(false);
