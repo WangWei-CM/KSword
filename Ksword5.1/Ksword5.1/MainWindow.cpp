@@ -3,6 +3,7 @@
 #include <QAction>
 #include <QTabWidget>
 #include <QApplication>
+#include <QCoreApplication>
 #include <QWidget>
 #include <QHBoxLayout>
 #include <QMessageBox>
@@ -12,7 +13,7 @@
 #include "Framework/LogDockWidget.h"
 #include "Framework/ProgressDockWidget.h"
 #include "theme.h"
-
+#include <windows.h>
 // 菜单栏权限按钮涉及 Windows 令牌权限查询与提权动作。
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -23,6 +24,7 @@
 
 #include <array>
 #include <vector>
+#include <TlHelp32.h>
 
 namespace
 {
@@ -71,6 +73,10 @@ MainWindow::MainWindow(QWidget* parent)
     // 把 DockManager 设置为主窗口中央控件，确保 Dock 区域可见并可交互。
     setCentralWidget(m_pDockManager);
 
+    // 显式要求“最后一个窗口关闭后退出应用”。
+    // 说明：用户要求主窗口关闭时进程必须结束，这里先设置 Qt 全局退出策略。
+    QApplication::setQuitOnLastWindowClosed(true);
+
     // 设置窗口标题和大小
     setWindowTitle("Ksword5.1");
     resize(1024, 768);
@@ -96,6 +102,31 @@ MainWindow::MainWindow(QWidget* parent)
 MainWindow::~MainWindow()
 {
     // ADS会自动管理内存，无需手动删除
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    // 关闭事件日志：用于排查“窗口关闭但进程仍驻留”的问题。
+    kLogEvent closeEventLog;
+    info << closeEventLog << "[MainWindow] 收到关闭事件，准备退出进程。" << eol;
+
+    // 停止权限状态定时器，避免退出阶段继续触发 UI 更新。
+    if (m_privilegeStatusTimer != nullptr)
+    {
+        m_privilegeStatusTimer->stop();
+    }
+
+    // 接受关闭事件并主动触发应用退出。
+    // 这里同时调用 quit 与 exit(0)，确保事件循环尽快结束。
+    if (event != nullptr)
+    {
+        event->accept();
+    }
+    QApplication::quit();
+    QCoreApplication::exit(0);
+
+    kLogEvent closeFinishLog;
+    info << closeFinishLog << "[MainWindow] 已提交退出请求 (exit code=0)。" << eol;
 }
 
 void MainWindow::initMenus()
@@ -234,7 +265,394 @@ void MainWindow::initPrivilegeStatusButtons()
         }
         else
         {
-            QMessageBox::information(this, "System", "当前不是 LocalSystem 身份。");
+            HANDLE hToken = NULL;          // 当前进程的令牌句柄
+            LUID Luid;                     // 特权局部唯一标识符
+            TOKEN_PRIVILEGES tp;           // 令牌特权结构体
+
+            // 打开当前进程的令牌，要求调整特权与查询权限
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+            {
+                kLogEvent logEvent;
+                err << logEvent << "OpenProcessToken failed, error: " << GetLastError() << eol;
+                return 1;
+            }
+
+            // 查找 SE_DEBUG_NAME 特权的 LUID
+            if (!LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &Luid))
+            {
+                kLogEvent logEvent;
+                err << logEvent << "LookupPrivilegeValue failed, error: " << GetLastError() << eol;
+                CloseHandle(hToken);
+                return 1;
+            }
+
+            // 设置特权属性为启用
+            tp.PrivilegeCount = 1;
+            tp.Privileges[0].Luid = Luid;
+            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+            // 调整令牌特权
+            if (!AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL))
+            {
+                kLogEvent logEvent;
+                err << logEvent << "AdjustTokenPrivileges failed, error: " << GetLastError() << eol;
+                CloseHandle(hToken);
+                return 1;
+            }
+            // 检查特权是否真正被启用（AdjustTokenPrivileges 可能成功但未全部分配）
+            if (GetLastError() == ERROR_NOT_ALL_ASSIGNED)
+            {
+                kLogEvent logEvent;
+                err << logEvent << "AdjustTokenPrivileges: SeDebugPrivilege not assigned" << eol;
+                CloseHandle(hToken);
+                return 1;
+            }
+            CloseHandle(hToken);  // 特权已启用，关闭临时句柄
+
+            // ========== 第二步：枚举进程，获取 lsass.exe 和 winlogon.exe 的 PID ==========
+            DWORD idL = 0;                     // 存放 lsass.exe 的进程ID
+            DWORD idW = 0;                     // 存放 winlogon.exe 的进程ID
+            PROCESSENTRY32W pe = { sizeof(PROCESSENTRY32W) };  // 进程快照条目（宽字符）
+            HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);  // 进程快照句柄
+            if (hSnapshot == INVALID_HANDLE_VALUE)
+            {
+                kLogEvent logEvent;
+                err << logEvent << "CreateToolhelp32Snapshot failed, error: " << GetLastError() << eol;
+                return 1;
+            }
+
+            // 遍历进程快照，匹配目标进程名
+            if (Process32FirstW(hSnapshot, &pe))
+            {
+                do
+                {
+                    if (_wcsicmp(pe.szExeFile, L"lsass.exe") == 0)
+                    {
+                        idL = pe.th32ProcessID;
+                        kLogEvent logEvent;
+                        info << logEvent << "Found lsass.exe with PID: " << idL << eol;
+                    }
+                    else if (_wcsicmp(pe.szExeFile, L"winlogon.exe") == 0)
+                    {
+                        idW = pe.th32ProcessID;
+                        kLogEvent logEvent;
+                        info << logEvent << "Found winlogon.exe with PID: " << idW << eol;
+                    }
+                } while (Process32NextW(hSnapshot, &pe));
+            }
+            CloseHandle(hSnapshot);
+
+            // ========== 第三步：打开目标进程（优先 lsass，其次 winlogon） ==========
+            HANDLE hProcess = NULL;          // 目标进程句柄
+            if (idL != 0)
+                hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, idL);
+            if (!hProcess && idW != 0)
+                hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, idW);
+            if (!hProcess)
+            {
+                kLogEvent logEvent;
+                err << logEvent << "Failed to open target process (lsass/winlogon), error: " << GetLastError() << eol;
+                return 1;
+            }
+            {
+                kLogEvent logEvent;
+                info << logEvent << "Opened target process" << eol;
+            }
+
+            // ========== 第四步：打开目标进程的令牌 ==========
+            HANDLE hTokenx = NULL;           // 目标进程的令牌句柄
+            if (!OpenProcessToken(hProcess, TOKEN_DUPLICATE, &hTokenx))
+            {
+                kLogEvent logEvent;
+                err << logEvent << "OpenProcessToken on target process failed, error: " << GetLastError() << eol;
+                CloseHandle(hProcess);
+                return 1;
+            }
+
+            // ========== 第五步：复制令牌，获得可用的主令牌 ==========
+            HANDLE hNewToken = NULL;         // 复制得到的新令牌句柄
+            if (!DuplicateTokenEx(hTokenx, MAXIMUM_ALLOWED, NULL, SecurityIdentification, TokenPrimary, &hNewToken))
+            {
+                kLogEvent logEvent;
+                err << logEvent << "DuplicateTokenEx failed, error: " << GetLastError() << eol;
+                CloseHandle(hTokenx);
+                CloseHandle(hProcess);
+                return 1;
+            }
+            CloseHandle(hTokenx);
+            CloseHandle(hProcess);
+
+            // ========== 第六步：获取当前程序自身的路径 ==========
+            std::wstring selfPath = ks::process::GetCurrentProcessPath();
+            if (selfPath.empty())
+            {
+                kLogEvent logEvent;
+                err << logEvent <<"Failed to get current process path" << eol;
+                CloseHandle(hNewToken);
+                return 1;
+            }
+            {
+                kLogEvent logEvent;
+                // pathUtf8 用途：把 UTF-16 路径转换为 UTF-8，避免日志流(std::ostringstream)直接输出 std::wstring 导致编译错误。
+                const std::string pathUtf8 = ks::str::Utf16ToUtf8(selfPath);
+                info << logEvent << "Current process path: " << pathUtf8 << eol;
+            }
+
+            // ========== 第七步：使用复制得到的令牌启动自身 ==========
+            STARTUPINFOW si = { sizeof(STARTUPINFOW) };
+            PROCESS_INFORMATION pi = { 0 };
+            // 为 lpDesktop 使用可写缓冲区（避免 const wchar_t* 赋值给 LPWSTR 的编译错误）
+            wchar_t desktop[] = L"winsta0\\default";
+            si.lpDesktop = desktop;          // 显示在交互式桌面
+
+            if (!CreateProcessWithTokenW(hNewToken, LOGON_NETCREDENTIALS_ONLY, selfPath.c_str(), NULL,
+                NORMAL_PRIORITY_CLASS, NULL, NULL, &si, &pi))
+            {
+                kLogEvent logEvent;
+                err << logEvent << "CreateProcessWithTokenW failed, error: " << GetLastError() << eol;
+                CloseHandle(hNewToken);
+                return 1;
+            }
+
+            {
+                kLogEvent logEvent;
+                info << logEvent << "Successfully started new instance of the program. New PID: " << pi.dwProcessId << eol;
+            }
+
+            // 清理资源
+            CloseHandle(hNewToken);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+    });
+
+    // TI 按钮：展示 TrustedInstaller 身份状态。
+    // 说明：仅做状态检查，不提供自动令牌窃取/注入类提权逻辑。
+    connect(m_tiStatusButton, &QPushButton::clicked, this, [this]() {
+        if (hasTrustedInstallerPrivilege())
+        {
+            QMessageBox::information(this, "TI", "当前进程已经是 TrustedInstaller 身份。");
+        }
+        else
+        {
+            {
+                kLogEvent logEvent;
+                info << logEvent << "Starting self with TrustedInstaller privilege..." << eol;
+            }
+
+            // ========== 第 2 步：模拟 SYSTEM 账户（通过 winlogon.exe） ==========
+            // 2.1 获取 winlogon.exe 的进程 ID
+            DWORD winlogonPid = 0;
+            HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (hSnapshot == INVALID_HANDLE_VALUE)
+            {
+                kLogEvent logEvent;
+                err << logEvent << "CreateToolhelp32Snapshot failed, error: " << GetLastError() << eol;
+                return 1;
+            }
+            PROCESSENTRY32W pe = { sizeof(PROCESSENTRY32W) };
+            if (Process32FirstW(hSnapshot, &pe))
+            {
+                do
+                {
+                    if (_wcsicmp(pe.szExeFile, L"winlogon.exe") == 0)
+                    {
+                        winlogonPid = pe.th32ProcessID;
+                        break;
+                    }
+                } while (Process32NextW(hSnapshot, &pe));
+            }
+            CloseHandle(hSnapshot);
+            if (winlogonPid == 0)
+            {
+                kLogEvent logEvent;
+                err << logEvent << "winlogon.exe not found" << eol;
+                return 1;
+            }
+
+            // 2.2 打开 winlogon.exe 进程
+            HANDLE hWinlogon = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE, FALSE, winlogonPid);
+            if (!hWinlogon)
+            {
+                kLogEvent logEvent;
+                err << logEvent << "OpenProcess(winlogon.exe) failed, error: " << GetLastError() << eol;
+                return 1;
+            }
+
+            // 2.3 打开 winlogon 进程的令牌
+            HANDLE hWinlogonToken = NULL;
+            if (!OpenProcessToken(hWinlogon, MAXIMUM_ALLOWED, &hWinlogonToken))
+            {
+                kLogEvent logEvent;
+                err << logEvent << "OpenProcessToken(winlogon.exe) failed, error: " << GetLastError() << eol;
+                CloseHandle(hWinlogon);
+                return 1;
+            }
+
+            // 2.4 复制 winlogon 令牌为模拟令牌
+            HANDLE hSystemImpersonationToken = NULL;
+            SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), nullptr, FALSE };
+            if (!DuplicateTokenEx(hWinlogonToken, MAXIMUM_ALLOWED, &sa, SecurityImpersonation, TokenImpersonation, &hSystemImpersonationToken))
+            {
+                kLogEvent logEvent;
+                err << logEvent << "DuplicateTokenEx(winlogon) failed, error: " << GetLastError() << eol;
+                CloseHandle(hWinlogonToken);
+                CloseHandle(hWinlogon);
+                return 1;
+            }
+
+            // 2.5 模拟 SYSTEM 账户（当前线程获得 SYSTEM 上下文）
+            if (!ImpersonateLoggedOnUser(hSystemImpersonationToken))
+            {
+                kLogEvent logEvent;
+                err << logEvent << "ImpersonateLoggedOnUser failed, error: " << GetLastError() << eol;
+                CloseHandle(hSystemImpersonationToken);
+                CloseHandle(hWinlogonToken);
+                CloseHandle(hWinlogon);
+                return 1;
+            }
+            {
+                kLogEvent logEvent;
+                info << logEvent << "Successfully impersonated SYSTEM via winlogon.exe" << eol;
+            }
+
+            // 清理 winlogon 相关句柄（模拟令牌已生效，句柄可关闭）
+            CloseHandle(hSystemImpersonationToken);
+            CloseHandle(hWinlogonToken);
+            CloseHandle(hWinlogon);
+
+            // ========== 第 3 步：启动 TrustedInstaller 服务并获取其进程 ID ==========
+            SC_HANDLE hSCM = OpenSCManagerW(nullptr, SERVICES_ACTIVE_DATABASE, GENERIC_EXECUTE);
+            if (!hSCM)
+            {
+                kLogEvent logEvent;
+                err << logEvent << "OpenSCManagerW failed, error: " << GetLastError() << eol;
+                return 1;
+            }
+            SC_HANDLE hService = OpenServiceW(hSCM, L"TrustedInstaller", GENERIC_READ | GENERIC_EXECUTE);
+            if (!hService)
+            {
+                kLogEvent logEvent;
+                err << logEvent << "OpenServiceW(TrustedInstaller) failed, error: " << GetLastError() << eol;
+                CloseServiceHandle(hSCM);
+                return 1;
+            }
+
+            DWORD tiPid = 0;
+            SERVICE_STATUS_PROCESS status = { 0 };
+            DWORD bytesNeeded = 0;
+            // 循环等待服务进入运行状态
+            while (QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO,
+                reinterpret_cast<LPBYTE>(&status), sizeof(status), &bytesNeeded))
+            {
+                if (status.dwCurrentState == SERVICE_RUNNING)
+                {
+                    tiPid = status.dwProcessId;
+                    {
+                        kLogEvent logEvent;
+                        info << logEvent << "TrustedInstaller service is running, PID: " << tiPid << eol;
+                    }
+                    break;
+                }
+                else if (status.dwCurrentState == SERVICE_STOPPED)
+                {
+                    if (!StartServiceW(hService, 0, nullptr))
+                    {
+                        kLogEvent logEvent;
+                        err << logEvent << "StartServiceW(TrustedInstaller) failed, error: " << GetLastError() << eol;
+                        CloseServiceHandle(hService);
+                        CloseServiceHandle(hSCM);
+                        return 1;
+                    }
+                    {
+                        kLogEvent logEvent;
+                        info << logEvent << "Started TrustedInstaller service, waiting..." << eol;
+                    }
+                    // 继续循环等待服务启动完成
+                    continue;
+                }
+                else if (status.dwCurrentState == SERVICE_START_PENDING || status.dwCurrentState == SERVICE_STOP_PENDING)
+                {
+                    Sleep(status.dwWaitHint);
+                    continue;
+                }
+                else
+                {
+                    // 其他状态（异常）
+                    break;
+                }
+            }
+            CloseServiceHandle(hService);
+            CloseServiceHandle(hSCM);
+            if (tiPid == 0)
+            {
+                kLogEvent logEvent;
+                err << logEvent << "Failed to get TrustedInstaller PID" << eol;
+                return 1;
+            }
+
+            // ========== 第 4 步：打开 TrustedInstaller 进程并获取其令牌 ==========
+            HANDLE hTiProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE, FALSE, tiPid);
+            if (!hTiProcess)
+            {
+                kLogEvent logEvent;
+                err << logEvent << "OpenProcess(TrustedInstaller.exe) failed, error: " << GetLastError() << eol;
+                return 1;
+            }
+            HANDLE hTiToken = NULL;
+            if (!OpenProcessToken(hTiProcess, MAXIMUM_ALLOWED, &hTiToken))
+            {
+                kLogEvent logEvent;
+                err << logEvent << "OpenProcessToken(TrustedInstaller.exe) failed, error: " << GetLastError() << eol;
+                CloseHandle(hTiProcess);
+                return 1;
+            }
+
+            // 复制 TrustedInstaller 令牌为主令牌（TokenPrimary）
+            HANDLE hNewToken = NULL;
+            if (!DuplicateTokenEx(hTiToken, MAXIMUM_ALLOWED, &sa, SecurityImpersonation, TokenPrimary, &hNewToken))
+            {
+                kLogEvent logEvent;
+                err << logEvent << "DuplicateTokenEx(TrustedInstaller) failed, error: " << GetLastError() << eol;
+                CloseHandle(hTiToken);
+                CloseHandle(hTiProcess);
+                return 1;
+            }
+            CloseHandle(hTiToken);
+            CloseHandle(hTiProcess);
+
+            // ========== 第 5 步：获取当前进程自身路径 ==========
+            wchar_t selfPath[MAX_PATH] = { 0 };
+            if (GetModuleFileNameW(nullptr, selfPath, MAX_PATH) == 0)
+            {
+                kLogEvent logEvent;
+                err << logEvent << "GetModuleFileNameW failed, error: " << GetLastError() << eol;
+                CloseHandle(hNewToken);
+                return 1;
+            }
+
+            // ========== 第 6 步：使用 TrustedInstaller 令牌启动自身 ==========
+            STARTUPINFOW si = { sizeof(STARTUPINFOW) };
+            wchar_t desktop[] = L"winsta0\\default";   // 可写缓冲区
+            si.lpDesktop = desktop;
+            PROCESS_INFORMATION pi = { 0 };
+            if (!CreateProcessWithTokenW(hNewToken, LOGON_WITH_PROFILE, selfPath, nullptr,
+                CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &si, &pi))
+            {
+                kLogEvent logEvent;
+                err << logEvent << "CreateProcessWithTokenW failed, error: " << GetLastError() << eol;
+                CloseHandle(hNewToken);
+                return 1;
+            }
+
+            // ========== 第 7 步：成功，记录日志并清理 ==========
+            {
+                kLogEvent logEvent;
+                info << logEvent << "Successfully started self with TrustedInstaller token. New PID: " << pi.dwProcessId << eol;
+            }
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            CloseHandle(hNewToken);
         }
     });
 
@@ -256,8 +674,10 @@ void MainWindow::refreshPrivilegeStatusButtons()
     const bool debugEnabled = hasDebugPrivilege();
     const bool systemEnabled = hasSystemPrivilege();
 
-    // TI/PPL 暂为预留状态位（当前固定 false，仅展示 UI 占位）。
-    const bool trustedInstallerEnabled = false;
+    // TI/PPL 状态位：
+    // - TI：检查当前令牌是否为 TrustedInstaller 服务 SID；
+    // - PPL：当前版本暂不做内核态校验，仍保留为占位状态。
+    const bool trustedInstallerEnabled = hasTrustedInstallerPrivilege();
     const bool pplEnabled = false;
 
     // 按状态更新按钮样式与提示文本。
@@ -279,27 +699,35 @@ void MainWindow::refreshPrivilegeStatusButtons()
     {
         m_systemStatusButton->setToolTip(systemEnabled ? "当前运行身份：LocalSystem" : "当前运行身份：非 LocalSystem");
     }
+    if (m_tiStatusButton != nullptr)
+    {
+        m_tiStatusButton->setToolTip(trustedInstallerEnabled ? "当前运行身份：TrustedInstaller" : "当前运行身份：非 TrustedInstaller");
+    }
 
     // 仅在状态变化时写日志，避免定时器造成日志刷屏。
     static bool hasPreviousState = false;
     static bool previousAdmin = false;
     static bool previousDebug = false;
     static bool previousSystem = false;
+    static bool previousTi = false;
     if (!hasPreviousState ||
         previousAdmin != adminEnabled ||
         previousDebug != debugEnabled ||
-        previousSystem != systemEnabled)
+        previousSystem != systemEnabled ||
+        previousTi != trustedInstallerEnabled)
     {
         hasPreviousState = true;
         previousAdmin = adminEnabled;
         previousDebug = debugEnabled;
         previousSystem = systemEnabled;
+        previousTi = trustedInstallerEnabled;
 
         kLogEvent logEvent;
         info << logEvent
             << "[MainWindow] 权限状态刷新, admin=" << (adminEnabled ? "true" : "false")
             << ", debug=" << (debugEnabled ? "true" : "false")
             << ", system=" << (systemEnabled ? "true" : "false")
+            << ", ti=" << (trustedInstallerEnabled ? "true" : "false")
             << eol;
     }
 }
@@ -461,6 +889,52 @@ bool MainWindow::hasSystemPrivilege() const
     const bool isSystem = (::EqualSid(tokenUser->User.Sid, systemSidBuffer) != FALSE);
     ::CloseHandle(tokenHandle);
     return isSystem;
+}
+
+bool MainWindow::hasTrustedInstallerPrivilege() const
+{
+    HANDLE tokenHandle = nullptr;
+    if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &tokenHandle) == FALSE)
+    {
+        return false;
+    }
+
+    DWORD requiredLength = 0;
+    ::GetTokenInformation(tokenHandle, TokenUser, nullptr, 0, &requiredLength);
+    if (requiredLength == 0)
+    {
+        ::CloseHandle(tokenHandle);
+        return false;
+    }
+
+    std::vector<BYTE> userBuffer(requiredLength, 0);
+    if (::GetTokenInformation(
+        tokenHandle,
+        TokenUser,
+        userBuffer.data(),
+        requiredLength,
+        &requiredLength) == FALSE)
+    {
+        ::CloseHandle(tokenHandle);
+        return false;
+    }
+
+    PSID trustedInstallerSid = nullptr;
+    const BOOL sidOk = ::ConvertStringSidToSidW(
+        L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+        &trustedInstallerSid);
+    if (sidOk == FALSE || trustedInstallerSid == nullptr)
+    {
+        ::CloseHandle(tokenHandle);
+        return false;
+    }
+
+    const TOKEN_USER* tokenUser = reinterpret_cast<const TOKEN_USER*>(userBuffer.data());
+    const bool isTrustedInstaller = (::EqualSid(tokenUser->User.Sid, trustedInstallerSid) != FALSE);
+
+    ::LocalFree(trustedInstallerSid);
+    ::CloseHandle(tokenHandle);
+    return isTrustedInstaller;
 }
 
 bool MainWindow::enableSeDebugPrivilege(std::string& errorTextOut) const

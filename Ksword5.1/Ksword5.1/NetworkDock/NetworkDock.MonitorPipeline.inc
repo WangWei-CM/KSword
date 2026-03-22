@@ -25,8 +25,8 @@ void NetworkDock::flushPendingPacketsToUi()
         }
 
         // 单次最多处理固定数量，避免 UI 一帧执行过久。
-        // 这里把批量上限下调，优先保障主线程交互流畅性（按钮、拖拽、切页不卡顿）。
-        constexpr std::size_t kMaxConsumePerTick = 96;
+        // kMaxConsumePerTick 用途：在“不卡 UI”与“少丢包”之间折中；这里提高上限以减少高流量积压。
+        constexpr std::size_t kMaxConsumePerTick = 960;
         const std::size_t consumeCount = std::min<std::size_t>(kMaxConsumePerTick, m_pendingPacketQueue.size());
         packetBatch.reserve(consumeCount);
         for (std::size_t index = 0; index < consumeCount; ++index)

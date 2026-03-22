@@ -154,8 +154,20 @@ private:
     QIcon resolveProcessIcon(const std::string& processPath, int iconPixelSize);
     QString formatModuleSizeText(std::uint32_t moduleSizeBytes) const;
     QString formatHexText(std::uint64_t value) const;
-    bool readBinaryFile(const QString& filePath, std::vector<std::uint8_t>& bufferOut, std::string& errorTextOut) const;
-    void showActionResultMessage(const QString& title, bool actionOk, const std::string& detailText);
+    // readBinaryFile 作用：读取二进制文件到缓冲区，并沿用调用方传入的同一 kLogEvent 输出过程日志。
+    // 调用方式：由注入动作函数传入 actionEvent，以保证“动作+文件读取”日志链路一致。
+    // 参数 filePath：文件路径；bufferOut：输出缓冲区；errorTextOut：错误信息；actionEvent：同链路日志事件对象。
+    // 返回值：读取成功返回 true，失败返回 false。
+    bool readBinaryFile(
+        const QString& filePath,
+        std::vector<std::uint8_t>& bufferOut,
+        std::string& errorTextOut,
+        const kLogEvent& actionEvent) const;
+    // showActionResultMessage 作用：统一记录动作结果（不弹框），并复用外层传入的同一 kLogEvent 维持调用链。
+    // 调用方式：动作函数先创建 kLogEvent，再将该事件对象传入本函数。
+    // 参数 title：动作标题；actionOk：动作是否成功；detailText：动作详情；actionEvent：同链路日志事件对象。
+    // 返回值：无。
+    void showActionResultMessage(const QString& title, bool actionOk, const std::string& detailText, const kLogEvent& actionEvent);
     ks::process::ProcessModuleRecord* selectedModuleRecord();
 
 private:

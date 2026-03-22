@@ -372,7 +372,7 @@ void ProcessDetailWindow::openCurrentModuleFolder()
         << ", actionOk="
         << (actionOk ? "true" : "false")
         << eol;
-    showActionResultMessage("打开模块所在目录", actionOk, detailText);
+    showActionResultMessage("打开模块所在目录", actionOk, detailText, openModuleFolderEvent);
 }
 
 void ProcessDetailWindow::unloadCurrentModule()
@@ -395,7 +395,7 @@ void ProcessDetailWindow::unloadCurrentModule()
         << ", actionOk="
         << (actionOk ? "true" : "false")
         << eol;
-    showActionResultMessage("卸载模块", actionOk, detailText);
+    showActionResultMessage("卸载模块", actionOk, detailText, unloadModuleEvent);
     if (actionOk)
     {
         requestAsyncModuleRefresh(true);
@@ -409,22 +409,27 @@ void ProcessDetailWindow::suspendCurrentModuleThread()
     {
         return;
     }
+    // 挂起线程动作：同一动作链统一复用 actionEvent，避免离散 GUID。
+    kLogEvent actionEvent;
     if (moduleRecord->representativeThreadId == 0)
     {
-        QMessageBox::warning(this, "挂起 Thread", "当前模块行没有可用 ThreadID。");
+        const std::string errorDetailText = "当前模块行没有可用 ThreadID。";
+        warn << actionEvent
+            << "[ProcessDetailWindow] suspendCurrentModuleThread: 缺少 ThreadID。"
+            << eol;
+        showActionResultMessage("挂起 Thread", false, errorDetailText, actionEvent);
         return;
     }
 
     std::string detailText;
     const bool actionOk = ks::process::SuspendThreadById(moduleRecord->representativeThreadId, &detailText);
-    kLogEvent suspendModuleThreadEvent;
-    info << suspendModuleThreadEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] suspendCurrentModuleThread: tid="
         << moduleRecord->representativeThreadId
         << ", actionOk="
         << (actionOk ? "true" : "false")
         << eol;
-    showActionResultMessage("挂起 Thread", actionOk, detailText);
+    showActionResultMessage("挂起 Thread", actionOk, detailText, actionEvent);
 }
 
 void ProcessDetailWindow::resumeCurrentModuleThread()
@@ -434,22 +439,27 @@ void ProcessDetailWindow::resumeCurrentModuleThread()
     {
         return;
     }
+    // 恢复线程动作：同一动作链统一复用 actionEvent，避免离散 GUID。
+    kLogEvent actionEvent;
     if (moduleRecord->representativeThreadId == 0)
     {
-        QMessageBox::warning(this, "取消挂起 Thread", "当前模块行没有可用 ThreadID。");
+        const std::string errorDetailText = "当前模块行没有可用 ThreadID。";
+        warn << actionEvent
+            << "[ProcessDetailWindow] resumeCurrentModuleThread: 缺少 ThreadID。"
+            << eol;
+        showActionResultMessage("取消挂起 Thread", false, errorDetailText, actionEvent);
         return;
     }
 
     std::string detailText;
     const bool actionOk = ks::process::ResumeThreadById(moduleRecord->representativeThreadId, &detailText);
-    kLogEvent resumeModuleThreadEvent;
-    info << resumeModuleThreadEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] resumeCurrentModuleThread: tid="
         << moduleRecord->representativeThreadId
         << ", actionOk="
         << (actionOk ? "true" : "false")
         << eol;
-    showActionResultMessage("取消挂起 Thread", actionOk, detailText);
+    showActionResultMessage("取消挂起 Thread", actionOk, detailText, actionEvent);
 }
 
 void ProcessDetailWindow::terminateCurrentModuleThread()
@@ -459,22 +469,27 @@ void ProcessDetailWindow::terminateCurrentModuleThread()
     {
         return;
     }
+    // 结束线程动作：同一动作链统一复用 actionEvent，避免离散 GUID。
+    kLogEvent actionEvent;
     if (moduleRecord->representativeThreadId == 0)
     {
-        QMessageBox::warning(this, "结束 Thread", "当前模块行没有可用 ThreadID。");
+        const std::string errorDetailText = "当前模块行没有可用 ThreadID。";
+        warn << actionEvent
+            << "[ProcessDetailWindow] terminateCurrentModuleThread: 缺少 ThreadID。"
+            << eol;
+        showActionResultMessage("结束 Thread", false, errorDetailText, actionEvent);
         return;
     }
 
     std::string detailText;
     const bool actionOk = ks::process::TerminateThreadById(moduleRecord->representativeThreadId, &detailText);
-    kLogEvent terminateModuleThreadEvent;
-    info << terminateModuleThreadEvent
+    (actionOk ? info : err) << actionEvent
         << "[ProcessDetailWindow] terminateCurrentModuleThread: tid="
         << moduleRecord->representativeThreadId
         << ", actionOk="
         << (actionOk ? "true" : "false")
         << eol;
-    showActionResultMessage("结束 Thread", actionOk, detailText);
+    showActionResultMessage("结束 Thread", actionOk, detailText, actionEvent);
     if (actionOk)
     {
         requestAsyncModuleRefresh(true);

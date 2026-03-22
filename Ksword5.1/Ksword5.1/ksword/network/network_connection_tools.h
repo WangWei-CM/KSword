@@ -48,14 +48,15 @@ namespace ks::network
     {
         std::uint32_t processId = 0;           // 所属进程 PID。
         std::string processName;               // 所属进程名（可能为空）。
+        bool isIpv6 = false;                   // 地址族标识：false=IPv4，true=IPv6。
 
         std::uint32_t localIpv4HostOrder = 0;  // 本地 IPv4（主机序，终止连接时使用）。
         std::uint16_t localPort = 0;           // 本地端口（主机序）。
-        std::string localAddressText;          // 本地 IPv4 文本（UI 直接显示）。
+        std::string localAddressText;          // 本地地址文本（IPv4/IPv6）。
 
         std::uint32_t remoteIpv4HostOrder = 0; // 远端 IPv4（主机序，终止连接时使用）。
         std::uint16_t remotePort = 0;          // 远端端口（主机序）。
-        std::string remoteAddressText;         // 远端 IPv4 文本（UI 直接显示）。
+        std::string remoteAddressText;         // 远端地址文本（IPv4/IPv6）。
 
         std::uint32_t tcpStateCode = 0;        // MIB_TCP_STATE_* 原始值。
         std::string tcpStateText;              // 状态文本（ESTABLISHED/LISTEN 等）。
@@ -68,10 +69,11 @@ namespace ks::network
     {
         std::uint32_t processId = 0;           // 所属进程 PID。
         std::string processName;               // 所属进程名（可能为空）。
+        bool isIpv6 = false;                   // 地址族标识：false=IPv4，true=IPv6。
 
         std::uint32_t localIpv4HostOrder = 0;  // 本地 IPv4（主机序）。
         std::uint16_t localPort = 0;           // 本地端口（主机序）。
-        std::string localAddressText;          // 本地 IPv4 文本（UI 直接显示）。
+        std::string localAddressText;          // 本地地址文本（IPv4/IPv6）。
     };
 
     namespace connection_detail
@@ -95,6 +97,27 @@ namespace ks::network
                 return std::string("0.0.0.0");
             }
             return std::string(ipv4TextBuffer);
+        }
+
+        // Ipv6BytesToText：
+        // - 把 16 字节 IPv6 地址转换为标准文本；
+        // - 失败时回退到 "::"。
+        inline std::string Ipv6BytesToText(const UCHAR ipv6Bytes[16])
+        {
+            IN6_ADDR ipv6Address{};
+            std::memcpy(&ipv6Address, ipv6Bytes, sizeof(ipv6Address));
+
+            char ipv6TextBuffer[INET6_ADDRSTRLEN] = {};
+            const PCSTR convertResult = ::inet_ntop(
+                AF_INET6,
+                &ipv6Address,
+                ipv6TextBuffer,
+                static_cast<socklen_t>(sizeof(ipv6TextBuffer)));
+            if (convertResult == nullptr)
+            {
+                return std::string("::");
+            }
+            return std::string(ipv6TextBuffer);
         }
 
         // TcpStateCodeToText：
@@ -140,7 +163,7 @@ namespace ks::network
     } // namespace connection_detail
 
     // EnumerateTcpConnectionRecords：
-    // - 枚举当前系统 IPv4 TCP 连接快照；
+    // - 枚举当前系统 IPv4 + IPv6 TCP 连接快照；
     // - 成功时返回 true，并填充 recordsOut；
     // - 失败时返回 false，并在 errorTextOut 写入错误说明。
     inline bool EnumerateTcpConnectionRecords(
@@ -153,69 +176,144 @@ namespace ks::network
             errorTextOut->clear();
         }
 
-        // 先查询所需缓冲区大小。
-        ULONG requiredBufferLength = 0;
-        DWORD queryResult = ::GetExtendedTcpTable(
-            nullptr,
-            &requiredBufferLength,
-            TRUE,
-            AF_INET,
-            TCP_TABLE_OWNER_PID_ALL,
-            0);
-        if (queryResult != ERROR_INSUFFICIENT_BUFFER || requiredBufferLength == 0)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = "GetExtendedTcpTable(size query) failed, code=" + std::to_string(queryResult);
-            }
-            return false;
-        }
-
-        // 再按大小分配缓冲并执行真实查询。
-        std::vector<std::uint8_t> tableBuffer(requiredBufferLength, 0);
-        auto* tcpTable = reinterpret_cast<PMIB_TCPTABLE_OWNER_PID>(tableBuffer.data());
-        queryResult = ::GetExtendedTcpTable(
-            tcpTable,
-            &requiredBufferLength,
-            TRUE,
-            AF_INET,
-            TCP_TABLE_OWNER_PID_ALL,
-            0);
-        if (queryResult != NO_ERROR)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = "GetExtendedTcpTable(data query) failed, code=" + std::to_string(queryResult);
-            }
-            return false;
-        }
-
         // PID -> 进程名缓存，避免对同一 PID 重复查询。
         std::unordered_map<std::uint32_t, std::string> processNameCache;
-        processNameCache.reserve(tcpTable->dwNumEntries);
 
-        // 遍历原生表并转换成 Dock 可直接消费的结构。
-        recordsOut.reserve(tcpTable->dwNumEntries);
-        for (DWORD rowIndex = 0; rowIndex < tcpTable->dwNumEntries; ++rowIndex)
+        // appendIpv4Table 用途：枚举 IPv4 TCP 连接并追加到统一输出容器。
+        auto appendIpv4Table = [&recordsOut, &processNameCache](std::string* errorOut) -> bool
+            {
+                ULONG requiredBufferLength = 0;
+                DWORD queryResult = ::GetExtendedTcpTable(
+                    nullptr,
+                    &requiredBufferLength,
+                    TRUE,
+                    AF_INET,
+                    TCP_TABLE_OWNER_PID_ALL,
+                    0);
+                if (queryResult != ERROR_INSUFFICIENT_BUFFER || requiredBufferLength == 0)
+                {
+                    if (errorOut != nullptr)
+                    {
+                        *errorOut = "GetExtendedTcpTable(AF_INET,size) failed, code=" + std::to_string(queryResult);
+                    }
+                    return false;
+                }
+
+                std::vector<std::uint8_t> tableBuffer(requiredBufferLength, 0);
+                auto* tcpTable = reinterpret_cast<PMIB_TCPTABLE_OWNER_PID>(tableBuffer.data());
+                queryResult = ::GetExtendedTcpTable(
+                    tcpTable,
+                    &requiredBufferLength,
+                    TRUE,
+                    AF_INET,
+                    TCP_TABLE_OWNER_PID_ALL,
+                    0);
+                if (queryResult != NO_ERROR)
+                {
+                    if (errorOut != nullptr)
+                    {
+                        *errorOut = "GetExtendedTcpTable(AF_INET,data) failed, code=" + std::to_string(queryResult);
+                    }
+                    return false;
+                }
+
+                recordsOut.reserve(recordsOut.size() + tcpTable->dwNumEntries);
+                for (DWORD rowIndex = 0; rowIndex < tcpTable->dwNumEntries; ++rowIndex)
+                {
+                    const MIB_TCPROW_OWNER_PID& row = tcpTable->table[rowIndex];
+
+                    TcpConnectionRecord record;
+                    record.isIpv6 = false;
+                    record.processId = static_cast<std::uint32_t>(row.dwOwningPid);
+                    record.processName = connection_detail::FillProcessNameCacheIfNeeded(record.processId, processNameCache);
+                    record.localIpv4HostOrder = ntohl(row.dwLocalAddr);
+                    record.remoteIpv4HostOrder = ntohl(row.dwRemoteAddr);
+                    record.localPort = ntohs(static_cast<u_short>(row.dwLocalPort));
+                    record.remotePort = ntohs(static_cast<u_short>(row.dwRemotePort));
+                    record.localAddressText = connection_detail::Ipv4NetworkOrderToText(row.dwLocalAddr);
+                    record.remoteAddressText = connection_detail::Ipv4NetworkOrderToText(row.dwRemoteAddr);
+                    record.tcpStateCode = static_cast<std::uint32_t>(row.dwState);
+                    record.tcpStateText = connection_detail::TcpStateCodeToText(record.tcpStateCode);
+                    recordsOut.push_back(std::move(record));
+                }
+                return true;
+            };
+
+        // appendIpv6Table 用途：枚举 IPv6 TCP 连接并追加到统一输出容器。
+        auto appendIpv6Table = [&recordsOut, &processNameCache](std::string* errorOut) -> bool
+            {
+                ULONG requiredBufferLength = 0;
+                DWORD queryResult = ::GetExtendedTcpTable(
+                    nullptr,
+                    &requiredBufferLength,
+                    TRUE,
+                    AF_INET6,
+                    TCP_TABLE_OWNER_PID_ALL,
+                    0);
+                if (queryResult != ERROR_INSUFFICIENT_BUFFER || requiredBufferLength == 0)
+                {
+                    if (errorOut != nullptr)
+                    {
+                        *errorOut = "GetExtendedTcpTable(AF_INET6,size) failed, code=" + std::to_string(queryResult);
+                    }
+                    return false;
+                }
+
+                std::vector<std::uint8_t> tableBuffer(requiredBufferLength, 0);
+                auto* tcpTable = reinterpret_cast<PMIB_TCP6TABLE_OWNER_PID>(tableBuffer.data());
+                queryResult = ::GetExtendedTcpTable(
+                    tcpTable,
+                    &requiredBufferLength,
+                    TRUE,
+                    AF_INET6,
+                    TCP_TABLE_OWNER_PID_ALL,
+                    0);
+                if (queryResult != NO_ERROR)
+                {
+                    if (errorOut != nullptr)
+                    {
+                        *errorOut = "GetExtendedTcpTable(AF_INET6,data) failed, code=" + std::to_string(queryResult);
+                    }
+                    return false;
+                }
+
+                recordsOut.reserve(recordsOut.size() + tcpTable->dwNumEntries);
+                for (DWORD rowIndex = 0; rowIndex < tcpTable->dwNumEntries; ++rowIndex)
+                {
+                    const MIB_TCP6ROW_OWNER_PID& row = tcpTable->table[rowIndex];
+
+                    TcpConnectionRecord record;
+                    record.isIpv6 = true;
+                    record.processId = static_cast<std::uint32_t>(row.dwOwningPid);
+                    record.processName = connection_detail::FillProcessNameCacheIfNeeded(record.processId, processNameCache);
+                    record.localIpv4HostOrder = 0;
+                    record.remoteIpv4HostOrder = 0;
+                    record.localPort = ntohs(static_cast<u_short>(row.dwLocalPort));
+                    record.remotePort = ntohs(static_cast<u_short>(row.dwRemotePort));
+                    record.localAddressText = connection_detail::Ipv6BytesToText(row.ucLocalAddr);
+                    record.remoteAddressText = connection_detail::Ipv6BytesToText(row.ucRemoteAddr);
+                    record.tcpStateCode = static_cast<std::uint32_t>(row.dwState);
+                    record.tcpStateText = connection_detail::TcpStateCodeToText(record.tcpStateCode);
+                    recordsOut.push_back(std::move(record));
+                }
+                return true;
+            };
+
+        std::string ipv4Error;
+        std::string ipv6Error;
+        const bool ipv4Ok = appendIpv4Table(&ipv4Error);
+        const bool ipv6Ok = appendIpv6Table(&ipv6Error);
+        if (!ipv4Ok && !ipv6Ok)
         {
-            const MIB_TCPROW_OWNER_PID& row = tcpTable->table[rowIndex];
-
-            TcpConnectionRecord record;
-            record.processId = static_cast<std::uint32_t>(row.dwOwningPid);
-            record.processName = connection_detail::FillProcessNameCacheIfNeeded(record.processId, processNameCache);
-
-            // TCP 表中的地址字段是网络序，转换为主机序后便于比较。
-            record.localIpv4HostOrder = ntohl(row.dwLocalAddr);
-            record.remoteIpv4HostOrder = ntohl(row.dwRemoteAddr);
-            record.localPort = ntohs(static_cast<u_short>(row.dwLocalPort));
-            record.remotePort = ntohs(static_cast<u_short>(row.dwRemotePort));
-
-            // UI 展示文本保留原始地址语义。
-            record.localAddressText = connection_detail::Ipv4NetworkOrderToText(row.dwLocalAddr);
-            record.remoteAddressText = connection_detail::Ipv4NetworkOrderToText(row.dwRemoteAddr);
-            record.tcpStateCode = static_cast<std::uint32_t>(row.dwState);
-            record.tcpStateText = connection_detail::TcpStateCodeToText(record.tcpStateCode);
-            recordsOut.push_back(std::move(record));
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = "TCP v4/v6 均枚举失败: " + ipv4Error + " ; " + ipv6Error;
+            }
+            return false;
+        }
+        if (errorTextOut != nullptr && (!ipv4Ok || !ipv6Ok))
+        {
+            *errorTextOut = "部分枚举失败: " + ipv4Error + " ; " + ipv6Error;
         }
 
         // 按 PID/本地端点/远端端点排序，保证 UI 每次刷新行顺序稳定。
@@ -227,6 +325,10 @@ namespace ks::network
                 if (left.processId != right.processId)
                 {
                     return left.processId < right.processId;
+                }
+                if (left.isIpv6 != right.isIpv6)
+                {
+                    return left.isIpv6 < right.isIpv6;
                 }
                 if (left.localIpv4HostOrder != right.localIpv4HostOrder)
                 {
@@ -240,6 +342,14 @@ namespace ks::network
                 {
                     return left.remoteIpv4HostOrder < right.remoteIpv4HostOrder;
                 }
+                if (left.localAddressText != right.localAddressText)
+                {
+                    return left.localAddressText < right.localAddressText;
+                }
+                if (left.remoteAddressText != right.remoteAddressText)
+                {
+                    return left.remoteAddressText < right.remoteAddressText;
+                }
                 return left.remotePort < right.remotePort;
             });
 
@@ -247,7 +357,7 @@ namespace ks::network
     }
 
     // EnumerateUdpEndpointRecords：
-    // - 枚举当前系统 IPv4 UDP 端点快照；
+    // - 枚举当前系统 IPv4 + IPv6 UDP 端点快照；
     // - 成功时返回 true，并填充 recordsOut；
     // - 失败时返回 false，并在 errorTextOut 写入错误说明。
     inline bool EnumerateUdpEndpointRecords(
@@ -260,58 +370,134 @@ namespace ks::network
             errorTextOut->clear();
         }
 
-        // 先查询缓冲长度，随后一次性拉取全部 UDP 端点数据。
-        ULONG requiredBufferLength = 0;
-        DWORD queryResult = ::GetExtendedUdpTable(
-            nullptr,
-            &requiredBufferLength,
-            TRUE,
-            AF_INET,
-            UDP_TABLE_OWNER_PID,
-            0);
-        if (queryResult != ERROR_INSUFFICIENT_BUFFER || requiredBufferLength == 0)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = "GetExtendedUdpTable(size query) failed, code=" + std::to_string(queryResult);
-            }
-            return false;
-        }
-
-        std::vector<std::uint8_t> tableBuffer(requiredBufferLength, 0);
-        auto* udpTable = reinterpret_cast<PMIB_UDPTABLE_OWNER_PID>(tableBuffer.data());
-        queryResult = ::GetExtendedUdpTable(
-            udpTable,
-            &requiredBufferLength,
-            TRUE,
-            AF_INET,
-            UDP_TABLE_OWNER_PID,
-            0);
-        if (queryResult != NO_ERROR)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = "GetExtendedUdpTable(data query) failed, code=" + std::to_string(queryResult);
-            }
-            return false;
-        }
-
         // PID 名称缓存，减少重复进程查询。
         std::unordered_map<std::uint32_t, std::string> processNameCache;
-        processNameCache.reserve(udpTable->dwNumEntries);
 
-        recordsOut.reserve(udpTable->dwNumEntries);
-        for (DWORD rowIndex = 0; rowIndex < udpTable->dwNumEntries; ++rowIndex)
+        // appendIpv4Table 用途：枚举 IPv4 UDP 端点并追加到统一输出容器。
+        auto appendIpv4Table = [&recordsOut, &processNameCache](std::string* errorOut) -> bool
+            {
+                ULONG requiredBufferLength = 0;
+                DWORD queryResult = ::GetExtendedUdpTable(
+                    nullptr,
+                    &requiredBufferLength,
+                    TRUE,
+                    AF_INET,
+                    UDP_TABLE_OWNER_PID,
+                    0);
+                if (queryResult != ERROR_INSUFFICIENT_BUFFER || requiredBufferLength == 0)
+                {
+                    if (errorOut != nullptr)
+                    {
+                        *errorOut = "GetExtendedUdpTable(AF_INET,size) failed, code=" + std::to_string(queryResult);
+                    }
+                    return false;
+                }
+
+                std::vector<std::uint8_t> tableBuffer(requiredBufferLength, 0);
+                auto* udpTable = reinterpret_cast<PMIB_UDPTABLE_OWNER_PID>(tableBuffer.data());
+                queryResult = ::GetExtendedUdpTable(
+                    udpTable,
+                    &requiredBufferLength,
+                    TRUE,
+                    AF_INET,
+                    UDP_TABLE_OWNER_PID,
+                    0);
+                if (queryResult != NO_ERROR)
+                {
+                    if (errorOut != nullptr)
+                    {
+                        *errorOut = "GetExtendedUdpTable(AF_INET,data) failed, code=" + std::to_string(queryResult);
+                    }
+                    return false;
+                }
+
+                recordsOut.reserve(recordsOut.size() + udpTable->dwNumEntries);
+                for (DWORD rowIndex = 0; rowIndex < udpTable->dwNumEntries; ++rowIndex)
+                {
+                    const MIB_UDPROW_OWNER_PID& row = udpTable->table[rowIndex];
+
+                    UdpEndpointRecord record;
+                    record.isIpv6 = false;
+                    record.processId = static_cast<std::uint32_t>(row.dwOwningPid);
+                    record.processName = connection_detail::FillProcessNameCacheIfNeeded(record.processId, processNameCache);
+                    record.localIpv4HostOrder = ntohl(row.dwLocalAddr);
+                    record.localPort = ntohs(static_cast<u_short>(row.dwLocalPort));
+                    record.localAddressText = connection_detail::Ipv4NetworkOrderToText(row.dwLocalAddr);
+                    recordsOut.push_back(std::move(record));
+                }
+                return true;
+            };
+
+        // appendIpv6Table 用途：枚举 IPv6 UDP 端点并追加到统一输出容器。
+        auto appendIpv6Table = [&recordsOut, &processNameCache](std::string* errorOut) -> bool
+            {
+                ULONG requiredBufferLength = 0;
+                DWORD queryResult = ::GetExtendedUdpTable(
+                    nullptr,
+                    &requiredBufferLength,
+                    TRUE,
+                    AF_INET6,
+                    UDP_TABLE_OWNER_PID,
+                    0);
+                if (queryResult != ERROR_INSUFFICIENT_BUFFER || requiredBufferLength == 0)
+                {
+                    if (errorOut != nullptr)
+                    {
+                        *errorOut = "GetExtendedUdpTable(AF_INET6,size) failed, code=" + std::to_string(queryResult);
+                    }
+                    return false;
+                }
+
+                std::vector<std::uint8_t> tableBuffer(requiredBufferLength, 0);
+                auto* udpTable = reinterpret_cast<PMIB_UDP6TABLE_OWNER_PID>(tableBuffer.data());
+                queryResult = ::GetExtendedUdpTable(
+                    udpTable,
+                    &requiredBufferLength,
+                    TRUE,
+                    AF_INET6,
+                    UDP_TABLE_OWNER_PID,
+                    0);
+                if (queryResult != NO_ERROR)
+                {
+                    if (errorOut != nullptr)
+                    {
+                        *errorOut = "GetExtendedUdpTable(AF_INET6,data) failed, code=" + std::to_string(queryResult);
+                    }
+                    return false;
+                }
+
+                recordsOut.reserve(recordsOut.size() + udpTable->dwNumEntries);
+                for (DWORD rowIndex = 0; rowIndex < udpTable->dwNumEntries; ++rowIndex)
+                {
+                    const MIB_UDP6ROW_OWNER_PID& row = udpTable->table[rowIndex];
+
+                    UdpEndpointRecord record;
+                    record.isIpv6 = true;
+                    record.processId = static_cast<std::uint32_t>(row.dwOwningPid);
+                    record.processName = connection_detail::FillProcessNameCacheIfNeeded(record.processId, processNameCache);
+                    record.localIpv4HostOrder = 0;
+                    record.localPort = ntohs(static_cast<u_short>(row.dwLocalPort));
+                    record.localAddressText = connection_detail::Ipv6BytesToText(row.ucLocalAddr);
+                    recordsOut.push_back(std::move(record));
+                }
+                return true;
+            };
+
+        std::string ipv4Error;
+        std::string ipv6Error;
+        const bool ipv4Ok = appendIpv4Table(&ipv4Error);
+        const bool ipv6Ok = appendIpv6Table(&ipv6Error);
+        if (!ipv4Ok && !ipv6Ok)
         {
-            const MIB_UDPROW_OWNER_PID& row = udpTable->table[rowIndex];
-
-            UdpEndpointRecord record;
-            record.processId = static_cast<std::uint32_t>(row.dwOwningPid);
-            record.processName = connection_detail::FillProcessNameCacheIfNeeded(record.processId, processNameCache);
-            record.localIpv4HostOrder = ntohl(row.dwLocalAddr);
-            record.localPort = ntohs(static_cast<u_short>(row.dwLocalPort));
-            record.localAddressText = connection_detail::Ipv4NetworkOrderToText(row.dwLocalAddr);
-            recordsOut.push_back(std::move(record));
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = "UDP v4/v6 均枚举失败: " + ipv4Error + " ; " + ipv6Error;
+            }
+            return false;
+        }
+        if (errorTextOut != nullptr && (!ipv4Ok || !ipv6Ok))
+        {
+            *errorTextOut = "部分枚举失败: " + ipv4Error + " ; " + ipv6Error;
         }
 
         // UDP 端点排序规则：PID -> 本地端点，保证 UI 行稳定。
@@ -324,9 +510,17 @@ namespace ks::network
                 {
                     return left.processId < right.processId;
                 }
+                if (left.isIpv6 != right.isIpv6)
+                {
+                    return left.isIpv6 < right.isIpv6;
+                }
                 if (left.localIpv4HostOrder != right.localIpv4HostOrder)
                 {
                     return left.localIpv4HostOrder < right.localIpv4HostOrder;
+                }
+                if (left.localAddressText != right.localAddressText)
+                {
+                    return left.localAddressText < right.localAddressText;
                 }
                 return left.localPort < right.localPort;
             });
@@ -345,6 +539,16 @@ namespace ks::network
         if (detailTextOut != nullptr)
         {
             detailTextOut->clear();
+        }
+
+        // 终止连接能力当前仅覆盖 IPv4（SetTcpEntry）；IPv6 连接仅支持展示，不支持终止。
+        if (connectionRecord.isIpv6)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = "IPv6 TCP 连接暂不支持通过 SetTcpEntry 终止。";
+            }
+            return false;
         }
 
         // 按 Win32 要求组装 MIB_TCPROW，地址/端口都需转换为网络序。

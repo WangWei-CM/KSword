@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // ============================================================
 // ksword/process/process.h
@@ -374,4 +374,6 @@ namespace ks::process
     bool LaunchProcess(
         const CreateProcessRequest& request,
         CreateProcessResult* resultOut);
+    std::wstring GetCurrentProcessPath();
+
 }

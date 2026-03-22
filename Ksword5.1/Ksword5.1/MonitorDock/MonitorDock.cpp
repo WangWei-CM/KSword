@@ -6,6 +6,7 @@
 #include "../theme.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QDateTime>
@@ -155,6 +156,39 @@ namespace
         default:
             return QString("<vt=%1>").arg(value.vt);
         }
+    }
+
+    // 文本匹配辅助：
+    // - 支持普通 contains 与正则匹配两种模式；
+    // - 支持大小写敏感切换；
+    // - pattern 为空时视为“匹配通过”。
+    bool textMatch(
+        const QString& sourceText,
+        const QString& patternText,
+        const bool useRegex,
+        const Qt::CaseSensitivity caseSensitivity)
+    {
+        if (patternText.trimmed().isEmpty())
+        {
+            return true;
+        }
+
+        if (!useRegex)
+        {
+            return sourceText.contains(patternText, caseSensitivity);
+        }
+
+        QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
+        if (caseSensitivity == Qt::CaseInsensitive)
+        {
+            options |= QRegularExpression::CaseInsensitiveOption;
+        }
+        const QRegularExpression regex(patternText, options);
+        if (!regex.isValid())
+        {
+            return false;
+        }
+        return regex.match(sourceText).hasMatch();
     }
 
     // 连接 ROOT\\CIMV2。
@@ -496,7 +530,8 @@ void MonitorDock::initializeWmiTab()
     m_wmiLayout->setSpacing(6);
 
     m_wmiSideToolBox = new QToolBox(m_wmiPage);
-    m_wmiLayout->addWidget(m_wmiSideToolBox, 0);
+    // 让折叠栏获得可伸缩空间，避免“WMI订阅”页在中等窗口高度下被压缩出内部滚动条。
+    m_wmiLayout->addWidget(m_wmiSideToolBox, 1);
 
     // Provider 折叠页。
     m_wmiProviderPanel = new QWidget(m_wmiSideToolBox);
@@ -597,6 +632,8 @@ void MonitorDock::initializeWmiTab()
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    // 事件类表先设置为可收敛尺寸策略，具体高度由 updateWmiSubscribePanelCompactLayout 动态计算。
+    m_wmiEventClassTable->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
     QHBoxLayout* whereLayout = new QHBoxLayout();
     whereLayout->setContentsMargins(0, 0, 0, 0);
@@ -613,32 +650,40 @@ void MonitorDock::initializeWmiTab()
 
     m_wmiWhereEditor = new QPlainTextEdit(m_wmiSubscribePanel);
     m_wmiWhereEditor->setPlaceholderText(QStringLiteral("可选：输入WQL WHERE子句"));
-    m_wmiWhereEditor->setMaximumBlockCount(20);
+    // WHERE 子句改为单行输入体验，降低折叠页高度并避免多行占位。
+    m_wmiWhereEditor->setMaximumBlockCount(1);
+    m_wmiWhereEditor->setLineWrapMode(QPlainTextEdit::NoWrap);
+    m_wmiWhereEditor->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_wmiWhereEditor->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_wmiWhereEditor->setStyleSheet(blueInputStyle());
+    // 按用户要求只保留一行高度。
+    m_wmiWhereEditor->setFixedHeight(30);
 
     m_wmiSubscribeControlLayout = new QHBoxLayout();
     m_wmiSubscribeControlLayout->setContentsMargins(0, 0, 0, 0);
     m_wmiSubscribeControlLayout->setSpacing(6);
 
-    m_wmiStartSubscribeButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_wmiSubscribePanel);
+    // WMI 订阅控制按钮移到折叠栏外（父控件改为 m_wmiPage），
+    // 避免订阅折叠页继续增高导致滚动条出现。
+    m_wmiStartSubscribeButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_wmiPage);
     m_wmiStartSubscribeButton->setToolTip(QStringLiteral("开始订阅"));
     m_wmiStartSubscribeButton->setStyleSheet(blueButtonStyle());
     m_wmiStartSubscribeButton->setFixedWidth(34);
 
-    m_wmiStopSubscribeButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), QString(), m_wmiSubscribePanel);
+    m_wmiStopSubscribeButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), QString(), m_wmiPage);
     m_wmiStopSubscribeButton->setToolTip(QStringLiteral("停止订阅"));
     m_wmiStopSubscribeButton->setStyleSheet(blueButtonStyle());
     m_wmiStopSubscribeButton->setFixedWidth(34);
 
-    m_wmiPauseSubscribeButton = new QPushButton(QIcon(":/Icon/process_pause.svg"), QString(), m_wmiSubscribePanel);
+    m_wmiPauseSubscribeButton = new QPushButton(QIcon(":/Icon/process_pause.svg"), QString(), m_wmiPage);
     m_wmiPauseSubscribeButton->setToolTip(QStringLiteral("暂停/继续订阅"));
     m_wmiPauseSubscribeButton->setStyleSheet(blueButtonStyle());
     m_wmiPauseSubscribeButton->setFixedWidth(34);
 
-    m_wmiSubscribeStatusLabel = new QLabel(QStringLiteral("● 未订阅"), m_wmiSubscribePanel);
+    m_wmiSubscribeStatusLabel = new QLabel(QStringLiteral("● 未订阅"), m_wmiPage);
     m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;font-weight:600;"));
 
-    m_wmiSubscribeControlLayout->addWidget(new QLabel(QStringLiteral("控制"), m_wmiSubscribePanel));
+    m_wmiSubscribeControlLayout->addWidget(new QLabel(QStringLiteral("WMI订阅控制"), m_wmiPage));
     m_wmiSubscribeControlLayout->addStretch(1);
     m_wmiSubscribeControlLayout->addWidget(m_wmiStartSubscribeButton);
     m_wmiSubscribeControlLayout->addWidget(m_wmiStopSubscribeButton);
@@ -649,9 +694,13 @@ void MonitorDock::initializeWmiTab()
     m_wmiSubscribeLayout->addWidget(m_wmiEventClassTable, 1);
     m_wmiSubscribeLayout->addLayout(whereLayout);
     m_wmiSubscribeLayout->addWidget(m_wmiWhereEditor, 0);
-    m_wmiSubscribeLayout->addLayout(m_wmiSubscribeControlLayout);
+    // 初始化时先按“紧凑高度”收敛订阅面板，防止首帧就出现折叠页内部滚动条。
+    updateWmiSubscribePanelCompactLayout();
 
     m_wmiSideToolBox->addItem(m_wmiSubscribePanel, QStringLiteral("WMI订阅"));
+
+    // 把订阅控制区放在折叠栏外，减少子折叠页高度，避免出现额外滚动条。
+    m_wmiLayout->addLayout(m_wmiSubscribeControlLayout, 0);
 
     // 结果表。
     m_wmiEventTable = new QTableWidget(m_wmiPage);
@@ -675,8 +724,118 @@ void MonitorDock::initializeWmiTab()
     m_wmiEventTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     m_wmiEventTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
 
+    // 结果筛选条：提供全字段/分字段/正则/大小写/反向匹配与贴底滚动控制。
+    QWidget* wmiFilterWidget = new QWidget(m_wmiPage);
+    QVBoxLayout* wmiFilterLayout = new QVBoxLayout(wmiFilterWidget);
+    wmiFilterLayout->setContentsMargins(0, 0, 0, 0);
+    wmiFilterLayout->setSpacing(4);
+
+    QHBoxLayout* wmiFilterTopRow = new QHBoxLayout();
+    wmiFilterTopRow->setContentsMargins(0, 0, 0, 0);
+    wmiFilterTopRow->setSpacing(6);
+    m_wmiEventGlobalFilterEdit = new QLineEdit(wmiFilterWidget);
+    m_wmiEventGlobalFilterEdit->setPlaceholderText(QStringLiteral("全字段筛选（时间/来源/类/PID/详情）"));
+    m_wmiEventGlobalFilterEdit->setStyleSheet(blueInputStyle());
+    m_wmiEventProviderFilterEdit = new QLineEdit(wmiFilterWidget);
+    m_wmiEventProviderFilterEdit->setPlaceholderText(QStringLiteral("来源筛选"));
+    m_wmiEventProviderFilterEdit->setStyleSheet(blueInputStyle());
+    m_wmiEventClassFilterEdit = new QLineEdit(wmiFilterWidget);
+    m_wmiEventClassFilterEdit->setPlaceholderText(QStringLiteral("事件类筛选"));
+    m_wmiEventClassFilterEdit->setStyleSheet(blueInputStyle());
+    wmiFilterTopRow->addWidget(new QLabel(QStringLiteral("筛选"), wmiFilterWidget));
+    wmiFilterTopRow->addWidget(m_wmiEventGlobalFilterEdit, 2);
+    wmiFilterTopRow->addWidget(m_wmiEventProviderFilterEdit, 1);
+    wmiFilterTopRow->addWidget(m_wmiEventClassFilterEdit, 1);
+
+    QHBoxLayout* wmiFilterBottomRow = new QHBoxLayout();
+    wmiFilterBottomRow->setContentsMargins(0, 0, 0, 0);
+    wmiFilterBottomRow->setSpacing(6);
+    m_wmiEventPidFilterEdit = new QLineEdit(wmiFilterWidget);
+    m_wmiEventPidFilterEdit->setPlaceholderText(QStringLiteral("PID/进程筛选"));
+    m_wmiEventPidFilterEdit->setStyleSheet(blueInputStyle());
+    m_wmiEventDetailFilterEdit = new QLineEdit(wmiFilterWidget);
+    m_wmiEventDetailFilterEdit->setPlaceholderText(QStringLiteral("详情筛选"));
+    m_wmiEventDetailFilterEdit->setStyleSheet(blueInputStyle());
+    m_wmiEventRegexCheck = new QCheckBox(QStringLiteral("正则"), wmiFilterWidget);
+    m_wmiEventCaseCheck = new QCheckBox(QStringLiteral("区分大小写"), wmiFilterWidget);
+    m_wmiEventInvertCheck = new QCheckBox(QStringLiteral("反向筛选"), wmiFilterWidget);
+    m_wmiEventKeepBottomCheck = new QCheckBox(QStringLiteral("保持表格在底部"), wmiFilterWidget);
+    m_wmiEventKeepBottomCheck->setChecked(true);
+    m_wmiEventFilterClearButton = new QPushButton(QIcon(":/Icon/log_clear.svg"), QString(), wmiFilterWidget);
+    m_wmiEventFilterClearButton->setStyleSheet(blueButtonStyle());
+    m_wmiEventFilterClearButton->setToolTip(QStringLiteral("清空所有WMI筛选条件"));
+    m_wmiEventFilterClearButton->setFixedWidth(34);
+    m_wmiEventFilterStatusLabel = new QLabel(QStringLiteral("可见: 0 / 0"), wmiFilterWidget);
+    m_wmiEventFilterStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;"));
+
+    wmiFilterBottomRow->addWidget(m_wmiEventPidFilterEdit, 1);
+    wmiFilterBottomRow->addWidget(m_wmiEventDetailFilterEdit, 2);
+    wmiFilterBottomRow->addWidget(m_wmiEventRegexCheck, 0);
+    wmiFilterBottomRow->addWidget(m_wmiEventCaseCheck, 0);
+    wmiFilterBottomRow->addWidget(m_wmiEventInvertCheck, 0);
+    wmiFilterBottomRow->addWidget(m_wmiEventKeepBottomCheck, 0);
+    wmiFilterBottomRow->addWidget(m_wmiEventFilterClearButton, 0);
+    wmiFilterBottomRow->addWidget(m_wmiEventFilterStatusLabel, 0);
+
+    wmiFilterLayout->addLayout(wmiFilterTopRow);
+    wmiFilterLayout->addLayout(wmiFilterBottomRow);
+
+    m_wmiLayout->addWidget(wmiFilterWidget, 0);
     m_wmiLayout->addWidget(m_wmiEventTable, 1);
+    // 调整 WMI 页面纵向占比：
+    // - 折叠配置区与外部控制区保持紧凑；
+    // - 事件结果表优先占用剩余空间。
+    m_wmiLayout->setStretch(0, 2);
+    m_wmiLayout->setStretch(1, 0);
+    m_wmiLayout->setStretch(2, 0);
+    m_wmiLayout->setStretch(3, 3);
     m_sideTabWidget->addTab(m_wmiPage, QStringLiteral("WMI"));
+}
+
+void MonitorDock::updateWmiSubscribePanelCompactLayout()
+{
+    if (m_wmiEventClassTable == nullptr)
+    {
+        return;
+    }
+
+    // fallbackVisibleRowCount 用途：事件类尚未加载时，先按固定可视行数预留紧凑高度。
+    const int fallbackVisibleRowCount = 4;
+    // maxVisibleRowCount 用途：限制折叠页最大可视行数，防止表格过高挤压折叠栏。
+    const int maxVisibleRowCount = 6;
+    // currentRowCount 用途：记录当前事件类表总行数，作为可视高度计算输入。
+    const int currentRowCount = m_wmiEventClassTable->rowCount();
+    // visibleRowCount 用途：将可视行数夹在 [fallbackVisibleRowCount, maxVisibleRowCount] 区间内。
+    const int visibleRowCount = std::clamp(
+        currentRowCount > 0 ? currentRowCount : fallbackVisibleRowCount,
+        fallbackVisibleRowCount,
+        maxVisibleRowCount);
+
+    // headerHeight 用途：记录事件类表头高度；若表头为空则使用默认值避免高度为 0。
+    int headerHeight = 24;
+    QHeaderView* headerView = m_wmiEventClassTable->horizontalHeader();
+    if (headerView != nullptr)
+    {
+        headerHeight = std::max(20, headerView->height());
+    }
+
+    // rowHeight 用途：记录单行默认高度，参与表格总高度估算。
+    int rowHeight = 24;
+    QHeaderView* verticalHeader = m_wmiEventClassTable->verticalHeader();
+    if (verticalHeader != nullptr)
+    {
+        rowHeight = std::max(20, verticalHeader->defaultSectionSize());
+    }
+
+    // framePixels 用途：补偿表格边框占用像素，防止最底行被裁切。
+    const int framePixels = m_wmiEventClassTable->frameWidth() * 2;
+    // safetyPadding 用途：额外留白，吸收不同系统样式下的高度浮动。
+    const int safetyPadding = 6;
+    // tableTargetHeight 用途：最终写回到事件类表的紧凑高度。
+    const int tableTargetHeight =
+        headerHeight + (visibleRowCount * rowHeight) + framePixels + safetyPadding;
+    m_wmiEventClassTable->setMinimumHeight(tableTargetHeight);
+    m_wmiEventClassTable->setMaximumHeight(tableTargetHeight);
 }
 
 void MonitorDock::initializeEtwTab()
@@ -712,9 +871,91 @@ void MonitorDock::initializeEtwTab()
     m_etwProviderControlLayout->addWidget(m_etwProviderRefreshButton);
     m_etwProviderControlLayout->addWidget(m_etwProviderStatusLabel);
 
-    m_etwProviderList = new QListWidget(m_etwProviderPanel);
+    // Provider 区改为左右分栏：
+    // - 左侧：预置常用 Provider 模板（含分类筛选）；
+    // - 右侧：系统枚举出的全部 Provider 勾选列表。
+    QHBoxLayout* etwProviderSplitLayout = new QHBoxLayout();
+    etwProviderSplitLayout->setContentsMargins(0, 0, 0, 0);
+    etwProviderSplitLayout->setSpacing(6);
+
+    QWidget* etwPresetWidget = new QWidget(m_etwProviderPanel);
+    QVBoxLayout* etwPresetLayout = new QVBoxLayout(etwPresetWidget);
+    etwPresetLayout->setContentsMargins(0, 0, 0, 0);
+    etwPresetLayout->setSpacing(4);
+
+    QHBoxLayout* etwPresetHeaderLayout = new QHBoxLayout();
+    etwPresetHeaderLayout->setContentsMargins(0, 0, 0, 0);
+    etwPresetHeaderLayout->setSpacing(6);
+    etwPresetHeaderLayout->addWidget(new QLabel(QStringLiteral("常用模板"), etwPresetWidget));
+
+    m_etwPresetCategoryCombo = new QComboBox(etwPresetWidget);
+    m_etwPresetCategoryCombo->setStyleSheet(blueInputStyle());
+    m_etwPresetCategoryCombo->addItems(QStringList{
+        QStringLiteral("全部分类"),
+        QStringLiteral("进程线程"),
+        QStringLiteral("文件注册表"),
+        QStringLiteral("网络通信"),
+        QStringLiteral("安全审计"),
+        QStringLiteral("脚本管理")
+    });
+    etwPresetHeaderLayout->addWidget(m_etwPresetCategoryCombo, 1);
+    etwPresetLayout->addLayout(etwPresetHeaderLayout);
+
+    m_etwPresetProviderList = new QListWidget(etwPresetWidget);
+    m_etwPresetProviderList->setAlternatingRowColors(true);
+    m_etwPresetProviderList->setMinimumHeight(180);
+    etwPresetLayout->addWidget(m_etwPresetProviderList, 1);
+
+    // 预置模板条目：按分类提供最常用 Provider，便于一键勾选常见监控场景。
+    struct EtwPresetTemplate
+    {
+        const wchar_t* categoryText;
+        const wchar_t* providerNameText;
+    };
+    const std::vector<EtwPresetTemplate> presetTemplateList{
+        { L"进程线程", L"Microsoft-Windows-Kernel-Process" },
+        { L"进程线程", L"Microsoft-Windows-Kernel-Thread" },
+        { L"进程线程", L"Microsoft-Windows-Kernel-Image" },
+        { L"文件注册表", L"Microsoft-Windows-Kernel-File" },
+        { L"文件注册表", L"Microsoft-Windows-Kernel-Registry" },
+        { L"网络通信", L"Microsoft-Windows-TCPIP" },
+        { L"网络通信", L"Microsoft-Windows-DNS-Client" },
+        { L"网络通信", L"Microsoft-Windows-Winsock-AFD" },
+        { L"安全审计", L"Microsoft-Windows-Security-Auditing" },
+        { L"安全审计", L"Microsoft-Windows-Defender" },
+        { L"脚本管理", L"Microsoft-Windows-PowerShell" },
+        { L"脚本管理", L"Microsoft-Windows-WMI-Activity" },
+        { L"脚本管理", L"Microsoft-Windows-TaskScheduler" }
+    };
+    for (const EtwPresetTemplate& preset : presetTemplateList)
+    {
+        const QString categoryText = QString::fromWCharArray(preset.categoryText);
+        const QString providerNameText = QString::fromWCharArray(preset.providerNameText);
+        QListWidgetItem* item = new QListWidgetItem(
+            QStringLiteral("[%1] %2").arg(categoryText, providerNameText),
+            m_etwPresetProviderList);
+        item->setData(Qt::UserRole, providerNameText);
+        item->setData(Qt::UserRole + 1, categoryText);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(Qt::Unchecked);
+    }
+
+    QWidget* etwAllProviderWidget = new QWidget(m_etwProviderPanel);
+    QVBoxLayout* etwAllProviderLayout = new QVBoxLayout(etwAllProviderWidget);
+    etwAllProviderLayout->setContentsMargins(0, 0, 0, 0);
+    etwAllProviderLayout->setSpacing(4);
+    etwAllProviderLayout->addWidget(new QLabel(QStringLiteral("系统Providers"), etwAllProviderWidget));
+
+    m_etwProviderList = new QListWidget(etwAllProviderWidget);
+    m_etwProviderList->setAlternatingRowColors(true);
+    m_etwProviderList->setMinimumHeight(180);
+    etwAllProviderLayout->addWidget(m_etwProviderList, 1);
+
+    etwProviderSplitLayout->addWidget(etwPresetWidget, 1);
+    etwProviderSplitLayout->addWidget(etwAllProviderWidget, 2);
+
     m_etwProviderPanelLayout->addLayout(m_etwProviderControlLayout);
-    m_etwProviderPanelLayout->addWidget(m_etwProviderList, 1);
+    m_etwProviderPanelLayout->addLayout(etwProviderSplitLayout, 1);
 
     m_etwSideToolBox->addItem(m_etwProviderPanel, QStringLiteral("ETW Providers"));
 
@@ -773,30 +1014,31 @@ void MonitorDock::initializeEtwTab()
     m_etwCaptureControlLayout->setContentsMargins(0, 0, 0, 0);
     m_etwCaptureControlLayout->setSpacing(6);
 
-    m_etwStartButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), capturePanel);
+    // ETW 控制按钮挪到折叠栏外（父控件改为 m_etwPage），避免折叠页过高。
+    m_etwStartButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_etwPage);
     m_etwStartButton->setToolTip(QStringLiteral("开始监听"));
     m_etwStartButton->setStyleSheet(blueButtonStyle());
     m_etwStartButton->setFixedWidth(34);
 
-    m_etwStopButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), QString(), capturePanel);
+    m_etwStopButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), QString(), m_etwPage);
     m_etwStopButton->setToolTip(QStringLiteral("停止监听"));
     m_etwStopButton->setStyleSheet(blueButtonStyle());
     m_etwStopButton->setFixedWidth(34);
 
-    m_etwPauseButton = new QPushButton(QIcon(":/Icon/process_pause.svg"), QString(), capturePanel);
+    m_etwPauseButton = new QPushButton(QIcon(":/Icon/process_pause.svg"), QString(), m_etwPage);
     m_etwPauseButton->setToolTip(QStringLiteral("暂停/继续"));
     m_etwPauseButton->setStyleSheet(blueButtonStyle());
     m_etwPauseButton->setFixedWidth(34);
 
-    m_etwExportButton = new QPushButton(QIcon(":/Icon/log_export.svg"), QString(), capturePanel);
+    m_etwExportButton = new QPushButton(QIcon(":/Icon/log_export.svg"), QString(), m_etwPage);
     m_etwExportButton->setToolTip(QStringLiteral("导出TSV"));
     m_etwExportButton->setStyleSheet(blueButtonStyle());
     m_etwExportButton->setFixedWidth(34);
 
-    m_etwCaptureStatusLabel = new QLabel(QStringLiteral("● 未监听"), capturePanel);
+    m_etwCaptureStatusLabel = new QLabel(QStringLiteral("● 未监听"), m_etwPage);
     m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;font-weight:600;"));
 
-    m_etwCaptureControlLayout->addWidget(new QLabel(QStringLiteral("控制"), capturePanel));
+    m_etwCaptureControlLayout->addWidget(new QLabel(QStringLiteral("ETW控制"), m_etwPage));
     m_etwCaptureControlLayout->addStretch(1);
     m_etwCaptureControlLayout->addWidget(m_etwStartButton);
     m_etwCaptureControlLayout->addWidget(m_etwStopButton);
@@ -805,8 +1047,10 @@ void MonitorDock::initializeEtwTab()
     m_etwCaptureControlLayout->addWidget(m_etwCaptureStatusLabel);
 
     captureLayout->addLayout(formLayout);
-    captureLayout->addLayout(m_etwCaptureControlLayout);
     m_etwSideToolBox->addItem(capturePanel, QStringLiteral("ETW捕获"));
+
+    // 把 ETW 控制栏放在折叠栏外，统一和 WMI 的操作区布局。
+    m_etwLayout->addLayout(m_etwCaptureControlLayout, 0);
 
     // 结果表。
     m_etwEventTable = new QTableWidget(m_etwPage);
@@ -835,6 +1079,9 @@ void MonitorDock::initializeEtwTab()
     m_etwEventTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
 
     m_etwLayout->addWidget(m_etwEventTable, 1);
+    m_etwLayout->setStretch(0, 2);
+    m_etwLayout->setStretch(1, 0);
+    m_etwLayout->setStretch(2, 3);
 
     m_etwUiUpdateTimer = new QTimer(this);
     m_etwUiUpdateTimer->setInterval(100);
@@ -928,13 +1175,17 @@ void MonitorDock::initializeConnections()
         {
             return;
         }
-        if (m_wmiWhereEditor->toPlainText().trimmed().isEmpty())
+        // 单行 WHERE 输入框逻辑：
+        // - 空内容时直接填模板；
+        // - 非空时在同一行用 AND 拼接，避免 appendPlainText 产生换行。
+        const QString existingWhere = m_wmiWhereEditor->toPlainText().trimmed();
+        if (existingWhere.isEmpty())
         {
             m_wmiWhereEditor->setPlainText(text);
         }
         else
         {
-            m_wmiWhereEditor->appendPlainText(QStringLiteral(" AND ") + text);
+            m_wmiWhereEditor->setPlainText(existingWhere + QStringLiteral(" AND ") + text);
         }
 
         kLogEvent event;
@@ -972,7 +1223,86 @@ void MonitorDock::initializeConnections()
         showWmiEventContextMenu(pos);
     });
 
+    // WMI 结果筛选交互：任一条件变化后实时重算可见行。
+    const auto bindWmiFilter = [this](QLineEdit* edit) {
+        if (edit == nullptr)
+        {
+            return;
+        }
+        connect(edit, &QLineEdit::textChanged, this, [this]() {
+            applyWmiEventFilter();
+        });
+    };
+    bindWmiFilter(m_wmiEventGlobalFilterEdit);
+    bindWmiFilter(m_wmiEventProviderFilterEdit);
+    bindWmiFilter(m_wmiEventClassFilterEdit);
+    bindWmiFilter(m_wmiEventPidFilterEdit);
+    bindWmiFilter(m_wmiEventDetailFilterEdit);
+
+    if (m_wmiEventRegexCheck != nullptr)
+    {
+        connect(m_wmiEventRegexCheck, &QCheckBox::toggled, this, [this]() {
+            applyWmiEventFilter();
+        });
+    }
+    if (m_wmiEventCaseCheck != nullptr)
+    {
+        connect(m_wmiEventCaseCheck, &QCheckBox::toggled, this, [this]() {
+            applyWmiEventFilter();
+        });
+    }
+    if (m_wmiEventInvertCheck != nullptr)
+    {
+        connect(m_wmiEventInvertCheck, &QCheckBox::toggled, this, [this]() {
+            applyWmiEventFilter();
+        });
+    }
+    if (m_wmiEventFilterClearButton != nullptr)
+    {
+        connect(m_wmiEventFilterClearButton, &QPushButton::clicked, this, [this]() {
+            clearWmiEventFilter();
+        });
+    }
+
     // ETW 基础交互。
+    if (m_etwPresetCategoryCombo != nullptr && m_etwPresetProviderList != nullptr)
+    {
+        const auto applyPresetCategoryFilter = [this](const QString& categoryText) {
+            const QString normalizedCategory = categoryText.trimmed();
+            int visibleCount = 0;
+            for (int row = 0; row < m_etwPresetProviderList->count(); ++row)
+            {
+                QListWidgetItem* item = m_etwPresetProviderList->item(row);
+                if (item == nullptr)
+                {
+                    continue;
+                }
+                const QString itemCategory = item->data(Qt::UserRole + 1).toString();
+                const bool isVisible = normalizedCategory.isEmpty()
+                    || normalizedCategory == QStringLiteral("全部分类")
+                    || itemCategory.compare(normalizedCategory, Qt::CaseInsensitive) == 0;
+                item->setHidden(!isVisible);
+                if (isVisible)
+                {
+                    ++visibleCount;
+                }
+            }
+
+            kLogEvent event;
+            dbg << event
+                << "[MonitorDock] ETW预置模板分类筛选, category="
+                << normalizedCategory.toStdString()
+                << ", visibleCount="
+                << visibleCount
+                << eol;
+        };
+
+        connect(m_etwPresetCategoryCombo, &QComboBox::currentTextChanged, this, [applyPresetCategoryFilter](const QString& text) {
+            applyPresetCategoryFilter(text);
+        });
+        applyPresetCategoryFilter(m_etwPresetCategoryCombo->currentText());
+    }
+
     connect(m_etwProviderRefreshButton, &QPushButton::clicked, this, [this]() {
         kLogEvent event;
         info << event
@@ -1062,11 +1392,11 @@ void MonitorDock::refreshWmiProvidersAsync()
     m_wmiProviderStatusLabel->setText(QStringLiteral("● 刷新中..."));
     m_wmiProviderStatusLabel->setStyleSheet(QStringLiteral("color:#1F4E7A;font-weight:600;"));
 
-    if (m_wmiSubscribeProgressPid == 0)
+    if (m_wmiProviderRefreshProgressPid == 0)
     {
-        m_wmiSubscribeProgressPid = kPro.add("监控", "刷新WMI Provider");
+        m_wmiProviderRefreshProgressPid = kPro.add("监控", "刷新WMI Provider");
     }
-    kPro.set(m_wmiSubscribeProgressPid, "开始枚举WMI Provider", 0, 10.0f);
+    kPro.set(m_wmiProviderRefreshProgressPid, "开始枚举WMI Provider", 0, 10.0f);
 
     QPointer<MonitorDock> guardThis(this);
     std::thread([guardThis]() {
@@ -1082,6 +1412,11 @@ void MonitorDock::refreshWmiProvidersAsync()
                 }
                 guardThis->m_wmiProviderStatusLabel->setText(QStringLiteral("● 初始化失败"));
                 guardThis->m_wmiProviderStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
+                if (guardThis->m_wmiProviderRefreshProgressPid != 0)
+                {
+                    kPro.set(guardThis->m_wmiProviderRefreshProgressPid, "WMI Provider刷新失败", 0, 100.0f);
+                    guardThis->m_wmiProviderRefreshProgressPid = 0;
+                }
 
                 kLogEvent event;
                 err << event << "[MonitorDock] WMI Provider初始化失败:" << errorText.toStdString() << eol;
@@ -1100,6 +1435,11 @@ void MonitorDock::refreshWmiProvidersAsync()
                 }
                 guardThis->m_wmiProviderStatusLabel->setText(QStringLiteral("● 连接失败"));
                 guardThis->m_wmiProviderStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
+                if (guardThis->m_wmiProviderRefreshProgressPid != 0)
+                {
+                    kPro.set(guardThis->m_wmiProviderRefreshProgressPid, "WMI Provider刷新失败", 0, 100.0f);
+                    guardThis->m_wmiProviderRefreshProgressPid = 0;
+                }
 
                 kLogEvent event;
                 err << event << "[MonitorDock] WMI连接失败:" << errorText.toStdString() << eol;
@@ -1208,7 +1548,11 @@ void MonitorDock::refreshWmiProvidersAsync()
             guardThis->m_wmiProviderStatusLabel->setText(
                 QStringLiteral("● 已刷新 %1 项").arg(guardThis->m_wmiProviders.size()));
             guardThis->m_wmiProviderStatusLabel->setStyleSheet(QStringLiteral("color:#2F7D32;font-weight:600;"));
-            kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI Provider完成", 0, 100.0f);
+            if (guardThis->m_wmiProviderRefreshProgressPid != 0)
+            {
+                kPro.set(guardThis->m_wmiProviderRefreshProgressPid, "WMI Provider完成", 0, 100.0f);
+                guardThis->m_wmiProviderRefreshProgressPid = 0;
+            }
 
             kLogEvent event;
             info << event
@@ -1324,6 +1668,8 @@ void MonitorDock::refreshWmiEventClassesAsync()
                         ? QStringLiteral("Win32")
                         : QStringLiteral("其他")));
             }
+            // 事件类刷新后重新计算折叠页目标高度，确保“WMI订阅”页不会因为行数变化撑爆折叠栏。
+            guardThis->updateWmiSubscribePanelCompactLayout();
 
             kLogEvent event;
             info << event
@@ -1343,6 +1689,116 @@ void MonitorDock::applyWmiProviderFilter()
     dbg << event
         << "[MonitorDock] 应用WMI Provider过滤, keyword="
         << keyword.toStdString()
+        << eol;
+}
+
+void MonitorDock::applyWmiEventFilter()
+{
+    if (m_wmiEventTable == nullptr)
+    {
+        return;
+    }
+
+    const QString globalKeyword = m_wmiEventGlobalFilterEdit != nullptr
+        ? m_wmiEventGlobalFilterEdit->text().trimmed()
+        : QString();
+    const QString providerKeyword = m_wmiEventProviderFilterEdit != nullptr
+        ? m_wmiEventProviderFilterEdit->text().trimmed()
+        : QString();
+    const QString classKeyword = m_wmiEventClassFilterEdit != nullptr
+        ? m_wmiEventClassFilterEdit->text().trimmed()
+        : QString();
+    const QString pidKeyword = m_wmiEventPidFilterEdit != nullptr
+        ? m_wmiEventPidFilterEdit->text().trimmed()
+        : QString();
+    const QString detailKeyword = m_wmiEventDetailFilterEdit != nullptr
+        ? m_wmiEventDetailFilterEdit->text().trimmed()
+        : QString();
+    const bool useRegex = m_wmiEventRegexCheck != nullptr && m_wmiEventRegexCheck->isChecked();
+    const bool invertMatch = m_wmiEventInvertCheck != nullptr && m_wmiEventInvertCheck->isChecked();
+    const Qt::CaseSensitivity caseSensitivity =
+        (m_wmiEventCaseCheck != nullptr && m_wmiEventCaseCheck->isChecked())
+        ? Qt::CaseSensitive
+        : Qt::CaseInsensitive;
+
+    int visibleCount = 0;
+    const int totalCount = m_wmiEventTable->rowCount();
+    for (int row = 0; row < totalCount; ++row)
+    {
+        const QString tsText = m_wmiEventTable->item(row, 0) != nullptr
+            ? m_wmiEventTable->item(row, 0)->text()
+            : QString();
+        const QString providerText = m_wmiEventTable->item(row, 1) != nullptr
+            ? m_wmiEventTable->item(row, 1)->text()
+            : QString();
+        const QString classText = m_wmiEventTable->item(row, 2) != nullptr
+            ? m_wmiEventTable->item(row, 2)->text()
+            : QString();
+        const QString pidText = m_wmiEventTable->item(row, 3) != nullptr
+            ? m_wmiEventTable->item(row, 3)->text()
+            : QString();
+        const QString detailText = m_wmiEventTable->item(row, 4) != nullptr
+            ? m_wmiEventTable->item(row, 4)->text()
+            : QString();
+
+        const QString mergedText = QStringLiteral("%1 %2 %3 %4 %5")
+            .arg(tsText, providerText, classText, pidText, detailText);
+        const bool globalMatch = textMatch(mergedText, globalKeyword, useRegex, caseSensitivity);
+        const bool providerMatch = textMatch(providerText, providerKeyword, useRegex, caseSensitivity);
+        const bool classMatch = textMatch(classText, classKeyword, useRegex, caseSensitivity);
+        const bool pidMatch = textMatch(pidText, pidKeyword, useRegex, caseSensitivity);
+        const bool detailMatch = textMatch(detailText, detailKeyword, useRegex, caseSensitivity);
+        bool showRow = globalMatch && providerMatch && classMatch && pidMatch && detailMatch;
+        if (invertMatch)
+        {
+            showRow = !showRow;
+        }
+
+        m_wmiEventTable->setRowHidden(row, !showRow);
+        if (showRow)
+        {
+            ++visibleCount;
+        }
+    }
+
+    if (m_wmiEventFilterStatusLabel != nullptr)
+    {
+        m_wmiEventFilterStatusLabel->setText(QStringLiteral("可见: %1 / %2").arg(visibleCount).arg(totalCount));
+    }
+    if (m_wmiEventKeepBottomCheck != nullptr && m_wmiEventKeepBottomCheck->isChecked())
+    {
+        m_wmiEventTable->scrollToBottom();
+    }
+
+    kLogEvent event;
+    dbg << event
+        << "[MonitorDock] 应用WMI事件筛选, total="
+        << totalCount
+        << ", visible="
+        << visibleCount
+        << ", regex="
+        << (useRegex ? "true" : "false")
+        << ", invert="
+        << (invertMatch ? "true" : "false")
+        << eol;
+}
+
+void MonitorDock::clearWmiEventFilter()
+{
+    if (m_wmiEventGlobalFilterEdit != nullptr) m_wmiEventGlobalFilterEdit->clear();
+    if (m_wmiEventProviderFilterEdit != nullptr) m_wmiEventProviderFilterEdit->clear();
+    if (m_wmiEventClassFilterEdit != nullptr) m_wmiEventClassFilterEdit->clear();
+    if (m_wmiEventPidFilterEdit != nullptr) m_wmiEventPidFilterEdit->clear();
+    if (m_wmiEventDetailFilterEdit != nullptr) m_wmiEventDetailFilterEdit->clear();
+    if (m_wmiEventRegexCheck != nullptr) m_wmiEventRegexCheck->setChecked(false);
+    if (m_wmiEventCaseCheck != nullptr) m_wmiEventCaseCheck->setChecked(false);
+    if (m_wmiEventInvertCheck != nullptr) m_wmiEventInvertCheck->setChecked(false);
+
+    applyWmiEventFilter();
+
+    kLogEvent event;
+    info << event
+        << "[MonitorDock] 已清空WMI事件筛选条件。"
         << eol;
 }
 
@@ -1425,7 +1881,11 @@ void MonitorDock::startWmiSubscription()
                 guardThis->m_wmiSubscribeRunning.store(false);
                 guardThis->m_wmiSubscribeStatusLabel->setText(QString("● 初始化失败: %1").arg(errorText));
                 guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
-                kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅失败", 0, 100.0f);
+                if (guardThis->m_wmiSubscribeProgressPid != 0)
+                {
+                    kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅失败", 0, 100.0f);
+                    guardThis->m_wmiSubscribeProgressPid = 0;
+                }
             }, Qt::QueuedConnection);
             return;
         }
@@ -1450,7 +1910,11 @@ void MonitorDock::startWmiSubscription()
                 guardThis->m_wmiSubscribeRunning.store(false);
                 guardThis->m_wmiSubscribeStatusLabel->setText(QString("● 连接失败: %1").arg(errorText));
                 guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
-                kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI连接失败", 0, 100.0f);
+                if (guardThis->m_wmiSubscribeProgressPid != 0)
+                {
+                    kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI连接失败", 0, 100.0f);
+                    guardThis->m_wmiSubscribeProgressPid = 0;
+                }
             }, Qt::QueuedConnection);
             return;
         }
@@ -1537,7 +2001,11 @@ void MonitorDock::startWmiSubscription()
                 guardThis->m_wmiSubscribeRunning.store(false);
                 guardThis->m_wmiSubscribeStatusLabel->setText(QStringLiteral("● 未建立任何有效订阅"));
                 guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
-                kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅失败(无有效类)", 0, 100.0f);
+                if (guardThis->m_wmiSubscribeProgressPid != 0)
+                {
+                    kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅失败(无有效类)", 0, 100.0f);
+                    guardThis->m_wmiSubscribeProgressPid = 0;
+                }
             }, Qt::QueuedConnection);
             return;
         }
@@ -1692,7 +2160,11 @@ void MonitorDock::startWmiSubscription()
             guardThis->m_wmiSubscribePaused.store(false);
             guardThis->m_wmiSubscribeStatusLabel->setText(QStringLiteral("● 已停止"));
             guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;font-weight:600;"));
-            kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅结束", 0, 100.0f);
+            if (guardThis->m_wmiSubscribeProgressPid != 0)
+            {
+                kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅结束", 0, 100.0f);
+                guardThis->m_wmiSubscribeProgressPid = 0;
+            }
 
             kLogEvent event;
             info << event
@@ -1734,6 +2206,11 @@ void MonitorDock::stopWmiSubscriptionInternal(bool waitForThread)
         {
             m_wmiUiUpdateTimer->stop();
         }
+        if (m_wmiSubscribeProgressPid != 0)
+        {
+            kPro.set(m_wmiSubscribeProgressPid, "WMI订阅结束", 0, 100.0f);
+            m_wmiSubscribeProgressPid = 0;
+        }
         kLogEvent event;
         dbg << event
             << "[MonitorDock] 停止WMI订阅：当前无活动线程。"
@@ -1751,6 +2228,11 @@ void MonitorDock::stopWmiSubscriptionInternal(bool waitForThread)
         if (m_wmiUiUpdateTimer != nullptr)
         {
             m_wmiUiUpdateTimer->stop();
+        }
+        if (m_wmiSubscribeProgressPid != 0)
+        {
+            kPro.set(m_wmiSubscribeProgressPid, "WMI订阅结束", 0, 100.0f);
+            m_wmiSubscribeProgressPid = 0;
         }
         kLogEvent event;
         info << event
@@ -1781,6 +2263,11 @@ void MonitorDock::stopWmiSubscriptionInternal(bool waitForThread)
             guardThis->flushWmiPendingRows();
             guardThis->m_wmiSubscribeStatusLabel->setText(QStringLiteral("● 已停止"));
             guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;font-weight:600;"));
+            if (guardThis->m_wmiSubscribeProgressPid != 0)
+            {
+                kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅结束", 0, 100.0f);
+                guardThis->m_wmiSubscribeProgressPid = 0;
+            }
 
             kLogEvent event;
             info << event
@@ -1878,6 +2365,9 @@ void MonitorDock::flushWmiPendingRows()
             tsItem->setToolTip(rowValues[0]);
         }
     }
+
+    // 每批次刷入完成后统一应用筛选，避免逐行重算造成 UI 抖动。
+    applyWmiEventFilter();
 
     kLogEvent event;
     dbg << event
@@ -2211,7 +2701,10 @@ void MonitorDock::startEtwCapture()
     };
 
     std::vector<ProviderSelection> selectedProviders;
-    selectedProviders.reserve(static_cast<std::size_t>(m_etwProviderList->count() + 1));
+    selectedProviders.reserve(static_cast<std::size_t>(
+        m_etwProviderList->count()
+        + (m_etwPresetProviderList != nullptr ? m_etwPresetProviderList->count() : 0)
+        + 1));
 
     auto tryAppendProvider = [&selectedProviders](const QString& providerName, const QString& guidText) {
         GUID guidValue{};
@@ -2250,6 +2743,69 @@ void MonitorDock::startEtwCapture()
         tryAppendProvider(providerName, providerGuid);
     }
 
+    // 预置模板勾选项：按名称到系统 Provider 列表里映射并追加 GUID。
+    int presetCheckedCount = 0;
+    int presetMatchedCount = 0;
+    if (m_etwPresetProviderList != nullptr)
+    {
+        for (int i = 0; i < m_etwPresetProviderList->count(); ++i)
+        {
+            QListWidgetItem* item = m_etwPresetProviderList->item(i);
+            if (item == nullptr || item->checkState() != Qt::Checked)
+            {
+                continue;
+            }
+            ++presetCheckedCount;
+
+            const QString presetProviderName = item->data(Qt::UserRole).toString().trimmed();
+            if (presetProviderName.isEmpty())
+            {
+                continue;
+            }
+
+            const auto exactFound = std::find_if(
+                m_etwProviders.begin(),
+                m_etwProviders.end(),
+                [presetProviderName](const EtwProviderEntry& entry) {
+                    return entry.providerName.compare(presetProviderName, Qt::CaseInsensitive) == 0;
+                });
+
+            bool matched = false;
+            if (exactFound != m_etwProviders.end())
+            {
+                matched = tryAppendProvider(exactFound->providerName, exactFound->providerGuidText);
+            }
+            else
+            {
+                // 模糊回退：允许模板名与系统 Provider 名称存在后缀差异。
+                const auto fuzzyFound = std::find_if(
+                    m_etwProviders.begin(),
+                    m_etwProviders.end(),
+                    [presetProviderName](const EtwProviderEntry& entry) {
+                        return entry.providerName.contains(presetProviderName, Qt::CaseInsensitive)
+                            || presetProviderName.contains(entry.providerName, Qt::CaseInsensitive);
+                    });
+                if (fuzzyFound != m_etwProviders.end())
+                {
+                    matched = tryAppendProvider(fuzzyFound->providerName, fuzzyFound->providerGuidText);
+                }
+            }
+
+            if (matched)
+            {
+                ++presetMatchedCount;
+            }
+            else
+            {
+                kLogEvent event;
+                warn << event
+                    << "[MonitorDock] ETW预置模板未命中系统Provider, template="
+                    << presetProviderName.toStdString()
+                    << eol;
+            }
+        }
+    }
+
     // 手动输入既支持 GUID，也支持 Provider 名称。
     const QString manualText = m_etwManualProviderEdit->text().trimmed();
     if (!manualText.isEmpty())
@@ -2267,6 +2823,16 @@ void MonitorDock::startEtwCapture()
                 tryAppendProvider(found->providerName, found->providerGuidText);
             }
         }
+    }
+
+    {
+        kLogEvent event;
+        info << event
+            << "[MonitorDock] ETW预置模板统计, checked="
+            << presetCheckedCount
+            << ", matched="
+            << presetMatchedCount
+            << eol;
     }
 
     if (selectedProviders.empty())

@@ -30,7 +30,9 @@
 #include <QPushButton>
 #include <QPixmap>
 #include <QRunnable>
+#include <QResizeEvent>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSvgRenderer>
 #include <QTableWidget>
@@ -49,6 +51,7 @@
 #include <chrono>
 #include <functional>
 #include <limits>
+#include <sstream>
 #include <set>
 #include <thread>
 #include <unordered_set>
@@ -224,6 +227,113 @@ namespace
         "SeSecurityPrivilege",
         "SeTakeOwnershipPrivilege"
     };
+
+    // BitmaskFlagDefinition 作用：
+    // - 统一描述“复选框可勾选的位标志定义”；
+    // - nameText：显示名称；
+    // - value：该位标志对应的掩码值；
+    // - descriptionText：鼠标悬停说明，帮助用户理解语义。
+    struct BitmaskFlagDefinition
+    {
+        const char* nameText = "";            // 标志名（例如 CREATE_SUSPENDED）。
+        std::uint32_t value = 0;              // 标志位掩码（DWORD）。
+        const char* descriptionText = "";     // 标志用途说明文本。
+    };
+
+    // CreateProcess.dwCreationFlags 常用且可组合的位标志全集。
+    const std::vector<BitmaskFlagDefinition> CreateProcessFlagDefinitions{
+        { "DEBUG_PROCESS", 0x00000001U, "调试子进程和其后代进程。" },
+        { "DEBUG_ONLY_THIS_PROCESS", 0x00000002U, "仅调试当前创建的子进程。" },
+        { "CREATE_SUSPENDED", 0x00000004U, "主线程创建后先挂起。" },
+        { "DETACHED_PROCESS", 0x00000008U, "控制台进程脱离父控制台。" },
+        { "CREATE_NEW_CONSOLE", 0x00000010U, "为新进程分配新控制台窗口。" },
+        { "NORMAL_PRIORITY_CLASS", 0x00000020U, "普通优先级类。" },
+        { "IDLE_PRIORITY_CLASS", 0x00000040U, "空闲优先级类。" },
+        { "HIGH_PRIORITY_CLASS", 0x00000080U, "高优先级类。" },
+        { "REALTIME_PRIORITY_CLASS", 0x00000100U, "实时优先级类（高风险）。" },
+        { "CREATE_NEW_PROCESS_GROUP", 0x00000200U, "创建新的进程组。" },
+        { "CREATE_UNICODE_ENVIRONMENT", 0x00000400U, "环境块按 Unicode 传递。" },
+        { "CREATE_SEPARATE_WOW_VDM", 0x00000800U, "16 位应用使用独立 WOW VDM。" },
+        { "CREATE_SHARED_WOW_VDM", 0x00001000U, "16 位应用共享 WOW VDM。" },
+        { "CREATE_FORCEDOS", 0x00002000U, "强制 DOS 兼容模式（历史选项）。" },
+        { "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000U, "低于普通优先级类。" },
+        { "ABOVE_NORMAL_PRIORITY_CLASS", 0x00008000U, "高于普通优先级类。" },
+        { "INHERIT_PARENT_AFFINITY", 0x00010000U, "继承父进程 CPU 亲和性。" },
+        { "CREATE_PROTECTED_PROCESS", 0x00040000U, "创建受保护进程（受系统限制）。" },
+        { "EXTENDED_STARTUPINFO_PRESENT", 0x00080000U, "启用 STARTUPINFOEX 扩展结构。" },
+        { "PROCESS_MODE_BACKGROUND_BEGIN", 0x00100000U, "进入后台模式（I/O/CPU 降优先级）。" },
+        { "PROCESS_MODE_BACKGROUND_END", 0x00200000U, "退出后台模式。" },
+        { "CREATE_SECURE_PROCESS", 0x00400000U, "创建安全进程（受系统策略限制）。" },
+        { "CREATE_BREAKAWAY_FROM_JOB", 0x01000000U, "允许脱离 Job 对象。" },
+        { "CREATE_PRESERVE_CODE_AUTHZ_LEVEL", 0x02000000U, "保持代码授权级别。" },
+        { "CREATE_DEFAULT_ERROR_MODE", 0x04000000U, "使用默认错误模式。" },
+        { "CREATE_NO_WINDOW", 0x08000000U, "控制台进程不创建窗口。" },
+        { "PROFILE_USER", 0x10000000U, "启用用户模式性能统计。" },
+        { "PROFILE_KERNEL", 0x20000000U, "启用内核模式性能统计。" },
+        { "PROFILE_SERVER", 0x40000000U, "启用服务器性能统计。" },
+        { "CREATE_IGNORE_SYSTEM_DEFAULT", 0x80000000U, "忽略系统默认设置（较少使用）。" }
+    };
+
+    // STARTUPINFO.dwFlags 位标志全集。
+    const std::vector<BitmaskFlagDefinition> StartupInfoFlagDefinitions{
+        { "STARTF_USESHOWWINDOW", 0x00000001U, "启用 wShowWindow 字段。" },
+        { "STARTF_USESIZE", 0x00000002U, "启用 dwXSize/dwYSize 字段。" },
+        { "STARTF_USEPOSITION", 0x00000004U, "启用 dwX/dwY 字段。" },
+        { "STARTF_USECOUNTCHARS", 0x00000008U, "启用控制台字符网格大小字段。" },
+        { "STARTF_USEFILLATTRIBUTE", 0x00000010U, "启用 dwFillAttribute 字段。" },
+        { "STARTF_RUNFULLSCREEN", 0x00000020U, "全屏模式启动（主要针对旧控制台）。" },
+        { "STARTF_FORCEONFEEDBACK", 0x00000040U, "强制显示忙碌光标反馈。" },
+        { "STARTF_FORCEOFFFEEDBACK", 0x00000080U, "关闭启动忙碌光标反馈。" },
+        { "STARTF_USESTDHANDLES", 0x00000100U, "启用标准输入/输出/错误句柄字段。" },
+        { "STARTF_USEHOTKEY", 0x00000200U, "启用热键字段（hStdInput 解释为 hotkey）。" },
+        { "STARTF_TITLEISLINKNAME", 0x00000800U, "标题解释为 Shell 链接名。" },
+        { "STARTF_TITLEISAPPID", 0x00001000U, "标题解释为 AppUserModelID。" },
+        { "STARTF_PREVENTPINNING", 0x00002000U, "阻止任务栏固定（需 AppID）。" },
+        { "STARTF_UNTRUSTEDSOURCE", 0x00008000U, "标记命令来源不可信。" },
+        { "STARTF_HOLOGRAPHIC", 0x00040000U, "全息场景启动标记（特定平台）。" }
+    };
+
+    // STARTUPINFO.dwFillAttribute 控制台颜色/样式标志全集。
+    const std::vector<BitmaskFlagDefinition> ConsoleFillAttributeDefinitions{
+        { "FOREGROUND_BLUE", 0x0001U, "前景色：蓝。" },
+        { "FOREGROUND_GREEN", 0x0002U, "前景色：绿。" },
+        { "FOREGROUND_RED", 0x0004U, "前景色：红。" },
+        { "FOREGROUND_INTENSITY", 0x0008U, "前景色高亮。" },
+        { "BACKGROUND_BLUE", 0x0010U, "背景色：蓝。" },
+        { "BACKGROUND_GREEN", 0x0020U, "背景色：绿。" },
+        { "BACKGROUND_RED", 0x0040U, "背景色：红。" },
+        { "BACKGROUND_INTENSITY", 0x0080U, "背景色高亮。" },
+        { "COMMON_LVB_LEADING_BYTE", 0x0100U, "双字节字符前导字节标记。" },
+        { "COMMON_LVB_TRAILING_BYTE", 0x0200U, "双字节字符后继字节标记。" },
+        { "COMMON_LVB_GRID_HORIZONTAL", 0x0400U, "水平网格线。" },
+        { "COMMON_LVB_GRID_LVERTICAL", 0x0800U, "左垂直网格线。" },
+        { "COMMON_LVB_GRID_RVERTICAL", 0x1000U, "右垂直网格线。" },
+        { "COMMON_LVB_REVERSE_VIDEO", 0x4000U, "反色显示。" },
+        { "COMMON_LVB_UNDERSCORE", 0x8000U, "下划线显示。" }
+    };
+
+    // Token DesiredAccess 常用位标志全集（OpenProcessToken / DuplicateTokenEx 路径）。
+    const std::vector<BitmaskFlagDefinition> TokenDesiredAccessDefinitions{
+        { "TOKEN_ASSIGN_PRIMARY", 0x00000001U, "可把令牌分配给新进程主令牌。" },
+        { "TOKEN_DUPLICATE", 0x00000002U, "可复制令牌。" },
+        { "TOKEN_IMPERSONATE", 0x00000004U, "可模拟令牌。" },
+        { "TOKEN_QUERY", 0x00000008U, "可查询令牌信息。" },
+        { "TOKEN_QUERY_SOURCE", 0x00000010U, "可查询令牌来源。" },
+        { "TOKEN_ADJUST_PRIVILEGES", 0x00000020U, "可调整令牌特权。" },
+        { "TOKEN_ADJUST_GROUPS", 0x00000040U, "可调整令牌组。" },
+        { "TOKEN_ADJUST_DEFAULT", 0x00000080U, "可调整默认 DACL/Owner 等。" },
+        { "TOKEN_ADJUST_SESSIONID", 0x00000100U, "可调整会话 ID。" },
+        { "DELETE", 0x00010000U, "标准删除权限。" },
+        { "READ_CONTROL", 0x00020000U, "标准读取安全描述符权限。" },
+        { "WRITE_DAC", 0x00040000U, "标准写 DACL 权限。" },
+        { "WRITE_OWNER", 0x00080000U, "标准写 Owner 权限。" },
+        { "ACCESS_SYSTEM_SECURITY", 0x01000000U, "访问 SACL 权限（高权限）。" },
+        { "MAXIMUM_ALLOWED", 0x02000000U, "请求对象允许的最大权限。" },
+        { "GENERIC_ALL", 0x10000000U, "通用全部权限映射。" },
+        { "GENERIC_EXECUTE", 0x20000000U, "通用执行权限映射。" },
+        { "GENERIC_WRITE", 0x40000000U, "通用写权限映射。" },
+        { "GENERIC_READ", 0x80000000U, "通用读权限映射。" }
+    };
 }
 
 ProcessDock::ProcessDock(QWidget* parent)
@@ -266,9 +376,17 @@ void ProcessDock::initializeUi()
 
 void ProcessDock::initializeTopControls()
 {
+    // 控制区改为“两行布局”：第一行放操作按钮，第二行单独放监控状态。
+    QVBoxLayout* controlContainerLayout = new QVBoxLayout();
+    controlContainerLayout->setContentsMargins(0, 0, 0, 0);
+    controlContainerLayout->setSpacing(4);
+
     m_controlLayout = new QHBoxLayout();
     m_controlLayout->setContentsMargins(0, 0, 0, 0);
     m_controlLayout->setSpacing(8);
+    m_statusLayout = new QHBoxLayout();
+    m_statusLayout->setContentsMargins(0, 0, 0, 0);
+    m_statusLayout->setSpacing(8);
 
     // 遍历策略下拉框：
     // 1) Toolhelp（CreateToolhelp32Snapshot + Process32First/Next）
@@ -279,6 +397,10 @@ void ProcessDock::initializeTopControls()
     m_strategyCombo->addItem(QIcon(IconRefresh), "NtQuerySystemInformation");
     m_strategyCombo->setCurrentIndex(1);
     m_strategyCombo->setToolTip("指定进程遍历方案");
+    // 自适应宽度策略：避免长文本把 Dock 顶出横向滚动条。
+    m_strategyCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_strategyCombo->setMinimumContentsLength(18);
+    m_strategyCombo->setMaximumWidth(260);
 
     // 树/列表切换按钮：按需求仅显示图标。
     m_treeToggleButton = new QPushButton(QIcon(IconTree), "", this);
@@ -294,6 +416,9 @@ void ProcessDock::initializeTopControls()
     m_viewModeCombo->addItem(QIcon(IconProcessMain), "详细信息视图");
     m_viewModeCombo->setCurrentIndex(static_cast<int>(ViewMode::Monitor));
     m_viewModeCombo->setToolTip("切换监视视图 / 详细信息视图");
+    m_viewModeCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_viewModeCombo->setMinimumContentsLength(8);
+    m_viewModeCombo->setMaximumWidth(180);
 
     const QString comboStyle = buildBlueComboBoxStyle();
     m_strategyCombo->setStyleSheet(comboStyle);
@@ -328,7 +453,7 @@ void ProcessDock::initializeTopControls()
     m_startButton->setStyleSheet(buttonStyle);
     m_pauseButton->setStyleSheet(buttonStyle);
 
-    // 把控件放入控制栏。
+    // 第一行放“操作按钮 + 刷新间隔”。
     m_controlLayout->addWidget(m_strategyCombo);
     m_controlLayout->addWidget(m_treeToggleButton);
     m_controlLayout->addWidget(m_viewModeCombo);
@@ -337,9 +462,13 @@ void ProcessDock::initializeTopControls()
     m_controlLayout->addStretch(1);
     m_controlLayout->addWidget(m_refreshLabel);
     m_controlLayout->addWidget(m_refreshSlider);
-    m_controlLayout->addWidget(m_refreshStateLabel);
+    // 第二行只放“监控状态”，避免与操作按钮挤在同一行导致横向滚动。
+    m_statusLayout->addWidget(m_refreshStateLabel, 1);
+    m_statusLayout->addStretch(1);
 
-    m_processPageLayout->addLayout(m_controlLayout);
+    controlContainerLayout->addLayout(m_controlLayout);
+    controlContainerLayout->addLayout(m_statusLayout);
+    m_processPageLayout->addLayout(controlContainerLayout);
 }
 
 void ProcessDock::initializeProcessTable()
@@ -355,6 +484,8 @@ void ProcessDock::initializeProcessTable()
     m_processTable->setSortingEnabled(true);
     m_processTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_processTable->setAlternatingRowColors(true);
+    // 列宽由自适应逻辑统一控制，强制关闭内部横向滚动条。
+    m_processTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     // 表头支持拖动、右键显示/隐藏列。
     QHeaderView* headerView = m_processTable->header();
@@ -373,6 +504,7 @@ void ProcessDock::initializeProcessTable()
 
     applyDefaultColumnWidths();
     applyViewMode(ViewMode::Monitor);
+    applyAdaptiveColumnWidths();
     m_processPageLayout->addWidget(m_processTable, 1);
 
     // 满足需求 3.1：侧边栏 Tab 中包含“进程列表”页签。
@@ -402,6 +534,53 @@ void ProcessDock::initializeCreateProcessPage()
     const QString comboStyle = buildBlueComboBoxStyle();
     const QString buttonStyle = buildBlueButtonStyle(false);
 
+    // 每次重建页面前先清空位标志复选框缓存，避免重复初始化导致悬空指针。
+    m_creationFlagChecks.clear();
+    m_startupFlagChecks.clear();
+    m_startupFillAttributeChecks.clear();
+    m_tokenDesiredAccessChecks.clear();
+
+    // buildBitmaskCheckGroup 作用：
+    // - 根据“标志定义列表”自动生成复选框分组；
+    // - 每个复选框通过 Qt Property 保存 flagValue/flagName，后续可统一做组合计算。
+    const auto buildBitmaskCheckGroup =
+        [](
+            QWidget* parentWidget,
+            const QString& groupTitle,
+            const std::vector<BitmaskFlagDefinition>& definitionList,
+            std::vector<QCheckBox*>* outputCheckBoxList) -> QGroupBox*
+    {
+        QGroupBox* groupBox = new QGroupBox(groupTitle, parentWidget);
+        QGridLayout* groupLayout = new QGridLayout(groupBox);
+        groupLayout->setContentsMargins(6, 6, 6, 6);
+        groupLayout->setHorizontalSpacing(10);
+        groupLayout->setVerticalSpacing(4);
+
+        const int columnCount = 3;
+        for (std::size_t index = 0; index < definitionList.size(); ++index)
+        {
+            const BitmaskFlagDefinition& definition = definitionList[index];
+            QCheckBox* flagCheck = new QCheckBox(QString::fromUtf8(definition.nameText), groupBox);
+            flagCheck->setProperty("flagValue", static_cast<qulonglong>(definition.value));
+            flagCheck->setProperty("flagName", QString::fromUtf8(definition.nameText));
+            flagCheck->setToolTip(
+                QStringLiteral("%1\n值: 0x%2\n说明: %3")
+                .arg(QString::fromUtf8(definition.nameText))
+                .arg(QString::number(static_cast<qulonglong>(definition.value), 16).toUpper())
+                .arg(QString::fromUtf8(definition.descriptionText)));
+
+            const int row = static_cast<int>(index / static_cast<std::size_t>(columnCount));
+            const int col = static_cast<int>(index % static_cast<std::size_t>(columnCount));
+            groupLayout->addWidget(flagCheck, row, col);
+
+            if (outputCheckBoxList != nullptr)
+            {
+                outputCheckBoxList->push_back(flagCheck);
+            }
+        }
+        return groupBox;
+    };
+
     // 1) 创建方式 + 令牌来源配置。
     QGroupBox* methodGroup = new QGroupBox("创建方式 / 令牌来源", contentWidget);
     QGridLayout* methodLayout = new QGridLayout(methodGroup);
@@ -429,6 +608,16 @@ void ProcessDock::initializeCreateProcessPage()
     methodLayout->addWidget(new QLabel("令牌访问掩码（DesiredAccess）:", methodGroup), 1, 2);
     methodLayout->addWidget(m_tokenDesiredAccessEdit, 1, 3);
     methodLayout->addWidget(m_tokenDuplicatePrimaryCheck, 2, 0, 1, 4);
+
+    // Token DesiredAccess 位标志勾选区：
+    // - 覆盖最常见 TOKEN_* / 标准权限 / GENERIC_*；
+    // - 用户可通过勾选组合，自动拼出访问掩码。
+    QGroupBox* tokenAccessGroup = buildBitmaskCheckGroup(
+        methodGroup,
+        "Token DesiredAccess 位标志组合",
+        TokenDesiredAccessDefinitions,
+        &m_tokenDesiredAccessChecks);
+    methodLayout->addWidget(tokenAccessGroup, 3, 0, 1, 4);
     contentLayout->addWidget(methodGroup);
 
     // 2) CreateProcessW 基础参数。
@@ -482,6 +671,16 @@ void ProcessDock::initializeCreateProcessPage()
     basicLayout->addWidget(new QLabel("dwCreationFlags（创建标志）:", basicGroup), 6, 0);
     basicLayout->addWidget(m_creationFlagsEdit, 6, 1);
     basicLayout->addWidget(m_inheritHandleCheck, 6, 2, 1, 2);
+
+    // dwCreationFlags 位标志勾选区：
+    // - 列出 CreateProcess 常见全部标志；
+    // - 用户勾选后自动组合成掩码写回 dwCreationFlags 输入框。
+    QGroupBox* creationFlagsGroup = buildBitmaskCheckGroup(
+        basicGroup,
+        "dwCreationFlags 位标志组合",
+        CreateProcessFlagDefinitions,
+        &m_creationFlagChecks);
+    basicLayout->addWidget(creationFlagsGroup, 7, 0, 1, 4);
     contentLayout->addWidget(basicGroup);
 
     // 3) PROCESS / THREAD SECURITY_ATTRIBUTES。
@@ -538,8 +737,8 @@ void ProcessDock::initializeCreateProcessPage()
     m_siYSizeEdit = new QLineEdit("0", startupGroup);
     m_siXCountCharsEdit = new QLineEdit("0", startupGroup);
     m_siYCountCharsEdit = new QLineEdit("0", startupGroup);
-    m_siFillAttributeEdit = new QLineEdit("0", startupGroup);
-    m_siFlagsEdit = new QLineEdit("0", startupGroup);
+    m_siFillAttributeEdit = new QLineEdit("0x00000000", startupGroup);
+    m_siFlagsEdit = new QLineEdit("0x00000000", startupGroup);
     m_siShowWindowEdit = new QLineEdit("0", startupGroup);
     m_siCbReserved2Edit = new QLineEdit("0", startupGroup);
     m_siReserved2PtrEdit = new QLineEdit("0", startupGroup);
@@ -591,6 +790,26 @@ void ProcessDock::initializeCreateProcessPage()
     addStartupField("hStdOutput（标准输出句柄）", m_siStdOutputEdit, 2);
     addStartupField("hStdError（标准错误句柄）", m_siStdErrorEdit, 4);
     ++startupRow;
+
+    // STARTUPINFO.dwFillAttribute 位标志勾选区：
+    // - 提供前景/背景颜色与样式位的可视化组合。
+    QGroupBox* startupFillAttrGroup = buildBitmaskCheckGroup(
+        startupGroup,
+        "STARTUPINFO.dwFillAttribute 位标志组合",
+        ConsoleFillAttributeDefinitions,
+        &m_startupFillAttributeChecks);
+    startupLayout->addWidget(startupFillAttrGroup, startupRow++, 0, 1, 6);
+
+    // STARTUPINFO.dwFlags 位标志勾选区：
+    // - 列出 STARTF_* 标志；
+    // - 通过复选框直接组合，并自动回填到 dwFlags 输入框。
+    QGroupBox* startupFlagsGroup = buildBitmaskCheckGroup(
+        startupGroup,
+        "STARTUPINFO.dwFlags 位标志组合",
+        StartupInfoFlagDefinitions,
+        &m_startupFlagChecks);
+    startupLayout->addWidget(startupFlagsGroup, startupRow++, 0, 1, 6);
+
     contentLayout->addWidget(startupGroup);
 
     // 5) PROCESS_INFORMATION 全字段。
@@ -695,11 +914,14 @@ void ProcessDock::initializeCreateProcessPage()
     m_currentDirectoryEdit->setToolTip("lpCurrentDirectory：子进程初始工作目录。");
     m_environmentEditor->setToolTip("lpEnvironment：环境变量块。每行 KEY=VALUE；禁用时传 null。");
     m_inheritHandleCheck->setToolTip("bInheritHandles：是否继承父进程可继承句柄。");
-    m_creationFlagsEdit->setToolTip("dwCreationFlags：创建标志位掩码，如 CREATE_SUSPENDED 等。");
+    m_creationFlagsEdit->setToolTip("dwCreationFlags：创建标志位掩码；可在下方复选框中逐位勾选组合。");
     m_useStartupInfoCheck->setToolTip("lpStartupInfo：启动信息结构体，控制窗口/标准句柄等行为。");
     m_useProcessInfoCheck->setToolTip("lpProcessInformation：接收新进程与主线程句柄/PID/TID 的输出结构。");
     m_useProcessSecurityCheck->setToolTip("lpProcessAttributes：进程对象安全属性。");
     m_useThreadSecurityCheck->setToolTip("lpThreadAttributes：主线程对象安全属性。");
+    m_siFlagsEdit->setToolTip("STARTUPINFO.dwFlags：启动标志位掩码；可在下方 STARTF 复选框中组合。");
+    m_siFillAttributeEdit->setToolTip("STARTUPINFO.dwFillAttribute：控制台颜色/样式位；可在下方复选框组合。");
+    m_tokenDesiredAccessEdit->setToolTip("Token DesiredAccess：令牌访问掩码；可在下方复选框组合。");
 
     m_sideTabWidget->addTab(m_createProcessPage, QIcon(IconStart), "创建进程");
     initializeCreateProcessConnections();
@@ -872,6 +1094,14 @@ void ProcessDock::initializeCreateProcessConnections()
         m_createMethodCombo->setCurrentIndex(0);
     }
 
+    // 位标志编辑联动：
+    // - 勾选复选框自动组合掩码写回输入框；
+    // - 手工修改输入框会反向刷新复选框状态。
+    bindBitmaskEditor(m_creationFlagsEdit, &m_creationFlagChecks, "dwCreationFlags");
+    bindBitmaskEditor(m_siFlagsEdit, &m_startupFlagChecks, "STARTUPINFO.dwFlags");
+    bindBitmaskEditor(m_siFillAttributeEdit, &m_startupFillAttributeChecks, "STARTUPINFO.dwFillAttribute");
+    bindBitmaskEditor(m_tokenDesiredAccessEdit, &m_tokenDesiredAccessChecks, "Token DesiredAccess");
+
     const bool tokenMode = (m_createMethodCombo != nullptr && m_createMethodCombo->currentIndex() == 1);
     if (m_tokenSourcePidEdit != nullptr) m_tokenSourcePidEdit->setEnabled(tokenMode);
     if (m_tokenDesiredAccessEdit != nullptr) m_tokenDesiredAccessEdit->setEnabled(tokenMode);
@@ -948,6 +1178,7 @@ void ProcessDock::applyViewMode(const ViewMode viewMode)
         m_processTable->setColumnHidden(toColumnIndex(TableColumn::Disk), false);
         m_processTable->setColumnHidden(toColumnIndex(TableColumn::Gpu), false);
         m_processTable->setColumnHidden(toColumnIndex(TableColumn::Net), false);
+        applyAdaptiveColumnWidths();
         return;
     }
 
@@ -962,6 +1193,53 @@ void ProcessDock::applyViewMode(const ViewMode viewMode)
     m_processTable->setColumnHidden(toColumnIndex(TableColumn::User), false);
     m_processTable->setColumnHidden(toColumnIndex(TableColumn::StartTime), false);
     m_processTable->setColumnHidden(toColumnIndex(TableColumn::IsAdmin), false);
+    applyAdaptiveColumnWidths();
+}
+
+void ProcessDock::applyAdaptiveColumnWidths()
+{
+    // 该函数作用：按当前可见列数量，均分可用宽度，彻底避免横向滚动条出现。
+    if (m_processTable == nullptr)
+    {
+        return;
+    }
+
+    QHeaderView* headerView = m_processTable->header();
+    if (headerView == nullptr)
+    {
+        return;
+    }
+
+    // 先统计可见列，隐藏列保留 ResizeToContents，防止切换视图时状态错乱。
+    int visibleColumnCount = 0;
+    for (int column = 0; column < static_cast<int>(TableColumn::Count); ++column)
+    {
+        if (!m_processTable->isColumnHidden(column))
+        {
+            ++visibleColumnCount;
+            headerView->setSectionResizeMode(column, QHeaderView::Stretch);
+        }
+        else
+        {
+            headerView->setSectionResizeMode(column, QHeaderView::ResizeToContents);
+        }
+    }
+
+    if (visibleColumnCount <= 0)
+    {
+        return;
+    }
+
+    // 兜底：宽度分配有时会因延迟布局未立刻生效，主动触发一次 viewport 更新。
+    m_processTable->viewport()->update();
+}
+
+void ProcessDock::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+
+    // Dock 尺寸变化后立即重新分配列宽，保证任何宽度下都不出现内部横向滚动条。
+    applyAdaptiveColumnWidths();
 }
 
 void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
@@ -1906,6 +2184,7 @@ void ProcessDock::showHeaderContextMenu(const QPoint& localPosition)
     const int columnIndex = selectedAction->data().toInt();
     const bool shouldShow = selectedAction->isChecked();
     m_processTable->setColumnHidden(columnIndex, !shouldShow);
+    applyAdaptiveColumnWidths();
 
     kLogEvent logEvent;
     info << logEvent
@@ -2129,17 +2408,19 @@ QIcon ProcessDock::blueTintedIcon(const char* iconPath, const QSize& iconSize) c
     return QIcon(iconPixmap);
 }
 
-void ProcessDock::showActionResultMessage(const QString& title, const bool actionOk, const std::string& detailText)
+void ProcessDock::showActionResultMessage(
+    const QString& title,
+    const bool actionOk,
+    const std::string& detailText,
+    const kLogEvent& actionEvent)
 {
-    const QString detail = QString::fromStdString(detailText.empty() ? "无附加信息" : detailText);
-    if (actionOk)
-    {
-        QMessageBox::information(this, title, "操作成功。\n" + detail);
-    }
-    else
-    {
-        QMessageBox::warning(this, title, "操作失败。\n" + detail);
-    }
+    // 统一动作结果日志：按照规范不再弹窗，避免频繁打断用户流程。
+    const std::string normalizedDetailText = detailText.empty() ? "无附加信息" : detailText;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] 动作结果, title=" << title.toStdString()
+        << ", actionOk=" << (actionOk ? "true" : "false")
+        << ", detail=" << normalizedDetailText
+        << eol;
 }
 
 std::string ProcessDock::buildRulerPrefix(const int depth)
@@ -2160,6 +2441,148 @@ std::string ProcessDock::buildRulerPrefix(const int depth)
 int ProcessDock::toColumnIndex(const TableColumn column)
 {
     return static_cast<int>(column);
+}
+
+void ProcessDock::syncEditValueFromBitmaskChecks(
+    QLineEdit* const valueEdit,
+    const std::vector<QCheckBox*>* const checkBoxList)
+{
+    // 参数合法性检查：任一为空直接返回，避免空指针访问。
+    if (valueEdit == nullptr || checkBoxList == nullptr)
+    {
+        return;
+    }
+
+    // 先计算“所有已知位掩码 + 已勾选位掩码”，
+    // 以便在回写时保留用户手工输入但列表中未覆盖的未知位。
+    std::uint32_t knownMask = 0;
+    std::uint32_t checkedMask = 0;
+    for (QCheckBox* checkBox : *checkBoxList)
+    {
+        if (checkBox == nullptr)
+        {
+            continue;
+        }
+        bool convertOk = false;
+        const std::uint32_t flagValue = static_cast<std::uint32_t>(
+            checkBox->property("flagValue").toULongLong(&convertOk));
+        if (!convertOk)
+        {
+            continue;
+        }
+
+        knownMask |= flagValue;
+        if (checkBox->isChecked())
+        {
+            checkedMask |= flagValue;
+        }
+    }
+
+    // 保留未知位：避免勾选一个已知位时误清空手工填入的其他位。
+    bool parseOk = false;
+    const std::uint32_t originalValue = parseUInt32WithDefault(valueEdit->text(), 0, &parseOk);
+    const std::uint32_t unknownMask = parseOk ? (originalValue & ~knownMask) : 0;
+    const std::uint32_t mergedValue = (checkedMask | unknownMask);
+
+    const QString mergedText = QStringLiteral("0x%1")
+        .arg(static_cast<qulonglong>(mergedValue), 8, 16, QChar('0'))
+        .toUpper();
+    if (valueEdit->text().compare(mergedText, Qt::CaseInsensitive) == 0)
+    {
+        return;
+    }
+
+    // 阻断 textChanged 信号，防止“回写文本 -> 再次反向同步”递归触发。
+    const QSignalBlocker blocker(valueEdit);
+    valueEdit->setText(mergedText);
+}
+
+void ProcessDock::syncBitmaskChecksFromEditValue(
+    QLineEdit* const valueEdit,
+    const std::vector<QCheckBox*>* const checkBoxList,
+    const QString& fieldDisplayName)
+{
+    // 参数合法性检查：任一为空直接返回。
+    if (valueEdit == nullptr || checkBoxList == nullptr)
+    {
+        return;
+    }
+
+    // 解析失败时仅跳过勾选同步，不主动覆写用户输入内容。
+    bool parseOk = false;
+    const std::uint32_t editValue = parseUInt32WithDefault(valueEdit->text(), 0, &parseOk);
+    if (!parseOk)
+    {
+        Q_UNUSED(fieldDisplayName);
+        return;
+    }
+
+    // 按输入值逐项更新勾选状态；使用 QSignalBlocker 防止触发 toggled 回调。
+    for (QCheckBox* checkBox : *checkBoxList)
+    {
+        if (checkBox == nullptr)
+        {
+            continue;
+        }
+
+        bool convertOk = false;
+        const std::uint32_t flagValue = static_cast<std::uint32_t>(
+            checkBox->property("flagValue").toULongLong(&convertOk));
+        if (!convertOk || flagValue == 0)
+        {
+            continue;
+        }
+
+        const bool shouldChecked = ((editValue & flagValue) == flagValue);
+        if (checkBox->isChecked() == shouldChecked)
+        {
+            continue;
+        }
+
+        const QSignalBlocker blocker(checkBox);
+        checkBox->setChecked(shouldChecked);
+    }
+}
+
+void ProcessDock::bindBitmaskEditor(
+    QLineEdit* const valueEdit,
+    std::vector<QCheckBox*>* const checkBoxList,
+    const QString& fieldDisplayName)
+{
+    // 参数校验：没有输入框或没有复选框列表则不绑定。
+    if (valueEdit == nullptr || checkBoxList == nullptr)
+    {
+        return;
+    }
+
+    // 复选框 -> 文本框：每次勾选变化都回算位掩码。
+    for (QCheckBox* checkBox : *checkBoxList)
+    {
+        if (checkBox == nullptr)
+        {
+            continue;
+        }
+
+        connect(checkBox, &QCheckBox::toggled, this, [this, valueEdit, checkBoxList, fieldDisplayName](bool) {
+            syncEditValueFromBitmaskChecks(valueEdit, checkBoxList);
+
+            kLogEvent logEvent;
+            dbg << logEvent
+                << "[ProcessDock] 位标志勾选变更, field="
+                << fieldDisplayName.toStdString()
+                << ", value="
+                << valueEdit->text().toStdString()
+                << eol;
+            });
+    }
+
+    // 文本框 -> 复选框：支持用户手工输入十进制或 0x 十六进制。
+    connect(valueEdit, &QLineEdit::textChanged, this, [this, valueEdit, checkBoxList, fieldDisplayName](const QString&) {
+        syncBitmaskChecksFromEditValue(valueEdit, checkBoxList, fieldDisplayName);
+        });
+
+    // 初始同步：页面打开时让默认值和复选框状态一致。
+    syncBitmaskChecksFromEditValue(valueEdit, checkBoxList, fieldDisplayName);
 }
 
 bool ProcessDock::parseUnsignedText(const QString& text, std::uint64_t& valueOut)
@@ -2335,8 +2758,8 @@ void ProcessDock::resetCreateProcessForm()
     if (m_siYSizeEdit != nullptr) m_siYSizeEdit->setText("0");
     if (m_siXCountCharsEdit != nullptr) m_siXCountCharsEdit->setText("0");
     if (m_siYCountCharsEdit != nullptr) m_siYCountCharsEdit->setText("0");
-    if (m_siFillAttributeEdit != nullptr) m_siFillAttributeEdit->setText("0");
-    if (m_siFlagsEdit != nullptr) m_siFlagsEdit->setText("0");
+    if (m_siFillAttributeEdit != nullptr) m_siFillAttributeEdit->setText("0x00000000");
+    if (m_siFlagsEdit != nullptr) m_siFlagsEdit->setText("0x00000000");
     if (m_siShowWindowEdit != nullptr) m_siShowWindowEdit->setText("0");
     if (m_siCbReserved2Edit != nullptr) m_siCbReserved2Edit->setText("0");
     if (m_siReserved2PtrEdit != nullptr) m_siReserved2PtrEdit->setText("0");
@@ -2590,19 +3013,26 @@ ks::process::CreateProcessRequest ProcessDock::buildCreateProcessRequestFromUi(
 
 void ProcessDock::executeApplyTokenPrivilegeEditsOnly()
 {
+    // 令牌调整动作日志：整段流程复用同一个 kLogEvent，避免离散调用链。
+    kLogEvent actionEvent;
     bool buildOk = false;
     QString errorText;
     const ks::process::CreateProcessRequest request = buildCreateProcessRequestFromUi(&buildOk, &errorText);
     if (!buildOk)
     {
         appendCreateResultLine("参数解析失败: " + errorText);
-        QMessageBox::warning(this, "令牌调整", errorText);
+        err << actionEvent
+            << "[ProcessDock] 令牌调整参数解析失败, error="
+            << errorText.toStdString()
+            << eol;
         return;
     }
     if (!request.tokenModeEnabled)
     {
         appendCreateResultLine("当前不是 Token 模式，无法仅应用令牌调整。");
-        QMessageBox::information(this, "令牌调整", "请先将 API 切换为 CreateProcessAsTokenW 模式。");
+        warn << actionEvent
+            << "[ProcessDock] 令牌调整被拒绝：当前非 Token 模式。"
+            << eol;
         return;
     }
 
@@ -2613,26 +3043,35 @@ void ProcessDock::executeApplyTokenPrivilegeEditsOnly()
         request.duplicatePrimaryToken,
         request.tokenPrivilegeEdits,
         &detailText);
+    std::ostringstream desiredAccessStream;
+    desiredAccessStream << "0x" << std::uppercase << std::hex << request.tokenDesiredAccess;
 
     appendCreateResultLine(QString("令牌调整结果: %1").arg(adjustOk ? "成功" : "失败"));
     appendCreateResultLine(QString::fromStdString(detailText.empty() ? "无附加信息" : detailText));
-    QMessageBox::information(
-        this,
-        "令牌调整",
-        QString("%1\n%2")
-        .arg(adjustOk ? "令牌特权调整成功。" : "令牌特权调整失败。")
-        .arg(QString::fromStdString(detailText)));
+    (adjustOk ? info : err) << actionEvent
+        << "[ProcessDock] 令牌调整完成, ok=" << (adjustOk ? "true" : "false")
+        << ", sourcePid=" << request.tokenSourcePid
+        << ", desiredAccess=" << desiredAccessStream.str()
+        << ", duplicatePrimary=" << (request.duplicatePrimaryToken ? "true" : "false")
+        << ", editCount=" << request.tokenPrivilegeEdits.size()
+        << ", detail=" << (detailText.empty() ? "无附加信息" : detailText)
+        << eol;
 }
 
 void ProcessDock::executeCreateProcessRequest()
 {
+    // 创建进程动作日志：整段流程复用同一个 kLogEvent，避免离散调用链。
+    kLogEvent createProcessEvent;
     bool buildOk = false;
     QString errorText;
     const ks::process::CreateProcessRequest request = buildCreateProcessRequestFromUi(&buildOk, &errorText);
     if (!buildOk)
     {
         appendCreateResultLine("参数解析失败: " + errorText);
-        QMessageBox::warning(this, "创建进程", errorText);
+        err << createProcessEvent
+            << "[ProcessDock] CreateProcess 参数解析失败, error="
+            << errorText.toStdString()
+            << eol;
         return;
     }
 
@@ -2652,28 +3091,12 @@ void ProcessDock::executeCreateProcessRequest()
             .arg(QString::number(createResult.hThread, 16)));
     }
 
-    kLogEvent logEvent;
-    (launchOk ? info : err) << logEvent
+    (launchOk ? info : err) << createProcessEvent
         << "[ProcessDock] CreateProcess 请求完成, ok=" << (launchOk ? "true" : "false")
         << ", tokenMode=" << (request.tokenModeEnabled ? "true" : "false")
         << ", error=" << createResult.win32Error
         << ", detail=" << createResult.detailText
         << eol;
-
-    if (launchOk)
-    {
-        QMessageBox::information(
-            this,
-            "创建进程",
-            QString("创建进程成功。\n%1").arg(QString::fromStdString(createResult.detailText)));
-    }
-    else
-    {
-        QMessageBox::warning(
-            this,
-            "创建进程",
-            QString("创建进程失败。\n%1").arg(QString::fromStdString(createResult.detailText)));
-    }
 
     if (launchOk)
     {
@@ -2703,16 +3126,15 @@ void ProcessDock::executeTaskKillAction(const bool forceKill)
 
     std::string detailText;
     const bool actionOk = ks::process::ExecuteTaskKill(processRecord->pid, forceKill, &detailText);
-    {
-        kLogEvent logEvent;
-        (actionOk ? info : err) << logEvent
-            << "[ProcessDock] TaskKill action, pid=" << processRecord->pid
-            << ", force=" << (forceKill ? "true" : "false")
-            << ", ok=" << (actionOk ? "true" : "false")
-            << ", detail=" << detailText
-            << eol;
-    }
-    showActionResultMessage(forceKill ? "Taskkill /f" : "Taskkill", actionOk, detailText);
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] TaskKill action, pid=" << processRecord->pid
+        << ", force=" << (forceKill ? "true" : "false")
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage(forceKill ? "Taskkill /f" : "Taskkill", actionOk, detailText, actionEvent);
     if (actionOk) requestAsyncRefresh(true);
 }
 
@@ -2728,15 +3150,14 @@ void ProcessDock::executeTerminateProcessAction()
 
     std::string detailText;
     const bool actionOk = ks::process::TerminateProcessByWin32(processRecord->pid, &detailText);
-    {
-        kLogEvent logEvent;
-        (actionOk ? info : err) << logEvent
-            << "[ProcessDock] TerminateProcess action, pid=" << processRecord->pid
-            << ", ok=" << (actionOk ? "true" : "false")
-            << ", detail=" << detailText
-            << eol;
-    }
-    showActionResultMessage("TerminateProcess", actionOk, detailText);
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] TerminateProcess action, pid=" << processRecord->pid
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage("TerminateProcess", actionOk, detailText, actionEvent);
     if (actionOk) requestAsyncRefresh(true);
 }
 
@@ -2752,15 +3173,14 @@ void ProcessDock::executeTerminateThreadsAction()
 
     std::string detailText;
     const bool actionOk = ks::process::TerminateAllThreadsByPid(processRecord->pid, &detailText);
-    {
-        kLogEvent logEvent;
-        (actionOk ? info : err) << logEvent
-            << "[ProcessDock] TerminateThreads action, pid=" << processRecord->pid
-            << ", ok=" << (actionOk ? "true" : "false")
-            << ", detail=" << detailText
-            << eol;
-    }
-    showActionResultMessage("TerminateThread(全部线程)", actionOk, detailText);
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] TerminateThreads action, pid=" << processRecord->pid
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage("TerminateThread(全部线程)", actionOk, detailText, actionEvent);
     if (actionOk) requestAsyncRefresh(true);
 }
 
@@ -2776,15 +3196,14 @@ void ProcessDock::executeInjectInvalidShellcodeAction()
 
     std::string detailText;
     const bool actionOk = ks::process::InjectInvalidShellcode(processRecord->pid, &detailText);
-    {
-        kLogEvent logEvent;
-        (actionOk ? warn : err) << logEvent
-            << "[ProcessDock] InjectInvalidShellcode action, pid=" << processRecord->pid
-            << ", ok=" << (actionOk ? "true" : "false")
-            << ", detail=" << detailText
-            << eol;
-    }
-    showActionResultMessage("注入无效shellcode", actionOk, detailText);
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? warn : err) << actionEvent
+        << "[ProcessDock] InjectInvalidShellcode action, pid=" << processRecord->pid
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage("注入无效shellcode", actionOk, detailText, actionEvent);
     if (actionOk) requestAsyncRefresh(true);
 }
 
@@ -2800,15 +3219,14 @@ void ProcessDock::executeSuspendAction()
 
     std::string detailText;
     const bool actionOk = ks::process::SuspendProcess(processRecord->pid, &detailText);
-    {
-        kLogEvent logEvent;
-        (actionOk ? info : err) << logEvent
-            << "[ProcessDock] SuspendProcess action, pid=" << processRecord->pid
-            << ", ok=" << (actionOk ? "true" : "false")
-            << ", detail=" << detailText
-            << eol;
-    }
-    showActionResultMessage("挂起进程", actionOk, detailText);
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] SuspendProcess action, pid=" << processRecord->pid
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage("挂起进程", actionOk, detailText, actionEvent);
 }
 
 void ProcessDock::executeResumeAction()
@@ -2823,15 +3241,14 @@ void ProcessDock::executeResumeAction()
 
     std::string detailText;
     const bool actionOk = ks::process::ResumeProcess(processRecord->pid, &detailText);
-    {
-        kLogEvent logEvent;
-        (actionOk ? info : err) << logEvent
-            << "[ProcessDock] ResumeProcess action, pid=" << processRecord->pid
-            << ", ok=" << (actionOk ? "true" : "false")
-            << ", detail=" << detailText
-            << eol;
-    }
-    showActionResultMessage("恢复进程", actionOk, detailText);
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] ResumeProcess action, pid=" << processRecord->pid
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage("恢复进程", actionOk, detailText, actionEvent);
 }
 
 void ProcessDock::executeSetCriticalAction(const bool enableCritical)
@@ -2846,16 +3263,15 @@ void ProcessDock::executeSetCriticalAction(const bool enableCritical)
 
     std::string detailText;
     const bool actionOk = ks::process::SetProcessCriticalFlag(processRecord->pid, enableCritical, &detailText);
-    {
-        kLogEvent logEvent;
-        (actionOk ? info : err) << logEvent
-            << "[ProcessDock] SetCritical action, pid=" << processRecord->pid
-            << ", enable=" << (enableCritical ? "true" : "false")
-            << ", ok=" << (actionOk ? "true" : "false")
-            << ", detail=" << detailText
-            << eol;
-    }
-    showActionResultMessage(enableCritical ? "设为关键进程" : "取消关键进程", actionOk, detailText);
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] SetCritical action, pid=" << processRecord->pid
+        << ", enable=" << (enableCritical ? "true" : "false")
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage(enableCritical ? "设为关键进程" : "取消关键进程", actionOk, detailText, actionEvent);
 }
 
 void ProcessDock::executeSetPriorityAction(const int priorityActionId)
@@ -2882,16 +3298,15 @@ void ProcessDock::executeSetPriorityAction(const int priorityActionId)
 
     std::string detailText;
     const bool actionOk = ks::process::SetProcessPriority(processRecord->pid, priorityLevel, &detailText);
-    {
-        kLogEvent logEvent;
-        (actionOk ? info : err) << logEvent
-            << "[ProcessDock] SetPriority action, pid=" << processRecord->pid
-            << ", actionId=" << priorityActionId
-            << ", ok=" << (actionOk ? "true" : "false")
-            << ", detail=" << detailText
-            << eol;
-    }
-    showActionResultMessage("设置进程优先级", actionOk, detailText);
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] SetPriority action, pid=" << processRecord->pid
+        << ", actionId=" << priorityActionId
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage("设置进程优先级", actionOk, detailText, actionEvent);
 }
 
 void ProcessDock::executeOpenFolderAction()
@@ -2906,15 +3321,14 @@ void ProcessDock::executeOpenFolderAction()
 
     std::string detailText;
     const bool actionOk = ks::process::OpenProcessFolder(processRecord->pid, &detailText);
-    {
-        kLogEvent logEvent;
-        (actionOk ? info : err) << logEvent
-            << "[ProcessDock] OpenFolder action, pid=" << processRecord->pid
-            << ", ok=" << (actionOk ? "true" : "false")
-            << ", detail=" << detailText
-            << eol;
-    }
-    showActionResultMessage("打开所在目录", actionOk, detailText);
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] OpenFolder action, pid=" << processRecord->pid
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage("打开所在目录", actionOk, detailText, actionEvent);
 }
 
 void ProcessDock::openProcessDetailsPlaceholder()

@@ -1,4 +1,4 @@
-#include "process.h"
+﻿#include "process.h"
 
 #include "../string/string.h"
 
@@ -3051,5 +3051,14 @@ namespace ks::process
             *resultOut = localResult;
         }
         return false;
+    }
+    std::wstring GetCurrentProcessPath()
+    {
+        wchar_t szPath[MAX_PATH] = { 0 };
+        if (GetModuleFileNameW(NULL, szPath, MAX_PATH) == 0)
+        {
+            return L"";
+        }
+        return std::wstring(szPath);
     }
 }

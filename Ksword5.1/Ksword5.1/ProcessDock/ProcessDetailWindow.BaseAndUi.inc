@@ -620,7 +620,17 @@ void ProcessDetailWindow::initializeConnections()
     connect(m_openPathFolderButton, &QPushButton::clicked, this, [this]() {
         std::string detailText;
         const bool actionOk = ks::process::OpenFolderByPath(m_baseRecord.imagePath, &detailText);
-        showActionResultMessage("打开程序路径", actionOk, detailText);
+        // 打开路径属于同一动作链，复用同一个 kLogEvent 传入结果函数。
+        kLogEvent actionEvent;
+        (actionOk ? info : err) << actionEvent
+            << "[ProcessDetailWindow] 打开程序路径, pid="
+            << m_baseRecord.pid
+            << ", actionOk="
+            << (actionOk ? "true" : "false")
+            << ", detail="
+            << detailText
+            << eol;
+        showActionResultMessage("打开程序路径", actionOk, detailText, actionEvent);
     });
 
     // 复制命令行按钮。

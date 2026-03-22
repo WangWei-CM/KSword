@@ -238,6 +238,167 @@ void NetworkDock::executeManualRequest()
     }
 }
 
+void NetworkDock::replayPacketToManualRequestByTableRow(const int row)
+{
+    // replayEvent 用途：贯穿本次“抓包回放草稿生成”全流程的统一日志事件链。
+    kLogEvent replayEvent;
+
+    // 基础行校验：右键目标行必须有效且仍在当前表格范围内。
+    if (m_packetTable == nullptr || row < 0 || row >= m_packetTable->rowCount())
+    {
+        warn << replayEvent
+            << "[NetworkDock] 报文重放失败：目标行无效, row=" << row
+            << eol;
+        return;
+    }
+
+    // 从时间列 UserRole 取出 sequenceId，用于回查完整报文实体。
+    QTableWidgetItem* timeItem = m_packetTable->item(row, toPacketColumn(PacketTableColumn::Time));
+    if (timeItem == nullptr)
+    {
+        warn << replayEvent
+            << "[NetworkDock] 报文重放失败：时间列为空, row=" << row
+            << eol;
+        return;
+    }
+
+    const QVariant sequenceVariant = timeItem->data(Qt::UserRole);
+    if (!sequenceVariant.isValid())
+    {
+        warn << replayEvent
+            << "[NetworkDock] 报文重放失败：sequenceId 缺失, row=" << row
+            << eol;
+        return;
+    }
+
+    const std::uint64_t sequenceId = static_cast<std::uint64_t>(sequenceVariant.toULongLong());
+    const auto packetIterator = m_packetBySequence.find(sequenceId);
+    if (packetIterator == m_packetBySequence.end())
+    {
+        appendManualRequestLogLine(QStringLiteral("回放失败：该报文已被清理，无法生成重放草稿。"));
+
+        warn << replayEvent
+            << "[NetworkDock] 报文重放失败：缓存中不存在该序号, sequenceId=" << sequenceId
+            << eol;
+        return;
+    }
+
+    // 请求构造页关键控件校验：缺失任一关键控件都无法完成自动回填。
+    if (m_manualApiCombo == nullptr ||
+        m_manualOverrideSocketParameterCheck == nullptr ||
+        m_manualEnableBindCheck == nullptr ||
+        m_manualLocalAddressEdit == nullptr ||
+        m_manualLocalPortSpin == nullptr ||
+        m_manualRemoteAddressEdit == nullptr ||
+        m_manualRemotePortSpin == nullptr ||
+        m_manualConnectBeforeSendCheck == nullptr ||
+        m_manualPayloadFormatCombo == nullptr ||
+        m_manualPayloadEditor == nullptr)
+    {
+        warn << replayEvent
+            << "[NetworkDock] 报文重放失败：请求构造页控件未就绪。"
+            << eol;
+        return;
+    }
+
+    // packetRecord 用途：承载本次要回放的抓包实体，后续统一从该对象提取参数。
+    const ks::network::PacketRecord& packetRecord = packetIterator->second;
+
+    // 当前请求构造执行器仅支持 IPv4；IPv6 报文给出明确提示，避免用户误操作。
+    std::uint32_t remoteIpv4HostOrder = 0;
+    if (!tryParseIpv4Text(toQString(packetRecord.remoteAddress), remoteIpv4HostOrder))
+    {
+        appendManualRequestLogLine(
+            QStringLiteral("回放失败：当前快速重放仅支持 IPv4 报文，IPv6 请在请求构造页手工填写。"));
+
+        warn << replayEvent
+            << "[NetworkDock] 报文重放失败：远端地址不是 IPv4, sequenceId=" << sequenceId
+            << ", remote=" << packetRecord.remoteAddress
+            << eol;
+        return;
+    }
+
+    // 端口 0 无法作为常规目标端点，提前拦截并提示。
+    if (packetRecord.remotePort == 0)
+    {
+        appendManualRequestLogLine(QStringLiteral("回放失败：该报文远端端口为 0，无法自动生成目标端点。"));
+
+        warn << replayEvent
+            << "[NetworkDock] 报文重放失败：远端端口为 0, sequenceId=" << sequenceId
+            << eol;
+        return;
+    }
+
+    // replayApiKind 用途：按抓包协议映射请求构造模式（TCP/UDP）。
+    const ks::network::ManualNetworkApiKind replayApiKind =
+        (packetRecord.protocol == ks::network::PacketTransportProtocol::Tcp)
+        ? ks::network::ManualNetworkApiKind::WinSockTcp
+        : ks::network::ManualNetworkApiKind::WinSockUdp;
+    const int replayApiComboIndex = m_manualApiCombo->findData(static_cast<int>(replayApiKind));
+
+    // payloadHexText 用途：把 payload 原始字节转为 HEX 文本，供请求构造直接发送。
+    const QString payloadHexText = buildPayloadHexFullText(packetRecord);
+    // payloadRange 用途：记录本次可回放的 payload 字节范围，便于日志输出与提示。
+    const auto payloadRange = buildPayloadByteRange(packetRecord);
+
+    // 统一回填请求构造页：重放先生成“可编辑草稿”，不直接自动执行。
+    m_manualOverrideSocketParameterCheck->setChecked(false);
+    if (replayApiComboIndex >= 0)
+    {
+        m_manualApiCombo->setCurrentIndex(replayApiComboIndex);
+    }
+    m_manualEnableBindCheck->setChecked(false);
+    m_manualLocalAddressEdit->setText(QStringLiteral("0.0.0.0"));
+    m_manualLocalPortSpin->setValue(0);
+    m_manualRemoteAddressEdit->setText(toQString(packetRecord.remoteAddress));
+    m_manualRemotePortSpin->setValue(static_cast<int>(packetRecord.remotePort));
+    m_manualConnectBeforeSendCheck->setChecked(true);
+
+    const int hexFormatIndex = m_manualPayloadFormatCombo->findData(
+        static_cast<int>(ks::network::ManualPayloadFormat::HexBytes));
+    if (hexFormatIndex >= 0)
+    {
+        m_manualPayloadFormatCombo->setCurrentIndex(hexFormatIndex);
+    }
+    m_manualPayloadEditor->setPlainText(payloadHexText);
+
+    // 自动切到请求构造页，方便用户立刻审阅并二次调整。
+    if (m_sideTabWidget != nullptr && m_manualRequestPage != nullptr)
+    {
+        m_sideTabWidget->setCurrentWidget(m_manualRequestPage);
+    }
+
+    appendManualRequestLogLine(QStringLiteral(
+        "已载入回放草稿：seq=%1, 协议=%2, 目标=%3:%4, payloadBytes=%5。")
+        .arg(static_cast<qulonglong>(packetRecord.sequenceId))
+        .arg(toQString(ks::network::PacketProtocolToString(packetRecord.protocol)))
+        .arg(toQString(packetRecord.remoteAddress))
+        .arg(packetRecord.remotePort)
+        .arg(static_cast<qulonglong>(payloadRange.second)));
+    appendManualRequestLogLine(QStringLiteral("提示：已自动切换到 HEX 载荷模式，点击“执行请求”即可发送。"));
+
+    if (packetRecord.direction == ks::network::PacketDirection::Inbound)
+    {
+        appendManualRequestLogLine(QStringLiteral("提示：该报文是入站包，重放时将由本机主动发往远端。"));
+    }
+    if (packetRecord.packetBytesTruncated)
+    {
+        appendManualRequestLogLine(QStringLiteral("注意：该报文抓包内容被截断，重放仅使用已保留字节。"));
+    }
+    if (payloadRange.second == 0)
+    {
+        appendManualRequestLogLine(QStringLiteral("提示：该报文 payload 为空，执行时将发送空载荷。"));
+    }
+
+    info << replayEvent
+        << "[NetworkDock] 已生成报文重放草稿, sequenceId=" << sequenceId
+        << ", api=" << ks::network::ManualNetworkApiKindToString(replayApiKind)
+        << ", remote=" << packetRecord.remoteAddress << ":" << packetRecord.remotePort
+        << ", payloadBytes=" << payloadRange.second
+        << ", truncated=" << (packetRecord.packetBytesTruncated ? "true" : "false")
+        << eol;
+}
+
 void NetworkDock::resetManualRequestForm()
 {
     // 保护性检查：若页面尚未初始化则直接返回。

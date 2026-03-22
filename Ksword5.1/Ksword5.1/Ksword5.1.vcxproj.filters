@@ -106,6 +106,12 @@
     <ClCompile Include="ksword\string\string.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="RegistryDock\RegistryDock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="WindowDock\WindowDock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="Ksword5.cpp">
@@ -189,6 +195,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="theme.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="WindowDock\WindowDock.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

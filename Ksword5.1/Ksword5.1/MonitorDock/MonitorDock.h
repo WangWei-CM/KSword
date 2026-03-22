@@ -92,6 +92,11 @@ private:
     // ========================= WMI 功能 ==========================
     void refreshWmiProvidersAsync();
     void refreshWmiEventClassesAsync();
+    // updateWmiSubscribePanelCompactLayout：
+    // - 作用：按当前事件类数量动态收敛“WMI订阅”折叠页高度，避免 QToolBox 内部滚动条；
+    // - 调用：初始化订阅UI后调用一次，事件类刷新完成后再次调用；
+    // - 入参/出参：无（直接读取并更新成员控件尺寸）。
+    void updateWmiSubscribePanelCompactLayout();
     void applyWmiProviderFilter();
     void startWmiSubscription();
     void stopWmiSubscription();
@@ -101,6 +106,8 @@ private:
         const QString& className,
         const QString& pidAndName,
         const QString& detailText);
+    void applyWmiEventFilter();
+    void clearWmiEventFilter();
     void flushWmiPendingRows();
     void appendWmiEventRow(
         const QString& providerName,
@@ -171,6 +178,17 @@ private:
     QPushButton* m_wmiStopSubscribeButton = nullptr;  // 停止订阅按钮。
     QPushButton* m_wmiPauseSubscribeButton = nullptr; // 暂停/继续按钮。
     QLabel* m_wmiSubscribeStatusLabel = nullptr;    // 订阅状态文本。
+    QLineEdit* m_wmiEventGlobalFilterEdit = nullptr; // WMI 全字段筛选框。
+    QLineEdit* m_wmiEventProviderFilterEdit = nullptr; // WMI Provider筛选框。
+    QLineEdit* m_wmiEventClassFilterEdit = nullptr; // WMI 事件类筛选框。
+    QLineEdit* m_wmiEventPidFilterEdit = nullptr; // WMI PID/进程筛选框。
+    QLineEdit* m_wmiEventDetailFilterEdit = nullptr; // WMI 详情筛选框。
+    QCheckBox* m_wmiEventRegexCheck = nullptr; // WMI 筛选是否启用正则。
+    QCheckBox* m_wmiEventCaseCheck = nullptr; // WMI 筛选是否大小写敏感。
+    QCheckBox* m_wmiEventInvertCheck = nullptr; // WMI 筛选是否反向匹配。
+    QCheckBox* m_wmiEventKeepBottomCheck = nullptr; // WMI 表格是否保持贴底滚动。
+    QPushButton* m_wmiEventFilterClearButton = nullptr; // WMI 筛选清空按钮。
+    QLabel* m_wmiEventFilterStatusLabel = nullptr; // WMI 筛选结果状态文本。
     QTableWidget* m_wmiEventTable = nullptr;        // WMI 事件结果表。
 
     std::vector<WmiProviderEntry> m_wmiProviders; // Provider 缓存。
@@ -178,6 +196,7 @@ private:
     std::atomic_bool m_wmiSubscribePaused{ false };  // 订阅暂停状态。
     std::atomic_bool m_wmiSubscribeStopFlag{ false }; // 订阅停止信号。
     std::unique_ptr<std::thread> m_wmiSubscribeThread; // WMI 后台订阅线程。
+    int m_wmiProviderRefreshProgressPid = 0;          // WMI Provider 刷新进度 PID。
     int m_wmiSubscribeProgressPid = 0;                // WMI 订阅进度 PID。
     std::vector<QStringList> m_wmiPendingRows;        // WMI 待刷入 UI 的事件缓存。
     std::mutex m_wmiPendingMutex;                     // WMI 事件缓存互斥锁。
@@ -192,6 +211,8 @@ private:
     QHBoxLayout* m_etwProviderControlLayout = nullptr; // ETW 控制栏。
     QPushButton* m_etwProviderRefreshButton = nullptr; // ETW 刷新按钮。
     QLabel* m_etwProviderStatusLabel = nullptr;      // ETW 状态标签。
+    QComboBox* m_etwPresetCategoryCombo = nullptr;   // ETW 预置模板分类筛选下拉框。
+    QListWidget* m_etwPresetProviderList = nullptr;  // ETW 预置常用 Provider 勾选列表。
     QListWidget* m_etwProviderList = nullptr;        // ETW Provider 复选列表。
     QLineEdit* m_etwManualProviderEdit = nullptr;    // 手动输入 Provider。
     QComboBox* m_etwLevelCombo = nullptr;            // 级别设置。
