@@ -108,8 +108,11 @@ private:
     // - 生成深色/浅色覆盖样式字符串，叠加在基础 QSS 之后。
     // 调用方式：applyAppearanceSettings 内部调用。
     // 入参 darkModeEnabled：是否使用深色样式。
+    // 入参 enableDockTransparencyForBackgroundImage：背景图可用时是否强制 Dock 背景透明。
     // 返回：拼接后的 QSS 片段。
-    QString buildAppearanceOverlayStyleSheet(bool darkModeEnabled) const;
+    QString buildAppearanceOverlayStyleSheet(
+        bool darkModeEnabled,
+        bool enableDockTransparencyForBackgroundImage) const;
 
     // ADS Dock Manager
     ads::CDockManager* m_pDockManager;

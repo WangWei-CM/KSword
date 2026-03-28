@@ -6,9 +6,98 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QStringList>
 
 namespace
 {
+    // appendUniquePath 作用：
+    // - 向候选路径列表追加“去重后的规范路径”；
+    // - 使用大小写不敏感比较，兼容 Windows 路径规则。
+    // 调用方式：collectCandidateRootPaths 内部调用。
+    // 入参 pathList：候选路径列表指针。
+    // 入参 rawPath：待追加路径文本。
+    void appendUniquePath(QStringList* pathList, const QString& rawPath)
+    {
+        if (pathList == nullptr)
+        {
+            return;
+        }
+
+        // normalizedPath 作用：把输入路径规范化，避免“..”或分隔符差异导致重复。
+        const QString normalizedPath = QDir::cleanPath(rawPath.trimmed());
+        if (normalizedPath.isEmpty())
+        {
+            return;
+        }
+
+        if (!pathList->contains(normalizedPath, Qt::CaseInsensitive))
+        {
+            pathList->append(normalizedPath);
+        }
+    }
+
+    // collectCandidateRootPaths 作用：
+    // - 生成资源路径解析用的根目录候选集；
+    // - 兼容“工作目录在仓库根目录”与“可执行文件在 x64/Debug”两类启动方式。
+    // 调用方式：配置/背景路径解析前调用。
+    // 返回：按优先级排序的根目录列表。
+    QStringList collectCandidateRootPaths()
+    {
+        QStringList candidateRootPaths;
+
+        // appendFromStartPath 作用：
+        // - 从起点目录开始向上回溯若干层；
+        // - 每层同时追加“本层目录”和“本层/Ksword5.1 子目录”两个候选。
+        const auto appendFromStartPath = [&candidateRootPaths](const QString& startPath) {
+            QString walkingPath = QDir::cleanPath(startPath.trimmed());
+            if (walkingPath.isEmpty())
+            {
+                return;
+            }
+
+            for (int depthIndex = 0; depthIndex < 8; ++depthIndex)
+            {
+                appendUniquePath(&candidateRootPaths, walkingPath);
+                appendUniquePath(
+                    &candidateRootPaths,
+                    QDir(walkingPath).absoluteFilePath(QStringLiteral("Ksword5.1")));
+
+                QDir walkingDir(walkingPath);
+                if (!walkingDir.cdUp())
+                {
+                    break;
+                }
+                walkingPath = QDir::cleanPath(walkingDir.absolutePath());
+            }
+        };
+
+        appendFromStartPath(QDir::currentPath());
+        appendFromStartPath(QCoreApplication::applicationDirPath());
+        return candidateRootPaths;
+    }
+
+    // resolvePreferredResourceRootPath 作用：
+    // - 选出“包含 style 目录”的优先资源根目录；
+    // - 保证 style/ksword_background.png 默认相对路径可被稳定解析。
+    // 调用方式：读写设置文件、回退路径解析时调用。
+    // 返回：资源根目录绝对路径。
+    QString resolvePreferredResourceRootPath()
+    {
+        // candidateRootPaths 作用：候选资源根目录列表。
+        const QStringList candidateRootPaths = collectCandidateRootPaths();
+        for (const QString& candidateRootPath : candidateRootPaths)
+        {
+            const QFileInfo styleDirectoryInfo(
+                QDir(candidateRootPath).absoluteFilePath(QStringLiteral("style")));
+            if (styleDirectoryInfo.exists() && styleDirectoryInfo.isDir())
+            {
+                return candidateRootPath;
+            }
+        }
+
+        return QDir::cleanPath(QDir::currentPath());
+    }
+
     // clampOpacityPercent 作用：
     // - 把透明度限制在 0~100，避免非法值污染配置。
     // 调用方式：读写 JSON 前后统一调用。
@@ -47,6 +136,41 @@ namespace
         }
         const QDir rootDir(rootDirPath);
         return QDir::cleanPath(rootDir.absoluteFilePath(maybeRelativePath));
+    }
+
+    // resolvePathAgainstCandidateRoots 作用：
+    // - 对相对路径做多根目录探测（工作目录/可执行目录/上级目录/Ksword5.1 子目录）；
+    // - 首个存在路径即返回，不存在时回退到“优先资源根目录”拼接结果。
+    // 调用方式：读取 JSON、加载背景图时调用。
+    // 入参 maybeRelativePath：相对或绝对路径文本。
+    // 返回：可用于后续文件访问的绝对路径。
+    QString resolvePathAgainstCandidateRoots(const QString& maybeRelativePath)
+    {
+        if (maybeRelativePath.trimmed().isEmpty())
+        {
+            return QString();
+        }
+
+        const QFileInfo inputPathInfo(maybeRelativePath);
+        if (inputPathInfo.isAbsolute())
+        {
+            return QDir::cleanPath(maybeRelativePath);
+        }
+
+        // candidateRootPaths 作用：多种启动路径下的候选根目录集合。
+        const QStringList candidateRootPaths = collectCandidateRootPaths();
+        for (const QString& candidateRootPath : candidateRootPaths)
+        {
+            const QString resolvedPath = resolveRelativePath(candidateRootPath, maybeRelativePath);
+            if (QFileInfo::exists(resolvedPath))
+            {
+                return resolvedPath;
+            }
+        }
+
+        // preferredRootPath 作用：当候选集中暂未命中时，提供稳定回退位置。
+        const QString preferredRootPath = resolvePreferredResourceRootPath();
+        return resolveRelativePath(preferredRootPath, maybeRelativePath);
     }
 
     // buildDefaultSettings 作用：
@@ -99,48 +223,19 @@ QString ks::settings::appearanceSettingsJsonRelativePath()
 QString ks::settings::resolveSettingsJsonPathForRead()
 {
     const QString relativePath = appearanceSettingsJsonRelativePath();
-
-    // firstCandidatePath 作用：优先在“当前工作目录”读取，便于开发态调试。
-    const QString firstCandidatePath = resolveRelativePath(QDir::currentPath(), relativePath);
-    if (QFileInfo::exists(firstCandidatePath))
-    {
-        return firstCandidatePath;
-    }
-
-    // secondCandidatePath 作用：工作目录无配置时，回退到可执行文件目录读取。
-    const QString secondCandidatePath = resolveRelativePath(QCoreApplication::applicationDirPath(), relativePath);
-    return secondCandidatePath;
+    return resolvePathAgainstCandidateRoots(relativePath);
 }
 
 QString ks::settings::resolveSettingsJsonPathForWrite()
 {
-    // 为了让用户能在项目目录直接看到配置，统一写入当前工作目录。
-    return resolveRelativePath(QDir::currentPath(), appearanceSettingsJsonRelativePath());
+    // preferredRootPath 作用：定位包含 style 目录的资源根目录，确保写入路径稳定。
+    const QString preferredRootPath = resolvePreferredResourceRootPath();
+    return resolveRelativePath(preferredRootPath, appearanceSettingsJsonRelativePath());
 }
 
 QString ks::settings::resolveBackgroundImagePathForLoad(const QString& imagePathText)
 {
-    if (imagePathText.trimmed().isEmpty())
-    {
-        return QString();
-    }
-
-    const QFileInfo rawPathInfo(imagePathText);
-    if (rawPathInfo.isAbsolute())
-    {
-        return QDir::cleanPath(imagePathText);
-    }
-
-    // firstCandidatePath 作用：优先按“当前工作目录”解析相对路径。
-    const QString firstCandidatePath = resolveRelativePath(QDir::currentPath(), imagePathText);
-    if (QFileInfo::exists(firstCandidatePath))
-    {
-        return firstCandidatePath;
-    }
-
-    // secondCandidatePath 作用：回退到“可执行文件目录”解析相对路径。
-    const QString secondCandidatePath = resolveRelativePath(QCoreApplication::applicationDirPath(), imagePathText);
-    return secondCandidatePath;
+    return resolvePathAgainstCandidateRoots(imagePathText);
 }
 
 ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
@@ -242,4 +337,3 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
 
     return true;
 }
-
