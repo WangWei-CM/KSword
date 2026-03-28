@@ -1,4 +1,5 @@
 #include "DriverDock.h"
+#include "../theme.h"
 
 // ============================================================
 // DriverDock.cpp

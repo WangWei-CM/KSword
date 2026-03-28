@@ -1,287 +1,264 @@
-﻿#pragma once
+#pragma once
 #include <QString>
 #include <qstring.h>
+
+// QSS_MainWindow_TabWidget 作用：
+// - 统一项目内所有 QTabWidget / QTabBar 的基础样式；
+// - 避免使用白底默认样式，保证深浅色都由调色板接管。
 const QString QSS_MainWindow_TabWidget = R"(
-        /* 标签页容器样式 - 白色背景 */
+    QTabWidget::pane {
+        border: none;
+        background-color: palette(base);
+        top: -1px;
+    }
 
-        QTabWidget::pane {
-            border: 1px solid #E0E0E0;  /* 浅色边框增强层次感 */
-            background-color: white;    /* 白色背景 */
-            top: -1px;                  /* 消除边框间隙 */
-            border-radius: 0px;         /* 全方角 */
-        }
+    QTabBar {
+        background-color: palette(window);
+        border-bottom: none;
+    }
 
-        /* 标签栏样式 */
-        QTabBar {
-            background-color: white;    /* 标签栏白色背景 */
-            border-bottom: 1px solid #E0E0E0;
-        }
+    QTabBar::tab {
+        background-color: palette(base);
+        color: palette(text);
+        padding: 6px 14px;
+        margin-right: 1px;
+        border: none;
+        border-top-left-radius: 3px;
+        border-top-right-radius: 3px;
+    }
 
-        /* 未选中标签样式 */
-        QTabBar::tab {
-            background-color: white;    /* 标签白色背景 */
-            color: #666666;             /* 灰色文字 */
-            padding: 8px 16px;          /* 内边距 */
-            margin-right: 1px;          /* 标签间间隙 */
-            border: 1px solid transparent;  /* 透明边框 */
-            border-radius: 0px;         /* 全方角 */
-        }
+    QTabBar::tab:selected {
+        background-color: #43A0FF;
+        color: #FFFFFF;
+        border-color: #43A0FF;
+    }
 
-        /* 选中标签样式 - 主题色#43A0FF */
-        QTabBar::tab:selected {
-            color: #43A0FF;             /* 主题色文字 */
-            border-bottom: 2px solid #43A0FF;  /* 底部主题色高亮条 */
-        }
+    QTabBar::tab:hover:!selected {
+        background-color: #2E8BFF;
+        color: #FFFFFF;
+    }
+)";
 
-        /* 标签悬停效果 */
-        QTabBar::tab:hover:!selected {
-            color: #43A0FF;             /* 悬停时主题色文字 */
-            border-bottom: 1px solid #E0E0E0;
-        }
-
-        /* 关闭按钮样式 */
-        QTabBar::close-button {
-            image: url(:/icons/close_normal.png);  /* 可替换为自定义关闭图标 */
-            subcontrol-position: right;
-            subcontrol-origin: margin;
-            width: 16px;
-            height: 16px;
-            margin: 0 4px 0 4px;
-        }
-
-        QTabBar::close-button:hover {
-            image: url(:/icons/close_hover.png);   /* 悬停状态关闭图标 */
-        }
-    )"
-    ;
+// QSS_MainWindow_dockStyle 作用：
+// - 统一主窗口 Dock 区域、ADS 停靠系统、滚动条的样式；
+// - 强制当前选中 Tab 使用主题色背景 + 白字，解决白底黑字残留问题。
 const QString QSS_MainWindow_dockStyle = R"(
-
-    /* 停靠窗口整体样式 */
     QDockWidget {
-        border: 1px solid #E0E0E0;
-        border-radius: 2px;
+        border: none;
         margin: 1px;
-        background-color: white;
+        background-color: palette(window);
+        color: palette(text);
     }
 
-    /* 标题栏样式 - 强制文字为主题色 */
     QDockWidget::title {
-        background-color: white;
-        color: #43A0FF !important; /* 主题色蓝色，!important 确保覆盖其他样式 */
+        background-color: palette(window);
+        color: palette(text);
         padding: 6px 10px;
-        border-bottom: 1px solid #E0E0E0;
-        font-weight: 500;
+        border-bottom: none;
     }
 
-    /* 聚集时选中的标题栏 - 突出主题色 */
-    QDockWidget::title:checked {
-        color: #43A0FF; /* 主题色 */
-        border-bottom: 2px solid #43A0FF; /* 加粗主题色下划线 */
-    }
-
-    /* 聚集标签栏整体样式 */
-    QDockWidget::tab-bar {
-        background-color: white;
-        border-bottom: 1px solid #E0E0E0;
-    }
-
-    /* 聚集时未选中标签 */
-    QDockWidget::tab {
-        color: #666666;
-        padding: 6px 16px;
-        margin-right: 2px;
-        border-bottom: 2px solid transparent;
-    }
-
-    /* 聚集时选中标签 - 强化主题色 */
-    QDockWidget::tab:selected {
-        color: #43A0FF; /* 主题色文字 */
-        border-bottom: 2px solid #43A0FF; /* 主题色下划线 */
-        background-color: #F0F7FF; /* 主题色浅色背景 */
-    }
-
-    /* 标签悬停效果 */
-    QDockWidget::tab:hover:!selected {
-        color: #43A0FF;
-        background-color: #F5F9FF;
-    }
-
-    /* 内容区域样式 */
     QDockWidget > QWidget {
-        background-color: white;
+        background-color: palette(base);
+        color: palette(text);
         border: none;
     }
 
-    /* 手柄样式 - 加入主题色反馈 */
-    QDockWidget::handle {
-        background-color: #F5F5F5;
-    }
-    QDockWidget::handle:hover {
-        background-color: #E8F0FF; /* 主题色浅色变体 */
+    QMainWindow QTabBar {
+        background-color: palette(window);
+        border-bottom: none;
     }
 
-    /* 按钮样式 - 主题色交互反馈 */
-    QDockWidget::close-button,
-    QDockWidget::float-button {
-        width: 16px;
-        height: 16px;
-        subcontrol-origin: padding;
-        subcontrol-position: right;
-        margin-right: 6px;
+    QMainWindow QTabBar::tab {
+        background-color: palette(base);
+        color: palette(text);
+        border: none;
+        padding: 6px 14px;
+    }
+
+    QMainWindow QTabBar::tab:selected {
+        background-color: #43A0FF;
+        color: #FFFFFF;
+        border-color: #43A0FF;
+    }
+
+    QMainWindow QTabBar::tab:hover:!selected {
+        background-color: #2E8BFF;
+        color: #FFFFFF;
+    }
+
+    ads--CDockManager,
+    ads--CDockContainerWidget,
+    ads--CDockAreaWidget,
+    ads--CDockAreaTitleBar,
+    ads--CFloatingDockContainer {
+        background-color: palette(window);
+        color: palette(text);
+    }
+
+    ads--CDockAreaTabBar {
+        background-color: palette(window);
+        border-bottom: none;
+    }
+
+    ads--CDockWidgetTab,
+    ads--CAutoHideTab {
+        background-color: palette(base);
+        color: palette(text);
+        border: none;
+        padding: 4px 10px;
+    }
+
+    ads--CDockWidgetTab QLabel,
+    ads--CAutoHideTab QLabel {
+        color: palette(text);
+    }
+
+    ads--CDockWidgetTab[activeTab="true"],
+    ads--CAutoHideTab[activeTab="true"] {
+        background-color: #43A0FF;
+        color: #FFFFFF;
+        border-color: #43A0FF;
+    }
+
+    ads--CDockWidgetTab[activeTab="true"] QLabel,
+    ads--CAutoHideTab[activeTab="true"] QLabel {
+        color: #FFFFFF;
+        font-weight: 600;
+    }
+
+    ads--CDockWidgetTab:hover,
+    ads--CAutoHideTab:hover {
+        background-color: #2E8BFF;
+        color: #FFFFFF;
+    }
+
+    ads--CDockAreaTitleBar QToolButton,
+    ads--CDockAreaTitleBar QPushButton {
+        background-color: transparent;
+        color: palette(text);
+        border: none;
         border-radius: 3px;
     }
 
-
-    /* 聚集标签栏整体样式 */
-    QDockWidget::tab-bar {
-        background-color: white;
-        border-bottom: 1px solid #E0E0E0; /* 与中央标签栏底部边框一致 */
+    ads--CDockAreaTitleBar QToolButton:hover,
+    ads--CDockAreaTitleBar QPushButton:hover {
+        background-color: #2E8BFF;
+        color: #FFFFFF;
+        border-color: #2E8BFF;
     }
 
-    /* 聚集时未选中标签 */
-    QDockWidget::tab {
-        color: #666666;
-        padding: 6px 16px; /* 与中央标签页内边距匹配 */
-        margin-right: 1px;
-        border-bottom: 2px solid transparent;
-    }
-
-    /* 聚集时选中标签 */
-    QDockWidget::tab:selected {
-        color: #43A0FF; /* 主题色文字 */
-        border-bottom: 2px solid #43A0FF; /* 主题色下划线 */
-        background-color: #F0F7FF; /* 主题色浅色背景，增强区分度 */
-    }
-
-    /* 标签悬停效果（未选中时） */
-    QDockWidget::tab:hover:!selected {
-        color: #43A0FF;
-        background-color: #F5F9FF; /* 比选中状态更浅的背景 */
-    }
-
-    /* 内容区域样式 */
-    QDockWidget > QWidget {
-        background-color: white;
+    QScrollBar:vertical {
+        background-color: palette(window);
+        width: 12px;
+        margin: 0px;
         border: none;
     }
 
-    /* 手柄样式 */
-    QDockWidget::handle {
-        background-color: #F5F5F5;
-    }
-    QDockWidget::handle:hover {
-        background-color: #E8F0FF; /* 主题色衍生色，增强交互反馈 */
+    QScrollBar::handle:vertical {
+        background-color: #43A0FF;
+        min-height: 20px;
+        border-radius: 4px;
     }
 
-    /* 关闭/浮动按钮样式 */
-    QDockWidget::close-button,
-    QDockWidget::float-button {
-        width: 16px;
-        height: 16px;
-        subcontrol-origin: padding;
-        subcontrol-position: right;
-        margin-right: 6px;
-        border-radius: 3px; /* 轻微圆角，增强点击感 */
+    QScrollBar::handle:vertical:hover {
+        background-color: #2E8BFF;
     }
 
-    QDockWidget::close-button:hover,
-    QDockWidget::float-button:hover {
-        background-color: #E8F0FF; /* 主题色背景反馈 */
+    QScrollBar:horizontal {
+        background-color: palette(window);
+        height: 12px;
+        margin: 0px;
+        border: none;
     }
 
-    QDockWidget::close-button:hover,
-    QDockWidget::float-button:hover {
-        background-color: #E8F0FF; /* 主题色背景反馈 */
+    QScrollBar::handle:horizontal {
+        background-color: #43A0FF;
+        min-width: 20px;
+        border-radius: 4px;
     }
-QMainWindow QTabBar {  /* 限定作用于主窗口内的 QTabBar（包括停靠聚集标签） */
-    background-color: white;
-    border-bottom: 1px solid #E0E0E0;
-}
 
-QMainWindow QTabBar::tab {  /* 停靠聚集的未选中标签 */
-    color: #666666;
-    padding: 6px 16px;
-    margin-right: 1px;
-    border-bottom: 2px solid transparent;
-}
+    QScrollBar::handle:horizontal:hover {
+        background-color: #2E8BFF;
+    }
 
-QMainWindow QTabBar::tab:selected {  /* 停靠聚集的选中标签 */
-    color: #43A0FF;
-    border-bottom: 2px solid #43A0FF;
-    background-color: #F0F7FF;
-}
+    QScrollBar::add-line,
+    QScrollBar::sub-line,
+    QScrollBar::add-page,
+    QScrollBar::sub-page {
+        background: transparent;
+        border: none;
+    }
 
-QMainWindow QTabBar::tab:hover:!selected {  /* 停靠聚集标签的悬停效果 */
-    color: #43A0FF;
-    background-color: #F5F9FF;
-}
+    QTableCornerButton::section {
+        background-color: palette(base);
+        border: none;
+    }
 )";
 
-        // 浅色按钮：默认白底蓝字 → hover 蓝底白字（深色样式）
-        const QString QSS_Buttons_Light = R"(
+// QSS_Buttons_Light 作用：
+// - 欢迎页等浅色场景统一按钮风格；
+// - 默认和悬停都不使用白色背景，避免高亮发白。
+const QString QSS_Buttons_Light = R"(
     QPushButton {
-        background-color: white !important;
-        color: #43A0FF !important;
+        background-color: #43A0FF !important;
+        color: #FFFFFF !important;
         border: 1px solid #43A0FF !important;
         padding: 6px 16px;
         border-radius: 3px;
         font-weight: 500;
-        outline: none; /* 去除Tab焦点虚线框 */
+        outline: none;
     }
 
-    /* hover 切换为深色按钮样式（蓝底白字） */
     QPushButton:hover {
-        background-color: #43A0FF !important;
-        color: white !important;
-        border-color: #43A0FF !important;
+        background-color: #2E8BFF !important;
+        color: #FFFFFF !important;
+        border-color: #2E8BFF !important;
     }
 
-    /* 按下状态：在 hover 深色基础上加深背景 */
     QPushButton:pressed {
-        background-color: #2880DD !important;
-        color: white !important;
-        padding-top: 7px;
-        padding-bottom: 5px;
+        background-color: #1F78D0 !important;
+        color: #FFFFFF !important;
+        border-color: #1F78D0 !important;
     }
 
     QPushButton:disabled {
-        background-color: white !important;
-        color: #B3D1FF !important;
-        border: 1px solid #B3D1FF !important;
+        background-color: #8DC4FF !important;
+        color: #F3F8FF !important;
+        border: 1px solid #8DC4FF !important;
         font-weight: normal;
     }
 )";
 
+// QSS_Buttons_Dark 作用：
+// - 深色场景按钮样式保持主题蓝，悬停继续加深；
+// - 避免出现白色 hover 背景。
 const QString QSS_Buttons_Dark = R"(
     QPushButton {
-        background-color: #43A0FF !important;
-        color: white !important;
-        border: 1px solid #43A0FF !important;
+        background-color: #2E8BFF !important;
+        color: #FFFFFF !important;
+        border: 1px solid #2E8BFF !important;
         padding: 6px 16px;
         border-radius: 3px;
         font-weight: 500;
-        outline: none; /* 去除Tab焦点虚线框 */
+        outline: none;
     }
 
-    /* hover 切换为浅色按钮样式（白底蓝字） */
     QPushButton:hover {
-        background-color: white !important;
-        color: #43A0FF !important;
+        background-color: #43A0FF !important;
+        color: #FFFFFF !important;
         border-color: #43A0FF !important;
     }
 
-    /* 按下状态：在 hover 浅色基础上加深背景 */
     QPushButton:pressed {
-        background-color: #E0E7FF !important;
-        color: #43A0FF !important;
-        padding-top: 7px;
-        padding-bottom: 5px;
+        background-color: #1F78D0 !important;
+        color: #FFFFFF !important;
+        border-color: #1F78D0 !important;
     }
 
     QPushButton:disabled {
-        background-color: #B3D1FF !important;
-        color: white !important;
-        border: 1px solid #B3D1FF !important;
+        background-color: #355A83 !important;
+        color: #A9BFDA !important;
+        border: 1px solid #355A83 !important;
         font-weight: normal;
     }
 )";

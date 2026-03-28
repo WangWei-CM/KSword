@@ -120,7 +120,7 @@ void DriverDock::rebuildDriverServiceTableByFilter()
                 QTableWidgetItem* cellItem = m_serviceTable->item(rowIndex, columnIndex);
                 if (cellItem != nullptr)
                 {
-                    cellItem->setBackground(QColor(226, 255, 232));
+                    cellItem->setBackground(KswordTheme::NewRowBackgroundColor());
                 }
             }
         }

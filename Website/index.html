@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ksword5.1</title>
+    <!-- 引入全站样式：首屏品牌页与后续页面统一视觉体系 -->
+    <link rel="stylesheet" href="./css/site.css">
+</head>
+<body class="landing-page">
+    <!-- 页面主容器：用于控制首屏宽度与上下留白 -->
+    <div class="page-shell">
+        <!-- 顶部导航：品牌标识 + 语言/主题切换 + 进入详情按钮 -->
+        <header class="brand-topbar">
+            <a class="brand-mark" href="./index.html">Ksword5.1</a>
+            <div class="topbar-actions">
+                <a class="action-button" id="landing-overview-link" href="./pages/overview.html" title="进入详细介绍页面">进入详情</a>
+                <button class="lang-button" type="button" data-lang-toggle title="切换中英文" aria-label="切换中英文">EN</button>
+                <button class="icon-button" type="button" data-theme-toggle title="切换深浅模式" aria-label="切换深浅模式">☾</button>
+            </div>
+        </header>
+
+        <!-- 品牌首屏：巨大 logo + 核心标语 + CTA 按钮 -->
+        <main class="brand-hero">
+            <div class="hero-logo-shell">
+                <img
+                    class="hero-logo"
+                    src="./Images/logo.png"
+                    alt="Ksword Logo"
+                    onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"
+                >
+                <div class="hero-logo-fallback">LOGO</div>
+            </div>
+
+            <h1 class="hero-slogan" id="landing-slogan">全国最强的Windows 内核调试工具</h1>
+            <p class="hero-subtitle" id="landing-subtitle">面向系统排障、内核分析与安全研究的一体化调试平台。</p>
+
+            <div class="hero-actions">
+                <a class="action-button primary" id="landing-cta-primary" href="./pages/overview.html" title="查看详细模块介绍">查看详细介绍</a>
+                <a class="action-button" id="landing-cta-secondary" href="./Images/截图命名与拍摄说明.txt" title="查看截图准备说明">查看截图规范</a>
+            </div>
+
+            <div class="hero-scroll-tip" id="landing-scroll-tip">详细功能内容在第二页（Overview）展示</div>
+        </main>
+    </div>
+
+    <!-- 脚本顺序：语言 -> 主题 -> 首屏文案 -->
+    <script src="./js/lang.js"></script>
+    <script src="./js/theme.js"></script>
+    <script src="./js/landing.js"></script>
+</body>
+</html>

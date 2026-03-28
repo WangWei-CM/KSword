@@ -63,6 +63,14 @@ public:
     // - 启动默认监视（性能计数器视图）。
     explicit ProcessDock(QWidget* parent = nullptr);
 
+    // refreshThemeVisuals 作用：
+    // - 在深浅色切换后，重绘当前列表行着色；
+    // - 修复“新增进程高亮色在主题切换后残留”的问题。
+    // 调用方式：MainWindow::applyAppearanceSettings 在主题更新后调用。
+    // 入参：无。
+    // 返回：无。
+    void refreshThemeVisuals();
+
 protected:
     // resizeEvent 作用：
     // - 在 Dock 尺寸变化时重新分配可见列宽；

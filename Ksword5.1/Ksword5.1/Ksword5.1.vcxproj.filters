@@ -85,6 +85,9 @@
     <ClCompile Include="ProcessDock\Process_Tool.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="SettingsDock\AppearanceSettings.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\UIBaseFunction.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -106,7 +109,7 @@
     <ClCompile Include="ksword\string\string.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="RegistryDock\RegistryDock.cpp">
+    <ClCompile Include="RegistryDock_Themed.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="WindowDock\WindowDock.cpp">
@@ -198,6 +201,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="WindowDock\WindowDock.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SettingsDock\AppearanceSettings.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

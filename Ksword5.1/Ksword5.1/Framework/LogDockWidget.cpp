@@ -93,7 +93,7 @@ namespace
     {
         return QStringLiteral(
             "QCheckBox {"
-            "  color: %1;"
+            "  color: %4;"
             "  spacing: 6px;"
             "}"
             "QCheckBox::indicator {"
@@ -101,7 +101,7 @@ namespace
             "  height: 14px;"
             "  border: 1px solid %2;"
             "  border-radius: 2px;"
-            "  background: #FFFFFF;"
+            "  background: %5;"
             "}"
             "QCheckBox::indicator:checked {"
             "  border: 1px solid %2;"
@@ -109,7 +109,9 @@ namespace
             "}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::SurfaceHex());
     }
 
     // buildBlueButtonStyleSheet 作用：
@@ -119,14 +121,16 @@ namespace
     {
         return QStringLiteral(
             "QPushButton {"
-            "  color: %1;"
-            "  background: #FFFFFF;"
+            "  color: #FFFFFF;"
+            "  background: %1;"
             "  border: 1px solid %2;"
             "  border-radius: 3px;"
             "  padding: 4px 12px;"
             "}"
             "QPushButton:hover {"
             "  background: %3;"
+            "  color: #FFFFFF;"
+            "  border: 1px solid %3;"
             "}"
             "QPushButton:pressed {"
             "  background: %4;"
@@ -135,7 +139,7 @@ namespace
             "}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
+            .arg(QStringLiteral("#2E8BFF"))
             .arg(KswordTheme::PrimaryBluePressedHex);
     }
 
@@ -147,12 +151,14 @@ namespace
         return QStringLiteral(
             "QHeaderView::section {"
             "  color: %1;"
-            "  background: #FFFFFF;"
-            "  border: 1px solid #E6E6E6;"
+            "  background: %2;"
+            "  border: 1px solid %3;"
             "  padding: 4px;"
             "  font-weight: 600;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::BorderHex());
     }
 }
 
@@ -256,9 +262,10 @@ void LogDockWidget::initializeUi()
     QHeaderView* horizontalHeader = m_logTable->horizontalHeader();
     horizontalHeader->setSectionResizeMode(LevelColumn, QHeaderView::Fixed);
     horizontalHeader->setSectionResizeMode(TimeColumn, QHeaderView::Interactive);
-    horizontalHeader->setSectionResizeMode(ContentColumn, QHeaderView::Interactive);
+    horizontalHeader->setSectionResizeMode(ContentColumn, QHeaderView::Stretch);
     horizontalHeader->setSectionResizeMode(FileColumn, QHeaderView::Interactive);
     horizontalHeader->setSectionResizeMode(FunctionColumn, QHeaderView::Interactive);
+    horizontalHeader->setStretchLastSection(false);
     horizontalHeader->setStyleSheet(buildBlueHeaderStyleSheet());
 
     // 等级列只容纳彩色方块，因此锁定窄列宽。
@@ -268,6 +275,10 @@ void LogDockWidget::initializeUi()
     m_logTable->setColumnWidth(FileColumn, 240);
     m_logTable->setColumnWidth(FunctionColumn, 320);
     m_logTable->verticalHeader()->setVisible(false);
+
+    // 默认隐藏“文件/函数”两列，减少首屏信息密度。
+    m_logTable->setColumnHidden(FileColumn, true);
+    m_logTable->setColumnHidden(FunctionColumn, true);
 
     // 最后拼装三层布局。
     m_rootLayout->addLayout(m_filterLayout);
@@ -413,8 +424,10 @@ void LogDockWidget::applyRowStyle(const int row, const kEvent& logItem)
     }
     else if (logItem.level == kLogLevel::Error)
     {
-        rowBackground = QColor(220, 72, 72);     // Error 整行红底
-        rowForeground = QColor(0, 0, 0);         // Error 整行黑字
+        rowBackground = KswordTheme::IsDarkModeEnabled()
+            ? QColor(138, 48, 48)
+            : QColor(220, 72, 72);     // Error 深浅色分支红底
+        rowForeground = QColor(255, 255, 255);   // Error 统一白字保证可读
         shouldApply = true;
     }
 
@@ -457,13 +470,13 @@ QColor LogDockWidget::getLevelColor(const kLogLevel level) const
     case kLogLevel::Debug:
         return QColor(52, 127, 235);
     case kLogLevel::Info:
-        return QColor(64, 173, 74);
+        return KswordTheme::IsDarkModeEnabled() ? QColor(104, 204, 116) : QColor(64, 173, 74);
     case kLogLevel::Warn:
-        return QColor(232, 176, 42);
+        return KswordTheme::IsDarkModeEnabled() ? QColor(245, 196, 94) : QColor(232, 176, 42);
     case kLogLevel::Error:
-        return QColor(214, 66, 66);
+        return KswordTheme::IsDarkModeEnabled() ? QColor(228, 120, 120) : QColor(214, 66, 66);
     case kLogLevel::Fatal:
-        return QColor(170, 20, 20);
+        return KswordTheme::IsDarkModeEnabled() ? QColor(200, 80, 80) : QColor(170, 20, 20);
     default:
         return QColor(128, 128, 128);
     }

@@ -1,5 +1,6 @@
 ﻿#include "WelcomeDock.h"
 #include "../UI/UI.css/UI_css.h"
+#include "../theme.h"
 #include <QStyle>
 #include <QDir>
 #include <QPixmap>
@@ -109,14 +110,20 @@ WelcomeDock::WelcomeDock(QWidget* parent) : QWidget(parent) {
     // 可选：限制最大高度（防止内容过多时占满空间）
     m_copyright->setMaximumHeight(100); // 根据实际行数调整（3行约60px，留余量）
     // 按钮
+    // welcomeButtonStyle 作用：根据当前深浅色状态选择欢迎页按钮样式。
+    const QString welcomeButtonStyle = KswordTheme::IsDarkModeEnabled() ? QSS_Buttons_Dark : QSS_Buttons_Light;
+
     m_githubBtn = new QPushButton("Github仓库", this);
-    m_githubBtn->setStyleSheet(QSS_Buttons_Light);
+    m_githubBtn->setStyleSheet(welcomeButtonStyle);
+    m_githubBtn->setToolTip("打开项目 Github 仓库主页");
 
     m_qqBtn = new QPushButton("QQ群", this);
-	m_qqBtn->setStyleSheet(QSS_Buttons_Light);
+	m_qqBtn->setStyleSheet(welcomeButtonStyle);
+    m_qqBtn->setToolTip("加入项目 QQ 交流群");
 
     m_webBtn = new QPushButton("网站", this);
-	m_webBtn->setStyleSheet(QSS_Buttons_Light);
+	m_webBtn->setStyleSheet(welcomeButtonStyle);
+    m_webBtn->setToolTip("访问项目官方网站");
 
     // 右侧用户头像（用占位文本模拟）
     // 右侧用户头像（初始隐藏文本，加载成功显示图片，失败显示占位）

@@ -1,0 +1,449 @@
+/* ============================= */
+/* Ksword5.1 Website 设计系统 */
+/* 作用：定义品牌级页面的全局变量与深浅模式主题。 */
+/* ============================= */
+:root {
+    --ks-primary: #43A0FF;
+    --ks-primary-deep: #2880DD;
+    --ks-primary-soft: #EAF4FF;
+    --ks-bg: #F3F7FC;
+    --ks-bg-accent: #E7F1FF;
+    --ks-surface: #FFFFFF;
+    --ks-text: #0F1E2F;
+    --ks-subtext: #5A6A7A;
+    --ks-line: #D6E2EF;
+    --ks-shadow-soft: 0 20px 60px rgba(67, 160, 255, 0.16);
+    --ks-shadow-hard: 0 10px 24px rgba(16, 40, 78, 0.16);
+}
+
+/* ============================= */
+/* 深色模式主题变量 */
+/* 作用：保留 Ksword 主色基因并增强暗背景层次感。 */
+/* ============================= */
+:root[data-theme="dark"] {
+    --ks-primary: #43A0FF;
+    --ks-primary-deep: #2880DD;
+    --ks-primary-soft: #24384F;
+    --ks-bg: #0B1220;
+    --ks-bg-accent: #111D30;
+    --ks-surface: #131F31;
+    --ks-text: #E6F0FF;
+    --ks-subtext: #9CB2CC;
+    --ks-line: #2A3D55;
+    --ks-shadow-soft: 0 20px 60px rgba(0, 0, 0, 0.45);
+    --ks-shadow-hard: 0 10px 24px rgba(0, 0, 0, 0.35);
+}
+
+/* ============================= */
+/* 全局基础规范 */
+/* 作用：重置默认样式，强制全站方角视觉。 */
+/* ============================= */
+* {
+    box-sizing: border-box;
+    border-radius: 0 !important;
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+    min-height: 100%;
+}
+
+body {
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: var(--ks-text);
+    background: linear-gradient(170deg, var(--ks-bg) 0%, var(--ks-bg-accent) 100%);
+    line-height: 1.65;
+}
+
+a {
+    color: inherit;
+    text-decoration: none;
+}
+
+p,
+ul,
+h1,
+h2,
+h3 {
+    margin: 0;
+}
+
+/* ============================= */
+/* 通用容器与按钮 */
+/* 作用：让不同页面共享一致的品牌化布局骨架。 */
+/* ============================= */
+.page-shell {
+    width: min(1400px, calc(100% - 64px));
+    margin: 0 auto;
+    padding: 24px 0 52px;
+}
+
+.brand-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 72px;
+}
+
+.brand-mark {
+    font-size: 24px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    color: var(--ks-primary);
+}
+
+.topbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.icon-button,
+.lang-button,
+.action-button {
+    border: 1px solid var(--ks-primary);
+    background: var(--ks-surface);
+    color: var(--ks-primary);
+    cursor: pointer;
+    font-weight: 700;
+}
+
+.icon-button,
+.lang-button {
+    width: 42px;
+    height: 42px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+}
+
+.action-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 16px;
+    font-size: 14px;
+}
+
+.action-button.primary {
+    background: var(--ks-primary);
+    color: #FFFFFF;
+}
+
+.icon-button:hover,
+.lang-button:hover,
+.action-button:hover {
+    background: var(--ks-primary-soft);
+}
+
+.action-button.primary:hover {
+    background: var(--ks-primary-deep);
+    color: #FFFFFF;
+}
+
+.icon-button:active,
+.lang-button:active,
+.action-button:active {
+    background: var(--ks-primary-deep);
+    color: #FFFFFF;
+}
+
+/* ============================= */
+/* 首屏品牌页样式 */
+/* 作用：打造“第一屏即品牌主张”的大布局体验。 */
+/* ============================= */
+.landing-page {
+    min-height: 100vh;
+}
+
+.brand-hero {
+    min-height: calc(100vh - 110px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 24px;
+    padding: 20px 0 40px;
+}
+
+.hero-logo-shell {
+    width: min(1000px, 86vw);
+    min-height: 42vh;
+    border: 1px solid var(--ks-line);
+    background: var(--ks-surface);
+    box-shadow: var(--ks-shadow-soft);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+}
+
+.hero-logo {
+    width: 100%;
+    max-height: 58vh;
+    object-fit: contain;
+    display: block;
+}
+
+.hero-logo-fallback {
+    display: none;
+    width: 100%;
+    min-height: 42vh;
+    align-items: center;
+    justify-content: center;
+    border: 1px dashed var(--ks-primary);
+    color: var(--ks-primary);
+    font-size: clamp(34px, 8vw, 112px);
+    font-weight: 900;
+    letter-spacing: 8px;
+    background: repeating-linear-gradient(
+        -45deg,
+        var(--ks-primary-soft),
+        var(--ks-primary-soft) 16px,
+        transparent 16px,
+        transparent 32px
+    );
+}
+
+.hero-slogan {
+    font-size: clamp(30px, 4.4vw, 68px);
+    font-weight: 900;
+    letter-spacing: 1px;
+}
+
+.hero-subtitle {
+    max-width: 980px;
+    color: var(--ks-subtext);
+    font-size: clamp(15px, 1.3vw, 22px);
+}
+
+.hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 12px;
+}
+
+.hero-scroll-tip {
+    margin-top: 8px;
+    color: var(--ks-subtext);
+    font-size: 13px;
+    letter-spacing: 0.6px;
+}
+
+/* ============================= */
+/* 产品总览页样式 */
+/* 作用：在第二页承载详细介绍与模块跳转入口。 */
+/* ============================= */
+.section-panel {
+    margin-top: 18px;
+    border: 1px solid var(--ks-line);
+    background: var(--ks-surface);
+    box-shadow: var(--ks-shadow-hard);
+    padding: 22px;
+}
+
+.panel-title {
+    font-size: clamp(24px, 2.4vw, 42px);
+    font-weight: 800;
+    color: var(--ks-primary);
+    margin-bottom: 10px;
+}
+
+.panel-desc {
+    color: var(--ks-subtext);
+    font-size: 15px;
+}
+
+.metrics-grid {
+    margin-top: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+}
+
+.metric-item {
+    border: 1px solid var(--ks-line);
+    background: var(--ks-bg);
+    padding: 14px;
+}
+
+.metric-label {
+    color: var(--ks-subtext);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+}
+
+.metric-value {
+    margin-top: 6px;
+    color: var(--ks-primary);
+    font-size: clamp(22px, 2.6vw, 40px);
+    font-weight: 800;
+}
+
+.modules-grid {
+    margin-top: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+    gap: 14px;
+}
+
+.module-card {
+    border: 1px solid var(--ks-line);
+    background: var(--ks-surface);
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.module-title {
+    font-size: 20px;
+    font-weight: 800;
+    color: var(--ks-primary);
+}
+
+.module-summary {
+    color: var(--ks-subtext);
+    font-size: 14px;
+    min-height: 68px;
+}
+
+.tag-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.tag-item {
+    border: 1px solid var(--ks-primary);
+    color: var(--ks-primary);
+    padding: 3px 8px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+/* ============================= */
+/* 截图展示位 */
+/* 作用：自动显示真实图片，不存在时展示占位提示。 */
+/* ============================= */
+.shot-placeholder {
+    border: 1px dashed var(--ks-primary);
+    background: var(--ks-primary-soft);
+    min-height: 126px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+}
+
+.shot-image {
+    width: 100%;
+    max-height: 220px;
+    object-fit: cover;
+    border: 1px solid var(--ks-line);
+    display: block;
+    margin-bottom: 6px;
+}
+
+.shot-fallback {
+    display: none;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.shot-name {
+    font-weight: 800;
+    color: var(--ks-primary);
+    font-size: 12px;
+}
+
+.shot-desc {
+    color: var(--ks-subtext);
+    font-size: 12px;
+}
+
+/* ============================= */
+/* 详情页布局 */
+/* 作用：承载单个 Tab 的介绍、流程和截图清单。 */
+/* ============================= */
+.detail-main {
+    margin-top: 16px;
+    display: grid;
+    grid-template-columns: 1.08fr 0.92fr;
+    gap: 14px;
+}
+
+.detail-panel {
+    border: 1px solid var(--ks-line);
+    background: var(--ks-surface);
+    box-shadow: var(--ks-shadow-hard);
+    padding: 16px;
+}
+
+.detail-panel h3 {
+    margin-top: 14px;
+    margin-bottom: 8px;
+    font-size: 18px;
+    color: var(--ks-primary);
+}
+
+.detail-panel ul {
+    padding-left: 18px;
+    color: var(--ks-subtext);
+}
+
+.detail-panel li {
+    margin-bottom: 8px;
+}
+
+.site-footer {
+    margin-top: 16px;
+    border: 1px solid var(--ks-line);
+    background: var(--ks-surface);
+    padding: 10px 14px;
+    color: var(--ks-subtext);
+    font-size: 13px;
+}
+
+/* ============================= */
+/* 响应式规则 */
+/* 作用：在平板和手机宽度下保持视觉比例。 */
+/* ============================= */
+@media (max-width: 1080px) {
+    .detail-main {
+        grid-template-columns: 1fr;
+    }
+
+    .page-shell {
+        width: calc(100% - 26px);
+    }
+
+    .brand-topbar {
+        min-height: 64px;
+    }
+}
+
+@media (max-width: 760px) {
+    .hero-logo-shell {
+        min-height: 32vh;
+    }
+
+    .topbar-actions {
+        gap: 6px;
+    }
+
+    .action-button {
+        padding: 9px 10px;
+        font-size: 13px;
+    }
+}

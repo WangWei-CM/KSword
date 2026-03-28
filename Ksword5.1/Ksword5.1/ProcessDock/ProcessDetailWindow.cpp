@@ -121,13 +121,15 @@ namespace
         return QStringLiteral(
             "QPushButton {"
             "  color: %1;"
-            "  background: #FFFFFF;"
+            "  background: %5;"
             "  border: 1px solid %2;"
             "  border-radius: 3px;"
             "  padding: 4px 10px;"
             "}"
             "QPushButton:hover {"
             "  background: %3;"
+            "  color: #FFFFFF;"
+            "  border: 1px solid %3;"
             "}"
             "QPushButton:pressed {"
             "  background: %4;"
@@ -135,8 +137,9 @@ namespace
             "}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
-            .arg(KswordTheme::PrimaryBluePressedHex);
+            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBluePressedHex)
+            .arg(KswordTheme::SurfaceHex());
     }
 
     // 格式化双精度到固定小数位字符串。

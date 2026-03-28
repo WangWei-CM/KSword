@@ -1,4 +1,5 @@
 #include "ProgressDockWidget.h"
+#include "../theme.h"
 
 #include <QFrame>        // 任务卡片容器
 #include <QLabel>        // 任务与步骤文本
@@ -37,7 +38,9 @@ void ProgressDockWidget::initializeUi()
     // 空列表提示：无任务时展示，提升可读性。
     m_emptyTipLabel = new QLabel(QStringLiteral("当前没有进行中的任务。"), m_scrollContent);
     m_emptyTipLabel->setAlignment(Qt::AlignCenter);
-    m_emptyTipLabel->setStyleSheet("color:#7A7A7A; font-size:13px;");
+    m_emptyTipLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-size:13px;")
+        .arg(KswordTheme::TextSecondaryHex()));
     m_cardLayout->addWidget(m_emptyTipLabel);
     m_cardLayout->addStretch(1);
 
@@ -126,11 +129,13 @@ QWidget* ProgressDockWidget::createTaskCardWidget(const kProgressTask& taskItem)
     QFrame* cardFrame = new QFrame();
     cardFrame->setFrameShape(QFrame::StyledPanel);
     cardFrame->setStyleSheet(
+        QStringLiteral(
         "QFrame {"
-        "  border:1px solid #DCDCDC;"
+        "  border:1px solid %1;"
         "  border-radius:4px;"
-        "  background:#FFFFFF;"
-        "}");
+        "  background:%2;"
+        "}")
+        .arg(KswordTheme::BorderHex(), KswordTheme::SurfaceHex()));
 
     // 卡片内部布局：任务标题、步骤、进度条依次排列。
     QVBoxLayout* cardLayout = new QVBoxLayout(cardFrame);
@@ -143,7 +148,9 @@ QWidget* ProgressDockWidget::createTaskCardWidget(const kProgressTask& taskItem)
         .arg(QString::fromUtf8(taskItem.taskName.c_str()))
         .arg(taskItem.pid),
         cardFrame);
-    titleLabel->setStyleSheet("font-weight:600; color:#1F1F1F;");
+    titleLabel->setStyleSheet(
+        QStringLiteral("font-weight:600; color:%1;")
+        .arg(KswordTheme::TextPrimaryHex()));
     cardLayout->addWidget(titleLabel);
 
     // 第二行：步骤文本，反映当前执行阶段。
@@ -151,7 +158,9 @@ QWidget* ProgressDockWidget::createTaskCardWidget(const kProgressTask& taskItem)
         QStringLiteral("步骤：%1")
         .arg(QString::fromUtf8(taskItem.stepName.c_str())),
         cardFrame);
-    stepLabel->setStyleSheet("color:#4A4A4A;");
+    stepLabel->setStyleSheet(
+        QStringLiteral("color:%1;")
+        .arg(KswordTheme::TextSecondaryHex()));
     cardLayout->addWidget(stepLabel);
 
     // 进度条：显示百分比，支持 UI 对话期间临时隐藏。

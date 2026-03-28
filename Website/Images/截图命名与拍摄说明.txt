@@ -1,0 +1,140 @@
+Ksword5.1 网站截图命名与拍摄说明
+==================================
+
+一、放置位置
+------------
+1. 所有截图统一放在：Website/Images/
+2. 请严格使用下方“文件名”字段，不要改名。
+3. 建议 PNG 格式，推荐分辨率 1920x1080。
+
+二、拍摄统一要求
+----------------
+1. 优先使用浅色主题截图；涉及主题切换时额外补一张深色对比图。
+2. 截图时尽量保留完整模块界面，避免过度裁剪。
+3. 如某功能尚未实现，请截图当前空白/占位状态并保留文件名。
+4. 若窗口太大，可分两张拍（主界面 + 关键弹窗）。
+
+三、具体截图清单（请逐项完成）
+-----------------------------
+
+[首页品牌首屏]
+- logo.png
+  内容：首页首屏巨大品牌 Logo（建议透明背景 PNG）。
+
+[欢迎]
+- tab_welcome_overview.png
+  内容：欢迎页完整界面，包含标题区与主要信息区域。
+- tab_welcome_user_profile.png
+  内容：用户信息区域特写（用户名/头像位置）。
+
+[进程]
+- tab_process_main_table.png
+  内容：进程主表格，尽量包含 PID、CPU、内存等列。
+- tab_process_context_menu.png
+  内容：任意进程项右键菜单（结束/挂起/恢复等动作）。
+- tab_process_create_form.png
+  内容：创建进程页面完整表单。
+- tab_process_detail_window.png
+  内容：进程详情窗口（模块页或高级信息页均可）。
+
+[网络]
+- tab_network_monitor.png
+  内容：流量监控页（抓包表格 + 过滤条件区域）。
+- tab_network_rate_limit.png
+  内容：限速规则配置页。
+- tab_network_connection_manage.png
+  内容：TCP/UDP 连接管理页。
+- tab_network_manual_request.png
+  内容：手工请求页（输入区 + 日志区）。
+- tab_network_diagnostics.png
+  内容：ARP 缓存 / DNS 缓存 / 存活扫描三者任意一个诊断页。
+
+[内存]
+- tab_memory_process_module.png
+  内容：进程与模块页面，能看到附加状态更好。
+- tab_memory_region_list.png
+  内容：内存区域列表页面。
+- tab_memory_search.png
+  内容：搜索条件与结果表格同时可见。
+- tab_memory_viewer.png
+  内容：十六进制内存查看器页面。
+- tab_memory_breakpoint_bookmark.png
+  内容：断点与书签页面。
+
+[文件]
+- tab_file_dual_panel.png
+  内容：双面板主界面（左右目录同时展示）。
+- tab_file_context_menu.png
+  内容：文件右键菜单（复制/剪切/重命名等）。
+- tab_file_detail_dialog.png
+  内容：文件详情弹窗。
+
+[驱动]
+- tab_driver_overview.png
+  内容：驱动服务概览表格。
+- tab_driver_operate.png
+  内容：驱动操作页面（注册/加载/卸载相关按钮）。
+- tab_driver_debug_output.png
+  内容：调试输出捕获页面。
+
+[内核]
+- tab_kernel_type_table.png
+  内容：内核对象类型表格。
+- tab_kernel_ntquery.png
+  内容：NtQuery 查询表格与详情区。
+
+[监控]
+- tab_monitor_wmi_provider.png
+  内容：WMI Provider 列表与订阅配置区。
+- tab_monitor_wmi_events.png
+  内容：WMI 事件列表。
+- tab_monitor_etw_events.png
+  内容：ETW 事件列表。
+
+[权限]
+- tab_privilege_main.png
+  内容：权限页面主界面（权限状态展示区）。
+
+[设置]
+- tab_settings_appearance.png
+  内容：外观设置页完整界面。
+- tab_settings_theme_switch.png
+  内容：主题切换前后对比图（建议拼图或连续两窗）。
+
+[窗口]
+- tab_window_main.png
+  内容：窗口模块主界面（窗口列表或控制区）。
+
+[注册表]
+- tab_registry_tree_values.png
+  内容：注册表树 + 值表双栏界面。
+- tab_registry_search.png
+  内容：注册表搜索结果界面。
+- tab_registry_edit_dialog.png
+  内容：值编辑对话框。
+
+[当前操作]
+- tab_current_operation_cards.png
+  内容：任务卡片列表，建议至少显示 2 个进行中任务。
+
+[日志输出]
+- tab_log_output_table.png
+  内容：日志表格与级别过滤区。
+- tab_log_output_context_menu.png
+  内容：日志右键菜单（复制/追踪/导出）。
+
+[即时窗口]
+- tab_immediate_window_main.png
+  内容：即时窗口当前界面（即便为空也截图）。
+
+[监视面板]
+- tab_monitor_panel_main.png
+  内容：监视面板当前界面（含底部区域）。
+
+四、补图完成后建议
+------------------
+1. 把截图文件直接覆盖放入 Website/Images。
+2. 浏览 Website/index.html 与各子页面，确认占位文件名都已匹配。
+3. 若新增功能，请同步补充本说明文档与 tabs-data.js。
+
+

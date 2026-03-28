@@ -71,17 +71,18 @@ namespace
         return QStringLiteral(
             "QPushButton,QToolButton{"
             "  color:%1;"
-            "  background:#FFFFFF;"
+            "  background:%5;"
             "  border:1px solid %2;"
             "  border-radius:3px;"
             "  padding:3px 8px;"
             "}"
-            "QPushButton:hover,QToolButton:hover{background:%3;}"
+            "QPushButton:hover,QToolButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
             "QPushButton:pressed,QToolButton:pressed{background:%4;color:#FFFFFF;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
-            .arg(KswordTheme::PrimaryBluePressedHex);
+            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBluePressedHex)
+            .arg(KswordTheme::SurfaceHex());
     }
 
     // 统一输入控件样式。
@@ -89,14 +90,18 @@ namespace
     {
         return QStringLiteral(
             "QLineEdit,QComboBox,QPlainTextEdit,QTextEdit{"
-            "  border:1px solid #C8DDF4;"
+            "  border:1px solid %2;"
             "  border-radius:3px;"
-            "  background:#FFFFFF;"
+            "  background:%3;"
+            "  color:%4;"
             "  padding:2px 6px;"
             "}"
             "QLineEdit:focus,QComboBox:focus,QPlainTextEdit:focus,QTextEdit:focus{"
             "  border:1px solid %1;}")
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex());
     }
 
     // 面包屑按钮样式：视觉上“嵌入输入框”，并保留轻量 hover 提示。
@@ -110,13 +115,15 @@ namespace
             "  padding:0 4px;"
             "}"
             "QToolButton:hover{"
-            "  background:#EAF4FF;"
+            "  background:%2;"
             "  border-radius:3px;"
             "}"
             "QToolButton:pressed{"
-            "  background:#D5E9FF;"
+            "  background:%3;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::PrimaryBlueHoverHex)
+            .arg(KswordTheme::PrimaryBluePressedHex);
     }
 
     // 递归复制目录：用于粘贴目录场景。
@@ -564,10 +571,19 @@ namespace
             auto applyHighlights = [textEdit, matchStatusLabel, searchState]() {
                 QList<QTextEdit::ExtraSelection> selections;
                 QTextCharFormat normalFormat;
-                normalFormat.setBackground(QColor(255, 247, 168));
+                normalFormat.setBackground(
+                    KswordTheme::IsDarkModeEnabled()
+                    ? QColor(106, 84, 24)
+                    : QColor(255, 247, 168));
                 QTextCharFormat currentFormat;
-                currentFormat.setBackground(QColor(255, 206, 107));
-                currentFormat.setForeground(QColor(42, 42, 42));
+                currentFormat.setBackground(
+                    KswordTheme::IsDarkModeEnabled()
+                    ? QColor(146, 102, 26)
+                    : QColor(255, 206, 107));
+                currentFormat.setForeground(
+                    KswordTheme::IsDarkModeEnabled()
+                    ? QColor(255, 255, 255)
+                    : QColor(42, 42, 42));
 
                 for (int index = 0; index < searchState->ranges.size(); ++index)
                 {
@@ -851,10 +867,10 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     panel.breadcrumbWidget->setObjectName(QStringLiteral("EmbeddedBreadcrumbWidget"));
     panel.breadcrumbWidget->setStyleSheet(QStringLiteral(
         "QWidget#EmbeddedBreadcrumbWidget{"
-        "  border:1px solid #C8DDF4;"
+        "  border:1px solid %1;"
         "  border-radius:3px;"
-        "  background:#FFFFFF;"
-        "}"));
+        "  background:%2;"
+        "}").arg(KswordTheme::BorderHex(), KswordTheme::SurfaceHex()));
     panel.breadcrumbLayout = new QHBoxLayout(panel.breadcrumbWidget);
     panel.breadcrumbLayout->setContentsMargins(6, 2, 6, 2);
     panel.breadcrumbLayout->setSpacing(2);
@@ -1446,7 +1462,7 @@ void FileDock::rebuildBreadcrumb(FilePanelWidgets& panel)
     panel.breadcrumbEditTriggerButton->setToolTip(QStringLiteral("点击空白区域编辑路径"));
     panel.breadcrumbEditTriggerButton->setStyleSheet(QStringLiteral(
         "QPushButton{border:none;background:transparent;}"
-        "QPushButton:hover{background:rgba(31,78,122,0.06);}"));
+        "QPushButton:hover{background:rgba(46,139,255,0.22);}"));
     panel.breadcrumbLayout->addWidget(panel.breadcrumbEditTriggerButton, 1);
     connect(panel.breadcrumbEditTriggerButton, &QPushButton::clicked, this, [this, &panel]() {
         kLogEvent event;

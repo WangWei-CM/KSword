@@ -242,7 +242,9 @@ void ProcessDetailWindow::initializeDetailTab()
     m_processIconLabel = new QLabel(m_detailTab);
     m_processIconLabel->setFixedSize(40, 40);
     m_processTitleLabel = new QLabel(m_detailTab);
-    m_processTitleLabel->setStyleSheet("font-size:18px; font-weight:700; color:#1F1F1F;");
+    m_processTitleLabel->setStyleSheet(
+        QStringLiteral("font-size:18px; font-weight:700; color:%1;")
+        .arg(KswordTheme::TextPrimaryHex()));
     titleLayout->addWidget(m_processIconLabel, 0, Qt::AlignTop);
     titleLayout->addWidget(m_processTitleLabel, 1);
     titleLayout->addStretch(1);
@@ -275,7 +277,9 @@ void ProcessDetailWindow::initializeDetailTab()
     m_parentIconLabel = new QLabel(m_detailTab);
     m_parentIconLabel->setFixedSize(20, 20);
     m_parentInfoLabel = new QLabel(m_detailTab);
-    m_parentInfoLabel->setStyleSheet("color:#3F3F3F; font-weight:600;");
+    m_parentInfoLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-weight:600;")
+        .arg(KswordTheme::TextSecondaryHex()));
     m_gotoParentButton = new QPushButton(QIcon(":/Icon/process_details.svg"), "转到父进程", m_detailTab);
     m_gotoParentButton->setVisible(false);
     parentLayout->addWidget(new QLabel("父进程:", m_detailTab));
@@ -329,7 +333,8 @@ void ProcessDetailWindow::initializeDetailTab()
     m_refreshThreadInspectButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), "刷新线程", threadGroup);
     m_refreshThreadInspectButton->setToolTip("异步刷新线程状态、寄存器摘要与 TEB 地址");
     m_threadInspectStatusLabel = new QLabel("● 尚未刷新", threadGroup);
-    m_threadInspectStatusLabel->setStyleSheet("color:#6F6F6F;");
+    m_threadInspectStatusLabel->setStyleSheet(
+        QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
     threadTopBarLayout->addWidget(m_refreshThreadInspectButton);
     threadTopBarLayout->addWidget(m_threadInspectStatusLabel, 1);
     threadLayout->addLayout(threadTopBarLayout);
@@ -496,7 +501,9 @@ void ProcessDetailWindow::initializeModuleTab()
         "QCheckBox::indicator:checked { background:%1; border:1px solid %1; }")
         .arg(KswordTheme::PrimaryBlueHex));
     m_moduleStatusLabel = new QLabel("● 等待首次刷新", m_moduleTab);
-    m_moduleStatusLabel->setStyleSheet("color:#5F5F5F; font-weight:600;");
+    m_moduleStatusLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-weight:600;")
+        .arg(KswordTheme::TextSecondaryHex()));
     m_moduleTopBarLayout->addWidget(m_refreshModuleButton);
     m_moduleTopBarLayout->addWidget(m_signatureCheckBox);
     m_moduleTopBarLayout->addStretch(1);
@@ -529,12 +536,14 @@ void ProcessDetailWindow::initializeModuleTab()
     m_moduleTable->header()->setStyleSheet(QStringLiteral(
         "QHeaderView::section {"
         "  color:%1;"
-        "  background:#FFFFFF;"
-        "  border:1px solid #E6E6E6;"
+        "  background:%2;"
+        "  border:1px solid %3;"
         "  padding:4px;"
         "  font-weight:600;"
         "}")
-        .arg(KswordTheme::PrimaryBlueHex));
+        .arg(KswordTheme::PrimaryBlueHex)
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::BorderHex()));
 
     m_refreshModuleButton->setStyleSheet(buildBlueButtonStyle());
 }
@@ -555,7 +564,9 @@ void ProcessDetailWindow::initializeTokenTab()
     m_refreshTokenButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), "刷新令牌", m_tokenTab);
     m_refreshTokenButton->setToolTip("异步刷新用户 SID、组、特权、完整性级别等令牌信息");
     m_tokenStatusLabel = new QLabel("● 尚未刷新", m_tokenTab);
-    m_tokenStatusLabel->setStyleSheet("color:#6F6F6F; font-weight:600;");
+    m_tokenStatusLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-weight:600;")
+        .arg(KswordTheme::TextSecondaryHex()));
     tokenTopBarLayout->addWidget(m_refreshTokenButton);
     tokenTopBarLayout->addWidget(m_tokenStatusLabel, 1);
     m_tokenLayout->addLayout(tokenTopBarLayout);
@@ -586,7 +597,9 @@ void ProcessDetailWindow::initializePebTab()
     m_refreshPebButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), "刷新PEB", m_pebTab);
     m_refreshPebButton->setToolTip("异步刷新 PEB、命令行、当前目录、环境块与安全标志");
     m_pebStatusLabel = new QLabel("● 尚未刷新", m_pebTab);
-    m_pebStatusLabel->setStyleSheet("color:#6F6F6F; font-weight:600;");
+    m_pebStatusLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-weight:600;")
+        .arg(KswordTheme::TextSecondaryHex()));
     pebTopBarLayout->addWidget(m_refreshPebButton);
     pebTopBarLayout->addWidget(m_pebStatusLabel, 1);
     m_pebLayout->addLayout(pebTopBarLayout);
@@ -757,7 +770,10 @@ void ProcessDetailWindow::refreshDetailTabTexts()
     m_detailStartTimeValue->setText(QString::fromStdString(m_baseRecord.startTimeText.empty() ? "-" : m_baseRecord.startTimeText));
     m_detailUserValue->setText(QString::fromStdString(m_baseRecord.userName.empty() ? "-" : m_baseRecord.userName));
     m_detailAdminValue->setText(m_baseRecord.isAdmin ? "■ 是" : "■ 否");
-    m_detailAdminValue->setStyleSheet(m_baseRecord.isAdmin ? "color:#228B22; font-weight:700;" : "color:#DC322F; font-weight:700;");
+    m_detailAdminValue->setStyleSheet(
+        m_baseRecord.isAdmin
+        ? (KswordTheme::IsDarkModeEnabled() ? "color:#82D28C; font-weight:700;" : "color:#228B22; font-weight:700;")
+        : (KswordTheme::IsDarkModeEnabled() ? "color:#FF9B9B; font-weight:700;" : "color:#DC322F; font-weight:700;"));
     m_detailArchitectureValue->setText(QString::fromStdString(m_baseRecord.architectureText.empty() ? "Unknown" : m_baseRecord.architectureText));
     m_detailPriorityValue->setText(QString::fromStdString(m_baseRecord.priorityText.empty() ? "Unknown" : m_baseRecord.priorityText));
     m_detailSessionValue->setText(QString::number(m_baseRecord.sessionId));
@@ -769,15 +785,23 @@ void ProcessDetailWindow::refreshDetailTabTexts()
     m_detailSignatureValue->setText(QString::fromStdString(m_baseRecord.signatureState.empty() ? "Unknown" : m_baseRecord.signatureState));
     if (!m_baseRecord.signatureTrusted && m_baseRecord.signatureState != "Pending")
     {
-        m_detailSignatureValue->setStyleSheet("color:#DC322F; font-weight:700;");
+        m_detailSignatureValue->setStyleSheet(
+            KswordTheme::IsDarkModeEnabled()
+            ? "color:#FF9B9B; font-weight:700;"
+            : "color:#DC322F; font-weight:700;");
     }
     else if (m_baseRecord.signatureTrusted)
     {
-        m_detailSignatureValue->setStyleSheet("color:#228B22; font-weight:700;");
+        m_detailSignatureValue->setStyleSheet(
+            KswordTheme::IsDarkModeEnabled()
+            ? "color:#82D28C; font-weight:700;"
+            : "color:#228B22; font-weight:700;");
     }
     else
     {
-        m_detailSignatureValue->setStyleSheet("color:#6F6F6F; font-weight:600;");
+        m_detailSignatureValue->setStyleSheet(
+            QStringLiteral("color:%1; font-weight:600;")
+            .arg(KswordTheme::TextSecondaryHex()));
     }
 
     // 刷新父进程信息区。

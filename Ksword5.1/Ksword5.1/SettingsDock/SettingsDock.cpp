@@ -1,2 +1,393 @@
 #include "SettingsDock.h"
-SettingsDock::SettingsDock(QWidget* parent) : QWidget(parent) {}
+
+#include "../Framework.h"
+#include "../theme.h"
+
+#include <QButtonGroup>
+#include <QFileDialog>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QSlider>
+#include <QTabWidget>
+#include <QToolButton>
+#include <QVBoxLayout>
+
+namespace
+{
+    // ToolTip 与图标常量：统一维护设置页按钮文案，避免硬编码分散。
+    constexpr const char* IconThemeFollowSystem = ":/Icon/settings_theme_system.svg";
+    constexpr const char* IconThemeLight = ":/Icon/settings_theme_light.svg";
+    constexpr const char* IconThemeDark = ":/Icon/settings_theme_dark.svg";
+    constexpr const char* IconBrowseBackground = ":/Icon/settings_background_browse.svg";
+    constexpr const char* IconResetBackground = ":/Icon/settings_background_reset.svg";
+}
+
+SettingsDock::SettingsDock(QWidget* parent)
+    : QWidget(parent)
+{
+    // 构造日志事件：用于追踪“设置页初始化”整个调用链。
+    kLogEvent settingsInitEvent;
+    info << settingsInitEvent << "[SettingsDock] 开始初始化设置页 UI。" << eol;
+
+    initializeUi();
+    initializeAppearanceTab();
+    loadSettingsFromJson();
+
+    info << settingsInitEvent << "[SettingsDock] 设置页初始化完成，外观配置已加载。" << eol;
+}
+
+ks::settings::AppearanceSettings SettingsDock::currentAppearanceSettings() const
+{
+    return m_currentAppearanceSettings;
+}
+
+void SettingsDock::initializeUi()
+{
+    // rootLayout 作用：SettingsDock 根布局，承载 Tab 控件。
+    QVBoxLayout* rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(10, 10, 10, 10);
+    rootLayout->setSpacing(8);
+
+    // m_tabWidget 作用：设置页签容器，后续可扩展更多标签页。
+    m_tabWidget = new QTabWidget(this);
+    m_tabWidget->setTabPosition(QTabWidget::North);
+    rootLayout->addWidget(m_tabWidget);
+
+    setLayout(rootLayout);
+}
+
+void SettingsDock::initializeAppearanceTab()
+{
+    // m_appearanceTab 作用：承载“外观”相关控件。
+    m_appearanceTab = new QWidget(m_tabWidget);
+    QVBoxLayout* appearanceRootLayout = new QVBoxLayout(m_appearanceTab);
+    appearanceRootLayout->setContentsMargins(8, 8, 8, 8);
+    appearanceRootLayout->setSpacing(12);
+
+    // ===== 主题模式分组 =====
+    QGroupBox* themeGroupBox = new QGroupBox(QStringLiteral("主题模式"), m_appearanceTab);
+    QVBoxLayout* themeLayout = new QVBoxLayout(themeGroupBox);
+    themeLayout->setSpacing(8);
+
+    QLabel* themeHintLabel = new QLabel(QStringLiteral("可选择跟随系统、浅色或深色主题。"), themeGroupBox);
+    themeLayout->addWidget(themeHintLabel);
+
+    QHBoxLayout* themeButtonLayout = new QHBoxLayout();
+    themeButtonLayout->setSpacing(10);
+    m_themeButtonGroup = new QButtonGroup(themeGroupBox);
+    m_themeButtonGroup->setExclusive(true);
+
+    // m_followSystemButton 作用：主题跟随系统按钮（图标 + 悬停说明）。
+    m_followSystemButton = new QToolButton(themeGroupBox);
+    m_followSystemButton->setIcon(QIcon(QString::fromUtf8(IconThemeFollowSystem)));
+    m_followSystemButton->setCheckable(true);
+    m_followSystemButton->setIconSize(QSize(20, 20));
+    m_followSystemButton->setFixedSize(36, 36);
+    m_followSystemButton->setToolTip(QStringLiteral("跟随系统主题（Windows 深浅切换时自动同步）"));
+
+    // m_lightModeButton 作用：强制浅色主题按钮（图标 + 悬停说明）。
+    m_lightModeButton = new QToolButton(themeGroupBox);
+    m_lightModeButton->setIcon(QIcon(QString::fromUtf8(IconThemeLight)));
+    m_lightModeButton->setCheckable(true);
+    m_lightModeButton->setIconSize(QSize(20, 20));
+    m_lightModeButton->setFixedSize(36, 36);
+    m_lightModeButton->setToolTip(QStringLiteral("强制浅色模式（白底深色字）"));
+
+    // m_darkModeButton 作用：强制深色主题按钮（图标 + 悬停说明）。
+    m_darkModeButton = new QToolButton(themeGroupBox);
+    m_darkModeButton->setIcon(QIcon(QString::fromUtf8(IconThemeDark)));
+    m_darkModeButton->setCheckable(true);
+    m_darkModeButton->setIconSize(QSize(20, 20));
+    m_darkModeButton->setFixedSize(36, 36);
+    m_darkModeButton->setToolTip(QStringLiteral("强制深色模式（黑底白字）"));
+
+    m_themeButtonGroup->addButton(m_followSystemButton, static_cast<int>(ks::settings::ThemeMode::FollowSystem));
+    m_themeButtonGroup->addButton(m_lightModeButton, static_cast<int>(ks::settings::ThemeMode::Light));
+    m_themeButtonGroup->addButton(m_darkModeButton, static_cast<int>(ks::settings::ThemeMode::Dark));
+
+    themeButtonLayout->addWidget(m_followSystemButton);
+    themeButtonLayout->addWidget(m_lightModeButton);
+    themeButtonLayout->addWidget(m_darkModeButton);
+    themeButtonLayout->addStretch();
+    themeLayout->addLayout(themeButtonLayout);
+    appearanceRootLayout->addWidget(themeGroupBox);
+
+    // ===== 背景图分组 =====
+    QGroupBox* backgroundGroupBox = new QGroupBox(QStringLiteral("窗口背景图"), m_appearanceTab);
+    QVBoxLayout* backgroundLayout = new QVBoxLayout(backgroundGroupBox);
+    backgroundLayout->setSpacing(8);
+
+    QLabel* pathHintLabel = new QLabel(
+        QStringLiteral("默认路径：style/ksword_background.png，可手动选择 PNG/JPG/BMP。"),
+        backgroundGroupBox);
+    pathHintLabel->setWordWrap(true);
+    backgroundLayout->addWidget(pathHintLabel);
+
+    QHBoxLayout* pathLayout = new QHBoxLayout();
+    pathLayout->setSpacing(6);
+
+    // m_backgroundPathEdit 作用：用户输入背景图路径文本。
+    m_backgroundPathEdit = new QLineEdit(backgroundGroupBox);
+    m_backgroundPathEdit->setPlaceholderText(QStringLiteral("style/ksword_background.png"));
+    pathLayout->addWidget(m_backgroundPathEdit, 1);
+
+    // m_browseBackgroundButton 作用：打开文件对话框选择背景图。
+    m_browseBackgroundButton = new QToolButton(backgroundGroupBox);
+    m_browseBackgroundButton->setIcon(QIcon(QString::fromUtf8(IconBrowseBackground)));
+    m_browseBackgroundButton->setIconSize(QSize(18, 18));
+    m_browseBackgroundButton->setFixedSize(34, 30);
+    m_browseBackgroundButton->setToolTip(QStringLiteral("浏览背景图文件"));
+    pathLayout->addWidget(m_browseBackgroundButton);
+
+    // m_resetBackgroundButton 作用：恢复默认背景路径。
+    m_resetBackgroundButton = new QToolButton(backgroundGroupBox);
+    m_resetBackgroundButton->setIcon(QIcon(QString::fromUtf8(IconResetBackground)));
+    m_resetBackgroundButton->setIconSize(QSize(18, 18));
+    m_resetBackgroundButton->setFixedSize(34, 30);
+    m_resetBackgroundButton->setToolTip(QStringLiteral("恢复默认背景路径"));
+    pathLayout->addWidget(m_resetBackgroundButton);
+
+    backgroundLayout->addLayout(pathLayout);
+
+    QLabel* opacityHintLabel = new QLabel(QStringLiteral("背景图透明度（0% 仅纯色背景，100% 仅背景图）"), backgroundGroupBox);
+    backgroundLayout->addWidget(opacityHintLabel);
+
+    QHBoxLayout* opacityLayout = new QHBoxLayout();
+    opacityLayout->setSpacing(6);
+
+    // m_backgroundOpacitySlider 作用：控制背景图透明度数值。
+    m_backgroundOpacitySlider = new QSlider(Qt::Horizontal, backgroundGroupBox);
+    m_backgroundOpacitySlider->setRange(0, 100);
+    m_backgroundOpacitySlider->setSingleStep(1);
+    m_backgroundOpacitySlider->setPageStep(5);
+    m_backgroundOpacitySlider->setToolTip(QStringLiteral("拖动调整背景图透明度"));
+    opacityLayout->addWidget(m_backgroundOpacitySlider, 1);
+
+    // m_backgroundOpacityValueLabel 作用：展示当前透明度百分比。
+    m_backgroundOpacityValueLabel = new QLabel(QStringLiteral("35%"), backgroundGroupBox);
+    m_backgroundOpacityValueLabel->setMinimumWidth(48);
+    opacityLayout->addWidget(m_backgroundOpacityValueLabel);
+
+    backgroundLayout->addLayout(opacityLayout);
+    appearanceRootLayout->addWidget(backgroundGroupBox);
+
+    appearanceRootLayout->addStretch();
+    m_tabWidget->addTab(m_appearanceTab, QStringLiteral("外观"));
+
+    bindAppearanceSignals();
+    updateThemeButtonStyle();
+}
+
+void SettingsDock::bindAppearanceSignals()
+{
+    connect(m_themeButtonGroup, &QButtonGroup::idClicked, this, [this](int /*clickedId*/) {
+        updateThemeButtonStyle();
+        saveAndEmitFromUi(QStringLiteral("主题按钮切换"));
+        });
+
+    connect(m_backgroundPathEdit, &QLineEdit::editingFinished, this, [this]() {
+        saveAndEmitFromUi(QStringLiteral("背景路径编辑完成"));
+        });
+
+    connect(m_backgroundOpacitySlider, &QSlider::valueChanged, this, [this](const int value) {
+        updateOpacityValueLabel(value);
+        if (!m_isApplyingUiState)
+        {
+            saveAndEmitFromUi(QStringLiteral("背景透明度变化"));
+        }
+        });
+
+    connect(m_browseBackgroundButton, &QToolButton::clicked, this, [this]() {
+        openBackgroundFileDialog();
+        });
+
+    connect(m_resetBackgroundButton, &QToolButton::clicked, this, [this]() {
+        resetBackgroundPathToDefault();
+        });
+}
+
+void SettingsDock::loadSettingsFromJson()
+{
+    m_currentAppearanceSettings = ks::settings::loadAppearanceSettings();
+    applySettingsToUi(m_currentAppearanceSettings);
+    emit appearanceSettingsChanged(m_currentAppearanceSettings);
+}
+
+void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& settings)
+{
+    m_isApplyingUiState = true;
+
+    // selectedButton 作用：根据主题模式找到对应按钮并置为选中。
+    QAbstractButton* selectedButton = m_themeButtonGroup->button(static_cast<int>(settings.themeMode));
+    if (selectedButton != nullptr)
+    {
+        selectedButton->setChecked(true);
+    }
+    else if (m_followSystemButton != nullptr)
+    {
+        m_followSystemButton->setChecked(true);
+    }
+
+    m_backgroundPathEdit->setText(settings.backgroundImagePath);
+    m_backgroundOpacitySlider->setValue(settings.backgroundOpacityPercent);
+    updateOpacityValueLabel(settings.backgroundOpacityPercent);
+    updateThemeButtonStyle();
+
+    m_isApplyingUiState = false;
+}
+
+ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
+{
+    ks::settings::AppearanceSettings collectedSettings;
+
+    // checkedThemeId 作用：读取当前选中的主题按钮 ID。
+    const int checkedThemeId = m_themeButtonGroup->checkedId();
+    if (checkedThemeId == static_cast<int>(ks::settings::ThemeMode::Light))
+    {
+        collectedSettings.themeMode = ks::settings::ThemeMode::Light;
+    }
+    else if (checkedThemeId == static_cast<int>(ks::settings::ThemeMode::Dark))
+    {
+        collectedSettings.themeMode = ks::settings::ThemeMode::Dark;
+    }
+    else
+    {
+        collectedSettings.themeMode = ks::settings::ThemeMode::FollowSystem;
+    }
+
+    const QString rawPathText = m_backgroundPathEdit->text().trimmed();
+    collectedSettings.backgroundImagePath = rawPathText.isEmpty()
+        ? QStringLiteral("style/ksword_background.png")
+        : rawPathText;
+
+    collectedSettings.backgroundOpacityPercent = m_backgroundOpacitySlider->value();
+    return collectedSettings;
+}
+
+void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
+{
+    if (m_isApplyingUiState)
+    {
+        return;
+    }
+
+    // settingsEvent 作用：本次“设置变更”调用链统一日志事件对象。
+    kLogEvent settingsEvent;
+    const ks::settings::AppearanceSettings nextSettings = collectSettingsFromUi();
+
+    if (nextSettings.themeMode == m_currentAppearanceSettings.themeMode
+        && nextSettings.backgroundImagePath == m_currentAppearanceSettings.backgroundImagePath
+        && nextSettings.backgroundOpacityPercent == m_currentAppearanceSettings.backgroundOpacityPercent)
+    {
+        return;
+    }
+
+    QString saveErrorText;
+    const bool saveOk = ks::settings::saveAppearanceSettings(nextSettings, &saveErrorText);
+    if (!saveOk)
+    {
+        err << settingsEvent
+            << "[SettingsDock] 保存外观设置失败，触发来源="
+            << triggerReason.toStdString()
+            << "，错误="
+            << saveErrorText.toStdString()
+            << eol;
+        return;
+    }
+
+    m_currentAppearanceSettings = nextSettings;
+
+    info << settingsEvent
+        << "[SettingsDock] 外观设置已保存，触发来源="
+        << triggerReason.toStdString()
+        << "，主题模式="
+        << ks::settings::themeModeToJsonText(m_currentAppearanceSettings.themeMode).toStdString()
+        << "，背景路径="
+        << m_currentAppearanceSettings.backgroundImagePath.toStdString()
+        << "，透明度="
+        << m_currentAppearanceSettings.backgroundOpacityPercent
+        << "%"
+        << eol;
+
+    emit appearanceSettingsChanged(m_currentAppearanceSettings);
+}
+
+void SettingsDock::updateThemeButtonStyle()
+{
+    const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
+    const QString normalStyle = darkModeEnabled
+        ? QStringLiteral(
+            "QToolButton{"
+            "  border:1px solid #5A5A5A;"
+            "  border-radius:6px;"
+            "  background:#202020;"
+            "}"
+            "QToolButton:hover{"
+            "  background:#2A2A2A;"
+            "}")
+        : QStringLiteral(
+            "QToolButton{"
+            "  border:1px solid #6A6A6A;"
+            "  border-radius:6px;"
+            "  background:#EDF5FF;"
+            "}"
+            "QToolButton:hover{"
+            "  background:#DCEBFF;"
+            "}");
+
+    const QString checkedStyle = darkModeEnabled
+        ? QStringLiteral(
+            "QToolButton{"
+            "  border:2px solid #43A0FF;"
+            "  border-radius:6px;"
+            "  background:#1B2A3C;"
+            "}")
+        : QStringLiteral(
+            "QToolButton{"
+            "  border:2px solid #43A0FF;"
+            "  border-radius:6px;"
+            "  background:#DDEEFF;"
+            "}");
+
+    const QList<QAbstractButton*> themeButtons = m_themeButtonGroup->buttons();
+    for (QAbstractButton* themeButton : themeButtons)
+    {
+        QToolButton* themedToolButton = qobject_cast<QToolButton*>(themeButton);
+        if (themedToolButton == nullptr)
+        {
+            continue;
+        }
+        themedToolButton->setStyleSheet(themedToolButton->isChecked() ? checkedStyle : normalStyle);
+    }
+}
+
+void SettingsDock::updateOpacityValueLabel(const int opacityPercent)
+{
+    m_backgroundOpacityValueLabel->setText(QStringLiteral("%1%").arg(opacityPercent));
+}
+
+void SettingsDock::openBackgroundFileDialog()
+{
+    const QString selectedFilePath = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("选择背景图片"),
+        m_backgroundPathEdit->text(),
+        QStringLiteral("图片文件 (*.png *.jpg *.jpeg *.bmp *.webp);;所有文件 (*.*)"));
+
+    if (selectedFilePath.isEmpty())
+    {
+        return;
+    }
+
+    m_backgroundPathEdit->setText(selectedFilePath);
+    saveAndEmitFromUi(QStringLiteral("浏览按钮选择背景图"));
+}
+
+void SettingsDock::resetBackgroundPathToDefault()
+{
+    m_backgroundPathEdit->setText(QStringLiteral("style/ksword_background.png"));
+    saveAndEmitFromUi(QStringLiteral("恢复默认背景路径"));
+}

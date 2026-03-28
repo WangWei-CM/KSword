@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ksword5.1 Module Detail</title>
+    <!-- 引入全站样式文件，保持详情页与总览页一致 -->
+    <link rel="stylesheet" href="../css/site.css">
+</head>
+<body data-tab-slug="driver">
+    <!-- 页面主容器：承载模块详情文本和截图区 -->
+    <div class="page-shell">
+        <!-- 顶部栏：返回入口 + 语言/主题切换 -->
+        <header class="brand-topbar">
+            <a class="brand-mark" href="../index.html">Ksword5.1</a>
+            <div class="topbar-actions">
+                <a class="action-button" id="detail-home-link" href="../index.html" title="返回首页">↩ 首页</a>
+                <a class="action-button" id="detail-overview-link" href="./overview.html" title="返回总览页">返回总览</a>
+                <button class="lang-button" type="button" data-lang-toggle title="切换中英文" aria-label="切换中英文">EN</button>
+                <button class="icon-button" type="button" data-theme-toggle title="切换深浅模式" aria-label="切换深浅模式">☾</button>
+            </div>
+        </header>
+
+        <!-- 模块标题区：标题和副标题由 detail.js 动态渲染 -->
+        <section class="section-panel">
+            <h1 class="panel-title" id="detail-title">模块详情</h1>
+            <p class="panel-desc" id="detail-subtitle">模块详细能力说明</p>
+        </section>
+
+        <!-- 详情主体：左侧能力说明，右侧截图清单 -->
+        <main class="detail-main">
+            <section class="detail-panel">
+                <div class="tag-row" id="detail-tags"></div>
+
+                <h3 id="detail-overview-heading">模块定位</h3>
+                <p id="detail-overview"></p>
+
+                <h3 id="detail-features-heading">核心功能</h3>
+                <ul id="detail-features"></ul>
+
+                <h3 id="detail-workflow-heading">推荐使用流程</h3>
+                <ul id="detail-workflow"></ul>
+            </section>
+
+            <aside class="detail-panel">
+                <h3 id="detail-shots-heading">截图预留位</h3>
+                <p id="detail-shot-tip" style="color:var(--ks-subtext);margin-bottom:10px;">请将对应截图放入 Website/Images，并使用下方指定文件名。</p>
+                <div id="detail-shots" style="display:flex;flex-direction:column;gap:10px;"></div>
+            </aside>
+        </main>
+
+        <!-- 页脚说明：提示截图规则文档位置 -->
+        <footer class="site-footer" id="detail-footer">截图规范文档：Website/Images/截图命名与拍摄说明.txt</footer>
+    </div>
+
+    <!-- 脚本顺序：数据 -> 语言 -> 主题 -> 详情渲染 -->
+    <script src="../js/tabs-data.js"></script>
+    <script src="../js/lang.js"></script>
+    <script src="../js/theme.js"></script>
+    <script src="../js/detail.js"></script>
+</body>
+</html>
