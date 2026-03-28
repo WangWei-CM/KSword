@@ -4,9 +4,17 @@
 #include <QTabWidget>
 #include <QApplication>
 #include <QCoreApplication>
+#include <QFileInfo>
+#include <QGuiApplication>
 #include <QWidget>
 #include <QHBoxLayout>
+#include <QPainter>
+#include <QPalette>
+#include <QPointF>
+#include <QPixmap>
+#include <QRectF>
 #include <QMessageBox>
+#include <QStyleHints>
 #pragma warning(disable: 4996)
 #include "UI/UI.css/UI_css.h"
 #include "Framework.h"
@@ -34,8 +42,15 @@ namespace
     // - false -> 白底蓝字。
     QString buildPrivilegeButtonStyle(const bool activeState)
     {
-        const QString backgroundColor = activeState ? KswordTheme::PrimaryBlueHex : QStringLiteral("#FFFFFF");
-        const QString textColor = activeState ? QStringLiteral("#FFFFFF") : KswordTheme::PrimaryBlueHex;
+        const QString backgroundColor = activeState
+            ? KswordTheme::PrimaryBlueHex
+            : KswordTheme::SurfaceHex();
+        const QString textColor = activeState
+            ? QStringLiteral("#FFFFFF")
+            : (KswordTheme::IsDarkModeEnabled() ? KswordTheme::TextPrimaryHex() : KswordTheme::PrimaryBlueHex);
+        const QString hoverColor = activeState
+            ? QStringLiteral("#2E8BFF")
+            : (KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#2A2A2A") : QStringLiteral("#2E8BFF"));
         return QStringLiteral(
             "QPushButton {"
             "  background:%1;"
@@ -47,6 +62,8 @@ namespace
             "}"
             "QPushButton:hover {"
             "  background:%4;"
+            "  color:#FFFFFF;"
+            "  border:1px solid %4;"
             "}"
             "QPushButton:pressed {"
             "  background:%5;"
@@ -55,8 +72,71 @@ namespace
             .arg(backgroundColor)
             .arg(textColor)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
+            .arg(hoverColor)
             .arg(KswordTheme::PrimaryBluePressedHex);
+    }
+
+    // normalizeOpacityPercent 作用：
+    // - 把透明度值限制在 0~100 范围，防止非法参数影响绘制。
+    // 调用方式：生成背景画刷前调用。
+    // 入参 rawOpacityPercent：原始透明度值。
+    // 返回：合法透明度值。
+    int normalizeOpacityPercent(const int rawOpacityPercent)
+    {
+        if (rawOpacityPercent < 0)
+        {
+            return 0;
+        }
+        if (rawOpacityPercent > 100)
+        {
+            return 100;
+        }
+        return rawOpacityPercent;
+    }
+
+    // buildBackgroundBrush 作用：
+    // - 按“纯色底 + 可选背景图 + 透明度”组合一张画刷贴图；
+    // - 用于主窗口与 Dock 管理器统一背景绘制。
+    // 调用方式：MainWindow::rebuildWindowBackgroundBrush 调用。
+    // 入参 windowSize：目标窗口尺寸；
+    // 入参 baseColor：主题基底色（深色黑、浅色白）；
+    // 入参 imagePath：背景图绝对路径；
+    // 入参 imageOpacityPercent：背景图透明度（0~100）。
+    // 返回：可直接设置到 QPalette::Window 的画刷。
+    QBrush buildBackgroundBrush(
+        const QSize& windowSize,
+        const QColor& baseColor,
+        const QString& imagePath,
+        const int imageOpacityPercent)
+    {
+        const QSize safeSize = windowSize.isValid() ? windowSize : QSize(1, 1);
+        QPixmap composedPixmap(safeSize);
+        composedPixmap.fill(baseColor);
+
+        if (!imagePath.trimmed().isEmpty())
+        {
+            QPixmap sourceImage(imagePath);
+            if (!sourceImage.isNull())
+            {
+                QPainter painter(&composedPixmap);
+                painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+                painter.setOpacity(static_cast<double>(normalizeOpacityPercent(imageOpacityPercent)) / 100.0);
+
+                // scaledImageSize 作用：按“覆盖整个窗口”策略计算缩放尺寸。
+                QSizeF scaledImageSize = sourceImage.size();
+                scaledImageSize.scale(safeSize, Qt::KeepAspectRatioByExpanding);
+
+                const QRectF targetRect(
+                    (static_cast<double>(safeSize.width()) - scaledImageSize.width()) / 2.0,
+                    (static_cast<double>(safeSize.height()) - scaledImageSize.height()) / 2.0,
+                    scaledImageSize.width(),
+                    scaledImageSize.height());
+
+                painter.drawPixmap(targetRect, sourceImage, QRectF(QPointF(0, 0), sourceImage.size()));
+            }
+        }
+
+        return QBrush(composedPixmap);
     }
 }
 
@@ -67,6 +147,15 @@ MainWindow::MainWindow(QWidget* parent)
     // 注意：使用 kLogEvent，避免与 QObject::event 命名冲突。
     kLogEvent startupEvent;
     info << startupEvent << "MainWindow 构造开始，准备初始化 Dock 系统。" << eol;
+
+    // Dock 全局配置：
+    // - 关闭所有可关闭按钮与标题栏三按钮（标签菜单/浮动/关闭）；
+    // - 与用户“所有 Dock Tab 不可关闭、去掉右上角按钮”的要求一致。
+    ads::CDockManager::setConfigFlag(ads::CDockManager::ActiveTabHasCloseButton, false);
+    ads::CDockManager::setConfigFlag(ads::CDockManager::AllTabsHaveCloseButton, false);
+    ads::CDockManager::setConfigFlag(ads::CDockManager::DockAreaHasCloseButton, false);
+    ads::CDockManager::setConfigFlag(ads::CDockManager::DockAreaHasUndockButton, false);
+    ads::CDockManager::setConfigFlag(ads::CDockManager::DockAreaHasTabsMenuButton, false);
 
     // 创建ADS Dock Manager
     m_pDockManager = new ads::CDockManager(this);
@@ -90,8 +179,11 @@ MainWindow::MainWindow(QWidget* parent)
     // 设置Dock布局
     setupDockLayout();
 
-    // 应用样式表
-    setStyleSheet(QSS_MainWindow_TabWidget + QSS_MainWindow_dockStyle);
+    // 初始化外观设置：
+    // - 读取 JSON；
+    // - 绑定系统深浅色变化；
+    // - 应用窗口背景色/背景图/文本颜色。
+    initAppearanceSettings();
 
     // 记录初始化完成日志，方便用户在“日志输出”面板直接看到结果。
     // 注意：使用 kLogEvent，避免与 QObject::event 命名冲突。
@@ -127,6 +219,12 @@ void MainWindow::closeEvent(QCloseEvent* event)
 
     kLogEvent closeFinishLog;
     info << closeFinishLog << "[MainWindow] 已提交退出请求 (exit code=0)。" << eol;
+}
+
+void MainWindow::resizeEvent(QResizeEvent* event)
+{
+    QMainWindow::resizeEvent(event);
+    rebuildWindowBackgroundBrush();
 }
 
 void MainWindow::initMenus()
@@ -1008,7 +1106,8 @@ void MainWindow::initDockWidgets()
     auto createDockWidget = [this](QWidget* widget, const QString& title) -> ads::CDockWidget* {
         ads::CDockWidget* dock = new ads::CDockWidget(title);
         dock->setWidget(widget);
-        dock->setFeature(ads::CDockWidget::DockWidgetClosable, true);
+        // DockWidgetClosable 禁用：统一去掉每个 Dock 标签旁边的关闭叉。
+        dock->setFeature(ads::CDockWidget::DockWidgetClosable, false);
         dock->setFeature(ads::CDockWidget::DockWidgetMovable, true);
         dock->setFeature(ads::CDockWidget::DockWidgetFloatable, true);
         return dock;
@@ -1082,12 +1181,375 @@ void MainWindow::setupDockLayout()
     // 右侧仅保留“当前操作 + 即时窗口”。
     m_pDockManager->addDockWidgetTabToArea(m_dockImmediate, rightDockArea);
 
-    // 5. 底部区域：把“日志输出”与“监视面板”合并为同一组标签页。
+    // 5. 底部区域：按“监视面板 + 日志输出”左右分栏并占满底部。
     auto bottomDockArea = m_pDockManager->addDockWidget(ads::BottomDockWidgetArea, m_dockMonitor);
-    m_pDockManager->addDockWidgetTabToArea(m_dockLog, bottomDockArea);
+    m_pDockManager->addDockWidget(ads::RightDockWidgetArea, m_dockLog, bottomDockArea);
 
     // 6. 设置默认显示的标签页
     m_dockWelcome->raise();
     m_dockCurrentOp->raise();
     m_dockMonitor->raise();
+}
+
+void MainWindow::initAppearanceSettings()
+{
+    // appearanceInitEvent 作用：统一追踪外观系统初始化流程日志。
+    kLogEvent appearanceInitEvent;
+    info << appearanceInitEvent << "[MainWindow] 开始初始化外观设置系统。" << eol;
+
+    if (m_settingsWidget != nullptr)
+    {
+        connect(
+            m_settingsWidget,
+            &SettingsDock::appearanceSettingsChanged,
+            this,
+            [this](const ks::settings::AppearanceSettings& settings) {
+                applyAppearanceSettings(settings, QStringLiteral("设置页变更"));
+            });
+
+        m_currentAppearanceSettings = m_settingsWidget->currentAppearanceSettings();
+    }
+    else
+    {
+        m_currentAppearanceSettings = ks::settings::loadAppearanceSettings();
+    }
+
+    QStyleHints* styleHints = QGuiApplication::styleHints();
+    if (styleHints != nullptr)
+    {
+        connect(styleHints, &QStyleHints::colorSchemeChanged, this, [this](Qt::ColorScheme /*newScheme*/) {
+            if (m_currentAppearanceSettings.themeMode == ks::settings::ThemeMode::FollowSystem)
+            {
+                applyAppearanceSettings(m_currentAppearanceSettings, QStringLiteral("系统颜色方案变化"));
+            }
+            });
+    }
+
+    applyAppearanceSettings(m_currentAppearanceSettings, QStringLiteral("初始化加载"));
+    info << appearanceInitEvent << "[MainWindow] 外观设置系统初始化完成。" << eol;
+}
+
+void MainWindow::applyAppearanceSettings(
+    const ks::settings::AppearanceSettings& settings,
+    const QString& triggerReason)
+{
+    // appearanceApplyEvent 作用：本次“外观应用”过程统一日志事件对象。
+    kLogEvent appearanceApplyEvent;
+
+    m_currentAppearanceSettings = settings;
+
+    const bool darkModeEnabled = isDarkModeEffective(settings);
+    const QColor windowBackgroundColor = darkModeEnabled ? QColor(0, 0, 0) : QColor(255, 255, 255);
+    const QColor textColor = darkModeEnabled ? QColor(255, 255, 255) : QColor(0, 0, 0);
+    const QColor baseColor = darkModeEnabled ? QColor(22, 22, 22) : QColor(255, 255, 255);
+    const QColor alternateBaseColor = darkModeEnabled ? QColor(30, 30, 30) : QColor(247, 249, 252);
+    const QColor midColor = darkModeEnabled ? QColor(86, 86, 86) : QColor(180, 180, 180);
+
+    // 把深浅色状态写入全局属性，供各 Dock 在绘制/着色时读取。
+    KswordTheme::SetDarkModeEnabled(darkModeEnabled);
+
+    // Windows 11 背景控制要求：
+    // 即使是纯黑/纯白，也必须显式设置 Window 颜色，避免系统接管背景。
+    QPalette mainPalette = palette();
+    mainPalette.setColor(QPalette::Window, windowBackgroundColor);
+    mainPalette.setColor(QPalette::WindowText, textColor);
+    mainPalette.setColor(QPalette::Base, baseColor);
+    mainPalette.setColor(QPalette::AlternateBase, alternateBaseColor);
+    mainPalette.setColor(QPalette::Mid, midColor);
+    mainPalette.setColor(QPalette::Midlight, darkModeEnabled ? QColor(116, 116, 116) : QColor(210, 210, 210));
+    mainPalette.setColor(QPalette::Dark, darkModeEnabled ? QColor(48, 48, 48) : QColor(120, 120, 120));
+    mainPalette.setColor(QPalette::Text, textColor);
+    mainPalette.setColor(QPalette::Button, darkModeEnabled ? QColor(30, 30, 30) : QColor(255, 255, 255));
+    mainPalette.setColor(QPalette::ButtonText, textColor);
+    mainPalette.setColor(QPalette::ToolTipBase, baseColor);
+    mainPalette.setColor(QPalette::ToolTipText, textColor);
+    mainPalette.setColor(QPalette::Highlight, QColor(67, 160, 255));
+    mainPalette.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
+    QApplication::setPalette(mainPalette);
+    setPalette(mainPalette);
+    setAutoFillBackground(true);
+
+    if (menuBar() != nullptr)
+    {
+        QPalette menuPalette = menuBar()->palette();
+        menuPalette.setColor(QPalette::Window, windowBackgroundColor);
+        menuPalette.setColor(QPalette::WindowText, textColor);
+        menuPalette.setColor(QPalette::Text, textColor);
+        menuBar()->setPalette(menuPalette);
+        menuBar()->setAutoFillBackground(true);
+    }
+
+    if (m_pDockManager != nullptr)
+    {
+        QPalette dockPalette = m_pDockManager->palette();
+        dockPalette.setColor(QPalette::Window, windowBackgroundColor);
+        dockPalette.setColor(QPalette::WindowText, textColor);
+        dockPalette.setColor(QPalette::Text, textColor);
+        m_pDockManager->setPalette(dockPalette);
+        m_pDockManager->setAutoFillBackground(true);
+    }
+
+    // appearanceStyleSheet 作用：
+    // - 聚合基础样式与深浅色覆盖样式；
+    // - 同时应用到 MainWindow 与 ADS DockManager，覆盖其默认白色样式。
+    const QString appearanceStyleSheet =
+        QSS_MainWindow_TabWidget
+        + QSS_MainWindow_dockStyle
+        + buildAppearanceOverlayStyleSheet(darkModeEnabled);
+
+    setStyleSheet(appearanceStyleSheet);
+    if (m_pDockManager != nullptr)
+    {
+        m_pDockManager->setStyleSheet(appearanceStyleSheet);
+    }
+
+    // 主题切换后主动刷新“按主题着色的表格行”，避免墨绿色残留到浅色模式。
+    if (m_processWidget != nullptr)
+    {
+        m_processWidget->refreshThemeVisuals();
+    }
+
+    rebuildWindowBackgroundBrush();
+    refreshPrivilegeStatusButtons();
+
+    const QString effectiveModeText = darkModeEnabled ? QStringLiteral("dark") : QStringLiteral("light");
+    info << appearanceApplyEvent
+        << "[MainWindow] 已应用外观设置，触发来源="
+        << triggerReason.toStdString()
+        << "，theme_mode="
+        << ks::settings::themeModeToJsonText(settings.themeMode).toStdString()
+        << "，effective_mode="
+        << effectiveModeText.toStdString()
+        << "，background_path="
+        << settings.backgroundImagePath.toStdString()
+        << "，opacity="
+        << settings.backgroundOpacityPercent
+        << "%"
+        << eol;
+}
+
+bool MainWindow::isDarkModeEffective(const ks::settings::AppearanceSettings& settings) const
+{
+    if (settings.themeMode == ks::settings::ThemeMode::Dark)
+    {
+        return true;
+    }
+    if (settings.themeMode == ks::settings::ThemeMode::Light)
+    {
+        return false;
+    }
+
+    QStyleHints* styleHints = QGuiApplication::styleHints();
+    if (styleHints == nullptr)
+    {
+        return false;
+    }
+    return styleHints->colorScheme() == Qt::ColorScheme::Dark;
+}
+
+void MainWindow::rebuildWindowBackgroundBrush()
+{
+    const bool darkModeEnabled = isDarkModeEffective(m_currentAppearanceSettings);
+    const QColor baseColor = darkModeEnabled ? QColor(0, 0, 0) : QColor(255, 255, 255);
+
+    // resolvedImagePath 作用：把配置路径解析成可加载的绝对路径。
+    const QString resolvedImagePath = ks::settings::resolveBackgroundImagePathForLoad(
+        m_currentAppearanceSettings.backgroundImagePath);
+
+    const QBrush backgroundBrush = buildBackgroundBrush(
+        size(),
+        baseColor,
+        resolvedImagePath,
+        m_currentAppearanceSettings.backgroundOpacityPercent);
+
+    QPalette mainPalette = palette();
+    mainPalette.setColor(QPalette::Window, baseColor);
+    mainPalette.setBrush(QPalette::Window, backgroundBrush);
+    setPalette(mainPalette);
+    setAutoFillBackground(true);
+
+    if (m_pDockManager != nullptr)
+    {
+        QPalette dockPalette = m_pDockManager->palette();
+        dockPalette.setColor(QPalette::Window, baseColor);
+        dockPalette.setBrush(QPalette::Window, backgroundBrush);
+        m_pDockManager->setPalette(dockPalette);
+        m_pDockManager->setAutoFillBackground(true);
+    }
+}
+
+QString MainWindow::buildAppearanceOverlayStyleSheet(const bool darkModeEnabled) const
+{
+    // sharedOverlayStyle 作用：
+    // - 统一按钮 hover/pressed 为主题蓝，避免出现白色高亮；
+    // - 强制 ADS 与普通 Tab 的选中态使用“主题色背景 + 白字”。
+    const QString sharedOverlayStyle = QStringLiteral(
+        "QPushButton:hover,QToolButton:hover{"
+        "  background-color:#2E8BFF !important;"
+        "  color:#FFFFFF !important;"
+        "  border-color:#2E8BFF !important;"
+        "}"
+        "QPushButton:pressed,QToolButton:pressed{"
+        "  background-color:#1F78D0 !important;"
+        "  color:#FFFFFF !important;"
+        "  border-color:#1F78D0 !important;"
+        "}"
+        "QTabBar::tab:selected{"
+        "  background-color:#43A0FF !important;"
+        "  color:#FFFFFF !important;"
+        "  border:none !important;"
+        "}"
+        "QTabBar::tab:hover:!selected{"
+        "  background-color:#2E8BFF !important;"
+        "  color:#FFFFFF !important;"
+        "}"
+        "QTabBar::tab{"
+        "  border:none !important;"
+        "}"
+        "ads--CDockAreaTabBar{"
+        "  background-color:palette(window) !important;"
+        "}"
+        "ads--CDockWidgetTab,ads--CAutoHideTab{"
+        "  background-color:palette(base) !important;"
+        "  color:palette(text) !important;"
+        "}"
+        "ads--CDockWidgetTab[activeTab=\"true\"],ads--CAutoHideTab[activeTab=\"true\"]{"
+        "  background-color:#43A0FF !important;"
+        "  color:#FFFFFF !important;"
+        "  border-color:#43A0FF !important;"
+        "}"
+        "QFrame[activeTab=\"true\"],QWidget[activeTab=\"true\"]{"
+        "  background-color:#43A0FF !important;"
+        "  color:#FFFFFF !important;"
+        "  border-color:#43A0FF !important;"
+        "}"
+        "ads--CDockWidgetTab[activeTab=\"true\"] QLabel,ads--CAutoHideTab[activeTab=\"true\"] QLabel{"
+        "  color:#FFFFFF !important;"
+        "  font-weight:600;"
+        "}"
+        "QFrame[activeTab=\"true\"] QLabel,QWidget[activeTab=\"true\"] QLabel{"
+        "  color:#FFFFFF !important;"
+        "  font-weight:600;"
+        "}"
+        "ads--CDockWidgetTab:hover,ads--CAutoHideTab:hover{"
+        "  background-color:#2E8BFF !important;"
+        "  color:#FFFFFF !important;"
+        "}"
+        "ads--CDockAreaTitleBar QToolButton,ads--CDockAreaTitleBar QPushButton{"
+        "  border:none !important;"
+        "  background:transparent !important;"
+        "}"
+        "QScrollBar::handle:vertical,QScrollBar::handle:horizontal{"
+        "  background-color:#43A0FF !important;"
+        "}"
+        "QScrollBar::handle:vertical:hover,QScrollBar::handle:horizontal:hover{"
+        "  background-color:#2E8BFF !important;"
+        "}");
+
+    if (!darkModeEnabled)
+    {
+        return QStringLiteral(
+            "QMainWindow{background-color:#FFFFFF;color:#000000;}"
+            "QMainWindow QWidget{color:#000000;}"
+            "QMenuBar,QMenu{background-color:#FFFFFF;color:#000000;}"
+            "QStatusBar{background-color:#FFFFFF;color:#000000;}"
+            "QLineEdit,QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget,QComboBox,QSpinBox,QDoubleSpinBox{"
+            "  background-color:#FFFFFF !important;"
+            "  color:#000000 !important;"
+            "  border:1px solid #C7D4E5;"
+            "}"
+            "QPushButton,QToolButton{"
+            "  background-color:#EDF5FF !important;"
+            "  color:#1F4E88 !important;"
+            "  border:1px solid #8ABFF5 !important;"
+            "}"
+            "QTabWidget::pane{"
+            "  background-color:#FFFFFF !important;"
+            "  border:1px solid #C7D4E5 !important;"
+            "}"
+            "QTabBar{"
+            "  background-color:#FFFFFF !important;"
+            "}"
+            "QTabBar::tab{"
+            "  background-color:#FFFFFF !important;"
+            "  color:#2F3A47 !important;"
+            "  border:none !important;"
+            "}"
+            "QTableView,QTableWidget,QTreeView,QTreeWidget,QListView,QListWidget{"
+            "  background:#FFFFFF !important;"
+            "  alternate-background-color:#F3F7FC !important;"
+            "  color:#000000 !important;"
+            "  gridline-color:#D5DFEB;"
+            "}"
+            "QTableView::item:selected,QTableWidget::item:selected,QTreeView::item:selected,QTreeWidget::item:selected{"
+            "  background:#2E8BFF !important;"
+            "  color:#FFFFFF !important;"
+            "}"
+            "QHeaderView::section{"
+            "  background:#F4F8FD !important;"
+            "  color:#1A2A3A !important;"
+            "  border:1px solid #CBD6E2;"
+            "}"
+            "QTableCornerButton::section{"
+            "  background:#F4F8FD !important;"
+            "  border:none !important;"
+            "}"
+            "QScrollBar:vertical,QScrollBar:horizontal{"
+            "  background:#F3F7FC !important;"
+            "  border:none !important;"
+            "}")
+            + sharedOverlayStyle;
+    }
+
+    return QStringLiteral(
+        "QMainWindow{background-color:#000000;color:#FFFFFF;}"
+        "QMainWindow QWidget{color:#FFFFFF;}"
+        "QMenuBar,QMenu{background-color:#000000;color:#FFFFFF;}"
+        "QStatusBar{background-color:#000000;color:#FFFFFF;}"
+        "QLineEdit,QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget,QComboBox,QSpinBox,QDoubleSpinBox{"
+        "  background-color:#111111 !important;"
+        "  color:#FFFFFF !important;"
+        "  border:1px solid #3A3A3A;"
+        "}"
+        "QPushButton,QToolButton{"
+        "  background-color:#1A1A1A !important;"
+        "  color:#FFFFFF !important;"
+        "  border:1px solid #5A5A5A !important;"
+        "}"
+        "QTabWidget::pane{"
+        "  background-color:#101010 !important;"
+        "  border:1px solid #3A3A3A !important;"
+        "}"
+        "QTabBar{"
+        "  background-color:#000000 !important;"
+        "}"
+        "QTabBar::tab{"
+        "  background-color:#000000 !important;"
+        "  color:#DDDDDD !important;"
+        "  border:none !important;"
+        "}"
+        "QTableView,QTableWidget,QTreeView,QTreeWidget,QListView,QListWidget{"
+        "  background:#121212 !important;"
+        "  alternate-background-color:#1D1D1D !important;"
+        "  color:#F0F0F0 !important;"
+        "  gridline-color:#2E2E2E;"
+        "}"
+        "QTableView::item:selected,QTableWidget::item:selected,QTreeView::item:selected,QTreeWidget::item:selected{"
+        "  background:#2E8BFF !important;"
+        "  color:#FFFFFF !important;"
+        "}"
+        "QHeaderView::section{"
+        "  background:#1A1A1A !important;"
+        "  color:#EAEAEA !important;"
+        "  border:1px solid #333333;"
+        "}"
+        "QTableCornerButton::section{"
+        "  background:#1A1A1A !important;"
+        "  border:none !important;"
+        "}"
+        "QScrollBar:vertical,QScrollBar:horizontal{"
+        "  background:#141414 !important;"
+        "  border:none !important;"
+        "}")
+        + sharedOverlayStyle;
 }

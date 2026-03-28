@@ -151,13 +151,15 @@ namespace
         return QStringLiteral(
             "QPushButton {"
             "  color: %1;"
-            "  background: #FFFFFF;"
+            "  background: %6;"
             "  border: 1px solid %2;"
             "  border-radius: 3px;"
             "  padding: %5;"
             "}"
             "QPushButton:hover {"
             "  background: %3;"
+            "  color: #FFFFFF;"
+            "  border: 1px solid %3;"
             "}"
             "QPushButton:pressed {"
             "  background: %4;"
@@ -165,9 +167,10 @@ namespace
             "}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
+            .arg(QStringLiteral("#2E8BFF"))
             .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(paddingText);
+            .arg(paddingText)
+            .arg(KswordTheme::SurfaceHex());
     }
 
     // 下拉框主题描边样式，保持与按钮同色系。
@@ -178,8 +181,8 @@ namespace
             "  border: 1px solid %1;"
             "  border-radius: 4px;"
             "  padding: 2px 8px;"
-            "  color: #1F4E7A;"
-            "  background: #FFFFFF;"
+            "  color: %4;"
+            "  background: %5;"
             "}"
             "QComboBox:hover {"
             "  border-color: %2;"
@@ -195,7 +198,9 @@ namespace
             "}")
             .arg(KswordTheme::PrimaryBlueBorderHex)
             .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex);
+            .arg(KswordTheme::PrimaryBlueHoverHex)
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::SurfaceHex());
     }
 
     // 统一“普通输入框”主题边框。
@@ -203,15 +208,19 @@ namespace
     {
         return QStringLiteral(
             "QLineEdit, QPlainTextEdit, QTextEdit {"
-            "  border: 1px solid #C8DDF4;"
+            "  border: 1px solid %2;"
             "  border-radius: 3px;"
-            "  background: #FFFFFF;"
+            "  background: %3;"
+            "  color: %4;"
             "  padding: 3px 5px;"
             "}"
             "QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {"
             "  border: 1px solid %1;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex());
     }
 
     // 常见令牌特权列表：用于“可视化调权”表格。
@@ -349,6 +358,13 @@ ProcessDock::ProcessDock(QWidget* parent)
     requestAsyncRefresh(true);
 }
 
+void ProcessDock::refreshThemeVisuals()
+{
+    // 仅重建当前表格可视层，不触发新的后台枚举任务。
+    // 用途：深浅色切换后，立即刷新“新增/退出”行的主题高亮色。
+    rebuildTable();
+}
+
 void ProcessDock::initializeUi()
 {
     // 根布局只容纳一个侧边栏 tab 控件。
@@ -444,7 +460,9 @@ void ProcessDock::initializeTopControls()
 
     // 刷新状态标签：明确告诉用户当前是否在刷新，以及最后耗时。
     m_refreshStateLabel = new QLabel("● 空闲", this);
-    m_refreshStateLabel->setStyleSheet(QStringLiteral("color:#4A4A4A; font-weight:600;"));
+    m_refreshStateLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-weight:600;")
+        .arg(KswordTheme::TextSecondaryHex()));
     m_refreshStateLabel->setToolTip("当前刷新状态");
 
     // 按钮统一蓝色风格（图标按钮版本）。
@@ -495,12 +513,14 @@ void ProcessDock::initializeProcessTable()
     headerView->setStyleSheet(QStringLiteral(
         "QHeaderView::section {"
         "  color: %1;"
-        "  background: #FFFFFF;"
-        "  border: 1px solid #E6E6E6;"
+        "  background: %2;"
+        "  border: 1px solid %3;"
         "  padding: 4px;"
         "  font-weight: 600;"
         "}")
-        .arg(KswordTheme::PrimaryBlueHex));
+        .arg(KswordTheme::PrimaryBlueHex)
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::BorderHex()));
 
     applyDefaultColumnWidths();
     applyViewMode(ViewMode::Monitor);
@@ -1137,7 +1157,11 @@ void ProcessDock::updateRefreshStateUi(const bool refreshing, const QString& sta
     }
     else
     {
-        m_refreshStateLabel->setStyleSheet(QStringLiteral("color:#2F7D32; font-weight:600;"));
+        const QString idleColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#6ECF7A")
+            : QStringLiteral("#2F7D32");
+        m_refreshStateLabel->setStyleSheet(
+            QStringLiteral("color:%1; font-weight:600;").arg(idleColor));
     }
     m_refreshStateLabel->setText(stateText);
 }
@@ -1786,18 +1810,24 @@ void ProcessDock::rebuildTable()
 
         // 管理员列：按要求使用“绿色/红色方块”直观显示状态。
         rowItem->setTextAlignment(toColumnIndex(TableColumn::IsAdmin), Qt::AlignCenter);
+        const QColor adminYesColor = KswordTheme::IsDarkModeEnabled()
+            ? QColor(130, 210, 140)
+            : QColor(34, 139, 34);
+        const QColor adminNoColor = KswordTheme::IsDarkModeEnabled()
+            ? QColor(255, 140, 140)
+            : QColor(220, 50, 47);
         rowItem->setForeground(
             toColumnIndex(TableColumn::IsAdmin),
-            processRecord.isAdmin ? QColor(34, 139, 34) : QColor(220, 50, 47));
+            processRecord.isAdmin ? adminYesColor : adminNoColor);
 
         // 数字签名列：非受信任时标红，方便快速识别风险进程。
         if (!processRecord.signatureTrusted && processRecord.signatureState != "Pending")
         {
-            rowItem->setForeground(toColumnIndex(TableColumn::Signature), QColor(220, 50, 47));
+            rowItem->setForeground(toColumnIndex(TableColumn::Signature), adminNoColor);
         }
         else if (processRecord.signatureTrusted)
         {
-            rowItem->setForeground(toColumnIndex(TableColumn::Signature), QColor(34, 139, 34));
+            rowItem->setForeground(toColumnIndex(TableColumn::Signature), adminYesColor);
         }
 
         // 新增进程绿色高亮；退出保留进程灰色高亮。
@@ -1805,15 +1835,15 @@ void ProcessDock::rebuildTable()
         {
             for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
             {
-                rowItem->setBackground(columnIndex, QColor(218, 255, 226));
+                rowItem->setBackground(columnIndex, KswordTheme::NewRowBackgroundColor());
             }
         }
         else if (displayRow.isExited)
         {
             for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
             {
-                rowItem->setBackground(columnIndex, QColor(236, 236, 236));
-                rowItem->setForeground(columnIndex, QColor(88, 88, 88));
+                rowItem->setBackground(columnIndex, KswordTheme::ExitedRowBackgroundColor());
+                rowItem->setForeground(columnIndex, KswordTheme::ExitedRowForegroundColor());
             }
         }
         else

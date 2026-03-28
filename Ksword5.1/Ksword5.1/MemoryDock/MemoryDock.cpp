@@ -79,13 +79,15 @@ namespace
         return QStringLiteral(
             "QPushButton {"
             "  color: %1;"
-            "  background: #FFFFFF;"
+            "  background: %5;"
             "  border: 1px solid %2;"
             "  border-radius: 3px;"
             "  padding: 4px 10px;"
             "}"
             "QPushButton:hover {"
             "  background: %3;"
+            "  color: #FFFFFF;"
+            "  border: 1px solid %3;"
             "}"
             "QPushButton:pressed {"
             "  background: %4;"
@@ -93,8 +95,9 @@ namespace
             "}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
-            .arg(KswordTheme::PrimaryBluePressedHex);
+            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBluePressedHex)
+            .arg(KswordTheme::SurfaceHex());
     }
 
     QString buildBlueComboStyle()
@@ -104,7 +107,8 @@ namespace
             "  border: 1px solid %1;"
             "  border-radius: 3px;"
             "  padding: 2px 6px;"
-            "  background: #FFFFFF;"
+            "  background: %3;"
+            "  color: %4;"
             "}"
             "QComboBox:hover {"
             "  border-color: %2;"
@@ -113,22 +117,28 @@ namespace
             "  border: none;"
             "}")
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex());
     }
 
     QString buildBlueInputStyle()
     {
         return QStringLiteral(
             "QLineEdit, QTextEdit, QPlainTextEdit {"
-            "  border: 1px solid #C8DDF4;"
+            "  border: 1px solid %2;"
             "  border-radius: 3px;"
-            "  background: #FFFFFF;"
+            "  background: %3;"
+            "  color: %4;"
             "  padding: 3px 5px;"
             "}"
             "QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {"
             "  border: 1px solid %1;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex());
     }
 
     // 表格表头统一主题样式，确保“内存页”整体视觉与主主题贴合。
@@ -137,12 +147,14 @@ namespace
         return QStringLiteral(
             "QHeaderView::section {"
             "  color:%1;"
-            "  background:#FFFFFF;"
-            "  border:1px solid #E6E6E6;"
+            "  background:%2;"
+            "  border:1px solid %3;"
             "  padding:4px;"
             "  font-weight:600;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::BorderHex());
     }
 
     // 十六进制查看器常量：每行 16 字节，共 32 行，每页 512 字节。

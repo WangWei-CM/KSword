@@ -64,30 +64,83 @@ namespace
     QString blueButtonStyle()
     {
         return QStringLiteral(
-            "QPushButton{color:%1;background:#FFFFFF;border:1px solid %2;border-radius:3px;padding:4px 8px;}"
-            "QPushButton:hover{background:%3;}"
+            "QPushButton{color:%1;background:%5;border:1px solid %2;border-radius:3px;padding:4px 8px;}"
+            "QPushButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
             "QPushButton:pressed{background:%4;color:#FFFFFF;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
-            .arg(KswordTheme::PrimaryBluePressedHex);
+            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBluePressedHex)
+            .arg(KswordTheme::SurfaceHex());
     }
 
     // 输入框统一样式。
     QString blueInputStyle()
     {
         return QStringLiteral(
-            "QLineEdit,QPlainTextEdit,QComboBox,QSpinBox{border:1px solid #C8DDF4;border-radius:3px;background:#FFFFFF;padding:2px 6px;}"
+            "QLineEdit,QPlainTextEdit,QComboBox,QSpinBox{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
             "QLineEdit:focus,QPlainTextEdit:focus,QComboBox:focus,QSpinBox:focus{border:1px solid %1;}")
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex());
     }
 
     // 表头统一样式。
     QString blueHeaderStyle()
     {
         return QStringLiteral(
-            "QHeaderView::section{color:%1;background:#FFFFFF;border:1px solid #E6E6E6;padding:4px;font-weight:600;}")
-            .arg(KswordTheme::PrimaryBlueHex);
+            "QHeaderView::section{color:%1;background:%2;border:1px solid %3;padding:4px;font-weight:600;}")
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::BorderHex());
+    }
+
+    // buildStatusStyle 作用：
+    // - 统一监控页状态标签配色，深浅色模式下都保持可读。
+    // 参数 colorHex：状态文字颜色。
+    // 返回：完整样式字符串。
+    QString buildStatusStyle(const QString& colorHex)
+    {
+        return QStringLiteral("color:%1;font-weight:600;").arg(colorHex);
+    }
+
+    // monitorInfoColorHex 作用：返回“信息态”颜色。
+    QString monitorInfoColorHex()
+    {
+        return KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#8FC7FF")
+            : QStringLiteral("#1F4E7A");
+    }
+
+    // monitorSuccessColorHex 作用：返回“成功态”颜色。
+    QString monitorSuccessColorHex()
+    {
+        return KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#7EDC8A")
+            : QStringLiteral("#2F7D32");
+    }
+
+    // monitorWarningColorHex 作用：返回“警告态”颜色。
+    QString monitorWarningColorHex()
+    {
+        return KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#FFD48A")
+            : QStringLiteral("#AA7B1C");
+    }
+
+    // monitorErrorColorHex 作用：返回“错误态”颜色。
+    QString monitorErrorColorHex()
+    {
+        return KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#FF9B9B")
+            : QStringLiteral("#A43434");
+    }
+
+    // monitorIdleColorHex 作用：返回“空闲态”颜色。
+    QString monitorIdleColorHex()
+    {
+        return KswordTheme::TextSecondaryHex();
     }
 
     // 线程内 COM 初始化。
@@ -553,7 +606,7 @@ void MonitorDock::initializeWmiTab()
     m_wmiProviderRefreshButton->setFixedWidth(34);
 
     m_wmiProviderStatusLabel = new QLabel(QStringLiteral("● 待刷新"), m_wmiProviderPanel);
-    m_wmiProviderStatusLabel->setStyleSheet(QStringLiteral("color:#5F5F5F;font-weight:600;"));
+    m_wmiProviderStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
 
     m_wmiProviderControlLayout->addWidget(m_wmiProviderFilterEdit, 1);
     m_wmiProviderControlLayout->addWidget(m_wmiProviderRefreshButton);
@@ -628,6 +681,8 @@ void MonitorDock::initializeWmiTab()
     m_wmiEventClassTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_wmiEventClassTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_wmiEventClassTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    // 关闭角按钮，避免左上角出现系统默认白色块。
+    m_wmiEventClassTable->setCornerButtonEnabled(false);
     m_wmiEventClassTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
@@ -681,7 +736,7 @@ void MonitorDock::initializeWmiTab()
     m_wmiPauseSubscribeButton->setFixedWidth(34);
 
     m_wmiSubscribeStatusLabel = new QLabel(QStringLiteral("● 未订阅"), m_wmiPage);
-    m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;font-weight:600;"));
+    m_wmiSubscribeStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
 
     m_wmiSubscribeControlLayout->addWidget(new QLabel(QStringLiteral("WMI订阅控制"), m_wmiPage));
     m_wmiSubscribeControlLayout->addStretch(1);
@@ -766,7 +821,8 @@ void MonitorDock::initializeWmiTab()
     m_wmiEventFilterClearButton->setToolTip(QStringLiteral("清空所有WMI筛选条件"));
     m_wmiEventFilterClearButton->setFixedWidth(34);
     m_wmiEventFilterStatusLabel = new QLabel(QStringLiteral("可见: 0 / 0"), wmiFilterWidget);
-    m_wmiEventFilterStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;"));
+    m_wmiEventFilterStatusLabel->setStyleSheet(
+        QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
 
     wmiFilterBottomRow->addWidget(m_wmiEventPidFilterEdit, 1);
     wmiFilterBottomRow->addWidget(m_wmiEventDetailFilterEdit, 2);
@@ -864,7 +920,7 @@ void MonitorDock::initializeEtwTab()
     m_etwProviderRefreshButton->setFixedWidth(34);
 
     m_etwProviderStatusLabel = new QLabel(QStringLiteral("● 待刷新"), m_etwProviderPanel);
-    m_etwProviderStatusLabel->setStyleSheet(QStringLiteral("color:#5F5F5F;font-weight:600;"));
+    m_etwProviderStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
 
     m_etwProviderControlLayout->addWidget(new QLabel(QStringLiteral("ETW Providers"), m_etwProviderPanel));
     m_etwProviderControlLayout->addStretch(1);
@@ -1036,7 +1092,7 @@ void MonitorDock::initializeEtwTab()
     m_etwExportButton->setFixedWidth(34);
 
     m_etwCaptureStatusLabel = new QLabel(QStringLiteral("● 未监听"), m_etwPage);
-    m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;font-weight:600;"));
+    m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
 
     m_etwCaptureControlLayout->addWidget(new QLabel(QStringLiteral("ETW控制"), m_etwPage));
     m_etwCaptureControlLayout->addStretch(1);
@@ -1390,7 +1446,7 @@ void MonitorDock::refreshWmiProvidersAsync()
         << eol;
 
     m_wmiProviderStatusLabel->setText(QStringLiteral("● 刷新中..."));
-    m_wmiProviderStatusLabel->setStyleSheet(QStringLiteral("color:#1F4E7A;font-weight:600;"));
+    m_wmiProviderStatusLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
 
     if (m_wmiProviderRefreshProgressPid == 0)
     {
@@ -1411,7 +1467,7 @@ void MonitorDock::refreshWmiProvidersAsync()
                     return;
                 }
                 guardThis->m_wmiProviderStatusLabel->setText(QStringLiteral("● 初始化失败"));
-                guardThis->m_wmiProviderStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
+                guardThis->m_wmiProviderStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
                 if (guardThis->m_wmiProviderRefreshProgressPid != 0)
                 {
                     kPro.set(guardThis->m_wmiProviderRefreshProgressPid, "WMI Provider刷新失败", 0, 100.0f);
@@ -1434,7 +1490,7 @@ void MonitorDock::refreshWmiProvidersAsync()
                     return;
                 }
                 guardThis->m_wmiProviderStatusLabel->setText(QStringLiteral("● 连接失败"));
-                guardThis->m_wmiProviderStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
+                guardThis->m_wmiProviderStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
                 if (guardThis->m_wmiProviderRefreshProgressPid != 0)
                 {
                     kPro.set(guardThis->m_wmiProviderRefreshProgressPid, "WMI Provider刷新失败", 0, 100.0f);
@@ -1547,7 +1603,7 @@ void MonitorDock::refreshWmiProvidersAsync()
             guardThis->applyWmiProviderFilter();
             guardThis->m_wmiProviderStatusLabel->setText(
                 QStringLiteral("● 已刷新 %1 项").arg(guardThis->m_wmiProviders.size()));
-            guardThis->m_wmiProviderStatusLabel->setStyleSheet(QStringLiteral("color:#2F7D32;font-weight:600;"));
+            guardThis->m_wmiProviderStatusLabel->setStyleSheet(buildStatusStyle(monitorSuccessColorHex()));
             if (guardThis->m_wmiProviderRefreshProgressPid != 0)
             {
                 kPro.set(guardThis->m_wmiProviderRefreshProgressPid, "WMI Provider完成", 0, 100.0f);
@@ -1857,7 +1913,7 @@ void MonitorDock::startWmiSubscription()
     kPro.set(m_wmiSubscribeProgressPid, "建立WMI订阅", 0, 10.0f);
 
     m_wmiSubscribeStatusLabel->setText(QStringLiteral("● 订阅中"));
-    m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#1F4E7A;font-weight:600;"));
+    m_wmiSubscribeStatusLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
     if (m_wmiUiUpdateTimer != nullptr && !m_wmiUiUpdateTimer->isActive())
     {
         m_wmiUiUpdateTimer->start();
@@ -1880,7 +1936,7 @@ void MonitorDock::startWmiSubscription()
                 }
                 guardThis->m_wmiSubscribeRunning.store(false);
                 guardThis->m_wmiSubscribeStatusLabel->setText(QString("● 初始化失败: %1").arg(errorText));
-                guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
+                guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
                 if (guardThis->m_wmiSubscribeProgressPid != 0)
                 {
                     kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅失败", 0, 100.0f);
@@ -1909,7 +1965,7 @@ void MonitorDock::startWmiSubscription()
                 }
                 guardThis->m_wmiSubscribeRunning.store(false);
                 guardThis->m_wmiSubscribeStatusLabel->setText(QString("● 连接失败: %1").arg(errorText));
-                guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
+                guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
                 if (guardThis->m_wmiSubscribeProgressPid != 0)
                 {
                     kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI连接失败", 0, 100.0f);
@@ -2000,7 +2056,7 @@ void MonitorDock::startWmiSubscription()
                 }
                 guardThis->m_wmiSubscribeRunning.store(false);
                 guardThis->m_wmiSubscribeStatusLabel->setText(QStringLiteral("● 未建立任何有效订阅"));
-                guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
+                guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
                 if (guardThis->m_wmiSubscribeProgressPid != 0)
                 {
                     kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅失败(无有效类)", 0, 100.0f);
@@ -2159,7 +2215,7 @@ void MonitorDock::startWmiSubscription()
             guardThis->m_wmiSubscribeRunning.store(false);
             guardThis->m_wmiSubscribePaused.store(false);
             guardThis->m_wmiSubscribeStatusLabel->setText(QStringLiteral("● 已停止"));
-            guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;font-weight:600;"));
+            guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
             if (guardThis->m_wmiSubscribeProgressPid != 0)
             {
                 kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅结束", 0, 100.0f);
@@ -2194,7 +2250,7 @@ void MonitorDock::stopWmiSubscriptionInternal(bool waitForThread)
     if (m_wmiSubscribeStatusLabel != nullptr)
     {
         m_wmiSubscribeStatusLabel->setText(QStringLiteral("● 停止中..."));
-        m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#AA7B1C;font-weight:600;"));
+        m_wmiSubscribeStatusLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
     }
 
     if (m_wmiSubscribeThread == nullptr || !m_wmiSubscribeThread->joinable())
@@ -2262,7 +2318,7 @@ void MonitorDock::stopWmiSubscriptionInternal(bool waitForThread)
             }
             guardThis->flushWmiPendingRows();
             guardThis->m_wmiSubscribeStatusLabel->setText(QStringLiteral("● 已停止"));
-            guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;font-weight:600;"));
+            guardThis->m_wmiSubscribeStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
             if (guardThis->m_wmiSubscribeProgressPid != 0)
             {
                 kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅结束", 0, 100.0f);
@@ -2292,12 +2348,12 @@ void MonitorDock::setWmiSubscriptionPaused(bool paused)
     if (paused)
     {
         m_wmiSubscribeStatusLabel->setText(QStringLiteral("● 已暂停"));
-        m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#AA7B1C;font-weight:600;"));
+        m_wmiSubscribeStatusLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
     }
     else
     {
         m_wmiSubscribeStatusLabel->setText(QStringLiteral("● 订阅中"));
-        m_wmiSubscribeStatusLabel->setStyleSheet(QStringLiteral("color:#1F4E7A;font-weight:600;"));
+        m_wmiSubscribeStatusLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
     }
 
     kLogEvent event;
@@ -2510,7 +2566,7 @@ void MonitorDock::refreshEtwProvidersAsync()
         << eol;
 
     m_etwProviderStatusLabel->setText(QStringLiteral("● 刷新中..."));
-    m_etwProviderStatusLabel->setStyleSheet(QStringLiteral("color:#1F4E7A;font-weight:600;"));
+    m_etwProviderStatusLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
 
     if (m_etwCaptureProgressPid == 0)
     {
@@ -2569,7 +2625,7 @@ void MonitorDock::refreshEtwProvidersAsync()
             {
                 guardThis->m_etwProviderStatusLabel->setText(
                     QStringLiteral("● 已刷新 %1 项").arg(guardThis->m_etwProviders.size()));
-                guardThis->m_etwProviderStatusLabel->setStyleSheet(QStringLiteral("color:#2F7D32;font-weight:600;"));
+                guardThis->m_etwProviderStatusLabel->setStyleSheet(buildStatusStyle(monitorSuccessColorHex()));
                 kPro.set(guardThis->m_etwCaptureProgressPid, "ETW Provider完成", 0, 100.0f);
 
                 kLogEvent event;
@@ -2581,7 +2637,7 @@ void MonitorDock::refreshEtwProvidersAsync()
             else
             {
                 guardThis->m_etwProviderStatusLabel->setText(QStringLiteral("● 刷新失败:%1").arg(status));
-                guardThis->m_etwProviderStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
+                guardThis->m_etwProviderStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
                 kPro.set(guardThis->m_etwCaptureProgressPid, "ETW Provider失败", 0, 100.0f);
 
                 kLogEvent event;
@@ -2866,7 +2922,7 @@ void MonitorDock::startEtwCapture()
     kPro.set(m_etwCaptureProgressPid, "准备ETW实时会话", 0, 10.0f);
 
     m_etwCaptureStatusLabel->setText(QStringLiteral("● 监听中"));
-    m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#1F4E7A;font-weight:600;"));
+    m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
 
     if (m_etwUiUpdateTimer != nullptr && !m_etwUiUpdateTimer->isActive())
     {
@@ -2944,7 +3000,7 @@ void MonitorDock::startEtwCapture()
                 guardThis->m_etwCaptureRunning.store(false);
                 guardThis->m_etwCapturePaused.store(false);
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● 启动失败:%1").arg(startStatus));
-                guardThis->m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
+                guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
                 kPro.set(guardThis->m_etwCaptureProgressPid, "ETW会话启动失败", 0, 100.0f);
             }, Qt::QueuedConnection);
             return;
@@ -2999,7 +3055,7 @@ void MonitorDock::startEtwCapture()
                 guardThis->m_etwCaptureRunning.store(false);
                 guardThis->m_etwCapturePaused.store(false);
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● 无可用Provider"));
-                guardThis->m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
+                guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
                 kPro.set(guardThis->m_etwCaptureProgressPid, "Provider启用失败", 0, 100.0f);
             }, Qt::QueuedConnection);
             return;
@@ -3027,7 +3083,7 @@ void MonitorDock::startEtwCapture()
                 guardThis->m_etwCaptureRunning.store(false);
                 guardThis->m_etwCapturePaused.store(false);
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● OpenTrace失败:%1").arg(lastError));
-                guardThis->m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#A43434;font-weight:600;"));
+                guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
                 kPro.set(guardThis->m_etwCaptureProgressPid, "OpenTrace失败", 0, 100.0f);
             }, Qt::QueuedConnection);
             return;
@@ -3054,12 +3110,12 @@ void MonitorDock::startEtwCapture()
             if (processStatus == ERROR_SUCCESS)
             {
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● 已停止"));
-                guardThis->m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;font-weight:600;"));
+                guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
             }
             else
             {
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● 处理结束:%1").arg(processStatus));
-                guardThis->m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#AA7B1C;font-weight:600;"));
+                guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
             }
             kPro.set(guardThis->m_etwCaptureProgressPid, "ETW监听结束", 0, 100.0f);
         }, Qt::QueuedConnection);
@@ -3123,7 +3179,7 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
         if (m_etwCaptureStatusLabel != nullptr)
         {
             m_etwCaptureStatusLabel->setText(QStringLiteral("● 已停止"));
-            m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;font-weight:600;"));
+            m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
         }
         if (m_etwUiUpdateTimer != nullptr && m_etwUiUpdateTimer->isActive())
         {
@@ -3146,7 +3202,7 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
         if (m_etwCaptureStatusLabel != nullptr)
         {
             m_etwCaptureStatusLabel->setText(QStringLiteral("● 已停止"));
-            m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;font-weight:600;"));
+            m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
         }
         if (m_etwUiUpdateTimer != nullptr && m_etwUiUpdateTimer->isActive())
         {
@@ -3163,7 +3219,7 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
     if (m_etwCaptureStatusLabel != nullptr)
     {
         m_etwCaptureStatusLabel->setText(QStringLiteral("● 停止中..."));
-        m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#AA7B1C;font-weight:600;"));
+        m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
     }
     std::unique_ptr<std::thread> joinThread = std::move(m_etwCaptureThread);
     QPointer<MonitorDock> guardThis(this);
@@ -3182,7 +3238,7 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
             if (guardThis->m_etwCaptureStatusLabel != nullptr)
             {
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● 已停止"));
-                guardThis->m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#4A4A4A;font-weight:600;"));
+                guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
             }
             if (guardThis->m_etwUiUpdateTimer != nullptr && guardThis->m_etwUiUpdateTimer->isActive())
             {
@@ -3217,12 +3273,12 @@ void MonitorDock::setEtwCapturePaused(bool paused)
     if (paused)
     {
         m_etwCaptureStatusLabel->setText(QStringLiteral("● 已暂停"));
-        m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#AA7B1C;font-weight:600;"));
+        m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
     }
     else
     {
         m_etwCaptureStatusLabel->setText(QStringLiteral("● 监听中"));
-        m_etwCaptureStatusLabel->setStyleSheet(QStringLiteral("color:#1F4E7A;font-weight:600;"));
+        m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
     }
 
     kLogEvent event;

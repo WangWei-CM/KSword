@@ -37,13 +37,14 @@ namespace
     QString blueButtonStyle()
     {
         return QStringLiteral(
-            "QPushButton{color:%1;background:#FFFFFF;border:1px solid %2;border-radius:3px;padding:3px 8px;}"
-            "QPushButton:hover{background:%3;}"
+            "QPushButton{color:%1;background:%5;border:1px solid %2;border-radius:3px;padding:3px 8px;}"
+            "QPushButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
             "QPushButton:pressed{background:%4;color:#FFFFFF;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
-            .arg(KswordTheme::PrimaryBluePressedHex);
+            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBluePressedHex)
+            .arg(KswordTheme::SurfaceHex());
     }
 
     // blueInputStyle：
@@ -51,16 +52,23 @@ namespace
     QString blueInputStyle()
     {
         return QStringLiteral(
-            "QLineEdit,QPlainTextEdit{border:1px solid #C8DDF4;border-radius:3px;background:#FFFFFF;padding:2px 6px;}"
+            "QLineEdit,QPlainTextEdit{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
             "QLineEdit:focus,QPlainTextEdit:focus{border:1px solid %1;}")
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex());
     }
 
     // headerStyle：
     // - 作用：统一表头颜色和字重，突出关键信息列。
     QString headerStyle()
     {
-        return QStringLiteral("QHeaderView::section{color:%1;font-weight:600;}").arg(KswordTheme::PrimaryBlueHex);
+        return QStringLiteral(
+            "QHeaderView::section{color:%1;background:%2;border:1px solid %3;font-weight:600;}")
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::BorderHex());
     }
 
     // boolText：
@@ -147,6 +155,11 @@ void KernelDock::initializeKernelTypeTab()
     m_kernelTypeTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_kernelTypeTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_kernelTypeTable->setAlternatingRowColors(true);
+    // 固定选中高亮为主题蓝，避免出现系统绿色高亮。
+    m_kernelTypeTable->setStyleSheet(QStringLiteral(
+        "QTableWidget::item:selected{background:#2E8BFF;color:#FFFFFF;}"));
+    // 关闭角按钮，防止左上角出现白色小块。
+    m_kernelTypeTable->setCornerButtonEnabled(false);
     m_kernelTypeTable->verticalHeader()->setVisible(false);
     m_kernelTypeTable->horizontalHeader()->setStyleSheet(headerStyle());
     m_kernelTypeTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
@@ -201,6 +214,9 @@ void KernelDock::initializeNtQueryTab()
     m_ntQueryTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_ntQueryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_ntQueryTable->setAlternatingRowColors(true);
+    m_ntQueryTable->setStyleSheet(QStringLiteral(
+        "QTableWidget::item:selected{background:#2E8BFF;color:#FFFFFF;}"));
+    m_ntQueryTable->setCornerButtonEnabled(false);
     m_ntQueryTable->verticalHeader()->setVisible(false);
     m_ntQueryTable->horizontalHeader()->setStyleSheet(headerStyle());
     m_ntQueryTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
@@ -451,7 +467,7 @@ void KernelDock::rebuildNtQueryTable()
 
         if (entry.statusCode < 0)
         {
-            statusItem->setForeground(QBrush(QColor(166, 52, 52)));
+            statusItem->setForeground(QBrush(KswordTheme::WarningAccentColor()));
         }
 
         m_ntQueryTable->setItem(row, 0, categoryItem);

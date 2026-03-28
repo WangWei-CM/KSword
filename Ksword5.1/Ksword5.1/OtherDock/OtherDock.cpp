@@ -82,17 +82,18 @@ namespace
         return QStringLiteral(
             "QPushButton,QToolButton{"
             "  color:%1;"
-            "  background:#FFFFFF;"
+            "  background:%5;"
             "  border:1px solid %2;"
             "  border-radius:3px;"
             "  padding:3px 8px;"
             "}"
-            "QPushButton:hover,QToolButton:hover{background:%3;}"
+            "QPushButton:hover,QToolButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
             "QPushButton:pressed,QToolButton:pressed{background:%4;color:#FFFFFF;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
-            .arg(KswordTheme::PrimaryBluePressedHex);
+            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBluePressedHex)
+            .arg(KswordTheme::SurfaceHex());
     }
 
     // 统一输入框样式：过滤框、下拉框、数值输入用同一套视觉反馈。
@@ -100,20 +101,27 @@ namespace
     {
         return QStringLiteral(
             "QLineEdit,QComboBox,QSpinBox{"
-            "  border:1px solid #C8DDF4;"
+            "  border:1px solid %2;"
             "  border-radius:3px;"
-            "  background:#FFFFFF;"
+            "  background:%3;"
+            "  color:%4;"
             "  padding:2px 6px;"
             "}"
             "QLineEdit:focus,QComboBox:focus,QSpinBox:focus{border:1px solid %1;}")
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex());
     }
 
     // 表头样式：突出列头，方便快速分辨字段。
     QString blueHeaderStyle()
     {
-        return QStringLiteral("QHeaderView::section{color:%1;font-weight:600;}")
-            .arg(KswordTheme::PrimaryBlueHex);
+        return QStringLiteral(
+            "QHeaderView::section{color:%1;background:%2;border:1px solid %3;font-weight:600;}")
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::BorderHex());
     }
 
     // 转换布尔文本：统一“是/否”显示，避免各处写法不一致。
@@ -608,9 +616,15 @@ namespace
         }
 
         QPixmap fallbackPixmap(targetSize);
-        fallbackPixmap.fill(QColor(246, 248, 252));
+        fallbackPixmap.fill(
+            KswordTheme::IsDarkModeEnabled()
+            ? QColor(35, 35, 35)
+            : QColor(246, 248, 252));
         QPainter painter(&fallbackPixmap);
-        painter.setPen(QColor(120, 120, 120));
+        painter.setPen(
+            KswordTheme::IsDarkModeEnabled()
+            ? QColor(190, 190, 190)
+            : QColor(120, 120, 120));
         painter.drawRect(fallbackPixmap.rect().adjusted(0, 0, -1, -1));
         painter.drawText(
             fallbackPixmap.rect(),
@@ -2255,7 +2269,9 @@ void OtherDock::initializeUi()
     m_thumbnailLabel = new QLabel(m_previewWidget);
     m_thumbnailLabel->setMinimumSize(320, 220);
     m_thumbnailLabel->setAlignment(Qt::AlignCenter);
-    m_thumbnailLabel->setStyleSheet(QStringLiteral("border:1px solid #D8D8D8;background:#F8FAFD;"));
+    m_thumbnailLabel->setStyleSheet(QStringLiteral(
+        "border:1px solid %1;background:%2;")
+        .arg(KswordTheme::BorderHex(), KswordTheme::SurfaceAltHex()));
 
     m_captureButton = new QPushButton(QIcon(":/Icon/process_details.svg"), QString(), m_previewWidget);
     m_captureButton->setToolTip(QStringLiteral("保存当前窗口截图"));
@@ -2826,15 +2842,15 @@ void OtherDock::rebuildWindowTreeFromSnapshot()
         {
             for (int col = 0; col < m_windowTree->columnCount(); ++col)
             {
-                item->setForeground(col, QBrush(QColor(128, 128, 128)));
-                item->setBackground(col, QBrush(QColor(238, 238, 238)));
+                item->setForeground(col, QBrush(KswordTheme::ExitedRowForegroundColor()));
+                item->setBackground(col, QBrush(KswordTheme::ExitedRowBackgroundColor()));
             }
         }
         else if (isNew)
         {
             for (int col = 0; col < m_windowTree->columnCount(); ++col)
             {
-                item->setBackground(col, QBrush(QColor(224, 245, 224)));
+                item->setBackground(col, QBrush(KswordTheme::NewRowBackgroundColor()));
             }
         }
     };

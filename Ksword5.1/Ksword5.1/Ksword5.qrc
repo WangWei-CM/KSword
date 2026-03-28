@@ -38,5 +38,12 @@
         <file alias="file_case.svg">Resource/Icon/editor/AZ_sort_ascending_letters_line.svg</file>
         <file alias="file_find.svg">Resource/Icon/editor/list_search_line.svg</file>
         <file alias="file_owner.svg">Resource/Icon/user/user_security_line.svg</file>
+
+        <!-- 设置模块外观页图标 -->
+        <file alias="settings_theme_system.svg">Resource/Icon/device/computer_line.svg</file>
+        <file alias="settings_theme_light.svg">Resource/Icon/weather/sun_line.svg</file>
+        <file alias="settings_theme_dark.svg">Resource/Icon/weather/moon_line.svg</file>
+        <file alias="settings_background_browse.svg">Resource/Icon/file/folder_open_line.svg</file>
+        <file alias="settings_background_reset.svg">Resource/Icon/design/background_line.svg</file>
     </qresource>
 </RCC>
