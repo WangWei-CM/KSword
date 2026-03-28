@@ -569,8 +569,11 @@ void MemoryDock::detachProcess()
     }
     m_regionTable->setRowCount(0);
     m_searchResultTable->setRowCount(0);
-    m_hexTable->clearContents();
-    m_hexTable->setRowCount(kHexRowCount);
+    if (m_hexEditorWidget != nullptr)
+    {
+        m_hexEditorWidget->setEditable(false);
+        m_hexEditorWidget->clearData();
+    }
     m_viewerStatusLabel->setText("未附加进程。");
 
     updateStatusBarText();

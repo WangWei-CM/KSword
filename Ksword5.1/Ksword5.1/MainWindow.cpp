@@ -20,6 +20,7 @@
 #include "Framework.h"
 #include "Framework/LogDockWidget.h"
 #include "Framework/ProgressDockWidget.h"
+#include "UI/CodeEditorWidget.h"
 #include "theme.h"
 #include <windows.h>
 // 菜单栏权限按钮涉及 Windows 令牌权限查询与提权动作。
@@ -1101,6 +1102,7 @@ void MainWindow::initDockWidgets()
     m_registryWidget = new RegistryDock(this);
     m_logWidget = new LogDockWidget(this);
     m_progressWidget = new ProgressDockWidget(this);
+    m_immediateEditorWidget = new CodeEditorWidget(this);
 
     // 使用辅助函数创建Dock Widgets
     auto createDockWidget = [this](QWidget* widget, const QString& title) -> ads::CDockWidget* {
@@ -1130,7 +1132,7 @@ void MainWindow::initDockWidgets()
     // 创建右侧和底部的基本Widgets
     m_dockCurrentOp = createDockWidget(m_progressWidget, "当前操作");
     m_dockLog = createDockWidget(m_logWidget, "日志输出");
-    m_dockImmediate = createDockWidget(new QWidget(), "即时窗口");
+    m_dockImmediate = createDockWidget(m_immediateEditorWidget, "即时窗口");
     m_dockMonitor = createDockWidget(new QWidget(), "监视面板");
 
     // 将Dock Widget的切换动作添加到菜单

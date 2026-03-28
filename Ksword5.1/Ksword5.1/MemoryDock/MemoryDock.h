@@ -36,7 +36,7 @@ class QTextEdit;
 class QTimer;
 class QTreeWidget;
 class QVBoxLayout;
-class QEvent;
+class HexEditorWidget;
 
 // Windows 句柄类型前置声明。
 typedef void* HANDLE;
@@ -176,18 +176,6 @@ private:
         double upperBound = 0.0;       // 数值上界。
         double epsilon = 0.00001;      // 浮点误差阈值。
     };
-
-private:
-    // ========================================================
-    // QObject 事件过滤（用于自定义十六进制选择行为）
-    // ========================================================
-
-    // eventFilter：
-    // - 作用：拦截内存查看器表格鼠标拖拽，实现“文本式线性选择”。
-    // - 参数 watched：触发事件的对象（主要是 m_hexTable->viewport()）。
-    // - 参数 event：具体事件对象（按下/移动/释放）。
-    // - 返回：true 表示事件已处理；false 表示继续默认分发。
-    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     // ========================================================
@@ -437,25 +425,6 @@ private:
         std::uint8_t value,
         QString& errorTextOut);
 
-    // applyHexViewerDragSelection：
-    // - 作用：根据锚点与当前点，按“十六进制区/ASCII区”规则重建选择范围。
-    // - 参数 currentRow：当前鼠标所在行索引。
-    // - 参数 currentColumn：当前鼠标所在列索引。
-    // - 返回：无。
-    void applyHexViewerDragSelection(int currentRow, int currentColumn);
-
-    // isHexValueColumn：
-    // - 作用：判断列索引是否属于十六进制值列（1~16）。
-    // - 参数 column：列索引。
-    // - 返回：true=十六进制值列；false=非十六进制值列。
-    static bool isHexValueColumn(int column);
-
-    // isAsciiColumn：
-    // - 作用：判断列索引是否为 ASCII 列。
-    // - 参数 column：列索引。
-    // - 返回：true=ASCII列；false=其他列。
-    static bool isAsciiColumn(int column);
-
 private:
     // ========================================================
     // 断点与书签（Tab5）相关函数
@@ -644,7 +613,7 @@ private:
     QLineEdit* m_viewAddressEdit = nullptr;   // 地址导航输入框。
     QPushButton* m_viewJumpButton = nullptr;  // 跳转按钮。
     QLabel* m_viewProtectLabel = nullptr;     // 当前地址保护属性标签。
-    QTableWidget* m_hexTable = nullptr;       // 十六进制视图表格。
+    HexEditorWidget* m_hexEditorWidget = nullptr; // 统一十六进制编辑器组件。
     QLabel* m_viewerStatusLabel = nullptr;    // 查看器状态文本。
 
     // ========================================================
@@ -689,11 +658,6 @@ private:
 
     std::uint64_t m_currentViewerAddress = 0;          // Tab4 当前起始地址。
     QByteArray m_currentViewerPageBytes;               // Tab4 当前页原始字节缓存。
-    bool m_hexTableProgrammaticUpdate = false;         // 防止表格回填触发递归编辑。
-    bool m_hexDragSelecting = false;                   // 是否正在进行自定义拖拽选择。
-    bool m_hexDragStartInAscii = false;                // 拖拽起点是否位于 ASCII 列。
-    int m_hexDragAnchorRow = -1;                       // 拖拽锚点行索引。
-    int m_hexDragAnchorColumn = -1;                    // 拖拽锚点列索引。
 
     std::vector<BreakpointEntry> m_breakpointCache;    // 断点缓存（Tab5）。
     std::vector<BookmarkEntry> m_bookmarkCache;        // 书签缓存（Tab5）。

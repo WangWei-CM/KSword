@@ -10,6 +10,7 @@
 
 #include "../ProcessDock/ProcessDetailWindow.h"
 #include "../theme.h"
+#include "../UI/CodeEditorWidget.h"
 
 #include <QApplication>
 #include <QAbstractItemView>
@@ -36,7 +37,6 @@
 #include <QMetaObject>
 #include <QPainter>
 #include <QPixmap>
-#include <QPlainTextEdit>
 #include <QPointer>
 #include <QProcess>
 #include <QPushButton>
@@ -48,6 +48,7 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTextEdit>
 #include <QTextStream>
 #include <QTimer>
 #include <QTimeZone>
@@ -852,7 +853,8 @@ private:
         generalLayout->addRow(QStringLiteral("句柄"), m_handleLabel);
         generalLayout->addRow(QStringLiteral("父句柄"), m_parentHandleLabel);
         generalLayout->addRow(QStringLiteral("所有者句柄"), m_ownerHandleLabel);
-        generalLayout->addRow(QStringLiteral("标题（可编辑）"), m_titleEdit);
+        m_titleEdit->setReadOnly(true);
+        generalLayout->addRow(QStringLiteral("标题"), m_titleEdit);
         generalLayout->addRow(QStringLiteral("类名"), m_classNameLabel);
         generalLayout->addRow(QStringLiteral("实例句柄"), m_instanceLabel);
         generalLayout->addRow(QStringLiteral("状态摘要"), m_stateLabel);
@@ -862,7 +864,7 @@ private:
         // ==================== 2. 样式 Tab ====================
         QWidget* stylePage = new QWidget(m_tabWidget);
         QVBoxLayout* styleLayout = new QVBoxLayout(stylePage);
-        m_styleText = new QPlainTextEdit(stylePage);
+        m_styleText = new CodeEditorWidget(stylePage);
         m_styleText->setReadOnly(true);
         styleLayout->addWidget(m_styleText, 1);
         m_tabWidget->addTab(stylePage, QStringLiteral("样式与外观"));
@@ -877,6 +879,8 @@ private:
         for (QSpinBox* spinBox : { m_xSpin, m_ySpin, m_widthSpin, m_heightSpin })
         {
             spinBox->setRange(-32768, 32768);
+            spinBox->setReadOnly(true);
+            spinBox->setButtonSymbols(QAbstractSpinBox::NoButtons);
         }
         m_widthSpin->setRange(1, 32768);
         m_heightSpin->setRange(1, 32768);
@@ -906,8 +910,10 @@ private:
         QWidget* statePage = new QWidget(m_tabWidget);
         QFormLayout* stateLayout = new QFormLayout(statePage);
         m_topMostCheck = new QCheckBox(QStringLiteral("置顶窗口"), statePage);
+        m_topMostCheck->setEnabled(false);
         m_alphaSlider = new QSlider(Qt::Horizontal, statePage);
         m_alphaSlider->setRange(20, 255);
+        m_alphaSlider->setEnabled(false);
         m_alphaLabel = new QLabel(statePage);
         stateLayout->addRow(QStringLiteral("置顶"), m_topMostCheck);
         stateLayout->addRow(QStringLiteral("透明度"), m_alphaSlider);
@@ -920,7 +926,7 @@ private:
         // ==================== 5. 进程线程 Tab ====================
         QWidget* processPage = new QWidget(m_tabWidget);
         QVBoxLayout* processLayout = new QVBoxLayout(processPage);
-        m_processThreadText = new QPlainTextEdit(processPage);
+        m_processThreadText = new CodeEditorWidget(processPage);
         m_processThreadText->setReadOnly(true);
         processLayout->addWidget(m_processThreadText, 1);
         m_tabWidget->addTab(processPage, QStringLiteral("进程与线程"));
@@ -928,7 +934,7 @@ private:
         // ==================== 6. 类信息 Tab ====================
         QWidget* classPage = new QWidget(m_tabWidget);
         QVBoxLayout* classLayout = new QVBoxLayout(classPage);
-        m_classText = new QPlainTextEdit(classPage);
+        m_classText = new CodeEditorWidget(classPage);
         m_classText->setReadOnly(true);
         classLayout->addWidget(m_classText, 1);
         m_tabWidget->addTab(classPage, QStringLiteral("类信息"));
@@ -938,9 +944,9 @@ private:
         QVBoxLayout* hookLayout = new QVBoxLayout(hookPage);
 
         // 概览文本：保留原有消息队列状态、焦点等摘要，便于快速判断窗口活性。
-        m_hookText = new QPlainTextEdit(hookPage);
+        m_hookText = new CodeEditorWidget(hookPage);
         m_hookText->setReadOnly(true);
-        m_hookText->setMaximumHeight(170);
+        m_hookText->setMaximumHeight(260);
         hookLayout->addWidget(m_hookText, 0);
 
         // 控制条：开始/停止/清空/自动滚动/最大行数，风格对齐其他按钮。
@@ -1051,7 +1057,7 @@ private:
         // ==================== 8. 高级属性 Tab ====================
         QWidget* advancedPage = new QWidget(m_tabWidget);
         QVBoxLayout* advancedLayout = new QVBoxLayout(advancedPage);
-        m_advancedText = new QPlainTextEdit(advancedPage);
+        m_advancedText = new CodeEditorWidget(advancedPage);
         m_advancedText->setReadOnly(true);
         advancedLayout->addWidget(m_advancedText, 1);
         m_tabWidget->addTab(advancedPage, QStringLiteral("高级属性"));
@@ -1067,6 +1073,7 @@ private:
 
         m_refreshButton->setToolTip(QStringLiteral("刷新窗口属性"));
         m_applyButton->setToolTip(QStringLiteral("应用修改"));
+        m_applyButton->setEnabled(false);
         m_exportButton->setToolTip(QStringLiteral("导出信息"));
         m_closeButton->setToolTip(QStringLiteral("关闭详情窗口"));
 
@@ -1130,7 +1137,7 @@ private:
         styleText += QStringLiteral("WS_DISABLED: %1\n").arg(boolText((styleValue & WS_DISABLED) != 0));
         styleText += QStringLiteral("WS_EX_TOPMOST: %1\n").arg(boolText((exStyleValue & WS_EX_TOPMOST) != 0));
         styleText += QStringLiteral("WS_EX_LAYERED: %1\n").arg(boolText((exStyleValue & WS_EX_LAYERED) != 0));
-        m_styleText->setPlainText(styleText);
+        m_styleText->setText(styleText);
 
         // 窗口位置与尺寸写回编辑控件。
         RECT rect{};
@@ -1258,7 +1265,7 @@ private:
             processText += QStringLiteral("ThreadOpen: 失败（线程可能已退出）\n");
         }
         processText += QStringLiteral("提示：可从右键菜单跳转到进程详细信息页。");
-        m_processThreadText->setPlainText(processText);
+        m_processThreadText->setText(processText);
 
         // 类信息：展示类名、类样式、窗口过程地址以及类资源句柄。
         QString classText;
@@ -1296,7 +1303,7 @@ private:
                     .arg(QString::fromWCharArray(modulePathBuffer, static_cast<int>(pathLength)));
             }
         }
-        m_classText->setPlainText(classText);
+        m_classText->setText(classText);
 
         // 钩子/消息页：补齐消息队列状态与 GUI 线程焦点句柄，替代原先占位文本。
         int childWindowCount = 0;
@@ -1369,7 +1376,7 @@ private:
         hookText += QStringLiteral("ForegroundWindow: %1\n")
             .arg(hwndToText(static_cast<quint64>(reinterpret_cast<quintptr>(::GetForegroundWindow()))));
         hookText += QStringLiteral("说明：系统级 Hook 链表不提供官方通用枚举接口，当前页聚焦可稳定获取的消息上下文。");
-        m_hookText->setPlainText(hookText);
+        m_hookText->setText(hookText);
 
         // 高级页：补齐 DPI、属性表（GetProp/EnumPropsExW）与窗口额外字节等关键内容。
         QString advancedText;
@@ -1433,7 +1440,7 @@ private:
         {
             advancedText += QStringLiteral("Properties: <none>\n");
         }
-        m_advancedText->setPlainText(advancedText);
+        m_advancedText->setText(advancedText);
 
         // 刷新时同步更新消息监控状态标签，避免页面切换后显示陈旧模式文本。
         updateMessageMonitorUiState();
@@ -2014,7 +2021,7 @@ private:
         text += QStringLiteral("状态摘要: %1\n").arg(m_stateLabel->text());
         text += QStringLiteral("关系摘要: %1\n\n").arg(m_relationLabel->text());
 
-        text += QStringLiteral("[样式]\n%1\n\n").arg(m_styleText->toPlainText());
+        text += QStringLiteral("[样式]\n%1\n\n").arg(m_styleText->text());
         text += QStringLiteral("[位置]\nX=%1, Y=%2, W=%3, H=%4\n\n")
             .arg(m_xSpin->value())
             .arg(m_ySpin->value())
@@ -2023,9 +2030,9 @@ private:
         text += QStringLiteral("[状态]\nTopMost=%1, Alpha=%2\n\n")
             .arg(boolText(m_topMostCheck->isChecked()))
             .arg(m_alphaSlider->value());
-        text += QStringLiteral("[进程线程]\n%1\n\n").arg(m_processThreadText->toPlainText());
-        text += QStringLiteral("[类信息]\n%1\n\n").arg(m_classText->toPlainText());
-        text += QStringLiteral("[消息钩子]\n%1\n\n").arg(m_hookText->toPlainText());
+        text += QStringLiteral("[进程线程]\n%1\n\n").arg(m_processThreadText->text());
+        text += QStringLiteral("[类信息]\n%1\n\n").arg(m_classText->text());
+        text += QStringLiteral("[消息钩子]\n%1\n\n").arg(m_hookText->text());
         text += QStringLiteral("[消息记录]\n");
         if (m_messageTable != nullptr)
         {
@@ -2051,7 +2058,7 @@ private:
             }
         }
         text += QStringLiteral("\n");
-        text += QStringLiteral("[高级属性]\n%1\n").arg(m_advancedText->toPlainText());
+        text += QStringLiteral("[高级属性]\n%1\n").arg(m_advancedText->text());
         return text;
     }
 
@@ -2069,7 +2076,7 @@ private:
     QLabel* m_stateLabel = nullptr;        // 状态摘要显示。
     QLabel* m_relationLabel = nullptr;     // 关系摘要显示。
 
-    QPlainTextEdit* m_styleText = nullptr;      // 样式文本区域。
+    CodeEditorWidget* m_styleText = nullptr;      // 样式文本区域（统一文本编辑器，只读）。
     QSpinBox* m_xSpin = nullptr;                // X 坐标输入。
     QSpinBox* m_ySpin = nullptr;                // Y 坐标输入。
     QSpinBox* m_widthSpin = nullptr;            // 宽度输入。
@@ -2078,9 +2085,9 @@ private:
     QSlider* m_alphaSlider = nullptr;           // 透明度滑块。
     QLabel* m_alphaLabel = nullptr;             // 透明度文本。
 
-    QPlainTextEdit* m_processThreadText = nullptr; // 进程线程页文本。
-    QPlainTextEdit* m_classText = nullptr;         // 类信息页文本。
-    QPlainTextEdit* m_hookText = nullptr;          // 钩子页文本。
+    CodeEditorWidget* m_processThreadText = nullptr; // 进程线程页文本（统一文本编辑器，只读）。
+    CodeEditorWidget* m_classText = nullptr;         // 类信息页文本（统一文本编辑器，只读）。
+    CodeEditorWidget* m_hookText = nullptr;          // 钩子页文本（统一文本编辑器，只读）。
     QPushButton* m_messageStartButton = nullptr;   // 消息监控开始按钮。
     QPushButton* m_messageStopButton = nullptr;    // 消息监控停止按钮。
     QPushButton* m_messageClearButton = nullptr;   // 消息列表清空按钮。
@@ -2089,7 +2096,7 @@ private:
     QLabel* m_messageModeLabel = nullptr;          // 当前采集模式标签。
     QLabel* m_messageCountLabel = nullptr;         // 已记录/丢弃计数标签。
     QTableWidget* m_messageTable = nullptr;        // 消息列表表格。
-    QPlainTextEdit* m_advancedText = nullptr;      // 高级页文本。
+    CodeEditorWidget* m_advancedText = nullptr;      // 高级页文本（统一文本编辑器，只读）。
 
     QPushButton* m_refreshButton = nullptr;    // 刷新按钮。
     QPushButton* m_applyButton = nullptr;      // 应用按钮。

@@ -8,6 +8,7 @@
 // ============================================================
 
 #include "../theme.h"
+#include "../UI/CodeEditorWidget.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -48,9 +49,6 @@
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTableWidget>
-#include <QTextEdit>
-#include <QTextCharFormat>
-#include <QTextCursor>
 #include <QToolButton>
 #include <QTreeView>
 #include <QUrl>
@@ -266,9 +264,8 @@ namespace
         {
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
-            QTextEdit* textEdit = new QTextEdit(page);
-            textEdit->setReadOnly(true);
-            textEdit->setStyleSheet(buildBlueInputStyle());
+            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
+            textEditorWidget->setReadOnly(true);
 
             const QFileInfo info(m_filePath);
             QString content;
@@ -282,9 +279,9 @@ namespace
             content += QStringLiteral("是否可执行: %1\n").arg(info.isExecutable() ? QStringLiteral("是") : QStringLiteral("否"));
             content += QStringLiteral("是否隐藏: %1\n").arg(info.isHidden() ? QStringLiteral("是") : QStringLiteral("否"));
             content += QStringLiteral("是否可写: %1\n").arg(info.isWritable() ? QStringLiteral("是") : QStringLiteral("否"));
-            textEdit->setPlainText(content);
+            textEditorWidget->setText(content);
 
-            layout->addWidget(textEdit, 1);
+            layout->addWidget(textEditorWidget, 1);
             return page;
         }
 
@@ -292,9 +289,8 @@ namespace
         {
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
-            QTextEdit* textEdit = new QTextEdit(page);
-            textEdit->setReadOnly(true);
-            textEdit->setStyleSheet(buildBlueInputStyle());
+            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
+            textEditorWidget->setReadOnly(true);
 
             QFileInfo info(m_filePath);
             QString content;
@@ -303,9 +299,9 @@ namespace
             content += QStringLiteral("Write: %1\n").arg(info.isWritable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
             content += QStringLiteral("Execute: %1\n").arg(info.isExecutable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
             content += QStringLiteral("\n提示：更深层 ACL / SID 解析可接入后续权限模块。");
-            textEdit->setPlainText(content);
+            textEditorWidget->setText(content);
 
-            layout->addWidget(textEdit, 1);
+            layout->addWidget(textEditorWidget, 1);
             return page;
         }
 
@@ -313,17 +309,16 @@ namespace
         {
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
-            QTextEdit* textEdit = new QTextEdit(page);
-            textEdit->setReadOnly(true);
-            textEdit->setStyleSheet(buildBlueInputStyle());
+            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
+            textEditorWidget->setReadOnly(true);
 
             QFile file(m_filePath);
             QString content;
             if (!file.open(QIODevice::ReadOnly))
             {
                 content = QStringLiteral("无法打开文件，哈希计算失败。");
-                textEdit->setPlainText(content);
-                layout->addWidget(textEdit, 1);
+                textEditorWidget->setText(content);
+                layout->addWidget(textEditorWidget, 1);
                 return page;
             }
 
@@ -346,9 +341,9 @@ namespace
             content += QStringLiteral("SHA1: %1\n").arg(QString::fromLatin1(sha1.result().toHex()));
             content += QStringLiteral("SHA256: %1\n").arg(QString::fromLatin1(sha256.result().toHex()));
             content += QStringLiteral("SHA512: %1\n").arg(QString::fromLatin1(sha512.result().toHex()));
-            textEdit->setPlainText(content);
+            textEditorWidget->setText(content);
 
-            layout->addWidget(textEdit, 1);
+            layout->addWidget(textEditorWidget, 1);
             return page;
         }
 
@@ -356,9 +351,8 @@ namespace
         {
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
-            QTextEdit* textEdit = new QTextEdit(page);
-            textEdit->setReadOnly(true);
-            textEdit->setStyleSheet(buildBlueInputStyle());
+            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
+            textEditorWidget->setReadOnly(true);
 
             // 调用 PowerShell 获取 Authenticode 详细信息，提供可审计的签名结果。
             QProcess process;
@@ -408,13 +402,13 @@ namespace
                 {
                     failText += QStringLiteral("错误输出为空，可能系统未启用 PowerShell 或文件不可访问。");
                 }
-                textEdit->setPlainText(failText);
-                layout->addWidget(textEdit, 1);
+                textEditorWidget->setText(failText);
+                layout->addWidget(textEditorWidget, 1);
                 return page;
             }
 
-            textEdit->setPlainText(stdOutText);
-            layout->addWidget(textEdit, 1);
+            textEditorWidget->setText(stdOutText);
+            layout->addWidget(textEditorWidget, 1);
             return page;
         }
 
@@ -422,17 +416,16 @@ namespace
         {
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
-            QTextEdit* textEdit = new QTextEdit(page);
-            textEdit->setReadOnly(true);
-            textEdit->setStyleSheet(buildBlueInputStyle());
+            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
+            textEditorWidget->setReadOnly(true);
 
             QFile file(m_filePath);
             QString content;
             if (!file.open(QIODevice::ReadOnly))
             {
                 content = QStringLiteral("无法读取文件，无法解析PE信息。");
-                textEdit->setPlainText(content);
-                layout->addWidget(textEdit, 1);
+                textEditorWidget->setText(content);
+                layout->addWidget(textEditorWidget, 1);
                 return page;
             }
 
@@ -440,8 +433,8 @@ namespace
             file.close();
             if (headerBytes.size() < 0x100)
             {
-                textEdit->setPlainText(QStringLiteral("文件过小，无法识别PE。"));
-                layout->addWidget(textEdit, 1);
+                textEditorWidget->setText(QStringLiteral("文件过小，无法识别PE。"));
+                layout->addWidget(textEditorWidget, 1);
                 return page;
             }
 
@@ -450,8 +443,8 @@ namespace
                 && static_cast<unsigned char>(headerBytes[1]) == 0x5A;
             if (!isMZ)
             {
-                textEdit->setPlainText(QStringLiteral("非PE文件（缺少 MZ 标记）。"));
-                layout->addWidget(textEdit, 1);
+                textEditorWidget->setText(QStringLiteral("非PE文件（缺少 MZ 标记）。"));
+                layout->addWidget(textEditorWidget, 1);
                 return page;
             }
 
@@ -466,9 +459,9 @@ namespace
                 content += QStringLiteral("Section数量: %1\n").arg(numberOfSections);
             }
             content += QStringLiteral("\n后续可扩展：导入表/导出表/资源树/区段熵值。");
-            textEdit->setPlainText(content);
+            textEditorWidget->setText(content);
 
-            layout->addWidget(textEdit, 1);
+            layout->addWidget(textEditorWidget, 1);
             return page;
         }
 
@@ -476,53 +469,16 @@ namespace
         {
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
-            QHBoxLayout* searchLayout = new QHBoxLayout();
-            searchLayout->setContentsMargins(0, 0, 0, 0);
-            searchLayout->setSpacing(6);
-
-            QLineEdit* searchEdit = new QLineEdit(page);
-            searchEdit->setPlaceholderText(QStringLiteral("Ctrl+F 查找，回车跳转下一项"));
-            searchEdit->setStyleSheet(buildBlueInputStyle());
-            searchEdit->setToolTip(QStringLiteral("输入关键字后在字符串结果中高亮匹配"));
-
-            QToolButton* regexButton = new QToolButton(page);
-            regexButton->setCheckable(true);
-            regexButton->setIcon(QIcon(":/Icon/file_regex.svg"));
-            regexButton->setToolTip(QStringLiteral("正则匹配开关"));
-            regexButton->setStyleSheet(buildBlueButtonStyle());
-
-            QToolButton* caseButton = new QToolButton(page);
-            caseButton->setCheckable(true);
-            caseButton->setIcon(QIcon(":/Icon/file_case.svg"));
-            caseButton->setToolTip(QStringLiteral("大小写匹配开关"));
-            caseButton->setStyleSheet(buildBlueButtonStyle());
-
-            QToolButton* nextButton = new QToolButton(page);
-            nextButton->setIcon(QIcon(":/Icon/file_find.svg"));
-            nextButton->setToolTip(QStringLiteral("跳转下一个匹配(F3)"));
-            nextButton->setStyleSheet(buildBlueButtonStyle());
-
-            QLabel* matchStatusLabel = new QLabel(QStringLiteral("匹配: 0"), page);
-            matchStatusLabel->setToolTip(QStringLiteral("当前匹配进度"));
-
-            searchLayout->addWidget(searchEdit, 1);
-            searchLayout->addWidget(regexButton, 0);
-            searchLayout->addWidget(caseButton, 0);
-            searchLayout->addWidget(nextButton, 0);
-            searchLayout->addWidget(matchStatusLabel, 0);
-            layout->addLayout(searchLayout);
-
-            QTextEdit* textEdit = new QTextEdit(page);
-            textEdit->setReadOnly(true);
-            textEdit->setStyleSheet(buildBlueInputStyle());
-            layout->addWidget(textEdit, 1);
+            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
+            textEditorWidget->setReadOnly(true);
+            layout->addWidget(textEditorWidget, 1);
 
             QFile file(m_filePath);
             QString rawStringText;
             if (!file.open(QIODevice::ReadOnly))
             {
                 rawStringText = QStringLiteral("无法读取文件，无法提取字符串。");
-                textEdit->setPlainText(rawStringText);
+                textEditorWidget->setText(rawStringText);
                 return page;
             }
 
@@ -557,153 +513,11 @@ namespace
             }
 
             rawStringText = result.join('\n');
-            textEdit->setPlainText(rawStringText);
-
-            // 查找状态：集中保存匹配范围和当前匹配索引，供各信号槽复用。
-            struct StringSearchState
+            if (rawStringText.trimmed().isEmpty())
             {
-                QVector<QPair<int, int>> ranges; // 全部匹配项范围。
-                int currentIndex = -1;           // 当前选中匹配项索引。
-            };
-            std::shared_ptr<StringSearchState> searchState = std::make_shared<StringSearchState>();
-
-            // applyHighlights：更新高亮和状态标签，并把光标移动到当前匹配项。
-            auto applyHighlights = [textEdit, matchStatusLabel, searchState]() {
-                QList<QTextEdit::ExtraSelection> selections;
-                QTextCharFormat normalFormat;
-                normalFormat.setBackground(
-                    KswordTheme::IsDarkModeEnabled()
-                    ? QColor(106, 84, 24)
-                    : QColor(255, 247, 168));
-                QTextCharFormat currentFormat;
-                currentFormat.setBackground(
-                    KswordTheme::IsDarkModeEnabled()
-                    ? QColor(146, 102, 26)
-                    : QColor(255, 206, 107));
-                currentFormat.setForeground(
-                    KswordTheme::IsDarkModeEnabled()
-                    ? QColor(255, 255, 255)
-                    : QColor(42, 42, 42));
-
-                for (int index = 0; index < searchState->ranges.size(); ++index)
-                {
-                    const QPair<int, int>& range = searchState->ranges[index];
-                    QTextCursor cursor(textEdit->document());
-                    cursor.setPosition(range.first);
-                    cursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, range.second);
-
-                    QTextEdit::ExtraSelection selection;
-                    selection.cursor = cursor;
-                    selection.format = (index == searchState->currentIndex) ? currentFormat : normalFormat;
-                    selections.push_back(selection);
-                }
-                textEdit->setExtraSelections(selections);
-
-                if (searchState->currentIndex >= 0 && searchState->currentIndex < searchState->ranges.size())
-                {
-                    const QPair<int, int>& currentRange = searchState->ranges[searchState->currentIndex];
-                    QTextCursor currentCursor(textEdit->document());
-                    currentCursor.setPosition(currentRange.first);
-                    currentCursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, currentRange.second);
-                    textEdit->setTextCursor(currentCursor);
-                    textEdit->ensureCursorVisible();
-                }
-
-                if (searchState->ranges.isEmpty())
-                {
-                    matchStatusLabel->setText(QStringLiteral("匹配: 0"));
-                }
-                else
-                {
-                    matchStatusLabel->setText(
-                        QStringLiteral("匹配: %1/%2")
-                        .arg(searchState->currentIndex + 1)
-                        .arg(searchState->ranges.size()));
-                }
-            };
-
-            // rebuildMatches：根据当前查询条件重建匹配结果。
-            auto rebuildMatches = [searchEdit, regexButton, caseButton, searchState, rawStringText, applyHighlights]() {
-                searchState->ranges.clear();
-                searchState->currentIndex = -1;
-
-                const QString keywordText = searchEdit->text();
-                if (keywordText.isEmpty())
-                {
-                    applyHighlights();
-                    return;
-                }
-
-                const QString patternText = regexButton->isChecked()
-                    ? keywordText
-                    : QRegularExpression::escape(keywordText);
-                QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
-                if (!caseButton->isChecked())
-                {
-                    options |= QRegularExpression::CaseInsensitiveOption;
-                }
-                const QRegularExpression regex(patternText, options);
-                if (!regex.isValid())
-                {
-                    applyHighlights();
-                    return;
-                }
-
-                QRegularExpressionMatchIterator it = regex.globalMatch(rawStringText);
-                while (it.hasNext())
-                {
-                    const QRegularExpressionMatch match = it.next();
-                    if (match.capturedLength() <= 0)
-                    {
-                        continue;
-                    }
-                    searchState->ranges.push_back({ match.capturedStart(), match.capturedLength() });
-                }
-
-                if (!searchState->ranges.isEmpty())
-                {
-                    searchState->currentIndex = 0;
-                }
-                applyHighlights();
-            };
-
-            // jumpNext：跳到下一个匹配项（循环）。
-            auto jumpNext = [searchState, applyHighlights, rebuildMatches]() {
-                if (searchState->ranges.isEmpty())
-                {
-                    rebuildMatches();
-                    return;
-                }
-                searchState->currentIndex = (searchState->currentIndex + 1) % searchState->ranges.size();
-                applyHighlights();
-            };
-
-            connect(searchEdit, &QLineEdit::textChanged, page, [rebuildMatches](const QString&) {
-                rebuildMatches();
-            });
-            connect(searchEdit, &QLineEdit::returnPressed, page, [jumpNext]() {
-                jumpNext();
-            });
-            connect(regexButton, &QToolButton::toggled, page, [rebuildMatches](bool) {
-                rebuildMatches();
-            });
-            connect(caseButton, &QToolButton::toggled, page, [rebuildMatches](bool) {
-                rebuildMatches();
-            });
-            connect(nextButton, &QToolButton::clicked, page, [jumpNext]() {
-                jumpNext();
-            });
-
-            QShortcut* findShortcut = new QShortcut(QKeySequence::Find, page);
-            connect(findShortcut, &QShortcut::activated, page, [searchEdit]() {
-                searchEdit->setFocus();
-                searchEdit->selectAll();
-            });
-
-            QShortcut* f3Shortcut = new QShortcut(QKeySequence(Qt::Key_F3), page);
-            connect(f3Shortcut, &QShortcut::activated, page, [jumpNext]() {
-                jumpNext();
-            });
+                rawStringText = QStringLiteral("<未提取到可打印字符串，或文件内容全部为二进制不可见字符。>");
+            }
+            textEditorWidget->setText(rawStringText);
 
             return page;
         }
@@ -713,65 +527,82 @@ namespace
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
 
-            // 十六进制视图改为表格布局，样式与内存模块对齐（地址+16字节+ASCII）。
-            QTableWidget* hexTable = new QTableWidget(page);
-            hexTable->setColumnCount(18);
-            QStringList headers;
-            headers << QStringLiteral("地址");
-            for (int index = 0; index < 16; ++index)
-            {
-                headers << QStringLiteral("%1").arg(index, 2, 16, QChar('0')).toUpper();
-            }
-            headers << QStringLiteral("ASCII");
-            hexTable->setHorizontalHeaderLabels(headers);
-            hexTable->setSelectionBehavior(QAbstractItemView::SelectItems);
-            hexTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
-            hexTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-            hexTable->setAlternatingRowColors(true);
-            hexTable->verticalHeader()->setVisible(false);
-            hexTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-            hexTable->horizontalHeader()->setStretchLastSection(true);
-            layout->addWidget(hexTable, 1);
+            // 文件属性页按用户要求统一改为文本编辑器展示（只读）。
+            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
+            textEditorWidget->setReadOnly(true);
+            layout->addWidget(textEditorWidget, 1);
 
+            // hexHintLabel 用途：提示用户该页面默认仅预览文件前部字节。
+            QLabel* hexHintLabel = new QLabel(page);
+            hexHintLabel->setWordWrap(true);
+            layout->addWidget(hexHintLabel, 0);
+
+            // 文件详情页只读取前 2MB，防止超大文件导致属性窗口卡顿。
+            constexpr qint64 kMaxPreviewBytes = 2 * 1024 * 1024;
             QFile file(m_filePath);
             if (!file.open(QIODevice::ReadOnly))
             {
-                hexTable->setRowCount(1);
-                hexTable->setItem(0, 0, new QTableWidgetItem(QStringLiteral("无法读取文件，无法显示十六进制。")));
+                hexHintLabel->setText(QStringLiteral("无法读取文件，无法显示十六进制。"));
+                textEditorWidget->setText(QStringLiteral("无法读取文件，无法显示十六进制。"));
                 return page;
             }
 
-            const QByteArray bytes = file.read(16 * 256);
+            const qint64 totalBytes = file.size();
+            const QByteArray bytes = file.read(kMaxPreviewBytes);
             file.close();
-            const int rowCount = (bytes.size() + 15) / 16;
-            hexTable->setRowCount(std::max(1, rowCount));
 
-            for (int row = 0; row < rowCount; ++row)
+            if (bytes.isEmpty())
             {
-                const int offset = row * 16;
-                const QByteArray block = bytes.mid(offset, 16);
-                hexTable->setItem(
-                    row,
-                    0,
-                    new QTableWidgetItem(QStringLiteral("0x%1").arg(offset, 8, 16, QChar('0')).toUpper()));
+                hexHintLabel->setText(QStringLiteral("文件为空。"));
+                textEditorWidget->setText(QStringLiteral("<empty>"));
+                return page;
+            }
 
+            QStringList dumpRowList;
+            constexpr int bytesPerLine = 16;
+            const int previewBytesCount = bytes.size();
+            dumpRowList.reserve((previewBytesCount + bytesPerLine - 1) / bytesPerLine);
+            for (int offset = 0; offset < previewBytesCount; offset += bytesPerLine)
+            {
+                QStringList byteTextList;
                 QString asciiText;
-                for (int column = 0; column < 16; ++column)
+                asciiText.reserve(bytesPerLine);
+                for (int index = 0; index < bytesPerLine; ++index)
                 {
-                    QString byteText = QStringLiteral("--");
-                    if (column < block.size())
+                    const int byteIndex = offset + index;
+                    if (byteIndex < previewBytesCount)
                     {
-                        const unsigned char byteValue = static_cast<unsigned char>(block[column]);
-                        byteText = QStringLiteral("%1").arg(byteValue, 2, 16, QChar('0')).toUpper();
-                        asciiText += std::isprint(byteValue) != 0 ? QChar::fromLatin1(block[column]) : QChar('.');
+                        const unsigned char byteValue = static_cast<unsigned char>(bytes.at(byteIndex));
+                        byteTextList.push_back(QStringLiteral("%1").arg(byteValue, 2, 16, QChar('0')).toUpper());
+                        asciiText.push_back(std::isprint(byteValue) ? QChar::fromLatin1(static_cast<char>(byteValue)) : QChar('.'));
                     }
                     else
                     {
-                        asciiText += QChar(' ');
+                        byteTextList.push_back(QStringLiteral("--"));
+                        asciiText.push_back(' ');
                     }
-                    hexTable->setItem(row, column + 1, new QTableWidgetItem(byteText));
                 }
-                hexTable->setItem(row, 17, new QTableWidgetItem(asciiText));
+
+                const QString rowText = QStringLiteral("0x%1  %2  |%3|")
+                    .arg(QString::number(offset, 16).toUpper().rightJustified(8, QChar('0')))
+                    .arg(byteTextList.join(' '))
+                    .arg(asciiText);
+                dumpRowList.push_back(rowText);
+            }
+            textEditorWidget->setText(dumpRowList.join('\n'));
+
+            if (totalBytes > bytes.size())
+            {
+                hexHintLabel->setText(
+                    QStringLiteral("当前仅预览文件前 %1 字节，总大小 %2 字节。")
+                    .arg(bytes.size())
+                    .arg(totalBytes));
+            }
+            else
+            {
+                hexHintLabel->setText(
+                    QStringLiteral("已加载完整文件，共 %1 字节。")
+                    .arg(totalBytes));
             }
 
             return page;

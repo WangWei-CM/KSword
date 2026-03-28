@@ -1,6 +1,7 @@
 ﻿#include "MemoryDock.h"
 
 #include "../theme.h"
+#include "../UI/HexEditorWidget.h"
 
 #include <QAction>
 #include <QApplication>
@@ -9,7 +10,6 @@
 #include <QClipboard>
 #include <QDateTime>
 #include <QDialog>
-#include <QEvent>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileDialog>
@@ -22,13 +22,11 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
-#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
-#include <QMouseEvent>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QPointer>

@@ -37,6 +37,7 @@
 
 class LogDockWidget; // 前置声明：日志 Dock 面板类型。
 class ProgressDockWidget; // 前置声明：当前操作进度面板类型。
+class CodeEditorWidget; // 前置声明：即时窗口可复用代码编辑器组件。
 
 class MainWindow : public QMainWindow
 {
@@ -146,6 +147,7 @@ private:
     RegistryDock* m_registryWidget;
     LogDockWidget* m_logWidget; // 日志输出 Dock 的可视化日志面板。
     ProgressDockWidget* m_progressWidget; // 当前操作 Dock 的任务进度卡片面板。
+    CodeEditorWidget* m_immediateEditorWidget = nullptr; // 即时窗口统一代码编辑器组件。
 
     // 顶部菜单栏右侧权限按钮（纯文字）：
     // - Admin：管理员权限状态与提权入口；

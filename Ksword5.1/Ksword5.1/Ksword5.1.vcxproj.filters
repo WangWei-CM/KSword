@@ -91,6 +91,12 @@
     <ClCompile Include="UI\UIBaseFunction.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\HexEditorWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\CodeEditorWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Framework\Log.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -157,6 +163,12 @@
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="SettingsDock\SettingsDock.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="UI\HexEditorWidget.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="UI\CodeEditorWidget.h">
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="WelcomeDock\WelcomeDock.h">

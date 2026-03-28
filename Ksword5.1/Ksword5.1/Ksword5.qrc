@@ -45,5 +45,20 @@
         <file alias="settings_theme_dark.svg">Resource/Icon/weather/moon_line.svg</file>
         <file alias="settings_background_browse.svg">Resource/Icon/file/folder_open_line.svg</file>
         <file alias="settings_background_reset.svg">Resource/Icon/design/background_line.svg</file>
+
+        <!-- 文本编辑器工具栏图标（全部使用 SVG 资源，禁止回退 MainLogo） -->
+        <file alias="codeeditor_new.svg">Resource/Icon/file/file_new_line.svg</file>
+        <file alias="codeeditor_open.svg">Resource/Icon/file/folder_open_line.svg</file>
+        <file alias="codeeditor_save.svg">Resource/Icon/file/save_line.svg</file>
+        <file alias="codeeditor_save_as.svg">Resource/Icon/file/file_export_line.svg</file>
+        <file alias="codeeditor_undo.svg">Resource/Icon/arrow/back_line.svg</file>
+        <file alias="codeeditor_redo.svg">Resource/Icon/arrow/forward_line.svg</file>
+        <file alias="codeeditor_cut.svg">Resource/Icon/design/scissors_line.svg</file>
+        <file alias="codeeditor_copy.svg">Resource/Icon/file/copy_line.svg</file>
+        <file alias="codeeditor_paste.svg">Resource/Icon/file/paste_line.svg</file>
+        <file alias="codeeditor_find.svg">Resource/Icon/file/search_line.svg</file>
+        <file alias="codeeditor_replace.svg">Resource/Icon/system/refresh_2_line.svg</file>
+        <file alias="codeeditor_goto.svg">Resource/Icon/arrow/arrow_down_line.svg</file>
+        <file alias="codeeditor_wrap.svg">Resource/Icon/editor/text_area_line.svg</file>
     </qresource>
 </RCC>

@@ -1,6 +1,7 @@
 #include "ProcessDetailWindow.h"
 
 #include "../theme.h"
+#include "../UI/CodeEditorWidget.h"
 
 #include <QAbstractItemView>
 #include <QApplication>
@@ -12,6 +13,7 @@
 #include <QFileIconProvider>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QEvent>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
@@ -21,8 +23,8 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QPalette>
 #include <QPointer>
-#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRunnable>
 #include <QThreadPool>
@@ -140,6 +142,174 @@ namespace
             .arg(QStringLiteral("#2E8BFF"))
             .arg(KswordTheme::PrimaryBluePressedHex)
             .arg(KswordTheme::SurfaceHex());
+    }
+
+    // buildProcessDetailRootStyle 作用：
+    // - 统一进程详情窗口内部控件的深浅色样式；
+    // - 明确设置表格/分组框/输入框/Tab/滚动条背景，消除默认白底残留。
+    QString buildProcessDetailRootStyle()
+    {
+        return QStringLiteral(
+            "QWidget#ProcessDetailWindowRoot{"
+            "  background:%1;"
+            "  color:%2;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QGroupBox{"
+            "  border:1px solid %3;"
+            "  border-radius:4px;"
+            "  margin-top:8px;"
+            "  padding-top:8px;"
+            "  background:%4;"
+            "  color:%2;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QGroupBox::title{"
+            "  subcontrol-origin:margin;"
+            "  left:8px;"
+            "  padding:0 4px;"
+            "  color:%2;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QLineEdit,"
+            "QWidget#ProcessDetailWindowRoot QComboBox,"
+            "QWidget#ProcessDetailWindowRoot QPlainTextEdit,"
+            "QWidget#ProcessDetailWindowRoot QTextEdit{"
+            "  background:%4;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  border-radius:3px;"
+            "  padding:3px 6px;"
+            "  selection-background-color:%5;"
+            "  selection-color:#FFFFFF;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QLineEdit[readOnly=\"true\"]{"
+            "  background:%6;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QComboBox::drop-down{"
+            "  border:none;"
+            "  width:20px;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QTableWidget,"
+            "QWidget#ProcessDetailWindowRoot QTreeWidget{"
+            "  background:%4;"
+            "  alternate-background-color:%6;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  gridline-color:%3;"
+            "  selection-background-color:%5;"
+            "  selection-color:#FFFFFF;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QTableCornerButton::section{"
+            "  background:%4;"
+            "  border:1px solid %3;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QHeaderView::section{"
+            "  background:%4;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  padding:4px;"
+            "  font-weight:600;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QTabWidget::pane{"
+            "  border:1px solid %3;"
+            "  background:%4;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QTabBar::tab{"
+            "  background:%4;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  border-bottom:none;"
+            "  padding:6px 10px;"
+            "  margin-right:1px;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QTabBar::tab:selected{"
+            "  background:%5;"
+            "  color:#FFFFFF;"
+            "  border-color:%5;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QTabBar::tab:hover:!selected{"
+            "  background:%6;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QScrollBar:vertical{"
+            "  background:%4;"
+            "  width:12px;"
+            "  margin:0;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QScrollBar:horizontal{"
+            "  background:%4;"
+            "  height:12px;"
+            "  margin:0;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QScrollBar::handle:vertical,"
+            "QWidget#ProcessDetailWindowRoot QScrollBar::handle:horizontal{"
+            "  background:%5;"
+            "  min-height:20px;"
+            "  min-width:20px;"
+            "  border-radius:4px;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QScrollBar::handle:vertical:hover,"
+            "QWidget#ProcessDetailWindowRoot QScrollBar::handle:horizontal:hover{"
+            "  background:#2E8BFF;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QScrollBar::add-line,"
+            "QWidget#ProcessDetailWindowRoot QScrollBar::sub-line{"
+            "  background:%4;"
+            "  border:none;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QScrollBar::add-page,"
+            "QWidget#ProcessDetailWindowRoot QScrollBar::sub-page{"
+            "  background:%4;"
+            "}")
+            .arg(QStringLiteral("palette(window)"))
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::SurfaceAltHex());
+    }
+
+    // buildStateLabelStyle 作用：
+    // - 统一状态标签（刷新中/完成/警告/失败）样式拼接；
+    // - 传入颜色和字重即可生成可复用样式文本。
+    QString buildStateLabelStyle(const QColor& textColor, const int fontWeight)
+    {
+        return QStringLiteral("color:%1; font-weight:%2;")
+            .arg(textColor.name(QColor::HexRgb))
+            .arg(fontWeight);
+    }
+
+    // statusIdleColor 作用：返回空闲状态文本色。
+    QColor statusIdleColor()
+    {
+        return KswordTheme::IsDarkModeEnabled() ? QColor(146, 214, 156) : QColor(47, 125, 50);
+    }
+
+    // statusWarningColor 作用：返回警告状态文本色。
+    QColor statusWarningColor()
+    {
+        return KswordTheme::IsDarkModeEnabled() ? QColor(255, 205, 130) : QColor(138, 109, 59);
+    }
+
+    // statusErrorColor 作用：返回错误状态文本色。
+    QColor statusErrorColor()
+    {
+        return KswordTheme::IsDarkModeEnabled() ? QColor(255, 145, 145) : QColor(220, 50, 47);
+    }
+
+    // statusSecondaryColor 作用：返回中性状态文本色。
+    QColor statusSecondaryColor()
+    {
+        return KswordTheme::IsDarkModeEnabled() ? QColor(178, 178, 178) : QColor(79, 79, 79);
+    }
+
+    // signatureTrustedColor 作用：返回签名可信文本色。
+    QColor signatureTrustedColor()
+    {
+        return KswordTheme::IsDarkModeEnabled() ? QColor(130, 210, 140) : QColor(34, 139, 34);
+    }
+
+    // signatureUntrustedColor 作用：返回签名不可信文本色。
+    QColor signatureUntrustedColor()
+    {
+        return KswordTheme::IsDarkModeEnabled() ? QColor(255, 155, 155) : QColor(220, 50, 47);
     }
 
     // 格式化双精度到固定小数位字符串。
