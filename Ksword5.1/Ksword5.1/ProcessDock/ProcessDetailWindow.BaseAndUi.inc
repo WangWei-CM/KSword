@@ -185,6 +185,150 @@ std::uint32_t ProcessDetailWindow::pid() const
     return m_baseRecord.pid;
 }
 
+void ProcessDetailWindow::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+
+    // 主题切换时立即重建内部样式，避免旧主题颜色残留。
+    if (event == nullptr)
+    {
+        return;
+    }
+
+    const bool isThemeEvent =
+        (event->type() == QEvent::PaletteChange) ||
+        (event->type() == QEvent::ApplicationPaletteChange) ||
+        (event->type() == QEvent::StyleChange);
+    if (!isThemeEvent)
+    {
+        return;
+    }
+
+    applyThemeStyle();
+    refreshDetailTabTexts();
+
+    if (m_threadInspectStatusLabel != nullptr)
+    {
+        updateThreadInspectStatusLabel(m_threadInspectStatusLabel->text(), m_threadInspectRefreshing);
+    }
+
+    if (m_moduleStatusLabel != nullptr)
+    {
+        updateModuleStatusLabel(m_moduleStatusLabel->text(), m_moduleRefreshing);
+        if (!m_moduleRefreshing && m_moduleRecords.empty())
+        {
+            m_moduleStatusLabel->setStyleSheet(buildStateLabelStyle(statusErrorColor(), 700));
+        }
+    }
+
+    if (m_tokenStatusLabel != nullptr)
+    {
+        m_tokenStatusLabel->setStyleSheet(
+            m_tokenRefreshing
+            ? buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700)
+            : buildStateLabelStyle(statusIdleColor(), 600));
+    }
+
+    if (m_pebStatusLabel != nullptr)
+    {
+        const bool hasDiagnostic = m_pebStatusLabel->text().contains(QStringLiteral(" | "));
+        if (m_pebRefreshing)
+        {
+            m_pebStatusLabel->setStyleSheet(buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700));
+        }
+        else if (hasDiagnostic)
+        {
+            m_pebStatusLabel->setStyleSheet(buildStateLabelStyle(statusWarningColor(), 700));
+        }
+        else
+        {
+            m_pebStatusLabel->setStyleSheet(buildStateLabelStyle(statusIdleColor(), 600));
+        }
+    }
+}
+
+void ProcessDetailWindow::applyThemeStyle()
+{
+    if (m_themeStyleApplying)
+    {
+        return;
+    }
+    m_themeStyleApplying = true;
+
+    // 显式设置窗口调色板：
+    // - Win11 下必须手动强制窗口背景，避免被系统自动接管为亮色。
+    const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
+    QPalette themedPalette = (qApp != nullptr) ? qApp->palette() : palette();
+    themedPalette.setColor(QPalette::Window, darkModeEnabled ? QColor(0, 0, 0) : QColor(255, 255, 255));
+    themedPalette.setColor(QPalette::WindowText, darkModeEnabled ? QColor(255, 255, 255) : QColor(0, 0, 0));
+    themedPalette.setColor(QPalette::Base, darkModeEnabled ? QColor(22, 22, 22) : QColor(255, 255, 255));
+    themedPalette.setColor(QPalette::AlternateBase, darkModeEnabled ? QColor(30, 30, 30) : QColor(247, 249, 252));
+    themedPalette.setColor(QPalette::Text, darkModeEnabled ? QColor(255, 255, 255) : QColor(0, 0, 0));
+    themedPalette.setColor(QPalette::Mid, darkModeEnabled ? QColor(86, 86, 86) : QColor(180, 180, 180));
+    themedPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
+    themedPalette.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
+
+    setPalette(themedPalette);
+    setAutoFillBackground(true);
+    setAttribute(Qt::WA_StyledBackground, true);
+    setStyleSheet(buildProcessDetailRootStyle());
+
+    // 子页面也强制设置背景，避免 tab 内容区域出现白底。
+    const std::vector<QWidget*> tabPageList{
+        m_detailTab,
+        m_actionTab,
+        m_moduleTab,
+        m_tokenTab,
+        m_pebTab
+    };
+    for (QWidget* tabPage : tabPageList)
+    {
+        if (tabPage == nullptr)
+        {
+            continue;
+        }
+        tabPage->setPalette(themedPalette);
+        tabPage->setAutoFillBackground(true);
+        tabPage->setAttribute(Qt::WA_StyledBackground, true);
+    }
+
+    // 表头统一用主题文本色，杜绝深色模式下黑字问题。
+    const QString headerStyle = QStringLiteral(
+        "QHeaderView::section {"
+        "  color:%1;"
+        "  background:%2;"
+        "  border:1px solid %3;"
+        "  padding:4px;"
+        "  font-weight:600;"
+        "}")
+        .arg(KswordTheme::TextPrimaryHex())
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::BorderHex());
+
+    if (m_threadInspectTable != nullptr && m_threadInspectTable->horizontalHeader() != nullptr)
+    {
+        m_threadInspectTable->horizontalHeader()->setStyleSheet(headerStyle);
+    }
+    if (m_moduleTable != nullptr && m_moduleTable->header() != nullptr)
+    {
+        m_moduleTable->header()->setStyleSheet(headerStyle);
+    }
+
+    if (m_signatureCheckBox != nullptr)
+    {
+        m_signatureCheckBox->setStyleSheet(QStringLiteral(
+            "QCheckBox { color:%1; font-weight:600; }"
+            "QCheckBox::indicator { border:1px solid %2; background:%3; width:13px; height:13px; }"
+            "QCheckBox::indicator:checked { background:%4; border:1px solid %4; }")
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::PrimaryBlueHex));
+    }
+
+    m_themeStyleApplying = false;
+}
+
 void ProcessDetailWindow::initializeUi()
 {
     // UI 初始化入口日志：用于排查窗口初始化顺序。
@@ -192,6 +336,9 @@ void ProcessDetailWindow::initializeUi()
     info << initUiEvent
         << "[ProcessDetailWindow] initializeUi: 创建根布局和Tab容器。"
         << eol;
+
+    // 根窗口对象名用于样式选择器精确命中。
+    setObjectName(QStringLiteral("ProcessDetailWindowRoot"));
 
     // 根布局只放一个 TabWidget，满足 4.2 的三分栏结构。
     m_rootLayout = new QVBoxLayout(this);
@@ -208,6 +355,12 @@ void ProcessDetailWindow::initializeUi()
     m_tokenTab = new QWidget(m_tabWidget);
     m_pebTab = new QWidget(m_tabWidget);
 
+    m_detailTab->setObjectName(QStringLiteral("ProcessDetailTab_Detail"));
+    m_actionTab->setObjectName(QStringLiteral("ProcessDetailTab_Action"));
+    m_moduleTab->setObjectName(QStringLiteral("ProcessDetailTab_Module"));
+    m_tokenTab->setObjectName(QStringLiteral("ProcessDetailTab_Token"));
+    m_pebTab->setObjectName(QStringLiteral("ProcessDetailTab_Peb"));
+
     initializeDetailTab();
     initializeActionTab();
     initializeModuleTab();
@@ -221,6 +374,9 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget->addTab(m_tokenTab, QIcon(":/Icon/process_critical.svg"), "令牌");
     m_tabWidget->addTab(m_pebTab, QIcon(":/Icon/process_tree.svg"), "PEB");
     m_tabWidget->setCurrentWidget(m_detailTab);
+
+    // 所有控件创建完毕后统一套用主题样式。
+    applyThemeStyle();
 
     updateWindowTitle();
 }
@@ -571,10 +727,9 @@ void ProcessDetailWindow::initializeTokenTab()
     tokenTopBarLayout->addWidget(m_tokenStatusLabel, 1);
     m_tokenLayout->addLayout(tokenTopBarLayout);
 
-    m_tokenDetailOutput = new QPlainTextEdit(m_tokenTab);
+    m_tokenDetailOutput = new CodeEditorWidget(m_tokenTab);
     m_tokenDetailOutput->setReadOnly(true);
-    m_tokenDetailOutput->setLineWrapMode(QPlainTextEdit::NoWrap);
-    m_tokenDetailOutput->setPlaceholderText("令牌详细信息将在此处显示。");
+    m_tokenDetailOutput->setText(QStringLiteral("令牌详细信息将在此处显示。"));
     m_tokenLayout->addWidget(m_tokenDetailOutput, 1);
 
     const QString buttonStyle = buildBlueButtonStyle();
@@ -604,10 +759,9 @@ void ProcessDetailWindow::initializePebTab()
     pebTopBarLayout->addWidget(m_pebStatusLabel, 1);
     m_pebLayout->addLayout(pebTopBarLayout);
 
-    m_pebDetailOutput = new QPlainTextEdit(m_pebTab);
+    m_pebDetailOutput = new CodeEditorWidget(m_pebTab);
     m_pebDetailOutput->setReadOnly(true);
-    m_pebDetailOutput->setLineWrapMode(QPlainTextEdit::NoWrap);
-    m_pebDetailOutput->setPlaceholderText("PEB 与地址空间摘要将在此处显示。");
+    m_pebDetailOutput->setText(QStringLiteral("PEB 与地址空间摘要将在此处显示。"));
     m_pebLayout->addWidget(m_pebDetailOutput, 1);
 
     const QString buttonStyle = buildBlueButtonStyle();
@@ -772,8 +926,8 @@ void ProcessDetailWindow::refreshDetailTabTexts()
     m_detailAdminValue->setText(m_baseRecord.isAdmin ? "■ 是" : "■ 否");
     m_detailAdminValue->setStyleSheet(
         m_baseRecord.isAdmin
-        ? (KswordTheme::IsDarkModeEnabled() ? "color:#82D28C; font-weight:700;" : "color:#228B22; font-weight:700;")
-        : (KswordTheme::IsDarkModeEnabled() ? "color:#FF9B9B; font-weight:700;" : "color:#DC322F; font-weight:700;"));
+        ? buildStateLabelStyle(signatureTrustedColor(), 700)
+        : buildStateLabelStyle(signatureUntrustedColor(), 700));
     m_detailArchitectureValue->setText(QString::fromStdString(m_baseRecord.architectureText.empty() ? "Unknown" : m_baseRecord.architectureText));
     m_detailPriorityValue->setText(QString::fromStdString(m_baseRecord.priorityText.empty() ? "Unknown" : m_baseRecord.priorityText));
     m_detailSessionValue->setText(QString::number(m_baseRecord.sessionId));
@@ -786,22 +940,17 @@ void ProcessDetailWindow::refreshDetailTabTexts()
     if (!m_baseRecord.signatureTrusted && m_baseRecord.signatureState != "Pending")
     {
         m_detailSignatureValue->setStyleSheet(
-            KswordTheme::IsDarkModeEnabled()
-            ? "color:#FF9B9B; font-weight:700;"
-            : "color:#DC322F; font-weight:700;");
+            buildStateLabelStyle(signatureUntrustedColor(), 700));
     }
     else if (m_baseRecord.signatureTrusted)
     {
         m_detailSignatureValue->setStyleSheet(
-            KswordTheme::IsDarkModeEnabled()
-            ? "color:#82D28C; font-weight:700;"
-            : "color:#228B22; font-weight:700;");
+            buildStateLabelStyle(signatureTrustedColor(), 700));
     }
     else
     {
         m_detailSignatureValue->setStyleSheet(
-            QStringLiteral("color:%1; font-weight:600;")
-            .arg(KswordTheme::TextSecondaryHex()));
+            buildStateLabelStyle(statusSecondaryColor(), 600));
     }
 
     // 刷新父进程信息区。

@@ -49,6 +49,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <sstream>
@@ -141,6 +142,62 @@ namespace
         QColor highlightColor = KswordTheme::PrimaryBlueColor;
         highlightColor.setAlpha(alphaValue);
         return highlightColor;
+    }
+
+    // hasDetailWindowSignificantChange 作用：
+    // - 判断两轮进程记录是否存在“需要立刻同步到详情窗口”的显著变化；
+    // - 通过阈值过滤掉轻微抖动，减少刷新期间 UI 卡顿。
+    bool hasDetailWindowSignificantChange(
+        const ks::process::ProcessRecord& oldRecord,
+        const ks::process::ProcessRecord& newRecord)
+    {
+        if (oldRecord.pid != newRecord.pid ||
+            oldRecord.creationTime100ns != newRecord.creationTime100ns)
+        {
+            return true;
+        }
+
+        if (std::fabs(oldRecord.cpuPercent - newRecord.cpuPercent) >= 4.0)
+        {
+            return true;
+        }
+        if (std::fabs(oldRecord.ramMB - newRecord.ramMB) >= 16.0)
+        {
+            return true;
+        }
+        if (std::fabs(oldRecord.diskMBps - newRecord.diskMBps) >= 1.0)
+        {
+            return true;
+        }
+        if (std::fabs(oldRecord.netKBps - newRecord.netKBps) >= 8.0)
+        {
+            return true;
+        }
+        if (std::fabs(oldRecord.gpuPercent - newRecord.gpuPercent) >= 5.0)
+        {
+            return true;
+        }
+
+        if (oldRecord.threadCount != newRecord.threadCount ||
+            oldRecord.handleCount != newRecord.handleCount ||
+            oldRecord.parentPid != newRecord.parentPid ||
+            oldRecord.isAdmin != newRecord.isAdmin ||
+            oldRecord.signatureTrusted != newRecord.signatureTrusted)
+        {
+            return true;
+        }
+
+        if (oldRecord.imagePath != newRecord.imagePath ||
+            oldRecord.commandLine != newRecord.commandLine ||
+            oldRecord.userName != newRecord.userName ||
+            oldRecord.signatureState != newRecord.signatureState ||
+            oldRecord.signaturePublisher != newRecord.signaturePublisher ||
+            oldRecord.startTimeText != newRecord.startTimeText)
+        {
+            return true;
+        }
+
+        return false;
     }
 
     // 统一按钮蓝色样式，和现有主题风格保持一致。
@@ -499,6 +556,7 @@ void ProcessDock::initializeProcessTable()
     m_processTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_processTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_processTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_processTable->setUniformRowHeights(true);
     m_processTable->setSortingEnabled(true);
     m_processTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_processTable->setAlternatingRowColors(true);
@@ -1322,8 +1380,8 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     const bool isFirstRefresh = m_cacheByIdentity.empty();
     const int staticDetailFillBudget =
         detailModeEnabled
-        ? 4096                          // 详细视图尽量全量补齐，结合并行线程避免 Pending 堆积。
-        : (isFirstRefresh ? 2 : 4);    // 监视视图优先速度，预算较低。
+        ? (isFirstRefresh ? 96 : 48)   // 详细视图也做预算控制，避免首轮全量静态查询导致 UI 抖动。
+        : (isFirstRefresh ? 8 : 4);    // 监视视图优先速度，预算更小。
     const std::uint32_t cpuCount = m_logicalCpuCount;
     const auto previousCache = m_cacheByIdentity;
     const auto previousCounters = m_counterSampleByIdentity;
@@ -1406,26 +1464,55 @@ void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult)
     const auto elapsedMs = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - m_lastRefreshStartTime).count());
 
-    // 用新结果替换缓存，并重建表格。
-    m_cacheByIdentity = refreshResult.nextCache;
-    m_counterSampleByIdentity = refreshResult.nextCounters;
-
     // 把最新进程数据同步到已打开的详情窗口（若对应进程仍存在）。
+    // 性能策略：
+    // 1) 仅同步“可见且未最小化”的详情窗口；
+    // 2) 轻微变化由节流器吸收，避免每轮刷新都触发重型解析链路。
+    const std::chrono::milliseconds detailWindowSyncInterval(1500);
     for (auto windowIt = m_detailWindowByIdentity.begin(); windowIt != m_detailWindowByIdentity.end();)
     {
         if (windowIt->second == nullptr)
         {
+            m_detailWindowLastSyncTimeByIdentity.erase(windowIt->first);
             windowIt = m_detailWindowByIdentity.erase(windowIt);
             continue;
         }
 
-        const auto cacheIt = m_cacheByIdentity.find(windowIt->first);
-        if (cacheIt != m_cacheByIdentity.end())
+        const QPointer<ProcessDetailWindow>& detailWindow = windowIt->second;
+        if (!detailWindow->isVisible() || detailWindow->isMinimized())
         {
-            windowIt->second->updateBaseRecord(cacheIt->second.record);
+            ++windowIt;
+            continue;
+        }
+
+        const auto nextCacheIt = refreshResult.nextCache.find(windowIt->first);
+        if (nextCacheIt == refreshResult.nextCache.end())
+        {
+            ++windowIt;
+            continue;
+        }
+
+        const auto previousCacheIt = m_cacheByIdentity.find(windowIt->first);
+        const bool hasSignificantChange =
+            (previousCacheIt == m_cacheByIdentity.end()) ||
+            hasDetailWindowSignificantChange(previousCacheIt->second.record, nextCacheIt->second.record);
+
+        const auto lastSyncIt = m_detailWindowLastSyncTimeByIdentity.find(windowIt->first);
+        const bool reachPeriodicSyncTime =
+            (lastSyncIt == m_detailWindowLastSyncTimeByIdentity.end()) ||
+            (std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - lastSyncIt->second) >= detailWindowSyncInterval);
+
+        if (hasSignificantChange || reachPeriodicSyncTime)
+        {
+            detailWindow->updateBaseRecord(nextCacheIt->second.record);
+            m_detailWindowLastSyncTimeByIdentity[windowIt->first] = nowTime;
         }
         ++windowIt;
     }
+
+    // 用新结果替换缓存，并重建表格。
+    m_cacheByIdentity = refreshResult.nextCache;
+    m_counterSampleByIdentity = refreshResult.nextCounters;
 
     rebuildTable();
 
@@ -1556,31 +1643,25 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
 
         if (needsStaticFill)
         {
-            // 详细信息视图中，允许全量补齐静态字段（路径/命令行/用户/签名）。
-            // 监视视图仍维持预算限制，避免整体刷新卡顿。
-            const bool allowFill =
-                detailModeEnabled ? true : (remainingStaticBudget > 0);
+            // 详细信息视图与监视视图都遵循预算：
+            // - 详细视图预算更高，但不再全量硬查，避免刷新瞬间卡顿；
+            // - 预算外的项标记为 Pending，后续轮次继续补齐。
+            const bool allowFill = (remainingStaticBudget > 0);
             if (allowFill)
             {
                 shouldFillStatic[recordIndex] = true;
                 includeSignatureList[recordIndex] = includeSignatureCheck;
-                if (!detailModeEnabled)
-                {
-                    --remainingStaticBudget;
-                }
+                --remainingStaticBudget;
             }
             else
             {
                 // 超预算时延后慢操作：保持基础数据可见，并标记后续继续处理。
                 if (processRecord.signatureState.empty())
                 {
-                    processRecord.signatureState = detailModeEnabled ? "Unknown" : "Pending";
+                    processRecord.signatureState = "Pending";
                 }
-                if (!detailModeEnabled)
-                {
-                    processRecord.signaturePublisher.clear();
-                    processRecord.signatureTrusted = false;
-                }
+                processRecord.signaturePublisher.clear();
+                processRecord.signatureTrusted = false;
                 ++refreshResult.staticDeferredCount;
             }
         }
@@ -1609,7 +1690,7 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         // - 监视视图：仅小并发，避免过度占用 CPU。
         const unsigned int hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
         const unsigned int wantedThreads = detailModeEnabled
-            ? std::max(2u, hardwareThreads)
+            ? std::max(2u, std::min(6u, hardwareThreads))
             : 2u;
         const unsigned int workerCount = std::max(
             1u,
@@ -1737,10 +1818,17 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
 
 void ProcessDock::rebuildTable()
 {
+    if (m_processTable == nullptr)
+    {
+        return;
+    }
+
     // 记录用户当前排序列与顺序，解决“刷新后被重置为 PID 排序”的问题。
     const int previousSortColumn = m_processTable->header()->sortIndicatorSection();
     const Qt::SortOrder previousSortOrder = m_processTable->header()->sortIndicatorOrder();
 
+    // 刷新期间临时冻结视图更新，减少大量 addTopLevelItem 时的重绘抖动。
+    m_processTable->setUpdatesEnabled(false);
     m_processTable->clear();
 
     // 树状模式下保持父子顺序，禁用自动排序。
@@ -1885,6 +1973,10 @@ void ProcessDock::rebuildTable()
 
     // 根据本轮数据刷新标题栏“占用总和”。
     updateUsageSummaryInHeader(displayRows);
+
+    // 表格重建完成后恢复刷新绘制。
+    m_processTable->setUpdatesEnabled(true);
+    m_processTable->viewport()->update();
 
     // 重建完成后输出一条细粒度日志，便于分析 UI 刷新开销与排序状态。
     kLogEvent logEvent;
@@ -2386,13 +2478,10 @@ QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processR
 
 QIcon ProcessDock::resolveProcessIcon(const ks::process::ProcessRecord& processRecord)
 {
-    // 优先使用记录中的 imagePath；若为空则按 PID 实时查询一次路径兜底。
+    // 仅使用后台缓存中的 imagePath：
+    // - 禁止在 UI 线程里按 PID 再查路径，避免刷新阶段出现卡顿。
     QString pathText = QString::fromStdString(processRecord.imagePath);
-    if (pathText.trimmed().isEmpty() && processRecord.pid != 0)
-    {
-        pathText = QString::fromStdString(ks::process::QueryProcessPathByPid(processRecord.pid));
-    }
-    if (pathText.isEmpty())
+    if (pathText.trimmed().isEmpty())
     {
         return QIcon(":/Icon/process_main.svg");
     }
@@ -3415,6 +3504,7 @@ void ProcessDock::openProcessDetailsPlaceholder()
     if (existingWindowIt != m_detailWindowByIdentity.end() && existingWindowIt->second != nullptr)
     {
         existingWindowIt->second->updateBaseRecord(detailRecord);
+        m_detailWindowLastSyncTimeByIdentity[identityKey] = std::chrono::steady_clock::now();
         existingWindowIt->second->show();
         existingWindowIt->second->raise();
         existingWindowIt->second->activateWindow();
@@ -3431,10 +3521,12 @@ void ProcessDock::openProcessDetailsPlaceholder()
     ProcessDetailWindow* detailWindow = new ProcessDetailWindow(detailRecord, nullptr);
     detailWindow->setAttribute(Qt::WA_DeleteOnClose, true);
     m_detailWindowByIdentity[identityKey] = detailWindow;
+    m_detailWindowLastSyncTimeByIdentity[identityKey] = std::chrono::steady_clock::now();
 
     // 详情窗口销毁后，从缓存移除，防止悬空指针。
     connect(detailWindow, &QObject::destroyed, this, [this, identityKey]() {
         m_detailWindowByIdentity.erase(identityKey);
+        m_detailWindowLastSyncTimeByIdentity.erase(identityKey);
     });
 
     // “转到父进程”由详情窗口发信号到这里统一处理。
@@ -3468,6 +3560,7 @@ void ProcessDock::openProcessDetailWindowByPid(const std::uint32_t pid)
         if (existingWindowIt != m_detailWindowByIdentity.end() && existingWindowIt->second != nullptr)
         {
             existingWindowIt->second->updateBaseRecord(cacheRecord);
+            m_detailWindowLastSyncTimeByIdentity[cachePair.first] = std::chrono::steady_clock::now();
             existingWindowIt->second->show();
             existingWindowIt->second->raise();
             existingWindowIt->second->activateWindow();
@@ -3508,8 +3601,10 @@ void ProcessDock::openProcessDetailWindowByPid(const std::uint32_t pid)
         ProcessDetailWindow* detailWindow = new ProcessDetailWindow(detailRecord, nullptr);
         detailWindow->setAttribute(Qt::WA_DeleteOnClose, true);
         m_detailWindowByIdentity[cachePair.first] = detailWindow;
+        m_detailWindowLastSyncTimeByIdentity[cachePair.first] = std::chrono::steady_clock::now();
         connect(detailWindow, &QObject::destroyed, this, [this, identityKey = cachePair.first]() {
             m_detailWindowByIdentity.erase(identityKey);
+            m_detailWindowLastSyncTimeByIdentity.erase(identityKey);
         });
         connect(detailWindow, &ProcessDetailWindow::requestOpenProcessByPid, this, [this](const std::uint32_t parentPid) {
             openProcessDetailWindowByPid(parentPid);
@@ -3539,8 +3634,10 @@ void ProcessDock::openProcessDetailWindowByPid(const std::uint32_t pid)
     ProcessDetailWindow* detailWindow = new ProcessDetailWindow(queriedRecord, nullptr);
     detailWindow->setAttribute(Qt::WA_DeleteOnClose, true);
     m_detailWindowByIdentity[identityKey] = detailWindow;
+    m_detailWindowLastSyncTimeByIdentity[identityKey] = std::chrono::steady_clock::now();
     connect(detailWindow, &QObject::destroyed, this, [this, identityKey]() {
         m_detailWindowByIdentity.erase(identityKey);
+        m_detailWindowLastSyncTimeByIdentity.erase(identityKey);
     });
     connect(detailWindow, &ProcessDetailWindow::requestOpenProcessByPid, this, [this](const std::uint32_t parentPid) {
         openProcessDetailWindowByPid(parentPid);

@@ -150,6 +150,8 @@
     <ClCompile Include="ProcessDock\Process_Tool.cpp" />
     <ClCompile Include="SettingsDock\AppearanceSettings.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.cpp" />
+    <ClCompile Include="UI\CodeEditorWidget.cpp" />
+    <ClCompile Include="UI\HexEditorWidget.cpp" />
     <ClCompile Include="UI\UIBaseFunction.cpp" />
     <ClCompile Include="WelcomeDock\WelcomeDock.cpp" />
     <ClCompile Include="WindowDock\WindowDock.cpp" />
@@ -193,6 +195,8 @@
     <QtMoc Include="ProcessDock\ProcessDetailWindow.h" />
     <QtMoc Include="ProcessDock\ProcessDock.h" />
     <QtMoc Include="SettingsDock\SettingsDock.h" />
+    <QtMoc Include="UI\CodeEditorWidget.h" />
+    <QtMoc Include="UI\HexEditorWidget.h" />
     <ClInclude Include="SettingsDock\AppearanceSettings.h" />
     <ClInclude Include="ProcessDock\Process_Tool.h" />
     <ClInclude Include="UI\UI.css\UI_css.h" />

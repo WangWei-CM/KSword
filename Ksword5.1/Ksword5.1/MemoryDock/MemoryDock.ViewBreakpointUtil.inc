@@ -5,266 +5,6 @@
 // - 聚焦“可视化读写 + 调试辅助 + 文本转换”能力。
 // ============================================================
 
-bool MemoryDock::eventFilter(QObject* watched, QEvent* event)
-{
-    // 只接管十六进制表格视口事件，其它对象保持 QWidget 默认分发。
-    if (m_hexTable == nullptr || watched != m_hexTable->viewport() || event == nullptr)
-    {
-        return QWidget::eventFilter(watched, event);
-    }
-
-    // 统一的“鼠标坐标 -> 表格索引”解析函数：
-    // 当鼠标拖出表格可视区域时，仍然会把坐标钳制到边界单元格，
-    // 这样拖拽选择行为会更接近文本编辑器的连续选中体验。
-    const auto resolveIndexByMousePos = [this](const QPoint& localPosition) -> QModelIndex {
-        QModelIndex index = m_hexTable->indexAt(localPosition);
-        if (index.isValid())
-        {
-            return index;
-        }
-
-        if (m_hexTable->rowCount() <= 0 || m_hexTable->columnCount() <= 0 || m_hexTable->model() == nullptr)
-        {
-            return QModelIndex();
-        }
-
-        int row = m_hexTable->rowAt(localPosition.y());
-        if (row < 0)
-        {
-            row = (localPosition.y() < 0) ? 0 : (m_hexTable->rowCount() - 1);
-        }
-
-        int column = m_hexTable->columnAt(localPosition.x());
-        if (column < 0)
-        {
-            column = (localPosition.x() < 0) ? 0 : (m_hexTable->columnCount() - 1);
-        }
-
-        row = std::clamp(row, 0, m_hexTable->rowCount() - 1);
-        column = std::clamp(column, 0, m_hexTable->columnCount() - 1);
-        return m_hexTable->model()->index(row, column);
-        };
-
-    switch (event->type())
-    {
-    case QEvent::MouseButtonPress:
-    {
-        const QMouseEvent* mouseEvent = static_cast<const QMouseEvent*>(event);
-        if (mouseEvent->button() != Qt::LeftButton)
-        {
-            return QWidget::eventFilter(watched, event);
-        }
-
-        const QModelIndex anchorIndex = resolveIndexByMousePos(mouseEvent->pos());
-        if (!anchorIndex.isValid())
-        {
-            return true;
-        }
-
-        const int anchorColumn = anchorIndex.column();
-
-        // 仅在“十六进制列 / ASCII 列”启用文本式拖拽选择。
-        // 地址列仍保留默认行为，不强制接管。
-        if (!isHexValueColumn(anchorColumn) && !isAsciiColumn(anchorColumn))
-        {
-            return QWidget::eventFilter(watched, event);
-        }
-
-        // 记录拖拽锚点和模式：
-        // - 起点在 ASCII 列：后续仅选中 ASCII 列（跨行）
-        // - 起点在 HEX 列：后续仅选中 HEX 16 字节区域（线性）
-        m_hexDragSelecting = true;
-        m_hexDragStartInAscii = isAsciiColumn(anchorColumn);
-        m_hexDragAnchorRow = anchorIndex.row();
-        m_hexDragAnchorColumn = anchorColumn;
-        applyHexViewerDragSelection(anchorIndex.row(), anchorIndex.column());
-
-        kLogEvent dragSelectStartEvent;
-        dbg << dragSelectStartEvent
-            << "[MemoryDock] eventFilter: 开始十六进制拖拽选择, anchorRow="
-            << m_hexDragAnchorRow
-            << ", anchorColumn="
-            << m_hexDragAnchorColumn
-            << ", mode="
-            << (m_hexDragStartInAscii ? "ASCII" : "HEX")
-            << eol;
-        return true;
-    }
-    case QEvent::MouseMove:
-    {
-        if (!m_hexDragSelecting)
-        {
-            return QWidget::eventFilter(watched, event);
-        }
-
-        const QMouseEvent* mouseEvent = static_cast<const QMouseEvent*>(event);
-        if ((mouseEvent->buttons() & Qt::LeftButton) == 0)
-        {
-            // 理论上 MouseButtonRelease 会清理状态；
-            // 这里额外兜底，避免极端情况下状态残留。
-            m_hexDragSelecting = false;
-            return true;
-        }
-
-        QModelIndex currentIndex = resolveIndexByMousePos(mouseEvent->pos());
-        if (!currentIndex.isValid())
-        {
-            return true;
-        }
-
-        // 根据起点模式修正目标列：
-        // ASCII 模式始终锁定 ASCII 列；
-        // HEX 模式把非 HEX 列强制夹到 [1,16] 的边界。
-        int adjustedColumn = currentIndex.column();
-        if (m_hexDragStartInAscii)
-        {
-            adjustedColumn = kHexBytesPerRow + 1;
-        }
-        else if (!isHexValueColumn(adjustedColumn))
-        {
-            adjustedColumn = (adjustedColumn < 1) ? 1 : kHexBytesPerRow;
-        }
-
-        applyHexViewerDragSelection(currentIndex.row(), adjustedColumn);
-        return true;
-    }
-    case QEvent::MouseButtonRelease:
-    {
-        const QMouseEvent* mouseEvent = static_cast<const QMouseEvent*>(event);
-        if (mouseEvent->button() == Qt::LeftButton && m_hexDragSelecting)
-        {
-            QModelIndex releaseIndex = resolveIndexByMousePos(mouseEvent->pos());
-            if (releaseIndex.isValid())
-            {
-                int releaseColumn = releaseIndex.column();
-                if (m_hexDragStartInAscii)
-                {
-                    releaseColumn = kHexBytesPerRow + 1;
-                }
-                else if (!isHexValueColumn(releaseColumn))
-                {
-                    releaseColumn = (releaseColumn < 1) ? 1 : kHexBytesPerRow;
-                }
-                applyHexViewerDragSelection(releaseIndex.row(), releaseColumn);
-            }
-
-            kLogEvent dragSelectEndEvent;
-            dbg << dragSelectEndEvent
-                << "[MemoryDock] eventFilter: 结束十六进制拖拽选择, mode="
-                << (m_hexDragStartInAscii ? "ASCII" : "HEX")
-                << eol;
-
-            m_hexDragSelecting = false;
-            return true;
-        }
-        return QWidget::eventFilter(watched, event);
-    }
-    default:
-        break;
-    }
-
-    return QWidget::eventFilter(watched, event);
-}
-
-void MemoryDock::applyHexViewerDragSelection(int currentRow, int currentColumn)
-{
-    // 保护性检查：无表格/无模型/无选中模型时不执行任何动作。
-    if (m_hexTable == nullptr || m_hexTable->model() == nullptr || m_hexTable->selectionModel() == nullptr)
-    {
-        return;
-    }
-    if (m_hexTable->rowCount() <= 0 || m_hexDragAnchorRow < 0 || m_hexDragAnchorColumn < 0)
-    {
-        return;
-    }
-
-    // 统一夹取行索引，避免拖拽到边缘外出现越界计算。
-    const int maxRowIndex = m_hexTable->rowCount() - 1;
-    const int anchorRow = std::clamp(m_hexDragAnchorRow, 0, maxRowIndex);
-    const int targetRow = std::clamp(currentRow, 0, maxRowIndex);
-    QItemSelectionModel* selectionModel = m_hexTable->selectionModel();
-    selectionModel->clearSelection();
-
-    if (m_hexDragStartInAscii)
-    {
-        // ASCII 模式：只允许选中 ASCII 列，行为像文本编辑器的整列跨行选中。
-        const int asciiColumn = kHexBytesPerRow + 1;
-        const int startRow = std::min(anchorRow, targetRow);
-        const int endRow = std::max(anchorRow, targetRow);
-        bool firstIndex = true;
-        for (int row = startRow; row <= endRow; ++row)
-        {
-            const QModelIndex index = m_hexTable->model()->index(row, asciiColumn);
-            if (!index.isValid())
-            {
-                continue;
-            }
-
-            QItemSelectionModel::SelectionFlags flags = QItemSelectionModel::Select;
-            if (firstIndex)
-            {
-                flags |= QItemSelectionModel::Clear;
-                firstIndex = false;
-            }
-            selectionModel->select(index, flags);
-        }
-
-        const QModelIndex currentIndex = m_hexTable->model()->index(targetRow, asciiColumn);
-        if (currentIndex.isValid())
-        {
-            selectionModel->setCurrentIndex(currentIndex, QItemSelectionModel::NoUpdate);
-        }
-        return;
-    }
-
-    // HEX 模式：把锚点和终点映射为线性偏移，再按线性范围逐格选中。
-    // 这会彻底避免 Qt 默认“矩形框选”行为。
-    const int anchorColumn = std::clamp(m_hexDragAnchorColumn, 1, kHexBytesPerRow);
-    const int targetColumn = std::clamp(currentColumn, 1, kHexBytesPerRow);
-    const int anchorLinearOffset = anchorRow * kHexBytesPerRow + (anchorColumn - 1);
-    const int targetLinearOffset = targetRow * kHexBytesPerRow + (targetColumn - 1);
-    const int startLinearOffset = std::min(anchorLinearOffset, targetLinearOffset);
-    const int endLinearOffset = std::max(anchorLinearOffset, targetLinearOffset);
-
-    bool firstIndex = true;
-    for (int linearOffset = startLinearOffset; linearOffset <= endLinearOffset; ++linearOffset)
-    {
-        const int row = linearOffset / kHexBytesPerRow;
-        const int column = (linearOffset % kHexBytesPerRow) + 1;
-        const QModelIndex index = m_hexTable->model()->index(row, column);
-        if (!index.isValid())
-        {
-            continue;
-        }
-
-        QItemSelectionModel::SelectionFlags flags = QItemSelectionModel::Select;
-        if (firstIndex)
-        {
-            flags |= QItemSelectionModel::Clear;
-            firstIndex = false;
-        }
-        selectionModel->select(index, flags);
-    }
-
-    const QModelIndex currentIndex = m_hexTable->model()->index(targetRow, targetColumn);
-    if (currentIndex.isValid())
-    {
-        selectionModel->setCurrentIndex(currentIndex, QItemSelectionModel::NoUpdate);
-    }
-}
-
-bool MemoryDock::isHexValueColumn(const int column)
-{
-    // 十六进制值列固定为 [1,16]：0 列是地址，17 列是 ASCII。
-    return column >= 1 && column <= kHexBytesPerRow;
-}
-
-bool MemoryDock::isAsciiColumn(const int column)
-{
-    // ASCII 列固定在十六进制 16 列之后，即索引 17。
-    return column == (kHexBytesPerRow + 1);
-}
-
 void MemoryDock::jumpToAddressFromUi()
 {
     // 地址跳转入口日志：记录用户输入原文。
@@ -315,19 +55,15 @@ void MemoryDock::reloadMemoryViewerPage()
         << formatAddress(m_currentViewerAddress).toStdString()
         << eol;
 
-    // 每次重载都重置拖拽选择状态，避免旧状态影响新页面的鼠标选择行为。
-    m_hexDragSelecting = false;
-    m_hexDragStartInAscii = false;
-    m_hexDragAnchorRow = -1;
-    m_hexDragAnchorColumn = -1;
-
     // 没有附加目标进程时，查看器仅显示提示，不尝试读内存。
     if (m_attachedProcessHandle == nullptr)
     {
-        m_hexTableProgrammaticUpdate = true;
-        m_hexTable->clearContents();
-        m_hexTable->setRowCount(kHexRowCount);
-        m_hexTableProgrammaticUpdate = false;
+        m_currentViewerPageBytes.clear();
+        if (m_hexEditorWidget != nullptr)
+        {
+            m_hexEditorWidget->setEditable(false);
+            m_hexEditorWidget->clearData();
+        }
         m_viewProtectLabel->setText("保护属性: -");
         m_viewerStatusLabel->setText("未附加进程。");
         kLogEvent reloadViewerNoAttachEvent;
@@ -349,10 +85,11 @@ void MemoryDock::reloadMemoryViewerPage()
     if (readOk == FALSE || bytesRead == 0)
     {
         m_currentViewerPageBytes.clear();
-        m_hexTableProgrammaticUpdate = true;
-        m_hexTable->clearContents();
-        m_hexTable->setRowCount(kHexRowCount);
-        m_hexTableProgrammaticUpdate = false;
+        if (m_hexEditorWidget != nullptr)
+        {
+            m_hexEditorWidget->setEditable(false);
+            m_hexEditorWidget->clearData();
+        }
         m_viewerStatusLabel->setText(
             QString("读取失败：地址=%1，错误码=%2")
             .arg(formatAddress(m_currentViewerAddress))
@@ -367,69 +104,17 @@ void MemoryDock::reloadMemoryViewerPage()
         return;
     }
 
+    // 保存当前页字节并投影到统一十六进制组件。
     m_currentViewerPageBytes = pageBytes.left(static_cast<int>(bytesRead));
-
-    // 用 QSignalBlocker + 标志位双保险，避免 setItem 时触发 itemChanged 回写。
-    m_hexTableProgrammaticUpdate = true;
-    QSignalBlocker signalBlocker(m_hexTable);
-    m_hexTable->clearContents();
-    m_hexTable->setRowCount(kHexRowCount);
-
-    for (int row = 0; row < kHexRowCount; ++row)
+    if (m_hexEditorWidget != nullptr)
     {
-        const std::uint64_t rowBaseAddress =
-            m_currentViewerAddress + static_cast<std::uint64_t>(row * kHexBytesPerRow);
-        QTableWidgetItem* rowAddressItem = new QTableWidgetItem(formatAddress(rowBaseAddress));
-        rowAddressItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-        m_hexTable->setItem(row, 0, rowAddressItem);
-
-        QString asciiText;
-        asciiText.reserve(kHexBytesPerRow);
-
-        for (int column = 0; column < kHexBytesPerRow; ++column)
-        {
-            const int byteIndex = row * kHexBytesPerRow + column;
-            QTableWidgetItem* byteItem = nullptr;
-
-            if (byteIndex < m_currentViewerPageBytes.size())
-            {
-                const unsigned char byteValue = static_cast<unsigned char>(m_currentViewerPageBytes.at(byteIndex));
-                byteItem = new QTableWidgetItem(QString("%1").arg(byteValue, 2, 16, QChar('0')).toUpper());
-
-                // 仅在可写句柄场景下允许直接编辑十六进制单元格。
-                Qt::ItemFlags itemFlags = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
-                if (m_canReadWriteMemory)
-                {
-                    itemFlags |= Qt::ItemIsEditable;
-                }
-                byteItem->setFlags(itemFlags);
-
-                // ASCII 区域仅显示可打印字符，不可打印统一替换为 '.'。
-                if (byteValue >= 32 && byteValue <= 126)
-                {
-                    asciiText.push_back(QChar(byteValue));
-                }
-                else
-                {
-                    asciiText.push_back('.');
-                }
-            }
-            else
-            {
-                byteItem = new QTableWidgetItem("--");
-                byteItem->setFlags(Qt::ItemIsEnabled);
-                asciiText.push_back(' ');
-            }
-
-            m_hexTable->setItem(row, column + 1, byteItem);
-        }
-
-        QTableWidgetItem* asciiItem = new QTableWidgetItem(asciiText);
-        asciiItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-        m_hexTable->setItem(row, kHexBytesPerRow + 1, asciiItem);
+        m_hexEditorWidget->setEditable(m_canReadWriteMemory);
+        m_hexEditorWidget->setBytesPerRow(16);
+        m_hexEditorWidget->setRegionData(
+            m_currentViewerPageBytes.constData(),
+            static_cast<std::size_t>(m_currentViewerPageBytes.size()),
+            m_currentViewerAddress);
     }
-
-    m_hexTableProgrammaticUpdate = false;
 
     // 更新当前地址保护属性显示，帮助用户判断是否可写/可执行。
     MEMORY_BASIC_INFORMATION mbi{};

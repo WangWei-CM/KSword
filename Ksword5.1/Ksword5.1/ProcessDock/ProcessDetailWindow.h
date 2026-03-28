@@ -22,11 +22,11 @@
 // 前置声明：减少头文件依赖，提升编译速度。
 class QCheckBox;
 class QComboBox;
+class QEvent;
 class QFormLayout;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
-class QPlainTextEdit;
 class QPushButton;
 class QTabWidget;
 class QTableWidget;
@@ -34,6 +34,7 @@ class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
 class QPoint;
+class CodeEditorWidget;
 
 class ProcessDetailWindow final : public QWidget
 {
@@ -100,7 +101,22 @@ private:
 
 private:
     // ======== UI 初始化 ========
+    // changeEvent 作用：
+    // - 监听调色板/样式变化；
+    // - 在深浅色切换后重建内部样式，避免进程详情页残留白底。
+    // 调用方式：Qt 自动触发。
+    // 参数 event：变更事件对象。
+    // 返回：无。
+    void changeEvent(QEvent* event) override;
+
     void initializeUi();
+    // applyThemeStyle 作用：
+    // - 给详情窗口内部控件统一应用深浅色样式；
+    // - 显式强制 Window/Base 颜色，规避 Win11 自动背景接管问题。
+    // 调用方式：initializeUi 完成控件创建后调用；changeEvent 中再次调用。
+    // 参数：无。
+    // 返回：无。
+    void applyThemeStyle();
     void initializeDetailTab();
     void initializeActionTab();
     void initializeModuleTab();
@@ -260,7 +276,7 @@ private:
     QVBoxLayout* m_tokenLayout = nullptr;          // 令牌页布局。
     QPushButton* m_refreshTokenButton = nullptr;   // 刷新令牌信息按钮。
     QLabel* m_tokenStatusLabel = nullptr;          // 令牌页状态文本。
-    QPlainTextEdit* m_tokenDetailOutput = nullptr; // 令牌信息输出框。
+    CodeEditorWidget* m_tokenDetailOutput = nullptr; // 令牌信息输出框（统一文本编辑器组件，只读）。
     bool m_tokenRefreshing = false;                // 令牌页刷新状态。
     std::uint64_t m_tokenRefreshTicket = 0;        // 令牌页刷新序号。
     int m_tokenRefreshProgressPid = 0;             // 令牌页刷新进度 PID。
@@ -269,10 +285,11 @@ private:
     QVBoxLayout* m_pebLayout = nullptr;            // PEB 页布局。
     QPushButton* m_refreshPebButton = nullptr;     // 刷新 PEB 信息按钮。
     QLabel* m_pebStatusLabel = nullptr;            // PEB 页状态文本。
-    QPlainTextEdit* m_pebDetailOutput = nullptr;   // PEB 信息输出框。
+    CodeEditorWidget* m_pebDetailOutput = nullptr;   // PEB 信息输出框（统一文本编辑器组件，只读）。
     bool m_pebRefreshing = false;                  // PEB 页刷新状态。
     std::uint64_t m_pebRefreshTicket = 0;          // PEB 页刷新序号。
     int m_pebRefreshProgressPid = 0;               // PEB 页刷新进度 PID。
+    bool m_themeStyleApplying = false;             // 主题样式重建防重入标记，避免 changeEvent 循环触发。
 
     // 图标缓存：路径 -> 图标，避免重复读取系统图标。
     QHash<QString, QIcon> m_iconCacheByPath;

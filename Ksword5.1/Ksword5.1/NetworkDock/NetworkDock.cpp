@@ -1,5 +1,6 @@
 #include "NetworkDock.h"
 #include "../ProcessDock/ProcessDetailWindow.h"
+#include "../UI/HexEditorWidget.h"
 
 #include <QAction>
 #include <QAbstractItemView>
@@ -10,7 +11,6 @@
 #include <QDateTime>
 #include <QFileIconProvider>
 #include <QFileInfo>
-#include <QFontDatabase>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QGuiApplication>
@@ -618,29 +618,33 @@ namespace
             QTabWidget* detailTabWidget = new QTabWidget(this);
             rootLayout->addWidget(detailTabWidget, 1);
 
-            // 十六进制页：使用 QPlainTextEdit，支持跨行连续选择。
+            // 十六进制页：统一复用 HexEditorWidget，功能与内存/文件模块保持一致。
             QWidget* hexPage = new QWidget(detailTabWidget);
             QVBoxLayout* hexPageLayout = new QVBoxLayout(hexPage);
             hexPageLayout->setContentsMargins(0, 0, 0, 0);
             hexPageLayout->setSpacing(4);
 
-            QLabel* hexHintLabel = new QLabel(QStringLiteral("十六进制区支持像文本编辑器一样跨行拖拽选择。"), hexPage);
+            QLabel* hexHintLabel = new QLabel(
+                QStringLiteral("十六进制区域支持 Ctrl+F 异步查找、Ctrl+G 跳转、批量复制与导出。"),
+                hexPage);
+            hexHintLabel->setWordWrap(true);
             hexPageLayout->addWidget(hexHintLabel);
 
-            QPlainTextEdit* hexTextEditor = new QPlainTextEdit(hexPage);
-            hexTextEditor->setReadOnly(true);
-            hexTextEditor->setLineWrapMode(QPlainTextEdit::NoWrap);
-            hexTextEditor->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-            hexTextEditor->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-            hexTextEditor->setPlainText(buildPacketHexAsciiDumpText(packetRecord));
-            hexTextEditor->setToolTip(QStringLiteral("可直接 Ctrl+C 复制选中的十六进制文本。"));
-
-            // 按需求调大十六进制字号，提升长时间查看体验。
-            QFont hexFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-            const int basePointSize = (hexFont.pointSize() > 0) ? hexFont.pointSize() : 10;
-            hexFont.setPointSize(std::max(11, basePointSize + 2));
-            hexTextEditor->setFont(hexFont);
-            hexPageLayout->addWidget(hexTextEditor, 1);
+            HexEditorWidget* hexEditorWidget = new HexEditorWidget(hexPage);
+            hexEditorWidget->setEditable(false);
+            hexEditorWidget->setBytesPerRow(16);
+            if (!packetRecord.packetBytes.empty())
+            {
+                const QByteArray packetBytes(
+                    reinterpret_cast<const char*>(packetRecord.packetBytes.data()),
+                    static_cast<int>(packetRecord.packetBytes.size()));
+                hexEditorWidget->setByteArray(packetBytes, 0);
+            }
+            else
+            {
+                hexEditorWidget->clearData();
+            }
+            hexPageLayout->addWidget(hexEditorWidget, 1);
 
             detailTabWidget->addTab(hexPage, QStringLiteral("十六进制"));
 

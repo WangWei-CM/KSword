@@ -674,171 +674,88 @@ void MemoryDock::initializeConnections()
         jumpToAddressFromUi();
         });
 
-    connect(m_hexTable, &QTableWidget::itemChanged, this, [this](QTableWidgetItem* changedItem) {
-        if (m_hexTableProgrammaticUpdate || changedItem == nullptr)
-        {
-            return;
-        }
-
-        const int row = changedItem->row();
-        const int column = changedItem->column();
-        if (column < 1 || column > kHexBytesPerRow)
-        {
-            return;
-        }
-
-        std::uint8_t newValue = 0;
-        if (!parseHexByte(changedItem->text(), newValue))
-        {
-            kLogEvent viewerEditParseFailEvent;
-            warn << viewerEditParseFailEvent
-                << "[MemoryDock] 十六进制编辑输入无效, row="
-                << row
-                << ", column="
-                << column
-                << ", text="
-                << changedItem->text().toStdString()
-                << eol;
-            QMessageBox::warning(this, "内存编辑", "请输入两位十六进制数。");
-            reloadMemoryViewerPage();
-            return;
-        }
-
-        const std::uint64_t offset =
-            static_cast<std::uint64_t>(row * kHexBytesPerRow + (column - 1));
-        const std::uint64_t address = m_currentViewerAddress + offset;
-
-        QString errorText;
-        if (!writeSingleByteAtViewer(address, newValue, errorText))
-        {
-            kLogEvent viewerWriteFailEvent;
-            err << viewerWriteFailEvent
-                << "[MemoryDock] 十六进制编辑写入失败, address="
-                << formatAddress(address).toStdString()
-                << ", error="
-                << errorText.toStdString()
-                << eol;
-            QMessageBox::warning(this, "内存编辑", errorText);
-            reloadMemoryViewerPage();
-            return;
-        }
-
-        kLogEvent viewerWriteSuccessEvent;
-        info << viewerWriteSuccessEvent
-            << "[MemoryDock] 十六进制编辑写入成功, address="
-            << formatAddress(address).toStdString()
-            << ", value=0x"
-            << QString("%1").arg(newValue, 2, 16, QChar('0')).toUpper().toStdString()
-            << eol;
-
-        // 写入成功后自动定位到“下一个可编辑十六进制单元格”，
-        // 让用户能够连续输入，不再每次手动点选下一格。
-        int nextRow = row;
-        int nextColumn = column;
-        if (column < kHexBytesPerRow)
-        {
-            // 同一行内优先向右移动一个字节列。
-            nextColumn = column + 1;
-        }
-        else if (row + 1 < m_hexTable->rowCount())
-        {
-            // 到达行尾时自动换到下一行第一个十六进制字节列。
-            nextRow = row + 1;
-            nextColumn = 1;
-        }
-
-        reloadMemoryViewerPage();
-
-        // 刷新后恢复焦点到目标单元格，保证“输入 -> 自动下跳 -> 继续输入”体验。
-        if (nextRow >= 0 &&
-            nextRow < m_hexTable->rowCount() &&
-            nextColumn >= 1 &&
-            nextColumn <= kHexBytesPerRow)
-        {
-            m_hexTable->setCurrentCell(nextRow, nextColumn);
-            m_hexTable->setFocus(Qt::OtherFocusReason);
-
-            kLogEvent viewerAutoMoveEvent;
-            dbg << viewerAutoMoveEvent
-                << "[MemoryDock] 十六进制编辑自动跳转下一格, nextRow="
-                << nextRow
-                << ", nextColumn="
-                << nextColumn
-                << eol;
-        }
-        });
-
-    connect(m_hexTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
-        QTableWidgetItem* clickedItem = m_hexTable->itemAt(localPosition);
-        if (clickedItem == nullptr)
-        {
-            return;
-        }
-
-        QMenu menu(this);
-        QAction* copyAction = menu.addAction("复制");
-        QAction* addBookmarkAction = menu.addAction("添加书签");
-        QAction* addBreakpointAction = menu.addAction("添加断点");
-        QAction* selectedAction = menu.exec(m_hexTable->viewport()->mapToGlobal(localPosition));
-        if (selectedAction == nullptr)
-        {
-            return;
-        }
-
-        if (selectedAction == copyAction)
-        {
-            QApplication::clipboard()->setText(clickedItem->text());
-            kLogEvent hexCopyEvent;
-            dbg << hexCopyEvent
-                << "[MemoryDock] 查看器右键复制单元格, text="
-                << clickedItem->text().toStdString()
-                << eol;
-            return;
-        }
-
-        if (clickedItem->column() < 1 || clickedItem->column() > kHexBytesPerRow)
-        {
-            return;
-        }
-        const std::uint64_t offset =
-            static_cast<std::uint64_t>(clickedItem->row() * kHexBytesPerRow + (clickedItem->column() - 1));
-        const std::uint64_t address = m_currentViewerAddress + offset;
-
-        if (selectedAction == addBookmarkAction)
-        {
-            kLogEvent hexAddBookmarkEvent;
-            info << hexAddBookmarkEvent
-                << "[MemoryDock] 查看器右键添加书签, address="
-                << formatAddress(address).toStdString()
-                << eol;
-            addBookmarkByAddress(address, "来自内存查看器");
-            rebuildBookmarkTable();
-            return;
-        }
-        if (selectedAction == addBreakpointAction)
-        {
+    connect(m_hexEditorWidget, &HexEditorWidget::byteEdited, this,
+        [this](const std::uint64_t absoluteAddress, const std::uint8_t oldValue, const std::uint8_t newValue) {
             QString errorText;
-            if (!addBreakpointByAddress(address, "来自内存查看器", errorText))
+            if (!writeSingleByteAtViewer(absoluteAddress, newValue, errorText))
             {
-                kLogEvent hexAddBreakpointFailEvent;
-                err << hexAddBreakpointFailEvent
-                    << "[MemoryDock] 查看器右键添加断点失败, address="
-                    << formatAddress(address).toStdString()
+                kLogEvent viewerWriteFailEvent;
+                err << viewerWriteFailEvent
+                    << "[MemoryDock] 十六进制编辑写入失败, address="
+                    << formatAddress(absoluteAddress).toStdString()
                     << ", error="
                     << errorText.toStdString()
                     << eol;
-                QMessageBox::warning(this, "添加断点", errorText);
+
+                // 写入失败时把控件数据回滚到旧值，保证显示与目标进程一致。
+                m_hexEditorWidget->setByteAtAbsoluteAddress(absoluteAddress, oldValue, true);
+                QMessageBox::warning(this, "内存编辑", errorText);
+                return;
             }
-            else
+
+            // 本地缓存同步更新，避免后续断点/书签逻辑读到旧页缓存。
+            if (absoluteAddress >= m_currentViewerAddress)
             {
-                kLogEvent hexAddBreakpointSuccessEvent;
-                info << hexAddBreakpointSuccessEvent
-                    << "[MemoryDock] 查看器右键添加断点成功, address="
-                    << formatAddress(address).toStdString()
-                    << eol;
+                const std::uint64_t offset = absoluteAddress - m_currentViewerAddress;
+                if (offset < static_cast<std::uint64_t>(m_currentViewerPageBytes.size()))
+                {
+                    m_currentViewerPageBytes[static_cast<int>(offset)] = static_cast<char>(newValue);
+                }
             }
-            rebuildBreakpointTable();
-        }
+
+            kLogEvent viewerWriteSuccessEvent;
+            info << viewerWriteSuccessEvent
+                << "[MemoryDock] 十六进制编辑写入成功, address="
+                << formatAddress(absoluteAddress).toStdString()
+                << ", value=0x"
+                << QString("%1").arg(newValue, 2, 16, QChar('0')).toUpper().toStdString()
+                << eol;
+        });
+
+    connect(m_hexEditorWidget, &HexEditorWidget::aboutToShowContextMenu, this,
+        [this](QMenu* menu, const std::uint64_t absoluteAddress, const bool hasByte) {
+            if (menu == nullptr || !hasByte)
+            {
+                return;
+            }
+
+            menu->addSeparator();
+            QAction* addBookmarkAction = menu->addAction("添加书签");
+            QAction* addBreakpointAction = menu->addAction("添加断点");
+
+            connect(addBookmarkAction, &QAction::triggered, this, [this, absoluteAddress]() {
+                kLogEvent hexAddBookmarkEvent;
+                info << hexAddBookmarkEvent
+                    << "[MemoryDock] 查看器右键添加书签, address="
+                    << formatAddress(absoluteAddress).toStdString()
+                    << eol;
+                addBookmarkByAddress(absoluteAddress, "来自内存查看器");
+                rebuildBookmarkTable();
+                });
+
+            connect(addBreakpointAction, &QAction::triggered, this, [this, absoluteAddress]() {
+                QString errorText;
+                if (!addBreakpointByAddress(absoluteAddress, "来自内存查看器", errorText))
+                {
+                    kLogEvent hexAddBreakpointFailEvent;
+                    err << hexAddBreakpointFailEvent
+                        << "[MemoryDock] 查看器右键添加断点失败, address="
+                        << formatAddress(absoluteAddress).toStdString()
+                        << ", error="
+                        << errorText.toStdString()
+                        << eol;
+                    QMessageBox::warning(this, "添加断点", errorText);
+                }
+                else
+                {
+                    kLogEvent hexAddBreakpointSuccessEvent;
+                    info << hexAddBreakpointSuccessEvent
+                        << "[MemoryDock] 查看器右键添加断点成功, address="
+                        << formatAddress(absoluteAddress).toStdString()
+                        << eol;
+                }
+                rebuildBreakpointTable();
+                });
         });
 
     // ========================================================

@@ -402,8 +402,8 @@ void ProcessDetailWindow::updateThreadInspectStatusLabel(const QString& statusTe
     m_threadInspectStatusLabel->setText(statusText);
     m_threadInspectStatusLabel->setStyleSheet(
         refreshing
-        ? "color:#1E90FF; font-weight:700;"
-        : "color:#4F4F4F; font-weight:600;");
+        ? buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700)
+        : buildStateLabelStyle(statusSecondaryColor(), 600));
 }
 
 void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
@@ -629,7 +629,7 @@ void ProcessDetailWindow::requestAsyncTokenRefresh()
     if (m_tokenStatusLabel != nullptr)
     {
         m_tokenStatusLabel->setText(QStringLiteral("● 正在刷新令牌..."));
-        m_tokenStatusLabel->setStyleSheet("color:#1E90FF; font-weight:700;");
+        m_tokenStatusLabel->setStyleSheet(buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700));
     }
 
     if (m_tokenRefreshProgressPid == 0)
@@ -976,7 +976,7 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
     if (m_pebStatusLabel != nullptr)
     {
         m_pebStatusLabel->setText(QStringLiteral("● 正在刷新PEB..."));
-        m_pebStatusLabel->setStyleSheet("color:#1E90FF; font-weight:700;");
+        m_pebStatusLabel->setStyleSheet(buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700));
     }
 
     if (m_pebRefreshProgressPid == 0)
@@ -991,6 +991,29 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
         {
             TextRefreshResult refreshResult{};
             const auto beginTime = std::chrono::steady_clock::now();
+            const auto progressDispatcher = [guardThis, ticketValue](const QString& stepText, const float progressValue)
+                {
+                    QMetaObject::invokeMethod(
+                        guardThis,
+                        [guardThis, ticketValue, stepText, progressValue]()
+                        {
+                            if (guardThis == nullptr || guardThis->m_pebRefreshTicket != ticketValue)
+                            {
+                                return;
+                            }
+                            if (guardThis->m_pebRefreshProgressPid != 0)
+                            {
+                                kPro.set(
+                                    guardThis->m_pebRefreshProgressPid,
+                                    stepText.toStdString(),
+                                    0,
+                                    progressValue);
+                            }
+                        },
+                        Qt::QueuedConnection);
+                };
+
+            progressDispatcher(QStringLiteral("打开目标进程"), 28.0f);
             std::wostringstream textBuilder;
             textBuilder << L"[PEB / Process Summary]\n";
             textBuilder << L"PID: " << pidValue << L"\n";
@@ -1007,9 +1030,11 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
             {
                 refreshResult.diagnosticText = QString("OpenProcess失败(%1)").arg(GetLastError());
                 textBuilder << L"OpenProcess: <failed>\n";
+                progressDispatcher(QStringLiteral("打开进程失败"), 100.0f);
             }
             else
             {
+                progressDispatcher(QStringLiteral("读取PEB与基础信息"), 40.0f);
                 PROCESS_BASIC_INFORMATION basicInfo{};
                 HMODULE ntdllModule = GetModuleHandleW(L"ntdll.dll");
                 NtQueryInformationProcessFn ntQueryProcess = reinterpret_cast<NtQueryInformationProcessFn>(
@@ -1142,6 +1167,8 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
                     textBuilder << L"ReadBytes: " << ioCounters.ReadTransferCount << L"\n";
                     textBuilder << L"WriteBytes: " << ioCounters.WriteTransferCount << L"\n";
                 }
+
+                progressDispatcher(QStringLiteral("解析映像与环境块"), 55.0f);
 
                 // 子系统信息：ProcessSubsystemInformation（可用时）。
                 if (ntQueryProcess != nullptr)
@@ -1320,17 +1347,25 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
                 std::uint64_t privateBytes = 0;
                 std::uint64_t regionCount = 0;
                 std::uint64_t previewRegionCount = 0;
-                constexpr std::uint64_t kMaxRegionScanCount = 200000;
+                constexpr std::uint64_t kMaxRegionScanCount = 60000;
                 const std::uintptr_t minAddress =
                     reinterpret_cast<std::uintptr_t>(systemInfo.lpMinimumApplicationAddress);
                 const std::uintptr_t maxAddress =
                     reinterpret_cast<std::uintptr_t>(systemInfo.lpMaximumApplicationAddress);
                 std::uintptr_t cursorAddress = minAddress;
                 bool regionScanTruncated = false;
+                bool regionScanTimeout = false;
+                const auto regionScanDeadline = beginTime + std::chrono::seconds(8);
 
                 textBuilder << L"[VirtualAddressRegionPreview]\n";
                 while (cursorAddress < maxAddress)
                 {
+                    if (std::chrono::steady_clock::now() > regionScanDeadline)
+                    {
+                        regionScanTimeout = true;
+                        break;
+                    }
+
                     const SIZE_T querySize = VirtualQueryEx(
                         processHandle,
                         reinterpret_cast<LPCVOID>(cursorAddress),
@@ -1351,6 +1386,14 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
                     {
                         regionScanTruncated = true;
                         break;
+                    }
+
+                    if ((regionCount % 2000) == 0)
+                    {
+                        const float progressValue = std::min(
+                            90.0f,
+                            60.0f + static_cast<float>(regionCount) * 0.0005f);
+                        progressDispatcher(QStringLiteral("扫描虚拟地址空间"), progressValue);
                     }
 
                     if (memoryInfo.State == MEM_COMMIT)
@@ -1419,6 +1462,14 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
                     refreshResult.diagnosticText = QString("虚拟内存枚举达到上限(%1)，结果为部分数据。")
                         .arg(kMaxRegionScanCount);
                 }
+                if (regionScanTimeout)
+                {
+                    if (!refreshResult.diagnosticText.trimmed().isEmpty())
+                    {
+                        refreshResult.diagnosticText += QStringLiteral(" | ");
+                    }
+                    refreshResult.diagnosticText += QStringLiteral("虚拟内存枚举超过8秒，已返回部分结果。");
+                }
                 textBuilder << L"RegionCount: " << regionCount << L"\n";
                 textBuilder << L"CommitBytes: " << commitBytes << L"\n";
                 textBuilder << L"MappedBytes: " << mappedBytes << L"\n";
@@ -1459,6 +1510,8 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
                     textBuilder << L"HeapCount: <unavailable>\n";
                 }
 
+                progressDispatcher(QStringLiteral("汇总PEB结果"), 95.0f);
+
                 CloseHandle(processHandle);
             }
 
@@ -1497,12 +1550,12 @@ void ProcessDetailWindow::applyTokenRefreshResult(const TextRefreshResult& refre
     }
     if (m_tokenDetailOutput != nullptr)
     {
-        m_tokenDetailOutput->setPlainText(refreshResult.detailText);
+        m_tokenDetailOutput->setText(refreshResult.detailText);
     }
     if (m_tokenStatusLabel != nullptr)
     {
         m_tokenStatusLabel->setText(QString("● 刷新完成 %1 ms").arg(refreshResult.elapsedMs));
-        m_tokenStatusLabel->setStyleSheet("color:#4F4F4F; font-weight:600;");
+        m_tokenStatusLabel->setStyleSheet(buildStateLabelStyle(statusIdleColor(), 600));
     }
     kPro.set(m_tokenRefreshProgressPid, "令牌信息刷新完成", 0, 100.0f);
 }
@@ -1516,16 +1569,16 @@ void ProcessDetailWindow::applyPebRefreshResult(const TextRefreshResult& refresh
     }
     if (m_pebDetailOutput != nullptr)
     {
-        m_pebDetailOutput->setPlainText(refreshResult.detailText);
+        m_pebDetailOutput->setText(refreshResult.detailText);
     }
     if (m_pebStatusLabel != nullptr)
     {
         QString statusText = QString("● 刷新完成 %1 ms").arg(refreshResult.elapsedMs);
-        QString statusStyle = QStringLiteral("color:#4F4F4F; font-weight:600;");
+        QString statusStyle = buildStateLabelStyle(statusIdleColor(), 600);
         if (!refreshResult.diagnosticText.trimmed().isEmpty())
         {
             statusText += QString(" | %1").arg(refreshResult.diagnosticText);
-            statusStyle = QStringLiteral("color:#8A6D3B; font-weight:700;");
+            statusStyle = buildStateLabelStyle(statusWarningColor(), 700);
         }
         m_pebStatusLabel->setText(statusText);
         m_pebStatusLabel->setStyleSheet(statusStyle);

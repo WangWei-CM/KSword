@@ -458,28 +458,13 @@ void MemoryDock::initializeMemoryViewerTab()
     navLayout->addWidget(m_viewProtectLabel);
     tabLayout->addLayout(navLayout);
 
-    // 16进制表格：地址 + 16字节 + ASCII。
-    m_hexTable = new QTableWidget(m_tabViewer);
-    m_hexTable->setRowCount(kHexRowCount);
-    m_hexTable->setColumnCount(kHexBytesPerRow + 2);
-    QStringList headers;
-    headers << "地址";
-    for (int column = 0; column < kHexBytesPerRow; ++column)
-    {
-        headers << QString("%1").arg(column, 2, 16, QChar('0')).toUpper();
-    }
-    headers << "ASCII";
-    m_hexTable->setHorizontalHeaderLabels(headers);
-    m_hexTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    m_hexTable->setSelectionBehavior(QAbstractItemView::SelectItems);
-    m_hexTable->setAlternatingRowColors(true);
-    m_hexTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_hexTable->verticalHeader()->setVisible(false);
-    m_hexTable->horizontalHeader()->setStyleSheet(buildBlueTableHeaderStyle());
-    m_hexTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    m_hexTable->horizontalHeader()->setStretchLastSection(true);
-    m_hexTable->viewport()->installEventFilter(this);
-    tabLayout->addWidget(m_hexTable, 1);
+    // 统一十六进制编辑器组件：
+    // - 后续内存/文件/网络全部复用该控件；
+    // - Tab4 在这里配置成 16 字节每行，默认只读。
+    m_hexEditorWidget = new HexEditorWidget(m_tabViewer);
+    m_hexEditorWidget->setBytesPerRow(16);
+    m_hexEditorWidget->setEditable(false);
+    tabLayout->addWidget(m_hexEditorWidget, 1);
 
     m_viewerStatusLabel = new QLabel("未附加进程。", m_tabViewer);
     tabLayout->addWidget(m_viewerStatusLabel);

@@ -151,7 +151,7 @@ void ProcessDetailWindow::applyModuleRefreshResult(const ModuleRefreshResult& re
     updateModuleStatusLabel(statusText, false);
     if (refreshResult.moduleSnapshot.modules.empty())
     {
-        m_moduleStatusLabel->setStyleSheet("color:#DC322F; font-weight:700;");
+        m_moduleStatusLabel->setStyleSheet(buildStateLabelStyle(statusErrorColor(), 700));
     }
 
     // 首次刷新结束后隐藏对应进度任务卡片。
@@ -219,15 +219,15 @@ void ProcessDetailWindow::rebuildModuleTable()
         // 按签名可信状态上色：可信绿色，不可信红色，Pending/未知灰色。
         if (moduleRecord.signatureTrusted)
         {
-            rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), QColor(34, 139, 34));
+            rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), signatureTrustedColor());
         }
         else if (moduleRecord.signatureState == "Pending" || moduleRecord.signatureState == "Unknown")
         {
-            rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), QColor(120, 120, 120));
+            rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), statusSecondaryColor());
         }
         else
         {
-            rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), QColor(220, 50, 47));
+            rowItem->setForeground(toModuleColumnIndex(ModuleColumn::Signature), signatureUntrustedColor());
         }
 
         m_moduleTable->addTopLevelItem(rowItem);
@@ -256,11 +256,11 @@ void ProcessDetailWindow::updateModuleStatusLabel(const QString& statusText, con
 
     if (refreshing)
     {
-        m_moduleStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:700;").arg(KswordTheme::PrimaryBlueHex));
+        m_moduleStatusLabel->setStyleSheet(buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700));
     }
     else
     {
-        m_moduleStatusLabel->setStyleSheet(QStringLiteral("color:#2F7D32; font-weight:600;"));
+        m_moduleStatusLabel->setStyleSheet(buildStateLabelStyle(statusIdleColor(), 600));
     }
 }
 
@@ -283,6 +283,26 @@ void ProcessDetailWindow::showModuleContextMenu(const QPoint& localPosition)
     m_moduleTable->setCurrentItem(clickedItem);
 
     QMenu contextMenu(this);
+    contextMenu.setStyleSheet(QStringLiteral(
+        "QMenu{"
+        "  background:%1;"
+        "  color:%2;"
+        "  border:1px solid %3;"
+        "}"
+        "QMenu::item:selected{"
+        "  background:%4;"
+        "  color:#FFFFFF;"
+        "}"
+        "QMenu::separator{"
+        "  height:1px;"
+        "  background:%3;"
+        "  margin:4px 8px;"
+        "}")
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::TextPrimaryHex())
+        .arg(KswordTheme::BorderHex())
+        .arg(KswordTheme::PrimaryBlueHex));
+
     QAction* copyCellAction = contextMenu.addAction(QIcon(":/Icon/process_copy_cell.svg"), "复制单元格");
     QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), "复制行");
     contextMenu.addSeparator();
