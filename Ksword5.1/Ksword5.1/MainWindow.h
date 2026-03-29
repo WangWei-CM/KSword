@@ -29,6 +29,7 @@
 #include "DriverDock/DriverDock.h"
 #include "KernelDock/KernelDock.h"
 #include "MonitorDock/MonitorDock.h"
+#include "MonitorDock/MonitorPanelWidget.h"
 #include "HardwareDock/HardwareDock.h"
 #include "PrivilegeDock/PrivilegeDock.h"
 #include "SettingsDock/SettingsDock.h"
@@ -146,6 +147,7 @@ private:
     DriverDock* m_driverWidget;
     KernelDock* m_kernelWidget;
     MonitorDock* m_monitorWidget;
+    MonitorPanelWidget* m_monitorPanelWidget = nullptr; // m_monitorPanelWidget：左下角监视面板四宫格性能图组件。
     HardwareDock* m_hardwareWidget;
     PrivilegeDock* m_privilegeWidget;
     SettingsDock* m_settingsWidget;

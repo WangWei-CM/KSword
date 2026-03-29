@@ -107,6 +107,11 @@ private:
         QString lastFilterLogSignature;        // 过滤参数日志去重签名。
         bool pathEditMode = false;             // 当前是否处于路径编辑模式。
         ks::file::ManualFsType lastManualFsType = ks::file::ManualFsType::Unknown; // 最近一次手动解析识别到的FS类型。
+        bool manualParseInProgress = false;    // 手动解析后台任务是否正在运行。
+        bool manualParsePending = false;       // 手动解析是否有待执行请求。
+        bool manualParsePendingShowWarning = false; // 待执行请求是否需要失败弹框。
+        int manualParseRequestSerial = 0;      // 手动解析请求序列号（用于丢弃过期结果）。
+        QString manualParsingPath;             // 当前后台解析正在处理的路径（用于避免同路径重复解析）。
     };
 
 private:
@@ -166,6 +171,12 @@ private:
     // - 作用：手动解析当前目录并填充模型。
     // - 参数 showWarningMessage：是否在失败时弹框提示。
     bool reloadManualModel(FilePanelWidgets& panel, bool showWarningMessage);
+
+    // requestAsyncManualReload：
+    // - 作用：异步执行手动解析，避免 UI 线程阻塞。
+    // - 参数 panel：目标面板。
+    // - 参数 showWarningMessage：失败时是否弹框。
+    void requestAsyncManualReload(FilePanelWidgets& panel, bool showWarningMessage);
 
     // currentModeIsManual：
     // - 作用：判断当前面板是否处于手动解析模式。
@@ -244,9 +255,17 @@ private:
     // - 作用：扫描当前卷的 NTFS 删除项并展示到表格。
     void scanDeletedFilesForRecovery();
 
+    // scanDeletedFilesForRecoveryAsync：
+    // - 作用：异步扫描当前卷，避免扫描误删时阻塞 UI。
+    void scanDeletedFilesForRecoveryAsync();
+
     // recoverSelectedDeletedFiles：
     // - 作用：对选中删除项执行恢复（当前支持 resident 数据恢复）。
     void recoverSelectedDeletedFiles();
+
+    // recoverSelectedDeletedFilesAsync：
+    // - 作用：异步恢复选中删除项，避免恢复过程阻塞 UI。
+    void recoverSelectedDeletedFilesAsync();
 
 private:
     // 根布局控件。
@@ -264,6 +283,8 @@ private:
     QTableWidget* m_recoveryTable = nullptr;        // 删除项结果表格。
     QLabel* m_recoveryStatusLabel = nullptr;        // 扫描状态标签。
     std::vector<ks::file::NtfsDeletedFileEntry> m_deletedRecoveryItems; // 删除项缓存（含 resident 数据）。
+    bool m_recoveryScanInProgress = false;          // 误删扫描后台任务运行状态。
+    bool m_recoveryRecoverInProgress = false;       // 误删恢复后台任务运行状态。
 
     // 左右面板实例。
     FilePanelWidgets m_leftPanel;              // 左侧面板状态。

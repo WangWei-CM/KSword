@@ -38,7 +38,9 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -65,6 +67,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include <Aclapi.h>
 #include <Sddl.h>
@@ -1808,9 +1811,16 @@ void FileDock::applyPanelFilterAndSort(FilePanelWidgets& panel)
 
     if (manualMode)
     {
-        if (panel.manualLoadedPath.compare(panel.currentPath, Qt::CaseInsensitive) != 0)
+        // 手动模式下仅在“当前路径未加载且未在解析”时才拉起新任务，
+        // 避免过滤/排序改动触发同一路径重复全盘扫描。
+        const bool loadedMatchesCurrentPath =
+            (panel.manualLoadedPath.compare(panel.currentPath, Qt::CaseInsensitive) == 0);
+        const bool samePathParsing =
+            panel.manualParseInProgress
+            && (panel.manualParsingPath.compare(panel.currentPath, Qt::CaseInsensitive) == 0);
+        if (!loadedMatchesCurrentPath && !samePathParsing)
         {
-            reloadManualModel(panel, false);
+            requestAsyncManualReload(panel, false);
         }
 
         if (filterText.isEmpty())
@@ -2089,6 +2099,269 @@ bool FileDock::reloadManualModel(FilePanelWidgets& panel, const bool showWarning
     return true;
 }
 
+void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool showWarningMessage)
+{
+    if (panel.manualModel == nullptr || panel.currentPath.isEmpty())
+    {
+        return;
+    }
+
+    // requestedPath：记录本次调用目标路径，避免在异步流程里读取到后续变更值。
+    const QString requestedPath = panel.currentPath;
+
+    // 路径已经加载且当前没有任务运行时，直接复用结果，避免无意义重复解析。
+    if (!panel.manualParseInProgress
+        && panel.manualLoadedPath.compare(requestedPath, Qt::CaseInsensitive) == 0)
+    {
+        return;
+    }
+
+    // 若已有后台任务在跑，仅在“目标路径发生变化”时登记 pending。
+    // 同一路径重复触发（例如用户调排序/过滤）不再触发第二次全盘解析。
+    if (panel.manualParseInProgress)
+    {
+        const bool samePathRunning =
+            (panel.manualParsingPath.compare(requestedPath, Qt::CaseInsensitive) == 0);
+        if (samePathRunning)
+        {
+            panel.manualParsePendingShowWarning =
+                panel.manualParsePendingShowWarning || showWarningMessage;
+            return;
+        }
+
+        panel.manualParsePending = true;
+        panel.manualParsePendingShowWarning = panel.manualParsePendingShowWarning || showWarningMessage;
+
+        {
+            kLogEvent event;
+            dbg << event
+                << "[FileDock] 手动解析任务排队, panel="
+                << panel.panelNameText.toStdString()
+                << ", runningPath="
+                << QDir::toNativeSeparators(panel.manualParsingPath).toStdString()
+                << ", pendingPath="
+                << QDir::toNativeSeparators(requestedPath).toStdString()
+                << eol;
+        }
+        return;
+    }
+
+    panel.manualParseInProgress = true;
+    panel.manualParsePending = false;
+    panel.manualParsePendingShowWarning = false;
+    panel.manualParseRequestSerial += 1;
+    panel.manualParsingPath = requestedPath;
+
+    // 记录请求上下文：用于后台线程回传时校验“结果是否过期”。
+    const int requestSerial = panel.manualParseRequestSerial;
+    const QString requestPath = requestedPath;
+    const QString panelNameText = panel.panelNameText;
+    const bool leftPanelRequest = (&panel == &m_leftPanel);
+
+    // 手动解析进度条：满足“手动解析要可视化进度”的需求。
+    const int progressPid = kPro.add("文件", (panelNameText + QStringLiteral(" 手动解析")).toStdString());
+    kPro.set(progressPid, "准备解析目录", 0, 5.0f);
+
+    if (panel.parserStatusLabel != nullptr)
+    {
+        panel.parserStatusLabel->setText(QStringLiteral("解析器: 手动解析中..."));
+    }
+    if (panel.readModeCombo != nullptr)
+    {
+        panel.readModeCombo->setEnabled(false);
+    }
+
+    {
+        kLogEvent event;
+        info << event
+            << "[FileDock] 启动异步手动解析, panel="
+            << panelNameText.toStdString()
+            << ", path="
+            << QDir::toNativeSeparators(requestPath).toStdString()
+            << ", requestSerial="
+            << requestSerial
+            << eol;
+    }
+
+    QPointer<FileDock> safeThis(this);
+    std::thread([safeThis, leftPanelRequest, requestPath, panelNameText, showWarningMessage, requestSerial, progressPid]() {
+        kPro.set(progressPid, "解析文件系统结构中", 0, 35.0f);
+
+        std::vector<ks::file::ManualDirectoryEntry> parsedEntries;
+        ks::file::ManualFsType parsedFsType = ks::file::ManualFsType::Unknown;
+        QString parseErrorText;
+        const bool parseOk = ks::file::ManualFileSystemParser::enumerateDirectory(
+            requestPath,
+            parsedEntries,
+            parsedFsType,
+            parseErrorText);
+
+        kPro.set(progressPid, parseOk ? "生成目录列表中" : "解析失败，整理错误信息", 0, 78.0f);
+
+        if (safeThis.isNull())
+        {
+            kPro.set(progressPid, "界面已关闭", 0, 100.0f);
+            return;
+        }
+
+        const bool invokeOk = QMetaObject::invokeMethod(
+            safeThis.data(),
+            [safeThis, leftPanelRequest, requestPath, panelNameText, showWarningMessage, requestSerial, progressPid, parseOk, parsedEntries, parsedFsType, parseErrorText]() {
+                if (safeThis.isNull())
+                {
+                    kPro.set(progressPid, "界面已关闭", 0, 100.0f);
+                    return;
+                }
+
+                FilePanelWidgets& targetPanel = leftPanelRequest ? safeThis->m_leftPanel : safeThis->m_rightPanel;
+                if (targetPanel.manualParseRequestSerial != requestSerial)
+                {
+                    // 过期结果直接丢弃，避免“慢任务覆盖新路径数据”。
+                    if (targetPanel.manualParsingPath.compare(requestPath, Qt::CaseInsensitive) == 0)
+                    {
+                        targetPanel.manualParseInProgress = false;
+                        targetPanel.manualParsingPath.clear();
+                        if (targetPanel.readModeCombo != nullptr)
+                        {
+                            targetPanel.readModeCombo->setEnabled(true);
+                        }
+                    }
+
+                    {
+                        kLogEvent event;
+                        warn << event
+                            << "[FileDock] 丢弃过期手动解析结果, panel="
+                            << panelNameText.toStdString()
+                            << ", path="
+                            << QDir::toNativeSeparators(requestPath).toStdString()
+                            << ", requestSerial="
+                            << requestSerial
+                            << ", currentSerial="
+                            << targetPanel.manualParseRequestSerial
+                            << eol;
+                    }
+
+                    kPro.set(progressPid, "结果过期已忽略", 0, 100.0f);
+
+                    if (!targetPanel.manualParseInProgress && targetPanel.manualParsePending)
+                    {
+                        const bool pendingShowWarning = targetPanel.manualParsePendingShowWarning;
+                        targetPanel.manualParsePending = false;
+                        targetPanel.manualParsePendingShowWarning = false;
+                        safeThis->requestAsyncManualReload(targetPanel, pendingShowWarning);
+                    }
+                    return;
+                }
+
+                targetPanel.manualParseInProgress = false;
+                targetPanel.manualParsingPath.clear();
+                if (targetPanel.readModeCombo != nullptr)
+                {
+                    targetPanel.readModeCombo->setEnabled(true);
+                }
+
+                targetPanel.manualModel->setRowCount(0);
+                targetPanel.lastManualFsType = parsedFsType;
+
+                if (!parseOk)
+                {
+                    // 失败时也记住路径，避免过滤/排序触发连续重试。
+                    targetPanel.manualLoadedPath = requestPath;
+                    if (targetPanel.parserStatusLabel != nullptr)
+                    {
+                        targetPanel.parserStatusLabel->setText(QStringLiteral("解析器: 手动解析失败"));
+                    }
+                    if (showWarningMessage)
+                    {
+                        QMessageBox::warning(
+                            safeThis.data(),
+                            QStringLiteral("手动解析失败"),
+                            QStringLiteral("路径: %1\n错误: %2")
+                            .arg(QDir::toNativeSeparators(requestPath))
+                            .arg(parseErrorText));
+                    }
+
+                    kLogEvent event;
+                    warn << event
+                        << "[FileDock] 异步手动解析失败, panel="
+                        << panelNameText.toStdString()
+                        << ", path="
+                        << QDir::toNativeSeparators(requestPath).toStdString()
+                        << ", error="
+                        << parseErrorText.toStdString()
+                        << eol;
+                }
+                else
+                {
+                    // 批量回填模型：减少每行插入产生的重绘开销。
+                    targetPanel.manualModel->blockSignals(true);
+                    for (const ks::file::ManualDirectoryEntry& itemValue : parsedEntries)
+                    {
+                        QList<QStandardItem*> rowItems;
+                        rowItems.reserve(static_cast<int>(ManualModelColumn::Count));
+
+                        QStandardItem* nameItem = new QStandardItem(itemValue.name);
+                        nameItem->setData(itemValue.absolutePath, Qt::UserRole);
+                        nameItem->setData(itemValue.isDirectory, Qt::UserRole + 1);
+                        rowItems.push_back(nameItem);
+
+                        QStandardItem* sizeItem = new QStandardItem(
+                            itemValue.isDirectory ? QStringLiteral("-") : formatSizeText(itemValue.sizeBytes));
+                        sizeItem->setData(static_cast<qulonglong>(itemValue.sizeBytes), Qt::UserRole);
+                        rowItems.push_back(sizeItem);
+
+                        rowItems.push_back(new QStandardItem(itemValue.typeText));
+                        rowItems.push_back(new QStandardItem(itemValue.modifiedTime.isValid()
+                            ? itemValue.modifiedTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+                            : QStringLiteral("-")));
+                        rowItems.push_back(new QStandardItem(QDir::toNativeSeparators(itemValue.absolutePath)));
+                        rowItems.push_back(new QStandardItem(itemValue.isDirectory ? QStringLiteral("1") : QStringLiteral("0")));
+                        targetPanel.manualModel->appendRow(rowItems);
+                    }
+                    targetPanel.manualModel->blockSignals(false);
+
+                    if (targetPanel.parserStatusLabel != nullptr)
+                    {
+                        targetPanel.parserStatusLabel->setText(
+                            QStringLiteral("解析器: %1 (手动)").arg(manualFsTypeToText(parsedFsType)));
+                    }
+                    targetPanel.manualLoadedPath = requestPath;
+
+                    kLogEvent event;
+                    info << event
+                        << "[FileDock] 异步手动解析完成, panel="
+                        << panelNameText.toStdString()
+                        << ", fsType="
+                        << manualFsTypeToText(parsedFsType).toStdString()
+                        << ", rows="
+                        << parsedEntries.size()
+                        << ", path="
+                        << QDir::toNativeSeparators(requestPath).toStdString()
+                        << eol;
+                }
+
+                // 模型回填后重新应用过滤/排序，让视图立即更新到当前条件。
+                safeThis->applyPanelFilterAndSort(targetPanel);
+                kPro.set(progressPid, parseOk ? "手动解析完成" : "手动解析失败", 0, 100.0f);
+
+                // 若解析过程中用户又切了目录，完成后立即执行挂起请求。
+                if (!targetPanel.manualParseInProgress && targetPanel.manualParsePending)
+                {
+                    const bool pendingShowWarning = targetPanel.manualParsePendingShowWarning;
+                    targetPanel.manualParsePending = false;
+                    targetPanel.manualParsePendingShowWarning = false;
+                    safeThis->requestAsyncManualReload(targetPanel, pendingShowWarning);
+                }
+            },
+            Qt::QueuedConnection);
+
+        if (!invokeOk)
+        {
+            kPro.set(progressPid, "回调失败", 0, 100.0f);
+        }
+    }).detach();
+}
+
 bool FileDock::currentModeIsManual(const FilePanelWidgets& panel) const
 {
     return panel.readModeCombo != nullptr && panel.readModeCombo->currentIndex() == 1;
@@ -2204,7 +2477,17 @@ void FileDock::refreshRecoveryVolumeList()
 
 void FileDock::scanDeletedFilesForRecovery()
 {
+    // 对外保留同步入口名，内部改为异步实现，避免阻塞 UI。
+    scanDeletedFilesForRecoveryAsync();
+}
+
+void FileDock::scanDeletedFilesForRecoveryAsync()
+{
     if (m_recoveryVolumeCombo == nullptr || m_recoveryTable == nullptr || m_recoveryStatusLabel == nullptr)
+    {
+        return;
+    }
+    if (m_recoveryScanInProgress)
     {
         return;
     }
@@ -2216,7 +2499,15 @@ void FileDock::scanDeletedFilesForRecovery()
 
     const QString rootPath = m_recoveryVolumeCombo->currentData().toString();
     m_recoveryStatusLabel->setText(QStringLiteral("正在扫描：%1").arg(rootPath));
-    QApplication::processEvents();
+    m_recoveryScanInProgress = true;
+    if (m_recoveryScanButton != nullptr)
+    {
+        m_recoveryScanButton->setEnabled(false);
+    }
+    if (m_recoveryExportButton != nullptr)
+    {
+        m_recoveryExportButton->setEnabled(false);
+    }
 
     {
         kLogEvent event;
@@ -2226,63 +2517,112 @@ void FileDock::scanDeletedFilesForRecovery()
             << eol;
     }
 
-    QString errorText;
-    std::vector<ks::file::NtfsDeletedFileEntry> deletedItems;
-    const bool scanOk = ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(
-        rootPath,
-        deletedItems,
-        errorText);
-    if (!scanOk)
-    {
-        m_recoveryStatusLabel->setText(QStringLiteral("扫描失败：%1").arg(errorText));
-        kLogEvent event;
-        err << event
-            << "[FileDock] 扫描误删失败, volume="
-            << QDir::toNativeSeparators(rootPath).toStdString()
-            << ", error="
-            << errorText.toStdString()
-            << eol;
-        QMessageBox::warning(this, QStringLiteral("扫描失败"), errorText);
-        return;
-    }
+    const int progressPid = kPro.add("文件恢复", "扫描误删");
+    kPro.set(progressPid, "准备扫描卷", 0, 5.0f);
 
-    m_deletedRecoveryItems = std::move(deletedItems);
-    m_recoveryTable->setRowCount(static_cast<int>(m_deletedRecoveryItems.size()));
-    for (int row = 0; row < static_cast<int>(m_deletedRecoveryItems.size()); ++row)
-    {
-        const ks::file::NtfsDeletedFileEntry& itemValue = m_deletedRecoveryItems[static_cast<std::size_t>(row)];
-        m_recoveryTable->setItem(row, 0, new QTableWidgetItem(itemValue.fileName));
-        m_recoveryTable->setItem(row, 1, new QTableWidgetItem(itemValue.pathHint));
-        m_recoveryTable->setItem(row, 2, new QTableWidgetItem(formatSizeText(itemValue.sizeBytes)));
-        m_recoveryTable->setItem(row, 3, new QTableWidgetItem(
-            itemValue.modifiedTime.isValid()
-            ? itemValue.modifiedTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
-            : QStringLiteral("-")));
-        m_recoveryTable->setItem(row, 4, new QTableWidgetItem(QString::number(itemValue.fileReference)));
-        m_recoveryTable->setItem(row, 5, new QTableWidgetItem(
-            itemValue.residentDataReady ? QStringLiteral("Resident可恢复") : QStringLiteral("仅元数据")));
-    }
+    QPointer<FileDock> safeThis(this);
+    std::thread([safeThis, rootPath, progressPid]() {
+        QString errorText;
+        std::vector<ks::file::NtfsDeletedFileEntry> deletedItems;
 
-    m_recoveryStatusLabel->setText(
-        QStringLiteral("扫描完成：%1 项（Resident 可恢复 %2 项）")
-        .arg(m_deletedRecoveryItems.size())
-        .arg(std::count_if(
-            m_deletedRecoveryItems.begin(),
-            m_deletedRecoveryItems.end(),
-            [](const ks::file::NtfsDeletedFileEntry& item) { return item.residentDataReady; })));
+        kPro.set(progressPid, "读取 NTFS 元数据中", 0, 35.0f);
+        const bool scanOk = ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(
+            rootPath,
+            deletedItems,
+            errorText);
+        kPro.set(progressPid, scanOk ? "整理扫描结果中" : "扫描失败，整理错误信息", 0, 82.0f);
 
-    kLogEvent event;
-    info << event
-        << "[FileDock] 扫描误删完成, volume="
-        << QDir::toNativeSeparators(rootPath).toStdString()
-        << ", total="
-        << m_deletedRecoveryItems.size()
-        << eol;
+        if (safeThis.isNull())
+        {
+            kPro.set(progressPid, "界面已关闭", 0, 100.0f);
+            return;
+        }
+
+        QMetaObject::invokeMethod(
+            safeThis.data(),
+            [safeThis, rootPath, progressPid, scanOk, deletedItems, errorText]() {
+                if (safeThis.isNull())
+                {
+                    kPro.set(progressPid, "界面已关闭", 0, 100.0f);
+                    return;
+                }
+
+                safeThis->m_recoveryScanInProgress = false;
+                if (safeThis->m_recoveryScanButton != nullptr)
+                {
+                    safeThis->m_recoveryScanButton->setEnabled(true);
+                }
+                if (safeThis->m_recoveryExportButton != nullptr)
+                {
+                    safeThis->m_recoveryExportButton->setEnabled(true);
+                }
+
+                if (!scanOk)
+                {
+                    safeThis->m_recoveryStatusLabel->setText(QStringLiteral("扫描失败：%1").arg(errorText));
+                    kLogEvent event;
+                    err << event
+                        << "[FileDock] 扫描误删失败, volume="
+                        << QDir::toNativeSeparators(rootPath).toStdString()
+                        << ", error="
+                        << errorText.toStdString()
+                        << eol;
+                    QMessageBox::warning(safeThis.data(), QStringLiteral("扫描失败"), errorText);
+                    kPro.set(progressPid, "扫描失败", 0, 100.0f);
+                    return;
+                }
+
+                safeThis->m_deletedRecoveryItems = deletedItems;
+                safeThis->m_recoveryTable->setRowCount(static_cast<int>(safeThis->m_deletedRecoveryItems.size()));
+                for (int row = 0; row < static_cast<int>(safeThis->m_deletedRecoveryItems.size()); ++row)
+                {
+                    const ks::file::NtfsDeletedFileEntry& itemValue = safeThis->m_deletedRecoveryItems[static_cast<std::size_t>(row)];
+                    safeThis->m_recoveryTable->setItem(row, 0, new QTableWidgetItem(itemValue.fileName));
+                    safeThis->m_recoveryTable->setItem(row, 1, new QTableWidgetItem(itemValue.pathHint));
+                    safeThis->m_recoveryTable->setItem(row, 2, new QTableWidgetItem(formatSizeText(itemValue.sizeBytes)));
+                    safeThis->m_recoveryTable->setItem(row, 3, new QTableWidgetItem(
+                        itemValue.modifiedTime.isValid()
+                        ? itemValue.modifiedTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+                        : QStringLiteral("-")));
+                    safeThis->m_recoveryTable->setItem(row, 4, new QTableWidgetItem(QString::number(itemValue.fileReference)));
+                    safeThis->m_recoveryTable->setItem(row, 5, new QTableWidgetItem(
+                        itemValue.residentDataReady ? QStringLiteral("Resident可恢复") : QStringLiteral("仅元数据")));
+                }
+
+                safeThis->m_recoveryStatusLabel->setText(
+                    QStringLiteral("扫描完成：%1 项（Resident 可恢复 %2 项）")
+                    .arg(safeThis->m_deletedRecoveryItems.size())
+                    .arg(std::count_if(
+                        safeThis->m_deletedRecoveryItems.begin(),
+                        safeThis->m_deletedRecoveryItems.end(),
+                        [](const ks::file::NtfsDeletedFileEntry& item) { return item.residentDataReady; })));
+
+                kLogEvent event;
+                info << event
+                    << "[FileDock] 扫描误删完成, volume="
+                    << QDir::toNativeSeparators(rootPath).toStdString()
+                    << ", total="
+                    << safeThis->m_deletedRecoveryItems.size()
+                    << eol;
+                kPro.set(progressPid, "扫描完成", 0, 100.0f);
+            },
+            Qt::QueuedConnection);
+    }).detach();
 }
 
 void FileDock::recoverSelectedDeletedFiles()
 {
+    // 对外保留同步入口名，内部改为异步实现，避免阻塞 UI。
+    recoverSelectedDeletedFilesAsync();
+}
+
+void FileDock::recoverSelectedDeletedFilesAsync()
+{
     if (m_recoveryTable == nullptr || m_recoveryVolumeCombo == nullptr)
+    {
+        return;
+    }
+    if (m_recoveryRecoverInProgress)
     {
         return;
     }
@@ -2303,17 +2643,8 @@ void FileDock::recoverSelectedDeletedFiles()
     }
 
     const QString volumeRoot = m_recoveryVolumeCombo->currentData().toString();
-    {
-        kLogEvent event;
-        info << event
-            << "[FileDock] 开始恢复选中误删项, volume="
-            << QDir::toNativeSeparators(volumeRoot).toStdString()
-            << ", selectedRows="
-            << selectedRows.size()
-            << eol;
-    }
-    int successCount = 0;
-    QStringList failTextList;
+    std::vector<ks::file::NtfsDeletedFileEntry> selectedItems;
+    selectedItems.reserve(static_cast<std::size_t>(selectedRows.size()));
     for (const QModelIndex& rowIndex : selectedRows)
     {
         const int rowValue = rowIndex.row();
@@ -2321,59 +2652,130 @@ void FileDock::recoverSelectedDeletedFiles()
         {
             continue;
         }
-
-        const ks::file::NtfsDeletedFileEntry& deletedItem =
-            m_deletedRecoveryItems[static_cast<std::size_t>(rowValue)];
-        QString exportName = deletedItem.fileName.trimmed();
-        if (exportName.isEmpty())
-        {
-            exportName = QStringLiteral("deleted_%1.bin").arg(deletedItem.fileReference);
-        }
-        const QString targetPath = QDir(exportDir).filePath(exportName);
-        QString errorText;
-        const bool ok = ks::file::ManualFileSystemParser::recoverNtfsResidentFile(
-            volumeRoot,
-            deletedItem,
-            targetPath,
-            errorText);
-        if (ok)
-        {
-            ++successCount;
-        }
-        else
-        {
-            failTextList.push_back(QStringLiteral("%1: %2").arg(exportName, errorText));
-        }
+        selectedItems.push_back(m_deletedRecoveryItems[static_cast<std::size_t>(rowValue)]);
+    }
+    if (selectedItems.empty())
+    {
+        QMessageBox::information(this, QStringLiteral("文件恢复"), QStringLiteral("未读取到有效恢复条目。"));
+        return;
     }
 
-    const QString summaryText = QStringLiteral("恢复完成：成功 %1，失败 %2。")
-        .arg(successCount)
-        .arg(failTextList.size());
-    m_recoveryStatusLabel->setText(summaryText);
-    if (failTextList.empty())
+    m_recoveryRecoverInProgress = true;
+    if (m_recoveryScanButton != nullptr)
+    {
+        m_recoveryScanButton->setEnabled(false);
+    }
+    if (m_recoveryExportButton != nullptr)
+    {
+        m_recoveryExportButton->setEnabled(false);
+    }
+
     {
         kLogEvent event;
         info << event
-            << "[FileDock] 恢复完成, success="
-            << successCount
-            << ", failed=0"
+            << "[FileDock] 开始恢复选中误删项, volume="
+            << QDir::toNativeSeparators(volumeRoot).toStdString()
+            << ", selectedRows="
+            << selectedItems.size()
             << eol;
-        QMessageBox::information(this, QStringLiteral("文件恢复"), summaryText);
     }
-    else
-    {
-        kLogEvent event;
-        warn << event
-            << "[FileDock] 恢复部分失败, success="
-            << successCount
-            << ", failed="
-            << failTextList.size()
-            << eol;
-        QMessageBox::warning(
-            this,
-            QStringLiteral("文件恢复"),
-            summaryText + QStringLiteral("\n\n失败明细：\n") + failTextList.join('\n'));
-    }
+
+    const int progressPid = kPro.add("文件恢复", "恢复选中");
+    kPro.set(progressPid, "准备恢复", 0, 5.0f);
+
+    QPointer<FileDock> safeThis(this);
+    std::thread([safeThis, progressPid, volumeRoot, exportDir, selectedItems]() {
+        int successCount = 0;
+        QStringList failTextList;
+
+        for (std::size_t index = 0; index < selectedItems.size(); ++index)
+        {
+            const ks::file::NtfsDeletedFileEntry& deletedItem = selectedItems[index];
+            QString exportName = deletedItem.fileName.trimmed();
+            if (exportName.isEmpty())
+            {
+                exportName = QStringLiteral("deleted_%1.bin").arg(deletedItem.fileReference);
+            }
+            const QString targetPath = QDir(exportDir).filePath(exportName);
+            QString errorText;
+            const bool ok = ks::file::ManualFileSystemParser::recoverNtfsResidentFile(
+                volumeRoot,
+                deletedItem,
+                targetPath,
+                errorText);
+            if (ok)
+            {
+                ++successCount;
+            }
+            else
+            {
+                failTextList.push_back(QStringLiteral("%1: %2").arg(exportName, errorText));
+            }
+
+            const float progress = 5.0f
+                + (static_cast<float>(index + 1) / static_cast<float>(selectedItems.size())) * 90.0f;
+            kPro.set(progressPid, "恢复处理中", 0, progress);
+        }
+
+        if (safeThis.isNull())
+        {
+            kPro.set(progressPid, "界面已关闭", 0, 100.0f);
+            return;
+        }
+
+        QMetaObject::invokeMethod(
+            safeThis.data(),
+            [safeThis, progressPid, successCount, failTextList]() {
+                if (safeThis.isNull())
+                {
+                    kPro.set(progressPid, "界面已关闭", 0, 100.0f);
+                    return;
+                }
+
+                safeThis->m_recoveryRecoverInProgress = false;
+                if (safeThis->m_recoveryScanButton != nullptr)
+                {
+                    safeThis->m_recoveryScanButton->setEnabled(true);
+                }
+                if (safeThis->m_recoveryExportButton != nullptr)
+                {
+                    safeThis->m_recoveryExportButton->setEnabled(true);
+                }
+
+                const QString summaryText = QStringLiteral("恢复完成：成功 %1，失败 %2。")
+                    .arg(successCount)
+                    .arg(failTextList.size());
+                safeThis->m_recoveryStatusLabel->setText(summaryText);
+
+                if (failTextList.empty())
+                {
+                    kLogEvent event;
+                    info << event
+                        << "[FileDock] 恢复完成, success="
+                        << successCount
+                        << ", failed=0"
+                        << eol;
+                    QMessageBox::information(safeThis.data(), QStringLiteral("文件恢复"), summaryText);
+                }
+                else
+                {
+                    kLogEvent event;
+                    warn << event
+                        << "[FileDock] 恢复部分失败, success="
+                        << successCount
+                        << ", failed="
+                        << failTextList.size()
+                        << eol;
+                    QMessageBox::warning(
+                        safeThis.data(),
+                        QStringLiteral("文件恢复"),
+                        summaryText + QStringLiteral("\n\n失败明细：\n") + failTextList.join('\n'));
+                }
+
+                kPro.set(progressPid, "恢复完成", 0, 100.0f);
+            },
+            Qt::QueuedConnection);
+    }).detach();
 }
 
 void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& localPos)

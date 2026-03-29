@@ -578,13 +578,8 @@ MonitorDock::MonitorDock(QWidget* parent)
     initializeUi();
     initializeConnections();
 
-    // 性能图刷新定时器：每秒采样一次 CPU/内存/磁盘/网络。
-    m_perfUpdateTimer = new QTimer(this);
-    m_perfUpdateTimer->setInterval(1000);
-    connect(m_perfUpdateTimer, &QTimer::timeout, this, [this]() {
-        refreshPerformanceCharts();
-    });
-    m_perfUpdateTimer->start();
+    // 顶部四宫格性能图已迁移到“监视面板”Dock（MonitorPanelWidget），
+    // 当前 MonitorDock 仅负责 WMI/ETW 实时监控逻辑。
 
     // WMI 事件表刷新节流：后台线程先入队，主线程按 100ms 批量刷入，避免事件风暴卡 UI。
     m_wmiUiUpdateTimer = new QTimer(this);
@@ -596,7 +591,6 @@ MonitorDock::MonitorDock(QWidget* parent)
     refreshWmiProvidersAsync();
     refreshWmiEventClassesAsync();
     refreshEtwProvidersAsync();
-    refreshPerformanceCharts();
 
     kLogEvent finishEvent;
     info << finishEvent << "[MonitorDock] 构造完成。" << eol;
@@ -635,12 +629,12 @@ MonitorDock::~MonitorDock()
 
 void MonitorDock::initializeUi()
 {
-    // 根布局和总 Tab。
+    // 根布局和总 Tab：
+    // - 监控页本体仅保留 WMI/ETW；
+    // - 性能四宫格图已经独立到左下角“监视面板”Dock。
     m_rootLayout = new QVBoxLayout(this);
     m_rootLayout->setContentsMargins(6, 6, 6, 6);
     m_rootLayout->setSpacing(6);
-
-    initializePerformancePanel();
 
     m_sideTabWidget = new QTabWidget(this);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
