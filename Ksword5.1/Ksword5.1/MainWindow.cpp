@@ -227,13 +227,24 @@ namespace
     }
 }
 
-MainWindow::MainWindow(QWidget* parent)
+MainWindow::MainWindow(
+    QWidget* parent,
+    StartupProgressCallback startupProgressCallback)
     : QMainWindow(parent)
+    , m_startupProgressCallback(startupProgressCallback)
 {
     // 记录主窗口启动日志，便于验证日志系统与 UI 联动是否生效。
     // 注意：使用 kLogEvent，避免与 QObject::event 命名冲突。
     kLogEvent startupEvent;
     info << startupEvent << "MainWindow 构造开始，准备初始化 Dock 系统。" << eol;
+
+    // 启动阶段细分：
+    // - 主窗口外壳；
+    // - 菜单；
+    // - 权限按钮；
+    // - Dock 内容；
+    // - 外观系统。
+    reportStartupProgress(32, QStringLiteral("正在初始化主窗口框架..."));
 
     // Dock 全局配置：
     // - 关闭所有可关闭按钮与标题栏三按钮（标签菜单/浮动/关闭）；
@@ -258,29 +269,55 @@ MainWindow::MainWindow(QWidget* parent)
     resize(1024, 768);
 
     // 初始化菜单
+    reportStartupProgress(38, QStringLiteral("正在初始化菜单..."));
     initMenus();
 
+    // 初始化权限状态按钮：
+    // - 从菜单初始化中拆开；
+    // - 便于启动画面展示更细的进度阶段。
+    reportStartupProgress(44, QStringLiteral("正在初始化权限状态按钮..."));
+    initPrivilegeStatusButtons();
+
     // 初始化Dock Widgets
+    reportStartupProgress(48, QStringLiteral("正在创建页面组件..."));
     initDockWidgets();
 
     // 设置Dock布局
+    reportStartupProgress(74, QStringLiteral("正在整理 Dock 布局..."));
     setupDockLayout();
 
     // 初始化外观设置：
     // - 读取 JSON；
     // - 绑定系统深浅色变化；
     // - 应用窗口背景色/背景图/文本颜色。
+    reportStartupProgress(84, QStringLiteral("正在初始化主题与外观..."));
     initAppearanceSettings();
 
     // 记录初始化完成日志，方便用户在“日志输出”面板直接看到结果。
     // 注意：使用 kLogEvent，避免与 QObject::event 命名冲突。
     kLogEvent readyEvent;
     info << readyEvent << "MainWindow 初始化完成，日志面板已加载。" << eol;
+    reportStartupProgress(93, QStringLiteral("主窗口初始化完成，准备显示..."));
 }
 
 MainWindow::~MainWindow()
 {
     // ADS会自动管理内存，无需手动删除
+}
+
+void MainWindow::reportStartupProgress(
+    const int progressPercent,
+    const QString& statusText) const
+{
+    // 安全回调策略：
+    // - 未传入回调则静默跳过；
+    // - 有回调时把阶段百分比与文字原样转发给主函数。
+    if (!m_startupProgressCallback)
+    {
+        return;
+    }
+
+    m_startupProgressCallback(progressPercent, statusText);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
@@ -344,9 +381,6 @@ void MainWindow::initMenus()
     menuBar()->addMenu("编辑(&E)");
 
     // 视图菜单将在initDockWidgets后添加Dock切换动作
-
-    // 菜单栏右侧权限状态按钮（Admin/Debug/System）。
-    initPrivilegeStatusButtons();
 }
 
 void MainWindow::initPrivilegeStatusButtons()
@@ -1173,27 +1207,40 @@ bool MainWindow::enableSeDebugPrivilege(std::string& errorTextOut) const
 
 void MainWindow::initDockWidgets()
 {
-    // 创建自定义Widgets
+    // 第一批轻量页面：先创建基础页签，尽快推进启动进度。
+    reportStartupProgress(50, QStringLiteral("正在创建基础页面..."));
     m_welcomeWidget = new WelcomeDock(this);
     m_processWidget = new ProcessDock(this);
     m_networkWidget = new NetworkDock(this);
     m_memoryWidget = new MemoryDock(this);
+
+    // 第二批核心页面：文件/驱动/内核通常更重，单独给出阶段提示。
+    reportStartupProgress(56, QStringLiteral("正在创建核心分析页面..."));
     m_fileWidget = new FileDock(this);
     m_driverWidget = new DriverDock(this);
     m_kernelWidget = new KernelDock(this);
     m_monitorWidget = new MonitorDock(this);
+
+    // 第三批功能页面：监视面板、硬件与设置页。
+    reportStartupProgress(62, QStringLiteral("正在创建监控与设置页面..."));
     // 监视面板使用独立组件承载四宫格性能图，避免与 WMI/ETW 页面耦合。
     m_monitorPanelWidget = new MonitorPanelWidget(this);
     m_hardwareWidget = new HardwareDock(this);
     m_privilegeWidget = new PrivilegeDock(this);
     m_settingsWidget = new SettingsDock(this);
+
+    // 第四批辅助页面：窗口、注册表、日志、当前操作、即时窗口。
+    reportStartupProgress(66, QStringLiteral("正在创建辅助页面..."));
     m_windowWidget = new WindowDock(this);
     m_registryWidget = new RegistryDock(this);
     m_logWidget = new LogDockWidget(this);
     m_progressWidget = new ProgressDockWidget(this);
     m_immediateEditorWidget = new CodeEditorWidget(this);
 
-    // 使用辅助函数创建Dock Widgets
+    // 创建 Dock 容器前再推进一次启动进度，避免长时间停留在单一文案。
+    reportStartupProgress(68, QStringLiteral("正在封装 Dock 容器..."));
+
+    // 使用辅助函数创建Dock Widgets。
     auto createDockWidget = [this](QWidget* widget, const QString& title) -> ads::CDockWidget* {
         ads::CDockWidget* dock = new ads::CDockWidget(title);
         dock->setWidget(widget);
@@ -1237,7 +1284,28 @@ void MainWindow::initDockWidgets()
     // 左下角“监视面板”接入独立性能图组件（CPU每核/内存/磁盘/网络）。
     m_dockMonitor = createDockWidget(m_monitorPanelWidget, "监视面板");
 
+    // 当前操作 Dock 专项透明策略：
+    // - Dock 自身背景透明；
+    // - 内容容器背景透明；
+    // - 避免 ADS 默认底色盖住壁纸或主题底图。
+    if (m_dockCurrentOp != nullptr)
+    {
+        m_dockCurrentOp->setObjectName(QStringLiteral("ksCurrentOperationDock"));
+        m_dockCurrentOp->setStyleSheet(
+            QStringLiteral(
+            "#ksCurrentOperationDock,"
+            "#ksCurrentOperationDock > QWidget,"
+            "#ksCurrentOperationDock QScrollArea,"
+            "#ksCurrentOperationDock QAbstractScrollArea,"
+            "#ksCurrentOperationDock QAbstractScrollArea::viewport{"
+            "  background:transparent;"
+            "  background-color:transparent;"
+            "  border:none;"
+            "}"));
+    }
+
     // 将Dock Widget的切换动作添加到菜单
+    reportStartupProgress(72, QStringLiteral("正在注册视图菜单..."));
     QMenu* viewMenu = menuBar()->addMenu("视图(&V)");
     QList<ads::CDockWidget*> allDocks = {
         m_dockWelcome, m_dockProcess, m_dockNetwork, m_dockMemory,
@@ -1302,6 +1370,11 @@ void MainWindow::initAppearanceSettings()
     kLogEvent appearanceInitEvent;
     info << appearanceInitEvent << "[MainWindow] 开始初始化外观设置系统。" << eol;
 
+    // 启动画面细分：
+    // - 先绑定设置页/系统主题变化；
+    // - 再真正应用首轮主题样式。
+    reportStartupProgress(86, QStringLiteral("正在绑定外观设置源..."));
+
     if (m_settingsWidget != nullptr)
     {
         connect(
@@ -1330,6 +1403,7 @@ void MainWindow::initAppearanceSettings()
             });
     }
 
+    reportStartupProgress(90, QStringLiteral("正在应用主界面主题..."));
     applyAppearanceSettings(m_currentAppearanceSettings, QStringLiteral("初始化加载"));
     info << appearanceInitEvent << "[MainWindow] 外观设置系统初始化完成。" << eol;
 }

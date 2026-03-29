@@ -2017,11 +2017,14 @@ bool FileDock::reloadManualModel(FilePanelWidgets& panel, const bool showWarning
     std::vector<ks::file::ManualDirectoryEntry> entries;
     ks::file::ManualFsType fsType = ks::file::ManualFsType::Unknown;
     QString errorText;
+    // usedWinApiFallback：记录手动 NTFS 解析是否已经降级到 Windows API。
+    bool usedWinApiFallback = false;
     const bool parseOk = ks::file::ManualFileSystemParser::enumerateDirectory(
         panel.currentPath,
         entries,
         fsType,
-        errorText);
+        errorText,
+        &usedWinApiFallback);
 
     panel.manualModel->removeRows(0, panel.manualModel->rowCount());
     panel.lastManualFsType = fsType;
@@ -2079,9 +2082,19 @@ bool FileDock::reloadManualModel(FilePanelWidgets& panel, const bool showWarning
 
     if (panel.parserStatusLabel != nullptr)
     {
-        panel.parserStatusLabel->setText(
-            QStringLiteral("解析器: %1 (手动)")
-            .arg(manualFsTypeToText(fsType)));
+        // 手动链路失败后若已回退到 Windows API，则必须明确展示真实来源，避免 UI 误导。
+        if (usedWinApiFallback)
+        {
+            panel.parserStatusLabel->setText(
+                QStringLiteral("解析器: Windows API 回退 (%1)")
+                .arg(manualFsTypeToText(fsType)));
+        }
+        else
+        {
+            panel.parserStatusLabel->setText(
+                QStringLiteral("解析器: %1 (手动)")
+                .arg(manualFsTypeToText(fsType)));
+        }
     }
     panel.manualLoadedPath = panel.currentPath;
 
@@ -2190,11 +2203,14 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
         std::vector<ks::file::ManualDirectoryEntry> parsedEntries;
         ks::file::ManualFsType parsedFsType = ks::file::ManualFsType::Unknown;
         QString parseErrorText;
+        // usedWinApiFallback：记录后台解析是否已退回到 Windows API，供 UI 正确显示状态。
+        bool usedWinApiFallback = false;
         const bool parseOk = ks::file::ManualFileSystemParser::enumerateDirectory(
             requestPath,
             parsedEntries,
             parsedFsType,
-            parseErrorText);
+            parseErrorText,
+            &usedWinApiFallback);
 
         kPro.set(progressPid, parseOk ? "生成目录列表中" : "解析失败，整理错误信息", 0, 78.0f);
 
@@ -2206,7 +2222,7 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
 
         const bool invokeOk = QMetaObject::invokeMethod(
             safeThis.data(),
-            [safeThis, leftPanelRequest, requestPath, panelNameText, showWarningMessage, requestSerial, progressPid, parseOk, parsedEntries, parsedFsType, parseErrorText]() {
+            [safeThis, leftPanelRequest, requestPath, panelNameText, showWarningMessage, requestSerial, progressPid, parseOk, parsedEntries, parsedFsType, parseErrorText, usedWinApiFallback]() {
                 if (safeThis.isNull())
                 {
                     kPro.set(progressPid, "界面已关闭", 0, 100.0f);
@@ -2335,8 +2351,18 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
 
                     if (targetPanel.parserStatusLabel != nullptr)
                     {
-                        targetPanel.parserStatusLabel->setText(
-                            QStringLiteral("解析器: %1 (手动)").arg(manualFsTypeToText(parsedFsType)));
+                        // 异步路径与同步路径保持同一展示规则，避免回退后仍伪装成手动解析。
+                        if (usedWinApiFallback)
+                        {
+                            targetPanel.parserStatusLabel->setText(
+                                QStringLiteral("解析器: Windows API 回退 (%1)")
+                                .arg(manualFsTypeToText(parsedFsType)));
+                        }
+                        else
+                        {
+                            targetPanel.parserStatusLabel->setText(
+                                QStringLiteral("解析器: %1 (手动)").arg(manualFsTypeToText(parsedFsType)));
+                        }
                     }
                     targetPanel.manualLoadedPath = requestPath;
 
@@ -2417,13 +2443,14 @@ void FileDock::initializeRecoveryPage()
     recoveryLayout->addWidget(toolWidget, 0);
 
     m_recoveryTable = new QTableWidget(m_fileRecoveryPage);
-    m_recoveryTable->setColumnCount(6);
+    m_recoveryTable->setColumnCount(7);
     m_recoveryTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("文件名"),
         QStringLiteral("路径提示"),
         QStringLiteral("大小"),
         QStringLiteral("修改时间"),
         QStringLiteral("记录号"),
+        QStringLiteral("完整度"),
         QStringLiteral("恢复能力")
         });
     m_recoveryTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -2538,12 +2565,19 @@ void FileDock::scanDeletedFilesForRecoveryAsync()
         QString errorText;
         std::vector<ks::file::NtfsDeletedFileEntry> deletedItems;
 
-        kPro.set(progressPid, "读取 NTFS 元数据中", 0, 35.0f);
+        kPro.set(progressPid, "准备读取 NTFS 元数据", 0, 3.0f);
         const bool scanOk = ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(
             rootPath,
             deletedItems,
-            errorText);
-        kPro.set(progressPid, scanOk ? "整理扫描结果中" : "扫描失败，整理错误信息", 0, 82.0f);
+            errorText,
+            [progressPid](const int percentValue, const QString& stageText) {
+                const int boundedPercent = std::clamp(percentValue, 0, 100);
+                kPro.set(progressPid, stageText.toStdString(), 0, static_cast<float>(boundedPercent));
+            });
+        if (!scanOk)
+        {
+            kPro.set(progressPid, "扫描失败，整理错误信息", 0, 82.0f);
+        }
 
         if (safeThis.isNull())
         {
@@ -2586,11 +2620,35 @@ void FileDock::scanDeletedFilesForRecoveryAsync()
                 }
 
                 safeThis->m_deletedRecoveryItems = deletedItems;
+                safeThis->m_recoveryTable->setUpdatesEnabled(false);
+                safeThis->m_recoveryTable->setSortingEnabled(false);
+                safeThis->m_recoveryTable->clearContents();
                 safeThis->m_recoveryTable->setRowCount(static_cast<int>(safeThis->m_deletedRecoveryItems.size()));
                 for (int row = 0; row < static_cast<int>(safeThis->m_deletedRecoveryItems.size()); ++row)
                 {
                     const ks::file::NtfsDeletedFileEntry& itemValue = safeThis->m_deletedRecoveryItems[static_cast<std::size_t>(row)];
-                    safeThis->m_recoveryTable->setItem(row, 0, new QTableWidgetItem(itemValue.fileName));
+                    // 完整度文本：优先显示估计百分比，无法评估时明确标记为未知。
+                    const QString integrityText =
+                        (itemValue.estimatedIntegrityPercent >= 0)
+                        ? QStringLiteral("%1%").arg(itemValue.estimatedIntegrityPercent)
+                        : QStringLiteral("未知");
+
+                    // 恢复能力文本：同时体现 resident、原始文件名是否保留，便于快速筛选。
+                    QString recoverabilityText =
+                        itemValue.residentDataReady
+                        ? QStringLiteral("Resident可恢复")
+                        : QStringLiteral("仅元数据");
+                    if (!itemValue.hasOriginalName)
+                    {
+                        recoverabilityText += QStringLiteral(" / 缺名");
+                    }
+
+                    QTableWidgetItem* nameItem = new QTableWidgetItem(itemValue.fileName);
+                    if (!itemValue.hasOriginalName)
+                    {
+                        nameItem->setToolTip(QStringLiteral("该条目原始文件名已丢失，当前名称为系统生成的占位名。"));
+                    }
+                    safeThis->m_recoveryTable->setItem(row, 0, nameItem);
                     safeThis->m_recoveryTable->setItem(row, 1, new QTableWidgetItem(itemValue.pathHint));
                     safeThis->m_recoveryTable->setItem(row, 2, new QTableWidgetItem(formatSizeText(itemValue.sizeBytes)));
                     safeThis->m_recoveryTable->setItem(row, 3, new QTableWidgetItem(
@@ -2598,17 +2656,25 @@ void FileDock::scanDeletedFilesForRecoveryAsync()
                         ? itemValue.modifiedTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
                         : QStringLiteral("-")));
                     safeThis->m_recoveryTable->setItem(row, 4, new QTableWidgetItem(QString::number(itemValue.fileReference)));
-                    safeThis->m_recoveryTable->setItem(row, 5, new QTableWidgetItem(
-                        itemValue.residentDataReady ? QStringLiteral("Resident可恢复") : QStringLiteral("仅元数据")));
+                    safeThis->m_recoveryTable->setItem(row, 5, new QTableWidgetItem(integrityText));
+                    safeThis->m_recoveryTable->setItem(row, 6, new QTableWidgetItem(recoverabilityText));
                 }
+                safeThis->m_recoveryTable->setUpdatesEnabled(true);
+
+                const int residentReadyCount = static_cast<int>(std::count_if(
+                    safeThis->m_deletedRecoveryItems.begin(),
+                    safeThis->m_deletedRecoveryItems.end(),
+                    [](const ks::file::NtfsDeletedFileEntry& item) { return item.residentDataReady; }));
+                const int highIntegrityCount = static_cast<int>(std::count_if(
+                    safeThis->m_deletedRecoveryItems.begin(),
+                    safeThis->m_deletedRecoveryItems.end(),
+                    [](const ks::file::NtfsDeletedFileEntry& item) { return item.estimatedIntegrityPercent >= 80; }));
 
                 safeThis->m_recoveryStatusLabel->setText(
-                    QStringLiteral("扫描完成：%1 项（Resident 可恢复 %2 项）")
+                    QStringLiteral("扫描完成：%1 项（Resident %2 项，完整度≥80%% %3 项）")
                     .arg(safeThis->m_deletedRecoveryItems.size())
-                    .arg(std::count_if(
-                        safeThis->m_deletedRecoveryItems.begin(),
-                        safeThis->m_deletedRecoveryItems.end(),
-                        [](const ks::file::NtfsDeletedFileEntry& item) { return item.residentDataReady; })));
+                    .arg(residentReadyCount)
+                    .arg(highIntegrityCount));
 
                 kLogEvent event;
                 info << event

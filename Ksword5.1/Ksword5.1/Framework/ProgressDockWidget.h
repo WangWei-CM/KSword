@@ -8,6 +8,7 @@
 
 #include "../Framework.h"
 
+#include <QString>
 #include <QWidget>
 
 class QLabel;
@@ -28,6 +29,11 @@ private:
     // initializeUi 作用：
     // - 创建主布局、滚动容器与“空列表提示”。
     void initializeUi();
+
+    // applyTransparentBackgroundPolicy 作用：
+    // - 把“当前操作”面板根控件/滚动区域/viewport 全部改为透明；
+    // - 避免 Dock 内容区域出现默认底色。
+    void applyTransparentBackgroundPolicy();
 
     // initializeRefreshTimer 作用：
     // - 创建定时器；
@@ -52,6 +58,24 @@ private:
     // 返回值：新建的卡片 QWidget 指针（父对象由布局接管）。
     QWidget* createTaskCardWidget(const kProgressTask& taskItem) const;
 
+    // buildHighContrastTextHex 作用：
+    // - 根据深浅主题返回高对比黑/白文字颜色；
+    // - 避免透明背景下灰字看不清。
+    // 返回值：可直接写入 QSS 的颜色字符串。
+    QString buildHighContrastTextHex() const;
+
+    // buildCardBackgroundHex 作用：
+    // - 为无边框卡片提供轻量半透明底色；
+    // - 在透明 Dock 上保持文字可读性。
+    // 返回值：可直接写入 QSS 的 rgba 字符串。
+    QString buildCardBackgroundHex() const;
+
+    // buildProgressBarStyleSheet 作用：
+    // - 统一生成进度条样式；
+    // - 保证文字、底轨、进度块在深浅主题下都清晰。
+    // 返回值：QProgressBar 样式表文本。
+    QString buildProgressBarStyleSheet() const;
+
 private:
     QVBoxLayout* m_rootLayout = nullptr;        // 根布局。
     QScrollArea* m_scrollArea = nullptr;        // 滚动容器。
@@ -61,4 +85,3 @@ private:
     QTimer* m_refreshTimer = nullptr;           // 定时刷新器。
     std::size_t m_lastRevision = 0;             // 上次刷新时 revision。
 };
-

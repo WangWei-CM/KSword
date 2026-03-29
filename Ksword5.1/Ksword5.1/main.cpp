@@ -555,25 +555,46 @@ int main(int argc, char* argv[])
     if (splashReady)
     {
         splashWindow.show();
-        splashWindow.updateProgress(8, L"正在初始化 Qt 运行时...");
+        splashWindow.updateProgress(6, L"正在初始化 Qt 运行时...");
         pumpSplashMessages();
     }
 
     QApplication app(argc, argv);
 
+    // startupProgressCallback 作用：
+    // - 供 MainWindow 构造期间持续回传细分阶段；
+    // - 每次更新后立即泵消息，避免 splash 文案卡住不动。
+    const MainWindow::StartupProgressCallback startupProgressCallback =
+        [&splashWindow, splashReady](const int progressPercent, const QString& statusText)
+        {
+            if (!splashReady)
+            {
+                return;
+            }
+
+            splashWindow.updateProgress(progressPercent, statusText.toStdWString());
+            pumpSplashMessages();
+        };
+
     if (splashReady)
     {
-        splashWindow.updateProgress(42, L"正在创建主窗口...");
+        splashWindow.updateProgress(18, L"正在准备应用环境...");
         pumpSplashMessages();
     }
 
-    MainWindow window;
+    if (splashReady)
+    {
+        splashWindow.updateProgress(28, L"正在创建主窗口...");
+        pumpSplashMessages();
+    }
+
+    MainWindow window(nullptr, startupProgressCallback);
     FirstFrameSplashHider firstFrameHider(&window, &splashWindow);
     window.installEventFilter(&firstFrameHider);
 
     if (splashReady)
     {
-        splashWindow.updateProgress(78, L"正在加载 Dock 与主题...");
+        splashWindow.updateProgress(95, L"正在显示主窗口...");
         pumpSplashMessages();
     }
 
@@ -581,7 +602,7 @@ int main(int argc, char* argv[])
 
     if (splashReady)
     {
-        splashWindow.updateProgress(92, L"正在渲染第一帧...");
+        splashWindow.updateProgress(98, L"正在等待首帧渲染...");
         pumpSplashMessages();
 
         // 兜底：若异常未收到 Paint 事件，4 秒后强制隐藏。

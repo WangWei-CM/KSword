@@ -11,13 +11,16 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSet>
 #include <QTimeZone>
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -30,6 +33,36 @@
 
 namespace
 {
+    // NtfsNameLink 作用：
+    // - 表示同一条 MFT 记录下的一个“目录名链接”；
+    // - 用于保留硬链接/多父目录场景，避免一条记录只能映射到一个目录。
+    struct NtfsNameLink
+    {
+        std::uint64_t parentIndex = 0;         // 父目录记录号。
+        QString fileName;                      // 该父目录下显示的文件名。
+        int nameScore = -1;                    // 名称优先级，优先 Win32/Win32&DOS。
+    };
+
+    // NtfsDataRun 作用：
+    // - 保存非 resident 主数据流的一个数据段；
+    // - 用于后续估算“簇是否仍未被覆盖”。
+    struct NtfsDataRun
+    {
+        std::uint64_t startLcn = 0;            // 数据段起始 LCN，稀疏段时为 0。
+        std::uint64_t clusterCount = 0;        // 当前数据段占用的簇数量。
+        bool isSparse = false;                 // 是否稀疏段，true 表示该段逻辑上为 0 填充。
+    };
+
+    // NtfsVolumeBitmapSnapshot 作用：
+    // - 保存卷位图快照；
+    // - 用于判断删除文件的数据簇是否仍然未被重新分配。
+    struct NtfsVolumeBitmapSnapshot
+    {
+        std::uint64_t startingLcn = 0;         // 当前位图起始 LCN。
+        std::uint64_t clusterCount = 0;        // 位图覆盖的簇数量。
+        std::vector<std::uint8_t> bitmapBytes; // 每个 bit 表示一个簇是否已分配。
+    };
+
     // NtfsRawRecord 作用：
     // - 保存单条 MFT 记录中与目录显示/恢复相关的字段；
     // - 同时用于“目录列表”和“误删扫描”两类场景。
@@ -42,8 +75,22 @@ namespace
         std::uint64_t modifiedTime100ns = 0;   // 修改时间（FILETIME 100ns）。
         bool inUse = false;                    // 是否在用。
         bool isDirectory = false;              // 是否目录。
+        bool hasPrimaryDataStream = false;     // 是否存在未命名主数据流。
+        bool nonResidentData = false;          // 未命名主数据流是否为非 resident。
         bool residentReady = false;            // 是否成功提取驻留数据。
         QByteArray residentData;               // 驻留数据内容。
+        std::vector<NtfsDataRun> dataRuns;     // 非 resident 主数据流的数据段集合。
+        std::vector<NtfsNameLink> nameLinks;   // 当前记录关联的全部目录名链接。
+    };
+
+    // NtfsDirectoryLink 作用：
+    // - 把目录项视角从“记录级”展开为“目录名级”；
+    // - 这样同一记录存在多个父目录/硬链接时，目录页也能完整显示。
+    struct NtfsDirectoryLink
+    {
+        std::uint64_t parentIndex = 0;         // 父目录记录号。
+        std::uint64_t recordIndex = 0;         // 子记录号。
+        QString fileName;                      // 该父目录下的显示名称。
     };
 
     // Fat32BootInfo 作用：
@@ -77,13 +124,138 @@ namespace
     // - 避免手动模式连续切目录时重复扫描造成卡顿。
     struct NtfsCacheEntry
     {
-        std::vector<NtfsRawRecord> records;     // 缓存记录集合。
-        qint64 loadedMsec = 0;                  // 缓存时间戳（毫秒）。
-        std::uint64_t recordLimit = 0;          // 本次缓存覆盖的最大记录数上限。
+        std::vector<NtfsRawRecord> records;                       // 缓存记录集合。
+        std::vector<NtfsDirectoryLink> directoryLinks;            // 目录项级索引集合。
+        std::unordered_map<std::uint64_t, std::size_t> recordOffsetByIndex; // 记录号到数组下标映射。
+        qint64 loadedMsec = 0;                                    // 缓存时间戳（毫秒）。
+        std::uint64_t recordLimit = 0;                            // 本次缓存覆盖的最大记录数上限。
+        bool fsctlFallbackAllowed = false;                        // 本次缓存是否允许 FSCTL 回退解析。
     };
 
     std::mutex g_ntfsCacheMutex; // NTFS 缓存互斥锁。
-    std::unordered_map<std::wstring, NtfsCacheEntry> g_ntfsCache; // 分卷缓存字典。
+    std::unordered_map<std::wstring, std::shared_ptr<NtfsCacheEntry>> g_ntfsCache; // 分卷缓存字典。
+
+    // buildTypeText 前置声明：
+    // - 供上方的 WinAPI 补齐辅助函数复用类型文本生成逻辑；
+    // - 具体实现保持在后文原位置，避免重复实现。
+    QString buildTypeText(const QString& fileName, const bool isDirectory);
+
+    // buildNtfsCacheIndex 作用：
+    // - 为缓存记录生成“目录项级索引”和“记录号索引”；
+    // - 避免每次切目录都重新遍历全量 MFT 记录。
+    void buildNtfsCacheIndex(NtfsCacheEntry& cacheEntry)
+    {
+        cacheEntry.directoryLinks.clear();
+        cacheEntry.recordOffsetByIndex.clear();
+        cacheEntry.directoryLinks.reserve(cacheEntry.records.size() * 2);
+        cacheEntry.recordOffsetByIndex.reserve(cacheEntry.records.size());
+
+        for (std::size_t i = 0; i < cacheEntry.records.size(); ++i)
+        {
+            const NtfsRawRecord& recordValue = cacheEntry.records[i];
+            cacheEntry.recordOffsetByIndex.emplace(recordValue.recordIndex, i);
+
+            if (!recordValue.nameLinks.empty())
+            {
+                for (const NtfsNameLink& nameLink : recordValue.nameLinks)
+                {
+                    if (nameLink.fileName.isEmpty())
+                    {
+                        continue;
+                    }
+
+                    NtfsDirectoryLink dirLink{};
+                    dirLink.parentIndex = nameLink.parentIndex;
+                    dirLink.recordIndex = recordValue.recordIndex;
+                    dirLink.fileName = nameLink.fileName;
+                    cacheEntry.directoryLinks.push_back(std::move(dirLink));
+                }
+                continue;
+            }
+
+            if (!recordValue.fileName.isEmpty())
+            {
+                NtfsDirectoryLink dirLink{};
+                dirLink.parentIndex = recordValue.parentIndex;
+                dirLink.recordIndex = recordValue.recordIndex;
+                dirLink.fileName = recordValue.fileName;
+                cacheEntry.directoryLinks.push_back(std::move(dirLink));
+            }
+        }
+
+        std::sort(
+            cacheEntry.directoryLinks.begin(),
+            cacheEntry.directoryLinks.end(),
+            [](const NtfsDirectoryLink& left, const NtfsDirectoryLink& right) {
+                if (left.parentIndex != right.parentIndex)
+                {
+                    return left.parentIndex < right.parentIndex;
+                }
+                const int compareResult = QString::compare(left.fileName, right.fileName, Qt::CaseInsensitive);
+                if (compareResult != 0)
+                {
+                    return compareResult < 0;
+                }
+                return left.recordIndex < right.recordIndex;
+            });
+    }
+
+    // findNtfsDirectoryLinkRange 作用：
+    // - 在已按 parentIndex 排序的目录项索引中，定位某个父目录的全部子项范围；
+    // - 返回值可直接用于遍历该目录的所有孩子。
+    auto findNtfsDirectoryLinkRange(
+        const std::vector<NtfsDirectoryLink>& directoryLinks,
+        const std::uint64_t parentIndex)
+    {
+        const auto lowerIt = std::lower_bound(
+            directoryLinks.begin(),
+            directoryLinks.end(),
+            parentIndex,
+            [](const NtfsDirectoryLink& linkValue, const std::uint64_t targetParentIndex) {
+                return linkValue.parentIndex < targetParentIndex;
+            });
+        const auto upperIt = std::upper_bound(
+            lowerIt,
+            directoryLinks.end(),
+            parentIndex,
+            [](const std::uint64_t targetParentIndex, const NtfsDirectoryLink& linkValue) {
+                return targetParentIndex < linkValue.parentIndex;
+            });
+        return std::make_pair(lowerIt, upperIt);
+    }
+
+    // enumerateDirectoryByWinApi 作用：
+    // - 用 Windows API/QDir 快速列出目录项；
+    // - 用作手动 NTFS 结果无法完整覆盖时的补齐与最终兜底。
+    bool enumerateDirectoryByWinApi(
+        const QString& pathText,
+        std::vector<ks::file::ManualDirectoryEntry>& entriesOut)
+    {
+        entriesOut.clear();
+
+        const QString normalizedPath = QDir::toNativeSeparators(QDir::cleanPath(pathText));
+        QDir fallbackDirectory(normalizedPath);
+        if (!fallbackDirectory.exists())
+        {
+            return false;
+        }
+
+        const QFileInfoList fallbackEntries = fallbackDirectory.entryInfoList(
+            QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+            QDir::DirsFirst | QDir::Name | QDir::IgnoreCase);
+        for (const QFileInfo& fileInfoValue : fallbackEntries)
+        {
+            ks::file::ManualDirectoryEntry itemValue{};
+            itemValue.name = fileInfoValue.fileName();
+            itemValue.absolutePath = fileInfoValue.absoluteFilePath();
+            itemValue.isDirectory = fileInfoValue.isDir();
+            itemValue.sizeBytes = itemValue.isDirectory ? 0 : static_cast<std::uint64_t>(fileInfoValue.size());
+            itemValue.modifiedTime = fileInfoValue.lastModified();
+            itemValue.typeText = buildTypeText(itemValue.name, itemValue.isDirectory);
+            entriesOut.push_back(std::move(itemValue));
+        }
+        return true;
+    }
 
     // le16/le32/le64 作用：读取小端整数。
     std::uint16_t le16(const std::byte* ptr)
@@ -106,6 +278,103 @@ namespace
             value |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>(ptr[i])) << (i * 8));
         }
         return value;
+    }
+
+    // readSignedLe64 作用：
+    // - 读取长度 1~8 字节的有符号小端整数；
+    // - 供 NTFS runlist 解析相对 LCN 偏移使用。
+    std::int64_t readSignedLe64(const std::byte* ptr, const std::uint8_t byteCount)
+    {
+        std::int64_t value = 0;
+        if (ptr == nullptr || byteCount == 0 || byteCount > 8)
+        {
+            return 0;
+        }
+
+        for (std::uint8_t i = 0; i < byteCount; ++i)
+        {
+            value |= (static_cast<std::int64_t>(static_cast<std::uint8_t>(ptr[i])) << (i * 8));
+        }
+
+        // 若最高字节符号位为 1，则需要手动做符号扩展。
+        const std::int64_t signMask = static_cast<std::int64_t>(1) << (byteCount * 8 - 1);
+        if (byteCount < 8 && (value & signMask) != 0)
+        {
+            value |= (~static_cast<std::int64_t>(0)) << (byteCount * 8);
+        }
+        return value;
+    }
+
+    // parseNtfsRunList 作用：
+    // - 解析非 resident 主数据流的 runlist；
+    // - 输出每一段实际 LCN 范围或稀疏段信息。
+    bool parseNtfsRunList(
+        const std::byte* runListPtr,
+        const std::byte* runListEnd,
+        std::vector<NtfsDataRun>& dataRunsOut)
+    {
+        dataRunsOut.clear();
+        if (runListPtr == nullptr || runListEnd == nullptr || runListPtr >= runListEnd)
+        {
+            return false;
+        }
+
+        std::int64_t currentLcn = 0;
+        while (runListPtr < runListEnd)
+        {
+            const std::uint8_t headerValue = static_cast<std::uint8_t>(*runListPtr);
+            runListPtr += 1;
+            if (headerValue == 0)
+            {
+                return !dataRunsOut.empty();
+            }
+
+            const std::uint8_t lengthFieldBytes = (headerValue & 0x0F);
+            const std::uint8_t offsetFieldBytes = ((headerValue >> 4) & 0x0F);
+            if (lengthFieldBytes == 0
+                || lengthFieldBytes > 8
+                || offsetFieldBytes > 8
+                || runListPtr + lengthFieldBytes + offsetFieldBytes > runListEnd)
+            {
+                dataRunsOut.clear();
+                return false;
+            }
+
+            std::uint64_t clusterCountValue = 0;
+            for (std::uint8_t i = 0; i < lengthFieldBytes; ++i)
+            {
+                clusterCountValue |=
+                    (static_cast<std::uint64_t>(static_cast<std::uint8_t>(runListPtr[i])) << (i * 8));
+            }
+            if (clusterCountValue == 0)
+            {
+                dataRunsOut.clear();
+                return false;
+            }
+
+            NtfsDataRun runValue{};
+            runValue.clusterCount = clusterCountValue;
+            if (offsetFieldBytes == 0)
+            {
+                runValue.isSparse = true;
+            }
+            else
+            {
+                const std::int64_t lcnDeltaValue =
+                    readSignedLe64(runListPtr + lengthFieldBytes, offsetFieldBytes);
+                currentLcn += lcnDeltaValue;
+                if (currentLcn < 0)
+                {
+                    dataRunsOut.clear();
+                    return false;
+                }
+                runValue.startLcn = static_cast<std::uint64_t>(currentLcn);
+            }
+
+            dataRunsOut.push_back(std::move(runValue));
+            runListPtr += lengthFieldBytes + offsetFieldBytes;
+        }
+        return !dataRunsOut.empty();
     }
 
     // trimVolumeRoot 作用：从任意路径提取卷根，如 C:\。
@@ -163,6 +432,67 @@ namespace
             return false;
         }
         return true;
+    }
+
+    // guessDeletedFileExtension 作用：
+    // - 当原始文件名已经丢失时，尽量根据 resident 数据头猜测扩展名；
+    // - 若无法判断，则统一回落为 bin。
+    QString guessDeletedFileExtension(const QByteArray& residentData)
+    {
+        if (residentData.size() >= 8
+            && static_cast<unsigned char>(residentData[0]) == 0x89
+            && residentData.mid(1, 3) == "PNG")
+        {
+            return QStringLiteral("png");
+        }
+        if (residentData.size() >= 3
+            && static_cast<unsigned char>(residentData[0]) == 0xFF
+            && static_cast<unsigned char>(residentData[1]) == 0xD8
+            && static_cast<unsigned char>(residentData[2]) == 0xFF)
+        {
+            return QStringLiteral("jpg");
+        }
+        if (residentData.size() >= 4 && residentData.left(4) == "%PDF")
+        {
+            return QStringLiteral("pdf");
+        }
+        if (residentData.size() >= 4 && residentData.left(4) == "PK\x03\x04")
+        {
+            return QStringLiteral("zip");
+        }
+        if (residentData.size() >= 6 && (residentData.left(6) == "GIF87a" || residentData.left(6) == "GIF89a"))
+        {
+            return QStringLiteral("gif");
+        }
+        if (residentData.size() >= 2 && residentData.left(2) == "BM")
+        {
+            return QStringLiteral("bmp");
+        }
+        if (residentData.size() >= 8
+            && static_cast<unsigned char>(residentData[0]) == 0x52
+            && static_cast<unsigned char>(residentData[1]) == 0x61
+            && static_cast<unsigned char>(residentData[2]) == 0x72
+            && static_cast<unsigned char>(residentData[3]) == 0x21)
+        {
+            return QStringLiteral("rar");
+        }
+        return QStringLiteral("bin");
+    }
+
+    // buildSyntheticDeletedFileName 作用：
+    // - 为“名称缺失”的删除记录生成占位文件名；
+    // - 便于结果列表展示与后续导出落盘。
+    QString buildSyntheticDeletedFileName(const NtfsRawRecord& recordValue)
+    {
+        QString suffixText = QStringLiteral("bin");
+        if (!recordValue.residentData.isEmpty())
+        {
+            suffixText = guessDeletedFileExtension(recordValue.residentData);
+        }
+
+        return QStringLiteral("deleted_%1.%2")
+            .arg(static_cast<qulonglong>(recordValue.recordIndex))
+            .arg(suffixText);
     }
 
     // fileTimeToLocal 作用：FILETIME(100ns) 转本地时间。
@@ -256,8 +586,202 @@ namespace
         return handleValue;
     }
 
+    // loadNtfsVolumeBitmapSnapshot 作用：
+    // - 读取整卷簇位图；
+    // - 供误删扫描估算“数据簇是否仍未被覆盖”。
+    bool loadNtfsVolumeBitmapSnapshot(
+        const QString& volumeRoot,
+        NtfsVolumeBitmapSnapshot& bitmapOut,
+        QString& errorTextOut)
+    {
+        bitmapOut = NtfsVolumeBitmapSnapshot{};
+        errorTextOut.clear();
+
+        QString openErrorText;
+        HANDLE volumeHandle = openReadHandle(buildVolumeDevicePath(volumeRoot), openErrorText);
+        if (volumeHandle == INVALID_HANDLE_VALUE)
+        {
+            errorTextOut = openErrorText;
+            return false;
+        }
+
+        NTFS_VOLUME_DATA_BUFFER volumeData{};
+        DWORD returnedBytes = 0;
+        if (::DeviceIoControl(
+            volumeHandle,
+            FSCTL_GET_NTFS_VOLUME_DATA,
+            nullptr,
+            0,
+            &volumeData,
+            static_cast<DWORD>(sizeof(volumeData)),
+            &returnedBytes,
+            nullptr) == FALSE)
+        {
+            errorTextOut = QStringLiteral("FSCTL_GET_NTFS_VOLUME_DATA失败, code=%1").arg(::GetLastError());
+            ::CloseHandle(volumeHandle);
+            return false;
+        }
+
+        const std::uint64_t totalClusters =
+            static_cast<std::uint64_t>(volumeData.TotalClusters.QuadPart);
+        const std::uint64_t bitmapBytes = (totalClusters + 7ULL) / 8ULL;
+        constexpr std::uint64_t MaxBitmapBytes = 128ULL * 1024ULL * 1024ULL;
+        if (bitmapBytes == 0 || bitmapBytes > MaxBitmapBytes)
+        {
+            errorTextOut = QStringLiteral("卷位图过大或为空, bytes=%1").arg(static_cast<qulonglong>(bitmapBytes));
+            ::CloseHandle(volumeHandle);
+            return false;
+        }
+
+        STARTING_LCN_INPUT_BUFFER inputBuffer{};
+        inputBuffer.StartingLcn.QuadPart = 0;
+        const std::size_t headerBytes = offsetof(VOLUME_BITMAP_BUFFER, Buffer);
+        std::vector<std::uint8_t> outputBuffer(headerBytes + static_cast<std::size_t>(bitmapBytes) + 64ULL);
+        returnedBytes = 0;
+        if (::DeviceIoControl(
+            volumeHandle,
+            FSCTL_GET_VOLUME_BITMAP,
+            &inputBuffer,
+            static_cast<DWORD>(sizeof(inputBuffer)),
+            outputBuffer.data(),
+            static_cast<DWORD>(outputBuffer.size()),
+            &returnedBytes,
+            nullptr) == FALSE)
+        {
+            errorTextOut = QStringLiteral("FSCTL_GET_VOLUME_BITMAP失败, code=%1").arg(::GetLastError());
+            ::CloseHandle(volumeHandle);
+            return false;
+        }
+        ::CloseHandle(volumeHandle);
+
+        if (returnedBytes < headerBytes)
+        {
+            errorTextOut = QStringLiteral("卷位图返回长度不足。");
+            return false;
+        }
+
+        const VOLUME_BITMAP_BUFFER* bitmapBuffer =
+            reinterpret_cast<const VOLUME_BITMAP_BUFFER*>(outputBuffer.data());
+        bitmapOut.startingLcn =
+            static_cast<std::uint64_t>(bitmapBuffer->StartingLcn.QuadPart);
+        bitmapOut.clusterCount =
+            static_cast<std::uint64_t>(bitmapBuffer->BitmapSize.QuadPart);
+
+        const std::uint64_t actualBitmapBytes = (bitmapOut.clusterCount + 7ULL) / 8ULL;
+        if (headerBytes + actualBitmapBytes > returnedBytes
+            || headerBytes + actualBitmapBytes > outputBuffer.size())
+        {
+            errorTextOut = QStringLiteral("卷位图数据长度异常。");
+            return false;
+        }
+
+        bitmapOut.bitmapBytes.assign(
+            outputBuffer.begin() + static_cast<std::ptrdiff_t>(headerBytes),
+            outputBuffer.begin() + static_cast<std::ptrdiff_t>(headerBytes + actualBitmapBytes));
+        return true;
+    }
+
+    // tryCountAllocatedClustersInRange 作用：
+    // - 统计指定簇范围内当前已分配的簇数量；
+    // - 返回 false 表示位图不覆盖该区间，当前无法评估。
+    bool tryCountAllocatedClustersInRange(
+        const NtfsVolumeBitmapSnapshot& bitmapValue,
+        const std::uint64_t startLcn,
+        const std::uint64_t clusterCount,
+        std::uint64_t& allocatedClustersOut)
+    {
+        allocatedClustersOut = 0;
+        if (clusterCount == 0)
+        {
+            return true;
+        }
+        if (startLcn < bitmapValue.startingLcn)
+        {
+            return false;
+        }
+
+        const std::uint64_t relativeStartBit = startLcn - bitmapValue.startingLcn;
+        if (relativeStartBit + clusterCount > bitmapValue.clusterCount)
+        {
+            return false;
+        }
+
+        const std::uint64_t endBitExclusive = relativeStartBit + clusterCount;
+        std::uint64_t currentBit = relativeStartBit;
+        while (currentBit < endBitExclusive)
+        {
+            const std::uint64_t byteIndex = currentBit / 8ULL;
+            const std::uint8_t bitOffset = static_cast<std::uint8_t>(currentBit % 8ULL);
+            const std::uint64_t bitsInThisByte =
+                std::min<std::uint64_t>(8ULL - bitOffset, endBitExclusive - currentBit);
+
+            std::uint8_t byteValue = bitmapValue.bitmapBytes[static_cast<std::size_t>(byteIndex)];
+            byteValue = static_cast<std::uint8_t>(byteValue >> bitOffset);
+            if (bitsInThisByte < 8ULL)
+            {
+                const std::uint8_t maskValue = static_cast<std::uint8_t>((1u << bitsInThisByte) - 1u);
+                byteValue = static_cast<std::uint8_t>(byteValue & maskValue);
+            }
+
+            allocatedClustersOut += static_cast<std::uint64_t>(std::popcount(static_cast<unsigned int>(byteValue)));
+            currentBit += bitsInThisByte;
+        }
+        return true;
+    }
+
+    // estimateDeletedRecordIntegrityPercent 作用：
+    // - 根据 resident 状态或非 resident 数据簇是否仍空闲，估算文件完整度；
+    // - 结果用于恢复列表排序与“完整度”展示。
+    int estimateDeletedRecordIntegrityPercent(
+        const NtfsRawRecord& recordValue,
+        const NtfsVolumeBitmapSnapshot* bitmapValue)
+    {
+        if (recordValue.residentReady && !recordValue.nonResidentData)
+        {
+            return 100;
+        }
+        if (!recordValue.nonResidentData || bitmapValue == nullptr || recordValue.dataRuns.empty())
+        {
+            return -1;
+        }
+
+        std::uint64_t totalClusters = 0;
+        std::uint64_t intactClusters = 0;
+        for (const NtfsDataRun& runValue : recordValue.dataRuns)
+        {
+            totalClusters += runValue.clusterCount;
+            if (runValue.isSparse)
+            {
+                intactClusters += runValue.clusterCount;
+                continue;
+            }
+
+            std::uint64_t allocatedClusters = 0;
+            if (!tryCountAllocatedClustersInRange(
+                bitmapValue[0],
+                runValue.startLcn,
+                runValue.clusterCount,
+                allocatedClusters))
+            {
+                return -1;
+            }
+            if (allocatedClusters > runValue.clusterCount)
+            {
+                return -1;
+            }
+            intactClusters += (runValue.clusterCount - allocatedClusters);
+        }
+
+        if (totalClusters == 0)
+        {
+            return (recordValue.sizeBytes == 0) ? 100 : -1;
+        }
+
+        return static_cast<int>((intactClusters * 100ULL + totalClusters / 2ULL) / totalClusters);
+    }
+
     // ntfsFixup 作用：应用 NTFS USA 修复，保证扇区尾校验通过。
-    bool ntfsFixup(std::vector<std::byte>& recordBytes)
+    bool ntfsFixup(std::vector<std::byte>& recordBytes, const std::uint16_t bytesPerSectorHint)
     {
         if (recordBytes.size() < 64)
         {
@@ -277,9 +801,34 @@ namespace
 
         const std::byte* usaPtr = recordBytes.data() + usaOffset;
         const std::uint16_t signature = le16(usaPtr);
+        // usaSectorCount 用途：记录当前 FILE 记录被切成多少个物理扇区片段。
+        const std::size_t usaSectorCount = static_cast<std::size_t>(usaCount - 1);
+        if (usaSectorCount == 0)
+        {
+            return false;
+        }
+
+        // sectorStrideBytes 用途：USA 修复时每一段的跨度，优先验证真实扇区大小，不再写死 512。
+        std::size_t sectorStrideBytes = 0;
+        if (bytesPerSectorHint >= 256
+            && bytesPerSectorHint <= recordBytes.size()
+            && (recordBytes.size() % bytesPerSectorHint) == 0
+            && (recordBytes.size() / bytesPerSectorHint) == usaSectorCount)
+        {
+            sectorStrideBytes = static_cast<std::size_t>(bytesPerSectorHint);
+        }
+        else if ((recordBytes.size() % usaSectorCount) == 0)
+        {
+            sectorStrideBytes = recordBytes.size() / usaSectorCount;
+        }
+        if (sectorStrideBytes < 256)
+        {
+            return false;
+        }
+
         for (std::uint16_t i = 1; i < usaCount; ++i)
         {
-            const std::size_t tailOffset = static_cast<std::size_t>(i) * 512ULL - 2ULL;
+            const std::size_t tailOffset = static_cast<std::size_t>(i) * sectorStrideBytes - 2ULL;
             if (tailOffset + 2 > recordBytes.size())
             {
                 return false;
@@ -296,13 +845,18 @@ namespace
     }
 
     // parseNtfsRecord 作用：解析单条 MFT 记录，抽取名称/父目录/大小/驻留数据。
-    bool parseNtfsRecord(std::vector<std::byte>& recordBytes, const std::uint64_t recordIndex, NtfsRawRecord& recordOut)
+    bool parseNtfsRecord(
+        std::vector<std::byte>& recordBytes,
+        const std::uint64_t recordIndex,
+        const std::uint16_t bytesPerSectorHint,
+        const bool captureResidentData,
+        NtfsRawRecord& recordOut)
     {
         if (recordBytes.size() < 64 || std::memcmp(recordBytes.data(), "FILE", 4) != 0)
         {
             return false;
         }
-        if (!ntfsFixup(recordBytes))
+        if (!ntfsFixup(recordBytes, bytesPerSectorHint))
         {
             return false;
         }
@@ -334,14 +888,16 @@ namespace
             {
                 break;
             }
+            const std::size_t attrEnd = attrOffset + attrLength;
 
             const bool nonResident = (recordBytes[attrOffset + 8] != std::byte{ 0 });
+            const std::uint8_t attrNameLength = static_cast<std::uint8_t>(recordBytes[attrOffset + 9]);
             if (attrType == 0x30 && !nonResident)
             {
                 const std::uint32_t contentLength = le32(recordBytes.data() + attrOffset + 16);
                 const std::uint16_t contentOffset = le16(recordBytes.data() + attrOffset + 20);
                 const std::size_t contentStart = attrOffset + contentOffset;
-                if (contentLength >= 66 && contentStart + contentLength <= recordBytes.size())
+                if (contentLength >= 66 && contentStart + contentLength <= attrEnd)
                 {
                     const std::byte* contentPtr = recordBytes.data() + contentStart;
                     const std::uint64_t parentRef = le64(contentPtr);
@@ -356,40 +912,104 @@ namespace
                             reinterpret_cast<const char16_t*>(contentPtr + 66),
                             static_cast<qsizetype>(nameLength));
                         const int score = (nameNamespace == 1 || nameNamespace == 3) ? 2 : (nameNamespace == 0 ? 1 : 0);
+                        const std::uint64_t parentIndexValue = (parentRef & 0x0000FFFFFFFFFFFFULL);
+
+                        // nameLinks：对同一父目录只保留最佳可显示名称，避免 DOS 名和长名重复污染列表。
+                        bool parentLinkUpdated = false;
+                        for (NtfsNameLink& nameLink : recordOut.nameLinks)
+                        {
+                            if (nameLink.parentIndex != parentIndexValue)
+                            {
+                                continue;
+                            }
+                            if (score >= nameLink.nameScore)
+                            {
+                                nameLink.fileName = candidateName;
+                                nameLink.nameScore = score;
+                            }
+                            parentLinkUpdated = true;
+                            break;
+                        }
+                        if (!parentLinkUpdated)
+                        {
+                            NtfsNameLink nameLink{};
+                            nameLink.parentIndex = parentIndexValue;
+                            nameLink.fileName = candidateName;
+                            nameLink.nameScore = score;
+                            recordOut.nameLinks.push_back(std::move(nameLink));
+                        }
+
                         if (score >= preferredNameScore)
                         {
                             preferredNameScore = score;
                             preferredName = candidateName;
-                            recordOut.parentIndex = (parentRef & 0x0000FFFFFFFFFFFFULL);
+                            recordOut.parentIndex = parentIndexValue;
                             recordOut.modifiedTime100ns = modified100ns;
                             recordOut.sizeBytes = realSize;
+                        }
+                        else
+                        {
+                            if (recordOut.modifiedTime100ns == 0 && modified100ns != 0)
+                            {
+                                recordOut.modifiedTime100ns = modified100ns;
+                            }
+                            if (recordOut.sizeBytes == 0 && realSize != 0)
+                            {
+                                recordOut.sizeBytes = realSize;
+                            }
                         }
                     }
                 }
             }
             else if (attrType == 0x80)
             {
+                // 只处理未命名主数据流，避免把 ADS 误判为文件主内容。
+                if (attrNameLength != 0)
+                {
+                    attrOffset += attrLength;
+                    continue;
+                }
+
                 if (!nonResident)
                 {
+                    recordOut.hasPrimaryDataStream = true;
+                    recordOut.nonResidentData = false;
                     const std::uint32_t dataLength = le32(recordBytes.data() + attrOffset + 16);
                     const std::uint16_t dataOffset = le16(recordBytes.data() + attrOffset + 20);
                     const std::size_t dataStart = attrOffset + dataOffset;
                     constexpr std::uint32_t MaxResidentSize = 2 * 1024 * 1024;
-                    if (dataLength > 0 && dataLength <= MaxResidentSize && dataStart + dataLength <= recordBytes.size())
+                    if (dataLength <= MaxResidentSize && dataStart + dataLength <= attrEnd)
                     {
-                        recordOut.residentData = QByteArray(
-                            reinterpret_cast<const char*>(recordBytes.data() + dataStart),
-                            static_cast<int>(dataLength));
                         recordOut.residentReady = true;
                         recordOut.sizeBytes = static_cast<std::uint64_t>(dataLength);
+                        if (captureResidentData && dataLength > 0)
+                        {
+                            recordOut.residentData = QByteArray(
+                                reinterpret_cast<const char*>(recordBytes.data() + dataStart),
+                                static_cast<int>(dataLength));
+                        }
                     }
                 }
-                else if (attrOffset + 56 <= recordBytes.size())
+                else if (attrLength >= 56)
                 {
+                    recordOut.hasPrimaryDataStream = true;
+                    recordOut.nonResidentData = true;
                     const std::uint64_t nonResidentSize = le64(recordBytes.data() + attrOffset + 48);
                     if (nonResidentSize > 0)
                     {
                         recordOut.sizeBytes = nonResidentSize;
+                    }
+
+                    const std::uint16_t runListOffset = le16(recordBytes.data() + attrOffset + 32);
+                    const std::size_t runListStart = attrOffset + runListOffset;
+                    if (runListOffset >= 0x40
+                        && runListStart < attrEnd)
+                    {
+                        std::vector<NtfsDataRun> runValues;
+                        if (parseNtfsRunList(recordBytes.data() + runListStart, recordBytes.data() + attrEnd, runValues))
+                        {
+                            recordOut.dataRuns = std::move(runValues);
+                        }
                     }
                 }
             }
@@ -445,8 +1065,12 @@ namespace
     // - 成功返回 true，失败返回 false。
     bool tryLoadNtfsRecordsByFsctl(
         const HANDLE volumeHandle,
+        const std::uint16_t bytesPerSectorHint,
         const std::uint32_t bytesPerRecordHint,
         const std::uint64_t maxRecordCount,
+        const bool captureResidentData,
+        const bool keepNamelessRecords,
+        const std::function<void(int, const QString&)>& progressCallback,
         std::vector<NtfsRawRecord>& recordsOut,
         QString& errorTextOut)
     {
@@ -506,6 +1130,7 @@ namespace
         std::uint64_t visitedCount = 0;                 // visitedCount：已访问的记录数（用于受 maxRecordCount 限制）。
         std::uint32_t consecutiveQueryFailCount = 0;    // 连续查询失败次数。
         std::uint32_t consecutiveInvalidRecordCount = 0; // 连续无效记录次数。
+        int lastReportedPercent = -1;                   // lastReportedPercent：FSCTL 分支的最近一次上报百分比。
         while (visitedCount < parseCount)
         {
             NTFS_FILE_RECORD_INPUT_BUFFER inputBuffer{};
@@ -545,6 +1170,17 @@ namespace
             }
             consecutiveQueryFailCount = 0;
             visitedCount += 1;
+            if (progressCallback)
+            {
+                const int percentValue = 10
+                    + static_cast<int>((visitedCount * 70ULL) / std::max<std::uint64_t>(parseCount, 1ULL));
+                if (percentValue != lastReportedPercent
+                    && ((visitedCount % 4096ULL) == 0 || visitedCount == parseCount))
+                {
+                    lastReportedPercent = percentValue;
+                    progressCallback(percentValue, QStringLiteral("FSCTL扫描 MFT 记录"));
+                }
+            }
 
             if (returnedBytes <= outputHeaderBytes)
             {
@@ -604,7 +1240,7 @@ namespace
                 fileRecordLength);
 
             NtfsRawRecord recordValue{};
-            if (!parseNtfsRecord(recordBytes, actualRecordIndex, recordValue))
+            if (!parseNtfsRecord(recordBytes, actualRecordIndex, bytesPerSectorHint, captureResidentData, recordValue))
             {
                 ++consecutiveInvalidRecordCount;
                 if (!recordsOut.empty()
@@ -622,7 +1258,9 @@ namespace
             }
 
             consecutiveInvalidRecordCount = 0;
-            if (recordValue.fileName.isEmpty() && recordValue.recordIndex != 5)
+            if (!keepNamelessRecords
+                && recordValue.fileName.isEmpty()
+                && recordValue.recordIndex != 5)
             {
                 if (actualRecordIndex == 0)
                 {
@@ -658,7 +1296,13 @@ namespace
         std::vector<NtfsRawRecord>& recordsOut,
         QString& errorTextOut,
         const std::uint64_t maxRecordCountHint,
-        const bool allowFsctlFallback)
+        const bool allowFsctlFallback,
+        const bool useCache,
+        const bool copyRecordsOut,
+        const bool captureResidentData,
+        const bool keepNamelessRecords,
+        const std::function<void(int, const QString&)>& progressCallback,
+        std::shared_ptr<const NtfsCacheEntry>* cacheEntryOut)
     {
         const std::wstring cacheKey = toWide(volumeRoot.toUpper());
         const qint64 nowMsec = QDateTime::currentMSecsSinceEpoch();
@@ -667,15 +1311,34 @@ namespace
         const std::uint64_t effectiveMaxRecordCount = (maxRecordCountHint == 0)
             ? NtfsHardMaxRecordCount
             : std::min<std::uint64_t>(maxRecordCountHint, NtfsHardMaxRecordCount);
+        if (useCache)
         {
             std::scoped_lock<std::mutex> lock(g_ntfsCacheMutex);
             const auto cacheIt = g_ntfsCache.find(cacheKey);
             if (cacheIt != g_ntfsCache.end()
-                && (nowMsec - cacheIt->second.loadedMsec) <= NtfsCacheTtlMsec
-                && cacheIt->second.recordLimit >= effectiveMaxRecordCount)
+                && (nowMsec - cacheIt->second->loadedMsec) <= NtfsCacheTtlMsec
+                && cacheIt->second->recordLimit >= effectiveMaxRecordCount)
             {
-                recordsOut = cacheIt->second.records;
-                return true;
+                if (cacheIt->second->fsctlFallbackAllowed == allowFsctlFallback)
+                {
+                    if (copyRecordsOut)
+                    {
+                        recordsOut = cacheIt->second->records;
+                    }
+                    else
+                    {
+                        recordsOut.clear();
+                    }
+                    if (cacheEntryOut != nullptr)
+                    {
+                        *cacheEntryOut = cacheIt->second;
+                    }
+                    if (progressCallback)
+                    {
+                        progressCallback(75, QStringLiteral("命中 NTFS 缓存"));
+                    }
+                    return true;
+                }
             }
         }
 
@@ -687,6 +1350,10 @@ namespace
             errorTextOut = openVolumeErrorText;
             return false;
         }
+        if (progressCallback)
+        {
+            progressCallback(4, QStringLiteral("已打开卷句柄"));
+        }
 
         // 先读取 NTFS 引导扇区，后续常规模式和回退模式都依赖这组参数。
         std::array<std::byte, 512> bootBytes{};
@@ -694,6 +1361,10 @@ namespace
         {
             ::CloseHandle(volumeHandle);
             return false;
+        }
+        if (progressCallback)
+        {
+            progressCallback(8, QStringLiteral("已读取 NTFS 引导区"));
         }
 
         const QByteArray oemText(reinterpret_cast<const char*>(bootBytes.data() + 3), 8);
@@ -793,8 +1464,12 @@ namespace
             if (allowFsctlFallback
                 && tryLoadNtfsRecordsByFsctl(
                     volumeHandle,
+                    bytesPerSector,
                     bytesPerRecord,
                     MaxRecordCount,
+                    captureResidentData,
+                    keepNamelessRecords,
+                    progressCallback,
                     fsctlRecords,
                     fsctlErrorText))
             {
@@ -813,13 +1488,32 @@ namespace
                         << eol;
                 }
 
+                if (useCache)
                 {
+                    std::shared_ptr<NtfsCacheEntry> cacheEntry = std::make_shared<NtfsCacheEntry>();
+                    if (copyRecordsOut)
+                    {
+                        cacheEntry->records = recordsOut;
+                    }
+                    else
+                    {
+                        cacheEntry->records = std::move(recordsOut);
+                    }
+                    cacheEntry->loadedMsec = nowMsec;
+                    cacheEntry->recordLimit = MaxRecordCount;
+                    cacheEntry->fsctlFallbackAllowed = allowFsctlFallback;
+                    buildNtfsCacheIndex(*cacheEntry);
+
                     std::scoped_lock<std::mutex> lock(g_ntfsCacheMutex);
-                    NtfsCacheEntry cacheEntry{};
-                    cacheEntry.records = recordsOut;
-                    cacheEntry.loadedMsec = nowMsec;
-                    cacheEntry.recordLimit = MaxRecordCount;
-                    g_ntfsCache[cacheKey] = std::move(cacheEntry);
+                    g_ntfsCache[cacheKey] = cacheEntry;
+                    if (cacheEntryOut != nullptr)
+                    {
+                        *cacheEntryOut = cacheEntry;
+                    }
+                }
+                if (!copyRecordsOut)
+                {
+                    recordsOut.clear();
                 }
                 return true;
             }
@@ -847,7 +1541,7 @@ namespace
                     firstRecordErrorText))
                 {
                     NtfsRawRecord mftRecordValue{};
-                    if (parseNtfsRecord(firstRecordBytes, 0, mftRecordValue)
+                    if (parseNtfsRecord(firstRecordBytes, 0, bytesPerSector, false, mftRecordValue)
                         && mftRecordValue.sizeBytes >= bytesPerRecord)
                     {
                         estimatedMftRecordCount =
@@ -939,8 +1633,25 @@ namespace
         std::uint32_t consecutiveEmptyCount = 0;       // 连续空记录计数：回退模式用于提前停止无效扫描。
         std::uint32_t consecutiveInvalidCount = 0;     // 连续无效记录计数：回退模式下用于识别“已离开有效 MFT 区间”。
         std::uint64_t validRecordCount = 0;            // 已解析出的有效记录数，用于无效区间提前终止判定。
+        int lastReportedPercent = -1;                  // lastReportedPercent：顺序扫描分支的最近一次上报百分比。
         for (std::uint64_t indexValue = 0; indexValue < parseCount; ++indexValue)
         {
+            if (progressCallback
+                && (((indexValue % 4096ULL) == 0) || (indexValue + 1 == parseCount)))
+            {
+                const int percentValue = 10
+                    + static_cast<int>(((indexValue + 1ULL) * 70ULL) / std::max<std::uint64_t>(parseCount, 1ULL));
+                if (percentValue != lastReportedPercent)
+                {
+                    lastReportedPercent = percentValue;
+                    progressCallback(
+                        percentValue,
+                        usingVolumeFallback
+                        ? QStringLiteral("按卷偏移扫描 MFT 记录")
+                        : QStringLiteral("按 $MFT 逻辑文件扫描记录"));
+                }
+            }
+
             const std::uint64_t offsetValue = sourceBaseOffset + indexValue * bytesPerRecord;
             QString readErrorText;
             if (!readBytesAtOffset(sourceHandle, offsetValue, bytesPerRecord, recordBytes.data(), readErrorText))
@@ -955,7 +1666,7 @@ namespace
             consecutiveReadFailCount = 0;
 
             NtfsRawRecord recordValue{};
-            if (!parseNtfsRecord(recordBytes, indexValue, recordValue))
+            if (!parseNtfsRecord(recordBytes, indexValue, bytesPerSector, captureResidentData, recordValue))
             {
                 ++consecutiveInvalidCount;
 
@@ -997,7 +1708,9 @@ namespace
             consecutiveEmptyCount = 0;
             consecutiveInvalidCount = 0;
             validRecordCount += 1;
-            if (recordValue.fileName.isEmpty() && recordValue.recordIndex != 5)
+            if (!keepNamelessRecords
+                && recordValue.fileName.isEmpty()
+                && recordValue.recordIndex != 5)
             {
                 continue;
             }
@@ -1016,45 +1729,84 @@ namespace
             return false;
         }
 
+        if (useCache)
         {
+            std::shared_ptr<NtfsCacheEntry> cacheEntry = std::make_shared<NtfsCacheEntry>();
+            if (copyRecordsOut)
+            {
+                cacheEntry->records = recordsOut;
+            }
+            else
+            {
+                cacheEntry->records = std::move(recordsOut);
+            }
+            cacheEntry->loadedMsec = nowMsec;
+            cacheEntry->recordLimit = MaxRecordCount;
+            cacheEntry->fsctlFallbackAllowed = allowFsctlFallback;
+            buildNtfsCacheIndex(*cacheEntry);
+
             std::scoped_lock<std::mutex> lock(g_ntfsCacheMutex);
-            NtfsCacheEntry cacheEntry{};
-            cacheEntry.records = recordsOut;
-            cacheEntry.loadedMsec = nowMsec;
-            cacheEntry.recordLimit = MaxRecordCount;
-            g_ntfsCache[cacheKey] = std::move(cacheEntry);
+            g_ntfsCache[cacheKey] = cacheEntry;
+            if (cacheEntryOut != nullptr)
+            {
+                *cacheEntryOut = cacheEntry;
+            }
+            if (!copyRecordsOut)
+            {
+                recordsOut.clear();
+            }
+        }
+        else if (cacheEntryOut != nullptr)
+        {
+            std::shared_ptr<NtfsCacheEntry> cacheEntry = std::make_shared<NtfsCacheEntry>();
+            if (copyRecordsOut)
+            {
+                cacheEntry->records = recordsOut;
+            }
+            else
+            {
+                cacheEntry->records = std::move(recordsOut);
+            }
+            cacheEntry->loadedMsec = nowMsec;
+            cacheEntry->recordLimit = MaxRecordCount;
+            cacheEntry->fsctlFallbackAllowed = allowFsctlFallback;
+            buildNtfsCacheIndex(*cacheEntry);
+            *cacheEntryOut = cacheEntry;
+            if (!copyRecordsOut)
+            {
+                recordsOut.clear();
+            }
         }
         return true;
     }
 
     // resolveNtfsDirectoryIndex 作用：按路径段定位目标目录的 MFT 记录号。
     bool resolveNtfsDirectoryIndex(
-        const std::vector<NtfsRawRecord>& recordsValue,
+        const NtfsCacheEntry& cacheEntry,
         const QStringList& pathSegments,
         std::uint64_t& directoryIndexOut)
     {
-        std::unordered_multimap<std::uint64_t, const NtfsRawRecord*> childMap;
-        childMap.reserve(recordsValue.size() * 2);
-        for (const NtfsRawRecord& recordValue : recordsValue)
-        {
-            childMap.emplace(recordValue.parentIndex, &recordValue);
-        }
-
         std::uint64_t currentIndex = 5;
         for (const QString& segmentText : pathSegments)
         {
             bool found = false;
-            const auto childRange = childMap.equal_range(currentIndex);
+            const auto childRange = findNtfsDirectoryLinkRange(cacheEntry.directoryLinks, currentIndex);
             for (auto it = childRange.first; it != childRange.second; ++it)
             {
-                const NtfsRawRecord* childRecord = it->second;
-                if (childRecord == nullptr || !childRecord->inUse || !childRecord->isDirectory)
+                const auto recordIt = cacheEntry.recordOffsetByIndex.find(it->recordIndex);
+                if (recordIt == cacheEntry.recordOffsetByIndex.end())
                 {
                     continue;
                 }
-                if (childRecord->fileName.compare(segmentText, Qt::CaseInsensitive) == 0)
+
+                const NtfsRawRecord& childRecord = cacheEntry.records[recordIt->second];
+                if (!childRecord.inUse || !childRecord.isDirectory)
                 {
-                    currentIndex = childRecord->recordIndex;
+                    continue;
+                }
+                if (it->fileName.compare(segmentText, Qt::CaseInsensitive) == 0)
+                {
+                    currentIndex = childRecord.recordIndex;
                     found = true;
                     break;
                 }
@@ -1068,15 +1820,18 @@ namespace
         return true;
     }
 
-    // buildNtfsPathHint 作用：从父链重建可读路径。
-    QString buildNtfsPathHint(
+    // buildNtfsPathHintByName 作用：
+    // - 根据“显示名 + 父目录记录号”重建尽可能完整的路径提示；
+    // - 供误删扫描在多 FILE_NAME 链接场景下生成更准确的候选路径。
+    QString buildNtfsPathHintByName(
         const QString& volumeRootPath,
-        const NtfsRawRecord& targetRecord,
+        const QString& targetName,
+        const std::uint64_t parentIndexValue,
         const std::unordered_map<std::uint64_t, const NtfsRawRecord*>& recordMap)
     {
         QStringList segments;
-        segments.push_front(targetRecord.fileName);
-        std::uint64_t parentIndex = targetRecord.parentIndex;
+        segments.push_front(targetName);
+        std::uint64_t parentIndex = parentIndexValue;
         int depthGuard = 0;
         while (parentIndex != 0 && parentIndex != 5 && depthGuard < 64)
         {
@@ -1102,6 +1857,242 @@ namespace
         }
         pathText += segments.join('\\');
         return pathText;
+    }
+
+    // buildNtfsPathHint 作用：从记录默认名称与父链重建可读路径。
+    QString buildNtfsPathHint(
+        const QString& volumeRootPath,
+        const NtfsRawRecord& targetRecord,
+        const std::unordered_map<std::uint64_t, const NtfsRawRecord*>& recordMap)
+    {
+        return buildNtfsPathHintByName(
+            volumeRootPath,
+            targetRecord.fileName,
+            targetRecord.parentIndex,
+            recordMap);
+    }
+
+    // tryReadNtfsSingleRecordByFsctl 作用：
+    // - 按记录号读取单条 NTFS MFT 记录；
+    // - 用于导出时按需回读 resident 数据，避免扫描阶段缓存大量文件内容。
+    bool tryReadNtfsSingleRecordByFsctl(
+        const HANDLE volumeHandle,
+        const std::uint64_t fileReference,
+        const std::uint16_t bytesPerSectorHint,
+        const std::uint32_t bytesPerRecordHint,
+        NtfsRawRecord& recordOut,
+        QString& errorTextOut)
+    {
+        NTFS_VOLUME_DATA_BUFFER volumeData{};
+        DWORD returnedBytes = 0;
+        if (::DeviceIoControl(
+            volumeHandle,
+            FSCTL_GET_NTFS_VOLUME_DATA,
+            nullptr,
+            0,
+            &volumeData,
+            static_cast<DWORD>(sizeof(volumeData)),
+            &returnedBytes,
+            nullptr) == FALSE)
+        {
+            errorTextOut = QStringLiteral("FSCTL_GET_NTFS_VOLUME_DATA失败, code=%1").arg(::GetLastError());
+            return false;
+        }
+
+        std::uint32_t bytesPerRecord = volumeData.BytesPerFileRecordSegment;
+        if (bytesPerRecord < 512 || bytesPerRecord > 16384)
+        {
+            bytesPerRecord = bytesPerRecordHint;
+        }
+        if (bytesPerRecord < 512 || bytesPerRecord > 16384)
+        {
+            errorTextOut = QStringLiteral("读取单条记录失败：MFT记录大小异常, bytesPerRecord=%1").arg(bytesPerRecord);
+            return false;
+        }
+
+        const std::size_t outputHeaderBytes = offsetof(NTFS_FILE_RECORD_OUTPUT_BUFFER, FileRecordBuffer);
+        const std::size_t outputBufferBytes = outputHeaderBytes + static_cast<std::size_t>(bytesPerRecord) + 16ULL;
+        std::vector<std::uint8_t> outputBuffer(outputBufferBytes);
+
+        NTFS_FILE_RECORD_INPUT_BUFFER inputBuffer{};
+        inputBuffer.FileReferenceNumber.QuadPart = static_cast<LONGLONG>(fileReference);
+        returnedBytes = 0;
+        if (::DeviceIoControl(
+            volumeHandle,
+            FSCTL_GET_NTFS_FILE_RECORD,
+            &inputBuffer,
+            static_cast<DWORD>(sizeof(inputBuffer)),
+            outputBuffer.data(),
+            static_cast<DWORD>(outputBuffer.size()),
+            &returnedBytes,
+            nullptr) == FALSE)
+        {
+            errorTextOut = QStringLiteral("FSCTL_GET_NTFS_FILE_RECORD失败, code=%1").arg(::GetLastError());
+            return false;
+        }
+        if (returnedBytes <= outputHeaderBytes)
+        {
+            errorTextOut = QStringLiteral("FSCTL_GET_NTFS_FILE_RECORD返回长度不足。");
+            return false;
+        }
+
+        NTFS_FILE_RECORD_OUTPUT_BUFFER* outputRecord =
+            reinterpret_cast<NTFS_FILE_RECORD_OUTPUT_BUFFER*>(outputBuffer.data());
+        const std::uint64_t actualRecordIndex =
+            static_cast<std::uint64_t>(outputRecord->FileReferenceNumber.QuadPart & 0x0000FFFFFFFFFFFFULL);
+        const std::uint32_t fileRecordLength = outputRecord->FileRecordLength;
+        if (actualRecordIndex != fileReference)
+        {
+            errorTextOut = QStringLiteral("目标记录不存在或已被替换, expect=%1, actual=%2")
+                .arg(static_cast<qulonglong>(fileReference))
+                .arg(static_cast<qulonglong>(actualRecordIndex));
+            return false;
+        }
+        if (fileRecordLength < 64
+            || fileRecordLength > bytesPerRecord
+            || outputHeaderBytes + fileRecordLength > returnedBytes
+            || outputHeaderBytes + fileRecordLength > outputBuffer.size())
+        {
+            errorTextOut = QStringLiteral("单条记录长度异常, recordLength=%1").arg(fileRecordLength);
+            return false;
+        }
+
+        std::vector<std::byte> recordBytes(fileRecordLength);
+        std::memcpy(recordBytes.data(), outputBuffer.data() + outputHeaderBytes, fileRecordLength);
+        if (!parseNtfsRecord(recordBytes, fileReference, bytesPerSectorHint, true, recordOut))
+        {
+            errorTextOut = QStringLiteral("单条记录解析失败。");
+            return false;
+        }
+        return true;
+    }
+
+    // loadNtfsSingleRecord 作用：
+    // - 为单文件恢复按需读取指定 MFT 记录；
+    // - 优先 FSCTL 精确取回，失败后再回退到 $MFT/卷偏移直读。
+    bool loadNtfsSingleRecord(
+        const QString& volumeRoot,
+        const std::uint64_t fileReference,
+        NtfsRawRecord& recordOut,
+        QString& errorTextOut)
+    {
+        errorTextOut.clear();
+        const QString volumeDevicePath = buildVolumeDevicePath(volumeRoot);
+        QString openVolumeErrorText;
+        HANDLE volumeHandle = openReadHandle(volumeDevicePath, openVolumeErrorText);
+        if (volumeHandle == INVALID_HANDLE_VALUE)
+        {
+            errorTextOut = openVolumeErrorText;
+            return false;
+        }
+
+        std::array<std::byte, 512> bootBytes{};
+        if (!readBytesAtOffset(volumeHandle, 0, 512, bootBytes.data(), errorTextOut))
+        {
+            ::CloseHandle(volumeHandle);
+            return false;
+        }
+
+        const std::uint16_t bytesPerSector = le16(bootBytes.data() + 11);
+        const std::uint8_t sectorsPerCluster = static_cast<std::uint8_t>(bootBytes[13]);
+        if (bytesPerSector == 0 || sectorsPerCluster == 0)
+        {
+            ::CloseHandle(volumeHandle);
+            errorTextOut = QStringLiteral("NTFS 引导参数异常：扇区或簇大小为 0。");
+            return false;
+        }
+
+        const std::uint64_t bytesPerCluster =
+            static_cast<std::uint64_t>(bytesPerSector) *
+            static_cast<std::uint64_t>(sectorsPerCluster);
+        const std::uint64_t mftStartCluster = le64(bootBytes.data() + 0x30);
+        const std::uint64_t mftStartOffset = mftStartCluster * bytesPerCluster;
+        const std::int8_t clustersPerRecord = static_cast<std::int8_t>(bootBytes[64]);
+        std::uint32_t bytesPerRecord = 1024;
+        if (clustersPerRecord < 0)
+        {
+            bytesPerRecord = (1u << (-clustersPerRecord));
+        }
+        else
+        {
+            bytesPerRecord =
+                static_cast<std::uint32_t>(bytesPerSector) *
+                static_cast<std::uint32_t>(sectorsPerCluster) *
+                static_cast<std::uint32_t>(clustersPerRecord);
+        }
+        if (bytesPerRecord < 512 || bytesPerRecord > 16384)
+        {
+            ::CloseHandle(volumeHandle);
+            errorTextOut = QStringLiteral("MFT记录大小异常: %1").arg(bytesPerRecord);
+            return false;
+        }
+
+        QString fsctlErrorText;
+        if (tryReadNtfsSingleRecordByFsctl(volumeHandle, fileReference, bytesPerSector, bytesPerRecord, recordOut, fsctlErrorText))
+        {
+            ::CloseHandle(volumeHandle);
+            return true;
+        }
+
+        const QString mftPath = QStringLiteral("\\\\.\\%1\\$MFT").arg(volumeRoot.left(2).toUpper());
+        QString openMftErrorText;
+        HANDLE mftHandle = openReadHandle(mftPath, openMftErrorText);
+        if (mftHandle != INVALID_HANDLE_VALUE)
+        {
+            std::vector<std::byte> recordBytes(bytesPerRecord);
+            QString readErrorText;
+            if (readBytesAtOffset(
+                mftHandle,
+                fileReference * static_cast<std::uint64_t>(bytesPerRecord),
+                bytesPerRecord,
+                recordBytes.data(),
+                readErrorText)
+                && parseNtfsRecord(recordBytes, fileReference, bytesPerSector, true, recordOut))
+            {
+                ::CloseHandle(mftHandle);
+                ::CloseHandle(volumeHandle);
+                return true;
+            }
+            if (!readErrorText.isEmpty())
+            {
+                fsctlErrorText += QStringLiteral("; $MFT直读失败: ") + readErrorText;
+            }
+            else
+            {
+                fsctlErrorText += QStringLiteral("; $MFT直读失败: 记录解析失败");
+            }
+            ::CloseHandle(mftHandle);
+        }
+        else if (!openMftErrorText.isEmpty())
+        {
+            fsctlErrorText += QStringLiteral("; 打开$MFT失败: ") + openMftErrorText;
+        }
+
+        std::vector<std::byte> recordBytes(bytesPerRecord);
+        if (!readBytesAtOffset(
+            volumeHandle,
+            mftStartOffset + fileReference * static_cast<std::uint64_t>(bytesPerRecord),
+            bytesPerRecord,
+            recordBytes.data(),
+            errorTextOut))
+        {
+            ::CloseHandle(volumeHandle);
+            if (!fsctlErrorText.isEmpty())
+            {
+                errorTextOut = fsctlErrorText + QStringLiteral("; 卷偏移直读失败: ") + errorTextOut;
+            }
+            return false;
+        }
+        ::CloseHandle(volumeHandle);
+
+        if (!parseNtfsRecord(recordBytes, fileReference, bytesPerSector, true, recordOut))
+        {
+            errorTextOut = fsctlErrorText.isEmpty()
+                ? QStringLiteral("卷偏移记录解析失败。")
+                : (fsctlErrorText + QStringLiteral("; 卷偏移记录解析失败。"));
+            return false;
+        }
+        return true;
     }
 
     // decodeFatDateTime 作用：把 FAT 日期+时间转换为 QDateTime。
@@ -1422,19 +2413,25 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
     const QString& pathText,
     std::vector<ManualDirectoryEntry>& entriesOut,
     ManualFsType& fsTypeOut,
-    QString& errorTextOut)
+    QString& errorTextOut,
+    bool* usedWinApiFallbackOut)
 {
     entriesOut.clear();
     errorTextOut.clear();
+    if (usedWinApiFallbackOut != nullptr)
+    {
+        *usedWinApiFallbackOut = false;
+    }
     fsTypeOut = detectFileSystemType(pathText);
 
     if (fsTypeOut == ManualFsType::Ntfs)
     {
         const QString volumeRoot = trimVolumeRoot(pathText);
         std::vector<NtfsRawRecord> recordsValue;
+        std::shared_ptr<const NtfsCacheEntry> cacheSnapshot;
         constexpr std::uint64_t DirectoryListMaxRecords = 250000ULL; // 目录浏览优先响应速度，限制单次扫描规模。
         constexpr std::uint64_t DirectoryRetryMaxRecords = 1200000ULL; // 定位目录失败时扩展扫描上限，避免漏掉高编号目录项。
-        if (!loadNtfsRecords(volumeRoot, recordsValue, errorTextOut, DirectoryListMaxRecords, true))
+        if (!loadNtfsRecords(volumeRoot, recordsValue, errorTextOut, DirectoryListMaxRecords, true, true, false, false, false, {}, &cacheSnapshot))
         {
             return false;
         }
@@ -1442,16 +2439,20 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
         const QStringList pathSegments = splitRelativeSegments(pathText);
         std::uint64_t dirIndex = 5;
         bool usedFullRangeScan = false; // usedFullRangeScan：标记本次是否已经执行过 60 万记录全量扫描。
-        bool resolveOk = resolveNtfsDirectoryIndex(recordsValue, pathSegments, dirIndex);
+        bool resolveOk = (cacheSnapshot != nullptr)
+            && resolveNtfsDirectoryIndex(*cacheSnapshot, pathSegments, dirIndex);
         if (!resolveOk && DirectoryListMaxRecords < DirectoryRetryMaxRecords)
         {
             std::vector<NtfsRawRecord> retryRecords;
             QString retryErrorText;
-            if (loadNtfsRecords(volumeRoot, retryRecords, retryErrorText, DirectoryRetryMaxRecords, true))
+            std::shared_ptr<const NtfsCacheEntry> retrySnapshot;
+            if (loadNtfsRecords(volumeRoot, retryRecords, retryErrorText, DirectoryRetryMaxRecords, true, true, false, false, false, {}, &retrySnapshot))
             {
                 recordsValue.swap(retryRecords);
+                cacheSnapshot = retrySnapshot;
                 usedFullRangeScan = true;
-                resolveOk = resolveNtfsDirectoryIndex(recordsValue, pathSegments, dirIndex);
+                resolveOk = (cacheSnapshot != nullptr)
+                    && resolveNtfsDirectoryIndex(*cacheSnapshot, pathSegments, dirIndex);
             }
             else if (errorTextOut.isEmpty())
             {
@@ -1462,29 +2463,17 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
         {
             // 兜底策略：目录真实存在但 MFT 链路解析失败时，回退到 WinAPI 枚举，
             // 避免手动模式直接“空白/报错不可访问”。
-            const QString normalizedPath = QDir::toNativeSeparators(QDir::cleanPath(pathText));
-            QDir fallbackDirectory(normalizedPath);
-            if (fallbackDirectory.exists())
+            if (enumerateDirectoryByWinApi(pathText, entriesOut))
             {
-                const QFileInfoList fallbackEntries = fallbackDirectory.entryInfoList(
-                    QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
-                    QDir::DirsFirst | QDir::Name | QDir::IgnoreCase);
-                for (const QFileInfo& fileInfoValue : fallbackEntries)
+                if (usedWinApiFallbackOut != nullptr)
                 {
-                    ManualDirectoryEntry itemValue{};
-                    itemValue.name = fileInfoValue.fileName();
-                    itemValue.absolutePath = fileInfoValue.absoluteFilePath();
-                    itemValue.isDirectory = fileInfoValue.isDir();
-                    itemValue.sizeBytes = itemValue.isDirectory ? 0 : static_cast<std::uint64_t>(fileInfoValue.size());
-                    itemValue.modifiedTime = fileInfoValue.lastModified();
-                    itemValue.typeText = buildTypeText(itemValue.name, itemValue.isDirectory);
-                    entriesOut.push_back(std::move(itemValue));
+                    *usedWinApiFallbackOut = true;
                 }
 
                 kLogEvent event;
                 warn << event
                     << "[FileDock] NTFS链路定位失败，回退WinAPI枚举, path="
-                    << normalizedPath.toStdString()
+                    << QDir::toNativeSeparators(QDir::cleanPath(pathText)).toStdString()
                     << ", rows="
                     << entriesOut.size()
                     << eol;
@@ -1501,23 +2490,36 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
 
         const QString currentPath = QDir::toNativeSeparators(QDir::cleanPath(pathText));
         auto appendEntriesByDirectoryIndex =
-            [&recordsValue, &entriesOut, &currentPath](const std::uint64_t targetDirectoryIndex)
+            [&entriesOut, &currentPath, &cacheSnapshot](const std::uint64_t targetDirectoryIndex)
             {
                 entriesOut.clear();
-                for (const NtfsRawRecord& recordValue : recordsValue)
+                if (cacheSnapshot == nullptr)
                 {
-                    if (!recordValue.inUse || recordValue.parentIndex != targetDirectoryIndex || recordValue.fileName.isEmpty())
+                    return;
+                }
+
+                const auto childRange = findNtfsDirectoryLinkRange(cacheSnapshot->directoryLinks, targetDirectoryIndex);
+                for (auto it = childRange.first; it != childRange.second; ++it)
+                {
+                    const auto recordIt = cacheSnapshot->recordOffsetByIndex.find(it->recordIndex);
+                    if (recordIt == cacheSnapshot->recordOffsetByIndex.end())
+                    {
+                        continue;
+                    }
+
+                    const NtfsRawRecord& recordValue = cacheSnapshot->records[recordIt->second];
+                    if (!recordValue.inUse || it->fileName.isEmpty())
                     {
                         continue;
                     }
 
                     ManualDirectoryEntry itemValue{};
-                    itemValue.name = recordValue.fileName;
-                    itemValue.absolutePath = QDir(currentPath).filePath(recordValue.fileName);
+                    itemValue.name = it->fileName;
+                    itemValue.absolutePath = QDir(currentPath).filePath(it->fileName);
                     itemValue.isDirectory = recordValue.isDirectory;
                     itemValue.sizeBytes = recordValue.isDirectory ? 0 : recordValue.sizeBytes;
                     itemValue.modifiedTime = fileTimeToLocal(recordValue.modifiedTime100ns);
-                    itemValue.typeText = buildTypeText(recordValue.fileName, recordValue.isDirectory);
+                    itemValue.typeText = buildTypeText(it->fileName, recordValue.isDirectory);
                     itemValue.ntfsFileReference = recordValue.recordIndex;
                     entriesOut.push_back(std::move(itemValue));
                 }
@@ -1525,17 +2527,67 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
 
         appendEntriesByDirectoryIndex(dirIndex);
 
-        // 当目录已定位但结果为空时，执行一次全量重试，避免因扫描上限导致“存在目录却显示空列表”。
+        // 对 Windows API 结果做一次低成本补齐校验：
+        // 1) 手动结果若少于 WinAPI，优先补齐缺失项，避免用户看到“比资源管理器更少”；
+        // 2) 这样即使目录里存在超出当前扫描窗口的新记录，也不会继续强制整卷深扫卡 UI。
+        std::vector<ManualDirectoryEntry> winApiEntries;
+        if (enumerateDirectoryByWinApi(pathText, winApiEntries))
+        {
+            QSet<QString> existingNameSet;
+            existingNameSet.reserve(static_cast<int>(entriesOut.size() * 2 + 8));
+            for (const ManualDirectoryEntry& itemValue : entriesOut)
+            {
+                existingNameSet.insert(itemValue.name.toCaseFolded());
+            }
+
+            std::size_t mergedCount = 0;
+            for (const ManualDirectoryEntry& fallbackItem : winApiEntries)
+            {
+                const QString normalizedName = fallbackItem.name.toCaseFolded();
+                if (existingNameSet.contains(normalizedName))
+                {
+                    continue;
+                }
+
+                existingNameSet.insert(normalizedName);
+                entriesOut.push_back(fallbackItem);
+                mergedCount += 1;
+            }
+
+            if (mergedCount > 0)
+            {
+                if (usedWinApiFallbackOut != nullptr)
+                {
+                    *usedWinApiFallbackOut = true;
+                }
+
+                kLogEvent event;
+                warn << event
+                    << "[FileDock] NTFS手动解析结果少于WinAPI，已补齐缺失目录项, path="
+                    << QDir::toNativeSeparators(QDir::cleanPath(pathText)).toStdString()
+                    << ", manualRows="
+                    << static_cast<qulonglong>(entriesOut.size() - mergedCount)
+                    << ", mergedRows="
+                    << static_cast<qulonglong>(mergedCount)
+                    << ", winApiRows="
+                    << static_cast<qulonglong>(winApiEntries.size())
+                    << eol;
+            }
+        }
+
+        // 当目录已定位且手动路径返回空时，才执行一次扩大扫描，尽量兼顾“速度优先”和“极端目录可用性”。
         if (entriesOut.empty() && !usedFullRangeScan && DirectoryListMaxRecords < DirectoryRetryMaxRecords)
         {
             std::vector<NtfsRawRecord> retryRecords;
             QString retryErrorText;
-            if (loadNtfsRecords(volumeRoot, retryRecords, retryErrorText, DirectoryRetryMaxRecords, true))
+            std::shared_ptr<const NtfsCacheEntry> retrySnapshot;
+            if (loadNtfsRecords(volumeRoot, retryRecords, retryErrorText, DirectoryRetryMaxRecords, true, true, false, false, false, {}, &retrySnapshot))
             {
                 std::uint64_t retryDirIndex = 5;
-                if (resolveNtfsDirectoryIndex(retryRecords, pathSegments, retryDirIndex))
+                if (retrySnapshot != nullptr && resolveNtfsDirectoryIndex(*retrySnapshot, pathSegments, retryDirIndex))
                 {
                     recordsValue.swap(retryRecords);
+                    cacheSnapshot = retrySnapshot;
                     dirIndex = retryDirIndex;
                     appendEntriesByDirectoryIndex(dirIndex);
                 }
@@ -1624,10 +2676,15 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
 bool ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(
     const QString& volumeRootPath,
     std::vector<NtfsDeletedFileEntry>& deletedOut,
-    QString& errorTextOut)
+    QString& errorTextOut,
+    const std::function<void(int, const QString&)>& progressCallback)
 {
     deletedOut.clear();
     errorTextOut.clear();
+    if (progressCallback)
+    {
+        progressCallback(1, QStringLiteral("准备误删扫描"));
+    }
     if (detectFileSystemType(volumeRootPath) != ManualFsType::Ntfs)
     {
         errorTextOut = QStringLiteral("仅 NTFS 卷支持误删扫描。");
@@ -1636,10 +2693,49 @@ bool ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(
 
     std::vector<NtfsRawRecord> recordsValue;
     const QString volumeRoot = trimVolumeRoot(volumeRootPath);
-    constexpr std::uint64_t DeletedScanMaxRecords = 600000ULL; // 删除恢复需要覆盖更多记录，保持较高上限。
-    if (!loadNtfsRecords(volumeRoot, recordsValue, errorTextOut, DeletedScanMaxRecords, false))
+    constexpr std::uint64_t DeletedScanMaxRecords = 1500000ULL; // 删除恢复默认拉满当前硬上限，优先提高命中率。
+    // 删除恢复优先保留 deleted 记录，因此这里禁用 FSCTL 路径，改走 $MFT/卷偏移扫描。
+    if (!loadNtfsRecords(
+        volumeRoot,
+        recordsValue,
+        errorTextOut,
+        DeletedScanMaxRecords,
+        false,
+        false,
+        true,
+        false,
+        true,
+        progressCallback,
+        nullptr))
     {
         return false;
+    }
+    if (progressCallback)
+    {
+        progressCallback(82, QStringLiteral("MFT 扫描完成，开始过滤删除项"));
+    }
+
+    // bitmapSnapshot：卷位图快照仅用于完整度估算，加载失败时不影响扫描主流程。
+    NtfsVolumeBitmapSnapshot bitmapSnapshot{};
+    const NtfsVolumeBitmapSnapshot* bitmapSnapshotPtr = nullptr;
+    QString bitmapErrorText;
+    if (loadNtfsVolumeBitmapSnapshot(volumeRoot, bitmapSnapshot, bitmapErrorText))
+    {
+        bitmapSnapshotPtr = &bitmapSnapshot;
+        if (progressCallback)
+        {
+            progressCallback(86, QStringLiteral("已读取卷位图，开始估算完整度"));
+        }
+    }
+    else if (!bitmapErrorText.isEmpty())
+    {
+        kLogEvent event;
+        warn << event
+            << "[FileDock] 误删扫描未能加载卷位图，完整度估算将退化为未知, volume="
+            << volumeRoot.toStdString()
+            << ", error="
+            << bitmapErrorText.toStdString()
+            << eol;
     }
 
     std::unordered_map<std::uint64_t, const NtfsRawRecord*> recordMap;
@@ -1649,23 +2745,88 @@ bool ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(
         recordMap.emplace(recordValue.recordIndex, &recordValue);
     }
 
-    constexpr std::size_t MaxDeletedRecords = 20000;
+    // emittedKeySet：避免同一记录的同一路径提示被重复加入结果。
+    QSet<QString> emittedKeySet;
+
+    // 恢复扫描结果上限：
+    // 1) 目录级表格仍使用 QTableWidget，过大结果会显著拖慢界面；
+    // 2) 这里先将上限提升到 8 万，兼顾覆盖率与 UI 可承受范围。
+    constexpr std::size_t MaxDeletedRecords = 80000;
+    std::size_t scannedDeletedCandidateCount = 0; // scannedDeletedCandidateCount：已评估的删除候选记录数。
     for (const NtfsRawRecord& recordValue : recordsValue)
     {
-        if (recordValue.inUse || recordValue.isDirectory || recordValue.fileName.isEmpty())
+        if (recordValue.inUse || recordValue.isDirectory)
         {
             continue;
         }
+        scannedDeletedCandidateCount += 1;
+        if (progressCallback
+            && ((scannedDeletedCandidateCount % 2048U) == 0))
+        {
+            const int percentValue = 86
+                + static_cast<int>((scannedDeletedCandidateCount * 10ULL)
+                    / std::max<std::size_t>(recordsValue.size(), static_cast<std::size_t>(1)));
+            progressCallback(std::min(percentValue, 96), QStringLiteral("过滤删除项并估算完整度"));
+        }
 
-        NtfsDeletedFileEntry itemValue{};
-        itemValue.fileName = recordValue.fileName;
-        itemValue.pathHint = buildNtfsPathHint(volumeRoot, recordValue, recordMap);
-        itemValue.sizeBytes = recordValue.sizeBytes;
-        itemValue.modifiedTime = fileTimeToLocal(recordValue.modifiedTime100ns);
-        itemValue.fileReference = recordValue.recordIndex;
-        itemValue.residentDataReady = recordValue.residentReady;
-        itemValue.residentData = recordValue.residentData;
-        deletedOut.push_back(std::move(itemValue));
+        auto appendDeletedItem =
+            [&deletedOut, &emittedKeySet, &recordValue, &recordMap, &volumeRoot, bitmapSnapshotPtr](
+                const QString& fileNameValue,
+                const std::uint64_t parentIndexValue,
+                const bool hasOriginalName)
+            {
+                const QString normalizedFileName = fileNameValue.trimmed();
+                if (normalizedFileName.isEmpty())
+                {
+                    return;
+                }
+
+                const QString dedupeKey = QStringLiteral("%1|%2|%3")
+                    .arg(static_cast<qulonglong>(recordValue.recordIndex))
+                    .arg(static_cast<qulonglong>(parentIndexValue))
+                    .arg(normalizedFileName.toCaseFolded());
+                if (emittedKeySet.contains(dedupeKey))
+                {
+                    return;
+                }
+                emittedKeySet.insert(dedupeKey);
+
+                NtfsDeletedFileEntry itemValue{};
+                itemValue.fileName = normalizedFileName;
+                itemValue.pathHint = buildNtfsPathHintByName(volumeRoot, normalizedFileName, parentIndexValue, recordMap);
+                itemValue.sizeBytes = recordValue.sizeBytes;
+                itemValue.modifiedTime = fileTimeToLocal(recordValue.modifiedTime100ns);
+                itemValue.fileReference = recordValue.recordIndex;
+                itemValue.estimatedIntegrityPercent =
+                    estimateDeletedRecordIntegrityPercent(recordValue, bitmapSnapshotPtr);
+                itemValue.hasOriginalName = hasOriginalName;
+                itemValue.residentDataReady = recordValue.residentReady;
+                deletedOut.push_back(std::move(itemValue));
+            };
+
+        if (!recordValue.nameLinks.empty())
+        {
+            for (const NtfsNameLink& nameLink : recordValue.nameLinks)
+            {
+                appendDeletedItem(nameLink.fileName, nameLink.parentIndex, true);
+                if (deletedOut.size() >= MaxDeletedRecords)
+                {
+                    break;
+                }
+            }
+        }
+        else
+        {
+            if (!recordValue.fileName.isEmpty())
+            {
+                appendDeletedItem(recordValue.fileName, recordValue.parentIndex, true);
+            }
+            else if (recordValue.hasPrimaryDataStream || recordValue.sizeBytes > 0 || recordValue.residentReady)
+            {
+                appendDeletedItem(buildSyntheticDeletedFileName(recordValue), recordValue.parentIndex, false);
+            }
+        }
+
         if (deletedOut.size() >= MaxDeletedRecords)
         {
             break;
@@ -1676,6 +2837,30 @@ bool ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(
         deletedOut.begin(),
         deletedOut.end(),
         [](const NtfsDeletedFileEntry& left, const NtfsDeletedFileEntry& right) {
+            // 完整度优先：
+            // 1) 已知完整度的项排在未知前；
+            // 2) 同为已知时按完整度降序；
+            // 3) 再优先原始文件名，再按时间与大小排序。
+            const bool leftIntegrityKnown = (left.estimatedIntegrityPercent >= 0);
+            const bool rightIntegrityKnown = (right.estimatedIntegrityPercent >= 0);
+            if (leftIntegrityKnown != rightIntegrityKnown)
+            {
+                return leftIntegrityKnown;
+            }
+            if (leftIntegrityKnown
+                && rightIntegrityKnown
+                && left.estimatedIntegrityPercent != right.estimatedIntegrityPercent)
+            {
+                return left.estimatedIntegrityPercent > right.estimatedIntegrityPercent;
+            }
+            if (left.hasOriginalName != right.hasOriginalName)
+            {
+                return left.hasOriginalName;
+            }
+            if (left.residentDataReady != right.residentDataReady)
+            {
+                return left.residentDataReady;
+            }
             if (left.modifiedTime.isValid() && right.modifiedTime.isValid())
             {
                 return left.modifiedTime > right.modifiedTime;
@@ -1684,8 +2869,16 @@ bool ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(
             {
                 return left.modifiedTime.isValid();
             }
+            if (left.sizeBytes != right.sizeBytes)
+            {
+                return left.sizeBytes > right.sizeBytes;
+            }
             return QString::compare(left.fileName, right.fileName, Qt::CaseInsensitive) < 0;
         });
+    if (progressCallback)
+    {
+        progressCallback(100, QStringLiteral("删除项排序完成"));
+    }
     return true;
 }
 
@@ -1708,15 +2901,53 @@ bool ks::file::ManualFileSystemParser::recoverNtfsResidentFile(
         return false;
     }
 
+    // residentDataBytes：优先复用条目里已有数据；若扫描阶段未缓存，则在这里按记录号回读。
+    QByteArray residentDataBytes = deletedEntry.residentData;
+    if (deletedEntry.sizeBytes > 0
+        && residentDataBytes.size() != static_cast<int>(deletedEntry.sizeBytes))
+    {
+        NtfsRawRecord recordValue{};
+        const QString volumeRoot = trimVolumeRoot(volumeRootPath);
+        if (volumeRoot.isEmpty())
+        {
+            errorTextOut = QStringLiteral("卷根路径无效。");
+            return false;
+        }
+
+        QString readRecordErrorText;
+        if (!loadNtfsSingleRecord(volumeRoot, deletedEntry.fileReference, recordValue, readRecordErrorText))
+        {
+            errorTextOut = QStringLiteral("按需回读 resident 数据失败：%1").arg(readRecordErrorText);
+            return false;
+        }
+        if (recordValue.inUse)
+        {
+            errorTextOut = QStringLiteral("该 MFT 记录已重新被占用，无法安全恢复。");
+            return false;
+        }
+        if (!recordValue.residentReady)
+        {
+            errorTextOut = QStringLiteral("该记录当前已不是 resident 主数据流。");
+            return false;
+        }
+
+        residentDataBytes = recordValue.residentData;
+        if (residentDataBytes.size() != static_cast<int>(recordValue.sizeBytes))
+        {
+            errorTextOut = QStringLiteral("按需回读的数据长度异常。");
+            return false;
+        }
+    }
+
     QFile targetFile(targetFilePath);
     if (!targetFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
     {
         errorTextOut = QStringLiteral("无法写入目标文件：%1").arg(targetFilePath);
         return false;
     }
-    const qint64 writeBytes = targetFile.write(deletedEntry.residentData);
+    const qint64 writeBytes = targetFile.write(residentDataBytes);
     targetFile.close();
-    if (writeBytes != deletedEntry.residentData.size())
+    if (writeBytes != residentDataBytes.size())
     {
         errorTextOut = QStringLiteral("写入长度不完整。");
         return false;
