@@ -132,6 +132,8 @@
   <ItemGroup>
     <ClCompile Include="DriverDock\DriverDock.cpp" />
     <ClCompile Include="FileDock\FileDock.cpp" />
+    <ClCompile Include="FileDock\ManualFileSystemParser.cpp" />
+    <ClCompile Include="HardwareDock\HardwareDock.cpp" />
     <ClCompile Include="Framework\Log.cpp" />
     <ClCompile Include="Framework\LogDockWidget.cpp" />
     <ClCompile Include="Framework\Progress.cpp" />
@@ -175,6 +177,7 @@
   <ItemGroup>
     <ClInclude Include="Framework.h" />
     <ClInclude Include="Ksword.h" />
+    <ClInclude Include="FileDock\ManualFileSystemParser.h" />
     <ClInclude Include="Framework\LogDockWidget.h" />
     <ClInclude Include="Framework\ProgressDockWidget.h" />
     <ClInclude Include="KernelDock\KernelDockQueryWorker.h" />
@@ -185,6 +188,7 @@
     <ClInclude Include="UI\UI_All.h" />
     <QtMoc Include="DriverDock\DriverDock.h" />
     <QtMoc Include="FileDock\FileDock.h" />
+    <QtMoc Include="HardwareDock\HardwareDock.h" />
     <QtMoc Include="KernelDock\KernelDock.h" />
     <QtMoc Include="MemoryDock\MemoryDock.h" />
     <QtMoc Include="MonitorDock\MonitorDock.h" />

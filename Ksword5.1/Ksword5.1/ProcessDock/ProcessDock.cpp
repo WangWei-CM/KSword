@@ -1546,6 +1546,7 @@ void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult)
             << ", exitedHold=" << refreshResult.exitedProcessCount
             << ", staticFilled=" << refreshResult.staticFilledCount
             << ", staticDeferred=" << refreshResult.staticDeferredCount
+            << ", imagePathFilled=" << refreshResult.imagePathFilledCount
             << ", cacheNow=" << m_cacheByIdentity.size()
             << eol;
     }
@@ -1728,6 +1729,80 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
             }
         }
         refreshResult.staticFilledCount += staticFillIndices.size();
+    }
+
+    // 第二阶段补充：单独为 imagePath 做更高预算的快速补齐。
+    // 说明：
+    // 1) 图标展示只依赖 imagePath，且路径查询比“命令行/签名”更轻；
+    // 2) 因此即使静态详情预算较低，也要额外补齐路径，避免整表图标都退化成占位图。
+    const bool isFirstRound = previousCache.empty();
+    int remainingImagePathBudget = detailModeEnabled
+        ? (isFirstRound ? 640 : 320)
+        : (isFirstRound ? 320 : 160);
+    std::vector<std::size_t> imagePathFillIndices;
+    imagePathFillIndices.reserve(latestProcessList.size());
+    for (std::size_t recordIndex = 0; recordIndex < latestProcessList.size(); ++recordIndex)
+    {
+        const ks::process::ProcessRecord& processRecord = latestProcessList[recordIndex];
+        if (processRecord.pid == 0 || !processRecord.imagePath.empty())
+        {
+            continue;
+        }
+        if (remainingImagePathBudget <= 0)
+        {
+            break;
+        }
+        imagePathFillIndices.push_back(recordIndex);
+        --remainingImagePathBudget;
+    }
+
+    if (progressTaskPid > 0)
+    {
+        kPro.set(progressTaskPid, "正在补齐进程图标路径...", 48, 0.48f);
+    }
+
+    if (!imagePathFillIndices.empty())
+    {
+        // 独立路径补齐线程池：仅执行 QueryProcessPathByPid，避免 UI 线程兜底查询造成卡顿。
+        const unsigned int hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+        const unsigned int wantedThreads = detailModeEnabled ? std::min(8u, hardwareThreads) : std::min(4u, hardwareThreads);
+        const unsigned int workerCount = std::max(
+            1u,
+            std::min<unsigned int>(wantedThreads, static_cast<unsigned int>(imagePathFillIndices.size())));
+        std::atomic<std::size_t> nextTaskIndex{ 0 };
+        std::atomic<std::size_t> filledCount{ 0 };
+        std::vector<std::thread> workerThreads;
+        workerThreads.reserve(workerCount);
+        for (unsigned int workerId = 0; workerId < workerCount; ++workerId)
+        {
+            workerThreads.emplace_back([&]() {
+                for (;;)
+                {
+                    const std::size_t taskOrder = nextTaskIndex.fetch_add(1);
+                    if (taskOrder >= imagePathFillIndices.size())
+                    {
+                        break;
+                    }
+
+                    const std::size_t recordIndex = imagePathFillIndices[taskOrder];
+                    ks::process::ProcessRecord& processRecord = latestProcessList[recordIndex];
+                    const std::string pathText = ks::process::QueryProcessPathByPid(processRecord.pid);
+                    if (!pathText.empty())
+                    {
+                        processRecord.imagePath = pathText;
+                        filledCount.fetch_add(1);
+                    }
+                }
+                });
+        }
+        for (std::thread& workerThread : workerThreads)
+        {
+            if (workerThread.joinable())
+            {
+                workerThread.join();
+            }
+        }
+        refreshResult.imagePathFilledCount = filledCount.load();
     }
 
     // 第三阶段：计算性能差值并写回缓存（该阶段仍串行，保证逻辑简单稳定）。

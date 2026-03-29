@@ -29,6 +29,7 @@
 #include "DriverDock/DriverDock.h"
 #include "KernelDock/KernelDock.h"
 #include "MonitorDock/MonitorDock.h"
+#include "HardwareDock/HardwareDock.h"
 #include "PrivilegeDock/PrivilegeDock.h"
 #include "SettingsDock/SettingsDock.h"
 #include "SettingsDock/AppearanceSettings.h"
@@ -130,6 +131,7 @@ private:
     ads::CDockWidget* m_dockSettings;
     ads::CDockWidget* m_dockWindow;
     ads::CDockWidget* m_dockRegistry;
+    ads::CDockWidget* m_dockHardware;
     ads::CDockWidget* m_dockCurrentOp;
     ads::CDockWidget* m_dockLog;
     ads::CDockWidget* m_dockImmediate;
@@ -144,6 +146,7 @@ private:
     DriverDock* m_driverWidget;
     KernelDock* m_kernelWidget;
     MonitorDock* m_monitorWidget;
+    HardwareDock* m_hardwareWidget;
     PrivilegeDock* m_privilegeWidget;
     SettingsDock* m_settingsWidget;
     WindowDock* m_windowWidget;

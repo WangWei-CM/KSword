@@ -9,6 +9,7 @@
 
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
+#include "../UI/HexEditorWidget.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -24,6 +25,7 @@
 #include <QFile>
 #include <QFileDevice>
 #include <QFileInfo>
+#include <QFileDialog>
 #include <QFileSystemModel>
 #include <QFormLayout>
 #include <QFrame>
@@ -44,11 +46,13 @@
 #include <QShortcut>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
+#include <QStandardItemModel>
 #include <QStatusBar>
 #include <QStorageInfo>
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QToolButton>
 #include <QTreeView>
 #include <QUrl>
@@ -60,9 +64,39 @@
 #include <cctype>
 #include <cmath>
 #include <memory>
+#include <string>
+
+#include <Aclapi.h>
+#include <Sddl.h>
 
 namespace
 {
+    // 手动解析模型列定义：名称/大小/类型/修改时间/完整路径/是否目录。
+    enum class ManualModelColumn : int
+    {
+        Name = 0,
+        Size = 1,
+        Type = 2,
+        ModifiedTime = 3,
+        FullPath = 4,
+        IsDirectory = 5,
+        Count = 6
+    };
+
+    // manualFsTypeToText 作用：手动解析结果类型转可读文本。
+    QString manualFsTypeToText(const ks::file::ManualFsType fsType)
+    {
+        switch (fsType)
+        {
+        case ks::file::ManualFsType::Ntfs:
+            return QStringLiteral("NTFS");
+        case ks::file::ManualFsType::Fat32:
+            return QStringLiteral("FAT32");
+        default:
+            return QStringLiteral("Unknown");
+        }
+    }
+
     // 统一按钮样式，保持与主界面蓝色主题一致。
     QString buildBlueButtonStyle()
     {
@@ -234,6 +268,243 @@ namespace
         return takeOwnOk && grantOk;
     }
 
+    // sidUseToText 作用：
+    // - 把 SID_NAME_USE 枚举转换为可读文本；
+    // - 用于 ACL 列表中显示主体类型（用户/组/域等）。
+    QString sidUseToText(const SID_NAME_USE sidUse)
+    {
+        switch (sidUse)
+        {
+        case SidTypeUser: return QStringLiteral("User");
+        case SidTypeGroup: return QStringLiteral("Group");
+        case SidTypeDomain: return QStringLiteral("Domain");
+        case SidTypeAlias: return QStringLiteral("Alias");
+        case SidTypeWellKnownGroup: return QStringLiteral("WellKnownGroup");
+        case SidTypeDeletedAccount: return QStringLiteral("DeletedAccount");
+        case SidTypeInvalid: return QStringLiteral("Invalid");
+        case SidTypeUnknown: return QStringLiteral("Unknown");
+        case SidTypeComputer: return QStringLiteral("Computer");
+        case SidTypeLabel: return QStringLiteral("Label");
+        default: return QStringLiteral("Other");
+        }
+    }
+
+    // sidToStringText 作用：
+    // - 把 PSID 转换为标准字符串形式（S-1-5-...）；
+    // - 失败时返回包含错误信息的占位文本。
+    QString sidToStringText(PSID sidValue)
+    {
+        if (sidValue == nullptr)
+        {
+            return QStringLiteral("<空SID>");
+        }
+        LPWSTR sidStringBuffer = nullptr;
+        if (::ConvertSidToStringSidW(sidValue, &sidStringBuffer) == FALSE || sidStringBuffer == nullptr)
+        {
+            return QStringLiteral("<SID转换失败 code=%1>").arg(::GetLastError());
+        }
+        QString sidText = QString::fromWCharArray(sidStringBuffer);
+        ::LocalFree(sidStringBuffer);
+        return sidText;
+    }
+
+    // sidToAccountText 作用：
+    // - 通过 LookupAccountSidW 解析 SID 的域名与账户名；
+    // - 解析失败时保留错误码，便于权限审计定位。
+    QString sidToAccountText(PSID sidValue)
+    {
+        if (sidValue == nullptr)
+        {
+            return QStringLiteral("<空SID>");
+        }
+
+        wchar_t accountBuffer[256] = {};
+        wchar_t domainBuffer[256] = {};
+        DWORD accountSize = static_cast<DWORD>(std::size(accountBuffer));
+        DWORD domainSize = static_cast<DWORD>(std::size(domainBuffer));
+        SID_NAME_USE sidUse = SidTypeUnknown;
+        if (::LookupAccountSidW(
+            nullptr,
+            sidValue,
+            accountBuffer,
+            &accountSize,
+            domainBuffer,
+            &domainSize,
+            &sidUse) == FALSE)
+        {
+            return QStringLiteral("<账户解析失败 code=%1>").arg(::GetLastError());
+        }
+
+        const QString accountText = QString::fromWCharArray(accountBuffer);
+        const QString domainText = QString::fromWCharArray(domainBuffer);
+        if (domainText.isEmpty())
+        {
+            return QStringLiteral("%1 (%2)").arg(accountText, sidUseToText(sidUse));
+        }
+        return QStringLiteral("%1\\%2 (%3)").arg(domainText, accountText, sidUseToText(sidUse));
+    }
+
+    // aceTypeToText 作用：
+    // - 把 ACE_HEADER::AceType 转换为可读文本；
+    // - 未覆盖类型保留原始数值，避免信息丢失。
+    QString aceTypeToText(const BYTE aceType)
+    {
+        switch (aceType)
+        {
+        case ACCESS_ALLOWED_ACE_TYPE: return QStringLiteral("ACCESS_ALLOWED");
+        case ACCESS_DENIED_ACE_TYPE: return QStringLiteral("ACCESS_DENIED");
+        case SYSTEM_AUDIT_ACE_TYPE: return QStringLiteral("SYSTEM_AUDIT");
+        case SYSTEM_ALARM_ACE_TYPE: return QStringLiteral("SYSTEM_ALARM");
+        case ACCESS_ALLOWED_OBJECT_ACE_TYPE: return QStringLiteral("ACCESS_ALLOWED_OBJECT");
+        case ACCESS_DENIED_OBJECT_ACE_TYPE: return QStringLiteral("ACCESS_DENIED_OBJECT");
+        case SYSTEM_AUDIT_OBJECT_ACE_TYPE: return QStringLiteral("SYSTEM_AUDIT_OBJECT");
+        case SYSTEM_MANDATORY_LABEL_ACE_TYPE: return QStringLiteral("MANDATORY_LABEL");
+        default:
+            return QStringLiteral("ACE_%1").arg(aceType);
+        }
+    }
+
+    // aceFlagsToText 作用：
+    // - 解析 ACE 继承/审计标志位；
+    // - 返回以“|”分隔的复合文本。
+    QString aceFlagsToText(const BYTE aceFlags)
+    {
+        QStringList flagList;
+        if ((aceFlags & OBJECT_INHERIT_ACE) != 0) flagList << QStringLiteral("OBJECT_INHERIT");
+        if ((aceFlags & CONTAINER_INHERIT_ACE) != 0) flagList << QStringLiteral("CONTAINER_INHERIT");
+        if ((aceFlags & NO_PROPAGATE_INHERIT_ACE) != 0) flagList << QStringLiteral("NO_PROPAGATE");
+        if ((aceFlags & INHERIT_ONLY_ACE) != 0) flagList << QStringLiteral("INHERIT_ONLY");
+        if ((aceFlags & INHERITED_ACE) != 0) flagList << QStringLiteral("INHERITED");
+        if ((aceFlags & SUCCESSFUL_ACCESS_ACE_FLAG) != 0) flagList << QStringLiteral("AUDIT_SUCCESS");
+        if ((aceFlags & FAILED_ACCESS_ACE_FLAG) != 0) flagList << QStringLiteral("AUDIT_FAIL");
+        return flagList.isEmpty() ? QStringLiteral("None") : flagList.join('|');
+    }
+
+    // accessMaskToText 作用：
+    // - 把文件系统访问掩码拆解为常见权限名；
+    // - 既保留 GENERIC_*，也保留 FILE_* 细粒度权限。
+    QString accessMaskToText(const DWORD accessMask)
+    {
+        QStringList rightList;
+        if ((accessMask & GENERIC_ALL) != 0) rightList << QStringLiteral("GENERIC_ALL");
+        if ((accessMask & GENERIC_READ) != 0) rightList << QStringLiteral("GENERIC_READ");
+        if ((accessMask & GENERIC_WRITE) != 0) rightList << QStringLiteral("GENERIC_WRITE");
+        if ((accessMask & GENERIC_EXECUTE) != 0) rightList << QStringLiteral("GENERIC_EXECUTE");
+        if ((accessMask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS) rightList << QStringLiteral("FILE_ALL_ACCESS");
+        if ((accessMask & FILE_GENERIC_READ) == FILE_GENERIC_READ) rightList << QStringLiteral("FILE_GENERIC_READ");
+        if ((accessMask & FILE_GENERIC_WRITE) == FILE_GENERIC_WRITE) rightList << QStringLiteral("FILE_GENERIC_WRITE");
+        if ((accessMask & FILE_GENERIC_EXECUTE) == FILE_GENERIC_EXECUTE) rightList << QStringLiteral("FILE_GENERIC_EXECUTE");
+        if ((accessMask & FILE_READ_DATA) != 0) rightList << QStringLiteral("READ_DATA");
+        if ((accessMask & FILE_WRITE_DATA) != 0) rightList << QStringLiteral("WRITE_DATA");
+        if ((accessMask & FILE_APPEND_DATA) != 0) rightList << QStringLiteral("APPEND_DATA");
+        if ((accessMask & FILE_EXECUTE) != 0) rightList << QStringLiteral("EXECUTE");
+        if ((accessMask & FILE_READ_ATTRIBUTES) != 0) rightList << QStringLiteral("READ_ATTRIBUTES");
+        if ((accessMask & FILE_WRITE_ATTRIBUTES) != 0) rightList << QStringLiteral("WRITE_ATTRIBUTES");
+        if ((accessMask & FILE_READ_EA) != 0) rightList << QStringLiteral("READ_EA");
+        if ((accessMask & FILE_WRITE_EA) != 0) rightList << QStringLiteral("WRITE_EA");
+        if ((accessMask & DELETE) != 0) rightList << QStringLiteral("DELETE");
+        if ((accessMask & READ_CONTROL) != 0) rightList << QStringLiteral("READ_CONTROL");
+        if ((accessMask & WRITE_DAC) != 0) rightList << QStringLiteral("WRITE_DAC");
+        if ((accessMask & WRITE_OWNER) != 0) rightList << QStringLiteral("WRITE_OWNER");
+        if ((accessMask & SYNCHRONIZE) != 0) rightList << QStringLiteral("SYNCHRONIZE");
+        return rightList.isEmpty() ? QStringLiteral("None") : rightList.join('|');
+    }
+
+    // appendAclText 作用：
+    // - 解析 ACL 中每一条 ACE，输出类型、标志、掩码、SID 与账户名；
+    // - titleText 用于区分 DACL 与 SACL 段落。
+    void appendAclText(const QString& titleText, PACL aclValue, QString& contentOut)
+    {
+        contentOut += QStringLiteral("\n[%1]\n").arg(titleText);
+        if (aclValue == nullptr)
+        {
+            contentOut += QStringLiteral("ACL: <null>\n");
+            return;
+        }
+
+        ACL_SIZE_INFORMATION aclSizeInfo{};
+        if (::GetAclInformation(
+            aclValue,
+            &aclSizeInfo,
+            static_cast<DWORD>(sizeof(aclSizeInfo)),
+            AclSizeInformation) == FALSE)
+        {
+            contentOut += QStringLiteral("读取 ACL 信息失败, code=%1\n").arg(::GetLastError());
+            return;
+        }
+
+        contentOut += QStringLiteral("ACE数量: %1\n").arg(aclSizeInfo.AceCount);
+        for (DWORD aceIndex = 0; aceIndex < aclSizeInfo.AceCount; ++aceIndex)
+        {
+            LPVOID acePointer = nullptr;
+            if (::GetAce(aclValue, aceIndex, &acePointer) == FALSE || acePointer == nullptr)
+            {
+                contentOut += QStringLiteral("  - ACE[%1] 读取失败, code=%2\n").arg(aceIndex).arg(::GetLastError());
+                continue;
+            }
+
+            ACE_HEADER* aceHeader = reinterpret_cast<ACE_HEADER*>(acePointer);
+            DWORD accessMask = 0;
+            PSID aceSid = nullptr;
+
+            switch (aceHeader->AceType)
+            {
+            case ACCESS_ALLOWED_ACE_TYPE:
+            {
+                ACCESS_ALLOWED_ACE* aceBody = reinterpret_cast<ACCESS_ALLOWED_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                break;
+            }
+            case ACCESS_DENIED_ACE_TYPE:
+            {
+                ACCESS_DENIED_ACE* aceBody = reinterpret_cast<ACCESS_DENIED_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                break;
+            }
+            case SYSTEM_AUDIT_ACE_TYPE:
+            {
+                SYSTEM_AUDIT_ACE* aceBody = reinterpret_cast<SYSTEM_AUDIT_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                break;
+            }
+            case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+            {
+                ACCESS_ALLOWED_OBJECT_ACE* aceBody = reinterpret_cast<ACCESS_ALLOWED_OBJECT_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                break;
+            }
+            case ACCESS_DENIED_OBJECT_ACE_TYPE:
+            {
+                ACCESS_DENIED_OBJECT_ACE* aceBody = reinterpret_cast<ACCESS_DENIED_OBJECT_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                break;
+            }
+            case SYSTEM_AUDIT_OBJECT_ACE_TYPE:
+            {
+                SYSTEM_AUDIT_OBJECT_ACE* aceBody = reinterpret_cast<SYSTEM_AUDIT_OBJECT_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                break;
+            }
+            default:
+                break;
+            }
+
+            contentOut += QStringLiteral("  - ACE[%1]\n").arg(aceIndex);
+            contentOut += QStringLiteral("    类型: %1\n").arg(aceTypeToText(aceHeader->AceType));
+            contentOut += QStringLiteral("    标志: %1\n").arg(aceFlagsToText(aceHeader->AceFlags));
+            contentOut += QStringLiteral("    Mask: 0x%1\n").arg(accessMask, 8, 16, QLatin1Char('0'));
+            contentOut += QStringLiteral("    权限: %1\n").arg(accessMaskToText(accessMask));
+            contentOut += QStringLiteral("    SID: %1\n").arg(sidToStringText(aceSid));
+            contentOut += QStringLiteral("    账户: %1\n").arg(sidToAccountText(aceSid));
+        }
+    }
+
     // 简单文件详情对话框：按 Tab 展示通用/安全/哈希/签名/PE/字符串/十六进制。
     class FileDetailDialog final : public QDialog
     {
@@ -292,13 +563,79 @@ namespace
             CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
             textEditorWidget->setReadOnly(true);
 
-            QFileInfo info(m_filePath);
             QString content;
-            content += QStringLiteral("权限摘要:\n");
+            const QString nativePath = QDir::toNativeSeparators(m_filePath);
+            std::wstring nativePathBuffer = nativePath.toStdWString();
+            content += QStringLiteral("目标路径: %1\n").arg(nativePath);
+
+            // 先给出 Qt 维度的快速权限摘要，便于与 ACL 细节对照。
+            QFileInfo info(m_filePath);
+            content += QStringLiteral("快速权限摘要:\n");
             content += QStringLiteral("Read: %1\n").arg(info.isReadable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
             content += QStringLiteral("Write: %1\n").arg(info.isWritable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
             content += QStringLiteral("Execute: %1\n").arg(info.isExecutable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
-            content += QStringLiteral("\n提示：更深层 ACL / SID 解析可接入后续权限模块。");
+
+            // 使用 GetNamedSecurityInfoW 拉取 Owner / Group / DACL，做深层 ACL/SID 解析。
+            PSID ownerSid = nullptr;
+            PSID groupSid = nullptr;
+            PACL dacl = nullptr;
+            PSECURITY_DESCRIPTOR securityDescriptor = nullptr;
+            const DWORD queryMask = OWNER_SECURITY_INFORMATION
+                | GROUP_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION;
+            const DWORD queryResult = ::GetNamedSecurityInfoW(
+                nativePathBuffer.data(),
+                SE_FILE_OBJECT,
+                queryMask,
+                &ownerSid,
+                &groupSid,
+                &dacl,
+                nullptr,
+                &securityDescriptor);
+            if (queryResult != ERROR_SUCCESS)
+            {
+                content += QStringLiteral("\n深层安全描述符读取失败, code=%1\n").arg(queryResult);
+            }
+            else
+            {
+                content += QStringLiteral("\n[Owner]\n");
+                content += QStringLiteral("SID: %1\n").arg(sidToStringText(ownerSid));
+                content += QStringLiteral("账户: %1\n").arg(sidToAccountText(ownerSid));
+
+                content += QStringLiteral("\n[Primary Group]\n");
+                content += QStringLiteral("SID: %1\n").arg(sidToStringText(groupSid));
+                content += QStringLiteral("账户: %1\n").arg(sidToAccountText(groupSid));
+
+                appendAclText(QStringLiteral("DACL"), dacl, content);
+                ::LocalFree(securityDescriptor);
+            }
+
+            // 尝试读取 SACL（审计 ACL），多数场景需要 SeSecurityPrivilege，失败也应输出原因。
+            PSID saclOwnerSid = nullptr;
+            PSID saclGroupSid = nullptr;
+            PACL sacl = nullptr;
+            PSECURITY_DESCRIPTOR saclDescriptor = nullptr;
+            const DWORD saclResult = ::GetNamedSecurityInfoW(
+                nativePathBuffer.data(),
+                SE_FILE_OBJECT,
+                SACL_SECURITY_INFORMATION,
+                &saclOwnerSid,
+                &saclGroupSid,
+                nullptr,
+                &sacl,
+                &saclDescriptor);
+            if (saclResult == ERROR_SUCCESS)
+            {
+                appendAclText(QStringLiteral("SACL"), sacl, content);
+                ::LocalFree(saclDescriptor);
+            }
+            else
+            {
+                content += QStringLiteral("\n[SACL]\n");
+                content += QStringLiteral("读取失败（通常需要 SeSecurityPrivilege）, code=%1\n").arg(saclResult);
+            }
+
+            content += QStringLiteral("\n说明：Mask 显示为十六进制，权限列为常见位标志拆解。");
             textEditorWidget->setText(content);
 
             layout->addWidget(textEditorWidget, 1);
@@ -527,10 +864,11 @@ namespace
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
 
-            // 文件属性页按用户要求统一改为文本编辑器展示（只读）。
-            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
-            textEditorWidget->setReadOnly(true);
-            layout->addWidget(textEditorWidget, 1);
+            // 统一复用 HexEditorWidget，避免各处重复实现十六进制转储逻辑。
+            HexEditorWidget* hexEditorWidget = new HexEditorWidget(page);
+            hexEditorWidget->setEditable(false);
+            hexEditorWidget->setBytesPerRow(16);
+            layout->addWidget(hexEditorWidget, 1);
 
             // hexHintLabel 用途：提示用户该页面默认仅预览文件前部字节。
             QLabel* hexHintLabel = new QLabel(page);
@@ -543,7 +881,7 @@ namespace
             if (!file.open(QIODevice::ReadOnly))
             {
                 hexHintLabel->setText(QStringLiteral("无法读取文件，无法显示十六进制。"));
-                textEditorWidget->setText(QStringLiteral("无法读取文件，无法显示十六进制。"));
+                hexEditorWidget->clearData();
                 return page;
             }
 
@@ -554,42 +892,12 @@ namespace
             if (bytes.isEmpty())
             {
                 hexHintLabel->setText(QStringLiteral("文件为空。"));
-                textEditorWidget->setText(QStringLiteral("<empty>"));
+                hexEditorWidget->clearData();
                 return page;
             }
 
-            QStringList dumpRowList;
-            constexpr int bytesPerLine = 16;
-            const int previewBytesCount = bytes.size();
-            dumpRowList.reserve((previewBytesCount + bytesPerLine - 1) / bytesPerLine);
-            for (int offset = 0; offset < previewBytesCount; offset += bytesPerLine)
-            {
-                QStringList byteTextList;
-                QString asciiText;
-                asciiText.reserve(bytesPerLine);
-                for (int index = 0; index < bytesPerLine; ++index)
-                {
-                    const int byteIndex = offset + index;
-                    if (byteIndex < previewBytesCount)
-                    {
-                        const unsigned char byteValue = static_cast<unsigned char>(bytes.at(byteIndex));
-                        byteTextList.push_back(QStringLiteral("%1").arg(byteValue, 2, 16, QChar('0')).toUpper());
-                        asciiText.push_back(std::isprint(byteValue) ? QChar::fromLatin1(static_cast<char>(byteValue)) : QChar('.'));
-                    }
-                    else
-                    {
-                        byteTextList.push_back(QStringLiteral("--"));
-                        asciiText.push_back(' ');
-                    }
-                }
-
-                const QString rowText = QStringLiteral("0x%1  %2  |%3|")
-                    .arg(QString::number(offset, 16).toUpper().rightJustified(8, QChar('0')))
-                    .arg(byteTextList.join(' '))
-                    .arg(asciiText);
-                dumpRowList.push_back(rowText);
-            }
-            textEditorWidget->setText(dumpRowList.join('\n'));
+            // 直接把预览字节交给 HexEditorWidget，使用统一滚动、查找、跳转能力。
+            hexEditorWidget->setByteArray(bytes, 0);
 
             if (totalBytes > bytes.size())
             {
@@ -629,8 +937,19 @@ void FileDock::initializeUi()
     m_rootLayout->setContentsMargins(4, 4, 4, 4);
     m_rootLayout->setSpacing(6);
 
-    m_mainSplitter = new QSplitter(Qt::Horizontal, this);
-    m_rootLayout->addWidget(m_mainSplitter, 1);
+    // 顶层改为竖排 Tab：文件管理 + 文件恢复。
+    m_rootTabWidget = new QTabWidget(this);
+    m_rootTabWidget->setTabPosition(QTabWidget::West);
+    m_rootTabWidget->setDocumentMode(true);
+    m_rootLayout->addWidget(m_rootTabWidget, 1);
+
+    m_fileManagerPage = new QWidget(m_rootTabWidget);
+    QVBoxLayout* managerLayout = new QVBoxLayout(m_fileManagerPage);
+    managerLayout->setContentsMargins(0, 0, 0, 0);
+    managerLayout->setSpacing(0);
+
+    m_mainSplitter = new QSplitter(Qt::Horizontal, m_fileManagerPage);
+    managerLayout->addWidget(m_mainSplitter, 1);
 
     initializePanel(m_leftPanel, QStringLiteral("左侧面板"));
     initializePanel(m_rightPanel, QStringLiteral("右侧面板"));
@@ -638,6 +957,13 @@ void FileDock::initializeUi()
     m_mainSplitter->addWidget(m_rightPanel.rootWidget);
     m_mainSplitter->setStretchFactor(0, 1);
     m_mainSplitter->setStretchFactor(1, 1);
+
+    m_rootTabWidget->addTab(m_fileManagerPage, QStringLiteral("文件管理"));
+    initializeRecoveryPage();
+    if (m_fileRecoveryPage != nullptr)
+    {
+        m_rootTabWidget->addTab(m_fileRecoveryPage, QStringLiteral("文件恢复"));
+    }
 }
 
 void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText)
@@ -740,6 +1066,11 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     panel.sortModeCombo->setStyleSheet(buildBlueInputStyle());
     panel.sortModeCombo->addItems(QStringList{ QStringLiteral("名称"), QStringLiteral("大小"), QStringLiteral("修改时间"), QStringLiteral("类型") });
 
+    panel.readModeCombo = new QComboBox(panel.toolWidget);
+    panel.readModeCombo->setStyleSheet(buildBlueInputStyle());
+    panel.readModeCombo->addItems(QStringList{ QStringLiteral("Windows API"), QStringLiteral("手动解析文件系统") });
+    panel.readModeCombo->setToolTip(QStringLiteral("切换目录读取方式：Windows API 或手动解析 NTFS/FAT32"));
+
     panel.filterEdit = new QLineEdit(panel.toolWidget);
     panel.filterEdit->setPlaceholderText(QStringLiteral("快速过滤"));
     panel.filterEdit->setStyleSheet(buildBlueInputStyle());
@@ -748,6 +1079,7 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     panel.toolLayout->addWidget(panel.showSystemCheck, 0);
     panel.toolLayout->addWidget(panel.showHiddenCheck, 0);
     panel.toolLayout->addWidget(panel.sortModeCombo, 0);
+    panel.toolLayout->addWidget(panel.readModeCombo, 0);
     panel.toolLayout->addWidget(panel.filterEdit, 1);
     panel.rootLayout->addWidget(panel.toolWidget, 0);
 
@@ -760,6 +1092,20 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     panel.proxyModel->setSourceModel(panel.fsModel);
     panel.proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
     panel.proxyModel->setFilterKeyColumn(0);
+
+    panel.manualModel = new QStandardItemModel(panel.rootWidget);
+    panel.manualModel->setColumnCount(static_cast<int>(ManualModelColumn::Count));
+    panel.manualModel->setHeaderData(static_cast<int>(ManualModelColumn::Name), Qt::Horizontal, QStringLiteral("名称"));
+    panel.manualModel->setHeaderData(static_cast<int>(ManualModelColumn::Size), Qt::Horizontal, QStringLiteral("大小"));
+    panel.manualModel->setHeaderData(static_cast<int>(ManualModelColumn::Type), Qt::Horizontal, QStringLiteral("类型"));
+    panel.manualModel->setHeaderData(static_cast<int>(ManualModelColumn::ModifiedTime), Qt::Horizontal, QStringLiteral("修改时间"));
+    panel.manualModel->setHeaderData(static_cast<int>(ManualModelColumn::FullPath), Qt::Horizontal, QStringLiteral("完整路径"));
+    panel.manualModel->setHeaderData(static_cast<int>(ManualModelColumn::IsDirectory), Qt::Horizontal, QStringLiteral("目录标记"));
+
+    panel.manualProxyModel = new QSortFilterProxyModel(panel.rootWidget);
+    panel.manualProxyModel->setSourceModel(panel.manualModel);
+    panel.manualProxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
+    panel.manualProxyModel->setFilterKeyColumn(static_cast<int>(ManualModelColumn::Name));
 
     panel.fileView = new QTreeView(panel.rootWidget);
     panel.fileView->setModel(panel.proxyModel);
@@ -783,11 +1129,15 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     panel.pathStatusLabel = new QLabel(QStringLiteral("路径: -"), panel.statusBar);
     panel.selectionStatusLabel = new QLabel(QStringLiteral("选中: 0"), panel.statusBar);
     panel.diskStatusLabel = new QLabel(QStringLiteral("磁盘: -"), panel.statusBar);
+    panel.parserStatusLabel = new QLabel(QStringLiteral("解析器: Windows API"), panel.statusBar);
     panel.statusBar->addWidget(panel.pathStatusLabel, 1);
+    panel.statusBar->addPermanentWidget(panel.parserStatusLabel, 0);
     panel.statusBar->addPermanentWidget(panel.selectionStatusLabel, 0);
     panel.statusBar->addPermanentWidget(panel.diskStatusLabel, 0);
     panel.rootLayout->addWidget(panel.statusBar, 0);
 
+    // 初始化读取模式并同步模型。
+    applyReadModeToPanel(panel);
     initializeConnections(panel);
 
     // 默认定位到系统根目录。
@@ -955,6 +1305,12 @@ void FileDock::initializeConnections(FilePanelWidgets& panel)
         applyPanelFilterAndSort(panel);
     });
 
+    // 读取模式切换：Windows API 与手动解析模型实时切换。
+    connect(panel.readModeCombo, &QComboBox::currentIndexChanged, this, [this, &panel](int) {
+        applyReadModeToPanel(panel);
+        refreshPanel(panel);
+    });
+
     // 快速过滤输入：实时更新代理模型。
     connect(panel.filterEdit, &QLineEdit::textChanged, this, [this, &panel](const QString&) {
         applyPanelFilterAndSort(panel);
@@ -962,18 +1318,17 @@ void FileDock::initializeConnections(FilePanelWidgets& panel)
 
     // 双击打开：目录进入，文件交给系统默认程序。
     connect(panel.fileView, &QTreeView::doubleClicked, this, [this, &panel](const QModelIndex& proxyIndex) {
-        if (!proxyIndex.isValid() || panel.proxyModel == nullptr || panel.fsModel == nullptr)
+        if (!proxyIndex.isValid())
         {
             return;
         }
 
-        const QModelIndex sourceIndex = panel.proxyModel->mapToSource(proxyIndex);
-        if (!sourceIndex.isValid())
+        const QString path = currentIndexPath(panel);
+        if (path.isEmpty())
         {
             return;
         }
 
-        const QString path = panel.fsModel->filePath(sourceIndex);
         QFileInfo info(path);
         if (info.isDir())
         {
@@ -1078,10 +1433,18 @@ void FileDock::navigateToPath(FilePanelWidgets& panel, const QString& pathText, 
         return;
     }
 
-    // 写入模型根路径并切换视图根索引。
-    const QModelIndex sourceRootIndex = panel.fsModel->setRootPath(normalizedPath);
-    const QModelIndex proxyRootIndex = panel.proxyModel->mapFromSource(sourceRootIndex);
-    panel.fileView->setRootIndex(proxyRootIndex);
+    // 根据当前读取模式更新模型根路径。
+    if (currentModeIsManual(panel))
+    {
+        // 手动解析模式使用平铺模型，根索引固定为无效索引。
+        panel.fileView->setRootIndex(QModelIndex());
+    }
+    else
+    {
+        const QModelIndex sourceRootIndex = panel.fsModel->setRootPath(normalizedPath);
+        const QModelIndex proxyRootIndex = panel.proxyModel->mapFromSource(sourceRootIndex);
+        panel.fileView->setRootIndex(proxyRootIndex);
+    }
     panel.currentPath = normalizedPath;
     panel.pathEdit->setText(QDir::toNativeSeparators(normalizedPath));
 
@@ -1154,6 +1517,10 @@ void FileDock::refreshPanel(FilePanelWidgets& panel)
     }
 
     // 复用导航逻辑触发模型重载，不写历史避免污染。
+    if (currentModeIsManual(panel))
+    {
+        panel.manualLoadedPath.clear();
+    }
     navigateToPath(panel, panel.currentPath, false);
 }
 
@@ -1435,77 +1802,128 @@ void FileDock::updatePanelStatus(FilePanelWidgets& panel)
 
 void FileDock::applyPanelFilterAndSort(FilePanelWidgets& panel)
 {
-    // 组合模型过滤标志：按用户勾选决定是否显示隐藏/系统文件。
-    QDir::Filters filters = QDir::AllEntries | QDir::NoDotAndDotDot;
-    if (panel.showHiddenCheck->isChecked())
-    {
-        filters |= QDir::Hidden;
-    }
-    if (panel.showSystemCheck->isChecked())
-    {
-        filters |= QDir::System;
-    }
-    panel.fsModel->setFilter(filters);
-
-    // 名称过滤：使用安全转义构造“包含匹配”正则，避免特殊字符误判。
+    const bool manualMode = currentModeIsManual(panel);
+    const int modeIndex = panel.viewModeCombo->currentIndex();
     const QString filterText = panel.filterEdit->text().trimmed();
-    if (filterText.isEmpty())
+
+    if (manualMode)
     {
-        panel.proxyModel->setFilterRegularExpression(QRegularExpression());
+        if (panel.manualLoadedPath.compare(panel.currentPath, Qt::CaseInsensitive) != 0)
+        {
+            reloadManualModel(panel, false);
+        }
+
+        if (filterText.isEmpty())
+        {
+            panel.manualProxyModel->setFilterRegularExpression(QRegularExpression());
+        }
+        else
+        {
+            const QString pattern = QStringLiteral(".*%1.*").arg(QRegularExpression::escape(filterText));
+            panel.manualProxyModel->setFilterRegularExpression(
+                QRegularExpression(pattern, QRegularExpression::CaseInsensitiveOption));
+        }
+
+        int sortColumn = static_cast<int>(ManualModelColumn::Name);
+        switch (panel.sortModeCombo->currentIndex())
+        {
+        case 1:
+            sortColumn = static_cast<int>(ManualModelColumn::Size);
+            break;
+        case 2:
+            sortColumn = static_cast<int>(ManualModelColumn::ModifiedTime);
+            break;
+        case 3:
+            sortColumn = static_cast<int>(ManualModelColumn::Type);
+            break;
+        default:
+            sortColumn = static_cast<int>(ManualModelColumn::Name);
+            break;
+        }
+        panel.fileView->sortByColumn(sortColumn, Qt::AscendingOrder);
+
+        const bool showDetailColumns = (modeIndex == 2 || modeIndex == 3);
+        panel.fileView->setIconSize(modeIndex == 0 ? QSize(32, 32) : QSize(18, 18));
+        panel.fileView->setRootIsDecorated(false);
+        panel.fileView->setItemsExpandable(false);
+        panel.fileView->setIndentation(10);
+
+        panel.fileView->setColumnHidden(static_cast<int>(ManualModelColumn::Size), !showDetailColumns);
+        panel.fileView->setColumnHidden(static_cast<int>(ManualModelColumn::Type), !showDetailColumns);
+        panel.fileView->setColumnHidden(static_cast<int>(ManualModelColumn::ModifiedTime), !showDetailColumns);
+        panel.fileView->setColumnHidden(static_cast<int>(ManualModelColumn::FullPath), true);
+        panel.fileView->setColumnHidden(static_cast<int>(ManualModelColumn::IsDirectory), true);
     }
     else
     {
-        const QString pattern = QStringLiteral(".*%1.*").arg(QRegularExpression::escape(filterText));
-        panel.proxyModel->setFilterRegularExpression(
-            QRegularExpression(pattern, QRegularExpression::CaseInsensitiveOption));
-    }
+        // 组合模型过滤标志：按用户勾选决定是否显示隐藏/系统文件。
+        QDir::Filters filters = QDir::AllEntries | QDir::NoDotAndDotDot;
+        if (panel.showHiddenCheck->isChecked())
+        {
+            filters |= QDir::Hidden;
+        }
+        if (panel.showSystemCheck->isChecked())
+        {
+            filters |= QDir::System;
+        }
+        panel.fsModel->setFilter(filters);
 
-    // 排序模式映射到 QFileSystemModel 列号。
-    int sortColumn = 0;
-    switch (panel.sortModeCombo->currentIndex())
-    {
-    case 1:
-        sortColumn = 1; // 大小
-        break;
-    case 2:
-        sortColumn = 3; // 修改时间
-        break;
-    case 3:
-        sortColumn = 2; // 类型
-        break;
-    case 0:
-    default:
-        sortColumn = 0; // 名称
-        break;
-    }
-    panel.fileView->sortByColumn(sortColumn, Qt::AscendingOrder);
+        if (filterText.isEmpty())
+        {
+            panel.proxyModel->setFilterRegularExpression(QRegularExpression());
+        }
+        else
+        {
+            const QString pattern = QStringLiteral(".*%1.*").arg(QRegularExpression::escape(filterText));
+            panel.proxyModel->setFilterRegularExpression(
+                QRegularExpression(pattern, QRegularExpression::CaseInsensitiveOption));
+        }
 
-    // 视图模式应用：复用 QTreeView，通过列显隐/图标大小模拟不同模式。
-    const int modeIndex = panel.viewModeCombo->currentIndex();
-    const bool showDetailColumns = (modeIndex == 2 || modeIndex == 3);
-    panel.fileView->setIconSize(modeIndex == 0 ? QSize(32, 32) : QSize(18, 18));
-    panel.fileView->setRootIsDecorated(modeIndex == 3);
-    panel.fileView->setItemsExpandable(modeIndex == 3);
-    panel.fileView->setIndentation(modeIndex == 3 ? 18 : 10);
+        int sortColumn = 0;
+        switch (panel.sortModeCombo->currentIndex())
+        {
+        case 1:
+            sortColumn = 1;
+            break;
+        case 2:
+            sortColumn = 3;
+            break;
+        case 3:
+            sortColumn = 2;
+            break;
+        default:
+            sortColumn = 0;
+            break;
+        }
+        panel.fileView->sortByColumn(sortColumn, Qt::AscendingOrder);
 
-    for (int column = 1; column < panel.fsModel->columnCount(); ++column)
-    {
-        panel.fileView->setColumnHidden(column, !showDetailColumns);
-    }
-
-    // 列模式（mode=1）保留图标列但关闭展开样式，形成紧凑列表效果。
-    if (modeIndex == 1)
-    {
-        panel.fileView->setRootIsDecorated(false);
-        panel.fileView->setItemsExpandable(false);
+        const bool showDetailColumns = (modeIndex == 2 || modeIndex == 3);
+        panel.fileView->setIconSize(modeIndex == 0 ? QSize(32, 32) : QSize(18, 18));
+        panel.fileView->setRootIsDecorated(modeIndex == 3);
+        panel.fileView->setItemsExpandable(modeIndex == 3);
+        panel.fileView->setIndentation(modeIndex == 3 ? 18 : 10);
+        for (int column = 1; column < panel.fsModel->columnCount(); ++column)
+        {
+            panel.fileView->setColumnHidden(column, !showDetailColumns);
+        }
+        if (modeIndex == 1)
+        {
+            panel.fileView->setRootIsDecorated(false);
+            panel.fileView->setItemsExpandable(false);
+        }
+        if (panel.parserStatusLabel != nullptr)
+        {
+            panel.parserStatusLabel->setText(QStringLiteral("解析器: Windows API"));
+        }
     }
 
     // 过滤参数日志去重：仅在用户真实调整条件时输出详细参数。
-    const QString filterSignature = QStringLiteral("%1|%2|%3|%4|%5")
+    const QString filterSignature = QStringLiteral("%1|%2|%3|%4|%5|%6")
         .arg(panel.showHiddenCheck->isChecked() ? 1 : 0)
         .arg(panel.showSystemCheck->isChecked() ? 1 : 0)
         .arg(panel.sortModeCombo->currentIndex())
         .arg(panel.viewModeCombo->currentIndex())
+        .arg(panel.readModeCombo->currentIndex())
         .arg(panel.filterEdit->text());
     if (filterSignature != panel.lastFilterLogSignature)
     {
@@ -1522,12 +1940,440 @@ void FileDock::applyPanelFilterAndSort(FilePanelWidgets& panel)
             << panel.sortModeCombo->currentIndex()
             << ", viewModeIndex="
             << panel.viewModeCombo->currentIndex()
+            << ", readModeIndex="
+            << panel.readModeCombo->currentIndex()
             << ", keyword="
             << panel.filterEdit->text().toStdString()
             << eol;
     }
 
     updatePanelStatus(panel);
+}
+
+void FileDock::applyReadModeToPanel(FilePanelWidgets& panel)
+{
+    if (panel.fileView == nullptr)
+    {
+        return;
+    }
+
+    if (currentModeIsManual(panel))
+    {
+        panel.fileView->setModel(panel.manualProxyModel);
+        panel.fileView->setRootIndex(QModelIndex());
+        panel.showHiddenCheck->setEnabled(false);
+        panel.showSystemCheck->setEnabled(false);
+        if (panel.parserStatusLabel != nullptr)
+        {
+            panel.parserStatusLabel->setText(QStringLiteral("解析器: 手动解析"));
+        }
+    }
+    else
+    {
+        panel.fileView->setModel(panel.proxyModel);
+        panel.showHiddenCheck->setEnabled(true);
+        panel.showSystemCheck->setEnabled(true);
+        if (!panel.currentPath.isEmpty())
+        {
+            const QModelIndex sourceRootIndex = panel.fsModel->setRootPath(panel.currentPath);
+            const QModelIndex proxyRootIndex = panel.proxyModel->mapFromSource(sourceRootIndex);
+            panel.fileView->setRootIndex(proxyRootIndex);
+        }
+        if (panel.parserStatusLabel != nullptr)
+        {
+            panel.parserStatusLabel->setText(QStringLiteral("解析器: Windows API"));
+        }
+    }
+
+    panel.fileView->header()->setStretchLastSection(false);
+    panel.fileView->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    QItemSelectionModel* selectionModel = panel.fileView->selectionModel();
+    if (selectionModel != nullptr)
+    {
+        QObject::disconnect(selectionModel, nullptr, this, nullptr);
+        connect(selectionModel, &QItemSelectionModel::selectionChanged, this, [this, &panel](const QItemSelection&, const QItemSelection&) {
+            updatePanelStatus(panel);
+        });
+    }
+}
+
+bool FileDock::reloadManualModel(FilePanelWidgets& panel, const bool showWarningMessage)
+{
+    if (panel.manualModel == nullptr || panel.currentPath.isEmpty())
+    {
+        return false;
+    }
+
+    std::vector<ks::file::ManualDirectoryEntry> entries;
+    ks::file::ManualFsType fsType = ks::file::ManualFsType::Unknown;
+    QString errorText;
+    const bool parseOk = ks::file::ManualFileSystemParser::enumerateDirectory(
+        panel.currentPath,
+        entries,
+        fsType,
+        errorText);
+
+    panel.manualModel->removeRows(0, panel.manualModel->rowCount());
+    panel.lastManualFsType = fsType;
+    if (!parseOk)
+    {
+        panel.manualLoadedPath.clear();
+        if (panel.parserStatusLabel != nullptr)
+        {
+            panel.parserStatusLabel->setText(QStringLiteral("解析器: 手动解析失败"));
+        }
+        if (showWarningMessage)
+        {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("手动解析失败"),
+                QStringLiteral("路径: %1\n错误: %2")
+                .arg(QDir::toNativeSeparators(panel.currentPath))
+                .arg(errorText));
+        }
+
+        kLogEvent event;
+        warn << event
+            << "[FileDock] 手动解析失败, panel="
+            << panel.panelNameText.toStdString()
+            << ", path="
+            << QDir::toNativeSeparators(panel.currentPath).toStdString()
+            << ", error="
+            << errorText.toStdString()
+            << eol;
+        return false;
+    }
+
+    for (const ks::file::ManualDirectoryEntry& itemValue : entries)
+    {
+        QList<QStandardItem*> rowItems;
+        rowItems.reserve(static_cast<int>(ManualModelColumn::Count));
+
+        QStandardItem* nameItem = new QStandardItem(itemValue.name);
+        nameItem->setData(itemValue.absolutePath, Qt::UserRole);
+        nameItem->setData(itemValue.isDirectory, Qt::UserRole + 1);
+        rowItems.push_back(nameItem);
+
+        QStandardItem* sizeItem = new QStandardItem(itemValue.isDirectory ? QStringLiteral("-") : formatSizeText(itemValue.sizeBytes));
+        sizeItem->setData(static_cast<qulonglong>(itemValue.sizeBytes), Qt::UserRole);
+        rowItems.push_back(sizeItem);
+
+        rowItems.push_back(new QStandardItem(itemValue.typeText));
+        rowItems.push_back(new QStandardItem(itemValue.modifiedTime.isValid()
+            ? itemValue.modifiedTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+            : QStringLiteral("-")));
+        rowItems.push_back(new QStandardItem(QDir::toNativeSeparators(itemValue.absolutePath)));
+        rowItems.push_back(new QStandardItem(itemValue.isDirectory ? QStringLiteral("1") : QStringLiteral("0")));
+        panel.manualModel->appendRow(rowItems);
+    }
+
+    if (panel.parserStatusLabel != nullptr)
+    {
+        panel.parserStatusLabel->setText(
+            QStringLiteral("解析器: %1 (手动)")
+            .arg(manualFsTypeToText(fsType)));
+    }
+    panel.manualLoadedPath = panel.currentPath;
+
+    kLogEvent event;
+    info << event
+        << "[FileDock] 手动解析完成, panel="
+        << panel.panelNameText.toStdString()
+        << ", fsType="
+        << manualFsTypeToText(fsType).toStdString()
+        << ", rows="
+        << entries.size()
+        << ", path="
+        << QDir::toNativeSeparators(panel.currentPath).toStdString()
+        << eol;
+    return true;
+}
+
+bool FileDock::currentModeIsManual(const FilePanelWidgets& panel) const
+{
+    return panel.readModeCombo != nullptr && panel.readModeCombo->currentIndex() == 1;
+}
+
+void FileDock::initializeRecoveryPage()
+{
+    m_fileRecoveryPage = new QWidget(m_rootTabWidget);
+    QVBoxLayout* recoveryLayout = new QVBoxLayout(m_fileRecoveryPage);
+    recoveryLayout->setContentsMargins(6, 6, 6, 6);
+    recoveryLayout->setSpacing(6);
+
+    QWidget* toolWidget = new QWidget(m_fileRecoveryPage);
+    QHBoxLayout* toolLayout = new QHBoxLayout(toolWidget);
+    toolLayout->setContentsMargins(0, 0, 0, 0);
+    toolLayout->setSpacing(6);
+
+    m_recoveryVolumeCombo = new QComboBox(toolWidget);
+    m_recoveryVolumeCombo->setStyleSheet(buildBlueInputStyle());
+    m_recoveryVolumeCombo->setToolTip(QStringLiteral("选择要扫描误删文件的 NTFS 卷。"));
+
+    m_recoveryRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), toolWidget);
+    m_recoveryRefreshButton->setToolTip(QStringLiteral("刷新可扫描卷列表"));
+    m_recoveryRefreshButton->setStyleSheet(buildBlueButtonStyle());
+    m_recoveryRefreshButton->setFixedWidth(30);
+
+    m_recoveryScanButton = new QPushButton(QIcon(":/Icon/log_track.svg"), QStringLiteral("扫描误删"), toolWidget);
+    m_recoveryScanButton->setToolTip(QStringLiteral("解析 NTFS MFT，扫描删除项"));
+    m_recoveryScanButton->setStyleSheet(buildBlueButtonStyle());
+
+    m_recoveryExportButton = new QPushButton(QIcon(":/Icon/log_export.svg"), QStringLiteral("恢复选中"), toolWidget);
+    m_recoveryExportButton->setToolTip(QStringLiteral("导出选中删除项（当前仅支持 resident 数据）"));
+    m_recoveryExportButton->setStyleSheet(buildBlueButtonStyle());
+
+    toolLayout->addWidget(new QLabel(QStringLiteral("卷: "), toolWidget), 0);
+    toolLayout->addWidget(m_recoveryVolumeCombo, 1);
+    toolLayout->addWidget(m_recoveryRefreshButton, 0);
+    toolLayout->addWidget(m_recoveryScanButton, 0);
+    toolLayout->addWidget(m_recoveryExportButton, 0);
+    recoveryLayout->addWidget(toolWidget, 0);
+
+    m_recoveryTable = new QTableWidget(m_fileRecoveryPage);
+    m_recoveryTable->setColumnCount(6);
+    m_recoveryTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("文件名"),
+        QStringLiteral("路径提示"),
+        QStringLiteral("大小"),
+        QStringLiteral("修改时间"),
+        QStringLiteral("记录号"),
+        QStringLiteral("恢复能力")
+        });
+    m_recoveryTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_recoveryTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_recoveryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_recoveryTable->verticalHeader()->setVisible(false);
+    m_recoveryTable->horizontalHeader()->setStretchLastSection(true);
+    m_recoveryTable->setAlternatingRowColors(true);
+    recoveryLayout->addWidget(m_recoveryTable, 1);
+
+    m_recoveryStatusLabel = new QLabel(QStringLiteral("请选择NTFS卷并开始扫描。"), m_fileRecoveryPage);
+    recoveryLayout->addWidget(m_recoveryStatusLabel, 0);
+
+    connect(m_recoveryRefreshButton, &QPushButton::clicked, this, [this]() {
+        refreshRecoveryVolumeList();
+    });
+    connect(m_recoveryScanButton, &QPushButton::clicked, this, [this]() {
+        scanDeletedFilesForRecovery();
+    });
+    connect(m_recoveryExportButton, &QPushButton::clicked, this, [this]() {
+        recoverSelectedDeletedFiles();
+    });
+
+    refreshRecoveryVolumeList();
+}
+
+void FileDock::refreshRecoveryVolumeList()
+{
+    if (m_recoveryVolumeCombo == nullptr)
+    {
+        return;
+    }
+
+    m_recoveryVolumeCombo->clear();
+    const QFileInfoList driveList = QDir::drives();
+    for (const QFileInfo& driveInfo : driveList)
+    {
+        const QString rootPath = QDir::toNativeSeparators(driveInfo.absoluteFilePath());
+        const ks::file::ManualFsType fsType = ks::file::ManualFileSystemParser::detectFileSystemType(rootPath);
+        if (fsType != ks::file::ManualFsType::Ntfs)
+        {
+            continue;
+        }
+
+        const QString displayText = QStringLiteral("%1 (NTFS)").arg(rootPath);
+        m_recoveryVolumeCombo->addItem(displayText, rootPath);
+    }
+
+    if (m_recoveryVolumeCombo->count() == 0)
+    {
+        m_recoveryStatusLabel->setText(QStringLiteral("未检测到可扫描的 NTFS 卷。"));
+    }
+    else
+    {
+        m_recoveryStatusLabel->setText(QStringLiteral("已刷新卷列表，可执行误删扫描。"));
+    }
+
+    kLogEvent event;
+    info << event
+        << "[FileDock] 刷新文件恢复卷列表, count="
+        << m_recoveryVolumeCombo->count()
+        << eol;
+}
+
+void FileDock::scanDeletedFilesForRecovery()
+{
+    if (m_recoveryVolumeCombo == nullptr || m_recoveryTable == nullptr || m_recoveryStatusLabel == nullptr)
+    {
+        return;
+    }
+    if (m_recoveryVolumeCombo->currentIndex() < 0)
+    {
+        QMessageBox::warning(this, QStringLiteral("文件恢复"), QStringLiteral("请先选择 NTFS 卷。"));
+        return;
+    }
+
+    const QString rootPath = m_recoveryVolumeCombo->currentData().toString();
+    m_recoveryStatusLabel->setText(QStringLiteral("正在扫描：%1").arg(rootPath));
+    QApplication::processEvents();
+
+    {
+        kLogEvent event;
+        info << event
+            << "[FileDock] 开始扫描误删文件, volume="
+            << QDir::toNativeSeparators(rootPath).toStdString()
+            << eol;
+    }
+
+    QString errorText;
+    std::vector<ks::file::NtfsDeletedFileEntry> deletedItems;
+    const bool scanOk = ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(
+        rootPath,
+        deletedItems,
+        errorText);
+    if (!scanOk)
+    {
+        m_recoveryStatusLabel->setText(QStringLiteral("扫描失败：%1").arg(errorText));
+        kLogEvent event;
+        err << event
+            << "[FileDock] 扫描误删失败, volume="
+            << QDir::toNativeSeparators(rootPath).toStdString()
+            << ", error="
+            << errorText.toStdString()
+            << eol;
+        QMessageBox::warning(this, QStringLiteral("扫描失败"), errorText);
+        return;
+    }
+
+    m_deletedRecoveryItems = std::move(deletedItems);
+    m_recoveryTable->setRowCount(static_cast<int>(m_deletedRecoveryItems.size()));
+    for (int row = 0; row < static_cast<int>(m_deletedRecoveryItems.size()); ++row)
+    {
+        const ks::file::NtfsDeletedFileEntry& itemValue = m_deletedRecoveryItems[static_cast<std::size_t>(row)];
+        m_recoveryTable->setItem(row, 0, new QTableWidgetItem(itemValue.fileName));
+        m_recoveryTable->setItem(row, 1, new QTableWidgetItem(itemValue.pathHint));
+        m_recoveryTable->setItem(row, 2, new QTableWidgetItem(formatSizeText(itemValue.sizeBytes)));
+        m_recoveryTable->setItem(row, 3, new QTableWidgetItem(
+            itemValue.modifiedTime.isValid()
+            ? itemValue.modifiedTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+            : QStringLiteral("-")));
+        m_recoveryTable->setItem(row, 4, new QTableWidgetItem(QString::number(itemValue.fileReference)));
+        m_recoveryTable->setItem(row, 5, new QTableWidgetItem(
+            itemValue.residentDataReady ? QStringLiteral("Resident可恢复") : QStringLiteral("仅元数据")));
+    }
+
+    m_recoveryStatusLabel->setText(
+        QStringLiteral("扫描完成：%1 项（Resident 可恢复 %2 项）")
+        .arg(m_deletedRecoveryItems.size())
+        .arg(std::count_if(
+            m_deletedRecoveryItems.begin(),
+            m_deletedRecoveryItems.end(),
+            [](const ks::file::NtfsDeletedFileEntry& item) { return item.residentDataReady; })));
+
+    kLogEvent event;
+    info << event
+        << "[FileDock] 扫描误删完成, volume="
+        << QDir::toNativeSeparators(rootPath).toStdString()
+        << ", total="
+        << m_deletedRecoveryItems.size()
+        << eol;
+}
+
+void FileDock::recoverSelectedDeletedFiles()
+{
+    if (m_recoveryTable == nullptr || m_recoveryVolumeCombo == nullptr)
+    {
+        return;
+    }
+    const QModelIndexList selectedRows = m_recoveryTable->selectionModel()->selectedRows();
+    if (selectedRows.empty())
+    {
+        QMessageBox::information(this, QStringLiteral("文件恢复"), QStringLiteral("请先在列表中选择要恢复的条目。"));
+        return;
+    }
+
+    const QString exportDir = QFileDialog::getExistingDirectory(
+        this,
+        QStringLiteral("选择恢复输出目录"),
+        QDir::homePath());
+    if (exportDir.isEmpty())
+    {
+        return;
+    }
+
+    const QString volumeRoot = m_recoveryVolumeCombo->currentData().toString();
+    {
+        kLogEvent event;
+        info << event
+            << "[FileDock] 开始恢复选中误删项, volume="
+            << QDir::toNativeSeparators(volumeRoot).toStdString()
+            << ", selectedRows="
+            << selectedRows.size()
+            << eol;
+    }
+    int successCount = 0;
+    QStringList failTextList;
+    for (const QModelIndex& rowIndex : selectedRows)
+    {
+        const int rowValue = rowIndex.row();
+        if (rowValue < 0 || rowValue >= static_cast<int>(m_deletedRecoveryItems.size()))
+        {
+            continue;
+        }
+
+        const ks::file::NtfsDeletedFileEntry& deletedItem =
+            m_deletedRecoveryItems[static_cast<std::size_t>(rowValue)];
+        QString exportName = deletedItem.fileName.trimmed();
+        if (exportName.isEmpty())
+        {
+            exportName = QStringLiteral("deleted_%1.bin").arg(deletedItem.fileReference);
+        }
+        const QString targetPath = QDir(exportDir).filePath(exportName);
+        QString errorText;
+        const bool ok = ks::file::ManualFileSystemParser::recoverNtfsResidentFile(
+            volumeRoot,
+            deletedItem,
+            targetPath,
+            errorText);
+        if (ok)
+        {
+            ++successCount;
+        }
+        else
+        {
+            failTextList.push_back(QStringLiteral("%1: %2").arg(exportName, errorText));
+        }
+    }
+
+    const QString summaryText = QStringLiteral("恢复完成：成功 %1，失败 %2。")
+        .arg(successCount)
+        .arg(failTextList.size());
+    m_recoveryStatusLabel->setText(summaryText);
+    if (failTextList.empty())
+    {
+        kLogEvent event;
+        info << event
+            << "[FileDock] 恢复完成, success="
+            << successCount
+            << ", failed=0"
+            << eol;
+        QMessageBox::information(this, QStringLiteral("文件恢复"), summaryText);
+    }
+    else
+    {
+        kLogEvent event;
+        warn << event
+            << "[FileDock] 恢复部分失败, success="
+            << successCount
+            << ", failed="
+            << failTextList.size()
+            << eol;
+        QMessageBox::warning(
+            this,
+            QStringLiteral("文件恢复"),
+            summaryText + QStringLiteral("\n\n失败明细：\n") + failTextList.join('\n'));
+    }
 }
 
 void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& localPos)
@@ -2468,11 +3314,17 @@ void FileDock::showColumnManagerDialog(FilePanelWidgets& panel)
     tipLabel->setWordWrap(true);
     rootLayout->addWidget(tipLabel, 0);
 
+    const bool manualMode = currentModeIsManual(panel);
+    const int columnCount = manualMode
+        ? (panel.manualModel == nullptr ? 0 : panel.manualModel->columnCount())
+        : (panel.fsModel == nullptr ? 0 : panel.fsModel->columnCount());
     std::vector<QCheckBox*> columnChecks;
-    columnChecks.reserve(static_cast<std::size_t>(panel.fsModel->columnCount()));
-    for (int column = 0; column < panel.fsModel->columnCount(); ++column)
+    columnChecks.reserve(static_cast<std::size_t>(columnCount));
+    for (int column = 0; column < columnCount; ++column)
     {
-        const QString columnName = panel.fsModel->headerData(column, Qt::Horizontal).toString();
+        const QString columnName = manualMode
+            ? panel.manualModel->headerData(column, Qt::Horizontal).toString()
+            : panel.fsModel->headerData(column, Qt::Horizontal).toString();
         QCheckBox* checkBox = new QCheckBox(columnName, &dialog);
         checkBox->setChecked(!panel.fileView->isColumnHidden(column));
         checkBox->setToolTip(QStringLiteral("切换列“%1”显示状态").arg(columnName));
@@ -2531,7 +3383,7 @@ void FileDock::showFileDetailDialog(const QString& filePath)
 
 QString FileDock::currentIndexPath(const FilePanelWidgets& panel) const
 {
-    if (panel.fileView == nullptr || panel.proxyModel == nullptr || panel.fsModel == nullptr)
+    if (panel.fileView == nullptr)
     {
         return QString();
     }
@@ -2542,19 +3394,41 @@ QString FileDock::currentIndexPath(const FilePanelWidgets& panel) const
         return QString();
     }
 
-    const QModelIndex sourceIndex = panel.proxyModel->mapToSource(proxyIndex);
-    if (!sourceIndex.isValid())
+    if (currentModeIsManual(panel))
+    {
+        if (panel.manualProxyModel == nullptr || panel.manualModel == nullptr)
+        {
+            return QString();
+        }
+
+        const QModelIndex sourceIndex = panel.manualProxyModel->mapToSource(proxyIndex);
+        if (!sourceIndex.isValid())
+        {
+            return QString();
+        }
+
+        const QStandardItem* fullPathItem = panel.manualModel->item(
+            sourceIndex.row(),
+            static_cast<int>(ManualModelColumn::FullPath));
+        if (fullPathItem == nullptr)
+        {
+            return QString();
+        }
+        return fullPathItem->text();
+    }
+
+    if (panel.proxyModel == nullptr || panel.fsModel == nullptr)
     {
         return QString();
     }
-
-    return panel.fsModel->filePath(sourceIndex);
+    const QModelIndex sourceIndex = panel.proxyModel->mapToSource(proxyIndex);
+    return sourceIndex.isValid() ? panel.fsModel->filePath(sourceIndex) : QString();
 }
 
 std::vector<QString> FileDock::selectedPaths(const FilePanelWidgets& panel) const
 {
     std::vector<QString> result;
-    if (panel.fileView == nullptr || panel.proxyModel == nullptr || panel.fsModel == nullptr)
+    if (panel.fileView == nullptr || panel.fileView->selectionModel() == nullptr)
     {
         return result;
     }
@@ -2562,21 +3436,59 @@ std::vector<QString> FileDock::selectedPaths(const FilePanelWidgets& panel) cons
     const QModelIndexList selectedRows = panel.fileView->selectionModel()->selectedRows(0);
     result.reserve(static_cast<std::size_t>(selectedRows.size()));
 
-    for (const QModelIndex& proxyIndex : selectedRows)
+    if (currentModeIsManual(panel))
     {
-        const QModelIndex sourceIndex = panel.proxyModel->mapToSource(proxyIndex);
-        if (!sourceIndex.isValid())
+        if (panel.manualProxyModel == nullptr || panel.manualModel == nullptr)
         {
-            continue;
+            return result;
         }
-        const QString path = panel.fsModel->filePath(sourceIndex);
-        if (path.isEmpty())
+        for (const QModelIndex& proxyIndex : selectedRows)
         {
-            continue;
+            const QModelIndex sourceIndex = panel.manualProxyModel->mapToSource(proxyIndex);
+            if (!sourceIndex.isValid())
+            {
+                continue;
+            }
+            const QStandardItem* fullPathItem = panel.manualModel->item(
+                sourceIndex.row(),
+                static_cast<int>(ManualModelColumn::FullPath));
+            if (fullPathItem == nullptr)
+            {
+                continue;
+            }
+            const QString pathText = fullPathItem->text();
+            if (pathText.isEmpty())
+            {
+                continue;
+            }
+            if (std::find(result.begin(), result.end(), pathText) == result.end())
+            {
+                result.push_back(pathText);
+            }
         }
-        if (std::find(result.begin(), result.end(), path) == result.end())
+    }
+    else
+    {
+        if (panel.proxyModel == nullptr || panel.fsModel == nullptr)
         {
-            result.push_back(path);
+            return result;
+        }
+        for (const QModelIndex& proxyIndex : selectedRows)
+        {
+            const QModelIndex sourceIndex = panel.proxyModel->mapToSource(proxyIndex);
+            if (!sourceIndex.isValid())
+            {
+                continue;
+            }
+            const QString path = panel.fsModel->filePath(sourceIndex);
+            if (path.isEmpty())
+            {
+                continue;
+            }
+            if (std::find(result.begin(), result.end(), path) == result.end())
+            {
+                result.push_back(path);
+            }
         }
     }
 

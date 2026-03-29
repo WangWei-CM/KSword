@@ -40,6 +40,11 @@ class QTabWidget;
 class QTimer;
 class QToolBox;
 class QVBoxLayout;
+class QGridLayout;
+class QBarSet;
+class QChartView;
+class QLineSeries;
+class QValueAxis;
 
 // COM 前置声明：避免在头文件引入大量 WMI 头。
 struct IWbemClassObject;
@@ -85,9 +90,19 @@ private:
 private:
     // ========================= UI 初始化 =========================
     void initializeUi();
+    void initializePerformancePanel();
     void initializeWmiTab();
     void initializeEtwTab();
     void initializeConnections();
+    void refreshPerformanceCharts();
+    bool sampleCpuUsage(double* cpuUsageOut);
+    bool sampleDiskRate(double* readBytesPerSecOut, double* writeBytesPerSecOut);
+    bool sampleNetworkRate(double* rxBytesPerSecOut, double* txBytesPerSecOut);
+    void appendLineSample(
+        QLineSeries* series,
+        QValueAxis* axisX,
+        QValueAxis* axisY,
+        double value);
 
     // ========================= WMI 功能 ==========================
     void refreshWmiProvidersAsync();
@@ -148,7 +163,37 @@ private:
 private:
     // ========================= 顶层布局 =========================
     QVBoxLayout* m_rootLayout = nullptr;    // 根布局。
+    QWidget* m_perfPanel = nullptr;         // 顶部性能图面板。
+    QGridLayout* m_perfPanelLayout = nullptr; // 顶部性能图布局。
+    QTimer* m_perfUpdateTimer = nullptr;    // 性能图刷新定时器（默认1秒）。
     QTabWidget* m_sideTabWidget = nullptr;  // 侧边栏 Tab 容器。
+
+    QChartView* m_cpuChartView = nullptr;      // CPU 条形图视图。
+    QChartView* m_memoryChartView = nullptr;   // 内存条形图视图。
+    QChartView* m_diskChartView = nullptr;     // 磁盘折线图视图。
+    QChartView* m_networkChartView = nullptr;  // 网络折线图视图。
+    QBarSet* m_cpuBarSet = nullptr;            // CPU 单柱数据集。
+    QBarSet* m_memoryBarSet = nullptr;         // 内存单柱数据集。
+    QLineSeries* m_diskReadSeries = nullptr;   // 磁盘读速率折线。
+    QLineSeries* m_diskWriteSeries = nullptr;  // 磁盘写速率折线。
+    QLineSeries* m_networkRxSeries = nullptr;  // 网络下载速率折线。
+    QLineSeries* m_networkTxSeries = nullptr;  // 网络上传速率折线。
+    QValueAxis* m_diskAxisX = nullptr;         // 磁盘图 X 轴。
+    QValueAxis* m_diskAxisY = nullptr;         // 磁盘图 Y 轴。
+    QValueAxis* m_networkAxisX = nullptr;      // 网络图 X 轴。
+    QValueAxis* m_networkAxisY = nullptr;      // 网络图 Y 轴。
+    int m_perfHistoryLength = 60;                        // 折线图保留点数。
+    int m_perfSampleCounter = 0;                         // 当前采样序号。
+    std::uint64_t m_lastCpuIdleTime = 0;                // 上次 CPU Idle 时间戳。
+    std::uint64_t m_lastCpuKernelTime = 0;              // 上次 CPU Kernel 时间戳。
+    std::uint64_t m_lastCpuUserTime = 0;                // 上次 CPU User 时间戳。
+    bool m_cpuSampleValid = false;                      // CPU 采样是否已初始化。
+    std::uint64_t m_lastNetworkRxBytes = 0;             // 上次网络累计接收字节。
+    std::uint64_t m_lastNetworkTxBytes = 0;             // 上次网络累计发送字节。
+    qint64 m_lastNetworkSampleMs = 0;                   // 上次网络采样时间（ms）。
+    void* m_diskPerfQueryHandle = nullptr;              // PDH 查询句柄（磁盘性能）。
+    void* m_diskReadCounterHandle = nullptr;            // PDH 磁盘读计数器句柄。
+    void* m_diskWriteCounterHandle = nullptr;           // PDH 磁盘写计数器句柄。
 
     // ========================= WMI 页 ===========================
     QWidget* m_wmiPage = nullptr;                  // WMI 主页面。

@@ -49,6 +49,9 @@
     <ClCompile Include="FileDock\FileDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="FileDock\ManualFileSystemParser.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KernelDock\KernelDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -118,6 +121,9 @@
     <ClCompile Include="RegistryDock_Themed.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="HardwareDock\HardwareDock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="WindowDock\WindowDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -174,6 +180,9 @@
     <QtMoc Include="WelcomeDock\WelcomeDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <QtMoc Include="HardwareDock\HardwareDock.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="UI\UI.css\UI_css.h">
@@ -210,6 +219,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="theme.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="FileDock\ManualFileSystemParser.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="WindowDock\WindowDock.h">

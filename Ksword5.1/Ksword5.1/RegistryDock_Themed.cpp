@@ -12,8 +12,12 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileDialog>
+#include <QFormLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -27,9 +31,11 @@
 #include <QRegularExpression>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTableWidget>
+#include <QTextEdit>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -126,6 +132,366 @@ namespace
         }
         return parts.join(' ');
     }
+
+    // NewRegistryValueInput 作用：
+    // - 承载“新建值”对话框输出结果；
+    // - 由调用方传给 writeRegistryValue 写入注册表。
+    struct NewRegistryValueInput
+    {
+        QString valueName;       // valueName：值名称，空字符串表示默认值。
+        DWORD valueType = REG_SZ; // valueType：注册表值类型（REG_*）。
+        QByteArray valueData;    // valueData：原始字节数据（按 WinAPI 写入格式组织）。
+    };
+
+    // parseUnsignedIntegerText 作用：
+    // - 支持把字符串解析为无符号整数（十进制或十六进制）；
+    // - 返回 true 表示解析成功，numericOut 返回数值。
+    bool parseUnsignedIntegerText(
+        const QString& text,
+        const int base,
+        quint64* numericOut)
+    {
+        if (numericOut == nullptr)
+        {
+            return false;
+        }
+
+        QString normalized = text.trimmed();
+        if (base == 16 && normalized.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+        {
+            normalized = normalized.mid(2).trimmed();
+        }
+        normalized.remove(' ');
+        if (normalized.isEmpty())
+        {
+            return false;
+        }
+
+        bool parseOk = false;
+        const quint64 numericValue = normalized.toULongLong(&parseOk, base);
+        if (!parseOk)
+        {
+            return false;
+        }
+
+        *numericOut = numericValue;
+        return true;
+    }
+
+    // NewRegistryValueDialog 作用：
+    // - 提供“值名称 + 类型 + 数据”的完整输入界面；
+    // - 针对数值类型提供十进制/十六进制双输入框并自动同步。
+    class NewRegistryValueDialog final : public QDialog
+    {
+    public:
+        // 构造函数：
+        // - parent：Qt 父窗口；
+        // - 默认选中 REG_SZ，允许用户继续切换类型。
+        explicit NewRegistryValueDialog(QWidget* parent)
+            : QDialog(parent)
+        {
+            setWindowTitle(QStringLiteral("新建注册表值"));
+            resize(560, 320);
+
+            QVBoxLayout* rootLayout = new QVBoxLayout(this);
+            QFormLayout* formLayout = new QFormLayout();
+            rootLayout->addLayout(formLayout);
+
+            m_valueNameEdit = new QLineEdit(this);
+            m_valueNameEdit->setPlaceholderText(QStringLiteral("留空表示默认值"));
+            m_valueNameEdit->setToolTip(QStringLiteral("注册表值名称，留空表示(默认)"));
+            formLayout->addRow(QStringLiteral("值名称"), m_valueNameEdit);
+
+            m_valueTypeCombo = new QComboBox(this);
+            m_valueTypeCombo->addItem(QStringLiteral("REG_SZ"), static_cast<int>(REG_SZ));
+            m_valueTypeCombo->addItem(QStringLiteral("REG_EXPAND_SZ"), static_cast<int>(REG_EXPAND_SZ));
+            m_valueTypeCombo->addItem(QStringLiteral("REG_MULTI_SZ"), static_cast<int>(REG_MULTI_SZ));
+            m_valueTypeCombo->addItem(QStringLiteral("REG_DWORD"), static_cast<int>(REG_DWORD));
+            m_valueTypeCombo->addItem(QStringLiteral("REG_QWORD"), static_cast<int>(REG_QWORD));
+            m_valueTypeCombo->addItem(QStringLiteral("REG_BINARY"), static_cast<int>(REG_BINARY));
+            m_valueTypeCombo->setToolTip(QStringLiteral("选择要创建的注册表值类型"));
+            formLayout->addRow(QStringLiteral("值类型"), m_valueTypeCombo);
+
+            m_valueStack = new QStackedWidget(this);
+            rootLayout->addWidget(m_valueStack, 1);
+
+            // 字符串页：用于 REG_SZ 与 REG_EXPAND_SZ。
+            QWidget* stringPage = new QWidget(this);
+            QVBoxLayout* stringLayout = new QVBoxLayout(stringPage);
+            stringLayout->setContentsMargins(0, 0, 0, 0);
+            m_stringEdit = new QLineEdit(stringPage);
+            m_stringEdit->setPlaceholderText(QStringLiteral("输入字符串值"));
+            m_stringEdit->setToolTip(QStringLiteral("字符串类型数据"));
+            stringLayout->addWidget(new QLabel(QStringLiteral("字符串数据"), stringPage));
+            stringLayout->addWidget(m_stringEdit);
+            m_valueStack->addWidget(stringPage);
+
+            // 多字符串页：每行一个子字符串，内部将自动组装为 MULTI_SZ。
+            QWidget* multiStringPage = new QWidget(this);
+            QVBoxLayout* multiLayout = new QVBoxLayout(multiStringPage);
+            multiLayout->setContentsMargins(0, 0, 0, 0);
+            m_multiStringEdit = new QTextEdit(multiStringPage);
+            m_multiStringEdit->setPlaceholderText(QStringLiteral("每行一个字符串，空行将忽略"));
+            m_multiStringEdit->setToolTip(QStringLiteral("多字符串类型数据（每行一个）"));
+            multiLayout->addWidget(new QLabel(QStringLiteral("多字符串数据（逐行输入）"), multiStringPage));
+            multiLayout->addWidget(m_multiStringEdit, 1);
+            m_valueStack->addWidget(multiStringPage);
+
+            // 数值页：十进制与十六进制双输入框实时同步，满足审计/调试习惯。
+            QWidget* numericPage = new QWidget(this);
+            QFormLayout* numericLayout = new QFormLayout(numericPage);
+            m_decimalEdit = new QLineEdit(numericPage);
+            m_decimalEdit->setPlaceholderText(QStringLiteral("十进制，例如 123456"));
+            m_decimalEdit->setToolTip(QStringLiteral("十进制输入，自动同步到十六进制"));
+            m_hexEdit = new QLineEdit(numericPage);
+            m_hexEdit->setPlaceholderText(QStringLiteral("十六进制，例如 0x1E240"));
+            m_hexEdit->setToolTip(QStringLiteral("十六进制输入，自动同步到十进制"));
+            numericLayout->addRow(QStringLiteral("十进制"), m_decimalEdit);
+            numericLayout->addRow(QStringLiteral("十六进制"), m_hexEdit);
+            m_valueStack->addWidget(numericPage);
+
+            // 二进制页：按字节输入十六进制文本，支持空格分隔。
+            QWidget* binaryPage = new QWidget(this);
+            QVBoxLayout* binaryLayout = new QVBoxLayout(binaryPage);
+            binaryLayout->setContentsMargins(0, 0, 0, 0);
+            m_binaryEdit = new QLineEdit(binaryPage);
+            m_binaryEdit->setPlaceholderText(QStringLiteral("例如：4D 5A 90 00"));
+            m_binaryEdit->setToolTip(QStringLiteral("按字节输入十六进制，使用空格分隔"));
+            binaryLayout->addWidget(new QLabel(QStringLiteral("二进制字节（十六进制）"), binaryPage));
+            binaryLayout->addWidget(m_binaryEdit);
+            m_valueStack->addWidget(binaryPage);
+
+            QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+            rootLayout->addWidget(buttonBox);
+            connect(buttonBox, &QDialogButtonBox::accepted, this, [this]() {
+                QString errorText;
+                if (!validateInput(&errorText))
+                {
+                    QMessageBox::warning(this, QStringLiteral("新建值"), errorText);
+                    return;
+                }
+                accept();
+            });
+            connect(buttonBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
+
+            connect(m_valueTypeCombo, &QComboBox::currentIndexChanged, this, [this](int) {
+                updateDataPageByType();
+            });
+            connect(m_decimalEdit, &QLineEdit::textChanged, this, [this](const QString&) {
+                syncNumericText(true);
+            });
+            connect(m_hexEdit, &QLineEdit::textChanged, this, [this](const QString&) {
+                syncNumericText(false);
+            });
+
+            m_decimalEdit->setText(QStringLiteral("0"));
+            updateDataPageByType();
+        }
+
+        // buildOutput 作用：
+        // - 在对话框 accept 后输出可直接写入 WinAPI 的结构；
+        // - 调用前需保证 validateInput 已通过。
+        NewRegistryValueInput buildOutput() const
+        {
+            NewRegistryValueInput output;
+            output.valueName = m_valueNameEdit->text().trimmed();
+            output.valueType = static_cast<DWORD>(m_valueTypeCombo->currentData().toInt());
+
+            if (output.valueType == REG_SZ || output.valueType == REG_EXPAND_SZ)
+            {
+                QString textValue = m_stringEdit->text();
+                textValue.append(QChar::Null);
+                output.valueData = QByteArray(
+                    reinterpret_cast<const char*>(textValue.utf16()),
+                    textValue.size() * static_cast<int>(sizeof(char16_t)));
+                return output;
+            }
+
+            if (output.valueType == REG_MULTI_SZ)
+            {
+                QStringList lineList = m_multiStringEdit->toPlainText().split('\n');
+                QString mergedText;
+                for (QString line : lineList)
+                {
+                    line = line.trimmed();
+                    if (line.isEmpty())
+                    {
+                        continue;
+                    }
+                    mergedText.append(line);
+                    mergedText.append(QChar::Null);
+                }
+                mergedText.append(QChar::Null);
+                output.valueData = QByteArray(
+                    reinterpret_cast<const char*>(mergedText.utf16()),
+                    mergedText.size() * static_cast<int>(sizeof(char16_t)));
+                return output;
+            }
+
+            if (output.valueType == REG_DWORD || output.valueType == REG_QWORD)
+            {
+                quint64 numericValue = 0;
+                if (!parseUnsignedIntegerText(m_decimalEdit->text(), 10, &numericValue))
+                {
+                    parseUnsignedIntegerText(m_hexEdit->text(), 16, &numericValue);
+                }
+                if (output.valueType == REG_DWORD)
+                {
+                    const quint32 dwordValue = static_cast<quint32>(numericValue & 0xFFFFFFFFULL);
+                    output.valueData = QByteArray(
+                        reinterpret_cast<const char*>(&dwordValue),
+                        static_cast<int>(sizeof(dwordValue)));
+                }
+                else
+                {
+                    output.valueData = QByteArray(
+                        reinterpret_cast<const char*>(&numericValue),
+                        static_cast<int>(sizeof(numericValue)));
+                }
+                return output;
+            }
+
+            const QStringList byteTextList = m_binaryEdit->text().split(
+                QRegularExpression(QStringLiteral("[,\\s]+")),
+                Qt::SkipEmptyParts);
+            for (const QString& byteText : byteTextList)
+            {
+                bool parseOk = false;
+                const int byteValue = byteText.toInt(&parseOk, 16);
+                if (!parseOk || byteValue < 0 || byteValue > 255)
+                {
+                    continue;
+                }
+                output.valueData.push_back(static_cast<char>(byteValue));
+            }
+            return output;
+        }
+
+    private:
+        // validateInput 作用：
+        // - 在点击确定时校验字段完整性与格式合法性；
+        // - errorTextOut 返回可直接显示给用户的错误文本。
+        bool validateInput(QString* errorTextOut) const
+        {
+            auto setError = [errorTextOut](const QString& text) {
+                if (errorTextOut != nullptr)
+                {
+                    *errorTextOut = text;
+                }
+            };
+
+            const DWORD valueType = static_cast<DWORD>(m_valueTypeCombo->currentData().toInt());
+            if (valueType == REG_DWORD || valueType == REG_QWORD)
+            {
+                quint64 numericValue = 0;
+                bool parseOk = parseUnsignedIntegerText(m_decimalEdit->text(), 10, &numericValue);
+                if (!parseOk)
+                {
+                    parseOk = parseUnsignedIntegerText(m_hexEdit->text(), 16, &numericValue);
+                }
+                if (!parseOk)
+                {
+                    setError(QStringLiteral("数值格式无效，请输入十进制或十六进制数字。"));
+                    return false;
+                }
+                if (valueType == REG_DWORD && numericValue > 0xFFFFFFFFULL)
+                {
+                    setError(QStringLiteral("DWORD 范围应在 0 ~ 0xFFFFFFFF。"));
+                    return false;
+                }
+                return true;
+            }
+
+            if (valueType == REG_BINARY)
+            {
+                const QStringList byteTextList = m_binaryEdit->text().split(
+                    QRegularExpression(QStringLiteral("[,\\s]+")),
+                    Qt::SkipEmptyParts);
+                for (const QString& byteText : byteTextList)
+                {
+                    bool parseOk = false;
+                    const int byteValue = byteText.toInt(&parseOk, 16);
+                    if (!parseOk || byteValue < 0 || byteValue > 255)
+                    {
+                        setError(QStringLiteral("二进制字节格式无效：%1").arg(byteText));
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            return true;
+        }
+
+        // updateDataPageByType 作用：
+        // - 根据 REG 类型切换输入页；
+        // - 保证输入控件与目标数据模型一致。
+        void updateDataPageByType()
+        {
+            const DWORD valueType = static_cast<DWORD>(m_valueTypeCombo->currentData().toInt());
+            if (valueType == REG_SZ || valueType == REG_EXPAND_SZ)
+            {
+                m_valueStack->setCurrentIndex(0);
+                return;
+            }
+            if (valueType == REG_MULTI_SZ)
+            {
+                m_valueStack->setCurrentIndex(1);
+                return;
+            }
+            if (valueType == REG_DWORD || valueType == REG_QWORD)
+            {
+                m_valueStack->setCurrentIndex(2);
+                return;
+            }
+            m_valueStack->setCurrentIndex(3);
+        }
+
+        // syncNumericText 作用：
+        // - 十进制/十六进制双向同步；
+        // - fromDecimal=true 表示用户刚编辑十进制框，反之同步十六进制框。
+        void syncNumericText(const bool fromDecimal)
+        {
+            if (m_syncingNumberText)
+            {
+                return;
+            }
+
+            m_syncingNumberText = true;
+            quint64 numericValue = 0;
+            bool parseOk = false;
+            if (fromDecimal)
+            {
+                parseOk = parseUnsignedIntegerText(m_decimalEdit->text(), 10, &numericValue);
+                if (parseOk)
+                {
+                    QSignalBlocker blocker(m_hexEdit);
+                    m_hexEdit->setText(QStringLiteral("0x%1").arg(numericValue, 0, 16).toUpper());
+                }
+            }
+            else
+            {
+                parseOk = parseUnsignedIntegerText(m_hexEdit->text(), 16, &numericValue);
+                if (parseOk)
+                {
+                    QSignalBlocker blocker(m_decimalEdit);
+                    m_decimalEdit->setText(QString::number(numericValue));
+                }
+            }
+            m_syncingNumberText = false;
+        }
+
+    private:
+        QLineEdit* m_valueNameEdit = nullptr;      // m_valueNameEdit：值名称输入框。
+        QComboBox* m_valueTypeCombo = nullptr;     // m_valueTypeCombo：值类型下拉框。
+        QStackedWidget* m_valueStack = nullptr;    // m_valueStack：不同类型的数据输入页。
+        QLineEdit* m_stringEdit = nullptr;         // m_stringEdit：字符串类型输入框。
+        QTextEdit* m_multiStringEdit = nullptr;    // m_multiStringEdit：多字符串输入框。
+        QLineEdit* m_decimalEdit = nullptr;        // m_decimalEdit：十进制输入框。
+        QLineEdit* m_hexEdit = nullptr;            // m_hexEdit：十六进制输入框。
+        QLineEdit* m_binaryEdit = nullptr;         // m_binaryEdit：二进制字节输入框。
+        bool m_syncingNumberText = false;          // m_syncingNumberText：防止双向同步递归触发。
+    };
 }
 
 RegistryDock::RegistryDock(QWidget* parent)
@@ -942,16 +1308,21 @@ void RegistryDock::createSubKey()
 
 void RegistryDock::createValue()
 {
-    bool ok = false;
-    const QString valueName = QInputDialog::getText(this, QStringLiteral("新建值"), QStringLiteral("值名称（默认值留空）："), QLineEdit::Normal, QString(), &ok).trimmed();
-    if (!ok) return;
+    // 统一使用详细对话框输入：值名称、值类型、值数据一次性完成。
+    NewRegistryValueDialog dialog(this);
+    if (dialog.exec() != QDialog::Accepted)
+    {
+        kLogEvent event;
+        dbg << event
+            << "[RegistryDock] 新建值取消：用户关闭输入对话框。"
+            << eol;
+        return;
+    }
 
-    const QStringList typeItems{ QStringLiteral("REG_SZ"), QStringLiteral("REG_DWORD"), QStringLiteral("REG_QWORD"), QStringLiteral("REG_BINARY") };
-    const QString typeText = QInputDialog::getItem(this, QStringLiteral("新建值"), QStringLiteral("值类型："), typeItems, 0, false, &ok);
-    if (!ok || typeText.isEmpty()) return;
-
-    QString dataText = QInputDialog::getText(this, QStringLiteral("新建值"), QStringLiteral("值数据："), QLineEdit::Normal, QString(), &ok);
-    if (!ok) return;
+    const NewRegistryValueInput inputValue = dialog.buildOutput();
+    const QString valueName = inputValue.valueName;
+    const DWORD type = inputValue.valueType;
+    const QByteArray data = inputValue.valueData;
 
     {
         kLogEvent event;
@@ -961,62 +1332,10 @@ void RegistryDock::createValue()
             << ", valueName="
             << valueName.toStdString()
             << ", type="
-            << typeText.toStdString()
+            << valueTypeToText(type).toStdString()
+            << ", dataSize="
+            << data.size()
             << eol;
-    }
-
-    DWORD type = REG_SZ;
-    QByteArray data;
-
-    if (typeText == QStringLiteral("REG_DWORD"))
-    {
-        type = REG_DWORD;
-        bool parseOk = false;
-        const quint32 value = dataText.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)
-            ? dataText.mid(2).toUInt(&parseOk, 16)
-            : dataText.toUInt(&parseOk, 10);
-        if (!parseOk)
-        {
-            QMessageBox::warning(this, QStringLiteral("新建值"), QStringLiteral("DWORD 格式无效。"));
-            return;
-        }
-        data = QByteArray(reinterpret_cast<const char*>(&value), sizeof(value));
-    }
-    else if (typeText == QStringLiteral("REG_QWORD"))
-    {
-        type = REG_QWORD;
-        bool parseOk = false;
-        const quint64 value = dataText.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)
-            ? dataText.mid(2).toULongLong(&parseOk, 16)
-            : dataText.toULongLong(&parseOk, 10);
-        if (!parseOk)
-        {
-            QMessageBox::warning(this, QStringLiteral("新建值"), QStringLiteral("QWORD 格式无效。"));
-            return;
-        }
-        data = QByteArray(reinterpret_cast<const char*>(&value), sizeof(value));
-    }
-    else if (typeText == QStringLiteral("REG_BINARY"))
-    {
-        type = REG_BINARY;
-        const QStringList parts = dataText.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
-        for (const QString& part : parts)
-        {
-            bool parseOk = false;
-            const int value = part.toInt(&parseOk, 16);
-            if (!parseOk || value < 0 || value > 255)
-            {
-                QMessageBox::warning(this, QStringLiteral("新建值"), QStringLiteral("二进制字节无效：%1").arg(part));
-                return;
-            }
-            data.push_back(static_cast<char>(value));
-        }
-    }
-    else
-    {
-        type = REG_SZ;
-        dataText.append(QChar::Null);
-        data = QByteArray(reinterpret_cast<const char*>(dataText.utf16()), dataText.size() * sizeof(char16_t));
     }
 
     HKEY root = nullptr;

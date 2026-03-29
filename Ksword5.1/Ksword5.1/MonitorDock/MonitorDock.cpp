@@ -14,6 +14,8 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QFrame>
+#include <QGridLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -24,6 +26,7 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QPainter>
 #include <QRegularExpression>
 #include <QSortFilterProxyModel>
 #include <QSpinBox>
@@ -36,6 +39,14 @@
 #include <QTimer>
 #include <QToolBox>
 #include <QVBoxLayout>
+
+#include <QtCharts/QBarCategoryAxis>
+#include <QtCharts/QBarSeries>
+#include <QtCharts/QBarSet>
+#include <QtCharts/QChart>
+#include <QtCharts/QChartView>
+#include <QtCharts/QLineSeries>
+#include <QtCharts/QValueAxis>
 
 #include <algorithm>
 #include <chrono>
@@ -53,10 +64,16 @@
 #include <atlbase.h>
 #include <evntrace.h>
 #include <evntcons.h>
+#include <iphlpapi.h>
+#include <netioapi.h>
+#include <Pdh.h>
+#include <pdhmsg.h>
 #include <tdh.h>
 
 #pragma comment(lib, "Wbemuuid.lib")
 #pragma comment(lib, "Tdh.lib")
+#pragma comment(lib, "Pdh.lib")
+#pragma comment(lib, "Iphlpapi.lib")
 
 namespace
 {
@@ -141,6 +158,38 @@ namespace
     QString monitorIdleColorHex()
     {
         return KswordTheme::TextSecondaryHex();
+    }
+
+    // bytesPerSecondToText 作用：
+    // - 把字节速率转换为可读文本（B/s、KB/s、MB/s、GB/s）；
+    // - 用于图表标题展示实时数值。
+    QString bytesPerSecondToText(const double bytesPerSecondValue)
+    {
+        const double absValue = std::max(0.0, bytesPerSecondValue);
+        if (absValue < 1024.0)
+        {
+            return QStringLiteral("%1 B/s").arg(absValue, 0, 'f', 1);
+        }
+        if (absValue < 1024.0 * 1024.0)
+        {
+            return QStringLiteral("%1 KB/s").arg(absValue / 1024.0, 0, 'f', 1);
+        }
+        if (absValue < 1024.0 * 1024.0 * 1024.0)
+        {
+            return QStringLiteral("%1 MB/s").arg(absValue / (1024.0 * 1024.0), 0, 'f', 2);
+        }
+        return QStringLiteral("%1 GB/s").arg(absValue / (1024.0 * 1024.0 * 1024.0), 0, 'f', 2);
+    }
+
+    // fileTimeToUint64 作用：
+    // - 把 FILETIME 合并为 64 位整数，便于计算时间差；
+    // - 用于 CPU 占用率采样。
+    std::uint64_t fileTimeToUint64(const FILETIME& fileTimeValue)
+    {
+        ULARGE_INTEGER largeIntValue{};
+        largeIntValue.LowPart = fileTimeValue.dwLowDateTime;
+        largeIntValue.HighPart = fileTimeValue.dwHighDateTime;
+        return static_cast<std::uint64_t>(largeIntValue.QuadPart);
     }
 
     // 线程内 COM 初始化。
@@ -529,6 +578,14 @@ MonitorDock::MonitorDock(QWidget* parent)
     initializeUi();
     initializeConnections();
 
+    // 性能图刷新定时器：每秒采样一次 CPU/内存/磁盘/网络。
+    m_perfUpdateTimer = new QTimer(this);
+    m_perfUpdateTimer->setInterval(1000);
+    connect(m_perfUpdateTimer, &QTimer::timeout, this, [this]() {
+        refreshPerformanceCharts();
+    });
+    m_perfUpdateTimer->start();
+
     // WMI 事件表刷新节流：后台线程先入队，主线程按 100ms 批量刷入，避免事件风暴卡 UI。
     m_wmiUiUpdateTimer = new QTimer(this);
     m_wmiUiUpdateTimer->setInterval(100);
@@ -539,6 +596,7 @@ MonitorDock::MonitorDock(QWidget* parent)
     refreshWmiProvidersAsync();
     refreshWmiEventClassesAsync();
     refreshEtwProvidersAsync();
+    refreshPerformanceCharts();
 
     kLogEvent finishEvent;
     info << finishEvent << "[MonitorDock] 构造完成。" << eol;
@@ -559,6 +617,20 @@ MonitorDock::~MonitorDock()
     {
         m_etwUiUpdateTimer->stop();
     }
+
+    if (m_perfUpdateTimer != nullptr)
+    {
+        m_perfUpdateTimer->stop();
+    }
+
+    // 析构时释放 PDH 查询句柄，避免系统计数器句柄泄漏。
+    if (m_diskPerfQueryHandle != nullptr)
+    {
+        ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle));
+        m_diskPerfQueryHandle = nullptr;
+        m_diskReadCounterHandle = nullptr;
+        m_diskWriteCounterHandle = nullptr;
+    }
 }
 
 void MonitorDock::initializeUi()
@@ -568,11 +640,508 @@ void MonitorDock::initializeUi()
     m_rootLayout->setContentsMargins(6, 6, 6, 6);
     m_rootLayout->setSpacing(6);
 
+    initializePerformancePanel();
+
     m_sideTabWidget = new QTabWidget(this);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
     initializeWmiTab();
     initializeEtwTab();
+}
+
+void MonitorDock::initializePerformancePanel()
+{
+    // 顶部性能面板：2x2 布局展示 CPU/内存条形图 + 磁盘/网络折线图。
+    m_perfPanel = new QWidget(this);
+    m_perfPanelLayout = new QGridLayout(m_perfPanel);
+    m_perfPanelLayout->setContentsMargins(0, 0, 0, 0);
+    m_perfPanelLayout->setHorizontalSpacing(6);
+    m_perfPanelLayout->setVerticalSpacing(6);
+    m_rootLayout->addWidget(m_perfPanel, 0);
+
+    auto createBarChartView = [this](const QString& titleText, const QColor& barColor, QBarSet** barSetOut, QChartView** chartViewOut) {
+        QBarSet* barSet = new QBarSet(QStringLiteral("Usage"));
+        barSet->append(0.0);
+        barSet->setColor(barColor);
+        barSet->setBorderColor(barColor);
+
+        QBarSeries* barSeries = new QBarSeries();
+        barSeries->append(barSet);
+
+        QChart* chart = new QChart();
+        chart->addSeries(barSeries);
+        chart->setTitle(titleText);
+        chart->legend()->hide();
+        chart->setBackgroundRoundness(0);
+        chart->setBackgroundVisible(false);
+        chart->setMargins(QMargins(0, 0, 0, 0));
+
+        QBarCategoryAxis* axisX = new QBarCategoryAxis(chart);
+        axisX->append(QStringList{ QStringLiteral("当前") });
+        axisX->setLabelsVisible(false);
+        axisX->setGridLineVisible(false);
+
+        QValueAxis* axisY = new QValueAxis(chart);
+        axisY->setRange(0.0, 100.0);
+        axisY->setLabelsVisible(false);
+        axisY->setGridLineVisible(false);
+        axisY->setMinorGridLineVisible(false);
+
+        chart->addAxis(axisX, Qt::AlignBottom);
+        chart->addAxis(axisY, Qt::AlignLeft);
+        barSeries->attachAxis(axisX);
+        barSeries->attachAxis(axisY);
+
+        QChartView* chartView = new QChartView(chart, m_perfPanel);
+        chartView->setRenderHint(QPainter::Antialiasing, true);
+        chartView->setMinimumHeight(140);
+        chartView->setFrameShape(QFrame::NoFrame);
+
+        if (barSetOut != nullptr)
+        {
+            *barSetOut = barSet;
+        }
+        if (chartViewOut != nullptr)
+        {
+            *chartViewOut = chartView;
+        }
+    };
+
+    auto createLineChartView =
+        [this](const QString& titleText,
+            const QColor& firstColor,
+            const QColor& secondColor,
+            const QString& firstSeriesName,
+            const QString& secondSeriesName,
+            QLineSeries** firstSeriesOut,
+            QLineSeries** secondSeriesOut,
+            QValueAxis** axisXOut,
+            QValueAxis** axisYOut,
+            QChartView** chartViewOut) {
+        QLineSeries* firstSeries = new QLineSeries();
+        firstSeries->setName(firstSeriesName);
+        firstSeries->setColor(firstColor);
+
+        QLineSeries* secondSeries = new QLineSeries();
+        secondSeries->setName(secondSeriesName);
+        secondSeries->setColor(secondColor);
+
+        QChart* chart = new QChart();
+        chart->addSeries(firstSeries);
+        chart->addSeries(secondSeries);
+        chart->setTitle(titleText);
+        chart->legend()->setVisible(true);
+        chart->legend()->setAlignment(Qt::AlignTop);
+        chart->setBackgroundRoundness(0);
+        chart->setBackgroundVisible(false);
+        chart->setMargins(QMargins(0, 0, 0, 0));
+
+        QValueAxis* axisX = new QValueAxis(chart);
+        axisX->setRange(0, m_perfHistoryLength - 1);
+        axisX->setLabelFormat(QStringLiteral("%d"));
+        axisX->setLabelsVisible(false);
+        axisX->setGridLineVisible(false);
+        axisX->setMinorGridLineVisible(false);
+
+        QValueAxis* axisY = new QValueAxis(chart);
+        axisY->setRange(0.0, 1.0);
+        axisY->setLabelFormat(QStringLiteral("%.0f"));
+        axisY->setLabelsVisible(false);
+        axisY->setGridLineVisible(false);
+        axisY->setMinorGridLineVisible(false);
+
+        chart->addAxis(axisX, Qt::AlignBottom);
+        chart->addAxis(axisY, Qt::AlignLeft);
+        firstSeries->attachAxis(axisX);
+        firstSeries->attachAxis(axisY);
+        secondSeries->attachAxis(axisX);
+        secondSeries->attachAxis(axisY);
+
+        QChartView* chartView = new QChartView(chart, m_perfPanel);
+        chartView->setRenderHint(QPainter::Antialiasing, true);
+        chartView->setMinimumHeight(140);
+        chartView->setFrameShape(QFrame::NoFrame);
+
+        if (firstSeriesOut != nullptr)
+        {
+            *firstSeriesOut = firstSeries;
+        }
+        if (secondSeriesOut != nullptr)
+        {
+            *secondSeriesOut = secondSeries;
+        }
+        if (axisXOut != nullptr)
+        {
+            *axisXOut = axisX;
+        }
+        if (axisYOut != nullptr)
+        {
+            *axisYOut = axisY;
+        }
+        if (chartViewOut != nullptr)
+        {
+            *chartViewOut = chartView;
+        }
+    };
+
+    createBarChartView(
+        QStringLiteral("CPU 占用率"),
+        QColor(KswordTheme::PrimaryBlueHex),
+        &m_cpuBarSet,
+        &m_cpuChartView);
+    createBarChartView(
+        QStringLiteral("内存利用率"),
+        QColor(QStringLiteral("#53C39B")),
+        &m_memoryBarSet,
+        &m_memoryChartView);
+    createLineChartView(
+        QStringLiteral("系统盘读写速率"),
+        QColor(QStringLiteral("#6FA8FF")),
+        QColor(QStringLiteral("#FFB66E")),
+        QStringLiteral("读取"),
+        QStringLiteral("写入"),
+        &m_diskReadSeries,
+        &m_diskWriteSeries,
+        &m_diskAxisX,
+        &m_diskAxisY,
+        &m_diskChartView);
+    createLineChartView(
+        QStringLiteral("网络收发速率"),
+        QColor(QStringLiteral("#7EDC8A")),
+        QColor(QStringLiteral("#F58A8A")),
+        QStringLiteral("下载"),
+        QStringLiteral("上传"),
+        &m_networkRxSeries,
+        &m_networkTxSeries,
+        &m_networkAxisX,
+        &m_networkAxisY,
+        &m_networkChartView);
+
+    // 折线图预填 0 值，启动后曲线从左到右平滑滚动。
+    for (int indexValue = 0; indexValue < m_perfHistoryLength; ++indexValue)
+    {
+        m_diskReadSeries->append(indexValue, 0.0);
+        m_diskWriteSeries->append(indexValue, 0.0);
+        m_networkRxSeries->append(indexValue, 0.0);
+        m_networkTxSeries->append(indexValue, 0.0);
+    }
+
+    m_perfPanelLayout->addWidget(m_cpuChartView, 0, 0);
+    m_perfPanelLayout->addWidget(m_memoryChartView, 0, 1);
+    m_perfPanelLayout->addWidget(m_diskChartView, 1, 0);
+    m_perfPanelLayout->addWidget(m_networkChartView, 1, 1);
+}
+
+void MonitorDock::appendLineSample(
+    QLineSeries* series,
+    QValueAxis* axisX,
+    QValueAxis* axisY,
+    const double value)
+{
+    if (series == nullptr || axisX == nullptr || axisY == nullptr)
+    {
+        return;
+    }
+
+    series->append(m_perfSampleCounter, value);
+    while (series->count() > m_perfHistoryLength)
+    {
+        series->remove(0);
+    }
+
+    const QList<QPointF> pointList = series->points();
+    if (pointList.isEmpty())
+    {
+        return;
+    }
+
+    const double minX = pointList.first().x();
+    const double maxX = pointList.last().x();
+    axisX->setRange(minX, std::max(maxX, minX + 1.0));
+
+    double yMaxValue = 1.0;
+    for (const QPointF& pointValue : pointList)
+    {
+        yMaxValue = std::max(yMaxValue, pointValue.y());
+    }
+    axisY->setRange(0.0, yMaxValue * 1.2);
+}
+
+bool MonitorDock::sampleCpuUsage(double* cpuUsageOut)
+{
+    if (cpuUsageOut == nullptr)
+    {
+        return false;
+    }
+
+    FILETIME idleTime{};
+    FILETIME kernelTime{};
+    FILETIME userTime{};
+    if (::GetSystemTimes(&idleTime, &kernelTime, &userTime) == FALSE)
+    {
+        return false;
+    }
+
+    const std::uint64_t idleValue = fileTimeToUint64(idleTime);
+    const std::uint64_t kernelValue = fileTimeToUint64(kernelTime);
+    const std::uint64_t userValue = fileTimeToUint64(userTime);
+
+    if (!m_cpuSampleValid)
+    {
+        m_lastCpuIdleTime = idleValue;
+        m_lastCpuKernelTime = kernelValue;
+        m_lastCpuUserTime = userValue;
+        m_cpuSampleValid = true;
+        *cpuUsageOut = 0.0;
+        return true;
+    }
+
+    const std::uint64_t deltaIdle = idleValue - m_lastCpuIdleTime;
+    const std::uint64_t deltaKernel = kernelValue - m_lastCpuKernelTime;
+    const std::uint64_t deltaUser = userValue - m_lastCpuUserTime;
+    const std::uint64_t deltaTotal = deltaKernel + deltaUser;
+
+    m_lastCpuIdleTime = idleValue;
+    m_lastCpuKernelTime = kernelValue;
+    m_lastCpuUserTime = userValue;
+
+    if (deltaTotal == 0)
+    {
+        *cpuUsageOut = 0.0;
+        return true;
+    }
+
+    const double usagePercent = (1.0 - static_cast<double>(deltaIdle) / static_cast<double>(deltaTotal)) * 100.0;
+    *cpuUsageOut = std::clamp(usagePercent, 0.0, 100.0);
+    return true;
+}
+
+bool MonitorDock::sampleDiskRate(double* readBytesPerSecOut, double* writeBytesPerSecOut)
+{
+    if (readBytesPerSecOut == nullptr || writeBytesPerSecOut == nullptr)
+    {
+        return false;
+    }
+
+    if (m_diskPerfQueryHandle == nullptr)
+    {
+        PDH_HQUERY queryHandle = nullptr;
+        if (::PdhOpenQueryW(nullptr, 0, &queryHandle) != ERROR_SUCCESS || queryHandle == nullptr)
+        {
+            return false;
+        }
+
+        PDH_HCOUNTER readCounter = nullptr;
+        PDH_HCOUNTER writeCounter = nullptr;
+        const PDH_STATUS addReadStatus = ::PdhAddEnglishCounterW(
+            queryHandle,
+            L"\\PhysicalDisk(_Total)\\Disk Read Bytes/sec",
+            0,
+            &readCounter);
+        const PDH_STATUS addWriteStatus = ::PdhAddEnglishCounterW(
+            queryHandle,
+            L"\\PhysicalDisk(_Total)\\Disk Write Bytes/sec",
+            0,
+            &writeCounter);
+
+        if (addReadStatus != ERROR_SUCCESS || addWriteStatus != ERROR_SUCCESS)
+        {
+            ::PdhCloseQuery(queryHandle);
+            return false;
+        }
+
+        m_diskPerfQueryHandle = queryHandle;
+        m_diskReadCounterHandle = readCounter;
+        m_diskWriteCounterHandle = writeCounter;
+
+        // 首次采样先 collect 一次，下一次再取稳定数据。
+        ::PdhCollectQueryData(queryHandle);
+        return false;
+    }
+
+    const PDH_HQUERY queryHandle = reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle);
+    const PDH_STATUS collectStatus = ::PdhCollectQueryData(queryHandle);
+    if (collectStatus != ERROR_SUCCESS)
+    {
+        return false;
+    }
+
+    PDH_FMT_COUNTERVALUE readValue{};
+    PDH_FMT_COUNTERVALUE writeValue{};
+    const PDH_STATUS readStatus = ::PdhGetFormattedCounterValue(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
+        PDH_FMT_DOUBLE,
+        nullptr,
+        &readValue);
+    const PDH_STATUS writeStatus = ::PdhGetFormattedCounterValue(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
+        PDH_FMT_DOUBLE,
+        nullptr,
+        &writeValue);
+
+    if (readStatus != ERROR_SUCCESS || writeStatus != ERROR_SUCCESS)
+    {
+        return false;
+    }
+
+    *readBytesPerSecOut = std::max(0.0, readValue.doubleValue);
+    *writeBytesPerSecOut = std::max(0.0, writeValue.doubleValue);
+    return true;
+}
+
+bool MonitorDock::sampleNetworkRate(double* rxBytesPerSecOut, double* txBytesPerSecOut)
+{
+    if (rxBytesPerSecOut == nullptr || txBytesPerSecOut == nullptr)
+    {
+        return false;
+    }
+
+    MIB_IF_TABLE2* tablePointer = nullptr;
+    const DWORD tableStatus = ::GetIfTable2(&tablePointer);
+    if (tableStatus != NO_ERROR || tablePointer == nullptr)
+    {
+        return false;
+    }
+
+    std::uint64_t totalRxBytes = 0;
+    std::uint64_t totalTxBytes = 0;
+    for (ULONG rowIndex = 0; rowIndex < tablePointer->NumEntries; ++rowIndex)
+    {
+        const MIB_IF_ROW2& rowValue = tablePointer->Table[rowIndex];
+        if (rowValue.OperStatus != IfOperStatusUp)
+        {
+            continue;
+        }
+        if (rowValue.Type == IF_TYPE_SOFTWARE_LOOPBACK)
+        {
+            continue;
+        }
+        totalRxBytes += static_cast<std::uint64_t>(rowValue.InOctets);
+        totalTxBytes += static_cast<std::uint64_t>(rowValue.OutOctets);
+    }
+    ::FreeMibTable(tablePointer);
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_lastNetworkSampleMs <= 0)
+    {
+        m_lastNetworkSampleMs = nowMs;
+        m_lastNetworkRxBytes = totalRxBytes;
+        m_lastNetworkTxBytes = totalTxBytes;
+        *rxBytesPerSecOut = 0.0;
+        *txBytesPerSecOut = 0.0;
+        return true;
+    }
+
+    const qint64 elapsedMs = nowMs - m_lastNetworkSampleMs;
+    if (elapsedMs <= 0)
+    {
+        return false;
+    }
+
+    const std::uint64_t deltaRx = totalRxBytes >= m_lastNetworkRxBytes
+        ? (totalRxBytes - m_lastNetworkRxBytes)
+        : 0;
+    const std::uint64_t deltaTx = totalTxBytes >= m_lastNetworkTxBytes
+        ? (totalTxBytes - m_lastNetworkTxBytes)
+        : 0;
+
+    m_lastNetworkSampleMs = nowMs;
+    m_lastNetworkRxBytes = totalRxBytes;
+    m_lastNetworkTxBytes = totalTxBytes;
+
+    *rxBytesPerSecOut = static_cast<double>(deltaRx) * 1000.0 / static_cast<double>(elapsedMs);
+    *txBytesPerSecOut = static_cast<double>(deltaTx) * 1000.0 / static_cast<double>(elapsedMs);
+    return true;
+}
+
+void MonitorDock::refreshPerformanceCharts()
+{
+    // 采样 CPU 与内存：条形图只展示当前瞬时值。
+    double cpuUsagePercent = 0.0;
+    if (!sampleCpuUsage(&cpuUsagePercent))
+    {
+        cpuUsagePercent = 0.0;
+    }
+    MEMORYSTATUSEX memoryStatus{};
+    memoryStatus.dwLength = sizeof(memoryStatus);
+    const bool memoryOk = ::GlobalMemoryStatusEx(&memoryStatus) != FALSE;
+    const double memoryUsagePercent = memoryOk ? static_cast<double>(memoryStatus.dwMemoryLoad) : 0.0;
+
+    if (m_cpuBarSet != nullptr)
+    {
+        m_cpuBarSet->replace(0, cpuUsagePercent);
+    }
+    if (m_memoryBarSet != nullptr)
+    {
+        m_memoryBarSet->replace(0, memoryUsagePercent);
+    }
+
+    if (m_cpuChartView != nullptr && m_cpuChartView->chart() != nullptr)
+    {
+        m_cpuChartView->chart()->setTitle(QStringLiteral("CPU 占用率 %1%").arg(cpuUsagePercent, 0, 'f', 1));
+    }
+    if (m_memoryChartView != nullptr && m_memoryChartView->chart() != nullptr)
+    {
+        m_memoryChartView->chart()->setTitle(QStringLiteral("内存利用率 %1%").arg(memoryUsagePercent, 0, 'f', 1));
+    }
+
+    // 采样磁盘与网络：折线图展示最近 m_perfHistoryLength 个采样点。
+    double diskReadBytesPerSec = 0.0;
+    double diskWriteBytesPerSec = 0.0;
+    if (!sampleDiskRate(&diskReadBytesPerSec, &diskWriteBytesPerSec))
+    {
+        diskReadBytesPerSec = 0.0;
+        diskWriteBytesPerSec = 0.0;
+    }
+
+    double networkRxBytesPerSec = 0.0;
+    double networkTxBytesPerSec = 0.0;
+    if (!sampleNetworkRate(&networkRxBytesPerSec, &networkTxBytesPerSec))
+    {
+        networkRxBytesPerSec = 0.0;
+        networkTxBytesPerSec = 0.0;
+    }
+
+    ++m_perfSampleCounter;
+    appendLineSample(m_diskReadSeries, m_diskAxisX, m_diskAxisY, diskReadBytesPerSec);
+    appendLineSample(m_diskWriteSeries, m_diskAxisX, m_diskAxisY, diskWriteBytesPerSec);
+    appendLineSample(m_networkRxSeries, m_networkAxisX, m_networkAxisY, networkRxBytesPerSec);
+    appendLineSample(m_networkTxSeries, m_networkAxisX, m_networkAxisY, networkTxBytesPerSec);
+
+    // 轴范围取两条线最大值，确保读/写、上/下行都完整显示。
+    auto updateAxisRangeByPair = [this](QLineSeries* firstSeries, QLineSeries* secondSeries, QValueAxis* axisY) {
+        if (firstSeries == nullptr || secondSeries == nullptr || axisY == nullptr)
+        {
+            return;
+        }
+        double maxValue = 1.0;
+        const QList<QPointF> firstPoints = firstSeries->points();
+        const QList<QPointF> secondPoints = secondSeries->points();
+        for (const QPointF& pointValue : firstPoints)
+        {
+            maxValue = std::max(maxValue, pointValue.y());
+        }
+        for (const QPointF& pointValue : secondPoints)
+        {
+            maxValue = std::max(maxValue, pointValue.y());
+        }
+        axisY->setRange(0.0, maxValue * 1.2);
+    };
+    updateAxisRangeByPair(m_diskReadSeries, m_diskWriteSeries, m_diskAxisY);
+    updateAxisRangeByPair(m_networkRxSeries, m_networkTxSeries, m_networkAxisY);
+
+    if (m_diskChartView != nullptr && m_diskChartView->chart() != nullptr)
+    {
+        m_diskChartView->chart()->setTitle(QStringLiteral("系统盘读写速率  读:%1  写:%2")
+            .arg(bytesPerSecondToText(diskReadBytesPerSec))
+            .arg(bytesPerSecondToText(diskWriteBytesPerSec)));
+    }
+    if (m_networkChartView != nullptr && m_networkChartView->chart() != nullptr)
+    {
+        m_networkChartView->chart()->setTitle(QStringLiteral("网络收发速率  下:%1  上:%2")
+            .arg(bytesPerSecondToText(networkRxBytesPerSec))
+            .arg(bytesPerSecondToText(networkTxBytesPerSec)));
+    }
 }
 
 void MonitorDock::initializeWmiTab()
@@ -3476,3 +4045,4 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
         openProcessDetail(this, pid);
     }
 }
+
