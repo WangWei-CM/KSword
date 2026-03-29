@@ -14,6 +14,9 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QPainter>
+#include <QResizeEvent>
+#include <QShowEvent>
+#include <QSizePolicy>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -71,7 +74,9 @@ namespace
         QChartView* chartView = new QChartView(chartPtr, parentWidget);
         chartView->setRenderHint(QPainter::Antialiasing, true);
         chartView->setFrameShape(QFrame::NoFrame);
-        chartView->setMinimumHeight(140);
+        chartView->setMinimumHeight(0);
+        chartView->setMaximumHeight(QWIDGETSIZE_MAX);
+        chartView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Ignored);
         return chartView;
     }
 
@@ -139,6 +144,27 @@ MonitorPanelWidget::~MonitorPanelWidget()
         m_diskReadCounterHandle = nullptr;
         m_diskWriteCounterHandle = nullptr;
     }
+}
+
+void MonitorPanelWidget::resizeEvent(QResizeEvent* resizeEventPointer)
+{
+    QWidget::resizeEvent(resizeEventPointer);
+    adjustChartCellHeights();
+}
+
+void MonitorPanelWidget::showEvent(QShowEvent* showEventPointer)
+{
+    QWidget::showEvent(showEventPointer);
+    // 延迟到事件循环末尾再重排，保证首帧也能拿到稳定几何尺寸。
+    QTimer::singleShot(0, this, [this]()
+    {
+        adjustChartCellHeights();
+    });
+    // Dock 布局在 show 后可能继续调整，补一帧延迟避免底部两张图首帧被压没。
+    QTimer::singleShot(80, this, [this]()
+    {
+        adjustChartCellHeights();
+    });
 }
 
 void MonitorPanelWidget::initializeUi()
@@ -364,6 +390,9 @@ void MonitorPanelWidget::initializeUi()
     m_chartGridLayout->setRowStretch(1, 1);
     m_chartGridLayout->setColumnStretch(0, 1);
     m_chartGridLayout->setColumnStretch(1, 1);
+
+    // 初始化阶段先执行一次高度压缩，避免外层 Dock 初始出现滚动条。
+    adjustChartCellHeights();
 }
 
 void MonitorPanelWidget::initializeCounters()
@@ -789,4 +818,85 @@ void MonitorPanelWidget::appendLineSample(
         maxYValue = std::max(maxYValue, pointValue.y());
     }
     axisY->setRange(0.0, maxYValue * 1.2);
+}
+
+void MonitorPanelWidget::adjustChartCellHeights()
+{
+    // applyMaxHeightIfChanged 作用：
+    // - 仅收紧图表最大高度，最小高度始终保持 0；
+    // - 避免子控件 minimumHeight 反向抬高父容器导致“无限变长”。
+    auto applyMaxHeightIfChanged =
+        [](QChartView* chartViewPointer, const int heightValue)
+        {
+            if (chartViewPointer == nullptr || heightValue <= 0)
+            {
+                return;
+            }
+            if (chartViewPointer->minimumHeight() == 0
+                && chartViewPointer->maximumHeight() == heightValue)
+            {
+                return;
+            }
+            chartViewPointer->setMinimumHeight(0);
+            chartViewPointer->setMaximumHeight(heightValue);
+        };
+
+    // widgetInnerHeight 用途：去掉布局边距后的真实可用高度，防止把边距重复算进图表高度。
+    int widgetInnerHeight = height();
+    if (m_rootLayout != nullptr)
+    {
+        const QMargins rootMargins = m_rootLayout->contentsMargins();
+        widgetInnerHeight -= (rootMargins.top() + rootMargins.bottom());
+    }
+    if (m_chartGridLayout != nullptr)
+    {
+        const QMargins gridMargins = m_chartGridLayout->contentsMargins();
+        widgetInnerHeight -= (gridMargins.top() + gridMargins.bottom());
+    }
+
+    // 回退值用途：布局尚未稳定时用 geometry/默认值兜底，防止出现 0 高度。
+    if (widgetInnerHeight <= 0 && m_chartGridLayout != nullptr)
+    {
+        widgetInnerHeight = m_chartGridLayout->geometry().height();
+    }
+    if (widgetInnerHeight <= 0)
+    {
+        widgetInnerHeight = 180;
+    }
+
+    // rowSpacingValue 用途：两行图之间的垂直间距，用于计算每行可用高度。
+    const int rowSpacingValue = m_chartGridLayout != nullptr
+        ? std::max(0, m_chartGridLayout->verticalSpacing())
+        : 0;
+    // availableRowsHeight 用途：扣除行间距后可分配给两行图表的总高度。
+    const int availableRowsHeight = std::max(2, widgetInnerHeight - rowSpacingValue);
+    // chartRowHeight 用途：每一行图表的目标上限高度，保持可压缩且避免“图消失”。
+    const int chartRowHeight = std::max(18, availableRowsHeight / 2);
+
+    applyMaxHeightIfChanged(m_cpuChartView, chartRowHeight);
+    applyMaxHeightIfChanged(m_memoryChartView, chartRowHeight);
+    applyMaxHeightIfChanged(m_diskChartView, chartRowHeight);
+    applyMaxHeightIfChanged(m_networkChartView, chartRowHeight);
+
+    // compactMode 用途：低高度时简化图例/标题，减少内部布局占用，避免出现滚动条。
+    const bool compactMode = (chartRowHeight < 92);
+    auto applyChartCompactMode =
+        [compactMode](QChartView* chartViewPointer)
+        {
+            if (chartViewPointer == nullptr || chartViewPointer->chart() == nullptr)
+            {
+                return;
+            }
+            QChart* chartPointer = chartViewPointer->chart();
+            if (chartPointer->legend() != nullptr)
+            {
+                chartPointer->legend()->setVisible(!compactMode);
+            }
+            if (compactMode)
+            {
+                chartPointer->setMargins(QMargins(0, 0, 0, 0));
+            }
+        };
+    applyChartCompactMode(m_diskChartView);
+    applyChartCompactMode(m_networkChartView);
 }

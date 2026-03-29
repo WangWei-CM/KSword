@@ -26,6 +26,7 @@ class QLineSeries;
 class QListWidget;
 class QResizeEvent;
 class QScrollArea;
+class QShowEvent;
 class QStackedWidget;
 class QTabWidget;
 class QTableWidget;
@@ -53,6 +54,11 @@ protected:
     // - 窗口尺寸变化时动态重排“利用率”页图表高度；
     // - 保证任务管理器风格页面尽量不出现滚动条。
     void resizeEvent(QResizeEvent* resizeEventPointer) override;
+
+    // showEvent 作用：
+    // - Dock 首次显示后再次触发布局重排；
+    // - 修复“利用率->CPU 首次进入高度尚未就绪”导致核心图挤压的问题。
+    void showEvent(QShowEvent* showEventPointer) override;
 
 private:
     // CoreChartEntry：

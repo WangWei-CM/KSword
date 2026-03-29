@@ -498,12 +498,18 @@ namespace
         recordsOut.clear();
         recordsOut.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(parseCount, 200000ULL)));
 
-        std::uint32_t consecutiveQueryFailCount = 0;     // 连续查询失败次数。
+        // FSCTL_GET_NTFS_FILE_RECORD 的行为是：
+        // - 返回“编号 <= 输入值”的最近一条在用记录；
+        // - 因此必须从高到低枚举，不能从 0 正向扫描。
+        std::uint64_t requestRecordIndex = (parseCount > 0) ? (parseCount - 1) : 0;
+        std::uint64_t lastReturnedRecordIndex = std::numeric_limits<std::uint64_t>::max();
+        std::uint64_t visitedCount = 0;                 // visitedCount：已访问的记录数（用于受 maxRecordCount 限制）。
+        std::uint32_t consecutiveQueryFailCount = 0;    // 连续查询失败次数。
         std::uint32_t consecutiveInvalidRecordCount = 0; // 连续无效记录次数。
-        for (std::uint64_t recordHintIndex = 0; recordHintIndex < parseCount; ++recordHintIndex)
+        while (visitedCount < parseCount)
         {
             NTFS_FILE_RECORD_INPUT_BUFFER inputBuffer{};
-            inputBuffer.FileReferenceNumber.QuadPart = static_cast<LONGLONG>(recordHintIndex);
+            inputBuffer.FileReferenceNumber.QuadPart = static_cast<LONGLONG>(requestRecordIndex);
 
             returnedBytes = 0;
             const BOOL queryOk = ::DeviceIoControl(
@@ -517,29 +523,77 @@ namespace
                 nullptr);
             if (queryOk == FALSE)
             {
+                const DWORD queryErrorCode = ::GetLastError();
                 ++consecutiveQueryFailCount;
-                if (recordHintIndex > 16384
-                    && !recordsOut.empty()
-                    && consecutiveQueryFailCount > 8192)
+                if (!recordsOut.empty()
+                    && consecutiveQueryFailCount > 2048)
                 {
                     break;
                 }
+
+                if (queryErrorCode == ERROR_HANDLE_EOF || queryErrorCode == ERROR_FILE_NOT_FOUND)
+                {
+                    break;
+                }
+
+                if (requestRecordIndex == 0)
+                {
+                    break;
+                }
+                requestRecordIndex -= 1;
                 continue;
             }
             consecutiveQueryFailCount = 0;
+            visitedCount += 1;
 
             if (returnedBytes <= outputHeaderBytes)
             {
+                if (requestRecordIndex == 0)
+                {
+                    break;
+                }
+                requestRecordIndex -= 1;
                 continue;
             }
             NTFS_FILE_RECORD_OUTPUT_BUFFER* outputRecord =
                 reinterpret_cast<NTFS_FILE_RECORD_OUTPUT_BUFFER*>(outputBuffer.data());
             const std::uint32_t fileRecordLength = outputRecord->FileRecordLength;
+            const std::uint64_t actualRecordIndex =
+                static_cast<std::uint64_t>(outputRecord->FileReferenceNumber.QuadPart & 0x0000FFFFFFFFFFFFULL);
+
+            // 若返回记录号比请求值还大，说明当前返回不符合“向下枚举”预期，直接降级请求号继续。
+            if (actualRecordIndex > requestRecordIndex)
+            {
+                if (requestRecordIndex == 0)
+                {
+                    break;
+                }
+                requestRecordIndex -= 1;
+                continue;
+            }
+
+            // 防止连续返回同一条记录导致死循环。
+            if (actualRecordIndex == lastReturnedRecordIndex)
+            {
+                if (actualRecordIndex == 0)
+                {
+                    break;
+                }
+                requestRecordIndex = actualRecordIndex - 1;
+                continue;
+            }
+            lastReturnedRecordIndex = actualRecordIndex;
+
             if (fileRecordLength < 64
                 || fileRecordLength > bytesPerRecord
                 || outputHeaderBytes + fileRecordLength > returnedBytes
                 || outputHeaderBytes + fileRecordLength > outputBuffer.size())
             {
+                if (actualRecordIndex == 0)
+                {
+                    break;
+                }
+                requestRecordIndex = actualRecordIndex - 1;
                 continue;
             }
 
@@ -549,28 +603,41 @@ namespace
                 outputBuffer.data() + outputHeaderBytes,
                 fileRecordLength);
 
-            // actualRecordIndex：使用 FSCTL 返回的真实记录号，避免仅依赖请求 hint。
-            const std::uint64_t actualRecordIndex =
-                static_cast<std::uint64_t>(outputRecord->FileReferenceNumber.QuadPart & 0x0000FFFFFFFFFFFFULL);
             NtfsRawRecord recordValue{};
             if (!parseNtfsRecord(recordBytes, actualRecordIndex, recordValue))
             {
                 ++consecutiveInvalidRecordCount;
-                if (recordHintIndex > 16384
-                    && !recordsOut.empty()
+                if (!recordsOut.empty()
                     && consecutiveInvalidRecordCount > 8192)
                 {
                     break;
                 }
+
+                if (actualRecordIndex == 0)
+                {
+                    break;
+                }
+                requestRecordIndex = actualRecordIndex - 1;
                 continue;
             }
 
             consecutiveInvalidRecordCount = 0;
             if (recordValue.fileName.isEmpty() && recordValue.recordIndex != 5)
             {
+                if (actualRecordIndex == 0)
+                {
+                    break;
+                }
+                requestRecordIndex = actualRecordIndex - 1;
                 continue;
             }
             recordsOut.push_back(std::move(recordValue));
+
+            if (actualRecordIndex == 0)
+            {
+                break;
+            }
+            requestRecordIndex = actualRecordIndex - 1;
         }
 
         if (recordsOut.empty())
@@ -590,14 +657,16 @@ namespace
         const QString& volumeRoot,
         std::vector<NtfsRawRecord>& recordsOut,
         QString& errorTextOut,
-        const std::uint64_t maxRecordCountHint)
+        const std::uint64_t maxRecordCountHint,
+        const bool allowFsctlFallback)
     {
         const std::wstring cacheKey = toWide(volumeRoot.toUpper());
         const qint64 nowMsec = QDateTime::currentMSecsSinceEpoch();
         constexpr qint64 NtfsCacheTtlMsec = 60000; // 缓存 60 秒，避免同卷短时间重复全盘扫描。
+        constexpr std::uint64_t NtfsHardMaxRecordCount = 1500000ULL; // 全局硬上限：兼顾大卷覆盖率与内存占用。
         const std::uint64_t effectiveMaxRecordCount = (maxRecordCountHint == 0)
-            ? 600000ULL
-            : std::min<std::uint64_t>(maxRecordCountHint, 600000ULL);
+            ? NtfsHardMaxRecordCount
+            : std::min<std::uint64_t>(maxRecordCountHint, NtfsHardMaxRecordCount);
         {
             std::scoped_lock<std::mutex> lock(g_ntfsCacheMutex);
             const auto cacheIt = g_ntfsCache.find(cacheKey);
@@ -721,12 +790,13 @@ namespace
             // 第一层回退：FSCTL 按记录号读取 MFT。
             std::vector<NtfsRawRecord> fsctlRecords;
             QString fsctlErrorText;
-            if (tryLoadNtfsRecordsByFsctl(
-                volumeHandle,
-                bytesPerRecord,
-                MaxRecordCount,
-                fsctlRecords,
-                fsctlErrorText))
+            if (allowFsctlFallback
+                && tryLoadNtfsRecordsByFsctl(
+                    volumeHandle,
+                    bytesPerRecord,
+                    MaxRecordCount,
+                    fsctlRecords,
+                    fsctlErrorText))
             {
                 recordsOut = std::move(fsctlRecords);
                 ::CloseHandle(volumeHandle);
@@ -1363,8 +1433,8 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
         const QString volumeRoot = trimVolumeRoot(pathText);
         std::vector<NtfsRawRecord> recordsValue;
         constexpr std::uint64_t DirectoryListMaxRecords = 250000ULL; // 目录浏览优先响应速度，限制单次扫描规模。
-        constexpr std::uint64_t DirectoryRetryMaxRecords = 600000ULL; // 定位目录失败时扩展扫描上限，避免漏掉高编号目录项。
-        if (!loadNtfsRecords(volumeRoot, recordsValue, errorTextOut, DirectoryListMaxRecords))
+        constexpr std::uint64_t DirectoryRetryMaxRecords = 1200000ULL; // 定位目录失败时扩展扫描上限，避免漏掉高编号目录项。
+        if (!loadNtfsRecords(volumeRoot, recordsValue, errorTextOut, DirectoryListMaxRecords, true))
         {
             return false;
         }
@@ -1377,7 +1447,7 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
         {
             std::vector<NtfsRawRecord> retryRecords;
             QString retryErrorText;
-            if (loadNtfsRecords(volumeRoot, retryRecords, retryErrorText, DirectoryRetryMaxRecords))
+            if (loadNtfsRecords(volumeRoot, retryRecords, retryErrorText, DirectoryRetryMaxRecords, true))
             {
                 recordsValue.swap(retryRecords);
                 usedFullRangeScan = true;
@@ -1390,6 +1460,38 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
         }
         if (!resolveOk)
         {
+            // 兜底策略：目录真实存在但 MFT 链路解析失败时，回退到 WinAPI 枚举，
+            // 避免手动模式直接“空白/报错不可访问”。
+            const QString normalizedPath = QDir::toNativeSeparators(QDir::cleanPath(pathText));
+            QDir fallbackDirectory(normalizedPath);
+            if (fallbackDirectory.exists())
+            {
+                const QFileInfoList fallbackEntries = fallbackDirectory.entryInfoList(
+                    QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+                    QDir::DirsFirst | QDir::Name | QDir::IgnoreCase);
+                for (const QFileInfo& fileInfoValue : fallbackEntries)
+                {
+                    ManualDirectoryEntry itemValue{};
+                    itemValue.name = fileInfoValue.fileName();
+                    itemValue.absolutePath = fileInfoValue.absoluteFilePath();
+                    itemValue.isDirectory = fileInfoValue.isDir();
+                    itemValue.sizeBytes = itemValue.isDirectory ? 0 : static_cast<std::uint64_t>(fileInfoValue.size());
+                    itemValue.modifiedTime = fileInfoValue.lastModified();
+                    itemValue.typeText = buildTypeText(itemValue.name, itemValue.isDirectory);
+                    entriesOut.push_back(std::move(itemValue));
+                }
+
+                kLogEvent event;
+                warn << event
+                    << "[FileDock] NTFS链路定位失败，回退WinAPI枚举, path="
+                    << normalizedPath.toStdString()
+                    << ", rows="
+                    << entriesOut.size()
+                    << eol;
+                errorTextOut.clear();
+                return true;
+            }
+
             if (errorTextOut.isEmpty())
             {
                 errorTextOut = QStringLiteral("NTFS目录不存在或不可访问。");
@@ -1428,7 +1530,7 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
         {
             std::vector<NtfsRawRecord> retryRecords;
             QString retryErrorText;
-            if (loadNtfsRecords(volumeRoot, retryRecords, retryErrorText, DirectoryRetryMaxRecords))
+            if (loadNtfsRecords(volumeRoot, retryRecords, retryErrorText, DirectoryRetryMaxRecords, true))
             {
                 std::uint64_t retryDirIndex = 5;
                 if (resolveNtfsDirectoryIndex(retryRecords, pathSegments, retryDirIndex))
@@ -1535,7 +1637,7 @@ bool ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(
     std::vector<NtfsRawRecord> recordsValue;
     const QString volumeRoot = trimVolumeRoot(volumeRootPath);
     constexpr std::uint64_t DeletedScanMaxRecords = 600000ULL; // 删除恢复需要覆盖更多记录，保持较高上限。
-    if (!loadNtfsRecords(volumeRoot, recordsValue, errorTextOut, DeletedScanMaxRecords))
+    if (!loadNtfsRecords(volumeRoot, recordsValue, errorTextOut, DeletedScanMaxRecords, false))
     {
         return false;
     }
