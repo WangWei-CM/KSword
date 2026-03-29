@@ -19,6 +19,8 @@ class QBarSet;
 class QChartView;
 class QGridLayout;
 class QLineSeries;
+class QResizeEvent;
+class QShowEvent;
 class QTimer;
 class QValueAxis;
 class QVBoxLayout;
@@ -36,6 +38,17 @@ public:
     // - 停止刷新定时器；
     // - 释放 PDH 查询句柄，避免资源泄漏。
     ~MonitorPanelWidget() override;
+
+protected:
+    // resizeEvent 作用：
+    // - Dock 高度变化时重算四宫格图高度；
+    // - 尽量避免监视面板出现滚动条。
+    void resizeEvent(QResizeEvent* resizeEventPointer) override;
+
+    // showEvent 作用：
+    // - 首次展示后触发一次延迟重排；
+    // - 解决初始 geometry 尚未稳定时的高度估算偏差。
+    void showEvent(QShowEvent* showEventPointer) override;
 
 private:
     // initializeUi 作用：
@@ -97,6 +110,11 @@ private:
         QValueAxis* axisX,
         QValueAxis* axisY,
         double value);
+
+    // adjustChartCellHeights 作用：
+    // - 按当前 Dock 可用高度压缩四张图；
+    // - 统一设置最小/最大高度，防止外层布局因最小高度触发滚动条。
+    void adjustChartCellHeights();
 
 private:
     // 布局控件。

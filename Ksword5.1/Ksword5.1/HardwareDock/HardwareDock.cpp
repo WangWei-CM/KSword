@@ -27,6 +27,7 @@
 #include <QProcess>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QShowEvent>
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -574,6 +575,21 @@ void HardwareDock::resizeEvent(QResizeEvent* resizeEventPointer)
     adjustUtilizationChartHeights();
 }
 
+void HardwareDock::showEvent(QShowEvent* showEventPointer)
+{
+    QWidget::showEvent(showEventPointer);
+    // 首次显示阶段延迟一帧再重排，确保滚动区 viewport 高度已经稳定。
+    QTimer::singleShot(0, this, [this]()
+    {
+        adjustUtilizationChartHeights();
+    });
+    // 某些 Dock 场景首次显示后仍会继续布局，补一帧延迟可避免 CPU 子页首帧挤压。
+    QTimer::singleShot(80, this, [this]()
+    {
+        adjustUtilizationChartHeights();
+    });
+}
+
 void HardwareDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
@@ -589,6 +605,36 @@ void HardwareDock::initializeUi()
     initializeCpuTab();
     initializeGpuTab();
     initializeMemoryTab();
+
+    if (m_sideTabWidget != nullptr)
+    {
+        connect(
+            m_sideTabWidget,
+            &QTabWidget::currentChanged,
+            this,
+            [this](const int tabIndexValue)
+            {
+                Q_UNUSED(tabIndexValue);
+                if (m_sideTabWidget == nullptr || m_utilizationPage == nullptr)
+                {
+                    return;
+                }
+                if (m_sideTabWidget->currentWidget() != m_utilizationPage)
+                {
+                    return;
+                }
+                // 进入“利用率”总页时刷新一次高度，修复首次进入 CPU 子页时尚未正确撑开的问题。
+                adjustUtilizationChartHeights();
+                QTimer::singleShot(0, this, [this]()
+                {
+                    adjustUtilizationChartHeights();
+                });
+                QTimer::singleShot(80, this, [this]()
+                {
+                    adjustUtilizationChartHeights();
+                });
+            });
+    }
 }
 
 void HardwareDock::initializeOverviewTab()
@@ -734,6 +780,16 @@ void HardwareDock::syncUtilizationSidebarSelection(const int selectedRowIndex)
 
     // 选项切换后立即重算大图高度，避免首帧出现滚动条。
     adjustUtilizationChartHeights();
+    // 延迟到事件循环末尾再重算一次，确保拿到切页后的真实 viewport 高度。
+    QTimer::singleShot(0, this, [this]()
+    {
+        adjustUtilizationChartHeights();
+    });
+    // 补一次短延迟重排，规避 Dock 动画/布局链导致的 CPU 首帧高度过小。
+    QTimer::singleShot(80, this, [this]()
+    {
+        adjustUtilizationChartHeights();
+    });
 }
 
 void HardwareDock::adjustUtilizationChartHeights()
@@ -744,51 +800,88 @@ void HardwareDock::adjustUtilizationChartHeights()
         && m_coreChartGridLayout != nullptr
         && !m_coreChartEntries.empty())
     {
-        const int cpuPageHeight = m_utilizationCpuSubPage->contentsRect().height();
-        const int headerHeight = std::max(
-            m_cpuModelLabel != nullptr ? m_cpuModelLabel->sizeHint().height() : 0,
-            44);
-        const int summaryHeight = m_utilizationSummaryLabel != nullptr
-            ? m_utilizationSummaryLabel->sizeHint().height()
-            : 20;
-        const int detailHeight = std::max(
-            m_cpuUtilPrimaryDetailLabel != nullptr ? m_cpuUtilPrimaryDetailLabel->sizeHint().height() : 0,
-            m_cpuUtilSecondaryDetailLabel != nullptr ? m_cpuUtilSecondaryDetailLabel->sizeHint().height() : 0);
+        // applyFixedHeightIfChanged 作用：
+        // - 仅在目标高度变化时写入最小/最大高度，避免无意义重排触发递归 resize；
+        // - widgetPointer：待设置控件；heightValue：目标固定高度（像素）。
+        auto applyFixedHeightIfChanged =
+            [](QWidget* widgetPointer, const int heightValue)
+            {
+                if (widgetPointer == nullptr || heightValue <= 0)
+                {
+                    return;
+                }
+                if (widgetPointer->minimumHeight() == heightValue
+                    && widgetPointer->maximumHeight() == heightValue)
+                {
+                    return;
+                }
+                widgetPointer->setMinimumHeight(heightValue);
+                widgetPointer->setMaximumHeight(heightValue);
+            };
 
-        const int reservedHeight = headerHeight + summaryHeight + detailHeight + 24;
-        const int availableChartAreaHeight = std::max(72, cpuPageHeight - reservedHeight);
+        // chartViewportHeight 用途：滚动区当前可见高度，作为核心网格高度分配基线。
+        int chartViewportHeight = 0;
+        if (m_coreChartScrollArea != nullptr && m_coreChartScrollArea->viewport() != nullptr)
+        {
+            chartViewportHeight = m_coreChartScrollArea->viewport()->height();
+        }
+        if (chartViewportHeight <= 0 && m_coreChartScrollArea != nullptr)
+        {
+            chartViewportHeight = m_coreChartScrollArea->height();
+        }
+        if (chartViewportHeight < 120)
+        {
+            // cpuReferenceHeight 用途：CPU 页稳定参考高度，避免初始化阶段拿到过小 viewport。
+            int cpuReferenceHeight = 0;
+            if (m_utilizationDetailStack != nullptr)
+            {
+                cpuReferenceHeight = m_utilizationDetailStack->contentsRect().height();
+            }
+            if (cpuReferenceHeight <= 0)
+            {
+                cpuReferenceHeight = m_utilizationCpuSubPage->contentsRect().height();
+            }
+            chartViewportHeight = std::max(120, cpuReferenceHeight / 2);
+        }
+
+        // availableChartAreaHeight 用途：核心图总可用高度；取滚动区可见高度阻断“高度递增反馈环”。
+        const int availableChartAreaHeight = std::max(1, chartViewportHeight);
         const int gridRows = std::max(1, m_cpuCoreGridRowCount);
         const int gridSpacing = std::max(0, m_coreChartGridLayout->verticalSpacing());
+        // cellHeight 用途：每个逻辑处理器小卡片高度；过小时允许滚动条接管，不强行拉伸父容器。
         const int cellHeight = std::max(
-            26,
+            18,
             (availableChartAreaHeight - gridSpacing * (gridRows - 1)) / gridRows);
 
         for (CoreChartEntry& chartEntry : m_coreChartEntries)
         {
             if (chartEntry.containerWidget != nullptr)
             {
-                chartEntry.containerWidget->setMinimumHeight(cellHeight);
-                chartEntry.containerWidget->setMaximumHeight(cellHeight);
+                applyFixedHeightIfChanged(chartEntry.containerWidget, cellHeight);
             }
             if (chartEntry.chartView != nullptr)
             {
-                const int chartHeight = std::max(14, cellHeight - 12);
-                chartEntry.chartView->setMinimumHeight(chartHeight);
-                chartEntry.chartView->setMaximumHeight(chartHeight);
+                const int chartHeight = std::max(10, cellHeight - 12);
+                applyFixedHeightIfChanged(chartEntry.chartView, chartHeight);
             }
         }
 
         const int hostHeight = gridRows * cellHeight + gridSpacing * (gridRows - 1);
-        m_coreChartHostWidget->setMinimumHeight(hostHeight);
-        m_coreChartHostWidget->setMaximumHeight(hostHeight);
+        applyFixedHeightIfChanged(m_coreChartHostWidget, hostHeight);
+        if (m_coreChartScrollArea != nullptr)
+        {
+            // 这里不再把滚动区本身锁成固定高度，避免布局在每次重算后持续推高父容器。
+            m_coreChartScrollArea->setMinimumHeight(0);
+            m_coreChartScrollArea->setMaximumHeight(QWIDGETSIZE_MAX);
+        }
 
         if (m_cpuUtilPrimaryDetailLabel != nullptr)
         {
-            m_cpuUtilPrimaryDetailLabel->setMaximumHeight(22);
+            m_cpuUtilPrimaryDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
         }
         if (m_cpuUtilSecondaryDetailLabel != nullptr)
         {
-            m_cpuUtilSecondaryDetailLabel->setMaximumHeight(22);
+            m_cpuUtilSecondaryDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
         }
     }
 
@@ -819,25 +912,58 @@ void HardwareDock::adjustUtilizationChartHeights()
 
     if (m_memoryUtilPrimaryDetailLabel != nullptr)
     {
-        m_memoryUtilPrimaryDetailLabel->setMaximumHeight(22);
+        m_memoryUtilPrimaryDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
     }
     if (m_memoryUtilSecondaryDetailLabel != nullptr)
     {
-        m_memoryUtilSecondaryDetailLabel->setMaximumHeight(22);
+        m_memoryUtilSecondaryDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
     }
     if (m_diskUtilDetailLabel != nullptr)
     {
-        m_diskUtilDetailLabel->setMaximumHeight(22);
+        m_diskUtilDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
     }
     if (m_networkUtilDetailLabel != nullptr)
     {
-        m_networkUtilDetailLabel->setMaximumHeight(22);
+        m_networkUtilDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
     }
 
     // GPU 页：四个引擎图 + 两条显存曲线全部动态压缩。
     if (m_utilizationGpuSubPage != nullptr)
     {
-        const int gpuPageHeight = m_utilizationGpuSubPage->contentsRect().height();
+        // applyMaxHeightIfChanged 作用：
+        // - 仅调整最大高度，最小高度保持 0，防止子控件反向撑大父布局；
+        // - widgetPointer：目标控件；maxHeightValue：目标最大高度（像素）。
+        auto applyMaxHeightIfChanged =
+            [](QWidget* widgetPointer, const int maxHeightValue)
+            {
+                if (widgetPointer == nullptr || maxHeightValue <= 0)
+                {
+                    return;
+                }
+                if (widgetPointer->minimumHeight() == 0
+                    && widgetPointer->maximumHeight() == maxHeightValue)
+                {
+                    return;
+                }
+                widgetPointer->setMinimumHeight(0);
+                widgetPointer->setMaximumHeight(maxHeightValue);
+            };
+
+        // gpuReferenceHeight 用途：GPU 子页布局参考高度，优先使用堆栈可见区域，避免自反馈增高。
+        int gpuReferenceHeight = 0;
+        if (m_utilizationDetailStack != nullptr)
+        {
+            gpuReferenceHeight = m_utilizationDetailStack->contentsRect().height();
+        }
+        if (gpuReferenceHeight <= 0)
+        {
+            gpuReferenceHeight = m_utilizationGpuSubPage->contentsRect().height();
+        }
+        if (gpuReferenceHeight <= 0)
+        {
+            gpuReferenceHeight = 320;
+        }
+
         const int titleHeight = std::max(
             m_gpuAdapterTitleLabel != nullptr ? m_gpuAdapterTitleLabel->sizeHint().height() : 0,
             44);
@@ -847,8 +973,9 @@ void HardwareDock::adjustUtilizationChartHeights()
         const int detailHeight = m_gpuUtilDetailLabel != nullptr
             ? m_gpuUtilDetailLabel->sizeHint().height()
             : 22;
-        const int reservedHeight = titleHeight + summaryHeight + detailHeight + 24;
-        const int availableHeight = std::max(120, gpuPageHeight - reservedHeight);
+        // reservedHeight 用途：GPU 页非图表区预留高度（含布局间距与上下边距）。
+        const int reservedHeight = titleHeight + summaryHeight + detailHeight + 38;
+        const int availableHeight = std::max(120, gpuReferenceHeight - reservedHeight);
 
         // engineAreaHeight 用途：分配给 2x2 引擎图区域的高度。
         const int engineAreaHeight = static_cast<int>(std::round(static_cast<double>(availableHeight) * 0.52));
@@ -861,8 +988,7 @@ void HardwareDock::adjustUtilizationChartHeights()
             {
                 if (chartEntry.chartView != nullptr)
                 {
-                    chartEntry.chartView->setMinimumHeight(std::max(18, cellHeight - 10));
-                    chartEntry.chartView->setMaximumHeight(std::max(18, cellHeight - 10));
+                    applyMaxHeightIfChanged(chartEntry.chartView, std::max(18, cellHeight - 10));
                 }
                 if (chartEntry.titleLabel != nullptr)
                 {
@@ -870,23 +996,20 @@ void HardwareDock::adjustUtilizationChartHeights()
                     chartEntry.titleLabel->setMaximumHeight(18);
                 }
             }
-            m_gpuEngineHostWidget->setMinimumHeight(engineAreaHeight);
-            m_gpuEngineHostWidget->setMaximumHeight(engineAreaHeight);
+            applyMaxHeightIfChanged(m_gpuEngineHostWidget, engineAreaHeight);
         }
 
         if (m_gpuDedicatedMemoryChartView != nullptr)
         {
-            m_gpuDedicatedMemoryChartView->setMinimumHeight(memoryAreaEachHeight);
-            m_gpuDedicatedMemoryChartView->setMaximumHeight(memoryAreaEachHeight);
+            applyMaxHeightIfChanged(m_gpuDedicatedMemoryChartView, memoryAreaEachHeight);
         }
         if (m_gpuSharedMemoryChartView != nullptr)
         {
-            m_gpuSharedMemoryChartView->setMinimumHeight(memoryAreaEachHeight);
-            m_gpuSharedMemoryChartView->setMaximumHeight(memoryAreaEachHeight);
+            applyMaxHeightIfChanged(m_gpuSharedMemoryChartView, memoryAreaEachHeight);
         }
         if (m_gpuUtilDetailLabel != nullptr)
         {
-            m_gpuUtilDetailLabel->setMaximumHeight(22);
+            m_gpuUtilDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
         }
     }
 }
@@ -921,8 +1044,10 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     m_coreChartScrollArea = new QScrollArea(m_utilizationCpuSubPage);
     m_coreChartScrollArea->setWidgetResizable(true);
     m_coreChartScrollArea->setFrameShape(QFrame::NoFrame);
-    m_coreChartScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // 当核心数量很多时允许内部滚动，避免核心图反向把整个 Dock 顶高到屏幕外。
+    m_coreChartScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_coreChartScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_coreChartScrollArea->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
     m_coreChartHostWidget = new QWidget(m_coreChartScrollArea);
     m_coreChartGridLayout = new QGridLayout(m_coreChartHostWidget);
     m_coreChartGridLayout->setContentsMargins(0, 0, 0, 0);
@@ -1444,6 +1569,8 @@ void HardwareDock::initializeCoreCharts()
             chartEntry.containerWidget);
         chartEntry.titleLabel->setStyleSheet(
             QStringLiteral("color:%1;font-weight:600;").arg(buildStatusColor().name()));
+        chartEntry.titleLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        chartEntry.titleLabel->setMinimumWidth(128);
         containerLayout->addWidget(chartEntry.titleLabel, 0);
 
         chartEntry.lineSeries = new QLineSeries(chartEntry.containerWidget);
@@ -1724,7 +1851,7 @@ void HardwareDock::refreshAllViews()
         networkRxBytesPerSec,
         networkTxBytesPerSec,
         gpuUsagePercent);
-    adjustUtilizationChartHeights();
+    // 高度重排只在 resize/tab 切换时执行，避免每秒重算导致核心图容器抖动。
 
     // 周期刷新策略：
     // - 传感器每 5 秒异步更新一次；
@@ -2326,8 +2453,8 @@ void HardwareDock::updateUtilizationView(
         const double usageValue = coreUsageList[static_cast<std::size_t>(indexValue)];
         chartEntry.titleLabel->setText(
             QStringLiteral("CPU %1  %2%")
-            .arg(indexValue)
-            .arg(usageValue, 0, 'f', 1));
+            .arg(indexValue, 2, 10, QLatin1Char('0'))
+            .arg(usageValue, 5, 'f', 1, QLatin1Char(' ')));
         appendCoreSeriesPoint(chartEntry, usageValue);
     }
 

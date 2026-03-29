@@ -2293,8 +2293,13 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                 }
                 else
                 {
-                    // 批量回填模型：减少每行插入产生的重绘开销。
-                    targetPanel.manualModel->blockSignals(true);
+                    // 批量回填模型：
+                    // - 不再阻断 manualModel 信号，避免 proxy 无法感知新增行导致“日志显示有 rows 但视图空白”。
+                    // - 通过临时关闭视图重绘降低批量插入期间的 UI 开销。
+                    if (targetPanel.fileView != nullptr)
+                    {
+                        targetPanel.fileView->setUpdatesEnabled(false);
+                    }
                     for (const ks::file::ManualDirectoryEntry& itemValue : parsedEntries)
                     {
                         QList<QStandardItem*> rowItems;
@@ -2318,7 +2323,15 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                         rowItems.push_back(new QStandardItem(itemValue.isDirectory ? QStringLiteral("1") : QStringLiteral("0")));
                         targetPanel.manualModel->appendRow(rowItems);
                     }
-                    targetPanel.manualModel->blockSignals(false);
+                    if (targetPanel.manualProxyModel != nullptr)
+                    {
+                        targetPanel.manualProxyModel->invalidate();
+                    }
+                    if (targetPanel.fileView != nullptr)
+                    {
+                        targetPanel.fileView->setRootIndex(QModelIndex());
+                        targetPanel.fileView->setUpdatesEnabled(true);
+                    }
 
                     if (targetPanel.parserStatusLabel != nullptr)
                     {
