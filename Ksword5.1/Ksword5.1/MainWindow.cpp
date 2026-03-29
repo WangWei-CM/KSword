@@ -1182,6 +1182,8 @@ void MainWindow::initDockWidgets()
     m_driverWidget = new DriverDock(this);
     m_kernelWidget = new KernelDock(this);
     m_monitorWidget = new MonitorDock(this);
+    // 监视面板使用独立组件承载四宫格性能图，避免与 WMI/ETW 页面耦合。
+    m_monitorPanelWidget = new MonitorPanelWidget(this);
     m_hardwareWidget = new HardwareDock(this);
     m_privilegeWidget = new PrivilegeDock(this);
     m_settingsWidget = new SettingsDock(this);
@@ -1232,7 +1234,8 @@ void MainWindow::initDockWidgets()
     m_dockCurrentOp = createDockWidget(m_progressWidget, "当前操作");
     m_dockLog = createDockWidget(m_logWidget, "日志输出");
     m_dockImmediate = createDockWidget(m_immediateEditorWidget, "即时窗口");
-    m_dockMonitor = createDockWidget(new QWidget(), "监视面板");
+    // 左下角“监视面板”接入独立性能图组件（CPU每核/内存/磁盘/网络）。
+    m_dockMonitor = createDockWidget(m_monitorPanelWidget, "监视面板");
 
     // 将Dock Widget的切换动作添加到菜单
     QMenu* viewMenu = menuBar()->addMenu("视图(&V)");

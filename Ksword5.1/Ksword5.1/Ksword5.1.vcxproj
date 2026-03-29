@@ -143,6 +143,7 @@
     <ClCompile Include="MainWindow.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.cpp" />
     <ClCompile Include="MonitorDock\MonitorDock.cpp" />
+    <ClCompile Include="MonitorDock\MonitorPanelWidget.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.cpp" />
     <ClCompile Include="OtherDock\OtherDock.cpp" />
     <ClCompile Include="PrivilegeDock\PrivilegeDock.cpp" />
@@ -154,6 +155,7 @@
     <ClCompile Include="SettingsDock\SettingsDock.cpp" />
     <ClCompile Include="UI\CodeEditorWidget.cpp" />
     <ClCompile Include="UI\HexEditorWidget.cpp" />
+    <ClCompile Include="UI\PerformanceNavCard.cpp" />
     <ClCompile Include="UI\UIBaseFunction.cpp" />
     <ClCompile Include="WelcomeDock\WelcomeDock.cpp" />
     <ClCompile Include="WindowDock\WindowDock.cpp" />
@@ -192,6 +194,7 @@
     <QtMoc Include="KernelDock\KernelDock.h" />
     <QtMoc Include="MemoryDock\MemoryDock.h" />
     <QtMoc Include="MonitorDock\MonitorDock.h" />
+    <ClInclude Include="MonitorDock\MonitorPanelWidget.h" />
     <QtMoc Include="NetworkDock\NetworkDock.h" />
     <QtMoc Include="OtherDock\OtherDock.h" />
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h" />
@@ -201,6 +204,7 @@
     <QtMoc Include="SettingsDock\SettingsDock.h" />
     <QtMoc Include="UI\CodeEditorWidget.h" />
     <QtMoc Include="UI\HexEditorWidget.h" />
+    <ClInclude Include="UI\PerformanceNavCard.h" />
     <ClInclude Include="SettingsDock\AppearanceSettings.h" />
     <ClInclude Include="ProcessDock\Process_Tool.h" />
     <ClInclude Include="UI\UI.css\UI_css.h" />

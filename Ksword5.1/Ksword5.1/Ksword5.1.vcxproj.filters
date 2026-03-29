@@ -64,6 +64,9 @@
     <ClCompile Include="MonitorDock\MonitorDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MonitorDock\MonitorPanelWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="NetworkDock\NetworkDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -98,6 +101,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UI\CodeEditorWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\PerformanceNavCard.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Framework\Log.cpp">
@@ -228,6 +234,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="SettingsDock\AppearanceSettings.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MonitorDock\MonitorPanelWidget.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\PerformanceNavCard.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
