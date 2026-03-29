@@ -15,6 +15,7 @@
 #include <QString>
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace ks::file
@@ -53,8 +54,10 @@ namespace ks::file
         std::uint64_t sizeBytes = 0;       // 文件大小（字节）。
         QDateTime modifiedTime;            // 文件最后修改时间。
         std::uint64_t fileReference = 0;   // MFT 记录号（用于二次定位）。
+        int estimatedIntegrityPercent = -1; // 估计完整度百分比，-1 表示当前无法评估。
+        bool hasOriginalName = true;       // 是否保留了原始文件名，false 表示仅能生成占位名。
         bool residentDataReady = false;    // 是否已提取驻留数据。
-        QByteArray residentData;           // 驻留数据内容（仅 resident 文件可用）。
+        QByteArray residentData;           // 驻留数据内容（扫描阶段可为空，恢复时按需回读）。
     };
 
     // ManualFileSystemParser 作用：
@@ -85,13 +88,17 @@ namespace ks::file
         // - 返回本次实际解析到的文件系统类型。
         // 出参 errorTextOut：
         // - 失败时返回可读错误描述。
+        // 出参 usedWinApiFallbackOut：
+        // - true 表示 NTFS 结果已发生 Windows API 回退或补齐；
+        // - false 表示本次结果仍完全来自手动解析流程。
         // 返回值：
         // - 成功返回 true，失败返回 false。
         static bool enumerateDirectory(
             const QString& pathText,
             std::vector<ManualDirectoryEntry>& entriesOut,
             ManualFsType& fsTypeOut,
-            QString& errorTextOut);
+            QString& errorTextOut,
+            bool* usedWinApiFallbackOut = nullptr);
 
         // enumerateNtfsDeletedFiles 作用：
         // - 扫描指定 NTFS 卷内“已删除”文件候选项。
@@ -103,12 +110,16 @@ namespace ks::file
         // - 返回误删候选列表。
         // 出参 errorTextOut：
         // - 失败时返回错误文本。
+        // 入参 progressCallback：
+        // - 可选进度回调，percent 范围约定为 0~100；
+        // - stageText 用于向 UI 展示当前阶段说明。
         // 返回值：
         // - 成功返回 true，失败返回 false。
         static bool enumerateNtfsDeletedFiles(
             const QString& volumeRootPath,
             std::vector<NtfsDeletedFileEntry>& deletedOut,
-            QString& errorTextOut);
+            QString& errorTextOut,
+            const std::function<void(int, const QString&)>& progressCallback = {});
 
         // recoverNtfsResidentFile 作用：
         // - 对单个误删项执行“驻留数据恢复”。
@@ -131,4 +142,3 @@ namespace ks::file
             QString& errorTextOut);
     };
 }
-

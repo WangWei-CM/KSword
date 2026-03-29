@@ -13,6 +13,9 @@
 #include <QResizeEvent>
 #include <QPushButton>
 #include <QTimer>
+#include <QString>
+
+#include <functional>
 #include <string>
 
 // ADS头文件
@@ -46,7 +49,19 @@ class MainWindow : public QMainWindow
     Q_OBJECT
 
 public:
-    MainWindow(QWidget* parent = nullptr);
+    // StartupProgressCallback 作用：
+    // - 主窗口构造期间把细分阶段进度回传给启动画面；
+    // - 主函数可传入 lambda，把文字与百分比同步到 splash。
+    using StartupProgressCallback = std::function<void(int, const QString&)>;
+
+    // 构造函数作用：
+    // - 初始化主窗口菜单、Dock、布局与外观；
+    // - 可选地持续回传启动阶段进度给 splash。
+    // 参数 parent：Qt 父对象。
+    // 参数 startupProgressCallback：启动进度回调；为空时忽略。
+    explicit MainWindow(
+        QWidget* parent = nullptr,
+        StartupProgressCallback startupProgressCallback = StartupProgressCallback());
     ~MainWindow();
 
 protected:
@@ -76,6 +91,13 @@ private:
     bool hasTrustedInstallerPrivilege() const;
     bool enableSeDebugPrivilege(std::string& errorTextOut) const;
     void initDockWidgets();
+
+    // reportStartupProgress 作用：
+    // - 安全调用启动进度回调；
+    // - 让 MainWindow 内部各阶段都能主动更新 splash 文案。
+    // 入参 progressPercent：阶段进度百分比。
+    // 入参 statusText：阶段说明文本。
+    void reportStartupProgress(int progressPercent, const QString& statusText) const;
 
     // initAppearanceSettings 作用：
     // - 读取 SettingsDock/JSON 的外观配置；
@@ -172,6 +194,7 @@ private:
 
     // m_currentAppearanceSettings 作用：缓存当前外观配置（主题/背景图/透明度）。
     ks::settings::AppearanceSettings m_currentAppearanceSettings;
+    StartupProgressCallback m_startupProgressCallback; // m_startupProgressCallback：主窗口启动阶段进度回调。
 };
 
 #endif // MAINWINDOW_H
