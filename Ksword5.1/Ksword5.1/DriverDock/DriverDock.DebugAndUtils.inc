@@ -40,15 +40,123 @@ void DriverDock::runDbwinCaptureLoop()
     // guardThis 用途：回投 UI 更新时判空，避免析构后访问悬空对象。
     QPointer<DriverDock> guardThis(this);
 
-    const HANDLE bufferReadyEventHandle = ::CreateEventW(nullptr, FALSE, FALSE, L"DBWIN_BUFFER_READY");
-    const HANDLE dataReadyEventHandle = ::CreateEventW(nullptr, FALSE, FALSE, L"DBWIN_DATA_READY");
-    const HANDLE sharedBufferHandle = ::CreateFileMappingW(
-        INVALID_HANDLE_VALUE,
-        nullptr,
-        PAGE_READWRITE,
-        0,
-        static_cast<DWORD>(sizeof(DbwinBufferPacket)),
-        L"DBWIN_BUFFER");
+    // ============================================================
+    // DBWIN 句柄初始化策略：
+    // 1) 先尝试 Global\ 前缀（服务/内核侧更常用）；
+    // 2) 失败再回退无前缀名称（兼容旧程序）；
+    // 3) 事件与共享内存都优先 Open，再 Create，减少“重复实例冲突”。
+    // ============================================================
+    const auto openOrCreateEventByName = [](const wchar_t* objectName) -> HANDLE
+        {
+            if (objectName == nullptr)
+            {
+                return nullptr;
+            }
+
+            // 先尝试打开已存在对象，便于附着到同机已有 DBWIN 会话。
+            HANDLE eventHandle = ::OpenEventW(
+                EVENT_MODIFY_STATE | SYNCHRONIZE,
+                FALSE,
+                objectName);
+            if (eventHandle != nullptr)
+            {
+                return eventHandle;
+            }
+
+            // 创建安全描述符：空 DACL 允许 SYSTEM/服务进程写入，降低“内核输出丢失”概率。
+            SECURITY_ATTRIBUTES securityAttr{};
+            SECURITY_DESCRIPTOR securityDesc{};
+            securityAttr.nLength = static_cast<DWORD>(sizeof(securityAttr));
+            securityAttr.bInheritHandle = FALSE;
+            securityAttr.lpSecurityDescriptor = nullptr;
+            if (::InitializeSecurityDescriptor(&securityDesc, SECURITY_DESCRIPTOR_REVISION) != FALSE &&
+                ::SetSecurityDescriptorDacl(&securityDesc, TRUE, nullptr, FALSE) != FALSE)
+            {
+                securityAttr.lpSecurityDescriptor = &securityDesc;
+            }
+
+            eventHandle = ::CreateEventW(
+                &securityAttr,
+                FALSE,
+                FALSE,
+                objectName);
+            return eventHandle;
+        };
+
+    // openOrCreateMappingByName 作用：
+    // - 先打开现有 DBWIN 共享内存，再按需创建；
+    // - 复用已存在缓冲可减少与其它捕获器的抢占冲突。
+    const auto openOrCreateMappingByName = [](const wchar_t* objectName) -> HANDLE
+        {
+            if (objectName == nullptr)
+            {
+                return nullptr;
+            }
+
+            HANDLE mappingHandle = ::OpenFileMappingW(
+                FILE_MAP_READ | FILE_MAP_WRITE,
+                FALSE,
+                objectName);
+            if (mappingHandle != nullptr)
+            {
+                return mappingHandle;
+            }
+
+            SECURITY_ATTRIBUTES securityAttr{};
+            SECURITY_DESCRIPTOR securityDesc{};
+            securityAttr.nLength = static_cast<DWORD>(sizeof(securityAttr));
+            securityAttr.bInheritHandle = FALSE;
+            securityAttr.lpSecurityDescriptor = nullptr;
+            if (::InitializeSecurityDescriptor(&securityDesc, SECURITY_DESCRIPTOR_REVISION) != FALSE &&
+                ::SetSecurityDescriptorDacl(&securityDesc, TRUE, nullptr, FALSE) != FALSE)
+            {
+                securityAttr.lpSecurityDescriptor = &securityDesc;
+            }
+
+            mappingHandle = ::CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                &securityAttr,
+                PAGE_READWRITE,
+                0,
+                static_cast<DWORD>(sizeof(DbwinBufferPacket)),
+                objectName);
+            return mappingHandle;
+        };
+
+    HANDLE bufferReadyEventHandle = nullptr; // bufferReadyEventHandle：通知写入方“缓冲可写”事件句柄。
+    HANDLE dataReadyEventHandle = nullptr;   // dataReadyEventHandle：通知读取方“数据可读”事件句柄。
+    HANDLE sharedBufferHandle = nullptr;     // sharedBufferHandle：DBWIN 共享内存句柄。
+    QString objectScopeText = QStringLiteral("Global"); // objectScopeText：记录当前成功附着的命名空间。
+
+    // 第一轮：Global\ 前缀（优先覆盖系统服务/会话隔离场景）。
+    bufferReadyEventHandle = openOrCreateEventByName(L"Global\\DBWIN_BUFFER_READY");
+    dataReadyEventHandle = openOrCreateEventByName(L"Global\\DBWIN_DATA_READY");
+    sharedBufferHandle = openOrCreateMappingByName(L"Global\\DBWIN_BUFFER");
+
+    // 第二轮：无前缀回退（兼容旧工具或权限不允许创建 Global 对象的环境）。
+    if (bufferReadyEventHandle == nullptr || dataReadyEventHandle == nullptr || sharedBufferHandle == nullptr)
+    {
+        if (sharedBufferHandle != nullptr)
+        {
+            ::CloseHandle(sharedBufferHandle);
+            sharedBufferHandle = nullptr;
+        }
+        if (dataReadyEventHandle != nullptr)
+        {
+            ::CloseHandle(dataReadyEventHandle);
+            dataReadyEventHandle = nullptr;
+        }
+        if (bufferReadyEventHandle != nullptr)
+        {
+            ::CloseHandle(bufferReadyEventHandle);
+            bufferReadyEventHandle = nullptr;
+        }
+
+        objectScopeText = QStringLiteral("Local");
+        bufferReadyEventHandle = openOrCreateEventByName(L"DBWIN_BUFFER_READY");
+        dataReadyEventHandle = openOrCreateEventByName(L"DBWIN_DATA_READY");
+        sharedBufferHandle = openOrCreateMappingByName(L"DBWIN_BUFFER");
+    }
 
     if (bufferReadyEventHandle == nullptr || dataReadyEventHandle == nullptr || sharedBufferHandle == nullptr)
     {
@@ -58,7 +166,7 @@ void DriverDock::runDbwinCaptureLoop()
                 {
                     return;
                 }
-                guardThis->appendDebugOutputLine(QStringLiteral("启动失败：DBWIN 句柄初始化失败。"));
+                guardThis->appendDebugOutputLine(QStringLiteral("启动失败：DBWIN 句柄初始化失败（Global/Local均不可用）。"));
                 guardThis->updateDebugCaptureButtonState();
             }, Qt::QueuedConnection);
 
@@ -102,13 +210,14 @@ void DriverDock::runDbwinCaptureLoop()
         return;
     }
 
-    QMetaObject::invokeMethod(this, [guardThis]()
+    QMetaObject::invokeMethod(this, [guardThis, objectScopeText]()
         {
             if (guardThis == nullptr)
             {
                 return;
             }
-            guardThis->appendDebugOutputLine(QStringLiteral("捕获线程已启动，等待调试输出..."));
+            guardThis->appendDebugOutputLine(
+                QStringLiteral("捕获线程已启动（命名空间=%1），等待调试输出...").arg(objectScopeText));
             guardThis->updateDebugCaptureButtonState();
         }, Qt::QueuedConnection);
 

@@ -452,6 +452,26 @@ namespace
         }
     }
 
+    // 枚举模式文本：用于日志显示，帮助定位“遗漏窗口”问题。
+    QString enumModeText(const int mode)
+    {
+        switch (mode)
+        {
+        case 0:
+            return QStringLiteral("混合枚举(推荐)");
+        case 1:
+            return QStringLiteral("EnumWindows+子窗口");
+        case 2:
+            return QStringLiteral("EnumDesktopWindows+子窗口");
+        case 3:
+            return QStringLiteral("EnumThreadWindows+子窗口");
+        case 4:
+            return QStringLiteral("仅EnumWindows顶层");
+        default:
+            return QStringLiteral("未知模式");
+        }
+    }
+
     // 句柄字符串转 HWND：在详情对话框应用改动时需要把缓存句柄还原。
     HWND toHwnd(const quint64 hwndValue)
     {
@@ -678,11 +698,15 @@ namespace
         detailWindow->activateWindow();
     }
 
-    // 枚举上下文：用于 EnumWindows / EnumChildWindows 回调过程携带输出容器。
+    // 枚举上下文：用于 EnumWindows / EnumDesktopWindows / EnumThreadWindows 回调携带输出容器。
     struct EnumContext
     {
-        std::vector<OtherDock::WindowInfo>* outputList = nullptr; // 输出窗口列表。
-        int zOrderCounter = 0;                                    // 当前枚举序号。
+        std::vector<OtherDock::WindowInfo>* outputList = nullptr; // outputList：输出窗口列表。
+        std::unordered_set<quint64>* seenHandleSet = nullptr;     // seenHandleSet：去重句柄集合。
+        int zOrderCounter = 0;                                    // zOrderCounter：当前枚举序号。
+        bool enumerateChildren = true;                            // enumerateChildren：是否递归子窗口。
+        QString topEnumApiName = QStringLiteral("EnumWindows");   // topEnumApiName：顶层窗口来源标识。
+        QString childEnumApiName = QStringLiteral("EnumChildWindows"); // childEnumApiName：子窗口来源标识。
     };
 
     // 填充单个 WindowInfo：从 HWND 读取常用属性并写入结构体。
@@ -753,22 +777,50 @@ namespace
     }
 
     // 子窗口枚举回调：把每个子窗口都纳入快照，满足“层级视图”需求。
-    BOOL CALLBACK enumChildWindowProc(HWND windowHandle, LPARAM param)
+    // appendWindowSnapshotIfNeeded 作用：
+    // - 根据句柄去重后写入窗口快照；
+    // - 返回 true 表示成功写入，false 表示句柄重复或上下文无效。
+    bool appendWindowSnapshotIfNeeded(
+        EnumContext* context,
+        HWND windowHandle,
+        const bool isChildWindow,
+        const QString& enumApiName)
     {
-        EnumContext* context = reinterpret_cast<EnumContext*>(param);
-        if (context == nullptr || context->outputList == nullptr)
+        if (context == nullptr || context->outputList == nullptr || context->seenHandleSet == nullptr)
         {
-            return TRUE;
+            return false;
         }
+
+        const quint64 hwndValue = static_cast<quint64>(reinterpret_cast<quintptr>(windowHandle));
+        if (context->seenHandleSet->find(hwndValue) != context->seenHandleSet->end())
+        {
+            return false;
+        }
+        context->seenHandleSet->insert(hwndValue);
 
         OtherDock::WindowInfo info;
         fillWindowInfo(
             windowHandle,
             context->zOrderCounter++,
-            true,
-            QStringLiteral("EnumChildWindows"),
+            isChildWindow,
+            enumApiName,
             info);
-        context->outputList->push_back(info);
+        context->outputList->push_back(std::move(info));
+        return true;
+    }
+
+    BOOL CALLBACK enumChildWindowProc(HWND windowHandle, LPARAM param)
+    {
+        EnumContext* context = reinterpret_cast<EnumContext*>(param);
+        if (context == nullptr)
+        {
+            return TRUE;
+        }
+        appendWindowSnapshotIfNeeded(
+            context,
+            windowHandle,
+            true,
+            context->childEnumApiName);
         return TRUE;
     }
 
@@ -776,22 +828,122 @@ namespace
     BOOL CALLBACK enumTopWindowProc(HWND windowHandle, LPARAM param)
     {
         EnumContext* context = reinterpret_cast<EnumContext*>(param);
-        if (context == nullptr || context->outputList == nullptr)
+        if (context == nullptr)
         {
             return TRUE;
         }
 
-        OtherDock::WindowInfo info;
-        fillWindowInfo(
+        appendWindowSnapshotIfNeeded(
+            context,
             windowHandle,
-            context->zOrderCounter++,
             false,
-            QStringLiteral("EnumWindows"),
-            info);
-        context->outputList->push_back(info);
+            context->topEnumApiName);
 
-        ::EnumChildWindows(windowHandle, enumChildWindowProc, param);
+        if (context->enumerateChildren)
+        {
+            ::EnumChildWindows(windowHandle, enumChildWindowProc, param);
+        }
         return TRUE;
+    }
+
+    // enumThreadTopWindowProc 作用：线程窗口枚举回调（用于 EnumThreadWindows）。
+    BOOL CALLBACK enumThreadTopWindowProc(HWND windowHandle, LPARAM param)
+    {
+        return enumTopWindowProc(windowHandle, param);
+    }
+
+    // appendByEnumWindows 作用：使用 EnumWindows 枚举窗口并按配置递归子窗口。
+    void appendByEnumWindows(EnumContext& context)
+    {
+        context.topEnumApiName = QStringLiteral("EnumWindows");
+        context.childEnumApiName = QStringLiteral("EnumChildWindows");
+        ::EnumWindows(enumTopWindowProc, reinterpret_cast<LPARAM>(&context));
+    }
+
+    // appendByEnumDesktopWindows 作用：在当前桌面上下文下枚举窗口。
+    void appendByEnumDesktopWindows(EnumContext& context)
+    {
+        context.topEnumApiName = QStringLiteral("EnumDesktopWindows");
+        context.childEnumApiName = QStringLiteral("EnumDesktopChildWindows");
+        ::EnumDesktopWindows(nullptr, enumTopWindowProc, reinterpret_cast<LPARAM>(&context));
+    }
+
+    // appendByEnumThreadWindows 作用：遍历线程并调用 EnumThreadWindows，补齐漏项。
+    void appendByEnumThreadWindows(EnumContext& context)
+    {
+        context.topEnumApiName = QStringLiteral("EnumThreadWindows");
+        context.childEnumApiName = QStringLiteral("EnumThreadChildWindows");
+
+        HANDLE snapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snapshotHandle == INVALID_HANDLE_VALUE)
+        {
+            return;
+        }
+
+        THREADENTRY32 threadEntry{};
+        threadEntry.dwSize = sizeof(threadEntry);
+        if (::Thread32First(snapshotHandle, &threadEntry) == FALSE)
+        {
+            ::CloseHandle(snapshotHandle);
+            return;
+        }
+
+        do
+        {
+            // threadEntry.th32ThreadID 用途：当前遍历到的线程 ID，作为 EnumThreadWindows 入参。
+            ::EnumThreadWindows(
+                threadEntry.th32ThreadID,
+                enumThreadTopWindowProc,
+                reinterpret_cast<LPARAM>(&context));
+        } while (::Thread32Next(snapshotHandle, &threadEntry) != FALSE);
+
+        ::CloseHandle(snapshotHandle);
+    }
+
+    // collectWindowSnapshotByMode 作用：按用户选择的枚举策略收集窗口快照。
+    void collectWindowSnapshotByMode(const int enumMode, std::vector<OtherDock::WindowInfo>& snapshotOut)
+    {
+        snapshotOut.clear();
+        snapshotOut.reserve(512);
+        std::unordered_set<quint64> seenSet;
+        seenSet.reserve(2048);
+
+        EnumContext context;
+        context.outputList = &snapshotOut;
+        context.seenHandleSet = &seenSet;
+        context.zOrderCounter = 0;
+        context.enumerateChildren = true;
+
+        if (enumMode == 0)
+        {
+            // 混合模式：多策略叠加后去重，优先解决“单一 API 漏项”。
+            appendByEnumWindows(context);
+            appendByEnumDesktopWindows(context);
+            appendByEnumThreadWindows(context);
+            return;
+        }
+
+        if (enumMode == 1)
+        {
+            appendByEnumWindows(context);
+            return;
+        }
+
+        if (enumMode == 2)
+        {
+            appendByEnumDesktopWindows(context);
+            return;
+        }
+
+        if (enumMode == 3)
+        {
+            appendByEnumThreadWindows(context);
+            return;
+        }
+
+        // 模式 4：仅顶层 EnumWindows，不递归子窗口，便于对比排查。
+        context.enumerateChildren = false;
+        appendByEnumWindows(context);
     }
 }
 
@@ -2191,6 +2343,17 @@ void OtherDock::initializeUi()
     m_filterModeCombo->setToolTip(QStringLiteral("选择窗口过滤条件"));
     m_filterModeCombo->setStyleSheet(blueInputStyle());
 
+    m_enumModeCombo = new QComboBox(m_toolBarWidget);
+    m_enumModeCombo->addItems({
+        QStringLiteral("混合枚举"),
+        QStringLiteral("EnumWindows"),
+        QStringLiteral("EnumDesktopWindows"),
+        QStringLiteral("EnumThreadWindows"),
+        QStringLiteral("仅顶层")
+        });
+    m_enumModeCombo->setToolTip(QStringLiteral("选择窗口枚举策略（用于减少漏项）"));
+    m_enumModeCombo->setStyleSheet(blueInputStyle());
+
     m_groupModeCombo = new QComboBox(m_toolBarWidget);
     m_groupModeCombo->addItems({
         QStringLiteral("按进程分组"),
@@ -2220,13 +2383,23 @@ void OtherDock::initializeUi()
     m_toolBarLayout->addWidget(m_autoRefreshIntervalSpin, 0);
     m_toolBarLayout->addWidget(m_filterEdit, 1);
     m_toolBarLayout->addWidget(m_filterModeCombo, 0);
+    m_toolBarLayout->addWidget(m_enumModeCombo, 0);
     m_toolBarLayout->addWidget(m_groupModeCombo, 0);
     m_toolBarLayout->addWidget(m_viewModeCombo, 0);
     m_toolBarLayout->addWidget(m_exportButton, 0);
 
-    // 中部主内容：左侧窗口树，右侧预览与摘要信息。
-    m_mainSplitter = new QSplitter(Qt::Horizontal, this);
-    m_rootLayout->addWidget(m_mainSplitter, 1);
+    // 中部主内容：Tab1=窗口列表，Tab2=桌面管理（SwitchDesktop）。
+    m_contentTabWidget = new QTabWidget(this);
+    m_rootLayout->addWidget(m_contentTabWidget, 1);
+
+    m_windowListPage = new QWidget(m_contentTabWidget);
+    m_windowListPageLayout = new QVBoxLayout(m_windowListPage);
+    m_windowListPageLayout->setContentsMargins(0, 0, 0, 0);
+    m_windowListPageLayout->setSpacing(0);
+
+    // 窗口列表页：左树右预览。
+    m_mainSplitter = new QSplitter(Qt::Horizontal, m_windowListPage);
+    m_windowListPageLayout->addWidget(m_mainSplitter, 1);
 
     m_windowTree = new QTreeWidget(m_mainSplitter);
     m_windowTree->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -2300,6 +2473,56 @@ void OtherDock::initializeUi()
     // 默认把左侧窗口列表区域放宽，避免窗口标题被截断。
     m_mainSplitter->setStretchFactor(0, 4);
     m_mainSplitter->setStretchFactor(1, 1);
+    m_contentTabWidget->addTab(m_windowListPage, QStringLiteral("窗口列表"));
+
+    // 桌面管理页：列出可访问桌面并支持切换。
+    m_desktopPage = new QWidget(m_contentTabWidget);
+    m_desktopPageLayout = new QVBoxLayout(m_desktopPage);
+    m_desktopPageLayout->setContentsMargins(0, 0, 0, 0);
+    m_desktopPageLayout->setSpacing(6);
+
+    m_desktopToolLayout = new QHBoxLayout();
+    m_desktopToolLayout->setContentsMargins(0, 0, 0, 0);
+    m_desktopToolLayout->setSpacing(6);
+
+    m_desktopRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_desktopPage);
+    m_desktopRefreshButton->setToolTip(QStringLiteral("刷新可用桌面列表"));
+    m_desktopRefreshButton->setStyleSheet(blueButtonStyle());
+    m_desktopRefreshButton->setFixedWidth(32);
+
+    m_desktopSwitchButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_desktopPage);
+    m_desktopSwitchButton->setToolTip(QStringLiteral("切换到选中桌面（SwitchDesktop）"));
+    m_desktopSwitchButton->setStyleSheet(blueButtonStyle());
+    m_desktopSwitchButton->setFixedWidth(32);
+
+    m_desktopStatusLabel = new QLabel(QStringLiteral("请选择桌面后点击切换。"), m_desktopPage);
+    m_desktopStatusLabel->setWordWrap(true);
+
+    m_desktopToolLayout->addWidget(m_desktopRefreshButton, 0);
+    m_desktopToolLayout->addWidget(m_desktopSwitchButton, 0);
+    m_desktopToolLayout->addWidget(m_desktopStatusLabel, 1);
+    m_desktopPageLayout->addLayout(m_desktopToolLayout, 0);
+
+    m_desktopTable = new QTableWidget(m_desktopPage);
+    m_desktopTable->setColumnCount(4);
+    m_desktopTable->setHorizontalHeaderLabels({
+        QStringLiteral("桌面名称"),
+        QStringLiteral("当前桌面"),
+        QStringLiteral("可切换"),
+        QStringLiteral("备注")
+        });
+    m_desktopTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_desktopTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_desktopTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_desktopTable->setAlternatingRowColors(true);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    m_desktopTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
+    m_desktopPageLayout->addWidget(m_desktopTable, 1);
+
+    m_contentTabWidget->addTab(m_desktopPage, QStringLiteral("桌面管理"));
 
     // 底部状态栏：展示总数、可见数、系统窗口数和当前选中信息。
     m_statusBar = new QStatusBar(this);
@@ -2316,6 +2539,9 @@ void OtherDock::initializeUi()
     // 自动刷新定时器：由勾选框控制启动和停止。
     m_autoRefreshTimer = new QTimer(this);
     m_autoRefreshTimer->setInterval(m_autoRefreshIntervalSpin->value());
+
+    // 初始化一次桌面列表，确保打开页签后立即可见。
+    refreshDesktopList();
 }
 
 void OtherDock::initializeConnections()
@@ -2380,6 +2606,14 @@ void OtherDock::initializeConnections()
             << filterModeText(index).toStdString()
             << eol;
         rebuildWindowTreeFromSnapshot();
+    });
+    connect(m_enumModeCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        kLogEvent event;
+        info << event
+            << "[OtherDock] 枚举模式切换, mode="
+            << enumModeText(index).toStdString()
+            << eol;
+        refreshWindowListAsync();
     });
     connect(m_groupModeCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
         kLogEvent event;
@@ -2534,6 +2768,247 @@ void OtherDock::initializeConnections()
             << eol;
         QMessageBox::information(this, QStringLiteral("窗口截图"), QStringLiteral("截图已保存：%1").arg(savePath));
     });
+
+    // 桌面管理页连接：刷新按钮、切换按钮、双击表格三条链路都指向同一切换逻辑。
+    connect(m_desktopRefreshButton, &QPushButton::clicked, this, [this]() {
+        kLogEvent event;
+        info << event
+            << "[OtherDock] 用户点击刷新桌面列表。"
+            << eol;
+        refreshDesktopList();
+    });
+    connect(m_desktopSwitchButton, &QPushButton::clicked, this, [this]() {
+        switchToSelectedDesktop();
+    });
+    connect(m_desktopTable, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
+        switchToSelectedDesktop();
+    });
+}
+
+void OtherDock::refreshDesktopList()
+{
+    // refreshEvent 复用整条流程日志，便于追踪“枚举-渲染-状态更新”链路。
+    kLogEvent refreshEvent;
+    info << refreshEvent
+        << "[OtherDock] 开始刷新桌面列表。"
+        << eol;
+
+    // currentDesktopName 用途：记录当前线程所在桌面名称，用于表格中高亮“当前桌面”。
+    QString currentDesktopName;
+    {
+        HDESK currentDesktopHandle = ::GetThreadDesktop(::GetCurrentThreadId());
+        if (currentDesktopHandle != nullptr)
+        {
+            DWORD requiredBytes = 0;
+            ::GetUserObjectInformationW(currentDesktopHandle, UOI_NAME, nullptr, 0, &requiredBytes);
+            if (requiredBytes >= sizeof(wchar_t))
+            {
+                std::vector<wchar_t> nameBuffer(requiredBytes / sizeof(wchar_t) + 1, L'\0');
+                if (::GetUserObjectInformationW(
+                    currentDesktopHandle,
+                    UOI_NAME,
+                    nameBuffer.data(),
+                    static_cast<DWORD>(nameBuffer.size() * sizeof(wchar_t)),
+                    &requiredBytes) != FALSE)
+                {
+                    currentDesktopName = QString::fromWCharArray(nameBuffer.data()).trimmed();
+                }
+            }
+        }
+    }
+
+    // desktopNameList 用途：缓存 EnumDesktopsW 枚举到的桌面名称，随后统一填充到表格。
+    std::vector<QString> desktopNameList;
+    desktopNameList.reserve(16);
+    struct DesktopEnumContext
+    {
+        std::vector<QString>* nameList = nullptr; // nameList：保存枚举结果。
+    };
+    DesktopEnumContext enumContext;
+    enumContext.nameList = &desktopNameList;
+    auto enumDesktopProc = [](LPWSTR desktopName, LPARAM lParam) -> BOOL {
+        DesktopEnumContext* context = reinterpret_cast<DesktopEnumContext*>(lParam);
+        if (context == nullptr || context->nameList == nullptr)
+        {
+            return FALSE;
+        }
+        if (desktopName != nullptr)
+        {
+            context->nameList->push_back(QString::fromWCharArray(desktopName));
+        }
+        return TRUE;
+    };
+
+    HWINSTA windowStationHandle = ::GetProcessWindowStation();
+    if (windowStationHandle == nullptr)
+    {
+        const DWORD errorCode = ::GetLastError();
+        err << refreshEvent
+            << "[OtherDock] 刷新桌面列表失败：GetProcessWindowStation失败, code="
+            << errorCode
+            << eol;
+        m_desktopStatusLabel->setText(QStringLiteral("刷新失败：无法获取窗口站，错误码=%1").arg(errorCode));
+        m_desktopTable->setRowCount(0);
+        return;
+    }
+
+    const BOOL enumOk = ::EnumDesktopsW(
+        windowStationHandle,
+        enumDesktopProc,
+        reinterpret_cast<LPARAM>(&enumContext));
+    if (enumOk == FALSE)
+    {
+        const DWORD errorCode = ::GetLastError();
+        err << refreshEvent
+            << "[OtherDock] 刷新桌面列表失败：EnumDesktopsW失败, code="
+            << errorCode
+            << eol;
+        m_desktopStatusLabel->setText(QStringLiteral("刷新失败：EnumDesktopsW 错误码=%1").arg(errorCode));
+        m_desktopTable->setRowCount(0);
+        return;
+    }
+
+    std::sort(desktopNameList.begin(), desktopNameList.end(), [](const QString& left, const QString& right) {
+        return left.localeAwareCompare(right) < 0;
+    });
+    desktopNameList.erase(
+        std::unique(desktopNameList.begin(), desktopNameList.end()),
+        desktopNameList.end());
+
+    m_desktopTable->setRowCount(static_cast<int>(desktopNameList.size()));
+    for (int row = 0; row < static_cast<int>(desktopNameList.size()); ++row)
+    {
+        const QString& desktopName = desktopNameList[static_cast<std::size_t>(row)];
+        QTableWidgetItem* nameItem = new QTableWidgetItem(desktopName);
+        nameItem->setData(Qt::UserRole, desktopName);
+        m_desktopTable->setItem(row, 0, nameItem);
+
+        const bool isCurrentDesktop = !currentDesktopName.isEmpty()
+            && QString::compare(desktopName, currentDesktopName, Qt::CaseInsensitive) == 0;
+        m_desktopTable->setItem(
+            row,
+            1,
+            new QTableWidgetItem(isCurrentDesktop ? QStringLiteral("是") : QStringLiteral("否")));
+
+        // canSwitch 用途：标识目标桌面是否可用 SwitchDesktop 权限打开。
+        bool canSwitch = false;
+        QString remarkText = QStringLiteral("可切换");
+        HDESK desktopHandle = ::OpenDesktopW(
+            reinterpret_cast<LPCWSTR>(desktopName.utf16()),
+            0,
+            FALSE,
+            DESKTOP_SWITCHDESKTOP | DESKTOP_READOBJECTS);
+        if (desktopHandle != nullptr)
+        {
+            canSwitch = true;
+            ::CloseDesktop(desktopHandle);
+        }
+        else
+        {
+            const DWORD errorCode = ::GetLastError();
+            remarkText = QStringLiteral("不可切换，错误码=%1").arg(errorCode);
+        }
+
+        m_desktopTable->setItem(row, 2, new QTableWidgetItem(canSwitch ? QStringLiteral("是") : QStringLiteral("否")));
+        m_desktopTable->setItem(row, 3, new QTableWidgetItem(remarkText));
+    }
+
+    if (m_desktopTable->rowCount() > 0)
+    {
+        m_desktopTable->selectRow(0);
+    }
+    m_desktopStatusLabel->setText(QStringLiteral("已枚举 %1 个桌面，当前桌面：%2")
+        .arg(desktopNameList.size())
+        .arg(currentDesktopName.isEmpty() ? QStringLiteral("<未知>") : currentDesktopName));
+
+    info << refreshEvent
+        << "[OtherDock] 桌面列表刷新完成, count="
+        << desktopNameList.size()
+        << ", currentDesktop="
+        << currentDesktopName.toStdString()
+        << eol;
+}
+
+void OtherDock::switchToSelectedDesktop()
+{
+    // actionEvent 用途：复用“参数校验-切换调用-结果回写”整条日志链路。
+    kLogEvent actionEvent;
+
+    if (m_desktopTable == nullptr || m_desktopTable->currentRow() < 0)
+    {
+        warn << actionEvent
+            << "[OtherDock] 切换桌面失败：未选中目标桌面。"
+            << eol;
+        m_desktopStatusLabel->setText(QStringLiteral("请先选择要切换的桌面。"));
+        return;
+    }
+
+    const int row = m_desktopTable->currentRow();
+    QTableWidgetItem* nameItem = m_desktopTable->item(row, 0);
+    if (nameItem == nullptr)
+    {
+        err << actionEvent
+            << "[OtherDock] 切换桌面失败：目标行缺少名称列。"
+            << eol;
+        m_desktopStatusLabel->setText(QStringLiteral("切换失败：桌面名称为空。"));
+        return;
+    }
+
+    const QString desktopName = nameItem->data(Qt::UserRole).toString().trimmed();
+    if (desktopName.isEmpty())
+    {
+        err << actionEvent
+            << "[OtherDock] 切换桌面失败：桌面名称为空字符串。"
+            << eol;
+        m_desktopStatusLabel->setText(QStringLiteral("切换失败：桌面名称为空。"));
+        return;
+    }
+
+    info << actionEvent
+        << "[OtherDock] 开始切换桌面, desktopName="
+        << desktopName.toStdString()
+        << eol;
+
+    HDESK desktopHandle = ::OpenDesktopW(
+        reinterpret_cast<LPCWSTR>(desktopName.utf16()),
+        0,
+        FALSE,
+        DESKTOP_SWITCHDESKTOP | DESKTOP_READOBJECTS);
+    if (desktopHandle == nullptr)
+    {
+        const DWORD errorCode = ::GetLastError();
+        err << actionEvent
+            << "[OtherDock] 切换桌面失败：OpenDesktopW失败, desktop="
+            << desktopName.toStdString()
+            << ", code="
+            << errorCode
+            << eol;
+        m_desktopStatusLabel->setText(QStringLiteral("切换失败：OpenDesktopW 错误码=%1").arg(errorCode));
+        return;
+    }
+
+    const BOOL switchOk = ::SwitchDesktop(desktopHandle);
+    const DWORD switchError = switchOk ? ERROR_SUCCESS : ::GetLastError();
+    ::CloseDesktop(desktopHandle);
+
+    if (switchOk == FALSE)
+    {
+        err << actionEvent
+            << "[OtherDock] 切换桌面失败：SwitchDesktop失败, desktop="
+            << desktopName.toStdString()
+            << ", code="
+            << switchError
+            << eol;
+        m_desktopStatusLabel->setText(QStringLiteral("切换失败：SwitchDesktop 错误码=%1").arg(switchError));
+        return;
+    }
+
+    info << actionEvent
+        << "[OtherDock] 切换桌面成功, desktop="
+        << desktopName.toStdString()
+        << eol;
+    m_desktopStatusLabel->setText(QStringLiteral("切换成功：%1").arg(desktopName));
+    refreshDesktopList();
 }
 
 void OtherDock::applyViewMode()
@@ -2600,11 +3075,14 @@ void OtherDock::refreshWindowListAsync()
 
     // 异步刷新链路统一复用 refreshEvent，确保“开始/完成”日志可按同一 GUID 追踪。
     kLogEvent refreshEvent;
+    const int enumMode = m_enumModeCombo != nullptr ? m_enumModeCombo->currentIndex() : 0;
     info << refreshEvent
         << "[OtherDock] 启动异步窗口枚举, filterMode="
         << filterModeText(m_filterModeCombo->currentIndex()).toStdString()
         << ", groupMode="
         << groupModeText(m_groupModeCombo->currentIndex()).toStdString()
+        << ", enumMode="
+        << enumModeText(enumMode).toStdString()
         << ", keyword="
         << m_filterEdit->text().toStdString()
         << eol;
@@ -2616,20 +3094,16 @@ void OtherDock::refreshWindowListAsync()
     kPro.set(m_refreshProgressPid, "开始枚举窗口", 0, 5.0f);
 
     QPointer<OtherDock> guardThis(this);
-    std::thread([guardThis, refreshEvent]() {
+    std::thread([guardThis, refreshEvent, enumMode]() {
         std::vector<WindowInfo> snapshot;
-        snapshot.reserve(512);
-
-        EnumContext context;
-        context.outputList = &snapshot;
-        context.zOrderCounter = 0;
-        ::EnumWindows(enumTopWindowProc, reinterpret_cast<LPARAM>(&context));
+        // collectWindowSnapshotByMode 用途：根据用户选择策略采集窗口并去重。
+        collectWindowSnapshotByMode(enumMode, snapshot);
 
         if (guardThis == nullptr)
         {
             return;
         }
-        QMetaObject::invokeMethod(qApp, [guardThis, snapshot = std::move(snapshot), refreshEvent]() mutable {
+        QMetaObject::invokeMethod(qApp, [guardThis, snapshot = std::move(snapshot), refreshEvent, enumMode]() mutable {
             if (guardThis == nullptr)
             {
                 return;
@@ -2708,6 +3182,8 @@ void OtherDock::refreshWindowListAsync()
             info << refreshEvent
                 << "[OtherDock] 枚举完成，当前窗口="
                 << snapshot.size()
+                << ", enumMode="
+                << enumModeText(enumMode).toStdString()
                 << ", 退出保留="
                 << guardThis->m_exitedOneRound.size()
                 << eol;

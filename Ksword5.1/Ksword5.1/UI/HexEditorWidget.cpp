@@ -18,6 +18,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFontDatabase>
+#include <QFontMetrics>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>

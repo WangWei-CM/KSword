@@ -492,6 +492,8 @@ void HexEditorWidget::selectLinearRange(
     const std::uint64_t safeCurrentOffset = std::min(currentOffset, maxOffset);
     const std::uint64_t rangeStartOffset = std::min(safeAnchorOffset, safeCurrentOffset);
     const std::uint64_t rangeEndOffset = std::max(safeAnchorOffset, safeCurrentOffset);
+    const int startRowIndex = static_cast<int>(rangeStartOffset / static_cast<std::uint64_t>(m_bytesPerRow));
+    const int endRowIndex = static_cast<int>(rangeEndOffset / static_cast<std::uint64_t>(m_bytesPerRow));
 
     m_hexTable->clearSelection();
 
@@ -520,6 +522,16 @@ void HexEditorWidget::selectLinearRange(
         }
     }
 
+    // 同步选中 ASCII 列对应行，确保从 ASCII 区域拖拽时有可见反馈。
+    for (int rowIndex = startRowIndex; rowIndex <= endRowIndex; ++rowIndex)
+    {
+        QTableWidgetItem* asciiItem = m_hexTable->item(rowIndex, m_bytesPerRow + 1);
+        if (asciiItem != nullptr)
+        {
+            asciiItem->setSelected(true);
+        }
+    }
+
     m_linearSelectAnchorOffset = safeAnchorOffset;
     m_linearSelectAnchorValid = true;
 }
@@ -529,14 +541,25 @@ bool HexEditorWidget::rowColumnToOffset(
     const int column,
     std::uint64_t& offsetOut) const
 {
-    if (row < 0 || column <= 0 || column > m_bytesPerRow)
+    if (row < 0 || column <= 0)
+    {
+        return false;
+    }
+
+    // ASCII 列统一映射到“该行首字节”，避免右键/当前单元格在 ASCII 列时失效。
+    int normalizedColumn = column;
+    if (normalizedColumn == m_bytesPerRow + 1)
+    {
+        normalizedColumn = 1;
+    }
+    if (normalizedColumn > m_bytesPerRow)
     {
         return false;
     }
 
     const std::uint64_t offset =
         static_cast<std::uint64_t>(row) * static_cast<std::uint64_t>(m_bytesPerRow) +
-        static_cast<std::uint64_t>(column - 1);
+        static_cast<std::uint64_t>(normalizedColumn - 1);
 
     if (offset >= static_cast<std::uint64_t>(m_buffer.size()))
     {
@@ -589,6 +612,35 @@ bool HexEditorWidget::viewportPosToOffset(
     {
         columnIndex = 1;
     }
+
+    // ASCII 列按字符位置映射到具体字节，修复“ASCII 区域无法跨行连续选择”。
+    if (columnIndex == m_bytesPerRow + 1)
+    {
+        const std::uint64_t rowStartOffset =
+            static_cast<std::uint64_t>(rowIndex) * static_cast<std::uint64_t>(m_bytesPerRow);
+        const std::uint64_t remainBytes =
+            static_cast<std::uint64_t>(m_buffer.size()) > rowStartOffset
+            ? static_cast<std::uint64_t>(m_buffer.size()) - rowStartOffset
+            : 0;
+        const int validBytesInRow = static_cast<int>(
+            std::min<std::uint64_t>(static_cast<std::uint64_t>(m_bytesPerRow), remainBytes));
+        if (validBytesInRow <= 0)
+        {
+            return false;
+        }
+
+        const QModelIndex asciiModelIndex = m_hexTable->model()->index(rowIndex, m_bytesPerRow + 1);
+        const QRect asciiRect = m_hexTable->visualRect(asciiModelIndex);
+        const QFontMetrics fontMetrics(m_hexTable->font());
+        const int charWidth = std::max(1, fontMetrics.horizontalAdvance(QChar('M')));
+        const int relativeX = std::max(0, viewportPos.x() - asciiRect.left());
+        int charIndex = relativeX / charWidth;
+        charIndex = std::clamp(charIndex, 0, validBytesInRow - 1);
+
+        offsetOut = rowStartOffset + static_cast<std::uint64_t>(charIndex);
+        return true;
+    }
+
     if (columnIndex > m_bytesPerRow)
     {
         columnIndex = m_bytesPerRow;

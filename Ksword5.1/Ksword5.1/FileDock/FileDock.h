@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "ManualFileSystemParser.h"
 
 #include <QWidget>
 
@@ -25,11 +26,13 @@ class QLabel;
 class QLineEdit;
 class QMenu;
 class QPushButton;
+class QStandardItemModel;
 class QStackedWidget;
 class QSortFilterProxyModel;
 class QSplitter;
 class QStatusBar;
 class QTabWidget;
+class QTableWidget;
 class QTreeView;
 class QVBoxLayout;
 class QWidget;
@@ -80,24 +83,30 @@ private:
         QCheckBox* showSystemCheck = nullptr;  // 显示系统文件开关。
         QCheckBox* showHiddenCheck = nullptr;  // 显示隐藏文件开关。
         QComboBox* sortModeCombo = nullptr;    // 排序方式选择。
+        QComboBox* readModeCombo = nullptr;    // 读取方式（Windows API/手动解析）。
         QLineEdit* filterEdit = nullptr;       // 文件名快速过滤输入框。
 
         QTreeView* fileView = nullptr;         // 文件树视图。
         QFileSystemModel* fsModel = nullptr;   // 原始文件系统模型。
         QSortFilterProxyModel* proxyModel = nullptr; // 过滤代理模型。
+        QStandardItemModel* manualModel = nullptr;   // 手动解析原始模型。
+        QSortFilterProxyModel* manualProxyModel = nullptr; // 手动解析代理模型。
 
         QStatusBar* statusBar = nullptr;       // 面板状态栏。
         QLabel* pathStatusLabel = nullptr;     // 当前路径状态。
         QLabel* selectionStatusLabel = nullptr; // 选中数量/大小状态。
         QLabel* diskStatusLabel = nullptr;     // 磁盘空间状态。
+        QLabel* parserStatusLabel = nullptr;   // 当前解析器状态提示。
 
         std::vector<QString> history;          // 路径历史列表。
         int historyIndex = -1;                 // 当前历史索引。
         QString currentPath;                   // 当前目录路径。
+        QString manualLoadedPath;              // 手动解析模型当前已加载目录路径。
         QString panelNameText;                 // 面板名称（日志与提示使用）。
         QString lastStatusLogSignature;        // 状态栏日志去重签名。
         QString lastFilterLogSignature;        // 过滤参数日志去重签名。
         bool pathEditMode = false;             // 当前是否处于路径编辑模式。
+        ks::file::ManualFsType lastManualFsType = ks::file::ManualFsType::Unknown; // 最近一次手动解析识别到的FS类型。
     };
 
 private:
@@ -116,6 +125,10 @@ private:
     // - 作用：绑定单个面板的信号槽交互逻辑。
     // - 参数 panel：目标面板。
     void initializeConnections(FilePanelWidgets& panel);
+
+    // initializeRecoveryPage：
+    // - 作用：初始化“文件恢复”竖排 Tab 页面。
+    void initializeRecoveryPage();
 
     // ======================= 导航与状态 =======================
     // navigateToPath：
@@ -144,6 +157,19 @@ private:
     // applyPanelFilterAndSort：
     // - 作用：应用显示隐藏文件、名称过滤和排序模式。
     void applyPanelFilterAndSort(FilePanelWidgets& panel);
+
+    // applyReadModeToPanel：
+    // - 作用：根据读取模式切换面板模型（Windows API / 手动解析）。
+    void applyReadModeToPanel(FilePanelWidgets& panel);
+
+    // reloadManualModel：
+    // - 作用：手动解析当前目录并填充模型。
+    // - 参数 showWarningMessage：是否在失败时弹框提示。
+    bool reloadManualModel(FilePanelWidgets& panel, bool showWarningMessage);
+
+    // currentModeIsManual：
+    // - 作用：判断当前面板是否处于手动解析模式。
+    bool currentModeIsManual(const FilePanelWidgets& panel) const;
 
     // ======================= 文件操作 =========================
     // showPanelContextMenu：
@@ -209,10 +235,35 @@ private:
     // - 作用：格式化字节大小（B/KB/MB/GB）。
     static QString formatSizeText(std::uint64_t sizeBytes);
 
+    // ======================= 文件恢复 =========================
+    // refreshRecoveryVolumeList：
+    // - 作用：刷新可扫描卷列表（仅展示 NTFS 卷）。
+    void refreshRecoveryVolumeList();
+
+    // scanDeletedFilesForRecovery：
+    // - 作用：扫描当前卷的 NTFS 删除项并展示到表格。
+    void scanDeletedFilesForRecovery();
+
+    // recoverSelectedDeletedFiles：
+    // - 作用：对选中删除项执行恢复（当前支持 resident 数据恢复）。
+    void recoverSelectedDeletedFiles();
+
 private:
     // 根布局控件。
     QVBoxLayout* m_rootLayout = nullptr;       // FileDock 根布局。
+    QTabWidget* m_rootTabWidget = nullptr;     // 竖排根 Tab（文件管理 / 文件恢复）。
+    QWidget* m_fileManagerPage = nullptr;      // 文件管理页容器。
+    QWidget* m_fileRecoveryPage = nullptr;     // 文件恢复页容器。
     QSplitter* m_mainSplitter = nullptr;       // 左右分栏分割器。
+
+    // 文件恢复页控件。
+    QComboBox* m_recoveryVolumeCombo = nullptr; // 恢复卷选择下拉框。
+    QPushButton* m_recoveryRefreshButton = nullptr; // 刷新卷按钮。
+    QPushButton* m_recoveryScanButton = nullptr;    // 扫描按钮。
+    QPushButton* m_recoveryExportButton = nullptr;  // 恢复导出按钮。
+    QTableWidget* m_recoveryTable = nullptr;        // 删除项结果表格。
+    QLabel* m_recoveryStatusLabel = nullptr;        // 扫描状态标签。
+    std::vector<ks::file::NtfsDeletedFileEntry> m_deletedRecoveryItems; // 删除项缓存（含 resident 数据）。
 
     // 左右面板实例。
     FilePanelWidgets m_leftPanel;              // 左侧面板状态。

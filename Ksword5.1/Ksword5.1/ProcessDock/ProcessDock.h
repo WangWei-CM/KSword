@@ -139,6 +139,7 @@ private:
         std::size_t reusedProcessCount = 0;     // 本轮复用旧缓存的数量。
         std::size_t staticFilledCount = 0;      // 本轮实际补齐静态详情的数量。
         std::size_t staticDeferredCount = 0;    // 本轮因预算或模式延后的静态详情数量。
+        std::size_t imagePathFilledCount = 0;   // 本轮额外补齐 imagePath 的数量（用于图标显示）。
         std::uint64_t workerElapsedMs = 0;      // 后台线程本轮构建结果耗时（毫秒）。
         int selectedStrategyIndex = 0;          // UI 选择的策略下标（0/1）。
         ks::process::ProcessEnumStrategy selectedStrategy{}; // 由下标映射的策略枚举。

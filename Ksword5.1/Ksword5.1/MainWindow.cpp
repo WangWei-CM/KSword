@@ -1182,6 +1182,7 @@ void MainWindow::initDockWidgets()
     m_driverWidget = new DriverDock(this);
     m_kernelWidget = new KernelDock(this);
     m_monitorWidget = new MonitorDock(this);
+    m_hardwareWidget = new HardwareDock(this);
     m_privilegeWidget = new PrivilegeDock(this);
     m_settingsWidget = new SettingsDock(this);
     m_windowWidget = new WindowDock(this);
@@ -1221,6 +1222,7 @@ void MainWindow::initDockWidgets()
     m_dockDriver = createDockWidget(m_driverWidget, "驱动");
     m_dockKernel = createDockWidget(m_kernelWidget, "内核");
     m_dockMonitorTab = createDockWidget(m_monitorWidget, "监控");
+    m_dockHardware = createDockWidget(m_hardwareWidget, "硬件");
     m_dockPrivilege = createDockWidget(m_privilegeWidget, "权限");
     m_dockSettings = createDockWidget(m_settingsWidget, "设置");
     m_dockWindow = createDockWidget(m_windowWidget, "窗口");
@@ -1236,7 +1238,7 @@ void MainWindow::initDockWidgets()
     QMenu* viewMenu = menuBar()->addMenu("视图(&V)");
     QList<ads::CDockWidget*> allDocks = {
         m_dockWelcome, m_dockProcess, m_dockNetwork, m_dockMemory,
-        m_dockFile, m_dockDriver, m_dockKernel, m_dockMonitorTab,
+        m_dockFile, m_dockDriver, m_dockKernel, m_dockMonitorTab, m_dockHardware,
         m_dockPrivilege, m_dockSettings, m_dockWindow, m_dockRegistry,
         m_dockCurrentOp, m_dockLog, m_dockImmediate, m_dockMonitor
     };
@@ -1266,6 +1268,7 @@ void MainWindow::setupDockLayout()
     m_pDockManager->addDockWidgetTabToArea(m_dockDriver, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockKernel, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockMonitorTab, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockHardware, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockPrivilege, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockSettings, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockWindow, leftDockArea);

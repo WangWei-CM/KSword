@@ -22,6 +22,8 @@ class QLineEdit;
 class QPushButton;
 class QSplitter;
 class QSpinBox;
+class QTableWidget;
+class QTabWidget;
 class QStatusBar;
 class QTextEdit;
 class QTimer;
@@ -91,6 +93,8 @@ private:
     bool passFilter(const WindowInfo& info) const;
     void updateStatusBar();
     void updatePreviewPanel(const WindowInfo* info);
+    void refreshDesktopList();
+    void switchToSelectedDesktop();
 
     // ===================== 交互操作 ======================
     void showWindowContextMenu(const QPoint& localPos);
@@ -108,11 +112,17 @@ private:
     QSpinBox* m_autoRefreshIntervalSpin = nullptr; // 自动刷新间隔（ms）。
     QLineEdit* m_filterEdit = nullptr;            // 关键字过滤输入。
     QComboBox* m_filterModeCombo = nullptr;       // 条件过滤下拉框。
+    QComboBox* m_enumModeCombo = nullptr;         // 枚举方式下拉框。
     QComboBox* m_groupModeCombo = nullptr;        // 分组方式下拉框。
     QComboBox* m_viewModeCombo = nullptr;         // 显示样式切换。
     QPushButton* m_exportButton = nullptr;        // 导出按钮。
 
-    // 中部主区域：左树右预览。
+    // 中部主区域：主Tab（窗口列表/桌面管理）。
+    QTabWidget* m_contentTabWidget = nullptr;     // 主内容 Tab 容器。
+    QWidget* m_windowListPage = nullptr;          // 窗口列表页。
+    QVBoxLayout* m_windowListPageLayout = nullptr;// 窗口列表页布局。
+
+    // 窗口列表页：左树右预览。
     QSplitter* m_mainSplitter = nullptr;          // 左右分割器。
     QTreeWidget* m_windowTree = nullptr;          // 窗口树/列表。
     QWidget* m_previewWidget = nullptr;           // 右侧预览容器。
@@ -120,6 +130,15 @@ private:
     QLabel* m_thumbnailLabel = nullptr;           // 窗口缩略图。
     QPushButton* m_captureButton = nullptr;       // 截图按钮。
     QTextEdit* m_quickInfoText = nullptr;         // 关键属性摘要文本。
+
+    // 桌面管理页：枚举可切换桌面（SwitchDesktop）。
+    QWidget* m_desktopPage = nullptr;             // 桌面管理页容器。
+    QVBoxLayout* m_desktopPageLayout = nullptr;   // 桌面管理页主布局。
+    QHBoxLayout* m_desktopToolLayout = nullptr;   // 桌面管理工具栏布局。
+    QPushButton* m_desktopRefreshButton = nullptr;// 刷新桌面列表按钮。
+    QPushButton* m_desktopSwitchButton = nullptr; // 切换到选中桌面按钮。
+    QTableWidget* m_desktopTable = nullptr;       // 桌面列表表格。
+    QLabel* m_desktopStatusLabel = nullptr;       // 桌面状态提示标签。
 
     // 底部状态栏。
     QStatusBar* m_statusBar = nullptr;            // 状态栏。
