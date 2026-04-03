@@ -1,3 +1,6 @@
+#include "NetworkDock.InternalCommon.h"
+
+using namespace network_dock_detail;
 void NetworkDock::applyMonitorFilters()
 {
     // 保护性检查：过滤控件尚未初始化时直接返回，避免空指针访问。
@@ -349,4 +352,6 @@ void NetworkDock::gotoProcessDetailByTableRow(const int row)
         << "[NetworkDock] 打开进程详情窗口, pid=" << targetPid
         << eol;
 }
+
+
 

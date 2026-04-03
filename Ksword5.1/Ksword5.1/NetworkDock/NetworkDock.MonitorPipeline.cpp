@@ -1,3 +1,6 @@
+#include "NetworkDock.InternalCommon.h"
+
+using namespace network_dock_detail;
 void NetworkDock::onPacketCaptured(const ks::network::PacketRecord& packetRecord)
 {
     // 缓存报文实体：用于详情窗口通过序号回查完整字节内容。
@@ -284,4 +287,6 @@ void NetworkDock::clearAllPacketRows()
     kLogEvent clearEvent;
     info << clearEvent << "[NetworkDock] 用户清空了网络报文列表。" << eol;
 }
+
+
 

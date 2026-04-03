@@ -17,6 +17,7 @@
 #include <QAbstractAnimation>
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QGraphicsOpacityEffect>
 
 // Qt Charts头文件（条形图相关）
 #include <QtCharts/QChart>
@@ -25,6 +26,11 @@
 #include <QtCharts/QValueAxis>
 #include <QtCharts/QChartView>
 #include "hGet.h"
+
+class HudPerformancePanel;
+class QTabWidget;
+class QTimer;
+
 // 自定义OpenGL部件，用于硬件加速渲染
 class OpenGLWidget : public QOpenGLWidget, protected QOpenGLFunctions
 {
@@ -71,7 +77,20 @@ protected:
     void paintEvent(QPaintEvent* event) override;
 
 private:
-    static const int HOTKEY_ID_CTRL = 1;
+    struct HudConfig
+    {
+        QString backgroundImagePath;
+        int leftWidgetOpacityPercent = 100;
+        int rightWidgetOpacityPercent = 100;
+        QString leftWidgetBackgroundColor = "#000000";
+        int leftWidgetBackgroundOpacityPercent = 0;
+        QString rightWidgetBackgroundColor = "#000000";
+        int rightWidgetBackgroundOpacityPercent = 0;
+    };
+
+    static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
+    static bool IsRightCtrlEvent(WPARAM wParam, const KBDLLHOOKSTRUCT* keyboardInfo);
+
     qreal m_windowOpacity;
     bool m_isVisible;
     bool m_isAnimating;
@@ -84,6 +103,7 @@ private:
     OpenGLWidget* m_glWidget;
 
     QPixmap m_cachedContent;
+    QPixmap m_lastStableContent;
     qreal m_contentScale;
 
     // 调试相关
@@ -93,38 +113,47 @@ private:
 
     void toggleVisibility();
     void initializeAnimations();
-    void cacheWindowContent();
+    HudConfig loadOrCreateConfig() const;
+    void applyHudConfig(const HudConfig& config);
+    void cacheWindowContent(bool refreshFromLiveScene = true);
     void debugOutput(const QString& message);
     void clearCache();
     void forceUpdateCache();
 
-    HardwareMonitor* m_hwMonitor;    // 硬件监控对象（来自hGet.h）
-    QTimer* m_updateTimer;           // 1秒更新定时器
+    HardwareMonitor* m_hwMonitor = nullptr;    // 旧硬件监控对象（已停用）
+    QTimer* m_updateTimer = nullptr;           // 旧定时器（已停用）
 
     // 2. 右侧TabWidget及图表相关
-    QTabWidget* m_rightTabWidget;    // 右侧Tab容器
+    QTabWidget* m_rightTabWidget = nullptr;    // 右侧Tab容器
+    HudPerformancePanel* m_performancePanel = nullptr;
+    QGraphicsOpacityEffect* m_leftOpacityEffect = nullptr;
+    QGraphicsOpacityEffect* m_rightOpacityEffect = nullptr;
     // CPU图表（系列+数据集+坐标轴+视图）
-    QBarSeries* m_cpuSeries;
+    QBarSeries* m_cpuSeries = nullptr;
     QList<QBarSet*> m_cpuBarSets;
-    QValueAxis* m_cpuAxisX;
-    QValueAxis* m_cpuAxisY;
-    QChartView* m_cpuChartView;
+    QValueAxis* m_cpuAxisX = nullptr;
+    QValueAxis* m_cpuAxisY = nullptr;
+    QChartView* m_cpuChartView = nullptr;
     // RAM图表（同上）
-    QBarSeries* m_ramSeries;
+    QBarSeries* m_ramSeries = nullptr;
     QList<QBarSet*> m_ramBarSets;
-    QValueAxis* m_ramAxisX;
-    QValueAxis* m_ramAxisY;
-    QChartView* m_ramChartView;
+    QValueAxis* m_ramAxisX = nullptr;
+    QValueAxis* m_ramAxisY = nullptr;
+    QChartView* m_ramChartView = nullptr;
     // Disk图表（同上）
-    QBarSeries* m_diskSeries;
+    QBarSeries* m_diskSeries = nullptr;
     QList<QBarSet*> m_diskBarSets;
-    QValueAxis* m_diskAxisX;
-    QValueAxis* m_diskAxisY;
-    QChartView* m_diskChartView;
+    QValueAxis* m_diskAxisX = nullptr;
+    QValueAxis* m_diskAxisY = nullptr;
+    QChartView* m_diskChartView = nullptr;
 
     // 3. 新增函数声明
     void initCPUChart();     // 初始化CPU条形图
     void initRAMChart();     // 初始化RAM条形图
     void initDiskChart();    // 初始化Disk条形图
     void onUpdateTimerTimeout(); // 定时器槽函数（每秒更新数据）
+
+    static HHOOK s_keyboardHook;
+    static KswordHUD* s_instance;
+    static bool s_rightCtrlDown;
 };

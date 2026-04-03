@@ -145,6 +145,16 @@
     <ClCompile Include="MonitorDock\MonitorDock.cpp" />
     <ClCompile Include="MonitorDock\MonitorPanelWidget.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.UiBuild.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.UiConnections.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.MonitorPipeline.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.FilterAndProcessActions.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.RateLimit.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.ConnectionManage.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.ManualRequest.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.NetworkDiagnostics.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.DetailAndUtils.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.InternalHelpers.cpp" />
     <ClCompile Include="OtherDock\OtherDock.cpp" />
     <ClCompile Include="PrivilegeDock\PrivilegeDock.cpp" />
     <ClCompile Include="RegistryDock_Themed.cpp" />
@@ -196,6 +206,8 @@
     <QtMoc Include="MonitorDock\MonitorDock.h" />
     <ClInclude Include="MonitorDock\MonitorPanelWidget.h" />
     <QtMoc Include="NetworkDock\NetworkDock.h" />
+    <ClInclude Include="NetworkDock\NetworkDock.InternalCommon.h" />
+    <ClInclude Include="NetworkDock\NetworkDock.InternalHelpers.h" />
     <QtMoc Include="OtherDock\OtherDock.h" />
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h" />
     <QtMoc Include="RegistryDock\RegistryDock.h" />

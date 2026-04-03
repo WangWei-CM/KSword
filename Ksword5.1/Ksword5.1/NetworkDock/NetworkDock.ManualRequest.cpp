@@ -1,3 +1,6 @@
+#include "NetworkDock.InternalCommon.h"
+
+using namespace network_dock_detail;
 void NetworkDock::executeManualRequest()
 {
     // 并发门控：
@@ -470,4 +473,6 @@ void NetworkDock::appendManualRequestLogLine(const QString& logLine)
     const QString timePrefix = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
     m_manualResultOutput->appendPlainText(QStringLiteral("[%1] %2").arg(timePrefix, logLine));
 }
+
+
 

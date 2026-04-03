@@ -1,9 +1,23 @@
 ﻿//#include "stdafx.h"
 
 #include <windows.h>
+#include <QApplication>
 #include <QCoreApplication>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileIconProvider>
+#include <QFont>
+#include <QHeaderView>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QLocale>
+#include <QMetaObject>
 #include <QOpenGLPaintDevice>
 #include <QPainter>
+#include <QStyle>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 
 #include <QEasingCurve>
 #include <QAbstractAnimation>
@@ -11,11 +25,49 @@
 #include <QApplication>
 #include <QTimer>
 #include <QSurfaceFormat>
+
+#include <Pdh.h>
+#include <TlHelp32.h>
+#include <Psapi.h>
+
+#include <algorithm>
+#include <array>
+#include <vector>
+
+#pragma comment(lib, "Pdh.lib")
+#pragma comment(lib, "Psapi.lib")
 // 硬件监控头文件
 #include "hGet.h"
+#include "HudPerformancePanel.h"
 #include "KswordHUD.h"
 // 命名空间（简化代码）
 //using namespace QtCharts;
+
+namespace
+{
+    constexpr int kHudOuterMargin = 36;
+    constexpr int kHudCenterGap = 24;
+
+    QColor parseConfigColor(const QString& colorText, const QColor& fallbackColor)
+    {
+        const QColor parsedColor(colorText.trimmed());
+        return parsedColor.isValid() ? parsedColor : fallbackColor;
+    }
+
+    QString buildWidgetBackgroundStyle(const QColor& color, const int opacityPercent)
+    {
+        const int alphaValue = qBound(0, opacityPercent, 100) * 255 / 100;
+        return QStringLiteral("background-color: rgba(%1, %2, %3, %4);")
+            .arg(color.red())
+            .arg(color.green())
+            .arg(color.blue())
+            .arg(alphaValue);
+    }
+}
+
+HHOOK KswordHUD::s_keyboardHook = nullptr;
+KswordHUD* KswordHUD::s_instance = nullptr;
+bool KswordHUD::s_rightCtrlDown = false;
 
 OpenGLWidget::OpenGLWidget(QWidget* parent)
     : QOpenGLWidget(parent), m_opacity(0.5) {
@@ -74,15 +126,15 @@ QPixmap OpenGLWidget::captureContent() {
         painter.fillRect(rect(), QColor(0, 0, 0, 128));
     }
 
-    // 绘制子部件（与paintGL完全一致，直接渲染到painter）
+    // 绘制子部件：使用实际抓图结果，避免复杂子控件/透明效果在 render() 路径下丢失。
     painter.setOpacity(1);
     if (m_leftWidget && m_leftWidget->isVisible()) {
-        m_leftWidget->render(&painter, m_leftWidget->pos(), QRegion(),
-            QWidget::DrawWindowBackground | QWidget::DrawChildren);
+        const QPixmap leftPixmap = m_leftWidget->grab();
+        painter.drawPixmap(m_leftWidget->geometry().topLeft(), leftPixmap);
     }
     if (m_rightWidget && m_rightWidget->isVisible()) {
-        m_rightWidget->render(&painter, m_rightWidget->pos(), QRegion(),
-            QWidget::DrawWindowBackground | QWidget::DrawChildren);
+        const QPixmap rightPixmap = m_rightWidget->grab();
+        painter.drawPixmap(m_rightWidget->geometry().topLeft(), rightPixmap);
     }
     // 移除setWindowOpacity(1.0)和setWindowOpacity(0.5)的波动操作
     return pixmap;
@@ -95,9 +147,14 @@ void OpenGLWidget::initializeGL() {
 void OpenGLWidget::resizeGL(int w, int h) {
     glViewport(0, 0, w, h);
     if (m_leftWidget && m_rightWidget) {
-        int halfWidth = w / 2;
-        m_leftWidget->setGeometry(0, 0, halfWidth, h);
-        m_rightWidget->setGeometry(halfWidth, 0, halfWidth, h);
+        const int contentWidth = std::max(0, w - 2 * kHudOuterMargin - kHudCenterGap);
+        const int paneWidth = contentWidth / 2;
+        const int paneHeight = std::max(0, h - 2 * kHudOuterMargin);
+        const int leftX = kHudOuterMargin;
+        const int rightX = leftX + paneWidth + kHudCenterGap;
+        const int topY = kHudOuterMargin;
+        m_leftWidget->setGeometry(leftX, topY, paneWidth, paneHeight);
+        m_rightWidget->setGeometry(rightX, topY, contentWidth - paneWidth, paneHeight);
     }
 }
 
@@ -179,155 +236,51 @@ KswordHUD::KswordHUD(QWidget* parent)
     m_glWidget = new OpenGLWidget(this);
     setCentralWidget(m_glWidget);
 
-    // 加载背景图并设置到OpenGL部件
-    const QString exePath = QCoreApplication::applicationDirPath();
-    const QString backgroundPath = exePath + "/Style/HUD_background.png";
-    QPixmap background;
-    if (background.load(backgroundPath)) {
-        m_glWidget->setBackgroundPixmap(background);
-        debugOutput("背景图片加载成功:" + backgroundPath);
-    }
-    else {
-        debugOutput("[警告] 背景图片加载失败！路径：" + backgroundPath);
-        background = QPixmap(size());
-        background.fill(QColor(30, 30, 30, 200));
-        m_glWidget->setBackgroundPixmap(background);
-    }
+    const HudConfig config = loadOrCreateConfig();
 
     // 左侧容器（50%宽度）
     m_leftWidget = new QWidget(m_glWidget);
+    m_leftWidget->setAttribute(Qt::WA_StyledBackground, true);
     m_leftWidget->setStyleSheet("background-color: transparent;");
     QVBoxLayout* leftLayout = new QVBoxLayout(m_leftWidget);
-    leftLayout->setContentsMargins(30, 0, 30, 0);
+    leftLayout->setContentsMargins(0, 0, 0, 0);
     leftLayout->setSpacing(0);
 
-    // 左侧顶部间隔
-    QSpacerItem* leftTopSpacer = new QSpacerItem(20, 40, QSizePolicy::Minimum, QSizePolicy::Expanding);
-    leftLayout->addSpacerItem(leftTopSpacer);
-    leftLayout->setStretch(0, 1);
+    // 左侧旧错误表格直接移除，保留透明留白。
+    leftLayout->addStretch(1);
 
-    // 左侧表格 - 占3/4高度
-    m_tableWidget = new QTableWidget;
-    m_tableWidget->setStyleSheet(R"(
-        QTableWidget {
-            background-color: rgba(0, 0, 0, 0.3);
-            color: #FFFFFF;
-            gridline-color: rgba(255, 255, 255, 0.2);
-            border: none;
-            border-radius: 8px;
-        }
-        QHeaderView::section {
-            background-color: rgba(0, 0, 0, 0.5);
-            color: #FFFFFF;
-            border: none;
-            padding: 8px;
-        }
-        QTableWidget::item {
-            padding: 8px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-        }
-    )");
-    m_tableWidget->setRowCount(10);
-    m_tableWidget->setColumnCount(3);
-    m_tableWidget->setHorizontalHeaderLabels({ "列1", "列2", "列3" });
-    leftLayout->addWidget(m_tableWidget);
-    leftLayout->setStretch(1, 3);
-
-    // -------------------------- 关键修改1：右侧UI改造为TabWidget --------------------------
-// 右侧容器（50%宽度，透明背景）
+    // 右侧容器（50%宽度，透明背景）
     m_rightWidget = new QWidget(m_glWidget);
+    m_rightWidget->setAttribute(Qt::WA_StyledBackground, true);
     m_rightWidget->setStyleSheet("background-color: transparent;");
     QVBoxLayout* rightLayout = new QVBoxLayout(m_rightWidget);
-    rightLayout->setContentsMargins(30, 0, 30, 0);
+    rightLayout->setContentsMargins(0, 0, 0, 0);
     rightLayout->setSpacing(0);
 
-    // 右侧顶部间隔（保持原有布局比例）
-    QSpacerItem* rightTopSpacer = new QSpacerItem(20, 40, QSizePolicy::Minimum, QSizePolicy::Expanding);
-    rightLayout->addSpacerItem(rightTopSpacer);
-    rightLayout->setStretch(0, 1);
-
-    // 右侧TabWidget（核心：替换原有空白Widget）
-    m_rightTabWidget = new QTabWidget;
-    // TabWidget样式（透明背景+白色标签）
-    m_rightTabWidget->setStyleSheet(R"(
-        QTabWidget::pane { /* Tab容器背景 */
-            border-top: 2px solid #C2C7CB;
-            background-color: rgba(0, 0, 0, 0.3);
-            border-radius: 8px;
-        }
-        QTabBar::tab { /* 未选中标签 */
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #E1E1E1, stop:1 #D3D3D3);
-            border: 1px solid #C4C4C3;
-            border-top-left-radius: 4px;
-            border-top-right-radius: 4px;
-            min-width: 80px;
-            padding: 6px;
-            margin-right: 2px;
-        }
-        QTabBar::tab:selected, QTabBar::tab:hover { /* 选中/hover标签 */
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fafafa, stop:1 #e7e7e7);
-        }
-        QTabWidget::tab-bar { /* 标签栏居中 */
-            alignment: Center;
-        }
-    )");
-    rightLayout->addWidget(m_rightTabWidget);
-    rightLayout->setStretch(1, 3);
-
-    // -------------------------- 关键修改2：初始化3个硬件图表 --------------------------
-    initCPUChart();   // CPU使用率图表
-    initRAMChart();   // 内存使用率图表
-    initDiskChart();  // 磁盘使用率图表
-
-    // -------------------------- 关键修改3：初始化硬件监控与定时器 --------------------------
-    // 1. 启动硬件监控（来自hGet.h）
-    m_hwMonitor = new HardwareMonitor();
-    if (m_hwMonitor->StartMonitoring()) {
-        debugOutput("硬件监控模块启动成功");
-    }
-    else {
-        debugOutput("[警告] 硬件监控模块启动失败！");
-    }
-
-    // 2. 启动1秒定时器（更新图表数据）
-    m_updateTimer = new QTimer(this);
-    m_updateTimer->setInterval(1000); // 1000ms = 1秒
-    connect(m_updateTimer, &QTimer::timeout, this, &KswordHUD::onUpdateTimerTimeout);
-    m_updateTimer->start();
-
-    //// 右侧顶部间隔
-    //QSpacerItem* rightTopSpacer = new QSpacerItem(20, 40, QSizePolicy::Minimum, QSizePolicy::Expanding);
-    //rightLayout->addSpacerItem(rightTopSpacer);
-    //rightLayout->setStretch(0, 1);
-
-    //// 右侧内容 - 占3/4高度
-    //QWidget* rightContentWidget = new QWidget;
-    //rightContentWidget->setStyleSheet(R"(
-    //    background-color: rgba(0, 0, 0, 0.3);
-    //    border-radius: 8px;
-    //)");
-    //rightLayout->addWidget(rightContentWidget);
-    //rightLayout->setStretch(1, 3);
+    // 右侧直接挂完整性能页，不再套外层Tab。
+    m_performancePanel = new HudPerformancePanel(m_rightWidget);
+    rightLayout->addWidget(m_performancePanel, 1);
 
     // 将左右部件交给OpenGL部件管理
     m_glWidget->setChildWidgets(m_leftWidget, m_rightWidget);
+    applyHudConfig(config);
 
     // 初始化动画
     initializeAnimations();
 
-    // 延迟注册热键和显示窗口
-    QTimer::singleShot(500, this, [this]() {
-        if (!RegisterHotKey((HWND)winId(), HOTKEY_ID_CTRL, MOD_CONTROL | MOD_NOREPEAT, 0)) {
-            DWORD error = GetLastError();
-            debugOutput("注册热键失败，错误码:" + QString::number(error));
-            if (error == 1409) {
-                debugOutput("热键已被其他程序占用");
-            }
-        }
-        else {
-            debugOutput("Ctrl热键注册成功");
-        }
+    s_instance = this;
+    if (s_keyboardHook == nullptr) {
+        s_keyboardHook = SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            &KswordHUD::LowLevelKeyboardProc,
+            GetModuleHandleW(nullptr),
+            0);
+        debugOutput(s_keyboardHook != nullptr
+            ? QStringLiteral("右Ctrl键盘钩子安装成功")
+            : QStringLiteral("右Ctrl键盘钩子安装失败"));
+    }
 
+    QTimer::singleShot(0, this, [this]() {
         hide();
         m_isVisible = false;
         debugOutput("窗口初始状态: 隐藏");
@@ -336,11 +289,18 @@ KswordHUD::KswordHUD(QWidget* parent)
 
 KswordHUD::~KswordHUD()
 {
-    UnregisterHotKey((HWND)winId(), HOTKEY_ID_CTRL);
-        if (m_updateTimer) {
-            m_updateTimer->stop();
-            delete m_updateTimer;
-        }
+    if (s_instance == this) {
+        s_instance = nullptr;
+    }
+    if (s_keyboardHook != nullptr) {
+        UnhookWindowsHookEx(s_keyboardHook);
+        s_keyboardHook = nullptr;
+        s_rightCtrlDown = false;
+    }
+    if (m_updateTimer) {
+        m_updateTimer->stop();
+        delete m_updateTimer;
+    }
 
     // 2. 停止并释放硬件监控
     if (m_hwMonitor) {
@@ -355,7 +315,6 @@ KswordHUD::~KswordHUD()
     delete m_cpuChartView;
     delete m_ramChartView;
     delete m_diskChartView;
-    delete m_rightTabWidget;
     debugOutput("KswordHUD 析构函数");
 }
 
@@ -371,29 +330,200 @@ void KswordHUD::setWindowOpacity(qreal opacity)
     }
     // 在动画状态下，update() 会在动画的valueChanged信号中调用
 }
+
+KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
+{
+    const QString styleDirPath = QCoreApplication::applicationDirPath() + "/Style";
+    QDir styleDir(styleDirPath);
+    if (!styleDir.exists()) {
+        styleDir.mkpath(QStringLiteral("."));
+    }
+
+    const QString configPath = styleDir.filePath(QStringLiteral("KswordHudConfig.json"));
+    QJsonObject configObject;
+    bool shouldWriteConfig = false;
+
+    QFile configFile(configPath);
+    if (configFile.exists() && configFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        const QJsonDocument configDocument = QJsonDocument::fromJson(configFile.readAll());
+        if (configDocument.isObject()) {
+            configObject = configDocument.object();
+        }
+        else {
+            shouldWriteConfig = true;
+        }
+        configFile.close();
+    }
+    else {
+        shouldWriteConfig = true;
+    }
+
+    if (!configObject.contains(QStringLiteral("backgroundImagePath"))) {
+        configObject.insert(QStringLiteral("backgroundImagePath"), QStringLiteral("HUD_background.png"));
+        shouldWriteConfig = true;
+    }
+    if (!configObject.contains(QStringLiteral("leftWidgetOpacityPercent"))) {
+        configObject.insert(QStringLiteral("leftWidgetOpacityPercent"), 100);
+        shouldWriteConfig = true;
+    }
+    if (!configObject.contains(QStringLiteral("rightWidgetOpacityPercent"))) {
+        configObject.insert(QStringLiteral("rightWidgetOpacityPercent"), 100);
+        shouldWriteConfig = true;
+    }
+    if (!configObject.contains(QStringLiteral("leftWidgetBackgroundColor"))) {
+        configObject.insert(QStringLiteral("leftWidgetBackgroundColor"), QStringLiteral("#000000"));
+        shouldWriteConfig = true;
+    }
+    if (!configObject.contains(QStringLiteral("leftWidgetBackgroundOpacityPercent"))) {
+        configObject.insert(QStringLiteral("leftWidgetBackgroundOpacityPercent"), 0);
+        shouldWriteConfig = true;
+    }
+    if (!configObject.contains(QStringLiteral("rightWidgetBackgroundColor"))) {
+        configObject.insert(QStringLiteral("rightWidgetBackgroundColor"), QStringLiteral("#000000"));
+        shouldWriteConfig = true;
+    }
+    if (!configObject.contains(QStringLiteral("rightWidgetBackgroundOpacityPercent"))) {
+        configObject.insert(QStringLiteral("rightWidgetBackgroundOpacityPercent"), 0);
+        shouldWriteConfig = true;
+    }
+
+    if (shouldWriteConfig && configFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        configFile.write(QJsonDocument(configObject).toJson(QJsonDocument::Indented));
+        configFile.close();
+    }
+
+    HudConfig config;
+    config.backgroundImagePath = configObject.value(QStringLiteral("backgroundImagePath")).toString(QStringLiteral("HUD_background.png"));
+    config.leftWidgetOpacityPercent = qBound(
+        0,
+        configObject.value(QStringLiteral("leftWidgetOpacityPercent")).toInt(100),
+        100);
+    config.rightWidgetOpacityPercent = qBound(
+        0,
+        configObject.value(QStringLiteral("rightWidgetOpacityPercent")).toInt(100),
+        100);
+    config.leftWidgetBackgroundColor =
+        configObject.value(QStringLiteral("leftWidgetBackgroundColor")).toString(QStringLiteral("#000000"));
+    config.leftWidgetBackgroundOpacityPercent = qBound(
+        0,
+        configObject.value(QStringLiteral("leftWidgetBackgroundOpacityPercent")).toInt(0),
+        100);
+    config.rightWidgetBackgroundColor =
+        configObject.value(QStringLiteral("rightWidgetBackgroundColor")).toString(QStringLiteral("#000000"));
+    config.rightWidgetBackgroundOpacityPercent = qBound(
+        0,
+        configObject.value(QStringLiteral("rightWidgetBackgroundOpacityPercent")).toInt(0),
+        100);
+    return config;
+}
+
+void KswordHUD::applyHudConfig(const HudConfig& config)
+{
+    const QString styleDirPath = QCoreApplication::applicationDirPath() + "/Style";
+    QString backgroundPath = config.backgroundImagePath.trimmed();
+    if (backgroundPath.isEmpty()) {
+        backgroundPath = QStringLiteral("HUD_background.png");
+    }
+    if (QDir::isRelativePath(backgroundPath)) {
+        backgroundPath = QDir(styleDirPath).filePath(backgroundPath);
+    }
+
+    QPixmap background;
+    if (background.load(backgroundPath)) {
+        m_glWidget->setBackgroundPixmap(background);
+        debugOutput("背景图片加载成功:" + backgroundPath);
+    }
+    else {
+        debugOutput("[警告] 背景图片加载失败！路径：" + backgroundPath);
+        background = QPixmap(size());
+        background.fill(QColor(30, 30, 30, 200));
+        m_glWidget->setBackgroundPixmap(background);
+    }
+
+    if (m_leftOpacityEffect == nullptr && m_leftWidget != nullptr) {
+        m_leftOpacityEffect = new QGraphicsOpacityEffect(m_leftWidget);
+        m_leftWidget->setGraphicsEffect(m_leftOpacityEffect);
+    }
+    if (m_rightOpacityEffect == nullptr && m_rightWidget != nullptr) {
+        m_rightOpacityEffect = new QGraphicsOpacityEffect(m_rightWidget);
+        m_rightWidget->setGraphicsEffect(m_rightOpacityEffect);
+    }
+
+    if (m_leftOpacityEffect != nullptr) {
+        m_leftOpacityEffect->setOpacity(static_cast<qreal>(config.leftWidgetOpacityPercent) / 100.0);
+    }
+    if (m_rightOpacityEffect != nullptr) {
+        m_rightOpacityEffect->setOpacity(static_cast<qreal>(config.rightWidgetOpacityPercent) / 100.0);
+    }
+
+    const QColor defaultWidgetColor(0, 0, 0);
+    const QColor leftBackgroundColor =
+        parseConfigColor(config.leftWidgetBackgroundColor, defaultWidgetColor);
+    const QColor rightBackgroundColor =
+        parseConfigColor(config.rightWidgetBackgroundColor, defaultWidgetColor);
+    if (m_leftWidget != nullptr) {
+        m_leftWidget->setStyleSheet(buildWidgetBackgroundStyle(
+            leftBackgroundColor,
+            config.leftWidgetBackgroundOpacityPercent));
+    }
+    if (m_rightWidget != nullptr) {
+        m_rightWidget->setStyleSheet(buildWidgetBackgroundStyle(
+            rightBackgroundColor,
+            config.rightWidgetBackgroundOpacityPercent));
+    }
+}
+
+bool KswordHUD::IsRightCtrlEvent(const WPARAM wParam, const KBDLLHOOKSTRUCT* keyboardInfo)
+{
+    if (keyboardInfo == nullptr) {
+        return false;
+    }
+
+    const bool isKeyTransition =
+        wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN || wParam == WM_KEYUP || wParam == WM_SYSKEYUP;
+    if (!isKeyTransition) {
+        return false;
+    }
+
+    if (keyboardInfo->vkCode == VK_RCONTROL) {
+        return true;
+    }
+
+    return keyboardInfo->vkCode == VK_CONTROL
+        && (keyboardInfo->flags & LLKHF_EXTENDED) != 0;
+}
+
+LRESULT CALLBACK KswordHUD::LowLevelKeyboardProc(const int nCode, const WPARAM wParam, const LPARAM lParam)
+{
+    if (nCode == HC_ACTION) {
+        const auto* keyboardInfo = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
+        if (IsRightCtrlEvent(wParam, keyboardInfo)) {
+            if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+                if (!s_rightCtrlDown && s_instance != nullptr) {
+                    s_rightCtrlDown = true;
+                    QMetaObject::invokeMethod(s_instance, [instance = s_instance]() {
+                        if (instance != nullptr) {
+                            instance->toggleVisibility();
+                        }
+                    }, Qt::QueuedConnection);
+                }
+            }
+            else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+                s_rightCtrlDown = false;
+            }
+        }
+    }
+
+    return CallNextHookEx(s_keyboardHook, nCode, wParam, lParam);
+}
+
 void KswordHUD::keyPressEvent(QKeyEvent* event)
 {
-    if (event->key() == Qt::Key_Control) {
-        debugOutput("Ctrl键按下，扫描码:" + QString::number(event->nativeScanCode()));
-        toggleVisibility();
-        event->accept();
-        return;
-    }
     QMainWindow::keyPressEvent(event);
 }
 
 bool KswordHUD::nativeEvent(const QByteArray& eventType, void* message, qintptr* result)
 {
-    MSG* msg = static_cast<MSG*>(message);
-    if (msg->message == WM_HOTKEY) {
-        debugOutput("接收到热键消息，wParam:" + QString::number(msg->wParam) + " lParam:" + QString::number(msg->lParam));
-        if (msg->wParam == HOTKEY_ID_CTRL) {
-            debugOutput("全局热键触发，切换窗口显示状态");
-            toggleVisibility();
-            *result = 0;
-            return true;
-        }
-    }
     return QMainWindow::nativeEvent(eventType, message, result);
 }
 
@@ -446,10 +576,16 @@ void KswordHUD::paintEvent(QPaintEvent* event)
         QMainWindow::paintEvent(event);
     }
 }
-void KswordHUD::cacheWindowContent()
+void KswordHUD::cacheWindowContent(const bool refreshFromLiveScene)
 {
     if (m_glWidget) {
-        m_cachedContent = m_glWidget->captureContent();
+        if (refreshFromLiveScene) {
+            m_cachedContent = m_glWidget->captureContent();
+            m_lastStableContent = m_cachedContent;
+        }
+        else {
+            m_cachedContent = m_lastStableContent;
+        }
         debugOutput("已缓存窗口内容");
     }
 }
@@ -561,7 +697,7 @@ void KswordHUD::toggleVisibility()
         m_animationFrameCount = 0;
 
         // 缓存当前窗口内容
-        cacheWindowContent();
+        cacheWindowContent(true);
 
         // 隐藏OpenGL部件，只显示缓存内容
         m_glWidget->hide();
@@ -572,21 +708,31 @@ void KswordHUD::toggleVisibility()
         // 显示窗口
         debugOutput("开始显示动画");
 
-        m_isAnimating = true;
-        m_animationFrameCount = 0;
+        if (m_lastStableContent.isNull()) {
+            show();
+            raise();
+            activateWindow();
+            m_isVisible = true;
+            m_isAnimating = false;
+            clearCache();
+            m_glWidget->show();
+            m_glWidget->update();
+            debugOutput("无历史快照，直接显示窗口");
+        }
+        else {
+            cacheWindowContent(false);
+            m_glWidget->hide();
 
-        // 先显示窗口
-        show();
-        raise();
-        activateWindow();
+            m_isAnimating = true;
+            m_animationFrameCount = 0;
 
-        // 缓存当前窗口内容
-        cacheWindowContent();
+            // 用上次快照直接做显示动画，避免真实面板先闪现。
+            show();
+            raise();
+            activateWindow();
 
-        // 隐藏OpenGL部件，只显示缓存内容
-        m_glWidget->hide();
-
-        m_showAnimation->start();
+            m_showAnimation->start();
+        }
     }
 }
 void KswordHUD::clearCache() {

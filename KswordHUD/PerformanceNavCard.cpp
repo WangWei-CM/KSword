@@ -1,20 +1,21 @@
 #include "PerformanceNavCard.h"
 
-// ============================================================
-// PerformanceNavCard.cpp
-// 作用：
-// 1) 按任务管理器样式绘制左侧性能导航卡片；
-// 2) 深浅色主题下统一处理背景和文字可读性；
-// 3) 维护缩略折线历史并在每次采样后重绘。
-// ============================================================
-
-#include "../theme.h"
-
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
 
-#include <algorithm>
+namespace
+{
+    QColor textPrimaryColor()
+    {
+        return QColor(242, 246, 252);
+    }
+
+    QColor textSecondaryColor()
+    {
+        return QColor(190, 206, 226);
+    }
+}
 
 PerformanceNavCard::PerformanceNavCard(QWidget* parent)
     : QWidget(parent)
@@ -52,8 +53,7 @@ void PerformanceNavCard::setSelectedState(const bool selected)
 
 void PerformanceNavCard::appendSample(const double usagePercent)
 {
-    // clampedPercent 用途：把外部传入采样限制在 0~100，避免越界绘制。
-    const double clampedPercent = std::clamp(usagePercent, 0.0, 100.0);
+    const double clampedPercent = qBound(0.0, usagePercent, 100.0);
     m_samples.push_back(clampedPercent);
     while (m_samples.size() > m_maxSampleCount)
     {
@@ -80,38 +80,35 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    // 卡片区域：改成透明底，仅保留边框高亮，避免计数器页左侧卡片遮住背景。
     const QRect cardRect = rect().adjusted(2, 2, -2, -2);
-    // cardBorderColor 用途：当前卡片边框颜色；选中时更亮，不选中时仅保留弱轮廓。
-    const QColor cardBorderColor = QColor(
+    const QColor cardBorderColor(
         m_accentColor.red(),
         m_accentColor.green(),
         m_accentColor.blue(),
-        m_selected ? 210 : 86);
+        m_selected ? 210 : 92);
     QPen cardBorderPen(cardBorderColor);
     cardBorderPen.setWidthF(m_selected ? 1.6 : 1.0);
     painter.setPen(cardBorderPen);
     painter.setBrush(Qt::NoBrush);
     painter.drawRoundedRect(cardRect, 4.0, 4.0);
 
-    // 缩略图区域：保留边框与曲线，内部背景保持透明。
     const QRect sparkRect(cardRect.left() + 10, cardRect.top() + 10, 62, cardRect.height() - 20);
-    // sparkBorderColor 用途：缩略图边框颜色；选中时使用实色，未选中时降低透明度。
-    const QColor sparkBorderColor = QColor(
+    const QColor sparkBorderColor(
         m_accentColor.red(),
         m_accentColor.green(),
         m_accentColor.blue(),
         m_selected ? 220 : 150);
-    painter.setBrush(Qt::NoBrush);
     QPen sparkBorderPen(sparkBorderColor);
     sparkBorderPen.setWidthF(1.2);
     painter.setPen(sparkBorderPen);
     painter.drawRect(sparkRect);
 
-    // 网格线：浅色辅助线，提升趋势可读性但不喧宾夺主。
-    QPen gridPen(m_accentColor);
+    QPen gridPen(QColor(
+        m_accentColor.red(),
+        m_accentColor.green(),
+        m_accentColor.blue(),
+        45));
     gridPen.setWidthF(0.8);
-    gridPen.setColor(QColor(m_accentColor.red(), m_accentColor.green(), m_accentColor.blue(), 45));
     painter.setPen(gridPen);
     for (int rowIndex = 1; rowIndex < 4; ++rowIndex)
     {
@@ -119,7 +116,6 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
         painter.drawLine(sparkRect.left(), yValue, sparkRect.right(), yValue);
     }
 
-    // 折线路径：把采样映射到缩略图区域，最大点数不足时也正常绘制。
     if (m_samples.size() == 1)
     {
         const double yRatio = m_samples.at(0) / 100.0;
@@ -160,21 +156,28 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
         painter.drawPath(path);
     }
 
-    // 文本区域：主标题加粗，副标题使用次级颜色。
-    const QRect titleRect(sparkRect.right() + 10, cardRect.top() + 8, cardRect.width() - sparkRect.width() - 24, 28);
-    const QRect subtitleRect(sparkRect.right() + 10, cardRect.top() + 34, cardRect.width() - sparkRect.width() - 24, 30);
+    const QRect titleRect(
+        sparkRect.right() + 10,
+        cardRect.top() + 8,
+        cardRect.width() - sparkRect.width() - 24,
+        28);
+    const QRect subtitleRect(
+        sparkRect.right() + 10,
+        cardRect.top() + 34,
+        cardRect.width() - sparkRect.width() - 24,
+        30);
 
     QFont titleFont = painter.font();
     titleFont.setPointSizeF(16.0);
     titleFont.setBold(true);
     painter.setFont(titleFont);
-    painter.setPen(KswordTheme::IsDarkModeEnabled() ? QColor(240, 240, 240) : QColor(26, 32, 38));
+    painter.setPen(textPrimaryColor());
     painter.drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter, m_titleText);
 
     QFont subtitleFont = painter.font();
     subtitleFont.setPointSizeF(11.0);
     subtitleFont.setBold(false);
     painter.setFont(subtitleFont);
-    painter.setPen(KswordTheme::IsDarkModeEnabled() ? QColor(198, 212, 225) : QColor(63, 83, 102));
+    painter.setPen(textSecondaryColor());
     painter.drawText(subtitleRect, Qt::AlignLeft | Qt::AlignVCenter, m_subtitleText);
 }
