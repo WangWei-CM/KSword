@@ -3,6 +3,8 @@
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QDateTime>
+#include <QFileIconProvider>
+#include <QFileInfo>
 #include <QFrame>
 #include <QHeaderView>
 #include <QHideEvent>
@@ -30,6 +32,7 @@
 
 namespace
 {
+    constexpr int kNameColumn = 0;
     constexpr int kPidRole = Qt::UserRole + 1;
     constexpr int kUsageRatioRole = Qt::UserRole + 2;
     constexpr int kMetricColumnFirst = 2;
@@ -124,8 +127,27 @@ namespace
             }
             painter->setPen(textColor);
 
-            const QRect textRect = option.rect.adjusted(10, 0, -10, 0);
             const int columnIndex = index.column();
+            QRect textRect = option.rect.adjusted(10, 0, -10, 0);
+            if (columnIndex == kNameColumn)
+            {
+                const QVariant decorationVariant = index.data(Qt::DecorationRole);
+                if (decorationVariant.canConvert<QIcon>())
+                {
+                    const QIcon iconValue = qvariant_cast<QIcon>(decorationVariant);
+                    if (!iconValue.isNull())
+                    {
+                        const int iconSize = std::min(18, std::max(14, option.rect.height() - 8));
+                        const QRect iconRect(
+                            option.rect.left() + 8,
+                            option.rect.top() + (option.rect.height() - iconSize) / 2,
+                            iconSize,
+                            iconSize);
+                        iconValue.paint(painter, iconRect, Qt::AlignCenter, QIcon::Normal, QIcon::On);
+                        textRect.adjust(iconSize + 8, 0, 0, 0);
+                    }
+                }
+            }
             const int textFlags =
                 (columnIndex >= kMetricColumnFirst ? Qt::AlignRight : Qt::AlignLeft)
                 | Qt::AlignVCenter
@@ -146,6 +168,7 @@ HudProcessListPanel::HudProcessListPanel(QWidget* parent)
         1,
         ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)));
 
+    m_fileIconProvider = new QFileIconProvider();
     initializeUi();
 
     m_refreshWatcher = new QFutureWatcher<RefreshResult>(this);
@@ -164,6 +187,8 @@ HudProcessListPanel::HudProcessListPanel(QWidget* parent)
 HudProcessListPanel::~HudProcessListPanel()
 {
     stopRefreshing();
+    delete m_fileIconProvider;
+    m_fileIconProvider = nullptr;
 }
 
 void HudProcessListPanel::showEvent(QShowEvent* event)
@@ -381,16 +406,18 @@ void HudProcessListPanel::requestRefresh()
     }
 
     const QHash<quint32, CounterSample> previousSamples = m_previousSamples;
+    const QHash<QString, QString> cachedImagePathByIdentity = m_imagePathByIdentity;
     const int logicalCpuCount = m_logicalCpuCount;
 
     m_refreshInProgress = true;
-    m_refreshWatcher->setFuture(QtConcurrent::run([previousSamples, logicalCpuCount]() {
-        return collectRefreshResult(previousSamples, logicalCpuCount);
+    m_refreshWatcher->setFuture(QtConcurrent::run([previousSamples, cachedImagePathByIdentity, logicalCpuCount]() {
+        return collectRefreshResult(previousSamples, cachedImagePathByIdentity, logicalCpuCount);
         }));
 }
 
 HudProcessListPanel::RefreshResult HudProcessListPanel::collectRefreshResult(
     const QHash<quint32, CounterSample>& previousSamples,
+    const QHash<QString, QString>& cachedImagePathByIdentity,
     const int logicalCpuCount)
 {
     RefreshResult result;
@@ -415,6 +442,9 @@ HudProcessListPanel::RefreshResult HudProcessListPanel::collectRefreshResult(
         ProcessEntry entry{};
         entry.pid = static_cast<quint32>(processEntryNative.th32ProcessID);
         entry.processName = QString::fromWCharArray(processEntryNative.szExeFile);
+        const QString processIdentityKey =
+            buildProcessIdentityKey(entry.pid, entry.processName);
+        entry.imagePath = cachedImagePathByIdentity.value(processIdentityKey);
 
         CounterSample nextSample{};
         nextSample.sampleMs = nowMs;
@@ -433,6 +463,23 @@ HudProcessListPanel::RefreshResult HudProcessListPanel::collectRefreshResult(
 
         if (processHandle != nullptr)
         {
+            if (entry.imagePath.isEmpty())
+            {
+                std::array<wchar_t, 32768> imagePathBuffer{};
+                DWORD imagePathLength = static_cast<DWORD>(imagePathBuffer.size());
+                if (::QueryFullProcessImageNameW(
+                    processHandle,
+                    0,
+                    imagePathBuffer.data(),
+                    &imagePathLength) != FALSE
+                    && imagePathLength > 0)
+                {
+                    entry.imagePath = QString::fromWCharArray(
+                        imagePathBuffer.data(),
+                        static_cast<int>(imagePathLength));
+                }
+            }
+
             PROCESS_MEMORY_COUNTERS_EX memoryInfo{};
             if (::GetProcessMemoryInfo(
                 processHandle,
@@ -524,6 +571,11 @@ void HudProcessListPanel::applyRefreshResult(const RefreshResult& result)
 
     m_previousSamples = result.nextSamples;
     updateHeaderSummary(result);
+    m_imagePathByIdentity.clear();
+    for (const ProcessEntry& entry : result.entries)
+    {
+        m_imagePathByIdentity.insert(buildProcessIdentityKey(entry.pid, entry.processName), entry.imagePath);
+    }
 
     QSet<quint32> livePidSet;
     livePidSet.reserve(result.entries.size());
@@ -594,6 +646,7 @@ void HudProcessListPanel::updateOrCreateRow(
 
     itemPointer->setText(NameColumn, entry.processName);
     itemPointer->setText(PidColumn, QString::number(entry.pid));
+    itemPointer->setIcon(NameColumn, resolveProcessIcon(entry));
     itemPointer->setText(CpuColumn, formatPercent(entry.cpuPercent, 2));
     itemPointer->setText(RamColumn, formatRamMB(entry.ramMB));
     itemPointer->setText(DiskColumn, formatDiskMBps(entry.diskMBps));
@@ -605,6 +658,50 @@ void HudProcessListPanel::updateOrCreateRow(
     itemPointer->setData(DiskColumn, kUsageRatioRole, usageRatioForEntry(entry, DiskColumn, maxRamMB, maxDiskMBps, maxNetKBps));
     itemPointer->setData(GpuColumn, kUsageRatioRole, usageRatioForEntry(entry, GpuColumn, maxRamMB, maxDiskMBps, maxNetKBps));
     itemPointer->setData(NetColumn, kUsageRatioRole, usageRatioForEntry(entry, NetColumn, maxRamMB, maxDiskMBps, maxNetKBps));
+}
+
+QString HudProcessListPanel::buildProcessIdentityKey(const quint32 pidValue, const QString& processName)
+{
+    return QStringLiteral("%1|%2").arg(pidValue).arg(processName.trimmed().toLower());
+}
+
+QIcon HudProcessListPanel::resolveProcessIcon(const ProcessEntry& entry)
+{
+    const QString identityKey = buildProcessIdentityKey(entry.pid, entry.processName);
+    const auto identityCacheIterator = m_iconCacheByIdentity.constFind(identityKey);
+    if (identityCacheIterator != m_iconCacheByIdentity.cend())
+    {
+        return identityCacheIterator.value();
+    }
+
+    if (!entry.imagePath.isEmpty())
+    {
+        const auto pathCacheIterator = m_iconCacheByPath.constFind(entry.imagePath);
+        if (pathCacheIterator != m_iconCacheByPath.cend())
+        {
+            m_iconCacheByIdentity.insert(identityKey, pathCacheIterator.value());
+            return pathCacheIterator.value();
+        }
+
+        if (m_fileIconProvider != nullptr)
+        {
+            const QFileInfo fileInfo(entry.imagePath);
+            if (fileInfo.exists())
+            {
+                const QIcon resolvedIcon = m_fileIconProvider->icon(fileInfo);
+                if (!resolvedIcon.isNull())
+                {
+                    m_iconCacheByPath.insert(entry.imagePath, resolvedIcon);
+                    m_iconCacheByIdentity.insert(identityKey, resolvedIcon);
+                    return resolvedIcon;
+                }
+            }
+        }
+    }
+
+    const QIcon fallbackIcon = QApplication::style()->standardIcon(QStyle::SP_FileIcon);
+    m_iconCacheByIdentity.insert(identityKey, fallbackIcon);
+    return fallbackIcon;
 }
 
 double HudProcessListPanel::usageRatioForEntry(

@@ -141,9 +141,9 @@ private:
 
 private:
     // ======== 主布局与控件 ========
-    QVBoxLayout* m_rootLayout = nullptr;      // 根布局：纵向堆叠“按钮条/筛选条/表格”。
-    QHBoxLayout* m_filterLayout = nullptr;    // 筛选布局：五个等级复选框。
-    QHBoxLayout* m_actionLayout = nullptr;    // 动作布局：图标按钮 + 详细信息/自动滚动。
+    QVBoxLayout* m_rootLayout = nullptr;      // 根布局：纵向堆叠“单行工具栏/表格”。
+    QHBoxLayout* m_filterLayout = nullptr;    // m_filterLayout：保留成员位，当前未单独挂入布局。
+    QHBoxLayout* m_actionLayout = nullptr;    // 动作布局：图标按钮 + 全部复选框。
 
     QCheckBox* m_debugCheck = nullptr;        // Debug 级别显示开关。
     QCheckBox* m_infoCheck = nullptr;         // Info 级别显示开关。

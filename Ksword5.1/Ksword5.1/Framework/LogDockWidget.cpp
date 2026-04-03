@@ -173,19 +173,26 @@ LogDockWidget::LogDockWidget(QWidget* parent)
 
 void LogDockWidget::initializeUi()
 {
-    // 根布局：上下排列三层（按钮行、筛选行、表格）。
+    // 根布局：上下排列两层（单行工具栏 + 表格）。
     m_rootLayout = new QVBoxLayout(this);
     m_rootLayout->setContentsMargins(0, 0, 0, 0);
-    m_rootLayout->setSpacing(6);
+    m_rootLayout->setSpacing(4);
 
-    // 第一行：所有动作按钮集中展示，只保留图标；右侧保留状态复选框。
+    // 单行工具栏：
+    // - 三个动作按钮与全部过滤/状态复选框全部放在同一行；
+    // - 满足“所有复选框和按钮全部堆到一行”的布局要求。
     m_actionLayout = new QHBoxLayout();
-    m_actionLayout->setContentsMargins(6, 6, 6, 0);
-    m_actionLayout->setSpacing(8);
+    m_actionLayout->setContentsMargins(6, 6, 6, 4);
+    m_actionLayout->setSpacing(6);
 
     m_exportButton = new QPushButton(createBlueThemedIcon(IconExportPath), QString(), this);
     m_clearButton = new QPushButton(createBlueThemedIcon(IconClearPath), QString(), this);
     m_copyVisibleButton = new QPushButton(createBlueThemedIcon(IconCopyPath), QString(), this);
+    m_debugCheck = new QCheckBox("Debug", this);
+    m_infoCheck = new QCheckBox("Info", this);
+    m_warnCheck = new QCheckBox("Warn", this);
+    m_errorCheck = new QCheckBox("Error", this);
+    m_fatalCheck = new QCheckBox("Fatal", this);
     m_detailCheck = new QCheckBox("详细信息", this);
     m_autoScrollCheck = new QCheckBox("保持滚动到最底端", this);
 
@@ -216,45 +223,31 @@ void LogDockWidget::initializeUi()
 
     // 把复选框文字与指示器统一改为欢迎页同款蓝色。
     const QString blueCheckBoxStyle = buildBlueCheckBoxStyleSheet();
+    m_debugCheck->setStyleSheet(blueCheckBoxStyle);
+    m_infoCheck->setStyleSheet(blueCheckBoxStyle);
+    m_warnCheck->setStyleSheet(blueCheckBoxStyle);
+    m_errorCheck->setStyleSheet(blueCheckBoxStyle);
+    m_fatalCheck->setStyleSheet(blueCheckBoxStyle);
     m_detailCheck->setStyleSheet(blueCheckBoxStyle);
     m_autoScrollCheck->setStyleSheet(blueCheckBoxStyle);
-
-    m_actionLayout->addWidget(m_exportButton);
-    m_actionLayout->addWidget(m_clearButton);
-    m_actionLayout->addWidget(m_copyVisibleButton);
-    m_actionLayout->addSpacing(6);
-    m_actionLayout->addWidget(m_detailCheck);
-    m_actionLayout->addWidget(m_autoScrollCheck);
-    m_actionLayout->addStretch(1);
-
-    // 第二行：五个等级复选框，默认全部勾选。
-    m_filterLayout = new QHBoxLayout();
-    m_filterLayout->setContentsMargins(6, 0, 6, 0);
-    m_filterLayout->setSpacing(12);
-
-    m_debugCheck = new QCheckBox("Debug", this);
-    m_infoCheck = new QCheckBox("Info", this);
-    m_warnCheck = new QCheckBox("Warn", this);
-    m_errorCheck = new QCheckBox("Error", this);
-    m_fatalCheck = new QCheckBox("Fatal", this);
 
     m_debugCheck->setChecked(true);
     m_infoCheck->setChecked(true);
     m_warnCheck->setChecked(true);
     m_errorCheck->setChecked(true);
     m_fatalCheck->setChecked(true);
-
-    m_debugCheck->setStyleSheet(blueCheckBoxStyle);
-    m_infoCheck->setStyleSheet(blueCheckBoxStyle);
-    m_warnCheck->setStyleSheet(blueCheckBoxStyle);
-    m_errorCheck->setStyleSheet(blueCheckBoxStyle);
-    m_fatalCheck->setStyleSheet(blueCheckBoxStyle);
-    m_filterLayout->addWidget(m_debugCheck);
-    m_filterLayout->addWidget(m_infoCheck);
-    m_filterLayout->addWidget(m_warnCheck);
-    m_filterLayout->addWidget(m_errorCheck);
-    m_filterLayout->addWidget(m_fatalCheck);
-    m_filterLayout->addStretch(1);
+    m_actionLayout->addWidget(m_exportButton);
+    m_actionLayout->addWidget(m_clearButton);
+    m_actionLayout->addWidget(m_copyVisibleButton);
+    m_actionLayout->addSpacing(8);
+    m_actionLayout->addWidget(m_debugCheck);
+    m_actionLayout->addWidget(m_infoCheck);
+    m_actionLayout->addWidget(m_warnCheck);
+    m_actionLayout->addWidget(m_errorCheck);
+    m_actionLayout->addWidget(m_fatalCheck);
+    m_actionLayout->addWidget(m_detailCheck);
+    m_actionLayout->addWidget(m_autoScrollCheck);
+    m_actionLayout->addStretch(1);
 
     // 第三层：日志表格，要求不可编辑且占满 Dock。
     m_logTable = new QTableWidget(this);
@@ -275,6 +268,7 @@ void LogDockWidget::initializeUi()
     horizontalHeader->setSectionResizeMode(FunctionColumn, QHeaderView::Interactive);
     horizontalHeader->setStretchLastSection(false);
     horizontalHeader->setStyleSheet(buildBlueHeaderStyleSheet());
+    horizontalHeader->setVisible(false);
 
     // 等级列只容纳彩色方块，因此锁定窄列宽。
     m_logTable->setColumnWidth(LevelColumn, 24);
@@ -287,9 +281,8 @@ void LogDockWidget::initializeUi()
     // 默认关闭详细信息模式，仅显示等级/时间/内容。
     applyDetailColumnVisibility();
 
-    // 最后拼装三层布局。
+    // 最后拼装两层布局。
     m_rootLayout->addLayout(m_actionLayout);
-    m_rootLayout->addLayout(m_filterLayout);
     m_rootLayout->addWidget(m_logTable, 1);
 }
 

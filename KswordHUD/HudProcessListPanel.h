@@ -3,8 +3,10 @@
 #include <QFutureWatcher>
 #include <QColor>
 #include <QHash>
+#include <QIcon>
 #include <QWidget>
 
+class QFileIconProvider;
 class QHideEvent;
 class QPoint;
 class QShowEvent;
@@ -48,6 +50,7 @@ private:
     {
         quint32 pid = 0;
         QString processName;
+        QString imagePath;
         double cpuPercent = 0.0;
         double ramMB = 0.0;
         double diskMBps = 0.0;
@@ -77,9 +80,12 @@ private:
     void requestRefresh();
     static RefreshResult collectRefreshResult(
         const QHash<quint32, CounterSample>& previousSamples,
+        const QHash<QString, QString>& cachedImagePathByIdentity,
         int logicalCpuCount);
     void applyRefreshResult(const RefreshResult& result);
     void updateHeaderSummary(const RefreshResult& result);
+    QIcon resolveProcessIcon(const ProcessEntry& entry);
+    static QString buildProcessIdentityKey(quint32 pidValue, const QString& processName);
     void updateOrCreateRow(
         const ProcessEntry& entry,
         double maxRamMB,
@@ -93,11 +99,15 @@ private:
 
     QTreeWidget* m_treeWidget = nullptr;
     QStyledItemDelegate* m_metricDelegate = nullptr;
+    QFileIconProvider* m_fileIconProvider = nullptr;
     QTimer* m_refreshTimer = nullptr;
     QFutureWatcher<RefreshResult>* m_refreshWatcher = nullptr;
     bool m_refreshInProgress = false;
     int m_logicalCpuCount = 1;
     QColor m_tableTextColor = QColor(255, 255, 255);
     QHash<quint32, CounterSample> m_previousSamples;
+    QHash<QString, QString> m_imagePathByIdentity;
+    QHash<QString, QIcon> m_iconCacheByIdentity;
+    QHash<QString, QIcon> m_iconCacheByPath;
     QHash<quint32, QTreeWidgetItem*> m_itemByPid;
 };
