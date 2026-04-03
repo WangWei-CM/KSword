@@ -43,9 +43,15 @@
     <ClCompile Include="Get.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="HudProcessListPanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="hGet.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="HudProcessListPanel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

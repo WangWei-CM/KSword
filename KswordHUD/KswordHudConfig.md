@@ -16,6 +16,7 @@ If the file does not exist, the program creates it automatically on startup.
   "rightWidgetOpacityPercent": 100,
   "leftWidgetBackgroundColor": "#101820",
   "leftWidgetBackgroundOpacityPercent": 35,
+  "leftProcessTableFontColor": "#FFFFFF",
   "rightWidgetBackgroundColor": "#08131F",
   "rightWidgetBackgroundOpacityPercent": 48
 }
@@ -56,6 +57,13 @@ If the file does not exist, the program creates it automatically on startup.
 - Range: `0` to `100`
 - Meaning: opacity of the left widget background color only
 - This does not change child widget opacity by itself
+
+`leftProcessTableFontColor`
+
+- Type: string
+- Recommended format: `#RRGGBB`
+- Meaning: font color of the left process table
+- Default: white
 
 `rightWidgetBackgroundColor`
 

@@ -37,12 +37,12 @@
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
     <QtInstall>Qt</QtInstall>
-    <QtModules>core;gui;widgets;opengl;openglwidgets;charts</QtModules>
+    <QtModules>core;gui;widgets;opengl;openglwidgets;charts;concurrent</QtModules>
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
     <QtInstall>Qt</QtInstall>
-    <QtModules>core;gui;widgets;opengl;openglwidgets;charts</QtModules>
+    <QtModules>core;gui;widgets;opengl;openglwidgets;charts;concurrent</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
   <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
@@ -108,6 +108,7 @@
     <ClCompile Include="Get.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="HudProcessListPanel.cpp" />
     <ClCompile Include="HudPerformancePanel.cpp" />
     <ClCompile Include="KswordHUD.cpp">
       <DynamicSource Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">input</DynamicSource>
@@ -117,6 +118,7 @@
     </ClCompile>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="PerformanceNavCard.cpp" />
+    <ClInclude Include="HudProcessListPanel.h" />
     <ClInclude Include="HudPerformancePanel.h" />
     <ClInclude Include="hGet.h" />
     <ClInclude Include="PerformanceNavCard.h" />

@@ -65,6 +65,11 @@ public:
     ~MainWindow();
 
 protected:
+    // eventFilter 作用：
+    // - 监听 ADS 浮动 Dock 窗口的显示与尺寸变化；
+    // - 在浮动窗口脱离主窗口后，同步应用主界面同款纯色/背景图填充。
+    bool eventFilter(QObject* watchedObject, QEvent* event) override;
+
     // closeEvent 作用：
     // - 在主窗口关闭时明确触发应用退出；
     // - 避免浮动 Dock 或后台窗口残留导致进程未结束。
@@ -127,6 +132,11 @@ private:
     // - 依据当前配置重建窗口背景画刷（纯色 + 背景图透明叠加）。
     // 调用方式：外观变更与窗口 resize 后调用。
     void rebuildWindowBackgroundBrush();
+
+    // applyFloatingDockContainerAppearance 作用：
+    // - 把当前主题色、背景图与样式同步到指定浮动 Dock 容器；
+    // - 解决“拖出后浮动窗口背景变成纯黑未填充”的问题。
+    void applyFloatingDockContainerAppearance(ads::CFloatingDockContainer* floatingWidget) const;
 
     // buildAppearanceOverlayStyleSheet 作用：
     // - 生成深色/浅色覆盖样式字符串，叠加在基础 QSS 之后。

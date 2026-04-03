@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QWidget>
+#include <QFutureWatcher>
+#include <QMutex>
 
 #include <atomic>
 #include <cstdint>
@@ -72,6 +74,42 @@ private:
         std::uint64_t nonPagedPoolBytes = 0;
     };
 
+    struct LiveSampleResult
+    {
+        bool perCoreOk = false;
+        std::vector<double> coreUsageList;
+        double totalCpuUsage = 0.0;
+        bool powerInfoOk = false;
+        std::vector<CpuPowerSnapshot> powerInfoList;
+        bool memoryOk = false;
+        double memoryUsagePercent = 0.0;
+        std::uint64_t totalPhysBytes = 0;
+        std::uint64_t availPhysBytes = 0;
+        bool diskOk = false;
+        double diskReadBytesPerSec = 0.0;
+        double diskWriteBytesPerSec = 0.0;
+        bool networkOk = false;
+        double networkRxBytesPerSec = 0.0;
+        double networkTxBytesPerSec = 0.0;
+        bool gpuOk = false;
+        double gpuUsagePercent = 0.0;
+        bool systemPerfOk = false;
+        SystemPerformanceSnapshot systemPerfSnapshot;
+        QString primaryNetworkAdapterName;
+        std::uint64_t primaryNetworkLinkBitsPerSecond = 0;
+        double gpuUsage3DPercent = 0.0;
+        double gpuUsageCopyPercent = 0.0;
+        double gpuUsageVideoEncodePercent = 0.0;
+        double gpuUsageVideoDecodePercent = 0.0;
+        double gpuDedicatedUsedGiB = 0.0;
+        double gpuDedicatedBudgetGiB = 0.0;
+        double gpuSharedUsedGiB = 0.0;
+        double gpuSharedBudgetGiB = 0.0;
+        QString systemVolumeText;
+        std::uint64_t systemVolumeTotalBytes = 0;
+        std::uint64_t systemVolumeFreeBytes = 0;
+    };
+
     void initializeUi();
     void initializeSidebarCards();
     void initializeCpuPage();
@@ -85,6 +123,9 @@ private:
 
     void initializePerformanceCounters();
     void refreshAllViews();
+    void requestLiveRefresh();
+    LiveSampleResult collectLiveSampleResult();
+    void applyLiveSampleResult(const LiveSampleResult& liveSampleResult);
     bool samplePerCoreUsage(std::vector<double>* coreUsageOut, double* totalUsageOut);
     bool sampleCpuPowerInfo(std::vector<CpuPowerSnapshot>* powerInfoOut);
     bool sampleMemoryUsage(double* memoryUsagePercentOut);
@@ -105,6 +146,8 @@ private:
     void updateSidebarCards(
         double cpuUsagePercent,
         double memoryUsagePercent,
+        std::uint64_t totalPhysBytes,
+        std::uint64_t availPhysBytes,
         double diskReadBytesPerSec,
         double diskWriteBytesPerSec,
         double networkRxBytesPerSec,
@@ -118,7 +161,9 @@ private:
         double diskWriteBytesPerSec,
         double networkRxBytesPerSec,
         double networkTxBytesPerSec,
-        double gpuUsagePercent);
+        double gpuUsagePercent,
+        const SystemPerformanceSnapshot* systemPerfSnapshotPointer,
+        bool systemPerfOk);
     void appendCoreSeriesPoint(CoreChartEntry& chartEntry, double usagePercent);
     void appendGeneralSeriesPoint(
         QLineSeries* lineSeries,
@@ -139,6 +184,9 @@ private:
     QListWidget* m_sidebarList = nullptr;
     QStackedWidget* m_detailStack = nullptr;
     QTimer* m_refreshTimer = nullptr;
+    QFutureWatcher<LiveSampleResult>* m_liveSampleWatcher = nullptr;
+    QMutex m_liveSampleMutex;
+    bool m_liveSampleInProgress = false;
 
     PerformanceNavCard* m_cpuNavCard = nullptr;
     PerformanceNavCard* m_memoryNavCard = nullptr;
@@ -245,6 +293,8 @@ private:
     QString m_systemVolumeText;
     std::uint64_t m_systemVolumeTotalBytes = 0;
     std::uint64_t m_systemVolumeFreeBytes = 0;
+    std::uint64_t m_lastTotalPhysBytes = 0;
+    std::uint64_t m_lastAvailPhysBytes = 0;
 
     double m_diskNavAutoScaleBytesPerSec = 1024.0 * 1024.0;
     double m_networkNavAutoScaleBytesPerSec = 1024.0 * 1024.0;
