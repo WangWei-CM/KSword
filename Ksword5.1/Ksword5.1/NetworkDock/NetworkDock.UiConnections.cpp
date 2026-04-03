@@ -97,6 +97,28 @@ void NetworkDock::initializeConnections()
             terminateSelectedTcpConnection();
         });
 
+    // HTTPS 解析控制连接。
+    connect(m_httpsStartProxyButton, &QPushButton::clicked, this, [this]()
+        {
+            startHttpsProxyService();
+        });
+    connect(m_httpsStopProxyButton, &QPushButton::clicked, this, [this]()
+        {
+            stopHttpsProxyService();
+        });
+    connect(m_httpsTrustCertButton, &QPushButton::clicked, this, [this]()
+        {
+            ensureHttpsRootCertificateTrusted();
+        });
+    connect(m_httpsApplyProxyButton, &QPushButton::clicked, this, [this]()
+        {
+            applyHttpsSystemProxy();
+        });
+    connect(m_httpsClearProxyButton, &QPushButton::clicked, this, [this]()
+        {
+            clearHttpsSystemProxy();
+        });
+
     // 连接表 PID 解析辅助：
     // - 从任意连接表（TCP/UDP）指定列提取 PID；
     // - 失败时统一弹窗并记录日志，减少重复代码。

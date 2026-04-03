@@ -91,6 +91,9 @@
     <ClCompile Include="NetworkDock\NetworkDock.ManualRequest.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="NetworkDock\NetworkDock.HttpsAnalyze.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="NetworkDock\NetworkDock.NetworkDiagnostics.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -98,6 +101,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="NetworkDock\NetworkDock.InternalHelpers.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="NetworkDock\HttpsProxyService.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="OtherDock\OtherDock.cpp">
@@ -273,6 +279,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="NetworkDock\NetworkDock.InternalHelpers.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="NetworkDock\HttpsProxyService.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\PerformanceNavCard.h">

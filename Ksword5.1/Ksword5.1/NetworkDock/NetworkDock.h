@@ -42,6 +42,12 @@ class QTimer;
 class QVBoxLayout;
 class QWidget;
 
+namespace ks::network
+{
+    struct HttpsProxyParsedEntry;
+    class HttpsMitmProxyService;
+}
+
 // ============================================================
 // NetworkDock
 // 说明：
@@ -160,6 +166,11 @@ private:
     // - 作用：构建“存活主机发现”页（IP段 ICMP 扫描）。
     // - 返回：无。
     void initializeAliveHostScanTab();
+
+    // initializeHttpsAnalyzeTab：
+    // - 作用：构建“HTTPS解析”页（代理控制 + 证书信任 + 解析结果）。
+    // - 返回：无。
+    void initializeHttpsAnalyzeTab();
 
     // initializeConnections：
     // - 作用：统一连接按钮、输入框、表格的信号槽。
@@ -382,6 +393,56 @@ private:
         std::uint32_t rttMs,
         const QString& detailText);
 
+    // ========================= HTTPS 解析 ======================
+    // startHttpsProxyService：
+    // - 作用：按当前监听参数启动本地 HTTPS 代理。
+    // - 返回：无。
+    void startHttpsProxyService();
+
+    // stopHttpsProxyService：
+    // - 作用：停止本地 HTTPS 代理并更新状态。
+    // - 返回：无。
+    void stopHttpsProxyService();
+
+    // ensureHttpsRootCertificateTrusted：
+    // - 作用：一键生成并安装信任根证书（当前用户证书存储）。
+    // - 返回：无。
+    void ensureHttpsRootCertificateTrusted();
+
+    // applyHttpsSystemProxy：
+    // - 作用：把系统代理切到本地 HTTPS 代理端口。
+    // - 返回：无。
+    void applyHttpsSystemProxy();
+
+    // clearHttpsSystemProxy：
+    // - 作用：清除系统代理配置并恢复直连。
+    // - 返回：无。
+    void clearHttpsSystemProxy();
+
+    // onHttpsProxyParsedEntryArrived：
+    // - 作用：接收代理层解析结果并写入表格。
+    // - 参数 parsedEntry：解析出的单条记录。
+    // - 返回：无。
+    void onHttpsProxyParsedEntryArrived(const ks::network::HttpsProxyParsedEntry& parsedEntry);
+
+    // openHttpsParsedDetailByRow：
+    // - 作用：按 HTTPS 解析表行号打开详情窗口。
+    // - 参数 row：HTTPS 解析表行索引。
+    // - 返回：无。
+    void openHttpsParsedDetailByRow(int row);
+
+    // appendHttpsProxyLogLine：
+    // - 作用：向 HTTPS 页日志输出框追加一行时间戳文本。
+    // - 参数 logLine：日志正文。
+    // - 返回：无。
+    void appendHttpsProxyLogLine(const QString& logLine);
+
+    // updateHttpsProxyStatusLabel：
+    // - 作用：统一刷新 HTTPS 代理状态标签文本。
+    // - 参数 statusText：状态说明文本。
+    // - 返回：无。
+    void updateHttpsProxyStatusLabel(const QString& statusText);
+
     // flushPendingPacketsToUi：
     // - 作用：批量消费后台积压报文并刷新 UI。
     // - 说明：通过定时器节流，避免高频逐包更新导致卡顿。
@@ -575,12 +636,30 @@ private:
     QLabel* m_aliveScanStatusLabel = nullptr;     // 扫描状态标签。
     QTableWidget* m_aliveScanTable = nullptr;     // 存活主机结果表。
 
+    // ========================= Tab8：HTTPS解析 ====================
+    QWidget* m_httpsAnalyzePage = nullptr;          // HTTPS解析页容器。
+    QVBoxLayout* m_httpsAnalyzeLayout = nullptr;    // HTTPS解析页主布局。
+    QHBoxLayout* m_httpsAnalyzeControlLayout = nullptr; // HTTPS控制栏布局。
+    QLineEdit* m_httpsListenAddressEdit = nullptr;  // 代理监听地址输入框。
+    QSpinBox* m_httpsListenPortSpin = nullptr;      // 代理监听端口输入框。
+    QPushButton* m_httpsStartProxyButton = nullptr; // 启动HTTPS代理按钮。
+    QPushButton* m_httpsStopProxyButton = nullptr;  // 停止HTTPS代理按钮。
+    QPushButton* m_httpsTrustCertButton = nullptr;  // 一键信任证书按钮。
+    QPushButton* m_httpsApplyProxyButton = nullptr; // 应用系统代理按钮。
+    QPushButton* m_httpsClearProxyButton = nullptr; // 清除系统代理按钮。
+    QLabel* m_httpsProxyStatusLabel = nullptr;      // HTTPS代理状态标签。
+    QTableWidget* m_httpsParsedTable = nullptr;     // HTTPS解析结果表格。
+    QPlainTextEdit* m_httpsProxyLogOutput = nullptr;// HTTPS代理日志输出框。
+    std::vector<ks::network::HttpsProxyParsedEntry> m_httpsParsedEntryCache; // HTTPS解析结果缓存，行号与表格一一对应。
+
     // ========================= 后台服务与缓存 ====================
     std::unique_ptr<ks::network::TrafficMonitorService> m_trafficService; // 抓包/限速后台服务对象。
     QTimer* m_rateLimitRefreshTimer = nullptr; // 限速规则轮询刷新定时器。
     QTimer* m_packetFlushTimer = nullptr;      // 报文批量刷新定时器（UI 节流关键）。
     QTimer* m_connectionRefreshTimer = nullptr; // 连接快照轮询刷新定时器（TCP/UDP）。
+    std::unique_ptr<ks::network::HttpsMitmProxyService> m_httpsProxyService; // HTTPS MITM 代理服务对象。
     bool m_monitorRunning = false;             // 抓包运行状态缓存。
+    bool m_httpsProxyRunning = false;          // HTTPS代理运行状态缓存。
     std::atomic_bool m_monitorStopInProgress{ false }; // 停止流程进行中，避免重复 stop 导致 UI 抖动。
     std::unique_ptr<std::thread> m_monitorStopThread;  // 异步 stop 的 join 线程，防止主线程等待卡顿。
 
