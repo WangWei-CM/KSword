@@ -1,3 +1,6 @@
+#include "NetworkDock.InternalCommon.h"
+
+using namespace network_dock_detail;
 void NetworkDock::initializeConnections()
 {
     // 启停抓包与清空表格按钮连接。
@@ -810,4 +813,6 @@ void NetworkDock::updateMonitorButtonState()
         m_stopMonitorButton->setEnabled(m_monitorRunning && !stopping);
     }
 }
+
+
 

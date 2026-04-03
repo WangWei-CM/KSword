@@ -12,6 +12,7 @@
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/PerformanceNavCard.h"
 
+#include <QAbstractScrollArea>
 #include <QAbstractItemView>
 #include <QDateTime>
 #include <QFrame>
@@ -79,6 +80,65 @@ namespace
         return KswordTheme::IsDarkModeEnabled()
             ? QColor(185, 205, 225)
             : QColor(55, 80, 105);
+    }
+
+    // appendTransparentBackgroundStyle 作用：
+    // - 给“硬件 -> 计数器/利用率”页控件补充透明背景样式；
+    // - 若控件属于滚动区域，还会同步把 viewport 设为透明，避免残留底色。
+    void appendTransparentBackgroundStyle(QWidget* widgetPointer)
+    {
+        if (widgetPointer == nullptr)
+        {
+            return;
+        }
+
+        widgetPointer->setAttribute(Qt::WA_StyledBackground, true);
+        widgetPointer->setAutoFillBackground(false);
+
+        // transparentDeclarationText 用途：透明背景声明片段；transparentRuleText 用途：当前控件专用规则块。
+        const QString transparentDeclarationText =
+            QStringLiteral("background:transparent;background-color:transparent;border:none;");
+        const QString transparentRuleText = QStringLiteral("%1{%2}")
+            .arg(QString::fromLatin1(widgetPointer->metaObject()->className()))
+            .arg(transparentDeclarationText);
+        if (!widgetPointer->styleSheet().contains(QStringLiteral("background:transparent")))
+        {
+            widgetPointer->setStyleSheet(widgetPointer->styleSheet() + transparentRuleText);
+        }
+
+        QAbstractScrollArea* abstractScrollAreaPointer =
+            qobject_cast<QAbstractScrollArea*>(widgetPointer);
+        if (abstractScrollAreaPointer == nullptr || abstractScrollAreaPointer->viewport() == nullptr)
+        {
+            return;
+        }
+
+        abstractScrollAreaPointer->viewport()->setAttribute(Qt::WA_StyledBackground, true);
+        abstractScrollAreaPointer->viewport()->setAutoFillBackground(false);
+        if (!abstractScrollAreaPointer->viewport()->styleSheet().contains(QStringLiteral("background:transparent")))
+        {
+            const QString viewportTransparentRuleText = QStringLiteral("%1{%2}")
+                .arg(QString::fromLatin1(abstractScrollAreaPointer->viewport()->metaObject()->className()))
+                .arg(transparentDeclarationText);
+            abstractScrollAreaPointer->viewport()->setStyleSheet(
+                abstractScrollAreaPointer->viewport()->styleSheet() + viewportTransparentRuleText);
+        }
+    }
+
+    // configureTransparentChart 作用：
+    // - 统一关闭图表背景与绘图区背景；
+    // - 避免 QChart 在透明容器上仍然绘制白底/深底块。
+    void configureTransparentChart(QChart* chartPointer)
+    {
+        if (chartPointer == nullptr)
+        {
+            return;
+        }
+
+        chartPointer->setBackgroundVisible(false);
+        chartPointer->setPlotAreaBackgroundVisible(false);
+        chartPointer->setBackgroundRoundness(0);
+        chartPointer->setMargins(QMargins(0, 0, 0, 0));
     }
 
     // bytesToGiBText 作用：
@@ -286,10 +346,12 @@ namespace
     // - 创建无边框 ChartView，统一 Dock 内视觉风格。
     QChartView* createNoFrameChartView(QChart* chart, QWidget* parentWidget)
     {
+        configureTransparentChart(chart);
         QChartView* chartView = new QChartView(chart, parentWidget);
         chartView->setRenderHint(QPainter::Antialiasing, true);
         chartView->setFrameShape(QFrame::NoFrame);
         chartView->setMinimumHeight(56);
+        appendTransparentBackgroundStyle(chartView);
         return chartView;
     }
 
@@ -659,6 +721,7 @@ void HardwareDock::initializeOverviewTab()
 void HardwareDock::initializeUtilizationTab()
 {
     m_utilizationPage = new QWidget(m_sideTabWidget);
+    appendTransparentBackgroundStyle(m_utilizationPage);
     m_utilizationLayout = new QVBoxLayout(m_utilizationPage);
     m_utilizationLayout->setContentsMargins(4, 4, 4, 4);
     m_utilizationLayout->setSpacing(6);
@@ -684,9 +747,11 @@ void HardwareDock::initializeUtilizationTab()
             "QListWidget{border:none;background:transparent;}"
             "QListWidget::item{border:none;padding:0px;margin:0px;}"
             "QListWidget::item:selected{background:transparent;}"));
+    appendTransparentBackgroundStyle(m_utilizationSidebarList);
     m_utilizationBodyLayout->addWidget(m_utilizationSidebarList, 0);
 
     m_utilizationDetailStack = new QStackedWidget(m_utilizationPage);
+    appendTransparentBackgroundStyle(m_utilizationDetailStack);
     m_utilizationBodyLayout->addWidget(m_utilizationDetailStack, 1);
 
     initializeUtilizationCpuSubTab();
@@ -1017,6 +1082,7 @@ void HardwareDock::adjustUtilizationChartHeights()
 void HardwareDock::initializeUtilizationCpuSubTab()
 {
     m_utilizationCpuSubPage = new QWidget(m_utilizationDetailStack);
+    appendTransparentBackgroundStyle(m_utilizationCpuSubPage);
     QVBoxLayout* cpuSubLayout = new QVBoxLayout(m_utilizationCpuSubPage);
     cpuSubLayout->setContentsMargins(4, 4, 4, 4);
     cpuSubLayout->setSpacing(6);
@@ -1048,7 +1114,9 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     m_coreChartScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_coreChartScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_coreChartScrollArea->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+    appendTransparentBackgroundStyle(m_coreChartScrollArea);
     m_coreChartHostWidget = new QWidget(m_coreChartScrollArea);
+    appendTransparentBackgroundStyle(m_coreChartHostWidget);
     m_coreChartGridLayout = new QGridLayout(m_coreChartHostWidget);
     m_coreChartGridLayout->setContentsMargins(0, 0, 0, 0);
     m_coreChartGridLayout->setHorizontalSpacing(6);
@@ -1077,6 +1145,7 @@ void HardwareDock::initializeUtilizationCpuSubTab()
 void HardwareDock::initializeUtilizationMemorySubTab()
 {
     m_utilizationMemorySubPage = new QWidget(m_utilizationDetailStack);
+    appendTransparentBackgroundStyle(m_utilizationMemorySubPage);
     QVBoxLayout* memorySubLayout = new QVBoxLayout(m_utilizationMemorySubPage);
     memorySubLayout->setContentsMargins(4, 4, 4, 4);
     memorySubLayout->setSpacing(6);
@@ -1155,6 +1224,7 @@ void HardwareDock::initializeUtilizationMemorySubTab()
 void HardwareDock::initializeUtilizationDiskSubTab()
 {
     m_utilizationDiskSubPage = new QWidget(m_utilizationDetailStack);
+    appendTransparentBackgroundStyle(m_utilizationDiskSubPage);
     QVBoxLayout* diskSubLayout = new QVBoxLayout(m_utilizationDiskSubPage);
     diskSubLayout->setContentsMargins(4, 4, 4, 4);
     diskSubLayout->setSpacing(6);
@@ -1224,6 +1294,7 @@ void HardwareDock::initializeUtilizationDiskSubTab()
 void HardwareDock::initializeUtilizationNetworkSubTab()
 {
     m_utilizationNetworkSubPage = new QWidget(m_utilizationDetailStack);
+    appendTransparentBackgroundStyle(m_utilizationNetworkSubPage);
     QVBoxLayout* networkSubLayout = new QVBoxLayout(m_utilizationNetworkSubPage);
     networkSubLayout->setContentsMargins(4, 4, 4, 4);
     networkSubLayout->setSpacing(6);
@@ -1293,6 +1364,7 @@ void HardwareDock::initializeUtilizationNetworkSubTab()
 void HardwareDock::initializeUtilizationGpuSubTab()
 {
     m_utilizationGpuSubPage = new QWidget(m_utilizationDetailStack);
+    appendTransparentBackgroundStyle(m_utilizationGpuSubPage);
     QVBoxLayout* gpuSubLayout = new QVBoxLayout(m_utilizationGpuSubPage);
     gpuSubLayout->setContentsMargins(4, 4, 4, 4);
     gpuSubLayout->setSpacing(6);
@@ -1321,6 +1393,7 @@ void HardwareDock::initializeUtilizationGpuSubTab()
     // - 对齐任务管理器的 3D / Copy / Video Encode / Video Decode；
     // - 每个引擎独立曲线和标题，便于定位瓶颈引擎。
     m_gpuEngineHostWidget = new QWidget(m_utilizationGpuSubPage);
+    appendTransparentBackgroundStyle(m_gpuEngineHostWidget);
     m_gpuEngineGridLayout = new QGridLayout(m_gpuEngineHostWidget);
     m_gpuEngineGridLayout->setContentsMargins(0, 0, 0, 0);
     m_gpuEngineGridLayout->setHorizontalSpacing(6);
@@ -1331,6 +1404,7 @@ void HardwareDock::initializeUtilizationGpuSubTab()
         [this](const QString& engineKeyText, const QString& displayNameText, const QColor& lineColor, const int rowIndex, const int columnIndex)
         {
             QWidget* cellWidget = new QWidget(m_gpuEngineHostWidget);
+            appendTransparentBackgroundStyle(cellWidget);
             QVBoxLayout* cellLayout = new QVBoxLayout(cellWidget);
             cellLayout->setContentsMargins(0, 0, 0, 0);
             cellLayout->setSpacing(2);
@@ -1560,6 +1634,7 @@ void HardwareDock::initializeCoreCharts()
     {
         CoreChartEntry chartEntry;
         chartEntry.containerWidget = new QWidget(m_coreChartHostWidget);
+        appendTransparentBackgroundStyle(chartEntry.containerWidget);
         QVBoxLayout* containerLayout = new QVBoxLayout(chartEntry.containerWidget);
         containerLayout->setContentsMargins(4, 4, 4, 4);
         containerLayout->setSpacing(2);

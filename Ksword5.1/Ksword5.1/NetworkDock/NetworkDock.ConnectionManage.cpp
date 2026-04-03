@@ -1,3 +1,6 @@
+#include "NetworkDock.InternalCommon.h"
+
+using namespace network_dock_detail;
 void NetworkDock::refreshConnectionTables()
 {
     // 连接快照枚举是相对昂贵操作：
@@ -221,4 +224,6 @@ void NetworkDock::copySelectedConnectionRowToClipboard(QTableWidget* tableWidget
         << ", row=" << selectedRow
         << eol;
 }
+
+
 

@@ -1,3 +1,6 @@
+#include "NetworkDock.InternalCommon.h"
+
+using namespace network_dock_detail;
 void NetworkDock::openPacketDetailWindowFromTableRow(QTableWidget* tableWidget, const int row)
 {
     if (tableWidget == nullptr || row < 0)
@@ -30,13 +33,8 @@ void NetworkDock::openPacketDetailWindowBySequenceId(const std::uint64_t sequenc
         return;
     }
 
-    // 详情窗口使用 show() 非模态弹出，不阻塞主 UI。
-    // 独立窗口：不挂在 Dock 下，避免主窗口布局变化影响详情窗口。
-    PacketDetailWindow* detailWindow = new PacketDetailWindow(iterator->second, nullptr);
-    detailWindow->setWindowFlag(Qt::Window, true);
-    detailWindow->show();
-    detailWindow->raise();
-    detailWindow->activateWindow();
+    // 详情窗口通过统一辅助函数弹出，保证行为与旧结构一致。
+    showPacketDetailWindow(iterator->second);
 
     kLogEvent detailWindowEvent;
     info << detailWindowEvent
@@ -230,3 +228,5 @@ bool NetworkDock::tryParseUnsignedIntegerText(const QString& integerText, std::u
     valueOut = static_cast<std::uint32_t>(parsedValue);
     return true;
 }
+
+

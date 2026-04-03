@@ -1,3 +1,6 @@
+#include "NetworkDock.InternalCommon.h"
+
+using namespace network_dock_detail;
 void NetworkDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
@@ -552,4 +555,6 @@ void NetworkDock::initializeManualRequestTab()
     kLogEvent initManualTabEvent;
     info << initManualTabEvent << "[NetworkDock] 请求构造页初始化完成。" << eol;
 }
+
+
 

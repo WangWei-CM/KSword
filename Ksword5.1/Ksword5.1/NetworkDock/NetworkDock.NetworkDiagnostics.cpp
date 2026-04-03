@@ -1,5 +1,8 @@
+#include "NetworkDock.InternalCommon.h"
+
+using namespace network_dock_detail;
 // ============================================================
-// NetworkDock.NetworkDiagnostics.inc
+// NetworkDock.NetworkDiagnostics.cpp
 // 作用：
 // - ARP 缓存展示与编辑；
 // - DNS 缓存展示与编辑；
@@ -998,3 +1001,5 @@ void NetworkDock::appendAliveHostRow(
     m_aliveScanTable->setItem(row, 2, new QTableWidgetItem(QString::number(rttMs)));
     m_aliveScanTable->setItem(row, 3, new QTableWidgetItem(detailText));
 }
+
+

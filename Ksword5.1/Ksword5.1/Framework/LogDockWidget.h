@@ -62,6 +62,11 @@ private:
     // 参数 filteredEvents：已筛选后的可见日志集合。
     void rebuildTable(const std::vector<kEvent>& filteredEvents);
 
+    // applyDetailColumnVisibility 作用：
+    // - 根据“详细信息”复选框状态切换文件列与函数列；
+    // - 让日志表格在简洁模式和详细模式之间切换。
+    void applyDetailColumnVisibility();
+
     // applyRowStyle 作用：
     // - 按日志等级为一行设置背景色与前景色。
     // 参数 row：目标行；logItem：该行对应日志对象。
@@ -102,6 +107,11 @@ private:
     // - 适配事件追踪过滤后的可见子集。
     void copyVisibleRows();
 
+    // buildVisibleRowText 作用：
+    // - 按当前可见列拼接一行日志文本；
+    // - 供“复制行/复制可见”复用，确保复制结果与界面一致。
+    QString buildVisibleRowText(const kEvent& logItem) const;
+
     // startTrackingByRow 作用：
     // - 读取某行的 GUID；
     // - 进入“仅显示同 GUID 日志”模式。
@@ -131,15 +141,16 @@ private:
 
 private:
     // ======== 主布局与控件 ========
-    QVBoxLayout* m_rootLayout = nullptr;      // 根布局：纵向堆叠“筛选条/按钮条/表格”。
+    QVBoxLayout* m_rootLayout = nullptr;      // 根布局：纵向堆叠“按钮条/筛选条/表格”。
     QHBoxLayout* m_filterLayout = nullptr;    // 筛选布局：五个等级复选框。
-    QHBoxLayout* m_actionLayout = nullptr;    // 动作布局：导出/清空/复制可见/自动滚动。
+    QHBoxLayout* m_actionLayout = nullptr;    // 动作布局：图标按钮 + 详细信息/自动滚动。
 
     QCheckBox* m_debugCheck = nullptr;        // Debug 级别显示开关。
     QCheckBox* m_infoCheck = nullptr;         // Info 级别显示开关。
     QCheckBox* m_warnCheck = nullptr;         // Warn 级别显示开关。
     QCheckBox* m_errorCheck = nullptr;        // Error 级别显示开关。
     QCheckBox* m_fatalCheck = nullptr;        // Fatal 级别显示开关。
+    QCheckBox* m_detailCheck = nullptr;       // “详细信息”开关：控制文件/函数列显示。
     QCheckBox* m_autoScrollCheck = nullptr;   // “保持滚动到最底端”开关。
 
     QPushButton* m_exportButton = nullptr;       // 导出日志按钮。

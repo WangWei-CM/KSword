@@ -1,3 +1,6 @@
+#include "NetworkDock.InternalCommon.h"
+
+using namespace network_dock_detail;
 void NetworkDock::applyOrUpdateRateLimitRule()
 {
     if (m_trafficService == nullptr || m_rateLimitPidEdit == nullptr ||
@@ -152,4 +155,6 @@ void NetworkDock::appendRateLimitActionLogLine(const QString& logLine)
     const QString timePrefix = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
     m_rateLimitLogOutput->appendPlainText(QStringLiteral("[%1] %2").arg(timePrefix, logLine));
 }
+
+
 

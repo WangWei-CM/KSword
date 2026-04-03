@@ -53,6 +53,7 @@ namespace
 
     // DefaultButtonIconSize：日志面板按钮与菜单图标默认尺寸。
     constexpr QSize DefaultButtonIconSize(16, 16);
+    constexpr int ActionButtonExtent = 28; // ActionButtonExtent：顶部图标按钮边长（像素）。
 
     // createBlueThemedIcon 作用：
     // - 把 qrc 中的单色 SVG 图标重新着色为主题蓝色；
@@ -115,32 +116,28 @@ namespace
     }
 
     // buildBlueButtonStyleSheet 作用：
-    // - 生成日志面板按钮蓝色边框与交互样式。
+    // - 生成日志面板图标按钮透明背景样式；
+    // - 默认背景透明，仅在 hover/pressed 时给轻量高亮。
     // 返回值：QSS 字符串。
     QString buildBlueButtonStyleSheet()
     {
         return QStringLiteral(
             "QPushButton {"
-            "  color: #FFFFFF;"
-            "  background: %1;"
-            "  border: 1px solid %2;"
-            "  border-radius: 3px;"
-            "  padding: 4px 12px;"
+            "  color: %1;"
+            "  background: transparent;"
+            "  border: 1px solid transparent;"
+            "  border-radius: 4px;"
+            "  padding: 4px;"
             "}"
             "QPushButton:hover {"
-            "  background: %3;"
-            "  color: #FFFFFF;"
-            "  border: 1px solid %3;"
+            "  background: rgba(67, 160, 255, 28);"
+            "  border: 1px solid rgba(67, 160, 255, 96);"
             "}"
             "QPushButton:pressed {"
-            "  background: %4;"
-            "  color: #FFFFFF;"
-            "  border: 1px solid %4;"
+            "  background: rgba(67, 160, 255, 46);"
+            "  border: 1px solid rgba(67, 160, 255, 136);"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
-            .arg(KswordTheme::PrimaryBluePressedHex);
+            .arg(KswordTheme::TextPrimaryHex());
     }
 
     // buildBlueHeaderStyleSheet 作用：
@@ -176,14 +173,63 @@ LogDockWidget::LogDockWidget(QWidget* parent)
 
 void LogDockWidget::initializeUi()
 {
-    // 根布局：上下排列三层（筛选行、按钮行、表格）。
+    // 根布局：上下排列三层（按钮行、筛选行、表格）。
     m_rootLayout = new QVBoxLayout(this);
     m_rootLayout->setContentsMargins(0, 0, 0, 0);
     m_rootLayout->setSpacing(6);
 
-    // 第一行：五个等级复选框，默认全部勾选。
+    // 第一行：所有动作按钮集中展示，只保留图标；右侧保留状态复选框。
+    m_actionLayout = new QHBoxLayout();
+    m_actionLayout->setContentsMargins(6, 6, 6, 0);
+    m_actionLayout->setSpacing(8);
+
+    m_exportButton = new QPushButton(createBlueThemedIcon(IconExportPath), QString(), this);
+    m_clearButton = new QPushButton(createBlueThemedIcon(IconClearPath), QString(), this);
+    m_copyVisibleButton = new QPushButton(createBlueThemedIcon(IconCopyPath), QString(), this);
+    m_detailCheck = new QCheckBox("详细信息", this);
+    m_autoScrollCheck = new QCheckBox("保持滚动到最底端", this);
+
+    // 按钮均设置图标与提示，满足“尽量用图标 + 悬停说明功能”。
+    m_exportButton->setToolTip("导出全部日志到 .txt 文件");
+    m_clearButton->setToolTip("清空日志管理器中的全部日志（双重确认）");
+    m_copyVisibleButton->setToolTip("复制当前可见列表内容（支持追踪过滤状态）");
+    m_detailCheck->setToolTip("显示文件列和函数列");
+    m_autoScrollCheck->setToolTip("开启后表格刷新将自动滚动到最后一行");
+
+    // 图标尺寸与按钮尺寸统一，保证工具栏视觉紧凑并保持纯图标风格。
+    m_exportButton->setIconSize(DefaultButtonIconSize);
+    m_clearButton->setIconSize(DefaultButtonIconSize);
+    m_copyVisibleButton->setIconSize(DefaultButtonIconSize);
+    m_exportButton->setFixedSize(ActionButtonExtent, ActionButtonExtent);
+    m_clearButton->setFixedSize(ActionButtonExtent, ActionButtonExtent);
+    m_copyVisibleButton->setFixedSize(ActionButtonExtent, ActionButtonExtent);
+    m_exportButton->setCursor(Qt::PointingHandCursor);
+    m_clearButton->setCursor(Qt::PointingHandCursor);
+    m_copyVisibleButton->setCursor(Qt::PointingHandCursor);
+    m_autoScrollCheck->setChecked(true);
+
+    // 把日志区按钮背景改为透明，仅保留图标与悬停反馈。
+    const QString blueButtonStyle = buildBlueButtonStyleSheet();
+    m_exportButton->setStyleSheet(blueButtonStyle);
+    m_clearButton->setStyleSheet(blueButtonStyle);
+    m_copyVisibleButton->setStyleSheet(blueButtonStyle);
+
+    // 把复选框文字与指示器统一改为欢迎页同款蓝色。
+    const QString blueCheckBoxStyle = buildBlueCheckBoxStyleSheet();
+    m_detailCheck->setStyleSheet(blueCheckBoxStyle);
+    m_autoScrollCheck->setStyleSheet(blueCheckBoxStyle);
+
+    m_actionLayout->addWidget(m_exportButton);
+    m_actionLayout->addWidget(m_clearButton);
+    m_actionLayout->addWidget(m_copyVisibleButton);
+    m_actionLayout->addSpacing(6);
+    m_actionLayout->addWidget(m_detailCheck);
+    m_actionLayout->addWidget(m_autoScrollCheck);
+    m_actionLayout->addStretch(1);
+
+    // 第二行：五个等级复选框，默认全部勾选。
     m_filterLayout = new QHBoxLayout();
-    m_filterLayout->setContentsMargins(6, 6, 6, 0);
+    m_filterLayout->setContentsMargins(6, 0, 6, 0);
     m_filterLayout->setSpacing(12);
 
     m_debugCheck = new QCheckBox("Debug", this);
@@ -198,55 +244,17 @@ void LogDockWidget::initializeUi()
     m_errorCheck->setChecked(true);
     m_fatalCheck->setChecked(true);
 
+    m_debugCheck->setStyleSheet(blueCheckBoxStyle);
+    m_infoCheck->setStyleSheet(blueCheckBoxStyle);
+    m_warnCheck->setStyleSheet(blueCheckBoxStyle);
+    m_errorCheck->setStyleSheet(blueCheckBoxStyle);
+    m_fatalCheck->setStyleSheet(blueCheckBoxStyle);
     m_filterLayout->addWidget(m_debugCheck);
     m_filterLayout->addWidget(m_infoCheck);
     m_filterLayout->addWidget(m_warnCheck);
     m_filterLayout->addWidget(m_errorCheck);
     m_filterLayout->addWidget(m_fatalCheck);
     m_filterLayout->addStretch(1);
-
-    // 第二行：操作按钮 + 自动滚动复选框。
-    m_actionLayout = new QHBoxLayout();
-    m_actionLayout->setContentsMargins(6, 0, 6, 0);
-    m_actionLayout->setSpacing(8);
-
-    m_exportButton = new QPushButton(createBlueThemedIcon(IconExportPath), "导出日志", this);
-    m_clearButton = new QPushButton(createBlueThemedIcon(IconClearPath), "清空日志列表", this);
-    m_copyVisibleButton = new QPushButton(createBlueThemedIcon(IconCopyPath), "复制可见", this);
-    m_autoScrollCheck = new QCheckBox("保持滚动到最底端", this);
-
-    // 按钮均设置图标与提示，满足“尽量用图标 + 悬停说明功能”。
-    m_exportButton->setToolTip("导出全部日志到 .txt 文件");
-    m_clearButton->setToolTip("清空日志管理器中的全部日志（双重确认）");
-    m_copyVisibleButton->setToolTip("复制当前可见列表内容（支持追踪过滤状态）");
-    m_autoScrollCheck->setToolTip("开启后表格刷新将自动滚动到最后一行");
-
-    // 图标尺寸统一，保证按钮视觉一致。
-    m_exportButton->setIconSize(DefaultButtonIconSize);
-    m_clearButton->setIconSize(DefaultButtonIconSize);
-    m_copyVisibleButton->setIconSize(DefaultButtonIconSize);
-    m_autoScrollCheck->setChecked(true);
-
-    // 把日志区按钮边框统一改为欢迎页同款蓝色。
-    const QString blueButtonStyle = buildBlueButtonStyleSheet();
-    m_exportButton->setStyleSheet(blueButtonStyle);
-    m_clearButton->setStyleSheet(blueButtonStyle);
-    m_copyVisibleButton->setStyleSheet(blueButtonStyle);
-
-    // 把复选框文字与指示器统一改为欢迎页同款蓝色。
-    const QString blueCheckBoxStyle = buildBlueCheckBoxStyleSheet();
-    m_debugCheck->setStyleSheet(blueCheckBoxStyle);
-    m_infoCheck->setStyleSheet(blueCheckBoxStyle);
-    m_warnCheck->setStyleSheet(blueCheckBoxStyle);
-    m_errorCheck->setStyleSheet(blueCheckBoxStyle);
-    m_fatalCheck->setStyleSheet(blueCheckBoxStyle);
-    m_autoScrollCheck->setStyleSheet(blueCheckBoxStyle);
-
-    m_actionLayout->addWidget(m_exportButton);
-    m_actionLayout->addWidget(m_clearButton);
-    m_actionLayout->addWidget(m_copyVisibleButton);
-    m_actionLayout->addStretch(1);
-    m_actionLayout->addWidget(m_autoScrollCheck);
 
     // 第三层：日志表格，要求不可编辑且占满 Dock。
     m_logTable = new QTableWidget(this);
@@ -276,18 +284,25 @@ void LogDockWidget::initializeUi()
     m_logTable->setColumnWidth(FunctionColumn, 320);
     m_logTable->verticalHeader()->setVisible(false);
 
-    // 默认隐藏“文件/函数”两列，减少首屏信息密度。
-    m_logTable->setColumnHidden(FileColumn, true);
-    m_logTable->setColumnHidden(FunctionColumn, true);
+    // 默认关闭详细信息模式，仅显示等级/时间/内容。
+    applyDetailColumnVisibility();
 
     // 最后拼装三层布局。
-    m_rootLayout->addLayout(m_filterLayout);
     m_rootLayout->addLayout(m_actionLayout);
+    m_rootLayout->addLayout(m_filterLayout);
     m_rootLayout->addWidget(m_logTable, 1);
 }
 
 void LogDockWidget::initializeConnections()
 {
+    // 按钮动作连接：导出/清空/复制可见。
+    connect(m_exportButton, &QPushButton::clicked, this, [this]() { exportAllLogs(); });
+    connect(m_clearButton, &QPushButton::clicked, this, [this]() { clearAllLogsWithDoubleConfirm(); });
+    connect(m_copyVisibleButton, &QPushButton::clicked, this, [this]() { copyVisibleRows(); });
+
+    // 详细信息开关只切列可见性，不需要整表重建。
+    connect(m_detailCheck, &QCheckBox::toggled, this, [this]() { applyDetailColumnVisibility(); });
+
     // 五个等级复选框任意变化时都强制刷新表格。
     connect(m_debugCheck, &QCheckBox::toggled, this, [this]() { refreshTableFromManager(true); });
     connect(m_infoCheck, &QCheckBox::toggled, this, [this]() { refreshTableFromManager(true); });
@@ -295,15 +310,23 @@ void LogDockWidget::initializeConnections()
     connect(m_errorCheck, &QCheckBox::toggled, this, [this]() { refreshTableFromManager(true); });
     connect(m_fatalCheck, &QCheckBox::toggled, this, [this]() { refreshTableFromManager(true); });
 
-    // 按钮动作连接：导出/清空/复制可见。
-    connect(m_exportButton, &QPushButton::clicked, this, [this]() { exportAllLogs(); });
-    connect(m_clearButton, &QPushButton::clicked, this, [this]() { clearAllLogsWithDoubleConfirm(); });
-    connect(m_copyVisibleButton, &QPushButton::clicked, this, [this]() { copyVisibleRows(); });
-
     // 右键菜单连接。
     connect(m_logTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
         showTableContextMenu(position);
     });
+}
+
+void LogDockWidget::applyDetailColumnVisibility()
+{
+    if (m_logTable == nullptr)
+    {
+        return;
+    }
+
+    // detailVisible 用途：记录“详细信息”开关当前状态，决定附加列是否显示。
+    const bool detailVisible = (m_detailCheck != nullptr) && m_detailCheck->isChecked();
+    m_logTable->setColumnHidden(FileColumn, !detailVisible);
+    m_logTable->setColumnHidden(FunctionColumn, !detailVisible);
 }
 
 void LogDockWidget::initializeRefreshTimer()
@@ -595,16 +618,9 @@ void LogDockWidget::copySingleRow(const int row)
         return;
     }
 
-    // 行复制使用可读文本：等级/时间/内容/文件/函数。
+    // 行复制按当前可见列输出，避免隐藏列仍被复制。
     const kEvent& logItem = m_visibleEvents[static_cast<std::size_t>(row)];
-    const QString rowText =
-        getLevelText(logItem.level) + "\t" +
-        QString::fromStdString(FormatTimeToString(logItem.timestamp)) + "\t" +
-        QString::fromStdString(logItem.content) + "\t" +
-        QString::fromStdString(logItem.fileLocation) + "\t" +
-        QString::fromStdString(logItem.functionName);
-
-    QApplication::clipboard()->setText(rowText);
+    QApplication::clipboard()->setText(buildVisibleRowText(logItem));
 }
 
 void LogDockWidget::copyVisibleRows()
@@ -615,16 +631,31 @@ void LogDockWidget::copyVisibleRows()
     // 遍历当前可见事件列表，保证与屏幕展示一致（含追踪/筛选状态）。
     for (const kEvent& logItem : m_visibleEvents)
     {
-        const QString lineText =
-            getLevelText(logItem.level) + "\t" +
-            QString::fromStdString(FormatTimeToString(logItem.timestamp)) + "\t" +
-            QString::fromStdString(logItem.content) + "\t" +
-            QString::fromStdString(logItem.fileLocation) + "\t" +
-            QString::fromStdString(logItem.functionName);
-        lines.push_back(lineText);
+        lines.push_back(buildVisibleRowText(logItem));
     }
 
     QApplication::clipboard()->setText(lines.join("\n"));
+}
+
+QString LogDockWidget::buildVisibleRowText(const kEvent& logItem) const
+{
+    QStringList visibleFieldList;
+    visibleFieldList.reserve(TotalColumns);
+
+    // 始终输出基础三列；详细信息开启时再追加文件/函数列。
+    visibleFieldList.push_back(getLevelText(logItem.level));
+    visibleFieldList.push_back(QString::fromStdString(FormatTimeToString(logItem.timestamp)));
+    visibleFieldList.push_back(QString::fromStdString(logItem.content));
+
+    // detailVisible 用途：记录当前是否应输出详细列文本。
+    const bool detailVisible = (m_detailCheck != nullptr) && m_detailCheck->isChecked();
+    if (detailVisible)
+    {
+        visibleFieldList.push_back(QString::fromStdString(logItem.fileLocation));
+        visibleFieldList.push_back(QString::fromStdString(logItem.functionName));
+    }
+
+    return visibleFieldList.join("\t");
 }
 
 void LogDockWidget::startTrackingByRow(const int row)
