@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "HttpsProxyService.h"
 
 // ============================================================
 // NetworkDock.cpp
@@ -13,6 +14,8 @@ NetworkDock::NetworkDock(QWidget* parent)
 {
     // 创建后台服务对象：负责抓包、PID 映射、限速逻辑。
     m_trafficService = std::make_unique<ks::network::TrafficMonitorService>();
+    // 创建 HTTPS 代理解析服务：负责 CONNECT 代理、证书生成与明文解析。
+    m_httpsProxyService = std::make_unique<ks::network::HttpsMitmProxyService>();
 
     // 初始化界面和连接逻辑。
     initializeUi();
@@ -94,6 +97,28 @@ NetworkDock::NetworkDock(QWidget* parent)
                 }, Qt::QueuedConnection);
         });
 
+    if (m_httpsProxyService != nullptr)
+    {
+        m_httpsProxyService->setParsedCallback([this](const ks::network::HttpsProxyParsedEntry& parsedEntry)
+            {
+                QMetaObject::invokeMethod(this, [this, parsedEntry]()
+                    {
+                        onHttpsProxyParsedEntryArrived(parsedEntry);
+                    }, Qt::QueuedConnection);
+            });
+        m_httpsProxyService->setStatusCallback([this](const QString& statusText)
+            {
+                QMetaObject::invokeMethod(this, [this, statusText]()
+                    {
+                        appendHttpsProxyLogLine(statusText);
+                        if (!statusText.isEmpty())
+                        {
+                            updateHttpsProxyStatusLabel(statusText);
+                        }
+                    }, Qt::QueuedConnection);
+            });
+    }
+
     // 初始化日志。
     kLogEvent initializeEvent;
     info << initializeEvent << "[NetworkDock] 网络面板初始化完成。" << eol;
@@ -125,8 +150,11 @@ NetworkDock::~NetworkDock()
     {
         m_trafficService->StopCapture();
     }
+    if (m_httpsProxyService != nullptr)
+    {
+        m_httpsProxyService->stop();
+    }
 
     kLogEvent destroyEvent;
     info << destroyEvent << "[NetworkDock] 网络面板已析构，抓包线程已停止。" << eol;
 }
-

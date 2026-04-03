@@ -3,39 +3,21 @@
 #include <windows.h>
 #include <QApplication>
 #include <QCoreApplication>
-#include <QDateTime>
 #include <QDir>
 #include <QFile>
-#include <QFileIconProvider>
-#include <QFont>
-#include <QHeaderView>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QLocale>
 #include <QMetaObject>
 #include <QOpenGLPaintDevice>
 #include <QPainter>
-#include <QStyle>
-#include <QTreeWidget>
-#include <QTreeWidgetItem>
 
 #include <QEasingCurve>
 #include <QAbstractAnimation>
 #include <QScreen>
-#include <QApplication>
 #include <QTimer>
 #include <QSurfaceFormat>
 
-#include <Pdh.h>
-#include <TlHelp32.h>
-#include <Psapi.h>
-
 #include <algorithm>
-#include <array>
-#include <vector>
-
-#pragma comment(lib, "Pdh.lib")
-#pragma comment(lib, "Psapi.lib")
 // 硬件监控头文件
 #include "hGet.h"
 #include "HudPerformancePanel.h"
@@ -386,7 +368,6 @@ KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
         configObject.insert(QStringLiteral("rightWidgetBackgroundOpacityPercent"), 0);
         shouldWriteConfig = true;
     }
-
     if (shouldWriteConfig && configFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
         configFile.write(QJsonDocument(configObject).toJson(QJsonDocument::Indented));
         configFile.close();

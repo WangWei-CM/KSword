@@ -53,7 +53,7 @@
     <QtInstall Condition="'$(KSWORD_QT_DIR)' != ''">$(KSWORD_QT_DIR)</QtInstall>
     <QtInstall Condition="'$(QtInstall)' == '' and '$(QTDIR)' != ''">$(QTDIR)</QtInstall>
     <QtInstall Condition="'$(QtInstall)' == ''">Qt</QtInstall>
-    <QtModules>core;gui;widgets;charts;svg</QtModules>
+    <QtModules>core;gui;network;widgets;charts;svg</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
   <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
@@ -152,9 +152,11 @@
     <ClCompile Include="NetworkDock\NetworkDock.RateLimit.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.ConnectionManage.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.ManualRequest.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.HttpsAnalyze.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.NetworkDiagnostics.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.DetailAndUtils.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.InternalHelpers.cpp" />
+    <ClCompile Include="NetworkDock\HttpsProxyService.cpp" />
     <ClCompile Include="OtherDock\OtherDock.cpp" />
     <ClCompile Include="PrivilegeDock\PrivilegeDock.cpp" />
     <ClCompile Include="RegistryDock_Themed.cpp" />
@@ -208,6 +210,7 @@
     <QtMoc Include="NetworkDock\NetworkDock.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalCommon.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalHelpers.h" />
+    <ClInclude Include="NetworkDock\HttpsProxyService.h" />
     <QtMoc Include="OtherDock\OtherDock.h" />
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h" />
     <QtMoc Include="RegistryDock\RegistryDock.h" />
