@@ -20,6 +20,7 @@
 #include <algorithm>
 // 硬件监控头文件
 #include "hGet.h"
+#include "HudProcessListPanel.h"
 #include "HudPerformancePanel.h"
 #include "KswordHUD.h"
 // 命名空间（简化代码）
@@ -178,6 +179,7 @@ KswordHUD::KswordHUD(QWidget* parent)
     , m_windowOpacity(0.5)
     , m_isVisible(false)
     , m_isAnimating(false)
+    , m_pendingToggleRequest(false)
     , m_leftWidget(nullptr)
     , m_rightWidget(nullptr)
     , m_tableWidget(nullptr)
@@ -228,8 +230,9 @@ KswordHUD::KswordHUD(QWidget* parent)
     leftLayout->setContentsMargins(0, 0, 0, 0);
     leftLayout->setSpacing(0);
 
-    // 左侧旧错误表格直接移除，保留透明留白。
-    leftLayout->addStretch(1);
+    // 左侧挂平铺进程资源列表，先不做树状分组。
+    m_processListPanel = new HudProcessListPanel(m_leftWidget);
+    leftLayout->addWidget(m_processListPanel, 1);
 
     // 右侧容器（50%宽度，透明背景）
     m_rightWidget = new QWidget(m_glWidget);
@@ -360,6 +363,10 @@ KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
         configObject.insert(QStringLiteral("leftWidgetBackgroundOpacityPercent"), 0);
         shouldWriteConfig = true;
     }
+    if (!configObject.contains(QStringLiteral("leftProcessTableFontColor"))) {
+        configObject.insert(QStringLiteral("leftProcessTableFontColor"), QStringLiteral("#FFFFFF"));
+        shouldWriteConfig = true;
+    }
     if (!configObject.contains(QStringLiteral("rightWidgetBackgroundColor"))) {
         configObject.insert(QStringLiteral("rightWidgetBackgroundColor"), QStringLiteral("#000000"));
         shouldWriteConfig = true;
@@ -389,6 +396,8 @@ KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
         0,
         configObject.value(QStringLiteral("leftWidgetBackgroundOpacityPercent")).toInt(0),
         100);
+    config.leftProcessTableFontColor =
+        configObject.value(QStringLiteral("leftProcessTableFontColor")).toString(QStringLiteral("#FFFFFF"));
     config.rightWidgetBackgroundColor =
         configObject.value(QStringLiteral("rightWidgetBackgroundColor")).toString(QStringLiteral("#000000"));
     config.rightWidgetBackgroundOpacityPercent = qBound(
@@ -440,6 +449,8 @@ void KswordHUD::applyHudConfig(const HudConfig& config)
     const QColor defaultWidgetColor(0, 0, 0);
     const QColor leftBackgroundColor =
         parseConfigColor(config.leftWidgetBackgroundColor, defaultWidgetColor);
+    const QColor leftProcessTableFontColor =
+        parseConfigColor(config.leftProcessTableFontColor, QColor(255, 255, 255));
     const QColor rightBackgroundColor =
         parseConfigColor(config.rightWidgetBackgroundColor, defaultWidgetColor);
     if (m_leftWidget != nullptr) {
@@ -451,6 +462,9 @@ void KswordHUD::applyHudConfig(const HudConfig& config)
         m_rightWidget->setStyleSheet(buildWidgetBackgroundStyle(
             rightBackgroundColor,
             config.rightWidgetBackgroundOpacityPercent));
+    }
+    if (m_processListPanel != nullptr) {
+        m_processListPanel->setTableTextColor(leftProcessTableFontColor);
     }
 }
 
@@ -573,6 +587,9 @@ void KswordHUD::cacheWindowContent(const bool refreshFromLiveScene)
 
 void KswordHUD::debugOutput(const QString& message)
 {
+    if (!qEnvironmentVariableIsSet("KSWORDHUD_DEBUG")) {
+        return;
+    }
     qint64 elapsed = m_debugTimer.elapsed();
     qDebug() << QString("[%1 ms] %2").arg(elapsed, 6).arg(message);
 }
@@ -613,6 +630,10 @@ void KswordHUD::initializeAnimations()
         m_glWidget->update(); // 强制OpenGL部件重绘
         debugOutput("隐藏动画完成，窗口已隐藏");
         m_animationFrameCount = 0;
+        if (m_pendingToggleRequest) {
+            m_pendingToggleRequest = false;
+            QTimer::singleShot(0, this, [this]() { toggleVisibility(); });
+        }
         });
 
     // 显示动画：透明度从0.0→1.0（叠加后0.0→0.5）
@@ -647,6 +668,10 @@ void KswordHUD::initializeAnimations()
 
         debugOutput("显示动画完成，窗口已显示");
         m_animationFrameCount = 0;
+        if (m_pendingToggleRequest) {
+            m_pendingToggleRequest = false;
+            QTimer::singleShot(0, this, [this]() { toggleVisibility(); });
+        }
         });
     setWindowOpacity(0.5);
 }
@@ -654,9 +679,12 @@ void KswordHUD::initializeAnimations()
 void KswordHUD::toggleVisibility()
 {
     if (m_isAnimating) {
-        debugOutput("动画正在进行中，忽略切换请求");
+        m_pendingToggleRequest = true;
+        debugOutput("动画进行中，已记录切换请求");
         return;
     }
+
+    m_pendingToggleRequest = false;
 
     debugOutput("切换可见性，当前状态:" + QString(m_isVisible ? "显示" : "隐藏"));
 

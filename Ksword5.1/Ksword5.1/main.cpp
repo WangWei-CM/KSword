@@ -1,6 +1,7 @@
 ﻿#include "MainWindow.h"
 
 #include <QtCore/QEvent>
+#include <QtCore/QFile>
 #include <QtCore/QObject>
 #include <QtCore/QTimer>
 #include <QtWidgets/QApplication>
@@ -10,14 +11,16 @@
 #endif
 #include <Windows.h>
 #include <gdiplus.h>
+#include <objidl.h>
 
 #include <algorithm>
-#include <filesystem>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
 
 #pragma comment(lib, "Gdiplus.lib")
+#pragma comment(lib, "Ole32.lib")
 
 namespace
 {
@@ -25,6 +28,11 @@ namespace
     // - 启动画面的 Win32 窗口类名；
     // - 统一注册/创建时的类标识。
     constexpr wchar_t kNativeSplashClassName[] = L"KswordNativeSplashWindow";
+
+    // kMainLogoResourcePath 作用：
+    // - 启动画面 Logo 的 qrc 路径；
+    // - 启动图直接从程序内嵌资源读取，不依赖磁盘目录结构。
+    constexpr auto kMainLogoResourcePath = ":/Image/Resource/Logo/MainLogo.png";
 
     // clampPercent 作用：
     // - 把任意进度值限制在 0~100；
@@ -96,66 +104,6 @@ namespace
         }
     }
 
-    // getExecutableDirectoryPath 作用：
-    // - 获取当前 EXE 所在目录；
-    // - 用于定位 MainLogo.png 文件。
-    std::filesystem::path getExecutableDirectoryPath()
-    {
-        wchar_t modulePathBuffer[MAX_PATH] = {};
-        const DWORD copiedLength = ::GetModuleFileNameW(nullptr, modulePathBuffer, static_cast<DWORD>(std::size(modulePathBuffer)));
-        if (copiedLength == 0 || copiedLength >= std::size(modulePathBuffer))
-        {
-            return std::filesystem::current_path();
-        }
-
-        std::filesystem::path modulePath(modulePathBuffer);
-        if (!modulePath.has_parent_path())
-        {
-            return std::filesystem::current_path();
-        }
-        return modulePath.parent_path();
-    }
-
-    // resolveMainLogoPath 作用：
-    // - 搜索 MainLogo.png 的绝对路径；
-    // - 按 EXE 目录和当前目录向上回溯，兼容开发态与发布态。
-    // 返回值：存在则返回完整路径，否则返回空字符串。
-    std::wstring resolveMainLogoPath()
-    {
-        std::vector<std::filesystem::path> searchRoots;
-        searchRoots.push_back(getExecutableDirectoryPath());
-        searchRoots.push_back(std::filesystem::current_path());
-
-        for (const std::filesystem::path& rootPath : searchRoots)
-        {
-            std::filesystem::path walkingPath = rootPath;
-            for (int depth = 0; depth < 8; ++depth)
-            {
-                const std::filesystem::path directCandidate =
-                    walkingPath / L"Resource" / L"Logo" / L"MainLogo.png";
-                if (std::filesystem::exists(directCandidate))
-                {
-                    return directCandidate.wstring();
-                }
-
-                const std::filesystem::path nestedCandidate =
-                    walkingPath / L"Ksword5.1" / L"Resource" / L"Logo" / L"MainLogo.png";
-                if (std::filesystem::exists(nestedCandidate))
-                {
-                    return nestedCandidate.wstring();
-                }
-
-                if (!walkingPath.has_parent_path())
-                {
-                    break;
-                }
-                walkingPath = walkingPath.parent_path();
-            }
-        }
-
-        return std::wstring();
-    }
-
     // NativeSplashWindow 作用：
     // - 用 Win32 + GDI+ 绘制带 Alpha 透明的启动画面；
     // - 支持左下角状态文本和进度条。
@@ -163,23 +111,15 @@ namespace
     {
     public:
         // initialize 作用：
-        // - 启动 GDI+、加载 Logo、创建 Layered Window；
+        // - 启动 GDI+、从 qrc 加载 Logo、创建 Layered Window；
         // - 成功后可调用 show/updateProgress。
-        // 入参 logoPathText：MainLogo.png 绝对路径。
         // 返回值：true=初始化成功；false=失败。
-        bool initialize(const std::wstring& logoPathText)
+        bool initialize()
         {
             if (m_initialized)
             {
                 return true;
             }
-
-            if (logoPathText.empty())
-            {
-                return false;
-            }
-
-            m_logoPathText = logoPathText;
 
             Gdiplus::GdiplusStartupInput startupInput;
             const Gdiplus::Status startupStatus = Gdiplus::GdiplusStartup(
@@ -191,11 +131,51 @@ namespace
                 return false;
             }
 
-            Gdiplus::Image* imageRaw = Gdiplus::Image::FromFile(m_logoPathText.c_str(), FALSE);
+            // logoFile 用途：从 qrc 读取启动图 PNG 字节。
+            QFile logoFile(QString::fromLatin1(kMainLogoResourcePath));
+            if (!logoFile.open(QIODevice::ReadOnly))
+            {
+                return false;
+            }
+
+            // logoBytes 用途：承载完整 PNG 二进制内容，供 COM 流包装。
+            const QByteArray logoBytes = logoFile.readAll();
+            if (logoBytes.isEmpty())
+            {
+                return false;
+            }
+
+            // globalMemoryHandle 用途：分配可被 IStream 接管的全局内存块。
+            HGLOBAL globalMemoryHandle = ::GlobalAlloc(GMEM_MOVEABLE, static_cast<SIZE_T>(logoBytes.size()));
+            if (globalMemoryHandle == nullptr)
+            {
+                return false;
+            }
+
+            void* memoryPointer = ::GlobalLock(globalMemoryHandle);
+            if (memoryPointer == nullptr)
+            {
+                ::GlobalFree(globalMemoryHandle);
+                return false;
+            }
+            std::memcpy(memoryPointer, logoBytes.constData(), static_cast<std::size_t>(logoBytes.size()));
+            ::GlobalUnlock(globalMemoryHandle);
+
+            IStream* logoStreamRaw = nullptr;
+            const HRESULT createStreamResult = ::CreateStreamOnHGlobal(globalMemoryHandle, TRUE, &logoStreamRaw);
+            if (FAILED(createStreamResult) || logoStreamRaw == nullptr)
+            {
+                ::GlobalFree(globalMemoryHandle);
+                return false;
+            }
+
+            m_logoStream.reset(logoStreamRaw);
+            Gdiplus::Image* imageRaw = Gdiplus::Image::FromStream(m_logoStream.get(), FALSE);
             m_logoImage.reset(imageRaw);
             if (!m_logoImage || m_logoImage->GetLastStatus() != Gdiplus::Ok)
             {
                 m_logoImage.reset();
+                m_logoStream.reset();
                 return false;
             }
 
@@ -281,6 +261,7 @@ namespace
         {
             hide();
             m_logoImage.reset();
+            m_logoStream.reset();
             if (m_gdiplusToken != 0)
             {
                 Gdiplus::GdiplusShutdown(m_gdiplusToken);
@@ -474,8 +455,19 @@ namespace
     private:
         HWND m_windowHandle = nullptr;                         // m_windowHandle：启动窗口句柄。
         ULONG_PTR m_gdiplusToken = 0;                         // m_gdiplusToken：GDI+ 令牌。
+        struct StreamReleaser
+        {
+            void operator()(IStream* streamPointer) const
+            {
+                if (streamPointer != nullptr)
+                {
+                    streamPointer->Release();
+                }
+            }
+        };
+
         std::unique_ptr<Gdiplus::Image> m_logoImage;          // m_logoImage：Logo 图像对象。
-        std::wstring m_logoPathText;                          // m_logoPathText：Logo 文件路径。
+        std::unique_ptr<IStream, StreamReleaser> m_logoStream; // m_logoStream：qrc 图像内存流。
         std::wstring m_statusText = L"正在启动...";             // m_statusText：底部状态文字。
         int m_progressPercent = 0;                            // m_progressPercent：进度百分比。
         int m_windowWidth = 480;                              // m_windowWidth：窗口宽度。
@@ -550,8 +542,7 @@ int main(int argc, char* argv[])
     initializeProcessDpiAwareness();
 
     NativeSplashWindow splashWindow;
-    const std::wstring logoPathText = resolveMainLogoPath();
-    const bool splashReady = splashWindow.initialize(logoPathText);
+    const bool splashReady = splashWindow.initialize();
     if (splashReady)
     {
         splashWindow.show();

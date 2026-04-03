@@ -11,6 +11,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QMutexLocker>
 #include <QMetaObject>
 #include <QPainter>
 #include <QPointer>
@@ -21,6 +22,8 @@
 #include <QStackedWidget>
 #include <QTimer>
 #include <QVBoxLayout>
+
+#include <QtConcurrent/QtConcurrentRun>
 
 #include <QtCharts/QChart>
 #include <QtCharts/QChartView>
@@ -372,7 +375,6 @@ HudPerformancePanel::HudPerformancePanel(QWidget* parent)
 {
     appendTransparentBackgroundStyle(this);
     initializeUi();
-    initializePerformanceCounters();
     refreshCpuTopologyStaticInfo();
     refreshSystemVolumeInfo();
 
@@ -382,17 +384,25 @@ HudPerformancePanel::HudPerformancePanel(QWidget* parent)
         m_cpuModelLabel->setText(m_cpuModelText);
     }
 
-    refreshAllViews();
     requestAsyncStaticInfoRefresh();
     requestAsyncSensorRefresh();
+
+    m_liveSampleWatcher = new QFutureWatcher<LiveSampleResult>(this);
+    connect(m_liveSampleWatcher, &QFutureWatcher<LiveSampleResult>::finished, this, [this]()
+    {
+        m_liveSampleInProgress = false;
+        applyLiveSampleResult(m_liveSampleWatcher->result());
+    });
 
     m_refreshTimer = new QTimer(this);
     m_refreshTimer->setInterval(1000);
     connect(m_refreshTimer, &QTimer::timeout, this, [this]()
     {
-        refreshAllViews();
+        requestLiveRefresh();
     });
     m_refreshTimer->start();
+
+    requestLiveRefresh();
 }
 
 HudPerformancePanel::~HudPerformancePanel()
@@ -400,6 +410,10 @@ HudPerformancePanel::~HudPerformancePanel()
     if (m_refreshTimer != nullptr)
     {
         m_refreshTimer->stop();
+    }
+    if (m_liveSampleWatcher != nullptr)
+    {
+        m_liveSampleWatcher->waitForFinished();
     }
 
     if (m_cpuPerfQueryHandle != nullptr)
@@ -1246,61 +1260,128 @@ void HudPerformancePanel::initializePerformanceCounters()
 
 void HudPerformancePanel::refreshAllViews()
 {
-    std::vector<double> coreUsageList;
-    coreUsageList.reserve(m_coreChartEntries.size());
-    double totalCpuUsage = 0.0;
-    if (!samplePerCoreUsage(&coreUsageList, &totalCpuUsage))
+    requestLiveRefresh();
+}
+
+void HudPerformancePanel::requestLiveRefresh()
+{
+    if (m_liveSampleInProgress || m_liveSampleWatcher == nullptr)
     {
-        coreUsageList.assign(m_coreChartEntries.size(), 0.0);
-        totalCpuUsage = 0.0;
+        return;
     }
 
-    double memoryUsagePercent = 0.0;
-    sampleMemoryUsage(&memoryUsagePercent);
-
-    double diskReadBytesPerSec = 0.0;
-    double diskWriteBytesPerSec = 0.0;
-    if (!sampleDiskRate(&diskReadBytesPerSec, &diskWriteBytesPerSec))
+    m_liveSampleInProgress = true;
+    m_liveSampleWatcher->setFuture(QtConcurrent::run([this]()
     {
-        diskReadBytesPerSec = 0.0;
-        diskWriteBytesPerSec = 0.0;
+        return collectLiveSampleResult();
+    }));
+}
+
+HudPerformancePanel::LiveSampleResult HudPerformancePanel::collectLiveSampleResult()
+{
+    QMutexLocker locker(&m_liveSampleMutex);
+
+    LiveSampleResult result;
+    result.perCoreOk = samplePerCoreUsage(&result.coreUsageList, &result.totalCpuUsage);
+    if (!result.perCoreOk)
+    {
+        result.coreUsageList.assign(m_coreChartEntries.size(), 0.0);
+        result.totalCpuUsage = 0.0;
     }
 
-    double networkRxBytesPerSec = 0.0;
-    double networkTxBytesPerSec = 0.0;
-    if (!sampleNetworkRate(&networkRxBytesPerSec, &networkTxBytesPerSec))
+    result.memoryOk = sampleMemoryUsage(&result.memoryUsagePercent);
+    if (!result.memoryOk)
     {
-        networkRxBytesPerSec = 0.0;
-        networkTxBytesPerSec = 0.0;
+        result.memoryUsagePercent = 0.0;
+    }
+    MEMORYSTATUSEX memoryStatus{};
+    memoryStatus.dwLength = sizeof(memoryStatus);
+    if (::GlobalMemoryStatusEx(&memoryStatus) == TRUE)
+    {
+        result.totalPhysBytes = static_cast<std::uint64_t>(memoryStatus.ullTotalPhys);
+        result.availPhysBytes = static_cast<std::uint64_t>(memoryStatus.ullAvailPhys);
     }
 
-    double gpuUsagePercent = 0.0;
-    if (!sampleGpuUsage(&gpuUsagePercent))
+    result.diskOk = sampleDiskRate(&result.diskReadBytesPerSec, &result.diskWriteBytesPerSec);
+    if (!result.diskOk)
     {
-        gpuUsagePercent = 0.0;
+        result.diskReadBytesPerSec = 0.0;
+        result.diskWriteBytesPerSec = 0.0;
     }
 
-    std::vector<CpuPowerSnapshot> powerInfoList;
-    sampleCpuPowerInfo(&powerInfoList);
+    result.networkOk = sampleNetworkRate(&result.networkRxBytesPerSec, &result.networkTxBytesPerSec);
+    if (!result.networkOk)
+    {
+        result.networkRxBytesPerSec = 0.0;
+        result.networkTxBytesPerSec = 0.0;
+    }
+
+    result.gpuOk = sampleGpuUsage(&result.gpuUsagePercent);
+    if (!result.gpuOk)
+    {
+        result.gpuUsagePercent = 0.0;
+    }
+
+    result.powerInfoOk = sampleCpuPowerInfo(&result.powerInfoList);
+    result.systemPerfOk = sampleSystemPerformanceSnapshot(&result.systemPerfSnapshot);
+
+    result.primaryNetworkAdapterName = m_primaryNetworkAdapterName;
+    result.primaryNetworkLinkBitsPerSecond = m_primaryNetworkLinkBitsPerSecond;
+    result.gpuUsage3DPercent = m_gpuUsage3DPercent;
+    result.gpuUsageCopyPercent = m_gpuUsageCopyPercent;
+    result.gpuUsageVideoEncodePercent = m_gpuUsageVideoEncodePercent;
+    result.gpuUsageVideoDecodePercent = m_gpuUsageVideoDecodePercent;
+    result.gpuDedicatedUsedGiB = m_gpuDedicatedUsedGiB;
+    result.gpuDedicatedBudgetGiB = m_gpuDedicatedBudgetGiB;
+    result.gpuSharedUsedGiB = m_gpuSharedUsedGiB;
+    result.gpuSharedBudgetGiB = m_gpuSharedBudgetGiB;
+    result.systemVolumeText = m_systemVolumeText;
+    result.systemVolumeTotalBytes = m_systemVolumeTotalBytes;
+    result.systemVolumeFreeBytes = m_systemVolumeFreeBytes;
+    return result;
+}
+
+void HudPerformancePanel::applyLiveSampleResult(const LiveSampleResult& liveSampleResult)
+{
+    {
+        QMutexLocker locker(&m_liveSampleMutex);
+        m_primaryNetworkAdapterName = liveSampleResult.primaryNetworkAdapterName;
+        m_primaryNetworkLinkBitsPerSecond = liveSampleResult.primaryNetworkLinkBitsPerSecond;
+        m_gpuUsage3DPercent = liveSampleResult.gpuUsage3DPercent;
+        m_gpuUsageCopyPercent = liveSampleResult.gpuUsageCopyPercent;
+        m_gpuUsageVideoEncodePercent = liveSampleResult.gpuUsageVideoEncodePercent;
+        m_gpuUsageVideoDecodePercent = liveSampleResult.gpuUsageVideoDecodePercent;
+        m_gpuDedicatedUsedGiB = liveSampleResult.gpuDedicatedUsedGiB;
+        m_gpuDedicatedBudgetGiB = liveSampleResult.gpuDedicatedBudgetGiB;
+        m_gpuSharedUsedGiB = liveSampleResult.gpuSharedUsedGiB;
+        m_gpuSharedBudgetGiB = liveSampleResult.gpuSharedBudgetGiB;
+        m_systemVolumeText = liveSampleResult.systemVolumeText;
+        m_systemVolumeTotalBytes = liveSampleResult.systemVolumeTotalBytes;
+        m_systemVolumeFreeBytes = liveSampleResult.systemVolumeFreeBytes;
+        m_lastTotalPhysBytes = liveSampleResult.totalPhysBytes;
+        m_lastAvailPhysBytes = liveSampleResult.availPhysBytes;
+    }
 
     ++m_sampleCounter;
     updateView(
-        coreUsageList,
-        memoryUsagePercent,
-        diskReadBytesPerSec,
-        diskWriteBytesPerSec,
-        networkRxBytesPerSec,
-        networkTxBytesPerSec,
-        gpuUsagePercent);
+        liveSampleResult.coreUsageList,
+        liveSampleResult.memoryUsagePercent,
+        liveSampleResult.diskReadBytesPerSec,
+        liveSampleResult.diskWriteBytesPerSec,
+        liveSampleResult.networkRxBytesPerSec,
+        liveSampleResult.networkTxBytesPerSec,
+        liveSampleResult.gpuUsagePercent);
     updateTaskManagerDetailLabels(
-        coreUsageList,
-        powerInfoList,
-        memoryUsagePercent,
-        diskReadBytesPerSec,
-        diskWriteBytesPerSec,
-        networkRxBytesPerSec,
-        networkTxBytesPerSec,
-        gpuUsagePercent);
+        liveSampleResult.coreUsageList,
+        liveSampleResult.powerInfoList,
+        liveSampleResult.memoryUsagePercent,
+        liveSampleResult.diskReadBytesPerSec,
+        liveSampleResult.diskWriteBytesPerSec,
+        liveSampleResult.networkRxBytesPerSec,
+        liveSampleResult.networkTxBytesPerSec,
+        liveSampleResult.gpuUsagePercent,
+        &liveSampleResult.systemPerfSnapshot,
+        liveSampleResult.systemPerfOk);
 
     if ((m_sampleCounter % 5) == 1)
     {
@@ -1975,6 +2056,8 @@ void HudPerformancePanel::updateView(
     updateSidebarCards(
         averageCpuUsage,
         memoryUsagePercent,
+        m_lastTotalPhysBytes,
+        m_lastAvailPhysBytes,
         diskReadBytesPerSec,
         diskWriteBytesPerSec,
         networkRxBytesPerSec,
@@ -1985,6 +2068,8 @@ void HudPerformancePanel::updateView(
 void HudPerformancePanel::updateSidebarCards(
     const double cpuUsagePercent,
     const double memoryUsagePercent,
+    const std::uint64_t totalPhysBytes,
+    const std::uint64_t availPhysBytes,
     const double diskReadBytesPerSec,
     const double diskWriteBytesPerSec,
     const double networkRxBytesPerSec,
@@ -2000,13 +2085,11 @@ void HudPerformancePanel::updateSidebarCards(
         m_cpuNavCard->appendSample(cpuUsagePercent);
     }
 
-    MEMORYSTATUSEX memoryStatus{};
-    memoryStatus.dwLength = sizeof(memoryStatus);
-    if (m_memoryNavCard != nullptr && ::GlobalMemoryStatusEx(&memoryStatus) == TRUE)
+    if (m_memoryNavCard != nullptr && totalPhysBytes > 0)
     {
-        const double totalGiB = static_cast<double>(memoryStatus.ullTotalPhys) / kOneGiBInBytes;
+        const double totalGiB = static_cast<double>(totalPhysBytes) / kOneGiBInBytes;
         const double usedGiB =
-            static_cast<double>(memoryStatus.ullTotalPhys - memoryStatus.ullAvailPhys) / kOneGiBInBytes;
+            static_cast<double>(totalPhysBytes - availPhysBytes) / kOneGiBInBytes;
         m_memoryNavCard->setSubtitleText(
             QStringLiteral("%1/%2 GB (%3%)")
             .arg(usedGiB, 0, 'f', 1)
@@ -2068,7 +2151,9 @@ void HudPerformancePanel::updateTaskManagerDetailLabels(
     const double diskWriteBytesPerSec,
     const double networkRxBytesPerSec,
     const double networkTxBytesPerSec,
-    const double gpuUsagePercent)
+    const double gpuUsagePercent,
+    const SystemPerformanceSnapshot* const systemPerfSnapshotPointer,
+    const bool systemPerfOk)
 {
     Q_UNUSED(memoryUsagePercent);
 
@@ -2105,8 +2190,6 @@ void HudPerformancePanel::updateTaskManagerDetailLabels(
         : 0.0;
     m_lastCpuSpeedGhz = currentCpuGhz;
 
-    SystemPerformanceSnapshot perfSnapshot;
-    const bool perfOk = sampleSystemPerformanceSnapshot(&perfSnapshot);
     const std::uint64_t uptimeSeconds = static_cast<std::uint64_t>(::GetTickCount64() / 1000ULL);
 
     if (m_cpuPrimaryDetailLabel != nullptr)
@@ -2121,9 +2204,9 @@ void HudPerformancePanel::updateTaskManagerDetailLabels(
                 "Up time: %6")
             .arg(averageCpuUsage, 0, 'f', 1)
             .arg(currentCpuGhz, 0, 'f', 2)
-            .arg(perfOk ? QString::number(perfSnapshot.processCount) : QStringLiteral("N/A"))
-            .arg(perfOk ? QString::number(perfSnapshot.threadCount) : QStringLiteral("N/A"))
-            .arg(perfOk ? QString::number(perfSnapshot.handleCount) : QStringLiteral("N/A"))
+            .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? QString::number(systemPerfSnapshotPointer->processCount) : QStringLiteral("N/A"))
+            .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? QString::number(systemPerfSnapshotPointer->threadCount) : QStringLiteral("N/A"))
+            .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? QString::number(systemPerfSnapshotPointer->handleCount) : QStringLiteral("N/A"))
             .arg(formatDurationText(uptimeSeconds)));
     }
 
@@ -2171,11 +2254,11 @@ void HudPerformancePanel::updateTaskManagerDetailLabels(
                     "Non-paged pool: %7")
                 .arg(usedGiB, 0, 'f', 1)
                 .arg(availableGiB, 0, 'f', 1)
-                .arg(perfOk ? bytesToReadableText(static_cast<double>(perfSnapshot.commitTotalBytes)) : QStringLiteral("N/A"))
-                .arg(perfOk ? bytesToReadableText(static_cast<double>(perfSnapshot.commitLimitBytes)) : QStringLiteral("N/A"))
-                .arg(perfOk ? bytesToReadableText(static_cast<double>(perfSnapshot.cachedBytes)) : QStringLiteral("N/A"))
-                .arg(perfOk ? bytesToReadableText(static_cast<double>(perfSnapshot.pagedPoolBytes)) : QStringLiteral("N/A"))
-                .arg(perfOk ? bytesToReadableText(static_cast<double>(perfSnapshot.nonPagedPoolBytes)) : QStringLiteral("N/A")));
+                .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->commitTotalBytes)) : QStringLiteral("N/A"))
+                .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->commitLimitBytes)) : QStringLiteral("N/A"))
+                .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->cachedBytes)) : QStringLiteral("N/A"))
+                .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->pagedPoolBytes)) : QStringLiteral("N/A"))
+                .arg(systemPerfOk && systemPerfSnapshotPointer != nullptr ? bytesToReadableText(static_cast<double>(systemPerfSnapshotPointer->nonPagedPoolBytes)) : QStringLiteral("N/A")));
         }
     }
 
@@ -2200,10 +2283,6 @@ void HudPerformancePanel::updateTaskManagerDetailLabels(
             .arg(bytesToReadableText(reservedBytes)));
     }
 
-    if ((m_sampleCounter % 15) == 1)
-    {
-        refreshSystemVolumeInfo();
-    }
     if (m_diskDetailLabel != nullptr)
     {
         const double diskTotalRate = std::max(0.0, diskReadBytesPerSec) + std::max(0.0, diskWriteBytesPerSec);

@@ -28,6 +28,7 @@
 #include "hGet.h"
 
 class HudPerformancePanel;
+class HudProcessListPanel;
 class QTabWidget;
 class QTimer;
 
@@ -84,6 +85,7 @@ private:
         int rightWidgetOpacityPercent = 100;
         QString leftWidgetBackgroundColor = "#000000";
         int leftWidgetBackgroundOpacityPercent = 0;
+        QString leftProcessTableFontColor = "#FFFFFF";
         QString rightWidgetBackgroundColor = "#000000";
         int rightWidgetBackgroundOpacityPercent = 0;
     };
@@ -94,6 +96,7 @@ private:
     qreal m_windowOpacity;
     bool m_isVisible;
     bool m_isAnimating;
+    bool m_pendingToggleRequest = false;
     QRect m_originalRect;
     QWidget* m_leftWidget;
     QWidget* m_rightWidget;
@@ -125,6 +128,7 @@ private:
 
     // 2. 右侧TabWidget及图表相关
     QTabWidget* m_rightTabWidget = nullptr;    // 右侧Tab容器
+    HudProcessListPanel* m_processListPanel = nullptr;
     HudPerformancePanel* m_performancePanel = nullptr;
     QGraphicsOpacityEffect* m_leftOpacityEffect = nullptr;
     QGraphicsOpacityEffect* m_rightOpacityEffect = nullptr;

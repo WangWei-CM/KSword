@@ -13,6 +13,7 @@
 #include <QPointF>
 #include <QPixmap>
 #include <QRectF>
+#include <QResizeEvent>
 #include <QImageReader>
 #include <QMessageBox>
 #include <QToolTip>
@@ -260,6 +261,23 @@ MainWindow::MainWindow(
     // 把 DockManager 设置为主窗口中央控件，确保 Dock 区域可见并可交互。
     setCentralWidget(m_pDockManager);
 
+    // 浮动窗口创建后立即挂接事件过滤器：
+    // - 让脱离主窗口的 Dock 容器也能同步背景图与纯色底；
+    // - 后续 resize/show 时统一走 MainWindow 的外观同步逻辑。
+    connect(
+        m_pDockManager,
+        &ads::CDockManager::floatingWidgetCreated,
+        this,
+        [this](ads::CFloatingDockContainer* floatingWidget)
+        {
+            if (floatingWidget == nullptr)
+            {
+                return;
+            }
+            floatingWidget->installEventFilter(this);
+            applyFloatingDockContainerAppearance(floatingWidget);
+        });
+
     // 显式要求“最后一个窗口关闭后退出应用”。
     // 说明：用户要求主窗口关闭时进程必须结束，这里先设置 Qt 全局退出策略。
     QApplication::setQuitOnLastWindowClosed(true);
@@ -343,6 +361,21 @@ void MainWindow::closeEvent(QCloseEvent* event)
 
     kLogEvent closeFinishLog;
     info << closeFinishLog << "[MainWindow] 已提交退出请求 (exit code=0)。" << eol;
+}
+
+bool MainWindow::eventFilter(QObject* watchedObject, QEvent* event)
+{
+    ads::CFloatingDockContainer* floatingWidget =
+        qobject_cast<ads::CFloatingDockContainer*>(watchedObject);
+    if (floatingWidget != nullptr && event != nullptr)
+    {
+        if (event->type() == QEvent::Show || event->type() == QEvent::Resize)
+        {
+            applyFloatingDockContainerAppearance(floatingWidget);
+        }
+    }
+
+    return QMainWindow::eventFilter(watchedObject, event);
 }
 
 void MainWindow::resizeEvent(QResizeEvent* event)
@@ -1614,6 +1647,67 @@ void MainWindow::rebuildWindowBackgroundBrush()
         dockPalette.setBrush(QPalette::Window, backgroundBrush);
         m_pDockManager->setPalette(dockPalette);
         m_pDockManager->setAutoFillBackground(true);
+
+        // 同步重建所有当前浮动窗口背景：
+        // - 主窗口 resize 或背景图切换后，浮动容器也要刷新自己的背景画刷；
+        // - 否则会继续保留旧尺寸/旧主题下的纯黑背景。
+        const QList<ads::CFloatingDockContainer*> floatingWidgetList = m_pDockManager->floatingWidgets();
+        for (ads::CFloatingDockContainer* floatingWidget : floatingWidgetList)
+        {
+            applyFloatingDockContainerAppearance(floatingWidget);
+        }
+    }
+}
+
+void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContainer* floatingWidget) const
+{
+    if (floatingWidget == nullptr)
+    {
+        return;
+    }
+
+    const bool darkModeEnabled = isDarkModeEffective(m_currentAppearanceSettings);
+    const QColor baseColor = darkModeEnabled ? QColor(0, 0, 0) : QColor(255, 255, 255);
+    const QString resolvedImagePath = ks::settings::resolveBackgroundImagePathForLoad(
+        m_currentAppearanceSettings.backgroundImagePath);
+    const bool enableDockTransparencyForBackgroundImage =
+        isBackgroundImageReady(m_currentAppearanceSettings.backgroundImagePath);
+
+    // floatingSize 用途：浮动容器当前尺寸；无效时至少给 1x1，避免画刷构造失败。
+    const QSize floatingSize = floatingWidget->size().isValid() ? floatingWidget->size() : QSize(1, 1);
+    const QBrush backgroundBrush = buildBackgroundBrush(
+        floatingSize,
+        baseColor,
+        resolvedImagePath,
+        m_currentAppearanceSettings.backgroundOpacityPercent);
+
+    QPalette floatingPalette = floatingWidget->palette();
+    floatingPalette.setColor(QPalette::Window, baseColor);
+    floatingPalette.setBrush(QPalette::Window, backgroundBrush);
+    floatingPalette.setColor(QPalette::WindowText, darkModeEnabled ? QColor(255, 255, 255) : QColor(0, 0, 0));
+    floatingWidget->setPalette(floatingPalette);
+    floatingWidget->setAutoFillBackground(true);
+    floatingWidget->setAttribute(Qt::WA_StyledBackground, false);
+
+    // 浮动窗口是独立顶层窗口，不继承 MainWindow 的局部样式表；
+    // 这里显式复用同一套外观样式，确保 Tab/TitleBar/内容区规则一致。
+    const QString appearanceStyleSheet =
+        QSS_MainWindow_TabWidget
+        + QSS_MainWindow_dockStyle
+        + buildAppearanceOverlayStyleSheet(
+            darkModeEnabled,
+            enableDockTransparencyForBackgroundImage);
+    floatingWidget->setStyleSheet(appearanceStyleSheet);
+
+    ads::CDockContainerWidget* dockContainer = floatingWidget->dockContainer();
+    if (dockContainer != nullptr)
+    {
+        QPalette dockContainerPalette = dockContainer->palette();
+        dockContainerPalette.setColor(QPalette::Window, baseColor);
+        dockContainerPalette.setBrush(QPalette::Window, backgroundBrush);
+        dockContainer->setPalette(dockContainerPalette);
+        dockContainer->setAutoFillBackground(true);
+        dockContainer->setAttribute(Qt::WA_StyledBackground, false);
     }
 }
 
