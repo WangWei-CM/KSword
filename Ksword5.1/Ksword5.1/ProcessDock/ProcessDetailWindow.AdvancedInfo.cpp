@@ -1,5 +1,9 @@
+﻿#include "ProcessDetailWindow.InternalCommon.h"
+
+using namespace process_detail_window_internal;
+
 // ============================================================
-// ProcessDetailWindow.AdvancedInfo.inc
+// ProcessDetailWindow.AdvancedInfo.cpp
 // 作用：
 // - 线程细节异步刷新；
 // - 令牌详情异步刷新；

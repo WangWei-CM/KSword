@@ -1,4 +1,5 @@
 #include "FileDock.h"
+#include "FilePropertyPeAnalyzer.h"
 
 // ============================================================
 // FileDock.cpp
@@ -758,48 +759,7 @@ namespace
             QVBoxLayout* layout = new QVBoxLayout(page);
             CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
             textEditorWidget->setReadOnly(true);
-
-            QFile file(m_filePath);
-            QString content;
-            if (!file.open(QIODevice::ReadOnly))
-            {
-                content = QStringLiteral("无法读取文件，无法解析PE信息。");
-                textEditorWidget->setText(content);
-                layout->addWidget(textEditorWidget, 1);
-                return page;
-            }
-
-            const QByteArray headerBytes = file.read(4096);
-            file.close();
-            if (headerBytes.size() < 0x100)
-            {
-                textEditorWidget->setText(QStringLiteral("文件过小，无法识别PE。"));
-                layout->addWidget(textEditorWidget, 1);
-                return page;
-            }
-
-            const bool isMZ = headerBytes.size() >= 2
-                && static_cast<unsigned char>(headerBytes[0]) == 0x4D
-                && static_cast<unsigned char>(headerBytes[1]) == 0x5A;
-            if (!isMZ)
-            {
-                textEditorWidget->setText(QStringLiteral("非PE文件（缺少 MZ 标记）。"));
-                layout->addWidget(textEditorWidget, 1);
-                return page;
-            }
-
-            const std::uint32_t peOffset = *reinterpret_cast<const std::uint32_t*>(headerBytes.constData() + 0x3C);
-            content += QStringLiteral("文件格式：PE\n");
-            content += QStringLiteral("e_lfanew: 0x%1\n").arg(QString::number(peOffset, 16).toUpper());
-            if (headerBytes.size() >= static_cast<int>(peOffset + 0x18))
-            {
-                const std::uint16_t machine = *reinterpret_cast<const std::uint16_t*>(headerBytes.constData() + peOffset + 4);
-                const std::uint16_t numberOfSections = *reinterpret_cast<const std::uint16_t*>(headerBytes.constData() + peOffset + 6);
-                content += QStringLiteral("Machine: 0x%1\n").arg(QString::number(machine, 16).toUpper());
-                content += QStringLiteral("Section数量: %1\n").arg(numberOfSections);
-            }
-            content += QStringLiteral("\n后续可扩展：导入表/导出表/资源树/区段熵值。");
-            textEditorWidget->setText(content);
+            textEditorWidget->setText(file_dock_detail::buildPeAnalysisText(m_filePath));
 
             layout->addWidget(textEditorWidget, 1);
             return page;
@@ -1039,6 +999,15 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     panel.pathEdit->setPlaceholderText(QStringLiteral("输入路径后按回车跳转"));
     panel.pathEdit->setStyleSheet(buildBlueInputStyle());
 
+    // 驱动器下拉框：
+    // - 固定放在地址栏右侧，直接跳转任意盘符根目录；
+    // - 解决默认路径体验更偏向当前系统盘的问题。
+    panel.driveCombo = new QComboBox(panel.navWidget);
+    panel.driveCombo->setStyleSheet(buildBlueInputStyle());
+    panel.driveCombo->setMinimumWidth(92);
+    panel.driveCombo->setMaximumWidth(140);
+    panel.driveCombo->setToolTip(QStringLiteral("快速跳转到任意驱动器根目录"));
+
     panel.pathStack->addWidget(panel.breadcrumbWidget);
     panel.pathStack->addWidget(panel.pathEdit);
 
@@ -1047,6 +1016,7 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     panel.navLayout->addWidget(panel.upButton);
     panel.navLayout->addWidget(panel.refreshButton);
     panel.navLayout->addWidget(panel.pathStack, 1);
+    panel.navLayout->addWidget(panel.driveCombo, 0);
     panel.rootLayout->addWidget(panel.navWidget, 0);
 
     panel.toolWidget = new QWidget(panel.rootWidget);
@@ -1142,6 +1112,7 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     // 初始化读取模式并同步模型。
     applyReadModeToPanel(panel);
     initializeConnections(panel);
+    refreshDriveCombo(panel);
 
     // 默认定位到系统根目录。
     const QString defaultPath = QDir::rootPath();
@@ -1260,6 +1231,34 @@ void FileDock::initializeConnections(FilePanelWidgets& panel)
         }
         navigateToPath(panel, targetPath, true);
         setPathEditMode(panel, false);
+    });
+
+    // 驱动器下拉框切换：直接跳转到对应盘符根目录。
+    connect(panel.driveCombo, &QComboBox::currentIndexChanged, this, [this, &panel](const int indexValue) {
+        if (indexValue < 0)
+        {
+            return;
+        }
+
+        const QString targetRootPath = panel.driveCombo->itemData(indexValue).toString();
+        if (targetRootPath.trimmed().isEmpty())
+        {
+            return;
+        }
+
+        if (panel.currentPath.compare(targetRootPath, Qt::CaseInsensitive) == 0)
+        {
+            return;
+        }
+
+        kLogEvent event;
+        info << event
+            << "[FileDock] 驱动器下拉框跳转, panel="
+            << panel.panelNameText.toStdString()
+            << ", targetRoot="
+            << QDir::toNativeSeparators(targetRootPath).toStdString()
+            << eol;
+        navigateToPath(panel, targetRootPath, true);
     });
 
     // 编辑完成但未回车时：回退到面包屑，避免长期停留在文本编辑态。
@@ -1426,7 +1425,16 @@ void FileDock::navigateToPath(FilePanelWidgets& panel, const QString& pathText, 
         return;
     }
 
-    const QString normalizedPath = QDir::cleanPath(QDir::fromNativeSeparators(trimmedPath));
+    QString normalizedPath = QDir::cleanPath(QDir::fromNativeSeparators(trimmedPath));
+
+    // 允许用户直接输入裸盘符（如 D:）后跳转到盘根目录。
+    if (normalizedPath.size() == 2
+        && normalizedPath.at(1) == QChar(':')
+        && normalizedPath.at(0).isLetter())
+    {
+        normalizedPath += QDir::separator();
+    }
+
     QDir targetDir(normalizedPath);
     if (!targetDir.exists())
     {
@@ -1450,6 +1458,7 @@ void FileDock::navigateToPath(FilePanelWidgets& panel, const QString& pathText, 
     }
     panel.currentPath = normalizedPath;
     panel.pathEdit->setText(QDir::toNativeSeparators(normalizedPath));
+    refreshDriveCombo(panel);
 
     // 记录历史：当用户主动导航时清理“前进分支”再追加。
     if (recordHistory)
@@ -1958,6 +1967,41 @@ void FileDock::applyPanelFilterAndSort(FilePanelWidgets& panel)
     }
 
     updatePanelStatus(panel);
+}
+
+void FileDock::refreshDriveCombo(FilePanelWidgets& panel)
+{
+    if (panel.driveCombo == nullptr)
+    {
+        return;
+    }
+
+    const QSignalBlocker blocker(panel.driveCombo);
+    panel.driveCombo->clear();
+
+    const QFileInfoList driveList = QDir::drives();
+    int selectedIndex = -1;
+    for (const QFileInfo& driveInfo : driveList)
+    {
+        const QString rootPath = QDir::toNativeSeparators(driveInfo.absoluteFilePath());
+        QString displayText = rootPath;
+        if (displayText.endsWith(QDir::separator()))
+        {
+            displayText.chop(1);
+        }
+        panel.driveCombo->addItem(displayText, rootPath);
+
+        if (!panel.currentPath.isEmpty()
+            && panel.currentPath.startsWith(driveInfo.absoluteFilePath(), Qt::CaseInsensitive))
+        {
+            selectedIndex = panel.driveCombo->count() - 1;
+        }
+    }
+
+    if (selectedIndex >= 0)
+    {
+        panel.driveCombo->setCurrentIndex(selectedIndex);
+    }
 }
 
 void FileDock::applyReadModeToPanel(FilePanelWidgets& panel)

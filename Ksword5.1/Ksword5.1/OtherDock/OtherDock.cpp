@@ -983,7 +983,7 @@ public:
     }
 
 private:
-    // 构建 UI：创建 8 个标签页并绑定底部操作按钮。
+    // 构建 UI：创建 5 个标签页（前四类属性合并到“基础属性”）并绑定底部操作按钮。
     void initializeUi()
     {
         QVBoxLayout* rootLayout = new QVBoxLayout(this);
@@ -991,17 +991,21 @@ private:
         m_tabWidget = new QTabWidget(this);
         rootLayout->addWidget(m_tabWidget, 1);
 
-        // ==================== 1. 常规信息 Tab ====================
-        QWidget* generalPage = new QWidget(m_tabWidget);
-        QFormLayout* generalLayout = new QFormLayout(generalPage);
-        m_handleLabel = new QLabel(generalPage);
-        m_parentHandleLabel = new QLabel(generalPage);
-        m_ownerHandleLabel = new QLabel(generalPage);
-        m_titleEdit = new QLineEdit(generalPage);
-        m_classNameLabel = new QLabel(generalPage);
-        m_instanceLabel = new QLabel(generalPage);
-        m_stateLabel = new QLabel(generalPage);
-        m_relationLabel = new QLabel(generalPage);
+        // ==================== 1. 基础属性 Tab（合并前四个页签） ====================
+        QWidget* basicPage = new QWidget(m_tabWidget);
+        QVBoxLayout* basicLayout = new QVBoxLayout(basicPage);
+
+        // 常规信息分组：集中展示句柄关系和标题类名等关键字段。
+        QGroupBox* generalGroup = new QGroupBox(QStringLiteral("常规信息"), basicPage);
+        QFormLayout* generalLayout = new QFormLayout(generalGroup);
+        m_handleLabel = new QLabel(generalGroup);
+        m_parentHandleLabel = new QLabel(generalGroup);
+        m_ownerHandleLabel = new QLabel(generalGroup);
+        m_titleEdit = new QLineEdit(generalGroup);
+        m_classNameLabel = new QLabel(generalGroup);
+        m_instanceLabel = new QLabel(generalGroup);
+        m_stateLabel = new QLabel(generalGroup);
+        m_relationLabel = new QLabel(generalGroup);
         generalLayout->addRow(QStringLiteral("句柄"), m_handleLabel);
         generalLayout->addRow(QStringLiteral("父句柄"), m_parentHandleLabel);
         generalLayout->addRow(QStringLiteral("所有者句柄"), m_ownerHandleLabel);
@@ -1011,23 +1015,20 @@ private:
         generalLayout->addRow(QStringLiteral("实例句柄"), m_instanceLabel);
         generalLayout->addRow(QStringLiteral("状态摘要"), m_stateLabel);
         generalLayout->addRow(QStringLiteral("关系摘要"), m_relationLabel);
-        m_tabWidget->addTab(generalPage, QStringLiteral("常规信息"));
+        basicLayout->addWidget(generalGroup, 0);
 
-        // ==================== 2. 样式 Tab ====================
-        QWidget* stylePage = new QWidget(m_tabWidget);
-        QVBoxLayout* styleLayout = new QVBoxLayout(stylePage);
-        m_styleText = new CodeEditorWidget(stylePage);
-        m_styleText->setReadOnly(true);
-        styleLayout->addWidget(m_styleText, 1);
-        m_tabWidget->addTab(stylePage, QStringLiteral("样式与外观"));
+        // 位置与状态分组：把可编辑位置和状态控制并排展示，减少标签切换。
+        QGroupBox* layoutStateGroup = new QGroupBox(QStringLiteral("位置与状态"), basicPage);
+        QHBoxLayout* layoutStateLayout = new QHBoxLayout(layoutStateGroup);
+        QWidget* positionPanel = new QWidget(layoutStateGroup);
+        QFormLayout* positionLayout = new QFormLayout(positionPanel);
+        QWidget* statePanel = new QWidget(layoutStateGroup);
+        QFormLayout* stateLayout = new QFormLayout(statePanel);
 
-        // ==================== 3. 位置尺寸 Tab ====================
-        QWidget* positionPage = new QWidget(m_tabWidget);
-        QFormLayout* positionLayout = new QFormLayout(positionPage);
-        m_xSpin = new QSpinBox(positionPage);
-        m_ySpin = new QSpinBox(positionPage);
-        m_widthSpin = new QSpinBox(positionPage);
-        m_heightSpin = new QSpinBox(positionPage);
+        m_xSpin = new QSpinBox(positionPanel);
+        m_ySpin = new QSpinBox(positionPanel);
+        m_widthSpin = new QSpinBox(positionPanel);
+        m_heightSpin = new QSpinBox(positionPanel);
         for (QSpinBox* spinBox : { m_xSpin, m_ySpin, m_widthSpin, m_heightSpin })
         {
             spinBox->setRange(-32768, 32768);
@@ -1036,7 +1037,8 @@ private:
         }
         m_widthSpin->setRange(1, 32768);
         m_heightSpin->setRange(1, 32768);
-        QPushButton* centerScreenButton = new QPushButton(QIcon(":/Icon/process_tree.svg"), QStringLiteral("居中到屏幕"), positionPage);
+
+        QPushButton* centerScreenButton = new QPushButton(QIcon(":/Icon/process_tree.svg"), QStringLiteral("居中到屏幕"), positionPanel);
         centerScreenButton->setToolTip(QStringLiteral("把窗口移动到主屏幕中央"));
         centerScreenButton->setStyleSheet(blueButtonStyle());
         positionLayout->addRow(QStringLiteral("X"), m_xSpin);
@@ -1044,6 +1046,29 @@ private:
         positionLayout->addRow(QStringLiteral("宽度"), m_widthSpin);
         positionLayout->addRow(QStringLiteral("高度"), m_heightSpin);
         positionLayout->addRow(QStringLiteral("快捷操作"), centerScreenButton);
+
+        m_topMostCheck = new QCheckBox(QStringLiteral("置顶窗口"), statePanel);
+        m_topMostCheck->setEnabled(false);
+        m_alphaSlider = new QSlider(Qt::Horizontal, statePanel);
+        m_alphaSlider->setRange(20, 255);
+        m_alphaSlider->setEnabled(false);
+        m_alphaLabel = new QLabel(statePanel);
+        stateLayout->addRow(QStringLiteral("置顶"), m_topMostCheck);
+        stateLayout->addRow(QStringLiteral("透明度"), m_alphaSlider);
+        stateLayout->addRow(QStringLiteral("当前 Alpha"), m_alphaLabel);
+
+        layoutStateLayout->addWidget(positionPanel, 1);
+        layoutStateLayout->addWidget(statePanel, 1);
+        basicLayout->addWidget(layoutStateGroup, 0);
+
+        // 样式分组：保留较大文本区域显示样式位与解释详情。
+        QGroupBox* styleGroup = new QGroupBox(QStringLiteral("样式与外观"), basicPage);
+        QVBoxLayout* styleLayout = new QVBoxLayout(styleGroup);
+        m_styleText = new CodeEditorWidget(styleGroup);
+        m_styleText->setReadOnly(true);
+        styleLayout->addWidget(m_styleText, 1);
+        basicLayout->addWidget(styleGroup, 1);
+
         connect(centerScreenButton, &QPushButton::clicked, this, [this]() {
             QScreen* screen = QGuiApplication::primaryScreen();
             if (screen == nullptr)
@@ -1056,26 +1081,12 @@ private:
             m_xSpin->setValue(targetX);
             m_ySpin->setValue(targetY);
         });
-        m_tabWidget->addTab(positionPage, QStringLiteral("位置与尺寸"));
-
-        // ==================== 4. 窗口状态 Tab ====================
-        QWidget* statePage = new QWidget(m_tabWidget);
-        QFormLayout* stateLayout = new QFormLayout(statePage);
-        m_topMostCheck = new QCheckBox(QStringLiteral("置顶窗口"), statePage);
-        m_topMostCheck->setEnabled(false);
-        m_alphaSlider = new QSlider(Qt::Horizontal, statePage);
-        m_alphaSlider->setRange(20, 255);
-        m_alphaSlider->setEnabled(false);
-        m_alphaLabel = new QLabel(statePage);
-        stateLayout->addRow(QStringLiteral("置顶"), m_topMostCheck);
-        stateLayout->addRow(QStringLiteral("透明度"), m_alphaSlider);
-        stateLayout->addRow(QStringLiteral("当前 Alpha"), m_alphaLabel);
         connect(m_alphaSlider, &QSlider::valueChanged, this, [this](int value) {
             m_alphaLabel->setText(QStringLiteral("%1").arg(value));
         });
-        m_tabWidget->addTab(statePage, QStringLiteral("窗口状态"));
+        m_tabWidget->addTab(basicPage, QStringLiteral("基础属性"));
 
-        // ==================== 5. 进程线程 Tab ====================
+        // ==================== 2. 进程线程 Tab ====================
         QWidget* processPage = new QWidget(m_tabWidget);
         QVBoxLayout* processLayout = new QVBoxLayout(processPage);
         m_processThreadText = new CodeEditorWidget(processPage);
@@ -1083,7 +1094,7 @@ private:
         processLayout->addWidget(m_processThreadText, 1);
         m_tabWidget->addTab(processPage, QStringLiteral("进程与线程"));
 
-        // ==================== 6. 类信息 Tab ====================
+        // ==================== 3. 类信息 Tab ====================
         QWidget* classPage = new QWidget(m_tabWidget);
         QVBoxLayout* classLayout = new QVBoxLayout(classPage);
         m_classText = new CodeEditorWidget(classPage);
@@ -1091,7 +1102,7 @@ private:
         classLayout->addWidget(m_classText, 1);
         m_tabWidget->addTab(classPage, QStringLiteral("类信息"));
 
-        // ==================== 7. 消息钩子 Tab ====================
+        // ==================== 4. 消息钩子 Tab ====================
         QWidget* hookPage = new QWidget(m_tabWidget);
         QVBoxLayout* hookLayout = new QVBoxLayout(hookPage);
 
@@ -1206,7 +1217,7 @@ private:
 
         m_tabWidget->addTab(hookPage, QStringLiteral("消息钩子"));
 
-        // ==================== 8. 高级属性 Tab ====================
+        // ==================== 5. 高级属性 Tab ====================
         QWidget* advancedPage = new QWidget(m_tabWidget);
         QVBoxLayout* advancedLayout = new QVBoxLayout(advancedPage);
         m_advancedText = new CodeEditorWidget(advancedPage);
@@ -2475,7 +2486,7 @@ void OtherDock::initializeUi()
     m_mainSplitter->setStretchFactor(1, 1);
     m_contentTabWidget->addTab(m_windowListPage, QStringLiteral("窗口列表"));
 
-    // 桌面管理页：列出可访问桌面并支持切换。
+    // 桌面管理页：列出窗口站与桌面，并补充 SessionId / SID / 权限状态等上下文。
     m_desktopPage = new QWidget(m_contentTabWidget);
     m_desktopPageLayout = new QVBoxLayout(m_desktopPage);
     m_desktopPageLayout->setContentsMargins(0, 0, 0, 0);
@@ -2495,7 +2506,9 @@ void OtherDock::initializeUi()
     m_desktopSwitchButton->setStyleSheet(blueButtonStyle());
     m_desktopSwitchButton->setFixedWidth(32);
 
-    m_desktopStatusLabel = new QLabel(QStringLiteral("请选择桌面后点击切换。"), m_desktopPage);
+    m_desktopStatusLabel = new QLabel(
+        QStringLiteral("支持枚举窗口站/桌面；切换会尝试“桌面名”和“窗口站\\\\桌面名”两种方式。"),
+        m_desktopPage);
     m_desktopStatusLabel->setWordWrap(true);
 
     m_desktopToolLayout->addWidget(m_desktopRefreshButton, 0);
@@ -2504,21 +2517,40 @@ void OtherDock::initializeUi()
     m_desktopPageLayout->addLayout(m_desktopToolLayout, 0);
 
     m_desktopTable = new QTableWidget(m_desktopPage);
-    m_desktopTable->setColumnCount(4);
+    m_desktopTable->setColumnCount(13);
     m_desktopTable->setHorizontalHeaderLabels({
+        QStringLiteral("窗口站"),
         QStringLiteral("桌面名称"),
+        QStringLiteral("当前站"),
         QStringLiteral("当前桌面"),
+        QStringLiteral("交互式"),
+        QStringLiteral("可读"),
         QStringLiteral("可切换"),
+        QStringLiteral("SessionId"),
+        QStringLiteral("所有者"),
+        QStringLiteral("SID"),
+        QStringLiteral("SID详情"),
+        QStringLiteral("堆(KB)"),
         QStringLiteral("备注")
         });
     m_desktopTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_desktopTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_desktopTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_desktopTable->setAlternatingRowColors(true);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_desktopTable->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_desktopTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_desktopTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(7, QHeaderView::ResizeToContents);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(8, QHeaderView::ResizeToContents);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(9, QHeaderView::Stretch);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(10, QHeaderView::Stretch);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(11, QHeaderView::ResizeToContents);
+    m_desktopTable->horizontalHeader()->setSectionResizeMode(12, QHeaderView::Stretch);
     m_desktopTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_desktopPageLayout->addWidget(m_desktopTable, 1);
 
@@ -2783,232 +2815,9 @@ void OtherDock::initializeConnections()
     connect(m_desktopTable, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
         switchToSelectedDesktop();
     });
-}
-
-void OtherDock::refreshDesktopList()
-{
-    // refreshEvent 复用整条流程日志，便于追踪“枚举-渲染-状态更新”链路。
-    kLogEvent refreshEvent;
-    info << refreshEvent
-        << "[OtherDock] 开始刷新桌面列表。"
-        << eol;
-
-    // currentDesktopName 用途：记录当前线程所在桌面名称，用于表格中高亮“当前桌面”。
-    QString currentDesktopName;
-    {
-        HDESK currentDesktopHandle = ::GetThreadDesktop(::GetCurrentThreadId());
-        if (currentDesktopHandle != nullptr)
-        {
-            DWORD requiredBytes = 0;
-            ::GetUserObjectInformationW(currentDesktopHandle, UOI_NAME, nullptr, 0, &requiredBytes);
-            if (requiredBytes >= sizeof(wchar_t))
-            {
-                std::vector<wchar_t> nameBuffer(requiredBytes / sizeof(wchar_t) + 1, L'\0');
-                if (::GetUserObjectInformationW(
-                    currentDesktopHandle,
-                    UOI_NAME,
-                    nameBuffer.data(),
-                    static_cast<DWORD>(nameBuffer.size() * sizeof(wchar_t)),
-                    &requiredBytes) != FALSE)
-                {
-                    currentDesktopName = QString::fromWCharArray(nameBuffer.data()).trimmed();
-                }
-            }
-        }
-    }
-
-    // desktopNameList 用途：缓存 EnumDesktopsW 枚举到的桌面名称，随后统一填充到表格。
-    std::vector<QString> desktopNameList;
-    desktopNameList.reserve(16);
-    struct DesktopEnumContext
-    {
-        std::vector<QString>* nameList = nullptr; // nameList：保存枚举结果。
-    };
-    DesktopEnumContext enumContext;
-    enumContext.nameList = &desktopNameList;
-    auto enumDesktopProc = [](LPWSTR desktopName, LPARAM lParam) -> BOOL {
-        DesktopEnumContext* context = reinterpret_cast<DesktopEnumContext*>(lParam);
-        if (context == nullptr || context->nameList == nullptr)
-        {
-            return FALSE;
-        }
-        if (desktopName != nullptr)
-        {
-            context->nameList->push_back(QString::fromWCharArray(desktopName));
-        }
-        return TRUE;
-    };
-
-    HWINSTA windowStationHandle = ::GetProcessWindowStation();
-    if (windowStationHandle == nullptr)
-    {
-        const DWORD errorCode = ::GetLastError();
-        err << refreshEvent
-            << "[OtherDock] 刷新桌面列表失败：GetProcessWindowStation失败, code="
-            << errorCode
-            << eol;
-        m_desktopStatusLabel->setText(QStringLiteral("刷新失败：无法获取窗口站，错误码=%1").arg(errorCode));
-        m_desktopTable->setRowCount(0);
-        return;
-    }
-
-    const BOOL enumOk = ::EnumDesktopsW(
-        windowStationHandle,
-        enumDesktopProc,
-        reinterpret_cast<LPARAM>(&enumContext));
-    if (enumOk == FALSE)
-    {
-        const DWORD errorCode = ::GetLastError();
-        err << refreshEvent
-            << "[OtherDock] 刷新桌面列表失败：EnumDesktopsW失败, code="
-            << errorCode
-            << eol;
-        m_desktopStatusLabel->setText(QStringLiteral("刷新失败：EnumDesktopsW 错误码=%1").arg(errorCode));
-        m_desktopTable->setRowCount(0);
-        return;
-    }
-
-    std::sort(desktopNameList.begin(), desktopNameList.end(), [](const QString& left, const QString& right) {
-        return left.localeAwareCompare(right) < 0;
+    connect(m_desktopTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        showDesktopContextMenu(pos);
     });
-    desktopNameList.erase(
-        std::unique(desktopNameList.begin(), desktopNameList.end()),
-        desktopNameList.end());
-
-    m_desktopTable->setRowCount(static_cast<int>(desktopNameList.size()));
-    for (int row = 0; row < static_cast<int>(desktopNameList.size()); ++row)
-    {
-        const QString& desktopName = desktopNameList[static_cast<std::size_t>(row)];
-        QTableWidgetItem* nameItem = new QTableWidgetItem(desktopName);
-        nameItem->setData(Qt::UserRole, desktopName);
-        m_desktopTable->setItem(row, 0, nameItem);
-
-        const bool isCurrentDesktop = !currentDesktopName.isEmpty()
-            && QString::compare(desktopName, currentDesktopName, Qt::CaseInsensitive) == 0;
-        m_desktopTable->setItem(
-            row,
-            1,
-            new QTableWidgetItem(isCurrentDesktop ? QStringLiteral("是") : QStringLiteral("否")));
-
-        // canSwitch 用途：标识目标桌面是否可用 SwitchDesktop 权限打开。
-        bool canSwitch = false;
-        QString remarkText = QStringLiteral("可切换");
-        HDESK desktopHandle = ::OpenDesktopW(
-            reinterpret_cast<LPCWSTR>(desktopName.utf16()),
-            0,
-            FALSE,
-            DESKTOP_SWITCHDESKTOP | DESKTOP_READOBJECTS);
-        if (desktopHandle != nullptr)
-        {
-            canSwitch = true;
-            ::CloseDesktop(desktopHandle);
-        }
-        else
-        {
-            const DWORD errorCode = ::GetLastError();
-            remarkText = QStringLiteral("不可切换，错误码=%1").arg(errorCode);
-        }
-
-        m_desktopTable->setItem(row, 2, new QTableWidgetItem(canSwitch ? QStringLiteral("是") : QStringLiteral("否")));
-        m_desktopTable->setItem(row, 3, new QTableWidgetItem(remarkText));
-    }
-
-    if (m_desktopTable->rowCount() > 0)
-    {
-        m_desktopTable->selectRow(0);
-    }
-    m_desktopStatusLabel->setText(QStringLiteral("已枚举 %1 个桌面，当前桌面：%2")
-        .arg(desktopNameList.size())
-        .arg(currentDesktopName.isEmpty() ? QStringLiteral("<未知>") : currentDesktopName));
-
-    info << refreshEvent
-        << "[OtherDock] 桌面列表刷新完成, count="
-        << desktopNameList.size()
-        << ", currentDesktop="
-        << currentDesktopName.toStdString()
-        << eol;
-}
-
-void OtherDock::switchToSelectedDesktop()
-{
-    // actionEvent 用途：复用“参数校验-切换调用-结果回写”整条日志链路。
-    kLogEvent actionEvent;
-
-    if (m_desktopTable == nullptr || m_desktopTable->currentRow() < 0)
-    {
-        warn << actionEvent
-            << "[OtherDock] 切换桌面失败：未选中目标桌面。"
-            << eol;
-        m_desktopStatusLabel->setText(QStringLiteral("请先选择要切换的桌面。"));
-        return;
-    }
-
-    const int row = m_desktopTable->currentRow();
-    QTableWidgetItem* nameItem = m_desktopTable->item(row, 0);
-    if (nameItem == nullptr)
-    {
-        err << actionEvent
-            << "[OtherDock] 切换桌面失败：目标行缺少名称列。"
-            << eol;
-        m_desktopStatusLabel->setText(QStringLiteral("切换失败：桌面名称为空。"));
-        return;
-    }
-
-    const QString desktopName = nameItem->data(Qt::UserRole).toString().trimmed();
-    if (desktopName.isEmpty())
-    {
-        err << actionEvent
-            << "[OtherDock] 切换桌面失败：桌面名称为空字符串。"
-            << eol;
-        m_desktopStatusLabel->setText(QStringLiteral("切换失败：桌面名称为空。"));
-        return;
-    }
-
-    info << actionEvent
-        << "[OtherDock] 开始切换桌面, desktopName="
-        << desktopName.toStdString()
-        << eol;
-
-    HDESK desktopHandle = ::OpenDesktopW(
-        reinterpret_cast<LPCWSTR>(desktopName.utf16()),
-        0,
-        FALSE,
-        DESKTOP_SWITCHDESKTOP | DESKTOP_READOBJECTS);
-    if (desktopHandle == nullptr)
-    {
-        const DWORD errorCode = ::GetLastError();
-        err << actionEvent
-            << "[OtherDock] 切换桌面失败：OpenDesktopW失败, desktop="
-            << desktopName.toStdString()
-            << ", code="
-            << errorCode
-            << eol;
-        m_desktopStatusLabel->setText(QStringLiteral("切换失败：OpenDesktopW 错误码=%1").arg(errorCode));
-        return;
-    }
-
-    const BOOL switchOk = ::SwitchDesktop(desktopHandle);
-    const DWORD switchError = switchOk ? ERROR_SUCCESS : ::GetLastError();
-    ::CloseDesktop(desktopHandle);
-
-    if (switchOk == FALSE)
-    {
-        err << actionEvent
-            << "[OtherDock] 切换桌面失败：SwitchDesktop失败, desktop="
-            << desktopName.toStdString()
-            << ", code="
-            << switchError
-            << eol;
-        m_desktopStatusLabel->setText(QStringLiteral("切换失败：SwitchDesktop 错误码=%1").arg(switchError));
-        return;
-    }
-
-    info << actionEvent
-        << "[OtherDock] 切换桌面成功, desktop="
-        << desktopName.toStdString()
-        << eol;
-    m_desktopStatusLabel->setText(QStringLiteral("切换成功：%1").arg(desktopName));
-    refreshDesktopList();
 }
 
 void OtherDock::applyViewMode()

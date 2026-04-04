@@ -41,6 +41,7 @@ class QTimer;
 class QToolBox;
 class QVBoxLayout;
 class QGridLayout;
+class QShowEvent;
 class QBarSet;
 class QChartView;
 class QLineSeries;
@@ -66,6 +67,12 @@ public:
     // 析构函数：
     // - 作用：停止后台线程与定时器，确保资源释放。
     ~MonitorDock() override;
+
+protected:
+    // showEvent：
+    // - 首次显示时再触发 WMI/ETW Provider 枚举；
+    // - 避免主窗口启动阶段并发拉起多路后台发现任务。
+    void showEvent(QShowEvent* event) override;
 
 private:
     // WmiProviderEntry：
@@ -285,4 +292,5 @@ private:
     std::uint64_t m_etwSessionHandle = 0;            // ETW 会话句柄（TRACEHANDLE）。
     std::uint64_t m_etwTraceHandle = 0;              // ETW 消费句柄（TRACEHANDLE）。
     QString m_etwSessionName;                        // ETW 会话名（Stop/Query 复用）。
+    bool m_initialDiscoveryDone = false;             // 首次显示时是否已触发 WMI/ETW Provider 枚举。
 };

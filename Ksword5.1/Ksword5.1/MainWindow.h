@@ -37,6 +37,7 @@
 #include "PrivilegeDock/PrivilegeDock.h"
 #include "SettingsDock/SettingsDock.h"
 #include "SettingsDock/AppearanceSettings.h"
+#include "StartupDock/StartupDock.h"
 #include "WindowDock/WindowDock.h"
 #include "RegistryDock/RegistryDock.h"
 
@@ -164,6 +165,7 @@ private:
     ads::CDockWidget* m_dockSettings;
     ads::CDockWidget* m_dockWindow;
     ads::CDockWidget* m_dockRegistry;
+    ads::CDockWidget* m_dockStartup;
     ads::CDockWidget* m_dockHardware;
     ads::CDockWidget* m_dockCurrentOp;
     ads::CDockWidget* m_dockLog;
@@ -183,6 +185,7 @@ private:
     HardwareDock* m_hardwareWidget;
     PrivilegeDock* m_privilegeWidget;
     SettingsDock* m_settingsWidget;
+    StartupDock* m_startupWidget;
     WindowDock* m_windowWidget;
     RegistryDock* m_registryWidget;
     LogDockWidget* m_logWidget; // 日志输出 Dock 的可视化日志面板。

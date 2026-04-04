@@ -21,6 +21,7 @@
 #include <QShowEvent>
 #include <QStackedWidget>
 #include <QTimer>
+#include <QVector>
 #include <QVBoxLayout>
 
 #include <QtConcurrent/QtConcurrentRun>
@@ -62,6 +63,88 @@
 
 namespace
 {
+    class CpuCoreSparklineWidget final : public QWidget
+    {
+    public:
+        explicit CpuCoreSparklineWidget(QWidget* parent = nullptr)
+            : QWidget(parent)
+        {
+            setAttribute(Qt::WA_StyledBackground, true);
+            setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        }
+
+        void appendSample(const double usagePercent, const int historyLength)
+        {
+            const double boundedValue = qBound(0.0, usagePercent, 100.0);
+            m_samples.push_back(boundedValue);
+            while (m_samples.size() > historyLength)
+            {
+                m_samples.pop_front();
+            }
+            update();
+        }
+
+    protected:
+        void paintEvent(QPaintEvent* eventPointer) override
+        {
+            Q_UNUSED(eventPointer);
+
+            QPainter painter(this);
+            painter.setRenderHint(QPainter::Antialiasing, true);
+            painter.fillRect(rect(), Qt::transparent);
+
+            const QRectF contentRect = QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5);
+            if (contentRect.width() <= 4.0 || contentRect.height() <= 4.0)
+            {
+                return;
+            }
+
+            painter.setPen(QPen(QColor(110, 168, 235, 48), 1.0));
+            painter.setBrush(QColor(255, 255, 255, 8));
+            painter.drawRoundedRect(contentRect, 6.0, 6.0);
+
+            painter.setPen(QPen(QColor(110, 168, 235, 28), 1.0));
+            const double midY = contentRect.top() + contentRect.height() * 0.5;
+            painter.drawLine(
+                QPointF(contentRect.left() + 4.0, midY),
+                QPointF(contentRect.right() - 4.0, midY));
+
+            if (m_samples.size() < 2)
+            {
+                return;
+            }
+
+            QPainterPath linePath;
+            const double usableWidth = std::max(1.0, contentRect.width() - 8.0);
+            const double usableHeight = std::max(1.0, contentRect.height() - 8.0);
+            for (int indexValue = 0; indexValue < m_samples.size(); ++indexValue)
+            {
+                const double xRatio =
+                    (m_samples.size() <= 1)
+                    ? 0.0
+                    : static_cast<double>(indexValue) / static_cast<double>(m_samples.size() - 1);
+                const double xValue = contentRect.left() + 4.0 + usableWidth * xRatio;
+                const double yValue =
+                    contentRect.bottom() - 4.0 - usableHeight * (m_samples.at(indexValue) / 100.0);
+                if (indexValue == 0)
+                {
+                    linePath.moveTo(xValue, yValue);
+                }
+                else
+                {
+                    linePath.lineTo(xValue, yValue);
+                }
+            }
+
+            painter.setPen(QPen(QColor(72, 170, 255, 230), 1.5));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawPath(linePath);
+        }
+
+    private:
+        QVector<double> m_samples;
+    };
+
     constexpr double kOneGiBInBytes = 1024.0 * 1024.0 * 1024.0;
 
     QColor textPrimaryColor()
@@ -979,36 +1062,9 @@ void HudPerformancePanel::initializeCoreCharts()
         chartEntry.titleLabel->setMinimumWidth(128);
         containerLayout->addWidget(chartEntry.titleLabel, 0);
 
-        chartEntry.lineSeries = new QLineSeries(chartEntry.containerWidget);
-        chartEntry.lineSeries->setColor(QColor(67, 160, 255));
-        for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
-        {
-            chartEntry.lineSeries->append(indexValue, 0.0);
-        }
-
-        QChart* chartPointer = new QChart();
-        chartPointer->addSeries(chartEntry.lineSeries);
-        chartPointer->legend()->hide();
-
-        chartEntry.axisX = new QValueAxis(chartPointer);
-        chartEntry.axisX->setRange(0, m_historyLength - 1);
-        chartEntry.axisX->setLabelsVisible(false);
-        chartEntry.axisX->setGridLineVisible(false);
-        chartEntry.axisX->setMinorGridLineVisible(false);
-
-        chartEntry.axisY = new QValueAxis(chartPointer);
-        chartEntry.axisY->setRange(0.0, 100.0);
-        chartEntry.axisY->setLabelsVisible(false);
-        chartEntry.axisY->setGridLineVisible(false);
-        chartEntry.axisY->setMinorGridLineVisible(false);
-
-        chartPointer->addAxis(chartEntry.axisX, Qt::AlignBottom);
-        chartPointer->addAxis(chartEntry.axisY, Qt::AlignLeft);
-        chartEntry.lineSeries->attachAxis(chartEntry.axisX);
-        chartEntry.lineSeries->attachAxis(chartEntry.axisY);
-
-        chartEntry.chartView = createNoFrameChartView(chartPointer, chartEntry.containerWidget);
-        containerLayout->addWidget(chartEntry.chartView, 1);
+        auto* sparklineWidget = new CpuCoreSparklineWidget(chartEntry.containerWidget);
+        chartEntry.chartWidget = sparklineWidget;
+        containerLayout->addWidget(chartEntry.chartWidget, 1);
 
         const int rowIndex = coreIndex / columnCount;
         const int columnIndex = coreIndex % columnCount;
@@ -1105,9 +1161,9 @@ void HudPerformancePanel::adjustChartHeights()
             {
                 applyFixedHeightIfChanged(chartEntry.containerWidget, cellHeight);
             }
-            if (chartEntry.chartView != nullptr)
+            if (chartEntry.chartWidget != nullptr)
             {
-                applyFixedHeightIfChanged(chartEntry.chartView, std::max(10, cellHeight - 12));
+                applyFixedHeightIfChanged(chartEntry.chartWidget, std::max(10, cellHeight - 12));
             }
         }
 
@@ -1935,21 +1991,29 @@ void HudPerformancePanel::updateView(
         m_cpuModelLabel->setText(m_cpuModelText);
     }
 
-    const int chartCount = std::min(
-        static_cast<int>(m_coreChartEntries.size()),
-        static_cast<int>(coreUsageList.size()));
-    for (int indexValue = 0; indexValue < chartCount; ++indexValue)
+    const bool cpuPageVisible =
+        (m_detailStack != nullptr && m_detailStack->currentWidget() == m_cpuPage);
+    if (cpuPageVisible)
     {
-        CoreChartEntry& chartEntry = m_coreChartEntries[static_cast<std::size_t>(indexValue)];
-        const double usageValue = coreUsageList[static_cast<std::size_t>(indexValue)];
-        if (chartEntry.titleLabel != nullptr)
+        const int chartCount = std::min(
+            static_cast<int>(m_coreChartEntries.size()),
+            static_cast<int>(coreUsageList.size()));
+        for (int indexValue = 0; indexValue < chartCount; ++indexValue)
         {
-            chartEntry.titleLabel->setText(
-                QStringLiteral("CPU %1  %2%")
-                .arg(indexValue, 2, 10, QLatin1Char('0'))
-                .arg(usageValue, 5, 'f', 1, QLatin1Char(' ')));
+            CoreChartEntry& chartEntry = m_coreChartEntries[static_cast<std::size_t>(indexValue)];
+            const double usageValue = coreUsageList[static_cast<std::size_t>(indexValue)];
+            if (chartEntry.titleLabel != nullptr)
+            {
+                const QString titleText = QStringLiteral("CPU %1  %2%")
+                    .arg(indexValue, 2, 10, QLatin1Char('0'))
+                    .arg(usageValue, 5, 'f', 1, QLatin1Char(' '));
+                if (chartEntry.titleLabel->text() != titleText)
+                {
+                    chartEntry.titleLabel->setText(titleText);
+                }
+            }
+            appendCoreSeriesPoint(chartEntry, usageValue);
         }
-        appendCoreSeriesPoint(chartEntry, usageValue);
     }
 
     if (m_memorySummaryLabel != nullptr)
@@ -2376,32 +2440,12 @@ void HudPerformancePanel::updateTaskManagerDetailLabels(
 
 void HudPerformancePanel::appendCoreSeriesPoint(CoreChartEntry& chartEntry, const double usagePercent)
 {
-    if (chartEntry.lineSeries == nullptr || chartEntry.axisX == nullptr || chartEntry.axisY == nullptr)
+    auto* sparklineWidget = static_cast<CpuCoreSparklineWidget*>(chartEntry.chartWidget);
+    if (sparklineWidget == nullptr)
     {
         return;
     }
-
-    chartEntry.lineSeries->append(m_sampleCounter, usagePercent);
-    while (chartEntry.lineSeries->count() > m_historyLength)
-    {
-        chartEntry.lineSeries->remove(0);
-    }
-
-    const QList<QPointF> pointList = chartEntry.lineSeries->points();
-    if (!pointList.isEmpty())
-    {
-        const double firstX = pointList.first().x();
-        const double lastX = pointList.last().x();
-        if (qFuzzyCompare(firstX, lastX))
-        {
-            chartEntry.axisX->setRange(firstX - 1.0, lastX + 1.0);
-        }
-        else
-        {
-            chartEntry.axisX->setRange(firstX, lastX);
-        }
-    }
-    chartEntry.axisY->setRange(0.0, 100.0);
+    sparklineWidget->appendSample(usagePercent, m_historyLength);
 }
 
 void HudPerformancePanel::appendGeneralSeriesPoint(

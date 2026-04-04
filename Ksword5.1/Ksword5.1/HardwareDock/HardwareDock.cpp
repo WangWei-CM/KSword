@@ -571,9 +571,6 @@ HardwareDock::HardwareDock(QWidget* parent)
 
     initializeUi();
     initializeConnections();
-    initializePerformanceCounters();
-    refreshCpuTopologyStaticInfo();
-    refreshSystemVolumeInfo();
 
     // 启动阶段先填充占位文本，避免首帧等待 PowerShell 导致窗口卡住。
     m_cachedOverviewStaticText = QStringLiteral("硬件概览加载中，请稍候...");
@@ -584,19 +581,12 @@ HardwareDock::HardwareDock(QWidget* parent)
     {
         m_cpuModelLabel->setText(m_cpuModelText);
     }
-    refreshStaticHardwareTexts(false);
-
-    // 首帧只做轻量采样，重型静态查询改为后台线程异步执行。
-    refreshAllViews();
-    requestAsyncStaticInfoRefresh();
-    requestAsyncSensorRefresh();
 
     m_refreshTimer = new QTimer(this);
     m_refreshTimer->setInterval(1000);
     connect(m_refreshTimer, &QTimer::timeout, this, [this]() {
         refreshAllViews();
     });
-    m_refreshTimer->start();
 
     info << event << "[HardwareDock] 构造完成。" << eol;
 }
@@ -640,6 +630,23 @@ void HardwareDock::resizeEvent(QResizeEvent* resizeEventPointer)
 void HardwareDock::showEvent(QShowEvent* showEventPointer)
 {
     QWidget::showEvent(showEventPointer);
+
+    if (!m_initialSamplingStarted)
+    {
+        m_initialSamplingStarted = true;
+        initializePerformanceCounters();
+        refreshCpuTopologyStaticInfo();
+        refreshSystemVolumeInfo();
+        refreshStaticHardwareTexts(false);
+        refreshAllViews();
+        requestAsyncStaticInfoRefresh();
+        requestAsyncSensorRefresh();
+        if (m_refreshTimer != nullptr)
+        {
+            m_refreshTimer->start();
+        }
+    }
+
     // 首次显示阶段延迟一帧再重排，确保滚动区 viewport 高度已经稳定。
     QTimer::singleShot(0, this, [this]()
     {

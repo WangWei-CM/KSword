@@ -33,6 +33,7 @@ class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
 class QResizeEvent;
+class QShowEvent;
 class QSlider;
 class QTableWidget;
 class QTabWidget;
@@ -72,6 +73,11 @@ public:
     void refreshThemeVisuals();
 
 protected:
+    // showEvent 作用：
+    // - 在 Dock 首次真正显示时再启动首轮刷新与周期监视；
+    // - 避免主窗口启动阶段被进程枚举拖慢。
+    void showEvent(QShowEvent* event) override;
+
     // resizeEvent 作用：
     // - 在 Dock 尺寸变化时重新分配可见列宽；
     // - 避免出现内部横向滚动条，保持“自适应宽度”体验。
@@ -342,10 +348,13 @@ private:
     QHash<QString, QIcon> m_iconCacheByPath;  // 进程图标缓存，避免重复提取。
     std::unordered_map<std::string, QPointer<ProcessDetailWindow>> m_detailWindowByIdentity; // 详情窗口缓存（同进程复用窗口）。
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_detailWindowLastSyncTimeByIdentity; // 详情窗口最近一次同步时间，避免每轮刷新都触发重型解析。
+    std::string m_trackedSelectedIdentityKey; // 当前选中进程 identityKey；表格刷新重建后用于恢复高亮。
+    int m_trackedSelectedColumn = 0;          // 当前选中列索引；恢复 currentItem 时尽量保持用户焦点列。
 
     // ======== 右键菜单绑定状态 ========
     std::string m_contextActionIdentityKey;      // 当前菜单动作绑定的 identityKey。
     ks::process::ProcessRecord m_contextActionRecord{}; // identity 在刷新中失效时的兜底副本。
     bool m_hasContextActionRecord = false;
     bool m_contextMenuVisible = false;           // 菜单弹出期间用于冻结周期刷新。
+    bool m_initialRefreshScheduled = false;      // 首次显示时是否已安排首轮刷新。
 };

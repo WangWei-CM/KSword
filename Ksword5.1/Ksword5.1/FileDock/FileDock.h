@@ -73,6 +73,7 @@ private:
         QPushButton* refreshButton = nullptr;  // 刷新按钮。
         QStackedWidget* pathStack = nullptr;   // 地址区域堆叠控件（面包屑/编辑框二选一）。
         QLineEdit* pathEdit = nullptr;         // 地址栏输入框（编辑模式）。
+        QComboBox* driveCombo = nullptr;       // 地址栏右侧驱动器跳转下拉框。
         QWidget* breadcrumbWidget = nullptr;   // 面包屑容器（展示模式）。
         QHBoxLayout* breadcrumbLayout = nullptr; // 面包屑布局。
         QPushButton* breadcrumbEditTriggerButton = nullptr; // 面包屑末尾空白点击热区。
@@ -154,6 +155,10 @@ private:
     // setPathEditMode：
     // - 作用：切换地址区显示模式（true=编辑框，false=面包屑）。
     void setPathEditMode(FilePanelWidgets& panel, bool editMode);
+
+    // refreshDriveCombo：
+    // - 作用：刷新驱动器下拉框列表并同步当前选中项。
+    void refreshDriveCombo(FilePanelWidgets& panel);
 
     // updatePanelStatus：
     // - 作用：更新状态栏（路径、选中数量、容量等）。

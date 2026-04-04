@@ -309,6 +309,7 @@ private:
     QString m_cachedMemoryStaticText;         // m_cachedMemoryStaticText：内存静态文本缓存。
     std::atomic_bool m_staticInfoRefreshing{ false }; // m_staticInfoRefreshing：静态信息异步刷新锁。
     std::atomic_bool m_sensorRefreshing{ false };     // m_sensorRefreshing：传感器异步刷新锁。
+    bool m_initialSamplingStarted = false;            // m_initialSamplingStarted：首次显示时是否已启动首轮采样。
     std::uint64_t m_lastNetworkRxBytes = 0;           // m_lastNetworkRxBytes：上次网络接收累计字节。
     std::uint64_t m_lastNetworkTxBytes = 0;           // m_lastNetworkTxBytes：上次网络发送累计字节。
     qint64 m_lastNetworkSampleMs = 0;                 // m_lastNetworkSampleMs：上次网络采样时间戳(ms)。

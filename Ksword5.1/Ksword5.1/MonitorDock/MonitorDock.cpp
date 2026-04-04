@@ -588,12 +588,26 @@ MonitorDock::MonitorDock(QWidget* parent)
         flushWmiPendingRows();
     });
 
-    refreshWmiProvidersAsync();
-    refreshWmiEventClassesAsync();
-    refreshEtwProvidersAsync();
-
     kLogEvent finishEvent;
     info << finishEvent << "[MonitorDock] 构造完成。" << eol;
+}
+
+void MonitorDock::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+
+    if (m_initialDiscoveryDone)
+    {
+        return;
+    }
+
+    m_initialDiscoveryDone = true;
+    QTimer::singleShot(0, this, [this]()
+        {
+            refreshWmiProvidersAsync();
+            refreshWmiEventClassesAsync();
+            refreshEtwProvidersAsync();
+        });
 }
 
 MonitorDock::~MonitorDock()
