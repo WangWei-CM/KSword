@@ -41,6 +41,7 @@ class QTabWidget;
 class QTimer;
 class QVBoxLayout;
 class QWidget;
+class QShowEvent;
 
 namespace ks::network
 {
@@ -68,6 +69,12 @@ public:
     // 析构函数：
     // - 作用：停止后台抓包线程，避免窗口释放后仍有异步回调。
     ~NetworkDock() override;
+
+protected:
+    // showEvent：
+    // - 首次显示时再初始化 HTTPS 代理服务实例；
+    // - 避免主窗口启动阶段提前构造代理相关对象。
+    void showEvent(QShowEvent* event) override;
 
 private:
     // PacketTableColumn：流量监控主表列索引定义。
@@ -660,6 +667,7 @@ private:
     std::unique_ptr<ks::network::HttpsMitmProxyService> m_httpsProxyService; // HTTPS MITM 代理服务对象。
     bool m_monitorRunning = false;             // 抓包运行状态缓存。
     bool m_httpsProxyRunning = false;          // HTTPS代理运行状态缓存。
+    bool m_httpsProxyServiceInitialized = false; // HTTPS代理服务是否已延后初始化。
     std::atomic_bool m_monitorStopInProgress{ false }; // 停止流程进行中，避免重复 stop 导致 UI 抖动。
     std::unique_ptr<std::thread> m_monitorStopThread;  // 异步 stop 的 join 线程，防止主线程等待卡顿。
 

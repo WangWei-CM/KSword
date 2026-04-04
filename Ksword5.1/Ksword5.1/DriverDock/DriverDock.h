@@ -27,6 +27,7 @@ class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
+class QShowEvent;
 class QSplitter;
 class QTableWidget;
 class QTabWidget;
@@ -49,6 +50,12 @@ public:
     // 析构函数：
     // - 作用：停止调试捕获线程并回收资源。
     ~DriverDock() override;
+
+protected:
+    // showEvent：
+    // - 首次显示时再执行驱动服务/模块枚举；
+    // - 避免主窗口启动阶段同步扫描 SCM 和内核模块。
+    void showEvent(QShowEvent* event) override;
 
 private:
     // DriverServiceRecord：
@@ -257,9 +264,9 @@ private:
     // ========================= 数据缓存 =========================
     std::vector<DriverServiceRecord> m_driverServiceCache;      // 驱动服务缓存。
     std::vector<LoadedKernelModuleRecord> m_loadedModuleCache;  // 已加载模块缓存。
+    bool m_initialRefreshDone = false;                          // 首次显示时是否已完成首轮刷新。
 
     // ========================= 调试捕获线程状态 =========================
     std::atomic_bool m_dbwinCaptureRunning{ false };       // 捕获线程运行标记。
     std::unique_ptr<std::thread> m_dbwinCaptureThread;     // 捕获线程对象。
 };
-

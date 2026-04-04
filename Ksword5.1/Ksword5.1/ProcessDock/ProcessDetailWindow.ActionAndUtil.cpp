@@ -1,5 +1,9 @@
+﻿#include "ProcessDetailWindow.InternalCommon.h"
+
+using namespace process_detail_window_internal;
+
 // ============================================================
-// ProcessDetailWindow.ActionAndUtil.inc
+// ProcessDetailWindow.ActionAndUtil.cpp
 // 作用：
 // - 负责操作页动作（终止/挂起/优先级/注入）与通用工具函数。
 // - 聚焦“执行动作 + 结果反馈 + 辅助格式化/查找”逻辑。

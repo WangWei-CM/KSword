@@ -93,8 +93,26 @@ private:
     bool passFilter(const WindowInfo& info) const;
     void updateStatusBar();
     void updatePreviewPanel(const WindowInfo* info);
+    // refreshDesktopList：
+    // - 作用：刷新“桌面管理”页中的窗口站/桌面清单；
+    // - 调用：初始化界面后、点击刷新按钮后、切换成功后调用；
+    // - 传入：无；
+    // - 传出：无，结果直接写入 m_desktopTable 与 m_desktopStatusLabel。
     void refreshDesktopList();
+
+    // switchToSelectedDesktop：
+    // - 作用：切换到表格中当前选中的桌面；
+    // - 调用：点击切换按钮或双击桌面行时调用；
+    // - 传入：无；
+    // - 传出：无，状态结果通过日志与 m_desktopStatusLabel 反馈。
     void switchToSelectedDesktop();
+
+    // showDesktopContextMenu：
+    // - 作用：在桌面管理表格中弹出右键菜单；
+    // - 调用：用户在桌面表上右键时触发；
+    // - 传入 localPos：表格视口坐标；
+    // - 传出：无，菜单动作会直接驱动切换/复制/查看详情。
+    void showDesktopContextMenu(const QPoint& localPos);
 
     // ===================== 交互操作 ======================
     void showWindowContextMenu(const QPoint& localPos);
@@ -131,13 +149,13 @@ private:
     QPushButton* m_captureButton = nullptr;       // 截图按钮。
     QTextEdit* m_quickInfoText = nullptr;         // 关键属性摘要文本。
 
-    // 桌面管理页：枚举可切换桌面（SwitchDesktop）。
+    // 桌面管理页：枚举窗口站与桌面清单，并展示 SessionId / SID / 切换能力等上下文。
     QWidget* m_desktopPage = nullptr;             // 桌面管理页容器。
     QVBoxLayout* m_desktopPageLayout = nullptr;   // 桌面管理页主布局。
     QHBoxLayout* m_desktopToolLayout = nullptr;   // 桌面管理工具栏布局。
     QPushButton* m_desktopRefreshButton = nullptr;// 刷新桌面列表按钮。
     QPushButton* m_desktopSwitchButton = nullptr; // 切换到选中桌面按钮。
-    QTableWidget* m_desktopTable = nullptr;       // 桌面列表表格。
+    QTableWidget* m_desktopTable = nullptr;       // 桌面列表表格（窗口站/桌面/SessionId/SID/SID详情/备注）。
     QLabel* m_desktopStatusLabel = nullptr;       // 桌面状态提示标签。
 
     // 底部状态栏。

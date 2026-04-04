@@ -1,5 +1,9 @@
+﻿#include "ProcessDetailWindow.InternalCommon.h"
+
+using namespace process_detail_window_internal;
+
 // ============================================================
-// ProcessDetailWindow.Module.inc
+// ProcessDetailWindow.Module.cpp
 // 作用：
 // - 负责模块页异步刷新、模块表构建、模块右键动作执行。
 // - 聚焦“模块信息与模块相关动作”逻辑。

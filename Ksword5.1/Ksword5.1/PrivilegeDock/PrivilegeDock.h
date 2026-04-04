@@ -19,6 +19,7 @@ class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QShowEvent;
 class QTableWidget;
 class QTabWidget;
 class QVBoxLayout;
@@ -32,6 +33,12 @@ public:
     // - parent：Qt 父控件；
     // - 作用：初始化账号与权限页面并触发首轮数据加载。
     explicit PrivilegeDock(QWidget* parent = nullptr);
+
+protected:
+    // showEvent：
+    // - 首次显示时再刷新账号与权限快照；
+    // - 避免主窗口启动阶段同步访问本地账号与权限信息。
+    void showEvent(QShowEvent* event) override;
 
 private:
     // LocalUserEntry：
@@ -104,5 +111,5 @@ private:
 
     // 缓存。
     std::vector<LocalUserEntry> m_localUserList;    // m_localUserList：本地用户缓存。
+    bool m_initialRefreshDone = false;              // 首次显示时是否已完成首轮刷新。
 };
-

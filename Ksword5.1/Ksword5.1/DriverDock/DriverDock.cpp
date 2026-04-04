@@ -31,6 +31,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm> // std::sort：结果列表排序。
@@ -195,12 +196,31 @@ DriverDock::DriverDock(QWidget* parent)
 
     initializeUi();
     initializeConnections();
-
-    refreshDriverServiceRecords();
-    refreshLoadedKernelModuleRecords();
     updateDebugCaptureButtonState();
 
     info << initEvent << "[DriverDock] 驱动页初始化完成。" << eol;
+}
+
+void DriverDock::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+
+    if (m_initialRefreshDone)
+    {
+        return;
+    }
+
+    m_initialRefreshDone = true;
+    if (m_overviewStatusLabel != nullptr)
+    {
+        m_overviewStatusLabel->setText(QStringLiteral("状态：首次打开，正在加载驱动服务与模块..."));
+    }
+
+    QTimer::singleShot(0, this, [this]()
+        {
+            refreshDriverServiceRecords();
+            refreshLoadedKernelModuleRecords();
+        });
 }
 
 DriverDock::~DriverDock()

@@ -1266,6 +1266,7 @@ void MainWindow::initDockWidgets()
     reportStartupProgress(66, QStringLiteral("正在创建辅助页面..."));
     m_windowWidget = new WindowDock(this);
     m_registryWidget = new RegistryDock(this);
+    m_startupWidget = new StartupDock(this);
     m_logWidget = new LogDockWidget(this);
     m_progressWidget = new ProgressDockWidget(this);
     m_immediateEditorWidget = new CodeEditorWidget(this);
@@ -1309,6 +1310,7 @@ void MainWindow::initDockWidgets()
     m_dockSettings = createDockWidget(m_settingsWidget, "设置");
     m_dockWindow = createDockWidget(m_windowWidget, "窗口");
     m_dockRegistry = createDockWidget(m_registryWidget, "注册表");
+    m_dockStartup = createDockWidget(m_startupWidget, "启动项");
 
     // 创建右侧和底部的基本Widgets
     m_dockCurrentOp = createDockWidget(m_progressWidget, "当前操作");
@@ -1343,7 +1345,7 @@ void MainWindow::initDockWidgets()
     QList<ads::CDockWidget*> allDocks = {
         m_dockWelcome, m_dockProcess, m_dockNetwork, m_dockMemory,
         m_dockFile, m_dockDriver, m_dockKernel, m_dockMonitorTab, m_dockHardware,
-        m_dockPrivilege, m_dockSettings, m_dockWindow, m_dockRegistry,
+        m_dockPrivilege, m_dockSettings, m_dockWindow, m_dockRegistry, m_dockStartup,
         m_dockCurrentOp, m_dockLog, m_dockImmediate, m_dockMonitor
     };
 
@@ -1377,6 +1379,7 @@ void MainWindow::setupDockLayout()
     m_pDockManager->addDockWidgetTabToArea(m_dockSettings, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockWindow, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockRegistry, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockStartup, leftDockArea);
 
     // 方法2: 或者使用addDockWidget并指定CenterDockWidgetArea
     // m_pDockManager->addDockWidget(ads::CenterDockWidgetArea, m_dockProcess, leftDockArea);

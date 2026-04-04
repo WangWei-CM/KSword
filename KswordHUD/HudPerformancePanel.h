@@ -37,10 +37,7 @@ private:
     {
         QWidget* containerWidget = nullptr;
         QLabel* titleLabel = nullptr;
-        QChartView* chartView = nullptr;
-        QLineSeries* lineSeries = nullptr;
-        QValueAxis* axisX = nullptr;
-        QValueAxis* axisY = nullptr;
+        QWidget* chartWidget = nullptr;
     };
 
     struct GpuEngineChartEntry

@@ -7,9 +7,11 @@ void NetworkDock::initializeUi()
     m_rootLayout->setContentsMargins(4, 4, 4, 4);
     m_rootLayout->setSpacing(4);
 
-    // 侧边栏 Tab：满足“分侧边栏 tab 实现”要求。
+    // 顶部横排 Tab：
+    // - 网络功能页签数量已较多，改成顶部横排后避免左侧竖排标签挤出纵向滚动条；
+    // - 保留统一 QTabWidget 结构，不改变各功能页内部实现。
     m_sideTabWidget = new QTabWidget(this);
-    m_sideTabWidget->setTabPosition(QTabWidget::West);
+    m_sideTabWidget->setTabPosition(QTabWidget::North);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
     initializeTrafficMonitorTab();

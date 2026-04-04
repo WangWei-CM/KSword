@@ -4,6 +4,7 @@
 #include "ProcessDetailWindow.h"
 
 #include <QAbstractItemView>
+#include <QAbstractScrollArea>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -32,6 +33,7 @@
 #include <QRunnable>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QShortcut>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSvgRenderer>
@@ -280,6 +282,35 @@ namespace
             .arg(KswordTheme::TextPrimaryHex());
     }
 
+    // applyTransparentContainerStyle 作用：
+    // - 仅把“创建进程”页中的容器类控件背景改成透明；
+    // - 不影响输入框、按钮等已有主题样式。
+    void applyTransparentContainerStyle(QWidget* widgetPointer)
+    {
+        if (widgetPointer == nullptr)
+        {
+            return;
+        }
+
+        widgetPointer->setAttribute(Qt::WA_StyledBackground, true);
+        widgetPointer->setAutoFillBackground(false);
+        widgetPointer->setStyleSheet(
+            widgetPointer->styleSheet()
+            + QStringLiteral("background:transparent;background-color:transparent;"));
+
+        QAbstractScrollArea* scrollAreaPointer = qobject_cast<QAbstractScrollArea*>(widgetPointer);
+        if (scrollAreaPointer == nullptr || scrollAreaPointer->viewport() == nullptr)
+        {
+            return;
+        }
+
+        scrollAreaPointer->viewport()->setAttribute(Qt::WA_StyledBackground, true);
+        scrollAreaPointer->viewport()->setAutoFillBackground(false);
+        scrollAreaPointer->viewport()->setStyleSheet(
+            scrollAreaPointer->viewport()->styleSheet()
+            + QStringLiteral("background:transparent;background-color:transparent;"));
+    }
+
     // 常见令牌特权列表：用于“可视化调权”表格。
     const QStringList CommonPrivilegeNames{
         "SeDebugPrivilege",
@@ -412,7 +443,32 @@ ProcessDock::ProcessDock(QWidget* parent)
     initializeUi();
     initializeConnections();
     initializeTimer();
-    requestAsyncRefresh(true);
+    m_monitoringEnabled = false;
+}
+
+void ProcessDock::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+
+    if (m_initialRefreshScheduled)
+    {
+        return;
+    }
+
+    m_initialRefreshScheduled = true;
+    m_monitoringEnabled = true;
+    if (m_refreshTimer != nullptr)
+    {
+        m_refreshTimer->start();
+    }
+
+    // 首次显示后再触发首轮刷新：
+    // - 避免主窗口启动阶段提前拉起进程枚举；
+    // - 用户真正切到“进程”页时再加载数据。
+    QTimer::singleShot(0, this, [this]()
+        {
+            requestAsyncRefresh(true);
+        });
 }
 
 void ProcessDock::refreshThemeVisuals()
@@ -593,6 +649,7 @@ void ProcessDock::initializeProcessTable()
 void ProcessDock::initializeCreateProcessPage()
 {
     m_createProcessPage = new QWidget(this);
+    applyTransparentContainerStyle(m_createProcessPage);
     m_createProcessPageLayout = new QVBoxLayout(m_createProcessPage);
     m_createProcessPageLayout->setContentsMargins(6, 6, 6, 6);
     m_createProcessPageLayout->setSpacing(6);
@@ -600,9 +657,11 @@ void ProcessDock::initializeCreateProcessPage()
     QScrollArea* scrollArea = new QScrollArea(m_createProcessPage);
     scrollArea->setWidgetResizable(true);
     scrollArea->setFrameShape(QFrame::NoFrame);
+    applyTransparentContainerStyle(scrollArea);
     m_createProcessPageLayout->addWidget(scrollArea, 1);
 
     QWidget* contentWidget = new QWidget(scrollArea);
+    applyTransparentContainerStyle(contentWidget);
     QVBoxLayout* contentLayout = new QVBoxLayout(contentWidget);
     contentLayout->setContentsMargins(2, 2, 2, 2);
     contentLayout->setSpacing(8);
@@ -629,6 +688,7 @@ void ProcessDock::initializeCreateProcessPage()
             std::vector<QCheckBox*>* outputCheckBoxList) -> QGroupBox*
     {
         QGroupBox* groupBox = new QGroupBox(groupTitle, parentWidget);
+        applyTransparentContainerStyle(groupBox);
         QGridLayout* groupLayout = new QGridLayout(groupBox);
         groupLayout->setContentsMargins(6, 6, 6, 6);
         groupLayout->setHorizontalSpacing(10);
@@ -661,6 +721,7 @@ void ProcessDock::initializeCreateProcessPage()
 
     // 1) 创建方式 + 令牌来源配置。
     QGroupBox* methodGroup = new QGroupBox("创建方式 / 令牌来源", contentWidget);
+    applyTransparentContainerStyle(methodGroup);
     QGridLayout* methodLayout = new QGridLayout(methodGroup);
     methodLayout->setHorizontalSpacing(8);
     methodLayout->setVerticalSpacing(6);
@@ -700,6 +761,7 @@ void ProcessDock::initializeCreateProcessPage()
 
     // 2) CreateProcessW 基础参数。
     QGroupBox* basicGroup = new QGroupBox("CreateProcessW 参数（全部可选 Null）", contentWidget);
+    applyTransparentContainerStyle(basicGroup);
     QGridLayout* basicLayout = new QGridLayout(basicGroup);
     basicLayout->setHorizontalSpacing(8);
     basicLayout->setVerticalSpacing(6);
@@ -763,6 +825,7 @@ void ProcessDock::initializeCreateProcessPage()
 
     // 3) PROCESS / THREAD SECURITY_ATTRIBUTES。
     QGroupBox* securityGroup = new QGroupBox("SECURITY_ATTRIBUTES（Process / Thread）", contentWidget);
+    applyTransparentContainerStyle(securityGroup);
     QGridLayout* securityLayout = new QGridLayout(securityGroup);
     securityLayout->setHorizontalSpacing(8);
     securityLayout->setVerticalSpacing(6);
@@ -798,6 +861,7 @@ void ProcessDock::initializeCreateProcessPage()
 
     // 4) STARTUPINFOW 全字段。
     QGroupBox* startupGroup = new QGroupBox("STARTUPINFOW（全部字段）", contentWidget);
+    applyTransparentContainerStyle(startupGroup);
     QGridLayout* startupLayout = new QGridLayout(startupGroup);
     startupLayout->setHorizontalSpacing(8);
     startupLayout->setVerticalSpacing(6);
@@ -892,6 +956,7 @@ void ProcessDock::initializeCreateProcessPage()
 
     // 5) PROCESS_INFORMATION 全字段。
     QGroupBox* processInfoGroup = new QGroupBox("PROCESS_INFORMATION（输出结构体，支持自定义初值）", contentWidget);
+    applyTransparentContainerStyle(processInfoGroup);
     QGridLayout* processInfoLayout = new QGridLayout(processInfoGroup);
     processInfoLayout->setHorizontalSpacing(8);
     processInfoLayout->setVerticalSpacing(6);
@@ -921,6 +986,7 @@ void ProcessDock::initializeCreateProcessPage()
 
     // 6) Token 特权编辑器。
     QGroupBox* tokenPrivilegeGroup = new QGroupBox("Token 特权调整（AdjustTokenPrivileges）", contentWidget);
+    applyTransparentContainerStyle(tokenPrivilegeGroup);
     QVBoxLayout* tokenPrivilegeLayout = new QVBoxLayout(tokenPrivilegeGroup);
     m_tokenPrivilegeTable = new QTableWidget(CommonPrivilegeNames.size(), 2, tokenPrivilegeGroup);
     m_tokenPrivilegeTable->setHorizontalHeaderLabels(QStringList{ "Privilege", "Action" });
@@ -961,6 +1027,7 @@ void ProcessDock::initializeCreateProcessPage()
 
     // 7) 操作按钮 + 输出日志。
     QGroupBox* actionGroup = new QGroupBox("执行与结果", contentWidget);
+    applyTransparentContainerStyle(actionGroup);
     QVBoxLayout* actionLayout = new QVBoxLayout(actionGroup);
     QHBoxLayout* actionButtonLayout = new QHBoxLayout();
     m_launchProcessButton = new QPushButton("执行创建进程", actionGroup);
@@ -1091,6 +1158,72 @@ void ProcessDock::initializeConnections()
     connect(m_processTable->header(), &QHeaderView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showHeaderContextMenu(localPosition);
     });
+
+    // currentItemChanged 作用：
+    // - 记录当前被用户选中的进程 identityKey；
+    // - 周期刷新后 rebuildTable 会按这个 key 恢复高亮。
+    connect(m_processTable, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* currentItem, QTreeWidgetItem*) {
+        if (currentItem == nullptr)
+        {
+            if (!m_contextMenuVisible)
+            {
+                m_trackedSelectedIdentityKey.clear();
+                m_trackedSelectedColumn = 0;
+            }
+            return;
+        }
+
+        m_trackedSelectedIdentityKey =
+            currentItem->data(0, Qt::UserRole).toString().toStdString();
+        const int currentColumn = m_processTable->currentColumn();
+        if (currentColumn >= 0 && currentColumn < static_cast<int>(TableColumn::Count))
+        {
+            m_trackedSelectedColumn = currentColumn;
+        }
+    });
+
+    // itemPressed 作用：
+    // - 左键点选某一行时同步记录点击列；
+    // - 刷新恢复时尽量回到用户原来的焦点列。
+    connect(m_processTable, &QTreeWidget::itemPressed, this, [this](QTreeWidgetItem* item, const int column) {
+        if (item == nullptr)
+        {
+            return;
+        }
+
+        m_trackedSelectedIdentityKey = item->data(0, Qt::UserRole).toString().toStdString();
+        if (column >= 0 && column < static_cast<int>(TableColumn::Count))
+        {
+            m_trackedSelectedColumn = column;
+        }
+    });
+
+    // Alt+E 作用：
+    // - 提供与任务管理器类似的快速结束进程快捷键；
+    // - 仅在“进程列表”页且存在选中行时执行 TerminateProcess。
+    QShortcut* terminateShortcut = new QShortcut(QKeySequence(Qt::ALT | Qt::Key_E), this);
+    terminateShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(terminateShortcut, &QShortcut::activated, this, [this]() {
+        if (m_sideTabWidget == nullptr || m_sideTabWidget->currentWidget() != m_processListPage)
+        {
+            return;
+        }
+
+        if (selectedRecord() == nullptr)
+        {
+            kLogEvent logEvent;
+            warn << logEvent
+                << "[ProcessDock] Alt+E 被忽略：当前没有选中可结束的进程。"
+                << eol;
+            return;
+        }
+
+        kLogEvent logEvent;
+        info << logEvent
+            << "[ProcessDock] 触发快捷键 Alt+E，执行 TerminateProcess。"
+            << eol;
+        executeTerminateProcessAction();
+    });
 }
 
 void ProcessDock::initializeCreateProcessConnections()
@@ -1197,7 +1330,7 @@ void ProcessDock::initializeTimer()
     connect(m_refreshTimer, &QTimer::timeout, this, [this]() {
         requestAsyncRefresh(false);
     });
-    m_refreshTimer->start();
+    // 首次显示前不启动，避免主窗口启动阶段后台偷跑刷新。
 }
 
 void ProcessDock::updateRefreshStateUi(const bool refreshing, const QString& stateText)
@@ -1901,8 +2034,17 @@ void ProcessDock::rebuildTable()
     // 记录用户当前排序列与顺序，解决“刷新后被重置为 PID 排序”的问题。
     const int previousSortColumn = m_processTable->header()->sortIndicatorSection();
     const Qt::SortOrder previousSortOrder = m_processTable->header()->sortIndicatorOrder();
+    const std::string trackedIdentityKeyBeforeRebuild =
+        !m_trackedSelectedIdentityKey.empty()
+        ? m_trackedSelectedIdentityKey
+        : selectedIdentityKey();
+    const int trackedColumnBeforeRebuild = std::clamp(
+        m_trackedSelectedColumn,
+        0,
+        static_cast<int>(TableColumn::Count) - 1);
 
     // 刷新期间临时冻结视图更新，减少大量 addTopLevelItem 时的重绘抖动。
+    QSignalBlocker tableSignalBlocker(m_processTable);
     m_processTable->setUpdatesEnabled(false);
     m_processTable->clear();
 
@@ -1946,6 +2088,11 @@ void ProcessDock::rebuildTable()
                 item->setForeground(columnIndex, QColor(255, 255, 255));
             }
         };
+
+    // trackedRowItemToRestore 作用：
+    // - 记录当前这轮重建中是否找到了“用户之前选中的进程行”；
+    // - 这样刷新完成后可以按 identityKey 恢复选中高亮。
+    QTreeWidgetItem* trackedRowItemToRestore = nullptr;
 
     for (const DisplayRow& displayRow : displayRows)
     {
@@ -2031,6 +2178,11 @@ void ProcessDock::rebuildTable()
             applyUsageHighlight(rowItem, toColumnIndex(TableColumn::Net), netUsageRatio);
         }
 
+        if (!trackedIdentityKeyBeforeRebuild.empty() && identityKey == trackedIdentityKeyBeforeRebuild)
+        {
+            trackedRowItemToRestore = rowItem;
+        }
+
         m_processTable->addTopLevelItem(rowItem);
     }
 
@@ -2044,6 +2196,23 @@ void ProcessDock::rebuildTable()
             : toColumnIndex(TableColumn::Pid);
         m_processTable->header()->setSortIndicator(safeSortColumn, previousSortOrder);
         m_processTable->sortItems(safeSortColumn, previousSortOrder);
+    }
+
+    // 按 identityKey 恢复用户之前选中的进程：
+    // - 左键点中的那一行在刷新后继续保持高亮；
+    // - 若该进程已不存在，则清空追踪状态，避免错误高亮。
+    if (trackedRowItemToRestore != nullptr)
+    {
+        m_processTable->setCurrentItem(trackedRowItemToRestore, trackedColumnBeforeRebuild);
+        trackedRowItemToRestore->setSelected(true);
+        m_processTable->scrollToItem(trackedRowItemToRestore, QAbstractItemView::PositionAtCenter);
+        m_trackedSelectedIdentityKey = trackedIdentityKeyBeforeRebuild;
+        m_trackedSelectedColumn = trackedColumnBeforeRebuild;
+    }
+    else if (!trackedIdentityKeyBeforeRebuild.empty())
+    {
+        m_trackedSelectedIdentityKey.clear();
+        m_trackedSelectedColumn = 0;
     }
 
     // 根据本轮数据刷新标题栏“占用总和”。

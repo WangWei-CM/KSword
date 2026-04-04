@@ -23,6 +23,7 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -92,10 +93,34 @@ PrivilegeDock::PrivilegeDock(QWidget* parent)
 
     initializeUi();
     initializeConnections();
-    refreshLocalUserList();
-    refreshPermissionSnapshot();
 
     info << event << "[PrivilegeDock] 构造完成。" << eol;
+}
+
+void PrivilegeDock::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+
+    if (m_initialRefreshDone)
+    {
+        return;
+    }
+
+    m_initialRefreshDone = true;
+    if (m_accountStatusLabel != nullptr)
+    {
+        m_accountStatusLabel->setText(QStringLiteral("状态：首次打开，正在加载账号列表..."));
+    }
+    if (m_permissionStatusLabel != nullptr)
+    {
+        m_permissionStatusLabel->setText(QStringLiteral("状态：首次打开，正在加载权限快照..."));
+    }
+
+    QTimer::singleShot(0, this, [this]()
+        {
+            refreshLocalUserList();
+            refreshPermissionSnapshot();
+        });
 }
 
 void PrivilegeDock::initializeUi()

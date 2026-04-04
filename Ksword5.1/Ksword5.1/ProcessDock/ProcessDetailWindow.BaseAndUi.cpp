@@ -1,5 +1,9 @@
+﻿#include "ProcessDetailWindow.InternalCommon.h"
+
+using namespace process_detail_window_internal;
+
 // ============================================================
-// ProcessDetailWindow.BaseAndUi.inc
+// ProcessDetailWindow.BaseAndUi.cpp
 // 作用：
 // - 负责构造/基础数据合并、三个 Tab 的 UI 初始化以及基础信号连接。
 // - 聚焦“窗口骨架与静态展示数据”逻辑。
