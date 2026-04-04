@@ -232,6 +232,7 @@ void HexEditorWidget::setRegionData(
         m_selectionRangeValid = false;
         m_selectionRangeStartOffset = 0;
         m_selectionRangeEndOffset = 0;
+        m_selectionVisualAsciiColumn = false;
         rebuildTable();
         updateSummaryLabel();
         updateSelectionInspector();
@@ -258,6 +259,7 @@ void HexEditorWidget::setByteArray(const QByteArray& bytes, const std::uint64_t 
     m_selectionRangeValid = false;
     m_selectionRangeStartOffset = 0;
     m_selectionRangeEndOffset = 0;
+    m_selectionVisualAsciiColumn = false;
     rebuildTable();
     updateSummaryLabel();
     updateSelectionInspector();
@@ -531,6 +533,12 @@ bool HexEditorWidget::eventFilter(QObject* watched, QEvent* event)
             m_linearSelectAnchorOffset = clickedOffset;
             m_linearSelectAnchorValid = true;
         }
+
+        // 记录本次拖拽起点是否在 ASCII 列：
+        // - true：视觉高亮保留在 ASCII 列；
+        // - false：视觉高亮保留在十六进制字节列。
+        const int pressedColumnIndex = m_hexTable->columnAt(mouseEvent->pos().x());
+        m_selectionVisualAsciiColumn = (pressedColumnIndex == (m_bytesPerRow + 1));
 
         m_linearSelectDragging = true;
         selectLinearRange(m_linearSelectAnchorOffset, clickedOffset, false);
