@@ -1,4 +1,4 @@
-#include "WelcomeDock.h"
+﻿#include "WelcomeDock.h"
 #include "../UI/UI.css/UI_css.h"
 #include "../theme.h"
 #include <QStyle>
@@ -197,6 +197,6 @@ WelcomeDock::WelcomeDock(QWidget* parent) : QWidget(parent) {
 
     // ==== 3. 信号连接（示例：Github按钮打开链接） ====
     connect(m_githubBtn, &QPushButton::clicked, this, [=]() {
-        QDesktopServices::openUrl(QUrl("https://github.com/xxx"));
+        QDesktopServices::openUrl(QUrl("https://github.com/WangWei-CM/KSword"));
         });
 }

@@ -133,6 +133,9 @@
     <ResourceCompile Include="AppIcon.rc" />
     <ClCompile Include="DriverDock\DriverDock.cpp" />
     <ClCompile Include="FileDock\FileDock.cpp" />
+    <ClCompile Include="FileDock\FileDock.HandleUsage.cpp" />
+    <ClCompile Include="FileDock\FileHandleUsageScanner.cpp" />
+    <ClCompile Include="FileDock\FileHandleUsageWindow.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.Directories.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.Tables.cpp" />
@@ -221,6 +224,8 @@
     <ClInclude Include="Framework.h" />
     <ClInclude Include="Ksword.h" />
     <ClInclude Include="FileDock\ManualFileSystemParser.h" />
+    <ClInclude Include="FileDock\FileHandleUsageScanner.h" />
+    <ClInclude Include="FileDock\FileHandleUsageWindow.h" />
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.h" />
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.Internal.h" />
     <ClInclude Include="Framework\LogDockWidget.h" />

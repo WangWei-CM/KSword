@@ -483,12 +483,12 @@ void HandleDock::initializeConnections()
 
 void HandleDock::requestAsyncRefresh(const bool forceRefresh)
 {
-    if (m_refreshInProgress && !forceRefresh)
+    if (m_refreshInProgress)
     {
-        return;
-    }
-    if (m_refreshInProgress && forceRefresh)
-    {
+        if (forceRefresh)
+        {
+            m_refreshPending = true;
+        }
         return;
     }
 
@@ -555,12 +555,12 @@ void HandleDock::requestAsyncRefresh(const bool forceRefresh)
 
 void HandleDock::requestObjectTypeRefreshAsync(const bool forceRefresh)
 {
-    if (m_objectTypeRefreshInProgress && !forceRefresh)
+    if (m_objectTypeRefreshInProgress)
     {
-        return;
-    }
-    if (m_objectTypeRefreshInProgress && forceRefresh)
-    {
+        if (forceRefresh)
+        {
+            m_objectTypeRefreshPending = true;
+        }
         return;
     }
 
@@ -625,8 +625,8 @@ void HandleDock::applyHandleRefreshResult(
     }
     updateHandleStatusLabel(statusText, false);
 
-    kPro.set(m_refreshProgressPid, "句柄刷新完成", 0, 100.0f);
     m_refreshInProgress = false;
+    kPro.set(m_refreshProgressPid, "句柄刷新完成", 0, 100.0f);
 
     kLogEvent refreshDoneEvent;
     info << refreshDoneEvent
@@ -643,6 +643,15 @@ void HandleDock::applyHandleRefreshResult(
         << ", diagnostic="
         << refreshResult.diagnosticText.toStdString()
         << eol;
+
+    if (m_refreshPending)
+    {
+        m_refreshPending = false;
+        QMetaObject::invokeMethod(this, [this]()
+            {
+                requestAsyncRefresh(true);
+            }, Qt::QueuedConnection);
+    }
 }
 
 void HandleDock::applyObjectTypeRefreshResult(
@@ -667,9 +676,18 @@ void HandleDock::applyObjectTypeRefreshResult(
     }
     updateObjectTypeStatusLabel(statusText, false);
 
-    kPro.set(m_objectTypeRefreshProgressPid, "对象类型刷新完成", 0, 100.0f);
     m_objectTypeRefreshInProgress = false;
+    kPro.set(m_objectTypeRefreshProgressPid, "对象类型刷新完成", 0, 100.0f);
     syncHandleTypeNamesFromObjectTypeMap();
+
+    if (m_objectTypeRefreshPending)
+    {
+        m_objectTypeRefreshPending = false;
+        QMetaObject::invokeMethod(this, [this]()
+            {
+                requestObjectTypeRefreshAsync(true);
+            }, Qt::QueuedConnection);
+    }
 }
 
 void HandleDock::rebuildHandleTable()

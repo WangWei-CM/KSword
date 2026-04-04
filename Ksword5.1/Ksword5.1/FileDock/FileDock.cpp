@@ -1364,36 +1364,43 @@ void FileDock::initializeConnections(FilePanelWidgets& panel)
 
     // Enter 快捷键：打开选中项。
     QShortcut* openShortcut = new QShortcut(QKeySequence(Qt::Key_Return), panel.fileView);
+    openShortcut->setContext(Qt::WidgetShortcut);
     connect(openShortcut, &QShortcut::activated, this, [this, &panel]() {
         openSelectedItems(panel);
     });
     QShortcut* openShortcutEnter = new QShortcut(QKeySequence(Qt::Key_Enter), panel.fileView);
+    openShortcutEnter->setContext(Qt::WidgetShortcut);
     connect(openShortcutEnter, &QShortcut::activated, this, [this, &panel]() {
         openSelectedItems(panel);
     });
 
     // F2 重命名快捷键。
     QShortcut* renameShortcut = new QShortcut(QKeySequence(Qt::Key_F2), panel.fileView);
+    renameShortcut->setContext(Qt::WidgetShortcut);
     connect(renameShortcut, &QShortcut::activated, this, [this, &panel]() {
         renameSelectedItem(panel);
     });
 
     // Delete 删除快捷键。
     QShortcut* deleteShortcut = new QShortcut(QKeySequence(Qt::Key_Delete), panel.fileView);
+    deleteShortcut->setContext(Qt::WidgetShortcut);
     connect(deleteShortcut, &QShortcut::activated, this, [this, &panel]() {
         deleteSelectedItem(panel);
     });
 
     // Ctrl+C/Ctrl+X/Ctrl+V 常用文件操作快捷键。
     QShortcut* copyShortcut = new QShortcut(QKeySequence::Copy, panel.fileView);
+    copyShortcut->setContext(Qt::WidgetShortcut);
     connect(copyShortcut, &QShortcut::activated, this, [this, &panel]() {
         copySelectedItems(panel);
     });
     QShortcut* cutShortcut = new QShortcut(QKeySequence::Cut, panel.fileView);
+    cutShortcut->setContext(Qt::WidgetShortcut);
     connect(cutShortcut, &QShortcut::activated, this, [this, &panel]() {
         cutSelectedItems(panel);
     });
     QShortcut* pasteShortcut = new QShortcut(QKeySequence::Paste, panel.fileView);
+    pasteShortcut->setContext(Qt::WidgetShortcut);
     connect(pasteShortcut, &QShortcut::activated, this, [this, &panel]() {
         pasteClipboardItems(panel);
     });
@@ -2962,15 +2969,13 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* detailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("属性..."));
     menu.addSeparator();
 
-    // “分析”子菜单：承载哈希/签名/熵值/十六进制入口。
-    QMenu* analysisMenu = menu.addMenu(QStringLiteral("分析"));
-    analysisMenu->setIcon(QIcon(":/Icon/log_track.svg"));
-    QAction* hashAction = analysisMenu->addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("计算哈希值"));
-    QAction* signAction = analysisMenu->addAction(QIcon(":/Icon/process_critical.svg"), QStringLiteral("检查数字签名"));
-    QAction* entropyAction = analysisMenu->addAction(QIcon(":/Icon/process_uncritical.svg"), QStringLiteral("计算熵值"));
-    QAction* hexAction = analysisMenu->addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("十六进制查看"));
-    analysisMenu->addSeparator();
-    QAction* peAction = analysisMenu->addAction(QIcon(":/Icon/process_list.svg"), QStringLiteral("在PE查看器中打开"));
+    // 分析动作改为顶层菜单，减少层级并提升右键操作效率。
+    QAction* hashAction = menu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("计算哈希值"));
+    QAction* signAction = menu.addAction(QIcon(":/Icon/process_critical.svg"), QStringLiteral("检查数字签名"));
+    QAction* entropyAction = menu.addAction(QIcon(":/Icon/process_uncritical.svg"), QStringLiteral("计算熵值"));
+    QAction* hexAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("十六进制查看"));
+    QAction* peAction = menu.addAction(QIcon(":/Icon/process_list.svg"), QStringLiteral("在PE查看器中打开"));
+    QAction* handleScanAction = menu.addAction(QIcon(":/Icon/handle_refresh.svg"), QStringLiteral("扫描占用句柄"));
 
     // 结合选中集合动态启用菜单项，保证“多选”和“右键动作”行为一致。
     const bool singleFileOnly = isSingleSelection && QFileInfo(firstPath).isFile();
@@ -2989,6 +2994,7 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     entropyAction->setEnabled(hasAnyFile);
     hexAction->setEnabled(singleFileOnly);
     peAction->setEnabled(singleFileOnly);
+    handleScanAction->setEnabled(hasSelection);
 
     QAction* selectedAction = menu.exec(panel.fileView->viewport()->mapToGlobal(localPos));
     if (selectedAction == nullptr)
@@ -3265,6 +3271,11 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
         {
             showFileDetailDialog(firstPath);
         }
+        return;
+    }
+    if (selectedAction == handleScanAction)
+    {
+        openHandleUsageScanWindow(menuPaths);
         return;
     }
 }

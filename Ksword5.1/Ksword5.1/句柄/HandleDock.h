@@ -520,8 +520,11 @@ private:
     QTreeWidget* m_objectTypeDetailTable = nullptr; // m_objectTypeDetailTable：对象类型详情（键值对表）。
 
     bool m_refreshInProgress = false;            // m_refreshInProgress：句柄刷新互斥标记。
+    bool m_refreshPending = false;               // m_refreshPending：刷新进行中期间记录的待执行刷新请求。
     bool m_objectTypeRefreshInProgress = false;  // m_objectTypeRefreshInProgress：对象类型刷新互斥标记。
+    bool m_objectTypeRefreshPending = false;     // m_objectTypeRefreshPending：对象类型刷新待执行请求标记。
     bool m_handleDetailRefreshInProgress = false; // m_handleDetailRefreshInProgress：句柄详情刷新互斥标记。
+    bool m_handleDetailRefreshPending = false;   // m_handleDetailRefreshPending：句柄详情刷新待执行请求标记。
     bool m_initialRefreshDone = false;           // m_initialRefreshDone：首轮刷新是否已完成。
     std::uint64_t m_refreshTicket = 0;           // m_refreshTicket：句柄刷新序号，防止乱序覆盖。
     std::uint64_t m_objectTypeRefreshTicket = 0; // m_objectTypeRefreshTicket：对象类型刷新序号。
