@@ -20,6 +20,7 @@
 #include <QFontDatabase>
 #include <QFontMetrics>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QItemSelectionModel>
@@ -122,6 +123,36 @@ namespace
             .arg(KswordTheme::SurfaceHex());
     }
 
+    // buildMenuStyle：
+    // - 为 HexEditor 内部右键菜单和导出菜单生成独立主题样式；
+    // - 修复深色模式下菜单仍然白底的问题。
+    QString buildMenuStyle()
+    {
+        return QStringLiteral(
+            "QMenu{"
+            "  background:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "}"
+            "QMenu::item{"
+            "  padding:6px 18px;"
+            "  background:transparent;"
+            "}"
+            "QMenu::item:selected{"
+            "  background:%4;"
+            "  color:#FFFFFF;"
+            "}"
+            "QMenu::separator{"
+            "  height:1px;"
+            "  background:%3;"
+            "  margin:4px 8px;"
+            "}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueHex);
+    }
+
     // buildMatchColor：
     // - 返回普通命中字节背景色；
     // - 深色模式使用偏墨绿，浅色模式使用淡黄。
@@ -144,6 +175,18 @@ namespace
             return QColor(76, 112, 52);
         }
         return QColor(255, 213, 107);
+    }
+
+    // buildSelectionColor：
+    // - 返回当前用户选区的高亮色；
+    // - 优先保证拖拽选区比查找高亮更显眼。
+    QColor buildSelectionColor()
+    {
+        if (KswordTheme::IsDarkModeEnabled())
+        {
+            return QColor(49, 92, 166);
+        }
+        return QColor(153, 205, 255);
     }
 
     // byteToHexText：
@@ -186,8 +229,12 @@ void HexEditorWidget::setRegionData(
         m_buffer.clear();
         ++m_bufferRevision;
         clearSearchState();
+        m_selectionRangeValid = false;
+        m_selectionRangeStartOffset = 0;
+        m_selectionRangeEndOffset = 0;
         rebuildTable();
         updateSummaryLabel();
+        updateSelectionInspector();
         updateStatusLabel(QStringLiteral("当前区域为空。"));
         return;
     }
@@ -208,8 +255,12 @@ void HexEditorWidget::setByteArray(const QByteArray& bytes, const std::uint64_t 
 
     // 新数据进入后清空旧查找结果，避免高亮错位。
     clearSearchState();
+    m_selectionRangeValid = false;
+    m_selectionRangeStartOffset = 0;
+    m_selectionRangeEndOffset = 0;
     rebuildTable();
     updateSummaryLabel();
+    updateSelectionInspector();
 
     updateStatusLabel(
         QStringLiteral("加载完成：%1 字节。")
@@ -232,6 +283,7 @@ void HexEditorWidget::setEditable(const bool editable)
     m_editable = editable;
     rebuildTable();
     updateSummaryLabel();
+    updateSelectionInspector();
 }
 
 bool HexEditorWidget::isEditable() const
@@ -259,6 +311,7 @@ void HexEditorWidget::setBytesPerRow(const int bytesPerRow)
 
     rebuildTable();
     updateSummaryLabel();
+    updateSelectionInspector();
 }
 
 int HexEditorWidget::bytesPerRow() const
@@ -393,6 +446,7 @@ bool HexEditorWidget::setByteAtAbsoluteAddress(
     updateAsciiCellByRow(row);
     updateRowHighlightByRow(row);
     m_ignoreItemChanged = false;
+    updateSelectionInspector();
 
     if (keepSelection)
     {

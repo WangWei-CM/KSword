@@ -20,6 +20,7 @@ class QObject;
 class QEvent;
 class QPoint;
 class QComboBox;
+class QGridLayout;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
@@ -238,6 +239,41 @@ private:
     // - 作用：刷新底部状态文本。
     void updateStatusLabel(const QString& statusText);
 
+    // initializeSelectionInspector：
+    // - 作用：创建底部“选区检查器”面板；
+    // - 展示起止地址、HEX/ASCII/UTF-16 和整数解释。
+    void initializeSelectionInspector();
+
+    // updateSelectionInspector：
+    // - 作用：按当前选区刷新检查器文本；
+    // - 无选区时回退显示当前字节或占位内容。
+    void updateSelectionInspector();
+
+    // buildSelectedByteArray：
+    // - 作用：把当前选区转换为连续展示用字节数组；
+    // - 按偏移升序输出，供各类预览格式复用。
+    QByteArray buildSelectedByteArray() const;
+
+    // formatSelectionHexPreview：
+    // - 作用：把选中字节格式化为 HEX 预览文本；
+    // - 过长时自动截断并标注省略。
+    QString formatSelectionHexPreview(const QByteArray& selectedBytes) const;
+
+    // formatSelectionAsciiPreview：
+    // - 作用：把选中字节格式化为 ASCII 预览文本；
+    // - 不可打印字符统一显示为 '.'。
+    QString formatSelectionAsciiPreview(const QByteArray& selectedBytes) const;
+
+    // formatSelectionUtf16Preview：
+    // - 作用：按 UTF-16LE 尝试解码选区内容；
+    // - 长度不足两个字节时显示不可用提示。
+    QString formatSelectionUtf16Preview(const QByteArray& selectedBytes) const;
+
+    // formatSelectionIntegerPreview：
+    // - 作用：按首 1/2/4/8 字节解释整数与浮点；
+    // - 便于快速判断选区像不像数值字段。
+    QString formatSelectionIntegerPreview(const QByteArray& selectedBytes) const;
+
     // updateAsciiCellByRow：
     // - 作用：更新指定行的 ASCII 列显示。
     void updateAsciiCellByRow(int rowIndex);
@@ -245,6 +281,17 @@ private:
     // updateRowHighlightByRow：
     // - 作用：根据查找命中掩码刷新指定行背景色。
     void updateRowHighlightByRow(int rowIndex);
+
+    // updateSelectionHighlightRange：
+    // - 作用：按“旧选区 + 新选区”的并集刷新受影响行；
+    // - 避免每次拖拽都重建整张表。
+    void updateSelectionHighlightRange(
+        bool oldRangeValid,
+        std::uint64_t oldStartOffset,
+        std::uint64_t oldEndOffset,
+        bool newRangeValid,
+        std::uint64_t newStartOffset,
+        std::uint64_t newEndOffset);
 
     // parseAddressNumber：
     // - 作用：解析十进制/十六进制数字文本。
@@ -456,6 +503,27 @@ private:
     // m_hexTable：十六进制数据表格。
     QTableWidget* m_hexTable = nullptr;
 
+    // m_selectionInspectorPanel：底部选区检查器容器。
+    QWidget* m_selectionInspectorPanel = nullptr;
+
+    // m_selectionInspectorLayout：选区检查器布局。
+    QGridLayout* m_selectionInspectorLayout = nullptr;
+
+    // m_selectionSummaryLabel：显示选区起止地址、长度等摘要。
+    QLabel* m_selectionSummaryLabel = nullptr;
+
+    // m_selectionHexPreviewLabel：显示 HEX 预览文本。
+    QLabel* m_selectionHexPreviewLabel = nullptr;
+
+    // m_selectionAsciiPreviewLabel：显示 ASCII 预览文本。
+    QLabel* m_selectionAsciiPreviewLabel = nullptr;
+
+    // m_selectionUtf16PreviewLabel：显示 UTF-16 预览文本。
+    QLabel* m_selectionUtf16PreviewLabel = nullptr;
+
+    // m_selectionIntegerPreviewLabel：显示整数/浮点解释文本。
+    QLabel* m_selectionIntegerPreviewLabel = nullptr;
+
     // m_statusLabel：底部状态文本。
     QLabel* m_statusLabel = nullptr;
 
@@ -542,4 +610,17 @@ private:
     // m_linearSelectAnchorValid：
     // - 作用：标记锚点偏移是否有效。
     bool m_linearSelectAnchorValid = false;
+
+    // m_selectionRangeValid：
+    // - 作用：标记当前是否存在自定义线性选区；
+    // - 选区只覆盖十六进制字节区，不选 ASCII 列。
+    bool m_selectionRangeValid = false;
+
+    // m_selectionRangeStartOffset：
+    // - 作用：记录当前选区起始偏移（包含）。
+    std::uint64_t m_selectionRangeStartOffset = 0;
+
+    // m_selectionRangeEndOffset：
+    // - 作用：记录当前选区结束偏移（包含）。
+    std::uint64_t m_selectionRangeEndOffset = 0;
 };

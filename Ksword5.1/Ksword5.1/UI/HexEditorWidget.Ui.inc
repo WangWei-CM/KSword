@@ -142,7 +142,10 @@ void HexEditorWidget::initializeUi()
     m_hexTable = new QTableWidget(this);
     m_hexTable->setColumnCount(m_bytesPerRow + 2);
     m_hexTable->setRowCount(1);
-    m_hexTable->setSelectionMode(QAbstractItemView::ContiguousSelection);
+    // 使用 ExtendedSelection：
+    // - 线性跨行选区在二维表格中并非严格矩形；
+    // - ContiguousSelection 会主动约束并吞掉部分选中状态，导致视觉高亮异常。
+    m_hexTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_hexTable->setSelectionBehavior(QAbstractItemView::SelectItems);
     m_hexTable->setEditTriggers(
         QAbstractItemView::AnyKeyPressed
@@ -163,10 +166,28 @@ void HexEditorWidget::initializeUi()
             "  border:none;"
             "  gridline-color:transparent;"
             "  outline:none;"
+            "  background:%1;"
+            "  alternate-background-color:%2;"
+            "  color:%3;"
+            "  selection-background-color:%4;"
+            "  selection-color:#FFFFFF;"
             "}"
             "QTableView::item{"
             "  border:none;"
-            "}"));
+            "  color:%3;"
+            "}"
+            "QTableView::item:selected{"
+            "  background:%4;"
+            "  color:#FFFFFF;"
+            "}"
+            "QTableCornerButton::section{"
+            "  background:%1;"
+            "  border:none;"
+            "}")
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::SurfaceAltHex())
+        .arg(KswordTheme::TextPrimaryHex())
+        .arg(KswordTheme::PrimaryBlueHex));
 
     // 表格字体加大并固定等宽，便于编辑十六进制内容。
     QFont fixedFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
@@ -180,6 +201,10 @@ void HexEditorWidget::initializeUi()
     m_hexTable->setCursor(Qt::IBeamCursor);
     m_hexTable->viewport()->installEventFilter(this);
     m_rootLayout->addWidget(m_hexTable, 1);
+
+    // 选区检查器：展示当前选中字节的多种解释结果。
+    initializeSelectionInspector();
+    m_rootLayout->addWidget(m_selectionInspectorPanel);
 
     // 底部状态文本：反馈操作成功/失败。
     m_statusLabel = new QLabel(QStringLiteral("就绪。"), this);
@@ -195,6 +220,7 @@ void HexEditorWidget::initializeUi()
 
     updateHeaderText();
     updateSummaryLabel();
+    updateSelectionInspector();
 }
 
 void HexEditorWidget::initializeConnections()
@@ -220,6 +246,7 @@ void HexEditorWidget::initializeConnections()
     connect(m_exportButton, &QToolButton::clicked, this, [this]()
         {
             QMenu exportMenu(this);
+            exportMenu.setStyleSheet(buildMenuStyle());
             QAction* binaryAction = exportMenu.addAction(QStringLiteral("导出二进制"));
             QAction* textAction = exportMenu.addAction(QStringLiteral("导出HEX文本"));
             QAction* selectedAction = exportMenu.exec(m_exportButton->mapToGlobal(QPoint(0, m_exportButton->height())));
@@ -397,9 +424,16 @@ void HexEditorWidget::initializeConnections()
             std::uint64_t offset = 0;
             if (!rowColumnToOffset(currentRow, currentColumn, offset))
             {
+                updateSelectionInspector();
                 return;
             }
             emit currentAddressChanged(m_baseAddress + offset);
+            updateSelectionInspector();
+        });
+
+    connect(m_hexTable, &QTableWidget::itemSelectionChanged, this, [this]()
+        {
+            updateSelectionInspector();
         });
 
     connect(m_hexTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
@@ -416,6 +450,7 @@ void HexEditorWidget::initializeConnections()
             const std::uint64_t absoluteAddress = m_baseAddress + clickedOffset;
 
             QMenu menu(this);
+            menu.setStyleSheet(buildMenuStyle());
             QAction* copyHexAction = menu.addAction(QStringLiteral("复制 HEX"));
             QAction* copyAsciiAction = menu.addAction(QStringLiteral("复制 ASCII"));
             QAction* copyAddressAction = menu.addAction(QStringLiteral("复制地址"));
@@ -592,7 +627,7 @@ void HexEditorWidget::rebuildTable()
         }
 
         QTableWidgetItem* asciiItem = new QTableWidgetItem(asciiText);
-        asciiItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+        asciiItem->setFlags(Qt::ItemIsEnabled);
         m_hexTable->setItem(rowIndex, m_bytesPerRow + 1, asciiItem);
     }
 
@@ -680,7 +715,7 @@ void HexEditorWidget::updateAsciiCellByRow(const int rowIndex)
     if (asciiItem == nullptr)
     {
         asciiItem = new QTableWidgetItem();
-        asciiItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+        asciiItem->setFlags(Qt::ItemIsEnabled);
         m_hexTable->setItem(rowIndex, m_bytesPerRow + 1, asciiItem);
     }
     asciiItem->setText(asciiText);
@@ -696,6 +731,7 @@ void HexEditorWidget::updateRowHighlightByRow(const int rowIndex)
     const std::uint64_t rowOffset = static_cast<std::uint64_t>(rowIndex) * static_cast<std::uint64_t>(m_bytesPerRow);
     const QColor matchColor = buildMatchColor();
     const QColor currentMatchColor = buildCurrentMatchColor();
+    const QColor selectionColor = buildSelectionColor();
 
     for (int byteColumn = 0; byteColumn < m_bytesPerRow; ++byteColumn)
     {
@@ -709,6 +745,14 @@ void HexEditorWidget::updateRowHighlightByRow(const int rowIndex)
         byteItem->setBackground(QBrush());
         if (byteOffset >= static_cast<std::uint64_t>(m_buffer.size()))
         {
+            continue;
+        }
+
+        if (m_selectionRangeValid &&
+            byteOffset >= std::min(m_selectionRangeStartOffset, m_selectionRangeEndOffset) &&
+            byteOffset <= std::max(m_selectionRangeStartOffset, m_selectionRangeEndOffset))
+        {
+            byteItem->setBackground(selectionColor);
             continue;
         }
 

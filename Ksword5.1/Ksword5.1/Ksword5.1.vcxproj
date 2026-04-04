@@ -199,6 +199,7 @@
     <ClCompile Include="StartupDock\StartupDock.Tasks.cpp" />
     <ClCompile Include="UI\CodeEditorWidget.cpp" />
     <ClCompile Include="UI\HexEditorWidget.cpp" />
+    <ClCompile Include="UI\HexEditorWidget.Selection.cpp" />
     <ClCompile Include="UI\PerformanceNavCard.cpp" />
     <ClCompile Include="UI\UIBaseFunction.cpp" />
     <ClCompile Include="WelcomeDock\WelcomeDock.cpp" />

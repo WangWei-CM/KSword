@@ -1,6 +1,7 @@
 #include "NetworkDock.InternalHelpers.h"
 
 #include "../UI/HexEditorWidget.h"
+#include "../theme.h"
 
 #include <QDateTime>
 #include <QLabel>
@@ -47,6 +48,73 @@ namespace network_dock_detail
             return QChar('.');
         }
 
+        // buildPacketDetailWindowStyle 作用：
+        // - 为“流量监控 -> 报文详情”窗口生成独立主题样式；
+        // - 重点覆盖 QPlainTextEdit/QTabWidget/Page，修复深色模式下白底残留。
+        QString buildPacketDetailWindowStyle()
+        {
+            const QString windowBackground = KswordTheme::SurfaceHex();
+            const QString panelBackground = KswordTheme::IsDarkModeEnabled()
+                ? QStringLiteral("#141414")
+                : QStringLiteral("#F8FAFC");
+            const QString inputBackground = KswordTheme::IsDarkModeEnabled()
+                ? QStringLiteral("#101010")
+                : QStringLiteral("#FFFFFF");
+            const QString borderColor = KswordTheme::BorderHex();
+            const QString textColor = KswordTheme::TextPrimaryHex();
+            const QString secondaryTextColor = KswordTheme::TextSecondaryHex();
+            const QString accentColor = KswordTheme::PrimaryBlueHex;
+
+            return QStringLiteral(
+                "QWidget{"
+                "  background:%1;"
+                "  color:%2;"
+                "}"
+                "QLabel{"
+                "  background:transparent;"
+                "  color:%2;"
+                "}"
+                "QTabWidget::pane{"
+                "  background:%3;"
+                "  border:1px solid %4;"
+                "  border-radius:4px;"
+                "}"
+                "QTabBar::tab{"
+                "  background:%1;"
+                "  color:%5;"
+                "  border:1px solid %4;"
+                "  padding:6px 12px;"
+                "  margin-right:2px;"
+                "  border-top-left-radius:4px;"
+                "  border-top-right-radius:4px;"
+                "}"
+                "QTabBar::tab:selected{"
+                "  background:%3;"
+                "  color:%2;"
+                "  border-bottom-color:%3;"
+                "}"
+                "QPlainTextEdit{"
+                "  background:%6;"
+                "  color:%2;"
+                "  border:1px solid %4;"
+                "  selection-background-color:%7;"
+                "  selection-color:#FFFFFF;"
+                "}"
+                "QScrollBar:vertical,QScrollBar:horizontal{"
+                "  background:%3;"
+                "}"
+                "QScrollBar::handle:vertical,QScrollBar::handle:horizontal{"
+                "  background:%7;"
+                "}")
+                .arg(windowBackground)
+                .arg(textColor)
+                .arg(panelBackground)
+                .arg(borderColor)
+                .arg(secondaryTextColor)
+                .arg(inputBackground)
+                .arg(accentColor);
+        }
+
         // PacketDetailWindow：
         // - 报文详情独立窗口（show 非阻塞，不阻塞主 UI）；
         // - 十六进制区使用纯文本编辑器，支持像文本一样跨行连续选择复制。
@@ -58,8 +126,11 @@ namespace network_dock_detail
             {
                 setAttribute(Qt::WA_DeleteOnClose, true);
                 setWindowFlag(Qt::Window, true);
+                setAttribute(Qt::WA_StyledBackground, true);
+                setAutoFillBackground(true);
                 setWindowTitle(QStringLiteral("报文详情 - #%1").arg(packetRecord.sequenceId));
                 resize(1120, 760);
+                setStyleSheet(buildPacketDetailWindowStyle());
 
                 QVBoxLayout* rootLayout = new QVBoxLayout(this);
                 rootLayout->setContentsMargins(8, 8, 8, 8);
@@ -81,6 +152,8 @@ namespace network_dock_detail
                     .arg(packetRecord.totalPacketSize)
                     .arg(packetRecord.payloadSize));
                 metaLabel->setWordWrap(true);
+                metaLabel->setStyleSheet(QStringLiteral("padding:6px 8px;border:1px solid %1;border-radius:4px;")
+                    .arg(KswordTheme::BorderHex()));
                 rootLayout->addWidget(metaLabel);
 
                 // 可读摘要：先展示“内容预览列同款”的语义化 ASCII 摘要，便于快速判断协议文本。
@@ -88,6 +161,7 @@ namespace network_dock_detail
                 readablePreviewLabel->setText(QStringLiteral("可读ASCII摘要: %1").arg(buildPayloadAsciiPreviewText(packetRecord)));
                 readablePreviewLabel->setWordWrap(true);
                 readablePreviewLabel->setToolTip(QStringLiteral("该摘要优先提取 payload 中可读 ASCII 片段。"));
+                readablePreviewLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
                 rootLayout->addWidget(readablePreviewLabel);
 
                 // 详情页签：把十六进制视图与 ASCII 文本视图分开，提升阅读与复制体验。
@@ -104,6 +178,7 @@ namespace network_dock_detail
                     QStringLiteral("十六进制区域支持 Ctrl+F 异步查找、Ctrl+G 跳转、批量复制与导出。"),
                     hexPage);
                 hexHintLabel->setWordWrap(true);
+                hexHintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
                 hexPageLayout->addWidget(hexHintLabel);
 
                 HexEditorWidget* hexEditorWidget = new HexEditorWidget(hexPage);
@@ -132,6 +207,7 @@ namespace network_dock_detail
 
                 QLabel* asciiHintLabel = new QLabel(QStringLiteral("下方为 payload 的 ASCII 视图（不可打印字节以 '.' 代替）。"), asciiPage);
                 asciiHintLabel->setWordWrap(true);
+                asciiHintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
                 asciiPageLayout->addWidget(asciiHintLabel);
 
                 QPlainTextEdit* asciiTextEditor = new QPlainTextEdit(asciiPage);

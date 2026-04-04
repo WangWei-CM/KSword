@@ -205,6 +205,9 @@
     <ClCompile Include="UI\HexEditorWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\HexEditorWidget.Selection.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\CodeEditorWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
