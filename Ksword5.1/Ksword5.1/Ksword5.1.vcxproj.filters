@@ -232,6 +232,18 @@
     <ClCompile Include="WindowDock\WindowDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="句柄\HandleDock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="句柄\HandleDock.Actions.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="句柄\HandleDock.Native.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="句柄\HandleObjectTypeWorker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="Ksword5.cpp">
@@ -294,6 +306,12 @@
     <QtMoc Include="HardwareDock\HardwareDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <QtMoc Include="句柄\HandleDock.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <ClInclude Include="句柄\HandleObjectTypeWorker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="UI\UI.css\UI_css.h">

@@ -88,8 +88,7 @@ KernelDock::KernelDock(QWidget* parent)
     initializeUi();
     initializeConnections();
 
-    // 首次进入自动刷新，减少用户第一次点击等待。
-    refreshKernelTypeAsync();
+    // “对象类型”页已迁移到句柄模块，这里只保留 NtQuery 页面自动刷新。
     refreshNtQueryAsync();
 
     kLogEvent finishEvent;
@@ -105,7 +104,7 @@ void KernelDock::initializeUi()
     m_tabWidget = new QTabWidget(this);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
-    initializeKernelTypeTab();
+    // 对象类型页已迁移到“句柄”Dock，这里不再创建旧对象类型页。
     initializeNtQueryTab();
 }
 
@@ -235,17 +234,8 @@ void KernelDock::initializeNtQueryTab()
 
 void KernelDock::initializeConnections()
 {
-    connect(m_refreshKernelTypeButton, &QPushButton::clicked, this, [this]() {
-        refreshKernelTypeAsync();
-    });
     connect(m_refreshNtQueryButton, &QPushButton::clicked, this, [this]() {
         refreshNtQueryAsync();
-    });
-    connect(m_kernelTypeFilterEdit, &QLineEdit::textChanged, this, [this](const QString& keywordText) {
-        rebuildKernelTypeTable(keywordText.trimmed());
-    });
-    connect(m_kernelTypeTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
-        showKernelTypeDetailByCurrentRow();
     });
     connect(m_ntQueryTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showNtQueryDetailByCurrentRow();

@@ -1267,6 +1267,7 @@ void MainWindow::initDockWidgets()
     reportStartupProgress(66, QStringLiteral("正在创建辅助页面..."));
     m_windowWidget = new WindowDock(this);
     m_registryWidget = new RegistryDock(this);
+    m_handleWidget = new HandleDock(this);
     m_startupWidget = new StartupDock(this);
     m_logWidget = new LogDockWidget(this);
     m_progressWidget = new ProgressDockWidget(this);
@@ -1311,6 +1312,7 @@ void MainWindow::initDockWidgets()
     m_dockSettings = createDockWidget(m_settingsWidget, "设置");
     m_dockWindow = createDockWidget(m_windowWidget, "窗口");
     m_dockRegistry = createDockWidget(m_registryWidget, "注册表");
+    m_dockHandle = createDockWidget(m_handleWidget, "句柄");
     m_dockStartup = createDockWidget(m_startupWidget, "启动项");
 
     // 创建右侧和底部的基本Widgets
@@ -1346,7 +1348,7 @@ void MainWindow::initDockWidgets()
     QList<ads::CDockWidget*> allDocks = {
         m_dockWelcome, m_dockProcess, m_dockNetwork, m_dockMemory,
         m_dockFile, m_dockDriver, m_dockKernel, m_dockMonitorTab, m_dockHardware,
-        m_dockPrivilege, m_dockSettings, m_dockWindow, m_dockRegistry, m_dockStartup,
+        m_dockPrivilege, m_dockSettings, m_dockWindow, m_dockRegistry, m_dockHandle, m_dockStartup,
         m_dockCurrentOp, m_dockLog, m_dockImmediate, m_dockMonitor
     };
 
@@ -1380,6 +1382,7 @@ void MainWindow::setupDockLayout()
     m_pDockManager->addDockWidgetTabToArea(m_dockSettings, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockWindow, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockRegistry, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockHandle, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockStartup, leftDockArea);
 
     // 方法2: 或者使用addDockWidget并指定CenterDockWidgetArea
@@ -1399,6 +1402,26 @@ void MainWindow::setupDockLayout()
     m_dockWelcome->raise();
     m_dockCurrentOp->raise();
     m_dockMonitor->raise();
+}
+
+void MainWindow::focusHandleDockByPid(const quint32 pid)
+{
+    // 跳转入口日志：记录来源请求 PID，便于串联调用链审计。
+    kLogEvent focusHandleEvent;
+    info << focusHandleEvent
+        << "[MainWindow] focusHandleDockByPid: pid="
+        << pid
+        << eol;
+
+    if (m_handleWidget != nullptr)
+    {
+        m_handleWidget->focusProcessId(static_cast<std::uint32_t>(pid), true);
+    }
+    if (m_dockHandle != nullptr)
+    {
+        m_dockHandle->raise();
+        m_dockHandle->setVisible(true);
+    }
 }
 
 void MainWindow::initAppearanceSettings()
@@ -1474,6 +1497,11 @@ void MainWindow::initAppearanceSettings()
         {
             targetDock = m_dockRegistry;
             targetName = QStringLiteral("注册表");
+        }
+        else if (normalizedKey == QStringLiteral("handle"))
+        {
+            targetDock = m_dockHandle;
+            targetName = QStringLiteral("句柄");
         }
         else if (normalizedKey == QStringLiteral("startup"))
         {

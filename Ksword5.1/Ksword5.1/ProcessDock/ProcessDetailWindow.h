@@ -61,6 +61,11 @@ signals:
     // - 由 ProcessDock 统一接收并打开对应进程详情窗口。
     void requestOpenProcessByPid(std::uint32_t pid);
 
+    // requestOpenHandleDockByPid 作用：
+    // - 在“跳转句柄”按钮点击时发出；
+    // - 由 ProcessDock 转发给 MainWindow 打开句柄 Dock 并按 PID 过滤。
+    void requestOpenHandleDockByPid(std::uint32_t pid);
+
 private:
     // ModuleRefreshResult：模块页后台刷新结果数据结构。
     struct ModuleRefreshResult
@@ -214,6 +219,7 @@ private:
     QPushButton* m_copyCommandButton = nullptr; // 复制命令行按钮。
     QLabel* m_parentIconLabel = nullptr;       // 父进程图标（20px）。
     QLabel* m_parentInfoLabel = nullptr;       // 父进程名 + PID。
+    QPushButton* m_openHandleDockButton = nullptr; // 跳转到句柄 Dock 按钮（按当前 PID 过滤）。
     QPushButton* m_gotoParentButton = nullptr; // 转到父进程按钮。
 
     QLabel* m_detailStartTimeValue = nullptr;  // 启动时间值。

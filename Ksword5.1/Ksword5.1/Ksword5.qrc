@@ -30,6 +30,12 @@
         <file alias="process_priority.svg">Resource/Icon/system/settings_2_line.svg</file>
         <file alias="process_details.svg">Resource/Icon/file/file_info_line.svg</file>
 
+        <!-- 句柄面板图标资源 -->
+        <file alias="handle_refresh.svg">Resource/Icon/system/refresh_3_line.svg</file>
+        <file alias="handle_copy.svg">Resource/Icon/file/copy_line.svg</file>
+        <file alias="handle_copy_row.svg">Resource/Icon/file/clipboard_line.svg</file>
+        <file alias="handle_close.svg">Resource/Icon/system/close_circle_line.svg</file>
+
         <!-- 文件模块新增导航与检索图标 -->
         <file alias="file_nav_back.svg">Resource/Icon/arrow/left_line.svg</file>
         <file alias="file_nav_forward.svg">Resource/Icon/arrow/right_line.svg</file>
