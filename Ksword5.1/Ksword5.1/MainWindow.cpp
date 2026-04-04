@@ -8,6 +8,8 @@
 #include <QGuiApplication>
 #include <QWidget>
 #include <QHBoxLayout>
+#include <QVBoxLayout>
+#include <QLabel>
 #include <QPainter>
 #include <QPalette>
 #include <QPointF>
@@ -46,6 +48,10 @@ namespace
     // - 便于主题切换时精准替换旧 Tooltip 样式，避免重复拼接。
     constexpr const char* kTooltipStyleBeginMarker = "/*KSWORD_TOOLTIP_STYLE_BEGIN*/";
     constexpr const char* kTooltipStyleEndMarker = "/*KSWORD_TOOLTIP_STYLE_END*/";
+    // kDeferredDockLoadIntervalMs 作用：
+    // - 控制“显示后补载”节流间隔；
+    // - 避免 0ms 连续补载把 UI 线程再次打满。
+    constexpr int kDeferredDockLoadIntervalMs = 60;
 
     // buildPrivilegeButtonStyle 作用：
     // - 按“当前是否具备权限”生成按钮样式；
@@ -246,6 +252,8 @@ MainWindow::MainWindow(
     // - 权限按钮；
     // - Dock 内容；
     // - 外观系统。
+    // 提前读取一次外观配置，便于在 initDockWidgets 阶段确定启动默认页签的预加载策略。
+    m_currentAppearanceSettings = ks::settings::loadAppearanceSettings();
     reportStartupProgress(32, QStringLiteral("正在初始化主窗口框架..."));
 
     // Dock 全局配置：
@@ -383,6 +391,27 @@ void MainWindow::resizeEvent(QResizeEvent* event)
 {
     QMainWindow::resizeEvent(event);
     rebuildWindowBackgroundBrush();
+}
+
+void MainWindow::showEvent(QShowEvent* event)
+{
+    QMainWindow::showEvent(event);
+    if (m_deferredDockInitializationStarted)
+    {
+        return;
+    }
+
+    m_deferredDockInitializationStarted = true;
+    if (m_deferredDockLoadQueue.empty())
+    {
+        return;
+    }
+
+    reportStartupProgress(94, QStringLiteral("主窗口已显示，继续补载剩余页面..."));
+    QTimer::singleShot(kDeferredDockLoadIntervalMs, this, [this]()
+        {
+            initializeNextDeferredDock();
+        });
 }
 
 void MainWindow::initMenus()
@@ -1219,36 +1248,222 @@ bool MainWindow::enableSeDebugPrivilege(std::string& errorTextOut) const
     return true;
 }
 
+QWidget* MainWindow::createDockPlaceholderWidget(const QString& titleText) const
+{
+    QWidget* placeholderWidget = new QWidget();
+    placeholderWidget->setObjectName(QStringLiteral("ksLazyDockPlaceholder_%1").arg(titleText));
+    placeholderWidget->setAutoFillBackground(false);
+    placeholderWidget->setAttribute(Qt::WA_StyledBackground, false);
+    placeholderWidget->setStyleSheet(
+        QStringLiteral(
+            "QWidget{"
+            "  background:transparent !important;"
+            "  background-color:transparent !important;"
+            "}"
+            "QLabel{"
+            "  background:transparent !important;"
+            "  background-color:transparent !important;"
+            "}"));
+
+    auto* placeholderLayout = new QVBoxLayout(placeholderWidget);
+    placeholderLayout->setContentsMargins(24, 24, 24, 24);
+    placeholderLayout->setSpacing(8);
+
+    QLabel* titleLabel = new QLabel(QStringLiteral("%1 页面正在延迟初始化...").arg(titleText), placeholderWidget);
+    titleLabel->setStyleSheet(QStringLiteral("font-size:16px;font-weight:700;"));
+    titleLabel->setAlignment(Qt::AlignCenter);
+    placeholderLayout->addStretch(1);
+    placeholderLayout->addWidget(titleLabel);
+
+    QLabel* hintLabel = new QLabel(QStringLiteral("主窗口已优先完成首屏加载，剩余页面将在显示后自动补载。"), placeholderWidget);
+    hintLabel->setWordWrap(true);
+    hintLabel->setAlignment(Qt::AlignCenter);
+    hintLabel->setStyleSheet(QStringLiteral("font-size:12px;color:%1;").arg(KswordTheme::TextSecondaryHex()));
+    placeholderLayout->addWidget(hintLabel);
+    placeholderLayout->addStretch(1);
+    return placeholderWidget;
+}
+
+void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
+{
+    if (dockWidget == nullptr)
+    {
+        return;
+    }
+    if (dockWidget->property("ks_lazy_initialized").toBool())
+    {
+        return;
+    }
+
+    const QString dockKey = dockWidget->property("ks_lazy_key").toString().trimmed().toLower();
+    QWidget* realWidget = nullptr;
+
+    if (dockKey == QStringLiteral("process"))
+    {
+        if (m_processWidget == nullptr) { m_processWidget = new ProcessDock(this); }
+        realWidget = m_processWidget;
+    }
+    else if (dockKey == QStringLiteral("network"))
+    {
+        if (m_networkWidget == nullptr) { m_networkWidget = new NetworkDock(this); }
+        realWidget = m_networkWidget;
+    }
+    else if (dockKey == QStringLiteral("memory"))
+    {
+        if (m_memoryWidget == nullptr) { m_memoryWidget = new MemoryDock(this); }
+        realWidget = m_memoryWidget;
+    }
+    else if (dockKey == QStringLiteral("file"))
+    {
+        if (m_fileWidget == nullptr) { m_fileWidget = new FileDock(this); }
+        realWidget = m_fileWidget;
+    }
+    else if (dockKey == QStringLiteral("driver"))
+    {
+        if (m_driverWidget == nullptr) { m_driverWidget = new DriverDock(this); }
+        realWidget = m_driverWidget;
+    }
+    else if (dockKey == QStringLiteral("kernel"))
+    {
+        if (m_kernelWidget == nullptr) { m_kernelWidget = new KernelDock(this); }
+        realWidget = m_kernelWidget;
+    }
+    else if (dockKey == QStringLiteral("monitor"))
+    {
+        if (m_monitorWidget == nullptr) { m_monitorWidget = new MonitorDock(this); }
+        realWidget = m_monitorWidget;
+    }
+    else if (dockKey == QStringLiteral("hardware"))
+    {
+        if (m_hardwareWidget == nullptr) { m_hardwareWidget = new HardwareDock(this); }
+        realWidget = m_hardwareWidget;
+    }
+    else if (dockKey == QStringLiteral("privilege"))
+    {
+        if (m_privilegeWidget == nullptr) { m_privilegeWidget = new PrivilegeDock(this); }
+        realWidget = m_privilegeWidget;
+    }
+    else if (dockKey == QStringLiteral("settings"))
+    {
+        if (m_settingsWidget == nullptr)
+        {
+            m_settingsWidget = new SettingsDock(this);
+            connect(
+                m_settingsWidget,
+                &SettingsDock::appearanceSettingsChanged,
+                this,
+                [this](const ks::settings::AppearanceSettings& settings) {
+                    applyAppearanceSettings(settings, QStringLiteral("设置页变更"));
+                });
+        }
+        realWidget = m_settingsWidget;
+    }
+    else if (dockKey == QStringLiteral("window"))
+    {
+        if (m_windowWidget == nullptr) { m_windowWidget = new WindowDock(this); }
+        realWidget = m_windowWidget;
+    }
+    else if (dockKey == QStringLiteral("registry"))
+    {
+        if (m_registryWidget == nullptr) { m_registryWidget = new RegistryDock(this); }
+        realWidget = m_registryWidget;
+    }
+    else if (dockKey == QStringLiteral("handle"))
+    {
+        if (m_handleWidget == nullptr) { m_handleWidget = new HandleDock(this); }
+        realWidget = m_handleWidget;
+    }
+    else if (dockKey == QStringLiteral("startup"))
+    {
+        if (m_startupWidget == nullptr) { m_startupWidget = new StartupDock(this); }
+        realWidget = m_startupWidget;
+    }
+
+    if (realWidget == nullptr)
+    {
+        return;
+    }
+
+    realWidget->setAutoFillBackground(false);
+    realWidget->setAttribute(Qt::WA_StyledBackground, false);
+    realWidget->setStyleSheet(
+        realWidget->styleSheet()
+        + QStringLiteral(
+            "QWidget{"
+            "  background:transparent;"
+            "  background-color:transparent;"
+            "}"));
+
+    QWidget* oldWidget = dockWidget->takeWidget();
+    dockWidget->setWidget(realWidget);
+    dockWidget->setProperty("ks_lazy_initialized", true);
+    if (oldWidget != nullptr)
+    {
+        oldWidget->deleteLater();
+    }
+
+    if (realWidget == m_processWidget)
+    {
+        m_processWidget->refreshThemeVisuals();
+    }
+
+    // 延迟补载时只做局部刷新，不再全局重算外观，避免每个 Dock 都触发一次大范围重绘。
+    realWidget->setPalette(palette());
+    realWidget->update();
+    dockWidget->update();
+}
+
+void MainWindow::initializeNextDeferredDock()
+{
+    while (m_nextDeferredDockIndex < m_deferredDockLoadQueue.size())
+    {
+        ads::CDockWidget* dockWidget = m_deferredDockLoadQueue[m_nextDeferredDockIndex++];
+        if (dockWidget == nullptr || dockWidget->property("ks_lazy_initialized").toBool())
+        {
+            continue;
+        }
+
+        ensureDockContentInitialized(dockWidget);
+        QTimer::singleShot(kDeferredDockLoadIntervalMs, this, [this]()
+            {
+                initializeNextDeferredDock();
+            });
+        return;
+    }
+
+    reportStartupProgress(98, QStringLiteral("剩余页面补载完成。"));
+}
+
 void MainWindow::initDockWidgets()
 {
-    // 第一批轻量页面：先创建基础页签，尽快推进启动进度。
-    reportStartupProgress(50, QStringLiteral("正在创建基础页面..."));
+    const QString startupDockKey = m_currentAppearanceSettings.startupDefaultTabKey.trimmed().toLower();
+    const auto shouldEagerLoad = [&startupDockKey](const QString& dockKey) -> bool
+        {
+            return dockKey == QStringLiteral("welcome") ||
+                dockKey == QStringLiteral("settings") ||
+                dockKey == startupDockKey;
+        };
+
+    // 首屏优先：欢迎页、设置页、启动默认页签，以及右侧/底部辅助组件。
+    reportStartupProgress(50, QStringLiteral("正在创建首屏页面..."));
     m_welcomeWidget = new WelcomeDock(this);
-    m_processWidget = new ProcessDock(this);
-    m_networkWidget = new NetworkDock(this);
-    m_memoryWidget = new MemoryDock(this);
-
-    // 第二批核心页面：文件/驱动/内核通常更重，单独给出阶段提示。
-    reportStartupProgress(56, QStringLiteral("正在创建核心分析页面..."));
-    m_fileWidget = new FileDock(this);
-    m_driverWidget = new DriverDock(this);
-    m_kernelWidget = new KernelDock(this);
-    m_monitorWidget = new MonitorDock(this);
-
-    // 第三批功能页面：监视面板、硬件与设置页。
-    reportStartupProgress(62, QStringLiteral("正在创建监控与设置页面..."));
-    // 监视面板使用独立组件承载四宫格性能图，避免与 WMI/ETW 页面耦合。
-    m_monitorPanelWidget = new MonitorPanelWidget(this);
-    m_hardwareWidget = new HardwareDock(this);
-    m_privilegeWidget = new PrivilegeDock(this);
+    if (shouldEagerLoad(QStringLiteral("process"))) { m_processWidget = new ProcessDock(this); }
+    if (shouldEagerLoad(QStringLiteral("network"))) { m_networkWidget = new NetworkDock(this); }
+    if (shouldEagerLoad(QStringLiteral("memory"))) { m_memoryWidget = new MemoryDock(this); }
+    if (shouldEagerLoad(QStringLiteral("file"))) { m_fileWidget = new FileDock(this); }
+    if (shouldEagerLoad(QStringLiteral("driver"))) { m_driverWidget = new DriverDock(this); }
+    if (shouldEagerLoad(QStringLiteral("kernel"))) { m_kernelWidget = new KernelDock(this); }
+    if (shouldEagerLoad(QStringLiteral("monitor"))) { m_monitorWidget = new MonitorDock(this); }
+    if (shouldEagerLoad(QStringLiteral("hardware"))) { m_hardwareWidget = new HardwareDock(this); }
+    if (shouldEagerLoad(QStringLiteral("privilege"))) { m_privilegeWidget = new PrivilegeDock(this); }
     m_settingsWidget = new SettingsDock(this);
+    if (shouldEagerLoad(QStringLiteral("window"))) { m_windowWidget = new WindowDock(this); }
+    if (shouldEagerLoad(QStringLiteral("registry"))) { m_registryWidget = new RegistryDock(this); }
+    if (shouldEagerLoad(QStringLiteral("handle"))) { m_handleWidget = new HandleDock(this); }
+    if (shouldEagerLoad(QStringLiteral("startup"))) { m_startupWidget = new StartupDock(this); }
 
-    // 第四批辅助页面：窗口、注册表、日志、当前操作、即时窗口。
-    reportStartupProgress(66, QStringLiteral("正在创建辅助页面..."));
-    m_windowWidget = new WindowDock(this);
-    m_registryWidget = new RegistryDock(this);
-    m_handleWidget = new HandleDock(this);
-    m_startupWidget = new StartupDock(this);
+    reportStartupProgress(60, QStringLiteral("正在创建辅助组件..."));
+    m_monitorPanelWidget = new MonitorPanelWidget(this);
     m_logWidget = new LogDockWidget(this);
     m_progressWidget = new ProgressDockWidget(this);
     m_immediateEditorWidget = new CodeEditorWidget(this);
@@ -1278,22 +1493,51 @@ void MainWindow::initDockWidgets()
         return dock;
         };
 
-    // 创建所有Dock Widgets
+    auto createLazyDockWidget = [this, &createDockWidget](
+        ads::CDockWidget*& dockOut,
+        QWidget* eagerWidget,
+        const QString& title,
+        const QString& dockKey)
+        {
+            QWidget* dockContentWidget = eagerWidget;
+            if (dockContentWidget == nullptr)
+            {
+                dockContentWidget = createDockPlaceholderWidget(title);
+            }
+
+            dockOut = createDockWidget(dockContentWidget, title);
+            dockOut->setProperty("ks_lazy_key", dockKey);
+            dockOut->setProperty("ks_lazy_initialized", eagerWidget != nullptr);
+            connect(dockOut, &ads::CDockWidget::visibilityChanged, this, [this, dockOut](const bool visible)
+                {
+                    if (visible)
+                    {
+                        ensureDockContentInitialized(dockOut);
+                    }
+                });
+
+            if (eagerWidget == nullptr)
+            {
+                m_deferredDockLoadQueue.push_back(dockOut);
+            }
+        };
+
+    // 创建所有 Dock 壳；重页面若未预加载，则先挂占位页并排入显示后补载队列。
     m_dockWelcome = createDockWidget(m_welcomeWidget, "欢迎");
-    m_dockProcess = createDockWidget(m_processWidget, "进程");
-    m_dockNetwork = createDockWidget(m_networkWidget, "网络");
-    m_dockMemory = createDockWidget(m_memoryWidget, "内存");
-    m_dockFile = createDockWidget(m_fileWidget, "文件");
-    m_dockDriver = createDockWidget(m_driverWidget, "驱动");
-    m_dockKernel = createDockWidget(m_kernelWidget, "内核");
-    m_dockMonitorTab = createDockWidget(m_monitorWidget, "监控");
-    m_dockHardware = createDockWidget(m_hardwareWidget, "硬件");
-    m_dockPrivilege = createDockWidget(m_privilegeWidget, "权限");
+    createLazyDockWidget(m_dockProcess, m_processWidget, "进程", QStringLiteral("process"));
+    createLazyDockWidget(m_dockNetwork, m_networkWidget, "网络", QStringLiteral("network"));
+    createLazyDockWidget(m_dockMemory, m_memoryWidget, "内存", QStringLiteral("memory"));
+    createLazyDockWidget(m_dockFile, m_fileWidget, "文件", QStringLiteral("file"));
+    createLazyDockWidget(m_dockDriver, m_driverWidget, "驱动", QStringLiteral("driver"));
+    createLazyDockWidget(m_dockKernel, m_kernelWidget, "内核", QStringLiteral("kernel"));
+    createLazyDockWidget(m_dockMonitorTab, m_monitorWidget, "监控", QStringLiteral("monitor"));
+    createLazyDockWidget(m_dockHardware, m_hardwareWidget, "硬件", QStringLiteral("hardware"));
+    createLazyDockWidget(m_dockPrivilege, m_privilegeWidget, "权限", QStringLiteral("privilege"));
     m_dockSettings = createDockWidget(m_settingsWidget, "设置");
-    m_dockWindow = createDockWidget(m_windowWidget, "窗口");
-    m_dockRegistry = createDockWidget(m_registryWidget, "注册表");
-    m_dockHandle = createDockWidget(m_handleWidget, "句柄");
-    m_dockStartup = createDockWidget(m_startupWidget, "启动项");
+    createLazyDockWidget(m_dockWindow, m_windowWidget, "窗口", QStringLiteral("window"));
+    createLazyDockWidget(m_dockRegistry, m_registryWidget, "注册表", QStringLiteral("registry"));
+    createLazyDockWidget(m_dockHandle, m_handleWidget, "句柄", QStringLiteral("handle"));
+    createLazyDockWidget(m_dockStartup, m_startupWidget, "启动项", QStringLiteral("startup"));
 
     // 创建右侧和底部的基本Widgets
     m_dockCurrentOp = createDockWidget(m_progressWidget, "当前操作");
@@ -1382,6 +1626,10 @@ void MainWindow::focusHandleDockByPid(const quint32 pid)
         << pid
         << eol;
 
+    if (m_dockHandle != nullptr)
+    {
+        ensureDockContentInitialized(m_dockHandle);
+    }
     if (m_handleWidget != nullptr)
     {
         m_handleWidget->focusProcessId(static_cast<std::uint32_t>(pid), true);
@@ -1402,6 +1650,10 @@ void MainWindow::openProcessDetailByPid(const quint32 pid)
         << pid
         << eol;
 
+    if (m_dockProcess != nullptr)
+    {
+        ensureDockContentInitialized(m_dockProcess);
+    }
     if (m_processWidget != nullptr)
     {
         m_processWidget->requestOpenProcessDetailByPid(static_cast<std::uint32_t>(pid));
@@ -1511,6 +1763,7 @@ void MainWindow::initAppearanceSettings()
 
         if (targetDock != nullptr)
         {
+            ensureDockContentInitialized(targetDock);
             targetDock->raise();
             kLogEvent startupDockEvent;
             info << startupDockEvent

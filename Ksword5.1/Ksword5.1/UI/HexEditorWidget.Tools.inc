@@ -441,29 +441,39 @@ void HexEditorWidget::selectRangeByOffset(
         return;
     }
 
+    const bool oldRangeValid = m_selectionRangeValid;
+    const std::uint64_t oldStartOffset = m_selectionRangeStartOffset;
+    const std::uint64_t oldEndOffset = m_selectionRangeEndOffset;
+
     m_hexTable->clearSelection();
 
     bool firstCell = true;
+    std::uint64_t newEndOffset = offset;
     for (int index = 0; index < length; ++index)
     {
+        // currentOffset：当前循环正在处理的目标字节偏移。
         const std::uint64_t currentOffset = offset + static_cast<std::uint64_t>(index);
+        // row：当前字节在表格中的行号输出参数。
         int row = 0;
+        // column：当前字节在表格中的列号输出参数（十六进制列）。
         int column = 0;
         if (!offsetToRowColumn(currentOffset, row, column))
         {
             break;
         }
 
+        newEndOffset = currentOffset;
+        // item：当前偏移对应的字节单元格，用于设置可视选中状态。
         QTableWidgetItem* item = m_hexTable->item(row, column);
-        if (item == nullptr)
+        if (item != nullptr)
         {
-            continue;
+            // 显式设置为选中态，确保拖拽框选时始终能看到蓝色高亮。
+            item->setSelected(true);
         }
-
-        item->setSelected(true);
         if (firstCell)
         {
-            m_hexTable->setCurrentCell(row, column);
+            // 当前单元格仅用于焦点/滚动定位，不应清空已构建的选区。
+            m_hexTable->setCurrentCell(row, column, QItemSelectionModel::NoUpdate);
             if (scrollToCenter)
             {
                 m_hexTable->scrollToItem(item, QAbstractItemView::PositionAtCenter);
@@ -471,6 +481,19 @@ void HexEditorWidget::selectRangeByOffset(
             firstCell = false;
         }
     }
+
+    m_selectionRangeValid = true;
+    m_selectionRangeStartOffset = offset;
+    m_selectionRangeEndOffset = newEndOffset;
+    updateSelectionHighlightRange(
+        oldRangeValid,
+        oldStartOffset,
+        oldEndOffset,
+        m_selectionRangeValid,
+        m_selectionRangeStartOffset,
+        m_selectionRangeEndOffset);
+    // 强制刷新视口，避免某些样式/平台下选区高亮延迟显示。
+    m_hexTable->viewport()->update();
 
     // 记录锚点，供 Shift + 鼠标继续扩展文本式选区。
     m_linearSelectAnchorOffset = offset;
@@ -492,29 +515,35 @@ void HexEditorWidget::selectLinearRange(
     const std::uint64_t safeCurrentOffset = std::min(currentOffset, maxOffset);
     const std::uint64_t rangeStartOffset = std::min(safeAnchorOffset, safeCurrentOffset);
     const std::uint64_t rangeEndOffset = std::max(safeAnchorOffset, safeCurrentOffset);
-    const int startRowIndex = static_cast<int>(rangeStartOffset / static_cast<std::uint64_t>(m_bytesPerRow));
-    const int endRowIndex = static_cast<int>(rangeEndOffset / static_cast<std::uint64_t>(m_bytesPerRow));
+    const bool oldRangeValid = m_selectionRangeValid;
+    const std::uint64_t oldStartOffset = m_selectionRangeStartOffset;
+    const std::uint64_t oldEndOffset = m_selectionRangeEndOffset;
 
     m_hexTable->clearSelection();
 
     for (std::uint64_t byteOffset = rangeStartOffset; byteOffset <= rangeEndOffset; ++byteOffset)
     {
+        // rowIndex：当前字节偏移映射后的行索引。
         int rowIndex = 0;
+        // columnIndex：当前字节偏移映射后的十六进制列索引。
         int columnIndex = 0;
         if (!offsetToRowColumn(byteOffset, rowIndex, columnIndex))
         {
             continue;
         }
 
+        // byteItem：当前偏移对应的字节单元格，负责展示选中高亮。
         QTableWidgetItem* byteItem = m_hexTable->item(rowIndex, columnIndex);
         if (byteItem != nullptr)
         {
+            // 拖拽路径上的所有字节都设置为选中态，保证视觉高亮连续可见。
             byteItem->setSelected(true);
         }
 
         if (byteOffset == safeCurrentOffset)
         {
-            m_hexTable->setCurrentCell(rowIndex, columnIndex);
+            // 当前单元格仅用于光标位置，不应触发 ClearAndSelect 覆盖整段选区。
+            m_hexTable->setCurrentCell(rowIndex, columnIndex, QItemSelectionModel::NoUpdate);
             if (scrollToCurrent && byteItem != nullptr)
             {
                 m_hexTable->scrollToItem(byteItem, QAbstractItemView::EnsureVisible);
@@ -522,18 +551,72 @@ void HexEditorWidget::selectLinearRange(
         }
     }
 
-    // 同步选中 ASCII 列对应行，确保从 ASCII 区域拖拽时有可见反馈。
-    for (int rowIndex = startRowIndex; rowIndex <= endRowIndex; ++rowIndex)
-    {
-        QTableWidgetItem* asciiItem = m_hexTable->item(rowIndex, m_bytesPerRow + 1);
-        if (asciiItem != nullptr)
-        {
-            asciiItem->setSelected(true);
-        }
-    }
+    m_selectionRangeValid = true;
+    m_selectionRangeStartOffset = rangeStartOffset;
+    m_selectionRangeEndOffset = rangeEndOffset;
+    updateSelectionHighlightRange(
+        oldRangeValid,
+        oldStartOffset,
+        oldEndOffset,
+        m_selectionRangeValid,
+        m_selectionRangeStartOffset,
+        m_selectionRangeEndOffset);
+    // 强制刷新视口，避免鼠标拖拽时高亮状态不立即重绘。
+    m_hexTable->viewport()->update();
 
     m_linearSelectAnchorOffset = safeAnchorOffset;
     m_linearSelectAnchorValid = true;
+}
+
+void HexEditorWidget::updateSelectionHighlightRange(
+    const bool oldRangeValid,
+    const std::uint64_t oldStartOffset,
+    const std::uint64_t oldEndOffset,
+    const bool newRangeValid,
+    const std::uint64_t newStartOffset,
+    const std::uint64_t newEndOffset)
+{
+    if (m_hexTable == nullptr || m_buffer.isEmpty())
+    {
+        return;
+    }
+
+    bool hasAnyRange = false;
+    std::uint64_t affectedStartOffset = 0;
+    std::uint64_t affectedEndOffset = 0;
+
+    if (oldRangeValid)
+    {
+        hasAnyRange = true;
+        affectedStartOffset = oldStartOffset;
+        affectedEndOffset = oldEndOffset;
+    }
+    if (newRangeValid)
+    {
+        if (!hasAnyRange)
+        {
+            hasAnyRange = true;
+            affectedStartOffset = newStartOffset;
+            affectedEndOffset = newEndOffset;
+        }
+        else
+        {
+            affectedStartOffset = std::min(affectedStartOffset, newStartOffset);
+            affectedEndOffset = std::max(affectedEndOffset, newEndOffset);
+        }
+    }
+
+    if (!hasAnyRange)
+    {
+        return;
+    }
+
+    const int startRowIndex = static_cast<int>(affectedStartOffset / static_cast<std::uint64_t>(m_bytesPerRow));
+    const int endRowIndex = static_cast<int>(affectedEndOffset / static_cast<std::uint64_t>(m_bytesPerRow));
+    for (int rowIndex = startRowIndex; rowIndex <= endRowIndex; ++rowIndex)
+    {
+        updateRowHighlightByRow(rowIndex);
+    }
 }
 
 bool HexEditorWidget::rowColumnToOffset(
@@ -657,6 +740,21 @@ bool HexEditorWidget::viewportPosToOffset(
 std::vector<std::uint64_t> HexEditorWidget::collectSelectedOffsets() const
 {
     std::vector<std::uint64_t> offsetList;
+    if (m_selectionRangeValid)
+    {
+        const std::uint64_t rangeStartOffset = std::min(m_selectionRangeStartOffset, m_selectionRangeEndOffset);
+        const std::uint64_t rangeEndOffset = std::max(m_selectionRangeStartOffset, m_selectionRangeEndOffset);
+        for (std::uint64_t offset = rangeStartOffset; offset <= rangeEndOffset; ++offset)
+        {
+            if (offset >= static_cast<std::uint64_t>(m_buffer.size()))
+            {
+                break;
+            }
+            offsetList.push_back(offset);
+        }
+        return offsetList;
+    }
+
     if (m_hexTable == nullptr)
     {
         return offsetList;

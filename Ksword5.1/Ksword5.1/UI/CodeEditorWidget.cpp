@@ -37,15 +37,26 @@
 namespace
 {
     // buildToolButtonStyle：
-    // - 统一工具按钮样式，hover 始终使用主题蓝。
+    // - 统一工具按钮样式，去掉边框让图标本体更突出；
+    // - hover/pressed 仅保留轻量底色反馈，避免 SVG 被边框吃掉。
     QString buildToolButtonStyle()
     {
         return QStringLiteral(
-            "QToolButton{border:1px solid %1;border-radius:3px;padding:2px 6px;background:%2;color:%3;}"
-            "QToolButton:hover{border:1px solid %4;background:%4;color:#FFFFFF;}"
-            "QToolButton:pressed{border:1px solid %5;background:%5;color:#FFFFFF;}")
-            .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
+            "QToolButton{"
+            "  border:none;"
+            "  border-radius:4px;"
+            "  padding:1px;"
+            "  background:transparent;"
+            "  color:%1;"
+            "}"
+            "QToolButton:hover{"
+            "  background:%2;"
+            "  color:#FFFFFF;"
+            "}"
+            "QToolButton:pressed{"
+            "  background:%3;"
+            "  color:#FFFFFF;"
+            "}")
             .arg(KswordTheme::TextPrimaryHex())
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBluePressedHex);
@@ -67,7 +78,7 @@ namespace
     // buildToolbarSvgIcon：
     // - 从 SVG 资源生成工具栏图标；
     // - 统一用主题蓝着色，避免深色模式下图标发黑看不清。
-    QIcon buildToolbarSvgIcon(const QString& resourcePath, const QSize& iconSize = QSize(16, 16))
+    QIcon buildToolbarSvgIcon(const QString& resourcePath, const QSize& iconSize = QSize(22, 22))
     {
         QSvgRenderer renderer(resourcePath);
         if (!renderer.isValid())
@@ -524,8 +535,9 @@ void CodeEditorWidget::initializeUi()
         {
             QToolButton* button = new QToolButton(m_toolbarWidget);
             button->setIcon(buildToolbarSvgIcon(iconPath));
-            button->setIconSize(QSize(16, 16));
+            button->setIconSize(QSize(22, 22));
             button->setToolTip(tip);
+            button->setAutoRaise(true);
             button->setFixedSize(24, 24);
             return button;
         };

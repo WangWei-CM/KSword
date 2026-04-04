@@ -12,6 +12,7 @@
 #include <QDragMoveEvent>
 #include <QResizeEvent>
 #include <QPushButton>
+#include <QShowEvent>
 #include <QTimer>
 #include <QString>
 
@@ -101,6 +102,11 @@ protected:
     // 入参 event：尺寸变化事件对象。
     void resizeEvent(QResizeEvent* event) override;
 
+    // showEvent 作用：
+    // - 主窗口首次显示后再启动延迟页面补载；
+    // - 保证窗口能先出现，再继续补齐剩余 Dock 内容。
+    void showEvent(QShowEvent* event) override;
+
 private:
     void initMenus();
     void initPrivilegeStatusButtons();
@@ -113,6 +119,9 @@ private:
     bool hasTrustedInstallerPrivilege() const;
     bool enableSeDebugPrivilege(std::string& errorTextOut) const;
     void initDockWidgets();
+    QWidget* createDockPlaceholderWidget(const QString& titleText) const;
+    void ensureDockContentInitialized(ads::CDockWidget* dockWidget);
+    void initializeNextDeferredDock();
 
     // reportStartupProgress 作用：
     // - 安全调用启动进度回调；
@@ -226,6 +235,9 @@ private:
     // m_currentAppearanceSettings 作用：缓存当前外观配置（主题/背景图/透明度）。
     ks::settings::AppearanceSettings m_currentAppearanceSettings;
     StartupProgressCallback m_startupProgressCallback; // m_startupProgressCallback：主窗口启动阶段进度回调。
+    bool m_deferredDockInitializationStarted = false; // m_deferredDockInitializationStarted：是否已启动显示后补载流程。
+    std::size_t m_nextDeferredDockIndex = 0;          // m_nextDeferredDockIndex：下一个待补载 Dock 队列索引。
+    std::vector<ads::CDockWidget*> m_deferredDockLoadQueue; // m_deferredDockLoadQueue：显示后依次补载的 Dock 队列。
 };
 
 #endif // MAINWINDOW_H

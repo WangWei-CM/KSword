@@ -1,5 +1,6 @@
 #include "NetworkDock.InternalCommon.h"
 #include "HttpsProxyService.h"
+#include "../theme.h"
 
 #include <QApplication>
 #include <WinInet.h>
@@ -27,6 +28,73 @@ namespace
         HttpsParsedColumnCount
     };
 
+    // buildHttpsDetailWindowStyle 作用：
+    // - 为 HTTPS 详情窗生成独立主题样式；
+    // - 重点覆盖 QPlainTextEdit/QTabWidget/QLabel，修复深色模式下残留白底。
+    QString buildHttpsDetailWindowStyle()
+    {
+        const QString windowBackground = KswordTheme::SurfaceHex();
+        const QString panelBackground = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#141414")
+            : QStringLiteral("#F8FAFC");
+        const QString inputBackground = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#101010")
+            : QStringLiteral("#FFFFFF");
+        const QString borderColor = KswordTheme::BorderHex();
+        const QString textColor = KswordTheme::TextPrimaryHex();
+        const QString secondaryTextColor = KswordTheme::TextSecondaryHex();
+        const QString accentColor = KswordTheme::PrimaryBlueHex;
+
+        return QStringLiteral(
+            "QWidget{"
+            "  background:%1;"
+            "  color:%2;"
+            "}"
+            "QLabel{"
+            "  background:transparent;"
+            "  color:%2;"
+            "}"
+            "QTabWidget::pane{"
+            "  background:%3;"
+            "  border:1px solid %4;"
+            "  border-radius:4px;"
+            "}"
+            "QTabBar::tab{"
+            "  background:%1;"
+            "  color:%5;"
+            "  border:1px solid %4;"
+            "  padding:6px 12px;"
+            "  margin-right:2px;"
+            "  border-top-left-radius:4px;"
+            "  border-top-right-radius:4px;"
+            "}"
+            "QTabBar::tab:selected{"
+            "  background:%3;"
+            "  color:%2;"
+            "  border-bottom-color:%3;"
+            "}"
+            "QPlainTextEdit{"
+            "  background:%6;"
+            "  color:%2;"
+            "  border:1px solid %4;"
+            "  selection-background-color:%7;"
+            "  selection-color:#FFFFFF;"
+            "}"
+            "QScrollBar:vertical,QScrollBar:horizontal{"
+            "  background:%3;"
+            "}"
+            "QScrollBar::handle:vertical,QScrollBar::handle:horizontal{"
+            "  background:%7;"
+            "}")
+            .arg(windowBackground)
+            .arg(textColor)
+            .arg(panelBackground)
+            .arg(borderColor)
+            .arg(secondaryTextColor)
+            .arg(inputBackground)
+            .arg(accentColor);
+    }
+
     class HttpsParsedDetailWindow final : public QWidget
     {
     public:
@@ -46,12 +114,15 @@ namespace
 
             setAttribute(Qt::WA_DeleteOnClose, true);
             setWindowFlag(Qt::Window, true);
+            setAttribute(Qt::WA_StyledBackground, true);
+            setAutoFillBackground(true);
             setWindowTitle(QStringLiteral("HTTPS详情 - #%1 %2")
                 .arg(parsedEntry.sessionId)
                 .arg(parsedEntry.eventTypeText));
-            resize(860, 720);
-            setMinimumWidth(640);
-            setMaximumWidth(980);
+            resize(1376, 720);
+            setMinimumWidth(1024);
+            setMaximumWidth(1568);
+            setStyleSheet(buildHttpsDetailWindowStyle());
 
             QVBoxLayout* rootLayout = new QVBoxLayout(this);
             rootLayout->setContentsMargins(8, 8, 8, 8);
@@ -62,6 +133,8 @@ namespace
             metaLabel->setTextFormat(Qt::RichText);
             metaLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
             metaLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+            metaLabel->setStyleSheet(QStringLiteral("padding:6px 8px;border:1px solid %1;border-radius:4px;")
+                .arg(KswordTheme::BorderHex()));
             metaLabel->setText(QStringLiteral(
                 "时间: %1<br/>客户端: %2<br/>目标: %3:%4<br/>事件: %5<br/>方法: %6<br/>路径: %7<br/>状态码: %8<br/>TLS: %9<br/>ALPN: %10<br/>SNI: %11<br/>详情: %12")
                 .arg(QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(parsedEntry.timestampMs)).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")))
@@ -88,6 +161,7 @@ namespace
 
             QLabel* hintLabel = new QLabel(QStringLiteral("下方使用项目内现有 HexEditorWidget 展示 HTTPS 事件原始字节。"), hexPage);
             hintLabel->setWordWrap(true);
+            hintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
             hexLayout->addWidget(hintLabel);
 
             HexEditorWidget* hexEditorWidget = new HexEditorWidget(hexPage);
