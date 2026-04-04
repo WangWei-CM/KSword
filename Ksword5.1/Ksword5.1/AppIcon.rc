@@ -1,0 +1,9 @@
+// AppIcon.rc 作用：
+// - 为 Ksword5.1 可执行文件提供原生 Win32 应用程序图标；
+// - Explorer/任务栏/文件属性读取的是这里的资源，而不是 qrc；
+// - 发布脚本会按标记替换下一行的 ICO 路径。
+
+#include <windows.h>
+
+// RELEASE_APP_ICON_FILE_MARKER
+IDI_APP_ICON ICON "Resource/Logo/KswordLogo_PRE.ico"

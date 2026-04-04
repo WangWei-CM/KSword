@@ -26,6 +26,9 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ResourceCompile Include="AppIcon.rc">
+      <Filter>Resource Files</Filter>
+    </ResourceCompile>
     <QtRcc Include="Ksword5.qrc">
       <Filter>Resource Files</Filter>
     </QtRcc>

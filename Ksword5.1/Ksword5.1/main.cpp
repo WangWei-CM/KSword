@@ -5,6 +5,7 @@
 #include <QtCore/QObject>
 #include <QtCore/QTimer>
 #include <QtWidgets/QApplication>
+#include <QtWidgets/QWidget>
 
 #include "Framework/ThemedMessageBox.h"
 
@@ -35,6 +36,11 @@ namespace
     // - 启动画面 Logo 的 qrc 路径；
     // - 启动图直接从程序内嵌资源读取，不依赖磁盘目录结构。
     constexpr auto kMainLogoResourcePath = ":/Image/Resource/Logo/MainLogo.png";
+
+    // kNativeAppIconResourceName 作用：
+    // - 指向 AppIcon.rc 中声明的原生图标资源名；
+    // - 任务栏与标题栏图标统一从这里加载，不依赖 qrc。
+    constexpr wchar_t kNativeAppIconResourceName[] = L"IDI_APP_ICON";
 
     // clampPercent 作用：
     // - 把任意进度值限制在 0~100；
@@ -103,6 +109,70 @@ namespace
         {
             ::TranslateMessage(&message);
             ::DispatchMessageW(&message);
+        }
+    }
+
+    // loadSharedIconFromResource 作用：
+    // - 从可执行文件原生资源中加载指定尺寸的共享图标；
+    // - 成功返回 HICON，失败返回 nullptr。
+    // 入参 widthValue/heightValue：目标图标尺寸。
+    HICON loadSharedIconFromResource(const int widthValue, const int heightValue)
+    {
+        return reinterpret_cast<HICON>(
+            ::LoadImageW(
+                ::GetModuleHandleW(nullptr),
+                kNativeAppIconResourceName,
+                IMAGE_ICON,
+                widthValue,
+                heightValue,
+                LR_DEFAULTCOLOR | LR_SHARED));
+    }
+
+    // applyNativeAppIconToWidget 作用：
+    // - 把 AppIcon.rc 中的图标显式写入 Qt 顶层窗口；
+    // - 修复“exe 已有图标，但任务栏/标题栏仍是默认图标”的问题。
+    // 入参 targetWidget：需要设置图标的顶层 Qt 窗口。
+    void applyNativeAppIconToWidget(QWidget* targetWidget)
+    {
+        if (targetWidget == nullptr)
+        {
+            return;
+        }
+
+        const HWND targetWindowHandle = reinterpret_cast<HWND>(targetWidget->winId());
+        if (targetWindowHandle == nullptr)
+        {
+            return;
+        }
+
+        const int bigIconWidth = ::GetSystemMetrics(SM_CXICON);
+        const int bigIconHeight = ::GetSystemMetrics(SM_CYICON);
+        const int smallIconWidth = ::GetSystemMetrics(SM_CXSMICON);
+        const int smallIconHeight = ::GetSystemMetrics(SM_CYSMICON);
+
+        HICON bigIconHandle = loadSharedIconFromResource(bigIconWidth, bigIconHeight);
+        HICON smallIconHandle = loadSharedIconFromResource(smallIconWidth, smallIconHeight);
+
+        if (bigIconHandle != nullptr)
+        {
+            ::SendMessageW(
+                targetWindowHandle,
+                WM_SETICON,
+                static_cast<WPARAM>(ICON_BIG),
+                reinterpret_cast<LPARAM>(bigIconHandle));
+        }
+        if (smallIconHandle != nullptr)
+        {
+            ::SendMessageW(
+                targetWindowHandle,
+                WM_SETICON,
+                static_cast<WPARAM>(ICON_SMALL),
+                reinterpret_cast<LPARAM>(smallIconHandle));
+            ::SendMessageW(
+                targetWindowHandle,
+                WM_SETICON,
+                static_cast<WPARAM>(ICON_SMALL2),
+                reinterpret_cast<LPARAM>(smallIconHandle));
         }
     }
 
@@ -593,6 +663,7 @@ int main(int argc, char* argv[])
     }
 
     window.show();
+    applyNativeAppIconToWidget(&window);
 
     if (splashReady)
     {

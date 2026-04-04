@@ -18,7 +18,7 @@ namespace
     // kReleaseBuildTimeText 作用：
     // - 欢迎页显示的精确编译时间；
     // - 由发布脚本按注释标记替换。
-    const QString kReleaseBuildTimeText = QStringLiteral("2026-04-04 14:17:49.729 +08:00"); // RELEASE_META_BUILD_TIME_MARKER
+    const QString kReleaseBuildTimeText = QStringLiteral("2026-04-04 14:25:53.649 +08:00"); // RELEASE_META_BUILD_TIME_MARKER
 }
 
 // 获取 Windows 登录头像路径（优先找用户自定义头像，找不到用系统默认）
