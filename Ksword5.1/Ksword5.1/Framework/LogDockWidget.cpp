@@ -231,7 +231,8 @@ void LogDockWidget::initializeUi()
     m_detailCheck->setStyleSheet(blueCheckBoxStyle);
     m_autoScrollCheck->setStyleSheet(blueCheckBoxStyle);
 
-    m_debugCheck->setChecked(true);
+    // Debug 默认关闭：避免日志输出 Dock 首次打开时被调试级别噪声淹没。
+    m_debugCheck->setChecked(false);
     m_infoCheck->setChecked(true);
     m_warnCheck->setChecked(true);
     m_errorCheck->setChecked(true);

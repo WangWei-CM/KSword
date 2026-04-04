@@ -13,8 +13,7 @@
         <file alias="log_cancel_track.svg">Resource/Icon/system/close_line.svg</file>
 
         <!-- 进程面板图标资源 -->
-        <!-- RELEASE_PROCESS_LOGO_FILE_MARKER -->
-        <file alias="process_main.svg">Resource/Logo/KswordLogo_PRE.ico</file>
+        <file alias="process_main.svg">Resource/Icon/system/process_line.svg</file>
         <file alias="process_refresh.svg">Resource/Icon/system/refresh_3_line.svg</file>
         <file alias="process_tree.svg">Resource/Icon/nature/tree_line.svg</file>
         <file alias="process_list.svg">Resource/Icon/system/scrollable_list_line.svg</file>

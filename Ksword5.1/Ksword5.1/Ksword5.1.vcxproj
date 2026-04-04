@@ -130,6 +130,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ResourceCompile Include="AppIcon.rc" />
     <ClCompile Include="DriverDock\DriverDock.cpp" />
     <ClCompile Include="FileDock\FileDock.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.cpp" />

@@ -183,13 +183,13 @@ function Update-NextLineByMarker {
 
 # scriptRootPath 作用：脚本所在目录（项目根目录），用于拼接相对路径。
 $scriptRootPath = Split-Path -Parent $MyInvocation.MyCommand.Path
-# sourceRootPath 作用：Ksword5.1 项目源目录（包含 WelcomeDock / qrc）。
+# sourceRootPath 作用：Ksword5.1 项目源目录（包含 WelcomeDock / qrc / rc）。
 $sourceRootPath = Join-Path $scriptRootPath 'Ksword5.1'
 
 # welcomeDockFilePath 作用：欢迎页源码目标文件。
 $welcomeDockFilePath = Join-Path $sourceRootPath 'WelcomeDock\WelcomeDock.cpp'
-# qrcFilePath 作用：资源清单目标文件（用于替换 process_main 映射）。
-$qrcFilePath = Join-Path $sourceRootPath 'Ksword5.qrc'
+# appIconRcFilePath 作用：原生 Win32 资源脚本文件（用于替换 EXE 图标）。
+$appIconRcFilePath = Join-Path $sourceRootPath 'AppIcon.rc'
 
 Write-Stage "准备更新发布信息。"
 Write-Stage "目标目录：$sourceRootPath"
@@ -208,24 +208,24 @@ $releaseTypeKey = Resolve-ReleaseType -InputText $releaseTypeInputText
 # buildTimeText 作用：记录脚本执行时的精确构建时间文本（含毫秒与时区）。
 $buildTimeText = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff K')
 
-# processLogoRelativePath 作用：根据发布类型选择 process_main 对应 logo 资源路径。
-$processLogoRelativePath = switch ($releaseTypeKey) {
+# appIconRelativePath 作用：根据发布类型选择 EXE 图标对应的 ICO 资源路径。
+$appIconRelativePath = switch ($releaseTypeKey) {
     'normal' { 'Resource/Logo/KswordLogo.ico' }
     'preview' { 'Resource/Logo/KswordLogo_PRE.ico' }
     'dev' { 'Resource/Logo/KswordLogo_DEV.ico' }
     default { throw "内部错误：未知发布类型 $releaseTypeKey" }
 }
 
-# processLogoAbsolutePath 作用：把相对路径映射到项目绝对路径，提前校验资源文件存在性。
-$processLogoAbsolutePath = Join-Path $sourceRootPath $processLogoRelativePath
-if (-not (Test-Path -LiteralPath $processLogoAbsolutePath)) {
-    throw "目标 Logo 文件不存在：$processLogoAbsolutePath"
+# appIconAbsolutePath 作用：把相对路径映射到项目绝对路径，提前校验 ICO 文件存在性。
+$appIconAbsolutePath = Join-Path $sourceRootPath $appIconRelativePath
+if (-not (Test-Path -LiteralPath $appIconAbsolutePath)) {
+    throw "目标应用程序图标文件不存在：$appIconAbsolutePath"
 }
 
 Write-Stage "版本号：$versionInputText"
 Write-Stage "发布类型：$releaseTypeKey"
 Write-Stage "编译时间：$buildTimeText"
-Write-Stage "进程Logo：$processLogoRelativePath"
+Write-Stage "应用程序图标：$appIconRelativePath"
 
 # 1) 更新欢迎页版本号（更大字号显示，文本源位于 WelcomeDock.cpp 标记行）。
 Update-QStringLiteralByMarker `
@@ -239,13 +239,13 @@ Update-QStringLiteralByMarker `
     -Marker 'RELEASE_META_BUILD_TIME_MARKER' `
     -NewValue $buildTimeText
 
-# 3) 更新 process_main 图标映射（按发布类型切换为不同 logo 文件）。
-$processMainAliasLine = "        <file alias=`"process_main.svg`">$processLogoRelativePath</file>"
+# 3) 更新原生 Win32 资源图标（按发布类型切换为不同 ICO 文件）。
+$appIconResourceLine = "IDI_APP_ICON ICON `"$appIconRelativePath`""
 Update-NextLineByMarker `
-    -FilePath $qrcFilePath `
-    -Marker 'RELEASE_PROCESS_LOGO_FILE_MARKER' `
-    -NewLine $processMainAliasLine
+    -FilePath $appIconRcFilePath `
+    -Marker 'RELEASE_APP_ICON_FILE_MARKER' `
+    -NewLine $appIconResourceLine
 
 Write-Stage '发布信息更新完成。'
 Write-Stage "已更新：$welcomeDockFilePath"
-Write-Stage "已更新：$qrcFilePath"
+Write-Stage "已更新：$appIconRcFilePath"
