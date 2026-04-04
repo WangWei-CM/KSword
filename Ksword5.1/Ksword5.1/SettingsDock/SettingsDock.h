@@ -5,6 +5,7 @@
 #include <QWidget>
 
 class QButtonGroup;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QSlider;
@@ -32,7 +33,8 @@ public:
 
 signals:
     // appearanceSettingsChanged 作用：
-    // - 当用户修改设置并保存后通知主窗口立即应用。
+    // - 当用户点击“应用”并保存成功后通知主窗口；
+    // - 主题/背景会立即应用，启动默认页签用于下次启动。
     // 调用方式：内部保存成功后 emit。
     // 入参 settings：最新外观配置。
     void appearanceSettingsChanged(const ks::settings::AppearanceSettings& settings);
@@ -49,7 +51,8 @@ private:
     void initializeAppearanceTab();
 
     // bindAppearanceSignals 作用：
-    // - 绑定外观页所有控件事件到统一保存流程。
+    // - 绑定外观页所有控件事件到“待应用”流程；
+    // - 仅在点击应用按钮后才触发保存与生效。
     // 调用方式：initializeAppearanceTab 末尾调用。
     void bindAppearanceSignals();
 
@@ -69,6 +72,19 @@ private:
     // 调用方式：保存前调用。
     // 返回：由当前 UI 生成的配置结构体。
     ks::settings::AppearanceSettings collectSettingsFromUi() const;
+
+    // markPendingChanges 作用：
+    // - 标记当前 UI 有未应用改动；
+    // - 刷新“应用按钮”可用态与提示文案。
+    // 调用方式：任意设置控件值变化后调用。
+    // 入参 triggerReason：触发原因文本（调试与日志辅助）。
+    void markPendingChanges(const QString& triggerReason);
+
+    // updateApplyButtonState 作用：
+    // - 根据 m_hasPendingChanges 更新应用按钮状态；
+    // - 统一维护“是否有待应用改动”的视觉反馈。
+    // 调用方式：标记待应用后、保存成功后、加载配置后调用。
+    void updateApplyButtonState();
 
     // saveAndEmitFromUi 作用：
     // - 从 UI 采集配置并写入 JSON；
@@ -132,9 +148,18 @@ private:
     // m_backgroundOpacityValueLabel 作用：显示透明度百分比文本。
     QLabel* m_backgroundOpacityValueLabel = nullptr;
 
+    // m_startupDefaultTabCombo 作用：设置“应用启动时默认激活的主标签页”。
+    QComboBox* m_startupDefaultTabCombo = nullptr;
+
+    // m_applySettingsButton 作用：统一提交当前设置改动并触发实际生效。
+    QToolButton* m_applySettingsButton = nullptr;
+
     // m_currentAppearanceSettings 作用：缓存当前有效外观配置。
     ks::settings::AppearanceSettings m_currentAppearanceSettings;
 
     // m_isApplyingUiState 作用：标记“正在回填 UI”，防止触发递归保存。
     bool m_isApplyingUiState = false;
+
+    // m_hasPendingChanges 作用：标记是否存在“未点击应用”的待生效改动。
+    bool m_hasPendingChanges = false;
 };

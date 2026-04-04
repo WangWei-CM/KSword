@@ -164,6 +164,9 @@ private:
     void updateRefreshStateUi(bool refreshing, const QString& stateText);
     void applyAdaptiveColumnWidths();
     void initializeCreateProcessConnections();
+    void focusProcessSearchBox(bool selectAllText);
+    QString currentProcessSearchText() const;
+    bool processRecordMatchesSearch(const ks::process::ProcessRecord& processRecord) const;
 
     // ======== 刷新与渲染 ========
     void requestAsyncRefresh(bool forceRefresh);
@@ -255,6 +258,7 @@ private:
     QComboBox* m_viewModeCombo = nullptr;     // 监视视图/详细视图下拉框。
     QPushButton* m_startButton = nullptr;     // 开始监视按钮。
     QPushButton* m_pauseButton = nullptr;     // 暂停监视按钮。
+    QLineEdit* m_processSearchLineEdit = nullptr; // 进程搜索框；用于按名称/PID/路径等关键词过滤当前列表。
     QLabel* m_refreshLabel = nullptr;         // 刷新间隔标签。
     QSlider* m_refreshSlider = nullptr;       // 刷新间隔滑块（秒）。
     QLabel* m_refreshStateLabel = nullptr;    // 刷新状态标签（明显展示“刷新中/空闲+耗时”）。

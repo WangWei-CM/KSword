@@ -3,7 +3,7 @@
 // ============================================================
 // AppearanceSettings.h
 // 作用：
-// - 定义“外观设置”数据结构（主题模式、背景图路径、透明度）；
+// - 定义“外观设置”数据结构（主题模式、背景图路径、透明度、启动默认页签）；
 // - 定义 JSON 读写与路径解析函数，供 SettingsDock/MainWindow 复用；
 // - 统一默认值，避免多处硬编码。
 // ============================================================
@@ -24,12 +24,14 @@ namespace ks::settings
     // AppearanceSettings：外观设置结构体。
     // themeMode：当前主题策略；
     // backgroundImagePath：背景图路径（可相对可绝对）；
-    // backgroundOpacityPercent：背景图透明度（0~100）。
+    // backgroundOpacityPercent：背景图透明度（0~100）；
+    // startupDefaultTabKey：应用启动时默认激活的主页签 key（如 welcome/process/network）。
     struct AppearanceSettings
     {
         ThemeMode themeMode = ThemeMode::FollowSystem;
         QString backgroundImagePath = QStringLiteral("style/ksword_background.png");
         int backgroundOpacityPercent = 35;
+        QString startupDefaultTabKey = QStringLiteral("welcome");
     };
 
     // themeModeToJsonText 作用：
@@ -86,4 +88,3 @@ namespace ks::settings
     // 返回：true=保存成功；false=保存失败。
     bool saveAppearanceSettings(const AppearanceSettings& settings, QString* errorTextOut = nullptr);
 }
-

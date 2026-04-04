@@ -183,6 +183,7 @@ namespace
         defaultSettings.themeMode = ks::settings::ThemeMode::FollowSystem;
         defaultSettings.backgroundImagePath = QStringLiteral("style/ksword_background.png");
         defaultSettings.backgroundOpacityPercent = 35;
+        defaultSettings.startupDefaultTabKey = QStringLiteral("welcome");
         return defaultSettings;
     }
 }
@@ -283,6 +284,15 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
         .toInt(loadedSettings.backgroundOpacityPercent);
     loadedSettings.backgroundOpacityPercent = clampOpacityPercent(backgroundOpacityPercentValue);
 
+    // startupDefaultTabKeyText 作用：读取启动默认页签字段，缺失或空值时回退 welcome。
+    const QString startupDefaultTabKeyText = rootObject.value(QStringLiteral("startup_default_tab_key"))
+        .toString(loadedSettings.startupDefaultTabKey)
+        .trimmed()
+        .toLower();
+    loadedSettings.startupDefaultTabKey = startupDefaultTabKeyText.isEmpty()
+        ? QStringLiteral("welcome")
+        : startupDefaultTabKeyText;
+
     return loadedSettings;
 }
 
@@ -310,6 +320,11 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
     rootObject.insert(QStringLiteral("theme_mode"), themeModeToJsonText(settings.themeMode));
     rootObject.insert(QStringLiteral("background_image_path"), settings.backgroundImagePath);
     rootObject.insert(QStringLiteral("background_opacity_percent"), clampOpacityPercent(settings.backgroundOpacityPercent));
+    rootObject.insert(
+        QStringLiteral("startup_default_tab_key"),
+        settings.startupDefaultTabKey.trimmed().isEmpty()
+        ? QStringLiteral("welcome")
+        : settings.startupDefaultTabKey.trimmed().toLower());
 
     const QJsonDocument jsonDocument(rootObject);
     const QByteArray jsonBytes = jsonDocument.toJson(QJsonDocument::Indented);

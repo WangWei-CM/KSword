@@ -23,6 +23,7 @@
 #include "Framework.h"
 #include "Framework/LogDockWidget.h"
 #include "Framework/ProgressDockWidget.h"
+#include "Framework/ThemedMessageBox.h"
 #include "UI/CodeEditorWidget.h"
 #include "theme.h"
 #include <windows.h>
@@ -1406,6 +1407,106 @@ void MainWindow::initAppearanceSettings()
     kLogEvent appearanceInitEvent;
     info << appearanceInitEvent << "[MainWindow] 开始初始化外观设置系统。" << eol;
 
+    // raiseStartupDockByKey 作用：
+    // - 按配置 key 激活启动默认主页签；
+    // - key 非法或目标 Dock 不可用时自动回退到欢迎页。
+    const auto raiseStartupDockByKey = [this](const QString& startupDockKey, const QString& triggerReason) {
+        const QString normalizedKey = startupDockKey.trimmed().toLower();
+        ads::CDockWidget* targetDock = nullptr;
+        QString targetName = QStringLiteral("欢迎");
+
+        if (normalizedKey == QStringLiteral("process"))
+        {
+            targetDock = m_dockProcess;
+            targetName = QStringLiteral("进程");
+        }
+        else if (normalizedKey == QStringLiteral("network"))
+        {
+            targetDock = m_dockNetwork;
+            targetName = QStringLiteral("网络");
+        }
+        else if (normalizedKey == QStringLiteral("memory"))
+        {
+            targetDock = m_dockMemory;
+            targetName = QStringLiteral("内存");
+        }
+        else if (normalizedKey == QStringLiteral("file"))
+        {
+            targetDock = m_dockFile;
+            targetName = QStringLiteral("文件");
+        }
+        else if (normalizedKey == QStringLiteral("driver"))
+        {
+            targetDock = m_dockDriver;
+            targetName = QStringLiteral("驱动");
+        }
+        else if (normalizedKey == QStringLiteral("kernel"))
+        {
+            targetDock = m_dockKernel;
+            targetName = QStringLiteral("内核");
+        }
+        else if (normalizedKey == QStringLiteral("monitor"))
+        {
+            targetDock = m_dockMonitorTab;
+            targetName = QStringLiteral("监控");
+        }
+        else if (normalizedKey == QStringLiteral("hardware"))
+        {
+            targetDock = m_dockHardware;
+            targetName = QStringLiteral("硬件");
+        }
+        else if (normalizedKey == QStringLiteral("privilege"))
+        {
+            targetDock = m_dockPrivilege;
+            targetName = QStringLiteral("权限");
+        }
+        else if (normalizedKey == QStringLiteral("settings"))
+        {
+            targetDock = m_dockSettings;
+            targetName = QStringLiteral("设置");
+        }
+        else if (normalizedKey == QStringLiteral("window"))
+        {
+            targetDock = m_dockWindow;
+            targetName = QStringLiteral("窗口");
+        }
+        else if (normalizedKey == QStringLiteral("registry"))
+        {
+            targetDock = m_dockRegistry;
+            targetName = QStringLiteral("注册表");
+        }
+        else if (normalizedKey == QStringLiteral("startup"))
+        {
+            targetDock = m_dockStartup;
+            targetName = QStringLiteral("启动项");
+        }
+        else
+        {
+            targetDock = m_dockWelcome;
+            targetName = QStringLiteral("欢迎");
+        }
+
+        if (targetDock == nullptr)
+        {
+            targetDock = m_dockWelcome;
+            targetName = QStringLiteral("欢迎");
+        }
+
+        if (targetDock != nullptr)
+        {
+            targetDock->raise();
+            kLogEvent startupDockEvent;
+            info << startupDockEvent
+                << "[MainWindow] 已激活启动默认页签, trigger="
+                << triggerReason.toStdString()
+                << ", key="
+                << normalizedKey.toStdString()
+                << ", tab="
+                << targetName.toStdString()
+                << eol;
+        }
+    };
+
     // 启动画面细分：
     // - 先绑定设置页/系统主题变化；
     // - 再真正应用首轮主题样式。
@@ -1441,6 +1542,7 @@ void MainWindow::initAppearanceSettings()
 
     reportStartupProgress(90, QStringLiteral("正在应用主界面主题..."));
     applyAppearanceSettings(m_currentAppearanceSettings, QStringLiteral("初始化加载"));
+    raiseStartupDockByKey(m_currentAppearanceSettings.startupDefaultTabKey, QStringLiteral("初始化加载"));
     info << appearanceInitEvent << "[MainWindow] 外观设置系统初始化完成。" << eol;
 }
 
@@ -1503,6 +1605,11 @@ void MainWindow::applyAppearanceSettings(
     // - 覆盖所有顶层窗口（含浮动 Dock 与后续新建窗口）；
     // - 修复“部分按钮 Tooltip 仍白底”的残留问题。
     applyGlobalTooltipStyleBlock(buildGlobalTooltipStyleBlock(darkModeEnabled));
+
+    // 全局 QMessageBox 主题刷新：
+    // - 深浅色切换后，已打开的消息框也同步改为当前主题；
+    // - 修复深色模式下消息框仍残留白底的问题。
+    ks::ui::RefreshGlobalMessageBoxTheme();
 
     if (menuBar() != nullptr)
     {

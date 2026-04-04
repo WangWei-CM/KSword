@@ -280,6 +280,7 @@ void ProcessDetailWindow::applyThemeStyle()
     // 子页面也强制设置背景，避免 tab 内容区域出现白底。
     const std::vector<QWidget*> tabPageList{
         m_detailTab,
+        m_threadTab,
         m_actionTab,
         m_moduleTab,
         m_tokenTab,
@@ -352,20 +353,23 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget = new QTabWidget(this);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
-    // 创建五个页面并分别初始化。
+    // 创建六个页面并分别初始化。
     m_detailTab = new QWidget(m_tabWidget);
+    m_threadTab = new QWidget(m_tabWidget);
     m_actionTab = new QWidget(m_tabWidget);
     m_moduleTab = new QWidget(m_tabWidget);
     m_tokenTab = new QWidget(m_tabWidget);
     m_pebTab = new QWidget(m_tabWidget);
 
     m_detailTab->setObjectName(QStringLiteral("ProcessDetailTab_Detail"));
+    m_threadTab->setObjectName(QStringLiteral("ProcessDetailTab_Thread"));
     m_actionTab->setObjectName(QStringLiteral("ProcessDetailTab_Action"));
     m_moduleTab->setObjectName(QStringLiteral("ProcessDetailTab_Module"));
     m_tokenTab->setObjectName(QStringLiteral("ProcessDetailTab_Token"));
     m_pebTab->setObjectName(QStringLiteral("ProcessDetailTab_Peb"));
 
     initializeDetailTab();
+    initializeThreadTab();
     initializeActionTab();
     initializeModuleTab();
     initializeTokenTab();
@@ -373,6 +377,7 @@ void ProcessDetailWindow::initializeUi()
 
     // 为 Tab 指定图标与标题文本。
     m_tabWidget->addTab(m_detailTab, QIcon(":/Icon/process_details.svg"), "详细信息");
+    m_tabWidget->addTab(m_threadTab, QIcon(":/Icon/process_tree.svg"), "线程");
     m_tabWidget->addTab(m_actionTab, QIcon(":/Icon/process_priority.svg"), "操作");
     m_tabWidget->addTab(m_moduleTab, QIcon(":/Icon/process_list.svg"), "模块");
     m_tabWidget->addTab(m_tokenTab, QIcon(":/Icon/process_critical.svg"), "令牌");
@@ -483,22 +488,48 @@ void ProcessDetailWindow::initializeDetailTab()
 
     m_detailLayout->addWidget(detailGroup);
 
-    // 线程细节区域：对应开发计划中的线程 ID/状态/优先级/TEB/上下文展示。
-    QGroupBox* threadGroup = new QGroupBox("线程详细信息", m_detailTab);
-    QVBoxLayout* threadLayout = new QVBoxLayout(threadGroup);
-    threadLayout->setContentsMargins(8, 8, 8, 8);
-    threadLayout->setSpacing(6);
+    m_detailLayout->addStretch(1);
 
+    const QString buttonStyle = buildBlueButtonStyle();
+    m_copyPathButton->setStyleSheet(buttonStyle);
+    m_openPathFolderButton->setStyleSheet(buttonStyle);
+    m_copyCommandButton->setStyleSheet(buttonStyle);
+    m_gotoParentButton->setStyleSheet(buttonStyle);
+}
+
+void ProcessDetailWindow::initializeThreadTab()
+{
+    // 线程页初始化日志：把线程枚举与寄存器摘要单独放到独立标签。
+    kLogEvent initThreadTabEvent;
+    info << initThreadTabEvent
+        << "[ProcessDetailWindow] initializeThreadTab: 构建线程信息页面。"
+        << eol;
+
+    m_threadLayout = new QVBoxLayout(m_threadTab);
+    m_threadLayout->setContentsMargins(6, 6, 6, 6);
+    m_threadLayout->setSpacing(8);
+
+    QGroupBox* threadGroup = new QGroupBox("线程枚举与上下文摘要", m_threadTab);
+    QVBoxLayout* threadGroupLayout = new QVBoxLayout(threadGroup);
+    threadGroupLayout->setContentsMargins(8, 8, 8, 8);
+    threadGroupLayout->setSpacing(6);
+
+    // 顶部工具栏：
+    // - 刷新按钮保留明确文字，避免仅靠图标无法分辨“线程刷新”语义；
+    // - 状态标签放在右侧，持续反馈本轮刷新耗时与诊断信息。
     QHBoxLayout* threadTopBarLayout = new QHBoxLayout();
     m_refreshThreadInspectButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), "刷新线程", threadGroup);
-    m_refreshThreadInspectButton->setToolTip("异步刷新线程状态、寄存器摘要与 TEB 地址");
+    m_refreshThreadInspectButton->setToolTip("异步刷新线程枚举、TEB、起始地址与寄存器摘要");
     m_threadInspectStatusLabel = new QLabel("● 尚未刷新", threadGroup);
     m_threadInspectStatusLabel->setStyleSheet(
         QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
     threadTopBarLayout->addWidget(m_refreshThreadInspectButton);
     threadTopBarLayout->addWidget(m_threadInspectStatusLabel, 1);
-    threadLayout->addLayout(threadTopBarLayout);
+    threadGroupLayout->addLayout(threadTopBarLayout);
 
+    // 线程表格：
+    // - 继续沿用原有列定义和刷新逻辑；
+    // - 仅把显示位置从“详细信息页底部”迁移到独立标签。
     m_threadInspectTable = new QTableWidget(threadGroup);
     m_threadInspectTable->setColumnCount(toThreadColumnIndex(ThreadRowColumn::Count));
     m_threadInspectTable->setHorizontalHeaderLabels(ThreadInspectHeaders);
@@ -516,16 +547,11 @@ void ProcessDetailWindow::initializeDetailTab()
     m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::StartAddress), 130);
     m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::TebAddress), 130);
     m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::Affinity), 108);
-    threadLayout->addWidget(m_threadInspectTable, 1);
-    m_detailLayout->addWidget(threadGroup, 1);
+    threadGroupLayout->addWidget(m_threadInspectTable, 1);
 
-    m_detailLayout->addStretch(1);
+    m_threadLayout->addWidget(threadGroup, 1);
 
     const QString buttonStyle = buildBlueButtonStyle();
-    m_copyPathButton->setStyleSheet(buttonStyle);
-    m_openPathFolderButton->setStyleSheet(buttonStyle);
-    m_copyCommandButton->setStyleSheet(buttonStyle);
-    m_gotoParentButton->setStyleSheet(buttonStyle);
     m_refreshThreadInspectButton->setStyleSheet(buttonStyle);
 }
 
@@ -539,39 +565,62 @@ void ProcessDetailWindow::initializeActionTab()
 
     m_actionLayout = new QVBoxLayout(m_actionTab);
     m_actionLayout->setContentsMargins(6, 6, 6, 6);
-    m_actionLayout->setSpacing(8);
+    m_actionLayout->setSpacing(10);
 
-    // 进程控制操作组：与右键菜单能力保持对齐。
-    QGroupBox* processActionGroup = new QGroupBox("进程控制", m_actionTab);
-    QGridLayout* processActionGrid = new QGridLayout(processActionGroup);
-    processActionGrid->setHorizontalSpacing(8);
-    processActionGrid->setVerticalSpacing(8);
+    // buildCompactActionButton 作用：
+    // - 为操作页生成统一尺寸的紧凑按钮；
+    // - 简单语义按钮只保留图标，把含义放到 tooltip，减少“又宽又丑”的占位。
+    const auto buildCompactActionButton =
+        [](const QString& iconPath, const QString& toolTipText, QWidget* parentWidget) -> QPushButton*
+    {
+        QPushButton* actionButton = new QPushButton(QIcon(iconPath), QString(), parentWidget);
+        actionButton->setFixedSize(34, 34);
+        actionButton->setIconSize(QSize(16, 16));
+        actionButton->setToolTip(toolTipText);
+        return actionButton;
+    };
 
-    m_taskKillButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), "Taskkill", processActionGroup);
-    m_taskKillForceButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), "Taskkill /f", processActionGroup);
-    m_terminateProcessButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), "TerminateProcess", processActionGroup);
-    m_terminateThreadsButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), "TerminateThread(全部线程)", processActionGroup);
-    m_suspendProcessButton = new QPushButton(QIcon(":/Icon/process_suspend.svg"), "挂起进程", processActionGroup);
-    m_resumeProcessButton = new QPushButton(QIcon(":/Icon/process_resume.svg"), "恢复进程", processActionGroup);
-    m_setCriticalButton = new QPushButton(QIcon(":/Icon/process_critical.svg"), "设为关键进程", processActionGroup);
-    m_clearCriticalButton = new QPushButton(QIcon(":/Icon/process_uncritical.svg"), "取消关键进程", processActionGroup);
-    m_injectInvalidShellcodeButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), "注入无效shellcode", processActionGroup);
+    // 结束与控制组：
+    // - “结束方案”改为下拉选择，避免四个宽按钮铺满整行；
+    // - 运行控制与关键进程操作改为紧凑图标按钮，保留 tooltip 解释语义。
+    QGroupBox* controlGroup = new QGroupBox("结束与控制", m_actionTab);
+    QGridLayout* controlLayout = new QGridLayout(controlGroup);
+    controlLayout->setHorizontalSpacing(8);
+    controlLayout->setVerticalSpacing(8);
 
-    processActionGrid->addWidget(m_taskKillButton, 0, 0);
-    processActionGrid->addWidget(m_taskKillForceButton, 0, 1);
-    processActionGrid->addWidget(m_terminateProcessButton, 1, 0);
-    processActionGrid->addWidget(m_terminateThreadsButton, 1, 1);
-    processActionGrid->addWidget(m_suspendProcessButton, 2, 0);
-    processActionGrid->addWidget(m_resumeProcessButton, 2, 1);
-    processActionGrid->addWidget(m_setCriticalButton, 3, 0);
-    processActionGrid->addWidget(m_clearCriticalButton, 3, 1);
-    processActionGrid->addWidget(m_injectInvalidShellcodeButton, 4, 0, 1, 2);
-    m_actionLayout->addWidget(processActionGroup);
+    m_terminateActionCombo = new QComboBox(controlGroup);
+    m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "Taskkill", 0);
+    m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "Taskkill /f", 1);
+    m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "TerminateProcess", 2);
+    m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "TerminateThread(全部线程)", 3);
+    m_terminateActionCombo->setToolTip("选择结束当前进程的执行方案");
+    m_executeTerminateActionButton = buildCompactActionButton(
+        QStringLiteral(":/Icon/process_terminate.svg"),
+        QStringLiteral("执行当前选中的结束方案"),
+        controlGroup);
 
-    // 优先级设置组。
-    QGroupBox* priorityGroup = new QGroupBox("进程优先级", m_actionTab);
-    QHBoxLayout* priorityLayout = new QHBoxLayout(priorityGroup);
-    m_priorityCombo = new QComboBox(priorityGroup);
+    m_suspendProcessButton = buildCompactActionButton(
+        QStringLiteral(":/Icon/process_suspend.svg"),
+        QStringLiteral("挂起当前进程"),
+        controlGroup);
+    m_resumeProcessButton = buildCompactActionButton(
+        QStringLiteral(":/Icon/process_resume.svg"),
+        QStringLiteral("恢复当前进程"),
+        controlGroup);
+    m_setCriticalButton = buildCompactActionButton(
+        QStringLiteral(":/Icon/process_critical.svg"),
+        QStringLiteral("把当前进程设为关键进程"),
+        controlGroup);
+    m_clearCriticalButton = buildCompactActionButton(
+        QStringLiteral(":/Icon/process_uncritical.svg"),
+        QStringLiteral("取消当前进程的关键进程标记"),
+        controlGroup);
+    m_injectInvalidShellcodeButton = buildCompactActionButton(
+        QStringLiteral(":/Icon/process_terminate.svg"),
+        QStringLiteral("向当前进程注入无效 shellcode（测试用途）"),
+        controlGroup);
+
+    m_priorityCombo = new QComboBox(controlGroup);
     m_priorityCombo->addItem("Idle", 0);
     m_priorityCombo->addItem("Below Normal", 1);
     m_priorityCombo->addItem("Normal", 2);
@@ -579,44 +628,104 @@ void ProcessDetailWindow::initializeActionTab()
     m_priorityCombo->addItem("High", 4);
     m_priorityCombo->addItem("Realtime", 5);
     m_priorityCombo->setCurrentIndex(2);
-    m_applyPriorityButton = new QPushButton(QIcon(":/Icon/process_priority.svg"), "应用优先级", priorityGroup);
-    priorityLayout->addWidget(m_priorityCombo, 1);
-    priorityLayout->addWidget(m_applyPriorityButton);
-    m_actionLayout->addWidget(priorityGroup);
+    m_priorityCombo->setToolTip("选择当前进程的新优先级");
+    m_applyPriorityButton = buildCompactActionButton(
+        QStringLiteral(":/Icon/process_priority.svg"),
+        QStringLiteral("应用当前选中的进程优先级"),
+        controlGroup);
 
-    // DLL 注入组。
-    QGroupBox* dllInjectGroup = new QGroupBox("DLL 注入器", m_actionTab);
-    QHBoxLayout* dllInjectLayout = new QHBoxLayout(dllInjectGroup);
-    m_dllPathLineEdit = new QLineEdit(dllInjectGroup);
+    controlLayout->addWidget(new QLabel("结束方案", controlGroup), 0, 0);
+    controlLayout->addWidget(m_terminateActionCombo, 0, 1, 1, 3);
+    controlLayout->addWidget(m_executeTerminateActionButton, 0, 4);
+    controlLayout->addWidget(new QLabel("运行控制", controlGroup), 1, 0);
+    controlLayout->addWidget(m_suspendProcessButton, 1, 1);
+    controlLayout->addWidget(m_resumeProcessButton, 1, 2);
+    controlLayout->addWidget(m_injectInvalidShellcodeButton, 1, 3);
+    controlLayout->addWidget(new QLabel("关键进程", controlGroup), 2, 0);
+    controlLayout->addWidget(m_setCriticalButton, 2, 1);
+    controlLayout->addWidget(m_clearCriticalButton, 2, 2);
+    controlLayout->addWidget(new QLabel("优先级", controlGroup), 3, 0);
+    controlLayout->addWidget(m_priorityCombo, 3, 1, 1, 3);
+    controlLayout->addWidget(m_applyPriorityButton, 3, 4);
+    m_actionLayout->addWidget(controlGroup);
+
+    // 注入与载入组：
+    // - 把 DLL / Shellcode 两套操作收成统一两行；
+    // - 浏览与执行按钮改成图标按钮，减少横向占用。
+    QGroupBox* injectGroup = new QGroupBox("注入与载入", m_actionTab);
+    QGridLayout* injectLayout = new QGridLayout(injectGroup);
+    injectLayout->setHorizontalSpacing(8);
+    injectLayout->setVerticalSpacing(8);
+
+    m_dllPathLineEdit = new QLineEdit(injectGroup);
     m_dllPathLineEdit->setPlaceholderText("请选择要注入的 DLL 路径");
-    m_browseDllButton = new QPushButton(QIcon(":/Icon/process_open_folder.svg"), "浏览", dllInjectGroup);
-    m_injectDllButton = new QPushButton(QIcon(":/Icon/process_start.svg"), "注入 DLL", dllInjectGroup);
-    dllInjectLayout->addWidget(m_dllPathLineEdit, 1);
-    dllInjectLayout->addWidget(m_browseDllButton);
-    dllInjectLayout->addWidget(m_injectDllButton);
-    m_actionLayout->addWidget(dllInjectGroup);
+    m_browseDllButton = buildCompactActionButton(
+        QStringLiteral(":/Icon/process_open_folder.svg"),
+        QStringLiteral("浏览并选择 DLL 文件"),
+        injectGroup);
+    m_injectDllButton = buildCompactActionButton(
+        QStringLiteral(":/Icon/process_start.svg"),
+        QStringLiteral("执行 DLL 注入"),
+        injectGroup);
 
-    // shellcode 注入组。
-    QGroupBox* shellcodeGroup = new QGroupBox("Shellcode 加载器", m_actionTab);
-    QHBoxLayout* shellcodeLayout = new QHBoxLayout(shellcodeGroup);
-    m_shellcodePathLineEdit = new QLineEdit(shellcodeGroup);
+    m_shellcodePathLineEdit = new QLineEdit(injectGroup);
     m_shellcodePathLineEdit->setPlaceholderText("请选择原始 shellcode 二进制文件");
-    m_browseShellcodeButton = new QPushButton(QIcon(":/Icon/process_open_folder.svg"), "浏览", shellcodeGroup);
-    m_injectShellcodeButton = new QPushButton(QIcon(":/Icon/process_start.svg"), "注入 shellcode", shellcodeGroup);
-    shellcodeLayout->addWidget(m_shellcodePathLineEdit, 1);
-    shellcodeLayout->addWidget(m_browseShellcodeButton);
-    shellcodeLayout->addWidget(m_injectShellcodeButton);
-    m_actionLayout->addWidget(shellcodeGroup);
+    m_browseShellcodeButton = buildCompactActionButton(
+        QStringLiteral(":/Icon/process_open_folder.svg"),
+        QStringLiteral("浏览并选择 shellcode 文件"),
+        injectGroup);
+    m_injectShellcodeButton = buildCompactActionButton(
+        QStringLiteral(":/Icon/process_start.svg"),
+        QStringLiteral("执行 shellcode 注入"),
+        injectGroup);
+
+    injectLayout->addWidget(new QLabel("DLL", injectGroup), 0, 0);
+    injectLayout->addWidget(m_dllPathLineEdit, 0, 1);
+    injectLayout->addWidget(m_browseDllButton, 0, 2);
+    injectLayout->addWidget(m_injectDllButton, 0, 3);
+    injectLayout->addWidget(new QLabel("Shellcode", injectGroup), 1, 0);
+    injectLayout->addWidget(m_shellcodePathLineEdit, 1, 1);
+    injectLayout->addWidget(m_browseShellcodeButton, 1, 2);
+    injectLayout->addWidget(m_injectShellcodeButton, 1, 3);
+    m_actionLayout->addWidget(injectGroup);
 
     m_actionLayout->addStretch(1);
 
-    // 统一按钮主题样式。
+    // 统一按钮主题样式：
+    // - 组合框继续使用项目蓝色描边；
+    // - 紧凑按钮沿用统一蓝色按钮皮肤，避免局部控件风格割裂。
     const QString buttonStyle = buildBlueButtonStyle();
+    const QString comboStyle = QStringLiteral(
+        "QComboBox {"
+        "  border: 1px solid %1;"
+        "  border-radius: 4px;"
+        "  padding: 3px 8px;"
+        "  color: %2;"
+        "  background: %3;"
+        "}"
+        "QComboBox:hover {"
+        "  border-color: %4;"
+        "}"
+        "QComboBox::drop-down {"
+        "  border:none;"
+        "  width:20px;"
+        "}"
+        "QComboBox QAbstractItemView {"
+        "  background:%3;"
+        "  color:%2;"
+        "  border:1px solid %1;"
+        "  selection-background-color:%4;"
+        "  selection-color:#FFFFFF;"
+        "}")
+        .arg(KswordTheme::BorderHex())
+        .arg(KswordTheme::TextPrimaryHex())
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::PrimaryBlueHex);
+    m_terminateActionCombo->setStyleSheet(comboStyle);
+    m_priorityCombo->setStyleSheet(comboStyle);
+
     const std::vector<QPushButton*> actionButtons{
-        m_taskKillButton,
-        m_taskKillForceButton,
-        m_terminateProcessButton,
-        m_terminateThreadsButton,
+        m_executeTerminateActionButton,
         m_suspendProcessButton,
         m_resumeProcessButton,
         m_setCriticalButton,
@@ -837,11 +946,10 @@ void ProcessDetailWindow::initializeConnections()
         requestAsyncPebRefresh();
     });
 
-    // 操作页按钮连接。
-    connect(m_taskKillButton, &QPushButton::clicked, this, [this]() { executeTaskKillAction(false); });
-    connect(m_taskKillForceButton, &QPushButton::clicked, this, [this]() { executeTaskKillAction(true); });
-    connect(m_terminateProcessButton, &QPushButton::clicked, this, [this]() { executeTerminateProcessAction(); });
-    connect(m_terminateThreadsButton, &QPushButton::clicked, this, [this]() { executeTerminateThreadsAction(); });
+    // 操作页按钮连接：
+    // - 结束方案统一走下拉框调度，避免保留多个重复大按钮；
+    // - 其余控制动作保持原有执行函数不变。
+    connect(m_executeTerminateActionButton, &QPushButton::clicked, this, [this]() { executeSelectedTerminateAction(); });
     connect(m_suspendProcessButton, &QPushButton::clicked, this, [this]() { executeSuspendProcessAction(); });
     connect(m_resumeProcessButton, &QPushButton::clicked, this, [this]() { executeResumeProcessAction(); });
     connect(m_setCriticalButton, &QPushButton::clicked, this, [this]() { executeSetCriticalAction(true); });

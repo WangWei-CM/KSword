@@ -4,7 +4,7 @@
 // ProcessDetailWindow.h
 // 作用：
 // - 提供“进程详细信息”独立窗口（非 Dock、非阻塞）；
-// - 每个进程可打开独立窗口，包含 详细信息 / 操作 / 模块 三个 Tab；
+// - 每个进程可打开独立窗口，包含 详细信息 / 线程 / 操作 / 模块 / 令牌 / PEB 六个 Tab；
 // - 支持模块刷新、右键操作、DLL 注入、Shellcode 注入等能力。
 // ============================================================
 
@@ -118,6 +118,7 @@ private:
     // 返回：无。
     void applyThemeStyle();
     void initializeDetailTab();
+    void initializeThreadTab();
     void initializeActionTab();
     void initializeModuleTab();
     void initializeTokenTab();
@@ -158,6 +159,7 @@ private:
     void executeTaskKillAction(bool forceKill);
     void executeTerminateProcessAction();
     void executeTerminateThreadsAction();
+    void executeSelectedTerminateAction();
     void executeSuspendProcessAction();
     void executeResumeProcessAction();
     void executeSetCriticalAction(bool enableCritical);
@@ -193,8 +195,9 @@ private:
 
     // ======== 根布局与 Tabs ========
     QVBoxLayout* m_rootLayout = nullptr;       // 窗口根布局。
-    QTabWidget* m_tabWidget = nullptr;         // 三个 Tab 的容器。
+    QTabWidget* m_tabWidget = nullptr;         // 详情窗口全部 Tab 的容器。
     QWidget* m_detailTab = nullptr;            // “详细信息”页。
+    QWidget* m_threadTab = nullptr;            // “线程”页。
     QWidget* m_actionTab = nullptr;            // “操作”页。
     QWidget* m_moduleTab = nullptr;            // “模块”页。
     QWidget* m_tokenTab = nullptr;             // “令牌”页。
@@ -225,16 +228,17 @@ private:
     QLabel* m_detailRamValue = nullptr;        // RAM 当前占用值。
     QLabel* m_detailDiskValue = nullptr;       // DISK 当前占用值。
     QLabel* m_detailSignatureValue = nullptr;  // 数字签名状态值。
+
+    // ======== 线程页控件 ========
+    QVBoxLayout* m_threadLayout = nullptr;     // 线程页总布局。
     QPushButton* m_refreshThreadInspectButton = nullptr; // 刷新线程细节按钮。
     QLabel* m_threadInspectStatusLabel = nullptr; // 线程细节刷新状态。
     QTableWidget* m_threadInspectTable = nullptr; // 线程细节表格。
 
     // ======== 操作页控件 ========
     QVBoxLayout* m_actionLayout = nullptr;     // 操作页总布局。
-    QPushButton* m_taskKillButton = nullptr;   // Taskkill。
-    QPushButton* m_taskKillForceButton = nullptr; // Taskkill /f。
-    QPushButton* m_terminateProcessButton = nullptr; // TerminateProcess。
-    QPushButton* m_terminateThreadsButton = nullptr; // TerminateThread(全部)。
+    QComboBox* m_terminateActionCombo = nullptr; // 结束方案下拉框。
+    QPushButton* m_executeTerminateActionButton = nullptr; // 执行当前结束方案按钮。
     QPushButton* m_suspendProcessButton = nullptr; // 挂起进程。
     QPushButton* m_resumeProcessButton = nullptr; // 恢复进程。
     QPushButton* m_setCriticalButton = nullptr; // 设为关键进程。

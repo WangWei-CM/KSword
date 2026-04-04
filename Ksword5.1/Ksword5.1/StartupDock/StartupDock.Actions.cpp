@@ -35,6 +35,11 @@ namespace
             *rootKeyOut = HKEY_LOCAL_MACHINE;
             return true;
         }
+        if (rootKeyText == QStringLiteral("HKCR"))
+        {
+            *rootKeyOut = HKEY_CLASSES_ROOT;
+            return true;
+        }
         return false;
     }
 
@@ -128,6 +133,7 @@ namespace
         ::CloseServiceHandle(scmHandle);
         return deleteOk != FALSE;
     }
+
 }
 
 void StartupDock::initializeConnections()
@@ -179,6 +185,7 @@ void StartupDock::initializeConnections()
     bindTableContextMenu(StartupCategory::Services, m_servicesTable);
     bindTableContextMenu(StartupCategory::Drivers, m_driversTable);
     bindTableContextMenu(StartupCategory::Tasks, m_tasksTable);
+    bindTableContextMenu(StartupCategory::Wmi, m_wmiTable);
 
     if (m_registryTree != nullptr)
     {
@@ -237,22 +244,33 @@ void StartupDock::showEntryContextMenu(
 
     const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
     QMenu contextMenu(this);
+    QAction* detailAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("查看启动项详细信息"));
     QAction* copyAction = contextMenu.addAction(createBlueIcon(":/Icon/log_copy.svg"), QStringLiteral("复制整行"));
     QAction* openFileAction = contextMenu.addAction(createBlueIcon(":/Icon/process_open_folder.svg"), QStringLiteral("打开文件位置"));
+    QAction* filePropertiesAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("转到文件属性"));
     QAction* openRegistryAction = contextMenu.addAction(createBlueIcon(":/Icon/file_find.svg"), QStringLiteral("打开注册表位置"));
     QAction* deleteAction = contextMenu.addAction(createBlueIcon(":/Icon/log_clear.svg"), QStringLiteral("删除项"));
     openFileAction->setEnabled(entry.canOpenFileLocation);
+    filePropertiesAction->setEnabled(entry.canOpenFileLocation);
     openRegistryAction->setEnabled(entry.canOpenRegistryLocation);
     deleteAction->setEnabled(entry.canDelete);
 
     QAction* selectedAction = contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPos));
-    if (selectedAction == copyAction)
+    if (selectedAction == detailAction)
+    {
+        showSelectedEntryDetails(category, tableWidget);
+    }
+    else if (selectedAction == copyAction)
     {
         copySelectedRow(category, tableWidget);
     }
     else if (selectedAction == openFileAction)
     {
         openSelectedFileLocation(category, tableWidget);
+    }
+    else if (selectedAction == filePropertiesAction)
+    {
+        openSelectedFileProperties(category, tableWidget);
     }
     else if (selectedAction == openRegistryAction)
     {
@@ -285,8 +303,10 @@ void StartupDock::showRegistryContextMenu(const QPoint& localPos)
     const QString locationText = treeItem->data(0, kStartupTreeLocationRole).toString().trimmed();
 
     QMenu contextMenu(this);
+    QAction* detailAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("查看启动项详细信息"));
     QAction* copyAction = contextMenu.addAction(createBlueIcon(":/Icon/log_copy.svg"), QStringLiteral("复制"));
     QAction* openFileAction = contextMenu.addAction(createBlueIcon(":/Icon/process_open_folder.svg"), QStringLiteral("打开文件位置"));
+    QAction* filePropertiesAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("转到文件属性"));
     QAction* openRegistryAction = contextMenu.addAction(createBlueIcon(":/Icon/file_find.svg"), QStringLiteral("打开注册表位置"));
     QAction* deleteAction = contextMenu.addAction(createBlueIcon(":/Icon/log_clear.svg"), QStringLiteral("删除项"));
 
@@ -294,6 +314,7 @@ void StartupDock::showRegistryContextMenu(const QPoint& localPos)
         || nodeKind == StartupTreeNodeKind::Placeholder)
     {
         openFileAction->setEnabled(false);
+        filePropertiesAction->setEnabled(false);
         openRegistryAction->setEnabled(!locationText.isEmpty());
         deleteAction->setEnabled(false);
     }
@@ -301,24 +322,34 @@ void StartupDock::showRegistryContextMenu(const QPoint& localPos)
     {
         const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
         openFileAction->setEnabled(entry.canOpenFileLocation);
+        filePropertiesAction->setEnabled(entry.canOpenFileLocation);
         openRegistryAction->setEnabled(entry.canOpenRegistryLocation);
         deleteAction->setEnabled(entry.canDelete);
     }
     else
     {
         openFileAction->setEnabled(false);
+        filePropertiesAction->setEnabled(false);
         openRegistryAction->setEnabled(false);
         deleteAction->setEnabled(false);
     }
 
     QAction* selectedAction = contextMenu.exec(m_registryTree->viewport()->mapToGlobal(localPos));
-    if (selectedAction == copyAction)
+    if (selectedAction == detailAction)
+    {
+        showSelectedEntryDetails(StartupCategory::Registry, nullptr);
+    }
+    else if (selectedAction == copyAction)
     {
         copySelectedRow(StartupCategory::Registry, nullptr);
     }
     else if (selectedAction == openFileAction)
     {
         openSelectedFileLocation(StartupCategory::Registry, nullptr);
+    }
+    else if (selectedAction == filePropertiesAction)
+    {
+        openSelectedFileProperties(StartupCategory::Registry, nullptr);
     }
     else if (selectedAction == openRegistryAction)
     {
@@ -725,6 +756,9 @@ int StartupDock::findEntryIndexByTableRow(const StartupCategory category, const 
         break;
     case StartupCategory::Registry:
         return -1;
+    case StartupCategory::Wmi:
+        tableWidget = m_wmiTable;
+        break;
     default:
         break;
     }

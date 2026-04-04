@@ -6,6 +6,8 @@
 #include <QtCore/QTimer>
 #include <QtWidgets/QApplication>
 
+#include "Framework/ThemedMessageBox.h"
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -551,6 +553,7 @@ int main(int argc, char* argv[])
     }
 
     QApplication app(argc, argv);
+    ks::ui::InstallGlobalMessageBoxTheme(&app);
 
     // startupProgressCallback 作用：
     // - 供 MainWindow 构造期间持续回传细分阶段；

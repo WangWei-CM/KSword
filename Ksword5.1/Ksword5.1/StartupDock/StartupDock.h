@@ -65,7 +65,8 @@ public:
         Services,      // 自动启动服务。
         Drivers,       // 自动/系统/引导驱动。
         Tasks,         // 计划任务。
-        Registry       // 高级注册表持久化项。
+        Registry,      // 高级注册表持久化项。
+        Wmi            // WMI 持久化项。
     };
 
     // StartupEntry：
@@ -135,11 +136,15 @@ private:
     void appendDriverEntries(std::vector<StartupEntry>* entryListOut);
     void appendTaskEntries(std::vector<StartupEntry>* entryListOut);
     void appendAdvancedRegistryEntries(std::vector<StartupEntry>* entryListOut);
+    void appendWinsockEntries(std::vector<StartupEntry>* entryListOut);
+    void appendWmiEntries(std::vector<StartupEntry>* entryListOut);
 
     // ===================== 交互 =====================
     void showEntryContextMenu(StartupCategory category, QTableWidget* tableWidget, const QPoint& localPos);
     void showRegistryContextMenu(const QPoint& localPos);
+    void showSelectedEntryDetails(StartupCategory category, QTableWidget* tableWidget);
     void openSelectedFileLocation(StartupCategory category, QTableWidget* tableWidget);
+    void openSelectedFileProperties(StartupCategory category, QTableWidget* tableWidget);
     void openSelectedRegistryLocation(StartupCategory category, QTableWidget* tableWidget);
     void copySelectedRow(StartupCategory category, QTableWidget* tableWidget);
     void deleteSelectedEntry(StartupCategory category, QTableWidget* tableWidget);
@@ -180,6 +185,7 @@ private:
     QWidget* m_driversPage = nullptr;         // m_driversPage：驱动页。
     QWidget* m_tasksPage = nullptr;           // m_tasksPage：计划任务页。
     QWidget* m_registryPage = nullptr;        // m_registryPage：高级注册表页。
+    QWidget* m_wmiPage = nullptr;             // m_wmiPage：WMI 持久化页。
 
     QTableWidget* m_allTable = nullptr;       // m_allTable：总览表。
     QTableWidget* m_logonTable = nullptr;     // m_logonTable：登录项表。
@@ -187,6 +193,7 @@ private:
     QTableWidget* m_driversTable = nullptr;   // m_driversTable：驱动表。
     QTableWidget* m_tasksTable = nullptr;     // m_tasksTable：任务表。
     QTreeWidget* m_registryTree = nullptr;    // m_registryTree：高级注册表树（按注册表位置分组）。
+    QTableWidget* m_wmiTable = nullptr;       // m_wmiTable：WMI 持久化表。
 
     // ===================== 数据缓存 =====================
     std::vector<StartupEntry> m_entryList;    // m_entryList：全部启动项缓存。

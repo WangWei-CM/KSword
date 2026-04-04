@@ -52,6 +52,8 @@ QString StartupDock::categoryToText(const StartupCategory category)
         return QStringLiteral("计划任务");
     case StartupCategory::Registry:
         return QStringLiteral("高级注册表");
+    case StartupCategory::Wmi:
+        return QStringLiteral("WMI");
     default:
         return QStringLiteral("未知");
     }
@@ -102,6 +104,8 @@ StartupDock::StartupCategory StartupDock::currentCategory() const
         return StartupCategory::Tasks;
     case 5:
         return StartupCategory::Registry;
+    case 6:
+        return StartupCategory::Wmi;
     default:
         return StartupCategory::All;
     }
@@ -123,6 +127,8 @@ QTableWidget* StartupDock::currentCategoryTable() const
         return m_tasksTable;
     case StartupCategory::Registry:
         return nullptr;
+    case StartupCategory::Wmi:
+        return m_wmiTable;
     default:
         return m_allTable;
     }
@@ -235,8 +241,14 @@ void StartupDock::requestAsyncRefresh(const bool forceRefresh)
             kPro.set(safeThis->m_progressPid, "枚举计划任务", 0, 75.0f);
             safeThis->appendTaskEntries(&entryList);
 
-            kPro.set(safeThis->m_progressPid, "枚举高级注册表项", 0, 92.0f);
+            kPro.set(safeThis->m_progressPid, "枚举高级注册表项", 0, 84.0f);
             safeThis->appendAdvancedRegistryEntries(&entryList);
+
+            kPro.set(safeThis->m_progressPid, "枚举Winsock持久化项", 0, 90.0f);
+            safeThis->appendWinsockEntries(&entryList);
+
+            kPro.set(safeThis->m_progressPid, "枚举WMI持久化项", 0, 96.0f);
+            safeThis->appendWmiEntries(&entryList);
 
             if (safeThis.isNull())
             {

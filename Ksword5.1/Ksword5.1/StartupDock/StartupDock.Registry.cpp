@@ -6,17 +6,14 @@ using namespace startup_dock_detail;
 
 namespace
 {
-    // RegistryValueRecord：
-    // - 作用：统一承载一次注册表值枚举结果；
-    // - valueType 用于调试和补充详情文本。
+    // RegistryValueRecord：统一承载一次注册表值枚举结果。
     struct RegistryValueRecord
     {
         QString valueNameText; // valueNameText：值名，空字符串表示默认值。
         QString valueDataText; // valueDataText：已转换成文本的数据。
         DWORD valueType = REG_NONE; // valueType：Win32 注册表类型。
     };
-    // RunKeySpec：
-    // - 作用：描述 Run/RunOnce/RunServices/CommandProcessor 等“枚举整键值列表”的登录项来源。
+    // RunKeySpec：描述 Run/RunOnce/RunServices/CommandProcessor 等“枚举整键值列表”的登录项来源。
     struct RunKeySpec
     {
         HKEY rootKey = nullptr;              // rootKey：注册表根键。
@@ -25,8 +22,7 @@ namespace
         const wchar_t* userText = L"";       // userText：上下文显示文本。
         const wchar_t* detailText = L"";     // detailText：该位置的说明文本。
     };
-    // SingleValueSpec：
-    // - 作用：描述“固定键路径 + 固定值名”的高级注册表来源。
+    // SingleValueSpec：描述“固定键路径 + 固定值名”的高级注册表来源。
     struct SingleValueSpec
     {
         HKEY rootKey = nullptr;              // rootKey：注册表根键。
@@ -37,8 +33,7 @@ namespace
         const wchar_t* detailText = L"";     // detailText：位置说明文本。
         bool resolveClsidFromValueData = false; // resolveClsidFromValueData：值数据是 CLSID 时解析宿主。
     };
-    // ValueEnumSpec：
-    // - 作用：描述“固定键路径 + 枚举全部值”的高级注册表来源。
+    // ValueEnumSpec：描述“固定键路径 + 枚举全部值”的高级注册表来源。
     struct ValueEnumSpec
     {
         HKEY rootKey = nullptr;              // rootKey：注册表根键。
@@ -49,8 +44,7 @@ namespace
         bool resolveClsidFromValueData = false; // resolveClsidFromValueData：值数据是 CLSID 时解析宿主。
         bool resolveClsidFromValueName = false; // resolveClsidFromValueName：值名是 CLSID 时解析宿主。
     };
-    // SubKeyValueSpec：
-    // - 作用：描述“枚举子键，再从每个子键中读一个指定值”的来源。
+    // SubKeyValueSpec：描述“枚举子键，再从每个子键中读一个指定值”的来源。
     struct SubKeyValueSpec
     {
         HKEY rootKey = nullptr;              // rootKey：注册表根键。
@@ -103,9 +97,7 @@ namespace
         }
         return QStringLiteral("UNKNOWN");
     }
-    // startupCategoryToText 作用：
-    // - 在本实现文件内部复用分类中文名；
-    // - 避免匿名命名空间辅助函数访问类内私有静态成员。
+    // startupCategoryToText：本地复用分类中文名，避免匿名命名空间辅助函数访问类内私有静态成员。
     QString startupCategoryToText(const StartupDock::StartupCategory category)
     {
         switch (category)
@@ -126,9 +118,7 @@ namespace
             return QStringLiteral("未知");
         }
     }
-    // buildRegistryLocationText 作用：
-    // - 生成 "HKLM\\Software\\..." 形式的位置文本；
-    // - 所有注册表条目的 locationText/locationGroupText 都走同一路径构造。
+    // buildRegistryLocationText：生成 "HKLM\\Software\\..." 形式的位置文本。
     QString buildRegistryLocationText(HKEY rootKey, const QString& subKeyText)
     {
         return QStringLiteral("%1\\%2")
@@ -543,13 +533,15 @@ namespace
         } };
         return runKeySpecList;
     }
-    const std::array<SingleValueSpec, 18>& buildSingleValueSpecList()
+    const std::array<SingleValueSpec, 20>& buildSingleValueSpecList()
     {
-        static const std::array<SingleValueSpec, 18> singleValueSpecList{ {
+        static const std::array<SingleValueSpec, 20> singleValueSpecList{ {
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon", L"Shell", L"WinlogonShell", L"本机", L"Winlogon Shell", false },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon", L"Userinit", L"WinlogonUserinit", L"本机", L"Winlogon Userinit", false },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon", L"Taskman", L"WinlogonTaskman", L"本机", L"Winlogon Taskman", false },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon", L"VmApplet", L"WinlogonVmApplet", L"本机", L"Winlogon VM Applet", false },
+            { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon", L"GinaDLL", L"WinlogonGinaDll", L"本机", L"旧式 GINA 登录 DLL", false },
+            { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon", L"AppSetup", L"WinlogonAppSetup", L"本机", L"Winlogon AppSetup", false },
             { HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon", L"Shell", L"UserWinlogonShell", L"当前用户", L"用户级 Winlogon Shell", false },
             { HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon", L"Userinit", L"UserWinlogonUserinit", L"当前用户", L"用户级 Winlogon Userinit", false },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows", L"AppInit_DLLs", L"AppInitDlls", L"本机", L"AppInit DLL 列表", false },
@@ -567,14 +559,16 @@ namespace
         } };
         return singleValueSpecList;
     }
-    const std::array<ValueEnumSpec, 17>& buildValueEnumSpecList()
+    const std::array<ValueEnumSpec, 19>& buildValueEnumSpecList()
     {
-        static const std::array<ValueEnumSpec, 17> valueEnumSpecList{ {
+        static const std::array<ValueEnumSpec, 19> valueEnumSpecList{ {
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellExecuteHooks", L"ShellExecuteHooks", L"本机", L"Explorer Shell Execute Hooks", true, true },
             { HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellExecuteHooks", L"ShellExecuteHooksUser", L"当前用户", L"用户级 Explorer Shell Execute Hooks", true, true },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SharedTaskScheduler", L"SharedTaskScheduler", L"本机", L"Explorer Shared Task Scheduler", true, false },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellServiceObjectDelayLoad", L"ShellDelayLoad", L"本机", L"Explorer 延迟加载 COM", true, false },
             { HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellServiceObjectDelayLoad", L"ShellDelayLoadUser", L"当前用户", L"用户级 Explorer 延迟加载 COM", true, false },
+            { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Shell Extensions\\Approved", L"ShellExtensionsApproved", L"本机", L"Shell 扩展白名单", false, true },
+            { HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Shell Extensions\\Approved", L"ShellExtensionsApprovedUser", L"当前用户", L"用户级 Shell 扩展白名单", false, true },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Internet Explorer\\URLSearchHooks", L"IEUrlSearchHooks", L"本机", L"Internet Explorer URL Search Hooks", true, true },
             { HKEY_CURRENT_USER, L"Software\\Microsoft\\Internet Explorer\\URLSearchHooks", L"IEUrlSearchHooksUser", L"当前用户", L"用户级 URL Search Hooks", true, true },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Internet Explorer\\Toolbar", L"IEToolbar", L"本机", L"Internet Explorer Toolbar", true, true },
@@ -590,14 +584,17 @@ namespace
         } };
         return valueEnumSpecList;
     }
-    const std::array<SubKeyValueSpec, 12>& buildSubKeyValueSpecList()
+    const std::array<SubKeyValueSpec, 15>& buildSubKeyValueSpecList()
     {
-        static const std::array<SubKeyValueSpec, 12> subKeyValueSpecList{ {
+        static const std::array<SubKeyValueSpec, 15> subKeyValueSpecList{ {
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Active Setup\\Installed Components", L"StubPath", L"ActiveSetup", L"本机", L"Active Setup StubPath", true, false, true },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options", L"Debugger", L"IFEO-Debugger", L"本机", L"映像执行调试器劫持", false, false, false },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options", L"VerifierDlls", L"IFEO-VerifierDlls", L"本机", L"映像验证器 DLL", false, false, false },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit", L"MonitorProcess", L"SilentProcessExit", L"本机", L"SilentProcessExit 监视进程", false, false, false },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\Notify", L"DLLName", L"WinlogonNotify", L"本机", L"Winlogon Notify 包", false, false, true },
+            { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Authentication\\Credential Providers", L"", L"CredentialProvider", L"本机", L"Credential Provider", false, true, true },
+            { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Authentication\\Credential Provider Filters", L"", L"CredentialProviderFilter", L"本机", L"Credential Provider Filter", false, true, true },
+            { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Authentication\\PLAP Providers", L"", L"PlapProvider", L"本机", L"PLAP Provider", false, true, true },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Browser Helper Objects", L"", L"BHO", L"本机", L"Browser Helper Object", false, true, true },
             { HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Browser Helper Objects", L"", L"BHO-User", L"当前用户", L"用户级 Browser Helper Object", false, true, true },
             { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Internet Explorer\\Explorer Bars", L"", L"IEExplorerBar", L"本机", L"Internet Explorer Explorer Bar", false, true, true },

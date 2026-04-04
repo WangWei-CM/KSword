@@ -15,6 +15,8 @@
 #include <QClipboard>
 #include <QDateTime>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileIconProvider>
@@ -32,6 +34,7 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTextEdit>
 #include <QTextStream>
 #include <QTimer>
 #include <QTreeWidget>
@@ -40,6 +43,7 @@
 #include <QVBoxLayout>
 
 #include <Windows.h>
+#include <Shellapi.h>
 
 #include <algorithm>  // std::sort/std::clamp：结果排序与范围控制。
 #include <array>      // std::array：固定大小注册表键清单。

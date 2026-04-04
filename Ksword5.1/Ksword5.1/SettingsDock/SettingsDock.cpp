@@ -4,6 +4,7 @@
 #include "../theme.h"
 
 #include <QButtonGroup>
+#include <QComboBox>
 #include <QFileDialog>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -23,6 +24,7 @@ namespace
     constexpr const char* IconThemeDark = ":/Icon/settings_theme_dark.svg";
     constexpr const char* IconBrowseBackground = ":/Icon/settings_background_browse.svg";
     constexpr const char* IconResetBackground = ":/Icon/settings_background_reset.svg";
+    constexpr const char* IconApplySettings = ":/Icon/process_start.svg";
 }
 
 SettingsDock::SettingsDock(QWidget* parent)
@@ -174,29 +176,80 @@ void SettingsDock::initializeAppearanceTab()
     backgroundLayout->addLayout(opacityLayout);
     appearanceRootLayout->addWidget(backgroundGroupBox);
 
+    // ===== 启动默认页签分组 =====
+    QGroupBox* startupGroupBox = new QGroupBox(QStringLiteral("启动默认标签页"), m_appearanceTab);
+    QVBoxLayout* startupLayout = new QVBoxLayout(startupGroupBox);
+    startupLayout->setSpacing(8);
+
+    QLabel* startupHintLabel = new QLabel(
+        QStringLiteral("设置应用启动后默认激活的主标签页（该项在下次启动生效）。"),
+        startupGroupBox);
+    startupHintLabel->setWordWrap(true);
+    startupLayout->addWidget(startupHintLabel);
+
+    QHBoxLayout* startupSelectorLayout = new QHBoxLayout();
+    startupSelectorLayout->setSpacing(6);
+    startupSelectorLayout->addWidget(new QLabel(QStringLiteral("默认页签"), startupGroupBox), 0);
+
+    // m_startupDefaultTabCombo 作用：维护“启动默认页签 key”与“中文显示名”的映射。
+    m_startupDefaultTabCombo = new QComboBox(startupGroupBox);
+    m_startupDefaultTabCombo->setToolTip(QStringLiteral("选择应用下次启动时默认展示的主标签页"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("欢迎"), QStringLiteral("welcome"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("进程"), QStringLiteral("process"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("网络"), QStringLiteral("network"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("内存"), QStringLiteral("memory"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("文件"), QStringLiteral("file"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("驱动"), QStringLiteral("driver"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("内核"), QStringLiteral("kernel"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("监控"), QStringLiteral("monitor"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("硬件"), QStringLiteral("hardware"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("权限"), QStringLiteral("privilege"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("设置"), QStringLiteral("settings"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("窗口"), QStringLiteral("window"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("注册表"), QStringLiteral("registry"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("启动项"), QStringLiteral("startup"));
+    startupSelectorLayout->addWidget(m_startupDefaultTabCombo, 1);
+    startupLayout->addLayout(startupSelectorLayout);
+    appearanceRootLayout->addWidget(startupGroupBox);
+
+    // ===== 应用按钮区域 =====
+    QHBoxLayout* actionLayout = new QHBoxLayout();
+    actionLayout->addStretch(1);
+
+    // m_applySettingsButton 作用：把当前待生效改动落盘并触发界面实际应用。
+    m_applySettingsButton = new QToolButton(m_appearanceTab);
+    m_applySettingsButton->setIcon(QIcon(QString::fromUtf8(IconApplySettings)));
+    m_applySettingsButton->setIconSize(QSize(18, 18));
+    m_applySettingsButton->setFixedSize(34, 30);
+    m_applySettingsButton->setToolTip(QStringLiteral("应用当前设置改动"));
+    m_applySettingsButton->setEnabled(false);
+    actionLayout->addWidget(m_applySettingsButton, 0);
+    appearanceRootLayout->addLayout(actionLayout);
+
     appearanceRootLayout->addStretch();
     m_tabWidget->addTab(m_appearanceTab, QStringLiteral("外观"));
 
     bindAppearanceSignals();
     updateThemeButtonStyle();
+    updateApplyButtonState();
 }
 
 void SettingsDock::bindAppearanceSignals()
 {
     connect(m_themeButtonGroup, &QButtonGroup::idClicked, this, [this](int /*clickedId*/) {
         updateThemeButtonStyle();
-        saveAndEmitFromUi(QStringLiteral("主题按钮切换"));
+        markPendingChanges(QStringLiteral("主题按钮切换"));
         });
 
     connect(m_backgroundPathEdit, &QLineEdit::editingFinished, this, [this]() {
-        saveAndEmitFromUi(QStringLiteral("背景路径编辑完成"));
+        markPendingChanges(QStringLiteral("背景路径编辑完成"));
         });
 
     connect(m_backgroundOpacitySlider, &QSlider::valueChanged, this, [this](const int value) {
         updateOpacityValueLabel(value);
         if (!m_isApplyingUiState)
         {
-            saveAndEmitFromUi(QStringLiteral("背景透明度变化"));
+            markPendingChanges(QStringLiteral("背景透明度变化"));
         }
         });
 
@@ -207,12 +260,22 @@ void SettingsDock::bindAppearanceSignals()
     connect(m_resetBackgroundButton, &QToolButton::clicked, this, [this]() {
         resetBackgroundPathToDefault();
         });
+
+    connect(m_startupDefaultTabCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        markPendingChanges(QStringLiteral("启动默认页签切换"));
+        });
+
+    connect(m_applySettingsButton, &QToolButton::clicked, this, [this]() {
+        saveAndEmitFromUi(QStringLiteral("点击应用按钮"));
+        });
 }
 
 void SettingsDock::loadSettingsFromJson()
 {
     m_currentAppearanceSettings = ks::settings::loadAppearanceSettings();
     applySettingsToUi(m_currentAppearanceSettings);
+    m_hasPendingChanges = false;
+    updateApplyButtonState();
     emit appearanceSettingsChanged(m_currentAppearanceSettings);
 }
 
@@ -233,10 +296,28 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
 
     m_backgroundPathEdit->setText(settings.backgroundImagePath);
     m_backgroundOpacitySlider->setValue(settings.backgroundOpacityPercent);
+
+    // startupTabIndex 作用：把配置中的启动页 key 映射为下拉框索引；缺失时回退“欢迎”。
+    int startupTabIndex = -1;
+    if (m_startupDefaultTabCombo != nullptr)
+    {
+        startupTabIndex = m_startupDefaultTabCombo->findData(settings.startupDefaultTabKey.trimmed().toLower());
+        if (startupTabIndex < 0)
+        {
+            startupTabIndex = m_startupDefaultTabCombo->findData(QStringLiteral("welcome"));
+        }
+        if (startupTabIndex >= 0)
+        {
+            m_startupDefaultTabCombo->setCurrentIndex(startupTabIndex);
+        }
+    }
+
     updateOpacityValueLabel(settings.backgroundOpacityPercent);
     updateThemeButtonStyle();
 
     m_isApplyingUiState = false;
+    m_hasPendingChanges = false;
+    updateApplyButtonState();
 }
 
 ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
@@ -264,7 +345,45 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
         : rawPathText;
 
     collectedSettings.backgroundOpacityPercent = m_backgroundOpacitySlider->value();
+    if (m_startupDefaultTabCombo != nullptr)
+    {
+        const QString startupTabKey = m_startupDefaultTabCombo->currentData().toString().trimmed().toLower();
+        collectedSettings.startupDefaultTabKey = startupTabKey.isEmpty()
+            ? QStringLiteral("welcome")
+            : startupTabKey;
+    }
+    else
+    {
+        collectedSettings.startupDefaultTabKey = QStringLiteral("welcome");
+    }
+
     return collectedSettings;
+}
+
+void SettingsDock::markPendingChanges(const QString& triggerReason)
+{
+    Q_UNUSED(triggerReason);
+    if (m_isApplyingUiState)
+    {
+        return;
+    }
+
+    m_hasPendingChanges = true;
+    updateApplyButtonState();
+}
+
+void SettingsDock::updateApplyButtonState()
+{
+    if (m_applySettingsButton == nullptr)
+    {
+        return;
+    }
+
+    m_applySettingsButton->setEnabled(m_hasPendingChanges);
+    m_applySettingsButton->setToolTip(
+        m_hasPendingChanges
+        ? QStringLiteral("应用当前设置改动（主题/背景立即生效，启动默认页签下次启动生效）")
+        : QStringLiteral("当前设置已应用，无待提交改动"));
 }
 
 void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
@@ -280,8 +399,11 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
 
     if (nextSettings.themeMode == m_currentAppearanceSettings.themeMode
         && nextSettings.backgroundImagePath == m_currentAppearanceSettings.backgroundImagePath
-        && nextSettings.backgroundOpacityPercent == m_currentAppearanceSettings.backgroundOpacityPercent)
+        && nextSettings.backgroundOpacityPercent == m_currentAppearanceSettings.backgroundOpacityPercent
+        && nextSettings.startupDefaultTabKey == m_currentAppearanceSettings.startupDefaultTabKey)
     {
+        m_hasPendingChanges = false;
+        updateApplyButtonState();
         return;
     }
 
@@ -299,6 +421,8 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
     }
 
     m_currentAppearanceSettings = nextSettings;
+    m_hasPendingChanges = false;
+    updateApplyButtonState();
 
     info << settingsEvent
         << "[SettingsDock] 外观设置已保存，触发来源="
@@ -309,7 +433,8 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         << m_currentAppearanceSettings.backgroundImagePath.toStdString()
         << "，透明度="
         << m_currentAppearanceSettings.backgroundOpacityPercent
-        << "%"
+        << "%，启动默认页签="
+        << m_currentAppearanceSettings.startupDefaultTabKey.toStdString()
         << eol;
 
     emit appearanceSettingsChanged(m_currentAppearanceSettings);
@@ -383,11 +508,11 @@ void SettingsDock::openBackgroundFileDialog()
     }
 
     m_backgroundPathEdit->setText(selectedFilePath);
-    saveAndEmitFromUi(QStringLiteral("浏览按钮选择背景图"));
+    markPendingChanges(QStringLiteral("浏览按钮选择背景图"));
 }
 
 void SettingsDock::resetBackgroundPathToDefault()
 {
     m_backgroundPathEdit->setText(QStringLiteral("style/ksword_background.png"));
-    saveAndEmitFromUi(QStringLiteral("恢复默认背景路径"));
+    markPendingChanges(QStringLiteral("恢复默认背景路径"));
 }
