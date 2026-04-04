@@ -445,10 +445,20 @@ void HexEditorWidget::selectRangeByOffset(
     const std::uint64_t oldStartOffset = m_selectionRangeStartOffset;
     const std::uint64_t oldEndOffset = m_selectionRangeEndOffset;
 
+    // 非鼠标拖拽路径（如查找命中跳转）统一使用十六进制列高亮。
+    if (!m_linearSelectDragging)
+    {
+        m_selectionVisualAsciiColumn = false;
+    }
+    // selectAsciiColumn：记录本次可视选区是否绘制在 ASCII 列。
+    const bool selectAsciiColumn = m_selectionVisualAsciiColumn;
+
     m_hexTable->clearSelection();
 
     bool firstCell = true;
     std::uint64_t newEndOffset = offset;
+    // lastSelectedAsciiRow：避免同一行 ASCII 单元格重复 setSelected。
+    int lastSelectedAsciiRow = -1;
     for (int index = 0; index < length; ++index)
     {
         // currentOffset：当前循环正在处理的目标字节偏移。
@@ -463,20 +473,44 @@ void HexEditorWidget::selectRangeByOffset(
         }
 
         newEndOffset = currentOffset;
-        // item：当前偏移对应的字节单元格，用于设置可视选中状态。
-        QTableWidgetItem* item = m_hexTable->item(row, column);
-        if (item != nullptr)
+
+        // hexItem：当前偏移对应的十六进制字节单元格。
+        QTableWidgetItem* hexItem = m_hexTable->item(row, column);
+        // asciiItem：当前行 ASCII 列单元格，用于 ASCII 跨行选区视觉反馈。
+        QTableWidgetItem* asciiItem = m_hexTable->item(row, m_bytesPerRow + 1);
+
+        if (selectAsciiColumn)
+        {
+            if (asciiItem != nullptr && lastSelectedAsciiRow != row)
+            {
+                asciiItem->setSelected(true);
+                lastSelectedAsciiRow = row;
+            }
+        }
+        else if (hexItem != nullptr)
         {
             // 显式设置为选中态，确保拖拽框选时始终能看到蓝色高亮。
-            item->setSelected(true);
+            hexItem->setSelected(true);
         }
+
         if (firstCell)
         {
             // 当前单元格仅用于焦点/滚动定位，不应清空已构建的选区。
-            m_hexTable->setCurrentCell(row, column, QItemSelectionModel::NoUpdate);
+            if (selectAsciiColumn)
+            {
+                m_hexTable->setCurrentCell(row, m_bytesPerRow + 1, QItemSelectionModel::NoUpdate);
+            }
+            else
+            {
+                m_hexTable->setCurrentCell(row, column, QItemSelectionModel::NoUpdate);
+            }
             if (scrollToCenter)
             {
-                m_hexTable->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+                QTableWidgetItem* scrollItem = selectAsciiColumn ? asciiItem : hexItem;
+                if (scrollItem != nullptr)
+                {
+                    m_hexTable->scrollToItem(scrollItem, QAbstractItemView::PositionAtCenter);
+                }
             }
             firstCell = false;
         }
@@ -518,8 +552,12 @@ void HexEditorWidget::selectLinearRange(
     const bool oldRangeValid = m_selectionRangeValid;
     const std::uint64_t oldStartOffset = m_selectionRangeStartOffset;
     const std::uint64_t oldEndOffset = m_selectionRangeEndOffset;
+    // selectAsciiColumn：记录本次拖拽是否要求把可视选区绘制在 ASCII 列。
+    const bool selectAsciiColumn = m_selectionVisualAsciiColumn;
 
     m_hexTable->clearSelection();
+    // lastSelectedAsciiRow：避免同一行 ASCII 单元格在循环中重复选中。
+    int lastSelectedAsciiRow = -1;
 
     for (std::uint64_t byteOffset = rangeStartOffset; byteOffset <= rangeEndOffset; ++byteOffset)
     {
@@ -534,7 +572,17 @@ void HexEditorWidget::selectLinearRange(
 
         // byteItem：当前偏移对应的字节单元格，负责展示选中高亮。
         QTableWidgetItem* byteItem = m_hexTable->item(rowIndex, columnIndex);
-        if (byteItem != nullptr)
+        // asciiItem：当前行 ASCII 列单元格，用于 ASCII 跨行选区。
+        QTableWidgetItem* asciiItem = m_hexTable->item(rowIndex, m_bytesPerRow + 1);
+        if (selectAsciiColumn)
+        {
+            if (asciiItem != nullptr && lastSelectedAsciiRow != rowIndex)
+            {
+                asciiItem->setSelected(true);
+                lastSelectedAsciiRow = rowIndex;
+            }
+        }
+        else if (byteItem != nullptr)
         {
             // 拖拽路径上的所有字节都设置为选中态，保证视觉高亮连续可见。
             byteItem->setSelected(true);
@@ -543,10 +591,21 @@ void HexEditorWidget::selectLinearRange(
         if (byteOffset == safeCurrentOffset)
         {
             // 当前单元格仅用于光标位置，不应触发 ClearAndSelect 覆盖整段选区。
-            m_hexTable->setCurrentCell(rowIndex, columnIndex, QItemSelectionModel::NoUpdate);
-            if (scrollToCurrent && byteItem != nullptr)
+            if (selectAsciiColumn)
             {
-                m_hexTable->scrollToItem(byteItem, QAbstractItemView::EnsureVisible);
+                m_hexTable->setCurrentCell(rowIndex, m_bytesPerRow + 1, QItemSelectionModel::NoUpdate);
+            }
+            else
+            {
+                m_hexTable->setCurrentCell(rowIndex, columnIndex, QItemSelectionModel::NoUpdate);
+            }
+            if (scrollToCurrent)
+            {
+                QTableWidgetItem* scrollItem = selectAsciiColumn ? asciiItem : byteItem;
+                if (scrollItem != nullptr)
+                {
+                    m_hexTable->scrollToItem(scrollItem, QAbstractItemView::EnsureVisible);
+                }
             }
         }
     }

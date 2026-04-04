@@ -627,7 +627,8 @@ void HexEditorWidget::rebuildTable()
         }
 
         QTableWidgetItem* asciiItem = new QTableWidgetItem(asciiText);
-        asciiItem->setFlags(Qt::ItemIsEnabled);
+        // ASCII 列允许被选中，满足“在 ASCII 列跨行高亮”的交互需求。
+        asciiItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
         m_hexTable->setItem(rowIndex, m_bytesPerRow + 1, asciiItem);
     }
 
@@ -638,6 +639,7 @@ void HexEditorWidget::rebuildTable()
         m_linearSelectDragging = false;
         m_linearSelectAnchorValid = false;
         m_linearSelectAnchorOffset = 0;
+        m_selectionVisualAsciiColumn = false;
     }
 }
 
@@ -715,7 +717,8 @@ void HexEditorWidget::updateAsciiCellByRow(const int rowIndex)
     if (asciiItem == nullptr)
     {
         asciiItem = new QTableWidgetItem();
-        asciiItem->setFlags(Qt::ItemIsEnabled);
+        // 维持 ASCII 列可选中属性，避免重建后丢失跨行选区视觉反馈。
+        asciiItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
         m_hexTable->setItem(rowIndex, m_bytesPerRow + 1, asciiItem);
     }
     asciiItem->setText(asciiText);
@@ -748,7 +751,8 @@ void HexEditorWidget::updateRowHighlightByRow(const int rowIndex)
             continue;
         }
 
-        if (m_selectionRangeValid &&
+        if (!m_selectionVisualAsciiColumn &&
+            m_selectionRangeValid &&
             byteOffset >= std::min(m_selectionRangeStartOffset, m_selectionRangeEndOffset) &&
             byteOffset <= std::max(m_selectionRangeStartOffset, m_selectionRangeEndOffset))
         {

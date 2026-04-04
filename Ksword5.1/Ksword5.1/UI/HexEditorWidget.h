@@ -611,9 +611,14 @@ private:
     // - 作用：标记锚点偏移是否有效。
     bool m_linearSelectAnchorValid = false;
 
+    // m_selectionVisualAsciiColumn：
+    // - 作用：标记当前线性选区是否以 ASCII 列作为视觉高亮目标；
+    // - true 时只在 ASCII 列显示跨行选中，false 时在十六进制字节列显示。
+    bool m_selectionVisualAsciiColumn = false;
+
     // m_selectionRangeValid：
     // - 作用：标记当前是否存在自定义线性选区；
-    // - 选区只覆盖十六进制字节区，不选 ASCII 列。
+    // - 选区本体始终以“字节偏移区间”保存，便于复制/解析逻辑复用。
     bool m_selectionRangeValid = false;
 
     // m_selectionRangeStartOffset：
