@@ -1156,22 +1156,27 @@ void MonitorDock::initializeWmiTab()
 {
     m_wmiPage = new QWidget(m_sideTabWidget);
     m_wmiLayout = new QVBoxLayout(m_wmiPage);
-    m_wmiLayout->setContentsMargins(4, 4, 4, 4);
-    m_wmiLayout->setSpacing(6);
+    m_wmiLayout->setContentsMargins(3, 3, 3, 3);
+    m_wmiLayout->setSpacing(4);
 
-    m_wmiSideToolBox = new QToolBox(m_wmiPage);
-    // 让折叠栏获得可伸缩空间，避免“WMI订阅”页在中等窗口高度下被压缩出内部滚动条。
-    m_wmiLayout->addWidget(m_wmiSideToolBox, 1);
+    // WMI 顶部配置区改为左右分栏：
+    // - 左侧：Provider 枚举与过滤；
+    // - 右侧：订阅类选择、WHERE 模板与订阅控制；
+    // - 不再使用折叠栏，避免频繁切页与空间浪费。
+    QWidget* wmiTopConfigPanel = new QWidget(m_wmiPage);
+    QHBoxLayout* wmiTopConfigLayout = new QHBoxLayout(wmiTopConfigPanel);
+    wmiTopConfigLayout->setContentsMargins(0, 0, 0, 0);
+    wmiTopConfigLayout->setSpacing(6);
 
-    // Provider 折叠页。
-    m_wmiProviderPanel = new QWidget(m_wmiSideToolBox);
+    // Provider 左侧面板。
+    m_wmiProviderPanel = new QWidget(wmiTopConfigPanel);
     m_wmiProviderPanelLayout = new QVBoxLayout(m_wmiProviderPanel);
-    m_wmiProviderPanelLayout->setContentsMargins(4, 4, 4, 4);
-    m_wmiProviderPanelLayout->setSpacing(6);
+    m_wmiProviderPanelLayout->setContentsMargins(3, 3, 3, 3);
+    m_wmiProviderPanelLayout->setSpacing(4);
 
     m_wmiProviderControlLayout = new QHBoxLayout();
     m_wmiProviderControlLayout->setContentsMargins(0, 0, 0, 0);
-    m_wmiProviderControlLayout->setSpacing(6);
+    m_wmiProviderControlLayout->setSpacing(4);
 
     m_wmiProviderFilterEdit = new QLineEdit(m_wmiProviderPanel);
     m_wmiProviderFilterEdit->setPlaceholderText(QStringLiteral("按Provider或命名空间过滤"));
@@ -1180,7 +1185,7 @@ void MonitorDock::initializeWmiTab()
     m_wmiProviderRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_wmiProviderPanel);
     m_wmiProviderRefreshButton->setToolTip(QStringLiteral("刷新WMI Provider"));
     m_wmiProviderRefreshButton->setStyleSheet(blueButtonStyle());
-    m_wmiProviderRefreshButton->setFixedWidth(34);
+    m_wmiProviderRefreshButton->setFixedWidth(32);
 
     m_wmiProviderStatusLabel = new QLabel(QStringLiteral("● 待刷新"), m_wmiProviderPanel);
     m_wmiProviderStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
@@ -1212,35 +1217,37 @@ void MonitorDock::initializeWmiTab()
     m_wmiProviderTableView->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_wmiProviderTableView->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_wmiProviderTableView->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_wmiProviderTableView->verticalHeader()->setDefaultSectionSize(22);
+    m_wmiProviderTableView->setMinimumHeight(220);
 
     m_wmiProviderPanelLayout->addLayout(m_wmiProviderControlLayout);
     m_wmiProviderPanelLayout->addWidget(m_wmiProviderTableView, 1);
-    m_wmiSideToolBox->addItem(m_wmiProviderPanel, QStringLiteral("WMI Providers"));
+    wmiTopConfigLayout->addWidget(m_wmiProviderPanel, 1);
 
-    // 订阅折叠页。
-    m_wmiSubscribePanel = new QWidget(m_wmiSideToolBox);
+    // 订阅右侧面板。
+    m_wmiSubscribePanel = new QWidget(wmiTopConfigPanel);
     m_wmiSubscribeLayout = new QVBoxLayout(m_wmiSubscribePanel);
-    m_wmiSubscribeLayout->setContentsMargins(4, 4, 4, 4);
-    m_wmiSubscribeLayout->setSpacing(6);
+    m_wmiSubscribeLayout->setContentsMargins(3, 3, 3, 3);
+    m_wmiSubscribeLayout->setSpacing(4);
 
     m_wmiEventClassControlLayout = new QHBoxLayout();
     m_wmiEventClassControlLayout->setContentsMargins(0, 0, 0, 0);
-    m_wmiEventClassControlLayout->setSpacing(6);
+    m_wmiEventClassControlLayout->setSpacing(4);
 
     m_wmiSelectAllClassesButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_wmiSubscribePanel);
     m_wmiSelectAllClassesButton->setToolTip(QStringLiteral("全选事件类"));
     m_wmiSelectAllClassesButton->setStyleSheet(blueButtonStyle());
-    m_wmiSelectAllClassesButton->setFixedWidth(34);
+    m_wmiSelectAllClassesButton->setFixedWidth(32);
 
     m_wmiSelectNoneClassesButton = new QPushButton(QIcon(":/Icon/process_pause.svg"), QString(), m_wmiSubscribePanel);
     m_wmiSelectNoneClassesButton->setToolTip(QStringLiteral("全不选事件类"));
     m_wmiSelectNoneClassesButton->setStyleSheet(blueButtonStyle());
-    m_wmiSelectNoneClassesButton->setFixedWidth(34);
+    m_wmiSelectNoneClassesButton->setFixedWidth(32);
 
     m_wmiSelectWin32ClassesButton = new QPushButton(QIcon(":/Icon/process_tree.svg"), QString(), m_wmiSubscribePanel);
     m_wmiSelectWin32ClassesButton->setToolTip(QStringLiteral("仅选择Win32_*"));
     m_wmiSelectWin32ClassesButton->setStyleSheet(blueButtonStyle());
-    m_wmiSelectWin32ClassesButton->setFixedWidth(34);
+    m_wmiSelectWin32ClassesButton->setFixedWidth(32);
 
     m_wmiEventClassControlLayout->addWidget(new QLabel(QStringLiteral("事件类"), m_wmiSubscribePanel));
     m_wmiEventClassControlLayout->addStretch(1);
@@ -1264,12 +1271,13 @@ void MonitorDock::initializeWmiTab()
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_wmiEventClassTable->verticalHeader()->setDefaultSectionSize(22);
     // 事件类表先设置为可收敛尺寸策略，具体高度由 updateWmiSubscribePanelCompactLayout 动态计算。
     m_wmiEventClassTable->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
     QHBoxLayout* whereLayout = new QHBoxLayout();
     whereLayout->setContentsMargins(0, 0, 0, 0);
-    whereLayout->setSpacing(6);
+    whereLayout->setSpacing(4);
     whereLayout->addWidget(new QLabel(QStringLiteral("WHERE模板"), m_wmiSubscribePanel));
 
     m_wmiWhereTemplateCombo = new QComboBox(m_wmiSubscribePanel);
@@ -1282,40 +1290,39 @@ void MonitorDock::initializeWmiTab()
 
     m_wmiWhereEditor = new QPlainTextEdit(m_wmiSubscribePanel);
     m_wmiWhereEditor->setPlaceholderText(QStringLiteral("可选：输入WQL WHERE子句"));
-    // WHERE 子句改为单行输入体验，降低折叠页高度并避免多行占位。
+    // WHERE 子句改为单行输入体验，降低右侧订阅区高度并避免多行占位。
     m_wmiWhereEditor->setMaximumBlockCount(1);
     m_wmiWhereEditor->setLineWrapMode(QPlainTextEdit::NoWrap);
     m_wmiWhereEditor->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_wmiWhereEditor->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_wmiWhereEditor->setStyleSheet(blueInputStyle());
-    // 按用户要求只保留一行高度。
-    m_wmiWhereEditor->setFixedHeight(30);
+    // 保持单行输入并压缩高度，给类列表与结果表留出更多可视行。
+    m_wmiWhereEditor->setFixedHeight(26);
 
     m_wmiSubscribeControlLayout = new QHBoxLayout();
     m_wmiSubscribeControlLayout->setContentsMargins(0, 0, 0, 0);
-    m_wmiSubscribeControlLayout->setSpacing(6);
+    m_wmiSubscribeControlLayout->setSpacing(4);
 
-    // WMI 订阅控制按钮移到折叠栏外（父控件改为 m_wmiPage），
-    // 避免订阅折叠页继续增高导致滚动条出现。
-    m_wmiStartSubscribeButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_wmiPage);
+    // 订阅控制保留在右侧面板内，形成“配置+控制”一体区，减少纵向重复占位。
+    m_wmiStartSubscribeButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_wmiSubscribePanel);
     m_wmiStartSubscribeButton->setToolTip(QStringLiteral("开始订阅"));
     m_wmiStartSubscribeButton->setStyleSheet(blueButtonStyle());
-    m_wmiStartSubscribeButton->setFixedWidth(34);
+    m_wmiStartSubscribeButton->setFixedWidth(32);
 
-    m_wmiStopSubscribeButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), QString(), m_wmiPage);
+    m_wmiStopSubscribeButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), QString(), m_wmiSubscribePanel);
     m_wmiStopSubscribeButton->setToolTip(QStringLiteral("停止订阅"));
     m_wmiStopSubscribeButton->setStyleSheet(blueButtonStyle());
-    m_wmiStopSubscribeButton->setFixedWidth(34);
+    m_wmiStopSubscribeButton->setFixedWidth(32);
 
-    m_wmiPauseSubscribeButton = new QPushButton(QIcon(":/Icon/process_pause.svg"), QString(), m_wmiPage);
+    m_wmiPauseSubscribeButton = new QPushButton(QIcon(":/Icon/process_pause.svg"), QString(), m_wmiSubscribePanel);
     m_wmiPauseSubscribeButton->setToolTip(QStringLiteral("暂停/继续订阅"));
     m_wmiPauseSubscribeButton->setStyleSheet(blueButtonStyle());
-    m_wmiPauseSubscribeButton->setFixedWidth(34);
+    m_wmiPauseSubscribeButton->setFixedWidth(32);
 
-    m_wmiSubscribeStatusLabel = new QLabel(QStringLiteral("● 未订阅"), m_wmiPage);
+    m_wmiSubscribeStatusLabel = new QLabel(QStringLiteral("● 未订阅"), m_wmiSubscribePanel);
     m_wmiSubscribeStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
 
-    m_wmiSubscribeControlLayout->addWidget(new QLabel(QStringLiteral("WMI订阅控制"), m_wmiPage));
+    m_wmiSubscribeControlLayout->addWidget(new QLabel(QStringLiteral("WMI订阅控制"), m_wmiSubscribePanel));
     m_wmiSubscribeControlLayout->addStretch(1);
     m_wmiSubscribeControlLayout->addWidget(m_wmiStartSubscribeButton);
     m_wmiSubscribeControlLayout->addWidget(m_wmiStopSubscribeButton);
@@ -1326,13 +1333,14 @@ void MonitorDock::initializeWmiTab()
     m_wmiSubscribeLayout->addWidget(m_wmiEventClassTable, 1);
     m_wmiSubscribeLayout->addLayout(whereLayout);
     m_wmiSubscribeLayout->addWidget(m_wmiWhereEditor, 0);
-    // 初始化时先按“紧凑高度”收敛订阅面板，防止首帧就出现折叠页内部滚动条。
+    m_wmiSubscribeLayout->addLayout(m_wmiSubscribeControlLayout, 0);
+    // 初始化时先按“紧凑高度”收敛事件类表，防止首帧就出现多余滚动条。
     updateWmiSubscribePanelCompactLayout();
 
-    m_wmiSideToolBox->addItem(m_wmiSubscribePanel, QStringLiteral("WMI订阅"));
+    wmiTopConfigLayout->addWidget(m_wmiSubscribePanel, 1);
 
-    // 把订阅控制区放在折叠栏外，减少子折叠页高度，避免出现额外滚动条。
-    m_wmiLayout->addLayout(m_wmiSubscribeControlLayout, 0);
+    // 顶部左右分栏统一加入 WMI 主布局。
+    m_wmiLayout->addWidget(wmiTopConfigPanel, 0);
 
     // 结果表。
     m_wmiEventTable = new QTableWidget(m_wmiPage);
@@ -1416,12 +1424,11 @@ void MonitorDock::initializeWmiTab()
     m_wmiLayout->addWidget(wmiFilterWidget, 0);
     m_wmiLayout->addWidget(m_wmiEventTable, 1);
     // 调整 WMI 页面纵向占比：
-    // - 折叠配置区与外部控制区保持紧凑；
+    // - 顶部左右配置区保持紧凑；
     // - 事件结果表优先占用剩余空间。
     m_wmiLayout->setStretch(0, 2);
     m_wmiLayout->setStretch(1, 0);
-    m_wmiLayout->setStretch(2, 0);
-    m_wmiLayout->setStretch(3, 3);
+    m_wmiLayout->setStretch(2, 4);
     m_sideTabWidget->addTab(m_wmiPage, QStringLiteral("WMI"));
 }
 
@@ -1432,10 +1439,10 @@ void MonitorDock::updateWmiSubscribePanelCompactLayout()
         return;
     }
 
-    // fallbackVisibleRowCount 用途：事件类尚未加载时，先按固定可视行数预留紧凑高度。
-    const int fallbackVisibleRowCount = 4;
-    // maxVisibleRowCount 用途：限制折叠页最大可视行数，防止表格过高挤压折叠栏。
-    const int maxVisibleRowCount = 6;
+    // fallbackVisibleRowCount 用途：事件类尚未加载时先预留较多行，改善首帧可读性。
+    const int fallbackVisibleRowCount = 8;
+    // maxVisibleRowCount 用途：新版左右布局下提升可视上限，避免“可见行数太少”。
+    const int maxVisibleRowCount = 12;
     // currentRowCount 用途：记录当前事件类表总行数，作为可视高度计算输入。
     const int currentRowCount = m_wmiEventClassTable->rowCount();
     // visibleRowCount 用途：将可视行数夹在 [fallbackVisibleRowCount, maxVisibleRowCount] 区间内。
@@ -1445,25 +1452,25 @@ void MonitorDock::updateWmiSubscribePanelCompactLayout()
         maxVisibleRowCount);
 
     // headerHeight 用途：记录事件类表头高度；若表头为空则使用默认值避免高度为 0。
-    int headerHeight = 24;
+    int headerHeight = 22;
     QHeaderView* headerView = m_wmiEventClassTable->horizontalHeader();
     if (headerView != nullptr)
     {
-        headerHeight = std::max(20, headerView->height());
+        headerHeight = std::max(18, headerView->height());
     }
 
     // rowHeight 用途：记录单行默认高度，参与表格总高度估算。
-    int rowHeight = 24;
+    int rowHeight = 22;
     QHeaderView* verticalHeader = m_wmiEventClassTable->verticalHeader();
     if (verticalHeader != nullptr)
     {
-        rowHeight = std::max(20, verticalHeader->defaultSectionSize());
+        rowHeight = std::max(18, verticalHeader->defaultSectionSize());
     }
 
     // framePixels 用途：补偿表格边框占用像素，防止最底行被裁切。
     const int framePixels = m_wmiEventClassTable->frameWidth() * 2;
     // safetyPadding 用途：额外留白，吸收不同系统样式下的高度浮动。
-    const int safetyPadding = 6;
+    const int safetyPadding = 4;
     // tableTargetHeight 用途：最终写回到事件类表的紧凑高度。
     const int tableTargetHeight =
         headerHeight + (visibleRowCount * rowHeight) + framePixels + safetyPadding;

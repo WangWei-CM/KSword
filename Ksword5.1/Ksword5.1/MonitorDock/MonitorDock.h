@@ -115,7 +115,7 @@ private:
     void refreshWmiProvidersAsync();
     void refreshWmiEventClassesAsync();
     // updateWmiSubscribePanelCompactLayout：
-    // - 作用：按当前事件类数量动态收敛“WMI订阅”折叠页高度，避免 QToolBox 内部滚动条；
+    // - 作用：按当前事件类数量动态收敛“WMI订阅”右侧面板中的事件类表高度；
     // - 调用：初始化订阅UI后调用一次，事件类刷新完成后再次调用；
     // - 入参/出参：无（直接读取并更新成员控件尺寸）。
     void updateWmiSubscribePanelCompactLayout();
@@ -205,7 +205,6 @@ private:
     // ========================= WMI 页 ===========================
     QWidget* m_wmiPage = nullptr;                  // WMI 主页面。
     QVBoxLayout* m_wmiLayout = nullptr;            // WMI 页面布局。
-    QToolBox* m_wmiSideToolBox = nullptr;          // WMI 侧边折叠菜单。
     QWidget* m_wmiProviderPanel = nullptr;         // Provider 面板。
     QVBoxLayout* m_wmiProviderPanelLayout = nullptr; // Provider 面板布局。
     QHBoxLayout* m_wmiProviderControlLayout = nullptr; // Provider 控制栏布局。

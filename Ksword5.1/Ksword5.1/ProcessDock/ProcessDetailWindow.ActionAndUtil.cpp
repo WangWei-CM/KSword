@@ -71,6 +71,47 @@ void ProcessDetailWindow::executeTerminateThreadsAction()
     showActionResultMessage("TerminateThread(全部线程)", actionOk, detailText, actionEvent);
 }
 
+void ProcessDetailWindow::executeSelectedTerminateAction()
+{
+    if (m_terminateActionCombo == nullptr)
+    {
+        kLogEvent terminateComboNullEvent;
+        err << terminateComboNullEvent
+            << "[ProcessDetailWindow] executeSelectedTerminateAction: m_terminateActionCombo 为空。"
+            << eol;
+        return;
+    }
+
+    // 结束方案调度：
+    // - 下拉框只负责选择策略；
+    // - 真正执行仍复用现有动作函数，确保日志链路和行为不变。
+    const int actionId = m_terminateActionCombo->currentData().toInt();
+    switch (actionId)
+    {
+    case 0:
+        executeTaskKillAction(false);
+        break;
+    case 1:
+        executeTaskKillAction(true);
+        break;
+    case 2:
+        executeTerminateProcessAction();
+        break;
+    case 3:
+        executeTerminateThreadsAction();
+        break;
+    default:
+    {
+        kLogEvent invalidTerminateActionEvent;
+        warn << invalidTerminateActionEvent
+            << "[ProcessDetailWindow] executeSelectedTerminateAction: 未知 actionId="
+            << actionId
+            << eol;
+        break;
+    }
+    }
+}
+
 void ProcessDetailWindow::executeSuspendProcessAction()
 {
     // 挂起进程日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。

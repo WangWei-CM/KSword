@@ -450,6 +450,14 @@ void ProcessDock::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
 
+    // 首次显示或重新回到可见状态时，把搜索焦点交给进程搜索框：
+    // - 用户切到该页面后可以直接键入搜索词；
+    // - 不要求先手动点击搜索框。
+    if (m_sideTabWidget != nullptr && m_sideTabWidget->currentWidget() == m_processListPage)
+    {
+        focusProcessSearchBox(true);
+    }
+
     if (m_initialRefreshScheduled)
     {
         return;
@@ -578,6 +586,16 @@ void ProcessDock::initializeTopControls()
         .arg(KswordTheme::TextSecondaryHex()));
     m_refreshStateLabel->setToolTip("当前刷新状态");
 
+    // 进程搜索框：
+    // - 直接基于当前缓存做本地过滤，不额外触发系统查询；
+    // - 切到“进程列表”页后会自动聚焦，支持直接键入搜索词。
+    m_processSearchLineEdit = new QLineEdit(this);
+    m_processSearchLineEdit->setClearButtonEnabled(true);
+    m_processSearchLineEdit->setPlaceholderText("搜索 PID / 名称 / 路径 / 命令行 / 用户");
+    m_processSearchLineEdit->setToolTip("切到进程列表页后可直接输入搜索词");
+    m_processSearchLineEdit->setStyleSheet(buildBlueLineEditStyle());
+    m_processSearchLineEdit->setMaximumWidth(320);
+
     // 按钮统一蓝色风格（图标按钮版本）。
     const QString buttonStyle = buildBlueButtonStyle(true);
     m_treeToggleButton->setStyleSheet(buttonStyle);
@@ -590,6 +608,7 @@ void ProcessDock::initializeTopControls()
     m_controlLayout->addWidget(m_viewModeCombo);
     m_controlLayout->addWidget(m_startButton);
     m_controlLayout->addWidget(m_pauseButton);
+    m_controlLayout->addWidget(m_processSearchLineEdit);
     m_controlLayout->addStretch(1);
     m_controlLayout->addWidget(m_refreshLabel);
     m_controlLayout->addWidget(m_refreshSlider);
@@ -1159,6 +1178,28 @@ void ProcessDock::initializeConnections()
         showHeaderContextMenu(localPosition);
     });
 
+    // 搜索框输入变更后直接重建表格：
+    // - 仅过滤当前缓存，不等待下一轮刷新；
+    // - 这样键入 notepad 等关键词时结果会立即收敛。
+    connect(m_processSearchLineEdit, &QLineEdit::textChanged, this, [this](const QString&) {
+        rebuildTable();
+    });
+
+    // 切回“进程列表”页时自动聚焦搜索框：
+    // - 用户无需先点一下输入框；
+    // - 可以直接开始输入 notepad 等搜索词。
+    connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](const int currentIndex) {
+        if (m_sideTabWidget == nullptr || currentIndex < 0)
+        {
+            return;
+        }
+        if (m_sideTabWidget->widget(currentIndex) != m_processListPage)
+        {
+            return;
+        }
+        focusProcessSearchBox(true);
+    });
+
     // currentItemChanged 作用：
     // - 记录当前被用户选中的进程 identityKey；
     // - 周期刷新后 rebuildTable 会按这个 key 恢复高亮。
@@ -1331,6 +1372,73 @@ void ProcessDock::initializeTimer()
         requestAsyncRefresh(false);
     });
     // 首次显示前不启动，避免主窗口启动阶段后台偷跑刷新。
+}
+
+void ProcessDock::focusProcessSearchBox(const bool selectAllText)
+{
+    if (m_processSearchLineEdit == nullptr)
+    {
+        return;
+    }
+
+    // 使用 singleShot(0) 把聚焦动作延后到当前事件循环尾部：
+    // - 避免与页签切换、显示事件内部的焦点竞争；
+    // - 保证用户切页后第一时间就能直接输入搜索词。
+    QPointer<QLineEdit> guardSearchLineEdit(m_processSearchLineEdit);
+    QTimer::singleShot(0, this, [guardSearchLineEdit, selectAllText]() {
+        if (guardSearchLineEdit == nullptr)
+        {
+            return;
+        }
+
+        guardSearchLineEdit->setFocus(Qt::ShortcutFocusReason);
+        if (selectAllText)
+        {
+            guardSearchLineEdit->selectAll();
+        }
+    });
+}
+
+QString ProcessDock::currentProcessSearchText() const
+{
+    if (m_processSearchLineEdit == nullptr)
+    {
+        return QString();
+    }
+
+    return m_processSearchLineEdit->text().trimmed();
+}
+
+bool ProcessDock::processRecordMatchesSearch(const ks::process::ProcessRecord& processRecord) const
+{
+    const QString searchText = currentProcessSearchText();
+    if (searchText.isEmpty())
+    {
+        return true;
+    }
+
+    // 搜索字段覆盖：
+    // - 进程名 / PID / 路径 / 命令行 / 用户 / 签名 / 启动时间 / 父 PID；
+    // - 统一使用 contains(忽略大小写) 做模糊匹配，方便快速定位。
+    const QStringList searchableFields{
+        QString::fromStdString(processRecord.processName),
+        QString::number(processRecord.pid),
+        QString::fromStdString(processRecord.imagePath),
+        QString::fromStdString(processRecord.commandLine),
+        QString::fromStdString(processRecord.userName),
+        QString::fromStdString(processRecord.signatureState),
+        QString::fromStdString(processRecord.startTimeText),
+        QString::number(processRecord.parentPid)
+    };
+    for (const QString& fieldText : searchableFields)
+    {
+        if (fieldText.contains(searchText, Qt::CaseInsensitive))
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void ProcessDock::updateRefreshStateUi(const bool refreshing, const QString& stateText)
@@ -2209,7 +2317,7 @@ void ProcessDock::rebuildTable()
         m_trackedSelectedIdentityKey = trackedIdentityKeyBeforeRebuild;
         m_trackedSelectedColumn = trackedColumnBeforeRebuild;
     }
-    else if (!trackedIdentityKeyBeforeRebuild.empty())
+    else if (!trackedIdentityKeyBeforeRebuild.empty() && currentProcessSearchText().isEmpty())
     {
         m_trackedSelectedIdentityKey.clear();
         m_trackedSelectedColumn = 0;
@@ -2297,6 +2405,14 @@ void ProcessDock::updateUsageSummaryInHeader(const std::vector<DisplayRow>& disp
 
 std::vector<ProcessDock::DisplayRow> ProcessDock::buildDisplayOrder() const
 {
+    // 搜索激活时统一返回扁平结果：
+    // - 用户搜索的目标是“快速定位进程”，不需要树结构干扰；
+    // - 扁平结果还能避免父节点未命中时留下孤立缩进。
+    if (!currentProcessSearchText().isEmpty())
+    {
+        return buildListDisplayOrder();
+    }
+
     return isTreeModeEnabled() ? buildTreeDisplayOrder() : buildListDisplayOrder();
 }
 
@@ -2307,6 +2423,11 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildListDisplayOrder() const
 
     for (const auto& cachePair : m_cacheByIdentity)
     {
+        if (!processRecordMatchesSearch(cachePair.second.record))
+        {
+            continue;
+        }
+
         DisplayRow displayRow{};
         displayRow.record = const_cast<ks::process::ProcessRecord*>(&cachePair.second.record);
         displayRow.depth = 0;

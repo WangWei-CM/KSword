@@ -141,6 +141,7 @@
     <ClCompile Include="Framework\LogDockWidget.cpp" />
     <ClCompile Include="Framework\Progress.cpp" />
     <ClCompile Include="Framework\ProgressDockWidget.cpp" />
+    <ClCompile Include="Framework\ThemedMessageBox.cpp" />
     <ClCompile Include="KernelDock\KernelDock.cpp" />
     <ClCompile Include="KernelDock\KernelDockQueryWorker.cpp" />
     <ClCompile Include="MainWindow.cpp" />
@@ -175,7 +176,10 @@
     <ClCompile Include="SettingsDock\AppearanceSettings.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.cpp" />
     <ClCompile Include="StartupDock\StartupDock.cpp" />
+    <ClCompile Include="StartupDock\StartupDock.Detail.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Ui.cpp" />
+    <ClCompile Include="StartupDock\StartupDock.Winsock.cpp" />
+    <ClCompile Include="StartupDock\StartupDock.Wmi.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Actions.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Helpers.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Registry.cpp" />
@@ -212,6 +216,7 @@
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.Internal.h" />
     <ClInclude Include="Framework\LogDockWidget.h" />
     <ClInclude Include="Framework\ProgressDockWidget.h" />
+    <ClInclude Include="Framework\ThemedMessageBox.h" />
     <ClInclude Include="KernelDock\KernelDockQueryWorker.h" />
     <ClInclude Include="ksword\ksword.h" />
     <ClInclude Include="ksword\process\process.h" />

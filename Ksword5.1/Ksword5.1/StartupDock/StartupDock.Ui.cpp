@@ -188,6 +188,7 @@ void StartupDock::initializeTabs()
     m_driversPage = createSingleTablePage(&m_driversTable, m_sideTabWidget);
     m_tasksPage = createSingleTablePage(&m_tasksTable, m_sideTabWidget);
     m_registryPage = createRegistryTreePage(&m_registryTree, m_sideTabWidget);
+    m_wmiPage = createSingleTablePage(&m_wmiTable, m_sideTabWidget);
 
     m_sideTabWidget->addTab(m_allPage, QIcon(":/Icon/process_list.svg"), QStringLiteral("总览"));
     m_sideTabWidget->addTab(m_logonPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("登录"));
@@ -195,6 +196,7 @@ void StartupDock::initializeTabs()
     m_sideTabWidget->addTab(m_driversPage, QIcon(":/Icon/process_details.svg"), QStringLiteral("驱动"));
     m_sideTabWidget->addTab(m_tasksPage, QIcon(":/Icon/process_refresh.svg"), QStringLiteral("计划任务"));
     m_sideTabWidget->addTab(m_registryPage, QIcon(":/Icon/file_find.svg"), QStringLiteral("高级注册表"));
+    m_sideTabWidget->addTab(m_wmiPage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("WMI"));
 }
 
 void StartupDock::rebuildAllTables()
@@ -205,6 +207,7 @@ void StartupDock::rebuildAllTables()
     rebuildTableForCategory(StartupCategory::Drivers, m_driversTable);
     rebuildTableForCategory(StartupCategory::Tasks, m_tasksTable);
     rebuildRegistryTree();
+    rebuildTableForCategory(StartupCategory::Wmi, m_wmiTable);
 }
 
 void StartupDock::rebuildTableForCategory(const StartupCategory category, QTableWidget* tableWidget)
@@ -365,8 +368,7 @@ void StartupDock::rebuildRegistryTree()
         groupItem->setData(0, kStartupEntryIndexRole, -1);
         groupItem->setData(0, kStartupTreeNodeKindRole, static_cast<int>(StartupTreeNodeKind::Group));
         groupItem->setData(0, kStartupTreeLocationRole, groupLocationText);
-        groupItem->setText(toStartupColumn(StartupColumn::Name), groupLocationText);
-        groupItem->setText(toStartupColumn(StartupColumn::Type), QStringLiteral("注册表位置"));
+        groupItem->setFirstColumnSpanned(true);
         groupItem->setIcon(toStartupColumn(StartupColumn::Name), createBlueIcon(":/Icon/file_find.svg"));
 
         const std::vector<int> totalEntryIndexList = totalEntryIndexMap.value(groupLocationText);
@@ -374,8 +376,9 @@ void StartupDock::rebuildRegistryTree()
         if (!visibleEntryIndexList.empty())
         {
             groupItem->setText(
-                toStartupColumn(StartupColumn::Detail),
-                QStringLiteral("匹配 %1 项，总计 %2 项")
+                toStartupColumn(StartupColumn::Name),
+                QStringLiteral("%1    匹配 %2 项 / 总计 %3 项")
+                    .arg(groupLocationText)
                     .arg(visibleEntryIndexList.size())
                     .arg(totalEntryIndexList.size()));
             for (const int entryIndex : visibleEntryIndexList)
@@ -389,10 +392,12 @@ void StartupDock::rebuildRegistryTree()
         else
         {
             groupItem->setText(
-                toStartupColumn(StartupColumn::Detail),
+                toStartupColumn(StartupColumn::Name),
                 totalEntryIndexList.empty()
-                ? QStringLiteral("无条目")
-                : QStringLiteral("当前过滤下无匹配项（总计 %1 项）").arg(totalEntryIndexList.size()));
+                ? QStringLiteral("%1    无条目").arg(groupLocationText)
+                : QStringLiteral("%1    当前过滤下无匹配项（总计 %2 项）")
+                    .arg(groupLocationText)
+                    .arg(totalEntryIndexList.size()));
 
             QTreeWidgetItem* placeholderItem = new QTreeWidgetItem(groupItem);
             placeholderItem->setData(0, kStartupEntryIndexRole, -1);
