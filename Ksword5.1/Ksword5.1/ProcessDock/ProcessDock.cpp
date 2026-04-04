@@ -3815,6 +3815,17 @@ void ProcessDock::executeOpenFolderAction()
     showActionResultMessage("打开所在目录", actionOk, detailText, actionEvent);
 }
 
+void ProcessDock::requestOpenProcessDetailByPid(const std::uint32_t pid)
+{
+    // 对外统一入口：便于 FileDock/主窗口按 PID 打开进程详情。
+    kLogEvent requestDetailEvent;
+    info << requestDetailEvent
+        << "[ProcessDock] requestOpenProcessDetailByPid: pid="
+        << pid
+        << eol;
+    openProcessDetailWindowByPid(pid);
+}
+
 void ProcessDock::openProcessDetailsPlaceholder()
 {
     ks::process::ProcessRecord* processRecord = selectedRecord();

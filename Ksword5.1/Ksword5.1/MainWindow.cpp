@@ -387,34 +387,14 @@ void MainWindow::resizeEvent(QResizeEvent* event)
 
 void MainWindow::initMenus()
 {
-    // 文件菜单
+    // 顶部菜单栏仅保留“文件 -> 退出”，符合当前精简要求。
     QMenu* fileMenu = menuBar()->addMenu("文件(&F)");
-
-    // 新建动作
-    QAction* newAction = new QAction("新建(&N)", this);
-    newAction->setShortcut(Qt::CTRL | Qt::Key_N);
-    connect(newAction, &QAction::triggered, this, [this]() {
-        // 占位实现
-        });
-    fileMenu->addAction(newAction);
-
-    // 打开动作
-    QAction* openAction = new QAction("打开(&O)", this);
-    openAction->setShortcut(Qt::CTRL | Qt::Key_O);
-    fileMenu->addAction(openAction);
-
-    fileMenu->addSeparator();
 
     // 退出动作
     QAction* exitAction = new QAction("退出(&X)", this);
     exitAction->setShortcut(Qt::CTRL | Qt::Key_Q);
     connect(exitAction, &QAction::triggered, QApplication::instance(), &QApplication::quit);
     fileMenu->addAction(exitAction);
-
-    // 其他菜单
-    menuBar()->addMenu("编辑(&E)");
-
-    // 视图菜单将在initDockWidgets后添加Dock切换动作
 }
 
 void MainWindow::initPrivilegeStatusButtons()
@@ -1342,19 +1322,8 @@ void MainWindow::initDockWidgets()
             "}"));
     }
 
-    // 将Dock Widget的切换动作添加到菜单
-    reportStartupProgress(72, QStringLiteral("正在注册视图菜单..."));
-    QMenu* viewMenu = menuBar()->addMenu("视图(&V)");
-    QList<ads::CDockWidget*> allDocks = {
-        m_dockWelcome, m_dockProcess, m_dockNetwork, m_dockMemory,
-        m_dockFile, m_dockDriver, m_dockKernel, m_dockMonitorTab, m_dockHardware,
-        m_dockPrivilege, m_dockSettings, m_dockWindow, m_dockRegistry, m_dockHandle, m_dockStartup,
-        m_dockCurrentOp, m_dockLog, m_dockImmediate, m_dockMonitor
-    };
-
-    for (auto dock : allDocks) {
-        viewMenu->addAction(dock->toggleViewAction());
-    }
+    // 顶部菜单栏已精简，不再注册 Dock 视图切换菜单。
+    reportStartupProgress(72, QStringLiteral("跳过视图菜单注册"));
 }
 #define ADS_TABIFY_DOCK_WIDGET_AVAILABLE
 void MainWindow::setupDockLayout()
@@ -1421,6 +1390,26 @@ void MainWindow::focusHandleDockByPid(const quint32 pid)
     {
         m_dockHandle->raise();
         m_dockHandle->setVisible(true);
+    }
+}
+
+void MainWindow::openProcessDetailByPid(const quint32 pid)
+{
+    // 跳转入口日志：记录来自外部模块的 PID 跳转请求。
+    kLogEvent openProcessDetailEvent;
+    info << openProcessDetailEvent
+        << "[MainWindow] openProcessDetailByPid: pid="
+        << pid
+        << eol;
+
+    if (m_processWidget != nullptr)
+    {
+        m_processWidget->requestOpenProcessDetailByPid(static_cast<std::uint32_t>(pid));
+    }
+    if (m_dockProcess != nullptr)
+    {
+        m_dockProcess->raise();
+        m_dockProcess->setVisible(true);
     }
 }
 

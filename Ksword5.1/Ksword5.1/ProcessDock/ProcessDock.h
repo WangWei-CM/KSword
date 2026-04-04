@@ -72,6 +72,14 @@ public:
     // 返回：无。
     void refreshThemeVisuals();
 
+    // requestOpenProcessDetailByPid 作用：
+    // - 外部模块按 PID 打开进程详情窗口；
+    // - 若已存在对应窗口则复用，不重复创建。
+    // 调用方式：MainWindow/FileDock 通过此入口跳转。
+    // 参数 pid：目标进程 PID。
+    // 返回：无。
+    void requestOpenProcessDetailByPid(std::uint32_t pid);
+
 protected:
     // showEvent 作用：
     // - 在 Dock 首次真正显示时再启动首轮刷新与周期监视；

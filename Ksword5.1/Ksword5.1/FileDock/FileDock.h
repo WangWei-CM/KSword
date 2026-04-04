@@ -237,6 +237,12 @@ private:
     // - 作用：打开文件详情窗口（多 Tab 信息展示）。
     void showFileDetailDialog(const QString& filePath);
 
+    // openHandleUsageScanWindow：
+    // - 作用：基于当前右键选中路径打开“占用句柄扫描结果”窗口；
+    // - 扫描结果独立展示，不阻塞 FileDock 主界面。
+    // - 参数 scanPaths：待扫描路径集合（文件或目录）。
+    void openHandleUsageScanWindow(const std::vector<QString>& scanPaths);
+
     // ======================= 工具函数 =========================
     // currentIndexPath：
     // - 作用：获取面板当前选中索引对应的绝对路径。

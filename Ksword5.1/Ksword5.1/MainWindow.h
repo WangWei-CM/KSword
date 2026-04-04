@@ -74,6 +74,13 @@ public slots:
     // 入参 pid：目标进程 PID。
     void focusHandleDockByPid(quint32 pid);
 
+    // openProcessDetailByPid 作用：
+    // - 将“进程”Dock 置顶并打开指定 PID 的进程详情窗口；
+    // - 供 FileDock 的“占用句柄扫描结果”窗口跳转调用。
+    // 调用方式：QMetaObject::invokeMethod(mainWindow, "openProcessDetailByPid", ... )。
+    // 入参 pid：目标进程 PID。
+    void openProcessDetailByPid(quint32 pid);
+
 protected:
     // eventFilter 作用：
     // - 监听 ADS 浮动 Dock 窗口的显示与尺寸变化；

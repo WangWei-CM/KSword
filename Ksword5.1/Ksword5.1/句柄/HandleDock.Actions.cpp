@@ -172,7 +172,8 @@ void HandleDock::closeSameTypeHandlesInCurrentProcess()
 
     std::vector<std::uint64_t> targetHandles;
     targetHandles.reserve(128);
-    for (const HandleRow& row : m_rows)
+    // 批量关闭范围使用完整快照 m_allRows，避免受当前过滤条件影响。
+    for (const HandleRow& row : m_allRows)
     {
         if (row.processId == selectedRow->processId && row.typeIndex == selectedRow->typeIndex)
         {
@@ -239,4 +240,3 @@ void HandleDock::closeSameTypeHandlesInCurrentProcess()
 
     requestAsyncRefresh(true);
 }
-

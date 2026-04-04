@@ -668,8 +668,24 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
         }
         typeNameSet.insert(row.typeName);
 
+        // 预算聚焦策略：
+        // - 若用户指定 PID/类型过滤，则优先把预算用于该范围；
+        // - 保持 m_allRows 仍是完整快照，不破坏本地过滤能力。
+        const bool pidMatchedForBudget =
+            !options.hasPidFilter ||
+            row.processId == options.pidFilter;
+        const QString typeFilterText = options.typeFilterText.trimmed();
+        const bool hasTypeFilter =
+            !typeFilterText.isEmpty() &&
+            typeFilterText != QStringLiteral("全部类型");
+        const bool typeMatchedForBudget =
+            !hasTypeFilter ||
+            row.typeName.compare(typeFilterText, Qt::CaseInsensitive) == 0;
+        const bool candidateForNameResolve = pidMatchedForBudget && typeMatchedForBudget;
+
         const bool shouldResolveName =
             options.resolveObjectName &&
+            candidateForNameResolve &&
             nameBudgetRemain > 0 &&
             shouldAttemptNameQuery(row.typeName);
         if (shouldResolveName)

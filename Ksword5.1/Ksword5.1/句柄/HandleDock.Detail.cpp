@@ -20,12 +20,12 @@
 
 void HandleDock::requestHandleDetailRefresh(const bool forceRefresh)
 {
-    if (m_handleDetailRefreshInProgress && !forceRefresh)
+    if (m_handleDetailRefreshInProgress)
     {
-        return;
-    }
-    if (m_handleDetailRefreshInProgress && forceRefresh)
-    {
+        if (forceRefresh)
+        {
+            m_handleDetailRefreshPending = true;
+        }
         return;
     }
 
@@ -109,6 +109,15 @@ void HandleDock::applyHandleDetailRefreshResult(
     if (m_handleDetailStatusLabel != nullptr)
     {
         m_handleDetailStatusLabel->setText(statusText);
+    }
+
+    if (m_handleDetailRefreshPending)
+    {
+        m_handleDetailRefreshPending = false;
+        QMetaObject::invokeMethod(this, [this]()
+            {
+                requestHandleDetailRefresh(true);
+            }, Qt::QueuedConnection);
     }
 }
 

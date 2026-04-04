@@ -52,6 +52,15 @@
     <ClCompile Include="FileDock\FileDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="FileDock\FileDock.HandleUsage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="FileDock\FileHandleUsageScanner.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="FileDock\FileHandleUsageWindow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -366,6 +375,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="FileDock\ManualFileSystemParser.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="FileDock\FileHandleUsageScanner.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="FileDock\FileHandleUsageWindow.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.h">
