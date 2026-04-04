@@ -1,0 +1,1008 @@
+﻿#include "../../KswordTotalHead.h"
+#include <shlobj.h> 
+#define CURRENT_MODULE "进程管理"
+#include "Process.h"
+#include "ProcessDetail.h"
+
+ProcessDetailManager kProcDtl;
+
+
+static std::unordered_map<DWORD, LPDIRECT3DTEXTURE9> g_ProcessIconTextures;
+// 排序类型
+enum SortType {
+    SortType_Name,
+    SortType_PID,
+    SortType_User,
+    SortType_None
+};
+void GetProcessList();
+static char filter_text[128] = "";
+static SortType current_sort = SortType_PID;
+static bool sort_ascending = true;
+static int selected_pid = -1;
+
+
+// CreateProcess参数存储
+static std::wstring g_modulePath;          // 模块路径（宽字符，适配Windows API）
+static std::wstring g_cmdLineArgs;         // 命令行参数
+static DWORD g_creationFlags = 0;          // dwCreationFlags
+static std::wstring g_environment;         // 环境变量（用户输入）
+static std::wstring g_workingDir;          // 工作目录
+static STARTUPINFOW g_startupInfo = { 0 };   // STARTUPINFO
+static PROCESS_INFORMATION g_procInfo = { 0 };// PROCESS_INFORMATION
+// 全局输入框变量（扩大作用域）
+static char modulePathUtf8[1024] = "C:\\Windows\\System32\\cmd.exe";
+static char cmdLineUtf8[1024] = "";
+static char workDirUtf8[1024] = "";
+static char envPid[32] = "";
+
+// 标志位状态变量（修复左值问题）
+static bool flagUseDefaultEnv = true;
+static bool flagCreateNewConsole = false;           // CREATE_NEW_CONSOLE
+static bool flagCreateSuspended = false;            // CREATE_SUSPENDED
+static bool flagCreateNoWindow = false;             // CREATE_NO_WINDOW
+static bool flagDebugProcess = false;               // DEBUG_PROCESS
+static bool flagDebugOnlyThis = false;              // DEBUG_ONLY_THIS_PROCESS
+static bool flagNewProcessGroup = false;            // CREATE_NEW_PROCESS_GROUP
+static bool flagUnicodeEnv = false;                 // CREATE_UNICODE_ENVIRONMENT
+static bool flagSeparateWowVdm = false;             // CREATE_SEPARATE_WOW_VDM
+static bool flagSharedWowVdm = false;               // CREATE_SHARED_WOW_VDM
+static bool flagInheritAffinity = false;            // INHERIT_PARENT_AFFINITY
+static bool flagProtectedProcess = false;           // CREATE_PROTECTED_PROCESS
+static bool flagExtendedStartup = false;            // EXTENDED_STARTUPINFO_PRESENT
+static bool flagBreakawayFromJob = false;           // CREATE_BREAKAWAY_FROM_JOB
+static bool flagPreserveCodeAuthz = false;          // CREATE_PRESERVE_CODE_AUTHZ_LEVEL
+
+static char lpDesktopUtf8[256] = "";
+static char lpTitleUtf8[256] = "";
+static bool flagStartfUseShowWindow = false;
+static bool flagStartfUseSize = false;
+static bool flagStartfUsePosition = false;
+static bool flagStartfUseCountChars = false;
+static bool flagStartfUseFillAttribute = false;
+static bool flagStartfForceOnFeedback = false;
+static bool flagStartfForceOffFeedback = false;
+static bool flagStartfUseStdHandles = false;
+static int showWindowMode = SW_SHOW;
+
+static bool KswordProcessTabInited = false;
+
+// 全局状态
+static std::vector<kProcess> dummy_processes;
+
+static void ReleaseIconTextures();
+
+// 从文件路径提取16×16图标（返回HICON，需手动释放）
+HICON Get16x16IconFromPath(const std::wstring& path) {
+    // 方案1：使用SHGetFileInfo提取文件关联图标
+    SHFILEINFOW shfi = { 0 };
+    DWORD_PTR res = SHGetFileInfoW(
+        path.c_str(),
+        0,
+        &shfi,
+        sizeof(shfi),
+        SHGFI_ICON | SHGFI_SMALLICON // SMALLICON对应16×16
+    );
+    if (res != 0) {
+        return shfi.hIcon; // 成功获取16×16图标
+    }
+
+    // 方案2：若失败，使用系统默认应用程序图标
+    return (HICON)LoadImageW(
+        NULL,
+        IDI_APPLICATION,
+        IMAGE_ICON,
+        16, 16, // 强制16×16尺寸
+        LR_SHARED
+    );
+}
+
+/**
+ * 将HICON（16×16图标）转换为DX9纹理
+ * @param hIcon 图标句柄（需提前获取16×16尺寸）
+ * @return 成功返回IDirect3DTexture9*，失败返回nullptr
+ */
+extern LPDIRECT3DDEVICE9        g_pd3dDevice;
+LPDIRECT3DTEXTURE9 IconToD3D9Texture(HICON hIcon) {
+    if (!g_pd3dDevice || !hIcon) return nullptr;
+
+    // 1. 创建16×16的D3D纹理（格式：A8R8G8B8，带alpha通道）
+    LPDIRECT3DTEXTURE9 pTexture = nullptr;
+    HRESULT hr = g_pd3dDevice->CreateTexture(
+        16, 16,          // 宽×高（固定16×16）
+        1,               // 层级（仅1级）
+        D3DUSAGE_DYNAMIC, // 动态纹理（可锁定更新）
+        D3DFMT_A8R8G8B8, // 像素格式（内存中实际为BGRA顺序）
+        D3DPOOL_DEFAULT, // 默认内存池
+        &pTexture,
+        nullptr
+    );
+    if (FAILED(hr)) {
+        kLog.err("创建D3D纹理失败！", CURRENT_MODULE);
+        return nullptr;
+    }
+
+    // 2. 将图标绘制到临时位图（获取像素数据）
+    HDC hdcScreen = GetDC(nullptr);
+    HDC hdcMem = CreateCompatibleDC(hdcScreen);
+    BITMAPINFO bmi = { 0 };
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = 16;
+    bmi.bmiHeader.biHeight = -16; // Top-Down（原点在左上角）
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32; // 32位BGRA格式（含Alpha）
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* pBits = nullptr;
+    HBITMAP hbmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
+    if (!hbmp) {
+        kLog.err("创建DIB位图失败！", CURRENT_MODULE);
+        ReleaseDC(nullptr, hdcScreen);
+        DeleteDC(hdcMem);
+        pTexture->Release();
+        return nullptr;
+    }
+    HGDIOBJ hOldBmp = SelectObject(hdcMem, hbmp);
+
+    // 2.2 绘制图标到DIB（带透明背景）
+    // 关键：用透明色填充背景（而非白色），避免图标边缘残留底色
+    RECT rcIcon = { 0, 0, 16, 16 };
+    HBRUSH hTransBrush = CreateSolidBrush(RGB(0, 0, 0)); // 临时黑色背景（后续会被图标覆盖）
+    FillRect(hdcMem, &rcIcon, hTransBrush);
+    DeleteObject(hTransBrush);
+
+    // 绘制图标（自动处理透明通道）
+    DrawIconEx(
+        hdcMem, 0, 0, hIcon,
+        16, 16, 0, nullptr, DI_NORMAL | DI_COMPAT
+    );
+
+    // 3. 将位图数据直接复制到D3D纹理（无需格式转换，两者都是BGRA）
+    D3DLOCKED_RECT lockedRect;
+    hr = pTexture->LockRect(
+        0,
+        &lockedRect,
+        nullptr,
+        D3DLOCK_DISCARD // 动态纹理推荐使用此标志
+    );
+    if (FAILED(hr)) {
+        kLog.err("锁定D3D纹理失败！", CURRENT_MODULE);
+        SelectObject(hdcMem, hOldBmp);
+        DeleteObject(hbmp);
+        DeleteDC(hdcMem);
+        ReleaseDC(nullptr, hdcScreen);
+        pTexture->Release();
+        return nullptr;
+    }
+
+    // 3.1 直接复制像素数据（GDI的BGRA与DX9的A8R8G8B8内存布局完全一致）
+    // 注意：lockedRect.Pitch可能大于16*4（存在内存对齐），需按行复制
+    BYTE* pSrc = (BYTE*)pBits;
+    BYTE* pDst = (BYTE*)lockedRect.pBits;
+    for (int y = 0; y < 16; y++) {
+        // 每行复制16个像素（每个像素4字节）
+        memcpy(
+            &pDst[y * lockedRect.Pitch],  // D3D纹理当前行地址
+            &pSrc[y * 16 * 4],            // GDI位图当前行地址（16*4字节/行）
+            16 * 4                         // 每行字节数
+        );
+    }
+
+    // 3.2 解锁纹理并清理资源
+    pTexture->UnlockRect(0);
+    SelectObject(hdcMem, hOldBmp);
+    DeleteObject(hbmp);
+    DeleteDC(hdcMem);
+    ReleaseDC(nullptr, hdcScreen);
+
+    return pTexture;
+}static std::wstring GetProcessPathByPID(DWORD pid) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (hProcess == NULL) return L"";
+
+    WCHAR szPath[MAX_PATH] = { 0 };
+    GetModuleFileNameExW(hProcess, NULL, szPath, MAX_PATH);
+    CloseHandle(hProcess);
+    return szPath;
+}
+static bool IsDeviceValid(LPDIRECT3DDEVICE9 device) {
+    if (!device) return false;
+    HRESULT hr = device->TestCooperativeLevel();
+    return (hr == D3D_OK || hr == D3DERR_DEVICENOTRESET);
+}
+static 
+HDESK hDesk = GetThreadDesktop(GetCurrentThreadId());
+extern LPDIRECT3DDEVICE9    g_pd3dDevice;
+LPDIRECT3DTEXTURE9 GetCachedProcessIcon(DWORD pid) {
+    HRESULT hr = g_pd3dDevice->TestCooperativeLevel();
+    if (hr == D3DERR_DEVICELOST) {
+        // 设备丢失，清理所有缓存的纹理
+        ReleaseIconTextures();
+        return NULL;
+    }
+    else if (hr == D3DERR_DEVICENOTRESET) {
+        // 设备需要重置，返回NULL
+        return NULL;
+    }
+    // 检查缓存，存在则直接返回
+    auto it = g_ProcessIconTextures.find(pid);
+    if (it != g_ProcessIconTextures.end()) {
+        //OutputDebugStringA("成功命中缓存\n");
+        return it->second;
+    }
+
+    // 不存在则创建并缓存
+
+    //OutputDebugStringA("缓存未命中\n");
+    std::wstring path = GetProcessPathByPID(pid);
+    HICON hIcon = Get16x16IconFromPath(path);
+    LPDIRECT3DTEXTURE9 pTexture = nullptr;
+    if (hIcon) {
+        pTexture = IconToD3D9Texture(hIcon);
+        DestroyIcon(hIcon); // 释放HICON资源
+    }
+
+    // 存入缓存（即使失败也存入nullptr避免重复尝试）
+    g_ProcessIconTextures[pid] = pTexture;
+    return pTexture;
+}
+
+
+
+bool SelectExecutableFile(wchar_t* outPath, size_t maxLen) {
+    OPENFILENAMEW ofn = { sizeof(OPENFILENAMEW) };
+    wchar_t fileName[1024] = L"";
+
+    ofn.hwndOwner = GetForegroundWindow();  // 使用当前活跃窗口作为父窗口
+    ofn.lpstrFilter = L"可执行文件 (*.exe)\0*.exe\0所有文件 (*.*)\0*.*\0";  // 文件筛选器
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = sizeof(fileName) / sizeof(wchar_t);
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;  // 确保文件存在
+    ofn.lpstrTitle = L"选择可执行文件";  // 对话框标题
+
+    if (GetOpenFileNameW(&ofn)) {
+        wcsncpy_s(outPath, maxLen, fileName, _TRUNCATE);
+        return true;
+    }
+    return false;
+}
+
+// 文件夹选择对话框函数
+bool SelectDirectory(wchar_t* outPath, size_t maxLen) {
+    BROWSEINFOW bi = { 0 };
+    LPITEMIDLIST pidl;
+    wchar_t displayName[MAX_PATH] = L"";
+
+    bi.hwndOwner = GetForegroundWindow();
+    bi.lpszTitle = L"选择工作目录";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_USENEWUI;  // 只返回文件系统目录
+
+    pidl = SHBrowseForFolderW(&bi);
+    if (pidl != nullptr) {
+        if (SHGetPathFromIDListW(pidl, displayName)) {
+            wcsncpy_s(outPath, maxLen, displayName, _TRUNCATE);
+            CoTaskMemFree(pidl);  // 释放内存
+            return true;
+        }
+        CoTaskMemFree(pidl);
+    }
+    return false;
+}
+
+std::string WCharToUTF8(const WCHAR* wstr) {
+    if (!wstr || *wstr == L'\0')
+        return std::string();
+
+    int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) {
+        throw std::system_error(GetLastError(), std::system_category(), "WideCharToMultiByte failed");
+    }
+
+    std::string str(len, 0);
+    int result = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, str.data(), len, nullptr, nullptr);
+    if (result == 0) {
+        throw std::system_error(GetLastError(), std::system_category(), "WideCharToMultiByte failed");
+    }
+
+    str.resize(len - 1); // 移除末尾的null
+    return str;
+}
+
+// 在程序退出或不再需要图标时调用
+static void ReleaseIconTextures() {
+    for (auto& [pid, pTexture] : g_ProcessIconTextures) {
+        if (pTexture) {
+            pTexture->Release(); // 释放D3D纹理
+        }
+    }
+    g_ProcessIconTextures.clear();
+}
+
+void RenderProcessIconInTable(DWORD pid) {
+    LPDIRECT3DTEXTURE9 pTexture = GetCachedProcessIcon(pid);
+    if (pTexture) {
+        // ImGui::Image参数：纹理指针（转换为ImTextureID）、尺寸
+        ImGui::Image(
+            (ImTextureID)pTexture,  // DX9纹理指针直接作为ImTextureID
+            ImVec2(16, 16)          // 16×16显示尺寸
+        );
+    }
+    else {
+        // 图标获取失败时显示占位符
+        ImGui::Text("[Icon]");
+    }
+}
+
+
+
+std::vector<kProcess> GetProcessListCore() {
+    std::vector<kProcess> processes;
+
+    // 添加进度显示任务
+    int Kpid = kItem.AddProcess(
+        C("获取进程列表"),
+        std::string(C("初始化快照...")),
+        NULL,  // 此任务不可取消
+        0.1f   // 初始进度10%
+    );
+
+    // 创建进程快照
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) {
+        // 更新进度为失败状态并返回
+        kItem.SetProcess(Kpid, C("创建快照失败"), 1.00f);
+        return processes;
+    }
+
+    // 更新进度：快照创建成功
+    kItem.SetProcess(Kpid, C("正在枚举进程..."), 0.3f);
+
+    PROCESSENTRY32W pe32{};
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
+
+    if (!Process32FirstW(hSnapshot, &pe32)) {
+        CloseHandle(hSnapshot);
+        kItem.SetProcess(Kpid, C("获取进程信息失败"), 1.00f);
+        return processes;
+    }
+
+    // 计算总进程数用于进度更新（先枚举一次获取总数）
+    DWORD totalCount = 0;
+    do {
+        totalCount++;
+    } while (Process32NextW(hSnapshot, &pe32));
+
+    // 重置快照到起始位置
+    Process32FirstW(hSnapshot, &pe32);
+
+    // 更新进度：开始处理进程信息
+    kItem.SetProcess(Kpid, C("处理进程信息..."), 0.4f);
+
+    DWORD currentCount = 0;
+    do {
+        kProcess info(pe32.th32ProcessID);
+        processes.push_back(std::move(info));
+
+        // 实时更新进度
+        currentCount++;
+        float progress = 0.4f + (0.5f * (float)currentCount / totalCount); // 40%到90%区间
+        kItem.SetProcess(Kpid, C("正在处理进程..."), progress);
+    } while (Process32NextW(hSnapshot, &pe32));
+
+    CloseHandle(hSnapshot);
+    dummy_processes.swap(processes);
+    // 恢复processes为原容器（如果需要返回原内容）
+    //processes.swap(dummy_processes);
+
+    // 完成进度
+    kItem.SetProcess(Kpid, C("进程列表获取完成"), 1.00f);
+
+    return processes;
+}
+void GetProcessList() {
+    std::thread(GetProcessListCore).detach(); // 异步获取进程列表
+    KswordProcessTabInited = true;
+
+}
+
+
+static void UpdateFilterAndSort(std::vector<kProcess*>& filtered,
+    const char* filter, SortType sort_type, bool ascending)
+{
+    filtered.clear();
+
+    // 过滤
+    for (auto& proc : dummy_processes) {
+        if (filter[0] == '\0' ||
+            strstr(proc.Name().data(), filter) ||
+            strstr(proc.User().data(), filter)) {
+            filtered.push_back(&proc);
+        }
+    }
+
+    // 排序
+    if (sort_type != SortType_None) {
+        std::sort(filtered.begin(), filtered.end(),
+            [sort_type, ascending](const kProcess* a, const kProcess* b) {
+                int cmp = 0;
+                switch (sort_type) {
+                case SortType_Name: cmp = strcmp(a->Name().data(), b->Name().data()); break;
+                case SortType_PID:  cmp = a->pid() - b->pid(); break;
+                case SortType_User: cmp = strcmp(a->User().data(), b->User().data()); break;
+                default: break;
+                }
+                return ascending ? (cmp < 0) : (cmp > 0);
+            });
+    }
+}
+
+static void KCreateProcessWithSuspendFollower(DWORD pid) {
+    int Kpid = kItem.AddProcess(C(std::string("PID为" + std::to_string(pid) + "的进程启动")),
+        std::string(C("取消挂起PID为" + std::to_string(pid) + "的进程启动")), NULL, 0.98f);
+    kItem.UI(Kpid,C( "点击按钮以继续运行该进程"), 1);
+    UnSuspendProcess(pid);
+    kItem.SetProcess(Kpid,"",1.00f);
+    return;
+    
+}
+
+static kProcess* SelectedProcess;//右键菜单所在进程
+void KswordGUIProcess() {
+    //渲染详细信息
+    if(KswordProcessTabInited == false)
+    {
+		std::thread (GetProcessList).detach();
+	}
+    kProcDtl.renderAll();
+
+    if (ImGui::CollapsingHeader(C("进程列表"), ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        // 过滤输入框
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 15);
+        static char filter_text[256] = "";
+        if (ImGui::InputTextWithHint("##filter", "Search (name/user)...",
+            filter_text, IM_ARRAYSIZE(filter_text))) {
+            // 过滤文本变化时重置滚动位置
+        }
+
+        // 准备过滤和排序后的数据
+        static std::vector<kProcess*> filtered_processes;
+        UpdateFilterAndSort(filtered_processes, filter_text, current_sort, sort_ascending);
+        const int totalRows = filtered_processes.size();  // 使用实际数据行数
+
+        // 表格设置
+        const float footer_height = ImGui::GetStyle().ItemSpacing.y +
+            ImGui::GetFrameHeightWithSpacing()+30;
+        ImGui::BeginChild("##table_container",
+            ImVec2(0, -footer_height), // 留出底部空间
+            ImGuiChildFlags_None,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );  // 禁用内置滚动条
+        {
+            // 获取子窗口的实际可用高度（表格可占用的最大高度）
+            const float childAvailHeight = ImGui::GetContentRegionAvail().y;
+            // 计算单行高度（包含行间距）
+            const float rowHeight = ImGui::GetTextLineHeightWithSpacing();
+            // 计算表头高度（约等于一个 frame 高度）
+            const float headerHeight = ImGui::GetFrameHeight();
+            // 动态计算可见行数：(子窗口高度 - 表头高度) / 单行高度（向上取整）
+            const int visibleRows = (int)max(1.0f, std::floor((childAvailHeight - headerHeight) / rowHeight));
+
+            static float scrollPos = 0.0f;  // 确保在此处定义scrollPos
+            const float scrollbarWidth = 15.0f;  // 滚动条宽度
+            const float columnSpacing = ImGui::GetStyle().ItemSpacing.x;  // 列间距
+
+            // 处理鼠标滚轮事件（控制滚动）
+            if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) { // 精确判断子窗口hover
+                // 独占鼠标事件，阻止父窗口响应
+                ImGui::SetNextFrameWantCaptureMouse(true);
+
+                if (ImGui::GetIO().MouseWheel != 0) {
+                    float scrollSpeed = 1.0f / (totalRows > visibleRows ? totalRows - visibleRows : 1);
+                    scrollPos += ImGui::GetIO().MouseWheel * scrollSpeed;
+                    scrollPos = std::clamp(scrollPos, 0.0f, 1.0f);
+
+                    // 双重保险：清空滚轮值
+                    ImGui::GetIO().MouseWheel = 0.0f;
+                }
+            }
+
+
+            // 计算滚动偏移
+            int scrollOffset = 0;
+            if (totalRows > visibleRows) {
+                //scrollOffset = (int)(scrollPos * (totalRows - visibleRows));
+                // 关键修改：反转滚动条与表格内容的对应关系
+                const float maxOffset = totalRows > visibleRows ? (totalRows - visibleRows) : 0;
+                // 用1 - scrollPos计算偏移量，实现滑块位置反转
+                scrollOffset = (int)((1 - scrollPos) * maxOffset); // 核心修改行
+                scrollOffset = std::clamp(scrollOffset, 0, (int)maxOffset);
+            }
+
+            ImGui::BeginColumns("TableWithScroll", 2, ImGuiOldColumnFlags_NoBorder);
+            {
+                ImGuiWindow* window = ImGui::GetCurrentWindow();
+                float windowWidth = window->Size.x;
+                float windowPaddingX = ImGui::GetStyle().WindowPadding.x * 2;
+                float availableWidth = windowWidth - windowPaddingX;
+                float tableColumnWidth = availableWidth - scrollbarWidth /*- columnSpacing*/;
+                ImGui::SetColumnWidth(0, tableColumnWidth);
+                ImGui::SetColumnWidth(1, scrollbarWidth);
+
+                // 表格标志中移除ScrollY，使用自定义滚动
+                if (ImGui::BeginTable("ProcessTable", 5,
+                    ImGuiTableFlags_Borders |
+                    ImGuiTableFlags_RowBg |
+                    ImGuiTableFlags_SizingFixedFit |
+                    ImGuiTableFlags_Resizable |
+                    ImGuiTableFlags_Sortable))
+                {
+                    // 表头设置
+                    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 0.0f, SortType_Name);
+                    ImGui::TableSetupColumn("PID", ImGuiTableColumnFlags_WidthFixed, 80.0f, SortType_PID);
+                    ImGui::TableSetupColumn("User", ImGuiTableColumnFlags_WidthStretch, 0.0f, SortType_User);
+                    ImGui::TableSetupColumn("CPU(%)", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                    ImGui::TableSetupColumn("RAM(MB)", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                    ImGui::TableSetupScrollFreeze(0, 1);
+
+                    // 排序逻辑
+                    if (ImGuiTableSortSpecs* sorts_specs = ImGui::TableGetSortSpecs())
+                    {
+                        if (sorts_specs->SpecsDirty)
+                        {
+                            current_sort = static_cast<SortType>(sorts_specs->Specs[0].ColumnUserID);
+                            sort_ascending = (sorts_specs->Specs[0].SortDirection == ImGuiSortDirection_Ascending);
+                            sorts_specs->SpecsDirty = false;
+                            scrollPos = 0.0f;  // 排序后重置滚动位置
+                        }
+                    }
+                    ImGui::TableHeadersRow();
+
+                    // 排序指示
+                    if (current_sort != SortType_None) {
+                        ImGui::TableSetColumnIndex(current_sort);
+                        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+                        const char* sort_order = sort_ascending ? "↑" : "↓";
+                        ImGui::TextDisabled(sort_order);
+                        ImGui::PopStyleVar();
+                    }
+
+                    // 根据滚动偏移绘制可见行
+                    int endRow = scrollOffset + visibleRows;
+                    if (endRow > totalRows) endRow = totalRows;
+
+                    for (int row = scrollOffset; row < endRow; row++) {
+                        kProcess* proc = filtered_processes[row];
+                        if (!proc) continue;
+
+                        ImGui::TableNextRow();
+                        ImGui::PushID(proc->pid());
+
+                        // 行选择逻辑
+                        ImVec2 initial_cursor_pos = ImGui::GetCursorPos();
+                        ImGui::TableSetColumnIndex(0);
+                        RenderProcessIconInTable(proc->pid()); ImGui::SameLine();
+                        ImGui::Text("%s", proc->Name().c_str()); ImGui::SameLine();
+
+                        bool is_selected = (selected_pid == proc->pid());
+                        bool row_clicked = ImGui::Selectable(
+                            "##row_selectable",
+                            is_selected,
+                            ImGuiSelectableFlags_SpanAllColumns |
+                            ImGuiSelectableFlags_AllowItemOverlap,
+                            ImVec2(0, ImGui::GetTextLineHeight())
+                        );
+
+                        if (row_clicked) {
+                            selected_pid = proc->pid();
+                        }
+
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                                ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+                        }
+
+                        if (ImGui::BeginPopupContextItem("##RowContextMenu")) {
+                            SelectedProcess = proc; // 保存当前选中的进程
+                            if (ImGui::BeginMenu("Terminate")) {
+                                if (ImGui::MenuItem("taskkill")) {
+                                    std::thread(KillProcessByTaskkill, SelectedProcess->pid()).detach();
+                                }
+                                if (ImGui::MenuItem("taskkill /f")) {
+                                    // 优雅关闭逻辑
+                                    SelectedProcess->Terminate(kTaskkillF);
+                                    kLog.Add(Info, C(("使用taskkill /f终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
+                                }
+                                if (ImGui::MenuItem("Terminate")) {
+
+                                    kLog.Add(Info, C(("使用Terminate终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
+                                    SelectedProcess->Terminate(kTerminate);
+                                }
+                                if (ImGui::MenuItem("Terminate Thread")) {
+                                    kLog.Add(Info, C(("使用TerminateThread终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
+                                    SelectedProcess->Terminate(kTerminateThread);
+                                }
+                                if (ImGui::MenuItem("NT Terminate")) {
+                                    kLog.Add(Info, C(("使用NT Terminate终止pid为" + std::to_string(SelectedProcess->pid()) + "的进程").c_str()), C(CURRENT_MODULE));
+                                    SelectedProcess->Terminate(kNTTerminate);
+                                }
+                                ImGui::EndMenu();
+                            }
+                            if (ImGui::MenuItem(C("挂起进程"))) {
+                                SelectedProcess->Suspend();
+                            }
+                            if (ImGui::MenuItem(C("取消挂起"))) {
+                                SelectedProcess->Resume();
+                            }
+                            if (ImGui::MenuItem(C("设置关键进程"))) {
+                                SelectedProcess->SetKeyProc();
+                            }
+                            if (ImGui::MenuItem(C("取消关键进程"))) {
+                                SelectedProcess->CancelKeyProc();
+                            }
+                            if (ImGui::MenuItem(C("打开所在位置"))) {
+                                size_t lastSlashPos = SelectedProcess->ExePath().find_last_of("\\/");
+                                if (lastSlashPos == std::string::npos) {
+                                    kLog.Add(Err, C("无法找到文件所在目录"), C(CURRENT_MODULE));
+                                }
+                                std::string folderPath = SelectedProcess->ExePath().substr(0, lastSlashPos);
+
+                                HINSTANCE result = ShellExecuteA(NULL, "explore", folderPath.c_str(), NULL, NULL, SW_SHOWDEFAULT);
+                            }
+                            if (ImGui::MenuItem(C("详细信息"))) {
+                                kProcDtl.add(SelectedProcess->pid());
+                            }
+                            ImGui::EndPopup();
+                        }
+                        // 其他列内容
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%d", proc->pid());
+
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::Text("%s", proc->User().c_str());
+
+                        ImGui::TableSetColumnIndex(3);
+                        ImGui::Text("%.1f", proc->GetCPUUsage());
+
+                        ImGui::TableSetColumnIndex(4);
+                        // 替换为kProcess实际的内存获取方式
+                        // 例如：如果内存以字节存储在mem_size成员中
+                        ImGui::Text("%.2f MB", 114514 / (1024.0f * 1024.0f));
+
+                        ImGui::PopID();
+                    }
+
+                    ImGui::EndTable();
+                }
+            }
+            ImGui::NextColumn();
+
+            // 滚动条控制区域
+            {
+                // 计算表格实际高度（包含表头）
+                float rowHeight = ImGui::GetTextLineHeightWithSpacing();
+                float tableHeight = rowHeight * (visibleRows)+ImGui::GetFrameHeight();  // 表头高度
+
+                // 当数据不足一屏时禁用滚动条
+                ImGui::PushItemFlag(ImGuiItemFlags_Disabled, totalRows <= visibleRows);
+                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, totalRows <= visibleRows ? 0.5f : 1.0f);
+
+                // 美化滚动条样式
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+                ImGui::PushStyleColor(ImGuiCol_SliderGrab, IM_COL32(100, 150, 255, 255));
+                ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, IM_COL32(150, 200, 255, 255));
+
+                // 滑块控制逻辑
+                if (ImGui::VSliderFloat("##Scrollbar", ImVec2(scrollbarWidth, tableHeight), &scrollPos, 0.0f, 1.0f, "")) {
+                    // 滑块拖动时自动限制范围
+                    scrollPos = std::clamp(scrollPos, 0.0f, 1.0f);  // 使用std::clamp替代ImGui::Clamp
+                }
+
+                // 恢复样式
+                ImGui::PopStyleColor(2);
+                ImGui::PopStyleVar(2);
+                ImGui::PopItemFlag();
+            }
+
+            ImGui::EndColumns();
+            ImGui::EndChild();
+
+            // 底部状态栏
+            ImGui::Separator();
+            ImGui::Text("Processes: %d / %d", filtered_processes.size(), dummy_processes.size());
+            ImGui::SameLine(ImGui::GetWindowWidth() - 120);
+            if (ImGui::SmallButton("Refresh")) {
+                GetProcessList();
+                kLog.Add(Info, C("刷新进程列表"), C(CURRENT_MODULE));
+                scrollPos = 0.0f;  // 刷新后重置滚动位置
+            }
+        }
+    }
+    if (ImGui::CollapsingHeader(C("CreateProcess函数")) ){
+    ImGui::InputTextWithHint(C("##ModulePath"), C("模块路径（如C:\\Windows\\notepad.exe）"), modulePathUtf8, sizeof(modulePathUtf8));
+    ImGui::SameLine();
+    if (ImGui::Button(C("浏览文件 ##CreateProcess1"))) {
+        wchar_t selectedPath[1024] = L"";
+        if (SelectExecutableFile(selectedPath, _countof(selectedPath))) {
+            g_modulePath = selectedPath;
+            WideCharToMultiByte(CP_UTF8, 0, selectedPath, -1, modulePathUtf8, sizeof(modulePathUtf8), nullptr, nullptr);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(C("粘贴 ##CreateProcess2")))
+    {
+        const wchar_t* demoPath = L"C:\\粘贴的路径.exe";
+        g_modulePath = demoPath;
+        WideCharToMultiByte(CP_UTF8, 0, demoPath, -1, modulePathUtf8, sizeof(modulePathUtf8), nullptr, nullptr);
+    }
+
+    // 2. 命令行参数
+    ImGui::InputTextWithHint(C("##CmdLine"), C("命令行参数（如test.txt）"), cmdLineUtf8, sizeof(cmdLineUtf8));
+    ImGui::SameLine();
+    if (ImGui::Button(C("粘贴 ##CreateProcess3")))
+    {
+        const wchar_t* demoArgs = L"粘贴的参数";
+        g_cmdLineArgs = demoArgs;
+        WideCharToMultiByte(CP_UTF8, 0, demoArgs, -1, cmdLineUtf8, sizeof(cmdLineUtf8), nullptr, nullptr);
+    }
+
+    // 3. dwCreationFlags选项（修复左值问题）
+    ImGui::Separator();
+    ImGui::Text(C("进程创建标志:"));
+    ImGui::Columns(2, nullptr, false); // 分为两栏
+    if (ImGui::Checkbox(C("CREATE_NEW_CONSOLE（新控制台）"), &flagCreateNewConsole))
+    {
+        g_creationFlags = flagCreateNewConsole ? (g_creationFlags | CREATE_NEW_CONSOLE) : (g_creationFlags & ~CREATE_NEW_CONSOLE);
+    }
+    if (ImGui::Checkbox(C("CREATE_SUSPENDED（挂起进程）"), &flagCreateSuspended))
+    {
+        g_creationFlags = flagCreateSuspended ? (g_creationFlags | CREATE_SUSPENDED) : (g_creationFlags & ~CREATE_SUSPENDED);
+    }
+    if (ImGui::Checkbox(C("CREATE_NO_WINDOW（无窗口）"), &flagCreateNoWindow))
+    {
+        g_creationFlags = flagCreateNoWindow ? (g_creationFlags | CREATE_NO_WINDOW) : (g_creationFlags & ~CREATE_NO_WINDOW);
+    }
+    if (ImGui::Checkbox(C("DEBUG_PROCESS（调试进程）"), &flagDebugProcess))
+    {
+        g_creationFlags = flagDebugProcess ? (g_creationFlags | DEBUG_PROCESS) : (g_creationFlags & ~DEBUG_PROCESS);
+    }
+    if (ImGui::Checkbox(C("DEBUG_ONLY_THIS_PROCESS"), &flagDebugOnlyThis))
+    {
+        g_creationFlags = flagDebugOnlyThis ? (g_creationFlags | DEBUG_ONLY_THIS_PROCESS) : (g_creationFlags & ~DEBUG_ONLY_THIS_PROCESS);
+    }
+    if (ImGui::Checkbox(C("CREATE_NEW_PROCESS_GROUP"), &flagNewProcessGroup))
+    {
+        g_creationFlags = flagNewProcessGroup ? (g_creationFlags | CREATE_NEW_PROCESS_GROUP) : (g_creationFlags & ~CREATE_NEW_PROCESS_GROUP);
+    }
+    if (ImGui::Checkbox(C("CREATE_UNICODE_ENVIRONMENT"), &flagUnicodeEnv))
+    {
+        g_creationFlags = flagUnicodeEnv ? (g_creationFlags | CREATE_UNICODE_ENVIRONMENT) : (g_creationFlags & ~CREATE_UNICODE_ENVIRONMENT);
+    }
+
+    ImGui::NextColumn(); // 切换到第二栏
+
+    // 第二栏标志位
+    if (ImGui::Checkbox(C("CREATE_SEPARATE_WOW_VDM"), &flagSeparateWowVdm))
+    {
+        g_creationFlags = flagSeparateWowVdm ? (g_creationFlags | CREATE_SEPARATE_WOW_VDM) : (g_creationFlags & ~CREATE_SEPARATE_WOW_VDM);
+    }
+    if (ImGui::Checkbox(C("CREATE_SHARED_WOW_VDM"), &flagSharedWowVdm))
+    {
+        g_creationFlags = flagSharedWowVdm ? (g_creationFlags | CREATE_SHARED_WOW_VDM) : (g_creationFlags & ~CREATE_SHARED_WOW_VDM);
+    }
+    if (ImGui::Checkbox(C("INHERIT_PARENT_AFFINITY"), &flagInheritAffinity))
+    {
+        g_creationFlags = flagInheritAffinity ? (g_creationFlags | INHERIT_PARENT_AFFINITY) : (g_creationFlags & ~INHERIT_PARENT_AFFINITY);
+    }
+    if (ImGui::Checkbox(C("CREATE_PROTECTED_PROCESS"), &flagProtectedProcess))
+    {
+        g_creationFlags = flagProtectedProcess ? (g_creationFlags | CREATE_PROTECTED_PROCESS) : (g_creationFlags & ~CREATE_PROTECTED_PROCESS);
+    }
+    if (ImGui::Checkbox(C("EXTENDED_STARTUPINFO_PRESENT"), &flagExtendedStartup))
+    {
+        g_creationFlags = flagExtendedStartup ? (g_creationFlags | EXTENDED_STARTUPINFO_PRESENT) : (g_creationFlags & ~EXTENDED_STARTUPINFO_PRESENT);
+    }
+    if (ImGui::Checkbox(C("CREATE_BREAKAWAY_FROM_JOB"), &flagBreakawayFromJob))
+    {
+        g_creationFlags = flagBreakawayFromJob ? (g_creationFlags | CREATE_BREAKAWAY_FROM_JOB) : (g_creationFlags & ~CREATE_BREAKAWAY_FROM_JOB);
+    }
+    if (ImGui::Checkbox(C("CREATE_PRESERVE_CODE_AUTHZ_LEVEL"), &flagPreserveCodeAuthz))
+    {
+        g_creationFlags = flagPreserveCodeAuthz ? (g_creationFlags | CREATE_PRESERVE_CODE_AUTHZ_LEVEL) : (g_creationFlags & ~CREATE_PRESERVE_CODE_AUTHZ_LEVEL);
+    }
+
+    ImGui::Columns(1); // 恢复单栏布局
+
+    // 4. 环境变量
+    ImGui::Separator();
+    ImGui::Text(C("环境变量:"));
+    ImGui::InputText(C("##PID"), envPid, sizeof(envPid));
+    ImGui::SameLine();
+    if (ImGui::Button(C("获取进程环境")))
+    {
+        g_environment = L"自定义环境变量=值";
+    }
+    if (ImGui::Checkbox(C("使用默认环境（NULL）"), &flagUseDefaultEnv))
+    {
+        if (flagUseDefaultEnv) g_environment.clear();
+    }
+
+    // 5. 工作目录
+    ImGui::Separator();
+    ImGui::InputTextWithHint(C("##WorkDir"), C("工作目录"), workDirUtf8, sizeof(workDirUtf8)); ImGui::SameLine();
+    if (ImGui::Button(C("浏览 ##CreateProcess4"))) {
+        wchar_t selectedPath[1024] = L"";
+        if (SelectExecutableFile(selectedPath, _countof(selectedPath))) {
+            g_modulePath = selectedPath;
+            WideCharToMultiByte(CP_UTF8, 0, selectedPath, -1, modulePathUtf8, sizeof(modulePathUtf8), nullptr, nullptr);
+        }
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button(C("粘贴 ##CreateProcess5")))
+    {
+        const wchar_t* demoDir = L"C:\\粘贴的目录";
+        g_workingDir = demoDir;
+        WideCharToMultiByte(CP_UTF8, 0, demoDir, -1, workDirUtf8, sizeof(workDirUtf8), nullptr, nullptr);
+    }
+
+    // 基础信息
+    ImGui::Text(C("结构体大小: %d 字节"), g_startupInfo.cb);
+    ImGui::InputText(C("桌面名称 (lpDesktop)"), lpDesktopUtf8, sizeof(lpDesktopUtf8));
+    ImGui::InputText(C("窗口标题 (lpTitle)"), lpTitleUtf8, sizeof(lpTitleUtf8));
+
+    // 窗口位置
+    ImGui::Separator();
+    ImGui::Checkbox(C("使用窗口位置 (STARTF_USEPOSITION)"), &flagStartfUsePosition);
+    ImGui::SameLine();
+    if (ImGui::Button(C("应用位置"))) {
+        g_startupInfo.dwFlags = flagStartfUsePosition ? (g_startupInfo.dwFlags | STARTF_USEPOSITION) : (g_startupInfo.dwFlags & ~STARTF_USEPOSITION);
+    }
+
+    ImGui::PushItemWidth(150);
+    ImGui::InputInt(C("窗口X坐标 (dwX)"), (int*)&g_startupInfo.dwX); ImGui::SameLine();
+    ImGui::InputInt(C("窗口Y坐标 (dwY)"), (int*)&g_startupInfo.dwY);
+    ImGui::PopItemWidth();
+
+    // 窗口大小
+    ImGui::Separator();
+    ImGui::Checkbox(C("使用窗口大小 (STARTF_USESIZE)"), &flagStartfUseSize);
+    ImGui::SameLine();
+    if (ImGui::Button(C("应用大小"))) {
+        g_startupInfo.dwFlags = flagStartfUseSize ? (g_startupInfo.dwFlags | STARTF_USESIZE) : (g_startupInfo.dwFlags & ~STARTF_USESIZE);
+    }
+
+    ImGui::PushItemWidth(150);
+    ImGui::InputInt(C("窗口宽度 (dwXSize)"), (int*)&g_startupInfo.dwXSize); ImGui::SameLine();
+    ImGui::InputInt(C("窗口高度 (dwYSize)"), (int*)&g_startupInfo.dwYSize);
+    ImGui::PopItemWidth();
+
+    // 控制台设置
+    ImGui::Separator();
+    ImGui::Text(C("控制台窗口设置:"));
+
+    ImGui::Checkbox(C("使用字符计数 (STARTF_USECOUNTCHARS)"), &flagStartfUseCountChars);
+    ImGui::SameLine();
+    if (ImGui::Button(C("应用字符计数"))) {
+        g_startupInfo.dwFlags = flagStartfUseCountChars ? (g_startupInfo.dwFlags | STARTF_USECOUNTCHARS) : (g_startupInfo.dwFlags & ~STARTF_USECOUNTCHARS);
+    }
+
+    ImGui::PushItemWidth(150);
+    ImGui::InputInt(C("字符宽度 (dwXCountChars)"), (int*)&g_startupInfo.dwXCountChars); ImGui::SameLine();
+    ImGui::InputInt(C("字符高度 (dwYCountChars)"), (int*)&g_startupInfo.dwYCountChars);
+    ImGui::PopItemWidth();
+
+    ImGui::Checkbox(C("使用填充属性 (STARTF_USEFILLATTRIBUTE)"), &flagStartfUseFillAttribute);
+    ImGui::SameLine();
+    if (ImGui::Button(C("应用填充属性"))) {
+        g_startupInfo.dwFlags = flagStartfUseFillAttribute ? (g_startupInfo.dwFlags | STARTF_USEFILLATTRIBUTE) : (g_startupInfo.dwFlags & ~STARTF_USEFILLATTRIBUTE);
+    }
+
+    ImGui::ColorEdit4(C("填充颜色 (dwFillAttribute)"), (float*)&g_startupInfo.dwFillAttribute, ImGuiColorEditFlags_Uint8);
+
+    // 窗口显示设置
+    ImGui::Separator();
+    ImGui::Checkbox(C("使用显示设置 (STARTF_USESHOWWINDOW)"), &flagStartfUseShowWindow);
+    ImGui::SameLine();
+    if (ImGui::Button(C("应用显示设置"))) {
+        g_startupInfo.dwFlags = flagStartfUseShowWindow ? (g_startupInfo.dwFlags | STARTF_USESHOWWINDOW) : (g_startupInfo.dwFlags & ~STARTF_USESHOWWINDOW);
+        g_startupInfo.wShowWindow = showWindowMode;
+    }
+
+    ImGui::Combo(C("显示模式 (wShowWindow)"), &showWindowMode,
+        C("SW_HIDE=0\0SW_SHOWNORMAL=1\0SW_NORMAL=1\0SW_SHOWMINIMIZED=2\0SW_SHOWMAXIMIZED=3\0SW_MAXIMIZE=3\0SW_SHOWNOACTIVATE=4\0SW_SHOW=5\0SW_MINIMIZE=6\0SW_SHOWMINNOACTIVE=7\0SW_SHOWNA=8\0SW_RESTORE=9\0SW_SHOWDEFAULT=10\0SW_FORCEMINIMIZE=11\0"));
+
+    // 其他标志
+    ImGui::Separator();
+    ImGui::Text(C("其他标志:"));
+    if (ImGui::Checkbox(C("STARTF_FORCEONFEEDBACK"), &flagStartfForceOnFeedback)) {
+        g_startupInfo.dwFlags = flagStartfForceOnFeedback ? (g_startupInfo.dwFlags | STARTF_FORCEONFEEDBACK) : (g_startupInfo.dwFlags & ~STARTF_FORCEONFEEDBACK);
+    }
+    if (ImGui::Checkbox(C("STARTF_FORCEOFFFEEDBACK"), &flagStartfForceOffFeedback)) {
+        g_startupInfo.dwFlags = flagStartfForceOffFeedback ? (g_startupInfo.dwFlags | STARTF_FORCEOFFFEEDBACK) : (g_startupInfo.dwFlags & ~STARTF_FORCEOFFFEEDBACK);
+    }
+    if (ImGui::Checkbox(C("STARTF_USESTDHANDLES"), &flagStartfUseStdHandles)) {
+        g_startupInfo.dwFlags = flagStartfUseStdHandles ? (g_startupInfo.dwFlags | STARTF_USESTDHANDLES) : (g_startupInfo.dwFlags & ~STARTF_USESTDHANDLES);
+    }
+
+    //// 标准句柄设置（仅作展示，实际使用需要设置有效句柄）
+    //if (flagStartfUseStdHandles) {
+    //    ImGui::Indent();
+    //    ImGui::Text(C("标准输入句柄 (hStdInput): 0x%p"), g_startupInfo.hStdInput);
+    //    ImGui::Text(C("标准输出句柄 (hStdOutput): 0x%p"), g_startupInfo.hStdOutput);
+    //    ImGui::Text(C("标准错误句柄 (hStdError): 0x%p"), g_startupInfo.hStdError);
+    //    ImGui::Unindent();
+    //}
+
+    // 应用按钮
+    ImGui::Separator();
+    if (ImGui::Button(C("应用所有设置"), ImVec2(-1, 0))) {
+        // 同步字符串到宽字符
+        MultiByteToWideChar(CP_UTF8, 0, lpDesktopUtf8, -1, g_startupInfo.lpDesktop, 256);
+        MultiByteToWideChar(CP_UTF8, 0, lpTitleUtf8, -1, g_startupInfo.lpTitle, 256);
+
+        // 同步标志位
+        g_startupInfo.dwFlags = 0;
+        if (flagStartfUsePosition) g_startupInfo.dwFlags |= STARTF_USEPOSITION;
+        if (flagStartfUseSize) g_startupInfo.dwFlags |= STARTF_USESIZE;
+        if (flagStartfUseCountChars) g_startupInfo.dwFlags |= STARTF_USECOUNTCHARS;
+        if (flagStartfUseFillAttribute) g_startupInfo.dwFlags |= STARTF_USEFILLATTRIBUTE;
+        if (flagStartfUseShowWindow) {
+            g_startupInfo.dwFlags |= STARTF_USESHOWWINDOW;
+            g_startupInfo.wShowWindow = showWindowMode;
+        }
+        if (flagStartfForceOnFeedback) g_startupInfo.dwFlags |= STARTF_FORCEONFEEDBACK;
+        if (flagStartfForceOffFeedback) g_startupInfo.dwFlags |= STARTF_FORCEOFFFEEDBACK;
+        if (flagStartfUseStdHandles) g_startupInfo.dwFlags |= STARTF_USESTDHANDLES;
+
+        kLog.Add(Info, C("STARTUPINFOW 设置已应用"), C(CURRENT_MODULE));
+    }
+    // 6. 调用CreateProcess
+    ImGui::Separator();
+    if (ImGui::Button(C("调用CreateProcess")))
+    {
+        // 转换UTF8输入到宽字符（修复类型不匹配）
+        wchar_t modulePathW[1024] = { 0 };
+        MultiByteToWideChar(CP_UTF8, 0, modulePathUtf8, -1, modulePathW, _countof(modulePathW));
+
+        wchar_t cmdLineW[1024] = { 0 };
+        MultiByteToWideChar(CP_UTF8, 0, cmdLineUtf8, -1, cmdLineW, _countof(cmdLineW));
+
+        wchar_t workingDirW[1024] = { 0 };
+        MultiByteToWideChar(CP_UTF8, 0, workDirUtf8, -1, workingDirW, _countof(workingDirW));
+
+        // 调用CreateProcess
+        STARTUPINFOW si = g_startupInfo;
+        PROCESS_INFORMATION pi = { 0 };
+        BOOL bSuccess = CreateProcessW(
+            modulePathW,                  // 模块路径
+            cmdLineW,                     // 命令行参数
+            nullptr,                      // 进程安全属性
+            nullptr,                      // 线程安全属性
+            FALSE,                        // 不继承句柄
+            g_creationFlags,              // 创建标志
+            flagUseDefaultEnv ? nullptr : (LPVOID)g_environment.c_str(),  // 环境变量
+            *workDirUtf8 ? workingDirW : nullptr,  // 工作目录
+            &si,                          // 启动信息
+            &pi                           // 进程信息
+        );
+
+        if (bSuccess)
+        {
+            kLog.Add(Info, C(("CreateProcess 调用成功！PID:" + std::to_string(pi.dwProcessId)).c_str()), C(CURRENT_MODULE));
+            g_procInfo = pi;
+            CloseHandle(pi.hThread); // 及时释放不需要的句柄
+        }
+        else
+        {
+            kLog.Add(Err, C(("CreateProcess 调用失败！错误码:" + std::to_string(GetLastError())).c_str()), C(CURRENT_MODULE));
+        }
+        if (flagCreateSuspended == true) {
+            std::thread(KCreateProcessWithSuspendFollower, pi.dwProcessId).detach();
+        }
+    }
+    }    
+    ImGui::EndTabItem();
+
+}
+
+#undef CURRENT_MODULE

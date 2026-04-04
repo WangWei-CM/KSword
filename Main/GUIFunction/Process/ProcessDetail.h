@@ -1,0 +1,122 @@
+#pragma once
+#include "../../KswordTotalHead.h"
+#include "process.h"
+
+struct OpenProcessTestItem {
+    std::string name;               // 权限名称
+    DWORD accessRight;              // 权限值
+    std::string result;             // 测试结果
+    bool tested;                    // 是否已测试
+};
+
+
+class ProcessOpenTest {
+private:
+    std::vector<OpenProcessTestItem> testItems;  // 权限测试列表
+    DWORD targetPID;                             // 目标进程PID
+    bool showTestWindow;                         // 窗口显示标志
+
+    // 执行单个权限测试
+    void RunTest(OpenProcessTestItem& item);
+
+    // 错误码转换为可读字符串
+    std::string GetErrorString(DWORD errorCode);
+
+public:
+    ProcessOpenTest();  // 构造函数，初始化权限列表
+
+    // 显示测试窗口
+    void ShowWindow();
+
+    // 设置目标PID
+    void SetTargetPID(DWORD pid) { targetPID = pid; }
+
+    // 显示/隐藏窗口
+    void ToggleWindow() { showTestWindow = !showTestWindow; }
+};
+
+// 定义存储令牌信息的结构体
+struct TokenInfo
+{
+    std::string enumName;
+    std::string description;
+    std::string dataType;
+    std::string value;
+    bool success;
+    DWORD errorCode;
+};
+
+
+
+class kProcessDetail : public kProcess {
+private:
+
+    HANDLE m_hToken;
+    bool m_isValid;
+    std::vector<TokenInfo> m_tokenInfos;
+
+    std::string processUser;       // 进程所属用户
+    std::string processExePath;    // 进程完整路径
+    bool isAdmin;                  // 是否为管理员权限
+    std::string processName;       // 进程名称
+    bool firstShow = true;
+	std::string commandLine;           // 命令行参数
+
+    // 新增：扩展进程信息
+    FILETIME creationTime;         // 创建时间
+    FILETIME exitTime;             // 退出时间
+    FILETIME kernelTime;           // 内核态时间
+    FILETIME userTime;             // 用户态时间
+    DWORD threadCount;             // 线程数
+    DWORD handleCount;             // 句柄数
+    LONG basePriority;             // 基本优先级
+    NTSTATUS exitStatus;           // 退出状态
+    ULONG_PTR affinityMask;        // 亲和性掩码
+    DWORD sessionId;               // 会话ID
+    DWORD parentPid;             // 父进程PID
+    std::string parentProcessName; // 父进程名称
+
+
+public:
+    std::string GetCommandLine();
+    // 仅支持PID初始化
+    explicit kProcessDetail(DWORD pid);
+    std::string FileTimeToString(FILETIME ft);  // FILETIME转字符串
+    bool GetProcessExtendedInfo();              // 获取扩展信息
+    bool GetParentProcessInfo();
+    // 渲染进程信息窗口
+    void Render();
+	ProcessOpenTest openTest; // 进程权限测试实例
+    // 辅助函数：将SID转换为字符串
+    std::string SidToString(PSID sid);
+
+    // 辅助函数：将LUID转换为字符串
+    std::string LuidToString(LUID luid);
+
+    // 辅助函数：获取特权名称
+    std::string GetPrivilegeName(LUID luid);
+
+    // 辅助函数：格式化错误代码
+    std::string FormatError(DWORD errorCode);
+
+private:
+    // 初始化并获取令牌信息
+    bool InitTokenInfo();
+    // 初始化详细进程信息
+    void InitDetailInfo();
+};
+
+class ProcessDetailManager {
+private:
+    std::vector<std::unique_ptr<kProcessDetail>> processDetails;
+public:
+    // 添加进程到管理列表（通过PID）
+    void add(DWORD pid);
+
+    // 移除指定PID的进程（返回是否成功移除）
+    bool remove(DWORD pid);
+
+    // 渲染所有进程的详细信息窗口
+    void renderAll();
+};
+

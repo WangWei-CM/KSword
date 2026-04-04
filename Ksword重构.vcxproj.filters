@@ -1,0 +1,171 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="Environment\Environment.cpp">
+      <Filter>Environment</Filter>
+    </ClCompile>
+    <ClCompile Include="Support\ksword.cpp">
+      <Filter>Support</Filter>
+    </ClCompile>
+    <ClCompile Include="Main\Ksword5Main.cpp" />
+    <ClCompile Include="imgui\imgui.cpp" />
+    <ClCompile Include="imgui\imgui_demo.cpp" />
+    <ClCompile Include="imgui\imgui_draw.cpp" />
+    <ClCompile Include="imgui\imgui_impl_dx9.cpp" />
+    <ClCompile Include="imgui\imgui_impl_win32.cpp" />
+    <ClCompile Include="imgui\imgui_tables.cpp" />
+    <ClCompile Include="imgui\imgui_widgets.cpp" />
+    <ClCompile Include="Main\GUIFunction\Ksword5GUI.cpp" />
+    <ClCompile Include="Main\GUIFunction\KswordGUIInit.cpp" />
+    <ClCompile Include="Main\GUIFunction\Process\KswordGUIProcess.cpp" />
+    <ClCompile Include="Main\SupportFunction\Ksword5SupportFunction.cpp" />
+    <ClCompile Include="Main\GUIFunction\KswordPointerWindow.cpp" />
+    <ClCompile Include="Main\GUIFunction\Process\GUIprocessCore.cpp" />
+    <ClCompile Include="Main\TextEditor\TextEditor.cpp" />
+    <ClCompile Include="Main\KswordToolBar.cpp" />
+    <ClCompile Include="Main\GUIFunction\KswordText.cpp" />
+    <ClCompile Include="Main\GUIFunction\Ksword5Title.cpp" />
+    <ClCompile Include="Main\GUIFunction\LogConsole.cpp" />
+    <ClCompile Include="Main\GUIFunction\Monitor\MonitorMain.cpp" />
+    <ClCompile Include="Main\FileExplorer\ImGuiFileDialog.cpp" />
+    <ClCompile Include="Main\GUIFunction\File\FileMain.cpp" />
+    <ClCompile Include="Main\SubProc\SecureDesktop.cpp" />
+    <ClCompile Include="Main\GUIFunction\Network\ETW.cpp" />
+    <ClCompile Include="Main\GUIFunction\Memory\MemoryMain.cpp" />
+    <ClCompile Include="Main\GUIFunction\Network\Network.cpp" />
+    <ClCompile Include="Main\GUIFunction\DLL\DLLMain.cpp" />
+    <ClCompile Include="Main\GUIFunction\Register\Register.cpp" />
+    <ClCompile Include="Main\GUIFunction\Process\ProcessInformation.cpp" />
+    <ClCompile Include="Main\GUIFunction\NT\NT.cpp" />
+    <ClCompile Include="Main\GUIFunction\Monitor\ETWMonitor.cpp" />
+    <ClCompile Include="Driver\KswordDriver.cpp" />
+    <ClCompile Include="Main\MainConsole\MainColsole.cpp" />
+    <ClCompile Include="Main\MainConsole\ConsoleHelper.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Environment\Environment.h">
+      <Filter>Environment</Filter>
+    </ClInclude>
+    <ClInclude Include="Support\ksword.h">
+      <Filter>Support</Filter>
+    </ClInclude>
+    <ClInclude Include="Main\SupportFunction\MainSupportFunction.h">
+      <Filter>Main\SupportFunction</Filter>
+    </ClInclude>
+    <ClInclude Include="Main\KswordTotalHead.h" />
+    <ClInclude Include="imgui\imconfig.h" />
+    <ClInclude Include="imgui\imgui.h" />
+    <ClInclude Include="imgui\imgui_impl_dx9.h" />
+    <ClInclude Include="imgui\imgui_impl_win32.h" />
+    <ClInclude Include="imgui\imgui_internal.h" />
+    <ClInclude Include="imgui\imstb_rectpack.h" />
+    <ClInclude Include="imgui\imstb_textedit.h" />
+    <ClInclude Include="imgui\imstb_truetype.h" />
+    <ClInclude Include="Main\GUIFunction\GUIFunction.h" />
+    <ClInclude Include="Main\Ksword5core.h" />
+    <ClInclude Include="Main\stb_image.h" />
+    <ClInclude Include="Main\stb_image_write.h" />
+    <ClInclude Include="Main\TextEditor\TextEditor.h" />
+    <ClInclude Include="resource.h" />
+    <ClInclude Include="Main\GUIFunction\Process\Process.h" />
+    <ClInclude Include="Main\GUIFunction\Monitor\MonitorMain.h" />
+    <ClInclude Include="Main\global_module_helper.hpp" />
+    <ClInclude Include="Main\FileExplorer\dirent\dirent.h" />
+    <ClInclude Include="Main\FileExplorer\stb\stb_image.h" />
+    <ClInclude Include="Main\FileExplorer\stb\stb_image_resize2.h" />
+    <ClInclude Include="Main\FileExplorer\ImGuiFileDialog.h" />
+    <ClInclude Include="Main\FileExplorer\ImGuiFileDialogConfig.h" />
+    <ClInclude Include="Main\GUIFunction\File\FileMain.h" />
+    <ClInclude Include="Main\SubProc\SubProc.h" />
+    <ClInclude Include="Main\GUIFunction\Network\Network.h" />
+    <ClInclude Include="Main\GUIFunction\Memory\Memory.h" />
+    <ClInclude Include="Main\GUIFunction\DLL\DLL.h" />
+    <ClInclude Include="Main\GUIFunction\Register\Register.h" />
+    <ClInclude Include="Main\GUIFunction\Process\ProcessDetail.h" />
+    <ClInclude Include="Main\GUIFunction\NT\nt.h" />
+    <ClInclude Include="Driver\KswordDriver.h" />
+    <ClInclude Include="Main\MainConsole\ConsolePainter.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Environment">
+      <UniqueIdentifier>{e7c46905-db61-4428-9026-7cf5fa82f117}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main">
+      <UniqueIdentifier>{1f5fede8-edfa-492b-b646-b29c63bc5528}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="SubProc">
+      <UniqueIdentifier>{912dab99-3343-4945-84ca-a533bfee5a3c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Support">
+      <UniqueIdentifier>{af0c83c2-fcb6-4144-9ff5-3e63ec73daa4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="CUIManage">
+      <UniqueIdentifier>{119610a6-0270-4534-a622-2baec37d1f93}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\ShellFunction">
+      <UniqueIdentifier>{6039b235-a9e6-4235-a0c7-b6afc930e11a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\SupportFunction">
+      <UniqueIdentifier>{16c32395-f18d-4b20-9d5f-511a9ff1af8f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\ShellFunction\Command::cd">
+      <UniqueIdentifier>{f4445f1c-4d93-4b99-b570-b1d4c093de41}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\ShellFunction\Command::apt">
+      <UniqueIdentifier>{4a4493a4-96da-41e3-b37b-36516d094672}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\Security">
+      <UniqueIdentifier>{47337d2d-1fe9-40b6-ad83-e872822f4a95}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\ShellFunction\Command::guimgr">
+      <UniqueIdentifier>{9aaf76f1-f65a-45b8-b379-d3fc30f8e42c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\ShellFunction\Command::help">
+      <UniqueIdentifier>{75bb6144-2420-45f8-aaab-2736f4ba1f06}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\ShellFunction\Command:procmgr">
+      <UniqueIdentifier>{58259691-9df4-4573-a16a-419e67fb910e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\ShellFunction\Command::selfmgr">
+      <UniqueIdentifier>{1601699c-0bb4-4602-84be-e61b085baed7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\Socket">
+      <UniqueIdentifier>{968b0c33-7766-45c8-a74d-6d329006b461}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\ShellFunction\Command::drivermgr">
+      <UniqueIdentifier>{0b9efd7f-319f-4ae3-8587-bda538f0c131}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Driver">
+      <UniqueIdentifier>{5a3e7b1f-cb7a-4c35-aff5-9a5579087de1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\ShellFunction\Command::netmgr">
+      <UniqueIdentifier>{e4197eba-8548-4fa7-a792-ba1be7bbc058}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Main\ShellFunction\Command::threadmgr">
+      <UniqueIdentifier>{f2c45791-a4c0-4cd4-a7d7-365ce68d67f0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="KswordDriver">
+      <UniqueIdentifier>{b3b42044-320e-4d61-b5c5-7a776ec2f32f}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="imgui.ini" />
+    <None Include="KswordGUI.ini" />
+    <None Include="packages.config" />
+    <None Include="D3DX9_43.dll" />
+    <None Include="x64\Release\KswordKernel.sys" />
+    <None Include="x64\Release\DriverSign.pfx" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="icon1.ico" />
+    <Image Include="Icon\DEV.ico" />
+    <Image Include="Icon\normal.ico" />
+    <Image Include="Icon\PRE.ico" />
+    <Image Include="Icon\PRO.ico" />
+    <Image Include="icon\bitmap1.bmp" />
+    <Image Include="Icon\ARK_Logo_Console.bmp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="ReKsword.rc" />
+  </ItemGroup>
+</Project>

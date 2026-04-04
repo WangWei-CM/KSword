@@ -1,0 +1,17 @@
+# 编译产物
+/bin/
+/obj/
+*.exe
+*.dll
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志文件
+*.log
+x64/
+packages/
+# IDE/编辑器配置
+.vs/
+.vscode/
