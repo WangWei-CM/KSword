@@ -40,6 +40,7 @@
 #include "StartupDock/StartupDock.h"
 #include "WindowDock/WindowDock.h"
 #include "RegistryDock/RegistryDock.h"
+#include "句柄/HandleDock.h"
 
 class LogDockWidget; // 前置声明：日志 Dock 面板类型。
 class ProgressDockWidget; // 前置声明：当前操作进度面板类型。
@@ -64,6 +65,14 @@ public:
         QWidget* parent = nullptr,
         StartupProgressCallback startupProgressCallback = StartupProgressCallback());
     ~MainWindow();
+
+public slots:
+    // focusHandleDockByPid 作用：
+    // - 将“句柄”Dock 置顶并切换 PID 过滤；
+    // - 供进程详情窗口发起“跳转到句柄视图”时调用。
+    // 调用方式：QMetaObject::invokeMethod(mainWindow, "focusHandleDockByPid", ... )。
+    // 入参 pid：目标进程 PID。
+    void focusHandleDockByPid(quint32 pid);
 
 protected:
     // eventFilter 作用：
@@ -165,6 +174,7 @@ private:
     ads::CDockWidget* m_dockSettings;
     ads::CDockWidget* m_dockWindow;
     ads::CDockWidget* m_dockRegistry;
+    ads::CDockWidget* m_dockHandle = nullptr;
     ads::CDockWidget* m_dockStartup;
     ads::CDockWidget* m_dockHardware;
     ads::CDockWidget* m_dockCurrentOp;
@@ -188,6 +198,7 @@ private:
     StartupDock* m_startupWidget;
     WindowDock* m_windowWidget;
     RegistryDock* m_registryWidget;
+    HandleDock* m_handleWidget = nullptr;
     LogDockWidget* m_logWidget; // 日志输出 Dock 的可视化日志面板。
     ProgressDockWidget* m_progressWidget; // 当前操作 Dock 的任务进度卡片面板。
     CodeEditorWidget* m_immediateEditorWidget = nullptr; // 即时窗口统一代码编辑器组件。

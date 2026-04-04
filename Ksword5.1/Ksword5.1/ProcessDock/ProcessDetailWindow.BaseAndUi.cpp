@@ -445,11 +445,15 @@ void ProcessDetailWindow::initializeDetailTab()
     m_parentInfoLabel->setStyleSheet(
         QStringLiteral("color:%1; font-weight:600;")
         .arg(KswordTheme::TextSecondaryHex()));
+    m_openHandleDockButton = new QPushButton(QIcon(":/Icon/process_list.svg"), "", m_detailTab);
+    m_openHandleDockButton->setToolTip(QStringLiteral("跳转到句柄 Dock，并按当前 PID 过滤"));
+    m_openHandleDockButton->setFixedSize(28, 28);
     m_gotoParentButton = new QPushButton(QIcon(":/Icon/process_details.svg"), "转到父进程", m_detailTab);
     m_gotoParentButton->setVisible(false);
     parentLayout->addWidget(new QLabel("父进程:", m_detailTab));
     parentLayout->addWidget(m_parentIconLabel);
     parentLayout->addWidget(m_parentInfoLabel, 1);
+    parentLayout->addWidget(m_openHandleDockButton);
     parentLayout->addWidget(m_gotoParentButton);
     m_detailLayout->addLayout(parentLayout);
 
@@ -494,6 +498,7 @@ void ProcessDetailWindow::initializeDetailTab()
     m_copyPathButton->setStyleSheet(buttonStyle);
     m_openPathFolderButton->setStyleSheet(buttonStyle);
     m_copyCommandButton->setStyleSheet(buttonStyle);
+    m_openHandleDockButton->setStyleSheet(buildBlueButtonStyle());
     m_gotoParentButton->setStyleSheet(buttonStyle);
 }
 
@@ -931,6 +936,15 @@ void ProcessDetailWindow::initializeConnections()
         emit requestOpenProcessByPid(parentPid);
     });
 
+    // 跳转句柄按钮：把当前 PID 转发给外部（MainWindow）打开句柄 Dock。
+    connect(m_openHandleDockButton, &QPushButton::clicked, this, [this]() {
+        if (m_baseRecord.pid == 0)
+        {
+            return;
+        }
+        emit requestOpenHandleDockByPid(m_baseRecord.pid);
+    });
+
     // 线程细节刷新按钮。
     connect(m_refreshThreadInspectButton, &QPushButton::clicked, this, [this]() {
         requestAsyncThreadInspectRefresh();
@@ -1031,6 +1045,10 @@ void ProcessDetailWindow::refreshDetailTabTexts()
     }
     m_pathLineEdit->setText(processPathText.trimmed().isEmpty() ? "-" : processPathText);
     m_commandLineEdit->setText(QString::fromStdString(m_baseRecord.commandLine.empty() ? "-" : m_baseRecord.commandLine));
+    if (m_openHandleDockButton != nullptr)
+    {
+        m_openHandleDockButton->setVisible(m_baseRecord.pid != 0);
+    }
 
     // 详细字段赋值。
     m_detailStartTimeValue->setText(QString::fromStdString(m_baseRecord.startTimeText.empty() ? "-" : m_baseRecord.startTimeText));

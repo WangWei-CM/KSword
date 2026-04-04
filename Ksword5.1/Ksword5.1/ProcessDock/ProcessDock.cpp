@@ -3898,6 +3898,21 @@ void ProcessDock::openProcessDetailsPlaceholder()
     connect(detailWindow, &ProcessDetailWindow::requestOpenProcessByPid, this, [this](const std::uint32_t parentPid) {
         openProcessDetailWindowByPid(parentPid);
     });
+    connect(detailWindow, &ProcessDetailWindow::requestOpenHandleDockByPid, this, [this](const std::uint32_t targetPid) {
+        const bool invokeOk = QMetaObject::invokeMethod(
+            this->parent(),
+            "focusHandleDockByPid",
+            Qt::QueuedConnection,
+            Q_ARG(quint32, static_cast<quint32>(targetPid)));
+        if (!invokeOk)
+        {
+            kLogEvent logEvent;
+            warn << logEvent
+                << "[ProcessDock] requestOpenHandleDockByPid 转发失败, pid="
+                << targetPid
+                << eol;
+        }
+    });
 
     detailWindow->show();
     detailWindow->raise();
@@ -3974,6 +3989,21 @@ void ProcessDock::openProcessDetailWindowByPid(const std::uint32_t pid)
         connect(detailWindow, &ProcessDetailWindow::requestOpenProcessByPid, this, [this](const std::uint32_t parentPid) {
             openProcessDetailWindowByPid(parentPid);
         });
+        connect(detailWindow, &ProcessDetailWindow::requestOpenHandleDockByPid, this, [this](const std::uint32_t targetPid) {
+            const bool invokeOk = QMetaObject::invokeMethod(
+                this->parent(),
+                "focusHandleDockByPid",
+                Qt::QueuedConnection,
+                Q_ARG(quint32, static_cast<quint32>(targetPid)));
+            if (!invokeOk)
+            {
+                kLogEvent logEvent;
+                warn << logEvent
+                    << "[ProcessDock] requestOpenHandleDockByPid 转发失败, pid="
+                    << targetPid
+                    << eol;
+            }
+        });
         detailWindow->show();
         detailWindow->raise();
         detailWindow->activateWindow();
@@ -4006,6 +4036,21 @@ void ProcessDock::openProcessDetailWindowByPid(const std::uint32_t pid)
     });
     connect(detailWindow, &ProcessDetailWindow::requestOpenProcessByPid, this, [this](const std::uint32_t parentPid) {
         openProcessDetailWindowByPid(parentPid);
+    });
+    connect(detailWindow, &ProcessDetailWindow::requestOpenHandleDockByPid, this, [this](const std::uint32_t targetPid) {
+        const bool invokeOk = QMetaObject::invokeMethod(
+            this->parent(),
+            "focusHandleDockByPid",
+            Qt::QueuedConnection,
+            Q_ARG(quint32, static_cast<quint32>(targetPid)));
+        if (!invokeOk)
+        {
+            kLogEvent logEvent;
+            warn << logEvent
+                << "[ProcessDock] requestOpenHandleDockByPid 转发失败, pid="
+                << targetPid
+                << eol;
+        }
     });
     detailWindow->show();
     detailWindow->raise();

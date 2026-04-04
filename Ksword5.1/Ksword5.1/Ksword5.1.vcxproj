@@ -137,6 +137,10 @@
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.Directories.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.Tables.cpp" />
     <ClCompile Include="FileDock\ManualFileSystemParser.cpp" />
+    <ClCompile Include="句柄\HandleDock.cpp" />
+    <ClCompile Include="句柄\HandleDock.Actions.cpp" />
+    <ClCompile Include="句柄\HandleDock.Native.cpp" />
+    <ClCompile Include="句柄\HandleObjectTypeWorker.cpp" />
     <ClCompile Include="HardwareDock\HardwareDock.cpp" />
     <ClCompile Include="Framework\Log.cpp" />
     <ClCompile Include="Framework\LogDockWidget.cpp" />
@@ -226,6 +230,8 @@
     <ClInclude Include="UI\UI_All.h" />
     <QtMoc Include="DriverDock\DriverDock.h" />
     <QtMoc Include="FileDock\FileDock.h" />
+    <QtMoc Include="句柄\HandleDock.h" />
+    <ClInclude Include="句柄\HandleObjectTypeWorker.h" />
     <QtMoc Include="HardwareDock\HardwareDock.h" />
     <QtMoc Include="KernelDock\KernelDock.h" />
     <QtMoc Include="MemoryDock\MemoryDock.h" />

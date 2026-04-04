@@ -23,6 +23,16 @@ namespace
     // - 避免误伤普通 QDialog/QWidget。
     constexpr const char* kThemedMessageBoxObjectName = "KswordThemedMessageBox";
 
+    // kThemePolishingPropertyName 作用：
+    // - 标记当前消息框是否正处于主题重写过程中；
+    // - 用于阻断 StyleChange/Polish 事件递归回调导致的重入崩溃。
+    constexpr const char* kThemePolishingPropertyName = "ksword_theme_polishing";
+
+    // kThemeModePropertyName 作用：
+    // - 缓存上次应用到消息框的深浅色模式；
+    // - 避免同一主题下重复 setStyleSheet/setPalette 触发额外样式事件。
+    constexpr const char* kThemeModePropertyName = "ksword_theme_dark_mode";
+
     // messageBoxWindowColor 作用：返回消息框主背景色。
     QColor messageBoxWindowColor(const bool darkModeEnabled)
     {
@@ -261,6 +271,12 @@ namespace
                 eventType == QEvent::ApplicationPaletteChange ||
                 eventType == QEvent::StyleChange)
             {
+                // 主题应用过程中会同步触发 StyleChange/PaletteChange；
+                // 若不在这里短路，会递归再次进入 polishMessageBox。
+                if (messageBox->property(kThemePolishingPropertyName).toBool())
+                {
+                    return QObject::eventFilter(watchedObject, eventObject);
+                }
                 polishMessageBox(messageBox);
             }
 
@@ -275,14 +291,52 @@ namespace
                 return;
             }
 
+            if (messageBox->property(kThemePolishingPropertyName).toBool())
+            {
+                return;
+            }
+
             const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
+            const bool themeAlreadyApplied =
+                messageBox->objectName() == QString::fromLatin1(kThemedMessageBoxObjectName) &&
+                messageBox->property(kThemeModePropertyName).toBool() == darkModeEnabled;
+
+            // currentPolishingStateResetter 作用：
+            // - 保证任意提前 return 或异常路径都能清除“正在应用主题”标记；
+            // - 避免消息框永久停留在“重入保护开启”状态。
+            struct PolishingStateResetter
+            {
+                QMessageBox* targetMessageBox = nullptr; // targetMessageBox：需要在析构时清理属性的消息框。
+
+                ~PolishingStateResetter()
+                {
+                    if (targetMessageBox != nullptr)
+                    {
+                        targetMessageBox->setProperty(kThemePolishingPropertyName, false);
+                    }
+                }
+            };
+
+            messageBox->setProperty(kThemePolishingPropertyName, true);
+            PolishingStateResetter currentPolishingStateResetter{ messageBox };
+
             const QPalette sourcePalette = (qApp != nullptr) ? qApp->palette() : messageBox->palette();
+            const QString targetStyleSheet = buildMessageBoxStyleSheet(darkModeEnabled);
             messageBox->setObjectName(QString::fromLatin1(kThemedMessageBoxObjectName));
             messageBox->setAttribute(Qt::WA_StyledBackground, true);
             messageBox->setAutoFillBackground(true);
-            messageBox->setPalette(buildMessageBoxPalette(sourcePalette, darkModeEnabled));
             messageBox->setMinimumWidth(500);
-            messageBox->setStyleSheet(buildMessageBoxStyleSheet(darkModeEnabled));
+            messageBox->setProperty(kThemeModePropertyName, darkModeEnabled);
+
+            // 相同主题重复进入时，只刷新按钮与文本可选属性，避免重复 setStyleSheet 造成样式风暴。
+            if (!themeAlreadyApplied)
+            {
+                messageBox->setPalette(buildMessageBoxPalette(sourcePalette, darkModeEnabled));
+                if (messageBox->styleSheet() != targetStyleSheet)
+                {
+                    messageBox->setStyleSheet(targetStyleSheet);
+                }
+            }
 
             QLabel* mainTextLabel = messageBox->findChild<QLabel*>(QStringLiteral("qt_msgbox_label"));
             if (mainTextLabel != nullptr)
