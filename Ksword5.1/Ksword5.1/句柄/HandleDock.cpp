@@ -21,6 +21,7 @@
 #include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStringList>
 #include <QTabWidget>
 #include <QThreadPool>
 #include <QTreeWidget>
@@ -211,6 +212,7 @@ void HandleDock::initializeHandleListTab()
     m_typeFilterCombo = new QComboBox(m_handleListPage);
     m_typeFilterCombo->setToolTip(QStringLiteral("按对象类型过滤（如 File/Key/Event）。"));
     m_typeFilterCombo->setStyleSheet(buildComboAndSpinStyle());
+    m_typeFilterCombo->setMinimumWidth(260);
     m_typeFilterCombo->addItem(QStringLiteral("全部类型"));
 
     m_onlyNamedCheckBox = new QCheckBox(QStringLiteral("仅命名对象"), m_handleListPage);
@@ -248,7 +250,27 @@ void HandleDock::initializeHandleListTab()
 
     m_handleListLayout->addLayout(m_toolbarLayout);
     m_handleListLayout->addWidget(m_statusLabel);
-    m_handleListLayout->addWidget(m_tableWidget, 1);
+    m_handleDetailStatusLabel = new QLabel(QStringLiteral("● 请选择一个句柄查看详情"), m_handleListPage);
+    m_handleDetailStatusLabel->setStyleSheet(
+        QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
+    m_handleDetailTable = new QTreeWidget(m_handleListPage);
+    m_handleDetailTable->setColumnCount(2);
+    m_handleDetailTable->setHeaderLabels(QStringList{ QStringLiteral("字段"), QStringLiteral("值") });
+    m_handleDetailTable->setRootIsDecorated(false);
+    m_handleDetailTable->setItemsExpandable(false);
+    m_handleDetailTable->setAlternatingRowColors(true);
+    m_handleDetailTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_handleDetailTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    if (m_handleDetailTable->header() != nullptr)
+    {
+        m_handleDetailTable->header()->setStyleSheet(buildHeaderStyle());
+        m_handleDetailTable->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        m_handleDetailTable->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+    }
+
+    m_handleListLayout->addWidget(m_tableWidget, 3);
+    m_handleListLayout->addWidget(m_handleDetailStatusLabel);
+    m_handleListLayout->addWidget(m_handleDetailTable, 2);
 
     m_tabWidget->addTab(m_handleListPage, QIcon(":/Icon/process_list.svg"), QStringLiteral("句柄列表"));
 }
@@ -319,7 +341,7 @@ void HandleDock::initializeHandleTable()
     m_tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_tableWidget->setSelectionMode(QAbstractItemView::SingleSelection);
     m_tableWidget->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_tableWidget->setSortingEnabled(false);
+    m_tableWidget->setSortingEnabled(true);
     m_tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
 
     QHeaderView* headerView = m_tableWidget->header();
@@ -328,6 +350,7 @@ void HandleDock::initializeHandleTable()
         headerView->setStyleSheet(buildHeaderStyle());
         headerView->setSectionResizeMode(QHeaderView::Interactive);
         headerView->setStretchLastSection(false);
+        headerView->setContextMenuPolicy(Qt::CustomContextMenu);
     }
     m_tableWidget->setColumnWidth(static_cast<int>(HandleTableColumn::ProcessId), 80);
     m_tableWidget->setColumnWidth(static_cast<int>(HandleTableColumn::ProcessName), 170);
@@ -396,22 +419,22 @@ void HandleDock::initializeConnections()
 
     connect(m_pidFilterEdit, &QLineEdit::returnPressed, this, [this]()
         {
-            requestAsyncRefresh(true);
+            applyLocalHandleFilters();
         });
 
-    connect(m_keywordFilterEdit, &QLineEdit::textChanged, this, [this](const QString&)
+    connect(m_keywordFilterEdit, &QLineEdit::returnPressed, this, [this]()
         {
-            requestAsyncRefresh(false);
+            applyLocalHandleFilters();
         });
 
     connect(m_typeFilterCombo, &QComboBox::currentTextChanged, this, [this](const QString&)
         {
-            requestAsyncRefresh(false);
+            applyLocalHandleFilters();
         });
 
     connect(m_onlyNamedCheckBox, &QCheckBox::toggled, this, [this](const bool)
         {
-            requestAsyncRefresh(false);
+            applyLocalHandleFilters();
         });
 
     connect(m_resolveNameCheckBox, &QCheckBox::toggled, this, [this](const bool)
@@ -428,6 +451,19 @@ void HandleDock::initializeConnections()
         {
             showHandleTableContextMenu(localPoint);
         });
+
+    connect(m_tableWidget, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem*, QTreeWidgetItem*)
+        {
+            requestHandleDetailRefresh(false);
+        });
+
+    if (m_tableWidget->header() != nullptr)
+    {
+        connect(m_tableWidget->header(), &QHeaderView::customContextMenuRequested, this, [this](const QPoint& localPoint)
+            {
+                showHandleHeaderContextMenu(localPoint);
+            });
+    }
 
     connect(m_refreshObjectTypeButton, &QPushButton::clicked, this, [this]()
         {
@@ -571,16 +607,16 @@ void HandleDock::applyHandleRefreshResult(
         return;
     }
 
-    m_rows = refreshResult.rows;
+    m_allRows = refreshResult.rows;
     m_typeNameCacheByIndex = refreshResult.updatedTypeNameCacheByIndex;
-    updateTypeFilterItems(refreshResult.availableTypeList);
-    rebuildHandleTable();
+    refreshTypeFilterItemsFromAllRows();
+    applyLocalHandleFilters();
 
     QString statusText = QStringLiteral(
         "● 刷新完成 %1 ms | 总句柄:%2 | 显示:%3 | 名称已解析:%4 | 类型映射命中:%5")
         .arg(refreshResult.elapsedMs)
         .arg(refreshResult.totalHandleCount)
-        .arg(refreshResult.visibleHandleCount)
+        .arg(m_rows.size())
         .arg(refreshResult.resolvedNameCount)
         .arg(refreshResult.objectTypeMappedCount);
     if (!refreshResult.diagnosticText.trimmed().isEmpty())
@@ -645,6 +681,9 @@ void HandleDock::rebuildHandleTable()
         auto* item = new QTreeWidgetItem();
         item->setText(static_cast<int>(HandleTableColumn::ProcessId), QString::number(row.processId));
         item->setText(static_cast<int>(HandleTableColumn::ProcessName), row.processName);
+        item->setIcon(
+            static_cast<int>(HandleTableColumn::ProcessName),
+            resolveProcessIconByPid(row.processId));
         item->setText(static_cast<int>(HandleTableColumn::HandleValue), formatHex(row.handleValue, 0));
         item->setText(
             static_cast<int>(HandleTableColumn::TypeIndex),
@@ -662,6 +701,9 @@ void HandleDock::rebuildHandleTable()
             static_cast<int>(HandleTableColumn::PointerCount),
             row.pointerCount == 0 ? QStringLiteral("-") : QString::number(row.pointerCount));
         item->setData(static_cast<int>(HandleTableColumn::ProcessId), Qt::UserRole, static_cast<qulonglong>(rowIndex));
+        item->setToolTip(
+            static_cast<int>(HandleTableColumn::GrantedAccess),
+            decodeGrantedAccessText(row.typeName, row.grantedAccess));
 
         if (row.objectName.trimmed().isEmpty())
         {
@@ -675,6 +717,7 @@ void HandleDock::rebuildHandleTable()
         m_tableWidget->addTopLevelItem(item);
     }
 }
+
 
 void HandleDock::rebuildObjectTypeTable(const QString& filterKeyword)
 {
@@ -750,230 +793,4 @@ HandleDock::HandleRefreshOptions HandleDock::collectHandleRefreshOptions() const
     }
 
     return options;
-}
-
-void HandleDock::updateTypeFilterItems(const std::vector<QString>& availableTypeList)
-{
-    const QString previousTypeText = m_typeFilterCombo->currentText();
-    QSignalBlocker comboBlocker(m_typeFilterCombo);
-    m_typeFilterCombo->clear();
-    m_typeFilterCombo->addItem(QStringLiteral("全部类型"));
-    for (const QString& typeNameText : availableTypeList)
-    {
-        m_typeFilterCombo->addItem(typeNameText);
-    }
-
-    const int previousIndex = m_typeFilterCombo->findText(previousTypeText);
-    if (previousIndex >= 0)
-    {
-        m_typeFilterCombo->setCurrentIndex(previousIndex);
-    }
-}
-
-void HandleDock::syncHandleTypeNamesFromObjectTypeMap()
-{
-    if (m_rows.empty() || m_typeNameMapByIndexFromObjectTab.empty())
-    {
-        return;
-    }
-
-    std::set<QString> typeNameSet;
-    for (HandleRow& row : m_rows)
-    {
-        const auto foundIt = m_typeNameMapByIndexFromObjectTab.find(row.typeIndex);
-        if (foundIt != m_typeNameMapByIndexFromObjectTab.end() && !foundIt->second.empty())
-        {
-            row.typeName = QString::fromStdString(foundIt->second);
-        }
-        typeNameSet.insert(row.typeName);
-    }
-
-    std::vector<QString> availableTypeList;
-    availableTypeList.reserve(typeNameSet.size());
-    for (const QString& typeNameText : typeNameSet)
-    {
-        availableTypeList.push_back(typeNameText);
-    }
-    updateTypeFilterItems(availableTypeList);
-
-    if (m_tableWidget == nullptr)
-    {
-        return;
-    }
-
-    for (int row = 0; row < m_tableWidget->topLevelItemCount(); ++row)
-    {
-        QTreeWidgetItem* item = m_tableWidget->topLevelItem(row);
-        if (item == nullptr)
-        {
-            continue;
-        }
-        const QVariant rowIndexValue =
-            item->data(static_cast<int>(HandleTableColumn::ProcessId), Qt::UserRole);
-        if (!rowIndexValue.isValid())
-        {
-            continue;
-        }
-        const std::size_t rowIndex = static_cast<std::size_t>(rowIndexValue.toULongLong());
-        if (rowIndex >= m_rows.size())
-        {
-            continue;
-        }
-        const HandleRow& handleRow = m_rows[rowIndex];
-        item->setText(
-            static_cast<int>(HandleTableColumn::TypeIndex),
-            formatTypeIndexDisplayText(handleRow.typeIndex, handleRow.typeName));
-    }
-
-    kLogEvent syncTypeNameEvent;
-    info << syncTypeNameEvent
-        << "[HandleDock] syncHandleTypeNamesFromObjectTypeMap: syncedRows="
-        << m_rows.size()
-        << ", mappedTypes="
-        << m_typeNameMapByIndexFromObjectTab.size()
-        << eol;
-}
-
-void HandleDock::updateHandleStatusLabel(const QString& statusText, const bool refreshing)
-{
-    if (m_statusLabel == nullptr)
-    {
-        return;
-    }
-    m_statusLabel->setText(statusText);
-    if (refreshing)
-    {
-        m_statusLabel->setStyleSheet(
-            QStringLiteral("color:%1;font-weight:700;")
-            .arg(KswordTheme::PrimaryBlueHex));
-        return;
-    }
-
-    const bool hasDiagnostic =
-        statusText.contains(QStringLiteral("失败")) ||
-        statusText.contains(QStringLiteral("预算")) ||
-        statusText.contains(QStringLiteral("异常")) ||
-        statusText.contains(QStringLiteral("截断"));
-    const QString textColor = hasDiagnostic
-        ? QStringLiteral("#D77A00")
-        : QStringLiteral("#3A8F3A");
-    m_statusLabel->setStyleSheet(
-        QStringLiteral("color:%1;font-weight:600;")
-        .arg(textColor));
-}
-
-void HandleDock::updateObjectTypeStatusLabel(const QString& statusText, const bool refreshing)
-{
-    if (m_objectTypeStatusLabel == nullptr)
-    {
-        return;
-    }
-    m_objectTypeStatusLabel->setText(statusText);
-    if (refreshing)
-    {
-        m_objectTypeStatusLabel->setStyleSheet(
-            QStringLiteral("color:%1;font-weight:700;")
-            .arg(KswordTheme::PrimaryBlueHex));
-        return;
-    }
-
-    const bool hasDiagnostic = statusText.contains(QStringLiteral("失败"));
-    const QString textColor = hasDiagnostic
-        ? QStringLiteral("#D77A00")
-        : QStringLiteral("#3A8F3A");
-    m_objectTypeStatusLabel->setStyleSheet(
-        QStringLiteral("color:%1;font-weight:600;")
-        .arg(textColor));
-}
-
-void HandleDock::focusObjectTypeByIndex(const std::uint16_t typeIndex)
-{
-    if (m_tabWidget != nullptr && m_objectTypePage != nullptr)
-    {
-        m_tabWidget->setCurrentWidget(m_objectTypePage);
-    }
-
-    if (m_objectTypeRows.empty() && !m_objectTypeRefreshInProgress)
-    {
-        requestObjectTypeRefreshAsync(true);
-        return;
-    }
-
-    if (m_objectTypeFilterEdit != nullptr)
-    {
-        m_objectTypeFilterEdit->setText(QString::number(typeIndex));
-    }
-
-    for (int row = 0; row < m_objectTypeTable->topLevelItemCount(); ++row)
-    {
-        QTreeWidgetItem* item = m_objectTypeTable->topLevelItem(row);
-        if (item == nullptr)
-        {
-            continue;
-        }
-        if (item->text(static_cast<int>(ObjectTypeTableColumn::TypeIndex)).toUInt() == typeIndex)
-        {
-            m_objectTypeTable->setCurrentItem(item);
-            break;
-        }
-    }
-}
-
-void HandleDock::showHandleTableContextMenu(const QPoint& localPosition)
-{
-    QTreeWidgetItem* clickedItem = m_tableWidget->itemAt(localPosition);
-    if (clickedItem == nullptr)
-    {
-        return;
-    }
-    m_tableWidget->setCurrentItem(clickedItem);
-
-    QMenu menu(this);
-    QAction* copyCellAction = menu.addAction(QIcon(":/Icon/handle_copy.svg"), QStringLiteral("复制单元格"));
-    QAction* copyRowAction = menu.addAction(QIcon(":/Icon/handle_copy_row.svg"), QStringLiteral("复制整行"));
-    menu.addSeparator();
-    QAction* closeHandleAction = menu.addAction(QIcon(":/Icon/handle_close.svg"), QStringLiteral("关闭句柄"));
-    QAction* closeBatchAction = menu.addAction(QIcon(":/Icon/handle_close.svg"), QStringLiteral("批量关闭同类型句柄"));
-    menu.addSeparator();
-    QAction* gotoTypeAction = menu.addAction(QIcon(":/Icon/process_tree.svg"), QStringLiteral("转到对象类型"));
-    QAction* refreshAction = menu.addAction(QIcon(":/Icon/handle_refresh.svg"), QStringLiteral("刷新"));
-
-    QAction* selectedAction = menu.exec(m_tableWidget->viewport()->mapToGlobal(localPosition));
-    if (selectedAction == nullptr)
-    {
-        return;
-    }
-    if (selectedAction == copyCellAction)
-    {
-        copyCurrentHandleCell();
-        return;
-    }
-    if (selectedAction == copyRowAction)
-    {
-        copyCurrentHandleRow();
-        return;
-    }
-    if (selectedAction == closeHandleAction)
-    {
-        closeCurrentHandle();
-        return;
-    }
-    if (selectedAction == closeBatchAction)
-    {
-        closeSameTypeHandlesInCurrentProcess();
-        return;
-    }
-    if (selectedAction == gotoTypeAction)
-    {
-        HandleRow* row = selectedHandleRow();
-        if (row != nullptr)
-        {
-            focusObjectTypeByIndex(row->typeIndex);
-        }
-        return;
-    }
-    if (selectedAction == refreshAction)
-    {
-        requestAsyncRefresh(true);
-    }
 }

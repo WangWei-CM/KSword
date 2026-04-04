@@ -139,6 +139,10 @@
     <ClCompile Include="FileDock\ManualFileSystemParser.cpp" />
     <ClCompile Include="句柄\HandleDock.cpp" />
     <ClCompile Include="句柄\HandleDock.Actions.cpp" />
+    <ClCompile Include="句柄\HandleDock.Detail.cpp" />
+    <ClCompile Include="句柄\HandleDock.DetailNative.cpp" />
+    <ClCompile Include="句柄\HandleDock.Filter.cpp" />
+    <ClCompile Include="句柄\HandleDock.Icon.cpp" />
     <ClCompile Include="句柄\HandleDock.Native.cpp" />
     <ClCompile Include="句柄\HandleObjectTypeWorker.cpp" />
     <ClCompile Include="HardwareDock\HardwareDock.cpp" />
