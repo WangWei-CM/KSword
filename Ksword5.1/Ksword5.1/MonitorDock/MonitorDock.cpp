@@ -1166,7 +1166,10 @@ void MonitorDock::initializeWmiTab()
     QWidget* wmiTopConfigPanel = new QWidget(m_wmiPage);
     QHBoxLayout* wmiTopConfigLayout = new QHBoxLayout(wmiTopConfigPanel);
     wmiTopConfigLayout->setContentsMargins(0, 0, 0, 0);
-    wmiTopConfigLayout->setSpacing(6);
+    wmiTopConfigLayout->setSpacing(4);
+    // 顶部配置区固定为紧凑高度，避免把下方监听结果表挤压到不可用。
+    wmiTopConfigPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    wmiTopConfigPanel->setMaximumHeight(220);
 
     // Provider 左侧面板。
     m_wmiProviderPanel = new QWidget(wmiTopConfigPanel);
@@ -1217,8 +1220,10 @@ void MonitorDock::initializeWmiTab()
     m_wmiProviderTableView->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_wmiProviderTableView->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_wmiProviderTableView->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    m_wmiProviderTableView->verticalHeader()->setDefaultSectionSize(22);
-    m_wmiProviderTableView->setMinimumHeight(220);
+    m_wmiProviderTableView->verticalHeader()->setDefaultSectionSize(20);
+    // Provider 列表控制为较窄高度，给监听结果腾出更多可视空间。
+    m_wmiProviderTableView->setMinimumHeight(120);
+    m_wmiProviderTableView->setMaximumHeight(160);
 
     m_wmiProviderPanelLayout->addLayout(m_wmiProviderControlLayout);
     m_wmiProviderPanelLayout->addWidget(m_wmiProviderTableView, 1);
@@ -1267,11 +1272,14 @@ void MonitorDock::initializeWmiTab()
     m_wmiEventClassTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     // 关闭角按钮，避免左上角出现系统默认白色块。
     m_wmiEventClassTable->setCornerButtonEnabled(false);
+    // 右侧事件类表改为无表头紧凑模式，减少高度占用并提升可见行数。
+    m_wmiEventClassTable->horizontalHeader()->setVisible(false);
+    m_wmiEventClassTable->verticalHeader()->setVisible(false);
     m_wmiEventClassTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    m_wmiEventClassTable->verticalHeader()->setDefaultSectionSize(22);
+    m_wmiEventClassTable->verticalHeader()->setDefaultSectionSize(20);
     // 事件类表先设置为可收敛尺寸策略，具体高度由 updateWmiSubscribePanelCompactLayout 动态计算。
     m_wmiEventClassTable->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
@@ -1297,7 +1305,7 @@ void MonitorDock::initializeWmiTab()
     m_wmiWhereEditor->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_wmiWhereEditor->setStyleSheet(blueInputStyle());
     // 保持单行输入并压缩高度，给类列表与结果表留出更多可视行。
-    m_wmiWhereEditor->setFixedHeight(26);
+    m_wmiWhereEditor->setFixedHeight(24);
 
     m_wmiSubscribeControlLayout = new QHBoxLayout();
     m_wmiSubscribeControlLayout->setContentsMargins(0, 0, 0, 0);
@@ -1426,9 +1434,9 @@ void MonitorDock::initializeWmiTab()
     // 调整 WMI 页面纵向占比：
     // - 顶部左右配置区保持紧凑；
     // - 事件结果表优先占用剩余空间。
-    m_wmiLayout->setStretch(0, 2);
+    m_wmiLayout->setStretch(0, 0);
     m_wmiLayout->setStretch(1, 0);
-    m_wmiLayout->setStretch(2, 4);
+    m_wmiLayout->setStretch(2, 1);
     m_sideTabWidget->addTab(m_wmiPage, QStringLiteral("WMI"));
 }
 
@@ -1439,10 +1447,10 @@ void MonitorDock::updateWmiSubscribePanelCompactLayout()
         return;
     }
 
-    // fallbackVisibleRowCount 用途：事件类尚未加载时先预留较多行，改善首帧可读性。
-    const int fallbackVisibleRowCount = 8;
-    // maxVisibleRowCount 用途：新版左右布局下提升可视上限，避免“可见行数太少”。
-    const int maxVisibleRowCount = 12;
+    // fallbackVisibleRowCount 用途：事件类尚未加载时先预留少量行，保持右侧区域紧凑。
+    const int fallbackVisibleRowCount = 2;
+    // maxVisibleRowCount 用途：限制事件类表高度，确保 WHERE 模板区始终在表格下方可见。
+    const int maxVisibleRowCount = 4;
     // currentRowCount 用途：记录当前事件类表总行数，作为可视高度计算输入。
     const int currentRowCount = m_wmiEventClassTable->rowCount();
     // visibleRowCount 用途：将可视行数夹在 [fallbackVisibleRowCount, maxVisibleRowCount] 区间内。
@@ -1452,19 +1460,19 @@ void MonitorDock::updateWmiSubscribePanelCompactLayout()
         maxVisibleRowCount);
 
     // headerHeight 用途：记录事件类表头高度；若表头为空则使用默认值避免高度为 0。
-    int headerHeight = 22;
+    int headerHeight = 0;
     QHeaderView* headerView = m_wmiEventClassTable->horizontalHeader();
-    if (headerView != nullptr)
+    if (headerView != nullptr && !headerView->isHidden())
     {
-        headerHeight = std::max(18, headerView->height());
+        headerHeight = std::max(16, headerView->height());
     }
 
     // rowHeight 用途：记录单行默认高度，参与表格总高度估算。
-    int rowHeight = 22;
+    int rowHeight = 20;
     QHeaderView* verticalHeader = m_wmiEventClassTable->verticalHeader();
     if (verticalHeader != nullptr)
     {
-        rowHeight = std::max(18, verticalHeader->defaultSectionSize());
+        rowHeight = std::max(16, verticalHeader->defaultSectionSize());
     }
 
     // framePixels 用途：补偿表格边框占用像素，防止最底行被裁切。

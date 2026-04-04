@@ -7,6 +7,20 @@
 #include <QStandardPaths>
 #include <windows.h>  // Windows API 头文件
 #include <shlobj.h>   // 用于获取用户目录（需链接 shell32.lib）
+
+namespace
+{
+    // kReleaseVersionText 作用：
+    // - 欢迎页显示的版本号文本；
+    // - 由发布脚本按注释标记替换。
+    const QString kReleaseVersionText = QStringLiteral("v0.0.0"); // RELEASE_META_VERSION_MARKER
+
+    // kReleaseBuildTimeText 作用：
+    // - 欢迎页显示的精确编译时间；
+    // - 由发布脚本按注释标记替换。
+    const QString kReleaseBuildTimeText = QStringLiteral("1970-01-01 00:00:00.000 +08:00"); // RELEASE_META_BUILD_TIME_MARKER
+}
+
 // 获取 Windows 登录头像路径（优先找用户自定义头像，找不到用系统默认）
 QString WelcomeDock::getWindowsUserName() {
     WCHAR userNameBuffer[256] = { 0 }; // 存储用户名的缓冲区
@@ -102,13 +116,21 @@ WelcomeDock::WelcomeDock(QWidget* parent) : QWidget(parent) {
     }
     // 版权信息
     m_copyright = new QLabel(this);
-    m_copyright->setText("Ksword Dev 卡利剑ARK工具开发团队 保留所有权利。<br>");
+    // 欢迎页发布信息：
+    // - 版本号使用更大字号；
+    // - 编译时间在下方备注显示，便于定位发布批次。
+    m_copyright->setText(
+        QStringLiteral(
+            "Ksword Dev 卡利剑ARK工具开发团队 保留所有权利。<br>"
+            "<span style='font-size:18px;font-weight:700;'>当前版本：%1</span><br>"
+            "<span style='font-size:12px;'>编译时间：%2</span><br>")
+        .arg(kReleaseVersionText, kReleaseBuildTimeText));
     m_copyright->setStyleSheet("line-height: 1.8;");
     m_copyright->setWordWrap(true); // 开启自动换行
     m_copyright->setTextInteractionFlags(Qt::TextSelectableByMouse); // 允许选中
     m_copyright->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     // 可选：限制最大高度（防止内容过多时占满空间）
-    m_copyright->setMaximumHeight(100); // 根据实际行数调整（3行约60px，留余量）
+    m_copyright->setMaximumHeight(140); // 发布信息增加“版本+编译时间”后提高可视高度，避免文本被裁切。
     // 按钮
     // welcomeButtonStyle 作用：根据当前深浅色状态选择欢迎页按钮样式。
     const QString welcomeButtonStyle = KswordTheme::IsDarkModeEnabled() ? QSS_Buttons_Dark : QSS_Buttons_Light;
