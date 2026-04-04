@@ -18,6 +18,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <sddl.h>
 #include <TlHelp32.h>
 #include <winternl.h>
 
@@ -583,10 +584,6 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
         {
             continue;
         }
-        if (options.hasPidFilter && rawRow.processId != options.pidFilter)
-        {
-            continue;
-        }
         if (typeNameCache.find(rawRow.typeIndex) != typeNameCache.end())
         {
             continue;
@@ -647,11 +644,6 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
         {
             continue;
         }
-        if (options.hasPidFilter && rawRow.processId != options.pidFilter)
-        {
-            continue;
-        }
-
         HandleRow row{};
         row.processId = rawRow.processId;
         row.processName = processNameOf(rawRow.processId);
@@ -675,13 +667,6 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
             row.typeName = QStringLiteral("Type#%1").arg(rawRow.typeIndex);
         }
         typeNameSet.insert(row.typeName);
-
-        if (options.typeFilterText != QStringLiteral("全部类型") &&
-            !options.typeFilterText.trimmed().isEmpty() &&
-            row.typeName != options.typeFilterText)
-        {
-            continue;
-        }
 
         const bool shouldResolveName =
             options.resolveObjectName &&
@@ -724,14 +709,6 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
             --nameBudgetRemain;
         }
 
-        if (options.onlyNamed && row.objectName.trimmed().isEmpty())
-        {
-            continue;
-        }
-        if (!rowMatchesKeyword(row, options.keywordText))
-        {
-            continue;
-        }
         if (!row.objectName.trimmed().isEmpty())
         {
             ++result.resolvedNameCount;

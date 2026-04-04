@@ -11,6 +11,8 @@
 #include "../Framework.h"
 #include "HandleObjectTypeWorker.h"
 
+#include <QHash>
+#include <QIcon>
 #include <QWidget>
 
 #include <cstdint>
@@ -28,6 +30,7 @@ class QPushButton;
 class QShowEvent;
 class QSpinBox;
 class QTabWidget;
+class QTreeWidget;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
@@ -156,6 +159,25 @@ private:
         QString diagnosticText;                    // diagnosticText：诊断文本。
     };
 
+    // HandleDetailField 作用：
+    // - 表示句柄详情面板中的一条键值记录；
+    // - 供异步详情结果回填到详情树控件。
+    struct HandleDetailField
+    {
+        QString keyText;     // keyText：字段名。
+        QString valueText;   // valueText：字段值。
+    };
+
+    // HandleDetailRefreshResult 作用：
+    // - 表示句柄详情后台查询结果；
+    // - 包含通用字段、类型专用字段与诊断信息。
+    struct HandleDetailRefreshResult
+    {
+        std::vector<HandleDetailField> fields; // fields：详情键值列表。
+        QString diagnosticText;                // diagnosticText：诊断信息。
+        std::uint64_t elapsedMs = 0;           // elapsedMs：详情查询耗时。
+    };
+
 private:
     // initializeUi 作用：
     // - 创建页面布局与多 Tab 容器；
@@ -238,6 +260,13 @@ private:
     // 传入/传出：无。
     void rebuildHandleTable();
 
+    // applyLocalHandleFilters 作用：
+    // - 对当前完整句柄快照做本地过滤，不重新枚举系统句柄；
+    // - 用于 PID/类型/关键字等轻量交互，避免反复重型刷新。
+    // 调用方法：过滤条件变更、句柄刷新完成后调用。
+    // 传入/传出：无。
+    void applyLocalHandleFilters();
+
     // rebuildObjectTypeTable 作用：
     // - 根据 m_objectTypeRows 重建对象类型表；
     // - 支持按关键词过滤类型名与编号。
@@ -261,12 +290,35 @@ private:
     // 传出：无。
     void updateTypeFilterItems(const std::vector<QString>& availableTypeList);
 
+    // refreshTypeFilterItemsFromAllRows 作用：
+    // - 根据完整句柄快照重建类型过滤下拉项；
+    // - 用于对象类型映射更新后同步过滤选项。
+    // 调用方法：applyHandleRefreshResult / syncHandleTypeNamesFromObjectTypeMap 调用。
+    // 传入/传出：无。
+    void refreshTypeFilterItemsFromAllRows();
+
     // syncHandleTypeNamesFromObjectTypeMap 作用：
     // - 在对象类型页刷新完成后，把当前已缓存句柄行的类型名就地同步；
     // - 避免再次触发一次重型句柄枚举，从而减少 UI 卡顿。
     // 调用方法：applyObjectTypeRefreshResult 内部调用。
     // 传入/传出：无。
     void syncHandleTypeNamesFromObjectTypeMap();
+
+    // requestHandleDetailRefresh 作用：
+    // - 对当前选中句柄异步拉取详细信息；
+    // - 详情包含通用字段与按类型分支的专用信息。
+    // 调用方法：选中行切换、手动刷新详情时调用。
+    // 传入 forceRefresh：true 强制刷新；false 遇到并发时忽略。
+    // 传出：无。
+    void requestHandleDetailRefresh(bool forceRefresh);
+
+    // applyHandleDetailRefreshResult 作用：
+    // - 在主线程应用句柄详情异步结果；
+    // - 回填详情表和状态文本。
+    // 调用方法：详情后台任务完成后回调。
+    // 传入 refreshTicket：详情刷新序号；refreshResult：详情结果。
+    // 传出：无。
+    void applyHandleDetailRefreshResult(std::uint64_t refreshTicket, const HandleDetailRefreshResult& refreshResult);
 
     // updateHandleStatusLabel 作用：
     // - 统一更新句柄页状态标签文本与颜色；
@@ -300,12 +352,28 @@ private:
     // 传出：无。
     void showHandleTableContextMenu(const QPoint& localPosition);
 
+    // showHandleHeaderContextMenu 作用：
+    // - 在句柄表头弹出列管理菜单；
+    // - 支持显示/隐藏列，补足基础列系统能力。
+    // 调用方法：QHeaderView::customContextMenuRequested 回调。
+    // 传入 localPosition：表头局部坐标。
+    // 传出：无。
+    void showHandleHeaderContextMenu(const QPoint& localPosition);
+
     // showObjectTypeDetailByCurrentRow 作用：
     // - 根据对象类型表当前行刷新详情文本；
     // - 复刻原 KernelDock 对象类型详情。
     // 调用方法：currentCellChanged 回调。
     // 传入/传出：无。
     void showObjectTypeDetailByCurrentRow();
+
+    // showHandleDetailPlaceholder 作用：
+    // - 在无选中句柄或详情未就绪时显示占位内容；
+    // - 避免详情区域残留旧数据。
+    // 调用方法：初始化、过滤后无选中项时调用。
+    // 传入 messageText：占位说明文本。
+    // 传出：无。
+    void showHandleDetailPlaceholder(const QString& messageText);
 
     // selectedHandleRow 作用：
     // - 读取当前选中句柄行对应的缓存记录；
@@ -369,6 +437,14 @@ private:
         std::uint64_t handleValue,
         std::string& detailTextOut);
 
+    // buildHandleDetailRefreshResult 作用：
+    // - 后台线程核心：按句柄类型生成专用详情；
+    // - 支持 File/Key/Process/Thread/Token/Section/Event/Mutant 等类型的增强展示。
+    // 调用方法：requestHandleDetailRefresh 在线程池中调用。
+    // 传入 row：当前选中句柄行快照。
+    // 传出：HandleDetailRefreshResult（按值返回）。
+    static HandleDetailRefreshResult buildHandleDetailRefreshResult(const HandleRow& row);
+
     // formatHex 作用：统一把数值转为 0x 前缀十六进制文本。
     // 调用方法：表格渲染时调用。
     // 传入 value：64 位值；width：最小宽度（补零）。
@@ -391,6 +467,30 @@ private:
     // 传出：QString 文本。
     static QString formatHandleAttributes(std::uint32_t attributes);
 
+    // resolveProcessIconByPid 作用：
+    // - 根据 PID 解析进程图标并做缓存；
+    // - 同一个 PID 只在首次渲染时解析一次，后续直接复用缓存图标。
+    // 调用方法：重建句柄表时调用。
+    // 传入 processId：目标进程 PID。
+    // 传出：QIcon 进程图标；失败时回退默认图标。
+    QIcon resolveProcessIconByPid(std::uint32_t processId);
+
+    // queryProcessImagePathCached 作用：
+    // - 查询并缓存 PID 对应的进程路径；
+    // - 避免同一 PID 反复走路径查询。
+    // 调用方法：resolveProcessIconByPid 内部调用。
+    // 传入 processId：目标进程 PID。
+    // 传出：QString 进程路径；失败时返回空字符串。
+    QString queryProcessImagePathCached(std::uint32_t processId);
+
+    // decodeGrantedAccessText 作用：
+    // - 按对象类型把 GrantedAccess 位掩码翻译成语义权限文本；
+    // - 用于列表 tooltip 与详情面板增强可读性。
+    // 调用方法：句柄表渲染与详情构建时调用。
+    // 传入 typeName：对象类型名；grantedAccess：访问掩码。
+    // 传出：QString 语义权限文本。
+    static QString decodeGrantedAccessText(const QString& typeName, std::uint32_t grantedAccess);
+
 private:
     QVBoxLayout* m_rootLayout = nullptr;         // m_rootLayout：页面根布局。
     QTabWidget* m_tabWidget = nullptr;           // m_tabWidget：句柄模块 Tab 容器。
@@ -407,6 +507,8 @@ private:
     QSpinBox* m_nameBudgetSpinBox = nullptr;     // m_nameBudgetSpinBox：对象名解析预算。
     QLabel* m_statusLabel = nullptr;             // m_statusLabel：句柄刷新状态文本。
     QTreeWidget* m_tableWidget = nullptr;        // m_tableWidget：句柄列表表格。
+    QLabel* m_handleDetailStatusLabel = nullptr; // m_handleDetailStatusLabel：句柄详情状态文本。
+    QTreeWidget* m_handleDetailTable = nullptr;  // m_handleDetailTable：句柄详情键值表。
 
     QWidget* m_objectTypePage = nullptr;         // m_objectTypePage：对象类型页容器。
     QVBoxLayout* m_objectTypeLayout = nullptr;   // m_objectTypeLayout：对象类型页布局。
@@ -419,14 +521,20 @@ private:
 
     bool m_refreshInProgress = false;            // m_refreshInProgress：句柄刷新互斥标记。
     bool m_objectTypeRefreshInProgress = false;  // m_objectTypeRefreshInProgress：对象类型刷新互斥标记。
+    bool m_handleDetailRefreshInProgress = false; // m_handleDetailRefreshInProgress：句柄详情刷新互斥标记。
     bool m_initialRefreshDone = false;           // m_initialRefreshDone：首轮刷新是否已完成。
     std::uint64_t m_refreshTicket = 0;           // m_refreshTicket：句柄刷新序号，防止乱序覆盖。
     std::uint64_t m_objectTypeRefreshTicket = 0; // m_objectTypeRefreshTicket：对象类型刷新序号。
+    std::uint64_t m_handleDetailRefreshTicket = 0; // m_handleDetailRefreshTicket：句柄详情刷新序号。
     int m_refreshProgressPid = 0;                // m_refreshProgressPid：句柄刷新 kPro 任务 PID。
     int m_objectTypeRefreshProgressPid = 0;      // m_objectTypeRefreshProgressPid：对象类型刷新 kPro 任务 PID。
+    int m_handleDetailRefreshProgressPid = 0;    // m_handleDetailRefreshProgressPid：句柄详情刷新 kPro 任务 PID。
 
-    std::vector<HandleRow> m_rows;               // m_rows：句柄列表缓存。
+    std::vector<HandleRow> m_allRows;            // m_allRows：完整句柄快照缓存。
+    std::vector<HandleRow> m_rows;               // m_rows：当前过滤后的句柄列表缓存。
     std::vector<HandleObjectTypeEntry> m_objectTypeRows; // m_objectTypeRows：对象类型行缓存。
     std::unordered_map<std::uint16_t, std::string> m_typeNameCacheByIndex; // m_typeNameCacheByIndex：句柄刷新阶段生成的类型缓存。
     std::unordered_map<std::uint16_t, std::string> m_typeNameMapByIndexFromObjectTab; // m_typeNameMapByIndexFromObjectTab：对象类型页映射缓存。
+    QHash<quint32, QIcon> m_processIconCacheByPid; // m_processIconCacheByPid：PID -> 图标缓存。
+    QHash<quint32, QString> m_processImagePathCacheByPid; // m_processImagePathCacheByPid：PID -> 路径缓存。
 };

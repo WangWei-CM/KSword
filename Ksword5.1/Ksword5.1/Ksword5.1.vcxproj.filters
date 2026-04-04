@@ -238,6 +238,18 @@
     <ClCompile Include="句柄\HandleDock.Actions.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="句柄\HandleDock.Detail.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="句柄\HandleDock.DetailNative.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="句柄\HandleDock.Filter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="句柄\HandleDock.Icon.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="句柄\HandleDock.Native.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
