@@ -42,6 +42,9 @@ function Resolve-ReleaseType {
     # normalizedText 作用：统一大小写与空白，降低输入格式差异影响。
     $normalizedText = $InputText.Trim().ToLower()
     switch ($normalizedText) {
+        '1' { return 'normal' }
+        '2' { return 'preview' }
+        '3' { return 'dev' }
         'normal' { return 'normal' }
         'release' { return 'normal' }
         '正式' { return 'normal' }
@@ -57,7 +60,7 @@ function Resolve-ReleaseType {
         '开发' { return 'dev' }
         '开发版' { return 'dev' }
         default {
-            throw "无法识别发布类型：$InputText。可用值：normal / preview / dev（或中文“普通/预览/开发”）。"
+            throw ("无法识别发布类型：{0}。可用值：normal / preview / dev（或中文：普通/预览/开发）。" -f $InputText)
         }
     }
 }
@@ -99,25 +102,32 @@ function Update-QStringLiteralByMarker {
         throw "未找到标记：$Marker（文件：$FilePath）"
     }
 
+    # sourceLine 作用：读取原始目标行，执行正则替换后回写。
+    $sourceLine = $fileLines[$targetLineIndex]
+    # patternText 作用：匹配单个 QStringLiteral("...") 片段。
+    $patternText = 'QStringLiteral\("([^"\\]|\\.)*"\)'
+    if (-not [System.Text.RegularExpressions.Regex]::IsMatch($sourceLine, $patternText)) {
+        throw ("标记行未找到可替换的 QStringLiteral 字面量：{0}（文件：{1}）" -f $Marker, $FilePath)
+    }
+
     # escapedValue 作用：保存已转义的新值，避免破坏 C++ 字符串语法。
     $escapedValue = Escape-CppStringLiteral -RawText $NewValue
     # replacementText 作用：构造完整 QStringLiteral("...") 片段用于替换。
     $replacementText = "QStringLiteral(`"$escapedValue`")"
-    # sourceLine 作用：读取原始目标行，执行正则替换后回写。
-    $sourceLine = $fileLines[$targetLineIndex]
     $updatedLine = [System.Text.RegularExpressions.Regex]::Replace(
         $sourceLine,
-        'QStringLiteral\("([^"\\]|\\.)*"\)',
+        $patternText,
         [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $replacementText },
         [System.Text.RegularExpressions.RegexOptions]::None,
         [TimeSpan]::FromSeconds(2))
 
-    if ($updatedLine -eq $sourceLine) {
-        throw "标记行未找到可替换的 QStringLiteral(\"...\")：$Marker（文件：$FilePath）"
-    }
-
     $fileLines[$targetLineIndex] = $updatedLine
-    Set-Content -LiteralPath $FilePath -Value $fileLines -Encoding UTF8
+    try {
+        Set-Content -LiteralPath $FilePath -Value $fileLines -Encoding UTF8
+    }
+    catch {
+        throw "写入文件失败（可能被 IDE 占用）：$FilePath；原始错误：$($_.Exception.Message)"
+    }
 }
 
 # Update-NextLineByMarker 作用：
@@ -161,7 +171,12 @@ function Update-NextLineByMarker {
     }
 
     $fileLines[$markerLineIndex + 1] = $NewLine
-    Set-Content -LiteralPath $FilePath -Value $fileLines -Encoding UTF8
+    try {
+        Set-Content -LiteralPath $FilePath -Value $fileLines -Encoding UTF8
+    }
+    catch {
+        throw "写入文件失败（可能被 IDE 占用）：$FilePath；原始错误：$($_.Exception.Message)"
+    }
 }
 
 # ===================== 主流程 =====================
@@ -186,7 +201,7 @@ if ([string]::IsNullOrWhiteSpace($versionInputText)) {
 }
 
 # releaseTypeInputText 作用：保存用户输入的发布类型文本。
-$releaseTypeInputText = Read-Host '请输入发布类型（normal / preview / dev，或中文：普通/预览/开发）'
+$releaseTypeInputText = Read-Host '请输入发布类型（1=普通, 2=预览, 3=开发；也支持 normal/preview/dev）'
 # releaseTypeKey 作用：发布类型规范化结果，仅取 normal/preview/dev 之一。
 $releaseTypeKey = Resolve-ReleaseType -InputText $releaseTypeInputText
 
