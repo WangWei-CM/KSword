@@ -590,6 +590,16 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
         return QMainWindow::nativeEvent(eventType, message, result);
     }
 
+    if (nativeMessage->message == WM_NCCALCSIZE)
+    {
+        // 使用最简非客户区裁剪策略：仅返回 0，避免复杂分支导致消息重入。
+        if (nativeMessage->wParam == TRUE)
+        {
+            *result = 0;
+            return true;
+        }
+    }
+
     if (nativeMessage->message == WM_NCHITTEST)
     {
         // maximizedInNativeMessage 用途：使用当前消息窗口句柄直接判定最大化状态，避免重入。
@@ -610,12 +620,38 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
                 ::GetSystemMetrics(SM_CXSIZEFRAME)
                 + ::GetSystemMetrics(SM_CXPADDEDBORDER)));
 
-        // 边缘缩放命中优先：仅在非最大化状态下启用八方向缩放。
+        // 兼容处理：若仍存在顶端负坐标带（非客户区残留），直接按可拖动标题栏返回。
+        if (localPoint.y() < 0 && localPoint.y() >= -borderWidth)
+        {
+            *result = HTCAPTION;
+            return true;
+        }
+
+        // 标题栏拖动命中优先：命中自绘标题栏且位于可拖动区时返回 HTCAPTION。
+        if (m_customTitleBar != nullptr)
+        {
+            // titleBarTopLeftPoint 用途：把标题栏左上角映射到 MainWindow 坐标系，保证命中测试坐标统一。
+            const QPoint titleBarTopLeftPoint = m_customTitleBar->mapTo(this, QPoint(0, 0));
+            // titleBarRect 用途：在主窗口坐标系下描述标题栏区域，供 HTCAPTION 命中判断。
+            const QRect titleBarRect(titleBarTopLeftPoint, m_customTitleBar->size());
+            if (titleBarRect.contains(localPoint))
+            {
+                const QPoint titleBarLocalPoint = localPoint - titleBarRect.topLeft();
+                if (m_customTitleBar->isPointInDraggableRegion(titleBarLocalPoint))
+                {
+                    *result = HTCAPTION;
+                    return true;
+                }
+            }
+        }
+
+        // 边缘缩放命中：仅在非最大化状态下启用。
         if (!maximizedInNativeMessage)
         {
             const bool hitLeft = localPoint.x() >= 0 && localPoint.x() < borderWidth;
             const bool hitRight = localPoint.x() <= width() && localPoint.x() > (width() - borderWidth);
-            const bool hitTop = localPoint.y() >= 0 && localPoint.y() < borderWidth;
+            // 顶边缩放带收窄到 3px，避免顶部大片区域无法拖动。
+            const bool hitTop = localPoint.y() >= 0 && localPoint.y() < 3;
             const bool hitBottom = localPoint.y() <= height() && localPoint.y() > (height() - borderWidth);
 
             if (hitTop && hitLeft)
@@ -657,24 +693,6 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
             {
                 *result = HTBOTTOM;
                 return true;
-            }
-        }
-
-        // 标题栏拖动命中：命中自绘标题栏且位于可拖动区时返回 HTCAPTION。
-        if (m_customTitleBar != nullptr)
-        {
-            // titleBarTopLeftPoint 用途：把标题栏左上角映射到 MainWindow 坐标系，保证命中测试坐标统一。
-            const QPoint titleBarTopLeftPoint = m_customTitleBar->mapTo(this, QPoint(0, 0));
-            // titleBarRect 用途：在主窗口坐标系下描述标题栏区域，供 HTCAPTION 命中判断。
-            const QRect titleBarRect(titleBarTopLeftPoint, m_customTitleBar->size());
-            if (titleBarRect.contains(localPoint))
-            {
-                const QPoint titleBarLocalPoint = localPoint - titleBarRect.topLeft();
-                if (m_customTitleBar->isPointInDraggableRegion(titleBarLocalPoint))
-                {
-                    *result = HTCAPTION;
-                    return true;
-                }
             }
         }
     }
