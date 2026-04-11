@@ -215,6 +215,7 @@
     <ClCompile Include="StartupDock\StartupDock.Wmi.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Actions.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Helpers.cpp" />
+    <ClCompile Include="StartupDock\StartupDock.RegistryCatalog.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Registry.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Services.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Tasks.cpp" />

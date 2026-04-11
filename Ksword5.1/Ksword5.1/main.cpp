@@ -628,13 +628,26 @@ int main(int argc, char* argv[])
         kSplash.progress("正在显示主窗口...", 95);
     }
 
+    window.show();
     if (startupSettings.launchMaximizedOnStartup)
     {
-        window.showMaximized();
-    }
-    else
-    {
-        window.show();
+        QTimer::singleShot(0, &window, [&window]()
+            {
+                // windowHandle 用途：启动后执行一次原生最大化命令，避免 Qt/Win32 状态漂移。
+                const HWND windowHandle = reinterpret_cast<HWND>(window.winId());
+                if (windowHandle != nullptr && ::IsWindow(windowHandle) != FALSE)
+                {
+                    ::SendMessageW(
+                        windowHandle,
+                        WM_SYSCOMMAND,
+                        static_cast<WPARAM>(SC_MAXIMIZE),
+                        0);
+                }
+                else
+                {
+                    window.showMaximized();
+                }
+            });
     }
     applyNativeAppIconToWidget(&window);
 

@@ -3,7 +3,10 @@
 #include "../theme.h"
 
 #include <QApplication>
+#include <QCoreApplication>
 #include <QDate>
+#include <QFileIconProvider>
+#include <QFileInfo>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -14,6 +17,7 @@
 #include <QResizeEvent>
 #include <QStringList>
 #include <QWidget>
+#include <QWindow>
 
 #include <Windows.h>
 
@@ -32,14 +36,14 @@ namespace
     // - kCommandLineMinWidth：命令输入框最小宽度；
     // - kCommandLineMaxWidth：命令输入框最大宽度；
     // - kAppIconSize：左侧应用图标绘制尺寸。
-    constexpr int kTitleBarHeight = 34;
-    constexpr int kControlButtonWidth = 26;
-    constexpr int kControlButtonHeight = 20;
-    constexpr int kControlIconSize = 12;
+    constexpr int kTitleBarHeight = 30;
+    constexpr int kControlButtonWidth = 32;
+    constexpr int kControlButtonHeight = 24;
+    constexpr int kControlIconSize = 16;
     constexpr int kUserBadgeMinWidth = 82;
     constexpr int kCommandLineMinWidth = 210;
     constexpr int kCommandLineMaxWidth = 760;
-    constexpr int kAppIconSize = 16;
+    constexpr int kAppIconSize = 18;
 
     // widgetBelongsTo：
     // - 作用：判断某个命中控件是否属于指定祖先控件分支；
@@ -64,6 +68,31 @@ namespace
             cursorWidget = cursorWidget->parentWidget();
         }
         return false;
+    }
+
+    // resolveApplicationPreviewIcon：
+    // - 作用：优先从可执行文件路径提取系统壳层图标；
+    // - 目标：让左上角图标与资源管理器中文件预览保持一致；
+    // - 传出：成功返回可执行文件图标，失败返回空图标。
+    QIcon resolveApplicationPreviewIcon()
+    {
+        // executablePathText 用途：保存当前进程可执行文件绝对路径。
+        const QString executablePathText = QCoreApplication::applicationFilePath();
+        if (executablePathText.trimmed().isEmpty())
+        {
+            return QIcon();
+        }
+
+        // executableFileInfo 用途：描述当前可执行文件路径，供壳层图标提供器读取。
+        const QFileInfo executableFileInfo(executablePathText);
+        if (!executableFileInfo.exists())
+        {
+            return QIcon();
+        }
+
+        // iconProvider 用途：向系统壳层查询与资源管理器一致的文件图标。
+        QFileIconProvider iconProvider;
+        return iconProvider.icon(executableFileInfo);
     }
 }
 
@@ -93,6 +122,39 @@ namespace ks::ui
     {
         m_darkModeEnabled = darkModeEnabled;
         updateVisualState();
+    }
+
+    void CustomTitleBar::setCustomRightWidget(QWidget* customRightWidget)
+    {
+        if (m_rightLayout == nullptr)
+        {
+            return;
+        }
+
+        if (m_customRightWidget == customRightWidget)
+        {
+            return;
+        }
+
+        if (m_customRightWidget != nullptr)
+        {
+            m_rightLayout->removeWidget(m_customRightWidget);
+            m_customRightWidget->hide();
+        }
+
+        // m_customRightWidget 用途：保存右侧扩展控件实例，便于后续替换或移除。
+        m_customRightWidget = customRightWidget;
+        if (m_customRightWidget == nullptr)
+        {
+            return;
+        }
+
+        if (m_customRightWidget->parentWidget() != m_rightWidget)
+        {
+            m_customRightWidget->setParent(m_rightWidget);
+        }
+        m_customRightWidget->setVisible(true);
+        m_rightLayout->insertWidget(0, m_customRightWidget, 0, Qt::AlignVCenter);
     }
 
     bool CustomTitleBar::isPointInDraggableRegion(const QPoint& localPos) const
@@ -136,6 +198,45 @@ namespace ks::ui
         updateCommandLineWidth();
     }
 
+    void CustomTitleBar::mousePressEvent(QMouseEvent* mouseEventPointer)
+    {
+        if (mouseEventPointer != nullptr
+            && mouseEventPointer->button() == Qt::LeftButton
+            && isPointInDraggableRegion(mouseEventPointer->pos()))
+        {
+            // hostWindowWidget 用途：获取标题栏所属顶层窗口，后续发起系统拖动。
+            QWidget* hostWindowWidget = window();
+            if (hostWindowWidget != nullptr)
+            {
+                // hostWindowHandle 用途：Qt 提供的顶层原生窗口句柄封装。
+                QWindow* hostWindowHandle = hostWindowWidget->windowHandle();
+                if (hostWindowHandle != nullptr && hostWindowHandle->startSystemMove())
+                {
+                    mouseEventPointer->accept();
+                    return;
+                }
+
+#ifdef Q_OS_WIN
+                // hostWindowHandleValue 用途：Win32 兜底拖动链路所需窗口句柄。
+                const HWND hostWindowHandleValue = reinterpret_cast<HWND>(hostWindowWidget->winId());
+                if (hostWindowHandleValue != nullptr && ::IsWindow(hostWindowHandleValue) != FALSE)
+                {
+                    ::ReleaseCapture();
+                    ::SendMessageW(
+                        hostWindowHandleValue,
+                        WM_SYSCOMMAND,
+                        static_cast<WPARAM>(SC_MOVE | HTCAPTION),
+                        0);
+                    mouseEventPointer->accept();
+                    return;
+                }
+#endif
+            }
+        }
+
+        QWidget::mousePressEvent(mouseEventPointer);
+    }
+
     void CustomTitleBar::mouseDoubleClickEvent(QMouseEvent* mouseEventPointer)
     {
         if (mouseEventPointer != nullptr
@@ -158,7 +259,7 @@ namespace ks::ui
         setAttribute(Qt::WA_StyledBackground, true);
 
         m_rootLayout = new QGridLayout(this);
-        m_rootLayout->setContentsMargins(6, 2, 6, 2);
+        m_rootLayout->setContentsMargins(6, 1, 12, 1);
         m_rootLayout->setHorizontalSpacing(6);
         m_rootLayout->setVerticalSpacing(0);
         m_rootLayout->setColumnStretch(0, 1);
@@ -201,7 +302,7 @@ namespace ks::ui
         // 右侧控制区：图钉 + 最小化 + 最大化/还原 + 关闭。
         m_rightWidget = new QWidget(this);
         m_rightLayout = new QHBoxLayout(m_rightWidget);
-        m_rightLayout->setContentsMargins(0, 0, 0, 0);
+        m_rightLayout->setContentsMargins(0, 0, 2, 0);
         m_rightLayout->setSpacing(1);
 
         m_pinButton = new QPushButton(m_rightWidget);
@@ -398,7 +499,11 @@ namespace ks::ui
         m_userBadgeButton->setText(displayUserNameText);
         m_userBadgeButton->setToolTip(QStringLiteral("当前用户：%1").arg(m_rawUserNameText));
 
-        QIcon appIcon = window() != nullptr ? window()->windowIcon() : QIcon();
+        QIcon appIcon = resolveApplicationPreviewIcon();
+        if (appIcon.isNull() && window() != nullptr)
+        {
+            appIcon = window()->windowIcon();
+        }
         if (appIcon.isNull())
         {
             appIcon = QApplication::windowIcon();

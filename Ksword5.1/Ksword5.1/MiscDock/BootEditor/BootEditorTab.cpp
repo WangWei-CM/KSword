@@ -234,10 +234,14 @@ void BootEditorTab::initializeToolbar()
 
 void BootEditorTab::initializeCenterPane()
 {
-    m_mainSplitter = new QSplitter(Qt::Horizontal, this);
+    // 主体改为上下布局：
+    // - 上半区只放条目表，避免被编辑区挤压；
+    // - 下半区放编辑区，再细分为左右两栏。
+    m_mainSplitter = new QSplitter(Qt::Vertical, this);
+    m_mainSplitter->setChildrenCollapsible(false);
     m_rootLayout->addWidget(m_mainSplitter, 1);
 
-    // 左侧表格：展示当前 BCD 条目列表。
+    // 上方表格：展示当前 BCD 条目列表。
     m_entryTable = new QTableWidget(m_mainSplitter);
     m_entryTable->setColumnCount(6);
     m_entryTable->setHorizontalHeaderLabels(QStringList{
@@ -253,18 +257,43 @@ void BootEditorTab::initializeCenterPane()
     m_entryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_entryTable->setAlternatingRowColors(true);
     m_entryTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_entryTable->horizontalHeader()->setStretchLastSection(true);
-    m_entryTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_entryTable->verticalHeader()->setVisible(false);
+    m_entryTable->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
 
-    // 右侧编辑区：分为基础设置、开关设置、命令执行、原始输出。
+    // 表头宽度策略：
+    // - 描述与路径列可伸展；
+    // - 其余列按内容自适应。
+    QHeaderView* entryHeader = m_entryTable->horizontalHeader();
+    entryHeader->setStretchLastSection(false);
+    entryHeader->setSectionResizeMode(kColumnIdentifier, QHeaderView::ResizeToContents);
+    entryHeader->setSectionResizeMode(kColumnDescription, QHeaderView::Stretch);
+    entryHeader->setSectionResizeMode(kColumnType, QHeaderView::ResizeToContents);
+    entryHeader->setSectionResizeMode(kColumnDevice, QHeaderView::ResizeToContents);
+    entryHeader->setSectionResizeMode(kColumnPath, QHeaderView::Stretch);
+    entryHeader->setSectionResizeMode(kColumnFlags, QHeaderView::ResizeToContents);
+
+    // 下方编辑区：再拆成左右两栏，降低单列过长问题。
     m_editorPane = new QWidget(m_mainSplitter);
     m_editorPaneLayout = new QVBoxLayout(m_editorPane);
     m_editorPaneLayout->setContentsMargins(0, 0, 0, 0);
     m_editorPaneLayout->setSpacing(6);
 
+    QSplitter* editorColumnsSplitter = new QSplitter(Qt::Horizontal, m_editorPane);
+    editorColumnsSplitter->setChildrenCollapsible(false);
+    m_editorPaneLayout->addWidget(editorColumnsSplitter, 1);
+
+    QWidget* leftEditorColumn = new QWidget(editorColumnsSplitter);
+    QVBoxLayout* leftEditorLayout = new QVBoxLayout(leftEditorColumn);
+    leftEditorLayout->setContentsMargins(0, 0, 0, 0);
+    leftEditorLayout->setSpacing(6);
+
+    QWidget* rightEditorColumn = new QWidget(editorColumnsSplitter);
+    QVBoxLayout* rightEditorLayout = new QVBoxLayout(rightEditorColumn);
+    rightEditorLayout->setContentsMargins(0, 0, 0, 0);
+    rightEditorLayout->setSpacing(6);
+
     // 基础字段编辑组。
-    QGroupBox* basicGroup = new QGroupBox(QStringLiteral("基础字段"), m_editorPane);
+    QGroupBox* basicGroup = new QGroupBox(QStringLiteral("基础字段"), leftEditorColumn);
     QFormLayout* basicLayout = new QFormLayout(basicGroup);
     basicLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 
@@ -306,10 +335,52 @@ void BootEditorTab::initializeCenterPane()
     basicLayout->addRow(QStringLiteral("启动菜单策略"), m_bootMenuPolicyCombo);
     basicLayout->addRow(QStringLiteral("菜单等待超时"), m_timeoutSpin);
 
-    m_editorPaneLayout->addWidget(basicGroup);
+    leftEditorLayout->addWidget(basicGroup);
+
+    // 传统引导快捷组：
+    // - 传统引导 = bootmenupolicy Legacy（可用 F8 菜单）；
+    // - 不等同于 BIOS/UEFI 固件模式切换（后者需在主板固件设置中操作）。
+    QGroupBox* legacyGroup = new QGroupBox(QStringLiteral("传统引导（Legacy/F8）"), leftEditorColumn);
+    QVBoxLayout* legacyLayout = new QVBoxLayout(legacyGroup);
+    legacyLayout->setContentsMargins(8, 8, 8, 8);
+    legacyLayout->setSpacing(6);
+
+    m_legacyModeHintLabel = new QLabel(
+        QStringLiteral("说明：这里的“传统引导”是 Windows 启动菜单策略（bootmenupolicy=Legacy），"
+            "不是 BIOS/UEFI 模式切换。"),
+        legacyGroup);
+    m_legacyModeHintLabel->setWordWrap(true);
+    legacyLayout->addWidget(m_legacyModeHintLabel);
+
+    QWidget* legacyActionWidget = new QWidget(legacyGroup);
+    QHBoxLayout* legacyActionLayout = new QHBoxLayout(legacyActionWidget);
+    legacyActionLayout->setContentsMargins(0, 0, 0, 0);
+    legacyActionLayout->setSpacing(6);
+
+    m_setLegacyForSelectedButton = new QPushButton(QStringLiteral("当前项启用 Legacy"), legacyActionWidget);
+    m_setLegacyForSelectedButton->setToolTip(
+        QStringLiteral("对当前选中引导项执行：bcdedit /set <id> bootmenupolicy Legacy"));
+    m_setLegacyForSelectedButton->setIcon(QIcon(QStringLiteral(":/Icon/process_start.svg")));
+    legacyActionLayout->addWidget(m_setLegacyForSelectedButton);
+
+    m_setLegacyForDefaultButton = new QPushButton(QStringLiteral("默认项启用 Legacy"), legacyActionWidget);
+    m_setLegacyForDefaultButton->setToolTip(
+        QStringLiteral("对当前默认引导项执行：bcdedit /set <default> bootmenupolicy Legacy"));
+    m_setLegacyForDefaultButton->setIcon(QIcon(QStringLiteral(":/Icon/process_priority.svg")));
+    legacyActionLayout->addWidget(m_setLegacyForDefaultButton);
+
+    m_setStandardForSelectedButton = new QPushButton(QStringLiteral("当前项恢复 Standard"), legacyActionWidget);
+    m_setStandardForSelectedButton->setToolTip(
+        QStringLiteral("对当前选中引导项执行：bcdedit /set <id> bootmenupolicy Standard"));
+    m_setStandardForSelectedButton->setIcon(QIcon(QStringLiteral(":/Icon/process_refresh.svg")));
+    legacyActionLayout->addWidget(m_setStandardForSelectedButton);
+    legacyActionLayout->addStretch(1);
+
+    legacyLayout->addWidget(legacyActionWidget);
+    leftEditorLayout->addWidget(legacyGroup);
 
     // 高级开关组。
-    QGroupBox* flagGroup = new QGroupBox(QStringLiteral("高级开关"), m_editorPane);
+    QGroupBox* flagGroup = new QGroupBox(QStringLiteral("高级开关"), rightEditorColumn);
     QVBoxLayout* flagLayout = new QVBoxLayout(flagGroup);
     flagLayout->setContentsMargins(8, 8, 8, 8);
     flagLayout->setSpacing(4);
@@ -336,10 +407,10 @@ void BootEditorTab::initializeCenterPane()
     flagLayout->addWidget(m_recoveryEnabledCheck);
     flagLayout->addWidget(new QLabel(QStringLiteral("safeboot 模式"), flagGroup));
     flagLayout->addWidget(m_safeBootCombo);
-    m_editorPaneLayout->addWidget(flagGroup);
+    rightEditorLayout->addWidget(flagGroup);
 
     // 应用动作区：分离“当前条目修改”和“bootmgr 全局参数”。
-    QWidget* actionWidget = new QWidget(m_editorPane);
+    QWidget* actionWidget = new QWidget(leftEditorColumn);
     QHBoxLayout* actionLayout = new QHBoxLayout(actionWidget);
     actionLayout->setContentsMargins(0, 0, 0, 0);
     actionLayout->setSpacing(6);
@@ -358,10 +429,11 @@ void BootEditorTab::initializeCenterPane()
     actionLayout->addWidget(m_applyBootMgrButton);
     actionLayout->addWidget(m_reloadOneButton);
     actionLayout->addStretch(1);
-    m_editorPaneLayout->addWidget(actionWidget);
+    leftEditorLayout->addWidget(actionWidget);
+    leftEditorLayout->addStretch(1);
 
     // 自定义命令组：支持输入任意 bcdedit 参数。
-    QGroupBox* customGroup = new QGroupBox(QStringLiteral("自定义命令"), m_editorPane);
+    QGroupBox* customGroup = new QGroupBox(QStringLiteral("自定义命令"), rightEditorColumn);
     QHBoxLayout* customLayout = new QHBoxLayout(customGroup);
     customLayout->setContentsMargins(8, 8, 8, 8);
     customLayout->setSpacing(6);
@@ -376,10 +448,10 @@ void BootEditorTab::initializeCenterPane()
 
     customLayout->addWidget(m_customCommandEdit, 1);
     customLayout->addWidget(m_runCustomCommandButton, 0);
-    m_editorPaneLayout->addWidget(customGroup);
+    rightEditorLayout->addWidget(customGroup);
 
     // 原始输出组：记录命令与输出，方便审计。
-    QGroupBox* outputGroup = new QGroupBox(QStringLiteral("原始输出"), m_editorPane);
+    QGroupBox* outputGroup = new QGroupBox(QStringLiteral("原始输出"), rightEditorColumn);
     QVBoxLayout* outputLayout = new QVBoxLayout(outputGroup);
     outputLayout->setContentsMargins(8, 8, 8, 8);
     outputLayout->setSpacing(4);
@@ -389,10 +461,18 @@ void BootEditorTab::initializeCenterPane()
     m_rawOutputEdit->setPlaceholderText(QStringLiteral("这里显示 bcdedit 原始输出与命令执行日志。"));
     m_rawOutputEdit->setMinimumHeight(180);
     outputLayout->addWidget(m_rawOutputEdit);
-    m_editorPaneLayout->addWidget(outputGroup, 1);
+    rightEditorLayout->addWidget(outputGroup, 1);
 
-    m_mainSplitter->setStretchFactor(0, 4);
-    m_mainSplitter->setStretchFactor(1, 6);
+    // 分割比例：
+    // - 上表格优先保证可读；
+    // - 下编辑区仍保留足够空间进行批量操作。
+    m_mainSplitter->setStretchFactor(0, 6);
+    m_mainSplitter->setStretchFactor(1, 5);
+    m_mainSplitter->setSizes(QList<int>{ 380, 320 });
+
+    editorColumnsSplitter->setStretchFactor(0, 5);
+    editorColumnsSplitter->setStretchFactor(1, 5);
+    editorColumnsSplitter->setSizes(QList<int>{ 1, 1 });
 }
 
 void BootEditorTab::initializeConnections()
@@ -441,6 +521,18 @@ void BootEditorTab::initializeConnections()
         {
             applyBootManagerChanges();
         });
+    connect(m_setLegacyForSelectedButton, &QPushButton::clicked, this, [this]()
+        {
+            setLegacyBootForSelectedEntry();
+        });
+    connect(m_setLegacyForDefaultButton, &QPushButton::clicked, this, [this]()
+        {
+            setLegacyBootForDefaultEntry();
+        });
+    connect(m_setStandardForSelectedButton, &QPushButton::clicked, this, [this]()
+        {
+            setStandardBootForSelectedEntry();
+        });
     connect(m_reloadOneButton, &QPushButton::clicked, this, [this]()
         {
             syncEditorFromSelection();
@@ -475,7 +567,12 @@ void BootEditorTab::refreshBcdEntries()
 
     if (!enumResult.startSucceeded || enumResult.timeout || enumResult.exitCode != 0)
     {
+        // 刷新失败时必须清空缓存：
+        // - 防止默认项缓存残留导致后续“默认项操作”误写到过期目标；
+        // - 同时清空原始枚举文本，避免界面继续展示旧数据。
         m_entryList.clear();
+        m_defaultIdentifierText.clear();
+        m_lastEnumRawText.clear();
         rebuildEntryTable();
         clearEditorForNoSelection();
 

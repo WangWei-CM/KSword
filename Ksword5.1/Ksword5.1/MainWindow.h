@@ -16,8 +16,10 @@
 #include <QEvent>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QString>
 #include <QByteArray>
+#include <QToolButton>
 
 #include <functional>
 #include <string>
@@ -178,6 +180,27 @@ private:
     // - 绑定置顶/窗口控制/命令输入三类交互信号。
     void initCustomTitleBar();
 
+    // syncCustomTitleBarMaximizedState 作用：
+    // - 统一计算主窗口“是否处于最大化态”并刷新标题栏第二按钮图标；
+    // - 兼容 Qt 状态与 Win32 Zoomed 状态，避免切换瞬间图标不一致。
+    void syncCustomTitleBarMaximizedState();
+
+    // ensureNativeFramelessWindowStyle 作用：
+    // - 在无边框模式下补齐 Win32 可缩放/可最大化样式位；
+    // - 修复 Win+↑/Win+↓ 与系统最大化链路偶发失效问题。
+    void ensureNativeFramelessWindowStyle();
+
+    // isWindowActuallyMaximized 作用：
+    // - 综合 Qt 状态与 Win32 IsZoomed 判断真实最大化状态；
+    // - 避免仅依赖 isMaximized() 造成“按钮状态漂移”。
+    bool isWindowActuallyMaximized() const;
+
+    // setWindowMaximizedBySystemCommand 作用：
+    // - 通过 Win32 系统命令执行最大化/还原；
+    // - 保证与 Win+方向键共享同一状态链路。
+    // 入参 targetMaximizedState：true=最大化，false=还原。
+    void setWindowMaximizedBySystemCommand(bool targetMaximizedState);
+
     // setPinnedWindowState 作用：
     // - 设置主窗口置顶状态并同步标题栏图钉图标；
     // - 内部使用 SetWindowPos 切换 HWND_TOPMOST/HWND_NOTOPMOST。
@@ -289,6 +312,9 @@ private:
     // - System：是否 LocalSystem 身份；
     // - TI/PPL：预留权限状态位（当前仅展示状态，不做切换）。
     QWidget* m_privilegeButtonContainer = nullptr;
+    QWidget* m_topActionRowWidget = nullptr;     // m_topActionRowWidget：标题栏下方的功能条容器（文件 + 权限按钮）。
+    QHBoxLayout* m_topActionRowLayout = nullptr; // m_topActionRowLayout：功能条水平布局。
+    QToolButton* m_fileMenuButton = nullptr;     // m_fileMenuButton：功能条左侧“文件”按钮。
     QPushButton* m_adminStatusButton = nullptr;
     QPushButton* m_debugStatusButton = nullptr;
     QPushButton* m_systemStatusButton = nullptr;

@@ -4,7 +4,10 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDateTime>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QInputDialog>
 #include <QLineEdit>
@@ -190,16 +193,70 @@ void BootEditorTab::applySelectedEntryChanges()
     // - 关闭模式：删除 safeboot 与 safebootalternateshell；
     // - 其余模式：按组合值写入。
     const QString safeBootModeValue = m_safeBootCombo->currentData().toString().trimmed().toLower();
+
+    // deleteValueWithMissingTolerance：
+    // - 统一处理 deletevalue 的返回；
+    // - 若仅因“字段不存在”失败则视为目标状态已满足；
+    // - 其它失败直接中止，避免最终误报“写入完成”。
+    const auto deleteValueWithMissingTolerance = [this, &identifierText](const QString& elementName) -> bool
+        {
+            const QString operationText = QStringLiteral("删除 %1").arg(elementName);
+            const BcdCommandResult deleteResult = runBcdEdit(
+                QStringList{
+                    QStringLiteral("/deletevalue"),
+                    identifierText,
+                    elementName
+                },
+                kDefaultCommandTimeoutMs,
+                operationText);
+            appendCommandLog(
+                QStringLiteral("bcdedit /deletevalue %1 %2").arg(identifierText, elementName),
+                deleteResult);
+
+            if (deleteResult.startSucceeded && !deleteResult.timeout && deleteResult.exitCode == 0)
+            {
+                return true;
+            }
+
+            const QString outputLowerText = deleteResult.mergedOutputText.toLower();
+            const bool likelyMissingElement =
+                outputLowerText.contains(QStringLiteral("not found"))
+                || outputLowerText.contains(QStringLiteral("cannot find"))
+                || outputLowerText.contains(QStringLiteral("does not exist"))
+                || deleteResult.mergedOutputText.contains(QStringLiteral("找不到"))
+                || deleteResult.mergedOutputText.contains(QStringLiteral("不存在"))
+                || deleteResult.mergedOutputText.contains(QStringLiteral("未找到"));
+
+            if (likelyMissingElement)
+            {
+                kLogEvent warnEvent;
+                warn << warnEvent
+                    << "[BootEditor] deletevalue 字段不存在，按目标状态继续: element="
+                    << elementName.toStdString()
+                    << ", identifier="
+                    << identifierText.toStdString()
+                    << eol;
+                return true;
+            }
+
+            QMessageBox::warning(
+                this,
+                QStringLiteral("引导编辑器"),
+                QStringLiteral("%1失败：\n%2")
+                .arg(operationText, deleteResult.mergedOutputText.trimmed()));
+            return false;
+        };
+
     if (safeBootModeValue == QStringLiteral("off"))
     {
-        runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/deletevalue"), identifierText, QStringLiteral("safeboot") },
-            QStringLiteral("删除 safeboot"),
-            false);
-        runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/deletevalue"), identifierText, QStringLiteral("safebootalternateshell") },
-            QStringLiteral("删除 safebootalternateshell"),
-            false);
+        if (!deleteValueWithMissingTolerance(QStringLiteral("safeboot")))
+        {
+            return;
+        }
+        if (!deleteValueWithMissingTolerance(QStringLiteral("safebootalternateshell")))
+        {
+            return;
+        }
     }
     else if (safeBootModeValue == QStringLiteral("minimal"))
     {
@@ -210,10 +267,10 @@ void BootEditorTab::applySelectedEntryChanges()
         {
             return;
         }
-        runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/deletevalue"), identifierText, QStringLiteral("safebootalternateshell") },
-            QStringLiteral("删除 safebootalternateshell"),
-            false);
+        if (!deleteValueWithMissingTolerance(QStringLiteral("safebootalternateshell")))
+        {
+            return;
+        }
     }
     else if (safeBootModeValue == QStringLiteral("network"))
     {
@@ -224,10 +281,10 @@ void BootEditorTab::applySelectedEntryChanges()
         {
             return;
         }
-        runBcdAndExpectSuccess(
-            QStringList{ QStringLiteral("/deletevalue"), identifierText, QStringLiteral("safebootalternateshell") },
-            QStringLiteral("删除 safebootalternateshell"),
-            false);
+        if (!deleteValueWithMissingTolerance(QStringLiteral("safebootalternateshell")))
+        {
+            return;
+        }
     }
     else if (safeBootModeValue == QStringLiteral("alternateshell"))
     {
@@ -257,6 +314,75 @@ void BootEditorTab::applyBootManagerChanges()
         QStringList{ QStringLiteral("/timeout"), QString::number(m_timeoutSpin->value()) },
         QStringLiteral("写入 timeout"),
         true))
+    {
+        return;
+    }
+    refreshBcdEntries();
+}
+
+void BootEditorTab::setLegacyBootForSelectedEntry()
+{
+    // 当前项传统引导：
+    // - 对当前选中条目写入 bootmenupolicy Legacy；
+    // - 成功后刷新列表与右侧详情。
+    const BcdEntry* selectedEntry = currentEntry();
+    if (selectedEntry == nullptr)
+    {
+        QMessageBox::information(this, QStringLiteral("传统引导"), QStringLiteral("请先选择一个引导条目。"));
+        return;
+    }
+
+    if (!applyBootMenuPolicyByIdentifier(
+        selectedEntry->identifierText.trimmed(),
+        QStringLiteral("Legacy"),
+        QStringLiteral("当前项启用传统引导")))
+    {
+        return;
+    }
+    refreshBcdEntries();
+}
+
+void BootEditorTab::setLegacyBootForDefaultEntry()
+{
+    // 默认项传统引导：
+    // - 对 {bootmgr}.default 对应条目写入 bootmenupolicy Legacy；
+    // - 若未读取到默认标识符则提示刷新后重试。
+    const QString defaultIdentifierText = m_defaultIdentifierText.trimmed();
+    if (defaultIdentifierText.isEmpty())
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("传统引导"),
+            QStringLiteral("当前未识别到默认启动项，请先刷新 BCD。"));
+        return;
+    }
+
+    if (!applyBootMenuPolicyByIdentifier(
+        defaultIdentifierText,
+        QStringLiteral("Legacy"),
+        QStringLiteral("默认项启用传统引导")))
+    {
+        return;
+    }
+    refreshBcdEntries();
+}
+
+void BootEditorTab::setStandardBootForSelectedEntry()
+{
+    // 当前项恢复标准：
+    // - 对当前选中条目写入 bootmenupolicy Standard；
+    // - 用于回退“传统引导”快捷设置。
+    const BcdEntry* selectedEntry = currentEntry();
+    if (selectedEntry == nullptr)
+    {
+        QMessageBox::information(this, QStringLiteral("传统引导"), QStringLiteral("请先选择一个引导条目。"));
+        return;
+    }
+
+    if (!applyBootMenuPolicyByIdentifier(
+        selectedEntry->identifierText.trimmed(),
+        QStringLiteral("Standard"),
+        QStringLiteral("当前项恢复标准引导")))
     {
         return;
     }
@@ -568,19 +694,6 @@ const BootEditorTab::BcdEntry* BootEditorTab::currentEntry() const
     return &m_entryList[static_cast<std::size_t>(index)];
 }
 
-bool BootEditorTab::ensureSelectionValid(const bool showHintBox) const
-{
-    const bool hasSelection = currentEntry() != nullptr;
-    if (!hasSelection && showHintBox)
-    {
-        QMessageBox::information(
-            const_cast<BootEditorTab*>(this),
-            QStringLiteral("引导编辑器"),
-            QStringLiteral("请先选择一个引导条目。"));
-    }
-    return hasSelection;
-}
-
 bool BootEditorTab::entryMatchesFilter(const BcdEntry& entry) const
 {
     const QString keywordText = m_filterEdit->text().trimmed();
@@ -613,25 +726,15 @@ QString BootEditorTab::readElementValue(
     const BcdEntry& entry,
     const QStringList& candidateKeyList) const
 {
-    // 先按候选 key 精确匹配，再尝试“包含式”兜底。
+    // 只做精确键匹配：
+    // - 避免 device/osdevice 等相似字段被 contains 误命中；
+    // - 若字段缺失则返回空，交给调用方决定后续行为。
     for (const QString& candidateRawKey : candidateKeyList)
     {
         const QString normalizedCandidateKey = normalizeElementKey(candidateRawKey);
         if (entry.elementMap.contains(normalizedCandidateKey))
         {
             return entry.elementMap.value(normalizedCandidateKey);
-        }
-    }
-
-    for (const QString& candidateRawKey : candidateKeyList)
-    {
-        const QString normalizedCandidateKey = normalizeElementKey(candidateRawKey);
-        for (auto iter = entry.elementMap.constBegin(); iter != entry.elementMap.constEnd(); ++iter)
-        {
-            if (iter.key().contains(normalizedCandidateKey))
-            {
-                return iter.value();
-            }
         }
     }
     return QString();
@@ -698,11 +801,31 @@ BootEditorTab::BcdCommandResult BootEditorTab::runBcdEdit(
         return result;
     }
 
-    if (!process.waitForFinished(timeoutMs))
+    // 可响应等待策略：
+    // - 使用短周期 waitForFinished + processEvents；
+    // - 避免单次长阻塞造成“界面假死”。
+    QElapsedTimer elapsedTimer;
+    elapsedTimer.start();
+    while (process.state() != QProcess::NotRunning)
     {
-        result.timeout = true;
-        process.kill();
-        process.waitForFinished(1000);
+        if (process.waitForFinished(50))
+        {
+            break;
+        }
+
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+
+        if (elapsedTimer.elapsed() >= timeoutMs)
+        {
+            result.timeout = true;
+            process.kill();
+            process.waitForFinished(1000);
+            break;
+        }
+    }
+
+    if (result.timeout)
+    {
         result.standardOutputText = QString::fromLocal8Bit(process.readAllStandardOutput());
         result.standardErrorText = QString::fromLocal8Bit(process.readAllStandardError());
         result.mergedOutputText = result.standardOutputText + QStringLiteral("\n") + result.standardErrorText;
@@ -789,6 +912,48 @@ bool BootEditorTab::runBcdAndExpectSuccess(
     {
         QMessageBox::information(this, QStringLiteral("引导编辑器"), QStringLiteral("%1成功。").arg(operationText));
     }
+    return true;
+}
+
+bool BootEditorTab::applyBootMenuPolicyByIdentifier(
+    const QString& identifierText,
+    const QString& policyValueText,
+    const QString& operationText)
+{
+    // 公共策略写入：
+    // - 统一校验标识符与目标策略参数；
+    // - 成功后给出明确结果提示。
+    const QString normalizedIdentifierText = identifierText.trimmed();
+    const QString normalizedPolicyText = policyValueText.trimmed();
+    if (normalizedIdentifierText.isEmpty() || normalizedPolicyText.isEmpty())
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("传统引导"),
+            QStringLiteral("参数无效：标识符或策略为空。"));
+        return false;
+    }
+
+    if (!runBcdAndExpectSuccess(
+        QStringList{
+            QStringLiteral("/set"),
+            normalizedIdentifierText,
+            QStringLiteral("bootmenupolicy"),
+            normalizedPolicyText
+        },
+        operationText,
+        false))
+    {
+        return false;
+    }
+
+    QMessageBox::information(
+        this,
+        QStringLiteral("传统引导"),
+        QStringLiteral("%1成功。\n标识符：%2\n策略：%3")
+        .arg(operationText)
+        .arg(normalizedIdentifierText)
+        .arg(normalizedPolicyText));
     return true;
 }
 

@@ -326,6 +326,12 @@ MainWindow::MainWindow(
     reportStartupProgress(44, QStringLiteral("正在初始化自绘标题栏..."));
     initCustomTitleBar();
 
+    // 初始化权限状态按钮：
+    // - Admin / Debug / System / TI / PPL；
+    // - 挂载到自绘标题栏右侧，不再依赖原生菜单栏。
+    reportStartupProgress(46, QStringLiteral("正在初始化权限状态按钮..."));
+    initPrivilegeStatusButtons();
+
     // 初始化Dock Widgets
     reportStartupProgress(48, QStringLiteral("正在创建页面组件..."));
     initDockWidgets();
@@ -417,6 +423,9 @@ void MainWindow::resizeEvent(QResizeEvent* event)
 void MainWindow::showEvent(QShowEvent* event)
 {
     QMainWindow::showEvent(event);
+    ensureNativeFramelessWindowStyle();
+    syncCustomTitleBarMaximizedState();
+
     if (m_deferredDockInitializationStarted)
     {
         return;
@@ -440,11 +449,129 @@ void MainWindow::changeEvent(QEvent* event)
     QMainWindow::changeEvent(event);
 
     if (event != nullptr
-        && event->type() == QEvent::WindowStateChange
-        && m_customTitleBar != nullptr)
+        && event->type() == QEvent::WindowStateChange)
     {
-        m_customTitleBar->setMaximizedState(isMaximized());
+        syncCustomTitleBarMaximizedState();
     }
+}
+
+void MainWindow::syncCustomTitleBarMaximizedState()
+{
+    if (m_customTitleBar == nullptr)
+    {
+        return;
+    }
+
+    // maximizedState 用途：统一记录当前窗口是否处于最大化态，供标题栏图标刷新。
+    const bool maximizedState = isWindowActuallyMaximized();
+    m_customTitleBar->setMaximizedState(maximizedState);
+}
+
+void MainWindow::ensureNativeFramelessWindowStyle()
+{
+#ifdef Q_OS_WIN
+    // mainWindowHandle 用途：获取主窗口原生句柄，用于补齐 Win32 样式位。
+    const HWND mainWindowHandle = reinterpret_cast<HWND>(winId());
+    if (mainWindowHandle == nullptr || ::IsWindow(mainWindowHandle) == FALSE)
+    {
+        return;
+    }
+
+    // currentStyleValue 用途：保存当前窗口样式，供增量合并必需样式位。
+    const LONG_PTR currentStyleValue = ::GetWindowLongPtrW(mainWindowHandle, GWL_STYLE);
+    // removeStyleMask 用途：显式移除系统标题栏样式，防止顶部出现白色非客户区。
+    const LONG_PTR removeStyleMask = WS_CAPTION;
+    // requiredStyleMask 用途：无边框窗口仍需具备的系统交互能力掩码。
+    const LONG_PTR requiredStyleMask = WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_SYSMENU;
+    // updatedStyleValue 用途：合并后的目标样式值。
+    const LONG_PTR updatedStyleValue = ((currentStyleValue & ~removeStyleMask) | requiredStyleMask);
+
+    if (updatedStyleValue != currentStyleValue)
+    {
+        ::SetWindowLongPtrW(mainWindowHandle, GWL_STYLE, updatedStyleValue);
+        ::SetWindowPos(
+            mainWindowHandle,
+            nullptr,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+#endif
+}
+
+bool MainWindow::isWindowActuallyMaximized() const
+{
+    // maximizedState 用途：先基于 Qt 状态判断当前是否最大化。
+    bool maximizedState = (windowState() & Qt::WindowMaximized) != 0 || isMaximized();
+#ifdef Q_OS_WIN
+    // 仅在窗口句柄已创建后再读取 Win32 状态，避免初始化阶段触发 winId() 重入。
+    if (!testAttribute(Qt::WA_WState_Created))
+    {
+        return maximizedState;
+    }
+
+    // mainWindowHandle 用途：读取 Win32 Zoomed 状态，补齐 Qt 状态判定盲区。
+    const HWND mainWindowHandle = reinterpret_cast<HWND>(const_cast<MainWindow*>(this)->winId());
+    if (mainWindowHandle != nullptr && ::IsWindow(mainWindowHandle) != FALSE)
+    {
+        maximizedState = maximizedState || (::IsZoomed(mainWindowHandle) != FALSE);
+    }
+#endif
+
+    return maximizedState;
+}
+
+void MainWindow::setWindowMaximizedBySystemCommand(const bool targetMaximizedState)
+{
+#ifdef Q_OS_WIN
+    // mainWindowHandle 用途：执行 SC_MAXIMIZE/SC_RESTORE 时使用的窗口句柄。
+    const HWND mainWindowHandle = reinterpret_cast<HWND>(winId());
+    if (mainWindowHandle != nullptr && ::IsWindow(mainWindowHandle) != FALSE)
+    {
+        // currentMaximizedState 用途：记录当前真实最大化态，避免重复发送相同命令。
+        const bool currentMaximizedState = (::IsZoomed(mainWindowHandle) != FALSE);
+        if (targetMaximizedState != currentMaximizedState)
+        {
+            ::SendMessageW(
+                mainWindowHandle,
+                WM_SYSCOMMAND,
+                static_cast<WPARAM>(targetMaximizedState ? SC_MAXIMIZE : SC_RESTORE),
+                0);
+        }
+    }
+    else
+    {
+        if (targetMaximizedState)
+        {
+            showMaximized();
+        }
+        else
+        {
+            showNormal();
+        }
+    }
+#else
+    if (targetMaximizedState)
+    {
+        showMaximized();
+    }
+    else
+    {
+        showNormal();
+    }
+#endif
+
+    syncCustomTitleBarMaximizedState();
+    QTimer::singleShot(0, this, [this]()
+        {
+            syncCustomTitleBarMaximizedState();
+        });
+    QTimer::singleShot(30, this, [this]()
+        {
+            syncCustomTitleBarMaximizedState();
+        });
 }
 
 bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result)
@@ -465,6 +592,12 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
 
     if (nativeMessage->message == WM_NCHITTEST)
     {
+        // maximizedInNativeMessage 用途：使用当前消息窗口句柄直接判定最大化状态，避免重入。
+        const bool maximizedInNativeMessage =
+            (nativeMessage->hwnd != nullptr && ::IsWindow(nativeMessage->hwnd) != FALSE)
+            ? (::IsZoomed(nativeMessage->hwnd) != FALSE)
+            : isWindowActuallyMaximized();
+
         const LPARAM pointData = nativeMessage->lParam;
         const POINT screenPoint = {
             static_cast<LONG>(static_cast<short>(LOWORD(pointData))),
@@ -478,7 +611,7 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
                 + ::GetSystemMetrics(SM_CXPADDEDBORDER)));
 
         // 边缘缩放命中优先：仅在非最大化状态下启用八方向缩放。
-        if (!isMaximized())
+        if (!maximizedInNativeMessage)
         {
             const bool hitLeft = localPoint.x() >= 0 && localPoint.x() < borderWidth;
             const bool hitRight = localPoint.x() <= width() && localPoint.x() > (width() - borderWidth);
@@ -530,7 +663,10 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
         // 标题栏拖动命中：命中自绘标题栏且位于可拖动区时返回 HTCAPTION。
         if (m_customTitleBar != nullptr)
         {
-            const QRect titleBarRect = m_customTitleBar->geometry();
+            // titleBarTopLeftPoint 用途：把标题栏左上角映射到 MainWindow 坐标系，保证命中测试坐标统一。
+            const QPoint titleBarTopLeftPoint = m_customTitleBar->mapTo(this, QPoint(0, 0));
+            // titleBarRect 用途：在主窗口坐标系下描述标题栏区域，供 HTCAPTION 命中判断。
+            const QRect titleBarRect(titleBarTopLeftPoint, m_customTitleBar->size());
             if (titleBarRect.contains(localPoint))
             {
                 const QPoint titleBarLocalPoint = localPoint - titleBarRect.topLeft();
@@ -556,11 +692,14 @@ void MainWindow::initCustomTitleBar()
 
     m_customTitleBar = new ks::ui::CustomTitleBar(this);
     m_customTitleBar->setPinnedState(m_windowPinned);
-    m_customTitleBar->setMaximizedState(isMaximized());
+    syncCustomTitleBarMaximizedState();
     m_customTitleBar->setDarkModeEnabled(KswordTheme::IsDarkModeEnabled());
     if (menuBar() != nullptr)
     {
-        menuBar()->hide();
+        // menuBarVisibleState 用途：隐藏原生菜单栏，避免出现在自绘标题栏上方。
+        const bool menuBarVisibleState = false;
+        menuBar()->setNativeMenuBar(false);
+        menuBar()->setVisible(menuBarVisibleState);
     }
     if (m_mainRootLayout != nullptr && m_mainRootContainer != nullptr)
     {
@@ -581,18 +720,9 @@ void MainWindow::initCustomTitleBar()
         showMinimized();
     });
     connect(m_customTitleBar, &ks::ui::CustomTitleBar::requestToggleMaximizeWindow, this, [this]() {
-        if (isMaximized())
-        {
-            showNormal();
-        }
-        else
-        {
-            showMaximized();
-        }
-        if (m_customTitleBar != nullptr)
-        {
-            m_customTitleBar->setMaximizedState(isMaximized());
-        }
+        // targetMaximizedState 用途：根据真实状态计算下一目标状态（最大化或还原）。
+        const bool targetMaximizedState = !isWindowActuallyMaximized();
+        setWindowMaximizedBySystemCommand(targetMaximizedState);
     });
     connect(m_customTitleBar, &ks::ui::CustomTitleBar::requestCloseWindow, this, [this]() {
         close();
@@ -775,14 +905,75 @@ void MainWindow::executeCommandInNewConsole(const QString& commandText)
 
 void MainWindow::initMenus()
 {
-    // 顶部菜单栏仅保留“文件 -> 退出”，符合当前精简要求。
-    QMenu* fileMenu = menuBar()->addMenu("文件(&F)");
+    if (menuBar() != nullptr)
+    {
+        // 隐藏 QMainWindow 原生菜单栏，避免出现在自绘标题栏上方。
+        menuBar()->setNativeMenuBar(false);
+        menuBar()->setVisible(false);
+    }
 
-    // 退出动作
-    QAction* exitAction = new QAction("退出(&X)", this);
+    if (m_topActionRowWidget != nullptr)
+    {
+        return;
+    }
+
+    // 功能条：位于自绘标题栏下方，左侧“文件”，右侧权限按钮。
+    m_topActionRowWidget = new QWidget(m_mainRootContainer);
+    m_topActionRowWidget->setObjectName(QStringLiteral("ksTopActionRow"));
+    m_topActionRowWidget->setFixedHeight(28);
+    m_topActionRowLayout = new QHBoxLayout(m_topActionRowWidget);
+    m_topActionRowLayout->setContentsMargins(8, 1, 8, 1);
+    m_topActionRowLayout->setSpacing(8);
+
+    m_fileMenuButton = new QToolButton(m_topActionRowWidget);
+    m_fileMenuButton->setObjectName(QStringLiteral("ksFileMenuButton"));
+    m_fileMenuButton->setText(QStringLiteral("文件"));
+    m_fileMenuButton->setToolTip(QStringLiteral("打开文件菜单"));
+    m_fileMenuButton->setPopupMode(QToolButton::InstantPopup);
+    m_fileMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_fileMenuButton->setAutoRaise(true);
+    m_fileMenuButton->setFixedHeight(22);
+    m_fileMenuButton->setStyleSheet(QStringLiteral(
+        "QToolButton#ksFileMenuButton{"
+        "  background:transparent !important;"
+        "  border:none !important;"
+        "  border-radius:0;"
+        "  margin:0;"
+        "  padding:2px 8px 2px 6px;"
+        "  font-size:12px;"
+        "  font-weight:500;"
+        "  text-align:left;"
+        "}"
+        "QToolButton#ksFileMenuButton:hover{"
+        "  background:rgba(46,139,255,0.14) !important;"
+        "  color:inherit !important;"
+        "}"
+        "QToolButton#ksFileMenuButton:pressed{"
+        "  background:rgba(46,139,255,0.22) !important;"
+        "  color:inherit !important;"
+        "}"
+        "QToolButton#ksFileMenuButton::menu-indicator{"
+        "  image:none;"
+        "  width:0;"
+        "  height:0;"
+        "}"));
+
+    // fileMenu 用途：承载“文件”下拉菜单动作（当前保留退出）。
+    QMenu* fileMenu = new QMenu(m_fileMenuButton);
+    QAction* exitAction = new QAction(QStringLiteral("退出(&X)"), fileMenu);
     exitAction->setShortcut(Qt::CTRL | Qt::Key_Q);
     connect(exitAction, &QAction::triggered, QApplication::instance(), &QApplication::quit);
     fileMenu->addAction(exitAction);
+    m_fileMenuButton->setMenu(fileMenu);
+
+    m_topActionRowLayout->addWidget(m_fileMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    m_topActionRowLayout->addStretch(1);
+
+    if (m_mainRootLayout != nullptr)
+    {
+        // 插入到根布局顶部；后续 initCustomTitleBar 会插到 index=0，因此标题栏仍在最上方。
+        m_mainRootLayout->insertWidget(0, m_topActionRowWidget, 0);
+    }
 }
 
 void MainWindow::initPrivilegeStatusButtons()
@@ -794,10 +985,13 @@ void MainWindow::initPrivilegeStatusButtons()
         return;
     }
 
-    // 在菜单栏右上角放置一个水平容器，承载权限状态按钮。
-    m_privilegeButtonContainer = new QWidget(menuBar());
+    // 在功能条右侧放置一个水平容器，承载权限状态按钮。
+    QWidget* privilegeButtonParent = m_topActionRowWidget != nullptr
+        ? m_topActionRowWidget
+        : this;
+    m_privilegeButtonContainer = new QWidget(privilegeButtonParent);
     QHBoxLayout* buttonLayout = new QHBoxLayout(m_privilegeButtonContainer);
-    buttonLayout->setContentsMargins(0, 0, 6, 0);
+    buttonLayout->setContentsMargins(0, 0, 4, 0);
     buttonLayout->setSpacing(6);
 
     // 按钮文本采用纯文字，满足用户要求。
@@ -830,8 +1024,11 @@ void MainWindow::initPrivilegeStatusButtons()
     m_tiStatusButton->setToolTip("TrustedInstaller 状态位（预留）");
     m_pplStatusButton->setToolTip("PPL 状态位（预留）");
 
-    // 把容器挂到菜单栏右上角。
-    menuBar()->setCornerWidget(m_privilegeButtonContainer, Qt::TopRightCorner);
+    // 把容器挂到功能条右侧。
+    if (m_topActionRowLayout != nullptr)
+    {
+        m_topActionRowLayout->addWidget(m_privilegeButtonContainer, 0, Qt::AlignRight | Qt::AlignVCenter);
+    }
 
     // Admin 按钮：
     // - 已是管理员：仅提示当前状态；
@@ -2391,7 +2588,7 @@ void MainWindow::applyAppearanceSettings(
     {
         m_customTitleBar->setDarkModeEnabled(darkModeEnabled);
         m_customTitleBar->setPinnedState(m_windowPinned);
-        m_customTitleBar->setMaximizedState(isMaximized());
+        syncCustomTitleBarMaximizedState();
     }
 
     rebuildWindowBackgroundBrush();

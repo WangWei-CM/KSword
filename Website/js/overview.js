@@ -63,7 +63,7 @@ function createMetricHtml(labelText, valueText) {
 }
 
 // createShowcaseCardHtml 函数用途：
-// - 生成单个模块分镜（左文右图）；
+// - 生成单个模块分镜（左右交错 + 内倾展示图）；
 // - 传入：tabItem(模块数据), tabIndex(序号), languageCode(语言), actionText(按钮文案), noPreviewTitle(占位标题), noPreviewDesc(占位说明)。
 function createShowcaseCardHtml(tabItem, tabIndex, languageCode, actionText, noPreviewTitle, noPreviewDesc) {
     const pickText = window.kswordLanguage ? window.kswordLanguage.pickText : function fallbackText(value) { return value || ""; };
@@ -76,6 +76,7 @@ function createShowcaseCardHtml(tabItem, tabIndex, languageCode, actionText, noP
 
     const sequenceText = String(tabIndex + 1).padStart(2, "0");
     const revealDelayMs = Math.min((tabIndex + 1) * 60, 880);
+    const mediaLeftClass = tabIndex % 2 === 1 ? " is-media-left" : "";
 
     let mediaHtml = "";
     if (previewShot) {
@@ -106,7 +107,7 @@ function createShowcaseCardHtml(tabItem, tabIndex, languageCode, actionText, noP
     }).join("");
 
     return [
-        '<article class="showcase-card reveal-on-load overview-snap" style="--reveal-delay:' + String(revealDelayMs) + 'ms;">',
+        '<article class="showcase-card reveal-on-load overview-snap' + mediaLeftClass + '" style="--reveal-delay:' + String(revealDelayMs) + 'ms;">',
         '  <div class="showcase-copy">',
         '    <div class="showcase-index">#' + sequenceText + '</div>',
         '    <h3 class="showcase-title">' + localizedTitle + '</h3>',
@@ -305,4 +306,3 @@ function registerOverviewLanguageObserver() {
 // DOMContentLoaded 监听用途：
 // - 确保节点就绪后再初始化渲染。
 document.addEventListener("DOMContentLoaded", registerOverviewLanguageObserver);
-

@@ -165,6 +165,9 @@ void StartupDock::initializeToolbar()
     m_hideMicrosoftCheck = new QCheckBox(QStringLiteral("隐藏微软项"), m_toolbarWidget);
     m_hideMicrosoftCheck->setToolTip(QStringLiteral("隐藏发布者包含 Microsoft/Windows 的条目。"));
 
+    m_hideEmptyPathCheck = new QCheckBox(QStringLiteral("隐藏空路径"), m_toolbarWidget);
+    m_hideEmptyPathCheck->setToolTip(QStringLiteral("在高级注册表树中隐藏当前没有任何条目的注册表位置。"));
+
     m_statusLabel = new QLabel(QStringLiteral("状态：首次打开该页时加载启动项"), m_toolbarWidget);
     m_statusLabel->setWordWrap(true);
     m_statusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -174,6 +177,7 @@ void StartupDock::initializeToolbar()
     m_toolbarLayout->addWidget(m_copyButton);
     m_toolbarLayout->addWidget(m_filterEdit, 1);
     m_toolbarLayout->addWidget(m_hideMicrosoftCheck);
+    m_toolbarLayout->addWidget(m_hideEmptyPathCheck);
     m_toolbarLayout->addWidget(m_statusLabel, 1);
 }
 
@@ -337,6 +341,7 @@ void StartupDock::rebuildRegistryTree()
 
     // knownLocationList：注册表树一级节点清单，按预定义位置顺序创建节点。
     QStringList knownLocationList = buildKnownStartupRegistryLocationList();
+    const bool hideEmptyPath = (m_hideEmptyPathCheck != nullptr) && m_hideEmptyPathCheck->isChecked();
     QHash<QString, std::vector<int>> totalEntryIndexMap;
     QHash<QString, std::vector<int>> visibleEntryIndexMap;
 
@@ -373,6 +378,12 @@ void StartupDock::rebuildRegistryTree()
 
         const std::vector<int> totalEntryIndexList = totalEntryIndexMap.value(groupLocationText);
         const std::vector<int> visibleEntryIndexList = visibleEntryIndexMap.value(groupLocationText);
+        if (hideEmptyPath && totalEntryIndexList.empty())
+        {
+            // hideEmptyPath 用途：按用户要求隐藏无任何条目的注册表位置节点。
+            continue;
+        }
+
         if (!visibleEntryIndexList.empty())
         {
             groupItem->setText(

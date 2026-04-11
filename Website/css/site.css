@@ -1341,3 +1341,108 @@ ul {
     }
 }
 
+
+/* ============================= */
+/* 首页 Changelog 区块 */
+/* 作用：替换核心模块抢先看，读取并展示网站根目录 change.log。 */
+/* ============================= */
+.landing-changelog {
+    margin-top: 24px;
+    border: 1px solid var(--ks-line);
+    border-radius: var(--ks-radius-lg);
+    background: var(--ks-surface);
+    box-shadow: var(--ks-shadow-card);
+    padding: 18px;
+}
+
+.landing-changelog-head {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.landing-changelog-title {
+    font-size: clamp(22px, 2.8vw, 40px);
+    line-height: 1.15;
+    font-weight: 900;
+    color: var(--ks-blue-500);
+}
+
+.landing-changelog-desc {
+    color: var(--ks-text-soft);
+    font-size: 14px;
+}
+
+.landing-changelog-content {
+    margin-top: 12px;
+    padding: 14px;
+    min-height: 180px;
+    max-height: min(48vh, 520px);
+    border: 1px solid var(--ks-line);
+    border-radius: var(--ks-radius-md);
+    background: rgba(12, 28, 50, 0.06);
+    color: var(--ks-text);
+    font-family: "Consolas", "Cascadia Mono", "Courier New", monospace;
+    font-size: 13px;
+    line-height: 1.62;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow: auto;
+}
+
+/* ============================= */
+/* 模块展厅交错布局 + 静态三维内倾 */
+/* 作用：让部分分镜图在左侧，且图片向页面中轴内倾。 */
+/* ============================= */
+.overview-page .showcase-card.is-media-left .showcase-copy {
+    order: 2;
+}
+
+.overview-page .showcase-card.is-media-left .showcase-media {
+    order: 1;
+}
+
+.overview-page .showcase-card .showcase-media {
+    transform-style: preserve-3d;
+}
+
+.overview-page .showcase-card:not(.is-media-left) .showcase-media {
+    transform: perspective(1700px) rotateY(-6deg);
+    transform-origin: left center;
+}
+
+.overview-page .showcase-card.is-media-left .showcase-media {
+    transform: perspective(1700px) rotateY(6deg);
+    transform-origin: right center;
+}
+
+.overview-page .showcase-card .showcase-image,
+.overview-page .showcase-card .showcase-fallback {
+    backface-visibility: hidden;
+}
+
+@media (max-width: 1260px) {
+    .overview-page .showcase-card .showcase-media {
+        transform: none;
+    }
+
+    .overview-page .showcase-card.is-media-left .showcase-copy {
+        order: 1;
+    }
+
+    .overview-page .showcase-card.is-media-left .showcase-media {
+        order: 2;
+    }
+}
+
+@media (max-width: 860px) {
+    .landing-changelog {
+        padding: 14px;
+    }
+
+    .landing-changelog-content {
+        min-height: 140px;
+        max-height: 40vh;
+        font-size: 12px;
+    }
+}
