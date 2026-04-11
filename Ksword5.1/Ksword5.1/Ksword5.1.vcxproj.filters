@@ -46,6 +46,9 @@
     <ClCompile Include="MainWindow.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MiscDock\BootEditor\BootEditorTab.Actions.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DriverDock\DriverDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -80,6 +83,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\BootEditor\BootEditorTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\MiscDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MonitorDock\MonitorDock.cpp">
@@ -143,6 +152,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="NetworkDock\NetworkDock.ManualRequest.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="NetworkDock\NetworkDock.MultiThreadDownload.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="NetworkDock\NetworkDock.HttpsAnalyze.cpp">
@@ -283,6 +295,12 @@
     <ClCompile Include="Framework\ProgressDockWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Framework\CustomTitleBar.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Framework\StartupSplash.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Framework\ThemedMessageBox.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -333,6 +351,9 @@
     <QtMoc Include="MainWindow.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <QtMoc Include="Framework\CustomTitleBar.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
     <QtMoc Include="DriverDock\DriverDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
@@ -343,6 +364,12 @@
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="MemoryDock\MemoryDock.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="MiscDock\BootEditor\BootEditorTab.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="MiscDock\MiscDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="MonitorDock\MonitorDock.h">
@@ -414,6 +441,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Framework\ProgressDockWidget.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Framework\StartupSplash.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Framework\ThemedMessageBox.h">

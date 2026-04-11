@@ -42,6 +42,7 @@ class QTimer;
 class QVBoxLayout;
 class QWidget;
 class QShowEvent;
+class MultiThreadDownloadSegmentBarWidget;
 
 namespace ks::network
 {
@@ -133,6 +134,44 @@ private:
     using UInt16Range = std::pair<std::uint16_t, std::uint16_t>;
 
 private:
+    // MultiThreadDownloadSegmentState：
+    // - 作用：保存单分段下载进度状态；
+    // - 仅供“多线程下载”页面内部逻辑使用。
+    struct MultiThreadDownloadSegmentState
+    {
+        std::uint64_t rangeBeginByte = 0; // rangeBeginByte：分段起始字节（含）。
+        std::uint64_t rangeEndByte = 0; // rangeEndByte：分段结束字节（含）。
+        std::atomic<std::uint64_t> downloadedBytes{ 0 }; // downloadedBytes：该分段已下载字节数。
+        std::atomic_bool finished{ false }; // finished：该分段是否已下载完成。
+        QString statusText = QStringLiteral("等待中"); // statusText：该分段状态文本。
+        mutable std::mutex statusMutex; // statusMutex：分段状态文本并发读写保护锁。
+    };
+
+    // MultiThreadDownloadTaskState：
+    // - 作用：保存单任务下载状态、分段集合和后台线程状态；
+    // - 仅供“多线程下载”页面内部逻辑使用。
+    struct MultiThreadDownloadTaskState
+    {
+        int taskId = 0; // taskId：任务编号。
+        QString urlText; // urlText：任务原始下载URL。
+        QString savePathText; // savePathText：任务最终输出文件路径。
+        QString fileNameText; // fileNameText：任务文件名。
+        int requestedThreadCount = 1; // requestedThreadCount：用户配置线程数。
+        int actualThreadCount = 1; // actualThreadCount：实际执行线程数（按服务端能力调整）。
+        bool supportsRange = false; // supportsRange：服务端是否支持 Range 分段下载。
+        std::uint64_t totalBytes = 0; // totalBytes：目标文件总字节数。
+        std::atomic<std::uint64_t> downloadedBytes{ 0 }; // downloadedBytes：任务累计已下载字节数。
+        std::atomic_int runningWorkerCount{ 0 }; // runningWorkerCount：仍在运行的下载线程数量。
+        std::atomic_bool finished{ false }; // finished：任务是否已完成（成功或失败结束）。
+        std::atomic_bool failed{ false }; // failed：任务是否失败结束。
+        std::atomic_bool cancelRequested{ false }; // cancelRequested：任务是否收到取消请求。
+        QString statusText = QStringLiteral("等待启动"); // statusText：任务状态文本。
+        QString errorReasonText; // errorReasonText：任务失败原因文本。
+        mutable std::mutex statusMutex; // statusMutex：任务状态与错误文本并发保护锁。
+        std::vector<std::shared_ptr<MultiThreadDownloadSegmentState>> segmentStateList; // segmentStateList：任务分段状态列表。
+    };
+
+private:
     // ========================= UI 初始化 =========================
     // initializeUi：
     // - 作用：初始化根布局与侧边栏 Tab 容器。
@@ -158,6 +197,11 @@ private:
     // - 作用：构建“请求构造”页（手动 API 参数编辑 + 执行结果输出）。
     // - 返回：无。
     void initializeManualRequestTab();
+
+    // initializeMultiThreadDownloadTab：
+    // - 作用：构建“多线程下载”页（URL/路径/线程数 + 任务与分段进度）。
+    // - 返回：无。
+    void initializeMultiThreadDownloadTab();
 
     // initializeArpCacheTab：
     // - 作用：构建“ARP缓存”页（展示 + 编辑）。
@@ -344,6 +388,28 @@ private:
     // - 参数 logLine：输出正文。
     // - 返回：无。
     void appendManualRequestLogLine(const QString& logLine);
+
+    // ========================= 多线程下载 ======================
+    // startMultiThreadDownloadTask：
+    // - 作用：按当前 URL、保存目录、线程数创建并启动下载任务。
+    // - 返回：无。
+    void startMultiThreadDownloadTask();
+
+    // browseMultiThreadDownloadDirectory：
+    // - 作用：选择下载输出目录并回填到目录输入框。
+    // - 返回：无。
+    void browseMultiThreadDownloadDirectory();
+
+    // refreshMultiThreadDownloadUi：
+    // - 作用：刷新下载任务表、分段表和总进度条显示。
+    // - 返回：无。
+    void refreshMultiThreadDownloadUi();
+
+    // findMultiThreadDownloadTaskById：
+    // - 作用：按任务编号查找下载任务状态对象。
+    // - 参数 taskId：任务编号。
+    // - 返回：找到时返回共享指针，否则返回空。
+    std::shared_ptr<MultiThreadDownloadTaskState> findMultiThreadDownloadTaskById(int taskId) const;
 
     // ========================= ARP/DNS/存活主机 ======================
     // refreshArpCacheTable：
@@ -608,7 +674,22 @@ private:
     QPushButton* m_manualResetButton = nullptr;      // 重置参数按钮。
     QPlainTextEdit* m_manualResultOutput = nullptr;  // 请求执行结果输出框。
 
-    // ========================= Tab5：ARP 缓存 ====================
+    // ========================= Tab5：多线程下载 ====================
+    QWidget* m_multiThreadDownloadPage = nullptr;      // 多线程下载页容器。
+    QVBoxLayout* m_multiThreadDownloadLayout = nullptr; // 多线程下载页主布局。
+    QHBoxLayout* m_multiThreadDownloadControlLayout = nullptr; // 下载参数控制栏布局。
+    QLineEdit* m_multiDownloadUrlEdit = nullptr;       // 下载URL输入框。
+    QLineEdit* m_multiDownloadSaveDirEdit = nullptr;   // 下载目录输入框。
+    QSpinBox* m_multiDownloadThreadCountSpin = nullptr; // 下载线程数输入框。
+    QPushButton* m_multiDownloadBrowseDirButton = nullptr; // 选择下载目录按钮。
+    QPushButton* m_multiDownloadStartButton = nullptr; // 启动下载按钮。
+    QLabel* m_multiDownloadStatusLabel = nullptr;      // 下载状态标签。
+    QTableWidget* m_multiDownloadTaskTable = nullptr;  // 下载任务总览表。
+    QTableWidget* m_multiDownloadSegmentTable = nullptr; // 当前任务分段进度表。
+    MultiThreadDownloadSegmentBarWidget* m_multiDownloadSegmentBar = nullptr; // 断节式总进度条控件。
+    QLabel* m_multiDownloadTotalProgressLabel = nullptr; // 总进度百分比标签。
+
+    // ========================= Tab6：ARP 缓存 ====================
     QWidget* m_arpCachePage = nullptr;            // ARP缓存页容器。
     QVBoxLayout* m_arpCacheLayout = nullptr;      // ARP缓存页布局。
     QHBoxLayout* m_arpCacheControlLayout = nullptr; // ARP控制栏布局。
@@ -619,7 +700,7 @@ private:
     QLabel* m_arpStatusLabel = nullptr;           // ARP状态标签。
     QTableWidget* m_arpTable = nullptr;           // ARP缓存表格。
 
-    // ========================= Tab6：DNS 缓存 ====================
+    // ========================= Tab7：DNS 缓存 ====================
     QWidget* m_dnsCachePage = nullptr;            // DNS缓存页容器。
     QVBoxLayout* m_dnsCacheLayout = nullptr;      // DNS缓存页布局。
     QHBoxLayout* m_dnsCacheControlLayout = nullptr; // DNS控制栏布局。
@@ -630,7 +711,7 @@ private:
     QLabel* m_dnsStatusLabel = nullptr;           // DNS状态标签。
     QTableWidget* m_dnsTable = nullptr;           // DNS缓存表格。
 
-    // ========================= Tab7：存活主机发现 ====================
+    // ========================= Tab8：存活主机发现 ====================
     QWidget* m_aliveScanPage = nullptr;           // 存活主机扫描页容器。
     QVBoxLayout* m_aliveScanLayout = nullptr;     // 存活主机扫描页布局。
     QHBoxLayout* m_aliveScanControlLayout = nullptr; // 扫描控制栏布局。
@@ -643,7 +724,7 @@ private:
     QLabel* m_aliveScanStatusLabel = nullptr;     // 扫描状态标签。
     QTableWidget* m_aliveScanTable = nullptr;     // 存活主机结果表。
 
-    // ========================= Tab8：HTTPS解析 ====================
+    // ========================= Tab9：HTTPS解析 ====================
     QWidget* m_httpsAnalyzePage = nullptr;          // HTTPS解析页容器。
     QVBoxLayout* m_httpsAnalyzeLayout = nullptr;    // HTTPS解析页主布局。
     QHBoxLayout* m_httpsAnalyzeControlLayout = nullptr; // HTTPS控制栏布局。
@@ -664,6 +745,7 @@ private:
     QTimer* m_rateLimitRefreshTimer = nullptr; // 限速规则轮询刷新定时器。
     QTimer* m_packetFlushTimer = nullptr;      // 报文批量刷新定时器（UI 节流关键）。
     QTimer* m_connectionRefreshTimer = nullptr; // 连接快照轮询刷新定时器（TCP/UDP）。
+    QTimer* m_multiDownloadRefreshTimer = nullptr; // 多线程下载页面刷新定时器（进度UI节流）。
     std::unique_ptr<ks::network::HttpsMitmProxyService> m_httpsProxyService; // HTTPS MITM 代理服务对象。
     bool m_monitorRunning = false;             // 抓包运行状态缓存。
     bool m_httpsProxyRunning = false;          // HTTPS代理运行状态缓存。
@@ -707,4 +789,10 @@ private:
     std::atomic_bool m_aliveScanRunning{ false };
     std::atomic_bool m_aliveScanCancel{ false };
     int m_aliveScanProgressPid = 0;
+
+    // 多线程下载任务运行状态：支持多任务并行与界面周期刷新。
+    mutable std::mutex m_multiDownloadTaskMutex; // m_multiDownloadTaskMutex：下载任务列表并发访问锁。
+    std::vector<std::shared_ptr<MultiThreadDownloadTaskState>> m_multiDownloadTaskList; // m_multiDownloadTaskList：下载任务状态集合。
+    int m_multiDownloadNextTaskId = 1; // m_multiDownloadNextTaskId：新建任务编号递增计数器。
+    int m_multiDownloadSelectedTaskId = 0; // m_multiDownloadSelectedTaskId：当前分段详情面板绑定的任务编号。
 };

@@ -17,6 +17,8 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <cmath>
+
 namespace
 {
     // ToolTip 与图标常量：统一维护设置页按钮文案，避免硬编码分散。
@@ -25,6 +27,17 @@ namespace
     constexpr const char* IconThemeDark = ":/Icon/settings_theme_dark.svg";
     constexpr const char* IconBrowseBackground = ":/Icon/settings_background_browse.svg";
     constexpr const char* IconResetBackground = ":/Icon/settings_background_reset.svg";
+
+    // formatScaleFactorText 作用：
+    // - 把缩放因子格式化为两位小数字符串；
+    // - 统一输入框显示格式，避免精度噪声。
+    // 调用方式：配置回填与保存后 UI 刷新时调用。
+    // 入参 scaleFactor：已校正的缩放因子。
+    // 返回：例如 "1.00" 的文本。
+    QString formatScaleFactorText(const double scaleFactor)
+    {
+        return QString::number(ks::settings::normalizeWindowScaleFactor(scaleFactor), 'f', 2);
+    }
 }
 
 SettingsDock::SettingsDock(QWidget* parent)
@@ -209,6 +222,7 @@ void SettingsDock::initializeAppearanceTab()
     m_startupDefaultTabCombo->addItem(QStringLiteral("注册表"), QStringLiteral("registry"));
     m_startupDefaultTabCombo->addItem(QStringLiteral("启动项"), QStringLiteral("startup"));
     m_startupDefaultTabCombo->addItem(QStringLiteral("服务"), QStringLiteral("service"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("杂项"), QStringLiteral("misc"));
     startupSelectorLayout->addWidget(m_startupDefaultTabCombo, 1);
     startupLayout->addLayout(startupSelectorLayout);
 
@@ -222,6 +236,28 @@ void SettingsDock::initializeAppearanceTab()
     m_startupAutoAdminCheckBox->setToolTip(
         QStringLiteral("下次启动时会在启动画面出现前先尝试管理员提权，失败则继续普通权限启动"));
     startupLayout->addWidget(m_startupAutoAdminCheckBox);
+
+    // 启动缩放因子设置：重启后生效，用于统一控制主窗口 UI 缩放倍率。
+    QHBoxLayout* startupScaleLayout = new QHBoxLayout();
+    startupScaleLayout->setSpacing(6);
+    startupScaleLayout->addWidget(new QLabel(QStringLiteral("窗口缩放因子"), startupGroupBox), 0);
+
+    // m_startupWindowScaleFactorEdit 作用：输入下次启动主窗口缩放因子（1.00=100%）。
+    m_startupWindowScaleFactorEdit = new QLineEdit(startupGroupBox);
+    m_startupWindowScaleFactorEdit->setPlaceholderText(QStringLiteral("1.00"));
+    m_startupWindowScaleFactorEdit->setFixedWidth(96);
+    m_startupWindowScaleFactorEdit->setToolTip(
+        QStringLiteral("主窗口缩放因子（重启生效）：1.00=100%，建议范围 0.50~2.00"));
+    startupScaleLayout->addWidget(m_startupWindowScaleFactorEdit, 0);
+    startupScaleLayout->addStretch(1);
+    startupLayout->addLayout(startupScaleLayout);
+
+    // m_startupWindowScaleHintLabel 作用：显示缩放因子对应百分比提示。
+    m_startupWindowScaleHintLabel = new QLabel(
+        QStringLiteral("当前：约 100%（重启后生效，系统缩放会叠加）"),
+        startupGroupBox);
+    m_startupWindowScaleHintLabel->setWordWrap(true);
+    startupLayout->addWidget(m_startupWindowScaleHintLabel);
 
     appearanceRootLayout->addWidget(startupGroupBox);
 
@@ -285,6 +321,15 @@ void SettingsDock::bindAppearanceSignals()
         markPendingChanges(QStringLiteral("启动时自动请求管理员权限开关切换"));
         });
 
+    connect(m_startupWindowScaleFactorEdit, &QLineEdit::textChanged, this, [this](const QString& /*text*/) {
+        const double normalizedScaleFactor = parseWindowScaleFactorFromUi();
+        updateWindowScaleFactorHintLabel(normalizedScaleFactor);
+        if (!m_isApplyingUiState)
+        {
+            markPendingChanges(QStringLiteral("启动窗口缩放因子变化"));
+        }
+        });
+
     connect(m_applySettingsButton, &QPushButton::clicked, this, [this]() {
         saveAndEmitFromUi(QStringLiteral("点击应用按钮"));
         });
@@ -342,7 +387,16 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
         m_startupAutoAdminCheckBox->setChecked(settings.autoRequestAdminOnStartup);
     }
 
+    if (m_startupWindowScaleFactorEdit != nullptr)
+    {
+        const double normalizedScaleFactor =
+            ks::settings::normalizeWindowScaleFactor(settings.startupWindowScaleFactor);
+        m_startupWindowScaleFactorEdit->setText(formatScaleFactorText(normalizedScaleFactor));
+    }
+
     updateOpacityValueLabel(settings.backgroundOpacityPercent);
+    updateWindowScaleFactorHintLabel(
+        ks::settings::normalizeWindowScaleFactor(settings.startupWindowScaleFactor));
     updateThemeButtonStyle();
 
     m_isApplyingUiState = false;
@@ -390,6 +444,10 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
         (m_startupMaximizedCheckBox != nullptr) && m_startupMaximizedCheckBox->isChecked();
     collectedSettings.autoRequestAdminOnStartup =
         (m_startupAutoAdminCheckBox != nullptr) && m_startupAutoAdminCheckBox->isChecked();
+    collectedSettings.startupWindowScaleFactor = parseWindowScaleFactorFromUi();
+    // 该开关来自启动前弹窗，不在设置页编辑；这里保留内存值，避免保存时被覆盖。
+    collectedSettings.startupScaleRecommendPromptDisabled =
+        m_currentAppearanceSettings.startupScaleRecommendPromptDisabled;
 
     return collectedSettings;
 }
@@ -430,13 +488,17 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
     // settingsEvent 作用：本次“设置变更”调用链统一日志事件对象。
     kLogEvent settingsEvent;
     const ks::settings::AppearanceSettings nextSettings = collectSettingsFromUi();
+    const bool sameScaleFactor =
+        std::fabs(nextSettings.startupWindowScaleFactor - m_currentAppearanceSettings.startupWindowScaleFactor) < 0.0001;
 
     if (nextSettings.themeMode == m_currentAppearanceSettings.themeMode
         && nextSettings.backgroundImagePath == m_currentAppearanceSettings.backgroundImagePath
         && nextSettings.backgroundOpacityPercent == m_currentAppearanceSettings.backgroundOpacityPercent
         && nextSettings.startupDefaultTabKey == m_currentAppearanceSettings.startupDefaultTabKey
         && nextSettings.launchMaximizedOnStartup == m_currentAppearanceSettings.launchMaximizedOnStartup
-        && nextSettings.autoRequestAdminOnStartup == m_currentAppearanceSettings.autoRequestAdminOnStartup)
+        && nextSettings.autoRequestAdminOnStartup == m_currentAppearanceSettings.autoRequestAdminOnStartup
+        && sameScaleFactor
+        && nextSettings.startupScaleRecommendPromptDisabled == m_currentAppearanceSettings.startupScaleRecommendPromptDisabled)
     {
         m_hasPendingChanges = false;
         updateApplyButtonState();
@@ -457,6 +519,14 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
     }
 
     m_currentAppearanceSettings = nextSettings;
+    m_isApplyingUiState = true;
+    if (m_startupWindowScaleFactorEdit != nullptr)
+    {
+        m_startupWindowScaleFactorEdit->setText(
+            formatScaleFactorText(m_currentAppearanceSettings.startupWindowScaleFactor));
+    }
+    updateWindowScaleFactorHintLabel(m_currentAppearanceSettings.startupWindowScaleFactor);
+    m_isApplyingUiState = false;
     m_hasPendingChanges = false;
     updateApplyButtonState();
 
@@ -475,6 +545,10 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         << (m_currentAppearanceSettings.launchMaximizedOnStartup ? "true" : "false")
         << "，启动时自动请求管理员权限="
         << (m_currentAppearanceSettings.autoRequestAdminOnStartup ? "true" : "false")
+        << "，启动窗口缩放因子="
+        << m_currentAppearanceSettings.startupWindowScaleFactor
+        << "，小屏缩放提示不再弹出="
+        << (m_currentAppearanceSettings.startupScaleRecommendPromptDisabled ? "true" : "false")
         << eol;
 
     emit appearanceSettingsChanged(m_currentAppearanceSettings);
@@ -532,6 +606,46 @@ void SettingsDock::updateThemeButtonStyle()
 void SettingsDock::updateOpacityValueLabel(const int opacityPercent)
 {
     m_backgroundOpacityValueLabel->setText(QStringLiteral("%1%").arg(opacityPercent));
+}
+
+void SettingsDock::updateWindowScaleFactorHintLabel(const double normalizedScaleFactor)
+{
+    if (m_startupWindowScaleHintLabel == nullptr)
+    {
+        return;
+    }
+
+    const double safeScaleFactor = ks::settings::normalizeWindowScaleFactor(normalizedScaleFactor);
+    const int scalePercent = static_cast<int>(std::lround(safeScaleFactor * 100.0));
+    m_startupWindowScaleHintLabel->setText(
+        QStringLiteral("当前：约 %1%%（重启后生效，系统缩放会叠加）").arg(scalePercent));
+}
+
+double SettingsDock::parseWindowScaleFactorFromUi() const
+{
+    const double currentScaleFactor =
+        ks::settings::normalizeWindowScaleFactor(m_currentAppearanceSettings.startupWindowScaleFactor);
+
+    if (m_startupWindowScaleFactorEdit == nullptr)
+    {
+        return currentScaleFactor;
+    }
+
+    QString rawScaleText = m_startupWindowScaleFactorEdit->text().trimmed();
+    if (rawScaleText.isEmpty())
+    {
+        return currentScaleFactor;
+    }
+
+    // 兼容中文输入法场景下使用逗号作为小数点。
+    rawScaleText.replace(',', '.');
+    bool convertOk = false;
+    const double parsedScaleFactor = rawScaleText.toDouble(&convertOk);
+    if (!convertOk)
+    {
+        return currentScaleFactor;
+    }
+    return ks::settings::normalizeWindowScaleFactor(parsedScaleFactor);
 }
 
 void SettingsDock::openBackgroundFileDialog()

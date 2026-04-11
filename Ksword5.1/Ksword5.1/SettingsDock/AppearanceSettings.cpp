@@ -13,6 +13,8 @@
 #endif
 #include <Windows.h>
 
+#include <cmath>
+
 namespace
 {
     // resolveExecutableDirectoryPath 作用：
@@ -141,6 +143,29 @@ namespace
         return opacityPercent;
     }
 
+    // clampWindowScaleFactorInternal 作用：
+    // - 把窗口缩放因子约束到 0.50~2.00；
+    // - 非法输入回退到 1.0。
+    // 调用方式：配置读写与启动前应用缩放时调用。
+    // 入参 rawScaleFactor：原始缩放因子。
+    // 返回：合法缩放因子。
+    double clampWindowScaleFactorInternal(const double rawScaleFactor)
+    {
+        if (!std::isfinite(rawScaleFactor) || rawScaleFactor <= 0.0)
+        {
+            return 1.0;
+        }
+        if (rawScaleFactor < 0.50)
+        {
+            return 0.50;
+        }
+        if (rawScaleFactor > 2.00)
+        {
+            return 2.00;
+        }
+        return rawScaleFactor;
+    }
+
     // resolveRelativePath 作用：
     // - 基于根目录把相对路径转成绝对路径；
     // - 绝对路径保持不变。
@@ -211,6 +236,8 @@ namespace
         defaultSettings.startupDefaultTabKey = QStringLiteral("welcome");
         defaultSettings.launchMaximizedOnStartup = false;
         defaultSettings.autoRequestAdminOnStartup = false;
+        defaultSettings.startupWindowScaleFactor = 1.0;
+        defaultSettings.startupScaleRecommendPromptDisabled = false;
         return defaultSettings;
     }
 }
@@ -336,6 +363,25 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     loadedSettings.autoRequestAdminOnStartup = rootObject.value(QStringLiteral("startup_auto_request_admin"))
         .toBool(loadedSettings.autoRequestAdminOnStartup);
 
+    // startupWindowScaleFactor 作用：读取“启动窗口缩放因子”，兼容旧字段 window_scale_factor。
+    double rawWindowScaleFactor = loadedSettings.startupWindowScaleFactor;
+    if (rootObject.contains(QStringLiteral("startup_window_scale_factor")))
+    {
+        rawWindowScaleFactor = rootObject.value(QStringLiteral("startup_window_scale_factor"))
+            .toDouble(loadedSettings.startupWindowScaleFactor);
+    }
+    else if (rootObject.contains(QStringLiteral("window_scale_factor")))
+    {
+        rawWindowScaleFactor = rootObject.value(QStringLiteral("window_scale_factor"))
+            .toDouble(loadedSettings.startupWindowScaleFactor);
+    }
+    loadedSettings.startupWindowScaleFactor = clampWindowScaleFactorInternal(rawWindowScaleFactor);
+
+    // startupScaleRecommendPromptDisabled 作用：读取“小屏推荐缩放提示不再弹出”开关。
+    loadedSettings.startupScaleRecommendPromptDisabled = rootObject
+        .value(QStringLiteral("startup_scale_recommend_prompt_disabled"))
+        .toBool(loadedSettings.startupScaleRecommendPromptDisabled);
+
     return loadedSettings;
 }
 
@@ -370,6 +416,12 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
         : settings.startupDefaultTabKey.trimmed().toLower());
     rootObject.insert(QStringLiteral("startup_maximized"), settings.launchMaximizedOnStartup);
     rootObject.insert(QStringLiteral("startup_auto_request_admin"), settings.autoRequestAdminOnStartup);
+    rootObject.insert(
+        QStringLiteral("startup_window_scale_factor"),
+        clampWindowScaleFactorInternal(settings.startupWindowScaleFactor));
+    rootObject.insert(
+        QStringLiteral("startup_scale_recommend_prompt_disabled"),
+        settings.startupScaleRecommendPromptDisabled);
 
     const QJsonDocument jsonDocument(rootObject);
     const QByteArray jsonBytes = jsonDocument.toJson(QJsonDocument::Indented);
@@ -396,4 +448,9 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
     }
 
     return true;
+}
+
+double ks::settings::normalizeWindowScaleFactor(const double rawScaleFactor)
+{
+    return clampWindowScaleFactorInternal(rawScaleFactor);
 }

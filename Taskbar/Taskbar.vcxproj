@@ -36,12 +36,14 @@
     <Import Project="$(QtMsBuild)\qt_defaults.props" />
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
-    <QtInstall>Qt</QtInstall>
+    <QtInstall Condition="'$(KSWORD_QT_DIR)'!=''">$(KSWORD_QT_DIR)</QtInstall>
+    <QtInstall Condition="'$(KSWORD_QT_DIR)'==''">Qt</QtInstall>
     <QtModules>core;gui;widgets;concurrent;multimedia</QtModules>
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
-    <QtInstall>Qt</QtInstall>
+    <QtInstall Condition="'$(KSWORD_QT_DIR)'!=''">$(KSWORD_QT_DIR)</QtInstall>
+    <QtInstall Condition="'$(KSWORD_QT_DIR)'==''">Qt</QtInstall>
     <QtModules>core;gui;widgets;concurrent;multimedia</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>

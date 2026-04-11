@@ -15,6 +15,7 @@
 #include <sstream>    // std::ostringstream：用于流式拼接日志文本。
 #include <string>     // std::string：用于保存日志内容/文件名/函数名。
 #include <vector>     // std::vector：用于日志管理器内部存储。
+#include <QString>    // QString：用于 Qt 字符串日志输出重载。
 
 // Windows 平台下使用 GUID 作为事件唯一标识。
 #include <guiddef.h>
@@ -22,6 +23,7 @@
 // Ksword.h：统一包含 ksword/ 目录下的 Win32 工具封装（进程/字符串等）。
 // 规范要求：Framework.h 作为全局入口，需要级联引入 Ksword.h。
 #include "Ksword.h"
+#include "Framework/StartupSplash.h"
 
 // 日志等级枚举：用于统一控制颜色、图标、筛选与导出文本。
 enum class kLogLevel
@@ -134,6 +136,18 @@ public:
     // 参数 logEvent：调用方创建的 kLogEvent 对象。
     // 返回值：当前日志流引用，支持链式调用。
     LogStream& operator<<(const kLogEvent& logEvent);
+
+    // operator<<(QString) 作用：
+    // - 直接支持 Qt QString 写日志；
+    // - 内部转为 std::string 后写入 messageBuffer，避免模板匹配失败。
+    // 参数 value：Qt 字符串文本。
+    // 返回值：当前日志流引用，支持链式调用。
+    LogStream& operator<<(const QString& value)
+    {
+        PendingLogState& pendingState = getPendingState();
+        pendingState.messageBuffer << value.toStdString();
+        return *this;
+    }
 
     // 模板 operator<< 作用：
     // - 接收任意可被 std::ostringstream 输出的类型；

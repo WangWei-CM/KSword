@@ -106,6 +106,13 @@ private:
     // 入参 opacityPercent：0~100 透明度值。
     void updateOpacityValueLabel(int opacityPercent);
 
+    // updateWindowScaleFactorHintLabel 作用：
+    // - 根据缩放因子更新百分比提示文案；
+    // - 明确提示“重启后生效”。
+    // 调用方式：缩放输入框变化或配置回填后调用。
+    // 入参 normalizedScaleFactor：已校正缩放因子。
+    void updateWindowScaleFactorHintLabel(double normalizedScaleFactor);
+
     // openBackgroundFileDialog 作用：
     // - 打开文件选择对话框，供用户挑选背景图路径。
     // 调用方式：点击“浏览背景图”按钮时调用。
@@ -115,6 +122,13 @@ private:
     // - 把背景图路径恢复为默认 style/ksword_background.png。
     // 调用方式：点击“恢复默认背景路径”按钮时调用。
     void resetBackgroundPathToDefault();
+
+    // parseWindowScaleFactorFromUi 作用：
+    // - 从输入框解析并校正启动窗口缩放因子；
+    // - 非法输入会自动回退到 1.0。
+    // 调用方式：collectSettingsFromUi 内部调用。
+    // 返回：合法缩放因子（0.50~2.00）。
+    double parseWindowScaleFactorFromUi() const;
 
 private:
     // m_tabWidget 作用：设置页签容器，当前至少包含“外观”页。
@@ -158,6 +172,12 @@ private:
 
     // m_startupAutoAdminCheckBox 作用：设置下次启动时是否先尝试申请管理员权限。
     QCheckBox* m_startupAutoAdminCheckBox = nullptr;
+
+    // m_startupWindowScaleFactorEdit 作用：设置下次启动主窗口缩放因子（重启生效）。
+    QLineEdit* m_startupWindowScaleFactorEdit = nullptr;
+
+    // m_startupWindowScaleHintLabel 作用：显示缩放因子对应百分比提示文本。
+    QLabel* m_startupWindowScaleHintLabel = nullptr;
 
     // m_applySettingsButton 作用：统一提交当前设置改动并触发实际生效。
     QPushButton* m_applySettingsButton = nullptr;
