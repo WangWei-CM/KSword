@@ -170,9 +170,9 @@ HandleDock::HandleDetailRefreshResult HandleDock::buildHandleDetailRefreshResult
     addField(QStringLiteral("访问掩码"), formatHex(row.grantedAccess, 8));
     addField(QStringLiteral("访问掩码语义"), decodeGrantedAccessText(row.typeName, row.grantedAccess));
     addField(QStringLiteral("属性"), formatHandleAttributes(row.attributes));
-    addField(QStringLiteral("HandleCount"), row.handleCount == 0 ? QStringLiteral("-") : QString::number(row.handleCount));
-    addField(QStringLiteral("PointerCount"), row.pointerCount == 0 ? QStringLiteral("-") : QString::number(row.pointerCount));
-    addField(QStringLiteral("对象名"), row.objectName.trimmed().isEmpty() ? QStringLiteral("-") : row.objectName);
+    addField(QStringLiteral("HandleCount"), formatOptionalObjectCount(row.handleCount, row.basicInfoAvailable));
+    addField(QStringLiteral("PointerCount"), formatOptionalObjectCount(row.pointerCount, row.basicInfoAvailable));
+    addField(QStringLiteral("对象名"), formatObjectNameDisplayText(row));
 
     HANDLE processHandle = ::OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, row.processId);
     if (processHandle == nullptr)
@@ -308,7 +308,7 @@ HandleDock::HandleDetailRefreshResult HandleDock::buildHandleDetailRefreshResult
     }
     else if (normalizedType == QStringLiteral("key"))
     {
-        addField(QStringLiteral("注册表路径"), row.objectName.trimmed().isEmpty() ? QStringLiteral("-") : row.objectName);
+        addField(QStringLiteral("注册表路径"), formatObjectNameDisplayText(row));
     }
     else
     {
@@ -321,4 +321,3 @@ HandleDock::HandleDetailRefreshResult HandleDock::buildHandleDetailRefreshResult
             std::chrono::steady_clock::now() - beginTime).count());
     return result;
 }
-

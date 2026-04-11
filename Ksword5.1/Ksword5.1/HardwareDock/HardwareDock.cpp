@@ -811,6 +811,18 @@ void HardwareDock::initializeUtilizationSidebarCards()
     addCardItem(m_diskNavCard, QStringLiteral("磁盘"), QColor(104, 204, 116));
     addCardItem(m_networkNavCard, QStringLiteral("以太网"), QColor(230, 149, 76));
     addCardItem(m_gpuNavCard, QStringLiteral("GPU"), QColor(105, 173, 255));
+
+    // 磁盘/网络缩略图改为双折线：
+    // - 蓝线表示读取/下行；
+    // - 黄线表示写入/上行。
+    if (m_diskNavCard != nullptr)
+    {
+        m_diskNavCard->setSeriesColors(QColor(80, 170, 255), QColor(255, 190, 105));
+    }
+    if (m_networkNavCard != nullptr)
+    {
+        m_networkNavCard->setSeriesColors(QColor(80, 170, 255), QColor(255, 190, 105));
+    }
 }
 
 void HardwareDock::syncUtilizationSidebarSelection(const int selectedRowIndex)
@@ -2709,36 +2721,56 @@ void HardwareDock::updateUtilizationSidebarCards(
 
     if (m_diskNavCard != nullptr)
     {
-        const double totalDiskBytesPerSec = std::max(0.0, diskReadBytesPerSec) + std::max(0.0, diskWriteBytesPerSec);
+        // safeDiskReadBytesPerSec 用途：磁盘读速率安全值，避免负数污染缩略图比例。
+        const double safeDiskReadBytesPerSec = std::max(0.0, diskReadBytesPerSec);
+        // safeDiskWriteBytesPerSec 用途：磁盘写速率安全值，避免负数污染缩略图比例。
+        const double safeDiskWriteBytesPerSec = std::max(0.0, diskWriteBytesPerSec);
+        const double totalDiskBytesPerSec = safeDiskReadBytesPerSec + safeDiskWriteBytesPerSec;
         m_diskNavAutoScaleBytesPerSec = std::max(
             totalDiskBytesPerSec + 1.0,
             m_diskNavAutoScaleBytesPerSec * 0.96);
-        const double diskUsagePercent = std::clamp(
-            totalDiskBytesPerSec / std::max(1.0, m_diskNavAutoScaleBytesPerSec) * 100.0,
+        // diskScaleBaseBytesPerSec 用途：磁盘卡片当前双线共用的自适应缩放基准。
+        const double diskScaleBaseBytesPerSec = std::max(1.0, m_diskNavAutoScaleBytesPerSec);
+        const double diskReadUsagePercent = std::clamp(
+            safeDiskReadBytesPerSec / diskScaleBaseBytesPerSec * 100.0,
+            0.0,
+            100.0);
+        const double diskWriteUsagePercent = std::clamp(
+            safeDiskWriteBytesPerSec / diskScaleBaseBytesPerSec * 100.0,
             0.0,
             100.0);
         m_diskNavCard->setSubtitleText(
             QStringLiteral("读 %1 / 写 %2")
             .arg(formatRateText(diskReadBytesPerSec))
             .arg(formatRateText(diskWriteBytesPerSec)));
-        m_diskNavCard->appendSample(diskUsagePercent);
+        m_diskNavCard->appendDualSample(diskReadUsagePercent, diskWriteUsagePercent);
     }
 
     if (m_networkNavCard != nullptr)
     {
-        const double totalNetworkBytesPerSec = std::max(0.0, networkRxBytesPerSec) + std::max(0.0, networkTxBytesPerSec);
+        // safeNetworkRxBytesPerSec 用途：网络下行速率安全值，作为蓝线输入。
+        const double safeNetworkRxBytesPerSec = std::max(0.0, networkRxBytesPerSec);
+        // safeNetworkTxBytesPerSec 用途：网络上行速率安全值，作为黄线输入。
+        const double safeNetworkTxBytesPerSec = std::max(0.0, networkTxBytesPerSec);
+        const double totalNetworkBytesPerSec = safeNetworkRxBytesPerSec + safeNetworkTxBytesPerSec;
         m_networkNavAutoScaleBytesPerSec = std::max(
             totalNetworkBytesPerSec + 1.0,
             m_networkNavAutoScaleBytesPerSec * 0.96);
-        const double networkUsagePercent = std::clamp(
-            totalNetworkBytesPerSec / std::max(1.0, m_networkNavAutoScaleBytesPerSec) * 100.0,
+        // networkScaleBaseBytesPerSec 用途：网络卡片当前双线共用的自适应缩放基准。
+        const double networkScaleBaseBytesPerSec = std::max(1.0, m_networkNavAutoScaleBytesPerSec);
+        const double networkRxUsagePercent = std::clamp(
+            safeNetworkRxBytesPerSec / networkScaleBaseBytesPerSec * 100.0,
+            0.0,
+            100.0);
+        const double networkTxUsagePercent = std::clamp(
+            safeNetworkTxBytesPerSec / networkScaleBaseBytesPerSec * 100.0,
             0.0,
             100.0);
         m_networkNavCard->setSubtitleText(
-            QStringLiteral("发 %1 / 收 %2")
-            .arg(formatRateText(networkTxBytesPerSec))
-            .arg(formatRateText(networkRxBytesPerSec)));
-        m_networkNavCard->appendSample(networkUsagePercent);
+            QStringLiteral("下 %1 / 上 %2")
+            .arg(formatRateText(networkRxBytesPerSec))
+            .arg(formatRateText(networkTxBytesPerSec)));
+        m_networkNavCard->appendDualSample(networkRxUsagePercent, networkTxUsagePercent);
     }
 
     if (m_gpuNavCard != nullptr)

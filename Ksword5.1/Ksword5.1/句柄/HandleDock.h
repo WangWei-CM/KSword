@@ -114,6 +114,10 @@ private:
         std::uint32_t attributes = 0;      // attributes：句柄属性位。
         std::uint32_t handleCount = 0;     // handleCount：对象句柄计数。
         std::uint32_t pointerCount = 0;    // pointerCount：对象指针计数。
+        bool basicInfoAvailable = false;   // basicInfoAvailable：是否成功读取 ObjectBasicInformation。
+        bool objectNameAvailable = false;  // objectNameAvailable：是否成功完成对象名查询（允许结果为空串）。
+        bool objectNameFailed = false;     // objectNameFailed：对象名查询已尝试但失败。
+        bool objectNameFromFallback = false; // objectNameFromFallback：对象名是否来自类型专用回退查询。
     };
 
     // HandleRefreshOptions 作用：
@@ -142,7 +146,9 @@ private:
         std::unordered_map<std::uint16_t, std::string> updatedTypeNameCacheByIndex; // updatedTypeNameCacheByIndex：更新后的类型缓存。
         std::size_t totalHandleCount = 0;          // totalHandleCount：系统总句柄数（枚举层）。
         std::size_t visibleHandleCount = 0;        // visibleHandleCount：过滤后可见句柄数。
+        std::size_t basicInfoResolvedCount = 0;    // basicInfoResolvedCount：成功读取 BasicInformation 的句柄数量。
         std::size_t resolvedNameCount = 0;         // resolvedNameCount：成功解析对象名数量。
+        std::size_t fallbackNameCount = 0;         // fallbackNameCount：通过类型专用回退拿到对象名的数量。
         std::size_t objectTypeMappedCount = 0;     // objectTypeMappedCount：通过对象类型页映射命中的数量。
         std::uint64_t elapsedMs = 0;               // elapsedMs：后台耗时毫秒。
         QString diagnosticText;                    // diagnosticText：诊断信息（失败/降级/预算等）。
@@ -450,6 +456,22 @@ private:
     // 传入 value：64 位值；width：最小宽度（补零）。
     // 传出：QString 文本。
     static QString formatHex(std::uint64_t value, int width = 0);
+
+    // formatOptionalObjectCount 作用：
+    // - 统一格式化 HandleCount/PointerCount 文本；
+    // - 区分“值为 0”和“未查到”两种状态。
+    // 调用方法：句柄列表与详情面板渲染时调用。
+    // 传入 countValue：计数字段值；countAvailable：是否成功查到。
+    // 传出：QString 文本。
+    static QString formatOptionalObjectCount(std::uint32_t countValue, bool countAvailable);
+
+    // formatObjectNameDisplayText 作用：
+    // - 统一格式化对象名列与详情面板文本；
+    // - 区分“未查询 / 未查到 / 无名称 / 有名称”四种状态。
+    // 调用方法：句柄列表与详情面板渲染时调用。
+    // 传入 row：当前句柄行数据。
+    // 传出：QString 文本。
+    static QString formatObjectNameDisplayText(const HandleRow& row);
 
     // formatTypeIndexDisplayText 作用：
     // - 把 TypeIndex 列格式化为“类型名 + 编号”可读文本；

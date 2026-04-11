@@ -140,6 +140,45 @@ namespace
             .arg(KswordTheme::TextPrimaryHex());
     }
 
+    // buildContextMenuStyle 作用：
+    // - 为 FileDock 文件列表右键菜单生成独立主题样式；
+    // - 修复浅色主题下菜单背景错误保持黑色，导致文字不可见的问题。
+    QString buildContextMenuStyle()
+    {
+        const QString disabledTextColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#8C8C8C")
+            : QStringLiteral("#7A8694");
+
+        return QStringLiteral(
+            "QMenu{"
+            "  background:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "}"
+            "QMenu::item{"
+            "  padding:6px 18px;"
+            "  background:transparent;"
+            "}"
+            "QMenu::item:selected{"
+            "  background:%4;"
+            "  color:#FFFFFF;"
+            "}"
+            "QMenu::item:disabled{"
+            "  color:%5;"
+            "  background:transparent;"
+            "}"
+            "QMenu::separator{"
+            "  height:1px;"
+            "  background:%3;"
+            "  margin:4px 8px;"
+            "}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(disabledTextColor);
+    }
+
     // 面包屑按钮样式：视觉上“嵌入输入框”，并保留轻量 hover 提示。
     QString buildBreadcrumbButtonStyle()
     {
@@ -2950,6 +2989,7 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     }
 
     QMenu menu(this);
+    menu.setStyleSheet(buildContextMenuStyle());
     QAction* openAction = menu.addAction(QIcon(":/Icon/process_start.svg"), QStringLiteral("打开/运行"));
     QAction* editAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("编辑（文本）"));
     QAction* copyPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制路径"));
@@ -3915,6 +3955,11 @@ void FileDock::showFileDetailDialog(const QString& filePath)
         << "[FileDock] 打开文件详情窗口, filePath="
         << QDir::toNativeSeparators(filePath).toStdString()
         << eol;
+}
+
+void FileDock::openFileDetailByPath(const QString& filePath)
+{
+    showFileDetailDialog(filePath);
 }
 
 QString FileDock::currentIndexPath(const FilePanelWidgets& panel) const

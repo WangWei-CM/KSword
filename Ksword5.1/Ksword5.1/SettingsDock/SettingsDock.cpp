@@ -4,6 +4,7 @@
 #include "../theme.h"
 
 #include <QButtonGroup>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QGroupBox>
@@ -24,7 +25,6 @@ namespace
     constexpr const char* IconThemeDark = ":/Icon/settings_theme_dark.svg";
     constexpr const char* IconBrowseBackground = ":/Icon/settings_background_browse.svg";
     constexpr const char* IconResetBackground = ":/Icon/settings_background_reset.svg";
-    constexpr const char* IconApplySettings = ":/Icon/process_start.svg";
 }
 
 SettingsDock::SettingsDock(QWidget* parent)
@@ -38,7 +38,7 @@ SettingsDock::SettingsDock(QWidget* parent)
     initializeAppearanceTab();
     loadSettingsFromJson();
 
-    info << settingsInitEvent << "[SettingsDock] 设置页初始化完成，外观配置已加载。" << eol;
+    info << settingsInitEvent << "[SettingsDock] 设置页初始化完成，界面与启动配置已加载。" << eol;
 }
 
 ks::settings::AppearanceSettings SettingsDock::currentAppearanceSettings() const
@@ -63,7 +63,7 @@ void SettingsDock::initializeUi()
 
 void SettingsDock::initializeAppearanceTab()
 {
-    // m_appearanceTab 作用：承载“外观”相关控件。
+    // m_appearanceTab 作用：承载“外观与启动”相关控件。
     m_appearanceTab = new QWidget(m_tabWidget);
     QVBoxLayout* appearanceRootLayout = new QVBoxLayout(m_appearanceTab);
     appearanceRootLayout->setContentsMargins(8, 8, 8, 8);
@@ -176,13 +176,13 @@ void SettingsDock::initializeAppearanceTab()
     backgroundLayout->addLayout(opacityLayout);
     appearanceRootLayout->addWidget(backgroundGroupBox);
 
-    // ===== 启动默认页签分组 =====
-    QGroupBox* startupGroupBox = new QGroupBox(QStringLiteral("启动默认标签页"), m_appearanceTab);
+    // ===== 启动行为分组 =====
+    QGroupBox* startupGroupBox = new QGroupBox(QStringLiteral("启动行为"), m_appearanceTab);
     QVBoxLayout* startupLayout = new QVBoxLayout(startupGroupBox);
     startupLayout->setSpacing(8);
 
     QLabel* startupHintLabel = new QLabel(
-        QStringLiteral("设置应用启动后默认激活的主标签页（该项在下次启动生效）。"),
+        QStringLiteral("设置应用下次启动时的默认页签、窗口显示方式与权限申请行为。"),
         startupGroupBox);
     startupHintLabel->setWordWrap(true);
     startupLayout->addWidget(startupHintLabel);
@@ -208,26 +208,38 @@ void SettingsDock::initializeAppearanceTab()
     m_startupDefaultTabCombo->addItem(QStringLiteral("窗口"), QStringLiteral("window"));
     m_startupDefaultTabCombo->addItem(QStringLiteral("注册表"), QStringLiteral("registry"));
     m_startupDefaultTabCombo->addItem(QStringLiteral("启动项"), QStringLiteral("startup"));
+    m_startupDefaultTabCombo->addItem(QStringLiteral("服务"), QStringLiteral("service"));
     startupSelectorLayout->addWidget(m_startupDefaultTabCombo, 1);
     startupLayout->addLayout(startupSelectorLayout);
+
+    // m_startupMaximizedCheckBox 作用：控制“下次启动时是否直接最大化显示”。
+    m_startupMaximizedCheckBox = new QCheckBox(QStringLiteral("启动时最大化"), startupGroupBox);
+    m_startupMaximizedCheckBox->setToolTip(QStringLiteral("下次启动主窗口时直接以最大化状态显示"));
+    startupLayout->addWidget(m_startupMaximizedCheckBox);
+
+    // m_startupAutoAdminCheckBox 作用：控制“启动图出现前是否先尝试 UAC 提权”。
+    m_startupAutoAdminCheckBox = new QCheckBox(QStringLiteral("启动时自动请求管理员权限"), startupGroupBox);
+    m_startupAutoAdminCheckBox->setToolTip(
+        QStringLiteral("下次启动时会在启动画面出现前先尝试管理员提权，失败则继续普通权限启动"));
+    startupLayout->addWidget(m_startupAutoAdminCheckBox);
+
     appearanceRootLayout->addWidget(startupGroupBox);
 
     // ===== 应用按钮区域 =====
     QHBoxLayout* actionLayout = new QHBoxLayout();
     actionLayout->addStretch(1);
 
-    // m_applySettingsButton 作用：把当前待生效改动落盘并触发界面实际应用。
-    m_applySettingsButton = new QToolButton(m_appearanceTab);
-    m_applySettingsButton->setIcon(QIcon(QString::fromUtf8(IconApplySettings)));
-    m_applySettingsButton->setIconSize(QSize(18, 18));
-    m_applySettingsButton->setFixedSize(34, 30);
+    // m_applySettingsButton 作用：把当前待生效改动落盘并触发界面实际应用（文字按钮）。
+    m_applySettingsButton = new QPushButton(QStringLiteral("应用"), m_appearanceTab);
+    m_applySettingsButton->setMinimumWidth(72);
+    m_applySettingsButton->setFixedHeight(30);
     m_applySettingsButton->setToolTip(QStringLiteral("应用当前设置改动"));
     m_applySettingsButton->setEnabled(false);
     actionLayout->addWidget(m_applySettingsButton, 0);
     appearanceRootLayout->addLayout(actionLayout);
 
     appearanceRootLayout->addStretch();
-    m_tabWidget->addTab(m_appearanceTab, QStringLiteral("外观"));
+    m_tabWidget->addTab(m_appearanceTab, QStringLiteral("外观与启动"));
 
     bindAppearanceSignals();
     updateThemeButtonStyle();
@@ -265,7 +277,15 @@ void SettingsDock::bindAppearanceSignals()
         markPendingChanges(QStringLiteral("启动默认页签切换"));
         });
 
-    connect(m_applySettingsButton, &QToolButton::clicked, this, [this]() {
+    connect(m_startupMaximizedCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
+        markPendingChanges(QStringLiteral("启动时最大化开关切换"));
+        });
+
+    connect(m_startupAutoAdminCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
+        markPendingChanges(QStringLiteral("启动时自动请求管理员权限开关切换"));
+        });
+
+    connect(m_applySettingsButton, &QPushButton::clicked, this, [this]() {
         saveAndEmitFromUi(QStringLiteral("点击应用按钮"));
         });
 }
@@ -312,6 +332,16 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
         }
     }
 
+    if (m_startupMaximizedCheckBox != nullptr)
+    {
+        m_startupMaximizedCheckBox->setChecked(settings.launchMaximizedOnStartup);
+    }
+
+    if (m_startupAutoAdminCheckBox != nullptr)
+    {
+        m_startupAutoAdminCheckBox->setChecked(settings.autoRequestAdminOnStartup);
+    }
+
     updateOpacityValueLabel(settings.backgroundOpacityPercent);
     updateThemeButtonStyle();
 
@@ -356,6 +386,10 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
     {
         collectedSettings.startupDefaultTabKey = QStringLiteral("welcome");
     }
+    collectedSettings.launchMaximizedOnStartup =
+        (m_startupMaximizedCheckBox != nullptr) && m_startupMaximizedCheckBox->isChecked();
+    collectedSettings.autoRequestAdminOnStartup =
+        (m_startupAutoAdminCheckBox != nullptr) && m_startupAutoAdminCheckBox->isChecked();
 
     return collectedSettings;
 }
@@ -382,7 +416,7 @@ void SettingsDock::updateApplyButtonState()
     m_applySettingsButton->setEnabled(m_hasPendingChanges);
     m_applySettingsButton->setToolTip(
         m_hasPendingChanges
-        ? QStringLiteral("应用当前设置改动（主题/背景立即生效，启动默认页签下次启动生效）")
+        ? QStringLiteral("应用当前设置改动（主题/背景立即生效，启动相关选项下次启动生效）")
         : QStringLiteral("当前设置已应用，无待提交改动"));
 }
 
@@ -400,7 +434,9 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
     if (nextSettings.themeMode == m_currentAppearanceSettings.themeMode
         && nextSettings.backgroundImagePath == m_currentAppearanceSettings.backgroundImagePath
         && nextSettings.backgroundOpacityPercent == m_currentAppearanceSettings.backgroundOpacityPercent
-        && nextSettings.startupDefaultTabKey == m_currentAppearanceSettings.startupDefaultTabKey)
+        && nextSettings.startupDefaultTabKey == m_currentAppearanceSettings.startupDefaultTabKey
+        && nextSettings.launchMaximizedOnStartup == m_currentAppearanceSettings.launchMaximizedOnStartup
+        && nextSettings.autoRequestAdminOnStartup == m_currentAppearanceSettings.autoRequestAdminOnStartup)
     {
         m_hasPendingChanges = false;
         updateApplyButtonState();
@@ -435,6 +471,10 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         << m_currentAppearanceSettings.backgroundOpacityPercent
         << "%，启动默认页签="
         << m_currentAppearanceSettings.startupDefaultTabKey.toStdString()
+        << "，启动时最大化="
+        << (m_currentAppearanceSettings.launchMaximizedOnStartup ? "true" : "false")
+        << "，启动时自动请求管理员权限="
+        << (m_currentAppearanceSettings.autoRequestAdminOnStartup ? "true" : "false")
         << eol;
 
     emit appearanceSettingsChanged(m_currentAppearanceSettings);

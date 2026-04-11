@@ -4,6 +4,7 @@
 #include <QTabWidget>
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDir>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QWidget>
@@ -1378,7 +1379,11 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         if (m_startupWidget == nullptr) { m_startupWidget = new StartupDock(this); }
         realWidget = m_startupWidget;
     }
-
+    else if (dockKey == QStringLiteral("service"))
+    {
+        if (m_serviceWidget == nullptr) { m_serviceWidget = new ServiceDock(this); }
+        realWidget = m_serviceWidget;
+    }
     if (realWidget == nullptr)
     {
         return;
@@ -1441,6 +1446,7 @@ void MainWindow::initDockWidgets()
         {
             return dockKey == QStringLiteral("welcome") ||
                 dockKey == QStringLiteral("settings") ||
+                (startupDockKey == QStringLiteral("winapi") && dockKey == QStringLiteral("monitor")) ||
                 dockKey == startupDockKey;
         };
 
@@ -1461,6 +1467,7 @@ void MainWindow::initDockWidgets()
     if (shouldEagerLoad(QStringLiteral("registry"))) { m_registryWidget = new RegistryDock(this); }
     if (shouldEagerLoad(QStringLiteral("handle"))) { m_handleWidget = new HandleDock(this); }
     if (shouldEagerLoad(QStringLiteral("startup"))) { m_startupWidget = new StartupDock(this); }
+    if (shouldEagerLoad(QStringLiteral("service"))) { m_serviceWidget = new ServiceDock(this); }
 
     reportStartupProgress(60, QStringLiteral("正在创建辅助组件..."));
     m_monitorPanelWidget = new MonitorPanelWidget(this);
@@ -1538,6 +1545,7 @@ void MainWindow::initDockWidgets()
     createLazyDockWidget(m_dockRegistry, m_registryWidget, "注册表", QStringLiteral("registry"));
     createLazyDockWidget(m_dockHandle, m_handleWidget, "句柄", QStringLiteral("handle"));
     createLazyDockWidget(m_dockStartup, m_startupWidget, "启动项", QStringLiteral("startup"));
+    createLazyDockWidget(m_dockService, m_serviceWidget, "服务", QStringLiteral("service"));
 
     // 创建右侧和底部的基本Widgets
     m_dockCurrentOp = createDockWidget(m_progressWidget, "当前操作");
@@ -1597,6 +1605,7 @@ void MainWindow::setupDockLayout()
     m_pDockManager->addDockWidgetTabToArea(m_dockRegistry, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockHandle, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockStartup, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockService, leftDockArea);
 
     // 方法2: 或者使用addDockWidget并指定CenterDockWidgetArea
     // m_pDockManager->addDockWidget(ads::CenterDockWidgetArea, m_dockProcess, leftDockArea);
@@ -1662,6 +1671,59 @@ void MainWindow::openProcessDetailByPid(const quint32 pid)
     {
         m_dockProcess->raise();
         m_dockProcess->setVisible(true);
+    }
+}
+
+void MainWindow::focusServiceDockByName(const QString& serviceNameText)
+{
+    const QString normalizedServiceName = serviceNameText.trimmed();
+    kLogEvent focusServiceEvent;
+    info << focusServiceEvent
+        << "[MainWindow] focusServiceDockByName: service="
+        << normalizedServiceName.toStdString()
+        << eol;
+
+    if (m_dockService != nullptr)
+    {
+        ensureDockContentInitialized(m_dockService);
+    }
+    if (m_serviceWidget != nullptr && !normalizedServiceName.isEmpty())
+    {
+        m_serviceWidget->focusServiceByName(normalizedServiceName);
+    }
+    if (m_dockService != nullptr)
+    {
+        m_dockService->raise();
+        m_dockService->setVisible(true);
+    }
+}
+
+void MainWindow::openFileDetailDockByPath(const QString& filePath)
+{
+    const QString normalizedFilePath = QDir::toNativeSeparators(filePath.trimmed());
+    if (normalizedFilePath.isEmpty())
+    {
+        return;
+    }
+
+    kLogEvent openFileDetailEvent;
+    info << openFileDetailEvent
+        << "[MainWindow] openFileDetailDockByPath: file="
+        << normalizedFilePath.toStdString()
+        << eol;
+
+    if (m_dockFile != nullptr)
+    {
+        ensureDockContentInitialized(m_dockFile);
+    }
+    if (m_fileWidget != nullptr)
+    {
+        m_fileWidget->openFileDetailByPath(normalizedFilePath);
+    }
+    if (m_dockFile != nullptr)
+    {
+        m_dockFile->raise();
+        m_dockFile->setVisible(true);
     }
 }
 
@@ -1749,6 +1811,16 @@ void MainWindow::initAppearanceSettings()
             targetDock = m_dockStartup;
             targetName = QStringLiteral("启动项");
         }
+        else if (normalizedKey == QStringLiteral("service"))
+        {
+            targetDock = m_dockService;
+            targetName = QStringLiteral("服务");
+        }
+        else if (normalizedKey == QStringLiteral("winapi"))
+        {
+            targetDock = m_dockMonitorTab;
+            targetName = QStringLiteral("监控/WinAPI");
+        }
         else
         {
             targetDock = m_dockWelcome;
@@ -1764,6 +1836,10 @@ void MainWindow::initAppearanceSettings()
         if (targetDock != nullptr)
         {
             ensureDockContentInitialized(targetDock);
+            if (normalizedKey == QStringLiteral("winapi") && m_monitorWidget != nullptr)
+            {
+                m_monitorWidget->activateMonitorTab(QStringLiteral("winapi"));
+            }
             targetDock->raise();
             kLogEvent startupDockEvent;
             info << startupDockEvent

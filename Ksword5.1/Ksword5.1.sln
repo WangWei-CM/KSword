@@ -9,6 +9,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Taskbar", "..\Taskbar\Taskb
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KswordHUD", "..\KswordHUD\KswordHUD.vcxproj", "{FD474EA8-79AC-46C1-952C-5F0222CBC178}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "APIMonitor_x64", "..\APIMonitor_x64\APIMonitor_x64.vcxproj", "{CEF9AD14-A819-4792-AA6B-009DB21334EE}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -27,6 +29,10 @@ Global
 		{FD474EA8-79AC-46C1-952C-5F0222CBC178}.Debug|x64.Build.0 = Debug|x64
 		{FD474EA8-79AC-46C1-952C-5F0222CBC178}.Release|x64.ActiveCfg = Release|x64
 		{FD474EA8-79AC-46C1-952C-5F0222CBC178}.Release|x64.Build.0 = Release|x64
+		{CEF9AD14-A819-4792-AA6B-009DB21334EE}.Debug|x64.ActiveCfg = Debug|x64
+		{CEF9AD14-A819-4792-AA6B-009DB21334EE}.Debug|x64.Build.0 = Debug|x64
+		{CEF9AD14-A819-4792-AA6B-009DB21334EE}.Release|x64.ActiveCfg = Release|x64
+		{CEF9AD14-A819-4792-AA6B-009DB21334EE}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

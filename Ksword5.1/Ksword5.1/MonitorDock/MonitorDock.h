@@ -46,6 +46,8 @@ class QBarSet;
 class QChartView;
 class QLineSeries;
 class QValueAxis;
+class WinAPIDock;
+class ProcessTraceMonitorWidget;
 
 // COM 前置声明：避免在头文件引入大量 WMI 头。
 struct IWbemClassObject;
@@ -67,6 +69,11 @@ public:
     // 析构函数：
     // - 作用：停止后台线程与定时器，确保资源释放。
     ~MonitorDock() override;
+
+    // activateMonitorTab：
+    // - 作用：把监控页内部子页切到指定 tab；
+    // - 调用：MainWindow 需要把启动默认页或跳转目标定位到“WinAPI / WMI / ETW / 进程定向”时调用。
+    void activateMonitorTab(const QString& tabKey);
 
 protected:
     // showEvent：
@@ -94,12 +101,25 @@ private:
         QString providerGuidText;  // Provider GUID 字符串。
     };
 
+    // EtwSessionEntry：
+    // - 作用：保存系统中一个活动 ETW 会话的快照信息；
+    // - 调用：ETW 会话栏枚举、展示与停止指定会话时复用。
+    struct EtwSessionEntry
+    {
+        QString sessionName;
+        QString modeText;
+        QString bufferText;
+        quint32 eventsLost = 0;
+        QString logFilePath;
+    };
+
 private:
     // ========================= UI 初始化 =========================
     void initializeUi();
     void initializePerformancePanel();
     void initializeWmiTab();
     void initializeEtwTab();
+    void ensureWinApiTabInitialized();
     void initializeConnections();
     void refreshPerformanceCharts();
     bool sampleCpuUsage(double* cpuUsageOut);
@@ -136,13 +156,18 @@ private:
         const QString& className,
         const QString& pidAndName,
         const QString& detailText);
+    void exportWmiRowsToTsv();
+    void openWmiEventDetailViewerForRow(int row) const;
     void showWmiEventContextMenu(const QPoint& position);
 
     // ========================= ETW 功能 ==========================
     void refreshEtwProvidersAsync();
+    void refreshEtwSessionsAsync();
+    void stopSelectedEtwSessions();
     void startEtwCapture();
     void stopEtwCapture();
     void setEtwCapturePaused(bool paused);
+    void updateEtwCaptureActionState();
     static void WINAPI etwEventRecordCallback(struct _EVENT_RECORD* eventRecordPtr);
     void enqueueEtwEventFromRecord(const struct _EVENT_RECORD* eventRecordPtr);
     void appendEtwEventRow(
@@ -154,6 +179,7 @@ private:
         const QString& detailJson,
         const QString& activityIdText);
     void exportEtwRowsToTsv();
+    void openEtwEventDetailViewerForRow(int row) const;
     void showEtwEventContextMenu(const QPoint& position);
 
     // ========================= 停止流程 ==========================
@@ -174,6 +200,9 @@ private:
     QGridLayout* m_perfPanelLayout = nullptr; // 顶部性能图布局。
     QTimer* m_perfUpdateTimer = nullptr;    // 性能图刷新定时器（默认1秒）。
     QTabWidget* m_sideTabWidget = nullptr;  // 侧边栏 Tab 容器。
+    ProcessTraceMonitorWidget* m_processTraceWidget = nullptr; // m_processTraceWidget：进程定向监控子页。
+    QWidget* m_winApiPage = nullptr;        // m_winApiPage：WinAPI 子页宿主容器。
+    WinAPIDock* m_winApiWidget = nullptr;   // m_winApiWidget：真正的 WinAPI 监控控件。
 
     QChartView* m_cpuChartView = nullptr;      // CPU 条形图视图。
     QChartView* m_memoryChartView = nullptr;   // 内存条形图视图。
@@ -228,6 +257,7 @@ private:
     QPushButton* m_wmiStartSubscribeButton = nullptr; // 开始订阅按钮。
     QPushButton* m_wmiStopSubscribeButton = nullptr;  // 停止订阅按钮。
     QPushButton* m_wmiPauseSubscribeButton = nullptr; // 暂停/继续按钮。
+    QPushButton* m_wmiExportButton = nullptr;         // 导出结果按钮。
     QLabel* m_wmiSubscribeStatusLabel = nullptr;    // 订阅状态文本。
     QLineEdit* m_wmiEventGlobalFilterEdit = nullptr; // WMI 全字段筛选框。
     QLineEdit* m_wmiEventProviderFilterEdit = nullptr; // WMI Provider筛选框。
@@ -262,6 +292,13 @@ private:
     QHBoxLayout* m_etwProviderControlLayout = nullptr; // ETW 控制栏。
     QPushButton* m_etwProviderRefreshButton = nullptr; // ETW 刷新按钮。
     QLabel* m_etwProviderStatusLabel = nullptr;      // ETW 状态标签。
+    QWidget* m_etwSessionPanel = nullptr;            // ETW 会话面板。
+    QVBoxLayout* m_etwSessionPanelLayout = nullptr;  // ETW 会话布局。
+    QHBoxLayout* m_etwSessionControlLayout = nullptr; // ETW 会话控制栏。
+    QPushButton* m_etwSessionRefreshButton = nullptr; // ETW 会话刷新按钮。
+    QPushButton* m_etwSessionStopButton = nullptr;   // ETW 会话停止按钮。
+    QLabel* m_etwSessionStatusLabel = nullptr;       // ETW 会话状态标签。
+    QTableWidget* m_etwSessionTable = nullptr;       // ETW 会话表。
     QComboBox* m_etwPresetCategoryCombo = nullptr;   // ETW 预置模板分类筛选下拉框。
     QListWidget* m_etwPresetProviderList = nullptr;  // ETW 预置常用 Provider 勾选列表。
     QListWidget* m_etwProviderList = nullptr;        // ETW Provider 复选列表。
@@ -281,6 +318,7 @@ private:
     QTimer* m_etwUiUpdateTimer = nullptr;            // 100ms 刷新节流定时器。
 
     std::vector<EtwProviderEntry> m_etwProviders;    // ETW Provider 缓存。
+    std::vector<EtwSessionEntry> m_etwSessions;      // ETW 会话缓存。
     std::vector<QStringList> m_etwPendingRows;       // ETW 待刷入 UI 的行缓存。
     std::mutex m_etwPendingMutex;                    // ETW 待刷入队列互斥锁。
     std::atomic_bool m_etwCaptureRunning{ false };   // ETW 捕获运行状态。
@@ -288,8 +326,9 @@ private:
     std::atomic_bool m_etwCaptureStopFlag{ false };  // ETW 捕获停止信号。
     std::unique_ptr<std::thread> m_etwCaptureThread; // ETW 后台线程。
     int m_etwCaptureProgressPid = 0;                 // ETW 捕获进度 PID。
-    std::uint64_t m_etwSessionHandle = 0;            // ETW 会话句柄（TRACEHANDLE）。
-    std::uint64_t m_etwTraceHandle = 0;              // ETW 消费句柄（TRACEHANDLE）。
+    int m_etwSessionRefreshProgressPid = 0;          // ETW 会话刷新/结束进度 PID。
+    std::atomic<std::uint64_t> m_etwSessionHandle{ 0 }; // ETW 会话句柄（TRACEHANDLE）。
+    std::atomic<std::uint64_t> m_etwTraceHandle{ 0 };   // ETW 消费句柄（TRACEHANDLE）。
     QString m_etwSessionName;                        // ETW 会话名（Stop/Query 复用）。
     bool m_initialDiscoveryDone = false;             // 首次显示时是否已触发 WMI/ETW Provider 枚举。
 };

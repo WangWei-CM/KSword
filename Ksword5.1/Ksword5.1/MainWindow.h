@@ -39,6 +39,7 @@
 #include "SettingsDock/SettingsDock.h"
 #include "SettingsDock/AppearanceSettings.h"
 #include "StartupDock/StartupDock.h"
+#include "ServerDock/ServiceDock.h"
 #include "WindowDock/WindowDock.h"
 #include "RegistryDock/RegistryDock.h"
 #include "句柄/HandleDock.h"
@@ -81,6 +82,18 @@ public slots:
     // 调用方式：QMetaObject::invokeMethod(mainWindow, "openProcessDetailByPid", ... )。
     // 入参 pid：目标进程 PID。
     void openProcessDetailByPid(quint32 pid);
+
+    // focusServiceDockByName 作用：
+    // - 将“服务”Dock 置顶并按服务名定位到目标行；
+    // - 供 StartupDock 的“转到服务管理”入口调用。
+    // 入参 serviceNameText：目标服务短名。
+    void focusServiceDockByName(const QString& serviceNameText);
+
+    // openFileDetailDockByPath 作用：
+    // - 置顶“文件”Dock 并打开指定文件的详情分析窗口；
+    // - 供 ServiceDock 的 BinaryPath/ServiceDll 联动调用。
+    // 入参 filePath：目标文件路径。
+    void openFileDetailDockByPath(const QString& filePath);
 
 protected:
     // eventFilter 作用：
@@ -192,6 +205,7 @@ private:
     ads::CDockWidget* m_dockRegistry;
     ads::CDockWidget* m_dockHandle = nullptr;
     ads::CDockWidget* m_dockStartup;
+    ads::CDockWidget* m_dockService = nullptr;
     ads::CDockWidget* m_dockHardware;
     ads::CDockWidget* m_dockCurrentOp;
     ads::CDockWidget* m_dockLog;
@@ -212,6 +226,7 @@ private:
     PrivilegeDock* m_privilegeWidget;
     SettingsDock* m_settingsWidget;
     StartupDock* m_startupWidget;
+    ServiceDock* m_serviceWidget = nullptr;
     WindowDock* m_windowWidget;
     RegistryDock* m_registryWidget;
     HandleDock* m_handleWidget = nullptr;

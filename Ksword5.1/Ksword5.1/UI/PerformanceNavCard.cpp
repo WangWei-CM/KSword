@@ -19,6 +19,7 @@
 PerformanceNavCard::PerformanceNavCard(QWidget* parent)
     : QWidget(parent)
     , m_accentColor(67, 160, 255)
+    , m_primarySeriesColor(67, 160, 255)
 {
     setAttribute(Qt::WA_StyledBackground, true);
     setAutoFillBackground(false);
@@ -41,6 +42,29 @@ void PerformanceNavCard::setSubtitleText(const QString& subtitleText)
 void PerformanceNavCard::setAccentColor(const QColor& accentColor)
 {
     m_accentColor = accentColor;
+    if (m_primarySeriesFollowsAccentColor)
+    {
+        m_primarySeriesColor = accentColor;
+    }
+    if (!m_secondarySeriesVisible)
+    {
+        m_secondarySeriesColor = QColor();
+    }
+    update();
+}
+
+void PerformanceNavCard::setSeriesColors(
+    const QColor& primarySeriesColor,
+    const QColor& secondarySeriesColor)
+{
+    m_primarySeriesFollowsAccentColor = !primarySeriesColor.isValid();
+    m_primarySeriesColor = primarySeriesColor.isValid() ? primarySeriesColor : m_accentColor;
+    m_secondarySeriesColor = secondarySeriesColor;
+    m_secondarySeriesVisible = secondarySeriesColor.isValid();
+    if (!m_secondarySeriesVisible)
+    {
+        m_secondarySamples.clear();
+    }
     update();
 }
 
@@ -54,17 +78,39 @@ void PerformanceNavCard::appendSample(const double usagePercent)
 {
     // clampedPercent 用途：把外部传入采样限制在 0~100，避免越界绘制。
     const double clampedPercent = std::clamp(usagePercent, 0.0, 100.0);
-    m_samples.push_back(clampedPercent);
-    while (m_samples.size() > m_maxSampleCount)
+    m_primarySamples.push_back(clampedPercent);
+    while (m_primarySamples.size() > m_maxSampleCount)
     {
-        m_samples.pop_front();
+        m_primarySamples.pop_front();
+    }
+    update();
+}
+
+void PerformanceNavCard::appendDualSample(
+    const double primaryUsagePercent,
+    const double secondaryUsagePercent)
+{
+    // primaryClampedPercent 用途：主序列采样值，限制在 0~100。
+    const double primaryClampedPercent = std::clamp(primaryUsagePercent, 0.0, 100.0);
+    // secondaryClampedPercent 用途：次序列采样值，限制在 0~100。
+    const double secondaryClampedPercent = std::clamp(secondaryUsagePercent, 0.0, 100.0);
+    m_primarySamples.push_back(primaryClampedPercent);
+    m_secondarySamples.push_back(secondaryClampedPercent);
+    while (m_primarySamples.size() > m_maxSampleCount)
+    {
+        m_primarySamples.pop_front();
+    }
+    while (m_secondarySamples.size() > m_maxSampleCount)
+    {
+        m_secondarySamples.pop_front();
     }
     update();
 }
 
 void PerformanceNavCard::clearSamples()
 {
-    m_samples.clear();
+    m_primarySamples.clear();
+    m_secondarySamples.clear();
     update();
 }
 
@@ -119,46 +165,61 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
         painter.drawLine(sparkRect.left(), yValue, sparkRect.right(), yValue);
     }
 
-    // 折线路径：把采样映射到缩略图区域，最大点数不足时也正常绘制。
-    if (m_samples.size() == 1)
-    {
-        const double yRatio = m_samples.at(0) / 100.0;
-        const double yValue = sparkRect.bottom() - yRatio * static_cast<double>(sparkRect.height());
-        QPen trendPen(m_accentColor);
-        trendPen.setWidthF(1.6);
-        painter.setPen(trendPen);
-        painter.drawLine(
-            QPointF(sparkRect.left(), yValue),
-            QPointF(sparkRect.right(), yValue));
-    }
-    else if (m_samples.size() >= 2)
-    {
-        QPainterPath path;
-        const int pointCount = m_samples.size();
-        for (int indexValue = 0; indexValue < pointCount; ++indexValue)
+    // drawSeriesPath 作用：
+    // - 把采样列表映射为缩略图曲线；
+    // - 兼容单点与多点两种情况，供主/次序列复用。
+    const auto drawSeriesPath =
+        [&painter, &sparkRect](const QVector<double>& sampleList, const QColor& seriesColor)
         {
-            const double xRatio = pointCount > 1
-                ? static_cast<double>(indexValue) / static_cast<double>(pointCount - 1)
-                : 0.0;
-            const double yRatio = m_samples.at(indexValue) / 100.0;
-            const double xValue = sparkRect.left() + xRatio * static_cast<double>(sparkRect.width());
-            const double yValue = sparkRect.bottom() - yRatio * static_cast<double>(sparkRect.height());
-            if (indexValue == 0)
+            if (sampleList.isEmpty())
             {
-                path.moveTo(xValue, yValue);
+                return;
             }
-            else
-            {
-                path.lineTo(xValue, yValue);
-            }
-        }
 
-        QPen trendPen(m_accentColor);
-        trendPen.setWidthF(1.6);
-        painter.setPen(trendPen);
-        painter.setBrush(Qt::NoBrush);
-        painter.drawPath(path);
+            QPen trendPen(seriesColor);
+            trendPen.setWidthF(1.6);
+            painter.setPen(trendPen);
+            painter.setBrush(Qt::NoBrush);
+
+            if (sampleList.size() == 1)
+            {
+                const double yRatio = sampleList.at(0) / 100.0;
+                const double yValue = sparkRect.bottom() - yRatio * static_cast<double>(sparkRect.height());
+                painter.drawLine(
+                    QPointF(sparkRect.left(), yValue),
+                    QPointF(sparkRect.right(), yValue));
+                return;
+            }
+
+            QPainterPath path;
+            const int pointCount = sampleList.size();
+            for (int indexValue = 0; indexValue < pointCount; ++indexValue)
+            {
+                const double xRatio = pointCount > 1
+                    ? static_cast<double>(indexValue) / static_cast<double>(pointCount - 1)
+                    : 0.0;
+                const double yRatio = sampleList.at(indexValue) / 100.0;
+                const double xValue = sparkRect.left() + xRatio * static_cast<double>(sparkRect.width());
+                const double yValue = sparkRect.bottom() - yRatio * static_cast<double>(sparkRect.height());
+                if (indexValue == 0)
+                {
+                    path.moveTo(xValue, yValue);
+                }
+                else
+                {
+                    path.lineTo(xValue, yValue);
+                }
+            }
+
+            painter.drawPath(path);
+        };
+
+    // 双线卡片先画次序列再画主序列，确保主线不会被遮住。
+    if (m_secondarySeriesVisible)
+    {
+        drawSeriesPath(m_secondarySamples, m_secondarySeriesColor);
     }
+    drawSeriesPath(m_primarySamples, m_primarySeriesColor);
 
     // 文本区域：主标题加粗，副标题使用次级颜色。
     const QRect titleRect(sparkRect.right() + 10, cardRect.top() + 8, cardRect.width() - sparkRect.width() - 24, 28);

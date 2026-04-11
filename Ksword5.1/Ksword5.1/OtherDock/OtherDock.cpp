@@ -18,6 +18,7 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QCloseEvent>
+#include <QCursor>
 #include <QDateTime>
 #include <QDialog>
 #include <QFile>
@@ -35,6 +36,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
 #include <QPointer>
@@ -61,6 +63,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -298,6 +301,85 @@ namespace
     constexpr int kWindowColumnTopMost = 10;
     constexpr int kWindowColumnState = 11;
     constexpr int kWindowColumnAlpha = 12;
+
+    // WindowPickerDragButton：
+    // - 作用：在左键按下后抓取鼠标，实现“按住准星拖拽并在任意位置松开”交互；
+    // - 调用：由 OtherDock::initializeUi 创建，并通过 setReleaseCallback 绑定释放回调；
+    // - 传入：releaseCallback 接收全局坐标；
+    // - 传出：无，回调由外部处理具体窗口拾取与详情弹窗。
+    class WindowPickerDragButton final : public QPushButton
+    {
+    public:
+        using ReleaseCallback = std::function<void(const QPoint&)>;
+
+        explicit WindowPickerDragButton(QWidget* parent = nullptr)
+            : QPushButton(parent)
+        {
+            // setMouseTracking(true) 作用：在拖拽过程中即使不按键变化也持续接收移动事件。
+            setMouseTracking(true);
+        }
+
+        // setReleaseCallback：
+        // - 作用：注册鼠标释放回调；
+        // - 调用：OtherDock 初始化 UI 时绑定；
+        // - 传入 callback：释放时接收全局坐标的函数对象；
+        // - 传出：无。
+        void setReleaseCallback(ReleaseCallback callback)
+        {
+            m_releaseCallback = std::move(callback);
+        }
+
+    protected:
+        void mousePressEvent(QMouseEvent* event) override
+        {
+            if (event != nullptr && event->button() == Qt::LeftButton)
+            {
+                // m_dragTracking 用于标记当前是否处于“准星拖拽拾取”过程。
+                m_dragTracking = true;
+                // grabMouse + CrossCursor 组合用于把拖拽过程视觉与输入统一到本按钮。
+                grabMouse(QCursor(Qt::CrossCursor));
+            }
+            QPushButton::mousePressEvent(event);
+        }
+
+        void mouseReleaseEvent(QMouseEvent* event) override
+        {
+            // shouldDispatch 用于确保仅在左键拖拽链路结束时触发窗口拾取回调。
+            const bool shouldDispatch =
+                m_dragTracking
+                && event != nullptr
+                && event->button() == Qt::LeftButton;
+
+            if (m_dragTracking)
+            {
+                // releaseMouse 作用：结束全局鼠标抓取，避免后续输入被错误劫持。
+                releaseMouse();
+                m_dragTracking = false;
+            }
+
+            QPoint releaseGlobalPos;
+            if (event != nullptr)
+            {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+                // releaseGlobalPos 用于记录松开鼠标时的屏幕坐标，后续据此 WindowFromPoint。
+                releaseGlobalPos = event->globalPosition().toPoint();
+#else
+                releaseGlobalPos = event->globalPos();
+#endif
+            }
+
+            QPushButton::mouseReleaseEvent(event);
+
+            if (shouldDispatch && m_releaseCallback)
+            {
+                m_releaseCallback(releaseGlobalPos);
+            }
+        }
+
+    private:
+        bool m_dragTracking = false;          // m_dragTracking：记录当前是否在拖拽拾取链路中。
+        ReleaseCallback m_releaseCallback;    // m_releaseCallback：鼠标释放时回调到 OtherDock。
+    };
 
     // queryProcessImagePathByPid：
     // - 通过 PID 查询可执行文件完整路径；
@@ -2406,7 +2488,34 @@ void OtherDock::initializeUi()
     m_windowListPage = new QWidget(m_contentTabWidget);
     m_windowListPageLayout = new QVBoxLayout(m_windowListPage);
     m_windowListPageLayout->setContentsMargins(0, 0, 0, 0);
-    m_windowListPageLayout->setSpacing(0);
+    m_windowListPageLayout->setSpacing(4);
+
+    // 窗口列表页顶部工具条：新增准星拖拽拾取入口，满足“直接拖到目标窗口看详情”场景。
+    m_windowListToolWidget = new QWidget(m_windowListPage);
+    m_windowListToolLayout = new QHBoxLayout(m_windowListToolWidget);
+    m_windowListToolLayout->setContentsMargins(0, 0, 0, 0);
+    m_windowListToolLayout->setSpacing(6);
+
+    auto* pickerButton = new WindowPickerDragButton(m_windowListToolWidget);
+    m_windowPickerButton = pickerButton;
+    m_windowPickerButton->setIcon(QIcon(":/Icon/window_picker_target.svg"));
+    m_windowPickerButton->setToolTip(QStringLiteral("按住并拖拽准星，松开后打开鼠标下方窗口的详细信息"));
+    m_windowPickerButton->setStyleSheet(blueButtonStyle());
+    m_windowPickerButton->setFixedWidth(32);
+
+    m_windowPickerHintLabel = new QLabel(
+        QStringLiteral("拖拽准星到目标窗口并松开，可直接打开窗口详细信息"),
+        m_windowListToolWidget);
+    m_windowPickerHintLabel->setToolTip(QStringLiteral("用于快速定位任意窗口，不需要先在左侧列表里查找"));
+
+    pickerButton->setReleaseCallback([this](const QPoint& globalPos) {
+        handleWindowPickerRelease(globalPos);
+    });
+
+    m_windowListToolLayout->addWidget(m_windowPickerButton, 0);
+    m_windowListToolLayout->addWidget(m_windowPickerHintLabel, 0);
+    m_windowListToolLayout->addStretch(1);
+    m_windowListPageLayout->addWidget(m_windowListToolWidget, 0);
 
     // 窗口列表页：左树右预览。
     m_mainSplitter = new QSplitter(Qt::Horizontal, m_windowListPage);
@@ -3392,6 +3501,90 @@ void OtherDock::updatePreviewPanel(const WindowInfo* info)
         << ", pid="
         << info->processId
         << eol;
+}
+
+void OtherDock::handleWindowPickerRelease(const QPoint& globalPos)
+{
+    // 拾取链路统一复用 pickEvent，保证从“拖拽释放”到“打开详情”全程可追踪。
+    kLogEvent pickEvent;
+    info << pickEvent
+        << "[OtherDock] 准星拾取释放, x="
+        << globalPos.x()
+        << ", y="
+        << globalPos.y()
+        << eol;
+
+    POINT nativePoint{};
+    nativePoint.x = globalPos.x();
+    nativePoint.y = globalPos.y();
+
+    // rawWindowHandle 直接对应鼠标下最细粒度窗口；rootWindowHandle 用于回退到顶级窗口。
+    HWND rawWindowHandle = ::WindowFromPoint(nativePoint);
+    HWND rootWindowHandle = rawWindowHandle != nullptr ? ::GetAncestor(rawWindowHandle, GA_ROOT) : nullptr;
+    HWND targetWindowHandle = rootWindowHandle != nullptr ? rootWindowHandle : rawWindowHandle;
+
+    if (targetWindowHandle == nullptr || ::IsWindow(targetWindowHandle) == FALSE)
+    {
+        warn << pickEvent
+            << "[OtherDock] 准星拾取失败：WindowFromPoint 未命中有效窗口。"
+            << eol;
+        QMessageBox::information(
+            this,
+            QStringLiteral("窗口拾取"),
+            QStringLiteral("未命中可用窗口，请重试。"));
+        return;
+    }
+
+    const quint64 targetHwndValue = static_cast<quint64>(
+        reinterpret_cast<quintptr>(targetWindowHandle));
+    const quint64 rawHwndValue = static_cast<quint64>(
+        reinterpret_cast<quintptr>(rawWindowHandle));
+
+    // 优先按顶级窗口匹配当前快照，若失败则回退原始命中窗口。
+    const WindowInfo* pickedInfo = findInfoByHwnd(targetHwndValue);
+    if (pickedInfo == nullptr && rawHwndValue != 0 && rawHwndValue != targetHwndValue)
+    {
+        pickedInfo = findInfoByHwnd(rawHwndValue);
+    }
+
+    // fallbackInfo 用于兜底构造详情数据，避免必须先刷新列表才能查看目标窗口。
+    WindowInfo fallbackInfo;
+    if (pickedInfo == nullptr)
+    {
+        const bool childFlag = ::GetParent(targetWindowHandle) != nullptr;
+        fillWindowInfo(
+            targetWindowHandle,
+            -1,
+            childFlag,
+            QStringLiteral("WindowPicker"),
+            fallbackInfo);
+        pickedInfo = &fallbackInfo;
+
+        warn << pickEvent
+            << "[OtherDock] 准星拾取命中窗口不在当前快照，已使用即时查询兜底, hwnd="
+            << hwndToText(targetHwndValue).toStdString()
+            << eol;
+    }
+
+    if (pickedInfo == nullptr)
+    {
+        err << pickEvent
+            << "[OtherDock] 准星拾取失败：无法构造窗口详情。"
+            << eol;
+        QMessageBox::warning(
+            this,
+            QStringLiteral("窗口拾取"),
+            QStringLiteral("读取目标窗口信息失败。"));
+        return;
+    }
+
+    info << pickEvent
+        << "[OtherDock] 准星拾取成功，打开窗口详情, hwnd="
+        << hwndToText(pickedInfo->hwndValue).toStdString()
+        << ", pid="
+        << pickedInfo->processId
+        << eol;
+    openWindowDetailDialog(*pickedInfo);
 }
 
 void OtherDock::showWindowContextMenu(const QPoint& localPos)
