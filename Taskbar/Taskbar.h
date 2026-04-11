@@ -45,6 +45,8 @@ private:
     QLabel* downloadSpeedLabel;          // 下行速率文本标签
     QTimer* networkUiTimer;              // UI 标签刷新定时器
 
+    std::atomic<bool> cpuWorkerRunning;                  // CPU 采样线程运行状态
+    std::thread cpuWorkerThread;                         // CPU 采样线程对象
     std::atomic<bool> networkWorkerRunning;              // 网速采样线程运行状态
     std::atomic<std::uint64_t> uploadBytesPerSecond;     // 上行速率缓存(B/s)
     std::atomic<std::uint64_t> downloadBytesPerSecond;   // 下行速率缓存(B/s)
@@ -69,8 +71,10 @@ private:
     HWND hWnd;
     QTimer* cpuUpdateTimer;
 
-    // 网络速率相关辅助逻辑。
+    // 采样与显示相关辅助逻辑。
     QString formatNetworkSpeed(std::uint64_t bytesPerSecond) const;
+    void startCpuWorker();
+    void stopCpuWorker();
     void startNetworkWorker();
     void stopNetworkWorker();
     void updateNetworkSpeedLabels();

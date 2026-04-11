@@ -516,90 +516,259 @@ namespace
         return queryPowerShellTextSync(scriptText, 6000);
     }
 
-    // extractSensorValueFromOutput 作用：
-    // - 从 PowerShell 文本中提取第一行可用值；
-    // - 若输出为空、超时或失败文本，则回退为 N/A。
-    QString extractSensorValueFromOutput(const QString& rawOutputText)
+    // SensorProbeResult 作用：
+    // - 保存一次传感器探测的值、来源和失败原因；
+    // - 供异步刷新逻辑决定界面展示与日志输出。
+    struct SensorProbeResult
     {
-        const QString firstLineText = rawOutputText
+        QString valueText = QStringLiteral("N/A"); // valueText：探测到的传感器值文本。
+        QString sourceText; // sourceText：成功读取时的来源标识。
+        QString reasonText; // reasonText：失败时的原因汇总。
+        QString rawOutputText; // rawOutputText：脚本原始返回文本，便于诊断。
+        bool success = false; // success：本次探测是否读到有效值。
+    };
+
+    // isReadableSensorValue 作用：
+    // - 判断传感器文本是否是可展示的有效值；
+    // - 统一处理空串和 N/A。
+    bool isReadableSensorValue(const QString& sensorValueText)
+    {
+        const QString trimmedValueText = sensorValueText.trimmed();
+        return !trimmedValueText.isEmpty() && trimmedValueText != QStringLiteral("N/A");
+    }
+
+    // parseSensorProbeOutput 作用：
+    // - 解析 PowerShell 返回的 OK|... / ERR|... 协议文本；
+    // - 回退兼容旧版“只返回一个值”的简单文本。
+    SensorProbeResult parseSensorProbeOutput(const QString& rawOutputText)
+    {
+        SensorProbeResult probeResult;
+        probeResult.rawOutputText = rawOutputText.trimmed();
+
+        const QString firstLineText = probeResult.rawOutputText
             .split('\n', Qt::SkipEmptyParts)
             .value(0)
             .trimmed();
+        if (firstLineText.startsWith(QStringLiteral("OK|")))
+        {
+            const QStringList resultPartList = firstLineText.split('|');
+            probeResult.valueText =
+                resultPartList.size() >= 2 ? resultPartList.at(1).trimmed() : QStringLiteral("N/A");
+            probeResult.sourceText =
+                resultPartList.size() >= 3 ? resultPartList.mid(2).join(QStringLiteral("|")).trimmed() : QString();
+            probeResult.success = isReadableSensorValue(probeResult.valueText);
+            if (!probeResult.success)
+            {
+                probeResult.reasonText = QStringLiteral("脚本返回成功标记，但值为空。");
+            }
+            return probeResult;
+        }
+
+        if (firstLineText.startsWith(QStringLiteral("ERR|")))
+        {
+            probeResult.reasonText = firstLineText.mid(4).trimmed();
+            if (probeResult.reasonText.isEmpty())
+            {
+                probeResult.reasonText = QStringLiteral("脚本返回失败标记，但未提供原因。");
+            }
+            return probeResult;
+        }
+
         if (firstLineText.isEmpty())
         {
-            return QStringLiteral("N/A");
+            probeResult.reasonText = QStringLiteral("脚本无输出。");
+            return probeResult;
         }
+
         if (firstLineText == QStringLiteral("<无输出>")
             || firstLineText.contains(QStringLiteral("PowerShell"))
             || firstLineText.contains(QStringLiteral("失败"))
             || firstLineText.contains(QStringLiteral("超时")))
         {
-            return QStringLiteral("N/A");
+            probeResult.reasonText = firstLineText;
+            return probeResult;
         }
-        return firstLineText;
+
+        probeResult.valueText = firstLineText;
+        probeResult.success = isReadableSensorValue(probeResult.valueText);
+        if (!probeResult.success)
+        {
+            probeResult.reasonText = QStringLiteral("脚本仅返回了空值或 N/A。");
+        }
+        return probeResult;
     }
 
-    // queryCpuTemperatureText 作用：
+    // buildSensorProbeSignatureText 作用：
+    // - 生成用于日志去重的稳定签名；
+    // - 成功时包含来源和值，失败时包含原因。
+    QString buildSensorProbeSignatureText(
+        const QString& probeNameText,
+        const SensorProbeResult& probeResult)
+    {
+        if (probeResult.success)
+        {
+            return QStringLiteral("%1:OK:%2:%3")
+                .arg(probeNameText)
+                .arg(probeResult.sourceText)
+                .arg(probeResult.valueText);
+        }
+
+        return QStringLiteral("%1:ERR:%2")
+            .arg(probeNameText)
+            .arg(probeResult.reasonText);
+    }
+
+    // buildSensorProbeLogFragment 作用：
+    // - 生成单个传感器项的日志片段；
+    // - 失败时优先带出原因，成功时带出来源和值。
+    QString buildSensorProbeLogFragment(
+        const QString& probeNameText,
+        const SensorProbeResult& probeResult)
+    {
+        if (probeResult.success)
+        {
+            return QStringLiteral("%1=%2，来源=%3")
+                .arg(probeNameText)
+                .arg(probeResult.valueText)
+                .arg(probeResult.sourceText.isEmpty() ? QStringLiteral("未标注") : probeResult.sourceText);
+        }
+
+        return QStringLiteral("%1失败，原因=%2")
+            .arg(probeNameText)
+            .arg(probeResult.reasonText.isEmpty() ? QStringLiteral("未提供原因。") : probeResult.reasonText);
+    }
+
+    // queryCpuTemperatureProbeResult 作用：
     // - 查询 CPU 温度第一可用值（单位 °C）；
-    // - 按“Libre/OpenHardwareMonitor -> ACPI -> Thermal Zone 计数器”顺序回退；
-    // - 不可读时返回 N/A。
-    QString queryCpuTemperatureText()
+    // - 按“Libre/OpenHardwareMonitor -> CIM/WMI 热区 -> Thermal Counter -> TemperatureProbe”顺序回退；
+    // - 失败时返回结构化原因文本。
+    SensorProbeResult queryCpuTemperatureProbeResult()
     {
         const QString temperatureScript = QStringLiteral(
-            "$ErrorActionPreference='SilentlyContinue'; "
+            "$ErrorActionPreference='Stop'; "
+            "function Add-Reason($list,[string]$reason){ if(-not [string]::IsNullOrWhiteSpace($reason)){ [void]$list.Add($reason) } }; "
             "function Format-Temp([double]$value){ "
-            "  if([double]::IsNaN($value) -or [double]::IsInfinity($value)){return $null}; "
-            "  if($value -lt -30 -or $value -gt 130){return $null}; "
+            "  if([double]::IsNaN($value) -or [double]::IsInfinity($value)){ return $null }; "
+            "  if($value -lt -30 -or $value -gt 130){ return $null }; "
             "  return ([math]::Round($value,1)).ToString() + '°C'; "
             "}; "
-            "$result=$null; "
-            "$sensorNamespaces=@('root/LibreHardwareMonitor','root/OpenHardwareMonitor'); "
-            "foreach($ns in $sensorNamespaces){ "
-            "  if($result){break}; "
-            "  $sensors=Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction SilentlyContinue; "
-            "  if($null -eq $sensors){continue}; "
-            "  $cpuTemps=$sensors | Where-Object { "
-            "    $_.SensorType -eq 'Temperature' -and "
-            "    (($_.Name -match 'Package|CPU') -or ($_.Identifier -match '/cpu')) "
-            "  } | Sort-Object @{Expression={if($_.Name -match 'Package'){0}else{1}}}, Name; "
-            "  foreach($sensor in $cpuTemps){ "
-            "    $temp=Format-Temp ([double]$sensor.Value); "
-            "    if($null -ne $temp){$result=$temp; break}; "
-            "  } "
-            "}; "
-            "if(-not $result){ "
-            "  $zoneTemps=Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | "
-            "    Select-Object -ExpandProperty CurrentTemperature; "
-            "  foreach($raw in $zoneTemps){ "
-            "    if($null -eq $raw){continue}; "
-            "    $temp=Format-Temp ((([double]$raw)/10.0)-273.15); "
-            "    if($null -ne $temp){$result=$temp; break}; "
-            "  } "
-            "}; "
-            "if(-not $result){ "
-            "  $counter=Get-Counter '\\Thermal Zone Information(*)\\Temperature' -ErrorAction SilentlyContinue; "
-            "  if($null -ne $counter){ "
-            "    foreach($sample in $counter.CounterSamples){ "
-            "      $raw=[double]$sample.CookedValue; "
-            "      if($raw -gt 200){$raw=($raw/10.0)-273.15}; "
-            "      $temp=Format-Temp $raw; "
-            "      if($null -ne $temp){$result=$temp; break}; "
+            "function Emit-Success([string]$value,[string]$source){ Write-Output ('OK|' + $value + '|' + $source); exit 0 }; "
+            "$reasons = New-Object 'System.Collections.Generic.List[string]'; "
+            "foreach($ns in @('root/LibreHardwareMonitor','root/OpenHardwareMonitor')){ "
+            "  try { "
+            "    $sensorRows=@(Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction Stop); "
+            "    $cpuTemps=@($sensorRows | Where-Object { "
+            "      $_.SensorType -eq 'Temperature' -and "
+            "      (($_.Name -match 'Package|CPU') -or ($_.Identifier -match '/cpu')) "
+            "    } | Sort-Object @{Expression={if($_.Name -match 'Package'){0}else{1}}}, Name); "
+            "    if($cpuTemps.Count -le 0){ Add-Reason $reasons ('CIM ' + $ns + ': 未找到CPU温度传感器'); continue }; "
+            "    foreach($sensor in $cpuTemps){ "
+            "      $temp=Format-Temp ([double]$sensor.Value); "
+            "      if($null -ne $temp){ Emit-Success $temp ('CIM ' + $ns + ' / ' + $sensor.Name) } "
             "    } "
-            "  } "
+            "    Add-Reason $reasons ('CIM ' + $ns + ': 传感器存在但值无效'); "
+            "  } catch { Add-Reason $reasons ('CIM ' + $ns + ': ' + $_.Exception.Message) } "
             "}; "
-            "if($result){$result}else{'N/A'}");
-        return extractSensorValueFromOutput(queryPowerShellTextSync(temperatureScript, 4200));
+            "try { "
+            "  $zoneRows=@(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop); "
+            "  if($zoneRows.Count -le 0){ Add-Reason $reasons 'CIM root/wmi: 无热区数据' }; "
+            "  foreach($row in $zoneRows){ "
+            "    $temp=Format-Temp ((([double]$row.CurrentTemperature)/10.0)-273.15); "
+            "    if($null -ne $temp){ Emit-Success $temp 'CIM root/wmi / MSAcpi_ThermalZoneTemperature' } "
+            "  } "
+            "  Add-Reason $reasons 'CIM root/wmi: 热区值超出有效范围'; "
+            "} catch { Add-Reason $reasons ('CIM root/wmi: ' + $_.Exception.Message) } "
+            "try { "
+            "  $zoneRows=@(Get-WmiObject -Namespace root\\wmi -Class MSAcpi_ThermalZoneTemperature -ErrorAction Stop); "
+            "  if($zoneRows.Count -le 0){ Add-Reason $reasons 'WMI root\\\\wmi: 无热区数据' }; "
+            "  foreach($row in $zoneRows){ "
+            "    $temp=Format-Temp ((([double]$row.CurrentTemperature)/10.0)-273.15); "
+            "    if($null -ne $temp){ Emit-Success $temp 'WMI root\\\\wmi / MSAcpi_ThermalZoneTemperature' } "
+            "  } "
+            "  Add-Reason $reasons 'WMI root\\\\wmi: 热区值超出有效范围'; "
+            "} catch { Add-Reason $reasons ('WMI root\\\\wmi: ' + $_.Exception.Message) } "
+            "foreach($counterPath in @('\\Thermal Zone Information(*)\\High Precision Temperature','\\Thermal Zone Information(*)\\Temperature')){ "
+            "  try { "
+            "    $samples=@((Get-Counter $counterPath -ErrorAction Stop).CounterSamples); "
+            "    if($samples.Count -le 0){ Add-Reason $reasons ('Counter ' + $counterPath + ': 无实例'); continue }; "
+            "    foreach($sample in $samples){ "
+            "      $raw=[double]$sample.CookedValue; "
+            "      if($raw -gt 200){ $raw=($raw/10.0)-273.15 }; "
+            "      $temp=Format-Temp $raw; "
+            "      if($null -ne $temp){ Emit-Success $temp ('Counter ' + $sample.Path) } "
+            "    } "
+            "    Add-Reason $reasons ('Counter ' + $counterPath + ': 样本值无效'); "
+            "  } catch { Add-Reason $reasons ('Counter ' + $counterPath + ': ' + $_.Exception.Message) } "
+            "}; "
+            "try { "
+            "  $probeRows=@(Get-CimInstance Win32_TemperatureProbe -ErrorAction Stop); "
+            "  if($probeRows.Count -le 0){ Add-Reason $reasons 'CIM Win32_TemperatureProbe: 无数据' }; "
+            "  foreach($probe in $probeRows){ "
+            "    if($null -eq $probe.CurrentReading){ continue }; "
+            "    $temp=Format-Temp ([double]$probe.CurrentReading); "
+            "    if($null -ne $temp){ Emit-Success $temp 'CIM Win32_TemperatureProbe / CurrentReading' } "
+            "  } "
+            "  Add-Reason $reasons 'CIM Win32_TemperatureProbe: 读取值无效'; "
+            "} catch { Add-Reason $reasons ('CIM Win32_TemperatureProbe: ' + $_.Exception.Message) } "
+            "if($reasons.Count -le 0){ Add-Reason $reasons '未找到可用温度来源' }; "
+            "Write-Output ('ERR|' + ($reasons -join ' || '));");
+        return parseSensorProbeOutput(queryPowerShellTextSync(temperatureScript, 5200));
     }
 
-    // queryCpuVoltageText 作用：
+    // queryCpuVoltageProbeResult 作用：
     // - 查询 CPU 电压第一可用值（单位 V）；
-    // - 不可读时返回 N/A。
-    QString queryCpuVoltageText()
+    // - 同时兼容 SMBIOS 位标志与十倍电压值编码；
+    // - 失败时返回结构化原因文本。
+    SensorProbeResult queryCpuVoltageProbeResult()
     {
         const QString voltageScript = QStringLiteral(
-            "$v=Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty CurrentVoltage; "
-            "if($null -eq $v -or $v -eq 0){'N/A'}else{([math]::Round($v*0.1,2)).ToString() + 'V'}");
-        return extractSensorValueFromOutput(queryPowerShellTextSync(voltageScript, 2200));
+            "$ErrorActionPreference='Stop'; "
+            "function Add-Reason($list,[string]$reason){ if(-not [string]::IsNullOrWhiteSpace($reason)){ [void]$list.Add($reason) } }; "
+            "function Format-Voltage([uint16]$raw){ "
+            "  if($raw -eq 0){ return $null }; "
+            "  if(($raw -band 0x80) -ne 0){ "
+            "    $decoded=(($raw -band 0x7F) / 10.0); "
+            "    if($decoded -gt 0){ return ([math]::Round($decoded,2)).ToString() + 'V' } "
+            "  }; "
+            "  if(($raw -band 0x1) -ne 0){ return '5.0V' }; "
+            "  if(($raw -band 0x2) -ne 0){ return '3.3V' }; "
+            "  if(($raw -band 0x4) -ne 0){ return '2.9V' }; "
+            "  return $null; "
+            "}; "
+            "function Emit-Success([string]$value,[string]$source){ Write-Output ('OK|' + $value + '|' + $source); exit 0 }; "
+            "$reasons = New-Object 'System.Collections.Generic.List[string]'; "
+            "try { "
+            "  $cpu=Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1; "
+            "  if($null -eq $cpu){ Add-Reason $reasons 'CIM Win32_Processor: 未返回处理器对象' } "
+            "  else { "
+            "    $voltage=Format-Voltage ([uint16]$cpu.CurrentVoltage); "
+            "    if($null -ne $voltage){ Emit-Success $voltage 'CIM Win32_Processor / CurrentVoltage' } "
+            "    Add-Reason $reasons ('CIM Win32_Processor: CurrentVoltage=' + [string]$cpu.CurrentVoltage + ' 无法解析'); "
+            "  } "
+            "} catch { Add-Reason $reasons ('CIM Win32_Processor: ' + $_.Exception.Message) } "
+            "try { "
+            "  $cpu=Get-WmiObject Win32_Processor -ErrorAction Stop | Select-Object -First 1; "
+            "  if($null -eq $cpu){ Add-Reason $reasons 'WMI Win32_Processor: 未返回处理器对象' } "
+            "  else { "
+            "    $voltage=Format-Voltage ([uint16]$cpu.CurrentVoltage); "
+            "    if($null -ne $voltage){ Emit-Success $voltage 'WMI Win32_Processor / CurrentVoltage' } "
+            "    Add-Reason $reasons ('WMI Win32_Processor: CurrentVoltage=' + [string]$cpu.CurrentVoltage + ' 无法解析'); "
+            "  } "
+            "} catch { Add-Reason $reasons ('WMI Win32_Processor: ' + $_.Exception.Message) } "
+            "try { "
+            "  $wmicText=& wmic.exe path Win32_Processor get CurrentVoltage /value 2>&1 | Out-String; "
+            "  if(-not [string]::IsNullOrWhiteSpace($wmicText)){ "
+            "    $match=[regex]::Match($wmicText,'CurrentVoltage=(\\d+)'); "
+            "    if($match.Success){ "
+            "      $voltage=Format-Voltage ([uint16]$match.Groups[1].Value); "
+            "      if($null -ne $voltage){ Emit-Success $voltage 'WMIC path Win32_Processor / CurrentVoltage' } "
+            "      Add-Reason $reasons ('WMIC path Win32_Processor: CurrentVoltage=' + $match.Groups[1].Value + ' 无法解析'); "
+            "    } else { Add-Reason $reasons ('WMIC path Win32_Processor: 返回=' + $wmicText.Trim()) } "
+            "  } else { Add-Reason $reasons 'WMIC path Win32_Processor: 无输出' } "
+            "} catch { Add-Reason $reasons ('WMIC path Win32_Processor: ' + $_.Exception.Message) } "
+            "if($reasons.Count -le 0){ Add-Reason $reasons '未找到可用电压来源' }; "
+            "Write-Output ('ERR|' + ($reasons -join ' || '));");
+        return parseSensorProbeOutput(queryPowerShellTextSync(voltageScript, 4200));
     }
 }
 

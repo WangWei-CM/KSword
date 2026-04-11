@@ -60,6 +60,29 @@ namespace
             .arg(KswordTheme::SurfaceHex());
     }
 
+    // buildOpaqueHandleUsageDialogStyle 作用：
+    // - 覆盖父级 Dock 透明样式，确保“文件占用”窗口在浅色主题不是黑底；
+    // - 统一列表区和表头为主题色板背景。
+    QString buildOpaqueHandleUsageDialogStyle(const QString& dialogObjectName)
+    {
+        return QStringLiteral(
+            "QDialog#%1{"
+            "  background-color:palette(window) !important;"
+            "  color:palette(text) !important;"
+            "}"
+            "QDialog#%1 QTreeWidget,"
+            "QDialog#%1 QAbstractScrollArea,"
+            "QDialog#%1 QAbstractScrollArea::viewport{"
+            "  background-color:palette(base) !important;"
+            "  color:palette(text) !important;"
+            "}"
+            "QDialog#%1 QHeaderView::section{"
+            "  background-color:palette(window) !important;"
+            "  color:palette(text) !important;"
+            "}")
+            .arg(dialogObjectName);
+    }
+
     // formatHex 作用：把整数转为 0x 前缀十六进制文本。
     QString formatHex(const std::uint64_t value, const int width = 0)
     {
@@ -98,6 +121,11 @@ void FileHandleUsageWindow::resizeEvent(QResizeEvent* event)
 
 void FileHandleUsageWindow::initializeUi()
 {
+    setObjectName(QStringLiteral("FileHandleUsageWindowRoot"));
+    setAttribute(Qt::WA_StyledBackground, true);
+    setAutoFillBackground(true);
+    setStyleSheet(buildOpaqueHandleUsageDialogStyle(objectName()));
+
     setWindowTitle(QStringLiteral("占用句柄扫描结果"));
     setMinimumSize(1100, 680);
 

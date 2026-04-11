@@ -11,10 +11,14 @@
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
+#include <QScreen>
 #include <QSize>
+#include <QSizePolicy>
 #include <QStyle>
 #include <QTextEdit>
 #include <QWidget>
+
+#include <algorithm>
 
 namespace
 {
@@ -32,6 +36,58 @@ namespace
     // - 缓存上次应用到消息框的深浅色模式；
     // - 避免同一主题下重复 setStyleSheet/setPalette 触发额外样式事件。
     constexpr const char* kThemeModePropertyName = "ksword_theme_dark_mode";
+
+    // 消息框尺寸常量：
+    // - kMessageBoxMinWidth：消息框允许的最小宽度；
+    // - kMessageBoxPreferredWidth：默认偏好的可读宽度；
+    // - kMessageBoxHardMaxWidth：消息框宽度硬上限，避免超宽；
+    // - kMessageBoxScreenMargin：与屏幕边缘的安全留白；
+    // - kMessageLabelHorizontalReserve：文本区需要预留给图标和内边距的水平空间。
+    constexpr int kMessageBoxMinWidth = 360;
+    constexpr int kMessageBoxPreferredWidth = 520;
+    constexpr int kMessageBoxHardMaxWidth = 820;
+    constexpr int kMessageBoxScreenMargin = 96;
+    constexpr int kMessageLabelHorizontalReserve = 148;
+
+    // computeMessageBoxMaxWidth 作用：
+    // - 按当前消息框所在屏幕计算安全最大宽度；
+    // - 防止长文本导致消息框溢出屏幕可用区域。
+    int computeMessageBoxMaxWidth(const QMessageBox* messageBox)
+    {
+        QScreen* targetScreen = messageBox != nullptr ? messageBox->screen() : nullptr;
+        if (targetScreen == nullptr && qApp != nullptr)
+        {
+            targetScreen = qApp->primaryScreen();
+        }
+        if (targetScreen == nullptr)
+        {
+            return kMessageBoxPreferredWidth;
+        }
+
+        const int availableWidth = std::max(
+            targetScreen->availableGeometry().width() - kMessageBoxScreenMargin,
+            kMessageBoxMinWidth);
+        const int cappedAvailableWidth = std::min(availableWidth, kMessageBoxHardMaxWidth);
+        return std::max(cappedAvailableWidth, kMessageBoxMinWidth);
+    }
+
+    // polishMessageTextLabel 作用：
+    // - 统一消息框文本标签的自动换行与宽度约束；
+    // - 解决长文本把对话框强行撑宽的问题。
+    void polishMessageTextLabel(QLabel* targetLabel, const int maxTextWidth)
+    {
+        if (targetLabel == nullptr)
+        {
+            return;
+        }
+
+        targetLabel->setWordWrap(true);
+        targetLabel->setMinimumWidth(0);
+        targetLabel->setMaximumWidth(std::max(maxTextWidth, 220));
+        targetLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+        targetLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        targetLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    }
 
     // messageBoxWindowColor 作用：返回消息框主背景色。
     QColor messageBoxWindowColor(const bool darkModeEnabled)
@@ -100,15 +156,16 @@ namespace
             "  color:%3;"
             "}"
             "QMessageBox#%1 QLabel#qt_msgbox_label{"
-            "  font-size:15px;"
+            "  font-size:14px;"
             "  font-weight:700;"
-            "  min-width:340px;"
-            "  padding:4px 6px 2px 6px;"
+            "  min-width:0px;"
+            "  padding:2px 6px 2px 6px;"
             "}"
             "QMessageBox#%1 QLabel#qt_msgbox_informativelabel{"
             "  color:%5;"
             "  font-size:13px;"
-            "  padding:0 6px 6px 6px;"
+            "  min-width:0px;"
+            "  padding:0 6px 4px 6px;"
             "}"
             "QMessageBox#%1 QLabel#qt_msgboxex_icon_label{"
             "  min-width:46px;"
@@ -116,17 +173,17 @@ namespace
             "}"
             "QMessageBox#%1 QDialogButtonBox{"
             "  border-top:1px solid %4;"
-            "  margin-top:10px;"
-            "  padding-top:10px;"
+            "  margin-top:6px;"
+            "  padding-top:6px;"
             "}"
             "QMessageBox#%1 QPushButton{"
             "  background:%6;"
             "  color:%3;"
             "  border:1px solid %4;"
             "  border-radius:6px;"
-            "  padding:6px 14px;"
-            "  min-width:96px;"
-            "  min-height:32px;"
+            "  padding:4px 10px;"
+            "  min-width:76px;"
+            "  min-height:28px;"
             "  font-weight:600;"
             "}"
             "QMessageBox#%1 QPushButton:hover{"
@@ -322,10 +379,15 @@ namespace
 
             const QPalette sourcePalette = (qApp != nullptr) ? qApp->palette() : messageBox->palette();
             const QString targetStyleSheet = buildMessageBoxStyleSheet(darkModeEnabled);
+            // dialogMaxWidth 用于按屏幕可用宽度限制消息框，避免超宽导致视觉拥挤。
+            const int dialogMaxWidth = computeMessageBoxMaxWidth(messageBox);
+            // textMaxWidth 用于约束主文本和说明文本宽度，确保自动换行可靠生效。
+            const int textMaxWidth = std::max(dialogMaxWidth - kMessageLabelHorizontalReserve, 220);
             messageBox->setObjectName(QString::fromLatin1(kThemedMessageBoxObjectName));
             messageBox->setAttribute(Qt::WA_StyledBackground, true);
             messageBox->setAutoFillBackground(true);
-            messageBox->setMinimumWidth(500);
+            messageBox->setMinimumWidth(kMessageBoxMinWidth);
+            messageBox->setMaximumWidth(dialogMaxWidth);
             messageBox->setProperty(kThemeModePropertyName, darkModeEnabled);
 
             // 相同主题重复进入时，只刷新按钮与文本可选属性，避免重复 setStyleSheet 造成样式风暴。
@@ -339,18 +401,10 @@ namespace
             }
 
             QLabel* mainTextLabel = messageBox->findChild<QLabel*>(QStringLiteral("qt_msgbox_label"));
-            if (mainTextLabel != nullptr)
-            {
-                mainTextLabel->setWordWrap(true);
-                mainTextLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            }
+            polishMessageTextLabel(mainTextLabel, textMaxWidth);
 
             QLabel* informativeLabel = messageBox->findChild<QLabel*>(QStringLiteral("qt_msgbox_informativelabel"));
-            if (informativeLabel != nullptr)
-            {
-                informativeLabel->setWordWrap(true);
-                informativeLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            }
+            polishMessageTextLabel(informativeLabel, textMaxWidth);
 
             QTextEdit* detailTextEdit = messageBox->findChild<QTextEdit*>();
             if (detailTextEdit != nullptr)
@@ -360,6 +414,7 @@ namespace
             }
 
             polishButtons(messageBox);
+            messageBox->adjustSize();
         }
 
     private:
@@ -384,8 +439,10 @@ namespace
 
                 pushButton->setProperty("ksword_primary", primaryButton);
                 pushButton->setCursor(Qt::PointingHandCursor);
-                pushButton->setMinimumHeight(32);
-                pushButton->setMinimumWidth(primaryButton ? 108 : 96);
+                pushButton->setMinimumHeight(28);
+                pushButton->setMaximumHeight(30);
+                pushButton->setMinimumWidth(primaryButton ? 86 : 76);
+                pushButton->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
                 pushButton->setToolTip(standardButtonToolTip(standardButton));
 
                 const QString iconPath = standardButtonIconPath(standardButton);

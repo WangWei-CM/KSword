@@ -14,11 +14,11 @@
 #include <qpushbutton.h>
 #include <qtimer.h>
 #include <QDateTime>
+#include <QCoreApplication>
 #include <QSizePolicy>
 #include <Qscreen.h>
 #include <thread>
 #include <chrono>
-#include <qthread.h>
 
 extern std::vector<int> cpuUsage;
 
@@ -53,6 +53,7 @@ Taskbar::Taskbar(QWidget* parent)
       uploadSpeedLabel(nullptr),
       downloadSpeedLabel(nullptr),
       networkUiTimer(nullptr),
+      cpuWorkerRunning(false),
       networkWorkerRunning(false),
       uploadBytesPerSecond(0),
       downloadBytesPerSecond(0),
@@ -310,6 +311,7 @@ Taskbar::Taskbar(QWidget* parent)
     cpuUpdateTimer->setInterval(200);
     connect(cpuUpdateTimer, &QTimer::timeout, this, &Taskbar::updateCPUUsage);
     cpuUpdateTimer->start();
+    startCpuWorker();
     updateCPUUsage();
 
     // -------------------------- 启动网络采样线程与文本刷新 --------------------------
@@ -358,7 +360,8 @@ void Taskbar::RegisterAsAppBar()
 
 Taskbar::~Taskbar()
 {
-    // 析构前先停止网络采样线程，避免后台线程访问已释放对象。
+    // 析构前先停止后台线程，避免线程继续运行导致进程无法退出。
+    stopCpuWorker();
     stopNetworkWorker();
 
     if (m_analyzer) {
@@ -373,12 +376,15 @@ Taskbar::~Taskbar()
 
 void Taskbar::onExitClicked()
 {
+    // 退出按钮的优先目标是结束进程：先触发关闭流程，再退出事件循环。
     close();
+    QCoreApplication::quit();
 }
 
 void Taskbar::closeEvent(QCloseEvent* event)
 {
-    // 关闭窗口时先停止网络线程，确保析构阶段无并发访问。
+    // 关闭窗口时先停止后台线程，确保析构阶段无并发访问。
+    stopCpuWorker();
     stopNetworkWorker();
 
     APPBARDATA abd = { 0 };
@@ -399,18 +405,6 @@ void Taskbar::updateTime()
 
 void Taskbar::updateCPUUsage()
 {
-    // 防止重复启动 CPU 采样线程。
-    static bool isFirstRun = true;
-    if (isFirstRun) {
-        std::thread([]()->void {
-            while (1) {
-                getCPUCoreUsage();
-                QThread::msleep(200);
-            }
-            }).detach();
-        isFirstRun = false;
-    }
-
     if (cpuUsage.size() != cpuBars.size()) {
         return;
     }
@@ -424,6 +418,30 @@ void Taskbar::updateCPUUsage()
         int barHeight = (cpuUsage[i] * maxBarHeight) / 100;
         barHeight = qBound(0, barHeight, maxBarHeight);
         cpuBars[i]->setFixedSize(4, barHeight);
+    }
+}
+
+void Taskbar::startCpuWorker()
+{
+    // 防止重复启动线程。
+    if (cpuWorkerRunning.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    cpuWorkerThread = std::thread([this]() {
+        while (cpuWorkerRunning.load(std::memory_order_acquire)) {
+            getCPUCoreUsage();
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    });
+}
+
+void Taskbar::stopCpuWorker()
+{
+    // 先发停止信号，再在主线程 join，保证线程安全退出。
+    cpuWorkerRunning.store(false, std::memory_order_release);
+    if (cpuWorkerThread.joinable()) {
+        cpuWorkerThread.join();
     }
 }
 

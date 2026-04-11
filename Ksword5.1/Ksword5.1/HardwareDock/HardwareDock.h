@@ -324,6 +324,7 @@ private:
     int m_historyLength = 60;                 // m_historyLength：曲线保留点数。
     int m_sampleCounter = 60;                 // m_sampleCounter：采样序号（从历史长度起步避免首段无图）。
     QString m_cachedSensorText;               // m_cachedSensorText：CPU 温度/电压缓存。
+    QString m_lastSensorLogSignatureText;     // m_lastSensorLogSignatureText：最近一次传感器日志去重签名。
     QString m_cachedOverviewStaticText;       // m_cachedOverviewStaticText：概览静态文本缓存。
     QString m_cachedGpuStaticText;            // m_cachedGpuStaticText：显卡静态文本缓存。
     QString m_cachedMemoryStaticText;         // m_cachedMemoryStaticText：内存静态文本缓存。
