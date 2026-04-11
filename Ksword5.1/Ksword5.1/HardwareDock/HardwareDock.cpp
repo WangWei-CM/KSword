@@ -45,6 +45,7 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <thread>
 
 #ifndef NOMINMAX
@@ -540,14 +541,54 @@ namespace
 
     // queryCpuTemperatureText 作用：
     // - 查询 CPU 温度第一可用值（单位 °C）；
+    // - 按“Libre/OpenHardwareMonitor -> ACPI -> Thermal Zone 计数器”顺序回退；
     // - 不可读时返回 N/A。
     QString queryCpuTemperatureText()
     {
         const QString temperatureScript = QStringLiteral(
-            "$v=Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | "
-            "Select-Object -First 1 -ExpandProperty CurrentTemperature; "
-            "if($null -eq $v){'N/A'}else{([math]::Round(($v/10)-273.15,1)).ToString() + '°C'}");
-        return extractSensorValueFromOutput(queryPowerShellTextSync(temperatureScript, 2200));
+            "$ErrorActionPreference='SilentlyContinue'; "
+            "function Format-Temp([double]$value){ "
+            "  if([double]::IsNaN($value) -or [double]::IsInfinity($value)){return $null}; "
+            "  if($value -lt -30 -or $value -gt 130){return $null}; "
+            "  return ([math]::Round($value,1)).ToString() + '°C'; "
+            "}; "
+            "$result=$null; "
+            "$sensorNamespaces=@('root/LibreHardwareMonitor','root/OpenHardwareMonitor'); "
+            "foreach($ns in $sensorNamespaces){ "
+            "  if($result){break}; "
+            "  $sensors=Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction SilentlyContinue; "
+            "  if($null -eq $sensors){continue}; "
+            "  $cpuTemps=$sensors | Where-Object { "
+            "    $_.SensorType -eq 'Temperature' -and "
+            "    (($_.Name -match 'Package|CPU') -or ($_.Identifier -match '/cpu')) "
+            "  } | Sort-Object @{Expression={if($_.Name -match 'Package'){0}else{1}}}, Name; "
+            "  foreach($sensor in $cpuTemps){ "
+            "    $temp=Format-Temp ([double]$sensor.Value); "
+            "    if($null -ne $temp){$result=$temp; break}; "
+            "  } "
+            "}; "
+            "if(-not $result){ "
+            "  $zoneTemps=Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | "
+            "    Select-Object -ExpandProperty CurrentTemperature; "
+            "  foreach($raw in $zoneTemps){ "
+            "    if($null -eq $raw){continue}; "
+            "    $temp=Format-Temp ((([double]$raw)/10.0)-273.15); "
+            "    if($null -ne $temp){$result=$temp; break}; "
+            "  } "
+            "}; "
+            "if(-not $result){ "
+            "  $counter=Get-Counter '\\Thermal Zone Information(*)\\Temperature' -ErrorAction SilentlyContinue; "
+            "  if($null -ne $counter){ "
+            "    foreach($sample in $counter.CounterSamples){ "
+            "      $raw=[double]$sample.CookedValue; "
+            "      if($raw -gt 200){$raw=($raw/10.0)-273.15}; "
+            "      $temp=Format-Temp $raw; "
+            "      if($null -ne $temp){$result=$temp; break}; "
+            "    } "
+            "  } "
+            "}; "
+            "if($result){$result}else{'N/A'}");
+        return extractSensorValueFromOutput(queryPowerShellTextSync(temperatureScript, 4200));
     }
 
     // queryCpuVoltageText 作用：
@@ -2585,6 +2626,12 @@ void HardwareDock::updateUtilizationView(
         m_diskUtilAxisY,
         diskWriteBytesPerSec,
         0.0);
+    updateSharedSeriesAxisRange(
+        m_diskReadLineSeries,
+        m_diskWriteLineSeries,
+        m_diskUtilAxisX,
+        m_diskUtilAxisY,
+        0.0);
 
     // 网络子页：更新上下行速率摘要与折线趋势。
     if (m_networkUtilSummaryLabel != nullptr)
@@ -2605,6 +2652,12 @@ void HardwareDock::updateUtilizationView(
         m_networkUtilAxisX,
         m_networkUtilAxisY,
         networkTxBytesPerSec,
+        0.0);
+    updateSharedSeriesAxisRange(
+        m_networkRxLineSeries,
+        m_networkTxLineSeries,
+        m_networkUtilAxisX,
+        m_networkUtilAxisY,
         0.0);
 
     // GPU 子页：更新利用率摘要与折线趋势。
@@ -2721,56 +2774,30 @@ void HardwareDock::updateUtilizationSidebarCards(
 
     if (m_diskNavCard != nullptr)
     {
-        // safeDiskReadBytesPerSec 用途：磁盘读速率安全值，避免负数污染缩略图比例。
-        const double safeDiskReadBytesPerSec = std::max(0.0, diskReadBytesPerSec);
-        // safeDiskWriteBytesPerSec 用途：磁盘写速率安全值，避免负数污染缩略图比例。
-        const double safeDiskWriteBytesPerSec = std::max(0.0, diskWriteBytesPerSec);
-        const double totalDiskBytesPerSec = safeDiskReadBytesPerSec + safeDiskWriteBytesPerSec;
-        m_diskNavAutoScaleBytesPerSec = std::max(
-            totalDiskBytesPerSec + 1.0,
-            m_diskNavAutoScaleBytesPerSec * 0.96);
-        // diskScaleBaseBytesPerSec 用途：磁盘卡片当前双线共用的自适应缩放基准。
-        const double diskScaleBaseBytesPerSec = std::max(1.0, m_diskNavAutoScaleBytesPerSec);
-        const double diskReadUsagePercent = std::clamp(
-            safeDiskReadBytesPerSec / diskScaleBaseBytesPerSec * 100.0,
-            0.0,
-            100.0);
-        const double diskWriteUsagePercent = std::clamp(
-            safeDiskWriteBytesPerSec / diskScaleBaseBytesPerSec * 100.0,
-            0.0,
-            100.0);
-        m_diskNavCard->setSubtitleText(
+        rebuildDualRateNavCard(
+            m_diskNavCard,
+            &m_diskNavReadHistoryBytesPerSec,
+            &m_diskNavWriteHistoryBytesPerSec,
+            diskReadBytesPerSec,
+            diskWriteBytesPerSec,
+            &m_diskNavAutoScaleBytesPerSec,
             QStringLiteral("读 %1 / 写 %2")
             .arg(formatRateText(diskReadBytesPerSec))
             .arg(formatRateText(diskWriteBytesPerSec)));
-        m_diskNavCard->appendDualSample(diskReadUsagePercent, diskWriteUsagePercent);
     }
 
     if (m_networkNavCard != nullptr)
     {
-        // safeNetworkRxBytesPerSec 用途：网络下行速率安全值，作为蓝线输入。
-        const double safeNetworkRxBytesPerSec = std::max(0.0, networkRxBytesPerSec);
-        // safeNetworkTxBytesPerSec 用途：网络上行速率安全值，作为黄线输入。
-        const double safeNetworkTxBytesPerSec = std::max(0.0, networkTxBytesPerSec);
-        const double totalNetworkBytesPerSec = safeNetworkRxBytesPerSec + safeNetworkTxBytesPerSec;
-        m_networkNavAutoScaleBytesPerSec = std::max(
-            totalNetworkBytesPerSec + 1.0,
-            m_networkNavAutoScaleBytesPerSec * 0.96);
-        // networkScaleBaseBytesPerSec 用途：网络卡片当前双线共用的自适应缩放基准。
-        const double networkScaleBaseBytesPerSec = std::max(1.0, m_networkNavAutoScaleBytesPerSec);
-        const double networkRxUsagePercent = std::clamp(
-            safeNetworkRxBytesPerSec / networkScaleBaseBytesPerSec * 100.0,
-            0.0,
-            100.0);
-        const double networkTxUsagePercent = std::clamp(
-            safeNetworkTxBytesPerSec / networkScaleBaseBytesPerSec * 100.0,
-            0.0,
-            100.0);
-        m_networkNavCard->setSubtitleText(
+        rebuildDualRateNavCard(
+            m_networkNavCard,
+            &m_networkNavRxHistoryBytesPerSec,
+            &m_networkNavTxHistoryBytesPerSec,
+            networkRxBytesPerSec,
+            networkTxBytesPerSec,
+            &m_networkNavAutoScaleBytesPerSec,
             QStringLiteral("下 %1 / 上 %2")
             .arg(formatRateText(networkRxBytesPerSec))
             .arg(formatRateText(networkTxBytesPerSec)));
-        m_networkNavCard->appendDualSample(networkRxUsagePercent, networkTxUsagePercent);
     }
 
     if (m_gpuNavCard != nullptr)
@@ -3155,6 +3182,135 @@ void HardwareDock::appendGeneralSeriesPoint(
     axisY->setRange(minAxisYValue, maxYValue * 1.15);
 }
 
+void HardwareDock::updateSharedSeriesAxisRange(
+    QLineSeries* primaryLineSeries,
+    QLineSeries* secondaryLineSeries,
+    QValueAxis* axisX,
+    QValueAxis* axisY,
+    const double minAxisYValue)
+{
+    if (axisX == nullptr || axisY == nullptr)
+    {
+        return;
+    }
+
+    const QList<QPointF> primaryPointList =
+        primaryLineSeries != nullptr ? primaryLineSeries->points() : QList<QPointF>();
+    const QList<QPointF> secondaryPointList =
+        secondaryLineSeries != nullptr ? secondaryLineSeries->points() : QList<QPointF>();
+    if (primaryPointList.isEmpty() && secondaryPointList.isEmpty())
+    {
+        return;
+    }
+
+    // firstXValue 用途：两条曲线可见区域的最左侧采样 X 值。
+    double firstXValue = std::numeric_limits<double>::max();
+    // lastXValue 用途：两条曲线可见区域的最右侧采样 X 值。
+    double lastXValue = std::numeric_limits<double>::lowest();
+    // maxYValue 用途：两条曲线当前可见历史中的共同最大值。
+    double maxYValue = minAxisYValue + 1.0;
+
+    const auto accumulatePointRange =
+        [&firstXValue, &lastXValue, &maxYValue](const QList<QPointF>& pointList)
+        {
+            if (pointList.isEmpty())
+            {
+                return;
+            }
+
+            firstXValue = std::min(firstXValue, pointList.first().x());
+            lastXValue = std::max(lastXValue, pointList.last().x());
+            for (const QPointF& pointValue : pointList)
+            {
+                maxYValue = std::max(maxYValue, pointValue.y());
+            }
+        };
+
+    accumulatePointRange(primaryPointList);
+    accumulatePointRange(secondaryPointList);
+
+    if (qFuzzyCompare(firstXValue, lastXValue))
+    {
+        axisX->setRange(firstXValue - 1.0, lastXValue + 1.0);
+    }
+    else
+    {
+        axisX->setRange(firstXValue, lastXValue);
+    }
+    axisY->setRange(minAxisYValue, maxYValue * 1.15);
+}
+
+void HardwareDock::rebuildDualRateNavCard(
+    PerformanceNavCard* navCard,
+    std::vector<double>* primaryHistoryOut,
+    std::vector<double>* secondaryHistoryOut,
+    const double primaryBytesPerSecond,
+    const double secondaryBytesPerSecond,
+    double* upperBoundBytesPerSecondOut,
+    const QString& subtitleText)
+{
+    if (navCard == nullptr
+        || primaryHistoryOut == nullptr
+        || secondaryHistoryOut == nullptr
+        || upperBoundBytesPerSecondOut == nullptr)
+    {
+        return;
+    }
+
+    // safePrimaryBytesPerSecond 用途：主序列安全速率值，过滤异常负值。
+    const double safePrimaryBytesPerSecond = std::max(0.0, primaryBytesPerSecond);
+    // safeSecondaryBytesPerSecond 用途：次序列安全速率值，过滤异常负值。
+    const double safeSecondaryBytesPerSecond = std::max(0.0, secondaryBytesPerSecond);
+    const int historyCapacity = std::max(1, navCard->sampleCapacity());
+
+    primaryHistoryOut->push_back(safePrimaryBytesPerSecond);
+    secondaryHistoryOut->push_back(safeSecondaryBytesPerSecond);
+    while (static_cast<int>(primaryHistoryOut->size()) > historyCapacity)
+    {
+        primaryHistoryOut->erase(primaryHistoryOut->begin());
+    }
+    while (static_cast<int>(secondaryHistoryOut->size()) > historyCapacity)
+    {
+        secondaryHistoryOut->erase(secondaryHistoryOut->begin());
+    }
+
+    // historyPeakBytesPerSecond 用途：缩略图可见历史中的真实峰值。
+    double historyPeakBytesPerSecond = 0.0;
+    for (const double historyValue : *primaryHistoryOut)
+    {
+        historyPeakBytesPerSecond = std::max(historyPeakBytesPerSecond, historyValue);
+    }
+    for (const double historyValue : *secondaryHistoryOut)
+    {
+        historyPeakBytesPerSecond = std::max(historyPeakBytesPerSecond, historyValue);
+    }
+
+    // 加一点顶部留白，避免峰值直接顶到边框。
+    *upperBoundBytesPerSecondOut = std::max(1.0, historyPeakBytesPerSecond * 1.08);
+
+    QVector<double> primaryPercentSampleList;
+    QVector<double> secondaryPercentSampleList;
+    primaryPercentSampleList.reserve(static_cast<int>(primaryHistoryOut->size()));
+    secondaryPercentSampleList.reserve(static_cast<int>(secondaryHistoryOut->size()));
+    for (const double historyValue : *primaryHistoryOut)
+    {
+        primaryPercentSampleList.push_back(std::clamp(
+            historyValue / *upperBoundBytesPerSecondOut * 100.0,
+            0.0,
+            100.0));
+    }
+    for (const double historyValue : *secondaryHistoryOut)
+    {
+        secondaryPercentSampleList.push_back(std::clamp(
+            historyValue / *upperBoundBytesPerSecondOut * 100.0,
+            0.0,
+            100.0));
+    }
+
+    navCard->setSubtitleText(subtitleText);
+    navCard->setSampleSeries(primaryPercentSampleList, secondaryPercentSampleList);
+}
+
 QString HardwareDock::formatRateText(const double bytesPerSecondValue) const
 {
     return bytesPerSecondToText(bytesPerSecondValue);
@@ -3271,7 +3427,14 @@ void HardwareDock::requestAsyncSensorRefresh()
                     return;
                 }
 
-                safeThis->m_cachedSensorText = sensorText;
+                // 采集偶发失败时保留上一份有效值，避免界面温度频繁闪回 N/A。
+                const bool newValueValid = (sensorText != QStringLiteral("N/A|N/A"));
+                if (newValueValid
+                    || safeThis->m_cachedSensorText.isEmpty()
+                    || safeThis->m_cachedSensorText == QStringLiteral("N/A|N/A"))
+                {
+                    safeThis->m_cachedSensorText = sensorText;
+                }
                 safeThis->m_sensorRefreshing.store(false);
             },
             Qt::QueuedConnection);

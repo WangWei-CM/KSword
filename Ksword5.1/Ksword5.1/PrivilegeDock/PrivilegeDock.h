@@ -12,9 +12,8 @@
 
 #include <QWidget>
 
-#include <vector>  // std::vector：缓存本地账号与组信息。
+#include <vector>  // std::vector：缓存本地账号与权限快照信息。
 
-class CodeEditorWidget;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
@@ -52,6 +51,17 @@ private:
         QString lastLogonText; // lastLogonText：最后登录时间文本。
     };
 
+    // PermissionSnapshotRow：
+    // - 作用：权限页列表一行数据；
+    // - type/name/status/detail 分别对应列表四列。
+    struct PermissionSnapshotRow
+    {
+        QString type;
+        QString name;
+        QString status;
+        QString detail;
+    };
+
 private:
     // ===================== UI 初始化 =====================
     void initializeUi();
@@ -75,8 +85,9 @@ private:
 
     // ===================== 权限页功能 =====================
     void refreshPermissionSnapshot();
-    QString buildLocalUserAndGroupText() const;
-    QString buildCurrentProcessPrivilegeText() const;
+    void appendLocalUserAndGroupRows(std::vector<PermissionSnapshotRow>* rowsOut) const;
+    void appendCurrentProcessPrivilegeRows(std::vector<PermissionSnapshotRow>* rowsOut) const;
+    void refreshPermissionTable(const std::vector<PermissionSnapshotRow>& rowList);
     QString fileTimeToDateTimeText(std::uint32_t secondsSince1970) const;
     QString winErrorText(DWORD code) const;
 
@@ -107,7 +118,7 @@ private:
     QHBoxLayout* m_permissionToolbarLayout = nullptr; // m_permissionToolbarLayout：权限页工具栏。
     QPushButton* m_permissionRefreshButton = nullptr; // m_permissionRefreshButton：刷新权限按钮。
     QLabel* m_permissionStatusLabel = nullptr;      // m_permissionStatusLabel：权限页状态标签。
-    CodeEditorWidget* m_permissionEditor = nullptr; // m_permissionEditor：权限详情文本。
+    QTableWidget* m_permissionTable = nullptr;      // m_permissionTable：权限快照列表。
 
     // 缓存。
     std::vector<LocalUserEntry> m_localUserList;    // m_localUserList：本地用户缓存。

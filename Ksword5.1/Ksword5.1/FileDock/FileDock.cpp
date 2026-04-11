@@ -179,6 +179,35 @@ namespace
             .arg(disabledTextColor);
     }
 
+    // buildLogPreviewText 作用：
+    // - 把多行结果压缩成单条日志预览文本，避免批量错误把日志面板刷满；
+    // - 参数 sourceLines：原始明细文本集合；参数 maxLineCount：最多保留的行数；
+    // - 返回：适合直接写入日志的 QString。
+    QString buildLogPreviewText(const QStringList& sourceLines, const int maxLineCount = 8)
+    {
+        if (sourceLines.isEmpty())
+        {
+            return QStringLiteral("(空)");
+        }
+
+        QStringList previewLines;
+        const int sourceLineCount = static_cast<int>(sourceLines.size());
+        const int previewCount = sourceLineCount < maxLineCount
+            ? sourceLineCount
+            : maxLineCount;
+        previewLines.reserve(previewCount + 1);
+        for (int index = 0; index < previewCount; ++index)
+        {
+            previewLines.push_back(sourceLines[index]);
+        }
+        if (sourceLines.size() > previewCount)
+        {
+            previewLines.push_back(
+                QStringLiteral("... 其余 %1 行省略").arg(sourceLines.size() - previewCount));
+        }
+        return previewLines.join(QStringLiteral("\n"));
+    }
+
     // 面包屑按钮样式：视觉上“嵌入输入框”，并保留轻量 hover 提示。
     QString buildBreadcrumbButtonStyle()
     {
@@ -3067,6 +3096,9 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     if (selectedAction == editAction)
     {
         // 编辑操作支持多选：逐个交给系统默认编辑器。
+        kLogEvent editEvent;
+        int successCount = 0;
+        QStringList failedPaths;
         for (const QString& path : menuPaths)
         {
             QFileInfo info(path);
@@ -3074,7 +3106,37 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             {
                 continue;
             }
-            QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+            const bool openOk = QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+            if (openOk)
+            {
+                successCount += 1;
+                continue;
+            }
+
+            failedPaths.push_back(QDir::toNativeSeparators(path));
+        }
+
+        if (!failedPaths.isEmpty())
+        {
+            warn << editEvent
+                << "[FileDock] 编辑（文本）部分失败, panel="
+                << panel.panelNameText.toStdString()
+                << ", successCount="
+                << successCount
+                << ", failCount="
+                << failedPaths.size()
+                << ", failedPreview=\n"
+                << buildLogPreviewText(failedPaths).toStdString()
+                << eol;
+        }
+        else
+        {
+            info << editEvent
+                << "[FileDock] 编辑（文本）完成, panel="
+                << panel.panelNameText.toStdString()
+                << ", successCount="
+                << successCount
+                << eol;
         }
         return;
     }
@@ -3126,7 +3188,28 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     if (selectedAction == openTerminalAction)
     {
         const QString workPath = panel.currentPath.isEmpty() ? QDir::homePath() : panel.currentPath;
-        QProcess::startDetached(QStringLiteral("cmd.exe"), QStringList{ QStringLiteral("/K"), QStringLiteral("cd /d \"%1\"").arg(workPath) });
+        const bool startOk = QProcess::startDetached(
+            QStringLiteral("cmd.exe"),
+            QStringList{ QStringLiteral("/K"), QStringLiteral("cd /d \"%1\"").arg(workPath) });
+        kLogEvent terminalEvent;
+        if (!startOk)
+        {
+            warn << terminalEvent
+                << "[FileDock] 在终端中打开失败, panel="
+                << panel.panelNameText.toStdString()
+                << ", workPath="
+                << QDir::toNativeSeparators(workPath).toStdString()
+                << eol;
+        }
+        else
+        {
+            info << terminalEvent
+                << "[FileDock] 在终端中打开完成, panel="
+                << panel.panelNameText.toStdString()
+                << ", workPath="
+                << QDir::toNativeSeparators(workPath).toStdString()
+                << eol;
+        }
         return;
     }
     if (selectedAction == columnAction)
@@ -3151,6 +3234,13 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
                 QMessageBox::Yes);
             if (userChoice != QMessageBox::Yes)
             {
+                kLogEvent detailCancelEvent;
+                info << detailCancelEvent
+                    << "[FileDock] 批量属性打开取消, panel="
+                    << panel.panelNameText.toStdString()
+                    << ", selectedCount="
+                    << menuPaths.size()
+                    << eol;
                 return;
             }
             openCount = kMaxAutoOpenDetailCount;
@@ -3160,6 +3250,16 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
         {
             showFileDetailDialog(menuPaths[i]);
         }
+
+        kLogEvent detailEvent;
+        info << detailEvent
+            << "[FileDock] 批量属性打开完成, panel="
+            << panel.panelNameText.toStdString()
+            << ", openedCount="
+            << openCount
+            << ", selectedCount="
+            << menuPaths.size()
+            << eol;
         return;
     }
     if (selectedAction == hashAction)
@@ -3167,15 +3267,21 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
         // 哈希计算支持多选：仅对文件条目计算，目录自动跳过。
         if (!hasAnyFile)
         {
-            QMessageBox::information(this, QStringLiteral("哈希计算"), QStringLiteral("请选择至少一个文件。"));
+            kLogEvent hashEmptyEvent;
+            warn << hashEmptyEvent
+                << "[FileDock] 哈希计算取消：未选中文件, panel="
+                << panel.panelNameText.toStdString()
+                << eol;
             return;
         }
 
-        QStringList hashLines;
+        kLogEvent hashEvent;
+        int successCount = 0;
+        QStringList failedLines;
         for (const QString& path : menuPaths)
         {
-            QFileInfo info(path);
-            if (!info.isFile())
+            QFileInfo fileInfo(path);
+            if (!fileInfo.isFile())
             {
                 continue;
             }
@@ -3183,7 +3289,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             QFile file(path);
             if (!file.open(QIODevice::ReadOnly))
             {
-                hashLines << QStringLiteral("[%1]\n无法打开文件。").arg(path);
+                failedLines << QStringLiteral("%1 | 无法打开文件。")
+                    .arg(QDir::toNativeSeparators(path));
                 continue;
             }
 
@@ -3199,15 +3306,41 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             }
             file.close();
 
-            hashLines << QStringLiteral(
-                "[%1]\nMD5: %2\nSHA1: %3\nSHA256: %4")
-                .arg(path)
-                .arg(QString::fromLatin1(md5.result().toHex()))
-                .arg(QString::fromLatin1(sha1.result().toHex()))
-                .arg(QString::fromLatin1(sha256.result().toHex()));
+            successCount += 1;
+            info << hashEvent
+                << "[FileDock] 哈希计算结果, filePath="
+                << QDir::toNativeSeparators(path).toStdString()
+                << ", md5="
+                << QString::fromLatin1(md5.result().toHex()).toStdString()
+                << ", sha1="
+                << QString::fromLatin1(sha1.result().toHex()).toStdString()
+                << ", sha256="
+                << QString::fromLatin1(sha256.result().toHex()).toStdString()
+                << eol;
         }
 
-        QMessageBox::information(this, QStringLiteral("哈希计算"), hashLines.join(QStringLiteral("\n\n")));
+        if (!failedLines.isEmpty())
+        {
+            warn << hashEvent
+                << "[FileDock] 哈希计算部分失败, panel="
+                << panel.panelNameText.toStdString()
+                << ", successCount="
+                << successCount
+                << ", failCount="
+                << failedLines.size()
+                << ", failedPreview=\n"
+                << buildLogPreviewText(failedLines).toStdString()
+                << eol;
+        }
+
+        info << hashEvent
+            << "[FileDock] 哈希计算完成, panel="
+            << panel.panelNameText.toStdString()
+            << ", successCount="
+            << successCount
+            << ", failCount="
+            << failedLines.size()
+            << eol;
         return;
     }
     if (selectedAction == signAction)
@@ -3215,7 +3348,11 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
         // 数字签名入口与属性页联动，支持多选逐个打开详情。
         if (!hasAnyFile)
         {
-            QMessageBox::information(this, QStringLiteral("签名检查"), QStringLiteral("请选择至少一个文件。"));
+            kLogEvent signEmptyEvent;
+            warn << signEmptyEvent
+                << "[FileDock] 签名检查取消：未选中文件, panel="
+                << panel.panelNameText.toStdString()
+                << eol;
             return;
         }
 
@@ -3235,14 +3372,34 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             openedCount += 1;
         }
 
-        if (openedCount == kMaxAutoOpenSignCount && menuPaths.size() > kMaxAutoOpenSignCount)
+        const std::size_t fileSelectionCount = static_cast<std::size_t>(std::count_if(
+            menuPaths.begin(),
+            menuPaths.end(),
+            [](const QString& path)
+            {
+                return QFileInfo(path).isFile();
+            }));
+        kLogEvent signEvent;
+        if (openedCount == kMaxAutoOpenSignCount && fileSelectionCount > kMaxAutoOpenSignCount)
         {
-            QMessageBox::information(
-                this,
-                QStringLiteral("签名检查"),
-                QStringLiteral("为避免打开过多窗口，已仅展示前 %1 个文件。")
-                    .arg(kMaxAutoOpenSignCount));
+            warn << signEvent
+                << "[FileDock] 签名检查已截断打开数量, panel="
+                << panel.panelNameText.toStdString()
+                << ", openedCount="
+                << openedCount
+                << ", fileSelectionCount="
+                << fileSelectionCount
+                << eol;
         }
+
+        info << signEvent
+            << "[FileDock] 签名检查完成, panel="
+            << panel.panelNameText.toStdString()
+            << ", openedCount="
+            << openedCount
+            << ", fileSelectionCount="
+            << fileSelectionCount
+            << eol;
         return;
     }
     if (selectedAction == entropyAction)
@@ -3250,15 +3407,21 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
         // 熵值计算支持多选：仅统计文件条目。
         if (!hasAnyFile)
         {
-            QMessageBox::information(this, QStringLiteral("熵值计算"), QStringLiteral("请选择至少一个文件。"));
+            kLogEvent entropyEmptyEvent;
+            warn << entropyEmptyEvent
+                << "[FileDock] 熵值计算取消：未选中文件, panel="
+                << panel.panelNameText.toStdString()
+                << eol;
             return;
         }
 
-        QStringList entropyLines;
+        kLogEvent entropyEvent;
+        int successCount = 0;
+        QStringList failedLines;
         for (const QString& path : menuPaths)
         {
-            QFileInfo info(path);
-            if (!info.isFile())
+            QFileInfo fileInfo(path);
+            if (!fileInfo.isFile())
             {
                 continue;
             }
@@ -3266,7 +3429,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             QFile file(path);
             if (!file.open(QIODevice::ReadOnly))
             {
-                entropyLines << QStringLiteral("[%1] 无法打开文件。").arg(path);
+                failedLines << QStringLiteral("%1 | 无法打开文件。")
+                    .arg(QDir::toNativeSeparators(path));
                 continue;
             }
 
@@ -3297,12 +3461,37 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
                 }
             }
 
-            entropyLines << QStringLiteral("[%1] 熵值: %2 (0~8)")
-                .arg(path)
-                .arg(QString::number(entropy, 'f', 4));
+            successCount += 1;
+            info << entropyEvent
+                << "[FileDock] 熵值计算结果, filePath="
+                << QDir::toNativeSeparators(path).toStdString()
+                << ", entropy="
+                << QString::number(entropy, 'f', 4).toStdString()
+                << eol;
         }
 
-        QMessageBox::information(this, QStringLiteral("熵值计算"), entropyLines.join('\n'));
+        if (!failedLines.isEmpty())
+        {
+            warn << entropyEvent
+                << "[FileDock] 熵值计算部分失败, panel="
+                << panel.panelNameText.toStdString()
+                << ", successCount="
+                << successCount
+                << ", failCount="
+                << failedLines.size()
+                << ", failedPreview=\n"
+                << buildLogPreviewText(failedLines).toStdString()
+                << eol;
+        }
+
+        info << entropyEvent
+            << "[FileDock] 熵值计算完成, panel="
+            << panel.panelNameText.toStdString()
+            << ", successCount="
+            << successCount
+            << ", failCount="
+            << failedLines.size()
+            << eol;
         return;
     }
     if (selectedAction == hexAction || selectedAction == peAction)
@@ -3339,6 +3528,9 @@ void FileDock::openSelectedItems(FilePanelWidgets& panel)
             << eol;
     }
 
+    int successCount = 0;
+    int failCount = 0;
+    QStringList failedPaths;
     for (const QString& path : paths)
     {
         QFileInfo info(path);
@@ -3347,16 +3539,58 @@ void FileDock::openSelectedItems(FilePanelWidgets& panel)
             if (paths.size() == 1)
             {
                 navigateToPath(panel, path, true);
+                successCount += 1;
             }
             else
             {
-                QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+                const bool openOk = QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+                if (openOk)
+                {
+                    successCount += 1;
+                }
+                else
+                {
+                    failCount += 1;
+                    failedPaths.push_back(QDir::toNativeSeparators(path));
+                }
             }
             continue;
         }
 
-        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+        const bool openOk = QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+        if (openOk)
+        {
+            successCount += 1;
+        }
+        else
+        {
+            failCount += 1;
+            failedPaths.push_back(QDir::toNativeSeparators(path));
+        }
     }
+
+    kLogEvent resultEvent;
+    if (failCount > 0)
+    {
+        warn << resultEvent
+            << "[FileDock] 打开选中项部分失败, panel="
+            << panel.panelNameText.toStdString()
+            << ", successCount="
+            << successCount
+            << ", failCount="
+            << failCount
+            << ", failedPreview=\n"
+            << buildLogPreviewText(failedPaths).toStdString()
+            << eol;
+        return;
+    }
+
+    info << resultEvent
+        << "[FileDock] 打开选中项完成, panel="
+        << panel.panelNameText.toStdString()
+        << ", successCount="
+        << successCount
+        << eol;
 }
 
 void FileDock::copySelectedItemPath(FilePanelWidgets& panel)
@@ -3539,11 +3773,9 @@ void FileDock::pasteClipboardItems(FilePanelWidgets& panel)
             << panel.panelNameText.toStdString()
             << ", errorCount="
             << errorLines.size()
+            << ", errorPreview=\n"
+            << buildLogPreviewText(errorLines).toStdString()
             << eol;
-        QMessageBox::warning(
-            this,
-            QStringLiteral("粘贴结果"),
-            QStringLiteral("部分操作失败：\n%1").arg(errorLines.join('\n')));
         return;
     }
 
@@ -3612,7 +3844,6 @@ void FileDock::createNewFileOrFolder(FilePanelWidgets& panel, bool createFolder)
             << ", targetPath="
             << QDir::toNativeSeparators(targetPath).toStdString()
             << eol;
-        QMessageBox::warning(this, QStringLiteral("创建失败"), QStringLiteral("无法创建：%1").arg(targetPath));
         return;
     }
 
@@ -3688,10 +3919,6 @@ void FileDock::renameSelectedItem(FilePanelWidgets& panel)
             << ", newPath="
             << QDir::toNativeSeparators(newPath).toStdString()
             << eol;
-        QMessageBox::warning(
-            this,
-            QStringLiteral("重命名失败"),
-            QStringLiteral("无法重命名：\n%1\n->\n%2").arg(path, newPath));
         return;
     }
 
@@ -3781,8 +4008,9 @@ void FileDock::deleteSelectedItem(FilePanelWidgets& panel)
             << panel.panelNameText.toStdString()
             << ", errorCount="
             << errors.size()
+            << ", errorPreview=\n"
+            << buildLogPreviewText(errors).toStdString()
             << eol;
-        QMessageBox::warning(this, QStringLiteral("删除结果"), errors.join('\n'));
         return;
     }
 
@@ -3852,12 +4080,9 @@ void FileDock::takeOwnershipSelectedItems(FilePanelWidgets& panel)
             << panel.panelNameText.toStdString()
             << ", failCount="
             << errorDetails.size()
+            << ", detailPreview=\n"
+            << buildLogPreviewText(errorDetails).toStdString()
             << eol;
-        QMessageBox::warning(
-            this,
-            QStringLiteral("取得所有权结果"),
-            QStringLiteral("部分项执行失败，详细信息如下：\n\n%1")
-            .arg(errorDetails.join(QStringLiteral("\n\n--------------------\n\n"))));
         return;
     }
 
@@ -3868,7 +4093,6 @@ void FileDock::takeOwnershipSelectedItems(FilePanelWidgets& panel)
         << ", successCount="
         << paths.size()
         << eol;
-    QMessageBox::information(this, QStringLiteral("取得所有权"), QStringLiteral("操作已完成。"));
 }
 
 void FileDock::showColumnManagerDialog(FilePanelWidgets& panel)
@@ -3939,7 +4163,11 @@ void FileDock::showFileDetailDialog(const QString& filePath)
     QFileInfo fileInfo(filePath);
     if (!fileInfo.exists())
     {
-        QMessageBox::warning(this, QStringLiteral("文件详情"), QStringLiteral("目标不存在：%1").arg(filePath));
+        kLogEvent event;
+        warn << event
+            << "[FileDock] 打开文件详情失败：目标不存在, filePath="
+            << QDir::toNativeSeparators(filePath).toStdString()
+            << eol;
         return;
     }
 

@@ -107,6 +107,31 @@ void PerformanceNavCard::appendDualSample(
     update();
 }
 
+void PerformanceNavCard::setSampleSeries(
+    const QVector<double>& primarySampleList,
+    const QVector<double>& secondarySampleList)
+{
+    m_primarySamples = primarySampleList;
+    while (m_primarySamples.size() > m_maxSampleCount)
+    {
+        m_primarySamples.pop_front();
+    }
+
+    if (m_secondarySeriesVisible)
+    {
+        m_secondarySamples = secondarySampleList;
+        while (m_secondarySamples.size() > m_maxSampleCount)
+        {
+            m_secondarySamples.pop_front();
+        }
+    }
+    else
+    {
+        m_secondarySamples.clear();
+    }
+    update();
+}
+
 void PerformanceNavCard::clearSamples()
 {
     m_primarySamples.clear();
@@ -117,6 +142,11 @@ void PerformanceNavCard::clearSamples()
 QSize PerformanceNavCard::sizeHint() const
 {
     return QSize(264, 78);
+}
+
+int PerformanceNavCard::sampleCapacity() const
+{
+    return m_maxSampleCount;
 }
 
 void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)

@@ -55,11 +55,22 @@ public:
     // 参数 secondaryUsagePercent：次序列百分比采样值。
     void appendDualSample(double primaryUsagePercent, double secondaryUsagePercent);
 
+    // setSampleSeries 作用：直接替换当前卡片的整段缩略图采样历史。
+    // 参数 primarySampleList：主序列完整采样列表，值域为 0~100。
+    // 参数 secondarySampleList：次序列完整采样列表，值域为 0~100。
+    void setSampleSeries(
+        const QVector<double>& primarySampleList,
+        const QVector<double>& secondarySampleList = {});
+
     // clearSamples 作用：清空缩略折线历史数据。
     void clearSamples();
 
     // sizeHint 作用：给 QListWidgetItem 提供推荐尺寸。
     [[nodiscard]] QSize sizeHint() const override;
+
+    // sampleCapacity 作用：返回缩略图最多保留的采样点数。
+    // 返回值：当前卡片允许的最大样本数。
+    [[nodiscard]] int sampleCapacity() const;
 
 protected:
     // paintEvent 作用：绘制卡片背景、边框、文字和缩略折线。
