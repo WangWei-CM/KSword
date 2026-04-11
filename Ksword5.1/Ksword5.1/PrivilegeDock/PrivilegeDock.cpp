@@ -9,7 +9,6 @@
 // ============================================================
 
 #include "../theme.h"
-#include "../UI/CodeEditorWidget.h"
 
 #include <QAbstractItemView>
 #include <QDateTime>
@@ -248,9 +247,24 @@ void PrivilegeDock::initializePermissionTab()
     m_permissionToolbarLayout->addWidget(m_permissionStatusLabel, 1);
     m_permissionLayout->addLayout(m_permissionToolbarLayout, 0);
 
-    m_permissionEditor = new CodeEditorWidget(m_permissionPage);
-    m_permissionEditor->setReadOnly(true);
-    m_permissionLayout->addWidget(m_permissionEditor, 1);
+    m_permissionTable = new QTableWidget(m_permissionPage);
+    m_permissionTable->setColumnCount(4);
+    m_permissionTable->setHorizontalHeaderLabels({
+        QStringLiteral("类型"),
+        QStringLiteral("名称"),
+        QStringLiteral("状态"),
+        QStringLiteral("详情")
+        });
+    m_permissionTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_permissionTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_permissionTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_permissionTable->setWordWrap(false);
+    m_permissionTable->horizontalHeader()->setStyleSheet(tableHeaderStyle());
+    m_permissionTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_permissionTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_permissionTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_permissionTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    m_permissionLayout->addWidget(m_permissionTable, 1);
 
     m_tabWidget->addTab(m_permissionPage, QStringLiteral("权限"));
 }
@@ -562,37 +576,48 @@ void PrivilegeDock::refreshPermissionSnapshot()
     kLogEvent event;
     info << event << "[PrivilegeDock] 开始刷新权限快照。" << eol;
 
-    QString outputText;
-    outputText += QStringLiteral("==== 本地用户与组 ====\n");
-    outputText += buildLocalUserAndGroupText();
-    outputText += QStringLiteral("\n\n==== 当前进程权限 ====\n");
-    outputText += buildCurrentProcessPrivilegeText();
+    std::vector<PermissionSnapshotRow> rowList;
+    appendLocalUserAndGroupRows(&rowList);
+    appendCurrentProcessPrivilegeRows(&rowList);
+    refreshPermissionTable(rowList);
 
-    m_permissionEditor->setText(outputText);
     m_permissionStatusLabel->setText(
-        QStringLiteral("状态：%1 刷新完成")
-        .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"))));
+        QStringLiteral("状态：%1 刷新完成，共 %2 项")
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")))
+        .arg(static_cast<int>(rowList.size())));
 
-    info << event << "[PrivilegeDock] 权限快照刷新完成。" << eol;
+    info << event
+        << "[PrivilegeDock] 权限快照刷新完成, rows="
+        << rowList.size()
+        << eol;
 }
 
-QString PrivilegeDock::buildLocalUserAndGroupText() const
+void PrivilegeDock::appendLocalUserAndGroupRows(std::vector<PermissionSnapshotRow>* rowsOut) const
 {
-    QString outputText;
-    outputText += QStringLiteral("[用户列表]\n");
-    for (const LocalUserEntry& entry : m_localUserList)
+    if (rowsOut == nullptr)
     {
-        outputText += QStringLiteral("- 用户名: %1, 全名: %2, 禁用: %3, 最后登录: %4\n")
-            .arg(entry.name)
-            .arg(entry.fullName.isEmpty() ? QStringLiteral("<空>") : entry.fullName)
-            .arg(boolText(entry.disabled))
-            .arg(entry.lastLogonText);
+        return;
     }
 
-    outputText += QStringLiteral("\n[本地组列表]\n");
+    // 先写入本地用户缓存。
+    for (const LocalUserEntry& entry : m_localUserList)
+    {
+        PermissionSnapshotRow row;
+        row.type = QStringLiteral("用户");
+        row.name = entry.name;
+        row.status = QStringLiteral("禁用:%1  最后登录:%2")
+            .arg(boolText(entry.disabled))
+            .arg(entry.lastLogonText);
+        row.detail = entry.fullName.isEmpty()
+            ? QStringLiteral("<无全名>")
+            : QStringLiteral("全名:%1").arg(entry.fullName);
+        rowsOut->push_back(row);
+    }
+
+    // 再枚举本地组。
     LPLOCALGROUP_INFO_1 groupInfo = nullptr;
     DWORD entriesRead = 0;
-    DWORD totalEntries = 0;
+    DWORD totalEntries = 0; // totalEntries：保留用于后续扩展分页。
     DWORD_PTR resumeHandle = 0;
     const NET_API_STATUS status = ::NetLocalGroupEnum(
         nullptr,
@@ -613,37 +638,63 @@ QString PrivilegeDock::buildLocalUserAndGroupText() const
             const QString groupComment = group.lgrpi1_comment != nullptr
                 ? QString::fromWCharArray(group.lgrpi1_comment)
                 : QString();
-            outputText += QStringLiteral("- 组名: %1, 说明: %2\n")
-                .arg(groupName)
-                .arg(groupComment.isEmpty() ? QStringLiteral("<空>") : groupComment);
-        }
-        if (groupInfo != nullptr)
-        {
-            ::NetApiBufferFree(groupInfo);
+            PermissionSnapshotRow row;
+            row.type = QStringLiteral("组");
+            row.name = groupName;
+            row.status = QStringLiteral("本地组");
+            row.detail = groupComment.isEmpty()
+                ? QStringLiteral("<无说明>")
+                : groupComment;
+            rowsOut->push_back(row);
         }
     }
     else
     {
-        outputText += QStringLiteral("读取组列表失败: %1\n").arg(winErrorText(status));
+        PermissionSnapshotRow row;
+        row.type = QStringLiteral("组");
+        row.name = QStringLiteral("<读取失败>");
+        row.status = QStringLiteral("错误");
+        row.detail = winErrorText(status);
+        rowsOut->push_back(row);
     }
 
-    return outputText;
+    if (groupInfo != nullptr)
+    {
+        ::NetApiBufferFree(groupInfo);
+    }
 }
 
-QString PrivilegeDock::buildCurrentProcessPrivilegeText() const
+void PrivilegeDock::appendCurrentProcessPrivilegeRows(std::vector<PermissionSnapshotRow>* rowsOut) const
 {
+    if (rowsOut == nullptr)
+    {
+        return;
+    }
+
     HANDLE tokenHandle = nullptr;
     if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &tokenHandle) == FALSE)
     {
-        return QStringLiteral("OpenProcessToken失败: %1").arg(winErrorText(::GetLastError()));
+        PermissionSnapshotRow row;
+        row.type = QStringLiteral("进程权限");
+        row.name = QStringLiteral("<读取失败>");
+        row.status = QStringLiteral("错误");
+        row.detail = QStringLiteral("OpenProcessToken失败: %1").arg(winErrorText(::GetLastError()));
+        rowsOut->push_back(row);
+        return;
     }
 
     DWORD bytesNeeded = 0;
     ::GetTokenInformation(tokenHandle, TokenPrivileges, nullptr, 0, &bytesNeeded);
     if (bytesNeeded == 0)
     {
+        PermissionSnapshotRow row;
+        row.type = QStringLiteral("进程权限");
+        row.name = QStringLiteral("<读取失败>");
+        row.status = QStringLiteral("错误");
+        row.detail = QStringLiteral("GetTokenInformation失败: %1").arg(winErrorText(::GetLastError()));
+        rowsOut->push_back(row);
         ::CloseHandle(tokenHandle);
-        return QStringLiteral("GetTokenInformation失败: %1").arg(winErrorText(::GetLastError()));
+        return;
     }
 
     std::vector<unsigned char> tokenBuffer(bytesNeeded, 0);
@@ -655,14 +706,17 @@ QString PrivilegeDock::buildCurrentProcessPrivilegeText() const
         &bytesNeeded) == FALSE)
     {
         const QString errorText = winErrorText(::GetLastError());
+        PermissionSnapshotRow row;
+        row.type = QStringLiteral("进程权限");
+        row.name = QStringLiteral("<读取失败>");
+        row.status = QStringLiteral("错误");
+        row.detail = QStringLiteral("GetTokenInformation失败: %1").arg(errorText);
+        rowsOut->push_back(row);
         ::CloseHandle(tokenHandle);
-        return QStringLiteral("GetTokenInformation失败: %1").arg(errorText);
+        return;
     }
 
     TOKEN_PRIVILEGES* privileges = reinterpret_cast<TOKEN_PRIVILEGES*>(tokenBuffer.data());
-    QString outputText;
-    outputText += QStringLiteral("权限数量: %1\n").arg(privileges->PrivilegeCount);
-
     for (DWORD index = 0; index < privileges->PrivilegeCount; ++index)
     {
         const LUID_AND_ATTRIBUTES& privilege = privileges->Privileges[index];
@@ -693,18 +747,48 @@ QString PrivilegeDock::buildCurrentProcessPrivilegeText() const
         const bool enabledByDefault = (privilege.Attributes & SE_PRIVILEGE_ENABLED_BY_DEFAULT) != 0;
         const bool removed = (privilege.Attributes & SE_PRIVILEGE_REMOVED) != 0;
 
-        outputText += QStringLiteral("- %1 (%2)\n")
-            .arg(privilegeName)
-            .arg(displayName);
-        outputText += QStringLiteral("  启用: %1, 默认启用: %2, 已移除: %3, Attributes=0x%4\n")
+        PermissionSnapshotRow row;
+        row.type = QStringLiteral("进程权限");
+        row.name = privilegeName;
+        row.status = QStringLiteral("启用:%1 默认:%2 移除:%3")
             .arg(boolText(enabled))
             .arg(boolText(enabledByDefault))
-            .arg(boolText(removed))
+            .arg(boolText(removed));
+        row.detail = QStringLiteral("%1, Attributes=0x%2")
+            .arg(displayName)
             .arg(QString::number(privilege.Attributes, 16).toUpper());
+        rowsOut->push_back(row);
+    }
+
+    if (privileges->PrivilegeCount == 0)
+    {
+        PermissionSnapshotRow row;
+        row.type = QStringLiteral("进程权限");
+        row.name = QStringLiteral("<空>");
+        row.status = QStringLiteral("无权限项");
+        row.detail = QStringLiteral("当前进程令牌未返回任何权限条目。");
+        rowsOut->push_back(row);
     }
 
     ::CloseHandle(tokenHandle);
-    return outputText;
+}
+
+void PrivilegeDock::refreshPermissionTable(const std::vector<PermissionSnapshotRow>& rowList)
+{
+    if (m_permissionTable == nullptr)
+    {
+        return;
+    }
+
+    m_permissionTable->setRowCount(static_cast<int>(rowList.size()));
+    for (int rowIndex = 0; rowIndex < static_cast<int>(rowList.size()); ++rowIndex)
+    {
+        const PermissionSnapshotRow& rowData = rowList[static_cast<std::size_t>(rowIndex)];
+        m_permissionTable->setItem(rowIndex, 0, new QTableWidgetItem(rowData.type));
+        m_permissionTable->setItem(rowIndex, 1, new QTableWidgetItem(rowData.name));
+        m_permissionTable->setItem(rowIndex, 2, new QTableWidgetItem(rowData.status));
+        m_permissionTable->setItem(rowIndex, 3, new QTableWidgetItem(rowData.detail));
+    }
 }
 
 QString PrivilegeDock::fileTimeToDateTimeText(const std::uint32_t secondsSince1970) const

@@ -184,6 +184,26 @@ private:
         QValueAxis* axisY,
         double sampleValue,
         double minAxisYValue = 0.0);
+    // updateSharedSeriesAxisRange 作用：
+    // - 给共用同一坐标轴的两条折线统一计算 X/Y 可见范围；
+    // - 用两条曲线的可见历史峰值同步刷新纵向比例。
+    void updateSharedSeriesAxisRange(
+        QLineSeries* primaryLineSeries,
+        QLineSeries* secondaryLineSeries,
+        QValueAxis* axisX,
+        QValueAxis* axisY,
+        double minAxisYValue = 0.0);
+    // rebuildDualRateNavCard 作用：
+    // - 记录磁盘/网络双速率原始历史；
+    // - 按当前可见历史峰值整体重算缩略图比例并整段重绘。
+    void rebuildDualRateNavCard(
+        PerformanceNavCard* navCard,
+        std::vector<double>* primaryHistoryOut,
+        std::vector<double>* secondaryHistoryOut,
+        double primaryBytesPerSecond,
+        double secondaryBytesPerSecond,
+        double* upperBoundBytesPerSecondOut,
+        const QString& subtitleText);
     QString formatRateText(double bytesPerSecondValue) const;
     void refreshStaticHardwareTexts(bool forceRefresh);
     void requestAsyncStaticInfoRefresh();
@@ -351,6 +371,10 @@ private:
 
     double m_diskNavAutoScaleBytesPerSec = 1024.0 * 1024.0; // m_diskNavAutoScaleBytesPerSec：磁盘卡片动态缩放上限。
     double m_networkNavAutoScaleBytesPerSec = 1024.0 * 1024.0; // m_networkNavAutoScaleBytesPerSec：网络卡片动态缩放上限。
+    std::vector<double> m_diskNavReadHistoryBytesPerSec; // m_diskNavReadHistoryBytesPerSec：磁盘读取缩略图原始速率历史。
+    std::vector<double> m_diskNavWriteHistoryBytesPerSec; // m_diskNavWriteHistoryBytesPerSec：磁盘写入缩略图原始速率历史。
+    std::vector<double> m_networkNavRxHistoryBytesPerSec; // m_networkNavRxHistoryBytesPerSec：网络下行缩略图原始速率历史。
+    std::vector<double> m_networkNavTxHistoryBytesPerSec; // m_networkNavTxHistoryBytesPerSec：网络上行缩略图原始速率历史。
 
     // PDH 性能计数器句柄（用 void* 规避头文件引入 Windows 细节）。
     void* m_cpuPerfQueryHandle = nullptr;     // m_cpuPerfQueryHandle：PDH 查询句柄。

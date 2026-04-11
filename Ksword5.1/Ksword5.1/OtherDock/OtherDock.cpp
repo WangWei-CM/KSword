@@ -336,10 +336,36 @@ namespace
             {
                 // m_dragTracking 用于标记当前是否处于“准星拖拽拾取”过程。
                 m_dragTracking = true;
+                // m_pressGlobalPos 用于记录拖拽起点，配合阈值区分“点击”和“拖拽”。
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+                m_pressGlobalPos = event->globalPosition().toPoint();
+#else
+                m_pressGlobalPos = event->globalPos();
+#endif
+                m_hasReachedDragThreshold = false;
                 // grabMouse + CrossCursor 组合用于把拖拽过程视觉与输入统一到本按钮。
                 grabMouse(QCursor(Qt::CrossCursor));
             }
             QPushButton::mousePressEvent(event);
+        }
+
+        void mouseMoveEvent(QMouseEvent* event) override
+        {
+            if (m_dragTracking && event != nullptr)
+            {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+                const QPoint currentGlobalPos = event->globalPosition().toPoint();
+#else
+                const QPoint currentGlobalPos = event->globalPos();
+#endif
+                const int moveDistance = (currentGlobalPos - m_pressGlobalPos).manhattanLength();
+                // m_hasReachedDragThreshold 用于避免“单击按钮”误触发窗口拾取。
+                if (moveDistance >= QApplication::startDragDistance())
+                {
+                    m_hasReachedDragThreshold = true;
+                }
+            }
+            QPushButton::mouseMoveEvent(event);
         }
 
         void mouseReleaseEvent(QMouseEvent* event) override
@@ -347,6 +373,7 @@ namespace
             // shouldDispatch 用于确保仅在左键拖拽链路结束时触发窗口拾取回调。
             const bool shouldDispatch =
                 m_dragTracking
+                && m_hasReachedDragThreshold
                 && event != nullptr
                 && event->button() == Qt::LeftButton;
 
@@ -356,6 +383,7 @@ namespace
                 releaseMouse();
                 m_dragTracking = false;
             }
+            m_hasReachedDragThreshold = false;
 
             QPoint releaseGlobalPos;
             if (event != nullptr)
@@ -378,6 +406,8 @@ namespace
 
     private:
         bool m_dragTracking = false;          // m_dragTracking：记录当前是否在拖拽拾取链路中。
+        bool m_hasReachedDragThreshold = false; // m_hasReachedDragThreshold：拖拽距离是否达到最小阈值。
+        QPoint m_pressGlobalPos;              // m_pressGlobalPos：记录左键按下时的屏幕坐标。
         ReleaseCallback m_releaseCallback;    // m_releaseCallback：鼠标释放时回调到 OtherDock。
     };
 
@@ -3518,10 +3548,10 @@ void OtherDock::handleWindowPickerRelease(const QPoint& globalPos)
     nativePoint.x = globalPos.x();
     nativePoint.y = globalPos.y();
 
-    // rawWindowHandle 直接对应鼠标下最细粒度窗口；rootWindowHandle 用于回退到顶级窗口。
+    // rawWindowHandle 直接对应鼠标下最细粒度窗口；rootWindowHandle 作为顶级窗口回退。
     HWND rawWindowHandle = ::WindowFromPoint(nativePoint);
     HWND rootWindowHandle = rawWindowHandle != nullptr ? ::GetAncestor(rawWindowHandle, GA_ROOT) : nullptr;
-    HWND targetWindowHandle = rootWindowHandle != nullptr ? rootWindowHandle : rawWindowHandle;
+    HWND targetWindowHandle = rawWindowHandle != nullptr ? rawWindowHandle : rootWindowHandle;
 
     if (targetWindowHandle == nullptr || ::IsWindow(targetWindowHandle) == FALSE)
     {
@@ -3535,16 +3565,24 @@ void OtherDock::handleWindowPickerRelease(const QPoint& globalPos)
         return;
     }
 
-    const quint64 targetHwndValue = static_cast<quint64>(
-        reinterpret_cast<quintptr>(targetWindowHandle));
     const quint64 rawHwndValue = static_cast<quint64>(
         reinterpret_cast<quintptr>(rawWindowHandle));
+    const quint64 rootHwndValue = static_cast<quint64>(
+        reinterpret_cast<quintptr>(rootWindowHandle));
+    quint64 targetHwndValue = rawHwndValue;
 
-    // 优先按顶级窗口匹配当前快照，若失败则回退原始命中窗口。
-    const WindowInfo* pickedInfo = findInfoByHwnd(targetHwndValue);
-    if (pickedInfo == nullptr && rawHwndValue != 0 && rawHwndValue != targetHwndValue)
+    // 优先按“鼠标下原始窗口”匹配，若未命中再回退到顶级窗口匹配。
+    const WindowInfo* pickedInfo = findInfoByHwnd(rawHwndValue);
+    if (pickedInfo == nullptr && rootHwndValue != 0 && rootHwndValue != rawHwndValue)
     {
-        pickedInfo = findInfoByHwnd(rawHwndValue);
+        pickedInfo = findInfoByHwnd(rootHwndValue);
+        targetWindowHandle = rootWindowHandle;
+        targetHwndValue = rootHwndValue;
+    }
+    else
+    {
+        targetWindowHandle = rawWindowHandle;
+        targetHwndValue = rawHwndValue;
     }
 
     // fallbackInfo 用于兜底构造详情数据，避免必须先刷新列表才能查看目标窗口。

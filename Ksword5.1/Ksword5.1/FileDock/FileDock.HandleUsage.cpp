@@ -11,7 +11,6 @@
 #include "FileHandleUsageWindow.h"
 
 #include <QFileInfo>
-#include <QMessageBox>
 #include <QMetaObject>
 
 #include <algorithm>
@@ -42,7 +41,10 @@ void FileDock::openHandleUsageScanWindow(const std::vector<QString>& scanPaths)
 
     if (validPaths.empty())
     {
-        QMessageBox::information(this, QStringLiteral("扫描占用句柄"), QStringLiteral("请选择至少一个文件或文件夹。"));
+        kLogEvent emptyEvent;
+        warn << emptyEvent
+            << "[FileDock] 扫描占用句柄取消：未选中有效文件或目录。"
+            << eol;
         return;
     }
 
