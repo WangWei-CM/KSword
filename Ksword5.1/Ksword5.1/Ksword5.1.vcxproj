@@ -153,11 +153,16 @@
     <ClCompile Include="Framework\LogDockWidget.cpp" />
     <ClCompile Include="Framework\Progress.cpp" />
     <ClCompile Include="Framework\ProgressDockWidget.cpp" />
+    <ClCompile Include="Framework\CustomTitleBar.cpp" />
+    <ClCompile Include="Framework\StartupSplash.cpp" />
     <ClCompile Include="Framework\ThemedMessageBox.cpp" />
     <ClCompile Include="KernelDock\KernelDock.cpp" />
     <ClCompile Include="KernelDock\KernelDockQueryWorker.cpp" />
     <ClCompile Include="MainWindow.cpp" />
+    <ClCompile Include="MiscDock\BootEditor\BootEditorTab.Actions.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.cpp" />
+    <ClCompile Include="MiscDock\BootEditor\BootEditorTab.cpp" />
+    <ClCompile Include="MiscDock\MiscDock.cpp" />
     <ClCompile Include="MonitorDock\MonitorDock.cpp" />
     <ClCompile Include="MonitorDock\MonitorPanelWidget.cpp" />
     <ClCompile Include="MonitorDock\MonitorTextViewer.cpp" />
@@ -175,6 +180,7 @@
     <ClCompile Include="NetworkDock\NetworkDock.RateLimit.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.ConnectionManage.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.ManualRequest.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.MultiThreadDownload.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.HttpsAnalyze.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.NetworkDiagnostics.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.DetailAndUtils.cpp" />
@@ -239,6 +245,7 @@
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="MainWindow.h" />
+    <QtMoc Include="Framework\CustomTitleBar.h" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Framework.h" />
@@ -250,6 +257,7 @@
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.Internal.h" />
     <ClInclude Include="Framework\LogDockWidget.h" />
     <ClInclude Include="Framework\ProgressDockWidget.h" />
+    <ClInclude Include="Framework\StartupSplash.h" />
     <ClInclude Include="Framework\ThemedMessageBox.h" />
     <ClInclude Include="KernelDock\KernelDockQueryWorker.h" />
     <ClInclude Include="ksword\ksword.h" />
@@ -264,6 +272,8 @@
     <QtMoc Include="HardwareDock\HardwareDock.h" />
     <QtMoc Include="KernelDock\KernelDock.h" />
     <QtMoc Include="MemoryDock\MemoryDock.h" />
+    <QtMoc Include="MiscDock\BootEditor\BootEditorTab.h" />
+    <QtMoc Include="MiscDock\MiscDock.h" />
     <QtMoc Include="MonitorDock\MonitorDock.h" />
     <ClInclude Include="MonitorDock\MonitorPanelWidget.h" />
     <ClInclude Include="MonitorDock\MonitorTextViewer.h" />

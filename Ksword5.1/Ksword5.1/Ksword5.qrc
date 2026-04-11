@@ -30,6 +30,12 @@
         <file alias="process_priority.svg">Resource/Icon/system/settings_2_line.svg</file>
         <file alias="process_details.svg">Resource/Icon/file/file_info_line.svg</file>
         <file alias="window_picker_target.svg">Resource/Icon/business/target_line.svg</file>
+        <file alias="titlebar_pin_line.svg">Resource/Icon/file/pin_line.svg</file>
+        <file alias="titlebar_pin_fill.svg">Resource/Icon/file/pin_fill.svg</file>
+        <file alias="titlebar_minimize.svg">Resource/Icon/system/minimize_line.svg</file>
+        <file alias="titlebar_maximize.svg">Resource/Icon/media/fullscreen_line.svg</file>
+        <file alias="titlebar_restore.svg">Resource/Icon/media/fullscreen_exit_line.svg</file>
+        <file alias="titlebar_close.svg">Resource/Icon/system/close_line.svg</file>
 
         <!-- 句柄面板图标资源 -->
         <file alias="handle_refresh.svg">Resource/Icon/system/refresh_3_line.svg</file>

@@ -27,7 +27,9 @@ namespace ks::settings
     // backgroundOpacityPercent：背景图透明度（0~100）；
     // startupDefaultTabKey：应用启动时默认激活的主页签 key（如 welcome/process/network）；
     // launchMaximizedOnStartup：下次启动时是否默认最大化显示；
-    // autoRequestAdminOnStartup：下次启动时是否在启动图出现前先尝试申请管理员权限。
+    // autoRequestAdminOnStartup：下次启动时是否在启动图出现前先尝试申请管理员权限；
+    // startupWindowScaleFactor：主窗口启动缩放因子（1.0=100%，重启后生效）；
+    // startupScaleRecommendPromptDisabled：小屏推荐缩放提示是否不再弹出。
     struct AppearanceSettings
     {
         ThemeMode themeMode = ThemeMode::FollowSystem;
@@ -36,6 +38,8 @@ namespace ks::settings
         QString startupDefaultTabKey = QStringLiteral("welcome");
         bool launchMaximizedOnStartup = false;
         bool autoRequestAdminOnStartup = false;
+        double startupWindowScaleFactor = 1.0;
+        bool startupScaleRecommendPromptDisabled = false;
     };
 
     // themeModeToJsonText 作用：
@@ -91,4 +95,12 @@ namespace ks::settings
     // 入参 errorTextOut：可选错误文本输出指针。
     // 返回：true=保存成功；false=保存失败。
     bool saveAppearanceSettings(const AppearanceSettings& settings, QString* errorTextOut = nullptr);
+
+    // normalizeWindowScaleFactor 作用：
+    // - 统一校正窗口缩放因子到合法范围；
+    // - 非法值（NaN/Inf/<=0）回退为 1.0。
+    // 调用方式：读取配置、保存配置、启动前应用缩放时调用。
+    // 入参 rawScaleFactor：原始缩放因子值。
+    // 返回：合法缩放因子（范围 0.50~2.00）。
+    double normalizeWindowScaleFactor(double rawScaleFactor);
 }

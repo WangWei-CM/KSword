@@ -4,44 +4,39 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ksword5.1 Overview</title>
-    <!-- 引入统一样式，保持与品牌首屏同一视觉体系 -->
+    <!-- 总览页样式：发布会展厅风格。 -->
     <link rel="stylesheet" href="../css/site.css">
 </head>
-<body>
-    <!-- 页面主容器：承载总览导航、介绍和模块卡片 -->
+<body class="overview-page">
     <div class="page-shell">
-        <!-- 顶部导航：返回首屏、语言/主题切换 -->
-        <header class="brand-topbar">
+        <header class="brand-topbar reveal-on-load" style="--reveal-delay: 20ms;">
             <a class="brand-mark" href="../index.html">Ksword5.1</a>
             <div class="topbar-actions">
-                <a class="action-button" id="overview-home-link" href="../index.html" title="返回品牌首页">↩ 首页</a>
+                <a class="action-button" id="overview-home-link" href="../index.html" title="返回发布主页">↩ 首页</a>
                 <button class="lang-button" type="button" data-lang-toggle title="切换中英文" aria-label="切换中英文">EN</button>
                 <button class="icon-button" type="button" data-theme-toggle title="切换深浅模式" aria-label="切换深浅模式">☾</button>
             </div>
         </header>
 
-        <!-- 产品介绍区：强调定位和规模感 -->
-        <section class="section-panel">
-            <h1 class="panel-title" id="overview-title">Ksword5.1 产品总览</h1>
-            <p class="panel-desc" id="overview-desc">从进程、内存、网络到内核对象，构建 Windows 深度调试的一体化能力矩阵。</p>
+        <section class="section-panel overview-hero reveal-on-load" style="--reveal-delay: 70ms;">
+            <h1 class="panel-title" id="overview-title">Ksword5.1 模块展厅</h1>
+            <p class="panel-desc" id="overview-desc">每个模块都有单独页面，采用“左文右图”的发布会展示结构，便于演示与交付。</p>
             <div class="metrics-grid" id="overview-metrics"></div>
         </section>
 
-        <!-- 模块总览区：展示所有 Tab 入口并跳转到对应详细子页面 -->
-        <section class="section-panel">
-            <h2 class="panel-title" id="modules-title">模块矩阵</h2>
-            <p class="panel-desc" id="modules-desc">点击任意模块，进入独立子页面查看详细能力与截图位清单。</p>
-            <div class="modules-grid" id="modules-grid" aria-label="Ksword 模块导航"></div>
-        </section>
+        <h2 class="showcase-headline reveal-on-load" style="--reveal-delay: 120ms;" id="modules-title">模块展示板块</h2>
+        <p class="showcase-desc reveal-on-load" style="--reveal-delay: 150ms;" id="modules-desc">点击任意模块即可进入独立页面，查看大图展示与完整能力说明。</p>
 
-        <!-- 页脚：提示图片目录与维护文档路径 -->
-        <footer class="site-footer" id="overview-footer">截图文件目录：Website/Images/ ｜ 命名规范：Website/Images/截图命名与拍摄说明.txt</footer>
+        <section class="modules-showcase" id="modules-showcase" aria-label="Ksword 模块展厅"></section>
+
+        <footer class="site-footer" id="overview-footer">截图目录：Website/Images/ ｜ 命名规范：Website/Images/截图命名与拍摄说明.txt</footer>
     </div>
 
-    <!-- 脚本顺序：数据 -> 语言 -> 主题 -> 总览渲染 -->
+    <!-- 脚本顺序：数据 -> 语言 -> 主题 -> 总览渲染。 -->
     <script src="../js/tabs-data.js"></script>
     <script src="../js/lang.js"></script>
     <script src="../js/theme.js"></script>
     <script src="../js/overview.js"></script>
 </body>
 </html>
+

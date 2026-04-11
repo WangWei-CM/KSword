@@ -13,8 +13,11 @@
 #include <QResizeEvent>
 #include <QPushButton>
 #include <QShowEvent>
+#include <QEvent>
 #include <QTimer>
+#include <QVBoxLayout>
 #include <QString>
+#include <QByteArray>
 
 #include <functional>
 #include <string>
@@ -42,11 +45,16 @@
 #include "ServerDock/ServiceDock.h"
 #include "WindowDock/WindowDock.h"
 #include "RegistryDock/RegistryDock.h"
+#include "MiscDock/MiscDock.h"
 #include "句柄/HandleDock.h"
 
 class LogDockWidget; // 前置声明：日志 Dock 面板类型。
 class ProgressDockWidget; // 前置声明：当前操作进度面板类型。
 class CodeEditorWidget; // 前置声明：即时窗口可复用代码编辑器组件。
+namespace ks::ui
+{
+    class CustomTitleBar; // 前置声明：主窗口自绘标题栏组件。
+}
 
 class MainWindow : public QMainWindow
 {
@@ -120,6 +128,19 @@ protected:
     // - 保证窗口能先出现，再继续补齐剩余 Dock 内容。
     void showEvent(QShowEvent* event) override;
 
+    // changeEvent 作用：
+    // - 监听窗口最大化/还原状态变化；
+    // - 同步刷新自绘标题栏中的最大化按钮图标状态。
+    void changeEvent(QEvent* event) override;
+
+    // nativeEvent 作用：
+    // - 处理无边框窗口命中测试（拖动与边缘缩放）；
+    // - 在自绘标题栏可拖动区域返回 HTCAPTION。
+    // 调用方式：Qt 在 Windows 消息循环中自动回调。
+    // 入参 eventType/message/result：原生消息参数。
+    // 返回：true=已处理；false=走基类默认处理。
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
+
 private:
     void initMenus();
     void initPrivilegeStatusButtons();
@@ -151,6 +172,28 @@ private:
     void initAppearanceSettings();
 
     void setupDockLayout();
+
+    // initCustomTitleBar 作用：
+    // - 初始化主窗口自绘标题栏并替代系统标题栏；
+    // - 绑定置顶/窗口控制/命令输入三类交互信号。
+    void initCustomTitleBar();
+
+    // setPinnedWindowState 作用：
+    // - 设置主窗口置顶状态并同步标题栏图钉图标；
+    // - 内部使用 SetWindowPos 切换 HWND_TOPMOST/HWND_NOTOPMOST。
+    // 入参 pinnedState：目标置顶状态。
+    // 入参 emitLog：是否记录状态切换日志。
+    void setPinnedWindowState(bool pinnedState, bool emitLog = true);
+
+    // togglePinnedWindowState 作用：
+    // - 在当前置顶状态基础上做取反切换。
+    void togglePinnedWindowState();
+
+    // executeCommandInNewConsole 作用：
+    // - 使用 CREATE_NEW_CONSOLE 打开可见 cmd 并执行 /K 命令；
+    // - 命令执行后控制台不会自动关闭。
+    // 入参 commandText：要执行的命令文本（用户输入）。
+    void executeCommandInNewConsole(const QString& commandText);
 
     // applyAppearanceSettings 作用：
     // - 把主题模式、背景图、透明度应用到主窗口；
@@ -188,51 +231,57 @@ private:
         bool enableDockTransparencyForBackgroundImage) const;
 
     // ADS Dock Manager
-    ads::CDockManager* m_pDockManager;
+    QWidget* m_mainRootContainer = nullptr; // m_mainRootContainer：主窗口根容器（承载标题栏+Dock 管理器）。
+    QVBoxLayout* m_mainRootLayout = nullptr; // m_mainRootLayout：主窗口根容器纵向布局。
+    ads::CDockManager* m_pDockManager = nullptr; // m_pDockManager：ADS Dock 管理器主对象。
 
     // Dock Widgets
-    ads::CDockWidget* m_dockWelcome;
-    ads::CDockWidget* m_dockProcess;
-    ads::CDockWidget* m_dockNetwork;
-    ads::CDockWidget* m_dockMemory;
-    ads::CDockWidget* m_dockFile;
-    ads::CDockWidget* m_dockDriver;
-    ads::CDockWidget* m_dockKernel;
-    ads::CDockWidget* m_dockMonitorTab;
-    ads::CDockWidget* m_dockPrivilege;
-    ads::CDockWidget* m_dockSettings;
-    ads::CDockWidget* m_dockWindow;
-    ads::CDockWidget* m_dockRegistry;
+    ads::CDockWidget* m_dockWelcome = nullptr; // m_dockWelcome：欢迎页 Dock。
+    ads::CDockWidget* m_dockProcess = nullptr; // m_dockProcess：进程页 Dock。
+    ads::CDockWidget* m_dockNetwork = nullptr; // m_dockNetwork：网络页 Dock。
+    ads::CDockWidget* m_dockMemory = nullptr; // m_dockMemory：内存页 Dock。
+    ads::CDockWidget* m_dockFile = nullptr; // m_dockFile：文件页 Dock。
+    ads::CDockWidget* m_dockDriver = nullptr; // m_dockDriver：驱动页 Dock。
+    ads::CDockWidget* m_dockKernel = nullptr; // m_dockKernel：内核页 Dock。
+    ads::CDockWidget* m_dockMonitorTab = nullptr; // m_dockMonitorTab：监控页 Dock。
+    ads::CDockWidget* m_dockPrivilege = nullptr; // m_dockPrivilege：权限页 Dock。
+    ads::CDockWidget* m_dockSettings = nullptr; // m_dockSettings：设置页 Dock。
+    ads::CDockWidget* m_dockWindow = nullptr; // m_dockWindow：窗口页 Dock。
+    ads::CDockWidget* m_dockRegistry = nullptr; // m_dockRegistry：注册表页 Dock。
     ads::CDockWidget* m_dockHandle = nullptr;
-    ads::CDockWidget* m_dockStartup;
+    ads::CDockWidget* m_dockStartup = nullptr; // m_dockStartup：启动项页 Dock。
     ads::CDockWidget* m_dockService = nullptr;
-    ads::CDockWidget* m_dockHardware;
-    ads::CDockWidget* m_dockCurrentOp;
-    ads::CDockWidget* m_dockLog;
-    ads::CDockWidget* m_dockImmediate;
-    ads::CDockWidget* m_dockMonitor;
+    ads::CDockWidget* m_dockMisc = nullptr;
+    ads::CDockWidget* m_dockHardware = nullptr; // m_dockHardware：硬件页 Dock。
+    ads::CDockWidget* m_dockCurrentOp = nullptr; // m_dockCurrentOp：当前操作 Dock。
+    ads::CDockWidget* m_dockLog = nullptr; // m_dockLog：日志输出 Dock。
+    ads::CDockWidget* m_dockImmediate = nullptr; // m_dockImmediate：即时窗口 Dock。
+    ads::CDockWidget* m_dockMonitor = nullptr; // m_dockMonitor：监视面板 Dock。
 
     // 自定义Widgets
-    WelcomeDock* m_welcomeWidget;
-    ProcessDock* m_processWidget;
-    NetworkDock* m_networkWidget;
-    MemoryDock* m_memoryWidget;
-    FileDock* m_fileWidget;
-    DriverDock* m_driverWidget;
-    KernelDock* m_kernelWidget;
-    MonitorDock* m_monitorWidget;
+    WelcomeDock* m_welcomeWidget = nullptr; // m_welcomeWidget：欢迎页内容控件。
+    ProcessDock* m_processWidget = nullptr; // m_processWidget：进程页内容控件。
+    NetworkDock* m_networkWidget = nullptr; // m_networkWidget：网络页内容控件。
+    MemoryDock* m_memoryWidget = nullptr; // m_memoryWidget：内存页内容控件。
+    FileDock* m_fileWidget = nullptr; // m_fileWidget：文件页内容控件。
+    DriverDock* m_driverWidget = nullptr; // m_driverWidget：驱动页内容控件。
+    KernelDock* m_kernelWidget = nullptr; // m_kernelWidget：内核页内容控件。
+    MonitorDock* m_monitorWidget = nullptr; // m_monitorWidget：监控页内容控件。
     MonitorPanelWidget* m_monitorPanelWidget = nullptr; // m_monitorPanelWidget：左下角监视面板四宫格性能图组件。
-    HardwareDock* m_hardwareWidget;
-    PrivilegeDock* m_privilegeWidget;
-    SettingsDock* m_settingsWidget;
-    StartupDock* m_startupWidget;
+    HardwareDock* m_hardwareWidget = nullptr; // m_hardwareWidget：硬件页内容控件。
+    PrivilegeDock* m_privilegeWidget = nullptr; // m_privilegeWidget：权限页内容控件。
+    SettingsDock* m_settingsWidget = nullptr; // m_settingsWidget：设置页内容控件。
+    StartupDock* m_startupWidget = nullptr; // m_startupWidget：启动项页内容控件。
     ServiceDock* m_serviceWidget = nullptr;
-    WindowDock* m_windowWidget;
-    RegistryDock* m_registryWidget;
+    MiscDock* m_miscWidget = nullptr;
+    WindowDock* m_windowWidget = nullptr; // m_windowWidget：窗口页内容控件。
+    RegistryDock* m_registryWidget = nullptr; // m_registryWidget：注册表页内容控件。
     HandleDock* m_handleWidget = nullptr;
-    LogDockWidget* m_logWidget; // 日志输出 Dock 的可视化日志面板。
-    ProgressDockWidget* m_progressWidget; // 当前操作 Dock 的任务进度卡片面板。
+    LogDockWidget* m_logWidget = nullptr; // 日志输出 Dock 的可视化日志面板。
+    ProgressDockWidget* m_progressWidget = nullptr; // 当前操作 Dock 的任务进度卡片面板。
     CodeEditorWidget* m_immediateEditorWidget = nullptr; // 即时窗口统一代码编辑器组件。
+    ks::ui::CustomTitleBar* m_customTitleBar = nullptr; // m_customTitleBar：主窗口自绘标题栏组件。
+    bool m_windowPinned = false;                        // m_windowPinned：主窗口当前是否置顶。
 
     // 顶部菜单栏右侧权限按钮（纯文字）：
     // - Admin：管理员权限状态与提权入口；

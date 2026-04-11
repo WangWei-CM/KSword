@@ -3574,14 +3574,12 @@ void HardwareDock::requestAsyncSensorRefresh()
         return;
     }
 
+    // event 用途：串联本次 CPU 传感器读取与日志输出，便于追踪失败原因。
+    kLogEvent event;
     QPointer<HardwareDock> safeThis(this);
-    std::thread([safeThis]() {
-        const QString temperatureText = queryCpuTemperatureText();
-        const QString voltageText = queryCpuVoltageText();
-        const QString sensorText = QStringLiteral("%1|%2")
-            .arg(temperatureText)
-            .arg(voltageText);
-
+    std::thread([safeThis, event]() {
+        const SensorProbeResult temperatureProbeResult = queryCpuTemperatureProbeResult();
+        const SensorProbeResult voltageProbeResult = queryCpuVoltageProbeResult();
         if (safeThis.isNull())
         {
             return;
@@ -3589,20 +3587,70 @@ void HardwareDock::requestAsyncSensorRefresh()
 
         const bool invokeOk = QMetaObject::invokeMethod(
             safeThis.data(),
-            [safeThis, sensorText]()
+            [safeThis, event, temperatureProbeResult, voltageProbeResult]()
             {
                 if (safeThis.isNull())
                 {
                     return;
                 }
 
-                // 采集偶发失败时保留上一份有效值，避免界面温度频繁闪回 N/A。
-                const bool newValueValid = (sensorText != QStringLiteral("N/A|N/A"));
-                if (newValueValid
-                    || safeThis->m_cachedSensorText.isEmpty()
-                    || safeThis->m_cachedSensorText == QStringLiteral("N/A|N/A"))
+                // previousSensorPartList 用途：拆分上一份缓存，分别保留温度/电压的最后有效值。
+                const QStringList previousSensorPartList = safeThis->m_cachedSensorText.split('|');
+                QString cachedTemperatureText =
+                    previousSensorPartList.size() >= 1 ? previousSensorPartList.at(0) : QStringLiteral("N/A");
+                QString cachedVoltageText =
+                    previousSensorPartList.size() >= 2 ? previousSensorPartList.at(1) : QStringLiteral("N/A");
+
+                if (isReadableSensorValue(temperatureProbeResult.valueText))
                 {
-                    safeThis->m_cachedSensorText = sensorText;
+                    cachedTemperatureText = temperatureProbeResult.valueText;
+                }
+                if (isReadableSensorValue(voltageProbeResult.valueText))
+                {
+                    cachedVoltageText = voltageProbeResult.valueText;
+                }
+                if (!isReadableSensorValue(cachedTemperatureText))
+                {
+                    cachedTemperatureText = QStringLiteral("N/A");
+                }
+                if (!isReadableSensorValue(cachedVoltageText))
+                {
+                    cachedVoltageText = QStringLiteral("N/A");
+                }
+
+                safeThis->m_cachedSensorText = QStringLiteral("%1|%2")
+                    .arg(cachedTemperatureText)
+                    .arg(cachedVoltageText);
+
+                // previousLogSignatureText 用途：上一轮日志签名，用于控制失败/恢复日志去重。
+                const QString previousLogSignatureText = safeThis->m_lastSensorLogSignatureText;
+                const QString logSignatureText =
+                    buildSensorProbeSignatureText(QStringLiteral("温度"), temperatureProbeResult)
+                    + QStringLiteral("||")
+                    + buildSensorProbeSignatureText(QStringLiteral("电压"), voltageProbeResult);
+                if (logSignatureText != previousLogSignatureText)
+                {
+                    safeThis->m_lastSensorLogSignatureText = logSignatureText;
+
+                    const bool hasFailure = !temperatureProbeResult.success || !voltageProbeResult.success;
+                    if (hasFailure)
+                    {
+                        warn << event
+                             << "[HardwareDock] CPU传感器读取失败："
+                             << buildSensorProbeLogFragment(QStringLiteral("温度"), temperatureProbeResult)
+                             << "；"
+                             << buildSensorProbeLogFragment(QStringLiteral("电压"), voltageProbeResult)
+                             << eol;
+                    }
+                    else if (!previousLogSignatureText.isEmpty())
+                    {
+                        info << event
+                             << "[HardwareDock] CPU传感器读取恢复："
+                             << buildSensorProbeLogFragment(QStringLiteral("温度"), temperatureProbeResult)
+                             << "；"
+                             << buildSensorProbeLogFragment(QStringLiteral("电压"), voltageProbeResult)
+                             << eol;
+                    }
                 }
                 safeThis->m_sensorRefreshing.store(false);
             },
@@ -3610,6 +3658,7 @@ void HardwareDock::requestAsyncSensorRefresh()
 
         if (!invokeOk && !safeThis.isNull())
         {
+            warn << event << "[HardwareDock] CPU传感器结果回投UI线程失败。" << eol;
             safeThis->m_sensorRefreshing.store(false);
         }
         }).detach();

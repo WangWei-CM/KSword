@@ -65,6 +65,17 @@ NetworkDock::NetworkDock(QWidget* parent)
         });
     m_connectionRefreshTimer->start();
 
+    // 多线程下载刷新定时器：
+    // - 周期刷新任务表/分段表/总进度条；
+    // - 即使当前不在下载页，只要存在运行中任务也维持刷新。
+    m_multiDownloadRefreshTimer = new QTimer(this);
+    m_multiDownloadRefreshTimer->setInterval(180);
+    connect(m_multiDownloadRefreshTimer, &QTimer::timeout, this, [this]()
+        {
+            refreshMultiThreadDownloadUi();
+        });
+    m_multiDownloadRefreshTimer->start();
+
     // 把后台线程回调转发到 UI 线程，保证表格操作线程安全。
     m_trafficService->SetPacketCallback([this](const ks::network::PacketRecord& packetRecord)
         {
@@ -114,6 +125,18 @@ NetworkDock::NetworkDock(QWidget* parent)
 
 NetworkDock::~NetworkDock()
 {
+    // 析构前请求取消全部下载任务，避免窗口释放后继续长期下载。
+    {
+        std::lock_guard<std::mutex> guard(m_multiDownloadTaskMutex);
+        for (const std::shared_ptr<MultiThreadDownloadTaskState>& taskState : m_multiDownloadTaskList)
+        {
+            if (taskState != nullptr)
+            {
+                taskState->cancelRequested.store(true);
+            }
+        }
+    }
+
     // 若有异步停止线程在执行，析构时同步等待一次，确保服务对象仍然有效。
     if (m_monitorStopThread != nullptr && m_monitorStopThread->joinable())
     {

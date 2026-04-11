@@ -401,6 +401,51 @@ void NetworkDock::initializeConnections()
                 << eol;
         });
 
+    // 多线程下载页连接：开始下载、选择目录、URL回车触发。
+    connect(m_multiDownloadStartButton, &QPushButton::clicked, this, [this]()
+        {
+            startMultiThreadDownloadTask();
+        });
+    connect(m_multiDownloadBrowseDirButton, &QPushButton::clicked, this, [this]()
+        {
+            browseMultiThreadDownloadDirectory();
+        });
+    connect(m_multiDownloadUrlEdit, &QLineEdit::returnPressed, this, [this]()
+        {
+            startMultiThreadDownloadTask();
+        });
+
+    // 多线程下载任务选中变化：切换右侧分段详情与总进度条绑定任务。
+    connect(m_multiDownloadTaskTable, &QTableWidget::itemSelectionChanged, this, [this]()
+        {
+            if (m_multiDownloadTaskTable == nullptr)
+            {
+                return;
+            }
+
+            const QList<QTableWidgetItem*> selectedItemList = m_multiDownloadTaskTable->selectedItems();
+            if (selectedItemList.isEmpty())
+            {
+                m_multiDownloadSelectedTaskId = 0;
+                refreshMultiThreadDownloadUi();
+                return;
+            }
+
+            const int selectedRow = selectedItemList.first()->row();
+            QTableWidgetItem* idItem = m_multiDownloadTaskTable->item(selectedRow, 0);
+            if (idItem == nullptr)
+            {
+                m_multiDownloadSelectedTaskId = 0;
+                refreshMultiThreadDownloadUi();
+                return;
+            }
+
+            bool parseOk = false;
+            const int selectedTaskId = idItem->text().toInt(&parseOk, 10);
+            m_multiDownloadSelectedTaskId = parseOk ? selectedTaskId : 0;
+            refreshMultiThreadDownloadUi();
+        });
+
     // 双击报文行：打开独立详情窗口（非阻塞）。
     connect(m_packetTable, &QTableWidget::cellDoubleClicked, this,
         [this](const int row, const int /*column*/)
@@ -706,6 +751,7 @@ void NetworkDock::initializeConnections()
     updateMonitorButtonState();
 
     // 初始化新增页首屏数据。
+    refreshMultiThreadDownloadUi();
     refreshArpCacheTable();
     refreshDnsCacheTable();
 }

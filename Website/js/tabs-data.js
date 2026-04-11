@@ -565,6 +565,186 @@ window.kswordTabs = [
         ]
     },
     {
+        slug: "hardware",
+        page: "hardware.html",
+        title: { zh: "硬件", en: "Hardware" },
+        summary: {
+            zh: "提供概览、利用率、CPU、显卡、内存多视角监控。",
+            en: "Provides overview, utilization, CPU, GPU, and memory perspectives."
+        },
+        tags: {
+            zh: ["性能", "监视", "硬件"],
+            en: ["Performance", "Monitoring", "Hardware"]
+        },
+        overview: {
+            zh: "硬件模块用于实时查看系统资源曲线与静态硬件信息，适合性能瓶颈定位。",
+            en: "Hardware module is designed for real-time resource curves and static hardware insight."
+        },
+        highlights: {
+            zh: [
+                "概览页集中显示系统关键状态。",
+                "利用率页按 CPU/内存/磁盘/网络/GPU 展示趋势。",
+                "CPU、显卡、内存页提供更细粒度信息。"
+            ],
+            en: [
+                "Overview page summarizes key system state.",
+                "Utilization page tracks CPU/memory/disk/network/GPU trends.",
+                "CPU, GPU, and memory pages provide deeper details."
+            ]
+        },
+        workflow: {
+            zh: [
+                "先看概览判断负载异常方向。",
+                "切换利用率页定位资源瓶颈。",
+                "进入 CPU/GPU/内存页做细节确认。"
+            ],
+            en: [
+                "Start from Overview to identify abnormal load direction.",
+                "Switch to Utilization to locate bottlenecks.",
+                "Use CPU/GPU/Memory tabs for detailed confirmation."
+            ]
+        },
+        screenshotPlan: [
+            { file: "tab_hardware_overview.png", goal: { zh: "硬件概览页", en: "Hardware overview page" } },
+            { file: "tab_hardware_utilization.png", goal: { zh: "利用率页", en: "Utilization page" } },
+            { file: "tab_hardware_cpu.png", goal: { zh: "CPU 页", en: "CPU page" } }
+        ]
+    },
+    {
+        slug: "handle",
+        page: "handle.html",
+        title: { zh: "句柄", en: "Handle" },
+        summary: {
+            zh: "提供句柄列表与对象类型视图，支持多维过滤。",
+            en: "Provides handle list and object type views with multidimensional filters."
+        },
+        tags: {
+            zh: ["对象", "过滤", "排障"],
+            en: ["Object", "Filter", "Troubleshooting"]
+        },
+        overview: {
+            zh: "句柄模块用于按 PID、对象类型、关键字追踪系统对象句柄。",
+            en: "Handle module tracks system object handles by PID, object type, and keywords."
+        },
+        highlights: {
+            zh: [
+                "句柄列表支持 PID/关键字/类型过滤。",
+                "可选解析对象名并控制解析预算。",
+                "对象类型页展示类型统计与详情。"
+            ],
+            en: [
+                "Handle list supports PID/keyword/type filters.",
+                "Object name resolution is optional with budget control.",
+                "Object type page shows statistics and details."
+            ]
+        },
+        workflow: {
+            zh: [
+                "按 PID 或关键字缩小句柄范围。",
+                "查看对象名和访问掩码定位可疑句柄。",
+                "切换对象类型页做全局统计分析。"
+            ],
+            en: [
+                "Narrow handle scope by PID or keyword.",
+                "Inspect object names and access masks.",
+                "Switch to object types for global statistics."
+            ]
+        },
+        screenshotPlan: [
+            { file: "tab_handle_list.png", goal: { zh: "句柄列表页", en: "Handle list page" } },
+            { file: "tab_handle_object_type.png", goal: { zh: "对象类型页", en: "Object type page" } }
+        ]
+    },
+    {
+        slug: "startup",
+        page: "startup.html",
+        title: { zh: "启动项", en: "Startup" },
+        summary: {
+            zh: "汇总登录项、服务、驱动、计划任务与高级注册表启动项。",
+            en: "Aggregates logon entries, services, drivers, tasks, and advanced registry startup items."
+        },
+        tags: {
+            zh: ["自启动", "审计", "治理"],
+            en: ["Autorun", "Audit", "Governance"]
+        },
+        overview: {
+            zh: "启动项模块用于统一审计与治理各类自动启动入口。",
+            en: "Startup module centralizes auditing and governance of autorun entry points."
+        },
+        highlights: {
+            zh: [
+                "提供总览、登录、服务、驱动、计划任务、高级注册表、WMI 分类。",
+                "支持过滤、导出、复制、定位来源位置。",
+                "支持删除可操作条目并跳转关联服务管理。"
+            ],
+            en: [
+                "Includes overview, logon, service, driver, tasks, advanced registry, and WMI categories.",
+                "Supports filtering, export, copy, and source location navigation.",
+                "Supports deleting manageable entries and jumping to service management."
+            ]
+        },
+        workflow: {
+            zh: [
+                "先看总览评估启动面风险。",
+                "切换分类页定位具体来源。",
+                "执行导出、删除或联动跳转处置。"
+            ],
+            en: [
+                "Start from overview to assess startup risk.",
+                "Switch categories to locate exact sources.",
+                "Use export, delete, or linked navigation for remediation."
+            ]
+        },
+        screenshotPlan: [
+            { file: "tab_startup_overview.png", goal: { zh: "启动项总览页", en: "Startup overview page" } },
+            { file: "tab_startup_registry.png", goal: { zh: "高级注册表页", en: "Advanced registry page" } }
+        ]
+    },
+    {
+        slug: "service",
+        page: "service.html",
+        title: { zh: "服务", en: "Service" },
+        summary: {
+            zh: "服务列表治理与属性编辑，覆盖常规/登录/恢复/依存关系/审计。",
+            en: "Service governance and property editing across general/logon/recovery/dependency/audit tabs."
+        },
+        tags: {
+            zh: ["SCM", "治理", "风险"],
+            en: ["SCM", "Governance", "Risk"]
+        },
+        overview: {
+            zh: "服务模块用于系统服务状态管理、启动类型治理与风险审计。",
+            en: "Service module manages service states, startup policies, and risk auditing."
+        },
+        highlights: {
+            zh: [
+                "服务主表支持刷新、排序、过滤与风险聚焦。",
+                "支持启动/停止/暂停/继续及启动类型调整。",
+                "详情区分为常规、登录、恢复、依存关系、审计五页。"
+            ],
+            en: [
+                "Main table supports refresh, sorting, filtering, and risk focus.",
+                "Supports start/stop/pause/continue and startup type changes.",
+                "Detail area includes general, logon, recovery, dependency, and audit tabs."
+            ]
+        },
+        workflow: {
+            zh: [
+                "先在主表筛出目标服务。",
+                "在常规页执行状态动作与启动类型调整。",
+                "在审计页查看风险信息并导出结果。"
+            ],
+            en: [
+                "Filter target services in the main table first.",
+                "Execute state actions and startup changes in General tab.",
+                "Review risk details and export results from Audit tab."
+            ]
+        },
+        screenshotPlan: [
+            { file: "tab_service_main.png", goal: { zh: "服务主表", en: "Service main table" } },
+            { file: "tab_service_properties.png", goal: { zh: "服务属性页", en: "Service property tabs" } }
+        ]
+    },    {
         slug: "current-operation",
         page: "current-operation.html",
         title: { zh: "当前操作", en: "Current Operation" },
@@ -751,3 +931,4 @@ window.findTabBySlug = function findTabBySlug(tabSlug) {
         return tabItem.slug === tabSlug;
     });
 };
+

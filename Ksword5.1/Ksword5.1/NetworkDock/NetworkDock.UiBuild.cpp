@@ -18,6 +18,7 @@ void NetworkDock::initializeUi()
     initializeRateLimitTab();
     initializeConnectionManageTab();
     initializeManualRequestTab();
+    initializeMultiThreadDownloadTab();
     initializeHttpsAnalyzeTab();
     initializeArpCacheTab();
     initializeDnsCacheTab();

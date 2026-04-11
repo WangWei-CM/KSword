@@ -26,6 +26,7 @@
 #include "Framework.h"
 #include "Framework/LogDockWidget.h"
 #include "Framework/ProgressDockWidget.h"
+#include "Framework/CustomTitleBar.h"
 #include "Framework/ThemedMessageBox.h"
 #include "UI/CodeEditorWidget.h"
 #include "theme.h"
@@ -257,6 +258,13 @@ MainWindow::MainWindow(
     m_currentAppearanceSettings = ks::settings::loadAppearanceSettings();
     reportStartupProgress(32, QStringLiteral("正在初始化主窗口框架..."));
 
+    // 启用无边框模式：
+    // - 由自绘标题栏接管最小化/最大化/关闭/置顶操作；
+    // - 保留系统菜单与最小化/最大化能力，便于原生行为兼容。
+    setWindowFlag(Qt::FramelessWindowHint, true);
+    setWindowFlag(Qt::WindowSystemMenuHint, true);
+    setWindowFlag(Qt::WindowMinMaxButtonsHint, true);
+
     // Dock 全局配置：
     // - 关闭所有可关闭按钮与标题栏三按钮（标签菜单/浮动/关闭）；
     // - 与用户“所有 Dock Tab 不可关闭、去掉右上角按钮”的要求一致。
@@ -266,10 +274,22 @@ MainWindow::MainWindow(
     ads::CDockManager::setConfigFlag(ads::CDockManager::DockAreaHasUndockButton, false);
     ads::CDockManager::setConfigFlag(ads::CDockManager::DockAreaHasTabsMenuButton, false);
 
-    // 创建ADS Dock Manager
-    m_pDockManager = new ads::CDockManager(this);
-    // 把 DockManager 设置为主窗口中央控件，确保 Dock 区域可见并可交互。
-    setCentralWidget(m_pDockManager);
+    // 创建主窗口根容器：
+    // - 第 0 行放自绘标题栏；
+    // - 第 1 行放 ADS Dock 管理器；
+    // - 统一规避 setMenuWidget 在无边框场景下的可见性不稳定问题。
+    m_mainRootContainer = new QWidget(this);
+    m_mainRootContainer->setObjectName(QStringLiteral("ksMainRootContainer"));
+    m_mainRootContainer->setAutoFillBackground(false);
+    m_mainRootContainer->setAttribute(Qt::WA_StyledBackground, false);
+
+    m_mainRootLayout = new QVBoxLayout(m_mainRootContainer);
+    m_mainRootLayout->setContentsMargins(0, 0, 0, 0);
+    m_mainRootLayout->setSpacing(0);
+
+    m_pDockManager = new ads::CDockManager(m_mainRootContainer);
+    m_mainRootLayout->addWidget(m_pDockManager, 1);
+    setCentralWidget(m_mainRootContainer);
 
     // 浮动窗口创建后立即挂接事件过滤器：
     // - 让脱离主窗口的 Dock 容器也能同步背景图与纯色底；
@@ -300,11 +320,11 @@ MainWindow::MainWindow(
     reportStartupProgress(38, QStringLiteral("正在初始化菜单..."));
     initMenus();
 
-    // 初始化权限状态按钮：
-    // - 从菜单初始化中拆开；
-    // - 便于启动画面展示更细的进度阶段。
-    reportStartupProgress(44, QStringLiteral("正在初始化权限状态按钮..."));
-    initPrivilegeStatusButtons();
+    // 初始化自绘标题栏：
+    // - 替代系统标题栏；
+    // - 承载置顶按钮、命令输入框和窗口控制按钮。
+    reportStartupProgress(44, QStringLiteral("正在初始化自绘标题栏..."));
+    initCustomTitleBar();
 
     // 初始化Dock Widgets
     reportStartupProgress(48, QStringLiteral("正在创建页面组件..."));
@@ -413,6 +433,344 @@ void MainWindow::showEvent(QShowEvent* event)
         {
             initializeNextDeferredDock();
         });
+}
+
+void MainWindow::changeEvent(QEvent* event)
+{
+    QMainWindow::changeEvent(event);
+
+    if (event != nullptr
+        && event->type() == QEvent::WindowStateChange
+        && m_customTitleBar != nullptr)
+    {
+        m_customTitleBar->setMaximizedState(isMaximized());
+    }
+}
+
+bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result)
+{
+    Q_UNUSED(eventType);
+
+#ifdef Q_OS_WIN
+    if (message == nullptr || result == nullptr)
+    {
+        return QMainWindow::nativeEvent(eventType, message, result);
+    }
+
+    MSG* nativeMessage = reinterpret_cast<MSG*>(message);
+    if (nativeMessage == nullptr)
+    {
+        return QMainWindow::nativeEvent(eventType, message, result);
+    }
+
+    if (nativeMessage->message == WM_NCHITTEST)
+    {
+        const LPARAM pointData = nativeMessage->lParam;
+        const POINT screenPoint = {
+            static_cast<LONG>(static_cast<short>(LOWORD(pointData))),
+            static_cast<LONG>(static_cast<short>(HIWORD(pointData)))
+        };
+        const QPoint localPoint = mapFromGlobal(QPoint(screenPoint.x, screenPoint.y));
+        const int borderWidth = std::max(
+            6,
+            static_cast<int>(
+                ::GetSystemMetrics(SM_CXSIZEFRAME)
+                + ::GetSystemMetrics(SM_CXPADDEDBORDER)));
+
+        // 边缘缩放命中优先：仅在非最大化状态下启用八方向缩放。
+        if (!isMaximized())
+        {
+            const bool hitLeft = localPoint.x() >= 0 && localPoint.x() < borderWidth;
+            const bool hitRight = localPoint.x() <= width() && localPoint.x() > (width() - borderWidth);
+            const bool hitTop = localPoint.y() >= 0 && localPoint.y() < borderWidth;
+            const bool hitBottom = localPoint.y() <= height() && localPoint.y() > (height() - borderWidth);
+
+            if (hitTop && hitLeft)
+            {
+                *result = HTTOPLEFT;
+                return true;
+            }
+            if (hitTop && hitRight)
+            {
+                *result = HTTOPRIGHT;
+                return true;
+            }
+            if (hitBottom && hitLeft)
+            {
+                *result = HTBOTTOMLEFT;
+                return true;
+            }
+            if (hitBottom && hitRight)
+            {
+                *result = HTBOTTOMRIGHT;
+                return true;
+            }
+            if (hitLeft)
+            {
+                *result = HTLEFT;
+                return true;
+            }
+            if (hitRight)
+            {
+                *result = HTRIGHT;
+                return true;
+            }
+            if (hitTop)
+            {
+                *result = HTTOP;
+                return true;
+            }
+            if (hitBottom)
+            {
+                *result = HTBOTTOM;
+                return true;
+            }
+        }
+
+        // 标题栏拖动命中：命中自绘标题栏且位于可拖动区时返回 HTCAPTION。
+        if (m_customTitleBar != nullptr)
+        {
+            const QRect titleBarRect = m_customTitleBar->geometry();
+            if (titleBarRect.contains(localPoint))
+            {
+                const QPoint titleBarLocalPoint = localPoint - titleBarRect.topLeft();
+                if (m_customTitleBar->isPointInDraggableRegion(titleBarLocalPoint))
+                {
+                    *result = HTCAPTION;
+                    return true;
+                }
+            }
+        }
+    }
+#endif
+
+    return QMainWindow::nativeEvent(eventType, message, result);
+}
+
+void MainWindow::initCustomTitleBar()
+{
+    if (m_customTitleBar != nullptr)
+    {
+        return;
+    }
+
+    m_customTitleBar = new ks::ui::CustomTitleBar(this);
+    m_customTitleBar->setPinnedState(m_windowPinned);
+    m_customTitleBar->setMaximizedState(isMaximized());
+    m_customTitleBar->setDarkModeEnabled(KswordTheme::IsDarkModeEnabled());
+    if (menuBar() != nullptr)
+    {
+        menuBar()->hide();
+    }
+    if (m_mainRootLayout != nullptr && m_mainRootContainer != nullptr)
+    {
+        m_customTitleBar->setParent(m_mainRootContainer);
+        m_mainRootLayout->insertWidget(0, m_customTitleBar, 0);
+    }
+    else
+    {
+        // 兜底：若根容器尚未就绪，退回 QMainWindow 的 menuWidget 挂载方式。
+        setMenuWidget(m_customTitleBar);
+    }
+    m_customTitleBar->show();
+
+    connect(m_customTitleBar, &ks::ui::CustomTitleBar::requestTogglePinned, this, [this]() {
+        togglePinnedWindowState();
+    });
+    connect(m_customTitleBar, &ks::ui::CustomTitleBar::requestMinimizeWindow, this, [this]() {
+        showMinimized();
+    });
+    connect(m_customTitleBar, &ks::ui::CustomTitleBar::requestToggleMaximizeWindow, this, [this]() {
+        if (isMaximized())
+        {
+            showNormal();
+        }
+        else
+        {
+            showMaximized();
+        }
+        if (m_customTitleBar != nullptr)
+        {
+            m_customTitleBar->setMaximizedState(isMaximized());
+        }
+    });
+    connect(m_customTitleBar, &ks::ui::CustomTitleBar::requestCloseWindow, this, [this]() {
+        close();
+    });
+    connect(m_customTitleBar, &ks::ui::CustomTitleBar::commandSubmitted, this, [this](const QString& commandText) {
+        executeCommandInNewConsole(commandText);
+    });
+
+    kLogEvent initTitleBarEvent;
+    info << initTitleBarEvent << "[MainWindow] 自绘标题栏初始化完成。" << eol;
+
+    // 首帧自检：
+    // - setMenuWidget 后下一轮事件循环检查标题栏是否可见；
+    // - 同步记录挂载状态与尺寸，便于排查“标题栏未显示”问题。
+    QTimer::singleShot(0, this, [this]()
+        {
+            if (m_customTitleBar == nullptr)
+            {
+                return;
+            }
+
+            // mountedAsMenuWidget 作用：确认自绘标题栏是否挂到 QMainWindow 菜单位。
+            const bool mountedAsMenuWidget = (menuWidget() == m_customTitleBar);
+            // mountedInRootLayout 作用：确认自绘标题栏是否挂到根容器纵向布局第 0 行。
+            const bool mountedInRootLayout =
+                (m_mainRootLayout != nullptr && m_mainRootLayout->indexOf(m_customTitleBar) >= 0);
+            if (!m_customTitleBar->isVisible())
+            {
+                m_customTitleBar->show();
+            }
+
+            kLogEvent titleBarCheckEvent;
+            info << titleBarCheckEvent
+                << "[MainWindow] 自绘标题栏挂载检查, mounted="
+                << (mountedAsMenuWidget ? "true" : "false")
+                << ", mounted_layout="
+                << (mountedInRootLayout ? "true" : "false")
+                << ", visible="
+                << (m_customTitleBar->isVisible() ? "true" : "false")
+                << ", size="
+                << m_customTitleBar->width()
+                << "x"
+                << m_customTitleBar->height()
+                << eol;
+        });
+}
+
+void MainWindow::setPinnedWindowState(const bool pinnedState, const bool emitLog)
+{
+    if (m_windowPinned == pinnedState)
+    {
+        if (m_customTitleBar != nullptr)
+        {
+            m_customTitleBar->setPinnedState(m_windowPinned);
+        }
+        return;
+    }
+
+    const HWND mainWindowHandle = reinterpret_cast<HWND>(winId());
+    if (mainWindowHandle == nullptr || ::IsWindow(mainWindowHandle) == FALSE)
+    {
+        kLogEvent failedEvent;
+        err << failedEvent << "[MainWindow] 置顶切换失败：主窗口句柄无效。" << eol;
+        return;
+    }
+
+    const BOOL setTopMostResult = ::SetWindowPos(
+        mainWindowHandle,
+        pinnedState ? HWND_TOPMOST : HWND_NOTOPMOST,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (setTopMostResult == FALSE)
+    {
+        const DWORD errorCode = ::GetLastError();
+        kLogEvent failedEvent;
+        err << failedEvent
+            << "[MainWindow] 置顶切换失败, targetPinned="
+            << (pinnedState ? "true" : "false")
+            << ", errorCode="
+            << errorCode
+            << eol;
+        QMessageBox::warning(
+            this,
+            QStringLiteral("窗口置顶"),
+            QStringLiteral("置顶状态切换失败，错误码：%1").arg(errorCode));
+        return;
+    }
+
+    m_windowPinned = pinnedState;
+    if (m_customTitleBar != nullptr)
+    {
+        m_customTitleBar->setPinnedState(m_windowPinned);
+    }
+
+    if (emitLog)
+    {
+        kLogEvent pinEvent;
+        info << pinEvent
+            << "[MainWindow] 置顶状态已切换, pinned="
+            << (m_windowPinned ? "true" : "false")
+            << eol;
+    }
+}
+
+void MainWindow::togglePinnedWindowState()
+{
+    setPinnedWindowState(!m_windowPinned, true);
+}
+
+void MainWindow::executeCommandInNewConsole(const QString& commandText)
+{
+    const QString trimmedCommandText = commandText.trimmed();
+    if (trimmedCommandText.isEmpty())
+    {
+        return;
+    }
+
+    kLogEvent commandEvent;
+    info << commandEvent
+        << "[MainWindow] 标题栏命令执行请求, command="
+        << trimmedCommandText.toStdString()
+        << eol;
+
+    QString commandInterpreterPath = qEnvironmentVariable("ComSpec").trimmed();
+    if (commandInterpreterPath.isEmpty())
+    {
+        commandInterpreterPath = QStringLiteral("C:\\Windows\\System32\\cmd.exe");
+    }
+    commandInterpreterPath = QDir::toNativeSeparators(commandInterpreterPath);
+
+    const QString commandLineText = QStringLiteral("\"%1\" /K %2")
+        .arg(commandInterpreterPath, trimmedCommandText);
+    std::wstring commandInterpreterPathWide = commandInterpreterPath.toStdWString();
+    std::wstring commandLineWide = commandLineText.toStdWString();
+    std::vector<wchar_t> commandLineBuffer(commandLineWide.begin(), commandLineWide.end());
+    commandLineBuffer.push_back(L'\0');
+
+    STARTUPINFOW startupInfo{};
+    startupInfo.cb = sizeof(startupInfo);
+    startupInfo.dwFlags = STARTF_USESHOWWINDOW;
+    startupInfo.wShowWindow = SW_SHOWNORMAL;
+
+    PROCESS_INFORMATION processInfo{};
+    const BOOL createProcessResult = ::CreateProcessW(
+        commandInterpreterPathWide.c_str(),
+        commandLineBuffer.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT,
+        nullptr,
+        nullptr,
+        &startupInfo,
+        &processInfo);
+    if (createProcessResult == FALSE)
+    {
+        const DWORD errorCode = ::GetLastError();
+        err << commandEvent
+            << "[MainWindow] 标题栏命令执行失败, errorCode="
+            << errorCode
+            << eol;
+        QMessageBox::warning(
+            this,
+            QStringLiteral("执行命令"),
+            QStringLiteral("启动 cmd 失败，错误码：%1").arg(errorCode));
+        return;
+    }
+
+    ::CloseHandle(processInfo.hThread);
+    ::CloseHandle(processInfo.hProcess);
+
+    info << commandEvent
+        << "[MainWindow] 标题栏命令执行已启动, pid="
+        << processInfo.dwProcessId
+        << eol;
 }
 
 void MainWindow::initMenus()
@@ -1384,6 +1742,11 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         if (m_serviceWidget == nullptr) { m_serviceWidget = new ServiceDock(this); }
         realWidget = m_serviceWidget;
     }
+    else if (dockKey == QStringLiteral("misc"))
+    {
+        if (m_miscWidget == nullptr) { m_miscWidget = new MiscDock(this); }
+        realWidget = m_miscWidget;
+    }
     if (realWidget == nullptr)
     {
         return;
@@ -1468,6 +1831,7 @@ void MainWindow::initDockWidgets()
     if (shouldEagerLoad(QStringLiteral("handle"))) { m_handleWidget = new HandleDock(this); }
     if (shouldEagerLoad(QStringLiteral("startup"))) { m_startupWidget = new StartupDock(this); }
     if (shouldEagerLoad(QStringLiteral("service"))) { m_serviceWidget = new ServiceDock(this); }
+    if (shouldEagerLoad(QStringLiteral("misc"))) { m_miscWidget = new MiscDock(this); }
 
     reportStartupProgress(60, QStringLiteral("正在创建辅助组件..."));
     m_monitorPanelWidget = new MonitorPanelWidget(this);
@@ -1546,6 +1910,7 @@ void MainWindow::initDockWidgets()
     createLazyDockWidget(m_dockHandle, m_handleWidget, "句柄", QStringLiteral("handle"));
     createLazyDockWidget(m_dockStartup, m_startupWidget, "启动项", QStringLiteral("startup"));
     createLazyDockWidget(m_dockService, m_serviceWidget, "服务", QStringLiteral("service"));
+    createLazyDockWidget(m_dockMisc, m_miscWidget, "杂项", QStringLiteral("misc"));
 
     // 创建右侧和底部的基本Widgets
     m_dockCurrentOp = createDockWidget(m_progressWidget, "当前操作");
@@ -1582,8 +1947,22 @@ void MainWindow::setupDockLayout()
 {
     // 1. 初始化DockManager（若未在构造函数中初始化）
     if (!m_pDockManager) {
-        m_pDockManager = new ads::CDockManager(this);
-        setCentralWidget(m_pDockManager);
+        QWidget* dockParentWidget = (m_mainRootContainer != nullptr)
+            ? m_mainRootContainer
+            : this;
+        m_pDockManager = new ads::CDockManager(dockParentWidget);
+        if (m_mainRootLayout != nullptr && m_mainRootContainer != nullptr)
+        {
+            m_mainRootLayout->addWidget(m_pDockManager, 1);
+            if (centralWidget() != m_mainRootContainer)
+            {
+                setCentralWidget(m_mainRootContainer);
+            }
+        }
+        else
+        {
+            setCentralWidget(m_pDockManager);
+        }
     }
 
     // 2. 左侧区域：先添加第一个DockWidget，获取其所在的DockArea
@@ -1606,6 +1985,7 @@ void MainWindow::setupDockLayout()
     m_pDockManager->addDockWidgetTabToArea(m_dockHandle, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockStartup, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockService, leftDockArea);
+    m_pDockManager->addDockWidgetTabToArea(m_dockMisc, leftDockArea);
 
     // 方法2: 或者使用addDockWidget并指定CenterDockWidgetArea
     // m_pDockManager->addDockWidget(ads::CenterDockWidgetArea, m_dockProcess, leftDockArea);
@@ -1816,6 +2196,11 @@ void MainWindow::initAppearanceSettings()
             targetDock = m_dockService;
             targetName = QStringLiteral("服务");
         }
+        else if (normalizedKey == QStringLiteral("misc"))
+        {
+            targetDock = m_dockMisc;
+            targetName = QStringLiteral("杂项");
+        }
         else if (normalizedKey == QStringLiteral("winapi"))
         {
             targetDock = m_dockMonitorTab;
@@ -2000,6 +2385,13 @@ void MainWindow::applyAppearanceSettings(
     if (m_processWidget != nullptr)
     {
         m_processWidget->refreshThemeVisuals();
+    }
+
+    if (m_customTitleBar != nullptr)
+    {
+        m_customTitleBar->setDarkModeEnabled(darkModeEnabled);
+        m_customTitleBar->setPinnedState(m_windowPinned);
+        m_customTitleBar->setMaximizedState(isMaximized());
     }
 
     rebuildWindowBackgroundBrush();

@@ -2,7 +2,6 @@
 #include <windows.h>
 #include <qthread.h>
 #include <iphlpapi.h>
-#include <netioapi.h>
 #include <mutex>
 #include <cstdio>
 
@@ -28,27 +27,35 @@ bool queryNetworkTotalBytes(std::uint64_t& totalUploadBytes,
     totalUploadBytes = 0;
     totalDownloadBytes = 0;
 
-    PMIB_IF_TABLE2 interfaceTable = nullptr;
-    if (GetIfTable2(&interfaceTable) != NO_ERROR || interfaceTable == nullptr) {
+    // 先请求缓冲区大小，再读取网卡表，确保兼容较老 SDK 配置。
+    ULONG tableSize = 0;
+    DWORD result = GetIfTable(nullptr, &tableSize, FALSE);
+    if (result != ERROR_INSUFFICIENT_BUFFER || tableSize == 0) {
         return false;
     }
 
-    for (ULONG i = 0; i < interfaceTable->NumEntries; ++i) {
-        const MIB_IF_ROW2& row = interfaceTable->Table[i];
-
-        // 只统计在线接口，并过滤回环口，避免将本机环回流量计入网速。
-        if (row.OperStatus != IfOperStatusUp) {
-            continue;
-        }
-        if (row.Type == IF_TYPE_SOFTWARE_LOOPBACK) {
-            continue;
-        }
-
-        totalDownloadBytes += row.InOctets;
-        totalUploadBytes += row.OutOctets;
+    std::vector<unsigned char> tableBuffer(tableSize);
+    PMIB_IFTABLE interfaceTable = reinterpret_cast<PMIB_IFTABLE>(tableBuffer.data());
+    result = GetIfTable(interfaceTable, &tableSize, FALSE);
+    if (result != NO_ERROR || interfaceTable == nullptr) {
+        return false;
     }
 
-    FreeMibTable(interfaceTable);
+    for (DWORD i = 0; i < interfaceTable->dwNumEntries; ++i) {
+        const MIB_IFROW& row = interfaceTable->table[i];
+
+        // 只统计在线接口，并过滤回环口，避免将本机环回流量计入网速。
+        if (row.dwOperStatus != IF_OPER_STATUS_OPERATIONAL) {
+            continue;
+        }
+        if (row.dwType == IF_TYPE_SOFTWARE_LOOPBACK) {
+            continue;
+        }
+
+        totalDownloadBytes += static_cast<std::uint64_t>(row.dwInOctets);
+        totalUploadBytes += static_cast<std::uint64_t>(row.dwOutOctets);
+    }
+
     return true;
 }
 }
