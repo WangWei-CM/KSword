@@ -78,6 +78,31 @@ namespace
         LARGE_INTEGER creationTime{};          // creationTime：创建时间。
     };
 
+    // CachedObjectSnapshot：
+    // - 按 objectAddress 缓存“对象级别”的成功查询结果；
+    // - 让多条句柄指向同一对象时复用 BasicInformation 与对象名；
+    // - 仅缓存成功结果，避免错误负缓存误伤后续可查询句柄。
+    struct CachedObjectSnapshot
+    {
+        bool basicInfoAvailable = false;       // basicInfoAvailable：是否已有成功的 BasicInformation 结果。
+        std::uint32_t handleCount = 0;         // handleCount：缓存的 HandleCount。
+        std::uint32_t pointerCount = 0;        // pointerCount：缓存的 PointerCount。
+        bool objectNameAvailable = false;      // objectNameAvailable：是否已有成功的对象名结果。
+        bool objectNameFromFallback = false;   // objectNameFromFallback：对象名是否来自类型专用回退。
+        QString objectName;                    // objectName：缓存的对象名文本，允许为空表示对象确实无名称。
+    };
+
+    // ObjectNameQueryResult：
+    // - 表示单次对象名解析的结果状态；
+    // - 区分“成功但为空”“查询失败”“回退命中”等状态。
+    struct ObjectNameQueryResult
+    {
+        bool available = false;                // available：对象名查询成功完成，允许 objectName 为空。
+        bool failed = false;                   // failed：对象名查询已尝试但失败。
+        bool usedFallback = false;             // usedFallback：对象名来自类型专用回退。
+        QString objectName;                    // objectName：对象名文本。
+    };
+
     // NtApiSet：
     // - 缓存 ntdll 与核心 Nt API 函数地址；
     // - 避免每次刷新重复 GetProcAddress。
@@ -426,6 +451,241 @@ namespace
         return status >= 0;
     }
 
+    // normalizeFinalPathText 作用：
+    // - 统一裁剪 GetFinalPathNameByHandleW 返回的 \\?\ 前缀；
+    // - 让文件对象名在 UI 中更接近日常 Windows 路径格式。
+    QString normalizeFinalPathText(QString pathText)
+    {
+        if (pathText.startsWith(QStringLiteral("\\\\?\\UNC\\"), Qt::CaseInsensitive))
+        {
+            pathText = QStringLiteral("\\\\") + pathText.mid(8);
+        }
+        else if (pathText.startsWith(QStringLiteral("\\\\?\\"), Qt::CaseInsensitive))
+        {
+            pathText = pathText.mid(4);
+        }
+        return pathText.trimmed();
+    }
+
+    // queryFileObjectDisplayName 作用：
+    // - 用 Win32 文件路径接口补 File/Directory 类型对象名；
+    // - 作为 NtQueryObject(ObjectNameInformation) 的回退路径。
+    bool queryFileObjectDisplayName(HANDLE objectHandle, QString& textOut)
+    {
+        textOut.clear();
+        DWORD bufferChars = 512;
+        for (int attemptIndex = 0; attemptIndex < 6; ++attemptIndex)
+        {
+            std::vector<wchar_t> pathBuffer(static_cast<std::size_t>(bufferChars), L'\0');
+            const DWORD pathLength = ::GetFinalPathNameByHandleW(
+                objectHandle,
+                pathBuffer.data(),
+                bufferChars,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+            if (pathLength == 0)
+            {
+                return false;
+            }
+            if (pathLength >= bufferChars)
+            {
+                bufferChars = pathLength + 1;
+                continue;
+            }
+
+            textOut = normalizeFinalPathText(QString::fromWCharArray(pathBuffer.data(), static_cast<int>(pathLength)));
+            return !textOut.isEmpty();
+        }
+        return false;
+    }
+
+    // queryProcessObjectDisplayName 作用：
+    // - 为 Process 句柄生成“PID + 路径”可读文本；
+    // - 解决进程对象常常没有标准对象名的问题。
+    bool queryProcessObjectDisplayName(HANDLE objectHandle, QString& textOut)
+    {
+        textOut.clear();
+        const DWORD targetProcessId = ::GetProcessId(objectHandle);
+        if (targetProcessId == 0)
+        {
+            return false;
+        }
+
+        std::vector<wchar_t> pathBuffer(2048, L'\0');
+        DWORD bufferChars = static_cast<DWORD>(pathBuffer.size());
+        if (::QueryFullProcessImageNameW(objectHandle, 0, pathBuffer.data(), &bufferChars) != FALSE &&
+            bufferChars > 0)
+        {
+            textOut = QStringLiteral("PID %1 | %2")
+                .arg(targetProcessId)
+                .arg(QString::fromWCharArray(pathBuffer.data(), static_cast<int>(bufferChars)).trimmed());
+            return true;
+        }
+
+        textOut = QStringLiteral("PID %1").arg(targetProcessId);
+        return true;
+    }
+
+    // queryThreadObjectDisplayName 作用：
+    // - 为 Thread 句柄生成“PID/TID”身份文本；
+    // - 让无对象名的线程句柄也能有稳定识别信息。
+    bool queryThreadObjectDisplayName(HANDLE objectHandle, QString& textOut)
+    {
+        textOut.clear();
+        const DWORD targetThreadId = ::GetThreadId(objectHandle);
+        if (targetThreadId == 0)
+        {
+            return false;
+        }
+
+        const DWORD ownerProcessId = ::GetProcessIdOfThread(objectHandle);
+        if (ownerProcessId != 0)
+        {
+            textOut = QStringLiteral("PID %1 / TID %2")
+                .arg(ownerProcessId)
+                .arg(targetThreadId);
+            return true;
+        }
+
+        textOut = QStringLiteral("TID %1").arg(targetThreadId);
+        return true;
+    }
+
+    // queryTokenObjectDisplayName 作用：
+    // - 为 Token 句柄生成“域\\账户”或 SID 文本；
+    // - 让常见令牌句柄在对象名列中也能快速识别归属用户。
+    bool queryTokenObjectDisplayName(HANDLE objectHandle, QString& textOut)
+    {
+        textOut.clear();
+
+        DWORD requiredLength = 0;
+        ::GetTokenInformation(objectHandle, TokenUser, nullptr, 0, &requiredLength);
+        if (requiredLength == 0)
+        {
+            return false;
+        }
+
+        std::vector<std::uint8_t> tokenBuffer(static_cast<std::size_t>(requiredLength), 0);
+        if (::GetTokenInformation(
+            objectHandle,
+            TokenUser,
+            tokenBuffer.data(),
+            requiredLength,
+            &requiredLength) == FALSE)
+        {
+            return false;
+        }
+
+        const auto* tokenUser = reinterpret_cast<const TOKEN_USER*>(tokenBuffer.data());
+        if (tokenUser == nullptr || tokenUser->User.Sid == nullptr)
+        {
+            return false;
+        }
+
+        wchar_t accountName[256] = {};
+        wchar_t domainName[256] = {};
+        DWORD accountNameLength = static_cast<DWORD>(std::size(accountName));
+        DWORD domainNameLength = static_cast<DWORD>(std::size(domainName));
+        SID_NAME_USE sidType = SidTypeUnknown;
+        if (::LookupAccountSidW(
+            nullptr,
+            tokenUser->User.Sid,
+            accountName,
+            &accountNameLength,
+            domainName,
+            &domainNameLength,
+            &sidType) != FALSE)
+        {
+            textOut = QStringLiteral("%1\\%2")
+                .arg(QString::fromWCharArray(domainName))
+                .arg(QString::fromWCharArray(accountName));
+            return true;
+        }
+
+        LPWSTR sidText = nullptr;
+        if (::ConvertSidToStringSidW(tokenUser->User.Sid, &sidText) != FALSE && sidText != nullptr)
+        {
+            textOut = QString::fromWCharArray(sidText);
+            ::LocalFree(sidText);
+            return true;
+        }
+        return false;
+    }
+
+    // queryTypeSpecificObjectName 作用：
+    // - 按对象类型选择更合适的回退查询方案；
+    // - 用于提升 File/Process/Thread/Token 等类型的对象名覆盖率。
+    bool queryTypeSpecificObjectName(
+        const QString& typeNameText,
+        HANDLE objectHandle,
+        QString& textOut)
+    {
+        const QString normalizedType = typeNameText.trimmed().toLower();
+        if (normalizedType == QStringLiteral("file") || normalizedType == QStringLiteral("directory"))
+        {
+            return queryFileObjectDisplayName(objectHandle, textOut);
+        }
+        if (normalizedType == QStringLiteral("process"))
+        {
+            return queryProcessObjectDisplayName(objectHandle, textOut);
+        }
+        if (normalizedType == QStringLiteral("thread"))
+        {
+            return queryThreadObjectDisplayName(objectHandle, textOut);
+        }
+        if (normalizedType == QStringLiteral("token"))
+        {
+            return queryTokenObjectDisplayName(objectHandle, textOut);
+        }
+        textOut.clear();
+        return false;
+    }
+
+    // resolveObjectNameText 作用：
+    // - 先尝试 NtQueryObject(ObjectNameInformation)；
+    // - 若失败或结果为空，再走类型专用回退；
+    // - 最终把成功/失败/回退状态一次性返回给调用方。
+    ObjectNameQueryResult resolveObjectNameText(
+        const NtApiSet& apiSet,
+        HANDLE objectHandle,
+        const QString& typeNameText)
+    {
+        ObjectNameQueryResult result{};
+
+        QString ntObjectNameText;
+        const bool ntQueryOk = queryUnicodeTextByNtObject(
+            apiSet,
+            objectHandle,
+            kObjectNameInformationClass,
+            ntObjectNameText);
+        if (ntQueryOk)
+        {
+            result.available = true;
+            result.objectName = ntObjectNameText.trimmed();
+            if (!result.objectName.isEmpty())
+            {
+                return result;
+            }
+        }
+
+        QString fallbackText;
+        if (queryTypeSpecificObjectName(typeNameText, objectHandle, fallbackText))
+        {
+            result.available = true;
+            result.usedFallback = !fallbackText.trimmed().isEmpty();
+            result.objectName = fallbackText.trimmed();
+            return result;
+        }
+
+        if (ntQueryOk)
+        {
+            result.objectName.clear();
+            return result;
+        }
+
+        result.failed = true;
+        return result;
+    }
+
     // shouldAttemptNameQuery 作用：
     // - 按对象类型决定是否尝试名称解析；
     // - 避免对高风险类型做大量 Name 查询导致卡顿。
@@ -437,7 +697,7 @@ namespace
         }
 
         const QString normalizedType = typeNameText.toLower();
-        static const std::array<const char*, 22> kAllowTypeKeyword{
+        static const std::array<const char*, 28> kAllowTypeKeyword{
             "file",
             "directory",
             "symboliclink",
@@ -459,7 +719,13 @@ namespace
             "driver",
             "wmi",
             "iocompletion",
-            "filterconnectionport"
+            "filterconnectionport",
+            "waitcompletionpacket",
+            "session",
+            "keyedevent",
+            "eventpair",
+            "iocompletionreserve",
+            "partition"
         };
 
         for (const char* keywordText : kAllowTypeKeyword)
@@ -633,8 +899,11 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
 
     // 第四步：按过滤条件生成最终可见句柄行。
     int nameBudgetRemain = std::max(options.nameResolveBudget, 0);
+    std::size_t basicInfoFailedCount = 0;
     std::size_t nameQueryFailedCount = 0;
     std::size_t duplicateFailedCount = 0;
+    std::size_t nameBudgetSkippedCount = 0;
+    std::unordered_map<std::uint64_t, CachedObjectSnapshot> objectSnapshotCacheByAddress;
     std::set<QString> typeNameSet;
     result.rows.reserve(rawRecords.size());
 
@@ -668,6 +937,28 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
         }
         typeNameSet.insert(row.typeName);
 
+        // 对象级缓存优先复用成功结果，减少同一对象的重复复制与重复查询。
+        if (rawRow.objectAddress != 0)
+        {
+            const auto cachedObjectIt = objectSnapshotCacheByAddress.find(rawRow.objectAddress);
+            if (cachedObjectIt != objectSnapshotCacheByAddress.end())
+            {
+                const CachedObjectSnapshot& cachedSnapshot = cachedObjectIt->second;
+                if (cachedSnapshot.basicInfoAvailable)
+                {
+                    row.basicInfoAvailable = true;
+                    row.handleCount = cachedSnapshot.handleCount;
+                    row.pointerCount = cachedSnapshot.pointerCount;
+                }
+                if (cachedSnapshot.objectNameAvailable)
+                {
+                    row.objectNameAvailable = true;
+                    row.objectNameFromFallback = cachedSnapshot.objectNameFromFallback;
+                    row.objectName = cachedSnapshot.objectName;
+                }
+            }
+        }
+
         // 预算聚焦策略：
         // - 若用户指定 PID/类型过滤，则优先把预算用于该范围；
         // - 保持 m_allRows 仍是完整快照，不破坏本地过滤能力。
@@ -683,12 +974,29 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
             row.typeName.compare(typeFilterText, Qt::CaseInsensitive) == 0;
         const bool candidateForNameResolve = pidMatchedForBudget && typeMatchedForBudget;
 
-        const bool shouldResolveName =
+        // BasicInformation 与对象名查询彻底解耦：
+        // - 只要 DuplicateHandle 成功，就尝试独立读取 HandleCount/PointerCount；
+        // - 对象名仍受预算与类型白名单控制，避免名称查询无限膨胀。
+        const bool shouldQueryBasicInfo = !row.basicInfoAvailable;
+        const bool typeEligibleForNameResolve =
             options.resolveObjectName &&
             candidateForNameResolve &&
-            nameBudgetRemain > 0 &&
             shouldAttemptNameQuery(row.typeName);
-        if (shouldResolveName)
+        bool shouldQueryObjectName = false;
+        if (typeEligibleForNameResolve && !row.objectNameAvailable)
+        {
+            if (nameBudgetRemain > 0)
+            {
+                shouldQueryObjectName = true;
+                --nameBudgetRemain;
+            }
+            else
+            {
+                ++nameBudgetSkippedCount;
+            }
+        }
+
+        if (shouldQueryBasicInfo || shouldQueryObjectName)
         {
             HANDLE sourceProcessHandle = openProcessHandleForDuplicate(rawRow.processId);
             if (sourceProcessHandle != nullptr)
@@ -696,38 +1004,100 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
                 UniqueHandle localHandle;
                 if (duplicateRemoteHandleToLocal(sourceProcessHandle, rawRow.handleValue, localHandle))
                 {
-                    OBJECT_BASIC_INFORMATION_NATIVE basicInfo{};
-                    if (queryObjectBasicInfo(apiSet, localHandle.get(), basicInfo))
+                    CachedObjectSnapshot* cachedSnapshot = nullptr;
+                    if (rawRow.objectAddress != 0)
                     {
-                        row.handleCount = basicInfo.handleCount;
-                        row.pointerCount = basicInfo.pointerCount;
+                        cachedSnapshot = &objectSnapshotCacheByAddress[rawRow.objectAddress];
                     }
 
-                    QString objectNameText;
-                    if (queryUnicodeTextByNtObject(apiSet, localHandle.get(), kObjectNameInformationClass, objectNameText))
+                    if (shouldQueryBasicInfo)
                     {
-                        row.objectName = objectNameText.trimmed();
+                        OBJECT_BASIC_INFORMATION_NATIVE basicInfo{};
+                        if (queryObjectBasicInfo(apiSet, localHandle.get(), basicInfo))
+                        {
+                            row.basicInfoAvailable = true;
+                            row.handleCount = basicInfo.handleCount;
+                            row.pointerCount = basicInfo.pointerCount;
+                            if (cachedSnapshot != nullptr)
+                            {
+                                cachedSnapshot->basicInfoAvailable = true;
+                                cachedSnapshot->handleCount = basicInfo.handleCount;
+                                cachedSnapshot->pointerCount = basicInfo.pointerCount;
+                            }
+                        }
+                        else
+                        {
+                            ++basicInfoFailedCount;
+                        }
                     }
-                    else
+
+                    if (shouldQueryObjectName)
                     {
-                        ++nameQueryFailedCount;
+                        const ObjectNameQueryResult nameQueryResult =
+                            resolveObjectNameText(apiSet, localHandle.get(), row.typeName);
+                        if (nameQueryResult.available)
+                        {
+                            row.objectNameAvailable = true;
+                            row.objectNameFailed = false;
+                            row.objectNameFromFallback = nameQueryResult.usedFallback;
+                            row.objectName = nameQueryResult.objectName;
+                            if (cachedSnapshot != nullptr)
+                            {
+                                cachedSnapshot->objectNameAvailable = true;
+                                cachedSnapshot->objectNameFromFallback = nameQueryResult.usedFallback;
+                                cachedSnapshot->objectName = nameQueryResult.objectName;
+                            }
+                        }
+                        else
+                        {
+                            row.objectNameFailed = nameQueryResult.failed;
+                            if (nameQueryResult.failed)
+                            {
+                                ++nameQueryFailedCount;
+                            }
+                        }
                     }
                 }
                 else
                 {
                     ++duplicateFailedCount;
+                    if (shouldQueryBasicInfo)
+                    {
+                        ++basicInfoFailedCount;
+                    }
+                    if (shouldQueryObjectName)
+                    {
+                        row.objectNameFailed = true;
+                        ++nameQueryFailedCount;
+                    }
                 }
             }
             else
             {
                 ++duplicateFailedCount;
+                if (shouldQueryBasicInfo)
+                {
+                    ++basicInfoFailedCount;
+                }
+                if (shouldQueryObjectName)
+                {
+                    row.objectNameFailed = true;
+                    ++nameQueryFailedCount;
+                }
             }
-            --nameBudgetRemain;
         }
 
-        if (!row.objectName.trimmed().isEmpty())
+        if (row.basicInfoAvailable)
+        {
+            ++result.basicInfoResolvedCount;
+        }
+        if (row.objectNameAvailable && !row.objectName.trimmed().isEmpty())
         {
             ++result.resolvedNameCount;
+            if (row.objectNameFromFallback)
+            {
+                ++result.fallbackNameCount;
+            }
         }
         result.rows.push_back(std::move(row));
     }
@@ -768,11 +1138,23 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
     {
         diagnosticList.push_back(QStringLiteral("句柄复制失败:%1").arg(duplicateFailedCount));
     }
+    if (basicInfoFailedCount > 0)
+    {
+        diagnosticList.push_back(QStringLiteral("对象计数查询失败:%1").arg(basicInfoFailedCount));
+    }
     if (nameQueryFailedCount > 0)
     {
         diagnosticList.push_back(QStringLiteral("对象名查询失败:%1").arg(nameQueryFailedCount));
     }
-    if (options.resolveObjectName && nameBudgetRemain <= 0 && options.nameResolveBudget > 0)
+    if (result.fallbackNameCount > 0)
+    {
+        diagnosticList.push_back(QStringLiteral("对象名回退命中:%1").arg(result.fallbackNameCount));
+    }
+    if (nameBudgetSkippedCount > 0)
+    {
+        diagnosticList.push_back(QStringLiteral("对象名预算跳过:%1").arg(nameBudgetSkippedCount));
+    }
+    if (options.resolveObjectName && nameBudgetSkippedCount > 0 && options.nameResolveBudget > 0)
     {
         diagnosticList.push_back(QStringLiteral("对象名解析已达到预算上限"));
     }
@@ -844,6 +1226,36 @@ QString HandleDock::formatHex(const std::uint64_t value, const int width)
     return QStringLiteral("0x%1")
         .arg(static_cast<qulonglong>(value), 0, 16)
         .toUpper();
+}
+
+QString HandleDock::formatOptionalObjectCount(
+    const std::uint32_t countValue,
+    const bool countAvailable)
+{
+    if (!countAvailable)
+    {
+        return QStringLiteral("未查到");
+    }
+    return QString::number(countValue);
+}
+
+QString HandleDock::formatObjectNameDisplayText(const HandleRow& row)
+{
+    if (row.objectNameAvailable)
+    {
+        if (row.objectName.trimmed().isEmpty())
+        {
+            return QStringLiteral("无名称");
+        }
+        return row.objectName;
+    }
+
+    if (row.objectNameFailed)
+    {
+        return QStringLiteral("未查到");
+    }
+
+    return QStringLiteral("未查询");
 }
 
 QString HandleDock::formatTypeIndexDisplayText(

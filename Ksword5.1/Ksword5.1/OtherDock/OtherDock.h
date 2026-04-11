@@ -32,6 +32,7 @@ class QTreeWidgetItem;
 class QLabel;
 class QVBoxLayout;
 class QHBoxLayout;
+class QPoint;
 
 // ============================================================
 // OtherDock
@@ -119,6 +120,12 @@ private:
     void exportVisibleRowsToTsv();
     void openWindowDetailDialog(const WindowInfo& info);
     const WindowInfo* findInfoByHwnd(quint64 hwndValue) const;
+    // handleWindowPickerRelease：
+    // - 作用：处理“准星拖拽拾取”释放事件，定位鼠标下窗口并弹出详情；
+    // - 调用：由窗口列表顶部拾取按钮在鼠标松开时触发；
+    // - 传入 globalPos：鼠标松开时的全局屏幕坐标；
+    // - 传出：无，成功时直接打开窗口详情对话框。
+    void handleWindowPickerRelease(const QPoint& globalPos);
 
 private:
     // 顶层布局与工具栏。
@@ -139,6 +146,10 @@ private:
     QTabWidget* m_contentTabWidget = nullptr;     // 主内容 Tab 容器。
     QWidget* m_windowListPage = nullptr;          // 窗口列表页。
     QVBoxLayout* m_windowListPageLayout = nullptr;// 窗口列表页布局。
+    QWidget* m_windowListToolWidget = nullptr;    // 窗口列表页顶部工具条容器。
+    QHBoxLayout* m_windowListToolLayout = nullptr;// 窗口列表页顶部工具条布局。
+    QPushButton* m_windowPickerButton = nullptr;  // 准星拖拽拾取按钮（释放时按鼠标位置打开窗口详情）。
+    QLabel* m_windowPickerHintLabel = nullptr;    // 准星按钮旁提示文案，说明拖拽用法。
 
     // 窗口列表页：左树右预览。
     QSplitter* m_mainSplitter = nullptr;          // 左右分割器。

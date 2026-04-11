@@ -15,15 +15,18 @@
 #include <Windows.h>
 #include <gdiplus.h>
 #include <objidl.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <cstring>
+#include <cwctype>
 #include <memory>
 #include <string>
 #include <vector>
 
 #pragma comment(lib, "Gdiplus.lib")
 #pragma comment(lib, "Ole32.lib")
+#pragma comment(lib, "Shell32.lib")
 
 namespace
 {
@@ -48,6 +51,92 @@ namespace
     int clampPercent(const int rawValue)
     {
         return std::clamp(rawValue, 0, 100);
+    }
+
+    // isCurrentProcessElevated 作用：
+    // - 判断当前进程是否已经运行在管理员权限下；
+    // - 供启动前自动提权分支与后续逻辑复用。
+    // 返回：true=当前已提权；false=当前仍是普通权限。
+    bool isCurrentProcessElevated()
+    {
+        HANDLE tokenHandle = nullptr;
+        if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &tokenHandle) == FALSE)
+        {
+            return false;
+        }
+
+        // tokenElevation 作用：承接 TokenElevation 查询结果。
+        TOKEN_ELEVATION tokenElevation{};
+        DWORD returnLength = 0;
+        const BOOL queryOk = ::GetTokenInformation(
+            tokenHandle,
+            TokenElevation,
+            &tokenElevation,
+            sizeof(tokenElevation),
+            &returnLength);
+        ::CloseHandle(tokenHandle);
+        return queryOk != FALSE && tokenElevation.TokenIsElevated != 0;
+    }
+
+    // extractCurrentProcessParameterText 作用：
+    // - 从当前命令行中提取“exe 之后”的参数文本；
+    // - 提权重启时直接复用原参数，避免启动行为发生偏差。
+    // 返回：适合传给 ShellExecuteW 的参数字符串；无参数时返回空字符串。
+    std::wstring extractCurrentProcessParameterText()
+    {
+        const wchar_t* commandLineText = ::GetCommandLineW();
+        if (commandLineText == nullptr)
+        {
+            return std::wstring();
+        }
+
+        // cursorPointer 作用：遍历命令行并定位到第一个参数的起始位置。
+        const wchar_t* cursorPointer = commandLineText;
+        bool insideQuotes = false;
+        while (*cursorPointer != L'\0')
+        {
+            if (*cursorPointer == L'"')
+            {
+                insideQuotes = !insideQuotes;
+            }
+            else if (!insideQuotes && std::iswspace(static_cast<wint_t>(*cursorPointer)) != 0)
+            {
+                break;
+            }
+            ++cursorPointer;
+        }
+
+        while (std::iswspace(static_cast<wint_t>(*cursorPointer)) != 0)
+        {
+            ++cursorPointer;
+        }
+
+        return std::wstring(cursorPointer);
+    }
+
+    // tryLaunchElevatedSelfBeforeSplash 作用：
+    // - 在启动图显示前尝试用 runas 启动一个管理员实例；
+    // - 成功后由当前普通权限实例直接退出，避免双开。
+    // 返回：true=已成功拉起管理员实例；false=提权失败，应继续普通权限启动。
+    bool tryLaunchElevatedSelfBeforeSplash()
+    {
+        wchar_t executablePathBuffer[MAX_PATH] = {};
+        const DWORD pathLength = ::GetModuleFileNameW(nullptr, executablePathBuffer, MAX_PATH);
+        if (pathLength == 0 || pathLength >= MAX_PATH)
+        {
+            return false;
+        }
+
+        // parameterText 作用：保留当前进程原始启动参数，交给管理员实例继续使用。
+        const std::wstring parameterText = extractCurrentProcessParameterText();
+        HINSTANCE shellResult = ::ShellExecuteW(
+            nullptr,
+            L"runas",
+            executablePathBuffer,
+            parameterText.empty() ? nullptr : parameterText.c_str(),
+            nullptr,
+            SW_SHOWNORMAL);
+        return reinterpret_cast<INT_PTR>(shellResult) > 32;
     }
 
     // initializeProcessDpiAwareness 作用：
@@ -608,10 +697,23 @@ namespace
 int main(int argc, char* argv[])
 {
     // 启动流程：
-    // 1) Qt 前显示原生透明启动画面；
-    // 2) 分阶段更新启动文字和进度；
-    // 3) 主窗口首帧绘制后立即隐藏。
+    // 1) 先读取启动设置，并在启动图前处理自动提权；
+    // 2) Qt 前显示原生透明启动画面；
+    // 3) 分阶段更新启动文字和进度；
+    // 4) 主窗口首帧绘制后立即隐藏。
     initializeProcessDpiAwareness();
+
+    // startupSettings 作用：缓存本次启动所需的界面与权限设置快照。
+    const ks::settings::AppearanceSettings startupSettings = ks::settings::loadAppearanceSettings();
+
+    if (startupSettings.autoRequestAdminOnStartup && !isCurrentProcessElevated())
+    {
+        const bool elevatedLaunchStarted = tryLaunchElevatedSelfBeforeSplash();
+        if (elevatedLaunchStarted)
+        {
+            return 0;
+        }
+    }
 
     NativeSplashWindow splashWindow;
     const bool splashReady = splashWindow.initialize();
@@ -662,7 +764,14 @@ int main(int argc, char* argv[])
         pumpSplashMessages();
     }
 
-    window.show();
+    if (startupSettings.launchMaximizedOnStartup)
+    {
+        window.showMaximized();
+    }
+    else
+    {
+        window.show();
+    }
     applyNativeAppIconToWidget(&window);
 
     if (splashReady)

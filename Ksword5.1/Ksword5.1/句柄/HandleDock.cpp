@@ -613,11 +613,13 @@ void HandleDock::applyHandleRefreshResult(
     applyLocalHandleFilters();
 
     QString statusText = QStringLiteral(
-        "● 刷新完成 %1 ms | 总句柄:%2 | 显示:%3 | 名称已解析:%4 | 类型映射命中:%5")
+        "● 刷新完成 %1 ms | 总句柄:%2 | 显示:%3 | 计数已解析:%4 | 名称已解析:%5 | 名称回退:%6 | 类型映射命中:%7")
         .arg(refreshResult.elapsedMs)
         .arg(refreshResult.totalHandleCount)
         .arg(m_rows.size())
+        .arg(refreshResult.basicInfoResolvedCount)
         .arg(refreshResult.resolvedNameCount)
+        .arg(refreshResult.fallbackNameCount)
         .arg(refreshResult.objectTypeMappedCount);
     if (!refreshResult.diagnosticText.trimmed().isEmpty())
     {
@@ -706,24 +708,24 @@ void HandleDock::rebuildHandleTable()
         item->setText(
             static_cast<int>(HandleTableColumn::TypeIndex),
             formatTypeIndexDisplayText(row.typeIndex, row.typeName));
-        item->setText(
-            static_cast<int>(HandleTableColumn::ObjectName),
-            row.objectName.trimmed().isEmpty() ? QStringLiteral("-") : row.objectName);
+        const QString objectNameDisplayText = formatObjectNameDisplayText(row);
+        item->setText(static_cast<int>(HandleTableColumn::ObjectName), objectNameDisplayText);
         item->setText(static_cast<int>(HandleTableColumn::ObjectAddress), formatHex(row.objectAddress, 0));
         item->setText(static_cast<int>(HandleTableColumn::GrantedAccess), formatHex(row.grantedAccess, 8));
         item->setText(static_cast<int>(HandleTableColumn::Attributes), formatHandleAttributes(row.attributes));
         item->setText(
             static_cast<int>(HandleTableColumn::HandleCount),
-            row.handleCount == 0 ? QStringLiteral("-") : QString::number(row.handleCount));
+            formatOptionalObjectCount(row.handleCount, row.basicInfoAvailable));
         item->setText(
             static_cast<int>(HandleTableColumn::PointerCount),
-            row.pointerCount == 0 ? QStringLiteral("-") : QString::number(row.pointerCount));
+            formatOptionalObjectCount(row.pointerCount, row.basicInfoAvailable));
         item->setData(static_cast<int>(HandleTableColumn::ProcessId), Qt::UserRole, static_cast<qulonglong>(rowIndex));
         item->setToolTip(
             static_cast<int>(HandleTableColumn::GrantedAccess),
             decodeGrantedAccessText(row.typeName, row.grantedAccess));
 
-        if (row.objectName.trimmed().isEmpty())
+        // 占位状态统一弱化显示，并附带 tooltip 解释来源，避免用户把“无名称”和“未查到”误看成同一种状态。
+        if (!row.objectNameAvailable || row.objectName.trimmed().isEmpty())
         {
             const QColor secondaryTextColor = KswordTheme::IsDarkModeEnabled()
                 ? QColor(178, 178, 178)
@@ -731,6 +733,35 @@ void HandleDock::rebuildHandleTable()
             item->setForeground(
                 static_cast<int>(HandleTableColumn::ObjectName),
                 secondaryTextColor);
+        }
+        if (!row.basicInfoAvailable)
+        {
+            const QColor secondaryTextColor = KswordTheme::IsDarkModeEnabled()
+                ? QColor(178, 178, 178)
+                : QColor(92, 92, 92);
+            item->setForeground(static_cast<int>(HandleTableColumn::HandleCount), secondaryTextColor);
+            item->setForeground(static_cast<int>(HandleTableColumn::PointerCount), secondaryTextColor);
+            item->setToolTip(static_cast<int>(HandleTableColumn::HandleCount), QStringLiteral("ObjectBasicInformation 未查到。"));
+            item->setToolTip(static_cast<int>(HandleTableColumn::PointerCount), QStringLiteral("ObjectBasicInformation 未查到。"));
+        }
+        if (row.objectNameAvailable)
+        {
+            if (row.objectName.trimmed().isEmpty())
+            {
+                item->setToolTip(static_cast<int>(HandleTableColumn::ObjectName), QStringLiteral("对象已查询，但该对象没有名称。"));
+            }
+            else if (row.objectNameFromFallback)
+            {
+                item->setToolTip(static_cast<int>(HandleTableColumn::ObjectName), QStringLiteral("对象名来自类型专用回退查询。"));
+            }
+        }
+        else if (row.objectNameFailed)
+        {
+            item->setToolTip(static_cast<int>(HandleTableColumn::ObjectName), QStringLiteral("对象名查询失败。"));
+        }
+        else
+        {
+            item->setToolTip(static_cast<int>(HandleTableColumn::ObjectName), QStringLiteral("对象名未查询，可能受预算、类型白名单或开关限制。"));
         }
         m_tableWidget->addTopLevelItem(item);
     }

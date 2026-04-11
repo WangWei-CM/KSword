@@ -88,6 +88,39 @@
     <ClCompile Include="MonitorDock\MonitorPanelWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MonitorDock\MonitorTextViewer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Ui.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Actions.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Capture.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Export.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Runtime.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MonitorDock\WinAPIDock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MonitorDock\WinAPIDock.Actions.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MonitorDock\WinAPIDock.Pipe.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MonitorDock\WinAPIDock.Ui.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="NetworkDock\NetworkDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -167,6 +200,30 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SettingsDock\AppearanceSettings.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ServerDock\ServiceDock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ServerDock\ServiceDock.Actions.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ServerDock\ServiceDock.Advanced.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ServerDock\ServiceDock.Enumerate.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ServerDock\ServiceDock.Helpers.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ServerDock\ServiceDock.Properties.Apply.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ServerDock\ServiceDock.Properties.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ServerDock\ServiceDock.Ui.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="StartupDock\StartupDock.cpp">
@@ -315,6 +372,9 @@
     <QtMoc Include="SettingsDock\SettingsDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <QtMoc Include="ServerDock\ServiceDock.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
     <QtMoc Include="StartupDock\StartupDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
@@ -398,10 +458,25 @@
     <ClInclude Include="SettingsDock\AppearanceSettings.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ServerDock\ServiceDock.Internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="StartupDock\StartupDock.Internal.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MonitorDock\MonitorPanelWidget.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MonitorDock\MonitorTextViewer.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MonitorDock\ProcessTraceMonitorWidget.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MonitorDock\WinAPIDock.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MonitorDock\WinApiMonitorProtocol.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="NetworkDock\NetworkDock.InternalCommon.h">

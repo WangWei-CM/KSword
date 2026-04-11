@@ -5,9 +5,11 @@
 #include <QWidget>
 
 class QButtonGroup;
+class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QPushButton;
 class QSlider;
 class QTabWidget;
 class QToolButton;
@@ -34,9 +36,9 @@ public:
 signals:
     // appearanceSettingsChanged 作用：
     // - 当用户点击“应用”并保存成功后通知主窗口；
-    // - 主题/背景会立即应用，启动默认页签用于下次启动。
+    // - 主题/背景会立即应用，启动相关选项用于下次启动。
     // 调用方式：内部保存成功后 emit。
-    // 入参 settings：最新外观配置。
+    // 入参 settings：最新界面与启动配置。
     void appearanceSettingsChanged(const ks::settings::AppearanceSettings& settings);
 
 private:
@@ -46,7 +48,7 @@ private:
     void initializeUi();
 
     // initializeAppearanceTab 作用：
-    // - 创建“外观”标签页控件（主题按钮、背景路径、透明度）。
+    // - 创建“外观与启动”标签页控件（主题按钮、背景路径、透明度、启动行为）。
     // 调用方式：initializeUi 内部调用。
     void initializeAppearanceTab();
 
@@ -64,7 +66,7 @@ private:
     // applySettingsToUi 作用：
     // - 把配置结构体回填到各控件显示。
     // 调用方式：loadSettingsFromJson/内部回滚时调用。
-    // 入参 settings：待显示的外观配置。
+    // 入参 settings：待显示的界面与启动配置。
     void applySettingsToUi(const ks::settings::AppearanceSettings& settings);
 
     // collectSettingsFromUi 作用：
@@ -118,7 +120,7 @@ private:
     // m_tabWidget 作用：设置页签容器，当前至少包含“外观”页。
     QTabWidget* m_tabWidget = nullptr;
 
-    // m_appearanceTab 作用：外观设置页 QWidget 容器。
+    // m_appearanceTab 作用：外观与启动设置页 QWidget 容器。
     QWidget* m_appearanceTab = nullptr;
 
     // m_themeButtonGroup 作用：三种主题按钮的互斥分组。
@@ -151,10 +153,16 @@ private:
     // m_startupDefaultTabCombo 作用：设置“应用启动时默认激活的主标签页”。
     QComboBox* m_startupDefaultTabCombo = nullptr;
 
-    // m_applySettingsButton 作用：统一提交当前设置改动并触发实际生效。
-    QToolButton* m_applySettingsButton = nullptr;
+    // m_startupMaximizedCheckBox 作用：设置下次启动时是否默认最大化显示。
+    QCheckBox* m_startupMaximizedCheckBox = nullptr;
 
-    // m_currentAppearanceSettings 作用：缓存当前有效外观配置。
+    // m_startupAutoAdminCheckBox 作用：设置下次启动时是否先尝试申请管理员权限。
+    QCheckBox* m_startupAutoAdminCheckBox = nullptr;
+
+    // m_applySettingsButton 作用：统一提交当前设置改动并触发实际生效。
+    QPushButton* m_applySettingsButton = nullptr;
+
+    // m_currentAppearanceSettings 作用：缓存当前有效界面与启动配置。
     ks::settings::AppearanceSettings m_currentAppearanceSettings;
 
     // m_isApplyingUiState 作用：标记“正在回填 UI”，防止触发递归保存。

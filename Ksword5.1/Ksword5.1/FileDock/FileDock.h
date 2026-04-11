@@ -57,6 +57,12 @@ public:
     // - 作用：默认析构即可，所有子控件由 Qt 父子关系自动释放。
     ~FileDock() override = default;
 
+    // openFileDetailByPath：
+    // - 作用：对外暴露文件详情窗口入口（含属性/哈希/签名/PE 等 Tab）；
+    // - 供 ServiceDock 等模块跨页联动调用。
+    // - 参数 filePath：目标文件绝对路径。
+    void openFileDetailByPath(const QString& filePath);
+
 private:
     // FilePanelWidgets：
     // - 作用：聚合单个文件面板的全部控件与运行时状态。

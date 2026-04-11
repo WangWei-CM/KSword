@@ -131,7 +131,7 @@ void HandleDock::closeCurrentHandle()
         .arg(formatHex(row->handleValue, 0))
         .arg(row->typeIndex)
         .arg(row->typeName)
-        .arg(row->objectName.trimmed().isEmpty() ? QStringLiteral("-") : row->objectName);
+        .arg(formatObjectNameDisplayText(*row));
     if (QMessageBox::question(this, QStringLiteral("关闭句柄"), confirmText) != QMessageBox::Yes)
     {
         return;

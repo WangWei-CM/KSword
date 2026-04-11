@@ -160,6 +160,13 @@
     <ClCompile Include="MemoryDock\MemoryDock.cpp" />
     <ClCompile Include="MonitorDock\MonitorDock.cpp" />
     <ClCompile Include="MonitorDock\MonitorPanelWidget.cpp" />
+    <ClCompile Include="MonitorDock\MonitorTextViewer.cpp" />
+    <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.cpp" />
+    <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Ui.cpp" />
+    <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Actions.cpp" />
+    <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Capture.cpp" />
+    <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Export.cpp" />
+    <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Runtime.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.UiBuild.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.UiConnections.cpp" />
@@ -187,6 +194,14 @@
     <ClCompile Include="ProcessDock\Process_Tool.cpp" />
     <ClCompile Include="SettingsDock\AppearanceSettings.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.cpp" />
+    <ClCompile Include="ServerDock\ServiceDock.cpp" />
+    <ClCompile Include="ServerDock\ServiceDock.Actions.cpp" />
+    <ClCompile Include="ServerDock\ServiceDock.Advanced.cpp" />
+    <ClCompile Include="ServerDock\ServiceDock.Enumerate.cpp" />
+    <ClCompile Include="ServerDock\ServiceDock.Helpers.cpp" />
+    <ClCompile Include="ServerDock\ServiceDock.Properties.Apply.cpp" />
+    <ClCompile Include="ServerDock\ServiceDock.Properties.cpp" />
+    <ClCompile Include="ServerDock\ServiceDock.Ui.cpp" />
     <ClCompile Include="StartupDock\StartupDock.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Detail.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Ui.cpp" />
@@ -203,6 +218,10 @@
     <ClCompile Include="UI\PerformanceNavCard.cpp" />
     <ClCompile Include="UI\UIBaseFunction.cpp" />
     <ClCompile Include="WelcomeDock\WelcomeDock.cpp" />
+    <ClCompile Include="MonitorDock\WinAPIDock.cpp" />
+    <ClCompile Include="MonitorDock\WinAPIDock.Actions.cpp" />
+    <ClCompile Include="MonitorDock\WinAPIDock.Pipe.cpp" />
+    <ClCompile Include="MonitorDock\WinAPIDock.Ui.cpp" />
     <ClCompile Include="WindowDock\WindowDock.cpp" />
     <ClCompile Include="ksword\process\process.cpp" />
     <ClCompile Include="ksword\string\string.cpp" />
@@ -247,6 +266,8 @@
     <QtMoc Include="MemoryDock\MemoryDock.h" />
     <QtMoc Include="MonitorDock\MonitorDock.h" />
     <ClInclude Include="MonitorDock\MonitorPanelWidget.h" />
+    <ClInclude Include="MonitorDock\MonitorTextViewer.h" />
+    <ClInclude Include="MonitorDock\ProcessTraceMonitorWidget.h" />
     <QtMoc Include="NetworkDock\NetworkDock.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalCommon.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalHelpers.h" />
@@ -262,10 +283,14 @@
     <QtMoc Include="UI\HexEditorWidget.h" />
     <ClInclude Include="UI\PerformanceNavCard.h" />
     <ClInclude Include="SettingsDock\AppearanceSettings.h" />
+    <QtMoc Include="ServerDock\ServiceDock.h" />
+    <ClInclude Include="ServerDock\ServiceDock.Internal.h" />
     <QtMoc Include="StartupDock\StartupDock.h" />
     <ClInclude Include="StartupDock\StartupDock.Internal.h" />
     <ClInclude Include="ProcessDock\Process_Tool.h" />
     <ClInclude Include="UI\UI.css\UI_css.h" />
+    <ClInclude Include="MonitorDock\WinAPIDock.h" />
+    <ClInclude Include="MonitorDock\WinApiMonitorProtocol.h" />
     <ClInclude Include="WindowDock\WindowDock.h" />
     <QtMoc Include="WelcomeDock\WelcomeDock.h" />
   </ItemGroup>

@@ -1,5 +1,8 @@
 
 #include "MonitorDock.h"
+#include "MonitorTextViewer.h"
+#include "ProcessTraceMonitorWidget.h"
+#include "WinAPIDock.h"
 
 // 监控页实现：包含 WMI/ETW 两个标签页，所有重活走异步线程。
 #include "../ProcessDock/ProcessDetailWindow.h"
@@ -23,6 +26,8 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
@@ -51,6 +56,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <set>
 #include <thread>
 #include <unordered_map>
 
@@ -120,6 +126,82 @@ namespace
     QString buildStatusStyle(const QString& colorHex)
     {
         return QStringLiteral("color:%1;font-weight:600;").arg(colorHex);
+    }
+
+    void stopActiveKswordTraceSessionsByPrefix(const QStringList& sessionPrefixList)
+    {
+        constexpr ULONG kQuerySessionCapacity = 96;
+        constexpr ULONG kTraceNameChars = 1024;
+        constexpr ULONG kLogFileChars = 1024;
+        constexpr ULONG kPropertyBufferSize =
+            sizeof(EVENT_TRACE_PROPERTIES)
+            + (kTraceNameChars + kLogFileChars) * sizeof(wchar_t);
+
+        std::vector<std::vector<unsigned char>> propertyBufferList(
+            kQuerySessionCapacity,
+            std::vector<unsigned char>(kPropertyBufferSize, 0));
+        std::vector<EVENT_TRACE_PROPERTIES*> propertyPointerList(kQuerySessionCapacity, nullptr);
+
+        for (ULONG indexValue = 0; indexValue < kQuerySessionCapacity; ++indexValue)
+        {
+            auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(propertyBufferList[indexValue].data());
+            properties->Wnode.BufferSize = kPropertyBufferSize;
+            properties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
+            properties->LogFileNameOffset =
+                sizeof(EVENT_TRACE_PROPERTIES) + kTraceNameChars * sizeof(wchar_t);
+            propertyPointerList[indexValue] = properties;
+        }
+
+        ULONG sessionCount = kQuerySessionCapacity;
+        const ULONG queryStatus = ::QueryAllTracesW(
+            propertyPointerList.data(),
+            kQuerySessionCapacity,
+            &sessionCount);
+        if (queryStatus != ERROR_SUCCESS && queryStatus != ERROR_MORE_DATA)
+        {
+            return;
+        }
+
+        for (ULONG indexValue = 0; indexValue < sessionCount && indexValue < kQuerySessionCapacity; ++indexValue)
+        {
+            const EVENT_TRACE_PROPERTIES* properties = propertyPointerList[indexValue];
+            if (properties == nullptr || properties->LoggerNameOffset == 0)
+            {
+                continue;
+            }
+
+            const wchar_t* loggerNamePointer = reinterpret_cast<const wchar_t*>(
+                propertyBufferList[indexValue].data() + properties->LoggerNameOffset);
+            const QString loggerNameText = QString::fromWCharArray(loggerNamePointer).trimmed();
+            if (loggerNameText.isEmpty())
+            {
+                continue;
+            }
+
+            const bool shouldStop = std::any_of(
+                sessionPrefixList.begin(),
+                sessionPrefixList.end(),
+                [&loggerNameText](const QString& prefixText) {
+                    return !prefixText.trimmed().isEmpty()
+                        && loggerNameText.startsWith(prefixText, Qt::CaseInsensitive);
+                });
+            if (!shouldStop)
+            {
+                continue;
+            }
+
+            const std::wstring loggerNameWide = loggerNameText.toStdWString();
+            std::vector<unsigned char> stopBuffer(
+                sizeof(EVENT_TRACE_PROPERTIES) + (loggerNameWide.size() + 1) * sizeof(wchar_t),
+                0);
+            auto* stopProperties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(stopBuffer.data());
+            stopProperties->Wnode.BufferSize = static_cast<ULONG>(stopBuffer.size());
+            stopProperties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
+            wchar_t* stopLoggerNamePointer = reinterpret_cast<wchar_t*>(
+                stopBuffer.data() + stopProperties->LoggerNameOffset);
+            ::wcscpy_s(stopLoggerNamePointer, loggerNameWide.size() + 1, loggerNameWide.c_str());
+            ::ControlTraceW(0, stopLoggerNamePointer, stopProperties, EVENT_TRACE_CONTROL_STOP);
+        }
     }
 
     // monitorInfoColorHex 作用：返回“信息态”颜色。
@@ -519,6 +601,20 @@ namespace
     // ETW 事件名解析：通过 TDH 元数据读 EventName，失败则返回空。
     QString queryEtwEventName(const EVENT_RECORD* eventRecord)
     {
+        const auto textAtOffset = [](const unsigned char* bufferPointer, const ULONG offsetValue) -> QString {
+            if (bufferPointer == nullptr || offsetValue == 0)
+            {
+                return QString();
+            }
+
+            const wchar_t* textPointer = reinterpret_cast<const wchar_t*>(bufferPointer + offsetValue);
+            if (textPointer == nullptr || *textPointer == L'\0')
+            {
+                return QString();
+            }
+            return QString::fromWCharArray(textPointer).trimmed();
+        };
+
         if (eventRecord == nullptr)
         {
             return QString();
@@ -544,18 +640,25 @@ namespace
             nullptr,
             info,
             &bufferSize);
-        if (status != ERROR_SUCCESS || info == nullptr || info->EventNameOffset == 0)
+        if (status != ERROR_SUCCESS || info == nullptr)
         {
             return QString();
         }
 
-        const wchar_t* namePtr = reinterpret_cast<const wchar_t*>(
-            reinterpret_cast<const unsigned char*>(info) + info->EventNameOffset);
-        if (namePtr == nullptr || *namePtr == L'\0')
+        const unsigned char* infoBufferPointer = reinterpret_cast<const unsigned char*>(info);
+        const QString eventNameText = textAtOffset(infoBufferPointer, info->EventNameOffset);
+        if (!eventNameText.isEmpty())
         {
-            return QString();
+            return eventNameText;
         }
-        return QString::fromWCharArray(namePtr);
+
+        const QString taskNameText = textAtOffset(infoBufferPointer, info->TaskNameOffset);
+        if (!taskNameText.isEmpty())
+        {
+            return taskNameText;
+        }
+
+        return textAtOffset(infoBufferPointer, info->OpcodeNameOffset);
     }
 
     // 100ns 时间戳文本格式化：直接输出 FILETIME 基准整数，满足计划要求。
@@ -566,6 +669,70 @@ namespace
             return now100nsText();
         }
         return QString::number(static_cast<qulonglong>(eventRecord->EventHeader.TimeStamp.QuadPart));
+    }
+
+    // buildEtwRowDetailText：
+    // - 作用：把 ETW 事件表某一行格式化为可读详情文本；
+    // - 调用：右键“查看返回详情”和双击事件行时复用。
+    QString buildEtwRowDetailText(QTableWidget* eventTable, const int row)
+    {
+        if (eventTable == nullptr || row < 0 || row >= eventTable->rowCount())
+        {
+            return QString();
+        }
+
+        const auto itemTextAt = [eventTable, row](const int column) -> QString {
+            QTableWidgetItem* itemPointer = eventTable->item(row, column);
+            return itemPointer != nullptr ? itemPointer->text() : QString();
+        };
+
+        const QString detailJsonText = itemTextAt(5);
+        QString normalizedDetailText = detailJsonText;
+        if (!detailJsonText.trimmed().isEmpty())
+        {
+            QJsonParseError parseError;
+            const QJsonDocument jsonDocument = QJsonDocument::fromJson(detailJsonText.toUtf8(), &parseError);
+            if (!jsonDocument.isNull())
+            {
+                normalizedDetailText = QString::fromUtf8(jsonDocument.toJson(QJsonDocument::Indented));
+            }
+        }
+
+        QString contentText;
+        contentText += QStringLiteral("时间(100ns)：%1\n").arg(itemTextAt(0));
+        contentText += QStringLiteral("Provider：%1\n").arg(itemTextAt(1));
+        contentText += QStringLiteral("事件ID：%1\n").arg(itemTextAt(2));
+        contentText += QStringLiteral("事件名：%1\n").arg(itemTextAt(3));
+        contentText += QStringLiteral("PID / TID：%1\n").arg(itemTextAt(4));
+        contentText += QStringLiteral("ActivityId：%1\n").arg(itemTextAt(6));
+        contentText += QStringLiteral("\n========== 返回详情 ==========\n");
+        contentText += normalizedDetailText.trimmed().isEmpty() ? QStringLiteral("<空>") : normalizedDetailText;
+        return contentText;
+    }
+
+    // buildWmiRowDetailText：
+    // - 作用：把 WMI 结果表某一行格式化为可读详情文本；
+    // - 调用：右键“查看返回详情”、双击事件行和文本查看窗口复用。
+    QString buildWmiRowDetailText(QTableWidget* eventTable, const int row)
+    {
+        if (eventTable == nullptr || row < 0 || row >= eventTable->rowCount())
+        {
+            return QString();
+        }
+
+        const auto itemTextAt = [eventTable, row](const int column) -> QString {
+            QTableWidgetItem* itemPointer = eventTable->item(row, column);
+            return itemPointer != nullptr ? itemPointer->text() : QString();
+        };
+
+        QString contentText;
+        contentText += QStringLiteral("时间戳：%1\n").arg(itemTextAt(0));
+        contentText += QStringLiteral("事件来源：%1\n").arg(itemTextAt(1));
+        contentText += QStringLiteral("事件类：%1\n").arg(itemTextAt(2));
+        contentText += QStringLiteral("PID / 进程：%1\n").arg(itemTextAt(3));
+        contentText += QStringLiteral("\n========== 返回详情 ==========\n");
+        contentText += itemTextAt(4).trimmed().isEmpty() ? QStringLiteral("<空>") : itemTextAt(4);
+        return contentText;
     }
 }
 
@@ -607,7 +774,72 @@ void MonitorDock::showEvent(QShowEvent* event)
             refreshWmiProvidersAsync();
             refreshWmiEventClassesAsync();
             refreshEtwProvidersAsync();
+            refreshEtwSessionsAsync();
         });
+}
+
+void MonitorDock::ensureWinApiTabInitialized()
+{
+    if (m_winApiPage == nullptr)
+    {
+        return;
+    }
+
+    if (m_winApiWidget == nullptr)
+    {
+        QVBoxLayout* hostLayout = qobject_cast<QVBoxLayout*>(m_winApiPage->layout());
+        if (hostLayout == nullptr)
+        {
+            hostLayout = new QVBoxLayout(m_winApiPage);
+            hostLayout->setContentsMargins(0, 0, 0, 0);
+            hostLayout->setSpacing(0);
+        }
+
+        m_winApiWidget = new WinAPIDock(m_winApiPage);
+        hostLayout->addWidget(m_winApiWidget, 1);
+    }
+
+    m_winApiWidget->notifyPageActivated();
+}
+
+void MonitorDock::activateMonitorTab(const QString& tabKey)
+{
+    if (m_sideTabWidget == nullptr)
+    {
+        return;
+    }
+
+    const QString normalizedKey = tabKey.trimmed().toLower();
+    if (normalizedKey == QStringLiteral("winapi"))
+    {
+        ensureWinApiTabInitialized();
+        if (m_winApiPage != nullptr)
+        {
+            m_sideTabWidget->setCurrentWidget(m_winApiPage);
+        }
+        return;
+    }
+    if (normalizedKey == QStringLiteral("wmi"))
+    {
+        if (m_wmiPage != nullptr)
+        {
+            m_sideTabWidget->setCurrentWidget(m_wmiPage);
+        }
+        return;
+    }
+    if (normalizedKey == QStringLiteral("etw"))
+    {
+        if (m_etwPage != nullptr)
+        {
+            m_sideTabWidget->setCurrentWidget(m_etwPage);
+        }
+        return;
+    }
+
+    if (m_processTraceWidget != nullptr)
+    {
+        m_sideTabWidget->setCurrentWidget(m_processTraceWidget);
+    }
 }
 
 MonitorDock::~MonitorDock()
@@ -644,7 +876,7 @@ MonitorDock::~MonitorDock()
 void MonitorDock::initializeUi()
 {
     // 根布局和总 Tab：
-    // - 监控页本体仅保留 WMI/ETW；
+    // - 监控页本体包含“进程定向 / WinAPI / WMI / ETW”四个标签；
     // - 性能四宫格图已经独立到左下角“监视面板”Dock。
     m_rootLayout = new QVBoxLayout(this);
     m_rootLayout->setContentsMargins(6, 6, 6, 6);
@@ -652,6 +884,21 @@ void MonitorDock::initializeUi()
 
     m_sideTabWidget = new QTabWidget(this);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
+
+    m_processTraceWidget = new ProcessTraceMonitorWidget(m_sideTabWidget);
+    m_sideTabWidget->addTab(
+        m_processTraceWidget,
+        QIcon(QStringLiteral(":/Icon/process_main.svg")),
+        QStringLiteral("进程定向"));
+
+    m_winApiPage = new QWidget(m_sideTabWidget);
+    QVBoxLayout* winApiPageLayout = new QVBoxLayout(m_winApiPage);
+    winApiPageLayout->setContentsMargins(0, 0, 0, 0);
+    winApiPageLayout->setSpacing(0);
+    m_sideTabWidget->addTab(
+        m_winApiPage,
+        QIcon(QStringLiteral(":/Icon/process_details.svg")),
+        QStringLiteral("WinAPI"));
 
     initializeWmiTab();
     initializeEtwTab();
@@ -1327,6 +1574,11 @@ void MonitorDock::initializeWmiTab()
     m_wmiPauseSubscribeButton->setStyleSheet(blueButtonStyle());
     m_wmiPauseSubscribeButton->setFixedWidth(32);
 
+    m_wmiExportButton = new QPushButton(QIcon(":/Icon/log_export.svg"), QString(), m_wmiSubscribePanel);
+    m_wmiExportButton->setToolTip(QStringLiteral("导出当前WMI结果到文件"));
+    m_wmiExportButton->setStyleSheet(blueButtonStyle());
+    m_wmiExportButton->setFixedWidth(32);
+
     m_wmiSubscribeStatusLabel = new QLabel(QStringLiteral("● 未订阅"), m_wmiSubscribePanel);
     m_wmiSubscribeStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
 
@@ -1335,6 +1587,7 @@ void MonitorDock::initializeWmiTab()
     m_wmiSubscribeControlLayout->addWidget(m_wmiStartSubscribeButton);
     m_wmiSubscribeControlLayout->addWidget(m_wmiStopSubscribeButton);
     m_wmiSubscribeControlLayout->addWidget(m_wmiPauseSubscribeButton);
+    m_wmiSubscribeControlLayout->addWidget(m_wmiExportButton);
     m_wmiSubscribeControlLayout->addWidget(m_wmiSubscribeStatusLabel);
 
     m_wmiSubscribeLayout->addLayout(m_wmiEventClassControlLayout);
@@ -1607,6 +1860,61 @@ void MonitorDock::initializeEtwTab()
 
     m_etwSideToolBox->addItem(m_etwProviderPanel, QStringLiteral("ETW Providers"));
 
+    // 会话折叠页：直接对标 logman query -ets / stop -ets 的核心能力。
+    m_etwSessionPanel = new QWidget(m_etwSideToolBox);
+    m_etwSessionPanelLayout = new QVBoxLayout(m_etwSessionPanel);
+    m_etwSessionPanelLayout->setContentsMargins(4, 4, 4, 4);
+    m_etwSessionPanelLayout->setSpacing(6);
+
+    m_etwSessionControlLayout = new QHBoxLayout();
+    m_etwSessionControlLayout->setContentsMargins(0, 0, 0, 0);
+    m_etwSessionControlLayout->setSpacing(6);
+
+    m_etwSessionRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_etwSessionPanel);
+    m_etwSessionRefreshButton->setToolTip(QStringLiteral("枚举系统活动 ETW 会话"));
+    m_etwSessionRefreshButton->setStyleSheet(blueButtonStyle());
+    m_etwSessionRefreshButton->setFixedWidth(34);
+
+    m_etwSessionStopButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), QString(), m_etwSessionPanel);
+    m_etwSessionStopButton->setToolTip(QStringLiteral("结束选中的 ETW 会话"));
+    m_etwSessionStopButton->setStyleSheet(blueButtonStyle());
+    m_etwSessionStopButton->setFixedWidth(34);
+    m_etwSessionStopButton->setEnabled(false);
+
+    m_etwSessionStatusLabel = new QLabel(QStringLiteral("● 待刷新"), m_etwSessionPanel);
+    m_etwSessionStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
+
+    m_etwSessionControlLayout->addWidget(new QLabel(QStringLiteral("ETW会话"), m_etwSessionPanel));
+    m_etwSessionControlLayout->addStretch(1);
+    m_etwSessionControlLayout->addWidget(m_etwSessionRefreshButton);
+    m_etwSessionControlLayout->addWidget(m_etwSessionStopButton);
+    m_etwSessionControlLayout->addWidget(m_etwSessionStatusLabel);
+    m_etwSessionPanelLayout->addLayout(m_etwSessionControlLayout);
+
+    m_etwSessionTable = new QTableWidget(m_etwSessionPanel);
+    m_etwSessionTable->setColumnCount(5);
+    m_etwSessionTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("会话名"),
+        QStringLiteral("模式"),
+        QStringLiteral("缓冲区"),
+        QStringLiteral("丢失事件"),
+        QStringLiteral("日志文件")
+    });
+    m_etwSessionTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_etwSessionTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_etwSessionTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_etwSessionTable->setAlternatingRowColors(true);
+    m_etwSessionTable->verticalHeader()->setVisible(false);
+    m_etwSessionTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
+    m_etwSessionTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_etwSessionTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_etwSessionTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_etwSessionTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_etwSessionTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
+    m_etwSessionPanelLayout->addWidget(m_etwSessionTable, 1);
+
+    m_etwSideToolBox->addItem(m_etwSessionPanel, QStringLiteral("ETW会话"));
+
     // 参数折叠页。
     QWidget* capturePanel = new QWidget(m_etwSideToolBox);
     QVBoxLayout* captureLayout = new QVBoxLayout(capturePanel);
@@ -1733,12 +2041,26 @@ void MonitorDock::initializeEtwTab()
 
     m_etwUiUpdateTimer = new QTimer(this);
     m_etwUiUpdateTimer->setInterval(100);
+    updateEtwCaptureActionState();
 
-    m_sideTabWidget->addTab(m_etwPage, QStringLiteral("ETW"));
+    m_sideTabWidget->addTab(m_etwPage, QStringLiteral("ETW监控"));
 }
 
 void MonitorDock::initializeConnections()
 {
+    connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](const int index) {
+        if (index < 0 || m_sideTabWidget == nullptr)
+        {
+            return;
+        }
+
+        QWidget* currentPage = m_sideTabWidget->widget(index);
+        if (currentPage == m_winApiPage)
+        {
+            ensureWinApiTabInitialized();
+        }
+    });
+
     // WMI 基础交互。
     connect(m_wmiProviderFilterEdit, &QLineEdit::textChanged, this, [this](const QString& text) {
         kLogEvent event;
@@ -1867,8 +2189,23 @@ void MonitorDock::initializeConnections()
         setWmiSubscriptionPaused(!m_wmiSubscribePaused.load());
     });
 
+    connect(m_wmiExportButton, &QPushButton::clicked, this, [this]() {
+        kLogEvent event;
+        info << event
+            << "[MonitorDock] 用户点击导出WMI事件。"
+            << eol;
+        exportWmiRowsToTsv();
+    });
+
     connect(m_wmiEventTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
         showWmiEventContextMenu(pos);
+    });
+    connect(m_wmiEventTable, &QTableWidget::itemDoubleClicked, this, [this](QTableWidgetItem* itemPointer) {
+        if (itemPointer == nullptr)
+        {
+            return;
+        }
+        openWmiEventDetailViewerForRow(itemPointer->row());
     });
 
     // WMI 结果筛选交互：任一条件变化后实时重算可见行。
@@ -1959,6 +2296,29 @@ void MonitorDock::initializeConnections()
         refreshEtwProvidersAsync();
     });
 
+    connect(m_etwSessionRefreshButton, &QPushButton::clicked, this, [this]() {
+        kLogEvent event;
+        info << event
+            << "[MonitorDock] 用户点击刷新ETW会话。"
+            << eol;
+        refreshEtwSessionsAsync();
+    });
+
+    connect(m_etwSessionStopButton, &QPushButton::clicked, this, [this]() {
+        kLogEvent event;
+        info << event
+            << "[MonitorDock] 用户点击结束选中ETW会话。"
+            << eol;
+        stopSelectedEtwSessions();
+    });
+
+    connect(m_etwSessionTable, &QTableWidget::itemSelectionChanged, this, [this]() {
+        if (m_etwSessionStopButton != nullptr && m_etwSessionTable != nullptr)
+        {
+            m_etwSessionStopButton->setEnabled(!m_etwSessionTable->selectedItems().isEmpty());
+        }
+    });
+
     connect(m_etwStartButton, &QPushButton::clicked, this, [this]() {
         kLogEvent event;
         info << event
@@ -1980,7 +2340,10 @@ void MonitorDock::initializeConnections()
         info << event
             << "[MonitorDock] 用户点击切换ETW暂停状态。"
             << eol;
-        setEtwCapturePaused(!m_etwCapturePaused.load());
+        if (!m_etwCapturePaused.load())
+        {
+            setEtwCapturePaused(true);
+        }
     });
 
     connect(m_etwExportButton, &QPushButton::clicked, this, [this]() {
@@ -2027,6 +2390,13 @@ void MonitorDock::initializeConnections()
 
     connect(m_etwEventTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
         showEtwEventContextMenu(pos);
+    });
+    connect(m_etwEventTable, &QTableWidget::itemDoubleClicked, this, [this](QTableWidgetItem* itemPointer) {
+        if (itemPointer == nullptr)
+        {
+            return;
+        }
+        openEtwEventDetailViewerForRow(itemPointer->row());
     });
 }
 
@@ -3061,6 +3431,129 @@ void MonitorDock::appendWmiEventRow(
     }
 }
 
+void MonitorDock::exportWmiRowsToTsv()
+{
+    if (m_wmiEventTable == nullptr || m_wmiEventTable->rowCount() == 0)
+    {
+        kLogEvent event;
+        dbg << event
+            << "[MonitorDock] WMI导出取消：无可导出事件。"
+            << eol;
+        QMessageBox::information(this, QStringLiteral("导出WMI"), QStringLiteral("当前没有可导出的WMI事件。"));
+        return;
+    }
+
+    int visibleCount = 0;
+    for (int row = 0; row < m_wmiEventTable->rowCount(); ++row)
+    {
+        if (!m_wmiEventTable->isRowHidden(row))
+        {
+            ++visibleCount;
+        }
+    }
+    if (visibleCount == 0)
+    {
+        kLogEvent event;
+        dbg << event
+            << "[MonitorDock] WMI导出取消：当前筛选后无可见事件。"
+            << eol;
+        QMessageBox::information(this, QStringLiteral("导出WMI"), QStringLiteral("当前筛选结果为空，没有可导出的WMI事件。"));
+        return;
+    }
+
+    const QString defaultName = QStringLiteral("wmi_events_%1.tsv")
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
+
+    const QString path = QFileDialog::getSaveFileName(
+        this,
+        QStringLiteral("导出WMI结果"),
+        defaultName,
+        QStringLiteral("TSV文件 (*.tsv);;文本文件 (*.txt)"));
+
+    if (path.trimmed().isEmpty())
+    {
+        kLogEvent event;
+        dbg << event
+            << "[MonitorDock] WMI导出取消：用户未选择路径。"
+            << eol;
+        return;
+    }
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+    {
+        kLogEvent event;
+        err << event
+            << "[MonitorDock] WMI导出失败：无法写入文件, path="
+            << path.toStdString()
+            << eol;
+        QMessageBox::warning(this, QStringLiteral("导出WMI"), QStringLiteral("无法写入文件：%1").arg(path));
+        return;
+    }
+
+    QTextStream out(&file);
+
+    QStringList header;
+    for (int col = 0; col < m_wmiEventTable->columnCount(); ++col)
+    {
+        QTableWidgetItem* item = m_wmiEventTable->horizontalHeaderItem(col);
+        header << (item != nullptr ? item->text() : QString());
+    }
+    out << header.join('\t') << '\n';
+
+    for (int row = 0; row < m_wmiEventTable->rowCount(); ++row)
+    {
+        if (m_wmiEventTable->isRowHidden(row))
+        {
+            continue;
+        }
+
+        QStringList values;
+        for (int col = 0; col < m_wmiEventTable->columnCount(); ++col)
+        {
+            QTableWidgetItem* item = m_wmiEventTable->item(row, col);
+            values << (item != nullptr ? item->text().replace('\t', ' ') : QString());
+        }
+        out << values.join('\t') << '\n';
+    }
+
+    file.close();
+
+    kLogEvent event;
+    info << event
+        << "[MonitorDock] WMI导出完成:"
+        << path.toStdString()
+        << ", visibleRows="
+        << visibleCount
+        << eol;
+    QMessageBox::information(this, QStringLiteral("导出WMI"), QStringLiteral("导出完成：%1").arg(path));
+}
+
+void MonitorDock::openWmiEventDetailViewerForRow(const int row) const
+{
+    const QString detailText = buildWmiRowDetailText(m_wmiEventTable, row);
+    if (detailText.trimmed().isEmpty())
+    {
+        return;
+    }
+
+    QString classText;
+    if (m_wmiEventTable != nullptr)
+    {
+        QTableWidgetItem* classItem = m_wmiEventTable->item(row, 2);
+        if (classItem != nullptr)
+        {
+            classText = classItem->text().trimmed();
+        }
+    }
+
+    monitor_text_viewer::showReadOnlyTextWindow(
+        const_cast<MonitorDock*>(this),
+        QStringLiteral("WMI 返回详情 - %1").arg(classText.isEmpty() ? QStringLiteral("事件") : classText),
+        detailText,
+        QStringLiteral("monitor://wmi/row-%1.txt").arg(row + 1));
+}
+
 void MonitorDock::showWmiEventContextMenu(const QPoint& position)
 {
     const QModelIndex index = m_wmiEventTable->indexAt(position);
@@ -3073,6 +3566,9 @@ void MonitorDock::showWmiEventContextMenu(const QPoint& position)
     const int col = index.column();
 
     QMenu menu(this);
+    QAction* viewDetailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("查看返回详情"));
+    menu.addSeparator();
+    QAction* copyDetailAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制返回详情文本"));
     QAction* copyCellAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制单元格"));
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/log_clipboard.svg"), QStringLiteral("复制整行"));
     menu.addSeparator();
@@ -3084,6 +3580,29 @@ void MonitorDock::showWmiEventContextMenu(const QPoint& position)
         kLogEvent event;
         dbg << event
             << "[MonitorDock] WMI事件右键菜单取消。"
+            << eol;
+        return;
+    }
+
+    if (action == viewDetailAction)
+    {
+        kLogEvent event;
+        info << event
+            << "[MonitorDock] WMI事件右键操作：查看返回详情, row="
+            << row
+            << eol;
+        openWmiEventDetailViewerForRow(row);
+        return;
+    }
+
+    if (action == copyDetailAction)
+    {
+        const QString detailText = buildWmiRowDetailText(m_wmiEventTable, row);
+        QApplication::clipboard()->setText(detailText);
+        kLogEvent event;
+        dbg << event
+            << "[MonitorDock] WMI事件右键操作：复制返回详情文本, row="
+            << row
             << eol;
         return;
     }
@@ -3242,6 +3761,294 @@ void MonitorDock::refreshEtwProvidersAsync()
     }).detach();
 }
 
+void MonitorDock::refreshEtwSessionsAsync()
+{
+    if (m_etwSessionStatusLabel != nullptr)
+    {
+        m_etwSessionStatusLabel->setText(QStringLiteral("● 刷新中..."));
+        m_etwSessionStatusLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
+    }
+    if (m_etwSessionStopButton != nullptr)
+    {
+        m_etwSessionStopButton->setEnabled(false);
+    }
+
+    if (m_etwSessionRefreshProgressPid == 0)
+    {
+        m_etwSessionRefreshProgressPid = kPro.add("监控", "刷新ETW会话");
+    }
+    kPro.set(m_etwSessionRefreshProgressPid, "枚举系统活动 ETW 会话", 0, 10.0f);
+
+    QPointer<MonitorDock> guardThis(this);
+    std::thread([guardThis]() {
+        std::vector<EtwSessionEntry> sessionList;
+        constexpr ULONG querySessionCapacity = 128;
+        constexpr ULONG traceNameChars = 1024;
+        constexpr ULONG logFileChars = 1024;
+        constexpr ULONG propertyBufferSize =
+            sizeof(EVENT_TRACE_PROPERTIES)
+            + (traceNameChars + logFileChars) * sizeof(wchar_t);
+
+        std::vector<std::vector<unsigned char>> propertyBufferList(
+            querySessionCapacity,
+            std::vector<unsigned char>(propertyBufferSize, 0));
+        std::vector<EVENT_TRACE_PROPERTIES*> propertyPointerList(querySessionCapacity, nullptr);
+
+        for (ULONG indexValue = 0; indexValue < querySessionCapacity; ++indexValue)
+        {
+            auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(propertyBufferList[indexValue].data());
+            properties->Wnode.BufferSize = propertyBufferSize;
+            properties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
+            properties->LogFileNameOffset =
+                sizeof(EVENT_TRACE_PROPERTIES) + traceNameChars * sizeof(wchar_t);
+            propertyPointerList[indexValue] = properties;
+        }
+
+        ULONG sessionCount = querySessionCapacity;
+        const ULONG queryStatus = ::QueryAllTracesW(
+            propertyPointerList.data(),
+            querySessionCapacity,
+            &sessionCount);
+        if (queryStatus == ERROR_SUCCESS || queryStatus == ERROR_MORE_DATA)
+        {
+            sessionList.reserve(sessionCount);
+            for (ULONG indexValue = 0; indexValue < sessionCount && indexValue < querySessionCapacity; ++indexValue)
+            {
+                const EVENT_TRACE_PROPERTIES* properties = propertyPointerList[indexValue];
+                if (properties == nullptr || properties->LoggerNameOffset == 0)
+                {
+                    continue;
+                }
+
+                const wchar_t* loggerNamePointer = reinterpret_cast<const wchar_t*>(
+                    propertyBufferList[indexValue].data() + properties->LoggerNameOffset);
+                const QString sessionNameText = QString::fromWCharArray(loggerNamePointer).trimmed();
+                if (sessionNameText.isEmpty())
+                {
+                    continue;
+                }
+
+                const wchar_t* logFileNamePointer = properties->LogFileNameOffset == 0
+                    ? nullptr
+                    : reinterpret_cast<const wchar_t*>(
+                        propertyBufferList[indexValue].data() + properties->LogFileNameOffset);
+                const QString logFileNameText = logFileNamePointer != nullptr
+                    ? QString::fromWCharArray(logFileNamePointer).trimmed()
+                    : QString();
+
+                QStringList modeTextList;
+                if ((properties->LogFileMode & EVENT_TRACE_REAL_TIME_MODE) != 0)
+                {
+                    modeTextList << QStringLiteral("实时");
+                }
+                if ((properties->LogFileMode & EVENT_TRACE_FILE_MODE_SEQUENTIAL) != 0
+                    || (properties->LogFileMode & EVENT_TRACE_FILE_MODE_CIRCULAR) != 0
+                    || (properties->LogFileMode & EVENT_TRACE_FILE_MODE_APPEND) != 0
+                    || !logFileNameText.isEmpty())
+                {
+                    modeTextList << QStringLiteral("文件");
+                }
+                if (modeTextList.isEmpty())
+                {
+                    modeTextList << QStringLiteral("未知");
+                }
+
+                EtwSessionEntry entry;
+                entry.sessionName = sessionNameText;
+                entry.modeText = modeTextList.join(QStringLiteral(" + "));
+                entry.bufferText = QStringLiteral("%1KB | %2/%3/%4")
+                    .arg(properties->BufferSize)
+                    .arg(properties->NumberOfBuffers)
+                    .arg(properties->MinimumBuffers)
+                    .arg(properties->MaximumBuffers);
+                entry.eventsLost = properties->EventsLost;
+                entry.logFilePath = logFileNameText;
+                sessionList.push_back(std::move(entry));
+            }
+        }
+
+        QMetaObject::invokeMethod(qApp, [guardThis, sessionList = std::move(sessionList), queryStatus]() {
+            if (guardThis == nullptr)
+            {
+                return;
+            }
+
+            guardThis->m_etwSessions = sessionList;
+            if (guardThis->m_etwSessionTable != nullptr)
+            {
+                guardThis->m_etwSessionTable->clearContents();
+                guardThis->m_etwSessionTable->setRowCount(static_cast<int>(guardThis->m_etwSessions.size()));
+                for (int row = 0; row < static_cast<int>(guardThis->m_etwSessions.size()); ++row)
+                {
+                    const EtwSessionEntry& entry = guardThis->m_etwSessions[static_cast<std::size_t>(row)];
+                    QTableWidgetItem* nameItem = new QTableWidgetItem(entry.sessionName);
+                    nameItem->setToolTip(entry.sessionName);
+                    guardThis->m_etwSessionTable->setItem(row, 0, nameItem);
+
+                    QTableWidgetItem* modeItem = new QTableWidgetItem(entry.modeText);
+                    modeItem->setToolTip(entry.modeText);
+                    guardThis->m_etwSessionTable->setItem(row, 1, modeItem);
+
+                    QTableWidgetItem* bufferItem = new QTableWidgetItem(entry.bufferText);
+                    bufferItem->setToolTip(entry.bufferText);
+                    guardThis->m_etwSessionTable->setItem(row, 2, bufferItem);
+
+                    QTableWidgetItem* lostItem = new QTableWidgetItem(QString::number(entry.eventsLost));
+                    lostItem->setToolTip(lostItem->text());
+                    guardThis->m_etwSessionTable->setItem(row, 3, lostItem);
+
+                    QTableWidgetItem* logItem = new QTableWidgetItem(entry.logFilePath);
+                    logItem->setToolTip(entry.logFilePath);
+                    guardThis->m_etwSessionTable->setItem(row, 4, logItem);
+                }
+            }
+
+            if (guardThis->m_etwSessionStatusLabel != nullptr)
+            {
+                if (queryStatus == ERROR_SUCCESS || queryStatus == ERROR_MORE_DATA)
+                {
+                    guardThis->m_etwSessionStatusLabel->setText(
+                        QStringLiteral("● 已刷新 %1 项").arg(guardThis->m_etwSessions.size()));
+                    guardThis->m_etwSessionStatusLabel->setStyleSheet(buildStatusStyle(monitorSuccessColorHex()));
+                    kPro.set(guardThis->m_etwSessionRefreshProgressPid, "ETW会话刷新完成", 0, 100.0f);
+                }
+                else
+                {
+                    guardThis->m_etwSessionStatusLabel->setText(
+                        QStringLiteral("● 刷新失败:%1").arg(queryStatus));
+                    guardThis->m_etwSessionStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
+                    kPro.set(guardThis->m_etwSessionRefreshProgressPid, "ETW会话刷新失败", 0, 100.0f);
+                }
+            }
+        }, Qt::QueuedConnection);
+    }).detach();
+}
+
+void MonitorDock::stopSelectedEtwSessions()
+{
+    if (m_etwSessionTable == nullptr)
+    {
+        return;
+    }
+
+    std::set<int> selectedRowSet;
+    const QList<QTableWidgetItem*> itemList = m_etwSessionTable->selectedItems();
+    for (QTableWidgetItem* itemPointer : itemList)
+    {
+        if (itemPointer != nullptr)
+        {
+            selectedRowSet.insert(itemPointer->row());
+        }
+    }
+
+    if (selectedRowSet.empty())
+    {
+        return;
+    }
+
+    QStringList sessionNameList;
+    for (const int row : selectedRowSet)
+    {
+        if (row < 0 || row >= static_cast<int>(m_etwSessions.size()))
+        {
+            continue;
+        }
+        const QString sessionNameText = m_etwSessions[static_cast<std::size_t>(row)].sessionName.trimmed();
+        if (!sessionNameText.isEmpty())
+        {
+            sessionNameList << sessionNameText;
+        }
+    }
+    sessionNameList.removeDuplicates();
+    if (sessionNameList.isEmpty())
+    {
+        return;
+    }
+
+    if (m_etwSessionStatusLabel != nullptr)
+    {
+        m_etwSessionStatusLabel->setText(QStringLiteral("● 正在结束会话..."));
+        m_etwSessionStatusLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
+    }
+    if (m_etwSessionStopButton != nullptr)
+    {
+        m_etwSessionStopButton->setEnabled(false);
+    }
+
+    if (m_etwSessionRefreshProgressPid == 0)
+    {
+        m_etwSessionRefreshProgressPid = kPro.add("监控", "结束ETW会话");
+    }
+    kPro.set(m_etwSessionRefreshProgressPid, "停止选中的 ETW 会话", 0, 10.0f);
+
+    QPointer<MonitorDock> guardThis(this);
+    std::thread([guardThis, sessionNameList]() {
+        int successCount = 0;
+        QStringList failureTextList;
+
+        for (const QString& sessionNameText : sessionNameList)
+        {
+            const std::wstring sessionNameWide = sessionNameText.toStdWString();
+            std::vector<unsigned char> propertyBuffer(
+                sizeof(EVENT_TRACE_PROPERTIES) + (sessionNameWide.size() + 1) * sizeof(wchar_t),
+                0);
+            auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(propertyBuffer.data());
+            properties->Wnode.BufferSize = static_cast<ULONG>(propertyBuffer.size());
+            properties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
+            wchar_t* loggerNamePointer = reinterpret_cast<wchar_t*>(
+                propertyBuffer.data() + properties->LoggerNameOffset);
+            ::wcscpy_s(loggerNamePointer, sessionNameWide.size() + 1, sessionNameWide.c_str());
+
+            const ULONG stopStatus = ::ControlTraceW(0, loggerNamePointer, properties, EVENT_TRACE_CONTROL_STOP);
+            if (stopStatus == ERROR_SUCCESS)
+            {
+                ++successCount;
+            }
+            else
+            {
+                failureTextList << QStringLiteral("%1(%2)").arg(sessionNameText).arg(stopStatus);
+            }
+        }
+
+        QMetaObject::invokeMethod(qApp, [guardThis, sessionNameList, successCount, failureTextList]() {
+            if (guardThis == nullptr)
+            {
+                return;
+            }
+
+            if (guardThis->m_etwSessionStatusLabel != nullptr)
+            {
+                if (failureTextList.isEmpty())
+                {
+                    guardThis->m_etwSessionStatusLabel->setText(
+                        QStringLiteral("● 已结束 %1 项").arg(successCount));
+                    guardThis->m_etwSessionStatusLabel->setStyleSheet(buildStatusStyle(monitorSuccessColorHex()));
+                    kPro.set(guardThis->m_etwSessionRefreshProgressPid, "结束ETW会话完成", 0, 100.0f);
+                }
+                else
+                {
+                    guardThis->m_etwSessionStatusLabel->setText(
+                        QStringLiteral("● 部分失败:%1").arg(failureTextList.join(QStringLiteral(" | "))));
+                    guardThis->m_etwSessionStatusLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
+                    kPro.set(guardThis->m_etwSessionRefreshProgressPid, "结束ETW会话部分失败", 0, 100.0f);
+                }
+            }
+
+            kLogEvent event;
+            info << event
+                << "[MonitorDock] ETW会话停止完成, requestedCount="
+                << sessionNameList.size()
+                << ", successCount="
+                << successCount
+                << ", failureCount="
+                << failureTextList.size()
+                << eol;
+
+            guardThis->refreshEtwSessionsAsync();
+        }, Qt::QueuedConnection);
+    }).detach();
+}
+
 void WINAPI MonitorDock::etwEventRecordCallback(struct _EVENT_RECORD* eventRecordPtr)
 {
     if (eventRecordPtr == nullptr)
@@ -3328,10 +4135,17 @@ void MonitorDock::startEtwCapture()
 {
     if (m_etwCaptureRunning.load())
     {
-        kLogEvent event;
-        dbg << event
-            << "[MonitorDock] 忽略启动ETW：当前已在监听。"
-            << eol;
+        if (m_etwCapturePaused.load())
+        {
+            setEtwCapturePaused(false);
+        }
+        else
+        {
+            kLogEvent event;
+            dbg << event
+                << "[MonitorDock] 忽略启动ETW：当前已在监听。"
+                << eol;
+        }
         return;
     }
 
@@ -3502,10 +4316,10 @@ void MonitorDock::startEtwCapture()
     m_etwCaptureRunning.store(true);
     m_etwCapturePaused.store(false);
     m_etwCaptureStopFlag.store(false);
-    m_etwSessionHandle = 0;
-    m_etwTraceHandle = 0;
-    m_etwSessionName = QStringLiteral("KswordEtw_%1")
-        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss_zzz")));
+    m_etwSessionHandle.store(0);
+    m_etwTraceHandle.store(0);
+    stopActiveKswordTraceSessionsByPrefix(QStringList{ QStringLiteral("KswordEtw") });
+    m_etwSessionName = QStringLiteral("KswordEtw");
 
     if (m_etwCaptureProgressPid == 0)
     {
@@ -3515,6 +4329,7 @@ void MonitorDock::startEtwCapture()
 
     m_etwCaptureStatusLabel->setText(QStringLiteral("● 监听中"));
     m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
+    updateEtwCaptureActionState();
 
     if (m_etwUiUpdateTimer != nullptr && !m_etwUiUpdateTimer->isActive())
     {
@@ -3593,12 +4408,13 @@ void MonitorDock::startEtwCapture()
                 guardThis->m_etwCapturePaused.store(false);
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● 启动失败:%1").arg(startStatus));
                 guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
+                guardThis->updateEtwCaptureActionState();
                 kPro.set(guardThis->m_etwCaptureProgressPid, "ETW会话启动失败", 0, 100.0f);
             }, Qt::QueuedConnection);
             return;
         }
 
-        guardThis->m_etwSessionHandle = static_cast<std::uint64_t>(sessionHandle);
+        guardThis->m_etwSessionHandle.store(static_cast<std::uint64_t>(sessionHandle));
         kPro.set(guardThis->m_etwCaptureProgressPid, "启用Provider", 0, 30.0f);
 
         int enableSuccessCount = 0;
@@ -3638,7 +4454,7 @@ void MonitorDock::startEtwCapture()
         if (enableSuccessCount == 0)
         {
             ::ControlTraceW(sessionHandle, loggerNamePtr, properties, EVENT_TRACE_CONTROL_STOP);
-            guardThis->m_etwSessionHandle = 0;
+            guardThis->m_etwSessionHandle.store(0);
             QMetaObject::invokeMethod(qApp, [guardThis]() {
                 if (guardThis == nullptr)
                 {
@@ -3648,6 +4464,7 @@ void MonitorDock::startEtwCapture()
                 guardThis->m_etwCapturePaused.store(false);
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● 无可用Provider"));
                 guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
+                guardThis->updateEtwCaptureActionState();
                 kPro.set(guardThis->m_etwCaptureProgressPid, "Provider启用失败", 0, 100.0f);
             }, Qt::QueuedConnection);
             return;
@@ -3664,7 +4481,7 @@ void MonitorDock::startEtwCapture()
         if (traceHandle == INVALID_PROCESSTRACE_HANDLE)
         {
             ::ControlTraceW(sessionHandle, loggerNamePtr, properties, EVENT_TRACE_CONTROL_STOP);
-            guardThis->m_etwSessionHandle = 0;
+            guardThis->m_etwSessionHandle.store(0);
 
             const ULONG lastError = ::GetLastError();
             QMetaObject::invokeMethod(qApp, [guardThis, lastError]() {
@@ -3676,20 +4493,31 @@ void MonitorDock::startEtwCapture()
                 guardThis->m_etwCapturePaused.store(false);
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● OpenTrace失败:%1").arg(lastError));
                 guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
+                guardThis->updateEtwCaptureActionState();
                 kPro.set(guardThis->m_etwCaptureProgressPid, "OpenTrace失败", 0, 100.0f);
             }, Qt::QueuedConnection);
             return;
         }
 
-        guardThis->m_etwTraceHandle = static_cast<std::uint64_t>(traceHandle);
+        guardThis->m_etwTraceHandle.store(static_cast<std::uint64_t>(traceHandle));
         kPro.set(guardThis->m_etwCaptureProgressPid, "ETW事件接收中", 0, 55.0f);
 
         const ULONG processStatus = ::ProcessTrace(&traceHandle, 1, nullptr, nullptr);
-        ::CloseTrace(traceHandle);
-        guardThis->m_etwTraceHandle = 0;
+        const std::uint64_t ownedTraceHandle = guardThis->m_etwTraceHandle.exchange(0);
+        if (ownedTraceHandle != 0)
+        {
+            ::CloseTrace(static_cast<TRACEHANDLE>(ownedTraceHandle));
+        }
 
-        ::ControlTraceW(sessionHandle, loggerNamePtr, properties, EVENT_TRACE_CONTROL_STOP);
-        guardThis->m_etwSessionHandle = 0;
+        const std::uint64_t ownedSessionHandle = guardThis->m_etwSessionHandle.exchange(0);
+        if (ownedSessionHandle != 0)
+        {
+            ::ControlTraceW(
+                static_cast<TRACEHANDLE>(ownedSessionHandle),
+                loggerNamePtr,
+                properties,
+                EVENT_TRACE_CONTROL_STOP);
+        }
 
         QMetaObject::invokeMethod(qApp, [guardThis, processStatus]() {
             if (guardThis == nullptr)
@@ -3709,6 +4537,7 @@ void MonitorDock::startEtwCapture()
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● 处理结束:%1").arg(processStatus));
                 guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
             }
+            guardThis->updateEtwCaptureActionState();
             kPro.set(guardThis->m_etwCaptureProgressPid, "ETW监听结束", 0, 100.0f);
         }, Qt::QueuedConnection);
     });
@@ -3732,15 +4561,15 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
     m_etwCaptureStopFlag.store(true);
 
     // 先关闭消费句柄，打断 ProcessTrace 阻塞。
-    if (m_etwTraceHandle != 0)
+    const std::uint64_t ownedTraceHandle = m_etwTraceHandle.exchange(0);
+    if (ownedTraceHandle != 0)
     {
-        TRACEHANDLE traceHandle = static_cast<TRACEHANDLE>(m_etwTraceHandle);
-        ::CloseTrace(traceHandle);
-        m_etwTraceHandle = 0;
+        ::CloseTrace(static_cast<TRACEHANDLE>(ownedTraceHandle));
     }
 
     // 再停止会话，确保 ETW 内核资源被释放。
-    if (m_etwSessionHandle != 0)
+    const std::uint64_t ownedSessionHandle = m_etwSessionHandle.exchange(0);
+    if (ownedSessionHandle != 0)
     {
         const std::wstring sessionNameWide = m_etwSessionName.toStdWString();
         const ULONG propertyBufferSize = static_cast<ULONG>(
@@ -3756,11 +4585,10 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
         }
 
         ::ControlTraceW(
-            static_cast<TRACEHANDLE>(m_etwSessionHandle),
+            static_cast<TRACEHANDLE>(ownedSessionHandle),
             loggerNamePtr,
             properties,
             EVENT_TRACE_CONTROL_STOP);
-        m_etwSessionHandle = 0;
     }
 
     if (m_etwCaptureThread == nullptr || !m_etwCaptureThread->joinable())
@@ -3777,6 +4605,7 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
         {
             m_etwUiUpdateTimer->stop();
         }
+        updateEtwCaptureActionState();
         kLogEvent event;
         dbg << event
             << "[MonitorDock] 停止ETW：当前无活动线程。"
@@ -3800,6 +4629,7 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
         {
             m_etwUiUpdateTimer->stop();
         }
+        updateEtwCaptureActionState();
         kLogEvent event;
         info << event
             << "[MonitorDock] 停止ETW：同步等待线程结束完成。"
@@ -3836,6 +4666,7 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
             {
                 guardThis->m_etwUiUpdateTimer->stop();
             }
+            guardThis->updateEtwCaptureActionState();
 
             kLogEvent event;
             info << event
@@ -3848,6 +4679,7 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
     {
         m_etwUiUpdateTimer->stop();
     }
+    updateEtwCaptureActionState();
 }
 
 void MonitorDock::setEtwCapturePaused(bool paused)
@@ -3872,12 +4704,42 @@ void MonitorDock::setEtwCapturePaused(bool paused)
         m_etwCaptureStatusLabel->setText(QStringLiteral("● 监听中"));
         m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
     }
+    updateEtwCaptureActionState();
 
     kLogEvent event;
     info << event
         << "[MonitorDock] ETW暂停状态变更, paused="
         << (paused ? "true" : "false")
         << eol;
+}
+
+void MonitorDock::updateEtwCaptureActionState()
+{
+    const bool running = m_etwCaptureRunning.load();
+    const bool paused = m_etwCapturePaused.load();
+
+    if (m_etwStartButton != nullptr)
+    {
+        m_etwStartButton->setEnabled(!running || paused);
+        m_etwStartButton->setIcon(QIcon(paused
+            ? QStringLiteral(":/Icon/process_resume.svg")
+            : QStringLiteral(":/Icon/process_start.svg")));
+        m_etwStartButton->setToolTip(paused
+            ? QStringLiteral("继续监听")
+            : QStringLiteral("开始监听"));
+    }
+
+    if (m_etwStopButton != nullptr)
+    {
+        m_etwStopButton->setEnabled(running);
+    }
+
+    if (m_etwPauseButton != nullptr)
+    {
+        m_etwPauseButton->setEnabled(running && !paused);
+        m_etwPauseButton->setIcon(QIcon(QStringLiteral(":/Icon/process_pause.svg")));
+        m_etwPauseButton->setToolTip(QStringLiteral("暂停监听"));
+    }
 }
 
 void MonitorDock::appendEtwEventRow(
@@ -3912,13 +4774,31 @@ void MonitorDock::appendEtwEventRow(
 
 void MonitorDock::exportEtwRowsToTsv()
 {
-    if (m_etwEventTable->rowCount() == 0)
+    if (m_etwEventTable == nullptr || m_etwEventTable->rowCount() == 0)
     {
         kLogEvent event;
         dbg << event
             << "[MonitorDock] ETW导出取消：无可导出事件。"
             << eol;
         QMessageBox::information(this, QStringLiteral("导出ETW"), QStringLiteral("当前没有可导出的事件。"));
+        return;
+    }
+
+    int visibleCount = 0;
+    for (int row = 0; row < m_etwEventTable->rowCount(); ++row)
+    {
+        if (!m_etwEventTable->isRowHidden(row))
+        {
+            ++visibleCount;
+        }
+    }
+    if (visibleCount == 0)
+    {
+        kLogEvent event;
+        dbg << event
+            << "[MonitorDock] ETW导出取消：当前筛选后无可见事件。"
+            << eol;
+        QMessageBox::information(this, QStringLiteral("导出ETW"), QStringLiteral("当前筛选结果为空，没有可导出的ETW事件。"));
         return;
     }
 
@@ -3964,6 +4844,11 @@ void MonitorDock::exportEtwRowsToTsv()
 
     for (int row = 0; row < m_etwEventTable->rowCount(); ++row)
     {
+        if (m_etwEventTable->isRowHidden(row))
+        {
+            continue;
+        }
+
         QStringList values;
         for (int col = 0; col < m_etwEventTable->columnCount(); ++col)
         {
@@ -3976,8 +4861,38 @@ void MonitorDock::exportEtwRowsToTsv()
     file.close();
 
     kLogEvent event;
-    info << event << "[MonitorDock] ETW导出完成:" << path.toStdString() << ", rows=" << m_etwEventTable->rowCount() << eol;
+    info << event
+        << "[MonitorDock] ETW导出完成:"
+        << path.toStdString()
+        << ", visibleRows="
+        << visibleCount
+        << eol;
     QMessageBox::information(this, QStringLiteral("导出ETW"), QStringLiteral("导出完成：%1").arg(path));
+}
+
+void MonitorDock::openEtwEventDetailViewerForRow(const int row) const
+{
+    const QString detailText = buildEtwRowDetailText(m_etwEventTable, row);
+    if (detailText.trimmed().isEmpty())
+    {
+        return;
+    }
+
+    QString eventNameText;
+    if (m_etwEventTable != nullptr)
+    {
+        QTableWidgetItem* eventNameItem = m_etwEventTable->item(row, 3);
+        if (eventNameItem != nullptr)
+        {
+            eventNameText = eventNameItem->text().trimmed();
+        }
+    }
+
+    monitor_text_viewer::showReadOnlyTextWindow(
+        const_cast<MonitorDock*>(this),
+        QStringLiteral("ETW 返回详情 - %1").arg(eventNameText.isEmpty() ? QStringLiteral("事件") : eventNameText),
+        detailText,
+        QStringLiteral("monitor://etw/row-%1.txt").arg(row + 1));
 }
 
 void MonitorDock::showEtwEventContextMenu(const QPoint& position)
@@ -3992,6 +4907,9 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
     const int col = index.column();
 
     QMenu menu(this);
+    QAction* viewDetailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("查看返回详情"));
+    menu.addSeparator();
+    QAction* copyDetailAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制返回详情文本"));
     QAction* copyCellAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制单元格"));
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/log_clipboard.svg"), QStringLiteral("复制整行"));
     menu.addSeparator();
@@ -4003,6 +4921,29 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
         kLogEvent event;
         dbg << event
             << "[MonitorDock] ETW事件右键菜单取消。"
+            << eol;
+        return;
+    }
+
+    if (action == viewDetailAction)
+    {
+        kLogEvent event;
+        info << event
+            << "[MonitorDock] ETW事件右键操作：查看返回详情, row="
+            << row
+            << eol;
+        openEtwEventDetailViewerForRow(row);
+        return;
+    }
+
+    if (action == copyDetailAction)
+    {
+        const QString detailText = buildEtwRowDetailText(m_etwEventTable, row);
+        QApplication::clipboard()->setText(detailText);
+        kLogEvent event;
+        dbg << event
+            << "[MonitorDock] ETW事件右键操作：复制返回详情文本, row="
+            << row
             << eol;
         return;
     }

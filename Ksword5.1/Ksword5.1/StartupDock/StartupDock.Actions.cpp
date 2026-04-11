@@ -249,10 +249,14 @@ void StartupDock::showEntryContextMenu(
     QAction* openFileAction = contextMenu.addAction(createBlueIcon(":/Icon/process_open_folder.svg"), QStringLiteral("打开文件位置"));
     QAction* filePropertiesAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("转到文件属性"));
     QAction* openRegistryAction = contextMenu.addAction(createBlueIcon(":/Icon/file_find.svg"), QStringLiteral("打开注册表位置"));
+    QAction* gotoServiceAction = contextMenu.addAction(createBlueIcon(":/Icon/process_list.svg"), QStringLiteral("转到服务管理"));
     QAction* deleteAction = contextMenu.addAction(createBlueIcon(":/Icon/log_clear.svg"), QStringLiteral("删除项"));
     openFileAction->setEnabled(entry.canOpenFileLocation);
     filePropertiesAction->setEnabled(entry.canOpenFileLocation);
     openRegistryAction->setEnabled(entry.canOpenRegistryLocation);
+    gotoServiceAction->setEnabled(
+        entry.category == StartupCategory::Services
+        || entry.sourceTypeText == QStringLiteral("AutoService"));
     deleteAction->setEnabled(entry.canDelete);
 
     QAction* selectedAction = contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPos));
@@ -275,6 +279,31 @@ void StartupDock::showEntryContextMenu(
     else if (selectedAction == openRegistryAction)
     {
         openSelectedRegistryLocation(category, tableWidget);
+    }
+    else if (selectedAction == gotoServiceAction)
+    {
+        QString serviceNameText;
+        if (entry.uniqueIdText.startsWith(QStringLiteral("SERVICE|"), Qt::CaseInsensitive))
+        {
+            serviceNameText = entry.uniqueIdText.mid(QStringLiteral("SERVICE|").size()).trimmed();
+        }
+        if (serviceNameText.isEmpty())
+        {
+            const int lastSlashIndex = entry.locationText.lastIndexOf('\\');
+            serviceNameText = (lastSlashIndex >= 0)
+                ? entry.locationText.mid(lastSlashIndex + 1).trimmed()
+                : entry.itemNameText.trimmed();
+        }
+
+        QWidget* mainWindowWidget = window();
+        if (mainWindowWidget != nullptr && !serviceNameText.isEmpty())
+        {
+            QMetaObject::invokeMethod(
+                mainWindowWidget,
+                "focusServiceDockByName",
+                Qt::QueuedConnection,
+                Q_ARG(QString, serviceNameText));
+        }
     }
     else if (selectedAction == deleteAction)
     {

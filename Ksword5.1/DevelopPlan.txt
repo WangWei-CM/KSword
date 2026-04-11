@@ -1,2 +1,16 @@
-窗口Dock 桌面管理补全（窗口站/桌面/SessionId/SID/SID详情/右键转到桌面/跨窗口站Open尝试）：已完成
-启动项Dock 注册表增强（按注册表位置默认展开树结构 / 扩展 Autoruns 风格注册表与 WMI/Winsock 来源 / 统一详情弹窗 / 转到文件属性）：已完成
+ServiceDock 模块骨架与主窗口接入（新增独立 ServiceDock 文件拆分 / MainWindow 注册与懒加载 / 顶部工具栏+左列表+右详情页基础布局 / 图标按钮与 tooltip / 日志与 kPro 基础接线）：已完成
+ServiceDock 服务枚举与主列表一期（异步枚举 SERVICE_WIN32_OWN_PROCESS 与 SERVICE_WIN32_SHARE_PROCESS / 搜索过滤排序 / 运行中与自动启动等快捷筛选 / 状态栏统计 / 行图标与基础高亮）：已完成
+ServiceDock 基本信息页与配置页一期（QueryServiceConfigW + QueryServiceConfig2W 读取描述/延迟自动启动/对象账户/错误控制/服务类型 / 结构化展示基础字段 / 保留刷新当前服务能力）：已完成
+ServiceDock 服务控制动作一期（启动/停止/暂停/继续/刷新状态 / 修改启动类型 / Pending 状态保护 / 高风险动作二次确认 / 操作完成后自动刷新 / 全链路 kLogEvent）：已完成
+ServiceDock 进程联动页（运行中服务 PID 关联 / 宿主进程信息 / svchost 分组与同宿主服务列表 / 跳转进程详情 / 跳转句柄页 PID 过滤）：已完成
+ServiceDock 注册表与文件联动（定位 HKLM\\SYSTEM\\CurrentControlSet\\Services\\<ServiceName> / 打开 BinaryPath 与 ServiceDll / 转到 FileDock 文件属性与 PE 分析 / 从 StartupDock 增加“转到服务管理”入口）：已完成
+ServiceDock 依赖页（枚举 DependOnService/DependOnGroup 与反向依赖 / 树状展示依赖链 / 标记未运行与缺失依赖 / 双击跳转到目标服务详情）：已完成
+ServiceDock 失败动作页（读取 FailureActions / FailureActionsFlag / ResetPeriod / RebootMessage / Command / 结构化展示第1次第2次后续失败动作）：已完成
+ServiceDock 触发器页（读取 SERVICE_CONFIG_TRIGGER_INFO / 解析常见 Trigger 类型与 Action / 展示 Trigger GUID、子类型、数据项 / 原始值与友好文本并存）：已完成
+ServiceDock 安全页一期（读取 ServiceSidType / RequiredPrivileges / LaunchProtected / 基础 SDDL 概览 / 当前令牌是否具备 Start/Stop/ChangeConfig/Delete 权限的可见化判断）：已完成
+ServiceDock 异常审计与风险标签（文件不存在 / ServiceDll 缺失 / 无签名 / 非微软自动启动 / 异常账户 / 可疑失败命令 / 配置缺失 / 风险列、颜色与快捷过滤）：已完成
+ServiceDock 导出与快照能力（导出当前列表与单服务完整配置为 TSV/JSON / 保留服务静态配置缓存 / 支持当前服务轻量刷新与全量刷新分层）：已完成
+ServiceDock 收尾优化与审计（细化 tooltip 与按钮禁用态 / 统一详情页样式 / 代码拆分控制单文件体积 / 编译验证 / 回归审计与补注释）：已完成
+MonitorDock 进程定向监控页（新增首个“进程定向”标签页 / 允许选择一个或多个目标进程 / 固定启用宽覆盖 ETW Provider + 进程快照辅助 / 只保留与目标进程树相关事件 / 事件筛选器与导出 / 多文件拆分 / 编译验证与审计）：已完成
+MonitorDock 监控体验增强（统一只读文本详情查看窗口 / ETW 与进程定向监控支持双击+右键查看返回详情 / WMI 监控结果导出到文件 / ETW/WMI 交互体验统一 / 不执行构建验证）：已完成
+MonitorDock 导出与详情复制统一（ETW 导出仅导出当前可见结果 / WMI ETW 进程定向监控统一增加“复制返回详情文本” / 不执行构建验证）：已完成

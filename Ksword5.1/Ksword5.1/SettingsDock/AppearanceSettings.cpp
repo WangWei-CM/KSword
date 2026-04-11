@@ -8,8 +8,31 @@
 #include <QJsonObject>
 #include <QStringList>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
 namespace
 {
+    // resolveExecutableDirectoryPath 作用：
+    // - 在 QApplication 尚未创建时，仍可直接拿到当前 exe 所在目录；
+    // - 供启动前读取配置文件时参与候选路径探测。
+    // 返回：exe 所在目录绝对路径；失败时返回空字符串。
+    QString resolveExecutableDirectoryPath()
+    {
+        wchar_t executablePathBuffer[MAX_PATH] = {};
+        const DWORD pathLength = ::GetModuleFileNameW(nullptr, executablePathBuffer, MAX_PATH);
+        if (pathLength == 0 || pathLength >= MAX_PATH)
+        {
+            return QString();
+        }
+
+        // executablePathText 作用：承载当前进程 exe 的完整绝对路径文本。
+        const QString executablePathText = QString::fromWCharArray(executablePathBuffer, static_cast<int>(pathLength));
+        return QFileInfo(executablePathText).absolutePath();
+    }
+
     // appendUniquePath 作用：
     // - 向候选路径列表追加“去重后的规范路径”；
     // - 使用大小写不敏感比较，兼容 Windows 路径规则。
@@ -71,7 +94,9 @@ namespace
             }
         };
 
+        // 先用当前工作目录与 exe 目录做探测，保证 pre-Qt 阶段也能稳定读取配置。
         appendFromStartPath(QDir::currentPath());
+        appendFromStartPath(resolveExecutableDirectoryPath());
         appendFromStartPath(QCoreApplication::applicationDirPath());
         return candidateRootPaths;
     }
@@ -174,7 +199,7 @@ namespace
     }
 
     // buildDefaultSettings 作用：
-    // - 统一创建默认外观设置，避免重复硬编码。
+    // - 统一创建默认界面与启动设置，避免重复硬编码。
     // 调用方式：读取失败或字段缺失时使用。
     // 返回：默认配置结构体。
     ks::settings::AppearanceSettings buildDefaultSettings()
@@ -184,6 +209,8 @@ namespace
         defaultSettings.backgroundImagePath = QStringLiteral("style/ksword_background.png");
         defaultSettings.backgroundOpacityPercent = 35;
         defaultSettings.startupDefaultTabKey = QStringLiteral("welcome");
+        defaultSettings.launchMaximizedOnStartup = false;
+        defaultSettings.autoRequestAdminOnStartup = false;
         return defaultSettings;
     }
 }
@@ -293,6 +320,22 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
         ? QStringLiteral("welcome")
         : startupDefaultTabKeyText;
 
+    // launchMaximizedOnStartup 作用：读取“启动时最大化”开关，并兼容旧版 startup_full_screen 字段。
+    if (rootObject.contains(QStringLiteral("startup_maximized")))
+    {
+        loadedSettings.launchMaximizedOnStartup = rootObject.value(QStringLiteral("startup_maximized"))
+            .toBool(loadedSettings.launchMaximizedOnStartup);
+    }
+    else
+    {
+        loadedSettings.launchMaximizedOnStartup = rootObject.value(QStringLiteral("startup_full_screen"))
+            .toBool(loadedSettings.launchMaximizedOnStartup);
+    }
+
+    // autoRequestAdminOnStartup 作用：读取“启动时自动请求管理员权限”开关，缺失时回退 false。
+    loadedSettings.autoRequestAdminOnStartup = rootObject.value(QStringLiteral("startup_auto_request_admin"))
+        .toBool(loadedSettings.autoRequestAdminOnStartup);
+
     return loadedSettings;
 }
 
@@ -325,6 +368,8 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
         settings.startupDefaultTabKey.trimmed().isEmpty()
         ? QStringLiteral("welcome")
         : settings.startupDefaultTabKey.trimmed().toLower());
+    rootObject.insert(QStringLiteral("startup_maximized"), settings.launchMaximizedOnStartup);
+    rootObject.insert(QStringLiteral("startup_auto_request_admin"), settings.autoRequestAdminOnStartup);
 
     const QJsonDocument jsonDocument(rootObject);
     const QByteArray jsonBytes = jsonDocument.toJson(QJsonDocument::Indented);
