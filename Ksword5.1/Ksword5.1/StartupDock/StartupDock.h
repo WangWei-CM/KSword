@@ -176,6 +176,7 @@ private:
     QPushButton* m_copyButton = nullptr;      // m_copyButton：复制按钮。
     QLineEdit* m_filterEdit = nullptr;        // m_filterEdit：关键词过滤输入框。
     QCheckBox* m_hideMicrosoftCheck = nullptr; // m_hideMicrosoftCheck：隐藏微软项开关。
+    QCheckBox* m_hideEmptyPathCheck = nullptr; // m_hideEmptyPathCheck：隐藏无条目注册表路径开关。
     QLabel* m_statusLabel = nullptr;          // m_statusLabel：摘要状态文本。
 
     // ===================== 分类页表格 =====================

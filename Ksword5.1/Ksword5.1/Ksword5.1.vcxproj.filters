@@ -259,6 +259,9 @@
     <ClCompile Include="StartupDock\StartupDock.Helpers.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="StartupDock\StartupDock.RegistryCatalog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="StartupDock\StartupDock.Registry.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

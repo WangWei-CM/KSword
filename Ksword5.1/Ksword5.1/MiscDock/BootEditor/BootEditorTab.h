@@ -85,6 +85,9 @@ private:
     // ===================== 交互动作 =====================
     void applySelectedEntryChanges();
     void applyBootManagerChanges();
+    void setLegacyBootForSelectedEntry();
+    void setLegacyBootForDefaultEntry();
+    void setStandardBootForSelectedEntry();
     void setSelectedAsDefaultEntry();
     void addSelectedToBootSequence();
     void createCopyFromSelectedEntry();
@@ -97,7 +100,6 @@ private:
     // ===================== 工具函数 =====================
     int currentEntryIndex() const;
     const BcdEntry* currentEntry() const;
-    bool ensureSelectionValid(bool showHintBox) const;
     bool entryMatchesFilter(const BcdEntry& entry) const;
     QString readElementValue(const BcdEntry& entry, const QStringList& candidateKeyList) const;
     bool readElementBool(
@@ -113,6 +115,10 @@ private:
         const QStringList& argumentList,
         const QString& operationText,
         bool showSuccessToast);
+    bool applyBootMenuPolicyByIdentifier(
+        const QString& identifierText,
+        const QString& policyValueText,
+        const QString& operationText);
 
     // ===================== 解析函数 =====================
     static QString normalizeElementKey(const QString& rawKeyText);
@@ -153,6 +159,10 @@ private:
     QLineEdit* m_localeEdit = nullptr;          // m_localeEdit：locale 字段编辑框。
     QComboBox* m_bootMenuPolicyCombo = nullptr; // m_bootMenuPolicyCombo：bootmenupolicy 选项框。
     QSpinBox* m_timeoutSpin = nullptr;          // m_timeoutSpin：bootmgr timeout 配置。
+    QLabel* m_legacyModeHintLabel = nullptr;    // m_legacyModeHintLabel：传统引导说明标签。
+    QPushButton* m_setLegacyForSelectedButton = nullptr; // m_setLegacyForSelectedButton：对当前条目启用 Legacy/F8。
+    QPushButton* m_setLegacyForDefaultButton = nullptr;  // m_setLegacyForDefaultButton：对默认条目启用 Legacy/F8。
+    QPushButton* m_setStandardForSelectedButton = nullptr; // m_setStandardForSelectedButton：对当前条目恢复 Standard。
 
     // ===================== 高级开关区 =====================
     QCheckBox* m_testSigningCheck = nullptr;       // m_testSigningCheck：testsigning 开关。
@@ -179,4 +189,3 @@ private:
     QString m_lastEnumRawText;              // m_lastEnumRawText：最近一次完整原始枚举文本。
     QString m_defaultIdentifierText;        // m_defaultIdentifierText：当前默认启动项标识符缓存。
 };
-

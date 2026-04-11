@@ -5,7 +5,7 @@
 
 // landingCopyMap 对象用途：
 // - 保存首页全部可切换文案；
-// - 结构按“主舞台 + 预告板块”组织，避免散乱硬编码。
+// - 结构按“主舞台 + Changelog”组织，避免散乱硬编码。
 const landingCopyMap = {
     zh: {
         overviewLink: "产品总览",
@@ -17,28 +17,11 @@ const landingCopyMap = {
         ctaSecondary: "查看截图规范",
         scrollTip: "每个能力板块都提供独立页面与大图展示。",
         stageCaption: "产品主视觉（可替换为宣传大图）",
-        stripTitle: "核心模块抢先看",
-        stripDesc: "每个板块均有独立页面，采用左文右图的大型展示布局。",
-        stripItems: [
-            {
-                title: "进程控制与诊断",
-                desc: "实时进程枚举、控制动作与多层详情联动，适合快速定位系统异常。",
-                action: "打开页面",
-                fallback: "进程模块主展示图占位"
-            },
-            {
-                title: "网络观测与管控",
-                desc: "流量监控、连接管理、限速规则与 HTTPS 解析整合在同一工作区。",
-                action: "打开页面",
-                fallback: "网络模块主展示图占位"
-            },
-            {
-                title: "内存分析与定位",
-                desc: "从附加进程到地址定位，覆盖区域浏览、搜索扫描与十六进制查看。",
-                action: "打开页面",
-                fallback: "内存模块主展示图占位"
-            }
-        ]
+        changelogTitle: "更新日志",
+        changelogDesc: "读取网站根目录 change.log 文件内容。",
+        changelogLoading: "正在读取 change.log ...",
+        changelogEmpty: "change.log 目前为空。",
+        changelogError: "读取 change.log 失败，请稍后重试。"
     },
     en: {
         overviewLink: "Overview",
@@ -50,29 +33,22 @@ const landingCopyMap = {
         ctaSecondary: "Screenshot Guide",
         scrollTip: "Every capability block has its own dedicated page with large visual sections.",
         stageCaption: "Main product visual (replace with your hero image)",
-        stripTitle: "Featured Modules",
-        stripDesc: "Each module is split into an independent page using a keynote-style left-copy right-image layout.",
-        stripItems: [
-            {
-                title: "Process Control & Diagnostics",
-                desc: "Real-time process enumeration, control actions, and deep linked details for fast troubleshooting.",
-                action: "Open Page",
-                fallback: "Process module hero image placeholder"
-            },
-            {
-                title: "Network Observation & Governance",
-                desc: "Traffic monitor, connection control, rate limits, and HTTPS analysis in one workspace.",
-                action: "Open Page",
-                fallback: "Network module hero image placeholder"
-            },
-            {
-                title: "Memory Analysis & Localization",
-                desc: "From process attach to address localization with region browsing, scans, and hex viewer.",
-                action: "Open Page",
-                fallback: "Memory module hero image placeholder"
-            }
-        ]
+        changelogTitle: "Changelog",
+        changelogDesc: "Read content from the website root change.log file.",
+        changelogLoading: "Loading change.log ...",
+        changelogEmpty: "change.log is currently empty.",
+        changelogError: "Failed to load change.log. Please try again later."
     }
+};
+
+// landingChangeLogState 变量用途：
+// - 维护 changelog 文件读取状态；
+// - 避免重复请求。
+const landingChangeLogState = {
+    started: false,
+    loaded: false,
+    failed: false,
+    text: ""
 };
 
 // setTextIfExists 函数用途：
@@ -85,8 +61,76 @@ function setTextIfExists(selectorText, textValue) {
     }
 }
 
+// getCurrentLandingLanguage 函数用途：
+// - 读取当前语言代码；
+// - 在语言模块未就绪时回退中文。
+function getCurrentLandingLanguage() {
+    if (window.kswordLanguage && typeof window.kswordLanguage.getLanguage === "function") {
+        return window.kswordLanguage.getLanguage();
+    }
+    return "zh";
+}
+
+// renderLandingChangelog 函数用途：
+// - 按当前状态渲染 changelog 面板文本。
+// - 传入：copyText(当前语言文案)。
+function renderLandingChangelog(copyText) {
+    setTextIfExists("#landing-changelog-title", copyText.changelogTitle);
+    setTextIfExists("#landing-changelog-desc", copyText.changelogDesc);
+
+    const changelogContentElement = document.querySelector("#landing-changelog-content");
+    if (!changelogContentElement) {
+        return;
+    }
+
+    if (!landingChangeLogState.started || (!landingChangeLogState.loaded && !landingChangeLogState.failed)) {
+        changelogContentElement.textContent = copyText.changelogLoading;
+        return;
+    }
+
+    if (landingChangeLogState.failed) {
+        changelogContentElement.textContent = copyText.changelogError;
+        return;
+    }
+
+    const normalizedLogText = landingChangeLogState.text.replace(/\r\n/g, "\n").trim();
+    changelogContentElement.textContent = normalizedLogText || copyText.changelogEmpty;
+}
+
+// ensureLandingChangelogLoaded 函数用途：
+// - 只请求一次 change.log；
+// - 请求结束后按当前语言刷新显示。
+function ensureLandingChangelogLoaded() {
+    if (landingChangeLogState.started) {
+        return;
+    }
+
+    landingChangeLogState.started = true;
+
+    fetch("./change.log?ts=" + String(Date.now()), { cache: "no-store" })
+        .then(function onResponse(response) {
+            if (!response.ok) {
+                throw new Error("HTTP " + String(response.status));
+            }
+            return response.text();
+        })
+        .then(function onTextLoaded(fileText) {
+            landingChangeLogState.loaded = true;
+            landingChangeLogState.failed = false;
+            landingChangeLogState.text = typeof fileText === "string" ? fileText : "";
+        })
+        .catch(function onLoadFailed() {
+            landingChangeLogState.loaded = false;
+            landingChangeLogState.failed = true;
+            landingChangeLogState.text = "";
+        })
+        .finally(function onLoadSettled() {
+            renderLandingCopy(getCurrentLandingLanguage());
+        });
+}
+
 // renderLandingCopy 函数用途：
-// - 根据当前语言刷新首页主舞台与预告板块文案。
+// - 根据当前语言刷新首页主舞台与 changelog 文案。
 // - 传入：languageCode("zh" 或 "en")。
 function renderLandingCopy(languageCode) {
     const copyText = landingCopyMap[languageCode] || landingCopyMap.zh;
@@ -99,8 +143,6 @@ function renderLandingCopy(languageCode) {
     setTextIfExists("#landing-cta-secondary", copyText.ctaSecondary);
     setTextIfExists("#landing-scroll-tip", copyText.scrollTip);
     setTextIfExists("#landing-stage-caption", copyText.stageCaption);
-    setTextIfExists("#landing-strip-title", copyText.stripTitle);
-    setTextIfExists("#landing-strip-desc", copyText.stripDesc);
 
     // 指标文本：固定 3 项，保持首页首屏简洁。
     if (Array.isArray(copyText.metrics) && copyText.metrics.length >= 3) {
@@ -109,17 +151,7 @@ function renderLandingCopy(languageCode) {
         setTextIfExists("#landing-metric-3", copyText.metrics[2]);
     }
 
-    // 三个抢先看板块文案同步。
-    if (Array.isArray(copyText.stripItems) && copyText.stripItems.length >= 3) {
-        for (let stripIndex = 0; stripIndex < 3; stripIndex += 1) {
-            const stripItem = copyText.stripItems[stripIndex];
-            const selectorPrefix = "#landing-strip-" + String(stripIndex + 1);
-            setTextIfExists(selectorPrefix + "-title", stripItem.title || "");
-            setTextIfExists(selectorPrefix + "-desc", stripItem.desc || "");
-            setTextIfExists(selectorPrefix + "-action", stripItem.action || "");
-            setTextIfExists(selectorPrefix + "-fallback", stripItem.fallback || "");
-        }
-    }
+    renderLandingChangelog(copyText);
 }
 
 // registerLandingLanguageObserver 函数用途：
@@ -127,12 +159,15 @@ function renderLandingCopy(languageCode) {
 function registerLandingLanguageObserver() {
     if (!window.kswordLanguage) {
         renderLandingCopy("zh");
+        ensureLandingChangelogLoaded();
         return;
     }
 
     window.kswordLanguage.onLanguageChange(function onLandingLanguageChanged(languageCode) {
         renderLandingCopy(languageCode);
     });
+
+    ensureLandingChangelogLoaded();
 }
 
 // DOMContentLoaded 监听用途：

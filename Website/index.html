@@ -52,69 +52,12 @@
             </section>
         </main>
 
-        <h2 class="landing-strip-title reveal-on-load" style="--reveal-delay: 220ms;" id="landing-strip-title">核心模块抢先看</h2>
-        <p class="landing-strip-desc reveal-on-load" style="--reveal-delay: 250ms;" id="landing-strip-desc">每个板块均有独立页面，采用左文右图的大型展示布局。</p>
-
-        <section class="landing-strips">
-            <article class="teaser-strip reveal-on-load" style="--reveal-delay: 300ms;">
-                <div class="teaser-copy">
-                    <h3 class="teaser-title" id="landing-strip-1-title">进程控制与诊断</h3>
-                    <p class="teaser-text" id="landing-strip-1-desc">实时进程枚举、控制动作与多层详情联动，适合快速定位系统异常。</p>
-                    <a class="action-button primary" id="landing-strip-1-action" href="./pages/process.html" title="打开进程模块页">打开页面</a>
-                </div>
-                <div class="teaser-media">
-                    <img
-                        class="teaser-image"
-                        src="./Images/tab_process_main_table.png"
-                        alt="进程模块展示图"
-                        onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"
-                    >
-                    <div class="media-fallback">
-                        <div class="fallback-name">tab_process_main_table.png</div>
-                        <div id="landing-strip-1-fallback">进程模块主展示图占位</div>
-                    </div>
-                </div>
-            </article>
-
-            <article class="teaser-strip reveal-on-load" style="--reveal-delay: 360ms;">
-                <div class="teaser-copy">
-                    <h3 class="teaser-title" id="landing-strip-2-title">网络观测与管控</h3>
-                    <p class="teaser-text" id="landing-strip-2-desc">流量监控、连接管理、限速规则与 HTTPS 解析整合在同一工作区。</p>
-                    <a class="action-button primary" id="landing-strip-2-action" href="./pages/network.html" title="打开网络模块页">打开页面</a>
-                </div>
-                <div class="teaser-media">
-                    <img
-                        class="teaser-image"
-                        src="./Images/tab_network_monitor.png"
-                        alt="网络模块展示图"
-                        onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"
-                    >
-                    <div class="media-fallback">
-                        <div class="fallback-name">tab_network_monitor.png</div>
-                        <div id="landing-strip-2-fallback">网络模块主展示图占位</div>
-                    </div>
-                </div>
-            </article>
-
-            <article class="teaser-strip reveal-on-load" style="--reveal-delay: 420ms;">
-                <div class="teaser-copy">
-                    <h3 class="teaser-title" id="landing-strip-3-title">内存分析与定位</h3>
-                    <p class="teaser-text" id="landing-strip-3-desc">从附加进程到地址定位，覆盖区域浏览、搜索扫描与十六进制查看。</p>
-                    <a class="action-button primary" id="landing-strip-3-action" href="./pages/memory.html" title="打开内存模块页">打开页面</a>
-                </div>
-                <div class="teaser-media">
-                    <img
-                        class="teaser-image"
-                        src="./Images/tab_memory_viewer.png"
-                        alt="内存模块展示图"
-                        onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"
-                    >
-                    <div class="media-fallback">
-                        <div class="fallback-name">tab_memory_viewer.png</div>
-                        <div id="landing-strip-3-fallback">内存模块主展示图占位</div>
-                    </div>
-                </div>
-            </article>
+        <section class="landing-changelog reveal-on-load" style="--reveal-delay: 230ms;" aria-label="Website Changelog">
+            <div class="landing-changelog-head">
+                <h2 class="landing-changelog-title" id="landing-changelog-title">更新日志</h2>
+                <p class="landing-changelog-desc" id="landing-changelog-desc">读取网站根目录 change.log 文件内容。</p>
+            </div>
+            <pre class="landing-changelog-content" id="landing-changelog-content">正在读取 change.log ...</pre>
         </section>
     </div>
 
@@ -124,4 +67,3 @@
     <script src="./js/landing.js"></script>
 </body>
 </html>
-

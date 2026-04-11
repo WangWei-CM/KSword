@@ -77,6 +77,13 @@ namespace ks::ui
         // - 作用：返回标题栏固定高度，供主窗口命中测试复用。
         int titleBarHeight() const;
 
+        // setCustomRightWidget：
+        // - 作用：在右侧控制按钮前插入一个自定义控件（例如权限状态按钮组）；
+        // - 调用：MainWindow 初始化权限按钮后调用；
+        // - 传入 customRightWidget：要挂载的自定义控件，传 nullptr 表示移除；
+        // - 传出：无。
+        void setCustomRightWidget(QWidget* customRightWidget);
+
     signals:
         // requestTogglePinned：
         // - 作用：请求切换置顶状态；
@@ -108,6 +115,11 @@ namespace ks::ui
         // resizeEvent：
         // - 作用：窗口尺寸变化时保持中间输入框宽度=标题栏宽度的 1/3。
         void resizeEvent(QResizeEvent* resizeEventPointer) override;
+
+        // mousePressEvent：
+        // - 作用：在可拖动区域按下左键时主动发起系统拖动；
+        // - 说明：作为 WM_NCHITTEST 的兜底链路，修复“标题栏无法拖动”。
+        void mousePressEvent(QMouseEvent* mouseEventPointer) override;
 
         // mouseDoubleClickEvent：
         // - 作用：双击标题栏可拖动区域时请求最大化/还原。
@@ -158,6 +170,7 @@ namespace ks::ui
 
         QWidget* m_rightWidget = nullptr;         // m_rightWidget：右侧按钮区容器。
         QHBoxLayout* m_rightLayout = nullptr;     // m_rightLayout：右侧按钮区布局。
+        QWidget* m_customRightWidget = nullptr;   // m_customRightWidget：右侧控制按钮前的自定义扩展控件。
         QPushButton* m_pinButton = nullptr;       // m_pinButton：置顶切换图钉按钮。
         QPushButton* m_minButton = nullptr;       // m_minButton：最小化按钮。
         QPushButton* m_maxButton = nullptr;       // m_maxButton：最大化/还原按钮。
@@ -172,4 +185,3 @@ namespace ks::ui
         bool m_darkModeEnabled = false;           // m_darkModeEnabled：当前是否深色主题。
     };
 }
-

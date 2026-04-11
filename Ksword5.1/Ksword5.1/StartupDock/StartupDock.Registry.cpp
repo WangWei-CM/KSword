@@ -858,47 +858,6 @@ namespace
     }
 }
 
-QStringList startup_dock_detail::buildKnownStartupRegistryLocationList()
-{
-    QStringList locationList;
-    auto appendLocation = [&locationList](HKEY rootKey, const wchar_t* subKeyText)
-        {
-            const QString locationText = buildRegistryLocationText(
-                rootKey,
-                QString::fromWCharArray(subKeyText));
-            if (!locationList.contains(locationText))
-            {
-                locationList.push_back(locationText);
-            }
-        };
-
-    for (const RunKeySpec& keySpec : buildRunKeySpecList())
-    {
-        appendLocation(keySpec.rootKey, keySpec.subKeyText);
-    }
-
-    appendLocation(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx");
-    appendLocation(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx");
-    appendLocation(HKEY_LOCAL_MACHINE, L"Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx");
-
-    for (const SingleValueSpec& valueSpec : buildSingleValueSpecList())
-    {
-        appendLocation(valueSpec.rootKey, valueSpec.subKeyText);
-    }
-
-    for (const ValueEnumSpec& valueSpec : buildValueEnumSpecList())
-    {
-        appendLocation(valueSpec.rootKey, valueSpec.subKeyText);
-    }
-
-    for (const SubKeyValueSpec& valueSpec : buildSubKeyValueSpecList())
-    {
-        appendLocation(valueSpec.rootKey, valueSpec.subKeyText);
-    }
-
-    return locationList;
-}
-
 void StartupDock::appendLogonEntries(std::vector<StartupEntry>* entryListOut)
 {
     if (entryListOut == nullptr)

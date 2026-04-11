@@ -3,6 +3,9 @@
     <qresource prefix="/Image">
         <file>Resource/Logo/MainLogo.png</file>
     </qresource>
+    <qresource prefix="/Data">
+        <file alias="startup_registry_locations.txt">StartupDock/startup_registry_locations.txt</file>
+    </qresource>
     <qresource prefix="/Icon">
         <!-- 日志面板使用的图标资源（均来自 Resource/Icon 图标库） -->
         <file alias="log_export.svg">Resource/Icon/file/file_export_line.svg</file>
@@ -34,7 +37,7 @@
         <file alias="titlebar_pin_fill.svg">Resource/Icon/file/pin_fill.svg</file>
         <file alias="titlebar_minimize.svg">Resource/Icon/system/minimize_line.svg</file>
         <file alias="titlebar_maximize.svg">Resource/Icon/media/fullscreen_line.svg</file>
-        <file alias="titlebar_restore.svg">Resource/Icon/media/fullscreen_exit_line.svg</file>
+        <file alias="titlebar_restore.svg">Resource/Icon/system/restore_line.svg</file>
         <file alias="titlebar_close.svg">Resource/Icon/system/close_line.svg</file>
 
         <!-- 句柄面板图标资源 -->

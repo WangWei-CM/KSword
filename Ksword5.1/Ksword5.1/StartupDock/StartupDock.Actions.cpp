@@ -158,6 +158,10 @@ void StartupDock::initializeConnections()
         {
             applyFilterAndRefresh();
         });
+    connect(m_hideEmptyPathCheck, &QCheckBox::toggled, this, [this](const bool)
+        {
+            applyFilterAndRefresh();
+        });
 
     const auto bindTableContextMenu =
         [this](const StartupCategory category, QTableWidget* tableWidget)
