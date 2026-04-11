@@ -156,7 +156,7 @@ namespace
             "  border:1px solid %3;"
             "}"
             "QMenu::item{"
-            "  padding:6px 18px;"
+            "  padding:3px 16px 3px 12px;"
             "  background:transparent;"
             "}"
             "QMenu::item:selected{"
@@ -170,13 +170,43 @@ namespace
             "QMenu::separator{"
             "  height:1px;"
             "  background:%3;"
-            "  margin:4px 8px;"
+            "  margin:2px 6px;"
             "}")
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::TextPrimaryHex())
             .arg(KswordTheme::BorderHex())
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(disabledTextColor);
+    }
+
+    // buildOpaqueStandaloneDialogStyle 作用：
+    // - 为“独立弹窗”覆盖父级 Dock 透明样式，防止浅色主题下出现黑底；
+    // - 强制编辑区/表格区使用 palette(base) 作为不透明背景。
+    QString buildOpaqueStandaloneDialogStyle(const QString& dialogObjectName)
+    {
+        return QStringLiteral(
+            "QDialog#%1{"
+            "  background-color:palette(window) !important;"
+            "  color:palette(text) !important;"
+            "}"
+            "QDialog#%1 QTabWidget::pane{"
+            "  background-color:palette(window) !important;"
+            "  border:1px solid palette(mid) !important;"
+            "}"
+            "QDialog#%1 QPlainTextEdit,"
+            "QDialog#%1 QTextEdit,"
+            "QDialog#%1 QTreeWidget,"
+            "QDialog#%1 QTableWidget,"
+            "QDialog#%1 QAbstractScrollArea,"
+            "QDialog#%1 QAbstractScrollArea::viewport{"
+            "  background-color:palette(base) !important;"
+            "  color:palette(text) !important;"
+            "}"
+            "QDialog#%1 QHeaderView::section{"
+            "  background-color:palette(window) !important;"
+            "  color:palette(text) !important;"
+            "}")
+            .arg(dialogObjectName);
     }
 
     // buildLogPreviewText 作用：
@@ -586,6 +616,10 @@ namespace
             , m_filePath(filePath)
         {
             setAttribute(Qt::WA_DeleteOnClose, true);
+            setObjectName(QStringLiteral("FileDetailDialogRoot"));
+            setAttribute(Qt::WA_StyledBackground, true);
+            setAutoFillBackground(true);
+            setStyleSheet(buildOpaqueStandaloneDialogStyle(objectName()));
             setWindowTitle(QStringLiteral("文件属性 - %1").arg(QFileInfo(filePath).fileName()));
             resize(980, 680);
 

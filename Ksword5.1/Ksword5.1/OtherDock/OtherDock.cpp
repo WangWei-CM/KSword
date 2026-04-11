@@ -128,6 +128,36 @@ namespace
             .arg(KswordTheme::BorderHex());
     }
 
+    // buildOpaqueWindowDetailDialogStyle 作用：
+    // - 覆盖父级 Dock 透明样式，避免“窗口详细信息”在浅色主题出现黑底；
+    // - 强制文本编辑器/表格/滚动区使用不透明背景。
+    QString buildOpaqueWindowDetailDialogStyle(const QString& dialogObjectName)
+    {
+        return QStringLiteral(
+            "QDialog#%1{"
+            "  background-color:palette(window) !important;"
+            "  color:palette(text) !important;"
+            "}"
+            "QDialog#%1 QTabWidget::pane{"
+            "  background-color:palette(window) !important;"
+            "  border:1px solid palette(mid) !important;"
+            "}"
+            "QDialog#%1 QPlainTextEdit,"
+            "QDialog#%1 QTextEdit,"
+            "QDialog#%1 QTreeWidget,"
+            "QDialog#%1 QTableWidget,"
+            "QDialog#%1 QAbstractScrollArea,"
+            "QDialog#%1 QAbstractScrollArea::viewport{"
+            "  background-color:palette(base) !important;"
+            "  color:palette(text) !important;"
+            "}"
+            "QDialog#%1 QHeaderView::section{"
+            "  background-color:palette(window) !important;"
+            "  color:palette(text) !important;"
+            "}")
+            .arg(dialogObjectName);
+    }
+
     // 转换布尔文本：统一“是/否”显示，避免各处写法不一致。
     QString boolText(const bool value)
     {
@@ -1077,6 +1107,10 @@ public:
         , m_info(info)
     {
         setAttribute(Qt::WA_DeleteOnClose, true);
+        setObjectName(QStringLiteral("WindowDetailDialogRoot"));
+        setAttribute(Qt::WA_StyledBackground, true);
+        setAutoFillBackground(true);
+        setStyleSheet(buildOpaqueWindowDetailDialogStyle(objectName()));
         setWindowTitle(QStringLiteral("窗口属性 - [%1] (%2)")
             .arg(info.titleText.isEmpty() ? QStringLiteral("<无标题>") : info.titleText,
                 hwndToText(info.hwndValue)));
