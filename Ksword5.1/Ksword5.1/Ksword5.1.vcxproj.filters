@@ -157,6 +157,9 @@
     <ClCompile Include="NetworkDock\NetworkDock.MultiThreadDownload.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="NetworkDock\NetworkDock.MultiThreadDownload.Clipboard.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="NetworkDock\NetworkDock.HttpsAnalyze.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

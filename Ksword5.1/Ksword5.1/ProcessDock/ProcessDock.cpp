@@ -63,6 +63,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <TlHelp32.h>
 
 namespace
 {
@@ -132,6 +133,55 @@ namespace
         default:
             return "Unknown";
         }
+    }
+
+    // isProcessPresentBySnapshot 作用：
+    // - 通过 Toolhelp 进程快照判断目标 PID 当前是否仍存在；
+    // - 用于“结束进程组合动作”每一步后的真实存活判定。
+    // 调用方式：ProcessDock::executeTerminateProcessAction 内部循环调用。
+    // 参数 targetPid：目标进程 PID。
+    // 参数 queryOkOut：快照查询是否成功（可空）。
+    // 返回值：true=进程仍存在（或查询失败时保守视为存在）；false=进程不存在。
+    bool isProcessPresentBySnapshot(const std::uint32_t targetPid, bool* const queryOkOut)
+    {
+        if (queryOkOut != nullptr)
+        {
+            *queryOkOut = false;
+        }
+
+        // snapshotHandle 用途：承接系统进程快照句柄，供后续枚举 PID。
+        const HANDLE snapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshotHandle == INVALID_HANDLE_VALUE)
+        {
+            return true;
+        }
+
+        // processEntry 用途：逐条读取进程快照记录并比较 PID。
+        PROCESSENTRY32W processEntry{};
+        processEntry.dwSize = sizeof(processEntry);
+        if (::Process32FirstW(snapshotHandle, &processEntry) == FALSE)
+        {
+            ::CloseHandle(snapshotHandle);
+            return true;
+        }
+
+        // processPresent 用途：记录目标 PID 是否在当前快照里被命中。
+        bool processPresent = false;
+        do
+        {
+            if (processEntry.th32ProcessID == targetPid)
+            {
+                processPresent = true;
+                break;
+            }
+        } while (::Process32NextW(snapshotHandle, &processEntry) != FALSE);
+
+        ::CloseHandle(snapshotHandle);
+        if (queryOkOut != nullptr)
+        {
+            *queryOkOut = true;
+        }
+        return processPresent;
     }
 
     // usageRatioToHighlightColor 作用：
@@ -1241,7 +1291,7 @@ void ProcessDock::initializeConnections()
 
     // Alt+E 作用：
     // - 提供与任务管理器类似的快速结束进程快捷键；
-    // - 仅在“进程列表”页且存在选中行时执行 TerminateProcess。
+    // - 仅在“进程列表”页且存在选中行时执行“结束进程组合动作”。
     QShortcut* terminateShortcut = new QShortcut(QKeySequence(Qt::ALT | Qt::Key_E), this);
     terminateShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(terminateShortcut, &QShortcut::activated, this, [this]() {
@@ -1261,7 +1311,7 @@ void ProcessDock::initializeConnections()
 
         kLogEvent logEvent;
         info << logEvent
-            << "[ProcessDock] 触发快捷键 Alt+E，执行 TerminateProcess。"
+            << "[ProcessDock] 触发快捷键 Alt+E，执行结束进程组合动作。"
             << eol;
         executeTerminateProcessAction();
     });
@@ -2580,13 +2630,22 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QAction* copyRowAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_copy_row.svg"), "复制行");
     contextMenu.addSeparator();
 
-    // 结束进程二级菜单。
-    QMenu* killSubMenu = contextMenu.addMenu(blueTintedIcon(":/Icon/process_terminate.svg"), "结束进程");
-    QAction* taskkillAction = killSubMenu->addAction(blueTintedIcon(":/Icon/process_terminate.svg"), "Taskkill");
-    QAction* taskkillForceAction = killSubMenu->addAction(blueTintedIcon(":/Icon/process_terminate.svg"), "Taskkill /f");
-    QAction* terminateProcessAction = killSubMenu->addAction(blueTintedIcon(":/Icon/process_terminate.svg"), "TerminateProcess");
-    QAction* terminateThreadsAction = killSubMenu->addAction(blueTintedIcon(":/Icon/process_terminate.svg"), "TerminateThread(全部线程)");
-    QAction* injectInvalidShellcodeAction = killSubMenu->addAction(blueTintedIcon(":/Icon/process_terminate.svg"), "注入无效shellcode");
+    // 结束动作区：
+    // - 取消“结束进程”二级菜单，改为一级动作；
+    // - “结束进程”会按顺序执行 TerminateProcess + TerminateThread(全部线程)。
+    QAction* terminateProcessAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_terminate.svg"),
+        "结束进程");
+    QAction* taskkillAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_terminate.svg"),
+        "Taskkill");
+    QAction* taskkillForceAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_terminate.svg"),
+        "Taskkill /f");
+    QAction* injectInvalidShellcodeAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_terminate.svg"),
+        "注入无效shellcode");
+    contextMenu.addSeparator();
 
     QAction* suspendAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_suspend.svg"), "挂起进程");
     QAction* resumeAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_resume.svg"), "恢复进程");
@@ -2629,10 +2688,9 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
 
     if (selectedAction == copyCellAction) { copyCurrentCell(); }
     else if (selectedAction == copyRowAction) { copyCurrentRow(); }
+    else if (selectedAction == terminateProcessAction) { executeTerminateProcessAction(); }
     else if (selectedAction == taskkillAction) { executeTaskKillAction(false); }
     else if (selectedAction == taskkillForceAction) { executeTaskKillAction(true); }
-    else if (selectedAction == terminateProcessAction) { executeTerminateProcessAction(); }
-    else if (selectedAction == terminateThreadsAction) { executeTerminateThreadsAction(); }
     else if (selectedAction == injectInvalidShellcodeAction) { executeInjectInvalidShellcodeAction(); }
     else if (selectedAction == suspendAction) { executeSuspendAction(); }
     else if (selectedAction == resumeAction) { executeResumeAction(); }
@@ -3632,17 +3690,190 @@ void ProcessDock::executeTerminateProcessAction()
         return;
     }
 
-    std::string detailText;
-    const bool actionOk = ks::process::TerminateProcessByWin32(processRecord->pid, &detailText);
+    // targetPid 用途：固定本次动作的目标 PID，避免中途选中行变化影响执行对象。
+    const std::uint32_t targetPid = processRecord->pid;
     // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
     kLogEvent actionEvent;
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDock] TerminateProcess action, pid=" << processRecord->pid
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
+    info << actionEvent
+        << "[ProcessDock] 开始执行结束进程组合动作, pid=" << targetPid
         << eol;
-    showActionResultMessage("TerminateProcess", actionOk, detailText, actionEvent);
-    if (actionOk) requestAsyncRefresh(true);
+
+    // 先做一次进程存在性检查，避免对已退出 PID 执行无意义操作。
+    bool initialQueryOk = false;
+    bool processStillPresent = isProcessPresentBySnapshot(targetPid, &initialQueryOk);
+    if (!initialQueryOk)
+    {
+        warn << actionEvent
+            << "[ProcessDock] 结束进程前置存在性检查失败，将按“进程仍存在”继续处理, pid="
+            << targetPid
+            << eol;
+    }
+    if (!processStillPresent)
+    {
+        info << actionEvent
+            << "[ProcessDock] 目标进程已不存在，结束动作直接判定成功, pid="
+            << targetPid
+            << eol;
+        showActionResultMessage("结束进程", true, "目标进程已不存在，无需执行结束动作。", actionEvent);
+        requestAsyncRefresh(true);
+        return;
+    }
+
+    // kTerminateRoundLimit 用途：限制“全方法链”轮次，避免异常目标导致无限阻塞 UI。
+    constexpr int kTerminateRoundLimit = 2;
+    // processExited 用途：记录组合动作最终是否确认目标进程已退出。
+    bool processExited = false;
+    // actionDetailStream 用途：汇总每一轮、每一方法的细节，供最终统一输出。
+    std::ostringstream actionDetailStream;
+    actionDetailStream << "pid=" << targetPid;
+
+    // TerminateMethodEntry 作用：描述一个可执行的“结束进程原理方法”。
+    struct TerminateMethodEntry
+    {
+        const char* methodName = nullptr; // methodName：日志中显示的方法名。
+        std::function<bool(std::string*)> invokeMethod; // invokeMethod：方法调用体。
+    };
+
+    // terminateMethodList 作用：
+    // - 维护“结束进程原理”的顺序清单；
+    // - 按用户要求把所有方法串联到同一入口。
+    const std::vector<TerminateMethodEntry> terminateMethodList =
+    {
+        { "TerminateProcess(Kernel32)", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateProcessByWin32(targetPid, detailOut); } },
+        { "NtTerminateProcess/ZwTerminateProcess", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateProcessByNtNative(targetPid, detailOut); } },
+        { "WTSTerminateProcess(WTS API)", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateProcessByWtsApi(targetPid, detailOut); } },
+        { "WinStationTerminateProcess(winsta)", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateProcessByWinStationApi(targetPid, detailOut); } },
+        { "TerminateJobObject(Job)", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateProcessByJobObject(targetPid, detailOut); } },
+        { "NtTerminateJobObject/ZwTerminateJobObject", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateProcessByNtJobObject(targetPid, detailOut); } },
+        { "RmShutdown(Restart Manager)", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateProcessByRestartManager(targetPid, false, detailOut); } },
+        { "RmShutdown(Restart Manager, force)", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateProcessByRestartManager(targetPid, true, detailOut); } },
+        { "DuplicateHandle(-1)+TerminateProcess", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateProcessByDuplicateHandlePseudo(targetPid, detailOut); } },
+        { "TerminateThread(全部线程)", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateAllThreadsByPid(targetPid, detailOut); } },
+        { "NtTerminateThread/ZwTerminateThread(全部线程)", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateAllThreadsByPidNtNative(targetPid, detailOut); } },
+        { "DebugActiveProcess 调试附加", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateProcessByDebugAttach(targetPid, detailOut); } },
+        { "ntsd -c q -p <pid>", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateProcessByNtsdCommand(targetPid, detailOut); } },
+        { "NtUnmapViewOfSection 卸载 ntdll.dll", [targetPid](std::string* detailOut)
+            { return ks::process::TerminateProcessByNtUnmapNtdll(targetPid, detailOut); } }
+    };
+
+    for (int roundIndex = 0; roundIndex < kTerminateRoundLimit && !processExited; ++roundIndex)
+    {
+        // roundNumber 用途：日志中的轮次编号（从 1 开始，便于人工排查）。
+        const int roundNumber = roundIndex + 1;
+
+        for (std::size_t methodIndex = 0;
+            methodIndex < terminateMethodList.size() && !processExited;
+            ++methodIndex)
+        {
+            const TerminateMethodEntry& methodEntry = terminateMethodList[methodIndex];
+            if (methodEntry.methodName == nullptr || !methodEntry.invokeMethod)
+            {
+                continue;
+            }
+
+            std::string methodDetailText;
+            const bool methodOk = methodEntry.invokeMethod(&methodDetailText);
+            const std::string normalizedMethodDetailText =
+                methodDetailText.empty() ? "无附加信息" : methodDetailText;
+            (methodOk ? info : err) << actionEvent
+                << "[ProcessDock] 结束进程组合动作-方法执行, pid="
+                << targetPid
+                << ", round="
+                << roundNumber
+                << ", method="
+                << methodEntry.methodName
+                << ", ok="
+                << (methodOk ? "true" : "false")
+                << ", detail="
+                << normalizedMethodDetailText
+                << eol;
+            if (!methodOk)
+            {
+                warn << actionEvent
+                    << "[ProcessDock] 当前方法执行失败，继续尝试下一方法, pid="
+                    << targetPid
+                    << ", round="
+                    << roundNumber
+                    << ", method="
+                    << methodEntry.methodName
+                    << eol;
+            }
+
+            actionDetailStream
+                << " | round"
+                << roundNumber
+                << ":"
+                << methodEntry.methodName
+                << "="
+                << (methodOk ? "ok" : "fail")
+                << "("
+                << normalizedMethodDetailText
+                << ")";
+
+            bool queryProcessPresentOk = false;
+            processStillPresent = isProcessPresentBySnapshot(targetPid, &queryProcessPresentOk);
+            if (!queryProcessPresentOk)
+            {
+                warn << actionEvent
+                    << "[ProcessDock] 方法执行后存在性检查失败，按“仍存活”继续尝试, pid="
+                    << targetPid
+                    << ", round="
+                    << roundNumber
+                    << ", method="
+                    << methodEntry.methodName
+                    << eol;
+            }
+            if (!processStillPresent)
+            {
+                processExited = true;
+                info << actionEvent
+                    << "[ProcessDock] 目标进程已退出, pid="
+                    << targetPid
+                    << ", round="
+                    << roundNumber
+                    << ", method="
+                    << methodEntry.methodName
+                    << eol;
+                break;
+            }
+        }
+
+        if (!processExited)
+        {
+            warn << actionEvent
+                << "[ProcessDock] 本轮全方法链执行后目标仍存活，将进入下一轮, pid="
+                << targetPid
+                << ", round="
+                << roundNumber
+                << eol;
+        }
+    }
+
+    if (!processExited)
+    {
+        err << actionEvent
+            << "[ProcessDock] 结束进程组合动作达到上限后目标仍存活, pid="
+            << targetPid
+            << ", roundLimit="
+            << kTerminateRoundLimit
+            << eol;
+    }
+
+    showActionResultMessage("结束进程", processExited, actionDetailStream.str(), actionEvent);
+    requestAsyncRefresh(true);
 }
 
 void ProcessDock::executeTerminateThreadsAction()

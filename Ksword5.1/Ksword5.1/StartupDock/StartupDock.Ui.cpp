@@ -1,5 +1,7 @@
 #include "StartupDock.Internal.h"
 
+#include <QColor>
+
 using namespace startup_dock_detail;
 
 namespace
@@ -7,6 +9,21 @@ namespace
     // kToolbarIconSize 作用：
     // - 统一启动项页顶部图标按钮尺寸。
     constexpr QSize kToolbarIconSize(16, 16);
+
+    // kUntrustedRowHighlightColor 作用：
+    // - 定义不受信任启动项整行背景色；
+    // - 采用半透明红色，确保风险可见且不遮挡文本。
+    const QColor kUntrustedRowHighlightColor(255, 64, 64, 76);
+
+    // isUntrustedStartupEntry 作用：
+    // - 判断某条启动项是否属于不受信任目标；
+    // - 调用方法：在行渲染前传入 StartupEntry；
+    // - 传入参数 entry：当前待渲染的启动项数据；
+    // - 返回值 true：需要按风险项做红色高亮，false：保持普通样式。
+    bool isUntrustedStartupEntry(const StartupDock::StartupEntry& entry)
+    {
+        return entry.publisherText.contains(QStringLiteral("(Untrusted)"), Qt::CaseInsensitive);
+    }
 
     // createStartupTable 作用：
     // - 创建统一列结构的启动项表格；
@@ -275,6 +292,21 @@ void StartupDock::appendEntryRow(
     tableWidget->setItem(rowIndex, toStartupColumn(StartupColumn::Enabled), createReadOnlyItem(buildStatusText(entry.enabled)));
     tableWidget->setItem(rowIndex, toStartupColumn(StartupColumn::Type), createReadOnlyItem(entry.sourceTypeText));
     tableWidget->setItem(rowIndex, toStartupColumn(StartupColumn::Detail), createReadOnlyItem(entry.detailText));
+
+    // shouldHighlightUntrusted 用途：记录当前条目是否命中不受信任高亮条件。
+    const bool shouldHighlightUntrusted = isUntrustedStartupEntry(entry);
+    if (shouldHighlightUntrusted)
+    {
+        for (int columnIndex = 0; columnIndex < toStartupColumn(StartupColumn::Count); ++columnIndex)
+        {
+            // currentItem 用途：定位当前行每一列单元格并统一套用半透明红底。
+            QTableWidgetItem* currentItem = tableWidget->item(rowIndex, columnIndex);
+            if (currentItem != nullptr)
+            {
+                currentItem->setBackground(kUntrustedRowHighlightColor);
+            }
+        }
+    }
 }
 
 void StartupDock::appendRegistryTreeLeaf(
@@ -301,6 +333,17 @@ void StartupDock::appendRegistryTreeLeaf(
     entryItem->setText(toStartupColumn(StartupColumn::Type), entry.sourceTypeText);
     entryItem->setText(toStartupColumn(StartupColumn::Detail), entry.detailText);
     entryItem->setIcon(toStartupColumn(StartupColumn::Name), resolveEntryIcon(entry));
+
+    // shouldHighlightUntrusted 用途：树节点模式下沿用表格相同的不受信任着色规则。
+    const bool shouldHighlightUntrusted = isUntrustedStartupEntry(entry);
+    if (shouldHighlightUntrusted)
+    {
+        for (int columnIndex = 0; columnIndex < toStartupColumn(StartupColumn::Count); ++columnIndex)
+        {
+            entryItem->setBackground(columnIndex, kUntrustedRowHighlightColor);
+        }
+    }
+
     for (int columnIndex = 0; columnIndex < toStartupColumn(StartupColumn::Count); ++columnIndex)
     {
         entryItem->setToolTip(columnIndex, entryItem->text(columnIndex));

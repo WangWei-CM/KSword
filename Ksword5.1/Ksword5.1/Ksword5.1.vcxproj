@@ -181,6 +181,7 @@
     <ClCompile Include="NetworkDock\NetworkDock.ConnectionManage.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.ManualRequest.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.MultiThreadDownload.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.MultiThreadDownload.Clipboard.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.HttpsAnalyze.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.NetworkDiagnostics.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.DetailAndUtils.cpp" />
