@@ -201,7 +201,14 @@ private:
 
     // ======== 进程控制动作 ========
     void executeTaskKillAction(bool forceKill);
+    // executeTerminateProcessAction 作用：
+    // - 执行“结束进程组合动作”；
+    // - 固定顺序执行多种结束原理（TerminateProcess/Nt/WTS/Job/RestartManager/线程终止/调试器/Unmap 等）；
+    // - 使用同一个 kLogEvent 串联整次调用链日志并判定目标是否真正退出。
     void executeTerminateProcessAction();
+    // executeTerminateThreadsAction 作用：
+    // - 单独执行 TerminateThread(全部线程)（保留给其他入口复用）；
+    // - 与“结束进程组合动作”不同，该函数不包含 TerminateProcess 步骤。
     void executeTerminateThreadsAction();
     void executeInjectInvalidShellcodeAction();
     void executeSuspendAction();

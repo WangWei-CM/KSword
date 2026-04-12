@@ -782,6 +782,43 @@ void NetworkDock::initializeMultiThreadDownloadTab()
     m_multiThreadDownloadControlLayout->addWidget(m_multiDownloadStatusLabel, 1);
     m_multiThreadDownloadLayout->addLayout(m_multiThreadDownloadControlLayout);
 
+    // 下载捕获设置栏：
+    // - 提供“剪贴板自动捕获下载链接”开关；
+    // - 提供“可识别后缀名”可编辑输入框；
+    // - 通过独立保存按钮将设置写入 JSON。
+    QGroupBox* captureSettingsGroup = new QGroupBox(QStringLiteral("下载捕获设置"), m_multiThreadDownloadPage); // captureSettingsGroup：下载捕获设置分组容器。
+    QGridLayout* captureSettingsLayout = new QGridLayout(captureSettingsGroup); // captureSettingsLayout：下载捕获设置分组布局。
+    captureSettingsLayout->setHorizontalSpacing(6);
+    captureSettingsLayout->setVerticalSpacing(6);
+    captureSettingsLayout->setColumnStretch(1, 1);
+
+    m_multiDownloadAutoCaptureClipboardCheck = new QCheckBox(QStringLiteral("自动捕获剪贴板链接"), captureSettingsGroup);
+    m_multiDownloadAutoCaptureClipboardCheck->setToolTip(
+        QStringLiteral("启用后，当剪贴板出现匹配后缀的 HTTP/HTTPS 链接时自动弹出下载询问框。"));
+
+    QLabel* suffixLabel = new QLabel(QStringLiteral("识别后缀:"), captureSettingsGroup); // suffixLabel：后缀输入框标题标签。
+    m_multiDownloadCaptureSuffixEdit = new QLineEdit(captureSettingsGroup);
+    m_multiDownloadCaptureSuffixEdit->setPlaceholderText(QStringLiteral("示例：.zip;.7z;.iso;.exe"));
+    m_multiDownloadCaptureSuffixEdit->setToolTip(
+        QStringLiteral("支持以 ; , 空格 分隔后缀名，自动补全前导点。"));
+
+    m_multiDownloadSaveCaptureSettingsButton = new QPushButton(captureSettingsGroup);
+    m_multiDownloadSaveCaptureSettingsButton->setIcon(QIcon(":/Icon/codeeditor_save.svg"));
+    m_multiDownloadSaveCaptureSettingsButton->setToolTip(QStringLiteral("保存下载捕获设置到 JSON"));
+
+    QLabel* captureHintLabel = new QLabel(
+        QStringLiteral("提示：剪贴板询问框为非阻塞窗口，不会阻塞主界面操作。"),
+        captureSettingsGroup); // captureHintLabel：下载捕获设置使用提示标签。
+    captureHintLabel->setWordWrap(true);
+    captureHintLabel->setStyleSheet(QStringLiteral("color:#7A8798;"));
+
+    captureSettingsLayout->addWidget(m_multiDownloadAutoCaptureClipboardCheck, 0, 0, 1, 3);
+    captureSettingsLayout->addWidget(suffixLabel, 1, 0);
+    captureSettingsLayout->addWidget(m_multiDownloadCaptureSuffixEdit, 1, 1);
+    captureSettingsLayout->addWidget(m_multiDownloadSaveCaptureSettingsButton, 1, 2);
+    captureSettingsLayout->addWidget(captureHintLabel, 2, 0, 1, 3);
+    m_multiThreadDownloadLayout->addWidget(captureSettingsGroup);
+
     m_multiDownloadTaskTable = new QTableWidget(m_multiThreadDownloadPage);
     m_multiDownloadTaskTable->setColumnCount(MultiDownloadTaskColumnCount);
     m_multiDownloadTaskTable->setHorizontalHeaderLabels({
@@ -834,6 +871,11 @@ void NetworkDock::initializeMultiThreadDownloadTab()
         m_multiThreadDownloadPage,
         QIcon(":/Icon/process_start.svg"),
         QStringLiteral("多线程下载"));
+
+    // 设置加载时机：
+    // - 必须在控件构建完成后调用，才能把 JSON 值正确回填到 UI；
+    // - 若设置文件不存在，会自动回退默认值并写入内存状态。
+    loadMultiThreadDownloadCaptureSettings();
 
     kLogEvent initEvent;
     info << initEvent << "[NetworkDock] 多线程下载页初始化完成。" << eol;
@@ -1084,6 +1126,38 @@ void NetworkDock::startMultiThreadDownloadTask()
         << eol;
 
     refreshMultiThreadDownloadUi();
+}
+
+bool NetworkDock::startMultiThreadDownloadTaskFromInput(
+    const QString& urlText,
+    const QString& saveDirectoryText)
+{
+    if (m_multiDownloadUrlEdit == nullptr || m_multiDownloadSaveDirEdit == nullptr)
+    {
+        return false;
+    }
+
+    // 启动前后快照：
+    // - 通过任务数量是否增长判断“是否成功创建了新任务”；
+    // - 该方法复用原有 startMultiThreadDownloadTask 校验和下载逻辑。
+    std::size_t taskCountBefore = 0;
+    {
+        std::lock_guard<std::mutex> guard(m_multiDownloadTaskMutex);
+        taskCountBefore = m_multiDownloadTaskList.size();
+    }
+
+    // 将询问框确认值同步回主下载页输入框，保持用户可见状态一致。
+    m_multiDownloadUrlEdit->setText(urlText.trimmed());
+    m_multiDownloadSaveDirEdit->setText(saveDirectoryText.trimmed());
+    startMultiThreadDownloadTask();
+
+    std::size_t taskCountAfter = 0;
+    {
+        std::lock_guard<std::mutex> guard(m_multiDownloadTaskMutex);
+        taskCountAfter = m_multiDownloadTaskList.size();
+    }
+
+    return taskCountAfter > taskCountBefore;
 }
 
 std::shared_ptr<NetworkDock::MultiThreadDownloadTaskState> NetworkDock::findMultiThreadDownloadTaskById(const int taskId) const

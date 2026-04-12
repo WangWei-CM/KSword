@@ -14,6 +14,7 @@
 #include <wincrypt.h>
 #include <Shellapi.h>
 #include <winternl.h>
+#include <RestartManager.h>
 
 #include <algorithm>   // std::max/std::clamp：衍生指标计算。
 #include <chrono>      // steady_clock：跨刷新轮次计时。
@@ -54,6 +55,11 @@ namespace
     // ProcessBreakOnTermination：NtSetInformationProcess 的关键进程信息类。
     constexpr PROCESSINFOCLASS ProcessBreakOnTerminationInfoClass = static_cast<PROCESSINFOCLASS>(29);
 
+    // Restart Manager 关闭标记：
+    // - 这里统一使用本地常量，不直接依赖 SDK 是否暴露枚举名字；
+    // - 语义等价于 Restart Manager 的强制关闭选项。
+    constexpr ULONG RestartManagerForceShutdownFlag = 0x1UL;
+
     // NT_SUCCESS：判断 NTSTATUS 成功与否。
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -65,6 +71,10 @@ namespace
     using NtSuspendProcessFn = NTSTATUS(NTAPI*)(HANDLE);
     using NtResumeProcessFn = NTSTATUS(NTAPI*)(HANDLE);
     using NtSetInformationProcessFn = NTSTATUS(NTAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG);
+    using NtTerminateProcessFn = NTSTATUS(NTAPI*)(HANDLE, NTSTATUS);
+    using NtTerminateThreadFn = NTSTATUS(NTAPI*)(HANDLE, NTSTATUS);
+    using NtTerminateJobObjectFn = NTSTATUS(NTAPI*)(HANDLE, NTSTATUS);
+    using NtUnmapViewOfSectionFn = NTSTATUS(NTAPI*)(HANDLE, PVOID);
 
     // 读取远程命令行需要的最小结构定义（只保留必要字段）。
     struct PebPartial
@@ -262,6 +272,89 @@ namespace
         }
 
         return std::string();
+    }
+
+    // QueryProcessStartTimeByPid 作用：
+    // - 按 PID 读取进程创建时间（FILETIME）；
+    // - 供 Restart Manager 的 RM_UNIQUE_PROCESS 结构体填充使用。
+    bool QueryProcessStartTimeByPid(const std::uint32_t pid, FILETIME* const creationTimeOut)
+    {
+        if (creationTimeOut == nullptr || pid == 0)
+        {
+            return false;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            static_cast<DWORD>(pid));
+        if (processHandle == nullptr)
+        {
+            return false;
+        }
+
+        FILETIME creationTime{};
+        FILETIME exitTime{};
+        FILETIME kernelTime{};
+        FILETIME userTime{};
+        const BOOL queryResult = ::GetProcessTimes(
+            processHandle,
+            &creationTime,
+            &exitTime,
+            &kernelTime,
+            &userTime);
+        ::CloseHandle(processHandle);
+        if (queryResult == FALSE)
+        {
+            return false;
+        }
+
+        *creationTimeOut = creationTime;
+        return true;
+    }
+
+    // QueryModuleBaseAddressBySnapshot 作用：
+    // - 通过模块快照定位目标模块基址；
+    // - 用于 NtUnmapViewOfSection 定位远程 ntdll.dll 映射地址。
+    bool QueryModuleBaseAddressBySnapshot(
+        const std::uint32_t pid,
+        const wchar_t* const moduleNameText,
+        void** const baseAddressOut)
+    {
+        if (baseAddressOut == nullptr || moduleNameText == nullptr || pid == 0)
+        {
+            return false;
+        }
+        *baseAddressOut = nullptr;
+
+        const HANDLE snapshotHandle = ::CreateToolhelp32Snapshot(
+            TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
+            static_cast<DWORD>(pid));
+        if (snapshotHandle == INVALID_HANDLE_VALUE)
+        {
+            return false;
+        }
+
+        MODULEENTRY32W moduleEntry{};
+        moduleEntry.dwSize = sizeof(moduleEntry);
+        if (::Module32FirstW(snapshotHandle, &moduleEntry) == FALSE)
+        {
+            ::CloseHandle(snapshotHandle);
+            return false;
+        }
+
+        do
+        {
+            if (_wcsicmp(moduleEntry.szModule, moduleNameText) == 0)
+            {
+                *baseAddressOut = moduleEntry.modBaseAddr;
+                ::CloseHandle(snapshotHandle);
+                return true;
+            }
+        } while (::Module32NextW(snapshotHandle, &moduleEntry) != FALSE);
+
+        ::CloseHandle(snapshotHandle);
+        return false;
     }
 
     // 通过令牌查询 DOMAIN\\User 形式用户名。
@@ -1815,6 +1908,404 @@ namespace ks::process
         return false;
     }
 
+    bool TerminateProcessByNtNative(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        // NtTerminateProcess 优先，缺失时回退 ZwTerminateProcess。
+        auto ntTerminateProcess = reinterpret_cast<NtTerminateProcessFn>(
+            GetNtdllProcAddress("NtTerminateProcess"));
+        if (ntTerminateProcess == nullptr)
+        {
+            ntTerminateProcess = reinterpret_cast<NtTerminateProcessFn>(
+                GetNtdllProcAddress("ZwTerminateProcess"));
+        }
+        if (ntTerminateProcess == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "NtTerminateProcess / ZwTerminateProcess not available.";
+            }
+            return false;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(PROCESS_TERMINATE, FALSE, ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(PROCESS_TERMINATE) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const NTSTATUS terminateStatus = ntTerminateProcess(processHandle, static_cast<NTSTATUS>(1));
+        ::CloseHandle(processHandle);
+        if (NT_SUCCESS(terminateStatus))
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = FormatNtStatusMessage(terminateStatus, "NtTerminateProcess failed");
+        }
+        return false;
+    }
+
+    bool TerminateProcessByWtsApi(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        using WtsTerminateProcessFn = BOOL(WINAPI*)(HANDLE, DWORD, DWORD);
+
+        static HMODULE wtsApiModule = ::LoadLibraryW(L"Wtsapi32.dll");
+        if (wtsApiModule == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "LoadLibrary(Wtsapi32.dll) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        static WtsTerminateProcessFn wtsTerminateProcess = reinterpret_cast<WtsTerminateProcessFn>(
+            ::GetProcAddress(wtsApiModule, "WTSTerminateProcess"));
+        if (wtsTerminateProcess == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "GetProcAddress(WTSTerminateProcess) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        // 传入 nullptr 表示当前服务器（等价 WTS_CURRENT_SERVER_HANDLE）。
+        const BOOL terminateResult = wtsTerminateProcess(nullptr, ToDwordPid(pid), 1);
+        if (terminateResult != FALSE)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "WTSTerminateProcess failed: " + FormatLastErrorMessage(::GetLastError());
+        }
+        return false;
+    }
+
+    bool TerminateProcessByWinStationApi(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        using WinStationTerminateProcessFn = BOOLEAN(WINAPI*)(HANDLE, ULONG, ULONG);
+
+        static HMODULE winstaModule = ::LoadLibraryW(L"winsta.dll");
+        if (winstaModule == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "LoadLibrary(winsta.dll) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        static WinStationTerminateProcessFn winStationTerminateProcess = reinterpret_cast<WinStationTerminateProcessFn>(
+            ::GetProcAddress(winstaModule, "WinStationTerminateProcess"));
+        if (winStationTerminateProcess == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "GetProcAddress(WinStationTerminateProcess) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const BOOLEAN terminateResult = winStationTerminateProcess(nullptr, static_cast<ULONG>(pid), 1UL);
+        if (terminateResult != FALSE)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "WinStationTerminateProcess failed: " + FormatLastErrorMessage(::GetLastError());
+        }
+        return false;
+    }
+
+    bool TerminateProcessByJobObject(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        const HANDLE processHandle = ::OpenProcess(
+            PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(for job terminate) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const HANDLE jobHandle = ::CreateJobObjectW(nullptr, nullptr);
+        if (jobHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "CreateJobObjectW failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        const BOOL assignResult = ::AssignProcessToJobObject(jobHandle, processHandle);
+        const DWORD assignError = ::GetLastError();
+        if (assignResult == FALSE)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "AssignProcessToJobObject failed: " + FormatLastErrorMessage(assignError);
+            }
+            ::CloseHandle(jobHandle);
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        const BOOL terminateResult = ::TerminateJobObject(jobHandle, 1);
+        const DWORD terminateError = ::GetLastError();
+        ::CloseHandle(jobHandle);
+        ::CloseHandle(processHandle);
+        if (terminateResult != FALSE)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "TerminateJobObject failed: " + FormatLastErrorMessage(terminateError);
+        }
+        return false;
+    }
+
+    bool TerminateProcessByNtJobObject(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        // NtTerminateJobObject 优先，缺失时回退 ZwTerminateJobObject。
+        auto ntTerminateJobObject = reinterpret_cast<NtTerminateJobObjectFn>(
+            GetNtdllProcAddress("NtTerminateJobObject"));
+        if (ntTerminateJobObject == nullptr)
+        {
+            ntTerminateJobObject = reinterpret_cast<NtTerminateJobObjectFn>(
+                GetNtdllProcAddress("ZwTerminateJobObject"));
+        }
+        if (ntTerminateJobObject == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "NtTerminateJobObject / ZwTerminateJobObject not available.";
+            }
+            return false;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(
+            PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(for nt job terminate) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const HANDLE jobHandle = ::CreateJobObjectW(nullptr, nullptr);
+        if (jobHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "CreateJobObjectW failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        const BOOL assignResult = ::AssignProcessToJobObject(jobHandle, processHandle);
+        const DWORD assignError = ::GetLastError();
+        if (assignResult == FALSE)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "AssignProcessToJobObject failed: " + FormatLastErrorMessage(assignError);
+            }
+            ::CloseHandle(jobHandle);
+            ::CloseHandle(processHandle);
+            return false;
+        }
+
+        const NTSTATUS terminateStatus = ntTerminateJobObject(jobHandle, static_cast<NTSTATUS>(1));
+        ::CloseHandle(jobHandle);
+        ::CloseHandle(processHandle);
+        if (NT_SUCCESS(terminateStatus))
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = FormatNtStatusMessage(terminateStatus, "NtTerminateJobObject failed");
+        }
+        return false;
+    }
+
+    bool TerminateProcessByRestartManager(
+        const std::uint32_t pid,
+        const bool forceShutdown,
+        std::string* const errorMessage)
+    {
+        using RmStartSessionFn = DWORD(WINAPI*)(DWORD*, DWORD, WCHAR*);
+        using RmRegisterResourcesFn = DWORD(WINAPI*)(DWORD, UINT, LPCWSTR*, UINT, RM_UNIQUE_PROCESS*, UINT, LPCWSTR*);
+        using RmShutdownFn = DWORD(WINAPI*)(DWORD, ULONG, RM_WRITE_STATUS_CALLBACK);
+        using RmEndSessionFn = DWORD(WINAPI*)(DWORD);
+
+        static HMODULE restartManagerModule = ::LoadLibraryW(L"Rstrtmgr.dll");
+        if (restartManagerModule == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "LoadLibrary(Rstrtmgr.dll) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        static RmStartSessionFn rmStartSession = reinterpret_cast<RmStartSessionFn>(
+            ::GetProcAddress(restartManagerModule, "RmStartSession"));
+        static RmRegisterResourcesFn rmRegisterResources = reinterpret_cast<RmRegisterResourcesFn>(
+            ::GetProcAddress(restartManagerModule, "RmRegisterResources"));
+        static RmShutdownFn rmShutdown = reinterpret_cast<RmShutdownFn>(
+            ::GetProcAddress(restartManagerModule, "RmShutdown"));
+        static RmEndSessionFn rmEndSession = reinterpret_cast<RmEndSessionFn>(
+            ::GetProcAddress(restartManagerModule, "RmEndSession"));
+        if (rmStartSession == nullptr ||
+            rmRegisterResources == nullptr ||
+            rmShutdown == nullptr ||
+            rmEndSession == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Restart Manager function export missing.";
+            }
+            return false;
+        }
+
+        DWORD sessionHandle = 0;
+        WCHAR sessionKey[CCH_RM_SESSION_KEY + 1] = {};
+        const DWORD startResult = rmStartSession(&sessionHandle, 0, sessionKey);
+        if (startResult != ERROR_SUCCESS)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "RmStartSession failed: code=" + std::to_string(startResult);
+            }
+            return false;
+        }
+
+        FILETIME processStartTime{};
+        if (!QueryProcessStartTimeByPid(pid, &processStartTime))
+        {
+            rmEndSession(sessionHandle);
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "QueryProcessStartTimeByPid failed.";
+            }
+            return false;
+        }
+
+        RM_UNIQUE_PROCESS uniqueProcess{};
+        uniqueProcess.dwProcessId = ToDwordPid(pid);
+        uniqueProcess.ProcessStartTime = processStartTime;
+
+        const DWORD registerResult = rmRegisterResources(
+            sessionHandle,
+            0,
+            nullptr,
+            1,
+            &uniqueProcess,
+            0,
+            nullptr);
+        if (registerResult != ERROR_SUCCESS)
+        {
+            rmEndSession(sessionHandle);
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "RmRegisterResources failed: code=" + std::to_string(registerResult);
+            }
+            return false;
+        }
+
+        const ULONG shutdownFlags = forceShutdown ? RestartManagerForceShutdownFlag : 0UL;
+        const DWORD shutdownResult = rmShutdown(sessionHandle, shutdownFlags, nullptr);
+        const DWORD endResult = rmEndSession(sessionHandle);
+        if (shutdownResult == ERROR_SUCCESS)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            std::ostringstream stream;
+            stream << "RmShutdown failed: code=" << shutdownResult
+                << ", RmEndSession=" << endResult;
+            *errorMessage = stream.str();
+        }
+        return false;
+    }
+
+    bool TerminateProcessByDuplicateHandlePseudo(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        // 先以“复制句柄权限”打开目标进程。
+        const HANDLE targetProcessHandle = ::OpenProcess(PROCESS_DUP_HANDLE, FALSE, ToDwordPid(pid));
+        if (targetProcessHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(PROCESS_DUP_HANDLE) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        // 复制目标进程中的伪句柄(-1)到当前进程，得到目标进程真实句柄。
+        HANDLE duplicatedProcessHandle = nullptr;
+        const BOOL duplicateResult = ::DuplicateHandle(
+            targetProcessHandle,
+            reinterpret_cast<HANDLE>(static_cast<LONG_PTR>(-1)),
+            ::GetCurrentProcess(),
+            &duplicatedProcessHandle,
+            0,
+            FALSE,
+            DUPLICATE_SAME_ACCESS);
+        const DWORD duplicateError = ::GetLastError();
+        ::CloseHandle(targetProcessHandle);
+        if (duplicateResult == FALSE || duplicatedProcessHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "DuplicateHandle(-1 pseudo handle) failed: " + FormatLastErrorMessage(duplicateError);
+            }
+            return false;
+        }
+
+        const BOOL terminateResult = ::TerminateProcess(duplicatedProcessHandle, 1);
+        const DWORD terminateError = ::GetLastError();
+        ::CloseHandle(duplicatedProcessHandle);
+        if (terminateResult != FALSE)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "TerminateProcess(duplicated handle) failed: " + FormatLastErrorMessage(terminateError);
+        }
+        return false;
+    }
+
     bool TerminateAllThreadsByPid(const std::uint32_t pid, std::string* const errorMessage)
     {
         HANDLE snapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -1869,6 +2360,234 @@ namespace ks::process
         if (errorMessage != nullptr)
         {
             *errorMessage = "No thread terminated (possible access denied or process has exited).";
+        }
+        return false;
+    }
+
+    bool TerminateAllThreadsByPidNtNative(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        // NtTerminateThread 优先，缺失时回退 ZwTerminateThread。
+        auto ntTerminateThread = reinterpret_cast<NtTerminateThreadFn>(
+            GetNtdllProcAddress("NtTerminateThread"));
+        if (ntTerminateThread == nullptr)
+        {
+            ntTerminateThread = reinterpret_cast<NtTerminateThreadFn>(
+                GetNtdllProcAddress("ZwTerminateThread"));
+        }
+        if (ntTerminateThread == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "NtTerminateThread / ZwTerminateThread not available.";
+            }
+            return false;
+        }
+
+        HANDLE snapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snapshotHandle == INVALID_HANDLE_VALUE)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "CreateToolhelp32Snapshot(THREAD) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        THREADENTRY32 threadEntry{};
+        threadEntry.dwSize = sizeof(threadEntry);
+        if (::Thread32First(snapshotHandle, &threadEntry) == FALSE)
+        {
+            ::CloseHandle(snapshotHandle);
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Thread32First failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        std::uint32_t terminatedCount = 0;
+        do
+        {
+            if (threadEntry.th32OwnerProcessID != pid)
+            {
+                continue;
+            }
+
+            const HANDLE threadHandle = ::OpenThread(THREAD_TERMINATE, FALSE, threadEntry.th32ThreadID);
+            if (threadHandle == nullptr)
+            {
+                continue;
+            }
+
+            const NTSTATUS terminateStatus = ntTerminateThread(threadHandle, static_cast<NTSTATUS>(1));
+            if (NT_SUCCESS(terminateStatus))
+            {
+                ++terminatedCount;
+            }
+            ::CloseHandle(threadHandle);
+        } while (::Thread32Next(snapshotHandle, &threadEntry) != FALSE);
+
+        ::CloseHandle(snapshotHandle);
+        if (terminatedCount > 0)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "No thread terminated via NtTerminateThread.";
+        }
+        return false;
+    }
+
+    bool TerminateProcessByDebugAttach(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        // 调试附加通常需要 SeDebugPrivilege，先尝试启用。
+        EnablePrivilege(SE_DEBUG_NAME);
+
+        const BOOL attachResult = ::DebugActiveProcess(ToDwordPid(pid));
+        if (attachResult == FALSE)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "DebugActiveProcess failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        // 按示例链路设置 DebugSetProcessKillOnExit(0)。
+        const BOOL setKillOnExitResult = ::DebugSetProcessKillOnExit(FALSE);
+        const DWORD setKillOnExitError = ::GetLastError();
+
+        // 避免当前进程长期占用调试关系，这里立即尝试解除附加。
+        const BOOL stopResult = ::DebugActiveProcessStop(ToDwordPid(pid));
+        const DWORD stopError = ::GetLastError();
+
+        if (setKillOnExitResult != FALSE && stopResult != FALSE)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            std::ostringstream stream;
+            if (setKillOnExitResult == FALSE)
+            {
+                stream << "DebugSetProcessKillOnExit(FALSE) failed: "
+                    << FormatLastErrorMessage(setKillOnExitError);
+            }
+            if (stopResult == FALSE)
+            {
+                if (!stream.str().empty())
+                {
+                    stream << "; ";
+                }
+                stream << "DebugActiveProcessStop failed: "
+                    << FormatLastErrorMessage(stopError);
+            }
+            *errorMessage = stream.str();
+        }
+        return false;
+    }
+
+    bool TerminateProcessByNtsdCommand(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        // 命令形态：ntsd -c q -p <pid>，附加后立即执行 q 退出。
+        std::wstring commandLine = L"cmd.exe /C ntsd -c q -p " + std::to_wstring(pid);
+        std::vector<wchar_t> mutableCommandLine(commandLine.begin(), commandLine.end());
+        mutableCommandLine.push_back(L'\0');
+
+        STARTUPINFOW startupInfo{};
+        startupInfo.cb = sizeof(startupInfo);
+        PROCESS_INFORMATION processInfo{};
+        const BOOL createResult = ::CreateProcessW(
+            nullptr,
+            mutableCommandLine.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            nullptr,
+            &startupInfo,
+            &processInfo);
+        if (createResult == FALSE)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "CreateProcess(ntsd) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const DWORD waitResult = ::WaitForSingleObject(processInfo.hProcess, 15000);
+        DWORD exitCode = 0;
+        ::GetExitCodeProcess(processInfo.hProcess, &exitCode);
+        ::CloseHandle(processInfo.hThread);
+        ::CloseHandle(processInfo.hProcess);
+        if (waitResult != WAIT_OBJECT_0)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "ntsd wait timeout or failed, waitResult=" + std::to_string(waitResult);
+            }
+            return false;
+        }
+        if (exitCode == 0)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ntsd exit code=" + std::to_string(exitCode);
+        }
+        return false;
+    }
+
+    bool TerminateProcessByNtUnmapNtdll(const std::uint32_t pid, std::string* const errorMessage)
+    {
+        auto ntUnmapViewOfSection = reinterpret_cast<NtUnmapViewOfSectionFn>(
+            GetNtdllProcAddress("NtUnmapViewOfSection"));
+        if (ntUnmapViewOfSection == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "NtUnmapViewOfSection not available.";
+            }
+            return false;
+        }
+
+        void* ntdllBaseAddress = nullptr;
+        if (!QueryModuleBaseAddressBySnapshot(pid, L"ntdll.dll", &ntdllBaseAddress) || ntdllBaseAddress == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "QueryModuleBaseAddressBySnapshot(ntdll.dll) failed.";
+            }
+            return false;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(PROCESS_VM_OPERATION, FALSE, ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(PROCESS_VM_OPERATION) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        const NTSTATUS unmapStatus = ntUnmapViewOfSection(processHandle, ntdllBaseAddress);
+        ::CloseHandle(processHandle);
+        if (NT_SUCCESS(unmapStatus))
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = FormatNtStatusMessage(unmapStatus, "NtUnmapViewOfSection failed");
         }
         return false;
     }

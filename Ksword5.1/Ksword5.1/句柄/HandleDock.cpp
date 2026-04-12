@@ -125,6 +125,74 @@ namespace
     {
         return value ? QStringLiteral("是") : QStringLiteral("否");
     }
+
+    // kHandleRenderSplashThreshold 作用：
+    // - 控制何时弹出启动页提示“渲染句柄列表”；
+    // - 仅在超大数据量渲染时启用，避免小列表频繁闪烁。
+    constexpr std::size_t kHandleRenderSplashThreshold = 50000;
+
+    // kHandleRenderProgressStep 作用：
+    // - 控制进度回写频率；
+    // - 通过分批更新降低额外开销。
+    constexpr std::size_t kHandleRenderProgressStep = 4096;
+
+    // HandleRenderSplashScope 作用：
+    // - 在超大句柄表渲染期间显示启动页；
+    // - 持续回写“渲染句柄列表到图形界面”进度，缓解“程序卡死”感知。
+    class HandleRenderSplashScope final
+    {
+    public:
+        explicit HandleRenderSplashScope(const std::size_t totalRowCount)
+            : m_totalRowCount(totalRowCount)
+        {
+            if (m_totalRowCount < kHandleRenderSplashThreshold)
+            {
+                return;
+            }
+
+            m_visible = kSplash.show();
+            if (!m_visible)
+            {
+                return;
+            }
+
+            kSplash.progress("渲染句柄列表到图形界面", 1);
+        }
+
+        ~HandleRenderSplashScope()
+        {
+            if (m_visible)
+            {
+                kSplash.hide();
+            }
+        }
+
+        void update(const std::size_t renderedRowCount) const
+        {
+            if (!m_visible || m_totalRowCount == 0)
+            {
+                return;
+            }
+
+            const std::size_t normalizedRenderedCount = std::min(renderedRowCount, m_totalRowCount);
+            const int progressPercent = std::max(
+                1,
+                std::min(99, static_cast<int>((normalizedRenderedCount * 100) / m_totalRowCount)));
+            kSplash.progress("渲染句柄列表到图形界面", progressPercent);
+        }
+
+        void finish() const
+        {
+            if (m_visible)
+            {
+                kSplash.progress("渲染句柄列表到图形界面", 100);
+            }
+        }
+
+    private:
+        std::size_t m_totalRowCount = 0; // m_totalRowCount：当前渲染总行数。
+        bool m_visible = false;          // m_visible：是否成功显示启动页。
+    };
 }
 
 HandleDock::HandleDock(QWidget* parent)
@@ -695,6 +763,9 @@ void HandleDock::applyObjectTypeRefreshResult(
 void HandleDock::rebuildHandleTable()
 {
     m_tableWidget->clear();
+    const std::size_t totalRowCount = m_rows.size();
+    HandleRenderSplashScope renderSplashScope(totalRowCount);
+
     for (std::size_t rowIndex = 0; rowIndex < m_rows.size(); ++rowIndex)
     {
         const HandleRow& row = m_rows[rowIndex];
@@ -764,7 +835,15 @@ void HandleDock::rebuildHandleTable()
             item->setToolTip(static_cast<int>(HandleTableColumn::ObjectName), QStringLiteral("对象名未查询，可能受预算、类型白名单或开关限制。"));
         }
         m_tableWidget->addTopLevelItem(item);
+
+        if (totalRowCount > 0
+            && (((rowIndex + 1) % kHandleRenderProgressStep) == 0 || (rowIndex + 1) == totalRowCount))
+        {
+            renderSplashScope.update(rowIndex + 1);
+        }
     }
+
+    renderSplashScope.finish();
 }
 
 

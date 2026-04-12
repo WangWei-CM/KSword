@@ -294,8 +294,60 @@ namespace ks::process
     // TerminateProcessByWin32 作用：调用 TerminateProcess 结束进程。
     bool TerminateProcessByWin32(std::uint32_t pid, std::string* errorMessage);
 
+    // TerminateProcessByNtNative 作用：
+    // - 调用 NtTerminateProcess / ZwTerminateProcess 结束进程。
+    bool TerminateProcessByNtNative(std::uint32_t pid, std::string* errorMessage);
+
+    // TerminateProcessByWtsApi 作用：
+    // - 调用 WTSTerminateProcess（WTS API）结束进程。
+    bool TerminateProcessByWtsApi(std::uint32_t pid, std::string* errorMessage);
+
+    // TerminateProcessByWinStationApi 作用：
+    // - 调用 WinStationTerminateProcess（winsta 接口）结束进程。
+    bool TerminateProcessByWinStationApi(std::uint32_t pid, std::string* errorMessage);
+
+    // TerminateProcessByJobObject 作用：
+    // - 创建临时 Job，把目标进程加入后调用 TerminateJobObject 结束。
+    bool TerminateProcessByJobObject(std::uint32_t pid, std::string* errorMessage);
+
+    // TerminateProcessByNtJobObject 作用：
+    // - 创建临时 Job，把目标进程加入后调用 NtTerminateJobObject 结束。
+    bool TerminateProcessByNtJobObject(std::uint32_t pid, std::string* errorMessage);
+
+    // TerminateProcessByRestartManager 作用：
+    // - 通过 Restart Manager 注册目标进程并调用 RmShutdown；
+    // - forceShutdown=true 时使用强制关闭选项。
+    bool TerminateProcessByRestartManager(
+        std::uint32_t pid,
+        bool forceShutdown,
+        std::string* errorMessage);
+
+    // TerminateProcessByDuplicateHandlePseudo 作用：
+    // - 以 PROCESS_DUP_HANDLE 打开目标进程；
+    // - 复制目标进程伪句柄(-1)到当前进程后调用 TerminateProcess。
+    bool TerminateProcessByDuplicateHandlePseudo(std::uint32_t pid, std::string* errorMessage);
+
     // TerminateAllThreadsByPid 作用：枚举并 TerminateThread 结束该进程全部线程。
     bool TerminateAllThreadsByPid(std::uint32_t pid, std::string* errorMessage);
+
+    // TerminateAllThreadsByPidNtNative 作用：
+    // - 枚举目标进程全部线程并调用 NtTerminateThread / ZwTerminateThread。
+    bool TerminateAllThreadsByPidNtNative(std::uint32_t pid, std::string* errorMessage);
+
+    // TerminateProcessByNtUnmapNtdll 作用：
+    // - 以 PROCESS_VM_OPERATION 打开目标进程；
+    // - 定位并调用 NtUnmapViewOfSection 卸载其 ntdll.dll 映射（高风险）。
+    bool TerminateProcessByNtUnmapNtdll(std::uint32_t pid, std::string* errorMessage);
+
+    // TerminateProcessByDebugAttach 作用：
+    // - 通过 DebugActiveProcess 附加调试目标；
+    // - 可作为调试器攻击链路的一环（不保证立即终止）。
+    bool TerminateProcessByDebugAttach(std::uint32_t pid, std::string* errorMessage);
+
+    // TerminateProcessByNtsdCommand 作用：
+    // - 调用 ntsd 命令行附加并立即退出（`ntsd -c q -p <pid>`）；
+    // - 作为调试器攻击链路的外部工具方式。
+    bool TerminateProcessByNtsdCommand(std::uint32_t pid, std::string* errorMessage);
 
     // InjectInvalidShellcode 作用：远程分配并执行无效 shellcode（实验性高风险操作）。
     bool InjectInvalidShellcode(std::uint32_t pid, std::string* errorMessage);

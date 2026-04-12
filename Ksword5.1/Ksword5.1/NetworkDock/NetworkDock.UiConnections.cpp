@@ -415,6 +415,37 @@ void NetworkDock::initializeConnections()
             startMultiThreadDownloadTask();
         });
 
+    // 下载捕获设置连接：开关/后缀变化后写入 JSON。
+    connect(m_multiDownloadAutoCaptureClipboardCheck, &QCheckBox::toggled, this, [this](const bool checked)
+        {
+            m_multiDownloadAutoCaptureClipboardEnabled = checked;
+            saveMultiThreadDownloadCaptureSettings();
+        });
+    connect(m_multiDownloadCaptureSuffixEdit, &QLineEdit::editingFinished, this, [this]()
+        {
+            saveMultiThreadDownloadCaptureSettings();
+        });
+    connect(m_multiDownloadSaveCaptureSettingsButton, &QPushButton::clicked, this, [this]()
+        {
+            saveMultiThreadDownloadCaptureSettings();
+        });
+
+    // 剪贴板监听连接：
+    // - 仅处理主剪贴板文本变化；
+    // - 自动捕获开关关闭时，检测函数会快速返回。
+    QClipboard* clipboardObject = QGuiApplication::clipboard(); // clipboardObject：系统主剪贴板对象。
+    if (clipboardObject != nullptr)
+    {
+        connect(clipboardObject, &QClipboard::changed, this, [this](const QClipboard::Mode mode)
+            {
+                if (mode != QClipboard::Clipboard)
+                {
+                    return;
+                }
+                onMultiThreadDownloadClipboardChanged();
+            });
+    }
+
     // 多线程下载任务选中变化：切换右侧分段详情与总进度条绑定任务。
     connect(m_multiDownloadTaskTable, &QTableWidget::itemSelectionChanged, this, [this]()
         {

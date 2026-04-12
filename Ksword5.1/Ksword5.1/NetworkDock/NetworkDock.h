@@ -14,6 +14,8 @@
 
 #include <QHash>
 #include <QIcon>
+#include <QPointer>
+#include <QStringList>
 #include <QWidget>
 
 #include <atomic>        // std::atomic_bool：存活主机扫描的并发状态控制。
@@ -39,9 +41,11 @@ class QSpinBox;
 class QTableWidget;
 class QTabWidget;
 class QTimer;
+class QUrl;
 class QVBoxLayout;
 class QWidget;
 class QShowEvent;
+class QDialog;
 class MultiThreadDownloadSegmentBarWidget;
 
 namespace ks::network
@@ -400,6 +404,48 @@ private:
     // - 返回：无。
     void browseMultiThreadDownloadDirectory();
 
+    // loadMultiThreadDownloadCaptureSettings：
+    // - 作用：读取“剪贴板自动捕获下载链接”设置并同步到多线程下载页控件；
+    // - 调用方式：多线程下载页 UI 构建完成后调用。
+    // - 返回：无。
+    void loadMultiThreadDownloadCaptureSettings();
+
+    // saveMultiThreadDownloadCaptureSettings：
+    // - 作用：把“剪贴板自动捕获下载链接”设置写入 JSON 文件；
+    // - 调用方式：设置控件发生变更后调用。
+    // - 返回：无。
+    void saveMultiThreadDownloadCaptureSettings();
+
+    // onMultiThreadDownloadClipboardChanged：
+    // - 作用：处理系统剪贴板文本变化并尝试识别可下载链接；
+    // - 调用方式：QClipboard::changed(Clipboard) 信号触发时调用。
+    // - 返回：无。
+    void onMultiThreadDownloadClipboardChanged();
+
+    // showMultiThreadDownloadClipboardPrompt：
+    // - 作用：以非阻塞对话框形式确认下载 URL 与保存目录；
+    // - 调用方式：剪贴板识别到匹配后缀的 URL 时调用。
+    // - 入参 urlText：候选下载 URL 文本。
+    // - 返回：无。
+    void showMultiThreadDownloadClipboardPrompt(const QString& urlText);
+
+    // startMultiThreadDownloadTaskFromInput：
+    // - 作用：把外部输入的 URL/目录注入 UI 并复用现有启动逻辑；
+    // - 调用方式：剪贴板询问框“开始下载”按钮点击后调用。
+    // - 入参 urlText：确认后的下载 URL；
+    // - 入参 saveDirectoryText：确认后的保存目录。
+    // - 返回：true=已成功创建新任务；false=启动失败或未创建任务。
+    bool startMultiThreadDownloadTaskFromInput(
+        const QString& urlText,
+        const QString& saveDirectoryText);
+
+    // isMultiThreadDownloadClipboardUrlSupported：
+    // - 作用：按当前后缀规则判断 URL 是否可触发自动下载询问；
+    // - 调用方式：剪贴板检测流程内部调用。
+    // - 入参 urlObject：已解析的 URL 对象。
+    // - 返回：true=匹配后缀；false=不匹配。
+    bool isMultiThreadDownloadClipboardUrlSupported(const QUrl& urlObject) const;
+
     // refreshMultiThreadDownloadUi：
     // - 作用：刷新下载任务表、分段表和总进度条显示。
     // - 返回：无。
@@ -681,6 +727,9 @@ private:
     QLineEdit* m_multiDownloadUrlEdit = nullptr;       // 下载URL输入框。
     QLineEdit* m_multiDownloadSaveDirEdit = nullptr;   // 下载目录输入框。
     QSpinBox* m_multiDownloadThreadCountSpin = nullptr; // 下载线程数输入框。
+    QCheckBox* m_multiDownloadAutoCaptureClipboardCheck = nullptr; // 自动捕获剪贴板下载链接开关。
+    QLineEdit* m_multiDownloadCaptureSuffixEdit = nullptr; // 自动识别后缀输入框（支持 ; , 空格 分隔）。
+    QPushButton* m_multiDownloadSaveCaptureSettingsButton = nullptr; // 保存捕获设置到 JSON 按钮。
     QPushButton* m_multiDownloadBrowseDirButton = nullptr; // 选择下载目录按钮。
     QPushButton* m_multiDownloadStartButton = nullptr; // 启动下载按钮。
     QLabel* m_multiDownloadStatusLabel = nullptr;      // 下载状态标签。
@@ -795,4 +844,8 @@ private:
     std::vector<std::shared_ptr<MultiThreadDownloadTaskState>> m_multiDownloadTaskList; // m_multiDownloadTaskList：下载任务状态集合。
     int m_multiDownloadNextTaskId = 1; // m_multiDownloadNextTaskId：新建任务编号递增计数器。
     int m_multiDownloadSelectedTaskId = 0; // m_multiDownloadSelectedTaskId：当前分段详情面板绑定的任务编号。
+    bool m_multiDownloadAutoCaptureClipboardEnabled = true; // m_multiDownloadAutoCaptureClipboardEnabled：是否启用剪贴板自动捕获。
+    QStringList m_multiDownloadCaptureSuffixList; // m_multiDownloadCaptureSuffixList：当前用于识别下载链接的后缀集合。
+    QString m_multiDownloadLastClipboardText; // m_multiDownloadLastClipboardText：最近一次处理过的剪贴板文本（去重）。
+    QPointer<QDialog> m_multiDownloadClipboardPromptDialog; // m_multiDownloadClipboardPromptDialog：当前非阻塞下载询问框弱引用。
 };
