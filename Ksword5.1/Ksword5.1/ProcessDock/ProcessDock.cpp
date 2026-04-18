@@ -1715,6 +1715,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
             strategyIndex,
             detailModeEnabled,
             staticDetailFillBudget,
+            localTicket,
             progressPid,
             previousCache,
             previousCounters,
@@ -1847,6 +1848,7 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
     const int strategyIndex,
     const bool detailModeEnabled,
     const int staticDetailFillBudget,
+    const std::uint64_t refreshTicket,
     const int progressTaskPid,
     const std::unordered_map<std::string, CacheEntry>& previousCache,
     const std::unordered_map<std::string, ks::process::CounterSample>& previousCounters,
@@ -1883,13 +1885,15 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
     // 静态详情预算控制：
     // - 预算用于限制“路径/命令行/用户/签名”等慢操作，避免首轮刷新过慢；
     // - 监视模式预算较低，详细模式预算较高。
-    int remainingStaticBudget = std::max(0, staticDetailFillBudget);
+    const std::size_t staticFillBudget = static_cast<std::size_t>(std::max(0, staticDetailFillBudget));
 
     // 第一阶段：预处理 identity、复用旧字段，并筛选“需要补静态详情”的 PID 列表。
     std::vector<std::string> identityKeys(latestProcessList.size());
     std::vector<bool> isNewProcess(latestProcessList.size(), false);
     std::vector<bool> shouldFillStatic(latestProcessList.size(), false);
     std::vector<bool> includeSignatureList(latestProcessList.size(), false);
+    std::vector<bool> isStaticFillCandidate(latestProcessList.size(), false);
+    std::vector<char> staticFillSucceeded(latestProcessList.size(), 0);
 
     for (std::size_t recordIndex = 0; recordIndex < latestProcessList.size(); ++recordIndex)
     {
@@ -1919,9 +1923,24 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
             processRecord.staticDetailsReady = oldRecord.staticDetailsReady;
             ++refreshResult.reusedProcessCount;
 
-            // 旧进程若静态字段还不完整，或签名仍 Pending，在预算允许时继续补齐。
+            // 旧进程若静态字段还不完整，或签名仍 Pending，则进入“待补齐候选”。
+            // 对持续失败的进程做退避，避免反复占满预算导致其它进程长期 Pending。
             const bool signaturePending = (processRecord.signatureState.empty() || processRecord.signatureState == "Pending");
-            needsStaticFill = !processRecord.staticDetailsReady || (detailModeEnabled && signaturePending);
+            const bool baseNeedsStaticFill = !processRecord.staticDetailsReady || (detailModeEnabled && signaturePending);
+            const std::uint32_t oldFailureCount = oldCacheIt->second.staticFillFailureCount;
+            if (baseNeedsStaticFill && oldFailureCount >= 3)
+            {
+                // 失败次数高时采用“稀疏重试”：降低对主预算的持续占用。
+                // 公式引入 PID 偏移，避免同一轮集中重试同一批进程。
+                constexpr std::uint64_t retryBackoffPeriod = 8;
+                const bool shouldRetryThisRound =
+                    ((refreshTicket + static_cast<std::uint64_t>(processRecord.pid)) % retryBackoffPeriod) == 0;
+                needsStaticFill = shouldRetryThisRound;
+            }
+            else
+            {
+                needsStaticFill = baseNeedsStaticFill;
+            }
             includeSignatureCheck = detailModeEnabled;
         }
         else
@@ -1935,28 +1954,55 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
 
         if (needsStaticFill)
         {
-            // 详细信息视图与监视视图都遵循预算：
-            // - 详细视图预算更高，但不再全量硬查，避免刷新瞬间卡顿；
-            // - 预算外的项标记为 Pending，后续轮次继续补齐。
-            const bool allowFill = (remainingStaticBudget > 0);
-            if (allowFill)
-            {
-                shouldFillStatic[recordIndex] = true;
-                includeSignatureList[recordIndex] = includeSignatureCheck;
-                --remainingStaticBudget;
-            }
-            else
-            {
-                // 超预算时延后慢操作：保持基础数据可见，并标记后续继续处理。
-                if (processRecord.signatureState.empty())
-                {
-                    processRecord.signatureState = "Pending";
-                }
-                processRecord.signaturePublisher.clear();
-                processRecord.signatureTrusted = false;
-                ++refreshResult.staticDeferredCount;
-            }
+            isStaticFillCandidate[recordIndex] = true;
+            includeSignatureList[recordIndex] = includeSignatureCheck;
         }
+    }
+
+    // 预算选择策略：
+    // - 先收集全部候选，再做“轮转挑选”；
+    // - 避免固定从头挑选导致尾部进程长期 Pending。
+    std::vector<std::size_t> staticFillCandidateIndices;
+    staticFillCandidateIndices.reserve(latestProcessList.size());
+    for (std::size_t recordIndex = 0; recordIndex < isStaticFillCandidate.size(); ++recordIndex)
+    {
+        if (isStaticFillCandidate[recordIndex])
+        {
+            staticFillCandidateIndices.push_back(recordIndex);
+        }
+    }
+
+    if (!staticFillCandidateIndices.empty() && staticFillBudget > 0)
+    {
+        const std::size_t candidateCount = staticFillCandidateIndices.size();
+        const std::size_t allowCount = std::min(staticFillBudget, candidateCount);
+        const std::size_t rotationOffset =
+            static_cast<std::size_t>(
+                (refreshTicket * static_cast<std::uint64_t>(std::max(1, staticDetailFillBudget)))
+                % static_cast<std::uint64_t>(candidateCount));
+        for (std::size_t offset = 0; offset < allowCount; ++offset)
+        {
+            const std::size_t candidateOrder = (rotationOffset + offset) % candidateCount;
+            const std::size_t selectedIndex = staticFillCandidateIndices[candidateOrder];
+            shouldFillStatic[selectedIndex] = true;
+        }
+    }
+
+    // 未命中预算的候选统一保持 Pending，等待后续轮次补齐。
+    for (const std::size_t recordIndex : staticFillCandidateIndices)
+    {
+        if (shouldFillStatic[recordIndex])
+        {
+            continue;
+        }
+        ks::process::ProcessRecord& processRecord = latestProcessList[recordIndex];
+        if (processRecord.signatureState.empty())
+        {
+            processRecord.signatureState = "Pending";
+        }
+        processRecord.signaturePublisher.clear();
+        processRecord.signatureTrusted = false;
+        ++refreshResult.staticDeferredCount;
     }
 
     // 第二阶段：把“路径/签名/参数”等慢静态操作并行化，减少详细视图卡顿。
@@ -1982,7 +2028,7 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         // - 监视视图：仅小并发，避免过度占用 CPU。
         const unsigned int hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
         const unsigned int wantedThreads = detailModeEnabled
-            ? std::max(2u, std::min(6u, hardwareThreads))
+            ? std::max(4u, std::min(12u, hardwareThreads))
             : 2u;
         const unsigned int workerCount = std::max(
             1u,
@@ -2005,9 +2051,24 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
                     }
 
                     const std::size_t recordIndex = staticFillIndices[taskOrder];
-                    ks::process::FillProcessStaticDetails(
+                    const bool fillOk = ks::process::FillProcessStaticDetails(
                         latestProcessList[recordIndex],
                         includeSignatureList[recordIndex]);
+                    staticFillSucceeded[recordIndex] = fillOk ? 1 : 0;
+
+                    // 失败降级策略：
+                    // - 避免签名列长期保持 Pending；
+                    // - 对权限受限场景直接标注 No Access。
+                    if (!fillOk && includeSignatureList[recordIndex])
+                    {
+                        ks::process::ProcessRecord& processRecord = latestProcessList[recordIndex];
+                        if (processRecord.signatureState.empty() || processRecord.signatureState == "Pending")
+                        {
+                            processRecord.signatureState = "No Access";
+                            processRecord.signaturePublisher.clear();
+                            processRecord.signatureTrusted = false;
+                        }
+                    }
                 }
                 });
         }
@@ -2128,6 +2189,31 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         cacheEntry.missingRounds = 0;
         cacheEntry.isNewInLatestRound = isNewProcess[recordIndex];
         cacheEntry.isExitedInLatestRound = false;
+        {
+            // staticFillAttemptCount/staticFillFailureCount 用途：
+            // - 记录当前 identity 的补齐尝试历史；
+            // - 下一轮用于“连续失败退避”，降低失败进程对预算的长期占用。
+            const auto oldCacheIt = previousCache.find(identityKey);
+            const std::uint32_t oldAttemptCount =
+                (oldCacheIt == previousCache.end()) ? 0U : oldCacheIt->second.staticFillAttemptCount;
+            const std::uint32_t oldFailureCount =
+                (oldCacheIt == previousCache.end()) ? 0U : oldCacheIt->second.staticFillFailureCount;
+            const bool attemptedThisRound = shouldFillStatic[recordIndex];
+            const bool fillOkThisRound = (staticFillSucceeded[recordIndex] != 0);
+
+            cacheEntry.staticFillAttemptCount = attemptedThisRound
+                ? (oldAttemptCount + 1U)
+                : oldAttemptCount;
+            cacheEntry.staticFillFailureCount = attemptedThisRound
+                ? (fillOkThisRound ? 0U : (oldFailureCount + 1U))
+                : oldFailureCount;
+
+            // 若当前记录已经具备可用静态详情，则主动清零失败计数。
+            if (cacheEntry.record.staticDetailsReady && cacheEntry.record.signatureState != "Pending")
+            {
+                cacheEntry.staticFillFailureCount = 0;
+            }
+        }
         refreshResult.nextCache.emplace(identityKey, std::move(cacheEntry));
 
         // 进度条阶段 3：按处理进度更新（频率做了抽样，避免过度抖动）。

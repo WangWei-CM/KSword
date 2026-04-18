@@ -138,6 +138,8 @@ private:
         int missingRounds = 0;             // 连续缺失轮次（1 表示“刚退出，保留显示”）。
         bool isNewInLatestRound = false;   // 最新刷新中是否为新增。
         bool isExitedInLatestRound = false;// 最新刷新中是否为退出保留。
+        std::uint32_t staticFillAttemptCount = 0; // 静态详情补齐尝试次数（含成功/失败）。
+        std::uint32_t staticFillFailureCount = 0; // 静态详情连续失败次数（用于退避重试）。
     };
 
     // RefreshResult：后台线程刷新结果对象。
@@ -251,6 +253,7 @@ private:
         int strategyIndex,
         bool detailModeEnabled,
         int staticDetailFillBudget,
+        std::uint64_t refreshTicket,
         int progressTaskPid,
         const std::unordered_map<std::string, CacheEntry>& previousCache,
         const std::unordered_map<std::string, ks::process::CounterSample>& previousCounters,

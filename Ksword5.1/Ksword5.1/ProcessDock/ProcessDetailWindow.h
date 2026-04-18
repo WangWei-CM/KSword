@@ -4,7 +4,7 @@
 // ProcessDetailWindow.h
 // 作用：
 // - 提供“进程详细信息”独立窗口（非 Dock、非阻塞）；
-// - 每个进程可打开独立窗口，包含 详细信息 / 线程 / 操作 / 模块 / 令牌 / PEB 六个 Tab；
+// - 每个进程可打开独立窗口，包含 详细信息 / 线程 / 操作 / 模块 / 令牌 / 令牌开关 / PEB 七个 Tab；
 // - 支持模块刷新、右键操作、DLL 注入、Shellcode 注入等能力。
 // ============================================================
 
@@ -127,6 +127,13 @@ private:
     void initializeActionTab();
     void initializeModuleTab();
     void initializeTokenTab();
+    // initializeTokenSwitchTab 作用：
+    // - 构建“令牌开关”页面；
+    // - 提供复选框批量控制 Token 开关位，并提供刷新/应用按钮。
+    // 调用方式：initializeUi 中创建 m_tokenSwitchTab 后调用。
+    // 参数：无。
+    // 返回：无。
+    void initializeTokenSwitchTab();
     void initializePebTab();
     void initializeConnections();
 
@@ -143,6 +150,20 @@ private:
     void requestAsyncPebRefresh();
     void applyTokenRefreshResult(const TextRefreshResult& refreshResult);
     void applyPebRefreshResult(const TextRefreshResult& refreshResult);
+    // refreshTokenSwitchStates 作用：
+    // - 读取当前目标进程令牌开关状态；
+    // - 把读取结果同步到“令牌开关”页的复选框。
+    // 调用方式：点击刷新按钮或窗口首次初始化后调用。
+    // 参数：无。
+    // 返回：无。
+    void refreshTokenSwitchStates();
+    // applyTokenSwitchStates 作用：
+    // - 把“令牌开关”页复选框状态写回目标进程令牌；
+    // - 底层通过 NtSetInformationToken（NtSetTokenInformation）逐项应用。
+    // 调用方式：点击应用按钮后调用。
+    // 参数：无。
+    // 返回：无。
+    void applyTokenSwitchStates();
 
     // ======== 模块页刷新 ========
     void requestAsyncModuleRefresh(bool forceRefresh);
@@ -206,6 +227,7 @@ private:
     QWidget* m_actionTab = nullptr;            // “操作”页。
     QWidget* m_moduleTab = nullptr;            // “模块”页。
     QWidget* m_tokenTab = nullptr;             // “令牌”页。
+    QWidget* m_tokenSwitchTab = nullptr;       // “令牌开关”页。
     QWidget* m_pebTab = nullptr;               // “PEB”页。
 
     // ======== 详细信息页控件 ========
@@ -290,6 +312,18 @@ private:
     bool m_tokenRefreshing = false;                // 令牌页刷新状态。
     std::uint64_t m_tokenRefreshTicket = 0;        // 令牌页刷新序号。
     int m_tokenRefreshProgressPid = 0;             // 令牌页刷新进度 PID。
+
+    // ======== 令牌开关页控件与状态 ========
+    QVBoxLayout* m_tokenSwitchLayout = nullptr;    // 令牌开关页总布局。
+    QPushButton* m_refreshTokenSwitchButton = nullptr; // 刷新令牌开关按钮。
+    QPushButton* m_applyTokenSwitchButton = nullptr;   // 应用令牌开关按钮。
+    QLabel* m_tokenSwitchStatusLabel = nullptr;    // 令牌开关应用状态文本。
+    QCheckBox* m_tokenSandboxInertCheck = nullptr; // SandboxInert 开关。
+    QCheckBox* m_tokenVirtualizationAllowedCheck = nullptr; // VirtualizationAllowed 开关。
+    QCheckBox* m_tokenVirtualizationEnabledCheck = nullptr; // VirtualizationEnabled 开关。
+    QCheckBox* m_tokenUiAccessCheck = nullptr;     // UIAccess 开关。
+    QCheckBox* m_tokenMandatoryNoWriteUpCheck = nullptr; // MandatoryPolicy: NoWriteUp 位。
+    QCheckBox* m_tokenMandatoryNewProcessMinCheck = nullptr; // MandatoryPolicy: NewProcessMin 位。
 
     // ======== PEB页控件与状态 ========
     QVBoxLayout* m_pebLayout = nullptr;            // PEB 页布局。

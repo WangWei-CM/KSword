@@ -27,6 +27,7 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGuiApplication>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -42,6 +43,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QScreen>
 #include <QSlider>
 #include <QSpinBox>
@@ -162,6 +164,81 @@ namespace
     QString boolText(const bool value)
     {
         return value ? QStringLiteral("是") : QStringLiteral("否");
+    }
+
+    // WindowStyleFlagDefinition：
+    // - 作用：定义一个“可勾选样式位”条目（名称/位掩码/用途说明）；
+    // - 调用：WindowDetailDialog 构建样式复选框组时按此表创建控件；
+    // - 传入传出：本结构仅做数据承载，不直接参与系统调用。
+    struct WindowStyleFlagDefinition
+    {
+        const char* styleNameText = nullptr;      // styleNameText：样式位名称（如 WS_VISIBLE）。
+        quint64 styleMaskValue = 0;               // styleMaskValue：对应 Win32 样式位掩码。
+        const char* styleDescriptionText = nullptr; // styleDescriptionText：悬停提示与导出说明文本。
+    };
+
+    // windowStyleFlagDefinitionList：
+    // - 作用：返回窗口普通样式（GWL_STYLE）复选框定义；
+    // - 调用：WindowDetailDialog::initializeUi 在“样式与外观”页创建 WS_* 复选框时调用；
+    // - 传入传出：无入参；返回只读定义列表引用。
+    const std::vector<WindowStyleFlagDefinition>& windowStyleFlagDefinitionList()
+    {
+        static const std::vector<WindowStyleFlagDefinition> kStyleDefinitionList = {
+            { "WS_BORDER", static_cast<quint64>(WS_BORDER), "窗口有细边框。" },
+            { "WS_CAPTION", static_cast<quint64>(WS_CAPTION), "窗口有标题栏（组合位：边框+对话框框架）。" },
+            { "WS_CHILD", static_cast<quint64>(WS_CHILD), "窗口是子窗口，通常依附父窗口。" },
+            { "WS_CLIPCHILDREN", static_cast<quint64>(WS_CLIPCHILDREN), "绘制时裁剪子窗口区域，减少重绘覆盖。" },
+            { "WS_CLIPSIBLINGS", static_cast<quint64>(WS_CLIPSIBLINGS), "兄弟窗口之间绘制互相裁剪。" },
+            { "WS_DISABLED", static_cast<quint64>(WS_DISABLED), "窗口禁用，不接收输入。" },
+            { "WS_DLGFRAME", static_cast<quint64>(WS_DLGFRAME), "窗口具备对话框风格边框。" },
+            { "WS_GROUP", static_cast<quint64>(WS_GROUP), "控件分组起始标记（常见于 Tab 导航组）。" },
+            { "WS_HSCROLL", static_cast<quint64>(WS_HSCROLL), "窗口带水平滚动条。" },
+            { "WS_MAXIMIZE", static_cast<quint64>(WS_MAXIMIZE), "窗口当前处于最大化样式状态位。" },
+            { "WS_MAXIMIZEBOX", static_cast<quint64>(WS_MAXIMIZEBOX), "窗口显示最大化按钮。" },
+            { "WS_MINIMIZE", static_cast<quint64>(WS_MINIMIZE), "窗口当前处于最小化样式状态位。" },
+            { "WS_MINIMIZEBOX", static_cast<quint64>(WS_MINIMIZEBOX), "窗口显示最小化按钮。" },
+            { "WS_POPUP", static_cast<quint64>(WS_POPUP), "弹出窗口样式（独立于父窗口裁剪关系）。" },
+            { "WS_SIZEBOX", static_cast<quint64>(WS_SIZEBOX), "窗口可通过边框拖拽改变大小。" },
+            { "WS_SYSMENU", static_cast<quint64>(WS_SYSMENU), "窗口带系统菜单（标题栏图标菜单）。" },
+            { "WS_TABSTOP", static_cast<quint64>(WS_TABSTOP), "控件允许通过 Tab 键获得焦点。" },
+            { "WS_VISIBLE", static_cast<quint64>(WS_VISIBLE), "窗口可见样式位。" },
+            { "WS_VSCROLL", static_cast<quint64>(WS_VSCROLL), "窗口带垂直滚动条。" }
+        };
+        return kStyleDefinitionList;
+    }
+
+    // windowExStyleFlagDefinitionList：
+    // - 作用：返回窗口扩展样式（GWL_EXSTYLE）复选框定义；
+    // - 调用：WindowDetailDialog::initializeUi 在“样式与外观”页创建 WS_EX_* 复选框时调用；
+    // - 传入传出：无入参；返回只读定义列表引用。
+    const std::vector<WindowStyleFlagDefinition>& windowExStyleFlagDefinitionList()
+    {
+        static const std::vector<WindowStyleFlagDefinition> kExStyleDefinitionList = {
+            { "WS_EX_ACCEPTFILES", static_cast<quint64>(WS_EX_ACCEPTFILES), "允许窗口接收拖放文件。" },
+            { "WS_EX_APPWINDOW", static_cast<quint64>(WS_EX_APPWINDOW), "强制窗口显示在任务栏。" },
+            { "WS_EX_CLIENTEDGE", static_cast<quint64>(WS_EX_CLIENTEDGE), "客户区边缘使用凹陷边框效果。" },
+            { "WS_EX_COMPOSITED", static_cast<quint64>(WS_EX_COMPOSITED), "对后代窗口启用双缓冲绘制（可能影响性能）。" },
+            { "WS_EX_CONTEXTHELP", static_cast<quint64>(WS_EX_CONTEXTHELP), "标题栏显示“帮助”按钮。" },
+            { "WS_EX_CONTROLPARENT", static_cast<quint64>(WS_EX_CONTROLPARENT), "父窗口参与 Tab 键焦点导航。" },
+            { "WS_EX_DLGMODALFRAME", static_cast<quint64>(WS_EX_DLGMODALFRAME), "对话框模式边框。" },
+            { "WS_EX_LAYERED", static_cast<quint64>(WS_EX_LAYERED), "启用分层窗口（透明度/颜色键）。" },
+            { "WS_EX_LAYOUTRTL", static_cast<quint64>(WS_EX_LAYOUTRTL), "布局从右到左。" },
+            { "WS_EX_LEFTSCROLLBAR", static_cast<quint64>(WS_EX_LEFTSCROLLBAR), "垂直滚动条显示在左侧。" },
+            { "WS_EX_MDICHILD", static_cast<quint64>(WS_EX_MDICHILD), "标记为 MDI 子窗口。" },
+            { "WS_EX_NOACTIVATE", static_cast<quint64>(WS_EX_NOACTIVATE), "窗口显示时不激活焦点。" },
+#ifdef WS_EX_NOREDIRECTIONBITMAP
+            { "WS_EX_NOREDIRECTIONBITMAP", static_cast<quint64>(WS_EX_NOREDIRECTIONBITMAP), "禁用 DWM 重定向位图。" },
+#endif
+            { "WS_EX_NOPARENTNOTIFY", static_cast<quint64>(WS_EX_NOPARENTNOTIFY), "创建/销毁时不通知父窗口。" },
+            { "WS_EX_RIGHT", static_cast<quint64>(WS_EX_RIGHT), "文字和布局右对齐。" },
+            { "WS_EX_RTLREADING", static_cast<quint64>(WS_EX_RTLREADING), "文本从右到左阅读。" },
+            { "WS_EX_STATICEDGE", static_cast<quint64>(WS_EX_STATICEDGE), "三维静态边框样式。" },
+            { "WS_EX_TOOLWINDOW", static_cast<quint64>(WS_EX_TOOLWINDOW), "工具窗口样式（小标题栏、通常不在任务栏）。" },
+            { "WS_EX_TOPMOST", static_cast<quint64>(WS_EX_TOPMOST), "窗口保持置顶层级。" },
+            { "WS_EX_TRANSPARENT", static_cast<quint64>(WS_EX_TRANSPARENT), "命中测试先让同线程下层窗口处理。" },
+            { "WS_EX_WINDOWEDGE", static_cast<quint64>(WS_EX_WINDOWEDGE), "窗口外框使用凸起边缘效果。" }
+        };
+        return kExStyleDefinitionList;
     }
 
     // 把 HWND 数值转十六进制文本，用于表格首列与详情标题。
@@ -1129,6 +1206,293 @@ public:
     }
 
 private:
+    // StyleCheckBinding：
+    // - 作用：保存“一个复选框”和“对应样式位”之间的绑定关系；
+    // - 调用：刷新样式时按绑定回填勾选状态，应用样式时按绑定收集位掩码；
+    // - 传入传出：本结构只作为 WindowDetailDialog 内部容器，不跨类传递。
+    struct StyleCheckBinding
+    {
+        QString styleNameText;            // styleNameText：样式位名称（展示与导出使用）。
+        QString styleDescriptionText;     // styleDescriptionText：样式说明（用于提示）。
+        quint64 styleMaskValue = 0;       // styleMaskValue：Win32 样式位掩码。
+        QCheckBox* checkBox = nullptr;    // checkBox：与样式位绑定的勾选控件。
+    };
+
+    // appendStyleCheckBoxGroup：
+    // - 作用：把一组样式定义转为复选框网格并加入布局；
+    // - 调用：initializeUi 创建“窗口样式/扩展样式”两组控件时各调用一次；
+    // - 传入 definitionList/bindingList：定义列表与输出绑定容器；
+    // - 传出：无，结果直接写入 UI 布局和 bindingList。
+    void appendStyleCheckBoxGroup(
+        QWidget* parentWidget,
+        QVBoxLayout* hostLayout,
+        const QString& groupTitleText,
+        const std::vector<WindowStyleFlagDefinition>& definitionList,
+        std::vector<StyleCheckBinding>* bindingList)
+    {
+        if (parentWidget == nullptr || hostLayout == nullptr || bindingList == nullptr)
+        {
+            return;
+        }
+
+        QGroupBox* groupBox = new QGroupBox(groupTitleText, parentWidget);
+        QGridLayout* gridLayout = new QGridLayout(groupBox);
+        gridLayout->setContentsMargins(8, 8, 8, 8);
+        gridLayout->setHorizontalSpacing(12);
+        gridLayout->setVerticalSpacing(4);
+
+        int itemIndex = 0;
+        for (const WindowStyleFlagDefinition& definition : definitionList)
+        {
+            // checkboxText：显示样式位名称，便于和文档/Win32 常量直接对应。
+            const QString checkboxText = QString::fromLatin1(definition.styleNameText);
+            QCheckBox* flagCheckBox = new QCheckBox(checkboxText, groupBox);
+            // checkboxTip：鼠标悬停时解释该样式位用途。
+            const QString checkboxTip = QString::fromUtf8(definition.styleDescriptionText);
+            flagCheckBox->setToolTip(checkboxTip);
+
+            const int rowIndex = itemIndex / 2;
+            const int colIndex = itemIndex % 2;
+            gridLayout->addWidget(flagCheckBox, rowIndex, colIndex);
+            ++itemIndex;
+
+            StyleCheckBinding binding;
+            binding.styleNameText = checkboxText;
+            binding.styleDescriptionText = checkboxTip;
+            binding.styleMaskValue = definition.styleMaskValue;
+            binding.checkBox = flagCheckBox;
+            bindingList->push_back(binding);
+
+            connect(flagCheckBox, &QCheckBox::toggled, this, [this](bool) {
+                if (m_styleCheckSyncing)
+                {
+                    return;
+                }
+
+                // 变更后即时刷新“状态面板”的置顶/分层联动显示。
+                updateDerivedStyleControlsFromCheckBoxes();
+                if (m_styleApplyButton != nullptr)
+                {
+                    m_styleApplyButton->setEnabled(true);
+                }
+                if (m_applyButton != nullptr)
+                {
+                    m_applyButton->setEnabled(true);
+                }
+            });
+        }
+
+        hostLayout->addWidget(groupBox, 0);
+    }
+
+    // collectStyleFlagsFromCheckBoxes：
+    // - 作用：把所有复选框状态汇总成 style/exStyle 两个掩码；
+    // - 调用：applyStyleCheckBoxChanges、updateDerivedStyleControlsFromCheckBoxes；
+    // - 传入传出：通过 styleValueOut/exStyleValueOut 输出目标样式值。
+    void collectStyleFlagsFromCheckBoxes(quint64* styleValueOut, quint64* exStyleValueOut) const
+    {
+        if (styleValueOut != nullptr)
+        {
+            *styleValueOut = 0;
+        }
+        if (exStyleValueOut != nullptr)
+        {
+            *exStyleValueOut = 0;
+        }
+
+        if (styleValueOut != nullptr)
+        {
+            for (const StyleCheckBinding& binding : m_styleCheckBindingList)
+            {
+                if (binding.checkBox != nullptr && binding.checkBox->isChecked())
+                {
+                    *styleValueOut |= binding.styleMaskValue;
+                }
+            }
+        }
+
+        if (exStyleValueOut != nullptr)
+        {
+            for (const StyleCheckBinding& binding : m_exStyleCheckBindingList)
+            {
+                if (binding.checkBox != nullptr && binding.checkBox->isChecked())
+                {
+                    *exStyleValueOut |= binding.styleMaskValue;
+                }
+            }
+        }
+    }
+
+    // updateDerivedStyleControlsFromCheckBoxes：
+    // - 作用：根据复选框当前状态，联动“置顶状态”和“透明度控件可用性”；
+    // - 调用：勾选变化后、刷新样式回填后；
+    // - 传入传出：无，直接更新 m_topMostCheck / m_alphaSlider。
+    void updateDerivedStyleControlsFromCheckBoxes()
+    {
+        quint64 styleValue = 0;
+        quint64 exStyleValue = 0;
+        collectStyleFlagsFromCheckBoxes(&styleValue, &exStyleValue);
+
+        if (m_topMostCheck != nullptr)
+        {
+            Q_UNUSED(styleValue);
+            m_topMostCheck->setChecked((exStyleValue & WS_EX_TOPMOST) != 0);
+        }
+        if (m_alphaSlider != nullptr)
+        {
+            m_alphaSlider->setEnabled((exStyleValue & WS_EX_LAYERED) != 0);
+        }
+    }
+
+    // syncStyleCheckBoxes：
+    // - 作用：把系统当前样式值回填到复选框；
+    // - 调用：refreshRuntimeInfo 每次读取到最新样式后调用；
+    // - 传入 styleValue/exStyleValue：目标窗口实时样式值；
+    // - 传出：无，UI 勾选状态被同步到实时值。
+    void syncStyleCheckBoxes(const quint64 styleValue, const quint64 exStyleValue)
+    {
+        m_styleCheckSyncing = true;
+        for (const StyleCheckBinding& binding : m_styleCheckBindingList)
+        {
+            if (binding.checkBox != nullptr)
+            {
+                binding.checkBox->setChecked((styleValue & binding.styleMaskValue) != 0);
+            }
+        }
+        for (const StyleCheckBinding& binding : m_exStyleCheckBindingList)
+        {
+            if (binding.checkBox != nullptr)
+            {
+                binding.checkBox->setChecked((exStyleValue & binding.styleMaskValue) != 0);
+            }
+        }
+        m_styleCheckSyncing = false;
+        updateDerivedStyleControlsFromCheckBoxes();
+    }
+
+    // buildStyleSummaryText：
+    // - 作用：拼接“十六进制样式值 + 每个复选框状态”的详细文本；
+    // - 调用：refreshRuntimeInfo 刷新样式文本区时调用；
+    // - 传入 styleValue/exStyleValue：实时样式值；
+    // - 传出：返回可直接写入 m_styleText 的说明文本。
+    QString buildStyleSummaryText(const quint64 styleValue, const quint64 exStyleValue) const
+    {
+        QString styleText;
+        styleText += QStringLiteral("Style: 0x%1\n").arg(styleValue, 0, 16);
+        styleText += QStringLiteral("ExStyle: 0x%1\n").arg(exStyleValue, 0, 16);
+        styleText += QStringLiteral("\n[窗口样式 WS_*]\n");
+        for (const StyleCheckBinding& binding : m_styleCheckBindingList)
+        {
+            const bool enabled = (styleValue & binding.styleMaskValue) != 0;
+            styleText += QStringLiteral("%1: %2\n")
+                .arg(binding.styleNameText, boolText(enabled));
+        }
+
+        styleText += QStringLiteral("\n[扩展样式 WS_EX_*]\n");
+        for (const StyleCheckBinding& binding : m_exStyleCheckBindingList)
+        {
+            const bool enabled = (exStyleValue & binding.styleMaskValue) != 0;
+            styleText += QStringLiteral("%1: %2\n")
+                .arg(binding.styleNameText, boolText(enabled));
+        }
+        return styleText;
+    }
+
+    // applyStyleCheckBoxChanges：
+    // - 作用：将复选框状态写回目标窗口的 GWL_STYLE/GWL_EXSTYLE；
+    // - 调用：样式页“应用样式位”按钮、底部“应用修改”按钮；
+    // - 传入 showSuccessDialog：是否弹出成功提示；
+    // - 传出：返回是否完成样式写回（不保证每一位都被系统接受）。
+    bool applyStyleCheckBoxChanges(const bool showSuccessDialog)
+    {
+        HWND windowHandle = toHwnd(m_info.hwndValue);
+        if (::IsWindow(windowHandle) == FALSE)
+        {
+            QMessageBox::warning(this, QStringLiteral("应用失败"), QStringLiteral("目标窗口句柄已失效。"));
+            return false;
+        }
+
+        // selectedStyleValue/selectedExStyleValue：复选框勾选出的“受控位”目标值。
+        quint64 selectedStyleValue = 0;
+        quint64 selectedExStyleValue = 0;
+        collectStyleFlagsFromCheckBoxes(&selectedStyleValue, &selectedExStyleValue);
+
+        // managedStyleMask/managedExStyleMask：当前界面可管理的样式位总掩码。
+        quint64 managedStyleMask = 0;
+        quint64 managedExStyleMask = 0;
+        for (const StyleCheckBinding& binding : m_styleCheckBindingList)
+        {
+            managedStyleMask |= binding.styleMaskValue;
+        }
+        for (const StyleCheckBinding& binding : m_exStyleCheckBindingList)
+        {
+            managedExStyleMask |= binding.styleMaskValue;
+        }
+
+        // currentStyleValue/currentExStyleValue：读取系统实时样式，保留未在 UI 暴露的位。
+        const quint64 currentStyleValue = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWL_STYLE));
+        const quint64 currentExStyleValue = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWL_EXSTYLE));
+        const quint64 desiredStyleValue =
+            (currentStyleValue & ~managedStyleMask)
+            | (selectedStyleValue & managedStyleMask);
+        const quint64 desiredExStyleValue =
+            (currentExStyleValue & ~managedExStyleMask)
+            | (selectedExStyleValue & managedExStyleMask);
+
+        ::SetLastError(ERROR_SUCCESS);
+        ::SetWindowLongPtrW(windowHandle, GWL_STYLE, static_cast<LONG_PTR>(desiredStyleValue));
+        const DWORD styleError = ::GetLastError();
+
+        ::SetLastError(ERROR_SUCCESS);
+        ::SetWindowLongPtrW(windowHandle, GWL_EXSTYLE, static_cast<LONG_PTR>(desiredExStyleValue));
+        const DWORD exStyleError = ::GetLastError();
+
+        // SetWindowPos：触发非客户区重算，确保样式变化立即生效。
+        ::SetWindowPos(
+            windowHandle,
+            (desiredExStyleValue & WS_EX_TOPMOST) != 0 ? HWND_TOPMOST : HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+        // 分层窗口透明度：仅在勾选 WS_EX_LAYERED 时应用 Alpha。
+        if ((desiredExStyleValue & WS_EX_LAYERED) != 0 && m_alphaSlider != nullptr)
+        {
+            ::SetLayeredWindowAttributes(
+                windowHandle,
+                0,
+                static_cast<BYTE>(m_alphaSlider->value()),
+                LWA_ALPHA);
+        }
+
+        ::RedrawWindow(
+            windowHandle,
+            nullptr,
+            nullptr,
+            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW | RDW_ALLCHILDREN);
+
+        refreshRuntimeInfo();
+
+        const bool styleWriteOk = (styleError == ERROR_SUCCESS);
+        const bool exStyleWriteOk = (exStyleError == ERROR_SUCCESS);
+        if (!styleWriteOk || !exStyleWriteOk)
+        {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("样式应用提示"),
+                QStringLiteral("样式写入完成，但部分位返回错误码：Style=%1, ExStyle=%2。")
+                .arg(styleError)
+                .arg(exStyleError));
+        }
+        else if (showSuccessDialog)
+        {
+            QMessageBox::information(this, QStringLiteral("窗口样式"), QStringLiteral("样式已应用。"));
+        }
+        return styleWriteOk && exStyleWriteOk;
+    }
+
     // 构建 UI：创建 5 个标签页（前四类属性合并到“基础属性”）并绑定底部操作按钮。
     void initializeUi()
     {
@@ -1207,11 +1571,59 @@ private:
         layoutStateLayout->addWidget(statePanel, 1);
         basicLayout->addWidget(layoutStateGroup, 0);
 
-        // 样式分组：保留较大文本区域显示样式位与解释详情。
+        // 样式分组：左侧复选框编辑样式位，右侧文本展示当前样式明细。
         QGroupBox* styleGroup = new QGroupBox(QStringLiteral("样式与外观"), basicPage);
-        QVBoxLayout* styleLayout = new QVBoxLayout(styleGroup);
+        QHBoxLayout* styleLayout = new QHBoxLayout(styleGroup);
+        styleLayout->setContentsMargins(6, 6, 6, 6);
+        styleLayout->setSpacing(8);
+
+        QWidget* styleEditorPanel = new QWidget(styleGroup);
+        QVBoxLayout* styleEditorLayout = new QVBoxLayout(styleEditorPanel);
+        styleEditorLayout->setContentsMargins(0, 0, 0, 0);
+        styleEditorLayout->setSpacing(6);
+
+        QHBoxLayout* styleActionLayout = new QHBoxLayout();
+        QLabel* styleHintLabel = new QLabel(QStringLiteral("勾选样式位后点击应用"), styleEditorPanel);
+        styleHintLabel->setToolTip(QStringLiteral("通过复选框直接调整 GWL_STYLE / GWL_EXSTYLE。"));
+        m_styleRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), styleEditorPanel);
+        m_styleApplyButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), styleEditorPanel);
+        m_styleRefreshButton->setToolTip(QStringLiteral("刷新窗口样式位"));
+        m_styleApplyButton->setToolTip(QStringLiteral("应用当前样式位勾选状态"));
+        m_styleRefreshButton->setStyleSheet(blueButtonStyle());
+        m_styleApplyButton->setStyleSheet(blueButtonStyle());
+        m_styleRefreshButton->setFixedWidth(34);
+        m_styleApplyButton->setFixedWidth(34);
+        styleActionLayout->addWidget(styleHintLabel, 1);
+        styleActionLayout->addWidget(m_styleRefreshButton, 0);
+        styleActionLayout->addWidget(m_styleApplyButton, 0);
+        styleEditorLayout->addLayout(styleActionLayout);
+
+        QScrollArea* styleScrollArea = new QScrollArea(styleEditorPanel);
+        styleScrollArea->setWidgetResizable(true);
+        QWidget* styleCheckContainer = new QWidget(styleScrollArea);
+        QVBoxLayout* styleCheckLayout = new QVBoxLayout(styleCheckContainer);
+        styleCheckLayout->setContentsMargins(0, 0, 0, 0);
+        styleCheckLayout->setSpacing(6);
+        appendStyleCheckBoxGroup(
+            styleCheckContainer,
+            styleCheckLayout,
+            QStringLiteral("窗口样式（GWL_STYLE）"),
+            windowStyleFlagDefinitionList(),
+            &m_styleCheckBindingList);
+        appendStyleCheckBoxGroup(
+            styleCheckContainer,
+            styleCheckLayout,
+            QStringLiteral("扩展样式（GWL_EXSTYLE）"),
+            windowExStyleFlagDefinitionList(),
+            &m_exStyleCheckBindingList);
+        styleCheckLayout->addStretch(1);
+        styleScrollArea->setWidget(styleCheckContainer);
+        styleEditorLayout->addWidget(styleScrollArea, 1);
+
         m_styleText = new CodeEditorWidget(styleGroup);
         m_styleText->setReadOnly(true);
+        m_styleText->setToolTip(QStringLiteral("显示实时样式值与每个位的解释状态。"));
+        styleLayout->addWidget(styleEditorPanel, 1);
         styleLayout->addWidget(m_styleText, 1);
         basicLayout->addWidget(styleGroup, 1);
 
@@ -1229,6 +1641,12 @@ private:
         });
         connect(m_alphaSlider, &QSlider::valueChanged, this, [this](int value) {
             m_alphaLabel->setText(QStringLiteral("%1").arg(value));
+        });
+        connect(m_styleRefreshButton, &QPushButton::clicked, this, [this]() {
+            refreshRuntimeInfo();
+        });
+        connect(m_styleApplyButton, &QPushButton::clicked, this, [this]() {
+            applyStyleCheckBoxChanges(true);
         });
         m_tabWidget->addTab(basicPage, QStringLiteral("基础属性"));
 
@@ -1437,16 +1855,8 @@ private:
         // 样式信息：输出十六进制样式值与常见标记判断。
         const quint64 styleValue = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWL_STYLE));
         const quint64 exStyleValue = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWL_EXSTYLE));
-        QString styleText;
-        styleText += QStringLiteral("Style: 0x%1\n").arg(styleValue, 0, 16);
-        styleText += QStringLiteral("ExStyle: 0x%1\n").arg(exStyleValue, 0, 16);
-        styleText += QStringLiteral("WS_POPUP: %1\n").arg(boolText((styleValue & WS_POPUP) != 0));
-        styleText += QStringLiteral("WS_CHILD: %1\n").arg(boolText((styleValue & WS_CHILD) != 0));
-        styleText += QStringLiteral("WS_VISIBLE: %1\n").arg(boolText((styleValue & WS_VISIBLE) != 0));
-        styleText += QStringLiteral("WS_DISABLED: %1\n").arg(boolText((styleValue & WS_DISABLED) != 0));
-        styleText += QStringLiteral("WS_EX_TOPMOST: %1\n").arg(boolText((exStyleValue & WS_EX_TOPMOST) != 0));
-        styleText += QStringLiteral("WS_EX_LAYERED: %1\n").arg(boolText((exStyleValue & WS_EX_LAYERED) != 0));
-        m_styleText->setText(styleText);
+        syncStyleCheckBoxes(styleValue, exStyleValue);
+        m_styleText->setText(buildStyleSummaryText(styleValue, exStyleValue));
 
         // 窗口位置与尺寸写回编辑控件。
         RECT rect{};
@@ -1482,6 +1892,7 @@ private:
             }
         }
         m_alphaSlider->setValue(alphaValue);
+        m_alphaSlider->setEnabled((exStyleValue & WS_EX_LAYERED) != 0);
         m_alphaLabel->setText(QString::number(alphaValue));
 
         // 进程线程信息：补齐路径、优先级、句柄计数、启动时间和模块摘要，便于排障和行为审计。
@@ -2239,7 +2650,7 @@ private:
         return toHwnd(m_info.hwndValue);
     }
 
-    // 应用改动：把标题、位置、置顶、透明度写回目标窗口。
+    // 应用改动：把标题、位置与复选框样式位写回目标窗口。
     void applyChanges()
     {
         HWND windowHandle = toHwnd(m_info.hwndValue);
@@ -2262,25 +2673,13 @@ private:
             std::max(1, m_heightSpin->value()),
             TRUE);
 
-        // 置顶切换：由复选框决定 HWND_TOPMOST / HWND_NOTOPMOST。
-        ::SetWindowPos(
-            windowHandle,
-            m_topMostCheck->isChecked() ? HWND_TOPMOST : HWND_NOTOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-
-        // 透明度修改：强制设置 WS_EX_LAYERED 后写入 Alpha。
-        LONG_PTR exStyle = ::GetWindowLongPtrW(windowHandle, GWL_EXSTYLE);
-        if ((exStyle & WS_EX_LAYERED) == 0)
+        // 样式修改：统一由“样式复选框”计算目标 Style/ExStyle 后应用。
+        const bool styleAppliedOk = applyStyleCheckBoxChanges(false);
+        if (!styleAppliedOk)
         {
-            ::SetWindowLongPtrW(windowHandle, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
+            return;
         }
-        ::SetLayeredWindowAttributes(windowHandle, 0, static_cast<BYTE>(m_alphaSlider->value()), LWA_ALPHA);
 
-        refreshRuntimeInfo();
         QMessageBox::information(this, QStringLiteral("窗口属性"), QStringLiteral("已应用修改。"));
     }
 
@@ -2386,6 +2785,11 @@ private:
     QLabel* m_relationLabel = nullptr;     // 关系摘要显示。
 
     CodeEditorWidget* m_styleText = nullptr;      // 样式文本区域（统一文本编辑器，只读）。
+    std::vector<StyleCheckBinding> m_styleCheckBindingList; // 普通样式复选框绑定表（GWL_STYLE）。
+    std::vector<StyleCheckBinding> m_exStyleCheckBindingList; // 扩展样式复选框绑定表（GWL_EXSTYLE）。
+    bool m_styleCheckSyncing = false;             // 勾选回填防抖标记，避免刷新触发“用户修改”链路。
+    QPushButton* m_styleRefreshButton = nullptr;  // 样式区刷新按钮。
+    QPushButton* m_styleApplyButton = nullptr;    // 样式区应用按钮。
     QSpinBox* m_xSpin = nullptr;                // X 坐标输入。
     QSpinBox* m_ySpin = nullptr;                // Y 坐标输入。
     QSpinBox* m_widthSpin = nullptr;            // 宽度输入。

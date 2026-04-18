@@ -5,7 +5,7 @@ using namespace process_detail_window_internal;
 // ============================================================
 // ProcessDetailWindow.BaseAndUi.cpp
 // 作用：
-// - 负责构造/基础数据合并、三个 Tab 的 UI 初始化以及基础信号连接。
+// - 负责构造/基础数据合并、多个 Tab 的 UI 初始化以及基础信号连接。
 // - 聚焦“窗口骨架与静态展示数据”逻辑。
 // ============================================================
 
@@ -84,6 +84,7 @@ ProcessDetailWindow::ProcessDetailWindow(const ks::process::ProcessRecord& baseR
     requestAsyncModuleRefresh(true);
     requestAsyncThreadInspectRefresh();
     requestAsyncTokenRefresh();
+    refreshTokenSwitchStates();
     requestAsyncPebRefresh();
 
     // 构造结束日志：标记窗口初始化链路完成。
@@ -170,6 +171,7 @@ void ProcessDetailWindow::updateBaseRecord(const ks::process::ProcessRecord& bas
     refreshDetailTabTexts();
     requestAsyncThreadInspectRefresh();
     requestAsyncTokenRefresh();
+    refreshTokenSwitchStates();
     requestAsyncPebRefresh();
 
     // 更新结束日志：输出新 identity 与关键字段状态。
@@ -233,6 +235,23 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
             : buildStateLabelStyle(statusIdleColor(), 600));
     }
 
+    if (m_tokenSwitchStatusLabel != nullptr)
+    {
+        const QString statusText = m_tokenSwitchStatusLabel->text();
+        if (statusText.contains(QStringLiteral("失败")) || statusText.contains(QStringLiteral("失败项")))
+        {
+            m_tokenSwitchStatusLabel->setStyleSheet(buildStateLabelStyle(statusWarningColor(), 700));
+        }
+        else if (statusText.contains(QStringLiteral("完成")) || statusText.contains(QStringLiteral("成功")))
+        {
+            m_tokenSwitchStatusLabel->setStyleSheet(buildStateLabelStyle(statusIdleColor(), 600));
+        }
+        else
+        {
+            m_tokenSwitchStatusLabel->setStyleSheet(buildStateLabelStyle(statusSecondaryColor(), 600));
+        }
+    }
+
     if (m_pebStatusLabel != nullptr)
     {
         const bool hasDiagnostic = m_pebStatusLabel->text().contains(QStringLiteral(" | "));
@@ -284,6 +303,7 @@ void ProcessDetailWindow::applyThemeStyle()
         m_actionTab,
         m_moduleTab,
         m_tokenTab,
+        m_tokenSwitchTab,
         m_pebTab
     };
     for (QWidget* tabPage : tabPageList)
@@ -353,12 +373,13 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget = new QTabWidget(this);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
-    // 创建六个页面并分别初始化。
+    // 创建七个页面并分别初始化。
     m_detailTab = new QWidget(m_tabWidget);
     m_threadTab = new QWidget(m_tabWidget);
     m_actionTab = new QWidget(m_tabWidget);
     m_moduleTab = new QWidget(m_tabWidget);
     m_tokenTab = new QWidget(m_tabWidget);
+    m_tokenSwitchTab = new QWidget(m_tabWidget);
     m_pebTab = new QWidget(m_tabWidget);
 
     m_detailTab->setObjectName(QStringLiteral("ProcessDetailTab_Detail"));
@@ -366,6 +387,7 @@ void ProcessDetailWindow::initializeUi()
     m_actionTab->setObjectName(QStringLiteral("ProcessDetailTab_Action"));
     m_moduleTab->setObjectName(QStringLiteral("ProcessDetailTab_Module"));
     m_tokenTab->setObjectName(QStringLiteral("ProcessDetailTab_Token"));
+    m_tokenSwitchTab->setObjectName(QStringLiteral("ProcessDetailTab_TokenSwitch"));
     m_pebTab->setObjectName(QStringLiteral("ProcessDetailTab_Peb"));
 
     initializeDetailTab();
@@ -373,6 +395,7 @@ void ProcessDetailWindow::initializeUi()
     initializeActionTab();
     initializeModuleTab();
     initializeTokenTab();
+    initializeTokenSwitchTab();
     initializePebTab();
 
     // 为 Tab 指定图标与标题文本。
@@ -381,6 +404,7 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget->addTab(m_actionTab, QIcon(":/Icon/process_priority.svg"), "操作");
     m_tabWidget->addTab(m_moduleTab, QIcon(":/Icon/process_list.svg"), "模块");
     m_tabWidget->addTab(m_tokenTab, QIcon(":/Icon/process_critical.svg"), "令牌");
+    m_tabWidget->addTab(m_tokenSwitchTab, QIcon(":/Icon/process_start.svg"), "令牌开关");
     m_tabWidget->addTab(m_pebTab, QIcon(":/Icon/process_tree.svg"), "PEB");
     m_tabWidget->setCurrentWidget(m_detailTab);
 
@@ -854,6 +878,76 @@ void ProcessDetailWindow::initializeTokenTab()
     m_refreshTokenButton->setStyleSheet(buttonStyle);
 }
 
+void ProcessDetailWindow::initializeTokenSwitchTab()
+{
+    // 令牌开关页初始化：
+    // - 提供“复选框 + 应用按钮”的批量令牌开关控制；
+    // - 额外提供“刷新当前开关状态”按钮用于回读当前值。
+    kLogEvent initTokenSwitchTabEvent;
+    info << initTokenSwitchTabEvent
+        << "[ProcessDetailWindow] initializeTokenSwitchTab: 构建令牌开关页面。"
+        << eol;
+
+    m_tokenSwitchLayout = new QVBoxLayout(m_tokenSwitchTab);
+    m_tokenSwitchLayout->setContentsMargins(6, 6, 6, 6);
+    m_tokenSwitchLayout->setSpacing(8);
+
+    QHBoxLayout* tokenSwitchTopBarLayout = new QHBoxLayout();
+    m_refreshTokenSwitchButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_tokenSwitchTab);
+    m_refreshTokenSwitchButton->setToolTip(QStringLiteral("刷新当前进程令牌的各项开关状态"));
+    m_refreshTokenSwitchButton->setFixedSize(34, 34);
+    m_refreshTokenSwitchButton->setIconSize(QSize(16, 16));
+    m_applyTokenSwitchButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_tokenSwitchTab);
+    m_applyTokenSwitchButton->setToolTip(QStringLiteral("把下方复选框状态写回目标进程令牌"));
+    m_applyTokenSwitchButton->setFixedSize(34, 34);
+    m_applyTokenSwitchButton->setIconSize(QSize(16, 16));
+    m_tokenSwitchStatusLabel = new QLabel(QStringLiteral("● 尚未刷新令牌开关"), m_tokenSwitchTab);
+    m_tokenSwitchStatusLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-weight:600;")
+        .arg(KswordTheme::TextSecondaryHex()));
+    tokenSwitchTopBarLayout->addWidget(m_refreshTokenSwitchButton);
+    tokenSwitchTopBarLayout->addWidget(m_applyTokenSwitchButton);
+    tokenSwitchTopBarLayout->addWidget(m_tokenSwitchStatusLabel, 1);
+    m_tokenSwitchLayout->addLayout(tokenSwitchTopBarLayout);
+
+    QGroupBox* tokenSwitchGroup = new QGroupBox(QStringLiteral("Token 开关位"), m_tokenSwitchTab);
+    QGridLayout* tokenSwitchGridLayout = new QGridLayout(tokenSwitchGroup);
+    tokenSwitchGridLayout->setHorizontalSpacing(12);
+    tokenSwitchGridLayout->setVerticalSpacing(8);
+
+    m_tokenSandboxInertCheck = new QCheckBox(QStringLiteral("SandboxInert"), tokenSwitchGroup);
+    m_tokenSandboxInertCheck->setToolTip(QStringLiteral("TokenSandBoxInert：沙箱惰性开关，常用于兼容旧进程策略"));
+    m_tokenVirtualizationAllowedCheck = new QCheckBox(QStringLiteral("VirtualizationAllowed"), tokenSwitchGroup);
+    m_tokenVirtualizationAllowedCheck->setToolTip(QStringLiteral("TokenVirtualizationAllowed：是否允许 UAC 虚拟化"));
+    m_tokenVirtualizationEnabledCheck = new QCheckBox(QStringLiteral("VirtualizationEnabled"), tokenSwitchGroup);
+    m_tokenVirtualizationEnabledCheck->setToolTip(QStringLiteral("TokenVirtualizationEnabled：是否启用 UAC 虚拟化"));
+    m_tokenUiAccessCheck = new QCheckBox(QStringLiteral("UIAccess"), tokenSwitchGroup);
+    m_tokenUiAccessCheck->setToolTip(QStringLiteral("TokenUIAccess：是否允许跨完整性级别访问部分 UI"));
+    m_tokenMandatoryNoWriteUpCheck = new QCheckBox(QStringLiteral("MandatoryPolicy.NoWriteUp"), tokenSwitchGroup);
+    m_tokenMandatoryNoWriteUpCheck->setToolTip(QStringLiteral("TokenMandatoryPolicy 位 0：禁止低完整性向高完整性写入"));
+    m_tokenMandatoryNewProcessMinCheck = new QCheckBox(QStringLiteral("MandatoryPolicy.NewProcessMin"), tokenSwitchGroup);
+    m_tokenMandatoryNewProcessMinCheck->setToolTip(QStringLiteral("TokenMandatoryPolicy 位 1：新进程最小化完整性策略"));
+
+    tokenSwitchGridLayout->addWidget(m_tokenSandboxInertCheck, 0, 0);
+    tokenSwitchGridLayout->addWidget(m_tokenVirtualizationAllowedCheck, 0, 1);
+    tokenSwitchGridLayout->addWidget(m_tokenVirtualizationEnabledCheck, 1, 0);
+    tokenSwitchGridLayout->addWidget(m_tokenUiAccessCheck, 1, 1);
+    tokenSwitchGridLayout->addWidget(m_tokenMandatoryNoWriteUpCheck, 2, 0);
+    tokenSwitchGridLayout->addWidget(m_tokenMandatoryNewProcessMinCheck, 2, 1);
+    m_tokenSwitchLayout->addWidget(tokenSwitchGroup);
+
+    QLabel* tokenSwitchHintLabel = new QLabel(
+        QStringLiteral("提示：不同进程/令牌权限下，部分开关可能无法修改，状态栏会给出失败项。"),
+        m_tokenSwitchTab);
+    tokenSwitchHintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+    m_tokenSwitchLayout->addWidget(tokenSwitchHintLabel);
+    m_tokenSwitchLayout->addStretch(1);
+
+    const QString buttonStyle = buildBlueButtonStyle();
+    m_refreshTokenSwitchButton->setStyleSheet(buttonStyle);
+    m_applyTokenSwitchButton->setStyleSheet(buttonStyle);
+}
+
 void ProcessDetailWindow::initializePebTab()
 {
     // PEB 页初始化：展示 PEB 地址、参数块、环境变量等。
@@ -953,6 +1047,16 @@ void ProcessDetailWindow::initializeConnections()
     // 令牌页刷新按钮。
     connect(m_refreshTokenButton, &QPushButton::clicked, this, [this]() {
         requestAsyncTokenRefresh();
+    });
+
+    // 令牌开关页刷新按钮：回读当前 token 开关值并同步复选框。
+    connect(m_refreshTokenSwitchButton, &QPushButton::clicked, this, [this]() {
+        refreshTokenSwitchStates();
+    });
+
+    // 令牌开关页应用按钮：把复选框状态写回目标 token。
+    connect(m_applyTokenSwitchButton, &QPushButton::clicked, this, [this]() {
+        applyTokenSwitchStates();
     });
 
     // PEB 页刷新按钮。
