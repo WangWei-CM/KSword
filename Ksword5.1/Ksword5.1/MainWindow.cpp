@@ -306,6 +306,17 @@ MainWindow::MainWindow(
     m_mainRootLayout->addWidget(m_pDockManager, 1);
     setCentralWidget(m_mainRootContainer);
 
+    // m_backgroundRebuildTimer 用途：
+    // - 合并窗口 resize 期间的背景重建请求；
+    // - 避免最大化恢复为窗口化时立即同步重建整窗背景造成卡顿。
+    m_backgroundRebuildTimer = new QTimer(this);
+    m_backgroundRebuildTimer->setSingleShot(true);
+    m_backgroundRebuildTimer->setInterval(24);
+    connect(m_backgroundRebuildTimer, &QTimer::timeout, this, [this]()
+        {
+            rebuildWindowBackgroundBrush();
+        });
+
     // 浮动窗口创建后立即挂接事件过滤器：
     // - 让脱离主窗口的 Dock 容器也能同步背景图与纯色底；
     // - 后续 resize/show 时统一走 MainWindow 的外观同步逻辑。
@@ -432,7 +443,7 @@ bool MainWindow::eventFilter(QObject* watchedObject, QEvent* event)
 void MainWindow::resizeEvent(QResizeEvent* event)
 {
     QMainWindow::resizeEvent(event);
-    rebuildWindowBackgroundBrush();
+    scheduleWindowBackgroundBrushRebuild();
 }
 
 void MainWindow::showEvent(QShowEvent* event)
@@ -2769,39 +2780,6 @@ void MainWindow::rebuildWindowBackgroundBrush()
     const QString resolvedImagePath = ks::settings::resolveBackgroundImagePathForLoad(
         m_currentAppearanceSettings.backgroundImagePath);
 
-    // 背景图路径诊断日志：
-    // - 记录解析后的背景图路径与可读性；
-    // - 便于快速定位“背景图不显示”是路径问题还是样式覆盖问题。
-    {
-        kLogEvent backgroundResolveEvent;
-        const QFileInfo backgroundFileInfo(resolvedImagePath);
-
-        // imageReader 作用：读取图片头信息（宽高与格式）用于日志诊断。
-        QImageReader imageReader(resolvedImagePath);
-        const QSize imagePixelSize = imageReader.size();
-        const QByteArray imageFormatBytes = imageReader.format();
-        info << backgroundResolveEvent
-            << "[MainWindow] rebuildWindowBackgroundBrush: configuredPath="
-            << m_currentAppearanceSettings.backgroundImagePath.toStdString()
-            << ", resolvedPath="
-            << resolvedImagePath.toStdString()
-            << ", fileName="
-            << backgroundFileInfo.fileName().toStdString()
-            << ", exists="
-            << (backgroundFileInfo.exists() ? "true" : "false")
-            << ", readable="
-            << (backgroundFileInfo.isReadable() ? "true" : "false")
-            << ", sizeBytes="
-            << backgroundFileInfo.size()
-            << ", imageSize="
-            << imagePixelSize.width()
-            << "x"
-            << imagePixelSize.height()
-            << ", format="
-            << imageFormatBytes.toStdString()
-            << eol;
-    }
-
     const QBrush backgroundBrush = buildBackgroundBrush(
         size(),
         baseColor,
@@ -2821,16 +2799,21 @@ void MainWindow::rebuildWindowBackgroundBrush()
         dockPalette.setBrush(QPalette::Window, backgroundBrush);
         m_pDockManager->setPalette(dockPalette);
         m_pDockManager->setAutoFillBackground(true);
-
-        // 同步重建所有当前浮动窗口背景：
-        // - 主窗口 resize 或背景图切换后，浮动容器也要刷新自己的背景画刷；
-        // - 否则会继续保留旧尺寸/旧主题下的纯黑背景。
-        const QList<ads::CFloatingDockContainer*> floatingWidgetList = m_pDockManager->floatingWidgets();
-        for (ads::CFloatingDockContainer* floatingWidget : floatingWidgetList)
-        {
-            applyFloatingDockContainerAppearance(floatingWidget);
-        }
     }
+}
+
+void MainWindow::scheduleWindowBackgroundBrushRebuild()
+{
+    if (m_backgroundRebuildTimer == nullptr)
+    {
+        rebuildWindowBackgroundBrush();
+        return;
+    }
+
+    // 连续 resize 时只保留最后一次重建：
+    // - 最大化拖下恢复为窗口化时，先让系统完成状态切换；
+    // - 再重建背景，减少窗口化瞬间的卡顿感。
+    m_backgroundRebuildTimer->start();
 }
 
 void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContainer* floatingWidget) const
