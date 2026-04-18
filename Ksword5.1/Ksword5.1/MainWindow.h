@@ -244,6 +244,11 @@ private:
     // 调用方式：外观变更与窗口 resize 后调用。
     void rebuildWindowBackgroundBrush();
 
+    // scheduleWindowBackgroundBrushRebuild 作用：
+    // - 对窗口 resize 触发的背景重建做短延迟合并；
+    // - 避免最大化拖下还原或连续缩放时每帧都同步重建整窗背景。
+    void scheduleWindowBackgroundBrushRebuild();
+
     // applyFloatingDockContainerAppearance 作用：
     // - 把当前主题色、背景图与样式同步到指定浮动 Dock 容器；
     // - 解决“拖出后浮动窗口背景变成纯黑未填充”的问题。
@@ -327,6 +332,7 @@ private:
     QPushButton* m_tiStatusButton = nullptr;
     QPushButton* m_pplStatusButton = nullptr;
     QTimer* m_privilegeStatusTimer = nullptr;
+    QTimer* m_backgroundRebuildTimer = nullptr; // m_backgroundRebuildTimer：窗口背景重建合并计时器。
 
     // m_currentAppearanceSettings 作用：缓存当前外观配置（主题/背景图/透明度）。
     ks::settings::AppearanceSettings m_currentAppearanceSettings;
