@@ -206,6 +206,29 @@ private:
     void addSelectedAvailableProcesses();
     void addManualProcessByPid();
     void addTargetProcessByPid(std::uint32_t pidValue, const QString& sourceText);
+    // upsertAutoTrackedProcessInTargetList：
+    // - 作用：把 ETW 识别到的新子进程同步到“监控目标”列表；
+    // - 调用：ETW 线程通过 QueuedConnection 回到 UI 线程后调用；
+    // - 入参 pidValue：子进程 PID；
+    // - 入参 parentPidValue：拉起该子进程的父 PID；
+    // - 入参 processNameText/processPathText：ETW 属性里带出的进程名与路径提示；
+    // - 入参 creationTime100ns：创建时间（若 ETW 暂未提供则为 0）；
+    // - 出参：无（内部更新 m_targetProcessList 与目标表格）。
+    void upsertAutoTrackedProcessInTargetList(
+        std::uint32_t pidValue,
+        std::uint32_t parentPidValue,
+        const QString& processNameText,
+        const QString& processPathText,
+        std::uint64_t creationTime100ns);
+    // removeTrackedProcessFromTargetListByPid：
+    // - 作用：当 ETW 明确报告进程退出时，从监听列表自动取消追踪；
+    // - 调用：ETW 线程通过 QueuedConnection 回到 UI 线程后调用；
+    // - 入参 pidValue：需要移除的 PID；
+    // - 入参 reasonText：本次移除的原因说明（用于日志审计）；
+    // - 出参：无（内部更新 m_targetProcessList 与目标表格）。
+    void removeTrackedProcessFromTargetListByPid(
+        std::uint32_t pidValue,
+        const QString& reasonText);
     void refreshTargetTable();
     void removeSelectedTargetProcesses();
     void clearTargetProcesses();
@@ -294,7 +317,7 @@ private:
     QPushButton* m_removeTargetButton = nullptr;         // m_removeTargetButton：移除选中目标按钮。
     QPushButton* m_clearTargetButton = nullptr;          // m_clearTargetButton：清空目标按钮。
     QLabel* m_targetStatusLabel = nullptr;               // m_targetStatusLabel：目标列表状态文本。
-    QTableWidget* m_targetTable = nullptr;               // m_targetTable：监控根进程列表。
+    QTableWidget* m_targetTable = nullptr;               // m_targetTable：监控监听列表（含手动目标与自动子进程）。
 
     // ========================= 控制栏 ===========================
     QPushButton* m_startButton = nullptr;                // m_startButton：开始监控按钮。

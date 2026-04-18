@@ -351,6 +351,44 @@ void ProcessDetailWindow::applyThemeStyle()
             .arg(KswordTheme::PrimaryBlueHex));
     }
 
+    if (m_tokenRawInfoClassCombo != nullptr || m_tokenRawInputModeCombo != nullptr)
+    {
+        const QString comboStyle = QStringLiteral(
+            "QComboBox {"
+            "  border: 1px solid %1;"
+            "  border-radius: 4px;"
+            "  padding: 3px 8px;"
+            "  color: %2;"
+            "  background: %3;"
+            "}"
+            "QComboBox:hover {"
+            "  border-color: %4;"
+            "}"
+            "QComboBox::drop-down {"
+            "  border:none;"
+            "  width:20px;"
+            "}"
+            "QComboBox QAbstractItemView {"
+            "  background:%3;"
+            "  color:%2;"
+            "  border:1px solid %1;"
+            "  selection-background-color:%4;"
+            "  selection-color:#FFFFFF;"
+            "}")
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::PrimaryBlueHex);
+        if (m_tokenRawInfoClassCombo != nullptr)
+        {
+            m_tokenRawInfoClassCombo->setStyleSheet(comboStyle);
+        }
+        if (m_tokenRawInputModeCombo != nullptr)
+        {
+            m_tokenRawInputModeCombo->setStyleSheet(comboStyle);
+        }
+    }
+
     m_themeStyleApplying = false;
 }
 
@@ -880,18 +918,22 @@ void ProcessDetailWindow::initializeTokenTab()
 
 void ProcessDetailWindow::initializeTokenSwitchTab()
 {
-    // 令牌开关页初始化：
-    // - 提供“复选框 + 应用按钮”的批量令牌开关控制；
-    // - 额外提供“刷新当前开关状态”按钮用于回读当前值。
+    // 令牌设置页初始化：
+    // - 第一部分提供常用开关复选框（快速设置）；
+    // - 第二部分提供原始 NtSetInformationToken 入口（覆盖全部信息类）。
     kLogEvent initTokenSwitchTabEvent;
     info << initTokenSwitchTabEvent
-        << "[ProcessDetailWindow] initializeTokenSwitchTab: 构建令牌开关页面。"
+        << "[ProcessDetailWindow] initializeTokenSwitchTab: 构建完整令牌设置页面。"
         << eol;
 
     m_tokenSwitchLayout = new QVBoxLayout(m_tokenSwitchTab);
     m_tokenSwitchLayout->setContentsMargins(6, 6, 6, 6);
     m_tokenSwitchLayout->setSpacing(8);
 
+    // 顶部工具栏按钮：
+    // - 刷新开关：只刷新快捷开关复选框；
+    // - 应用开关：提交快捷开关；
+    // - 刷新全部：触发令牌详情页“全信息类枚举”刷新。
     QHBoxLayout* tokenSwitchTopBarLayout = new QHBoxLayout();
     m_refreshTokenSwitchButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_tokenSwitchTab);
     m_refreshTokenSwitchButton->setToolTip(QStringLiteral("刷新当前进程令牌的各项开关状态"));
@@ -901,16 +943,24 @@ void ProcessDetailWindow::initializeTokenSwitchTab()
     m_applyTokenSwitchButton->setToolTip(QStringLiteral("把下方复选框状态写回目标进程令牌"));
     m_applyTokenSwitchButton->setFixedSize(34, 34);
     m_applyTokenSwitchButton->setIconSize(QSize(16, 16));
+    m_refreshTokenAllInfoButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_tokenSwitchTab);
+    m_refreshTokenAllInfoButton->setToolTip(QStringLiteral("刷新完整令牌信息（包含全部 TokenInformationClass 枚举）"));
+    m_refreshTokenAllInfoButton->setFixedSize(34, 34);
+    m_refreshTokenAllInfoButton->setIconSize(QSize(16, 16));
     m_tokenSwitchStatusLabel = new QLabel(QStringLiteral("● 尚未刷新令牌开关"), m_tokenSwitchTab);
     m_tokenSwitchStatusLabel->setStyleSheet(
         QStringLiteral("color:%1; font-weight:600;")
         .arg(KswordTheme::TextSecondaryHex()));
     tokenSwitchTopBarLayout->addWidget(m_refreshTokenSwitchButton);
     tokenSwitchTopBarLayout->addWidget(m_applyTokenSwitchButton);
+    tokenSwitchTopBarLayout->addWidget(m_refreshTokenAllInfoButton);
     tokenSwitchTopBarLayout->addWidget(m_tokenSwitchStatusLabel, 1);
     m_tokenSwitchLayout->addLayout(tokenSwitchTopBarLayout);
 
-    QGroupBox* tokenSwitchGroup = new QGroupBox(QStringLiteral("Token 开关位"), m_tokenSwitchTab);
+    // 快捷开关组：
+    // - 对应常见 Token 布尔位与 MandatoryPolicy 位；
+    // - 适合“一眼可见 + 一键应用”的高频修改场景。
+    QGroupBox* tokenSwitchGroup = new QGroupBox(QStringLiteral("Token 快捷开关"), m_tokenSwitchTab);
     QGridLayout* tokenSwitchGridLayout = new QGridLayout(tokenSwitchGroup);
     tokenSwitchGridLayout->setHorizontalSpacing(12);
     tokenSwitchGridLayout->setVerticalSpacing(8);
@@ -936,16 +986,151 @@ void ProcessDetailWindow::initializeTokenSwitchTab()
     tokenSwitchGridLayout->addWidget(m_tokenMandatoryNewProcessMinCheck, 2, 1);
     m_tokenSwitchLayout->addWidget(tokenSwitchGroup);
 
+    // 原始设置组：
+    // - 允许用户选择任意 TokenInformationClass；
+    // - 负载支持 UInt32/UInt64/HexBytes，直接进入 NtSetInformationToken。
+    QGroupBox* rawSetGroup = new QGroupBox(QStringLiteral("原始 NtSetInformationToken（全部信息类）"), m_tokenSwitchTab);
+    QGridLayout* rawSetLayout = new QGridLayout(rawSetGroup);
+    rawSetLayout->setHorizontalSpacing(10);
+    rawSetLayout->setVerticalSpacing(8);
+
+    m_tokenRawInfoClassCombo = new QComboBox(rawSetGroup);
+    m_tokenRawInfoClassCombo->setToolTip(QStringLiteral("选择要传给 NtSetInformationToken 的 TokenInformationClass"));
+    const auto tokenInfoClassNameById = [](const int classId) -> QString
+    {
+        switch (classId)
+        {
+        case 1: return QStringLiteral("TokenUser");
+        case 2: return QStringLiteral("TokenGroups");
+        case 3: return QStringLiteral("TokenPrivileges");
+        case 4: return QStringLiteral("TokenOwner");
+        case 5: return QStringLiteral("TokenPrimaryGroup");
+        case 6: return QStringLiteral("TokenDefaultDacl");
+        case 7: return QStringLiteral("TokenSource");
+        case 8: return QStringLiteral("TokenType");
+        case 9: return QStringLiteral("TokenImpersonationLevel");
+        case 10: return QStringLiteral("TokenStatistics");
+        case 11: return QStringLiteral("TokenRestrictedSids");
+        case 12: return QStringLiteral("TokenSessionId");
+        case 13: return QStringLiteral("TokenGroupsAndPrivileges");
+        case 14: return QStringLiteral("TokenSessionReference");
+        case 15: return QStringLiteral("TokenSandBoxInert");
+        case 16: return QStringLiteral("TokenAuditPolicy");
+        case 17: return QStringLiteral("TokenOrigin");
+        case 18: return QStringLiteral("TokenElevationType");
+        case 19: return QStringLiteral("TokenLinkedToken");
+        case 20: return QStringLiteral("TokenElevation");
+        case 21: return QStringLiteral("TokenHasRestrictions");
+        case 22: return QStringLiteral("TokenAccessInformation");
+        case 23: return QStringLiteral("TokenVirtualizationAllowed");
+        case 24: return QStringLiteral("TokenVirtualizationEnabled");
+        case 25: return QStringLiteral("TokenIntegrityLevel");
+        case 26: return QStringLiteral("TokenUIAccess");
+        case 27: return QStringLiteral("TokenMandatoryPolicy");
+        case 28: return QStringLiteral("TokenLogonSid");
+        case 29: return QStringLiteral("TokenIsAppContainer");
+        case 30: return QStringLiteral("TokenCapabilities");
+        case 31: return QStringLiteral("TokenAppContainerSid");
+        case 32: return QStringLiteral("TokenAppContainerNumber");
+        case 33: return QStringLiteral("TokenUserClaimAttributes");
+        case 34: return QStringLiteral("TokenDeviceClaimAttributes");
+        case 35: return QStringLiteral("TokenRestrictedUserClaimAttributes");
+        case 36: return QStringLiteral("TokenRestrictedDeviceClaimAttributes");
+        case 37: return QStringLiteral("TokenDeviceGroups");
+        case 38: return QStringLiteral("TokenRestrictedDeviceGroups");
+        case 39: return QStringLiteral("TokenSecurityAttributes");
+        case 40: return QStringLiteral("TokenIsRestricted");
+        case 41: return QStringLiteral("TokenProcessTrustLevel");
+        case 42: return QStringLiteral("TokenPrivateNameSpace");
+        case 43: return QStringLiteral("TokenSingletonAttributes");
+        case 44: return QStringLiteral("TokenBnoIsolation");
+        case 45: return QStringLiteral("TokenChildProcessFlags");
+        case 46: return QStringLiteral("TokenIsLessPrivilegedAppContainer");
+        case 47: return QStringLiteral("TokenIsSandboxed");
+        case 48: return QStringLiteral("TokenOriginatingProcessTrustLevel");
+        case 49: return QStringLiteral("TokenLoggingInformation");
+        case 50: return QStringLiteral("TokenLearningMode");
+        case 51: return QStringLiteral("TokenIsAppSilo");
+        default: return QStringLiteral("TokenClass%1").arg(classId);
+        }
+    };
+    for (int classId = 1; classId <= 80; ++classId)
+    {
+        const QString itemText = QStringLiteral("[%1] %2")
+            .arg(classId)
+            .arg(tokenInfoClassNameById(classId));
+        m_tokenRawInfoClassCombo->addItem(itemText, classId);
+    }
+    m_tokenRawInfoClassCombo->setCurrentIndex(14);
+
+    m_tokenRawInputModeCombo = new QComboBox(rawSetGroup);
+    m_tokenRawInputModeCombo->setToolTip(QStringLiteral("选择原始负载解释方式"));
+    m_tokenRawInputModeCombo->addItem(QStringLiteral("UInt32"), QStringLiteral("u32"));
+    m_tokenRawInputModeCombo->addItem(QStringLiteral("UInt64"), QStringLiteral("u64"));
+    m_tokenRawInputModeCombo->addItem(QStringLiteral("HexBytes"), QStringLiteral("hex"));
+
+    m_tokenRawPayloadEdit = new QLineEdit(rawSetGroup);
+    m_tokenRawPayloadEdit->setPlaceholderText(QStringLiteral("示例：UInt32=1；UInt64=0x10；HexBytes=01 00 00 00"));
+    m_tokenRawPayloadEdit->setToolTip(QStringLiteral("原始输入内容，按当前输入模式解析后直接传给 NtSetInformationToken"));
+
+    m_tokenRawApplyButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), rawSetGroup);
+    m_tokenRawApplyButton->setToolTip(QStringLiteral("应用原始 NtSetInformationToken 设置"));
+    m_tokenRawApplyButton->setFixedSize(34, 34);
+    m_tokenRawApplyButton->setIconSize(QSize(16, 16));
+
+    rawSetLayout->addWidget(new QLabel(QStringLiteral("信息类"), rawSetGroup), 0, 0);
+    rawSetLayout->addWidget(m_tokenRawInfoClassCombo, 0, 1, 1, 2);
+    rawSetLayout->addWidget(new QLabel(QStringLiteral("输入模式"), rawSetGroup), 1, 0);
+    rawSetLayout->addWidget(m_tokenRawInputModeCombo, 1, 1, 1, 2);
+    rawSetLayout->addWidget(new QLabel(QStringLiteral("原始负载"), rawSetGroup), 2, 0);
+    rawSetLayout->addWidget(m_tokenRawPayloadEdit, 2, 1);
+    rawSetLayout->addWidget(m_tokenRawApplyButton, 2, 2);
+    m_tokenSwitchLayout->addWidget(rawSetGroup);
+
     QLabel* tokenSwitchHintLabel = new QLabel(
-        QStringLiteral("提示：不同进程/令牌权限下，部分开关可能无法修改，状态栏会给出失败项。"),
+        QStringLiteral("提示：可先点“刷新全部令牌信息”查看所有 TokenInformationClass 的当前状态，再按快捷或原始模式应用。"),
         m_tokenSwitchTab);
     tokenSwitchHintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
     m_tokenSwitchLayout->addWidget(tokenSwitchHintLabel);
     m_tokenSwitchLayout->addStretch(1);
 
+    // 页面样式：
+    // - 图标按钮统一蓝色皮肤；
+    // - 原始设置组合框使用同一套描边/高亮风格。
     const QString buttonStyle = buildBlueButtonStyle();
     m_refreshTokenSwitchButton->setStyleSheet(buttonStyle);
     m_applyTokenSwitchButton->setStyleSheet(buttonStyle);
+    m_refreshTokenAllInfoButton->setStyleSheet(buttonStyle);
+    m_tokenRawApplyButton->setStyleSheet(buttonStyle);
+
+    const QString comboStyle = QStringLiteral(
+        "QComboBox {"
+        "  border: 1px solid %1;"
+        "  border-radius: 4px;"
+        "  padding: 3px 8px;"
+        "  color: %2;"
+        "  background: %3;"
+        "}"
+        "QComboBox:hover {"
+        "  border-color: %4;"
+        "}"
+        "QComboBox::drop-down {"
+        "  border:none;"
+        "  width:20px;"
+        "}"
+        "QComboBox QAbstractItemView {"
+        "  background:%3;"
+        "  color:%2;"
+        "  border:1px solid %1;"
+        "  selection-background-color:%4;"
+        "  selection-color:#FFFFFF;"
+        "}")
+        .arg(KswordTheme::BorderHex())
+        .arg(KswordTheme::TextPrimaryHex())
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::PrimaryBlueHex);
+    m_tokenRawInfoClassCombo->setStyleSheet(comboStyle);
+    m_tokenRawInputModeCombo->setStyleSheet(comboStyle);
 }
 
 void ProcessDetailWindow::initializePebTab()
@@ -1057,6 +1242,16 @@ void ProcessDetailWindow::initializeConnections()
     // 令牌开关页应用按钮：把复选框状态写回目标 token。
     connect(m_applyTokenSwitchButton, &QPushButton::clicked, this, [this]() {
         applyTokenSwitchStates();
+    });
+
+    // 令牌设置页“刷新全部信息”按钮：触发令牌详情全量刷新（含全部信息类枚举）。
+    connect(m_refreshTokenAllInfoButton, &QPushButton::clicked, this, [this]() {
+        requestAsyncTokenRefresh();
+    });
+
+    // 令牌设置页“原始应用”按钮：按当前 class + payload 直接调用 NtSetInformationToken。
+    connect(m_tokenRawApplyButton, &QPushButton::clicked, this, [this]() {
+        applyRawTokenInformation();
     });
 
     // PEB 页刷新按钮。

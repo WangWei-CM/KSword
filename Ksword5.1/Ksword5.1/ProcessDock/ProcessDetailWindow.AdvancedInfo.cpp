@@ -49,6 +49,15 @@ namespace
     constexpr DWORD kTokenMandatoryPolicyNewProcessMin = TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN;
 #endif
 
+    // TOKEN_ADJUST_SESSIONID 兜底常量：
+    // - 某些旧 SDK 可能未定义该访问位；
+    // - 这里统一给出数值兜底，避免编译差异。
+#ifndef TOKEN_ADJUST_SESSIONID
+    constexpr DWORD kTokenAdjustSessionIdAccess = 0x0100;
+#else
+    constexpr DWORD kTokenAdjustSessionIdAccess = TOKEN_ADJUST_SESSIONID;
+#endif
+
     // GetProcessInformation(ProcessPowerThrottling) 所需结构：
     // - 采用本地定义，避免依赖高版本 SDK 才可见的类型声明。
     struct ProcessPowerThrottlingStateNative
@@ -521,6 +530,94 @@ namespace
         default: return QString("UNKNOWN(%1)").arg(priorityClass);
         }
     }
+
+    // tokenInfoClassNameById：
+    // - 把 TokenInformationClass 数值映射到名称；
+    // - 未知编号统一显示 TokenClassN，避免信息丢失。
+    QString tokenInfoClassNameById(const ULONG classId)
+    {
+        switch (classId)
+        {
+        case 1: return QStringLiteral("TokenUser");
+        case 2: return QStringLiteral("TokenGroups");
+        case 3: return QStringLiteral("TokenPrivileges");
+        case 4: return QStringLiteral("TokenOwner");
+        case 5: return QStringLiteral("TokenPrimaryGroup");
+        case 6: return QStringLiteral("TokenDefaultDacl");
+        case 7: return QStringLiteral("TokenSource");
+        case 8: return QStringLiteral("TokenType");
+        case 9: return QStringLiteral("TokenImpersonationLevel");
+        case 10: return QStringLiteral("TokenStatistics");
+        case 11: return QStringLiteral("TokenRestrictedSids");
+        case 12: return QStringLiteral("TokenSessionId");
+        case 13: return QStringLiteral("TokenGroupsAndPrivileges");
+        case 14: return QStringLiteral("TokenSessionReference");
+        case 15: return QStringLiteral("TokenSandBoxInert");
+        case 16: return QStringLiteral("TokenAuditPolicy");
+        case 17: return QStringLiteral("TokenOrigin");
+        case 18: return QStringLiteral("TokenElevationType");
+        case 19: return QStringLiteral("TokenLinkedToken");
+        case 20: return QStringLiteral("TokenElevation");
+        case 21: return QStringLiteral("TokenHasRestrictions");
+        case 22: return QStringLiteral("TokenAccessInformation");
+        case 23: return QStringLiteral("TokenVirtualizationAllowed");
+        case 24: return QStringLiteral("TokenVirtualizationEnabled");
+        case 25: return QStringLiteral("TokenIntegrityLevel");
+        case 26: return QStringLiteral("TokenUIAccess");
+        case 27: return QStringLiteral("TokenMandatoryPolicy");
+        case 28: return QStringLiteral("TokenLogonSid");
+        case 29: return QStringLiteral("TokenIsAppContainer");
+        case 30: return QStringLiteral("TokenCapabilities");
+        case 31: return QStringLiteral("TokenAppContainerSid");
+        case 32: return QStringLiteral("TokenAppContainerNumber");
+        case 33: return QStringLiteral("TokenUserClaimAttributes");
+        case 34: return QStringLiteral("TokenDeviceClaimAttributes");
+        case 35: return QStringLiteral("TokenRestrictedUserClaimAttributes");
+        case 36: return QStringLiteral("TokenRestrictedDeviceClaimAttributes");
+        case 37: return QStringLiteral("TokenDeviceGroups");
+        case 38: return QStringLiteral("TokenRestrictedDeviceGroups");
+        case 39: return QStringLiteral("TokenSecurityAttributes");
+        case 40: return QStringLiteral("TokenIsRestricted");
+        case 41: return QStringLiteral("TokenProcessTrustLevel");
+        case 42: return QStringLiteral("TokenPrivateNameSpace");
+        case 43: return QStringLiteral("TokenSingletonAttributes");
+        case 44: return QStringLiteral("TokenBnoIsolation");
+        case 45: return QStringLiteral("TokenChildProcessFlags");
+        case 46: return QStringLiteral("TokenIsLessPrivilegedAppContainer");
+        case 47: return QStringLiteral("TokenIsSandboxed");
+        case 48: return QStringLiteral("TokenOriginatingProcessTrustLevel");
+        case 49: return QStringLiteral("TokenLoggingInformation");
+        case 50: return QStringLiteral("TokenLearningMode");
+        case 51: return QStringLiteral("TokenIsAppSilo");
+        default: return QStringLiteral("TokenClass%1").arg(classId);
+        }
+    }
+
+    // formatTokenRawPreview：
+    // - 把原始字节缓冲区前 N 字节格式化为十六进制预览；
+    // - 输出形如 "01 00 FF ..."，便于快速比对当前值。
+    QString formatTokenRawPreview(const std::vector<std::uint8_t>& rawBuffer, const std::size_t maxBytes)
+    {
+        if (rawBuffer.empty() || maxBytes == 0)
+        {
+            return QStringLiteral("-");
+        }
+
+        QStringList byteTextList;
+        const std::size_t previewCount = std::min<std::size_t>(rawBuffer.size(), maxBytes);
+        byteTextList.reserve(static_cast<int>(previewCount) + 1);
+        for (std::size_t index = 0; index < previewCount; ++index)
+        {
+            byteTextList << QStringLiteral("%1")
+                .arg(static_cast<unsigned int>(rawBuffer[index]), 2, 16, QChar('0'))
+                .toUpper();
+        }
+        if (rawBuffer.size() > previewCount)
+        {
+            byteTextList << QStringLiteral("...");
+        }
+        return byteTextList.join(QStringLiteral(" "));
+    }
 }
 
 void ProcessDetailWindow::updateThreadInspectStatusLabel(const QString& statusText, const bool refreshing)
@@ -930,6 +1027,40 @@ void ProcessDetailWindow::requestAsyncTokenRefresh()
                         }
                     }
 
+                    // 全信息类快照：
+                    // - 枚举 TokenInformationClass 1..80；
+                    // - 对每个类输出是否可读、字节长度与原始预览，避免遗漏关键字段。
+                    textBuilder << L"\n[All TokenInformationClass Snapshot]\n";
+                    for (ULONG classId = 1; classId <= 80; ++classId)
+                    {
+                        std::vector<std::uint8_t> classRawBuffer;
+                        const TOKEN_INFORMATION_CLASS infoClass = static_cast<TOKEN_INFORMATION_CLASS>(classId);
+                        const bool queryOk = queryTokenInfoBuffer(tokenHandle, infoClass, classRawBuffer);
+                        if (queryOk)
+                        {
+                            textBuilder << L"  ["
+                                << classId
+                                << L"] "
+                                << tokenInfoClassNameById(classId).toStdWString()
+                                << L": size="
+                                << classRawBuffer.size()
+                                << L", raw="
+                                << formatTokenRawPreview(classRawBuffer, 24).toStdWString()
+                                << L"\n";
+                        }
+                        else
+                        {
+                            const DWORD queryError = GetLastError();
+                            textBuilder << L"  ["
+                                << classId
+                                << L"] "
+                                << tokenInfoClassNameById(classId).toStdWString()
+                                << L": queryFailed("
+                                << queryError
+                                << L")\n";
+                        }
+                    }
+
                     CloseHandle(tokenHandle);
                 }
 
@@ -954,7 +1085,7 @@ void ProcessDetailWindow::requestAsyncTokenRefresh()
                     ULONG breakOnTermination = 0;
                     if (queryNtProcessInfoFixed(ntQueryProcess, processHandle, kProcessInfoClassBreakOnTermination, breakOnTermination))
                     {
-                        textBuilder << L"BreakOnTermination(Critical): "
+                        textBuilder << L"ProcessCriticalFlag(BreakOnTermination): "
                             << (breakOnTermination != 0 ? L"true" : L"false")
                             << L"\n";
                     }
@@ -1469,6 +1600,299 @@ void ProcessDetailWindow::applyTokenSwitchStates()
             << eol;
     }
 
+    requestAsyncTokenRefresh();
+    refreshTokenSwitchStates();
+}
+
+void ProcessDetailWindow::applyRawTokenInformation()
+{
+    // 原始设置应用日志：
+    // - 同一条 kLogEvent 贯穿“解析输入 -> 打开令牌 -> NtSetInformationToken”；
+    // - 保证失败点可在日志中准确定位。
+    kLogEvent actionEvent;
+    info << actionEvent
+        << "[ProcessDetailWindow] applyRawTokenInformation: pid="
+        << m_baseRecord.pid
+        << eol;
+
+    // setStatusLabel 作用：
+    // - 统一设置令牌设置页状态文本和颜色；
+    // - 减少多分支重复 setText/setStyleSheet 代码。
+    const auto setStatusLabel =
+        [this](const QString& statusText, const QColor& textColor, const int fontWeight)
+    {
+        if (m_tokenSwitchStatusLabel == nullptr)
+        {
+            return;
+        }
+        m_tokenSwitchStatusLabel->setText(statusText);
+        m_tokenSwitchStatusLabel->setStyleSheet(buildStateLabelStyle(textColor, fontWeight));
+    };
+
+    if (m_baseRecord.pid == 0)
+    {
+        setStatusLabel(QStringLiteral("● 原始设置失败：PID 无效"), statusWarningColor(), 700);
+        warn << actionEvent
+            << "[ProcessDetailWindow] applyRawTokenInformation: PID 无效。"
+            << eol;
+        return;
+    }
+    if (m_tokenRawInfoClassCombo == nullptr || m_tokenRawInputModeCombo == nullptr || m_tokenRawPayloadEdit == nullptr)
+    {
+        setStatusLabel(QStringLiteral("● 原始设置失败：控件未初始化"), statusWarningColor(), 700);
+        err << actionEvent
+            << "[ProcessDetailWindow] applyRawTokenInformation: 原始设置控件为空。"
+            << eol;
+        return;
+    }
+
+    const int classId = m_tokenRawInfoClassCombo->currentData().toInt();
+    const QString modeKey = m_tokenRawInputModeCombo->currentData().toString().trimmed().toLower();
+    const QString payloadText = m_tokenRawPayloadEdit->text().trimmed();
+    if (classId <= 0)
+    {
+        setStatusLabel(QStringLiteral("● 原始设置失败：信息类无效"), statusWarningColor(), 700);
+        warn << actionEvent
+            << "[ProcessDetailWindow] applyRawTokenInformation: classId 无效="
+            << classId
+            << eol;
+        return;
+    }
+    if (payloadText.isEmpty())
+    {
+        setStatusLabel(QStringLiteral("● 原始设置失败：负载为空"), statusWarningColor(), 700);
+        warn << actionEvent
+            << "[ProcessDetailWindow] applyRawTokenInformation: payload 为空。"
+            << eol;
+        return;
+    }
+
+    // 输入解析：
+    // - UInt32/UInt64 使用 Qt 自动进制（支持 0x 前缀）；
+    // - HexBytes 按空格/逗号分隔字节序列。
+    std::vector<std::uint8_t> payloadBuffer;
+    QString parseErrorText;
+    if (modeKey == QStringLiteral("u32"))
+    {
+        bool parseOk = false;
+        const qulonglong parsedValue = payloadText.toULongLong(&parseOk, 0);
+        if (!parseOk || parsedValue > 0xFFFFFFFFULL)
+        {
+            parseErrorText = QStringLiteral("UInt32 解析失败");
+        }
+        else
+        {
+            const std::uint32_t value32 = static_cast<std::uint32_t>(parsedValue);
+            payloadBuffer.resize(sizeof(value32));
+            std::memcpy(payloadBuffer.data(), &value32, sizeof(value32));
+        }
+    }
+    else if (modeKey == QStringLiteral("u64"))
+    {
+        bool parseOk = false;
+        const qulonglong parsedValue = payloadText.toULongLong(&parseOk, 0);
+        if (!parseOk)
+        {
+            parseErrorText = QStringLiteral("UInt64 解析失败");
+        }
+        else
+        {
+            const std::uint64_t value64 = static_cast<std::uint64_t>(parsedValue);
+            payloadBuffer.resize(sizeof(value64));
+            std::memcpy(payloadBuffer.data(), &value64, sizeof(value64));
+        }
+    }
+    else if (modeKey == QStringLiteral("hex"))
+    {
+        QString normalizedText = payloadText;
+        normalizedText.replace(',', ' ');
+        const QStringList tokenList = normalizedText.split(' ', Qt::SkipEmptyParts);
+        if (tokenList.isEmpty())
+        {
+            parseErrorText = QStringLiteral("HexBytes 解析失败：没有字节");
+        }
+        else
+        {
+            payloadBuffer.reserve(static_cast<std::size_t>(tokenList.size()));
+            for (const QString& tokenText : tokenList)
+            {
+                QString oneByteText = tokenText.trimmed();
+                if (oneByteText.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+                {
+                    oneByteText = oneByteText.mid(2);
+                }
+                bool oneByteOk = false;
+                const uint oneByteValue = oneByteText.toUInt(&oneByteOk, 16);
+                if (!oneByteOk || oneByteValue > 0xFFU)
+                {
+                    parseErrorText = QStringLiteral("HexBytes 解析失败：非法字节 '%1'").arg(tokenText);
+                    payloadBuffer.clear();
+                    break;
+                }
+                payloadBuffer.push_back(static_cast<std::uint8_t>(oneByteValue));
+            }
+        }
+    }
+    else
+    {
+        parseErrorText = QStringLiteral("未知输入模式");
+    }
+
+    if (!parseErrorText.isEmpty() || payloadBuffer.empty())
+    {
+        setStatusLabel(
+            QStringLiteral("● 原始设置失败：%1").arg(parseErrorText.isEmpty() ? QStringLiteral("负载为空") : parseErrorText),
+            statusWarningColor(),
+            700);
+        warn << actionEvent
+            << "[ProcessDetailWindow] applyRawTokenInformation: 负载解析失败, mode="
+            << modeKey.toStdString()
+            << ", payload="
+            << payloadText.toStdString()
+            << ", error="
+            << parseErrorText.toStdString()
+            << eol;
+        return;
+    }
+
+    if (m_tokenRawApplyButton != nullptr)
+    {
+        m_tokenRawApplyButton->setEnabled(false);
+    }
+    setStatusLabel(QStringLiteral("● 正在应用原始令牌设置..."), KswordTheme::PrimaryBlueColor, 700);
+
+    // 动态解析 NtSetInformationToken：
+    // - 用户选择的信息类和值将直接透传到原生 API；
+    // - 此路径用于覆盖快捷开关之外的全部可尝试设置项。
+    HMODULE ntdllModule = GetModuleHandleW(L"ntdll.dll");
+    if (ntdllModule == nullptr)
+    {
+        ntdllModule = LoadLibraryW(L"ntdll.dll");
+    }
+    const auto setInformationToken = reinterpret_cast<NtSetInformationTokenFn>(
+        ntdllModule != nullptr ? GetProcAddress(ntdllModule, "NtSetInformationToken") : nullptr);
+    if (setInformationToken == nullptr)
+    {
+        setStatusLabel(QStringLiteral("● 原始设置失败：NtSetInformationToken 不可用"), statusWarningColor(), 700);
+        err << actionEvent
+            << "[ProcessDetailWindow] applyRawTokenInformation: NtSetInformationToken 不可用。"
+            << eol;
+        if (m_tokenRawApplyButton != nullptr)
+        {
+            m_tokenRawApplyButton->setEnabled(true);
+        }
+        return;
+    }
+
+    // 打开目标令牌：
+    // - TOKEN_ADJUST_DEFAULT 覆盖大部分设置项；
+    // - TOKEN_ADJUST_SESSIONID 用于 TokenSessionId 等特例信息类。
+    HANDLE processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, m_baseRecord.pid);
+    if (processHandle == nullptr)
+    {
+        const DWORD openProcessError = GetLastError();
+        setStatusLabel(
+            QStringLiteral("● 原始设置失败：OpenProcess(%1)").arg(openProcessError),
+            statusWarningColor(),
+            700);
+        err << actionEvent
+            << "[ProcessDetailWindow] applyRawTokenInformation: OpenProcess 失败, error="
+            << openProcessError
+            << eol;
+        if (m_tokenRawApplyButton != nullptr)
+        {
+            m_tokenRawApplyButton->setEnabled(true);
+        }
+        return;
+    }
+
+    HANDLE tokenHandle = nullptr;
+    if (OpenProcessToken(
+        processHandle,
+        TOKEN_ADJUST_DEFAULT | kTokenAdjustSessionIdAccess | TOKEN_QUERY,
+        &tokenHandle) == FALSE || tokenHandle == nullptr)
+    {
+        const DWORD openTokenError = GetLastError();
+        CloseHandle(processHandle);
+        processHandle = nullptr;
+        setStatusLabel(
+            QStringLiteral("● 原始设置失败：OpenProcessToken(%1)").arg(openTokenError),
+            statusWarningColor(),
+            700);
+        err << actionEvent
+            << "[ProcessDetailWindow] applyRawTokenInformation: OpenProcessToken 失败, error="
+            << openTokenError
+            << eol;
+        if (m_tokenRawApplyButton != nullptr)
+        {
+            m_tokenRawApplyButton->setEnabled(true);
+        }
+        return;
+    }
+
+    const TOKEN_INFORMATION_CLASS infoClass = static_cast<TOKEN_INFORMATION_CLASS>(classId);
+    const NTSTATUS setStatus = setInformationToken(
+        tokenHandle,
+        infoClass,
+        payloadBuffer.data(),
+        static_cast<ULONG>(payloadBuffer.size()));
+
+    CloseHandle(tokenHandle);
+    tokenHandle = nullptr;
+    CloseHandle(processHandle);
+    processHandle = nullptr;
+
+    if (m_tokenRawApplyButton != nullptr)
+    {
+        m_tokenRawApplyButton->setEnabled(true);
+    }
+
+    if (NT_SUCCESS(setStatus))
+    {
+        setStatusLabel(
+            QStringLiteral("● 原始设置成功：[%1] %2, size=%3")
+            .arg(classId)
+            .arg(tokenInfoClassNameById(static_cast<ULONG>(classId)))
+            .arg(payloadBuffer.size()),
+            statusIdleColor(),
+            600);
+        info << actionEvent
+            << "[ProcessDetailWindow] applyRawTokenInformation: 成功, classId="
+            << classId
+            << ", className="
+            << tokenInfoClassNameById(static_cast<ULONG>(classId)).toStdString()
+            << ", payloadSize="
+            << payloadBuffer.size()
+            << ", payloadPreview="
+            << formatTokenRawPreview(payloadBuffer, 24).toStdString()
+            << eol;
+    }
+    else
+    {
+        setStatusLabel(
+            QStringLiteral("● 原始设置失败：[%1] %2, status=%3")
+            .arg(classId)
+            .arg(tokenInfoClassNameById(static_cast<ULONG>(classId)))
+            .arg(formatNtStatusHex(setStatus)),
+            statusWarningColor(),
+            700);
+        err << actionEvent
+            << "[ProcessDetailWindow] applyRawTokenInformation: 失败, classId="
+            << classId
+            << ", className="
+            << tokenInfoClassNameById(static_cast<ULONG>(classId)).toStdString()
+            << ", status="
+            << formatNtStatusHex(setStatus).toStdString()
+            << ", payloadSize="
+            << payloadBuffer.size()
+            << ", payloadPreview="
+            << formatTokenRawPreview(payloadBuffer, 24).toStdString()
+            << eol;
+    }
+
+    // 提交后统一刷新：
+    // - 令牌详情页会重新抓取完整信息类快照；
+    // - 快捷开关页会重新回读可见复选框状态。
     requestAsyncTokenRefresh();
     refreshTokenSwitchStates();
 }

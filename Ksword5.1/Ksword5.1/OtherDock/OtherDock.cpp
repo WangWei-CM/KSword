@@ -1740,6 +1740,8 @@ private:
                 return;
             }
             QMenu menu;
+            // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
+            menu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* copyRowAction = menu.addAction(QStringLiteral("复制选中行"));
             QAction* selectedAction = menu.exec(m_messageTable->viewport()->mapToGlobal(pos));
             if (selectedAction != copyRowAction)
@@ -4089,6 +4091,8 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
     }
 
     QMenu menu(this);
+    // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* activateAction = menu.addAction(QIcon(":/Icon/process_start.svg"), QStringLiteral("激活窗口"));
     QAction* topMostAction = menu.addAction(QIcon(":/Icon/process_priority.svg"), QStringLiteral("置顶/取消置顶"));
     QAction* showHideAction = menu.addAction(QIcon(":/Icon/process_pause.svg"), QStringLiteral("显示/隐藏"));

@@ -205,6 +205,9 @@
     <ClCompile Include="ProcessDock\ProcessDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ProcessDock\ProcessDock.ThreadTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="SettingsDock\SettingsDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

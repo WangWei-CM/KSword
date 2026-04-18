@@ -1,4 +1,5 @@
 #include "HandleDock.h"
+#include "../theme.h"
 
 // ============================================================
 // HandleDock.Detail.cpp
@@ -130,6 +131,8 @@ void HandleDock::showHandleHeaderContextMenu(const QPoint& localPosition)
 
     QHeaderView* header = m_tableWidget->header();
     QMenu menu(this);
+    // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     for (int columnIndex = 0; columnIndex < static_cast<int>(HandleTableColumn::Count); ++columnIndex)
     {
         const QString columnTitle = m_tableWidget->headerItem()->text(columnIndex);

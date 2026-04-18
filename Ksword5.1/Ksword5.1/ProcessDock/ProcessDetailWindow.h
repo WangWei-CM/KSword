@@ -164,6 +164,13 @@ private:
     // 参数：无。
     // 返回：无。
     void applyTokenSwitchStates();
+    // applyRawTokenInformation 作用：
+    // - 从“原始设置”区域读取 TokenInformationClass 与原始负载；
+    // - 直接调用 NtSetInformationToken 提交，覆盖所有可尝试的信息类。
+    // 调用方式：点击“应用原始设置”按钮后调用。
+    // 参数：无。
+    // 返回：无。
+    void applyRawTokenInformation();
 
     // ======== 模块页刷新 ========
     void requestAsyncModuleRefresh(bool forceRefresh);
@@ -317,6 +324,7 @@ private:
     QVBoxLayout* m_tokenSwitchLayout = nullptr;    // 令牌开关页总布局。
     QPushButton* m_refreshTokenSwitchButton = nullptr; // 刷新令牌开关按钮。
     QPushButton* m_applyTokenSwitchButton = nullptr;   // 应用令牌开关按钮。
+    QPushButton* m_refreshTokenAllInfoButton = nullptr; // 刷新全部令牌信息按钮（触发全信息类枚举）。
     QLabel* m_tokenSwitchStatusLabel = nullptr;    // 令牌开关应用状态文本。
     QCheckBox* m_tokenSandboxInertCheck = nullptr; // SandboxInert 开关。
     QCheckBox* m_tokenVirtualizationAllowedCheck = nullptr; // VirtualizationAllowed 开关。
@@ -324,6 +332,10 @@ private:
     QCheckBox* m_tokenUiAccessCheck = nullptr;     // UIAccess 开关。
     QCheckBox* m_tokenMandatoryNoWriteUpCheck = nullptr; // MandatoryPolicy: NoWriteUp 位。
     QCheckBox* m_tokenMandatoryNewProcessMinCheck = nullptr; // MandatoryPolicy: NewProcessMin 位。
+    QComboBox* m_tokenRawInfoClassCombo = nullptr; // 原始设置：TokenInformationClass 选择框。
+    QComboBox* m_tokenRawInputModeCombo = nullptr; // 原始设置：负载输入模式（UInt32/UInt64/HexBytes）。
+    QLineEdit* m_tokenRawPayloadEdit = nullptr;    // 原始设置：负载输入文本。
+    QPushButton* m_tokenRawApplyButton = nullptr;  // 原始设置：执行 NtSetInformationToken 的按钮。
 
     // ======== PEB页控件与状态 ========
     QVBoxLayout* m_pebLayout = nullptr;            // PEB 页布局。

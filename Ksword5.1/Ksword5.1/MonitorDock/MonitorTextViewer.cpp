@@ -1,4 +1,6 @@
 #include "MonitorTextViewer.h"
+#include "../theme.h"
+#include "../UI/CodeEditorWidget.h"
 
 // ============================================================
 // MonitorTextViewer.cpp
@@ -10,11 +12,7 @@
 
 #include <QDialog>
 #include <QDialogButtonBox>
-#include <QFontDatabase>
-#include <QPlainTextEdit>
 #include <QVBoxLayout>
-
-#include <algorithm>
 
 namespace monitor_text_viewer
 {
@@ -26,21 +24,23 @@ namespace monitor_text_viewer
     {
         QDialog* dialogPointer = new QDialog(parentWidget);
         dialogPointer->setAttribute(Qt::WA_DeleteOnClose, true);
+        dialogPointer->setObjectName(QStringLiteral("MonitorTextViewerDialog"));
         dialogPointer->setWindowTitle(titleText.trimmed().isEmpty() ? QStringLiteral("详情查看") : titleText);
         dialogPointer->resize(980, 720);
         dialogPointer->setModal(false);
+        // 详情弹窗强制使用不透明背景，避免浅色模式下出现黑底。
+        dialogPointer->setStyleSheet(KswordTheme::OpaqueDialogStyle(dialogPointer->objectName()));
 
         QVBoxLayout* layoutPointer = new QVBoxLayout(dialogPointer);
         layoutPointer->setContentsMargins(6, 6, 6, 6);
         layoutPointer->setSpacing(6);
 
-        QPlainTextEdit* editorWidget = new QPlainTextEdit(dialogPointer);
+        // editorWidget 用途：
+        // - 统一复用项目内置 CodeEditorWidget，满足“默认使用内部编辑器”规范；
+        // - 只读展示 ETW/WMI 等返回详情文本。
+        CodeEditorWidget* editorWidget = new CodeEditorWidget(dialogPointer);
         editorWidget->setReadOnly(true);
-        editorWidget->setLineWrapMode(QPlainTextEdit::NoWrap);
-        QFont fixedFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-        fixedFont.setPointSize(std::max(11, fixedFont.pointSize()));
-        editorWidget->setFont(fixedFont);
-        editorWidget->setPlainText(contentText);
+        editorWidget->setText(contentText);
         editorWidget->setToolTip(virtualPathText.trimmed().isEmpty() ? titleText : virtualPathText);
 
         QDialogButtonBox* buttonBoxPointer = new QDialogButtonBox(QDialogButtonBox::Close, dialogPointer);

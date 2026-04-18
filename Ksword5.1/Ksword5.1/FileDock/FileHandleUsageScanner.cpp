@@ -4,7 +4,7 @@
 // FileHandleUsageScanner.cpp
 // 作用：
 // - 实现正式版“文件/目录占用扫描”；
-// - 文件句柄部分采用旧句柄表 + 16 线程 + 监管线程续扫；
+// - 文件句柄部分采用扩展句柄表 + 16 线程 + 监管线程续扫；
 // - 同时补充进程映像与已加载模块两类非 File 句柄占用来源。
 // ============================================================
 
@@ -42,27 +42,31 @@ namespace filedock::handleusage
         constexpr std::size_t kWorkerCount = 16;
         constexpr std::uint64_t kHeartbeatTimeoutMs = 500;
         constexpr DWORD kMonitorSleepMs = 80;
-        constexpr ULONG kSystemHandleInformationClass = 16;
+        constexpr ULONG kSystemExtendedHandleInformationClass = 64;
+        constexpr ULONG kObjectNameInformationClass = 1;
         constexpr NTSTATUS kStatusInfoLengthMismatch = static_cast<NTSTATUS>(0xC0000004);
         constexpr NTSTATUS kStatusBufferOverflow = static_cast<NTSTATUS>(0x80000005);
         constexpr NTSTATUS kStatusBufferTooSmall = static_cast<NTSTATUS>(0xC0000023);
         constexpr float kHandlePathProgressStart = 35.0f;
         constexpr float kHandlePathProgressEnd = 85.0f;
 
-        struct SYSTEM_HANDLE_TABLE_ENTRY_INFO_NATIVE
+        struct SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX_NATIVE
         {
-            ULONG processId = 0;            // processId：拥有该句柄的进程 PID。
-            UCHAR objectTypeNumber = 0;     // objectTypeNumber：对象类型编号。
-            UCHAR flags = 0;                // flags：句柄属性位。
-            USHORT handleValue = 0;         // handleValue：句柄值。
-            PVOID objectAddress = nullptr;  // objectAddress：内核对象地址。
-            ACCESS_MASK grantedAccess = 0;  // grantedAccess：访问掩码。
+            PVOID objectAddress = nullptr;          // objectAddress：内核对象地址。
+            ULONG_PTR uniqueProcessId = 0;          // uniqueProcessId：拥有该句柄的进程 PID。
+            ULONG_PTR handleValue = 0;              // handleValue：句柄值（完整位宽）。
+            ULONG grantedAccess = 0;                // grantedAccess：访问掩码。
+            USHORT creatorBackTraceIndex = 0;       // creatorBackTraceIndex：创建栈索引。
+            USHORT objectTypeIndex = 0;             // objectTypeIndex：对象类型编号。
+            ULONG handleAttributes = 0;             // handleAttributes：句柄属性位。
+            ULONG reserved = 0;                     // reserved：保留字段。
         };
 
-        struct SYSTEM_HANDLE_INFORMATION_NATIVE
+        struct SYSTEM_HANDLE_INFORMATION_EX_NATIVE
         {
-            ULONG handleCount = 0;                                  // handleCount：系统句柄总数。
-            SYSTEM_HANDLE_TABLE_ENTRY_INFO_NATIVE handles[1] = {};  // handles：句柄条目数组。
+            ULONG_PTR numberOfHandles = 0;                                     // numberOfHandles：系统句柄总数。
+            ULONG_PTR reserved = 0;                                            // reserved：保留字段。
+            SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX_NATIVE handles[1] = {};          // handles：句柄条目数组。
         };
 
         class UniqueHandle final
@@ -150,10 +154,50 @@ namespace filedock::handleusage
             return pathText.toLower();
         }
 
+        // buildNtPathEquivalent 作用：
+        // - 把 DOS/UNC 路径转换为 NT 设备路径，用于匹配 NtQueryObject 的对象名；
+        // - 例如 C:\a\b -> \Device\HarddiskVolumeX\a\b，\\srv\share -> \Device\Mup\srv\share。
+        bool buildNtPathEquivalent(const QString& absolutePath, QString& ntPathOut)
+        {
+            ntPathOut.clear();
+            QString pathText = QDir::toNativeSeparators(absolutePath.trimmed());
+            pathText.replace('/', '\\');
+            if (pathText.size() >= 2 && pathText.at(1) == QChar(':'))
+            {
+                const QString driveText = pathText.left(2).toUpper();
+                wchar_t deviceBuffer[4096] = {};
+                const DWORD queryChars = ::QueryDosDeviceW(
+                    reinterpret_cast<LPCWSTR>(driveText.utf16()),
+                    deviceBuffer,
+                    static_cast<DWORD>(std::size(deviceBuffer)));
+                if (queryChars == 0 || deviceBuffer[0] == L'\0')
+                {
+                    return false;
+                }
+
+                const QString devicePrefix = QString::fromWCharArray(deviceBuffer).trimmed();
+                if (devicePrefix.isEmpty())
+                {
+                    return false;
+                }
+
+                ntPathOut = devicePrefix + pathText.mid(2);
+                return !ntPathOut.trimmed().isEmpty();
+            }
+
+            if (pathText.startsWith(QStringLiteral("\\\\")))
+            {
+                // UNC 转 NT 设备路径时去掉一个前导反斜杠，使其符合 \Device\Mup\server\share。
+                ntPathOut = QStringLiteral("\\Device\\Mup") + pathText.mid(1);
+                return !ntPathOut.trimmed().isEmpty();
+            }
+            return false;
+        }
+
         std::vector<TargetPathPattern> buildTargetPatterns(const std::vector<QString>& absolutePaths)
         {
             std::vector<TargetPathPattern> patternList;
-            patternList.reserve(absolutePaths.size());
+            patternList.reserve(absolutePaths.size() * 2);
 
             std::set<QString> normalizedSet;
             for (const QString& rawPath : absolutePaths)
@@ -181,6 +225,23 @@ namespace filedock::handleusage
                 pattern.normalizedPath = normalizedPath;
                 pattern.directoryMode = fileInfo.exists() ? fileInfo.isDir() : rawPath.endsWith('\\');
                 patternList.push_back(std::move(pattern));
+
+                QString ntPathText;
+                if (buildNtPathEquivalent(absolutePath, ntPathText))
+                {
+                    const QString normalizedNtPath = normalizePathForCompare(ntPathText);
+                    if (!normalizedNtPath.isEmpty() &&
+                        normalizedSet.find(normalizedNtPath) == normalizedSet.end())
+                    {
+                        normalizedSet.insert(normalizedNtPath);
+
+                        TargetPathPattern ntPattern{};
+                        ntPattern.displayPath = absolutePath;
+                        ntPattern.normalizedPath = normalizedNtPath;
+                        ntPattern.directoryMode = fileInfo.exists() ? fileInfo.isDir() : rawPath.endsWith('\\');
+                        patternList.push_back(std::move(ntPattern));
+                    }
+                }
             }
             return patternList;
         }
@@ -233,13 +294,17 @@ namespace filedock::handleusage
         struct NtApiSet final
         {
             using NtQuerySystemInformationFn = NTSTATUS(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
+            using NtQueryObjectFn = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
 
             HMODULE ntdllModule = nullptr;                               // ntdllModule：ntdll 模块句柄。
             NtQuerySystemInformationFn querySystemInformation = nullptr; // querySystemInformation：NtQuerySystemInformation。
+            NtQueryObjectFn queryObject = nullptr;                       // queryObject：NtQueryObject。
 
             bool ready() const
             {
-                return ntdllModule != nullptr && querySystemInformation != nullptr;
+                return ntdllModule != nullptr &&
+                    querySystemInformation != nullptr &&
+                    queryObject != nullptr;
             }
         };
 
@@ -259,6 +324,9 @@ namespace filedock::handleusage
             apiSet.querySystemInformation =
                 reinterpret_cast<NtApiSet::NtQuerySystemInformationFn>(
                     ::GetProcAddress(apiSet.ntdllModule, "NtQuerySystemInformation"));
+            apiSet.queryObject =
+                reinterpret_cast<NtApiSet::NtQueryObjectFn>(
+                    ::GetProcAddress(apiSet.ntdllModule, "NtQueryObject"));
             return apiSet;
         }
 
@@ -282,7 +350,7 @@ namespace filedock::handleusage
                 bufferOut.assign(static_cast<std::size_t>(bufferSize), 0);
                 ULONG returnLength = 0;
                 const NTSTATUS status = apiSet.querySystemInformation(
-                    kSystemHandleInformationClass,
+                    kSystemExtendedHandleInformationClass,
                     bufferOut.data(),
                     bufferSize,
                     &returnLength);
@@ -299,7 +367,7 @@ namespace filedock::handleusage
                     diagnosticTextOut = QStringLiteral("NtQuerySystemInformation 失败。");
                     return false;
                 }
-                if (bufferOut.size() < sizeof(SYSTEM_HANDLE_INFORMATION_NATIVE))
+                if (bufferOut.size() < sizeof(SYSTEM_HANDLE_INFORMATION_EX_NATIVE))
                 {
                     diagnosticTextOut = QStringLiteral("句柄快照缓冲区尺寸异常。");
                     return false;
@@ -366,9 +434,28 @@ namespace filedock::handleusage
             return true;
         }
 
+        // querySafeHandleRecordCount 作用：
+        // - 根据返回缓冲区尺寸计算可安全访问的句柄记录数；
+        // - 防止 numberOfHandles 超出实际缓冲区导致越界访问。
+        std::size_t querySafeHandleRecordCount(
+            const SYSTEM_HANDLE_INFORMATION_EX_NATIVE* handleInfo,
+            const std::size_t bufferSize)
+        {
+            if (handleInfo == nullptr || bufferSize < offsetof(SYSTEM_HANDLE_INFORMATION_EX_NATIVE, handles))
+            {
+                return 0;
+            }
+            const std::size_t declaredCount = static_cast<std::size_t>(handleInfo->numberOfHandles);
+            const std::size_t maxCountByBuffer =
+                (bufferSize - offsetof(SYSTEM_HANDLE_INFORMATION_EX_NATIVE, handles)) /
+                sizeof(SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX_NATIVE);
+            return std::min(declaredCount, maxCountByBuffer);
+        }
+
         bool resolveFileTypeIndex(
             const HANDLE localTargetHandle,
-            const SYSTEM_HANDLE_INFORMATION_NATIVE* handleInfo,
+            const SYSTEM_HANDLE_INFORMATION_EX_NATIVE* handleInfo,
+            const std::size_t handleCount,
             std::uint16_t& fileTypeIndexOut)
         {
             fileTypeIndexOut = 0;
@@ -378,11 +465,11 @@ namespace filedock::handleusage
             }
 
             const DWORD currentProcessId = ::GetCurrentProcessId();
-            const USHORT localHandleValue = static_cast<USHORT>(reinterpret_cast<ULONG_PTR>(localTargetHandle));
-            for (ULONG index = 0; index < handleInfo->handleCount; ++index)
+            const ULONG_PTR localHandleValue = reinterpret_cast<ULONG_PTR>(localTargetHandle);
+            for (std::size_t index = 0; index < handleCount; ++index)
             {
-                const SYSTEM_HANDLE_TABLE_ENTRY_INFO_NATIVE& row = handleInfo->handles[index];
-                if (row.processId != currentProcessId)
+                const SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX_NATIVE& row = handleInfo->handles[index];
+                if (static_cast<DWORD>(row.uniqueProcessId) != currentProcessId)
                 {
                     continue;
                 }
@@ -391,7 +478,7 @@ namespace filedock::handleusage
                     continue;
                 }
 
-                fileTypeIndexOut = static_cast<std::uint16_t>(row.objectTypeNumber);
+                fileTypeIndexOut = static_cast<std::uint16_t>(row.objectTypeIndex);
                 return fileTypeIndexOut != 0;
             }
             return false;
@@ -426,12 +513,71 @@ namespace filedock::handleusage
             return true;
         }
 
+        // queryUnicodeTextByNtObject 作用：
+        // - 读取 NtQueryObject 返回的 UNICODE_STRING 文本；
+        // - 用于 ObjectNameInformation 回退路径解析。
+        bool queryUnicodeTextByNtObject(
+            NtApiSet::NtQueryObjectFn queryObject,
+            HANDLE objectHandle,
+            const ULONG informationClass,
+            QString& textOut)
+        {
+            textOut.clear();
+            if (queryObject == nullptr || objectHandle == nullptr || objectHandle == INVALID_HANDLE_VALUE)
+            {
+                return false;
+            }
+
+            ULONG bufferSize = 1024;
+            for (int attemptIndex = 0; attemptIndex < 8; ++attemptIndex)
+            {
+                std::vector<std::uint8_t> buffer(static_cast<std::size_t>(bufferSize), 0);
+                ULONG returnLength = 0;
+                const NTSTATUS status = queryObject(
+                    objectHandle,
+                    informationClass,
+                    buffer.data(),
+                    bufferSize,
+                    &returnLength);
+
+                if (status == kStatusInfoLengthMismatch ||
+                    status == kStatusBufferOverflow ||
+                    status == kStatusBufferTooSmall)
+                {
+                    const ULONG recommendedSize = (returnLength > bufferSize)
+                        ? returnLength + 256
+                        : bufferSize * 2;
+                    bufferSize = std::max<ULONG>(recommendedSize, bufferSize + 256);
+                    continue;
+                }
+                if (status < 0)
+                {
+                    return false;
+                }
+
+                const auto* unicodeValue = reinterpret_cast<const UNICODE_STRING*>(buffer.data());
+                if (unicodeValue == nullptr || unicodeValue->Buffer == nullptr || unicodeValue->Length == 0)
+                {
+                    textOut.clear();
+                    return true;
+                }
+
+                textOut = QString::fromWCharArray(
+                    unicodeValue->Buffer,
+                    static_cast<int>(unicodeValue->Length / sizeof(wchar_t)));
+                return true;
+            }
+            return false;
+        }
+
         struct FinalPathQueryState
         {
             LONG refCount = 2;                       // refCount：主线程 + 工作线程双引用。
             HANDLE ownedHandle = nullptr;            // ownedHandle：工作线程独占句柄副本。
+            NtApiSet::NtQueryObjectFn queryObject = nullptr; // queryObject：NtQueryObject，用于失败回退。
             DWORD resultLength = 0;                  // resultLength：GetFinalPathNameByHandleW 返回值。
             DWORD lastError = ERROR_GEN_FAILURE;     // lastError：失败时的 Win32 错误码。
+            bool usedNtObjectFallback = false;       // usedNtObjectFallback：是否走了 NtQueryObject 回退。
             wchar_t pathBuffer[32768] = {};          // pathBuffer：最终 DOS 路径输出缓冲。
         };
 
@@ -455,6 +601,7 @@ namespace filedock::handleusage
                 return 0;
             }
 
+            state->usedNtObjectFallback = false;
             state->resultLength = ::GetFinalPathNameByHandleW(
                 state->ownedHandle,
                 state->pathBuffer,
@@ -466,7 +613,39 @@ namespace filedock::handleusage
             }
             else
             {
-                state->lastError = ::GetLastError();
+                // Win32 路径接口失败后，回退到 NtQueryObject(ObjectNameInformation)。
+                QString ntObjectPathText;
+                if (queryUnicodeTextByNtObject(
+                    state->queryObject,
+                    state->ownedHandle,
+                    kObjectNameInformationClass,
+                    ntObjectPathText))
+                {
+                    const QString normalizedText = ntObjectPathText.trimmed();
+                    if (!normalizedText.isEmpty())
+                    {
+                        const std::wstring wideText = normalizedText.toStdWString();
+                        const std::size_t copyLength = std::min<std::size_t>(
+                            wideText.size(),
+                            std::size(state->pathBuffer) - 1);
+                        for (std::size_t index = 0; index < copyLength; ++index)
+                        {
+                            state->pathBuffer[index] = wideText[index];
+                        }
+                        state->pathBuffer[copyLength] = L'\0';
+                        state->resultLength = static_cast<DWORD>(copyLength);
+                        state->lastError = ERROR_SUCCESS;
+                        state->usedNtObjectFallback = true;
+                    }
+                    else
+                    {
+                        state->lastError = ERROR_GEN_FAILURE;
+                    }
+                }
+                else
+                {
+                    state->lastError = ::GetLastError();
+                }
             }
 
             if (state->ownedHandle != nullptr && state->ownedHandle != INVALID_HANDLE_VALUE)
@@ -480,12 +659,15 @@ namespace filedock::handleusage
 
         bool queryFinalDosPathWithTimeout(
             HANDLE sourceHandle,
+            NtApiSet::NtQueryObjectFn queryObject,
             const DWORD timeoutMs,
             QString& pathOut,
-            bool& timedOutOut)
+            bool& timedOutOut,
+            bool& usedNtObjectFallbackOut)
         {
             pathOut.clear();
             timedOutOut = false;
+            usedNtObjectFallbackOut = false;
             if (sourceHandle == nullptr || sourceHandle == INVALID_HANDLE_VALUE)
             {
                 return false;
@@ -507,6 +689,7 @@ namespace filedock::handleusage
 
             FinalPathQueryState* state = new FinalPathQueryState();
             state->ownedHandle = workerOwnedHandle;
+            state->queryObject = queryObject;
 
             const uintptr_t threadHandleValue = _beginthreadex(
                 nullptr,
@@ -532,6 +715,7 @@ namespace filedock::handleusage
                 if (state->lastError == ERROR_SUCCESS)
                 {
                     pathOut = QString::fromWCharArray(state->pathBuffer);
+                    usedNtObjectFallbackOut = state->usedNtObjectFallback;
                 }
                 ::CloseHandle(threadHandle);
                 releaseFinalPathQueryState(state);
@@ -576,9 +760,10 @@ namespace filedock::handleusage
 
         struct FileHandleScanSharedState
         {
-            const SYSTEM_HANDLE_INFORMATION_NATIVE* handleInfo = nullptr; // handleInfo：句柄快照原始结构。
+            const SYSTEM_HANDLE_INFORMATION_EX_NATIVE* handleInfo = nullptr; // handleInfo：句柄快照原始结构。
             std::size_t handleCount = 0;                                  // handleCount：句柄条目数。
             std::uint16_t fileTypeIndex = 0;                              // fileTypeIndex：动态解析的 File 类型编号。
+            NtApiSet::NtQueryObjectFn queryObject = nullptr;              // queryObject：NtQueryObject，用于路径解析回退。
             std::uint64_t skippedHelperHandleKey = 0;                     // skippedHelperHandleKey：辅助打开目标路径的本进程句柄键。
             std::vector<TargetPathPattern> targetPatterns;                // targetPatterns：目标路径规则列表。
             std::unordered_map<std::uint32_t, QString> processNameMap;    // processNameMap：PID -> 进程名。
@@ -592,6 +777,7 @@ namespace filedock::handleusage
             std::atomic<std::size_t> openProcessFailedCount = 0;          // openProcessFailedCount：OpenProcess 失败次数。
             std::atomic<std::size_t> duplicateFailedCount = 0;            // duplicateFailedCount：DuplicateHandle 失败次数。
             std::atomic<std::size_t> pathQueryFailedCount = 0;            // pathQueryFailedCount：路径查询失败次数。
+            std::atomic<std::size_t> ntNameFallbackCount = 0;             // ntNameFallbackCount：走 NtQueryObject 回退的次数。
             std::atomic<std::size_t> nonDiskFileSkippedCount = 0;         // nonDiskFileSkippedCount：非磁盘 File 句柄跳过次数。
             std::atomic<std::size_t> timeoutRespawnCount = 0;             // timeoutRespawnCount：监管线程续扫次数。
             std::atomic<std::size_t> matchedCount = 0;                    // matchedCount：文件句柄命中数量。
@@ -695,15 +881,17 @@ namespace filedock::handleusage
                 attempt->progressIndex.store(index);
                 attempt->lastAliveTickMs.store(static_cast<std::uint64_t>(::GetTickCount64()));
 
-                const SYSTEM_HANDLE_TABLE_ENTRY_INFO_NATIVE& row = sharedState->handleInfo->handles[index];
-                if (row.objectTypeNumber != sharedState->fileTypeIndex)
+                const SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX_NATIVE& row = sharedState->handleInfo->handles[index];
+                if (static_cast<std::uint16_t>(row.objectTypeIndex) != sharedState->fileTypeIndex)
                 {
                     continue;
                 }
 
+                const std::uint32_t ownerProcessId = static_cast<std::uint32_t>(row.uniqueProcessId);
+                const std::uint64_t ownerHandleValue = static_cast<std::uint64_t>(row.handleValue);
                 const std::uint64_t handleKey = buildHandleKey(
-                    static_cast<std::uint32_t>(row.processId),
-                    static_cast<std::uint64_t>(row.handleValue));
+                    ownerProcessId,
+                    ownerHandleValue);
                 if (handleKey == sharedState->skippedHelperHandleKey)
                 {
                     continue;
@@ -717,7 +905,7 @@ namespace filedock::handleusage
                     }
                 }
 
-                const HANDLE ownerProcessHandle = openProcessHandleCached(*sharedState, row.processId);
+                const HANDLE ownerProcessHandle = openProcessHandleCached(*sharedState, ownerProcessId);
                 if (ownerProcessHandle == nullptr)
                 {
                     sharedState->openProcessFailedCount.fetch_add(1);
@@ -727,7 +915,7 @@ namespace filedock::handleusage
                 UniqueHandle localHandle;
                 if (!duplicateRemoteHandleToLocal(
                     ownerProcessHandle,
-                    static_cast<std::uint64_t>(row.handleValue),
+                    ownerHandleValue,
                     localHandle))
                 {
                     sharedState->duplicateFailedCount.fetch_add(1);
@@ -745,13 +933,24 @@ namespace filedock::handleusage
 
                 QString finalPathText;
                 bool pathTimedOut = false;
-                if (!queryFinalDosPathWithTimeout(localHandle.get(), 120, finalPathText, pathTimedOut))
+                bool usedNtObjectFallback = false;
+                if (!queryFinalDosPathWithTimeout(
+                    localHandle.get(),
+                    sharedState->queryObject,
+                    120,
+                    finalPathText,
+                    pathTimedOut,
+                    usedNtObjectFallback))
                 {
                     if (!pathTimedOut)
                     {
                         sharedState->pathQueryFailedCount.fetch_add(1);
                     }
                     continue;
+                }
+                if (usedNtObjectFallback)
+                {
+                    sharedState->ntNameFallbackCount.fetch_add(1);
                 }
 
                 if (attempt->abandoned.load())
@@ -772,18 +971,18 @@ namespace filedock::handleusage
                 }
 
                 HandleUsageEntry entry{};
-                entry.processId = static_cast<std::uint32_t>(row.processId);
+                entry.processId = ownerProcessId;
                 const auto processNameIt = sharedState->processNameMap.find(entry.processId);
                 entry.processName = (processNameIt != sharedState->processNameMap.end())
                     ? processNameIt->second
                     : QStringLiteral("PID_%1").arg(entry.processId);
                 entry.processImagePath = queryProcessImagePathCachedThreadSafe(*sharedState, entry.processId);
-                entry.handleValue = static_cast<std::uint64_t>(row.handleValue);
+                entry.handleValue = ownerHandleValue;
                 entry.typeIndex = sharedState->fileTypeIndex;
                 entry.typeName = QStringLiteral("FileHandle");
                 entry.objectName = finalPathText;
                 entry.grantedAccess = static_cast<std::uint32_t>(row.grantedAccess);
-                entry.attributes = static_cast<std::uint32_t>(row.flags);
+                entry.attributes = static_cast<std::uint32_t>(row.handleAttributes);
                 entry.matchedTargetPath = matchedTargetPath;
                 entry.matchedByDirectoryRule = matchedByDirectoryRule;
                 entry.matchRuleText = buildPathRuleText(QStringLiteral("文件句柄"), matchedByDirectoryRule);
@@ -856,6 +1055,14 @@ namespace filedock::handleusage
                 return result;
             }
 
+            std::uint16_t fileTypeIndex = 0;
+            UniqueHandle helperHandle;
+            if (!openTargetPathHandle(targetPatterns.front(), helperHandle))
+            {
+                result.diagnosticText = QStringLiteral("打开目标路径失败，无法解析 File TypeIndex。");
+                return result;
+            }
+
             if (progressPid > 0)
             {
                 kPro.set(progressPid, "准备抓取系统句柄快照", 0, 10.0f);
@@ -871,13 +1078,21 @@ namespace filedock::handleusage
             }
 
             const auto* handleInfo =
-                reinterpret_cast<const SYSTEM_HANDLE_INFORMATION_NATIVE*>(handleBuffer.data());
-            if (handleInfo == nullptr || handleInfo->handleCount == 0)
+                reinterpret_cast<const SYSTEM_HANDLE_INFORMATION_EX_NATIVE*>(handleBuffer.data());
+            const std::size_t safeHandleCount = querySafeHandleRecordCount(handleInfo, handleBuffer.size());
+            if (handleInfo == nullptr || safeHandleCount == 0)
             {
                 result.diagnosticText = QStringLiteral("系统句柄快照为空。");
                 return result;
             }
-            result.totalHandleCount = static_cast<std::size_t>(handleInfo->handleCount);
+            result.totalHandleCount = safeHandleCount;
+            if (safeHandleCount < static_cast<std::size_t>(handleInfo->numberOfHandles))
+            {
+                const QString truncateText = QStringLiteral("句柄快照记录超出缓冲区，已按安全上限截断。");
+                snapshotDiagnosticText = snapshotDiagnosticText.trimmed().isEmpty()
+                    ? truncateText
+                    : snapshotDiagnosticText + QStringLiteral(" | ") + truncateText;
+            }
 
             if (progressPid > 0)
             {
@@ -885,10 +1100,7 @@ namespace filedock::handleusage
             }
 
             const std::unordered_map<std::uint32_t, QString> processNameMap = collectProcessNameMap();
-            std::uint16_t fileTypeIndex = 0;
-            UniqueHandle helperHandle;
-            if (!openTargetPathHandle(targetPatterns.front(), helperHandle) ||
-                !resolveFileTypeIndex(helperHandle.get(), handleInfo, fileTypeIndex))
+            if (!resolveFileTypeIndex(helperHandle.get(), handleInfo, safeHandleCount, fileTypeIndex))
             {
                 result.diagnosticText = QStringLiteral("动态 File TypeIndex 解析失败。");
                 return result;
@@ -900,8 +1112,9 @@ namespace filedock::handleusage
 
             auto sharedState = std::make_shared<FileHandleScanSharedState>();
             sharedState->handleInfo = handleInfo;
-            sharedState->handleCount = result.totalHandleCount;
+            sharedState->handleCount = safeHandleCount;
             sharedState->fileTypeIndex = fileTypeIndex;
+            sharedState->queryObject = apiSet.queryObject;
             sharedState->skippedHelperHandleKey = helperHandleKey;
             sharedState->targetPatterns = targetPatterns;
             sharedState->processNameMap = processNameMap;
@@ -1020,6 +1233,10 @@ namespace filedock::handleusage
             if (sharedState->pathQueryFailedCount.load() > 0)
             {
                 diagnosticList.push_back(QStringLiteral("路径查询失败:%1").arg(sharedState->pathQueryFailedCount.load()));
+            }
+            if (sharedState->ntNameFallbackCount.load() > 0)
+            {
+                diagnosticList.push_back(QStringLiteral("Nt对象名回退:%1").arg(sharedState->ntNameFallbackCount.load()));
             }
             if (sharedState->nonDiskFileSkippedCount.load() > 0)
             {

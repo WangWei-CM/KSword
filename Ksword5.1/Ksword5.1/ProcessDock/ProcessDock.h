@@ -51,6 +51,7 @@ namespace ks::process
 {
     struct CounterSample;
     struct ProcessRecord;
+    struct SystemThreadRecord;
 }
 
 class ProcessDock final : public QWidget
@@ -115,6 +116,27 @@ private:
         Count          // 列总数。
     };
 
+    // ThreadTableColumn：线程页表格列索引定义。
+    enum class ThreadTableColumn : int
+    {
+        ThreadId = 0,      // 线程 ID。
+        OwnerPid,          // 所属进程 PID。
+        ProcessName,       // 所属进程名（含图标）。
+        StartAddress,      // 线程启动地址。
+        Priority,          // 动态优先级。
+        BasePriority,      // 基础优先级。
+        ThreadState,       // 线程状态码（含文本）。
+        WaitReason,        // 等待原因码（含文本）。
+        KernelTimeMs,      // 内核态累计时间（毫秒）。
+        UserTimeMs,        // 用户态累计时间（毫秒）。
+        CpuTimeMs,         // CPU 累计时间（毫秒）。
+        WaitTimeTick,      // 等待时长计数。
+        ContextSwitches,   // 上下文切换次数。
+        CreateTime,        // 创建时间。
+        ProcessPath,       // 所属进程路径（可为空）。
+        Count              // 列总数。
+    };
+
     // ViewMode：两种视图模式。
     enum class ViewMode : int
     {
@@ -169,7 +191,9 @@ private:
     void initializeTopControls();
     void initializeProcessTable();
     void initializeCreateProcessPage();
+    void initializeThreadPage();
     void initializeConnections();
+    void initializeThreadPageConnections();
     void initializeTimer();
     void updateRefreshStateUi(bool refreshing, const QString& stateText);
     void applyAdaptiveColumnWidths();
@@ -182,6 +206,9 @@ private:
     void requestAsyncRefresh(bool forceRefresh);
     void applyRefreshResult(const RefreshResult& refreshResult);
     void rebuildTable();
+    void requestAsyncThreadRefresh(bool forceRefresh);
+    void rebuildThreadTable();
+    void applyThreadStatusUi(bool refreshing, const QString& stateText);
     std::vector<DisplayRow> buildDisplayOrder() const;
     std::vector<DisplayRow> buildTreeDisplayOrder() const;
     std::vector<DisplayRow> buildListDisplayOrder() const;
@@ -194,11 +221,18 @@ private:
 
     // ======== 表格交互 ========
     void showTableContextMenu(const QPoint& localPosition);
+    void showThreadTableContextMenu(const QPoint& localPosition);
     void showHeaderContextMenu(const QPoint& localPosition);
     void copyCurrentCell();
     void copyCurrentRow();
+    void copyCurrentThreadCell();
+    void copyCurrentThreadRow();
     void openProcessDetailsPlaceholder();
     void openProcessDetailWindowByPid(std::uint32_t pid);
+    void openThreadOwnerProcessDetails();
+    void executeSuspendThreadAction();
+    void executeResumeThreadAction();
+    void executeTerminateThreadAction();
     void updateUsageSummaryInHeader(const std::vector<DisplayRow>& displayRows);
 
     // ======== 进程控制动作 ========
@@ -222,11 +256,19 @@ private:
     // ======== 工具函数 ========
     std::string selectedIdentityKey() const;
     ks::process::ProcessRecord* selectedRecord();
+    const ks::process::SystemThreadRecord* selectedThreadRecord() const;
     void bindContextActionToItem(QTreeWidgetItem* clickedItem);
     void clearContextActionBinding();
+    void bindThreadContextActionToItem(QTreeWidgetItem* clickedItem);
+    void clearThreadContextActionBinding();
+    bool threadRecordMatchesSearch(const ks::process::SystemThreadRecord& threadRecord) const;
     QString formatColumnText(const ks::process::ProcessRecord& processRecord, TableColumn column, int depth) const;
+    QString formatThreadColumnText(const ks::process::SystemThreadRecord& threadRecord, ThreadTableColumn column) const;
+    QString threadStateText(std::uint32_t stateValue) const;
+    QString threadWaitReasonText(std::uint32_t waitReasonValue) const;
     QIcon resolveProcessIcon(const ks::process::ProcessRecord& processRecord);
     QIcon blueTintedIcon(const char* iconPath, const QSize& iconSize = QSize(16, 16)) const;
+    QString buildThreadContextMenuStyle() const;
     // showActionResultMessage 作用：统一记录进程动作结果日志（不弹窗），复用同一 kLogEvent 保持调用链连续。
     // 调用方式：在动作函数中创建 kLogEvent 后，将同一个事件对象传入本函数。
     // 参数 title：动作标题；actionOk：动作是否成功；detailText：动作详情；actionEvent：本次动作全链路事件对象。
@@ -244,6 +286,7 @@ private:
     void syncBitmaskChecksFromEditValue(QLineEdit* valueEdit, const std::vector<QCheckBox*>* checkBoxList, const QString& fieldDisplayName);
     static std::string buildRulerPrefix(int depth);
     static int toColumnIndex(TableColumn column);
+    static int toThreadColumnIndex(ThreadTableColumn column);
     static bool parseUnsignedText(const QString& text, std::uint64_t& valueOut);
     static std::uint32_t parseUInt32WithDefault(const QString& text, std::uint32_t defaultValue, bool* parseOkOut = nullptr);
     static std::uint64_t parseUInt64WithDefault(const QString& text, std::uint64_t defaultValue, bool* parseOkOut = nullptr);
@@ -267,6 +310,8 @@ private:
     QVBoxLayout* m_processPageLayout = nullptr; // 进程页主布局。
     QWidget* m_createProcessPage = nullptr;   // “创建进程”页容器。
     QVBoxLayout* m_createProcessPageLayout = nullptr; // 创建页主布局。
+    QWidget* m_threadPage = nullptr;          // “线程列表”页容器。
+    QVBoxLayout* m_threadPageLayout = nullptr; // 线程页主布局。
 
     // ======== 控制栏 ========
     QHBoxLayout* m_controlLayout = nullptr;   // 上方“操作按钮”行布局。
@@ -283,6 +328,13 @@ private:
 
     // ======== 进程表格 ========
     QTreeWidget* m_processTable = nullptr;    // 进程列表表格（支持列拖动/排序/右键）。
+
+    // ======== 线程页控件 ========
+    QHBoxLayout* m_threadTopLayout = nullptr; // 线程页顶部操作栏。
+    QPushButton* m_threadRefreshButton = nullptr; // 线程页刷新按钮（图标按钮）。
+    QLineEdit* m_threadSearchLineEdit = nullptr; // 线程页搜索框（按 TID/PID/名称过滤）。
+    QLabel* m_threadStatusLabel = nullptr;    // 线程页刷新状态标签。
+    QTreeWidget* m_threadTable = nullptr;     // 线程列表表格（支持右键动作）。
 
     // ======== 创建进程页 - 通用参数 ========
     QComboBox* m_createMethodCombo = nullptr; // CreateProcessW / Token 路径。
@@ -372,11 +424,20 @@ private:
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_detailWindowLastSyncTimeByIdentity; // 详情窗口最近一次同步时间，避免每轮刷新都触发重型解析。
     std::string m_trackedSelectedIdentityKey; // 当前选中进程 identityKey；表格刷新重建后用于恢复高亮。
     int m_trackedSelectedColumn = 0;          // 当前选中列索引；恢复 currentItem 时尽量保持用户焦点列。
+    std::vector<ks::process::SystemThreadRecord> m_threadRecordList; // 线程页最近一次刷新结果缓存。
+    std::string m_threadDiagnosticText;       // 线程页最近一次刷新诊断文本。
 
     // ======== 右键菜单绑定状态 ========
     std::string m_contextActionIdentityKey;      // 当前菜单动作绑定的 identityKey。
     ks::process::ProcessRecord m_contextActionRecord{}; // identity 在刷新中失效时的兜底副本。
     bool m_hasContextActionRecord = false;
     bool m_contextMenuVisible = false;           // 菜单弹出期间用于冻结周期刷新。
+    std::uint32_t m_threadContextActionTid = 0;  // 线程右键菜单绑定的 TID。
+    std::uint32_t m_threadContextActionPid = 0;  // 线程右键菜单绑定的 PID。
+    bool m_threadContextMenuVisible = false;     // 线程菜单弹出期间冻结线程刷新。
+
+    // ======== 线程刷新调度 ========
+    bool m_threadRefreshInProgress = false;      // 线程页是否存在进行中的后台刷新任务。
+    std::uint64_t m_threadRefreshTicket = 0;     // 线程页刷新序号（用于丢弃过期结果）。
     bool m_initialRefreshScheduled = false;      // 首次显示时是否已安排首轮刷新。
 };

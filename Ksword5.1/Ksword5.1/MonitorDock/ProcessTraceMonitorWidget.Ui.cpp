@@ -162,8 +162,9 @@ void ProcessTraceMonitorWidget::initializeUi()
     availableLayout->addWidget(m_availableTable, 1);
 
     // 监控目标面板：
-    // - 只展示用户明确选中的根进程；
-    // - 运行期衍生出来的子进程放在事件关系列里展示，不在此处混入。
+    // - 默认展示用户手动选择的目标进程；
+    // - 运行期若 ETW 识别到“目标进程拉起子进程”，也会自动加入本列表；
+    // - 当列表中的进程收到 ETW 退出事件时，会自动从本列表移除。
     m_targetPanel = new QWidget(m_topSplitter);
     QVBoxLayout* targetLayout = new QVBoxLayout(m_targetPanel);
     targetLayout->setContentsMargins(6, 6, 6, 6);

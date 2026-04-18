@@ -77,8 +77,11 @@ namespace
     void showStartupDetailDialog(QWidget* parentWidget, const QString& titleText, const QString& detailText)
     {
         QDialog detailDialog(parentWidget);
+        detailDialog.setObjectName(QStringLiteral("StartupDockDetailDialog"));
         detailDialog.setWindowTitle(titleText);
         detailDialog.resize(860, 620);
+        // 详情弹窗强制使用不透明背景，避免浅色模式下出现黑底。
+        detailDialog.setStyleSheet(KswordTheme::OpaqueDialogStyle(detailDialog.objectName()));
 
         QVBoxLayout* layout = new QVBoxLayout(&detailDialog);
         CodeEditorWidget* detailEditor = new CodeEditorWidget(&detailDialog);

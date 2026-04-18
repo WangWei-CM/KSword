@@ -248,6 +248,8 @@ void StartupDock::showEntryContextMenu(
 
     const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
     QMenu contextMenu(this);
+    // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
+    contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* detailAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("查看启动项详细信息"));
     QAction* copyAction = contextMenu.addAction(createBlueIcon(":/Icon/log_copy.svg"), QStringLiteral("复制整行"));
     QAction* openFileAction = contextMenu.addAction(createBlueIcon(":/Icon/process_open_folder.svg"), QStringLiteral("打开文件位置"));
@@ -336,6 +338,8 @@ void StartupDock::showRegistryContextMenu(const QPoint& localPos)
     const QString locationText = treeItem->data(0, kStartupTreeLocationRole).toString().trimmed();
 
     QMenu contextMenu(this);
+    // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
+    contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* detailAction = contextMenu.addAction(createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("查看启动项详细信息"));
     QAction* copyAction = contextMenu.addAction(createBlueIcon(":/Icon/log_copy.svg"), QStringLiteral("复制"));
     QAction* openFileAction = contextMenu.addAction(createBlueIcon(":/Icon/process_open_folder.svg"), QStringLiteral("打开文件位置"));
