@@ -7,6 +7,7 @@ using namespace process_detail_window_internal;
 // 作用：
 // - 线程细节异步刷新；
 // - 令牌详情异步刷新；
+// - 令牌开关读取与应用（NtSetInformationToken）；
 // - PEB/内存摘要异步刷新。
 // ============================================================
 
@@ -19,6 +20,10 @@ namespace
     // NtQueryInformationProcess 函数签名：
     // - 这里统一使用 ULONG 信息类，避免 SDK 版本差异导致的编译问题。
     using NtQueryInformationProcessFn = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    // NtSetInformationToken 函数签名：
+    // - Windows Native API 入口名为 NtSetInformationToken；
+    // - 本文件把它作为“NtSetTokenInformation”语义来驱动令牌开关写入。
+    using NtSetInformationTokenFn = NTSTATUS(NTAPI*)(HANDLE, TOKEN_INFORMATION_CLASS, PVOID, ULONG);
 
     // PROCESSINFOCLASS 关键常量：
     // - 这些值用于补齐令牌页/PEB页的深度信息读取；
@@ -29,6 +34,20 @@ namespace
     constexpr ULONG kProcessInfoClassCommandLine = 60;
     constexpr ULONG kProcessInfoClassProtection = 61;
     constexpr ULONG kProcessInfoClassSubsystem = 75;
+
+    // MandatoryPolicy 位常量：
+    // - 某些 SDK 版本可能没有导出宏；
+    // - 这里做本地 constexpr 兜底，保证工程可编译。
+#ifndef TOKEN_MANDATORY_POLICY_NO_WRITE_UP
+    constexpr DWORD kTokenMandatoryPolicyNoWriteUp = 0x1;
+#else
+    constexpr DWORD kTokenMandatoryPolicyNoWriteUp = TOKEN_MANDATORY_POLICY_NO_WRITE_UP;
+#endif
+#ifndef TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN
+    constexpr DWORD kTokenMandatoryPolicyNewProcessMin = 0x2;
+#else
+    constexpr DWORD kTokenMandatoryPolicyNewProcessMin = TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN;
+#endif
 
     // GetProcessInformation(ProcessPowerThrottling) 所需结构：
     // - 采用本地定义，避免依赖高版本 SDK 才可见的类型声明。
@@ -358,6 +377,117 @@ namespace
             requiredLength,
             &requiredLength);
         return queryOk != FALSE;
+    }
+
+    // formatNtStatusHex：
+    // - 把 NTSTATUS 转成 0xXXXXXXXX 十六进制文本；
+    // - 供令牌开关应用失败时拼接可审计的错误细节。
+    QString formatNtStatusHex(const NTSTATUS statusCode)
+    {
+        return QStringLiteral("0x%1")
+            .arg(static_cast<unsigned long>(statusCode), 8, 16, QChar('0'))
+            .toUpper();
+    }
+
+    // queryTokenBoolFlag：
+    // - 读取“ULONG 布尔位”类型令牌字段；
+    // - 成功时输出 bool 值，失败返回 false。
+    bool queryTokenBoolFlag(
+        HANDLE tokenHandle,
+        const TOKEN_INFORMATION_CLASS infoClass,
+        bool& valueOut)
+    {
+        ULONG rawValue = 0;
+        DWORD returnLength = 0;
+        const BOOL queryOk = GetTokenInformation(
+            tokenHandle,
+            infoClass,
+            &rawValue,
+            static_cast<DWORD>(sizeof(rawValue)),
+            &returnLength);
+        if (queryOk == FALSE || returnLength < sizeof(rawValue))
+        {
+            return false;
+        }
+        valueOut = (rawValue != 0);
+        return true;
+    }
+
+    // queryTokenMandatoryPolicyBits：
+    // - 读取 TokenMandatoryPolicy 并拆分两个复选框位；
+    // - 输出 NoWriteUp / NewProcessMin 两个布尔值。
+    bool queryTokenMandatoryPolicyBits(
+        HANDLE tokenHandle,
+        bool& noWriteUpOut,
+        bool& newProcessMinOut)
+    {
+        TOKEN_MANDATORY_POLICY mandatoryPolicy{};
+        DWORD returnLength = 0;
+        const BOOL queryOk = GetTokenInformation(
+            tokenHandle,
+            TokenMandatoryPolicy,
+            &mandatoryPolicy,
+            static_cast<DWORD>(sizeof(mandatoryPolicy)),
+            &returnLength);
+        if (queryOk == FALSE || returnLength < sizeof(mandatoryPolicy))
+        {
+            return false;
+        }
+        noWriteUpOut = (mandatoryPolicy.Policy & kTokenMandatoryPolicyNoWriteUp) != 0;
+        newProcessMinOut = (mandatoryPolicy.Policy & kTokenMandatoryPolicyNewProcessMin) != 0;
+        return true;
+    }
+
+    // applyTokenBoolFlag：
+    // - 使用 NtSetInformationToken 写入 ULONG 布尔位；
+    // - 返回 NTSTATUS 以便调用者记录逐项失败原因。
+    NTSTATUS applyTokenBoolFlag(
+        const NtSetInformationTokenFn setInformationToken,
+        HANDLE tokenHandle,
+        const TOKEN_INFORMATION_CLASS infoClass,
+        const bool enabled)
+    {
+        if (setInformationToken == nullptr || tokenHandle == nullptr)
+        {
+            return static_cast<NTSTATUS>(0xC000000DL);
+        }
+        ULONG rawValue = enabled ? 1UL : 0UL;
+        return setInformationToken(
+            tokenHandle,
+            infoClass,
+            &rawValue,
+            static_cast<ULONG>(sizeof(rawValue)));
+    }
+
+    // applyTokenMandatoryPolicyBits：
+    // - 把两个策略复选框合成为 TOKEN_MANDATORY_POLICY；
+    // - 使用 NtSetInformationToken 一次性写入策略位。
+    NTSTATUS applyTokenMandatoryPolicyBits(
+        const NtSetInformationTokenFn setInformationToken,
+        HANDLE tokenHandle,
+        const bool noWriteUpEnabled,
+        const bool newProcessMinEnabled)
+    {
+        if (setInformationToken == nullptr || tokenHandle == nullptr)
+        {
+            return static_cast<NTSTATUS>(0xC000000DL);
+        }
+
+        TOKEN_MANDATORY_POLICY mandatoryPolicy{};
+        mandatoryPolicy.Policy = 0;
+        if (noWriteUpEnabled)
+        {
+            mandatoryPolicy.Policy |= kTokenMandatoryPolicyNoWriteUp;
+        }
+        if (newProcessMinEnabled)
+        {
+            mandatoryPolicy.Policy |= kTokenMandatoryPolicyNewProcessMin;
+        }
+        return setInformationToken(
+            tokenHandle,
+            TokenMandatoryPolicy,
+            &mandatoryPolicy,
+            static_cast<ULONG>(sizeof(mandatoryPolicy)));
     }
 
     // describeIntegrityLevel：
@@ -951,6 +1081,396 @@ void ProcessDetailWindow::requestAsyncTokenRefresh()
                 Qt::QueuedConnection);
         });
     QThreadPool::globalInstance()->start(refreshTask);
+}
+
+void ProcessDetailWindow::refreshTokenSwitchStates()
+{
+    // 令牌开关回读日志：
+    // - 本次回读链路复用同一个 kLogEvent；
+    // - 便于把“打开句柄 -> 读取字段 -> 回填UI”串成一条可追踪链路。
+    kLogEvent actionEvent;
+    info << actionEvent
+        << "[ProcessDetailWindow] refreshTokenSwitchStates: pid="
+        << m_baseRecord.pid
+        << eol;
+
+    // setStatusLabel 作用：
+    // - 统一写入状态文本与颜色；
+    // - 避免多处分支重复 setText/setStyleSheet。
+    const auto setStatusLabel =
+        [this](const QString& statusText, const QColor& textColor, const int fontWeight)
+    {
+        if (m_tokenSwitchStatusLabel == nullptr)
+        {
+            return;
+        }
+        m_tokenSwitchStatusLabel->setText(statusText);
+        m_tokenSwitchStatusLabel->setStyleSheet(buildStateLabelStyle(textColor, fontWeight));
+    };
+
+    if (m_baseRecord.pid == 0)
+    {
+        setStatusLabel(QStringLiteral("● 刷新失败：PID 无效"), statusWarningColor(), 700);
+        warn << actionEvent
+            << "[ProcessDetailWindow] refreshTokenSwitchStates: PID 无效。"
+            << eol;
+        return;
+    }
+
+    if (m_refreshTokenSwitchButton != nullptr)
+    {
+        m_refreshTokenSwitchButton->setEnabled(false);
+    }
+    setStatusLabel(QStringLiteral("● 正在读取令牌开关..."), KswordTheme::PrimaryBlueColor, 700);
+
+    // 打开进程和令牌句柄：
+    // - 读取开关只需要 TOKEN_QUERY；
+    // - 进程句柄先用 QUERY_LIMITED，尽量降低权限要求。
+    HANDLE processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, m_baseRecord.pid);
+    if (processHandle == nullptr)
+    {
+        const DWORD openProcessError = GetLastError();
+        setStatusLabel(
+            QStringLiteral("● 刷新失败：OpenProcess(%1)").arg(openProcessError),
+            statusWarningColor(),
+            700);
+        err << actionEvent
+            << "[ProcessDetailWindow] refreshTokenSwitchStates: OpenProcess 失败, error="
+            << openProcessError
+            << eol;
+        if (m_refreshTokenSwitchButton != nullptr)
+        {
+            m_refreshTokenSwitchButton->setEnabled(true);
+        }
+        return;
+    }
+
+    HANDLE tokenHandle = nullptr;
+    if (OpenProcessToken(processHandle, TOKEN_QUERY, &tokenHandle) == FALSE || tokenHandle == nullptr)
+    {
+        const DWORD openTokenError = GetLastError();
+        CloseHandle(processHandle);
+        processHandle = nullptr;
+        setStatusLabel(
+            QStringLiteral("● 刷新失败：OpenProcessToken(%1)").arg(openTokenError),
+            statusWarningColor(),
+            700);
+        err << actionEvent
+            << "[ProcessDetailWindow] refreshTokenSwitchStates: OpenProcessToken 失败, error="
+            << openTokenError
+            << eol;
+        if (m_refreshTokenSwitchButton != nullptr)
+        {
+            m_refreshTokenSwitchButton->setEnabled(true);
+        }
+        return;
+    }
+
+    // queryBoolToCheckBox 作用：
+    // - 从令牌读取一个 ULONG 布尔位并写入对应复选框；
+    // - 失败项写入 failItemList，便于最终状态栏汇总。
+    int successCount = 0;
+    QStringList failItemList;
+    const auto queryBoolToCheckBox =
+        [tokenHandle, &successCount, &failItemList](
+            QCheckBox* checkBox,
+            const TOKEN_INFORMATION_CLASS infoClass,
+            const QString& itemName)
+    {
+        if (checkBox == nullptr)
+        {
+            failItemList << QStringLiteral("%1(控件为空)").arg(itemName);
+            return;
+        }
+
+        bool flagValue = false;
+        if (!queryTokenBoolFlag(tokenHandle, infoClass, flagValue))
+        {
+            const DWORD queryError = GetLastError();
+            failItemList << QStringLiteral("%1(%2)").arg(itemName).arg(queryError);
+            return;
+        }
+        checkBox->setChecked(flagValue);
+        ++successCount;
+    };
+
+    queryBoolToCheckBox(m_tokenSandboxInertCheck, TokenSandBoxInert, QStringLiteral("SandboxInert"));
+    queryBoolToCheckBox(m_tokenVirtualizationAllowedCheck, TokenVirtualizationAllowed, QStringLiteral("VirtualizationAllowed"));
+    queryBoolToCheckBox(m_tokenVirtualizationEnabledCheck, TokenVirtualizationEnabled, QStringLiteral("VirtualizationEnabled"));
+    queryBoolToCheckBox(m_tokenUiAccessCheck, TokenUIAccess, QStringLiteral("UIAccess"));
+
+    // MandatoryPolicy 读取：
+    // - 一次读取两个位，分别同步到两个策略复选框；
+    // - 失败同样记录到 failItemList 中。
+    if (m_tokenMandatoryNoWriteUpCheck == nullptr || m_tokenMandatoryNewProcessMinCheck == nullptr)
+    {
+        failItemList << QStringLiteral("MandatoryPolicy(控件为空)");
+    }
+    else
+    {
+        bool noWriteUpEnabled = false;
+        bool newProcessMinEnabled = false;
+        if (queryTokenMandatoryPolicyBits(tokenHandle, noWriteUpEnabled, newProcessMinEnabled))
+        {
+            m_tokenMandatoryNoWriteUpCheck->setChecked(noWriteUpEnabled);
+            m_tokenMandatoryNewProcessMinCheck->setChecked(newProcessMinEnabled);
+            ++successCount;
+        }
+        else
+        {
+            const DWORD queryError = GetLastError();
+            failItemList << QStringLiteral("MandatoryPolicy(%1)").arg(queryError);
+        }
+    }
+
+    CloseHandle(tokenHandle);
+    tokenHandle = nullptr;
+    CloseHandle(processHandle);
+    processHandle = nullptr;
+
+    if (m_refreshTokenSwitchButton != nullptr)
+    {
+        m_refreshTokenSwitchButton->setEnabled(true);
+    }
+
+    // 最终状态栏：
+    // - 全部成功显示绿色；
+    // - 有失败项显示橙色并附失败清单。
+    if (failItemList.isEmpty())
+    {
+        setStatusLabel(
+            QStringLiteral("● 刷新完成：%1 项开关已同步").arg(successCount),
+            statusIdleColor(),
+            600);
+        info << actionEvent
+            << "[ProcessDetailWindow] refreshTokenSwitchStates: 完成, successCount="
+            << successCount
+            << eol;
+    }
+    else
+    {
+        setStatusLabel(
+            QStringLiteral("● 刷新完成：成功%1，失败项=%2")
+            .arg(successCount)
+            .arg(failItemList.join(QStringLiteral(", "))),
+            statusWarningColor(),
+            700);
+        warn << actionEvent
+            << "[ProcessDetailWindow] refreshTokenSwitchStates: 部分失败, successCount="
+            << successCount
+            << ", failItems="
+            << failItemList.join(QStringLiteral(" | ")).toStdString()
+            << eol;
+    }
+}
+
+void ProcessDetailWindow::applyTokenSwitchStates()
+{
+    // 令牌开关应用日志：
+    // - 使用同一个 kLogEvent 贯穿整个应用流程；
+    // - 每个字段单独记录结果，便于定位哪一项权限不足。
+    kLogEvent actionEvent;
+    info << actionEvent
+        << "[ProcessDetailWindow] applyTokenSwitchStates: pid="
+        << m_baseRecord.pid
+        << eol;
+
+    // setStatusLabel 作用：
+    // - 统一写入状态文本与颜色；
+    // - 与 refreshTokenSwitchStates 保持一致的反馈风格。
+    const auto setStatusLabel =
+        [this](const QString& statusText, const QColor& textColor, const int fontWeight)
+    {
+        if (m_tokenSwitchStatusLabel == nullptr)
+        {
+            return;
+        }
+        m_tokenSwitchStatusLabel->setText(statusText);
+        m_tokenSwitchStatusLabel->setStyleSheet(buildStateLabelStyle(textColor, fontWeight));
+    };
+
+    if (m_baseRecord.pid == 0)
+    {
+        setStatusLabel(QStringLiteral("● 应用失败：PID 无效"), statusWarningColor(), 700);
+        warn << actionEvent
+            << "[ProcessDetailWindow] applyTokenSwitchStates: PID 无效。"
+            << eol;
+        return;
+    }
+
+    if (m_applyTokenSwitchButton != nullptr)
+    {
+        m_applyTokenSwitchButton->setEnabled(false);
+    }
+    setStatusLabel(QStringLiteral("● 正在应用令牌开关..."), KswordTheme::PrimaryBlueColor, 700);
+
+    // 动态解析 NtSetInformationToken：
+    // - 用户需求中提到 NtSetTokenInformation，这里对应 ntdll 导出的 NtSetInformationToken；
+    // - 若导出不可用则直接终止并给出错误说明。
+    HMODULE ntdllModule = GetModuleHandleW(L"ntdll.dll");
+    if (ntdllModule == nullptr)
+    {
+        ntdllModule = LoadLibraryW(L"ntdll.dll");
+    }
+    const auto setInformationToken = reinterpret_cast<NtSetInformationTokenFn>(
+        ntdllModule != nullptr ? GetProcAddress(ntdllModule, "NtSetInformationToken") : nullptr);
+    if (setInformationToken == nullptr)
+    {
+        setStatusLabel(QStringLiteral("● 应用失败：NtSetInformationToken 不可用"), statusWarningColor(), 700);
+        err << actionEvent
+            << "[ProcessDetailWindow] applyTokenSwitchStates: NtSetInformationToken 不可用。"
+            << eol;
+        if (m_applyTokenSwitchButton != nullptr)
+        {
+            m_applyTokenSwitchButton->setEnabled(true);
+        }
+        return;
+    }
+
+    // 打开目标令牌：
+    // - 写开关需要 TOKEN_ADJUST_DEFAULT；
+    // - 同时保留 TOKEN_QUERY 用于后续回读和诊断。
+    HANDLE processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, m_baseRecord.pid);
+    if (processHandle == nullptr)
+    {
+        const DWORD openProcessError = GetLastError();
+        setStatusLabel(
+            QStringLiteral("● 应用失败：OpenProcess(%1)").arg(openProcessError),
+            statusWarningColor(),
+            700);
+        err << actionEvent
+            << "[ProcessDetailWindow] applyTokenSwitchStates: OpenProcess 失败, error="
+            << openProcessError
+            << eol;
+        if (m_applyTokenSwitchButton != nullptr)
+        {
+            m_applyTokenSwitchButton->setEnabled(true);
+        }
+        return;
+    }
+
+    HANDLE tokenHandle = nullptr;
+    if (OpenProcessToken(processHandle, TOKEN_ADJUST_DEFAULT | TOKEN_QUERY, &tokenHandle) == FALSE || tokenHandle == nullptr)
+    {
+        const DWORD openTokenError = GetLastError();
+        CloseHandle(processHandle);
+        processHandle = nullptr;
+        setStatusLabel(
+            QStringLiteral("● 应用失败：OpenProcessToken(%1)").arg(openTokenError),
+            statusWarningColor(),
+            700);
+        err << actionEvent
+            << "[ProcessDetailWindow] applyTokenSwitchStates: OpenProcessToken 失败, error="
+            << openTokenError
+            << eol;
+        if (m_applyTokenSwitchButton != nullptr)
+        {
+            m_applyTokenSwitchButton->setEnabled(true);
+        }
+        return;
+    }
+
+    // applyBoolFromCheckBox 作用：
+    // - 读取复选框状态并调用 NtSetInformationToken；
+    // - 每项失败都会记录 NTSTATUS，最终统一汇总到状态栏。
+    int successCount = 0;
+    QStringList failItemList;
+    const auto applyBoolFromCheckBox =
+        [setInformationToken, tokenHandle, &successCount, &failItemList](
+            QCheckBox* checkBox,
+            const TOKEN_INFORMATION_CLASS infoClass,
+            const QString& itemName)
+    {
+        if (checkBox == nullptr)
+        {
+            failItemList << QStringLiteral("%1(控件为空)").arg(itemName);
+            return;
+        }
+
+        const NTSTATUS setStatus = applyTokenBoolFlag(
+            setInformationToken,
+            tokenHandle,
+            infoClass,
+            checkBox->isChecked());
+        if (!NT_SUCCESS(setStatus))
+        {
+            failItemList << QStringLiteral("%1(%2)").arg(itemName).arg(formatNtStatusHex(setStatus));
+            return;
+        }
+        ++successCount;
+    };
+
+    applyBoolFromCheckBox(m_tokenSandboxInertCheck, TokenSandBoxInert, QStringLiteral("SandboxInert"));
+    applyBoolFromCheckBox(m_tokenVirtualizationAllowedCheck, TokenVirtualizationAllowed, QStringLiteral("VirtualizationAllowed"));
+    applyBoolFromCheckBox(m_tokenVirtualizationEnabledCheck, TokenVirtualizationEnabled, QStringLiteral("VirtualizationEnabled"));
+    applyBoolFromCheckBox(m_tokenUiAccessCheck, TokenUIAccess, QStringLiteral("UIAccess"));
+
+    // MandatoryPolicy 写入：
+    // - 由两个策略复选框合成一个 POLICY 位掩码；
+    // - 使用 NtSetInformationToken(TokenMandatoryPolicy) 一次提交。
+    if (m_tokenMandatoryNoWriteUpCheck == nullptr || m_tokenMandatoryNewProcessMinCheck == nullptr)
+    {
+        failItemList << QStringLiteral("MandatoryPolicy(控件为空)");
+    }
+    else
+    {
+        const NTSTATUS policyStatus = applyTokenMandatoryPolicyBits(
+            setInformationToken,
+            tokenHandle,
+            m_tokenMandatoryNoWriteUpCheck->isChecked(),
+            m_tokenMandatoryNewProcessMinCheck->isChecked());
+        if (NT_SUCCESS(policyStatus))
+        {
+            ++successCount;
+        }
+        else
+        {
+            failItemList << QStringLiteral("MandatoryPolicy(%1)").arg(formatNtStatusHex(policyStatus));
+        }
+    }
+
+    CloseHandle(tokenHandle);
+    tokenHandle = nullptr;
+    CloseHandle(processHandle);
+    processHandle = nullptr;
+
+    if (m_applyTokenSwitchButton != nullptr)
+    {
+        m_applyTokenSwitchButton->setEnabled(true);
+    }
+
+    // 应用结果反馈：
+    // - 全成功时刷新文本令牌页与开关页；
+    // - 部分失败时也刷新开关页，确保 UI 与真实状态尽量一致。
+    if (failItemList.isEmpty())
+    {
+        setStatusLabel(
+            QStringLiteral("● 应用完成：成功%1项").arg(successCount),
+            statusIdleColor(),
+            600);
+        info << actionEvent
+            << "[ProcessDetailWindow] applyTokenSwitchStates: 全部成功, successCount="
+            << successCount
+            << eol;
+    }
+    else
+    {
+        setStatusLabel(
+            QStringLiteral("● 应用完成：成功%1，失败项=%2")
+            .arg(successCount)
+            .arg(failItemList.join(QStringLiteral(", "))),
+            statusWarningColor(),
+            700);
+        warn << actionEvent
+            << "[ProcessDetailWindow] applyTokenSwitchStates: 部分失败, successCount="
+            << successCount
+            << ", failItems="
+            << failItemList.join(QStringLiteral(" | ")).toStdString()
+            << eol;
+    }
+
+    requestAsyncTokenRefresh();
+    refreshTokenSwitchStates();
 }
 
 void ProcessDetailWindow::requestAsyncPebRefresh()
