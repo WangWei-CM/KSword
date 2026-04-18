@@ -7,6 +7,7 @@
 #include <QDate>
 #include <QFileIconProvider>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -15,6 +16,7 @@
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScreen>
 #include <QStringList>
 #include <QWidget>
 #include <QWindow>
@@ -202,47 +204,80 @@ namespace ks::ui
     {
         if (mouseEventPointer != nullptr
             && mouseEventPointer->button() == Qt::LeftButton
-            && isPointInDraggableRegion(mouseEventPointer->pos()))
+            && isPointInDraggableRegion(mouseEventPointer->position().toPoint()))
         {
-            // hostWindowWidget 用途：获取标题栏所属顶层窗口，后续发起系统拖动。
-            QWidget* hostWindowWidget = window();
-            if (hostWindowWidget != nullptr)
-            {
-                // hostWindowHandle 用途：Qt 提供的顶层原生窗口句柄封装。
-                QWindow* hostWindowHandle = hostWindowWidget->windowHandle();
-                if (hostWindowHandle != nullptr && hostWindowHandle->startSystemMove())
-                {
-                    mouseEventPointer->accept();
-                    return;
-                }
+            // m_dragCandidateActive 用途：标记本次左键按下可进入标题栏拖动候选状态。
+            m_dragCandidateActive = true;
+            // m_dragInProgress 用途：新的按压序列开始时重置“系统拖动已启动”标记。
+            m_dragInProgress = false;
+            // m_dragPressLocalPos 用途：保存按下时的标题栏局部坐标，供恢复窗口时计算相对位置。
+            m_dragPressLocalPos = mouseEventPointer->position().toPoint();
+            // m_dragPressGlobalPos 用途：保存按下时的全局坐标，供拖动阈值判断与恢复定位使用。
+            m_dragPressGlobalPos = mouseEventPointer->globalPosition().toPoint();
+            mouseEventPointer->accept();
+            return;
+        }
 
-#ifdef Q_OS_WIN
-                // hostWindowHandleValue 用途：Win32 兜底拖动链路所需窗口句柄。
-                const HWND hostWindowHandleValue = reinterpret_cast<HWND>(hostWindowWidget->winId());
-                if (hostWindowHandleValue != nullptr && ::IsWindow(hostWindowHandleValue) != FALSE)
+        m_dragCandidateActive = false;
+        m_dragInProgress = false;
+        QWidget::mousePressEvent(mouseEventPointer);
+    }
+
+    void CustomTitleBar::mouseMoveEvent(QMouseEvent* mouseEventPointer)
+    {
+        if (mouseEventPointer != nullptr
+            && m_dragCandidateActive
+            && !m_dragInProgress
+            && (mouseEventPointer->buttons() & Qt::LeftButton))
+        {
+            // currentLocalPos 用途：记录本次 move 时相对标题栏左上角的坐标。
+            const QPoint currentLocalPos = mouseEventPointer->position().toPoint();
+            // dragDistance 用途：判断当前移动是否达到系统拖动阈值，避免点击被误判为拖动。
+            const int dragDistance = (currentLocalPos - m_dragPressLocalPos).manhattanLength();
+            if (dragDistance >= QApplication::startDragDistance())
+            {
+                // currentGlobalPos 用途：当前鼠标全局坐标，供恢复窗口和发起系统拖动复用。
+                const QPoint currentGlobalPos = mouseEventPointer->globalPosition().toPoint();
+                QWidget* hostWindowWidget = window();
+                if (hostWindowWidget != nullptr)
                 {
-                    ::ReleaseCapture();
-                    ::SendMessageW(
-                        hostWindowHandleValue,
-                        WM_SYSCOMMAND,
-                        static_cast<WPARAM>(SC_MOVE | HTCAPTION),
-                        0);
-                    mouseEventPointer->accept();
-                    return;
+                    const bool hostWindowMaximized =
+                        hostWindowWidget->isMaximized()
+                        || ((hostWindowWidget->windowState() & Qt::WindowMaximized) != 0);
+                    if (hostWindowMaximized)
+                    {
+                        restoreWindowFromMaximizedForDrag(hostWindowWidget, currentGlobalPos);
+                    }
+
+                    if (tryStartWindowSystemMove(currentGlobalPos))
+                    {
+                        m_dragCandidateActive = false;
+                        m_dragInProgress = true;
+                        mouseEventPointer->accept();
+                        return;
+                    }
                 }
-#endif
             }
         }
 
-        QWidget::mousePressEvent(mouseEventPointer);
+        QWidget::mouseMoveEvent(mouseEventPointer);
+    }
+
+    void CustomTitleBar::mouseReleaseEvent(QMouseEvent* mouseEventPointer)
+    {
+        m_dragCandidateActive = false;
+        m_dragInProgress = false;
+        QWidget::mouseReleaseEvent(mouseEventPointer);
     }
 
     void CustomTitleBar::mouseDoubleClickEvent(QMouseEvent* mouseEventPointer)
     {
         if (mouseEventPointer != nullptr
             && mouseEventPointer->button() == Qt::LeftButton
-            && isPointInDraggableRegion(mouseEventPointer->pos()))
+            && isPointInDraggableRegion(mouseEventPointer->position().toPoint()))
         {
+            m_dragCandidateActive = false;
+            m_dragInProgress = false;
             emit requestToggleMaximizeWindow();
             mouseEventPointer->accept();
             return;
@@ -524,6 +559,100 @@ namespace ks::ui
 
         const int commandLineWidth = std::clamp(width() / 3, kCommandLineMinWidth, kCommandLineMaxWidth);
         m_commandLineEdit->setFixedWidth(commandLineWidth);
+    }
+
+    bool CustomTitleBar::tryStartWindowSystemMove(const QPoint& globalPoint)
+    {
+        Q_UNUSED(globalPoint);
+
+        // hostWindowWidget 用途：获取标题栏所属顶层窗口，后续向系统发起窗口拖动。
+        QWidget* hostWindowWidget = window();
+        if (hostWindowWidget == nullptr)
+        {
+            return false;
+        }
+
+        // hostWindowHandle 用途：Qt 提供的顶层原生窗口句柄封装。
+        QWindow* hostWindowHandle = hostWindowWidget->windowHandle();
+        if (hostWindowHandle != nullptr && hostWindowHandle->startSystemMove())
+        {
+            return true;
+        }
+
+#ifdef Q_OS_WIN
+        // hostWindowHandleValue 用途：Win32 兜底拖动链路所需窗口句柄。
+        const HWND hostWindowHandleValue = reinterpret_cast<HWND>(hostWindowWidget->winId());
+        if (hostWindowHandleValue != nullptr && ::IsWindow(hostWindowHandleValue) != FALSE)
+        {
+            ::ReleaseCapture();
+            ::SendMessageW(
+                hostWindowHandleValue,
+                WM_SYSCOMMAND,
+                static_cast<WPARAM>(SC_MOVE | HTCAPTION),
+                0);
+            return true;
+        }
+#endif
+
+        return false;
+    }
+
+    void CustomTitleBar::restoreWindowFromMaximizedForDrag(
+        QWidget* hostWindowWidget,
+        const QPoint& globalPoint)
+    {
+        if (hostWindowWidget == nullptr)
+        {
+            return;
+        }
+
+        // restoredGeometry 用途：读取窗口最大化前的正常几何信息，供拖下还原时复用。
+        QRect restoredGeometry = hostWindowWidget->normalGeometry();
+        if (!restoredGeometry.isValid()
+            || restoredGeometry.width() <= 0
+            || restoredGeometry.height() <= 0)
+        {
+            restoredGeometry = hostWindowWidget->geometry();
+        }
+
+        const int windowWidth = std::max(1, hostWindowWidget->width());
+        // horizontalRatio 用途：保存按下点在整窗宽度中的比例，恢复后让鼠标仍落在相近位置。
+        const double horizontalRatio = std::clamp(
+            static_cast<double>(m_dragPressLocalPos.x()) / static_cast<double>(windowWidth),
+            0.0,
+            1.0);
+        // restoredLeft 用途：计算恢复为窗口化后窗口左上角 X 坐标。
+        int restoredLeft = globalPoint.x() - static_cast<int>(restoredGeometry.width() * horizontalRatio);
+        // restoredTopOffset 用途：让窗口恢复后标题栏仍贴近鼠标，而不是直接跳到屏幕顶端。
+        const int restoredTopOffset = std::clamp(m_dragPressLocalPos.y(), 12, 24);
+        // restoredTop 用途：计算恢复为窗口化后窗口左上角 Y 坐标。
+        int restoredTop = globalPoint.y() - restoredTopOffset;
+
+        // screenObject 用途：找到当前鼠标所在屏幕，避免恢复后窗口跑出可用工作区。
+        QScreen* screenObject = QGuiApplication::screenAt(globalPoint);
+        if (screenObject == nullptr && hostWindowWidget->windowHandle() != nullptr)
+        {
+            screenObject = hostWindowWidget->windowHandle()->screen();
+        }
+        if (screenObject != nullptr)
+        {
+            const QRect availableGeometry = screenObject->availableGeometry();
+            restoredLeft = std::clamp(
+                restoredLeft,
+                availableGeometry.left(),
+                availableGeometry.right() - restoredGeometry.width() + 1);
+            restoredTop = std::clamp(
+                restoredTop,
+                availableGeometry.top(),
+                availableGeometry.bottom() - restoredGeometry.height() + 1);
+        }
+
+        hostWindowWidget->showNormal();
+        hostWindowWidget->setGeometry(
+            restoredLeft,
+            restoredTop,
+            restoredGeometry.width(),
+            restoredGeometry.height());
     }
 
     QString CustomTitleBar::resolveCompileDateText() const

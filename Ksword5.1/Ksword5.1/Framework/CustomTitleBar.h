@@ -117,9 +117,18 @@ namespace ks::ui
         void resizeEvent(QResizeEvent* resizeEventPointer) override;
 
         // mousePressEvent：
-        // - 作用：在可拖动区域按下左键时主动发起系统拖动；
-        // - 说明：作为 WM_NCHITTEST 的兜底链路，修复“标题栏无法拖动”。
+        // - 作用：记录标题栏左键按下状态，为后续拖动/双击判定提供起点；
+        // - 说明：不在按下瞬间直接拖动，避免抢占双击序列。
         void mousePressEvent(QMouseEvent* mouseEventPointer) override;
+
+        // mouseMoveEvent：
+        // - 作用：在拖动阈值达到后发起系统拖动；
+        // - 说明：最大化状态下会先恢复到窗口化，再继续进入拖动。
+        void mouseMoveEvent(QMouseEvent* mouseEventPointer) override;
+
+        // mouseReleaseEvent：
+        // - 作用：结束一次标题栏按压/拖动候选状态，避免残留状态影响下次交互。
+        void mouseReleaseEvent(QMouseEvent* mouseEventPointer) override;
 
         // mouseDoubleClickEvent：
         // - 作用：双击标题栏可拖动区域时请求最大化/还原。
@@ -144,6 +153,21 @@ namespace ks::ui
         // updateCommandLineWidth：
         // - 作用：把命令输入框宽度调整为标题栏可用宽度的 1/3。
         void updateCommandLineWidth();
+
+        // tryStartWindowSystemMove：
+        // - 作用：向宿主窗口发起一次系统级拖动；
+        // - 调用：mouseMoveEvent 在达到拖动阈值后调用；
+        // - 传入 globalPoint：当前鼠标全局坐标；
+        // - 传出：true=系统已接管拖动，false=拖动未启动。
+        bool tryStartWindowSystemMove(const QPoint& globalPoint);
+
+        // restoreWindowFromMaximizedForDrag：
+        // - 作用：最大化窗口开始拖动时，先恢复为窗口化并把窗口放到鼠标下方；
+        // - 调用：mouseMoveEvent 检测到“最大化态拖动”时调用；
+        // - 传入 hostWindowWidget：标题栏所属顶层窗口；
+        // - 传入 globalPoint：当前鼠标全局坐标；
+        // - 传出：无。
+        void restoreWindowFromMaximizedForDrag(QWidget* hostWindowWidget, const QPoint& globalPoint);
 
         // resolveCompileDateText：
         // - 作用：把编译日期格式化为 yyyy-MM-dd；
@@ -183,5 +207,9 @@ namespace ks::ui
         bool m_isPinned = false;                  // m_isPinned：当前置顶状态。
         bool m_isMaximized = false;               // m_isMaximized：当前窗口是否最大化。
         bool m_darkModeEnabled = false;           // m_darkModeEnabled：当前是否深色主题。
+        bool m_dragCandidateActive = false;       // m_dragCandidateActive：当前是否处于标题栏拖动候选状态。
+        bool m_dragInProgress = false;            // m_dragInProgress：当前是否已把拖动交给系统处理。
+        QPoint m_dragPressLocalPos;               // m_dragPressLocalPos：本次按下时相对标题栏左上角的坐标。
+        QPoint m_dragPressGlobalPos;              // m_dragPressGlobalPos：本次按下时的全局屏幕坐标。
     };
 }
