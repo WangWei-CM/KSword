@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "StartupDock.h"
+#include "../theme.h"
 
 #include <QApplication>
 #include <QCheckBox>

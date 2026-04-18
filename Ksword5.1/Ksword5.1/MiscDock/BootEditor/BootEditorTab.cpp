@@ -548,6 +548,8 @@ void BootEditorTab::initializeConnections()
     connect(m_entryTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPos)
         {
             QMenu menu(m_entryTable);
+            // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
+            menu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* copyRowAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_copy.svg")), QStringLiteral("复制当前行"));
             QAction* selectedAction = menu.exec(m_entryTable->viewport()->mapToGlobal(localPos));
             if (selectedAction == copyRowAction)

@@ -820,6 +820,20 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
     QString processPathText;
     bool relevant = false;
     bool needsLazyDetailLookup = false;
+    // shouldSyncAutoAddTargetList：标记是否需要把新子进程写入监听列表（UI 线程执行）。
+    bool shouldSyncAutoAddTargetList = false;
+    // autoAdd*：承载“自动加入监听列表”所需参数，锁外通过 invokeMethod 投递到 UI。
+    std::uint32_t autoAddPidValue = 0;
+    std::uint32_t autoAddParentPidValue = 0;
+    QString autoAddProcessNameText;
+    QString autoAddProcessPathText;
+    std::uint64_t autoAddCreationTime100ns = 0;
+    // shouldAutoRemoveTargetList：标记是否需要把退出进程从监听列表移除（UI 线程执行）。
+    bool shouldAutoRemoveTargetList = false;
+    // autoRemovePidValue：承载“自动移除监听列表”所需 PID。
+    std::uint32_t autoRemovePidValue = 0;
+    // allowStopAutoRemove：仅在“明确命中退出进程 PID”时才允许自动移除监听项。
+    bool allowStopAutoRemove = false;
 
     {
         std::lock_guard<std::mutex> lock(m_runtimeMutex);
@@ -871,34 +885,70 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
             needsLazyDetailLookup = matchedTrackedProcess->alive
                 && processNameText.trimmed().isEmpty()
                 && displayPidValue != 0;
+            allowStopAutoRemove = true;
         }
-        else if (parentPidValue != 0
+
+        // 进程创建事件的特殊处理：
+        // - 即使当前事件头 PID 已经命中父进程，也要把“新子进程 PID”纳入监听列表；
+        // - 因此这里不使用 else-if，而是独立再执行一轮父子关系处理。
+        const bool isCreateEvent = isProcessCreateEvent(providerTypeText, eventNameText);
+        if (parentPidValue != 0
             && propertyPidValue != 0
-            && isProcessCreateEvent(providerTypeText, eventNameText))
+            && isCreateEvent)
         {
             RuntimeTrackedProcess* parentTrackedProcess = trackedByPid(parentPidValue);
             if (parentTrackedProcess != nullptr)
             {
-                RuntimeTrackedProcess childTrackedProcess;
-                childTrackedProcess.pid = propertyPidValue;
-                childTrackedProcess.parentPid = parentPidValue;
-                childTrackedProcess.rootPid = parentTrackedProcess->rootPid;
-                childTrackedProcess.processName = processHintText;
-                childTrackedProcess.imagePath = processHintText;
-                childTrackedProcess.creationTime100ns = 0;
-                childTrackedProcess.alive = true;
-                childTrackedProcess.isRoot = false;
-                childTrackedProcess.staleSnapshotRounds = 0;
-                childTrackedProcess.lastRelatedEventTime100ns = eventTimestamp100ns;
-                m_trackedProcessMap[propertyPidValue] = childTrackedProcess;
+                // parentRootPidValue：先拷贝父根 PID，避免 map 插入导致指针失效后仍访问父节点。
+                const std::uint32_t parentRootPidValue = parentTrackedProcess->rootPid;
+                auto childIt = m_trackedProcessMap.find(propertyPidValue);
+                if (childIt == m_trackedProcessMap.end())
+                {
+                    RuntimeTrackedProcess childTrackedProcess;
+                    childTrackedProcess.pid = propertyPidValue;
+                    childTrackedProcess.parentPid = parentPidValue;
+                    childTrackedProcess.rootPid = parentRootPidValue;
+                    childTrackedProcess.processName = processHintText;
+                    childTrackedProcess.imagePath = processHintText;
+                    childTrackedProcess.creationTime100ns = 0;
+                    childTrackedProcess.alive = true;
+                    childTrackedProcess.isRoot = false;
+                    childTrackedProcess.staleSnapshotRounds = 0;
+                    childTrackedProcess.lastRelatedEventTime100ns = eventTimestamp100ns;
+                    m_trackedProcessMap[propertyPidValue] = childTrackedProcess;
+                    childIt = m_trackedProcessMap.find(propertyPidValue);
+                }
+                else
+                {
+                    childIt->second.parentPid = parentPidValue;
+                    childIt->second.rootPid = parentRootPidValue;
+                    childIt->second.alive = true;
+                    childIt->second.isRoot = false;
+                    childIt->second.staleSnapshotRounds = 0;
+                    childIt->second.lastRelatedEventTime100ns = eventTimestamp100ns;
+                    if (!processHintText.trimmed().isEmpty())
+                    {
+                        childIt->second.processName = processHintText;
+                        childIt->second.imagePath = processHintText;
+                    }
+                }
 
+                const RuntimeTrackedProcess& childTrackedProcess = childIt->second;
                 relevant = true;
                 displayPidValue = propertyPidValue;
                 rootPidValue = childTrackedProcess.rootPid;
                 relationText = QStringLiteral("子进程(%1)").arg(parentPidValue);
                 processNameText = childTrackedProcess.processName;
                 processPathText = childTrackedProcess.imagePath;
-                needsLazyDetailLookup = true;
+                needsLazyDetailLookup = childTrackedProcess.alive
+                    && processNameText.trimmed().isEmpty()
+                    && displayPidValue != 0;
+                shouldSyncAutoAddTargetList = true;
+                autoAddPidValue = childTrackedProcess.pid;
+                autoAddParentPidValue = childTrackedProcess.parentPid;
+                autoAddProcessNameText = childTrackedProcess.processName;
+                autoAddProcessPathText = childTrackedProcess.imagePath;
+                autoAddCreationTime100ns = childTrackedProcess.creationTime100ns;
             }
         }
 
@@ -917,6 +967,7 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
                 {
                     continue;
                 }
+                const bool matchedByProcessIdProperty = propertyNameLooksLikeProcessId(normalizedName);
 
                 RuntimeTrackedProcess* linkedTrackedProcess = trackedByPid(static_cast<std::uint32_t>(property.numericValue));
                 if (linkedTrackedProcess == nullptr || !linkedTrackedProcess->alive)
@@ -934,18 +985,25 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
                 needsLazyDetailLookup = linkedTrackedProcess->alive
                     && processNameText.trimmed().isEmpty()
                     && displayPidValue != 0;
+                allowStopAutoRemove = matchedByProcessIdProperty;
                 break;
             }
         }
 
-        if (relevant && displayPidValue != 0 && isProcessStopEvent(providerTypeText, eventNameText))
+        if (relevant
+            && displayPidValue != 0
+            && allowStopAutoRemove
+            && isProcessStopEvent(providerTypeText, eventNameText))
         {
             auto found = m_trackedProcessMap.find(displayPidValue);
             if (found != m_trackedProcessMap.end())
             {
                 found->second.alive = false;
                 found->second.lastRelatedEventTime100ns = eventTimestamp100ns;
+                m_trackedProcessMap.erase(found);
             }
+            shouldAutoRemoveTargetList = true;
+            autoRemovePidValue = displayPidValue;
         }
     }
 
@@ -1005,7 +1063,42 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
     rowOut->detailText = buildEventDetailText(providerGuidText, eventRecordPtr, propertyList);
     rowOut->activityIdText = guidToText(eventRecord->EventHeader.ActivityId);
 
-    if (displayPidValue != 0)
+    // UI 同步：
+    // - ETW 线程只负责判定；
+    // - 监听列表变更统一回到 UI 线程，避免并发写 m_targetProcessList。
+    if (shouldSyncAutoAddTargetList && autoAddPidValue != 0)
+    {
+        QMetaObject::invokeMethod(
+            this,
+            [this,
+             autoAddPidValue,
+             autoAddParentPidValue,
+             autoAddProcessNameText,
+             autoAddProcessPathText,
+             autoAddCreationTime100ns]() {
+                upsertAutoTrackedProcessInTargetList(
+                    autoAddPidValue,
+                    autoAddParentPidValue,
+                    autoAddProcessNameText,
+                    autoAddProcessPathText,
+                    autoAddCreationTime100ns);
+            },
+            Qt::QueuedConnection);
+    }
+
+    if (shouldAutoRemoveTargetList && autoRemovePidValue != 0)
+    {
+        QMetaObject::invokeMethod(
+            this,
+            [this, autoRemovePidValue]() {
+                removeTrackedProcessFromTargetListByPid(
+                    autoRemovePidValue,
+                    QStringLiteral("ETW 进程退出事件"));
+            },
+            Qt::QueuedConnection);
+    }
+
+    if (displayPidValue != 0 && !shouldAutoRemoveTargetList)
     {
         std::lock_guard<std::mutex> lock(m_runtimeMutex);
         const auto found = m_trackedProcessMap.find(displayPidValue);

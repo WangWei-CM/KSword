@@ -88,6 +88,81 @@ namespace KswordTheme
         return QStringLiteral("palette(mid)");
     }
 
+    // ContextMenuStyle 作用：
+    // - 统一生成右键菜单样式，确保菜单背景始终显式填充；
+    // - 重点规避浅色模式下菜单继承透明背景而显示黑底、文字不可读的问题。
+    // 调用方式：menu.setStyleSheet(KswordTheme::ContextMenuStyle())。
+    // 返回：可直接应用到 QMenu 的样式文本。
+    inline QString ContextMenuStyle()
+    {
+        const QString disabledTextColor = IsDarkModeEnabled()
+            ? QStringLiteral("#8C8C8C")
+            : QStringLiteral("#7A8694");
+
+        return QStringLiteral(
+            "QMenu{"
+            "  background:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "}"
+            "QMenu::item{"
+            "  padding:4px 16px 4px 12px;"
+            "  background:transparent;"
+            "}"
+            "QMenu::item:selected{"
+            "  background:%4;"
+            "  color:#FFFFFF;"
+            "}"
+            "QMenu::item:disabled{"
+            "  color:%5;"
+            "  background:transparent;"
+            "}"
+            "QMenu::separator{"
+            "  height:1px;"
+            "  background:%3;"
+            "  margin:2px 6px;"
+            "}")
+            .arg(SurfaceHex())
+            .arg(TextPrimaryHex())
+            .arg(BorderHex())
+            .arg(PrimaryBlueHex)
+            .arg(disabledTextColor);
+    }
+
+    // OpaqueDialogStyle 作用：
+    // - 为独立弹窗显式设置不透明背景，避免父级透明样式导致黑底；
+    // - 主要用于“详情查看”类弹窗（如启动项详情、ETW 返回详情）。
+    // 调用方式：dialog.setStyleSheet(KswordTheme::OpaqueDialogStyle(dialog.objectName()))。
+    // 入参 dialogObjectName：目标 QDialog 的 objectName。
+    // 返回：可直接应用到 QDialog 的样式文本；objectName 为空时返回空串。
+    inline QString OpaqueDialogStyle(const QString& dialogObjectName)
+    {
+        if (dialogObjectName.trimmed().isEmpty())
+        {
+            return QString();
+        }
+
+        return QStringLiteral(
+            "QDialog#%1{"
+            "  background-color:palette(window) !important;"
+            "  color:palette(text) !important;"
+            "}"
+            "QDialog#%1 QPlainTextEdit,"
+            "QDialog#%1 QTextEdit,"
+            "QDialog#%1 QTreeWidget,"
+            "QDialog#%1 QTableWidget,"
+            "QDialog#%1 QAbstractScrollArea,"
+            "QDialog#%1 QAbstractScrollArea::viewport{"
+            "  background-color:palette(base) !important;"
+            "  color:palette(text) !important;"
+            "}"
+            "QDialog#%1 QHeaderView::section{"
+            "  background-color:palette(window) !important;"
+            "  color:palette(text) !important;"
+            "}")
+            .arg(dialogObjectName);
+    }
+
     // NewRowBackgroundColor 作用：返回“新增行”高亮色（深色为墨绿色）。
     inline QColor NewRowBackgroundColor()
     {

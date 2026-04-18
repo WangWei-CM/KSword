@@ -198,6 +198,7 @@
     <ClCompile Include="ProcessDock\ProcessDetailWindow.ActionAndUtil.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.AdvancedInfo.cpp" />
     <ClCompile Include="ProcessDock\ProcessDock.cpp" />
+    <ClCompile Include="ProcessDock\ProcessDock.ThreadTab.cpp" />
     <ClCompile Include="ProcessDock\Process_Tool.cpp" />
     <ClCompile Include="SettingsDock\AppearanceSettings.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.cpp" />

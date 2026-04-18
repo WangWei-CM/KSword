@@ -1,4 +1,5 @@
 #include "OtherDock.h"
+#include "../theme.h"
 
 // ============================================================
 // OtherDock.DesktopSwitch.cpp
@@ -258,6 +259,8 @@ void OtherDock::showDesktopContextMenu(const QPoint& localPos)
     const QString qualifiedDesktopName = QStringLiteral("%1\\%2").arg(windowStationName, desktopName);
 
     QMenu menu(this);
+    // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* goDesktopAction = menu.addAction(QIcon(":/Icon/process_start.svg"), QStringLiteral("转到桌面"));
     QAction* sidDetailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("查看SID详情"));
     QAction* copySidAction = menu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("复制SID"));

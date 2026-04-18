@@ -681,6 +681,152 @@ void ProcessTraceMonitorWidget::addTargetProcessByPid(const std::uint32_t pidVal
         << eol;
 }
 
+void ProcessTraceMonitorWidget::upsertAutoTrackedProcessInTargetList(
+    const std::uint32_t pidValue,
+    const std::uint32_t parentPidValue,
+    const QString& processNameText,
+    const QString& processPathText,
+    const std::uint64_t creationTime100ns)
+{
+    if (pidValue == 0)
+    {
+        return;
+    }
+
+    // normalizedProcessName/normalizedProcessPath：清理 ETW 事件中可能携带的空白文本。
+    const QString normalizedProcessName = processNameText.trimmed();
+    const QString normalizedProcessPath = processPathText.trimmed();
+    // autoRemarkText：用于明确标记“该条目是 ETW 自动加入”。
+    const QString autoRemarkText = QStringLiteral("ETW 自动加入（父PID=%1）").arg(parentPidValue);
+
+    auto targetIt = std::find_if(
+        m_targetProcessList.begin(),
+        m_targetProcessList.end(),
+        [pidValue](const TargetProcessEntry& entry) {
+            return entry.pid == pidValue;
+        });
+
+    bool targetAdded = false;
+    if (targetIt == m_targetProcessList.end())
+    {
+        TargetProcessEntry targetEntry;
+        targetEntry.pid = pidValue;
+        targetEntry.processName = normalizedProcessName;
+        targetEntry.imagePath = normalizedProcessPath;
+        targetEntry.creationTime100ns = creationTime100ns;
+        targetEntry.alive = true;
+        targetEntry.remarkText = autoRemarkText;
+        m_targetProcessList.push_back(targetEntry);
+        targetIt = std::prev(m_targetProcessList.end());
+        targetAdded = true;
+    }
+    else
+    {
+        targetIt->alive = true;
+        if (!normalizedProcessName.isEmpty())
+        {
+            targetIt->processName = normalizedProcessName;
+        }
+        if (!normalizedProcessPath.isEmpty())
+        {
+            targetIt->imagePath = normalizedProcessPath;
+        }
+        if (creationTime100ns != 0)
+        {
+            targetIt->creationTime100ns = creationTime100ns;
+        }
+
+        const bool canRewriteRemark = targetIt->remarkText.trimmed().isEmpty()
+            || targetIt->remarkText.contains(QStringLiteral("ETW 自动加入"), Qt::CaseInsensitive);
+        if (canRewriteRemark)
+        {
+            targetIt->remarkText = autoRemarkText;
+        }
+    }
+
+    // needDetailLookup：当 ETW 没带全字段时，按 PID 补一轮轻量静态详情。
+    const bool needDetailLookup = targetIt->processName.trimmed().isEmpty()
+        || targetIt->imagePath.trimmed().isEmpty()
+        || targetIt->userName.trimmed().isEmpty()
+        || targetIt->creationTime100ns == 0;
+    if (needDetailLookup)
+    {
+        const ks::process::ProcessRecord detailRecord = buildLightweightMonitorProcessRecord(pidValue);
+        if (targetIt->processName.trimmed().isEmpty())
+        {
+            targetIt->processName = QString::fromStdString(detailRecord.processName);
+        }
+        if (targetIt->imagePath.trimmed().isEmpty())
+        {
+            targetIt->imagePath = QString::fromStdString(detailRecord.imagePath);
+        }
+        if (targetIt->userName.trimmed().isEmpty())
+        {
+            targetIt->userName = QString::fromStdString(detailRecord.userName);
+        }
+        if (targetIt->creationTime100ns == 0)
+        {
+            targetIt->creationTime100ns = detailRecord.creationTime100ns;
+        }
+
+        // 这里保持 alive=true：
+        // - 触发来源是“ETW 进程创建事件”，说明该 PID 在事件时刻可达；
+        // - 即便轻量详情补全失败，也不应把其误判成已退出。
+        targetIt->alive = true;
+    }
+
+    refreshTargetTable();
+    updateStatusLabel();
+
+    kLogEvent autoAddEvent;
+    info << autoAddEvent
+        << "[ProcessTraceMonitorWidget] ETW自动同步监控目标, pid="
+        << pidValue
+        << ", parentPid="
+        << parentPidValue
+        << ", action="
+        << (targetAdded ? "add" : "update")
+        << eol;
+}
+
+void ProcessTraceMonitorWidget::removeTrackedProcessFromTargetListByPid(
+    const std::uint32_t pidValue,
+    const QString& reasonText)
+{
+    if (pidValue == 0 || m_targetProcessList.empty())
+    {
+        return;
+    }
+
+    // removeBegin：指向第一个需要删除的条目，用于批量擦除同 PID 记录。
+    const auto removeBegin = std::remove_if(
+        m_targetProcessList.begin(),
+        m_targetProcessList.end(),
+        [pidValue](const TargetProcessEntry& entry) {
+            return entry.pid == pidValue;
+        });
+    if (removeBegin == m_targetProcessList.end())
+    {
+        return;
+    }
+
+    const std::size_t removedCount = static_cast<std::size_t>(m_targetProcessList.end() - removeBegin);
+    m_targetProcessList.erase(removeBegin, m_targetProcessList.end());
+
+    refreshTargetTable();
+    updateStatusLabel();
+
+    kLogEvent autoRemoveEvent;
+    info << autoRemoveEvent
+        << "[ProcessTraceMonitorWidget] 自动取消追踪, pid="
+        << pidValue
+        << ", removedCount="
+        << removedCount
+        << ", reason="
+        << reasonText.toStdString()
+        << eol;
+}
+
 void ProcessTraceMonitorWidget::refreshTargetTable()
 {
     if (m_targetTable == nullptr)

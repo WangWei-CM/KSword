@@ -9,6 +9,7 @@
 #include "../theme.h"
 
 #include <QApplication>
+#include <QByteArray>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
@@ -24,9 +25,11 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QJsonArray>
 #include <QMenu>
 #include <QMessageBox>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QJsonParseError>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -55,6 +58,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <memory>
 #include <set>
 #include <thread>
@@ -70,6 +74,7 @@
 #include <atlbase.h>
 #include <evntrace.h>
 #include <evntcons.h>
+#include <sddl.h>
 #include <iphlpapi.h>
 #include <netioapi.h>
 #include <Pdh.h>
@@ -598,67 +603,1532 @@ namespace
         return ok ? mask : 0ULL;
     }
 
-    // ETW 事件名解析：通过 TDH 元数据读 EventName，失败则返回空。
-    QString queryEtwEventName(const EVENT_RECORD* eventRecord)
+    // EtwSchemaPropertyEntry：
+    // - 作用：缓存一个 ETW 顶层属性的类型、长度策略和语义说明；
+    // - 调用：首次命中某个事件类型时由 TDH 构建一次，后续直接复用。
+    struct EtwSchemaPropertyEntry
     {
-        const auto textAtOffset = [](const unsigned char* bufferPointer, const ULONG offsetValue) -> QString {
-            if (bufferPointer == nullptr || offsetValue == 0)
-            {
-                return QString();
-            }
+        ULONG propertyIndex = 0;               // propertyIndex：属性索引，供 ParamLength/ParamCount 引用。
+        QString propertyNameText;              // propertyNameText：原始属性名。
+        QString normalizedNameText;            // normalizedNameText：归一化属性名（仅字母数字小写）。
+        QString meaningText;                   // meaningText：常见属性的人类语义。
+        USHORT inType = TDH_INTYPE_NULL;       // inType：TDH 输入类型。
+        USHORT outType = TDH_OUTTYPE_NULL;     // outType：TDH 输出类型。
+        USHORT fixedLength = 0;                // fixedLength：属性固定长度（若有）。
+        USHORT fixedCount = 0;                 // fixedCount：属性固定数组数量（若有）。
+        ULONG flags = 0;                       // flags：PropertyFlags 位集合。
+        bool isStruct = false;                 // isStruct：是否结构体属性。
+        bool useLengthProperty = false;        // useLengthProperty：长度是否来自前置属性。
+        bool useCountProperty = false;         // useCountProperty：计数是否来自前置属性。
+        ULONG lengthPropertyIndex = 0;         // lengthPropertyIndex：长度来源属性索引。
+        ULONG countPropertyIndex = 0;          // countPropertyIndex：数量来源属性索引。
+    };
 
-            const wchar_t* textPointer = reinterpret_cast<const wchar_t*>(bufferPointer + offsetValue);
-            if (textPointer == nullptr || *textPointer == L'\0')
+    // EtwSchemaEntry：
+    // - 作用：缓存“Provider + EventId + Version + Task + Opcode”对应的事件元数据；
+    // - 调用：ETW 回调里先查该缓存，命中后不再重复调用 TdhGetEventInformation。
+    struct EtwSchemaEntry
+    {
+        QString cacheKeyText;                               // cacheKeyText：事件类型缓存键。
+        QString eventNameText;                              // eventNameText：事件名。
+        QString taskNameText;                               // taskNameText：任务名。
+        QString opcodeNameText;                             // opcodeNameText：操作码名。
+        std::vector<EtwSchemaPropertyEntry> propertyList;   // propertyList：顶层属性布局与语义缓存。
+    };
+
+    // EtwDecodedPropertyEntry：
+    // - 作用：保存单条事件中某个属性的解码结果；
+    // - 调用：用于构造“事件数据(JSON)”和“查看返回详情”窗口内容。
+    struct EtwDecodedPropertyEntry
+    {
+        QString propertyNameText;              // propertyNameText：属性名。
+        QString normalizedNameText;            // normalizedNameText：归一化属性名。
+        QString meaningText;                   // meaningText：属性语义。
+        QString inTypeText;                    // inTypeText：类型文本。
+        QString valueText;                     // valueText：可读值。
+        QString hexPreviewText;                // hexPreviewText：原始字节十六进制预览。
+        ULONG beginOffset = 0;                 // beginOffset：属性起始偏移（相对 UserData）。
+        ULONG endOffset = 0;                   // endOffset：属性结束偏移（不含）。
+        bool numericAvailable = false;         // numericAvailable：是否解析出数值。
+        std::uint64_t numericValue = 0;        // numericValue：数值形式，供长度引用/语义分析。
+        bool parseFallback = false;            // parseFallback：是否走了兜底解析。
+    };
+
+    // EtwSemanticSummary：
+    // - 作用：聚合“资源类型 / 动作 / 目标 / 状态”等常见语义信息；
+    // - 调用：展示在 ETW 详情 JSON 顶层，便于快速阅读。
+    struct EtwSemanticSummary
+    {
+        QString resourceTypeText;              // resourceTypeText：资源类型（文件/注册表/网络等）。
+        QString actionText;                    // actionText：行为动作（打开/创建/删除等）。
+        QString targetText;                    // targetText：目标对象（路径/键名/端点等）。
+        QString statusText;                    // statusText：状态码或结果文本。
+    };
+
+    // ETW schema 全局缓存：
+    // - 作用：避免每条事件都重复调用 TdhGetEventInformation；
+    // - 生命周期：开始监听时主动清空，后续按事件类型懒加载。
+    std::mutex g_etwSchemaCacheMutex;
+    std::unordered_map<std::string, EtwSchemaEntry> g_etwSchemaCacheByKey;
+
+    // normalizeEtwPropertyName：
+    // - 作用：把属性名归一化为小写字母数字，便于做跨 Provider 的启发式匹配。
+    QString normalizeEtwPropertyName(const QString& propertyNameText)
+    {
+        QString normalizedText;
+        normalizedText.reserve(propertyNameText.size());
+        for (const QChar currentChar : propertyNameText.toLower())
+        {
+            if (currentChar.isLetterOrNumber())
             {
-                return QString();
+                normalizedText.push_back(currentChar);
             }
-            return QString::fromWCharArray(textPointer).trimmed();
+        }
+        return normalizedText;
+    }
+
+    // etwPropertyMeaningText：
+    // - 作用：给常见属性名提供中文语义说明；
+    // - 调用：构建 schema 时写入缓存，避免后续重复判断。
+    QString etwPropertyMeaningText(const QString& normalizedNameText)
+    {
+        static const std::unordered_map<std::string, QString> kMeaningMap{
+            {"processid", QStringLiteral("进程ID")},
+            {"threadid", QStringLiteral("线程ID")},
+            {"parentprocessid", QStringLiteral("父进程ID")},
+            {"imagename", QStringLiteral("映像路径")},
+            {"imagefilename", QStringLiteral("映像文件")},
+            {"commandline", QStringLiteral("命令行")},
+            {"processname", QStringLiteral("进程名称")},
+            {"pid", QStringLiteral("进程ID")},
+            {"parentid", QStringLiteral("父进程ID")},
+            {"filename", QStringLiteral("文件路径")},
+            {"filepath", QStringLiteral("文件路径")},
+            {"pathname", QStringLiteral("路径")},
+            {"targetfilename", QStringLiteral("目标文件路径")},
+            {"targetname", QStringLiteral("目标名称")},
+            {"relativefilename", QStringLiteral("相对文件名")},
+            {"oldfilename", QStringLiteral("源文件路径")},
+            {"newfilename", QStringLiteral("新文件路径")},
+            {"fileobject", QStringLiteral("文件对象指针")},
+            {"keyname", QStringLiteral("注册表键路径")},
+            {"keypath", QStringLiteral("注册表键路径")},
+            {"hive", QStringLiteral("注册表根键")},
+            {"valuename", QStringLiteral("注册表值名称")},
+            {"objectname", QStringLiteral("对象路径")},
+            {"path", QStringLiteral("对象路径")},
+            {"operation", QStringLiteral("操作类型")},
+            {"disposition", QStringLiteral("处置结果")},
+            {"desiredaccess", QStringLiteral("目标访问权限")},
+            {"shareaccess", QStringLiteral("共享访问权限")},
+            {"status", QStringLiteral("状态码")},
+            {"ntstatus", QStringLiteral("NT状态码")},
+            {"result", QStringLiteral("结果码")},
+            {"opcode", QStringLiteral("操作码")},
+            {"informationclass", QStringLiteral("信息类")},
+            {"hostname", QStringLiteral("主机名")},
+            {"url", QStringLiteral("URL")},
+            {"domainname", QStringLiteral("域名")},
+            {"daddr", QStringLiteral("目标IP")},
+            {"saddr", QStringLiteral("源IP")},
+            {"dport", QStringLiteral("目标端口")},
+            {"sport", QStringLiteral("源端口")}
         };
 
-        if (eventRecord == nullptr)
+        const auto found = kMeaningMap.find(normalizedNameText.toStdString());
+        if (found == kMeaningMap.end())
+        {
+            return QString();
+        }
+        return found->second;
+    }
+
+    // etwTypeText：
+    // - 作用：把 TDH InType 转成可读类型名；
+    // - 调用：在 JSON 中输出每个属性的类型说明。
+    QString etwTypeText(const USHORT inTypeValue)
+    {
+        switch (inTypeValue)
+        {
+        case TDH_INTYPE_UNICODESTRING: return QStringLiteral("UnicodeString");
+        case TDH_INTYPE_ANSISTRING: return QStringLiteral("AnsiString");
+        case TDH_INTYPE_INT8: return QStringLiteral("Int8");
+        case TDH_INTYPE_UINT8: return QStringLiteral("UInt8");
+        case TDH_INTYPE_INT16: return QStringLiteral("Int16");
+        case TDH_INTYPE_UINT16: return QStringLiteral("UInt16");
+        case TDH_INTYPE_INT32: return QStringLiteral("Int32");
+        case TDH_INTYPE_UINT32: return QStringLiteral("UInt32");
+        case TDH_INTYPE_HEXINT32: return QStringLiteral("HexInt32");
+        case TDH_INTYPE_INT64: return QStringLiteral("Int64");
+        case TDH_INTYPE_UINT64: return QStringLiteral("UInt64");
+        case TDH_INTYPE_HEXINT64: return QStringLiteral("HexInt64");
+        case TDH_INTYPE_FLOAT: return QStringLiteral("Float32");
+        case TDH_INTYPE_DOUBLE: return QStringLiteral("Float64");
+        case TDH_INTYPE_BOOLEAN: return QStringLiteral("Boolean");
+        case TDH_INTYPE_BINARY: return QStringLiteral("Binary");
+        case TDH_INTYPE_GUID: return QStringLiteral("Guid");
+        case TDH_INTYPE_POINTER: return QStringLiteral("Pointer");
+        case TDH_INTYPE_FILETIME: return QStringLiteral("FileTime");
+        case TDH_INTYPE_SYSTEMTIME: return QStringLiteral("SystemTime");
+        case TDH_INTYPE_SID: return QStringLiteral("Sid");
+        case TDH_INTYPE_HEXDUMP: return QStringLiteral("HexDump");
+        default: return QStringLiteral("Type_%1").arg(static_cast<int>(inTypeValue));
+        }
+    }
+
+    // etwTextAtOffset：
+    // - 作用：读取 TRACE_EVENT_INFO 中按偏移保存的 UTF-16 文本；
+    // - 调用：解析事件名、任务名、操作码名与属性名。
+    QString etwTextAtOffset(const unsigned char* infoBufferPointer, const ULONG offsetValue)
+    {
+        if (infoBufferPointer == nullptr || offsetValue == 0)
         {
             return QString();
         }
 
-        DWORD bufferSize = 0;
+        const wchar_t* textPointer = reinterpret_cast<const wchar_t*>(infoBufferPointer + offsetValue);
+        if (textPointer == nullptr || *textPointer == L'\0')
+        {
+            return QString();
+        }
+        return QString::fromWCharArray(textPointer).trimmed();
+    }
+
+    // etwHexPreview：
+    // - 作用：把字节缓冲格式化成单行十六进制预览；
+    // - 调用：属性无法完全解析时输出原始字节摘要。
+    QString etwHexPreview(const unsigned char* dataPointer, const ULONG dataSize, const ULONG maxBytes = 64)
+    {
+        if (dataPointer == nullptr || dataSize == 0)
+        {
+            return QStringLiteral("<empty>");
+        }
+
+        const ULONG visibleBytes = std::min(dataSize, maxBytes);
+        QStringList byteTextList;
+        byteTextList.reserve(static_cast<int>(visibleBytes));
+        for (ULONG indexValue = 0; indexValue < visibleBytes; ++indexValue)
+        {
+            byteTextList << QStringLiteral("%1").arg(dataPointer[indexValue], 2, 16, QChar(u'0')).toUpper();
+        }
+
+        QString previewText = byteTextList.join(' ');
+        if (dataSize > visibleBytes)
+        {
+            previewText += QStringLiteral(" ... (%1 bytes)").arg(dataSize);
+        }
+        return previewText;
+    }
+
+    // etwHexDump：
+    // - 作用：把字节缓冲格式化为多行十六进制查看器文本；
+    // - 调用：未知字段和尾部未解析字节的兜底展示。
+    QString etwHexDump(const unsigned char* dataPointer, const ULONG dataSize, const ULONG maxBytes = 512)
+    {
+        if (dataPointer == nullptr || dataSize == 0)
+        {
+            return QStringLiteral("<empty>");
+        }
+
+        const ULONG visibleBytes = std::min(dataSize, maxBytes);
+        QStringList lineList;
+        for (ULONG offsetValue = 0; offsetValue < visibleBytes; offsetValue += 16)
+        {
+            const ULONG lineBytes = std::min<ULONG>(16, visibleBytes - offsetValue);
+            QStringList hexCellList;
+            hexCellList.reserve(16);
+
+            QString asciiText;
+            asciiText.reserve(16);
+            for (ULONG columnIndex = 0; columnIndex < lineBytes; ++columnIndex)
+            {
+                const unsigned char byteValue = dataPointer[offsetValue + columnIndex];
+                hexCellList << QStringLiteral("%1").arg(byteValue, 2, 16, QChar(u'0')).toUpper();
+                asciiText.push_back((byteValue >= 32 && byteValue <= 126) ? QChar(byteValue) : QChar(u'.'));
+            }
+            for (ULONG columnIndex = lineBytes; columnIndex < 16; ++columnIndex)
+            {
+                hexCellList << QStringLiteral("  ");
+                asciiText.push_back(QChar(u' '));
+            }
+
+            lineList << QStringLiteral("%1  %2  |%3|")
+                .arg(offsetValue, 4, 16, QChar(u'0'))
+                .arg(hexCellList.join(' '))
+                .arg(asciiText);
+        }
+
+        if (dataSize > visibleBytes)
+        {
+            lineList << QStringLiteral("... 已截断，原始长度=%1 bytes，展示=%2 bytes")
+                .arg(dataSize)
+                .arg(visibleBytes);
+        }
+
+        return lineList.join('\n');
+    }
+
+    // etwSchemaKeyFromRecord：
+    // - 作用：生成事件类型缓存键；
+    // - 组成：ProviderGuid + EventId + Version + Task + Opcode。
+    std::string etwSchemaKeyFromRecord(const EVENT_RECORD* eventRecord)
+    {
+        if (eventRecord == nullptr)
+        {
+            return std::string();
+        }
+
+        const QString keyText = QStringLiteral("%1|%2|%3|%4|%5")
+            .arg(guidToText(eventRecord->EventHeader.ProviderId))
+            .arg(static_cast<int>(eventRecord->EventHeader.EventDescriptor.Id))
+            .arg(static_cast<int>(eventRecord->EventHeader.EventDescriptor.Version))
+            .arg(static_cast<int>(eventRecord->EventHeader.EventDescriptor.Task))
+            .arg(static_cast<int>(eventRecord->EventHeader.EventDescriptor.Opcode));
+        return keyText.toStdString();
+    }
+
+    // clearEtwSchemaCache：
+    // - 作用：清空 ETW schema 缓存；
+    // - 调用：每轮开始监听前调用一次，保证缓存与本轮会话一致。
+    void clearEtwSchemaCache()
+    {
+        std::lock_guard<std::mutex> lock(g_etwSchemaCacheMutex);
+        g_etwSchemaCacheByKey.clear();
+    }
+
+    // tryBuildEtwSchemaByTdh：
+    // - 作用：用 TDH 构建单个事件类型的 schema；
+    // - 调用：仅在缓存未命中时触发，避免每条事件重复查询。
+    bool tryBuildEtwSchemaByTdh(const EVENT_RECORD* eventRecord, EtwSchemaEntry* schemaOut)
+    {
+        if (eventRecord == nullptr || schemaOut == nullptr)
+        {
+            return false;
+        }
+
+        DWORD infoBufferSize = 0;
         ULONG status = ::TdhGetEventInformation(
             const_cast<EVENT_RECORD*>(eventRecord),
             0,
             nullptr,
             nullptr,
-            &bufferSize);
-        if (status != ERROR_INSUFFICIENT_BUFFER || bufferSize == 0)
+            &infoBufferSize);
+        if (status != ERROR_INSUFFICIENT_BUFFER || infoBufferSize == 0)
         {
-            return QString();
+            return false;
         }
 
-        std::vector<unsigned char> buffer(bufferSize);
-        auto* info = reinterpret_cast<PTRACE_EVENT_INFO>(buffer.data());
+        std::vector<unsigned char> infoBuffer(infoBufferSize, 0);
+        auto* eventInfo = reinterpret_cast<PTRACE_EVENT_INFO>(infoBuffer.data());
         status = ::TdhGetEventInformation(
             const_cast<EVENT_RECORD*>(eventRecord),
             0,
             nullptr,
-            info,
-            &bufferSize);
-        if (status != ERROR_SUCCESS || info == nullptr)
+            eventInfo,
+            &infoBufferSize);
+        if (status != ERROR_SUCCESS || eventInfo == nullptr)
+        {
+            return false;
+        }
+
+        EtwSchemaEntry localSchema;
+        const unsigned char* rawInfoBuffer = reinterpret_cast<const unsigned char*>(eventInfo);
+        localSchema.cacheKeyText = QString::fromStdString(etwSchemaKeyFromRecord(eventRecord));
+        localSchema.eventNameText = etwTextAtOffset(rawInfoBuffer, eventInfo->EventNameOffset);
+        localSchema.taskNameText = etwTextAtOffset(rawInfoBuffer, eventInfo->TaskNameOffset);
+        localSchema.opcodeNameText = etwTextAtOffset(rawInfoBuffer, eventInfo->OpcodeNameOffset);
+
+        localSchema.propertyList.reserve(eventInfo->TopLevelPropertyCount);
+        for (ULONG propertyIndex = 0; propertyIndex < eventInfo->TopLevelPropertyCount; ++propertyIndex)
+        {
+            const EVENT_PROPERTY_INFO& propertyInfo = eventInfo->EventPropertyInfoArray[propertyIndex];
+
+            EtwSchemaPropertyEntry propertyEntry;
+            propertyEntry.propertyIndex = propertyIndex;
+            propertyEntry.propertyNameText = etwTextAtOffset(rawInfoBuffer, propertyInfo.NameOffset);
+            if (propertyEntry.propertyNameText.isEmpty())
+            {
+                propertyEntry.propertyNameText = QStringLiteral("Property_%1").arg(propertyIndex);
+            }
+            propertyEntry.normalizedNameText = normalizeEtwPropertyName(propertyEntry.propertyNameText);
+            propertyEntry.meaningText = etwPropertyMeaningText(propertyEntry.normalizedNameText);
+            propertyEntry.flags = static_cast<ULONG>(propertyInfo.Flags);
+            propertyEntry.isStruct = (propertyInfo.Flags & PropertyStruct) != 0;
+
+            if (!propertyEntry.isStruct)
+            {
+                propertyEntry.inType = propertyInfo.nonStructType.InType;
+                propertyEntry.outType = propertyInfo.nonStructType.OutType;
+                propertyEntry.fixedLength = propertyInfo.length;
+                propertyEntry.fixedCount = propertyInfo.count;
+                propertyEntry.useLengthProperty = (propertyInfo.Flags & PropertyParamLength) != 0;
+                propertyEntry.useCountProperty = (propertyInfo.Flags & PropertyParamCount) != 0;
+                if (propertyEntry.useLengthProperty)
+                {
+                    propertyEntry.lengthPropertyIndex = propertyInfo.lengthPropertyIndex;
+                }
+                if (propertyEntry.useCountProperty)
+                {
+                    propertyEntry.countPropertyIndex = propertyInfo.countPropertyIndex;
+                }
+            }
+
+            localSchema.propertyList.push_back(std::move(propertyEntry));
+        }
+
+        *schemaOut = std::move(localSchema);
+        return true;
+    }
+
+    // tryGetEtwSchemaCached：
+    // - 作用：优先从缓存拿 schema，未命中时仅构建一次并写回缓存；
+    // - 调用：每条事件回调入口会调用，但 TDH 查询仅发生在首次命中。
+    bool tryGetEtwSchemaCached(const EVENT_RECORD* eventRecord, EtwSchemaEntry* schemaOut)
+    {
+        if (eventRecord == nullptr || schemaOut == nullptr)
+        {
+            return false;
+        }
+
+        const std::string cacheKey = etwSchemaKeyFromRecord(eventRecord);
+        if (cacheKey.empty())
+        {
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_etwSchemaCacheMutex);
+            const auto found = g_etwSchemaCacheByKey.find(cacheKey);
+            if (found != g_etwSchemaCacheByKey.end())
+            {
+                *schemaOut = found->second;
+                return true;
+            }
+        }
+
+        EtwSchemaEntry builtSchema;
+        if (!tryBuildEtwSchemaByTdh(eventRecord, &builtSchema))
+        {
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_etwSchemaCacheMutex);
+            auto [iter, inserted] = g_etwSchemaCacheByKey.emplace(cacheKey, builtSchema);
+            if (!inserted)
+            {
+                iter->second = builtSchema;
+            }
+            *schemaOut = iter->second;
+        }
+        return true;
+    }
+
+    // etwReadScalar：
+    // - 作用：从字节缓冲中安全读取固定宽度标量；
+    // - 调用：属性数值解码与长度参数读取。
+    template <typename TValue>
+    bool etwReadScalar(const unsigned char* dataPointer, const ULONG dataSize, TValue* valueOut)
+    {
+        if (dataPointer == nullptr || valueOut == nullptr || dataSize < sizeof(TValue))
+        {
+            return false;
+        }
+
+        TValue localValue{};
+        std::memcpy(&localValue, dataPointer, sizeof(TValue));
+        *valueOut = localValue;
+        return true;
+    }
+
+    // etwPointerSizeByHeader：
+    // - 作用：根据事件头位宽标记推导指针长度；
+    // - 调用：Pointer 类型属性解码。
+    ULONG etwPointerSizeByHeader(const EVENT_RECORD* eventRecord)
+    {
+        if (eventRecord == nullptr)
+        {
+            return static_cast<ULONG>(sizeof(void*));
+        }
+        return (eventRecord->EventHeader.Flags & EVENT_HEADER_FLAG_32_BIT_HEADER) != 0 ? 4UL : 8UL;
+    }
+
+    // etwFixedTypeSize：
+    // - 作用：返回常见 InType 的固定字节长度；
+    // - 返回 0 表示“可变长度或未知长度”。
+    ULONG etwFixedTypeSize(const USHORT inTypeValue, const ULONG pointerSize)
+    {
+        switch (inTypeValue)
+        {
+        case TDH_INTYPE_INT8:
+        case TDH_INTYPE_UINT8:
+        case TDH_INTYPE_ANSICHAR:
+            return 1;
+        case TDH_INTYPE_INT16:
+        case TDH_INTYPE_UINT16:
+        case TDH_INTYPE_UNICODECHAR:
+            return 2;
+        case TDH_INTYPE_INT32:
+        case TDH_INTYPE_UINT32:
+        case TDH_INTYPE_HEXINT32:
+        case TDH_INTYPE_FLOAT:
+        case TDH_INTYPE_BOOLEAN:
+            return 4;
+        case TDH_INTYPE_INT64:
+        case TDH_INTYPE_UINT64:
+        case TDH_INTYPE_HEXINT64:
+        case TDH_INTYPE_DOUBLE:
+        case TDH_INTYPE_FILETIME:
+            return 8;
+        case TDH_INTYPE_GUID:
+            return 16;
+        case TDH_INTYPE_POINTER:
+            return pointerSize == 4 || pointerSize == 8 ? pointerSize : static_cast<ULONG>(sizeof(void*));
+        default:
+            return 0;
+        }
+    }
+
+    // etwUnicodeBytesToText：
+    // - 作用：把 UTF-16LE 字节缓冲转成 QString，并裁掉尾部 NUL；
+    // - 调用：UnicodeString 类属性解码。
+    QString etwUnicodeBytesToText(const unsigned char* dataPointer, const ULONG dataSize)
+    {
+        if (dataPointer == nullptr || dataSize < sizeof(wchar_t))
         {
             return QString();
         }
 
-        const unsigned char* infoBufferPointer = reinterpret_cast<const unsigned char*>(info);
-        const QString eventNameText = textAtOffset(infoBufferPointer, info->EventNameOffset);
-        if (!eventNameText.isEmpty())
+        const ULONG alignedBytes = dataSize - (dataSize % sizeof(wchar_t));
+        if (alignedBytes == 0)
         {
-            return eventNameText;
+            return QString();
         }
 
-        const QString taskNameText = textAtOffset(infoBufferPointer, info->TaskNameOffset);
-        if (!taskNameText.isEmpty())
+        std::wstring tempWideText(static_cast<std::size_t>(alignedBytes / sizeof(wchar_t)), L'\0');
+        std::memcpy(tempWideText.data(), dataPointer, alignedBytes);
+        QString textValue = QString::fromWCharArray(tempWideText.c_str(), static_cast<int>(tempWideText.size()));
+
+        const int nullPosition = textValue.indexOf(QChar(u'\0'));
+        if (nullPosition >= 0)
         {
-            return taskNameText;
+            textValue.truncate(nullPosition);
+        }
+        return textValue.trimmed();
+    }
+
+    // etwAnsiBytesToText：
+    // - 作用：把 ANSI 字节缓冲转成 QString，并裁掉尾部 NUL；
+    // - 调用：AnsiString 类属性解码。
+    QString etwAnsiBytesToText(const unsigned char* dataPointer, const ULONG dataSize)
+    {
+        if (dataPointer == nullptr || dataSize == 0)
+        {
+            return QString();
         }
 
-        return textAtOffset(infoBufferPointer, info->OpcodeNameOffset);
+        QByteArray byteArray(reinterpret_cast<const char*>(dataPointer), static_cast<int>(dataSize));
+        const int nullPosition = byteArray.indexOf('\0');
+        if (nullPosition >= 0)
+        {
+            byteArray.truncate(nullPosition);
+        }
+        return QString::fromLocal8Bit(byteArray).trimmed();
+    }
+
+    // tryConsumeUnicodeString：
+    // - 作用：按“显式长度优先，否则扫描 NUL 终止”的规则读取 Unicode 字符串；
+    // - 调用：TDH_INTYPE_UNICODESTRING 解码。
+    bool tryConsumeUnicodeString(
+        const unsigned char* dataPointer,
+        const ULONG availableBytes,
+        const ULONG explicitLengthBytes,
+        QString* textOut,
+        ULONG* consumedOut)
+    {
+        if (textOut != nullptr)
+        {
+            *textOut = QString();
+        }
+        if (consumedOut != nullptr)
+        {
+            *consumedOut = 0;
+        }
+        if (dataPointer == nullptr || availableBytes == 0)
+        {
+            return false;
+        }
+
+        ULONG consumeBytes = 0;
+        if (explicitLengthBytes > 0)
+        {
+            consumeBytes = std::min(explicitLengthBytes, availableBytes);
+        }
+        else
+        {
+            for (ULONG offsetValue = 0; offsetValue + 1 < availableBytes; offsetValue += 2)
+            {
+                if (dataPointer[offsetValue] == 0 && dataPointer[offsetValue + 1] == 0)
+                {
+                    consumeBytes = offsetValue + 2;
+                    break;
+                }
+            }
+            if (consumeBytes == 0)
+            {
+                consumeBytes = availableBytes;
+            }
+        }
+
+        if (consumeBytes == 0)
+        {
+            return false;
+        }
+        if ((consumeBytes % 2) != 0)
+        {
+            --consumeBytes;
+        }
+        if (consumeBytes == 0)
+        {
+            return false;
+        }
+
+        if (textOut != nullptr)
+        {
+            *textOut = etwUnicodeBytesToText(dataPointer, consumeBytes);
+        }
+        if (consumedOut != nullptr)
+        {
+            *consumedOut = consumeBytes;
+        }
+        return true;
+    }
+
+    // tryConsumeAnsiString：
+    // - 作用：按“显式长度优先，否则扫描 NUL 终止”的规则读取 ANSI 字符串；
+    // - 调用：TDH_INTYPE_ANSISTRING 解码。
+    bool tryConsumeAnsiString(
+        const unsigned char* dataPointer,
+        const ULONG availableBytes,
+        const ULONG explicitLengthBytes,
+        QString* textOut,
+        ULONG* consumedOut)
+    {
+        if (textOut != nullptr)
+        {
+            *textOut = QString();
+        }
+        if (consumedOut != nullptr)
+        {
+            *consumedOut = 0;
+        }
+        if (dataPointer == nullptr || availableBytes == 0)
+        {
+            return false;
+        }
+
+        ULONG consumeBytes = 0;
+        if (explicitLengthBytes > 0)
+        {
+            consumeBytes = std::min(explicitLengthBytes, availableBytes);
+        }
+        else
+        {
+            for (ULONG offsetValue = 0; offsetValue < availableBytes; ++offsetValue)
+            {
+                if (dataPointer[offsetValue] == 0)
+                {
+                    consumeBytes = offsetValue + 1;
+                    break;
+                }
+            }
+            if (consumeBytes == 0)
+            {
+                consumeBytes = availableBytes;
+            }
+        }
+
+        if (consumeBytes == 0)
+        {
+            return false;
+        }
+        if (textOut != nullptr)
+        {
+            *textOut = etwAnsiBytesToText(dataPointer, consumeBytes);
+        }
+        if (consumedOut != nullptr)
+        {
+            *consumedOut = consumeBytes;
+        }
+        return true;
+    }
+
+    // decodeEtwPropertiesBySchema：
+    // - 作用：按缓存 schema 顺序解析 UserData，并记录每个字段偏移；
+    // - 要点：长度/数量引用属性从前面数值字段读取，不再逐字段调用 TDH 查询。
+    bool decodeEtwPropertiesBySchema(
+        const EVENT_RECORD* eventRecord,
+        const EtwSchemaEntry& schemaEntry,
+        std::vector<EtwDecodedPropertyEntry>* decodedPropertyListOut,
+        ULONG* parsedBytesOut,
+        QString* unparsedTailHexOut)
+    {
+        if (decodedPropertyListOut == nullptr || parsedBytesOut == nullptr)
+        {
+            return false;
+        }
+
+        decodedPropertyListOut->clear();
+        *parsedBytesOut = 0;
+        if (unparsedTailHexOut != nullptr)
+        {
+            unparsedTailHexOut->clear();
+        }
+
+        if (eventRecord == nullptr)
+        {
+            return false;
+        }
+
+        const unsigned char* userDataPointer = reinterpret_cast<const unsigned char*>(eventRecord->UserData);
+        const ULONG userDataLength = eventRecord->UserDataLength;
+        if (userDataPointer == nullptr || userDataLength == 0)
+        {
+            return true;
+        }
+
+        const ULONG pointerSize = etwPointerSizeByHeader(eventRecord);
+        ULONG cursorOffset = 0;
+        std::unordered_map<ULONG, std::uint64_t> numericValueMap;
+        decodedPropertyListOut->reserve(schemaEntry.propertyList.size());
+
+        for (const EtwSchemaPropertyEntry& propertySchema : schemaEntry.propertyList)
+        {
+            EtwDecodedPropertyEntry decodedEntry;
+            decodedEntry.propertyNameText = propertySchema.propertyNameText;
+            decodedEntry.normalizedNameText = propertySchema.normalizedNameText;
+            decodedEntry.meaningText = propertySchema.meaningText;
+            decodedEntry.inTypeText = etwTypeText(propertySchema.inType);
+            decodedEntry.beginOffset = cursorOffset;
+
+            if (cursorOffset >= userDataLength)
+            {
+                decodedEntry.valueText = QStringLiteral("<无更多数据>");
+                decodedEntry.parseFallback = true;
+                decodedEntry.endOffset = cursorOffset;
+                decodedPropertyListOut->push_back(std::move(decodedEntry));
+                continue;
+            }
+
+            const ULONG availableBytes = userDataLength - cursorOffset;
+            const unsigned char* fieldDataPointer = userDataPointer + cursorOffset;
+
+            ULONG resolvedLength = propertySchema.fixedLength;
+            ULONG resolvedCount = propertySchema.fixedCount == 0 ? 1UL : static_cast<ULONG>(propertySchema.fixedCount);
+            if (propertySchema.useLengthProperty)
+            {
+                const auto found = numericValueMap.find(propertySchema.lengthPropertyIndex);
+                if (found != numericValueMap.end())
+                {
+                    resolvedLength = static_cast<ULONG>(std::min<std::uint64_t>(found->second, 0xFFFFFFFFULL));
+                }
+            }
+            if (propertySchema.useCountProperty)
+            {
+                const auto found = numericValueMap.find(propertySchema.countPropertyIndex);
+                if (found != numericValueMap.end())
+                {
+                    resolvedCount = static_cast<ULONG>(std::max<std::uint64_t>(1ULL, found->second));
+                }
+            }
+
+            ULONG consumeBytes = 0;
+            bool parsedAsKnownType = true;
+
+            if (propertySchema.isStruct)
+            {
+                // 结构体字段存在嵌套与动态布局，这里保留十六进制预览。
+                decodedEntry.valueText = QStringLiteral("<Struct: 当前版本未展开，已保留十六进制预览>");
+                consumeBytes = std::min<ULONG>(availableBytes, resolvedLength > 0 ? resolvedLength : 32UL);
+                decodedEntry.parseFallback = true;
+            }
+            else
+            {
+                const ULONG fixedTypeSize = etwFixedTypeSize(propertySchema.inType, pointerSize);
+                ULONG expectedBytes = 0;
+                if (resolvedLength > 0)
+                {
+                    expectedBytes = resolvedLength * std::max<ULONG>(1, resolvedCount);
+                }
+                else if (fixedTypeSize > 0)
+                {
+                    expectedBytes = fixedTypeSize * std::max<ULONG>(1, resolvedCount);
+                }
+
+                switch (propertySchema.inType)
+                {
+                case TDH_INTYPE_UNICODESTRING:
+                {
+                    QString textValue;
+                    if (tryConsumeUnicodeString(fieldDataPointer, availableBytes, expectedBytes, &textValue, &consumeBytes))
+                    {
+                        decodedEntry.valueText = textValue;
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_ANSISTRING:
+                {
+                    QString textValue;
+                    if (tryConsumeAnsiString(fieldDataPointer, availableBytes, expectedBytes, &textValue, &consumeBytes))
+                    {
+                        decodedEntry.valueText = textValue;
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_GUID:
+                {
+                    GUID guidValue{};
+                    consumeBytes = std::min<ULONG>(availableBytes, 16);
+                    if (etwReadScalar(fieldDataPointer, availableBytes, &guidValue))
+                    {
+                        decodedEntry.valueText = guidToText(guidValue);
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_INT8:
+                {
+                    std::int8_t value = 0;
+                    consumeBytes = 1;
+                    if (etwReadScalar(fieldDataPointer, availableBytes, &value))
+                    {
+                        decodedEntry.numericAvailable = true;
+                        decodedEntry.numericValue = static_cast<std::uint64_t>(value);
+                        decodedEntry.valueText = QString::number(value);
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_UINT8:
+                {
+                    std::uint8_t value = 0;
+                    consumeBytes = 1;
+                    if (etwReadScalar(fieldDataPointer, availableBytes, &value))
+                    {
+                        decodedEntry.numericAvailable = true;
+                        decodedEntry.numericValue = value;
+                        decodedEntry.valueText = QString::number(value);
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_BOOLEAN:
+                {
+                    const ULONG boolBytes = expectedBytes > 0 ? std::min(expectedBytes, availableBytes) : 4UL;
+                    consumeBytes = std::max<ULONG>(1, boolBytes);
+
+                    std::uint32_t value32 = 0;
+                    if (consumeBytes >= 4 && etwReadScalar(fieldDataPointer, availableBytes, &value32))
+                    {
+                        decodedEntry.numericAvailable = true;
+                        decodedEntry.numericValue = value32;
+                        decodedEntry.valueText = value32 == 0 ? QStringLiteral("false") : QStringLiteral("true");
+                    }
+                    else
+                    {
+                        std::uint8_t value8 = 0;
+                        if (etwReadScalar(fieldDataPointer, availableBytes, &value8))
+                        {
+                            decodedEntry.numericAvailable = true;
+                            decodedEntry.numericValue = value8;
+                            decodedEntry.valueText = value8 == 0 ? QStringLiteral("false") : QStringLiteral("true");
+                        }
+                        else
+                        {
+                            parsedAsKnownType = false;
+                        }
+                    }
+                    break;
+                }
+                case TDH_INTYPE_INT16:
+                {
+                    std::int16_t value = 0;
+                    consumeBytes = 2;
+                    if (etwReadScalar(fieldDataPointer, availableBytes, &value))
+                    {
+                        decodedEntry.numericAvailable = true;
+                        decodedEntry.numericValue = static_cast<std::uint64_t>(value);
+                        decodedEntry.valueText = QString::number(value);
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_UINT16:
+                {
+                    std::uint16_t value = 0;
+                    consumeBytes = 2;
+                    if (etwReadScalar(fieldDataPointer, availableBytes, &value))
+                    {
+                        decodedEntry.numericAvailable = true;
+                        decodedEntry.numericValue = value;
+                        decodedEntry.valueText = QString::number(value);
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_INT32:
+                {
+                    std::int32_t value = 0;
+                    consumeBytes = 4;
+                    if (etwReadScalar(fieldDataPointer, availableBytes, &value))
+                    {
+                        decodedEntry.numericAvailable = true;
+                        decodedEntry.numericValue = static_cast<std::uint64_t>(value);
+                        decodedEntry.valueText = QString::number(value);
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_UINT32:
+                case TDH_INTYPE_HEXINT32:
+                {
+                    std::uint32_t value = 0;
+                    consumeBytes = 4;
+                    if (etwReadScalar(fieldDataPointer, availableBytes, &value))
+                    {
+                        decodedEntry.numericAvailable = true;
+                        decodedEntry.numericValue = value;
+                        decodedEntry.valueText = propertySchema.inType == TDH_INTYPE_HEXINT32
+                            ? QStringLiteral("0x%1").arg(value, 8, 16, QChar(u'0')).toUpper()
+                            : QString::number(value);
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_INT64:
+                {
+                    std::int64_t value = 0;
+                    consumeBytes = 8;
+                    if (etwReadScalar(fieldDataPointer, availableBytes, &value))
+                    {
+                        decodedEntry.numericAvailable = true;
+                        decodedEntry.numericValue = static_cast<std::uint64_t>(value);
+                        decodedEntry.valueText = QString::number(static_cast<qlonglong>(value));
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_FLOAT:
+                {
+                    float value = 0.0f;
+                    consumeBytes = 4;
+                    if (etwReadScalar(fieldDataPointer, availableBytes, &value))
+                    {
+                        decodedEntry.valueText = QString::number(value, 'f', 6);
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_DOUBLE:
+                {
+                    double value = 0.0;
+                    consumeBytes = 8;
+                    if (etwReadScalar(fieldDataPointer, availableBytes, &value))
+                    {
+                        decodedEntry.valueText = QString::number(value, 'f', 6);
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_UINT64:
+                case TDH_INTYPE_HEXINT64:
+                case TDH_INTYPE_POINTER:
+                case TDH_INTYPE_FILETIME:
+                {
+                    std::uint64_t value = 0;
+                    consumeBytes = propertySchema.inType == TDH_INTYPE_POINTER ? pointerSize : 8;
+                    if (consumeBytes == 4)
+                    {
+                        std::uint32_t value32 = 0;
+                        if (etwReadScalar(fieldDataPointer, availableBytes, &value32))
+                        {
+                            value = value32;
+                        }
+                    }
+                    else
+                    {
+                        etwReadScalar(fieldDataPointer, availableBytes, &value);
+                    }
+
+                    if (value == 0 && availableBytes < consumeBytes)
+                    {
+                        parsedAsKnownType = false;
+                        break;
+                    }
+
+                    decodedEntry.numericAvailable = true;
+                    decodedEntry.numericValue = value;
+                    if (propertySchema.inType == TDH_INTYPE_POINTER
+                        || propertySchema.inType == TDH_INTYPE_HEXINT64)
+                    {
+                        decodedEntry.valueText = QStringLiteral("0x%1")
+                            .arg(static_cast<qulonglong>(value), consumeBytes * 2, 16, QChar(u'0'))
+                            .toUpper();
+                    }
+                    else
+                    {
+                        decodedEntry.valueText = QString::number(static_cast<qulonglong>(value));
+                    }
+                    break;
+                }
+                case TDH_INTYPE_SID:
+                {
+                    PSID sidPointer = reinterpret_cast<PSID>(const_cast<unsigned char*>(fieldDataPointer));
+                    if (sidPointer != nullptr && ::IsValidSid(sidPointer) != FALSE)
+                    {
+                        consumeBytes = ::GetLengthSid(sidPointer);
+                        consumeBytes = std::min(consumeBytes, availableBytes);
+                        LPWSTR sidTextPointer = nullptr;
+                        if (::ConvertSidToStringSidW(sidPointer, &sidTextPointer) != FALSE && sidTextPointer != nullptr)
+                        {
+                            decodedEntry.valueText = QString::fromWCharArray(sidTextPointer);
+                            ::LocalFree(sidTextPointer);
+                        }
+                        else
+                        {
+                            decodedEntry.valueText = QStringLiteral("<SID转换失败>");
+                            decodedEntry.parseFallback = true;
+                        }
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_SYSTEMTIME:
+                {
+                    SYSTEMTIME systemTimeValue{};
+                    consumeBytes = static_cast<ULONG>(sizeof(SYSTEMTIME));
+                    if (etwReadScalar(fieldDataPointer, availableBytes, &systemTimeValue))
+                    {
+                        decodedEntry.valueText = QStringLiteral("%1-%2-%3 %4:%5:%6.%7")
+                            .arg(systemTimeValue.wYear, 4, 10, QChar(u'0'))
+                            .arg(systemTimeValue.wMonth, 2, 10, QChar(u'0'))
+                            .arg(systemTimeValue.wDay, 2, 10, QChar(u'0'))
+                            .arg(systemTimeValue.wHour, 2, 10, QChar(u'0'))
+                            .arg(systemTimeValue.wMinute, 2, 10, QChar(u'0'))
+                            .arg(systemTimeValue.wSecond, 2, 10, QChar(u'0'))
+                            .arg(systemTimeValue.wMilliseconds, 3, 10, QChar(u'0'));
+                    }
+                    else
+                    {
+                        parsedAsKnownType = false;
+                    }
+                    break;
+                }
+                case TDH_INTYPE_BINARY:
+                case TDH_INTYPE_HEXDUMP:
+                {
+                    consumeBytes = expectedBytes > 0
+                        ? std::min(expectedBytes, availableBytes)
+                        : std::min<ULONG>(availableBytes, 64);
+                    decodedEntry.valueText = QStringLiteral("<二进制数据>");
+                    decodedEntry.parseFallback = true;
+                    break;
+                }
+                default:
+                    parsedAsKnownType = false;
+                    break;
+                }
+            }
+
+            if (!parsedAsKnownType)
+            {
+                // 无法确定类型时，用“长度策略 > 剩余全部”的顺序兜底。
+                ULONG fallbackBytes = 0;
+                if (resolvedLength > 0)
+                {
+                    fallbackBytes = std::min<ULONG>(availableBytes, resolvedLength * std::max<ULONG>(1, resolvedCount));
+                }
+                else if (propertySchema.fixedLength > 0)
+                {
+                    fallbackBytes = std::min<ULONG>(availableBytes, propertySchema.fixedLength);
+                }
+                else
+                {
+                    fallbackBytes = std::min<ULONG>(availableBytes, 32);
+                }
+
+                consumeBytes = std::max<ULONG>(1, fallbackBytes);
+                decodedEntry.valueText = QStringLiteral("<未识别类型，已按十六进制保留>");
+                decodedEntry.parseFallback = true;
+            }
+
+            consumeBytes = std::min(consumeBytes, availableBytes);
+            decodedEntry.endOffset = cursorOffset + consumeBytes;
+            decodedEntry.hexPreviewText = etwHexPreview(fieldDataPointer, consumeBytes);
+
+            if (decodedEntry.numericAvailable)
+            {
+                numericValueMap[propertySchema.propertyIndex] = decodedEntry.numericValue;
+            }
+
+            decodedPropertyListOut->push_back(std::move(decodedEntry));
+            cursorOffset += consumeBytes;
+        }
+
+        *parsedBytesOut = cursorOffset;
+        if (cursorOffset < userDataLength && unparsedTailHexOut != nullptr)
+        {
+            const unsigned char* tailPointer = userDataPointer + cursorOffset;
+            *unparsedTailHexOut = etwHexDump(tailPointer, userDataLength - cursorOffset);
+        }
+        return true;
+    }
+
+    // etwPropertyValueMeaningful：
+    // - 作用：过滤空值/占位值，避免语义提取误判。
+    bool etwPropertyValueMeaningful(const QString& valueText)
+    {
+        const QString trimmed = valueText.trimmed();
+        if (trimmed.isEmpty())
+        {
+            return false;
+        }
+        return !trimmed.startsWith('<');
+    }
+
+    // findFirstEtwProperty：
+    // - 作用：按候选属性名列表查找第一条有效属性值；
+    // - 调用：提取目标路径、状态码、端口等常见语义。
+    const EtwDecodedPropertyEntry* findFirstEtwProperty(
+        const std::vector<EtwDecodedPropertyEntry>& propertyList,
+        const QStringList& normalizedNameList)
+    {
+        for (const QString& normalizedName : normalizedNameList)
+        {
+            for (const EtwDecodedPropertyEntry& property : propertyList)
+            {
+                if (property.normalizedNameText == normalizedName
+                    && etwPropertyValueMeaningful(property.valueText))
+                {
+                    return &property;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    // inferEtwResourceType：
+    // - 作用：根据 Provider 与事件名推断资源大类；
+    // - 调用：写入 JSON semantic.resourceType。
+    QString inferEtwResourceType(const QString& providerNameText, const QString& eventNameText)
+    {
+        const QString providerLower = providerNameText.toLower();
+        const QString eventLower = eventNameText.toLower();
+
+        if (providerLower.contains(QStringLiteral("registry")) || eventLower.contains(QStringLiteral("reg")))
+        {
+            return QStringLiteral("注册表");
+        }
+        if (providerLower.contains(QStringLiteral("file")) || providerLower.contains(QStringLiteral("ntfs"))
+            || eventLower.contains(QStringLiteral("file")) || eventLower.contains(QStringLiteral("createfile")))
+        {
+            return QStringLiteral("文件");
+        }
+        if (providerLower.contains(QStringLiteral("tcp")) || providerLower.contains(QStringLiteral("udp"))
+            || providerLower.contains(QStringLiteral("network")) || providerLower.contains(QStringLiteral("winsock"))
+            || eventLower.contains(QStringLiteral("connect")) || eventLower.contains(QStringLiteral("send"))
+            || eventLower.contains(QStringLiteral("recv")))
+        {
+            return QStringLiteral("网络");
+        }
+        if (providerLower.contains(QStringLiteral("process")) || providerLower.contains(QStringLiteral("thread"))
+            || eventLower.contains(QStringLiteral("process")) || eventLower.contains(QStringLiteral("thread")))
+        {
+            return QStringLiteral("进程线程");
+        }
+        return QStringLiteral("通用");
+    }
+
+    // inferEtwActionText：
+    // - 作用：根据事件名和操作码名提取动作语义；
+    // - 调用：写入 JSON semantic.action。
+    QString inferEtwActionText(const QString& eventNameText, const QString& opcodeNameText)
+    {
+        const QString actionProbe = (eventNameText + QLatin1Char(' ') + opcodeNameText).toLower();
+
+        if (actionProbe.contains(QStringLiteral("create")) || actionProbe.contains(QStringLiteral("start")))
+        {
+            return QStringLiteral("创建/启动");
+        }
+        if (actionProbe.contains(QStringLiteral("open")))
+        {
+            return QStringLiteral("打开");
+        }
+        if (actionProbe.contains(QStringLiteral("close")) || actionProbe.contains(QStringLiteral("cleanup")))
+        {
+            return QStringLiteral("关闭");
+        }
+        if (actionProbe.contains(QStringLiteral("read")) || actionProbe.contains(QStringLiteral("query")))
+        {
+            return QStringLiteral("读取/查询");
+        }
+        if (actionProbe.contains(QStringLiteral("write")) || actionProbe.contains(QStringLiteral("set")))
+        {
+            return QStringLiteral("写入/设置");
+        }
+        if (actionProbe.contains(QStringLiteral("delete")) || actionProbe.contains(QStringLiteral("remove")))
+        {
+            return QStringLiteral("删除");
+        }
+        if (actionProbe.contains(QStringLiteral("rename")))
+        {
+            return QStringLiteral("重命名");
+        }
+        if (actionProbe.contains(QStringLiteral("connect")))
+        {
+            return QStringLiteral("连接");
+        }
+        if (actionProbe.contains(QStringLiteral("send")))
+        {
+            return QStringLiteral("发送");
+        }
+        if (actionProbe.contains(QStringLiteral("recv")) || actionProbe.contains(QStringLiteral("receive")))
+        {
+            return QStringLiteral("接收");
+        }
+        if (!eventNameText.trimmed().isEmpty())
+        {
+            return eventNameText.trimmed();
+        }
+        if (!opcodeNameText.trimmed().isEmpty())
+        {
+            return opcodeNameText.trimmed();
+        }
+        return QStringLiteral("未知动作");
+    }
+
+    // etwIpv4TextFromNumeric：
+    // - 作用：把 32 位地址值按 IPv4 文本展示；
+    // - 调用：网络事件目标端点拼接。
+    QString etwIpv4TextFromNumeric(const std::uint32_t addressValue)
+    {
+        const std::uint8_t byte1 = static_cast<std::uint8_t>((addressValue >> 0) & 0xFF);
+        const std::uint8_t byte2 = static_cast<std::uint8_t>((addressValue >> 8) & 0xFF);
+        const std::uint8_t byte3 = static_cast<std::uint8_t>((addressValue >> 16) & 0xFF);
+        const std::uint8_t byte4 = static_cast<std::uint8_t>((addressValue >> 24) & 0xFF);
+        return QStringLiteral("%1.%2.%3.%4").arg(byte1).arg(byte2).arg(byte3).arg(byte4);
+    }
+
+    // inferEtwSemanticSummary：
+    // - 作用：聚合文件/注册表/网络等常见场景的目标对象和状态；
+    // - 调用：作为 ETW 详情 JSON 的语义摘要区块。
+    EtwSemanticSummary inferEtwSemanticSummary(
+        const QString& providerNameText,
+        const QString& eventNameText,
+        const QString& opcodeNameText,
+        const std::vector<EtwDecodedPropertyEntry>& propertyList)
+    {
+        EtwSemanticSummary summary;
+        summary.resourceTypeText = inferEtwResourceType(providerNameText, eventNameText);
+        summary.actionText = inferEtwActionText(eventNameText, opcodeNameText);
+
+        const EtwDecodedPropertyEntry* filePathProperty = findFirstEtwProperty(
+            propertyList,
+            QStringList{ QStringLiteral("filename"), QStringLiteral("filepath"), QStringLiteral("targetfilename"),
+            QStringLiteral("newfilename"), QStringLiteral("oldfilename"), QStringLiteral("pathname"),
+            QStringLiteral("targetname"), QStringLiteral("relativefilename"), QStringLiteral("fileobject") });
+        const EtwDecodedPropertyEntry* oldFileProperty = findFirstEtwProperty(
+            propertyList,
+            QStringList{ QStringLiteral("oldfilename") });
+        const EtwDecodedPropertyEntry* newFileProperty = findFirstEtwProperty(
+            propertyList,
+            QStringList{ QStringLiteral("newfilename"), QStringLiteral("targetfilename") });
+        const EtwDecodedPropertyEntry* regKeyProperty = findFirstEtwProperty(
+            propertyList,
+            QStringList{ QStringLiteral("keyname"), QStringLiteral("keypath"), QStringLiteral("hive"),
+            QStringLiteral("objectname"), QStringLiteral("path") });
+        const EtwDecodedPropertyEntry* regValueProperty = findFirstEtwProperty(
+            propertyList,
+            QStringList{ QStringLiteral("valuename") });
+        const EtwDecodedPropertyEntry* imageProperty = findFirstEtwProperty(
+            propertyList,
+            QStringList{ QStringLiteral("imagename"), QStringLiteral("imagefilename"), QStringLiteral("commandline") });
+        const EtwDecodedPropertyEntry* sourceAddressProperty = findFirstEtwProperty(
+            propertyList,
+            QStringList{ QStringLiteral("saddr"), QStringLiteral("sourceaddress"), QStringLiteral("srcaddr") });
+        const EtwDecodedPropertyEntry* targetAddressProperty = findFirstEtwProperty(
+            propertyList,
+            QStringList{ QStringLiteral("daddr"), QStringLiteral("destaddress"), QStringLiteral("dstaddr") });
+        const EtwDecodedPropertyEntry* sourcePortProperty = findFirstEtwProperty(
+            propertyList,
+            QStringList{ QStringLiteral("sport"), QStringLiteral("sourceport"), QStringLiteral("srcport") });
+        const EtwDecodedPropertyEntry* targetPortProperty = findFirstEtwProperty(
+            propertyList,
+            QStringList{ QStringLiteral("dport"), QStringLiteral("destport"), QStringLiteral("dstport") });
+        const EtwDecodedPropertyEntry* operationProperty = findFirstEtwProperty(
+            propertyList,
+            QStringList{ QStringLiteral("operation"), QStringLiteral("opcode") });
+
+        if (summary.actionText == QStringLiteral("未知动作")
+            && operationProperty != nullptr
+            && !operationProperty->valueText.trimmed().isEmpty())
+        {
+            summary.actionText = operationProperty->valueText.trimmed();
+        }
+
+        if (summary.resourceTypeText == QStringLiteral("文件") && filePathProperty != nullptr)
+        {
+            if (summary.actionText.contains(QStringLiteral("重命名"))
+                && oldFileProperty != nullptr
+                && newFileProperty != nullptr)
+            {
+                summary.targetText = QStringLiteral("%1 -> %2")
+                    .arg(oldFileProperty->valueText, newFileProperty->valueText);
+            }
+            else
+            {
+                summary.targetText = filePathProperty->valueText;
+            }
+        }
+        else if (summary.resourceTypeText == QStringLiteral("注册表") && regKeyProperty != nullptr)
+        {
+            summary.targetText = regKeyProperty->valueText;
+            if (regValueProperty != nullptr && !regValueProperty->valueText.isEmpty())
+            {
+                summary.targetText += QStringLiteral("\\") + regValueProperty->valueText;
+            }
+        }
+        else if (summary.resourceTypeText == QStringLiteral("进程线程") && imageProperty != nullptr)
+        {
+            summary.targetText = imageProperty->valueText;
+        }
+        else if (summary.resourceTypeText == QStringLiteral("网络"))
+        {
+            QString sourceAddressText;
+            QString targetAddressText;
+            if (sourceAddressProperty != nullptr)
+            {
+                if (sourceAddressProperty->numericAvailable)
+                {
+                    sourceAddressText = etwIpv4TextFromNumeric(
+                        static_cast<std::uint32_t>(sourceAddressProperty->numericValue));
+                }
+                else
+                {
+                    sourceAddressText = sourceAddressProperty->valueText;
+                }
+            }
+            if (targetAddressProperty != nullptr)
+            {
+                if (targetAddressProperty->numericAvailable)
+                {
+                    targetAddressText = etwIpv4TextFromNumeric(
+                        static_cast<std::uint32_t>(targetAddressProperty->numericValue));
+                }
+                else
+                {
+                    targetAddressText = targetAddressProperty->valueText;
+                }
+            }
+
+            const QString sourcePortText = sourcePortProperty != nullptr
+                ? sourcePortProperty->valueText
+                : QString();
+            const QString targetPortText = targetPortProperty != nullptr
+                ? targetPortProperty->valueText
+                : QString();
+
+            if (!sourceAddressText.isEmpty() || !targetAddressText.isEmpty())
+            {
+                const QString sourceEndpointText = sourcePortText.isEmpty()
+                    ? sourceAddressText
+                    : QStringLiteral("%1:%2").arg(sourceAddressText, sourcePortText);
+                const QString targetEndpointText = targetPortText.isEmpty()
+                    ? targetAddressText
+                    : QStringLiteral("%1:%2").arg(targetAddressText, targetPortText);
+                if (!sourceEndpointText.isEmpty() && !targetEndpointText.isEmpty())
+                {
+                    summary.targetText = QStringLiteral("%1 -> %2")
+                        .arg(sourceEndpointText, targetEndpointText);
+                }
+                else if (!targetEndpointText.isEmpty())
+                {
+                    summary.targetText = targetEndpointText;
+                }
+                else
+                {
+                    summary.targetText = sourceEndpointText;
+                }
+            }
+        }
+        else
+        {
+            const EtwDecodedPropertyEntry* genericTarget = findFirstEtwProperty(
+                propertyList,
+                QStringList{ QStringLiteral("objectname"), QStringLiteral("path"), QStringLiteral("targetname"),
+                QStringLiteral("filename"), QStringLiteral("keyname"), QStringLiteral("keypath"),
+                QStringLiteral("imagename"), QStringLiteral("pathname") });
+            if (genericTarget != nullptr)
+            {
+                summary.targetText = genericTarget->valueText;
+            }
+        }
+
+        const EtwDecodedPropertyEntry* statusProperty = findFirstEtwProperty(
+            propertyList,
+            QStringList{ QStringLiteral("status"), QStringLiteral("ntstatus"), QStringLiteral("result"),
+            QStringLiteral("hresult"), QStringLiteral("errorcode"), QStringLiteral("error"),
+            QStringLiteral("win32error"), QStringLiteral("win32status") });
+        if (statusProperty != nullptr)
+        {
+            if (statusProperty->numericAvailable)
+            {
+                const std::uint64_t statusValue = statusProperty->numericValue;
+                summary.statusText = statusValue == 0
+                    ? QStringLiteral("成功")
+                    : QStringLiteral("0x%1").arg(static_cast<qulonglong>(statusValue), 8, 16, QChar(u'0')).toUpper();
+            }
+            else
+            {
+                summary.statusText = statusProperty->valueText;
+            }
+        }
+        return summary;
+    }
+
+    // buildEtwDetailJson：
+    // - 作用：把元信息、语义摘要、属性列表、尾部十六进制兜底打包成 JSON；
+    // - 调用：enqueueEtwEventFromRecord 构造结果表“事件数据(JSON)”列。
+    QString buildEtwDetailJson(
+        const EVENT_RECORD* eventRecord,
+        const QString& providerGuidText,
+        const QString& providerNameText,
+        const EtwSchemaEntry& schemaEntry,
+        const std::vector<EtwDecodedPropertyEntry>& propertyList,
+        const ULONG parsedBytes,
+        const QString& unparsedTailHexText)
+    {
+        QJsonObject rootObject;
+
+        QJsonObject metaObject;
+        QString eventNameText = schemaEntry.eventNameText.trimmed();
+        if (eventNameText.isEmpty())
+        {
+            eventNameText = schemaEntry.taskNameText.trimmed();
+        }
+        if (eventNameText.isEmpty())
+        {
+            eventNameText = schemaEntry.opcodeNameText.trimmed();
+        }
+        if (eventNameText.isEmpty())
+        {
+            eventNameText = QStringLiteral("Event_%1")
+                .arg(static_cast<int>(eventRecord->EventHeader.EventDescriptor.Id));
+        }
+
+        metaObject.insert(QStringLiteral("providerGuid"), providerGuidText);
+        metaObject.insert(QStringLiteral("providerName"), providerNameText);
+        metaObject.insert(QStringLiteral("eventId"), static_cast<int>(eventRecord->EventHeader.EventDescriptor.Id));
+        metaObject.insert(QStringLiteral("eventName"), eventNameText);
+        metaObject.insert(QStringLiteral("task"), static_cast<int>(eventRecord->EventHeader.EventDescriptor.Task));
+        metaObject.insert(QStringLiteral("taskName"), schemaEntry.taskNameText);
+        metaObject.insert(QStringLiteral("opcode"), static_cast<int>(eventRecord->EventHeader.EventDescriptor.Opcode));
+        metaObject.insert(QStringLiteral("opcodeName"), schemaEntry.opcodeNameText);
+        metaObject.insert(QStringLiteral("level"), static_cast<int>(eventRecord->EventHeader.EventDescriptor.Level));
+        metaObject.insert(
+            QStringLiteral("keyword"),
+            QStringLiteral("0x%1").arg(
+                static_cast<qulonglong>(eventRecord->EventHeader.EventDescriptor.Keyword),
+                16,
+                16,
+                QChar(u'0')).toUpper());
+        metaObject.insert(QStringLiteral("version"), static_cast<int>(eventRecord->EventHeader.EventDescriptor.Version));
+        metaObject.insert(QStringLiteral("userDataLength"), static_cast<int>(eventRecord->UserDataLength));
+        metaObject.insert(QStringLiteral("parsedBytes"), static_cast<int>(parsedBytes));
+        rootObject.insert(QStringLiteral("meta"), metaObject);
+
+        const EtwSemanticSummary semanticSummary = inferEtwSemanticSummary(
+            providerNameText,
+            eventNameText,
+            schemaEntry.opcodeNameText,
+            propertyList);
+        QJsonObject semanticObject;
+        semanticObject.insert(QStringLiteral("resourceType"), semanticSummary.resourceTypeText);
+        semanticObject.insert(QStringLiteral("action"), semanticSummary.actionText);
+        semanticObject.insert(QStringLiteral("target"), semanticSummary.targetText);
+        semanticObject.insert(QStringLiteral("status"), semanticSummary.statusText);
+        rootObject.insert(QStringLiteral("semantic"), semanticObject);
+
+        QJsonArray propertyArray;
+        for (const EtwDecodedPropertyEntry& property : propertyList)
+        {
+            QJsonObject propertyObject;
+            propertyObject.insert(QStringLiteral("name"), property.propertyNameText);
+            propertyObject.insert(QStringLiteral("normalized"), property.normalizedNameText);
+            propertyObject.insert(QStringLiteral("meaning"), property.meaningText);
+            propertyObject.insert(QStringLiteral("type"), property.inTypeText);
+            propertyObject.insert(QStringLiteral("value"), property.valueText);
+            propertyObject.insert(
+                QStringLiteral("offset"),
+                QStringLiteral("0x%1-0x%2")
+                .arg(property.beginOffset, 4, 16, QChar(u'0'))
+                .arg(property.endOffset, 4, 16, QChar(u'0')));
+            propertyObject.insert(QStringLiteral("hexPreview"), property.hexPreviewText);
+            propertyObject.insert(QStringLiteral("fallback"), property.parseFallback);
+            propertyArray.append(propertyObject);
+        }
+        rootObject.insert(QStringLiteral("properties"), propertyArray);
+
+        if (!unparsedTailHexText.trimmed().isEmpty())
+        {
+            QJsonObject rawFallbackObject;
+            rawFallbackObject.insert(QStringLiteral("note"), QStringLiteral("存在未解析尾部字节，已按十六进制保留"));
+            rawFallbackObject.insert(QStringLiteral("hexDump"), unparsedTailHexText);
+            rootObject.insert(QStringLiteral("rawFallback"), rawFallbackObject);
+        }
+
+        return QString::fromUtf8(QJsonDocument(rootObject).toJson(QJsonDocument::Compact));
     }
 
     // 100ns 时间戳文本格式化：直接输出 FILETIME 基准整数，满足计划要求。
@@ -688,13 +2158,24 @@ namespace
 
         const QString detailJsonText = itemTextAt(5);
         QString normalizedDetailText = detailJsonText;
+        QString semanticResourceText;
+        QString semanticActionText;
+        QString semanticTargetText;
+        QString semanticStatusText;
         if (!detailJsonText.trimmed().isEmpty())
         {
             QJsonParseError parseError;
             const QJsonDocument jsonDocument = QJsonDocument::fromJson(detailJsonText.toUtf8(), &parseError);
-            if (!jsonDocument.isNull())
+            if (!jsonDocument.isNull() && jsonDocument.isObject())
             {
                 normalizedDetailText = QString::fromUtf8(jsonDocument.toJson(QJsonDocument::Indented));
+
+                const QJsonObject rootObject = jsonDocument.object();
+                const QJsonObject semanticObject = rootObject.value(QStringLiteral("semantic")).toObject();
+                semanticResourceText = semanticObject.value(QStringLiteral("resourceType")).toString();
+                semanticActionText = semanticObject.value(QStringLiteral("action")).toString();
+                semanticTargetText = semanticObject.value(QStringLiteral("target")).toString();
+                semanticStatusText = semanticObject.value(QStringLiteral("status")).toString();
             }
         }
 
@@ -705,6 +2186,21 @@ namespace
         contentText += QStringLiteral("事件名：%1\n").arg(itemTextAt(3));
         contentText += QStringLiteral("PID / TID：%1\n").arg(itemTextAt(4));
         contentText += QStringLiteral("ActivityId：%1\n").arg(itemTextAt(6));
+        if (!semanticResourceText.trimmed().isEmpty()
+            || !semanticActionText.trimmed().isEmpty()
+            || !semanticTargetText.trimmed().isEmpty()
+            || !semanticStatusText.trimmed().isEmpty())
+        {
+            contentText += QStringLiteral("\n========== 语义摘要 ==========\n");
+            contentText += QStringLiteral("资源类型：%1\n").arg(
+                semanticResourceText.trimmed().isEmpty() ? QStringLiteral("<未知>") : semanticResourceText);
+            contentText += QStringLiteral("动作：%1\n").arg(
+                semanticActionText.trimmed().isEmpty() ? QStringLiteral("<未知>") : semanticActionText);
+            contentText += QStringLiteral("目标：%1\n").arg(
+                semanticTargetText.trimmed().isEmpty() ? QStringLiteral("<未知>") : semanticTargetText);
+            contentText += QStringLiteral("状态：%1\n").arg(
+                semanticStatusText.trimmed().isEmpty() ? QStringLiteral("<未知>") : semanticStatusText);
+        }
         contentText += QStringLiteral("\n========== 返回详情 ==========\n");
         contentText += normalizedDetailText.trimmed().isEmpty() ? QStringLiteral("<空>") : normalizedDetailText;
         return contentText;
@@ -3566,6 +5062,8 @@ void MonitorDock::showWmiEventContextMenu(const QPoint& position)
     const int col = index.column();
 
     QMenu menu(this);
+    // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* viewDetailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("查看返回详情"));
     menu.addSeparator();
     QAction* copyDetailAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制返回详情文本"));
@@ -4092,29 +5590,85 @@ void MonitorDock::enqueueEtwEventFromRecord(const struct _EVENT_RECORD* eventRec
     }
 
     const int eventId = static_cast<int>(eventRecord->EventHeader.EventDescriptor.Id);
-    QString eventName = queryEtwEventName(eventRecord);
-    if (eventName.trimmed().isEmpty())
-    {
-        eventName = QStringLiteral("Event_%1").arg(eventId);
-    }
+    QString eventName = QStringLiteral("Event_%1").arg(eventId);
 
     const std::uint32_t pidValue = static_cast<std::uint32_t>(eventRecord->EventHeader.ProcessId);
     const std::uint32_t tidValue = static_cast<std::uint32_t>(eventRecord->EventHeader.ThreadId);
     const QString timestampText = etwTimestamp100nsText(eventRecord);
     const QString activityIdText = guidToText(eventRecord->EventHeader.ActivityId);
 
-    const ULONGLONG keywordValue = eventRecord->EventHeader.EventDescriptor.Keyword;
-    const UCHAR levelValue = eventRecord->EventHeader.EventDescriptor.Level;
-    const UCHAR opcodeValue = eventRecord->EventHeader.EventDescriptor.Opcode;
-    const USHORT taskValue = eventRecord->EventHeader.EventDescriptor.Task;
-    const QString detailJson = QStringLiteral(
-        "{\"providerGuid\":\"%1\",\"eventId\":%2,\"level\":%3,\"task\":%4,\"opcode\":%5,\"keyword\":\"0x%6\"}")
-        .arg(providerGuidText)
-        .arg(eventId)
-        .arg(static_cast<int>(levelValue))
-        .arg(static_cast<int>(taskValue))
-        .arg(static_cast<int>(opcodeValue))
-        .arg(QString::number(static_cast<qulonglong>(keywordValue), 16).toUpper());
+    // schema 缓存策略：
+    // - 首次命中某事件类型时调用一次 TDH 建模；
+    // - 后续同类型事件只走缓存布局，不再重复 TDH 查询。
+    EtwSchemaEntry schemaEntry;
+    const bool schemaReady = tryGetEtwSchemaCached(eventRecord, &schemaEntry);
+
+    if (schemaReady)
+    {
+        if (!schemaEntry.eventNameText.trimmed().isEmpty())
+        {
+            eventName = schemaEntry.eventNameText.trimmed();
+        }
+        else if (!schemaEntry.taskNameText.trimmed().isEmpty())
+        {
+            eventName = schemaEntry.taskNameText.trimmed();
+        }
+        else if (!schemaEntry.opcodeNameText.trimmed().isEmpty())
+        {
+            eventName = schemaEntry.opcodeNameText.trimmed();
+        }
+    }
+
+    std::vector<EtwDecodedPropertyEntry> decodedPropertyList;
+    QString unparsedTailHexText;
+    ULONG parsedBytes = 0;
+    if (schemaReady)
+    {
+        decodeEtwPropertiesBySchema(
+            eventRecord,
+            schemaEntry,
+            &decodedPropertyList,
+            &parsedBytes,
+            &unparsedTailHexText);
+    }
+    else if (eventRecord->UserData != nullptr && eventRecord->UserDataLength > 0)
+    {
+        // schema 构建失败时仍保留原始 payload，确保“看得到数据”。
+        const unsigned char* rawUserDataPointer = reinterpret_cast<const unsigned char*>(eventRecord->UserData);
+        parsedBytes = 0;
+        unparsedTailHexText = etwHexDump(rawUserDataPointer, eventRecord->UserDataLength);
+    }
+
+    QString detailJson;
+    if (schemaReady)
+    {
+        detailJson = buildEtwDetailJson(
+            eventRecord,
+            providerGuidText,
+            providerName,
+            schemaEntry,
+            decodedPropertyList,
+            parsedBytes,
+            unparsedTailHexText);
+    }
+    else
+    {
+        QJsonObject fallbackMeta;
+        fallbackMeta.insert(QStringLiteral("providerGuid"), providerGuidText);
+        fallbackMeta.insert(QStringLiteral("providerName"), providerName);
+        fallbackMeta.insert(QStringLiteral("eventId"), eventId);
+        fallbackMeta.insert(QStringLiteral("eventName"), eventName);
+        fallbackMeta.insert(QStringLiteral("note"), QStringLiteral("未获取到TDH schema，已保留原始十六进制数据"));
+        fallbackMeta.insert(QStringLiteral("userDataLength"), static_cast<int>(eventRecord->UserDataLength));
+
+        QJsonObject fallbackRoot;
+        fallbackRoot.insert(QStringLiteral("meta"), fallbackMeta);
+        if (!unparsedTailHexText.trimmed().isEmpty())
+        {
+            fallbackRoot.insert(QStringLiteral("rawFallback"), unparsedTailHexText);
+        }
+        detailJson = QString::fromUtf8(QJsonDocument(fallbackRoot).toJson(QJsonDocument::Compact));
+    }
 
     QStringList rowValues;
     rowValues << timestampText;
@@ -4312,6 +5866,11 @@ void MonitorDock::startEtwCapture()
         std::lock_guard<std::mutex> lock(m_etwPendingMutex);
         m_etwPendingRows.clear();
     }
+
+    // 每轮监听开始前刷新一次 schema 缓存：
+    // - 这样可以保证本轮会话基于最新事件布局重新建模；
+    // - 后续同类型事件直接走缓存，不再重复调用 TDH。
+    clearEtwSchemaCache();
 
     m_etwCaptureRunning.store(true);
     m_etwCapturePaused.store(false);
@@ -4907,6 +6466,8 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
     const int col = index.column();
 
     QMenu menu(this);
+    // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* viewDetailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("查看返回详情"));
     menu.addSeparator();
     QAction* copyDetailAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制返回详情文本"));

@@ -17,6 +17,7 @@
 
         <!-- 进程面板图标资源 -->
         <file alias="process_main.svg">Resource/Icon/system/process_line.svg</file>
+        <file alias="process_threads.svg">Resource/Icon/logo/threads_line.svg</file>
         <file alias="process_refresh.svg">Resource/Icon/system/refresh_3_line.svg</file>
         <file alias="process_tree.svg">Resource/Icon/nature/tree_line.svg</file>
         <file alias="process_list.svg">Resource/Icon/system/scrollable_list_line.svg</file>

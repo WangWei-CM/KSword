@@ -534,6 +534,7 @@ void ProcessDock::refreshThemeVisuals()
     // 仅重建当前表格可视层，不触发新的后台枚举任务。
     // 用途：深浅色切换后，立即刷新“新增/退出”行的主题高亮色。
     rebuildTable();
+    rebuildThreadTable();
 }
 
 void ProcessDock::initializeUi()
@@ -556,6 +557,7 @@ void ProcessDock::initializeUi()
     // 初始化上方控制栏和下方表格。
     initializeTopControls();
     initializeProcessTable();
+    initializeThreadPage();
     initializeCreateProcessPage();
 
     m_rootLayout->addWidget(m_sideTabWidget);
@@ -1243,11 +1245,17 @@ void ProcessDock::initializeConnections()
         {
             return;
         }
-        if (m_sideTabWidget->widget(currentIndex) != m_processListPage)
+        QWidget* currentPage = m_sideTabWidget->widget(currentIndex);
+        if (currentPage == m_processListPage)
         {
+            focusProcessSearchBox(true);
             return;
         }
-        focusProcessSearchBox(true);
+        if (currentPage == m_threadPage)
+        {
+            requestAsyncThreadRefresh(true);
+            return;
+        }
     });
 
     // currentItemChanged 作用：
@@ -1315,6 +1323,9 @@ void ProcessDock::initializeConnections()
             << eol;
         executeTerminateProcessAction();
     });
+
+    // 线程页专属连接：集中在独立函数中，避免主连接函数继续膨胀。
+    initializeThreadPageConnections();
 }
 
 void ProcessDock::initializeCreateProcessConnections()
@@ -1807,6 +1818,10 @@ void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult)
     m_counterSampleByIdentity = refreshResult.nextCounters;
 
     rebuildTable();
+    if (m_sideTabWidget != nullptr && m_sideTabWidget->currentWidget() == m_threadPage)
+    {
+        requestAsyncThreadRefresh(false);
+    }
 
     // 更新进度任务：本轮刷新完成后自动隐藏卡片。
     if (m_refreshProgressTaskPid > 0)

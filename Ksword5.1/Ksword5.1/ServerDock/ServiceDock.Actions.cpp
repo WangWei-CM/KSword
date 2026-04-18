@@ -1,4 +1,5 @@
 #include "ServiceDock.Internal.h"
+#include "../theme.h"
 
 #include <chrono>
 #include <QFileDialog>
@@ -119,6 +120,8 @@ void ServiceDock::showServiceContextMenu(const QPoint& localPos)
     }
 
     QMenu contextMenu(this);
+    // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
+    contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* refreshAction = contextMenu.addAction(createBlueIcon(":/Icon/process_refresh.svg"), QStringLiteral("刷新当前服务"));
     QAction* startAction = contextMenu.addAction(createBlueIcon(":/Icon/process_start.svg"), QStringLiteral("启动服务"));
     QAction* stopAction = contextMenu.addAction(createBlueIcon(":/Icon/process_terminate.svg"), QStringLiteral("停止服务"));

@@ -291,6 +291,8 @@ void HandleDock::showHandleTableContextMenu(const QPoint& localPosition)
     m_tableWidget->setCurrentItem(clickedItem);
 
     QMenu menu(this);
+    // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyCellAction = menu.addAction(QIcon(":/Icon/handle_copy.svg"), QStringLiteral("复制单元格"));
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/handle_copy_row.svg"), QStringLiteral("复制整行"));
     menu.addSeparator();

@@ -218,6 +218,24 @@ namespace ks::process
         std::string stateText;             // 线程状态文本（Running/Unknown）。
     };
 
+    // SystemThreadRecord：系统全量线程快照中的单线程数据。
+    struct SystemThreadRecord
+    {
+        std::uint32_t threadId = 0;            // 线程 ID（TID）。
+        std::uint32_t ownerPid = 0;            // 所属进程 PID。
+        std::string ownerProcessName;          // 所属进程名称（用于列表展示）。
+        std::uint64_t startAddress = 0;        // 线程启动地址（内核返回的指针值）。
+        int priority = 0;                      // 当前动态优先级。
+        int basePriority = 0;                  // 基础优先级。
+        std::uint32_t threadState = 0;         // 线程状态码（KTHREAD_STATE 数值）。
+        std::uint32_t waitReason = 0;          // 等待原因码（KWAIT_REASON 数值）。
+        std::uint64_t kernelTime100ns = 0;     // 内核态累计时间（100ns）。
+        std::uint64_t userTime100ns = 0;       // 用户态累计时间（100ns）。
+        std::uint64_t createTime100ns = 0;     // 创建时间（FILETIME 100ns）。
+        std::uint32_t waitTimeTick = 0;        // 等待时长计数（Nt 原始字段）。
+        std::uint32_t contextSwitchCount = 0;  // 上下文切换次数（Nt 原始字段）。
+    };
+
     // ProcessModuleSnapshot：模块页签所需快照数据（模块 + 线程）。
     struct ProcessModuleSnapshot
     {
@@ -249,6 +267,19 @@ namespace ks::process
     std::vector<ProcessRecord> EnumerateProcesses(
         ProcessEnumStrategy strategy,
         ProcessEnumStrategy* actualStrategyOut = nullptr);
+
+    // EnumerateSystemThreads 作用：
+    // - 枚举当前系统全部线程（优先 NtQuerySystemInformation）；
+    // - 当 Nt 路径不可用时自动回退 Toolhelp 快照。
+    // 参数 usedNtQueryOut：
+    // - 可选输出参数；
+    // - true 表示使用了 NtQuerySystemInformation，false 表示回退 Toolhelp。
+    // 参数 diagnosticTextOut：
+    // - 可选输出参数；
+    // - 返回本轮枚举的路径说明或失败原因，便于 UI 诊断展示。
+    std::vector<SystemThreadRecord> EnumerateSystemThreads(
+        bool* usedNtQueryOut = nullptr,
+        std::string* diagnosticTextOut = nullptr);
 
     // FillProcessStaticDetails 作用：
     // - 填充路径、命令行、用户、签名、管理员等“相对静态”字段；

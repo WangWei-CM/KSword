@@ -24,6 +24,7 @@
 #include <iomanip>     // std::hex：格式化十六进制文本。
 #include <iterator>    // std::size：静态数组长度。
 #include <sstream>     // std::ostringstream：错误文本拼接。
+#include <unordered_map> // std::unordered_map：线程枚举时缓存 PID->进程名。
 #include <vector>      // std::vector：系统信息缓冲与容器。
 
 // 链接依赖库：
@@ -145,6 +146,23 @@ namespace
         LARGE_INTEGER ReadTransferCount;
         LARGE_INTEGER WriteTransferCount;
         LARGE_INTEGER OtherTransferCount;
+    };
+
+    // NtQuerySystemInformation(SystemProcessInformation) 中的线程子结构。
+    // 说明：
+    // - 官方 winternl 头在不同 SDK 上字段命名存在差异；
+    // - 这里使用兼容布局，保证可读出线程核心字段（TID/优先级/状态等）。
+    struct SystemThreadInformationRecord
+    {
+        LARGE_INTEGER ReservedTime[3];  // [0]=KernelTime, [1]=UserTime, [2]=CreateTime。
+        ULONG WaitTime;                 // 线程等待时长计数（原始值）。
+        PVOID StartAddress;             // 线程启动地址。
+        CLIENT_ID ClientId;             // 线程与所属进程标识。
+        KPRIORITY Priority;             // 当前动态优先级。
+        LONG BasePriority;              // 基础优先级。
+        ULONG ContextSwitches;          // 上下文切换次数。
+        ULONG ThreadState;              // 线程状态码（KTHREAD_STATE）。
+        ULONG WaitReason;               // 等待原因码（KWAIT_REASON）。
     };
 
     // 格式化 Win32 错误码文本，便于 UI 提示详细失败原因。
@@ -1781,6 +1799,230 @@ namespace ks::process
             *actualStrategyOut = ProcessEnumStrategy::SnapshotProcess32;
         }
         return enumerateBySnapshot();
+    }
+
+    std::vector<SystemThreadRecord> EnumerateSystemThreads(
+        bool* const usedNtQueryOut,
+        std::string* const diagnosticTextOut)
+    {
+        // usedNtQueryOut 用途：向调用方回报本轮是否走 NtQuery 路径。
+        if (usedNtQueryOut != nullptr)
+        {
+            *usedNtQueryOut = false;
+        }
+
+        // diagnosticTextOut 用途：返回本轮路径说明或失败原因。
+        if (diagnosticTextOut != nullptr)
+        {
+            diagnosticTextOut->clear();
+        }
+
+        // 第一阶段：优先尝试 NtQuerySystemInformation(SystemProcessInformation)。
+        const auto ntQuerySystemInformation = reinterpret_cast<NtQuerySystemInformationFn>(
+            GetNtdllProcAddress("NtQuerySystemInformation"));
+        if (ntQuerySystemInformation != nullptr)
+        {
+            ULONG bufferLength = 2 * 1024 * 1024;
+            std::vector<BYTE> informationBuffer(bufferLength);
+            NTSTATUS queryStatus = ntQuerySystemInformation(
+                SystemProcessInformation,
+                informationBuffer.data(),
+                bufferLength,
+                &bufferLength);
+
+            while (queryStatus == StatusInfoLengthMismatch)
+            {
+                bufferLength = (bufferLength * 3) / 2 + 64 * 1024;
+                informationBuffer.resize(bufferLength);
+                queryStatus = ntQuerySystemInformation(
+                    SystemProcessInformation,
+                    informationBuffer.data(),
+                    bufferLength,
+                    &bufferLength);
+            }
+
+            if (NT_SUCCESS(queryStatus))
+            {
+                std::vector<SystemThreadRecord> threadList;
+
+                // currentPointer 用途：顺序遍历 NextEntryOffset 链表。
+                BYTE* currentPointer = informationBuffer.data();
+                while (currentPointer != nullptr)
+                {
+                    const auto* processInfo = reinterpret_cast<const SystemProcessInformationRecord*>(currentPointer);
+                    const std::uint32_t processPid = static_cast<std::uint32_t>(
+                        reinterpret_cast<std::uintptr_t>(processInfo->UniqueProcessId));
+
+                    // processNameText 用途：给该进程下所有线程复用同一进程名文本。
+                    std::string processNameText;
+                    if (processInfo->ImageName.Buffer != nullptr && processInfo->ImageName.Length > 0)
+                    {
+                        const std::wstring imageName(
+                            processInfo->ImageName.Buffer,
+                            static_cast<std::size_t>(processInfo->ImageName.Length / sizeof(wchar_t)));
+                        processNameText = ks::str::Utf16ToUtf8(imageName);
+                    }
+                    else if (processPid == 0)
+                    {
+                        processNameText = "System Idle Process";
+                    }
+                    else if (processPid == 4)
+                    {
+                        processNameText = "System";
+                    }
+                    else
+                    {
+                        processNameText = "Unknown";
+                    }
+
+                    // threadArrayPointer 用途：定位到当前进程条目后紧跟的线程数组。
+                    const auto* threadArrayPointer =
+                        reinterpret_cast<const SystemThreadInformationRecord*>(processInfo + 1);
+                    for (ULONG threadIndex = 0; threadIndex < processInfo->NumberOfThreads; ++threadIndex)
+                    {
+                        const SystemThreadInformationRecord& threadInfo = threadArrayPointer[threadIndex];
+
+                        SystemThreadRecord threadRecord{};
+                        threadRecord.threadId = static_cast<std::uint32_t>(
+                            reinterpret_cast<std::uintptr_t>(threadInfo.ClientId.UniqueThread));
+                        threadRecord.ownerPid = static_cast<std::uint32_t>(
+                            reinterpret_cast<std::uintptr_t>(threadInfo.ClientId.UniqueProcess));
+                        if (threadRecord.ownerPid == 0)
+                        {
+                            threadRecord.ownerPid = processPid;
+                        }
+                        threadRecord.ownerProcessName = processNameText;
+                        threadRecord.startAddress = reinterpret_cast<std::uint64_t>(threadInfo.StartAddress);
+                        threadRecord.priority = static_cast<int>(threadInfo.Priority);
+                        threadRecord.basePriority = static_cast<int>(threadInfo.BasePriority);
+                        threadRecord.threadState = static_cast<std::uint32_t>(threadInfo.ThreadState);
+                        threadRecord.waitReason = static_cast<std::uint32_t>(threadInfo.WaitReason);
+                        threadRecord.kernelTime100ns = static_cast<std::uint64_t>(threadInfo.ReservedTime[0].QuadPart);
+                        threadRecord.userTime100ns = static_cast<std::uint64_t>(threadInfo.ReservedTime[1].QuadPart);
+                        threadRecord.createTime100ns = static_cast<std::uint64_t>(threadInfo.ReservedTime[2].QuadPart);
+                        threadRecord.waitTimeTick = static_cast<std::uint32_t>(threadInfo.WaitTime);
+                        threadRecord.contextSwitchCount = static_cast<std::uint32_t>(threadInfo.ContextSwitches);
+                        threadList.push_back(std::move(threadRecord));
+                    }
+
+                    if (processInfo->NextEntryOffset == 0)
+                    {
+                        break;
+                    }
+                    currentPointer += processInfo->NextEntryOffset;
+                }
+
+                // 统一排序：先 PID，再 TID，保证 UI 每轮刷新顺序稳定。
+                std::sort(
+                    threadList.begin(),
+                    threadList.end(),
+                    [](const SystemThreadRecord& leftRecord, const SystemThreadRecord& rightRecord)
+                    {
+                        if (leftRecord.ownerPid != rightRecord.ownerPid)
+                        {
+                            return leftRecord.ownerPid < rightRecord.ownerPid;
+                        }
+                        return leftRecord.threadId < rightRecord.threadId;
+                    });
+
+                if (usedNtQueryOut != nullptr)
+                {
+                    *usedNtQueryOut = true;
+                }
+                if (diagnosticTextOut != nullptr)
+                {
+                    *diagnosticTextOut =
+                        "NtQuerySystemInformation(SystemProcessInformation) success";
+                }
+                return threadList;
+            }
+
+            if (diagnosticTextOut != nullptr)
+            {
+                *diagnosticTextOut = FormatNtStatusMessage(
+                    queryStatus,
+                    "NtQuerySystemInformation(SystemProcessInformation) failed");
+            }
+        }
+        else if (diagnosticTextOut != nullptr)
+        {
+            *diagnosticTextOut = "NtQuerySystemInformation not available";
+        }
+
+        // 第二阶段：Nt 路径不可用时回退 Toolhelp（保证功能可用性）。
+        std::vector<SystemThreadRecord> threadList;
+        HANDLE snapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snapshotHandle == INVALID_HANDLE_VALUE)
+        {
+            if (diagnosticTextOut != nullptr)
+            {
+                *diagnosticTextOut += " | Toolhelp fallback failed: "
+                    + FormatLastErrorMessage(::GetLastError());
+            }
+            return threadList;
+        }
+
+        // processNameCacheByPid 用途：避免为同 PID 重复调用 GetProcessNameByPID。
+        std::unordered_map<std::uint32_t, std::string> processNameCacheByPid;
+
+        THREADENTRY32 threadEntry{};
+        threadEntry.dwSize = sizeof(threadEntry);
+        if (::Thread32First(snapshotHandle, &threadEntry) == FALSE)
+        {
+            if (diagnosticTextOut != nullptr)
+            {
+                *diagnosticTextOut += " | Thread32First failed: "
+                    + FormatLastErrorMessage(::GetLastError());
+            }
+            ::CloseHandle(snapshotHandle);
+            return threadList;
+        }
+
+        do
+        {
+            SystemThreadRecord threadRecord{};
+            threadRecord.threadId = static_cast<std::uint32_t>(threadEntry.th32ThreadID);
+            threadRecord.ownerPid = static_cast<std::uint32_t>(threadEntry.th32OwnerProcessID);
+            threadRecord.priority = static_cast<int>(threadEntry.tpBasePri);
+            threadRecord.basePriority = static_cast<int>(threadEntry.tpBasePri);
+            threadRecord.threadState = std::numeric_limits<std::uint32_t>::max();
+            threadRecord.waitReason = std::numeric_limits<std::uint32_t>::max();
+
+            auto processNameIt = processNameCacheByPid.find(threadRecord.ownerPid);
+            if (processNameIt == processNameCacheByPid.end())
+            {
+                std::string processNameText = GetProcessNameByPID(threadRecord.ownerPid);
+                if (processNameText.empty())
+                {
+                    processNameText = "Unknown";
+                }
+                processNameIt = processNameCacheByPid.emplace(
+                    threadRecord.ownerPid,
+                    std::move(processNameText)).first;
+            }
+            threadRecord.ownerProcessName = processNameIt->second;
+            threadList.push_back(std::move(threadRecord));
+        } while (::Thread32Next(snapshotHandle, &threadEntry) != FALSE);
+
+        ::CloseHandle(snapshotHandle);
+
+        std::sort(
+            threadList.begin(),
+            threadList.end(),
+            [](const SystemThreadRecord& leftRecord, const SystemThreadRecord& rightRecord)
+            {
+                if (leftRecord.ownerPid != rightRecord.ownerPid)
+                {
+                    return leftRecord.ownerPid < rightRecord.ownerPid;
+                }
+                return leftRecord.threadId < rightRecord.threadId;
+            });
+
+        if (diagnosticTextOut != nullptr)
+        {
+            *diagnosticTextOut += " | Toolhelp fallback success";
+        }
+        return threadList;
     }
 
     std::string QueryProcessPathByPid(const std::uint32_t pid)

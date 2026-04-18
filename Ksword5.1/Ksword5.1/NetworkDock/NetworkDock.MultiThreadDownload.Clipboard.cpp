@@ -1,6 +1,7 @@
 #include "NetworkDock.InternalCommon.h"
 
 #include "../SettingsDock/AppearanceSettings.h"
+#include "../theme.h"
 
 #include <QCoreApplication>
 #include <QDialog>
@@ -404,11 +405,14 @@ void NetworkDock::showMultiThreadDownloadClipboardPrompt(const QString& urlText)
     QDialog* promptDialog = new QDialog(this); // promptDialog：非阻塞下载询问框对象。
     m_multiDownloadClipboardPromptDialog = promptDialog;
     promptDialog->setAttribute(Qt::WA_DeleteOnClose, true);
+    promptDialog->setObjectName(QStringLiteral("NetworkMultiDownloadPromptDialog"));
     promptDialog->setWindowFlag(Qt::Window, true);
     promptDialog->setWindowModality(Qt::NonModal);
     promptDialog->setModal(false);
     promptDialog->setWindowTitle(QStringLiteral("检测到可下载链接"));
     promptDialog->resize(760, 200);
+    // 弹窗背景显式填充，避免浅色模式下继承透明样式出现黑底。
+    promptDialog->setStyleSheet(KswordTheme::OpaqueDialogStyle(promptDialog->objectName()));
 
     QVBoxLayout* rootLayout = new QVBoxLayout(promptDialog); // rootLayout：询问框根布局。
     QLabel* descriptionLabel = new QLabel(
