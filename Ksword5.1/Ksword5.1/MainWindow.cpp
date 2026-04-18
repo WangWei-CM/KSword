@@ -36,12 +36,15 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 #include <sddl.h>
 
 #include <array>
 #include <vector>
 #include <TlHelp32.h>
+
+#pragma comment(lib, "Dwmapi.lib")
 
 namespace
 {
@@ -54,6 +57,18 @@ namespace
     // - 控制“显示后补载”节流间隔；
     // - 避免 0ms 连续补载把 UI 线程再次打满。
     constexpr int kDeferredDockLoadIntervalMs = 60;
+    // kDwmUseImmersiveDarkModeAttribute 作用：
+    // - 兼容不同 SDK 头文件是否声明该枚举值；
+    // - 用于告诉 DWM 当前窗口应按深色还是浅色边框策略处理。
+    constexpr DWORD kDwmUseImmersiveDarkModeAttribute = 20;
+    // kDwmBorderColorAttribute 作用：
+    // - 指向 Win11 边框颜色属性编号；
+    // - 用于关闭系统默认白色可见边框。
+    constexpr DWORD kDwmBorderColorAttribute = 34;
+    // kDwmColorNone 作用：
+    // - 传给 DWMWA_BORDER_COLOR 后表示“不绘制可见边框”；
+    // - 保留阴影与缩放能力，仅移除闪白边线。
+    constexpr DWORD kDwmColorNone = 0xFFFFFFFE;
 
     // buildPrivilegeButtonStyle 作用：
     // - 按“当前是否具备权限”生成按钮样式；
@@ -424,6 +439,7 @@ void MainWindow::showEvent(QShowEvent* event)
 {
     QMainWindow::showEvent(event);
     ensureNativeFramelessWindowStyle();
+    applyNativeWindowFrameVisualStyle();
     syncCustomTitleBarMaximizedState();
 
     if (m_deferredDockInitializationStarted)
@@ -432,16 +448,13 @@ void MainWindow::showEvent(QShowEvent* event)
     }
 
     m_deferredDockInitializationStarted = true;
-    if (m_deferredDockLoadQueue.empty())
-    {
-        return;
-    }
 
-    reportStartupProgress(94, QStringLiteral("主窗口已显示，继续补载剩余页面..."));
-    QTimer::singleShot(kDeferredDockLoadIntervalMs, this, [this]()
-        {
-            initializeNextDeferredDock();
-        });
+    // 懒加载策略修正：
+    // - 旧逻辑会在主窗口 show 后继续把所有未初始化 Dock 逐个补载；
+    // - 这会让“懒加载”退化成“延后但仍全量加载”，启动后首屏持续卡顿；
+    // - 现在改为仅在用户真正切到对应 Dock，或代码显式跳转该 Dock 时，再初始化内容。
+    // 说明：visibilityChanged / focusXXXDock / raiseStartupDockByKey 已经覆盖按需初始化入口。
+    Q_UNUSED(kDeferredDockLoadIntervalMs);
 }
 
 void MainWindow::changeEvent(QEvent* event)
@@ -501,6 +514,61 @@ void MainWindow::ensureNativeFramelessWindowStyle()
 #endif
 }
 
+void MainWindow::applyNativeWindowFrameVisualStyle()
+{
+#ifdef Q_OS_WIN
+    // 未创建原生窗口句柄时不主动触发 winId，避免在构造早期引入额外重入。
+    if (!testAttribute(Qt::WA_WState_Created))
+    {
+        return;
+    }
+
+    // mainWindowHandle 用途：向 DWM 写入主窗口无边框视觉属性。
+    const HWND mainWindowHandle = reinterpret_cast<HWND>(winId());
+    if (mainWindowHandle == nullptr || ::IsWindow(mainWindowHandle) == FALSE)
+    {
+        return;
+    }
+
+    // darkModeEnabled 用途：根据当前外观配置决定 DWM 是否启用沉浸式深色边框策略。
+    const bool darkModeEnabled = isDarkModeEffective(m_currentAppearanceSettings);
+    // immersiveDarkModeValue 用途：DwmSetWindowAttribute 所需 BOOL 入参。
+    const BOOL immersiveDarkModeValue = darkModeEnabled ? TRUE : FALSE;
+    // borderColorValue 用途：要求 DWM 不再绘制系统默认白色边框。
+    const DWORD borderColorValue = kDwmColorNone;
+
+    const HRESULT darkModeResult = ::DwmSetWindowAttribute(
+        mainWindowHandle,
+        kDwmUseImmersiveDarkModeAttribute,
+        &immersiveDarkModeValue,
+        sizeof(immersiveDarkModeValue));
+    const HRESULT borderColorResult = ::DwmSetWindowAttribute(
+        mainWindowHandle,
+        kDwmBorderColorAttribute,
+        &borderColorValue,
+        sizeof(borderColorValue));
+
+    // darkModeUnsupported / borderColorUnsupported 用途：
+    // - 标记当前系统仅仅是不支持新属性，而不是发生异常；
+    // - 避免旧系统在每次启动时输出无意义告警。
+    const bool darkModeUnsupported = (darkModeResult == E_INVALIDARG);
+    const bool borderColorUnsupported = (borderColorResult == E_INVALIDARG);
+    if ((!SUCCEEDED(darkModeResult) && !darkModeUnsupported)
+        || (!SUCCEEDED(borderColorResult) && !borderColorUnsupported))
+    {
+        kLogEvent frameVisualEvent;
+        warn << frameVisualEvent
+            << "[MainWindow] DWM 边框样式同步失败, dark_hr=0x"
+            << std::hex
+            << static_cast<unsigned long>(darkModeResult)
+            << ", border_hr=0x"
+            << static_cast<unsigned long>(borderColorResult)
+            << std::dec
+            << eol;
+    }
+#endif
+}
+
 bool MainWindow::isWindowActuallyMaximized() const
 {
     // maximizedState 用途：先基于 Qt 状态判断当前是否最大化。
@@ -526,7 +594,7 @@ bool MainWindow::isWindowActuallyMaximized() const
 void MainWindow::setWindowMaximizedBySystemCommand(const bool targetMaximizedState)
 {
 #ifdef Q_OS_WIN
-    // mainWindowHandle 用途：执行 SC_MAXIMIZE/SC_RESTORE 时使用的窗口句柄。
+    // mainWindowHandle 用途：执行原生最大化/还原时使用的窗口句柄。
     const HWND mainWindowHandle = reinterpret_cast<HWND>(winId());
     if (mainWindowHandle != nullptr && ::IsWindow(mainWindowHandle) != FALSE)
     {
@@ -534,11 +602,12 @@ void MainWindow::setWindowMaximizedBySystemCommand(const bool targetMaximizedSta
         const bool currentMaximizedState = (::IsZoomed(mainWindowHandle) != FALSE);
         if (targetMaximizedState != currentMaximizedState)
         {
-            ::SendMessageW(
+            // 使用 ShowWindow 切换窗口状态：
+            // - 避免在标题栏鼠标消息处理期间同步 SendMessage(WM_SYSCOMMAND) 造成重入；
+            // - 修复“先跳到左上角再闪回”和双击后标题栏拖动链路失效的问题。
+            ::ShowWindow(
                 mainWindowHandle,
-                WM_SYSCOMMAND,
-                static_cast<WPARAM>(targetMaximizedState ? SC_MAXIMIZE : SC_RESTORE),
-                0);
+                targetMaximizedState ? SW_MAXIMIZE : SW_RESTORE);
         }
     }
     else
@@ -564,11 +633,10 @@ void MainWindow::setWindowMaximizedBySystemCommand(const bool targetMaximizedSta
 #endif
 
     syncCustomTitleBarMaximizedState();
+    // 二次同步只保留 0ms 一次：
+    // - 覆盖“系统命令异步切换窗口态”的下一轮事件循环；
+    // - 避免多次延迟同步导致体感卡顿或图标抖动。
     QTimer::singleShot(0, this, [this]()
-        {
-            syncCustomTitleBarMaximizedState();
-        });
-    QTimer::singleShot(30, this, [this]()
         {
             syncCustomTitleBarMaximizedState();
         });
@@ -592,12 +660,56 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
 
     if (nativeMessage->message == WM_NCCALCSIZE)
     {
-        // 使用最简非客户区裁剪策略：仅返回 0，避免复杂分支导致消息重入。
-        if (nativeMessage->wParam == TRUE)
+        // WM_NCCALCSIZE 双分支统一返回 0：
+        // - wParam=TRUE：窗口尺寸/状态变化时，让整块窗口都成为客户区；
+        // - wParam=FALSE：窗口初始创建阶段同样移除默认非客户区，修复 Win11 左/上透明残留带。
+        // 说明：这里不做额外矩形改写，保持现有可缩放与最大化行为不变。
+        *result = 0;
+        return true;
+    }
+
+    if (nativeMessage->message == WM_NCLBUTTONDOWN)
+    {
+        // 对 HTCAPTION 显式转发给 DefWindowProc：
+        // - Qt 无边框窗口不会总是替我们走完原生标题栏拖动语义；
+        // - 这里显式调用原生默认过程，保证单击按住后可以拖动。
+        if (nativeMessage->wParam == HTCAPTION)
         {
+            *result = ::DefWindowProcW(
+                nativeMessage->hwnd,
+                nativeMessage->message,
+                nativeMessage->wParam,
+                nativeMessage->lParam);
+            return true;
+        }
+    }
+
+    if (nativeMessage->message == WM_NCLBUTTONDBLCLK)
+    {
+        // HTCAPTION 双击手动切换最大化/还原：
+        // - 保留系统标题栏语义；
+        // - 同时避免 Qt/无边框窗口把双击吞掉导致无反应。
+        if (nativeMessage->wParam == HTCAPTION)
+        {
+            const bool targetMaximizedState =
+                (nativeMessage->hwnd != nullptr && ::IsWindow(nativeMessage->hwnd) != FALSE)
+                ? (::IsZoomed(nativeMessage->hwnd) == FALSE)
+                : !isWindowActuallyMaximized();
+            setWindowMaximizedBySystemCommand(targetMaximizedState);
             *result = 0;
             return true;
         }
+    }
+
+    if (nativeMessage->message == WM_NCACTIVATE)
+    {
+        // 焦点切换时要求系统跳过默认非客户区重绘，避免瞬间刷出白色边框。
+        *result = ::DefWindowProcW(
+            nativeMessage->hwnd,
+            nativeMessage->message,
+            nativeMessage->wParam,
+            static_cast<LPARAM>(-1));
+        return true;
     }
 
     if (nativeMessage->message == WM_NCHITTEST)
@@ -614,45 +726,35 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
             static_cast<LONG>(static_cast<short>(HIWORD(pointData)))
         };
         const QPoint localPoint = mapFromGlobal(QPoint(screenPoint.x, screenPoint.y));
+        // windowRectValue 用途：读取顶层窗口的屏幕坐标矩形，供边框缩放命中使用。
+        RECT windowRectValue = {};
+        ::GetWindowRect(nativeMessage->hwnd, &windowRectValue);
+        // frameLocalPoint 用途：把屏幕坐标转换为相对整个顶层窗口左上角的坐标。
+        const QPoint frameLocalPoint(
+            screenPoint.x - windowRectValue.left,
+            screenPoint.y - windowRectValue.top);
+        // frameWidthValue/frameHeightValue 用途：保存顶层窗口当前尺寸，供右边/下边缩放命中判断。
+        const int frameWidthValue = windowRectValue.right - windowRectValue.left;
+        const int frameHeightValue = windowRectValue.bottom - windowRectValue.top;
         const int borderWidth = std::max(
-            6,
+            8,
             static_cast<int>(
                 ::GetSystemMetrics(SM_CXSIZEFRAME)
                 + ::GetSystemMetrics(SM_CXPADDEDBORDER)));
 
-        // 兼容处理：若仍存在顶端负坐标带（非客户区残留），直接按可拖动标题栏返回。
-        if (localPoint.y() < 0 && localPoint.y() >= -borderWidth)
-        {
-            *result = HTCAPTION;
-            return true;
-        }
-
-        // 标题栏拖动命中优先：命中自绘标题栏且位于可拖动区时返回 HTCAPTION。
-        if (m_customTitleBar != nullptr)
-        {
-            // titleBarTopLeftPoint 用途：把标题栏左上角映射到 MainWindow 坐标系，保证命中测试坐标统一。
-            const QPoint titleBarTopLeftPoint = m_customTitleBar->mapTo(this, QPoint(0, 0));
-            // titleBarRect 用途：在主窗口坐标系下描述标题栏区域，供 HTCAPTION 命中判断。
-            const QRect titleBarRect(titleBarTopLeftPoint, m_customTitleBar->size());
-            if (titleBarRect.contains(localPoint))
-            {
-                const QPoint titleBarLocalPoint = localPoint - titleBarRect.topLeft();
-                if (m_customTitleBar->isPointInDraggableRegion(titleBarLocalPoint))
-                {
-                    *result = HTCAPTION;
-                    return true;
-                }
-            }
-        }
-
-        // 边缘缩放命中：仅在非最大化状态下启用。
+        // 边缘缩放命中优先：
+        // - 必须先于标题栏拖动命中，否则标题栏会吞掉上边/左右边缩放区域；
+        // - 这是“窗口无法调整大小”的直接原因。
         if (!maximizedInNativeMessage)
         {
-            const bool hitLeft = localPoint.x() >= 0 && localPoint.x() < borderWidth;
-            const bool hitRight = localPoint.x() <= width() && localPoint.x() > (width() - borderWidth);
-            // 顶边缩放带收窄到 3px，避免顶部大片区域无法拖动。
-            const bool hitTop = localPoint.y() >= 0 && localPoint.y() < 3;
-            const bool hitBottom = localPoint.y() <= height() && localPoint.y() > (height() - borderWidth);
+            const bool hitLeft = frameLocalPoint.x() >= 0 && frameLocalPoint.x() < borderWidth;
+            const bool hitRight =
+                frameLocalPoint.x() <= frameWidthValue
+                && frameLocalPoint.x() > (frameWidthValue - borderWidth);
+            const bool hitTop = frameLocalPoint.y() >= 0 && frameLocalPoint.y() < borderWidth;
+            const bool hitBottom =
+                frameLocalPoint.y() <= frameHeightValue
+                && frameLocalPoint.y() > (frameHeightValue - borderWidth);
 
             if (hitTop && hitLeft)
             {
@@ -695,6 +797,14 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
                 return true;
             }
         }
+
+        // 兼容处理：若仍存在顶端负坐标带（非客户区残留），直接按可拖动标题栏返回。
+        if (localPoint.y() < 0 && localPoint.y() >= -borderWidth)
+        {
+            *result = HTCAPTION;
+            return true;
+        }
+
     }
 #endif
 
@@ -2609,6 +2719,7 @@ void MainWindow::applyAppearanceSettings(
         syncCustomTitleBarMaximizedState();
     }
 
+    applyNativeWindowFrameVisualStyle();
     rebuildWindowBackgroundBrush();
     refreshPrivilegeStatusButtons();
 

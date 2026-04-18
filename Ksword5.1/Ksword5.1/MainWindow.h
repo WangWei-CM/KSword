@@ -190,14 +190,20 @@ private:
     // - 修复 Win+↑/Win+↓ 与系统最大化链路偶发失效问题。
     void ensureNativeFramelessWindowStyle();
 
+    // applyNativeWindowFrameVisualStyle 作用：
+    // - 向 DWM 同步当前深浅色状态并关闭系统可见边框；
+    // - 修复主窗口在焦点切换时瞬间闪出白色边框的问题。
+    // 调用方式：窗口句柄创建完成后、主题切换后调用。
+    void applyNativeWindowFrameVisualStyle();
+
     // isWindowActuallyMaximized 作用：
     // - 综合 Qt 状态与 Win32 IsZoomed 判断真实最大化状态；
     // - 避免仅依赖 isMaximized() 造成“按钮状态漂移”。
     bool isWindowActuallyMaximized() const;
 
     // setWindowMaximizedBySystemCommand 作用：
-    // - 通过 Win32 系统命令执行最大化/还原；
-    // - 保证与 Win+方向键共享同一状态链路。
+    // - 通过 Win32 原生窗口状态 API 执行最大化/还原；
+    // - 避免在标题栏双击鼠标消息处理中同步 SendMessage 重入，造成闪动与状态错乱。
     // 入参 targetMaximizedState：true=最大化，false=还原。
     void setWindowMaximizedBySystemCommand(bool targetMaximizedState);
 
