@@ -2,6 +2,8 @@
 
 #include "../theme.h"
 #include "ProcessDetailWindow.h"
+#include "../../../shared/KswordArkLogProtocol.h"
+#include "../../../shared/driver/KswordArkProcessIoctl.h"
 
 #include <QAbstractItemView>
 #include <QAbstractScrollArea>
@@ -133,6 +135,80 @@ namespace
         default:
             return "Unknown";
         }
+    }
+
+    // terminateProcessByR0Driver 作用：
+    // - 通过 R0 驱动设备发送“结束进程”IOCTL；
+    // - 使用共享协议头中的结构体，避免两侧字段漂移。
+    bool terminateProcessByR0Driver(const std::uint32_t targetPid, std::string* const detailTextOut)
+    {
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+
+        if (targetPid == 0U || targetPid <= 4U)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = "invalid target pid";
+            }
+            return false;
+        }
+
+        const HANDLE driverHandle = ::CreateFileW(
+            KSWORD_ARK_LOG_WIN32_PATH,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (driverHandle == INVALID_HANDLE_VALUE)
+        {
+            const DWORD lastError = ::GetLastError();
+            if (detailTextOut != nullptr)
+            {
+                std::ostringstream oss;
+                oss << "CreateFileW(" << "\\\\.\\KswordARKLog" << ") failed, error=" << lastError;
+                *detailTextOut = oss.str();
+            }
+            return false;
+        }
+
+        KSWORD_ARK_TERMINATE_PROCESS_REQUEST request{};
+        request.processId = targetPid;
+        request.exitStatus = static_cast<long>(0xC0000005u);
+
+        DWORD bytesReturned = 0;
+        const BOOL ioctlOk = ::DeviceIoControl(
+            driverHandle,
+            IOCTL_KSWORD_ARK_TERMINATE_PROCESS,
+            &request,
+            static_cast<DWORD>(sizeof(request)),
+            nullptr,
+            0,
+            &bytesReturned,
+            nullptr);
+        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
+        ::CloseHandle(driverHandle);
+
+        if (detailTextOut != nullptr)
+        {
+            std::ostringstream oss;
+            oss << "pid=" << targetPid << ", bytesReturned=" << bytesReturned;
+            if (ioctlOk)
+            {
+                oss << ", ioctl=ok";
+            }
+            else
+            {
+                oss << ", ioctl=fail, error=" << ioctlError;
+            }
+            *detailTextOut = oss.str();
+        }
+
+        return ioctlOk != FALSE;
     }
 
     // isProcessPresentBySnapshot 作用：
@@ -711,6 +787,27 @@ void ProcessDock::initializeProcessTable()
     applyViewMode(ViewMode::Monitor);
     applyAdaptiveColumnWidths();
     m_processPageLayout->addWidget(m_processTable, 1);
+
+    // R0 功能标识：
+    // - 进程页包含“R0结束进程”动作，因此在右下角固定放置内核标识图；
+    // - 路径按项目规范使用固定 Kernel.png 资源文件。
+    QLabel* r0KernelBadgeLabel = new QLabel(m_processListPage);
+    r0KernelBadgeLabel->setObjectName(QStringLiteral("r0KernelBadgeLabel"));
+    r0KernelBadgeLabel->setToolTip(QStringLiteral("R0 功能标识"));
+    const QPixmap kernelBadgePixmap(
+        QStringLiteral("H:/Project/Ksword5.1/Ksword5.1/Ksword5.1/Resource/Kernel.png"));
+    if (!kernelBadgePixmap.isNull())
+    {
+        r0KernelBadgeLabel->setPixmap(kernelBadgePixmap.scaled(
+            52,
+            52,
+            Qt::KeepAspectRatio,
+            Qt::SmoothTransformation));
+    }
+    m_processPageLayout->addWidget(
+        r0KernelBadgeLabel,
+        0,
+        Qt::AlignRight | Qt::AlignBottom);
 
     // 满足需求 3.1：侧边栏 Tab 中包含“进程列表”页签。
     m_sideTabWidget->addTab(m_processListPage, QIcon(IconProcessMain), "进程列表");
@@ -2727,6 +2824,8 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     bindContextActionToItem(clickedItem);
 
     QMenu contextMenu(this);
+    // 右键菜单显式样式：避免浅色模式在透明父控件下出现黑底黑字。
+    contextMenu.setStyleSheet(buildThreadContextMenuStyle());
     QAction* copyCellAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_copy_cell.svg"), "复制单元格");
     QAction* copyRowAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_copy_row.svg"), "复制行");
     contextMenu.addSeparator();
@@ -2743,6 +2842,9 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QAction* taskkillForceAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_terminate.svg"),
         "Taskkill /f");
+    QAction* r0TerminateAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_terminate.svg"),
+        "R0结束进程");
     QAction* injectInvalidShellcodeAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_terminate.svg"),
         "注入无效shellcode");
@@ -2792,6 +2894,7 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     else if (selectedAction == terminateProcessAction) { executeTerminateProcessAction(); }
     else if (selectedAction == taskkillAction) { executeTaskKillAction(false); }
     else if (selectedAction == taskkillForceAction) { executeTaskKillAction(true); }
+    else if (selectedAction == r0TerminateAction) { executeR0TerminateProcessAction(); }
     else if (selectedAction == injectInvalidShellcodeAction) { executeInjectInvalidShellcodeAction(); }
     else if (selectedAction == suspendAction) { executeSuspendAction(); }
     else if (selectedAction == resumeAction) { executeResumeAction(); }
@@ -3779,6 +3882,34 @@ void ProcessDock::executeTaskKillAction(const bool forceKill)
         << eol;
     showActionResultMessage(forceKill ? "Taskkill /f" : "Taskkill", actionOk, detailText, actionEvent);
     if (actionOk) requestAsyncRefresh(true);
+}
+
+void ProcessDock::executeR0TerminateProcessAction()
+{
+    ks::process::ProcessRecord* processRecord = selectedRecord();
+    if (processRecord == nullptr)
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] executeR0TerminateProcessAction 被忽略：当前没有选中进程。" << eol;
+        return;
+    }
+
+    const std::uint32_t targetPid = processRecord->pid;
+    std::string detailText;
+    const bool actionOk = terminateProcessByR0Driver(targetPid, &detailText);
+
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] R0 terminate action, pid=" << targetPid
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage("R0结束进程", actionOk, detailText, actionEvent);
+    if (actionOk)
+    {
+        requestAsyncRefresh(true);
+    }
 }
 
 void ProcessDock::executeTerminateProcessAction()

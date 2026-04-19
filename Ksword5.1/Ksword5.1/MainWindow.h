@@ -22,7 +22,10 @@
 #include <QToolButton>
 
 #include <functional>
+#include <atomic>
+#include <memory>
 #include <string>
+#include <thread>
 
 // ADS头文件
 #include "include/ads/DockManager.h"
@@ -148,6 +151,18 @@ private:
     void initPrivilegeStatusButtons();
     void refreshPrivilegeStatusButtons();
     void applyPrivilegeButtonStyle(QPushButton* button, bool activeState);
+    void handleR0StatusButtonClicked();
+    bool queryR0DriverServiceRunning(bool& runningOut, bool fatalOnError);
+    bool startR0DriverService();
+    bool stopR0DriverService(bool suppressErrorDialog = false);
+    void startR0DriverLogPoller();
+    void stopR0DriverLogPoller();
+    void runR0DriverLogPollerLoop();
+    void dispatchR0DriverLogRecord(const std::string& logRecordText);
+    bool showUnsignedDriverFailureDialog(unsigned long errorCode, const QString& operationText);
+    bool enableWindowsTestModeAndPromptReboot();
+    bool isR0DriverSignatureFailure(unsigned long errorCode) const;
+    void showR0FatalError(const QString& stageText, unsigned long errorCode, const QString& detailText = QString());
     void requestAdminElevationRestart();
     bool hasAdminPrivilege() const;
     bool hasDebugPrivilege() const;
@@ -321,7 +336,7 @@ private:
     // - Admin：管理员权限状态与提权入口；
     // - Debug：SeDebugPrivilege 状态与申请入口；
     // - System：是否 LocalSystem 身份；
-    // - TI/PPL：预留权限状态位（当前仅展示状态，不做切换）。
+    // - TI/R0：TrustedInstaller 与驱动服务快捷开关。
     QWidget* m_privilegeButtonContainer = nullptr;
     QWidget* m_topActionRowWidget = nullptr;     // m_topActionRowWidget：标题栏下方的功能条容器（文件 + 权限按钮）。
     QHBoxLayout* m_topActionRowLayout = nullptr; // m_topActionRowLayout：功能条水平布局。
@@ -330,7 +345,10 @@ private:
     QPushButton* m_debugStatusButton = nullptr;
     QPushButton* m_systemStatusButton = nullptr;
     QPushButton* m_tiStatusButton = nullptr;
-    QPushButton* m_pplStatusButton = nullptr;
+    QPushButton* m_r0StatusButton = nullptr;
+    bool m_r0DriverServiceRunning = false;      // m_r0DriverServiceRunning：KswordARK 驱动服务当前是否运行。
+    std::atomic_bool m_r0DriverLogPollerRunning{ false }; // m_r0DriverLogPollerRunning：R0 日志轮询线程运行标记。
+    std::unique_ptr<std::thread> m_r0DriverLogPollerThread; // m_r0DriverLogPollerThread：R0 日志轮询线程对象。
     QTimer* m_privilegeStatusTimer = nullptr;
     QTimer* m_backgroundRebuildTimer = nullptr; // m_backgroundRebuildTimer：窗口背景重建合并计时器。
 

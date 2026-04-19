@@ -11,6 +11,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KswordHUD", "..\KswordHUD\K
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "APIMonitor_x64", "..\APIMonitor_x64\APIMonitor_x64.vcxproj", "{CEF9AD14-A819-4792-AA6B-009DB21334EE}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KswordARKDriver", "..\KswordARKDriver\KswordARKDriver.vcxproj", "{E4B6A5CC-D9ED-FCA2-46D5-5035E8728524}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -33,6 +35,12 @@ Global
 		{CEF9AD14-A819-4792-AA6B-009DB21334EE}.Debug|x64.Build.0 = Debug|x64
 		{CEF9AD14-A819-4792-AA6B-009DB21334EE}.Release|x64.ActiveCfg = Release|x64
 		{CEF9AD14-A819-4792-AA6B-009DB21334EE}.Release|x64.Build.0 = Release|x64
+		{E4B6A5CC-D9ED-FCA2-46D5-5035E8728524}.Debug|x64.ActiveCfg = Debug|x64
+		{E4B6A5CC-D9ED-FCA2-46D5-5035E8728524}.Debug|x64.Build.0 = Debug|x64
+		{E4B6A5CC-D9ED-FCA2-46D5-5035E8728524}.Debug|x64.Deploy.0 = Debug|x64
+		{E4B6A5CC-D9ED-FCA2-46D5-5035E8728524}.Release|x64.ActiveCfg = Release|x64
+		{E4B6A5CC-D9ED-FCA2-46D5-5035E8728524}.Release|x64.Build.0 = Release|x64
+		{E4B6A5CC-D9ED-FCA2-46D5-5035E8728524}.Release|x64.Deploy.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

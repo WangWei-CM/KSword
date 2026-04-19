@@ -332,6 +332,12 @@ private:
     QCheckBox* m_tokenUiAccessCheck = nullptr;     // UIAccess 开关。
     QCheckBox* m_tokenMandatoryNoWriteUpCheck = nullptr; // MandatoryPolicy: NoWriteUp 位。
     QCheckBox* m_tokenMandatoryNewProcessMinCheck = nullptr; // MandatoryPolicy: NewProcessMin 位。
+    QCheckBox* m_tokenHasRestrictionsCheck = nullptr; // TokenHasRestrictions（class=21）开关。
+    QCheckBox* m_tokenIsAppContainerCheck = nullptr;  // TokenIsAppContainer（class=29）开关。
+    QCheckBox* m_tokenIsRestrictedCheck = nullptr; // TokenIsRestricted（class=40）开关。
+    QCheckBox* m_tokenIsLessPrivilegedAppContainerCheck = nullptr; // TokenIsLessPrivilegedAppContainer（class=46）开关。
+    QCheckBox* m_tokenIsSandboxedCheck = nullptr; // TokenIsSandboxed（class=47）开关。
+    QCheckBox* m_tokenIsAppSiloCheck = nullptr; // TokenIsAppSilo（class=51）开关。
     QComboBox* m_tokenRawInfoClassCombo = nullptr; // 原始设置：TokenInformationClass 选择框。
     QComboBox* m_tokenRawInputModeCombo = nullptr; // 原始设置：负载输入模式（UInt32/UInt64/HexBytes）。
     QLineEdit* m_tokenRawPayloadEdit = nullptr;    // 原始设置：负载输入文本。

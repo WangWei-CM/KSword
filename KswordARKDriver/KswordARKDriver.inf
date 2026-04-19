@@ -1,0 +1,70 @@
+;
+; KswordARKDriver.inf
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=USBDevice
+ClassGuid={88BAE032-5A81-49f0-BC3D-A4FF138216D6}
+Provider=%ManufacturerName%
+CatalogFile=KswordARKDriver.cat
+DriverVer=
+PnpLockDown=1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+KswordARK.sys  = 1,,
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName%=Standard,NT$ARCH$.10.0...16299 ; %13% support introduced in build 16299
+
+[Standard.NT$ARCH$.10.0...16299]
+%KswordARKDriver.DeviceDesc%=KswordARKDriver_Device, USB\VID_vvvv&PID_pppp
+
+[KswordARKDriver_Device.NT]
+CopyFiles=File_Copy
+
+[File_Copy]
+KswordARK.sys
+
+[KswordARKDriver_Device.NT.HW]
+AddReg=KswordARKDriver_AddReg
+
+[KswordARKDriver_AddReg]
+; By default, USBDevice class uses iProduct descriptor to name the device
+; Uncomment for this device to use %KswordARKDriver.DeviceDesc%
+;HKR,,FriendlyName,,%KswordARKDriver.DeviceDesc%
+
+;-------------- Service installation
+[KswordARKDriver_Device.NT.Services]
+AddService = KswordARK,%SPSVCINST_ASSOCSERVICE%, KswordARKDriver_Service_Inst
+
+; -------------- KswordARKDriver driver install sections
+[KswordARKDriver_Service_Inst]
+DisplayName    = %KswordARKDriver.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\KswordARK.sys
+
+[KswordARKDriver_Device.NT.Wdf]
+KmdfService =  KswordARK, KswordARKDriver_wdfsect
+
+[KswordARKDriver_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+SPSVCINST_ASSOCSERVICE= 0x00000002
+ManufacturerName="<Your manufacturer name>" ;TODO: Replace with your manufacturer name
+DiskName = "KswordARKDriver Installation Disk"
+KswordARKDriver.DeviceDesc = "KswordARKDriver Device"
+KswordARKDriver.SVCDESC = "KswordARKDriver Service"

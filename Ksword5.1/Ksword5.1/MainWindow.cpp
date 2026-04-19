@@ -18,7 +18,9 @@
 #include <QRectF>
 #include <QResizeEvent>
 #include <QImageReader>
+#include <QDialog>
 #include <QMessageBox>
+#include <QProcess>
 #include <QToolTip>
 #include <QStyleHints>
 #pragma warning(disable: 4996)
@@ -30,6 +32,7 @@
 #include "Framework/ThemedMessageBox.h"
 #include "UI/CodeEditorWidget.h"
 #include "theme.h"
+#include "../../shared/KswordArkLogProtocol.h"
 #include <windows.h>
 // 菜单栏权限按钮涉及 Windows 令牌权限查询与提权动作。
 #ifndef NOMINMAX
@@ -39,8 +42,11 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <sddl.h>
+#include <winternl.h>
 
 #include <array>
+#include <chrono>
+#include <cstring>
 #include <vector>
 #include <TlHelp32.h>
 
@@ -69,6 +75,331 @@ namespace
     // - 传给 DWMWA_BORDER_COLOR 后表示“不绘制可见边框”；
     // - 保留阴影与缩放能力，仅移除闪白边线。
     constexpr DWORD kDwmColorNone = 0xFFFFFFFE;
+    constexpr wchar_t kR0DriverServiceName[] = L"KswordARK";
+    constexpr wchar_t kR0DriverDisplayName[] = L"KswordARK Driver Service";
+    constexpr DWORD kR0ServiceWaitTimeoutMs = 9000;
+    constexpr int kR0LogConnectRetrySleepMs = 260;
+    constexpr int kR0LogIdlePollSleepMs = 120;
+    constexpr char kR0LogPrefixDebug[] = "[Debug]";
+    constexpr char kR0LogPrefixInfo[] = "[Info]";
+    constexpr char kR0LogPrefixWarn[] = "[Warn]";
+    constexpr char kR0LogPrefixError[] = "[Error]";
+    constexpr char kR0LogPrefixFatal[] = "[Fatal]";
+
+    // sharedR0DriverLogEvent 作用：
+    // - 统一承载 R3 进程内“驱动日志转发”链路的 GUID；
+    // - 满足“所有驱动输出走同一个 kLogEvent”要求。
+    kLogEvent& sharedR0DriverLogEvent()
+    {
+        static kLogEvent sharedEvent;
+        return sharedEvent;
+    }
+
+    // startsWithLiteral 作用：
+    // - 判断文本是否以固定前缀开头（区分大小写）；
+    // - 仅用于日志等级标签解析。
+    bool startsWithLiteral(const std::string& text, const char* prefixText)
+    {
+        if (prefixText == nullptr)
+        {
+            return false;
+        }
+
+        const std::size_t prefixLength = std::strlen(prefixText);
+        if (text.size() < prefixLength)
+        {
+            return false;
+        }
+        return text.compare(0, prefixLength, prefixText) == 0;
+    }
+
+    class ScopedServiceHandle final
+    {
+    public:
+        ScopedServiceHandle() = default;
+        explicit ScopedServiceHandle(const SC_HANDLE handle)
+            : m_handle(handle)
+        {
+        }
+
+        ScopedServiceHandle(const ScopedServiceHandle&) = delete;
+        ScopedServiceHandle& operator=(const ScopedServiceHandle&) = delete;
+
+        ScopedServiceHandle(ScopedServiceHandle&& other) noexcept
+            : m_handle(other.m_handle)
+        {
+            other.m_handle = nullptr;
+        }
+
+        ScopedServiceHandle& operator=(ScopedServiceHandle&& other) noexcept
+        {
+            if (this != &other)
+            {
+                reset();
+                m_handle = other.m_handle;
+                other.m_handle = nullptr;
+            }
+            return *this;
+        }
+
+        ~ScopedServiceHandle()
+        {
+            reset();
+        }
+
+        void reset(const SC_HANDLE newHandle = nullptr)
+        {
+            if (m_handle != nullptr)
+            {
+                ::CloseServiceHandle(m_handle);
+            }
+            m_handle = newHandle;
+        }
+
+        SC_HANDLE get() const
+        {
+            return m_handle;
+        }
+
+        bool isValid() const
+        {
+            return m_handle != nullptr;
+        }
+
+    private:
+        SC_HANDLE m_handle = nullptr;
+    };
+
+    QString formatWin32ErrorText(const DWORD errorCode)
+    {
+        if (errorCode == ERROR_SUCCESS)
+        {
+            return QStringLiteral("成功");
+        }
+
+        LPWSTR messageBuffer = nullptr;
+        const DWORD messageLength = ::FormatMessageW(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr,
+            errorCode,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            reinterpret_cast<LPWSTR>(&messageBuffer),
+            0,
+            nullptr);
+
+        QString messageText;
+        if (messageLength > 0 && messageBuffer != nullptr)
+        {
+            messageText = QString::fromWCharArray(messageBuffer, static_cast<int>(messageLength)).trimmed();
+        }
+        if (messageBuffer != nullptr)
+        {
+            ::LocalFree(messageBuffer);
+        }
+        if (messageText.isEmpty())
+        {
+            messageText = QStringLiteral("未知系统错误");
+        }
+        return messageText;
+    }
+
+    QString serviceStateToText(const DWORD serviceState)
+    {
+        switch (serviceState)
+        {
+        case SERVICE_STOPPED: return QStringLiteral("STOPPED");
+        case SERVICE_START_PENDING: return QStringLiteral("START_PENDING");
+        case SERVICE_STOP_PENDING: return QStringLiteral("STOP_PENDING");
+        case SERVICE_RUNNING: return QStringLiteral("RUNNING");
+        case SERVICE_CONTINUE_PENDING: return QStringLiteral("CONTINUE_PENDING");
+        case SERVICE_PAUSE_PENDING: return QStringLiteral("PAUSE_PENDING");
+        case SERVICE_PAUSED: return QStringLiteral("PAUSED");
+        default: return QStringLiteral("UNKNOWN");
+        }
+    }
+
+    bool queryServiceStatus(const SC_HANDLE serviceHandle, SERVICE_STATUS_PROCESS& statusOut, DWORD& errorCodeOut)
+    {
+        errorCodeOut = ERROR_SUCCESS;
+        DWORD bytesNeeded = 0;
+        if (::QueryServiceStatusEx(
+            serviceHandle,
+            SC_STATUS_PROCESS_INFO,
+            reinterpret_cast<LPBYTE>(&statusOut),
+            sizeof(statusOut),
+            &bytesNeeded) == FALSE)
+        {
+            errorCodeOut = ::GetLastError();
+            return false;
+        }
+        return true;
+    }
+
+    bool waitServiceState(
+        const SC_HANDLE serviceHandle,
+        const DWORD targetState,
+        const DWORD timeoutMs,
+        SERVICE_STATUS_PROCESS& latestStatusOut,
+        DWORD& errorCodeOut)
+    {
+        errorCodeOut = ERROR_SUCCESS;
+        const ULONGLONG deadline = ::GetTickCount64() + timeoutMs;
+        while (true)
+        {
+            if (!queryServiceStatus(serviceHandle, latestStatusOut, errorCodeOut))
+            {
+                return false;
+            }
+            if (latestStatusOut.dwCurrentState == targetState)
+            {
+                return true;
+            }
+            if (::GetTickCount64() >= deadline)
+            {
+                return false;
+            }
+
+            DWORD waitMs = latestStatusOut.dwWaitHint / 10;
+            if (waitMs < 120)
+            {
+                waitMs = 120;
+            }
+            if (waitMs > 500)
+            {
+                waitMs = 500;
+            }
+            ::Sleep(waitMs);
+        }
+    }
+
+    bool isRunningLikeServiceState(const DWORD serviceState)
+    {
+        return serviceState == SERVICE_RUNNING ||
+            serviceState == SERVICE_START_PENDING ||
+            serviceState == SERVICE_CONTINUE_PENDING;
+    }
+
+    // enableCurrentProcessPrivilege 作用：
+    // - 尝试为当前进程启用指定权限（例如 SeLoadDriverPrivilege）；
+    // - 用于 NtUnloadDriver 调用前的权限准备。
+    bool enableCurrentProcessPrivilege(const wchar_t* const privilegeName, DWORD* const errorCodeOut)
+    {
+        if (errorCodeOut != nullptr)
+        {
+            *errorCodeOut = ERROR_SUCCESS;
+        }
+        if (privilegeName == nullptr || privilegeName[0] == L'\0')
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ERROR_INVALID_PARAMETER;
+            }
+            return false;
+        }
+
+        HANDLE tokenHandle = nullptr;
+        if (::OpenProcessToken(
+            ::GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &tokenHandle) == FALSE)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            return false;
+        }
+
+        LUID privilegeLuid{};
+        if (::LookupPrivilegeValueW(nullptr, privilegeName, &privilegeLuid) == FALSE)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            ::CloseHandle(tokenHandle);
+            return false;
+        }
+
+        TOKEN_PRIVILEGES tokenPrivileges{};
+        tokenPrivileges.PrivilegeCount = 1;
+        tokenPrivileges.Privileges[0].Luid = privilegeLuid;
+        tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (::AdjustTokenPrivileges(
+            tokenHandle,
+            FALSE,
+            &tokenPrivileges,
+            0,
+            nullptr,
+            nullptr) == FALSE)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            ::CloseHandle(tokenHandle);
+            return false;
+        }
+
+        const DWORD adjustError = ::GetLastError();
+        ::CloseHandle(tokenHandle);
+        if (adjustError != ERROR_SUCCESS)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = adjustError;
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    // tryNtUnloadDriverByServiceName 作用：
+    // - 通过 NtUnloadDriver 直接尝试卸载指定服务名对应的驱动；
+    // - 返回 true 表示 NTSTATUS 成功（>=0）。
+    bool tryNtUnloadDriverByServiceName(
+        const wchar_t* const serviceName,
+        long* const ntStatusOut)
+    {
+        if (ntStatusOut != nullptr)
+        {
+            *ntStatusOut = 0L;
+        }
+        if (serviceName == nullptr || serviceName[0] == L'\0')
+        {
+            return false;
+        }
+
+        const HMODULE ntdllModule = ::GetModuleHandleW(L"ntdll.dll");
+        if (ntdllModule == nullptr)
+        {
+            return false;
+        }
+
+        using NtUnloadDriverFn = long (NTAPI*)(PUNICODE_STRING);
+        const NtUnloadDriverFn ntUnloadDriverFn =
+            reinterpret_cast<NtUnloadDriverFn>(::GetProcAddress(ntdllModule, "NtUnloadDriver"));
+        if (ntUnloadDriverFn == nullptr)
+        {
+            return false;
+        }
+
+        std::wstring registryServicePath = L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\";
+        registryServicePath += serviceName;
+
+        UNICODE_STRING registryPathUnicode{};
+        registryPathUnicode.Buffer = const_cast<PWSTR>(registryServicePath.c_str());
+        registryPathUnicode.Length = static_cast<USHORT>(registryServicePath.size() * sizeof(wchar_t));
+        registryPathUnicode.MaximumLength = registryPathUnicode.Length;
+
+        const long ntStatus = ntUnloadDriverFn(&registryPathUnicode);
+        if (ntStatusOut != nullptr)
+        {
+            *ntStatusOut = ntStatus;
+        }
+        return ntStatus >= 0;
+    }
 
     // buildPrivilegeButtonStyle 作用：
     // - 按“当前是否具备权限”生成按钮样式；
@@ -108,6 +439,54 @@ namespace
             .arg(KswordTheme::PrimaryBlueBorderHex)
             .arg(hoverColor)
             .arg(KswordTheme::PrimaryBluePressedHex);
+    }
+
+    // buildR0ButtonStyle 作用：
+    // - R0 专用样式；
+    // - true  -> 蓝底，字体按深浅主题自动黑/白；
+    // - false -> 黑/白底蓝字。
+    QString buildR0ButtonStyle(const bool activeState)
+    {
+        const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
+        const QString adaptiveTextColor = darkModeEnabled
+            ? QStringLiteral("#FFFFFF")
+            : QStringLiteral("#000000");
+        const QString backgroundColor = activeState
+            ? KswordTheme::PrimaryBlueHex
+            : KswordTheme::SurfaceHex();
+        const QString textColor = activeState
+            ? adaptiveTextColor
+            : KswordTheme::PrimaryBlueHex;
+        const QString hoverColor = activeState
+            ? QStringLiteral("#2E8BFF")
+            : (darkModeEnabled ? QStringLiteral("#2A2A2A") : QStringLiteral("#EAF4FF"));
+        const QString pressedColor = activeState
+            ? KswordTheme::PrimaryBluePressedHex
+            : (darkModeEnabled ? QStringLiteral("#1E1E1E") : QStringLiteral("#DCEEFF"));
+        return QStringLiteral(
+            "QPushButton {"
+            "  background:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  border-radius:3px;"
+            "  padding:2px 8px;"
+            "  font-weight:600;"
+            "}"
+            "QPushButton:hover {"
+            "  background:%4;"
+            "  color:%5;"
+            "  border:1px solid %4;"
+            "}"
+            "QPushButton:pressed {"
+            "  background:%6;"
+            "  color:%5;"
+            "}")
+            .arg(backgroundColor)
+            .arg(textColor)
+            .arg(KswordTheme::PrimaryBlueBorderHex)
+            .arg(hoverColor)
+            .arg(activeState ? adaptiveTextColor : KswordTheme::PrimaryBlueHex)
+            .arg(pressedColor);
     }
 
     // normalizeOpacityPercent 作用：
@@ -353,10 +732,11 @@ MainWindow::MainWindow(
     initCustomTitleBar();
 
     // 初始化权限状态按钮：
-    // - Admin / Debug / System / TI / PPL；
+    // - Admin / Debug / System / TI / R0；
     // - 挂载到自绘标题栏右侧，不再依赖原生菜单栏。
     reportStartupProgress(46, QStringLiteral("正在初始化权限状态按钮..."));
     initPrivilegeStatusButtons();
+    startR0DriverLogPoller();
 
     // 初始化Dock Widgets
     reportStartupProgress(48, QStringLiteral("正在创建页面组件..."));
@@ -382,6 +762,7 @@ MainWindow::MainWindow(
 
 MainWindow::~MainWindow()
 {
+    stopR0DriverLogPoller();
     // ADS会自动管理内存，无需手动删除
 }
 
@@ -410,6 +791,25 @@ void MainWindow::closeEvent(QCloseEvent* event)
     if (m_privilegeStatusTimer != nullptr)
     {
         m_privilegeStatusTimer->stop();
+    }
+    stopR0DriverLogPoller();
+
+    // 关闭窗口时自动停止 R0 驱动：
+    // - 先静默查询服务状态；
+    // - 若在运行则执行“静默停驱”（仅记录日志，不弹错误框）。
+    bool r0RunningBeforeExit = false;
+    if (queryR0DriverServiceRunning(r0RunningBeforeExit, false) && r0RunningBeforeExit)
+    {
+        const bool stopOk = stopR0DriverService(true);
+        kLogEvent autoStopEvent;
+        if (stopOk)
+        {
+            info << autoStopEvent << "[MainWindow][R0] 关闭窗口时已自动停止并删除驱动服务。" << eol;
+        }
+        else
+        {
+            warn << autoStopEvent << "[MainWindow][R0] 关闭窗口时自动停驱失败（已静默处理）。" << eol;
+        }
     }
 
     // 接受关闭事件并主动触发应用退出。
@@ -1138,7 +1538,7 @@ void MainWindow::initPrivilegeStatusButtons()
     m_debugStatusButton = new QPushButton("Debug", m_privilegeButtonContainer);
     m_systemStatusButton = new QPushButton("System", m_privilegeButtonContainer);
     m_tiStatusButton = new QPushButton("TI", m_privilegeButtonContainer);
-    m_pplStatusButton = new QPushButton("PPL", m_privilegeButtonContainer);
+    m_r0StatusButton = new QPushButton("R0", m_privilegeButtonContainer);
 
     // 统一按钮尺寸，保证右上角布局整齐。
     const std::array<QPushButton*, 5> statusButtons{
@@ -1146,7 +1546,7 @@ void MainWindow::initPrivilegeStatusButtons()
         m_debugStatusButton,
         m_systemStatusButton,
         m_tiStatusButton,
-        m_pplStatusButton
+        m_r0StatusButton
     };
     for (QPushButton* statusButton : statusButtons)
     {
@@ -1159,9 +1559,8 @@ void MainWindow::initPrivilegeStatusButtons()
         buttonLayout->addWidget(statusButton);
     }
 
-    // 先占位说明：TI / PPL 状态位目前仅展示（后续可扩展实现）。
-    m_tiStatusButton->setToolTip("TrustedInstaller 状态位（预留）");
-    m_pplStatusButton->setToolTip("PPL 状态位（预留）");
+    m_tiStatusButton->setToolTip("TrustedInstaller 状态位");
+    m_r0StatusButton->setToolTip("R0：KswordARK 驱动服务快捷开关");
 
     // 把容器挂到功能条右侧。
     if (m_topActionRowLayout != nullptr)
@@ -1613,6 +2012,14 @@ void MainWindow::initPrivilegeStatusButtons()
         }
     });
 
+    // R0 按钮：
+    // - 启动前先查询服务状态；
+    // - 运行中则停止并卸载服务；
+    // - 未运行则从当前 exe 目录加载 KswordARK.sys。
+    connect(m_r0StatusButton, &QPushButton::clicked, this, [this]() {
+        handleR0StatusButtonClicked();
+    });
+
     // 定时刷新权限状态，保证按钮颜色与实际权限一致。
     m_privilegeStatusTimer = new QTimer(this);
     m_privilegeStatusTimer->setInterval(1500);
@@ -1621,6 +2028,8 @@ void MainWindow::initPrivilegeStatusButtons()
     });
     m_privilegeStatusTimer->start();
 
+    // 启动时执行一次 R0 服务状态查询，作为按钮初始态来源。
+    queryR0DriverServiceRunning(m_r0DriverServiceRunning, true);
     refreshPrivilegeStatusButtons();
 }
 
@@ -1631,18 +2040,21 @@ void MainWindow::refreshPrivilegeStatusButtons()
     const bool debugEnabled = hasDebugPrivilege();
     const bool systemEnabled = hasSystemPrivilege();
 
-    // TI/PPL 状态位：
+    // TI/R0 状态位：
     // - TI：检查当前令牌是否为 TrustedInstaller 服务 SID；
-    // - PPL：当前版本暂不做内核态校验，仍保留为占位状态。
+    // - R0：检查 KswordARK 驱动服务是否处于运行态。
     const bool trustedInstallerEnabled = hasTrustedInstallerPrivilege();
-    const bool pplEnabled = false;
+    const bool r0Enabled = m_r0DriverServiceRunning;
 
     // 按状态更新按钮样式与提示文本。
     applyPrivilegeButtonStyle(m_adminStatusButton, adminEnabled);
     applyPrivilegeButtonStyle(m_debugStatusButton, debugEnabled);
     applyPrivilegeButtonStyle(m_systemStatusButton, systemEnabled);
     applyPrivilegeButtonStyle(m_tiStatusButton, trustedInstallerEnabled);
-    applyPrivilegeButtonStyle(m_pplStatusButton, pplEnabled);
+    if (m_r0StatusButton != nullptr)
+    {
+        m_r0StatusButton->setStyleSheet(buildR0ButtonStyle(r0Enabled));
+    }
 
     if (m_adminStatusButton != nullptr)
     {
@@ -1660,6 +2072,12 @@ void MainWindow::refreshPrivilegeStatusButtons()
     {
         m_tiStatusButton->setToolTip(trustedInstallerEnabled ? "当前运行身份：TrustedInstaller" : "当前运行身份：非 TrustedInstaller");
     }
+    if (m_r0StatusButton != nullptr)
+    {
+        m_r0StatusButton->setToolTip(r0Enabled
+            ? "R0 已启用：KswordARK 驱动服务正在运行（点击卸载）"
+            : "R0 未启用：点击创建并启动 KswordARK 驱动服务");
+    }
 
     // 仅在状态变化时写日志，避免定时器造成日志刷屏。
     static bool hasPreviousState = false;
@@ -1667,17 +2085,20 @@ void MainWindow::refreshPrivilegeStatusButtons()
     static bool previousDebug = false;
     static bool previousSystem = false;
     static bool previousTi = false;
+    static bool previousR0 = false;
     if (!hasPreviousState ||
         previousAdmin != adminEnabled ||
         previousDebug != debugEnabled ||
         previousSystem != systemEnabled ||
-        previousTi != trustedInstallerEnabled)
+        previousTi != trustedInstallerEnabled ||
+        previousR0 != r0Enabled)
     {
         hasPreviousState = true;
         previousAdmin = adminEnabled;
         previousDebug = debugEnabled;
         previousSystem = systemEnabled;
         previousTi = trustedInstallerEnabled;
+        previousR0 = r0Enabled;
 
         kLogEvent logEvent;
         info << logEvent
@@ -1685,6 +2106,7 @@ void MainWindow::refreshPrivilegeStatusButtons()
             << ", debug=" << (debugEnabled ? "true" : "false")
             << ", system=" << (systemEnabled ? "true" : "false")
             << ", ti=" << (trustedInstallerEnabled ? "true" : "false")
+            << ", r0=" << (r0Enabled ? "true" : "false")
             << eol;
     }
 }
@@ -1696,6 +2118,823 @@ void MainWindow::applyPrivilegeButtonStyle(QPushButton* button, const bool activ
         return;
     }
     button->setStyleSheet(buildPrivilegeButtonStyle(activeState));
+}
+
+void MainWindow::startR0DriverLogPoller()
+{
+    if (m_r0DriverLogPollerRunning.exchange(true))
+    {
+        return;
+    }
+
+    try
+    {
+        m_r0DriverLogPollerThread = std::make_unique<std::thread>([this]()
+            {
+                runR0DriverLogPollerLoop();
+            });
+    }
+    catch (...)
+    {
+        m_r0DriverLogPollerRunning.store(false);
+        m_r0DriverLogPollerThread.reset();
+
+        kLogEvent& logEvent = sharedR0DriverLogEvent();
+        err << logEvent << "[MainWindow][R0Log] 轮询线程创建失败。" << eol;
+    }
+}
+
+void MainWindow::stopR0DriverLogPoller()
+{
+    m_r0DriverLogPollerRunning.store(false);
+    if (m_r0DriverLogPollerThread != nullptr && m_r0DriverLogPollerThread->joinable())
+    {
+        m_r0DriverLogPollerThread->join();
+    }
+    m_r0DriverLogPollerThread.reset();
+}
+
+void MainWindow::runR0DriverLogPollerLoop()
+{
+    HANDLE logDeviceHandle = INVALID_HANDLE_VALUE;
+    std::string pendingPayloadText;
+    pendingPayloadText.reserve(2048);
+    bool waitingDeviceLogged = false;
+    static const std::string endMarkerText = KSWORD_ARK_LOG_END_MARKER;
+
+    kLogEvent& logEvent = sharedR0DriverLogEvent();
+    info << logEvent << "[MainWindow][R0Log] 轮询线程已启动。" << eol;
+
+    while (m_r0DriverLogPollerRunning.load())
+    {
+        if (logDeviceHandle == INVALID_HANDLE_VALUE)
+        {
+            logDeviceHandle = ::CreateFileW(
+                KSWORD_ARK_LOG_WIN32_PATH,
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr);
+
+            if (logDeviceHandle == INVALID_HANDLE_VALUE)
+            {
+                if (!waitingDeviceLogged)
+                {
+                    waitingDeviceLogged = true;
+                    dbg << logEvent << "[MainWindow][R0Log] 等待日志设备上线：" << "path=\\\\.\\KswordARKLog" << eol;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(kR0LogConnectRetrySleepMs));
+                continue;
+            }
+
+            waitingDeviceLogged = false;
+            info << logEvent << "[MainWindow][R0Log] 已连接驱动日志设备。" << eol;
+        }
+
+        char readBuffer[1024] = { 0 };
+        DWORD bytesRead = 0;
+        if (::ReadFile(logDeviceHandle, readBuffer, static_cast<DWORD>(sizeof(readBuffer)), &bytesRead, nullptr) != FALSE)
+        {
+            if (bytesRead == 0U)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(kR0LogIdlePollSleepMs));
+                continue;
+            }
+
+            pendingPayloadText.append(readBuffer, bytesRead);
+            while (true)
+            {
+                const std::size_t markerPosition = pendingPayloadText.find(endMarkerText);
+                if (markerPosition == std::string::npos)
+                {
+                    break;
+                }
+
+                const std::string recordText = pendingPayloadText.substr(0, markerPosition);
+                pendingPayloadText.erase(0, markerPosition + endMarkerText.size());
+                dispatchR0DriverLogRecord(recordText);
+            }
+            continue;
+        }
+
+        const DWORD readError = ::GetLastError();
+        if (readError == ERROR_NO_MORE_ITEMS ||
+            readError == ERROR_NO_DATA ||
+            readError == ERROR_HANDLE_EOF)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kR0LogIdlePollSleepMs));
+            continue;
+        }
+
+        warn << logEvent
+            << "[MainWindow][R0Log] 读取日志设备失败, error="
+            << readError
+            << ", 将重新连接。"
+            << eol;
+        ::CloseHandle(logDeviceHandle);
+        logDeviceHandle = INVALID_HANDLE_VALUE;
+        std::this_thread::sleep_for(std::chrono::milliseconds(kR0LogConnectRetrySleepMs));
+    }
+
+    if (logDeviceHandle != INVALID_HANDLE_VALUE)
+    {
+        ::CloseHandle(logDeviceHandle);
+        logDeviceHandle = INVALID_HANDLE_VALUE;
+    }
+
+    info << logEvent << "[MainWindow][R0Log] 轮询线程已退出。" << eol;
+}
+
+void MainWindow::dispatchR0DriverLogRecord(const std::string& logRecordText)
+{
+    if (logRecordText.empty())
+    {
+        return;
+    }
+
+    std::string payloadText = logRecordText;
+    LogStream* outputStream = &info;
+    std::size_t prefixLength = 0U;
+
+    if (startsWithLiteral(payloadText, kR0LogPrefixDebug))
+    {
+        outputStream = &dbg;
+        prefixLength = std::strlen(kR0LogPrefixDebug);
+    }
+    else if (startsWithLiteral(payloadText, kR0LogPrefixInfo))
+    {
+        outputStream = &info;
+        prefixLength = std::strlen(kR0LogPrefixInfo);
+    }
+    else if (startsWithLiteral(payloadText, kR0LogPrefixWarn))
+    {
+        outputStream = &warn;
+        prefixLength = std::strlen(kR0LogPrefixWarn);
+    }
+    else if (startsWithLiteral(payloadText, kR0LogPrefixError))
+    {
+        outputStream = &err;
+        prefixLength = std::strlen(kR0LogPrefixError);
+    }
+    else if (startsWithLiteral(payloadText, kR0LogPrefixFatal))
+    {
+        outputStream = &fatal;
+        prefixLength = std::strlen(kR0LogPrefixFatal);
+    }
+
+    if (prefixLength > 0U && payloadText.size() >= prefixLength)
+    {
+        payloadText.erase(0, prefixLength);
+    }
+
+    kLogEvent& logEvent = sharedR0DriverLogEvent();
+    (*outputStream) << logEvent << "[R0] " << payloadText << eol;
+}
+
+void MainWindow::showR0FatalError(
+    const QString& stageText,
+    const unsigned long errorCode,
+    const QString& detailText)
+{
+    const DWORD win32ErrorCode = static_cast<DWORD>(errorCode);
+    QString messageText = stageText.trimmed();
+    if (win32ErrorCode != ERROR_SUCCESS)
+    {
+        messageText += QStringLiteral("\n\n错误码：%1").arg(win32ErrorCode);
+        messageText += QStringLiteral("\n系统信息：%1").arg(formatWin32ErrorText(win32ErrorCode));
+    }
+    if (!detailText.trimmed().isEmpty())
+    {
+        messageText += QStringLiteral("\n\n详细信息：\n%1").arg(detailText.trimmed());
+    }
+
+    kLogEvent logEvent;
+    fatal << logEvent
+        << "[MainWindow][R0][Fatal] stage=" << stageText.toStdString()
+        << ", error=" << win32ErrorCode
+        << ", detail=" << detailText.toStdString()
+        << eol;
+
+    QMessageBox::critical(this, QStringLiteral("R0 操作失败"), messageText);
+}
+
+bool MainWindow::isR0DriverSignatureFailure(const unsigned long errorCode) const
+{
+    return errorCode == ERROR_INVALID_IMAGE_HASH ||
+        errorCode == ERROR_DRIVER_BLOCKED;
+}
+
+bool MainWindow::queryR0DriverServiceRunning(bool& runningOut, const bool fatalOnError)
+{
+    runningOut = false;
+
+    ScopedServiceHandle scmHandle(::OpenSCManagerW(nullptr, SERVICES_ACTIVE_DATABASE, SC_MANAGER_CONNECT));
+    if (!scmHandle.isValid())
+    {
+        if (fatalOnError)
+        {
+            showR0FatalError(
+                QStringLiteral("查询 KswordARK 驱动服务状态失败：无法连接服务控制管理器。"),
+                ::GetLastError());
+        }
+        return false;
+    }
+
+    ScopedServiceHandle serviceHandle(::OpenServiceW(
+        scmHandle.get(),
+        kR0DriverServiceName,
+        SERVICE_QUERY_STATUS));
+    if (!serviceHandle.isValid())
+    {
+        const DWORD openError = ::GetLastError();
+        if (openError == ERROR_SERVICE_DOES_NOT_EXIST)
+        {
+            runningOut = false;
+            return true;
+        }
+        if (fatalOnError)
+        {
+            showR0FatalError(
+                QStringLiteral("查询 KswordARK 驱动服务状态失败：无法打开服务。"),
+                openError,
+                QStringLiteral("目标服务名：%1").arg(QString::fromWCharArray(kR0DriverServiceName)));
+        }
+        return false;
+    }
+
+    SERVICE_STATUS_PROCESS status{};
+    DWORD queryError = ERROR_SUCCESS;
+    if (!queryServiceStatus(serviceHandle.get(), status, queryError))
+    {
+        if (fatalOnError)
+        {
+            showR0FatalError(
+                QStringLiteral("查询 KswordARK 驱动服务状态失败：读取服务状态失败。"),
+                queryError);
+        }
+        return false;
+    }
+
+    runningOut = isRunningLikeServiceState(status.dwCurrentState);
+    return true;
+}
+
+bool MainWindow::stopR0DriverService(const bool suppressErrorDialog)
+{
+    bool usedDirectNtUnloadFallback = false;
+
+    const auto reportStopFailure =
+        [this, suppressErrorDialog](
+            const QString& stageText,
+            const unsigned long errorCode,
+            const QString& detailText = QString())
+        {
+            if (!suppressErrorDialog)
+            {
+                showR0FatalError(stageText, errorCode, detailText);
+                return;
+            }
+
+            kLogEvent logEvent;
+            err << logEvent
+                << "[MainWindow][R0][AutoStop] stage="
+                << stageText.toStdString()
+                << ", error="
+                << errorCode
+                << ", detail="
+                << detailText.toStdString()
+                << eol;
+        };
+
+    ScopedServiceHandle scmHandle(::OpenSCManagerW(nullptr, SERVICES_ACTIVE_DATABASE, SC_MANAGER_CONNECT));
+    if (!scmHandle.isValid())
+    {
+        reportStopFailure(
+            QStringLiteral("R0 卸载失败：无法连接服务控制管理器。"),
+            ::GetLastError());
+        return false;
+    }
+
+    ScopedServiceHandle serviceHandle(::OpenServiceW(
+        scmHandle.get(),
+        kR0DriverServiceName,
+        SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE));
+    if (!serviceHandle.isValid())
+    {
+        const DWORD openError = ::GetLastError();
+        if (openError == ERROR_SERVICE_DOES_NOT_EXIST)
+        {
+            return true;
+        }
+        reportStopFailure(
+            QStringLiteral("R0 卸载失败：无法打开驱动服务。"),
+            openError);
+        return false;
+    }
+
+    SERVICE_STATUS_PROCESS status{};
+    DWORD queryError = ERROR_SUCCESS;
+    if (!queryServiceStatus(serviceHandle.get(), status, queryError))
+    {
+        reportStopFailure(
+            QStringLiteral("R0 卸载失败：读取驱动服务状态失败。"),
+            queryError);
+        return false;
+    }
+
+    if (status.dwCurrentState != SERVICE_STOPPED)
+    {
+        if (status.dwCurrentState != SERVICE_STOP_PENDING)
+        {
+            SERVICE_STATUS ignoredStatus{};
+            if (::ControlService(serviceHandle.get(), SERVICE_CONTROL_STOP, &ignoredStatus) == FALSE)
+            {
+                const DWORD stopError = ::GetLastError();
+                if (stopError != ERROR_SERVICE_NOT_ACTIVE)
+                {
+                    // 命中 1052（不接受 STOP 控制）时，回退到 NtUnloadDriver 直卸路径。
+                    if (stopError == ERROR_INVALID_SERVICE_CONTROL)
+                    {
+                        DWORD privilegeError = ERROR_SUCCESS;
+                        const bool privilegeOk =
+                            enableCurrentProcessPrivilege(SE_LOAD_DRIVER_NAME, &privilegeError);
+
+                        long ntUnloadStatus = 0;
+                        const bool unloadOk = tryNtUnloadDriverByServiceName(
+                            kR0DriverServiceName,
+                            &ntUnloadStatus);
+                        if (!unloadOk)
+                        {
+                            reportStopFailure(
+                                QStringLiteral("R0 卸载失败：ControlService 返回 1052，且 NtUnloadDriver 回退失败。"),
+                                stopError,
+                                QStringLiteral("enablePrivilegeOk=%1, privilegeError=%2, ntUnloadStatus=0x%3")
+                                .arg(privilegeOk ? QStringLiteral("true") : QStringLiteral("false"))
+                                .arg(privilegeError)
+                                .arg(static_cast<qulonglong>(static_cast<unsigned long>(ntUnloadStatus)), 8, 16, QChar('0')));
+                            return false;
+                        }
+
+                        usedDirectNtUnloadFallback = true;
+                        status.dwCurrentState = SERVICE_STOPPED;
+                    }
+                    else
+                    {
+                        reportStopFailure(
+                            QStringLiteral("R0 卸载失败：停止驱动服务失败。"),
+                            stopError);
+                        return false;
+                    }
+                }
+            }
+        }
+
+        if (!usedDirectNtUnloadFallback)
+        {
+            SERVICE_STATUS_PROCESS latestStatus{};
+            DWORD waitError = ERROR_SUCCESS;
+            if (!waitServiceState(
+                serviceHandle.get(),
+                SERVICE_STOPPED,
+                kR0ServiceWaitTimeoutMs,
+                latestStatus,
+                waitError))
+            {
+                if (waitError != ERROR_SUCCESS)
+                {
+                    reportStopFailure(
+                        QStringLiteral("R0 卸载失败：等待服务停止时查询状态失败。"),
+                        waitError);
+                }
+                else
+                {
+                    reportStopFailure(
+                        QStringLiteral("R0 卸载失败：等待服务停止超时。"),
+                        ERROR_TIMEOUT,
+                        QStringLiteral("当前状态：%1").arg(serviceStateToText(latestStatus.dwCurrentState)));
+                }
+                return false;
+            }
+        }
+    }
+
+    if (::DeleteService(serviceHandle.get()) == FALSE)
+    {
+        const DWORD deleteError = ::GetLastError();
+        if (deleteError != ERROR_SERVICE_MARKED_FOR_DELETE &&
+            deleteError != ERROR_SERVICE_DOES_NOT_EXIST)
+        {
+            reportStopFailure(
+                QStringLiteral("R0 卸载失败：删除驱动服务失败。"),
+                deleteError);
+            return false;
+        }
+    }
+
+    kLogEvent logEvent;
+    info << logEvent << "[MainWindow][R0] 已停止并删除 KswordARK 驱动服务。" << eol;
+    return true;
+}
+
+bool MainWindow::showUnsignedDriverFailureDialog(
+    const unsigned long errorCode,
+    const QString& operationText)
+{
+    const DWORD win32ErrorCode = static_cast<DWORD>(errorCode);
+    const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
+    const QString adaptiveTextColor = darkModeEnabled
+        ? QStringLiteral("#FFFFFF")
+        : QStringLiteral("#000000");
+
+    QDialog decisionDialog(this);
+    decisionDialog.setModal(true);
+    decisionDialog.setWindowTitle(QStringLiteral("KswordARK 驱动签名校验失败"));
+    decisionDialog.setObjectName(QStringLiteral("ksUnsignedDriverFailureDialog"));
+    decisionDialog.setMinimumWidth(680);
+    decisionDialog.setStyleSheet(KswordTheme::OpaqueDialogStyle(decisionDialog.objectName()));
+
+    QVBoxLayout* rootLayout = new QVBoxLayout(&decisionDialog);
+    rootLayout->setContentsMargins(16, 16, 16, 16);
+    rootLayout->setSpacing(10);
+
+    QLabel* failureReasonLabel = new QLabel(
+        QStringLiteral(
+            "驱动加载失败，失败原因是系统拒绝了未通过数字签名校验的内核驱动。\n\n"
+            "操作阶段：%1\n错误码：%2\n系统信息：%3")
+        .arg(operationText)
+        .arg(win32ErrorCode)
+        .arg(formatWin32ErrorText(win32ErrorCode)),
+        &decisionDialog);
+    failureReasonLabel->setWordWrap(true);
+    failureReasonLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    rootLayout->addWidget(failureReasonLabel);
+
+    QLabel* signatureMechanismLabel = new QLabel(
+        QStringLiteral(
+            "Windows 内核驱动默认启用“强制数字签名”机制：系统在加载 .sys 时会校验证书链与镜像完整性。"
+            "当驱动未签名、签名损坏或证书不被信任时，系统会阻止加载。"),
+        &decisionDialog);
+    signatureMechanismLabel->setWordWrap(true);
+    rootLayout->addWidget(signatureMechanismLabel);
+
+    QLabel* actionTitleLabel = new QLabel(QStringLiteral("我可以做什么？"), &decisionDialog);
+    actionTitleLabel->setStyleSheet(QStringLiteral("font-size:16px;font-weight:700;"));
+    rootLayout->addWidget(actionTitleLabel);
+
+    QLabel* testModeDescriptionLabel = new QLabel(
+        QStringLiteral(
+            "测试模式（Test Signing）会放宽驱动签名限制，便于开发调试。\n"
+            "风险说明：\n"
+            "1. 未经签名的恶意驱动同样可以加载。\n"
+            "2. 反作弊程序会阻止所有游戏启动。\n"
+            "3. 开启和关闭测试模式都需要重启电脑。"),
+        &decisionDialog);
+    testModeDescriptionLabel->setWordWrap(true);
+    rootLayout->addWidget(testModeDescriptionLabel);
+
+    QPushButton* continueR3Button = new QPushButton(QStringLiteral("退出并继续使用R3功能"), &decisionDialog);
+    continueR3Button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    continueR3Button->setMinimumHeight(42);
+    continueR3Button->setStyleSheet(QStringLiteral(
+        "QPushButton{"
+        "  background:%1;"
+        "  color:%2;"
+        "  border:1px solid %1;"
+        "  border-radius:4px;"
+        "  font-weight:700;"
+        "}"
+        "QPushButton:hover{"
+        "  background:#2E8BFF;"
+        "}"
+        "QPushButton:pressed{"
+        "  background:%3;"
+        "}")
+        .arg(KswordTheme::PrimaryBlueHex)
+        .arg(adaptiveTextColor)
+        .arg(KswordTheme::PrimaryBluePressedHex));
+    rootLayout->addWidget(continueR3Button);
+
+    QPushButton* enableTestModeButton = new QPushButton(QStringLiteral("开启测试模式"), &decisionDialog);
+    enableTestModeButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    enableTestModeButton->setMinimumHeight(42);
+    enableTestModeButton->setStyleSheet(QStringLiteral(
+        "QPushButton{"
+        "  background:%1;"
+        "  color:%2;"
+        "  border:1px solid %2;"
+        "  border-radius:4px;"
+        "  font-weight:700;"
+        "}"
+        "QPushButton:hover{"
+        "  background:%3;"
+        "}"
+        "QPushButton:pressed{"
+        "  background:%4;"
+        "}")
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::PrimaryBlueHex)
+        .arg(darkModeEnabled ? QStringLiteral("#2A2A2A") : QStringLiteral("#EAF4FF"))
+        .arg(darkModeEnabled ? QStringLiteral("#1D1D1D") : QStringLiteral("#DCEEFF")));
+    rootLayout->addWidget(enableTestModeButton);
+
+    bool enableTestMode = false;
+    connect(continueR3Button, &QPushButton::clicked, &decisionDialog, [&decisionDialog]() {
+        decisionDialog.done(QDialog::Rejected);
+    });
+    connect(enableTestModeButton, &QPushButton::clicked, &decisionDialog, [&decisionDialog, &enableTestMode]() {
+        enableTestMode = true;
+        decisionDialog.done(QDialog::Accepted);
+    });
+
+    decisionDialog.exec();
+    if (!enableTestMode)
+    {
+        return true;
+    }
+    return enableWindowsTestModeAndPromptReboot();
+}
+
+bool MainWindow::enableWindowsTestModeAndPromptReboot()
+{
+    if (!hasAdminPrivilege())
+    {
+        showR0FatalError(
+            QStringLiteral("开启测试模式失败：当前进程没有管理员权限。"),
+            ERROR_ACCESS_DENIED,
+            QStringLiteral("请先以管理员身份运行 Ksword5.1。"));
+        return false;
+    }
+
+    QProcess bcdeditProcess;
+    bcdeditProcess.start(QStringLiteral("bcdedit"), { QStringLiteral("/set"), QStringLiteral("testsigning"), QStringLiteral("on") });
+    if (!bcdeditProcess.waitForStarted(5000))
+    {
+        showR0FatalError(
+            QStringLiteral("开启测试模式失败：无法启动 bcdedit。"),
+            ERROR_GEN_FAILURE,
+            bcdeditProcess.errorString());
+        return false;
+    }
+    if (!bcdeditProcess.waitForFinished(15000))
+    {
+        bcdeditProcess.kill();
+        bcdeditProcess.waitForFinished(3000);
+        showR0FatalError(
+            QStringLiteral("开启测试模式失败：bcdedit 执行超时。"),
+            ERROR_TIMEOUT);
+        return false;
+    }
+
+    const QString standardOutput = QString::fromLocal8Bit(bcdeditProcess.readAllStandardOutput()).trimmed();
+    const QString standardError = QString::fromLocal8Bit(bcdeditProcess.readAllStandardError()).trimmed();
+    if (bcdeditProcess.exitStatus() != QProcess::NormalExit || bcdeditProcess.exitCode() != 0)
+    {
+        QString detailText = QStringLiteral("退出码：%1").arg(bcdeditProcess.exitCode());
+        if (!standardOutput.isEmpty())
+        {
+            detailText += QStringLiteral("\nstdout：%1").arg(standardOutput);
+        }
+        if (!standardError.isEmpty())
+        {
+            detailText += QStringLiteral("\nstderr：%1").arg(standardError);
+        }
+        showR0FatalError(
+            QStringLiteral("开启测试模式失败：bcdedit 返回错误。"),
+            ERROR_GEN_FAILURE,
+            detailText);
+        return false;
+    }
+
+    QMessageBox rebootDialog(this);
+    rebootDialog.setIcon(QMessageBox::Question);
+    rebootDialog.setWindowTitle(QStringLiteral("测试模式已设置"));
+    rebootDialog.setText(QStringLiteral("已执行 bcdedit /set testsigning on。"));
+    rebootDialog.setInformativeText(QStringLiteral("需要重启电脑后才会生效。你可以选择稍后重启或现在重启。"));
+    QPushButton* rebootLaterButton = rebootDialog.addButton(QStringLiteral("稍后重启"), QMessageBox::RejectRole);
+    QPushButton* rebootNowButton = rebootDialog.addButton(QStringLiteral("现在重启"), QMessageBox::AcceptRole);
+    rebootDialog.exec();
+
+    if (rebootDialog.clickedButton() == rebootNowButton)
+    {
+        if (!QProcess::startDetached(QStringLiteral("shutdown"), { QStringLiteral("/r"), QStringLiteral("/t"), QStringLiteral("0") }))
+        {
+            showR0FatalError(
+                QStringLiteral("立即重启失败：无法调用 shutdown 命令。"),
+                ERROR_GEN_FAILURE);
+            return false;
+        }
+    }
+    else if (rebootDialog.clickedButton() == rebootLaterButton)
+    {
+        kLogEvent logEvent;
+        info << logEvent << "[MainWindow][R0] 用户选择稍后重启，测试模式将在下次重启后生效。" << eol;
+    }
+
+    return true;
+}
+
+bool MainWindow::startR0DriverService()
+{
+    const QString driverPath = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("KswordARK.sys"));
+    const QString nativeDriverPath = QDir::toNativeSeparators(driverPath);
+    const QFileInfo driverFileInfo(driverPath);
+    if (!driverFileInfo.exists() || !driverFileInfo.isFile())
+    {
+        showR0FatalError(
+            QStringLiteral("R0 启动失败：当前程序目录下不存在 KswordARK.sys。"),
+            ERROR_FILE_NOT_FOUND,
+            QStringLiteral("期望路径：%1").arg(nativeDriverPath));
+        return false;
+    }
+
+    ScopedServiceHandle scmHandle(::OpenSCManagerW(
+        nullptr,
+        SERVICES_ACTIVE_DATABASE,
+        SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE));
+    if (!scmHandle.isValid())
+    {
+        showR0FatalError(
+            QStringLiteral("R0 启动失败：无法连接服务控制管理器。"),
+            ::GetLastError());
+        return false;
+    }
+
+    ScopedServiceHandle serviceHandle(::OpenServiceW(
+        scmHandle.get(),
+        kR0DriverServiceName,
+        SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP | SERVICE_CHANGE_CONFIG | DELETE));
+    if (!serviceHandle.isValid())
+    {
+        const DWORD openError = ::GetLastError();
+        if (openError != ERROR_SERVICE_DOES_NOT_EXIST)
+        {
+            showR0FatalError(
+                QStringLiteral("R0 启动失败：无法打开已有驱动服务。"),
+                openError);
+            return false;
+        }
+
+        const std::wstring driverPathWide = nativeDriverPath.toStdWString();
+        serviceHandle.reset(::CreateServiceW(
+            scmHandle.get(),
+            kR0DriverServiceName,
+            kR0DriverDisplayName,
+            SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP | SERVICE_CHANGE_CONFIG | DELETE,
+            SERVICE_KERNEL_DRIVER,
+            SERVICE_DEMAND_START,
+            SERVICE_ERROR_NORMAL,
+            driverPathWide.c_str(),
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr));
+        if (!serviceHandle.isValid())
+        {
+            showR0FatalError(
+                QStringLiteral("R0 启动失败：创建驱动服务失败。"),
+                ::GetLastError(),
+                QStringLiteral("驱动路径：%1").arg(nativeDriverPath));
+            return false;
+        }
+    }
+    else
+    {
+        const std::wstring driverPathWide = nativeDriverPath.toStdWString();
+        if (::ChangeServiceConfigW(
+            serviceHandle.get(),
+            SERVICE_KERNEL_DRIVER,
+            SERVICE_DEMAND_START,
+            SERVICE_ERROR_NORMAL,
+            driverPathWide.c_str(),
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            kR0DriverDisplayName) == FALSE)
+        {
+            showR0FatalError(
+                QStringLiteral("R0 启动失败：更新驱动服务配置失败。"),
+                ::GetLastError());
+            return false;
+        }
+    }
+
+    SERVICE_STATUS_PROCESS status{};
+    DWORD queryError = ERROR_SUCCESS;
+    if (!queryServiceStatus(serviceHandle.get(), status, queryError))
+    {
+        showR0FatalError(
+            QStringLiteral("R0 启动失败：读取服务状态失败。"),
+            queryError);
+        return false;
+    }
+
+    if (isRunningLikeServiceState(status.dwCurrentState))
+    {
+        m_r0DriverServiceRunning = true;
+        return true;
+    }
+
+    if (::StartServiceW(serviceHandle.get(), 0, nullptr) == FALSE)
+    {
+        const DWORD startError = ::GetLastError();
+        if (startError == ERROR_SERVICE_ALREADY_RUNNING)
+        {
+            m_r0DriverServiceRunning = true;
+            return true;
+        }
+
+        if (isR0DriverSignatureFailure(startError))
+        {
+            kLogEvent logEvent;
+            fatal << logEvent
+                << "[MainWindow][R0][Fatal] 驱动签名校验失败, error="
+                << startError
+                << eol;
+            showUnsignedDriverFailureDialog(
+                startError,
+                QStringLiteral("启动 KswordARK 驱动服务"));
+            return false;
+        }
+
+        showR0FatalError(
+            QStringLiteral("R0 启动失败：驱动服务启动失败。"),
+            startError,
+            QStringLiteral("驱动路径：%1").arg(nativeDriverPath));
+        return false;
+    }
+
+    SERVICE_STATUS_PROCESS latestStatus{};
+    DWORD waitError = ERROR_SUCCESS;
+    if (!waitServiceState(
+        serviceHandle.get(),
+        SERVICE_RUNNING,
+        kR0ServiceWaitTimeoutMs,
+        latestStatus,
+        waitError))
+    {
+        if (waitError != ERROR_SUCCESS)
+        {
+            showR0FatalError(
+                QStringLiteral("R0 启动失败：等待服务运行时查询状态失败。"),
+                waitError);
+        }
+        else
+        {
+            showR0FatalError(
+                QStringLiteral("R0 启动失败：等待驱动进入运行态超时。"),
+                ERROR_TIMEOUT,
+                QStringLiteral("当前状态：%1").arg(serviceStateToText(latestStatus.dwCurrentState)));
+        }
+        return false;
+    }
+
+    m_r0DriverServiceRunning = true;
+    kLogEvent logEvent;
+    info << logEvent << "[MainWindow][R0] 已创建并启动 KswordARK 驱动服务。" << eol;
+    return true;
+}
+
+void MainWindow::handleR0StatusButtonClicked()
+{
+    bool runningNow = false;
+    if (!queryR0DriverServiceRunning(runningNow, true))
+    {
+        return;
+    }
+    m_r0DriverServiceRunning = runningNow;
+
+    if (runningNow)
+    {
+        if (!stopR0DriverService())
+        {
+            refreshPrivilegeStatusButtons();
+            return;
+        }
+        m_r0DriverServiceRunning = false;
+        refreshPrivilegeStatusButtons();
+        return;
+    }
+
+    if (!startR0DriverService())
+    {
+        m_r0DriverServiceRunning = false;
+        refreshPrivilegeStatusButtons();
+        return;
+    }
+
+    bool finalRunningState = false;
+    if (!queryR0DriverServiceRunning(finalRunningState, true))
+    {
+        refreshPrivilegeStatusButtons();
+        return;
+    }
+    m_r0DriverServiceRunning = finalRunningState;
+    refreshPrivilegeStatusButtons();
 }
 
 void MainWindow::requestAdminElevationRestart()
