@@ -986,6 +986,48 @@ void ProcessDetailWindow::initializeTokenSwitchTab()
     tokenSwitchGridLayout->addWidget(m_tokenMandatoryNewProcessMinCheck, 2, 1);
     m_tokenSwitchLayout->addWidget(tokenSwitchGroup);
 
+    // 常用信息类（布尔语义）组：
+    // - 这些项都来自 TokenInformationClass 下拉中的高频类；
+    // - 通过复选框直接读写，减少“选类 + 填值”的重复操作。
+    QGroupBox* tokenCommonClassGroup =
+        new QGroupBox(QStringLiteral("Token 常用信息类（布尔语义）"), m_tokenSwitchTab);
+    QGridLayout* tokenCommonClassGridLayout = new QGridLayout(tokenCommonClassGroup);
+    tokenCommonClassGridLayout->setHorizontalSpacing(12);
+    tokenCommonClassGridLayout->setVerticalSpacing(8);
+
+    m_tokenHasRestrictionsCheck =
+        new QCheckBox(QStringLiteral("HasRestrictions"), tokenCommonClassGroup);
+    m_tokenHasRestrictionsCheck->setToolTip(
+        QStringLiteral("TokenHasRestrictions（class=21）：是否存在限制 SID / 限制策略"));
+    m_tokenIsAppContainerCheck =
+        new QCheckBox(QStringLiteral("IsAppContainer"), tokenCommonClassGroup);
+    m_tokenIsAppContainerCheck->setToolTip(
+        QStringLiteral("TokenIsAppContainer（class=29）：当前令牌是否为 AppContainer"));
+    m_tokenIsRestrictedCheck =
+        new QCheckBox(QStringLiteral("IsRestricted"), tokenCommonClassGroup);
+    m_tokenIsRestrictedCheck->setToolTip(
+        QStringLiteral("TokenIsRestricted（class=40）：当前令牌是否受限制"));
+    m_tokenIsLessPrivilegedAppContainerCheck =
+        new QCheckBox(QStringLiteral("IsLessPrivilegedAppContainer"), tokenCommonClassGroup);
+    m_tokenIsLessPrivilegedAppContainerCheck->setToolTip(
+        QStringLiteral("TokenIsLessPrivilegedAppContainer（class=46）：是否为低权限 AppContainer"));
+    m_tokenIsSandboxedCheck =
+        new QCheckBox(QStringLiteral("IsSandboxed"), tokenCommonClassGroup);
+    m_tokenIsSandboxedCheck->setToolTip(
+        QStringLiteral("TokenIsSandboxed（class=47）：当前令牌是否被沙箱化"));
+    m_tokenIsAppSiloCheck =
+        new QCheckBox(QStringLiteral("IsAppSilo"), tokenCommonClassGroup);
+    m_tokenIsAppSiloCheck->setToolTip(
+        QStringLiteral("TokenIsAppSilo（class=51）：当前令牌是否属于 AppSilo"));
+
+    tokenCommonClassGridLayout->addWidget(m_tokenHasRestrictionsCheck, 0, 0);
+    tokenCommonClassGridLayout->addWidget(m_tokenIsAppContainerCheck, 0, 1);
+    tokenCommonClassGridLayout->addWidget(m_tokenIsRestrictedCheck, 1, 0);
+    tokenCommonClassGridLayout->addWidget(m_tokenIsLessPrivilegedAppContainerCheck, 1, 1);
+    tokenCommonClassGridLayout->addWidget(m_tokenIsSandboxedCheck, 2, 0);
+    tokenCommonClassGridLayout->addWidget(m_tokenIsAppSiloCheck, 2, 1);
+    m_tokenSwitchLayout->addWidget(tokenCommonClassGroup);
+
     // 原始设置组：
     // - 允许用户选择任意 TokenInformationClass；
     // - 负载支持 UInt32/UInt64/HexBytes，直接进入 NtSetInformationToken。

@@ -79,6 +79,18 @@
     <ClCompile Include="KernelDock\KernelDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="KernelDock\KernelDock.ContextMenu.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDock.Runtime.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDockAtomWorker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDockObjectNamespaceWorker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KernelDock\KernelDockQueryWorker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -459,6 +471,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="KernelDock\KernelDockQueryWorker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelDockAtomWorker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelDockObjectNamespaceWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Ksword.h">

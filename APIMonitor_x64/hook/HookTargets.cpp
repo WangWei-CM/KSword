@@ -262,6 +262,8 @@ namespace apimon
             { L"KernelBase.dll", "CreateProcessW", ks::winapi_monitor::EventCategory::Process, &g_createProcessWHook, reinterpret_cast<void*>(&HookedCreateProcessW), reinterpret_cast<void**>(&g_createProcessWOriginal) },
             { L"Kernel32.dll", "LoadLibraryW", ks::winapi_monitor::EventCategory::Loader, &g_loadLibraryWHook, reinterpret_cast<void*>(&HookedLoadLibraryW), reinterpret_cast<void**>(&g_loadLibraryWOriginal) },
             { L"Kernel32.dll", "LoadLibraryExW", ks::winapi_monitor::EventCategory::Loader, &g_loadLibraryExWHook, reinterpret_cast<void*>(&HookedLoadLibraryExW), reinterpret_cast<void**>(&g_loadLibraryExWOriginal) },
+            // RegOpenKeyExW：注册表读取入口 API，必须纳入绑定表，否则“注册表打开/读取”事件会缺失。
+            { L"Advapi32.dll", "RegOpenKeyExW", ks::winapi_monitor::EventCategory::Registry, &g_regOpenKeyExWHook, reinterpret_cast<void*>(&HookedRegOpenKeyExW), reinterpret_cast<void**>(&g_regOpenKeyExWOriginal) },
             { L"Advapi32.dll", "RegCreateKeyExW", ks::winapi_monitor::EventCategory::Registry, &g_regCreateKeyExWHook, reinterpret_cast<void*>(&HookedRegCreateKeyExW), reinterpret_cast<void**>(&g_regCreateKeyExWOriginal) },
             { L"Advapi32.dll", "RegSetValueExW", ks::winapi_monitor::EventCategory::Registry, &g_regSetValueExWHook, reinterpret_cast<void*>(&HookedRegSetValueExW), reinterpret_cast<void**>(&g_regSetValueExWOriginal) },
             { L"Ws2_32.dll", "connect", ks::winapi_monitor::EventCategory::Network, &g_connectHook, reinterpret_cast<void*>(&HookedConnect), reinterpret_cast<void**>(&g_connectOriginal) },

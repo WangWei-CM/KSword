@@ -10,6 +10,14 @@
 右键菜单（QMenu）是高风险点：默认样式在某些页面会继承透明/未填充背景，浅色模式下可能出现黑底黑字。凡是新增或修改右键菜单，必须显式设置背景样式（至少设置QMenu背景、文字、选中态、禁用态），不要依赖默认样式。
 详情弹窗（QDialog）同样是高风险点：如果父容器用了透明或特殊样式，弹窗可能出现黑底。新增详情页时必须显式设置不透明背景样式，确保浅色/深色都可读。
 
+R3 与 R0 的通信结构体/IOCTL 常量统一放在 `shared/driver/` 目录，不允许分散定义在 UI 文件或驱动私有头里。新增通信协议时，必须先在 `shared/driver/` 建头文件，再让 R3/R0 同时 include 这一个文件。
+凡是使用 R0 的功能入口（按钮、面板、弹窗、专用功能区），右下角必须放置这张图：`H:\Project\Ksword5.1\Ksword5.1\Ksword5.1\Resource\Kernel.png`。这是统一视觉标识，不能省略。
+R0 结束进程功能代码放置规范：
+- R3 入口：`Ksword5.1/Ksword5.1/ProcessDock/ProcessDock.cpp` 的进程列表右键菜单动作；动作函数只负责收集 PID、调用驱动、写日志和刷新。
+- R3 协议定义：`shared/driver/KswordArkProcessIoctl.h`（PID/退出码结构与 IOCTL 号）。
+- R0 分发入口：`KswordARKDriver/Queue.c` 的 `KswordARKDriverEvtIoDeviceControl`；这里做 IOCTL 解析、参数校验、日志。
+- R0 执行要求：驱动侧实际结束进程必须走 `ZwTerminateProcess`，并通过现有日志通道输出 `[Info]/[Warn]/[Error]...END_OF_LOG`。
+
 > 本文档描述 `Framework.h` 日志系统的调用方式与语法规范。  
 > 适用范围：Windows 平台下的 KswordARK/Ksword5.1 工程。
 

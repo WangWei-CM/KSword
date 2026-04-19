@@ -58,6 +58,22 @@ namespace
     constexpr DWORD kTokenAdjustSessionIdAccess = TOKEN_ADJUST_SESSIONID;
 #endif
 
+    // 布尔语义 TokenInformationClass 常量：
+    // - 使用数值常量规避不同 SDK 头文件的枚举可见性差异；
+    // - 与“令牌开关页”新增复选框一一对应。
+    constexpr TOKEN_INFORMATION_CLASS kTokenInfoClassHasRestrictions =
+        static_cast<TOKEN_INFORMATION_CLASS>(21);
+    constexpr TOKEN_INFORMATION_CLASS kTokenInfoClassIsAppContainer =
+        static_cast<TOKEN_INFORMATION_CLASS>(29);
+    constexpr TOKEN_INFORMATION_CLASS kTokenInfoClassIsRestricted =
+        static_cast<TOKEN_INFORMATION_CLASS>(40);
+    constexpr TOKEN_INFORMATION_CLASS kTokenInfoClassIsLessPrivilegedAppContainer =
+        static_cast<TOKEN_INFORMATION_CLASS>(46);
+    constexpr TOKEN_INFORMATION_CLASS kTokenInfoClassIsSandboxed =
+        static_cast<TOKEN_INFORMATION_CLASS>(47);
+    constexpr TOKEN_INFORMATION_CLASS kTokenInfoClassIsAppSilo =
+        static_cast<TOKEN_INFORMATION_CLASS>(51);
+
     // GetProcessInformation(ProcessPowerThrottling) 所需结构：
     // - 采用本地定义，避免依赖高版本 SDK 才可见的类型声明。
     struct ProcessPowerThrottlingStateNative
@@ -1329,6 +1345,30 @@ void ProcessDetailWindow::refreshTokenSwitchStates()
     queryBoolToCheckBox(m_tokenVirtualizationAllowedCheck, TokenVirtualizationAllowed, QStringLiteral("VirtualizationAllowed"));
     queryBoolToCheckBox(m_tokenVirtualizationEnabledCheck, TokenVirtualizationEnabled, QStringLiteral("VirtualizationEnabled"));
     queryBoolToCheckBox(m_tokenUiAccessCheck, TokenUIAccess, QStringLiteral("UIAccess"));
+    queryBoolToCheckBox(
+        m_tokenHasRestrictionsCheck,
+        kTokenInfoClassHasRestrictions,
+        QStringLiteral("HasRestrictions"));
+    queryBoolToCheckBox(
+        m_tokenIsAppContainerCheck,
+        kTokenInfoClassIsAppContainer,
+        QStringLiteral("IsAppContainer"));
+    queryBoolToCheckBox(
+        m_tokenIsRestrictedCheck,
+        kTokenInfoClassIsRestricted,
+        QStringLiteral("IsRestricted"));
+    queryBoolToCheckBox(
+        m_tokenIsLessPrivilegedAppContainerCheck,
+        kTokenInfoClassIsLessPrivilegedAppContainer,
+        QStringLiteral("IsLessPrivilegedAppContainer"));
+    queryBoolToCheckBox(
+        m_tokenIsSandboxedCheck,
+        kTokenInfoClassIsSandboxed,
+        QStringLiteral("IsSandboxed"));
+    queryBoolToCheckBox(
+        m_tokenIsAppSiloCheck,
+        kTokenInfoClassIsAppSilo,
+        QStringLiteral("IsAppSilo"));
 
     // MandatoryPolicy 读取：
     // - 一次读取两个位，分别同步到两个策略复选框；
@@ -1535,6 +1575,30 @@ void ProcessDetailWindow::applyTokenSwitchStates()
     applyBoolFromCheckBox(m_tokenVirtualizationAllowedCheck, TokenVirtualizationAllowed, QStringLiteral("VirtualizationAllowed"));
     applyBoolFromCheckBox(m_tokenVirtualizationEnabledCheck, TokenVirtualizationEnabled, QStringLiteral("VirtualizationEnabled"));
     applyBoolFromCheckBox(m_tokenUiAccessCheck, TokenUIAccess, QStringLiteral("UIAccess"));
+    applyBoolFromCheckBox(
+        m_tokenHasRestrictionsCheck,
+        kTokenInfoClassHasRestrictions,
+        QStringLiteral("HasRestrictions"));
+    applyBoolFromCheckBox(
+        m_tokenIsAppContainerCheck,
+        kTokenInfoClassIsAppContainer,
+        QStringLiteral("IsAppContainer"));
+    applyBoolFromCheckBox(
+        m_tokenIsRestrictedCheck,
+        kTokenInfoClassIsRestricted,
+        QStringLiteral("IsRestricted"));
+    applyBoolFromCheckBox(
+        m_tokenIsLessPrivilegedAppContainerCheck,
+        kTokenInfoClassIsLessPrivilegedAppContainer,
+        QStringLiteral("IsLessPrivilegedAppContainer"));
+    applyBoolFromCheckBox(
+        m_tokenIsSandboxedCheck,
+        kTokenInfoClassIsSandboxed,
+        QStringLiteral("IsSandboxed"));
+    applyBoolFromCheckBox(
+        m_tokenIsAppSiloCheck,
+        kTokenInfoClassIsAppSilo,
+        QStringLiteral("IsAppSilo"));
 
     // MandatoryPolicy 写入：
     // - 由两个策略复选框合成一个 POLICY 位掩码；

@@ -242,6 +242,10 @@ private:
     // - 固定顺序执行多种结束原理（TerminateProcess/Nt/WTS/Job/RestartManager/线程终止/调试器/Unmap 等）；
     // - 使用同一个 kLogEvent 串联整次调用链日志并判定目标是否真正退出。
     void executeTerminateProcessAction();
+    // executeR0TerminateProcessAction 作用：
+    // - 通过 R0 驱动 IOCTL 请求内核态结束目标进程；
+    // - 成功/失败细节统一写入日志面板。
+    void executeR0TerminateProcessAction();
     // executeTerminateThreadsAction 作用：
     // - 单独执行 TerminateThread(全部线程)（保留给其他入口复用）；
     // - 与“结束进程组合动作”不同，该函数不包含 TerminateProcess 步骤。

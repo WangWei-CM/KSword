@@ -157,6 +157,10 @@
     <ClCompile Include="Framework\StartupSplash.cpp" />
     <ClCompile Include="Framework\ThemedMessageBox.cpp" />
     <ClCompile Include="KernelDock\KernelDock.cpp" />
+    <ClCompile Include="KernelDock\KernelDock.ContextMenu.cpp" />
+    <ClCompile Include="KernelDock\KernelDock.Runtime.cpp" />
+    <ClCompile Include="KernelDock\KernelDockAtomWorker.cpp" />
+    <ClCompile Include="KernelDock\KernelDockObjectNamespaceWorker.cpp" />
     <ClCompile Include="KernelDock\KernelDockQueryWorker.cpp" />
     <ClCompile Include="MainWindow.cpp" />
     <ClCompile Include="MiscDock\BootEditor\BootEditorTab.Actions.cpp" />
@@ -262,6 +266,8 @@
     <ClInclude Include="Framework\ProgressDockWidget.h" />
     <ClInclude Include="Framework\StartupSplash.h" />
     <ClInclude Include="Framework\ThemedMessageBox.h" />
+    <ClInclude Include="KernelDock\KernelDockAtomWorker.h" />
+    <ClInclude Include="KernelDock\KernelDockObjectNamespaceWorker.h" />
     <ClInclude Include="KernelDock\KernelDockQueryWorker.h" />
     <ClInclude Include="ksword\ksword.h" />
     <ClInclude Include="ksword\process\process.h" />

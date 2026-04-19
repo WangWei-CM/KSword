@@ -1,39 +1,33 @@
+
 #include "KernelDock.h"
 
 // ============================================================
 // KernelDock.cpp
 // 作用说明：
-// 1) 负责 KernelDock 的 UI 构建与交互；
-// 2) 耗时查询通过 KernelDockQueryWorker 在后台线程执行；
-// 3) 本文件只处理表格渲染与详情展示，不做底层 Nt 解析。
+// 1) 实现内核 Dock 的三页 UI（对象命名空间 / 原子表 / 历史 NtQuery）；
+// 2) 实现异步刷新、筛选、详情联动与右键菜单；
+// 3) 具体底层枚举逻辑放在 Worker 文件，当前文件仅做界面和交互编排。
 // ============================================================
 
-#include "KernelDockQueryWorker.h"
+#include "../UI/CodeEditorWidget.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
-#include <QBrush>
-#include <QColor>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
-#include <QPlainTextEdit>
-#include <QPointer>
 #include <QPushButton>
 #include <QSplitter>
 #include <QTableWidget>
-#include <QTableWidgetItem>
 #include <QTabWidget>
 #include <QVBoxLayout>
-
-#include <thread> // std::thread：执行后台刷新任务。
 
 namespace
 {
     // blueButtonStyle：
-    // - 作用：统一蓝色按钮样式，保证内核页与全局主题一致。
+    // - 作用：统一图标按钮样式（带悬停与按下态）。
     QString blueButtonStyle()
     {
         return QStringLiteral(
@@ -48,12 +42,12 @@ namespace
     }
 
     // blueInputStyle：
-    // - 作用：统一输入框/详情框样式，降低视觉跳变。
+    // - 作用：统一筛选输入框样式。
     QString blueInputStyle()
     {
         return QStringLiteral(
-            "QLineEdit,QPlainTextEdit{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
-            "QLineEdit:focus,QPlainTextEdit:focus{border:1px solid %1;}")
+            "QLineEdit{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
+            "QLineEdit:focus{border:1px solid %1;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::BorderHex())
             .arg(KswordTheme::SurfaceHex())
@@ -61,7 +55,7 @@ namespace
     }
 
     // headerStyle：
-    // - 作用：统一表头颜色和字重，突出关键信息列。
+    // - 作用：统一表头样式，强化列标题可读性。
     QString headerStyle()
     {
         return QStringLiteral(
@@ -71,28 +65,73 @@ namespace
             .arg(KswordTheme::BorderHex());
     }
 
-    // boolText：
-    // - 作用：布尔值统一输出中文“是/否”。
-    QString boolText(const bool value)
+    // tableSelectionStyle：
+    // - 作用：固定表格选中高亮为主题蓝，避免系统默认配色差异。
+    QString tableSelectionStyle()
     {
-        return value ? QStringLiteral("是") : QStringLiteral("否");
+        return QStringLiteral("QTableWidget::item:selected{background:#2E8BFF;color:#FFFFFF;}");
     }
+
+    // statusLabelStyle：
+    // - 作用：统一状态标签的颜色与字重。
+    QString statusLabelStyle(const QString& colorHex)
+    {
+        return QStringLiteral("color:%1;font-weight:600;").arg(colorHex);
+    }
+
+    // ObjectNamespaceColumn：对象命名空间表列索引。
+    enum class ObjectNamespaceColumn : int
+    {
+        RootPath = 0,
+        Scope,
+        DirectoryPath,
+        ObjectName,
+        ObjectType,
+        FullPath,
+        EnumApi,
+        SymbolicTarget,
+        Status,
+        Count
+    };
+
+    // AtomColumn：原子表列索引。
+    enum class AtomColumn : int
+    {
+        Value = 0,
+        Hex,
+        Name,
+        Source,
+        Status,
+        Count
+    };
+
+    // NtQueryColumn：历史 NtQuery 表列索引。
+    enum class NtQueryColumn : int
+    {
+        Category = 0,
+        Function,
+        QueryItem,
+        Status,
+        Summary,
+        Count
+    };
 }
 
 KernelDock::KernelDock(QWidget* parent)
     : QWidget(parent)
 {
-    kLogEvent event;
-    info << event << "[KernelDock] 构造开始，初始化内核模块。" << eol;
+    kLogEvent initEvent;
+    info << initEvent << "[KernelDock] 构造开始，准备初始化三页内核视图。" << eol;
 
     initializeUi();
     initializeConnections();
 
-    // “对象类型”页已迁移到句柄模块，这里只保留 NtQuery 页面自动刷新。
+    // 默认先刷新新功能页，再刷新历史页。
+    refreshObjectNamespaceAsync();
+    refreshAtomTableAsync();
     refreshNtQueryAsync();
 
-    kLogEvent finishEvent;
-    info << finishEvent << "[KernelDock] 构造完成。" << eol;
+    info << initEvent << "[KernelDock] 构造完成。" << eol;
 }
 
 void KernelDock::initializeUi()
@@ -104,75 +143,164 @@ void KernelDock::initializeUi()
     m_tabWidget = new QTabWidget(this);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
-    // 对象类型页已迁移到“句柄”Dock，这里不再创建旧对象类型页。
+    initializeObjectNamespaceTab();
+    initializeAtomTableTab();
     initializeNtQueryTab();
+
+    m_tabWidget->setCurrentWidget(m_objectNamespacePage);
 }
 
-void KernelDock::initializeKernelTypeTab()
+void KernelDock::initializeObjectNamespaceTab()
 {
-    m_kernelTypePage = new QWidget(m_tabWidget);
-    m_kernelTypeLayout = new QVBoxLayout(m_kernelTypePage);
-    m_kernelTypeLayout->setContentsMargins(4, 4, 4, 4);
-    m_kernelTypeLayout->setSpacing(6);
+    m_objectNamespacePage = new QWidget(m_tabWidget);
+    m_objectNamespaceLayout = new QVBoxLayout(m_objectNamespacePage);
+    m_objectNamespaceLayout->setContentsMargins(4, 4, 4, 4);
+    m_objectNamespaceLayout->setSpacing(6);
 
-    m_kernelTypeToolLayout = new QHBoxLayout();
-    m_kernelTypeToolLayout->setContentsMargins(0, 0, 0, 0);
-    m_kernelTypeToolLayout->setSpacing(6);
+    m_objectNamespaceToolLayout = new QHBoxLayout();
+    m_objectNamespaceToolLayout->setContentsMargins(0, 0, 0, 0);
+    m_objectNamespaceToolLayout->setSpacing(6);
 
-    m_refreshKernelTypeButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_kernelTypePage);
-    m_refreshKernelTypeButton->setToolTip(QStringLiteral("刷新内核对象类型"));
-    m_refreshKernelTypeButton->setStyleSheet(blueButtonStyle());
-    m_refreshKernelTypeButton->setFixedWidth(34);
+    m_refreshObjectNamespaceButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_objectNamespacePage);
+    m_refreshObjectNamespaceButton->setToolTip(QStringLiteral("刷新对象命名空间枚举结果"));
+    m_refreshObjectNamespaceButton->setStyleSheet(blueButtonStyle());
+    m_refreshObjectNamespaceButton->setFixedWidth(34);
 
-    m_kernelTypeFilterEdit = new QLineEdit(m_kernelTypePage);
-    m_kernelTypeFilterEdit->setPlaceholderText(QStringLiteral("输入类型名或编号过滤"));
-    m_kernelTypeFilterEdit->setToolTip(QStringLiteral("根据对象类型名称或编号筛选"));
-    m_kernelTypeFilterEdit->setStyleSheet(blueInputStyle());
+    m_objectNamespaceFilterEdit = new QLineEdit(m_objectNamespacePage);
+    m_objectNamespaceFilterEdit->setPlaceholderText(QStringLiteral("按根目录/对象名/对象类型/路径筛选"));
+    m_objectNamespaceFilterEdit->setToolTip(QStringLiteral("输入关键字后实时过滤对象命名空间表格"));
+    m_objectNamespaceFilterEdit->setClearButtonEnabled(true);
+    m_objectNamespaceFilterEdit->setStyleSheet(blueInputStyle());
 
-    m_kernelTypeStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_kernelTypePage);
+    m_objectNamespaceStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_objectNamespacePage);
+    m_objectNamespaceStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
-    m_kernelTypeToolLayout->addWidget(m_refreshKernelTypeButton);
-    m_kernelTypeToolLayout->addWidget(m_kernelTypeFilterEdit, 1);
-    m_kernelTypeToolLayout->addWidget(m_kernelTypeStatusLabel, 0);
-    m_kernelTypeLayout->addLayout(m_kernelTypeToolLayout);
+    m_objectNamespaceToolLayout->addWidget(m_refreshObjectNamespaceButton, 0);
+    m_objectNamespaceToolLayout->addWidget(m_objectNamespaceFilterEdit, 1);
+    m_objectNamespaceToolLayout->addWidget(m_objectNamespaceStatusLabel, 0);
+    m_objectNamespaceLayout->addLayout(m_objectNamespaceToolLayout);
 
-    QSplitter* splitter = new QSplitter(Qt::Vertical, m_kernelTypePage);
-    m_kernelTypeLayout->addWidget(splitter, 1);
+    QSplitter* splitter = new QSplitter(Qt::Vertical, m_objectNamespacePage);
+    m_objectNamespaceLayout->addWidget(splitter, 1);
 
-    m_kernelTypeTable = new QTableWidget(splitter);
-    m_kernelTypeTable->setColumnCount(7);
-    m_kernelTypeTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("类型编号"),
-        QStringLiteral("类型名"),
-        QStringLiteral("对象数"),
-        QStringLiteral("句柄数"),
-        QStringLiteral("访问掩码"),
-        QStringLiteral("安全要求"),
-        QStringLiteral("维护计数")
+    m_objectNamespaceTable = new QTableWidget(splitter);
+    m_objectNamespaceTable->setColumnCount(static_cast<int>(ObjectNamespaceColumn::Count));
+    m_objectNamespaceTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("目录路径"),
+        QStringLiteral("作用说明"),
+        QStringLiteral("当前目录"),
+        QStringLiteral("对象名"),
+        QStringLiteral("对象类型"),
+        QStringLiteral("完整路径"),
+        QStringLiteral("枚举 API"),
+        QStringLiteral("符号链接目标"),
+        QStringLiteral("状态")
         });
-    m_kernelTypeTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_kernelTypeTable->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_kernelTypeTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_kernelTypeTable->setAlternatingRowColors(true);
-    // 固定选中高亮为主题蓝，避免出现系统绿色高亮。
-    m_kernelTypeTable->setStyleSheet(QStringLiteral(
-        "QTableWidget::item:selected{background:#2E8BFF;color:#FFFFFF;}"));
-    // 关闭角按钮，防止左上角出现白色小块。
-    m_kernelTypeTable->setCornerButtonEnabled(false);
-    m_kernelTypeTable->verticalHeader()->setVisible(false);
-    m_kernelTypeTable->horizontalHeader()->setStyleSheet(headerStyle());
-    m_kernelTypeTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    m_kernelTypeTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_objectNamespaceTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_objectNamespaceTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_objectNamespaceTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_objectNamespaceTable->setAlternatingRowColors(true);
+    m_objectNamespaceTable->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_objectNamespaceTable->setStyleSheet(tableSelectionStyle());
+    m_objectNamespaceTable->setCornerButtonEnabled(false);
+    m_objectNamespaceTable->verticalHeader()->setVisible(false);
+    m_objectNamespaceTable->horizontalHeader()->setStyleSheet(headerStyle());
+    m_objectNamespaceTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_objectNamespaceTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(ObjectNamespaceColumn::FullPath), QHeaderView::Stretch);
+    m_objectNamespaceTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(ObjectNamespaceColumn::EnumApi), QHeaderView::Interactive);
+    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::RootPath), 180);
+    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::Scope), 220);
+    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::DirectoryPath), 220);
+    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::ObjectName), 180);
+    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::ObjectType), 120);
+    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::EnumApi), 360);
+    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), 260);
+    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::Status), 220);
 
-    m_kernelTypeDetailEdit = new QPlainTextEdit(splitter);
-    m_kernelTypeDetailEdit->setReadOnly(true);
-    m_kernelTypeDetailEdit->setStyleSheet(blueInputStyle());
-    m_kernelTypeDetailEdit->setPlainText(QStringLiteral("请选择一条类型记录查看详情。"));
+    m_objectNamespaceDetailEditor = new CodeEditorWidget(splitter);
+    m_objectNamespaceDetailEditor->setReadOnly(true);
+    m_objectNamespaceDetailEditor->setText(QStringLiteral("请选择一条对象命名空间记录查看详情。"));
 
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
 
-    m_tabWidget->addTab(m_kernelTypePage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("内核对象类型"));
+    const int objectNamespaceTabIndex = m_tabWidget->addTab(
+        m_objectNamespacePage,
+        QIcon(":/Icon/process_tree.svg"),
+        QStringLiteral("对象命名空间"));
+    m_tabWidget->setTabToolTip(objectNamespaceTabIndex, QStringLiteral("对象管理器命名空间遍历（默认页）"));
+}
+
+void KernelDock::initializeAtomTableTab()
+{
+    m_atomPage = new QWidget(m_tabWidget);
+    m_atomLayout = new QVBoxLayout(m_atomPage);
+    m_atomLayout->setContentsMargins(4, 4, 4, 4);
+    m_atomLayout->setSpacing(6);
+
+    m_atomToolLayout = new QHBoxLayout();
+    m_atomToolLayout->setContentsMargins(0, 0, 0, 0);
+    m_atomToolLayout->setSpacing(6);
+
+    m_refreshAtomButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_atomPage);
+    m_refreshAtomButton->setToolTip(QStringLiteral("刷新原子表遍历结果"));
+    m_refreshAtomButton->setStyleSheet(blueButtonStyle());
+    m_refreshAtomButton->setFixedWidth(34);
+
+    m_atomFilterEdit = new QLineEdit(m_atomPage);
+    m_atomFilterEdit->setPlaceholderText(QStringLiteral("按 Atom 值/十六进制/名称/来源筛选"));
+    m_atomFilterEdit->setToolTip(QStringLiteral("输入关键字后实时过滤原子表"));
+    m_atomFilterEdit->setClearButtonEnabled(true);
+    m_atomFilterEdit->setStyleSheet(blueInputStyle());
+
+    m_atomStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_atomPage);
+    m_atomStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
+
+    m_atomToolLayout->addWidget(m_refreshAtomButton, 0);
+    m_atomToolLayout->addWidget(m_atomFilterEdit, 1);
+    m_atomToolLayout->addWidget(m_atomStatusLabel, 0);
+    m_atomLayout->addLayout(m_atomToolLayout);
+
+    QSplitter* splitter = new QSplitter(Qt::Vertical, m_atomPage);
+    m_atomLayout->addWidget(splitter, 1);
+
+    m_atomTable = new QTableWidget(splitter);
+    m_atomTable->setColumnCount(static_cast<int>(AtomColumn::Count));
+    m_atomTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("Atom值"),
+        QStringLiteral("十六进制"),
+        QStringLiteral("名称"),
+        QStringLiteral("来源"),
+        QStringLiteral("状态")
+        });
+    m_atomTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_atomTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_atomTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_atomTable->setAlternatingRowColors(true);
+    m_atomTable->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_atomTable->setStyleSheet(tableSelectionStyle());
+    m_atomTable->setCornerButtonEnabled(false);
+    m_atomTable->verticalHeader()->setVisible(false);
+    m_atomTable->horizontalHeader()->setStyleSheet(headerStyle());
+    m_atomTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_atomTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(AtomColumn::Name), QHeaderView::Stretch);
+    m_atomTable->setColumnWidth(static_cast<int>(AtomColumn::Value), 110);
+    m_atomTable->setColumnWidth(static_cast<int>(AtomColumn::Hex), 110);
+    m_atomTable->setColumnWidth(static_cast<int>(AtomColumn::Source), 220);
+    m_atomTable->setColumnWidth(static_cast<int>(AtomColumn::Status), 160);
+
+    m_atomDetailEditor = new CodeEditorWidget(splitter);
+    m_atomDetailEditor->setReadOnly(true);
+    m_atomDetailEditor->setText(QStringLiteral("请选择一条原子记录查看详情。"));
+
+    splitter->setStretchFactor(0, 3);
+    splitter->setStretchFactor(1, 2);
+
+    const int atomTabIndex = m_tabWidget->addTab(
+        m_atomPage,
+        QIcon(":/Icon/process_threads.svg"),
+        QStringLiteral("原子表遍历"));
+    m_tabWidget->setTabToolTip(atomTabIndex, QStringLiteral("遍历全局原子范围并提供校验操作"));
 }
 
 void KernelDock::initializeNtQueryTab()
@@ -187,13 +315,14 @@ void KernelDock::initializeNtQueryTab()
     m_ntQueryToolLayout->setSpacing(6);
 
     m_refreshNtQueryButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_ntQueryPage);
-    m_refreshNtQueryButton->setToolTip(QStringLiteral("刷新 NtQuery 信息"));
+    m_refreshNtQueryButton->setToolTip(QStringLiteral("刷新历史 NtQuery 信息"));
     m_refreshNtQueryButton->setStyleSheet(blueButtonStyle());
     m_refreshNtQueryButton->setFixedWidth(34);
 
     m_ntQueryStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_ntQueryPage);
+    m_ntQueryStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
-    m_ntQueryToolLayout->addWidget(m_refreshNtQueryButton);
+    m_ntQueryToolLayout->addWidget(m_refreshNtQueryButton, 0);
     m_ntQueryToolLayout->addWidget(m_ntQueryStatusLabel, 1);
     m_ntQueryLayout->addLayout(m_ntQueryToolLayout);
 
@@ -201,7 +330,7 @@ void KernelDock::initializeNtQueryTab()
     m_ntQueryLayout->addWidget(splitter, 1);
 
     m_ntQueryTable = new QTableWidget(splitter);
-    m_ntQueryTable->setColumnCount(5);
+    m_ntQueryTable->setColumnCount(static_cast<int>(NtQueryColumn::Count));
     m_ntQueryTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("类别"),
         QStringLiteral("函数"),
@@ -213,356 +342,63 @@ void KernelDock::initializeNtQueryTab()
     m_ntQueryTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_ntQueryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_ntQueryTable->setAlternatingRowColors(true);
-    m_ntQueryTable->setStyleSheet(QStringLiteral(
-        "QTableWidget::item:selected{background:#2E8BFF;color:#FFFFFF;}"));
+    m_ntQueryTable->setStyleSheet(tableSelectionStyle());
     m_ntQueryTable->setCornerButtonEnabled(false);
     m_ntQueryTable->verticalHeader()->setVisible(false);
     m_ntQueryTable->horizontalHeader()->setStyleSheet(headerStyle());
     m_ntQueryTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    m_ntQueryTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
+    m_ntQueryTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(NtQueryColumn::Summary), QHeaderView::Stretch);
 
-    m_ntQueryDetailEdit = new QPlainTextEdit(splitter);
-    m_ntQueryDetailEdit->setReadOnly(true);
-    m_ntQueryDetailEdit->setStyleSheet(blueInputStyle());
-    m_ntQueryDetailEdit->setPlainText(QStringLiteral("请选择一条 NtQuery 结果查看详情。"));
+    m_ntQueryDetailEditor = new CodeEditorWidget(splitter);
+    m_ntQueryDetailEditor->setReadOnly(true);
+    m_ntQueryDetailEditor->setText(QStringLiteral("请选择一条 NtQuery 结果查看详情。"));
 
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
 
-    m_tabWidget->addTab(m_ntQueryPage, QIcon(":/Icon/process_details.svg"), QStringLiteral("NtQuery信息"));
+    const int ntQueryTabIndex = m_tabWidget->addTab(
+        m_ntQueryPage,
+        QIcon(":/Icon/process_details.svg"),
+        QStringLiteral("历史NtQuery"));
+    m_tabWidget->setTabToolTip(ntQueryTabIndex, QStringLiteral("旧版内核 NtQuery 信息页"));
 }
 
 void KernelDock::initializeConnections()
 {
+    // 对象命名空间页连接：刷新、筛选、详情联动、右键菜单。
+    connect(m_refreshObjectNamespaceButton, &QPushButton::clicked, this, [this]() {
+        refreshObjectNamespaceAsync();
+    });
+    connect(m_objectNamespaceFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
+        rebuildObjectNamespaceTable(filterText.trimmed());
+    });
+    connect(m_objectNamespaceTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+        showObjectNamespaceDetailByCurrentRow();
+    });
+    connect(m_objectNamespaceTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        showObjectNamespaceContextMenu(localPosition);
+    });
+
+    // 原子表页连接：刷新、筛选、详情联动、右键菜单。
+    connect(m_refreshAtomButton, &QPushButton::clicked, this, [this]() {
+        refreshAtomTableAsync();
+    });
+    connect(m_atomFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
+        rebuildAtomTable(filterText.trimmed());
+    });
+    connect(m_atomTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+        showAtomDetailByCurrentRow();
+    });
+    connect(m_atomTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        showAtomContextMenu(localPosition);
+    });
+
+    // 历史 NtQuery 页连接：刷新与详情联动。
     connect(m_refreshNtQueryButton, &QPushButton::clicked, this, [this]() {
         refreshNtQueryAsync();
     });
     connect(m_ntQueryTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showNtQueryDetailByCurrentRow();
     });
-}
-
-void KernelDock::refreshKernelTypeAsync()
-{
-    if (m_kernelTypeRefreshRunning.exchange(true))
-    {
-        kLogEvent event;
-        dbg << event << "[KernelDock] 对象类型刷新被忽略：已有任务运行。" << eol;
-        return;
-    }
-
-    m_refreshKernelTypeButton->setEnabled(false);
-    m_kernelTypeStatusLabel->setText(QStringLiteral("状态：刷新中..."));
-
-    QPointer<KernelDock> guardThis(this);
-    std::thread([guardThis]() {
-        std::vector<KernelObjectTypeEntry> resultRows;
-        QString errorText;
-        const bool success = runKernelTypeSnapshotTask(resultRows, errorText);
-
-        QMetaObject::invokeMethod(guardThis, [guardThis, success, errorText, resultRows = std::move(resultRows)]() mutable {
-            if (guardThis == nullptr)
-            {
-                return;
-            }
-
-            guardThis->m_kernelTypeRefreshRunning.store(false);
-            guardThis->m_refreshKernelTypeButton->setEnabled(true);
-
-            if (!success)
-            {
-                guardThis->m_kernelTypeStatusLabel->setText(QStringLiteral("状态：刷新失败"));
-                guardThis->m_kernelTypeDetailEdit->setPlainText(errorText);
-                kLogEvent event;
-                err << event << "[KernelDock] 内核对象类型刷新失败: " << errorText.toStdString() << eol;
-                return;
-            }
-
-            guardThis->m_kernelTypeRows = std::move(resultRows);
-            guardThis->rebuildKernelTypeTable(guardThis->m_kernelTypeFilterEdit->text().trimmed());
-            guardThis->m_kernelTypeStatusLabel->setText(
-                QStringLiteral("状态：已刷新 %1 项").arg(guardThis->m_kernelTypeRows.size()));
-
-            if (guardThis->m_kernelTypeTable->rowCount() > 0)
-            {
-                guardThis->m_kernelTypeTable->setCurrentCell(0, 0);
-            }
-            else
-            {
-                guardThis->m_kernelTypeDetailEdit->setPlainText(QStringLiteral("当前过滤条件下无可见数据。"));
-            }
-
-            kLogEvent event;
-            info << event << "[KernelDock] 内核对象类型刷新完成，条目数=" << guardThis->m_kernelTypeRows.size() << eol;
-        }, Qt::QueuedConnection);
-    }).detach();
-}
-
-void KernelDock::refreshNtQueryAsync()
-{
-    if (m_ntQueryRefreshRunning.exchange(true))
-    {
-        kLogEvent event;
-        dbg << event << "[KernelDock] NtQuery 刷新被忽略：已有任务运行。" << eol;
-        return;
-    }
-
-    m_refreshNtQueryButton->setEnabled(false);
-    m_ntQueryStatusLabel->setText(QStringLiteral("状态：刷新中..."));
-
-    QPointer<KernelDock> guardThis(this);
-    std::thread([guardThis]() {
-        std::vector<KernelNtQueryResultEntry> resultList;
-        QString errorText;
-        const bool success = runNtQuerySnapshotTask(resultList, errorText);
-
-        QMetaObject::invokeMethod(guardThis, [guardThis, success, errorText, resultList = std::move(resultList)]() mutable {
-            if (guardThis == nullptr)
-            {
-                return;
-            }
-
-            guardThis->m_ntQueryRefreshRunning.store(false);
-            guardThis->m_refreshNtQueryButton->setEnabled(true);
-
-            if (!success)
-            {
-                guardThis->m_ntQueryStatusLabel->setText(QStringLiteral("状态：刷新失败"));
-                guardThis->m_ntQueryDetailEdit->setPlainText(errorText);
-                kLogEvent event;
-                err << event << "[KernelDock] NtQuery 刷新失败: " << errorText.toStdString() << eol;
-                return;
-            }
-
-            guardThis->m_ntQueryResults = std::move(resultList);
-            guardThis->rebuildNtQueryTable();
-
-            int successCount = 0;
-            for (const KernelNtQueryResultEntry& entry : guardThis->m_ntQueryResults)
-            {
-                if (entry.statusCode >= 0)
-                {
-                    ++successCount;
-                }
-            }
-
-            guardThis->m_ntQueryStatusLabel->setText(
-                QStringLiteral("状态：已刷新 %1 项，成功 %2 项")
-                .arg(guardThis->m_ntQueryResults.size())
-                .arg(successCount));
-
-            if (guardThis->m_ntQueryTable->rowCount() > 0)
-            {
-                guardThis->m_ntQueryTable->setCurrentCell(0, 0);
-            }
-            else
-            {
-                guardThis->m_ntQueryDetailEdit->setPlainText(QStringLiteral("无可展示结果。"));
-            }
-
-            kLogEvent event;
-            info << event << "[KernelDock] NtQuery 刷新完成，结果数=" << guardThis->m_ntQueryResults.size() << eol;
-        }, Qt::QueuedConnection);
-    }).detach();
-}
-
-void KernelDock::rebuildKernelTypeTable(const QString& filterKeyword)
-{
-    if (m_kernelTypeTable == nullptr)
-    {
-        return;
-    }
-
-    m_kernelTypeTable->setRowCount(0);
-    int visibleCount = 0;
-
-    for (std::size_t sourceIndex = 0; sourceIndex < m_kernelTypeRows.size(); ++sourceIndex)
-    {
-        const KernelObjectTypeEntry& entry = m_kernelTypeRows[sourceIndex];
-        const bool matched = filterKeyword.isEmpty()
-            || entry.typeNameText.contains(filterKeyword, Qt::CaseInsensitive)
-            || QString::number(entry.typeIndex).contains(filterKeyword, Qt::CaseInsensitive);
-        if (!matched)
-        {
-            continue;
-        }
-
-        const int row = m_kernelTypeTable->rowCount();
-        m_kernelTypeTable->insertRow(row);
-
-        auto* indexItem = new QTableWidgetItem(QString::number(entry.typeIndex));
-        indexItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-        auto* typeItem = new QTableWidgetItem(entry.typeNameText);
-        auto* objItem = new QTableWidgetItem(QString::number(entry.totalObjectCount));
-        auto* handleItem = new QTableWidgetItem(QString::number(entry.totalHandleCount));
-        auto* maskItem = new QTableWidgetItem(QStringLiteral("0x%1").arg(entry.validAccessMask, 0, 16).toUpper());
-        auto* securityItem = new QTableWidgetItem(boolText(entry.securityRequired));
-        auto* maintainItem = new QTableWidgetItem(boolText(entry.maintainHandleCount));
-
-        indexItem->setFlags(indexItem->flags() & ~Qt::ItemIsEditable);
-        typeItem->setFlags(typeItem->flags() & ~Qt::ItemIsEditable);
-        objItem->setFlags(objItem->flags() & ~Qt::ItemIsEditable);
-        handleItem->setFlags(handleItem->flags() & ~Qt::ItemIsEditable);
-        maskItem->setFlags(maskItem->flags() & ~Qt::ItemIsEditable);
-        securityItem->setFlags(securityItem->flags() & ~Qt::ItemIsEditable);
-        maintainItem->setFlags(maintainItem->flags() & ~Qt::ItemIsEditable);
-
-        m_kernelTypeTable->setItem(row, 0, indexItem);
-        m_kernelTypeTable->setItem(row, 1, typeItem);
-        m_kernelTypeTable->setItem(row, 2, objItem);
-        m_kernelTypeTable->setItem(row, 3, handleItem);
-        m_kernelTypeTable->setItem(row, 4, maskItem);
-        m_kernelTypeTable->setItem(row, 5, securityItem);
-        m_kernelTypeTable->setItem(row, 6, maintainItem);
-        ++visibleCount;
-    }
-
-    kLogEvent event;
-    dbg << event
-        << "[KernelDock] 重建对象类型表，total="
-        << m_kernelTypeRows.size()
-        << ", visible="
-        << visibleCount
-        << ", filter="
-        << filterKeyword.toStdString()
-        << eol;
-}
-
-void KernelDock::rebuildNtQueryTable()
-{
-    if (m_ntQueryTable == nullptr)
-    {
-        return;
-    }
-
-    m_ntQueryTable->setRowCount(0);
-    for (std::size_t sourceIndex = 0; sourceIndex < m_ntQueryResults.size(); ++sourceIndex)
-    {
-        const KernelNtQueryResultEntry& entry = m_ntQueryResults[sourceIndex];
-        const int row = m_ntQueryTable->rowCount();
-        m_ntQueryTable->insertRow(row);
-
-        auto* categoryItem = new QTableWidgetItem(entry.categoryText);
-        categoryItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-        auto* functionItem = new QTableWidgetItem(entry.functionNameText);
-        auto* queryItem = new QTableWidgetItem(entry.queryItemText);
-        auto* statusItem = new QTableWidgetItem(entry.statusText);
-        auto* summaryItem = new QTableWidgetItem(entry.summaryText);
-
-        categoryItem->setFlags(categoryItem->flags() & ~Qt::ItemIsEditable);
-        functionItem->setFlags(functionItem->flags() & ~Qt::ItemIsEditable);
-        queryItem->setFlags(queryItem->flags() & ~Qt::ItemIsEditable);
-        statusItem->setFlags(statusItem->flags() & ~Qt::ItemIsEditable);
-        summaryItem->setFlags(summaryItem->flags() & ~Qt::ItemIsEditable);
-
-        if (entry.statusCode < 0)
-        {
-            statusItem->setForeground(QBrush(KswordTheme::WarningAccentColor()));
-        }
-
-        m_ntQueryTable->setItem(row, 0, categoryItem);
-        m_ntQueryTable->setItem(row, 1, functionItem);
-        m_ntQueryTable->setItem(row, 2, queryItem);
-        m_ntQueryTable->setItem(row, 3, statusItem);
-        m_ntQueryTable->setItem(row, 4, summaryItem);
-    }
-}
-
-void KernelDock::showKernelTypeDetailByCurrentRow()
-{
-    if (m_kernelTypeTable == nullptr || m_kernelTypeDetailEdit == nullptr)
-    {
-        return;
-    }
-
-    const int row = m_kernelTypeTable->currentRow();
-    if (row < 0)
-    {
-        m_kernelTypeDetailEdit->setPlainText(QStringLiteral("请选择一条类型记录查看详情。"));
-        return;
-    }
-
-    QTableWidgetItem* indexItem = m_kernelTypeTable->item(row, 0);
-    if (indexItem == nullptr)
-    {
-        m_kernelTypeDetailEdit->setPlainText(QStringLiteral("当前行无有效数据。"));
-        return;
-    }
-
-    const std::size_t sourceIndex = static_cast<std::size_t>(indexItem->data(Qt::UserRole).toULongLong());
-    if (sourceIndex >= m_kernelTypeRows.size())
-    {
-        m_kernelTypeDetailEdit->setPlainText(QStringLiteral("索引越界。"));
-        return;
-    }
-
-    const KernelObjectTypeEntry& entry = m_kernelTypeRows[sourceIndex];
-    const QString detailText = QStringLiteral(
-        "类型编号: %1\n"
-        "类型名称: %2\n"
-        "对象总数: %3\n"
-        "句柄总数: %4\n"
-        "访问掩码: 0x%5\n"
-        "安全要求: %6\n"
-        "维护句柄计数: %7\n"
-        "池类型: %8\n"
-        "默认分页池配额: %9\n"
-        "默认非分页池配额: %10")
-        .arg(entry.typeIndex)
-        .arg(entry.typeNameText)
-        .arg(entry.totalObjectCount)
-        .arg(entry.totalHandleCount)
-        .arg(entry.validAccessMask, 0, 16)
-        .arg(boolText(entry.securityRequired))
-        .arg(boolText(entry.maintainHandleCount))
-        .arg(entry.poolType)
-        .arg(entry.defaultPagedPoolCharge)
-        .arg(entry.defaultNonPagedPoolCharge);
-    m_kernelTypeDetailEdit->setPlainText(detailText);
-}
-
-void KernelDock::showNtQueryDetailByCurrentRow()
-{
-    if (m_ntQueryTable == nullptr || m_ntQueryDetailEdit == nullptr)
-    {
-        return;
-    }
-
-    const int row = m_ntQueryTable->currentRow();
-    if (row < 0)
-    {
-        m_ntQueryDetailEdit->setPlainText(QStringLiteral("请选择一条 NtQuery 结果查看详情。"));
-        return;
-    }
-
-    QTableWidgetItem* categoryItem = m_ntQueryTable->item(row, 0);
-    if (categoryItem == nullptr)
-    {
-        m_ntQueryDetailEdit->setPlainText(QStringLiteral("当前行无有效数据。"));
-        return;
-    }
-
-    const std::size_t sourceIndex = static_cast<std::size_t>(categoryItem->data(Qt::UserRole).toULongLong());
-    if (sourceIndex >= m_ntQueryResults.size())
-    {
-        m_ntQueryDetailEdit->setPlainText(QStringLiteral("索引越界。"));
-        return;
-    }
-
-    const KernelNtQueryResultEntry& entry = m_ntQueryResults[sourceIndex];
-    const QString detailText = QStringLiteral(
-        "类别: %1\n"
-        "函数: %2\n"
-        "查询项: %3\n"
-        "状态: %4\n"
-        "摘要: %5\n\n"
-        "详细输出:\n%6")
-        .arg(entry.categoryText)
-        .arg(entry.functionNameText)
-        .arg(entry.queryItemText)
-        .arg(entry.statusText)
-        .arg(entry.summaryText)
-        .arg(entry.detailText);
-    m_ntQueryDetailEdit->setPlainText(detailText);
 }
 

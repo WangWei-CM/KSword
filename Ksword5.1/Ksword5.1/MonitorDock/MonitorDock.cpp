@@ -1860,6 +1860,28 @@ namespace
         return QStringLiteral("%1.%2.%3.%4").arg(byte1).arg(byte2).arg(byte3).arg(byte4);
     }
 
+    // etwToSingleLine：
+    // - 作用：把多行文本压成单行，便于表格摘要展示。
+    QString etwToSingleLine(const QString& valueText)
+    {
+        QString normalizedText = valueText;
+        normalizedText.replace(QChar(u'\r'), QChar(u' '));
+        normalizedText.replace(QChar(u'\n'), QChar(u' '));
+        return normalizedText.simplified();
+    }
+
+    // appendEtwStatusSummary：
+    // - 作用：按需在摘要尾部补上状态文本。
+    QString appendEtwStatusSummary(const QString& summaryText, const QString& statusText)
+    {
+        const QString normalizedStatusText = etwToSingleLine(statusText);
+        if (normalizedStatusText.isEmpty())
+        {
+            return summaryText;
+        }
+        return QStringLiteral("%1 | 状态=%2").arg(summaryText, normalizedStatusText);
+    }
+
     // inferEtwSemanticSummary：
     // - 作用：聚合文件/注册表/网络等常见场景的目标对象和状态；
     // - 调用：作为 ETW 详情 JSON 的语义摘要区块。
@@ -2037,14 +2059,233 @@ namespace
         return summary;
     }
 
+    // buildEtwSummaryText：
+    // - 作用：生成 ETW 表格“单行关键摘要”；常见类型做特判。
+    QString buildEtwSummaryText(
+        const QString& providerNameText,
+        const QString& eventNameText,
+        const QString& opcodeNameText,
+        const std::uint32_t pidValue,
+        const std::uint32_t tidValue,
+        const EtwSemanticSummary& semanticSummary,
+        const std::vector<EtwDecodedPropertyEntry>& propertyList)
+    {
+        const QString resourceTypeText = etwToSingleLine(semanticSummary.resourceTypeText);
+        QString actionText = etwToSingleLine(semanticSummary.actionText);
+        QString targetText = etwToSingleLine(semanticSummary.targetText);
+        const QString statusText = etwToSingleLine(semanticSummary.statusText);
+
+        if (actionText.isEmpty())
+        {
+            actionText = etwToSingleLine(eventNameText);
+        }
+        if (actionText.isEmpty())
+        {
+            actionText = etwToSingleLine(opcodeNameText);
+        }
+        if (actionText.isEmpty())
+        {
+            actionText = QStringLiteral("事件");
+        }
+
+        const QString probeText = (providerNameText + QLatin1Char(' ') + eventNameText + QLatin1Char(' ') + opcodeNameText).toLower();
+        const bool isThreadEvent = probeText.contains(QStringLiteral("thread"));
+
+        if (resourceTypeText == QStringLiteral("文件"))
+        {
+            if (targetText.isEmpty())
+            {
+                const EtwDecodedPropertyEntry* filePathProperty = findFirstEtwProperty(
+                    propertyList,
+                    QStringList{ QStringLiteral("filename"), QStringLiteral("filepath"),
+                    QStringLiteral("targetfilename"), QStringLiteral("newfilename"),
+                    QStringLiteral("oldfilename"), QStringLiteral("pathname"),
+                    QStringLiteral("targetname"), QStringLiteral("relativefilename") });
+                if (filePathProperty != nullptr)
+                {
+                    targetText = etwToSingleLine(filePathProperty->valueText);
+                }
+            }
+            if (targetText.isEmpty())
+            {
+                targetText = QStringLiteral("<未知路径>");
+            }
+            const QString summaryText = QStringLiteral("文件 %1 | %2 | PID=%3 TID=%4")
+                .arg(actionText, targetText)
+                .arg(pidValue)
+                .arg(tidValue);
+            return appendEtwStatusSummary(summaryText, statusText);
+        }
+
+        if (resourceTypeText == QStringLiteral("注册表"))
+        {
+            if (targetText.isEmpty())
+            {
+                const EtwDecodedPropertyEntry* keyProperty = findFirstEtwProperty(
+                    propertyList,
+                    QStringList{ QStringLiteral("keyname"), QStringLiteral("keypath"),
+                    QStringLiteral("hive"), QStringLiteral("objectname"), QStringLiteral("path") });
+                const EtwDecodedPropertyEntry* valueProperty = findFirstEtwProperty(
+                    propertyList,
+                    QStringList{ QStringLiteral("valuename") });
+                if (keyProperty != nullptr)
+                {
+                    targetText = etwToSingleLine(keyProperty->valueText);
+                    if (valueProperty != nullptr)
+                    {
+                        const QString valueNameText = etwToSingleLine(valueProperty->valueText);
+                        if (!valueNameText.isEmpty())
+                        {
+                            targetText += QStringLiteral("\\") + valueNameText;
+                        }
+                    }
+                }
+            }
+            if (targetText.isEmpty())
+            {
+                targetText = QStringLiteral("<未知路径>");
+            }
+            const QString summaryText = QStringLiteral("注册表 %1 | %2 | PID=%3 TID=%4")
+                .arg(actionText, targetText)
+                .arg(pidValue)
+                .arg(tidValue);
+            return appendEtwStatusSummary(summaryText, statusText);
+        }
+
+        if (resourceTypeText == QStringLiteral("进程线程"))
+        {
+            const EtwDecodedPropertyEntry* processIdProperty = findFirstEtwProperty(
+                propertyList,
+                QStringList{ QStringLiteral("processid"), QStringLiteral("pid"),
+                QStringLiteral("targetprocessid") });
+            const EtwDecodedPropertyEntry* threadIdProperty = findFirstEtwProperty(
+                propertyList,
+                QStringList{ QStringLiteral("threadid"), QStringLiteral("tid"),
+                QStringLiteral("targetthreadid") });
+            const EtwDecodedPropertyEntry* parentPidProperty = findFirstEtwProperty(
+                propertyList,
+                QStringList{ QStringLiteral("parentprocessid"), QStringLiteral("parentid"), QStringLiteral("ppid") });
+            const EtwDecodedPropertyEntry* imageProperty = findFirstEtwProperty(
+                propertyList,
+                QStringList{ QStringLiteral("imagename"), QStringLiteral("imagefilename"),
+                QStringLiteral("processname"), QStringLiteral("commandline") });
+
+            const QString processIdText = processIdProperty != nullptr
+                ? etwToSingleLine(processIdProperty->valueText)
+                : QString::number(pidValue);
+            const QString threadIdText = threadIdProperty != nullptr
+                ? etwToSingleLine(threadIdProperty->valueText)
+                : QString::number(tidValue);
+
+            QString processDisplayText = targetText;
+            if (processDisplayText.isEmpty() && imageProperty != nullptr)
+            {
+                processDisplayText = etwToSingleLine(imageProperty->valueText);
+            }
+
+            QString summaryText;
+            if (isThreadEvent)
+            {
+                summaryText = QStringLiteral("线程 %1 | PID=%2 TID=%3")
+                    .arg(actionText, processIdText, threadIdText);
+                if (!processDisplayText.isEmpty())
+                {
+                    summaryText += QStringLiteral(" | 进程=%1").arg(processDisplayText);
+                }
+            }
+            else
+            {
+                summaryText = QStringLiteral("进程 %1 | PID=%2 | TID=%3")
+                    .arg(actionText, processIdText, threadIdText);
+                if (!processDisplayText.isEmpty())
+                {
+                    summaryText += QStringLiteral(" | %1").arg(processDisplayText);
+                }
+                if (parentPidProperty != nullptr)
+                {
+                    const QString parentPidText = etwToSingleLine(parentPidProperty->valueText);
+                    if (!parentPidText.isEmpty())
+                    {
+                        summaryText += QStringLiteral(" | 父PID=%1").arg(parentPidText);
+                    }
+                }
+            }
+            return appendEtwStatusSummary(summaryText, statusText);
+        }
+
+        QString targetDisplayText = targetText;
+        if (targetDisplayText.isEmpty())
+        {
+            targetDisplayText = etwToSingleLine(providerNameText);
+        }
+        if (targetDisplayText.isEmpty())
+        {
+            targetDisplayText = QStringLiteral("<无目标>");
+        }
+
+        QString summaryText = QStringLiteral("%1 | %2 | PID=%3 TID=%4")
+            .arg(actionText, targetDisplayText)
+            .arg(pidValue)
+            .arg(tidValue);
+        if (!resourceTypeText.isEmpty() && resourceTypeText != QStringLiteral("通用"))
+        {
+            summaryText = QStringLiteral("%1 %2").arg(resourceTypeText, summaryText);
+        }
+        return appendEtwStatusSummary(summaryText, statusText);
+    }
+
+    // buildEtwSummaryFromDetailJson：
+    // - 作用：从详情 JSON 回推单行摘要（兜底路径，保证旧调用也可显示摘要）。
+    QString buildEtwSummaryFromDetailJson(
+        const QString& detailJsonText,
+        const QString& providerNameText,
+        const QString& eventNameText,
+        const std::uint32_t pidValue,
+        const std::uint32_t tidValue)
+    {
+        QJsonParseError parseError;
+        const QJsonDocument jsonDocument = QJsonDocument::fromJson(detailJsonText.toUtf8(), &parseError);
+        if (jsonDocument.isNull() || !jsonDocument.isObject())
+        {
+            const QString normalizedEventName = etwToSingleLine(eventNameText).isEmpty()
+                ? QStringLiteral("事件")
+                : etwToSingleLine(eventNameText);
+            return QStringLiteral("%1 | PID=%2 TID=%3")
+                .arg(normalizedEventName)
+                .arg(pidValue)
+                .arg(tidValue);
+        }
+
+        const QJsonObject rootObject = jsonDocument.object();
+        const QJsonObject semanticObject = rootObject.value(QStringLiteral("semantic")).toObject();
+        const QJsonObject metaObject = rootObject.value(QStringLiteral("meta")).toObject();
+
+        EtwSemanticSummary semanticSummary;
+        semanticSummary.resourceTypeText = semanticObject.value(QStringLiteral("resourceType")).toString();
+        semanticSummary.actionText = semanticObject.value(QStringLiteral("action")).toString();
+        semanticSummary.targetText = semanticObject.value(QStringLiteral("target")).toString();
+        semanticSummary.statusText = semanticObject.value(QStringLiteral("status")).toString();
+
+        const QString opcodeNameText = metaObject.value(QStringLiteral("opcodeName")).toString();
+        return buildEtwSummaryText(
+            providerNameText,
+            eventNameText,
+            opcodeNameText,
+            pidValue,
+            tidValue,
+            semanticSummary,
+            std::vector<EtwDecodedPropertyEntry>{});
+    }
+
     // buildEtwDetailJson：
     // - 作用：把元信息、语义摘要、属性列表、尾部十六进制兜底打包成 JSON；
-    // - 调用：enqueueEtwEventFromRecord 构造结果表“事件数据(JSON)”列。
+    // - 调用：enqueueEtwEventFromRecord 构造“查看返回详情”所需的原始数据。
     QString buildEtwDetailJson(
         const EVENT_RECORD* eventRecord,
         const QString& providerGuidText,
         const QString& providerNameText,
         const EtwSchemaEntry& schemaEntry,
+        const EtwSemanticSummary& semanticSummary,
         const std::vector<EtwDecodedPropertyEntry>& propertyList,
         const ULONG parsedBytes,
         const QString& unparsedTailHexText)
@@ -2088,11 +2329,6 @@ namespace
         metaObject.insert(QStringLiteral("parsedBytes"), static_cast<int>(parsedBytes));
         rootObject.insert(QStringLiteral("meta"), metaObject);
 
-        const EtwSemanticSummary semanticSummary = inferEtwSemanticSummary(
-            providerNameText,
-            eventNameText,
-            schemaEntry.opcodeNameText,
-            propertyList);
         QJsonObject semanticObject;
         semanticObject.insert(QStringLiteral("resourceType"), semanticSummary.resourceTypeText);
         semanticObject.insert(QStringLiteral("action"), semanticSummary.actionText);
@@ -2156,7 +2392,13 @@ namespace
             return itemPointer != nullptr ? itemPointer->text() : QString();
         };
 
-        const QString detailJsonText = itemTextAt(5);
+        QString detailJsonText;
+        QTableWidgetItem* detailItem = eventTable->item(row, 5);
+        if (detailItem != nullptr)
+        {
+            const QString detailFromRole = detailItem->data(Qt::UserRole).toString();
+            detailJsonText = detailFromRole.trimmed().isEmpty() ? detailItem->text() : detailFromRole;
+        }
         QString normalizedDetailText = detailJsonText;
         QString semanticResourceText;
         QString semanticActionText;
@@ -3513,7 +3755,7 @@ void MonitorDock::initializeEtwTab()
         QStringLiteral("事件ID"),
         QStringLiteral("事件名称"),
         QStringLiteral("PID/TID"),
-        QStringLiteral("事件数据(JSON)"),
+        QStringLiteral("事件摘要"),
         QStringLiteral("ActivityId")
     });
     m_etwEventTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -3872,8 +4114,16 @@ void MonitorDock::initializeConnections()
             m_etwEventTable->insertRow(row);
             for (int col = 0; col < 7; ++col)
             {
-                QTableWidgetItem* item = new QTableWidgetItem(rowValues.at(col));
-                item->setToolTip(rowValues.at(col));
+                const QString cellText = rowValues.at(col);
+                QTableWidgetItem* item = new QTableWidgetItem(cellText);
+                item->setToolTip(cellText);
+                if (col == 5)
+                {
+                    const QString detailJsonText = rowValues.size() > 7
+                        ? rowValues.at(7)
+                        : cellText;
+                    item->setData(Qt::UserRole, detailJsonText);
+                }
                 m_etwEventTable->setItem(row, col, item);
             }
         }
@@ -5640,16 +5890,32 @@ void MonitorDock::enqueueEtwEventFromRecord(const struct _EVENT_RECORD* eventRec
     }
 
     QString detailJson;
+    QString detailSummaryText;
     if (schemaReady)
     {
+        const EtwSemanticSummary semanticSummary = inferEtwSemanticSummary(
+            providerName,
+            eventName,
+            schemaEntry.opcodeNameText,
+            decodedPropertyList);
+
         detailJson = buildEtwDetailJson(
             eventRecord,
             providerGuidText,
             providerName,
             schemaEntry,
+            semanticSummary,
             decodedPropertyList,
             parsedBytes,
             unparsedTailHexText);
+        detailSummaryText = buildEtwSummaryText(
+            providerName,
+            eventName,
+            schemaEntry.opcodeNameText,
+            pidValue,
+            tidValue,
+            semanticSummary,
+            decodedPropertyList);
     }
     else
     {
@@ -5668,6 +5934,20 @@ void MonitorDock::enqueueEtwEventFromRecord(const struct _EVENT_RECORD* eventRec
             fallbackRoot.insert(QStringLiteral("rawFallback"), unparsedTailHexText);
         }
         detailJson = QString::fromUtf8(QJsonDocument(fallbackRoot).toJson(QJsonDocument::Compact));
+
+        detailSummaryText = QStringLiteral("%1 | PID=%2 TID=%3 | 原始数据=%4字节")
+            .arg(etwToSingleLine(eventName).isEmpty() ? QStringLiteral("事件") : etwToSingleLine(eventName))
+            .arg(pidValue)
+            .arg(tidValue)
+            .arg(static_cast<int>(eventRecord->UserDataLength));
+    }
+
+    if (detailSummaryText.trimmed().isEmpty())
+    {
+        detailSummaryText = QStringLiteral("%1 | PID=%2 TID=%3")
+            .arg(etwToSingleLine(eventName).isEmpty() ? QStringLiteral("事件") : etwToSingleLine(eventName))
+            .arg(pidValue)
+            .arg(tidValue);
     }
 
     QStringList rowValues;
@@ -5676,8 +5956,9 @@ void MonitorDock::enqueueEtwEventFromRecord(const struct _EVENT_RECORD* eventRec
     rowValues << QString::number(eventId);
     rowValues << eventName;
     rowValues << QStringLiteral("%1 / %2").arg(pidValue).arg(tidValue);
-    rowValues << detailJson;
+    rowValues << detailSummaryText;
     rowValues << activityIdText;
+    rowValues << detailJson;
 
     {
         std::lock_guard<std::mutex> lock(m_etwPendingMutex);
@@ -6313,13 +6594,20 @@ void MonitorDock::appendEtwEventRow(
     const int row = m_etwEventTable->rowCount();
     m_etwEventTable->insertRow(row);
 
+    const QString detailSummaryText = buildEtwSummaryFromDetailJson(
+        detailJson,
+        providerName,
+        eventName,
+        pidValue,
+        tidValue);
+
     const QStringList values{
         now100nsText(),
         providerName,
         QString::number(eventId),
         eventName,
         QStringLiteral("%1 / %2").arg(pidValue).arg(tidValue),
-        detailJson,
+        detailSummaryText,
         activityIdText
     };
 
@@ -6327,6 +6615,10 @@ void MonitorDock::appendEtwEventRow(
     {
         QTableWidgetItem* item = new QTableWidgetItem(values.at(i));
         item->setToolTip(values.at(i));
+        if (i == 5)
+        {
+            item->setData(Qt::UserRole, detailJson);
+        }
         m_etwEventTable->setItem(row, i, item);
     }
 }

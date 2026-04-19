@@ -12,6 +12,8 @@ namespace apimon
     {
         SRWLOCK g_pipeLock = SRWLOCK_INIT;              // g_pipeLock：保护 g_pipeHandle 的读写与发送序列。
         HANDLE g_pipeHandle = INVALID_HANDLE_VALUE;     // g_pipeHandle：当前已连接的命名管道句柄。
+        // g_pipeHandleValue：无锁句柄快照，供 Hook 快速判断“是否监控管道句柄”，避免在 WriteFile Hook 中重入锁导致死锁。
+        std::atomic_uintptr_t g_pipeHandleValue{ 0 };
         SRWLOCK g_queueLock = SRWLOCK_INIT;             // g_queueLock：保护待发送事件队列。
         std::deque<ks::winapi_monitor::ApiMonitorEventPacket> g_pendingPacketQueue; // 待发送事件队列。
         constexpr std::size_t kMaxPendingPacketCount = 4096;
@@ -49,6 +51,8 @@ namespace apimon
 
         void ClosePipeLocked()
         {
+            // 先清空无锁快照，确保 Hook 侧不会在关闭阶段继续把该句柄当作可用监控管道。
+            g_pipeHandleValue.store(0);
             if (g_pipeHandle != INVALID_HANDLE_VALUE)
             {
                 // 关闭阶段不再 FlushFileBuffers，避免 UI 已断开或停止读取时把目标线程卡死。
@@ -237,6 +241,7 @@ namespace apimon
         ::AcquireSRWLockExclusive(&g_pipeLock);
         ClosePipeLocked();
         g_pipeHandle = pipeHandle;
+        g_pipeHandleValue.store(reinterpret_cast<std::uintptr_t>(pipeHandle));
         ::ReleaseSRWLockExclusive(&g_pipeLock);
         EnsureSenderThreadStarted();
         return true;
@@ -358,9 +363,19 @@ namespace apimon
 
     bool IsMonitorPipeHandle(const HANDLE handleValue)
     {
-        ::AcquireSRWLockShared(&g_pipeLock);
-        const bool sameHandle = handleValue != nullptr && handleValue == g_pipeHandle;
-        ::ReleaseSRWLockShared(&g_pipeLock);
-        return sameHandle;
+        if (handleValue == nullptr || handleValue == INVALID_HANDLE_VALUE)
+        {
+            return false;
+        }
+
+        const std::uintptr_t monitorPipeHandleValue = g_pipeHandleValue.load();
+        if (monitorPipeHandleValue == 0)
+        {
+            return false;
+        }
+
+        // 通过无锁快照比较句柄值，避免 FlushPendingMonitorEvents 持有 g_pipeLock 时，
+        // WriteFile Hook 再次尝试加锁造成同线程重入死锁。
+        return reinterpret_cast<std::uintptr_t>(handleValue) == monitorPipeHandleValue;
     }
 }
