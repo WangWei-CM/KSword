@@ -656,10 +656,8 @@ void ProcessDetailWindow::initializeActionTab()
     controlLayout->setVerticalSpacing(8);
 
     m_terminateActionCombo = new QComboBox(controlGroup);
-    m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "Taskkill", 0);
-    m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "Taskkill /f", 1);
-    m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "TerminateProcess", 2);
-    m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "TerminateThread(全部线程)", 3);
+    m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "TerminateProcess", 0);
+    m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "TerminateThread(全部线程)", 1);
     m_terminateActionCombo->setToolTip("选择结束当前进程的执行方案");
     m_executeTerminateActionButton = buildCompactActionButton(
         QStringLiteral(":/Icon/process_terminate.svg"),
@@ -682,11 +680,6 @@ void ProcessDetailWindow::initializeActionTab()
         QStringLiteral(":/Icon/process_uncritical.svg"),
         QStringLiteral("取消当前进程的关键进程标记"),
         controlGroup);
-    m_injectInvalidShellcodeButton = buildCompactActionButton(
-        QStringLiteral(":/Icon/process_terminate.svg"),
-        QStringLiteral("向当前进程注入无效 shellcode（测试用途）"),
-        controlGroup);
-
     m_priorityCombo = new QComboBox(controlGroup);
     m_priorityCombo->addItem("Idle", 0);
     m_priorityCombo->addItem("Below Normal", 1);
@@ -707,7 +700,6 @@ void ProcessDetailWindow::initializeActionTab()
     controlLayout->addWidget(new QLabel("运行控制", controlGroup), 1, 0);
     controlLayout->addWidget(m_suspendProcessButton, 1, 1);
     controlLayout->addWidget(m_resumeProcessButton, 1, 2);
-    controlLayout->addWidget(m_injectInvalidShellcodeButton, 1, 3);
     controlLayout->addWidget(new QLabel("关键进程", controlGroup), 2, 0);
     controlLayout->addWidget(m_setCriticalButton, 2, 1);
     controlLayout->addWidget(m_clearCriticalButton, 2, 2);
@@ -797,7 +789,6 @@ void ProcessDetailWindow::initializeActionTab()
         m_resumeProcessButton,
         m_setCriticalButton,
         m_clearCriticalButton,
-        m_injectInvalidShellcodeButton,
         m_applyPriorityButton,
         m_browseDllButton,
         m_injectDllButton,
@@ -1309,7 +1300,6 @@ void ProcessDetailWindow::initializeConnections()
     connect(m_resumeProcessButton, &QPushButton::clicked, this, [this]() { executeResumeProcessAction(); });
     connect(m_setCriticalButton, &QPushButton::clicked, this, [this]() { executeSetCriticalAction(true); });
     connect(m_clearCriticalButton, &QPushButton::clicked, this, [this]() { executeSetCriticalAction(false); });
-    connect(m_injectInvalidShellcodeButton, &QPushButton::clicked, this, [this]() { executeInjectInvalidShellcodeAction(); });
     connect(m_applyPriorityButton, &QPushButton::clicked, this, [this]() { executeSetPriorityAction(); });
     connect(m_injectDllButton, &QPushButton::clicked, this, [this]() { executeInjectDllAction(); });
     connect(m_injectShellcodeButton, &QPushButton::clicked, this, [this]() { executeInjectShellcodeAction(); });

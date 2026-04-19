@@ -22,6 +22,7 @@
 #include <QSplitter>
 #include <QTableWidget>
 #include <QTabWidget>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 
 namespace
@@ -65,11 +66,13 @@ namespace
             .arg(KswordTheme::BorderHex());
     }
 
-    // tableSelectionStyle：
-    // - 作用：固定表格选中高亮为主题蓝，避免系统默认配色差异。
-    QString tableSelectionStyle()
+    // itemSelectionStyle：
+    // - 作用：统一表格/树控件选中高亮为主题蓝，避免系统默认配色差异。
+    QString itemSelectionStyle()
     {
-        return QStringLiteral("QTableWidget::item:selected{background:#2E8BFF;color:#FFFFFF;}");
+        return QStringLiteral(
+            "QTableWidget::item:selected{background:#2E8BFF;color:#FFFFFF;}"
+            "QTreeWidget::item:selected{background:#2E8BFF;color:#FFFFFF;}");
     }
 
     // statusLabelStyle：
@@ -79,18 +82,14 @@ namespace
         return QStringLiteral("color:%1;font-weight:600;").arg(colorHex);
     }
 
-    // ObjectNamespaceColumn：对象命名空间表列索引。
+    // ObjectNamespaceColumn：对象命名空间树列索引。
     enum class ObjectNamespaceColumn : int
     {
-        RootPath = 0,
-        Scope,
-        DirectoryPath,
-        ObjectName,
-        ObjectType,
-        FullPath,
-        EnumApi,
-        SymbolicTarget,
+        Name = 0,
+        Type,
+        PathOrScope,
         Status,
+        SymbolicTarget,
         Count
     };
 
@@ -167,8 +166,8 @@ void KernelDock::initializeObjectNamespaceTab()
     m_refreshObjectNamespaceButton->setFixedWidth(34);
 
     m_objectNamespaceFilterEdit = new QLineEdit(m_objectNamespacePage);
-    m_objectNamespaceFilterEdit->setPlaceholderText(QStringLiteral("按根目录/对象名/对象类型/路径筛选"));
-    m_objectNamespaceFilterEdit->setToolTip(QStringLiteral("输入关键字后实时过滤对象命名空间表格"));
+    m_objectNamespaceFilterEdit->setPlaceholderText(QStringLiteral("按根目录/目录路径/对象名/对象类型/状态筛选"));
+    m_objectNamespaceFilterEdit->setToolTip(QStringLiteral("输入关键字后实时过滤对象命名空间树"));
     m_objectNamespaceFilterEdit->setClearButtonEnabled(true);
     m_objectNamespaceFilterEdit->setStyleSheet(blueInputStyle());
 
@@ -180,49 +179,58 @@ void KernelDock::initializeObjectNamespaceTab()
     m_objectNamespaceToolLayout->addWidget(m_objectNamespaceStatusLabel, 0);
     m_objectNamespaceLayout->addLayout(m_objectNamespaceToolLayout);
 
-    QSplitter* splitter = new QSplitter(Qt::Vertical, m_objectNamespacePage);
-    m_objectNamespaceLayout->addWidget(splitter, 1);
+    QSplitter* verticalSplitter = new QSplitter(Qt::Vertical, m_objectNamespacePage);
+    m_objectNamespaceLayout->addWidget(verticalSplitter, 1);
 
-    m_objectNamespaceTable = new QTableWidget(splitter);
-    m_objectNamespaceTable->setColumnCount(static_cast<int>(ObjectNamespaceColumn::Count));
-    m_objectNamespaceTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("目录路径"),
-        QStringLiteral("作用说明"),
-        QStringLiteral("当前目录"),
-        QStringLiteral("对象名"),
-        QStringLiteral("对象类型"),
-        QStringLiteral("完整路径"),
-        QStringLiteral("枚举 API"),
-        QStringLiteral("符号链接目标"),
-        QStringLiteral("状态")
+    QSplitter* horizontalSplitter = new QSplitter(Qt::Horizontal, verticalSplitter);
+
+    m_objectNamespaceTree = new QTreeWidget(horizontalSplitter);
+    m_objectNamespaceTree->setColumnCount(static_cast<int>(ObjectNamespaceColumn::Count));
+    m_objectNamespaceTree->setHeaderLabels(QStringList{
+        QStringLiteral("名称"),
+        QStringLiteral("类型"),
+        QStringLiteral("路径/说明"),
+        QStringLiteral("状态"),
+        QStringLiteral("符号链接目标")
         });
-    m_objectNamespaceTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_objectNamespaceTable->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_objectNamespaceTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_objectNamespaceTable->setAlternatingRowColors(true);
-    m_objectNamespaceTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_objectNamespaceTable->setStyleSheet(tableSelectionStyle());
-    m_objectNamespaceTable->setCornerButtonEnabled(false);
-    m_objectNamespaceTable->verticalHeader()->setVisible(false);
-    m_objectNamespaceTable->horizontalHeader()->setStyleSheet(headerStyle());
-    m_objectNamespaceTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    m_objectNamespaceTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(ObjectNamespaceColumn::FullPath), QHeaderView::Stretch);
-    m_objectNamespaceTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(ObjectNamespaceColumn::EnumApi), QHeaderView::Interactive);
-    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::RootPath), 180);
-    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::Scope), 220);
-    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::DirectoryPath), 220);
-    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::ObjectName), 180);
-    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::ObjectType), 120);
-    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::EnumApi), 360);
-    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), 260);
-    m_objectNamespaceTable->setColumnWidth(static_cast<int>(ObjectNamespaceColumn::Status), 220);
+    m_objectNamespaceTree->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_objectNamespaceTree->setAlternatingRowColors(true);
+    m_objectNamespaceTree->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_objectNamespaceTree->setStyleSheet(itemSelectionStyle());
+    m_objectNamespaceTree->setUniformRowHeights(true);
+    m_objectNamespaceTree->setRootIsDecorated(true);
+    m_objectNamespaceTree->header()->setStyleSheet(headerStyle());
+    // 列宽策略：始终按可用宽度自适应，避免出现横向滚动条。
+    m_objectNamespaceTree->header()->setSectionResizeMode(QHeaderView::Stretch);
+    m_objectNamespaceTree->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_objectNamespaceTree->setToolTip(QStringLiteral("文件管理器式对象命名空间树，支持逐级展开与右键操作"));
 
-    m_objectNamespaceDetailEditor = new CodeEditorWidget(splitter);
+    m_objectNamespacePropertyTable = new QTableWidget(horizontalSplitter);
+    m_objectNamespacePropertyTable->setColumnCount(2);
+    m_objectNamespacePropertyTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("属性项"),
+        QStringLiteral("值")
+        });
+    m_objectNamespacePropertyTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_objectNamespacePropertyTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_objectNamespacePropertyTable->setAlternatingRowColors(true);
+    m_objectNamespacePropertyTable->setStyleSheet(itemSelectionStyle());
+    m_objectNamespacePropertyTable->setCornerButtonEnabled(false);
+    m_objectNamespacePropertyTable->verticalHeader()->setVisible(false);
+    m_objectNamespacePropertyTable->horizontalHeader()->setStyleSheet(headerStyle());
+    m_objectNamespacePropertyTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_objectNamespacePropertyTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_objectNamespacePropertyTable->setColumnWidth(0, 220);
+    m_objectNamespacePropertyTable->setToolTip(QStringLiteral("当前选中节点的字段详情（字段名 + 字段值）"));
+
+    m_objectNamespaceDetailEditor = new CodeEditorWidget(verticalSplitter);
     m_objectNamespaceDetailEditor->setReadOnly(true);
-    m_objectNamespaceDetailEditor->setText(QStringLiteral("请选择一条对象命名空间记录查看详情。"));
+    m_objectNamespaceDetailEditor->setText(QStringLiteral("请选择对象命名空间节点查看详情。"));
 
-    splitter->setStretchFactor(0, 3);
-    splitter->setStretchFactor(1, 2);
+    horizontalSplitter->setStretchFactor(0, 3);
+    horizontalSplitter->setStretchFactor(1, 2);
+    verticalSplitter->setStretchFactor(0, 4);
+    verticalSplitter->setStretchFactor(1, 2);
 
     const int objectNamespaceTabIndex = m_tabWidget->addTab(
         m_objectNamespacePage,
@@ -278,7 +286,7 @@ void KernelDock::initializeAtomTableTab()
     m_atomTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_atomTable->setAlternatingRowColors(true);
     m_atomTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_atomTable->setStyleSheet(tableSelectionStyle());
+    m_atomTable->setStyleSheet(itemSelectionStyle());
     m_atomTable->setCornerButtonEnabled(false);
     m_atomTable->verticalHeader()->setVisible(false);
     m_atomTable->horizontalHeader()->setStyleSheet(headerStyle());
@@ -342,7 +350,7 @@ void KernelDock::initializeNtQueryTab()
     m_ntQueryTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_ntQueryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_ntQueryTable->setAlternatingRowColors(true);
-    m_ntQueryTable->setStyleSheet(tableSelectionStyle());
+    m_ntQueryTable->setStyleSheet(itemSelectionStyle());
     m_ntQueryTable->setCornerButtonEnabled(false);
     m_ntQueryTable->verticalHeader()->setVisible(false);
     m_ntQueryTable->horizontalHeader()->setStyleSheet(headerStyle());
@@ -372,10 +380,10 @@ void KernelDock::initializeConnections()
     connect(m_objectNamespaceFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
         rebuildObjectNamespaceTable(filterText.trimmed());
     });
-    connect(m_objectNamespaceTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+    connect(m_objectNamespaceTree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem*, QTreeWidgetItem*) {
         showObjectNamespaceDetailByCurrentRow();
     });
-    connect(m_objectNamespaceTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+    connect(m_objectNamespaceTree, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showObjectNamespaceContextMenu(localPosition);
     });
 

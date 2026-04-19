@@ -59,6 +59,11 @@ namespace
     // - 便于主题切换时精准替换旧 Tooltip 样式，避免重复拼接。
     constexpr const char* kTooltipStyleBeginMarker = "/*KSWORD_TOOLTIP_STYLE_BEGIN*/";
     constexpr const char* kTooltipStyleEndMarker = "/*KSWORD_TOOLTIP_STYLE_END*/";
+    // kContextMenuStyleBeginMarker / kContextMenuStyleEndMarker 作用：
+    // - 在 QApplication 样式表中标记“右键菜单主题片段”的起止位置；
+    // - 便于主题切换时替换旧菜单样式，避免重复拼接与样式污染。
+    constexpr const char* kContextMenuStyleBeginMarker = "/*KSWORD_CONTEXT_MENU_STYLE_BEGIN*/";
+    constexpr const char* kContextMenuStyleEndMarker = "/*KSWORD_CONTEXT_MENU_STYLE_END*/";
     // kDeferredDockLoadIntervalMs 作用：
     // - 控制“显示后补载”节流间隔；
     // - 避免 0ms 连续补载把 UI 线程再次打满。
@@ -579,6 +584,62 @@ namespace
             .arg(QString::fromLatin1(kTooltipStyleEndMarker));
     }
 
+    // buildGlobalContextMenuStyleBlock 作用：
+    // - 生成全局右键菜单样式片段，兜底所有标准输入控件右键菜单；
+    // - 修复独立顶层窗口中输入框右键菜单在深浅色切换后背景不一致的问题。
+    // 调用方式：applyAppearanceSettings 内部调用。
+    // 入参 darkModeEnabled：当前是否深色模式。
+    // 返回：可直接拼接到 QApplication 样式表的 QMenu 片段。
+    QString buildGlobalContextMenuStyleBlock(const bool darkModeEnabled)
+    {
+        const QString menuBackgroundColor = darkModeEnabled
+            ? QStringLiteral("#111111")
+            : QStringLiteral("#FFFFFF");
+        const QString menuTextColor = darkModeEnabled
+            ? QStringLiteral("#FFFFFF")
+            : QStringLiteral("#000000");
+        const QString menuBorderColor = darkModeEnabled
+            ? QStringLiteral("#3A3A3A")
+            : QStringLiteral("#C7D4E5");
+        const QString disabledTextColor = darkModeEnabled
+            ? QStringLiteral("#8C8C8C")
+            : QStringLiteral("#7A8694");
+
+        const QString contextMenuRule = QStringLiteral(
+            "QMenu{"
+            "  background-color:%1 !important;"
+            "  color:%2 !important;"
+            "  border:1px solid %3 !important;"
+            "}"
+            "QMenu::item{"
+            "  padding:4px 16px 4px 12px;"
+            "  background-color:transparent;"
+            "}"
+            "QMenu::item:selected{"
+            "  background-color:%4 !important;"
+            "  color:#FFFFFF !important;"
+            "}"
+            "QMenu::item:disabled{"
+            "  color:%5 !important;"
+            "  background-color:transparent;"
+            "}"
+            "QMenu::separator{"
+            "  height:1px;"
+            "  background-color:%3;"
+            "  margin:2px 6px;"
+            "}")
+            .arg(menuBackgroundColor)
+            .arg(menuTextColor)
+            .arg(menuBorderColor)
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(disabledTextColor);
+
+        return QStringLiteral("\n%1\n%2\n%3\n")
+            .arg(QString::fromLatin1(kContextMenuStyleBeginMarker))
+            .arg(contextMenuRule)
+            .arg(QString::fromLatin1(kContextMenuStyleEndMarker));
+    }
+
     // applyGlobalTooltipStyleBlock 作用：
     // - 把 Tooltip 样式片段写入 QApplication 样式表；
     // - 先删除旧标记片段，再追加新片段，确保切换主题后 Tooltip 立即生效。
@@ -609,6 +670,38 @@ namespace
         }
 
         appStyleSheetText += tooltipStyleBlock;
+        appInstance->setStyleSheet(appStyleSheetText);
+    }
+
+    // applyGlobalContextMenuStyleBlock 作用：
+    // - 把 QMenu 样式片段写入 QApplication 样式表；
+    // - 先删除旧标记片段，再追加新片段，确保主题切换后右键菜单立即生效。
+    // 调用方式：applyAppearanceSettings 内部调用。
+    // 入参 contextMenuStyleBlock：buildGlobalContextMenuStyleBlock 生成的样式片段。
+    void applyGlobalContextMenuStyleBlock(const QString& contextMenuStyleBlock)
+    {
+        QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
+        if (appInstance == nullptr)
+        {
+            return;
+        }
+
+        QString appStyleSheetText = appInstance->styleSheet();
+        const QString beginMarkerText = QString::fromLatin1(kContextMenuStyleBeginMarker);
+        const QString endMarkerText = QString::fromLatin1(kContextMenuStyleEndMarker);
+        const int beginMarkerIndex = appStyleSheetText.indexOf(beginMarkerText);
+
+        if (beginMarkerIndex >= 0)
+        {
+            const int endMarkerIndex = appStyleSheetText.indexOf(endMarkerText, beginMarkerIndex);
+            if (endMarkerIndex >= 0)
+            {
+                const int removeLength = (endMarkerIndex - beginMarkerIndex) + endMarkerText.length();
+                appStyleSheetText.remove(beginMarkerIndex, removeLength);
+            }
+        }
+
+        appStyleSheetText += contextMenuStyleBlock;
         appInstance->setStyleSheet(appStyleSheetText);
     }
 
@@ -3911,6 +4004,10 @@ void MainWindow::applyAppearanceSettings(
     // - 覆盖所有顶层窗口（含浮动 Dock 与后续新建窗口）；
     // - 修复“部分按钮 Tooltip 仍白底”的残留问题。
     applyGlobalTooltipStyleBlock(buildGlobalTooltipStyleBlock(darkModeEnabled));
+    // 同步写入 QApplication 样式表中的 QMenu 规则：
+    // - 兜底标准输入控件（QLineEdit/QTextEdit/QPlainTextEdit）右键菜单；
+    // - 覆盖独立顶层窗口中未手动设置菜单样式的场景。
+    applyGlobalContextMenuStyleBlock(buildGlobalContextMenuStyleBlock(darkModeEnabled));
 
     // 全局 QMessageBox 主题刷新：
     // - 深浅色切换后，已打开的消息框也同步改为当前主题；

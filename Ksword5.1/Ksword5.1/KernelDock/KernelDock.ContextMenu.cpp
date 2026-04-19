@@ -1,10 +1,10 @@
-
+﻿
 #include "KernelDock.h"
 
 // ============================================================
 // KernelDock.ContextMenu.cpp
 // 作用说明：
-// 1) 承载对象命名空间表格右键菜单；
+// 1) 承载对象命名空间树右键菜单；
 // 2) 承载原子表右键菜单；
 // 3) 实现复制与针对对象/原子的快捷操作。
 // ============================================================
@@ -23,6 +23,8 @@
 #include <QStringList>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 
 namespace
 {
@@ -50,20 +52,19 @@ namespace
         }
     }
 
-    // tableRowAsTsv：
-    // - 作用：把当前表格行序列化为 TSV。
-    QString tableRowAsTsv(const QTableWidget* tableWidget, const int rowIndex)
+    // treeItemAsTsv：
+    // - 作用：把树节点当前行序列化为 TSV。
+    QString treeItemAsTsv(const QTreeWidget* treeWidget, const QTreeWidgetItem* treeItem)
     {
-        if (tableWidget == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
+        if (treeWidget == nullptr || treeItem == nullptr)
         {
             return QString();
         }
 
         QStringList fieldList;
-        for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
+        for (int columnIndex = 0; columnIndex < treeWidget->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* cellItem = tableWidget->item(rowIndex, columnIndex);
-            fieldList.push_back(cellItem == nullptr ? QString() : cellItem->text());
+            fieldList.push_back(treeItem->text(columnIndex));
         }
         return fieldList.join('\t');
     }
@@ -97,18 +98,14 @@ namespace
             .arg(QString::number(entry.atomValue), hexText, safeText(entry.atomNameText), safeText(entry.sourceText), safeText(entry.statusText));
     }
 
-    // ObjectNamespaceColumn：对象命名空间表列索引。
+    // ObjectNamespaceColumn：对象命名空间树列索引。
     enum class ObjectNamespaceColumn : int
     {
-        RootPath = 0,
-        Scope,
-        DirectoryPath,
-        ObjectName,
-        ObjectType,
-        FullPath,
-        EnumApi,
-        SymbolicTarget,
+        Name = 0,
+        Type,
+        PathOrScope,
         Status,
+        SymbolicTarget,
         Count
     };
 
@@ -126,19 +123,22 @@ namespace
 
 void KernelDock::showObjectNamespaceContextMenu(const QPoint& localPosition)
 {
-    if (m_objectNamespaceTable == nullptr)
+    if (m_objectNamespaceTree == nullptr)
     {
         return;
     }
 
-    const QModelIndex clickedIndex = m_objectNamespaceTable->indexAt(localPosition);
-    if (clickedIndex.isValid())
+    QTreeWidgetItem* clickedItem = m_objectNamespaceTree->itemAt(localPosition);
+    const int clickedColumn = m_objectNamespaceTree->columnAt(localPosition.x());
+    if (clickedItem != nullptr)
     {
-        m_objectNamespaceTable->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+        m_objectNamespaceTree->setCurrentItem(clickedItem, clickedColumn >= 0 ? clickedColumn : 0);
     }
 
+    QTreeWidgetItem* currentItem = m_objectNamespaceTree->currentItem();
     const KernelObjectNamespaceEntry* entry = currentObjectNamespaceEntry();
     const bool hasEntry = (entry != nullptr);
+    const bool hasTreeNode = (currentItem != nullptr);
 
     QMenu contextMenu(this);
     contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
@@ -161,7 +161,7 @@ void KernelDock::showObjectNamespaceContextMenu(const QPoint& localPosition)
     copyFullPathAction->setEnabled(hasEntry);
     copySymbolicTargetAction->setEnabled(hasEntry && !entry->symbolicLinkTargetText.trimmed().isEmpty());
     copyEnumApiAction->setEnabled(hasEntry);
-    copyRowAction->setEnabled(hasEntry);
+    copyRowAction->setEnabled(hasTreeNode);
     copySameRootRowsAction->setEnabled(hasEntry);
 
     QMenu* operationMenu = contextMenu.addMenu(QIcon(":/Icon/process_tree.svg"), QStringLiteral("对象操作"));
@@ -177,7 +177,7 @@ void KernelDock::showObjectNamespaceContextMenu(const QPoint& localPosition)
     resolveSymbolicLinkAction->setEnabled(hasEntry && entry->isSymbolicLink);
     mapDosPathAction->setEnabled(hasEntry && (isNtDevicePath(entry->fullPathText) || isNtDevicePath(entry->symbolicLinkTargetText)));
 
-    QAction* selectedAction = contextMenu.exec(m_objectNamespaceTable->viewport()->mapToGlobal(localPosition));
+    QAction* selectedAction = contextMenu.exec(m_objectNamespaceTree->viewport()->mapToGlobal(localPosition));
     if (selectedAction == nullptr)
     {
         return;
@@ -197,15 +197,29 @@ void KernelDock::showObjectNamespaceContextMenu(const QPoint& localPosition)
 
     if (selectedAction == copyCellAction)
     {
-        const int rowIndex = m_objectNamespaceTable->currentRow();
-        const int columnIndex = m_objectNamespaceTable->currentColumn();
-        if (rowIndex >= 0 && columnIndex >= 0)
+        QTreeWidgetItem* selectedTreeItem = m_objectNamespaceTree->currentItem();
+        if (selectedTreeItem != nullptr)
         {
-            QTableWidgetItem* cellItem = m_objectNamespaceTable->item(rowIndex, columnIndex);
-            if (cellItem != nullptr)
+            int currentColumn = m_objectNamespaceTree->currentColumn();
+            if (currentColumn < 0)
             {
-                copyTextToClipboard(cellItem->text());
+                currentColumn = 0;
             }
+            copyTextToClipboard(selectedTreeItem->text(currentColumn));
+        }
+        return;
+    }
+
+    if (selectedAction == copyRowAction)
+    {
+        QTreeWidgetItem* selectedTreeItem = m_objectNamespaceTree->currentItem();
+        if (hasEntry)
+        {
+            copyTextToClipboard(objectNamespaceEntryAsTsv(*entry));
+        }
+        else if (selectedTreeItem != nullptr)
+        {
+            copyTextToClipboard(treeItemAsTsv(m_objectNamespaceTree, selectedTreeItem));
         }
         return;
     }
@@ -240,17 +254,12 @@ void KernelDock::showObjectNamespaceContextMenu(const QPoint& localPosition)
         copyTextToClipboard(entry->enumApiText);
         return;
     }
-    if (selectedAction == copyRowAction)
-    {
-        copyTextToClipboard(tableRowAsTsv(m_objectNamespaceTable, m_objectNamespaceTable->currentRow()));
-        return;
-    }
     if (selectedAction == copySameRootRowsAction)
     {
         QStringList rowList;
         for (const KernelObjectNamespaceEntry& rowEntry : m_objectNamespaceRows)
         {
-            if (QString::compare(rowEntry.rootPathText, entry->rootPathText, Qt::CaseInsensitive) == 0)
+            if (QString::compare(rowEntry.directoryPathText, entry->directoryPathText, Qt::CaseInsensitive) == 0)
             {
                 rowList.push_back(objectNamespaceEntryAsTsv(rowEntry));
             }
@@ -292,18 +301,14 @@ void KernelDock::showObjectNamespaceContextMenu(const QPoint& localPosition)
         if (resolveOk && currentObjectNamespaceSourceIndex(sourceIndex))
         {
             m_objectNamespaceRows[sourceIndex].symbolicLinkTargetText = targetText;
-            if (m_objectNamespaceTable->currentRow() >= 0)
+            QTreeWidgetItem* selectedTreeItem = m_objectNamespaceTree->currentItem();
+            if (selectedTreeItem != nullptr)
             {
-                QTableWidgetItem* targetItem = m_objectNamespaceTable->item(
-                    m_objectNamespaceTable->currentRow(),
-                    static_cast<int>(ObjectNamespaceColumn::SymbolicTarget));
-                if (targetItem != nullptr)
-                {
-                    targetItem->setText(targetText);
-                }
+                selectedTreeItem->setText(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), targetText);
             }
         }
 
+        showObjectNamespaceDetailByCurrentRow();
         m_objectNamespaceDetailEditor->setText(resultText);
         return;
     }

@@ -19,7 +19,7 @@ Environment:
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text (INIT, DriverEntry)
-#pragma alloc_text (PAGE, KswordARKDriverEvtDeviceAdd)
+#pragma alloc_text (PAGE, KswordARKDriverEvtDriverUnload)
 #pragma alloc_text (PAGE, KswordARKDriverEvtDriverContextCleanup)
 #endif
 
@@ -74,9 +74,9 @@ Return Value:
     WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
     attributes.EvtCleanupCallback = KswordARKDriverEvtDriverContextCleanup;
 
-    WDF_DRIVER_CONFIG_INIT(&config,
-                           KswordARKDriverEvtDeviceAdd
-                           );
+    WDF_DRIVER_CONFIG_INIT(&config, WDF_NO_EVENT_CALLBACK);
+    config.DriverInitFlags = WdfDriverInitNonPnpDriver;
+    config.EvtDriverUnload = KswordARKDriverEvtDriverUnload;
 
     status = WdfDriverCreate(DriverObject,
                              RegistryPath,
@@ -103,43 +103,31 @@ Return Value:
     return status;
 }
 
-NTSTATUS
-KswordARKDriverEvtDeviceAdd(
-    _In_    WDFDRIVER       Driver,
-    _Inout_ PWDFDEVICE_INIT DeviceInit
+VOID
+KswordARKDriverEvtDriverUnload(
+    _In_ WDFDRIVER Driver
     )
 /*++
 Routine Description:
 
-    EvtDeviceAdd is called by the framework in response to AddDevice
-    call from the PnP manager. We create and initialize a device object to
-    represent a new instance of the device.
+    Called when SCM requests to unload the non-PnP control driver.
 
 Arguments:
 
-    Driver - Handle to a framework driver object created in DriverEntry
-
-    DeviceInit - Pointer to a framework-allocated WDFDEVICE_INIT structure.
+    Driver - Handle to a WDF Driver object.
 
 Return Value:
 
-    NTSTATUS
+    VOID
 
 --*/
 {
-    NTSTATUS status;
-
     UNREFERENCED_PARAMETER(Driver);
 
     PAGED_CODE();
 
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Entry");
-
-    status = KswordARKDriverCreateDevice(DeviceInit);
-
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Exit");
-
-    return status;
 }
 
 VOID

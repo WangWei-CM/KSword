@@ -26,6 +26,7 @@ class QLineEdit;
 class QPushButton;
 class QTableWidget;
 class QTabWidget;
+class QTreeWidget;
 class QVBoxLayout;
 class CodeEditorWidget;
 
@@ -164,9 +165,27 @@ private:
 
     // ==================== 表格渲染 ====================
     // rebuildObjectNamespaceTable：
-    // - 作用：根据筛选关键词重建对象命名空间表格。
+    // - 作用：根据筛选关键词重建对象命名空间树。
     // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
     void rebuildObjectNamespaceTable(const QString& filterKeyword);
+
+    // rebuildObjectNamespacePropertyTable：
+    // - 作用：重建“对象属性项/值”表，展示当前节点或对象记录的详细字段。
+    // - 参数 entry：当前对象记录；为 nullptr 时展示树节点摘要。
+    // - 参数 nodeNameText：树节点名称（entry 为 nullptr 时使用）。
+    // - 参数 nodeTypeText：树节点类型（entry 为 nullptr 时使用）。
+    // - 参数 nodePathText：树节点路径（entry 为 nullptr 时使用）。
+    // - 参数 nodeDescriptionText：树节点说明（entry 为 nullptr 时使用）。
+    void rebuildObjectNamespacePropertyTable(
+        const KernelObjectNamespaceEntry* entry,
+        const QString& nodeNameText,
+        const QString& nodeTypeText,
+        const QString& nodePathText,
+        const QString& nodeDescriptionText);
+
+    // selectFirstObjectNamespaceEntryItem：
+    // - 作用：在树中定位并选中第一条对象记录节点（非根/目录摘要节点）。
+    void selectFirstObjectNamespaceEntryItem();
 
     // rebuildAtomTable：
     // - 作用：根据筛选关键词重建原子表格。
@@ -236,7 +255,8 @@ private:
     QPushButton* m_refreshObjectNamespaceButton = nullptr;     // m_refreshObjectNamespaceButton：对象命名空间刷新按钮。
     QLineEdit* m_objectNamespaceFilterEdit = nullptr;          // m_objectNamespaceFilterEdit：对象命名空间关键词过滤输入框。
     QLabel* m_objectNamespaceStatusLabel = nullptr;            // m_objectNamespaceStatusLabel：对象命名空间状态文本。
-    QTableWidget* m_objectNamespaceTable = nullptr;            // m_objectNamespaceTable：对象命名空间结果表。
+    QTreeWidget* m_objectNamespaceTree = nullptr;              // m_objectNamespaceTree：对象命名空间树（文件管理器式结构）。
+    QTableWidget* m_objectNamespacePropertyTable = nullptr;    // m_objectNamespacePropertyTable：对象属性项/值表。
     CodeEditorWidget* m_objectNamespaceDetailEditor = nullptr; // m_objectNamespaceDetailEditor：对象命名空间详情编辑器（只读）。
 
     // ==================== 原子表页 ====================

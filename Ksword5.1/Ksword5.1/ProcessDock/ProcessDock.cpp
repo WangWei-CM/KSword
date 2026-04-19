@@ -38,6 +38,7 @@
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QScrollBar>
 #include <QSvgRenderer>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -94,6 +95,9 @@ namespace
     constexpr const char* IconList = ":/Icon/process_list.svg";
     constexpr const char* IconStart = ":/Icon/process_start.svg";
     constexpr const char* IconPause = ":/Icon/process_pause.svg";
+    // Kernel 标识图路径：按项目规范固定使用 Resource\Kernel.png。
+    const QString KernelBadgeImagePath = QStringLiteral(
+        "H:/Project/Ksword5.1/Ksword5.1/Ksword5.1/Resource/Kernel.png");
 
     // 默认按钮图标尺寸。
     constexpr QSize DefaultIconSize(16, 16);
@@ -197,6 +201,162 @@ namespace
         {
             std::ostringstream oss;
             oss << "pid=" << targetPid << ", bytesReturned=" << bytesReturned;
+            if (ioctlOk)
+            {
+                oss << ", ioctl=ok";
+            }
+            else
+            {
+                oss << ", ioctl=fail, error=" << ioctlError;
+            }
+            *detailTextOut = oss.str();
+        }
+
+        return ioctlOk != FALSE;
+    }
+
+    // suspendProcessByR0Driver 作用：
+    // - 通过 R0 驱动设备发送“挂起进程”IOCTL；
+    // - 使用共享协议头中的结构体，避免两侧字段漂移。
+    bool suspendProcessByR0Driver(const std::uint32_t targetPid, std::string* const detailTextOut)
+    {
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+
+        if (targetPid == 0U || targetPid <= 4U)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = "invalid target pid";
+            }
+            return false;
+        }
+
+        const HANDLE driverHandle = ::CreateFileW(
+            KSWORD_ARK_LOG_WIN32_PATH,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (driverHandle == INVALID_HANDLE_VALUE)
+        {
+            const DWORD lastError = ::GetLastError();
+            if (detailTextOut != nullptr)
+            {
+                std::ostringstream oss;
+                oss << "CreateFileW(" << "\\\\.\\KswordARKLog" << ") failed, error=" << lastError;
+                *detailTextOut = oss.str();
+            }
+            return false;
+        }
+
+        KSWORD_ARK_SUSPEND_PROCESS_REQUEST request{};
+        request.processId = targetPid;
+
+        DWORD bytesReturned = 0;
+        const BOOL ioctlOk = ::DeviceIoControl(
+            driverHandle,
+            IOCTL_KSWORD_ARK_SUSPEND_PROCESS,
+            &request,
+            static_cast<DWORD>(sizeof(request)),
+            nullptr,
+            0,
+            &bytesReturned,
+            nullptr);
+        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
+        ::CloseHandle(driverHandle);
+
+        if (detailTextOut != nullptr)
+        {
+            std::ostringstream oss;
+            oss << "pid=" << targetPid << ", bytesReturned=" << bytesReturned;
+            if (ioctlOk)
+            {
+                oss << ", ioctl=ok";
+            }
+            else
+            {
+                oss << ", ioctl=fail, error=" << ioctlError;
+            }
+            *detailTextOut = oss.str();
+        }
+
+        return ioctlOk != FALSE;
+    }
+
+    // setPplProtectionLevelByR0Driver 作用：
+    // - 通过 R0 驱动设备发送“设置 PPL 保护层级”IOCTL；
+    // - protectionLevel 与 ProcessProtectionInformation 的单字节层级编码保持一致。
+    bool setPplProtectionLevelByR0Driver(
+        const std::uint32_t targetPid,
+        const std::uint8_t protectionLevel,
+        std::string* const detailTextOut)
+    {
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+
+        if (targetPid == 0U || targetPid <= 4U)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = "invalid target pid";
+            }
+            return false;
+        }
+
+        const HANDLE driverHandle = ::CreateFileW(
+            KSWORD_ARK_LOG_WIN32_PATH,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (driverHandle == INVALID_HANDLE_VALUE)
+        {
+            const DWORD lastError = ::GetLastError();
+            if (detailTextOut != nullptr)
+            {
+                std::ostringstream oss;
+                oss << "CreateFileW(" << "\\\\.\\KswordARKLog" << ") failed, error=" << lastError;
+                *detailTextOut = oss.str();
+            }
+            return false;
+        }
+
+        KSWORD_ARK_SET_PPL_LEVEL_REQUEST request{};
+        request.processId = targetPid;
+        request.protectionLevel = protectionLevel;
+
+        DWORD bytesReturned = 0;
+        const BOOL ioctlOk = ::DeviceIoControl(
+            driverHandle,
+            IOCTL_KSWORD_ARK_SET_PPL_LEVEL,
+            &request,
+            static_cast<DWORD>(sizeof(request)),
+            nullptr,
+            0,
+            &bytesReturned,
+            nullptr);
+        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
+        ::CloseHandle(driverHandle);
+
+        if (detailTextOut != nullptr)
+        {
+            std::ostringstream oss;
+            oss << "pid=" << targetPid
+                << ", protectionLevel=0x"
+                << std::hex
+                << std::uppercase
+                << static_cast<unsigned int>(protectionLevel)
+                << std::dec
+                << ", bytesReturned=" << bytesReturned;
             if (ioctlOk)
             {
                 oss << ", ioctl=ok";
@@ -794,8 +954,7 @@ void ProcessDock::initializeProcessTable()
     QLabel* r0KernelBadgeLabel = new QLabel(m_processListPage);
     r0KernelBadgeLabel->setObjectName(QStringLiteral("r0KernelBadgeLabel"));
     r0KernelBadgeLabel->setToolTip(QStringLiteral("R0 功能标识"));
-    const QPixmap kernelBadgePixmap(
-        QStringLiteral("H:/Project/Ksword5.1/Ksword5.1/Ksword5.1/Resource/Kernel.png"));
+    const QPixmap kernelBadgePixmap(KernelBadgeImagePath);
     if (!kernelBadgePixmap.isNull())
     {
         r0KernelBadgeLabel->setPixmap(kernelBadgePixmap.scaled(
@@ -2398,6 +2557,13 @@ void ProcessDock::rebuildTable()
         m_trackedSelectedColumn,
         0,
         static_cast<int>(TableColumn::Count) - 1);
+    // 滚动位置快照：
+    // - 保存刷新前用户视口位置；
+    // - 刷新后恢复，避免每轮重建跳回顶部。
+    QScrollBar* verticalScrollBar = m_processTable->verticalScrollBar();
+    QScrollBar* horizontalScrollBar = m_processTable->horizontalScrollBar();
+    const int verticalScrollValueBeforeRebuild = (verticalScrollBar != nullptr) ? verticalScrollBar->value() : 0;
+    const int horizontalScrollValueBeforeRebuild = (horizontalScrollBar != nullptr) ? horizontalScrollBar->value() : 0;
 
     // 刷新期间临时冻结视图更新，减少大量 addTopLevelItem 时的重绘抖动。
     QSignalBlocker tableSignalBlocker(m_processTable);
@@ -2561,7 +2727,6 @@ void ProcessDock::rebuildTable()
     {
         m_processTable->setCurrentItem(trackedRowItemToRestore, trackedColumnBeforeRebuild);
         trackedRowItemToRestore->setSelected(true);
-        m_processTable->scrollToItem(trackedRowItemToRestore, QAbstractItemView::PositionAtCenter);
         m_trackedSelectedIdentityKey = trackedIdentityKeyBeforeRebuild;
         m_trackedSelectedColumn = trackedColumnBeforeRebuild;
     }
@@ -2573,6 +2738,22 @@ void ProcessDock::rebuildTable()
 
     // 根据本轮数据刷新标题栏“占用总和”。
     updateUsageSummaryInHeader(displayRows);
+
+    // 恢复滚动位置：保持用户当前视图位置不被刷新打断。
+    if (verticalScrollBar != nullptr)
+    {
+        verticalScrollBar->setValue(std::clamp(
+            verticalScrollValueBeforeRebuild,
+            verticalScrollBar->minimum(),
+            verticalScrollBar->maximum()));
+    }
+    if (horizontalScrollBar != nullptr)
+    {
+        horizontalScrollBar->setValue(std::clamp(
+            horizontalScrollValueBeforeRebuild,
+            horizontalScrollBar->minimum(),
+            horizontalScrollBar->maximum()));
+    }
 
     // 表格重建完成后恢复刷新绘制。
     m_processTable->setUpdatesEnabled(true);
@@ -2826,6 +3007,41 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QMenu contextMenu(this);
     // 右键菜单显式样式：避免浅色模式在透明父控件下出现黑底黑字。
     contextMenu.setStyleSheet(buildThreadContextMenuStyle());
+
+    // R0 动作图标构造器：
+    // - 基础图标仍沿用主题蓝；
+    // - 在图标右下角叠加 Kernel.png，作为 R0 入口统一视觉标识。
+    const auto buildR0ActionIcon = [this](const char* iconPath) -> QIcon
+    {
+        QPixmap iconPixmap = blueTintedIcon(iconPath).pixmap(DefaultIconSize);
+        if (iconPixmap.isNull())
+        {
+            iconPixmap = QPixmap(DefaultIconSize);
+            iconPixmap.fill(Qt::transparent);
+        }
+
+        const QPixmap kernelPixmap(KernelBadgeImagePath);
+        if (!kernelPixmap.isNull())
+        {
+            const int badgeSide = std::max(8, std::min(iconPixmap.width(), iconPixmap.height()) / 2);
+            const QPixmap scaledBadge = kernelPixmap.scaled(
+                badgeSide,
+                badgeSide,
+                Qt::KeepAspectRatio,
+                Qt::SmoothTransformation);
+
+            QPainter painter(&iconPixmap);
+            painter.setRenderHint(QPainter::Antialiasing, true);
+            painter.drawPixmap(
+                iconPixmap.width() - scaledBadge.width(),
+                iconPixmap.height() - scaledBadge.height(),
+                scaledBadge);
+            painter.end();
+        }
+
+        return QIcon(iconPixmap);
+    };
+
     QAction* copyCellAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_copy_cell.svg"), "复制单元格");
     QAction* copyRowAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_copy_row.svg"), "复制行");
     contextMenu.addSeparator();
@@ -2836,18 +3052,57 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QAction* terminateProcessAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_terminate.svg"),
         "结束进程");
-    QAction* taskkillAction = contextMenu.addAction(
-        blueTintedIcon(":/Icon/process_terminate.svg"),
-        "Taskkill");
-    QAction* taskkillForceAction = contextMenu.addAction(
-        blueTintedIcon(":/Icon/process_terminate.svg"),
-        "Taskkill /f");
     QAction* r0TerminateAction = contextMenu.addAction(
-        blueTintedIcon(":/Icon/process_terminate.svg"),
+        buildR0ActionIcon(":/Icon/process_terminate.svg"),
         "R0结束进程");
-    QAction* injectInvalidShellcodeAction = contextMenu.addAction(
-        blueTintedIcon(":/Icon/process_terminate.svg"),
-        "注入无效shellcode");
+    QAction* r0SuspendAction = contextMenu.addAction(
+        buildR0ActionIcon(":/Icon/process_suspend.svg"),
+        "R0挂起进程");
+    QMenu* r0PplLevelSubMenu = contextMenu.addMenu(
+        buildR0ActionIcon(":/Icon/process_critical.svg"),
+        "R0设置PPL层级");
+    QAction* r0PplNoneAction = r0PplLevelSubMenu->addAction(
+        buildR0ActionIcon(":/Icon/process_critical.svg"),
+        "关闭PPL保护 (0x00)");
+    r0PplNoneAction->setData(0x00U);
+    r0PplLevelSubMenu->addSeparator();
+    // PPL 预设签名器列表：
+    // - 按用户提供的 1~10 层级构建；
+    // - protectionLevel = (Signer << 4) | Type，其中 Type 固定为 1（PPL）。
+    struct PplSignerPreset
+    {
+        int signerValue;       // signerValue：PPL Signer 数值（1~10）。
+        const char* signerName; // signerName：菜单展示名称。
+        const char* meaningText; // meaningText：菜单展示释义。
+    };
+    const PplSignerPreset presetList[] =
+    {
+        { 1, "WinSystem", "系统组件" },
+        { 2, "WinTcb", "可信计算基础（最高权限）" },
+        { 3, "WinMain", "主要 Windows 组件" },
+        { 4, "WinLocal", "本地系统服务" },
+        { 5, "WinConsole", "控制台子系统" },
+        { 6, "WinAuthenticated", "已认证应用" },
+        { 7, "WinUnauthenticated", "未认证应用（最低）" },
+        { 8, "WinCodeGen", "代码生成" },
+        { 9, "WinStore", "Windows Store 应用" },
+        { 10, "WinPPL", "第三方 PPL 进程" }
+    };
+    for (const PplSignerPreset& presetEntry : presetList)
+    {
+        const unsigned int protectionLevel = (static_cast<unsigned int>(presetEntry.signerValue) << 4U) | 0x01U;
+        const QString protectionLevelHexText = QStringLiteral("0x%1")
+            .arg(protectionLevel, 2, 16, QChar('0'))
+            .toUpper();
+        QAction* presetAction = r0PplLevelSubMenu->addAction(
+            buildR0ActionIcon(":/Icon/process_critical.svg"),
+            QStringLiteral("%1 (%2) → %3 [%4]")
+            .arg(QString::fromLatin1(presetEntry.signerName))
+            .arg(presetEntry.signerValue)
+            .arg(QString::fromUtf8(presetEntry.meaningText))
+            .arg(protectionLevelHexText));
+        presetAction->setData(protectionLevel);
+    }
     contextMenu.addSeparator();
 
     QAction* suspendAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_suspend.svg"), "挂起进程");
@@ -2892,10 +3147,8 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     if (selectedAction == copyCellAction) { copyCurrentCell(); }
     else if (selectedAction == copyRowAction) { copyCurrentRow(); }
     else if (selectedAction == terminateProcessAction) { executeTerminateProcessAction(); }
-    else if (selectedAction == taskkillAction) { executeTaskKillAction(false); }
-    else if (selectedAction == taskkillForceAction) { executeTaskKillAction(true); }
     else if (selectedAction == r0TerminateAction) { executeR0TerminateProcessAction(); }
-    else if (selectedAction == injectInvalidShellcodeAction) { executeInjectInvalidShellcodeAction(); }
+    else if (selectedAction == r0SuspendAction) { executeR0SuspendProcessAction(); }
     else if (selectedAction == suspendAction) { executeSuspendAction(); }
     else if (selectedAction == resumeAction) { executeResumeAction(); }
     else if (selectedAction == setCriticalAction) { executeSetCriticalAction(true); }
@@ -2905,6 +3158,29 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     else if (selectedAction->parent() == prioritySubMenu)
     {
         executeSetPriorityAction(selectedAction->data().toInt());
+    }
+    else if (selectedAction->parent() == r0PplLevelSubMenu)
+    {
+        const unsigned int levelValue = selectedAction->data().toUInt();
+        if (levelValue > 0xFFU)
+        {
+            kLogEvent actionEvent;
+            warn << actionEvent
+                << "[ProcessDock] R0 PPL 层级无效: levelValue="
+                << levelValue
+                << eol;
+            showActionResultMessage(
+                QStringLiteral("R0设置PPL层级"),
+                false,
+                std::string("invalid PPL level value"),
+                actionEvent);
+            clearContextActionBinding();
+            return;
+        }
+
+        executeR0SetPplProtectionAction(
+            static_cast<std::uint8_t>(levelValue),
+            selectedAction->text());
     }
 
     clearContextActionBinding();
@@ -3860,30 +4136,6 @@ ProcessDock::ViewMode ProcessDock::currentViewMode() const
     return static_cast<ViewMode>(m_viewModeCombo->currentIndex());
 }
 
-void ProcessDock::executeTaskKillAction(const bool forceKill)
-{
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
-    {
-        kLogEvent logEvent;
-        warn << logEvent << "[ProcessDock] executeTaskKillAction 被忽略：当前没有选中进程。" << eol;
-        return;
-    }
-
-    std::string detailText;
-    const bool actionOk = ks::process::ExecuteTaskKill(processRecord->pid, forceKill, &detailText);
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDock] TaskKill action, pid=" << processRecord->pid
-        << ", force=" << (forceKill ? "true" : "false")
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
-        << eol;
-    showActionResultMessage(forceKill ? "Taskkill /f" : "Taskkill", actionOk, detailText, actionEvent);
-    if (actionOk) requestAsyncRefresh(true);
-}
-
 void ProcessDock::executeR0TerminateProcessAction()
 {
     ks::process::ProcessRecord* processRecord = selectedRecord();
@@ -3910,6 +4162,62 @@ void ProcessDock::executeR0TerminateProcessAction()
     {
         requestAsyncRefresh(true);
     }
+}
+
+void ProcessDock::executeR0SuspendProcessAction()
+{
+    ks::process::ProcessRecord* processRecord = selectedRecord();
+    if (processRecord == nullptr)
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] executeR0SuspendProcessAction 被忽略：当前没有选中进程。" << eol;
+        return;
+    }
+
+    const std::uint32_t targetPid = processRecord->pid;
+    std::string detailText;
+    const bool actionOk = suspendProcessByR0Driver(targetPid, &detailText);
+
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] R0 suspend action, pid=" << targetPid
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage("R0挂起进程", actionOk, detailText, actionEvent);
+}
+
+void ProcessDock::executeR0SetPplProtectionAction(
+    const std::uint8_t protectionLevel,
+    const QString& levelDisplayText)
+{
+    ks::process::ProcessRecord* processRecord = selectedRecord();
+    if (processRecord == nullptr)
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] executeR0SetPplProtectionAction 被忽略：当前没有选中进程。" << eol;
+        return;
+    }
+
+    const std::uint32_t targetPid = processRecord->pid;
+    std::string detailText;
+    const bool actionOk = setPplProtectionLevelByR0Driver(targetPid, protectionLevel, &detailText);
+
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] R0 set PPL action, pid=" << targetPid
+        << ", protectionLevel=0x"
+        << std::hex
+        << std::uppercase
+        << static_cast<unsigned int>(protectionLevel)
+        << std::dec
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    const QString actionTitle = QStringLiteral("R0设置PPL层级(%1)").arg(levelDisplayText);
+    showActionResultMessage(actionTitle, actionOk, detailText, actionEvent);
 }
 
 void ProcessDock::executeTerminateProcessAction()
@@ -4128,29 +4436,6 @@ void ProcessDock::executeTerminateThreadsAction()
         << ", detail=" << detailText
         << eol;
     showActionResultMessage("TerminateThread(全部线程)", actionOk, detailText, actionEvent);
-    if (actionOk) requestAsyncRefresh(true);
-}
-
-void ProcessDock::executeInjectInvalidShellcodeAction()
-{
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
-    {
-        kLogEvent logEvent;
-        warn << logEvent << "[ProcessDock] executeInjectInvalidShellcodeAction 被忽略：当前没有选中进程。" << eol;
-        return;
-    }
-
-    std::string detailText;
-    const bool actionOk = ks::process::InjectInvalidShellcode(processRecord->pid, &detailText);
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    (actionOk ? warn : err) << actionEvent
-        << "[ProcessDock] InjectInvalidShellcode action, pid=" << processRecord->pid
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
-        << eol;
-    showActionResultMessage("注入无效shellcode", actionOk, detailText, actionEvent);
     if (actionOk) requestAsyncRefresh(true);
 }
 
