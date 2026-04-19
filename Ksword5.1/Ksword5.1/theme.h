@@ -159,8 +159,22 @@ namespace KswordTheme
             "QDialog#%1 QHeaderView::section{"
             "  background-color:palette(window) !important;"
             "  color:palette(text) !important;"
+            "}"
+            "QDialog#%1 QMenu{"
+            "  background-color:palette(base) !important;"
+            "  color:palette(text) !important;"
+            "  border:1px solid palette(mid) !important;"
+            "}"
+            "QDialog#%1 QMenu::item:selected{"
+            "  background-color:%2 !important;"
+            "  color:#FFFFFF !important;"
+            "}"
+            "QDialog#%1 QMenu::separator{"
+            "  height:1px;"
+            "  background-color:palette(mid) !important;"
             "}")
-            .arg(dialogObjectName);
+            .arg(dialogObjectName)
+            .arg(PrimaryBlueHex);
     }
 
     // NewRowBackgroundColor 作用：返回“新增行”高亮色（深色为墨绿色）。

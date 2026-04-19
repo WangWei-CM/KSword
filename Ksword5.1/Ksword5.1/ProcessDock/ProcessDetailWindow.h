@@ -189,7 +189,6 @@ private:
     void terminateCurrentModuleThread();
 
     // ======== 操作页动作 ========
-    void executeTaskKillAction(bool forceKill);
     void executeTerminateProcessAction();
     void executeTerminateThreadsAction();
     void executeSelectedTerminateAction();
@@ -197,7 +196,6 @@ private:
     void executeResumeProcessAction();
     void executeSetCriticalAction(bool enableCritical);
     void executeSetPriorityAction();
-    void executeInjectInvalidShellcodeAction();
     void executeInjectDllAction();
     void executeInjectShellcodeAction();
 
@@ -278,7 +276,6 @@ private:
     QPushButton* m_resumeProcessButton = nullptr; // 恢复进程。
     QPushButton* m_setCriticalButton = nullptr; // 设为关键进程。
     QPushButton* m_clearCriticalButton = nullptr; // 取消关键进程。
-    QPushButton* m_injectInvalidShellcodeButton = nullptr; // 注入无效 shellcode。
 
     QComboBox* m_priorityCombo = nullptr;      // 优先级选择框。
     QPushButton* m_applyPriorityButton = nullptr; // 应用优先级按钮。

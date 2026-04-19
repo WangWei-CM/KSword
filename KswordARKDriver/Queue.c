@@ -21,13 +21,215 @@ Environment:
 
 #include "../shared/driver/KswordArkProcessIoctl.h"
 
+NTSYSAPI
+NTSTATUS
+NTAPI
+PsLookupProcessByProcessId(
+    _In_ HANDLE ProcessId,
+    _Outptr_ PEPROCESS* Process
+    );
+
 #ifndef PROCESS_TERMINATE
 #define PROCESS_TERMINATE (0x0001)
 #endif
 
+#ifndef PROCESS_SUSPEND_RESUME
+#define PROCESS_SUSPEND_RESUME (0x0800)
+#endif
+
+#ifndef PROCESS_SET_INFORMATION
+#define PROCESS_SET_INFORMATION (0x0200)
+#endif
+
+#define KSWORD_ARK_PROCESS_INFO_CLASS_PROTECTION 61UL
+
+typedef NTSTATUS(NTAPI* KSWORD_PS_SUSPEND_PROCESS_FN)(
+    _In_ PEPROCESS Process
+    );
+
+typedef UCHAR(NTAPI* KSWORD_PS_GET_PROCESS_PROTECTION_FN)(
+    _In_ PEPROCESS Process
+    );
+
+typedef NTSTATUS(NTAPI* KSWORD_ZW_OR_NT_SUSPEND_PROCESS_FN)(
+    _In_ HANDLE ProcessHandle
+    );
+
+typedef NTSTATUS(NTAPI* KSWORD_ZW_SET_INFORMATION_PROCESS_FN)(
+    _In_ HANDLE ProcessHandle,
+    _In_ ULONG ProcessInformationClass,
+    _In_reads_bytes_(ProcessInformationLength) PVOID ProcessInformation,
+    _In_ ULONG ProcessInformationLength
+    );
+
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text (PAGE, KswordARKDriverQueueInitialize)
 #endif
+
+// KswordARKDriverResolvePsSuspendProcess:
+// - Resolve PsSuspendProcess first; this export is available on more systems.
+static KSWORD_PS_SUSPEND_PROCESS_FN
+KswordARKDriverResolvePsSuspendProcess(
+    VOID
+    )
+{
+    UNICODE_STRING routineName;
+    RtlInitUnicodeString(&routineName, L"PsSuspendProcess");
+    return (KSWORD_PS_SUSPEND_PROCESS_FN)MmGetSystemRoutineAddress(&routineName);
+}
+
+// KswordARKDriverResolveZwOrNtSuspendProcess:
+// - Fallback resolver for Zw/Nt suspend APIs that use process handle input.
+static KSWORD_ZW_OR_NT_SUSPEND_PROCESS_FN
+KswordARKDriverResolveZwOrNtSuspendProcess(
+    VOID
+    )
+{
+    UNICODE_STRING routineName;
+
+    RtlInitUnicodeString(&routineName, L"ZwSuspendProcess");
+    {
+        KSWORD_ZW_OR_NT_SUSPEND_PROCESS_FN routineAddress =
+            (KSWORD_ZW_OR_NT_SUSPEND_PROCESS_FN)MmGetSystemRoutineAddress(&routineName);
+        if (routineAddress != NULL) {
+            return routineAddress;
+        }
+    }
+
+    RtlInitUnicodeString(&routineName, L"NtSuspendProcess");
+    return (KSWORD_ZW_OR_NT_SUSPEND_PROCESS_FN)MmGetSystemRoutineAddress(&routineName);
+}
+
+// KswordARKDriverResolvePsGetProcessProtection:
+// - Resolve PsGetProcessProtection for runtime offset discovery.
+static KSWORD_PS_GET_PROCESS_PROTECTION_FN
+KswordARKDriverResolvePsGetProcessProtection(
+    VOID
+    )
+{
+    UNICODE_STRING routineName;
+    RtlInitUnicodeString(&routineName, L"PsGetProcessProtection");
+    return (KSWORD_PS_GET_PROCESS_PROTECTION_FN)MmGetSystemRoutineAddress(&routineName);
+}
+
+// KswordARKDriverResolveProcessProtectionOffset:
+// - Parse PsGetProcessProtection machine code to find EPROCESS protection-byte offset.
+static LONG
+KswordARKDriverResolveProcessProtectionOffset(
+    VOID
+    )
+{
+    KSWORD_PS_GET_PROCESS_PROTECTION_FN psGetProcessProtection = NULL;
+    const UCHAR* routineCode = NULL;
+    ULONG scanIndex = 0U;
+
+    psGetProcessProtection = KswordARKDriverResolvePsGetProcessProtection();
+    if (psGetProcessProtection == NULL) {
+        return -1;
+    }
+
+    routineCode = (const UCHAR*)psGetProcessProtection;
+    for (scanIndex = 0U; scanIndex + 8U < 64U; ++scanIndex) {
+        LONG offsetValue = -1;
+
+        // Pattern A: 0F B6 81 xx xx xx xx  => movzx eax, byte ptr [rcx+imm32]
+        if (routineCode[scanIndex] == 0x0F &&
+            routineCode[scanIndex + 1U] == 0xB6 &&
+            routineCode[scanIndex + 2U] == 0x81) {
+            RtlCopyMemory(&offsetValue, routineCode + scanIndex + 3U, sizeof(offsetValue));
+            if (offsetValue > 0 && offsetValue < 0x4000) {
+                return offsetValue;
+            }
+        }
+
+        // Pattern B: 8A 81 xx xx xx xx => mov al, byte ptr [rcx+imm32]
+        if (routineCode[scanIndex] == 0x8A &&
+            routineCode[scanIndex + 1U] == 0x81) {
+            RtlCopyMemory(&offsetValue, routineCode + scanIndex + 2U, sizeof(offsetValue));
+            if (offsetValue > 0 && offsetValue < 0x4000) {
+                return offsetValue;
+            }
+        }
+
+        // Pattern C: 0F B6 41 xx => movzx eax, byte ptr [rcx+imm8]
+        if (routineCode[scanIndex] == 0x0F &&
+            routineCode[scanIndex + 1U] == 0xB6 &&
+            routineCode[scanIndex + 2U] == 0x41) {
+            const CHAR offset8 = (CHAR)routineCode[scanIndex + 3U];
+            if (offset8 > 0) {
+                return (LONG)offset8;
+            }
+        }
+
+        // Pattern D: 8A 41 xx => mov al, byte ptr [rcx+imm8]
+        if (routineCode[scanIndex] == 0x8A &&
+            routineCode[scanIndex + 1U] == 0x41) {
+            const CHAR offset8 = (CHAR)routineCode[scanIndex + 2U];
+            if (offset8 > 0) {
+                return (LONG)offset8;
+            }
+        }
+    }
+
+    return -1;
+}
+
+// KswordARKDriverResolveZwSetInformationProcess:
+// - Resolve ZwSetInformationProcess dynamically for broad WDK compatibility.
+static KSWORD_ZW_SET_INFORMATION_PROCESS_FN
+KswordARKDriverResolveZwSetInformationProcess(
+    VOID
+    )
+{
+    UNICODE_STRING routineName;
+    RtlInitUnicodeString(&routineName, L"ZwSetInformationProcess");
+    return (KSWORD_ZW_SET_INFORMATION_PROCESS_FN)MmGetSystemRoutineAddress(&routineName);
+}
+
+// KswordARKDriverPatchProcessProtectionLevelByPid:
+// - Fallback path: patch EPROCESS protection byte directly.
+static NTSTATUS
+KswordARKDriverPatchProcessProtectionLevelByPid(
+    _In_ ULONG processId,
+    _In_ UCHAR protectionLevel
+    )
+{
+    const LONG protectionOffset = KswordARKDriverResolveProcessProtectionOffset();
+    KSWORD_PS_GET_PROCESS_PROTECTION_FN psGetProcessProtection = NULL;
+    PEPROCESS processObject = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (protectionOffset <= 0) {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    status = PsLookupProcessByProcessId(ULongToHandle(processId), &processObject);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    psGetProcessProtection = KswordARKDriverResolvePsGetProcessProtection();
+
+    __try {
+        PUCHAR processBase = (PUCHAR)processObject;
+        volatile UCHAR* protectionByte = (volatile UCHAR*)(processBase + (ULONG)protectionOffset);
+        *protectionByte = protectionLevel;
+
+        if (psGetProcessProtection != NULL) {
+            const UCHAR appliedLevel = psGetProcessProtection(processObject);
+            status = (appliedLevel == protectionLevel) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+        }
+        else {
+            status = STATUS_SUCCESS;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+    }
+
+    ObDereferenceObject(processObject);
+    return status;
+}
 
 // KswordARKDriverTerminateProcessByPid:
 // - Open the target process by PID and terminate it via ZwTerminateProcess.
@@ -61,6 +263,128 @@ KswordARKDriverTerminateProcessByPid(
     status = ZwTerminateProcess(processHandle, exitStatus);
     ZwClose(processHandle);
     return status;
+}
+
+// KswordARKDriverSuspendProcessByPid:
+// - Suspend target process by PID (PsSuspendProcess preferred, Zw/Nt fallback).
+static NTSTATUS
+KswordARKDriverSuspendProcessByPid(
+    _In_ ULONG processId
+    )
+{
+    OBJECT_ATTRIBUTES objectAttributes;
+    CLIENT_ID clientId;
+    HANDLE processHandle = NULL;
+    PEPROCESS processObject = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+    KSWORD_PS_SUSPEND_PROCESS_FN psSuspendProcess = NULL;
+    KSWORD_ZW_OR_NT_SUSPEND_PROCESS_FN zwOrNtSuspendProcess = NULL;
+
+    if (processId == 0U || processId <= 4U) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Prefer PsSuspendProcess with PEPROCESS input for wider compatibility.
+    psSuspendProcess = KswordARKDriverResolvePsSuspendProcess();
+    if (psSuspendProcess != NULL) {
+        status = PsLookupProcessByProcessId(ULongToHandle(processId), &processObject);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+
+        status = psSuspendProcess(processObject);
+        ObDereferenceObject(processObject);
+        return status;
+    }
+
+    // Fallback to Zw/NtSuspendProcess with process-handle input.
+    zwOrNtSuspendProcess = KswordARKDriverResolveZwOrNtSuspendProcess();
+    if (zwOrNtSuspendProcess == NULL) {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    InitializeObjectAttributes(&objectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    clientId.UniqueProcess = ULongToHandle(processId);
+    clientId.UniqueThread = NULL;
+    status = ZwOpenProcess(
+        &processHandle,
+        PROCESS_SUSPEND_RESUME,
+        &objectAttributes,
+        &clientId);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = zwOrNtSuspendProcess(processHandle);
+    ZwClose(processHandle);
+    return status;
+}
+
+// KswordARKDriverSetProcessPplLevelByPid:
+// - Set target process protection level by PID (ZwSetInformation preferred, patch fallback).
+static NTSTATUS
+KswordARKDriverSetProcessPplLevelByPid(
+    _In_ ULONG processId,
+    _In_ UCHAR protectionLevel
+    )
+{
+    OBJECT_ATTRIBUTES objectAttributes;
+    CLIENT_ID clientId;
+    HANDLE processHandle = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+    UCHAR protectionLevelByte = protectionLevel;
+    KSWORD_ZW_SET_INFORMATION_PROCESS_FN zwSetInformationProcess = NULL;
+    const UCHAR protectionType = (UCHAR)(protectionLevel & 0x07U);
+
+    if (processId == 0U || processId <= 4U) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Base validation:
+    // - 0x00 disables protection;
+    // - non-zero requires Type==1 (PPL).
+    if (protectionLevel != 0U && protectionType != 0x01U) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Preferred path: ZwSetInformationProcess(ProcessProtectionInformation).
+    zwSetInformationProcess = KswordARKDriverResolveZwSetInformationProcess();
+    if (zwSetInformationProcess != NULL) {
+        InitializeObjectAttributes(&objectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+        clientId.UniqueProcess = ULongToHandle(processId);
+        clientId.UniqueThread = NULL;
+        status = ZwOpenProcess(
+            &processHandle,
+            PROCESS_SET_INFORMATION,
+            &objectAttributes,
+            &clientId);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+
+        status = zwSetInformationProcess(
+            processHandle,
+            KSWORD_ARK_PROCESS_INFO_CLASS_PROTECTION,
+            &protectionLevelByte,
+            (ULONG)sizeof(protectionLevelByte));
+        ZwClose(processHandle);
+
+        // Succeeded on the preferred path.
+        if (NT_SUCCESS(status)) {
+            return status;
+        }
+
+        // If this info class is rejected by OS, continue to fallback patch path.
+        if (status != STATUS_INVALID_PARAMETER &&
+            status != STATUS_INVALID_INFO_CLASS &&
+            status != STATUS_NOT_IMPLEMENTED &&
+            status != STATUS_NOT_SUPPORTED) {
+            return status;
+        }
+    }
+
+    // Fallback path: patch EPROCESS protection byte directly.
+    return KswordARKDriverPatchProcessProtectionLevelByPid(processId, protectionLevelByte);
 }
 
 NTSTATUS
@@ -267,6 +591,129 @@ Return Value:
                 sizeof(logMessage),
                 "R0 terminate failed: pid=%lu, status=0x%08X.",
                 (unsigned long)terminateRequest->processId,
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+        }
+        break;
+    }
+    case IOCTL_KSWORD_ARK_SUSPEND_PROCESS:
+    {
+        KSWORD_ARK_SUSPEND_PROCESS_REQUEST* suspendRequest = NULL;
+
+        status = WdfRequestRetrieveInputBuffer(
+            Request,
+            sizeof(KSWORD_ARK_SUSPEND_PROCESS_REQUEST),
+            &inputBuffer,
+            &inputBufferLength);
+        if (!NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 suspend ioctl: input buffer invalid, status=0x%08X",
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+            break;
+        }
+
+        suspendRequest = (KSWORD_ARK_SUSPEND_PROCESS_REQUEST*)inputBuffer;
+        if (suspendRequest->processId == 0U || suspendRequest->processId <= 4U) {
+            status = STATUS_INVALID_PARAMETER;
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 suspend ioctl: pid=%lu rejected.",
+                (unsigned long)suspendRequest->processId);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Warn", logMessage);
+            break;
+        }
+
+        (void)RtlStringCbPrintfA(
+            logMessage,
+            sizeof(logMessage),
+            "R0 suspend ioctl: pid=%lu.",
+            (unsigned long)suspendRequest->processId);
+        (void)KswordARKDriverEnqueueLogFrame(device, "Info", logMessage);
+
+        status = KswordARKDriverSuspendProcessByPid((ULONG)suspendRequest->processId);
+        if (NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 suspend success: pid=%lu.",
+                (unsigned long)suspendRequest->processId);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Info", logMessage);
+            completeBytes = sizeof(KSWORD_ARK_SUSPEND_PROCESS_REQUEST);
+        }
+        else {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 suspend failed: pid=%lu, status=0x%08X.",
+                (unsigned long)suspendRequest->processId,
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+        }
+        break;
+    }
+    case IOCTL_KSWORD_ARK_SET_PPL_LEVEL:
+    {
+        KSWORD_ARK_SET_PPL_LEVEL_REQUEST* setPplRequest = NULL;
+
+        status = WdfRequestRetrieveInputBuffer(
+            Request,
+            sizeof(KSWORD_ARK_SET_PPL_LEVEL_REQUEST),
+            &inputBuffer,
+            &inputBufferLength);
+        if (!NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 set PPL ioctl: input buffer invalid, status=0x%08X",
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+            break;
+        }
+
+        setPplRequest = (KSWORD_ARK_SET_PPL_LEVEL_REQUEST*)inputBuffer;
+        if (setPplRequest->processId == 0U || setPplRequest->processId <= 4U) {
+            status = STATUS_INVALID_PARAMETER;
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 set PPL ioctl: pid=%lu rejected.",
+                (unsigned long)setPplRequest->processId);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Warn", logMessage);
+            break;
+        }
+
+        (void)RtlStringCbPrintfA(
+            logMessage,
+            sizeof(logMessage),
+            "R0 set PPL ioctl: pid=%lu, level=0x%02X.",
+            (unsigned long)setPplRequest->processId,
+            (unsigned int)setPplRequest->protectionLevel);
+        (void)KswordARKDriverEnqueueLogFrame(device, "Info", logMessage);
+
+        status = KswordARKDriverSetProcessPplLevelByPid(
+            (ULONG)setPplRequest->processId,
+            (UCHAR)setPplRequest->protectionLevel);
+        if (NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 set PPL success: pid=%lu, level=0x%02X.",
+                (unsigned long)setPplRequest->processId,
+                (unsigned int)setPplRequest->protectionLevel);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Info", logMessage);
+            completeBytes = sizeof(KSWORD_ARK_SET_PPL_LEVEL_REQUEST);
+        }
+        else {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 set PPL failed: pid=%lu, level=0x%02X, status=0x%08X.",
+                (unsigned long)setPplRequest->processId,
+                (unsigned int)setPplRequest->protectionLevel,
                 (unsigned int)status);
             (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
         }

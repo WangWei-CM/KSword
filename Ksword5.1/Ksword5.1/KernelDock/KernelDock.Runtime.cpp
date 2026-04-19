@@ -19,12 +19,16 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMetaObject>
+#include <QMap>
 #include <QPointer>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 
 #include <algorithm> // std::count_if：统计失败项。
+#include <limits>    // std::numeric_limits：定义树节点哨兵值。
 #include <thread>    // std::thread：后台刷新任务。
 
 namespace
@@ -43,20 +47,122 @@ namespace
         return valueText.trimmed().isEmpty() ? fallbackText : valueText;
     }
 
-    // ObjectNamespaceColumn：对象命名空间表列索引。
+    // ObjectNamespaceColumn：对象命名空间树列索引。
     enum class ObjectNamespaceColumn : int
     {
-        RootPath = 0,
-        Scope,
-        DirectoryPath,
-        ObjectName,
-        ObjectType,
-        FullPath,
-        EnumApi,
-        SymbolicTarget,
+        Name = 0,
+        Type,
+        PathOrScope,
         Status,
+        SymbolicTarget,
         Count
     };
+
+    // ObjectNamespaceNodeKind：对象命名空间树节点类型。
+    enum class ObjectNamespaceNodeKind : int
+    {
+        Root = 0,
+        Directory,
+        ObjectEntry
+    };
+
+    // 对象命名空间树自定义角色：
+    // - SourceIndexRole：对象节点对应 m_objectNamespaceRows 的索引。
+    // - NodeKindRole：节点类型（根/目录/对象）。
+    // - NodePathRole：节点路径（根路径/目录路径/完整对象路径）。
+    // - NodeDescriptionRole：节点补充说明文本。
+    constexpr int SourceIndexRole = Qt::UserRole + 1;
+    constexpr int NodeKindRole = Qt::UserRole + 2;
+    constexpr int NodePathRole = Qt::UserRole + 3;
+    constexpr int NodeDescriptionRole = Qt::UserRole + 4;
+
+    // kInvalidSourceIndex：树节点未绑定对象记录时使用的哨兵值。
+    constexpr qulonglong kInvalidSourceIndex = std::numeric_limits<qulonglong>::max();
+
+    // leafNameFromObjectPath：
+    // - 作用：从对象路径提取最后一段名称用于树节点显示。
+    QString leafNameFromObjectPath(const QString& fullPathText)
+    {
+        const int slashIndex = fullPathText.lastIndexOf('\\');
+        if (slashIndex < 0)
+        {
+            return fullPathText;
+        }
+        if (slashIndex + 1 >= fullPathText.size())
+        {
+            return fullPathText;
+        }
+        return fullPathText.mid(slashIndex + 1);
+    }
+
+    // appendPropertyRow：
+    // - 作用：向属性表追加一条“字段名 + 字段值”记录，并设为只读。
+    void appendPropertyRow(QTableWidget* propertyTable, const QString& fieldNameText, const QString& fieldValueText)
+    {
+        if (propertyTable == nullptr)
+        {
+            return;
+        }
+
+        const int rowIndex = propertyTable->rowCount();
+        propertyTable->insertRow(rowIndex);
+
+        auto* nameItem = new QTableWidgetItem(fieldNameText);
+        auto* valueItem = new QTableWidgetItem(fieldValueText);
+
+        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+        valueItem->setFlags(valueItem->flags() & ~Qt::ItemIsEditable);
+
+        propertyTable->setItem(rowIndex, 0, nameItem);
+        propertyTable->setItem(rowIndex, 1, valueItem);
+    }
+
+    // findFirstEntryItem：
+    // - 作用：在树中查找第一条绑定对象记录的节点。
+    // - 返回：找到返回节点指针；否则返回 nullptr。
+    QTreeWidgetItem* findFirstEntryItem(QTreeWidget* treeWidget)
+    {
+        if (treeWidget == nullptr)
+        {
+            return nullptr;
+        }
+
+        for (int rootIndex = 0; rootIndex < treeWidget->topLevelItemCount(); ++rootIndex)
+        {
+            QTreeWidgetItem* rootItem = treeWidget->topLevelItem(rootIndex);
+            if (rootItem == nullptr)
+            {
+                continue;
+            }
+
+            for (int directoryIndex = 0; directoryIndex < rootItem->childCount(); ++directoryIndex)
+            {
+                QTreeWidgetItem* directoryItem = rootItem->child(directoryIndex);
+                if (directoryItem == nullptr)
+                {
+                    continue;
+                }
+
+                for (int entryIndex = 0; entryIndex < directoryItem->childCount(); ++entryIndex)
+                {
+                    QTreeWidgetItem* entryItem = directoryItem->child(entryIndex);
+                    if (entryItem == nullptr)
+                    {
+                        continue;
+                    }
+
+                    bool convertOk = false;
+                    const qulonglong sourceIndex = entryItem->data(0, SourceIndexRole).toULongLong(&convertOk);
+                    if (convertOk && sourceIndex != kInvalidSourceIndex)
+                    {
+                        return entryItem;
+                    }
+                }
+            }
+        }
+
+        return nullptr;
+    }
 
     // AtomColumn：原子表列索引。
     enum class AtomColumn : int
@@ -141,12 +247,18 @@ void KernelDock::refreshObjectNamespaceAsync()
             guardThis->m_objectNamespaceStatusLabel->setStyleSheet(
                 statusLabelStyle(failedCount == 0 ? QStringLiteral("#3A8F3A") : QStringLiteral("#D77A00")));
 
-            if (guardThis->m_objectNamespaceTable->rowCount() > 0)
+            if (guardThis->m_objectNamespaceTree->topLevelItemCount() > 0)
             {
-                guardThis->m_objectNamespaceTable->setCurrentCell(0, 0);
+                guardThis->selectFirstObjectNamespaceEntryItem();
             }
             else
             {
+                guardThis->rebuildObjectNamespacePropertyTable(
+                    nullptr,
+                    QStringLiteral("<无可见节点>"),
+                    QStringLiteral("提示"),
+                    QStringLiteral("<无>"),
+                    QStringLiteral("当前筛选条件下无可见对象记录。"));
                 guardThis->m_objectNamespaceDetailEditor->setText(QStringLiteral("当前筛选条件下无可见对象记录。"));
             }
 
@@ -310,13 +422,17 @@ void KernelDock::refreshNtQueryAsync()
 
 void KernelDock::rebuildObjectNamespaceTable(const QString& filterKeyword)
 {
-    if (m_objectNamespaceTable == nullptr)
+    if (m_objectNamespaceTree == nullptr)
     {
         return;
     }
 
-    m_objectNamespaceTable->setSortingEnabled(false);
-    m_objectNamespaceTable->setRowCount(0);
+    m_objectNamespaceTree->clear();
+
+    // rootItemMap：缓存“根路径 -> 根节点”映射，避免重复创建根节点。
+    QMap<QString, QTreeWidgetItem*> rootItemMap;
+    // directoryItemMap：缓存“根路径+目录路径 -> 目录节点”映射，避免重复创建目录节点。
+    QMap<QString, QTreeWidgetItem*> directoryItemMap;
 
     for (std::size_t sourceIndex = 0; sourceIndex < m_objectNamespaceRows.size(); ++sourceIndex)
     {
@@ -336,51 +452,218 @@ void KernelDock::rebuildObjectNamespaceTable(const QString& filterKeyword)
             continue;
         }
 
-        const int rowIndex = m_objectNamespaceTable->rowCount();
-        m_objectNamespaceTable->insertRow(rowIndex);
+        QTreeWidgetItem* rootItem = rootItemMap.value(entry.rootPathText, nullptr);
+        if (rootItem == nullptr)
+        {
+            rootItem = new QTreeWidgetItem(m_objectNamespaceTree);
+            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Name), entry.rootPathText);
+            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), QStringLiteral("根目录"));
+            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::PathOrScope), safeText(entry.scopeDescriptionText));
+            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), QStringLiteral("根节点"));
+            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), QStringLiteral("<无>"));
+            rootItem->setData(0, SourceIndexRole, kInvalidSourceIndex);
+            rootItem->setData(0, NodeKindRole, static_cast<int>(ObjectNamespaceNodeKind::Root));
+            rootItem->setData(0, NodePathRole, entry.rootPathText);
+            rootItem->setData(0, NodeDescriptionRole, entry.scopeDescriptionText);
+            rootItem->setForeground(
+                static_cast<int>(ObjectNamespaceColumn::Type),
+                QBrush(KswordTheme::PrimaryBlueColor));
 
-        auto* rootItem = new QTableWidgetItem(entry.rootPathText);
-        rootItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-        auto* scopeItem = new QTableWidgetItem(entry.scopeDescriptionText);
-        auto* directoryItem = new QTableWidgetItem(entry.directoryPathText);
-        auto* objectNameItem = new QTableWidgetItem(entry.objectNameText);
-        auto* objectTypeItem = new QTableWidgetItem(entry.objectTypeText);
-        auto* fullPathItem = new QTableWidgetItem(entry.fullPathText);
-        auto* enumApiItem = new QTableWidgetItem(entry.enumApiText);
-        auto* symbolicTargetItem = new QTableWidgetItem(entry.symbolicLinkTargetText);
-        auto* statusItem = new QTableWidgetItem(entry.statusText);
+            rootItemMap.insert(entry.rootPathText, rootItem);
+        }
 
-        rootItem->setFlags(rootItem->flags() & ~Qt::ItemIsEditable);
-        scopeItem->setFlags(scopeItem->flags() & ~Qt::ItemIsEditable);
-        directoryItem->setFlags(directoryItem->flags() & ~Qt::ItemIsEditable);
-        objectNameItem->setFlags(objectNameItem->flags() & ~Qt::ItemIsEditable);
-        objectTypeItem->setFlags(objectTypeItem->flags() & ~Qt::ItemIsEditable);
-        fullPathItem->setFlags(fullPathItem->flags() & ~Qt::ItemIsEditable);
-        enumApiItem->setFlags(enumApiItem->flags() & ~Qt::ItemIsEditable);
-        symbolicTargetItem->setFlags(symbolicTargetItem->flags() & ~Qt::ItemIsEditable);
-        statusItem->setFlags(statusItem->flags() & ~Qt::ItemIsEditable);
+        const QString directoryKeyText = entry.rootPathText + QChar('\n') + entry.directoryPathText;
+        QTreeWidgetItem* directoryItem = directoryItemMap.value(directoryKeyText, nullptr);
+        if (directoryItem == nullptr)
+        {
+            directoryItem = new QTreeWidgetItem(rootItem);
+            directoryItem->setText(
+                static_cast<int>(ObjectNamespaceColumn::Name),
+                leafNameFromObjectPath(entry.directoryPathText));
+            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), QStringLiteral("目录"));
+            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::PathOrScope), entry.directoryPathText);
+            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), QStringLiteral("已展开枚举"));
+            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), QStringLiteral("<无>"));
+            directoryItem->setData(0, SourceIndexRole, kInvalidSourceIndex);
+            directoryItem->setData(0, NodeKindRole, static_cast<int>(ObjectNamespaceNodeKind::Directory));
+            directoryItem->setData(0, NodePathRole, entry.directoryPathText);
+            directoryItem->setData(0, NodeDescriptionRole, entry.scopeDescriptionText);
+            directoryItem->setForeground(
+                static_cast<int>(ObjectNamespaceColumn::Type),
+                QBrush(KswordTheme::PrimaryBlueColor));
+
+            directoryItemMap.insert(directoryKeyText, directoryItem);
+        }
+
+        auto* objectItem = new QTreeWidgetItem(directoryItem);
+        const QString objectNameText = entry.objectNameText.trimmed().isEmpty()
+            ? QStringLiteral("<未命名对象>")
+            : entry.objectNameText;
+        objectItem->setText(static_cast<int>(ObjectNamespaceColumn::Name), objectNameText);
+        objectItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), safeText(entry.objectTypeText));
+        objectItem->setText(static_cast<int>(ObjectNamespaceColumn::PathOrScope), safeText(entry.fullPathText));
+        objectItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), safeText(entry.statusText));
+        objectItem->setText(
+            static_cast<int>(ObjectNamespaceColumn::SymbolicTarget),
+            safeText(entry.symbolicLinkTargetText));
+        objectItem->setData(0, SourceIndexRole, static_cast<qulonglong>(sourceIndex));
+        objectItem->setData(0, NodeKindRole, static_cast<int>(ObjectNamespaceNodeKind::ObjectEntry));
+        objectItem->setData(0, NodePathRole, entry.fullPathText);
+        objectItem->setData(0, NodeDescriptionRole, entry.scopeDescriptionText);
 
         if (!entry.querySucceeded)
         {
-            statusItem->setForeground(QBrush(KswordTheme::WarningAccentColor()));
+            objectItem->setForeground(
+                static_cast<int>(ObjectNamespaceColumn::Status),
+                QBrush(KswordTheme::WarningAccentColor()));
         }
         else if (entry.isDirectory)
         {
-            objectTypeItem->setForeground(QBrush(KswordTheme::PrimaryBlueColor));
+            objectItem->setForeground(
+                static_cast<int>(ObjectNamespaceColumn::Type),
+                QBrush(KswordTheme::PrimaryBlueColor));
         }
-
-        m_objectNamespaceTable->setItem(rowIndex, static_cast<int>(ObjectNamespaceColumn::RootPath), rootItem);
-        m_objectNamespaceTable->setItem(rowIndex, static_cast<int>(ObjectNamespaceColumn::Scope), scopeItem);
-        m_objectNamespaceTable->setItem(rowIndex, static_cast<int>(ObjectNamespaceColumn::DirectoryPath), directoryItem);
-        m_objectNamespaceTable->setItem(rowIndex, static_cast<int>(ObjectNamespaceColumn::ObjectName), objectNameItem);
-        m_objectNamespaceTable->setItem(rowIndex, static_cast<int>(ObjectNamespaceColumn::ObjectType), objectTypeItem);
-        m_objectNamespaceTable->setItem(rowIndex, static_cast<int>(ObjectNamespaceColumn::FullPath), fullPathItem);
-        m_objectNamespaceTable->setItem(rowIndex, static_cast<int>(ObjectNamespaceColumn::EnumApi), enumApiItem);
-        m_objectNamespaceTable->setItem(rowIndex, static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), symbolicTargetItem);
-        m_objectNamespaceTable->setItem(rowIndex, static_cast<int>(ObjectNamespaceColumn::Status), statusItem);
     }
 
-    m_objectNamespaceTable->setSortingEnabled(true);
+    if (!filterKeyword.isEmpty())
+    {
+        m_objectNamespaceTree->expandAll();
+    }
+    else
+    {
+        for (int rootIndex = 0; rootIndex < m_objectNamespaceTree->topLevelItemCount(); ++rootIndex)
+        {
+            QTreeWidgetItem* rootItem = m_objectNamespaceTree->topLevelItem(rootIndex);
+            if (rootItem == nullptr)
+            {
+                continue;
+            }
+            rootItem->setExpanded(true);
+            for (int directoryIndex = 0; directoryIndex < rootItem->childCount(); ++directoryIndex)
+            {
+                QTreeWidgetItem* directoryItem = rootItem->child(directoryIndex);
+                if (directoryItem != nullptr)
+                {
+                    directoryItem->setExpanded(false);
+                }
+            }
+        }
+    }
+
+    if (m_objectNamespaceTree->currentItem() == nullptr)
+    {
+        selectFirstObjectNamespaceEntryItem();
+    }
+}
+
+void KernelDock::rebuildObjectNamespacePropertyTable(
+    const KernelObjectNamespaceEntry* entry,
+    const QString& nodeNameText,
+    const QString& nodeTypeText,
+    const QString& nodePathText,
+    const QString& nodeDescriptionText)
+{
+    if (m_objectNamespacePropertyTable == nullptr)
+    {
+        return;
+    }
+
+    m_objectNamespacePropertyTable->setRowCount(0);
+
+    if (entry == nullptr)
+    {
+        appendPropertyRow(m_objectNamespacePropertyTable, QStringLiteral("节点名称"), safeText(nodeNameText));
+        appendPropertyRow(m_objectNamespacePropertyTable, QStringLiteral("节点类型"), safeText(nodeTypeText));
+        appendPropertyRow(m_objectNamespacePropertyTable, QStringLiteral("节点路径"), safeText(nodePathText));
+        appendPropertyRow(m_objectNamespacePropertyTable, QStringLiteral("节点说明"), safeText(nodeDescriptionText));
+        appendPropertyRow(
+            m_objectNamespacePropertyTable,
+            QStringLiteral("提示"),
+            QStringLiteral("当前节点是树层级摘要，展开下级并选择对象项可查看完整字段。"));
+        return;
+    }
+
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("rootPathText（根目录）"),
+        safeText(entry->rootPathText));
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("scopeDescriptionText（作用说明）"),
+        safeText(entry->scopeDescriptionText));
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("directoryPathText（当前目录）"),
+        safeText(entry->directoryPathText));
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("objectNameText（对象名）"),
+        safeText(entry->objectNameText));
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("objectTypeText（对象类型）"),
+        safeText(entry->objectTypeText));
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("fullPathText（完整路径）"),
+        safeText(entry->fullPathText));
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("enumApiText（枚举API）"),
+        safeText(entry->enumApiText));
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("symbolicLinkTargetText（符号链接目标）"),
+        safeText(entry->symbolicLinkTargetText));
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("statusText（状态）"),
+        safeText(entry->statusText));
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("statusCode（NTSTATUS）"),
+        QStringLiteral("0x%1").arg(static_cast<unsigned int>(entry->statusCode), 8, 16, QChar('0')).toUpper());
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("querySucceeded（查询成功）"),
+        entry->querySucceeded ? QStringLiteral("true") : QStringLiteral("false"));
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("isDirectory（是否目录）"),
+        entry->isDirectory ? QStringLiteral("true") : QStringLiteral("false"));
+    appendPropertyRow(
+        m_objectNamespacePropertyTable,
+        QStringLiteral("isSymbolicLink（是否符号链接）"),
+        entry->isSymbolicLink ? QStringLiteral("true") : QStringLiteral("false"));
+}
+
+void KernelDock::selectFirstObjectNamespaceEntryItem()
+{
+    if (m_objectNamespaceTree == nullptr)
+    {
+        return;
+    }
+
+    QTreeWidgetItem* firstEntryItem = findFirstEntryItem(m_objectNamespaceTree);
+    if (firstEntryItem != nullptr)
+    {
+        m_objectNamespaceTree->setCurrentItem(firstEntryItem, 0);
+        return;
+    }
+
+    if (m_objectNamespaceTree->topLevelItemCount() > 0)
+    {
+        m_objectNamespaceTree->setCurrentItem(m_objectNamespaceTree->topLevelItem(0), 0);
+        return;
+    }
+
+    rebuildObjectNamespacePropertyTable(
+        nullptr,
+        QStringLiteral("<无节点>"),
+        QStringLiteral("提示"),
+        QStringLiteral("<无>"),
+        QStringLiteral("当前对象命名空间树为空。"));
+    m_objectNamespaceDetailEditor->setText(QStringLiteral("当前对象命名空间树为空。"));
 }
 
 void KernelDock::rebuildAtomTable(const QString& filterKeyword)
@@ -491,24 +774,25 @@ bool KernelDock::currentObjectNamespaceSourceIndex(std::size_t& sourceIndexOut) 
 {
     sourceIndexOut = 0;
 
-    if (m_objectNamespaceTable == nullptr)
+    if (m_objectNamespaceTree == nullptr)
     {
         return false;
     }
 
-    const int currentRow = m_objectNamespaceTable->currentRow();
-    if (currentRow < 0)
+    QTreeWidgetItem* currentItem = m_objectNamespaceTree->currentItem();
+    if (currentItem == nullptr)
     {
         return false;
     }
 
-    QTableWidgetItem* rootItem = m_objectNamespaceTable->item(currentRow, static_cast<int>(ObjectNamespaceColumn::RootPath));
-    if (rootItem == nullptr)
+    bool convertOk = false;
+    const qulonglong sourceIndex = currentItem->data(0, SourceIndexRole).toULongLong(&convertOk);
+    if (!convertOk || sourceIndex == kInvalidSourceIndex)
     {
         return false;
     }
 
-    sourceIndexOut = static_cast<std::size_t>(rootItem->data(Qt::UserRole).toULongLong());
+    sourceIndexOut = static_cast<std::size_t>(sourceIndex);
     return sourceIndexOut < m_objectNamespaceRows.size();
 }
 
@@ -559,32 +843,74 @@ const KernelAtomEntry* KernelDock::currentAtomEntry() const
 
 void KernelDock::showObjectNamespaceDetailByCurrentRow()
 {
-    if (m_objectNamespaceDetailEditor == nullptr)
+    if (m_objectNamespaceDetailEditor == nullptr || m_objectNamespaceTree == nullptr)
     {
         return;
     }
+
+    QTreeWidgetItem* currentItem = m_objectNamespaceTree->currentItem();
+    if (currentItem == nullptr)
+    {
+        rebuildObjectNamespacePropertyTable(
+            nullptr,
+            QStringLiteral("<未选择节点>"),
+            QStringLiteral("提示"),
+            QStringLiteral("<无>"),
+            QStringLiteral("请选择左侧树节点查看对象字段。"));
+        m_objectNamespaceDetailEditor->setText(QStringLiteral("请选择对象命名空间树节点查看详情。"));
+        return;
+    }
+
+    const QString nodeNameText = safeText(currentItem->text(static_cast<int>(ObjectNamespaceColumn::Name)));
+    const QString nodeTypeText = safeText(currentItem->text(static_cast<int>(ObjectNamespaceColumn::Type)));
+    const QString nodePathText = safeText(currentItem->data(0, NodePathRole).toString());
+    const QString nodeDescriptionText = safeText(currentItem->data(0, NodeDescriptionRole).toString());
 
     const KernelObjectNamespaceEntry* entry = currentObjectNamespaceEntry();
     if (entry == nullptr)
     {
-        m_objectNamespaceDetailEditor->setText(QStringLiteral("请选择一条对象命名空间记录查看详情。"));
+        rebuildObjectNamespacePropertyTable(
+            nullptr,
+            nodeNameText,
+            nodeTypeText,
+            nodePathText,
+            nodeDescriptionText);
+        m_objectNamespaceDetailEditor->setText(
+            QStringLiteral(
+                "当前节点名称: %1\n"
+                "当前节点类型: %2\n"
+                "当前节点路径: %3\n"
+                "节点说明: %4\n\n"
+                "提示: 请选择目录下具体对象项以查看完整对象字段。")
+            .arg(nodeNameText, nodeTypeText, nodePathText, nodeDescriptionText));
         return;
     }
 
+    rebuildObjectNamespacePropertyTable(
+        entry,
+        nodeNameText,
+        nodeTypeText,
+        nodePathText,
+        nodeDescriptionText);
+
     const QString detailText = QStringLiteral(
-        "目录路径: %1\n"
-        "作用说明: %2\n"
-        "当前目录: %3\n"
-        "对象名: %4\n"
-        "对象类型: %5\n"
-        "完整路径: %6\n"
-        "枚举 API: %7\n"
-        "符号链接目标: %8\n"
-        "状态: %9\n"
-        "是否目录: %10\n"
-        "是否符号链接: %11\n\n"
-        "Worker详情:\n%12")
+        "树节点名称: %1\n"
+        "树节点类型: %2\n"
+        "目录路径: %3\n"
+        "作用说明: %4\n"
+        "当前目录: %5\n"
+        "对象名: %6\n"
+        "对象类型: %7\n"
+        "完整路径: %8\n"
+        "枚举 API: %9\n"
+        "符号链接目标: %10\n"
+        "状态: %11\n"
+        "是否目录: %12\n"
+        "是否符号链接: %13\n\n"
+        "Worker详情:\n%14")
         .arg(
+            nodeNameText,
+            nodeTypeText,
             safeText(entry->rootPathText),
             safeText(entry->scopeDescriptionText),
             safeText(entry->directoryPathText),

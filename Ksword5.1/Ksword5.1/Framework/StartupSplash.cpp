@@ -399,6 +399,7 @@ private:
         // 根据 DPI 缩放固定像素参数，修复高缩放下控件偏小问题。
         m_padding = std::max(8, static_cast<int>(std::lround(m_basePadding * m_dpiScaleFactor)));
         m_bottomAreaHeight = std::max(28, static_cast<int>(std::lround(m_baseBottomAreaHeight * m_dpiScaleFactor)));
+        m_logoInfoSpacing = std::max(6, static_cast<int>(std::lround(m_baseLogoInfoSpacing * m_dpiScaleFactor)));
         m_statusFontPixelSize = std::max(9.0f, static_cast<float>(m_baseStatusFontPixelSize * m_dpiScaleFactor));
         m_trackHeight = std::max(4, static_cast<int>(std::lround(m_baseTrackHeight * m_dpiScaleFactor)));
 
@@ -424,7 +425,7 @@ private:
         m_logoDrawHeight = std::max(1, static_cast<int>(std::lround(sourceLogoHeight * finalScale)));
 
         m_windowWidth = m_logoDrawWidth + (m_padding * 2);
-        m_windowHeight = m_logoDrawHeight + (m_padding * 2);
+        m_windowHeight = m_logoDrawHeight + (m_padding * 2) + m_logoInfoSpacing + m_bottomAreaHeight;
         m_windowPosX = (screenWidth - m_windowWidth) / 2;
         m_windowPosY = (screenHeight - m_windowHeight) / 2;
 
@@ -499,13 +500,13 @@ private:
 
             // 居中绘制 Logo 主图层。
             const int logoPosX = (m_windowWidth - m_logoDrawWidth) / 2;
-            const int logoPosY = (m_windowHeight - m_logoDrawHeight) / 2;
+            const int logoPosY = m_padding;
             graphics.DrawImage(
                 m_logoImage.get(),
                 Gdiplus::Rect(logoPosX, logoPosY, m_logoDrawWidth, m_logoDrawHeight));
 
-            // 底部叠加信息层：状态文案 + 进度条。
-            const int overlayTop = std::max(0, m_windowHeight - m_bottomAreaHeight);
+            // 底部叠加信息层：状态文案 + 进度条（整体位于 Logo 下方，不遮挡主图）。
+            const int overlayTop = logoPosY + m_logoDrawHeight + m_logoInfoSpacing;
             const Gdiplus::RectF overlayRect(
                 0.0f,
                 static_cast<Gdiplus::REAL>(overlayTop),
@@ -529,7 +530,7 @@ private:
             graphics.DrawString(m_statusText.c_str(), -1, &textFont, textRect, nullptr, &textBrush);
 
             const int trackMarginBottom = std::max(4, static_cast<int>(std::lround(6.0 * m_dpiScaleFactor)));
-            const int trackTop = std::max(0, m_windowHeight - m_trackHeight - trackMarginBottom);
+            const int trackTop = overlayTop + m_bottomAreaHeight - m_trackHeight - trackMarginBottom;
             const int trackWidth = std::max(1, m_windowWidth - m_padding * 2);
             const Gdiplus::RectF trackRect(
                 static_cast<Gdiplus::REAL>(m_padding),
@@ -616,6 +617,7 @@ private:
     int m_windowPosY = 0;                                      // m_windowPosY：窗口左上角 Y 坐标。
     int m_padding = 24;                                        // m_padding：窗口内边距（DPI 缩放后值）。
     int m_bottomAreaHeight = 56;                               // m_bottomAreaHeight：底部信息区高度（DPI 缩放后值）。
+    int m_logoInfoSpacing = 12;                                // m_logoInfoSpacing：Logo 与信息区垂直间距。
     float m_statusFontPixelSize = 12.0f;                       // m_statusFontPixelSize：状态文字像素字号。
     int m_trackHeight = 8;                                     // m_trackHeight：进度条轨道高度。
     bool m_initialized = false;                                // m_initialized：是否初始化完成。
@@ -623,6 +625,7 @@ private:
     double m_dpiScaleFactor = 1.0;                             // m_dpiScaleFactor：DPI 缩放倍率。
     int m_basePadding = 24;                                    // m_basePadding：96DPI 基准内边距。
     int m_baseBottomAreaHeight = 56;                           // m_baseBottomAreaHeight：96DPI 基准底部区高度。
+    int m_baseLogoInfoSpacing = 12;                            // m_baseLogoInfoSpacing：96DPI 基准 Logo 与信息区间距。
     float m_baseStatusFontPixelSize = 12.0f;                   // m_baseStatusFontPixelSize：96DPI 基准文字字号。
     int m_baseTrackHeight = 8;                                 // m_baseTrackHeight：96DPI 基准进度条高度。
 };

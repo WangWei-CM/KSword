@@ -236,7 +236,6 @@ private:
     void updateUsageSummaryInHeader(const std::vector<DisplayRow>& displayRows);
 
     // ======== 进程控制动作 ========
-    void executeTaskKillAction(bool forceKill);
     // executeTerminateProcessAction 作用：
     // - 执行“结束进程组合动作”；
     // - 固定顺序执行多种结束原理（TerminateProcess/Nt/WTS/Job/RestartManager/线程终止/调试器/Unmap 等）；
@@ -246,11 +245,18 @@ private:
     // - 通过 R0 驱动 IOCTL 请求内核态结束目标进程；
     // - 成功/失败细节统一写入日志面板。
     void executeR0TerminateProcessAction();
+    // executeR0SuspendProcessAction 作用：
+    // - 通过 R0 驱动 IOCTL 请求内核态挂起目标进程；
+    // - 成功/失败细节统一写入日志面板。
+    void executeR0SuspendProcessAction();
+    // executeR0SetPplProtectionAction 作用：
+    // - 通过 R0 驱动 IOCTL 请求设置目标进程 PPL 保护层级；
+    // - protectionLevel 使用单字节原生层级编码（Signer<<4 | Type）。
+    void executeR0SetPplProtectionAction(std::uint8_t protectionLevel, const QString& levelDisplayText);
     // executeTerminateThreadsAction 作用：
     // - 单独执行 TerminateThread(全部线程)（保留给其他入口复用）；
     // - 与“结束进程组合动作”不同，该函数不包含 TerminateProcess 步骤。
     void executeTerminateThreadsAction();
-    void executeInjectInvalidShellcodeAction();
     void executeSuspendAction();
     void executeResumeAction();
     void executeSetCriticalAction(bool enableCritical);

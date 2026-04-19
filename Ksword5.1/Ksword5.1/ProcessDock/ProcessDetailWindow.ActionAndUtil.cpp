@@ -9,28 +9,6 @@ using namespace process_detail_window_internal;
 // - 聚焦“执行动作 + 结果反馈 + 辅助格式化/查找”逻辑。
 // ============================================================
 
-void ProcessDetailWindow::executeTaskKillAction(const bool forceKill)
-{
-    // TaskKill 操作日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
-    kLogEvent actionEvent;
-    info << actionEvent
-        << "[ProcessDetailWindow] executeTaskKillAction: pid="
-        << m_baseRecord.pid
-        << ", forceKill="
-        << (forceKill ? "true" : "false")
-        << eol;
-
-    std::string detailText;
-    const bool actionOk = ks::process::ExecuteTaskKill(m_baseRecord.pid, forceKill, &detailText);
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDetailWindow] executeTaskKillAction: actionOk="
-        << (actionOk ? "true" : "false")
-        << ", detail="
-        << detailText
-        << eol;
-    showActionResultMessage(forceKill ? "Taskkill /f" : "Taskkill", actionOk, detailText, actionEvent);
-}
-
 void ProcessDetailWindow::executeTerminateProcessAction()
 {
     // TerminateProcess 操作日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
@@ -89,15 +67,9 @@ void ProcessDetailWindow::executeSelectedTerminateAction()
     switch (actionId)
     {
     case 0:
-        executeTaskKillAction(false);
-        break;
-    case 1:
-        executeTaskKillAction(true);
-        break;
-    case 2:
         executeTerminateProcessAction();
         break;
-    case 3:
+    case 1:
         executeTerminateThreadsAction();
         break;
     default:
@@ -216,26 +188,6 @@ void ProcessDetailWindow::executeSetPriorityAction()
         << detailText
         << eol;
     showActionResultMessage("设置进程优先级", actionOk, detailText, actionEvent);
-}
-
-void ProcessDetailWindow::executeInjectInvalidShellcodeAction()
-{
-    // 无效 shellcode 注入日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
-    kLogEvent actionEvent;
-    warn << actionEvent
-        << "[ProcessDetailWindow] executeInjectInvalidShellcodeAction: pid="
-        << m_baseRecord.pid
-        << eol;
-
-    std::string detailText;
-    const bool actionOk = ks::process::InjectInvalidShellcode(m_baseRecord.pid, &detailText);
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDetailWindow] executeInjectInvalidShellcodeAction: actionOk="
-        << (actionOk ? "true" : "false")
-        << ", detail="
-        << detailText
-        << eol;
-    showActionResultMessage("注入无效shellcode", actionOk, detailText, actionEvent);
 }
 
 void ProcessDetailWindow::executeInjectDllAction()

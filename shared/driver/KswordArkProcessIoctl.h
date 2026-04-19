@@ -3,7 +3,7 @@
 // ============================================================
 // KswordArkProcessIoctl.h
 // Purpose:
-// - Shared IOCTL code and request struct for R3 <-> R0 process termination.
+// - Shared IOCTL code and request struct for R3 <-> R0 process actions.
 // - This file must be included by both user mode and kernel mode.
 // ============================================================
 
@@ -26,6 +26,8 @@
 
 #define KSWORD_ARK_IOCTL_DEVICE_TYPE FILE_DEVICE_UNKNOWN
 #define KSWORD_ARK_IOCTL_FUNCTION_TERMINATE_PROCESS 0x801
+#define KSWORD_ARK_IOCTL_FUNCTION_SUSPEND_PROCESS 0x802
+#define KSWORD_ARK_IOCTL_FUNCTION_SET_PPL_LEVEL 0x803
 
 #define IOCTL_KSWORD_ARK_TERMINATE_PROCESS \
     CTL_CODE( \
@@ -39,3 +41,29 @@ typedef struct _KSWORD_ARK_TERMINATE_PROCESS_REQUEST
     unsigned long processId;
     long exitStatus;
 } KSWORD_ARK_TERMINATE_PROCESS_REQUEST;
+
+#define IOCTL_KSWORD_ARK_SUSPEND_PROCESS \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_SUSPEND_PROCESS, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+typedef struct _KSWORD_ARK_SUSPEND_PROCESS_REQUEST
+{
+    unsigned long processId;
+} KSWORD_ARK_SUSPEND_PROCESS_REQUEST;
+
+#define IOCTL_KSWORD_ARK_SET_PPL_LEVEL \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_SET_PPL_LEVEL, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+typedef struct _KSWORD_ARK_SET_PPL_LEVEL_REQUEST
+{
+    unsigned long processId;
+    unsigned char protectionLevel;
+    unsigned char reserved[3];
+} KSWORD_ARK_SET_PPL_LEVEL_REQUEST;
