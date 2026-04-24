@@ -316,6 +316,12 @@
   <ItemGroup>
     <None Include="qtvars.pro" />
   </ItemGroup>
+  <Target Name="CopyTaskmgrHijackScript" AfterTargets="Build">
+    <PropertyGroup>
+      <TaskmgrHijackScriptSource>$(MSBuildProjectDirectory)\..\..\TaskmgrHijack.ps1</TaskmgrHijackScriptSource>
+    </PropertyGroup>
+    <Copy SourceFiles="$(TaskmgrHijackScriptSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(TaskmgrHijackScriptSource)')" />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">
     <Import Project="$(QtMsBuild)\qt.targets" />

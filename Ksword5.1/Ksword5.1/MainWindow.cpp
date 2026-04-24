@@ -3323,6 +3323,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     }
 
     const QString dockKey = dockWidget->property("ks_lazy_key").toString().trimmed().toLower();
+    const bool isNetworkDock = (dockKey == QStringLiteral("network"));
     QWidget* realWidget = nullptr;
 
     if (dockKey == QStringLiteral("process"))
@@ -3422,6 +3423,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
 
     realWidget->setAutoFillBackground(false);
     realWidget->setAttribute(Qt::WA_StyledBackground, false);
+    realWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     realWidget->setStyleSheet(
         realWidget->styleSheet()
         + QStringLiteral(
@@ -3430,8 +3432,21 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
             "  background-color:transparent;"
             "}"));
 
+    if (isNetworkDock)
+    {
+        // 网络页额外要求：
+        // 1) 不再让 ADS 自动包一层外部 QScrollArea；
+        // 2) 把整个网络 Dock 的最小高度抬到 300，便于验证问题是否位于最外层 Dock 容器。
+        realWidget->setMinimumHeight(300);
+        dockWidget->setMinimumSizeHintMode(ads::CDockWidget::MinimumSizeHintFromDockWidgetMinimumSize);
+        dockWidget->setMinimumHeight(300);
+        dockWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    }
+
     QWidget* oldWidget = dockWidget->takeWidget();
-    dockWidget->setWidget(realWidget);
+    dockWidget->setWidget(
+        realWidget,
+        isNetworkDock ? ads::CDockWidget::ForceNoScrollArea : ads::CDockWidget::AutoScrollArea);
     dockWidget->setProperty("ks_lazy_initialized", true);
     if (oldWidget != nullptr)
     {
@@ -3511,9 +3526,12 @@ void MainWindow::initDockWidgets()
     reportStartupProgress(68, QStringLiteral("正在封装 Dock 容器..."));
 
     // 使用辅助函数创建Dock Widgets。
-    auto createDockWidget = [this](QWidget* widget, const QString& title) -> ads::CDockWidget* {
+    auto createDockWidget = [this](
+        QWidget* widget,
+        const QString& title,
+        const ads::CDockWidget::eInsertMode insertMode = ads::CDockWidget::AutoScrollArea) -> ads::CDockWidget* {
         ads::CDockWidget* dock = new ads::CDockWidget(title);
-        dock->setWidget(widget);
+        dock->setWidget(widget, insertMode);
         // DockWidgetClosable 禁用：统一去掉每个 Dock 标签旁边的关闭叉。
         dock->setFeature(ads::CDockWidget::DockWidgetClosable, false);
         dock->setFeature(ads::CDockWidget::DockWidgetMovable, true);
@@ -3538,15 +3556,27 @@ void MainWindow::initDockWidgets()
         const QString& title,
         const QString& dockKey)
         {
+            const bool isNetworkDock = (dockKey == QStringLiteral("network"));
             QWidget* dockContentWidget = eagerWidget;
             if (dockContentWidget == nullptr)
             {
                 dockContentWidget = createDockPlaceholderWidget(title);
             }
 
-            dockOut = createDockWidget(dockContentWidget, title);
+            dockContentWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+            dockOut = createDockWidget(
+                dockContentWidget,
+                title,
+                isNetworkDock ? ads::CDockWidget::ForceNoScrollArea : ads::CDockWidget::AutoScrollArea);
             dockOut->setProperty("ks_lazy_key", dockKey);
             dockOut->setProperty("ks_lazy_initialized", eagerWidget != nullptr);
+            if (isNetworkDock)
+            {
+                dockContentWidget->setMinimumHeight(300);
+                dockOut->setMinimumSizeHintMode(ads::CDockWidget::MinimumSizeHintFromDockWidgetMinimumSize);
+                dockOut->setMinimumHeight(300);
+                dockOut->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+            }
             connect(dockOut, &ads::CDockWidget::visibilityChanged, this, [this, dockOut](const bool visible)
                 {
                     if (visible)

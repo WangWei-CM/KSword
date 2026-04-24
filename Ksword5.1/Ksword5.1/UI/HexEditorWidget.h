@@ -27,11 +27,13 @@ class QLineEdit;
 class QMenu;
 class QPushButton;
 class QShortcut;
+class QTabWidget;
 class QTableWidget;
 class QTableWidgetItem;
 class QToolButton;
 class QWidget;
 class QVBoxLayout;
+class CodeEditorWidget;
 
 // HexEditorWidget：
 // - 统一十六进制查看器；
@@ -261,7 +263,7 @@ private:
 
     // formatSelectionAsciiPreview：
     // - 作用：把选中字节格式化为 ASCII 预览文本；
-    // - 不可打印字符统一显示为 '.'。
+    // - 不可打印字符统一显示为 '.'，不做长度截断。
     QString formatSelectionAsciiPreview(const QByteArray& selectedBytes) const;
 
     // formatSelectionUtf16Preview：
@@ -277,6 +279,10 @@ private:
     // updateAsciiCellByRow：
     // - 作用：更新指定行的 ASCII 列显示。
     void updateAsciiCellByRow(int rowIndex);
+
+    // refreshAsciiTabText：
+    // - 作用：把当前缓冲区完整 ASCII 文本同步到 ASCII 页编辑器。
+    void refreshAsciiTabText();
 
     // updateRowHighlightByRow：
     // - 作用：根据查找命中掩码刷新指定行背景色。
@@ -428,6 +434,10 @@ private:
     // - 作用：导出当前缓冲区为十六进制文本文件。
     void exportHexTextFile();
 
+    // exportSelectedHexDataFile：
+    // - 作用：把当前选中区域导出为纯 HEX 字节文本文件。
+    void exportSelectedHexDataFile();
+
     // buildRowDumpText：
     // - 作用：构造指定行的转储文本。
     QString buildRowDumpText(int rowIndex) const;
@@ -500,7 +510,19 @@ private:
     // m_jumpCloseButton：关闭跳转面板按钮。
     QToolButton* m_jumpCloseButton = nullptr;
 
-    // m_hexTable：十六进制数据表格。
+    // m_viewTabWidget：主视图区 Tab（HEX / ASCII）。
+    QTabWidget* m_viewTabWidget = nullptr;
+
+    // m_hexViewPage：HEX 页面容器。
+    QWidget* m_hexViewPage = nullptr;
+
+    // m_asciiViewPage：ASCII 页面容器。
+    QWidget* m_asciiViewPage = nullptr;
+
+    // m_asciiEditor：ASCII 页使用的内置文本编辑器（只读）。
+    CodeEditorWidget* m_asciiEditor = nullptr;
+
+    // m_hexTable：十六进制数据表格（位于 HEX 页面）。
     QTableWidget* m_hexTable = nullptr;
 
     // m_selectionInspectorPanel：底部选区检查器容器。

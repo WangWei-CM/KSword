@@ -836,18 +836,6 @@ std::vector<std::uint64_t> HexEditorWidget::collectSelectedOffsets() const
         offsetList.push_back(offset);
     }
 
-    // 未选择时回退当前单元格。
-    if (offsetList.empty())
-    {
-        const int currentRow = m_hexTable->currentRow();
-        const int currentColumn = m_hexTable->currentColumn();
-        std::uint64_t currentOffset = 0;
-        if (rowColumnToOffset(currentRow, currentColumn, currentOffset))
-        {
-            offsetList.push_back(currentOffset);
-        }
-    }
-
     std::sort(offsetList.begin(), offsetList.end());
     offsetList.erase(std::unique(offsetList.begin(), offsetList.end()), offsetList.end());
     return offsetList;
@@ -1011,6 +999,54 @@ void HexEditorWidget::exportHexTextFile()
 
     updateStatusLabel(
         QStringLiteral("导出完成：HEX 文本 -> %1").arg(filePath));
+}
+
+void HexEditorWidget::exportSelectedHexDataFile()
+{
+    const std::vector<std::uint64_t> offsetList = collectSelectedOffsets();
+    if (offsetList.empty())
+    {
+        updateStatusLabel(QStringLiteral("导出失败：未选中有效字节。"));
+        return;
+    }
+
+    const QString filePath = QFileDialog::getSaveFileName(
+        this,
+        QStringLiteral("导出选中 HEX 数据"),
+        QStringLiteral("hex_selected.txt"),
+        QStringLiteral("Text Files (*.txt);;All Files (*.*)"));
+    if (filePath.trimmed().isEmpty())
+    {
+        return;
+    }
+
+    QFile outputFile(filePath);
+    if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+    {
+        QMessageBox::warning(this, QStringLiteral("导出失败"), QStringLiteral("无法写入文件：%1").arg(filePath));
+        return;
+    }
+
+    QTextStream outputStream(&outputFile);
+    outputStream.setEncoding(QStringConverter::Utf8);
+
+    bool firstByte = true;
+    for (const std::uint64_t offset : offsetList)
+    {
+        if (!firstByte)
+        {
+            outputStream << ' ';
+        }
+        firstByte = false;
+        const std::uint8_t byteValue = static_cast<std::uint8_t>(m_buffer.at(static_cast<int>(offset)));
+        outputStream << byteToHexText(byteValue);
+    }
+    outputFile.close();
+
+    updateStatusLabel(
+        QStringLiteral("导出完成：%1 字节 HEX 数据 -> %2")
+        .arg(static_cast<qulonglong>(offsetList.size()))
+        .arg(filePath));
 }
 
 QString HexEditorWidget::buildRowDumpText(const int rowIndex) const

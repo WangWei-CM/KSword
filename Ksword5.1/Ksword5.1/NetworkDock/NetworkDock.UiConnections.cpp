@@ -18,36 +18,40 @@ void NetworkDock::initializeConnections()
         });
 
     // 组合过滤控制连接：
-    // - 支持 PID/IP段/端口/包长的“同时应用”；
-    // - 所有输入框按 Enter 也会触发应用，便于快速筛查。
+    // - 漏斗按钮控制折叠面板显隐；
+    // - 规则组支持新增、应用、导入、导出、默认保存、一键清空。
+    connect(m_monitorFilterToggleButton, &QPushButton::toggled, this, [this](const bool checked)
+        {
+            if (m_monitorFilterPanel != nullptr)
+            {
+                m_monitorFilterPanel->setVisible(checked);
+            }
+        });
+
+    connect(m_addMonitorFilterGroupButton, &QPushButton::clicked, this, [this]()
+        {
+            addMonitorFilterRuleGroup();
+        });
+
     connect(m_applyMonitorFilterButton, &QPushButton::clicked, this, [this]()
         {
             applyMonitorFilters();
         });
     connect(m_clearMonitorFilterButton, &QPushButton::clicked, this, [this]()
         {
-            clearMonitorFilters();
+            clearAllMonitorFilterConfigurations();
         });
-
-    connect(m_pidFilterEdit, &QLineEdit::returnPressed, this, [this]()
+    connect(m_saveMonitorFilterButton, &QPushButton::clicked, this, [this]()
         {
-            applyMonitorFilters();
+            saveMonitorFilterConfigToDefaultPath();
         });
-    connect(m_localIpFilterEdit, &QLineEdit::returnPressed, this, [this]()
+    connect(m_importMonitorFilterButton, &QPushButton::clicked, this, [this]()
         {
-            applyMonitorFilters();
+            importMonitorFilterConfigFromUserSelectedPath();
         });
-    connect(m_remoteIpFilterEdit, &QLineEdit::returnPressed, this, [this]()
+    connect(m_exportMonitorFilterButton, &QPushButton::clicked, this, [this]()
         {
-            applyMonitorFilters();
-        });
-    connect(m_localPortFilterEdit, &QLineEdit::returnPressed, this, [this]()
-        {
-            applyMonitorFilters();
-        });
-    connect(m_remotePortFilterEdit, &QLineEdit::returnPressed, this, [this]()
-        {
-            applyMonitorFilters();
+            exportMonitorFilterConfigToUserSelectedPath();
         });
 
     // 限速规则控制连接。
@@ -241,11 +245,7 @@ void NetworkDock::initializeConnections()
                     return;
                 }
 
-                if (m_pidFilterEdit != nullptr)
-                {
-                    m_pidFilterEdit->setText(QString::number(targetPid));
-                }
-                applyMonitorFilters();
+                addOrTrackProcessPid(targetPid);
 
                 kLogEvent trackEvent;
                 info << trackEvent
@@ -310,11 +310,7 @@ void NetworkDock::initializeConnections()
                     return;
                 }
 
-                if (m_pidFilterEdit != nullptr)
-                {
-                    m_pidFilterEdit->setText(QString::number(targetPid));
-                }
-                applyMonitorFilters();
+                addOrTrackProcessPid(targetPid);
 
                 kLogEvent trackEvent;
                 info << trackEvent

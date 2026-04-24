@@ -1,5 +1,8 @@
 #include "NetworkDock.InternalCommon.h"
 
+#include <QFrame>
+#include <QScrollArea>
+
 using namespace network_dock_detail;
 void NetworkDock::initializeUi()
 {
@@ -12,6 +15,7 @@ void NetworkDock::initializeUi()
     // - 保留统一 QTabWidget 结构，不改变各功能页内部实现。
     m_sideTabWidget = new QTabWidget(this);
     m_sideTabWidget->setTabPosition(QTabWidget::North);
+    m_sideTabWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
     initializeTrafficMonitorTab();
@@ -23,6 +27,7 @@ void NetworkDock::initializeUi()
     initializeArpCacheTab();
     initializeDnsCacheTab();
     initializeAliveHostScanTab();
+    initializeHostsFileEditorTab();
 }
 
 void NetworkDock::initializeTrafficMonitorTab()
@@ -60,105 +65,94 @@ void NetworkDock::initializeTrafficMonitorTab()
 
     m_trafficMonitorLayout->addLayout(m_monitorControlLayout);
 
-    // 过滤栏第 1 行：PID + 本地IP段 + 远端IP段 + 应用/清空按钮。
-    // 说明：筛查功能已合并到流量监控页，且支持多条件同时启用。
-    m_monitorFilterLayoutLine1 = new QHBoxLayout();
-    m_monitorFilterLayoutLine1->setSpacing(6);
+    // 新过滤标题栏：漏斗按钮 + 规则组管理 + 导入导出保存。
+    m_monitorFilterHeaderLayout = new QHBoxLayout();
+    m_monitorFilterHeaderLayout->setSpacing(6);
 
-    QLabel* pidFilterLabel = new QLabel(QStringLiteral("PID:"), m_trafficMonitorPage);
-    m_pidFilterEdit = new QLineEdit(m_trafficMonitorPage);
-    m_pidFilterEdit->setMaximumWidth(110);
-    m_pidFilterEdit->setMinimumWidth(66);
-    m_pidFilterEdit->setPlaceholderText(QStringLiteral("可留空"));
-    m_pidFilterEdit->setToolTip(QStringLiteral("按 PID 精确筛选，右键“跟踪此进程”会自动填写此项。"));
+    m_monitorFilterToggleButton = new QPushButton(m_trafficMonitorPage);
+    m_monitorFilterToggleButton->setCheckable(true);
+    m_monitorFilterToggleButton->setChecked(false);
+    m_monitorFilterToggleButton->setIcon(QIcon(":/Icon/filter_funnel.svg"));
+    m_monitorFilterToggleButton->setToolTip(QStringLiteral("展开/收起网络筛选器配置"));
 
-    QLabel* localIpFilterLabel = new QLabel(QStringLiteral("本地IP段:"), m_trafficMonitorPage);
-    m_localIpFilterEdit = new QLineEdit(m_trafficMonitorPage);
-    m_localIpFilterEdit->setMaximumWidth(240);
-    m_localIpFilterEdit->setMinimumWidth(120);
-    m_localIpFilterEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    m_localIpFilterEdit->setPlaceholderText(QStringLiteral("示例：192.168.1.0/24 或 192.168.1.10-192.168.1.50"));
-    m_localIpFilterEdit->setToolTip(QStringLiteral("支持 CIDR、IP范围、单IP 三种格式。"));
+    QLabel* filterTitleLabel = new QLabel(QStringLiteral("网络筛选器"), m_trafficMonitorPage);
+    filterTitleLabel->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
 
-    QLabel* remoteIpFilterLabel = new QLabel(QStringLiteral("远端IP段:"), m_trafficMonitorPage);
-    m_remoteIpFilterEdit = new QLineEdit(m_trafficMonitorPage);
-    m_remoteIpFilterEdit->setMaximumWidth(240);
-    m_remoteIpFilterEdit->setMinimumWidth(120);
-    m_remoteIpFilterEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    m_remoteIpFilterEdit->setPlaceholderText(QStringLiteral("示例：8.8.8.8 或 10.0.0.0/8"));
-    m_remoteIpFilterEdit->setToolTip(QStringLiteral("支持 CIDR、IP范围、单IP 三种格式。"));
+    m_addMonitorFilterGroupButton = new QPushButton(QStringLiteral("新增规则组"), m_trafficMonitorPage);
+    m_addMonitorFilterGroupButton->setIcon(QIcon(":/Icon/process_start.svg"));
+    m_addMonitorFilterGroupButton->setToolTip(QStringLiteral("新增一个 OR 规则组"));
 
-    m_applyMonitorFilterButton = new QPushButton(m_trafficMonitorPage);
+    m_applyMonitorFilterButton = new QPushButton(QStringLiteral("应用"), m_trafficMonitorPage);
     m_applyMonitorFilterButton->setIcon(QIcon(":/Icon/log_track.svg"));
-    m_applyMonitorFilterButton->setToolTip(QStringLiteral("应用当前全部筛选条件（可同时生效）"));
+    m_applyMonitorFilterButton->setToolTip(QStringLiteral("应用当前全部规则组过滤条件"));
 
-    m_clearMonitorFilterButton = new QPushButton(m_trafficMonitorPage);
-    m_clearMonitorFilterButton->setIcon(QIcon(":/Icon/log_cancel_track.svg"));
-    m_clearMonitorFilterButton->setToolTip(QStringLiteral("清空全部筛选条件并恢复显示所有流量"));
+    m_saveMonitorFilterButton = new QPushButton(QStringLiteral("保存"), m_trafficMonitorPage);
+    m_saveMonitorFilterButton->setIcon(QIcon(":/Icon/codeeditor_save.svg"));
+    m_saveMonitorFilterButton->setToolTip(QStringLiteral("保存到 exe 目录下 config/wireshark.cfg"));
 
-    m_monitorFilterLayoutLine1->addWidget(pidFilterLabel);
-    m_monitorFilterLayoutLine1->addWidget(m_pidFilterEdit);
-    m_monitorFilterLayoutLine1->addWidget(localIpFilterLabel);
-    m_monitorFilterLayoutLine1->addWidget(m_localIpFilterEdit);
-    m_monitorFilterLayoutLine1->addWidget(remoteIpFilterLabel);
-    m_monitorFilterLayoutLine1->addWidget(m_remoteIpFilterEdit);
-    m_monitorFilterLayoutLine1->addWidget(m_applyMonitorFilterButton);
-    m_monitorFilterLayoutLine1->addWidget(m_clearMonitorFilterButton);
-    m_monitorFilterLayoutLine1->addStretch(1);
-    m_trafficMonitorLayout->addLayout(m_monitorFilterLayoutLine1);
+    m_importMonitorFilterButton = new QPushButton(QStringLiteral("导入"), m_trafficMonitorPage);
+    m_importMonitorFilterButton->setIcon(QIcon(":/Icon/codeeditor_open.svg"));
+    m_importMonitorFilterButton->setToolTip(QStringLiteral("从配置文件导入规则组"));
 
-    // 过滤栏第 2 行：本地端口 + 远端端口 + 包长范围 + 当前过滤状态。
-    m_monitorFilterLayoutLine2 = new QHBoxLayout();
-    m_monitorFilterLayoutLine2->setSpacing(6);
+    m_exportMonitorFilterButton = new QPushButton(QStringLiteral("导出"), m_trafficMonitorPage);
+    m_exportMonitorFilterButton->setIcon(QIcon(":/Icon/log_export.svg"));
+    m_exportMonitorFilterButton->setToolTip(QStringLiteral("导出当前规则组到配置文件"));
 
-    QLabel* localPortFilterLabel = new QLabel(QStringLiteral("本地端口:"), m_trafficMonitorPage);
-    m_localPortFilterEdit = new QLineEdit(m_trafficMonitorPage);
-    m_localPortFilterEdit->setMaximumWidth(140);
-    m_localPortFilterEdit->setMinimumWidth(90);
-    m_localPortFilterEdit->setPlaceholderText(QStringLiteral("如 80 或 1000-2000"));
-    m_localPortFilterEdit->setToolTip(QStringLiteral("支持单端口或端口范围。"));
+    m_clearMonitorFilterButton = new QPushButton(QStringLiteral("一键清空"), m_trafficMonitorPage);
+    m_clearMonitorFilterButton->setIcon(QIcon(":/Icon/log_clear.svg"));
+    m_clearMonitorFilterButton->setToolTip(QStringLiteral("清空全部规则组配置"));
 
-    QLabel* remotePortFilterLabel = new QLabel(QStringLiteral("远端端口:"), m_trafficMonitorPage);
-    m_remotePortFilterEdit = new QLineEdit(m_trafficMonitorPage);
-    m_remotePortFilterEdit->setMaximumWidth(140);
-    m_remotePortFilterEdit->setMinimumWidth(90);
-    m_remotePortFilterEdit->setPlaceholderText(QStringLiteral("如 443 或 5000-6000"));
-    m_remotePortFilterEdit->setToolTip(QStringLiteral("支持单端口或端口范围。"));
+    m_monitorFilterHeaderLayout->addWidget(m_monitorFilterToggleButton);
+    m_monitorFilterHeaderLayout->addWidget(filterTitleLabel);
+    m_monitorFilterHeaderLayout->addSpacing(4);
+    m_monitorFilterHeaderLayout->addWidget(m_addMonitorFilterGroupButton);
+    m_monitorFilterHeaderLayout->addWidget(m_applyMonitorFilterButton);
+    m_monitorFilterHeaderLayout->addWidget(m_saveMonitorFilterButton);
+    m_monitorFilterHeaderLayout->addWidget(m_importMonitorFilterButton);
+    m_monitorFilterHeaderLayout->addWidget(m_exportMonitorFilterButton);
+    m_monitorFilterHeaderLayout->addWidget(m_clearMonitorFilterButton);
+    m_monitorFilterHeaderLayout->addStretch(1);
+    m_trafficMonitorLayout->addLayout(m_monitorFilterHeaderLayout);
 
-    QLabel* packetSizeLabel = new QLabel(QStringLiteral("包长(B):"), m_trafficMonitorPage);
-    m_packetSizeMinSpin = new QSpinBox(m_trafficMonitorPage);
-    m_packetSizeMinSpin->setRange(0, 65535);
-    m_packetSizeMinSpin->setValue(0);
-    m_packetSizeMinSpin->setSpecialValueText(QStringLiteral("不限"));
-    m_packetSizeMinSpin->setToolTip(QStringLiteral("最小包长（0 表示不限）。"));
-    m_packetSizeMinSpin->setMaximumWidth(90);
+    // 过滤折叠面板：标题分隔线 + 规则组滚动区 + 状态标签。
+    m_monitorFilterPanel = new QWidget(m_trafficMonitorPage);
+    m_monitorFilterPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    // 过滤面板采用“受限高度 + 内部滚动”策略，避免撑高整个 Dock 出现外层滚动条。
+    m_monitorFilterPanel->setMaximumHeight(240);
+    m_monitorFilterPanelLayout = new QVBoxLayout(m_monitorFilterPanel);
+    m_monitorFilterPanelLayout->setContentsMargins(2, 0, 2, 0);
+    m_monitorFilterPanelLayout->setSpacing(6);
 
-    QLabel* packetSizeToLabel = new QLabel(QStringLiteral("~"), m_trafficMonitorPage);
-    m_packetSizeMaxSpin = new QSpinBox(m_trafficMonitorPage);
-    m_packetSizeMaxSpin->setRange(0, 65535);
-    m_packetSizeMaxSpin->setValue(0);
-    m_packetSizeMaxSpin->setSpecialValueText(QStringLiteral("不限"));
-    m_packetSizeMaxSpin->setToolTip(QStringLiteral("最大包长（0 表示不限）。"));
-    m_packetSizeMaxSpin->setMaximumWidth(90);
+    QFrame* filterSeparatorLine = new QFrame(m_monitorFilterPanel);
+    filterSeparatorLine->setFrameShape(QFrame::HLine);
+    filterSeparatorLine->setFrameShadow(QFrame::Sunken);
+    m_monitorFilterPanelLayout->addWidget(filterSeparatorLine);
 
-    QLabel* filterStateTitle = new QLabel(QStringLiteral("过滤状态:"), m_trafficMonitorPage);
-    m_monitorFilterStateLabel = new QLabel(QStringLiteral("当前过滤：无"), m_trafficMonitorPage);
-    // 过滤状态标签支持换行并占据剩余空间，避免窄窗口下强制撑宽父布局。
+    m_monitorFilterScrollArea = new QScrollArea(m_monitorFilterPanel);
+    m_monitorFilterScrollArea->setWidgetResizable(true);
+    m_monitorFilterScrollArea->setFrameShape(QFrame::NoFrame);
+    m_monitorFilterScrollArea->setMinimumHeight(0);
+    m_monitorFilterScrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_monitorFilterScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_monitorFilterScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+
+    m_monitorFilterGroupHostWidget = new QWidget(m_monitorFilterScrollArea);
+    m_monitorFilterGroupHostLayout = new QVBoxLayout(m_monitorFilterGroupHostWidget);
+    m_monitorFilterGroupHostLayout->setContentsMargins(0, 0, 0, 0);
+    m_monitorFilterGroupHostLayout->setSpacing(8);
+    m_monitorFilterScrollArea->setWidget(m_monitorFilterGroupHostWidget);
+    m_monitorFilterPanelLayout->addWidget(m_monitorFilterScrollArea, 1);
+
+    m_monitorFilterStateLabel = new QLabel(QStringLiteral("当前过滤：无"), m_monitorFilterPanel);
     m_monitorFilterStateLabel->setWordWrap(true);
     m_monitorFilterStateLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    m_monitorFilterStateLabel->setToolTip(QStringLiteral("显示当前已应用的组合筛选条件。"));
+    m_monitorFilterPanelLayout->addWidget(m_monitorFilterStateLabel);
 
-    m_monitorFilterLayoutLine2->addWidget(localPortFilterLabel);
-    m_monitorFilterLayoutLine2->addWidget(m_localPortFilterEdit);
-    m_monitorFilterLayoutLine2->addWidget(remotePortFilterLabel);
-    m_monitorFilterLayoutLine2->addWidget(m_remotePortFilterEdit);
-    m_monitorFilterLayoutLine2->addWidget(packetSizeLabel);
-    m_monitorFilterLayoutLine2->addWidget(m_packetSizeMinSpin);
-    m_monitorFilterLayoutLine2->addWidget(packetSizeToLabel);
-    m_monitorFilterLayoutLine2->addWidget(m_packetSizeMaxSpin);
-    m_monitorFilterLayoutLine2->addWidget(filterStateTitle);
-    m_monitorFilterLayoutLine2->addWidget(m_monitorFilterStateLabel, 1);
-    m_trafficMonitorLayout->addLayout(m_monitorFilterLayoutLine2);
+    m_trafficMonitorLayout->addWidget(m_monitorFilterPanel);
+    m_monitorFilterPanel->setVisible(false);
+
+    addMonitorFilterRuleGroup();
+    updateMonitorFilterStateLabel();
 
     // 报文主表：展示“全部发送 UDP/TCP 包”。
     m_packetTable = new QTableWidget(m_trafficMonitorPage);
@@ -323,6 +317,7 @@ void NetworkDock::initializeConnectionManageTab()
     // 子页签：分别展示 TCP 与 UDP。
     m_connectionSubTabWidget = new QTabWidget(m_connectionManagePage);
     m_connectionSubTabWidget->setTabPosition(QTabWidget::North);
+    m_connectionSubTabWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_connectionManageLayout->addWidget(m_connectionSubTabWidget, 1);
 
     // TCP 表：状态、PID、进程、本地端点、远端端点。

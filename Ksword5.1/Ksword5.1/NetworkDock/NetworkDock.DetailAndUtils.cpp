@@ -87,78 +87,25 @@ QIcon NetworkDock::resolveProcessIconByPid(const std::uint32_t processId, const 
 
 bool NetworkDock::packetPassesMonitorFilter(const ks::network::PacketRecord& packetRecord) const
 {
-    // 1) PID 精确过滤。
-    if (m_activePidFilter.has_value() && packetRecord.processId != m_activePidFilter.value())
+    if (m_activeMonitorFilterGroupList.empty())
     {
-        return false;
+        return true;
     }
 
-    // 2) 本地 IP 段过滤：只在该条件启用时才解析文本地址，避免无谓开销。
-    if (m_activeLocalIpv4RangeFilter.has_value())
+    for (const MonitorFilterRuleGroupCompiled& groupFilter : m_activeMonitorFilterGroupList)
     {
-        std::uint32_t localIpv4HostOrder = 0;
-        if (!tryParseIpv4Text(toQString(packetRecord.localAddress), localIpv4HostOrder))
+        if (!groupFilter.enabled)
         {
-            // 地址不可解析时保守处理为“不通过”，避免误放行。
-            return false;
+            continue;
         }
 
-        const UInt32Range& localIpRange = m_activeLocalIpv4RangeFilter.value();
-        if (localIpv4HostOrder < localIpRange.first || localIpv4HostOrder > localIpRange.second)
+        if (packetMatchesMonitorFilterGroup(packetRecord, groupFilter))
         {
-            return false;
+            return true;
         }
     }
 
-    // 3) 远端 IP 段过滤。
-    if (m_activeRemoteIpv4RangeFilter.has_value())
-    {
-        std::uint32_t remoteIpv4HostOrder = 0;
-        if (!tryParseIpv4Text(toQString(packetRecord.remoteAddress), remoteIpv4HostOrder))
-        {
-            return false;
-        }
-
-        const UInt32Range& remoteIpRange = m_activeRemoteIpv4RangeFilter.value();
-        if (remoteIpv4HostOrder < remoteIpRange.first || remoteIpv4HostOrder > remoteIpRange.second)
-        {
-            return false;
-        }
-    }
-
-    // 4) 本地端口范围过滤。
-    if (m_activeLocalPortRangeFilter.has_value())
-    {
-        const UInt16Range& localPortRange = m_activeLocalPortRangeFilter.value();
-        if (packetRecord.localPort < localPortRange.first || packetRecord.localPort > localPortRange.second)
-        {
-            return false;
-        }
-    }
-
-    // 5) 远端端口范围过滤。
-    if (m_activeRemotePortRangeFilter.has_value())
-    {
-        const UInt16Range& remotePortRange = m_activeRemotePortRangeFilter.value();
-        if (packetRecord.remotePort < remotePortRange.first || packetRecord.remotePort > remotePortRange.second)
-        {
-            return false;
-        }
-    }
-
-    // 6) 报文总长度过滤（总长度字段，单位字节）。
-    if (m_activePacketSizeRangeFilter.has_value())
-    {
-        const UInt32Range& packetSizeRange = m_activePacketSizeRangeFilter.value();
-        if (packetRecord.totalPacketSize < packetSizeRange.first ||
-            packetRecord.totalPacketSize > packetSizeRange.second)
-        {
-            return false;
-        }
-    }
-
-    // 所有已启用条件均通过，才允许显示该报文。
-    return true;
+    return false;
 }
 
 int NetworkDock::toPacketColumn(const PacketTableColumn column)

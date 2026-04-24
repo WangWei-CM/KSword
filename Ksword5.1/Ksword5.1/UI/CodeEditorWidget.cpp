@@ -9,11 +9,14 @@
 
 #include "../theme.h"
 
+#include <QBuffer>
 #include <QFile>
 #include <QFileDialog>
 #include <QFontDatabase>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPaintEvent>
@@ -30,6 +33,8 @@
 #include <QTextStream>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QXmlStreamReader>
+#include <QXmlStreamWriter>
 #include <QStringConverter>
 
 #include <algorithm>
@@ -143,6 +148,364 @@ namespace
         }
         return QChar();
     }
+
+    // FileDecodeResult：
+    // - 承载文本文件解码结果和会话元数据。
+    struct FileDecodeResult
+    {
+        QString text;
+        QStringConverter::Encoding encoding = QStringConverter::Utf8;
+        bool hasBom = false;
+        QString lineEndingText = QStringLiteral("\n");
+        bool success = false;
+    };
+
+    // readAllTextWithEncoding：
+    // - 按指定编码读取完整文本。
+    QString readAllTextWithEncoding(const QByteArray& rawBytes, const QStringConverter::Encoding encoding)
+    {
+        QBuffer byteBuffer;
+        byteBuffer.setData(rawBytes);
+        if (!byteBuffer.open(QIODevice::ReadOnly))
+        {
+            return QString();
+        }
+
+        QTextStream textStream(&byteBuffer);
+        textStream.setEncoding(encoding);
+        return textStream.readAll();
+    }
+
+    // detectDominantLineEnding：
+    // - 统计文本主导换行风格。
+    QString detectDominantLineEnding(const QString& textValue)
+    {
+        int crlfCount = 0;
+        int lfCount = 0;
+        int crCount = 0;
+
+        for (int index = 0; index < textValue.size(); ++index)
+        {
+            const QChar currentChar = textValue.at(index);
+            if (currentChar == QChar('\r'))
+            {
+                if ((index + 1) < textValue.size() && textValue.at(index + 1) == QChar('\n'))
+                {
+                    ++crlfCount;
+                    ++index;
+                }
+                else
+                {
+                    ++crCount;
+                }
+            }
+            else if (currentChar == QChar('\n'))
+            {
+                ++lfCount;
+            }
+        }
+
+        if (crlfCount >= lfCount && crlfCount >= crCount)
+        {
+            return QStringLiteral("\r\n");
+        }
+        if (lfCount >= crCount)
+        {
+            return QStringLiteral("\n");
+        }
+        return QStringLiteral("\r");
+    }
+
+    // normalizeLineEndingForSaving：
+    // - 写回文件前统一换行风格，避免混合换行持续扩散。
+    QString normalizeLineEndingForSaving(const QString& textValue, const QString& lineEndingText)
+    {
+        QString normalizedText = textValue;
+        normalizedText.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+        normalizedText.replace(QChar('\r'), QChar('\n'));
+
+        if (lineEndingText == QStringLiteral("\r\n"))
+        {
+            return normalizedText.replace(QStringLiteral("\n"), QStringLiteral("\r\n"));
+        }
+        if (lineEndingText == QStringLiteral("\r"))
+        {
+            return normalizedText.replace(QChar('\n'), QChar('\r'));
+        }
+        return normalizedText;
+    }
+
+    // buildEncodingDisplayText：
+    // - 转换编码展示文案（含 BOM 标记）。
+    QString buildEncodingDisplayText(const QStringConverter::Encoding encoding, const bool hasBom)
+    {
+        QString encodingName = QStringLiteral("UTF-8");
+        switch (encoding)
+        {
+        case QStringConverter::Utf8:
+            encodingName = QStringLiteral("UTF-8");
+            break;
+        case QStringConverter::Utf16LE:
+            encodingName = QStringLiteral("UTF-16 LE");
+            break;
+        case QStringConverter::Utf16BE:
+            encodingName = QStringLiteral("UTF-16 BE");
+            break;
+        case QStringConverter::System:
+            encodingName = QStringLiteral("本地编码");
+            break;
+        default:
+            encodingName = QStringLiteral("UTF-8");
+            break;
+        }
+
+        if (hasBom)
+        {
+            encodingName += QStringLiteral(" BOM");
+        }
+        return encodingName;
+    }
+
+    // stripKnownBom：
+    // - 移除常见 BOM 头并返回是否命中。
+    QByteArray stripKnownBom(const QByteArray& fileBytes, bool* hadBomOut)
+    {
+        QByteArray payload = fileBytes;
+        bool hadBom = false;
+        if (payload.startsWith("\xEF\xBB\xBF"))
+        {
+            payload.remove(0, 3);
+            hadBom = true;
+        }
+        else if (payload.size() >= 2
+            && static_cast<unsigned char>(payload.at(0)) == 0xFF
+            && static_cast<unsigned char>(payload.at(1)) == 0xFE)
+        {
+            payload.remove(0, 2);
+            hadBom = true;
+        }
+        else if (payload.size() >= 2
+            && static_cast<unsigned char>(payload.at(0)) == 0xFE
+            && static_cast<unsigned char>(payload.at(1)) == 0xFF)
+        {
+            payload.remove(0, 2);
+            hadBom = true;
+        }
+
+        if (hadBomOut != nullptr)
+        {
+            *hadBomOut = hadBom;
+        }
+        return payload;
+    }
+
+    // decodeTextFileBytesAuto：
+    // - 自动识别 BOM / UTF-8 / 本地编码。
+    FileDecodeResult decodeTextFileBytesAuto(const QByteArray& fileBytes)
+    {
+        FileDecodeResult result;
+        result.success = true;
+
+        if (fileBytes.startsWith("\xEF\xBB\xBF"))
+        {
+            result.encoding = QStringConverter::Utf8;
+            result.hasBom = true;
+            result.text = QString::fromUtf8(fileBytes.constData() + 3, fileBytes.size() - 3);
+        }
+        else if (fileBytes.size() >= 2
+            && static_cast<unsigned char>(fileBytes.at(0)) == 0xFF
+            && static_cast<unsigned char>(fileBytes.at(1)) == 0xFE)
+        {
+            result.encoding = QStringConverter::Utf16LE;
+            result.hasBom = true;
+            result.text = readAllTextWithEncoding(fileBytes.mid(2), QStringConverter::Utf16LE);
+        }
+        else if (fileBytes.size() >= 2
+            && static_cast<unsigned char>(fileBytes.at(0)) == 0xFE
+            && static_cast<unsigned char>(fileBytes.at(1)) == 0xFF)
+        {
+            result.encoding = QStringConverter::Utf16BE;
+            result.hasBom = true;
+            result.text = readAllTextWithEncoding(fileBytes.mid(2), QStringConverter::Utf16BE);
+        }
+        else
+        {
+            const QString utf8Text = QString::fromUtf8(fileBytes);
+            if (!fileBytes.isEmpty() && utf8Text.contains(QChar::ReplacementCharacter))
+            {
+                result.encoding = QStringConverter::System;
+                result.hasBom = false;
+                result.text = QString::fromLocal8Bit(fileBytes);
+            }
+            else
+            {
+                result.encoding = QStringConverter::Utf8;
+                result.hasBom = false;
+                result.text = utf8Text;
+            }
+        }
+
+        result.lineEndingText = detectDominantLineEnding(result.text);
+        return result;
+    }
+
+    // decodeTextFileBytesForced：
+    // - 以调用方指定编码读取文本。
+    FileDecodeResult decodeTextFileBytesForced(const QByteArray& fileBytes, QStringConverter::Encoding forcedEncoding)
+    {
+        FileDecodeResult result;
+        result.success = true;
+        result.encoding = forcedEncoding;
+
+        bool hadBom = false;
+        const QByteArray payload = stripKnownBom(fileBytes, &hadBom);
+        result.hasBom = hadBom;
+
+        switch (forcedEncoding)
+        {
+        case QStringConverter::Utf8:
+            result.text = QString::fromUtf8(payload);
+            break;
+        case QStringConverter::Utf16LE:
+            result.text = readAllTextWithEncoding(payload, QStringConverter::Utf16LE);
+            break;
+        case QStringConverter::Utf16BE:
+            result.text = readAllTextWithEncoding(payload, QStringConverter::Utf16BE);
+            break;
+        case QStringConverter::System:
+            result.text = QString::fromLocal8Bit(payload);
+            break;
+        default:
+            result.encoding = QStringConverter::Utf8;
+            result.text = QString::fromUtf8(payload);
+            break;
+        }
+
+        result.lineEndingText = detectDominantLineEnding(result.text);
+        return result;
+    }
+
+    // tryFormatJsonText：
+    // - 尝试识别并格式化 JSON。
+    bool tryFormatJsonText(const QString& inputText, QString* formattedTextOut)
+    {
+        const QString trimmedText = inputText.trimmed();
+        if (trimmedText.size() < 2)
+        {
+            return false;
+        }
+
+        const QChar firstChar = trimmedText.front();
+        const QChar lastChar = trimmedText.back();
+        const bool looksLikeJson =
+            (firstChar == QChar('{') && lastChar == QChar('}'))
+            || (firstChar == QChar('[') && lastChar == QChar(']'));
+        if (!looksLikeJson)
+        {
+            return false;
+        }
+
+        QJsonParseError parseError;
+        const QJsonDocument jsonDocument = QJsonDocument::fromJson(trimmedText.toUtf8(), &parseError);
+        if (parseError.error != QJsonParseError::NoError || jsonDocument.isNull())
+        {
+            return false;
+        }
+
+        QString formattedText = QString::fromUtf8(jsonDocument.toJson(QJsonDocument::Indented));
+        if (formattedText.endsWith(QChar('\n')))
+        {
+            formattedText.chop(1);
+        }
+
+        if (formattedTextOut != nullptr)
+        {
+            *formattedTextOut = formattedText;
+        }
+        return true;
+    }
+
+    // tryFormatXmlText：
+    // - 尝试识别并格式化 XML。
+    bool tryFormatXmlText(const QString& inputText, QString* formattedTextOut)
+    {
+        const QString trimmedText = inputText.trimmed();
+        if (trimmedText.size() < 3 || !trimmedText.startsWith(QChar('<')) || !trimmedText.endsWith(QChar('>')))
+        {
+            return false;
+        }
+        if (!trimmedText.contains(QStringLiteral("</"))
+            && !trimmedText.contains(QStringLiteral("/>"))
+            && !trimmedText.startsWith(QStringLiteral("<?xml")))
+        {
+            return false;
+        }
+
+        QXmlStreamReader xmlReader(trimmedText);
+        QString formattedXmlText;
+        QXmlStreamWriter xmlWriter(&formattedXmlText);
+        xmlWriter.setAutoFormatting(true);
+        xmlWriter.setAutoFormattingIndent(2);
+
+        while (!xmlReader.atEnd())
+        {
+            xmlReader.readNext();
+            if (xmlReader.tokenType() == QXmlStreamReader::Invalid)
+            {
+                break;
+            }
+            xmlWriter.writeCurrentToken(xmlReader);
+        }
+
+        if (xmlReader.hasError())
+        {
+            return false;
+        }
+
+        if (formattedTextOut != nullptr)
+        {
+            *formattedTextOut = formattedXmlText;
+        }
+        return true;
+    }
+
+    // autoFormatStructuredText：
+    // - 默认自动格式化 JSON / XML。
+    QString autoFormatStructuredText(const QString& inputText, QString* detectedKindOut)
+    {
+        if (detectedKindOut != nullptr)
+        {
+            detectedKindOut->clear();
+        }
+
+        // 超大文本跳过结构化格式化，优先保证编辑器交互流畅。
+        constexpr int kAutoFormatMaxChars = 2 * 1024 * 1024;
+        if (inputText.size() > kAutoFormatMaxChars)
+        {
+            return inputText;
+        }
+
+        QString formattedText;
+        if (tryFormatJsonText(inputText, &formattedText))
+        {
+            if (detectedKindOut != nullptr)
+            {
+                *detectedKindOut = QStringLiteral("JSON");
+            }
+            return formattedText;
+        }
+
+        if (tryFormatXmlText(inputText, &formattedText))
+        {
+            if (detectedKindOut != nullptr)
+            {
+                *detectedKindOut = QStringLiteral("XML");
+            }
+            return formattedText;
+        }
+
+        return inputText;
+    }
 }
 
 class BracketHighlighter final : public QSyntaxHighlighter
@@ -219,7 +582,7 @@ public:
         fixedFont.setPointSize(std::max(12, fixedFont.pointSize()));
         setFont(fixedFont);
         setTabStopDistance(QFontMetricsF(fixedFont).horizontalAdvance(QChar(' ')) * 4.0);
-        setLineWrapMode(QPlainTextEdit::NoWrap);
+        setLineWrapMode(QPlainTextEdit::WidgetWidth);
         setFrameShape(QFrame::NoFrame);
 
         m_lineNumberArea = new LineNumberArea(this);
@@ -485,7 +848,9 @@ void CodeEditorWidget::setText(const QString& plainText)
     {
         return;
     }
-    m_editor->setPlainText(plainText);
+
+    m_editor->setPlainText(applyStructuredAutoFormatIfNeeded(plainText));
+    resetFileSessionMetadata();
     updateStatusText();
 }
 
@@ -515,6 +880,34 @@ void CodeEditorWidget::setReadOnly(const bool readOnly)
 bool CodeEditorWidget::isReadOnly() const
 {
     return m_readOnlyMode;
+}
+
+QString CodeEditorWidget::currentEncodingDisplayText() const
+{
+    return m_fileSessionAvailable
+        ? buildEncodingDisplayText(m_fileEncoding, m_fileHasBom)
+        : QStringLiteral("未知");
+}
+
+bool CodeEditorWidget::openLocalFile(const QString& filePath)
+{
+    return loadLocalFile(filePath, false, QStringConverter::Utf8);
+}
+
+bool CodeEditorWidget::openLocalFileWithEncoding(const QString& filePath, const QStringConverter::Encoding encoding)
+{
+    return loadLocalFile(filePath, true, encoding);
+}
+
+bool CodeEditorWidget::reopenCurrentFileWithEncoding(const QStringConverter::Encoding encoding)
+{
+    if (m_currentFilePath.trimmed().isEmpty())
+    {
+        m_statusLabel->setText(QStringLiteral("重开失败：当前无文件路径。"));
+        return false;
+    }
+
+    return loadLocalFile(m_currentFilePath, true, encoding);
 }
 
 void CodeEditorWidget::initializeUi()
@@ -642,6 +1035,7 @@ void CodeEditorWidget::initializeConnections()
             }
             m_editor->clear();
             m_currentFilePath.clear();
+            resetFileSessionMetadata();
             updateStatusText();
         });
 
@@ -867,12 +1261,13 @@ void CodeEditorWidget::updateStatusText()
 {
     const QTextCursor cursor = m_editor->textCursor();
     const QString fileName = m_currentFilePath.trimmed().isEmpty() ? QStringLiteral("<未命名>") : m_currentFilePath;
-    m_statusLabel->setText(QStringLiteral("行:%1 列:%2 字符:%3 文件:%4 模式:%5")
+    m_statusLabel->setText(QStringLiteral("行:%1 列:%2 字符:%3 文件:%4 模式:%5 编码:%6")
         .arg(cursor.blockNumber() + 1)
         .arg(cursor.positionInBlock() + 1)
         .arg(m_editor->toPlainText().size())
         .arg(fileName)
-        .arg(m_readOnlyMode ? QStringLiteral("只读") : QStringLiteral("可编辑")));
+        .arg(m_readOnlyMode ? QStringLiteral("只读") : QStringLiteral("可编辑"))
+        .arg(currentEncodingDisplayText()));
 }
 
 bool CodeEditorWidget::findByDirection(const bool forward)
@@ -1001,19 +1396,59 @@ void CodeEditorWidget::openTextFile()
         return;
     }
 
-    QFile inputFile(filePath);
-    if (!inputFile.open(QIODevice::ReadOnly | QIODevice::Text))
+    openLocalFile(filePath);
+}
+
+bool CodeEditorWidget::loadLocalFile(
+    const QString& filePath,
+    const bool forceEncoding,
+    const QStringConverter::Encoding forcedEncoding)
+{
+    const QString normalizedPath = filePath.trimmed();
+    if (normalizedPath.isEmpty())
     {
-        m_statusLabel->setText(QStringLiteral("打开失败：无法读取文件。"));
-        return;
+        m_statusLabel->setText(QStringLiteral("打开失败：文件路径为空。"));
+        return false;
     }
 
-    QTextStream inputStream(&inputFile);
-    inputStream.setEncoding(QStringConverter::Utf8);
-    m_editor->setPlainText(inputStream.readAll());
+    QFile inputFile(normalizedPath);
+    if (!inputFile.open(QIODevice::ReadOnly))
+    {
+        m_statusLabel->setText(QStringLiteral("打开失败：无法读取文件。"));
+        return false;
+    }
+
+    const QByteArray fileBytes = inputFile.readAll();
     inputFile.close();
-    setCurrentFilePath(filePath);
-    m_statusLabel->setText(QStringLiteral("打开成功：%1").arg(filePath));
+
+    const FileDecodeResult decodeResult = forceEncoding
+        ? decodeTextFileBytesForced(fileBytes, forcedEncoding)
+        : decodeTextFileBytesAuto(fileBytes);
+
+    if (!decodeResult.success)
+    {
+        m_statusLabel->setText(QStringLiteral("打开失败：解码失败。"));
+        return false;
+    }
+
+    QString detectedKind;
+    const QString displayText = applyStructuredAutoFormatIfNeeded(decodeResult.text, &detectedKind);
+    m_editor->setPlainText(displayText);
+
+    m_currentFilePath = normalizedPath;
+    m_fileEncoding = decodeResult.encoding;
+    m_fileHasBom = decodeResult.hasBom;
+    m_fileLineEnding = decodeResult.lineEndingText;
+    m_fileSessionAvailable = true;
+
+    const QString autoFormatHint = detectedKind.isEmpty()
+        ? QString()
+        : QStringLiteral("，已自动格式化%1").arg(detectedKind);
+    m_statusLabel->setText(QStringLiteral("打开成功：%1（%2%3）")
+        .arg(normalizedPath)
+        .arg(currentEncodingDisplayText())
+        .arg(autoFormatHint));
+    return true;
 }
 
 void CodeEditorWidget::saveTextFile(const bool forceSaveAs)
@@ -1039,17 +1474,46 @@ void CodeEditorWidget::saveTextFile(const bool forceSaveAs)
     }
 
     QFile outputFile(targetPath);
-    if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+    if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
     {
         m_statusLabel->setText(QStringLiteral("保存失败：无法写入文件。"));
         return;
     }
 
+    const QStringConverter::Encoding targetEncoding = m_fileSessionAvailable
+        ? m_fileEncoding
+        : QStringConverter::Utf8;
+    const bool targetHasBom = m_fileSessionAvailable ? m_fileHasBom : false;
+    const QString targetLineEnding = m_fileLineEnding.isEmpty()
+        ? detectDominantLineEnding(m_editor->toPlainText())
+        : m_fileLineEnding;
+    const QString normalizedText = normalizeLineEndingForSaving(m_editor->toPlainText(), targetLineEnding);
+
     QTextStream outputStream(&outputFile);
-    outputStream.setEncoding(QStringConverter::Utf8);
-    outputStream << m_editor->toPlainText();
+    outputStream.setEncoding(targetEncoding);
+    outputStream.setGenerateByteOrderMark(targetHasBom);
+    outputStream << normalizedText;
+    outputStream.flush();
     outputFile.close();
 
-    setCurrentFilePath(targetPath);
-    m_statusLabel->setText(QStringLiteral("保存成功：%1").arg(targetPath));
+    m_currentFilePath = targetPath;
+    m_fileEncoding = targetEncoding;
+    m_fileHasBom = targetHasBom;
+    m_fileLineEnding = targetLineEnding;
+    m_fileSessionAvailable = true;
+    updateStatusText();
+    m_statusLabel->setText(QStringLiteral("保存成功：%1（%2）").arg(targetPath, currentEncodingDisplayText()));
+}
+
+void CodeEditorWidget::resetFileSessionMetadata()
+{
+    m_fileEncoding = QStringConverter::Utf8;
+    m_fileHasBom = false;
+    m_fileLineEnding = QStringLiteral("\n");
+    m_fileSessionAvailable = false;
+}
+
+QString CodeEditorWidget::applyStructuredAutoFormatIfNeeded(const QString& inputText, QString* detectedKindOut) const
+{
+    return autoFormatStructuredText(inputText, detectedKindOut);
 }

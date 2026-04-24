@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Source Files">
@@ -16,6 +16,24 @@
     <Filter Include="Driver Files">
       <UniqueIdentifier>{8E41214B-6785-4CFE-B992-037D68949A14}</UniqueIdentifier>
       <Extensions>inf;inv;inx;mof;mc;</Extensions>
+    </Filter>
+    <Filter Include="Source Files\\Framework">
+      <UniqueIdentifier>{E34E5095-D845-4B17-9956-E640B16179B2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\\Dispatch">
+      <UniqueIdentifier>{A060B883-8B50-4F43-85C4-E5C0D43B0F65}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\\Features">
+      <UniqueIdentifier>{2722FBD5-E9FF-44AB-963F-D738CF00FA3F}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\\Platform">
+      <UniqueIdentifier>{75A4CDCC-C7CA-4466-A916-060582F95507}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\\Ark">
+      <UniqueIdentifier>{13A81269-1589-4984-B17E-03AB7BCA7D54}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\\Platform">
+      <UniqueIdentifier>{B602E1B8-4706-46D8-B612-F762DFDDFCF6}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
@@ -42,16 +60,49 @@
     <ClInclude Include="Trace.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\ark\ark_device.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_driver.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_ioctl.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_log.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_process.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_queue.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="src\platform\process_resolver.h">
+      <Filter>Header Files\Platform</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Device.c">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\framework\driver_entry.c">
+      <Filter>Source Files\Framework</Filter>
     </ClCompile>
-    <ClCompile Include="Driver.c">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\framework\device_control.c">
+      <Filter>Source Files\Framework</Filter>
     </ClCompile>
-   <ClCompile Include="Queue.c">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\framework\io_queue.c">
+      <Filter>Source Files\Framework</Filter>
+    </ClCompile>
+    <ClCompile Include="src\dispatch\ioctl_dispatch.c">
+      <Filter>Source Files\Dispatch</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\log\log_channel.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\process\process_actions.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\platform\process_resolver.c">
+      <Filter>Source Files\Platform</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
