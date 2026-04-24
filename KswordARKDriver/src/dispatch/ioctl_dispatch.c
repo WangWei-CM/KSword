@@ -66,6 +66,100 @@ Return Value:
         IoControlCode);
 
     switch (IoControlCode) {
+    case IOCTL_KSWORD_ARK_DELETE_PATH:
+    {
+        KSWORD_ARK_DELETE_PATH_REQUEST* deleteRequest = NULL;
+        BOOLEAN isDirectory = FALSE;
+
+        status = WdfRequestRetrieveInputBuffer(
+            Request,
+            sizeof(KSWORD_ARK_DELETE_PATH_REQUEST),
+            &inputBuffer,
+            &inputBufferLength);
+        if (!NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 delete ioctl: input buffer invalid, status=0x%08X",
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+            break;
+        }
+
+        deleteRequest = (KSWORD_ARK_DELETE_PATH_REQUEST*)inputBuffer;
+        isDirectory =
+            ((deleteRequest->flags & KSWORD_ARK_DELETE_PATH_FLAG_DIRECTORY) != 0UL)
+            ? TRUE
+            : FALSE;
+
+        if ((deleteRequest->flags & (~KSWORD_ARK_DELETE_PATH_FLAG_DIRECTORY)) != 0UL) {
+            status = STATUS_INVALID_PARAMETER;
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 delete ioctl: flags rejected, flags=0x%08X.",
+                (unsigned int)deleteRequest->flags);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Warn", logMessage);
+            break;
+        }
+
+        if (deleteRequest->pathLengthChars == 0U ||
+            deleteRequest->pathLengthChars >= KSWORD_ARK_DELETE_PATH_MAX_CHARS) {
+            status = STATUS_INVALID_PARAMETER;
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 delete ioctl: path length rejected, chars=%u.",
+                (unsigned int)deleteRequest->pathLengthChars);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Warn", logMessage);
+            break;
+        }
+
+        if (deleteRequest->path[deleteRequest->pathLengthChars] != L'\0') {
+            status = STATUS_INVALID_PARAMETER;
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 delete ioctl: path not null-terminated, chars=%u.",
+                (unsigned int)deleteRequest->pathLengthChars);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Warn", logMessage);
+            break;
+        }
+
+        (void)RtlStringCbPrintfA(
+            logMessage,
+            sizeof(logMessage),
+            "R0 delete ioctl: chars=%u, directory=%u.",
+            (unsigned int)deleteRequest->pathLengthChars,
+            (unsigned int)isDirectory);
+        (void)KswordARKDriverEnqueueLogFrame(device, "Info", logMessage);
+
+        status = KswordARKDriverDeletePath(
+            deleteRequest->path,
+            deleteRequest->pathLengthChars,
+            isDirectory);
+        if (NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 delete success: chars=%u, directory=%u.",
+                (unsigned int)deleteRequest->pathLengthChars,
+                (unsigned int)isDirectory);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Info", logMessage);
+            completeBytes = sizeof(KSWORD_ARK_DELETE_PATH_REQUEST);
+        }
+        else {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 delete failed: chars=%u, directory=%u, status=0x%08X.",
+                (unsigned int)deleteRequest->pathLengthChars,
+                (unsigned int)isDirectory,
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+        }
+        break;
+    }
     case IOCTL_KSWORD_ARK_TERMINATE_PROCESS:
     {
         KSWORD_ARK_TERMINATE_PROCESS_REQUEST* terminateRequest = NULL;

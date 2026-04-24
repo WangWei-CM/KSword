@@ -11,6 +11,8 @@
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/HexEditorWidget.h"
+#include "../../../shared/KswordArkLogProtocol.h"
+#include "../../../shared/driver/KswordArkFileIoctl.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -75,6 +77,212 @@
 
 namespace
 {
+    struct DriverDeleteTarget
+    {
+        QString path;
+        bool isDirectory = false;
+    };
+
+    // isPathReparsePoint：
+    // - 作用：判断目标路径是否为重解析点（符号链接/Junction 等）；
+    // - 用于目录递归删除时避免误跟进到链接目标。
+    bool isPathReparsePoint(const QString& path)
+    {
+        const std::wstring nativePathText = QDir::toNativeSeparators(path).toStdWString();
+        if (nativePathText.empty())
+        {
+            return false;
+        }
+
+        const DWORD fileAttributes = ::GetFileAttributesW(nativePathText.c_str());
+        if (fileAttributes == INVALID_FILE_ATTRIBUTES)
+        {
+            return false;
+        }
+        return (fileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U;
+    }
+
+    // buildDriverNtPath：
+    // - 作用：把 Win32 路径转成驱动可直接使用的 NT 路径；
+    // - 规则：普通盘符路径转成 \??\C:\...，UNC 路径转成 \??\UNC\...
+    QString buildDriverNtPath(const QString& path)
+    {
+        const QString nativePathText = QDir::toNativeSeparators(path).trimmed();
+        if (nativePathText.isEmpty())
+        {
+            return QString();
+        }
+        if (nativePathText.startsWith(QStringLiteral("\\??\\")))
+        {
+            return nativePathText;
+        }
+        if (nativePathText.startsWith(QStringLiteral("\\\\?\\")))
+        {
+            return QStringLiteral("\\??\\") + nativePathText.mid(4);
+        }
+        if (nativePathText.startsWith(QStringLiteral("\\Device\\")))
+        {
+            return nativePathText;
+        }
+        if (nativePathText.startsWith(QStringLiteral("\\\\")))
+        {
+            return QStringLiteral("\\??\\UNC\\") + nativePathText.mid(2);
+        }
+        return QStringLiteral("\\??\\") + nativePathText;
+    }
+
+    // openKswordArkDriverHandle：
+    // - 作用：连接 KswordARK 控制设备，供后续多次发送删除 IOCTL；
+    // - 失败时返回 INVALID_HANDLE_VALUE，并写出详细错误描述。
+    HANDLE openKswordArkDriverHandle(std::string* const detailTextOut)
+    {
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+
+        const HANDLE driverHandle = ::CreateFileW(
+            KSWORD_ARK_LOG_WIN32_PATH,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (driverHandle != INVALID_HANDLE_VALUE)
+        {
+            return driverHandle;
+        }
+
+        if (detailTextOut != nullptr)
+        {
+            const DWORD lastError = ::GetLastError();
+            std::ostringstream oss;
+            oss << "CreateFileW(" << "\\\\.\\KswordARKLog" << ") failed, error=" << lastError;
+            *detailTextOut = oss.str();
+        }
+        return INVALID_HANDLE_VALUE;
+    }
+
+    // deletePathByR0Driver：
+    // - 作用：向 KswordARK 驱动发送“删除单一路径”IOCTL；
+    // - 参数 isDirectory 用于驱动端选择目录/文件打开语义。
+    bool deletePathByR0Driver(
+        const HANDLE driverHandle,
+        const QString& path,
+        const bool isDirectory,
+        std::string* const detailTextOut)
+    {
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+
+        if (driverHandle == nullptr || driverHandle == INVALID_HANDLE_VALUE)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = "invalid driver handle";
+            }
+            return false;
+        }
+
+        const QString driverNtPath = buildDriverNtPath(path);
+        if (driverNtPath.isEmpty())
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = "empty path";
+            }
+            return false;
+        }
+
+        const std::wstring ntPathText = driverNtPath.toStdWString();
+        if (ntPathText.empty() || ntPathText.size() >= KSWORD_ARK_DELETE_PATH_MAX_CHARS)
+        {
+            if (detailTextOut != nullptr)
+            {
+                std::ostringstream oss;
+                oss << "path too long for ioctl, chars=" << ntPathText.size();
+                *detailTextOut = oss.str();
+            }
+            return false;
+        }
+
+        KSWORD_ARK_DELETE_PATH_REQUEST request{};
+        request.flags = isDirectory ? KSWORD_ARK_DELETE_PATH_FLAG_DIRECTORY : 0UL;
+        request.pathLengthChars = static_cast<unsigned short>(ntPathText.size());
+        std::copy(ntPathText.begin(), ntPathText.end(), request.path);
+        request.path[request.pathLengthChars] = L'\0';
+
+        DWORD bytesReturned = 0;
+        const BOOL ioctlOk = ::DeviceIoControl(
+            driverHandle,
+            IOCTL_KSWORD_ARK_DELETE_PATH,
+            &request,
+            static_cast<DWORD>(sizeof(request)),
+            nullptr,
+            0,
+            &bytesReturned,
+            nullptr);
+        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
+
+        if (detailTextOut != nullptr)
+        {
+            std::ostringstream oss;
+            oss << "path=" << QDir::toNativeSeparators(path).toStdString()
+                << ", directory=" << (isDirectory ? 1 : 0)
+                << ", bytesReturned=" << bytesReturned;
+            if (ioctlOk)
+            {
+                oss << ", ioctl=ok";
+            }
+            else
+            {
+                oss << ", ioctl=fail, error=" << ioctlError;
+            }
+            *detailTextOut = oss.str();
+        }
+
+        return ioctlOk != FALSE;
+    }
+
+    // appendDriverDeleteTargetsPostOrder：
+    // - 作用：把目录展开成“子项先删、目录后删”的后序列表；
+    // - 说明：重解析点目录不递归进入，只删除链接本身。
+    bool appendDriverDeleteTargetsPostOrder(
+        const QString& rootPath,
+        std::vector<DriverDeleteTarget>& targetsOut,
+        QString& errorTextOut)
+    {
+        const QFileInfo rootInfo(rootPath);
+        const bool rootExists = rootInfo.exists() || rootInfo.isSymLink();
+        if (!rootExists)
+        {
+            errorTextOut = QStringLiteral("路径不存在：%1").arg(QDir::toNativeSeparators(rootPath));
+            return false;
+        }
+
+        const bool isDirectory = rootInfo.isDir();
+        const bool isReparsePoint = isPathReparsePoint(rootPath);
+        if (isDirectory && !isReparsePoint)
+        {
+            const QFileInfoList childInfoList = QDir(rootPath).entryInfoList(
+                QDir::NoDotAndDotDot | QDir::AllEntries | QDir::Hidden | QDir::System,
+                QDir::DirsFirst | QDir::Name);
+            for (const QFileInfo& childInfo : childInfoList)
+            {
+                if (!appendDriverDeleteTargetsPostOrder(childInfo.absoluteFilePath(), targetsOut, errorTextOut))
+                {
+                    return false;
+                }
+            }
+        }
+
+        targetsOut.push_back(DriverDeleteTarget{ rootPath, isDirectory });
+        return true;
+    }
+
     // 手动解析模型列定义：名称/大小/类型/修改时间/完整路径/是否目录。
     enum class ManualModelColumn : int
     {
@@ -3062,6 +3270,7 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* pasteAction = menu.addAction(QIcon(":/Icon/process_resume.svg"), QStringLiteral("粘贴"));
     QAction* renameAction = menu.addAction(QIcon(":/Icon/process_priority.svg"), QStringLiteral("重命名(F2)"));
     QAction* deleteAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("删除(Delete)"));
+    QAction* driverDeleteAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("驱动删除(R0)"));
     QAction* takeOwnerAction = menu.addAction(QIcon(":/Icon/file_owner.svg"), QStringLiteral("取得所有权"));
     menu.addSeparator();
     QAction* newFileAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("新建文件"));
@@ -3090,6 +3299,7 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     pasteAction->setEnabled(!m_clipboardPaths.empty());
     renameAction->setEnabled(isSingleSelection);
     deleteAction->setEnabled(hasSelection);
+    driverDeleteAction->setEnabled(hasSelection);
     takeOwnerAction->setEnabled(hasSelection);
     detailAction->setEnabled(hasSelection);
     hashAction->setEnabled(hasAnyFile);
@@ -3202,6 +3412,11 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     if (selectedAction == deleteAction)
     {
         deleteSelectedItem(panel);
+        return;
+    }
+    if (selectedAction == driverDeleteAction)
+    {
+        deleteSelectedItemByDriver(panel);
         return;
     }
     if (selectedAction == takeOwnerAction)
@@ -4054,6 +4269,131 @@ void FileDock::deleteSelectedItem(FilePanelWidgets& panel)
         << panel.panelNameText.toStdString()
         << ", count="
         << paths.size()
+        << eol;
+}
+
+void FileDock::deleteSelectedItemByDriver(FilePanelWidgets& panel)
+{
+    const std::vector<QString> paths = selectedPaths(panel);
+    if (paths.empty())
+    {
+        return;
+    }
+
+    {
+        kLogEvent event;
+        info << event
+            << "[FileDock] 驱动删除请求, panel="
+            << panel.panelNameText.toStdString()
+            << ", count="
+            << paths.size()
+            << eol;
+    }
+
+    const QMessageBox::StandardButton userChoice = QMessageBox::question(
+        this,
+        QStringLiteral("驱动删除确认"),
+        QStringLiteral("将通过 KswordARK 驱动直接硬删除选中的 %1 项。\n此操作不会进入回收站，目录会递归删除，是否继续？")
+            .arg(paths.size()),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (userChoice != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    std::vector<DriverDeleteTarget> deleteTargets;
+    QStringList prepareErrors;
+    for (const QString& path : paths)
+    {
+        QString errorText;
+        if (!appendDriverDeleteTargetsPostOrder(path, deleteTargets, errorText))
+        {
+            prepareErrors.push_back(errorText);
+        }
+    }
+
+    if (deleteTargets.empty())
+    {
+        kLogEvent event;
+        warn << event
+            << "[FileDock] 驱动删除取消：未生成可删除目标, panel="
+            << panel.panelNameText.toStdString()
+            << ", prepareErrorPreview=\n"
+            << buildLogPreviewText(prepareErrors).toStdString()
+            << eol;
+        return;
+    }
+
+    std::string openDriverDetailText;
+    const HANDLE driverHandle = openKswordArkDriverHandle(&openDriverDetailText);
+    if (driverHandle == INVALID_HANDLE_VALUE)
+    {
+        kLogEvent event;
+        warn << event
+            << "[FileDock] 驱动删除失败：无法连接驱动, panel="
+            << panel.panelNameText.toStdString()
+            << ", detail="
+            << openDriverDetailText
+            << eol;
+        QMessageBox::warning(
+            this,
+            QStringLiteral("驱动删除"),
+            QStringLiteral("无法连接 KswordARK 驱动设备，请先启用 R0 驱动。"));
+        return;
+    }
+
+    const int progressPid = kPro.add("文件", "驱动删除");
+    kPro.set(progressPid, "驱动删除开始", 0, 5.0f);
+
+    QStringList deleteErrors = prepareErrors;
+    const std::size_t totalTargetCount = deleteTargets.size();
+    for (std::size_t index = 0; index < totalTargetCount; ++index)
+    {
+        const DriverDeleteTarget& target = deleteTargets[index];
+        std::string detailText;
+        const bool deleteOk = deletePathByR0Driver(
+            driverHandle,
+            target.path,
+            target.isDirectory,
+            &detailText);
+        if (!deleteOk)
+        {
+            deleteErrors.push_back(QString::fromStdString(detailText));
+        }
+
+        const float progress =
+            5.0f + (static_cast<float>(index + 1) / static_cast<float>(totalTargetCount)) * 90.0f;
+        kPro.set(progressPid, "驱动删除处理中", 0, progress);
+    }
+
+    ::CloseHandle(driverHandle);
+
+    refreshPanel(panel);
+    kPro.set(progressPid, "驱动删除完成", 0, 100.0f);
+
+    if (!deleteErrors.isEmpty())
+    {
+        kLogEvent event;
+        warn << event
+            << "[FileDock] 驱动删除部分失败, panel="
+            << panel.panelNameText.toStdString()
+            << ", errorCount="
+            << deleteErrors.size()
+            << ", errorPreview=\n"
+            << buildLogPreviewText(deleteErrors).toStdString()
+            << eol;
+        return;
+    }
+
+    kLogEvent event;
+    info << event
+        << "[FileDock] 驱动删除完成, panel="
+        << panel.panelNameText.toStdString()
+        << ", originalCount="
+        << paths.size()
+        << ", targetCount="
+        << deleteTargets.size()
         << eol;
 }
 

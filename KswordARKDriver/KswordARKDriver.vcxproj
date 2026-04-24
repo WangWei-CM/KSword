@@ -22,6 +22,7 @@
     <None Include="ReadMe.txt" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\features\file\file_actions.c" />
     <ClCompile Include="src\dispatch\ioctl_dispatch.c" />
     <ClCompile Include="src\features\log\log_channel.c" />
     <ClCompile Include="src\features\process\process_actions.c" />
@@ -35,6 +36,7 @@
     <ClInclude Include="Driver.h" />
     <ClInclude Include="include\ark\ark_device.h" />
     <ClInclude Include="include\ark\ark_driver.h" />
+    <ClInclude Include="include\ark\ark_file.h" />
     <ClInclude Include="include\ark\ark_ioctl.h" />
     <ClInclude Include="include\ark\ark_log.h" />
     <ClInclude Include="include\ark\ark_process.h" />

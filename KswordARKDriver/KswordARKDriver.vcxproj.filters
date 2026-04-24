@@ -66,6 +66,9 @@
     <ClInclude Include="include\ark\ark_driver.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
+    <ClInclude Include="include\ark\ark_file.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
     <ClInclude Include="include\ark\ark_ioctl.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
@@ -83,6 +86,9 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\features\file\file_actions.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
     <ClCompile Include="src\framework\driver_entry.c">
       <Filter>Source Files\Framework</Filter>
     </ClCompile>
