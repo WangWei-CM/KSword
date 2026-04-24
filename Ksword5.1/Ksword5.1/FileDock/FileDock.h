@@ -230,6 +230,11 @@ private:
     // - 作用：删除当前选中项（当前实现走普通删除）。
     void deleteSelectedItem(FilePanelWidgets& panel);
 
+    // deleteSelectedItemByDriver：
+    // - 作用：通过 KswordARK 驱动对当前选中项执行硬删除。
+    // - 说明：目录删除由 R3 先展开为后序路径列表，再逐项交给驱动删除。
+    void deleteSelectedItemByDriver(FilePanelWidgets& panel);
+
     // takeOwnershipSelectedItems：
     // - 作用：对当前选中项执行“取得所有权 + 授权完全控制”。
     // - 说明：调用系统 takeown/icacls，失败信息会汇总提示。
