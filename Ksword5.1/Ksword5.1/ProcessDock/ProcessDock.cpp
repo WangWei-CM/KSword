@@ -3067,26 +3067,24 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     r0PplNoneAction->setData(0x00U);
     r0PplLevelSubMenu->addSeparator();
     // PPL 预设签名器列表：
-    // - 按用户提供的 1~10 层级构建；
+    // - 与 PPLcontrol 的 signer 命名/数值对齐（PsProtectedSigner*）；
     // - protectionLevel = (Signer << 4) | Type，其中 Type 固定为 1（PPL）。
     struct PplSignerPreset
     {
-        int signerValue;       // signerValue：PPL Signer 数值（1~10）。
+        int signerValue;       // signerValue：PPL Signer 数值（1~7）。
         const char* signerName; // signerName：菜单展示名称。
         const char* meaningText; // meaningText：菜单展示释义。
+        bool supportedByDriver; // supportedByDriver：当前驱动是否支持 signer 对应签名级别联动。
     };
     const PplSignerPreset presetList[] =
     {
-        { 1, "WinSystem", "系统组件" },
-        { 2, "WinTcb", "可信计算基础（最高权限）" },
-        { 3, "WinMain", "主要 Windows 组件" },
-        { 4, "WinLocal", "本地系统服务" },
-        { 5, "WinConsole", "控制台子系统" },
-        { 6, "WinAuthenticated", "已认证应用" },
-        { 7, "WinUnauthenticated", "未认证应用（最低）" },
-        { 8, "WinCodeGen", "代码生成" },
-        { 9, "WinStore", "Windows Store 应用" },
-        { 10, "WinPPL", "第三方 PPL 进程" }
+        { 1, "Authenticode", "签名代码（Authenticode）", true },
+        { 2, "CodeGen", "动态代码生成", true },
+        { 3, "Antimalware", "反恶意软件", true },
+        { 4, "Lsa", "本地安全机构", true },
+        { 5, "Windows", "Windows 组件", true },
+        { 6, "WinTcb", "可信计算基础（最高）", true },
+        { 7, "WinSystem", "系统 signer（当前驱动未启用）", false }
     };
     for (const PplSignerPreset& presetEntry : presetList)
     {
@@ -3102,6 +3100,11 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
             .arg(QString::fromUtf8(presetEntry.meaningText))
             .arg(protectionLevelHexText));
         presetAction->setData(protectionLevel);
+        if (!presetEntry.supportedByDriver)
+        {
+            presetAction->setEnabled(false);
+            presetAction->setToolTip(QStringLiteral("该 Signer 在当前驱动下暂无签名级别联动映射。"));
+        }
     }
     contextMenu.addSeparator();
 

@@ -204,18 +204,12 @@ QString HexEditorWidget::formatSelectionAsciiPreview(const QByteArray& selectedB
         return QStringLiteral("-");
     }
 
-    constexpr int kPreviewBytes = 64;
-    const int displayCount = std::min<int>(selectedBytes.size(), kPreviewBytes);
     QString asciiText;
-    asciiText.reserve(displayCount + 8);
-    for (int index = 0; index < displayCount; ++index)
+    asciiText.reserve(selectedBytes.size());
+    for (int index = 0; index < selectedBytes.size(); ++index)
     {
         const std::uint8_t byteValue = static_cast<std::uint8_t>(selectedBytes.at(index));
         asciiText.push_back((byteValue >= 32 && byteValue <= 126) ? QChar(byteValue) : QChar('.'));
-    }
-    if (selectedBytes.size() > kPreviewBytes)
-    {
-        asciiText += QStringLiteral(" ...");
     }
     return asciiText;
 }

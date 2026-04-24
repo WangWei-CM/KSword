@@ -46,6 +46,10 @@ class QVBoxLayout;
 class QWidget;
 class QShowEvent;
 class QDialog;
+class QCompleter;
+class QScrollArea;
+class QStandardItemModel;
+class CodeEditorWidget;
 class MultiThreadDownloadSegmentBarWidget;
 
 namespace ks::network
@@ -137,6 +141,93 @@ private:
     using UInt32Range = std::pair<std::uint32_t, std::uint32_t>;
     using UInt16Range = std::pair<std::uint16_t, std::uint16_t>;
 
+    // MonitorTextRuleFieldKind：规则组中“文本列表类型”枚举。
+    enum class MonitorTextRuleFieldKind : int
+    {
+        LocalAddress = 0, // 本地地址列表（支持 CIDR/范围/单 IP）。
+        RemoteAddress,    // 远程地址列表（支持 CIDR/范围/单 IP）。
+        LocalPort,        // 本地端口列表（支持单端口/范围）。
+        RemotePort,       // 远程端口列表（支持单端口/范围）。
+        PacketSize        // 包长列表（支持单值/范围，逗号分隔）。
+    };
+
+    // MonitorProcessTarget：进程过滤条目（PID + 名称 + 图标）。
+    struct MonitorProcessTarget
+    {
+        std::uint32_t pid = 0;
+        QString processName;
+        QIcon processIcon;
+    };
+
+    // MonitorProcessCandidate：PID 输入补全候选项缓存。
+    struct MonitorProcessCandidate
+    {
+        std::uint32_t pid = 0;
+        QString processName;
+        QString displayText;
+        QString searchText;
+        QIcon processIcon;
+    };
+
+    // MonitorTextRuleFieldUiState：地址/端口/包长列表字段的 UI + 数据状态。
+    struct MonitorTextRuleFieldUiState
+    {
+        QString labelText;
+        QLineEdit* inputEdit = nullptr;
+        QPushButton* addButton = nullptr;
+        QPushButton* clearButton = nullptr;
+        QTableWidget* tableWidget = nullptr;
+        QStringList valueList;
+    };
+
+    // MonitorFilterRuleGroupCompiled：单规则组编译后的可匹配过滤条件（组内 AND，组间 OR）。
+    struct MonitorFilterRuleGroupCompiled
+    {
+        int groupId = 0;
+        bool enabled = true;
+        std::vector<std::uint32_t> processIdList;
+        std::vector<UInt32Range> localAddressRangeList;
+        std::vector<UInt32Range> remoteAddressRangeList;
+        std::vector<UInt16Range> localPortRangeList;
+        std::vector<UInt16Range> remotePortRangeList;
+        std::vector<UInt32Range> packetSizeRangeList;
+
+        bool hasAnyCondition() const
+        {
+            return !processIdList.empty() ||
+                !localAddressRangeList.empty() ||
+                !remoteAddressRangeList.empty() ||
+                !localPortRangeList.empty() ||
+                !remotePortRangeList.empty() ||
+                !packetSizeRangeList.empty();
+        }
+    };
+
+    // MonitorFilterRuleGroupUiState：单规则组的 UI 组件与原始输入状态。
+    struct MonitorFilterRuleGroupUiState
+    {
+        int groupId = 0;
+        QWidget* containerWidget = nullptr;
+        QLabel* titleLabel = nullptr;
+        QCheckBox* enabledCheck = nullptr;
+        QPushButton* removeGroupButton = nullptr;
+
+        QLineEdit* processInputEdit = nullptr;
+        QCompleter* processCompleter = nullptr;
+        QStandardItemModel* processSuggestionModel = nullptr;
+        QPushButton* addProcessButton = nullptr;
+        QPushButton* removeInvalidProcessButton = nullptr;
+        QPushButton* clearProcessButton = nullptr;
+        QTableWidget* processTable = nullptr;
+        std::vector<MonitorProcessTarget> processTargetList;
+
+        MonitorTextRuleFieldUiState localAddressField;
+        MonitorTextRuleFieldUiState remoteAddressField;
+        MonitorTextRuleFieldUiState localPortField;
+        MonitorTextRuleFieldUiState remotePortField;
+        MonitorTextRuleFieldUiState packetSizeField;
+    };
+
 private:
     // MultiThreadDownloadSegmentState：
     // - 作用：保存单分段下载进度状态；
@@ -222,6 +313,11 @@ private:
     // - 返回：无。
     void initializeAliveHostScanTab();
 
+    // initializeHostsFileEditorTab：
+    // - 作用：构建“hosts文件编辑”页（全屏文本编辑器）。
+    // - 返回：无。
+    void initializeHostsFileEditorTab();
+
     // initializeHttpsAnalyzeTab：
     // - 作用：构建“HTTPS解析”页（代理控制 + 证书信任 + 解析结果）。
     // - 返回：无。
@@ -290,19 +386,212 @@ private:
 
     // ========================= 流量过滤 ==========================
     // applyMonitorFilters：
-    // - 作用：解析 UI 输入并应用组合过滤（PID/IP段/端口/包长）。
+    // - 作用：把规则组配置编译为可匹配条件并应用到流量表。
     // - 返回：无。
     void applyMonitorFilters();
 
     // clearMonitorFilters：
-    // - 作用：清除全部过滤条件并恢复显示全量报文。
+    // - 作用：清空全部规则组配置并恢复显示全量报文。
     // - 返回：无。
     void clearMonitorFilters();
 
     // updateMonitorFilterStateLabel：
-    // - 作用：把当前已启用过滤条件汇总为状态文本展示在 UI。
+    // - 作用：把当前规则组过滤状态汇总到状态标签。
     // - 返回：无。
     void updateMonitorFilterStateLabel();
+
+    // addMonitorFilterRuleGroup：
+    // - 作用：新增一个规则组（组间 OR）。
+    // - 返回：无。
+    void addMonitorFilterRuleGroup();
+
+    // removeMonitorFilterRuleGroup：
+    // - 作用：删除指定规则组。
+    // - 参数 groupId：规则组唯一 ID。
+    // - 返回：无。
+    void removeMonitorFilterRuleGroup(int groupId);
+
+    // rebuildMonitorFilterRuleGroupUi：
+    // - 作用：按当前规则组状态重建规则组区域 UI。
+    // - 返回：无。
+    void rebuildMonitorFilterRuleGroupUi();
+
+    // refreshProcessSuggestionModelForGroup：
+    // - 作用：按输入关键词刷新指定规则组的进程候选下拉。
+    // - 参数 groupId：规则组唯一 ID。
+    // - 参数 keywordText：当前输入文本。
+    // - 返回：无。
+    void refreshProcessSuggestionModelForGroup(int groupId, const QString& keywordText);
+
+    // refreshMonitorProcessCandidateList：
+    // - 作用：刷新“系统进程候选缓存”（PID/名称/图标）。
+    // - 参数 forceRefresh：true 时忽略最小刷新间隔。
+    // - 返回：无。
+    void refreshMonitorProcessCandidateList(bool forceRefresh);
+
+    // addProcessTargetByInput：
+    // - 作用：把进程输入框当前值解析并加入规则组进程列表。
+    // - 参数 groupId：规则组唯一 ID。
+    // - 返回：无。
+    void addProcessTargetByInput(int groupId);
+
+    // removeProcessTarget：
+    // - 作用：按 PID 删除规则组中的单个进程条目。
+    // - 参数 groupId：规则组唯一 ID。
+    // - 参数 pidValue：目标 PID。
+    // - 返回：无。
+    void removeProcessTarget(int groupId, std::uint32_t pidValue);
+
+    // clearProcessTargetList：
+    // - 作用：清空规则组全部进程条目。
+    // - 参数 groupId：规则组唯一 ID。
+    // - 返回：无。
+    void clearProcessTargetList(int groupId);
+
+    // removeInvalidProcessTargets：
+    // - 作用：移除“PID 不存在或 PID 与进程名不匹配”的条目。
+    // - 参数 groupId：规则组唯一 ID。
+    // - 返回：无。
+    void removeInvalidProcessTargets(int groupId);
+
+    // addTextFilterItemsByInput：
+    // - 作用：把输入框文本解析为一个或多个条目并加入字段列表。
+    // - 参数 groupId：规则组唯一 ID。
+    // - 参数 fieldKind：字段类型（地址/端口/包长）。
+    // - 返回：无。
+    void addTextFilterItemsByInput(int groupId, MonitorTextRuleFieldKind fieldKind);
+
+    // removeTextFilterItem：
+    // - 作用：删除字段列表中的单个条目。
+    // - 参数 groupId：规则组唯一 ID。
+    // - 参数 fieldKind：字段类型。
+    // - 参数 itemIndex：条目索引。
+    // - 返回：无。
+    void removeTextFilterItem(int groupId, MonitorTextRuleFieldKind fieldKind, int itemIndex);
+
+    // clearTextFilterItems：
+    // - 作用：清空字段列表全部条目。
+    // - 参数 groupId：规则组唯一 ID。
+    // - 参数 fieldKind：字段类型。
+    // - 返回：无。
+    void clearTextFilterItems(int groupId, MonitorTextRuleFieldKind fieldKind);
+
+    // refreshProcessTableForGroup：
+    // - 作用：刷新指定规则组“进程列表”表格显示。
+    // - 参数 groupId：规则组唯一 ID。
+    // - 返回：无。
+    void refreshProcessTableForGroup(int groupId);
+
+    // refreshTextTableForGroup：
+    // - 作用：刷新指定规则组字段表格（地址/端口/包长）。
+    // - 参数 groupId：规则组唯一 ID。
+    // - 参数 fieldKind：字段类型。
+    // - 返回：无。
+    void refreshTextTableForGroup(int groupId, MonitorTextRuleFieldKind fieldKind);
+
+    // clearAllMonitorFilterConfigurations：
+    // - 作用：一键清空所有规则组及其全部条目，并保留一个空白规则组。
+    // - 返回：无。
+    void clearAllMonitorFilterConfigurations();
+
+    // importMonitorFilterConfigFromUserSelectedPath：
+    // - 作用：从用户选择的配置文件导入规则组。
+    // - 返回：无。
+    void importMonitorFilterConfigFromUserSelectedPath();
+
+    // exportMonitorFilterConfigToUserSelectedPath：
+    // - 作用：把当前规则组导出到用户选择路径。
+    // - 返回：无。
+    void exportMonitorFilterConfigToUserSelectedPath() const;
+
+    // loadMonitorFilterConfigFromDefaultPath：
+    // - 作用：从默认路径 `config/wireshark.cfg` 读取规则组。
+    // - 返回：无。
+    void loadMonitorFilterConfigFromDefaultPath();
+
+    // saveMonitorFilterConfigToDefaultPath：
+    // - 作用：保存当前规则组到默认路径 `config/wireshark.cfg`。
+    // - 返回：无。
+    void saveMonitorFilterConfigToDefaultPath() const;
+
+    // saveMonitorFilterConfigToPath：
+    // - 作用：保存当前规则组到指定路径。
+    // - 参数 filePath：目标配置文件路径。
+    // - 参数 showErrorDialog：是否在失败时弹框。
+    // - 返回：true=保存成功；false=保存失败。
+    bool saveMonitorFilterConfigToPath(const QString& filePath, bool showErrorDialog) const;
+
+    // loadMonitorFilterConfigFromPath：
+    // - 作用：从指定路径加载规则组并刷新 UI。
+    // - 参数 filePath：来源配置文件路径。
+    // - 参数 showErrorDialog：是否在失败时弹框。
+    // - 返回：true=加载成功；false=加载失败。
+    bool loadMonitorFilterConfigFromPath(const QString& filePath, bool showErrorDialog);
+
+    // monitorFilterConfigPath：
+    // - 作用：获取默认规则配置文件绝对路径。
+    // - 返回：`<exe目录>/config/wireshark.cfg`。
+    QString monitorFilterConfigPath() const;
+
+    // tryCompileMonitorFilterGroups：
+    // - 作用：把 UI 原始条目编译为可匹配条件。
+    // - 参数 compiledGroupsOut：成功时输出编译结果。
+    // - 参数 errorTextOut：失败时输出错误文本。
+    // - 返回：true=编译成功；false=存在非法条目。
+    bool tryCompileMonitorFilterGroups(
+        std::vector<MonitorFilterRuleGroupCompiled>& compiledGroupsOut,
+        QString& errorTextOut) const;
+
+    // packetMatchesMonitorFilterGroup：
+    // - 作用：判断报文是否命中单规则组（组内 AND）。
+    // - 参数 packetRecord：待匹配报文。
+    // - 参数 groupFilter：编译后的规则组。
+    // - 返回：true=命中；false=不命中。
+    bool packetMatchesMonitorFilterGroup(
+        const ks::network::PacketRecord& packetRecord,
+        const MonitorFilterRuleGroupCompiled& groupFilter) const;
+
+    // findMonitorFilterRuleGroupById：
+    // - 作用：按规则组 ID 查找 UI 状态对象。
+    // - 参数 groupId：规则组唯一 ID。
+    // - 返回：找到返回指针，未找到返回空。
+    MonitorFilterRuleGroupUiState* findMonitorFilterRuleGroupById(int groupId);
+    const MonitorFilterRuleGroupUiState* findMonitorFilterRuleGroupById(int groupId) const;
+
+    // findTextRuleField：
+    // - 作用：从规则组中按字段类型定位字段状态对象。
+    // - 参数 groupState：目标规则组。
+    // - 参数 fieldKind：字段类型。
+    // - 返回：找到返回指针，未找到返回空。
+    MonitorTextRuleFieldUiState* findTextRuleField(
+        MonitorFilterRuleGroupUiState& groupState,
+        MonitorTextRuleFieldKind fieldKind);
+    const MonitorTextRuleFieldUiState* findTextRuleField(
+        const MonitorFilterRuleGroupUiState& groupState,
+        MonitorTextRuleFieldKind fieldKind) const;
+
+    // addOrTrackProcessPid：
+    // - 作用：把某 PID 注入首个规则组并立即应用过滤。
+    // - 参数 pidValue：目标 PID。
+    // - 返回：无。
+    void addOrTrackProcessPid(std::uint32_t pidValue);
+
+    // splitMonitorFilterTokens：
+    // - 作用：按逗号/分号/空白拆分输入文本。
+    // - 参数 inputText：原始输入文本。
+    // - 返回：分词结果（去空项）。
+    static QStringList splitMonitorFilterTokens(const QString& inputText);
+
+    // tryParsePacketSizeToken：
+    // - 作用：解析单个包长条件（如 "40" 或 "60-80"）。
+    // - 参数 tokenText：输入词元。
+    // - 参数 rangeOut：解析成功时输出范围。
+    // - 参数 normalizeTextOut：解析成功时输出规范化文本。
+    // - 返回：true=成功；false=失败。
+    static bool tryParsePacketSizeToken(
+        const QString& tokenText,
+        UInt32Range& rangeOut,
+        QString& normalizeTextOut);
 
     // trackProcessByTableRow：
     // - 作用：右键“跟踪此进程”时把该行 PID 写入过滤并立即应用。
@@ -643,26 +932,26 @@ private:
     QWidget* m_trafficMonitorPage = nullptr;      // 流量监控页容器。
     QVBoxLayout* m_trafficMonitorLayout = nullptr;// 流量监控页主布局。
     QHBoxLayout* m_monitorControlLayout = nullptr;// 抓包控制栏布局。
-    QHBoxLayout* m_monitorFilterLayoutLine1 = nullptr; // 过滤栏第 1 行（PID/IP）。
-    QHBoxLayout* m_monitorFilterLayoutLine2 = nullptr; // 过滤栏第 2 行（端口/包长）。
+    QHBoxLayout* m_monitorFilterHeaderLayout = nullptr; // 过滤面板标题栏（漏斗/按钮组）。
+    QWidget* m_monitorFilterPanel = nullptr;            // 过滤规则组折叠面板容器。
+    QVBoxLayout* m_monitorFilterPanelLayout = nullptr;  // 过滤规则组面板主布局。
+    QScrollArea* m_monitorFilterScrollArea = nullptr;   // 规则组滚动容器。
+    QWidget* m_monitorFilterGroupHostWidget = nullptr;  // 规则组承载容器。
+    QVBoxLayout* m_monitorFilterGroupHostLayout = nullptr; // 规则组承载布局。
 
     QPushButton* m_startMonitorButton = nullptr; // 启动监控按钮。
     QPushButton* m_stopMonitorButton = nullptr;  // 停止监控按钮。
     QPushButton* m_clearPacketButton = nullptr;  // 清空报文按钮。
     QLabel* m_monitorStatusLabel = nullptr;      // 抓包状态标签。
 
-    QLineEdit* m_pidFilterEdit = nullptr;      // PID 过滤输入框（可为空表示禁用）。
-    QLineEdit* m_localIpFilterEdit = nullptr;  // 本地 IP 段过滤输入框（支持 CIDR/范围/单 IP）。
-    QLineEdit* m_remoteIpFilterEdit = nullptr; // 远端 IP 段过滤输入框（支持 CIDR/范围/单 IP）。
-
-    QLineEdit* m_localPortFilterEdit = nullptr;  // 本地端口过滤输入框（单值或范围）。
-    QLineEdit* m_remotePortFilterEdit = nullptr; // 远端端口过滤输入框（单值或范围）。
-    QSpinBox* m_packetSizeMinSpin = nullptr;     // 报文大小最小值（0 表示不限）。
-    QSpinBox* m_packetSizeMaxSpin = nullptr;     // 报文大小最大值（0 表示不限）。
-
-    QPushButton* m_applyMonitorFilterButton = nullptr; // 应用组合过滤按钮。
-    QPushButton* m_clearMonitorFilterButton = nullptr; // 清空组合过滤按钮。
-    QLabel* m_monitorFilterStateLabel = nullptr;       // 当前过滤状态汇总标签。
+    QPushButton* m_monitorFilterToggleButton = nullptr;     // 漏斗按钮（展开/收起过滤配置）。
+    QPushButton* m_addMonitorFilterGroupButton = nullptr;   // 新增规则组按钮。
+    QPushButton* m_applyMonitorFilterButton = nullptr;      // 应用过滤按钮。
+    QPushButton* m_clearMonitorFilterButton = nullptr;      // 一键清空全部配置按钮。
+    QPushButton* m_saveMonitorFilterButton = nullptr;       // 保存到默认 cfg 按钮。
+    QPushButton* m_importMonitorFilterButton = nullptr;     // 导入配置按钮。
+    QPushButton* m_exportMonitorFilterButton = nullptr;     // 导出配置按钮。
+    QLabel* m_monitorFilterStateLabel = nullptr;            // 当前过滤状态汇总标签。
     QTableWidget* m_packetTable = nullptr;             // 全量发送报文表格。
 
     // ========================= Tab2：进程限速 ====================
@@ -789,6 +1078,11 @@ private:
     QPlainTextEdit* m_httpsProxyLogOutput = nullptr;// HTTPS代理日志输出框。
     std::vector<ks::network::HttpsProxyParsedEntry> m_httpsParsedEntryCache; // HTTPS解析结果缓存，行号与表格一一对应。
 
+    // ========================= Tab10：hosts文件编辑 ====================
+    QWidget* m_hostsFileEditorPage = nullptr;       // hosts文件编辑页容器。
+    QVBoxLayout* m_hostsFileEditorLayout = nullptr; // hosts文件编辑页布局。
+    CodeEditorWidget* m_hostsFileEditor = nullptr;  // hosts文件编辑器（全屏复用项目文本编辑组件）。
+
     // ========================= 后台服务与缓存 ====================
     std::unique_ptr<ks::network::TrafficMonitorService> m_trafficService; // 抓包/限速后台服务对象。
     QTimer* m_rateLimitRefreshTimer = nullptr; // 限速规则轮询刷新定时器。
@@ -802,15 +1096,15 @@ private:
     std::atomic_bool m_monitorStopInProgress{ false }; // 停止流程进行中，避免重复 stop 导致 UI 抖动。
     std::unique_ptr<std::thread> m_monitorStopThread;  // 异步 stop 的 join 线程，防止主线程等待卡顿。
 
-    // 当前启用的组合过滤条件：
-    // - 任一 optional 为空表示该条件“未启用”；
-    // - 全部为空时等价于“无过滤”。
-    std::optional<std::uint32_t> m_activePidFilter;          // PID 精确匹配过滤。
-    std::optional<UInt32Range> m_activeLocalIpv4RangeFilter; // 本地 IP 范围过滤（主机序）。
-    std::optional<UInt32Range> m_activeRemoteIpv4RangeFilter;// 远端 IP 范围过滤（主机序）。
-    std::optional<UInt16Range> m_activeLocalPortRangeFilter; // 本地端口范围过滤。
-    std::optional<UInt16Range> m_activeRemotePortRangeFilter;// 远端端口范围过滤。
-    std::optional<UInt32Range> m_activePacketSizeRangeFilter; // 报文总长度范围过滤（字节）。
+    // 当前已应用过滤状态：
+    // - m_monitorFilterRuleGroupUiList 保存“原始 UI 配置”；
+    // - m_activeMonitorFilterGroupList 保存“编译后可匹配条件”；
+    // - m_monitorProcessCandidateList 是 PID 输入补全缓存。
+    std::vector<std::unique_ptr<MonitorFilterRuleGroupUiState>> m_monitorFilterRuleGroupUiList;
+    std::vector<MonitorFilterRuleGroupCompiled> m_activeMonitorFilterGroupList;
+    std::vector<MonitorProcessCandidate> m_monitorProcessCandidateList;
+    int m_monitorFilterNextGroupId = 1;
+    qint64 m_monitorProcessCandidateLastRefreshMs = 0;
 
     static constexpr std::size_t kMaxPacketCacheCount = 6000;          // 报文缓存上限。
     // 后台待刷新队列上限：

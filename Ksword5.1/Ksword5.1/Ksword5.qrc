@@ -14,6 +14,7 @@
         <file alias="log_clipboard.svg">Resource/Icon/file/clipboard_line.svg</file>
         <file alias="log_track.svg">Resource/Icon/editor/list_search_line.svg</file>
         <file alias="log_cancel_track.svg">Resource/Icon/system/close_line.svg</file>
+        <file alias="filter_funnel.svg">Resource/Icon/business/filter_line.svg</file>
 
         <!-- 进程面板图标资源 -->
         <file alias="process_main.svg">Resource/Icon/system/process_line.svg</file>

@@ -138,8 +138,16 @@ void HexEditorWidget::initializeUi()
     m_jumpPanel->setVisible(false);
     m_rootLayout->addWidget(m_jumpPanel);
 
-    // 主表：地址列 + 字节列 + ASCII 列。
-    m_hexTable = new QTableWidget(this);
+    // 主视图区：HEX 与 ASCII 两个页面。
+    m_viewTabWidget = new QTabWidget(this);
+    m_viewTabWidget->setDocumentMode(true);
+    m_hexViewPage = new QWidget(m_viewTabWidget);
+    QVBoxLayout* hexPageLayout = new QVBoxLayout(m_hexViewPage);
+    hexPageLayout->setContentsMargins(0, 0, 0, 0);
+    hexPageLayout->setSpacing(0);
+
+    // HEX 页面主表：地址列 + 字节列 + ASCII 列。
+    m_hexTable = new QTableWidget(m_hexViewPage);
     m_hexTable->setColumnCount(m_bytesPerRow + 2);
     m_hexTable->setRowCount(1);
     // 使用 ExtendedSelection：
@@ -200,7 +208,20 @@ void HexEditorWidget::initializeUi()
     m_hexTable->viewport()->setCursor(Qt::IBeamCursor);
     m_hexTable->setCursor(Qt::IBeamCursor);
     m_hexTable->viewport()->installEventFilter(this);
-    m_rootLayout->addWidget(m_hexTable, 1);
+    hexPageLayout->addWidget(m_hexTable, 1);
+    m_viewTabWidget->addTab(m_hexViewPage, QStringLiteral("HEX"));
+
+    m_asciiViewPage = new QWidget(m_viewTabWidget);
+    QVBoxLayout* asciiPageLayout = new QVBoxLayout(m_asciiViewPage);
+    asciiPageLayout->setContentsMargins(0, 0, 0, 0);
+    asciiPageLayout->setSpacing(0);
+    m_asciiEditor = new CodeEditorWidget(m_asciiViewPage);
+    m_asciiEditor->setReadOnly(true);
+    m_asciiEditor->setText(QStringLiteral("当前无数据。"));
+    asciiPageLayout->addWidget(m_asciiEditor, 1);
+    m_viewTabWidget->addTab(m_asciiViewPage, QStringLiteral("ASCII"));
+
+    m_rootLayout->addWidget(m_viewTabWidget, 1);
 
     // 选区检查器：展示当前选中字节的多种解释结果。
     initializeSelectionInspector();
@@ -221,6 +242,7 @@ void HexEditorWidget::initializeUi()
     updateHeaderText();
     updateSummaryLabel();
     updateSelectionInspector();
+    refreshAsciiTabText();
 }
 
 void HexEditorWidget::initializeConnections()
@@ -249,6 +271,8 @@ void HexEditorWidget::initializeConnections()
             exportMenu.setStyleSheet(buildMenuStyle());
             QAction* binaryAction = exportMenu.addAction(QStringLiteral("导出二进制"));
             QAction* textAction = exportMenu.addAction(QStringLiteral("导出HEX文本"));
+            QAction* selectedHexAction = exportMenu.addAction(QStringLiteral("导出选中HEX数据"));
+            selectedHexAction->setEnabled(!collectSelectedOffsets().empty());
             QAction* selectedAction = exportMenu.exec(m_exportButton->mapToGlobal(QPoint(0, m_exportButton->height())));
             if (selectedAction == binaryAction)
             {
@@ -258,6 +282,11 @@ void HexEditorWidget::initializeConnections()
             if (selectedAction == textAction)
             {
                 exportHexTextFile();
+                return;
+            }
+            if (selectedAction == selectedHexAction)
+            {
+                exportSelectedHexDataFile();
             }
         });
 
@@ -396,6 +425,7 @@ void HexEditorWidget::initializeConnections()
             m_ignoreItemChanged = true;
             changedItem->setText(byteToHexText(newValue));
             updateAsciiCellByRow(rowIndex);
+            refreshAsciiTabText();
             updateRowHighlightByRow(rowIndex);
             m_ignoreItemChanged = false;
 
@@ -445,9 +475,16 @@ void HexEditorWidget::initializeConnections()
             if (clickedItem != nullptr)
             {
                 hasByte = rowColumnToOffset(clickedItem->row(), clickedItem->column(), clickedOffset);
+                // 右键点击未选中单元格时，先把该字节设为当前选区，保证复制严格针对当前目标。
+                if (hasByte && !clickedItem->isSelected())
+                {
+                    m_selectionVisualAsciiColumn = (clickedItem->column() == (m_bytesPerRow + 1));
+                    selectRangeByOffset(clickedOffset, 1, false);
+                }
             }
 
             const std::uint64_t absoluteAddress = m_baseAddress + clickedOffset;
+            const bool hasSelection = !collectSelectedOffsets().empty();
 
             QMenu menu(this);
             menu.setStyleSheet(buildMenuStyle());
@@ -461,6 +498,14 @@ void HexEditorWidget::initializeConnections()
             menu.addSeparator();
             QAction* exportBinaryAction = menu.addAction(QStringLiteral("导出二进制"));
             QAction* exportTextAction = menu.addAction(QStringLiteral("导出 HEX 文本"));
+            QAction* exportSelectedHexAction = menu.addAction(QStringLiteral("导出选中 HEX 数据"));
+
+            if (!hasSelection)
+            {
+                copyHexAction->setEnabled(false);
+                copyAsciiAction->setEnabled(false);
+                exportSelectedHexAction->setEnabled(false);
+            }
 
             if (!hasByte)
             {
@@ -514,6 +559,11 @@ void HexEditorWidget::initializeConnections()
             if (selectedAction == exportTextAction)
             {
                 exportHexTextFile();
+                return;
+            }
+            if (selectedAction == exportSelectedHexAction)
+            {
+                exportSelectedHexDataFile();
             }
         });
 
@@ -540,6 +590,19 @@ void HexEditorWidget::initializeConnections()
     connect(m_copyAsciiShortcut, &QShortcut::activated, this, [this]()
         {
             copySelectedAsAscii();
+        });
+
+    connect(m_viewTabWidget, &QTabWidget::currentChanged, this, [this](const int indexValue)
+        {
+            const bool hexPageActive = (indexValue == 0);
+            if (m_selectionInspectorPanel != nullptr)
+            {
+                m_selectionInspectorPanel->setVisible(hexPageActive);
+            }
+            if (!hexPageActive)
+            {
+                refreshAsciiTabText();
+            }
         });
 }
 
@@ -641,6 +704,8 @@ void HexEditorWidget::rebuildTable()
         m_linearSelectAnchorOffset = 0;
         m_selectionVisualAsciiColumn = false;
     }
+
+    refreshAsciiTabText();
 }
 
 void HexEditorWidget::updateHeaderText()
@@ -685,6 +750,38 @@ void HexEditorWidget::updateStatusLabel(const QString& statusText)
     {
         m_statusLabel->setText(statusText);
     }
+}
+
+void HexEditorWidget::refreshAsciiTabText()
+{
+    if (m_asciiEditor == nullptr)
+    {
+        return;
+    }
+
+    if (m_buffer.isEmpty())
+    {
+        m_asciiEditor->setText(QStringLiteral("当前无数据。"));
+        return;
+    }
+
+    const int safeBytesPerRow = std::max(1, m_bytesPerRow);
+    QString asciiText;
+    asciiText.reserve(m_buffer.size() + (m_buffer.size() / safeBytesPerRow) + 8);
+
+    for (int index = 0; index < m_buffer.size(); ++index)
+    {
+        const std::uint8_t byteValue = static_cast<std::uint8_t>(m_buffer.at(index));
+        const bool printable = (byteValue >= 32 && byteValue <= 126);
+        asciiText.push_back(printable ? QChar(byteValue) : QChar('.'));
+
+        if (((index + 1) % safeBytesPerRow) == 0 && (index + 1) < m_buffer.size())
+        {
+            asciiText.push_back(QChar('\n'));
+        }
+    }
+
+    m_asciiEditor->setText(asciiText);
 }
 
 void HexEditorWidget::updateAsciiCellByRow(const int rowIndex)

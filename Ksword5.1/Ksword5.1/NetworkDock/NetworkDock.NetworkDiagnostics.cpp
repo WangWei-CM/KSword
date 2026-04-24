@@ -1,5 +1,8 @@
 #include "NetworkDock.InternalCommon.h"
 
+#include "../UI/CodeEditorWidget.h"
+#include <QDir>
+
 using namespace network_dock_detail;
 // ============================================================
 // NetworkDock.NetworkDiagnostics.cpp
@@ -7,6 +10,7 @@ using namespace network_dock_detail;
 // - ARP 缓存展示与编辑；
 // - DNS 缓存展示与编辑；
 // - 存活主机发现（ICMP 扫描）。
+// - hosts 文件编辑。
 // ============================================================
 
 void NetworkDock::initializeArpCacheTab()
@@ -188,6 +192,51 @@ void NetworkDock::initializeAliveHostScanTab()
     m_aliveScanLayout->addWidget(m_aliveScanTable, 1);
 
     m_sideTabWidget->addTab(m_aliveScanPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("存活主机"));
+}
+
+void NetworkDock::initializeHostsFileEditorTab()
+{
+    m_hostsFileEditorPage = new QWidget(this);
+    m_hostsFileEditorLayout = new QVBoxLayout(m_hostsFileEditorPage);
+    m_hostsFileEditorLayout->setContentsMargins(0, 0, 0, 0);
+    m_hostsFileEditorLayout->setSpacing(0);
+
+    m_hostsFileEditor = new CodeEditorWidget(m_hostsFileEditorPage);
+    m_hostsFileEditor->setReadOnly(false);
+    m_hostsFileEditorLayout->addWidget(m_hostsFileEditor, 1);
+
+    QString windowsDirectory = qEnvironmentVariable("WINDIR").trimmed();
+    if (windowsDirectory.isEmpty())
+    {
+        windowsDirectory = QStringLiteral("C:/Windows");
+    }
+    const QString hostsFilePath = QDir(windowsDirectory)
+        .absoluteFilePath(QStringLiteral("System32/drivers/etc/hosts"));
+
+    if (m_hostsFileEditor->openLocalFile(hostsFilePath))
+    {
+        kLogEvent openHostsEvent;
+        info << openHostsEvent
+            << "[NetworkDock] hosts文件编辑页已加载, path="
+            << hostsFilePath.toStdString()
+            << eol;
+    }
+    else
+    {
+        m_hostsFileEditor->setCurrentFilePath(hostsFilePath);
+        m_hostsFileEditor->setText(QStringLiteral(
+            "# hosts 文件读取失败。\n"
+            "# 目标路径: %1\n"
+            "# 如需直接保存系统 hosts，请以管理员权限运行程序。").arg(hostsFilePath));
+
+        kLogEvent openHostsFailEvent;
+        warn << openHostsFailEvent
+            << "[NetworkDock] hosts文件编辑页加载失败, path="
+            << hostsFilePath.toStdString()
+            << eol;
+    }
+
+    m_sideTabWidget->addTab(m_hostsFileEditorPage, QIcon(":/Icon/codeeditor_open.svg"), QStringLiteral("hosts文件编辑"));
 }
 
 void NetworkDock::refreshArpCacheTable()

@@ -18,6 +18,7 @@ NetworkDock::NetworkDock(QWidget* parent)
     // 初始化界面和连接逻辑。
     initializeUi();
     initializeConnections();
+    loadMonitorFilterConfigFromDefaultPath();
 
     // 限速页使用定时器轮询刷新规则状态（触发次数、当前窗口字节等）。
     m_rateLimitRefreshTimer = new QTimer(this);

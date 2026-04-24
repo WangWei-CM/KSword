@@ -178,7 +178,7 @@ namespace network_dock_detail
                 readablePreviewLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
                 rootLayout->addWidget(readablePreviewLabel);
 
-                // 详情页签：把十六进制视图与 ASCII 文本视图分开，提升阅读与复制体验。
+                // 详情页签：当前仅保留十六进制视图页。
                 QTabWidget* detailTabWidget = new QTabWidget(this);
                 rootLayout->addWidget(detailTabWidget, 1);
 
@@ -212,28 +212,6 @@ namespace network_dock_detail
                 hexPageLayout->addWidget(hexEditorWidget, 1);
 
                 detailTabWidget->addTab(hexPage, QStringLiteral("十六进制"));
-
-                // ASCII 页：展示 payload 的文本化内容，优先保留 CRLF 语义。
-                QWidget* asciiPage = new QWidget(detailTabWidget);
-                QVBoxLayout* asciiPageLayout = new QVBoxLayout(asciiPage);
-                asciiPageLayout->setContentsMargins(0, 0, 0, 0);
-                asciiPageLayout->setSpacing(4);
-
-                QLabel* asciiHintLabel = new QLabel(QStringLiteral("下方为 payload 的 ASCII 视图（不可打印字节以 '.' 代替）。"), asciiPage);
-                asciiHintLabel->setWordWrap(true);
-                asciiHintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
-                asciiPageLayout->addWidget(asciiHintLabel);
-
-                QPlainTextEdit* asciiTextEditor = new QPlainTextEdit(asciiPage);
-                asciiTextEditor->setReadOnly(true);
-                asciiTextEditor->setLineWrapMode(QPlainTextEdit::NoWrap);
-                asciiTextEditor->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-                asciiTextEditor->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-                asciiTextEditor->setPlainText(buildPayloadAsciiFullText(packetRecord));
-                asciiTextEditor->setToolTip(QStringLiteral("可直接复制 payload 的 ASCII 文本内容。"));
-                asciiPageLayout->addWidget(asciiTextEditor, 1);
-
-                detailTabWidget->addTab(asciiPage, QStringLiteral("报文ASCII"));
             }
         };
     }

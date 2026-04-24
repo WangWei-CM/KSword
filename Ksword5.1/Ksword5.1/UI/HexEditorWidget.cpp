@@ -1,4 +1,5 @@
 #include "HexEditorWidget.h"
+#include "CodeEditorWidget.h"
 
 // ============================================================
 // HexEditorWidget.cpp
@@ -35,6 +36,7 @@
 #include <QStringConverter>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTabWidget>
 #include <QTextStream>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -446,6 +448,7 @@ bool HexEditorWidget::setByteAtAbsoluteAddress(
         byteItem->setText(byteToHexText(byteValue));
     }
     updateAsciiCellByRow(row);
+    refreshAsciiTabText();
     updateRowHighlightByRow(row);
     m_ignoreItemChanged = false;
     updateSelectionInspector();

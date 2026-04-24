@@ -9,6 +9,7 @@
 // ============================================================
 
 #include <QString>
+#include <QStringConverter>
 #include <QWidget>
 
 class QLabel;
@@ -22,7 +23,7 @@ class CodeTextEdit;
 
 // CodeEditorWidget：
 // - 统一的文本编辑器外壳；
-// - 对外提供基础文本读写与当前文件路径访问。
+// - 对外提供基础文本读写、当前文件路径与文件编码会话访问。
 class CodeEditorWidget final : public QWidget
 {
     Q_OBJECT
@@ -63,6 +64,29 @@ public:
     // isReadOnly：
     // - 返回当前是否只读。
     bool isReadOnly() const;
+
+    // currentEncodingDisplayText：
+    // - 返回当前文件编码展示文本（如 "UTF-8 BOM"）；
+    // - 若当前内容不是来自文件加载，则返回 "未知"。
+    QString currentEncodingDisplayText() const;
+
+    // openLocalFile：
+    // - 通过程序接口打开本地文本文件（自动识别编码）；
+    // - 不依赖 UI 按钮，适合业务代码直接调用。
+    // 返回：true=成功，false=失败。
+    bool openLocalFile(const QString& filePath);
+
+    // openLocalFileWithEncoding：
+    // - 通过程序接口按指定编码打开本地文本文件；
+    // - 用于“以其他编码重新打开”场景。
+    // 返回：true=成功，false=失败。
+    bool openLocalFileWithEncoding(const QString& filePath, QStringConverter::Encoding encoding);
+
+    // reopenCurrentFileWithEncoding：
+    // - 使用当前文件路径按指定编码重新加载；
+    // - 当前文件路径为空时会直接失败。
+    // 返回：true=成功，false=失败。
+    bool reopenCurrentFileWithEncoding(QStringConverter::Encoding encoding);
 
 private:
     // initializeUi：
@@ -113,8 +137,13 @@ private:
     void jumpToInputLine();
 
     // openTextFile：
-    // - 打开 UTF-8 文本文件到编辑器。
+    // - 通过文件选择框打开文本文件到编辑器（自动识别编码）。
     void openTextFile();
+
+    // loadLocalFile：
+    // - 文件加载内部实现；
+    // - 支持自动识别编码或按指定编码强制解码。
+    bool loadLocalFile(const QString& filePath, bool forceEncoding, QStringConverter::Encoding forcedEncoding);
 
     // saveTextFile：
     // - 保存文本到文件。
@@ -124,6 +153,15 @@ private:
     // refreshReadOnlyUiState：
     // - 根据只读状态更新按钮可用性和面板可见性。
     void refreshReadOnlyUiState();
+
+    // resetFileSessionMetadata：
+    // - 重置当前文件会话元数据（编码/BOM/换行）。
+    void resetFileSessionMetadata();
+
+    // applyStructuredAutoFormatIfNeeded：
+    // - 若文本识别为 JSON/XML，则自动格式化；
+    // - 返回格式化后的文本，无法识别或解析失败时原样返回。
+    QString applyStructuredAutoFormatIfNeeded(const QString& inputText, QString* detectedKindOut = nullptr) const;
 
 private:
     // m_rootLayout：根布局。
@@ -224,6 +262,18 @@ private:
 
     // m_currentFilePath：当前文件路径（用于保存覆盖）。
     QString m_currentFilePath;
+
+    // m_fileEncoding：当前文件编码（仅在文件加载后有效）。
+    QStringConverter::Encoding m_fileEncoding = QStringConverter::Utf8;
+
+    // m_fileHasBom：当前文件是否带 BOM。
+    bool m_fileHasBom = false;
+
+    // m_fileLineEnding：当前文件主导换行风格（"\r\n" / "\n" / "\r"）。
+    QString m_fileLineEnding = QStringLiteral("\n");
+
+    // m_fileSessionAvailable：当前编码元数据是否有效可展示。
+    bool m_fileSessionAvailable = false;
 
     // m_replaceEnabled：标记查找面板当前是否显示替换控件。
     bool m_replaceEnabled = false;
