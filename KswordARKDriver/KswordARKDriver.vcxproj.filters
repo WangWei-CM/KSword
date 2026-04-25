@@ -26,6 +26,12 @@
     <Filter Include="Source Files\\Features">
       <UniqueIdentifier>{2722FBD5-E9FF-44AB-963F-D738CF00FA3F}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\\Features\\Callback">
+      <UniqueIdentifier>{A97DE6FD-FFAF-4FB3-952D-13DE33A0A34B}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\\Features\\Kernel">
+      <UniqueIdentifier>{3C9A808C-7B1F-4E1A-9A24-2A70C4FA2287}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Source Files\\Platform">
       <UniqueIdentifier>{75A4CDCC-C7CA-4466-A916-060582F95507}</UniqueIdentifier>
     </Filter>
@@ -81,11 +87,47 @@
     <ClInclude Include="include\ark\ark_queue.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
+    <ClInclude Include="include\ark\ark_callback.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_kernel.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="src\features\callback\callback_internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="src\platform\process_resolver.h">
       <Filter>Header Files\Platform</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\features\callback\callback_runtime.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\callback\callback_rules.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\callback\callback_waiter.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\callback\registry_callback.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\callback\process_callback.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\callback\thread_callback.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\callback\image_callback.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\callback\object_callback.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\kernel\ssdt_query.c">
+      <Filter>Source Files\Features\Kernel</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\file\file_actions.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>

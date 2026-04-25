@@ -151,6 +151,7 @@ private:
         int depth = 0;                                // 树状列表下的缩进深度。
         bool isNew = false;                           // 本轮新增进程（绿色高亮）。
         bool isExited = false;                        // 本轮退出但保留一轮（灰色高亮）。
+        bool isKernelOnly = false;                    // 仅内核枚举可见（疑似隐藏进程，红色高亮）。
     };
 
     // CacheEntry：进程缓存条目（用于复用静态信息和退出保留）。
@@ -160,6 +161,7 @@ private:
         int missingRounds = 0;             // 连续缺失轮次（1 表示“刚退出，保留显示”）。
         bool isNewInLatestRound = false;   // 最新刷新中是否为新增。
         bool isExitedInLatestRound = false;// 最新刷新中是否为退出保留。
+        bool isKernelOnlyInLatestRound = false; // 最新刷新中是否仅内核枚举可见。
         std::uint32_t staticFillAttemptCount = 0; // 静态详情补齐尝试次数（含成功/失败）。
         std::uint32_t staticFillFailureCount = 0; // 静态详情连续失败次数（用于退避重试）。
     };
@@ -183,6 +185,11 @@ private:
         ks::process::ProcessEnumStrategy selectedStrategy{}; // 由下标映射的策略枚举。
         ks::process::ProcessEnumStrategy actualStrategy{};   // 实际执行策略（Auto 下可能回退）。
         bool detailModeEnabled = false;         // 本轮是否处于“详细信息视图”。
+        bool kernelCompareEnabled = false;      // 本轮是否启用内核进程对比。
+        bool kernelQuerySucceeded = false;      // 内核进程查询是否成功。
+        std::size_t kernelEnumeratedCount = 0;  // 内核枚举得到的进程数量。
+        std::size_t kernelOnlyCount = 0;        // 仅内核可见（疑似隐藏）进程数量。
+        std::string kernelQueryDetailText;      // 内核查询诊断文本（错误或统计）。
     };
 
 private:
@@ -305,6 +312,7 @@ private:
     static RefreshResult buildRefreshResult(
         int strategyIndex,
         bool detailModeEnabled,
+        bool queryKernelProcessList,
         int staticDetailFillBudget,
         std::uint64_t refreshTicket,
         int progressTaskPid,
@@ -331,6 +339,7 @@ private:
     QComboBox* m_viewModeCombo = nullptr;     // 监视视图/详细视图下拉框。
     QPushButton* m_startButton = nullptr;     // 开始监视按钮。
     QPushButton* m_pauseButton = nullptr;     // 暂停监视按钮。
+    QCheckBox* m_kernelCompareCheck = nullptr;// 刷新时是否额外请求内核进程列表并做差异对比。
     QLineEdit* m_processSearchLineEdit = nullptr; // 进程搜索框；用于按名称/PID/路径等关键词过滤当前列表。
     QLabel* m_refreshLabel = nullptr;         // 刷新间隔标签。
     QSlider* m_refreshSlider = nullptr;       // 刷新间隔滑块（秒）。

@@ -20,6 +20,109 @@ Environment:
 #define FILE_OPEN_REPARSE_POINT 0x00200000UL
 #endif
 
+#ifndef FILE_DISPOSITION_DELETE
+#define FILE_DISPOSITION_DELETE 0x00000001UL
+#endif
+
+#ifndef FILE_DISPOSITION_POSIX_SEMANTICS
+#define FILE_DISPOSITION_POSIX_SEMANTICS 0x00000002UL
+#endif
+
+#ifndef FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK
+#define FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK 0x00000004UL
+#endif
+
+#ifndef FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE
+#define FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE 0x00000010UL
+#endif
+
+// Use the documented value 64 for FileDispositionInformationEx to support
+// older WDK headers where the enum constant may be missing.
+#define KSWORD_FILE_DISPOSITION_INFORMATION_EX_CLASS_VALUE ((FILE_INFORMATION_CLASS)64)
+
+typedef struct _KSWORD_FILE_DISPOSITION_INFORMATION_EX
+{
+    ULONG Flags;
+} KSWORD_FILE_DISPOSITION_INFORMATION_EX, *PKSWORD_FILE_DISPOSITION_INFORMATION_EX;
+
+static BOOLEAN
+KswordARKDriverShouldRetryDeleteWithDispositionEx(
+    _In_ NTSTATUS deleteStatus,
+    _In_ BOOLEAN isDirectory
+    )
+/*++
+
+Routine Description:
+
+    Decide whether delete failure should trigger FileDispositionInformationEx
+    fallback. This fallback is file-only and targets common "in-use" failures.
+
+Arguments:
+
+    deleteStatus - First delete attempt status.
+    isDirectory - TRUE when target is directory.
+
+Return Value:
+
+    BOOLEAN
+
+--*/
+{
+    if (isDirectory) {
+        return FALSE;
+    }
+
+    switch (deleteStatus) {
+    case STATUS_ACCESS_DENIED:
+    case STATUS_SHARING_VIOLATION:
+    case STATUS_CANNOT_DELETE:
+    case STATUS_USER_MAPPED_FILE:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+static NTSTATUS
+KswordARKDriverDeleteFileWithDispositionEx(
+    _In_ HANDLE fileHandle
+    )
+/*++
+
+Routine Description:
+
+    Retry delete by FileDispositionInformationEx with stronger semantics:
+    POSIX delete + force image section check + ignore readonly attribute.
+
+Arguments:
+
+    fileHandle - Open file handle.
+
+Return Value:
+
+    NTSTATUS
+
+--*/
+{
+    KSWORD_FILE_DISPOSITION_INFORMATION_EX dispositionInformationEx;
+    IO_STATUS_BLOCK ioStatusBlock;
+
+    RtlZeroMemory(&dispositionInformationEx, sizeof(dispositionInformationEx));
+    dispositionInformationEx.Flags =
+        FILE_DISPOSITION_DELETE
+        | FILE_DISPOSITION_POSIX_SEMANTICS
+        | FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK
+        | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE;
+
+    RtlZeroMemory(&ioStatusBlock, sizeof(ioStatusBlock));
+    return ZwSetInformationFile(
+        fileHandle,
+        &ioStatusBlock,
+        &dispositionInformationEx,
+        (ULONG)sizeof(dispositionInformationEx),
+        KSWORD_FILE_DISPOSITION_INFORMATION_EX_CLASS_VALUE);
+}
+
 static NTSTATUS
 KswordARKDriverNormalizeReadOnlyAttribute(
     _In_ HANDLE fileHandle
@@ -109,6 +212,7 @@ Return Value:
     ACCESS_MASK desiredAccess;
     ULONG createOptions;
     NTSTATUS status;
+    NTSTATUS firstDeleteStatus = STATUS_SUCCESS;
 
     if (pathText == NULL || pathLengthChars == 0U) {
         return STATUS_INVALID_PARAMETER;
@@ -169,6 +273,24 @@ Return Value:
         &dispositionInformation,
         (ULONG)sizeof(dispositionInformation),
         FileDispositionInformation);
+    firstDeleteStatus = status;
+
+    if (!NT_SUCCESS(status) &&
+        KswordARKDriverShouldRetryDeleteWithDispositionEx(status, isDirectory)) {
+        const NTSTATUS fallbackStatus = KswordARKDriverDeleteFileWithDispositionEx(fileHandle);
+        if (NT_SUCCESS(fallbackStatus)) {
+            status = fallbackStatus;
+        }
+        else if (fallbackStatus != STATUS_INVALID_INFO_CLASS &&
+            fallbackStatus != STATUS_NOT_SUPPORTED &&
+            fallbackStatus != STATUS_INVALID_PARAMETER) {
+            // Return explicit fallback failure; keep first status for unsupported cases.
+            status = fallbackStatus;
+        }
+        else {
+            status = firstDeleteStatus;
+        }
+    }
 
     ZwClose(fileHandle);
     return status;

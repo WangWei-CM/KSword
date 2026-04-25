@@ -5,8 +5,9 @@
 // 作用说明：
 // 1) 提供“对象命名空间遍历”标签页（默认页）；
 // 2) 提供“原子表遍历”标签页；
-// 3) 保留旧版“NtQuery 信息”标签页到历史页；
-// 4) 全部耗时查询走后台线程，避免阻塞 UI 线程。
+// 3) 提供“SSDT 遍历”标签页；
+// 4) 保留旧版“NtQuery 信息”标签页到历史页；
+// 5) 全部耗时查询走后台线程，避免阻塞 UI 线程。
 // ============================================================
 
 #include "../Framework.h"
@@ -29,6 +30,7 @@ class QTabWidget;
 class QTreeWidget;
 class QVBoxLayout;
 class CodeEditorWidget;
+class CallbackInterceptController;
 
 // ============================================================
 // KernelObjectTypeEntry
@@ -108,10 +110,31 @@ struct KernelAtomEntry
 };
 
 // ============================================================
+// KernelSsdtEntry
+// 作用：
+// - 表示一条 SSDT 相关条目；
+// - 保存服务索引、Zw 导出地址、表项地址及详情。
+// ============================================================
+struct KernelSsdtEntry
+{
+    std::uint32_t serviceIndex = 0;      // serviceIndex：服务索引（仅在 indexResolved=true 时有效）。
+    std::uint32_t flags = 0;             // flags：驱动返回的标志位。
+    std::uint64_t zwRoutineAddress = 0;  // zwRoutineAddress：Zw* 导出例程地址。
+    std::uint64_t serviceRoutineAddress = 0; // serviceRoutineAddress：SSDT 表项解析出的服务例程地址。
+    std::uint64_t serviceTableBase = 0;  // serviceTableBase：驱动返回的服务表基址。
+    QString serviceNameText;             // serviceNameText：服务名称（Zw*）。
+    QString moduleNameText;              // moduleNameText：模块名。
+    QString statusText;                  // statusText：状态文本（索引解析/表项解析等）。
+    QString detailText;                  // detailText：详情文本。
+    bool indexResolved = false;          // indexResolved：是否成功从桩码提取服务索引。
+    bool querySucceeded = false;         // querySucceeded：该条目是否有效。
+};
+
+// ============================================================
 // KernelDock
 // 作用：
 // - 内核分析主控件；
-// - 管理对象命名空间/原子表/历史 NtQuery 三个页面；
+// - 管理对象命名空间/原子表/SSDT/历史 NtQuery/驱动回调页面；
 // - 管理异步刷新、筛选、详情联动与右键菜单操作。
 // ============================================================
 class KernelDock final : public QWidget
@@ -146,9 +169,22 @@ private:
     // - 作用：创建“历史 NtQuery 信息”页。
     void initializeNtQueryTab();
 
+    // initializeSsdtTab：
+    // - 作用：创建“SSDT 遍历”页。
+    void initializeSsdtTab();
+
+    // initializeCallbackInterceptTab：
+    // - 作用：创建“驱动回调”页签（规则组/规则编辑/导入导出/应用/状态）。
+    void initializeCallbackInterceptTab();
+
     // initializeConnections：
     // - 作用：绑定按钮、筛选框、表格联动与右键菜单。
     void initializeConnections();
+
+    // ensureTabInitialized：
+    // - 作用：按需初始化指定 Tab 的 UI 与首次数据加载。
+    // - 参数 tabIndex：顶层 Tab 索引。
+    void ensureTabInitialized(int tabIndex);
 
     // ==================== 异步刷新 ====================
     // refreshObjectNamespaceAsync：
@@ -162,6 +198,10 @@ private:
     // refreshNtQueryAsync：
     // - 作用：后台刷新历史 NtQuery 结果。
     void refreshNtQueryAsync();
+
+    // refreshSsdtAsync：
+    // - 作用：后台刷新 SSDT 遍历结果。
+    void refreshSsdtAsync();
 
     // ==================== 表格渲染 ====================
     // rebuildObjectNamespaceTable：
@@ -196,6 +236,11 @@ private:
     // - 作用：重建历史 NtQuery 结果表格。
     void rebuildNtQueryTable();
 
+    // rebuildSsdtTable：
+    // - 作用：根据筛选关键词重建 SSDT 结果表格。
+    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
+    void rebuildSsdtTable(const QString& filterKeyword);
+
     // ==================== 详情联动 ====================
     // showObjectNamespaceDetailByCurrentRow：
     // - 作用：根据当前选中行显示对象命名空间详情。
@@ -208,6 +253,10 @@ private:
     // showNtQueryDetailByCurrentRow：
     // - 作用：根据当前选中行显示 NtQuery 详情。
     void showNtQueryDetailByCurrentRow();
+
+    // showSsdtDetailByCurrentRow：
+    // - 作用：根据当前选中行显示 SSDT 详情。
+    void showSsdtDetailByCurrentRow();
 
     // ==================== 右键菜单 ====================
     // showObjectNamespaceContextMenu：
@@ -233,6 +282,12 @@ private:
     // - 返回：true=读取成功；false=无选中或越界。
     bool currentAtomSourceIndex(std::size_t& sourceIndexOut) const;
 
+    // currentSsdtSourceIndex：
+    // - 作用：读取 SSDT 表当前行映射到缓存向量的索引。
+    // - 传出 sourceIndexOut：缓存索引。
+    // - 返回：true=读取成功；false=无选中或越界。
+    bool currentSsdtSourceIndex(std::size_t& sourceIndexOut) const;
+
     // currentObjectNamespaceEntry：
     // - 作用：返回对象命名空间当前选中项。
     // - 返回：命中返回指针；否则 nullptr。
@@ -243,10 +298,25 @@ private:
     // - 返回：命中返回指针；否则 nullptr。
     const KernelAtomEntry* currentAtomEntry() const;
 
+    // currentSsdtEntry：
+    // - 作用：返回 SSDT 表当前选中项。
+    // - 返回：命中返回指针；否则 nullptr。
+    const KernelSsdtEntry* currentSsdtEntry() const;
+
 private:
     // ==================== 根级控件 ====================
     QVBoxLayout* m_rootLayout = nullptr; // m_rootLayout：KernelDock 根布局。
     QTabWidget* m_tabWidget = nullptr;   // m_tabWidget：顶层 Tab 容器。
+    int m_objectNamespaceTabIndex = -1;  // m_objectNamespaceTabIndex：对象命名空间页签索引。
+    int m_atomTabIndex = -1;             // m_atomTabIndex：原子表页签索引。
+    int m_ssdtTabIndex = -1;             // m_ssdtTabIndex：SSDT 页签索引。
+    int m_ntQueryTabIndex = -1;          // m_ntQueryTabIndex：历史 NtQuery 页签索引。
+    int m_callbackTabIndex = -1;         // m_callbackTabIndex：驱动回调页签索引。
+    bool m_objectNamespaceTabInitialized = false; // m_objectNamespaceTabInitialized：对象命名空间页是否已初始化。
+    bool m_atomTabInitialized = false;            // m_atomTabInitialized：原子表页是否已初始化。
+    bool m_ssdtTabInitialized = false;            // m_ssdtTabInitialized：SSDT 页是否已初始化。
+    bool m_ntQueryTabInitialized = false;         // m_ntQueryTabInitialized：历史 NtQuery 页是否已初始化。
+    bool m_callbackTabInitialized = false;        // m_callbackTabInitialized：驱动回调页是否已初始化。
 
     // ==================== 对象命名空间页 ====================
     QWidget* m_objectNamespacePage = nullptr;                  // m_objectNamespacePage：对象命名空间页容器。
@@ -278,13 +348,29 @@ private:
     QTableWidget* m_ntQueryTable = nullptr;            // m_ntQueryTable：历史 NtQuery 结果表。
     CodeEditorWidget* m_ntQueryDetailEditor = nullptr; // m_ntQueryDetailEditor：历史 NtQuery 详情编辑器（只读）。
 
+    // ==================== SSDT 页 ====================
+    QWidget* m_ssdtPage = nullptr;                     // m_ssdtPage：SSDT 页容器。
+    QVBoxLayout* m_ssdtLayout = nullptr;               // m_ssdtLayout：SSDT 页布局。
+    QHBoxLayout* m_ssdtToolLayout = nullptr;           // m_ssdtToolLayout：SSDT 工具栏布局。
+    QPushButton* m_refreshSsdtButton = nullptr;        // m_refreshSsdtButton：SSDT 刷新按钮。
+    QLineEdit* m_ssdtFilterEdit = nullptr;             // m_ssdtFilterEdit：SSDT 筛选输入框。
+    QLabel* m_ssdtStatusLabel = nullptr;               // m_ssdtStatusLabel：SSDT 状态文本。
+    QTableWidget* m_ssdtTable = nullptr;               // m_ssdtTable：SSDT 结果表。
+    CodeEditorWidget* m_ssdtDetailEditor = nullptr;    // m_ssdtDetailEditor：SSDT 详情编辑器（只读）。
+
+    // ==================== 驱动回调页 ====================
+    QWidget* m_callbackInterceptPage = nullptr;                     // m_callbackInterceptPage：驱动回调页容器。
+    CallbackInterceptController* m_callbackInterceptController = nullptr; // m_callbackInterceptController：驱动回调页控制器。
+
     // ==================== 数据缓存 ====================
     std::vector<KernelObjectNamespaceEntry> m_objectNamespaceRows; // m_objectNamespaceRows：对象命名空间快照行。
     std::vector<KernelAtomEntry> m_atomRows;                       // m_atomRows：原子快照行。
     std::vector<KernelNtQueryResultEntry> m_ntQueryResults;        // m_ntQueryResults：历史 NtQuery 快照行。
+    std::vector<KernelSsdtEntry> m_ssdtRows;                       // m_ssdtRows：SSDT 快照行。
 
     // ==================== 刷新状态 ====================
     std::atomic_bool m_objectNamespaceRefreshRunning{ false }; // m_objectNamespaceRefreshRunning：对象命名空间刷新状态。
     std::atomic_bool m_atomRefreshRunning{ false };            // m_atomRefreshRunning：原子表刷新状态。
     std::atomic_bool m_ntQueryRefreshRunning{ false };         // m_ntQueryRefreshRunning：历史 NtQuery 刷新状态。
+    std::atomic_bool m_ssdtRefreshRunning{ false };            // m_ssdtRefreshRunning：SSDT 刷新状态。
 };

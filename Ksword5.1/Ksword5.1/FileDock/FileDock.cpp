@@ -1,5 +1,6 @@
-#include "FileDock.h"
+﻿#include "FileDock.h"
 #include "FilePropertyPeAnalyzer.h"
+#include "FileHandleUsageScanner.h"
 
 // ============================================================
 // FileDock.cpp
@@ -13,6 +14,7 @@
 #include "../UI/HexEditorWidget.h"
 #include "../../../shared/KswordArkLogProtocol.h"
 #include "../../../shared/driver/KswordArkFileIoctl.h"
+#include "../../../shared/driver/KswordArkProcessIoctl.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -69,6 +71,7 @@
 #include <cctype>
 #include <cmath>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -129,6 +132,48 @@ namespace
             return QStringLiteral("\\??\\UNC\\") + nativePathText.mid(2);
         }
         return QStringLiteral("\\??\\") + nativePathText;
+    }
+
+    // buildLiteralNameFilterPattern：
+    // - 作用：把关键字转成 QFileSystemModel::setNameFilters 可用的“包含匹配”通配符；
+    // - 说明：对 *, ?, [, ] 做转义，避免用户输入被当作通配符语法。
+    QString buildLiteralNameFilterPattern(const QString& keywordText)
+    {
+        QString escapedKeyword = keywordText;
+        escapedKeyword.replace(QStringLiteral("["), QStringLiteral("[[]"));
+        escapedKeyword.replace(QStringLiteral("]"), QStringLiteral("[]]"));
+        escapedKeyword.replace(QStringLiteral("*"), QStringLiteral("[*]"));
+        escapedKeyword.replace(QStringLiteral("?"), QStringLiteral("[?]"));
+        return QStringLiteral("*%1*").arg(escapedKeyword);
+    }
+
+    // queryShortPathText：
+    // - 作用：查询目标路径对应的 Win32 短路径（8.3）；
+    // - 失败时返回空字符串，调用方可决定是否走原名兜底。
+    QString queryShortPathText(const QString& path)
+    {
+        const std::wstring nativePathText = QDir::toNativeSeparators(path).toStdWString();
+        if (nativePathText.empty())
+        {
+            return QString();
+        }
+
+        const DWORD requiredChars = ::GetShortPathNameW(nativePathText.c_str(), nullptr, 0);
+        if (requiredChars == 0)
+        {
+            return QString();
+        }
+
+        QVector<wchar_t> shortPathBuffer(static_cast<int>(requiredChars) + 2, L'\0');
+        const DWORD copiedChars = ::GetShortPathNameW(
+            nativePathText.c_str(),
+            shortPathBuffer.data(),
+            static_cast<DWORD>(shortPathBuffer.size()));
+        if (copiedChars == 0 || copiedChars >= static_cast<DWORD>(shortPathBuffer.size()))
+        {
+            return QString();
+        }
+        return QString::fromWCharArray(shortPathBuffer.data(), static_cast<int>(copiedChars));
     }
 
     // openKswordArkDriverHandle：
@@ -245,6 +290,137 @@ namespace
         }
 
         return ioctlOk != FALSE;
+    }
+
+    // terminateProcessByR0Driver：
+    // - 作用：复用同一个驱动句柄，向 R0 发送结束进程 IOCTL；
+    // - 返回值：true=驱动返回成功，false=驱动返回失败或句柄无效。
+    bool terminateProcessByR0Driver(
+        const HANDLE driverHandle,
+        const std::uint32_t processId,
+        std::string* const detailTextOut)
+    {
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+
+        if (driverHandle == nullptr || driverHandle == INVALID_HANDLE_VALUE)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = "invalid driver handle";
+            }
+            return false;
+        }
+
+        if (processId == 0U || processId <= 4U)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = "invalid target pid";
+            }
+            return false;
+        }
+
+        KSWORD_ARK_TERMINATE_PROCESS_REQUEST request{};
+        request.processId = processId;
+        request.exitStatus = static_cast<long>(0xC0000005u);
+
+        DWORD bytesReturned = 0;
+        const BOOL ioctlOk = ::DeviceIoControl(
+            driverHandle,
+            IOCTL_KSWORD_ARK_TERMINATE_PROCESS,
+            &request,
+            static_cast<DWORD>(sizeof(request)),
+            nullptr,
+            0,
+            &bytesReturned,
+            nullptr);
+        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
+
+        if (detailTextOut != nullptr)
+        {
+            std::ostringstream oss;
+            oss << "pid=" << processId
+                << ", bytesReturned=" << bytesReturned;
+            if (ioctlOk)
+            {
+                oss << ", ioctl=ok";
+            }
+            else
+            {
+                oss << ", ioctl=fail, error=" << ioctlError;
+            }
+            *detailTextOut = oss.str();
+        }
+
+        return ioctlOk != FALSE;
+    }
+
+    // collectOccupyProcessIdsByPath：
+    // - 作用：调用现有占用扫描器，提取“占用目标路径”的 PID 集合；
+    // - 说明：这里运行在 R3，结果用于后续请求 R0 结束占用进程。
+    std::vector<std::uint32_t> collectOccupyProcessIdsByPath(
+        const QString& path,
+        QStringList* const detailTextListOut)
+    {
+        if (detailTextListOut != nullptr)
+        {
+            detailTextListOut->clear();
+        }
+
+        const std::vector<QString> scanTargets{ path };
+        const filedock::handleusage::HandleUsageScanResult scanResult =
+            filedock::handleusage::scanHandleUsageByPaths(scanTargets, 0);
+
+        std::set<std::uint32_t> processIdSet;
+        QStringList processPreviewList;
+        constexpr std::size_t MaxPreviewCount = 6U;
+        for (const filedock::handleusage::HandleUsageEntry& entry : scanResult.entries)
+        {
+            if (entry.processId == 0U || entry.processId <= 4U)
+            {
+                continue;
+            }
+
+            const std::uint32_t processId = entry.processId;
+            const auto insertResult = processIdSet.insert(processId);
+            if (!insertResult.second)
+            {
+                continue;
+            }
+
+            if (processPreviewList.size() < static_cast<int>(MaxPreviewCount))
+            {
+                const QString processName =
+                    entry.processName.trimmed().isEmpty()
+                    ? QStringLiteral("Unknown")
+                    : entry.processName.trimmed();
+                processPreviewList.push_back(
+                    QStringLiteral("%1(%2)").arg(processName).arg(processId));
+            }
+        }
+
+        if (detailTextListOut != nullptr)
+        {
+            const QString diagnosticText = scanResult.diagnosticText.trimmed().isEmpty()
+                ? QStringLiteral("-")
+                : scanResult.diagnosticText.simplified();
+            detailTextListOut->push_back(
+                QStringLiteral("occupyScan matched=%1, diagnostic=%2")
+                .arg(scanResult.matchedHandleCount)
+                .arg(diagnosticText));
+
+            if (!processPreviewList.isEmpty())
+            {
+                detailTextListOut->push_back(
+                    QStringLiteral("occupyPidPreview=%1")
+                    .arg(processPreviewList.join(QStringLiteral(", "))));
+            }
+        }
+
+        return std::vector<std::uint32_t>(processIdSet.begin(), processIdSet.end());
     }
 
     // appendDriverDeleteTargetsPostOrder：
@@ -1370,6 +1546,8 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     panel.fsModel->setReadOnly(false);
     panel.fsModel->setResolveSymlinks(true);
     panel.fsModel->setFilter(QDir::AllEntries | QDir::NoDotAndDotDot);
+    // 关闭“仅灰显不隐藏”行为，确保名称过滤严格只显示匹配项。
+    panel.fsModel->setNameFilterDisables(false);
 
     panel.proxyModel = new QSortFilterProxyModel(panel.rootWidget);
     panel.proxyModel->setSourceModel(panel.fsModel);
@@ -2206,14 +2384,16 @@ void FileDock::applyPanelFilterAndSort(FilePanelWidgets& panel)
 
         if (filterText.isEmpty())
         {
-            panel.proxyModel->setFilterRegularExpression(QRegularExpression());
+            panel.fsModel->setNameFilters(QStringList());
         }
         else
         {
-            const QString pattern = QStringLiteral(".*%1.*").arg(QRegularExpression::escape(filterText));
-            panel.proxyModel->setFilterRegularExpression(
-                QRegularExpression(pattern, QRegularExpression::CaseInsensitiveOption));
+            panel.fsModel->setNameFilters(QStringList{
+                buildLiteralNameFilterPattern(filterText)
+                });
         }
+        // Windows API 模式改由 QFileSystemModel 执行名称过滤，代理层只保留排序职责。
+        panel.proxyModel->setFilterRegularExpression(QRegularExpression());
 
         int sortColumn = 0;
         switch (panel.sortModeCombo->currentIndex())
@@ -3264,6 +3444,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* openAction = menu.addAction(QIcon(":/Icon/process_start.svg"), QStringLiteral("打开/运行"));
     QAction* editAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("编辑（文本）"));
     QAction* copyPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制路径"));
+    QAction* copyKernelPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制内核模式地址"));
+    QAction* copyShortNameAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制短文件名"));
     menu.addSeparator();
     QAction* copyAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制"));
     QAction* cutAction = menu.addAction(QIcon(":/Icon/process_suspend.svg"), QStringLiteral("剪切"));
@@ -3294,6 +3476,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     openAction->setEnabled(hasSelection);
     editAction->setEnabled(hasAnyFile);
     copyPathAction->setEnabled(hasSelection);
+    copyKernelPathAction->setEnabled(hasSelection);
+    copyShortNameAction->setEnabled(hasSelection);
     copyAction->setEnabled(hasSelection);
     cutAction->setEnabled(hasSelection);
     pasteAction->setEnabled(!m_clipboardPaths.empty());
@@ -3387,6 +3571,16 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     if (selectedAction == copyPathAction)
     {
         copySelectedItemPath(panel);
+        return;
+    }
+    if (selectedAction == copyKernelPathAction)
+    {
+        copySelectedItemKernelPath(panel);
+        return;
+    }
+    if (selectedAction == copyShortNameAction)
+    {
+        copySelectedItemShortName(panel);
         return;
     }
     if (selectedAction == copyAction)
@@ -3863,6 +4057,86 @@ void FileDock::copySelectedItemPath(FilePanelWidgets& panel)
         << panel.panelNameText.toStdString()
         << ", count="
         << paths.size()
+        << eol;
+}
+
+void FileDock::copySelectedItemKernelPath(FilePanelWidgets& panel)
+{
+    const std::vector<QString> paths = selectedPaths(panel);
+    if (paths.empty())
+    {
+        return;
+    }
+
+    QStringList lines;
+    lines.reserve(static_cast<int>(paths.size()));
+    for (const QString& path : paths)
+    {
+        const QString kernelPath = buildDriverNtPath(path);
+        lines << (kernelPath.isEmpty() ? QDir::toNativeSeparators(path) : kernelPath);
+    }
+    QApplication::clipboard()->setText(lines.join('\n'));
+
+    kLogEvent event;
+    info << event
+        << "[FileDock] 复制内核模式地址到剪贴板, panel="
+        << panel.panelNameText.toStdString()
+        << ", count="
+        << paths.size()
+        << eol;
+}
+
+void FileDock::copySelectedItemShortName(FilePanelWidgets& panel)
+{
+    const std::vector<QString> paths = selectedPaths(panel);
+    if (paths.empty())
+    {
+        return;
+    }
+
+    QStringList shortNameLines;
+    shortNameLines.reserve(static_cast<int>(paths.size()));
+
+    int shortNameHitCount = 0;
+    int fallbackCount = 0;
+    for (const QString& path : paths)
+    {
+        const QString shortPathText = queryShortPathText(path);
+        QString shortNameText;
+        if (!shortPathText.isEmpty())
+        {
+            shortNameText = QFileInfo(shortPathText).fileName().trimmed();
+            if (shortNameText.isEmpty())
+            {
+                shortNameText = QDir::toNativeSeparators(shortPathText);
+            }
+            shortNameHitCount += 1;
+        }
+        else
+        {
+            shortNameText = QFileInfo(path).fileName().trimmed();
+            if (shortNameText.isEmpty())
+            {
+                shortNameText = QDir::toNativeSeparators(path);
+            }
+            fallbackCount += 1;
+        }
+
+        shortNameLines << shortNameText;
+    }
+
+    QApplication::clipboard()->setText(shortNameLines.join('\n'));
+
+    kLogEvent event;
+    info << event
+        << "[FileDock] 复制短文件名到剪贴板, panel="
+        << panel.panelNameText.toStdString()
+        << ", count="
+        << paths.size()
+        << ", shortNameHitCount="
+        << shortNameHitCount
+        << ", fallbackCount="
+        << fallbackCount
         << eol;
 }
 
@@ -4347,17 +4621,97 @@ void FileDock::deleteSelectedItemByDriver(FilePanelWidgets& panel)
     kPro.set(progressPid, "驱动删除开始", 0, 5.0f);
 
     QStringList deleteErrors = prepareErrors;
+    std::set<std::uint32_t> terminatedProcessCache;
     const std::size_t totalTargetCount = deleteTargets.size();
     for (std::size_t index = 0; index < totalTargetCount; ++index)
     {
         const DriverDeleteTarget& target = deleteTargets[index];
         std::string detailText;
-        const bool deleteOk = deletePathByR0Driver(
+        bool deleteOk = deletePathByR0Driver(
             driverHandle,
             target.path,
             target.isDirectory,
             &detailText);
-        if (!deleteOk)
+        if (!deleteOk && !target.isDirectory)
+        {
+            QStringList fallbackDetails;
+            const std::vector<std::uint32_t> occupyPids =
+                collectOccupyProcessIdsByPath(target.path, &fallbackDetails);
+
+            std::size_t terminateAttemptCount = 0U;
+            std::size_t terminateSuccessCount = 0U;
+            std::size_t terminateSkipCount = 0U;
+            for (const std::uint32_t processId : occupyPids)
+            {
+                if (terminatedProcessCache.find(processId) != terminatedProcessCache.end())
+                {
+                    terminateSkipCount += 1U;
+                    continue;
+                }
+
+                terminateAttemptCount += 1U;
+                std::string terminateDetailText;
+                const bool terminateOk = terminateProcessByR0Driver(
+                    driverHandle,
+                    processId,
+                    &terminateDetailText);
+                if (terminateOk)
+                {
+                    terminateSuccessCount += 1U;
+                    terminatedProcessCache.insert(processId);
+                }
+
+                fallbackDetails.push_back(
+                    QStringLiteral("terminate pid=%1 -> %2 (%3)")
+                    .arg(processId)
+                    .arg(terminateOk ? QStringLiteral("ok") : QStringLiteral("fail"))
+                    .arg(QString::fromStdString(terminateDetailText)));
+            }
+
+            std::string retryDetailText;
+            if (terminateSuccessCount > 0U)
+            {
+                deleteOk = deletePathByR0Driver(
+                    driverHandle,
+                    target.path,
+                    target.isDirectory,
+                    &retryDetailText);
+            }
+
+            if (deleteOk)
+            {
+                kLogEvent forceEvent;
+                info << forceEvent
+                    << "[FileDock] 驱动删除重试成功, path="
+                    << QDir::toNativeSeparators(target.path).toStdString()
+                    << ", terminated="
+                    << terminateSuccessCount
+                    << ", skipped="
+                    << terminateSkipCount
+                    << eol;
+            }
+            else
+            {
+                QStringList errorLines;
+                errorLines.push_back(QString::fromStdString(detailText));
+                errorLines.push_back(
+                    QStringLiteral("occupyPidCount=%1, terminateAttempt=%2, terminateSuccess=%3, terminateSkipped=%4")
+                    .arg(occupyPids.size())
+                    .arg(terminateAttemptCount)
+                    .arg(terminateSuccessCount)
+                    .arg(terminateSkipCount));
+                if (!retryDetailText.empty())
+                {
+                    errorLines.push_back(
+                        QStringLiteral("retryDelete=%1")
+                        .arg(QString::fromStdString(retryDetailText)));
+                }
+                errorLines.append(fallbackDetails);
+
+                deleteErrors.push_back(errorLines.join(QStringLiteral(" | ")));
+            }
+        }
+        else if (!deleteOk)
         {
             deleteErrors.push_back(QString::fromStdString(detailText));
         }

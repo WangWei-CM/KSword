@@ -206,6 +206,14 @@ private:
     // - 作用：复制选中项完整路径到剪贴板。
     void copySelectedItemPath(FilePanelWidgets& panel);
 
+    // copySelectedItemKernelPath：
+    // - 作用：复制选中项的内核命名空间路径（\??\...）到剪贴板。
+    void copySelectedItemKernelPath(FilePanelWidgets& panel);
+
+    // copySelectedItemShortName：
+    // - 作用：复制选中项短文件名（8.3 名称）到剪贴板。
+    void copySelectedItemShortName(FilePanelWidgets& panel);
+
     // copySelectedItems：
     // - 作用：复制选中项到内部剪贴板缓存（等待粘贴）。
     void copySelectedItems(FilePanelWidgets& panel);

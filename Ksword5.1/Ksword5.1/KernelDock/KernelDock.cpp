@@ -4,7 +4,7 @@
 // ============================================================
 // KernelDock.cpp
 // 作用说明：
-// 1) 实现内核 Dock 的三页 UI（对象命名空间 / 原子表 / 历史 NtQuery）；
+// 1) 实现内核 Dock 的顶层页签 UI（对象命名空间 / 原子表 / SSDT / 历史 NtQuery / 驱动回调）；
 // 2) 实现异步刷新、筛选、详情联动与右键菜单；
 // 3) 具体底层枚举逻辑放在 Worker 文件，当前文件仅做界面和交互编排。
 // ============================================================
@@ -22,6 +22,7 @@
 #include <QSplitter>
 #include <QTableWidget>
 #include <QTabWidget>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -120,15 +121,15 @@ KernelDock::KernelDock(QWidget* parent)
     : QWidget(parent)
 {
     kLogEvent initEvent;
-    info << initEvent << "[KernelDock] 构造开始，准备初始化三页内核视图。" << eol;
+    info << initEvent << "[KernelDock] 构造开始，准备初始化五页内核视图。" << eol;
 
     initializeUi();
     initializeConnections();
 
-    // 默认先刷新新功能页，再刷新历史页。
-    refreshObjectNamespaceAsync();
-    refreshAtomTableAsync();
-    refreshNtQueryAsync();
+    // 首次延迟加载当前页，避免切到内核 Dock 时同步初始化全部页签造成卡顿。
+    QTimer::singleShot(0, this, [this]() {
+        ensureTabInitialized(m_tabWidget != nullptr ? m_tabWidget->currentIndex() : -1);
+    });
 
     info << initEvent << "[KernelDock] 构造完成。" << eol;
 }
@@ -142,16 +143,52 @@ void KernelDock::initializeUi()
     m_tabWidget = new QTabWidget(this);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
-    initializeObjectNamespaceTab();
-    initializeAtomTableTab();
-    initializeNtQueryTab();
+    m_objectNamespacePage = new QWidget(m_tabWidget);
+    m_atomPage = new QWidget(m_tabWidget);
+    m_ssdtPage = new QWidget(m_tabWidget);
+    m_ntQueryPage = new QWidget(m_tabWidget);
+    m_callbackInterceptPage = new QWidget(m_tabWidget);
 
-    m_tabWidget->setCurrentWidget(m_objectNamespacePage);
+    m_objectNamespaceTabIndex = m_tabWidget->addTab(
+        m_objectNamespacePage,
+        QIcon(":/Icon/process_tree.svg"),
+        QStringLiteral("对象命名空间"));
+    m_tabWidget->setTabToolTip(m_objectNamespaceTabIndex, QStringLiteral("对象管理器命名空间遍历（默认页）"));
+
+    m_atomTabIndex = m_tabWidget->addTab(
+        m_atomPage,
+        QIcon(":/Icon/process_threads.svg"),
+        QStringLiteral("原子表遍历"));
+    m_tabWidget->setTabToolTip(m_atomTabIndex, QStringLiteral("遍历全局原子范围并提供校验操作"));
+
+    m_ntQueryTabIndex = m_tabWidget->addTab(
+        m_ntQueryPage,
+        QIcon(":/Icon/process_details.svg"),
+        QStringLiteral("历史NtQuery"));
+    m_tabWidget->setTabToolTip(m_ntQueryTabIndex, QStringLiteral("旧版内核 NtQuery 信息页"));
+
+    m_ssdtTabIndex = m_tabWidget->addTab(
+        m_ssdtPage,
+        QIcon(":/Icon/process_list.svg"),
+        QStringLiteral("SSDT遍历"));
+    m_tabWidget->setTabToolTip(m_ssdtTabIndex, QStringLiteral("驱动侧 SSDT 服务索引遍历结果"));
+
+    m_callbackTabIndex = m_tabWidget->addTab(
+        m_callbackInterceptPage,
+        QIcon(":/Icon/process_shield.svg"),
+        QStringLiteral("驱动回调"));
+    m_tabWidget->setTabToolTip(m_callbackTabIndex, QStringLiteral("驱动回调拦截规则管理与询问事件处理"));
+
+    m_tabWidget->setCurrentIndex(m_objectNamespaceTabIndex);
 }
 
 void KernelDock::initializeObjectNamespaceTab()
 {
-    m_objectNamespacePage = new QWidget(m_tabWidget);
+    if (m_objectNamespacePage == nullptr || m_objectNamespaceLayout != nullptr)
+    {
+        return;
+    }
+
     m_objectNamespaceLayout = new QVBoxLayout(m_objectNamespacePage);
     m_objectNamespaceLayout->setContentsMargins(4, 4, 4, 4);
     m_objectNamespaceLayout->setSpacing(6);
@@ -232,16 +269,28 @@ void KernelDock::initializeObjectNamespaceTab()
     verticalSplitter->setStretchFactor(0, 4);
     verticalSplitter->setStretchFactor(1, 2);
 
-    const int objectNamespaceTabIndex = m_tabWidget->addTab(
-        m_objectNamespacePage,
-        QIcon(":/Icon/process_tree.svg"),
-        QStringLiteral("对象命名空间"));
-    m_tabWidget->setTabToolTip(objectNamespaceTabIndex, QStringLiteral("对象管理器命名空间遍历（默认页）"));
+    // 对象命名空间页连接：刷新、筛选、详情联动、右键菜单。
+    connect(m_refreshObjectNamespaceButton, &QPushButton::clicked, this, [this]() {
+        refreshObjectNamespaceAsync();
+    });
+    connect(m_objectNamespaceFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
+        rebuildObjectNamespaceTable(filterText.trimmed());
+    });
+    connect(m_objectNamespaceTree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem*, QTreeWidgetItem*) {
+        showObjectNamespaceDetailByCurrentRow();
+    });
+    connect(m_objectNamespaceTree, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        showObjectNamespaceContextMenu(localPosition);
+    });
 }
 
 void KernelDock::initializeAtomTableTab()
 {
-    m_atomPage = new QWidget(m_tabWidget);
+    if (m_atomPage == nullptr || m_atomLayout != nullptr)
+    {
+        return;
+    }
+
     m_atomLayout = new QVBoxLayout(m_atomPage);
     m_atomLayout->setContentsMargins(4, 4, 4, 4);
     m_atomLayout->setSpacing(6);
@@ -304,16 +353,28 @@ void KernelDock::initializeAtomTableTab()
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
 
-    const int atomTabIndex = m_tabWidget->addTab(
-        m_atomPage,
-        QIcon(":/Icon/process_threads.svg"),
-        QStringLiteral("原子表遍历"));
-    m_tabWidget->setTabToolTip(atomTabIndex, QStringLiteral("遍历全局原子范围并提供校验操作"));
+    // 原子表页连接：刷新、筛选、详情联动、右键菜单。
+    connect(m_refreshAtomButton, &QPushButton::clicked, this, [this]() {
+        refreshAtomTableAsync();
+    });
+    connect(m_atomFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
+        rebuildAtomTable(filterText.trimmed());
+    });
+    connect(m_atomTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+        showAtomDetailByCurrentRow();
+    });
+    connect(m_atomTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        showAtomContextMenu(localPosition);
+    });
 }
 
 void KernelDock::initializeNtQueryTab()
 {
-    m_ntQueryPage = new QWidget(m_tabWidget);
+    if (m_ntQueryPage == nullptr || m_ntQueryLayout != nullptr)
+    {
+        return;
+    }
+
     m_ntQueryLayout = new QVBoxLayout(m_ntQueryPage);
     m_ntQueryLayout->setContentsMargins(4, 4, 4, 4);
     m_ntQueryLayout->setSpacing(6);
@@ -364,43 +425,6 @@ void KernelDock::initializeNtQueryTab()
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
 
-    const int ntQueryTabIndex = m_tabWidget->addTab(
-        m_ntQueryPage,
-        QIcon(":/Icon/process_details.svg"),
-        QStringLiteral("历史NtQuery"));
-    m_tabWidget->setTabToolTip(ntQueryTabIndex, QStringLiteral("旧版内核 NtQuery 信息页"));
-}
-
-void KernelDock::initializeConnections()
-{
-    // 对象命名空间页连接：刷新、筛选、详情联动、右键菜单。
-    connect(m_refreshObjectNamespaceButton, &QPushButton::clicked, this, [this]() {
-        refreshObjectNamespaceAsync();
-    });
-    connect(m_objectNamespaceFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
-        rebuildObjectNamespaceTable(filterText.trimmed());
-    });
-    connect(m_objectNamespaceTree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem*, QTreeWidgetItem*) {
-        showObjectNamespaceDetailByCurrentRow();
-    });
-    connect(m_objectNamespaceTree, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
-        showObjectNamespaceContextMenu(localPosition);
-    });
-
-    // 原子表页连接：刷新、筛选、详情联动、右键菜单。
-    connect(m_refreshAtomButton, &QPushButton::clicked, this, [this]() {
-        refreshAtomTableAsync();
-    });
-    connect(m_atomFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
-        rebuildAtomTable(filterText.trimmed());
-    });
-    connect(m_atomTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
-        showAtomDetailByCurrentRow();
-    });
-    connect(m_atomTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
-        showAtomContextMenu(localPosition);
-    });
-
     // 历史 NtQuery 页连接：刷新与详情联动。
     connect(m_refreshNtQueryButton, &QPushButton::clicked, this, [this]() {
         refreshNtQueryAsync();
@@ -408,5 +432,54 @@ void KernelDock::initializeConnections()
     connect(m_ntQueryTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showNtQueryDetailByCurrentRow();
     });
+}
+
+void KernelDock::initializeConnections()
+{
+    // 顶层页签切换：按需初始化对应页面并触发首轮数据加载。
+    connect(m_tabWidget, &QTabWidget::currentChanged, this, [this](const int tabIndex) {
+        ensureTabInitialized(tabIndex);
+    });
+}
+
+void KernelDock::ensureTabInitialized(const int tabIndex)
+{
+    if (tabIndex == m_objectNamespaceTabIndex && !m_objectNamespaceTabInitialized)
+    {
+        initializeObjectNamespaceTab();
+        m_objectNamespaceTabInitialized = true;
+        refreshObjectNamespaceAsync();
+        return;
+    }
+
+    if (tabIndex == m_atomTabIndex && !m_atomTabInitialized)
+    {
+        initializeAtomTableTab();
+        m_atomTabInitialized = true;
+        refreshAtomTableAsync();
+        return;
+    }
+
+    if (tabIndex == m_ntQueryTabIndex && !m_ntQueryTabInitialized)
+    {
+        initializeNtQueryTab();
+        m_ntQueryTabInitialized = true;
+        refreshNtQueryAsync();
+        return;
+    }
+
+    if (tabIndex == m_ssdtTabIndex && !m_ssdtTabInitialized)
+    {
+        initializeSsdtTab();
+        m_ssdtTabInitialized = true;
+        refreshSsdtAsync();
+        return;
+    }
+
+    if (tabIndex == m_callbackTabIndex && !m_callbackTabInitialized)
+    {
+        initializeCallbackInterceptTab();
+        m_callbackTabInitialized = true;
+    }
 }
 

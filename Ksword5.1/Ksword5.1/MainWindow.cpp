@@ -23,6 +23,7 @@
 #include <QProcess>
 #include <QToolTip>
 #include <QStyleHints>
+#include <QEvent>
 #pragma warning(disable: 4996)
 #include "UI/UI.css/UI_css.h"
 #include "Framework.h"
@@ -30,6 +31,7 @@
 #include "Framework/ProgressDockWidget.h"
 #include "Framework/CustomTitleBar.h"
 #include "Framework/ThemedMessageBox.h"
+#include "KernelDock/KernelDock.CallbackPromptManager.h"
 #include "UI/CodeEditorWidget.h"
 #include "theme.h"
 #include "../../shared/KswordArkLogProtocol.h"
@@ -54,6 +56,71 @@
 
 namespace
 {
+    // GlobalContextMenuThemeFilter 作用：
+    // - 在应用层拦截所有 QMenu 的显示/样式变化事件；
+    // - 对“未显式设置样式”的菜单自动套用统一主题样式，避免遗漏单点 setStyleSheet。
+    class GlobalContextMenuThemeFilter final : public QObject
+    {
+    public:
+        explicit GlobalContextMenuThemeFilter(QObject* parent = nullptr)
+            : QObject(parent)
+        {
+        }
+
+    protected:
+        bool eventFilter(QObject* watchedObject, QEvent* eventObject) override
+        {
+            if (watchedObject == nullptr || eventObject == nullptr)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            const QEvent::Type eventType = eventObject->type();
+            if (eventType != QEvent::Show)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            QMenu* menuWidget = qobject_cast<QMenu*>(watchedObject);
+            if (menuWidget == nullptr)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            // 仅自动处理“未显式设置样式”的菜单；已手工定制的菜单保持原样。
+            // 对自动处理过的菜单，每次显示都刷新一次，保证深浅色切换后立即生效。
+            const bool autoThemedByKsword =
+                menuWidget->property("ksword_auto_context_menu_themed").toBool();
+            const bool noExplicitMenuStyle = menuWidget->styleSheet().trimmed().isEmpty();
+            if (noExplicitMenuStyle || autoThemedByKsword)
+            {
+                menuWidget->setStyleSheet(KswordTheme::ContextMenuStyle());
+                menuWidget->setProperty("ksword_auto_context_menu_themed", true);
+            }
+
+            return QObject::eventFilter(watchedObject, eventObject);
+        }
+    };
+
+    // ensureGlobalContextMenuThemeFilterInstalled 作用：
+    // - 安装一次应用级 QMenu 主题过滤器；
+    // - 让所有后续创建的右键菜单自动获得深浅色背景兜底。
+    void ensureGlobalContextMenuThemeFilterInstalled()
+    {
+        QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
+        if (appInstance == nullptr)
+        {
+            return;
+        }
+
+        static GlobalContextMenuThemeFilter* contextMenuThemeFilter = nullptr;
+        if (contextMenuThemeFilter == nullptr)
+        {
+            contextMenuThemeFilter = new GlobalContextMenuThemeFilter(appInstance);
+            appInstance->installEventFilter(contextMenuThemeFilter);
+        }
+    }
+
     // kTooltipStyleBeginMarker / kTooltipStyleEndMarker 作用：
     // - 在 QApplication 样式表中标记“Tooltip 主题片段”的起止位置；
     // - 便于主题切换时精准替换旧 Tooltip 样式，避免重复拼接。
@@ -730,6 +797,11 @@ MainWindow::MainWindow(
     : QMainWindow(parent)
     , m_startupProgressCallback(startupProgressCallback)
 {
+    // 安装全局 QMenu 主题过滤器：
+    // - 统一兜底所有右键菜单背景；
+    // - 避免后续新增菜单遗漏 setStyleSheet 导致浅色模式黑底。
+    ensureGlobalContextMenuThemeFilterInstalled();
+
     // 记录主窗口启动日志，便于验证日志系统与 UI 联动是否生效。
     // 注意：使用 kLogEvent，避免与 QObject::event 命名冲突。
     kLogEvent startupEvent;
@@ -831,6 +903,12 @@ MainWindow::MainWindow(
     initPrivilegeStatusButtons();
     startR0DriverLogPoller();
 
+    if (CallbackPromptManager* callbackPromptManager = CallbackPromptManager::ensureGlobalManager(this))
+    {
+        callbackPromptManager->setHostWindow(this);
+        callbackPromptManager->start();
+    }
+
     // 初始化Dock Widgets
     reportStartupProgress(48, QStringLiteral("正在创建页面组件..."));
     initDockWidgets();
@@ -855,6 +933,7 @@ MainWindow::MainWindow(
 
 MainWindow::~MainWindow()
 {
+    CallbackPromptManager::shutdownGlobalManager();
     stopR0DriverLogPoller();
     // ADS会自动管理内存，无需手动删除
 }
@@ -886,6 +965,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
         m_privilegeStatusTimer->stop();
     }
     stopR0DriverLogPoller();
+    CallbackPromptManager::shutdownGlobalManager();
 
     // 关闭窗口时自动停止 R0 驱动：
     // - 先静默查询服务状态；

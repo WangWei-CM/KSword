@@ -12,6 +12,8 @@
 #include "ark_queue.h"
 #include "ark_process.h"
 #include "ark_log.h"
+#include "ark_callback.h"
+#include "ark_kernel.h"
 #include "Trace.h"
 
 EXTERN_C_START

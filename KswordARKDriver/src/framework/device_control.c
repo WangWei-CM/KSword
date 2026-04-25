@@ -112,6 +112,13 @@ Return Value:
         return status;
     }
 
+    status = KswordARKCallbackInitialize(device);
+    if (!NT_SUCCESS(status)) {
+        TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "KswordARKCallbackInitialize failed %!STATUS!", status);
+        WdfObjectDelete(device);
+        return status;
+    }
+
     status = KswordARKDriverEnqueueLogFrame(device, "Info", "KswordARK driver started.");
     if (!NT_SUCCESS(status)) {
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "KswordARKDriverEnqueueLogFrame(startup) failed %!STATUS!", status);

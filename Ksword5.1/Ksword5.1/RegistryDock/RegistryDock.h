@@ -99,6 +99,12 @@ private:
     void deleteSelectedObject();
     void editSelectedValue();
     void copyCurrentPathToClipboard();
+    // copyCurrentKernelPathToClipboard：
+    // - 作用：把当前键路径转换为 \REGISTRY\... 后写入剪贴板。
+    void copyCurrentKernelPathToClipboard();
+    // copySelectedValueKernelPathToClipboard：
+    // - 作用：把当前值（或当前键）路径转换为 \REGISTRY\... 后写入剪贴板。
+    void copySelectedValueKernelPathToClipboard();
 
     // ===================== 导入导出 =====================
     void exportCurrentKeyAsync();
