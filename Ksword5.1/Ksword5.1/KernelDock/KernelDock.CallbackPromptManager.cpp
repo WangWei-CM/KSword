@@ -8,6 +8,7 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDateTime>
+#include <QEvent>
 #include <QFileIconProvider>
 #include <QFileInfo>
 #include <QFontMetrics>
@@ -18,6 +19,7 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QPalette>
 #include <QPushButton>
 #include <QPixmap>
 #include <QRegularExpression>
@@ -114,6 +116,138 @@ namespace
         return processIcon;
     }
 
+    QColor resolveCurrentAccentColor()
+    {
+        if (qApp != nullptr)
+        {
+            const QColor highlightColor =
+                qApp->palette().color(QPalette::Active, QPalette::Highlight);
+            if (highlightColor.isValid())
+            {
+                return highlightColor;
+            }
+        }
+        return KswordTheme::PrimaryBlueColor;
+    }
+
+    QString currentAccentColorHex()
+    {
+        return resolveCurrentAccentColor().name(QColor::HexRgb);
+    }
+
+    QString buildPopupThemeStyleSheet()
+    {
+        const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
+        const QColor accentColor = resolveCurrentAccentColor();
+
+        const QColor accentHoverColor = accentColor.lighter(darkModeEnabled ? 118 : 110);
+        const QColor accentPressedColor = accentColor.darker(darkModeEnabled ? 120 : 112);
+        const QColor neutralHoverColor = darkModeEnabled ? QColor(54, 54, 54) : QColor(236, 243, 252);
+        const QColor neutralPressedColor = darkModeEnabled ? QColor(42, 42, 42) : QColor(225, 236, 249);
+
+        QColor denyBackgroundColor = KswordTheme::WarningAccentColor();
+        denyBackgroundColor.setAlpha(darkModeEnabled ? 58 : 36);
+        QColor denyHoverColor = KswordTheme::WarningAccentColor();
+        denyHoverColor.setAlpha(darkModeEnabled ? 88 : 60);
+        QColor denyPressedColor = KswordTheme::WarningAccentColor();
+        denyPressedColor.setAlpha(darkModeEnabled ? 118 : 78);
+        const QColor denyBorderColor = KswordTheme::WarningAccentColor();
+
+        QColor detailBackgroundColor = accentColor;
+        detailBackgroundColor.setAlpha(darkModeEnabled ? 56 : 30);
+        QColor detailHoverColor = accentColor;
+        detailHoverColor.setAlpha(darkModeEnabled ? 86 : 54);
+        QColor detailPressedColor = accentColor;
+        detailPressedColor.setAlpha(darkModeEnabled ? 114 : 76);
+
+        return QStringLiteral(
+            "QDialog#KswordCallbackDecisionPopup{"
+            "  background-color:palette(window);"
+            "  color:palette(text);"
+            "  border:1px solid %1;"
+            "  border-radius:10px;"
+            "}"
+            "QDialog#KswordCallbackDecisionPopup QLabel{"
+            "  color:palette(text);"
+            "}"
+            "QDialog#KswordCallbackDecisionPopup QLabel#KswordCallbackTitleLabel{"
+            "  color:%1;"
+            "  font-size:15px;"
+            "  font-weight:800;"
+            "}"
+            "QDialog#KswordCallbackDecisionPopup QLabel#KswordCallbackSectionLabel{"
+            "  color:%1;"
+            "  font-weight:700;"
+            "}"
+            "QDialog#KswordCallbackDecisionPopup QLabel#KswordCallbackInitiatorLink{"
+            "  color:%1;"
+            "}"
+            "QDialog#KswordCallbackDecisionPopup QPushButton{"
+            "  background-color:palette(base);"
+            "  color:palette(text);"
+            "  border:1px solid palette(mid);"
+            "  border-radius:6px;"
+            "  padding:6px 14px;"
+            "  min-height:30px;"
+            "}"
+            "QDialog#KswordCallbackDecisionPopup QPushButton:hover{"
+            "  background-color:%2;"
+            "  border-color:%1;"
+            "}"
+            "QDialog#KswordCallbackDecisionPopup QPushButton:pressed{"
+            "  background-color:%3;"
+            "}"
+            "QPushButton#KswordCallbackAllowButton{"
+            "  background-color:%1;"
+            "  color:#FFFFFF;"
+            "  border:1px solid %1;"
+            "}"
+            "QPushButton#KswordCallbackAllowButton:hover{"
+            "  background-color:%4;"
+            "  border-color:%4;"
+            "}"
+            "QPushButton#KswordCallbackAllowButton:pressed{"
+            "  background-color:%5;"
+            "  border-color:%5;"
+            "}"
+            "QPushButton#KswordCallbackDenyButton{"
+            "  background-color:%6;"
+            "  border:1px solid %7;"
+            "}"
+            "QPushButton#KswordCallbackDenyButton:hover{"
+            "  background-color:%8;"
+            "  border-color:%7;"
+            "}"
+            "QPushButton#KswordCallbackDenyButton:pressed{"
+            "  background-color:%9;"
+            "  border-color:%7;"
+            "}"
+            "QPushButton#KswordCallbackDetailButton{"
+            "  background-color:%10;"
+            "  border:1px solid %1;"
+            "}"
+            "QPushButton#KswordCallbackDetailButton:hover{"
+            "  background-color:%11;"
+            "  border-color:%1;"
+            "}"
+            "QPushButton#KswordCallbackDetailButton:pressed{"
+            "  background-color:%12;"
+            "  border-color:%1;"
+            "}")
+            .arg(accentColor.name(QColor::HexRgb))
+            .arg(neutralHoverColor.name(QColor::HexRgb))
+            .arg(neutralPressedColor.name(QColor::HexRgb))
+            .arg(accentHoverColor.name(QColor::HexRgb))
+            .arg(accentPressedColor.name(QColor::HexRgb))
+            .arg(denyBackgroundColor.name(QColor::HexArgb))
+            .arg(denyBorderColor.name(QColor::HexRgb))
+            .arg(denyHoverColor.name(QColor::HexArgb))
+            .arg(denyPressedColor.name(QColor::HexArgb))
+            .arg(detailBackgroundColor.name(QColor::HexArgb))
+            .arg(detailHoverColor.name(QColor::HexArgb))
+            .arg(detailPressedColor.name(QColor::HexArgb));
+    }
+
     QString buildDecisionButtonText(
         const quint32 buttonDecision,
         const quint32 defaultDecision,
@@ -194,11 +328,47 @@ CallbackPromptManager::CallbackPromptManager(QWidget* hostWindow, QObject* paren
 {
     initializePopupUi();
     initializePopupConnections();
+    if (qApp != nullptr)
+    {
+        qApp->installEventFilter(this);
+    }
 }
 
 CallbackPromptManager::~CallbackPromptManager()
 {
+    if (qApp != nullptr)
+    {
+        qApp->removeEventFilter(this);
+    }
     stop();
+}
+
+bool CallbackPromptManager::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == qApp && event != nullptr)
+    {
+        const QEvent::Type eventType = event->type();
+        if (eventType == QEvent::ApplicationPaletteChange ||
+            eventType == QEvent::PaletteChange ||
+            eventType == QEvent::StyleChange)
+        {
+            applyPopupTheme();
+            if (m_hasCurrentEvent)
+            {
+                updatePopupContent(m_currentEvent);
+            }
+        }
+    }
+    return QObject::eventFilter(watched, event);
+}
+
+void CallbackPromptManager::applyPopupTheme()
+{
+    if (m_popupDialog.isNull())
+    {
+        return;
+    }
+    m_popupDialog->setStyleSheet(buildPopupThemeStyleSheet());
 }
 
 void CallbackPromptManager::setHostWindow(QWidget* hostWindow)
@@ -259,49 +429,6 @@ void CallbackPromptManager::initializePopupUi()
         Qt::NoDropShadowWindowHint);
     popupDialog->setModal(false);
     popupDialog->setAttribute(Qt::WA_ShowWithoutActivating, true);
-    popupDialog->setStyleSheet(
-        QStringLiteral(
-            "QDialog#KswordCallbackDecisionPopup{"
-            "  background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #0F172A,stop:1 #111C34);"
-            "  border:1px solid %1;"
-            "  border-radius:10px;"
-            "}"
-            "QLabel{color:#E2E8F0;}"
-            "QPushButton{"
-            "  background:#1E293B;"
-            "  color:#E2E8F0;"
-            "  border:1px solid #334155;"
-            "  border-radius:6px;"
-            "  padding:6px 14px;"
-            "  min-height:30px;"
-            "}"
-            "QPushButton:hover{background:#1E3A5F;color:#FFFFFF;border-color:%1;}"
-            "QPushButton:pressed{background:#17304D;color:#FFFFFF;}"
-            "QPushButton#KswordCallbackAllowButton{"
-            "  background:%1;"
-            "  color:#FFFFFF;"
-            "  border:1px solid %1;"
-            "}"
-            "QPushButton#KswordCallbackAllowButton:hover{"
-            "  background:#5BAFFF;"
-            "  border-color:#5BAFFF;"
-            "}"
-            "QPushButton#KswordCallbackDenyButton{"
-            "  background:#243246;"
-            "  border:1px solid #3A4A60;"
-            "}"
-            "QPushButton#KswordCallbackDetailButton{"
-            "  background:#17263E;"
-            "  border:1px solid #2E4461;"
-            "}"
-            "QLabel#KswordCallbackSectionLabel{"
-            "  color:%1;"
-            "  font-weight:700;"
-            "}"
-            "QLabel#KswordCallbackInitiatorLink{"
-            "  color:%1;"
-            "}")
-            .arg(KswordTheme::PrimaryBlueHex));
 
     auto* rootLayout = new QVBoxLayout(popupDialog);
     rootLayout->setContentsMargins(14, 12, 14, 12);
@@ -324,9 +451,7 @@ void CallbackPromptManager::initializePopupUi()
     }
 
     auto* titleLabel = new QLabel(QStringLiteral("驱动回调决策"), popupDialog);
-    titleLabel->setStyleSheet(
-        QStringLiteral("font-size:15px;font-weight:800;color:%1;")
-        .arg(KswordTheme::PrimaryBlueHex));
+    titleLabel->setObjectName(QStringLiteral("KswordCallbackTitleLabel"));
 
     headerLayout->addWidget(logoLabel, 0, Qt::AlignVCenter);
     headerLayout->addWidget(titleLabel, 0, Qt::AlignVCenter);
@@ -405,6 +530,7 @@ void CallbackPromptManager::initializePopupUi()
     rootLayout->addLayout(actionLayout, 0);
 
     m_popupDialog = popupDialog;
+    applyPopupTheme();
 
     m_countdownTimer = new QTimer(this);
     m_countdownTimer->setInterval(kPollTickMs);
@@ -892,6 +1018,7 @@ void CallbackPromptManager::tryShowNextEvent()
         m_remainingTimeoutMs = 5000;
     }
 
+    applyPopupTheme();
     movePopupToBottomRight();
 
     m_popupDialog->show();
@@ -952,7 +1079,7 @@ void CallbackPromptManager::updatePopupContent(const KSWORD_ARK_CALLBACK_EVENT_P
         m_initiatorValueLabel->setText(
             QStringLiteral("<a href=\"pid:%1\" style=\"color:%2;text-decoration:underline;\">%3</a>")
             .arg(eventPacket.originatingPid)
-            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(currentAccentColorHex())
             .arg(elidedText.toHtmlEscaped()));
     }
     if (m_initiatorIconLabel != nullptr)

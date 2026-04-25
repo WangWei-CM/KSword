@@ -18,6 +18,7 @@ class QPushButton;
 class QTimer;
 class QWidget;
 class QCloseEvent;
+class QEvent;
 
 class CallbackPromptManager final : public QObject
 {
@@ -61,6 +62,8 @@ private:
     };
 
 private:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    void applyPopupTheme();
     void initializePopupUi();
     void initializePopupConnections();
     void appendManagerLog(const QString& logText);

@@ -4624,6 +4624,29 @@ void MonitorDock::updateWmiSubscribePanelCompactLayout()
     m_wmiEventClassTable->setMaximumHeight(tableTargetHeight);
 }
 
+void MonitorDock::updateEtwCollapseHeight()
+{
+    if (m_etwSideToolBox == nullptr || m_etwSideToolBox->count() <= 0)
+    {
+        return;
+    }
+
+    QWidget* currentItem = m_etwSideToolBox->currentWidget();
+    if (currentItem != nullptr && currentItem->layout() != nullptr)
+    {
+        currentItem->layout()->activate();
+    }
+    if (m_etwSideToolBox->layout() != nullptr)
+    {
+        m_etwSideToolBox->layout()->activate();
+    }
+
+    // 取消折叠区的显式高度钳制，交给外层布局自然分配。
+    m_etwSideToolBox->setMinimumHeight(0);
+    m_etwSideToolBox->setMaximumHeight(QWIDGETSIZE_MAX);
+    m_etwSideToolBox->updateGeometry();
+}
+
 void MonitorDock::initializeEtwTab()
 {
     m_etwPage = new QWidget(m_sideTabWidget);
@@ -4631,11 +4654,20 @@ void MonitorDock::initializeEtwTab()
     m_etwLayout->setContentsMargins(4, 4, 4, 4);
     m_etwLayout->setSpacing(6);
 
+    // 折叠区直接挂在 ETW 主布局，避免额外包装层引入独立滚动/高度约束。
     m_etwSideToolBox = new QToolBox(m_etwPage);
+    m_etwSideToolBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    m_etwSideToolBox->setMinimumHeight(0);
+    m_etwSideToolBox->setMaximumHeight(QWIDGETSIZE_MAX);
     m_etwLayout->addWidget(m_etwSideToolBox, 0);
 
-    // Provider 折叠页。
-    m_etwProviderPanel = new QWidget(m_etwSideToolBox);
+    // Providers + 会话共用一个折叠页，并在页内左右并排布局。
+    QWidget* etwProviderSessionPanel = new QWidget(m_etwSideToolBox);
+    QHBoxLayout* etwProviderSessionLayout = new QHBoxLayout(etwProviderSessionPanel);
+    etwProviderSessionLayout->setContentsMargins(4, 4, 4, 4);
+    etwProviderSessionLayout->setSpacing(6);
+
+    m_etwProviderPanel = new QWidget(etwProviderSessionPanel);
     m_etwProviderPanelLayout = new QVBoxLayout(m_etwProviderPanel);
     m_etwProviderPanelLayout->setContentsMargins(4, 4, 4, 4);
     m_etwProviderPanelLayout->setSpacing(6);
@@ -4743,10 +4775,7 @@ void MonitorDock::initializeEtwTab()
     m_etwProviderPanelLayout->addLayout(m_etwProviderControlLayout);
     m_etwProviderPanelLayout->addLayout(etwProviderSplitLayout, 1);
 
-    m_etwSideToolBox->addItem(m_etwProviderPanel, QStringLiteral("ETW Providers"));
-
-    // 会话折叠页：直接对标 logman query -ets / stop -ets 的核心能力。
-    m_etwSessionPanel = new QWidget(m_etwSideToolBox);
+    m_etwSessionPanel = new QWidget(etwProviderSessionPanel);
     m_etwSessionPanelLayout = new QVBoxLayout(m_etwSessionPanel);
     m_etwSessionPanelLayout->setContentsMargins(4, 4, 4, 4);
     m_etwSessionPanelLayout->setSpacing(6);
@@ -4796,9 +4825,12 @@ void MonitorDock::initializeEtwTab()
     m_etwSessionTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     m_etwSessionTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     m_etwSessionTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
+    m_etwSessionTable->setMinimumHeight(180);
     m_etwSessionPanelLayout->addWidget(m_etwSessionTable, 1);
 
-    m_etwSideToolBox->addItem(m_etwSessionPanel, QStringLiteral("ETW会话"));
+    etwProviderSessionLayout->addWidget(m_etwProviderPanel, 3);
+    etwProviderSessionLayout->addWidget(m_etwSessionPanel, 2);
+    m_etwSideToolBox->addItem(etwProviderSessionPanel, QStringLiteral("ETW Providers / 会话"));
 
     // 参数折叠页。
     QWidget* capturePanel = new QWidget(m_etwSideToolBox);
@@ -4922,19 +4954,22 @@ void MonitorDock::initializeEtwTab()
     m_etwEventTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
 
     m_etwLayout->addWidget(m_etwEventTable, 1);
-    m_etwLayout->setStretch(0, 2);
-    m_etwLayout->setStretch(1, 0);
-    m_etwLayout->setStretch(2, 3);
 
     m_etwUiUpdateTimer = new QTimer(this);
     m_etwUiUpdateTimer->setInterval(100);
     updateEtwCaptureActionState();
+    updateEtwCollapseHeight();
 
     m_sideTabWidget->addTab(m_etwPage, QStringLiteral("ETW监控"));
 }
 
 void MonitorDock::initializeEtwFilterPanels()
 {
+    QWidget* etwFilterPanel = new QWidget(m_etwSideToolBox);
+    QHBoxLayout* etwFilterPanelLayout = new QHBoxLayout(etwFilterPanel);
+    etwFilterPanelLayout->setContentsMargins(4, 4, 4, 4);
+    etwFilterPanelLayout->setSpacing(6);
+
     const auto initStagePanel = [this](
         const EtwFilterStage stage,
         QWidget*& panelOut,
@@ -4951,10 +4986,17 @@ void MonitorDock::initializeEtwFilterPanels()
         QWidget*& hostWidgetOut,
         QVBoxLayout*& hostLayoutOut)
         {
-            panelOut = new QWidget(m_etwSideToolBox);
+            panelOut = new QWidget();
             panelLayoutOut = new QVBoxLayout(panelOut);
             panelLayoutOut->setContentsMargins(4, 4, 4, 4);
             panelLayoutOut->setSpacing(6);
+
+            QLabel* stageTitleLabel = new QLabel(
+                stage == EtwFilterStage::Pre ? QStringLiteral("ETW前置筛选") : QStringLiteral("ETW后置筛选"),
+                panelOut);
+            stageTitleLabel->setStyleSheet(
+                QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::PrimaryBlueHex));
+            panelLayoutOut->addWidget(stageTitleLabel, 0);
 
             QLabel* semanticHintLabel = new QLabel(panelOut);
             semanticHintLabel->setWordWrap(true);
@@ -4999,21 +5041,13 @@ void MonitorDock::initializeEtwFilterPanels()
             stateLabelOut->setWordWrap(true);
             panelLayoutOut->addWidget(stateLabelOut, 0);
 
-            scrollAreaOut = new QScrollArea(panelOut);
-            scrollAreaOut->setWidgetResizable(true);
-            scrollAreaOut->setFrameShape(QFrame::NoFrame);
-            hostWidgetOut = new QWidget(scrollAreaOut);
+            // 筛选区不再使用内部滚动，避免折叠页内容被二次压缩。
+            scrollAreaOut = nullptr;
+            hostWidgetOut = new QWidget(panelOut);
             hostLayoutOut = new QVBoxLayout(hostWidgetOut);
             hostLayoutOut->setContentsMargins(0, 0, 0, 0);
             hostLayoutOut->setSpacing(6);
-            scrollAreaOut->setWidget(hostWidgetOut);
-            panelLayoutOut->addWidget(scrollAreaOut, 1);
-
-            m_etwSideToolBox->addItem(
-                panelOut,
-                stage == EtwFilterStage::Pre
-                ? QStringLiteral("ETW前置筛选")
-                : QStringLiteral("ETW后置筛选"));
+            panelLayoutOut->addWidget(hostWidgetOut, 0);
         };
 
     initStagePanel(
@@ -5048,11 +5082,16 @@ void MonitorDock::initializeEtwFilterPanels()
         m_etwPostFilterGroupHostWidget,
         m_etwPostFilterGroupHostLayout);
 
+    etwFilterPanelLayout->addWidget(m_etwPreFilterPanel, 1);
+    etwFilterPanelLayout->addWidget(m_etwPostFilterPanel, 1);
+    m_etwSideToolBox->addItem(etwFilterPanel, QStringLiteral("ETW筛选"));
+
     addEtwFilterRuleGroup(EtwFilterStage::Pre);
     addEtwFilterRuleGroup(EtwFilterStage::Post);
     applyEtwFilterRules(EtwFilterStage::Pre);
     applyEtwFilterRules(EtwFilterStage::Post);
     loadEtwFilterConfigFromDefaultPath(false);
+    updateEtwCollapseHeight();
 }
 
 void MonitorDock::initializeConnections()
@@ -5069,6 +5108,12 @@ void MonitorDock::initializeConnections()
             ensureWinApiTabInitialized();
         }
     });
+    if (m_etwSideToolBox != nullptr)
+    {
+        connect(m_etwSideToolBox, &QToolBox::currentChanged, this, [this](const int) {
+            updateEtwCollapseHeight();
+        });
+    }
 
     // WMI 基础交互。
     connect(m_wmiProviderFilterEdit, &QLineEdit::textChanged, this, [this](const QString& text) {
@@ -5595,6 +5640,7 @@ void MonitorDock::rebuildEtwFilterRuleGroupUi(const EtwFilterStage stage)
         ++displayIndex;
     }
     hostLayout->addStretch(1);
+    updateEtwCollapseHeight();
 }
 
 void MonitorDock::addEtwFilterRuleGroup(const EtwFilterStage stage)
@@ -5687,11 +5733,11 @@ void MonitorDock::addEtwFilterRuleGroup(const EtwFilterStage stage)
     int fieldIndex = 0;
     for (const EtwFilterFieldDescriptor& descriptor : fieldDescriptorList)
     {
-        QLabel* fieldLabel = new QLabel(QString::fromLatin1(descriptor.label), groupState->containerWidget);
+        QLabel* fieldLabel = new QLabel(QString::fromUtf8(descriptor.label), groupState->containerWidget);
         QLineEdit* fieldEdit = new QLineEdit(groupState->containerWidget);
         fieldEdit->setStyleSheet(blueInputStyle());
         fieldEdit->setPlaceholderText(
-            QStringLiteral("%1（逗号/分号/空白分隔）").arg(QString::fromLatin1(descriptor.placeholder)));
+            QStringLiteral("%1（逗号/分号/空白分隔）").arg(QString::fromUtf8(descriptor.placeholder)));
 
         const int row = fieldIndex / kColumnCount;
         const int col = fieldIndex % kColumnCount;
@@ -5706,7 +5752,7 @@ void MonitorDock::addEtwFilterRuleGroup(const EtwFilterStage stage)
         EtwFilterFieldUiState fieldUi;
         fieldUi.fieldId = descriptor.fieldId;
         fieldUi.fieldKey = QString::fromLatin1(descriptor.key);
-        fieldUi.fieldLabel = QString::fromLatin1(descriptor.label);
+        fieldUi.fieldLabel = QString::fromUtf8(descriptor.label);
         fieldUi.inputEdit = fieldEdit;
         groupState->fieldList.push_back(std::move(fieldUi));
 
@@ -6144,6 +6190,7 @@ void MonitorDock::applyEtwFilterRules(const EtwFilterStage stage)
 
     updateEtwFilterStateLabel(stage);
     saveEtwFilterConfigToPath(etwFilterConfigPath(), false);
+    updateEtwCollapseHeight();
 
     kLogEvent event;
     info << event
@@ -7892,6 +7939,8 @@ void MonitorDock::refreshEtwProvidersAsync()
                     << status
                     << eol;
             }
+
+            guardThis->updateEtwCollapseHeight();
         }, Qt::QueuedConnection);
     }).detach();
 }
@@ -8055,6 +8104,8 @@ void MonitorDock::refreshEtwSessionsAsync()
                     kPro.set(guardThis->m_etwSessionRefreshProgressPid, "ETW会话刷新失败", 0, 100.0f);
                 }
             }
+
+            guardThis->updateEtwCollapseHeight();
         }, Qt::QueuedConnection);
     }).detach();
 }

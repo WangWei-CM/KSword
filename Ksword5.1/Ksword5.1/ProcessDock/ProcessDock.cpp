@@ -208,6 +208,10 @@ namespace
             else
             {
                 oss << ", ioctl=fail, error=" << ioctlError;
+                if (ioctlError == ERROR_ACCESS_DENIED)
+                {
+                    oss << " (driver returned failing NTSTATUS, check R0 log for status)";
+                }
             }
             *detailTextOut = oss.str();
         }
