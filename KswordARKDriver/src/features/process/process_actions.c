@@ -25,6 +25,20 @@ PsLookupProcessByProcessId(
     _Outptr_ PEPROCESS* Process
     );
 
+NTSYSAPI
+HANDLE
+NTAPI
+PsGetProcessInheritedFromUniqueProcessId(
+    _In_ PEPROCESS Process
+    );
+
+NTSYSAPI
+PCHAR
+NTAPI
+PsGetProcessImageFileName(
+    _In_ PEPROCESS Process
+    );
+
 #ifndef PROCESS_TERMINATE
 #define PROCESS_TERMINATE (0x0001)
 #endif
@@ -72,6 +86,157 @@ PsLookupProcessByProcessId(
 #define KSWORD_PS_PROTECTED_SIGNER_LSA ((UCHAR)0x04)
 #define KSWORD_PS_PROTECTED_SIGNER_WINDOWS ((UCHAR)0x05)
 #define KSWORD_PS_PROTECTED_SIGNER_WINTCB ((UCHAR)0x06)
+
+#define KSWORD_ARK_ENUM_RESPONSE_HEADER_SIZE \
+    (sizeof(KSWORD_ARK_ENUM_PROCESS_RESPONSE) - sizeof(KSWORD_ARK_PROCESS_ENTRY))
+#define KSWORD_ARK_ENUM_PID_STEP 4UL
+#define KSWORD_ARK_ENUM_SCAN_MAX_PID 0x00400000UL
+#define KSWORD_ARK_ENUM_SCAN_MIN_PID KSWORD_ARK_ENUM_PID_STEP
+
+typedef PEPROCESS(NTAPI* KSWORD_PS_GET_NEXT_PROCESS_FN)(
+    _In_opt_ PEPROCESS Process
+    );
+
+static KSWORD_PS_GET_NEXT_PROCESS_FN
+KswordARKDriverResolvePsGetNextProcess(
+    VOID
+    )
+{
+    UNICODE_STRING routineName;
+
+    RtlInitUnicodeString(&routineName, L"PsGetNextProcess");
+    return (KSWORD_PS_GET_NEXT_PROCESS_FN)MmGetSystemRoutineAddress(&routineName);
+}
+
+static ULONG
+KswordARKDriverAlignPidToStep(
+    _In_ ULONG pidValue
+    )
+{
+    return pidValue - (pidValue % KSWORD_ARK_ENUM_PID_STEP);
+}
+
+static BOOLEAN
+KswordARKDriverPidInScanRange(
+    _In_ ULONG pidValue,
+    _In_ ULONG scanStartPid,
+    _In_ ULONG scanEndPid
+    )
+{
+    if (pidValue < scanStartPid || pidValue > scanEndPid) {
+        return FALSE;
+    }
+    return ((pidValue % KSWORD_ARK_ENUM_PID_STEP) == 0U) ? TRUE : FALSE;
+}
+
+static VOID
+KswordARKDriverBitmapSetPid(
+    _Inout_updates_bytes_(bitmapBytes) PUCHAR bitmap,
+    _In_ size_t bitmapBytes,
+    _In_ ULONG pidValue
+    )
+{
+    size_t bitIndex = 0;
+    size_t byteIndex = 0;
+    UCHAR bitMask = 0;
+
+    if (bitmap == NULL || bitmapBytes == 0U) {
+        return;
+    }
+
+    bitIndex = (size_t)(pidValue / KSWORD_ARK_ENUM_PID_STEP);
+    byteIndex = (bitIndex >> 3);
+    if (byteIndex >= bitmapBytes) {
+        return;
+    }
+
+    bitMask = (UCHAR)(1U << (bitIndex & 0x07U));
+    bitmap[byteIndex] = (UCHAR)(bitmap[byteIndex] | bitMask);
+}
+
+static BOOLEAN
+KswordARKDriverBitmapHasPid(
+    _In_reads_bytes_(bitmapBytes) const UCHAR* bitmap,
+    _In_ size_t bitmapBytes,
+    _In_ ULONG pidValue
+    )
+{
+    size_t bitIndex = 0;
+    size_t byteIndex = 0;
+    UCHAR bitMask = 0;
+
+    if (bitmap == NULL || bitmapBytes == 0U) {
+        return FALSE;
+    }
+
+    bitIndex = (size_t)(pidValue / KSWORD_ARK_ENUM_PID_STEP);
+    byteIndex = (bitIndex >> 3);
+    if (byteIndex >= bitmapBytes) {
+        return FALSE;
+    }
+
+    bitMask = (UCHAR)(1U << (bitIndex & 0x07U));
+    return ((bitmap[byteIndex] & bitMask) != 0U) ? TRUE : FALSE;
+}
+
+static VOID
+KswordARKDriverCopyImageName(
+    _Out_writes_all_(16) CHAR destinationImageName[16],
+    _In_opt_z_ const CHAR* sourceImageName
+    )
+{
+    ULONG copyIndex = 0;
+
+    if (destinationImageName == NULL) {
+        return;
+    }
+
+    RtlZeroMemory(destinationImageName, 16);
+    if (sourceImageName == NULL) {
+        return;
+    }
+
+    for (copyIndex = 0; copyIndex < 15U; ++copyIndex) {
+        destinationImageName[copyIndex] = sourceImageName[copyIndex];
+        if (sourceImageName[copyIndex] == '\0') {
+            break;
+        }
+    }
+    destinationImageName[15] = '\0';
+}
+
+static VOID
+KswordARKDriverAppendProcessEntry(
+    _Inout_ KSWORD_ARK_ENUM_PROCESS_RESPONSE* response,
+    _In_ size_t entryCapacity,
+    _In_ ULONG processId,
+    _In_ ULONG parentProcessId,
+    _In_ ULONG processFlags,
+    _In_opt_z_ const CHAR* imageName
+    )
+{
+    KSWORD_ARK_PROCESS_ENTRY* entry = NULL;
+
+    if (response == NULL) {
+        return;
+    }
+
+    if (response->totalCount != MAXULONG) {
+        response->totalCount += 1UL;
+    }
+
+    if ((size_t)response->returnedCount >= entryCapacity) {
+        return;
+    }
+
+    entry = &response->entries[response->returnedCount];
+    RtlZeroMemory(entry, sizeof(*entry));
+    entry->processId = processId;
+    entry->parentProcessId = parentProcessId;
+    entry->flags = processFlags;
+    KswordARKDriverCopyImageName(entry->imageName, imageName);
+    response->returnedCount += 1UL;
+}
 
 static NTSTATUS
 KswordARKDriverResolveSignatureLevelsFromSigner(
@@ -340,4 +505,174 @@ Return Value:
     }
 
     return KswordARKDriverPatchProcessProtectionStateByPid(processId, protectionLevel);
+}
+
+NTSTATUS
+KswordARKDriverEnumerateProcesses(
+    _Out_writes_bytes_to_(outputBufferLength, *bytesWrittenOut) PVOID outputBuffer,
+    _In_ size_t outputBufferLength,
+    _In_opt_ const KSWORD_ARK_ENUM_PROCESS_REQUEST* request,
+    _Out_ size_t* bytesWrittenOut
+    )
+{
+    KSWORD_ARK_ENUM_PROCESS_RESPONSE* response = NULL;
+    size_t entryCapacity = 0;
+    size_t totalBytesWritten = 0;
+    ULONG requestFlags = 0;
+    ULONG scanStartPid = KSWORD_ARK_ENUM_SCAN_MIN_PID;
+    ULONG scanEndPid = KSWORD_ARK_ENUM_SCAN_MAX_PID;
+    BOOLEAN scanCidTable = FALSE;
+    UCHAR* pidBitmap = NULL;
+    size_t pidBitmapBytes = 0;
+    ULONG scanPid = 0;
+    KSWORD_PS_GET_NEXT_PROCESS_FN psGetNextProcess = NULL;
+    PEPROCESS processCursor = NULL;
+
+    if (outputBuffer == NULL || bytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *bytesWrittenOut = 0;
+    if (outputBufferLength < KSWORD_ARK_ENUM_RESPONSE_HEADER_SIZE) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlZeroMemory(outputBuffer, outputBufferLength);
+    response = (KSWORD_ARK_ENUM_PROCESS_RESPONSE*)outputBuffer;
+    response->version = KSWORD_ARK_ENUM_PROCESS_PROTOCOL_VERSION;
+    response->entrySize = sizeof(KSWORD_ARK_PROCESS_ENTRY);
+    entryCapacity =
+        (outputBufferLength - KSWORD_ARK_ENUM_RESPONSE_HEADER_SIZE) / sizeof(KSWORD_ARK_PROCESS_ENTRY);
+
+    if (request != NULL) {
+        requestFlags = request->flags;
+        if (request->startPid != 0U) {
+            scanStartPid = request->startPid;
+        }
+        if (request->endPid != 0U) {
+            scanEndPid = request->endPid;
+        }
+    }
+
+    if (scanStartPid < KSWORD_ARK_ENUM_SCAN_MIN_PID) {
+        scanStartPid = KSWORD_ARK_ENUM_SCAN_MIN_PID;
+    }
+    if (scanEndPid < scanStartPid) {
+        scanEndPid = scanStartPid;
+    }
+    if (scanEndPid > KSWORD_ARK_ENUM_SCAN_MAX_PID) {
+        scanEndPid = KSWORD_ARK_ENUM_SCAN_MAX_PID;
+    }
+
+    scanStartPid = KswordARKDriverAlignPidToStep(scanStartPid);
+    if (scanStartPid < KSWORD_ARK_ENUM_SCAN_MIN_PID) {
+        scanStartPid = KSWORD_ARK_ENUM_SCAN_MIN_PID;
+    }
+    scanEndPid = KswordARKDriverAlignPidToStep(scanEndPid);
+    if (scanEndPid < scanStartPid) {
+        scanEndPid = scanStartPid;
+    }
+
+    scanCidTable = ((requestFlags & KSWORD_ARK_ENUM_PROCESS_FLAG_SCAN_CID_TABLE) != 0U) ? TRUE : FALSE;
+    psGetNextProcess = KswordARKDriverResolvePsGetNextProcess();
+    if (psGetNextProcess == NULL) {
+        // Fallback: force CID scan when PsGetNextProcess is unavailable.
+        scanCidTable = TRUE;
+    }
+
+    if (scanCidTable) {
+        const size_t bitmapBitCount = (size_t)(scanEndPid / KSWORD_ARK_ENUM_PID_STEP) + 1U;
+        pidBitmapBytes = (bitmapBitCount + 7U) >> 3;
+#pragma warning(push)
+#pragma warning(disable:4996)
+        pidBitmap = (UCHAR*)ExAllocatePoolWithTag(NonPagedPoolNx, pidBitmapBytes, 'pKsK');
+#pragma warning(pop)
+        if (pidBitmap == NULL) {
+            scanCidTable = FALSE;
+            pidBitmapBytes = 0U;
+        }
+        else {
+            RtlZeroMemory(pidBitmap, pidBitmapBytes);
+        }
+    }
+
+    if (psGetNextProcess != NULL) {
+        processCursor = psGetNextProcess(NULL);
+        while (processCursor != NULL) {
+            const ULONG processId = HandleToULong(PsGetProcessId(processCursor));
+            const ULONG parentProcessId =
+                HandleToULong(PsGetProcessInheritedFromUniqueProcessId(processCursor));
+            const CHAR* imageName = PsGetProcessImageFileName(processCursor);
+            const ULONG processFlags = KSWORD_ARK_PROCESS_FLAG_KERNEL_ENUMERATED;
+            PEPROCESS nextProcess = NULL;
+
+            KswordARKDriverAppendProcessEntry(
+                response,
+                entryCapacity,
+                processId,
+                parentProcessId,
+                processFlags,
+                imageName);
+
+            if (scanCidTable && KswordARKDriverPidInScanRange(processId, scanStartPid, scanEndPid)) {
+                KswordARKDriverBitmapSetPid(pidBitmap, pidBitmapBytes, processId);
+            }
+
+            nextProcess = psGetNextProcess(processCursor);
+            ObDereferenceObject(processCursor);
+            processCursor = nextProcess;
+        }
+    }
+
+    if (scanCidTable) {
+        scanPid = scanStartPid;
+        for (;;) {
+            PEPROCESS hiddenProcessObject = NULL;
+            NTSTATUS lookupStatus = STATUS_UNSUCCESSFUL;
+            BOOLEAN presentInActiveList = FALSE;
+
+            if (psGetNextProcess != NULL && pidBitmap != NULL) {
+                presentInActiveList = KswordARKDriverBitmapHasPid(pidBitmap, pidBitmapBytes, scanPid);
+            }
+
+            if (!presentInActiveList) {
+                lookupStatus = PsLookupProcessByProcessId(ULongToHandle(scanPid), &hiddenProcessObject);
+                if (NT_SUCCESS(lookupStatus)) {
+                    const ULONG parentProcessId =
+                        HandleToULong(PsGetProcessInheritedFromUniqueProcessId(hiddenProcessObject));
+                    const CHAR* imageName = PsGetProcessImageFileName(hiddenProcessObject);
+                    ULONG processFlags = KSWORD_ARK_PROCESS_FLAG_KERNEL_ENUMERATED;
+
+                    if (psGetNextProcess != NULL && pidBitmap != NULL) {
+                        processFlags |= KSWORD_ARK_PROCESS_FLAG_HIDDEN_FROM_ACTIVE_LIST;
+                    }
+
+                    KswordARKDriverAppendProcessEntry(
+                        response,
+                        entryCapacity,
+                        scanPid,
+                        parentProcessId,
+                        processFlags,
+                        imageName);
+                    ObDereferenceObject(hiddenProcessObject);
+                }
+            }
+
+            if ((scanEndPid - scanPid) < KSWORD_ARK_ENUM_PID_STEP) {
+                break;
+            }
+            scanPid += KSWORD_ARK_ENUM_PID_STEP;
+        }
+    }
+
+    if (pidBitmap != NULL) {
+        ExFreePoolWithTag(pidBitmap, 'pKsK');
+        pidBitmap = NULL;
+    }
+
+    totalBytesWritten =
+        KSWORD_ARK_ENUM_RESPONSE_HEADER_SIZE +
+        ((size_t)response->returnedCount * sizeof(KSWORD_ARK_PROCESS_ENTRY));
+    *bytesWrittenOut = totalBytesWritten;
+    return STATUS_SUCCESS;
 }

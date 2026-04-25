@@ -22,6 +22,15 @@
     <None Include="ReadMe.txt" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\features\callback\callback_runtime.c" />
+    <ClCompile Include="src\features\callback\callback_rules.c" />
+    <ClCompile Include="src\features\callback\callback_waiter.c" />
+    <ClCompile Include="src\features\callback\registry_callback.c" />
+    <ClCompile Include="src\features\callback\process_callback.c" />
+    <ClCompile Include="src\features\callback\thread_callback.c" />
+    <ClCompile Include="src\features\callback\image_callback.c" />
+    <ClCompile Include="src\features\callback\object_callback.c" />
+    <ClCompile Include="src\features\kernel\ssdt_query.c" />
     <ClCompile Include="src\features\file\file_actions.c" />
     <ClCompile Include="src\dispatch\ioctl_dispatch.c" />
     <ClCompile Include="src\features\log\log_channel.c" />
@@ -41,13 +50,19 @@
     <ClInclude Include="include\ark\ark_log.h" />
     <ClInclude Include="include\ark\ark_process.h" />
     <ClInclude Include="include\ark\ark_queue.h" />
+    <ClInclude Include="include\ark\ark_callback.h" />
+    <ClInclude Include="include\ark\ark_kernel.h" />
+    <ClInclude Include="src\features\callback\callback_internal.h" />
     <ClInclude Include="Public.h" />
     <ClInclude Include="Queue.h" />
     <ClInclude Include="src\platform\process_resolver.h" />
     <ClInclude Include="Trace.h" />
   </ItemGroup>
   <ItemGroup>
-    <Inf Include="KswordARKDriver.inf" />
+    <Inf Include="KswordARKDriver.inf">
+      <SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate>
+      <DateStamp>04/24/2026</DateStamp>
+    </Inf>
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{E4B6A5CC-D9ED-FCA2-46D5-5035E8728524}</ProjectGuid>
@@ -142,6 +157,7 @@
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
     </DriverSign>
     <Link>
+      <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -158,6 +174,7 @@
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
     </DriverSign>
     <Link>
+      <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -173,6 +190,7 @@
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
     </DriverSign>
     <Link>
+      <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -188,6 +206,7 @@
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
     </DriverSign>
     <Link>
+      <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>

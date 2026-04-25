@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "../theme.h"
 
 using namespace network_dock_detail;
 void NetworkDock::initializeConnections()
@@ -215,6 +216,7 @@ void NetworkDock::initializeConnections()
             }
 
             QMenu contextMenu(this);
+            contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* terminateAction = contextMenu.addAction(QIcon(":/Icon/process_uncritical.svg"), QStringLiteral("终止此 TCP 连接"));
             QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制行"));
             QAction* trackProcessAction = contextMenu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("跟踪此进程"));
@@ -286,6 +288,7 @@ void NetworkDock::initializeConnections()
             }
 
             QMenu contextMenu(this);
+            contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制行"));
             QAction* trackProcessAction = contextMenu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("跟踪此进程"));
             QAction* gotoProcessDetailAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
@@ -556,6 +559,7 @@ void NetworkDock::initializeConnections()
                 };
 
             QMenu contextMenu(this);
+            contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* detailAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("查看报文详情"));
             QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制行"));
             QAction* copyAsciiAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制选中报文ASCII"));

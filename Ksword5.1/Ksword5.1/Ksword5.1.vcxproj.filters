@@ -79,10 +79,25 @@
     <ClCompile Include="KernelDock\KernelDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="KernelDock\KernelDock.CallbackIntercept.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDock.CallbackPromptManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDock.CallbackRuleSerializer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDock.CallbackRuleValidator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KernelDock\KernelDock.ContextMenu.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="KernelDock\KernelDock.Runtime.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDock.Ssdt.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="KernelDock\KernelDockAtomWorker.cpp">
@@ -92,6 +107,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="KernelDock\KernelDockQueryWorker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDockSsdtWorker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDock.cpp">
@@ -384,6 +402,9 @@
     <QtMoc Include="KernelDock\KernelDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <QtMoc Include="KernelDock\KernelDock.CallbackPromptManager.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
     <QtMoc Include="MemoryDock\MemoryDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
@@ -473,10 +494,16 @@
     <ClInclude Include="KernelDock\KernelDockQueryWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="KernelDock\KernelDock.CallbackIntercept.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="KernelDock\KernelDockAtomWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="KernelDock\KernelDockObjectNamespaceWorker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelDockSsdtWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Ksword.h">

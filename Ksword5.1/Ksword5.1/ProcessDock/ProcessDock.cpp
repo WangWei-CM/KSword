@@ -371,6 +371,157 @@ namespace
         return ioctlOk != FALSE;
     }
 
+    // KernelProcessSnapshotEntry 作用：
+    // - 承载 R0 枚举返回的一条进程快照；
+    // - 仅保留 UI 对比所需字段（PID/父 PID/标志/短进程名）。
+    struct KernelProcessSnapshotEntry
+    {
+        std::uint32_t processId = 0;
+        std::uint32_t parentProcessId = 0;
+        std::uint32_t flags = 0;
+        std::string imageName;
+    };
+
+    // 内核专属记录使用固定创建时间种子，避免与 R3 常规 identity 发生冲突。
+    constexpr std::uint64_t KernelOnlyCreationTimeSeed = 0xFFFFFFFF00000000ULL;
+
+    // 读取 R0 短进程名（char[16]），并去除尾部 NUL。
+    std::string toKernelImageName(const KSWORD_ARK_PROCESS_ENTRY& processEntry)
+    {
+        const char* beginPtr = processEntry.imageName;
+        const char* endPtr = beginPtr + sizeof(processEntry.imageName);
+        const char* nulPtr = std::find(beginPtr, endPtr, '\0');
+        return std::string(beginPtr, nulPtr);
+    }
+
+    // enumerateProcessesByR0Driver 作用：
+    // - 调用驱动 IOCTL 获取内核侧进程列表；
+    // - 输出可用于“R3 列表 vs R0 列表”差异比对的数据。
+    bool enumerateProcessesByR0Driver(
+        std::vector<KernelProcessSnapshotEntry>* const processListOut,
+        std::string* const detailTextOut)
+    {
+        if (processListOut == nullptr)
+        {
+            return false;
+        }
+        processListOut->clear();
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+
+        const HANDLE driverHandle = ::CreateFileW(
+            KSWORD_ARK_LOG_WIN32_PATH,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (driverHandle == INVALID_HANDLE_VALUE)
+        {
+            const DWORD lastError = ::GetLastError();
+            if (detailTextOut != nullptr)
+            {
+                std::ostringstream oss;
+                oss << "CreateFileW(" << "\\\\.\\KswordARKLog" << ") failed, error=" << lastError;
+                *detailTextOut = oss.str();
+            }
+            return false;
+        }
+
+        KSWORD_ARK_ENUM_PROCESS_REQUEST request{};
+        request.flags = KSWORD_ARK_ENUM_PROCESS_FLAG_SCAN_CID_TABLE;
+        request.startPid = 0U;
+        request.endPid = 0U;
+
+        std::vector<std::uint8_t> responseBuffer(1024 * 1024, 0U);
+        DWORD bytesReturned = 0;
+        const BOOL ioctlOk = ::DeviceIoControl(
+            driverHandle,
+            IOCTL_KSWORD_ARK_ENUM_PROCESS,
+            &request,
+            static_cast<DWORD>(sizeof(request)),
+            responseBuffer.data(),
+            static_cast<DWORD>(responseBuffer.size()),
+            &bytesReturned,
+            nullptr);
+        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
+        ::CloseHandle(driverHandle);
+
+        if (ioctlOk == FALSE)
+        {
+            if (detailTextOut != nullptr)
+            {
+                std::ostringstream oss;
+                oss << "DeviceIoControl(IOCTL_KSWORD_ARK_ENUM_PROCESS) failed, error=" << ioctlError;
+                *detailTextOut = oss.str();
+            }
+            return false;
+        }
+
+        constexpr std::size_t enumResponseHeaderSize =
+            sizeof(KSWORD_ARK_ENUM_PROCESS_RESPONSE) - sizeof(KSWORD_ARK_PROCESS_ENTRY);
+        if (bytesReturned < enumResponseHeaderSize)
+        {
+            if (detailTextOut != nullptr)
+            {
+                std::ostringstream oss;
+                oss << "enum-process response too small, bytesReturned=" << bytesReturned;
+                *detailTextOut = oss.str();
+            }
+            return false;
+        }
+
+        const auto* responseHeader =
+            reinterpret_cast<const KSWORD_ARK_ENUM_PROCESS_RESPONSE*>(responseBuffer.data());
+        if (responseHeader->entrySize < sizeof(KSWORD_ARK_PROCESS_ENTRY))
+        {
+            if (detailTextOut != nullptr)
+            {
+                std::ostringstream oss;
+                oss << "enum-process entry size invalid, entrySize=" << responseHeader->entrySize;
+                *detailTextOut = oss.str();
+            }
+            return false;
+        }
+
+        const std::size_t availableEntryCountByBytes =
+            (bytesReturned - enumResponseHeaderSize) / static_cast<std::size_t>(responseHeader->entrySize);
+        const std::size_t returnedEntryCount = std::min<std::size_t>(
+            static_cast<std::size_t>(responseHeader->returnedCount),
+            availableEntryCountByBytes);
+        processListOut->reserve(returnedEntryCount);
+
+        for (std::size_t entryIndex = 0; entryIndex < returnedEntryCount; ++entryIndex)
+        {
+            const std::size_t entryOffset =
+                enumResponseHeaderSize + (entryIndex * static_cast<std::size_t>(responseHeader->entrySize));
+            const auto* entry = reinterpret_cast<const KSWORD_ARK_PROCESS_ENTRY*>(
+                responseBuffer.data() + entryOffset);
+
+            KernelProcessSnapshotEntry processEntry{};
+            processEntry.processId = static_cast<std::uint32_t>(entry->processId);
+            processEntry.parentProcessId = static_cast<std::uint32_t>(entry->parentProcessId);
+            processEntry.flags = static_cast<std::uint32_t>(entry->flags);
+            processEntry.imageName = toKernelImageName(*entry);
+            processListOut->push_back(std::move(processEntry));
+        }
+
+        if (detailTextOut != nullptr)
+        {
+            std::ostringstream oss;
+            oss << "version=" << responseHeader->version
+                << ", total=" << responseHeader->totalCount
+                << ", returned=" << responseHeader->returnedCount
+                << ", parsed=" << processListOut->size()
+                << ", bytesReturned=" << bytesReturned;
+            *detailTextOut = oss.str();
+        }
+        return true;
+    }
+
     // isProcessPresentBySnapshot 作用：
     // - 通过 Toolhelp 进程快照判断目标 PID 当前是否仍存在；
     // - 用于“结束进程组合动作”每一步后的真实存活判定。
@@ -884,6 +1035,13 @@ void ProcessDock::initializeTopControls()
     m_processSearchLineEdit->setStyleSheet(buildBlueLineEditStyle());
     m_processSearchLineEdit->setMaximumWidth(320);
 
+    // 内核对比开关：
+    // - 勾选后每轮刷新额外请求 R0 进程列表；
+    // - UI 会把“R0 有、R3 无”的进程按红色高亮显示。
+    m_kernelCompareCheck = new QCheckBox("刷新时对比内核进程（查隐藏）", this);
+    m_kernelCompareCheck->setChecked(false);
+    m_kernelCompareCheck->setToolTip("勾选后刷新会额外请求驱动进程列表，并高亮仅内核可见的进程。");
+
     // 按钮统一蓝色风格（图标按钮版本）。
     const QString buttonStyle = buildBlueButtonStyle(true);
     m_treeToggleButton->setStyleSheet(buttonStyle);
@@ -897,6 +1055,7 @@ void ProcessDock::initializeTopControls()
     m_controlLayout->addWidget(m_startButton);
     m_controlLayout->addWidget(m_pauseButton);
     m_controlLayout->addWidget(m_processSearchLineEdit);
+    m_controlLayout->addWidget(m_kernelCompareCheck);
     m_controlLayout->addStretch(1);
     m_controlLayout->addWidget(m_refreshLabel);
     m_controlLayout->addWidget(m_refreshSlider);
@@ -1407,6 +1566,16 @@ void ProcessDock::initializeConnections()
         info << logEvent
             << "[ProcessDock] 进程枚举策略切换为: "
             << strategyToText(toStrategy(m_strategyCombo->currentIndex()))
+            << eol;
+        requestAsyncRefresh(true);
+    });
+
+    // 内核对比勾选变更后立即刷新，确保列表高亮状态与开关一致。
+    connect(m_kernelCompareCheck, &QCheckBox::toggled, this, [this](const bool checked) {
+        kLogEvent logEvent;
+        info << logEvent
+            << "[ProcessDock] 内核进程对比开关变更, enabled="
+            << (checked ? "true" : "false")
             << eol;
         requestAsyncRefresh(true);
     });
@@ -1935,6 +2104,8 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     // 复制当前缓存快照给后台线程，避免跨线程读写冲突。
     const int strategyIndex = m_strategyCombo->currentIndex();
     const bool detailModeEnabled = (currentViewMode() == ViewMode::Detail);
+    const bool queryKernelProcessList =
+        (m_kernelCompareCheck != nullptr && m_kernelCompareCheck->isChecked());
     const bool isFirstRefresh = m_cacheByIdentity.empty();
     const int staticDetailFillBudget =
         detailModeEnabled
@@ -1952,8 +2123,9 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     // 刷新前先更新 UI 状态与日志，给出明显“刷新中”提示。
     updateRefreshStateUi(
         true,
-        QString("● 正在刷新... 策略=%1")
-        .arg(QString::fromUtf8(strategyToText(toStrategy(strategyIndex)))));
+        QString("● 正在刷新... 策略=%1%2")
+        .arg(QString::fromUtf8(strategyToText(toStrategy(strategyIndex))))
+        .arg(queryKernelProcessList ? " | 内核对比=ON" : ""));
 
     {
         kLogEvent logEvent;
@@ -1962,6 +2134,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
             << ", force=" << (forceRefresh ? "true" : "false")
             << ", strategy=" << strategyToText(toStrategy(strategyIndex))
             << ", detailMode=" << (detailModeEnabled ? "true" : "false")
+            << ", kernelCompare=" << (queryKernelProcessList ? "true" : "false")
             << ", staticBudget=" << staticDetailFillBudget
             << ", cacheSize=" << previousCache.size()
             << eol;
@@ -1973,6 +2146,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         localTicket,
         strategyIndex,
         detailModeEnabled,
+        queryKernelProcessList,
         staticDetailFillBudget,
         cpuCount,
         progressPid = m_refreshProgressTaskPid,
@@ -1981,6 +2155,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         const ProcessDock::RefreshResult refreshResult = ProcessDock::buildRefreshResult(
             strategyIndex,
             detailModeEnabled,
+            queryKernelProcessList,
             staticDetailFillBudget,
             localTicket,
             progressPid,
@@ -2086,14 +2261,26 @@ void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult)
     }
 
     // 刷新状态标签展示详细统计，明确告诉用户“刷新已完成”。
-    updateRefreshStateUi(
-        false,
-        QString("● 刷新完成 %1 ms | 方法:%2 | 枚举:%3 新增:%4 退出:%5")
+    QString refreshStatusText = QString("● 刷新完成 %1 ms | 方法:%2 | 枚举:%3 新增:%4 退出:%5")
         .arg(elapsedMs)
         .arg(QString::fromUtf8(strategyToText(refreshResult.actualStrategy)))
         .arg(refreshResult.enumeratedCount)
         .arg(refreshResult.newProcessCount)
-        .arg(refreshResult.exitedProcessCount));
+        .arg(refreshResult.exitedProcessCount);
+    if (refreshResult.kernelCompareEnabled)
+    {
+        if (refreshResult.kernelQuerySucceeded)
+        {
+            refreshStatusText += QString(" | 内核:%1 隐藏:%2")
+                .arg(refreshResult.kernelEnumeratedCount)
+                .arg(refreshResult.kernelOnlyCount);
+        }
+        else
+        {
+            refreshStatusText += " | 内核查询失败";
+        }
+    }
+    updateRefreshStateUi(false, refreshStatusText);
 
     // 输出详细刷新日志，便于后续性能与正确性排查。
     {
@@ -2110,6 +2297,11 @@ void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult)
             << ", staticFilled=" << refreshResult.staticFilledCount
             << ", staticDeferred=" << refreshResult.staticDeferredCount
             << ", imagePathFilled=" << refreshResult.imagePathFilledCount
+            << ", kernelCompareEnabled=" << (refreshResult.kernelCompareEnabled ? "true" : "false")
+            << ", kernelQuerySucceeded=" << (refreshResult.kernelQuerySucceeded ? "true" : "false")
+            << ", kernelEnumerated=" << refreshResult.kernelEnumeratedCount
+            << ", kernelOnly=" << refreshResult.kernelOnlyCount
+            << ", kernelDetail=" << refreshResult.kernelQueryDetailText
             << ", cacheNow=" << m_cacheByIdentity.size()
             << eol;
     }
@@ -2118,6 +2310,7 @@ void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult)
 ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
     const int strategyIndex,
     const bool detailModeEnabled,
+    const bool queryKernelProcessList,
     const int staticDetailFillBudget,
     const std::uint64_t refreshTicket,
     const int progressTaskPid,
@@ -2134,6 +2327,7 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
     refreshResult.selectedStrategy = toStrategy(strategyIndex);
     refreshResult.actualStrategy = refreshResult.selectedStrategy;
     refreshResult.detailModeEnabled = detailModeEnabled;
+    refreshResult.kernelCompareEnabled = queryKernelProcessList;
 
     // 进度条阶段 1：开始枚举。
     if (progressTaskPid > 0)
@@ -2146,6 +2340,72 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         strategy,
         &refreshResult.actualStrategy);
     const std::uint64_t sampleTick = steadyNow100ns();
+    std::unordered_set<std::uint32_t> kernelOnlyPidSet;
+
+    // 可选阶段：向 R0 请求内核进程列表，并追加“仅内核可见”的记录。
+    if (queryKernelProcessList)
+    {
+        if (progressTaskPid > 0)
+        {
+            kPro.set(progressTaskPid, "正在请求内核进程列表...", 18, 0.18f);
+        }
+
+        std::vector<KernelProcessSnapshotEntry> kernelProcessList;
+        std::string kernelQueryDetailText;
+        const bool queryKernelOk = enumerateProcessesByR0Driver(&kernelProcessList, &kernelQueryDetailText);
+        refreshResult.kernelQuerySucceeded = queryKernelOk;
+        refreshResult.kernelQueryDetailText = kernelQueryDetailText;
+        refreshResult.kernelEnumeratedCount = kernelProcessList.size();
+
+        if (queryKernelOk)
+        {
+            std::unordered_set<std::uint32_t> userPidSet;
+            userPidSet.reserve(latestProcessList.size() * 2 + 1);
+            for (const ks::process::ProcessRecord& processRecord : latestProcessList)
+            {
+                userPidSet.insert(processRecord.pid);
+            }
+
+            for (const KernelProcessSnapshotEntry& kernelProcess : kernelProcessList)
+            {
+                if (userPidSet.find(kernelProcess.processId) != userPidSet.end())
+                {
+                    continue;
+                }
+                userPidSet.insert(kernelProcess.processId);
+
+                ks::process::ProcessRecord kernelOnlyRecord{};
+                kernelOnlyRecord.pid = kernelProcess.processId;
+                kernelOnlyRecord.parentPid = kernelProcess.parentProcessId;
+                kernelOnlyRecord.creationTime100ns =
+                    KernelOnlyCreationTimeSeed + static_cast<std::uint64_t>(kernelProcess.processId);
+                kernelOnlyRecord.processName = kernelProcess.imageName.empty()
+                    ? std::string("[R0] Unknown")
+                    : std::string("[R0] ") + kernelProcess.imageName;
+                kernelOnlyRecord.imagePath = "[仅内核枚举可见]";
+                kernelOnlyRecord.commandLine = "[仅内核枚举可见]";
+                kernelOnlyRecord.userName = "-";
+                kernelOnlyRecord.signatureState = "KernelOnly(Hidden?)";
+                kernelOnlyRecord.signaturePublisher.clear();
+                kernelOnlyRecord.signatureTrusted = false;
+                kernelOnlyRecord.startTimeText = "-";
+                kernelOnlyRecord.architectureText = "Unknown";
+                kernelOnlyRecord.priorityText = "-";
+                kernelOnlyRecord.isAdmin = false;
+                kernelOnlyRecord.dynamicCountersReady = true;
+                kernelOnlyRecord.staticDetailsReady = true;
+
+                latestProcessList.push_back(std::move(kernelOnlyRecord));
+                kernelOnlyPidSet.insert(kernelProcess.processId);
+                ++refreshResult.kernelOnlyCount;
+            }
+        }
+        else if (refreshResult.kernelQueryDetailText.empty())
+        {
+            refreshResult.kernelQueryDetailText = "query kernel process list failed";
+        }
+    }
+
     refreshResult.enumeratedCount = latestProcessList.size();
 
     if (progressTaskPid > 0)
@@ -2177,6 +2437,8 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         identityKeys[recordIndex] = identityKey;
 
         const auto oldCacheIt = previousCache.find(identityKey);
+        const bool isKernelOnlyRecord =
+            (kernelOnlyPidSet.find(processRecord.pid) != kernelOnlyPidSet.end());
         bool needsStaticFill = false;
         bool includeSignatureCheck = false;
         if (oldCacheIt != previousCache.end())
@@ -2216,11 +2478,31 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         }
         else
         {
-            // 新出现进程：计数 + 依据预算决定是否补齐静态详情。
-            ++refreshResult.newProcessCount;
-            isNewProcess[recordIndex] = true;
-            needsStaticFill = true;
-            includeSignatureCheck = detailModeEnabled;
+            if (isKernelOnlyRecord)
+            {
+                // 仅内核可见记录默认不走“新增绿色”路径，避免与红色隐藏高亮冲突。
+                isNewProcess[recordIndex] = false;
+                needsStaticFill = false;
+                includeSignatureCheck = false;
+            }
+            else
+            {
+                // 新出现进程：计数 + 依据预算决定是否补齐静态详情。
+                ++refreshResult.newProcessCount;
+                isNewProcess[recordIndex] = true;
+                needsStaticFill = true;
+                includeSignatureCheck = detailModeEnabled;
+            }
+        }
+
+        if (isKernelOnlyRecord)
+        {
+            processRecord.staticDetailsReady = true;
+            processRecord.dynamicCountersReady = true;
+            if (processRecord.signatureState.empty())
+            {
+                processRecord.signatureState = "KernelOnly(Hidden?)";
+            }
         }
 
         if (needsStaticFill)
@@ -2460,6 +2742,8 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         cacheEntry.missingRounds = 0;
         cacheEntry.isNewInLatestRound = isNewProcess[recordIndex];
         cacheEntry.isExitedInLatestRound = false;
+        cacheEntry.isKernelOnlyInLatestRound =
+            (kernelOnlyPidSet.find(cacheEntry.record.pid) != kernelOnlyPidSet.end());
         {
             // staticFillAttemptCount/staticFillFailureCount 用途：
             // - 记录当前 identity 的补齐尝试历史；
@@ -2507,6 +2791,11 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         }
 
         const CacheEntry& oldEntry = oldPair.second;
+        if (oldEntry.isKernelOnlyInLatestRound)
+        {
+            // 仅内核可见记录不做“退出保留”，避免在关闭内核对比后残留一轮灰底。
+            continue;
+        }
         if (oldEntry.missingRounds >= 1)
         {
             // 已经保留过一轮，本次彻底移除。
@@ -2662,20 +2951,34 @@ void ProcessDock::rebuildTable()
             rowItem->setForeground(toColumnIndex(TableColumn::Signature), adminYesColor);
         }
 
-        // 新增进程绿色高亮；退出保留进程灰色高亮。
-        if (displayRow.isNew)
-        {
-            for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
-            {
-                rowItem->setBackground(columnIndex, KswordTheme::NewRowBackgroundColor());
-            }
-        }
-        else if (displayRow.isExited)
+        // 退出保留进程灰色高亮；仅内核可见进程红色高亮；普通新增进程绿色高亮。
+        if (displayRow.isExited)
         {
             for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
             {
                 rowItem->setBackground(columnIndex, KswordTheme::ExitedRowBackgroundColor());
                 rowItem->setForeground(columnIndex, KswordTheme::ExitedRowForegroundColor());
+            }
+        }
+        else if (displayRow.isKernelOnly)
+        {
+            const QColor kernelOnlyForeground = KswordTheme::IsDarkModeEnabled()
+                ? QColor(255, 140, 140)
+                : QColor(200, 32, 32);
+            const QColor kernelOnlyBackground = KswordTheme::IsDarkModeEnabled()
+                ? QColor(110, 28, 28, 140)
+                : QColor(255, 224, 224);
+            for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
+            {
+                rowItem->setBackground(columnIndex, kernelOnlyBackground);
+                rowItem->setForeground(columnIndex, kernelOnlyForeground);
+            }
+        }
+        else if (displayRow.isNew)
+        {
+            for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
+            {
+                rowItem->setBackground(columnIndex, KswordTheme::NewRowBackgroundColor());
             }
         }
         else
@@ -2862,6 +3165,7 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildListDisplayOrder() const
         displayRow.depth = 0;
         displayRow.isNew = cachePair.second.isNewInLatestRound;
         displayRow.isExited = cachePair.second.isExitedInLatestRound;
+        displayRow.isKernelOnly = cachePair.second.isKernelOnlyInLatestRound;
         displayRows.push_back(displayRow);
     }
 
@@ -2948,6 +3252,7 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildTreeDisplayOrder() const
             displayRow.depth = depth;
             displayRow.isNew = node.cacheEntry->isNewInLatestRound;
             displayRow.isExited = node.cacheEntry->isExitedInLatestRound;
+            displayRow.isKernelOnly = node.cacheEntry->isKernelOnlyInLatestRound;
             displayRows.push_back(displayRow);
 
             const auto childIt = childrenByParentPid.find(node.cacheEntry->record.pid);
@@ -2982,6 +3287,7 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildTreeDisplayOrder() const
         fallbackRow.depth = 0;
         fallbackRow.isNew = node.cacheEntry->isNewInLatestRound;
         fallbackRow.isExited = node.cacheEntry->isExitedInLatestRound;
+        fallbackRow.isKernelOnly = node.cacheEntry->isKernelOnlyInLatestRound;
         displayRows.push_back(fallbackRow);
     }
 
@@ -3387,7 +3693,7 @@ QIcon ProcessDock::resolveProcessIcon(const ks::process::ProcessRecord& processR
     // 仅使用后台缓存中的 imagePath：
     // - 禁止在 UI 线程里按 PID 再查路径，避免刷新阶段出现卡顿。
     QString pathText = QString::fromStdString(processRecord.imagePath);
-    if (pathText.trimmed().isEmpty())
+    if (pathText.trimmed().isEmpty() || pathText.startsWith('['))
     {
         return QIcon(":/Icon/process_main.svg");
     }

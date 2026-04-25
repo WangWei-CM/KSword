@@ -20,6 +20,11 @@ Environment:
 
 #include <ntstrsafe.h>
 
+#define KSWORD_ARK_ENUM_RESPONSE_HEADER_SIZE \
+    (sizeof(KSWORD_ARK_ENUM_PROCESS_RESPONSE) - sizeof(KSWORD_ARK_PROCESS_ENTRY))
+#define KSWORD_ARK_ENUM_SSDT_RESPONSE_HEADER_SIZE \
+    (sizeof(KSWORD_ARK_ENUM_SSDT_RESPONSE) - sizeof(KSWORD_ARK_SSDT_ENTRY))
+
 VOID
 KswordARKDriverEvtIoDeviceControl(
     _In_ WDFQUEUE Queue,
@@ -53,6 +58,7 @@ Return Value:
     size_t inputBufferLength = 0;
     NTSTATUS status = STATUS_SUCCESS;
     size_t completeBytes = 0;
+    BOOLEAN completeRequest = TRUE;
     CHAR logMessage[KSWORD_ARK_LOG_ENTRY_MAX_BYTES] = { 0 };
 
     TraceEvents(
@@ -345,6 +351,241 @@ Return Value:
         }
         break;
     }
+    case IOCTL_KSWORD_ARK_ENUM_PROCESS:
+    {
+        KSWORD_ARK_ENUM_PROCESS_REQUEST* enumRequest = NULL;
+        KSWORD_ARK_ENUM_PROCESS_REQUEST defaultRequest = { 0 };
+        PVOID outputBuffer = NULL;
+        size_t outputBufferLength = 0;
+
+        if (InputBufferLength >= sizeof(KSWORD_ARK_ENUM_PROCESS_REQUEST)) {
+            status = WdfRequestRetrieveInputBuffer(
+                Request,
+                sizeof(KSWORD_ARK_ENUM_PROCESS_REQUEST),
+                &inputBuffer,
+                &inputBufferLength);
+            if (!NT_SUCCESS(status)) {
+                (void)RtlStringCbPrintfA(
+                    logMessage,
+                    sizeof(logMessage),
+                    "R0 enum-process ioctl: input buffer invalid, status=0x%08X.",
+                    (unsigned int)status);
+                (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+                break;
+            }
+            enumRequest = (KSWORD_ARK_ENUM_PROCESS_REQUEST*)inputBuffer;
+        }
+        else {
+            enumRequest = &defaultRequest;
+            enumRequest->flags = KSWORD_ARK_ENUM_PROCESS_FLAG_SCAN_CID_TABLE;
+            enumRequest->startPid = 0U;
+            enumRequest->endPid = 0U;
+            enumRequest->reserved = 0U;
+        }
+
+        status = WdfRequestRetrieveOutputBuffer(
+            Request,
+            KSWORD_ARK_ENUM_RESPONSE_HEADER_SIZE,
+            &outputBuffer,
+            &outputBufferLength);
+        if (!NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 enum-process ioctl: output buffer invalid, status=0x%08X.",
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+            break;
+        }
+
+        status = KswordARKDriverEnumerateProcesses(
+            outputBuffer,
+            outputBufferLength,
+            enumRequest,
+            &completeBytes);
+        if (!NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 enum-process failed: status=0x%08X, outBytes=%Iu.",
+                (unsigned int)status,
+                completeBytes);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+            break;
+        }
+
+        if (completeBytes >= KSWORD_ARK_ENUM_RESPONSE_HEADER_SIZE) {
+            KSWORD_ARK_ENUM_PROCESS_RESPONSE* responseHeader =
+                (KSWORD_ARK_ENUM_PROCESS_RESPONSE*)outputBuffer;
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 enum-process success: total=%lu, returned=%lu, outBytes=%Iu.",
+                (unsigned long)responseHeader->totalCount,
+                (unsigned long)responseHeader->returnedCount,
+                completeBytes);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Info", logMessage);
+        }
+        else {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 enum-process success: outBytes=%Iu (header partial).",
+                completeBytes);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Warn", logMessage);
+        }
+        break;
+    }
+    case IOCTL_KSWORD_ARK_ENUM_SSDT:
+    {
+        KSWORD_ARK_ENUM_SSDT_REQUEST* enumRequest = NULL;
+        KSWORD_ARK_ENUM_SSDT_REQUEST defaultRequest = { 0 };
+        PVOID outputBuffer = NULL;
+        size_t outputBufferLength = 0;
+
+        if (InputBufferLength >= sizeof(KSWORD_ARK_ENUM_SSDT_REQUEST)) {
+            status = WdfRequestRetrieveInputBuffer(
+                Request,
+                sizeof(KSWORD_ARK_ENUM_SSDT_REQUEST),
+                &inputBuffer,
+                &inputBufferLength);
+            if (!NT_SUCCESS(status)) {
+                (void)RtlStringCbPrintfA(
+                    logMessage,
+                    sizeof(logMessage),
+                    "R0 enum-ssdt ioctl: input buffer invalid, status=0x%08X.",
+                    (unsigned int)status);
+                (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+                break;
+            }
+            enumRequest = (KSWORD_ARK_ENUM_SSDT_REQUEST*)inputBuffer;
+        }
+        else {
+            enumRequest = &defaultRequest;
+            enumRequest->flags = KSWORD_ARK_ENUM_SSDT_FLAG_INCLUDE_UNRESOLVED;
+            enumRequest->reserved = 0U;
+        }
+
+        status = WdfRequestRetrieveOutputBuffer(
+            Request,
+            KSWORD_ARK_ENUM_SSDT_RESPONSE_HEADER_SIZE,
+            &outputBuffer,
+            &outputBufferLength);
+        if (!NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 enum-ssdt ioctl: output buffer invalid, status=0x%08X.",
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+            break;
+        }
+
+        status = KswordARKDriverEnumerateSsdt(
+            outputBuffer,
+            outputBufferLength,
+            enumRequest,
+            &completeBytes);
+        if (!NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 enum-ssdt failed: status=0x%08X, outBytes=%Iu.",
+                (unsigned int)status,
+                completeBytes);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+            break;
+        }
+
+        if (completeBytes >= KSWORD_ARK_ENUM_SSDT_RESPONSE_HEADER_SIZE) {
+            KSWORD_ARK_ENUM_SSDT_RESPONSE* responseHeader =
+                (KSWORD_ARK_ENUM_SSDT_RESPONSE*)outputBuffer;
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 enum-ssdt success: total=%lu, returned=%lu, outBytes=%Iu.",
+                (unsigned long)responseHeader->totalCount,
+                (unsigned long)responseHeader->returnedCount,
+                completeBytes);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Info", logMessage);
+        }
+        else {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 enum-ssdt success: outBytes=%Iu (header partial).",
+                completeBytes);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Warn", logMessage);
+        }
+        break;
+    }
+    case IOCTL_KSWORD_ARK_SET_CALLBACK_RULES:
+    {
+        status = KswordARKCallbackIoctlSetRules(
+            Request,
+            InputBufferLength,
+            &completeBytes);
+        if (NT_SUCCESS(status)) {
+            (void)KswordARKDriverEnqueueLogFrame(device, "Info", "Callback rules applied.");
+        }
+        else {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "Callback rules apply failed, status=0x%08X.",
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Error", logMessage);
+        }
+        break;
+    }
+    case IOCTL_KSWORD_ARK_GET_CALLBACK_RUNTIME_STATE:
+    {
+        status = KswordARKCallbackIoctlGetRuntimeState(
+            Request,
+            OutputBufferLength,
+            &completeBytes);
+        break;
+    }
+    case IOCTL_KSWORD_ARK_WAIT_CALLBACK_EVENT:
+    {
+        status = KswordARKCallbackIoctlWaitEvent(
+            Request,
+            OutputBufferLength,
+            &completeBytes);
+        if (status == STATUS_PENDING) {
+            completeRequest = FALSE;
+        }
+        break;
+    }
+    case IOCTL_KSWORD_ARK_ANSWER_CALLBACK_EVENT:
+    {
+        status = KswordARKCallbackIoctlAnswerEvent(
+            Request,
+            InputBufferLength,
+            &completeBytes);
+        if (!NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "Callback answer failed, status=0x%08X.",
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Warn", logMessage);
+        }
+        break;
+    }
+    case IOCTL_KSWORD_ARK_CANCEL_ALL_PENDING_DECISIONS:
+    {
+        status = KswordARKCallbackIoctlCancelAllPending(&completeBytes);
+        if (!NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "Cancel-all pending decisions failed, status=0x%08X.",
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Warn", logMessage);
+        }
+        break;
+    }
     default:
         status = STATUS_INVALID_DEVICE_REQUEST;
         (void)RtlStringCbPrintfA(
@@ -356,5 +597,7 @@ Return Value:
         break;
     }
 
-    WdfRequestCompleteWithInformation(Request, status, completeBytes);
+    if (completeRequest) {
+        WdfRequestCompleteWithInformation(Request, status, completeBytes);
+    }
 }

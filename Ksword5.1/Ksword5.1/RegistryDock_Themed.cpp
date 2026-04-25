@@ -47,6 +47,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <sddl.h>
 
 namespace
 {
@@ -115,6 +116,145 @@ namespace
             return QString();
         }
         return trimmed;
+    }
+
+    // queryCurrentUserSidText：
+    // - 作用：解析当前进程所属用户 SID 文本（用于 HKCU -> \REGISTRY\USER\<SID> 映射）；
+    // - 失败时返回空字符串，调用方可走保守兜底路径。
+    QString queryCurrentUserSidText()
+    {
+        HANDLE tokenHandle = nullptr;
+        if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &tokenHandle))
+        {
+            return QString();
+        }
+
+        DWORD tokenInfoBytes = 0;
+        ::GetTokenInformation(tokenHandle, TokenUser, nullptr, 0, &tokenInfoBytes);
+        if (tokenInfoBytes == 0)
+        {
+            ::CloseHandle(tokenHandle);
+            return QString();
+        }
+
+        QByteArray tokenBuffer(static_cast<int>(tokenInfoBytes), 0);
+        if (!::GetTokenInformation(tokenHandle, TokenUser, tokenBuffer.data(), tokenInfoBytes, &tokenInfoBytes))
+        {
+            ::CloseHandle(tokenHandle);
+            return QString();
+        }
+        ::CloseHandle(tokenHandle);
+
+        const TOKEN_USER* tokenUser = reinterpret_cast<const TOKEN_USER*>(tokenBuffer.constData());
+        if (tokenUser == nullptr || tokenUser->User.Sid == nullptr)
+        {
+            return QString();
+        }
+
+        LPWSTR sidTextBuffer = nullptr;
+        if (!::ConvertSidToStringSidW(tokenUser->User.Sid, &sidTextBuffer) || sidTextBuffer == nullptr)
+        {
+            return QString();
+        }
+
+        const QString sidText = QString::fromWCharArray(sidTextBuffer).trimmed();
+        ::LocalFree(sidTextBuffer);
+        return sidText;
+    }
+
+    // buildKernelRegistryPath：
+    // - 作用：把 HK*/HKEY_* 形式转换为内核命名空间 \REGISTRY\...；
+    // - 返回：可直接用于驱动/内核回调规则的路径文本。
+    QString buildKernelRegistryPath(const QString& registryPathText)
+    {
+        QString normalizedPath = registryPathText.trimmed();
+        normalizedPath.replace('/', '\\');
+        while (normalizedPath.contains(QStringLiteral("\\\\")))
+        {
+            normalizedPath.replace(QStringLiteral("\\\\"), QStringLiteral("\\"));
+        }
+        if (normalizedPath.endsWith('\\'))
+        {
+            normalizedPath.chop(1);
+        }
+        if (normalizedPath.isEmpty())
+        {
+            return QString();
+        }
+
+        if (normalizedPath.startsWith(QStringLiteral("\\REGISTRY\\"), Qt::CaseInsensitive)
+            || normalizedPath.compare(QStringLiteral("\\REGISTRY"), Qt::CaseInsensitive) == 0)
+        {
+            return normalizedPath;
+        }
+
+        auto restPathAfterRoot = [&normalizedPath](const QString& rootText) {
+            QString restPath = normalizedPath.mid(rootText.size());
+            while (restPath.startsWith('\\'))
+            {
+                restPath.remove(0, 1);
+            }
+            return restPath;
+        };
+
+        auto buildWithRoot = [](const QString& kernelRootPath, const QString& restPath) {
+            if (restPath.isEmpty())
+            {
+                return kernelRootPath;
+            }
+            return QStringLiteral("%1\\%2").arg(kernelRootPath, restPath);
+        };
+
+        if (normalizedPath.startsWith(QStringLiteral("HKLM"), Qt::CaseInsensitive))
+        {
+            return buildWithRoot(QStringLiteral("\\REGISTRY\\MACHINE"), restPathAfterRoot(QStringLiteral("HKLM")));
+        }
+        if (normalizedPath.startsWith(QStringLiteral("HKEY_LOCAL_MACHINE"), Qt::CaseInsensitive))
+        {
+            return buildWithRoot(QStringLiteral("\\REGISTRY\\MACHINE"), restPathAfterRoot(QStringLiteral("HKEY_LOCAL_MACHINE")));
+        }
+        if (normalizedPath.startsWith(QStringLiteral("HKU"), Qt::CaseInsensitive))
+        {
+            return buildWithRoot(QStringLiteral("\\REGISTRY\\USER"), restPathAfterRoot(QStringLiteral("HKU")));
+        }
+        if (normalizedPath.startsWith(QStringLiteral("HKEY_USERS"), Qt::CaseInsensitive))
+        {
+            return buildWithRoot(QStringLiteral("\\REGISTRY\\USER"), restPathAfterRoot(QStringLiteral("HKEY_USERS")));
+        }
+        if (normalizedPath.startsWith(QStringLiteral("HKCR"), Qt::CaseInsensitive))
+        {
+            return buildWithRoot(QStringLiteral("\\REGISTRY\\MACHINE\\SOFTWARE\\Classes"), restPathAfterRoot(QStringLiteral("HKCR")));
+        }
+        if (normalizedPath.startsWith(QStringLiteral("HKEY_CLASSES_ROOT"), Qt::CaseInsensitive))
+        {
+            return buildWithRoot(QStringLiteral("\\REGISTRY\\MACHINE\\SOFTWARE\\Classes"), restPathAfterRoot(QStringLiteral("HKEY_CLASSES_ROOT")));
+        }
+        if (normalizedPath.startsWith(QStringLiteral("HKCC"), Qt::CaseInsensitive))
+        {
+            return buildWithRoot(
+                QStringLiteral("\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Hardware Profiles\\Current"),
+                restPathAfterRoot(QStringLiteral("HKCC")));
+        }
+        if (normalizedPath.startsWith(QStringLiteral("HKEY_CURRENT_CONFIG"), Qt::CaseInsensitive))
+        {
+            return buildWithRoot(
+                QStringLiteral("\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Hardware Profiles\\Current"),
+                restPathAfterRoot(QStringLiteral("HKEY_CURRENT_CONFIG")));
+        }
+        if (normalizedPath.startsWith(QStringLiteral("HKCU"), Qt::CaseInsensitive)
+            || normalizedPath.startsWith(QStringLiteral("HKEY_CURRENT_USER"), Qt::CaseInsensitive))
+        {
+            static const QString cachedUserSid = queryCurrentUserSidText();
+            const QString userRootPath = cachedUserSid.isEmpty()
+                ? QStringLiteral("\\REGISTRY\\USER")
+                : QStringLiteral("\\REGISTRY\\USER\\%1").arg(cachedUserSid);
+            const QString restPath = normalizedPath.startsWith(QStringLiteral("HKCU"), Qt::CaseInsensitive)
+                ? restPathAfterRoot(QStringLiteral("HKCU"))
+                : restPathAfterRoot(QStringLiteral("HKEY_CURRENT_USER"));
+            return buildWithRoot(userRootPath, restPath);
+        }
+
+        return normalizedPath;
     }
 
     // bytesToHex：把二进制输出为十六进制字符串。
@@ -1203,6 +1343,7 @@ void RegistryDock::showTreeContextMenu(const QPoint& pos)
     QAction* deleteAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("删除"));
     menu.addSeparator();
     QAction* copyPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制路径"));
+    QAction* copyKernelPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制内核模式地址"));
     QAction* refreshAction = menu.addAction(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("刷新"));
     menu.addSeparator();
     QAction* exportAction = menu.addAction(QIcon(":/Icon/log_export.svg"), QStringLiteral("导出 .reg"));
@@ -1224,6 +1365,7 @@ void RegistryDock::showTreeContextMenu(const QPoint& pos)
     else if (action == renameAction) renameSelectedObject();
     else if (action == deleteAction) deleteSelectedObject();
     else if (action == copyPathAction) copyCurrentPathToClipboard();
+    else if (action == copyKernelPathAction) copyCurrentKernelPathToClipboard();
     else if (action == refreshAction) refreshCurrentKey(true);
     else if (action == exportAction) exportCurrentKeyAsync();
     else if (action == importAction) importRegFileAsync();
@@ -1242,6 +1384,7 @@ void RegistryDock::showValueContextMenu(const QPoint& pos)
     QAction* renameAction = menu.addAction(QIcon(":/Icon/process_priority.svg"), QStringLiteral("重命名"));
     QAction* deleteAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("删除"));
     QAction* copyPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制路径"));
+    QAction* copyKernelPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制内核模式地址"));
 
     QAction* action = menu.exec(m_valueTable->viewport()->mapToGlobal(pos));
     if (action == nullptr) return;
@@ -1260,6 +1403,7 @@ void RegistryDock::showValueContextMenu(const QPoint& pos)
     else if (action == renameAction) renameSelectedObject();
     else if (action == deleteAction) deleteSelectedObject();
     else if (action == copyPathAction) copyCurrentPathToClipboard();
+    else if (action == copyKernelPathAction) copySelectedValueKernelPathToClipboard();
 }
 
 void RegistryDock::createSubKey()
@@ -1703,6 +1847,59 @@ void RegistryDock::copyCurrentPathToClipboard()
 
     kLogEvent event;
     info << event << "[RegistryDock] 复制路径到剪贴板, path=" << m_currentPath.toStdString() << eol;
+}
+
+void RegistryDock::copyCurrentKernelPathToClipboard()
+{
+    const QString kernelPath = buildKernelRegistryPath(m_currentPath);
+    if (kernelPath.isEmpty())
+    {
+        return;
+    }
+
+    QApplication::clipboard()->setText(kernelPath);
+
+    kLogEvent event;
+    info << event
+        << "[RegistryDock] 复制内核模式地址到剪贴板, path="
+        << m_currentPath.toStdString()
+        << ", kernelPath="
+        << kernelPath.toStdString()
+        << eol;
+}
+
+void RegistryDock::copySelectedValueKernelPathToClipboard()
+{
+    QString targetPath = m_currentPath;
+    const int selectedRow = m_valueTable->currentRow();
+    if (selectedRow >= 0)
+    {
+        QTableWidgetItem* valueNameItem = m_valueTable->item(selectedRow, 0);
+        if (valueNameItem != nullptr)
+        {
+            const QString valueName = valueNameItem->data(Qt::UserRole).toString().trimmed();
+            if (!valueName.isEmpty())
+            {
+                targetPath += QStringLiteral("\\") + valueName;
+            }
+        }
+    }
+
+    const QString kernelPath = buildKernelRegistryPath(targetPath);
+    if (kernelPath.isEmpty())
+    {
+        return;
+    }
+
+    QApplication::clipboard()->setText(kernelPath);
+
+    kLogEvent event;
+    info << event
+        << "[RegistryDock] 复制值内核模式地址到剪贴板, path="
+        << targetPath.toStdString()
+        << ", kernelPath="
+        << kernelPath.toStdString()
+        << eol;
 }
 
 void RegistryDock::exportCurrentKeyAsync()

@@ -157,11 +157,17 @@
     <ClCompile Include="Framework\StartupSplash.cpp" />
     <ClCompile Include="Framework\ThemedMessageBox.cpp" />
     <ClCompile Include="KernelDock\KernelDock.cpp" />
+    <ClCompile Include="KernelDock\KernelDock.CallbackIntercept.cpp" />
+    <ClCompile Include="KernelDock\KernelDock.CallbackPromptManager.cpp" />
+    <ClCompile Include="KernelDock\KernelDock.CallbackRuleSerializer.cpp" />
+    <ClCompile Include="KernelDock\KernelDock.CallbackRuleValidator.cpp" />
     <ClCompile Include="KernelDock\KernelDock.ContextMenu.cpp" />
     <ClCompile Include="KernelDock\KernelDock.Runtime.cpp" />
+    <ClCompile Include="KernelDock\KernelDock.Ssdt.cpp" />
     <ClCompile Include="KernelDock\KernelDockAtomWorker.cpp" />
     <ClCompile Include="KernelDock\KernelDockObjectNamespaceWorker.cpp" />
     <ClCompile Include="KernelDock\KernelDockQueryWorker.cpp" />
+    <ClCompile Include="KernelDock\KernelDockSsdtWorker.cpp" />
     <ClCompile Include="MainWindow.cpp" />
     <ClCompile Include="MiscDock\BootEditor\BootEditorTab.Actions.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.cpp" />
@@ -267,8 +273,10 @@
     <ClInclude Include="Framework\StartupSplash.h" />
     <ClInclude Include="Framework\ThemedMessageBox.h" />
     <ClInclude Include="KernelDock\KernelDockAtomWorker.h" />
+    <ClInclude Include="KernelDock\KernelDock.CallbackIntercept.h" />
     <ClInclude Include="KernelDock\KernelDockObjectNamespaceWorker.h" />
     <ClInclude Include="KernelDock\KernelDockQueryWorker.h" />
+    <ClInclude Include="KernelDock\KernelDockSsdtWorker.h" />
     <ClInclude Include="ksword\ksword.h" />
     <ClInclude Include="ksword\process\process.h" />
     <ClInclude Include="ksword\string\string.h" />
@@ -280,6 +288,7 @@
     <ClInclude Include="句柄\HandleObjectTypeWorker.h" />
     <QtMoc Include="HardwareDock\HardwareDock.h" />
     <QtMoc Include="KernelDock\KernelDock.h" />
+    <QtMoc Include="KernelDock\KernelDock.CallbackPromptManager.h" />
     <QtMoc Include="MemoryDock\MemoryDock.h" />
     <QtMoc Include="MiscDock\BootEditor\BootEditorTab.h" />
     <QtMoc Include="MiscDock\MiscDock.h" />
