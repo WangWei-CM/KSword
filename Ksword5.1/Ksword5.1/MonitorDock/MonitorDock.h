@@ -435,6 +435,10 @@ private:
     void stopEtwCapture();
     void setEtwCapturePaused(bool paused);
     void updateEtwCaptureActionState();
+    // updateEtwCollapseHeight：
+    // - 作用：按当前展开项内容重算 ETW 折叠区高度，避免压缩折叠页内部控件；
+    // - 说明：高度不足时交给外层滚动区域处理，不在折叠页内部压缩。
+    void updateEtwCollapseHeight();
     static void WINAPI etwEventRecordCallback(struct _EVENT_RECORD* eventRecordPtr);
     void enqueueEtwEventFromRecord(const struct _EVENT_RECORD* eventRecordPtr);
     void appendEtwEventRow(

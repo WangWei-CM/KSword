@@ -1,12 +1,14 @@
 #pragma once
 
 #include <ntddk.h>
+#include <wdf.h>
 #include "driver/KswordArkProcessIoctl.h"
 
 EXTERN_C_START
 
 NTSTATUS
 KswordARKDriverTerminateProcessByPid(
+    _In_opt_ WDFDEVICE device,
     _In_ ULONG processId,
     _In_ NTSTATUS exitStatus
     );

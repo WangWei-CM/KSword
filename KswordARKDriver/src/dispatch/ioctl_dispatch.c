@@ -206,6 +206,7 @@ Return Value:
         (void)KswordARKDriverEnqueueLogFrame(device, "Info", logMessage);
 
         status = KswordARKDriverTerminateProcessByPid(
+            device,
             (ULONG)terminateRequest->processId,
             (NTSTATUS)terminateRequest->exitStatus);
         if (NT_SUCCESS(status)) {
@@ -216,6 +217,15 @@ Return Value:
                 (unsigned long)terminateRequest->processId);
             (void)KswordARKDriverEnqueueLogFrame(device, "Info", logMessage);
             completeBytes = sizeof(KSWORD_ARK_TERMINATE_PROCESS_REQUEST);
+        }
+        else if (status == STATUS_PROCESS_IS_TERMINATING) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "R0 terminate pending: pid=%lu, status=0x%08X (still terminating).",
+                (unsigned long)terminateRequest->processId,
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Warn", logMessage);
         }
         else {
             (void)RtlStringCbPrintfA(
