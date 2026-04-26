@@ -189,6 +189,36 @@ void SettingsDock::initializeAppearanceTab()
     backgroundLayout->addLayout(opacityLayout);
     appearanceRootLayout->addWidget(backgroundGroupBox);
 
+    // ===== 交互与滚动分组 =====
+    QGroupBox* interactionGroupBox = new QGroupBox(QStringLiteral("交互与滚动"), m_appearanceTab);
+    QVBoxLayout* interactionLayout = new QVBoxLayout(interactionGroupBox);
+    interactionLayout->setSpacing(8);
+
+    QLabel* interactionHintLabel = new QLabel(
+        QStringLiteral("调整全局滚动条占用空间、滚轮是否调整滑块，以及滚动条是否自动隐藏。"),
+        interactionGroupBox);
+    interactionHintLabel->setWordWrap(true);
+    interactionLayout->addWidget(interactionHintLabel);
+
+    QHBoxLayout* scrollBarWidthLayout = new QHBoxLayout();
+    scrollBarWidthLayout->setSpacing(6);
+    scrollBarWidthLayout->addWidget(new QLabel(QStringLiteral("滚动条宽度"), interactionGroupBox), 0);
+    m_scrollBarWidthCombo = new QComboBox(interactionGroupBox);
+    m_scrollBarWidthCombo->addItem(QStringLiteral("窄版（默认，遮挡更少）"), false);
+    m_scrollBarWidthCombo->addItem(QStringLiteral("宽版（旧版大小）"), true);
+    scrollBarWidthLayout->addWidget(m_scrollBarWidthCombo, 1);
+    interactionLayout->addLayout(scrollBarWidthLayout);
+
+    m_scrollBarAutoHideCheckBox = new QCheckBox(QStringLiteral("滚动条自动隐藏（悬停时展开）"), interactionGroupBox);
+    m_scrollBarAutoHideCheckBox->setToolTip(QStringLiteral("启用后滚动条默认缩到很窄，鼠标悬停时展开到当前宽度档位"));
+    interactionLayout->addWidget(m_scrollBarAutoHideCheckBox);
+
+    m_sliderWheelAdjustCheckBox = new QCheckBox(QStringLiteral("允许滚轮直接调整滑块"), interactionGroupBox);
+    m_sliderWheelAdjustCheckBox->setToolTip(QStringLiteral("关闭后，鼠标滚轮经过滑块时优先滚动页面，不再误改滑块值"));
+    interactionLayout->addWidget(m_sliderWheelAdjustCheckBox);
+
+    appearanceRootLayout->addWidget(interactionGroupBox);
+
     // ===== 启动行为分组 =====
     QGroupBox* startupGroupBox = new QGroupBox(QStringLiteral("启动行为"), m_appearanceTab);
     QVBoxLayout* startupLayout = new QVBoxLayout(startupGroupBox);
@@ -331,6 +361,18 @@ void SettingsDock::bindAppearanceSignals()
         markPendingChanges(QStringLiteral("系统右键文件解锁器开关切换"));
         });
 
+    connect(m_scrollBarWidthCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        markPendingChanges(QStringLiteral("滚动条宽度切换"));
+        });
+
+    connect(m_scrollBarAutoHideCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
+        markPendingChanges(QStringLiteral("滚动条自动隐藏开关切换"));
+        });
+
+    connect(m_sliderWheelAdjustCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
+        markPendingChanges(QStringLiteral("滑块滚轮调节开关切换"));
+        });
+
     connect(m_startupWindowScaleFactorEdit, &QLineEdit::textChanged, this, [this](const QString& /*text*/) {
         const double normalizedScaleFactor = parseWindowScaleFactorFromUi();
         updateWindowScaleFactorHintLabel(normalizedScaleFactor);
@@ -401,6 +443,20 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
         m_unlockerShellContextMenuCheckBox->setChecked(settings.unlockerShellContextMenuEnabled);
     }
 
+    if (m_scrollBarWidthCombo != nullptr)
+    {
+        const int scrollBarWidthIndex = m_scrollBarWidthCombo->findData(settings.useWideScrollBars);
+        m_scrollBarWidthCombo->setCurrentIndex(scrollBarWidthIndex >= 0 ? scrollBarWidthIndex : 0);
+    }
+    if (m_scrollBarAutoHideCheckBox != nullptr)
+    {
+        m_scrollBarAutoHideCheckBox->setChecked(settings.scrollBarAutoHideEnabled);
+    }
+    if (m_sliderWheelAdjustCheckBox != nullptr)
+    {
+        m_sliderWheelAdjustCheckBox->setChecked(settings.sliderWheelAdjustEnabled);
+    }
+
     if (m_startupWindowScaleFactorEdit != nullptr)
     {
         const double normalizedScaleFactor =
@@ -464,6 +520,12 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
         m_currentAppearanceSettings.startupScaleRecommendPromptDisabled;
     collectedSettings.unlockerShellContextMenuEnabled =
         (m_unlockerShellContextMenuCheckBox != nullptr) && m_unlockerShellContextMenuCheckBox->isChecked();
+    collectedSettings.useWideScrollBars =
+        (m_scrollBarWidthCombo != nullptr) && m_scrollBarWidthCombo->currentData().toBool();
+    collectedSettings.scrollBarAutoHideEnabled =
+        (m_scrollBarAutoHideCheckBox != nullptr) && m_scrollBarAutoHideCheckBox->isChecked();
+    collectedSettings.sliderWheelAdjustEnabled =
+        (m_sliderWheelAdjustCheckBox != nullptr) && m_sliderWheelAdjustCheckBox->isChecked();
 
     return collectedSettings;
 }
@@ -515,7 +577,10 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         && nextSettings.autoRequestAdminOnStartup == m_currentAppearanceSettings.autoRequestAdminOnStartup
         && sameScaleFactor
         && nextSettings.startupScaleRecommendPromptDisabled == m_currentAppearanceSettings.startupScaleRecommendPromptDisabled
-        && nextSettings.unlockerShellContextMenuEnabled == m_currentAppearanceSettings.unlockerShellContextMenuEnabled)
+        && nextSettings.unlockerShellContextMenuEnabled == m_currentAppearanceSettings.unlockerShellContextMenuEnabled
+        && nextSettings.useWideScrollBars == m_currentAppearanceSettings.useWideScrollBars
+        && nextSettings.scrollBarAutoHideEnabled == m_currentAppearanceSettings.scrollBarAutoHideEnabled
+        && nextSettings.sliderWheelAdjustEnabled == m_currentAppearanceSettings.sliderWheelAdjustEnabled)
     {
         m_hasPendingChanges = false;
         updateApplyButtonState();
@@ -568,6 +633,12 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         << (m_currentAppearanceSettings.startupScaleRecommendPromptDisabled ? "true" : "false")
         << "，系统右键文件解锁器菜单="
         << (m_currentAppearanceSettings.unlockerShellContextMenuEnabled ? "true" : "false")
+        << "，宽滚动条="
+        << (m_currentAppearanceSettings.useWideScrollBars ? "true" : "false")
+        << "，滚动条自动隐藏="
+        << (m_currentAppearanceSettings.scrollBarAutoHideEnabled ? "true" : "false")
+        << "，滚轮调整滑块="
+        << (m_currentAppearanceSettings.sliderWheelAdjustEnabled ? "true" : "false")
         << eol;
 
     emit appearanceSettingsChanged(m_currentAppearanceSettings);
