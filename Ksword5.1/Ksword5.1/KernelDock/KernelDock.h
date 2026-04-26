@@ -25,6 +25,7 @@ class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QComboBox;
 class QTableWidget;
 class QTabWidget;
 class QTreeWidget;
@@ -177,6 +178,10 @@ private:
     // - 作用：创建“驱动回调”页签（规则组/规则编辑/导入导出/应用/状态）。
     void initializeCallbackInterceptTab();
 
+    // initializeCallbackRemoveTab：
+    // - 作用：创建“回调移除”页签（移除其他驱动注册的 notify 回调）。
+    void initializeCallbackRemoveTab();
+
     // initializeConnections：
     // - 作用：绑定按钮、筛选框、表格联动与右键菜单。
     void initializeConnections();
@@ -312,11 +317,13 @@ private:
     int m_ssdtTabIndex = -1;             // m_ssdtTabIndex：SSDT 页签索引。
     int m_ntQueryTabIndex = -1;          // m_ntQueryTabIndex：历史 NtQuery 页签索引。
     int m_callbackTabIndex = -1;         // m_callbackTabIndex：驱动回调页签索引。
+    int m_callbackRemoveTabIndex = -1;   // m_callbackRemoveTabIndex：回调移除页签索引。
     bool m_objectNamespaceTabInitialized = false; // m_objectNamespaceTabInitialized：对象命名空间页是否已初始化。
     bool m_atomTabInitialized = false;            // m_atomTabInitialized：原子表页是否已初始化。
     bool m_ssdtTabInitialized = false;            // m_ssdtTabInitialized：SSDT 页是否已初始化。
     bool m_ntQueryTabInitialized = false;         // m_ntQueryTabInitialized：历史 NtQuery 页是否已初始化。
     bool m_callbackTabInitialized = false;        // m_callbackTabInitialized：驱动回调页是否已初始化。
+    bool m_callbackRemoveTabInitialized = false;  // m_callbackRemoveTabInitialized：回调移除页是否已初始化。
 
     // ==================== 对象命名空间页 ====================
     QWidget* m_objectNamespacePage = nullptr;                  // m_objectNamespacePage：对象命名空间页容器。
@@ -361,6 +368,14 @@ private:
     // ==================== 驱动回调页 ====================
     QWidget* m_callbackInterceptPage = nullptr;                     // m_callbackInterceptPage：驱动回调页容器。
     CallbackInterceptController* m_callbackInterceptController = nullptr; // m_callbackInterceptController：驱动回调页控制器。
+    QWidget* m_callbackRemovePage = nullptr;                        // m_callbackRemovePage：回调移除页容器。
+    QVBoxLayout* m_callbackRemoveLayout = nullptr;                  // m_callbackRemoveLayout：回调移除页布局。
+    QHBoxLayout* m_callbackRemoveToolLayout = nullptr;              // m_callbackRemoveToolLayout：回调移除工具栏布局。
+    QComboBox* m_callbackRemoveTypeCombo = nullptr;                 // m_callbackRemoveTypeCombo：回调类型下拉框。
+    QLineEdit* m_callbackRemoveAddressEdit = nullptr;               // m_callbackRemoveAddressEdit：回调地址输入框。
+    QPushButton* m_callbackRemoveButton = nullptr;                  // m_callbackRemoveButton：执行移除按钮。
+    QLabel* m_callbackRemoveStatusLabel = nullptr;                  // m_callbackRemoveStatusLabel：状态文本。
+    CodeEditorWidget* m_callbackRemoveDetailEditor = nullptr;       // m_callbackRemoveDetailEditor：结果详情文本框。
 
     // ==================== 数据缓存 ====================
     std::vector<KernelObjectNamespaceEntry> m_objectNamespaceRows; // m_objectNamespaceRows：对象命名空间快照行。
