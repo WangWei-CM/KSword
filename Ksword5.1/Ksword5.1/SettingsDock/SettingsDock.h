@@ -176,6 +176,15 @@ private:
     // m_unlockerShellContextMenuCheckBox 作用：设置是否启用系统右键“文件解锁器”菜单。
     QCheckBox* m_unlockerShellContextMenuCheckBox = nullptr;
 
+    // m_scrollBarWidthCombo 作用：设置全局滚动条宽度（窄/宽）。
+    QComboBox* m_scrollBarWidthCombo = nullptr;
+
+    // m_scrollBarAutoHideCheckBox 作用：设置滚动条是否弱显示/悬停显示。
+    QCheckBox* m_scrollBarAutoHideCheckBox = nullptr;
+
+    // m_sliderWheelAdjustCheckBox 作用：设置滚轮是否可直接调整滑块值。
+    QCheckBox* m_sliderWheelAdjustCheckBox = nullptr;
+
     // m_startupWindowScaleFactorEdit 作用：设置下次启动主窗口缩放因子（重启生效）。
     QLineEdit* m_startupWindowScaleFactorEdit = nullptr;
 

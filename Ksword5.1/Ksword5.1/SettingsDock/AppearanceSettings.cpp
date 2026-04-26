@@ -239,6 +239,9 @@ namespace
         defaultSettings.startupWindowScaleFactor = 1.0;
         defaultSettings.startupScaleRecommendPromptDisabled = false;
         defaultSettings.unlockerShellContextMenuEnabled = false;
+        defaultSettings.useWideScrollBars = false;
+        defaultSettings.scrollBarAutoHideEnabled = false;
+        defaultSettings.sliderWheelAdjustEnabled = false;
         return defaultSettings;
     }
 }
@@ -385,6 +388,15 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     loadedSettings.unlockerShellContextMenuEnabled = rootObject
         .value(QStringLiteral("unlocker_shell_context_menu_enabled"))
         .toBool(loadedSettings.unlockerShellContextMenuEnabled);
+    loadedSettings.useWideScrollBars = rootObject
+        .value(QStringLiteral("use_wide_scroll_bars"))
+        .toBool(loadedSettings.useWideScrollBars);
+    loadedSettings.scrollBarAutoHideEnabled = rootObject
+        .value(QStringLiteral("scroll_bar_auto_hide_enabled"))
+        .toBool(loadedSettings.scrollBarAutoHideEnabled);
+    loadedSettings.sliderWheelAdjustEnabled = rootObject
+        .value(QStringLiteral("slider_wheel_adjust_enabled"))
+        .toBool(loadedSettings.sliderWheelAdjustEnabled);
 
     return loadedSettings;
 }
@@ -429,6 +441,15 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
     rootObject.insert(
         QStringLiteral("unlocker_shell_context_menu_enabled"),
         settings.unlockerShellContextMenuEnabled);
+    rootObject.insert(
+        QStringLiteral("use_wide_scroll_bars"),
+        settings.useWideScrollBars);
+    rootObject.insert(
+        QStringLiteral("scroll_bar_auto_hide_enabled"),
+        settings.scrollBarAutoHideEnabled);
+    rootObject.insert(
+        QStringLiteral("slider_wheel_adjust_enabled"),
+        settings.sliderWheelAdjustEnabled);
 
     const QJsonDocument jsonDocument(rootObject);
     const QByteArray jsonBytes = jsonDocument.toJson(QJsonDocument::Indented);

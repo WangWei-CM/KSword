@@ -31,6 +31,9 @@ namespace ks::settings
     // startupWindowScaleFactor：主窗口启动缩放因子（1.0=100%，重启后生效）；
     // startupScaleRecommendPromptDisabled：小屏推荐缩放提示是否不再弹出。
     // unlockerShellContextMenuEnabled：是否启用“系统右键-文件解锁器”菜单（下次启动生效）。
+    // useWideScrollBars：是否使用宽滚动条（false=默认窄版）；
+    // scrollBarAutoHideEnabled：滚动条是否启用自动隐藏/悬停展开；
+    // sliderWheelAdjustEnabled：是否允许滚轮直接调整滑块值。
     struct AppearanceSettings
     {
         ThemeMode themeMode = ThemeMode::FollowSystem;
@@ -42,6 +45,9 @@ namespace ks::settings
         double startupWindowScaleFactor = 1.0;
         bool startupScaleRecommendPromptDisabled = false;
         bool unlockerShellContextMenuEnabled = false;
+        bool useWideScrollBars = false;
+        bool scrollBarAutoHideEnabled = false;
+        bool sliderWheelAdjustEnabled = false;
     };
 
     // themeModeToJsonText 作用：
