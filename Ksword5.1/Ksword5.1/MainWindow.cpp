@@ -3885,6 +3885,32 @@ void MainWindow::openFileDetailDockByPath(const QString& filePath)
     }
 }
 
+void MainWindow::openFileUnlockerDockByPath(const QString& filePath)
+{
+    const QString normalizedFilePath = QDir::toNativeSeparators(filePath.trimmed());
+    if (normalizedFilePath.isEmpty())
+    {
+        return;
+    }
+
+    kLogEvent unlockFileEvent;
+    info << unlockFileEvent
+        << "[MainWindow] openFileUnlockerDockByPath: path="
+        << normalizedFilePath.toStdString()
+        << eol;
+
+    if (m_dockFile != nullptr)
+    {
+        ensureDockContentInitialized(m_dockFile);
+        m_dockFile->raise();
+        m_dockFile->setVisible(true);
+    }
+    if (m_fileWidget != nullptr)
+    {
+        m_fileWidget->unlockFileByPath(normalizedFilePath);
+    }
+}
+
 void MainWindow::initAppearanceSettings()
 {
     // appearanceInitEvent 作用：统一追踪外观系统初始化流程日志。

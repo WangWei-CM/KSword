@@ -173,6 +173,9 @@ private:
     // m_startupAutoAdminCheckBox 作用：设置下次启动时是否先尝试申请管理员权限。
     QCheckBox* m_startupAutoAdminCheckBox = nullptr;
 
+    // m_unlockerShellContextMenuCheckBox 作用：设置是否启用系统右键“文件解锁器”菜单。
+    QCheckBox* m_unlockerShellContextMenuCheckBox = nullptr;
+
     // m_startupWindowScaleFactorEdit 作用：设置下次启动主窗口缩放因子（重启生效）。
     QLineEdit* m_startupWindowScaleFactorEdit = nullptr;
 
