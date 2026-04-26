@@ -237,6 +237,12 @@ void SettingsDock::initializeAppearanceTab()
         QStringLiteral("下次启动时会在启动画面出现前先尝试管理员提权，失败则继续普通权限启动"));
     startupLayout->addWidget(m_startupAutoAdminCheckBox);
 
+    // m_unlockerShellContextMenuCheckBox 作用：控制是否启用系统右键“文件解锁器”菜单。
+    m_unlockerShellContextMenuCheckBox = new QCheckBox(QStringLiteral("启用系统右键“文件解锁器”菜单"), startupGroupBox);
+    m_unlockerShellContextMenuCheckBox->setToolTip(
+        QStringLiteral("关闭后会在下次启动时自动移除系统右键菜单中的“Ksword 文件解锁器(R0)”项"));
+    startupLayout->addWidget(m_unlockerShellContextMenuCheckBox);
+
     // 启动缩放因子设置：重启后生效，用于统一控制主窗口 UI 缩放倍率。
     QHBoxLayout* startupScaleLayout = new QHBoxLayout();
     startupScaleLayout->setSpacing(6);
@@ -321,6 +327,10 @@ void SettingsDock::bindAppearanceSignals()
         markPendingChanges(QStringLiteral("启动时自动请求管理员权限开关切换"));
         });
 
+    connect(m_unlockerShellContextMenuCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
+        markPendingChanges(QStringLiteral("系统右键文件解锁器开关切换"));
+        });
+
     connect(m_startupWindowScaleFactorEdit, &QLineEdit::textChanged, this, [this](const QString& /*text*/) {
         const double normalizedScaleFactor = parseWindowScaleFactorFromUi();
         updateWindowScaleFactorHintLabel(normalizedScaleFactor);
@@ -386,6 +396,10 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
     {
         m_startupAutoAdminCheckBox->setChecked(settings.autoRequestAdminOnStartup);
     }
+    if (m_unlockerShellContextMenuCheckBox != nullptr)
+    {
+        m_unlockerShellContextMenuCheckBox->setChecked(settings.unlockerShellContextMenuEnabled);
+    }
 
     if (m_startupWindowScaleFactorEdit != nullptr)
     {
@@ -448,6 +462,8 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
     // 该开关来自启动前弹窗，不在设置页编辑；这里保留内存值，避免保存时被覆盖。
     collectedSettings.startupScaleRecommendPromptDisabled =
         m_currentAppearanceSettings.startupScaleRecommendPromptDisabled;
+    collectedSettings.unlockerShellContextMenuEnabled =
+        (m_unlockerShellContextMenuCheckBox != nullptr) && m_unlockerShellContextMenuCheckBox->isChecked();
 
     return collectedSettings;
 }
@@ -498,7 +514,8 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         && nextSettings.launchMaximizedOnStartup == m_currentAppearanceSettings.launchMaximizedOnStartup
         && nextSettings.autoRequestAdminOnStartup == m_currentAppearanceSettings.autoRequestAdminOnStartup
         && sameScaleFactor
-        && nextSettings.startupScaleRecommendPromptDisabled == m_currentAppearanceSettings.startupScaleRecommendPromptDisabled)
+        && nextSettings.startupScaleRecommendPromptDisabled == m_currentAppearanceSettings.startupScaleRecommendPromptDisabled
+        && nextSettings.unlockerShellContextMenuEnabled == m_currentAppearanceSettings.unlockerShellContextMenuEnabled)
     {
         m_hasPendingChanges = false;
         updateApplyButtonState();
@@ -549,6 +566,8 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         << m_currentAppearanceSettings.startupWindowScaleFactor
         << "，小屏缩放提示不再弹出="
         << (m_currentAppearanceSettings.startupScaleRecommendPromptDisabled ? "true" : "false")
+        << "，系统右键文件解锁器菜单="
+        << (m_currentAppearanceSettings.unlockerShellContextMenuEnabled ? "true" : "false")
         << eol;
 
     emit appearanceSettingsChanged(m_currentAppearanceSettings);

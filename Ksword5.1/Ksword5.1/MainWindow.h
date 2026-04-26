@@ -108,6 +108,12 @@ public slots:
     // 入参 filePath：目标文件路径。
     void openFileDetailDockByPath(const QString& filePath);
 
+    // openFileUnlockerDockByPath 作用：
+    // - 置顶“文件”Dock 并触发“文件解锁器”处理指定路径；
+    // - 供系统右键菜单命令启动后的自动联动调用。
+    // 入参 filePath：目标文件或目录路径。
+    void openFileUnlockerDockByPath(const QString& filePath);
+
 protected:
     // eventFilter 作用：
     // - 监听 ADS 浮动 Dock 窗口的显示与尺寸变化；

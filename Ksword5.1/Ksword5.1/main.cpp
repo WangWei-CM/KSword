@@ -1,9 +1,12 @@
 #include "MainWindow.h"
 
 #include <QtCore/QByteArray>
+#include <QtCore/QCoreApplication>
 #include <QtCore/QEvent>
 #include <QtCore/QObject>
+#include <QtCore/QStringList>
 #include <QtCore/QTimer>
+#include <QtWidgets/QMessageBox>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QWidget>
 
@@ -20,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cwctype>
+#include <vector>
 #include <string>
 
 #pragma comment(lib, "Shell32.lib")
@@ -27,6 +31,126 @@
 
 namespace
 {
+    constexpr wchar_t kUnlockerKeyName[] = L"Ksword.FileUnlocker";
+
+    // queryCurrentExecutablePath 作用：
+    // - 动态获取当前进程可执行文件绝对路径；
+    // - 兼容长路径，避免固定 MAX_PATH 缓冲区截断问题。
+    // 返回：成功返回非空绝对路径，失败返回空字符串。
+    std::wstring queryCurrentExecutablePath()
+    {
+        std::vector<wchar_t> pathBuffer(1024, L'\0');
+        while (pathBuffer.size() < 32768)
+        {
+            ::SetLastError(ERROR_SUCCESS);
+            const DWORD copiedLength = ::GetModuleFileNameW(
+                nullptr,
+                pathBuffer.data(),
+                static_cast<DWORD>(pathBuffer.size()));
+            const DWORD lastError = ::GetLastError();
+            if (copiedLength == 0)
+            {
+                return std::wstring();
+            }
+
+            if (copiedLength > 0
+                && copiedLength < pathBuffer.size()
+                && lastError != ERROR_INSUFFICIENT_BUFFER)
+            {
+                return std::wstring(pathBuffer.data(), copiedLength);
+            }
+
+            pathBuffer.resize(pathBuffer.size() * 2, L'\0');
+        }
+        return std::wstring();
+    }
+
+    bool writeRegistryString(
+        HKEY rootKey,
+        const std::wstring& subKeyPath,
+        const wchar_t* valueName,
+        const std::wstring& valueText)
+    {
+        HKEY keyHandle = nullptr;
+        const LONG createResult = ::RegCreateKeyExW(
+            rootKey,
+            subKeyPath.c_str(),
+            0,
+            nullptr,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            nullptr,
+            &keyHandle,
+            nullptr);
+        if (createResult != ERROR_SUCCESS)
+        {
+            return false;
+        }
+
+        const DWORD valueSizeBytes = static_cast<DWORD>((valueText.size() + 1) * sizeof(wchar_t));
+        const LONG setResult = ::RegSetValueExW(
+            keyHandle,
+            valueName,
+            0,
+            REG_SZ,
+            reinterpret_cast<const BYTE*>(valueText.c_str()),
+            valueSizeBytes);
+        ::RegCloseKey(keyHandle);
+        return setResult == ERROR_SUCCESS;
+    }
+
+    void deleteRegistryTreeBestEffort(HKEY rootKey, const std::wstring& subKeyPath)
+    {
+        ::RegDeleteTreeW(rootKey, subKeyPath.c_str());
+    }
+
+    bool registerUnlockerContextMenu(const std::wstring& executablePath)
+    {
+        const std::wstring commandForFile = L"\"" + executablePath + L"\" --unlock \"%1\"";
+        const std::wstring commandForBackground = L"\"" + executablePath + L"\" --unlock \"%V\"";
+
+        const std::wstring baseStar = L"Software\\Classes\\*\\shell\\" + std::wstring(kUnlockerKeyName);
+        const std::wstring baseDirectory = L"Software\\Classes\\Directory\\shell\\" + std::wstring(kUnlockerKeyName);
+        const std::wstring baseDrive = L"Software\\Classes\\Drive\\shell\\" + std::wstring(kUnlockerKeyName);
+        const std::wstring baseBackground =
+            L"Software\\Classes\\Directory\\Background\\shell\\" + std::wstring(kUnlockerKeyName);
+
+        const bool starOk =
+            writeRegistryString(HKEY_CURRENT_USER, baseStar, nullptr, L"使用 Ksword 文件解锁器(R0)")
+            && writeRegistryString(HKEY_CURRENT_USER, baseStar, L"Icon", executablePath)
+            && writeRegistryString(HKEY_CURRENT_USER, baseStar + L"\\command", nullptr, commandForFile);
+        const bool directoryOk =
+            writeRegistryString(HKEY_CURRENT_USER, baseDirectory, nullptr, L"使用 Ksword 文件解锁器(R0)")
+            && writeRegistryString(HKEY_CURRENT_USER, baseDirectory, L"Icon", executablePath)
+            && writeRegistryString(HKEY_CURRENT_USER, baseDirectory + L"\\command", nullptr, commandForFile);
+        const bool driveOk =
+            writeRegistryString(HKEY_CURRENT_USER, baseDrive, nullptr, L"使用 Ksword 文件解锁器(R0)")
+            && writeRegistryString(HKEY_CURRENT_USER, baseDrive, L"Icon", executablePath)
+            && writeRegistryString(HKEY_CURRENT_USER, baseDrive + L"\\command", nullptr, commandForFile);
+        const bool backgroundOk =
+            writeRegistryString(HKEY_CURRENT_USER, baseBackground, nullptr, L"使用 Ksword 文件解锁器(R0)")
+            && writeRegistryString(HKEY_CURRENT_USER, baseBackground, L"Icon", executablePath)
+            && writeRegistryString(HKEY_CURRENT_USER, baseBackground + L"\\command", nullptr, commandForBackground);
+
+        return starOk && directoryOk && driveOk && backgroundOk;
+    }
+
+    void unregisterUnlockerContextMenu()
+    {
+        deleteRegistryTreeBestEffort(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\*\\shell\\" + std::wstring(kUnlockerKeyName));
+        deleteRegistryTreeBestEffort(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\Directory\\shell\\" + std::wstring(kUnlockerKeyName));
+        deleteRegistryTreeBestEffort(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\Drive\\shell\\" + std::wstring(kUnlockerKeyName));
+        deleteRegistryTreeBestEffort(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\Directory\\Background\\shell\\" + std::wstring(kUnlockerKeyName));
+    }
+
     // kNativeAppIconResourceName 作用：
     // - 指向 AppIcon.rc 内声明的主图标资源名；
     // - 用于把原生图标同步到 Qt 主窗口标题栏和任务栏。
@@ -99,9 +223,8 @@ namespace
     // 返回：true=管理员实例已拉起；false=失败，继续普通启动。
     bool tryLaunchElevatedSelfBeforeSplash()
     {
-        wchar_t executablePathBuffer[MAX_PATH] = {};
-        const DWORD pathLength = ::GetModuleFileNameW(nullptr, executablePathBuffer, MAX_PATH);
-        if (pathLength == 0 || pathLength >= MAX_PATH)
+        const std::wstring executablePath = queryCurrentExecutablePath();
+        if (executablePath.empty())
         {
             return false;
         }
@@ -111,7 +234,7 @@ namespace
         HINSTANCE shellResult = ::ShellExecuteW(
             nullptr,
             L"runas",
-            executablePathBuffer,
+            executablePath.c_str(),
             parameterText.empty() ? nullptr : parameterText.c_str(),
             nullptr,
             SW_SHOWNORMAL);
@@ -595,6 +718,83 @@ int main(int argc, char* argv[])
 
     QApplication app(argc, argv);
     ks::ui::InstallGlobalMessageBoxTheme(&app);
+    const QStringList argumentList = QCoreApplication::arguments();
+
+    const bool shouldRegisterUnlockerMenu = argumentList.contains(QStringLiteral("--register-unlocker-context-menu"));
+    const bool shouldUnregisterUnlockerMenu = argumentList.contains(QStringLiteral("--unregister-unlocker-context-menu"));
+    if (shouldRegisterUnlockerMenu || shouldUnregisterUnlockerMenu)
+    {
+        if (shouldUnregisterUnlockerMenu)
+        {
+            unregisterUnlockerContextMenu();
+            startupSettings.unlockerShellContextMenuEnabled = false;
+            QString saveErrorText;
+            ks::settings::saveAppearanceSettings(startupSettings, &saveErrorText);
+            QMessageBox::information(
+                nullptr,
+                QStringLiteral("Ksword 文件解锁器"),
+                QStringLiteral("已移除系统右键菜单中的“Ksword 文件解锁器(R0)”项。"));
+            return 0;
+        }
+
+        const std::wstring executablePath = queryCurrentExecutablePath();
+        if (executablePath.empty())
+        {
+            QMessageBox::warning(
+                nullptr,
+                QStringLiteral("Ksword 文件解锁器"),
+                QStringLiteral("读取程序路径失败，无法注册系统右键菜单。"));
+            return 1;
+        }
+
+        const bool registerOk = registerUnlockerContextMenu(executablePath);
+        if (registerOk)
+        {
+            startupSettings.unlockerShellContextMenuEnabled = true;
+            QString saveErrorText;
+            ks::settings::saveAppearanceSettings(startupSettings, &saveErrorText);
+            QMessageBox::information(
+                nullptr,
+                QStringLiteral("Ksword 文件解锁器"),
+                QStringLiteral("已注册系统右键菜单，可在文件/目录/磁盘和目录空白处右键触发。"));
+            return 0;
+        }
+
+        QMessageBox::warning(
+            nullptr,
+            QStringLiteral("Ksword 文件解锁器"),
+            QStringLiteral("注册系统右键菜单失败，请确认当前账户对 HKCU\\Software\\Classes 具备写入权限。"));
+        return 1;
+    }
+
+    // 常规启动下：根据设置页开关同步系统右键“文件解锁器”菜单。
+    {
+        const std::wstring executablePath = queryCurrentExecutablePath();
+        if (!executablePath.empty())
+        {
+            if (startupSettings.unlockerShellContextMenuEnabled)
+            {
+                registerUnlockerContextMenu(executablePath);
+            }
+            else
+            {
+                unregisterUnlockerContextMenu();
+            }
+        }
+    }
+
+    QStringList unlockPathList;
+    for (int index = 1; index < argumentList.size(); ++index)
+    {
+        if (argumentList[index] == QStringLiteral("--unlock"))
+        {
+            if (index + 1 < argumentList.size())
+            {
+                unlockPathList.push_back(argumentList[index + 1]);
+                index += 1;
+            }
+        }
+    }
 
     // startupProgressCallback 作用：
     // - 接收 MainWindow 构造阶段回调；
@@ -650,6 +850,17 @@ int main(int argc, char* argv[])
             });
     }
     applyNativeAppIconToWidget(&window);
+
+    if (!unlockPathList.isEmpty())
+    {
+        for (const QString& targetPath : unlockPathList)
+        {
+            QTimer::singleShot(0, &window, [&window, targetPath]()
+                {
+                    window.openFileUnlockerDockByPath(targetPath);
+                });
+        }
+    }
 
     if (splashReady)
     {

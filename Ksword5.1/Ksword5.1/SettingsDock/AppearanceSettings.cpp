@@ -238,6 +238,7 @@ namespace
         defaultSettings.autoRequestAdminOnStartup = false;
         defaultSettings.startupWindowScaleFactor = 1.0;
         defaultSettings.startupScaleRecommendPromptDisabled = false;
+        defaultSettings.unlockerShellContextMenuEnabled = false;
         return defaultSettings;
     }
 }
@@ -381,6 +382,9 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     loadedSettings.startupScaleRecommendPromptDisabled = rootObject
         .value(QStringLiteral("startup_scale_recommend_prompt_disabled"))
         .toBool(loadedSettings.startupScaleRecommendPromptDisabled);
+    loadedSettings.unlockerShellContextMenuEnabled = rootObject
+        .value(QStringLiteral("unlocker_shell_context_menu_enabled"))
+        .toBool(loadedSettings.unlockerShellContextMenuEnabled);
 
     return loadedSettings;
 }
@@ -422,6 +426,9 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
     rootObject.insert(
         QStringLiteral("startup_scale_recommend_prompt_disabled"),
         settings.startupScaleRecommendPromptDisabled);
+    rootObject.insert(
+        QStringLiteral("unlocker_shell_context_menu_enabled"),
+        settings.unlockerShellContextMenuEnabled);
 
     const QJsonDocument jsonDocument(rootObject);
     const QByteArray jsonBytes = jsonDocument.toJson(QJsonDocument::Indented);
