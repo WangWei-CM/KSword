@@ -25,6 +25,7 @@
     <ClCompile Include="src\features\callback\callback_runtime.c" />
     <ClCompile Include="src\features\callback\callback_rules.c" />
     <ClCompile Include="src\features\callback\callback_waiter.c" />
+    <ClCompile Include="src\features\callback\callback_remove_external.c" />
     <ClCompile Include="src\features\callback\registry_callback.c" />
     <ClCompile Include="src\features\callback\process_callback.c" />
     <ClCompile Include="src\features\callback\thread_callback.c" />

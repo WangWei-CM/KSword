@@ -110,6 +110,9 @@
     <ClCompile Include="src\features\callback\callback_waiter.c">
       <Filter>Source Files\Features\Callback</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\callback\callback_remove_external.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\callback\registry_callback.c">
       <Filter>Source Files\Features\Callback</Filter>
     </ClCompile>
