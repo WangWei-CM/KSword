@@ -14,6 +14,9 @@
 #include <QWidget>
 
 #include <cstdint>     // std::uint64_t：文件大小统计。
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include <vector>      // std::vector：导航历史记录容器。
 
 // Qt 前置声明：降低头文件耦合。
@@ -55,13 +58,18 @@ public:
 
     // 析构函数：
     // - 作用：默认析构即可，所有子控件由 Qt 父子关系自动释放。
-    ~FileDock() override = default;
+    ~FileDock() override;
 
     // openFileDetailByPath：
     // - 作用：对外暴露文件详情窗口入口（含属性/哈希/签名/PE 等 Tab）；
     // - 供 ServiceDock 等模块跨页联动调用。
     // - 参数 filePath：目标文件绝对路径。
     void openFileDetailByPath(const QString& filePath);
+
+    // unlockFileByPath：
+    // - 作用：对外暴露“文件解锁器”入口（单路径）；
+    // - 供系统右键菜单命令启动后跨页联动调用。
+    void unlockFileByPath(const QString& targetPath);
 
 private:
     // FilePanelWidgets：
@@ -248,6 +256,20 @@ private:
     // - 说明：调用系统 takeown/icacls，失败信息会汇总提示。
     void takeOwnershipSelectedItems(FilePanelWidgets& panel);
 
+    // unlockSelectedItemsByDriver：
+    // - 作用：扫描选中路径占用进程，并通过 KswordARK 驱动尝试结束占用进程；
+    // - 说明：用于“文件解锁器”右键动作，不直接删除文件。
+    void unlockSelectedItemsByDriver(FilePanelWidgets& panel);
+
+    // unlockPathsByDriver：
+    // - 作用：执行“文件解锁器”核心流程（扫描占用 + R0 结束进程）；
+    // - 参数 triggerTag：触发来源标签（右键菜单/系统右键）。
+    // - 参数 panelForRefresh：可选，仅刷新指定面板；为空时刷新左右面板。
+    void unlockPathsByDriver(
+        const std::vector<QString>& targetPaths,
+        const QString& triggerTag,
+        FilePanelWidgets* panelForRefresh);
+
     // showColumnManagerDialog：
     // - 作用：弹出列管理器切换列显示状态。
     void showColumnManagerDialog(FilePanelWidgets& panel);
@@ -323,4 +345,10 @@ private:
     // 跨面板复制/剪切缓存。
     std::vector<QString> m_clipboardPaths;     // 剪贴板中的路径列表。
     bool m_clipboardCutMode = false;           // true=剪切；false=复制。
+
+    // 文件解锁器后台线程状态。
+    std::thread m_unlockerWorkerThread;
+    std::atomic_bool m_unlockerWorkerStopRequested{ false };
+    std::atomic_bool m_unlockerWorkerRunning{ false };
+    mutable std::mutex m_unlockerWorkerMutex;
 };
