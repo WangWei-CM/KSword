@@ -116,19 +116,19 @@ namespace
             L"Software\\Classes\\Directory\\Background\\shell\\" + std::wstring(kUnlockerKeyName);
 
         const bool starOk =
-            writeRegistryString(HKEY_CURRENT_USER, baseStar, nullptr, L"使用 Ksword 文件解锁器(R0)")
+            writeRegistryString(HKEY_CURRENT_USER, baseStar, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
             && writeRegistryString(HKEY_CURRENT_USER, baseStar, L"Icon", executablePath)
             && writeRegistryString(HKEY_CURRENT_USER, baseStar + L"\\command", nullptr, commandForFile);
         const bool directoryOk =
-            writeRegistryString(HKEY_CURRENT_USER, baseDirectory, nullptr, L"使用 Ksword 文件解锁器(R0)")
+            writeRegistryString(HKEY_CURRENT_USER, baseDirectory, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
             && writeRegistryString(HKEY_CURRENT_USER, baseDirectory, L"Icon", executablePath)
             && writeRegistryString(HKEY_CURRENT_USER, baseDirectory + L"\\command", nullptr, commandForFile);
         const bool driveOk =
-            writeRegistryString(HKEY_CURRENT_USER, baseDrive, nullptr, L"使用 Ksword 文件解锁器(R0)")
+            writeRegistryString(HKEY_CURRENT_USER, baseDrive, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
             && writeRegistryString(HKEY_CURRENT_USER, baseDrive, L"Icon", executablePath)
             && writeRegistryString(HKEY_CURRENT_USER, baseDrive + L"\\command", nullptr, commandForFile);
         const bool backgroundOk =
-            writeRegistryString(HKEY_CURRENT_USER, baseBackground, nullptr, L"使用 Ksword 文件解锁器(R0)")
+            writeRegistryString(HKEY_CURRENT_USER, baseBackground, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
             && writeRegistryString(HKEY_CURRENT_USER, baseBackground, L"Icon", executablePath)
             && writeRegistryString(HKEY_CURRENT_USER, baseBackground + L"\\command", nullptr, commandForBackground);
 
@@ -733,7 +733,7 @@ int main(int argc, char* argv[])
             QMessageBox::information(
                 nullptr,
                 QStringLiteral("Ksword 文件解锁器"),
-                QStringLiteral("已移除系统右键菜单中的“Ksword 文件解锁器(R0)”项。"));
+                QStringLiteral("已移除系统右键菜单中的“Ksword 文件解锁器(R3/R0)”项。"));
             return 0;
         }
 

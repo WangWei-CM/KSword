@@ -240,7 +240,7 @@ void SettingsDock::initializeAppearanceTab()
     // m_unlockerShellContextMenuCheckBox 作用：控制是否启用系统右键“文件解锁器”菜单。
     m_unlockerShellContextMenuCheckBox = new QCheckBox(QStringLiteral("启用系统右键“文件解锁器”菜单"), startupGroupBox);
     m_unlockerShellContextMenuCheckBox->setToolTip(
-        QStringLiteral("关闭后会在下次启动时自动移除系统右键菜单中的“Ksword 文件解锁器(R0)”项"));
+        QStringLiteral("关闭后会在下次启动时自动移除系统右键菜单中的“Ksword 文件解锁器(R3/R0)”项"));
     startupLayout->addWidget(m_unlockerShellContextMenuCheckBox);
 
     // 启动缩放因子设置：重启后生效，用于统一控制主窗口 UI 缩放倍率。
