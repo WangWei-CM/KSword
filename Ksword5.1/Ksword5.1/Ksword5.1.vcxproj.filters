@@ -91,6 +91,9 @@
     <ClCompile Include="KernelDock\KernelDock.CallbackRuleValidator.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="KernelDock\KernelDock.CallbackRemove.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KernelDock\KernelDock.ContextMenu.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
