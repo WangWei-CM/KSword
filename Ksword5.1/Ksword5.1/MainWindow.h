@@ -282,6 +282,7 @@ private:
     // 入参 enableDockTransparencyForBackgroundImage：背景图可用时是否强制 Dock 背景透明。
     // 返回：拼接后的 QSS 片段。
     QString buildAppearanceOverlayStyleSheet(
+        const ks::settings::AppearanceSettings& settings,
         bool darkModeEnabled,
         bool enableDockTransparencyForBackgroundImage) const;
 
