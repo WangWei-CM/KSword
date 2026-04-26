@@ -257,12 +257,12 @@ private:
     void takeOwnershipSelectedItems(FilePanelWidgets& panel);
 
     // unlockSelectedItemsByDriver：
-    // - 作用：扫描选中路径占用进程，并通过 KswordARK 驱动尝试结束占用进程；
+    // - 作用：扫描选中路径占用进程，列出候选进程并按用户选择用 R3/R0 结束；
     // - 说明：用于“文件解锁器”右键动作，不直接删除文件。
     void unlockSelectedItemsByDriver(FilePanelWidgets& panel);
 
     // unlockPathsByDriver：
-    // - 作用：执行“文件解锁器”核心流程（扫描占用 + R0 结束进程）；
+    // - 作用：执行“文件解锁器”核心流程（扫描占用 + 用户选择 + R3/R0 结束进程）；
     // - 参数 triggerTag：触发来源标签（右键菜单/系统右键）。
     // - 参数 panelForRefresh：可选，仅刷新指定面板；为空时刷新左右面板。
     void unlockPathsByDriver(
