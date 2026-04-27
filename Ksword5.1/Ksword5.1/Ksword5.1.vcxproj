@@ -161,6 +161,7 @@
     <ClCompile Include="KernelDock\KernelDock.CallbackPromptManager.cpp" />
     <ClCompile Include="KernelDock\KernelDock.CallbackRuleSerializer.cpp" />
     <ClCompile Include="KernelDock\KernelDock.CallbackRuleValidator.cpp" />
+    <ClCompile Include="KernelDock\KernelDock.CallbackRemove.cpp" />
     <ClCompile Include="KernelDock\KernelDock.ContextMenu.cpp" />
     <ClCompile Include="KernelDock\KernelDock.Runtime.cpp" />
     <ClCompile Include="KernelDock\KernelDock.Ssdt.cpp" />

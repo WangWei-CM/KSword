@@ -13,6 +13,7 @@
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QComboBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -148,6 +149,7 @@ void KernelDock::initializeUi()
     m_ssdtPage = new QWidget(m_tabWidget);
     m_ntQueryPage = new QWidget(m_tabWidget);
     m_callbackInterceptPage = new QWidget(m_tabWidget);
+    m_callbackRemovePage = new QWidget(m_tabWidget);
 
     m_objectNamespaceTabIndex = m_tabWidget->addTab(
         m_objectNamespacePage,
@@ -178,6 +180,12 @@ void KernelDock::initializeUi()
         QIcon(":/Icon/process_shield.svg"),
         QStringLiteral("驱动回调"));
     m_tabWidget->setTabToolTip(m_callbackTabIndex, QStringLiteral("驱动回调拦截规则管理与询问事件处理"));
+
+    m_callbackRemoveTabIndex = m_tabWidget->addTab(
+        m_callbackRemovePage,
+        QIcon(":/Icon/process_delete.svg"),
+        QStringLiteral("回调移除"));
+    m_tabWidget->setTabToolTip(m_callbackRemoveTabIndex, QStringLiteral("通过 Ksword 内核驱动移除其他驱动注册的回调"));
 
     m_tabWidget->setCurrentIndex(m_objectNamespaceTabIndex);
 }
@@ -480,6 +488,12 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
     {
         initializeCallbackInterceptTab();
         m_callbackTabInitialized = true;
+        return;
+    }
+
+    if (tabIndex == m_callbackRemoveTabIndex && !m_callbackRemoveTabInitialized)
+    {
+        initializeCallbackRemoveTab();
+        m_callbackRemoveTabInitialized = true;
     }
 }
-
