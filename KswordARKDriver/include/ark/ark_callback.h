@@ -50,5 +50,12 @@ KswordARKCallbackIoctlCancelAllPending(
     _Out_ size_t* CompleteBytesOut
     );
 
-EXTERN_C_END
+NTSTATUS
+KswordARKCallbackIoctlRemoveExternalCallback(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* CompleteBytesOut
+    );
 
+EXTERN_C_END

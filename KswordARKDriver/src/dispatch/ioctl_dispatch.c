@@ -596,6 +596,23 @@ Return Value:
         }
         break;
     }
+    case IOCTL_KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK:
+    {
+        status = KswordARKCallbackIoctlRemoveExternalCallback(
+            Request,
+            InputBufferLength,
+            OutputBufferLength,
+            &completeBytes);
+        if (!NT_SUCCESS(status)) {
+            (void)RtlStringCbPrintfA(
+                logMessage,
+                sizeof(logMessage),
+                "Remove external callback failed, status=0x%08X.",
+                (unsigned int)status);
+            (void)KswordARKDriverEnqueueLogFrame(device, "Warn", logMessage);
+        }
+        break;
+    }
     default:
         status = STATUS_INVALID_DEVICE_REQUEST;
         (void)RtlStringCbPrintfA(

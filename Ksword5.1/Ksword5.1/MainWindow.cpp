@@ -1,6 +1,7 @@
 ﻿#include "MainWindow.h"
 #include <QMenu>
 #include <QAction>
+#include <QAbstractSlider>
 #include <QTabWidget>
 #include <QApplication>
 #include <QCoreApplication>
@@ -24,6 +25,8 @@
 #include <QToolTip>
 #include <QStyleHints>
 #include <QEvent>
+#include <QEventLoop>
+#include <QWheelEvent>
 #pragma warning(disable: 4996)
 #include "UI/UI.css/UI_css.h"
 #include "Framework.h"
@@ -102,6 +105,40 @@ namespace
         }
     };
 
+    class GlobalSliderWheelFilter final : public QObject
+    {
+    public:
+        explicit GlobalSliderWheelFilter(QObject* parent = nullptr)
+            : QObject(parent)
+        {
+        }
+
+    protected:
+        bool eventFilter(QObject* watchedObject, QEvent* eventObject) override
+        {
+            if (watchedObject == nullptr || eventObject == nullptr || eventObject->type() != QEvent::Wheel)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
+            const bool sliderWheelAdjustEnabled = appInstance != nullptr
+                && appInstance->property("ksword_slider_wheel_adjust_enabled").toBool();
+            if (sliderWheelAdjustEnabled)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            if (qobject_cast<QAbstractSlider*>(watchedObject) == nullptr)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            eventObject->ignore();
+            return true;
+        }
+    };
+
     // ensureGlobalContextMenuThemeFilterInstalled 作用：
     // - 安装一次应用级 QMenu 主题过滤器；
     // - 让所有后续创建的右键菜单自动获得深浅色背景兜底。
@@ -118,6 +155,22 @@ namespace
         {
             contextMenuThemeFilter = new GlobalContextMenuThemeFilter(appInstance);
             appInstance->installEventFilter(contextMenuThemeFilter);
+        }
+    }
+
+    void ensureGlobalSliderWheelFilterInstalled()
+    {
+        QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
+        if (appInstance == nullptr)
+        {
+            return;
+        }
+
+        static GlobalSliderWheelFilter* sliderWheelFilter = nullptr;
+        if (sliderWheelFilter == nullptr)
+        {
+            sliderWheelFilter = new GlobalSliderWheelFilter(appInstance);
+            appInstance->installEventFilter(sliderWheelFilter);
         }
     }
 
@@ -801,6 +854,7 @@ MainWindow::MainWindow(
     // - 统一兜底所有右键菜单背景；
     // - 避免后续新增菜单遗漏 setStyleSheet 导致浅色模式黑底。
     ensureGlobalContextMenuThemeFilterInstalled();
+    ensureGlobalSliderWheelFilterInstalled();
 
     // 记录主窗口启动日志，便于验证日志系统与 UI 联动是否生效。
     // 注意：使用 kLogEvent，避免与 QObject::event 命名冲突。
@@ -3382,7 +3436,7 @@ QWidget* MainWindow::createDockPlaceholderWidget(const QString& titleText) const
     placeholderLayout->addStretch(1);
     placeholderLayout->addWidget(titleLabel);
 
-    QLabel* hintLabel = new QLabel(QStringLiteral("主窗口已优先完成首屏加载，剩余页面将在显示后自动补载。"), placeholderWidget);
+    QLabel* hintLabel = new QLabel(QStringLiteral("主窗口已优先完成首屏加载，页面内容将在首次打开时加载。"), placeholderWidget);
     hintLabel->setWordWrap(true);
     hintLabel->setAlignment(Qt::AlignCenter);
     hintLabel->setStyleSheet(QStringLiteral("font-size:12px;color:%1;").arg(KswordTheme::TextSecondaryHex()));
@@ -3403,6 +3457,13 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     }
 
     const QString dockKey = dockWidget->property("ks_lazy_key").toString().trimmed().toLower();
+    const QString dockTitleText = dockWidget->windowTitle().trimmed().isEmpty()
+        ? dockKey
+        : dockWidget->windowTitle().trimmed();
+    const int progressPid = kPro.add("页面", QStringLiteral("打开%1页").arg(dockTitleText).toStdString());
+    kPro.set(progressPid, QStringLiteral("准备加载%1页").arg(dockTitleText).toStdString(), 0, 8.0f);
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+
     const bool isNetworkDock = (dockKey == QStringLiteral("network"));
     QWidget* realWidget = nullptr;
 
@@ -3498,8 +3559,12 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     }
     if (realWidget == nullptr)
     {
+        kPro.set(progressPid, QStringLiteral("%1页无需加载").arg(dockTitleText).toStdString(), 0, 100.0f);
         return;
     }
+
+    kPro.set(progressPid, QStringLiteral("正在创建%1页内容").arg(dockTitleText).toStdString(), 0, 45.0f);
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
     realWidget->setAutoFillBackground(false);
     realWidget->setAttribute(Qt::WA_StyledBackground, false);
@@ -3523,6 +3588,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         dockWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     }
 
+    kPro.set(progressPid, QStringLiteral("正在挂载%1页").arg(dockTitleText).toStdString(), 0, 72.0f);
     QWidget* oldWidget = dockWidget->takeWidget();
     dockWidget->setWidget(
         realWidget,
@@ -3542,6 +3608,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     realWidget->setPalette(palette());
     realWidget->update();
     dockWidget->update();
+    kPro.set(progressPid, QStringLiteral("%1页加载完成").arg(dockTitleText).toStdString(), 0, 100.0f);
 }
 
 void MainWindow::initializeNextDeferredDock()
@@ -3661,7 +3728,9 @@ void MainWindow::initDockWidgets()
                 {
                     if (visible)
                     {
-                        ensureDockContentInitialized(dockOut);
+                        QTimer::singleShot(0, this, [this, dockOut]() {
+                            ensureDockContentInitialized(dockOut);
+                            });
                     }
                 });
 
@@ -3885,6 +3954,32 @@ void MainWindow::openFileDetailDockByPath(const QString& filePath)
     }
 }
 
+void MainWindow::openFileUnlockerDockByPath(const QString& filePath)
+{
+    const QString normalizedFilePath = QDir::toNativeSeparators(filePath.trimmed());
+    if (normalizedFilePath.isEmpty())
+    {
+        return;
+    }
+
+    kLogEvent unlockFileEvent;
+    info << unlockFileEvent
+        << "[MainWindow] openFileUnlockerDockByPath: path="
+        << normalizedFilePath.toStdString()
+        << eol;
+
+    if (m_dockFile != nullptr)
+    {
+        ensureDockContentInitialized(m_dockFile);
+        m_dockFile->raise();
+        m_dockFile->setVisible(true);
+    }
+    if (m_fileWidget != nullptr)
+    {
+        m_fileWidget->unlockFileByPath(normalizedFilePath);
+    }
+}
+
 void MainWindow::initAppearanceSettings()
 {
     // appearanceInitEvent 作用：统一追踪外观系统初始化流程日志。
@@ -4079,6 +4174,10 @@ void MainWindow::applyAppearanceSettings(
 
     // 把深浅色状态写入全局属性，供各 Dock 在绘制/着色时读取。
     KswordTheme::SetDarkModeEnabled(darkModeEnabled);
+    if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
+    {
+        appInstance->setProperty("ksword_slider_wheel_adjust_enabled", settings.sliderWheelAdjustEnabled);
+    }
 
     // Windows 11 背景控制要求：
     // 即使是纯黑/纯白，也必须显式设置 Window 颜色，避免系统接管背景。
@@ -4151,6 +4250,7 @@ void MainWindow::applyAppearanceSettings(
         QSS_MainWindow_TabWidget
         + QSS_MainWindow_dockStyle
         + buildAppearanceOverlayStyleSheet(
+            m_currentAppearanceSettings,
             darkModeEnabled,
             enableDockTransparencyForBackgroundImage);
 
@@ -4298,6 +4398,7 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
         QSS_MainWindow_TabWidget
         + QSS_MainWindow_dockStyle
         + buildAppearanceOverlayStyleSheet(
+            m_currentAppearanceSettings,
             darkModeEnabled,
             enableDockTransparencyForBackgroundImage);
     floatingWidget->setStyleSheet(appearanceStyleSheet);
@@ -4315,12 +4416,39 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
 }
 
 QString MainWindow::buildAppearanceOverlayStyleSheet(
+    const ks::settings::AppearanceSettings& settings,
     const bool darkModeEnabled,
     const bool enableDockTransparencyForBackgroundImage) const
 {
     // tooltipStyle 作用：
     // - 强制全局提示框采用主题化背景和文字；
     // - 修复深色模式下 Tooltip 仍为白底的问题。
+    const int scrollBarHoverExtentPx = settings.useWideScrollBars ? 12 : 7;
+    const int scrollBarExtentPx = settings.scrollBarAutoHideEnabled ? 3 : scrollBarHoverExtentPx;
+    const int scrollBarRadiusPx = settings.useWideScrollBars ? 5 : 3;
+    const QString scrollBarHandleColor = settings.scrollBarAutoHideEnabled
+        ? QStringLiteral("rgba(67,160,255,0.42)")
+        : QStringLiteral("rgba(67,160,255,0.78)");
+    const QString scrollBarHandleHoverColor = QStringLiteral("rgba(46,139,255,0.92)");
+    const QString panelBackgroundColor = darkModeEnabled
+        ? QStringLiteral("rgba(18,18,18,0.92)")
+        : QStringLiteral("rgba(255,255,255,0.94)");
+    const QString panelBorderColor = darkModeEnabled
+        ? QStringLiteral("#303846")
+        : QStringLiteral("#C6D8EC");
+    const QString inactiveTabColor = darkModeEnabled
+        ? QStringLiteral("#151C26")
+        : QStringLiteral("#EEF5FD");
+    const QString inactiveTabTextColor = darkModeEnabled
+        ? QStringLiteral("#E4ECF7")
+        : QStringLiteral("#23415F");
+    const QString activeTabColor = darkModeEnabled
+        ? QStringLiteral("#EAF4FF")
+        : QStringLiteral("#164B82");
+    const QString activeTabTextColor = darkModeEnabled
+        ? QStringLiteral("#0A2340")
+        : QStringLiteral("#FFFFFF");
+
     const QString tooltipStyle = QStringLiteral(
         "QToolTip{"
         "  background-color:%1 !important;"
@@ -4380,10 +4508,89 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         + dockBackgroundPolicyStyle.arg(
             darkModeEnabled ? QStringLiteral("#FFFFFF") : QStringLiteral("#000000"));
 
+    // depthOverlayStyle 作用：
+    // - 为 Dock 面板、分组、表格和 Tab 增加边界/圆角/轻阴影感；
+    // - 让当前 Tab 使用与图标错开的深浅对比色，避免蓝色图标在蓝底上不可见。
+    const QString depthOverlayStyle = QStringLiteral(
+        "ads--CDockAreaWidget{"
+        "  border:1px solid %1 !important;"
+        "  border-radius:8px;"
+        "  background:%2 !important;"
+        "}"
+        "ads--CDockAreaTitleBar{"
+        "  border-bottom:1px solid %1 !important;"
+        "  padding:2px 4px;"
+        "}"
+        "QGroupBox,QFrame#card,QWidget#card{"
+        "  border:1px solid %1;"
+        "  border-radius:8px;"
+        "  background:%2;"
+        "  margin-top:6px;"
+        "}"
+        "QTabWidget::pane{"
+        "  border:1px solid %1 !important;"
+        "  border-radius:8px;"
+        "  background:%2 !important;"
+        "  top:-1px;"
+        "}"
+        "QHeaderView::section{"
+        "  font-weight:600;"
+        "  min-height:24px;"
+        "}")
+        .arg(panelBorderColor)
+        .arg(panelBackgroundColor);
+
+    // scrollBarOverlayStyle 作用：
+    // - 全局改为透明轨道，减少遮挡；
+    // - 根据设置切换窄/宽滚动条，并支持默认弱显示、悬停增强。
+    const QString scrollBarOverlayStyle = QStringLiteral(
+        "QScrollBar:vertical{"
+        "  background:transparent !important;"
+        "  border:none !important;"
+        "  width:%1px !important;"
+        "  margin:0px;"
+        "}"
+        "QScrollBar:horizontal{"
+        "  background:transparent !important;"
+        "  border:none !important;"
+        "  height:%1px !important;"
+        "  margin:0px;"
+        "}"
+        "QScrollBar:vertical:hover{"
+        "  width:%5px !important;"
+        "}"
+        "QScrollBar:horizontal:hover{"
+        "  height:%5px !important;"
+        "}"
+        "QScrollBar::handle:vertical{"
+        "  background-color:%3 !important;"
+        "  min-height:24px;"
+        "  border-radius:%2px;"
+        "}"
+        "QScrollBar::handle:horizontal{"
+        "  background-color:%3 !important;"
+        "  min-width:24px;"
+        "  border-radius:%2px;"
+        "}"
+        "QScrollBar::handle:vertical:hover,QScrollBar::handle:horizontal:hover{"
+        "  background-color:%4 !important;"
+        "}"
+        "QScrollBar::add-line,QScrollBar::sub-line,QScrollBar::add-page,QScrollBar::sub-page{"
+        "  background:transparent !important;"
+        "  border:none !important;"
+        "  width:0px;"
+        "  height:0px;"
+        "}")
+        .arg(scrollBarExtentPx)
+        .arg(scrollBarRadiusPx)
+        .arg(scrollBarHandleColor)
+        .arg(scrollBarHandleHoverColor)
+        .arg(scrollBarHoverExtentPx);
+
     // sharedOverlayStyle 作用：
-    // - 统一 hover/pressed 与 Tab 高亮主题色；
-    // - 维持滚动条蓝色手柄与 Dock 选中态白字。
-    const QString sharedOverlayStyle = QStringLiteral(
+    // - 统一 hover/pressed 与 Tab 高亮；
+    // - 当前 Tab 采用反差色，避免图标与选中底色混在一起。
+    const QString sharedOverlayStyle = depthOverlayStyle + scrollBarOverlayStyle + QStringLiteral(
         "QPushButton:hover,QToolButton:hover{"
         "  background-color:#2E8BFF !important;"
         "  color:#FFFFFF !important;"
@@ -4394,33 +4601,49 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  color:#FFFFFF !important;"
         "  border-color:#1F78D0 !important;"
         "}"
+        "QTabBar::tab{"
+        "  background-color:%1 !important;"
+        "  color:%2 !important;"
+        "  border:1px solid %3 !important;"
+        "  border-bottom:none !important;"
+        "  border-top-left-radius:6px;"
+        "  border-top-right-radius:6px;"
+        "  padding:6px 12px;"
+        "  margin-right:2px;"
+        "}"
         "QTabBar::tab:selected{"
-        "  background-color:#43A0FF !important;"
-        "  color:#FFFFFF !important;"
-        "  border:none !important;"
+        "  background-color:%4 !important;"
+        "  color:%5 !important;"
+        "  font-weight:700;"
+        "  border-color:%3 !important;"
         "}"
         "QTabBar::tab:hover:!selected{"
         "  background-color:#2E8BFF !important;"
         "  color:#FFFFFF !important;"
         "}"
-        "QTabBar::tab{"
-        "  border:none !important;"
-        "}"
         "ads--CDockAreaTabBar{"
         "  background:transparent !important;"
+        "  padding:2px 4px 0px 4px;"
         "}"
         "ads--CDockWidgetTab,ads--CAutoHideTab{"
-        "  background-color:palette(base) !important;"
-        "  color:palette(text) !important;"
+        "  background-color:%1 !important;"
+        "  color:%2 !important;"
+        "  border:1px solid %3 !important;"
+        "  border-radius:6px;"
+        "  padding:5px 10px;"
+        "  margin:1px 2px;"
+        "}"
+        "ads--CDockWidgetTab QLabel,ads--CAutoHideTab QLabel{"
+        "  color:%2 !important;"
         "}"
         "ads--CDockWidgetTab[activeTab=\"true\"],ads--CAutoHideTab[activeTab=\"true\"]{"
-        "  background-color:#43A0FF !important;"
-        "  color:#FFFFFF !important;"
-        "  border-color:#43A0FF !important;"
+        "  background-color:%4 !important;"
+        "  color:%5 !important;"
+        "  border-color:%3 !important;"
         "}"
         "ads--CDockWidgetTab[activeTab=\"true\"] QLabel,ads--CAutoHideTab[activeTab=\"true\"] QLabel{"
-        "  color:#FFFFFF !important;"
-        "  font-weight:600;"
+        "  color:%5 !important;"
+        "  font-weight:700;"
         "}"
         "ads--CDockWidgetTab:hover,ads--CAutoHideTab:hover{"
         "  background-color:#2E8BFF !important;"
@@ -4429,14 +4652,12 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "ads--CDockAreaTitleBar QToolButton,ads--CDockAreaTitleBar QPushButton{"
         "  border:none !important;"
         "  background:transparent !important;"
-        "}"
-        "QScrollBar::handle:vertical,QScrollBar::handle:horizontal{"
-        "  background-color:#43A0FF !important;"
-        "}"
-        "QScrollBar::handle:vertical:hover,QScrollBar::handle:horizontal:hover{"
-        "  background-color:#2E8BFF !important;"
-        "}");
-
+        "}")
+        .arg(inactiveTabColor)
+        .arg(inactiveTabTextColor)
+        .arg(panelBorderColor)
+        .arg(activeTabColor)
+        .arg(activeTabTextColor);
     // dockContentTransparentStyle 作用：
     // - 背景图可用时，把 Dock 内容区域常见容器背景全部改为透明；
     // - 修复“Dock 面板整体仍是黑底/白底，背景图只能从缝隙看到”的问题。
