@@ -69,6 +69,8 @@
 
 #include <array>
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cctype>
 #include <cmath>
 #include <map>
@@ -111,6 +113,17 @@ namespace
         bool accepted = false;
         UnlockTerminateMode terminateMode = UnlockTerminateMode::R3;
         std::vector<std::uint32_t> selectedProcessIdList;
+    };
+
+    // UnlockSelectionSharedState：
+    // - 作用：在线程与 UI 队列之间传递解锁器选择结果；
+    // - 说明：使用 shared_ptr 托管，避免 FileDock 析构时队列中的 UI 回调访问已释放栈变量。
+    struct UnlockSelectionSharedState
+    {
+        std::mutex mutex;                         // mutex：保护 completed 与 result 的互斥锁。
+        std::condition_variable condition;        // condition：通知后台线程 UI 选择已完成。
+        bool completed = false;                   // completed：标记 UI 选择流程是否已经写入结果。
+        UnlockSelectionResult result;             // result：保存用户选择的结束方式和 PID 列表。
     };
 
     QString unlockTerminateModeToText(const UnlockTerminateMode mode)
@@ -633,7 +646,7 @@ namespace
 
     // collectOccupyProcessIdsByPath：
     // - 作用：调用现有占用扫描器，提取“占用目标路径”的 PID 集合；
-    // - 说明：这里运行在 R3，结果用于后续请求 R0 结束占用进程。
+    // - 说明：这里运行在 R3，结果只用于展示/诊断，不能隐式结束进程。
     std::vector<std::uint32_t> collectOccupyProcessIdsByPath(
         const QString& path,
         QStringList* const detailTextListOut)
@@ -1655,6 +1668,7 @@ FileDock::FileDock(QWidget* parent)
 
 FileDock::~FileDock()
 {
+    // 析构阶段只发出停止信号，避免后台线程继续等待新的 UI 选择结果。
     m_unlockerWorkerStopRequested.store(true);
     std::thread workerThread;
     {
@@ -4918,7 +4932,6 @@ void FileDock::deleteSelectedItemByDriver(FilePanelWidgets& panel)
     kPro.set(progressPid, "驱动删除开始", 0, 5.0f);
 
     QStringList deleteErrors = prepareErrors;
-    std::set<std::uint32_t> terminatedProcessCache;
     const std::size_t totalTargetCount = deleteTargets.size();
     for (std::size_t index = 0; index < totalTargetCount; ++index)
     {
@@ -4931,82 +4944,20 @@ void FileDock::deleteSelectedItemByDriver(FilePanelWidgets& panel)
             &detailText);
         if (!deleteOk && !target.isDirectory)
         {
+            // 驱动删除失败后仅扫描占用进程用于提示，禁止绕过文件解锁器的显式选择流程。
             QStringList fallbackDetails;
             const std::vector<std::uint32_t> occupyPids =
                 collectOccupyProcessIdsByPath(target.path, &fallbackDetails);
 
-            std::size_t terminateAttemptCount = 0U;
-            std::size_t terminateSuccessCount = 0U;
-            std::size_t terminateSkipCount = 0U;
-            for (const std::uint32_t processId : occupyPids)
-            {
-                if (terminatedProcessCache.find(processId) != terminatedProcessCache.end())
-                {
-                    terminateSkipCount += 1U;
-                    continue;
-                }
+            QStringList errorLines;
+            errorLines.push_back(QString::fromStdString(detailText));
+            errorLines.push_back(
+                QStringLiteral("occupyPidCount=%1, autoTerminate=disabled")
+                .arg(occupyPids.size()));
+            errorLines.push_back(QStringLiteral("请先使用“文件解锁器”选择并确认要结束的占用进程，再重新执行驱动删除。"));
+            errorLines.append(fallbackDetails);
 
-                terminateAttemptCount += 1U;
-                std::string terminateDetailText;
-                const bool terminateOk = terminateProcessByR0Driver(
-                    driverHandle,
-                    processId,
-                    &terminateDetailText);
-                if (terminateOk)
-                {
-                    terminateSuccessCount += 1U;
-                    terminatedProcessCache.insert(processId);
-                }
-
-                fallbackDetails.push_back(
-                    QStringLiteral("terminate pid=%1 -> %2 (%3)")
-                    .arg(processId)
-                    .arg(terminateOk ? QStringLiteral("ok") : QStringLiteral("fail"))
-                    .arg(QString::fromStdString(terminateDetailText)));
-            }
-
-            std::string retryDetailText;
-            if (terminateSuccessCount > 0U)
-            {
-                deleteOk = deletePathByR0Driver(
-                    driverHandle,
-                    target.path,
-                    target.isDirectory,
-                    &retryDetailText);
-            }
-
-            if (deleteOk)
-            {
-                kLogEvent forceEvent;
-                info << forceEvent
-                    << "[FileDock] 驱动删除重试成功, path="
-                    << QDir::toNativeSeparators(target.path).toStdString()
-                    << ", terminated="
-                    << terminateSuccessCount
-                    << ", skipped="
-                    << terminateSkipCount
-                    << eol;
-            }
-            else
-            {
-                QStringList errorLines;
-                errorLines.push_back(QString::fromStdString(detailText));
-                errorLines.push_back(
-                    QStringLiteral("occupyPidCount=%1, terminateAttempt=%2, terminateSuccess=%3, terminateSkipped=%4")
-                    .arg(occupyPids.size())
-                    .arg(terminateAttemptCount)
-                    .arg(terminateSuccessCount)
-                    .arg(terminateSkipCount));
-                if (!retryDetailText.empty())
-                {
-                    errorLines.push_back(
-                        QStringLiteral("retryDelete=%1")
-                        .arg(QString::fromStdString(retryDetailText)));
-                }
-                errorLines.append(fallbackDetails);
-
-                deleteErrors.push_back(errorLines.join(QStringLiteral(" | ")));
-            }
+            deleteErrors.push_back(errorLines.join(QStringLiteral(" | ")));
         }
         else if (!deleteOk)
         {
@@ -5193,35 +5144,62 @@ void FileDock::unlockPathsByDriver(
         }
 
         UnlockSelectionResult selectionResult;
+        const std::shared_ptr<UnlockSelectionSharedState> selectionState =
+            std::make_shared<UnlockSelectionSharedState>();
         const bool selectionInvokeOk = QMetaObject::invokeMethod(
             safeThis.data(),
-            [&selectionResult, safeThis, progressPid, jobResult]() {
+            [selectionState, safeThis, progressPid, jobResult]() {
+                UnlockSelectionResult uiSelectionResult;
                 if (safeThis.isNull())
                 {
                     kPro.set(progressPid, "界面已关闭", 0, 100.0f);
-                    return;
                 }
-
-                if (jobResult.processCandidateList.empty())
+                else if (jobResult.processCandidateList.empty())
                 {
                     QMessageBox::information(
                         safeThis.data(),
                         QStringLiteral("文件解锁器"),
                         QStringLiteral("未发现占用进程，无需解锁。"));
                     kPro.set(progressPid, "未发现占用进程", 0, 100.0f);
-                    return;
+                }
+                else
+                {
+                    uiSelectionResult = showUnlockProcessSelectionDialog(
+                        safeThis.data(),
+                        jobResult.processCandidateList);
                 }
 
-                selectionResult = showUnlockProcessSelectionDialog(
-                    safeThis.data(),
-                    jobResult.processCandidateList);
+                {
+                    std::lock_guard<std::mutex> lock(selectionState->mutex);
+                    selectionState->result = uiSelectionResult;
+                    selectionState->completed = true;
+                }
+
+                selectionState->condition.notify_all();
             },
-            Qt::BlockingQueuedConnection);
+            Qt::QueuedConnection);
         if (!selectionInvokeOk)
         {
             kPro.set(progressPid, "回调失败", 0, 100.0f);
             markWorkerStopped();
             return;
+        }
+
+        {
+            std::unique_lock<std::mutex> lock(selectionState->mutex);
+            while (!selectionState->completed)
+            {
+                if (safeThis.isNull() || this->m_unlockerWorkerStopRequested.load())
+                {
+                    kPro.set(progressPid, "界面已关闭", 0, 100.0f);
+                    markWorkerStopped();
+                    return;
+                }
+
+                selectionState->condition.wait_for(lock, std::chrono::milliseconds(100));
+            }
+
+            selectionResult = selectionState->result;
         }
 
         if (!selectionResult.accepted || selectionResult.selectedProcessIdList.empty())

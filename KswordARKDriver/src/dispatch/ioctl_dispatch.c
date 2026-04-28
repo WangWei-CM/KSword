@@ -598,6 +598,19 @@ Return Value:
     }
     case IOCTL_KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK:
     {
+        status = IoValidateDeviceIoControlAccess( // 校验调用方打开句柄时具备写权限，避免只读用户触发高危回调移除路径。
+            WdfRequestWdmGetIrp(Request), // 获取当前 WDF 请求对应的底层 WDM IRP。
+            FILE_WRITE_ACCESS); // 要求 FILE_WRITE_ACCESS/GENERIC_WRITE 权限。
+        if (!NT_SUCCESS(status)) { // 权限不足时拒绝进入内核回调移除实现。
+            (void)RtlStringCbPrintfA( // 生成权限拒绝日志文本。
+                logMessage, // 写入本次 IOCTL 共用日志缓冲区。
+                sizeof(logMessage), // 传入日志缓冲区容量，防止格式化越界。
+                "Remove external callback denied: write access required, status=0x%08X.", // 说明拒绝原因。
+                (unsigned int)status); // 输出权限校验返回码。
+            (void)KswordARKDriverEnqueueLogFrame(device, "Warn", logMessage); // 写入驱动日志通道，便于 R3 审计。
+            break; // 停止处理该 IOCTL。
+        }
+
         status = KswordARKCallbackIoctlRemoveExternalCallback(
             Request,
             InputBufferLength,
