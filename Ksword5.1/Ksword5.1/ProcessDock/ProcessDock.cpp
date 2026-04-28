@@ -40,6 +40,7 @@
 #include <QSlider>
 #include <QScrollBar>
 #include <QSvgRenderer>
+#include <QTabBar>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
@@ -95,6 +96,7 @@ namespace
     constexpr const char* IconList = ":/Icon/process_list.svg";
     constexpr const char* IconStart = ":/Icon/process_start.svg";
     constexpr const char* IconPause = ":/Icon/process_pause.svg";
+    constexpr const char* IconThreadTab = ":/Icon/process_threads.svg";
     // Kernel 标识图路径：按项目规范固定使用 Resource\Kernel.png。
     const QString KernelBadgeImagePath = QStringLiteral(
         "H:/Project/Ksword5.1/Ksword5.1/Ksword5.1/Resource/Kernel.png");
@@ -102,6 +104,32 @@ namespace
     // 默认按钮图标尺寸。
     constexpr QSize DefaultIconSize(16, 16);
     constexpr QSize CompactIconButtonSize(28, 28);
+    constexpr int ProcessSideTabWidthPx = 118;
+    constexpr int ProcessNumericSortRole = Qt::UserRole + 200;
+
+    class ProcessSortTreeWidgetItem final : public QTreeWidgetItem
+    {
+    public:
+        // operator< 作用：让进程表按隐藏数值键排序，而不是按展示字符串排序。
+        bool operator<(const QTreeWidgetItem& otherItem) const override
+        {
+            const QTreeWidget* ownerTree = treeWidget();
+            const int sortColumn = ownerTree != nullptr ? ownerTree->sortColumn() : 0;
+            bool leftOk = false;
+            bool rightOk = false;
+            const double leftValue = data(sortColumn, ProcessNumericSortRole).toDouble(&leftOk);
+            const double rightValue = otherItem.data(sortColumn, ProcessNumericSortRole).toDouble(&rightOk);
+            if (leftOk && rightOk && leftValue != rightValue)
+            {
+                return leftValue < rightValue;
+            }
+            if (leftOk && rightOk)
+            {
+                return text(sortColumn).localeAwareCompare(otherItem.text(sortColumn)) < 0;
+            }
+            return QTreeWidgetItem::operator<(otherItem);
+        }
+    };
 
     // 当前 steady_clock 时间转 100ns（与 ks::process 差值计算规则保持一致）。
     std::uint64_t steadyNow100ns()
@@ -938,6 +966,29 @@ void ProcessDock::initializeUi()
     m_sideTabWidget = new QTabWidget(this);
     m_sideTabWidget->setTabPosition(QTabWidget::West);
     m_sideTabWidget->setDocumentMode(true);
+    m_sideTabWidget->setIconSize(DefaultIconSize);
+
+    // 左侧页签宽度控制：
+    // 1) West Tab 默认会被全局 min-width 放大，信息密度偏低；
+    // 2) 这里固定为进程页专用宽度，保证文字完整且不挤压表格。
+    if (m_sideTabWidget->tabBar() != nullptr)
+    {
+        m_sideTabWidget->tabBar()->setFixedWidth(ProcessSideTabWidthPx);
+        m_sideTabWidget->tabBar()->setExpanding(false);
+        m_sideTabWidget->tabBar()->setStyleSheet(QStringLiteral(
+            "QTabBar{background:transparent;border-right:1px solid %1;border-bottom:none;}"
+            "QTabBar::tab{min-width:%2px;max-width:%2px;padding:7px 6px;margin:0px;"
+            "border:1px solid %1;border-left:none;border-right:none;border-radius:0px;}"
+            "QTabBar::tab:selected{background-color:%3;color:#FFFFFF;border-color:%1;"
+            "border-left:3px solid %4;font-weight:700;}"
+            "QTabBar::tab:hover:!selected{background-color:%5;color:%6;}" )
+            .arg(KswordTheme::BorderHex())
+            .arg(ProcessSideTabWidthPx - 2)
+            .arg(KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#1F5F99") : QStringLiteral("#164B82"))
+            .arg(KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#7FC1FF") : KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#213247") : QStringLiteral("#E5F1FF"))
+            .arg(KswordTheme::TextPrimaryHex()));
+    }
 
     // “进程列表”页是本模块核心页面。
     m_processListPage = new QWidget(this);
@@ -1132,8 +1183,9 @@ void ProcessDock::initializeProcessTable()
         Qt::AlignRight | Qt::AlignBottom);
 
     // 满足需求 3.1：侧边栏 Tab 中包含“进程列表”页签。
-    m_sideTabWidget->addTab(m_processListPage, QIcon(IconProcessMain), "进程列表");
+    m_sideTabWidget->addTab(m_processListPage, blueTintedIcon(IconProcessMain), "进程列表");
     m_sideTabWidget->setCurrentIndex(0);
+    refreshSideTabIconContrast();
 }
 
 void ProcessDock::initializeCreateProcessPage()
@@ -1558,7 +1610,8 @@ void ProcessDock::initializeCreateProcessPage()
     m_siFillAttributeEdit->setToolTip("STARTUPINFO.dwFillAttribute：控制台颜色/样式位；可在下方复选框组合。");
     m_tokenDesiredAccessEdit->setToolTip("Token DesiredAccess：令牌访问掩码；可在下方复选框组合。");
 
-    m_sideTabWidget->addTab(m_createProcessPage, QIcon(IconStart), "创建进程");
+    m_sideTabWidget->addTab(m_createProcessPage, blueTintedIcon(IconStart), "创建进程");
+    refreshSideTabIconContrast();
     initializeCreateProcessConnections();
 }
 
@@ -1674,6 +1727,8 @@ void ProcessDock::initializeConnections()
         {
             return;
         }
+        refreshSideTabIconContrast();
+
         QWidget* currentPage = m_sideTabWidget->widget(currentIndex);
         if (currentPage == m_processListPage)
         {
@@ -2916,7 +2971,7 @@ void ProcessDock::rebuildTable()
             continue;
         }
 
-        QTreeWidgetItem* rowItem = new QTreeWidgetItem();
+        QTreeWidgetItem* rowItem = new ProcessSortTreeWidgetItem();
         const ks::process::ProcessRecord& processRecord = *displayRow.record;
         const std::string identityKey = ks::process::BuildProcessIdentityKey(
             processRecord.pid,
@@ -2929,6 +2984,17 @@ void ProcessDock::rebuildTable()
             const TableColumn column = static_cast<TableColumn>(columnIndex);
             rowItem->setText(columnIndex, formatColumnText(processRecord, column, displayRow.depth));
         }
+
+        // 排序键使用原始数值：展示文本可以带单位，但排序必须按真实大小比较。
+        rowItem->setData(toColumnIndex(TableColumn::Pid), ProcessNumericSortRole, static_cast<double>(processRecord.pid));
+        rowItem->setData(toColumnIndex(TableColumn::Cpu), ProcessNumericSortRole, processRecord.cpuPercent);
+        rowItem->setData(toColumnIndex(TableColumn::Ram), ProcessNumericSortRole, processRecord.ramMB);
+        rowItem->setData(toColumnIndex(TableColumn::Disk), ProcessNumericSortRole, processRecord.diskMBps);
+        rowItem->setData(toColumnIndex(TableColumn::Gpu), ProcessNumericSortRole, processRecord.gpuPercent);
+        rowItem->setData(toColumnIndex(TableColumn::Net), ProcessNumericSortRole, processRecord.netKBps);
+        rowItem->setData(toColumnIndex(TableColumn::ParentPid), ProcessNumericSortRole, static_cast<double>(processRecord.parentPid));
+        rowItem->setData(toColumnIndex(TableColumn::StartTime), ProcessNumericSortRole, static_cast<double>(processRecord.creationTime100ns));
+        rowItem->setData(toColumnIndex(TableColumn::IsAdmin), ProcessNumericSortRole, processRecord.isAdmin ? 1.0 : 0.0);
 
         // 进程名列固定显示目标 EXE 图标（命中缓存后开销可控）。
         rowItem->setIcon(toColumnIndex(TableColumn::Name), resolveProcessIcon(processRecord));
@@ -3725,6 +3791,15 @@ QIcon ProcessDock::resolveProcessIcon(const ks::process::ProcessRecord& processR
 
 QIcon ProcessDock::blueTintedIcon(const char* iconPath, const QSize& iconSize) const
 {
+    return tintedProcessTabIcon(iconPath, KswordTheme::PrimaryBlueColor, iconSize);
+}
+
+QIcon ProcessDock::tintedProcessTabIcon(
+    const char* iconPath,
+    const QColor& tintColor,
+    const QSize& iconSize) const
+{
+    // SVG 着色流程：先按原路径渲染透明图，再用 SourceIn 覆盖指定颜色。
     QSvgRenderer renderer(QString::fromUtf8(iconPath));
     if (!renderer.isValid())
     {
@@ -3738,9 +3813,43 @@ QIcon ProcessDock::blueTintedIcon(const char* iconPath, const QSize& iconSize) c
     painter.setRenderHint(QPainter::Antialiasing, true);
     renderer.render(&painter, QRectF(0, 0, iconSize.width(), iconSize.height()));
     painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
-    painter.fillRect(iconPixmap.rect(), KswordTheme::PrimaryBlueColor);
+    painter.fillRect(iconPixmap.rect(), tintColor);
     painter.end();
     return QIcon(iconPixmap);
+}
+
+void ProcessDock::refreshSideTabIconContrast()
+{
+    if (m_sideTabWidget == nullptr)
+    {
+        return;
+    }
+
+    // 左侧 Tab 选中态是深蓝背景，当前页图标改为白色以避免融入背景。
+    const int currentIndex = m_sideTabWidget->currentIndex();
+    const QColor selectedIconColor(255, 255, 255);
+    const QIcon processIcon = currentIndex == m_sideTabWidget->indexOf(m_processListPage)
+        ? tintedProcessTabIcon(IconProcessMain, selectedIconColor)
+        : blueTintedIcon(IconProcessMain);
+    const QIcon threadIcon = currentIndex == m_sideTabWidget->indexOf(m_threadPage)
+        ? tintedProcessTabIcon(IconThreadTab, selectedIconColor)
+        : blueTintedIcon(IconThreadTab);
+    const QIcon createIcon = currentIndex == m_sideTabWidget->indexOf(m_createProcessPage)
+        ? tintedProcessTabIcon(IconStart, selectedIconColor)
+        : blueTintedIcon(IconStart);
+
+    if (m_processListPage != nullptr)
+    {
+        m_sideTabWidget->setTabIcon(m_sideTabWidget->indexOf(m_processListPage), processIcon);
+    }
+    if (m_threadPage != nullptr)
+    {
+        m_sideTabWidget->setTabIcon(m_sideTabWidget->indexOf(m_threadPage), threadIcon);
+    }
+    if (m_createProcessPage != nullptr)
+    {
+        m_sideTabWidget->setTabIcon(m_sideTabWidget->indexOf(m_createProcessPage), createIcon);
+    }
 }
 
 void ProcessDock::showActionResultMessage(
