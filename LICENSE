@@ -1,0 +1,85 @@
+Ksword5.1 Proprietary License
+
+Copyright (c) 2025-2026 WangWei-CM / OB_BUFF(Felix3322).
+All rights reserved.
+
+1. Scope
+
+This license applies to the Ksword5.1 software suite, including its user-mode
+applications, kernel-mode components, helper tools, scripts, documentation,
+assets, and any related source code or binary distributions in this repository
+unless a specific file or third-party component states otherwise.
+
+2. Permission
+
+You may use, copy, build, and run this software only if you have received
+explicit authorization from the copyright holder or project maintainer.
+Authorized use must comply with all applicable laws, regulations, organizational
+policies, and security requirements.
+
+3. Restrictions
+
+Unless explicitly permitted in writing, you may not:
+
+- redistribute, publish, sublicense, sell, rent, lease, or otherwise transfer
+  this software or any derivative work;
+- use this software to access, inspect, modify, disrupt, bypass, or control any
+  system, process, network, driver, kernel object, account, file, registry key,
+  or other resource without proper authorization;
+- remove, obscure, or alter copyright, license, attribution, security warning,
+  or provenance notices;
+- represent this software or derivative work as an official release without the
+  project maintainer's written approval;
+- use the software in any manner that violates law, regulation, or third-party
+  rights.
+
+4. Security-Sensitive Functionality
+
+Ksword5.1 contains system-level debugging, inspection, driver, kernel,
+process-control, file, registry, network, and monitoring capabilities. These
+features are intended only for lawful, authorized administration, debugging,
+research, incident response, education, and defensive security work.
+
+You are solely responsible for ensuring that your use is authorized and safe.
+Do not use this software on systems you do not own or administer, or where you
+do not have explicit permission to perform the relevant actions.
+
+5. Third-Party Components
+
+Third-party libraries, SDKs, drivers, tools, frameworks, binaries, and assets
+included with or used by this project remain governed by their own licenses.
+This license does not grant rights to third-party materials beyond the rights
+provided by those third-party licenses.
+
+6. No Warranty
+
+This software is provided "as is" and "as available", without warranty of any
+kind, whether express, implied, statutory, or otherwise, including but not
+limited to warranties of merchantability, fitness for a particular purpose,
+title, non-infringement, accuracy, availability, compatibility, or security.
+
+7. Limitation of Liability
+
+To the maximum extent permitted by law, the copyright holder, project
+maintainers, and contributors shall not be liable for any direct, indirect,
+incidental, special, consequential, exemplary, punitive, or other damages,
+including loss of data, system instability, service interruption, security
+incident, loss of profits, or business interruption, arising from or related to
+this software or its use, even if advised of the possibility of such damages.
+
+8. Termination
+
+Any permission granted under this license terminates automatically if you
+violate its terms. Upon termination, you must stop using the software and delete
+all unauthorized copies in your possession or control.
+
+9. Additional Written Terms
+
+The copyright holder or project maintainer may grant additional permissions or
+commercial terms in a separate written agreement. If such an agreement exists,
+that agreement controls only to the extent it expressly conflicts with this
+license.
+
+中文说明（非正式摘要）
+
+本项目默认不是开源授权。未经版权所有者或项目维护者明确授权，不得分发、销售、再授权或用于未授权系统。Ksword5.1 包含进程、网络、驱动、内核、文件、注册表等系统级调试和管理能力，只能在合法授权、合规和安全的场景下使用。本软件按“现状”提供，不提供任何明示或默示担保；因使用本软件造成的风险和后果由使用者自行承担。

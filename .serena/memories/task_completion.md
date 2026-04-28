@@ -1,0 +1,1 @@
+Before final handoff, run focused checks when feasible: `git diff --check` for whitespace/patch hygiene and the relevant Visual Studio/CLion build if environment is configured. For driver or GUI behavior changes, mention if runtime validation on a controlled Windows test machine was not performed.
