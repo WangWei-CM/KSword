@@ -28,9 +28,9 @@ Environment:
 #endif
 
 // Security descriptor for control device:
-// SYSTEM full access, Administrators read/write/execute, World read/write/execute, Restricted read.
+// SYSTEM full access, Administrators read/write/execute, World read-only, Restricted read.
 static const WCHAR g_KswordArkControlDeviceSddl[] =
-    L"D:P(A;;GA;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;WD)(A;;GR;;;RC)";
+    L"D:P(A;;GA;;;SY)(A;;GRGWGX;;;BA)(A;;GR;;;WD)(A;;GR;;;RC)";
 
 NTSTATUS
 KswordARKDriverCreateControlDevice(
