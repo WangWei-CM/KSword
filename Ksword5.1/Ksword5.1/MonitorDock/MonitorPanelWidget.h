@@ -116,6 +116,11 @@ private:
     // - 统一设置最小/最大高度，防止外层布局因最小高度触发滚动条。
     void adjustChartCellHeights();
 
+    // applyChartTextTheme 作用：
+    // - 统一刷新图表标题、图例、坐标轴文字颜色；
+    // - 修复深色模式下左下角监视器文字对比度过低。
+    void applyChartTextTheme();
+
 private:
     // 布局控件。
     QVBoxLayout* m_rootLayout = nullptr;   // m_rootLayout：根布局。

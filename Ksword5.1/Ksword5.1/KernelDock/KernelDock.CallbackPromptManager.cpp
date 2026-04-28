@@ -186,7 +186,7 @@ namespace
             "  background-color:palette(base);"
             "  color:palette(text);"
             "  border:1px solid palette(mid);"
-            "  border-radius:6px;"
+            "  border-radius:2px;"
             "  padding:6px 14px;"
             "  min-height:30px;"
             "}"

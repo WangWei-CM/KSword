@@ -178,6 +178,11 @@ private:
     void initDockWidgets();
     QWidget* createDockPlaceholderWidget(const QString& titleText) const;
     void ensureDockContentInitialized(ads::CDockWidget* dockWidget);
+
+    // showSettingsPanelFromMenu：
+    // - 作用：从顶部菜单栏打开设置内容，替代主 Dock Tab 中的“设置”页签。
+    void showSettingsPanelFromMenu();
+
     void initializeNextDeferredDock();
 
     // reportStartupProgress 作用：
@@ -301,7 +306,6 @@ private:
     ads::CDockWidget* m_dockKernel = nullptr; // m_dockKernel：内核页 Dock。
     ads::CDockWidget* m_dockMonitorTab = nullptr; // m_dockMonitorTab：监控页 Dock。
     ads::CDockWidget* m_dockPrivilege = nullptr; // m_dockPrivilege：权限页 Dock。
-    ads::CDockWidget* m_dockSettings = nullptr; // m_dockSettings：设置页 Dock。
     ads::CDockWidget* m_dockWindow = nullptr; // m_dockWindow：窗口页 Dock。
     ads::CDockWidget* m_dockRegistry = nullptr; // m_dockRegistry：注册表页 Dock。
     ads::CDockWidget* m_dockHandle = nullptr;
@@ -326,7 +330,6 @@ private:
     MonitorPanelWidget* m_monitorPanelWidget = nullptr; // m_monitorPanelWidget：左下角监视面板四宫格性能图组件。
     HardwareDock* m_hardwareWidget = nullptr; // m_hardwareWidget：硬件页内容控件。
     PrivilegeDock* m_privilegeWidget = nullptr; // m_privilegeWidget：权限页内容控件。
-    SettingsDock* m_settingsWidget = nullptr; // m_settingsWidget：设置页内容控件。
     StartupDock* m_startupWidget = nullptr; // m_startupWidget：启动项页内容控件。
     ServiceDock* m_serviceWidget = nullptr;
     MiscDock* m_miscWidget = nullptr;
@@ -348,6 +351,7 @@ private:
     QWidget* m_topActionRowWidget = nullptr;     // m_topActionRowWidget：标题栏下方的功能条容器（文件 + 权限按钮）。
     QHBoxLayout* m_topActionRowLayout = nullptr; // m_topActionRowLayout：功能条水平布局。
     QToolButton* m_fileMenuButton = nullptr;     // m_fileMenuButton：功能条左侧“文件”按钮。
+    QToolButton* m_settingsMenuButton = nullptr; // m_settingsMenuButton：功能条左侧“设置”入口按钮。
     QPushButton* m_adminStatusButton = nullptr;
     QPushButton* m_debugStatusButton = nullptr;
     QPushButton* m_systemStatusButton = nullptr;

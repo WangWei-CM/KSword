@@ -13,6 +13,7 @@
 #include <QDateTime>
 #include <QFile>
 #include <QFileDialog>
+#include <QFrame>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QHash>
@@ -25,6 +26,7 @@
 #include <QPlainTextEdit>
 #include <QClipboard>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSize>
 #include <QSplitter>
 #include <QStyledItemDelegate>
@@ -886,7 +888,24 @@ private:
             return;
         }
 
-        auto* rootLayout = new QVBoxLayout(m_hostPage);
+        auto* outerLayout = new QVBoxLayout(m_hostPage);
+        outerLayout->setContentsMargins(0, 0, 0, 0);
+        outerLayout->setSpacing(0);
+
+        auto* scrollArea = new QScrollArea(m_hostPage);
+        scrollArea->setWidgetResizable(true);
+        scrollArea->setFrameShape(QFrame::NoFrame);
+        scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        outerLayout->addWidget(scrollArea, 1);
+
+        auto* scrollContent = new QWidget(scrollArea);
+        scrollContent->setObjectName(QStringLiteral("ksCallbackInterceptScrollContent"));
+        scrollContent->setAutoFillBackground(false);
+        scrollContent->setAttribute(Qt::WA_StyledBackground, false);
+        scrollArea->setWidget(scrollContent);
+
+        auto* rootLayout = new QVBoxLayout(scrollContent);
         rootLayout->setContentsMargins(4, 4, 4, 4);
         rootLayout->setSpacing(6);
 
@@ -894,12 +913,12 @@ private:
         topBarLayout->setContentsMargins(0, 0, 0, 0);
         topBarLayout->setSpacing(6);
 
-        m_globalEnabledCheck = new QCheckBox(QStringLiteral("全局启用"), m_hostPage);
+        m_globalEnabledCheck = new QCheckBox(QStringLiteral("全局启用"), scrollContent);
         m_globalEnabledCheck->setChecked(true);
-        m_applyButton = new QPushButton(QStringLiteral("应用"), m_hostPage);
-        m_reloadStateButton = new QPushButton(QStringLiteral("重新加载驱动状态"), m_hostPage);
-        m_importButton = new QPushButton(QStringLiteral("导入配置"), m_hostPage);
-        m_exportButton = new QPushButton(QStringLiteral("导出配置"), m_hostPage);
+        m_applyButton = new QPushButton(QStringLiteral("应用"), scrollContent);
+        m_reloadStateButton = new QPushButton(QStringLiteral("重新加载驱动状态"), scrollContent);
+        m_importButton = new QPushButton(QStringLiteral("导入配置"), scrollContent);
+        m_exportButton = new QPushButton(QStringLiteral("导出配置"), scrollContent);
 
         const auto setupIconButton = [this](QPushButton* button, const QIcon& iconValue, const QString& tipText) {
             if (button == nullptr || m_hostPage == nullptr)
@@ -925,11 +944,11 @@ private:
         topBarLayout->addStretch(1);
         rootLayout->addLayout(topBarLayout, 0);
 
-        m_statusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_hostPage);
+        m_statusLabel = new QLabel(QStringLiteral("状态：等待刷新"), scrollContent);
         m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
         rootLayout->addWidget(m_statusLabel, 0);
 
-        auto* mainSplitter = new QSplitter(Qt::Horizontal, m_hostPage);
+        auto* mainSplitter = new QSplitter(Qt::Horizontal, scrollContent);
         rootLayout->addWidget(mainSplitter, 1);
 
         auto* groupPane = new QWidget(mainSplitter);
@@ -1025,7 +1044,7 @@ private:
         const int reservedTabIndex = m_ruleTabWidget->addTab(reservedPage, QStringLiteral("文件系统微过滤器（预留）"));
         m_tabCallbackTypeMap.insert(reservedTabIndex, KSWORD_ARK_CALLBACK_TYPE_MINIFILTER_RESERVED);
 
-        auto* logTabWidget = new QTabWidget(m_hostPage);
+        auto* logTabWidget = new QTabWidget(scrollContent);
         m_appLogEditor = new QPlainTextEdit(logTabWidget);
         m_eventLogEditor = new QPlainTextEdit(logTabWidget);
         m_appLogEditor->setReadOnly(true);

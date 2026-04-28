@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // ============================================================
 // ProcessDock.h
@@ -285,6 +285,10 @@ private:
     QString threadWaitReasonText(std::uint32_t waitReasonValue) const;
     QIcon resolveProcessIcon(const ks::process::ProcessRecord& processRecord);
     QIcon blueTintedIcon(const char* iconPath, const QSize& iconSize = QSize(16, 16)) const;
+    // tintedProcessTabIcon 作用：按指定颜色重绘进程页侧栏图标，避免选中态蓝底蓝图标。
+    QIcon tintedProcessTabIcon(const char* iconPath, const QColor& tintColor, const QSize& iconSize = QSize(16, 16)) const;
+    // refreshSideTabIconContrast 作用：刷新左侧 Tab 选中态图标颜色，提升当前页识别度。
+    void refreshSideTabIconContrast();
     QString buildThreadContextMenuStyle() const;
     // showActionResultMessage 作用：统一记录进程动作结果日志（不弹窗），复用同一 kLogEvent 保持调用链连续。
     // 调用方式：在动作函数中创建 kLogEvent 后，将同一个事件对象传入本函数。

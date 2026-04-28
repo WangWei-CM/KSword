@@ -19,6 +19,10 @@
 #define FILE_ANY_ACCESS 0
 #endif
 
+#ifndef FILE_WRITE_ACCESS
+#define FILE_WRITE_ACCESS 0x0002
+#endif
+
 #ifndef CTL_CODE
 #define CTL_CODE(DeviceType, Function, Method, Access) \
     (((DeviceType) << 16) | ((Access) << 14) | ((Function) << 2) | (Method))

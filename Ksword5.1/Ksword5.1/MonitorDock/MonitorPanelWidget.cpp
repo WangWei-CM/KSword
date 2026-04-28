@@ -13,6 +13,8 @@
 #include <QDateTime>
 #include <QFrame>
 #include <QGridLayout>
+#include <QFont>
+#include <QList>
 #include <QPainter>
 #include <QResizeEvent>
 #include <QShowEvent>
@@ -23,6 +25,7 @@
 #include <QtCharts/QBarCategoryAxis>
 #include <QtCharts/QBarSeries>
 #include <QtCharts/QBarSet>
+#include <QtCharts/QAbstractAxis>
 #include <QtCharts/QAreaSeries>
 #include <QtCharts/QChart>
 #include <QtCharts/QChartView>
@@ -95,6 +98,22 @@ namespace
             ? QColor(130, 218, 170)
             : QColor(70, 185, 120);
     }
+
+    // monitorPanelTextColor 作用：返回监视器图表标题/图例/轴标签颜色。
+    QColor monitorPanelTextColor()
+    {
+        return KswordTheme::IsDarkModeEnabled()
+            ? QColor(245, 249, 255)
+            : QColor(25, 39, 55);
+    }
+
+    // monitorPanelMutedTextColor 作用：返回监视器坐标轴次级文字颜色。
+    QColor monitorPanelMutedTextColor()
+    {
+        return KswordTheme::IsDarkModeEnabled()
+            ? QColor(185, 202, 222)
+            : QColor(80, 96, 115);
+    }
 }
 
 MonitorPanelWidget::MonitorPanelWidget(QWidget* parent)
@@ -155,6 +174,7 @@ void MonitorPanelWidget::resizeEvent(QResizeEvent* resizeEventPointer)
 void MonitorPanelWidget::showEvent(QShowEvent* showEventPointer)
 {
     QWidget::showEvent(showEventPointer);
+    applyChartTextTheme();
     // 延迟到事件循环末尾再重排，保证首帧也能拿到稳定几何尺寸。
     QTimer::singleShot(0, this, [this]()
     {
@@ -391,7 +411,8 @@ void MonitorPanelWidget::initializeUi()
     m_chartGridLayout->setColumnStretch(0, 1);
     m_chartGridLayout->setColumnStretch(1, 1);
 
-    // 初始化阶段先执行一次高度压缩，避免外层 Dock 初始出现滚动条。
+    // 初始化阶段先应用文字主题并执行一次高度压缩，避免深色文字过暗和外层滚动条。
+    applyChartTextTheme();
     adjustChartCellHeights();
 }
 
@@ -796,13 +817,23 @@ void MonitorPanelWidget::appendLineSample(
         return;
     }
 
-    series->append(m_sampleCounter, value);
-    while (series->count() > m_historyLength)
+    // 折线图使用固定 X 坐标窗口：
+    // 1) 新点从右侧进入；
+    // 2) 旧点整体左移，形成平移感；
+    // 3) 避免 QChart 每次把整条曲线从起点重新动画播放。
+    QList<QPointF> pointList = series->points();
+    pointList.push_back(QPointF(static_cast<double>(pointList.size()), value));
+    while (pointList.size() > m_historyLength)
     {
-        series->remove(0);
+        pointList.removeFirst();
     }
+    for (int pointIndex = 0; pointIndex < pointList.size(); ++pointIndex)
+    {
+        pointList[pointIndex].setX(static_cast<double>(pointIndex));
+    }
+    series->replace(pointList);
 
-    const QList<QPointF> pointList = series->points();
+
     if (pointList.isEmpty())
     {
         return;
@@ -818,6 +849,60 @@ void MonitorPanelWidget::appendLineSample(
         maxYValue = std::max(maxYValue, pointValue.y());
     }
     axisY->setRange(0.0, maxYValue * 1.2);
+}
+
+void MonitorPanelWidget::applyChartTextTheme()
+{
+    const QColor primaryTextColor = monitorPanelTextColor();
+    const QColor mutedTextColor = monitorPanelMutedTextColor();
+    const QBrush primaryTextBrush(primaryTextColor);
+    const QBrush mutedTextBrush(mutedTextColor);
+
+    // chartList 变量：统一枚举四张图，确保标题/图例在深浅色下都可读。
+    const QList<QChart*> chartList{
+        m_cpuChartView != nullptr ? m_cpuChartView->chart() : nullptr,
+        m_memoryChartView != nullptr ? m_memoryChartView->chart() : nullptr,
+        m_diskChartView != nullptr ? m_diskChartView->chart() : nullptr,
+        m_networkChartView != nullptr ? m_networkChartView->chart() : nullptr
+    };
+
+    QFont titleFont = font();
+    titleFont.setPointSizeF(std::max(10.0, titleFont.pointSizeF() + 1.0));
+    titleFont.setWeight(QFont::DemiBold);
+
+    QFont legendFont = font();
+    legendFont.setPointSizeF(std::max(9.0, legendFont.pointSizeF()));
+
+    for (QChart* chart : chartList)
+    {
+        if (chart == nullptr)
+        {
+            continue;
+        }
+
+        const bool barChartNeedsSoftAnimation = chart == (m_cpuChartView != nullptr ? m_cpuChartView->chart() : nullptr)
+            || chart == (m_memoryChartView != nullptr ? m_memoryChartView->chart() : nullptr);
+
+        chart->setTitleBrush(primaryTextBrush);
+        chart->setTitleFont(titleFont);
+        chart->legend()->setLabelColor(primaryTextColor);
+        chart->legend()->setFont(legendFont);
+        chart->setAnimationOptions(barChartNeedsSoftAnimation ? QChart::SeriesAnimations : QChart::NoAnimation);
+        chart->setAnimationDuration(barChartNeedsSoftAnimation ? 120 : 0);
+
+        const QList<QAbstractAxis*> axisList = chart->axes();
+        for (QAbstractAxis* axis : axisList)
+        {
+            if (axis == nullptr)
+            {
+                continue;
+            }
+            axis->setLabelsBrush(mutedTextBrush);
+            axis->setTitleBrush(mutedTextBrush);
+            axis->setLinePenColor(mutedTextColor);
+            axis->setGridLineColor(mutedTextColor);
+        }
+    }
 }
 
 void MonitorPanelWidget::adjustChartCellHeights()

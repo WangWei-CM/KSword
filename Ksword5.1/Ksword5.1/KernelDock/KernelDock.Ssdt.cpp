@@ -27,7 +27,7 @@ namespace
     QString blueButtonStyle()
     {
         return QStringLiteral(
-            "QPushButton{color:%1;background:%5;border:1px solid %2;border-radius:3px;padding:3px 8px;}"
+            "QPushButton{color:%1;background:%5;border:1px solid %2;border-radius:2px;padding:3px 8px;}"
             "QPushButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
             "QPushButton:pressed{background:%4;color:#FFFFFF;}")
             .arg(KswordTheme::PrimaryBlueHex)
@@ -40,7 +40,7 @@ namespace
     QString blueInputStyle()
     {
         return QStringLiteral(
-            "QLineEdit{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
+            "QLineEdit{border:1px solid %2;border-radius:2px;background:%3;color:%4;padding:2px 6px;}"
             "QLineEdit:focus{border:1px solid %1;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::BorderHex())

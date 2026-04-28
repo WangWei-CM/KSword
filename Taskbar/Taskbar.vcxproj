@@ -39,12 +39,14 @@
     <QtInstall Condition="'$(KSWORD_QT_DIR)'!=''">$(KSWORD_QT_DIR)</QtInstall>
     <QtInstall Condition="'$(KSWORD_QT_DIR)'==''">Qt</QtInstall>
     <QtModules>core;gui;widgets;concurrent;multimedia</QtModules>
+    <QMakeExtraArgs>QMAKE_MSC_VER=1944 QMAKE_MSC_FULL_VER=194435217</QMakeExtraArgs>
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
     <QtInstall Condition="'$(KSWORD_QT_DIR)'!=''">$(KSWORD_QT_DIR)</QtInstall>
     <QtInstall Condition="'$(KSWORD_QT_DIR)'==''">Qt</QtInstall>
     <QtModules>core;gui;widgets;concurrent;multimedia</QtModules>
+    <QMakeExtraArgs>QMAKE_MSC_VER=1944 QMAKE_MSC_FULL_VER=194435217</QMakeExtraArgs>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
   <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">

@@ -382,7 +382,8 @@ void BootEditorTab::initializeCenterPane()
     // 高级开关组。
     QGroupBox* flagGroup = new QGroupBox(QStringLiteral("高级开关"), rightEditorColumn);
     QVBoxLayout* flagLayout = new QVBoxLayout(flagGroup);
-    flagLayout->setContentsMargins(8, 8, 8, 8);
+    // 标题与内容之间保留额外顶部空间，避免全局 QGroupBox 标题压住第一个复选框。
+    flagLayout->setContentsMargins(8, 14, 8, 8);
     flagLayout->setSpacing(4);
 
     m_testSigningCheck = new QCheckBox(QStringLiteral("开启测试签名 (testsigning)"), flagGroup);

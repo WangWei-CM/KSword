@@ -18,7 +18,6 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
-#include <corhdr.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -37,6 +36,22 @@ namespace file_dock_detail::pe_tables_detail
             std::uint32_t signature = 0;
             std::uint8_t guid[16] = {};
             std::uint32_t age = 0;
+        };
+
+        struct ImageCor20Header
+        {
+            std::uint32_t cb = 0;
+            std::uint16_t MajorRuntimeVersion = 0;
+            std::uint16_t MinorRuntimeVersion = 0;
+            IMAGE_DATA_DIRECTORY MetaData = {};
+            std::uint32_t Flags = 0;
+            std::uint32_t EntryPointToken = 0;
+            IMAGE_DATA_DIRECTORY Resources = {};
+            IMAGE_DATA_DIRECTORY StrongNameSignature = {};
+            IMAGE_DATA_DIRECTORY CodeManagerTable = {};
+            IMAGE_DATA_DIRECTORY VTableFixups = {};
+            IMAGE_DATA_DIRECTORY ExportAddressTableJumps = {};
+            IMAGE_DATA_DIRECTORY ManagedNativeHeader = {};
         };
 
         // readPodAtOffset 作用：
@@ -546,7 +561,7 @@ namespace file_dock_detail::pe_tables_detail
             return;
         }
 
-        IMAGE_COR20_HEADER clrHeader{};
+        ImageCor20Header clrHeader{};
         if (!readPodAtOffset(fileBytes, clrOffset, &clrHeader))
         {
             outputStream << "CLR 头读取失败。\n";
