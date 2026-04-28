@@ -524,6 +524,49 @@ bool MemoryDock::attachToProcess(
     return true;
 }
 
+void MemoryDock::focusProcessForOperations(const std::uint32_t pid, const bool showMessage)
+{
+    // 从进程 Dock 跳转：刷新进程列表，定位目标行并切换到“进程与模块/内存区域”操作上下文。
+    if (pid == 0)
+    {
+        return;
+    }
+
+    refreshProcessList(true);
+    QString processName = QStringLiteral("PID_%1").arg(pid);
+    for (int row = 0; row < m_processTable->rowCount(); ++row)
+    {
+        QTableWidgetItem* pidItem = m_processTable->item(row, 1);
+        QTableWidgetItem* nameItem = m_processTable->item(row, 0);
+        if (pidItem == nullptr || nameItem == nullptr)
+        {
+            continue;
+        }
+        if (pidItem->text().toUInt() == pid)
+        {
+            processName = nameItem->text().trimmed();
+            m_processTable->selectRow(row);
+            m_processTable->scrollToItem(pidItem, QAbstractItemView::PositionAtCenter);
+            break;
+        }
+    }
+
+    if (m_processCombo != nullptr)
+    {
+        const int comboIndex = m_processCombo->findData(QVariant::fromValue(static_cast<uint>(pid)), Qt::UserRole);
+        if (comboIndex >= 0)
+        {
+            m_processCombo->setCurrentIndex(comboIndex);
+        }
+    }
+
+    attachToProcess(pid, processName, showMessage);
+    if (m_tabWidget != nullptr && m_tabRegions != nullptr)
+    {
+        m_tabWidget->setCurrentWidget(m_tabRegions);
+    }
+}
+
 void MemoryDock::detachProcess()
 {
     // 分离入口日志：记录旧 PID 便于追踪。

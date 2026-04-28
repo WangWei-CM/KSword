@@ -3489,6 +3489,9 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QAction* setCriticalAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_critical.svg"), "设为关键进程");
     QAction* clearCriticalAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_uncritical.svg"), "取消关键进程");
     QAction* openFolderAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_open_folder.svg"), "打开所在目录");
+    QAction* openMemoryAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_details.svg"),
+        "跳转到内存操作（可在此处转储）");
 
     // 优先级二级菜单。
     QMenu* prioritySubMenu = contextMenu.addMenu(blueTintedIcon(":/Icon/process_priority.svg"), "设置进程优先级");
@@ -3533,6 +3536,7 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     else if (selectedAction == setCriticalAction) { executeSetCriticalAction(true); }
     else if (selectedAction == clearCriticalAction) { executeSetCriticalAction(false); }
     else if (selectedAction == openFolderAction) { executeOpenFolderAction(); }
+    else if (selectedAction == openMemoryAction) { executeOpenMemoryOperationAction(); }
     else if (selectedAction == detailsAction) { openProcessDetailsPlaceholder(); }
     else if (selectedAction->parent() == prioritySubMenu)
     {
@@ -3730,7 +3734,9 @@ QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processR
         // CPU 改为两位小数，避免低占用进程全部显示 0.0 的视觉误差。
         return QString::number(processRecord.cpuPercent, 'f', 2) + "%";
     case TableColumn::Ram:
-        return QString::number(processRecord.ramMB, 'f', 1) + " MB";
+        return QStringLiteral("申请 %1 MB / 使用 %2 MB")
+            .arg(processRecord.ramMB, 0, 'f', 1)
+            .arg(processRecord.workingSetMB, 0, 'f', 1);
     case TableColumn::Disk:
         return QString::number(processRecord.diskMBps, 'f', 2) + " MB/s";
     case TableColumn::Gpu:
@@ -4983,6 +4989,36 @@ void ProcessDock::executeOpenFolderAction()
         << ", detail=" << detailText
         << eol;
     showActionResultMessage("打开所在目录", actionOk, detailText, actionEvent);
+}
+
+void ProcessDock::executeOpenMemoryOperationAction()
+{
+    ks::process::ProcessRecord* processRecord = selectedRecord();
+    if (processRecord == nullptr)
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] executeOpenMemoryOperationAction 被忽略：当前没有选中进程。" << eol;
+        return;
+    }
+
+    const bool invokeOk = QMetaObject::invokeMethod(
+        this->parent(),
+        "focusMemoryDockByPid",
+        Qt::QueuedConnection,
+        Q_ARG(quint32, static_cast<quint32>(processRecord->pid)));
+    kLogEvent actionEvent;
+    (invokeOk ? info : warn) << actionEvent
+        << "[ProcessDock] 跳转到内存操作, pid=" << processRecord->pid
+        << ", invokeOk=" << (invokeOk ? "true" : "false")
+        << eol;
+    if (!invokeOk)
+    {
+        showActionResultMessage(
+            QStringLiteral("跳转到内存操作"),
+            false,
+            std::string("focusMemoryDockByPid invoke failed"),
+            actionEvent);
+    }
 }
 
 void ProcessDock::requestOpenProcessDetailByPid(const std::uint32_t pid)

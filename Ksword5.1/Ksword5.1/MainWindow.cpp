@@ -4212,6 +4212,30 @@ void MainWindow::focusHandleDockByPid(const quint32 pid)
     }
 }
 
+void MainWindow::focusMemoryDockByPid(const quint32 pid)
+{
+    // 跳转入口日志：记录目标 PID，并确保内存 Dock 惰性加载完成。
+    kLogEvent focusMemoryEvent;
+    info << focusMemoryEvent
+        << "[MainWindow] focusMemoryDockByPid: pid="
+        << pid
+        << eol;
+
+    if (m_dockMemory != nullptr)
+    {
+        ensureDockContentInitialized(m_dockMemory);
+    }
+    if (m_memoryWidget != nullptr)
+    {
+        m_memoryWidget->focusProcessForOperations(static_cast<std::uint32_t>(pid), false);
+    }
+    if (m_dockMemory != nullptr)
+    {
+        m_dockMemory->raise();
+        m_dockMemory->setVisible(true);
+    }
+}
+
 void MainWindow::openProcessDetailByPid(const quint32 pid)
 {
     // 跳转入口日志：记录来自外部模块的 PID 跳转请求。
