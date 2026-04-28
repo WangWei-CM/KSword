@@ -13,14 +13,22 @@
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QApplication>
+#include <QEventLoop>
 #include <QComboBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPainter>
+#include <QPixmap>
+#include <QFrame>
+#include <QProgressBar>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSplitter>
+#include <QSvgRenderer>
 #include <QTableWidget>
 #include <QTabWidget>
 #include <QTimer>
@@ -34,7 +42,7 @@ namespace
     QString blueButtonStyle()
     {
         return QStringLiteral(
-            "QPushButton{color:%1;background:%5;border:1px solid %2;border-radius:3px;padding:3px 8px;}"
+            "QPushButton{color:%1;background:%5;border:1px solid %2;border-radius:2px;padding:3px 8px;}"
             "QPushButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
             "QPushButton:pressed{background:%4;color:#FFFFFF;}")
             .arg(KswordTheme::PrimaryBlueHex)
@@ -49,7 +57,7 @@ namespace
     QString blueInputStyle()
     {
         return QStringLiteral(
-            "QLineEdit{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
+            "QLineEdit{border:1px solid %2;border-radius:2px;background:%3;color:%4;padding:2px 6px;}"
             "QLineEdit:focus{border:1px solid %1;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::BorderHex())
@@ -116,6 +124,45 @@ namespace
         Summary,
         Count
     };
+
+    // tintedSvgIcon：
+    // - 作用：把资源 SVG 渲染为指定颜色图标，用于 Tab 选中态高对比显示。
+    // - 参数 iconPath：资源路径；参数 tintColor：目标颜色；参数 iconSize：输出尺寸。
+    QIcon tintedSvgIcon(const QString& iconPath, const QColor& tintColor, const QSize& iconSize = QSize(16, 16))
+    {
+        QSvgRenderer svgRenderer(iconPath);
+        if (!svgRenderer.isValid())
+        {
+            return QIcon(iconPath);
+        }
+
+        QPixmap tintedPixmap(iconSize);
+        tintedPixmap.fill(Qt::transparent);
+
+        QPainter painter(&tintedPixmap);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        svgRenderer.render(&painter, QRectF(0, 0, iconSize.width(), iconSize.height()));
+        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        painter.fillRect(tintedPixmap.rect(), tintColor);
+        painter.end();
+
+        return QIcon(tintedPixmap);
+    }
+
+    // tabIcon：
+    // - 作用：返回普通 Tab 图标，保持未选中态与项目图标资源一致。
+    // - 变量 iconPath：图标资源路径，统一放在调用点便于审阅。
+    QIcon tabIcon(const QString& iconPath)
+    {
+        return tintedSvgIcon(iconPath, KswordTheme::PrimaryBlueColor);
+    }
+
+    // selectedTabIcon：
+    // - 作用：返回白色 Tab 图标，避免选中蓝底时出现蓝底蓝图标。
+    QIcon selectedTabIcon(const QString& iconPath)
+    {
+        return tintedSvgIcon(iconPath, QColor(255, 255, 255));
+    }
 }
 
 KernelDock::KernelDock(QWidget* parent)
@@ -139,9 +186,28 @@ void KernelDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
     m_rootLayout->setContentsMargins(6, 6, 6, 6);
-    m_rootLayout->setSpacing(6);
+    m_rootLayout->setSpacing(4);
+
+    // 初始化进度条默认隐藏，仅在惰性 Tab 开始构建时短暂显示。
+    m_tabInitializingStatusLabel = new QLabel(QStringLiteral("页面就绪"), this);
+    m_tabInitializingStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
+    m_tabInitializingStatusLabel->setVisible(false);
+
+    m_tabInitializingProgressBar = new QProgressBar(this);
+    m_tabInitializingProgressBar->setRange(0, 0);
+    m_tabInitializingProgressBar->setFixedHeight(4);
+    m_tabInitializingProgressBar->setTextVisible(false);
+    m_tabInitializingProgressBar->setVisible(false);
+    m_tabInitializingProgressBar->setStyleSheet(QStringLiteral(
+        "QProgressBar{border:none;background:%1;border-radius:1px;}"
+        "QProgressBar::chunk{background:%2;border-radius:1px;}")
+        .arg(KswordTheme::BorderHex())
+        .arg(KswordTheme::PrimaryBlueHex));
+    m_rootLayout->addWidget(m_tabInitializingStatusLabel, 0);
+    m_rootLayout->addWidget(m_tabInitializingProgressBar, 0);
 
     m_tabWidget = new QTabWidget(this);
+    m_tabWidget->setIconSize(QSize(16, 16));
     m_rootLayout->addWidget(m_tabWidget, 1);
 
     m_objectNamespacePage = new QWidget(m_tabWidget);
@@ -153,41 +219,158 @@ void KernelDock::initializeUi()
 
     m_objectNamespaceTabIndex = m_tabWidget->addTab(
         m_objectNamespacePage,
-        QIcon(":/Icon/process_tree.svg"),
+        tabIcon(QStringLiteral(":/Icon/process_tree.svg")),
         QStringLiteral("对象命名空间"));
     m_tabWidget->setTabToolTip(m_objectNamespaceTabIndex, QStringLiteral("对象管理器命名空间遍历（默认页）"));
 
     m_atomTabIndex = m_tabWidget->addTab(
         m_atomPage,
-        QIcon(":/Icon/process_threads.svg"),
+        tabIcon(QStringLiteral(":/Icon/process_threads.svg")),
         QStringLiteral("原子表遍历"));
     m_tabWidget->setTabToolTip(m_atomTabIndex, QStringLiteral("遍历全局原子范围并提供校验操作"));
 
     m_ntQueryTabIndex = m_tabWidget->addTab(
         m_ntQueryPage,
-        QIcon(":/Icon/process_details.svg"),
+        tabIcon(QStringLiteral(":/Icon/process_details.svg")),
         QStringLiteral("历史NtQuery"));
     m_tabWidget->setTabToolTip(m_ntQueryTabIndex, QStringLiteral("旧版内核 NtQuery 信息页"));
 
     m_ssdtTabIndex = m_tabWidget->addTab(
         m_ssdtPage,
-        QIcon(":/Icon/process_list.svg"),
+        tabIcon(QStringLiteral(":/Icon/process_list.svg")),
         QStringLiteral("SSDT遍历"));
     m_tabWidget->setTabToolTip(m_ssdtTabIndex, QStringLiteral("驱动侧 SSDT 服务索引遍历结果"));
 
     m_callbackTabIndex = m_tabWidget->addTab(
         m_callbackInterceptPage,
-        QIcon(":/Icon/process_shield.svg"),
+        tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
         QStringLiteral("驱动回调"));
     m_tabWidget->setTabToolTip(m_callbackTabIndex, QStringLiteral("驱动回调拦截规则管理与询问事件处理"));
 
     m_callbackRemoveTabIndex = m_tabWidget->addTab(
         m_callbackRemovePage,
-        QIcon(":/Icon/process_delete.svg"),
+        tabIcon(QStringLiteral(":/Icon/process_terminate.svg")),
         QStringLiteral("回调移除"));
     m_tabWidget->setTabToolTip(m_callbackRemoveTabIndex, QStringLiteral("通过 Ksword 内核驱动移除其他驱动注册的回调"));
 
     m_tabWidget->setCurrentIndex(m_objectNamespaceTabIndex);
+    updateTabIconContrast();
+}
+
+void KernelDock::showTabInitializingProgress(const int tabIndex, const QString& titleText)
+{
+    if (m_tabInitializingProgressBar == nullptr || m_tabInitializingStatusLabel == nullptr)
+    {
+        return;
+    }
+
+    // 只在当前正要显示的页签上展示进度，避免后台页初始化干扰用户视线。
+    if (m_tabWidget != nullptr && m_tabWidget->currentIndex() != tabIndex)
+    {
+        return;
+    }
+
+    m_tabInitializingStatusLabel->setText(QStringLiteral("正在初始化 %1 页面...").arg(titleText));
+    m_tabInitializingStatusLabel->setVisible(true);
+    m_tabInitializingProgressBar->setVisible(true);
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+}
+
+void KernelDock::hideTabInitializingProgress()
+{
+    if (m_tabInitializingProgressBar != nullptr)
+    {
+        m_tabInitializingProgressBar->setVisible(false);
+    }
+    if (m_tabInitializingStatusLabel != nullptr)
+    {
+        m_tabInitializingStatusLabel->setVisible(false);
+    }
+}
+
+QVBoxLayout* KernelDock::wrapPageInScrollArea(QWidget* pageWidget, QWidget** contentWidgetOut)
+{
+    if (pageWidget == nullptr)
+    {
+        return nullptr;
+    }
+
+    // 外层只保留一个 QScrollArea，真实控件放入 contentWidget，保证页面空白处滚轮也能滚动。
+    auto* outerLayout = new QVBoxLayout(pageWidget);
+    outerLayout->setContentsMargins(0, 0, 0, 0);
+    outerLayout->setSpacing(0);
+
+    auto* scrollArea = new QScrollArea(pageWidget);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->viewport()->setAttribute(Qt::WA_Hover, true);
+
+    auto* contentWidget = new QWidget(scrollArea);
+    contentWidget->setObjectName(QStringLiteral("ksKernelScrollableContent"));
+    contentWidget->setAutoFillBackground(false);
+    contentWidget->setAttribute(Qt::WA_StyledBackground, false);
+
+    auto* contentLayout = new QVBoxLayout(contentWidget);
+    contentLayout->setContentsMargins(4, 4, 4, 4);
+    contentLayout->setSpacing(6);
+
+    scrollArea->setWidget(contentWidget);
+    outerLayout->addWidget(scrollArea, 1);
+
+    if (contentWidgetOut != nullptr)
+    {
+        *contentWidgetOut = contentWidget;
+    }
+
+    if (pageWidget == m_callbackRemovePage)
+    {
+        m_callbackRemoveScrollArea = scrollArea;
+    }
+    return contentLayout;
+}
+
+void KernelDock::updateTabIconContrast()
+{
+    if (m_tabWidget == nullptr)
+    {
+        return;
+    }
+
+    // Tab 选中态为蓝色背景时，图标改用白色资源绘制；未选中保持原图标颜色。
+    const int currentIndex = m_tabWidget->currentIndex();
+    m_tabWidget->setTabIcon(m_objectNamespaceTabIndex, tabIcon(QStringLiteral(":/Icon/process_tree.svg")));
+    m_tabWidget->setTabIcon(m_atomTabIndex, tabIcon(QStringLiteral(":/Icon/process_threads.svg")));
+    m_tabWidget->setTabIcon(m_ntQueryTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
+    m_tabWidget->setTabIcon(m_ssdtTabIndex, tabIcon(QStringLiteral(":/Icon/process_list.svg")));
+    m_tabWidget->setTabIcon(m_callbackTabIndex, tabIcon(QStringLiteral(":/Icon/process_critical.svg")));
+    m_tabWidget->setTabIcon(m_callbackRemoveTabIndex, tabIcon(QStringLiteral(":/Icon/process_terminate.svg")));
+
+    if (currentIndex == m_objectNamespaceTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_tree.svg")));
+    }
+    else if (currentIndex == m_atomTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_threads.svg")));
+    }
+    else if (currentIndex == m_ntQueryTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_details.svg")));
+    }
+    else if (currentIndex == m_ssdtTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_list.svg")));
+    }
+    else if (currentIndex == m_callbackTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_critical.svg")));
+    }
+    else if (currentIndex == m_callbackRemoveTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_terminate.svg")));
+    }
 }
 
 void KernelDock::initializeObjectNamespaceTab()
@@ -446,6 +629,7 @@ void KernelDock::initializeConnections()
 {
     // 顶层页签切换：按需初始化对应页面并触发首轮数据加载。
     connect(m_tabWidget, &QTabWidget::currentChanged, this, [this](const int tabIndex) {
+        updateTabIconContrast();
         ensureTabInitialized(tabIndex);
     });
 }
@@ -454,46 +638,58 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 {
     if (tabIndex == m_objectNamespaceTabIndex && !m_objectNamespaceTabInitialized)
     {
+        showTabInitializingProgress(tabIndex, QStringLiteral("对象命名空间"));
         initializeObjectNamespaceTab();
         m_objectNamespaceTabInitialized = true;
+        hideTabInitializingProgress();
         refreshObjectNamespaceAsync();
         return;
     }
 
     if (tabIndex == m_atomTabIndex && !m_atomTabInitialized)
     {
+        showTabInitializingProgress(tabIndex, QStringLiteral("全局原子表"));
         initializeAtomTableTab();
         m_atomTabInitialized = true;
+        hideTabInitializingProgress();
         refreshAtomTableAsync();
         return;
     }
 
     if (tabIndex == m_ntQueryTabIndex && !m_ntQueryTabInitialized)
     {
+        showTabInitializingProgress(tabIndex, QStringLiteral("历史 NtQuery"));
         initializeNtQueryTab();
         m_ntQueryTabInitialized = true;
+        hideTabInitializingProgress();
         refreshNtQueryAsync();
         return;
     }
 
     if (tabIndex == m_ssdtTabIndex && !m_ssdtTabInitialized)
     {
+        showTabInitializingProgress(tabIndex, QStringLiteral("SSDT"));
         initializeSsdtTab();
         m_ssdtTabInitialized = true;
+        hideTabInitializingProgress();
         refreshSsdtAsync();
         return;
     }
 
     if (tabIndex == m_callbackTabIndex && !m_callbackTabInitialized)
     {
+        showTabInitializingProgress(tabIndex, QStringLiteral("驱动回调"));
         initializeCallbackInterceptTab();
         m_callbackTabInitialized = true;
+        hideTabInitializingProgress();
         return;
     }
 
     if (tabIndex == m_callbackRemoveTabIndex && !m_callbackRemoveTabInitialized)
     {
+        showTabInitializingProgress(tabIndex, QStringLiteral("回调移除"));
         initializeCallbackRemoveTab();
         m_callbackRemoveTabInitialized = true;
+        hideTabInitializingProgress();
     }
 }

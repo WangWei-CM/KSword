@@ -26,6 +26,8 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QComboBox;
+class QProgressBar;
+class QScrollArea;
 class QTableWidget;
 class QTabWidget;
 class QTreeWidget;
@@ -232,6 +234,25 @@ private:
     // - 作用：在树中定位并选中第一条对象记录节点（非根/目录摘要节点）。
     void selectFirstObjectNamespaceEntryItem();
 
+    // showTabInitializingProgress：
+    // - 作用：页签惰性初始化前显示顶部不确定进度条，减少空白等待感。
+    // - 参数 tabIndex：目标页签索引；参数 titleText：页签中文名称。
+    void showTabInitializingProgress(int tabIndex, const QString& titleText);
+
+    // wrapPageInScrollArea：
+    // - 作用：创建页面滚动区域，让页面空白处也能响应滚轮滚动。
+    // - 参数 pageWidget：页签页面；参数 contentWidgetOut：输出真实内容容器。
+    // - 返回：真实内容容器的垂直布局。
+    QVBoxLayout* wrapPageInScrollArea(QWidget* pageWidget, QWidget** contentWidgetOut);
+
+    // hideTabInitializingProgress：
+    // - 作用：页签内容构建完成后隐藏初始化进度条。
+    void hideTabInitializingProgress();
+
+    // updateTabIconContrast：
+    // - 作用：根据当前选中页签重绘 Tab 图标颜色，确保蓝底高亮时图标为白色。
+    void updateTabIconContrast();
+
     // rebuildAtomTable：
     // - 作用：根据筛选关键词重建原子表格。
     // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
@@ -312,6 +333,8 @@ private:
     // ==================== 根级控件 ====================
     QVBoxLayout* m_rootLayout = nullptr; // m_rootLayout：KernelDock 根布局。
     QTabWidget* m_tabWidget = nullptr;   // m_tabWidget：顶层 Tab 容器。
+    QProgressBar* m_tabInitializingProgressBar = nullptr; // m_tabInitializingProgressBar：Tab 初始化顶部不确定进度条。
+    QLabel* m_tabInitializingStatusLabel = nullptr;       // m_tabInitializingStatusLabel：Tab 初始化状态提示文字。
     int m_objectNamespaceTabIndex = -1;  // m_objectNamespaceTabIndex：对象命名空间页签索引。
     int m_atomTabIndex = -1;             // m_atomTabIndex：原子表页签索引。
     int m_ssdtTabIndex = -1;             // m_ssdtTabIndex：SSDT 页签索引。
@@ -370,6 +393,8 @@ private:
     CallbackInterceptController* m_callbackInterceptController = nullptr; // m_callbackInterceptController：驱动回调页控制器。
     QWidget* m_callbackRemovePage = nullptr;                        // m_callbackRemovePage：回调移除页容器。
     QVBoxLayout* m_callbackRemoveLayout = nullptr;                  // m_callbackRemoveLayout：回调移除页布局。
+    QWidget* m_callbackRemoveContentWidget = nullptr;               // m_callbackRemoveContentWidget：回调移除页滚动内容容器。
+    QScrollArea* m_callbackRemoveScrollArea = nullptr;              // m_callbackRemoveScrollArea：回调移除页滚动区域。
     QHBoxLayout* m_callbackRemoveToolLayout = nullptr;              // m_callbackRemoveToolLayout：回调移除工具栏布局。
     QComboBox* m_callbackRemoveTypeCombo = nullptr;                 // m_callbackRemoveTypeCombo：回调类型下拉框。
     QLineEdit* m_callbackRemoveAddressEdit = nullptr;               // m_callbackRemoveAddressEdit：回调地址输入框。

@@ -196,15 +196,19 @@ void KernelDock::initializeCallbackRemoveTab()
         return;
     }
 
-    m_callbackRemoveLayout = new QVBoxLayout(m_callbackRemovePage);
-    m_callbackRemoveLayout->setContentsMargins(8, 8, 8, 8);
+    m_callbackRemoveLayout = wrapPageInScrollArea(m_callbackRemovePage, &m_callbackRemoveContentWidget);
+    if (m_callbackRemoveLayout == nullptr || m_callbackRemoveContentWidget == nullptr)
+    {
+        return;
+    }
+    m_callbackRemoveLayout->setContentsMargins(6, 6, 6, 6);
     m_callbackRemoveLayout->setSpacing(6);
 
     m_callbackRemoveToolLayout = new QHBoxLayout();
     m_callbackRemoveToolLayout->setContentsMargins(0, 0, 0, 0);
     m_callbackRemoveToolLayout->setSpacing(6);
 
-    m_callbackRemoveTypeCombo = new QComboBox(m_callbackRemovePage);
+    m_callbackRemoveTypeCombo = new QComboBox(m_callbackRemoveContentWidget);
     m_callbackRemoveTypeCombo->addItem(QStringLiteral("进程创建/退出 Notify"), static_cast<quint32>(KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_PROCESS));
     m_callbackRemoveTypeCombo->addItem(QStringLiteral("线程创建/退出 Notify"), static_cast<quint32>(KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_THREAD));
     m_callbackRemoveTypeCombo->addItem(QStringLiteral("镜像加载 Notify"), static_cast<quint32>(KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_IMAGE));
@@ -214,13 +218,13 @@ void KernelDock::initializeCallbackRemoveTab()
     m_callbackRemoveTypeCombo->addItem(QStringLiteral("WFP Callout"), static_cast<quint32>(KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_WFP_CALLOUT));
     m_callbackRemoveTypeCombo->addItem(QStringLiteral("ETW Provider/Consumer"), static_cast<quint32>(KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_ETW_PROVIDER));
 
-    m_callbackRemoveAddressEdit = new QLineEdit(m_callbackRemovePage);
+    m_callbackRemoveAddressEdit = new QLineEdit(m_callbackRemoveContentWidget);
     m_callbackRemoveAddressEdit->setPlaceholderText(QStringLiteral("输入回调地址（例如 0xFFFFF80012345678）"));
     m_callbackRemoveAddressEdit->setClearButtonEnabled(true);
 
-    m_callbackRemoveButton = new QPushButton(QStringLiteral("移除回调"), m_callbackRemovePage);
+    m_callbackRemoveButton = new QPushButton(QStringLiteral("移除回调"), m_callbackRemoveContentWidget);
     m_callbackRemoveButton->setStyleSheet(QStringLiteral(
-        "QPushButton{color:%1;background:%2;border:1px solid %3;border-radius:3px;padding:3px 10px;}"
+        "QPushButton{color:%1;background:%2;border:1px solid %3;border-radius:2px;padding:3px 10px;}"
         "QPushButton:hover{background:#2E8BFF;color:#FFFFFF;border:1px solid #2E8BFF;}"
         "QPushButton:pressed{background:%4;color:#FFFFFF;}"
     ).arg(
@@ -229,17 +233,17 @@ void KernelDock::initializeCallbackRemoveTab()
         KswordTheme::PrimaryBlueBorderHex,
         KswordTheme::PrimaryBluePressedHex));
 
-    m_callbackRemoveStatusLabel = new QLabel(QStringLiteral("状态：等待操作（当前仅前三类支持直接移除）"), m_callbackRemovePage);
+    m_callbackRemoveStatusLabel = new QLabel(QStringLiteral("状态：等待操作（当前仅前三类支持直接移除）"), m_callbackRemoveContentWidget);
     m_callbackRemoveStatusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
 
-    m_callbackRemoveToolLayout->addWidget(new QLabel(QStringLiteral("类型："), m_callbackRemovePage));
+    m_callbackRemoveToolLayout->addWidget(new QLabel(QStringLiteral("类型："), m_callbackRemoveContentWidget));
     m_callbackRemoveToolLayout->addWidget(m_callbackRemoveTypeCombo, 0);
     m_callbackRemoveToolLayout->addWidget(m_callbackRemoveAddressEdit, 1);
     m_callbackRemoveToolLayout->addWidget(m_callbackRemoveButton, 0);
     m_callbackRemoveLayout->addLayout(m_callbackRemoveToolLayout);
     m_callbackRemoveLayout->addWidget(m_callbackRemoveStatusLabel, 0);
 
-    m_callbackRemoveDetailEditor = new CodeEditorWidget(m_callbackRemovePage);
+    m_callbackRemoveDetailEditor = new CodeEditorWidget(m_callbackRemoveContentWidget);
     m_callbackRemoveDetailEditor->setReadOnly(true);
     m_callbackRemoveDetailEditor->setText(QStringLiteral("提示：该页面通过 KswordARK 驱动调用内核接口移除指定地址的回调，并尝试映射对应模块/服务。"));
     m_callbackRemoveLayout->addWidget(m_callbackRemoveDetailEditor, 1);
