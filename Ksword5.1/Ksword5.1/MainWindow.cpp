@@ -1,8 +1,11 @@
 ﻿#include "MainWindow.h"
 #include <QMenu>
 #include <QAction>
+#include <QEasingCurve>
+#include <QAbstractScrollArea>
 #include <QAbstractSlider>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
@@ -12,12 +15,17 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QLabel>
+#include <QList>
 #include <QPainter>
 #include <QPalette>
 #include <QPointF>
 #include <QPixmap>
+#include <QPointer>
+#include <QPropertyAnimation>
 #include <QRectF>
 #include <QResizeEvent>
+#include <QSizePolicy>
+#include <QScrollBar>
 #include <QImageReader>
 #include <QDialog>
 #include <QMessageBox>
@@ -34,6 +42,7 @@
 #include "Framework/ProgressDockWidget.h"
 #include "Framework/CustomTitleBar.h"
 #include "Framework/ThemedMessageBox.h"
+#include "include/ads/DockWidgetTab.h"
 #include "KernelDock/KernelDock.CallbackPromptManager.h"
 #include "UI/CodeEditorWidget.h"
 #include "theme.h"
@@ -49,8 +58,11 @@
 #include <sddl.h>
 #include <winternl.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
+#include <unordered_map>
 #include <cstring>
 #include <vector>
 #include <TlHelp32.h>
@@ -105,6 +117,143 @@ namespace
         }
     };
 
+    QIcon contrastIconForSelectedTab(const QIcon& sourceIcon)
+    {
+        if (sourceIcon.isNull())
+        {
+            return sourceIcon;
+        }
+
+        // 原生 QTabBar 没有 QSS 图标着色能力，这里按当前图标蒙版生成白色版本。
+        const QSize iconSize(16, 16);
+        QPixmap sourcePixmap = sourceIcon.pixmap(iconSize);
+        if (sourcePixmap.isNull())
+        {
+            return sourceIcon;
+        }
+
+        QPixmap contrastPixmap(iconSize);
+        contrastPixmap.fill(Qt::transparent);
+        QPainter painter(&contrastPixmap);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.drawPixmap(0, 0, sourcePixmap);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        painter.fillRect(contrastPixmap.rect(), QColor(255, 255, 255));
+        painter.end();
+        return QIcon(contrastPixmap);
+    }
+
+    class GlobalTabIconContrastFilter final : public QObject
+    {
+    public:
+        explicit GlobalTabIconContrastFilter(QObject* parent = nullptr)
+            : QObject(parent)
+        {
+        }
+
+    protected:
+        bool eventFilter(QObject* watchedObject, QEvent* eventObject) override
+        {
+            if (watchedObject == nullptr || eventObject == nullptr)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            QTabBar* tabBar = qobject_cast<QTabBar*>(watchedObject);
+            if (tabBar == nullptr)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            const QEvent::Type eventType = eventObject->type();
+            if (eventType == QEvent::Destroy)
+            {
+                m_originalIconsByTabBar.erase(tabBar);
+                m_displayIconsByTabBar.erase(tabBar);
+                m_contrastIconsByTabBar.erase(tabBar);
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+            if (eventType != QEvent::Show
+                && eventType != QEvent::Paint
+                && eventType != QEvent::Resize)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            refreshTabBarIcons(tabBar);
+            return QObject::eventFilter(watchedObject, eventObject);
+        }
+
+    private:
+        void refreshTabBarIcons(QTabBar* tabBar)
+        {
+            if (tabBar == nullptr || tabBar->count() <= 0)
+            {
+                return;
+            }
+
+            QList<QIcon>& originalIconList = m_originalIconsByTabBar[tabBar];
+            QList<QIcon>& displayIconList = m_displayIconsByTabBar[tabBar];
+            QList<QIcon>& contrastIconList = m_contrastIconsByTabBar[tabBar];
+            while (originalIconList.size() < tabBar->count())
+            {
+                originalIconList.push_back(QIcon());
+                displayIconList.push_back(QIcon());
+                contrastIconList.push_back(QIcon());
+            }
+            while (originalIconList.size() > tabBar->count())
+            {
+                originalIconList.removeLast();
+                displayIconList.removeLast();
+                contrastIconList.removeLast();
+            }
+
+            const int selectedIndex = tabBar->currentIndex();
+            for (int tabIndex = 0; tabIndex < tabBar->count(); ++tabIndex)
+            {
+                const QIcon currentIcon = tabBar->tabIcon(tabIndex);
+                const bool currentIconWasAppliedByFilter = !displayIconList[tabIndex].isNull()
+                    && currentIcon.cacheKey() == displayIconList[tabIndex].cacheKey();
+                if (originalIconList[tabIndex].isNull())
+                {
+                    originalIconList[tabIndex] = currentIcon;
+                    contrastIconList[tabIndex] = QIcon();
+                }
+                else if (tabIndex != selectedIndex
+                    && !currentIconWasAppliedByFilter
+                    && !currentIcon.isNull()
+                    && currentIcon.cacheKey() != originalIconList[tabIndex].cacheKey())
+                {
+                    originalIconList[tabIndex] = currentIcon;
+                    contrastIconList[tabIndex] = QIcon();
+                }
+
+                const QIcon originalIcon = originalIconList[tabIndex];
+                if (originalIcon.isNull())
+                {
+                    continue;
+                }
+                if (contrastIconList[tabIndex].isNull())
+                {
+                    contrastIconList[tabIndex] = contrastIconForSelectedTab(originalIcon);
+                }
+
+                const QIcon displayIcon = tabIndex == selectedIndex
+                    ? contrastIconList[tabIndex]
+                    : originalIcon;
+                if (currentIcon.cacheKey() != displayIcon.cacheKey())
+                {
+                    tabBar->setTabIcon(tabIndex, displayIcon);
+                }
+                displayIconList[tabIndex] = displayIcon;
+            }
+        }
+
+        std::unordered_map<QTabBar*, QList<QIcon>> m_originalIconsByTabBar;
+        std::unordered_map<QTabBar*, QList<QIcon>> m_displayIconsByTabBar;
+        std::unordered_map<QTabBar*, QList<QIcon>> m_contrastIconsByTabBar;
+    };
+
     class GlobalSliderWheelFilter final : public QObject
     {
     public:
@@ -121,10 +270,22 @@ namespace
                 return QObject::eventFilter(watchedObject, eventObject);
             }
 
+            QWheelEvent* wheelEvent = static_cast<QWheelEvent*>(eventObject);
+            if (trySmoothScroll(watchedObject, wheelEvent))
+            {
+                return true;
+            }
+
             QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
             const bool sliderWheelAdjustEnabled = appInstance != nullptr
                 && appInstance->property("ksword_slider_wheel_adjust_enabled").toBool();
             if (sliderWheelAdjustEnabled)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            // 只禁止 QSlider 这类“数值滑块”的滚轮调值，不能拦截 QScrollBar，否则页面滚动会失效。
+            if (qobject_cast<QScrollBar*>(watchedObject) != nullptr)
             {
                 return QObject::eventFilter(watchedObject, eventObject);
             }
@@ -137,6 +298,108 @@ namespace
             eventObject->ignore();
             return true;
         }
+
+    private:
+        bool trySmoothScroll(QObject* watchedObject, QWheelEvent* wheelEvent)
+        {
+            if (wheelEvent == nullptr || wheelEvent->modifiers().testFlag(Qt::ControlModifier))
+            {
+                return false;
+            }
+
+            QScrollBar* targetScrollBar = findTargetScrollBar(watchedObject, wheelEvent);
+            if (targetScrollBar == nullptr || targetScrollBar->minimum() == targetScrollBar->maximum())
+            {
+                return false;
+            }
+
+            const int wheelDelta = !wheelEvent->pixelDelta().isNull()
+                ? wheelEvent->pixelDelta().y()
+                : wheelEvent->angleDelta().y() / 8;
+            if (wheelDelta == 0)
+            {
+                return false;
+            }
+
+            // 动画步长保持克制：让滚轮有平滑过渡，但不拖慢大量表格的快速浏览。
+            const int lineStep = std::max(18, targetScrollBar->singleStep() * 3);
+            const int targetValue = std::clamp(
+                targetScrollBar->value() - wheelDelta * lineStep / 15,
+                targetScrollBar->minimum(),
+                targetScrollBar->maximum());
+            animateScrollBar(targetScrollBar, targetValue);
+            wheelEvent->accept();
+            return true;
+        }
+
+        QScrollBar* findTargetScrollBar(QObject* watchedObject, QWheelEvent* wheelEvent) const
+        {
+            if (qobject_cast<QAbstractSlider*>(watchedObject) != nullptr
+                && qobject_cast<QScrollBar*>(watchedObject) == nullptr)
+            {
+                return nullptr;
+            }
+
+            QScrollBar* directScrollBar = qobject_cast<QScrollBar*>(watchedObject);
+            if (directScrollBar != nullptr)
+            {
+                return directScrollBar;
+            }
+
+            QWidget* sourceWidget = qobject_cast<QWidget*>(watchedObject);
+            QWidget* currentWidget = sourceWidget;
+            while (currentWidget != nullptr)
+            {
+                QAbstractScrollArea* scrollArea = qobject_cast<QAbstractScrollArea*>(currentWidget);
+                if (scrollArea != nullptr)
+                {
+                    return chooseScrollBar(scrollArea, wheelEvent);
+                }
+                currentWidget = currentWidget->parentWidget();
+            }
+            return nullptr;
+        }
+
+        QScrollBar* chooseScrollBar(QAbstractScrollArea* scrollArea, QWheelEvent* wheelEvent) const
+        {
+            if (scrollArea == nullptr || wheelEvent == nullptr)
+            {
+                return nullptr;
+            }
+
+            if (std::abs(wheelEvent->angleDelta().x()) > std::abs(wheelEvent->angleDelta().y()))
+            {
+                QScrollBar* horizontalScrollBar = scrollArea->horizontalScrollBar();
+                if (horizontalScrollBar != nullptr && horizontalScrollBar->minimum() != horizontalScrollBar->maximum())
+                {
+                    return horizontalScrollBar;
+                }
+            }
+            return scrollArea->verticalScrollBar();
+        }
+
+        void animateScrollBar(QScrollBar* targetScrollBar, const int targetValue)
+        {
+            if (targetScrollBar == nullptr)
+            {
+                return;
+            }
+
+            QPointer<QPropertyAnimation>& animationRef = m_scrollAnimationByBar[targetScrollBar];
+            if (animationRef == nullptr)
+            {
+                animationRef = new QPropertyAnimation(targetScrollBar, "value", targetScrollBar);
+                animationRef->setDuration(110);
+                animationRef->setEasingCurve(QEasingCurve::OutCubic);
+            }
+
+            animationRef->stop();
+            animationRef->setStartValue(targetScrollBar->value());
+            animationRef->setEndValue(targetValue);
+            animationRef->start();
+        }
+
+        std::unordered_map<QScrollBar*, QPointer<QPropertyAnimation>> m_scrollAnimationByBar;
     };
 
     // ensureGlobalContextMenuThemeFilterInstalled 作用：
@@ -164,6 +427,13 @@ namespace
         if (appInstance == nullptr)
         {
             return;
+        }
+
+        static GlobalTabIconContrastFilter* tabIconContrastFilter = nullptr;
+        if (tabIconContrastFilter == nullptr)
+        {
+            tabIconContrastFilter = new GlobalTabIconContrastFilter(appInstance);
+            appInstance->installEventFilter(tabIconContrastFilter);
         }
 
         static GlobalSliderWheelFilter* sliderWheelFilter = nullptr;
@@ -1691,16 +1961,8 @@ void MainWindow::initMenus()
     m_topActionRowLayout->setContentsMargins(8, 1, 8, 1);
     m_topActionRowLayout->setSpacing(8);
 
-    m_fileMenuButton = new QToolButton(m_topActionRowWidget);
-    m_fileMenuButton->setObjectName(QStringLiteral("ksFileMenuButton"));
-    m_fileMenuButton->setText(QStringLiteral("文件"));
-    m_fileMenuButton->setToolTip(QStringLiteral("打开文件菜单"));
-    m_fileMenuButton->setPopupMode(QToolButton::InstantPopup);
-    m_fileMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    m_fileMenuButton->setAutoRaise(true);
-    m_fileMenuButton->setFixedHeight(22);
-    m_fileMenuButton->setStyleSheet(QStringLiteral(
-        "QToolButton#ksFileMenuButton{"
+    const QString topMenuButtonStyle = QStringLiteral(
+        "QToolButton{"
         "  background:transparent !important;"
         "  border:none !important;"
         "  border-radius:0;"
@@ -1710,19 +1972,29 @@ void MainWindow::initMenus()
         "  font-weight:500;"
         "  text-align:left;"
         "}"
-        "QToolButton#ksFileMenuButton:hover{"
+        "QToolButton:hover{"
         "  background:rgba(46,139,255,0.14) !important;"
         "  color:inherit !important;"
         "}"
-        "QToolButton#ksFileMenuButton:pressed{"
+        "QToolButton:pressed{"
         "  background:rgba(46,139,255,0.22) !important;"
         "  color:inherit !important;"
         "}"
-        "QToolButton#ksFileMenuButton::menu-indicator{"
+        "QToolButton::menu-indicator{"
         "  image:none;"
         "  width:0;"
         "  height:0;"
-        "}"));
+        "}");
+
+    m_fileMenuButton = new QToolButton(m_topActionRowWidget);
+    m_fileMenuButton->setObjectName(QStringLiteral("ksFileMenuButton"));
+    m_fileMenuButton->setText(QStringLiteral("文件"));
+    m_fileMenuButton->setToolTip(QStringLiteral("打开文件菜单"));
+    m_fileMenuButton->setPopupMode(QToolButton::InstantPopup);
+    m_fileMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_fileMenuButton->setAutoRaise(true);
+    m_fileMenuButton->setFixedHeight(22);
+    m_fileMenuButton->setStyleSheet(topMenuButtonStyle);
 
     // fileMenu 用途：承载“文件”下拉菜单动作（当前保留退出）。
     QMenu* fileMenu = new QMenu(m_fileMenuButton);
@@ -1732,7 +2004,20 @@ void MainWindow::initMenus()
     fileMenu->addAction(exitAction);
     m_fileMenuButton->setMenu(fileMenu);
 
+    m_settingsMenuButton = new QToolButton(m_topActionRowWidget);
+    m_settingsMenuButton->setObjectName(QStringLiteral("ksSettingsMenuButton"));
+    m_settingsMenuButton->setText(QStringLiteral("设置"));
+    m_settingsMenuButton->setToolTip(QStringLiteral("打开界面与启动设置"));
+    m_settingsMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_settingsMenuButton->setAutoRaise(true);
+    m_settingsMenuButton->setFixedHeight(22);
+    m_settingsMenuButton->setStyleSheet(topMenuButtonStyle);
+    connect(m_settingsMenuButton, &QToolButton::clicked, this, [this]() {
+        showSettingsPanelFromMenu();
+    });
+
     m_topActionRowLayout->addWidget(m_fileMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    m_topActionRowLayout->addWidget(m_settingsMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addStretch(1);
 
     if (m_mainRootLayout != nullptr)
@@ -1740,6 +2025,35 @@ void MainWindow::initMenus()
         // 插入到根布局顶部；后续 initCustomTitleBar 会插到 index=0，因此标题栏仍在最上方。
         m_mainRootLayout->insertWidget(0, m_topActionRowWidget, 0);
     }
+}
+
+void MainWindow::showSettingsPanelFromMenu()
+{
+    QDialog settingsDialog(this);
+    settingsDialog.setWindowTitle(QStringLiteral("设置"));
+    settingsDialog.setModal(false);
+    settingsDialog.resize(760, 640);
+    settingsDialog.setStyleSheet(QStringLiteral(
+        "QDialog{background:%1;color:%2;}")
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::TextPrimaryHex()));
+
+    QVBoxLayout dialogLayout(&settingsDialog);
+    dialogLayout.setContentsMargins(8, 8, 8, 8);
+    dialogLayout.setSpacing(6);
+
+    // 设置面板改为顶部菜单即时对话框，每次打开读取当前 JSON，避免占用主 Tab 栏空间。
+    SettingsDock settingsPanel(&settingsDialog);
+    connect(
+        &settingsPanel,
+        &SettingsDock::appearanceSettingsChanged,
+        this,
+        [this](const ks::settings::AppearanceSettings& settings) {
+            applyAppearanceSettings(settings, QStringLiteral("顶部菜单设置变更"));
+        });
+    dialogLayout.addWidget(&settingsPanel, 1);
+
+    settingsDialog.exec();
 }
 
 void MainWindow::initPrivilegeStatusButtons()
@@ -3512,21 +3826,6 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         if (m_privilegeWidget == nullptr) { m_privilegeWidget = new PrivilegeDock(this); }
         realWidget = m_privilegeWidget;
     }
-    else if (dockKey == QStringLiteral("settings"))
-    {
-        if (m_settingsWidget == nullptr)
-        {
-            m_settingsWidget = new SettingsDock(this);
-            connect(
-                m_settingsWidget,
-                &SettingsDock::appearanceSettingsChanged,
-                this,
-                [this](const ks::settings::AppearanceSettings& settings) {
-                    applyAppearanceSettings(settings, QStringLiteral("设置页变更"));
-                });
-        }
-        realWidget = m_settingsWidget;
-    }
     else if (dockKey == QStringLiteral("window"))
     {
         if (m_windowWidget == nullptr) { m_windowWidget = new WindowDock(this); }
@@ -3638,12 +3937,11 @@ void MainWindow::initDockWidgets()
     const auto shouldEagerLoad = [&startupDockKey](const QString& dockKey) -> bool
         {
             return dockKey == QStringLiteral("welcome") ||
-                dockKey == QStringLiteral("settings") ||
                 (startupDockKey == QStringLiteral("winapi") && dockKey == QStringLiteral("monitor")) ||
                 dockKey == startupDockKey;
         };
 
-    // 首屏优先：欢迎页、设置页、启动默认页签，以及右侧/底部辅助组件。
+    // 首屏优先：欢迎页、启动默认页签，以及右侧/底部辅助组件；设置改由顶部菜单即时打开。
     reportStartupProgress(50, QStringLiteral("正在创建首屏页面..."));
     m_welcomeWidget = new WelcomeDock(this);
     if (shouldEagerLoad(QStringLiteral("process"))) { m_processWidget = new ProcessDock(this); }
@@ -3655,7 +3953,6 @@ void MainWindow::initDockWidgets()
     if (shouldEagerLoad(QStringLiteral("monitor"))) { m_monitorWidget = new MonitorDock(this); }
     if (shouldEagerLoad(QStringLiteral("hardware"))) { m_hardwareWidget = new HardwareDock(this); }
     if (shouldEagerLoad(QStringLiteral("privilege"))) { m_privilegeWidget = new PrivilegeDock(this); }
-    m_settingsWidget = new SettingsDock(this);
     if (shouldEagerLoad(QStringLiteral("window"))) { m_windowWidget = new WindowDock(this); }
     if (shouldEagerLoad(QStringLiteral("registry"))) { m_registryWidget = new RegistryDock(this); }
     if (shouldEagerLoad(QStringLiteral("handle"))) { m_handleWidget = new HandleDock(this); }
@@ -3740,6 +4037,19 @@ void MainWindow::initDockWidgets()
             }
         };
 
+    // setupDockTabText 作用：统一主 Dock Tab 的文本省略策略与最小宽度，减少“...”出现。
+    const auto setupDockTabText = [](ads::CDockWidget* dockWidget) {
+        if (dockWidget == nullptr || dockWidget->tabWidget() == nullptr)
+        {
+            return;
+        }
+
+        ads::CDockWidgetTab* tabWidget = dockWidget->tabWidget();
+        tabWidget->setElideMode(Qt::ElideNone);
+        tabWidget->setMinimumWidth(88);
+        tabWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    };
+
     // 创建所有 Dock 壳；重页面若未预加载，则先挂占位页并排入显示后补载队列。
     m_dockWelcome = createDockWidget(m_welcomeWidget, "欢迎");
     createLazyDockWidget(m_dockProcess, m_processWidget, "进程", QStringLiteral("process"));
@@ -3751,7 +4061,6 @@ void MainWindow::initDockWidgets()
     createLazyDockWidget(m_dockMonitorTab, m_monitorWidget, "监控", QStringLiteral("monitor"));
     createLazyDockWidget(m_dockHardware, m_hardwareWidget, "硬件", QStringLiteral("hardware"));
     createLazyDockWidget(m_dockPrivilege, m_privilegeWidget, "权限", QStringLiteral("privilege"));
-    m_dockSettings = createDockWidget(m_settingsWidget, "设置");
     createLazyDockWidget(m_dockWindow, m_windowWidget, "窗口", QStringLiteral("window"));
     createLazyDockWidget(m_dockRegistry, m_registryWidget, "注册表", QStringLiteral("registry"));
     createLazyDockWidget(m_dockHandle, m_handleWidget, "句柄", QStringLiteral("handle"));
@@ -3784,6 +4093,33 @@ void MainWindow::initDockWidgets()
             "  background-color:transparent;"
             "  border:none;"
             "}"));
+    }
+
+    QList<ads::CDockWidget*> mainDockTabList{
+        m_dockWelcome,
+        m_dockProcess,
+        m_dockNetwork,
+        m_dockMemory,
+        m_dockFile,
+        m_dockDriver,
+        m_dockKernel,
+        m_dockMonitorTab,
+        m_dockHardware,
+        m_dockPrivilege,
+        m_dockWindow,
+        m_dockRegistry,
+        m_dockHandle,
+        m_dockStartup,
+        m_dockService,
+        m_dockMisc,
+        m_dockCurrentOp,
+        m_dockLog,
+        m_dockImmediate,
+        m_dockMonitor
+    };
+    for (ads::CDockWidget* dockWidget : mainDockTabList)
+    {
+        setupDockTabText(dockWidget);
     }
 
     // 顶部菜单栏已精简，不再注册 Dock 视图切换菜单。
@@ -3826,7 +4162,6 @@ void MainWindow::setupDockLayout()
     m_pDockManager->addDockWidgetTabToArea(m_dockMonitorTab, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockHardware, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockPrivilege, leftDockArea);
-    m_pDockManager->addDockWidgetTabToArea(m_dockSettings, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockWindow, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockRegistry, leftDockArea);
     m_pDockManager->addDockWidgetTabToArea(m_dockHandle, leftDockArea);
@@ -4041,8 +4376,9 @@ void MainWindow::initAppearanceSettings()
         }
         else if (normalizedKey == QStringLiteral("settings"))
         {
-            targetDock = m_dockSettings;
-            targetName = QStringLiteral("设置");
+            // 旧配置可能仍保存 settings；设置已移动到顶部菜单，启动时回退欢迎页避免自动弹窗。
+            targetDock = m_dockWelcome;
+            targetName = QStringLiteral("欢迎");
         }
         else if (normalizedKey == QStringLiteral("window"))
         {
@@ -4112,26 +4448,10 @@ void MainWindow::initAppearanceSettings()
     };
 
     // 启动画面细分：
-    // - 先绑定设置页/系统主题变化；
-    // - 再真正应用首轮主题样式。
-    reportStartupProgress(86, QStringLiteral("正在绑定外观设置源..."));
-
-    if (m_settingsWidget != nullptr)
-    {
-        connect(
-            m_settingsWidget,
-            &SettingsDock::appearanceSettingsChanged,
-            this,
-            [this](const ks::settings::AppearanceSettings& settings) {
-                applyAppearanceSettings(settings, QStringLiteral("设置页变更"));
-            });
-
-        m_currentAppearanceSettings = m_settingsWidget->currentAppearanceSettings();
-    }
-    else
-    {
-        m_currentAppearanceSettings = ks::settings::loadAppearanceSettings();
-    }
+    // - 设置页改为顶部菜单按需创建；
+    // - 初始化时直接从 JSON 读取外观配置，再应用首轮主题样式。
+    reportStartupProgress(86, QStringLiteral("正在读取外观设置..."));
+    m_currentAppearanceSettings = ks::settings::loadAppearanceSettings();
 
     QStyleHints* styleHints = QGuiApplication::styleHints();
     if (styleHints != nullptr)
@@ -4425,7 +4745,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     // - 修复深色模式下 Tooltip 仍为白底的问题。
     const int scrollBarHoverExtentPx = settings.useWideScrollBars ? 12 : 7;
     const int scrollBarExtentPx = settings.scrollBarAutoHideEnabled ? 3 : scrollBarHoverExtentPx;
-    const int scrollBarRadiusPx = settings.useWideScrollBars ? 5 : 3;
+    const int scrollBarRadiusPx = 0;
     const QString scrollBarHandleColor = settings.scrollBarAutoHideEnabled
         ? QStringLiteral("rgba(67,160,255,0.42)")
         : QStringLiteral("rgba(67,160,255,0.78)");
@@ -4443,11 +4763,9 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         ? QStringLiteral("#E4ECF7")
         : QStringLiteral("#23415F");
     const QString activeTabColor = darkModeEnabled
-        ? QStringLiteral("#EAF4FF")
+        ? QStringLiteral("#1E5B8F")
         : QStringLiteral("#164B82");
-    const QString activeTabTextColor = darkModeEnabled
-        ? QStringLiteral("#0A2340")
-        : QStringLiteral("#FFFFFF");
+    const QString activeTabTextColor = QStringLiteral("#FFFFFF");
 
     const QString tooltipStyle = QStringLiteral(
         "QToolTip{"
@@ -4525,7 +4843,18 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  border:1px solid %1;"
         "  border-radius:8px;"
         "  background:%2;"
-        "  margin-top:6px;"
+        "  margin-top:12px;"
+        "}"
+        "QGroupBox{"
+        "  padding-top:6px;"
+        "}"
+        "QGroupBox::title{"
+        "  subcontrol-origin:margin;"
+        "  subcontrol-position:top left;"
+        "  left:10px;"
+        "  padding:0px 4px;"
+        "  background:%2;"
+        "  color:%3;"
         "}"
         "QTabWidget::pane{"
         "  border:1px solid %1 !important;"
@@ -4538,7 +4867,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  min-height:24px;"
         "}")
         .arg(panelBorderColor)
-        .arg(panelBackgroundColor);
+        .arg(panelBackgroundColor)
+        .arg(darkModeEnabled ? QStringLiteral("#F2F6FF") : QStringLiteral("#162A42"));
 
     // scrollBarOverlayStyle 作用：
     // - 全局改为透明轨道，减少遮挡；
@@ -4592,46 +4922,56 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     // - 当前 Tab 采用反差色，避免图标与选中底色混在一起。
     const QString sharedOverlayStyle = depthOverlayStyle + scrollBarOverlayStyle + QStringLiteral(
         "QPushButton:hover,QToolButton:hover{"
-        "  background-color:#2E8BFF !important;"
+        "  background-color:#246EA8 !important;"
         "  color:#FFFFFF !important;"
-        "  border-color:#2E8BFF !important;"
+        "  border-color:#246EA8 !important;"
         "}"
         "QPushButton:pressed,QToolButton:pressed{"
         "  background-color:#1F78D0 !important;"
         "  color:#FFFFFF !important;"
         "  border-color:#1F78D0 !important;"
         "}"
+        "QTabBar{"
+        "  border-bottom:1px solid %3 !important;"
+        "}"
         "QTabBar::tab{"
         "  background-color:%1 !important;"
         "  color:%2 !important;"
         "  border:1px solid %3 !important;"
-        "  border-bottom:none !important;"
-        "  border-top-left-radius:6px;"
-        "  border-top-right-radius:6px;"
-        "  padding:6px 12px;"
-        "  margin-right:2px;"
+        "  border-bottom:1px solid %3 !important;"
+        "  border-radius:0px !important;"
+        "  padding:4px 14px 5px 14px;"
+        "  min-width:74px;"
+        "  margin:0px 1px 0px 0px;"
+        "  font-size:12px;"
         "}"
         "QTabBar::tab:selected{"
         "  background-color:%4 !important;"
         "  color:%5 !important;"
         "  font-weight:700;"
         "  border-color:%3 !important;"
+        "  border-bottom-color:%4 !important;"
+        "  margin-bottom:-1px;"
         "}"
         "QTabBar::tab:hover:!selected{"
-        "  background-color:#2E8BFF !important;"
-        "  color:#FFFFFF !important;"
+        "  background-color:%6 !important;"
+        "  color:%2 !important;"
         "}"
         "ads--CDockAreaTabBar{"
         "  background:transparent !important;"
-        "  padding:2px 4px 0px 4px;"
+        "  border-bottom:1px solid %3 !important;"
+        "  padding:0px 2px 0px 2px;"
         "}"
         "ads--CDockWidgetTab,ads--CAutoHideTab{"
         "  background-color:%1 !important;"
         "  color:%2 !important;"
         "  border:1px solid %3 !important;"
-        "  border-radius:6px;"
-        "  padding:5px 10px;"
-        "  margin:1px 2px;"
+        "  border-bottom:1px solid %3 !important;"
+        "  border-radius:0px !important;"
+        "  padding:4px 13px 5px 13px;"
+        "  margin:0px 1px 0px 0px;"
+        "  min-width:74px;"
+        "  font-size:12px;"
         "}"
         "ads--CDockWidgetTab QLabel,ads--CAutoHideTab QLabel{"
         "  color:%2 !important;"
@@ -4640,14 +4980,16 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  background-color:%4 !important;"
         "  color:%5 !important;"
         "  border-color:%3 !important;"
+        "  border-bottom-color:%4 !important;"
+        "  margin-bottom:-1px;"
         "}"
         "ads--CDockWidgetTab[activeTab=\"true\"] QLabel,ads--CAutoHideTab[activeTab=\"true\"] QLabel{"
         "  color:%5 !important;"
         "  font-weight:700;"
         "}"
         "ads--CDockWidgetTab:hover,ads--CAutoHideTab:hover{"
-        "  background-color:#2E8BFF !important;"
-        "  color:#FFFFFF !important;"
+        "  background-color:%6 !important;"
+        "  color:%2 !important;"
         "}"
         "ads--CDockAreaTitleBar QToolButton,ads--CDockAreaTitleBar QPushButton{"
         "  border:none !important;"
@@ -4657,7 +4999,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         .arg(inactiveTabTextColor)
         .arg(panelBorderColor)
         .arg(activeTabColor)
-        .arg(activeTabTextColor);
+        .arg(activeTabTextColor)
+        .arg(darkModeEnabled ? QStringLiteral("#24344A") : QStringLiteral("#DDEBFA"));
     // dockContentTransparentStyle 作用：
     // - 背景图可用时，把 Dock 内容区域常见容器背景全部改为透明；
     // - 修复“Dock 面板整体仍是黑底/白底，背景图只能从缝隙看到”的问题。
@@ -4773,11 +5116,16 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             "}"
             "QTabBar{"
             "  background:transparent !important;"
+            "  border-bottom:1px solid #3A3A3A !important;"
             "}"
             "QTabBar::tab{"
-            "  background-color:#000000 !important;"
-            "  color:#DDDDDD !important;"
-            "  border:none !important;"
+            "  background-color:#151C26 !important;"
+            "  color:#E8EEF7 !important;"
+            "  border:1px solid #3A3A3A !important;"
+            "  border-bottom:1px solid #3A3A3A !important;"
+            "  border-radius:0px !important;"
+            "  padding:4px 14px 5px 14px;"
+            "  min-width:74px;"
             "}"
             "QTableView,QTableWidget,QTreeView,QTreeWidget,QListView,QListWidget{"
             "  background:#121212 !important;"
