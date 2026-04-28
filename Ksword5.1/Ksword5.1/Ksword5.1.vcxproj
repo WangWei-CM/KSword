@@ -149,6 +149,7 @@
     <ClCompile Include="句柄\HandleDock.Native.cpp" />
     <ClCompile Include="句柄\HandleObjectTypeWorker.cpp" />
     <ClCompile Include="HardwareDock\HardwareDock.cpp" />
+    <ClCompile Include="HardwareDock\MemoryCompositionHistoryWidget.cpp" />
     <ClCompile Include="Framework\Log.cpp" />
     <ClCompile Include="Framework\LogDockWidget.cpp" />
     <ClCompile Include="Framework\Progress.cpp" />
@@ -289,6 +290,7 @@
     <QtMoc Include="句柄\HandleDock.h" />
     <ClInclude Include="句柄\HandleObjectTypeWorker.h" />
     <QtMoc Include="HardwareDock\HardwareDock.h" />
+    <ClInclude Include="HardwareDock\MemoryCompositionHistoryWidget.h" />
     <QtMoc Include="KernelDock\KernelDock.h" />
     <QtMoc Include="KernelDock\KernelDock.CallbackPromptManager.h" />
     <QtMoc Include="MemoryDock\MemoryDock.h" />

@@ -17,6 +17,7 @@
 #include <vector>   // std::vector：保存每核图表与采样数据。
 
 class CodeEditorWidget;
+class MemoryCompositionHistoryWidget;
 class PerformanceNavCard;
 class QChartView;
 class QGridLayout;
@@ -257,10 +258,7 @@ private:
     QWidget* m_utilizationMemorySubPage = nullptr;   // m_utilizationMemorySubPage：内存详情页。
     QLabel* m_memoryCapacityLabel = nullptr;         // m_memoryCapacityLabel：内存总量标签。
     QLabel* m_memoryUtilSummaryLabel = nullptr;      // m_memoryUtilSummaryLabel：内存摘要文本。
-    QChartView* m_memoryUtilChartView = nullptr;     // m_memoryUtilChartView：内存趋势图视图。
-    QLineSeries* m_memoryUtilLineSeries = nullptr;   // m_memoryUtilLineSeries：内存趋势折线。
-    QValueAxis* m_memoryUtilAxisX = nullptr;         // m_memoryUtilAxisX：内存图 X 轴。
-    QValueAxis* m_memoryUtilAxisY = nullptr;         // m_memoryUtilAxisY：内存图 Y 轴。
+    MemoryCompositionHistoryWidget* m_memoryCompositionHistoryWidget = nullptr; // m_memoryCompositionHistoryWidget：内存历史与构成合并图。
     QLabel* m_memoryUtilPrimaryDetailLabel = nullptr; // m_memoryUtilPrimaryDetailLabel：内存左侧参数文本。
     QLabel* m_memoryUtilSecondaryDetailLabel = nullptr; // m_memoryUtilSecondaryDetailLabel：内存右侧参数文本。
 
