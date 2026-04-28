@@ -358,6 +358,9 @@
     <ClCompile Include="RegistryDock_Themed.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="HardwareDock\MemoryCompositionHistoryWidget.cpp">
+      <Filter>Source Files\HardwareDock</Filter>
+    </ClCompile>
     <ClCompile Include="HardwareDock\HardwareDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -462,6 +465,9 @@
     <QtMoc Include="WelcomeDock\WelcomeDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="HardwareDock\MemoryCompositionHistoryWidget.h">
+      <Filter>Header Files\HardwareDock</Filter>
+    </ClInclude>
     <QtMoc Include="HardwareDock\HardwareDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
