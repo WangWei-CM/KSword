@@ -197,7 +197,8 @@ void ProcessDock::initializeThreadPage()
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ProcessPath), 360);
 
     m_threadPageLayout->addWidget(m_threadTable, 1);
-    m_sideTabWidget->addTab(m_threadPage, QIcon(IconThreadTab), "线程列表");
+    m_sideTabWidget->addTab(m_threadPage, blueTintedIcon(IconThreadTab), "线程列表");
+    refreshSideTabIconContrast();
 }
 
 void ProcessDock::initializeThreadPageConnections()
