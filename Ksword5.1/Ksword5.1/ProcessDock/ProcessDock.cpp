@@ -2937,7 +2937,7 @@ void ProcessDock::rebuildTable()
         {
             continue;
         }
-        maxRamMB = std::max(maxRamMB, displayRow.record->ramMB);
+        maxRamMB = std::max(maxRamMB, displayRow.record->workingSetMB);
         maxDiskMBps = std::max(maxDiskMBps, displayRow.record->diskMBps);
         maxNetKBps = std::max(maxNetKBps, displayRow.record->netKBps);
     }
@@ -2991,7 +2991,7 @@ void ProcessDock::rebuildTable()
         // 排序键使用原始数值：展示文本可以带单位，但排序必须按真实大小比较。
         rowItem->setData(toColumnIndex(TableColumn::Pid), ProcessNumericSortRole, static_cast<double>(processRecord.pid));
         rowItem->setData(toColumnIndex(TableColumn::Cpu), ProcessNumericSortRole, processRecord.cpuPercent);
-        rowItem->setData(toColumnIndex(TableColumn::Ram), ProcessNumericSortRole, processRecord.ramMB);
+        rowItem->setData(toColumnIndex(TableColumn::Ram), ProcessNumericSortRole, processRecord.workingSetMB);
         rowItem->setData(toColumnIndex(TableColumn::Disk), ProcessNumericSortRole, processRecord.diskMBps);
         rowItem->setData(toColumnIndex(TableColumn::Gpu), ProcessNumericSortRole, processRecord.gpuPercent);
         rowItem->setData(toColumnIndex(TableColumn::Net), ProcessNumericSortRole, processRecord.netKBps);
@@ -3059,7 +3059,7 @@ void ProcessDock::rebuildTable()
             // 常规行按占用比例做主题色高亮（CPU/RAM/DISK/GPU/NET）。
             const double cpuUsageRatio = std::clamp(processRecord.cpuPercent / 100.0, 0.0, 1.0);
             const double ramUsageRatio = (maxRamMB > 0.0)
-                ? std::clamp(processRecord.ramMB / maxRamMB, 0.0, 1.0)
+                ? std::clamp(processRecord.workingSetMB / maxRamMB, 0.0, 1.0)
                 : 0.0;
             const double diskUsageRatio = (maxDiskMBps > 0.0)
                 ? std::clamp(processRecord.diskMBps / maxDiskMBps, 0.0, 1.0)
@@ -3737,9 +3737,9 @@ QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processR
         // CPU 改为两位小数，避免低占用进程全部显示 0.0 的视觉误差。
         return QString::number(processRecord.cpuPercent, 'f', 2) + "%";
     case TableColumn::Ram:
-        return QStringLiteral("申请 %1 MB / 使用 %2 MB")
-            .arg(processRecord.ramMB, 0, 'f', 1)
-            .arg(processRecord.workingSetMB, 0, 'f', 1);
+        return QStringLiteral("使用 %1 MB / 申请 %2 MB")
+            .arg(processRecord.workingSetMB, 0, 'f', 1)
+            .arg(processRecord.ramMB, 0, 'f', 1);
     case TableColumn::Disk:
         return QString::number(processRecord.diskMBps, 'f', 2) + " MB/s";
     case TableColumn::Gpu:
