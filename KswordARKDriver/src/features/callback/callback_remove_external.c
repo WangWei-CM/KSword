@@ -16,6 +16,18 @@ Environment: // 描述运行环境字段。
 
 #include "callback_internal.h" // 引入回调内部共享声明。
 
+#define SystemModuleInformation 11 // 声明 ZwQuerySystemInformation 的系统模块信息类别值。
+
+NTSYSAPI // 声明内核导出的 ZwQuerySystemInformation 例程。
+NTSTATUS // 声明函数返回 NTSTATUS 状态码。
+NTAPI // 声明函数使用 NTAPI 调用约定。
+ZwQuerySystemInformation( // 查询系统级信息缓冲。
+    _In_ ULONG SystemInformationClass, // 输入系统信息类别。
+    _Out_writes_bytes_opt_(SystemInformationLength) PVOID SystemInformation, // 输出信息缓冲区。
+    _In_ ULONG SystemInformationLength, // 输入信息缓冲区字节数。
+    _Out_opt_ PULONG ReturnLength // 可选输出所需字节数。
+    ); // 结束 ZwQuerySystemInformation 声明。
+
 typedef struct _KSWORD_ARK_SYSTEM_MODULE_ENTRY // 定义系统模块单项结构体。
 { // 开始系统模块单项结构体定义。
     HANDLE Section; // 记录模块节对象句柄。
