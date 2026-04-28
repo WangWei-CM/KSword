@@ -95,36 +95,47 @@ namespace KswordTheme
     // 返回：可直接应用到 QMenu 的样式文本。
     inline QString ContextMenuStyle()
     {
+        const QString menuBackgroundColor = IsDarkModeEnabled()
+            ? QStringLiteral("#172232")
+            : QStringLiteral("#FFFFFF");
+        const QString menuTextColor = IsDarkModeEnabled()
+            ? QStringLiteral("#F4F8FF")
+            : QStringLiteral("#172B43");
+        const QString menuBorderColor = IsDarkModeEnabled()
+            ? QStringLiteral("#34506D")
+            : QStringLiteral("#9DBBDD");
         const QString disabledTextColor = IsDarkModeEnabled()
             ? QStringLiteral("#8C8C8C")
             : QStringLiteral("#7A8694");
 
         return QStringLiteral(
             "QMenu{"
-            "  background:%1;"
-            "  color:%2;"
-            "  border:1px solid %3;"
+            "  background-color:%1 !important;"
+            "  color:%2 !important;"
+            "  border:1px solid %3 !important;"
+            "  padding:3px;"
             "}"
             "QMenu::item{"
-            "  padding:4px 16px 4px 12px;"
-            "  background:transparent;"
+            "  color:%2 !important;"
+            "  padding:5px 18px 5px 14px;"
+            "  background-color:transparent !important;"
             "}"
             "QMenu::item:selected{"
-            "  background:%4;"
-            "  color:#FFFFFF;"
+            "  background-color:%4 !important;"
+            "  color:#FFFFFF !important;"
             "}"
             "QMenu::item:disabled{"
-            "  color:%5;"
-            "  background:transparent;"
+            "  color:%5 !important;"
+            "  background-color:transparent !important;"
             "}"
             "QMenu::separator{"
             "  height:1px;"
-            "  background:%3;"
+            "  background-color:%3;"
             "  margin:2px 6px;"
             "}")
-            .arg(SurfaceHex())
-            .arg(TextPrimaryHex())
-            .arg(BorderHex())
+            .arg(menuBackgroundColor)
+            .arg(menuTextColor)
+            .arg(menuBorderColor)
             .arg(PrimaryBlueHex)
             .arg(disabledTextColor);
     }

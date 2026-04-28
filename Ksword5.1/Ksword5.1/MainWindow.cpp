@@ -983,14 +983,14 @@ namespace
     QString buildGlobalContextMenuStyleBlock(const bool darkModeEnabled)
     {
         const QString menuBackgroundColor = darkModeEnabled
-            ? QStringLiteral("#111111")
+            ? QStringLiteral("#172232")
             : QStringLiteral("#FFFFFF");
         const QString menuTextColor = darkModeEnabled
-            ? QStringLiteral("#FFFFFF")
-            : QStringLiteral("#000000");
+            ? QStringLiteral("#F4F8FF")
+            : QStringLiteral("#172B43");
         const QString menuBorderColor = darkModeEnabled
-            ? QStringLiteral("#3A3A3A")
-            : QStringLiteral("#C7D4E5");
+            ? QStringLiteral("#34506D")
+            : QStringLiteral("#9DBBDD");
         const QString disabledTextColor = darkModeEnabled
             ? QStringLiteral("#8C8C8C")
             : QStringLiteral("#7A8694");
@@ -1000,10 +1000,12 @@ namespace
             "  background-color:%1 !important;"
             "  color:%2 !important;"
             "  border:1px solid %3 !important;"
+            "  padding:3px;"
             "}"
             "QMenu::item{"
-            "  padding:4px 16px 4px 12px;"
-            "  background-color:transparent;"
+            "  color:%2 !important;"
+            "  padding:5px 18px 5px 14px;"
+            "  background-color:transparent !important;"
             "}"
             "QMenu::item:selected{"
             "  background-color:%4 !important;"
@@ -1011,7 +1013,7 @@ namespace
             "}"
             "QMenu::item:disabled{"
             "  color:%5 !important;"
-            "  background-color:transparent;"
+            "  background-color:transparent !important;"
             "}"
             "QMenu::separator{"
             "  height:1px;"
@@ -4781,14 +4783,14 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         ? QStringLiteral("#303846")
         : QStringLiteral("#C6D8EC");
     const QString inactiveTabColor = darkModeEnabled
-        ? QStringLiteral("#151C26")
-        : QStringLiteral("#EEF5FD");
+        ? QStringLiteral("#223047")
+        : QStringLiteral("#E8F2FF");
     const QString inactiveTabTextColor = darkModeEnabled
-        ? QStringLiteral("#E4ECF7")
-        : QStringLiteral("#23415F");
+        ? QStringLiteral("#F1F7FF")
+        : QStringLiteral("#143A63");
     const QString activeTabColor = darkModeEnabled
-        ? QStringLiteral("#1E5B8F")
-        : QStringLiteral("#164B82");
+        ? QStringLiteral("#2E8BFF")
+        : QStringLiteral("#1667B7");
     const QString activeTabTextColor = QStringLiteral("#FFFFFF");
 
     const QString tooltipStyle = QStringLiteral(
@@ -4860,8 +4862,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  background:%2 !important;"
         "}"
         "ads--CDockAreaTitleBar{"
-        "  border-bottom:1px solid %1 !important;"
-        "  padding:2px 4px;"
+        "  border-bottom:none !important;"
+        "  padding:0px;"
         "}"
         "QGroupBox,QFrame#card,QWidget#card{"
         "  border:1px solid %1;"
@@ -4881,10 +4883,10 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  color:%3;"
         "}"
         "QTabWidget::pane{"
-        "  border:1px solid %1 !important;"
-        "  border-radius:8px;"
+        "  border:none !important;"
+        "  border-radius:0px;"
         "  background:%2 !important;"
-        "  top:-1px;"
+        "  top:0px;"
         "}"
         "QHeaderView::section{"
         "  font-weight:600;"
@@ -4956,26 +4958,31 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  border-color:#1F78D0 !important;"
         "}"
         "QTabBar{"
-        "  border-bottom:1px solid %3 !important;"
+        "  border:none !important;"
         "}"
         "QTabBar::tab{"
         "  background-color:%1 !important;"
         "  color:%2 !important;"
-        "  border:1px solid %3 !important;"
-        "  border-bottom:1px solid %3 !important;"
+        "  border:none !important;"
         "  border-radius:0px !important;"
-        "  padding:4px 14px 5px 14px;"
-        "  min-width:74px;"
-        "  margin:0px 1px 0px 0px;"
-        "  font-size:12px;"
+        "  padding:2px 9px;"
+        "  min-width:56px;"
+        "  min-height:24px;"
+        "  margin:0px;"
+        "  font-size:15px;"
+        "}"
+        "QTabBar::tab:left,QTabBar::tab:right{"
+        "  min-width:46px;"
+        "  max-width:46px;"
+        "  min-height:84px;"
+        "  max-height:84px;"
+        "  padding:7px 3px;"
+        "  font-size:16px;"
         "}"
         "QTabBar::tab:selected{"
         "  background-color:%4 !important;"
         "  color:%5 !important;"
         "  font-weight:700;"
-        "  border-color:%3 !important;"
-        "  border-bottom-color:%4 !important;"
-        "  margin-bottom:-1px;"
         "}"
         "QTabBar::tab:hover:!selected{"
         "  background-color:%6 !important;"
@@ -4983,29 +4990,27 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "}"
         "ads--CDockAreaTabBar{"
         "  background:transparent !important;"
-        "  border-bottom:1px solid %3 !important;"
-        "  padding:0px 2px 0px 2px;"
+        "  border:none !important;"
+        "  padding:0px;"
         "}"
         "ads--CDockWidgetTab,ads--CAutoHideTab{"
         "  background-color:%1 !important;"
         "  color:%2 !important;"
-        "  border:1px solid %3 !important;"
-        "  border-bottom:1px solid %3 !important;"
+        "  border:none !important;"
         "  border-radius:0px !important;"
-        "  padding:4px 13px 5px 13px;"
-        "  margin:0px 1px 0px 0px;"
-        "  min-width:74px;"
-        "  font-size:12px;"
+        "  padding:2px 9px;"
+        "  margin:0px;"
+        "  min-width:56px;"
+        "  min-height:24px;"
+        "  font-size:15px;"
         "}"
         "ads--CDockWidgetTab QLabel,ads--CAutoHideTab QLabel{"
         "  color:%2 !important;"
+        "  font-size:15px;"
         "}"
         "ads--CDockWidgetTab[activeTab=\"true\"],ads--CAutoHideTab[activeTab=\"true\"]{"
         "  background-color:%4 !important;"
         "  color:%5 !important;"
-        "  border-color:%3 !important;"
-        "  border-bottom-color:%4 !important;"
-        "  margin-bottom:-1px;"
         "}"
         "ads--CDockWidgetTab[activeTab=\"true\"] QLabel,ads--CAutoHideTab[activeTab=\"true\"] QLabel{"
         "  color:%5 !important;"
@@ -5024,7 +5029,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         .arg(panelBorderColor)
         .arg(activeTabColor)
         .arg(activeTabTextColor)
-        .arg(darkModeEnabled ? QStringLiteral("#24344A") : QStringLiteral("#DDEBFA"));
+        .arg(darkModeEnabled ? QStringLiteral("#2B3D59") : QStringLiteral("#D6E9FF"));
     // dockContentTransparentStyle 作用：
     // - 背景图可用时，把 Dock 内容区域常见容器背景全部改为透明；
     // - 修复“Dock 面板整体仍是黑底/白底，背景图只能从缝隙看到”的问题。
@@ -5068,12 +5073,23 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     {
         return rootStyle
             + QStringLiteral(
-                "QMenuBar,QMenu{background-color:#FFFFFF;color:#000000;}"
+                "QMenuBar{background-color:#FFFFFF;color:#000000;}"
                 "QStatusBar{background-color:#FFFFFF;color:#000000;}"
-                "QLineEdit,QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget,QComboBox,QSpinBox,QDoubleSpinBox{"
+                "QLineEdit,QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget,QSpinBox,QDoubleSpinBox{"
                 "  background-color:#FFFFFF !important;"
                 "  color:#000000 !important;"
                 "  border:1px solid #C7D4E5;"
+                "}"
+                "QComboBox{"
+                "  background-color:#FFFFFF;"
+                "  color:#172B43;"
+                "  border:1px solid #AFC4DC;"
+                "}"
+                "QComboBox QAbstractItemView{"
+                "  background-color:#FFFFFF;"
+                "  color:#172B43;"
+                "  selection-background-color:#2E8BFF;"
+                "  selection-color:#FFFFFF;"
                 "}"
                 "QPushButton,QToolButton{"
                 "  background-color:#EDF5FF !important;"
@@ -5082,15 +5098,20 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
                 "}"
                 "QTabWidget::pane{"
                 "  background:transparent !important;"
-                "  border:1px solid #C7D4E5 !important;"
+                "  border:none !important;"
                 "}"
                 "QTabBar{"
                 "  background:transparent !important;"
                 "}"
                 "QTabBar::tab{"
-                "  background-color:#FFFFFF !important;"
-                "  color:#2F3A47 !important;"
+                "  background-color:#E8F2FF !important;"
+                "  color:#143A63 !important;"
                 "  border:none !important;"
+                "  padding:2px 9px;"
+                "  min-width:56px;"
+                "  min-height:24px;"
+                "  margin:0px;"
+                "  font-size:15px;"
                 "}"
                 "QTableView,QTableWidget,QTreeView,QTreeWidget,QListView,QListWidget{"
                 "  background:#FFFFFF !important;"
@@ -5122,12 +5143,23 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
 
     return rootStyle
         + QStringLiteral(
-            "QMenuBar,QMenu{background-color:#000000;color:#FFFFFF;}"
+            "QMenuBar{background-color:#000000;color:#FFFFFF;}"
             "QStatusBar{background-color:#000000;color:#FFFFFF;}"
-            "QLineEdit,QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget,QComboBox,QSpinBox,QDoubleSpinBox{"
+            "QLineEdit,QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget,QSpinBox,QDoubleSpinBox{"
             "  background-color:#111111 !important;"
             "  color:#FFFFFF !important;"
             "  border:1px solid #3A3A3A;"
+            "}"
+            "QComboBox{"
+            "  background-color:#172232;"
+            "  color:#F4F8FF;"
+            "  border:1px solid #34506D;"
+            "}"
+            "QComboBox QAbstractItemView{"
+            "  background-color:#172232;"
+            "  color:#F4F8FF;"
+            "  selection-background-color:#2E8BFF;"
+            "  selection-color:#FFFFFF;"
             "}"
             "QPushButton,QToolButton{"
             "  background-color:#1A1A1A !important;"
@@ -5136,20 +5168,22 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             "}"
             "QTabWidget::pane{"
             "  background:transparent !important;"
-            "  border:1px solid #3A3A3A !important;"
+            "  border:none !important;"
             "}"
             "QTabBar{"
             "  background:transparent !important;"
-            "  border-bottom:1px solid #3A3A3A !important;"
+            "  border:none !important;"
             "}"
             "QTabBar::tab{"
-            "  background-color:#151C26 !important;"
-            "  color:#E8EEF7 !important;"
-            "  border:1px solid #3A3A3A !important;"
-            "  border-bottom:1px solid #3A3A3A !important;"
+            "  background-color:#223047 !important;"
+            "  color:#F1F7FF !important;"
+            "  border:none !important;"
             "  border-radius:0px !important;"
-            "  padding:4px 14px 5px 14px;"
-            "  min-width:74px;"
+            "  padding:2px 9px;"
+            "  min-width:56px;"
+            "  min-height:24px;"
+            "  margin:0px;"
+            "  font-size:15px;"
             "}"
             "QTableView,QTableWidget,QTreeView,QTreeWidget,QListView,QListWidget{"
             "  background:#121212 !important;"

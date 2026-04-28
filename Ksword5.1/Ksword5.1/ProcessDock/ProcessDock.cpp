@@ -102,9 +102,11 @@ namespace
         "H:/Project/Ksword5.1/Ksword5.1/Ksword5.1/Resource/Kernel.png");
 
     // 默认按钮图标尺寸。
-    constexpr QSize DefaultIconSize(16, 16);
+    constexpr QSize DefaultIconSize(18, 18);
+    constexpr QSize SideTabIconSize(22, 22);
     constexpr QSize CompactIconButtonSize(28, 28);
-    constexpr int ProcessSideTabWidthPx = 118;
+    constexpr int ProcessSideTabWidthPx = 48;
+    constexpr int ProcessSideTabHeightPx = 86;
     constexpr int ProcessNumericSortRole = Qt::UserRole + 200;
 
     class ProcessSortTreeWidgetItem final : public QTreeWidgetItem
@@ -704,31 +706,34 @@ namespace
     // 下拉框主题描边样式，保持与按钮同色系。
     QString buildBlueComboBoxStyle()
     {
+        const QString comboBackgroundColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#172232")
+            : QStringLiteral("#FFFFFF");
+        const QString comboTextColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#F4F8FF")
+            : QStringLiteral("#172B43");
+        const QString comboBorderColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#34506D")
+            : QStringLiteral("#AFC4DC");
+
         return QStringLiteral(
-            "QComboBox {"
-            "  border: 1px solid %1;"
-            "  border-radius: 4px;"
-            "  padding: 2px 8px;"
-            "  color: %4;"
-            "  background: %5;"
+            "QComboBox{"
+            "  background-color:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  padding:2px 8px;"
             "}"
-            "QComboBox:hover {"
-            "  border-color: %2;"
-            "  background: %3;"
-            "}"
-            "QComboBox::drop-down {"
-            "  border: none;"
-            "  width: 20px;"
-            "}"
-            "QComboBox QAbstractItemView {"
-            "  border: 1px solid %1;"
-            "  selection-background-color: %3;"
+            "QComboBox QAbstractItemView{"
+            "  background-color:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  selection-background-color:%4;"
+            "  selection-color:#FFFFFF;"
             "}")
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::SurfaceHex());
+            .arg(comboBackgroundColor)
+            .arg(comboTextColor)
+            .arg(comboBorderColor)
+            .arg(KswordTheme::PrimaryBlueHex);
     }
 
     // 统一“普通输入框”主题边框。
@@ -966,7 +971,7 @@ void ProcessDock::initializeUi()
     m_sideTabWidget = new QTabWidget(this);
     m_sideTabWidget->setTabPosition(QTabWidget::West);
     m_sideTabWidget->setDocumentMode(true);
-    m_sideTabWidget->setIconSize(DefaultIconSize);
+    m_sideTabWidget->setIconSize(SideTabIconSize);
 
     // 左侧页签宽度控制：
     // 1) West Tab 默认会被全局 min-width 放大，信息密度偏低；
@@ -976,16 +981,14 @@ void ProcessDock::initializeUi()
         m_sideTabWidget->tabBar()->setFixedWidth(ProcessSideTabWidthPx);
         m_sideTabWidget->tabBar()->setExpanding(false);
         m_sideTabWidget->tabBar()->setStyleSheet(QStringLiteral(
-            "QTabBar{background:transparent;border-right:1px solid %1;border-bottom:none;}"
-            "QTabBar::tab{min-width:%2px;max-width:%2px;padding:7px 6px;margin:0px;"
-            "border:1px solid %1;border-left:none;border-right:none;border-radius:0px;}"
-            "QTabBar::tab:selected{background-color:%3;color:#FFFFFF;border-color:%1;"
-            "border-left:3px solid %4;font-weight:700;}"
-            "QTabBar::tab:hover:!selected{background-color:%5;color:%6;}" )
-            .arg(KswordTheme::BorderHex())
-            .arg(ProcessSideTabWidthPx - 2)
+            "QTabBar{background:transparent;border:none;}"
+            "QTabBar::tab{min-width:%1px;max-width:%1px;min-height:%2px;"
+            "padding:7px 3px;margin:0px;border:none;border-radius:0px;font-size:16px;}"
+            "QTabBar::tab:selected{background-color:%3;color:#FFFFFF;font-weight:700;}"
+            "QTabBar::tab:hover:!selected{background-color:%4;color:%5;}" )
+            .arg(ProcessSideTabWidthPx)
+            .arg(ProcessSideTabHeightPx)
             .arg(KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#1F5F99") : QStringLiteral("#164B82"))
-            .arg(KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#7FC1FF") : KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#213247") : QStringLiteral("#E5F1FF"))
             .arg(KswordTheme::TextPrimaryHex()));
     }
