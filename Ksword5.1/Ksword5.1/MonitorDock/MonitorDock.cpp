@@ -1,5 +1,6 @@
 
 #include "MonitorDock.h"
+#include "DirectKernelCallMonitorWidget.h"
 #include "MonitorTextViewer.h"
 #include "ProcessTraceMonitorWidget.h"
 #include "WinAPIDock.h"
@@ -3695,6 +3696,16 @@ void MonitorDock::activateMonitorTab(const QString& tabKey)
     }
 
     const QString normalizedKey = tabKey.trimmed().toLower();
+    if (normalizedKey == QStringLiteral("direct-kernel-call")
+        || normalizedKey == QStringLiteral("directkernelcall")
+        || normalizedKey == QStringLiteral("syscall"))
+    {
+        if (m_directKernelCallWidget != nullptr)
+        {
+            m_sideTabWidget->setCurrentWidget(m_directKernelCallWidget);
+        }
+        return;
+    }
     if (normalizedKey == QStringLiteral("winapi"))
     {
         ensureWinApiTabInitialized();
@@ -3775,6 +3786,12 @@ void MonitorDock::initializeUi()
         m_processTraceWidget,
         QIcon(QStringLiteral(":/Icon/process_main.svg")),
         QStringLiteral("进程定向"));
+
+    m_directKernelCallWidget = new DirectKernelCallMonitorWidget(m_sideTabWidget);
+    m_sideTabWidget->addTab(
+        m_directKernelCallWidget,
+        QIcon(QStringLiteral(":/Icon/process_threads.svg")),
+        QStringLiteral("直接内核调用"));
 
     m_winApiPage = new QWidget(m_sideTabWidget);
     QVBoxLayout* winApiPageLayout = new QVBoxLayout(m_winApiPage);

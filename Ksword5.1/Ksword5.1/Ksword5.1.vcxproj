@@ -177,6 +177,7 @@
     <ClCompile Include="MonitorDock\MonitorDock.cpp" />
     <ClCompile Include="MonitorDock\MonitorPanelWidget.cpp" />
     <ClCompile Include="MonitorDock\MonitorTextViewer.cpp" />
+    <ClCompile Include="MonitorDock\DirectKernelCallMonitorWidget.cpp" />
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.cpp" />
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Ui.cpp" />
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Actions.cpp" />
@@ -294,6 +295,7 @@
     <QtMoc Include="MiscDock\BootEditor\BootEditorTab.h" />
     <QtMoc Include="MiscDock\MiscDock.h" />
     <QtMoc Include="MonitorDock\MonitorDock.h" />
+    <ClInclude Include="MonitorDock\DirectKernelCallMonitorWidget.h" />
     <ClInclude Include="MonitorDock\MonitorPanelWidget.h" />
     <ClInclude Include="MonitorDock\MonitorTextViewer.h" />
     <ClInclude Include="MonitorDock\ProcessTraceMonitorWidget.h" />

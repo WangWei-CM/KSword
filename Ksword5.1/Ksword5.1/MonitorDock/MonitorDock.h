@@ -53,6 +53,7 @@ class QLineSeries;
 class QValueAxis;
 class WinAPIDock;
 class ProcessTraceMonitorWidget;
+class DirectKernelCallMonitorWidget;
 
 // COM 前置声明：避免在头文件引入大量 WMI 头。
 struct IWbemClassObject;
@@ -495,6 +496,7 @@ private:
     QTimer* m_perfUpdateTimer = nullptr;    // 性能图刷新定时器（默认1秒）。
     QTabWidget* m_sideTabWidget = nullptr;  // 侧边栏 Tab 容器。
     ProcessTraceMonitorWidget* m_processTraceWidget = nullptr; // m_processTraceWidget：进程定向监控子页。
+    DirectKernelCallMonitorWidget* m_directKernelCallWidget = nullptr; // m_directKernelCallWidget：直接内核调用监控子页。
     QWidget* m_winApiPage = nullptr;        // m_winApiPage：WinAPI 子页宿主容器。
     WinAPIDock* m_winApiWidget = nullptr;   // m_winApiWidget：真正的 WinAPI 监控控件。
 

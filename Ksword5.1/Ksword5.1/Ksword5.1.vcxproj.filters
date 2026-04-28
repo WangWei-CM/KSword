@@ -127,6 +127,9 @@
     <ClCompile Include="MonitorDock\MonitorDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MonitorDock\DirectKernelCallMonitorWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MonitorDock\MonitorPanelWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -549,6 +552,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="StartupDock\StartupDock.Internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MonitorDock\DirectKernelCallMonitorWidget.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MonitorDock\MonitorPanelWidget.h">
