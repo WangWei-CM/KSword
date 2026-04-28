@@ -25,6 +25,7 @@
 #include <QtCharts/QBarCategoryAxis>
 #include <QtCharts/QBarSeries>
 #include <QtCharts/QBarSet>
+#include <QtCharts/QStackedBarSeries>
 #include <QtCharts/QAbstractAxis>
 #include <QtCharts/QAreaSeries>
 #include <QtCharts/QChart>
@@ -208,17 +209,26 @@ void MonitorPanelWidget::initializeUi()
     QStringList cpuCategoryTextList;
     cpuCategoryTextList.reserve(logicalCoreCount);
 
-    m_cpuCoreBarSet = new QBarSet(QStringLiteral("CPU Core Usage"));
+    m_cpuCoreHistoryBarSet = new QBarSet(QStringLiteral("历史"));
+    QColor cpuHistoryColor = cpuBarColor();
+    cpuHistoryColor.setAlpha(86);
+    m_cpuCoreHistoryBarSet->setColor(cpuHistoryColor);
+    m_cpuCoreHistoryBarSet->setBorderColor(Qt::transparent);
+
+    m_cpuCoreBarSet = new QBarSet(QStringLiteral("当前"));
     m_cpuCoreBarSet->setColor(cpuBarColor());
     m_cpuCoreBarSet->setBorderColor(cpuBarColor());
 
     for (int coreIndex = 0; coreIndex < logicalCoreCount; ++coreIndex)
     {
+        m_cpuCoreHistoryBarSet->append(0.0);
         m_cpuCoreBarSet->append(0.0);
         cpuCategoryTextList.push_back(QString::number(coreIndex));
     }
+    m_cpuCoreHistoryPercentList.assign(static_cast<std::size_t>(logicalCoreCount), 0.0);
 
     QBarSeries* cpuBarSeries = new QBarSeries(this);
+    cpuBarSeries->append(m_cpuCoreHistoryBarSet);
     cpuBarSeries->append(m_cpuCoreBarSet);
 
     QChart* cpuChart = new QChart();
@@ -246,22 +256,33 @@ void MonitorPanelWidget::initializeUi()
     cpuBarSeries->attachAxis(cpuAxisY);
     m_cpuChartView = createNoFrameChartView(cpuChart, this);
 
-    // ===================== 内存柱状图 =====================
-    m_memoryBarSet = new QBarSet(QStringLiteral("Memory Usage"));
-    m_memoryBarSet->append(0.0);
-    m_memoryBarSet->setColor(memoryBarColor());
-    m_memoryBarSet->setBorderColor(memoryBarColor());
+    // ===================== 内存组成柱状图 =====================
+    m_memoryUsedBarSet = new QBarSet(QStringLiteral("已用"));
+    m_memoryStandbyBarSet = new QBarSet(QStringLiteral("提交/缓存"));
+    m_memoryAvailableBarSet = new QBarSet(QStringLiteral("可用"));
+    *m_memoryUsedBarSet << 0.0;
+    *m_memoryStandbyBarSet << 0.0;
+    *m_memoryAvailableBarSet << 100.0;
+    m_memoryUsedBarSet->setColor(QColor(86, 166, 255));
+    m_memoryStandbyBarSet->setColor(QColor(255, 184, 92));
+    m_memoryAvailableBarSet->setColor(QColor(92, 210, 145));
+    m_memoryUsedBarSet->setBorderColor(Qt::transparent);
+    m_memoryStandbyBarSet->setBorderColor(Qt::transparent);
+    m_memoryAvailableBarSet->setBorderColor(Qt::transparent);
 
-    QBarSeries* memoryBarSeries = new QBarSeries(this);
-    memoryBarSeries->append(m_memoryBarSet);
+    m_memoryStackedSeries = new QStackedBarSeries(this);
+    m_memoryStackedSeries->append(m_memoryUsedBarSet);
+    m_memoryStackedSeries->append(m_memoryStandbyBarSet);
+    m_memoryStackedSeries->append(m_memoryAvailableBarSet);
 
     QChart* memoryChart = new QChart();
-    memoryChart->addSeries(memoryBarSeries);
-    memoryChart->legend()->hide();
+    memoryChart->addSeries(m_memoryStackedSeries);
+    memoryChart->legend()->setVisible(true);
+    memoryChart->legend()->setAlignment(Qt::AlignBottom);
     memoryChart->setBackgroundVisible(false);
     memoryChart->setBackgroundRoundness(0);
     memoryChart->setMargins(QMargins(0, 0, 0, 0));
-    memoryChart->setTitle(QStringLiteral("内存利用率"));
+    memoryChart->setTitle(QStringLiteral("内存组成"));
 
     QBarCategoryAxis* memoryAxisX = new QBarCategoryAxis(memoryChart);
     memoryAxisX->append(QStringList{ QStringLiteral("当前") });
@@ -276,9 +297,36 @@ void MonitorPanelWidget::initializeUi()
 
     memoryChart->addAxis(memoryAxisX, Qt::AlignBottom);
     memoryChart->addAxis(memoryAxisY, Qt::AlignLeft);
-    memoryBarSeries->attachAxis(memoryAxisX);
-    memoryBarSeries->attachAxis(memoryAxisY);
+    m_memoryStackedSeries->attachAxis(memoryAxisX);
+    m_memoryStackedSeries->attachAxis(memoryAxisY);
     m_memoryChartView = createNoFrameChartView(memoryChart, this);
+
+    // ===================== 内存占用历史折线图 =====================
+    m_memoryUsageSeries = new QLineSeries(this);
+    m_memoryUsageSeries->setName(QStringLiteral("内存占用"));
+    QPen memoryTrendPen(memoryBarColor());
+    memoryTrendPen.setWidthF(2.4);
+    m_memoryUsageSeries->setPen(memoryTrendPen);
+    QChart* memoryTrendChart = new QChart();
+    memoryTrendChart->addSeries(m_memoryUsageSeries);
+    memoryTrendChart->legend()->hide();
+    memoryTrendChart->setBackgroundVisible(false);
+    memoryTrendChart->setBackgroundRoundness(0);
+    memoryTrendChart->setMargins(QMargins(0, 0, 0, 0));
+    memoryTrendChart->setTitle(QStringLiteral("内存占用历史"));
+    m_memoryTrendAxisX = new QValueAxis(memoryTrendChart);
+    m_memoryTrendAxisX->setRange(0, m_historyLength);
+    m_memoryTrendAxisX->setLabelsVisible(false);
+    m_memoryTrendAxisX->setGridLineVisible(false);
+    m_memoryTrendAxisY = new QValueAxis(memoryTrendChart);
+    m_memoryTrendAxisY->setRange(0.0, 100.0);
+    m_memoryTrendAxisY->setLabelsVisible(false);
+    m_memoryTrendAxisY->setGridLineVisible(false);
+    memoryTrendChart->addAxis(m_memoryTrendAxisX, Qt::AlignBottom);
+    memoryTrendChart->addAxis(m_memoryTrendAxisY, Qt::AlignLeft);
+    m_memoryUsageSeries->attachAxis(m_memoryTrendAxisX);
+    m_memoryUsageSeries->attachAxis(m_memoryTrendAxisY);
+    m_memoryTrendChartView = createNoFrameChartView(memoryTrendChart, this);
 
     // ===================== 折线图创建器（磁盘/网络复用） =====================
     auto createLineChartView =
@@ -401,15 +449,17 @@ void MonitorPanelWidget::initializeUi()
         &m_networkAxisY,
         &m_networkChartView);
 
-    // 把四张图按 2x2 放入网格。
+    // 把五张图放入 2x3 网格：内存折线放左侧，内存组成柱保持紧凑展示。
     m_chartGridLayout->addWidget(m_cpuChartView, 0, 0);
-    m_chartGridLayout->addWidget(m_memoryChartView, 0, 1);
-    m_chartGridLayout->addWidget(m_diskChartView, 1, 0);
-    m_chartGridLayout->addWidget(m_networkChartView, 1, 1);
+    m_chartGridLayout->addWidget(m_memoryTrendChartView, 0, 1);
+    m_chartGridLayout->addWidget(m_memoryChartView, 0, 2);
+    m_chartGridLayout->addWidget(m_diskChartView, 1, 0, 1, 2);
+    m_chartGridLayout->addWidget(m_networkChartView, 1, 2);
     m_chartGridLayout->setRowStretch(0, 1);
     m_chartGridLayout->setRowStretch(1, 1);
     m_chartGridLayout->setColumnStretch(0, 1);
     m_chartGridLayout->setColumnStretch(1, 1);
+    m_chartGridLayout->setColumnStretch(2, 1);
 
     // 初始化阶段先应用文字主题并执行一次高度压缩，避免深色文字过暗和外层滚动条。
     applyChartTextTheme();
@@ -518,6 +568,21 @@ void MonitorPanelWidget::refreshMetrics()
                 indexValue < static_cast<int>(perCoreUsageList.size())
                 ? perCoreUsageList[static_cast<std::size_t>(indexValue)]
                 : 0.0;
+            const double previousHistoryValue =
+                indexValue < static_cast<int>(m_cpuCoreHistoryPercentList.size())
+                ? m_cpuCoreHistoryPercentList[static_cast<std::size_t>(indexValue)]
+                : 0.0;
+            const double historyValue = previousHistoryValue <= 0.0
+                ? usageValue
+                : previousHistoryValue * 0.88 + usageValue * 0.12;
+            if (indexValue < static_cast<int>(m_cpuCoreHistoryPercentList.size()))
+            {
+                m_cpuCoreHistoryPercentList[static_cast<std::size_t>(indexValue)] = historyValue;
+            }
+            if (m_cpuCoreHistoryBarSet != nullptr && indexValue < m_cpuCoreHistoryBarSet->count())
+            {
+                m_cpuCoreHistoryBarSet->replace(indexValue, historyValue);
+            }
             m_cpuCoreBarSet->replace(indexValue, usageValue);
         }
     }
@@ -527,20 +592,36 @@ void MonitorPanelWidget::refreshMetrics()
             QStringLiteral("CPU 每核心利用率（总体 %1%）").arg(totalCpuUsage, 0, 'f', 1));
     }
 
-    // 采样并更新内存柱图。
-    double memoryUsagePercent = 0.0;
-    if (!sampleMemoryUsage(&memoryUsagePercent))
+    // 采样并更新内存组成柱图与历史折线。
+    MemoryCompositionSample memorySample{};
+    if (!sampleMemoryUsage(&memorySample))
     {
-        memoryUsagePercent = 0.0;
+        memorySample = MemoryCompositionSample{};
     }
-    if (m_memoryBarSet != nullptr)
+    if (m_memoryUsedBarSet != nullptr)
     {
-        m_memoryBarSet->replace(0, memoryUsagePercent);
+        m_memoryUsedBarSet->replace(0, memorySample.usedPercent);
+    }
+    if (m_memoryStandbyBarSet != nullptr)
+    {
+        m_memoryStandbyBarSet->replace(0, memorySample.standbyPercent);
+    }
+    if (m_memoryAvailableBarSet != nullptr)
+    {
+        m_memoryAvailableBarSet->replace(0, memorySample.availablePercent);
     }
     if (m_memoryChartView != nullptr && m_memoryChartView->chart() != nullptr)
     {
         m_memoryChartView->chart()->setTitle(
-            QStringLiteral("内存利用率 %1%").arg(memoryUsagePercent, 0, 'f', 1));
+            QStringLiteral("内存组成 已用:%1% 提交:%2% 可用:%3%")
+            .arg(memorySample.usedPercent, 0, 'f', 1)
+            .arg(memorySample.commitPercent, 0, 'f', 1)
+            .arg(memorySample.availablePercent, 0, 'f', 1));
+    }
+    if (m_memoryTrendChartView != nullptr && m_memoryTrendChartView->chart() != nullptr)
+    {
+        m_memoryTrendChartView->chart()->setTitle(
+            QStringLiteral("内存占用历史 %1%").arg(memorySample.usedPercent, 0, 'f', 1));
     }
 
     // 采样并更新磁盘/网络折线图。
@@ -561,6 +642,7 @@ void MonitorPanelWidget::refreshMetrics()
     }
 
     ++m_sampleCounter;
+    appendLineSample(m_memoryUsageSeries, m_memoryTrendAxisX, m_memoryTrendAxisY, memorySample.usedPercent);
     appendLineSample(m_diskReadSeries, m_diskAxisX, m_diskAxisY, diskReadBytesPerSec);
     appendLineSample(m_diskWriteSeries, m_diskAxisX, m_diskAxisY, diskWriteBytesPerSec);
     appendLineSample(m_networkRxSeries, m_networkAxisX, m_networkAxisY, networkRxBytesPerSec);
@@ -670,9 +752,9 @@ bool MonitorPanelWidget::samplePerCoreCpuUsage(
     return true;
 }
 
-bool MonitorPanelWidget::sampleMemoryUsage(double* memoryUsageOut) const
+bool MonitorPanelWidget::sampleMemoryUsage(MemoryCompositionSample* memorySampleOut) const
 {
-    if (memoryUsageOut == nullptr)
+    if (memorySampleOut == nullptr)
     {
         return false;
     }
@@ -681,11 +763,34 @@ bool MonitorPanelWidget::sampleMemoryUsage(double* memoryUsageOut) const
     memoryStatus.dwLength = sizeof(memoryStatus);
     if (::GlobalMemoryStatusEx(&memoryStatus) == FALSE)
     {
-        *memoryUsageOut = 0.0;
+        *memorySampleOut = MemoryCompositionSample{};
         return false;
     }
 
-    *memoryUsageOut = static_cast<double>(memoryStatus.dwMemoryLoad);
+    const double totalPhysBytes = static_cast<double>(memoryStatus.ullTotalPhys);
+    const double availablePhysBytes = static_cast<double>(memoryStatus.ullAvailPhys);
+    const double usedPhysBytes = std::max(0.0, totalPhysBytes - availablePhysBytes);
+    const double totalCommitBytes = static_cast<double>(memoryStatus.ullTotalPageFile);
+    const double availableCommitBytes = static_cast<double>(memoryStatus.ullAvailPageFile);
+    const double usedCommitBytes = std::max(0.0, totalCommitBytes - availableCommitBytes);
+
+    MemoryCompositionSample sample{};
+    if (totalPhysBytes > 0.0)
+    {
+        sample.usedPercent = std::clamp(usedPhysBytes * 100.0 / totalPhysBytes, 0.0, 100.0);
+        sample.availablePercent = std::clamp(availablePhysBytes * 100.0 / totalPhysBytes, 0.0, 100.0);
+    }
+    sample.commitPercent = totalCommitBytes > 0.0
+        ? std::clamp(usedCommitBytes * 100.0 / totalCommitBytes, 0.0, 100.0)
+        : sample.usedPercent;
+    sample.standbyPercent = std::clamp(sample.commitPercent - sample.usedPercent, 0.0, 100.0);
+    const double totalStackPercent = sample.usedPercent + sample.standbyPercent + sample.availablePercent;
+    if (totalStackPercent > 100.0 && totalStackPercent > 0.0)
+    {
+        sample.availablePercent = std::max(0.0, 100.0 - sample.usedPercent - sample.standbyPercent);
+    }
+
+    *memorySampleOut = sample;
     return true;
 }
 
@@ -862,6 +967,7 @@ void MonitorPanelWidget::applyChartTextTheme()
     const QList<QChart*> chartList{
         m_cpuChartView != nullptr ? m_cpuChartView->chart() : nullptr,
         m_memoryChartView != nullptr ? m_memoryChartView->chart() : nullptr,
+        m_memoryTrendChartView != nullptr ? m_memoryTrendChartView->chart() : nullptr,
         m_diskChartView != nullptr ? m_diskChartView->chart() : nullptr,
         m_networkChartView != nullptr ? m_networkChartView->chart() : nullptr
     };
@@ -959,6 +1065,7 @@ void MonitorPanelWidget::adjustChartCellHeights()
     const int chartRowHeight = std::max(18, availableRowsHeight / 2);
 
     applyMaxHeightIfChanged(m_cpuChartView, chartRowHeight);
+    applyMaxHeightIfChanged(m_memoryTrendChartView, chartRowHeight);
     applyMaxHeightIfChanged(m_memoryChartView, chartRowHeight);
     applyMaxHeightIfChanged(m_diskChartView, chartRowHeight);
     applyMaxHeightIfChanged(m_networkChartView, chartRowHeight);
@@ -982,6 +1089,7 @@ void MonitorPanelWidget::adjustChartCellHeights()
                 chartPointer->setMargins(QMargins(0, 0, 0, 0));
             }
         };
+    applyChartCompactMode(m_memoryChartView);
     applyChartCompactMode(m_diskChartView);
     applyChartCompactMode(m_networkChartView);
 }

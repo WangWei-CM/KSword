@@ -179,11 +179,13 @@ namespace ks::process
         // ======== 原始性能计数器（用于相邻两轮差值计算） ========
         std::uint64_t rawCpuTime100ns = 0;      // Kernel + User 总 CPU 时间（100ns）。
         std::uint64_t rawWorkingSetBytes = 0;   // 工作集内存字节数。
+        std::uint64_t rawPrivateBytes = 0;      // 私有提交/申请内存字节数。
         std::uint64_t rawIoBytes = 0;           // Read/Write/Other 传输累计字节。
 
         // ======== UI 直接显示的衍生性能数据 ========
         double cpuPercent = 0.0;           // CPU 百分比（0~100 * 逻辑核折算）。
-        double ramMB = 0.0;                // RAM（MB）。
+        double ramMB = 0.0;                // RAM 申请内存（MB，优先 PrivateUsage）。
+        double workingSetMB = 0.0;         // RAM 实际使用工作集（MB）。
         double diskMBps = 0.0;             // 磁盘吞吐（MB/s）。
         double gpuPercent = 0.0;           // GPU（当前预留，默认 0）。
         double netKBps = 0.0;              // 网络（当前预留，默认 0）。

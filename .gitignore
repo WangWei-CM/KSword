@@ -5,3 +5,11 @@ x86/
 /Ksword5.1/Ksword5.1/debug/moc_predefs.h.cbt
 /Back
 .deps/
+build_*.txt
+build_*.json
+*.log
+package_stage/
+tmp-qmake-mm*/
+windeployqt_raw.txt
+vs_install.json
+aqtinstall.log

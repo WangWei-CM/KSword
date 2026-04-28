@@ -19,6 +19,7 @@ class QBarSet;
 class QChartView;
 class QGridLayout;
 class QLineSeries;
+class QStackedBarSeries;
 class QResizeEvent;
 class QShowEvent;
 class QTimer;
@@ -74,11 +75,19 @@ private:
         std::vector<double>* coreUsagesOut,
         double* totalUsageOut);
 
+    struct MemoryCompositionSample
+    {
+        double usedPercent = 0.0;       // usedPercent：物理内存使用百分比。
+        double standbyPercent = 0.0;    // standbyPercent：近似缓存/备用百分比。
+        double availablePercent = 0.0;  // availablePercent：可用物理内存百分比。
+        double commitPercent = 0.0;     // commitPercent：提交量占提交上限百分比。
+    };
+
     // sampleMemoryUsage 作用：
-    // - 获取系统内存占用百分比。
-    // 参数 memoryUsageOut：内存占用输出值。
+    // - 获取系统内存组成百分比。
+    // 参数 memorySampleOut：内存组成输出值。
     // 返回：true=采样成功，false=采样失败。
-    bool sampleMemoryUsage(double* memoryUsageOut) const;
+    bool sampleMemoryUsage(MemoryCompositionSample* memorySampleOut) const;
 
     // sampleDiskRate 作用：
     // - 获取系统总磁盘读写速率（字节/秒）。
@@ -129,9 +138,18 @@ private:
 
     // CPU/内存图控件。
     QChartView* m_cpuChartView = nullptr;     // m_cpuChartView：CPU 每核柱状图。
-    QChartView* m_memoryChartView = nullptr;  // m_memoryChartView：内存柱状图。
-    QBarSet* m_cpuCoreBarSet = nullptr;       // m_cpuCoreBarSet：CPU 每核柱条数据集。
-    QBarSet* m_memoryBarSet = nullptr;        // m_memoryBarSet：内存柱条数据集。
+    QChartView* m_memoryChartView = nullptr;  // m_memoryChartView：内存组成柱状图。
+    QChartView* m_memoryTrendChartView = nullptr; // m_memoryTrendChartView：内存占用历史折线图。
+    QBarSet* m_cpuCoreBarSet = nullptr;       // m_cpuCoreBarSet：CPU 每核当前柱条数据集。
+    QBarSet* m_cpuCoreHistoryBarSet = nullptr; // m_cpuCoreHistoryBarSet：CPU 每核历史半透明柱条数据集。
+    QBarSet* m_memoryUsedBarSet = nullptr;    // m_memoryUsedBarSet：物理内存已用段。
+    QBarSet* m_memoryStandbyBarSet = nullptr; // m_memoryStandbyBarSet：近似缓存/提交段。
+    QBarSet* m_memoryAvailableBarSet = nullptr; // m_memoryAvailableBarSet：可用内存段。
+    QStackedBarSeries* m_memoryStackedSeries = nullptr; // m_memoryStackedSeries：内存组成堆叠柱。
+    QLineSeries* m_memoryUsageSeries = nullptr; // m_memoryUsageSeries：内存占用历史折线。
+    QValueAxis* m_memoryTrendAxisX = nullptr; // m_memoryTrendAxisX：内存折线 X 轴。
+    QValueAxis* m_memoryTrendAxisY = nullptr; // m_memoryTrendAxisY：内存折线 Y 轴。
+    std::vector<double> m_cpuCoreHistoryPercentList; // m_cpuCoreHistoryPercentList：每核历史平均占用率。
 
     // 磁盘/网络图控件。
     QChartView* m_diskChartView = nullptr;    // m_diskChartView：磁盘读写折线图。

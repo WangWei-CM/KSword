@@ -1399,7 +1399,13 @@ namespace ks::process
             sizeof(memoryCounters)) != FALSE)
         {
             processRecord.rawWorkingSetBytes = static_cast<std::uint64_t>(memoryCounters.WorkingSetSize);
-            processRecord.ramMB = static_cast<double>(processRecord.rawWorkingSetBytes) / (1024.0 * 1024.0);
+            processRecord.rawPrivateBytes = static_cast<std::uint64_t>(memoryCounters.PrivateUsage);
+            if (processRecord.rawPrivateBytes == 0)
+            {
+                processRecord.rawPrivateBytes = static_cast<std::uint64_t>(memoryCounters.PagefileUsage);
+            }
+            processRecord.workingSetMB = static_cast<double>(processRecord.rawWorkingSetBytes) / (1024.0 * 1024.0);
+            processRecord.ramMB = static_cast<double>(processRecord.rawPrivateBytes) / (1024.0 * 1024.0);
         }
 
         // 读取 IO 累计字节。
@@ -1561,8 +1567,9 @@ namespace ks::process
         nextSampleOut.ioBytes = processRecord.rawIoBytes;
         nextSampleOut.sampleTick100ns = currentTick100ns;
 
-        // RAM 直接由工作集实时换算。
-        processRecord.ramMB = static_cast<double>(processRecord.rawWorkingSetBytes) / (1024.0 * 1024.0);
+        // RAM 同时保留申请内存与工作集，便于 UI 展示“申请/使用”两组数值。
+        processRecord.workingSetMB = static_cast<double>(processRecord.rawWorkingSetBytes) / (1024.0 * 1024.0);
+        processRecord.ramMB = static_cast<double>(processRecord.rawPrivateBytes) / (1024.0 * 1024.0);
 
         // 无历史样本时，CPU/Disk 无法计算差值，置 0。
         if (previousSample == nullptr)
@@ -1722,11 +1729,13 @@ namespace ks::process
                     processRecord.creationTime100ns = static_cast<std::uint64_t>(processInfo->CreateTime.QuadPart);
                     processRecord.rawCpuTime100ns = static_cast<std::uint64_t>(processInfo->KernelTime.QuadPart + processInfo->UserTime.QuadPart);
                     processRecord.rawWorkingSetBytes = static_cast<std::uint64_t>(processInfo->WorkingSetSize);
+                    processRecord.rawPrivateBytes = static_cast<std::uint64_t>(processInfo->PrivatePageCount);
                     processRecord.rawIoBytes =
                         static_cast<std::uint64_t>(processInfo->ReadTransferCount.QuadPart) +
                         static_cast<std::uint64_t>(processInfo->WriteTransferCount.QuadPart) +
                         static_cast<std::uint64_t>(processInfo->OtherTransferCount.QuadPart);
-                    processRecord.ramMB = static_cast<double>(processRecord.rawWorkingSetBytes) / (1024.0 * 1024.0);
+                    processRecord.workingSetMB = static_cast<double>(processRecord.rawWorkingSetBytes) / (1024.0 * 1024.0);
+                    processRecord.ramMB = static_cast<double>(processRecord.rawPrivateBytes) / (1024.0 * 1024.0);
                     processRecord.startTimeText = ks::str::FileTime100nsToLocalText(processRecord.creationTime100ns);
                     processRecord.dynamicCountersReady = true;
 

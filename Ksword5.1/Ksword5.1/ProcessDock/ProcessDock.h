@@ -269,6 +269,8 @@ private:
     void executeSetCriticalAction(bool enableCritical);
     void executeSetPriorityAction(int priorityActionId);
     void executeOpenFolderAction();
+    // executeOpenMemoryOperationAction 作用：跳转到内存页并附加当前进程，便于继续转储/查看区域。
+    void executeOpenMemoryOperationAction();
 
     // ======== 工具函数 ========
     std::string selectedIdentityKey() const;

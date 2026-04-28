@@ -61,6 +61,11 @@ public:
     // - 作用：在控件销毁前释放进程句柄、停止定时器与后台扫描状态。
     ~MemoryDock() override;
 
+    // focusProcessForOperations：
+    // - 作用：从进程页跳转到内存页后自动定位并附加目标 PID；
+    // - 调用方式：MainWindow::focusMemoryDockByPid 调用。
+    void focusProcessForOperations(std::uint32_t pid, bool showMessage = false);
+
 private:
     // ========================================================
     // 内部数据结构定义（用于表格缓存与跨 Tab 共享状态）

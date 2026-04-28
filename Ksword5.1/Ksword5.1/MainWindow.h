@@ -89,6 +89,12 @@ public slots:
     // 入参 pid：目标进程 PID。
     void focusHandleDockByPid(quint32 pid);
 
+    // focusMemoryDockByPid 作用：
+    // - 将“内存”Dock 置顶并附加目标进程，便于执行内存区域查看与转储。
+    // 调用方式：进程页右键菜单“跳转到内存操作”调用。
+    // 入参 pid：目标进程 PID。
+    void focusMemoryDockByPid(quint32 pid);
+
     // openProcessDetailByPid 作用：
     // - 将“进程”Dock 置顶并打开指定 PID 的进程详情窗口；
     // - 供 FileDock 的“占用句柄扫描结果”窗口跳转调用。
