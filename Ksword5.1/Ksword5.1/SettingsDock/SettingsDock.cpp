@@ -247,7 +247,6 @@ void SettingsDock::initializeAppearanceTab()
     m_startupDefaultTabCombo->addItem(QStringLiteral("监控"), QStringLiteral("monitor"));
     m_startupDefaultTabCombo->addItem(QStringLiteral("硬件"), QStringLiteral("hardware"));
     m_startupDefaultTabCombo->addItem(QStringLiteral("权限"), QStringLiteral("privilege"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("设置"), QStringLiteral("settings"));
     m_startupDefaultTabCombo->addItem(QStringLiteral("窗口"), QStringLiteral("window"));
     m_startupDefaultTabCombo->addItem(QStringLiteral("注册表"), QStringLiteral("registry"));
     m_startupDefaultTabCombo->addItem(QStringLiteral("启动项"), QStringLiteral("startup"));
@@ -651,7 +650,7 @@ void SettingsDock::updateThemeButtonStyle()
         ? QStringLiteral(
             "QToolButton{"
             "  border:1px solid #5A5A5A;"
-            "  border-radius:6px;"
+            "  border-radius:2px;"
             "  background:#202020;"
             "}"
             "QToolButton:hover{"
@@ -660,7 +659,7 @@ void SettingsDock::updateThemeButtonStyle()
         : QStringLiteral(
             "QToolButton{"
             "  border:1px solid #6A6A6A;"
-            "  border-radius:6px;"
+            "  border-radius:2px;"
             "  background:#EDF5FF;"
             "}"
             "QToolButton:hover{"
@@ -671,13 +670,13 @@ void SettingsDock::updateThemeButtonStyle()
         ? QStringLiteral(
             "QToolButton{"
             "  border:2px solid #43A0FF;"
-            "  border-radius:6px;"
+            "  border-radius:2px;"
             "  background:#1B2A3C;"
             "}")
         : QStringLiteral(
             "QToolButton{"
             "  border:2px solid #43A0FF;"
-            "  border-radius:6px;"
+            "  border-radius:2px;"
             "  background:#DDEEFF;"
             "}");
 
