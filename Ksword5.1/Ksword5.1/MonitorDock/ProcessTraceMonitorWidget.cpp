@@ -69,19 +69,7 @@ ProcessTraceMonitorWidget::~ProcessTraceMonitorWidget()
 
 QString ProcessTraceMonitorWidget::blueButtonStyle()
 {
-    return QStringLiteral(
-        "QPushButton{color:%1;background:%5;border:1px solid %2;border-radius:3px;padding:4px 8px;}"
-        "QPushButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
-        "QPushButton:pressed{background:%4;color:#FFFFFF;}"
-        "QPushButton:disabled{color:%6;background:%7;border:1px solid %8;}")
-        .arg(KswordTheme::PrimaryBlueHex)
-        .arg(KswordTheme::PrimaryBlueBorderHex)
-        .arg(KswordTheme::PrimaryBlueSolidHoverHex())
-        .arg(KswordTheme::PrimaryBluePressedHex)
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::TextSecondaryHex())
-        .arg(KswordTheme::SurfaceAltHex())
-        .arg(KswordTheme::BorderHex());
+    return KswordTheme::ThemedButtonStyle();
 }
 
 QString ProcessTraceMonitorWidget::blueInputStyle()

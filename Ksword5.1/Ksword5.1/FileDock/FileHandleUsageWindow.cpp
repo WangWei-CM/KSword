@@ -36,28 +36,7 @@ namespace
     // buildBlueButtonStyle 作用：生成统一蓝色按钮样式（图标按钮紧凑尺寸）。
     QString buildBlueButtonStyle()
     {
-        return QStringLiteral(
-            "QPushButton{"
-            "  color:%1;"
-            "  background:%5;"
-            "  border:1px solid %2;"
-            "  border-radius:3px;"
-            "  padding:4px;"
-            "}"
-            "QPushButton:hover{"
-            "  background:%3;"
-            "  color:#FFFFFF;"
-            "  border:1px solid %3;"
-            "}"
-            "QPushButton:pressed{"
-            "  background:%4;"
-            "  color:#FFFFFF;"
-            "}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
-            .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(KswordTheme::SurfaceHex());
+        return KswordTheme::ThemedButtonStyle();
     }
 
     // buildOpaqueHandleUsageDialogStyle 作用：

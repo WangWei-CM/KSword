@@ -41,15 +41,7 @@ namespace
     // - 作用：统一图标按钮样式（带悬停与按下态）。
     QString blueButtonStyle()
     {
-        return QStringLiteral(
-            "QPushButton{color:%1;background:%5;border:1px solid %2;border-radius:2px;padding:3px 8px;}"
-            "QPushButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
-            "QPushButton:pressed{background:%4;color:#FFFFFF;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
-            .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(KswordTheme::SurfaceHex());
+        return KswordTheme::ThemedButtonStyle();
     }
 
     // blueInputStyle：
