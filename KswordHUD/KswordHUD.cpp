@@ -356,7 +356,7 @@ KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
         shouldWriteConfig = true;
     }
     if (!configObject.contains(QStringLiteral("leftWidgetBackgroundColor"))) {
-        configObject.insert(QStringLiteral("leftWidgetBackgroundColor"), QStringLiteral("#000000"));
+        configObject.insert(QStringLiteral("leftWidgetBackgroundColor"), QStringLiteral("#0A0F16"));
         shouldWriteConfig = true;
     }
     if (!configObject.contains(QStringLiteral("leftWidgetBackgroundOpacityPercent"))) {
@@ -368,7 +368,7 @@ KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
         shouldWriteConfig = true;
     }
     if (!configObject.contains(QStringLiteral("rightWidgetBackgroundColor"))) {
-        configObject.insert(QStringLiteral("rightWidgetBackgroundColor"), QStringLiteral("#000000"));
+        configObject.insert(QStringLiteral("rightWidgetBackgroundColor"), QStringLiteral("#0A0F16"));
         shouldWriteConfig = true;
     }
     if (!configObject.contains(QStringLiteral("rightWidgetBackgroundOpacityPercent"))) {
@@ -391,7 +391,7 @@ KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
         configObject.value(QStringLiteral("rightWidgetOpacityPercent")).toInt(100),
         100);
     config.leftWidgetBackgroundColor =
-        configObject.value(QStringLiteral("leftWidgetBackgroundColor")).toString(QStringLiteral("#000000"));
+        configObject.value(QStringLiteral("leftWidgetBackgroundColor")).toString(QStringLiteral("#0A0F16"));
     config.leftWidgetBackgroundOpacityPercent = qBound(
         0,
         configObject.value(QStringLiteral("leftWidgetBackgroundOpacityPercent")).toInt(0),
@@ -399,7 +399,7 @@ KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
     config.leftProcessTableFontColor =
         configObject.value(QStringLiteral("leftProcessTableFontColor")).toString(QStringLiteral("#FFFFFF"));
     config.rightWidgetBackgroundColor =
-        configObject.value(QStringLiteral("rightWidgetBackgroundColor")).toString(QStringLiteral("#000000"));
+        configObject.value(QStringLiteral("rightWidgetBackgroundColor")).toString(QStringLiteral("#0A0F16"));
     config.rightWidgetBackgroundOpacityPercent = qBound(
         0,
         configObject.value(QStringLiteral("rightWidgetBackgroundOpacityPercent")).toInt(0),

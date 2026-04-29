@@ -1,4 +1,4 @@
-#include "BootEditorTab.h"
+﻿#include "BootEditorTab.h"
 
 #include "../../theme.h"
 
@@ -72,7 +72,7 @@ namespace
             "QToolButton:pressed{background:%4;color:#FFFFFF;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
             .arg(KswordTheme::PrimaryBluePressedHex)
             .arg(KswordTheme::SurfaceHex());
     }
@@ -227,7 +227,7 @@ void BootEditorTab::initializeToolbar()
         : QStringLiteral("权限：非管理员（多数写操作会失败）"));
     m_adminHintLabel->setStyleSheet(
         elevated
-        ? QStringLiteral("color:#2E8BFF;font-weight:600;")
+        ? QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::PrimaryBlueHex)
         : QStringLiteral("color:#D97706;font-weight:600;"));
     m_toolbarLayout->addWidget(m_adminHintLabel);
 }

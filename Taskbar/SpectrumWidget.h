@@ -58,7 +58,7 @@ private:
     int m_drawAreaY = 0;
 
     // 颜色配置
-    QColor m_barColor = QColor(0, 255, 255); // #00FFFF
+    QColor m_barColor = QColor(67, 160, 255); // #43A0FF
 
     // 性能优化
     QElapsedTimer m_paintTimer;

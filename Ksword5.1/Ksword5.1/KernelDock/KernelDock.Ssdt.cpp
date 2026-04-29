@@ -1,4 +1,4 @@
-#include "KernelDock.h"
+﻿#include "KernelDock.h"
 
 #include "KernelDockSsdtWorker.h"
 #include "../UI/CodeEditorWidget.h"
@@ -32,7 +32,7 @@ namespace
             "QPushButton:pressed{background:%4;color:#FFFFFF;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
             .arg(KswordTheme::PrimaryBluePressedHex)
             .arg(KswordTheme::SurfaceHex());
     }
@@ -59,7 +59,8 @@ namespace
 
     QString itemSelectionStyle()
     {
-        return QStringLiteral("QTableWidget::item:selected{background:#2E8BFF;color:#FFFFFF;}");
+        return QStringLiteral("QTableWidget::item:selected{background:%1;color:#FFFFFF;}")
+            .arg(KswordTheme::PrimaryBlueHex);
     }
 
     QString statusLabelStyle(const QString& colorHex)

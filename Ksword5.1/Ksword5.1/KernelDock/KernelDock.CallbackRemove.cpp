@@ -1,4 +1,4 @@
-#include "KernelDock.h"
+﻿#include "KernelDock.h"
 
 #include "../../../shared/KswordArkLogProtocol.h"
 #include "../../../shared/driver/KswordArkCallbackIoctl.h"
@@ -225,7 +225,7 @@ void KernelDock::initializeCallbackRemoveTab()
     m_callbackRemoveButton = new QPushButton(QStringLiteral("移除回调"), m_callbackRemoveContentWidget);
     m_callbackRemoveButton->setStyleSheet(QStringLiteral(
         "QPushButton{color:%1;background:%2;border:1px solid %3;border-radius:2px;padding:3px 10px;}"
-        "QPushButton:hover{background:#2E8BFF;color:#FFFFFF;border:1px solid #2E8BFF;}"
+        "QPushButton:hover{background:%4;color:#FFFFFF;border:1px solid %4;}"
         "QPushButton:pressed{background:%4;color:#FFFFFF;}"
     ).arg(
         KswordTheme::PrimaryBlueHex,

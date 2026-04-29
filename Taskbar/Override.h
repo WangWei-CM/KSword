@@ -20,13 +20,13 @@ public:
         }
 
         // 2. 精准变色（只处理图标本体，保留透明背景）
-        QIcon coloredIcon = colorizeIcon(originalIcon, iconSize, QColor("#00ffff"));
+        QIcon coloredIcon = colorizeIcon(originalIcon, iconSize, QColor("#43A0FF"));
         setIcon(coloredIcon);
         setIconSize(iconSize); // 强制图标尺寸
 
         // 3. 发光效果
         glowEffect = new QGraphicsDropShadowEffect(this);
-        glowEffect->setColor(QColor("#00ffff"));
+        glowEffect->setColor(QColor("#43A0FF"));
         glowEffect->setBlurRadius(8); // 发光强度（适中）
         glowEffect->setOffset(0, 0);
         glowEffect->setEnabled(false);
@@ -42,10 +42,10 @@ public:
                 /* 移除固定宽高，完全由图标+内边距决定 */
             }
             QPushButton:hover {
-                border-color: #00ffff;
+                border-color: #43A0FF;
             }
             QPushButton:pressed {
-                background-color: rgba(0, 255, 255, 0.1);
+                background-color: rgba(67, 160, 255, 0.14);
             }
         )");
     }
