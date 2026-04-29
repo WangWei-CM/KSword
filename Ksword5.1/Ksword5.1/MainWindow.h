@@ -358,9 +358,11 @@ private:
     // - System：是否 LocalSystem 身份；
     // - TI/R0：TrustedInstaller 与驱动服务快捷开关。
     QWidget* m_privilegeButtonContainer = nullptr;
-    QWidget* m_topActionRowWidget = nullptr;     // m_topActionRowWidget：标题栏下方的功能条容器（文件 + 权限按钮）。
+    QWidget* m_topActionRowWidget = nullptr;     // m_topActionRowWidget：标题栏下方的功能条容器（常用动作 + 权限按钮）。
     QHBoxLayout* m_topActionRowLayout = nullptr; // m_topActionRowLayout：功能条水平布局。
-    QToolButton* m_fileMenuButton = nullptr;     // m_fileMenuButton：功能条左侧“文件”按钮。
+    QToolButton* m_updateMenuButton = nullptr;   // m_updateMenuButton：功能条左侧“检查更新”按钮。
+    QToolButton* m_licenseMenuButton = nullptr;  // m_licenseMenuButton：功能条左侧“许可证”按钮。
+    QToolButton* m_exitMenuButton = nullptr;     // m_exitMenuButton：功能条左侧“退出”按钮。
     QToolButton* m_settingsMenuButton = nullptr; // m_settingsMenuButton：功能条左侧“设置”入口按钮。
     QPushButton* m_adminStatusButton = nullptr;
     QPushButton* m_debugStatusButton = nullptr;
