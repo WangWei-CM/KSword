@@ -71,17 +71,7 @@ namespace
 
     QString blueButtonStyle()
     {
-        return QStringLiteral(
-            "QPushButton{color:%1;background:%5;border:1px solid %2;border-radius:3px;padding:4px 8px;}"
-            "QPushButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
-            "QPushButton:pressed{background:%4;color:#FFFFFF;}"
-            "QPushButton:disabled{color:%6;border:1px solid %2;background:%5;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
-            .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::TextSecondaryHex());
+        return KswordTheme::ThemedButtonStyle();
     }
 
     QString blueInputStyle()

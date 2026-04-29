@@ -20,9 +20,8 @@ const QString QSS_MainWindow_TabWidget = R"(
     QTabBar::tab {
         background-color: palette(alternate-base);
         color: palette(text);
-        padding: 2px 9px;
+        padding: 3px 12px;
         margin: 0px;
-        min-width: 56px;
         min-height: 24px;
         border: none;
         border-radius: 0px;
@@ -31,11 +30,7 @@ const QString QSS_MainWindow_TabWidget = R"(
 
     QTabBar::tab:left,
     QTabBar::tab:right {
-        min-width: 46px;
-        max-width: 46px;
-        min-height: 84px;
-        max-height: 84px;
-        padding: 7px 3px;
+        padding: 6px 8px;
         font-size: 16px;
     }
 
@@ -85,20 +80,15 @@ const QString QSS_MainWindow_dockStyle = R"(
         color: palette(text);
         border: none;
         border-radius: 0px;
-        padding: 2px 8px;
+        padding: 3px 12px;
         margin: 0px;
-        min-width: 52px;
         min-height: 22px;
         font-size: 13px;
     }
 
     QMainWindow QTabBar::tab:left,
     QMainWindow QTabBar::tab:right {
-        min-width: 46px;
-        max-width: 46px;
-        min-height: 84px;
-        max-height: 84px;
-        padding: 7px 3px;
+        padding: 6px 8px;
         font-size: 16px;
     }
 
@@ -134,8 +124,7 @@ const QString QSS_MainWindow_dockStyle = R"(
         color: palette(text);
         border: none;
         border-radius: 0px;
-        padding: 2px 9px;
-        min-width: 56px;
+        padding: 3px 12px;
         min-height: 24px;
         font-size: 15px;
     }

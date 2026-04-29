@@ -223,15 +223,7 @@ void KernelDock::initializeCallbackRemoveTab()
     m_callbackRemoveAddressEdit->setClearButtonEnabled(true);
 
     m_callbackRemoveButton = new QPushButton(QStringLiteral("移除回调"), m_callbackRemoveContentWidget);
-    m_callbackRemoveButton->setStyleSheet(QStringLiteral(
-        "QPushButton{color:%1;background:%2;border:1px solid %3;border-radius:2px;padding:3px 10px;}"
-        "QPushButton:hover{background:%4;color:#FFFFFF;border:1px solid %4;}"
-        "QPushButton:pressed{background:%4;color:#FFFFFF;}"
-    ).arg(
-        KswordTheme::PrimaryBlueHex,
-        KswordTheme::SurfaceHex(),
-        KswordTheme::PrimaryBlueBorderHex,
-        KswordTheme::PrimaryBluePressedHex));
+    m_callbackRemoveButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
 
     m_callbackRemoveStatusLabel = new QLabel(QStringLiteral("状态：等待操作（当前仅前三类支持直接移除）"), m_callbackRemoveContentWidget);
     m_callbackRemoveStatusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));

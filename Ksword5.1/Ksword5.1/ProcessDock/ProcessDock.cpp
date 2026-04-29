@@ -107,8 +107,7 @@ namespace
     constexpr QSize DefaultIconSize(18, 18);
     constexpr QSize SideTabIconSize(22, 22);
     constexpr QSize CompactIconButtonSize(28, 28);
-    constexpr int ProcessSideTabWidthPx = 38;
-    constexpr int ProcessSideTabHeightPx = 88;
+    constexpr int ProcessSideTabMinHeightPx = 72;
     constexpr int ProcessNumericSortRole = Qt::UserRole + 200;
     constexpr int ProcessEfficiencyModeRole = Qt::UserRole + 201;
     constexpr int ProcessEfficiencyModeKnownRole = Qt::UserRole + 202;
@@ -1044,23 +1043,20 @@ void ProcessDock::initializeUi()
     m_sideTabWidget->setDocumentMode(true);
     m_sideTabWidget->setIconSize(SideTabIconSize);
 
-    // 左侧页签宽度控制：
-    // 1) West Tab 默认会被全局 min-width 放大，信息密度偏低；
-    // 2) 这里固定为进程页专用宽度，保证文字完整且不挤压表格。
+    // 左侧页签使用内容自适应宽度，避免固定宽度导致不同字号/语言下被截断。
     if (m_sideTabWidget->tabBar() != nullptr)
     {
-        m_sideTabWidget->tabBar()->setFixedWidth(ProcessSideTabWidthPx);
         m_sideTabWidget->tabBar()->setExpanding(false);
+        m_sideTabWidget->tabBar()->setUsesScrollButtons(true);
+        m_sideTabWidget->tabBar()->setElideMode(Qt::ElideNone);
         m_sideTabWidget->tabBar()->setStyleSheet(QStringLiteral(
             "QTabBar{background:transparent;border:none;}"
-            "QTabBar::tab{min-width:%1px;max-width:%1px;min-height:%2px;"
-            "padding:4px 2px;margin:0px;border:none;border-radius:0px;font-size:15px;}"
-            "QTabBar::tab:selected{background-color:%3;color:#FFFFFF;font-size:18px;font-weight:700;}"
-            "QTabBar::tab:hover:!selected{background-color:%4;color:%5;}" )
-            .arg(ProcessSideTabWidthPx)
-            .arg(ProcessSideTabHeightPx)
+            "QTabBar::tab{min-height:%1px;padding:6px 8px;margin:0px;border:none;border-radius:0px;font-size:15px;}"
+            "QTabBar::tab:selected{background-color:%2;color:#FFFFFF;font-size:18px;font-weight:700;}"
+            "QTabBar::tab:hover:!selected{background-color:%3;color:%4;}" )
+            .arg(ProcessSideTabMinHeightPx)
             .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::IsDarkModeEnabled() ? KswordTheme::SurfaceMutedColorHex() : KswordTheme::PrimaryBlueSubtleHex())
+            .arg(KswordTheme::SurfaceAltHex())
             .arg(KswordTheme::TextPrimaryHex()));
     }
 

@@ -171,6 +171,10 @@ namespace
             }
 
             const QEvent::Type eventType = eventObject->type();
+            if (eventType != QEvent::Destroy)
+            {
+                configureAdaptiveTabBar(tabBar);
+            }
             if (eventType == QEvent::Destroy)
             {
                 m_originalIconsByTabBar.erase(tabBar);
@@ -190,6 +194,19 @@ namespace
         }
 
     private:
+        void configureAdaptiveTabBar(QTabBar* tabBar) const
+        {
+            if (tabBar == nullptr)
+            {
+                return;
+            }
+
+            tabBar->setExpanding(false);
+            tabBar->setUsesScrollButtons(true);
+            tabBar->setElideMode(Qt::ElideNone);
+            tabBar->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        }
+
         void refreshTabBarIcons(QTabBar* tabBar)
         {
             if (tabBar == nullptr || tabBar->count() <= 0)
@@ -2152,8 +2169,20 @@ void MainWindow::showSettingsPanelFromMenu()
         "  color:%4 !important;"
         "  border:1px solid %5 !important;"
         "  selection-background-color:%7 !important;"
-        "  selection-color:%4 !important;"
+        "  selection-color:#FFFFFF !important;"
         "  outline:0;"
+        "}"
+        "QDialog QComboBox QAbstractItemView::item{"
+        "  background-color:%6 !important;"
+        "  color:%4 !important;"
+        "}"
+        "QDialog QComboBox QAbstractItemView::item:hover{"
+        "  background-color:%7 !important;"
+        "  color:#FFFFFF !important;"
+        "}"
+        "QDialog QComboBox QAbstractItemView::item:selected{"
+        "  background-color:%7 !important;"
+        "  color:#FFFFFF !important;"
         "}")
         .arg(KswordTheme::SurfaceHex())
         .arg(KswordTheme::TextPrimaryHex())
@@ -4161,7 +4190,7 @@ void MainWindow::initDockWidgets()
             }
         };
 
-    // setupDockTabText 作用：统一主 Dock Tab 的文本省略策略与最小宽度，减少“...”出现。
+    // setupDockTabText 作用：统一主 Dock Tab 的文本省略策略，并允许按内容自适应宽度。
     const auto setupDockTabText = [](ads::CDockWidget* dockWidget) {
         if (dockWidget == nullptr || dockWidget->tabWidget() == nullptr)
         {
@@ -4170,7 +4199,7 @@ void MainWindow::initDockWidgets()
 
         ads::CDockWidgetTab* tabWidget = dockWidget->tabWidget();
         tabWidget->setElideMode(Qt::ElideNone);
-        tabWidget->setMinimumWidth(88);
+        tabWidget->setMinimumWidth(0);
         tabWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     };
 
@@ -4901,6 +4930,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     const QString borderColorText = KswordTheme::BorderColorHex();
     const QString borderStrongColorText = KswordTheme::BorderStrongColorHex();
     const QString primaryTextColor = KswordTheme::TextPrimaryColorHex();
+    const QString disabledTextColor = KswordTheme::TextDisabledColorHex();
     const QString selectedTextColor = QStringLiteral("#FFFFFF");
     const QString activeThemeColor = KswordTheme::PrimaryBlueHex;
     const QString activeThemeHoverColor = KswordTheme::PrimaryBlueSolidHoverHex();
@@ -5079,6 +5109,11 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     // - 统一 hover/pressed 与 Tab 高亮；
     // - 当前 Tab 采用反差色，避免图标与选中底色混在一起。
     const QString buttonInteractionStyle = QStringLiteral(
+        "QPushButton,QToolButton{"
+        "  background-color:%4 !important;"
+        "  color:%5 !important;"
+        "  border:1px solid %6 !important;"
+        "}"
         "QPushButton:hover,QToolButton:hover{"
         "  background-color:%1 !important;"
         "  color:%3 !important;"
@@ -5088,10 +5123,20 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  background-color:%2 !important;"
         "  color:%3 !important;"
         "  border-color:%2 !important;"
+        "}"
+        "QPushButton:disabled,QToolButton:disabled{"
+        "  background-color:%7 !important;"
+        "  color:%8 !important;"
+        "  border-color:%6 !important;"
         "}")
         .arg(activeThemeHoverColor)
         .arg(activeThemePressedColor)
-        .arg(selectedTextColor);
+        .arg(selectedTextColor)
+        .arg(darkModeEnabled ? surfaceAltBackgroundText : subtleThemeColor)
+        .arg(darkModeEnabled ? primaryTextColor : QStringLiteral("#174A79"))
+        .arg(darkModeEnabled ? borderStrongColorText : QStringLiteral("#9BC7F2"))
+        .arg(darkModeEnabled ? surfaceMutedBackgroundText : QStringLiteral("#EDF4FC"))
+        .arg(disabledTextColor);
 
     const QString comboBoxStyle = QStringLiteral(
         "QComboBox{"
@@ -5101,21 +5146,57 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  border-radius:3px;"
         "  padding:2px 20px 2px 6px;"
         "  min-height:22px;"
+        "  selection-background-color:%4 !important;"
+        "  selection-color:%7 !important;"
         "}"
         "QComboBox:hover{"
+        "  background-color:%6 !important;"
+        "  color:%2 !important;"
         "  border-color:%4 !important;"
+        "}"
+        "QComboBox:focus,QComboBox:on{"
+        "  background-color:%1 !important;"
+        "  color:%2 !important;"
+        "  border-color:%4 !important;"
+        "}"
+        "QComboBox:disabled{"
+        "  background-color:%6 !important;"
+        "  color:%8 !important;"
+        "  border-color:%3 !important;"
         "}"
         "QComboBox::drop-down{"
         "  border:none !important;"
+        "  background:transparent !important;"
         "  width:18px;"
+        "}"
+        "QComboBox::down-arrow{"
+        "  image:none;"
+        "  border-left:4px solid transparent;"
+        "  border-right:4px solid transparent;"
+        "  border-top:5px solid %2;"
+        "  width:0px;"
+        "  height:0px;"
         "}"
         "QComboBox QAbstractItemView{"
         "  background-color:%5 !important;"
+        "  alternate-background-color:%5 !important;"
         "  color:%2 !important;"
         "  border:1px solid %3 !important;"
-        "  selection-background-color:%6 !important;"
+        "  selection-background-color:%4 !important;"
         "  selection-color:%7 !important;"
         "  outline:0;"
+        "}"
+        "QComboBox QAbstractItemView::item{"
+        "  background-color:%5 !important;"
+        "  color:%2 !important;"
+        "}"
+        "QComboBox QAbstractItemView::item:hover{"
+        "  background-color:%6 !important;"
+        "  color:%2 !important;"
+        "}"
+        "QComboBox QAbstractItemView::item:selected{"
+        "  background-color:%4 !important;"
+        "  color:%7 !important;"
         "}")
         .arg(comboBackgroundColor)
         .arg(comboTextColor)
@@ -5123,7 +5204,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         .arg(activeTabColor)
         .arg(comboPopupBackgroundColor)
         .arg(comboPopupHoverColor)
-        .arg(selectedTextColor);
+        .arg(selectedTextColor)
+        .arg(disabledTextColor);
 
     const QString tabStyle = QStringLiteral(
         "QTabBar{"
@@ -5134,18 +5216,13 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  color:%2 !important;"
         "  border:none !important;"
         "  border-radius:0px !important;"
-        "  padding:1px 7px;"
-        "  min-width:48px;"
+        "  padding:3px 12px;"
         "  min-height:22px;"
         "  margin:0px;"
         "  font-size:15px;"
         "}"
         "QTabBar::tab:left,QTabBar::tab:right{"
-        "  min-width:38px;"
-        "  max-width:38px;"
-        "  min-height:88px;"
-        "  max-height:88px;"
-        "  padding:4px 2px;"
+        "  padding:6px 10px;"
         "  font-size:15px;"
         "}"
         "QTabBar::tab:selected{"
@@ -5171,9 +5248,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  color:%2 !important;"
         "  border:none !important;"
         "  border-radius:0px !important;"
-        "  padding:1px 7px;"
+        "  padding:3px 12px;"
         "  margin:0px;"
-        "  min-width:48px;"
         "  min-height:22px;"
         "  font-size:15px;"
         "}"

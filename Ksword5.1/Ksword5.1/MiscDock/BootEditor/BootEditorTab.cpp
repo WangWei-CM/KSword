@@ -60,21 +60,7 @@ namespace
     // - 与项目蓝色主题保持一致。
     QString buildBlueToolButtonStyle()
     {
-        return QStringLiteral(
-            "QToolButton{"
-            "  color:%1;"
-            "  background:%5;"
-            "  border:1px solid %2;"
-            "  border-radius:3px;"
-            "  padding:3px 8px;"
-            "}"
-            "QToolButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
-            "QToolButton:pressed{background:%4;color:#FFFFFF;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
-            .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(KswordTheme::SurfaceHex());
+        return KswordTheme::ThemedButtonStyle();
     }
 
     // buildBlueInputStyle：

@@ -241,13 +241,13 @@ namespace KswordTheme
             "  color:%7 !important;"
             "  border-color:%3 !important;"
             "}")
-            .arg(IsDarkModeEnabled() ? SurfaceAltColorHex() : PrimaryBlueSubtleHex())
-            .arg(IsDarkModeEnabled() ? TextPrimaryColorHex() : QStringLiteral("#174A79"))
-            .arg(IsDarkModeEnabled() ? BorderStrongColorHex() : QStringLiteral("#9BC7F2"))
+            .arg(SurfaceAltHex())
+            .arg(TextPrimaryHex())
+            .arg(BorderHex())
             .arg(PrimaryBlueSolidHoverHex())
             .arg(PrimaryBluePressedHex)
-            .arg(IsDarkModeEnabled() ? SurfaceMutedColorHex() : QStringLiteral("#EDF4FC"))
-            .arg(TextDisabledColorHex());
+            .arg(SurfaceAltHex())
+            .arg(TextSecondaryHex());
     }
 
     // ContextMenuStyle 作用：
