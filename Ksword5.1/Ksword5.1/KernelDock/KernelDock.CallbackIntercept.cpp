@@ -782,15 +782,15 @@ namespace
     QString callbackRuleComboBackgroundHex()
     {
         return KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#000000")
+            ? QStringLiteral("#182334")
             : QStringLiteral("#FFFFFF");
     }
 
     QString callbackRuleComboTextHex()
     {
         return KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#FFFFFF")
-            : QStringLiteral("#1A1A1A");
+            ? QStringLiteral("#F3F7FF")
+            : QStringLiteral("#162A42");
     }
 
     QString callbackRuleComboStyle()
@@ -813,7 +813,7 @@ namespace
             "  color:%2;"
             "  border:1px solid %3;"
             "  selection-background-color:%4;"
-            "  selection-color:#FFFFFF;"
+            "  selection-color:%2;"
             "}")
             .arg(backgroundHex)
             .arg(textHex)
