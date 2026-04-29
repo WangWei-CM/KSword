@@ -8,6 +8,8 @@
 #include <QTextStream>
 #include <QTabWidget>
 #include <QTabBar>
+#include <QToolButton>
+#include <QTimer>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -207,6 +209,31 @@ namespace
             tabBar->setExpanding(false);
             tabBar->setUsesScrollButtons(true);
             tabBar->setElideMode(Qt::ElideNone);
+
+            // 仅在首次配置后执行一次“回到最左”的初始化，确保启动时空间不足也先显示最左侧 Tab。
+            // 后续窗口缩放不再重复执行，避免影响用户手动滚动位置。
+            if (!tabBar->property("ksword_initial_left_edge_synced").toBool())
+            {
+                tabBar->setProperty("ksword_initial_left_edge_synced", true);
+                QTimer::singleShot(0, tabBar, [tabBar]() {
+                    const QList<QToolButton*> scrollButtons = tabBar->findChildren<QToolButton*>();
+                    for (QToolButton* button : scrollButtons)
+                    {
+                        if (button == nullptr || !button->isVisible() || !button->isEnabled())
+                        {
+                            continue;
+                        }
+                        if (button->arrowType() == Qt::LeftArrow)
+                        {
+                            while (button->isEnabled())
+                            {
+                                button->click();
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
         }
 
         void refreshTabBarIcons(QTabBar* tabBar)
