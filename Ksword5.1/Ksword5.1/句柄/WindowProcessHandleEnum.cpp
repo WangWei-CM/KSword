@@ -133,6 +133,8 @@ void GetSystemHandles(std::string startString) {
                                 if (pathLen == 0) {
                                     //DWORD err = GetLastError();
                                     //std::cerr << "路径获取失败 (错误码: 0x" << std::hex << err << ")" << std::endl;
+                                    // 失败时必须先关闭复制句柄，避免循环中持续泄漏句柄资源。
+                                    CloseHandle(hDupHandle);
                                     continue;
                                 }
                                 char ansiPath[MAX_PATH * 2] = { 0 };
@@ -178,6 +180,11 @@ void GetSystemHandles(std::string startString) {
             }
         }
     }
+    // 函数退出前统一释放句柄快照缓冲，避免重复调用时产生稳定内存泄漏。
+    if (handleInfo != nullptr) {
+        free(handleInfo);
+        handleInfo = nullptr;
+    }
 }
 //进程结构体，从官网copy
 //从NTDLL里定义原型
@@ -186,7 +193,9 @@ typedef DWORD(WINAPI* PNtQuerySystemInformation) (UINT systemInformation, PVOID 
 BOOL NtQueryAllProcess() {
     BOOL ret = FALSE;
     PNtQuerySystemInformation NtQuerySystemInformation = NULL;
-    NtQuerySystemInformation = (PNtQuerySystemInformation)GetProcAddress(LoadLibrary(L"ntdll.dll"), "NtQuerySystemInformation");
+    // ntdllHandle 用途：保存 LoadLibrary 返回值，以便函数结束时对应 FreeLibrary，避免模块引用泄漏。
+    HMODULE ntdllHandle = LoadLibrary(L"ntdll.dll");
+    NtQuerySystemInformation = (PNtQuerySystemInformation)GetProcAddress(ntdllHandle, "NtQuerySystemInformation");
     PSYSTEM_PROCESS_INFORMATION sysProInfo = NULL, old = NULL;
     if (NtQuerySystemInformation != NULL) {
         ULONG cbSize = sizeof(SYSTEM_PROCESS_INFORMATION);
@@ -221,6 +230,10 @@ BOOL NtQueryAllProcess() {
         free(old);
     }
 
+    if (ntdllHandle != nullptr) {
+        FreeLibrary(ntdllHandle);
+        ntdllHandle = nullptr;
+    }
     return ret;
 }
 

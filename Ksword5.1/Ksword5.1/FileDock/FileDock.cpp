@@ -452,22 +452,9 @@ namespace
             return false;
         }
 
-        const HANDLE processHandle = ::OpenProcess(PROCESS_TERMINATE, FALSE, processId);
-        if (processHandle == nullptr)
-        {
-            const DWORD openError = ::GetLastError();
-            if (detailTextOut != nullptr)
-            {
-                std::ostringstream oss;
-                oss << "pid=" << processId << ", OpenProcess(PROCESS_TERMINATE) failed, error=" << openError;
-                *detailTextOut = oss.str();
-            }
-            return false;
-        }
-
-        const BOOL terminateOk = ::TerminateProcess(processHandle, static_cast<UINT>(0xC0000005u));
-        const DWORD terminateError = terminateOk ? ERROR_SUCCESS : ::GetLastError();
-        ::CloseHandle(processHandle);
+        // 统一复用 ks::process 模块，确保各页面结束进程策略、返回语义与错误描述保持一致。
+        std::string terminateErrorText;
+        const bool terminateOk = ks::process::TerminateProcessByWin32(processId, &terminateErrorText);
 
         if (detailTextOut != nullptr)
         {
@@ -479,11 +466,11 @@ namespace
             }
             else
             {
-                oss << ", TerminateProcess=fail, error=" << terminateError;
+                oss << ", TerminateProcess=fail, detail=" << terminateErrorText;
             }
             *detailTextOut = oss.str();
         }
-        return terminateOk != FALSE;
+        return terminateOk;
     }
 
     UnlockSelectionResult showUnlockProcessSelectionDialog(
