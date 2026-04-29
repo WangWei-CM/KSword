@@ -4211,32 +4211,24 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
             << windowInfo->processId
             << eol;
 
-        HANDLE processHandle = ::OpenProcess(PROCESS_TERMINATE, FALSE, windowInfo->processId);
-        if (processHandle == nullptr)
+        std::string terminateErrorText;
+        const bool terminateOk = ks::process::TerminateProcessByWin32(
+            static_cast<std::uint32_t>(windowInfo->processId),
+            &terminateErrorText);
+        if (!terminateOk)
         {
             err << actionEvent
-                << "[OtherDock] 结束进程失败：OpenProcess失败, pid="
+                << "[OtherDock] 结束进程失败, pid="
                 << windowInfo->processId
+                << ", detail=" << terminateErrorText
                 << eol;
         }
         else
         {
-            const BOOL terminateOk = ::TerminateProcess(processHandle, 0);
-            ::CloseHandle(processHandle);
-            if (terminateOk == FALSE)
-            {
-                err << actionEvent
-                    << "[OtherDock] 结束进程失败：TerminateProcess失败, pid="
-                    << windowInfo->processId
-                    << eol;
-            }
-            else
-            {
-                warn << actionEvent
-                    << "[OtherDock] 结束进程成功, pid="
-                    << windowInfo->processId
-                    << eol;
-            }
+            warn << actionEvent
+                << "[OtherDock] 结束进程成功, pid="
+                << windowInfo->processId
+                << eol;
         }
         dbg << actionEvent
             << "[OtherDock] 结束进程操作处理完毕, pid="

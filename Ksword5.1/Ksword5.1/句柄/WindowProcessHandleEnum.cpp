@@ -65,18 +65,35 @@ typedef struct _SYSTEM_HANDLE_INFORMATION {
     ULONG HandleCount;          // 正确字段名
     SYSTEM_HANDLE_TABLE_ENTRY_INFO Handles[1];   // 动态数组
 } SYSTEM_HANDLE_INFORMATION, * PSYSTEM_HANDLE_INFORMATION;
+
+namespace {
+struct HandleCloser {
+    void operator()(HANDLE handle) const {
+        if (handle != nullptr && handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle);
+        }
+    }
+};
+
+using unique_handle = std::unique_ptr<void, HandleCloser>;
+
+struct MallocDeleter {
+    void operator()(void* ptr) const { free(ptr); }
+};
+} // namespace
+
 void GetSystemHandles(std::string startString) {
     _NtQuerySystemInformation NtQuerySystemInformation =
         (_NtQuerySystemInformation)GetProcAddress(GetModuleHandle(L"ntdll.dll"), "NtQuerySystemInformation");
 
     ULONG bufferSize = 0x1000;
-    PSYSTEM_HANDLE_INFORMATION handleInfo = (PSYSTEM_HANDLE_INFORMATION)malloc(bufferSize);
+    std::unique_ptr<SYSTEM_HANDLE_INFORMATION, MallocDeleter> handleInfo(
+        static_cast<PSYSTEM_HANDLE_INFORMATION>(malloc(bufferSize)));
     NTSTATUS status;
     // 动态调整缓冲区（参考网页5）
-    while ((status = NtQuerySystemInformation(16, handleInfo, bufferSize, NULL)) == 0xC0000004L) {
-        free(handleInfo);
+    while ((status = NtQuerySystemInformation(16, handleInfo.get(), bufferSize, NULL)) == 0xC0000004L) {
         bufferSize *= 2;
-        handleInfo = (PSYSTEM_HANDLE_INFORMATION)malloc(bufferSize);
+        handleInfo.reset(static_cast<PSYSTEM_HANDLE_INFORMATION>(malloc(bufferSize)));
     }
     if (status == 0) {
         std::cout << "Query succeeded with buffer size: " << bufferSize<<std::endl;
@@ -93,26 +110,27 @@ void GetSystemHandles(std::string startString) {
             // 输出信息
             if (sourceEntry.ObjectTypeIndex == 37) {
                 // 这是文件句柄
-                HANDLE hProcess = OpenProcess(
+                unique_handle hProcess(OpenProcess(
                     PROCESS_DUP_HANDLE,
                     FALSE,
                     sourceEntry.UniqueProcessId
-                ); 
+                ));
                 if (hProcess) {
-                    HANDLE hDupHandle;
+                    HANDLE duplicated = nullptr;
                     if (DuplicateHandle(
-                        hProcess,
+                        static_cast<HANDLE>(hProcess.get()),
                         (HANDLE)sourceEntry.HandleValue,
                         GetCurrentProcess(),
-                        &hDupHandle,
+                        &duplicated,
                         0,
                         FALSE,
                         DUPLICATE_SAME_ACCESS
                     )) {
+                        unique_handle hDupHandle(duplicated);
                         wchar_t typeName[64];
                         DWORD retSize;
                         if (NT_SUCCESS(NtQueryObject(
-                            hDupHandle,
+                            static_cast<HANDLE>(hDupHandle.get()),
                             ObjectTypeInformation,
                             typeName,
                             sizeof(typeName),
@@ -125,7 +143,7 @@ void GetSystemHandles(std::string startString) {
                                 wchar_t devicePath[MAX_PATH + 1] = { 0 };
                                 // 使用GetFinalPathNameByHandleW获取设备路径（网页3）
                                 DWORD pathLen = GetFinalPathNameByHandleW(
-                                    hDupHandle,
+                                    static_cast<HANDLE>(hDupHandle.get()),
                                     devicePath,
                                     MAX_PATH,
                                     VOLUME_NAME_DOS  // 返回DOS格式路径（网页8）
@@ -166,12 +184,10 @@ void GetSystemHandles(std::string startString) {
                                 
 
                         }
-                        CloseHandle(hDupHandle);
                     }
                     else {
                         //std::cerr << "复制令牌 (错误码: 0x" << std::hex << GetLastError() << ")" << std::endl;
                     }
-                    CloseHandle(hProcess);
                 }
                 else {
                 }
@@ -186,7 +202,9 @@ typedef DWORD(WINAPI* PNtQuerySystemInformation) (UINT systemInformation, PVOID 
 BOOL NtQueryAllProcess() {
     BOOL ret = FALSE;
     PNtQuerySystemInformation NtQuerySystemInformation = NULL;
-    NtQuerySystemInformation = (PNtQuerySystemInformation)GetProcAddress(LoadLibrary(L"ntdll.dll"), "NtQuerySystemInformation");
+    // ntdllHandle 用途：保存 LoadLibrary 返回值，以便函数结束时对应 FreeLibrary，避免模块引用泄漏。
+    HMODULE ntdllHandle = LoadLibrary(L"ntdll.dll");
+    NtQuerySystemInformation = (PNtQuerySystemInformation)GetProcAddress(ntdllHandle, "NtQuerySystemInformation");
     PSYSTEM_PROCESS_INFORMATION sysProInfo = NULL, old = NULL;
     if (NtQuerySystemInformation != NULL) {
         ULONG cbSize = sizeof(SYSTEM_PROCESS_INFORMATION);
@@ -221,6 +239,10 @@ BOOL NtQueryAllProcess() {
         free(old);
     }
 
+    if (ntdllHandle != nullptr) {
+        FreeLibrary(ntdllHandle);
+        ntdllHandle = nullptr;
+    }
     return ret;
 }
 
