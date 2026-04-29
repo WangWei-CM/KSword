@@ -958,8 +958,8 @@ void HardwareDock::initializeUtilizationTab()
     m_utilizationSidebarList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_utilizationSidebarList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_utilizationSidebarList->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_utilizationSidebarList->setSpacing(3);
-    m_utilizationSidebarList->setFixedWidth(286);
+    m_utilizationSidebarList->setSpacing(2);
+    m_utilizationSidebarList->setFixedWidth(268);
     m_utilizationSidebarList->setStyleSheet(
         QStringLiteral(
             "QListWidget{border:none;background:transparent;}"
@@ -1029,6 +1029,10 @@ void HardwareDock::initializeUtilizationSidebarCards()
     if (m_diskNavCard != nullptr)
     {
         m_diskNavCard->setSeriesColors(QColor(80, 170, 255), QColor(255, 190, 105));
+    }
+    if (m_memoryNavCard != nullptr)
+    {
+        m_memoryNavCard->setSeriesColors(QColor(184, 99, 255), QColor(79, 195, 247));
     }
     if (m_networkNavCard != nullptr)
     {
@@ -2916,12 +2920,41 @@ void HardwareDock::updateUtilizationSidebarCards(
         const double totalGiB = static_cast<double>(memoryStatus.ullTotalPhys) / (1024.0 * 1024.0 * 1024.0);
         const double usedGiB =
             static_cast<double>(memoryStatus.ullTotalPhys - memoryStatus.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
+        const double cachedPercent = std::clamp(
+            100.0 - memoryUsagePercent,
+            0.0,
+            100.0);
+        const int historyCapacity = std::max(1, m_memoryNavCard->sampleCapacity());
+        m_memoryNavUsedHistoryPercent.push_back(memoryUsagePercent);
+        m_memoryNavCachedHistoryPercent.push_back(cachedPercent);
+        while (static_cast<int>(m_memoryNavUsedHistoryPercent.size()) > historyCapacity)
+        {
+            m_memoryNavUsedHistoryPercent.erase(m_memoryNavUsedHistoryPercent.begin());
+        }
+        while (static_cast<int>(m_memoryNavCachedHistoryPercent.size()) > historyCapacity)
+        {
+            m_memoryNavCachedHistoryPercent.erase(m_memoryNavCachedHistoryPercent.begin());
+        }
+
+        QVector<double> usedSampleList;
+        QVector<double> cachedSampleList;
+        usedSampleList.reserve(static_cast<int>(m_memoryNavUsedHistoryPercent.size()));
+        cachedSampleList.reserve(static_cast<int>(m_memoryNavCachedHistoryPercent.size()));
+        for (const double usedSampleValue : m_memoryNavUsedHistoryPercent)
+        {
+            usedSampleList.push_back(std::clamp(usedSampleValue, 0.0, 100.0));
+        }
+        for (const double cachedSampleValue : m_memoryNavCachedHistoryPercent)
+        {
+            cachedSampleList.push_back(std::clamp(cachedSampleValue, 0.0, 100.0));
+        }
+
         m_memoryNavCard->setSubtitleText(
-            QStringLiteral("%1/%2 GB (%3%)")
+            QStringLiteral("用 %1/%2 GB / 余 %3%")
             .arg(usedGiB, 0, 'f', 1)
             .arg(totalGiB, 0, 'f', 1)
-            .arg(memoryUsagePercent, 0, 'f', 0));
-        m_memoryNavCard->appendSample(memoryUsagePercent);
+            .arg(cachedPercent, 0, 'f', 0));
+        m_memoryNavCard->setSampleSeries(usedSampleList, cachedSampleList);
     }
 
     if (m_diskNavCard != nullptr)

@@ -24,7 +24,7 @@ PerformanceNavCard::PerformanceNavCard(QWidget* parent)
     setAttribute(Qt::WA_StyledBackground, true);
     setAutoFillBackground(false);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    setMinimumHeight(78);
+    setMinimumHeight(68);
 }
 
 void PerformanceNavCard::setTitleText(const QString& titleText)
@@ -141,7 +141,7 @@ void PerformanceNavCard::clearSamples()
 
 QSize PerformanceNavCard::sizeHint() const
 {
-    return QSize(264, 78);
+    return QSize(252, 68);
 }
 
 int PerformanceNavCard::sampleCapacity() const
@@ -157,7 +157,7 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     painter.setRenderHint(QPainter::Antialiasing, true);
 
     // 卡片区域：改成透明底，仅保留边框高亮，避免计数器页左侧卡片遮住背景。
-    const QRect cardRect = rect().adjusted(2, 2, -2, -2);
+    const QRect cardRect = rect().adjusted(1, 1, -1, -1);
     // cardBorderColor 用途：当前卡片边框颜色；选中时更亮，不选中时仅保留弱轮廓。
     const QColor cardBorderColor = QColor(
         m_accentColor.red(),
@@ -165,13 +165,13 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
         m_accentColor.blue(),
         m_selected ? 210 : 86);
     QPen cardBorderPen(cardBorderColor);
-    cardBorderPen.setWidthF(m_selected ? 1.6 : 1.0);
+    cardBorderPen.setWidthF(m_selected ? 1.2 : 0.8);
     painter.setPen(cardBorderPen);
     painter.setBrush(Qt::NoBrush);
     painter.drawRoundedRect(cardRect, 4.0, 4.0);
 
     // 缩略图区域：保留边框与曲线，内部背景保持透明。
-    const QRect sparkRect(cardRect.left() + 10, cardRect.top() + 10, 62, cardRect.height() - 20);
+    const QRect sparkRect(cardRect.left() + 6, cardRect.top() + 7, 64, cardRect.height() - 14);
     // sparkBorderColor 用途：缩略图边框颜色；选中时使用实色，未选中时降低透明度。
     const QColor sparkBorderColor = QColor(
         m_accentColor.red(),
@@ -252,18 +252,18 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     drawSeriesPath(m_primarySamples, m_primarySeriesColor);
 
     // 文本区域：主标题加粗，副标题使用次级颜色。
-    const QRect titleRect(sparkRect.right() + 10, cardRect.top() + 8, cardRect.width() - sparkRect.width() - 24, 28);
-    const QRect subtitleRect(sparkRect.right() + 10, cardRect.top() + 34, cardRect.width() - sparkRect.width() - 24, 30);
+    const QRect titleRect(sparkRect.right() + 8, cardRect.top() + 5, cardRect.width() - sparkRect.width() - 18, 30);
+    const QRect subtitleRect(sparkRect.right() + 8, cardRect.top() + 32, cardRect.width() - sparkRect.width() - 18, 28);
 
     QFont titleFont = painter.font();
-    titleFont.setPointSizeF(16.0);
+    titleFont.setPointSizeF(18.0);
     titleFont.setBold(true);
     painter.setFont(titleFont);
     painter.setPen(KswordTheme::IsDarkModeEnabled() ? QColor(240, 240, 240) : QColor(26, 32, 38));
     painter.drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter, m_titleText);
 
     QFont subtitleFont = painter.font();
-    subtitleFont.setPointSizeF(11.0);
+    subtitleFont.setPointSizeF(11.5);
     subtitleFont.setBold(false);
     painter.setFont(subtitleFont);
     painter.setPen(KswordTheme::IsDarkModeEnabled() ? QColor(198, 212, 225) : QColor(63, 83, 102));
