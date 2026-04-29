@@ -1987,10 +1987,10 @@ void MainWindow::initMenus()
 
     const bool topMenuDarkModeEnabled = KswordTheme::IsDarkModeEnabled();
     const QString topMenuHoverColor = topMenuDarkModeEnabled
-        ? QStringLiteral("rgba(63,143,232,0.28)")
+        ? QStringLiteral("rgba(63,143,232,0.16)")
         : QStringLiteral("#DCEBFB");
     const QString topMenuPressedColor = topMenuDarkModeEnabled
-        ? QStringLiteral("rgba(63,143,232,0.38)")
+        ? QStringLiteral("rgba(63,143,232,0.24)")
         : QStringLiteral("#C7DFF8");
     const QString topMenuTextColor = topMenuDarkModeEnabled
         ? QStringLiteral("#EAF2FF")
@@ -1999,8 +1999,8 @@ void MainWindow::initMenus()
         "QToolButton{"
         "  background:transparent !important;"
         "  color:%1 !important;"
-        "  border:none !important;"
-        "  border-radius:0;"
+        "  border:1px solid transparent !important;"
+        "  border-radius:4px;"
         "  margin:0;"
         "  padding:2px 8px 2px 6px;"
         "  font-size:12px;"
@@ -2010,10 +2010,12 @@ void MainWindow::initMenus()
         "QToolButton:hover{"
         "  background:%2 !important;"
         "  color:%1 !important;"
+        "  border-color:%3 !important;"
         "}"
         "QToolButton:pressed{"
-        "  background:%3 !important;"
+        "  background:%4 !important;"
         "  color:%1 !important;"
+        "  border-color:%3 !important;"
         "}"
         "QToolButton::menu-indicator{"
         "  image:none;"
@@ -2022,6 +2024,9 @@ void MainWindow::initMenus()
         "}")
         .arg(topMenuTextColor)
         .arg(topMenuHoverColor)
+        .arg(topMenuDarkModeEnabled
+            ? QStringLiteral("rgba(83,167,255,0.38)")
+            : QStringLiteral("#A8C9EA"))
         .arg(topMenuPressedColor);
 
     m_fileMenuButton = new QToolButton(m_topActionRowWidget);
@@ -4950,7 +4955,9 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     const QString inactiveTabTextColor = primaryTextColor;
     const QString activeTabColor = activeThemeColor;
     const QString activeTabTextColor = selectedTextColor;
-    const QString tabHoverColor = darkModeEnabled ? surfaceMutedBackgroundText : subtleThemeColor;
+    const QString tabHoverColor = darkModeEnabled
+        ? QStringLiteral("rgba(67,160,255,0.16)")
+        : subtleThemeColor;
     const QString comboBackgroundColor = surfaceBackgroundText;
     const QString comboTextColor = primaryTextColor;
     const QString comboBorderColor = borderColorText;
