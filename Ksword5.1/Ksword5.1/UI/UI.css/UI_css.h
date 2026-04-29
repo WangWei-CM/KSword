@@ -25,13 +25,13 @@ const QString QSS_MainWindow_TabWidget = R"(
         min-height: 24px;
         border: none;
         border-radius: 0px;
-        font-size: 15px;
+        font-size: 14px;
     }
 
     QTabBar::tab:left,
     QTabBar::tab:right {
         padding: 6px 8px;
-        font-size: 16px;
+        font-size: 15px;
     }
 
     QTabBar::tab:selected {
@@ -83,13 +83,13 @@ const QString QSS_MainWindow_dockStyle = R"(
         padding: 3px 12px;
         margin: 0px;
         min-height: 22px;
-        font-size: 13px;
+        font-size: 14px;
     }
 
     QMainWindow QTabBar::tab:left,
     QMainWindow QTabBar::tab:right {
         padding: 6px 8px;
-        font-size: 16px;
+        font-size: 15px;
     }
 
     QMainWindow QTabBar::tab:selected {
@@ -126,13 +126,13 @@ const QString QSS_MainWindow_dockStyle = R"(
         border-radius: 0px;
         padding: 3px 12px;
         min-height: 24px;
-        font-size: 15px;
+        font-size: 14px;
     }
 
     ads--CDockWidgetTab QLabel,
     ads--CAutoHideTab QLabel {
         color: palette(text);
-        font-size: 15px;
+        font-size: 14px;
     }
 
     ads--CDockWidgetTab[activeTab="true"],
@@ -283,4 +283,3 @@ const QString QSS_Buttons_Dark = R"(
         font-weight: normal;
     }
 )";
-
