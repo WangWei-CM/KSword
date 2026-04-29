@@ -18,8 +18,8 @@ const QString QSS_MainWindow_TabWidget = R"(
     }
 
     QTabBar::tab {
-        background-color: #223047;
-        color: #F1F7FF;
+        background-color: palette(alternate-base);
+        color: palette(text);
         padding: 2px 9px;
         margin: 0px;
         min-width: 56px;
@@ -40,14 +40,14 @@ const QString QSS_MainWindow_TabWidget = R"(
     }
 
     QTabBar::tab:selected {
-        background-color: #2E8BFF;
+        background-color: #43A0FF;
         color: #FFFFFF;
         font-weight: 700;
     }
 
     QTabBar::tab:hover:!selected {
-        background-color: #2B3D59;
-        color: #FFFFFF;
+        background-color: palette(midlight);
+        color: palette(text);
     }
 )";
 
@@ -81,8 +81,8 @@ const QString QSS_MainWindow_dockStyle = R"(
     }
 
     QMainWindow QTabBar::tab {
-        background-color: #223047;
-        color: #F1F7FF;
+        background-color: palette(alternate-base);
+        color: palette(text);
         border: none;
         border-radius: 0px;
         padding: 2px 8px;
@@ -103,14 +103,14 @@ const QString QSS_MainWindow_dockStyle = R"(
     }
 
     QMainWindow QTabBar::tab:selected {
-        background-color: #2E8BFF;
+        background-color: #43A0FF;
         color: #FFFFFF;
         font-weight: 700;
     }
 
     QMainWindow QTabBar::tab:hover:!selected {
-        background-color: #2B3D59;
-        color: #FFFFFF;
+        background-color: palette(midlight);
+        color: palette(text);
     }
 
     ads--CDockManager,
@@ -130,8 +130,8 @@ const QString QSS_MainWindow_dockStyle = R"(
 
     ads--CDockWidgetTab,
     ads--CAutoHideTab {
-        background-color: #223047;
-        color: #F1F7FF;
+        background-color: palette(alternate-base);
+        color: palette(text);
         border: none;
         border-radius: 0px;
         padding: 2px 9px;
@@ -142,13 +142,13 @@ const QString QSS_MainWindow_dockStyle = R"(
 
     ads--CDockWidgetTab QLabel,
     ads--CAutoHideTab QLabel {
-        color: #F1F7FF;
+        color: palette(text);
         font-size: 15px;
     }
 
     ads--CDockWidgetTab[activeTab="true"],
     ads--CAutoHideTab[activeTab="true"] {
-        background-color: #2E8BFF;
+        background-color: #43A0FF;
         color: #FFFFFF;
     }
 
@@ -160,8 +160,8 @@ const QString QSS_MainWindow_dockStyle = R"(
 
     ads--CDockWidgetTab:hover,
     ads--CAutoHideTab:hover {
-        background-color: #2B3D59;
-        color: #FFFFFF;
+        background-color: palette(midlight);
+        color: palette(text);
     }
 
     ads--CDockAreaTitleBar QToolButton,
@@ -174,9 +174,9 @@ const QString QSS_MainWindow_dockStyle = R"(
 
     ads--CDockAreaTitleBar QToolButton:hover,
     ads--CDockAreaTitleBar QPushButton:hover {
-        background-color: #2B3D59;
+        background-color: #43A0FF;
         color: #FFFFFF;
-        border-color: #246EA8;
+        border-color: #43A0FF;
     }
 
     QScrollBar:vertical {
@@ -187,13 +187,13 @@ const QString QSS_MainWindow_dockStyle = R"(
     }
 
     QScrollBar::handle:vertical {
-        background-color: #164B82;
+        background-color: #43A0FF;
         min-height: 20px;
         border-radius: 2px;
     }
 
     QScrollBar::handle:vertical:hover {
-        background-color: #246EA8;
+        background-color: #2F92FF;
     }
 
     QScrollBar:horizontal {
@@ -204,13 +204,13 @@ const QString QSS_MainWindow_dockStyle = R"(
     }
 
     QScrollBar::handle:horizontal {
-        background-color: #164B82;
+        background-color: #43A0FF;
         min-width: 20px;
         border-radius: 2px;
     }
 
     QScrollBar::handle:horizontal:hover {
-        background-color: #246EA8;
+        background-color: #2F92FF;
     }
 
     QScrollBar::add-line,
@@ -232,9 +232,9 @@ const QString QSS_MainWindow_dockStyle = R"(
 // - 默认和悬停都不使用白色背景，避免高亮发白。
 const QString QSS_Buttons_Light = R"(
     QPushButton {
-        background-color: #164B82 !important;
+        background-color: #43A0FF !important;
         color: #FFFFFF !important;
-        border: 1px solid #164B82 !important;
+        border: 1px solid #43A0FF !important;
         padding: 6px 16px;
         border-radius: 1px;
         font-weight: 500;
@@ -242,21 +242,21 @@ const QString QSS_Buttons_Light = R"(
     }
 
     QPushButton:hover {
-        background-color: #246EA8 !important;
+        background-color: #2F92FF !important;
         color: #FFFFFF !important;
-        border-color: #246EA8 !important;
+        border-color: #2F92FF !important;
     }
 
     QPushButton:pressed {
-        background-color: #1F78D0 !important;
+        background-color: #1F7FD9 !important;
         color: #FFFFFF !important;
-        border-color: #1F78D0 !important;
+        border-color: #1F7FD9 !important;
     }
 
     QPushButton:disabled {
-        background-color: #8DC4FF !important;
+        background-color: #B8DCFF !important;
         color: #F3F8FF !important;
-        border: 1px solid #8DC4FF !important;
+        border: 1px solid #B8DCFF !important;
         font-weight: normal;
     }
 )";
@@ -266,9 +266,9 @@ const QString QSS_Buttons_Light = R"(
 // - 避免出现白色 hover 背景。
 const QString QSS_Buttons_Dark = R"(
     QPushButton {
-        background-color: #246EA8 !important;
+        background-color: #43A0FF !important;
         color: #FFFFFF !important;
-        border: 1px solid #246EA8 !important;
+        border: 1px solid #43A0FF !important;
         padding: 6px 16px;
         border-radius: 1px;
         font-weight: 500;
@@ -276,21 +276,21 @@ const QString QSS_Buttons_Dark = R"(
     }
 
     QPushButton:hover {
-        background-color: #164B82 !important;
+        background-color: #2F92FF !important;
         color: #FFFFFF !important;
-        border-color: #164B82 !important;
+        border-color: #2F92FF !important;
     }
 
     QPushButton:pressed {
-        background-color: #1F78D0 !important;
+        background-color: #1F7FD9 !important;
         color: #FFFFFF !important;
-        border-color: #1F78D0 !important;
+        border-color: #1F7FD9 !important;
     }
 
     QPushButton:disabled {
-        background-color: #355A83 !important;
-        color: #A9BFDA !important;
-        border: 1px solid #355A83 !important;
+        background-color: #1E2B3C !important;
+        color: #7C92A9 !important;
+        border: 1px solid #37506A !important;
         font-weight: normal;
     }
 )";

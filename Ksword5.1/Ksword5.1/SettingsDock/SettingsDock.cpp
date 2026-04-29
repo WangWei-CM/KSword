@@ -649,36 +649,46 @@ void SettingsDock::updateThemeButtonStyle()
     const QString normalStyle = darkModeEnabled
         ? QStringLiteral(
             "QToolButton{"
-            "  border:1px solid #5A5A5A;"
+            "  border:1px solid %1;"
             "  border-radius:2px;"
-            "  background:#202020;"
+            "  background:%2;"
             "}"
             "QToolButton:hover{"
-            "  background:#2A2A2A;"
+            "  background:%3;"
             "}")
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::SurfaceAltColorHex())
+            .arg(KswordTheme::SurfaceMutedColorHex())
         : QStringLiteral(
             "QToolButton{"
-            "  border:1px solid #6A6A6A;"
+            "  border:1px solid %1;"
             "  border-radius:2px;"
-            "  background:#EDF5FF;"
+            "  background:%2;"
             "}"
             "QToolButton:hover{"
-            "  background:#DCEBFF;"
-            "}");
+            "  background:%3;"
+            "}")
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::PrimaryBlueSubtleHex())
+            .arg(QStringLiteral("#D6ECFF"));
 
     const QString checkedStyle = darkModeEnabled
         ? QStringLiteral(
             "QToolButton{"
-            "  border:2px solid #43A0FF;"
+            "  border:2px solid %1;"
             "  border-radius:2px;"
-            "  background:#1B2A3C;"
+            "  background:%2;"
             "}")
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::PrimaryBlueSubtleHex())
         : QStringLiteral(
             "QToolButton{"
-            "  border:2px solid #43A0FF;"
+            "  border:2px solid %1;"
             "  border-radius:2px;"
-            "  background:#DDEEFF;"
-            "}");
+            "  background:%2;"
+            "}")
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::PrimaryBlueSubtleHex());
 
     const QList<QAbstractButton*> themeButtons = m_themeButtonGroup->buttons();
     for (QAbstractButton* themeButton : themeButtons)

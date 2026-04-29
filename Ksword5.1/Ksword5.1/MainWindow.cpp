@@ -814,8 +814,8 @@ namespace
             ? QStringLiteral("#FFFFFF")
             : (KswordTheme::IsDarkModeEnabled() ? KswordTheme::TextPrimaryHex() : KswordTheme::PrimaryBlueHex);
         const QString hoverColor = activeState
-            ? QStringLiteral("#2E8BFF")
-            : (KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#2A2A2A") : QStringLiteral("#2E8BFF"));
+            ? KswordTheme::PrimaryBlueSolidHoverHex()
+            : KswordTheme::PrimaryBlueSolidHoverHex();
         return QStringLiteral(
             "QPushButton {"
             "  background:%1;"
@@ -848,9 +848,7 @@ namespace
     QString buildR0ButtonStyle(const bool activeState)
     {
         const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
-        const QString adaptiveTextColor = darkModeEnabled
-            ? QStringLiteral("#FFFFFF")
-            : QStringLiteral("#000000");
+        const QString adaptiveTextColor = QStringLiteral("#FFFFFF");
         const QString backgroundColor = activeState
             ? KswordTheme::PrimaryBlueHex
             : KswordTheme::SurfaceHex();
@@ -858,11 +856,11 @@ namespace
             ? adaptiveTextColor
             : KswordTheme::PrimaryBlueHex;
         const QString hoverColor = activeState
-            ? QStringLiteral("#2E8BFF")
-            : (darkModeEnabled ? QStringLiteral("#2A2A2A") : QStringLiteral("#EAF4FF"));
+            ? KswordTheme::PrimaryBlueSolidHoverHex()
+            : KswordTheme::PrimaryBlueSubtleHex();
         const QString pressedColor = activeState
             ? KswordTheme::PrimaryBluePressedHex
-            : (darkModeEnabled ? QStringLiteral("#1E1E1E") : QStringLiteral("#DCEEFF"));
+            : (darkModeEnabled ? QStringLiteral("#10283E") : QStringLiteral("#D6ECFF"));
         return QStringLiteral(
             "QPushButton {"
             "  background:%1;"
@@ -885,7 +883,7 @@ namespace
             .arg(textColor)
             .arg(KswordTheme::PrimaryBlueBorderHex)
             .arg(hoverColor)
-            .arg(activeState ? adaptiveTextColor : KswordTheme::PrimaryBlueHex)
+            .arg(activeState ? adaptiveTextColor : KswordTheme::TextPrimaryColorHex())
             .arg(pressedColor);
     }
 
@@ -969,9 +967,9 @@ namespace
             "  padding:4px 6px;"
             "  border-radius:3px;"
             "}")
-            .arg(darkModeEnabled ? QStringLiteral("#181818") : QStringLiteral("#FFFFFF"))
-            .arg(darkModeEnabled ? QStringLiteral("#FFFFFF") : QStringLiteral("#000000"))
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(darkModeEnabled ? QStringLiteral("#101923") : QStringLiteral("#FFFFFF"))
+            .arg(darkModeEnabled ? QStringLiteral("#EDF6FF") : QStringLiteral("#102336"))
+            .arg(KswordTheme::BorderColorHex());
 
         return QStringLiteral("\n%1\n%2\n%3\n")
             .arg(QString::fromLatin1(kTooltipStyleBeginMarker))
@@ -988,17 +986,17 @@ namespace
     QString buildGlobalContextMenuStyleBlock(const bool darkModeEnabled)
     {
         const QString menuBackgroundColor = darkModeEnabled
-            ? QStringLiteral("#172232")
+            ? QStringLiteral("#111924")
             : QStringLiteral("#FFFFFF");
         const QString menuTextColor = darkModeEnabled
-            ? QStringLiteral("#F4F8FF")
-            : QStringLiteral("#172B43");
+            ? QStringLiteral("#EDF6FF")
+            : QStringLiteral("#102336");
         const QString menuBorderColor = darkModeEnabled
-            ? QStringLiteral("#34506D")
-            : QStringLiteral("#9DBBDD");
+            ? QStringLiteral("#37506A")
+            : QStringLiteral("#BED3E9");
         const QString disabledTextColor = darkModeEnabled
-            ? QStringLiteral("#8C8C8C")
-            : QStringLiteral("#7A8694");
+            ? QStringLiteral("#7C92A9")
+            : QStringLiteral("#7E8EA0");
 
         const QString contextMenuRule = QStringLiteral(
             "QMenu{"
@@ -3212,9 +3210,7 @@ bool MainWindow::showUnsignedDriverFailureDialog(
 {
     const DWORD win32ErrorCode = static_cast<DWORD>(errorCode);
     const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
-    const QString adaptiveTextColor = darkModeEnabled
-        ? QStringLiteral("#FFFFFF")
-        : QStringLiteral("#000000");
+    const QString adaptiveTextColor = QStringLiteral("#FFFFFF");
 
     QDialog decisionDialog(this);
     decisionDialog.setModal(true);
@@ -3274,14 +3270,15 @@ bool MainWindow::showUnsignedDriverFailureDialog(
         "  font-weight:700;"
         "}"
         "QPushButton:hover{"
-        "  background:#2E8BFF;"
+        "  background:%4;"
         "}"
         "QPushButton:pressed{"
         "  background:%3;"
         "}")
         .arg(KswordTheme::PrimaryBlueHex)
         .arg(adaptiveTextColor)
-        .arg(KswordTheme::PrimaryBluePressedHex));
+        .arg(KswordTheme::PrimaryBluePressedHex)
+        .arg(KswordTheme::PrimaryBlueSolidHoverHex()));
     rootLayout->addWidget(continueR3Button);
 
     QPushButton* enableTestModeButton = new QPushButton(QStringLiteral("开启测试模式"), &decisionDialog);
@@ -3303,8 +3300,8 @@ bool MainWindow::showUnsignedDriverFailureDialog(
         "}")
         .arg(KswordTheme::SurfaceHex())
         .arg(KswordTheme::PrimaryBlueHex)
-        .arg(darkModeEnabled ? QStringLiteral("#2A2A2A") : QStringLiteral("#EAF4FF"))
-        .arg(darkModeEnabled ? QStringLiteral("#1D1D1D") : QStringLiteral("#DCEEFF")));
+        .arg(KswordTheme::PrimaryBlueSubtleHex())
+        .arg(darkModeEnabled ? QStringLiteral("#10283E") : QStringLiteral("#D6ECFF")));
     rootLayout->addWidget(enableTestModeButton);
 
     bool enableTestMode = false;
@@ -4631,11 +4628,12 @@ void MainWindow::applyAppearanceSettings(
     m_currentAppearanceSettings = settings;
 
     const bool darkModeEnabled = isDarkModeEffective(settings);
-    const QColor windowBackgroundColor = darkModeEnabled ? QColor(0, 0, 0) : QColor(255, 255, 255);
-    const QColor textColor = darkModeEnabled ? QColor(255, 255, 255) : QColor(0, 0, 0);
-    const QColor baseColor = darkModeEnabled ? QColor(22, 22, 22) : QColor(255, 255, 255);
-    const QColor alternateBaseColor = darkModeEnabled ? QColor(30, 30, 30) : QColor(247, 249, 252);
-    const QColor midColor = darkModeEnabled ? QColor(86, 86, 86) : QColor(180, 180, 180);
+    KswordTheme::SetDarkModeEnabled(darkModeEnabled);
+    const QColor windowBackgroundColor = KswordTheme::WindowColor();
+    const QColor textColor = KswordTheme::TextPrimaryColor();
+    const QColor baseColor = KswordTheme::SurfaceColor();
+    const QColor alternateBaseColor = KswordTheme::SurfaceAltColor();
+    const QColor midColor = KswordTheme::BorderColor();
 
     // enableDockTransparencyForBackgroundImage 作用：
     // - 当背景图可用时，把 Dock 系统背景整体切换为透明；
@@ -4644,7 +4642,6 @@ void MainWindow::applyAppearanceSettings(
         isBackgroundImageReady(settings.backgroundImagePath);
 
     // 把深浅色状态写入全局属性，供各 Dock 在绘制/着色时读取。
-    KswordTheme::SetDarkModeEnabled(darkModeEnabled);
     if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
     {
         appInstance->setProperty("ksword_slider_wheel_adjust_enabled", settings.sliderWheelAdjustEnabled);
@@ -4658,14 +4655,14 @@ void MainWindow::applyAppearanceSettings(
     mainPalette.setColor(QPalette::Base, baseColor);
     mainPalette.setColor(QPalette::AlternateBase, alternateBaseColor);
     mainPalette.setColor(QPalette::Mid, midColor);
-    mainPalette.setColor(QPalette::Midlight, darkModeEnabled ? QColor(116, 116, 116) : QColor(210, 210, 210));
-    mainPalette.setColor(QPalette::Dark, darkModeEnabled ? QColor(48, 48, 48) : QColor(120, 120, 120));
+    mainPalette.setColor(QPalette::Midlight, KswordTheme::BorderStrongColor());
+    mainPalette.setColor(QPalette::Dark, darkModeEnabled ? QColor(20, 30, 42) : QColor(144, 165, 188));
     mainPalette.setColor(QPalette::Text, textColor);
-    mainPalette.setColor(QPalette::Button, darkModeEnabled ? QColor(30, 30, 30) : QColor(255, 255, 255));
+    mainPalette.setColor(QPalette::Button, alternateBaseColor);
     mainPalette.setColor(QPalette::ButtonText, textColor);
-    mainPalette.setColor(QPalette::ToolTipBase, darkModeEnabled ? QColor(24, 24, 24) : QColor(255, 255, 255));
+    mainPalette.setColor(QPalette::ToolTipBase, baseColor);
     mainPalette.setColor(QPalette::ToolTipText, textColor);
-    mainPalette.setColor(QPalette::Highlight, QColor(67, 160, 255));
+    mainPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
     mainPalette.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
     QApplication::setPalette(mainPalette);
     setPalette(mainPalette);
@@ -4675,7 +4672,7 @@ void MainWindow::applyAppearanceSettings(
     // - 通过 QToolTip 静态调色板强制应用深浅色提示框；
     // - 修复深色模式下 Tooltip 仍是白底的问题。
     QPalette toolTipPalette = mainPalette;
-    toolTipPalette.setColor(QPalette::ToolTipBase, darkModeEnabled ? QColor(24, 24, 24) : QColor(255, 255, 255));
+    toolTipPalette.setColor(QPalette::ToolTipBase, baseColor);
     toolTipPalette.setColor(QPalette::ToolTipText, textColor);
     QToolTip::setPalette(toolTipPalette);
     QToolTip::setFont(QApplication::font());
@@ -4897,41 +4894,36 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     const int scrollBarHoverExtentPx = settings.useWideScrollBars ? 12 : 7;
     const int scrollBarExtentPx = settings.scrollBarAutoHideEnabled ? 3 : scrollBarHoverExtentPx;
     const int scrollBarRadiusPx = 0;
+    const QString windowBackgroundText = KswordTheme::WindowColorHex();
+    const QString surfaceBackgroundText = KswordTheme::SurfaceColorHex();
+    const QString surfaceAltBackgroundText = KswordTheme::SurfaceAltColorHex();
+    const QString surfaceMutedBackgroundText = KswordTheme::SurfaceMutedColorHex();
+    const QString borderColorText = KswordTheme::BorderColorHex();
+    const QString borderStrongColorText = KswordTheme::BorderStrongColorHex();
+    const QString primaryTextColor = KswordTheme::TextPrimaryColorHex();
+    const QString selectedTextColor = QStringLiteral("#FFFFFF");
+    const QString activeThemeColor = KswordTheme::PrimaryBlueHex;
+    const QString activeThemeHoverColor = KswordTheme::PrimaryBlueSolidHoverHex();
+    const QString activeThemePressedColor = KswordTheme::PrimaryBluePressedHex;
+    const QString subtleThemeColor = KswordTheme::PrimaryBlueSubtleHex();
     const QString scrollBarHandleColor = settings.scrollBarAutoHideEnabled
         ? QStringLiteral("rgba(67,160,255,0.42)")
         : QStringLiteral("rgba(67,160,255,0.78)");
-    const QString scrollBarHandleHoverColor = QStringLiteral("rgba(46,139,255,0.92)");
+    const QString scrollBarHandleHoverColor = QStringLiteral("rgba(67,160,255,0.92)");
     const QString panelBackgroundColor = darkModeEnabled
-        ? QStringLiteral("rgba(18,18,18,0.92)")
-        : QStringLiteral("rgba(255,255,255,0.94)");
-    const QString panelBorderColor = darkModeEnabled
-        ? QStringLiteral("#303846")
-        : QStringLiteral("#C6D8EC");
-    const QString inactiveTabColor = darkModeEnabled
-        ? QStringLiteral("#1E2A3C")
-        : QStringLiteral("#DCEBFB");
-    const QString inactiveTabTextColor = darkModeEnabled
-        ? QStringLiteral("#EAF2FF")
-        : QStringLiteral("#173554");
-    const QString activeTabColor = darkModeEnabled
-        ? QStringLiteral("#3F8FE8")
-        : QStringLiteral("#1D74C9");
-    const QString activeTabTextColor = QStringLiteral("#FFFFFF");
-    const QString comboBackgroundColor = darkModeEnabled
-        ? QStringLiteral("#182334")
-        : QStringLiteral("#FFFFFF");
-    const QString comboTextColor = darkModeEnabled
-        ? QStringLiteral("#F3F7FF")
-        : QStringLiteral("#162A42");
-    const QString comboBorderColor = darkModeEnabled
-        ? QStringLiteral("#3D5775")
-        : QStringLiteral("#9CB8D8");
-    const QString comboPopupBackgroundColor = darkModeEnabled
-        ? QStringLiteral("#142032")
-        : QStringLiteral("#FFFFFF");
-    const QString comboPopupHoverColor = darkModeEnabled
-        ? QStringLiteral("#27466A")
-        : QStringLiteral("#E6F2FF");
+        ? QStringLiteral("rgba(17,25,36,0.94)")
+        : QStringLiteral("rgba(255,255,255,0.95)");
+    const QString panelBorderColor = borderColorText;
+    const QString inactiveTabColor = surfaceAltBackgroundText;
+    const QString inactiveTabTextColor = primaryTextColor;
+    const QString activeTabColor = activeThemeColor;
+    const QString activeTabTextColor = selectedTextColor;
+    const QString tabHoverColor = darkModeEnabled ? surfaceMutedBackgroundText : subtleThemeColor;
+    const QString comboBackgroundColor = surfaceBackgroundText;
+    const QString comboTextColor = primaryTextColor;
+    const QString comboBorderColor = borderColorText;
+    const QString comboPopupBackgroundColor = surfaceBackgroundText;
+    const QString comboPopupHoverColor = tabHoverColor;
 
     const QString tooltipStyle = QStringLiteral(
         "QToolTip{"
@@ -4941,9 +4933,9 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  padding:4px 6px;"
         "  border-radius:3px;"
         "}")
-        .arg(darkModeEnabled ? QStringLiteral("#181818") : QStringLiteral("#FFFFFF"))
-        .arg(darkModeEnabled ? QStringLiteral("#FFFFFF") : QStringLiteral("#000000"))
-        .arg(KswordTheme::PrimaryBlueHex);
+        .arg(surfaceBackgroundText)
+        .arg(primaryTextColor)
+        .arg(borderStrongColorText);
 
     // dockBackgroundPolicyStyle 作用：
     // - 背景图可用时：Dock 相关容器全部透明，让底图完整透出；
@@ -4988,9 +4980,9 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  background-color:palette(window) !important;"
         "  color:%1;"
         "}")
-        .arg(darkModeEnabled ? QStringLiteral("#FFFFFF") : QStringLiteral("#000000"))
+        .arg(primaryTextColor)
         + dockBackgroundPolicyStyle.arg(
-            darkModeEnabled ? QStringLiteral("#FFFFFF") : QStringLiteral("#000000"));
+            primaryTextColor);
 
     // depthOverlayStyle 作用：
     // - 为 Dock 面板、分组、表格和 Tab 增加边界/圆角/轻阴影感；
@@ -5034,7 +5026,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "}")
         .arg(panelBorderColor)
         .arg(panelBackgroundColor)
-        .arg(darkModeEnabled ? QStringLiteral("#F2F6FF") : QStringLiteral("#162A42"));
+        .arg(primaryTextColor);
 
     // scrollBarOverlayStyle 作用：
     // - 全局改为透明轨道，减少遮挡；
@@ -5086,21 +5078,26 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     // sharedOverlayStyle 作用：
     // - 统一 hover/pressed 与 Tab 高亮；
     // - 当前 Tab 采用反差色，避免图标与选中底色混在一起。
-    const QString sharedOverlayStyle = depthOverlayStyle + scrollBarOverlayStyle + QStringLiteral(
+    const QString buttonInteractionStyle = QStringLiteral(
         "QPushButton:hover,QToolButton:hover{"
-        "  background-color:#246EA8 !important;"
-        "  color:#FFFFFF !important;"
-        "  border-color:#246EA8 !important;"
+        "  background-color:%1 !important;"
+        "  color:%3 !important;"
+        "  border-color:%1 !important;"
         "}"
         "QPushButton:pressed,QToolButton:pressed{"
-        "  background-color:#1F78D0 !important;"
-        "  color:#FFFFFF !important;"
-        "  border-color:#1F78D0 !important;"
-        "}"
+        "  background-color:%2 !important;"
+        "  color:%3 !important;"
+        "  border-color:%2 !important;"
+        "}")
+        .arg(activeThemeHoverColor)
+        .arg(activeThemePressedColor)
+        .arg(selectedTextColor);
+
+    const QString comboBoxStyle = QStringLiteral(
         "QComboBox{"
-        "  background-color:%7 !important;"
-        "  color:%8 !important;"
-        "  border:1px solid %9 !important;"
+        "  background-color:%1 !important;"
+        "  color:%2 !important;"
+        "  border:1px solid %3 !important;"
         "  border-radius:3px;"
         "  padding:2px 20px 2px 6px;"
         "  min-height:22px;"
@@ -5113,13 +5110,22 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  width:18px;"
         "}"
         "QComboBox QAbstractItemView{"
-        "  background-color:%10 !important;"
-        "  color:%8 !important;"
-        "  border:1px solid %9 !important;"
-        "  selection-background-color:%11 !important;"
-        "  selection-color:%8 !important;"
+        "  background-color:%5 !important;"
+        "  color:%2 !important;"
+        "  border:1px solid %3 !important;"
+        "  selection-background-color:%6 !important;"
+        "  selection-color:%7 !important;"
         "  outline:0;"
-        "}"
+        "}")
+        .arg(comboBackgroundColor)
+        .arg(comboTextColor)
+        .arg(comboBorderColor)
+        .arg(activeTabColor)
+        .arg(comboPopupBackgroundColor)
+        .arg(comboPopupHoverColor)
+        .arg(selectedTextColor);
+
+    const QString tabStyle = QStringLiteral(
         "QTabBar{"
         "  border:none !important;"
         "}"
@@ -5197,13 +5203,13 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         .arg(panelBorderColor)
         .arg(activeTabColor)
         .arg(activeTabTextColor)
-        .arg(darkModeEnabled ? QStringLiteral("#2A405E") : QStringLiteral("#CFE5FF"))
-        .arg(comboBackgroundColor)
-        .arg(comboTextColor)
-        .arg(comboBorderColor)
-        .arg(comboPopupBackgroundColor)
-        .arg(comboPopupHoverColor);
-    // dockContentTransparentStyle 作用：
+        .arg(tabHoverColor);
+
+    const QString sharedOverlayStyle = depthOverlayStyle
+        + scrollBarOverlayStyle
+        + buttonInteractionStyle
+        + comboBoxStyle
+        + tabStyle;    // dockContentTransparentStyle 作用：
     // - 背景图可用时，把 Dock 内容区域常见容器背景全部改为透明；
     // - 修复“Dock 面板整体仍是黑底/白底，背景图只能从缝隙看到”的问题。
     // 注意：该片段只作用于 ads--CDockWidget 后代，不影响菜单栏等全局区域。
@@ -5246,44 +5252,54 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     {
         return rootStyle
             + QStringLiteral(
-                "QMenuBar{background-color:#FFFFFF;color:#173554;}"
-                "QMenuBar::item{background:transparent;color:#173554;padding:2px 7px;}"
-                "QMenuBar::item:selected{background:#DCEBFB;color:#173554;}"
-                "QMenuBar::item:pressed{background:#C7DFF8;color:#173554;}"
-                "QStatusBar{background-color:#FFFFFF;color:#000000;}"
+                "QMenuBar{background-color:%1;color:%3;}"
+                "QMenuBar::item{background:transparent;color:%3;padding:2px 7px;}"
+                "QMenuBar::item:selected{background:%2;color:%3;}"
+                "QMenuBar::item:pressed{background:__LIGHT_MENUBAR_PRESSED__;color:%3;}"
+                "QStatusBar{background-color:%1;color:%3;}"
                 "QLineEdit,QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget,QSpinBox,QDoubleSpinBox{"
-                "  background-color:#FFFFFF !important;"
-                "  color:#000000 !important;"
-                "  border:1px solid #C7D4E5;"
+                "  background-color:%1 !important;"
+                "  color:%3 !important;"
+                "  border:1px solid %4;"
                 "}"
                 "QPushButton,QToolButton{"
-                "  background-color:#EDF5FF !important;"
-                "  color:#1F4E88 !important;"
-                "  border:1px solid #8ABFF5 !important;"
+                "  background-color:%2 !important;"
+                "  color:#174A79 !important;"
+                "  border:1px solid %5 !important;"
                 "}"
                 "QTableView,QTableWidget,QTreeView,QTreeWidget,QListView,QListWidget{"
-                "  background:#FFFFFF !important;"
-                "  alternate-background-color:#F3F7FC !important;"
-                "  color:#000000 !important;"
-                "  gridline-color:#D5DFEB;"
+                "  background:%1 !important;"
+                "  alternate-background-color:%6 !important;"
+                "  color:%3 !important;"
+                "  gridline-color:%4;"
                 "}"
                 "QTableView::item:selected,QTableWidget::item:selected,QTreeView::item:selected,QTreeWidget::item:selected{"
-                "  background:#2E8BFF !important;"
-                "  color:#FFFFFF !important;"
+                "  background:%7 !important;"
+                "  color:%8 !important;"
                 "}"
                 "QHeaderView::section{"
-                "  background:#F4F8FD !important;"
-                "  color:#1A2A3A !important;"
-                "  border:1px solid #CBD6E2;"
+                "  background:%6 !important;"
+                "  color:%3 !important;"
+                "  border:1px solid %4;"
                 "}"
                 "QTableCornerButton::section{"
-                "  background:#F4F8FD !important;"
+                "  background:%6 !important;"
                 "  border:none !important;"
                 "}"
                 "QScrollBar:vertical,QScrollBar:horizontal{"
-                "  background:#F3F7FC !important;"
+                "  background:%9 !important;"
                 "  border:none !important;"
                 "}")
+                .arg(surfaceBackgroundText)
+                .arg(subtleThemeColor)
+                .arg(primaryTextColor)
+                .arg(borderColorText)
+                .arg(borderStrongColorText)
+                .arg(surfaceAltBackgroundText)
+                .arg(activeThemeColor)
+                .arg(selectedTextColor)
+                .arg(windowBackgroundText)
+                .replace(QStringLiteral("__LIGHT_MENUBAR_PRESSED__"), surfaceMutedBackgroundText)
             + sharedOverlayStyle
             + tooltipStyle
             + dockContentTransparentStyle;
@@ -5291,44 +5307,52 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
 
     return rootStyle
         + QStringLiteral(
-            "QMenuBar{background-color:#000000;color:#EAF2FF;}"
-            "QMenuBar::item{background:transparent;color:#EAF2FF;padding:2px 7px;}"
-            "QMenuBar::item:selected{background:rgba(63,143,232,0.28);color:#EAF2FF;}"
-            "QMenuBar::item:pressed{background:rgba(63,143,232,0.38);color:#FFFFFF;}"
-            "QStatusBar{background-color:#000000;color:#FFFFFF;}"
+            "QMenuBar{background-color:%1;color:%3;}"
+            "QMenuBar::item{background:transparent;color:%3;padding:2px 7px;}"
+            "QMenuBar::item:selected{background:rgba(67,160,255,0.28);color:%3;}"
+            "QMenuBar::item:pressed{background:rgba(67,160,255,0.38);color:%8;}"
+            "QStatusBar{background-color:%1;color:%3;}"
             "QLineEdit,QTextEdit,QPlainTextEdit,QTableWidget,QTreeWidget,QListWidget,QSpinBox,QDoubleSpinBox{"
-            "  background-color:#111111 !important;"
-            "  color:#FFFFFF !important;"
-            "  border:1px solid #3A3A3A;"
+            "  background-color:%2 !important;"
+            "  color:%3 !important;"
+            "  border:1px solid %4;"
             "}"
             "QPushButton,QToolButton{"
-            "  background-color:#1A1A1A !important;"
-            "  color:#FFFFFF !important;"
-            "  border:1px solid #5A5A5A !important;"
+            "  background-color:%6 !important;"
+            "  color:%3 !important;"
+            "  border:1px solid %5 !important;"
             "}"
             "QTableView,QTableWidget,QTreeView,QTreeWidget,QListView,QListWidget{"
-            "  background:#121212 !important;"
-            "  alternate-background-color:#1D1D1D !important;"
-            "  color:#F0F0F0 !important;"
-            "  gridline-color:#2E2E2E;"
+            "  background:%2 !important;"
+            "  alternate-background-color:%6 !important;"
+            "  color:%3 !important;"
+            "  gridline-color:%4;"
             "}"
             "QTableView::item:selected,QTableWidget::item:selected,QTreeView::item:selected,QTreeWidget::item:selected{"
-            "  background:#2E8BFF !important;"
-            "  color:#FFFFFF !important;"
+            "  background:%7 !important;"
+            "  color:%8 !important;"
             "}"
             "QHeaderView::section{"
-            "  background:#1A1A1A !important;"
-            "  color:#EAEAEA !important;"
-            "  border:1px solid #333333;"
+            "  background:%6 !important;"
+            "  color:%3 !important;"
+            "  border:1px solid %4;"
             "}"
             "QTableCornerButton::section{"
-            "  background:#1A1A1A !important;"
+            "  background:%6 !important;"
             "  border:none !important;"
             "}"
             "QScrollBar:vertical,QScrollBar:horizontal{"
-            "  background:#141414 !important;"
+            "  background:%1 !important;"
             "  border:none !important;"
             "}")
+            .arg(windowBackgroundText)
+            .arg(surfaceBackgroundText)
+            .arg(primaryTextColor)
+            .arg(borderColorText)
+            .arg(borderStrongColorText)
+            .arg(surfaceAltBackgroundText)
+            .arg(activeThemeColor)
+            .arg(selectedTextColor)
         + sharedOverlayStyle
         + tooltipStyle
         + dockContentTransparentStyle;

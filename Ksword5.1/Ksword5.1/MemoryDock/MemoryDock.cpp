@@ -93,7 +93,7 @@ namespace
             "}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
             .arg(KswordTheme::PrimaryBluePressedHex)
             .arg(KswordTheme::SurfaceHex());
     }

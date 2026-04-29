@@ -1,4 +1,4 @@
-#include "ProcessDock.h"
+﻿#include "ProcessDock.h"
 
 #include "../theme.h"
 #include "ProcessDetailWindow.h"
@@ -763,7 +763,7 @@ namespace
             "}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
             .arg(KswordTheme::PrimaryBluePressedHex)
             .arg(paddingText)
             .arg(KswordTheme::SurfaceHex());
@@ -1059,8 +1059,8 @@ void ProcessDock::initializeUi()
             "QTabBar::tab:hover:!selected{background-color:%4;color:%5;}" )
             .arg(ProcessSideTabWidthPx)
             .arg(ProcessSideTabHeightPx)
-            .arg(KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#1F5F99") : QStringLiteral("#164B82"))
-            .arg(KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#213247") : QStringLiteral("#E5F1FF"))
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::IsDarkModeEnabled() ? KswordTheme::SurfaceMutedColorHex() : KswordTheme::PrimaryBlueSubtleHex())
             .arg(KswordTheme::TextPrimaryHex()));
     }
 

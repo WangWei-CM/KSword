@@ -1,4 +1,4 @@
-#include "DirectKernelCallMonitorWidget.h"
+﻿#include "DirectKernelCallMonitorWidget.h"
 
 // ============================================================
 // DirectKernelCallMonitorWidget.cpp
@@ -78,7 +78,7 @@ namespace
             "QPushButton:disabled{color:%6;border:1px solid %2;background:%5;}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
             .arg(KswordTheme::PrimaryBluePressedHex)
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::TextSecondaryHex());

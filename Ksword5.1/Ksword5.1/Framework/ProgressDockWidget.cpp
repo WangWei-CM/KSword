@@ -1,4 +1,4 @@
-#include "ProgressDockWidget.h"
+﻿#include "ProgressDockWidget.h"
 #include "../theme.h"
 
 #include <QFrame>        // 任务卡片容器

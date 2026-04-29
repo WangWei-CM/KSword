@@ -1,4 +1,4 @@
-#include "ProcessTraceMonitorWidget.h"
+﻿#include "ProcessTraceMonitorWidget.h"
 
 // ============================================================
 // ProcessTraceMonitorWidget.cpp
@@ -76,7 +76,7 @@ QString ProcessTraceMonitorWidget::blueButtonStyle()
         "QPushButton:disabled{color:%6;background:%7;border:1px solid %8;}")
         .arg(KswordTheme::PrimaryBlueHex)
         .arg(KswordTheme::PrimaryBlueBorderHex)
-        .arg(QStringLiteral("#2E8BFF"))
+        .arg(KswordTheme::PrimaryBlueSolidHoverHex())
         .arg(KswordTheme::PrimaryBluePressedHex)
         .arg(KswordTheme::SurfaceHex())
         .arg(KswordTheme::TextSecondaryHex())
