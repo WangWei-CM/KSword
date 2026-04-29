@@ -30,7 +30,7 @@ const QString QSS_MainWindow_TabWidget = R"(
 
     QTabBar::tab:left,
     QTabBar::tab:right {
-        padding: 6px 8px;
+        padding: 5px 6px;
         font-size: 15px;
     }
 
@@ -88,7 +88,7 @@ const QString QSS_MainWindow_dockStyle = R"(
 
     QMainWindow QTabBar::tab:left,
     QMainWindow QTabBar::tab:right {
-        padding: 6px 8px;
+        padding: 5px 6px;
         font-size: 15px;
     }
 
