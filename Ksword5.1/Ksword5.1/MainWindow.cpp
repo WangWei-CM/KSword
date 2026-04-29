@@ -2004,7 +2004,7 @@ void MainWindow::initMenus()
         return;
     }
 
-    // 功能条：位于自绘标题栏下方，左侧“文件”，右侧权限按钮。
+    // 功能条：位于自绘标题栏下方，左侧常用动作，右侧权限按钮。
     m_topActionRowWidget = new QWidget(m_mainRootContainer);
     m_topActionRowWidget->setObjectName(QStringLiteral("ksTopActionRow"));
     m_topActionRowWidget->setFixedHeight(28);
@@ -2056,32 +2056,36 @@ void MainWindow::initMenus()
             : QStringLiteral("#A8C9EA"))
         .arg(topMenuPressedColor);
 
-    m_fileMenuButton = new QToolButton(m_topActionRowWidget);
-    m_fileMenuButton->setObjectName(QStringLiteral("ksFileMenuButton"));
-    m_fileMenuButton->setText(QStringLiteral("文件"));
-    m_fileMenuButton->setToolTip(QStringLiteral("打开文件菜单"));
-    m_fileMenuButton->setPopupMode(QToolButton::InstantPopup);
-    m_fileMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    m_fileMenuButton->setAutoRaise(true);
-    m_fileMenuButton->setFixedHeight(22);
-    m_fileMenuButton->setStyleSheet(topMenuButtonStyle);
+    m_updateMenuButton = new QToolButton(m_topActionRowWidget);
+    m_updateMenuButton->setObjectName(QStringLiteral("ksUpdateMenuButton"));
+    m_updateMenuButton->setText(QStringLiteral("检查更新"));
+    m_updateMenuButton->setToolTip(QStringLiteral("打开 GitHub Releases 页面"));
+    m_updateMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_updateMenuButton->setAutoRaise(true);
+    m_updateMenuButton->setFixedHeight(22);
+    m_updateMenuButton->setStyleSheet(topMenuButtonStyle);
+    connect(m_updateMenuButton, &QToolButton::clicked, this, &MainWindow::openReleasePageFromMenu);
 
-    // fileMenu 用途：承载“文件”下拉菜单动作（当前保留退出）。
-    QMenu* fileMenu = new QMenu(m_fileMenuButton);
-    QAction* updateAction = new QAction(QStringLiteral("检查更新(&U)"), fileMenu);
-    connect(updateAction, &QAction::triggered, this, &MainWindow::openReleasePageFromMenu);
-    fileMenu->addAction(updateAction);
+    m_licenseMenuButton = new QToolButton(m_topActionRowWidget);
+    m_licenseMenuButton->setObjectName(QStringLiteral("ksLicenseMenuButton"));
+    m_licenseMenuButton->setText(QStringLiteral("许可证"));
+    m_licenseMenuButton->setToolTip(QStringLiteral("查看同目录 license 文件"));
+    m_licenseMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_licenseMenuButton->setAutoRaise(true);
+    m_licenseMenuButton->setFixedHeight(22);
+    m_licenseMenuButton->setStyleSheet(topMenuButtonStyle);
+    connect(m_licenseMenuButton, &QToolButton::clicked, this, &MainWindow::showLicenseFromMenu);
 
-    QAction* licenseAction = new QAction(QStringLiteral("许可证(&L)"), fileMenu);
-    connect(licenseAction, &QAction::triggered, this, &MainWindow::showLicenseFromMenu);
-    fileMenu->addAction(licenseAction);
-    fileMenu->addSeparator();
-
-    QAction* exitAction = new QAction(QStringLiteral("退出(&X)"), fileMenu);
-    exitAction->setShortcut(Qt::CTRL | Qt::Key_Q);
-    connect(exitAction, &QAction::triggered, QApplication::instance(), &QApplication::quit);
-    fileMenu->addAction(exitAction);
-    m_fileMenuButton->setMenu(fileMenu);
+    m_exitMenuButton = new QToolButton(m_topActionRowWidget);
+    m_exitMenuButton->setObjectName(QStringLiteral("ksExitMenuButton"));
+    m_exitMenuButton->setText(QStringLiteral("退出"));
+    m_exitMenuButton->setToolTip(QStringLiteral("退出程序 (Ctrl+Q)"));
+    m_exitMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_exitMenuButton->setAutoRaise(true);
+    m_exitMenuButton->setFixedHeight(22);
+    m_exitMenuButton->setStyleSheet(topMenuButtonStyle);
+    m_exitMenuButton->setShortcut(QKeySequence(QStringLiteral("Ctrl+Q")));
+    connect(m_exitMenuButton, &QToolButton::clicked, QApplication::instance(), &QApplication::quit);
 
     m_settingsMenuButton = new QToolButton(m_topActionRowWidget);
     m_settingsMenuButton->setObjectName(QStringLiteral("ksSettingsMenuButton"));
@@ -2095,7 +2099,9 @@ void MainWindow::initMenus()
         showSettingsPanelFromMenu();
     });
 
-    m_topActionRowLayout->addWidget(m_fileMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    m_topActionRowLayout->addWidget(m_updateMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    m_topActionRowLayout->addWidget(m_licenseMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    m_topActionRowLayout->addWidget(m_exitMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_settingsMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addStretch(1);
 
