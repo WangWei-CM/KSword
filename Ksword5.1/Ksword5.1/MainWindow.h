@@ -1,4 +1,4 @@
-﻿#ifndef MAINWINDOW_H
+#ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
 #include <QMainWindow>
@@ -188,6 +188,10 @@ private:
     // showSettingsPanelFromMenu：
     // - 作用：从顶部菜单栏打开设置内容，替代主 Dock Tab 中的“设置”页签。
     void showSettingsPanelFromMenu();
+    // openReleasePageFromMenu 作用：从顶部菜单打开 GitHub Releases 页面检查更新。
+    void openReleasePageFromMenu();
+    // showLicenseFromMenu 作用：读取程序同目录 license 文件并展示许可证内容。
+    void showLicenseFromMenu();
 
     void initializeNextDeferredDock();
 

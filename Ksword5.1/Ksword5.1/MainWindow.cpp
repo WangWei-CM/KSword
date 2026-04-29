@@ -4,11 +4,15 @@
 #include <QEasingCurve>
 #include <QAbstractScrollArea>
 #include <QAbstractSlider>
+#include <QTextEdit>
+#include <QTextStream>
 #include <QTabWidget>
 #include <QTabBar>
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QWidget>
@@ -32,6 +36,7 @@
 #include <QProcess>
 #include <QToolTip>
 #include <QStyleHints>
+#include <QUrl>
 #include <QEvent>
 #include <QEventLoop>
 #include <QWheelEvent>
@@ -2000,6 +2005,15 @@ void MainWindow::initMenus()
 
     // fileMenu 用途：承载“文件”下拉菜单动作（当前保留退出）。
     QMenu* fileMenu = new QMenu(m_fileMenuButton);
+    QAction* updateAction = new QAction(QStringLiteral("检查更新(&U)"), fileMenu);
+    connect(updateAction, &QAction::triggered, this, &MainWindow::openReleasePageFromMenu);
+    fileMenu->addAction(updateAction);
+
+    QAction* licenseAction = new QAction(QStringLiteral("许可证(&L)"), fileMenu);
+    connect(licenseAction, &QAction::triggered, this, &MainWindow::showLicenseFromMenu);
+    fileMenu->addAction(licenseAction);
+    fileMenu->addSeparator();
+
     QAction* exitAction = new QAction(QStringLiteral("退出(&X)"), fileMenu);
     exitAction->setShortcut(Qt::CTRL | Qt::Key_Q);
     connect(exitAction, &QAction::triggered, QApplication::instance(), &QApplication::quit);
@@ -2029,6 +2043,62 @@ void MainWindow::initMenus()
     }
 }
 
+void MainWindow::openReleasePageFromMenu()
+{
+    const QUrl releaseUrl(QStringLiteral("https://github.com/WangWei-CM/KSword/releases"));
+    if (!QDesktopServices::openUrl(releaseUrl))
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("检查更新"),
+            QStringLiteral("无法打开更新页面：%1").arg(releaseUrl.toString()));
+    }
+}
+
+void MainWindow::showLicenseFromMenu()
+{
+    const QString licensePath = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("license"));
+    QFile licenseFile(licensePath);
+    QString licenseText;
+    if (licenseFile.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        QTextStream licenseStream(&licenseFile);
+        licenseStream.setEncoding(QStringConverter::Utf8);
+        licenseText = licenseStream.readAll();
+    }
+    else
+    {
+        licenseText = QStringLiteral("未找到同目录 license 文件：\n%1").arg(QDir::toNativeSeparators(licensePath));
+    }
+
+    QDialog licenseDialog(this);
+    licenseDialog.setWindowTitle(QStringLiteral("许可证"));
+    licenseDialog.resize(760, 560);
+    licenseDialog.setStyleSheet(QStringLiteral(
+        "QDialog{background:%1;color:%2;}"
+        "QTextEdit{background:%1;color:%2;border:1px solid %3;}"
+        "QPushButton{padding:4px 14px;}" )
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::TextPrimaryHex())
+        .arg(KswordTheme::BorderHex()));
+
+    QVBoxLayout dialogLayout(&licenseDialog);
+    dialogLayout.setContentsMargins(8, 8, 8, 8);
+    dialogLayout.setSpacing(8);
+
+    QTextEdit licenseEditor(&licenseDialog);
+    licenseEditor.setReadOnly(true);
+    licenseEditor.setPlainText(licenseText.trimmed().isEmpty()
+        ? QStringLiteral("license 文件为空。")
+        : licenseText);
+    dialogLayout.addWidget(&licenseEditor, 1);
+
+    QPushButton closeButton(QStringLiteral("关闭"), &licenseDialog);
+    connect(&closeButton, &QPushButton::clicked, &licenseDialog, &QDialog::accept);
+    dialogLayout.addWidget(&closeButton, 0, Qt::AlignRight);
+
+    licenseDialog.exec();
+}
 void MainWindow::showSettingsPanelFromMenu()
 {
     QDialog settingsDialog(this);
@@ -4783,15 +4853,30 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         ? QStringLiteral("#303846")
         : QStringLiteral("#C6D8EC");
     const QString inactiveTabColor = darkModeEnabled
-        ? QStringLiteral("#223047")
-        : QStringLiteral("#E8F2FF");
+        ? QStringLiteral("#1E2A3C")
+        : QStringLiteral("#DCEBFB");
     const QString inactiveTabTextColor = darkModeEnabled
-        ? QStringLiteral("#F1F7FF")
-        : QStringLiteral("#143A63");
+        ? QStringLiteral("#EAF2FF")
+        : QStringLiteral("#173554");
     const QString activeTabColor = darkModeEnabled
-        ? QStringLiteral("#2E8BFF")
-        : QStringLiteral("#1667B7");
+        ? QStringLiteral("#3F8FE8")
+        : QStringLiteral("#1D74C9");
     const QString activeTabTextColor = QStringLiteral("#FFFFFF");
+    const QString comboBackgroundColor = darkModeEnabled
+        ? QStringLiteral("#182334")
+        : QStringLiteral("#FFFFFF");
+    const QString comboTextColor = darkModeEnabled
+        ? QStringLiteral("#F3F7FF")
+        : QStringLiteral("#162A42");
+    const QString comboBorderColor = darkModeEnabled
+        ? QStringLiteral("#3D5775")
+        : QStringLiteral("#9CB8D8");
+    const QString comboPopupBackgroundColor = darkModeEnabled
+        ? QStringLiteral("#142032")
+        : QStringLiteral("#FFFFFF");
+    const QString comboPopupHoverColor = darkModeEnabled
+        ? QStringLiteral("#27466A")
+        : QStringLiteral("#E6F2FF");
 
     const QString tooltipStyle = QStringLiteral(
         "QToolTip{"
@@ -4957,6 +5042,29 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  color:#FFFFFF !important;"
         "  border-color:#1F78D0 !important;"
         "}"
+        "QComboBox{"
+        "  background-color:%7 !important;"
+        "  color:%8 !important;"
+        "  border:1px solid %9 !important;"
+        "  border-radius:3px;"
+        "  padding:2px 20px 2px 6px;"
+        "  min-height:22px;"
+        "}"
+        "QComboBox:hover{"
+        "  border-color:%4 !important;"
+        "}"
+        "QComboBox::drop-down{"
+        "  border:none !important;"
+        "  width:18px;"
+        "}"
+        "QComboBox QAbstractItemView{"
+        "  background-color:%10 !important;"
+        "  color:%8 !important;"
+        "  border:1px solid %9 !important;"
+        "  selection-background-color:%11 !important;"
+        "  selection-color:%8 !important;"
+        "  outline:0;"
+        "}"
         "QTabBar{"
         "  border:none !important;"
         "}"
@@ -4965,19 +5073,19 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  color:%2 !important;"
         "  border:none !important;"
         "  border-radius:0px !important;"
-        "  padding:2px 9px;"
-        "  min-width:56px;"
-        "  min-height:24px;"
+        "  padding:1px 7px;"
+        "  min-width:48px;"
+        "  min-height:22px;"
         "  margin:0px;"
-        "  font-size:15px;"
+        "  font-size:17px;"
         "}"
         "QTabBar::tab:left,QTabBar::tab:right{"
-        "  min-width:46px;"
-        "  max-width:46px;"
-        "  min-height:84px;"
-        "  max-height:84px;"
-        "  padding:7px 3px;"
-        "  font-size:16px;"
+        "  min-width:38px;"
+        "  max-width:38px;"
+        "  min-height:72px;"
+        "  max-height:72px;"
+        "  padding:3px 2px;"
+        "  font-size:18px;"
         "}"
         "QTabBar::tab:selected{"
         "  background-color:%4 !important;"
@@ -4998,15 +5106,15 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  color:%2 !important;"
         "  border:none !important;"
         "  border-radius:0px !important;"
-        "  padding:2px 9px;"
+        "  padding:1px 7px;"
         "  margin:0px;"
-        "  min-width:56px;"
-        "  min-height:24px;"
-        "  font-size:15px;"
+        "  min-width:48px;"
+        "  min-height:22px;"
+        "  font-size:17px;"
         "}"
         "ads--CDockWidgetTab QLabel,ads--CAutoHideTab QLabel{"
         "  color:%2 !important;"
-        "  font-size:15px;"
+        "  font-size:17px;"
         "}"
         "ads--CDockWidgetTab[activeTab=\"true\"],ads--CAutoHideTab[activeTab=\"true\"]{"
         "  background-color:%4 !important;"
@@ -5029,7 +5137,12 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         .arg(panelBorderColor)
         .arg(activeTabColor)
         .arg(activeTabTextColor)
-        .arg(darkModeEnabled ? QStringLiteral("#2B3D59") : QStringLiteral("#D6E9FF"));
+        .arg(darkModeEnabled ? QStringLiteral("#2A405E") : QStringLiteral("#CFE5FF"))
+        .arg(comboBackgroundColor)
+        .arg(comboTextColor)
+        .arg(comboBorderColor)
+        .arg(comboPopupBackgroundColor)
+        .arg(comboPopupHoverColor);
     // dockContentTransparentStyle 作用：
     // - 背景图可用时，把 Dock 内容区域常见容器背景全部改为透明；
     // - 修复“Dock 面板整体仍是黑底/白底，背景图只能从缝隙看到”的问题。
@@ -5080,38 +5193,10 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
                 "  color:#000000 !important;"
                 "  border:1px solid #C7D4E5;"
                 "}"
-                "QComboBox{"
-                "  background-color:#FFFFFF;"
-                "  color:#172B43;"
-                "  border:1px solid #AFC4DC;"
-                "}"
-                "QComboBox QAbstractItemView{"
-                "  background-color:#FFFFFF;"
-                "  color:#172B43;"
-                "  selection-background-color:#2E8BFF;"
-                "  selection-color:#FFFFFF;"
-                "}"
                 "QPushButton,QToolButton{"
                 "  background-color:#EDF5FF !important;"
                 "  color:#1F4E88 !important;"
                 "  border:1px solid #8ABFF5 !important;"
-                "}"
-                "QTabWidget::pane{"
-                "  background:transparent !important;"
-                "  border:none !important;"
-                "}"
-                "QTabBar{"
-                "  background:transparent !important;"
-                "}"
-                "QTabBar::tab{"
-                "  background-color:#E8F2FF !important;"
-                "  color:#143A63 !important;"
-                "  border:none !important;"
-                "  padding:2px 9px;"
-                "  min-width:56px;"
-                "  min-height:24px;"
-                "  margin:0px;"
-                "  font-size:15px;"
                 "}"
                 "QTableView,QTableWidget,QTreeView,QTreeWidget,QListView,QListWidget{"
                 "  background:#FFFFFF !important;"
@@ -5150,40 +5235,10 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             "  color:#FFFFFF !important;"
             "  border:1px solid #3A3A3A;"
             "}"
-            "QComboBox{"
-            "  background-color:#172232;"
-            "  color:#F4F8FF;"
-            "  border:1px solid #34506D;"
-            "}"
-            "QComboBox QAbstractItemView{"
-            "  background-color:#172232;"
-            "  color:#F4F8FF;"
-            "  selection-background-color:#2E8BFF;"
-            "  selection-color:#FFFFFF;"
-            "}"
             "QPushButton,QToolButton{"
             "  background-color:#1A1A1A !important;"
             "  color:#FFFFFF !important;"
             "  border:1px solid #5A5A5A !important;"
-            "}"
-            "QTabWidget::pane{"
-            "  background:transparent !important;"
-            "  border:none !important;"
-            "}"
-            "QTabBar{"
-            "  background:transparent !important;"
-            "  border:none !important;"
-            "}"
-            "QTabBar::tab{"
-            "  background-color:#223047 !important;"
-            "  color:#F1F7FF !important;"
-            "  border:none !important;"
-            "  border-radius:0px !important;"
-            "  padding:2px 9px;"
-            "  min-width:56px;"
-            "  min-height:24px;"
-            "  margin:0px;"
-            "  font-size:15px;"
             "}"
             "QTableView,QTableWidget,QTreeView,QTreeWidget,QListView,QListWidget{"
             "  background:#121212 !important;"
