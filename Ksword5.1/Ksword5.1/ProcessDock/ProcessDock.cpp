@@ -1048,7 +1048,6 @@ void ProcessDock::initializeUi()
     {
         m_sideTabWidget->tabBar()->setExpanding(false);
         m_sideTabWidget->tabBar()->setUsesScrollButtons(true);
-        m_sideTabWidget->tabBar()->setElideMode(Qt::ElideNone);
         m_sideTabWidget->tabBar()->setStyleSheet(QStringLiteral(
             "QTabBar{background:transparent;border:none;}"
             "QTabBar::tab{min-height:%1px;padding:6px 8px;margin:0px;border:none;border-radius:0px;font-size:15px;}"

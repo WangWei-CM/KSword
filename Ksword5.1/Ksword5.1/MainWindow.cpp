@@ -171,16 +171,18 @@ namespace
             }
 
             const QEvent::Type eventType = eventObject->type();
-            if (eventType != QEvent::Destroy)
-            {
-                configureAdaptiveTabBar(tabBar);
-            }
             if (eventType == QEvent::Destroy)
             {
                 m_originalIconsByTabBar.erase(tabBar);
                 m_displayIconsByTabBar.erase(tabBar);
                 m_contrastIconsByTabBar.erase(tabBar);
                 return QObject::eventFilter(watchedObject, eventObject);
+            }
+            if (eventType == QEvent::Show
+                || eventType == QEvent::Polish
+                || eventType == QEvent::StyleChange)
+            {
+                configureAdaptiveTabBar(tabBar);
             }
             if (eventType != QEvent::Show
                 && eventType != QEvent::Paint
@@ -196,15 +198,15 @@ namespace
     private:
         void configureAdaptiveTabBar(QTabBar* tabBar) const
         {
-            if (tabBar == nullptr)
+            if (tabBar == nullptr || tabBar->property("ksword_adaptive_tabbar_configured").toBool())
             {
                 return;
             }
 
+            tabBar->setProperty("ksword_adaptive_tabbar_configured", true);
             tabBar->setExpanding(false);
             tabBar->setUsesScrollButtons(true);
             tabBar->setElideMode(Qt::ElideNone);
-            tabBar->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         }
 
         void refreshTabBarIcons(QTabBar* tabBar)
