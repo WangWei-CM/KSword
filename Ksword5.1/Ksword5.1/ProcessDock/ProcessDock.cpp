@@ -28,6 +28,7 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
@@ -37,6 +38,7 @@
 #include <QScrollArea>
 #include <QShortcut>
 #include <QSignalBlocker>
+#include <QStyledItemDelegate>
 #include <QSlider>
 #include <QScrollBar>
 #include <QSvgRenderer>
@@ -105,9 +107,11 @@ namespace
     constexpr QSize DefaultIconSize(18, 18);
     constexpr QSize SideTabIconSize(22, 22);
     constexpr QSize CompactIconButtonSize(28, 28);
-    constexpr int ProcessSideTabWidthPx = 48;
-    constexpr int ProcessSideTabHeightPx = 86;
+    constexpr int ProcessSideTabWidthPx = 38;
+    constexpr int ProcessSideTabHeightPx = 72;
     constexpr int ProcessNumericSortRole = Qt::UserRole + 200;
+    constexpr int ProcessEfficiencyModeRole = Qt::UserRole + 201;
+    constexpr int ProcessEfficiencyModeKnownRole = Qt::UserRole + 202;
 
     class ProcessSortTreeWidgetItem final : public QTreeWidgetItem
     {
@@ -130,6 +134,68 @@ namespace
                 return text(sortColumn).localeAwareCompare(otherItem.text(sortColumn)) < 0;
             }
             return QTreeWidgetItem::operator<(otherItem);
+        }
+    };
+    // ProcessNameDelegate 作用：在“进程名”列右侧绘制效率模式绿叶，不新增表格列。
+    class ProcessNameDelegate final : public QStyledItemDelegate
+    {
+    public:
+        explicit ProcessNameDelegate(QObject* parent = nullptr)
+            : QStyledItemDelegate(parent)
+        {
+        }
+
+        void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+        {
+            QStyleOptionViewItem itemOption(option);
+            if (index.column() == 0 && index.data(ProcessEfficiencyModeRole).toBool())
+            {
+                itemOption.rect.adjust(0, 0, -22, 0);
+            }
+            QStyledItemDelegate::paint(painter, itemOption, index);
+
+            if (index.column() != 0 || !index.data(ProcessEfficiencyModeRole).toBool())
+            {
+                return;
+            }
+            if (painter == nullptr)
+            {
+                return;
+            }
+
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing, true);
+            const int iconSize = std::min(16, std::max(10, option.rect.height() - 6));
+            const QRect leafRect(
+                option.rect.right() - iconSize - 5,
+                option.rect.center().y() - iconSize / 2,
+                iconSize,
+                iconSize);
+            const QColor leafColor = KswordTheme::IsDarkModeEnabled()
+                ? QColor(101, 216, 120)
+                : QColor(32, 166, 72);
+            QPainterPath leafPath;
+            leafPath.moveTo(leafRect.left() + leafRect.width() * 0.18, leafRect.center().y());
+            leafPath.cubicTo(
+                leafRect.left() + leafRect.width() * 0.32,
+                leafRect.top() + leafRect.height() * 0.08,
+                leafRect.right() - leafRect.width() * 0.10,
+                leafRect.top() + leafRect.height() * 0.06,
+                leafRect.right() - leafRect.width() * 0.08,
+                leafRect.center().y());
+            leafPath.cubicTo(
+                leafRect.right() - leafRect.width() * 0.10,
+                leafRect.bottom() - leafRect.height() * 0.08,
+                leafRect.left() + leafRect.width() * 0.30,
+                leafRect.bottom() - leafRect.height() * 0.05,
+                leafRect.left() + leafRect.width() * 0.18,
+                leafRect.center().y());
+            painter->fillPath(leafPath, leafColor);
+            painter->setPen(QPen(QColor(255, 255, 255, 210), 1.2));
+            painter->drawLine(
+                QPointF(leafRect.left() + leafRect.width() * 0.28, leafRect.bottom() - leafRect.height() * 0.25),
+                QPointF(leafRect.right() - leafRect.width() * 0.20, leafRect.top() + leafRect.height() * 0.22));
+            painter->restore();
         }
     };
 
@@ -721,14 +787,19 @@ namespace
             "  background-color:%1;"
             "  color:%2;"
             "  border:1px solid %3;"
-            "  padding:2px 8px;"
+            "  border-radius:3px;"
+            "  padding:2px 20px 2px 6px;"
+            "}"
+            "QComboBox::drop-down{"
+            "  border:none;"
+            "  width:18px;"
             "}"
             "QComboBox QAbstractItemView{"
             "  background-color:%1;"
             "  color:%2;"
             "  border:1px solid %3;"
             "  selection-background-color:%4;"
-            "  selection-color:#FFFFFF;"
+            "  selection-color:%2;"
             "}")
             .arg(comboBackgroundColor)
             .arg(comboTextColor)
@@ -983,7 +1054,7 @@ void ProcessDock::initializeUi()
         m_sideTabWidget->tabBar()->setStyleSheet(QStringLiteral(
             "QTabBar{background:transparent;border:none;}"
             "QTabBar::tab{min-width:%1px;max-width:%1px;min-height:%2px;"
-            "padding:7px 3px;margin:0px;border:none;border-radius:0px;font-size:16px;}"
+            "padding:3px 2px;margin:0px;border:none;border-radius:0px;font-size:18px;}"
             "QTabBar::tab:selected{background-color:%3;color:#FFFFFF;font-weight:700;}"
             "QTabBar::tab:hover:!selected{background-color:%4;color:%5;}" )
             .arg(ProcessSideTabWidthPx)
@@ -1140,6 +1211,9 @@ void ProcessDock::initializeProcessTable()
     m_processTable->setSortingEnabled(true);
     m_processTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_processTable->setAlternatingRowColors(true);
+    m_processTable->setItemDelegateForColumn(
+        toColumnIndex(TableColumn::Name),
+        new ProcessNameDelegate(m_processTable));
     // 列宽由自适应逻辑统一控制，强制关闭内部横向滚动条。
     m_processTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
@@ -2998,6 +3072,15 @@ void ProcessDock::rebuildTable()
         rowItem->setData(toColumnIndex(TableColumn::ParentPid), ProcessNumericSortRole, static_cast<double>(processRecord.parentPid));
         rowItem->setData(toColumnIndex(TableColumn::StartTime), ProcessNumericSortRole, static_cast<double>(processRecord.creationTime100ns));
         rowItem->setData(toColumnIndex(TableColumn::IsAdmin), ProcessNumericSortRole, processRecord.isAdmin ? 1.0 : 0.0);
+        rowItem->setData(toColumnIndex(TableColumn::Name), ProcessEfficiencyModeKnownRole, processRecord.efficiencyModeSupported);
+        rowItem->setData(toColumnIndex(TableColumn::Name), ProcessEfficiencyModeRole, processRecord.efficiencyModeEnabled);
+        if (processRecord.efficiencyModeEnabled)
+        {
+            rowItem->setToolTip(
+                toColumnIndex(TableColumn::Name),
+                QStringLiteral("%1\n效率模式已启用")
+                    .arg(QString::fromStdString(processRecord.processName)));
+        }
 
         // 进程名列固定显示目标 EXE 图标（命中缓存后开销可控）。
         rowItem->setIcon(toColumnIndex(TableColumn::Name), resolveProcessIcon(processRecord));
@@ -3382,6 +3465,7 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         m_processTable->setCurrentItem(clickedItem, clickedColumn);
     }
     bindContextActionToItem(clickedItem);
+    ks::process::ProcessRecord* contextProcessRecord = selectedRecord();
 
     QMenu contextMenu(this);
     // 右键菜单显式样式：避免浅色模式在透明父控件下出现黑底黑字。
@@ -3489,6 +3573,17 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
 
     QAction* suspendAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_suspend.svg"), "挂起进程");
     QAction* resumeAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_resume.svg"), "恢复进程");
+    QAction* enableEfficiencyAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_resume.svg"),
+        "开启效率模式（绿叶）");
+    QAction* disableEfficiencyAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_suspend.svg"),
+        "关闭效率模式");
+    if (contextProcessRecord != nullptr && contextProcessRecord->efficiencyModeSupported)
+    {
+        enableEfficiencyAction->setEnabled(!contextProcessRecord->efficiencyModeEnabled);
+        disableEfficiencyAction->setEnabled(contextProcessRecord->efficiencyModeEnabled);
+    }
     QAction* setCriticalAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_critical.svg"), "设为关键进程");
     QAction* clearCriticalAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_uncritical.svg"), "取消关键进程");
     QAction* openFolderAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_open_folder.svg"), "打开所在目录");
@@ -3536,6 +3631,8 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     else if (selectedAction == r0SuspendAction) { executeR0SuspendProcessAction(); }
     else if (selectedAction == suspendAction) { executeSuspendAction(); }
     else if (selectedAction == resumeAction) { executeResumeAction(); }
+    else if (selectedAction == enableEfficiencyAction) { executeSetEfficiencyModeAction(true); }
+    else if (selectedAction == disableEfficiencyAction) { executeSetEfficiencyModeAction(false); }
     else if (selectedAction == setCriticalAction) { executeSetCriticalAction(true); }
     else if (selectedAction == clearCriticalAction) { executeSetCriticalAction(false); }
     else if (selectedAction == openFolderAction) { executeOpenFolderAction(); }
@@ -4972,6 +5069,45 @@ void ProcessDock::executeSetPriorityAction(const int priorityActionId)
     showActionResultMessage("设置进程优先级", actionOk, detailText, actionEvent);
 }
 
+void ProcessDock::executeSetEfficiencyModeAction(const bool enableEfficiencyMode)
+{
+    ks::process::ProcessRecord* processRecord = selectedRecord();
+    if (processRecord == nullptr)
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] executeSetEfficiencyModeAction 被忽略：当前没有选中进程。" << eol;
+        return;
+    }
+
+    std::string detailText;
+    const bool actionOk = ks::process::SetProcessEfficiencyMode(
+        processRecord->pid,
+        enableEfficiencyMode,
+        &detailText);
+    if (actionOk)
+    {
+        processRecord->efficiencyModeSupported = true;
+        processRecord->efficiencyModeEnabled = enableEfficiencyMode;
+        if (m_processTable != nullptr)
+        {
+            m_processTable->viewport()->update();
+        }
+    }
+
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] SetEfficiencyMode action, pid=" << processRecord->pid
+        << ", enable=" << (enableEfficiencyMode ? "true" : "false")
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage(
+        enableEfficiencyMode ? "开启效率模式" : "关闭效率模式",
+        actionOk,
+        detailText,
+        actionEvent);
+}
 void ProcessDock::executeOpenFolderAction()
 {
     ks::process::ProcessRecord* processRecord = selectedRecord();
