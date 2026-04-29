@@ -1,4 +1,4 @@
-﻿#include "process.h"
+#include "process.h"
 
 #include "../string/string.h"
 
@@ -56,6 +56,11 @@ namespace
     // ProcessBreakOnTermination：NtSetInformationProcess 的关键进程信息类。
     constexpr PROCESSINFOCLASS ProcessBreakOnTerminationInfoClass = static_cast<PROCESSINFOCLASS>(29);
 
+    // ProcessPowerThrottling：Get/SetProcessInformation 的效率模式信息类。
+    constexpr ULONG ProcessPowerThrottlingInfoClass = 4UL;
+    constexpr ULONG ProcessPowerThrottlingCurrentVersion = 1UL;
+    constexpr ULONG ProcessPowerThrottlingExecutionSpeed = 0x1UL;
+
     // Restart Manager 关闭标记：
     // - 这里统一使用本地常量，不直接依赖 SDK 是否暴露枚举名字；
     // - 语义等价于 Restart Manager 的强制关闭选项。
@@ -69,6 +74,8 @@ namespace
     // Nt 函数指针类型定义。
     using NtQuerySystemInformationFn = NTSTATUS(NTAPI*)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
     using NtQueryInformationProcessFn = NTSTATUS(NTAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+    using GetProcessInformationFn = BOOL(WINAPI*)(HANDLE, ULONG, LPVOID, DWORD);
+    using SetProcessInformationFn = BOOL(WINAPI*)(HANDLE, ULONG, LPVOID, DWORD);
     using NtSuspendProcessFn = NTSTATUS(NTAPI*)(HANDLE);
     using NtResumeProcessFn = NTSTATUS(NTAPI*)(HANDLE);
     using NtSetInformationProcessFn = NTSTATUS(NTAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG);
@@ -781,6 +788,73 @@ namespace
         }
         return PriorityClassToText(priorityClass);
     }
+    // ProcessPowerThrottlingStateNative：
+    // - 兼容旧 SDK 的本地结构声明；
+    // - controlMask/stateMask 的 ExecutionSpeed 位代表 Windows 效率模式。
+    struct ProcessPowerThrottlingStateNative
+    {
+        ULONG version = 0;
+        ULONG controlMask = 0;
+        ULONG stateMask = 0;
+    };
+
+    // QueryProcessEfficiencyModeByHandle 作用：读取目标进程效率模式状态。
+    bool QueryProcessEfficiencyModeByHandle(
+        const HANDLE processHandle,
+        bool* const enabledOut,
+        std::string* const errorMessage)
+    {
+        if (enabledOut != nullptr)
+        {
+            *enabledOut = false;
+        }
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Process handle is null.";
+            }
+            return false;
+        }
+
+        HMODULE kernel32Module = ::GetModuleHandleW(L"kernel32.dll");
+        const auto getProcessInformation = reinterpret_cast<GetProcessInformationFn>(
+            kernel32Module != nullptr ? ::GetProcAddress(kernel32Module, "GetProcessInformation") : nullptr);
+        if (getProcessInformation == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "GetProcessInformation(ProcessPowerThrottling) is not available.";
+            }
+            return false;
+        }
+
+        ProcessPowerThrottlingStateNative powerState{};
+        powerState.version = ProcessPowerThrottlingCurrentVersion;
+        const BOOL queryOk = getProcessInformation(
+            processHandle,
+            ProcessPowerThrottlingInfoClass,
+            &powerState,
+            static_cast<DWORD>(sizeof(powerState)));
+        if (queryOk == FALSE)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "GetProcessInformation(ProcessPowerThrottling) failed: "
+                    + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        if (enabledOut != nullptr)
+        {
+            *enabledOut =
+                (powerState.controlMask & ProcessPowerThrottlingExecutionSpeed) != 0 &&
+                (powerState.stateMask & ProcessPowerThrottlingExecutionSpeed) != 0;
+        }
+        return true;
+    }
+
 
     // 按 machine 常量转换为架构文本。
     std::string MachineToArchitectureText(const USHORT machineType)
@@ -1426,6 +1500,10 @@ namespace ks::process
 
         // 动态刷新阶段顺带更新优先级/架构文本，便于详情窗口实时展示。
         processRecord.priorityText = QueryPriorityTextByHandle(processHandle);
+        processRecord.efficiencyModeSupported = QueryProcessEfficiencyModeByHandle(
+            processHandle,
+            &processRecord.efficiencyModeEnabled,
+            nullptr);
         if (processRecord.architectureText.empty() || processRecord.architectureText == "Unknown")
         {
             processRecord.architectureText = QueryProcessArchitectureByHandle(processHandle);
@@ -1490,6 +1568,10 @@ namespace ks::process
         processRecord.isAdmin = QueryProcessIsElevatedByHandle(processHandle);
         processRecord.architectureText = QueryProcessArchitectureByHandle(processHandle);
         processRecord.priorityText = QueryPriorityTextByHandle(processHandle);
+        processRecord.efficiencyModeSupported = QueryProcessEfficiencyModeByHandle(
+            processHandle,
+            &processRecord.efficiencyModeEnabled,
+            nullptr);
         if (processRecord.sessionId == 0)
         {
             DWORD sessionId = 0;
@@ -3093,6 +3175,57 @@ namespace ks::process
         if (errorMessage != nullptr)
         {
             *errorMessage = "SetPriorityClass failed: " + FormatLastErrorMessage(setError);
+        }
+        return false;
+    }
+
+    bool SetProcessEfficiencyMode(
+        const std::uint32_t pid,
+        const bool enableEfficiencyMode,
+        std::string* const errorMessage)
+    {
+        HMODULE kernel32Module = ::GetModuleHandleW(L"kernel32.dll");
+        const auto setProcessInformation = reinterpret_cast<SetProcessInformationFn>(
+            kernel32Module != nullptr ? ::GetProcAddress(kernel32Module, "SetProcessInformation") : nullptr);
+        if (setProcessInformation == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "SetProcessInformation(ProcessPowerThrottling) is not available.";
+            }
+            return false;
+        }
+
+        const HANDLE processHandle = ::OpenProcess(PROCESS_SET_INFORMATION, FALSE, ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "OpenProcess(PROCESS_SET_INFORMATION) failed: " + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        ProcessPowerThrottlingStateNative powerState{};
+        powerState.version = ProcessPowerThrottlingCurrentVersion;
+        powerState.controlMask = ProcessPowerThrottlingExecutionSpeed;
+        powerState.stateMask = enableEfficiencyMode ? ProcessPowerThrottlingExecutionSpeed : 0UL;
+        const BOOL setOk = setProcessInformation(
+            processHandle,
+            ProcessPowerThrottlingInfoClass,
+            &powerState,
+            static_cast<DWORD>(sizeof(powerState)));
+        const DWORD setError = ::GetLastError();
+        ::CloseHandle(processHandle);
+        if (setOk != FALSE)
+        {
+            return true;
+        }
+
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "SetProcessInformation(ProcessPowerThrottling) failed: "
+                + FormatLastErrorMessage(setError);
         }
         return false;
     }
