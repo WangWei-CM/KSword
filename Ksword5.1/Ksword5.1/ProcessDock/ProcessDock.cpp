@@ -108,7 +108,7 @@ namespace
     constexpr QSize SideTabIconSize(22, 22);
     constexpr QSize CompactIconButtonSize(28, 28);
     constexpr int ProcessSideTabWidthPx = 38;
-    constexpr int ProcessSideTabHeightPx = 72;
+    constexpr int ProcessSideTabHeightPx = 88;
     constexpr int ProcessNumericSortRole = Qt::UserRole + 200;
     constexpr int ProcessEfficiencyModeRole = Qt::UserRole + 201;
     constexpr int ProcessEfficiencyModeKnownRole = Qt::UserRole + 202;
@@ -1054,8 +1054,8 @@ void ProcessDock::initializeUi()
         m_sideTabWidget->tabBar()->setStyleSheet(QStringLiteral(
             "QTabBar{background:transparent;border:none;}"
             "QTabBar::tab{min-width:%1px;max-width:%1px;min-height:%2px;"
-            "padding:3px 2px;margin:0px;border:none;border-radius:0px;font-size:18px;}"
-            "QTabBar::tab:selected{background-color:%3;color:#FFFFFF;font-weight:700;}"
+            "padding:4px 2px;margin:0px;border:none;border-radius:0px;font-size:15px;}"
+            "QTabBar::tab:selected{background-color:%3;color:#FFFFFF;font-size:18px;font-weight:700;}"
             "QTabBar::tab:hover:!selected{background-color:%4;color:%5;}" )
             .arg(ProcessSideTabWidthPx)
             .arg(ProcessSideTabHeightPx)
