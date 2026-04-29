@@ -1,4 +1,5 @@
 #include "HardwareDock.h"
+#include "MemoryCompositionHistoryWidget.h"
 
 // ============================================================
 // HardwareDock.cpp
@@ -957,8 +958,8 @@ void HardwareDock::initializeUtilizationTab()
     m_utilizationSidebarList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_utilizationSidebarList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_utilizationSidebarList->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_utilizationSidebarList->setSpacing(3);
-    m_utilizationSidebarList->setFixedWidth(286);
+    m_utilizationSidebarList->setSpacing(2);
+    m_utilizationSidebarList->setFixedWidth(268);
     m_utilizationSidebarList->setStyleSheet(
         QStringLiteral(
             "QListWidget{border:none;background:transparent;}"
@@ -1028,6 +1029,10 @@ void HardwareDock::initializeUtilizationSidebarCards()
     if (m_diskNavCard != nullptr)
     {
         m_diskNavCard->setSeriesColors(QColor(80, 170, 255), QColor(255, 190, 105));
+    }
+    if (m_memoryNavCard != nullptr)
+    {
+        m_memoryNavCard->setSeriesColors(QColor(184, 99, 255), QColor(79, 195, 247));
     }
     if (m_networkNavCard != nullptr)
     {
@@ -1183,7 +1188,7 @@ void HardwareDock::adjustUtilizationChartHeights()
     auto adjustMainChartHeight =
         [](
             QWidget* pageWidget,
-            QChartView* chartView,
+            QWidget* chartView,
             const double ratioValue,
             const int minHeightValue,
             const int reserveHeightValue)
@@ -1200,7 +1205,7 @@ void HardwareDock::adjustUtilizationChartHeights()
             chartView->setMaximumHeight(finalHeight);
         };
 
-    adjustMainChartHeight(m_utilizationMemorySubPage, m_memoryUtilChartView, 0.36, 56, 116);
+    adjustMainChartHeight(m_utilizationMemorySubPage, m_memoryCompositionHistoryWidget, 0.36, 56, 116);
     adjustMainChartHeight(m_utilizationDiskSubPage, m_diskUtilChartView, 0.40, 58, 120);
     adjustMainChartHeight(m_utilizationNetworkSubPage, m_networkUtilChartView, 0.40, 58, 120);
 
@@ -1398,40 +1403,9 @@ void HardwareDock::initializeUtilizationMemorySubTab()
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     memorySubLayout->addWidget(m_memoryUtilSummaryLabel, 0);
 
-    m_memoryUtilLineSeries = new QLineSeries(m_utilizationMemorySubPage);
-    m_memoryUtilLineSeries->setColor(QColor(184, 99, 255));
-    for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
-    {
-        m_memoryUtilLineSeries->append(indexValue, 0.0);
-    }
-
-    QChart* memoryChart = new QChart();
-    memoryChart->addSeries(m_memoryUtilLineSeries);
-    memoryChart->legend()->hide();
-    memoryChart->setBackgroundVisible(false);
-    memoryChart->setBackgroundRoundness(0);
-    memoryChart->setMargins(QMargins(0, 0, 0, 0));
-    memoryChart->setTitle(QStringLiteral("内存使用率趋势"));
-
-    m_memoryUtilAxisX = new QValueAxis(memoryChart);
-    m_memoryUtilAxisX->setRange(0, m_historyLength);
-    m_memoryUtilAxisX->setLabelsVisible(false);
-    m_memoryUtilAxisX->setGridLineVisible(true);
-    m_memoryUtilAxisX->setGridLineColor(QColor(184, 99, 255, 35));
-
-    m_memoryUtilAxisY = new QValueAxis(memoryChart);
-    m_memoryUtilAxisY->setRange(0.0, 100.0);
-    m_memoryUtilAxisY->setLabelsVisible(false);
-    m_memoryUtilAxisY->setGridLineVisible(true);
-    m_memoryUtilAxisY->setGridLineColor(QColor(184, 99, 255, 35));
-
-    memoryChart->addAxis(m_memoryUtilAxisX, Qt::AlignBottom);
-    memoryChart->addAxis(m_memoryUtilAxisY, Qt::AlignLeft);
-    m_memoryUtilLineSeries->attachAxis(m_memoryUtilAxisX);
-    m_memoryUtilLineSeries->attachAxis(m_memoryUtilAxisY);
-
-    m_memoryUtilChartView = createNoFrameChartView(memoryChart, m_utilizationMemorySubPage);
-    memorySubLayout->addWidget(m_memoryUtilChartView, 1);
+    m_memoryCompositionHistoryWidget = new MemoryCompositionHistoryWidget(m_utilizationMemorySubPage);
+    m_memoryCompositionHistoryWidget->setMinimumHeight(116);
+    memorySubLayout->addWidget(m_memoryCompositionHistoryWidget, 1);
 
     QHBoxLayout* detailLayout = new QHBoxLayout();
     detailLayout->setSpacing(16);
@@ -2768,12 +2742,25 @@ void HardwareDock::updateUtilizationView(
         m_memoryUtilSummaryLabel->setText(
             QStringLiteral("当前内存占用：%1%").arg(memoryUsagePercent, 0, 'f', 1));
     }
-    appendGeneralSeriesPoint(
-        m_memoryUtilLineSeries,
-        m_memoryUtilAxisX,
-        m_memoryUtilAxisY,
-        memoryUsagePercent,
-        0.0);
+    if (m_memoryCompositionHistoryWidget != nullptr)
+    {
+        MemoryCompositionHistoryWidget::CompositionSample memorySample;
+        memorySample.usedPercent = memoryUsagePercent;
+
+        SystemPerformanceSnapshot perfSnapshot;
+        const bool perfOk = sampleSystemPerformanceSnapshot(&perfSnapshot);
+        MEMORYSTATUSEX memoryStatus{};
+        memoryStatus.dwLength = sizeof(memoryStatus);
+        const bool memoryStatusOk = (::GlobalMemoryStatusEx(&memoryStatus) == TRUE);
+        if (perfOk && memoryStatusOk && memoryStatus.ullTotalPhys > 0ULL)
+        {
+            const double totalPhysicalBytes = static_cast<double>(memoryStatus.ullTotalPhys);
+            memorySample.cachedPercent = static_cast<double>(perfSnapshot.cachedBytes) / totalPhysicalBytes * 100.0;
+            memorySample.pagedPoolPercent = static_cast<double>(perfSnapshot.pagedPoolBytes) / totalPhysicalBytes * 100.0;
+            memorySample.nonPagedPoolPercent = static_cast<double>(perfSnapshot.nonPagedPoolBytes) / totalPhysicalBytes * 100.0;
+        }
+        m_memoryCompositionHistoryWidget->appendSample(memorySample);
+    }
 
     // 磁盘子页：更新读写速率摘要与折线趋势。
     if (m_diskUtilSummaryLabel != nullptr)
@@ -2933,12 +2920,41 @@ void HardwareDock::updateUtilizationSidebarCards(
         const double totalGiB = static_cast<double>(memoryStatus.ullTotalPhys) / (1024.0 * 1024.0 * 1024.0);
         const double usedGiB =
             static_cast<double>(memoryStatus.ullTotalPhys - memoryStatus.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
+        const double cachedPercent = std::clamp(
+            100.0 - memoryUsagePercent,
+            0.0,
+            100.0);
+        const int historyCapacity = std::max(1, m_memoryNavCard->sampleCapacity());
+        m_memoryNavUsedHistoryPercent.push_back(memoryUsagePercent);
+        m_memoryNavCachedHistoryPercent.push_back(cachedPercent);
+        while (static_cast<int>(m_memoryNavUsedHistoryPercent.size()) > historyCapacity)
+        {
+            m_memoryNavUsedHistoryPercent.erase(m_memoryNavUsedHistoryPercent.begin());
+        }
+        while (static_cast<int>(m_memoryNavCachedHistoryPercent.size()) > historyCapacity)
+        {
+            m_memoryNavCachedHistoryPercent.erase(m_memoryNavCachedHistoryPercent.begin());
+        }
+
+        QVector<double> usedSampleList;
+        QVector<double> cachedSampleList;
+        usedSampleList.reserve(static_cast<int>(m_memoryNavUsedHistoryPercent.size()));
+        cachedSampleList.reserve(static_cast<int>(m_memoryNavCachedHistoryPercent.size()));
+        for (const double usedSampleValue : m_memoryNavUsedHistoryPercent)
+        {
+            usedSampleList.push_back(std::clamp(usedSampleValue, 0.0, 100.0));
+        }
+        for (const double cachedSampleValue : m_memoryNavCachedHistoryPercent)
+        {
+            cachedSampleList.push_back(std::clamp(cachedSampleValue, 0.0, 100.0));
+        }
+
         m_memoryNavCard->setSubtitleText(
-            QStringLiteral("%1/%2 GB (%3%)")
+            QStringLiteral("用 %1/%2 GB / 余 %3%")
             .arg(usedGiB, 0, 'f', 1)
             .arg(totalGiB, 0, 'f', 1)
-            .arg(memoryUsagePercent, 0, 'f', 0));
-        m_memoryNavCard->appendSample(memoryUsagePercent);
+            .arg(cachedPercent, 0, 'f', 0));
+        m_memoryNavCard->setSampleSeries(usedSampleList, cachedSampleList);
     }
 
     if (m_diskNavCard != nullptr)

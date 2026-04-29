@@ -1,4 +1,4 @@
-#include "BootEditorTab.h"
+﻿#include "BootEditorTab.h"
 
 #include "../../theme.h"
 
@@ -60,21 +60,7 @@ namespace
     // - 与项目蓝色主题保持一致。
     QString buildBlueToolButtonStyle()
     {
-        return QStringLiteral(
-            "QToolButton{"
-            "  color:%1;"
-            "  background:%5;"
-            "  border:1px solid %2;"
-            "  border-radius:3px;"
-            "  padding:3px 8px;"
-            "}"
-            "QToolButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
-            "QToolButton:pressed{background:%4;color:#FFFFFF;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
-            .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(KswordTheme::SurfaceHex());
+        return KswordTheme::ThemedButtonStyle();
     }
 
     // buildBlueInputStyle：
@@ -227,7 +213,7 @@ void BootEditorTab::initializeToolbar()
         : QStringLiteral("权限：非管理员（多数写操作会失败）"));
     m_adminHintLabel->setStyleSheet(
         elevated
-        ? QStringLiteral("color:#2E8BFF;font-weight:600;")
+        ? QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::PrimaryBlueHex)
         : QStringLiteral("color:#D97706;font-weight:600;"));
     m_toolbarLayout->addWidget(m_adminHintLabel);
 }

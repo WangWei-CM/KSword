@@ -1,5 +1,6 @@
-
+﻿
 #include "MonitorDock.h"
+#include "DirectKernelCallMonitorWidget.h"
 #include "MonitorTextViewer.h"
 #include "ProcessTraceMonitorWidget.h"
 #include "WinAPIDock.h"
@@ -95,15 +96,7 @@ namespace
     // 按主题统一按钮风格。
     QString blueButtonStyle()
     {
-        return QStringLiteral(
-            "QPushButton{color:%1;background:%5;border:1px solid %2;border-radius:3px;padding:4px 8px;}"
-            "QPushButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
-            "QPushButton:pressed{background:%4;color:#FFFFFF;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
-            .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(KswordTheme::SurfaceHex());
+        return KswordTheme::ThemedButtonStyle();
     }
 
     // 输入框统一样式。
@@ -3695,6 +3688,16 @@ void MonitorDock::activateMonitorTab(const QString& tabKey)
     }
 
     const QString normalizedKey = tabKey.trimmed().toLower();
+    if (normalizedKey == QStringLiteral("direct-kernel-call")
+        || normalizedKey == QStringLiteral("directkernelcall")
+        || normalizedKey == QStringLiteral("syscall"))
+    {
+        if (m_directKernelCallWidget != nullptr)
+        {
+            m_sideTabWidget->setCurrentWidget(m_directKernelCallWidget);
+        }
+        return;
+    }
     if (normalizedKey == QStringLiteral("winapi"))
     {
         ensureWinApiTabInitialized();
@@ -3775,6 +3778,12 @@ void MonitorDock::initializeUi()
         m_processTraceWidget,
         QIcon(QStringLiteral(":/Icon/process_main.svg")),
         QStringLiteral("进程定向"));
+
+    m_directKernelCallWidget = new DirectKernelCallMonitorWidget(m_sideTabWidget);
+    m_sideTabWidget->addTab(
+        m_directKernelCallWidget,
+        QIcon(QStringLiteral(":/Icon/process_threads.svg")),
+        QStringLiteral("直接内核调用"));
 
     m_winApiPage = new QWidget(m_sideTabWidget);
     QVBoxLayout* winApiPageLayout = new QVBoxLayout(m_winApiPage);

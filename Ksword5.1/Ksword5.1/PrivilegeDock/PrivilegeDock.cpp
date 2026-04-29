@@ -1,4 +1,4 @@
-#include "PrivilegeDock.h"
+﻿#include "PrivilegeDock.h"
 
 // ============================================================
 // PrivilegeDock.cpp
@@ -42,15 +42,7 @@ namespace
     // - 统一按钮风格，保证权限页视觉与其他 Dock 一致。
     QString blueButtonStyle()
     {
-        return QStringLiteral(
-            "QPushButton{color:%1;background:%5;border:1px solid %2;border-radius:3px;padding:3px 8px;}"
-            "QPushButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
-            "QPushButton:pressed{background:%4;color:#FFFFFF;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
-            .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(KswordTheme::SurfaceHex());
+        return KswordTheme::ThemedButtonStyle();
     }
 
     // blueInputStyle 作用：

@@ -1,4 +1,4 @@
-#include "ProcessDock.h"
+﻿#include "ProcessDock.h"
 
 #include "../theme.h"
 
@@ -79,7 +79,7 @@ namespace
             "}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
             .arg(KswordTheme::PrimaryBluePressedHex)
             .arg(paddingText)
             .arg(KswordTheme::SurfaceHex());
@@ -615,19 +615,10 @@ QString ProcessDock::buildThreadContextMenuStyle() const
     // 右键菜单高风险点处理：
     // - 明确写死深浅色下背景与文字颜色；
     // - 禁止依赖默认样式，避免浅色模式出现黑底黑字问题。
-    const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
-    const QString menuBackgroundColor = darkModeEnabled
-        ? QStringLiteral("#111111")
-        : QStringLiteral("#FFFFFF");
-    const QString menuTextColor = darkModeEnabled
-        ? QStringLiteral("#F3F3F3")
-        : QStringLiteral("#111111");
-    const QString menuBorderColor = darkModeEnabled
-        ? QStringLiteral("#2C2C2C")
-        : QStringLiteral("#D5DCE4");
-    const QString menuDisabledColor = darkModeEnabled
-        ? QStringLiteral("#7A7A7A")
-        : QStringLiteral("#9AA3AD");
+    const QString menuBackgroundColor = KswordTheme::SurfaceColorHex();
+    const QString menuTextColor = KswordTheme::TextPrimaryColorHex();
+    const QString menuBorderColor = KswordTheme::BorderColorHex();
+    const QString menuDisabledColor = KswordTheme::TextDisabledColorHex();
 
     return QStringLiteral(
         "QMenu{"

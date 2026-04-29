@@ -1,4 +1,4 @@
-#include "ThemedMessageBox.h"
+﻿#include "ThemedMessageBox.h"
 
 #include "../theme.h"
 
@@ -92,43 +92,43 @@ namespace
     // messageBoxWindowColor 作用：返回消息框主背景色。
     QColor messageBoxWindowColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(16, 21, 28) : QColor(248, 251, 255);
+        return darkModeEnabled ? QColor(10, 15, 22) : QColor(248, 251, 255);
     }
 
     // messageBoxSurfaceColor 作用：返回消息框内部面板色。
     QColor messageBoxSurfaceColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(23, 29, 38) : QColor(255, 255, 255);
+        return darkModeEnabled ? QColor(17, 25, 36) : QColor(255, 255, 255);
     }
 
     // messageBoxBorderColor 作用：返回消息框边框色。
     QColor messageBoxBorderColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(45, 62, 82) : QColor(198, 215, 234);
+        return darkModeEnabled ? QColor(55, 80, 106) : QColor(190, 211, 233);
     }
 
     // messageBoxTextColor 作用：返回消息框主文本色。
     QColor messageBoxTextColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(237, 244, 255) : QColor(20, 33, 51);
+        return darkModeEnabled ? QColor(237, 246, 255) : QColor(16, 35, 54);
     }
 
     // messageBoxSecondaryTextColor 作用：返回说明文本色。
     QColor messageBoxSecondaryTextColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(183, 197, 216) : QColor(81, 97, 116);
+        return darkModeEnabled ? QColor(179, 198, 218) : QColor(79, 99, 120);
     }
 
     // messageBoxSecondaryButtonColor 作用：返回次级按钮底色。
     QColor messageBoxSecondaryButtonColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(21, 27, 36) : QColor(255, 255, 255);
+        return darkModeEnabled ? QColor(24, 35, 50) : QColor(255, 255, 255);
     }
 
     // messageBoxSecondaryButtonHoverColor 作用：返回次级按钮悬停底色。
     QColor messageBoxSecondaryButtonHoverColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(27, 37, 49) : QColor(234, 244, 255);
+        return darkModeEnabled ? QColor(30, 43, 60) : QColor(234, 244, 255);
     }
 
     // buildMessageBoxStyleSheet 作用：
@@ -201,15 +201,15 @@ namespace
             "  font-weight:700;"
             "}"
             "QMessageBox#%1 QPushButton[ksword_primary=\"true\"]:hover{"
-            "  background:#2E8BFF;"
-            "  border-color:#2E8BFF;"
+            "  background:__MESSAGE_PRIMARY_HOVER__;"
+            "  border-color:__MESSAGE_PRIMARY_HOVER__;"
             "}"
             "QMessageBox#%1 QPushButton[ksword_primary=\"true\"]:pressed{"
             "  background:%9;"
             "  border-color:%9;"
             "}"
             "QMessageBox#%1 QTextEdit{"
-            "  background:%10;"
+            "  background:__MESSAGE_SURFACE__;"
             "  color:%3;"
             "  border:1px solid %4;"
             "  border-radius:6px;"
@@ -226,7 +226,8 @@ namespace
             .arg(secondaryButtonHoverColorText)
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(surfaceColorText);
+            .replace(QStringLiteral("__MESSAGE_SURFACE__"), surfaceColorText)
+            .replace(QStringLiteral("__MESSAGE_PRIMARY_HOVER__"), KswordTheme::PrimaryBlueSolidHoverHex());
     }
 
     // buildMessageBoxPalette 作用：

@@ -1,4 +1,4 @@
-#include "ProcessDock.h"
+﻿#include "ProcessDock.h"
 
 #include "../theme.h"
 #include "ProcessDetailWindow.h"
@@ -28,6 +28,7 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
@@ -37,6 +38,7 @@
 #include <QScrollArea>
 #include <QShortcut>
 #include <QSignalBlocker>
+#include <QStyledItemDelegate>
 #include <QSlider>
 #include <QScrollBar>
 #include <QSvgRenderer>
@@ -102,10 +104,13 @@ namespace
         "H:/Project/Ksword5.1/Ksword5.1/Ksword5.1/Resource/Kernel.png");
 
     // 默认按钮图标尺寸。
-    constexpr QSize DefaultIconSize(16, 16);
+    constexpr QSize DefaultIconSize(18, 18);
+    constexpr QSize SideTabIconSize(22, 22);
     constexpr QSize CompactIconButtonSize(28, 28);
-    constexpr int ProcessSideTabWidthPx = 118;
+    constexpr int ProcessSideTabMinHeightPx = 72;
     constexpr int ProcessNumericSortRole = Qt::UserRole + 200;
+    constexpr int ProcessEfficiencyModeRole = Qt::UserRole + 201;
+    constexpr int ProcessEfficiencyModeKnownRole = Qt::UserRole + 202;
 
     class ProcessSortTreeWidgetItem final : public QTreeWidgetItem
     {
@@ -128,6 +133,68 @@ namespace
                 return text(sortColumn).localeAwareCompare(otherItem.text(sortColumn)) < 0;
             }
             return QTreeWidgetItem::operator<(otherItem);
+        }
+    };
+    // ProcessNameDelegate 作用：在“进程名”列右侧绘制效率模式绿叶，不新增表格列。
+    class ProcessNameDelegate final : public QStyledItemDelegate
+    {
+    public:
+        explicit ProcessNameDelegate(QObject* parent = nullptr)
+            : QStyledItemDelegate(parent)
+        {
+        }
+
+        void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+        {
+            QStyleOptionViewItem itemOption(option);
+            if (index.column() == 0 && index.data(ProcessEfficiencyModeRole).toBool())
+            {
+                itemOption.rect.adjust(0, 0, -22, 0);
+            }
+            QStyledItemDelegate::paint(painter, itemOption, index);
+
+            if (index.column() != 0 || !index.data(ProcessEfficiencyModeRole).toBool())
+            {
+                return;
+            }
+            if (painter == nullptr)
+            {
+                return;
+            }
+
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing, true);
+            const int iconSize = std::min(16, std::max(10, option.rect.height() - 6));
+            const QRect leafRect(
+                option.rect.right() - iconSize - 5,
+                option.rect.center().y() - iconSize / 2,
+                iconSize,
+                iconSize);
+            const QColor leafColor = KswordTheme::IsDarkModeEnabled()
+                ? QColor(101, 216, 120)
+                : QColor(32, 166, 72);
+            QPainterPath leafPath;
+            leafPath.moveTo(leafRect.left() + leafRect.width() * 0.18, leafRect.center().y());
+            leafPath.cubicTo(
+                leafRect.left() + leafRect.width() * 0.32,
+                leafRect.top() + leafRect.height() * 0.08,
+                leafRect.right() - leafRect.width() * 0.10,
+                leafRect.top() + leafRect.height() * 0.06,
+                leafRect.right() - leafRect.width() * 0.08,
+                leafRect.center().y());
+            leafPath.cubicTo(
+                leafRect.right() - leafRect.width() * 0.10,
+                leafRect.bottom() - leafRect.height() * 0.08,
+                leafRect.left() + leafRect.width() * 0.30,
+                leafRect.bottom() - leafRect.height() * 0.05,
+                leafRect.left() + leafRect.width() * 0.18,
+                leafRect.center().y());
+            painter->fillPath(leafPath, leafColor);
+            painter->setPen(QPen(QColor(255, 255, 255, 210), 1.2));
+            painter->drawLine(
+                QPointF(leafRect.left() + leafRect.width() * 0.28, leafRect.bottom() - leafRect.height() * 0.25),
+                QPointF(leafRect.right() - leafRect.width() * 0.20, leafRect.top() + leafRect.height() * 0.22));
+            painter->restore();
         }
     };
 
@@ -695,7 +762,7 @@ namespace
             "}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
             .arg(KswordTheme::PrimaryBluePressedHex)
             .arg(paddingText)
             .arg(KswordTheme::SurfaceHex());
@@ -704,31 +771,39 @@ namespace
     // 下拉框主题描边样式，保持与按钮同色系。
     QString buildBlueComboBoxStyle()
     {
+        const QString comboBackgroundColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#172232")
+            : QStringLiteral("#FFFFFF");
+        const QString comboTextColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#F4F8FF")
+            : QStringLiteral("#172B43");
+        const QString comboBorderColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#34506D")
+            : QStringLiteral("#AFC4DC");
+
         return QStringLiteral(
-            "QComboBox {"
-            "  border: 1px solid %1;"
-            "  border-radius: 4px;"
-            "  padding: 2px 8px;"
-            "  color: %4;"
-            "  background: %5;"
+            "QComboBox{"
+            "  background-color:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  border-radius:3px;"
+            "  padding:2px 20px 2px 6px;"
             "}"
-            "QComboBox:hover {"
-            "  border-color: %2;"
-            "  background: %3;"
+            "QComboBox::drop-down{"
+            "  border:none;"
+            "  width:18px;"
             "}"
-            "QComboBox::drop-down {"
-            "  border: none;"
-            "  width: 20px;"
-            "}"
-            "QComboBox QAbstractItemView {"
-            "  border: 1px solid %1;"
-            "  selection-background-color: %3;"
+            "QComboBox QAbstractItemView{"
+            "  background-color:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  selection-background-color:%4;"
+            "  selection-color:%2;"
             "}")
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
-            .arg(KswordTheme::TextPrimaryHex())
-            .arg(KswordTheme::SurfaceHex());
+            .arg(comboBackgroundColor)
+            .arg(comboTextColor)
+            .arg(comboBorderColor)
+            .arg(KswordTheme::PrimaryBlueHex);
     }
 
     // 统一“普通输入框”主题边框。
@@ -966,27 +1041,21 @@ void ProcessDock::initializeUi()
     m_sideTabWidget = new QTabWidget(this);
     m_sideTabWidget->setTabPosition(QTabWidget::West);
     m_sideTabWidget->setDocumentMode(true);
-    m_sideTabWidget->setIconSize(DefaultIconSize);
+    m_sideTabWidget->setIconSize(SideTabIconSize);
 
-    // 左侧页签宽度控制：
-    // 1) West Tab 默认会被全局 min-width 放大，信息密度偏低；
-    // 2) 这里固定为进程页专用宽度，保证文字完整且不挤压表格。
+    // 左侧页签使用内容自适应宽度，避免固定宽度导致不同字号/语言下被截断。
     if (m_sideTabWidget->tabBar() != nullptr)
     {
-        m_sideTabWidget->tabBar()->setFixedWidth(ProcessSideTabWidthPx);
         m_sideTabWidget->tabBar()->setExpanding(false);
+        m_sideTabWidget->tabBar()->setUsesScrollButtons(true);
         m_sideTabWidget->tabBar()->setStyleSheet(QStringLiteral(
-            "QTabBar{background:transparent;border-right:1px solid %1;border-bottom:none;}"
-            "QTabBar::tab{min-width:%2px;max-width:%2px;padding:7px 6px;margin:0px;"
-            "border:1px solid %1;border-left:none;border-right:none;border-radius:0px;}"
-            "QTabBar::tab:selected{background-color:%3;color:#FFFFFF;border-color:%1;"
-            "border-left:3px solid %4;font-weight:700;}"
-            "QTabBar::tab:hover:!selected{background-color:%5;color:%6;}" )
-            .arg(KswordTheme::BorderHex())
-            .arg(ProcessSideTabWidthPx - 2)
-            .arg(KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#1F5F99") : QStringLiteral("#164B82"))
-            .arg(KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#7FC1FF") : KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::IsDarkModeEnabled() ? QStringLiteral("#213247") : QStringLiteral("#E5F1FF"))
+            "QTabBar{background:transparent;border:none;}"
+            "QTabBar::tab{min-height:%1px;padding:6px 8px;margin:0px;border:none;border-radius:0px;font-size:15px;}"
+            "QTabBar::tab:selected{background-color:%2;color:#FFFFFF;font-size:18px;font-weight:700;}"
+            "QTabBar::tab:hover:!selected{background-color:%3;color:%4;}" )
+            .arg(ProcessSideTabMinHeightPx)
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::SurfaceAltHex())
             .arg(KswordTheme::TextPrimaryHex()));
     }
 
@@ -1137,6 +1206,9 @@ void ProcessDock::initializeProcessTable()
     m_processTable->setSortingEnabled(true);
     m_processTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_processTable->setAlternatingRowColors(true);
+    m_processTable->setItemDelegateForColumn(
+        toColumnIndex(TableColumn::Name),
+        new ProcessNameDelegate(m_processTable));
     // 列宽由自适应逻辑统一控制，强制关闭内部横向滚动条。
     m_processTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
@@ -2934,7 +3006,7 @@ void ProcessDock::rebuildTable()
         {
             continue;
         }
-        maxRamMB = std::max(maxRamMB, displayRow.record->ramMB);
+        maxRamMB = std::max(maxRamMB, displayRow.record->workingSetMB);
         maxDiskMBps = std::max(maxDiskMBps, displayRow.record->diskMBps);
         maxNetKBps = std::max(maxNetKBps, displayRow.record->netKBps);
     }
@@ -2988,13 +3060,22 @@ void ProcessDock::rebuildTable()
         // 排序键使用原始数值：展示文本可以带单位，但排序必须按真实大小比较。
         rowItem->setData(toColumnIndex(TableColumn::Pid), ProcessNumericSortRole, static_cast<double>(processRecord.pid));
         rowItem->setData(toColumnIndex(TableColumn::Cpu), ProcessNumericSortRole, processRecord.cpuPercent);
-        rowItem->setData(toColumnIndex(TableColumn::Ram), ProcessNumericSortRole, processRecord.ramMB);
+        rowItem->setData(toColumnIndex(TableColumn::Ram), ProcessNumericSortRole, processRecord.workingSetMB);
         rowItem->setData(toColumnIndex(TableColumn::Disk), ProcessNumericSortRole, processRecord.diskMBps);
         rowItem->setData(toColumnIndex(TableColumn::Gpu), ProcessNumericSortRole, processRecord.gpuPercent);
         rowItem->setData(toColumnIndex(TableColumn::Net), ProcessNumericSortRole, processRecord.netKBps);
         rowItem->setData(toColumnIndex(TableColumn::ParentPid), ProcessNumericSortRole, static_cast<double>(processRecord.parentPid));
         rowItem->setData(toColumnIndex(TableColumn::StartTime), ProcessNumericSortRole, static_cast<double>(processRecord.creationTime100ns));
         rowItem->setData(toColumnIndex(TableColumn::IsAdmin), ProcessNumericSortRole, processRecord.isAdmin ? 1.0 : 0.0);
+        rowItem->setData(toColumnIndex(TableColumn::Name), ProcessEfficiencyModeKnownRole, processRecord.efficiencyModeSupported);
+        rowItem->setData(toColumnIndex(TableColumn::Name), ProcessEfficiencyModeRole, processRecord.efficiencyModeEnabled);
+        if (processRecord.efficiencyModeEnabled)
+        {
+            rowItem->setToolTip(
+                toColumnIndex(TableColumn::Name),
+                QStringLiteral("%1\n效率模式已启用")
+                    .arg(QString::fromStdString(processRecord.processName)));
+        }
 
         // 进程名列固定显示目标 EXE 图标（命中缓存后开销可控）。
         rowItem->setIcon(toColumnIndex(TableColumn::Name), resolveProcessIcon(processRecord));
@@ -3056,7 +3137,7 @@ void ProcessDock::rebuildTable()
             // 常规行按占用比例做主题色高亮（CPU/RAM/DISK/GPU/NET）。
             const double cpuUsageRatio = std::clamp(processRecord.cpuPercent / 100.0, 0.0, 1.0);
             const double ramUsageRatio = (maxRamMB > 0.0)
-                ? std::clamp(processRecord.ramMB / maxRamMB, 0.0, 1.0)
+                ? std::clamp(processRecord.workingSetMB / maxRamMB, 0.0, 1.0)
                 : 0.0;
             const double diskUsageRatio = (maxDiskMBps > 0.0)
                 ? std::clamp(processRecord.diskMBps / maxDiskMBps, 0.0, 1.0)
@@ -3379,6 +3460,7 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         m_processTable->setCurrentItem(clickedItem, clickedColumn);
     }
     bindContextActionToItem(clickedItem);
+    ks::process::ProcessRecord* contextProcessRecord = selectedRecord();
 
     QMenu contextMenu(this);
     // 右键菜单显式样式：避免浅色模式在透明父控件下出现黑底黑字。
@@ -3486,6 +3568,17 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
 
     QAction* suspendAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_suspend.svg"), "挂起进程");
     QAction* resumeAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_resume.svg"), "恢复进程");
+    QAction* enableEfficiencyAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_resume.svg"),
+        "开启效率模式（绿叶）");
+    QAction* disableEfficiencyAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_suspend.svg"),
+        "关闭效率模式");
+    if (contextProcessRecord != nullptr && contextProcessRecord->efficiencyModeSupported)
+    {
+        enableEfficiencyAction->setEnabled(!contextProcessRecord->efficiencyModeEnabled);
+        disableEfficiencyAction->setEnabled(contextProcessRecord->efficiencyModeEnabled);
+    }
     QAction* setCriticalAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_critical.svg"), "设为关键进程");
     QAction* clearCriticalAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_uncritical.svg"), "取消关键进程");
     QAction* openFolderAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_open_folder.svg"), "打开所在目录");
@@ -3533,6 +3626,8 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     else if (selectedAction == r0SuspendAction) { executeR0SuspendProcessAction(); }
     else if (selectedAction == suspendAction) { executeSuspendAction(); }
     else if (selectedAction == resumeAction) { executeResumeAction(); }
+    else if (selectedAction == enableEfficiencyAction) { executeSetEfficiencyModeAction(true); }
+    else if (selectedAction == disableEfficiencyAction) { executeSetEfficiencyModeAction(false); }
     else if (selectedAction == setCriticalAction) { executeSetCriticalAction(true); }
     else if (selectedAction == clearCriticalAction) { executeSetCriticalAction(false); }
     else if (selectedAction == openFolderAction) { executeOpenFolderAction(); }
@@ -3734,9 +3829,9 @@ QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processR
         // CPU 改为两位小数，避免低占用进程全部显示 0.0 的视觉误差。
         return QString::number(processRecord.cpuPercent, 'f', 2) + "%";
     case TableColumn::Ram:
-        return QStringLiteral("申请 %1 MB / 使用 %2 MB")
-            .arg(processRecord.ramMB, 0, 'f', 1)
-            .arg(processRecord.workingSetMB, 0, 'f', 1);
+        return QStringLiteral("使用 %1 MB / 申请 %2 MB")
+            .arg(processRecord.workingSetMB, 0, 'f', 1)
+            .arg(processRecord.ramMB, 0, 'f', 1);
     case TableColumn::Disk:
         return QString::number(processRecord.diskMBps, 'f', 2) + " MB/s";
     case TableColumn::Gpu:
@@ -4969,6 +5064,45 @@ void ProcessDock::executeSetPriorityAction(const int priorityActionId)
     showActionResultMessage("设置进程优先级", actionOk, detailText, actionEvent);
 }
 
+void ProcessDock::executeSetEfficiencyModeAction(const bool enableEfficiencyMode)
+{
+    ks::process::ProcessRecord* processRecord = selectedRecord();
+    if (processRecord == nullptr)
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] executeSetEfficiencyModeAction 被忽略：当前没有选中进程。" << eol;
+        return;
+    }
+
+    std::string detailText;
+    const bool actionOk = ks::process::SetProcessEfficiencyMode(
+        processRecord->pid,
+        enableEfficiencyMode,
+        &detailText);
+    if (actionOk)
+    {
+        processRecord->efficiencyModeSupported = true;
+        processRecord->efficiencyModeEnabled = enableEfficiencyMode;
+        if (m_processTable != nullptr)
+        {
+            m_processTable->viewport()->update();
+        }
+    }
+
+    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+    kLogEvent actionEvent;
+    (actionOk ? info : err) << actionEvent
+        << "[ProcessDock] SetEfficiencyMode action, pid=" << processRecord->pid
+        << ", enable=" << (enableEfficiencyMode ? "true" : "false")
+        << ", ok=" << (actionOk ? "true" : "false")
+        << ", detail=" << detailText
+        << eol;
+    showActionResultMessage(
+        enableEfficiencyMode ? "开启效率模式" : "关闭效率模式",
+        actionOk,
+        detailText,
+        actionEvent);
+}
 void ProcessDock::executeOpenFolderAction()
 {
     ks::process::ProcessRecord* processRecord = selectedRecord();

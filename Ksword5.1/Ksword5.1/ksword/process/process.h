@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // ============================================================
 // ksword/process/process.h
@@ -174,6 +174,8 @@ namespace ks::process
         std::string startTimeText;         // 启动时间文本（YYYY-MM-DD HH:MM:SS）。
         std::string architectureText;      // 架构文本（x64/x86/ARM/Unknown）。
         std::string priorityText;          // 优先级文本（Normal/High/...）。
+        bool efficiencyModeSupported = false; // 是否成功查询效率模式状态。
+        bool efficiencyModeEnabled = false;   // 是否启用效率模式（PowerThrottling ExecutionSpeed）。
         bool isAdmin = false;              // 进程令牌是否已提升（管理员权限）。
 
         // ======== 原始性能计数器（用于相邻两轮差值计算） ========
@@ -396,6 +398,9 @@ namespace ks::process
 
     // SetProcessPriority 作用：设置进程优先级（SetPriorityClass）。
     bool SetProcessPriority(std::uint32_t pid, ProcessPriorityLevel priorityLevel, std::string* errorMessage);
+
+    // SetProcessEfficiencyMode 作用：启用/关闭 Windows 进程效率模式（PowerThrottling）。
+    bool SetProcessEfficiencyMode(std::uint32_t pid, bool enableEfficiencyMode, std::string* errorMessage);
 
     // OpenProcessFolder 作用：在资源管理器定位该进程路径所在文件。
     bool OpenProcessFolder(std::uint32_t pid, std::string* errorMessage);

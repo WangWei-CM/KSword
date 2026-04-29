@@ -47,23 +47,19 @@ namespace
     // 统一按钮风格：与主界面保持同一主题。
     QString blueButtonStyle()
     {
-        return QStringLiteral(
-            "QPushButton{color:%1;background:#FFFFFF;border:1px solid %2;border-radius:3px;padding:3px 8px;}"
-            "QPushButton:hover{background:%3;}"
-            "QPushButton:pressed{background:%4;color:#FFFFFF;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
-            .arg(KswordTheme::PrimaryBluePressedHex);
+        return KswordTheme::ThemedButtonStyle();
     }
 
     // 统一输入框风格：路径栏、搜索栏复用同一套样式。
     QString blueInputStyle()
     {
         return QStringLiteral(
-            "QLineEdit{border:1px solid #C8DDF4;border-radius:3px;background:#FFFFFF;padding:2px 6px;}"
+            "QLineEdit{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
             "QLineEdit:focus{border:1px solid %1;}")
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex());
     }
 
     // 表头风格：提升信息密集列表的可读性。

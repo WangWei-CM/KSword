@@ -3,7 +3,7 @@
 // ==============================
 // theme.h
 // 统一管理项目主题色常量，避免各处硬编码颜色值。
-// 本文件当前先收敛“欢迎页同款蓝色”及其常用衍生色。
+// 本文件收敛全局深浅主题色板、主色与常用语义色，避免各处硬编码颜色值。
 // ==============================
 
 #include <QColor>   // QColor：用于 Qt 绘制与样式着色。
@@ -19,14 +19,23 @@ namespace KswordTheme
     // PrimaryBlueColor：主蓝色 QColor 形式，便于图标重着色与绘图。
     inline const QColor PrimaryBlueColor(67, 160, 255);
 
-    // PrimaryBlueHoverHex：主蓝色悬停背景（浅蓝）。
-    inline const QString PrimaryBlueHoverHex = QStringLiteral("#EAF4FF");
+    // PrimaryBlueHoverHex：主蓝色弱悬停背景（浅蓝）。
+    inline const QString PrimaryBlueHoverHex = QStringLiteral("#DFF0FF");
 
     // PrimaryBluePressedHex：主蓝色按下背景（更深蓝）。
-    inline const QString PrimaryBluePressedHex = QStringLiteral("#2880DD");
+    inline const QString PrimaryBluePressedHex = QStringLiteral("#1F7FD9");
 
     // PrimaryBlueBorderHex：统一边框蓝（与主蓝一致，便于语义命名）。
     inline const QString PrimaryBlueBorderHex = PrimaryBlueHex;
+
+    // PrimaryBlueActiveHex：主色实底悬停色，适合蓝底白字控件。
+    inline const QString PrimaryBlueActiveHex = QStringLiteral("#2F92FF");
+
+    // PrimaryBlueSubtleDarkHex：深色模式下主色弱背景。
+    inline const QString PrimaryBlueSubtleDarkHex = QStringLiteral("#173553");
+
+    // PrimaryBlueSubtleLightHex：浅色模式下主色弱背景。
+    inline const QString PrimaryBlueSubtleLightHex = QStringLiteral("#EAF4FF");
 
     // DarkModePropertyKey：应用级主题状态属性键。
     inline const char* DarkModePropertyKey = "ksword_dark_mode_enabled";
@@ -56,6 +65,123 @@ namespace KswordTheme
             return false;
         }
         return qApp->property(DarkModePropertyKey).toBool();
+    }
+
+    // WindowColor 作用：返回应用窗口底色。
+    inline QColor WindowColor()
+    {
+        return IsDarkModeEnabled() ? QColor(10, 15, 22) : QColor(248, 251, 255);
+    }
+
+    // SurfaceColor 作用：返回基础内容面板色。
+    inline QColor SurfaceColor()
+    {
+        return IsDarkModeEnabled() ? QColor(17, 25, 36) : QColor(255, 255, 255);
+    }
+
+    // SurfaceAltColor 作用：返回次级内容面板色。
+    inline QColor SurfaceAltColor()
+    {
+        return IsDarkModeEnabled() ? QColor(24, 35, 50) : QColor(243, 248, 255);
+    }
+
+    // SurfaceMutedColor 作用：返回弱层次背景色。
+    inline QColor SurfaceMutedColor()
+    {
+        return IsDarkModeEnabled() ? QColor(30, 43, 60) : QColor(226, 241, 255);
+    }
+
+    // BorderColor 作用：返回中性边框色。
+    inline QColor BorderColor()
+    {
+        return IsDarkModeEnabled() ? QColor(55, 80, 106) : QColor(190, 211, 233);
+    }
+
+    // BorderStrongColor 作用：返回强调边框色。
+    inline QColor BorderStrongColor()
+    {
+        return IsDarkModeEnabled() ? QColor(72, 105, 138) : QColor(151, 190, 231);
+    }
+
+    // TextPrimaryColor 作用：返回主文本色。
+    inline QColor TextPrimaryColor()
+    {
+        return IsDarkModeEnabled() ? QColor(237, 246, 255) : QColor(16, 35, 54);
+    }
+
+    // TextSecondaryColor 作用：返回次级文本色。
+    inline QColor TextSecondaryColor()
+    {
+        return IsDarkModeEnabled() ? QColor(179, 198, 218) : QColor(79, 99, 120);
+    }
+
+    // TextDisabledColor 作用：返回禁用文本色。
+    inline QColor TextDisabledColor()
+    {
+        return IsDarkModeEnabled() ? QColor(124, 146, 169) : QColor(126, 142, 160);
+    }
+
+    // ThemeColorName 作用：统一 QColor -> #RRGGBB 文本。
+    inline QString ThemeColorName(const QColor& colorValue)
+    {
+        return colorValue.name(QColor::HexRgb).toUpper();
+    }
+
+    inline QString WindowColorHex()
+    {
+        return ThemeColorName(WindowColor());
+    }
+
+    inline QString SurfaceColorHex()
+    {
+        return ThemeColorName(SurfaceColor());
+    }
+
+    inline QString SurfaceAltColorHex()
+    {
+        return ThemeColorName(SurfaceAltColor());
+    }
+
+    inline QString SurfaceMutedColorHex()
+    {
+        return ThemeColorName(SurfaceMutedColor());
+    }
+
+    inline QString BorderColorHex()
+    {
+        return ThemeColorName(BorderColor());
+    }
+
+    inline QString BorderStrongColorHex()
+    {
+        return ThemeColorName(BorderStrongColor());
+    }
+
+    inline QString TextPrimaryColorHex()
+    {
+        return ThemeColorName(TextPrimaryColor());
+    }
+
+    inline QString TextSecondaryColorHex()
+    {
+        return ThemeColorName(TextSecondaryColor());
+    }
+
+    inline QString TextDisabledColorHex()
+    {
+        return ThemeColorName(TextDisabledColor());
+    }
+
+    // PrimaryBlueSubtleHex 作用：返回深浅色适配的主色弱背景。
+    inline QString PrimaryBlueSubtleHex()
+    {
+        return IsDarkModeEnabled() ? PrimaryBlueSubtleDarkHex : PrimaryBlueSubtleLightHex;
+    }
+
+    // PrimaryBlueSolidHoverHex 作用：返回蓝底白字控件的悬停色。
+    inline QString PrimaryBlueSolidHoverHex()
+    {
+        return PrimaryBlueActiveHex;
     }
 
     // SurfaceHex 作用：返回基础面板背景色（浅色白、深色深灰）。
@@ -88,6 +214,42 @@ namespace KswordTheme
         return QStringLiteral("palette(mid)");
     }
 
+    // ThemedButtonStyle 作用：生成统一按钮样式，按深浅色输出可读前景/背景。
+    inline QString ThemedButtonStyle()
+    {
+        return QStringLiteral(
+            "QPushButton,QToolButton{"
+            "  background-color:%1 !important;"
+            "  color:%2 !important;"
+            "  border:1px solid %3 !important;"
+            "  border-radius:3px;"
+            "  padding:4px 10px;"
+            "  font-weight:600;"
+            "}"
+            "QPushButton:hover,QToolButton:hover{"
+            "  background-color:%4 !important;"
+            "  color:#FFFFFF !important;"
+            "  border-color:%4 !important;"
+            "}"
+            "QPushButton:pressed,QToolButton:pressed{"
+            "  background-color:%5 !important;"
+            "  color:#FFFFFF !important;"
+            "  border-color:%5 !important;"
+            "}"
+            "QPushButton:disabled,QToolButton:disabled{"
+            "  background-color:%6 !important;"
+            "  color:%7 !important;"
+            "  border-color:%3 !important;"
+            "}")
+            .arg(SurfaceAltHex())
+            .arg(TextPrimaryHex())
+            .arg(BorderHex())
+            .arg(PrimaryBlueSolidHoverHex())
+            .arg(PrimaryBluePressedHex)
+            .arg(SurfaceAltHex())
+            .arg(TextSecondaryHex());
+    }
+
     // ContextMenuStyle 作用：
     // - 统一生成右键菜单样式，确保菜单背景始终显式填充；
     // - 重点规避浅色模式下菜单继承透明背景而显示黑底、文字不可读的问题。
@@ -95,36 +257,39 @@ namespace KswordTheme
     // 返回：可直接应用到 QMenu 的样式文本。
     inline QString ContextMenuStyle()
     {
-        const QString disabledTextColor = IsDarkModeEnabled()
-            ? QStringLiteral("#8C8C8C")
-            : QStringLiteral("#7A8694");
+        const QString menuBackgroundColor = SurfaceColorHex();
+        const QString menuTextColor = TextPrimaryColorHex();
+        const QString menuBorderColor = BorderColorHex();
+        const QString disabledTextColor = TextDisabledColorHex();
 
         return QStringLiteral(
             "QMenu{"
-            "  background:%1;"
-            "  color:%2;"
-            "  border:1px solid %3;"
+            "  background-color:%1 !important;"
+            "  color:%2 !important;"
+            "  border:1px solid %3 !important;"
+            "  padding:3px;"
             "}"
             "QMenu::item{"
-            "  padding:4px 16px 4px 12px;"
-            "  background:transparent;"
+            "  color:%2 !important;"
+            "  padding:5px 18px 5px 14px;"
+            "  background-color:transparent !important;"
             "}"
             "QMenu::item:selected{"
-            "  background:%4;"
-            "  color:#FFFFFF;"
+            "  background-color:%4 !important;"
+            "  color:#FFFFFF !important;"
             "}"
             "QMenu::item:disabled{"
-            "  color:%5;"
-            "  background:transparent;"
+            "  color:%5 !important;"
+            "  background-color:transparent !important;"
             "}"
             "QMenu::separator{"
             "  height:1px;"
-            "  background:%3;"
+            "  background-color:%3;"
             "  margin:2px 6px;"
             "}")
-            .arg(SurfaceHex())
-            .arg(TextPrimaryHex())
-            .arg(BorderHex())
+            .arg(menuBackgroundColor)
+            .arg(menuTextColor)
+            .arg(menuBorderColor)
             .arg(PrimaryBlueHex)
             .arg(disabledTextColor);
     }
@@ -180,19 +345,19 @@ namespace KswordTheme
     // NewRowBackgroundColor 作用：返回“新增行”高亮色（深色为墨绿色）。
     inline QColor NewRowBackgroundColor()
     {
-        return IsDarkModeEnabled() ? QColor(34, 66, 44) : QColor(218, 255, 226);
+        return IsDarkModeEnabled() ? QColor(30, 70, 48) : QColor(218, 255, 226);
     }
 
     // ExitedRowBackgroundColor 作用：返回“退出行”背景色（深色为深灰）。
     inline QColor ExitedRowBackgroundColor()
     {
-        return IsDarkModeEnabled() ? QColor(52, 52, 52) : QColor(236, 236, 236);
+        return IsDarkModeEnabled() ? QColor(43, 53, 64) : QColor(236, 242, 248);
     }
 
     // ExitedRowForegroundColor 作用：返回“退出行”文字色。
     inline QColor ExitedRowForegroundColor()
     {
-        return IsDarkModeEnabled() ? QColor(170, 170, 170) : QColor(88, 88, 88);
+        return IsDarkModeEnabled() ? QColor(172, 190, 208) : QColor(88, 100, 114);
     }
 
     // WarningAccentColor 作用：返回警告文本色，深色下更高亮。
