@@ -1,4 +1,4 @@
-#include "ProcessDetailWindow.InternalCommon.h"
+﻿#include "ProcessDetailWindow.InternalCommon.h"
 
 // ============================================================
 // ProcessDetailWindow.cpp
@@ -62,7 +62,7 @@ namespace process_detail_window_internal
             "}")
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
+            .arg(KswordTheme::PrimaryBlueSolidHoverHex())
             .arg(KswordTheme::PrimaryBluePressedHex)
             .arg(KswordTheme::SurfaceHex());
     }
@@ -181,7 +181,7 @@ namespace process_detail_window_internal
             "}"
             "QWidget#ProcessDetailWindowRoot QScrollBar::handle:vertical:hover,"
             "QWidget#ProcessDetailWindowRoot QScrollBar::handle:horizontal:hover{"
-            "  background:#2E8BFF;"
+            "  background:%1;"
             "}"
             "QWidget#ProcessDetailWindowRoot QScrollBar::add-line,"
             "QWidget#ProcessDetailWindowRoot QScrollBar::sub-line{"

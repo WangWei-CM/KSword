@@ -19,7 +19,6 @@ class QBarSet;
 class QChartView;
 class QGridLayout;
 class QLineSeries;
-class QStackedBarSeries;
 class QResizeEvent;
 class QShowEvent;
 class QTimer;
@@ -138,17 +137,17 @@ private:
 
     // CPU/内存图控件。
     QChartView* m_cpuChartView = nullptr;     // m_cpuChartView：CPU 每核柱状图。
-    QChartView* m_memoryChartView = nullptr;  // m_memoryChartView：内存组成柱状图。
-    QChartView* m_memoryTrendChartView = nullptr; // m_memoryTrendChartView：内存占用历史折线图。
+    QChartView* m_memoryTrendChartView = nullptr; // m_memoryTrendChartView：内存占用与组成合并趋势图。
     QBarSet* m_cpuCoreBarSet = nullptr;       // m_cpuCoreBarSet：CPU 每核当前柱条数据集。
     QBarSet* m_cpuCoreHistoryBarSet = nullptr; // m_cpuCoreHistoryBarSet：CPU 每核历史半透明柱条数据集。
-    QBarSet* m_memoryUsedBarSet = nullptr;    // m_memoryUsedBarSet：物理内存已用段。
-    QBarSet* m_memoryStandbyBarSet = nullptr; // m_memoryStandbyBarSet：近似缓存/提交段。
-    QBarSet* m_memoryAvailableBarSet = nullptr; // m_memoryAvailableBarSet：可用内存段。
-    QStackedBarSeries* m_memoryStackedSeries = nullptr; // m_memoryStackedSeries：内存组成堆叠柱。
+    QLineSeries* m_memoryUsedSeries = nullptr; // m_memoryUsedSeries：已用组成面积上边界。
+    QLineSeries* m_memoryStandbyTopSeries = nullptr; // m_memoryStandbyTopSeries：提交/缓存面积上边界。
+    QLineSeries* m_memoryStandbyBaseSeries = nullptr; // m_memoryStandbyBaseSeries：提交/缓存面积下边界。
+    QLineSeries* m_memoryAvailableTopSeries = nullptr; // m_memoryAvailableTopSeries：可用面积上边界。
+    QLineSeries* m_memoryAvailableBaseSeries = nullptr; // m_memoryAvailableBaseSeries：可用面积下边界。
     QLineSeries* m_memoryUsageSeries = nullptr; // m_memoryUsageSeries：内存占用历史折线。
-    QValueAxis* m_memoryTrendAxisX = nullptr; // m_memoryTrendAxisX：内存折线 X 轴。
-    QValueAxis* m_memoryTrendAxisY = nullptr; // m_memoryTrendAxisY：内存折线 Y 轴。
+    QValueAxis* m_memoryTrendAxisX = nullptr; // m_memoryTrendAxisX：内存合并趋势 X 轴。
+    QValueAxis* m_memoryTrendAxisY = nullptr; // m_memoryTrendAxisY：内存合并趋势 Y 轴。
     std::vector<double> m_cpuCoreHistoryPercentList; // m_cpuCoreHistoryPercentList：每核历史平均占用率。
 
     // 磁盘/网络图控件。

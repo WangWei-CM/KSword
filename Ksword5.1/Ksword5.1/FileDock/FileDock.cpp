@@ -774,21 +774,7 @@ namespace
     // 统一按钮样式，保持与主界面蓝色主题一致。
     QString buildBlueButtonStyle()
     {
-        return QStringLiteral(
-            "QPushButton,QToolButton{"
-            "  color:%1;"
-            "  background:%5;"
-            "  border:1px solid %2;"
-            "  border-radius:3px;"
-            "  padding:3px 8px;"
-            "}"
-            "QPushButton:hover,QToolButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
-            "QPushButton:pressed,QToolButton:pressed{background:%4;color:#FFFFFF;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
-            .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(KswordTheme::SurfaceHex());
+        return KswordTheme::ThemedButtonStyle();
     }
 
     // 统一输入控件样式。
@@ -920,13 +906,15 @@ namespace
             "}"
             "QToolButton:hover{"
             "  background:%2;"
+            "  color:%1;"
             "  border-radius:3px;"
             "}"
             "QToolButton:pressed{"
             "  background:%3;"
+            "  color:#FFFFFF;"
             "}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueHoverHex)
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::SurfaceAltHex())
             .arg(KswordTheme::PrimaryBluePressedHex);
     }
 
@@ -2470,8 +2458,10 @@ void FileDock::rebuildBreadcrumb(FilePanelWidgets& panel)
     panel.breadcrumbEditTriggerButton->setCursor(Qt::IBeamCursor);
     panel.breadcrumbEditTriggerButton->setToolTip(QStringLiteral("点击空白区域编辑路径"));
     panel.breadcrumbEditTriggerButton->setStyleSheet(QStringLiteral(
-        "QPushButton{border:none;background:transparent;}"
-        "QPushButton:hover{background:rgba(46,139,255,0.22);}"));
+        "QPushButton{border:none;background:transparent;color:%1;}"
+        "QPushButton:hover{background:%2;color:%1;}")
+        .arg(KswordTheme::TextPrimaryColorHex())
+        .arg(KswordTheme::IsDarkModeEnabled() ? KswordTheme::SurfaceMutedColorHex() : KswordTheme::PrimaryBlueSubtleHex()));
     panel.breadcrumbLayout->addWidget(panel.breadcrumbEditTriggerButton, 1);
     connect(panel.breadcrumbEditTriggerButton, &QPushButton::clicked, this, [this, &panel]() {
         kLogEvent event;

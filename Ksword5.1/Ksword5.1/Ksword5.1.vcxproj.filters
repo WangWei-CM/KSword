@@ -127,6 +127,9 @@
     <ClCompile Include="MonitorDock\MonitorDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MonitorDock\DirectKernelCallMonitorWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MonitorDock\MonitorPanelWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -355,6 +358,9 @@
     <ClCompile Include="RegistryDock_Themed.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="HardwareDock\MemoryCompositionHistoryWidget.cpp">
+      <Filter>Source Files\HardwareDock</Filter>
+    </ClCompile>
     <ClCompile Include="HardwareDock\HardwareDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -459,6 +465,9 @@
     <QtMoc Include="WelcomeDock\WelcomeDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="HardwareDock\MemoryCompositionHistoryWidget.h">
+      <Filter>Header Files\HardwareDock</Filter>
+    </ClInclude>
     <QtMoc Include="HardwareDock\HardwareDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
@@ -549,6 +558,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="StartupDock\StartupDock.Internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MonitorDock\DirectKernelCallMonitorWidget.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MonitorDock\MonitorPanelWidget.h">

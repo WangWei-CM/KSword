@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // ============================================================
 // ProcessDock.h
@@ -268,6 +268,8 @@ private:
     void executeResumeAction();
     void executeSetCriticalAction(bool enableCritical);
     void executeSetPriorityAction(int priorityActionId);
+    // executeSetEfficiencyModeAction 作用：开启/关闭 Windows 进程效率模式。
+    void executeSetEfficiencyModeAction(bool enableEfficiencyMode);
     void executeOpenFolderAction();
     // executeOpenMemoryOperationAction 作用：跳转到内存页并附加当前进程，便于继续转储/查看区域。
     void executeOpenMemoryOperationAction();

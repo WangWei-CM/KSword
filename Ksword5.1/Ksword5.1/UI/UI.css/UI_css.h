@@ -7,40 +7,42 @@
 // - 避免使用白底默认样式，保证深浅色都由调色板接管。
 const QString QSS_MainWindow_TabWidget = R"(
     QTabWidget::pane {
-        border: 1px solid palette(mid);
+        border: none;
         background-color: palette(base);
-        top: -1px;
+        top: 0px;
     }
 
     QTabBar {
         background-color: palette(window);
-        border-bottom: 1px solid palette(mid);
+        border: none;
     }
 
     QTabBar::tab {
-        background-color: palette(base);
+        background-color: palette(alternate-base);
         color: palette(text);
-        padding: 4px 14px 5px 14px;
-        margin: 0px 1px 0px 0px;
-        min-width: 74px;
-        border: 1px solid palette(mid);
-        border-bottom: 1px solid palette(mid);
+        padding: 3px 12px;
+        margin: 0px;
+        min-height: 24px;
+        border: none;
         border-radius: 0px;
-        font-size: 12px;
+        font-size: 15px;
+    }
+
+    QTabBar::tab:left,
+    QTabBar::tab:right {
+        padding: 6px 8px;
+        font-size: 16px;
     }
 
     QTabBar::tab:selected {
-        background-color: #164B82;
+        background-color: #43A0FF;
         color: #FFFFFF;
-        border-color: #164B82;
-        border-bottom-color: #164B82;
-        margin-bottom: -1px;
         font-weight: 700;
     }
 
     QTabBar::tab:hover:!selected {
-        background-color: #246EA8;
-        color: #FFFFFF;
+        background-color: palette(midlight);
+        color: palette(text);
     }
 )";
 
@@ -70,32 +72,35 @@ const QString QSS_MainWindow_dockStyle = R"(
 
     QMainWindow QTabBar {
         background-color: palette(window);
-        border-bottom: 1px solid palette(mid);
+        border: none;
     }
 
     QMainWindow QTabBar::tab {
-        background-color: palette(base);
+        background-color: palette(alternate-base);
         color: palette(text);
-        border: 1px solid palette(mid);
-        border-bottom: 1px solid palette(mid);
+        border: none;
         border-radius: 0px;
-        padding: 4px 14px 5px 14px;
-        min-width: 74px;
-        font-size: 12px;
+        padding: 3px 12px;
+        margin: 0px;
+        min-height: 22px;
+        font-size: 13px;
+    }
+
+    QMainWindow QTabBar::tab:left,
+    QMainWindow QTabBar::tab:right {
+        padding: 6px 8px;
+        font-size: 16px;
     }
 
     QMainWindow QTabBar::tab:selected {
-        background-color: #164B82;
+        background-color: #43A0FF;
         color: #FFFFFF;
-        border-color: #164B82;
-        border-bottom-color: #164B82;
-        margin-bottom: -1px;
         font-weight: 700;
     }
 
     QMainWindow QTabBar::tab:hover:!selected {
-        background-color: #246EA8;
-        color: #FFFFFF;
+        background-color: palette(midlight);
+        color: palette(text);
     }
 
     ads--CDockManager,
@@ -109,33 +114,31 @@ const QString QSS_MainWindow_dockStyle = R"(
 
     ads--CDockAreaTabBar {
         background-color: palette(window);
-        border-bottom: 1px solid palette(mid);
+        border: none;
+        padding: 0px;
     }
 
     ads--CDockWidgetTab,
     ads--CAutoHideTab {
-        background-color: palette(base);
+        background-color: palette(alternate-base);
         color: palette(text);
-        border: 1px solid palette(mid);
-        border-bottom: 1px solid palette(mid);
+        border: none;
         border-radius: 0px;
-        padding: 4px 13px 5px 13px;
-        min-width: 74px;
-        font-size: 12px;
+        padding: 3px 12px;
+        min-height: 24px;
+        font-size: 15px;
     }
 
     ads--CDockWidgetTab QLabel,
     ads--CAutoHideTab QLabel {
         color: palette(text);
+        font-size: 15px;
     }
 
     ads--CDockWidgetTab[activeTab="true"],
     ads--CAutoHideTab[activeTab="true"] {
-        background-color: #164B82;
+        background-color: #43A0FF;
         color: #FFFFFF;
-        border-color: #164B82;
-        border-bottom-color: #164B82;
-        margin-bottom: -1px;
     }
 
     ads--CDockWidgetTab[activeTab="true"] QLabel,
@@ -146,8 +149,8 @@ const QString QSS_MainWindow_dockStyle = R"(
 
     ads--CDockWidgetTab:hover,
     ads--CAutoHideTab:hover {
-        background-color: #246EA8;
-        color: #FFFFFF;
+        background-color: palette(midlight);
+        color: palette(text);
     }
 
     ads--CDockAreaTitleBar QToolButton,
@@ -160,9 +163,9 @@ const QString QSS_MainWindow_dockStyle = R"(
 
     ads--CDockAreaTitleBar QToolButton:hover,
     ads--CDockAreaTitleBar QPushButton:hover {
-        background-color: #246EA8;
+        background-color: #43A0FF;
         color: #FFFFFF;
-        border-color: #246EA8;
+        border-color: #43A0FF;
     }
 
     QScrollBar:vertical {
@@ -173,13 +176,13 @@ const QString QSS_MainWindow_dockStyle = R"(
     }
 
     QScrollBar::handle:vertical {
-        background-color: #164B82;
+        background-color: #43A0FF;
         min-height: 20px;
         border-radius: 2px;
     }
 
     QScrollBar::handle:vertical:hover {
-        background-color: #246EA8;
+        background-color: #2F92FF;
     }
 
     QScrollBar:horizontal {
@@ -190,13 +193,13 @@ const QString QSS_MainWindow_dockStyle = R"(
     }
 
     QScrollBar::handle:horizontal {
-        background-color: #164B82;
+        background-color: #43A0FF;
         min-width: 20px;
         border-radius: 2px;
     }
 
     QScrollBar::handle:horizontal:hover {
-        background-color: #246EA8;
+        background-color: #2F92FF;
     }
 
     QScrollBar::add-line,
@@ -218,9 +221,9 @@ const QString QSS_MainWindow_dockStyle = R"(
 // - 默认和悬停都不使用白色背景，避免高亮发白。
 const QString QSS_Buttons_Light = R"(
     QPushButton {
-        background-color: #164B82 !important;
+        background-color: #43A0FF !important;
         color: #FFFFFF !important;
-        border: 1px solid #164B82 !important;
+        border: 1px solid #43A0FF !important;
         padding: 6px 16px;
         border-radius: 1px;
         font-weight: 500;
@@ -228,21 +231,21 @@ const QString QSS_Buttons_Light = R"(
     }
 
     QPushButton:hover {
-        background-color: #246EA8 !important;
+        background-color: #2F92FF !important;
         color: #FFFFFF !important;
-        border-color: #246EA8 !important;
+        border-color: #2F92FF !important;
     }
 
     QPushButton:pressed {
-        background-color: #1F78D0 !important;
+        background-color: #1F7FD9 !important;
         color: #FFFFFF !important;
-        border-color: #1F78D0 !important;
+        border-color: #1F7FD9 !important;
     }
 
     QPushButton:disabled {
-        background-color: #8DC4FF !important;
+        background-color: #B8DCFF !important;
         color: #F3F8FF !important;
-        border: 1px solid #8DC4FF !important;
+        border: 1px solid #B8DCFF !important;
         font-weight: normal;
     }
 )";
@@ -252,9 +255,9 @@ const QString QSS_Buttons_Light = R"(
 // - 避免出现白色 hover 背景。
 const QString QSS_Buttons_Dark = R"(
     QPushButton {
-        background-color: #246EA8 !important;
+        background-color: #43A0FF !important;
         color: #FFFFFF !important;
-        border: 1px solid #246EA8 !important;
+        border: 1px solid #43A0FF !important;
         padding: 6px 16px;
         border-radius: 1px;
         font-weight: 500;
@@ -262,21 +265,21 @@ const QString QSS_Buttons_Dark = R"(
     }
 
     QPushButton:hover {
-        background-color: #164B82 !important;
+        background-color: #2F92FF !important;
         color: #FFFFFF !important;
-        border-color: #164B82 !important;
+        border-color: #2F92FF !important;
     }
 
     QPushButton:pressed {
-        background-color: #1F78D0 !important;
+        background-color: #1F7FD9 !important;
         color: #FFFFFF !important;
-        border-color: #1F78D0 !important;
+        border-color: #1F7FD9 !important;
     }
 
     QPushButton:disabled {
-        background-color: #355A83 !important;
-        color: #A9BFDA !important;
-        border: 1px solid #355A83 !important;
+        background-color: #1E2B3C !important;
+        color: #7C92A9 !important;
+        border: 1px solid #37506A !important;
         font-weight: normal;
     }
 )";

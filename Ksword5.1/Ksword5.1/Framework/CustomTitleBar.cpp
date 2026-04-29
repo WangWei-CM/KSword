@@ -1,4 +1,4 @@
-#include "CustomTitleBar.h"
+﻿#include "CustomTitleBar.h"
 
 #include "../theme.h"
 
@@ -407,33 +407,21 @@ namespace ks::ui
 
     void CustomTitleBar::updateVisualState()
     {
-        const QString titleBarBackgroundText = m_darkModeEnabled
-            ? QStringLiteral("#0B0F14")
-            : QStringLiteral("#F8FBFF");
-        const QString titleBarBorderText = m_darkModeEnabled
-            ? QStringLiteral("#24364D")
-            : QStringLiteral("#BFD4EB");
-        const QString titleTextColorText = m_darkModeEnabled
-            ? QStringLiteral("#E7F2FF")
-            : QStringLiteral("#143B68");
-        const QString commandBackgroundText = m_darkModeEnabled
-            ? QStringLiteral("#111924")
-            : QStringLiteral("#FFFFFF");
-        const QString commandTextColorText = m_darkModeEnabled
-            ? QStringLiteral("#EAF3FF")
-            : QStringLiteral("#133A67");
-        const QString commandBorderText = m_darkModeEnabled
-            ? QStringLiteral("#355375")
-            : QStringLiteral("#9FC3E8");
+        const QString titleBarBackgroundText = KswordTheme::WindowColorHex();
+        const QString titleBarBorderText = KswordTheme::BorderColorHex();
+        const QString titleTextColorText = KswordTheme::TextPrimaryColorHex();
+        const QString commandBackgroundText = KswordTheme::SurfaceColorHex();
+        const QString commandTextColorText = KswordTheme::TextPrimaryColorHex();
+        const QString commandBorderText = KswordTheme::BorderStrongColorHex();
 
         const QString normalBadgeBackgroundText = m_darkModeEnabled
-            ? QStringLiteral("#10161F")
-            : QStringLiteral("#FFFFFF");
+            ? KswordTheme::SurfaceAltColorHex()
+            : KswordTheme::SurfaceColorHex();
         const QString normalBadgeTextColorText = KswordTheme::PrimaryBlueHex;
         const QString specialBadgeBackgroundText = KswordTheme::PrimaryBlueHex;
         const QString specialBadgeTextColorText = m_darkModeEnabled
             ? QStringLiteral("#FFFFFF")
-            : QStringLiteral("#0D1624");
+            : QStringLiteral("#102336");
 
         const QString userBadgeBackgroundText = m_isSpecialUser
             ? specialBadgeBackgroundText
@@ -470,12 +458,12 @@ namespace ks::ui
             "#ksCustomTitleBar QPushButton#ksTitlePinButton:hover,"
             "#ksCustomTitleBar QPushButton#ksTitleMinButton:hover,"
             "#ksCustomTitleBar QPushButton#ksTitleMaxButton:hover{"
-            "  background:#2E8BFF;"
+            "  background:__TITLE_BUTTON_HOVER__;"
             "}"
             "#ksCustomTitleBar QPushButton#ksTitlePinButton:pressed,"
             "#ksCustomTitleBar QPushButton#ksTitleMinButton:pressed,"
             "#ksCustomTitleBar QPushButton#ksTitleMaxButton:pressed{"
-            "  background:#1F78D0;"
+            "  background:__TITLE_BUTTON_PRESSED__;"
             "}"
             "#ksCustomTitleBar QPushButton#ksTitleCloseButton:hover{"
             "  background:#E2554E;"
@@ -497,7 +485,9 @@ namespace ks::ui
             .arg(commandTextColorText)
             .arg(commandBorderText)
             .arg(userBadgeBackgroundText)
-            .arg(userBadgeTextColorText);
+            .arg(userBadgeTextColorText)
+            .replace(QStringLiteral("__TITLE_BUTTON_HOVER__"), KswordTheme::PrimaryBlueSolidHoverHex())
+            .replace(QStringLiteral("__TITLE_BUTTON_PRESSED__"), KswordTheme::PrimaryBluePressedHex);
         setStyleSheet(titleBarStyleSheetText);
 
         // 图标与按钮文案同步：

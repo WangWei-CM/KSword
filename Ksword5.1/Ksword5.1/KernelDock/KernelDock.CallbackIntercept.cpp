@@ -782,15 +782,15 @@ namespace
     QString callbackRuleComboBackgroundHex()
     {
         return KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#000000")
+            ? QStringLiteral("#182334")
             : QStringLiteral("#FFFFFF");
     }
 
     QString callbackRuleComboTextHex()
     {
         return KswordTheme::IsDarkModeEnabled()
-            ? QStringLiteral("#FFFFFF")
-            : QStringLiteral("#1A1A1A");
+            ? QStringLiteral("#F3F7FF")
+            : QStringLiteral("#162A42");
     }
 
     QString callbackRuleComboStyle()
@@ -814,11 +814,24 @@ namespace
             "  border:1px solid %3;"
             "  selection-background-color:%4;"
             "  selection-color:#FFFFFF;"
+            "}"
+            "QComboBox QAbstractItemView::item{"
+            "  background:%1;"
+            "  color:%2;"
+            "}"
+            "QComboBox QAbstractItemView::item:hover{"
+            "  background:%5;"
+            "  color:%2;"
+            "}"
+            "QComboBox QAbstractItemView::item:selected{"
+            "  background:%4;"
+            "  color:#FFFFFF;"
             "}")
             .arg(backgroundHex)
             .arg(textHex)
             .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::SurfaceAltHex());
     }
 
     void applyRuleComboStyle(QComboBox* comboBox)

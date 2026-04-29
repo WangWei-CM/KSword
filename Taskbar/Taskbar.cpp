@@ -72,7 +72,7 @@ Taskbar::Taskbar(QWidget* parent)
 
     // 2. 创建中心容器与外层布局。
     centralWidget = new QWidget(this);
-    centralWidget->setStyleSheet("background-color: #0d101b;");
+    centralWidget->setStyleSheet("background-color: #0A0F16;");
 
     QVBoxLayout* vLayout = new QVBoxLayout(centralWidget);
     vLayout->setContentsMargins(0, 0, 0, 0);
@@ -99,7 +99,7 @@ Taskbar::Taskbar(QWidget* parent)
         logoLabel->setPixmap(scaledPix);
         logoLabel->setAlignment(Qt::AlignCenter);
         logoLabel->setScaledContents(false);
-        logoLabel->setStyleSheet("color: #00ffff;");
+        logoLabel->setStyleSheet("color: #43A0FF;");
     }
     hLayout->addWidget(logoLabel);
 
@@ -112,7 +112,7 @@ Taskbar::Taskbar(QWidget* parent)
             border: none;
             background: transparent;
             padding: 5px 0;
-            color: #00ffff;
+            color: #43A0FF;
             font-size: 12px;
         }
         )");
@@ -169,7 +169,7 @@ Taskbar::Taskbar(QWidget* parent)
         QLabel {
             border: none;
             background: transparent;
-            color: #00ffff;
+            color: #43A0FF;
             font-size: 12px;
             padding: 0px 0px;
         }
@@ -215,7 +215,7 @@ Taskbar::Taskbar(QWidget* parent)
 
     for (int i = 0; i < coreCount; ++i) {
         QLabel* bar = new QLabel(cpuBarContainer);
-        bar->setStyleSheet("background-color: #00ffff;");
+        bar->setStyleSheet("background-color: #43A0FF;");
         bar->setAlignment(Qt::AlignBottom);
 
         cpuBars[i] = bar;

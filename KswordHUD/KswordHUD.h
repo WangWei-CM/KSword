@@ -83,10 +83,10 @@ private:
         QString backgroundImagePath;
         int leftWidgetOpacityPercent = 100;
         int rightWidgetOpacityPercent = 100;
-        QString leftWidgetBackgroundColor = "#000000";
+        QString leftWidgetBackgroundColor = "#0A0F16";
         int leftWidgetBackgroundOpacityPercent = 0;
         QString leftProcessTableFontColor = "#FFFFFF";
-        QString rightWidgetBackgroundColor = "#000000";
+        QString rightWidgetBackgroundColor = "#0A0F16";
         int rightWidgetBackgroundOpacityPercent = 0;
     };
 

@@ -1,4 +1,4 @@
-#include "OtherDock.h"
+﻿#include "OtherDock.h"
 
 // ============================================================
 // OtherDock.cpp
@@ -85,21 +85,7 @@ namespace
     // 统一按钮样式：与全局蓝色主题保持一致，避免界面风格割裂。
     QString blueButtonStyle()
     {
-        return QStringLiteral(
-            "QPushButton,QToolButton{"
-            "  color:%1;"
-            "  background:%5;"
-            "  border:1px solid %2;"
-            "  border-radius:3px;"
-            "  padding:3px 8px;"
-            "}"
-            "QPushButton:hover,QToolButton:hover{background:%3;color:#FFFFFF;border:1px solid %3;}"
-            "QPushButton:pressed,QToolButton:pressed{background:%4;color:#FFFFFF;}")
-            .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::PrimaryBlueBorderHex)
-            .arg(QStringLiteral("#2E8BFF"))
-            .arg(KswordTheme::PrimaryBluePressedHex)
-            .arg(KswordTheme::SurfaceHex());
+        return KswordTheme::ThemedButtonStyle();
     }
 
     // 统一输入框样式：过滤框、下拉框、数值输入用同一套视觉反馈。

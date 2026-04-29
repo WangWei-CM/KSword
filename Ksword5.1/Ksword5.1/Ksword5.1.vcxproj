@@ -149,6 +149,7 @@
     <ClCompile Include="句柄\HandleDock.Native.cpp" />
     <ClCompile Include="句柄\HandleObjectTypeWorker.cpp" />
     <ClCompile Include="HardwareDock\HardwareDock.cpp" />
+    <ClCompile Include="HardwareDock\MemoryCompositionHistoryWidget.cpp" />
     <ClCompile Include="Framework\Log.cpp" />
     <ClCompile Include="Framework\LogDockWidget.cpp" />
     <ClCompile Include="Framework\Progress.cpp" />
@@ -177,6 +178,7 @@
     <ClCompile Include="MonitorDock\MonitorDock.cpp" />
     <ClCompile Include="MonitorDock\MonitorPanelWidget.cpp" />
     <ClCompile Include="MonitorDock\MonitorTextViewer.cpp" />
+    <ClCompile Include="MonitorDock\DirectKernelCallMonitorWidget.cpp" />
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.cpp" />
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Ui.cpp" />
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Actions.cpp" />
@@ -288,12 +290,14 @@
     <QtMoc Include="句柄\HandleDock.h" />
     <ClInclude Include="句柄\HandleObjectTypeWorker.h" />
     <QtMoc Include="HardwareDock\HardwareDock.h" />
+    <ClInclude Include="HardwareDock\MemoryCompositionHistoryWidget.h" />
     <QtMoc Include="KernelDock\KernelDock.h" />
     <QtMoc Include="KernelDock\KernelDock.CallbackPromptManager.h" />
     <QtMoc Include="MemoryDock\MemoryDock.h" />
     <QtMoc Include="MiscDock\BootEditor\BootEditorTab.h" />
     <QtMoc Include="MiscDock\MiscDock.h" />
     <QtMoc Include="MonitorDock\MonitorDock.h" />
+    <ClInclude Include="MonitorDock\DirectKernelCallMonitorWidget.h" />
     <ClInclude Include="MonitorDock\MonitorPanelWidget.h" />
     <ClInclude Include="MonitorDock\MonitorTextViewer.h" />
     <ClInclude Include="MonitorDock\ProcessTraceMonitorWidget.h" />
