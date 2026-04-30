@@ -1,6 +1,5 @@
 #include "KernelDock.CallbackPromptManager.h"
 
-#include "../../../shared/KswordArkLogProtocol.h"
 #include "../theme.h"
 
 #include <Windows.h>
@@ -681,10 +680,9 @@ void CallbackPromptManager::stopWorkersIfNeeded()
 
         workerContext->running.store(false);
         std::lock_guard<std::mutex> handleLock(workerContext->ioMutex);
-        HANDLE deviceHandle = reinterpret_cast<HANDLE>(workerContext->deviceHandle);
-        if (deviceHandle != nullptr && deviceHandle != INVALID_HANDLE_VALUE)
+        if (workerContext->deviceHandle.isValid())
         {
-            (void)::CancelIoEx(deviceHandle, nullptr);
+            (void)::CancelIoEx(workerContext->deviceHandle.native(), nullptr);
         }
     }
 
@@ -707,12 +705,7 @@ void CallbackPromptManager::stopWorkersIfNeeded()
             continue;
         }
         std::lock_guard<std::mutex> handleLock(workerContext->ioMutex);
-        HANDLE deviceHandle = reinterpret_cast<HANDLE>(workerContext->deviceHandle);
-        if (deviceHandle != nullptr && deviceHandle != INVALID_HANDLE_VALUE)
-        {
-            ::CloseHandle(deviceHandle);
-            workerContext->deviceHandle = nullptr;
-        }
+        workerContext->deviceHandle.reset();
     }
 
     m_workerList.clear();
@@ -736,12 +729,7 @@ void CallbackPromptManager::runWaitWorkerLoop(int workerTag)
 
     auto resetDeviceHandle = [workerContext]() {
         std::lock_guard<std::mutex> handleLock(workerContext->ioMutex);
-        HANDLE deviceHandle = reinterpret_cast<HANDLE>(workerContext->deviceHandle);
-        if (deviceHandle != nullptr && deviceHandle != INVALID_HANDLE_VALUE)
-        {
-            ::CloseHandle(deviceHandle);
-            workerContext->deviceHandle = nullptr;
-        }
+        workerContext->deviceHandle.reset();
     };
 
     while (workerContext->running.load())
@@ -749,20 +737,14 @@ void CallbackPromptManager::runWaitWorkerLoop(int workerTag)
         HANDLE waitHandle = INVALID_HANDLE_VALUE;
         {
             std::lock_guard<std::mutex> handleLock(workerContext->ioMutex);
-            waitHandle = reinterpret_cast<HANDLE>(workerContext->deviceHandle);
+            waitHandle = workerContext->deviceHandle.native();
         }
 
         if (waitHandle == nullptr || waitHandle == INVALID_HANDLE_VALUE)
         {
-            HANDLE newHandle = ::CreateFileW(
-                KSWORD_ARK_LOG_WIN32_PATH,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                nullptr,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
-                nullptr);
-            if (newHandle == INVALID_HANDLE_VALUE)
+            ksword::ark::DriverClient driverClient;
+            ksword::ark::DriverHandle newHandle = driverClient.openOverlapped();
+            if (!newHandle.isValid())
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(kWaitRetrySleepMs));
                 continue;
@@ -770,8 +752,8 @@ void CallbackPromptManager::runWaitWorkerLoop(int workerTag)
 
             {
                 std::lock_guard<std::mutex> handleLock(workerContext->ioMutex);
-                workerContext->deviceHandle = newHandle;
-                waitHandle = reinterpret_cast<HANDLE>(workerContext->deviceHandle);
+                workerContext->deviceHandle = std::move(newHandle);
+                waitHandle = workerContext->deviceHandle.native();
             }
         }
 
@@ -790,19 +772,17 @@ void CallbackPromptManager::runWaitWorkerLoop(int workerTag)
         }
 
         DWORD bytesReturned = 0;
-        const BOOL waitIssued = ::DeviceIoControl(
-            waitHandle,
-            IOCTL_KSWORD_ARK_WAIT_CALLBACK_EVENT,
-            &waitRequest,
-            static_cast<DWORD>(sizeof(waitRequest)),
-            &eventPacket,
-            static_cast<DWORD>(sizeof(eventPacket)),
-            &bytesReturned,
+        ksword::ark::DriverClient driverClient;
+        const ksword::ark::AsyncIoResult waitIssueResult = driverClient.waitCallbackEventAsync(
+            workerContext->deviceHandle,
+            waitRequest,
+            eventPacket,
             &waitOverlapped);
+        bytesReturned = waitIssueResult.bytesReturned;
 
-        if (waitIssued == FALSE)
+        if (!waitIssueResult.issued)
         {
-            const DWORD waitError = ::GetLastError();
+            const DWORD waitError = waitIssueResult.win32Error;
             if (waitError == ERROR_IO_PENDING)
             {
                 bool needCancel = false;
@@ -1214,19 +1194,6 @@ void CallbackPromptManager::onPopupClosedByUser()
 
 bool CallbackPromptManager::sendAnswerToDriver(const KSWORD_ARK_GUID128& eventGuid, quint32 decision)
 {
-    HANDLE driverHandle = ::CreateFileW(
-        KSWORD_ARK_LOG_WIN32_PATH,
-        GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr);
-    if (driverHandle == INVALID_HANDLE_VALUE)
-    {
-        return false;
-    }
-
     KSWORD_ARK_CALLBACK_ANSWER_REQUEST answerRequest{};
     answerRequest.size = sizeof(answerRequest);
     answerRequest.version = KSWORD_ARK_CALLBACK_PROTOCOL_VERSION;
@@ -1238,46 +1205,15 @@ bool CallbackPromptManager::sendAnswerToDriver(const KSWORD_ARK_GUID128& eventGu
     answerRequest.sourceSessionId = currentSessionId();
     answerRequest.answeredAtUtc100ns = currentUtc100ns();
 
-    DWORD bytesReturned = 0;
-    const BOOL ioctlOk = ::DeviceIoControl(
-        driverHandle,
-        IOCTL_KSWORD_ARK_ANSWER_CALLBACK_EVENT,
-        &answerRequest,
-        static_cast<DWORD>(sizeof(answerRequest)),
-        nullptr,
-        0,
-        &bytesReturned,
-        nullptr);
-    ::CloseHandle(driverHandle);
-    return ioctlOk != FALSE;
+    const ksword::ark::DriverClient driverClient;
+    const ksword::ark::IoResult result = driverClient.answerCallbackEvent(answerRequest);
+    return result.ok;
 }
 
 void CallbackPromptManager::cancelAllPendingDecisionsBestEffort()
 {
-    HANDLE driverHandle = ::CreateFileW(
-        KSWORD_ARK_LOG_WIN32_PATH,
-        GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr);
-    if (driverHandle == INVALID_HANDLE_VALUE)
-    {
-        return;
-    }
-
-    DWORD bytesReturned = 0;
-    (void)::DeviceIoControl(
-        driverHandle,
-        IOCTL_KSWORD_ARK_CANCEL_ALL_PENDING_DECISIONS,
-        nullptr,
-        0,
-        nullptr,
-        0,
-        &bytesReturned,
-        nullptr);
-    ::CloseHandle(driverHandle);
+    const ksword::ark::DriverClient driverClient;
+    (void)driverClient.cancelAllPendingCallbackDecisions();
 }
 
 quint64 CallbackPromptManager::currentUtc100ns() const

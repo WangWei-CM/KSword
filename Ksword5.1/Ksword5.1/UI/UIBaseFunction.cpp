@@ -1,29 +1,35 @@
 #include "UI_All.h"
-#include <QWidget>
+
 #include <QLabel>
 #include <QVBoxLayout>
-QWidget* createBasicPlaceholder(const QString& tipText/* = "占位区域"*/) {
-    // 占位符主容器
+#include <QWidget>
+
+QWidget* createBasicPlaceholder(const QString& tipText/* = "Placeholder panel"*/)
+{
+    // Allocate the placeholder without a parent. The caller or the layout that
+    // receives the widget is responsible for transferring ownership into Qt's
+    // normal parent-child object tree.
     QWidget* placeholder = new QWidget();
-    // 设置大小策略为可扩展
+
+    // Let the placeholder fill whatever dock/page area requested it, while the
+    // border makes unfinished panels visible during development and testing.
     placeholder->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    // 设置最小尺寸确保可见
-    //placeholder->setMinimumSize(100, 100);
     placeholder->setStyleSheet(
-        "border: 2px solid #0066CC; " // 蓝色线框
-        "background-color: transparent; " // 透明背景
-        "border-radius: 0px;" // 强制方角
-    );
+        "border: 2px solid #0066CC; "
+        "background-color: transparent; "
+        "border-radius: 0px;");
 
-    // 蓝色字体提示
+    // The label carries the caller-provided hint text and stays centered so the
+    // placeholder remains useful even when the containing panel is resized.
     QLabel* tipLabel = new QLabel(tipText, placeholder);
-    tipLabel->setStyleSheet("color: #0066CC; font-size: 14px;"); // 蓝色字体
-    tipLabel->setAlignment(Qt::AlignCenter); // 文字居中
+    tipLabel->setStyleSheet("color: #0066CC; font-size: 14px;");
+    tipLabel->setAlignment(Qt::AlignCenter);
 
-    // 布局（让文字在占位符正中间）
+    // A zero-margin vertical layout keeps the label centered in the full widget
+    // rectangle and returns the finished placeholder to the caller.
     QVBoxLayout* layout = new QVBoxLayout(placeholder);
     layout->addWidget(tipLabel);
-    layout->setContentsMargins(0, 0, 0, 0); // 去掉布局边距
+    layout->setContentsMargins(0, 0, 0, 0);
 
     return placeholder;
 }

@@ -2,6 +2,7 @@
 
 #include "../Framework.h"
 #include "KernelDock.CallbackIntercept.h"
+#include "../ArkDriverClient/ArkDriverClient.h"
 
 #include <QDialog>
 #include <QPointer>
@@ -58,7 +59,7 @@ private:
         std::atomic_bool running{ false };
         std::unique_ptr<std::thread> thread;
         std::mutex ioMutex;
-        void* deviceHandle = nullptr;
+        ksword::ark::DriverHandle deviceHandle;
     };
 
 private:

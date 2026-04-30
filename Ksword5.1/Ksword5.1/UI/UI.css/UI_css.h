@@ -4,7 +4,8 @@
 
 // QSS_MainWindow_TabWidget 作用：
 // - 统一项目内所有 QTabWidget / QTabBar 的基础样式；
-// - 避免使用白底默认样式，保证深浅色都由调色板接管。
+// - 避免使用白底默认样式，保证深浅色都由调色板接管；
+// - 不设置 font-size，让 Tab 栏继承 Qt 默认应用字号。
 const QString QSS_MainWindow_TabWidget = R"(
     QTabWidget::pane {
         border: none;
@@ -25,13 +26,11 @@ const QString QSS_MainWindow_TabWidget = R"(
         min-height: 24px;
         border: none;
         border-radius: 0px;
-        font-size: 14px;
     }
 
     QTabBar::tab:left,
     QTabBar::tab:right {
         padding: 5px 6px;
-        font-size: 15px;
     }
 
     QTabBar::tab:selected {
@@ -48,7 +47,8 @@ const QString QSS_MainWindow_TabWidget = R"(
 
 // QSS_MainWindow_dockStyle 作用：
 // - 统一主窗口 Dock 区域、ADS 停靠系统、滚动条的样式；
-// - 强制当前选中 Tab 使用主题色背景 + 白字，解决白底黑字残留问题。
+// - 强制当前选中 Tab 使用主题色背景 + 白字，解决白底黑字残留问题；
+// - 不设置 font-size，让 Dock 栏和内部 Tab 栏继承 Qt 默认应用字号。
 const QString QSS_MainWindow_dockStyle = R"(
     QDockWidget {
         border: none;
@@ -83,13 +83,11 @@ const QString QSS_MainWindow_dockStyle = R"(
         padding: 3px 12px;
         margin: 0px;
         min-height: 22px;
-        font-size: 14px;
     }
 
     QMainWindow QTabBar::tab:left,
     QMainWindow QTabBar::tab:right {
         padding: 5px 6px;
-        font-size: 15px;
     }
 
     QMainWindow QTabBar::tab:selected {
@@ -126,13 +124,11 @@ const QString QSS_MainWindow_dockStyle = R"(
         border-radius: 0px;
         padding: 3px 12px;
         min-height: 24px;
-        font-size: 14px;
     }
 
     ads--CDockWidgetTab QLabel,
     ads--CAutoHideTab QLabel {
         color: palette(text);
-        font-size: 14px;
     }
 
     ads--CDockWidgetTab[activeTab="true"],

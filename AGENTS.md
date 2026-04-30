@@ -77,3 +77,13 @@ $seven='C:\Users\Felix\CLionProjects\Wisdom-Weasel\7z.exe'
 ```
 
 校验通过时，`7z t` 输出应包含 `Everything is Ok`。本流程生成的包根目录必须是 `Release\`，不要把 `dist\KswordARK-release-work\` 或其它临时目录打进包里。
+
+
+## Phase -1 协作规范
+
+- 仓库相对根目录为 `H:/Project/Ksword5.1`；文档与规则使用相对路径，不写个人机器路径作为开发落点。
+- R0/R3 协议只在 `shared/driver/` 定义。
+- 驱动 IOCTL 分发只通过 `KswordARKDriver/src/dispatch/ioctl_registry.c` 注册 handler，`ioctl_dispatch.c` 不再承载业务 switch。
+- 用户态 KswordARK 设备访问只通过 `Ksword5.1/Ksword5.1/ArkDriverClient/`，Dock UI 不直接调用 KswordARK `DeviceIoControl`。
+- 新增源码必须同步更新对应 `.vcxproj` 和 `.vcxproj.filters`。
+- 第三方代码接入必须带 LICENSE 和 NOTICE。
