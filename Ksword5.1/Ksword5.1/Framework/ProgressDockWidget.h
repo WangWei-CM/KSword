@@ -25,6 +25,11 @@ public:
     // 参数 parent：Qt 父对象。
     explicit ProgressDockWidget(QWidget* parent = nullptr);
 
+    // refreshThemeVisuals 作用：
+    // - 主题切换后重新套用当前操作面板背景和文字样式；
+    // - 强制重建卡片，避免旧 QLabel 保留旧主题颜色。
+    void refreshThemeVisuals();
+
 private:
     // initializeUi 作用：
     // - 创建主布局、滚动容器与“空列表提示”。

@@ -83,8 +83,17 @@ void ProgressDockWidget::applyTransparentBackgroundPolicy()
         "#ksProgressDockScrollContent{"
         "  background:transparent;"
         "  background-color:transparent;"
+        "  color:%1;"
         "  border:none;"
-        "}"));
+        "}"
+        "#ksProgressDockRoot QLabel{"
+        "  color:%1;"
+        "  background:transparent;"
+        "}"
+        "#ksProgressDockRoot QProgressBar{"
+        "  color:%1;"
+        "}")
+        .arg(buildHighContrastTextHex()));
 }
 
 void ProgressDockWidget::initializeRefreshTimer()
@@ -103,6 +112,19 @@ void ProgressDockWidget::initializeRefreshTimer()
             refreshTaskCards(false);
         });
     m_refreshTimer->start();
+}
+
+void ProgressDockWidget::refreshThemeVisuals()
+{
+    // 主题刷新时重新套透明策略，并重建所有任务卡片。
+    applyTransparentBackgroundPolicy();
+    if (m_emptyTipLabel != nullptr)
+    {
+        m_emptyTipLabel->setStyleSheet(
+            QStringLiteral("color:%1; font-size:13px; background:transparent;")
+            .arg(buildHighContrastTextHex()));
+    }
+    refreshTaskCards(true);
 }
 
 void ProgressDockWidget::refreshTaskCards(const bool forceRefresh)
@@ -217,12 +239,12 @@ QWidget* ProgressDockWidget::createTaskCardWidget(const kProgressTask& taskItem)
 QString ProgressDockWidget::buildHighContrastTextHex() const
 {
     // 高对比前景策略：
-    // - 深色主题固定白字；
-    // - 浅色主题固定黑字；
+    // - 深色主题使用项目主文本白蓝色；
+    // - 浅色主题使用深墨色；
     // 避免透明背景叠加后 palette(mid) 灰字对比不足。
     return KswordTheme::IsDarkModeEnabled()
-        ? QStringLiteral("#FFFFFF")
-        : QStringLiteral("#000000");
+        ? KswordTheme::TextPrimaryColorHex()
+        : KswordTheme::TextPrimaryColorHex();
 }
 
 QString ProgressDockWidget::buildCardBackgroundHex() const
