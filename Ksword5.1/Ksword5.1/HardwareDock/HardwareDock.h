@@ -3,7 +3,7 @@
 // ============================================================
 // HardwareDock.h
 // 作用：
-// 1) 提供“概览/利用率/CPU/显卡/内存”五个侧边 Tab；
+// 1) 提供“利用率/概览/CPU/显卡/内存”五个侧边 Tab，并让利用率拥有最高优先级；
 // 2) 利用率页按任务管理器风格实现“左侧缩略卡片 + 右侧详情页”；
 // 3) CPU/显卡/内存页保留文本化详情，便于排障与审计。
 // ============================================================
@@ -115,6 +115,156 @@ private:
         std::uint64_t nonPagedPoolBytes = 0;   // nonPagedPoolBytes：非分页池字节。
     };
 
+    // UtilizationDeviceKind：
+    // - 作用：标识“利用率”左侧卡片对应的详情页类型；
+    // - 处理逻辑：CPU/内存固定存在，磁盘/网卡/GPU按设备动态扩展；
+    // - 返回行为：枚举本身无返回值，仅用于导航状态同步。
+    enum class UtilizationDeviceKind
+    {
+        Cpu,     // Cpu：CPU固定详情页。
+        Memory,  // Memory：内存固定详情页。
+        Disk,    // Disk：单个物理磁盘详情页。
+        Network, // Network：单个网络接口详情页。
+        Gpu      // Gpu：单个DXGI显卡适配器详情页。
+    };
+
+    // UtilizationNavEntry：
+    // - 作用：绑定左侧 PerformanceNavCard 与右侧 QStackedWidget 页面；
+    // - 输入来源：initializeUtilizationSidebarCards 和动态设备发现逻辑；
+    // - 返回行为：结构体仅保存指针和索引，不负责释放 Qt 对象。
+    struct UtilizationNavEntry
+    {
+        PerformanceNavCard* navCard = nullptr;       // navCard：左侧导航卡片控件。
+        QWidget* detailPage = nullptr;               // detailPage：右侧详情页控件。
+        UtilizationDeviceKind kind = UtilizationDeviceKind::Cpu; // kind：设备类型。
+        int deviceIndex = -1;                        // deviceIndex：同类设备数组索引。
+    };
+
+    // DiskRateSample：
+    // - 作用：保存一次单磁盘 PDH 读写速率采样；
+    // - 调用方式：sampleDiskRates 填充列表，刷新阶段按 instanceNameText 匹配页面；
+    // - 返回行为：结构体无方法，字段均为输出数据。
+    struct DiskRateSample
+    {
+        QString instanceNameText;       // instanceNameText：PDH PhysicalDisk 实例名。
+        QString displayNameText;        // displayNameText：界面展示名，例如“磁盘 0 (C:)”。
+        double readBytesPerSec = 0.0;   // readBytesPerSec：读取字节每秒。
+        double writeBytesPerSec = 0.0;  // writeBytesPerSec：写入字节每秒。
+    };
+
+    // NetworkRateSample：
+    // - 作用：保存一次单网卡收发速率采样；
+    // - 调用方式：sampleNetworkRates 读取 GetIfTable2 并按接口 LUID 计算增量；
+    // - 返回行为：字段直接供 UI 卡片和详情页刷新。
+    struct NetworkRateSample
+    {
+        std::uint64_t interfaceKey = 0;             // interfaceKey：网络接口 LUID 打包键。
+        QString displayNameText;                   // displayNameText：网卡别名或描述。
+        std::uint64_t linkBitsPerSecond = 0;        // linkBitsPerSecond：链路速率 bit/s。
+        double rxBytesPerSec = 0.0;                 // rxBytesPerSec：接收字节每秒。
+        double txBytesPerSec = 0.0;                 // txBytesPerSec：发送字节每秒。
+        std::uint64_t totalRxBytes = 0;             // totalRxBytes：系统累计接收字节。
+        std::uint64_t totalTxBytes = 0;             // totalTxBytes：系统累计发送字节。
+    };
+
+    // GpuUsageSample：
+    // - 作用：保存一次单 GPU 的引擎利用率和显存采样；
+    // - 调用方式：sampleGpuUsages 先枚举 DXGI 适配器，再合并 PDH GPU Engine 数据；
+    // - 返回行为：刷新阶段按 adapterKey 更新对应 GPU 页面。
+    struct GpuUsageSample
+    {
+        std::uint64_t adapterKey = 0;              // adapterKey：DXGI LUID 打包键。
+        int adapterIndex = 0;                      // adapterIndex：DXGI 枚举序号。
+        QString displayNameText;                  // displayNameText：显卡名称。
+        double overallUsagePercent = 0.0;         // overallUsagePercent：总体近似利用率。
+        double usage3DPercent = 0.0;              // usage3DPercent：3D 引擎利用率。
+        double usageCopyPercent = 0.0;            // usageCopyPercent：Copy 引擎利用率。
+        double usageVideoEncodePercent = 0.0;     // usageVideoEncodePercent：视频编码利用率。
+        double usageVideoDecodePercent = 0.0;     // usageVideoDecodePercent：视频解码利用率。
+        double dedicatedMemoryGiB = 0.0;          // dedicatedMemoryGiB：专用显存总量 GiB。
+        double dedicatedUsedGiB = 0.0;            // dedicatedUsedGiB：专用显存已用 GiB。
+        double dedicatedBudgetGiB = 0.0;          // dedicatedBudgetGiB：专用显存预算 GiB。
+        double sharedUsedGiB = 0.0;               // sharedUsedGiB：共享显存已用 GiB。
+        double sharedBudgetGiB = 0.0;             // sharedBudgetGiB：共享显存预算 GiB。
+    };
+
+    // DiskUtilizationDevice：
+    // - 作用：保存一个磁盘卡片、详情页和历史缩略图状态；
+    // - 调用方式：ensureDiskUtilizationDevice 在发现新 PDH 实例时创建；
+    // - 返回行为：结构体由 HardwareDock 持有，Qt 对象仍走父子树释放。
+    struct DiskUtilizationDevice
+    {
+        QString instanceNameText;                 // instanceNameText：PDH PhysicalDisk 实例名。
+        QString displayNameText;                  // displayNameText：左侧卡片标题。
+        QWidget* pageWidget = nullptr;            // pageWidget：右侧详情页。
+        QLabel* summaryLabel = nullptr;           // summaryLabel：读写摘要。
+        QChartView* chartView = nullptr;          // chartView：读写趋势图。
+        QLineSeries* readLineSeries = nullptr;    // readLineSeries：读取速率折线。
+        QLineSeries* writeLineSeries = nullptr;   // writeLineSeries：写入速率折线。
+        QValueAxis* axisX = nullptr;              // axisX：趋势图 X 轴。
+        QValueAxis* axisY = nullptr;              // axisY：趋势图 Y 轴。
+        QLabel* detailLabel = nullptr;            // detailLabel：参数详情。
+        PerformanceNavCard* navCard = nullptr;    // navCard：左侧导航卡片。
+        double navAutoScaleBytesPerSec = 1024.0 * 1024.0; // navAutoScaleBytesPerSec：缩略图动态上限。
+        std::vector<double> readHistoryBytesPerSec;  // readHistoryBytesPerSec：缩略图读取历史。
+        std::vector<double> writeHistoryBytesPerSec; // writeHistoryBytesPerSec：缩略图写入历史。
+    };
+
+    // NetworkUtilizationDevice：
+    // - 作用：保存一个网卡页面、速率历史和上次累计计数；
+    // - 调用方式：sampleNetworkRates 会在 UI 线程内按 LUID 找到或创建；
+    // - 返回行为：结构体不返回数据，刷新函数读取字段更新 UI。
+    struct NetworkUtilizationDevice
+    {
+        std::uint64_t interfaceKey = 0;           // interfaceKey：网络接口 LUID 打包键。
+        QString displayNameText;                 // displayNameText：网卡展示名。
+        std::uint64_t linkBitsPerSecond = 0;      // linkBitsPerSecond：链路速率 bit/s。
+        std::uint64_t lastRxBytes = 0;            // lastRxBytes：上次累计接收字节。
+        std::uint64_t lastTxBytes = 0;            // lastTxBytes：上次累计发送字节。
+        qint64 lastSampleMs = 0;                  // lastSampleMs：上次采样时间戳。
+        bool hasPreviousSample = false;           // hasPreviousSample：是否已有增量基线。
+        QWidget* pageWidget = nullptr;            // pageWidget：右侧详情页。
+        QLabel* summaryLabel = nullptr;           // summaryLabel：收发摘要。
+        QChartView* chartView = nullptr;          // chartView：收发趋势图。
+        QLineSeries* rxLineSeries = nullptr;      // rxLineSeries：接收速率折线。
+        QLineSeries* txLineSeries = nullptr;      // txLineSeries：发送速率折线。
+        QValueAxis* axisX = nullptr;              // axisX：趋势图 X 轴。
+        QValueAxis* axisY = nullptr;              // axisY：趋势图 Y 轴。
+        QLabel* detailLabel = nullptr;            // detailLabel：参数详情。
+        PerformanceNavCard* navCard = nullptr;    // navCard：左侧导航卡片。
+        double navAutoScaleBytesPerSec = 1024.0 * 1024.0; // navAutoScaleBytesPerSec：缩略图动态上限。
+        std::vector<double> rxHistoryBytesPerSec; // rxHistoryBytesPerSec：缩略图接收历史。
+        std::vector<double> txHistoryBytesPerSec; // txHistoryBytesPerSec：缩略图发送历史。
+    };
+
+    // GpuUtilizationDevice：
+    // - 作用：保存一个 GPU 适配器的详情页、引擎图和显存图控件；
+    // - 调用方式：ensureGpuUtilizationDevice 在 DXGI 发现新适配器时创建；
+    // - 返回行为：字段由 updateGpuUtilizationDevice 读取并刷新。
+    struct GpuUtilizationDevice
+    {
+        std::uint64_t adapterKey = 0;             // adapterKey：DXGI LUID 打包键。
+        bool adapterKeyAssigned = false;          // adapterKeyAssigned：adapterKey 是否已经绑定真实设备。
+        int adapterIndex = 0;                     // adapterIndex：DXGI 枚举序号。
+        QString displayNameText;                 // displayNameText：显卡名称。
+        QWidget* pageWidget = nullptr;            // pageWidget：右侧详情页。
+        QLabel* adapterTitleLabel = nullptr;      // adapterTitleLabel：标题区适配器名。
+        QLabel* summaryLabel = nullptr;           // summaryLabel：利用率摘要。
+        QWidget* engineHostWidget = nullptr;      // engineHostWidget：引擎小图宿主。
+        QGridLayout* engineGridLayout = nullptr;  // engineGridLayout：引擎小图网格。
+        std::vector<GpuEngineChartEntry> engineCharts; // engineCharts：四类引擎图。
+        QChartView* dedicatedMemoryChartView = nullptr; // dedicatedMemoryChartView：专用显存图。
+        QLineSeries* dedicatedMemoryLineSeries = nullptr; // dedicatedMemoryLineSeries：专用显存折线。
+        QValueAxis* dedicatedMemoryAxisX = nullptr; // dedicatedMemoryAxisX：专用显存 X 轴。
+        QValueAxis* dedicatedMemoryAxisY = nullptr; // dedicatedMemoryAxisY：专用显存 Y 轴。
+        QChartView* sharedMemoryChartView = nullptr; // sharedMemoryChartView：共享显存图。
+        QLineSeries* sharedMemoryLineSeries = nullptr; // sharedMemoryLineSeries：共享显存折线。
+        QValueAxis* sharedMemoryAxisX = nullptr;  // sharedMemoryAxisX：共享显存 X 轴。
+        QValueAxis* sharedMemoryAxisY = nullptr;  // sharedMemoryAxisY：共享显存 Y 轴。
+        QLabel* detailLabel = nullptr;            // detailLabel：参数详情。
+        PerformanceNavCard* navCard = nullptr;    // navCard：左侧导航卡片。
+    };
+
 private:
     // ===================== UI 初始化 =====================
     void initializeUi();
@@ -133,6 +283,21 @@ private:
     void initializeConnections();
     void syncUtilizationSidebarSelection(int selectedRowIndex);
     void adjustUtilizationChartHeights();
+    PerformanceNavCard* addUtilizationSidebarCard(
+        QWidget* detailPage,
+        const QString& titleText,
+        const QColor& accentColor,
+        UtilizationDeviceKind kind,
+        int deviceIndex);
+    int findDiskUtilizationDeviceIndexByInstance(const QString& instanceNameText) const;
+    int ensureDiskUtilizationDevice(const DiskRateSample& sample, int ordinalIndex);
+    int findNetworkUtilizationDeviceIndexByKey(std::uint64_t interfaceKey) const;
+    int ensureNetworkUtilizationDevice(const NetworkRateSample& sample, int ordinalIndex);
+    int findGpuUtilizationDeviceIndexByKey(std::uint64_t adapterKey) const;
+    int ensureGpuUtilizationDevice(const GpuUsageSample& sample, int ordinalIndex);
+    void createDiskUtilizationDevicePage(DiskUtilizationDevice* devicePointer);
+    void createNetworkUtilizationDevicePage(NetworkUtilizationDevice* devicePointer);
+    void createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePointer);
 
     // ===================== 采样与刷新 =====================
     void initializePerformanceCounters();
@@ -142,8 +307,11 @@ private:
         double* totalUsageOut);
     bool sampleCpuPowerInfo(std::vector<CpuPowerSnapshot>* powerInfoOut);
     bool sampleMemoryUsage(double* memoryUsagePercentOut);
+    bool sampleDiskRates(std::vector<DiskRateSample>* sampleListOut);
     bool sampleDiskRate(double* readBytesPerSecOut, double* writeBytesPerSecOut);
+    bool sampleNetworkRates(std::vector<NetworkRateSample>* sampleListOut);
     bool sampleNetworkRate(double* rxBytesPerSecOut, double* txBytesPerSecOut);
+    bool sampleGpuUsages(std::vector<GpuUsageSample>* sampleListOut);
     bool sampleGpuUsage(double* gpuUsagePercentOut);
     bool sampleGpuMemoryInfoByDxgi();
     bool sampleSystemPerformanceSnapshot(SystemPerformanceSnapshot* snapshotOut) const;
@@ -164,6 +332,12 @@ private:
         double networkRxBytesPerSec,
         double networkTxBytesPerSec,
         double gpuUsagePercent);
+    void updateAdditionalDiskUtilizationDevices(const std::vector<DiskRateSample>& sampleList);
+    void updateAdditionalNetworkUtilizationDevices(const std::vector<NetworkRateSample>& sampleList);
+    void updateAdditionalGpuUtilizationDevices(const std::vector<GpuUsageSample>& sampleList);
+    void updateDiskUtilizationDevice(DiskUtilizationDevice& device, const DiskRateSample& sample);
+    void updateNetworkUtilizationDevice(NetworkUtilizationDevice& device, const NetworkRateSample& sample);
+    void updateGpuUtilizationDevice(GpuUtilizationDevice& device, const GpuUsageSample& sample);
     void updateTaskManagerDetailLabels(
         const std::vector<double>& coreUsageList,
         const std::vector<CpuPowerSnapshot>& powerInfoList,
@@ -236,13 +410,14 @@ private:
     QHBoxLayout* m_utilizationBodyLayout = nullptr; // m_utilizationBodyLayout：左右分栏布局。
     QListWidget* m_utilizationSidebarList = nullptr; // m_utilizationSidebarList：左侧性能卡片列表。
     QStackedWidget* m_utilizationDetailStack = nullptr; // m_utilizationDetailStack：右侧详情页栈。
+    std::vector<UtilizationNavEntry> m_utilizationNavEntries; // m_utilizationNavEntries：左侧卡片到右侧页的映射。
 
     // 左侧性能卡片。
     PerformanceNavCard* m_cpuNavCard = nullptr;      // m_cpuNavCard：CPU 导航卡片。
     PerformanceNavCard* m_memoryNavCard = nullptr;   // m_memoryNavCard：内存导航卡片。
-    PerformanceNavCard* m_diskNavCard = nullptr;     // m_diskNavCard：磁盘导航卡片。
-    PerformanceNavCard* m_networkNavCard = nullptr;  // m_networkNavCard：网络导航卡片。
-    PerformanceNavCard* m_gpuNavCard = nullptr;      // m_gpuNavCard：GPU 导航卡片。
+    PerformanceNavCard* m_diskNavCard = nullptr;     // m_diskNavCard：兼容旧聚合磁盘卡片，当前动态设备模式下为空。
+    PerformanceNavCard* m_networkNavCard = nullptr;  // m_networkNavCard：兼容旧聚合网络卡片，当前动态设备模式下为空。
+    PerformanceNavCard* m_gpuNavCard = nullptr;      // m_gpuNavCard：兼容旧聚合GPU卡片，当前动态设备模式下为空。
 
     // 利用率详情页：CPU。
     QWidget* m_utilizationCpuSubPage = nullptr;    // m_utilizationCpuSubPage：CPU 详情页。
@@ -329,9 +504,9 @@ private:
     std::atomic_bool m_staticInfoRefreshing{ false }; // m_staticInfoRefreshing：静态信息异步刷新锁。
     std::atomic_bool m_sensorRefreshing{ false };     // m_sensorRefreshing：传感器异步刷新锁。
     bool m_initialSamplingStarted = false;            // m_initialSamplingStarted：首次显示时是否已启动首轮采样。
-    std::uint64_t m_lastNetworkRxBytes = 0;           // m_lastNetworkRxBytes：上次网络接收累计字节。
-    std::uint64_t m_lastNetworkTxBytes = 0;           // m_lastNetworkTxBytes：上次网络发送累计字节。
-    qint64 m_lastNetworkSampleMs = 0;                 // m_lastNetworkSampleMs：上次网络采样时间戳(ms)。
+    std::uint64_t m_lastNetworkRxBytes = 0;           // m_lastNetworkRxBytes：兼容旧聚合网络采样的累计接收字节。
+    std::uint64_t m_lastNetworkTxBytes = 0;           // m_lastNetworkTxBytes：兼容旧聚合网络采样的累计发送字节。
+    qint64 m_lastNetworkSampleMs = 0;                 // m_lastNetworkSampleMs：兼容旧聚合网络采样时间戳(ms)。
     QString m_primaryNetworkAdapterName;              // m_primaryNetworkAdapterName：当前主活跃网卡名称。
     std::uint64_t m_primaryNetworkLinkBitsPerSecond = 0; // m_primaryNetworkLinkBitsPerSecond：主网卡链路速率。
 
@@ -368,14 +543,17 @@ private:
     std::uint64_t m_systemVolumeTotalBytes = 0; // m_systemVolumeTotalBytes：系统盘总容量字节。
     std::uint64_t m_systemVolumeFreeBytes = 0;  // m_systemVolumeFreeBytes：系统盘剩余容量字节。
 
-    double m_diskNavAutoScaleBytesPerSec = 1024.0 * 1024.0; // m_diskNavAutoScaleBytesPerSec：磁盘卡片动态缩放上限。
-    double m_networkNavAutoScaleBytesPerSec = 1024.0 * 1024.0; // m_networkNavAutoScaleBytesPerSec：网络卡片动态缩放上限。
+    double m_diskNavAutoScaleBytesPerSec = 1024.0 * 1024.0; // m_diskNavAutoScaleBytesPerSec：兼容旧聚合磁盘页的动态缩放上限。
+    double m_networkNavAutoScaleBytesPerSec = 1024.0 * 1024.0; // m_networkNavAutoScaleBytesPerSec：兼容旧聚合网络页的动态缩放上限。
     std::vector<double> m_memoryNavUsedHistoryPercent; // m_memoryNavUsedHistoryPercent：内存已用缩略图历史。
     std::vector<double> m_memoryNavCachedHistoryPercent; // m_memoryNavCachedHistoryPercent：内存缓存/池缩略图历史。
-    std::vector<double> m_diskNavReadHistoryBytesPerSec; // m_diskNavReadHistoryBytesPerSec：磁盘读取缩略图原始速率历史。
-    std::vector<double> m_diskNavWriteHistoryBytesPerSec; // m_diskNavWriteHistoryBytesPerSec：磁盘写入缩略图原始速率历史。
-    std::vector<double> m_networkNavRxHistoryBytesPerSec; // m_networkNavRxHistoryBytesPerSec：网络下行缩略图原始速率历史。
-    std::vector<double> m_networkNavTxHistoryBytesPerSec; // m_networkNavTxHistoryBytesPerSec：网络上行缩略图原始速率历史。
+    std::vector<double> m_diskNavReadHistoryBytesPerSec; // m_diskNavReadHistoryBytesPerSec：兼容旧聚合磁盘卡片读取历史。
+    std::vector<double> m_diskNavWriteHistoryBytesPerSec; // m_diskNavWriteHistoryBytesPerSec：兼容旧聚合磁盘卡片写入历史。
+    std::vector<double> m_networkNavRxHistoryBytesPerSec; // m_networkNavRxHistoryBytesPerSec：兼容旧聚合网络卡片下行历史。
+    std::vector<double> m_networkNavTxHistoryBytesPerSec; // m_networkNavTxHistoryBytesPerSec：兼容旧聚合网络卡片上行历史。
+    std::vector<DiskUtilizationDevice> m_diskUtilDevices; // m_diskUtilDevices：磁盘利用率多设备页。
+    std::vector<NetworkUtilizationDevice> m_networkUtilDevices; // m_networkUtilDevices：网卡利用率多设备页。
+    std::vector<GpuUtilizationDevice> m_gpuUtilDevices; // m_gpuUtilDevices：GPU利用率多设备页。
 
     // PDH 性能计数器句柄（用 void* 规避头文件引入 Windows 细节）。
     void* m_cpuPerfQueryHandle = nullptr;     // m_cpuPerfQueryHandle：PDH 查询句柄。

@@ -9,6 +9,7 @@
 // 4) 提供事件筛选、导出、复制与跳转进程详情等交互能力。
 // ============================================================
 
+#include "ProcessTraceTimelineWidget.h"
 #include "../Framework.h"
 
 #include <QWidget>
@@ -34,7 +35,6 @@ class QTimer;
 class QVBoxLayout;
 
 struct _EVENT_RECORD;
-
 class ProcessTraceMonitorWidget final : public QWidget
 {
 public:
@@ -179,6 +179,7 @@ public:
     // - activityIdText：ActivityId 文本。
     struct CapturedEventRow
     {
+        std::uint64_t time100ns = 0;
         QString time100nsText;
         QString typeText;
         QString providerText;
@@ -240,6 +241,24 @@ private:
     void scheduleEventFilterApply();
     bool hasAnyEventFilterActive() const;
     void updateEventFilterStatusText(int visibleCount, int totalCount);
+    // applyTimelineSelection：
+    // - 作用：接收时间轴控件发出的绝对起止时间；
+    // - 处理：记录内部时间选区并触发现有事件表筛选；
+    // - 返回：无返回值。
+    void applyTimelineSelection(std::uint64_t start100ns, std::uint64_t end100ns);
+    // refreshTimelineRange：
+    // - 作用：根据采集开始/停止状态更新时间轴左右边界；
+    // - 入参 captureFinished：true 表示右侧固定为停止时间，false 表示右侧跟随当前时间；
+    // - 返回：无返回值。
+    void refreshTimelineRange(bool captureFinished);
+    // refreshTimelinePoints：
+    // - 作用：把轻量事件点缓存推送给时间轴控件重绘；
+    // - 返回：无返回值。
+    void refreshTimelinePoints();
+    // isTimelineFilterActive：
+    // - 作用：判断用户是否已经通过时间轴启用额外时间过滤；
+    // - 返回：true 表示 applyEventFilter 需要叠加时间范围判断。
+    bool isTimelineFilterActive() const;
     void flushPendingRows();
     void appendEventRow(const CapturedEventRow& rowValue);
     void openEventDetailViewerForRow(int row) const;
@@ -285,6 +304,7 @@ private:
     static QString monitorIdleColorHex();
     static QString providerTypeFromName(const QString& providerNameText);
     static QString now100nsText();
+    static std::uint64_t currentSystemTime100ns();
     static QString guidToText(const GUID& guidValue);
     static QString queryEtwEventName(const struct _EVENT_RECORD* eventRecordPtr);
     static bool textMatch(
@@ -339,6 +359,7 @@ private:
     QCheckBox* m_eventKeepBottomCheck = nullptr;        // m_eventKeepBottomCheck：是否保持贴底。
     QPushButton* m_eventClearFilterButton = nullptr;    // m_eventClearFilterButton：清空筛选按钮。
     QLabel* m_eventFilterStatusLabel = nullptr;         // m_eventFilterStatusLabel：筛选结果统计文本。
+    ProcessTraceTimelineWidget* m_eventTimelineWidget = nullptr; // m_eventTimelineWidget：ETW 事件瀑布流时间轴。
     QTableWidget* m_eventTable = nullptr;               // m_eventTable：行为事件结果表。
 
     // ========================= 后台状态 =========================
@@ -347,6 +368,7 @@ private:
     std::vector<ProviderEntry> m_activeProviderList;                // m_activeProviderList：本轮监控成功启用的 Provider。
     std::unordered_map<std::uint32_t, RuntimeTrackedProcess> m_trackedProcessMap; // m_trackedProcessMap：运行期目标进程树。
     std::vector<CapturedEventRow> m_pendingRows;                    // m_pendingRows：后台待刷入 UI 的事件队列。
+    std::vector<ProcessTraceTimelineEventPoint> m_timelineEventPoints; // m_timelineEventPoints：时间轴绘制用轻量事件缓存。
     std::mutex m_runtimeMutex;                                      // m_runtimeMutex：保护目标进程树与 Provider 列表。
     std::mutex m_pendingMutex;                                      // m_pendingMutex：保护待刷新事件队列。
     std::atomic_bool m_captureRunning{ false };                     // m_captureRunning：ETW 监听是否在运行。
@@ -361,5 +383,10 @@ private:
     int m_captureProgressPid = 0;                                   // m_captureProgressPid：进度条任务 ID。
     std::atomic<std::uint64_t> m_sessionHandle{ 0 };                // m_sessionHandle：ETW 会话句柄。
     std::atomic<std::uint64_t> m_traceHandle{ 0 };                  // m_traceHandle：ETW 消费句柄。
+    std::uint64_t m_captureStartTime100ns = 0;                      // m_captureStartTime100ns：本轮监控起点时间。
+    std::uint64_t m_captureStopTime100ns = 0;                       // m_captureStopTime100ns：本轮监控停止时间。
+    std::uint64_t m_timelineSelectionStart100ns = 0;                // m_timelineSelectionStart100ns：时间轴框选起点。
+    std::uint64_t m_timelineSelectionEnd100ns = 0;                  // m_timelineSelectionEnd100ns：时间轴框选终点。
+    bool m_timelineUserSelectionActive = false;                     // m_timelineUserSelectionActive：用户是否已启用时间框选。
     QString m_sessionName;                                          // m_sessionName：本轮 ETW 会话名。
 };

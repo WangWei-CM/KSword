@@ -102,10 +102,24 @@ private:
     // 参数 row：目标行索引。
     void copySingleRow(int row);
 
+    // copySelectedRows 作用：
+    // - 复制当前表格中选中的全部日志行；
+    // - 多选行右键菜单只调用该入口，保证一次性复制所有选中行。
+    // 参数：无，函数内部读取表格选择模型。
+    // 返回值：无，复制文本直接写入系统剪贴板。
+    void copySelectedRows();
+
     // copyVisibleRows 作用：
     // - 把当前表格可见内容全部复制到剪贴板；
     // - 适配事件追踪过滤后的可见子集。
     void copyVisibleRows();
+
+    // collectSelectedRowIndexes 作用：
+    // - 从 QTableWidget 的选择模型中收集当前被选中的行号；
+    // - 自动排序并去重，避免同一行被多个单元格重复计入。
+    // 参数：无。
+    // 返回值：合法行号列表，顺序与界面从上到下保持一致。
+    std::vector<int> collectSelectedRowIndexes() const;
 
     // buildVisibleRowText 作用：
     // - 按当前可见列拼接一行日志文本；

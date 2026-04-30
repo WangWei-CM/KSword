@@ -21,6 +21,7 @@
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -59,6 +60,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <set>
 #include <thread>
@@ -87,7 +89,14 @@ namespace
         "启动参数",
         "用户",
         "启动时间",
-        "管理员"
+        "管理员",
+        "PPL保护级别",
+        "保护状态",
+        "PPL",
+        "句柄数",
+        "HandleTable",
+        "SectionObject",
+        "R0状态"
     };
 
     // 常用图标路径常量（全部来自 qrc 的 /Icon 前缀资源）。
@@ -119,14 +128,14 @@ namespace
         {
             const QTreeWidget* ownerTree = treeWidget();
             const int sortColumn = ownerTree != nullptr ? ownerTree->sortColumn() : 0;
-            bool leftOk = false;
-            bool rightOk = false;
-            const double leftValue = data(sortColumn, ProcessNumericSortRole).toDouble(&leftOk);
-            const double rightValue = otherItem.data(sortColumn, ProcessNumericSortRole).toDouble(&rightOk);
-            if (leftOk && rightOk && leftValue != rightValue)
-            {
-                return leftValue < rightValue;
-            }
+        bool leftOk = false;
+        bool rightOk = false;
+        const double leftValue = data(sortColumn, ProcessNumericSortRole).toDouble(&leftOk);
+        const double rightValue = otherItem.data(sortColumn, ProcessNumericSortRole).toDouble(&rightOk);
+        if (leftOk && rightOk && leftValue != rightValue)
+        {
+            return leftValue < rightValue;
+        }
             if (leftOk && rightOk)
             {
                 return text(sortColumn).localeAwareCompare(otherItem.text(sortColumn)) < 0;
@@ -332,11 +341,169 @@ namespace
         std::uint32_t processId = 0;
         std::uint32_t parentProcessId = 0;
         std::uint32_t flags = 0;
+        std::uint32_t sessionId = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t r0Status = KSWORD_ARK_PROCESS_R0_STATUS_UNAVAILABLE;
+        std::uint32_t sessionSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint8_t protection = 0;
+        std::uint8_t signatureLevel = 0;
+        std::uint8_t sectionSignatureLevel = 0;
+        std::uint32_t protectionSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t signatureLevelSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t sectionSignatureLevelSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t objectTableSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t sectionObjectSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t imagePathSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t protectionOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t signatureLevelOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t sectionSignatureLevelOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t objectTableOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t sectionObjectOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint64_t objectTableAddress = 0;
+        std::uint64_t sectionObjectAddress = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
         std::string imageName;
+        std::string imagePath;
     };
 
     // 内核专属记录使用固定创建时间种子，避免与 R3 常规 identity 发生冲突。
     constexpr std::uint64_t KernelOnlyCreationTimeSeed = 0xFFFFFFFF00000000ULL;
+
+    QString processFieldSourceText(const std::uint32_t sourceValue)
+    {
+        // sourceValue 用途：共享协议中的字段来源枚举。
+        // 返回值：面向 UI 的稳定可读文本。
+        switch (sourceValue)
+        {
+        case KSWORD_ARK_PROCESS_FIELD_SOURCE_PUBLIC_API:
+            return QStringLiteral("Public API");
+        case KSWORD_ARK_PROCESS_FIELD_SOURCE_SYSTEM_INFORMER_DYNDATA:
+            return QStringLiteral("System Informer DynData");
+        case KSWORD_ARK_PROCESS_FIELD_SOURCE_RUNTIME_PATTERN:
+            return QStringLiteral("Runtime pattern");
+        default:
+            return QStringLiteral("Unavailable");
+        }
+    }
+
+    QString processR0StatusText(const std::uint32_t statusValue)
+    {
+        // statusValue 用途：R0 每行扩展信息的整体完成状态。
+        // 返回值：短文本，直接用于表格列与详情页。
+        switch (statusValue)
+        {
+        case KSWORD_ARK_PROCESS_R0_STATUS_OK:
+            return QStringLiteral("OK");
+        case KSWORD_ARK_PROCESS_R0_STATUS_PARTIAL:
+            return QStringLiteral("Partial");
+        case KSWORD_ARK_PROCESS_R0_STATUS_DYNDATA_MISSING:
+            return QStringLiteral("DynData missing");
+        case KSWORD_ARK_PROCESS_R0_STATUS_READ_FAILED:
+            return QStringLiteral("Read failed");
+        default:
+            return QStringLiteral("Unavailable");
+        }
+    }
+
+    QString byteHexText(const std::uint8_t byteValue)
+    {
+        // byteValue 用途：保护/签名等级原始单字节值。
+        // 返回值：0xNN 格式，便于和内核原始字段对照。
+        return QStringLiteral("0x%1")
+            .arg(static_cast<unsigned int>(byteValue), 2, 16, QChar('0'))
+            .toUpper();
+    }
+
+    bool resolvePplSignatureLevelsForUi(
+        const std::uint8_t protectionLevel,
+        std::uint8_t* const signatureLevelOut,
+        std::uint8_t* const sectionSignatureLevelOut)
+    {
+        // protectionLevel 用途：菜单传入的 PS_PROTECTION 原始字节。
+        // 返回值：true 表示 UI 能预测驱动侧同步写入的签名级别。
+        if (signatureLevelOut == nullptr || sectionSignatureLevelOut == nullptr)
+        {
+            return false;
+        }
+
+        const std::uint8_t signerType = (protectionLevel == 0U)
+            ? static_cast<std::uint8_t>(0U)
+            : static_cast<std::uint8_t>((protectionLevel & 0xF0U) >> 4U);
+        switch (signerType)
+        {
+        case 0:
+            *signatureLevelOut = 0x00U;
+            *sectionSignatureLevelOut = 0x00U;
+            return true;
+        case 1:
+            *signatureLevelOut = 0x04U;
+            *sectionSignatureLevelOut = 0x04U;
+            return true;
+        case 2:
+            *signatureLevelOut = 0x0BU;
+            *sectionSignatureLevelOut = 0x06U;
+            return true;
+        case 3:
+            *signatureLevelOut = 0x07U;
+            *sectionSignatureLevelOut = 0x07U;
+            return true;
+        case 4:
+            *signatureLevelOut = 0x0CU;
+            *sectionSignatureLevelOut = 0x08U;
+            return true;
+        case 5:
+            *signatureLevelOut = 0x0CU;
+            *sectionSignatureLevelOut = 0x0CU;
+            return true;
+        case 6:
+            *signatureLevelOut = 0x0EU;
+            *sectionSignatureLevelOut = 0x0CU;
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    QString pplMutationCapabilityText(const ks::process::ProcessRecord& processRecord)
+    {
+        // processRecord 用途：读取当前行的 DynData capability 与字段来源。
+        // 返回值：二次确认框中的 capability/source 摘要。
+        const bool capabilityPresent =
+            (processRecord.r0DynDataCapabilityMask & KSW_CAP_PROCESS_PROTECTION_PATCH) != 0U;
+        const bool protectionOffsetPresent =
+            processRecord.r0ProtectionOffset != KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE &&
+            processRecord.r0SignatureLevelOffset != KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE &&
+            processRecord.r0SectionSignatureLevelOffset != KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        return QStringLiteral("Capability: %1 | Offsets: %2 | Sources: Protection=%3, Signature=%4, SectionSignature=%5")
+            .arg(capabilityPresent ? QStringLiteral("KSW_CAP_PROCESS_PROTECTION_PATCH present") : QStringLiteral("missing/unknown"))
+            .arg(protectionOffsetPresent ? QStringLiteral("present") : QStringLiteral("missing/unknown"))
+            .arg(processFieldSourceText(processRecord.r0ProtectionSource))
+            .arg(processFieldSourceText(processRecord.r0SignatureLevelSource))
+            .arg(processFieldSourceText(processRecord.r0SectionSignatureLevelSource));
+    }
+
+    QString pointerAvailabilityText(
+        const bool available,
+        const std::uint64_t addressValue,
+        const std::uint32_t sourceValue)
+    {
+        // available 表示 offset/capability 是否可用；addressValue 是当前字段值。
+        // 返回值含来源，方便用户判断 DynData 是否命中。
+        if (!available)
+        {
+            return QStringLiteral("Unavailable (%1)").arg(processFieldSourceText(sourceValue));
+        }
+        if (addressValue == 0U)
+        {
+            return QStringLiteral("Available: null (%1)").arg(processFieldSourceText(sourceValue));
+        }
+        const QString addressText = QStringLiteral("0x%1")
+            .arg(static_cast<qulonglong>(addressValue), 0, 16)
+            .toUpper();
+        return QStringLiteral("Available: 0x%1 (%2)")
+            .arg(addressText.mid(2))
+            .arg(processFieldSourceText(sourceValue));
+    }
 
     // enumerateProcessesByR0Driver 作用：
     // - 通过 ArkDriverClient 获取内核侧进程列表；
@@ -374,7 +541,29 @@ namespace
             processEntry.processId = entry.processId;
             processEntry.parentProcessId = entry.parentProcessId;
             processEntry.flags = entry.flags;
+            processEntry.sessionId = entry.sessionId;
+            processEntry.fieldFlags = entry.fieldFlags;
+            processEntry.r0Status = entry.r0Status;
+            processEntry.sessionSource = entry.sessionSource;
+            processEntry.protection = entry.protection;
+            processEntry.signatureLevel = entry.signatureLevel;
+            processEntry.sectionSignatureLevel = entry.sectionSignatureLevel;
+            processEntry.protectionSource = entry.protectionSource;
+            processEntry.signatureLevelSource = entry.signatureLevelSource;
+            processEntry.sectionSignatureLevelSource = entry.sectionSignatureLevelSource;
+            processEntry.objectTableSource = entry.objectTableSource;
+            processEntry.sectionObjectSource = entry.sectionObjectSource;
+            processEntry.imagePathSource = entry.imagePathSource;
+            processEntry.protectionOffset = entry.protectionOffset;
+            processEntry.signatureLevelOffset = entry.signatureLevelOffset;
+            processEntry.sectionSignatureLevelOffset = entry.sectionSignatureLevelOffset;
+            processEntry.objectTableOffset = entry.objectTableOffset;
+            processEntry.sectionObjectOffset = entry.sectionObjectOffset;
+            processEntry.objectTableAddress = entry.objectTableAddress;
+            processEntry.sectionObjectAddress = entry.sectionObjectAddress;
+            processEntry.dynDataCapabilityMask = entry.dynDataCapabilityMask;
             processEntry.imageName = entry.imageName;
+            processEntry.imagePath = entry.imagePath;
             processListOut->push_back(std::move(processEntry));
         }
 
@@ -383,6 +572,89 @@ namespace
             *detailTextOut = enumResult.io.message;
         }
         return true;
+    }
+
+    // mergeKernelProcessExtension 作用：
+    // - 把 R0 枚举得到的 Phase-2 EPROCESS 扩展字段合并到 R3 进程记录；
+    // - 基础路径/命令行仍以用户态公开 API 为主，R0 路径仅作为补充诊断字段。
+    void mergeKernelProcessExtension(
+        ks::process::ProcessRecord& processRecord,
+        const KernelProcessSnapshotEntry& kernelProcess)
+    {
+        processRecord.r0Flags = kernelProcess.flags;
+        processRecord.r0FieldFlags = kernelProcess.fieldFlags;
+        processRecord.r0Status = kernelProcess.r0Status;
+        processRecord.r0DynDataCapabilityMask = kernelProcess.dynDataCapabilityMask;
+        processRecord.r0ImagePath = kernelProcess.imagePath;
+
+        if ((kernelProcess.fieldFlags & KSWORD_ARK_PROCESS_FIELD_SESSION_PRESENT) != 0U)
+        {
+            processRecord.sessionId = kernelProcess.sessionId;
+        }
+
+        processRecord.r0Protection = kernelProcess.protection;
+        processRecord.r0SignatureLevel = kernelProcess.signatureLevel;
+        processRecord.r0SectionSignatureLevel = kernelProcess.sectionSignatureLevel;
+        processRecord.r0SessionSource = kernelProcess.sessionSource;
+        processRecord.r0ImagePathSource = kernelProcess.imagePathSource;
+        processRecord.r0ProtectionSource = kernelProcess.protectionSource;
+        processRecord.r0SignatureLevelSource = kernelProcess.signatureLevelSource;
+        processRecord.r0SectionSignatureLevelSource = kernelProcess.sectionSignatureLevelSource;
+        processRecord.r0ObjectTableSource = kernelProcess.objectTableSource;
+        processRecord.r0SectionObjectSource = kernelProcess.sectionObjectSource;
+        processRecord.r0ProtectionOffset = kernelProcess.protectionOffset;
+        processRecord.r0SignatureLevelOffset = kernelProcess.signatureLevelOffset;
+        processRecord.r0SectionSignatureLevelOffset = kernelProcess.sectionSignatureLevelOffset;
+        processRecord.r0ObjectTableOffset = kernelProcess.objectTableOffset;
+        processRecord.r0SectionObjectOffset = kernelProcess.sectionObjectOffset;
+        processRecord.r0ObjectTableAddress = kernelProcess.objectTableAddress;
+        processRecord.r0SectionObjectAddress = kernelProcess.sectionObjectAddress;
+    }
+
+    bool enrichProcessRecordWithR0ExtensionByPid(
+        ks::process::ProcessRecord& processRecord,
+        std::string* const detailTextOut)
+    {
+        // processRecord 用途：调用方当前选中或即将打开详情的 R3 进程记录。
+        // 返回值：true 表示已从 R0 枚举中找到同 PID 并合并 Phase-2 扩展字段。
+        std::vector<KernelProcessSnapshotEntry> kernelProcessList;
+        std::string queryDetailText;
+        const bool queryOk = enumerateProcessesByR0Driver(&kernelProcessList, &queryDetailText);
+        if (!queryOk)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = queryDetailText.empty()
+                    ? std::string("query kernel process list failed")
+                    : queryDetailText;
+            }
+            return false;
+        }
+
+        for (const KernelProcessSnapshotEntry& kernelProcess : kernelProcessList)
+        {
+            if (kernelProcess.processId != processRecord.pid)
+            {
+                continue;
+            }
+
+            mergeKernelProcessExtension(processRecord, kernelProcess);
+            if (processRecord.processName.empty() && !kernelProcess.imageName.empty())
+            {
+                processRecord.processName = kernelProcess.imageName;
+            }
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = queryDetailText;
+            }
+            return true;
+        }
+
+        if (detailTextOut != nullptr)
+        {
+            *detailTextOut = "target pid not returned by R0 process enumeration";
+        }
+        return false;
     }
 
     // isProcessPresentBySnapshot 作用：
@@ -476,6 +748,12 @@ namespace
             return true;
         }
         if (std::fabs(oldRecord.gpuPercent - newRecord.gpuPercent) >= 5.0)
+        {
+            return true;
+        }
+        if (oldRecord.protectionLevelKnown != newRecord.protectionLevelKnown ||
+            oldRecord.protectionLevel != newRecord.protectionLevel ||
+            oldRecord.protectionLevelText != newRecord.protectionLevelText)
         {
             return true;
         }
@@ -965,7 +1243,11 @@ void ProcessDock::initializeProcessTable()
     m_processTable->setRootIsDecorated(false);
     m_processTable->setItemsExpandable(false);
     m_processTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_processTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    // 选择模式：
+    // - 普通左键仍保持单行焦点；
+    // - 按住 Ctrl 左键点击时由 Qt 进入复选式多选/取消选择；
+    // - 右键菜单会读取所有已选行并批量执行动作。
+    m_processTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_processTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_processTable->setUniformRowHeights(true);
     m_processTable->setSortingEnabled(true);
@@ -1588,18 +1870,25 @@ void ProcessDock::initializeConnections()
             if (!m_contextMenuVisible)
             {
                 m_trackedSelectedIdentityKey.clear();
+                m_trackedSelectedIdentityKeys.clear();
                 m_trackedSelectedColumn = 0;
             }
             return;
         }
 
-        m_trackedSelectedIdentityKey =
-            currentItem->data(0, Qt::UserRole).toString().toStdString();
         const int currentColumn = m_processTable->currentColumn();
         if (currentColumn >= 0 && currentColumn < static_cast<int>(TableColumn::Count))
         {
             m_trackedSelectedColumn = currentColumn;
         }
+        syncTrackedSelectionFromTable();
+    });
+
+    // itemSelectionChanged 作用：
+    // - 记录 Ctrl 复选后的完整行集合；
+    // - 周期刷新 rebuildTable 后按 identityKey 恢复多选状态。
+    connect(m_processTable, &QTreeWidget::itemSelectionChanged, this, [this]() {
+        syncTrackedSelectionFromTable();
     });
 
     // itemPressed 作用：
@@ -1616,6 +1905,10 @@ void ProcessDock::initializeConnections()
         {
             m_trackedSelectedColumn = column;
         }
+        QTimer::singleShot(0, this, [this]()
+        {
+            syncTrackedSelectionFromTable();
+        });
     });
 
     // Alt+E 作用：
@@ -1629,7 +1922,7 @@ void ProcessDock::initializeConnections()
             return;
         }
 
-        if (selectedRecord() == nullptr)
+        if (selectedActionTargets().empty())
         {
             kLogEvent logEvent;
             warn << logEvent
@@ -1806,9 +2099,12 @@ bool ProcessDock::processRecordMatchesSearch(const ks::process::ProcessRecord& p
         QString::fromStdString(processRecord.processName),
         QString::number(processRecord.pid),
         QString::fromStdString(processRecord.imagePath),
+        QString::fromStdString(processRecord.r0ImagePath),
         QString::fromStdString(processRecord.commandLine),
         QString::fromStdString(processRecord.userName),
         QString::fromStdString(processRecord.signatureState),
+        processR0StatusText(processRecord.r0Status),
+        processFieldSourceText(processRecord.r0ProtectionSource),
         QString::fromStdString(processRecord.startTimeText),
         QString::number(processRecord.parentPid)
     };
@@ -1863,6 +2159,13 @@ void ProcessDock::applyDefaultColumnWidths()
     m_processTable->setColumnWidth(toColumnIndex(TableColumn::User), 180);
     m_processTable->setColumnWidth(toColumnIndex(TableColumn::StartTime), 160);
     m_processTable->setColumnWidth(toColumnIndex(TableColumn::IsAdmin), 90);
+    m_processTable->setColumnWidth(toColumnIndex(TableColumn::PplLevel), 220);
+    m_processTable->setColumnWidth(toColumnIndex(TableColumn::Protection), 130);
+    m_processTable->setColumnWidth(toColumnIndex(TableColumn::Ppl), 120);
+    m_processTable->setColumnWidth(toColumnIndex(TableColumn::HandleCount), 90);
+    m_processTable->setColumnWidth(toColumnIndex(TableColumn::HandleTable), 180);
+    m_processTable->setColumnWidth(toColumnIndex(TableColumn::SectionObject), 180);
+    m_processTable->setColumnWidth(toColumnIndex(TableColumn::R0Status), 130);
 }
 
 void ProcessDock::applyViewMode(const ViewMode viewMode)
@@ -1883,6 +2186,12 @@ void ProcessDock::applyViewMode(const ViewMode viewMode)
         m_processTable->setColumnHidden(toColumnIndex(TableColumn::Disk), false);
         m_processTable->setColumnHidden(toColumnIndex(TableColumn::Gpu), false);
         m_processTable->setColumnHidden(toColumnIndex(TableColumn::Net), false);
+        m_processTable->setColumnHidden(toColumnIndex(TableColumn::HandleCount), false);
+        m_processTable->setColumnHidden(toColumnIndex(TableColumn::Protection), false);
+        m_processTable->setColumnHidden(toColumnIndex(TableColumn::Ppl), false);
+        m_processTable->setColumnHidden(toColumnIndex(TableColumn::HandleTable), false);
+        m_processTable->setColumnHidden(toColumnIndex(TableColumn::SectionObject), false);
+        m_processTable->setColumnHidden(toColumnIndex(TableColumn::R0Status), false);
         applyAdaptiveColumnWidths();
         return;
     }
@@ -1898,6 +2207,12 @@ void ProcessDock::applyViewMode(const ViewMode viewMode)
     m_processTable->setColumnHidden(toColumnIndex(TableColumn::User), false);
     m_processTable->setColumnHidden(toColumnIndex(TableColumn::StartTime), false);
     m_processTable->setColumnHidden(toColumnIndex(TableColumn::IsAdmin), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::PplLevel), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::Protection), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::Ppl), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::HandleTable), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::SectionObject), false);
+    m_processTable->setColumnHidden(toColumnIndex(TableColumn::R0Status), false);
     applyAdaptiveColumnWidths();
 }
 
@@ -2237,6 +2552,7 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         &refreshResult.actualStrategy);
     const std::uint64_t sampleTick = steadyNow100ns();
     std::unordered_set<std::uint32_t> kernelOnlyPidSet;
+    std::unordered_map<std::uint32_t, KernelProcessSnapshotEntry> kernelProcessByPid;
 
     // 可选阶段：向 R0 请求内核进程列表，并追加“仅内核可见”的记录。
     if (queryKernelProcessList)
@@ -2257,6 +2573,11 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         {
             std::unordered_set<std::uint32_t> userPidSet;
             userPidSet.reserve(latestProcessList.size() * 2 + 1);
+            kernelProcessByPid.reserve(kernelProcessList.size() * 2 + 1);
+            for (const KernelProcessSnapshotEntry& kernelProcess : kernelProcessList)
+            {
+                kernelProcessByPid[kernelProcess.processId] = kernelProcess;
+            }
             for (const ks::process::ProcessRecord& processRecord : latestProcessList)
             {
                 userPidSet.insert(processRecord.pid);
@@ -2273,6 +2594,7 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
                 ks::process::ProcessRecord kernelOnlyRecord{};
                 kernelOnlyRecord.pid = kernelProcess.processId;
                 kernelOnlyRecord.parentPid = kernelProcess.parentProcessId;
+                mergeKernelProcessExtension(kernelOnlyRecord, kernelProcess);
                 kernelOnlyRecord.creationTime100ns =
                     KernelOnlyCreationTimeSeed + static_cast<std::uint64_t>(kernelProcess.processId);
                 kernelOnlyRecord.processName = kernelProcess.imageName.empty()
@@ -2346,6 +2668,32 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
             if (processRecord.userName.empty()) processRecord.userName = oldRecord.userName;
             if (processRecord.signatureState.empty()) processRecord.signatureState = oldRecord.signatureState;
             if (processRecord.signaturePublisher.empty()) processRecord.signaturePublisher = oldRecord.signaturePublisher;
+            if (processRecord.r0FieldFlags == 0U) processRecord.r0FieldFlags = oldRecord.r0FieldFlags;
+            if (processRecord.r0ImagePath.empty()) processRecord.r0ImagePath = oldRecord.r0ImagePath;
+            if (processRecord.r0Status == KSWORD_ARK_PROCESS_R0_STATUS_UNAVAILABLE) processRecord.r0Status = oldRecord.r0Status;
+            // PPL 保护级别枚举是手动刷新字段，不能从上一轮缓存继承。
+            processRecord.protectionLevelKnown = false;
+            processRecord.protectionLevel = 0;
+            processRecord.protectionLevelText.clear();
+            processRecord.r0Flags = oldRecord.r0Flags;
+            processRecord.r0DynDataCapabilityMask = oldRecord.r0DynDataCapabilityMask;
+            processRecord.r0Protection = oldRecord.r0Protection;
+            processRecord.r0SignatureLevel = oldRecord.r0SignatureLevel;
+            processRecord.r0SectionSignatureLevel = oldRecord.r0SectionSignatureLevel;
+            processRecord.r0SessionSource = oldRecord.r0SessionSource;
+            processRecord.r0ImagePathSource = oldRecord.r0ImagePathSource;
+            processRecord.r0ProtectionSource = oldRecord.r0ProtectionSource;
+            processRecord.r0SignatureLevelSource = oldRecord.r0SignatureLevelSource;
+            processRecord.r0SectionSignatureLevelSource = oldRecord.r0SectionSignatureLevelSource;
+            processRecord.r0ObjectTableSource = oldRecord.r0ObjectTableSource;
+            processRecord.r0SectionObjectSource = oldRecord.r0SectionObjectSource;
+            processRecord.r0ProtectionOffset = oldRecord.r0ProtectionOffset;
+            processRecord.r0SignatureLevelOffset = oldRecord.r0SignatureLevelOffset;
+            processRecord.r0SectionSignatureLevelOffset = oldRecord.r0SectionSignatureLevelOffset;
+            processRecord.r0ObjectTableOffset = oldRecord.r0ObjectTableOffset;
+            processRecord.r0SectionObjectOffset = oldRecord.r0SectionObjectOffset;
+            processRecord.r0ObjectTableAddress = oldRecord.r0ObjectTableAddress;
+            processRecord.r0SectionObjectAddress = oldRecord.r0SectionObjectAddress;
             processRecord.signatureTrusted = oldRecord.signatureTrusted;
             if (processRecord.startTimeText.empty()) processRecord.startTimeText = oldRecord.startTimeText;
             processRecord.isAdmin = oldRecord.isAdmin;
@@ -2389,6 +2737,11 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
                 needsStaticFill = true;
                 includeSignatureCheck = detailModeEnabled;
             }
+        }
+        const auto kernelProcessIt = kernelProcessByPid.find(processRecord.pid);
+        if (kernelProcessIt != kernelProcessByPid.end())
+        {
+            mergeKernelProcessExtension(processRecord, kernelProcessIt->second);
         }
 
         if (isKernelOnlyRecord)
@@ -2702,6 +3055,10 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
         exitedEntry.missingRounds = oldEntry.missingRounds + 1;
         exitedEntry.isNewInLatestRound = false;
         exitedEntry.isExitedInLatestRound = true;
+        // 退出保留行也不能携带上一轮手动 PPL 枚举，避免灰色残留行显示过期保护级别。
+        exitedEntry.record.protectionLevelKnown = false;
+        exitedEntry.record.protectionLevel = 0;
+        exitedEntry.record.protectionLevelText.clear();
         refreshResult.nextCache.emplace(oldPair.first, std::move(exitedEntry));
         ++refreshResult.exitedProcessCount;
 
@@ -2738,6 +3095,18 @@ void ProcessDock::rebuildTable()
         !m_trackedSelectedIdentityKey.empty()
         ? m_trackedSelectedIdentityKey
         : selectedIdentityKey();
+    std::unordered_set<std::string> trackedIdentityKeysBeforeRebuild;
+    for (const std::string& identityKey : m_trackedSelectedIdentityKeys)
+    {
+        if (!identityKey.empty())
+        {
+            trackedIdentityKeysBeforeRebuild.insert(identityKey);
+        }
+    }
+    if (!trackedIdentityKeyBeforeRebuild.empty())
+    {
+        trackedIdentityKeysBeforeRebuild.insert(trackedIdentityKeyBeforeRebuild);
+    }
     const int trackedColumnBeforeRebuild = std::clamp(
         m_trackedSelectedColumn,
         0,
@@ -2761,10 +3130,11 @@ void ProcessDock::rebuildTable()
 
     const std::vector<DisplayRow> displayRows = buildDisplayOrder();
 
-    // 先预计算 RAM/DISK/NET 的本轮最大值，用于把绝对值映射成“占用比例高亮”。
+    // 先预计算 RAM/DISK/NET/句柄数的本轮最大值，用于把绝对值映射成“占用比例高亮”。
     double maxRamMB = 0.0;
     double maxDiskMBps = 0.0;
     double maxNetKBps = 0.0;
+    std::uint32_t maxHandleCount = 0;
     for (const DisplayRow& displayRow : displayRows)
     {
         if (displayRow.record == nullptr)
@@ -2774,6 +3144,7 @@ void ProcessDock::rebuildTable()
         maxRamMB = std::max(maxRamMB, displayRow.record->workingSetMB);
         maxDiskMBps = std::max(maxDiskMBps, displayRow.record->diskMBps);
         maxNetKBps = std::max(maxNetKBps, displayRow.record->netKBps);
+        maxHandleCount = std::max(maxHandleCount, displayRow.record->handleCount);
     }
 
     // applyUsageHighlight 作用：
@@ -2800,6 +3171,8 @@ void ProcessDock::rebuildTable()
     // - 记录当前这轮重建中是否找到了“用户之前选中的进程行”；
     // - 这样刷新完成后可以按 identityKey 恢复选中高亮。
     QTreeWidgetItem* trackedRowItemToRestore = nullptr;
+    std::vector<QTreeWidgetItem*> trackedRowItemsToRestore;
+    trackedRowItemsToRestore.reserve(trackedIdentityKeysBeforeRebuild.size());
 
     for (const DisplayRow& displayRow : displayRows)
     {
@@ -2832,6 +3205,22 @@ void ProcessDock::rebuildTable()
         rowItem->setData(toColumnIndex(TableColumn::ParentPid), ProcessNumericSortRole, static_cast<double>(processRecord.parentPid));
         rowItem->setData(toColumnIndex(TableColumn::StartTime), ProcessNumericSortRole, static_cast<double>(processRecord.creationTime100ns));
         rowItem->setData(toColumnIndex(TableColumn::IsAdmin), ProcessNumericSortRole, processRecord.isAdmin ? 1.0 : 0.0);
+        rowItem->setData(
+            toColumnIndex(TableColumn::PplLevel),
+            ProcessNumericSortRole,
+            processRecord.protectionLevelKnown ? static_cast<double>(processRecord.protectionLevel) : -1.0);
+        rowItem->setData(toColumnIndex(TableColumn::Protection), ProcessNumericSortRole, static_cast<double>(processRecord.r0Protection));
+        rowItem->setData(toColumnIndex(TableColumn::Ppl), ProcessNumericSortRole, static_cast<double>(processRecord.r0Protection));
+        rowItem->setData(toColumnIndex(TableColumn::HandleCount), ProcessNumericSortRole, static_cast<double>(processRecord.handleCount));
+        rowItem->setData(
+            toColumnIndex(TableColumn::HandleTable),
+            ProcessNumericSortRole,
+            ((processRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_OBJECT_TABLE_AVAILABLE) != 0U) ? 1.0 : 0.0);
+        rowItem->setData(
+            toColumnIndex(TableColumn::SectionObject),
+            ProcessNumericSortRole,
+            ((processRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_SECTION_OBJECT_AVAILABLE) != 0U) ? 1.0 : 0.0);
+        rowItem->setData(toColumnIndex(TableColumn::R0Status), ProcessNumericSortRole, static_cast<double>(processRecord.r0Status));
         rowItem->setData(toColumnIndex(TableColumn::Name), ProcessEfficiencyModeKnownRole, processRecord.efficiencyModeSupported);
         rowItem->setData(toColumnIndex(TableColumn::Name), ProcessEfficiencyModeRole, processRecord.efficiencyModeEnabled);
         if (processRecord.efficiencyModeEnabled)
@@ -2911,17 +3300,28 @@ void ProcessDock::rebuildTable()
             const double netUsageRatio = (maxNetKBps > 0.0)
                 ? std::clamp(processRecord.netKBps / maxNetKBps, 0.0, 1.0)
                 : 0.0;
+            const double handleUsageRatio = (maxHandleCount > 0U)
+                ? std::clamp(
+                    static_cast<double>(processRecord.handleCount) / static_cast<double>(maxHandleCount),
+                    0.0,
+                    1.0)
+                : 0.0;
 
             applyUsageHighlight(rowItem, toColumnIndex(TableColumn::Cpu), cpuUsageRatio);
             applyUsageHighlight(rowItem, toColumnIndex(TableColumn::Ram), ramUsageRatio);
             applyUsageHighlight(rowItem, toColumnIndex(TableColumn::Disk), diskUsageRatio);
             applyUsageHighlight(rowItem, toColumnIndex(TableColumn::Gpu), gpuUsageRatio);
             applyUsageHighlight(rowItem, toColumnIndex(TableColumn::Net), netUsageRatio);
+            applyUsageHighlight(rowItem, toColumnIndex(TableColumn::HandleCount), handleUsageRatio);
         }
 
         if (!trackedIdentityKeyBeforeRebuild.empty() && identityKey == trackedIdentityKeyBeforeRebuild)
         {
             trackedRowItemToRestore = rowItem;
+        }
+        if (trackedIdentityKeysBeforeRebuild.find(identityKey) != trackedIdentityKeysBeforeRebuild.end())
+        {
+            trackedRowItemsToRestore.push_back(rowItem);
         }
 
         m_processTable->addTopLevelItem(rowItem);
@@ -2942,16 +3342,25 @@ void ProcessDock::rebuildTable()
     // 按 identityKey 恢复用户之前选中的进程：
     // - 左键点中的那一行在刷新后继续保持高亮；
     // - 若该进程已不存在，则清空追踪状态，避免错误高亮。
-    if (trackedRowItemToRestore != nullptr)
+    if (!trackedRowItemsToRestore.empty())
     {
-        m_processTable->setCurrentItem(trackedRowItemToRestore, trackedColumnBeforeRebuild);
-        trackedRowItemToRestore->setSelected(true);
-        m_trackedSelectedIdentityKey = trackedIdentityKeyBeforeRebuild;
+        for (QTreeWidgetItem* rowItem : trackedRowItemsToRestore)
+        {
+            if (rowItem != nullptr)
+            {
+                rowItem->setSelected(true);
+            }
+        }
+        QTreeWidgetItem* currentRowItemToRestore =
+            trackedRowItemToRestore != nullptr ? trackedRowItemToRestore : trackedRowItemsToRestore.front();
+        m_processTable->setCurrentItem(currentRowItemToRestore, trackedColumnBeforeRebuild);
+        syncTrackedSelectionFromTable();
         m_trackedSelectedColumn = trackedColumnBeforeRebuild;
     }
-    else if (!trackedIdentityKeyBeforeRebuild.empty() && currentProcessSearchText().isEmpty())
+    else if (!trackedIdentityKeysBeforeRebuild.empty() && currentProcessSearchText().isEmpty())
     {
         m_trackedSelectedIdentityKey.clear();
+        m_trackedSelectedIdentityKeys.clear();
         m_trackedSelectedColumn = 0;
     }
 
@@ -3001,6 +3410,7 @@ void ProcessDock::updateUsageSummaryInHeader(const std::vector<DisplayRow>& disp
     double totalDiskMBps = 0.0;
     double totalGpuPercent = 0.0;
     double totalNetKBps = 0.0;
+    std::uint64_t totalHandleCount = 0;
     for (const DisplayRow& displayRow : displayRows)
     {
         if (displayRow.record == nullptr || displayRow.isExited)
@@ -3021,6 +3431,7 @@ void ProcessDock::updateUsageSummaryInHeader(const std::vector<DisplayRow>& disp
         totalDiskMBps += displayRow.record->diskMBps;
         totalGpuPercent += displayRow.record->gpuPercent;
         totalNetKBps += displayRow.record->netKBps;
+        totalHandleCount += displayRow.record->handleCount;
     }
 
     // 非占用列保持原始列名；占用列追加“总和”文本（不使用 Σ 符号）。
@@ -3049,6 +3460,15 @@ void ProcessDock::updateUsageSummaryInHeader(const std::vector<DisplayRow>& disp
     headerItem->setText(toColumnIndex(TableColumn::User), ProcessTableHeaders.at(toColumnIndex(TableColumn::User)));
     headerItem->setText(toColumnIndex(TableColumn::StartTime), ProcessTableHeaders.at(toColumnIndex(TableColumn::StartTime)));
     headerItem->setText(toColumnIndex(TableColumn::IsAdmin), ProcessTableHeaders.at(toColumnIndex(TableColumn::IsAdmin)));
+    headerItem->setText(toColumnIndex(TableColumn::PplLevel), ProcessTableHeaders.at(toColumnIndex(TableColumn::PplLevel)));
+    headerItem->setText(toColumnIndex(TableColumn::Protection), ProcessTableHeaders.at(toColumnIndex(TableColumn::Protection)));
+    headerItem->setText(toColumnIndex(TableColumn::Ppl), ProcessTableHeaders.at(toColumnIndex(TableColumn::Ppl)));
+    headerItem->setText(
+        toColumnIndex(TableColumn::HandleCount),
+        QString("句柄数 %1").arg(static_cast<qulonglong>(totalHandleCount)));
+    headerItem->setText(toColumnIndex(TableColumn::HandleTable), ProcessTableHeaders.at(toColumnIndex(TableColumn::HandleTable)));
+    headerItem->setText(toColumnIndex(TableColumn::SectionObject), ProcessTableHeaders.at(toColumnIndex(TableColumn::SectionObject)));
+    headerItem->setText(toColumnIndex(TableColumn::R0Status), ProcessTableHeaders.at(toColumnIndex(TableColumn::R0Status)));
 }
 
 std::vector<ProcessDock::DisplayRow> ProcessDock::buildDisplayOrder() const
@@ -3218,14 +3638,47 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         clearContextActionBinding();
         return;
     }
-    m_processTable->setCurrentItem(clickedItem);
     const int clickedColumn = m_processTable->columnAt(localPosition.x());
-    if (clickedColumn >= 0)
+
+    // 右键行为：
+    // - 若右键点在已有多选集合内，则保持集合不变，菜单动作对所有选中行生效；
+    // - 若右键点在未选中行上，则切换为该单行，保持传统右键体验。
+    if (!clickedItem->isSelected())
     {
-        m_processTable->setCurrentItem(clickedItem, clickedColumn);
+        m_processTable->clearSelection();
+        if (clickedColumn >= 0)
+        {
+            m_processTable->setCurrentItem(clickedItem, clickedColumn);
+        }
+        else
+        {
+            m_processTable->setCurrentItem(clickedItem);
+        }
+        clickedItem->setSelected(true);
+    }
+    else if (clickedColumn >= 0)
+    {
+        if (QItemSelectionModel* selectionModel = m_processTable->selectionModel())
+        {
+            selectionModel->setCurrentIndex(
+                m_processTable->indexFromItem(clickedItem, clickedColumn),
+                QItemSelectionModel::NoUpdate);
+        }
+    }
+    else
+    {
+        if (QItemSelectionModel* selectionModel = m_processTable->selectionModel())
+        {
+            selectionModel->setCurrentIndex(
+                m_processTable->indexFromItem(clickedItem, 0),
+                QItemSelectionModel::NoUpdate);
+        }
     }
     bindContextActionToItem(clickedItem);
-    ks::process::ProcessRecord* contextProcessRecord = selectedRecord();
+    const std::vector<ProcessActionTarget> contextActionTargets = selectedActionTargets();
+    const bool hasBatchSelection = contextActionTargets.size() > 1;
+    const ks::process::ProcessRecord* contextProcessRecord =
+        contextActionTargets.empty() ? nullptr : &contextActionTargets.front().record;
 
     QMenu contextMenu(this);
     // 右键菜单显式样式：避免浅色模式在透明父控件下出现黑底黑字。
@@ -3268,6 +3721,14 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QAction* copyCellAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_copy_cell.svg"), "复制单元格");
     QAction* copyRowAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_copy_row.svg"), "复制行");
     contextMenu.addSeparator();
+    if (hasBatchSelection)
+    {
+        QAction* batchHintAction = contextMenu.addAction(
+            blueTintedIcon(":/Icon/process_list.svg"),
+            QStringLiteral("已选择 %1 个进程，支持批量动作").arg(contextActionTargets.size()));
+        batchHintAction->setEnabled(false);
+        contextMenu.addSeparator();
+    }
 
     // 结束动作区：
     // - 取消“结束进程”二级菜单，改为一级动作；
@@ -3281,6 +3742,10 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QAction* r0SuspendAction = contextMenu.addAction(
         buildR0ActionIcon(":/Icon/process_suspend.svg"),
         "R0挂起进程");
+    QAction* refreshPplLevelAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_refresh.svg"),
+        "手动刷新PPL保护级别");
+    refreshPplLevelAction->setToolTip(QStringLiteral("查询 ProcessProtectionLevelInfo；结果只更新当前列表快照，不写入跨轮缓存。"));
     QMenu* r0PplLevelSubMenu = contextMenu.addMenu(
         buildR0ActionIcon(":/Icon/process_critical.svg"),
         "R0设置PPL层级");
@@ -3367,65 +3832,68 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     realtimePriority->setData(5);
 
     QAction* detailsAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_details.svg"), "进程详细信息");
+    detailsAction->setEnabled(!hasBatchSelection);
 
     m_contextMenuVisible = true;
     QAction* selectedAction = contextMenu.exec(m_processTable->viewport()->mapToGlobal(localPosition));
     m_contextMenuVisible = false;
-    if (selectedAction == nullptr)
     {
-        clearContextActionBinding();
-        return;
-    }
-
-    {
-        kLogEvent logEvent;
-        info << logEvent
-            << "[ProcessDock] 右键菜单执行动作: " << selectedAction->text().toStdString()
-            << eol;
-    }
-
-    if (selectedAction == copyCellAction) { copyCurrentCell(); }
-    else if (selectedAction == copyRowAction) { copyCurrentRow(); }
-    else if (selectedAction == terminateProcessAction) { executeTerminateProcessAction(); }
-    else if (selectedAction == r0TerminateAction) { executeR0TerminateProcessAction(); }
-    else if (selectedAction == r0SuspendAction) { executeR0SuspendProcessAction(); }
-    else if (selectedAction == suspendAction) { executeSuspendAction(); }
-    else if (selectedAction == resumeAction) { executeResumeAction(); }
-    else if (selectedAction == enableEfficiencyAction) { executeSetEfficiencyModeAction(true); }
-    else if (selectedAction == disableEfficiencyAction) { executeSetEfficiencyModeAction(false); }
-    else if (selectedAction == setCriticalAction) { executeSetCriticalAction(true); }
-    else if (selectedAction == clearCriticalAction) { executeSetCriticalAction(false); }
-    else if (selectedAction == openFolderAction) { executeOpenFolderAction(); }
-    else if (selectedAction == openMemoryAction) { executeOpenMemoryOperationAction(); }
-    else if (selectedAction == detailsAction) { openProcessDetailsPlaceholder(); }
-    else if (selectedAction->parent() == prioritySubMenu)
-    {
-        executeSetPriorityAction(selectedAction->data().toInt());
-    }
-    else if (selectedAction->parent() == r0PplLevelSubMenu)
-    {
-        const unsigned int levelValue = selectedAction->data().toUInt();
-        if (levelValue > 0xFFU)
+        if (selectedAction == nullptr)
         {
-            kLogEvent actionEvent;
-            warn << actionEvent
-                << "[ProcessDock] R0 PPL 层级无效: levelValue="
-                << levelValue
-                << eol;
-            showActionResultMessage(
-                QStringLiteral("R0设置PPL层级"),
-                false,
-                std::string("invalid PPL level value"),
-                actionEvent);
             clearContextActionBinding();
             return;
         }
 
-        executeR0SetPplProtectionAction(
-            static_cast<std::uint8_t>(levelValue),
-            selectedAction->text());
-    }
+        {
+            kLogEvent logEvent;
+            info << logEvent
+                << "[ProcessDock] 右键菜单执行动作: " << selectedAction->text().toStdString()
+                << eol;
+        }
 
+        if (selectedAction == copyCellAction) { copyCurrentCell(); }
+        else if (selectedAction == copyRowAction) { copyCurrentRow(); }
+        else if (selectedAction == terminateProcessAction) { executeTerminateProcessAction(); }
+        else if (selectedAction == r0TerminateAction) { executeR0TerminateProcessAction(); }
+        else if (selectedAction == r0SuspendAction) { executeR0SuspendProcessAction(); }
+        else if (selectedAction == refreshPplLevelAction) { executeRefreshPplProtectionLevelAction(); }
+        else if (selectedAction == suspendAction) { executeSuspendAction(); }
+        else if (selectedAction == resumeAction) { executeResumeAction(); }
+        else if (selectedAction == enableEfficiencyAction) { executeSetEfficiencyModeAction(true); }
+        else if (selectedAction == disableEfficiencyAction) { executeSetEfficiencyModeAction(false); }
+        else if (selectedAction == setCriticalAction) { executeSetCriticalAction(true); }
+        else if (selectedAction == clearCriticalAction) { executeSetCriticalAction(false); }
+        else if (selectedAction == openFolderAction) { executeOpenFolderAction(); }
+        else if (selectedAction == openMemoryAction) { executeOpenMemoryOperationAction(); }
+        else if (selectedAction == detailsAction) { openProcessDetailsPlaceholder(); }
+        else if (selectedAction->parent() == prioritySubMenu)
+        {
+            executeSetPriorityAction(selectedAction->data().toInt());
+        }
+        else if (selectedAction->parent() == r0PplLevelSubMenu)
+        {
+            const unsigned int levelValue = selectedAction->data().toUInt();
+            if (levelValue > 0xFFU)
+            {
+                kLogEvent actionEvent;
+                warn << actionEvent
+                    << "[ProcessDock] R0 PPL 层级无效: levelValue="
+                    << levelValue
+                    << eol;
+                showActionResultMessage(
+                    QStringLiteral("R0设置PPL层级"),
+                    false,
+                    std::string("invalid PPL level value"),
+                    actionEvent);
+                clearContextActionBinding();
+                return;
+            }
+
+            executeR0SetPplProtectionAction(
+                static_cast<std::uint8_t>(levelValue),
+                selectedAction->text());
+        }
+    }
     clearContextActionBinding();
 }
 
@@ -3464,8 +3932,7 @@ void ProcessDock::showHeaderContextMenu(const QPoint& localPosition)
 
 void ProcessDock::copyCurrentCell()
 {
-    QTreeWidgetItem* currentItem = m_processTable->currentItem();
-    if (currentItem == nullptr)
+    if (m_processTable == nullptr)
     {
         return;
     }
@@ -3475,74 +3942,164 @@ void ProcessDock::copyCurrentCell()
     {
         return;
     }
-    QApplication::clipboard()->setText(currentItem->text(currentColumn));
+
+    QList<QTreeWidgetItem*> selectedItemList = m_processTable->selectedItems();
+    if (selectedItemList.isEmpty() && m_processTable->currentItem() != nullptr)
+    {
+        selectedItemList.push_back(m_processTable->currentItem());
+    }
+
+    QStringList cellTexts;
+    cellTexts.reserve(selectedItemList.size());
+    std::unordered_set<std::string> visitedIdentitySet;
+    for (QTreeWidgetItem* itemPointer : selectedItemList)
+    {
+        if (itemPointer == nullptr)
+        {
+            continue;
+        }
+
+        const std::string identityKey = itemPointer->data(0, Qt::UserRole).toString().toStdString();
+        if (!identityKey.empty() && visitedIdentitySet.find(identityKey) != visitedIdentitySet.end())
+        {
+            continue;
+        }
+        if (!identityKey.empty())
+        {
+            visitedIdentitySet.insert(identityKey);
+        }
+        cellTexts.push_back(itemPointer->text(currentColumn));
+    }
+
+    QApplication::clipboard()->setText(cellTexts.join("\n"));
 
     kLogEvent logEvent;
     dbg << logEvent
         << "[ProcessDock] 复制单元格, column=" << currentColumn
-        << ", text=" << currentItem->text(currentColumn).toStdString()
+        << ", rowCount=" << cellTexts.size()
+        << ", text=" << cellTexts.join("\\n").toStdString()
         << eol;
 }
 
 void ProcessDock::copyCurrentRow()
 {
-    QTreeWidgetItem* currentItem = m_processTable->currentItem();
-    if (currentItem == nullptr)
+    if (m_processTable == nullptr)
     {
         return;
     }
 
-    QStringList rowFields;
-    rowFields.reserve(static_cast<int>(TableColumn::Count));
-    for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
+    QList<QTreeWidgetItem*> selectedItemList = m_processTable->selectedItems();
+    if (selectedItemList.isEmpty() && m_processTable->currentItem() != nullptr)
     {
-        rowFields.push_back(currentItem->text(columnIndex));
+        selectedItemList.push_back(m_processTable->currentItem());
     }
-    QApplication::clipboard()->setText(rowFields.join("\t"));
+
+    QStringList rowTexts;
+    rowTexts.reserve(selectedItemList.size());
+    std::unordered_set<std::string> visitedIdentitySet;
+    for (QTreeWidgetItem* itemPointer : selectedItemList)
+    {
+        if (itemPointer == nullptr)
+        {
+            continue;
+        }
+
+        const std::string identityKey = itemPointer->data(0, Qt::UserRole).toString().toStdString();
+        if (!identityKey.empty() && visitedIdentitySet.find(identityKey) != visitedIdentitySet.end())
+        {
+            continue;
+        }
+        if (!identityKey.empty())
+        {
+            visitedIdentitySet.insert(identityKey);
+        }
+
+        QStringList rowFields;
+        rowFields.reserve(static_cast<int>(TableColumn::Count));
+        for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
+        {
+            rowFields.push_back(itemPointer->text(columnIndex));
+        }
+        rowTexts.push_back(rowFields.join("\t"));
+    }
+    QApplication::clipboard()->setText(rowTexts.join("\n"));
 
     kLogEvent logEvent;
     dbg << logEvent
-        << "[ProcessDock] 复制整行, text=" << rowFields.join("\t").toStdString()
+        << "[ProcessDock] 复制整行, rowCount=" << rowTexts.size()
+        << ", text=" << rowTexts.join("\\n").toStdString()
         << eol;
 }
 
 void ProcessDock::bindContextActionToItem(QTreeWidgetItem* clickedItem)
 {
     clearContextActionBinding();
-    if (clickedItem == nullptr)
+    if (m_processTable == nullptr)
     {
         return;
     }
 
-    m_contextActionIdentityKey = clickedItem->data(0, Qt::UserRole).toString().toStdString();
-    if (m_contextActionIdentityKey.empty())
+    // 右键动作绑定：
+    // - 优先绑定当前所有选中行，让菜单动作天然支持 Ctrl 复选批量操作；
+    // - 如果当前没有选中行，则退化为右键点中的单行。
+    QList<QTreeWidgetItem*> selectedItemList = m_processTable->selectedItems();
+    if (selectedItemList.isEmpty() && clickedItem != nullptr)
+    {
+        selectedItemList.push_back(clickedItem);
+    }
+
+    std::unordered_set<std::string> visitedIdentitySet;
+    for (QTreeWidgetItem* itemPointer : selectedItemList)
+    {
+        if (itemPointer == nullptr)
+        {
+            continue;
+        }
+
+        const std::string identityKey = itemPointer->data(0, Qt::UserRole).toString().toStdString();
+        if (identityKey.empty() || visitedIdentitySet.find(identityKey) != visitedIdentitySet.end())
+        {
+            continue;
+        }
+        visitedIdentitySet.insert(identityKey);
+
+        ProcessActionTarget actionTarget{};
+        actionTarget.identityKey = identityKey;
+
+        const auto cacheIt = m_cacheByIdentity.find(identityKey);
+        if (cacheIt != m_cacheByIdentity.end())
+        {
+            actionTarget.record = cacheIt->second.record;
+            m_contextActionRecords.push_back(std::move(actionTarget));
+            continue;
+        }
+
+        // 若刷新刚好重建导致 identity 缓存缺失，尝试用当前行 PID 兜底。
+        bool pidParseOk = false;
+        const std::uint32_t pidValue = itemPointer->text(toColumnIndex(TableColumn::Pid)).toUInt(&pidParseOk);
+        if (pidParseOk)
+        {
+            actionTarget.record = {};
+            actionTarget.record.pid = pidValue;
+            actionTarget.record.processName = itemPointer->text(toColumnIndex(TableColumn::Name)).toStdString();
+            m_contextActionRecords.push_back(std::move(actionTarget));
+        }
+    }
+
+    if (m_contextActionRecords.empty())
     {
         return;
     }
 
-    const auto cacheIt = m_cacheByIdentity.find(m_contextActionIdentityKey);
-    if (cacheIt != m_cacheByIdentity.end())
-    {
-        m_contextActionRecord = cacheIt->second.record;
-        m_hasContextActionRecord = true;
-        return;
-    }
-
-    // 若刷新刚好重建导致 identity 缓存缺失，尝试用当前行 PID 兜底。
-    bool pidParseOk = false;
-    const std::uint32_t pidValue = clickedItem->text(toColumnIndex(TableColumn::Pid)).toUInt(&pidParseOk);
-    if (pidParseOk)
-    {
-        m_contextActionRecord = {};
-        m_contextActionRecord.pid = pidValue;
-        m_contextActionRecord.processName = clickedItem->text(toColumnIndex(TableColumn::Name)).toStdString();
-        m_hasContextActionRecord = true;
-    }
+    m_contextActionIdentityKey = m_contextActionRecords.front().identityKey;
+    m_contextActionRecord = m_contextActionRecords.front().record;
+    m_hasContextActionRecord = true;
 }
 
 void ProcessDock::clearContextActionBinding()
 {
     m_contextActionIdentityKey.clear();
+    m_contextActionRecords.clear();
     m_hasContextActionRecord = false;
     m_contextMenuVisible = false;
 }
@@ -3582,6 +4139,246 @@ ks::process::ProcessRecord* ProcessDock::selectedRecord()
     return &cacheIt->second.record;
 }
 
+std::vector<ProcessDock::ProcessActionTarget> ProcessDock::selectedActionTargets() const
+{
+    // 右键菜单弹出期间优先使用冻结的动作绑定，避免刷新或选择变化影响执行对象。
+    if (!m_contextActionRecords.empty())
+    {
+        return m_contextActionRecords;
+    }
+
+    std::vector<ProcessActionTarget> actionTargets;
+    std::unordered_set<std::string> visitedIdentitySet;
+
+    // collectItemTarget 作用：
+    // - 从表格行解析 identityKey；
+    // - 优先从缓存取完整记录，缓存缺失时用行文本中的 PID 构造兜底记录。
+    const auto collectItemTarget =
+        [this, &actionTargets, &visitedIdentitySet](QTreeWidgetItem* itemPointer)
+        {
+            if (itemPointer == nullptr)
+            {
+                return;
+            }
+
+            const std::string identityKey = itemPointer->data(0, Qt::UserRole).toString().toStdString();
+            if (identityKey.empty() || visitedIdentitySet.find(identityKey) != visitedIdentitySet.end())
+            {
+                return;
+            }
+            visitedIdentitySet.insert(identityKey);
+
+            ProcessActionTarget actionTarget{};
+            actionTarget.identityKey = identityKey;
+
+            const auto cacheIt = m_cacheByIdentity.find(identityKey);
+            if (cacheIt != m_cacheByIdentity.end())
+            {
+                actionTarget.record = cacheIt->second.record;
+                actionTargets.push_back(std::move(actionTarget));
+                return;
+            }
+
+            bool pidParseOk = false;
+            const std::uint32_t pidValue = itemPointer->text(toColumnIndex(TableColumn::Pid)).toUInt(&pidParseOk);
+            if (pidParseOk)
+            {
+                actionTarget.record = {};
+                actionTarget.record.pid = pidValue;
+                actionTarget.record.processName = itemPointer->text(toColumnIndex(TableColumn::Name)).toStdString();
+                actionTargets.push_back(std::move(actionTarget));
+            }
+        };
+
+    if (m_processTable != nullptr)
+    {
+        const QList<QTreeWidgetItem*> selectedItemList = m_processTable->selectedItems();
+        for (QTreeWidgetItem* itemPointer : selectedItemList)
+        {
+            collectItemTarget(itemPointer);
+        }
+        if (actionTargets.empty())
+        {
+            collectItemTarget(m_processTable->currentItem());
+        }
+    }
+
+    return actionTargets;
+}
+
+void ProcessDock::syncTrackedSelectionFromTable()
+{
+    if (m_processTable == nullptr || m_contextMenuVisible)
+    {
+        return;
+    }
+
+    std::vector<std::string> selectedIdentityKeys;
+    std::unordered_set<std::string> visitedIdentitySet;
+    const QList<QTreeWidgetItem*> selectedItemList = m_processTable->selectedItems();
+    selectedIdentityKeys.reserve(static_cast<std::size_t>(selectedItemList.size()));
+
+    for (QTreeWidgetItem* itemPointer : selectedItemList)
+    {
+        if (itemPointer == nullptr)
+        {
+            continue;
+        }
+
+        const std::string identityKey = itemPointer->data(0, Qt::UserRole).toString().toStdString();
+        if (identityKey.empty() || visitedIdentitySet.find(identityKey) != visitedIdentitySet.end())
+        {
+            continue;
+        }
+        visitedIdentitySet.insert(identityKey);
+        selectedIdentityKeys.push_back(identityKey);
+    }
+
+    QTreeWidgetItem* currentItem = m_processTable->currentItem();
+    if (currentItem != nullptr)
+    {
+        const std::string currentIdentityKey = currentItem->data(0, Qt::UserRole).toString().toStdString();
+        if (!currentIdentityKey.empty())
+        {
+            m_trackedSelectedIdentityKey = currentIdentityKey;
+            if (visitedIdentitySet.find(currentIdentityKey) == visitedIdentitySet.end())
+            {
+                selectedIdentityKeys.push_back(currentIdentityKey);
+            }
+        }
+    }
+    else
+    {
+        m_trackedSelectedIdentityKey.clear();
+    }
+
+    m_trackedSelectedIdentityKeys = std::move(selectedIdentityKeys);
+}
+
+void ProcessDock::dispatchProcessActionTargetsInParallel(
+    const QString& actionTitle,
+    const std::vector<ProcessActionTarget>& actionTargets,
+    const std::function<bool(const ProcessActionTarget&, std::string*)>& actionInvoker,
+    const bool refreshWhenAnySucceeded)
+{
+    // 参数检查：没有目标或没有执行体时直接记录并返回。
+    if (actionTargets.empty() || !actionInvoker)
+    {
+        kLogEvent logEvent;
+        warn << logEvent
+            << "[ProcessDock] 批量动作被忽略：目标为空或执行体为空, title="
+            << actionTitle.toStdString()
+            << eol;
+        return;
+    }
+
+    // 单目标沿用同步执行路径，避免简单动作产生不必要线程切换。
+    if (actionTargets.size() == 1U)
+    {
+        std::string detailText;
+        const bool actionOk = actionInvoker(actionTargets.front(), &detailText);
+        kLogEvent actionEvent;
+        (actionOk ? info : err) << actionEvent
+            << "[ProcessDock] 单进程动作完成, title=" << actionTitle.toStdString()
+            << ", pid=" << actionTargets.front().record.pid
+            << ", ok=" << (actionOk ? "true" : "false")
+            << ", detail=" << (detailText.empty() ? "无附加信息" : detailText)
+            << eol;
+        showActionResultMessage(actionTitle, actionOk, detailText, actionEvent);
+        if (actionOk && refreshWhenAnySucceeded)
+        {
+            requestAsyncRefresh(true);
+        }
+        clearContextActionBinding();
+        return;
+    }
+
+    // 批量动作：每个 PID 独立线程执行，避免一个目标卡住后阻塞后续目标。
+    QPointer<ProcessDock> guard(this);
+    const QString localActionTitle = actionTitle;
+    const std::size_t targetCount = actionTargets.size();
+    const auto finishedCounter = std::make_shared<std::atomic_size_t>(0U);
+    const auto anySucceeded = std::make_shared<std::atomic_bool>(false);
+    kLogEvent startEvent;
+    info << startEvent
+        << "[ProcessDock] 启动批量动作, title=" << localActionTitle.toStdString()
+        << ", targetCount=" << targetCount
+        << eol;
+
+    for (const ProcessActionTarget& actionTarget : actionTargets)
+    {
+        std::thread([
+            guard,
+            localActionTitle,
+            actionTarget,
+            actionInvoker,
+            refreshWhenAnySucceeded,
+            targetCount,
+            finishedCounter,
+            anySucceeded]()
+        {
+            std::string detailText;
+            const bool actionOk = actionInvoker(actionTarget, &detailText);
+            const std::string normalizedDetailText = detailText.empty() ? "无附加信息" : detailText;
+            if (actionOk)
+            {
+                anySucceeded->store(true, std::memory_order_relaxed);
+            }
+            const std::size_t finishedCount =
+                finishedCounter->fetch_add(1U, std::memory_order_acq_rel) + 1U;
+            const bool allTargetsFinished = (finishedCount >= targetCount);
+
+            kLogEvent threadEvent;
+            (actionOk ? info : err) << threadEvent
+                << "[ProcessDock] 批量动作单目标完成, title=" << localActionTitle.toStdString()
+                << ", pid=" << actionTarget.record.pid
+                << ", identity=" << actionTarget.identityKey
+                << ", ok=" << (actionOk ? "true" : "false")
+                << ", detail=" << normalizedDetailText
+                << eol;
+
+            if (guard == nullptr)
+            {
+                return;
+            }
+
+            QMetaObject::invokeMethod(guard, [guard, localActionTitle, actionOk, detailText, refreshWhenAnySucceeded]()
+            {
+                if (guard == nullptr)
+                {
+                    return;
+                }
+
+                kLogEvent uiEvent;
+                guard->showActionResultMessage(localActionTitle, actionOk, detailText, uiEvent);
+            }, Qt::QueuedConnection);
+
+            if (!allTargetsFinished || guard == nullptr)
+            {
+                return;
+            }
+
+            QMetaObject::invokeMethod(guard, [guard, localActionTitle, refreshWhenAnySucceeded, anySucceeded]()
+            {
+                if (guard == nullptr)
+                {
+                    return;
+                }
+
+                if (refreshWhenAnySucceeded && anySucceeded->load(std::memory_order_relaxed))
+                {
+                    kLogEvent refreshEvent;
+                    info << refreshEvent
+                        << "[ProcessDock] 批量动作全部完成，触发一次刷新, title="
+                        << localActionTitle.toStdString()
+                        << eol;
+                    guard->requestAsyncRefresh(true);
+                }
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+}
+
 QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processRecord, const TableColumn column, const int depth) const
 {
     switch (column)
@@ -3619,6 +4416,45 @@ QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processR
     case TableColumn::IsAdmin:
         // 用方块 + 文本表示管理员状态（颜色在重建表格时设置）。
         return processRecord.isAdmin ? "■ 是" : "■ 否";
+    case TableColumn::PplLevel:
+        // PPL 保护级别枚举只由用户手动刷新，不从缓存继承。
+        if (!processRecord.protectionLevelKnown)
+        {
+            return QStringLiteral("未手动刷新");
+        }
+        return QString::fromStdString(processRecord.protectionLevelText.empty()
+            ? "Unknown"
+            : processRecord.protectionLevelText);
+    case TableColumn::Protection:
+        if ((processRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_PROTECTION_PRESENT) == 0U)
+        {
+            return QStringLiteral("Unavailable (%1)").arg(processFieldSourceText(processRecord.r0ProtectionSource));
+        }
+        return QStringLiteral("%1 (%2)")
+            .arg(byteHexText(processRecord.r0Protection))
+            .arg(processFieldSourceText(processRecord.r0ProtectionSource));
+    case TableColumn::Ppl:
+        if ((processRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_PROTECTION_PRESENT) == 0U)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return (processRecord.r0Protection == 0U)
+            ? QStringLiteral("None (0x00)")
+            : QStringLiteral("PPL %1").arg(byteHexText(processRecord.r0Protection));
+    case TableColumn::HandleCount:
+        return QString::number(processRecord.handleCount);
+    case TableColumn::HandleTable:
+        return pointerAvailabilityText(
+            (processRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_OBJECT_TABLE_AVAILABLE) != 0U,
+            processRecord.r0ObjectTableAddress,
+            processRecord.r0ObjectTableSource);
+    case TableColumn::SectionObject:
+        return pointerAvailabilityText(
+            (processRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_SECTION_OBJECT_AVAILABLE) != 0U,
+            processRecord.r0SectionObjectAddress,
+            processRecord.r0SectionObjectSource);
+    case TableColumn::R0Status:
+        return processR0StatusText(processRecord.r0Status);
     default:
         return QString();
     }
@@ -4426,378 +5262,508 @@ ProcessDock::ViewMode ProcessDock::currentViewMode() const
 
 void ProcessDock::executeR0TerminateProcessAction()
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] executeR0TerminateProcessAction 被忽略：当前没有选中进程。" << eol;
         return;
     }
 
-    const std::uint32_t targetPid = processRecord->pid;
-    std::string detailText;
-    const bool actionOk = terminateProcessByR0Driver(targetPid, &detailText);
-
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDock] R0 terminate action, pid=" << targetPid
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
-        << eol;
-    showActionResultMessage("R0结束进程", actionOk, detailText, actionEvent);
-    if (actionOk)
-    {
-        requestAsyncRefresh(true);
-    }
+    dispatchProcessActionTargetsInParallel(
+        QStringLiteral("R0结束进程"),
+        actionTargets,
+        [](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return terminateProcessByR0Driver(actionTarget.record.pid, detailTextOut);
+        },
+        true);
 }
 
 void ProcessDock::executeR0SuspendProcessAction()
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] executeR0SuspendProcessAction 被忽略：当前没有选中进程。" << eol;
         return;
     }
 
-    const std::uint32_t targetPid = processRecord->pid;
-    std::string detailText;
-    const bool actionOk = suspendProcessByR0Driver(targetPid, &detailText);
-
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDock] R0 suspend action, pid=" << targetPid
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
-        << eol;
-    showActionResultMessage("R0挂起进程", actionOk, detailText, actionEvent);
+    dispatchProcessActionTargetsInParallel(
+        QStringLiteral("R0挂起进程"),
+        actionTargets,
+        [](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return suspendProcessByR0Driver(actionTarget.record.pid, detailTextOut);
+        },
+        false);
 }
 
 void ProcessDock::executeR0SetPplProtectionAction(
     const std::uint8_t protectionLevel,
     const QString& levelDisplayText)
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] executeR0SetPplProtectionAction 被忽略：当前没有选中进程。" << eol;
         return;
     }
 
-    const std::uint32_t targetPid = processRecord->pid;
-    std::string detailText;
-    const bool actionOk = setPplProtectionLevelByR0Driver(targetPid, protectionLevel, &detailText);
+    const ks::process::ProcessRecord& primaryRecord = actionTargets.front().record;
+    const std::uint32_t targetPid = primaryRecord.pid;
+    std::uint8_t targetSignatureLevel = 0U;
+    std::uint8_t targetSectionSignatureLevel = 0U;
+    const bool signaturePredictionOk = resolvePplSignatureLevelsForUi(
+        protectionLevel,
+        &targetSignatureLevel,
+        &targetSectionSignatureLevel);
+    const QString currentProtectionText =
+        ((primaryRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_PROTECTION_PRESENT) != 0U)
+        ? byteHexText(primaryRecord.r0Protection)
+        : QStringLiteral("Unavailable");
+    const QString currentSignatureText =
+        ((primaryRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_SIGNATURE_LEVEL_PRESENT) != 0U)
+        ? byteHexText(primaryRecord.r0SignatureLevel)
+        : QStringLiteral("Unavailable");
+    const QString currentSectionSignatureText =
+        ((primaryRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_SECTION_SIGNATURE_LEVEL_PRESENT) != 0U)
+        ? byteHexText(primaryRecord.r0SectionSignatureLevel)
+        : QStringLiteral("Unavailable");
+    const QString targetSignatureText = signaturePredictionOk
+        ? byteHexText(targetSignatureLevel)
+        : QStringLiteral("Unknown");
+    const QString targetSectionSignatureText = signaturePredictionOk
+        ? byteHexText(targetSectionSignatureLevel)
+        : QStringLiteral("Unknown");
+    const QString confirmationText = QStringLiteral(
+        "将通过 R0 驱动修改目标进程 PPL/Protection 字段。\n\n"
+        "进程: %1 (PID %2)%12\n"
+        "当前 Protection: %3  来源: %4\n"
+        "目标 Protection: %5  菜单: %6\n\n"
+        "SignatureLevel 影响:\n"
+        "  当前 SignatureLevel: %7 -> 目标: %8\n"
+        "  当前 SectionSignatureLevel: %9 -> 目标: %10\n\n"
+        "%11\n\n"
+        "风险: 该动作会直接写 EPROCESS.Protection/SignatureLevel/SectionSignatureLevel。"
+        "错误的 DynData 偏移、系统版本差异或目标进程状态变化可能导致回滚失败、访问异常或系统不稳定。"
+        "继续前请确认已保存当前字段值用于手工回滚。")
+        .arg(QString::fromStdString(primaryRecord.processName.empty() ? std::string("Unknown") : primaryRecord.processName))
+        .arg(targetPid)
+        .arg(currentProtectionText)
+        .arg(processFieldSourceText(primaryRecord.r0ProtectionSource))
+        .arg(byteHexText(protectionLevel))
+        .arg(levelDisplayText)
+        .arg(currentSignatureText)
+        .arg(targetSignatureText)
+        .arg(currentSectionSignatureText)
+        .arg(targetSectionSignatureText)
+        .arg(pplMutationCapabilityText(primaryRecord))
+        .arg(actionTargets.size() > 1U ? QStringLiteral("\n批量目标数: %1，确认后每个进程会独立线程执行。").arg(actionTargets.size()) : QString());
 
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDock] R0 set PPL action, pid=" << targetPid
-        << ", protectionLevel=0x"
-        << std::hex
-        << std::uppercase
-        << static_cast<unsigned int>(protectionLevel)
-        << std::dec
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
-        << eol;
+    const QMessageBox::StandardButton confirmationButton = QMessageBox::warning(
+        this,
+        QStringLiteral("确认 R0 设置 PPL 层级"),
+        confirmationText,
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (confirmationButton != QMessageBox::Yes)
+    {
+        kLogEvent cancelEvent;
+        warn << cancelEvent
+            << "[ProcessDock] R0 set PPL action cancelled by user, pid="
+            << targetPid
+            << ", protectionLevel=0x"
+            << std::hex
+            << std::uppercase
+            << static_cast<unsigned int>(protectionLevel)
+            << std::dec
+            << eol;
+        return;
+    }
+
     const QString actionTitle = QStringLiteral("R0设置PPL层级(%1)").arg(levelDisplayText);
-    showActionResultMessage(actionTitle, actionOk, detailText, actionEvent);
+    dispatchProcessActionTargetsInParallel(
+        actionTitle,
+        actionTargets,
+        [protectionLevel](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return setPplProtectionLevelByR0Driver(actionTarget.record.pid, protectionLevel, detailTextOut);
+        },
+        false);
+}
+
+void ProcessDock::executeRefreshPplProtectionLevelAction()
+{
+    // 该动作只刷新用户选中的当前快照字段，不触发完整进程枚举。
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] PPL 保护级别刷新被忽略：当前没有选中进程。" << eol;
+        return;
+    }
+
+    std::size_t successCount = 0;
+    std::size_t failureCount = 0;
+    QStringList resultLineList;
+    resultLineList.reserve(static_cast<qsizetype>(actionTargets.size()));
+
+    // 每个目标独立调用 GetProcessInformation，避免 PPL 列依赖旧缓存。
+    for (const ProcessActionTarget& actionTarget : actionTargets)
+    {
+        std::uint32_t protectionLevelValue = 0;
+        std::string protectionLevelText;
+        std::string errorText;
+        const bool queryOk = ks::process::QueryProcessProtectionLevelByPid(
+            actionTarget.record.pid,
+            &protectionLevelValue,
+            &protectionLevelText,
+            &errorText);
+
+        auto cacheIt = m_cacheByIdentity.find(actionTarget.identityKey);
+        if (cacheIt == m_cacheByIdentity.end())
+        {
+            ++failureCount;
+            resultLineList.push_back(QStringLiteral("PID %1: cache missing")
+                .arg(actionTarget.record.pid));
+            continue;
+        }
+
+        if (queryOk)
+        {
+            cacheIt->second.record.protectionLevelKnown = true;
+            cacheIt->second.record.protectionLevel = protectionLevelValue;
+            cacheIt->second.record.protectionLevelText = protectionLevelText;
+            ++successCount;
+            resultLineList.push_back(QStringLiteral("PID %1: %2")
+                .arg(actionTarget.record.pid)
+                .arg(QString::fromStdString(protectionLevelText)));
+        }
+        else
+        {
+            cacheIt->second.record.protectionLevelKnown = true;
+            cacheIt->second.record.protectionLevel = 0;
+            cacheIt->second.record.protectionLevelText = errorText.empty()
+                ? std::string("Query failed")
+                : std::string("Query failed: ") + errorText;
+            ++failureCount;
+            resultLineList.push_back(QStringLiteral("PID %1: %2")
+                .arg(actionTarget.record.pid)
+                .arg(QString::fromStdString(cacheIt->second.record.protectionLevelText)));
+        }
+    }
+
+    rebuildTable();
+    updateRefreshStateUi(
+        false,
+        QStringLiteral("● PPL保护级别手动刷新完成 成功:%1 失败:%2")
+            .arg(successCount)
+            .arg(failureCount));
+
+    kLogEvent actionEvent;
+    (failureCount == 0 ? info : warn) << actionEvent
+        << "[ProcessDock] PPL 保护级别手动刷新完成, targets=" << actionTargets.size()
+        << ", success=" << successCount
+        << ", failure=" << failureCount
+        << ", detail=" << resultLineList.join(" | ").toStdString()
+        << eol;
 }
 
 void ProcessDock::executeTerminateProcessAction()
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] executeTerminateProcessAction 被忽略：当前没有选中进程。" << eol;
         return;
     }
 
-    // targetPid 用途：固定本次动作的目标 PID，避免中途选中行变化影响执行对象。
-    const std::uint32_t targetPid = processRecord->pid;
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    info << actionEvent
-        << "[ProcessDock] 开始执行结束进程组合动作, pid=" << targetPid
-        << eol;
-
-    // 先做一次进程存在性检查，避免对已退出 PID 执行无意义操作。
-    bool initialQueryOk = false;
-    bool processStillPresent = isProcessPresentBySnapshot(targetPid, &initialQueryOk);
-    if (!initialQueryOk)
-    {
-        warn << actionEvent
-            << "[ProcessDock] 结束进程前置存在性检查失败，将按“进程仍存在”继续处理, pid="
-            << targetPid
-            << eol;
-    }
-    if (!processStillPresent)
-    {
-        info << actionEvent
-            << "[ProcessDock] 目标进程已不存在，结束动作直接判定成功, pid="
-            << targetPid
-            << eol;
-        showActionResultMessage("结束进程", true, "目标进程已不存在，无需执行结束动作。", actionEvent);
-        requestAsyncRefresh(true);
-        return;
-    }
-
-    // kTerminateRoundLimit 用途：限制“全方法链”轮次，避免异常目标导致无限阻塞 UI。
-    constexpr int kTerminateRoundLimit = 2;
-    // processExited 用途：记录组合动作最终是否确认目标进程已退出。
-    bool processExited = false;
-    // actionDetailStream 用途：汇总每一轮、每一方法的细节，供最终统一输出。
-    std::ostringstream actionDetailStream;
-    actionDetailStream << "pid=" << targetPid;
-
-    // TerminateMethodEntry 作用：描述一个可执行的“结束进程原理方法”。
-    struct TerminateMethodEntry
-    {
-        const char* methodName = nullptr; // methodName：日志中显示的方法名。
-        std::function<bool(std::string*)> invokeMethod; // invokeMethod：方法调用体。
-    };
-
-    // terminateMethodList 作用：
-    // - 维护“结束进程原理”的顺序清单；
-    // - 按用户要求把所有方法串联到同一入口。
-    const std::vector<TerminateMethodEntry> terminateMethodList =
-    {
-        { "TerminateProcess(Kernel32)", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateProcessByWin32(targetPid, detailOut); } },
-        { "NtTerminateProcess/ZwTerminateProcess", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateProcessByNtNative(targetPid, detailOut); } },
-        { "WTSTerminateProcess(WTS API)", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateProcessByWtsApi(targetPid, detailOut); } },
-        { "WinStationTerminateProcess(winsta)", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateProcessByWinStationApi(targetPid, detailOut); } },
-        { "TerminateJobObject(Job)", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateProcessByJobObject(targetPid, detailOut); } },
-        { "NtTerminateJobObject/ZwTerminateJobObject", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateProcessByNtJobObject(targetPid, detailOut); } },
-        { "RmShutdown(Restart Manager)", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateProcessByRestartManager(targetPid, false, detailOut); } },
-        { "RmShutdown(Restart Manager, force)", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateProcessByRestartManager(targetPid, true, detailOut); } },
-        { "DuplicateHandle(-1)+TerminateProcess", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateProcessByDuplicateHandlePseudo(targetPid, detailOut); } },
-        { "TerminateThread(全部线程)", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateAllThreadsByPid(targetPid, detailOut); } },
-        { "NtTerminateThread/ZwTerminateThread(全部线程)", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateAllThreadsByPidNtNative(targetPid, detailOut); } },
-        { "DebugActiveProcess 调试附加", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateProcessByDebugAttach(targetPid, detailOut); } },
-        { "ntsd -c q -p <pid>", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateProcessByNtsdCommand(targetPid, detailOut); } },
-        { "NtUnmapViewOfSection 卸载 ntdll.dll", [targetPid](std::string* detailOut)
-            { return ks::process::TerminateProcessByNtUnmapNtdll(targetPid, detailOut); } }
-    };
-
-    for (int roundIndex = 0; roundIndex < kTerminateRoundLimit && !processExited; ++roundIndex)
-    {
-        // roundNumber 用途：日志中的轮次编号（从 1 开始，便于人工排查）。
-        const int roundNumber = roundIndex + 1;
-
-        for (std::size_t methodIndex = 0;
-            methodIndex < terminateMethodList.size() && !processExited;
-            ++methodIndex)
+    dispatchProcessActionTargetsInParallel(
+        QStringLiteral("结束进程"),
+        actionTargets,
+        [](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
         {
-            const TerminateMethodEntry& methodEntry = terminateMethodList[methodIndex];
-            if (methodEntry.methodName == nullptr || !methodEntry.invokeMethod)
-            {
-                continue;
-            }
-
-            std::string methodDetailText;
-            const bool methodOk = methodEntry.invokeMethod(&methodDetailText);
-            const std::string normalizedMethodDetailText =
-                methodDetailText.empty() ? "无附加信息" : methodDetailText;
-            (methodOk ? info : err) << actionEvent
-                << "[ProcessDock] 结束进程组合动作-方法执行, pid="
-                << targetPid
-                << ", round="
-                << roundNumber
-                << ", method="
-                << methodEntry.methodName
-                << ", ok="
-                << (methodOk ? "true" : "false")
-                << ", detail="
-                << normalizedMethodDetailText
+            // targetPid 用途：固定本次动作的目标 PID，避免中途选中行变化影响执行对象。
+            const std::uint32_t targetPid = actionTarget.record.pid;
+            // 单目标动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
+            kLogEvent actionEvent;
+            info << actionEvent
+                << "[ProcessDock] 开始执行结束进程组合动作, pid=" << targetPid
                 << eol;
-            if (!methodOk)
+
+            // 先做一次进程存在性检查，避免对已退出 PID 执行无意义操作。
+            bool initialQueryOk = false;
+            bool processStillPresent = isProcessPresentBySnapshot(targetPid, &initialQueryOk);
+            if (!initialQueryOk)
             {
                 warn << actionEvent
-                    << "[ProcessDock] 当前方法执行失败，继续尝试下一方法, pid="
+                    << "[ProcessDock] 结束进程前置存在性检查失败，将按“进程仍存在”继续处理, pid="
                     << targetPid
-                    << ", round="
-                    << roundNumber
-                    << ", method="
-                    << methodEntry.methodName
-                    << eol;
-            }
-
-            actionDetailStream
-                << " | round"
-                << roundNumber
-                << ":"
-                << methodEntry.methodName
-                << "="
-                << (methodOk ? "ok" : "fail")
-                << "("
-                << normalizedMethodDetailText
-                << ")";
-
-            bool queryProcessPresentOk = false;
-            processStillPresent = isProcessPresentBySnapshot(targetPid, &queryProcessPresentOk);
-            if (!queryProcessPresentOk)
-            {
-                warn << actionEvent
-                    << "[ProcessDock] 方法执行后存在性检查失败，按“仍存活”继续尝试, pid="
-                    << targetPid
-                    << ", round="
-                    << roundNumber
-                    << ", method="
-                    << methodEntry.methodName
                     << eol;
             }
             if (!processStillPresent)
             {
-                processExited = true;
                 info << actionEvent
-                    << "[ProcessDock] 目标进程已退出, pid="
+                    << "[ProcessDock] 目标进程已不存在，结束动作直接判定成功, pid="
                     << targetPid
-                    << ", round="
-                    << roundNumber
-                    << ", method="
-                    << methodEntry.methodName
                     << eol;
-                break;
+                if (detailTextOut != nullptr)
+                {
+                    *detailTextOut = "目标进程已不存在，无需执行结束动作。";
+                }
+                return true;
             }
-        }
 
-        if (!processExited)
-        {
-            warn << actionEvent
-                << "[ProcessDock] 本轮全方法链执行后目标仍存活，将进入下一轮, pid="
-                << targetPid
-                << ", round="
-                << roundNumber
-                << eol;
-        }
-    }
+            // kTerminateRoundLimit 用途：限制“全方法链”轮次，避免异常目标导致无限阻塞 UI。
+            constexpr int kTerminateRoundLimit = 2;
+            // processExited 用途：记录组合动作最终是否确认目标进程已退出。
+            bool processExited = false;
+            // actionDetailStream 用途：汇总每一轮、每一方法的细节，供最终统一输出。
+            std::ostringstream actionDetailStream;
+            actionDetailStream << "pid=" << targetPid;
 
-    if (!processExited)
-    {
-        err << actionEvent
-            << "[ProcessDock] 结束进程组合动作达到上限后目标仍存活, pid="
-            << targetPid
-            << ", roundLimit="
-            << kTerminateRoundLimit
-            << eol;
-    }
+            // TerminateMethodEntry 作用：描述一个可执行的“结束进程原理方法”。
+            struct TerminateMethodEntry
+            {
+                const char* methodName = nullptr; // methodName：日志中显示的方法名。
+                std::function<bool(std::string*)> invokeMethod; // invokeMethod：方法调用体。
+            };
 
-    showActionResultMessage("结束进程", processExited, actionDetailStream.str(), actionEvent);
-    requestAsyncRefresh(true);
+            // terminateMethodList 作用：
+            // - 维护“结束进程原理”的顺序清单；
+            // - 每个进程的内部方法链保持顺序，但多个进程之间并行执行。
+            const std::vector<TerminateMethodEntry> terminateMethodList =
+            {
+                { "TerminateProcess(Kernel32)", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateProcessByWin32(targetPid, detailOut); } },
+                { "NtTerminateProcess/ZwTerminateProcess", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateProcessByNtNative(targetPid, detailOut); } },
+                { "WTSTerminateProcess(WTS API)", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateProcessByWtsApi(targetPid, detailOut); } },
+                { "WinStationTerminateProcess(winsta)", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateProcessByWinStationApi(targetPid, detailOut); } },
+                { "TerminateJobObject(Job)", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateProcessByJobObject(targetPid, detailOut); } },
+                { "NtTerminateJobObject/ZwTerminateJobObject", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateProcessByNtJobObject(targetPid, detailOut); } },
+                { "RmShutdown(Restart Manager)", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateProcessByRestartManager(targetPid, false, detailOut); } },
+                { "RmShutdown(Restart Manager, force)", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateProcessByRestartManager(targetPid, true, detailOut); } },
+                { "DuplicateHandle(-1)+TerminateProcess", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateProcessByDuplicateHandlePseudo(targetPid, detailOut); } },
+                { "TerminateThread(全部线程)", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateAllThreadsByPid(targetPid, detailOut); } },
+                { "NtTerminateThread/ZwTerminateThread(全部线程)", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateAllThreadsByPidNtNative(targetPid, detailOut); } },
+                { "DebugActiveProcess 调试附加", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateProcessByDebugAttach(targetPid, detailOut); } },
+                { "ntsd -c q -p <pid>", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateProcessByNtsdCommand(targetPid, detailOut); } },
+                { "NtUnmapViewOfSection 卸载 ntdll.dll", [targetPid](std::string* detailOut)
+                    { return ks::process::TerminateProcessByNtUnmapNtdll(targetPid, detailOut); } }
+            };
+
+            for (int roundIndex = 0; roundIndex < kTerminateRoundLimit && !processExited; ++roundIndex)
+            {
+                // roundNumber 用途：日志中的轮次编号（从 1 开始，便于人工排查）。
+                const int roundNumber = roundIndex + 1;
+
+                for (std::size_t methodIndex = 0;
+                    methodIndex < terminateMethodList.size() && !processExited;
+                    ++methodIndex)
+                {
+                    const TerminateMethodEntry& methodEntry = terminateMethodList[methodIndex];
+                    if (methodEntry.methodName == nullptr || !methodEntry.invokeMethod)
+                    {
+                        continue;
+                    }
+
+                    std::string methodDetailText;
+                    const bool methodOk = methodEntry.invokeMethod(&methodDetailText);
+                    const std::string normalizedMethodDetailText =
+                        methodDetailText.empty() ? "无附加信息" : methodDetailText;
+                    (methodOk ? info : err) << actionEvent
+                        << "[ProcessDock] 结束进程组合动作-方法执行, pid="
+                        << targetPid
+                        << ", round="
+                        << roundNumber
+                        << ", method="
+                        << methodEntry.methodName
+                        << ", ok="
+                        << (methodOk ? "true" : "false")
+                        << ", detail="
+                        << normalizedMethodDetailText
+                        << eol;
+                    if (!methodOk)
+                    {
+                        warn << actionEvent
+                            << "[ProcessDock] 当前方法执行失败，继续尝试下一方法, pid="
+                            << targetPid
+                            << ", round="
+                            << roundNumber
+                            << ", method="
+                            << methodEntry.methodName
+                            << eol;
+                    }
+
+                    actionDetailStream
+                        << " | round"
+                        << roundNumber
+                        << ":"
+                        << methodEntry.methodName
+                        << "="
+                        << (methodOk ? "ok" : "fail")
+                        << "("
+                        << normalizedMethodDetailText
+                        << ")";
+
+                    bool queryProcessPresentOk = false;
+                    processStillPresent = isProcessPresentBySnapshot(targetPid, &queryProcessPresentOk);
+                    if (!queryProcessPresentOk)
+                    {
+                        warn << actionEvent
+                            << "[ProcessDock] 方法执行后存在性检查失败，按“仍存活”继续尝试, pid="
+                            << targetPid
+                            << ", round="
+                            << roundNumber
+                            << ", method="
+                            << methodEntry.methodName
+                            << eol;
+                    }
+                    if (!processStillPresent)
+                    {
+                        processExited = true;
+                        info << actionEvent
+                            << "[ProcessDock] 目标进程已退出, pid="
+                            << targetPid
+                            << ", round="
+                            << roundNumber
+                            << ", method="
+                            << methodEntry.methodName
+                            << eol;
+                        break;
+                    }
+                }
+
+                if (!processExited)
+                {
+                    warn << actionEvent
+                        << "[ProcessDock] 本轮全方法链执行后目标仍存活，将进入下一轮, pid="
+                        << targetPid
+                        << ", round="
+                        << roundNumber
+                        << eol;
+                }
+            }
+
+            if (!processExited)
+            {
+                err << actionEvent
+                    << "[ProcessDock] 结束进程组合动作达到上限后目标仍存活, pid="
+                    << targetPid
+                    << ", roundLimit="
+                    << kTerminateRoundLimit
+                    << eol;
+            }
+
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = actionDetailStream.str();
+            }
+            return processExited;
+        },
+        true);
 }
 
 void ProcessDock::executeTerminateThreadsAction()
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] executeTerminateThreadsAction 被忽略：当前没有选中进程。" << eol;
         return;
     }
 
-    std::string detailText;
-    const bool actionOk = ks::process::TerminateAllThreadsByPid(processRecord->pid, &detailText);
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDock] TerminateThreads action, pid=" << processRecord->pid
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
-        << eol;
-    showActionResultMessage("TerminateThread(全部线程)", actionOk, detailText, actionEvent);
-    if (actionOk) requestAsyncRefresh(true);
+    dispatchProcessActionTargetsInParallel(
+        QStringLiteral("TerminateThread(全部线程)"),
+        actionTargets,
+        [](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return ks::process::TerminateAllThreadsByPid(actionTarget.record.pid, detailTextOut);
+        },
+        true);
 }
 
 void ProcessDock::executeSuspendAction()
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] executeSuspendAction 被忽略：当前没有选中进程。" << eol;
         return;
     }
 
-    std::string detailText;
-    const bool actionOk = ks::process::SuspendProcess(processRecord->pid, &detailText);
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDock] SuspendProcess action, pid=" << processRecord->pid
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
-        << eol;
-    showActionResultMessage("挂起进程", actionOk, detailText, actionEvent);
+    dispatchProcessActionTargetsInParallel(
+        QStringLiteral("挂起进程"),
+        actionTargets,
+        [](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return ks::process::SuspendProcess(actionTarget.record.pid, detailTextOut);
+        },
+        false);
 }
 
 void ProcessDock::executeResumeAction()
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] executeResumeAction 被忽略：当前没有选中进程。" << eol;
         return;
     }
 
-    std::string detailText;
-    const bool actionOk = ks::process::ResumeProcess(processRecord->pid, &detailText);
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDock] ResumeProcess action, pid=" << processRecord->pid
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
-        << eol;
-    showActionResultMessage("恢复进程", actionOk, detailText, actionEvent);
+    dispatchProcessActionTargetsInParallel(
+        QStringLiteral("恢复进程"),
+        actionTargets,
+        [](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return ks::process::ResumeProcess(actionTarget.record.pid, detailTextOut);
+        },
+        false);
 }
 
 void ProcessDock::executeSetCriticalAction(const bool enableCritical)
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] executeSetCriticalAction 被忽略：当前没有选中进程。" << eol;
         return;
     }
 
-    std::string detailText;
-    const bool actionOk = ks::process::SetProcessCriticalFlag(processRecord->pid, enableCritical, &detailText);
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDock] SetCritical action, pid=" << processRecord->pid
-        << ", enable=" << (enableCritical ? "true" : "false")
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
-        << eol;
-    showActionResultMessage(enableCritical ? "设为关键进程" : "取消关键进程", actionOk, detailText, actionEvent);
+    dispatchProcessActionTargetsInParallel(
+        enableCritical ? QStringLiteral("设为关键进程") : QStringLiteral("取消关键进程"),
+        actionTargets,
+        [enableCritical](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return ks::process::SetProcessCriticalFlag(actionTarget.record.pid, enableCritical, detailTextOut);
+        },
+        false);
 }
 
 void ProcessDock::executeSetPriorityAction(const int priorityActionId)
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] executeSetPriorityAction 被忽略：当前没有选中进程。" << eol;
@@ -4816,107 +5782,106 @@ void ProcessDock::executeSetPriorityAction(const int priorityActionId)
     default: break;
     }
 
-    std::string detailText;
-    const bool actionOk = ks::process::SetProcessPriority(processRecord->pid, priorityLevel, &detailText);
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDock] SetPriority action, pid=" << processRecord->pid
-        << ", actionId=" << priorityActionId
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
-        << eol;
-    showActionResultMessage("设置进程优先级", actionOk, detailText, actionEvent);
+    dispatchProcessActionTargetsInParallel(
+        QStringLiteral("设置进程优先级"),
+        actionTargets,
+        [priorityLevel](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return ks::process::SetProcessPriority(actionTarget.record.pid, priorityLevel, detailTextOut);
+        },
+        false);
 }
 
 void ProcessDock::executeSetEfficiencyModeAction(const bool enableEfficiencyMode)
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] executeSetEfficiencyModeAction 被忽略：当前没有选中进程。" << eol;
         return;
     }
 
-    std::string detailText;
-    const bool actionOk = ks::process::SetProcessEfficiencyMode(
-        processRecord->pid,
-        enableEfficiencyMode,
-        &detailText);
-    if (actionOk)
-    {
-        processRecord->efficiencyModeSupported = true;
-        processRecord->efficiencyModeEnabled = enableEfficiencyMode;
-        if (m_processTable != nullptr)
+    const QString actionTitle =
+        enableEfficiencyMode ? QStringLiteral("开启效率模式") : QStringLiteral("关闭效率模式");
+    dispatchProcessActionTargetsInParallel(
+        actionTitle,
+        actionTargets,
+        [enableEfficiencyMode](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
         {
-            m_processTable->viewport()->update();
+            return ks::process::SetProcessEfficiencyMode(
+                actionTarget.record.pid,
+                enableEfficiencyMode,
+                detailTextOut);
+        },
+        false);
+
+    // UI 缓存即时更新：线程执行结果仍会独立记录；这里仅让已选行视觉状态快速响应。
+    for (const ProcessActionTarget& actionTarget : actionTargets)
+    {
+        const auto cacheIt = m_cacheByIdentity.find(actionTarget.identityKey);
+        if (cacheIt != m_cacheByIdentity.end())
+        {
+            cacheIt->second.record.efficiencyModeSupported = true;
+            cacheIt->second.record.efficiencyModeEnabled = enableEfficiencyMode;
         }
     }
-
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDock] SetEfficiencyMode action, pid=" << processRecord->pid
-        << ", enable=" << (enableEfficiencyMode ? "true" : "false")
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
-        << eol;
-    showActionResultMessage(
-        enableEfficiencyMode ? "开启效率模式" : "关闭效率模式",
-        actionOk,
-        detailText,
-        actionEvent);
+    if (m_processTable != nullptr)
+    {
+        m_processTable->viewport()->update();
+    }
 }
+
 void ProcessDock::executeOpenFolderAction()
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] executeOpenFolderAction 被忽略：当前没有选中进程。" << eol;
         return;
     }
 
-    std::string detailText;
-    const bool actionOk = ks::process::OpenProcessFolder(processRecord->pid, &detailText);
-    // 单次动作统一复用 actionEvent，保证同一调用链日志 GUID 一致。
-    kLogEvent actionEvent;
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDock] OpenFolder action, pid=" << processRecord->pid
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText
-        << eol;
-    showActionResultMessage("打开所在目录", actionOk, detailText, actionEvent);
+    dispatchProcessActionTargetsInParallel(
+        QStringLiteral("打开所在目录"),
+        actionTargets,
+        [](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return ks::process::OpenProcessFolder(actionTarget.record.pid, detailTextOut);
+        },
+        false);
 }
 
 void ProcessDock::executeOpenMemoryOperationAction()
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] executeOpenMemoryOperationAction 被忽略：当前没有选中进程。" << eol;
         return;
     }
 
-    const bool invokeOk = QMetaObject::invokeMethod(
-        this->parent(),
-        "focusMemoryDockByPid",
-        Qt::QueuedConnection,
-        Q_ARG(quint32, static_cast<quint32>(processRecord->pid)));
-    kLogEvent actionEvent;
-    (invokeOk ? info : warn) << actionEvent
-        << "[ProcessDock] 跳转到内存操作, pid=" << processRecord->pid
-        << ", invokeOk=" << (invokeOk ? "true" : "false")
-        << eol;
-    if (!invokeOk)
+    for (const ProcessActionTarget& actionTarget : actionTargets)
     {
-        showActionResultMessage(
-            QStringLiteral("跳转到内存操作"),
-            false,
-            std::string("focusMemoryDockByPid invoke failed"),
-            actionEvent);
+        const bool invokeOk = QMetaObject::invokeMethod(
+            this->parent(),
+            "focusMemoryDockByPid",
+            Qt::QueuedConnection,
+            Q_ARG(quint32, static_cast<quint32>(actionTarget.record.pid)));
+        kLogEvent actionEvent;
+        (invokeOk ? info : warn) << actionEvent
+            << "[ProcessDock] 跳转到内存操作, pid=" << actionTarget.record.pid
+            << ", invokeOk=" << (invokeOk ? "true" : "false")
+            << eol;
+        if (!invokeOk)
+        {
+            showActionResultMessage(
+                QStringLiteral("跳转到内存操作"),
+                false,
+                std::string("focusMemoryDockByPid invoke failed"),
+                actionEvent);
+        }
     }
 }
 
@@ -4933,17 +5898,27 @@ void ProcessDock::requestOpenProcessDetailByPid(const std::uint32_t pid)
 
 void ProcessDock::openProcessDetailsPlaceholder()
 {
-    ks::process::ProcessRecord* processRecord = selectedRecord();
-    if (processRecord == nullptr)
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
     {
         kLogEvent logEvent;
         warn << logEvent << "[ProcessDock] 打开进程详细信息失败：当前没有选中进程。" << eol;
         QMessageBox::warning(this, "进程详细信息", "请先在表格中选中一个进程。");
         return;
     }
+    if (actionTargets.size() > 1U)
+    {
+        kLogEvent logEvent;
+        warn << logEvent
+            << "[ProcessDock] 打开进程详细信息失败：详情窗口仅支持单进程, selectedCount="
+            << actionTargets.size()
+            << eol;
+        QMessageBox::information(this, "进程详细信息", "请只选中一个进程再打开详情窗口。");
+        return;
+    }
 
     // 详情窗口展示前，主动补齐静态字段，避免“路径/用户/命令行为空”。
-    ks::process::ProcessRecord detailRecord = *processRecord;
+    ks::process::ProcessRecord detailRecord = actionTargets.front().record;
     const bool needStaticQuery =
         detailRecord.imagePath.empty() ||
         detailRecord.commandLine.empty() ||
@@ -4974,6 +5949,21 @@ void ProcessDock::openProcessDetailsPlaceholder()
             if (queriedRecord.handleCount != 0) detailRecord.handleCount = queriedRecord.handleCount;
             detailRecord.staticDetailsReady = queriedRecord.staticDetailsReady;
         }
+    }
+
+    if (detailRecord.r0Status == KSWORD_ARK_PROCESS_R0_STATUS_UNAVAILABLE && detailRecord.pid != 0U)
+    {
+        std::string r0DetailText;
+        const bool r0Enriched = enrichProcessRecordWithR0ExtensionByPid(detailRecord, &r0DetailText);
+        kLogEvent r0EnrichEvent;
+        (r0Enriched ? info : warn) << r0EnrichEvent
+            << "[ProcessDock] 打开进程详情前补齐 R0 扩展, pid="
+            << detailRecord.pid
+            << ", enriched="
+            << (r0Enriched ? "true" : "false")
+            << ", detail="
+            << r0DetailText
+            << eol;
     }
 
     // identityKey 用于“一进程一窗口”复用逻辑。
@@ -5094,6 +6084,21 @@ void ProcessDock::openProcessDetailWindowByPid(const std::uint32_t pid)
             }
         }
 
+        if (detailRecord.r0Status == KSWORD_ARK_PROCESS_R0_STATUS_UNAVAILABLE && detailRecord.pid != 0U)
+        {
+            std::string r0DetailText;
+            const bool r0Enriched = enrichProcessRecordWithR0ExtensionByPid(detailRecord, &r0DetailText);
+            kLogEvent r0EnrichEvent;
+            (r0Enriched ? info : warn) << r0EnrichEvent
+                << "[ProcessDock] 按 PID 打开详情前补齐 R0 扩展, pid="
+                << detailRecord.pid
+                << ", enriched="
+                << (r0Enriched ? "true" : "false")
+                << ", detail="
+                << r0DetailText
+                << eol;
+        }
+
         ProcessDetailWindow* detailWindow = new ProcessDetailWindow(detailRecord, nullptr);
         detailWindow->setAttribute(Qt::WA_DeleteOnClose, true);
         m_detailWindowByIdentity[cachePair.first] = detailWindow;
@@ -5136,6 +6141,21 @@ void ProcessDock::openProcessDetailWindowByPid(const std::uint32_t pid)
     if (queriedRecord.processName.empty())
     {
         queriedRecord.processName = "PID_" + std::to_string(pid);
+    }
+
+    if (queriedRecord.r0Status == KSWORD_ARK_PROCESS_R0_STATUS_UNAVAILABLE && queriedRecord.pid != 0U)
+    {
+        std::string r0DetailText;
+        const bool r0Enriched = enrichProcessRecordWithR0ExtensionByPid(queriedRecord, &r0DetailText);
+        kLogEvent r0EnrichEvent;
+        (r0Enriched ? info : warn) << r0EnrichEvent
+            << "[ProcessDock] 缓存外 PID 打开详情前补齐 R0 扩展, pid="
+            << queriedRecord.pid
+            << ", enriched="
+            << (r0Enriched ? "true" : "false")
+            << ", detail="
+            << r0DetailText
+            << eol;
     }
 
     const std::string identityKey = ks::process::BuildProcessIdentityKey(

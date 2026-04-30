@@ -271,6 +271,25 @@ namespace apimon
             case 0xFF:
                 // 0xFF 同时覆盖 call/jmp/push 等多种语义，这里统一保守拒绝。
                 return 0;
+            case 0xF6:
+            case 0xF7:
+            {
+                // Nt* syscall stub 在现代 x64 ntdll 中常见形态包含：
+                //   F6 04 25 08 03 FE 7F 01    test byte ptr [KUSER_SHARED_DATA+0x308], 1
+                // 旧解码器不认识 F6，导致 Nt* 导出桩无法安装 inline hook。
+                // 这里只复制不会改变相对控制流的 F6/F7 ModRM 指令；TEST /0,/1 带立即数，其它一元操作不带立即数。
+                if (offsetValue >= maxLength)
+                {
+                    return 0;
+                }
+
+                const unsigned char modrmValue = codePointer[offsetValue];
+                const unsigned char regValue = static_cast<unsigned char>((modrmValue >> 3) & 0x7);
+                const std::size_t immediateLength = (regValue == 0 || regValue == 1)
+                    ? (opcodeValue == 0xF6 ? 1 : (operandOverride ? 2 : 4))
+                    : 0;
+                return appendModRmInstruction(immediateLength);
+            }
             default:
                 break;
             }

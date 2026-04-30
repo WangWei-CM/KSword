@@ -182,6 +182,7 @@
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Capture.cpp" />
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Export.cpp" />
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Runtime.cpp" />
+    <ClCompile Include="MonitorDock\ProcessTraceTimelineWidget.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.UiBuild.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.UiConnections.cpp" />
@@ -298,6 +299,7 @@
     <ClInclude Include="MonitorDock\MonitorPanelWidget.h" />
     <ClInclude Include="MonitorDock\MonitorTextViewer.h" />
     <ClInclude Include="MonitorDock\ProcessTraceMonitorWidget.h" />
+    <ClInclude Include="MonitorDock\ProcessTraceTimelineWidget.h" />
     <QtMoc Include="NetworkDock\NetworkDock.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalCommon.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalHelpers.h" />

@@ -36,6 +36,7 @@
     <ClCompile Include="src\dispatch\ioctl_dispatch.c" />
     <ClCompile Include="src\features\log\log_channel.c" />
     <ClCompile Include="src\features\process\process_actions.c" />
+    <ClCompile Include="src\features\process\process_extended.c" />
     <ClCompile Include="src\framework\device_control.c" />
     <ClCompile Include="src\framework\driver_entry.c" />
     <ClCompile Include="src\framework\io_queue.c" />
@@ -60,6 +61,7 @@
     <ClInclude Include="include\ark\ark_queue.h" />
     <ClInclude Include="include\ark\ark_callback.h" />
     <ClInclude Include="include\ark\ark_kernel.h" />
+    <ClInclude Include="src\features\process\process_extended.h" />
     <ClInclude Include="src\features\callback\callback_internal.h" />
     <ClInclude Include="Public.h" />
     <ClInclude Include="Queue.h" />

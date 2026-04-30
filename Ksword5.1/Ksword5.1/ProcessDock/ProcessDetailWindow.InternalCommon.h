@@ -12,6 +12,7 @@
 
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
+#include "../../../shared/driver/KswordArkDynDataIoctl.h"
 
 #include <QAbstractItemView>
 #include <QApplication>

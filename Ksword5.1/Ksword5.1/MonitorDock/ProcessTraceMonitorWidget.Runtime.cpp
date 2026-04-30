@@ -169,6 +169,18 @@ void ProcessTraceMonitorWidget::startMonitoring()
         m_eventTable->clearContents();
         m_eventTable->setRowCount(0);
     }
+    m_timelineEventPoints.clear();
+    m_captureStartTime100ns = currentSystemTime100ns();
+    m_captureStopTime100ns = 0;
+    m_timelineSelectionStart100ns = m_captureStartTime100ns;
+    m_timelineSelectionEnd100ns = m_captureStartTime100ns;
+    m_timelineUserSelectionActive = false;
+    if (m_eventTimelineWidget != nullptr)
+    {
+        m_eventTimelineWidget->resetTimeline(m_captureStartTime100ns);
+        m_timelineSelectionStart100ns = m_eventTimelineWidget->selectionStart100ns();
+        m_timelineSelectionEnd100ns = m_eventTimelineWidget->selectionEnd100ns();
+    }
     {
         std::lock_guard<std::mutex> lock(m_pendingMutex);
         m_pendingRows.clear();
@@ -524,6 +536,10 @@ void ProcessTraceMonitorWidget::startMonitoring()
                 return;
             }
 
+            if (guardThis->m_captureStopTime100ns == 0)
+            {
+                guardThis->m_captureStopTime100ns = guardThis->currentSystemTime100ns();
+            }
             guardThis->m_captureRunning.store(false);
             guardThis->m_capturePaused.store(false);
             if (guardThis->m_runtimeRefreshTimer != nullptr)
@@ -539,6 +555,11 @@ void ProcessTraceMonitorWidget::startMonitoring()
             if (guardThis->m_uiUpdateTimer != nullptr)
             {
                 guardThis->flushPendingRows();
+            }
+            guardThis->refreshTimelineRange(true);
+            if (guardThis->hasAnyEventFilterActive())
+            {
+                guardThis->applyEventFilter();
             }
 
             if (processStatus == ERROR_SUCCESS)
@@ -567,6 +588,11 @@ void ProcessTraceMonitorWidget::stopMonitoring()
 void ProcessTraceMonitorWidget::stopMonitoringInternal(const bool waitForThread)
 {
     m_captureStopFlag.store(true);
+    if (m_captureRunning.load() && m_captureStopTime100ns == 0)
+    {
+        m_captureStopTime100ns = currentSystemTime100ns();
+        refreshTimelineRange(true);
+    }
 
     const std::uint64_t ownedTraceHandle = m_traceHandle.exchange(0);
     if (ownedTraceHandle != 0)

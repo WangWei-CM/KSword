@@ -12,6 +12,8 @@
 - System Informer DynData 只允许作为 `third_party/systeminformer_dyn/` 数据源接入，禁止顺手搬入 KPH 对象系统、通信层、session token 或 System Informer IOCTL。
 - 依赖未公开内核字段的功能必须通过 DynData capability gating 判断，不要在业务功能里散落新增硬编码偏移。
 - 新增依赖私有偏移的 IOCTL 必须在 `KswordARKDriver/src/dispatch/ioctl_registry.c` 的 `RequiredCapability` 填写对应 `KSW_CAP_*`；无依赖时才使用 `KSWORD_ARK_IOCTL_CAPABILITY_NONE`（也就是 `0ULL`）。
+- 进程扩展信息统一走 `shared/driver/KswordArkProcessIoctl.h` v2；Protection、SignatureLevel、ObjectTable、SectionObject 等 EPROCESS 字段只能来自 DynData/Runtime resolver，并在 UI 展示字段来源。
+- PPL 修改属于高风险 R0 写字段动作，必须依赖 `KSW_CAP_PROCESS_PROTECTION_PATCH`，并在用户态二次确认中展示当前值、目标值、签名级别联动和回滚风险。
 
 ## 合并冲突控制
 

@@ -16,6 +16,7 @@ Environment:
 
 #include "ark/ark_driver.h"
 #include "..\..\platform\process_resolver.h"
+#include "process_extended.h"
 #include <ntstrsafe.h>
 #include <stdarg.h>
 
@@ -527,7 +528,8 @@ KswordARKDriverAppendProcessEntry(
     _In_ ULONG processId,
     _In_ ULONG parentProcessId,
     _In_ ULONG processFlags,
-    _In_opt_z_ const CHAR* imageName
+    _In_opt_z_ const CHAR* imageName,
+    _In_ PEPROCESS processObject
     )
 {
     KSWORD_ARK_PROCESS_ENTRY* entry = NULL;
@@ -550,6 +552,7 @@ KswordARKDriverAppendProcessEntry(
     entry->parentProcessId = parentProcessId;
     entry->flags = processFlags;
     KswordARKDriverCopyImageName(entry->imageName, imageName);
+    KswordARKProcessPopulateExtendedEntry(entry, processObject);
     response->returnedCount += 1UL;
 }
 
@@ -598,27 +601,18 @@ KswordARKDriverResolveSignatureLevelsFromSigner(
     }
 }
 
-// PPLcontrol-style fallback: patch EPROCESS protection/signature bytes directly.
+// PPLcontrol-style fallback: calculate target bytes here, then let Phase-2
+// DynData-owned process_extended.c perform the actual EPROCESS patch.
 static NTSTATUS
 KswordARKDriverPatchProcessProtectionStateByPid(
     _In_ ULONG processId,
     _In_ UCHAR protectionLevel
     )
 {
-    const LONG protectionOffset = KswordARKDriverResolveProcessProtectionOffset();
-    const LONG signatureLevelOffset = KswordARKDriverResolveProcessSignatureLevelOffset();
-    const LONG sectionSignatureLevelOffset = KswordARKDriverResolveProcessSectionSignatureLevelOffset();
-    PEPROCESS processObject = NULL;
     NTSTATUS status = STATUS_SUCCESS;
     UCHAR signerType = (UCHAR)((protectionLevel & 0xF0U) >> 4U);
     UCHAR signatureLevel = SE_SIGNING_LEVEL_UNCHECKED;
     UCHAR sectionSignatureLevel = SE_SIGNING_LEVEL_UNCHECKED;
-
-    if (protectionOffset <= 0 ||
-        signatureLevelOffset <= 0 ||
-        sectionSignatureLevelOffset <= 0) {
-        return STATUS_PROCEDURE_NOT_FOUND;
-    }
 
     if (protectionLevel == 0U) {
         signerType = KSWORD_PS_PROTECTED_SIGNER_NONE;
@@ -632,34 +626,11 @@ KswordARKDriverPatchProcessProtectionStateByPid(
         return status;
     }
 
-    status = PsLookupProcessByProcessId(ULongToHandle(processId), &processObject);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    __try {
-        PUCHAR processBase = (PUCHAR)processObject;
-        volatile UCHAR* protectionByte = (volatile UCHAR*)(processBase + (ULONG)protectionOffset);
-        volatile UCHAR* signatureByte = (volatile UCHAR*)(processBase + (ULONG)signatureLevelOffset);
-        volatile UCHAR* sectionSignatureByte =
-            (volatile UCHAR*)(processBase + (ULONG)sectionSignatureLevelOffset);
-
-        *protectionByte = protectionLevel;
-        *signatureByte = signatureLevel;
-        *sectionSignatureByte = sectionSignatureLevel;
-
-        if (*protectionByte != protectionLevel ||
-            *signatureByte != signatureLevel ||
-            *sectionSignatureByte != sectionSignatureLevel) {
-            status = STATUS_UNSUCCESSFUL;
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        status = GetExceptionCode();
-    }
-
-    ObDereferenceObject(processObject);
-    return status;
+    return KswordARKProcessPatchProtectionByDynData(
+        processId,
+        protectionLevel,
+        signatureLevel,
+        sectionSignatureLevel);
 }
 
 static NTSTATUS
@@ -1629,7 +1600,8 @@ KswordARKDriverEnumerateProcesses(
                 processId,
                 parentProcessId,
                 processFlags,
-                imageName);
+                imageName,
+                processCursor);
 
             if (scanCidTable && KswordARKDriverPidInScanRange(processId, scanStartPid, scanEndPid)) {
                 KswordARKDriverBitmapSetPid(pidBitmap, pidBitmapBytes, processId);
@@ -1670,7 +1642,8 @@ KswordARKDriverEnumerateProcesses(
                         scanPid,
                         parentProcessId,
                         processFlags,
-                        imageName);
+                        imageName,
+                        hiddenProcessObject);
                     ObDereferenceObject(hiddenProcessObject);
                 }
             }

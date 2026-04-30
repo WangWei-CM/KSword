@@ -19,6 +19,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -113,6 +115,13 @@ private:
         User,          // 用户名。
         StartTime,     // 启动时间。
         IsAdmin,       // 是否管理员。
+        PplLevel,      // 用户态手动刷新得到的 PPL 保护级别枚举。
+        Protection,    // R0 读取的保护状态。
+        Ppl,           // R0 读取的 PPL 原始字节。
+        HandleCount,   // 进程句柄数量。
+        HandleTable,   // EPROCESS.ObjectTable 是否可用。
+        SectionObject, // EPROCESS.SectionObject 是否可用。
+        R0Status,      // R0 扩展字段总体状态。
         Count          // 列总数。
     };
 
@@ -164,6 +173,15 @@ private:
         bool isKernelOnlyInLatestRound = false; // 最新刷新中是否仅内核枚举可见。
         std::uint32_t staticFillAttemptCount = 0; // 静态详情补齐尝试次数（含成功/失败）。
         std::uint32_t staticFillFailureCount = 0; // 静态详情连续失败次数（用于退避重试）。
+    };
+
+    // ProcessActionTarget：
+    // - 作用：保存一次右键动作绑定的进程快照；
+    // - identityKey 用于回写缓存与保持选择，record 是跨线程执行时使用的只读副本。
+    struct ProcessActionTarget
+    {
+        std::string identityKey;            // identityKey：PID+创建时间构成的稳定行标识。
+        ks::process::ProcessRecord record;  // record：动作执行线程使用的进程记录副本。
     };
 
     // RefreshResult：后台线程刷新结果对象。
@@ -260,6 +278,13 @@ private:
     // - 通过 R0 驱动 IOCTL 请求设置目标进程 PPL 保护层级；
     // - protectionLevel 使用单字节原生层级编码（Signer<<4 | Type）。
     void executeR0SetPplProtectionAction(std::uint8_t protectionLevel, const QString& levelDisplayText);
+    // executeRefreshPplProtectionLevelAction 作用：
+    // - 手动刷新当前可见进程的 PPL 保护级别枚举；
+    // - 结果仅写入当前 UI 快照，不参与下一轮缓存复用。
+    // 调用方式：进程列表右键菜单或详细视图手动刷新入口调用。
+    // 参数：无。
+    // 返回值：无。
+    void executeRefreshPplProtectionLevelAction();
     // executeTerminateThreadsAction 作用：
     // - 单独执行 TerminateThread(全部线程)（保留给其他入口复用）；
     // - 与“结束进程组合动作”不同，该函数不包含 TerminateProcess 步骤。
@@ -277,6 +302,13 @@ private:
     // ======== 工具函数 ========
     std::string selectedIdentityKey() const;
     ks::process::ProcessRecord* selectedRecord();
+    std::vector<ProcessActionTarget> selectedActionTargets() const;
+    void syncTrackedSelectionFromTable();
+    void dispatchProcessActionTargetsInParallel(
+        const QString& actionTitle,
+        const std::vector<ProcessActionTarget>& actionTargets,
+        const std::function<bool(const ProcessActionTarget&, std::string*)>& actionInvoker,
+        bool refreshWhenAnySucceeded);
     const ks::process::SystemThreadRecord* selectedThreadRecord() const;
     void bindContextActionToItem(QTreeWidgetItem* clickedItem);
     void clearContextActionBinding();
@@ -450,6 +482,7 @@ private:
     std::unordered_map<std::string, QPointer<ProcessDetailWindow>> m_detailWindowByIdentity; // 详情窗口缓存（同进程复用窗口）。
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_detailWindowLastSyncTimeByIdentity; // 详情窗口最近一次同步时间，避免每轮刷新都触发重型解析。
     std::string m_trackedSelectedIdentityKey; // 当前选中进程 identityKey；表格刷新重建后用于恢复高亮。
+    std::vector<std::string> m_trackedSelectedIdentityKeys; // 多选进程 identityKey 集合；Ctrl 复选后用于刷新恢复。
     int m_trackedSelectedColumn = 0;          // 当前选中列索引；恢复 currentItem 时尽量保持用户焦点列。
     std::vector<ks::process::SystemThreadRecord> m_threadRecordList; // 线程页最近一次刷新结果缓存。
     std::string m_threadDiagnosticText;       // 线程页最近一次刷新诊断文本。
@@ -457,6 +490,7 @@ private:
     // ======== 右键菜单绑定状态 ========
     std::string m_contextActionIdentityKey;      // 当前菜单动作绑定的 identityKey。
     ks::process::ProcessRecord m_contextActionRecord{}; // identity 在刷新中失效时的兜底副本。
+    std::vector<ProcessActionTarget> m_contextActionRecords; // 右键菜单绑定的多选进程副本。
     bool m_hasContextActionRecord = false;
     bool m_contextMenuVisible = false;           // 菜单弹出期间用于冻结周期刷新。
     std::uint32_t m_threadContextActionTid = 0;  // 线程右键菜单绑定的 TID。

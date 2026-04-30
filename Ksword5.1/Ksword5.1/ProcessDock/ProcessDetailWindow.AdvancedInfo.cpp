@@ -87,6 +87,114 @@ namespace
     // - 第二个参数用 ULONG 表示信息类，兼容不同头文件环境。
     using GetProcessInformationFn = BOOL(WINAPI*)(HANDLE, ULONG, LPVOID, DWORD);
 
+    // ProcessWow64Information：
+    // - NtQueryInformationProcess 信息类 26；
+    // - 64 位控制端读取 32 位目标时，需要先拿到 Wow64 PEB，再按 32 位结构解析。
+    constexpr ULONG kProcessInfoClassWow64Information = 26;
+
+    // PEB 文本读取上限：
+    // - UNICODE_STRING 长度来自远程进程，必须先做边界限制；
+    // - 防止损坏/伪造的 ProcessParameters 让 UI 后台线程分配超大内存。
+    constexpr std::size_t kMaxRemoteUnicodeBytes = 256 * 1024;
+
+    // 环境块预览上限：
+    // - PEB 内没有稳定可跨版本依赖的环境块长度字段；
+    // - 采用分块读取并在双 NUL 结束或达到上限时停止。
+    constexpr std::size_t kMaxEnvironmentPreviewBytes = 128 * 1024;
+    constexpr std::size_t kEnvironmentReadChunkBytes = 4096;
+    constexpr std::size_t kMaxEnvironmentPreviewLines = 20;
+    constexpr std::size_t kMaxEnvironmentLineChars = 4096;
+
+    // RemoteUnicodeString32：
+    // - 32 位目标进程内的 UNICODE_STRING 布局；
+    // - Buffer 是远程 32 位地址，不能直接使用当前进程的 UNICODE_STRING。
+    struct RemoteUnicodeString32 final
+    {
+        USHORT length = 0;        // 字节长度，不含终止 NUL。
+        USHORT maximumLength = 0; // 字节容量，可能大于 length。
+        std::uint32_t buffer = 0; // 远程 32 位 PWSTR 地址。
+    };
+
+    // Curdir32/Curdir64：
+    // - 对应 RTL_USER_PROCESS_PARAMETERS.CurrentDirectory；
+    // - 只保留 DosPath 与 Handle，满足详情页显示当前目录。
+    struct Curdir32 final
+    {
+        RemoteUnicodeString32 dosPath{};
+        std::uint32_t handle = 0;
+    };
+
+    struct Curdir64 final
+    {
+        UNICODE_STRING dosPath{};
+        PVOID handle = nullptr;
+    };
+
+    // Peb32Lite/Peb64Lite：
+    // - 只覆盖 PEB 起始字段到 ProcessParameters；
+    // - 避免读取 SDK PEB 全结构，降低跨版本字段变化带来的失败概率。
+    struct Peb32Lite final
+    {
+        BYTE reserved1[2]{};
+        BYTE beingDebugged = 0;
+        BYTE reserved2[1]{};
+        std::uint32_t mutant = 0;
+        std::uint32_t imageBaseAddress = 0;
+        std::uint32_t ldr = 0;
+        std::uint32_t processParameters = 0;
+    };
+
+    struct Peb64Lite final
+    {
+        BYTE reserved1[2]{};
+        BYTE beingDebugged = 0;
+        BYTE reserved2[1]{};
+        PVOID mutant = nullptr;
+        PVOID imageBaseAddress = nullptr;
+        PVOID ldr = nullptr;
+        PVOID processParameters = nullptr;
+    };
+
+    // RtlUserProcessParameters32Lite/RtlUserProcessParameters64Lite：
+    // - 按公开稳定偏移覆盖 CurrentDirectory/ImagePathName/CommandLine/Environment；
+    // - 32 位与 64 位的指针和 UNICODE_STRING 大小不同，必须分开定义。
+    struct RtlUserProcessParameters32Lite final
+    {
+        BYTE reservedBeforeCurrentDirectory[0x24]{};
+        Curdir32 currentDirectory{};
+        RemoteUnicodeString32 dllPath{};
+        RemoteUnicodeString32 imagePathName{};
+        RemoteUnicodeString32 commandLine{};
+        std::uint32_t environment = 0;
+    };
+
+    struct RtlUserProcessParameters64Lite final
+    {
+        BYTE reservedBeforeCurrentDirectory[0x38]{};
+        Curdir64 currentDirectory{};
+        UNICODE_STRING dllPath{};
+        UNICODE_STRING imagePathName{};
+        UNICODE_STRING commandLine{};
+        PVOID environment = nullptr;
+    };
+
+    // RemotePebProcessParametersRead：
+    // - 承载一次 PEB->ProcessParameters 解析结果；
+    // - readOk 表示参数块结构读取成功，字符串为空不一定代表读取失败。
+    struct RemotePebProcessParametersRead final
+    {
+        QString labelText;                         // Native PEB / Wow64 PEB。
+        bool readOk = false;                       // 是否成功读到 ProcessParameters。
+        std::uint64_t pebAddress = 0;              // PEB 地址。
+        std::uint64_t imageBaseAddress = 0;         // PEB.ImageBaseAddress。
+        std::uint64_t processParametersAddress = 0;// ProcessParameters 地址。
+        std::uint64_t environmentAddress = 0;      // Environment 地址。
+        QString commandLineText;                   // PEB 内命令行。
+        QString imagePathText;                     // PEB 内映像路径。
+        QString currentDirectoryText;              // PEB 内当前目录。
+        QString diagnosticText;                    // 失败/降级原因。
+    };
+
     // queryNtProcessInfoFixed：
     // - 读取“固定大小”的 NtQueryInformationProcess 输出结构；
     // - 成功返回 true，失败返回 false。
@@ -184,12 +292,18 @@ namespace
         }
 
         const std::uintptr_t bufferBegin = reinterpret_cast<std::uintptr_t>(commandBuffer.data());
-        const std::uintptr_t bufferEnd = bufferBegin + commandBuffer.size();
+        const std::uintptr_t bufferSize = commandBuffer.size();
         const std::uintptr_t stringPtr = reinterpret_cast<std::uintptr_t>(commandUnicode->Buffer);
         const std::size_t stringLengthBytes = static_cast<std::size_t>(commandUnicode->Length);
+        if ((stringLengthBytes % sizeof(wchar_t)) != 0 || stringLengthBytes > kMaxRemoteUnicodeBytes)
+        {
+            return QString();
+        }
 
         // 情况A：字符串直接位于返回缓冲区中。
-        if (stringPtr >= bufferBegin && stringPtr + stringLengthBytes <= bufferEnd)
+        if (stringPtr >= bufferBegin &&
+            stringPtr - bufferBegin <= bufferSize &&
+            stringLengthBytes <= bufferSize - (stringPtr - bufferBegin))
         {
             return QString::fromWCharArray(
                 reinterpret_cast<const wchar_t*>(stringPtr),
@@ -212,6 +326,375 @@ namespace
             return QString();
         }
         return QString::fromWCharArray(remoteChars.data());
+    }
+
+    // appendPebDiagnostic：
+    // - 把 PEB 解析阶段的非致命错误追加到诊断文本；
+    // - 入参 target 为可变诊断文本，message 为本次追加内容；
+    // - 返回：无，调用方继续执行后续降级路径。
+    void appendPebDiagnostic(QString& target, const QString& message)
+    {
+        if (message.trimmed().isEmpty())
+        {
+            return;
+        }
+
+        if (!target.trimmed().isEmpty())
+        {
+            target += QStringLiteral(" | ");
+        }
+        target += message;
+    }
+
+    // readRemoteMemoryExact：
+    // - 从远程进程读取固定长度内存；
+    // - 入参 processHandle 是目标进程句柄，remoteAddress 是目标地址；
+    // - 入参 localBuffer/localSize 是本地接收缓冲；
+    // - 返回 true 表示完整读取 localSize 字节，false 表示地址无效或只读到部分数据。
+    bool readRemoteMemoryExact(
+        HANDLE processHandle,
+        const std::uint64_t remoteAddress,
+        void* localBuffer,
+        const SIZE_T localSize)
+    {
+        if (processHandle == nullptr || remoteAddress == 0 || localBuffer == nullptr || localSize == 0)
+        {
+            return false;
+        }
+
+        SIZE_T bytesRead = 0;
+        const BOOL readOk = ReadProcessMemory(
+            processHandle,
+            reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(remoteAddress)),
+            localBuffer,
+            localSize,
+            &bytesRead);
+        return readOk != FALSE && bytesRead == localSize;
+    }
+
+    // readRemoteStructure：
+    // - 按模板类型读取一个远程结构体；
+    // - 读取前先清零输出，避免失败后遗留旧数据；
+    // - 返回 true 表示结构体完整读取，false 表示远程页不可读或长度不足。
+    template<typename T>
+    bool readRemoteStructure(
+        HANDLE processHandle,
+        const std::uint64_t remoteAddress,
+        T& valueOut)
+    {
+        std::memset(&valueOut, 0, sizeof(T));
+        return readRemoteMemoryExact(
+            processHandle,
+            remoteAddress,
+            &valueOut,
+            static_cast<SIZE_T>(sizeof(T)));
+    }
+
+    // readRemoteUnicodeStringByAddress：
+    // - 按“远程地址 + 字节长度”读取 UTF-16 字符串；
+    // - 对长度做偶数校验和上限限制，避免坏 PEB 触发超大分配；
+    // - 返回读取到的 QString，失败或空串时返回空 QString。
+    QString readRemoteUnicodeStringByAddress(
+        HANDLE processHandle,
+        const std::uint64_t bufferAddress,
+        const USHORT lengthBytes)
+    {
+        if (processHandle == nullptr || bufferAddress == 0 || lengthBytes == 0)
+        {
+            return QString();
+        }
+
+        if ((lengthBytes % sizeof(wchar_t)) != 0 ||
+            static_cast<std::size_t>(lengthBytes) > kMaxRemoteUnicodeBytes)
+        {
+            return QString();
+        }
+
+        std::vector<wchar_t> stringBuffer(
+            static_cast<std::size_t>(lengthBytes / sizeof(wchar_t)) + 1,
+            L'\0');
+        SIZE_T bytesRead = 0;
+        const BOOL readOk = ReadProcessMemory(
+            processHandle,
+            reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(bufferAddress)),
+            stringBuffer.data(),
+            static_cast<SIZE_T>(lengthBytes),
+            &bytesRead);
+        if (readOk == FALSE || bytesRead < sizeof(wchar_t))
+        {
+            return QString();
+        }
+
+        if (bytesRead > lengthBytes)
+        {
+            bytesRead = lengthBytes;
+        }
+
+        const int charCount = static_cast<int>(bytesRead / sizeof(wchar_t));
+        if (charCount <= 0)
+        {
+            return QString();
+        }
+        stringBuffer[static_cast<std::size_t>(charCount)] = L'\0';
+        return QString::fromWCharArray(stringBuffer.data(), charCount);
+    }
+
+    // readRemoteUnicodeString64：
+    // - 读取 64 位目标结构中的 UNICODE_STRING；
+    // - 输入是当前进程位宽的 UNICODE_STRING 快照；
+    // - 返回字符串文本，失败返回空。
+    QString readRemoteUnicodeString64(
+        HANDLE processHandle,
+        const UNICODE_STRING& remoteUnicode)
+    {
+        return readRemoteUnicodeStringByAddress(
+            processHandle,
+            reinterpret_cast<std::uint64_t>(remoteUnicode.Buffer),
+            remoteUnicode.Length);
+    }
+
+    // readRemoteUnicodeString32：
+    // - 读取 32 位目标结构中的 UNICODE_STRING；
+    // - 输入是手工定义的 32 位布局，Buffer 按 32 位地址提升为 64 位再读取；
+    // - 返回字符串文本，失败返回空。
+    QString readRemoteUnicodeString32(
+        HANDLE processHandle,
+        const RemoteUnicodeString32& remoteUnicode)
+    {
+        return readRemoteUnicodeStringByAddress(
+            processHandle,
+            static_cast<std::uint64_t>(remoteUnicode.buffer),
+            remoteUnicode.length);
+    }
+
+    // readRemoteEnvironmentPreviewLines：
+    // - 分块读取远程环境变量块，直到双 NUL、读取失败或达到上限；
+    // - 只返回前 kMaxEnvironmentPreviewLines 行，避免 UI 文本过大；
+    // - diagnosticTextOut 可选输出截断/失败提示；
+    // - 返回环境变量预览行列表，读取不到时返回空列表。
+    QStringList readRemoteEnvironmentPreviewLines(
+        HANDLE processHandle,
+        const std::uint64_t environmentAddress,
+        QString* diagnosticTextOut)
+    {
+        if (diagnosticTextOut != nullptr)
+        {
+            diagnosticTextOut->clear();
+        }
+        if (processHandle == nullptr || environmentAddress == 0)
+        {
+            return {};
+        }
+
+        std::vector<wchar_t> environmentChars;
+        environmentChars.reserve(kEnvironmentReadChunkBytes / sizeof(wchar_t));
+
+        bool foundDoubleNull = false;
+        bool readStoppedByError = false;
+        std::size_t offsetBytes = 0;
+        while (offsetBytes < kMaxEnvironmentPreviewBytes)
+        {
+            const std::size_t bytesRemaining = kMaxEnvironmentPreviewBytes - offsetBytes;
+            const std::size_t requestBytes = std::min<std::size_t>(
+                kEnvironmentReadChunkBytes,
+                bytesRemaining);
+            std::vector<std::uint8_t> chunkBuffer(requestBytes, 0);
+
+            SIZE_T bytesRead = 0;
+            const BOOL readOk = ReadProcessMemory(
+                processHandle,
+                reinterpret_cast<LPCVOID>(
+                    static_cast<std::uintptr_t>(environmentAddress + offsetBytes)),
+                chunkBuffer.data(),
+                static_cast<SIZE_T>(chunkBuffer.size()),
+                &bytesRead);
+            if (readOk == FALSE || bytesRead < sizeof(wchar_t))
+            {
+                readStoppedByError = true;
+                break;
+            }
+
+            const std::size_t charCount = static_cast<std::size_t>(bytesRead / sizeof(wchar_t));
+            const std::size_t scanStartIndex = environmentChars.empty()
+                ? 1
+                : environmentChars.size();
+            const auto* chunkChars = reinterpret_cast<const wchar_t*>(chunkBuffer.data());
+            environmentChars.insert(environmentChars.end(), chunkChars, chunkChars + charCount);
+
+            for (std::size_t index = scanStartIndex; index < environmentChars.size(); ++index)
+            {
+                if (environmentChars[index - 1] == L'\0' && environmentChars[index] == L'\0')
+                {
+                    environmentChars.resize(index);
+                    foundDoubleNull = true;
+                    break;
+                }
+            }
+            if (foundDoubleNull)
+            {
+                break;
+            }
+
+            const std::size_t consumedBytes = charCount * sizeof(wchar_t);
+            if (consumedBytes == 0 || consumedBytes < requestBytes)
+            {
+                readStoppedByError = true;
+                break;
+            }
+            offsetBytes += consumedBytes;
+        }
+
+        QStringList lines;
+        std::size_t cursorIndex = 0;
+        while (cursorIndex < environmentChars.size() &&
+            lines.size() < static_cast<int>(kMaxEnvironmentPreviewLines))
+        {
+            const wchar_t* currentLine = environmentChars.data() + cursorIndex;
+            std::size_t currentLength = 0;
+            while (cursorIndex + currentLength < environmentChars.size() &&
+                environmentChars[cursorIndex + currentLength] != L'\0')
+            {
+                ++currentLength;
+            }
+            if (currentLength == 0)
+            {
+                break;
+            }
+
+            const int visibleLength = static_cast<int>(
+                std::min<std::size_t>(currentLength, kMaxEnvironmentLineChars));
+            QString lineText = QString::fromWCharArray(currentLine, visibleLength);
+            if (currentLength > kMaxEnvironmentLineChars)
+            {
+                lineText += QStringLiteral(" ...<truncated>");
+            }
+            lines.push_back(lineText);
+            cursorIndex += currentLength + 1;
+        }
+
+        if (diagnosticTextOut != nullptr)
+        {
+            if (!foundDoubleNull && offsetBytes >= kMaxEnvironmentPreviewBytes)
+            {
+                *diagnosticTextOut = QStringLiteral("环境变量块预览达到128KB上限，已截断。");
+            }
+            else if (readStoppedByError && lines.empty())
+            {
+                *diagnosticTextOut = QStringLiteral("环境变量块地址不可完整读取。");
+            }
+        }
+
+        return lines;
+    }
+
+    // readPebProcessParameters64：
+    // - 按 64 位布局解析 PEB->RTL_USER_PROCESS_PARAMETERS；
+    // - 输出命令行、映像路径、当前目录、环境块地址；
+    // - 返回结构体携带 readOk 与诊断文本，不直接抛出异常。
+    RemotePebProcessParametersRead readPebProcessParameters64(
+        HANDLE processHandle,
+        const std::uint64_t pebAddress,
+        const QString& labelText)
+    {
+        RemotePebProcessParametersRead result{};
+        result.labelText = labelText;
+        result.pebAddress = pebAddress;
+
+        Peb64Lite pebSnapshot{};
+        if (!readRemoteStructure(processHandle, pebAddress, pebSnapshot))
+        {
+            result.diagnosticText = QStringLiteral("读取64位PEB头失败。");
+            return result;
+        }
+
+        result.processParametersAddress = reinterpret_cast<std::uint64_t>(
+            pebSnapshot.processParameters);
+        result.imageBaseAddress = reinterpret_cast<std::uint64_t>(
+            pebSnapshot.imageBaseAddress);
+        if (result.processParametersAddress == 0)
+        {
+            result.diagnosticText = QStringLiteral("64位PEB.ProcessParameters为空。");
+            return result;
+        }
+
+        RtlUserProcessParameters64Lite processParameters{};
+        if (!readRemoteStructure(
+            processHandle,
+            result.processParametersAddress,
+            processParameters))
+        {
+            result.diagnosticText = QStringLiteral("读取64位RTL_USER_PROCESS_PARAMETERS失败。");
+            return result;
+        }
+
+        result.readOk = true;
+        result.environmentAddress = reinterpret_cast<std::uint64_t>(
+            processParameters.environment);
+        result.commandLineText = readRemoteUnicodeString64(
+            processHandle,
+            processParameters.commandLine);
+        result.imagePathText = readRemoteUnicodeString64(
+            processHandle,
+            processParameters.imagePathName);
+        result.currentDirectoryText = readRemoteUnicodeString64(
+            processHandle,
+            processParameters.currentDirectory.dosPath);
+        return result;
+    }
+
+    // readPebProcessParameters32：
+    // - 按 Wow64 32 位布局解析 PEB->RTL_USER_PROCESS_PARAMETERS；
+    // - 解决 64 位程序读取 32 位目标时按 64 位结构偏移解析失败的问题；
+    // - 返回结构体携带 readOk 与诊断文本，不直接抛出异常。
+    RemotePebProcessParametersRead readPebProcessParameters32(
+        HANDLE processHandle,
+        const std::uint64_t pebAddress,
+        const QString& labelText)
+    {
+        RemotePebProcessParametersRead result{};
+        result.labelText = labelText;
+        result.pebAddress = pebAddress;
+
+        Peb32Lite pebSnapshot{};
+        if (!readRemoteStructure(processHandle, pebAddress, pebSnapshot))
+        {
+            result.diagnosticText = QStringLiteral("读取32位PEB头失败。");
+            return result;
+        }
+
+        result.processParametersAddress = static_cast<std::uint64_t>(
+            pebSnapshot.processParameters);
+        result.imageBaseAddress = static_cast<std::uint64_t>(
+            pebSnapshot.imageBaseAddress);
+        if (result.processParametersAddress == 0)
+        {
+            result.diagnosticText = QStringLiteral("32位PEB.ProcessParameters为空。");
+            return result;
+        }
+
+        RtlUserProcessParameters32Lite processParameters{};
+        if (!readRemoteStructure(
+            processHandle,
+            result.processParametersAddress,
+            processParameters))
+        {
+            result.diagnosticText = QStringLiteral("读取32位RTL_USER_PROCESS_PARAMETERS失败。");
+            return result;
+        }
+
+        result.readOk = true;
+        result.environmentAddress = static_cast<std::uint64_t>(
+            processParameters.environment);
+        result.commandLineText = readRemoteUnicodeString32(
+            processHandle,
+            processParameters.commandLine);
+        result.imagePathText = readRemoteUnicodeString32(
+            processHandle,
+            processParameters.imagePathName);
+        result.currentDirectoryText = readRemoteUnicodeString32(
+            processHandle,
+            processParameters.currentDirectory.dosPath);
+        return result;
     }
 
     // memoryStateToText：
@@ -2180,7 +2663,7 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
                     textBuilder << L"WriteBytes: " << ioCounters.WriteTransferCount << L"\n";
                 }
 
-                progressDispatcher(QStringLiteral("解析映像与环境块"), 55.0f);
+                progressDispatcher(QStringLiteral("解析PEB参数块"), 55.0f);
 
                 // 子系统信息：ProcessSubsystemInformation（可用时）。
                 if (ntQueryProcess != nullptr)
@@ -2196,24 +2679,109 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
                     }
                 }
 
-                // 映像基址与入口点：
-                // - 通过模块快照获取主模块基址；
-                // - 读取 DOS/NT 头解析 EntryPoint RVA。
-                std::uint64_t imageBaseAddress = 0;
-                HANDLE moduleSnapshot = CreateToolhelp32Snapshot(
-                    TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
-                    pidValue);
-                if (moduleSnapshot != INVALID_HANDLE_VALUE)
+                // PEB 参数块解析：
+                // - Native PEB 按 64 位布局读取；
+                // - Wow64 PEB 按 32 位布局读取，避免 32 位进程在 64 位工具里偏移错位。
+                QString pebDiagnosticText;
+                std::vector<RemotePebProcessParametersRead> pebReadList;
+                if (basicInfo.PebBaseAddress != nullptr)
                 {
-                    MODULEENTRY32 moduleEntry{};
-                    moduleEntry.dwSize = sizeof(moduleEntry);
-                    if (Module32First(moduleSnapshot, &moduleEntry) != FALSE)
-                    {
-                        imageBaseAddress = reinterpret_cast<std::uint64_t>(moduleEntry.modBaseAddr);
-                        imagePathText = QString::fromWCharArray(moduleEntry.szExePath);
-                    }
-                    CloseHandle(moduleSnapshot);
+                    pebReadList.push_back(readPebProcessParameters64(
+                        processHandle,
+                        reinterpret_cast<std::uint64_t>(basicInfo.PebBaseAddress),
+                        QStringLiteral("NativePEB")));
                 }
+                else
+                {
+                    appendPebDiagnostic(pebDiagnosticText, QStringLiteral("ProcessBasicInformation 未返回 PEB 地址。"));
+                }
+
+                ULONG_PTR wow64PebAddress = 0;
+                if (ntQueryProcess != nullptr &&
+                    queryNtProcessInfoFixed(
+                        ntQueryProcess,
+                        processHandle,
+                        kProcessInfoClassWow64Information,
+                        wow64PebAddress) &&
+                    wow64PebAddress != 0 &&
+                    wow64PebAddress != reinterpret_cast<ULONG_PTR>(basicInfo.PebBaseAddress))
+                {
+                    pebReadList.push_back(readPebProcessParameters32(
+                        processHandle,
+                        static_cast<std::uint64_t>(wow64PebAddress),
+                        QStringLiteral("Wow64PEB")));
+                }
+
+                std::uint64_t imageBaseAddress = 0;
+                for (const RemotePebProcessParametersRead& pebRead : pebReadList)
+                {
+                    if (!pebRead.readOk)
+                    {
+                        appendPebDiagnostic(
+                            pebDiagnosticText,
+                            QStringLiteral("%1: %2")
+                            .arg(pebRead.labelText)
+                            .arg(pebRead.diagnosticText));
+                        continue;
+                    }
+
+                    textBuilder << L"["
+                        << pebRead.labelText.toStdWString()
+                        << L"]\n";
+                    textBuilder << L"  PebAddress: "
+                        << uint64ToHex(pebRead.pebAddress).toStdWString()
+                        << L"\n";
+                    textBuilder << L"  ProcessParameters: "
+                        << uint64ToHex(pebRead.processParametersAddress).toStdWString()
+                        << L"\n";
+                    textBuilder << L"  ImageBaseAddress: "
+                        << uint64ToHex(pebRead.imageBaseAddress).toStdWString()
+                        << L"\n";
+                    textBuilder << L"  Environment: "
+                        << uint64ToHex(pebRead.environmentAddress).toStdWString()
+                        << L"\n";
+
+                    if (!pebRead.commandLineText.trimmed().isEmpty())
+                    {
+                        textBuilder << L"CommandLine("
+                            << pebRead.labelText.toStdWString()
+                            << L"): "
+                            << pebRead.commandLineText.toStdWString()
+                            << L"\n";
+                    }
+                    if (!pebRead.imagePathText.trimmed().isEmpty())
+                    {
+                        imagePathText = pebRead.imagePathText;
+                        textBuilder << L"ImagePath("
+                            << pebRead.labelText.toStdWString()
+                            << L"): "
+                            << pebRead.imagePathText.toStdWString()
+                            << L"\n";
+                    }
+                    if (!pebRead.currentDirectoryText.trimmed().isEmpty())
+                    {
+                        currentDirectoryText = pebRead.currentDirectoryText;
+                        textBuilder << L"CurrentDirectory("
+                            << pebRead.labelText.toStdWString()
+                            << L"): "
+                            << pebRead.currentDirectoryText.toStdWString()
+                            << L"\n";
+                    }
+                    if (imageBaseAddress == 0 && pebRead.imageBaseAddress != 0)
+                    {
+                        imageBaseAddress = pebRead.imageBaseAddress;
+                    }
+                }
+
+                if (!pebDiagnosticText.trimmed().isEmpty())
+                {
+                    appendPebDiagnostic(refreshResult.diagnosticText, pebDiagnosticText);
+                }
+
+                // 映像入口点：
+                // - 优先使用 PEB.ImageBaseAddress，避免 ToolHelp 模块快照在部分进程上阻塞；
+                // - 只读取 PE 头部，不枚举模块列表。
+                progressDispatcher(QStringLiteral("解析映像入口点"), 60.0f);
                 if (imageBaseAddress != 0)
                 {
                     textBuilder << L"ImageBaseAddress: "
@@ -2223,126 +2791,82 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
                     SIZE_T bytesRead = 0;
                     if (ReadProcessMemory(
                         processHandle,
-                        reinterpret_cast<LPCVOID>(imageBaseAddress),
+                        reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(imageBaseAddress)),
                         &dosHeader,
                         sizeof(dosHeader),
                         &bytesRead) != FALSE &&
                         bytesRead == sizeof(dosHeader) &&
-                        dosHeader.e_magic == IMAGE_DOS_SIGNATURE)
+                        dosHeader.e_magic == IMAGE_DOS_SIGNATURE &&
+                        dosHeader.e_lfanew > 0 &&
+                        dosHeader.e_lfanew < 0x100000)
                     {
                         IMAGE_NT_HEADERS64 ntHeader64{};
                         if (ReadProcessMemory(
                             processHandle,
-                            reinterpret_cast<LPCVOID>(imageBaseAddress + static_cast<std::uint64_t>(dosHeader.e_lfanew)),
+                            reinterpret_cast<LPCVOID>(
+                                static_cast<std::uintptr_t>(
+                                    imageBaseAddress + static_cast<std::uint64_t>(dosHeader.e_lfanew))),
                             &ntHeader64,
                             sizeof(ntHeader64),
                             &bytesRead) != FALSE &&
-                            bytesRead >= sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) &&
+                            bytesRead >= sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + sizeof(WORD) &&
                             ntHeader64.Signature == IMAGE_NT_SIGNATURE)
                         {
-                            const std::uint32_t entryRva = ntHeader64.OptionalHeader.AddressOfEntryPoint;
-                            textBuilder << L"EntryPointRva: 0x"
-                                << QString::number(entryRva, 16).toUpper().toStdWString()
-                                << L"\n";
-                            textBuilder << L"EntryPointAddress: "
-                                << uint64ToHex(imageBaseAddress + entryRva).toStdWString()
-                                << L"\n";
+                            const WORD optionalMagic = ntHeader64.OptionalHeader.Magic;
+                            if (optionalMagic == IMAGE_NT_OPTIONAL_HDR32_MAGIC ||
+                                optionalMagic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+                            {
+                                const std::uint32_t entryRva = ntHeader64.OptionalHeader.AddressOfEntryPoint;
+                                textBuilder << L"EntryPointRva: 0x"
+                                    << QString::number(entryRva, 16).toUpper().toStdWString()
+                                    << L"\n";
+                                textBuilder << L"EntryPointAddress: "
+                                    << uint64ToHex(imageBaseAddress + entryRva).toStdWString()
+                                    << L"\n";
+                            }
                         }
                     }
                 }
+                else
+                {
+                    appendPebDiagnostic(refreshResult.diagnosticText, QStringLiteral("PEB 未提供可用映像基址。"));
+                }
 
                 // 环境变量块预览：
-                // - 通过 PEB->ProcessParameters->Environment 指针读取前若干项；
-                // - 若读取失败则给出提示文本。
-                struct RtlUserProcessParametersLite final
-                {
-                    BYTE reserved1[16];
-                    PVOID reserved2[10];
-                    UNICODE_STRING imagePathName;
-                    UNICODE_STRING commandLine;
-                    PVOID environment;
-                };
-
+                // - 从已成功解析的 PEB 参数块里选择第一个环境地址；
+                // - 分块读取并设置 128KB 上限，避免环境块损坏时卡住后台任务。
+                progressDispatcher(QStringLiteral("读取环境变量预览"), 64.0f);
                 bool environmentPreviewOk = false;
-                if (basicInfo.PebBaseAddress != nullptr)
+                for (const RemotePebProcessParametersRead& pebRead : pebReadList)
                 {
-                    PEB pebSnapshot{};
-                    SIZE_T bytesRead = 0;
-                    if (ReadProcessMemory(
-                        processHandle,
-                        basicInfo.PebBaseAddress,
-                        &pebSnapshot,
-                        sizeof(pebSnapshot),
-                        &bytesRead) != FALSE &&
-                        bytesRead == sizeof(pebSnapshot) &&
-                        pebSnapshot.ProcessParameters != nullptr)
+                    if (!pebRead.readOk || pebRead.environmentAddress == 0)
                     {
-                        RtlUserProcessParametersLite processParameters{};
-                        if (ReadProcessMemory(
-                            processHandle,
-                            pebSnapshot.ProcessParameters,
-                            &processParameters,
-                            sizeof(processParameters),
-                            &bytesRead) != FALSE &&
-                            bytesRead == sizeof(processParameters))
-                        {
-                            const QString commandFromPeb = readRemoteUnicodeString(
-                                processHandle,
-                                processParameters.commandLine);
-                            if (!commandFromPeb.trimmed().isEmpty())
-                            {
-                                textBuilder << L"CommandLine(PEB): " << commandFromPeb.toStdWString() << L"\n";
-                            }
-                            const QString imagePathFromPeb = readRemoteUnicodeString(
-                                processHandle,
-                                processParameters.imagePathName);
-                            if (!imagePathFromPeb.trimmed().isEmpty())
-                            {
-                                textBuilder << L"ImagePath(PEB): " << imagePathFromPeb.toStdWString() << L"\n";
-                            }
-
-                            if (processParameters.environment != nullptr)
-                            {
-                                std::vector<wchar_t> envBuffer(32768, L'\0');
-                                SIZE_T envBytesRead = 0;
-                                const BOOL envReadOk = ReadProcessMemory(
-                                    processHandle,
-                                    processParameters.environment,
-                                    envBuffer.data(),
-                                    static_cast<SIZE_T>(envBuffer.size() * sizeof(wchar_t)),
-                                    &envBytesRead);
-                                if (envReadOk != FALSE && envBytesRead > sizeof(wchar_t))
-                                {
-                                    environmentPreviewOk = true;
-                                    textBuilder << L"[EnvironmentPreview]\n";
-                                    std::size_t previewLines = 0;
-                                    const std::size_t maxPreviewLines = 20;
-                                    const std::size_t totalChars = envBytesRead / sizeof(wchar_t);
-                                    std::size_t cursorIndex = 0;
-                                    while (cursorIndex < totalChars && previewLines < maxPreviewLines)
-                                    {
-                                        const wchar_t* currentLine = envBuffer.data() + cursorIndex;
-                                        std::size_t currentLength = 0;
-                                        while (cursorIndex + currentLength < totalChars)
-                                        {
-                                            if (envBuffer[cursorIndex + currentLength] == L'\0')
-                                            {
-                                                break;
-                                            }
-                                            ++currentLength;
-                                        }
-                                        if (currentLength == 0)
-                                        {
-                                            break;
-                                        }
-                                        textBuilder << L"  " << currentLine << L"\n";
-                                        cursorIndex += currentLength + 1;
-                                        ++previewLines;
-                                    }
-                                }
-                            }
-                        }
+                        continue;
                     }
+
+                    QString environmentDiagnosticText;
+                    const QStringList environmentLines = readRemoteEnvironmentPreviewLines(
+                        processHandle,
+                        pebRead.environmentAddress,
+                        &environmentDiagnosticText);
+                    if (!environmentDiagnosticText.trimmed().isEmpty())
+                    {
+                        appendPebDiagnostic(refreshResult.diagnosticText, environmentDiagnosticText);
+                    }
+                    if (environmentLines.isEmpty())
+                    {
+                        continue;
+                    }
+
+                    environmentPreviewOk = true;
+                    textBuilder << L"[EnvironmentPreview:"
+                        << pebRead.labelText.toStdWString()
+                        << L"]\n";
+                    for (const QString& lineText : environmentLines)
+                    {
+                        textBuilder << L"  " << lineText.toStdWString() << L"\n";
+                    }
+                    break;
                 }
                 if (!environmentPreviewOk)
                 {
@@ -2369,6 +2893,7 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
                 bool regionScanTimeout = false;
                 const auto regionScanDeadline = beginTime + std::chrono::seconds(8);
 
+                progressDispatcher(QStringLiteral("扫描虚拟地址空间"), 68.0f);
                 textBuilder << L"[VirtualAddressRegionPreview]\n";
                 while (cursorAddress < maxAddress)
                 {
@@ -2389,7 +2914,9 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
                     }
                     if (memoryInfo.RegionSize == 0)
                     {
-                        refreshResult.diagnosticText = QStringLiteral("虚拟内存枚举遇到零长度区域，已提前终止。");
+                        appendPebDiagnostic(
+                            refreshResult.diagnosticText,
+                            QStringLiteral("虚拟内存枚举遇到零长度区域，已提前终止。"));
                         break;
                     }
 
@@ -2464,23 +2991,25 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
                         cursorAddress + static_cast<std::uintptr_t>(memoryInfo.RegionSize);
                     if (nextAddress <= cursorAddress)
                     {
-                        refreshResult.diagnosticText = QStringLiteral("虚拟内存枚举地址发生回绕，已提前终止。");
+                        appendPebDiagnostic(
+                            refreshResult.diagnosticText,
+                            QStringLiteral("虚拟内存枚举地址发生回绕，已提前终止。"));
                         break;
                     }
                     cursorAddress = nextAddress;
                 }
                 if (regionScanTruncated)
                 {
-                    refreshResult.diagnosticText = QString("虚拟内存枚举达到上限(%1)，结果为部分数据。")
-                        .arg(kMaxRegionScanCount);
+                    appendPebDiagnostic(
+                        refreshResult.diagnosticText,
+                        QString("虚拟内存枚举达到上限(%1)，结果为部分数据。")
+                        .arg(kMaxRegionScanCount));
                 }
                 if (regionScanTimeout)
                 {
-                    if (!refreshResult.diagnosticText.trimmed().isEmpty())
-                    {
-                        refreshResult.diagnosticText += QStringLiteral(" | ");
-                    }
-                    refreshResult.diagnosticText += QStringLiteral("虚拟内存枚举超过8秒，已返回部分结果。");
+                    appendPebDiagnostic(
+                        refreshResult.diagnosticText,
+                        QStringLiteral("虚拟内存枚举超过8秒，已返回部分结果。"));
                 }
                 textBuilder << L"RegionCount: " << regionCount << L"\n";
                 textBuilder << L"CommitBytes: " << commitBytes << L"\n";
@@ -2488,39 +3017,14 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
                 textBuilder << L"ImageBytes: " << imageBytes << L"\n";
                 textBuilder << L"PrivateBytes: " << privateBytes << L"\n";
 
-                // 堆信息：Heap32List + Heap32 遍历统计。
-                HANDLE heapSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPHEAPLIST, pidValue);
-                if (heapSnapshot != INVALID_HANDLE_VALUE)
-                {
-                    HEAPLIST32 heapList{};
-                    heapList.dwSize = sizeof(heapList);
-                    DWORD heapCount = 0;
-                    std::uint64_t heapBlockCount = 0;
-                    BOOL hasHeap = Heap32ListFirst(heapSnapshot, &heapList);
-                    while (hasHeap != FALSE)
-                    {
-                        ++heapCount;
-                        HEAPENTRY32 heapEntry{};
-                        heapEntry.dwSize = sizeof(heapEntry);
-                        BOOL hasBlock = Heap32First(
-                            &heapEntry,
-                            pidValue,
-                            static_cast<ULONG_PTR>(heapList.th32HeapID));
-                        while (hasBlock != FALSE)
-                        {
-                            ++heapBlockCount;
-                            hasBlock = Heap32Next(&heapEntry);
-                        }
-                        hasHeap = Heap32ListNext(heapSnapshot, &heapList);
-                    }
-                    CloseHandle(heapSnapshot);
-                    textBuilder << L"HeapCount: " << heapCount << L"\n";
-                    textBuilder << L"HeapBlockCount: " << heapBlockCount << L"\n";
-                }
-                else
-                {
-                    textBuilder << L"HeapCount: <unavailable>\n";
-                }
+                // 堆信息：只统计 HeapList 数量。
+                // - 旧实现继续调用 Heap32First/Heap32Next 遍历全部堆块；
+                // - 这些 API 在大进程、受保护进程或堆损坏场景下可能在内部长时间阻塞；
+                // - PEB 页首要目标是 ProcessParameters/环境块解析，因此这里主动跳过堆块全量枚举。
+                progressDispatcher(QStringLiteral("跳过堆块枚举"), 90.0f);
+                textBuilder << L"HeapCount: <skipped>\n";
+                textBuilder << L"HeapBlockCount: <skipped>\n";
+                textBuilder << L"HeapBlockEnumeration: <skipped to keep PEB refresh bounded>\n";
 
                 progressDispatcher(QStringLiteral("汇总PEB结果"), 95.0f);
 

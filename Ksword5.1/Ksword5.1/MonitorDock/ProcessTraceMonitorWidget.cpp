@@ -187,13 +187,18 @@ QString ProcessTraceMonitorWidget::providerTypeFromName(const QString& providerN
 
 QString ProcessTraceMonitorWidget::now100nsText()
 {
+    return QString::number(static_cast<qulonglong>(currentSystemTime100ns()));
+}
+
+std::uint64_t ProcessTraceMonitorWidget::currentSystemTime100ns()
+{
     FILETIME fileTimeValue{};
     ::GetSystemTimeAsFileTime(&fileTimeValue);
 
     ULARGE_INTEGER largeValue{};
     largeValue.LowPart = fileTimeValue.dwLowDateTime;
     largeValue.HighPart = fileTimeValue.dwHighDateTime;
-    return QString::number(static_cast<qulonglong>(largeValue.QuadPart));
+    return static_cast<std::uint64_t>(largeValue.QuadPart);
 }
 
 QString ProcessTraceMonitorWidget::guidToText(const GUID& guidValue)

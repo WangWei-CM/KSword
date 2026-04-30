@@ -127,6 +127,14 @@ private:
     void initializeActionTab();
     void initializeModuleTab();
     void initializeTokenTab();
+    // initializeKernelObjectTab 作用：
+    // - 构建 Phase-2 “内核对象”页面；
+    // - 展示 R0 扩展字段、DynData capability、字段来源和可用性；
+    // - 仅显示 ObjectTable/SectionObject 可用状态，不在本页直接枚举句柄表或 Section。
+    // 调用方式：initializeUi 中创建 m_kernelObjectTab 后调用。
+    // 参数：无。
+    // 返回：无。
+    void initializeKernelObjectTab();
     // initializeTokenSwitchTab 作用：
     // - 构建“令牌开关”页面；
     // - 提供复选框批量控制 Token 开关位，并提供刷新/应用按钮。
@@ -139,6 +147,13 @@ private:
 
     // ======== 详情页刷新 ========
     void refreshDetailTabTexts();
+    // refreshKernelObjectTabTexts 作用：
+    // - 根据 m_baseRecord 刷新“内核对象”页所有标签；
+    // - DynData 未命中时显示 Unavailable，避免误导用户可直接进入后续句柄/Section 枚举。
+    // 调用方式：refreshDetailTabTexts 和 updateBaseRecord 间接调用。
+    // 参数：无。
+    // 返回：无。
+    void refreshKernelObjectTabTexts();
     void refreshParentProcessSection();
     void updateWindowTitle();
     void requestAsyncThreadInspectRefresh();
@@ -233,6 +248,7 @@ private:
     QWidget* m_moduleTab = nullptr;            // “模块”页。
     QWidget* m_tokenTab = nullptr;             // “令牌”页。
     QWidget* m_tokenSwitchTab = nullptr;       // “令牌开关”页。
+    QWidget* m_kernelObjectTab = nullptr;      // “内核对象”页。
     QWidget* m_pebTab = nullptr;               // “PEB”页。
 
     // ======== 详细信息页控件 ========
@@ -307,6 +323,29 @@ private:
     bool m_threadInspectRefreshing = false;        // 线程细节是否正在刷新。
     std::uint64_t m_threadInspectRefreshTicket = 0;// 线程细节刷新序号。
     int m_threadInspectRefreshProgressPid = 0;     // 线程细节刷新对应进度 PID。
+
+    // ======== 内核对象页控件 ========
+    QVBoxLayout* m_kernelObjectLayout = nullptr; // 内核对象页总布局。
+    QLabel* m_kernelObjectR0StatusValue = nullptr; // R0 扩展读取状态。
+    QLabel* m_kernelObjectCapabilityValue = nullptr; // DynData capability 位图。
+    QLabel* m_kernelObjectProtectionValue = nullptr; // EPROCESS.Protection 原始值。
+    QLabel* m_kernelObjectSignatureValue = nullptr; // SignatureLevel 原始值。
+    QLabel* m_kernelObjectSectionSignatureValue = nullptr; // SectionSignatureLevel 原始值。
+    QLabel* m_kernelObjectHandleTableValue = nullptr; // ObjectTable 可用性和当前指针。
+    QLabel* m_kernelObjectSectionObjectValue = nullptr; // SectionObject 可用性和当前指针。
+    QLabel* m_kernelObjectImagePathValue = nullptr; // R0 镜像路径。
+    QLabel* m_kernelObjectSessionSourceValue = nullptr; // Session 来源。
+    QLabel* m_kernelObjectImagePathSourceValue = nullptr; // 镜像路径来源。
+    QLabel* m_kernelObjectProtectionSourceValue = nullptr; // Protection 来源。
+    QLabel* m_kernelObjectSignatureSourceValue = nullptr; // SignatureLevel 来源。
+    QLabel* m_kernelObjectSectionSignatureSourceValue = nullptr; // SectionSignatureLevel 来源。
+    QLabel* m_kernelObjectObjectTableSourceValue = nullptr; // ObjectTable 来源。
+    QLabel* m_kernelObjectSectionObjectSourceValue = nullptr; // SectionObject 来源。
+    QLabel* m_kernelObjectProtectionOffsetValue = nullptr; // Protection 偏移。
+    QLabel* m_kernelObjectSignatureOffsetValue = nullptr; // SignatureLevel 偏移。
+    QLabel* m_kernelObjectSectionSignatureOffsetValue = nullptr; // SectionSignatureLevel 偏移。
+    QLabel* m_kernelObjectObjectTableOffsetValue = nullptr; // ObjectTable 偏移。
+    QLabel* m_kernelObjectSectionObjectOffsetValue = nullptr; // SectionObject 偏移。
 
     // ======== 令牌页控件与状态 ========
     QVBoxLayout* m_tokenLayout = nullptr;          // 令牌页布局。

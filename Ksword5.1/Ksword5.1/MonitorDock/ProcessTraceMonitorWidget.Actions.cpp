@@ -24,9 +24,11 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
+#include <QVariant>
 
 #include <algorithm>
 #include <set>
+#include <utility>
 #include <vector>
 
 #ifndef NOMINMAX
@@ -42,6 +44,7 @@ namespace
     constexpr int kEventRoleGlobalSearchText = Qt::UserRole;
     constexpr int kEventRoleProcessSearchText = Qt::UserRole + 1;
     constexpr int kEventRoleEventSearchText = Qt::UserRole + 2;
+    constexpr int kEventRoleTime100nsValue = Qt::UserRole + 3;
 
     // queryLightweightProcessPath：
     // - 作用：只查询当前页面展示需要的进程路径；
@@ -388,6 +391,14 @@ void ProcessTraceMonitorWidget::initializeConnections()
             }
             openEventDetailViewerForRow(itemPointer->row());
         });
+    }
+
+    if (m_eventTimelineWidget != nullptr)
+    {
+        m_eventTimelineWidget->setSelectionChangedCallback(
+            [this](const std::uint64_t start100ns, const std::uint64_t end100ns) {
+                applyTimelineSelection(start100ns, end100ns);
+            });
     }
 
     // 定时器：
@@ -1027,7 +1038,8 @@ bool ProcessTraceMonitorWidget::hasAnyEventFilterActive() const
         || globalFilterActive
         || regexFilterActive
         || caseFilterActive
-        || invertFilterActive;
+        || invertFilterActive
+        || isTimelineFilterActive();
 }
 
 void ProcessTraceMonitorWidget::updateEventFilterStatusText(const int visibleCount, const int totalCount)
@@ -1045,6 +1057,76 @@ void ProcessTraceMonitorWidget::updateEventFilterStatusText(const int visibleCou
         visibleCount > 0 ? monitorSuccessColorHex() : monitorIdleColorHex()));
 }
 
+void ProcessTraceMonitorWidget::applyTimelineSelection(
+    const std::uint64_t start100ns,
+    const std::uint64_t end100ns)
+{
+    // 时间轴负责解释鼠标动作，事件表负责执行筛选。
+    // 这里存储绝对时间戳，确保图形选区与表格行通过数据关联，而不是通过屏幕坐标关联。
+    m_timelineSelectionStart100ns = std::min(start100ns, end100ns);
+    m_timelineSelectionEnd100ns = std::max(start100ns, end100ns);
+    m_timelineUserSelectionActive = true;
+    applyEventFilter();
+}
+
+void ProcessTraceMonitorWidget::refreshTimelineRange(const bool captureFinished)
+{
+    if (m_eventTimelineWidget == nullptr || m_captureStartTime100ns == 0)
+    {
+        return;
+    }
+
+    // captureEnd100ns：
+    // - 采集中使用当前系统时间，让时间轴右侧实时扩展；
+    // - 停止后使用记录的停止时间，让右侧固定。
+    std::uint64_t captureEnd100ns = captureFinished && m_captureStopTime100ns != 0
+        ? m_captureStopTime100ns
+        : currentSystemTime100ns();
+
+    if (captureEnd100ns <= m_captureStartTime100ns)
+    {
+        captureEnd100ns = m_captureStartTime100ns + 1;
+    }
+
+    m_eventTimelineWidget->setCaptureRange(m_captureStartTime100ns, captureEnd100ns);
+    m_timelineSelectionStart100ns = m_eventTimelineWidget->selectionStart100ns();
+    m_timelineSelectionEnd100ns = m_eventTimelineWidget->selectionEnd100ns();
+}
+
+void ProcessTraceMonitorWidget::refreshTimelinePoints()
+{
+    if (m_eventTimelineWidget == nullptr)
+    {
+        return;
+    }
+
+    m_eventTimelineWidget->setEventPoints(m_timelineEventPoints);
+}
+
+bool ProcessTraceMonitorWidget::isTimelineFilterActive() const
+{
+    if (m_captureStartTime100ns == 0
+        || !m_timelineUserSelectionActive
+        || m_timelineSelectionStart100ns == 0
+        || m_timelineSelectionEnd100ns == 0
+        || m_timelineSelectionEnd100ns <= m_timelineSelectionStart100ns)
+    {
+        return false;
+    }
+
+    const std::uint64_t effectiveEnd100ns = m_captureStopTime100ns != 0
+        ? m_captureStopTime100ns
+        : currentSystemTime100ns();
+    if (effectiveEnd100ns <= m_captureStartTime100ns)
+    {
+        return false;
+    }
+
+    // 全范围选区不视为额外筛选，避免默认自动跟随状态下隐藏新追加事件。
+    return m_timelineSelectionStart100ns > m_captureStartTime100ns
+        || m_timelineSelectionEnd100ns < effectiveEnd100ns;
+}
+
 void ProcessTraceMonitorWidget::applyEventFilter()
 {
     if (m_eventTable == nullptr)
@@ -1060,6 +1142,7 @@ void ProcessTraceMonitorWidget::applyEventFilter()
     const QString globalText = m_eventGlobalFilterEdit != nullptr ? m_eventGlobalFilterEdit->text() : QString();
     const bool useRegex = m_eventRegexCheck != nullptr && m_eventRegexCheck->isChecked();
     const bool invertMatch = m_eventInvertCheck != nullptr && m_eventInvertCheck->isChecked();
+    const bool timelineFilterActive = isTimelineFilterActive();
     const Qt::CaseSensitivity caseSensitivity =
         (m_eventCaseCheck != nullptr && m_eventCaseCheck->isChecked())
         ? Qt::CaseSensitive
@@ -1101,6 +1184,19 @@ void ProcessTraceMonitorWidget::applyEventFilter()
             ? timeItem->data(kEventRoleGlobalSearchText).toString()
             : QString();
 
+        // timelineMatched：
+        // - 时间窗口始终是外层约束；
+        // - 现有“反向”选项不能把它反转为“时间框外”，否则会破坏框选时间的语义。
+        bool timelineMatched = true;
+        if (timelineFilterActive)
+        {
+            const std::uint64_t rowTime100ns = timeItem != nullptr
+                ? timeItem->data(kEventRoleTime100nsValue).toULongLong()
+                : 0;
+            timelineMatched = rowTime100ns >= m_timelineSelectionStart100ns
+                && rowTime100ns <= m_timelineSelectionEnd100ns;
+        }
+
         bool matched = true;
         if (!typeText.isEmpty() && typeText != QStringLiteral("全部类型"))
         {
@@ -1117,6 +1213,7 @@ void ProcessTraceMonitorWidget::applyEventFilter()
         {
             matched = !matched;
         }
+        matched = matched && timelineMatched;
 
         m_eventTable->setRowHidden(row, !matched);
         if (matched)
@@ -1179,6 +1276,13 @@ void ProcessTraceMonitorWidget::clearEventFilter()
     {
         m_eventInvertCheck->setChecked(false);
     }
+    if (m_eventTimelineWidget != nullptr)
+    {
+        m_eventTimelineWidget->resetSelectionToFullRange();
+        m_timelineSelectionStart100ns = m_eventTimelineWidget->selectionStart100ns();
+        m_timelineSelectionEnd100ns = m_eventTimelineWidget->selectionEnd100ns();
+        m_timelineUserSelectionActive = false;
+    }
 
     applyEventFilter();
 
@@ -1201,6 +1305,7 @@ void ProcessTraceMonitorWidget::flushPendingRows()
 
     if (rowList.empty())
     {
+        refreshTimelineRange(false);
         return;
     }
 
@@ -1213,9 +1318,15 @@ void ProcessTraceMonitorWidget::flushPendingRows()
     while (m_eventTable->rowCount() > 12000)
     {
         m_eventTable->removeRow(0);
+        if (!m_timelineEventPoints.empty())
+        {
+            m_timelineEventPoints.erase(m_timelineEventPoints.begin());
+        }
     }
 
     m_eventTable->setUpdatesEnabled(true);
+    refreshTimelineRange(false);
+    refreshTimelinePoints();
 
     if (hasAnyEventFilterActive())
     {
@@ -1247,6 +1358,8 @@ void ProcessTraceMonitorWidget::appendEventRow(const CapturedEventRow& rowValue)
     m_eventTable->insertRow(row);
 
     QTableWidgetItem* timeItem = createReadOnlyItem(rowValue.time100nsText);
+    timeItem->setData(kEventRoleTime100nsValue, QVariant::fromValue<qulonglong>(
+        static_cast<qulonglong>(rowValue.time100ns)));
     timeItem->setData(
         kEventRoleProcessSearchText,
         QStringLiteral("%1 | %2 | %3 | %4")
@@ -1280,4 +1393,9 @@ void ProcessTraceMonitorWidget::appendEventRow(const CapturedEventRow& rowValue)
     m_eventTable->setItem(row, EventColumnRelation, createReadOnlyItem(rowValue.relationText));
     m_eventTable->setItem(row, EventColumnDetail, createReadOnlyItem(rowValue.detailText));
     m_eventTable->setItem(row, EventColumnActivityId, createReadOnlyItem(rowValue.activityIdText));
+
+    ProcessTraceTimelineEventPoint pointValue;
+    pointValue.time100ns = rowValue.time100ns;
+    pointValue.typeText = rowValue.typeText;
+    m_timelineEventPoints.push_back(std::move(pointValue));
 }

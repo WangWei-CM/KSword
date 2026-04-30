@@ -60,7 +60,29 @@ namespace ksword::ark
         std::uint32_t processId = 0;
         std::uint32_t parentProcessId = 0;
         std::uint32_t flags = 0;
+        std::uint32_t sessionId = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t r0Status = KSWORD_ARK_PROCESS_R0_STATUS_UNAVAILABLE;
+        std::uint32_t sessionSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint8_t protection = 0;
+        std::uint8_t signatureLevel = 0;
+        std::uint8_t sectionSignatureLevel = 0;
+        std::uint32_t protectionSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t signatureLevelSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t sectionSignatureLevelSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t objectTableSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t sectionObjectSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t imagePathSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t protectionOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t signatureLevelOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t sectionSignatureLevelOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t objectTableOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t sectionObjectOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint64_t objectTableAddress = 0;
+        std::uint64_t sectionObjectAddress = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
         std::string imageName;
+        std::string imagePath;
     };
 
     // ProcessEnumResult carries both the parsed rows and protocol metadata.
