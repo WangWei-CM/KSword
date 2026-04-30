@@ -206,6 +206,8 @@ void KernelDock::initializeUi()
     m_objectNamespacePage = new QWidget(m_tabWidget);
     m_atomPage = new QWidget(m_tabWidget);
     m_ssdtPage = new QWidget(m_tabWidget);
+    m_dynDataPage = new QWidget(m_tabWidget);
+    m_driverStatusPage = new QWidget(m_tabWidget);
     m_ntQueryPage = new QWidget(m_tabWidget);
     m_callbackInterceptPage = new QWidget(m_tabWidget);
     m_callbackRemovePage = new QWidget(m_tabWidget);
@@ -233,6 +235,18 @@ void KernelDock::initializeUi()
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
         QStringLiteral("SSDT遍历"));
     m_tabWidget->setTabToolTip(m_ssdtTabIndex, QStringLiteral("驱动侧 SSDT 服务索引遍历结果"));
+
+    m_dynDataTabIndex = m_tabWidget->addTab(
+        m_dynDataPage,
+        tabIcon(QStringLiteral(":/Icon/process_priority.svg")),
+        QStringLiteral("动态偏移"));
+    m_tabWidget->setTabToolTip(m_dynDataTabIndex, QStringLiteral("System Informer DynData 精确匹配状态与字段列表"));
+
+    m_driverStatusTabIndex = m_tabWidget->addTab(
+        m_driverStatusPage,
+        tabIcon(QStringLiteral(":/Icon/process_details.svg")),
+        QStringLiteral("驱动状态"));
+    m_tabWidget->setTabToolTip(m_driverStatusTabIndex, QStringLiteral("KswordARK 驱动加载、协议、安全策略、DynData 和功能能力矩阵"));
 
     m_callbackTabIndex = m_tabWidget->addTab(
         m_callbackInterceptPage,
@@ -337,6 +351,8 @@ void KernelDock::updateTabIconContrast()
     m_tabWidget->setTabIcon(m_atomTabIndex, tabIcon(QStringLiteral(":/Icon/process_threads.svg")));
     m_tabWidget->setTabIcon(m_ntQueryTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
     m_tabWidget->setTabIcon(m_ssdtTabIndex, tabIcon(QStringLiteral(":/Icon/process_list.svg")));
+    m_tabWidget->setTabIcon(m_dynDataTabIndex, tabIcon(QStringLiteral(":/Icon/process_priority.svg")));
+    m_tabWidget->setTabIcon(m_driverStatusTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
     m_tabWidget->setTabIcon(m_callbackTabIndex, tabIcon(QStringLiteral(":/Icon/process_critical.svg")));
     m_tabWidget->setTabIcon(m_callbackRemoveTabIndex, tabIcon(QStringLiteral(":/Icon/process_terminate.svg")));
 
@@ -355,6 +371,14 @@ void KernelDock::updateTabIconContrast()
     else if (currentIndex == m_ssdtTabIndex)
     {
         m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_list.svg")));
+    }
+    else if (currentIndex == m_dynDataTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_priority.svg")));
+    }
+    else if (currentIndex == m_driverStatusTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_details.svg")));
     }
     else if (currentIndex == m_callbackTabIndex)
     {
@@ -666,6 +690,26 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         m_ssdtTabInitialized = true;
         hideTabInitializingProgress();
         refreshSsdtAsync();
+        return;
+    }
+
+    if (tabIndex == m_dynDataTabIndex && !m_dynDataTabInitialized)
+    {
+        showTabInitializingProgress(tabIndex, QStringLiteral("动态偏移"));
+        initializeDynDataTab();
+        m_dynDataTabInitialized = true;
+        hideTabInitializingProgress();
+        refreshDynDataAsync();
+        return;
+    }
+
+    if (tabIndex == m_driverStatusTabIndex && !m_driverStatusTabInitialized)
+    {
+        showTabInitializingProgress(tabIndex, QStringLiteral("驱动状态"));
+        initializeDriverStatusTab();
+        m_driverStatusTabInitialized = true;
+        hideTabInitializingProgress();
+        refreshDriverStatusAsync();
         return;
     }
 

@@ -119,6 +119,11 @@ Return Value:
         return status;
     }
 
+    status = KswordARKDynDataInitialize(device);
+    if (!NT_SUCCESS(status)) {
+        TraceEvents(TRACE_LEVEL_WARNING, TRACE_DEVICE, "KswordARKDynDataInitialize recorded failure %!STATUS!", status);
+    }
+
     status = KswordARKDriverEnqueueLogFrame(device, "Info", "KswordARK driver started.");
     if (!NT_SUCCESS(status)) {
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "KswordARKDriverEnqueueLogFrame(startup) failed %!STATUS!", status);
@@ -189,6 +194,11 @@ Return Value:
     status = KswordARKDriverQueueInitialize(device);
     if (!NT_SUCCESS(status)) {
         return status;
+    }
+
+    status = KswordARKDynDataInitialize(device);
+    if (!NT_SUCCESS(status)) {
+        TraceEvents(TRACE_LEVEL_WARNING, TRACE_DEVICE, "KswordARKDynDataInitialize(PnP) recorded failure %!STATUS!", status);
     }
 
     (void)KswordARKDriverEnqueueLogFrame(device, "Info", "KswordARK PnP device initialized.");

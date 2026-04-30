@@ -99,6 +99,24 @@
     <ClInclude Include="src\platform\process_resolver.h">
       <Filter>Header Files\Platform</Filter>
     </ClInclude>
+    <ClInclude Include="src\platform\kernel_module_identity.h">
+      <Filter>Header Files\Platform</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_dyndata.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_dyndata_fields.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_capability.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="..\third_party\systeminformer_dyn\ksw_si_dynconfig.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\third_party\systeminformer_dyn\kphdyn.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   <ClInclude Include="src\dispatch\ioctl_registry.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\dispatch\ioctl_validation.h"><Filter>Header Files</Filter></ClInclude></ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\features\callback\callback_runtime.c">
@@ -154,6 +172,27 @@
     </ClCompile>
     <ClCompile Include="src\platform\process_resolver.c">
       <Filter>Source Files\Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="src\platform\kernel_module_identity.c">
+      <Filter>Source Files\Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\dyndata\dyndata_loader.c">
+      <Filter>Source Files\Features\DynData</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\dyndata\dyndata_query.c">
+      <Filter>Source Files\Features\DynData</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\dyndata\dyndata_validate.c">
+      <Filter>Source Files\Features\DynData</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\capability\capability_query.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\capability\capability_ioctl.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="..\third_party\systeminformer_dyn\kphdyn.c">
+      <Filter>Source Files\ThirdParty</Filter>
     </ClCompile>
   <ClCompile Include="src\dispatch\ioctl_registry.c"><Filter>Source Files\Dispatch</Filter></ClCompile><ClCompile Include="src\dispatch\ioctl_validation.c"><Filter>Source Files\Dispatch</Filter></ClCompile><ClCompile Include="src\features\process\process_ioctl.c"><Filter>Source Files\Features</Filter></ClCompile><ClCompile Include="src\features\file\file_ioctl.c"><Filter>Source Files\Features</Filter></ClCompile><ClCompile Include="src\features\kernel\kernel_ioctl.c"><Filter>Source Files\Features\Kernel</Filter></ClCompile><ClCompile Include="src\features\callback\callback_ioctl.c"><Filter>Source Files\Features\Callback</Filter></ClCompile></ItemGroup>
 </Project>

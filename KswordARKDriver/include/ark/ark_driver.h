@@ -14,6 +14,8 @@
 #include "ark_log.h"
 #include "ark_callback.h"
 #include "ark_kernel.h"
+#include "ark_dyndata.h"
+#include "ark_capability.h"
 #include "Trace.h"
 
 EXTERN_C_START

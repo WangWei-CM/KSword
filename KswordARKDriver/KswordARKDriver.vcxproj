@@ -40,6 +40,13 @@
     <ClCompile Include="src\framework\driver_entry.c" />
     <ClCompile Include="src\framework\io_queue.c" />
     <ClCompile Include="src\platform\process_resolver.c" />
+    <ClCompile Include="src\platform\kernel_module_identity.c" />
+    <ClCompile Include="src\features\dyndata\dyndata_loader.c" />
+    <ClCompile Include="src\features\dyndata\dyndata_query.c" />
+    <ClCompile Include="src\features\dyndata\dyndata_validate.c" />
+    <ClCompile Include="src\features\capability\capability_query.c" />
+    <ClCompile Include="src\features\capability\capability_ioctl.c" />
+    <ClCompile Include="..\third_party\systeminformer_dyn\kphdyn.c" />
   <ClCompile Include="src\dispatch\ioctl_registry.c" /><ClCompile Include="src\dispatch\ioctl_validation.c" /><ClCompile Include="src\features\process\process_ioctl.c" /><ClCompile Include="src\features\file\file_ioctl.c" /><ClCompile Include="src\features\kernel\kernel_ioctl.c" /><ClCompile Include="src\features\callback\callback_ioctl.c" /></ItemGroup>
   <ItemGroup>
     <ClInclude Include="Device.h" />
@@ -57,6 +64,12 @@
     <ClInclude Include="Public.h" />
     <ClInclude Include="Queue.h" />
     <ClInclude Include="src\platform\process_resolver.h" />
+    <ClInclude Include="src\platform\kernel_module_identity.h" />
+    <ClInclude Include="include\ark\ark_dyndata.h" />
+    <ClInclude Include="include\ark\ark_dyndata_fields.h" />
+    <ClInclude Include="include\ark\ark_capability.h" />
+    <ClInclude Include="..\third_party\systeminformer_dyn\ksw_si_dynconfig.h" />
+    <ClInclude Include="..\third_party\systeminformer_dyn\kphdyn.h" />
     <ClInclude Include="Trace.h" />
   <ClInclude Include="src\dispatch\ioctl_registry.h" /><ClInclude Include="src\dispatch\ioctl_validation.h" /></ItemGroup>
   <ItemGroup>
@@ -156,7 +169,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)..\shared;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\km;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\shared;$(WindowsSdkDir)Include\wdf\kmdf\1.15;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)..\shared;$(ProjectDir)..\third_party\systeminformer_dyn;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\km;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\shared;$(WindowsSdkDir)Include\wdf\kmdf\1.15;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <WppEnabled>true</WppEnabled>
       <WppRecorderEnabled>true</WppRecorderEnabled>
@@ -174,7 +187,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)..\shared;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\km;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\shared;$(WindowsSdkDir)Include\wdf\kmdf\1.15;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)..\shared;$(ProjectDir)..\third_party\systeminformer_dyn;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\km;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\shared;$(WindowsSdkDir)Include\wdf\kmdf\1.15;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <WppEnabled>true</WppEnabled>
       <WppRecorderEnabled>true</WppRecorderEnabled>
@@ -193,7 +206,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)..\shared;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\km;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\shared;$(WindowsSdkDir)Include\wdf\kmdf\1.15;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)..\shared;$(ProjectDir)..\third_party\systeminformer_dyn;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\km;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\shared;$(WindowsSdkDir)Include\wdf\kmdf\1.15;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <WppEnabled>true</WppEnabled>
       <WppRecorderEnabled>true</WppRecorderEnabled>
@@ -211,7 +224,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)..\shared;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\km;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\shared;$(WindowsSdkDir)Include\wdf\kmdf\1.15;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;$(ProjectDir)..\shared;$(ProjectDir)..\third_party\systeminformer_dyn;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\km;$(WindowsSdkDir)Include\$(TargetPlatformVersion)\shared;$(WindowsSdkDir)Include\wdf\kmdf\1.15;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <WppEnabled>true</WppEnabled>
       <WppRecorderEnabled>true</WppRecorderEnabled>

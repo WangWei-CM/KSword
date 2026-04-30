@@ -112,6 +112,10 @@ private:
     void appendInternalEvent(const QString& categoryText, const QString& apiText, const QString& detailText);
 
     void startPipeReadThread();
+    void startChildPipeReadThread(std::uint32_t childPidValue);
+    void closeChildPipeHandles();
+    void joinChildPipeThreads();
+    void writeChildStopFlags();
     void flushPendingRows();
     void appendEventRow(const EventRow& rowValue);
 
@@ -156,6 +160,7 @@ private:
     QCheckBox* m_hookNetworkCheck = nullptr;           // m_hookNetworkCheck：是否启用网络 API 监控。
     QCheckBox* m_hookProcessCheck = nullptr;           // m_hookProcessCheck：是否启用进程 API 监控。
     QCheckBox* m_hookLoaderCheck = nullptr;            // m_hookLoaderCheck：是否启用加载器 API 监控。
+    QCheckBox* m_autoInjectChildCheck = nullptr;       // m_autoInjectChildCheck：是否在 CreateProcessW 成功后自动注入子进程。
     QPushButton* m_startButton = nullptr;              // m_startButton：启动 WinAPI 监控按钮。
     QPushButton* m_stopButton = nullptr;               // m_stopButton：停止 WinAPI 监控按钮。
     QPushButton* m_terminateHookButton = nullptr;      // m_terminateHookButton：手动终止目标进程 Hook 按钮。
@@ -173,6 +178,10 @@ private:
     std::vector<EventRow> m_pendingRows;                   // m_pendingRows：后台线程待刷入的事件行。
     std::mutex m_pendingMutex;                             // m_pendingMutex：保护待刷入事件队列。
     std::unique_ptr<std::thread> m_pipeThread;             // m_pipeThread：命名管道读取线程。
+    std::vector<std::unique_ptr<std::thread>> m_childPipeThreads; // m_childPipeThreads：自动注入子进程后的子管道读取线程。
+    std::vector<std::uintptr_t> m_childPipeHandleValues;   // m_childPipeHandleValues：子管道句柄快照，用于停止时打断阻塞 ReadFile。
+    std::vector<std::uint32_t> m_childSessionPids;          // m_childSessionPids：已发现的自动注入子进程 PID，用于写停止标记。
+    std::mutex m_childPipeMutex;                           // m_childPipeMutex：保护子管道线程/句柄/PID 容器。
     std::atomic_bool m_processRefreshPending{ false };     // m_processRefreshPending：进程刷新是否进行中。
     std::atomic_bool m_pipeRunning{ false };               // m_pipeRunning：当前监控会话是否在运行。
     std::atomic_bool m_pipeConnected{ false };             // m_pipeConnected：是否已成功连上 Agent 管道。

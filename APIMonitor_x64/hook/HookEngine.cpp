@@ -7,7 +7,7 @@ namespace apimon
 {
     namespace
     {
-        constexpr std::size_t kAbsoluteJumpSize = 12;
+        constexpr std::size_t kAbsoluteJumpSize = 14; // kAbsoluteJumpSize：FF 25 [rip+0] + 8 字节目标地址，不破坏通用寄存器。
 
         class ScopedOtherThreadsSuspender
         {
@@ -278,13 +278,19 @@ namespace apimon
             return 0;
         }
 
+        // BuildAbsoluteJump 作用：
+        // - 输入：targetBuffer 指向至少 kAbsoluteJumpSize 字节可写内存，destinationAddress 为跳转目标；
+        // - 处理：写入 x64 RIP 间接绝对跳转桩，避免 mov rax/jmp rax 破坏 trampoline 已恢复的 RAX；
+        // - 返回：无返回值，调用者随后负责刷新指令缓存。
         void BuildAbsoluteJump(unsigned char* targetBuffer, const void* destinationAddress)
         {
-            targetBuffer[0] = 0x48;
-            targetBuffer[1] = 0xB8;
-            std::memcpy(targetBuffer + 2, &destinationAddress, sizeof(destinationAddress));
-            targetBuffer[10] = 0xFF;
-            targetBuffer[11] = 0xE0;
+            targetBuffer[0] = 0xFF;
+            targetBuffer[1] = 0x25;
+            targetBuffer[2] = 0x00;
+            targetBuffer[3] = 0x00;
+            targetBuffer[4] = 0x00;
+            targetBuffer[5] = 0x00;
+            std::memcpy(targetBuffer + 6, &destinationAddress, sizeof(destinationAddress));
         }
 
         void* ResolveJumpStub(void* addressValue)

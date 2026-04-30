@@ -1,0 +1,178 @@
+#pragma once
+
+#include "KswordArkProcessIoctl.h"
+
+// ============================================================
+// KswordArkDynDataIoctl.h
+// Purpose:
+// - Shared R3/R0 protocol for querying DynData profile status, field offsets,
+//   and derived feature capability flags.
+// - This file is the only shared protocol surface for Phase 0 DynData queries.
+// ============================================================
+
+#define KSWORD_ARK_DYNDATA_PROTOCOL_VERSION 1UL
+
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_DYN_STATUS 0x807
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_DYN_FIELDS 0x808
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_CAPABILITIES 0x809
+
+#define IOCTL_KSWORD_ARK_QUERY_DYN_STATUS \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_DYN_STATUS, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_QUERY_DYN_FIELDS \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_DYN_FIELDS, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_QUERY_CAPABILITIES \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_CAPABILITIES, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define KSW_CAP_DYN_NTOS_ACTIVE             0x0000000000000001ULL
+#define KSW_CAP_DYN_LXCORE_ACTIVE           0x0000000000000002ULL
+#define KSW_CAP_OBJECT_TYPE_FIELDS          0x0000000000000004ULL
+#define KSW_CAP_HANDLE_TABLE_DECODE         0x0000000000000008ULL
+#define KSW_CAP_PROCESS_OBJECT_TABLE        0x0000000000000010ULL
+#define KSW_CAP_THREAD_STACK_FIELDS         0x0000000000000020ULL
+#define KSW_CAP_THREAD_IO_COUNTERS          0x0000000000000040ULL
+#define KSW_CAP_ALPC_FIELDS                 0x0000000000000080ULL
+#define KSW_CAP_SECTION_CONTROL_AREA        0x0000000000000100ULL
+#define KSW_CAP_PROCESS_PROTECTION_PATCH    0x0000000000000200ULL
+#define KSW_CAP_WSL_LXCORE_FIELDS           0x0000000000000400ULL
+
+#define KSW_DYN_STATUS_FLAG_INITIALIZED      0x00000001UL
+#define KSW_DYN_STATUS_FLAG_NTOS_ACTIVE      0x00000002UL
+#define KSW_DYN_STATUS_FLAG_LXCORE_ACTIVE    0x00000004UL
+#define KSW_DYN_STATUS_FLAG_EXTRA_ACTIVE     0x00000008UL
+
+#define KSW_DYN_MODULE_NAME_CHARS 64U
+#define KSW_DYN_REASON_CHARS 160U
+#define KSW_DYN_FIELD_NAME_CHARS 64U
+#define KSW_DYN_FIELD_SOURCE_CHARS 32U
+#define KSW_DYN_FIELD_FEATURE_CHARS 64U
+
+#define KSW_DYN_PROFILE_CLASS_NTOSKRNL 0U
+#define KSW_DYN_PROFILE_CLASS_NTKRLA57 1U
+#define KSW_DYN_PROFILE_CLASS_LXCORE 2U
+
+#define KSW_DYN_FIELD_SOURCE_UNAVAILABLE 0UL
+#define KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER 1UL
+#define KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN 2UL
+#define KSW_DYN_FIELD_SOURCE_KSWORD_EXTRA_TABLE 3UL
+
+#define KSW_DYN_FIELD_FLAG_PRESENT 0x00000001UL
+#define KSW_DYN_FIELD_FLAG_REQUIRED 0x00000002UL
+#define KSW_DYN_FIELD_FLAG_OPTIONAL 0x00000004UL
+
+#define KSW_DYN_FIELD_ID_EP_OBJECT_TABLE 1UL
+#define KSW_DYN_FIELD_ID_EP_SECTION_OBJECT 2UL
+#define KSW_DYN_FIELD_ID_HT_HANDLE_CONTENTION_EVENT 3UL
+#define KSW_DYN_FIELD_ID_OT_NAME 4UL
+#define KSW_DYN_FIELD_ID_OT_INDEX 5UL
+#define KSW_DYN_FIELD_ID_OB_DECODE_SHIFT 6UL
+#define KSW_DYN_FIELD_ID_OB_ATTRIBUTES_SHIFT 7UL
+#define KSW_DYN_FIELD_ID_KT_INITIAL_STACK 8UL
+#define KSW_DYN_FIELD_ID_KT_STACK_LIMIT 9UL
+#define KSW_DYN_FIELD_ID_KT_STACK_BASE 10UL
+#define KSW_DYN_FIELD_ID_KT_KERNEL_STACK 11UL
+#define KSW_DYN_FIELD_ID_KT_READ_OPERATION_COUNT 12UL
+#define KSW_DYN_FIELD_ID_KT_WRITE_OPERATION_COUNT 13UL
+#define KSW_DYN_FIELD_ID_KT_OTHER_OPERATION_COUNT 14UL
+#define KSW_DYN_FIELD_ID_KT_READ_TRANSFER_COUNT 15UL
+#define KSW_DYN_FIELD_ID_KT_WRITE_TRANSFER_COUNT 16UL
+#define KSW_DYN_FIELD_ID_KT_OTHER_TRANSFER_COUNT 17UL
+#define KSW_DYN_FIELD_ID_MM_SECTION_CONTROL_AREA 18UL
+#define KSW_DYN_FIELD_ID_MM_CONTROL_AREA_LIST_HEAD 19UL
+#define KSW_DYN_FIELD_ID_MM_CONTROL_AREA_LOCK 20UL
+#define KSW_DYN_FIELD_ID_ALPC_COMMUNICATION_INFO 21UL
+#define KSW_DYN_FIELD_ID_ALPC_OWNER_PROCESS 22UL
+#define KSW_DYN_FIELD_ID_ALPC_CONNECTION_PORT 23UL
+#define KSW_DYN_FIELD_ID_ALPC_SERVER_COMMUNICATION_PORT 24UL
+#define KSW_DYN_FIELD_ID_ALPC_CLIENT_COMMUNICATION_PORT 25UL
+#define KSW_DYN_FIELD_ID_ALPC_HANDLE_TABLE 26UL
+#define KSW_DYN_FIELD_ID_ALPC_HANDLE_TABLE_LOCK 27UL
+#define KSW_DYN_FIELD_ID_ALPC_ATTRIBUTES 28UL
+#define KSW_DYN_FIELD_ID_ALPC_ATTRIBUTES_FLAGS 29UL
+#define KSW_DYN_FIELD_ID_ALPC_PORT_CONTEXT 30UL
+#define KSW_DYN_FIELD_ID_ALPC_PORT_OBJECT_LOCK 31UL
+#define KSW_DYN_FIELD_ID_ALPC_SEQUENCE_NO 32UL
+#define KSW_DYN_FIELD_ID_ALPC_STATE 33UL
+#define KSW_DYN_FIELD_ID_LX_PICO_PROC 34UL
+#define KSW_DYN_FIELD_ID_LX_PICO_PROC_INFO 35UL
+#define KSW_DYN_FIELD_ID_LX_PICO_PROC_INFO_PID 36UL
+#define KSW_DYN_FIELD_ID_LX_PICO_THRD_INFO 37UL
+#define KSW_DYN_FIELD_ID_LX_PICO_THRD_INFO_TID 38UL
+#define KSW_DYN_FIELD_ID_EP_PROTECTION 39UL
+#define KSW_DYN_FIELD_ID_EP_SIGNATURE_LEVEL 40UL
+#define KSW_DYN_FIELD_ID_EP_SECTION_SIGNATURE_LEVEL 41UL
+
+typedef struct _KSW_DYN_MODULE_IDENTITY_PACKET
+{
+    unsigned long present;
+    unsigned long classId;
+    unsigned long machine;
+    unsigned long timeDateStamp;
+    unsigned long sizeOfImage;
+    unsigned long long imageBase;
+    wchar_t moduleName[KSW_DYN_MODULE_NAME_CHARS];
+} KSW_DYN_MODULE_IDENTITY_PACKET;
+
+typedef struct _KSW_QUERY_DYN_STATUS_RESPONSE
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long statusFlags;
+    unsigned long systemInformerDataVersion;
+    unsigned long systemInformerDataLength;
+    long lastStatus;
+    unsigned long matchedProfileClass;
+    unsigned long matchedProfileOffset;
+    unsigned long matchedFieldsId;
+    unsigned long fieldCount;
+    unsigned long reserved;
+    unsigned long long capabilityMask;
+    KSW_DYN_MODULE_IDENTITY_PACKET ntoskrnl;
+    KSW_DYN_MODULE_IDENTITY_PACKET lxcore;
+    wchar_t unavailableReason[KSW_DYN_REASON_CHARS];
+} KSW_QUERY_DYN_STATUS_RESPONSE;
+
+typedef struct _KSW_QUERY_CAPABILITIES_RESPONSE
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long statusFlags;
+    unsigned long reserved;
+    unsigned long long capabilityMask;
+} KSW_QUERY_CAPABILITIES_RESPONSE;
+
+typedef struct _KSW_DYN_FIELD_ENTRY
+{
+    unsigned long fieldId;
+    unsigned long flags;
+    unsigned long source;
+    unsigned long offset;
+    unsigned long long capabilityMask;
+    char fieldName[KSW_DYN_FIELD_NAME_CHARS];
+    char sourceName[KSW_DYN_FIELD_SOURCE_CHARS];
+    char featureName[KSW_DYN_FIELD_FEATURE_CHARS];
+} KSW_DYN_FIELD_ENTRY;
+
+typedef struct _KSW_QUERY_DYN_FIELDS_RESPONSE
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long totalCount;
+    unsigned long returnedCount;
+    unsigned long entrySize;
+    unsigned long reserved;
+    KSW_DYN_FIELD_ENTRY entries[1];
+} KSW_QUERY_DYN_FIELDS_RESPONSE;

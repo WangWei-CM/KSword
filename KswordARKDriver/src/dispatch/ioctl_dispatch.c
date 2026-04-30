@@ -110,6 +110,20 @@ Return Value:
         return;
     }
 
+    if (!KswordARKCapabilityIsIoctlAllowed(ioctlEntry->RequiredCapability, &status)) {
+        KswordARKDispatchLog(
+            device,
+            "Warn",
+            "IOCTL denied by capability gate: name=%s, code=0x%08X, required=0x%I64X, status=0x%08X.",
+            ioctlEntry->Name != NULL ? ioctlEntry->Name : "<unnamed>",
+            (unsigned int)ioctlEntry->IoControlCode,
+            ioctlEntry->RequiredCapability,
+            (unsigned int)status);
+        KswordARKCapabilityRecordLastError(status, "ioctl_dispatch", "IOCTL denied by DynData capability gate.");
+        WdfRequestCompleteWithInformation(Request, status, completeBytes);
+        return;
+    }
+
     status = ioctlEntry->Handler(device, Request, InputBufferLength, OutputBufferLength, &completeBytes);
     KswordARKDispatchLog(
         device,
