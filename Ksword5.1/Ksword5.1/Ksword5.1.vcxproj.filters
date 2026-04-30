@@ -157,6 +157,9 @@
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Runtime.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MonitorDock\ProcessTraceTimelineWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MonitorDock\WinAPIDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -573,6 +576,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MonitorDock\ProcessTraceMonitorWidget.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MonitorDock\ProcessTraceTimelineWidget.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MonitorDock\WinAPIDock.h">

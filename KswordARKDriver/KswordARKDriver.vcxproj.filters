@@ -93,6 +93,9 @@
     <ClInclude Include="include\ark\ark_kernel.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
+    <ClInclude Include="src\features\process\process_extended.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="src\features\callback\callback_internal.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -168,6 +171,9 @@
       <Filter>Source Files\Features</Filter>
     </ClCompile>
     <ClCompile Include="src\features\process\process_actions.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\process\process_extended.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>
     <ClCompile Include="src\platform\process_resolver.c">

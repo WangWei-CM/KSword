@@ -1,4 +1,4 @@
-﻿#include "ProcessDetailWindow.InternalCommon.h"
+#include "ProcessDetailWindow.InternalCommon.h"
 
 using namespace process_detail_window_internal;
 
@@ -8,6 +8,123 @@ using namespace process_detail_window_internal;
 // - 负责构造/基础数据合并、多个 Tab 的 UI 初始化以及基础信号连接。
 // - 聚焦“窗口骨架与静态展示数据”逻辑。
 // ============================================================
+
+namespace
+{
+    QString detailProcessFieldSourceText(const std::uint32_t sourceValue)
+    {
+        // sourceValue 用途：共享协议中的 Phase-2 字段来源枚举。
+        // 返回值：直接给详情页展示的稳定文本。
+        switch (sourceValue)
+        {
+        case KSWORD_ARK_PROCESS_FIELD_SOURCE_PUBLIC_API:
+            return QStringLiteral("Public API");
+        case KSWORD_ARK_PROCESS_FIELD_SOURCE_SYSTEM_INFORMER_DYNDATA:
+            return QStringLiteral("System Informer DynData");
+        case KSWORD_ARK_PROCESS_FIELD_SOURCE_RUNTIME_PATTERN:
+            return QStringLiteral("Runtime pattern");
+        default:
+            return QStringLiteral("Unavailable");
+        }
+    }
+
+    QString detailProcessR0StatusText(const std::uint32_t statusValue)
+    {
+        // statusValue 用途：R0 枚举行的扩展读取总体状态。
+        // 返回值：详情页状态文本，便于和 ProcessDock 列保持一致。
+        switch (statusValue)
+        {
+        case KSWORD_ARK_PROCESS_R0_STATUS_OK:
+            return QStringLiteral("OK");
+        case KSWORD_ARK_PROCESS_R0_STATUS_PARTIAL:
+            return QStringLiteral("Partial");
+        case KSWORD_ARK_PROCESS_R0_STATUS_DYNDATA_MISSING:
+            return QStringLiteral("DynData missing");
+        case KSWORD_ARK_PROCESS_R0_STATUS_READ_FAILED:
+            return QStringLiteral("Read failed");
+        default:
+            return QStringLiteral("Unavailable");
+        }
+    }
+
+    QString detailProcessByteHexText(const std::uint8_t byteValue)
+    {
+        // byteValue 用途：Protection/SignatureLevel 等单字节内核字段。
+        // 返回值：0xNN 大写十六进制文本。
+        return QStringLiteral("0x%1")
+            .arg(static_cast<unsigned int>(byteValue), 2, 16, QChar('0'))
+            .toUpper();
+    }
+
+    QString detailProcessOffsetText(const std::uint32_t offsetValue)
+    {
+        // offsetValue 用途：EPROCESS 字段偏移。
+        // 返回值：不可用时明确显示 Unavailable，可用时显示 0xNN。
+        if (offsetValue == KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE || offsetValue == 0x0000FFFFUL)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return QStringLiteral("0x%1")
+            .arg(static_cast<unsigned int>(offsetValue), 0, 16)
+            .toUpper();
+    }
+
+    QString detailProcessPointerText(
+        const QString& availableLabel,
+        const bool available,
+        const std::uint64_t addressValue,
+        const std::uint32_t sourceValue)
+    {
+        // availableLabel 用途：传入 HandleTable/SectionObject 等领域语义。
+        // 返回值：先展示“available”结论，再附带地址和来源。
+        if (!available)
+        {
+            return QStringLiteral("Unavailable (%1)").arg(detailProcessFieldSourceText(sourceValue));
+        }
+        if (addressValue == 0U)
+        {
+            return QStringLiteral("%1: null (%2)")
+                .arg(availableLabel)
+                .arg(detailProcessFieldSourceText(sourceValue));
+        }
+        const QString addressText = QStringLiteral("0x%1")
+            .arg(static_cast<qulonglong>(addressValue), 0, 16)
+            .toUpper();
+        return QStringLiteral("%1: 0x%2 (%3)")
+            .arg(availableLabel)
+            .arg(addressText.mid(2))
+            .arg(detailProcessFieldSourceText(sourceValue));
+    }
+
+    QString detailProcessCapabilityText(const std::uint64_t capabilityMask)
+    {
+        // capabilityMask 用途：R0 枚举时附带的 DynData capability 快照。
+        // 返回值：十六进制位图 + Phase-2 关心的能力名称。
+        QStringList capabilityNames;
+        if ((capabilityMask & KSW_CAP_PROCESS_OBJECT_TABLE) != 0U)
+        {
+            capabilityNames << QStringLiteral("ProcessObjectTable");
+        }
+        if ((capabilityMask & KSW_CAP_SECTION_CONTROL_AREA) != 0U)
+        {
+            capabilityNames << QStringLiteral("SectionControlArea");
+        }
+        if ((capabilityMask & KSW_CAP_PROCESS_PROTECTION_PATCH) != 0U)
+        {
+            capabilityNames << QStringLiteral("ProcessProtectionPatch");
+        }
+        if (capabilityNames.isEmpty())
+        {
+            capabilityNames << QStringLiteral("None/Unavailable");
+        }
+        const QString maskText = QStringLiteral("0x%1")
+            .arg(static_cast<qulonglong>(capabilityMask), 0, 16)
+            .toUpper();
+        return QStringLiteral("%1 (%2)")
+            .arg(maskText)
+            .arg(capabilityNames.join(QStringLiteral(", ")));
+    }
+}
 
 ProcessDetailWindow::ProcessDetailWindow(const ks::process::ProcessRecord& baseRecord, QWidget* parent)
     : QWidget(parent)
@@ -61,6 +178,8 @@ ProcessDetailWindow::ProcessDetailWindow(const ks::process::ProcessRecord& baseR
             if (queriedRecord.threadCount != 0) m_baseRecord.threadCount = queriedRecord.threadCount;
             if (queriedRecord.handleCount != 0) m_baseRecord.handleCount = queriedRecord.handleCount;
             if (queriedRecord.creationTime100ns != 0) m_baseRecord.creationTime100ns = queriedRecord.creationTime100ns;
+            if (m_baseRecord.r0FieldFlags == 0U) m_baseRecord.r0FieldFlags = queriedRecord.r0FieldFlags;
+            if (m_baseRecord.r0ImagePath.empty()) m_baseRecord.r0ImagePath = queriedRecord.r0ImagePath;
             kLogEvent ctorStaticQuerySuccessEvent;
             info << ctorStaticQuerySuccessEvent
                 << "[ProcessDetailWindow] 构造阶段补齐静态信息成功, pid="
@@ -119,6 +238,25 @@ void ProcessDetailWindow::updateBaseRecord(const ks::process::ProcessRecord& bas
     if (mergedRecord.startTimeText.empty()) mergedRecord.startTimeText = m_baseRecord.startTimeText;
     if (mergedRecord.signatureState.empty()) mergedRecord.signatureState = m_baseRecord.signatureState;
     if (mergedRecord.signaturePublisher.empty()) mergedRecord.signaturePublisher = m_baseRecord.signaturePublisher;
+    if (mergedRecord.r0FieldFlags == 0U) mergedRecord.r0FieldFlags = m_baseRecord.r0FieldFlags;
+    if (mergedRecord.r0ImagePath.empty()) mergedRecord.r0ImagePath = m_baseRecord.r0ImagePath;
+    if (mergedRecord.r0Status == KSWORD_ARK_PROCESS_R0_STATUS_UNAVAILABLE) mergedRecord.r0Status = m_baseRecord.r0Status;
+    if (mergedRecord.r0DynDataCapabilityMask == 0U) mergedRecord.r0DynDataCapabilityMask = m_baseRecord.r0DynDataCapabilityMask;
+    if (mergedRecord.r0ProtectionSource == KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE) mergedRecord.r0ProtectionSource = m_baseRecord.r0ProtectionSource;
+    if (mergedRecord.r0SignatureLevelSource == KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE) mergedRecord.r0SignatureLevelSource = m_baseRecord.r0SignatureLevelSource;
+    if (mergedRecord.r0SectionSignatureLevelSource == KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE) mergedRecord.r0SectionSignatureLevelSource = m_baseRecord.r0SectionSignatureLevelSource;
+    if (mergedRecord.r0ObjectTableSource == KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE) mergedRecord.r0ObjectTableSource = m_baseRecord.r0ObjectTableSource;
+    if (mergedRecord.r0SectionObjectSource == KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE) mergedRecord.r0SectionObjectSource = m_baseRecord.r0SectionObjectSource;
+    if (mergedRecord.r0ProtectionOffset == KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE) mergedRecord.r0ProtectionOffset = m_baseRecord.r0ProtectionOffset;
+    if (mergedRecord.r0SignatureLevelOffset == KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE) mergedRecord.r0SignatureLevelOffset = m_baseRecord.r0SignatureLevelOffset;
+    if (mergedRecord.r0SectionSignatureLevelOffset == KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE) mergedRecord.r0SectionSignatureLevelOffset = m_baseRecord.r0SectionSignatureLevelOffset;
+    if (mergedRecord.r0ObjectTableOffset == KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE) mergedRecord.r0ObjectTableOffset = m_baseRecord.r0ObjectTableOffset;
+    if (mergedRecord.r0SectionObjectOffset == KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE) mergedRecord.r0SectionObjectOffset = m_baseRecord.r0SectionObjectOffset;
+    if (mergedRecord.r0ObjectTableAddress == 0U) mergedRecord.r0ObjectTableAddress = m_baseRecord.r0ObjectTableAddress;
+    if (mergedRecord.r0SectionObjectAddress == 0U) mergedRecord.r0SectionObjectAddress = m_baseRecord.r0SectionObjectAddress;
+    mergedRecord.r0Protection = (mergedRecord.r0FieldFlags != 0U) ? mergedRecord.r0Protection : m_baseRecord.r0Protection;
+    mergedRecord.r0SignatureLevel = (mergedRecord.r0FieldFlags != 0U) ? mergedRecord.r0SignatureLevel : m_baseRecord.r0SignatureLevel;
+    mergedRecord.r0SectionSignatureLevel = (mergedRecord.r0FieldFlags != 0U) ? mergedRecord.r0SectionSignatureLevel : m_baseRecord.r0SectionSignatureLevel;
     mergedRecord.signatureTrusted = mergedRecord.signatureTrusted || m_baseRecord.signatureTrusted;
 
     const bool needStaticQuery =
@@ -268,6 +406,8 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
             m_pebStatusLabel->setStyleSheet(buildStateLabelStyle(statusIdleColor(), 600));
         }
     }
+
+    refreshKernelObjectTabTexts();
 }
 
 void ProcessDetailWindow::applyThemeStyle()
@@ -304,6 +444,7 @@ void ProcessDetailWindow::applyThemeStyle()
         m_moduleTab,
         m_tokenTab,
         m_tokenSwitchTab,
+        m_kernelObjectTab,
         m_pebTab
     };
     for (QWidget* tabPage : tabPageList)
@@ -418,6 +559,7 @@ void ProcessDetailWindow::initializeUi()
     m_moduleTab = new QWidget(m_tabWidget);
     m_tokenTab = new QWidget(m_tabWidget);
     m_tokenSwitchTab = new QWidget(m_tabWidget);
+    m_kernelObjectTab = new QWidget(m_tabWidget);
     m_pebTab = new QWidget(m_tabWidget);
 
     m_detailTab->setObjectName(QStringLiteral("ProcessDetailTab_Detail"));
@@ -426,6 +568,7 @@ void ProcessDetailWindow::initializeUi()
     m_moduleTab->setObjectName(QStringLiteral("ProcessDetailTab_Module"));
     m_tokenTab->setObjectName(QStringLiteral("ProcessDetailTab_Token"));
     m_tokenSwitchTab->setObjectName(QStringLiteral("ProcessDetailTab_TokenSwitch"));
+    m_kernelObjectTab->setObjectName(QStringLiteral("ProcessDetailTab_KernelObject"));
     m_pebTab->setObjectName(QStringLiteral("ProcessDetailTab_Peb"));
 
     initializeDetailTab();
@@ -434,6 +577,7 @@ void ProcessDetailWindow::initializeUi()
     initializeModuleTab();
     initializeTokenTab();
     initializeTokenSwitchTab();
+    initializeKernelObjectTab();
     initializePebTab();
 
     // 为 Tab 指定图标与标题文本。
@@ -443,6 +587,7 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget->addTab(m_moduleTab, QIcon(":/Icon/process_list.svg"), "模块");
     m_tabWidget->addTab(m_tokenTab, QIcon(":/Icon/process_critical.svg"), "令牌");
     m_tabWidget->addTab(m_tokenSwitchTab, QIcon(":/Icon/process_start.svg"), "令牌开关");
+    m_tabWidget->addTab(m_kernelObjectTab, QIcon(":/Icon/process_critical.svg"), "内核对象");
     m_tabWidget->addTab(m_pebTab, QIcon(":/Icon/process_tree.svg"), "PEB");
     m_tabWidget->setCurrentWidget(m_detailTab);
 
@@ -905,6 +1050,120 @@ void ProcessDetailWindow::initializeTokenTab()
 
     const QString buttonStyle = buildBlueButtonStyle();
     m_refreshTokenButton->setStyleSheet(buttonStyle);
+}
+
+void ProcessDetailWindow::initializeKernelObjectTab()
+{
+    // 内核对象页初始化：
+    // - 展示 Phase-2 进程扩展信息；
+    // - 不执行句柄表/Section 枚举，避免 DynData 缺失时误触后续高风险路径。
+    kLogEvent initKernelObjectTabEvent;
+    info << initKernelObjectTabEvent
+        << "[ProcessDetailWindow] initializeKernelObjectTab: 构建内核对象页面。"
+        << eol;
+
+    m_kernelObjectLayout = new QVBoxLayout(m_kernelObjectTab);
+    m_kernelObjectLayout->setContentsMargins(6, 6, 6, 6);
+    m_kernelObjectLayout->setSpacing(8);
+
+    QLabel* hintLabel = new QLabel(
+        QStringLiteral("本页只展示 R0 读取到的 EPROCESS 字段来源、偏移和可用性；DynData 未命中时不会提供直接句柄表/Section 枚举入口。"),
+        m_kernelObjectTab);
+    hintLabel->setWordWrap(true);
+    hintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+    m_kernelObjectLayout->addWidget(hintLabel);
+
+    QGroupBox* summaryGroup = new QGroupBox(QStringLiteral("R0 扩展摘要"), m_kernelObjectTab);
+    QFormLayout* summaryFormLayout = new QFormLayout(summaryGroup);
+    summaryFormLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    summaryFormLayout->setHorizontalSpacing(18);
+    summaryFormLayout->setVerticalSpacing(6);
+
+    m_kernelObjectR0StatusValue = new QLabel(summaryGroup);
+    m_kernelObjectCapabilityValue = new QLabel(summaryGroup);
+    m_kernelObjectImagePathValue = new QLabel(summaryGroup);
+    m_kernelObjectR0StatusValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_kernelObjectCapabilityValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_kernelObjectImagePathValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_kernelObjectImagePathValue->setWordWrap(true);
+
+    summaryFormLayout->addRow(QStringLiteral("R0 状态"), m_kernelObjectR0StatusValue);
+    summaryFormLayout->addRow(QStringLiteral("DynData Capability"), m_kernelObjectCapabilityValue);
+    summaryFormLayout->addRow(QStringLiteral("R0 镜像路径"), m_kernelObjectImagePathValue);
+    m_kernelObjectLayout->addWidget(summaryGroup);
+
+    QGroupBox* objectGroup = new QGroupBox(QStringLiteral("对象字段可用性"), m_kernelObjectTab);
+    QFormLayout* objectFormLayout = new QFormLayout(objectGroup);
+    objectFormLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    objectFormLayout->setHorizontalSpacing(18);
+    objectFormLayout->setVerticalSpacing(6);
+
+    m_kernelObjectHandleTableValue = new QLabel(objectGroup);
+    m_kernelObjectSectionObjectValue = new QLabel(objectGroup);
+    m_kernelObjectHandleTableValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_kernelObjectSectionObjectValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    objectFormLayout->addRow(QStringLiteral("HandleTable"), m_kernelObjectHandleTableValue);
+    objectFormLayout->addRow(QStringLiteral("SectionObject"), m_kernelObjectSectionObjectValue);
+    m_kernelObjectLayout->addWidget(objectGroup);
+
+    QGroupBox* protectionGroup = new QGroupBox(QStringLiteral("保护与签名字段"), m_kernelObjectTab);
+    QFormLayout* protectionFormLayout = new QFormLayout(protectionGroup);
+    protectionFormLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    protectionFormLayout->setHorizontalSpacing(18);
+    protectionFormLayout->setVerticalSpacing(6);
+
+    m_kernelObjectProtectionValue = new QLabel(protectionGroup);
+    m_kernelObjectSignatureValue = new QLabel(protectionGroup);
+    m_kernelObjectSectionSignatureValue = new QLabel(protectionGroup);
+    m_kernelObjectProtectionValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_kernelObjectSignatureValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_kernelObjectSectionSignatureValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    protectionFormLayout->addRow(QStringLiteral("EPROCESS.Protection"), m_kernelObjectProtectionValue);
+    protectionFormLayout->addRow(QStringLiteral("SignatureLevel"), m_kernelObjectSignatureValue);
+    protectionFormLayout->addRow(QStringLiteral("SectionSignatureLevel"), m_kernelObjectSectionSignatureValue);
+    m_kernelObjectLayout->addWidget(protectionGroup);
+
+    QGroupBox* sourceGroup = new QGroupBox(QStringLiteral("字段来源"), m_kernelObjectTab);
+    QFormLayout* sourceFormLayout = new QFormLayout(sourceGroup);
+    sourceFormLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    sourceFormLayout->setHorizontalSpacing(18);
+    sourceFormLayout->setVerticalSpacing(6);
+
+    m_kernelObjectSessionSourceValue = new QLabel(sourceGroup);
+    m_kernelObjectImagePathSourceValue = new QLabel(sourceGroup);
+    m_kernelObjectProtectionSourceValue = new QLabel(sourceGroup);
+    m_kernelObjectSignatureSourceValue = new QLabel(sourceGroup);
+    m_kernelObjectSectionSignatureSourceValue = new QLabel(sourceGroup);
+    m_kernelObjectObjectTableSourceValue = new QLabel(sourceGroup);
+    m_kernelObjectSectionObjectSourceValue = new QLabel(sourceGroup);
+    sourceFormLayout->addRow(QStringLiteral("Session"), m_kernelObjectSessionSourceValue);
+    sourceFormLayout->addRow(QStringLiteral("ImagePath"), m_kernelObjectImagePathSourceValue);
+    sourceFormLayout->addRow(QStringLiteral("Protection"), m_kernelObjectProtectionSourceValue);
+    sourceFormLayout->addRow(QStringLiteral("SignatureLevel"), m_kernelObjectSignatureSourceValue);
+    sourceFormLayout->addRow(QStringLiteral("SectionSignatureLevel"), m_kernelObjectSectionSignatureSourceValue);
+    sourceFormLayout->addRow(QStringLiteral("ObjectTable"), m_kernelObjectObjectTableSourceValue);
+    sourceFormLayout->addRow(QStringLiteral("SectionObject"), m_kernelObjectSectionObjectSourceValue);
+    m_kernelObjectLayout->addWidget(sourceGroup);
+
+    QGroupBox* offsetGroup = new QGroupBox(QStringLiteral("EPROCESS 偏移"), m_kernelObjectTab);
+    QFormLayout* offsetFormLayout = new QFormLayout(offsetGroup);
+    offsetFormLayout->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    offsetFormLayout->setHorizontalSpacing(18);
+    offsetFormLayout->setVerticalSpacing(6);
+
+    m_kernelObjectProtectionOffsetValue = new QLabel(offsetGroup);
+    m_kernelObjectSignatureOffsetValue = new QLabel(offsetGroup);
+    m_kernelObjectSectionSignatureOffsetValue = new QLabel(offsetGroup);
+    m_kernelObjectObjectTableOffsetValue = new QLabel(offsetGroup);
+    m_kernelObjectSectionObjectOffsetValue = new QLabel(offsetGroup);
+    offsetFormLayout->addRow(QStringLiteral("Protection"), m_kernelObjectProtectionOffsetValue);
+    offsetFormLayout->addRow(QStringLiteral("SignatureLevel"), m_kernelObjectSignatureOffsetValue);
+    offsetFormLayout->addRow(QStringLiteral("SectionSignatureLevel"), m_kernelObjectSectionSignatureOffsetValue);
+    offsetFormLayout->addRow(QStringLiteral("ObjectTable"), m_kernelObjectObjectTableOffsetValue);
+    offsetFormLayout->addRow(QStringLiteral("SectionObject"), m_kernelObjectSectionObjectOffsetValue);
+    m_kernelObjectLayout->addWidget(offsetGroup);
+
+    m_kernelObjectLayout->addStretch(1);
 }
 
 void ProcessDetailWindow::initializeTokenSwitchTab()
@@ -1416,6 +1675,7 @@ void ProcessDetailWindow::refreshDetailTabTexts()
 
     // 刷新父进程信息区。
     refreshParentProcessSection();
+    refreshKernelObjectTabTexts();
     updateWindowTitle();
 
     // 详情刷新完成日志：确认核心字段已落到 UI。
@@ -1426,6 +1686,103 @@ void ProcessDetailWindow::refreshDetailTabTexts()
         << ", user="
         << m_baseRecord.userName
         << eol;
+}
+
+void ProcessDetailWindow::refreshKernelObjectTabTexts()
+{
+    // 内核对象页刷新：
+    // - 所有字段都来自当前 ProcessRecord 缓存；
+    // - 不在 UI 刷新时额外请求 R0，避免详情窗口无意触发内核枚举。
+    if (m_kernelObjectTab == nullptr)
+    {
+        return;
+    }
+
+    const bool protectionPresent =
+        (m_baseRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_PROTECTION_PRESENT) != 0U;
+    const bool signaturePresent =
+        (m_baseRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_SIGNATURE_LEVEL_PRESENT) != 0U;
+    const bool sectionSignaturePresent =
+        (m_baseRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_SECTION_SIGNATURE_LEVEL_PRESENT) != 0U;
+    const bool objectTableAvailable =
+        (m_baseRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_OBJECT_TABLE_AVAILABLE) != 0U;
+    const bool sectionObjectAvailable =
+        (m_baseRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_SECTION_OBJECT_AVAILABLE) != 0U;
+
+    if (m_kernelObjectR0StatusValue != nullptr)
+    {
+        m_kernelObjectR0StatusValue->setText(detailProcessR0StatusText(m_baseRecord.r0Status));
+        m_kernelObjectR0StatusValue->setStyleSheet(
+            buildStateLabelStyle(
+                m_baseRecord.r0Status == KSWORD_ARK_PROCESS_R0_STATUS_OK
+                ? statusIdleColor()
+                : statusWarningColor(),
+                700));
+    }
+
+    if (m_kernelObjectCapabilityValue != nullptr)
+    {
+        m_kernelObjectCapabilityValue->setText(detailProcessCapabilityText(m_baseRecord.r0DynDataCapabilityMask));
+    }
+    if (m_kernelObjectImagePathValue != nullptr)
+    {
+        m_kernelObjectImagePathValue->setText(
+            QString::fromStdString(m_baseRecord.r0ImagePath.empty() ? std::string("-") : m_baseRecord.r0ImagePath));
+    }
+
+    if (m_kernelObjectHandleTableValue != nullptr)
+    {
+        m_kernelObjectHandleTableValue->setText(detailProcessPointerText(
+            QStringLiteral("HandleTable available"),
+            objectTableAvailable,
+            m_baseRecord.r0ObjectTableAddress,
+            m_baseRecord.r0ObjectTableSource));
+        m_kernelObjectHandleTableValue->setStyleSheet(
+            buildStateLabelStyle(objectTableAvailable ? statusIdleColor() : statusSecondaryColor(), 700));
+    }
+    if (m_kernelObjectSectionObjectValue != nullptr)
+    {
+        m_kernelObjectSectionObjectValue->setText(detailProcessPointerText(
+            QStringLiteral("SectionObject available"),
+            sectionObjectAvailable,
+            m_baseRecord.r0SectionObjectAddress,
+            m_baseRecord.r0SectionObjectSource));
+        m_kernelObjectSectionObjectValue->setStyleSheet(
+            buildStateLabelStyle(sectionObjectAvailable ? statusIdleColor() : statusSecondaryColor(), 700));
+    }
+
+    if (m_kernelObjectProtectionValue != nullptr)
+    {
+        m_kernelObjectProtectionValue->setText(protectionPresent
+            ? detailProcessByteHexText(m_baseRecord.r0Protection)
+            : QStringLiteral("Unavailable"));
+    }
+    if (m_kernelObjectSignatureValue != nullptr)
+    {
+        m_kernelObjectSignatureValue->setText(signaturePresent
+            ? detailProcessByteHexText(m_baseRecord.r0SignatureLevel)
+            : QStringLiteral("Unavailable"));
+    }
+    if (m_kernelObjectSectionSignatureValue != nullptr)
+    {
+        m_kernelObjectSectionSignatureValue->setText(sectionSignaturePresent
+            ? detailProcessByteHexText(m_baseRecord.r0SectionSignatureLevel)
+            : QStringLiteral("Unavailable"));
+    }
+
+    if (m_kernelObjectSessionSourceValue != nullptr) m_kernelObjectSessionSourceValue->setText(detailProcessFieldSourceText(m_baseRecord.r0SessionSource));
+    if (m_kernelObjectImagePathSourceValue != nullptr) m_kernelObjectImagePathSourceValue->setText(detailProcessFieldSourceText(m_baseRecord.r0ImagePathSource));
+    if (m_kernelObjectProtectionSourceValue != nullptr) m_kernelObjectProtectionSourceValue->setText(detailProcessFieldSourceText(m_baseRecord.r0ProtectionSource));
+    if (m_kernelObjectSignatureSourceValue != nullptr) m_kernelObjectSignatureSourceValue->setText(detailProcessFieldSourceText(m_baseRecord.r0SignatureLevelSource));
+    if (m_kernelObjectSectionSignatureSourceValue != nullptr) m_kernelObjectSectionSignatureSourceValue->setText(detailProcessFieldSourceText(m_baseRecord.r0SectionSignatureLevelSource));
+    if (m_kernelObjectObjectTableSourceValue != nullptr) m_kernelObjectObjectTableSourceValue->setText(detailProcessFieldSourceText(m_baseRecord.r0ObjectTableSource));
+    if (m_kernelObjectSectionObjectSourceValue != nullptr) m_kernelObjectSectionObjectSourceValue->setText(detailProcessFieldSourceText(m_baseRecord.r0SectionObjectSource));
+
+    if (m_kernelObjectProtectionOffsetValue != nullptr) m_kernelObjectProtectionOffsetValue->setText(detailProcessOffsetText(m_baseRecord.r0ProtectionOffset));
+    if (m_kernelObjectSignatureOffsetValue != nullptr) m_kernelObjectSignatureOffsetValue->setText(detailProcessOffsetText(m_baseRecord.r0SignatureLevelOffset));
+    if (m_kernelObjectSectionSignatureOffsetValue != nullptr) m_kernelObjectSectionSignatureOffsetValue->setText(detailProcessOffsetText(m_baseRecord.r0SectionSignatureLevelOffset));
+    if (m_kernelObjectObjectTableOffsetValue != nullptr) m_kernelObjectObjectTableOffsetValue->setText(detailProcessOffsetText(m_baseRecord.r0ObjectTableOffset));
+    if (m_kernelObjectSectionObjectOffsetValue != nullptr) m_kernelObjectSectionObjectOffsetValue->setText(detailProcessOffsetText(m_baseRecord.r0SectionObjectOffset));
 }
 
 void ProcessDetailWindow::refreshParentProcessSection()

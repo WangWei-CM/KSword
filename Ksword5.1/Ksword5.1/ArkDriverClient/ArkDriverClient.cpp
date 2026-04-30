@@ -3,9 +3,12 @@
 #include "ArkDriverError.h"
 
 #include <algorithm>
+#include <cwchar>
 #include <sstream>
 #include <string>
 #include <utility>
+
+#include "../ksword/string/string.h"
 
 namespace ksword::ark
 {
@@ -26,6 +29,34 @@ namespace ksword::ark
                 ++length;
             }
             return std::string(textBuffer, textBuffer + length);
+        }
+
+        std::string fixedUtf16ToUtf8String(const unsigned short* textBuffer, const std::size_t maxChars)
+        {
+            // textBuffer 用途：接收共享协议中的 UTF-16 code unit 数组。
+            // maxChars 用途：限定最大扫描长度，避免缺少结尾 NUL 时越界。
+            if (textBuffer == nullptr || maxChars == 0U)
+            {
+                return {};
+            }
+
+            std::size_t length = 0U;
+            while (length < maxChars && textBuffer[length] != 0U)
+            {
+                ++length;
+            }
+            if (length == 0U)
+            {
+                return {};
+            }
+
+            std::wstring wideText;
+            wideText.reserve(length);
+            for (std::size_t index = 0; index < length; ++index)
+            {
+                wideText.push_back(static_cast<wchar_t>(textBuffer[index]));
+            }
+            return ks::str::Utf16ToUtf8(wideText);
         }
     }
 
@@ -277,7 +308,12 @@ namespace ksword::ark
         }
 
         const auto* responseHeader = reinterpret_cast<const KSWORD_ARK_ENUM_PROCESS_RESPONSE*>(responseBuffer.data());
-        if (responseHeader->entrySize < sizeof(KSWORD_ARK_PROCESS_ENTRY))
+        // v1MinimumEntrySize 用途：
+        // - 只要求老协议固定头字段完整，确保 protocol v1 驱动仍可被解析；
+        // - imageName 长度来自协议常量，避免对空指针成员表达式产生编译器差异。
+        constexpr std::size_t v1MinimumEntrySize =
+            sizeof(unsigned long) * 4U + 16U;
+        if (responseHeader->entrySize < v1MinimumEntrySize)
         {
             enumResult.io.ok = false;
             enumResult.io.message = "enum-process entry size invalid, entrySize=" + std::to_string(responseHeader->entrySize);
@@ -299,6 +335,33 @@ namespace ksword::ark
             parsedEntry.parentProcessId = static_cast<std::uint32_t>(entry->parentProcessId);
             parsedEntry.flags = static_cast<std::uint32_t>(entry->flags);
             parsedEntry.imageName = fixedAnsiToString(entry->imageName, sizeof(entry->imageName));
+            if (responseHeader->entrySize >= sizeof(KSWORD_ARK_PROCESS_ENTRY))
+            {
+                parsedEntry.sessionId = static_cast<std::uint32_t>(entry->sessionId);
+                parsedEntry.fieldFlags = static_cast<std::uint32_t>(entry->fieldFlags);
+                parsedEntry.r0Status = static_cast<std::uint32_t>(entry->r0Status);
+                parsedEntry.sessionSource = static_cast<std::uint32_t>(entry->sessionSource);
+                parsedEntry.protection = static_cast<std::uint8_t>(entry->protection);
+                parsedEntry.signatureLevel = static_cast<std::uint8_t>(entry->signatureLevel);
+                parsedEntry.sectionSignatureLevel = static_cast<std::uint8_t>(entry->sectionSignatureLevel);
+                parsedEntry.protectionSource = static_cast<std::uint32_t>(entry->protectionSource);
+                parsedEntry.signatureLevelSource = static_cast<std::uint32_t>(entry->signatureLevelSource);
+                parsedEntry.sectionSignatureLevelSource = static_cast<std::uint32_t>(entry->sectionSignatureLevelSource);
+                parsedEntry.objectTableSource = static_cast<std::uint32_t>(entry->objectTableSource);
+                parsedEntry.sectionObjectSource = static_cast<std::uint32_t>(entry->sectionObjectSource);
+                parsedEntry.imagePathSource = static_cast<std::uint32_t>(entry->imagePathSource);
+                parsedEntry.protectionOffset = static_cast<std::uint32_t>(entry->protectionOffset);
+                parsedEntry.signatureLevelOffset = static_cast<std::uint32_t>(entry->signatureLevelOffset);
+                parsedEntry.sectionSignatureLevelOffset = static_cast<std::uint32_t>(entry->sectionSignatureLevelOffset);
+                parsedEntry.objectTableOffset = static_cast<std::uint32_t>(entry->objectTableOffset);
+                parsedEntry.sectionObjectOffset = static_cast<std::uint32_t>(entry->sectionObjectOffset);
+                parsedEntry.objectTableAddress = static_cast<std::uint64_t>(entry->objectTableAddress);
+                parsedEntry.sectionObjectAddress = static_cast<std::uint64_t>(entry->sectionObjectAddress);
+                parsedEntry.dynDataCapabilityMask = static_cast<std::uint64_t>(entry->dynDataCapabilityMask);
+                parsedEntry.imagePath = fixedUtf16ToUtf8String(
+                    entry->imagePath,
+                    KSWORD_ARK_PROCESS_IMAGE_PATH_CHARS);
+            }
             enumResult.entries.push_back(std::move(parsedEntry));
         }
 

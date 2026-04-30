@@ -4,7 +4,7 @@
 // ============================================================
 // HardwareDock.cpp
 // 作用：
-// 1) 提供硬件总览与利用率可视化；
+// 1) 提供利用率优先的硬件监控视图与硬件总览；
 // 2) 利用 PDH + Power API 周期采样 CPU/内存/每核频率；
 // 3) 显卡与内存模块信息通过 PowerShell/WMI 文本化展示。
 // ============================================================
@@ -27,6 +27,7 @@
 #include <QPainter>
 #include <QPointer>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QShowEvent>
@@ -218,6 +219,89 @@ namespace
             return QStringLiteral("video_decode");
         }
         return QString();
+    }
+
+    // packLuidKey 作用：
+    // - 把 Windows LUID 的 HighPart/LowPart 合并为稳定 64 位键；
+    // - 用于 DXGI 显卡适配器与 PDH GPU Engine 实例之间做关联。
+    std::uint64_t packLuidKey(const LUID& luidValue)
+    {
+        const std::uint64_t highPartValue =
+            static_cast<std::uint64_t>(static_cast<std::uint32_t>(luidValue.HighPart));
+        const std::uint64_t lowPartValue =
+            static_cast<std::uint64_t>(luidValue.LowPart);
+        return (highPartValue << 32U) | lowPartValue;
+    }
+
+    // interfaceLuidToKey 作用：
+    // - 把 MIB_IF_ROW2 的 InterfaceLuid.Value 转为无符号键；
+    // - 调用方用该键跨采样周期匹配同一块网卡。
+    std::uint64_t interfaceLuidToKey(const std::uint64_t luidValue)
+    {
+        return luidValue;
+    }
+
+    // simplifyDiskInstanceName 作用：
+    // - 把 PDH PhysicalDisk 实例名转换为任务管理器风格标题；
+    // - 示例："0 C:" 显示为“磁盘 0 (C:)”。
+    QString simplifyDiskInstanceName(const QString& instanceNameText)
+    {
+        const QString trimmedText = instanceNameText.trimmed();
+        if (trimmedText.isEmpty())
+        {
+            return QStringLiteral("磁盘");
+        }
+        if (trimmedText == QStringLiteral("_Total"))
+        {
+            return QStringLiteral("磁盘总计");
+        }
+
+        const int spaceIndex = trimmedText.indexOf(QLatin1Char(' '));
+        if (spaceIndex > 0)
+        {
+            const QString diskIndexText = trimmedText.left(spaceIndex).trimmed();
+            const QString volumeText = trimmedText.mid(spaceIndex + 1).trimmed();
+            if (!volumeText.isEmpty())
+            {
+                return QStringLiteral("磁盘 %1 (%2)").arg(diskIndexText, volumeText);
+            }
+            return QStringLiteral("磁盘 %1").arg(diskIndexText);
+        }
+
+        return QStringLiteral("磁盘 %1").arg(trimmedText);
+    }
+
+    // parseGpuAdapterKeyFromEngineName 作用：
+    // - 从 PDH GPU Engine 实例名中解析 LUID；
+    // - Windows 常见格式包含“luid_0xHIGH_0xLOW”，失败时返回 false。
+    bool parseGpuAdapterKeyFromEngineName(
+        const QString& engineNameText,
+        std::uint64_t* adapterKeyOut)
+    {
+        if (adapterKeyOut == nullptr)
+        {
+            return false;
+        }
+
+        static const QRegularExpression luidRegex(
+            QStringLiteral("luid_0x([0-9a-fA-F]+)_0x([0-9a-fA-F]+)"));
+        const QRegularExpressionMatch matchValue = luidRegex.match(engineNameText);
+        if (!matchValue.hasMatch())
+        {
+            return false;
+        }
+
+        bool highOk = false;
+        bool lowOk = false;
+        const std::uint64_t highValue = matchValue.captured(1).toULongLong(&highOk, 16);
+        const std::uint64_t lowValue = matchValue.captured(2).toULongLong(&lowOk, 16);
+        if (!highOk || !lowOk)
+        {
+            return false;
+        }
+
+        *adapterKeyOut = ((highValue & 0xFFFFFFFFULL) << 32U) | (lowValue & 0xFFFFFFFFULL);
+        return true;
     }
 
     // formatDurationText 作用：
@@ -880,8 +964,9 @@ void HardwareDock::initializeUi()
     m_sideTabWidget->setTabPosition(QTabWidget::West);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
-    initializeOverviewTab();
+    // 页签优先级：先注册“利用率”，让硬件 Dock 初次打开时默认进入性能监控页。
     initializeUtilizationTab();
+    initializeOverviewTab();
     initializeCpuTab();
     initializeGpuTab();
     initializeMemoryTab();
@@ -955,7 +1040,7 @@ void HardwareDock::initializeUtilizationTab()
     m_utilizationSidebarList = new QListWidget(m_utilizationPage);
     m_utilizationSidebarList->setFrameShape(QFrame::NoFrame);
     m_utilizationSidebarList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_utilizationSidebarList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_utilizationSidebarList->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_utilizationSidebarList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_utilizationSidebarList->setSelectionMode(QAbstractItemView::SingleSelection);
     m_utilizationSidebarList->setSpacing(2);
@@ -1001,43 +1086,62 @@ void HardwareDock::initializeUtilizationSidebarCards()
         return;
     }
 
-    // addCardItem 作用：
-    // - 向左侧导航列表追加一个性能卡片；
-    // - 卡片包含标题、副标题和缩略折线，后续按采样动态刷新。
-    auto addCardItem =
-        [this](PerformanceNavCard*& cardOut, const QString& titleText, const QColor& accentColor)
-        {
-            QListWidgetItem* itemPointer = new QListWidgetItem();
-            cardOut = new PerformanceNavCard(m_utilizationSidebarList);
-            cardOut->setTitleText(titleText);
-            cardOut->setSubtitleText(QStringLiteral("采样中..."));
-            cardOut->setAccentColor(accentColor);
-            itemPointer->setSizeHint(cardOut->sizeHint());
-            m_utilizationSidebarList->addItem(itemPointer);
-            m_utilizationSidebarList->setItemWidget(itemPointer, cardOut);
-        };
+    m_cpuNavCard = addUtilizationSidebarCard(
+        m_utilizationCpuSubPage,
+        QStringLiteral("CPU"),
+        QColor(90, 178, 255),
+        UtilizationDeviceKind::Cpu,
+        -1);
+    m_memoryNavCard = addUtilizationSidebarCard(
+        m_utilizationMemorySubPage,
+        QStringLiteral("内存"),
+        QColor(184, 99, 255),
+        UtilizationDeviceKind::Memory,
+        -1);
+    // 磁盘、网卡、GPU 不再注册固定聚合卡片：
+    // - 设备发现后由 ensure*UtilizationDevice 动态追加；
+    // - 这样多硬盘/多显卡/多网卡会像任务管理器一样各占一个入口。
+    m_diskNavCard = nullptr;
+    m_networkNavCard = nullptr;
+    m_gpuNavCard = nullptr;
 
-    addCardItem(m_cpuNavCard, QStringLiteral("CPU"), QColor(90, 178, 255));
-    addCardItem(m_memoryNavCard, QStringLiteral("内存"), QColor(184, 99, 255));
-    addCardItem(m_diskNavCard, QStringLiteral("磁盘"), QColor(104, 204, 116));
-    addCardItem(m_networkNavCard, QStringLiteral("以太网"), QColor(230, 149, 76));
-    addCardItem(m_gpuNavCard, QStringLiteral("GPU"), QColor(105, 173, 255));
-
-    // 磁盘/网络缩略图改为双折线：
-    // - 蓝线表示读取/下行；
-    // - 黄线表示写入/上行。
-    if (m_diskNavCard != nullptr)
-    {
-        m_diskNavCard->setSeriesColors(QColor(80, 170, 255), QColor(255, 190, 105));
-    }
     if (m_memoryNavCard != nullptr)
     {
         m_memoryNavCard->setSeriesColors(QColor(184, 99, 255), QColor(79, 195, 247));
     }
-    if (m_networkNavCard != nullptr)
+}
+
+PerformanceNavCard* HardwareDock::addUtilizationSidebarCard(
+    QWidget* detailPage,
+    const QString& titleText,
+    const QColor& accentColor,
+    const UtilizationDeviceKind kind,
+    const int deviceIndex)
+{
+    if (m_utilizationSidebarList == nullptr)
     {
-        m_networkNavCard->setSeriesColors(QColor(80, 170, 255), QColor(255, 190, 105));
+        return nullptr;
     }
+
+    // itemPointer 用途：承载 PerformanceNavCard 的 QListWidget 行。
+    QListWidgetItem* itemPointer = new QListWidgetItem();
+    // cardPointer 用途：实际绘制任务管理器风格缩略卡片。
+    PerformanceNavCard* cardPointer = new PerformanceNavCard(m_utilizationSidebarList);
+    cardPointer->setTitleText(titleText);
+    cardPointer->setSubtitleText(QStringLiteral("采样中..."));
+    cardPointer->setAccentColor(accentColor);
+    itemPointer->setSizeHint(cardPointer->sizeHint());
+    m_utilizationSidebarList->addItem(itemPointer);
+    m_utilizationSidebarList->setItemWidget(itemPointer, cardPointer);
+
+    // navEntry 用途：记录 QListWidget 行号与 QStackedWidget 页面之间的稳定映射。
+    UtilizationNavEntry navEntry;
+    navEntry.navCard = cardPointer;
+    navEntry.detailPage = detailPage;
+    navEntry.kind = kind;
+    navEntry.deviceIndex = deviceIndex;
+    m_utilizationNavEntries.push_back(navEntry);
+    return cardPointer;
 }
 
 void HardwareDock::syncUtilizationSidebarSelection(const int selectedRowIndex)
@@ -1053,28 +1157,34 @@ void HardwareDock::syncUtilizationSidebarSelection(const int selectedRowIndex)
         return;
     }
 
-    const int boundedIndex = std::clamp(selectedRowIndex, 0, pageCount - 1);
-    m_utilizationDetailStack->setCurrentIndex(boundedIndex);
+    const int entryCount = static_cast<int>(m_utilizationNavEntries.size());
+    const int boundedRowIndex = entryCount > 0
+        ? std::clamp(selectedRowIndex, 0, entryCount - 1)
+        : std::clamp(selectedRowIndex, 0, pageCount - 1);
 
-    if (m_cpuNavCard != nullptr)
+    // targetPageIndex 用途：把左侧行号映射到右侧堆栈真实页面索引。
+    int targetPageIndex = std::clamp(boundedRowIndex, 0, pageCount - 1);
+    if (boundedRowIndex >= 0 && boundedRowIndex < entryCount)
     {
-        m_cpuNavCard->setSelectedState(boundedIndex == 0);
+        QWidget* targetPageWidget = m_utilizationNavEntries[static_cast<std::size_t>(boundedRowIndex)].detailPage;
+        if (targetPageWidget != nullptr)
+        {
+            const int resolvedIndex = m_utilizationDetailStack->indexOf(targetPageWidget);
+            if (resolvedIndex >= 0)
+            {
+                targetPageIndex = resolvedIndex;
+            }
+        }
     }
-    if (m_memoryNavCard != nullptr)
+    m_utilizationDetailStack->setCurrentIndex(targetPageIndex);
+
+    for (int entryIndex = 0; entryIndex < entryCount; ++entryIndex)
     {
-        m_memoryNavCard->setSelectedState(boundedIndex == 1);
-    }
-    if (m_diskNavCard != nullptr)
-    {
-        m_diskNavCard->setSelectedState(boundedIndex == 2);
-    }
-    if (m_networkNavCard != nullptr)
-    {
-        m_networkNavCard->setSelectedState(boundedIndex == 3);
-    }
-    if (m_gpuNavCard != nullptr)
-    {
-        m_gpuNavCard->setSelectedState(boundedIndex == 4);
+        UtilizationNavEntry& entry = m_utilizationNavEntries[static_cast<std::size_t>(entryIndex)];
+        if (entry.navCard != nullptr)
+        {
+            entry.navCard->setSelectedState(entryIndex == boundedRowIndex);
+        }
     }
 
     // 选项切换后立即重算大图高度，避免首帧出现滚动条。
@@ -1225,29 +1335,45 @@ void HardwareDock::adjustUtilizationChartHeights()
     {
         m_networkUtilDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
     }
+    for (DiskUtilizationDevice& device : m_diskUtilDevices)
+    {
+        adjustMainChartHeight(device.pageWidget, device.chartView, 0.40, 58, 120);
+        if (device.detailLabel != nullptr)
+        {
+            device.detailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
+        }
+    }
+    for (NetworkUtilizationDevice& device : m_networkUtilDevices)
+    {
+        adjustMainChartHeight(device.pageWidget, device.chartView, 0.40, 58, 120);
+        if (device.detailLabel != nullptr)
+        {
+            device.detailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
+        }
+    }
+
+    // applyMaxHeightIfChanged 作用：
+    // - 仅调整最大高度，最小高度保持 0，防止子控件反向撑大父布局；
+    // - widgetPointer：目标控件；maxHeightValue：目标最大高度（像素）。
+    auto applyMaxHeightIfChanged =
+        [](QWidget* widgetPointer, const int maxHeightValue)
+        {
+            if (widgetPointer == nullptr || maxHeightValue <= 0)
+            {
+                return;
+            }
+            if (widgetPointer->minimumHeight() == 0
+                && widgetPointer->maximumHeight() == maxHeightValue)
+            {
+                return;
+            }
+            widgetPointer->setMinimumHeight(0);
+            widgetPointer->setMaximumHeight(maxHeightValue);
+        };
 
     // GPU 页：四个引擎图 + 两条显存曲线全部动态压缩。
     if (m_utilizationGpuSubPage != nullptr)
     {
-        // applyMaxHeightIfChanged 作用：
-        // - 仅调整最大高度，最小高度保持 0，防止子控件反向撑大父布局；
-        // - widgetPointer：目标控件；maxHeightValue：目标最大高度（像素）。
-        auto applyMaxHeightIfChanged =
-            [](QWidget* widgetPointer, const int maxHeightValue)
-            {
-                if (widgetPointer == nullptr || maxHeightValue <= 0)
-                {
-                    return;
-                }
-                if (widgetPointer->minimumHeight() == 0
-                    && widgetPointer->maximumHeight() == maxHeightValue)
-                {
-                    return;
-                }
-                widgetPointer->setMinimumHeight(0);
-                widgetPointer->setMaximumHeight(maxHeightValue);
-            };
-
         // gpuReferenceHeight 用途：GPU 子页布局参考高度，优先使用堆栈可见区域，避免自反馈增高。
         int gpuReferenceHeight = 0;
         if (m_utilizationDetailStack != nullptr)
@@ -1309,6 +1435,61 @@ void HardwareDock::adjustUtilizationChartHeights()
         if (m_gpuUtilDetailLabel != nullptr)
         {
             m_gpuUtilDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
+        }
+    }
+    for (GpuUtilizationDevice& device : m_gpuUtilDevices)
+    {
+        if (device.pageWidget == nullptr)
+        {
+            continue;
+        }
+
+        // gpuReferenceHeight 用途：多 GPU 子页的当前稳定高度。
+        int gpuReferenceHeight = 0;
+        if (m_utilizationDetailStack != nullptr)
+        {
+            gpuReferenceHeight = m_utilizationDetailStack->contentsRect().height();
+        }
+        if (gpuReferenceHeight <= 0)
+        {
+            gpuReferenceHeight = device.pageWidget->contentsRect().height();
+        }
+        if (gpuReferenceHeight <= 0)
+        {
+            continue;
+        }
+
+        const int layoutSpacing = 6;
+        const int headerHeight = 24;
+        const int summaryHeight = device.summaryLabel != nullptr
+            ? device.summaryLabel->sizeHint().height()
+            : 0;
+        const int detailHeight = device.detailLabel != nullptr
+            ? device.detailLabel->sizeHint().height()
+            : 0;
+        const int reservedHeight = headerHeight + summaryHeight + detailHeight + layoutSpacing * 7 + 12;
+        const int graphAreaHeight = std::max(126, gpuReferenceHeight - reservedHeight);
+        const int engineAreaHeight = std::max(64, graphAreaHeight / 2);
+        const int memoryAreaEachHeight = std::max(42, graphAreaHeight / 4);
+
+        if (device.engineHostWidget != nullptr && device.engineGridLayout != nullptr)
+        {
+            const int rowSpacing = std::max(0, device.engineGridLayout->verticalSpacing());
+            const int cellHeight = std::max(26, (engineAreaHeight - rowSpacing) / 2);
+            for (GpuEngineChartEntry& chartEntry : device.engineCharts)
+            {
+                if (chartEntry.chartView != nullptr)
+                {
+                    applyMaxHeightIfChanged(chartEntry.chartView, std::max(14, cellHeight - 14));
+                }
+            }
+            applyMaxHeightIfChanged(device.engineHostWidget, engineAreaHeight);
+        }
+        applyMaxHeightIfChanged(device.dedicatedMemoryChartView, memoryAreaEachHeight);
+        applyMaxHeightIfChanged(device.sharedMemoryChartView, memoryAreaEachHeight);
+        if (device.detailLabel != nullptr)
+        {
+            device.detailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
         }
     }
 }
@@ -1899,6 +2080,441 @@ void HardwareDock::initializeConnections()
     // 暂无额外交互按钮，预留函数用于后续扩展。
 }
 
+int HardwareDock::findDiskUtilizationDeviceIndexByInstance(const QString& instanceNameText) const
+{
+    for (int indexValue = 0; indexValue < static_cast<int>(m_diskUtilDevices.size()); ++indexValue)
+    {
+        const DiskUtilizationDevice& device = m_diskUtilDevices[static_cast<std::size_t>(indexValue)];
+        if (QString::compare(device.instanceNameText, instanceNameText, Qt::CaseInsensitive) == 0)
+        {
+            return indexValue;
+        }
+    }
+    return -1;
+}
+
+int HardwareDock::ensureDiskUtilizationDevice(
+    const DiskRateSample& sample,
+    const int ordinalIndex)
+{
+    const int existingIndex = findDiskUtilizationDeviceIndexByInstance(sample.instanceNameText);
+    if (existingIndex >= 0)
+    {
+        return existingIndex;
+    }
+
+    // device 用途：为新发现的物理磁盘实例保留 UI 控件和历史采样。
+    DiskUtilizationDevice device;
+    device.instanceNameText = sample.instanceNameText;
+    device.displayNameText = sample.displayNameText.isEmpty()
+        ? QStringLiteral("磁盘 %1").arg(ordinalIndex)
+        : sample.displayNameText;
+    createDiskUtilizationDevicePage(&device);
+    m_diskUtilDevices.push_back(device);
+
+    const int deviceIndex = static_cast<int>(m_diskUtilDevices.size()) - 1;
+    m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard = addUtilizationSidebarCard(
+        m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].pageWidget,
+        m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].displayNameText,
+        QColor(104, 204, 116),
+        UtilizationDeviceKind::Disk,
+        deviceIndex);
+    if (m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard != nullptr)
+    {
+        m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard->setSeriesColors(
+            QColor(80, 170, 255),
+            QColor(255, 190, 105));
+    }
+    return deviceIndex;
+}
+
+int HardwareDock::findNetworkUtilizationDeviceIndexByKey(const std::uint64_t interfaceKey) const
+{
+    for (int indexValue = 0; indexValue < static_cast<int>(m_networkUtilDevices.size()); ++indexValue)
+    {
+        const NetworkUtilizationDevice& device = m_networkUtilDevices[static_cast<std::size_t>(indexValue)];
+        if (device.interfaceKey == interfaceKey)
+        {
+            return indexValue;
+        }
+    }
+    return -1;
+}
+
+int HardwareDock::ensureNetworkUtilizationDevice(
+    const NetworkRateSample& sample,
+    const int ordinalIndex)
+{
+    const int existingIndex = findNetworkUtilizationDeviceIndexByKey(sample.interfaceKey);
+    if (existingIndex >= 0)
+    {
+        return existingIndex;
+    }
+
+    // device 用途：为新发现的网卡接口保留 UI 控件和增量采样基线。
+    NetworkUtilizationDevice device;
+    device.interfaceKey = sample.interfaceKey;
+    device.displayNameText = sample.displayNameText.isEmpty()
+        ? QStringLiteral("以太网 %1").arg(ordinalIndex)
+        : sample.displayNameText;
+    device.linkBitsPerSecond = sample.linkBitsPerSecond;
+    device.lastRxBytes = sample.totalRxBytes;
+    device.lastTxBytes = sample.totalTxBytes;
+    device.lastSampleMs = QDateTime::currentMSecsSinceEpoch();
+    device.hasPreviousSample = true;
+    createNetworkUtilizationDevicePage(&device);
+    m_networkUtilDevices.push_back(device);
+
+    const int deviceIndex = static_cast<int>(m_networkUtilDevices.size()) - 1;
+    m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard = addUtilizationSidebarCard(
+        m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)].pageWidget,
+        m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)].displayNameText,
+        QColor(230, 149, 76),
+        UtilizationDeviceKind::Network,
+        deviceIndex);
+    if (m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard != nullptr)
+    {
+        m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard->setSeriesColors(
+            QColor(80, 170, 255),
+            QColor(255, 190, 105));
+    }
+    return deviceIndex;
+}
+
+int HardwareDock::findGpuUtilizationDeviceIndexByKey(const std::uint64_t adapterKey) const
+{
+    for (int indexValue = 0; indexValue < static_cast<int>(m_gpuUtilDevices.size()); ++indexValue)
+    {
+        const GpuUtilizationDevice& device = m_gpuUtilDevices[static_cast<std::size_t>(indexValue)];
+        if (device.adapterKeyAssigned && device.adapterKey == adapterKey)
+        {
+            return indexValue;
+        }
+    }
+    return -1;
+}
+
+int HardwareDock::ensureGpuUtilizationDevice(
+    const GpuUsageSample& sample,
+    const int ordinalIndex)
+{
+    const int existingIndex = findGpuUtilizationDeviceIndexByKey(sample.adapterKey);
+    if (existingIndex >= 0)
+    {
+        return existingIndex;
+    }
+
+    // device 用途：为新发现的 DXGI 适配器保留任务管理器风格 GPU 详情页。
+    GpuUtilizationDevice device;
+    device.adapterKey = sample.adapterKey;
+    device.adapterKeyAssigned = true;
+    device.adapterIndex = sample.adapterIndex;
+    device.displayNameText = QStringLiteral("GPU %1").arg(ordinalIndex);
+    createGpuUtilizationDevicePage(&device);
+    m_gpuUtilDevices.push_back(device);
+
+    const int deviceIndex = static_cast<int>(m_gpuUtilDevices.size()) - 1;
+    m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard = addUtilizationSidebarCard(
+        m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)].pageWidget,
+        m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)].displayNameText,
+        QColor(105, 173, 255),
+        UtilizationDeviceKind::Gpu,
+        deviceIndex);
+    return deviceIndex;
+}
+
+void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* devicePointer)
+{
+    if (devicePointer == nullptr || m_utilizationDetailStack == nullptr)
+    {
+        return;
+    }
+
+    devicePointer->pageWidget = new QWidget(m_utilizationDetailStack);
+    appendTransparentBackgroundStyle(devicePointer->pageWidget);
+    QVBoxLayout* pageLayout = new QVBoxLayout(devicePointer->pageWidget);
+    pageLayout->setContentsMargins(4, 4, 4, 4);
+    pageLayout->setSpacing(6);
+
+    QLabel* titleLabel = new QLabel(devicePointer->displayNameText, devicePointer->pageWidget);
+    titleLabel->setStyleSheet(
+        QStringLiteral("font-size:46px;font-weight:700;color:%1;")
+        .arg(KswordTheme::TextPrimaryHex()));
+    pageLayout->addWidget(titleLabel, 0);
+
+    devicePointer->summaryLabel = new QLabel(QStringLiteral("磁盘采样初始化中..."), devicePointer->pageWidget);
+    devicePointer->summaryLabel->setStyleSheet(
+        QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
+    pageLayout->addWidget(devicePointer->summaryLabel, 0);
+
+    devicePointer->readLineSeries = new QLineSeries(devicePointer->pageWidget);
+    devicePointer->readLineSeries->setName(QStringLiteral("读取"));
+    devicePointer->readLineSeries->setColor(QColor(80, 170, 255));
+    devicePointer->writeLineSeries = new QLineSeries(devicePointer->pageWidget);
+    devicePointer->writeLineSeries->setName(QStringLiteral("写入"));
+    devicePointer->writeLineSeries->setColor(QColor(255, 190, 105));
+    for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
+    {
+        devicePointer->readLineSeries->append(indexValue, 0.0);
+        devicePointer->writeLineSeries->append(indexValue, 0.0);
+    }
+
+    QChart* chart = new QChart();
+    chart->addSeries(devicePointer->readLineSeries);
+    chart->addSeries(devicePointer->writeLineSeries);
+    chart->legend()->setVisible(true);
+    chart->legend()->setAlignment(Qt::AlignBottom);
+    chart->setTitle(QStringLiteral("%1 读写速率趋势").arg(devicePointer->displayNameText));
+    devicePointer->axisX = new QValueAxis(chart);
+    devicePointer->axisX->setRange(0, m_historyLength);
+    devicePointer->axisX->setLabelsVisible(false);
+    devicePointer->axisX->setGridLineVisible(false);
+    devicePointer->axisY = new QValueAxis(chart);
+    devicePointer->axisY->setRange(0.0, 1.0);
+    devicePointer->axisY->setLabelsVisible(false);
+    devicePointer->axisY->setGridLineVisible(false);
+    chart->addAxis(devicePointer->axisX, Qt::AlignBottom);
+    chart->addAxis(devicePointer->axisY, Qt::AlignLeft);
+    devicePointer->readLineSeries->attachAxis(devicePointer->axisX);
+    devicePointer->readLineSeries->attachAxis(devicePointer->axisY);
+    devicePointer->writeLineSeries->attachAxis(devicePointer->axisX);
+    devicePointer->writeLineSeries->attachAxis(devicePointer->axisY);
+    devicePointer->chartView = createNoFrameChartView(chart, devicePointer->pageWidget);
+    pageLayout->addWidget(devicePointer->chartView, 1);
+
+    devicePointer->detailLabel = new QLabel(QStringLiteral("磁盘参数采样中..."), devicePointer->pageWidget);
+    devicePointer->detailLabel->setWordWrap(false);
+    devicePointer->detailLabel->setStyleSheet(
+        QStringLiteral("font-size:14px;color:%1;").arg(KswordTheme::TextPrimaryHex()));
+    pageLayout->addWidget(devicePointer->detailLabel, 0);
+
+    m_utilizationDetailStack->addWidget(devicePointer->pageWidget);
+}
+
+void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* devicePointer)
+{
+    if (devicePointer == nullptr || m_utilizationDetailStack == nullptr)
+    {
+        return;
+    }
+
+    devicePointer->pageWidget = new QWidget(m_utilizationDetailStack);
+    appendTransparentBackgroundStyle(devicePointer->pageWidget);
+    QVBoxLayout* pageLayout = new QVBoxLayout(devicePointer->pageWidget);
+    pageLayout->setContentsMargins(4, 4, 4, 4);
+    pageLayout->setSpacing(6);
+
+    QLabel* titleLabel = new QLabel(devicePointer->displayNameText, devicePointer->pageWidget);
+    titleLabel->setStyleSheet(
+        QStringLiteral("font-size:46px;font-weight:700;color:%1;")
+        .arg(KswordTheme::TextPrimaryHex()));
+    pageLayout->addWidget(titleLabel, 0);
+
+    devicePointer->summaryLabel = new QLabel(QStringLiteral("网络采样初始化中..."), devicePointer->pageWidget);
+    devicePointer->summaryLabel->setStyleSheet(
+        QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
+    pageLayout->addWidget(devicePointer->summaryLabel, 0);
+
+    devicePointer->rxLineSeries = new QLineSeries(devicePointer->pageWidget);
+    devicePointer->rxLineSeries->setName(QStringLiteral("下行"));
+    devicePointer->rxLineSeries->setColor(QColor(92, 190, 255));
+    devicePointer->txLineSeries = new QLineSeries(devicePointer->pageWidget);
+    devicePointer->txLineSeries->setName(QStringLiteral("上行"));
+    devicePointer->txLineSeries->setColor(QColor(255, 190, 105));
+    for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
+    {
+        devicePointer->rxLineSeries->append(indexValue, 0.0);
+        devicePointer->txLineSeries->append(indexValue, 0.0);
+    }
+
+    QChart* chart = new QChart();
+    chart->addSeries(devicePointer->rxLineSeries);
+    chart->addSeries(devicePointer->txLineSeries);
+    chart->legend()->setVisible(true);
+    chart->legend()->setAlignment(Qt::AlignBottom);
+    chart->setTitle(QStringLiteral("%1 收发速率趋势").arg(devicePointer->displayNameText));
+    devicePointer->axisX = new QValueAxis(chart);
+    devicePointer->axisX->setRange(0, m_historyLength);
+    devicePointer->axisX->setLabelsVisible(false);
+    devicePointer->axisX->setGridLineVisible(false);
+    devicePointer->axisY = new QValueAxis(chart);
+    devicePointer->axisY->setRange(0.0, 1.0);
+    devicePointer->axisY->setLabelsVisible(false);
+    devicePointer->axisY->setGridLineVisible(false);
+    chart->addAxis(devicePointer->axisX, Qt::AlignBottom);
+    chart->addAxis(devicePointer->axisY, Qt::AlignLeft);
+    devicePointer->rxLineSeries->attachAxis(devicePointer->axisX);
+    devicePointer->rxLineSeries->attachAxis(devicePointer->axisY);
+    devicePointer->txLineSeries->attachAxis(devicePointer->axisX);
+    devicePointer->txLineSeries->attachAxis(devicePointer->axisY);
+    devicePointer->chartView = createNoFrameChartView(chart, devicePointer->pageWidget);
+    pageLayout->addWidget(devicePointer->chartView, 1);
+
+    devicePointer->detailLabel = new QLabel(QStringLiteral("网络参数采样中..."), devicePointer->pageWidget);
+    devicePointer->detailLabel->setWordWrap(false);
+    devicePointer->detailLabel->setStyleSheet(
+        QStringLiteral("font-size:14px;color:%1;").arg(KswordTheme::TextPrimaryHex()));
+    pageLayout->addWidget(devicePointer->detailLabel, 0);
+
+    m_utilizationDetailStack->addWidget(devicePointer->pageWidget);
+}
+
+void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePointer)
+{
+    if (devicePointer == nullptr || m_utilizationDetailStack == nullptr)
+    {
+        return;
+    }
+
+    devicePointer->pageWidget = new QWidget(m_utilizationDetailStack);
+    appendTransparentBackgroundStyle(devicePointer->pageWidget);
+    QVBoxLayout* pageLayout = new QVBoxLayout(devicePointer->pageWidget);
+    pageLayout->setContentsMargins(4, 4, 4, 4);
+    pageLayout->setSpacing(6);
+
+    QHBoxLayout* headerLayout = new QHBoxLayout();
+    QLabel* titleLabel = new QLabel(devicePointer->displayNameText, devicePointer->pageWidget);
+    titleLabel->setStyleSheet(
+        QStringLiteral("font-size:46px;font-weight:700;color:%1;")
+        .arg(KswordTheme::TextPrimaryHex()));
+    devicePointer->adapterTitleLabel = new QLabel(QStringLiteral("适配器读取中..."), devicePointer->pageWidget);
+    devicePointer->adapterTitleLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    devicePointer->adapterTitleLabel->setStyleSheet(
+        QStringLiteral("font-size:15px;font-weight:500;color:%1;")
+        .arg(KswordTheme::TextPrimaryHex()));
+    headerLayout->addWidget(titleLabel, 0);
+    headerLayout->addStretch(1);
+    headerLayout->addWidget(devicePointer->adapterTitleLabel, 0);
+    pageLayout->addLayout(headerLayout, 0);
+
+    devicePointer->summaryLabel = new QLabel(QStringLiteral("GPU采样初始化中..."), devicePointer->pageWidget);
+    devicePointer->summaryLabel->setStyleSheet(
+        QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
+    pageLayout->addWidget(devicePointer->summaryLabel, 0);
+
+    devicePointer->engineHostWidget = new QWidget(devicePointer->pageWidget);
+    appendTransparentBackgroundStyle(devicePointer->engineHostWidget);
+    devicePointer->engineGridLayout = new QGridLayout(devicePointer->engineHostWidget);
+    devicePointer->engineGridLayout->setContentsMargins(0, 0, 0, 0);
+    devicePointer->engineGridLayout->setHorizontalSpacing(6);
+    devicePointer->engineGridLayout->setVerticalSpacing(6);
+    devicePointer->engineCharts.clear();
+
+    auto addEngineChart =
+        [this, devicePointer](
+            const QString& keyText,
+            const QString& displayText,
+            const QColor& lineColor,
+            const int rowIndex,
+            const int columnIndex)
+        {
+            QWidget* cellWidget = new QWidget(devicePointer->engineHostWidget);
+            appendTransparentBackgroundStyle(cellWidget);
+            QVBoxLayout* cellLayout = new QVBoxLayout(cellWidget);
+            cellLayout->setContentsMargins(3, 3, 3, 3);
+            cellLayout->setSpacing(2);
+
+            GpuEngineChartEntry chartEntry;
+            chartEntry.engineKeyText = keyText;
+            chartEntry.displayNameText = displayText;
+            chartEntry.titleLabel = new QLabel(displayText, cellWidget);
+            chartEntry.titleLabel->setStyleSheet(
+                QStringLiteral("font-size:12px;color:%1;").arg(KswordTheme::TextPrimaryHex()));
+            cellLayout->addWidget(chartEntry.titleLabel, 0);
+
+            chartEntry.lineSeries = new QLineSeries(cellWidget);
+            chartEntry.lineSeries->setColor(lineColor);
+            for (int sampleIndex = 0; sampleIndex < m_historyLength; ++sampleIndex)
+            {
+                chartEntry.lineSeries->append(sampleIndex, 0.0);
+            }
+
+            QChart* chart = new QChart();
+            chart->addSeries(chartEntry.lineSeries);
+            chart->legend()->setVisible(false);
+            chartEntry.axisX = new QValueAxis(chart);
+            chartEntry.axisX->setRange(0, m_historyLength);
+            chartEntry.axisX->setLabelsVisible(false);
+            chartEntry.axisX->setGridLineVisible(false);
+            chartEntry.axisY = new QValueAxis(chart);
+            chartEntry.axisY->setRange(0.0, 100.0);
+            chartEntry.axisY->setLabelsVisible(false);
+            chartEntry.axisY->setGridLineVisible(false);
+            chart->addAxis(chartEntry.axisX, Qt::AlignBottom);
+            chart->addAxis(chartEntry.axisY, Qt::AlignLeft);
+            chartEntry.lineSeries->attachAxis(chartEntry.axisX);
+            chartEntry.lineSeries->attachAxis(chartEntry.axisY);
+            chartEntry.chartView = createNoFrameChartView(chart, cellWidget);
+            cellLayout->addWidget(chartEntry.chartView, 1);
+
+            devicePointer->engineGridLayout->addWidget(cellWidget, rowIndex, columnIndex);
+            devicePointer->engineCharts.push_back(chartEntry);
+        };
+
+    addEngineChart(QStringLiteral("3d"), QStringLiteral("3D"), QColor(105, 173, 255), 0, 0);
+    addEngineChart(QStringLiteral("copy"), QStringLiteral("Copy"), QColor(110, 196, 247), 0, 1);
+    addEngineChart(QStringLiteral("video_encode"), QStringLiteral("Video Encode"), QColor(125, 184, 255), 1, 0);
+    addEngineChart(QStringLiteral("video_decode"), QStringLiteral("Video Decode"), QColor(137, 178, 255), 1, 1);
+    pageLayout->addWidget(devicePointer->engineHostWidget, 1);
+
+    auto createMemoryChart =
+        [this, devicePointer](
+            const QString& titleText,
+            QLineSeries** seriesOut,
+            QValueAxis** axisXOut,
+            QValueAxis** axisYOut,
+            QChartView** chartViewOut)
+        {
+            *seriesOut = new QLineSeries(devicePointer->pageWidget);
+            (*seriesOut)->setColor(QColor(92, 167, 255));
+            for (int sampleIndex = 0; sampleIndex < m_historyLength; ++sampleIndex)
+            {
+                (*seriesOut)->append(sampleIndex, 0.0);
+            }
+
+            QChart* chart = new QChart();
+            chart->addSeries(*seriesOut);
+            chart->legend()->setVisible(false);
+            chart->setTitle(titleText);
+            *axisXOut = new QValueAxis(chart);
+            (*axisXOut)->setRange(0, m_historyLength);
+            (*axisXOut)->setLabelsVisible(false);
+            (*axisXOut)->setGridLineVisible(false);
+            *axisYOut = new QValueAxis(chart);
+            (*axisYOut)->setRange(0.0, 1.0);
+            (*axisYOut)->setLabelsVisible(false);
+            (*axisYOut)->setGridLineVisible(false);
+            chart->addAxis(*axisXOut, Qt::AlignBottom);
+            chart->addAxis(*axisYOut, Qt::AlignLeft);
+            (*seriesOut)->attachAxis(*axisXOut);
+            (*seriesOut)->attachAxis(*axisYOut);
+            *chartViewOut = createNoFrameChartView(chart, devicePointer->pageWidget);
+        };
+
+    createMemoryChart(
+        QStringLiteral("专用 GPU 内存利用率"),
+        &devicePointer->dedicatedMemoryLineSeries,
+        &devicePointer->dedicatedMemoryAxisX,
+        &devicePointer->dedicatedMemoryAxisY,
+        &devicePointer->dedicatedMemoryChartView);
+    createMemoryChart(
+        QStringLiteral("共享 GPU 内存利用率"),
+        &devicePointer->sharedMemoryLineSeries,
+        &devicePointer->sharedMemoryAxisX,
+        &devicePointer->sharedMemoryAxisY,
+        &devicePointer->sharedMemoryChartView);
+    pageLayout->addWidget(devicePointer->dedicatedMemoryChartView, 0);
+    pageLayout->addWidget(devicePointer->sharedMemoryChartView, 0);
+
+    devicePointer->detailLabel = new QLabel(QStringLiteral("GPU参数采样中..."), devicePointer->pageWidget);
+    devicePointer->detailLabel->setWordWrap(false);
+    devicePointer->detailLabel->setStyleSheet(
+        QStringLiteral("font-size:14px;color:%1;").arg(KswordTheme::TextPrimaryHex()));
+    pageLayout->addWidget(devicePointer->detailLabel, 0);
+
+    m_utilizationDetailStack->addWidget(devicePointer->pageWidget);
+}
+
 void HardwareDock::refreshCpuTopologyStaticInfo()
 {
     m_cpuModelText = queryCpuBrandTextByCpuid();
@@ -2086,7 +2702,16 @@ void HardwareDock::refreshAllViews()
 
     double diskReadBytesPerSec = 0.0;
     double diskWriteBytesPerSec = 0.0;
-    if (!sampleDiskRate(&diskReadBytesPerSec, &diskWriteBytesPerSec))
+    std::vector<DiskRateSample> diskSampleList;
+    if (sampleDiskRates(&diskSampleList))
+    {
+        for (const DiskRateSample& sample : diskSampleList)
+        {
+            diskReadBytesPerSec += std::max(0.0, sample.readBytesPerSec);
+            diskWriteBytesPerSec += std::max(0.0, sample.writeBytesPerSec);
+        }
+    }
+    else
     {
         diskReadBytesPerSec = 0.0;
         diskWriteBytesPerSec = 0.0;
@@ -2094,14 +2719,31 @@ void HardwareDock::refreshAllViews()
 
     double networkRxBytesPerSec = 0.0;
     double networkTxBytesPerSec = 0.0;
-    if (!sampleNetworkRate(&networkRxBytesPerSec, &networkTxBytesPerSec))
+    std::vector<NetworkRateSample> networkSampleList;
+    if (sampleNetworkRates(&networkSampleList))
+    {
+        for (const NetworkRateSample& sample : networkSampleList)
+        {
+            networkRxBytesPerSec += std::max(0.0, sample.rxBytesPerSec);
+            networkTxBytesPerSec += std::max(0.0, sample.txBytesPerSec);
+        }
+    }
+    else
     {
         networkRxBytesPerSec = 0.0;
         networkTxBytesPerSec = 0.0;
     }
 
     double gpuUsagePercent = 0.0;
-    if (!sampleGpuUsage(&gpuUsagePercent))
+    std::vector<GpuUsageSample> gpuSampleList;
+    if (sampleGpuUsages(&gpuSampleList))
+    {
+        for (const GpuUsageSample& sample : gpuSampleList)
+        {
+            gpuUsagePercent = std::max(gpuUsagePercent, sample.overallUsagePercent);
+        }
+    }
+    else
     {
         gpuUsagePercent = 0.0;
     }
@@ -2119,6 +2761,9 @@ void HardwareDock::refreshAllViews()
         networkRxBytesPerSec,
         networkTxBytesPerSec,
         gpuUsagePercent);
+    updateAdditionalDiskUtilizationDevices(diskSampleList);
+    updateAdditionalNetworkUtilizationDevices(networkSampleList);
+    updateAdditionalGpuUtilizationDevices(gpuSampleList);
     updateCpuDetailTable(coreUsageList, powerInfoList);
     updateTaskManagerDetailLabels(
         coreUsageList,
@@ -2271,9 +2916,9 @@ bool HardwareDock::sampleMemoryUsage(double* memoryUsagePercentOut)
     return true;
 }
 
-bool HardwareDock::sampleDiskRate(double* readBytesPerSecOut, double* writeBytesPerSecOut)
+bool HardwareDock::sampleDiskRates(std::vector<DiskRateSample>* sampleListOut)
 {
-    if (readBytesPerSecOut == nullptr || writeBytesPerSecOut == nullptr)
+    if (sampleListOut == nullptr)
     {
         return false;
     }
@@ -2290,12 +2935,12 @@ bool HardwareDock::sampleDiskRate(double* readBytesPerSecOut, double* writeBytes
         PDH_HCOUNTER writeCounterHandle = nullptr;
         const PDH_STATUS addReadStatus = ::PdhAddEnglishCounterW(
             queryHandle,
-            L"\\PhysicalDisk(_Total)\\Disk Read Bytes/sec",
+            L"\\PhysicalDisk(*)\\Disk Read Bytes/sec",
             0,
             &readCounterHandle);
         const PDH_STATUS addWriteStatus = ::PdhAddEnglishCounterW(
             queryHandle,
-            L"\\PhysicalDisk(_Total)\\Disk Write Bytes/sec",
+            L"\\PhysicalDisk(*)\\Disk Write Bytes/sec",
             0,
             &writeCounterHandle);
         if (addReadStatus != ERROR_SUCCESS || addWriteStatus != ERROR_SUCCESS)
@@ -2308,7 +2953,6 @@ bool HardwareDock::sampleDiskRate(double* readBytesPerSecOut, double* writeBytes
         m_diskReadCounterHandle = readCounterHandle;
         m_diskWriteCounterHandle = writeCounterHandle;
         ::PdhCollectQueryData(queryHandle);
-        return false;
     }
 
     const PDH_HQUERY queryHandle = reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle);
@@ -2317,25 +2961,121 @@ bool HardwareDock::sampleDiskRate(double* readBytesPerSecOut, double* writeBytes
         return false;
     }
 
-    PDH_FMT_COUNTERVALUE readValue{};
-    PDH_FMT_COUNTERVALUE writeValue{};
-    const PDH_STATUS readStatus = ::PdhGetFormattedCounterValue(
+    DWORD readBufferSize = 0;
+    DWORD readItemCount = 0;
+    PDH_STATUS readQueryStatus = ::PdhGetFormattedCounterArrayW(
         reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
         PDH_FMT_DOUBLE,
-        nullptr,
-        &readValue);
-    const PDH_STATUS writeStatus = ::PdhGetFormattedCounterValue(
-        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
+        &readBufferSize,
+        &readItemCount,
+        nullptr);
+    if (readQueryStatus != PDH_MORE_DATA || readBufferSize == 0 || readItemCount == 0)
+    {
+        sampleListOut->clear();
+        return true;
+    }
+
+    std::vector<unsigned char> readBuffer(readBufferSize);
+    PDH_FMT_COUNTERVALUE_ITEM_W* readItemPointer =
+        reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(readBuffer.data());
+    readQueryStatus = ::PdhGetFormattedCounterArrayW(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
         PDH_FMT_DOUBLE,
-        nullptr,
-        &writeValue);
-    if (readStatus != ERROR_SUCCESS || writeStatus != ERROR_SUCCESS)
+        &readBufferSize,
+        &readItemCount,
+        readItemPointer);
+    if (readQueryStatus != ERROR_SUCCESS)
     {
         return false;
     }
 
-    *readBytesPerSecOut = std::max(0.0, readValue.doubleValue);
-    *writeBytesPerSecOut = std::max(0.0, writeValue.doubleValue);
+    DWORD writeBufferSize = 0;
+    DWORD writeItemCount = 0;
+    PDH_STATUS writeQueryStatus = ::PdhGetFormattedCounterArrayW(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
+        PDH_FMT_DOUBLE,
+        &writeBufferSize,
+        &writeItemCount,
+        nullptr);
+    if (writeQueryStatus != PDH_MORE_DATA || writeBufferSize == 0 || writeItemCount == 0)
+    {
+        return false;
+    }
+
+    std::vector<unsigned char> writeBuffer(writeBufferSize);
+    PDH_FMT_COUNTERVALUE_ITEM_W* writeItemPointer =
+        reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(writeBuffer.data());
+    writeQueryStatus = ::PdhGetFormattedCounterArrayW(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
+        PDH_FMT_DOUBLE,
+        &writeBufferSize,
+        &writeItemCount,
+        writeItemPointer);
+    if (writeQueryStatus != ERROR_SUCCESS)
+    {
+        return false;
+    }
+
+    sampleListOut->clear();
+    sampleListOut->reserve(readItemCount);
+    for (DWORD readIndex = 0; readIndex < readItemCount; ++readIndex)
+    {
+        const PDH_FMT_COUNTERVALUE_ITEM_W& readItem = readItemPointer[readIndex];
+        const QString instanceNameText = QString::fromWCharArray(
+            readItem.szName != nullptr ? readItem.szName : L"").trimmed();
+        if (instanceNameText.isEmpty() || instanceNameText == QStringLiteral("_Total"))
+        {
+            continue;
+        }
+        if (readItem.FmtValue.CStatus != ERROR_SUCCESS)
+        {
+            continue;
+        }
+
+        DiskRateSample sample;
+        sample.instanceNameText = instanceNameText;
+        sample.displayNameText = simplifyDiskInstanceName(instanceNameText);
+        sample.readBytesPerSec = std::max(0.0, readItem.FmtValue.doubleValue);
+        for (DWORD writeIndex = 0; writeIndex < writeItemCount; ++writeIndex)
+        {
+            const PDH_FMT_COUNTERVALUE_ITEM_W& writeItem = writeItemPointer[writeIndex];
+            const QString writeInstanceNameText = QString::fromWCharArray(
+                writeItem.szName != nullptr ? writeItem.szName : L"").trimmed();
+            if (QString::compare(writeInstanceNameText, instanceNameText, Qt::CaseInsensitive) == 0
+                && writeItem.FmtValue.CStatus == ERROR_SUCCESS)
+            {
+                sample.writeBytesPerSec = std::max(0.0, writeItem.FmtValue.doubleValue);
+                break;
+            }
+        }
+        sampleListOut->push_back(sample);
+    }
+    return true;
+}
+
+bool HardwareDock::sampleDiskRate(double* readBytesPerSecOut, double* writeBytesPerSecOut)
+{
+    if (readBytesPerSecOut == nullptr || writeBytesPerSecOut == nullptr)
+    {
+        return false;
+    }
+
+    std::vector<DiskRateSample> sampleList;
+    const bool sampleOk = sampleDiskRates(&sampleList);
+    if (!sampleOk)
+    {
+        return false;
+    }
+
+    double totalReadBytesPerSec = 0.0;
+    double totalWriteBytesPerSec = 0.0;
+    for (const DiskRateSample& sample : sampleList)
+    {
+        totalReadBytesPerSec += std::max(0.0, sample.readBytesPerSec);
+        totalWriteBytesPerSec += std::max(0.0, sample.writeBytesPerSec);
+    }
+    *readBytesPerSecOut = totalReadBytesPerSec;
+    *writeBytesPerSecOut = totalWriteBytesPerSec;
     return true;
 }
 
@@ -2420,6 +3160,336 @@ bool HardwareDock::sampleNetworkRate(double* rxBytesPerSecOut, double* txBytesPe
 
     *rxBytesPerSecOut = static_cast<double>(deltaRx) * 1000.0 / static_cast<double>(elapsedMs);
     *txBytesPerSecOut = static_cast<double>(deltaTx) * 1000.0 / static_cast<double>(elapsedMs);
+    return true;
+}
+
+bool HardwareDock::sampleNetworkRates(std::vector<NetworkRateSample>* sampleListOut)
+{
+    if (sampleListOut == nullptr)
+    {
+        return false;
+    }
+
+    MIB_IF_TABLE2* tablePointer = nullptr;
+    if (::GetIfTable2(&tablePointer) != NO_ERROR || tablePointer == nullptr)
+    {
+        return false;
+    }
+
+    sampleListOut->clear();
+    sampleListOut->reserve(tablePointer->NumEntries);
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    std::uint64_t primaryTrafficBytes = 0;
+    QString primaryAdapterName;
+    std::uint64_t primaryLinkBitsPerSecond = 0;
+    for (ULONG rowIndex = 0; rowIndex < tablePointer->NumEntries; ++rowIndex)
+    {
+        const MIB_IF_ROW2& rowValue = tablePointer->Table[rowIndex];
+        if (rowValue.OperStatus != IfOperStatusUp)
+        {
+            continue;
+        }
+        if (rowValue.Type == IF_TYPE_SOFTWARE_LOOPBACK)
+        {
+            continue;
+        }
+
+        NetworkRateSample sample;
+        sample.interfaceKey = interfaceLuidToKey(static_cast<std::uint64_t>(rowValue.InterfaceLuid.Value));
+        sample.displayNameText = QString::fromWCharArray(rowValue.Alias).trimmed();
+        if (sample.displayNameText.isEmpty())
+        {
+            sample.displayNameText = QString::fromWCharArray(rowValue.Description).trimmed();
+        }
+        sample.linkBitsPerSecond = std::max<std::uint64_t>(
+            static_cast<std::uint64_t>(rowValue.ReceiveLinkSpeed),
+            static_cast<std::uint64_t>(rowValue.TransmitLinkSpeed));
+        sample.totalRxBytes = static_cast<std::uint64_t>(rowValue.InOctets);
+        sample.totalTxBytes = static_cast<std::uint64_t>(rowValue.OutOctets);
+
+        const int deviceIndex = ensureNetworkUtilizationDevice(
+            sample,
+            static_cast<int>(sampleListOut->size()));
+        if (deviceIndex >= 0 && deviceIndex < static_cast<int>(m_networkUtilDevices.size()))
+        {
+            NetworkUtilizationDevice& device = m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)];
+            const qint64 elapsedMs = nowMs - device.lastSampleMs;
+            if (device.hasPreviousSample && elapsedMs > 0)
+            {
+                const std::uint64_t deltaRx = sample.totalRxBytes >= device.lastRxBytes
+                    ? (sample.totalRxBytes - device.lastRxBytes)
+                    : 0;
+                const std::uint64_t deltaTx = sample.totalTxBytes >= device.lastTxBytes
+                    ? (sample.totalTxBytes - device.lastTxBytes)
+                    : 0;
+                sample.rxBytesPerSec = static_cast<double>(deltaRx) * 1000.0 / static_cast<double>(elapsedMs);
+                sample.txBytesPerSec = static_cast<double>(deltaTx) * 1000.0 / static_cast<double>(elapsedMs);
+            }
+            device.lastRxBytes = sample.totalRxBytes;
+            device.lastTxBytes = sample.totalTxBytes;
+            device.lastSampleMs = nowMs;
+            device.linkBitsPerSecond = sample.linkBitsPerSecond;
+            device.hasPreviousSample = true;
+        }
+        const std::uint64_t trafficBytes = sample.totalRxBytes + sample.totalTxBytes;
+        if (trafficBytes >= primaryTrafficBytes)
+        {
+            primaryTrafficBytes = trafficBytes;
+            primaryAdapterName = sample.displayNameText;
+            primaryLinkBitsPerSecond = sample.linkBitsPerSecond;
+        }
+        sampleListOut->push_back(sample);
+    }
+    ::FreeMibTable(tablePointer);
+    m_primaryNetworkAdapterName = primaryAdapterName;
+    m_primaryNetworkLinkBitsPerSecond = primaryLinkBitsPerSecond;
+    return true;
+}
+
+bool HardwareDock::sampleGpuUsages(std::vector<GpuUsageSample>* sampleListOut)
+{
+    if (sampleListOut == nullptr)
+    {
+        return false;
+    }
+
+    // oneGiBInBytes 用途：把 DXGI 字节字段转换为任务管理器常见 GiB 文本。
+    constexpr double oneGiBInBytes = 1024.0 * 1024.0 * 1024.0;
+    IDXGIFactory6* factoryPointer = nullptr;
+    const HRESULT createFactoryStatus = ::CreateDXGIFactory1(IID_PPV_ARGS(&factoryPointer));
+    if (FAILED(createFactoryStatus) || factoryPointer == nullptr)
+    {
+        return false;
+    }
+
+    sampleListOut->clear();
+    for (UINT adapterIndex = 0;; ++adapterIndex)
+    {
+        IDXGIAdapter1* adapterPointer = nullptr;
+        const HRESULT enumStatus = factoryPointer->EnumAdapters1(adapterIndex, &adapterPointer);
+        if (enumStatus == DXGI_ERROR_NOT_FOUND)
+        {
+            break;
+        }
+        if (FAILED(enumStatus) || adapterPointer == nullptr)
+        {
+            continue;
+        }
+
+        DXGI_ADAPTER_DESC1 adapterDesc{};
+        adapterPointer->GetDesc1(&adapterDesc);
+        if ((adapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0)
+        {
+            adapterPointer->Release();
+            continue;
+        }
+
+        GpuUsageSample sample;
+        sample.adapterKey = packLuidKey(adapterDesc.AdapterLuid);
+        sample.adapterIndex = static_cast<int>(adapterIndex);
+        sample.displayNameText = QString::fromWCharArray(adapterDesc.Description).trimmed();
+        sample.dedicatedMemoryGiB = static_cast<double>(adapterDesc.DedicatedVideoMemory) / oneGiBInBytes;
+
+        IDXGIAdapter3* adapter3Pointer = nullptr;
+        const HRESULT queryInterfaceStatus = adapterPointer->QueryInterface(
+            IID_PPV_ARGS(&adapter3Pointer));
+        if (SUCCEEDED(queryInterfaceStatus) && adapter3Pointer != nullptr)
+        {
+            DXGI_QUERY_VIDEO_MEMORY_INFO localMemoryInfo{};
+            DXGI_QUERY_VIDEO_MEMORY_INFO nonLocalMemoryInfo{};
+            const HRESULT localStatus = adapter3Pointer->QueryVideoMemoryInfo(
+                0,
+                DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
+                &localMemoryInfo);
+            const HRESULT nonLocalStatus = adapter3Pointer->QueryVideoMemoryInfo(
+                0,
+                DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,
+                &nonLocalMemoryInfo);
+            if (SUCCEEDED(localStatus))
+            {
+                sample.dedicatedUsedGiB =
+                    static_cast<double>(localMemoryInfo.CurrentUsage) / oneGiBInBytes;
+                sample.dedicatedBudgetGiB =
+                    static_cast<double>(localMemoryInfo.Budget) / oneGiBInBytes;
+            }
+            if (SUCCEEDED(nonLocalStatus))
+            {
+                sample.sharedUsedGiB =
+                    static_cast<double>(nonLocalMemoryInfo.CurrentUsage) / oneGiBInBytes;
+                sample.sharedBudgetGiB =
+                    static_cast<double>(nonLocalMemoryInfo.Budget) / oneGiBInBytes;
+            }
+            adapter3Pointer->Release();
+        }
+
+        if (sample.sharedBudgetGiB <= 0.0)
+        {
+            MEMORYSTATUSEX memoryStatus{};
+            memoryStatus.dwLength = sizeof(memoryStatus);
+            if (::GlobalMemoryStatusEx(&memoryStatus) == TRUE)
+            {
+                const double totalMemoryGiB =
+                    static_cast<double>(memoryStatus.ullTotalPhys) / oneGiBInBytes;
+                sample.sharedBudgetGiB = std::max(0.5, totalMemoryGiB * 0.5);
+            }
+        }
+
+        ensureGpuUtilizationDevice(sample, static_cast<int>(sampleListOut->size()));
+        sampleListOut->push_back(sample);
+        adapterPointer->Release();
+    }
+    factoryPointer->Release();
+
+    if (sampleListOut->empty())
+    {
+        return true;
+    }
+
+    if (m_gpuPerfQueryHandle == nullptr)
+    {
+        PDH_HQUERY queryHandle = nullptr;
+        if (::PdhOpenQueryW(nullptr, 0, &queryHandle) != ERROR_SUCCESS || queryHandle == nullptr)
+        {
+            return true;
+        }
+
+        PDH_HCOUNTER counterHandle = nullptr;
+        const PDH_STATUS addStatus = ::PdhAddEnglishCounterW(
+            queryHandle,
+            L"\\GPU Engine(*)\\Utilization Percentage",
+            0,
+            &counterHandle);
+        if (addStatus != ERROR_SUCCESS || counterHandle == nullptr)
+        {
+            ::PdhCloseQuery(queryHandle);
+            return true;
+        }
+
+        m_gpuPerfQueryHandle = queryHandle;
+        m_gpuCounterHandle = counterHandle;
+        ::PdhCollectQueryData(queryHandle);
+        ::Sleep(1);
+        ::PdhCollectQueryData(queryHandle);
+    }
+    else
+    {
+        const PDH_HQUERY queryHandle = reinterpret_cast<PDH_HQUERY>(m_gpuPerfQueryHandle);
+        if (::PdhCollectQueryData(queryHandle) != ERROR_SUCCESS)
+        {
+            return true;
+        }
+
+        DWORD bufferSize = 0;
+        DWORD itemCount = 0;
+        PDH_STATUS queryStatus = ::PdhGetFormattedCounterArrayW(
+            reinterpret_cast<PDH_HCOUNTER>(m_gpuCounterHandle),
+            PDH_FMT_DOUBLE,
+            &bufferSize,
+            &itemCount,
+            nullptr);
+        if (queryStatus == PDH_MORE_DATA && bufferSize > 0 && itemCount > 0)
+        {
+            std::vector<unsigned char> rawBuffer(bufferSize);
+            PDH_FMT_COUNTERVALUE_ITEM_W* itemPointer =
+                reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(rawBuffer.data());
+            queryStatus = ::PdhGetFormattedCounterArrayW(
+                reinterpret_cast<PDH_HCOUNTER>(m_gpuCounterHandle),
+                PDH_FMT_DOUBLE,
+                &bufferSize,
+                &itemCount,
+                itemPointer);
+            if (queryStatus == ERROR_SUCCESS)
+            {
+                for (DWORD itemIndex = 0; itemIndex < itemCount; ++itemIndex)
+                {
+                    const PDH_FMT_COUNTERVALUE_ITEM_W& itemValue = itemPointer[itemIndex];
+                    if (itemValue.FmtValue.CStatus != ERROR_SUCCESS)
+                    {
+                        continue;
+                    }
+
+                    const QString engineNameText = QString::fromWCharArray(
+                        itemValue.szName != nullptr ? itemValue.szName : L"");
+                    std::uint64_t adapterKey = 0;
+                    if (!parseGpuAdapterKeyFromEngineName(engineNameText, &adapterKey))
+                    {
+                        continue;
+                    }
+
+                    const QString engineKeyText = resolveGpuEngineKeyFromCounter(engineNameText);
+                    if (engineKeyText.isEmpty())
+                    {
+                        continue;
+                    }
+
+                    GpuUsageSample* samplePointer = nullptr;
+                    for (GpuUsageSample& sample : *sampleListOut)
+                    {
+                        if (sample.adapterKey == adapterKey)
+                        {
+                            samplePointer = &sample;
+                            break;
+                        }
+                    }
+                    if (samplePointer == nullptr)
+                    {
+                        continue;
+                    }
+
+                    const double engineUsagePercent =
+                        std::clamp(itemValue.FmtValue.doubleValue, 0.0, 100.0);
+                    if (engineKeyText == QStringLiteral("3d"))
+                    {
+                        samplePointer->usage3DPercent =
+                            std::max(samplePointer->usage3DPercent, engineUsagePercent);
+                    }
+                    else if (engineKeyText == QStringLiteral("copy"))
+                    {
+                        samplePointer->usageCopyPercent =
+                            std::max(samplePointer->usageCopyPercent, engineUsagePercent);
+                    }
+                    else if (engineKeyText == QStringLiteral("video_encode"))
+                    {
+                        samplePointer->usageVideoEncodePercent =
+                            std::max(samplePointer->usageVideoEncodePercent, engineUsagePercent);
+                    }
+                    else if (engineKeyText == QStringLiteral("video_decode"))
+                    {
+                        samplePointer->usageVideoDecodePercent =
+                            std::max(samplePointer->usageVideoDecodePercent, engineUsagePercent);
+                    }
+                    samplePointer->overallUsagePercent =
+                        std::max(samplePointer->overallUsagePercent, engineUsagePercent);
+                }
+            }
+        }
+    }
+
+    // aggregate* 用途：维护旧聚合 GPU 页的兼容展示，动态设备页使用 sampleListOut。
+    GpuUsageSample aggregateSample = sampleListOut->front();
+    for (const GpuUsageSample& sample : *sampleListOut)
+    {
+        aggregateSample.overallUsagePercent =
+            std::max(aggregateSample.overallUsagePercent, sample.overallUsagePercent);
+        aggregateSample.usage3DPercent =
+            std::max(aggregateSample.usage3DPercent, sample.usage3DPercent);
+        aggregateSample.usageCopyPercent =
+            std::max(aggregateSample.usageCopyPercent, sample.usageCopyPercent);
+        aggregateSample.usageVideoEncodePercent =
+            std::max(aggregateSample.usageVideoEncodePercent, sample.usageVideoEncodePercent);
+        aggregateSample.usageVideoDecodePercent =
+            std::max(aggregateSample.usageVideoDecodePercent, sample.usageVideoDecodePercent);
+    }
+    m_gpuAdapterNameText = aggregateSample.displayNameText;
+    m_gpuDedicatedMemoryGiB = aggregateSample.dedicatedMemoryGiB;
+    m_gpuDedicatedUsedGiB = aggregateSample.dedicatedUsedGiB;
+    m_gpuDedicatedBudgetGiB = aggregateSample.dedicatedBudgetGiB;
+    m_gpuSharedUsedGiB = aggregateSample.sharedUsedGiB;
+    m_gpuSharedBudgetGiB = aggregateSample.sharedBudgetGiB;
+    m_gpuUsage3DPercent = aggregateSample.usage3DPercent;
+    m_gpuUsageCopyPercent = aggregateSample.usageCopyPercent;
+    m_gpuUsageVideoEncodePercent = aggregateSample.usageVideoEncodePercent;
+    m_gpuUsageVideoDecodePercent = aggregateSample.usageVideoDecodePercent;
     return true;
 }
 
@@ -2993,6 +4063,292 @@ void HardwareDock::updateUtilizationSidebarCards(
             .arg(m_gpuDedicatedUsedGiB, 0, 'f', 1)
             .arg((m_gpuDedicatedBudgetGiB > 0.0 ? m_gpuDedicatedBudgetGiB : m_gpuDedicatedMemoryGiB), 0, 'f', 1));
         m_gpuNavCard->appendSample(gpuUsagePercent);
+    }
+}
+
+void HardwareDock::updateAdditionalDiskUtilizationDevices(const std::vector<DiskRateSample>& sampleList)
+{
+    for (int sampleIndex = 0; sampleIndex < static_cast<int>(sampleList.size()); ++sampleIndex)
+    {
+        const DiskRateSample& sample = sampleList[static_cast<std::size_t>(sampleIndex)];
+        const int deviceIndex = ensureDiskUtilizationDevice(sample, sampleIndex);
+        if (deviceIndex < 0 || deviceIndex >= static_cast<int>(m_diskUtilDevices.size()))
+        {
+            continue;
+        }
+        updateDiskUtilizationDevice(m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)], sample);
+    }
+}
+
+void HardwareDock::updateAdditionalNetworkUtilizationDevices(const std::vector<NetworkRateSample>& sampleList)
+{
+    for (int sampleIndex = 0; sampleIndex < static_cast<int>(sampleList.size()); ++sampleIndex)
+    {
+        const NetworkRateSample& sample = sampleList[static_cast<std::size_t>(sampleIndex)];
+        const int deviceIndex = ensureNetworkUtilizationDevice(sample, sampleIndex);
+        if (deviceIndex < 0 || deviceIndex >= static_cast<int>(m_networkUtilDevices.size()))
+        {
+            continue;
+        }
+        updateNetworkUtilizationDevice(m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)], sample);
+    }
+}
+
+void HardwareDock::updateAdditionalGpuUtilizationDevices(const std::vector<GpuUsageSample>& sampleList)
+{
+    for (int sampleIndex = 0; sampleIndex < static_cast<int>(sampleList.size()); ++sampleIndex)
+    {
+        const GpuUsageSample& sample = sampleList[static_cast<std::size_t>(sampleIndex)];
+        const int deviceIndex = ensureGpuUtilizationDevice(sample, sampleIndex);
+        if (deviceIndex < 0 || deviceIndex >= static_cast<int>(m_gpuUtilDevices.size()))
+        {
+            continue;
+        }
+        updateGpuUtilizationDevice(m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)], sample);
+    }
+}
+
+void HardwareDock::updateDiskUtilizationDevice(
+    DiskUtilizationDevice& device,
+    const DiskRateSample& sample)
+{
+    if (device.summaryLabel != nullptr)
+    {
+        device.summaryLabel->setText(
+            QStringLiteral("读取：%1    写入：%2")
+            .arg(formatRateText(sample.readBytesPerSec))
+            .arg(formatRateText(sample.writeBytesPerSec)));
+    }
+
+    appendGeneralSeriesPoint(
+        device.readLineSeries,
+        device.axisX,
+        device.axisY,
+        sample.readBytesPerSec,
+        0.0);
+    appendGeneralSeriesPoint(
+        device.writeLineSeries,
+        device.axisX,
+        device.axisY,
+        sample.writeBytesPerSec,
+        0.0);
+    updateSharedSeriesAxisRange(
+        device.readLineSeries,
+        device.writeLineSeries,
+        device.axisX,
+        device.axisY,
+        0.0);
+
+    if (device.navCard != nullptr)
+    {
+        rebuildDualRateNavCard(
+            device.navCard,
+            &device.readHistoryBytesPerSec,
+            &device.writeHistoryBytesPerSec,
+            sample.readBytesPerSec,
+            sample.writeBytesPerSec,
+            &device.navAutoScaleBytesPerSec,
+            QStringLiteral("读 %1 / 写 %2")
+            .arg(formatRateText(sample.readBytesPerSec))
+            .arg(formatRateText(sample.writeBytesPerSec)));
+    }
+
+    if (device.detailLabel != nullptr)
+    {
+        const double totalRate = std::max(0.0, sample.readBytesPerSec)
+            + std::max(0.0, sample.writeBytesPerSec);
+        const double approxPercent = std::clamp(
+            totalRate / std::max(1.0, device.navAutoScaleBytesPerSec) * 100.0,
+            0.0,
+            100.0);
+        device.detailLabel->setText(
+            QStringLiteral(
+                "活动时间(近似): %1%\n"
+                "读取速度: %2\n"
+                "写入速度: %3\n"
+                "性能计数器实例: %4")
+            .arg(approxPercent, 0, 'f', 1)
+            .arg(formatRateText(sample.readBytesPerSec))
+            .arg(formatRateText(sample.writeBytesPerSec))
+            .arg(sample.instanceNameText));
+    }
+}
+
+void HardwareDock::updateNetworkUtilizationDevice(
+    NetworkUtilizationDevice& device,
+    const NetworkRateSample& sample)
+{
+    if (device.summaryLabel != nullptr)
+    {
+        device.summaryLabel->setText(
+            QStringLiteral("接收：%1    发送：%2")
+            .arg(formatRateText(sample.rxBytesPerSec))
+            .arg(formatRateText(sample.txBytesPerSec)));
+    }
+
+    appendGeneralSeriesPoint(
+        device.rxLineSeries,
+        device.axisX,
+        device.axisY,
+        sample.rxBytesPerSec,
+        0.0);
+    appendGeneralSeriesPoint(
+        device.txLineSeries,
+        device.axisX,
+        device.axisY,
+        sample.txBytesPerSec,
+        0.0);
+    updateSharedSeriesAxisRange(
+        device.rxLineSeries,
+        device.txLineSeries,
+        device.axisX,
+        device.axisY,
+        0.0);
+
+    if (device.navCard != nullptr)
+    {
+        rebuildDualRateNavCard(
+            device.navCard,
+            &device.rxHistoryBytesPerSec,
+            &device.txHistoryBytesPerSec,
+            sample.rxBytesPerSec,
+            sample.txBytesPerSec,
+            &device.navAutoScaleBytesPerSec,
+            QStringLiteral("下 %1 / 上 %2")
+            .arg(formatRateText(sample.rxBytesPerSec))
+            .arg(formatRateText(sample.txBytesPerSec)));
+    }
+
+    if (device.detailLabel != nullptr)
+    {
+        const double linkMbps = static_cast<double>(sample.linkBitsPerSecond) / (1000.0 * 1000.0);
+        device.detailLabel->setText(
+            QStringLiteral(
+                "适配器: %1\n"
+                "发送: %2\n"
+                "接收: %3\n"
+                "链路速度: %4 Mbps")
+            .arg(sample.displayNameText.isEmpty() ? QStringLiteral("N/A") : sample.displayNameText)
+            .arg(formatRateText(sample.txBytesPerSec))
+            .arg(formatRateText(sample.rxBytesPerSec))
+            .arg(linkMbps > 0.0 ? QString::number(linkMbps, 'f', 1) : QStringLiteral("N/A")));
+    }
+}
+
+void HardwareDock::updateGpuUtilizationDevice(
+    GpuUtilizationDevice& device,
+    const GpuUsageSample& sample)
+{
+    if (device.adapterTitleLabel != nullptr)
+    {
+        device.adapterTitleLabel->setText(
+            sample.displayNameText.isEmpty() ? QStringLiteral("N/A") : sample.displayNameText);
+    }
+    if (device.summaryLabel != nullptr)
+    {
+        device.summaryLabel->setText(
+            QStringLiteral("GPU 当前利用率：%1%    3D：%2%    Copy：%3%")
+            .arg(sample.overallUsagePercent, 0, 'f', 1)
+            .arg(sample.usage3DPercent, 0, 'f', 1)
+            .arg(sample.usageCopyPercent, 0, 'f', 1));
+    }
+
+    for (GpuEngineChartEntry& chartEntry : device.engineCharts)
+    {
+        double usagePercent = 0.0;
+        if (chartEntry.engineKeyText == QStringLiteral("3d"))
+        {
+            usagePercent = sample.usage3DPercent;
+        }
+        else if (chartEntry.engineKeyText == QStringLiteral("copy"))
+        {
+            usagePercent = sample.usageCopyPercent;
+        }
+        else if (chartEntry.engineKeyText == QStringLiteral("video_encode"))
+        {
+            usagePercent = sample.usageVideoEncodePercent;
+        }
+        else if (chartEntry.engineKeyText == QStringLiteral("video_decode"))
+        {
+            usagePercent = sample.usageVideoDecodePercent;
+        }
+        appendGeneralSeriesPoint(chartEntry.lineSeries, chartEntry.axisX, chartEntry.axisY, usagePercent, 0.0);
+        if (chartEntry.titleLabel != nullptr)
+        {
+            chartEntry.titleLabel->setText(
+                QStringLiteral("%1  %2%")
+                .arg(chartEntry.displayNameText)
+                .arg(usagePercent, 0, 'f', 1));
+        }
+    }
+
+    appendGeneralSeriesPoint(
+        device.dedicatedMemoryLineSeries,
+        device.dedicatedMemoryAxisX,
+        device.dedicatedMemoryAxisY,
+        sample.dedicatedUsedGiB,
+        0.0);
+    appendGeneralSeriesPoint(
+        device.sharedMemoryLineSeries,
+        device.sharedMemoryAxisX,
+        device.sharedMemoryAxisY,
+        sample.sharedUsedGiB,
+        0.0);
+    if (device.dedicatedMemoryAxisY != nullptr)
+    {
+        const double dedicatedUpperGiB = std::max(
+            0.5,
+            sample.dedicatedBudgetGiB > 0.0 ? sample.dedicatedBudgetGiB : sample.dedicatedMemoryGiB);
+        device.dedicatedMemoryAxisY->setRange(0.0, dedicatedUpperGiB);
+    }
+    if (device.sharedMemoryAxisY != nullptr)
+    {
+        device.sharedMemoryAxisY->setRange(0.0, std::max(0.5, sample.sharedBudgetGiB));
+    }
+    if (device.dedicatedMemoryChartView != nullptr
+        && device.dedicatedMemoryChartView->chart() != nullptr)
+    {
+        device.dedicatedMemoryChartView->chart()->setTitle(
+            QStringLiteral("专用 GPU 内存利用率  %1 / %2 GiB")
+            .arg(sample.dedicatedUsedGiB, 0, 'f', 2)
+            .arg((sample.dedicatedBudgetGiB > 0.0 ? sample.dedicatedBudgetGiB : sample.dedicatedMemoryGiB), 0, 'f', 2));
+    }
+    if (device.sharedMemoryChartView != nullptr
+        && device.sharedMemoryChartView->chart() != nullptr)
+    {
+        device.sharedMemoryChartView->chart()->setTitle(
+            QStringLiteral("共享 GPU 内存利用率  %1 / %2 GiB")
+            .arg(sample.sharedUsedGiB, 0, 'f', 2)
+            .arg(sample.sharedBudgetGiB, 0, 'f', 2));
+    }
+    if (device.detailLabel != nullptr)
+    {
+        device.detailLabel->setText(
+            QStringLiteral(
+                "利用率: %1%\n"
+                "3D: %2%   Copy: %3%   Video Encode: %4%   Video Decode: %5%\n"
+                "专用显存: %6 / %7 GiB\n"
+                "共享显存: %8 / %9 GiB\n"
+                "适配器索引: %10")
+            .arg(sample.overallUsagePercent, 0, 'f', 1)
+            .arg(sample.usage3DPercent, 0, 'f', 1)
+            .arg(sample.usageCopyPercent, 0, 'f', 1)
+            .arg(sample.usageVideoEncodePercent, 0, 'f', 1)
+            .arg(sample.usageVideoDecodePercent, 0, 'f', 1)
+            .arg(sample.dedicatedUsedGiB, 0, 'f', 2)
+            .arg((sample.dedicatedBudgetGiB > 0.0 ? sample.dedicatedBudgetGiB : sample.dedicatedMemoryGiB), 0, 'f', 2)
+            .arg(sample.sharedUsedGiB, 0, 'f', 2)
+            .arg(sample.sharedBudgetGiB, 0, 'f', 2)
+            .arg(sample.adapterIndex));
+    }
+    if (device.navCard != nullptr)
+    {
+        device.navCard->setSubtitleText(
+            QStringLiteral("%1%  %2/%3 GB")
+            .arg(sample.overallUsagePercent, 0, 'f', 0)
+            .arg(sample.dedicatedUsedGiB, 0, 'f', 1)
+            .arg((sample.dedicatedBudgetGiB > 0.0 ? sample.dedicatedBudgetGiB : sample.dedicatedMemoryGiB), 0, 'f', 1));
+        device.navCard->appendSample(sample.overallUsagePercent);
     }
 }
 

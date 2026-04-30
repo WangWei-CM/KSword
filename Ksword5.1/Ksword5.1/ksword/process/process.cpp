@@ -18,6 +18,7 @@
 
 #include <algorithm>   // std::max/std::clamp：衍生指标计算。
 #include <chrono>      // steady_clock：跨刷新轮次计时。
+#include <cstring>     // std::memset：远程结构读取前清零输出缓冲。
 #include <cwchar>      // std::swprintf：拼接版本信息查询路径。
 #include <filesystem>  // std::filesystem：路径存在性与目录判断。
 #include <fstream>     // std::ifstream：读取 PE 头计算入口 RVA。
@@ -61,6 +62,27 @@ namespace
     constexpr ULONG ProcessPowerThrottlingCurrentVersion = 1UL;
     constexpr ULONG ProcessPowerThrottlingExecutionSpeed = 0x1UL;
 
+    // ProcessProtectionLevelInfo：
+    // - GetProcessInformation PROCESS_INFORMATION_CLASS 枚举值 7；
+    // - 返回 PROCESS_PROTECTION_LEVEL_INFORMATION.ProtectionLevel。
+    constexpr ULONG ProcessProtectionLevelInfoClass = 7UL;
+
+    // PROTECTION_LEVEL_*：
+    // - 部分构建环境的 processthreadsapi.h 未暴露这些宏；
+    // - 本地兜底值仅用于解码 GetProcessInformation 的公开枚举。
+    // - 0 同时用于 WINTCB_LIGHT，命名按 WinBase.h 的公开宏保持一致。
+    constexpr DWORD ProcessProtectionLevelWinTcbLight = 0x00000000UL;
+    constexpr DWORD ProcessProtectionLevelNone = 0xFFFFFFFEUL;
+    constexpr DWORD ProcessProtectionLevelWindows = 0x00000001UL;
+    constexpr DWORD ProcessProtectionLevelWindowsLight = 0x00000002UL;
+    constexpr DWORD ProcessProtectionLevelAntimalwareLight = 0x00000003UL;
+    constexpr DWORD ProcessProtectionLevelLsaLight = 0x00000004UL;
+    constexpr DWORD ProcessProtectionLevelWinTcb = 0x00000005UL;
+    constexpr DWORD ProcessProtectionLevelCodegenLight = 0x00000006UL;
+    constexpr DWORD ProcessProtectionLevelAuthenticode = 0x00000007UL;
+    constexpr DWORD ProcessProtectionLevelPplApp = 0x00000008UL;
+    constexpr DWORD ProcessProtectionLevelSame = 0xFFFFFFFFUL;
+
     // Restart Manager 关闭标记：
     // - 这里统一使用本地常量，不直接依赖 SDK 是否暴露枚举名字；
     // - 语义等价于 Restart Manager 的强制关闭选项。
@@ -84,25 +106,6 @@ namespace
     using NtTerminateJobObjectFn = NTSTATUS(NTAPI*)(HANDLE, NTSTATUS);
     using NtUnmapViewOfSectionFn = NTSTATUS(NTAPI*)(HANDLE, PVOID);
 
-    // 读取远程命令行需要的最小结构定义（只保留必要字段）。
-    struct PebPartial
-    {
-        BYTE reserved1[2];
-        BYTE beingDebugged;
-        BYTE reserved2[1];
-        PVOID reserved3[2];
-        PVOID processParameters;
-    };
-
-    // 读取远程命令行需要的最小 ProcessParameters 结构。
-    struct RtlUserProcessParametersPartial
-    {
-        BYTE reserved1[16];
-        PVOID reserved2[10];
-        UNICODE_STRING imagePathName;
-        UNICODE_STRING commandLine;
-    };
-
     // ProcessBasicInformation 结果结构（与 NtQueryInformationProcess 对应）。
     struct ProcessBasicInformationLocal
     {
@@ -111,6 +114,73 @@ namespace
         PVOID reserved2[2]{};
         ULONG_PTR uniqueProcessId = 0;
         PVOID reserved3 = nullptr;
+    };
+
+    // ProcessCommandLineInformation：
+    // - NtQueryInformationProcess 信息类 60；
+    // - 优先走该路径可避开手工 PEB 偏移差异。
+    constexpr PROCESSINFOCLASS ProcessCommandLineInformationClass =
+        static_cast<PROCESSINFOCLASS>(60);
+
+    // ProcessWow64Information：
+    // - NtQueryInformationProcess 信息类 26；
+    // - 64 位工具读取 32 位目标时用它获取 Wow64 PEB 地址。
+    constexpr PROCESSINFOCLASS ProcessWow64InformationClass =
+        static_cast<PROCESSINFOCLASS>(26);
+
+    // 远程 UNICODE_STRING 最大读取长度：
+    // - Length 来自目标进程内存，不能无条件信任；
+    // - 256KB 足够覆盖正常命令行，同时避免坏指针导致超大分配。
+    constexpr std::size_t RemoteUnicodeStringMaxBytes = 256 * 1024;
+
+    // RemoteUnicodeString32：
+    // - 32 位目标进程内 UNICODE_STRING 的真实布局；
+    // - Buffer 是 32 位远程地址，读取前需要提升为 64 位整数。
+    struct RemoteUnicodeString32
+    {
+        USHORT length = 0;        // 字符串字节数，不包含终止 NUL。
+        USHORT maximumLength = 0; // 缓冲容量字节数。
+        std::uint32_t buffer = 0; // 32 位远程 PWSTR 地址。
+    };
+
+    // Peb32CommandLineLite / Peb64CommandLineLite：
+    // - 只保留 PEB 起始字段到 ProcessParameters；
+    // - 避免依赖 SDK 裁剪版 PEB，也避免读取整个 PEB 结构。
+    struct Peb32CommandLineLite
+    {
+        BYTE reserved1[2]{};
+        BYTE beingDebugged = 0;
+        BYTE reserved2[1]{};
+        std::uint32_t mutant = 0;
+        std::uint32_t imageBaseAddress = 0;
+        std::uint32_t ldr = 0;
+        std::uint32_t processParameters = 0;
+    };
+
+    struct Peb64CommandLineLite
+    {
+        BYTE reserved1[2]{};
+        BYTE beingDebugged = 0;
+        BYTE reserved2[1]{};
+        PVOID mutant = nullptr;
+        PVOID imageBaseAddress = nullptr;
+        PVOID ldr = nullptr;
+        PVOID processParameters = nullptr;
+    };
+
+    // RtlUserProcessParameters32CommandLine / 64CommandLine：
+    // - 按公开稳定偏移直接定位 CommandLine 字段；
+    // - 32 位 CommandLine 位于 0x40，64 位 CommandLine 位于 0x70。
+    struct RtlUserProcessParameters32CommandLine
+    {
+        BYTE reservedBeforeCommandLine[0x40]{};
+        RemoteUnicodeString32 commandLine{};
+    };
+
+    struct RtlUserProcessParameters64CommandLine
+    {
+        BYTE reservedBeforeCommandLine[0x70]{};
+        UNICODE_STRING commandLine{};
     };
 
     // NtQuerySystemInformation(SystemProcessInformation) 的完整结构体定义。
@@ -665,14 +735,264 @@ namespace
         return signatureInfo;
     }
 
+    // ReadRemoteMemoryExact：
+    // - 从目标进程读取固定长度内存；
+    // - 输入 processHandle 为目标进程句柄，remoteAddress 为远程地址；
+    // - 输入 localBuffer/localSize 为本地缓冲；
+    // - 返回 true 表示完整读取 localSize 字节，false 表示失败或部分读取。
+    bool ReadRemoteMemoryExact(
+        const HANDLE processHandle,
+        const std::uint64_t remoteAddress,
+        void* localBuffer,
+        const SIZE_T localSize)
+    {
+        if (processHandle == nullptr || remoteAddress == 0 || localBuffer == nullptr || localSize == 0)
+        {
+            return false;
+        }
+
+        SIZE_T bytesRead = 0;
+        const BOOL readOk = ::ReadProcessMemory(
+            processHandle,
+            reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(remoteAddress)),
+            localBuffer,
+            localSize,
+            &bytesRead);
+        return readOk != FALSE && bytesRead == localSize;
+    }
+
+    // ReadRemoteStructure：
+    // - 模板化读取远程结构；
+    // - 读取前清空输出结构，失败后调用者不会看到脏数据；
+    // - 返回 true 表示读取完整结构成功。
+    template<typename T>
+    bool ReadRemoteStructure(
+        const HANDLE processHandle,
+        const std::uint64_t remoteAddress,
+        T& valueOut)
+    {
+        std::memset(&valueOut, 0, sizeof(T));
+        return ReadRemoteMemoryExact(
+            processHandle,
+            remoteAddress,
+            &valueOut,
+            static_cast<SIZE_T>(sizeof(T)));
+    }
+
+    // ReadRemoteUnicodeStringByAddress：
+    // - 通过远程 UTF-16 地址和字节长度读取字符串；
+    // - 对 Length 做偶数和上限校验，避免目标进程损坏字段拖垮枚举线程；
+    // - 返回 UTF-8 文本，失败返回空字符串。
+    std::string ReadRemoteUnicodeStringByAddress(
+        const HANDLE processHandle,
+        const std::uint64_t bufferAddress,
+        const USHORT lengthBytes)
+    {
+        if (processHandle == nullptr || bufferAddress == 0 || lengthBytes == 0)
+        {
+            return std::string();
+        }
+        if ((lengthBytes % sizeof(wchar_t)) != 0 ||
+            static_cast<std::size_t>(lengthBytes) > RemoteUnicodeStringMaxBytes)
+        {
+            return std::string();
+        }
+
+        std::wstring textBuffer(
+            static_cast<std::size_t>(lengthBytes / sizeof(wchar_t)),
+            L'\0');
+        SIZE_T bytesRead = 0;
+        const BOOL readOk = ::ReadProcessMemory(
+            processHandle,
+            reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(bufferAddress)),
+            textBuffer.data(),
+            static_cast<SIZE_T>(lengthBytes),
+            &bytesRead);
+        if (readOk == FALSE || bytesRead < sizeof(wchar_t))
+        {
+            return std::string();
+        }
+
+        const std::size_t charCount = static_cast<std::size_t>(
+            std::min<SIZE_T>(bytesRead, static_cast<SIZE_T>(lengthBytes)) / sizeof(wchar_t));
+        if (charCount < textBuffer.size())
+        {
+            textBuffer.resize(charCount);
+        }
+        return ks::str::Utf16ToUtf8(textBuffer);
+    }
+
+    // ReadRemoteUnicodeString64：
+    // - 读取 64 位目标内的 UNICODE_STRING；
+    // - 输入 remoteUnicode 是从远程结构体复制出的快照；
+    // - 返回 UTF-8 文本，失败返回空字符串。
+    std::string ReadRemoteUnicodeString64(
+        const HANDLE processHandle,
+        const UNICODE_STRING& remoteUnicode)
+    {
+        return ReadRemoteUnicodeStringByAddress(
+            processHandle,
+            reinterpret_cast<std::uint64_t>(remoteUnicode.Buffer),
+            remoteUnicode.Length);
+    }
+
+    // ReadRemoteUnicodeString32：
+    // - 读取 32 位目标内的 UNICODE_STRING；
+    // - 输入 remoteUnicode 使用手工 32 位布局，避免指针宽度错位；
+    // - 返回 UTF-8 文本，失败返回空字符串。
+    std::string ReadRemoteUnicodeString32(
+        const HANDLE processHandle,
+        const RemoteUnicodeString32& remoteUnicode)
+    {
+        return ReadRemoteUnicodeStringByAddress(
+            processHandle,
+            static_cast<std::uint64_t>(remoteUnicode.buffer),
+            remoteUnicode.length);
+    }
+
+    // QueryProcessCommandLineByNtInfo：
+    // - 使用 ProcessCommandLineInformation 查询命令行；
+    // - 新系统可直接返回 UNICODE_STRING + 字符串缓冲；
+    // - 返回 UTF-8 文本，失败返回空字符串并交给 PEB 回退路径。
+    std::string QueryProcessCommandLineByNtInfo(
+        const NtQueryInformationProcessFn ntQueryInformationProcess,
+        const HANDLE processHandle)
+    {
+        if (ntQueryInformationProcess == nullptr || processHandle == nullptr)
+        {
+            return std::string();
+        }
+
+        ULONG requiredLength = 0;
+        NTSTATUS firstStatus = ntQueryInformationProcess(
+            processHandle,
+            ProcessCommandLineInformationClass,
+            nullptr,
+            0,
+            &requiredLength);
+        if (!NT_SUCCESS(firstStatus) && requiredLength == 0)
+        {
+            return std::string();
+        }
+        if (requiredLength < sizeof(UNICODE_STRING))
+        {
+            requiredLength = static_cast<ULONG>(sizeof(UNICODE_STRING) + 512);
+        }
+
+        std::vector<std::uint8_t> queryBuffer(requiredLength + sizeof(wchar_t), 0);
+        NTSTATUS secondStatus = ntQueryInformationProcess(
+            processHandle,
+            ProcessCommandLineInformationClass,
+            queryBuffer.data(),
+            static_cast<ULONG>(queryBuffer.size()),
+            &requiredLength);
+        if (!NT_SUCCESS(secondStatus))
+        {
+            return std::string();
+        }
+
+        const auto* commandUnicode = reinterpret_cast<const UNICODE_STRING*>(queryBuffer.data());
+        if (commandUnicode == nullptr || commandUnicode->Length == 0 || commandUnicode->Buffer == nullptr)
+        {
+            return std::string();
+        }
+
+        const std::uintptr_t bufferBegin = reinterpret_cast<std::uintptr_t>(queryBuffer.data());
+        const std::uintptr_t bufferSize = queryBuffer.size();
+        const std::uintptr_t textPtr = reinterpret_cast<std::uintptr_t>(commandUnicode->Buffer);
+        const std::size_t textBytes = static_cast<std::size_t>(commandUnicode->Length);
+        if ((textBytes % sizeof(wchar_t)) != 0 || textBytes > RemoteUnicodeStringMaxBytes)
+        {
+            return std::string();
+        }
+
+        if (textPtr >= bufferBegin &&
+            textPtr - bufferBegin <= bufferSize &&
+            textBytes <= bufferSize - (textPtr - bufferBegin))
+        {
+            const auto* wideText = reinterpret_cast<const wchar_t*>(textPtr);
+            return ks::str::Utf16ToUtf8(std::wstring(
+                wideText,
+                wideText + static_cast<std::size_t>(commandUnicode->Length / sizeof(wchar_t))));
+        }
+
+        return ReadRemoteUnicodeString64(processHandle, *commandUnicode);
+    }
+
+    // QueryProcessCommandLineByPeb64：
+    // - 按 64 位 PEB 布局读取 ProcessParameters.CommandLine；
+    // - 用于 ProcessCommandLineInformation 失败后的回退；
+    // - 返回 UTF-8 文本，失败返回空字符串。
+    std::string QueryProcessCommandLineByPeb64(
+        const HANDLE processHandle,
+        const std::uint64_t pebAddress)
+    {
+        Peb64CommandLineLite pebSnapshot{};
+        if (!ReadRemoteStructure(processHandle, pebAddress, pebSnapshot) ||
+            pebSnapshot.processParameters == nullptr)
+        {
+            return std::string();
+        }
+
+        RtlUserProcessParameters64CommandLine processParameters{};
+        if (!ReadRemoteStructure(
+            processHandle,
+            reinterpret_cast<std::uint64_t>(pebSnapshot.processParameters),
+            processParameters))
+        {
+            return std::string();
+        }
+
+        return ReadRemoteUnicodeString64(processHandle, processParameters.commandLine);
+    }
+
+    // QueryProcessCommandLineByPeb32：
+    // - 按 32 位 Wow64 PEB 布局读取 ProcessParameters.CommandLine；
+    // - 修正 x64 控制进程读取 32 位目标时的结构偏移错位；
+    // - 返回 UTF-8 文本，失败返回空字符串。
+    std::string QueryProcessCommandLineByPeb32(
+        const HANDLE processHandle,
+        const std::uint64_t pebAddress)
+    {
+        Peb32CommandLineLite pebSnapshot{};
+        if (!ReadRemoteStructure(processHandle, pebAddress, pebSnapshot) ||
+            pebSnapshot.processParameters == 0)
+        {
+            return std::string();
+        }
+
+        RtlUserProcessParameters32CommandLine processParameters{};
+        if (!ReadRemoteStructure(
+            processHandle,
+            static_cast<std::uint64_t>(pebSnapshot.processParameters),
+            processParameters))
+        {
+            return std::string();
+        }
+
+        return ReadRemoteUnicodeString32(processHandle, processParameters.commandLine);
+    }
+
     // 从远程进程读取命令行（读取 PEB / ProcessParameters）。
     std::string QueryProcessCommandLineByHandle(const HANDLE processHandle)
     {
+        // 命令行读取顺序：
+        // 1) 优先使用 ProcessCommandLineInformation，让系统处理结构差异；
+        // 2) 再读 Native PEB，覆盖旧系统或受限信息类；
+        // 3) 最后读 Wow64 PEB，修复 x64 工具读取 32 位目标时的偏移错位。
         const auto ntQueryInformationProcess = reinterpret_cast<NtQueryInformationProcessFn>(
             GetNtdllProcAddress("NtQueryInformationProcess"));
         if (ntQueryInformationProcess == nullptr)
         {
             return std::string();
+        }
+
+        const std::string commandLineByInfo = QueryProcessCommandLineByNtInfo(
+            ntQueryInformationProcess,
+            processHandle);
+        if (!commandLineByInfo.empty())
+        {
+            return commandLineByInfo;
         }
 
         ProcessBasicInformationLocal basicInfo{};
@@ -687,52 +1007,31 @@ namespace
             return std::string();
         }
 
-        // 读取 PEB，拿到 ProcessParameters 指针。
-        PebPartial pebSnapshot{};
-        SIZE_T bytesRead = 0;
-        if (::ReadProcessMemory(
+        const std::string commandLineByNativePeb = QueryProcessCommandLineByPeb64(
             processHandle,
-            basicInfo.pebBaseAddress,
-            &pebSnapshot,
-            sizeof(pebSnapshot),
-            &bytesRead) == FALSE ||
-            pebSnapshot.processParameters == nullptr)
+            reinterpret_cast<std::uint64_t>(basicInfo.pebBaseAddress));
+        if (!commandLineByNativePeb.empty())
         {
-            return std::string();
+            return commandLineByNativePeb;
         }
 
-        // 读取 ProcessParameters，拿到 CommandLine UNICODE_STRING。
-        RtlUserProcessParametersPartial paramsSnapshot{};
-        if (::ReadProcessMemory(
+        ULONG_PTR wow64PebAddress = 0;
+        NTSTATUS wow64Status = ntQueryInformationProcess(
             processHandle,
-            pebSnapshot.processParameters,
-            &paramsSnapshot,
-            sizeof(paramsSnapshot),
-            &bytesRead) == FALSE)
+            ProcessWow64InformationClass,
+            &wow64PebAddress,
+            static_cast<ULONG>(sizeof(wow64PebAddress)),
+            nullptr);
+        if (NT_SUCCESS(wow64Status) &&
+            wow64PebAddress != 0 &&
+            wow64PebAddress != reinterpret_cast<ULONG_PTR>(basicInfo.pebBaseAddress))
         {
-            return std::string();
+            return QueryProcessCommandLineByPeb32(
+                processHandle,
+                static_cast<std::uint64_t>(wow64PebAddress));
         }
 
-        if (paramsSnapshot.commandLine.Buffer == nullptr || paramsSnapshot.commandLine.Length == 0)
-        {
-            return std::string();
-        }
-
-        // 读取远程命令行 UTF-16 文本并转 UTF-8。
-        std::wstring commandLineText(
-            static_cast<std::size_t>(paramsSnapshot.commandLine.Length / sizeof(wchar_t)),
-            L'\0');
-        if (::ReadProcessMemory(
-            processHandle,
-            paramsSnapshot.commandLine.Buffer,
-            commandLineText.data(),
-            paramsSnapshot.commandLine.Length,
-            &bytesRead) == FALSE)
-        {
-            return std::string();
-        }
-
-        return ks::str::Utf16ToUtf8(commandLineText);
+        return std::string();
     }
 
     // 把 PID 转成 DWORD，统一并避免隐式窄化警告。
@@ -797,6 +1096,58 @@ namespace
         ULONG controlMask = 0;
         ULONG stateMask = 0;
     };
+
+    // ProcessProtectionLevelInformationNative：
+    // - 兼容旧 SDK 的本地结构声明；
+    // - protectionLevel 保存 PROTECTION_LEVEL_* 枚举。
+    struct ProcessProtectionLevelInformationNative
+    {
+        DWORD protectionLevel = 0;
+    };
+
+    // ProcessProtectionLevelToText 作用：把公开枚举值翻译成 UI 可读文本。
+    std::string ProcessProtectionLevelToText(const DWORD protectionLevel)
+    {
+        // protectionLevel 用途：GetProcessInformation 返回的原始枚举值。
+        // 返回值：包含名称与十六进制值，方便用户与 WinAPI 文档对照。
+        switch (protectionLevel)
+        {
+        case ProcessProtectionLevelNone:
+            return "None (PROTECTION_LEVEL_NONE, 0xFFFFFFFE)";
+        case ProcessProtectionLevelWinTcbLight:
+            return "WinTcbLight (PROTECTION_LEVEL_WINTCB_LIGHT, 0x00000000)";
+        case ProcessProtectionLevelWindows:
+            return "Windows (PROTECTION_LEVEL_WINDOWS, 0x00000001)";
+        case ProcessProtectionLevelWindowsLight:
+            return "WindowsLight (PROTECTION_LEVEL_WINDOWS_LIGHT, 0x00000002)";
+        case ProcessProtectionLevelAntimalwareLight:
+            return "AntimalwareLight (PROTECTION_LEVEL_ANTIMALWARE_LIGHT, 0x00000003)";
+        case ProcessProtectionLevelLsaLight:
+            return "LsaLight (PROTECTION_LEVEL_LSA_LIGHT, 0x00000004)";
+        case ProcessProtectionLevelWinTcb:
+            return "WinTcb (PROTECTION_LEVEL_WINTCB, 0x00000005)";
+        case ProcessProtectionLevelCodegenLight:
+            return "CodegenLight (PROTECTION_LEVEL_CODEGEN_LIGHT, 0x00000006)";
+        case ProcessProtectionLevelAuthenticode:
+            return "Authenticode (PROTECTION_LEVEL_AUTHENTICODE, 0x00000007)";
+        case ProcessProtectionLevelPplApp:
+            return "PplApp (PROTECTION_LEVEL_PPL_APP, 0x00000008)";
+        case ProcessProtectionLevelSame:
+            return "Same (PROTECTION_LEVEL_SAME, 0xFFFFFFFF)";
+        default:
+            break;
+        }
+
+        std::ostringstream textBuilder;
+        textBuilder << "Unknown (0x"
+            << std::hex
+            << std::uppercase
+            << std::setw(8)
+            << std::setfill('0')
+            << static_cast<unsigned long>(protectionLevel)
+            << ")";
+        return textBuilder.str();
+    }
 
     // QueryProcessEfficiencyModeByHandle 作用：读取目标进程效率模式状态。
     bool QueryProcessEfficiencyModeByHandle(
@@ -1445,6 +1796,22 @@ namespace ks::process
             ToDwordPid(processRecord.pid));
         if (processHandle == nullptr)
         {
+            // 降级路径：
+            // - 某些受保护进程拒绝 PROCESS_VM_READ，但仍可能允许受限查询；
+            // - 资源视图的“句柄数”只依赖 PROCESS_QUERY_LIMITED_INFORMATION，单独尝试一次。
+            const HANDLE limitedProcessHandle = ::OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                FALSE,
+                ToDwordPid(processRecord.pid));
+            if (limitedProcessHandle != nullptr)
+            {
+                DWORD processHandleCount = 0;
+                if (::GetProcessHandleCount(limitedProcessHandle, &processHandleCount) != FALSE)
+                {
+                    processRecord.handleCount = static_cast<std::uint32_t>(processHandleCount);
+                }
+                ::CloseHandle(limitedProcessHandle);
+            }
             processRecord.dynamicCountersReady = false;
             return false;
         }
@@ -1508,12 +1875,111 @@ namespace ks::process
         {
             processRecord.architectureText = QueryProcessArchitectureByHandle(processHandle);
         }
+
+        // 句柄数量是资源视图动态列，必须在关闭 processHandle 之前读取。
+        DWORD processHandleCount = 0;
+        if (::GetProcessHandleCount(processHandle, &processHandleCount) != FALSE)
+        {
+            processRecord.handleCount = static_cast<std::uint32_t>(processHandleCount);
+        }
         ::CloseHandle(processHandle);
 
         // GPU/Net 当前预留，统一置零。
         processRecord.gpuPercent = 0.0;
         processRecord.netKBps = 0.0;
         processRecord.dynamicCountersReady = true;
+        return true;
+    }
+
+    bool QueryProcessProtectionLevelByPid(
+        const std::uint32_t pid,
+        std::uint32_t* const levelOut,
+        std::string* const displayTextOut,
+        std::string* const errorMessageOut)
+    {
+        // 输出参数先清零，保证失败路径不会留下上一轮脏值。
+        if (levelOut != nullptr)
+        {
+            *levelOut = 0;
+        }
+        if (displayTextOut != nullptr)
+        {
+            displayTextOut->clear();
+        }
+        if (errorMessageOut != nullptr)
+        {
+            errorMessageOut->clear();
+        }
+
+        // PID 0 没有常规进程句柄，直接返回公开枚举中的 None。
+        if (pid == 0)
+        {
+            if (levelOut != nullptr)
+            {
+                *levelOut = ProcessProtectionLevelNone;
+            }
+            if (displayTextOut != nullptr)
+            {
+                *displayTextOut = ProcessProtectionLevelToText(ProcessProtectionLevelNone);
+            }
+            return true;
+        }
+
+        // GetProcessInformation 从 kernel32 动态解析，兼容较旧 SDK/运行环境。
+        HMODULE kernel32Module = ::GetModuleHandleW(L"kernel32.dll");
+        const auto getProcessInformation = reinterpret_cast<GetProcessInformationFn>(
+            kernel32Module != nullptr ? ::GetProcAddress(kernel32Module, "GetProcessInformation") : nullptr);
+        if (getProcessInformation == nullptr)
+        {
+            if (errorMessageOut != nullptr)
+            {
+                *errorMessageOut = "GetProcessInformation(ProcessProtectionLevelInfo) is not available.";
+            }
+            return false;
+        }
+
+        // 查询 PPL 枚举只需要受限查询权限，避免无谓请求 VM_READ。
+        const HANDLE processHandle = ::OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            ToDwordPid(pid));
+        if (processHandle == nullptr)
+        {
+            if (errorMessageOut != nullptr)
+            {
+                *errorMessageOut = "OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) failed: "
+                    + FormatLastErrorMessage(::GetLastError());
+            }
+            return false;
+        }
+
+        ProcessProtectionLevelInformationNative protectionInfo{};
+        const BOOL queryOk = getProcessInformation(
+            processHandle,
+            ProcessProtectionLevelInfoClass,
+            &protectionInfo,
+            static_cast<DWORD>(sizeof(protectionInfo)));
+        const DWORD queryError = ::GetLastError();
+        ::CloseHandle(processHandle);
+
+        if (queryOk == FALSE)
+        {
+            if (errorMessageOut != nullptr)
+            {
+                *errorMessageOut = "GetProcessInformation(ProcessProtectionLevelInfo) failed: "
+                    + FormatLastErrorMessage(queryError);
+            }
+            return false;
+        }
+
+        if (levelOut != nullptr)
+        {
+            *levelOut = static_cast<std::uint32_t>(protectionInfo.protectionLevel);
+        }
+        if (displayTextOut != nullptr)
+        {
+            *displayTextOut = ProcessProtectionLevelToText(protectionInfo.protectionLevel);
+        }
         return true;
     }
 

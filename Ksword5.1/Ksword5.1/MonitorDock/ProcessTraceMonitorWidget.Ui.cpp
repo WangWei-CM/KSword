@@ -357,6 +357,15 @@ void ProcessTraceMonitorWidget::initializeUi()
 
     m_rootLayout->addWidget(m_filterPanel, 0);
 
+    // ETW 时间轴：
+    // - 高度固定 40px，宽度由根布局自动填满；
+    // - 该控件只维护内部时间选区，不从图形点位反向推导事件集合；
+    // - 框选结果与下方事件表已有后置筛选器叠加生效。
+    m_eventTimelineWidget = new ProcessTraceTimelineWidget(this);
+    m_eventTimelineWidget->setToolTip(QStringLiteral(
+        "ETW 事件瀑布流时间轴：拖动矩形移动时间窗口；拖动左右边调整边界；滚轮向上放大窗口、向下缩小窗口。"));
+    m_rootLayout->addWidget(m_eventTimelineWidget, 0);
+
     // 事件表：
     // - 单独保留类型、Provider、根 PID、关系等列，便于后续筛选；
     // - Detail 列尽量保存属性摘要，便于用户再做文本二次过滤。

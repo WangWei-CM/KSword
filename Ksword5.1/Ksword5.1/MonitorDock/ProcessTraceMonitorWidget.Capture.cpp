@@ -1045,7 +1045,8 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
         processNameText = QStringLiteral("PID=%1").arg(displayPidValue);
     }
 
-    rowOut->time100nsText = QString::number(static_cast<qulonglong>(eventRecord->EventHeader.TimeStamp.QuadPart));
+    rowOut->time100ns = eventTimestamp100ns;
+    rowOut->time100nsText = QString::number(static_cast<qulonglong>(eventTimestamp100ns));
     rowOut->typeText = providerTypeText;
     rowOut->providerText = providerNameText;
     rowOut->eventId = eventIdValue;

@@ -1,6 +1,8 @@
 #include "LogDockWidget.h"
 #include "../theme.h"
 
+#include <algorithm>
+
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
@@ -8,6 +10,7 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QItemSelectionModel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
@@ -251,12 +254,16 @@ void LogDockWidget::initializeUi()
     m_actionLayout->addStretch(1);
 
     // 第三层：日志表格，要求不可编辑且占满 Dock。
+    // 选择策略：
+    // - SelectRows 让单击任意单元格时选中整行；
+    // - ExtendedSelection 支持 Ctrl+单击叠加多行选择；
+    // - 后续右键菜单会根据多选状态限制为“复制”动作。
     m_logTable = new QTableWidget(this);
     m_logTable->setColumnCount(TotalColumns);
     m_logTable->setHorizontalHeaderLabels(QStringList() << "" << "时间" << "内容" << "文件" << "函数");
     m_logTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_logTable->setSelectionBehavior(QAbstractItemView::SelectItems);
-    m_logTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_logTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_logTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_logTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_logTable->setWordWrap(false);
 
@@ -534,12 +541,46 @@ void LogDockWidget::showTableContextMenu(const QPoint& position)
         column = clickedItem->column();
     }
 
+    // selectedRowIndexes 用途：记录右键弹出前表格已有选中行。
+    // 如果用户 Ctrl+单击选中了多行，则右键菜单必须只保留“复制”。
+    std::vector<int> selectedRowIndexes = collectSelectedRowIndexes();
+    const bool clickedRowIsSelected =
+        std::find(selectedRowIndexes.cbegin(), selectedRowIndexes.cend(), row) != selectedRowIndexes.cend();
+
+    // 右键点到未选中行时，按常见表格行为切换到该单行。
+    // 这样普通右键不会误操作之前 Ctrl 多选留下的行集合。
+    const bool hasValidCell = row >= 0 && column >= 0 && row < static_cast<int>(m_visibleEvents.size());
+    if (hasValidCell && !clickedRowIsSelected)
+    {
+        m_logTable->clearSelection();
+        m_logTable->selectRow(row);
+        selectedRowIndexes.clear();
+        selectedRowIndexes.push_back(row);
+    }
+
     QMenu contextMenu(this);
+    contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+
+    // 多行选择场景：
+    // - 菜单只出现“复制”；
+    // - 复制范围固定为所有选中行，避免跟踪/单元格复制造成歧义。
+    if (selectedRowIndexes.size() > 1)
+    {
+        QAction* copySelectedRowsAction = contextMenu.addAction(createBlueThemedIcon(IconCopyPath), "复制");
+        copySelectedRowsAction->setEnabled(!selectedRowIndexes.empty());
+
+        QAction* selectedAction = contextMenu.exec(m_logTable->viewport()->mapToGlobal(position));
+        if (selectedAction == copySelectedRowsAction)
+        {
+            copySelectedRows();
+        }
+        return;
+    }
+
     QAction* copyCellAction = contextMenu.addAction(createBlueThemedIcon(IconCopyPath), "复制单元格");
     QAction* copyRowAction = contextMenu.addAction(createBlueThemedIcon(IconClipboardPath), "复制行");
 
     // 若未点中有效单元格，则复制操作不可用。
-    const bool hasValidCell = row >= 0 && column >= 0 && row < static_cast<int>(m_visibleEvents.size());
     copyCellAction->setEnabled(hasValidCell);
     copyRowAction->setEnabled(hasValidCell);
 
@@ -617,6 +658,36 @@ void LogDockWidget::copySingleRow(const int row)
     QApplication::clipboard()->setText(buildVisibleRowText(logItem));
 }
 
+void LogDockWidget::copySelectedRows()
+{
+    const std::vector<int> selectedRowIndexes = collectSelectedRowIndexes();
+    if (selectedRowIndexes.empty())
+    {
+        return;
+    }
+
+    QStringList lines;
+    lines.reserve(static_cast<int>(selectedRowIndexes.size()));
+
+    // selectedRowIndexes 已按界面行号升序排列，这里直接按视觉顺序输出。
+    for (const int row : selectedRowIndexes)
+    {
+        if (row < 0 || row >= static_cast<int>(m_visibleEvents.size()))
+        {
+            continue;
+        }
+
+        // 每一行仍复用 buildVisibleRowText，保证隐藏详细列时复制结果也不包含隐藏列。
+        const kEvent& logItem = m_visibleEvents[static_cast<std::size_t>(row)];
+        lines.push_back(buildVisibleRowText(logItem));
+    }
+
+    if (!lines.isEmpty())
+    {
+        QApplication::clipboard()->setText(lines.join("\n"));
+    }
+}
+
 void LogDockWidget::copyVisibleRows()
 {
     QStringList lines;
@@ -629,6 +700,33 @@ void LogDockWidget::copyVisibleRows()
     }
 
     QApplication::clipboard()->setText(lines.join("\n"));
+}
+
+std::vector<int> LogDockWidget::collectSelectedRowIndexes() const
+{
+    std::vector<int> selectedRows;
+    if (m_logTable == nullptr || m_logTable->selectionModel() == nullptr)
+    {
+        return selectedRows;
+    }
+
+    // selectedIndexes 用途：兼容 SelectRows 下的整行选择，也兼容未来可能出现的单元格选择。
+    // 同一行会出现多个列索引，因此后续必须排序去重。
+    const QModelIndexList selectedIndexes = m_logTable->selectionModel()->selectedIndexes();
+    selectedRows.reserve(static_cast<std::size_t>(selectedIndexes.size()));
+
+    for (const QModelIndex& selectedIndex : selectedIndexes)
+    {
+        const int row = selectedIndex.row();
+        if (row >= 0 && row < static_cast<int>(m_visibleEvents.size()))
+        {
+            selectedRows.push_back(row);
+        }
+    }
+
+    std::sort(selectedRows.begin(), selectedRows.end());
+    selectedRows.erase(std::unique(selectedRows.begin(), selectedRows.end()), selectedRows.end());
+    return selectedRows;
 }
 
 QString LogDockWidget::buildVisibleRowText(const kEvent& logItem) const

@@ -13,6 +13,8 @@
 #include <string>  // std::string：跨层统一文本类型（UTF-8）。
 #include <vector>  // std::vector：进程列表容器。
 
+#include "../../../../shared/driver/KswordArkProcessIoctl.h" // R0 进程扩展字段常量。
+
 namespace ks::process
 {
     // ProcessEnumStrategy：进程遍历策略。
@@ -177,6 +179,9 @@ namespace ks::process
         bool efficiencyModeSupported = false; // 是否成功查询效率模式状态。
         bool efficiencyModeEnabled = false;   // 是否启用效率模式（PowerThrottling ExecutionSpeed）。
         bool isAdmin = false;              // 进程令牌是否已提升（管理员权限）。
+        std::uint32_t protectionLevel = 0;  // PPL 保护级别枚举值，来自手动刷新快照。
+        bool protectionLevelKnown = false;  // protectionLevelKnown：true 表示本轮已手动查询 PPL。
+        std::string protectionLevelText;    // protectionLevelText：PPL 枚举文本，未刷新时保持空。
 
         // ======== 原始性能计数器（用于相邻两轮差值计算） ========
         std::uint64_t rawCpuTime100ns = 0;      // Kernel + User 总 CPU 时间（100ns）。
@@ -194,6 +199,33 @@ namespace ks::process
 
         bool staticDetailsReady = false;   // true 表示详情字段已完整填充。
         bool dynamicCountersReady = false; // true 表示性能计数器可用。
+
+        // ======== R0 / EPROCESS 扩展信息（Phase 2） ========
+        std::uint32_t r0Flags = 0;          // R0 枚举行原始 flags，例如隐藏进程标记。
+        std::uint32_t r0FieldFlags = 0;     // KSWORD_ARK_PROCESS_FIELD_* 可用性位图。
+        std::uint32_t r0Status = KSWORD_ARK_PROCESS_R0_STATUS_UNAVAILABLE; // R0 扩展读取状态。
+        std::uint64_t r0DynDataCapabilityMask = 0; // 驱动 DynData capability 位图快照。
+        std::string r0ImagePath;            // R0 通过公开 API 返回的镜像路径（通常是 NT 路径）。
+
+        std::uint8_t r0Protection = 0;      // EPROCESS.Protection 原始字节。
+        std::uint8_t r0SignatureLevel = 0;  // EPROCESS.SignatureLevel 原始字节。
+        std::uint8_t r0SectionSignatureLevel = 0; // EPROCESS.SectionSignatureLevel 原始字节。
+
+        std::uint32_t r0SessionSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE; // Session 字段来源。
+        std::uint32_t r0ImagePathSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE; // 镜像路径来源。
+        std::uint32_t r0ProtectionSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE; // Protection 来源。
+        std::uint32_t r0SignatureLevelSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE; // SignatureLevel 来源。
+        std::uint32_t r0SectionSignatureLevelSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE; // SectionSignatureLevel 来源。
+        std::uint32_t r0ObjectTableSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE; // ObjectTable 来源。
+        std::uint32_t r0SectionObjectSource = KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE; // SectionObject 来源。
+
+        std::uint32_t r0ProtectionOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE; // EPROCESS.Protection 偏移。
+        std::uint32_t r0SignatureLevelOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE; // EPROCESS.SignatureLevel 偏移。
+        std::uint32_t r0SectionSignatureLevelOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE; // EPROCESS.SectionSignatureLevel 偏移。
+        std::uint32_t r0ObjectTableOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE; // EPROCESS.ObjectTable 偏移。
+        std::uint32_t r0SectionObjectOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE; // EPROCESS.SectionObject 偏移。
+        std::uint64_t r0ObjectTableAddress = 0; // EPROCESS.ObjectTable 当前指针值。
+        std::uint64_t r0SectionObjectAddress = 0; // EPROCESS.SectionObject 当前指针值。
     };
 
     // ProcessModuleRecord：进程模块列表中的单行数据。
@@ -301,6 +333,20 @@ namespace ks::process
     // 参数 processRecord：目标记录（按引用修改）。
     // 返回值：true 成功；false 表示无法获取动态计数器。
     bool RefreshProcessDynamicCounters(ProcessRecord& processRecord);
+
+    // QueryProcessProtectionLevelByPid 作用：
+    // - 通过用户态 ProcessProtectionLevelInfo 查询目标进程 PPL 枚举；
+    // - 该值为手动刷新字段，ProcessDock 不把它写入跨轮静态缓存。
+    // 参数 pid：目标进程 PID。
+    // 参数 levelOut：输出 PROTECTION_LEVEL_* 原始枚举值，可为空。
+    // 参数 displayTextOut：输出可读文本，可为空。
+    // 参数 errorMessageOut：失败原因，可为空。
+    // 返回值：查询成功返回 true，失败返回 false。
+    bool QueryProcessProtectionLevelByPid(
+        std::uint32_t pid,
+        std::uint32_t* levelOut,
+        std::string* displayTextOut,
+        std::string* errorMessageOut = nullptr);
 
     // UpdateDerivedCounters 作用：
     // - 根据“上一轮样本 + 当前原始计数器”计算 CPU%、DiskMB/s；

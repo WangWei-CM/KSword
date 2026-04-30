@@ -33,6 +33,11 @@ namespace
 {
     constexpr wchar_t kUnlockerKeyName[] = L"Ksword.FileUnlocker";
 
+    // kStartupScaleRecommendedLogicalWidth 作用：
+    // - 定义启动分辨率审查的最低建议逻辑宽度；
+    // - 低于该宽度时才弹出缩放推荐对话框。
+    constexpr int kStartupScaleRecommendedLogicalWidth = 1920;
+
     // queryCurrentExecutablePath 作用：
     // - 动态获取当前进程可执行文件绝对路径；
     // - 兼容长路径，避免固定 MAX_PATH 缓冲区截断问题。
@@ -241,6 +246,31 @@ namespace
         return reinterpret_cast<INT_PTR>(shellResult) > 32;
     }
 
+    // tryLaunchRestartedSelfBeforeSplash 作用：
+    // - 在 QApplication 创建前按原命令行参数重新启动当前程序；
+    // - 用于缩放配置保存后，让新进程从冷启动阶段读取最新 QT_SCALE_FACTOR；
+    // - 当前进程只负责启动新实例，退出由 main 根据返回值执行。
+    // 返回：true=新实例已拉起；false=启动失败，调用方继续当前启动流程。
+    bool tryLaunchRestartedSelfBeforeSplash()
+    {
+        const std::wstring executablePath = queryCurrentExecutablePath();
+        if (executablePath.empty())
+        {
+            return false;
+        }
+
+        // parameterText 作用：保留本次启动参数，避免 --unlock 等入口在重启后丢失。
+        const std::wstring parameterText = extractCurrentProcessParameterText();
+        HINSTANCE shellResult = ::ShellExecuteW(
+            nullptr,
+            L"open",
+            executablePath.c_str(),
+            parameterText.empty() ? nullptr : parameterText.c_str(),
+            nullptr,
+            SW_SHOWNORMAL);
+        return reinterpret_cast<INT_PTR>(shellResult) > 32;
+    }
+
     // initializeProcessDpiAwareness 作用：
     // - 在主函数最早阶段设置进程 DPI 感知；
     // - 保证启动页与 Qt 主窗口的缩放行为稳定。
@@ -348,15 +378,16 @@ namespace
         const std::wstring currentScaleText = buildPercentText(currentScaleFactor);
         const std::wstring recommendedScaleText = buildPercentText(recommendedScaleFactor);
         const std::wstring dialogContentText =
-            L"当前可用宽度约 " + std::to_wstring(logicalClientWidth) + L"px，小于推荐的 1440px。\n"
+            L"当前可用宽度约 " + std::to_wstring(logicalClientWidth) + L"px，小于推荐的 "
+            + std::to_wstring(kStartupScaleRecommendedLogicalWidth) + L"px。\n"
             L"当前缩放：" + currentScaleText + L"\n"
             L"推荐缩放：" + recommendedScaleText + L"\n\n"
-            L"是否应用推荐缩放并在下次启动生效？";
+            L"是否应用推荐缩放？Ksword 将保存设置并立即重启。";
 
         // dialogButtons 作用：TaskDialog 自定义按钮集合。
         TASKDIALOG_BUTTON dialogButtons[] =
         {
-            { IDYES, L"应用推荐缩放" },
+            { IDYES, L"应用并重启" },
             { IDNO, L"保持当前设置" }
         };
 
@@ -390,15 +421,16 @@ namespace
     }
 
     // maybeApplyStartupScaleRecommendation 作用：
-    // - 当可用宽度小于 1440 时提示推荐缩放；
+    // - 当可用宽度小于最低建议宽度时提示推荐缩放；
     // - 可写回“缩放因子 + 不再提示”到配置文件。
     // 调用方式：QApplication 创建前调用。
     // 入参 startupSettings：启动配置对象（按需被更新）。
-    void maybeApplyStartupScaleRecommendation(ks::settings::AppearanceSettings* startupSettings)
+    // 返回：true=已启动重启实例，当前进程应立即退出；false=继续当前启动流程。
+    bool maybeApplyStartupScaleRecommendation(ks::settings::AppearanceSettings* startupSettings)
     {
         if (startupSettings == nullptr)
         {
-            return;
+            return false;
         }
 
         // scaleDecisionEvent 作用：串联启动缩放决策链路日志。
@@ -408,14 +440,14 @@ namespace
             info << scaleDecisionEvent
                 << "[main] 启动缩放推荐提示已禁用，跳过检测。"
                 << eol;
-            return;
+            return false;
         }
 
         const int physicalScreenWidth = std::max(1, ::GetSystemMetrics(SM_CXSCREEN));
         const int systemScalePercent = querySystemScalePercent();
         const int logicalClientWidth = static_cast<int>(
             std::lround((static_cast<double>(physicalScreenWidth) * 100.0) / static_cast<double>(systemScalePercent)));
-        if (logicalClientWidth >= 1440)
+        if (logicalClientWidth >= kStartupScaleRecommendedLogicalWidth)
         {
             info << scaleDecisionEvent
                 << "[main] 可用宽度满足要求，跳过推荐缩放。 logicalWidth="
@@ -423,13 +455,15 @@ namespace
                 << ", systemScalePercent="
                 << systemScalePercent
                 << eol;
-            return;
+            return false;
         }
 
         const double currentScaleFactor = ks::settings::normalizeWindowScaleFactor(
             startupSettings->startupWindowScaleFactor);
         const double recommendedScaleFactor = ks::settings::normalizeWindowScaleFactor(
-            std::min(1.0, static_cast<double>(logicalClientWidth) / 1440.0));
+            std::min(
+                1.0,
+                static_cast<double>(logicalClientWidth) / static_cast<double>(kStartupScaleRecommendedLogicalWidth)));
         if (recommendedScaleFactor >= currentScaleFactor - 0.0001)
         {
             info << scaleDecisionEvent
@@ -438,7 +472,7 @@ namespace
                 << ", recommended="
                 << recommendedScaleFactor
                 << eol;
-            return;
+            return false;
         }
 
         bool applyRecommendedScale = false;
@@ -454,7 +488,7 @@ namespace
             warn << scaleDecisionEvent
                 << "[main] 启动缩放推荐弹窗失败或被关闭，保持当前设置。"
                 << eol;
-            return;
+            return false;
         }
 
         bool hasSettingsChanged = false;
@@ -474,7 +508,7 @@ namespace
             info << scaleDecisionEvent
                 << "[main] 用户未修改缩放建议配置。"
                 << eol;
-            return;
+            return false;
         }
 
         QString saveErrorText;
@@ -485,7 +519,7 @@ namespace
                 << "[main] 启动缩放推荐配置保存失败, error="
                 << saveErrorText.toStdString()
                 << eol;
-            return;
+            return false;
         }
 
         info << scaleDecisionEvent
@@ -500,6 +534,27 @@ namespace
             << ", disablePrompt="
             << (startupSettings->startupScaleRecommendPromptDisabled ? "true" : "false")
             << eol;
+
+        if (!applyRecommendedScale)
+        {
+            return false;
+        }
+
+        // restartEvent 作用：记录“用户接受推荐缩放后立即重启”的执行结果。
+        kLogEvent restartEvent;
+        const bool restarted = tryLaunchRestartedSelfBeforeSplash();
+        if (!restarted)
+        {
+            err << restartEvent
+                << "[main] 启动缩放推荐配置已保存，但自动重启失败；继续当前启动流程。"
+                << eol;
+            return false;
+        }
+
+        info << restartEvent
+            << "[main] 用户已应用启动缩放推荐，新实例已启动，当前实例退出。"
+            << eol;
+        return true;
     }
 
     // applyQtScaleFactorEnvironment 作用：
@@ -697,7 +752,10 @@ int main(int argc, char* argv[])
 
     // startupSettings 作用：缓存本次启动所需配置快照。
     ks::settings::AppearanceSettings startupSettings = ks::settings::loadAppearanceSettings();
-    maybeApplyStartupScaleRecommendation(&startupSettings);
+    if (maybeApplyStartupScaleRecommendation(&startupSettings))
+    {
+        return 0;
+    }
 
     if (startupSettings.autoRequestAdminOnStartup && !isCurrentProcessElevated())
     {
