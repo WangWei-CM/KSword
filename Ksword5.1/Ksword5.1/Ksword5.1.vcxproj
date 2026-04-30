@@ -1,5 +1,5 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
-<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<?xml version='1.0' encoding='utf-8'?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build" ToolsVersion="17.0">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
@@ -28,7 +28,7 @@
     <ConfigurationType>Application</ConfigurationType>
     <PlatformToolset>v143</PlatformToolset>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
@@ -36,12 +36,7 @@
     <Import Project="$(QtMsBuild)\qt_defaults.props" />
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
-    <!--
-      QtInstall 解析优先级（便于命令行构建）：
-      1) KSWORD_QT_DIR 环境变量（推荐）
-      2) QTDIR 环境变量
-      3) 旧配置名 "Qt"（依赖 Qt VS Tools 注册表映射）
-    -->
+    
     <QtInstall Condition="'$(KSWORD_QT_DIR)' != ''">$(KSWORD_QT_DIR)</QtInstall>
     <QtInstall Condition="'$(QtInstall)' == '' and '$(QTDIR)' != ''">$(QTDIR)</QtInstall>
     <QtInstall Condition="'$(QtInstall)' == ''">Qt</QtInstall>
@@ -49,7 +44,7 @@
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
-    <!-- Release 与 Debug 保持同样的 QtInstall 解析策略 -->
+    
     <QtInstall Condition="'$(KSWORD_QT_DIR)' != ''">$(KSWORD_QT_DIR)</QtInstall>
     <QtInstall Condition="'$(QtInstall)' == '' and '$(QTDIR)' != ''">$(QTDIR)</QtInstall>
     <QtInstall Condition="'$(QtInstall)' == ''">Qt</QtInstall>
@@ -94,7 +89,7 @@
       <LanguageStandard>stdcpp23</LanguageStandard>
       <Optimization>Disabled</Optimization>
       <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
-      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <Link>
@@ -258,7 +253,7 @@
     </QtMoc>
     <ClCompile Include="main.cpp" />
     <QtUic Include="WelcomeDock\Welcome.ui" />
-  </ItemGroup>
+  <ClCompile Include="ArkDriverClient\ArkDriverClient.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverError.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverCapabilities.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverProcess.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverFile.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp" /></ItemGroup>
   <ItemGroup>
     <QtMoc Include="MainWindow.h" />
     <QtMoc Include="Framework\CustomTitleBar.h" />
@@ -326,7 +321,7 @@
     <ClInclude Include="MonitorDock\WinApiMonitorProtocol.h" />
     <ClInclude Include="WindowDock\WindowDock.h" />
     <QtMoc Include="WelcomeDock\WelcomeDock.h" />
-  </ItemGroup>
+  <ClInclude Include="ArkDriverClient\ArkDriverClient.h" /><ClInclude Include="ArkDriverClient\ArkDriverTypes.h" /><ClInclude Include="ArkDriverClient\ArkDriverError.h" /><ClInclude Include="ArkDriverClient\ArkDriverCapabilities.h" /></ItemGroup>
   <ItemGroup>
     <None Include="qtvars.pro" />
   </ItemGroup>

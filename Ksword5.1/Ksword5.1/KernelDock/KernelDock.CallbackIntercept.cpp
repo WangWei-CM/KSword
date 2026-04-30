@@ -3,8 +3,7 @@
 #include "KernelDock.CallbackIntercept.h"
 #include "KernelDock.CallbackPromptManager.h"
 #include "../theme.h"
-
-#include "../../../shared/KswordArkLogProtocol.h"
+#include "../ArkDriverClient/ArkDriverClient.h"
 
 #include <QApplication>
 #include <QAbstractItemView>
@@ -2613,46 +2612,20 @@ private:
             return false;
         }
 
-        HANDLE driverHandle = ::CreateFileW(
-            KSWORD_ARK_LOG_WIN32_PATH,
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        if (driverHandle == INVALID_HANDLE_VALUE)
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::CallbackRuntimeResult runtimeResult = driverClient.queryCallbackRuntimeState();
+        if (!runtimeResult.io.ok)
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("连接驱动失败，error=%1").arg(::GetLastError());
+                *errorTextOut = QStringLiteral("获取驱动状态失败，error=%1，detail=%2")
+                    .arg(runtimeResult.io.win32Error)
+                    .arg(QString::fromStdString(runtimeResult.io.message));
             }
             return false;
         }
 
-        KSWORD_ARK_CALLBACK_RUNTIME_STATE runtimeState{};
-        DWORD bytesReturned = 0;
-        const BOOL ioctlOk = ::DeviceIoControl(
-            driverHandle,
-            IOCTL_KSWORD_ARK_GET_CALLBACK_RUNTIME_STATE,
-            nullptr,
-            0,
-            &runtimeState,
-            static_cast<DWORD>(sizeof(runtimeState)),
-            &bytesReturned,
-            nullptr);
-        ::CloseHandle(driverHandle);
-
-        if (ioctlOk == FALSE || bytesReturned < sizeof(runtimeState))
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = QStringLiteral("获取驱动状态失败，error=%1").arg(::GetLastError());
-            }
-            return false;
-        }
-
-        *runtimeStateOut = runtimeState;
+        *runtimeStateOut = runtimeResult.state;
         return true;
     }
 
@@ -2704,45 +2677,20 @@ private:
             return;
         }
 
-        HANDLE driverHandle = ::CreateFileW(
-            KSWORD_ARK_LOG_WIN32_PATH,
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        if (driverHandle == INVALID_HANDLE_VALUE)
-        {
-            const DWORD lastError = ::GetLastError();
-            QMessageBox::warning(
-                m_hostPage,
-                QStringLiteral("驱动回调"),
-                QStringLiteral("连接驱动失败，error=%1。").arg(lastError));
-            appendAppLog(QStringLiteral("连接驱动失败，error=%1").arg(lastError));
-            return;
-        }
-
-        DWORD bytesReturned = 0;
-        const BOOL ioctlOk = ::DeviceIoControl(
-            driverHandle,
-            IOCTL_KSWORD_ARK_SET_CALLBACK_RULES,
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::IoResult applyResult = driverClient.setCallbackRules(
             blobBytes.data(),
-            static_cast<DWORD>(blobBytes.size()),
-            nullptr,
-            0,
-            &bytesReturned,
-            nullptr);
-        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
-        ::CloseHandle(driverHandle);
+            static_cast<unsigned long>(blobBytes.size()));
 
-        if (ioctlOk == FALSE)
+        if (!applyResult.ok)
         {
             QMessageBox::warning(
                 m_hostPage,
                 QStringLiteral("驱动回调"),
-                QStringLiteral("应用到驱动失败，error=%1。").arg(ioctlError));
-            appendAppLog(QStringLiteral("应用到驱动失败，error=%1").arg(ioctlError));
+                QStringLiteral("应用到驱动失败，error=%1。").arg(applyResult.win32Error));
+            appendAppLog(QStringLiteral("应用到驱动失败，error=%1，detail=%2")
+                .arg(applyResult.win32Error)
+                .arg(QString::fromStdString(applyResult.message)));
             return;
         }
 

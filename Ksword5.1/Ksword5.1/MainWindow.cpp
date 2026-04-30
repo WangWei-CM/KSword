@@ -2538,6 +2538,11 @@ void MainWindow::initPrivilegeStatusButtons()
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
         }
+
+        // Qt ignores the slot return value, but early failure paths in this
+        // lambda return an int for legacy flow control. Return a final success
+        // value so every compiler-visible path is explicit and warning-free.
+        return 0;
     });
 
     // TI 按钮：展示 TrustedInstaller 身份状态。
@@ -2768,6 +2773,11 @@ void MainWindow::initPrivilegeStatusButtons()
             CloseHandle(pi.hThread);
             CloseHandle(hNewToken);
         }
+
+        // Qt ignores the slot return value, but early failure paths in this
+        // lambda return an int for legacy flow control. Return a final success
+        // value so every compiler-visible path is explicit and warning-free.
+        return 0;
     });
 
     // R0 按钮：
@@ -5285,6 +5295,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         .arg(disabledTextColor)
         .arg(comboArrowIconPath);
 
+    // tabStyle 作用：统一普通 Tab 与 ADS Dock Tab 的颜色、边距和选中态。
+    // 字号不在这里设置，保证所有 Tab 栏继承 Qt 默认应用字号。
     const QString tabStyle = QStringLiteral(
         "QTabBar{"
         "  border:none !important;"
@@ -5297,11 +5309,9 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  padding:3px 12px;"
         "  min-height:22px;"
         "  margin:0px;"
-        "  font-size:15px;"
         "}"
         "QTabBar::tab:left,QTabBar::tab:right{"
         "  padding:5px 6px;"
-        "  font-size:15px;"
         "}"
         "QTabBar::tab:selected{"
         "  background-color:%4 !important;"
@@ -5325,11 +5335,9 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  padding:3px 12px;"
         "  margin:0px;"
         "  min-height:22px;"
-        "  font-size:15px;"
         "}"
         "ads--CDockWidgetTab QLabel,ads--CAutoHideTab QLabel{"
         "  color:%2 !important;"
-        "  font-size:15px;"
         "}"
         "ads--CDockWidgetTab[activeTab=\"true\"],ads--CAutoHideTab[activeTab=\"true\"]{"
         "  background-color:%4 !important;"

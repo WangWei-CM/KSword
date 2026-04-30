@@ -12,11 +12,12 @@
 
 R3 与 R0 的通信结构体/IOCTL 常量统一放在 `shared/driver/` 目录，不允许分散定义在 UI 文件或驱动私有头里。新增通信协议时，必须先在 `shared/driver/` 建头文件，再让 R3/R0 同时 include 这一个文件。
 凡是使用 R0 的功能入口（按钮、面板、弹窗、右键菜单、专用功能区），右下角必须放置这张图：`H:\Project\Ksword5.1\Ksword5.1\Ksword5.1\Resource\Kernel.png`。这是统一视觉标识，不能省略。
-R0 结束进程功能代码放置规范：
-- R3 入口：`Ksword5.1/Ksword5.1/ProcessDock/ProcessDock.cpp` 的进程列表右键菜单动作；动作函数只负责收集 PID、调用驱动、写日志和刷新。
-- R3 协议定义：`shared/driver/KswordArkProcessIoctl.h`（PID/退出码结构与 IOCTL 号）。
-- R0 分发入口：`KswordARKDriver/Queue.c` 的 `KswordARKDriverEvtIoDeviceControl`；这里做 IOCTL 解析、参数校验、日志。
-- R0 执行要求：驱动侧实际结束进程必须走 `ZwTerminateProcess`，并通过现有日志通道输出 `[Info]/[Warn]/[Error]...END_OF_LOG`。
+R0/R3 调用放置规范：
+- R3 协议定义只允许放在仓库根目录 `shared/driver/`，UI 文件不得重复定义 IOCTL 常量或结构体。
+- R3 访问 KswordARK 驱动必须统一通过 `Ksword5.1/Ksword5.1/ArkDriverClient/`。
+- Dock UI 文件只负责收集参数、展示结果、写日志和刷新界面，不直接 `CreateFileW(\\.\KswordARKLog)`，也不直接调用 KswordARK `DeviceIoControl`。
+- R0 分发入口为 `KswordARKDriver/src/dispatch/ioctl_dispatch.c`，该文件只做 registry 查表、handler 调用、统一日志和完成请求。
+- R0 业务 handler 分布在 `KswordARKDriver/src/features/<module>/<module>_ioctl.c`，真实执行逻辑放在对应 feature action/query 文件。
 
 > 本文档描述 `Framework.h` 日志系统的调用方式与语法规范。  
 > 适用范围：Windows 平台下的 KswordARK/Ksword5.1 工程。
@@ -229,3 +230,11 @@ msbuild .\Ksword5.1.sln /t:Build "/p:Configuration=Debug;Platform=x64" /m
   - `["msbuild"]`
 
 这样后续大多数构建命令可直接执行，减少重复确认。
+
+
+## 协作 ownership
+
+- Owner B 负责 `ArkDriverClient/`，其它 Dock 需要新增 R0 调用时先扩展 client，再在 UI 中调用结构化接口。
+- Owner E/F/D 分别修改 ProcessDock、FileDock/句柄、KernelDock，避免多人同时编辑同一个 Dock 大文件。
+- 新增 `.cpp/.h` 必须同步加入 `Ksword5.1.vcxproj` 与 `.filters`。
+- 不允许使用 `.inc` 堆叠方式拆文件；按 Tab、worker、client 模块拆成明确 `.cpp/.h`。

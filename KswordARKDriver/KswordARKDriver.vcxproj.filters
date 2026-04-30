@@ -1,5 +1,5 @@
-<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<?xml version='1.0' encoding='utf-8'?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
   <ItemGroup>
     <Filter Include="Source Files">
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
@@ -41,7 +41,7 @@
     <Filter Include="Header Files\\Platform">
       <UniqueIdentifier>{B602E1B8-4706-46D8-B612-F762DFDDFCF6}</UniqueIdentifier>
     </Filter>
-  </ItemGroup>
+  <Filter Include="Source Files\Dispatch"><UniqueIdentifier>{00000000-0000-0000-0000-000000000000}</UniqueIdentifier></Filter><Filter Include="Source Files\Features"><UniqueIdentifier>{00000000-0000-0000-0000-000000000000}</UniqueIdentifier></Filter><Filter Include="Source Files\Features\Kernel"><UniqueIdentifier>{00000000-0000-0000-0000-000000000000}</UniqueIdentifier></Filter><Filter Include="Source Files\Features\Callback"><UniqueIdentifier>{00000000-0000-0000-0000-000000000000}</UniqueIdentifier></Filter></ItemGroup>
   <ItemGroup>
     <None Include="ReadMe.txt" />
   </ItemGroup>
@@ -99,7 +99,7 @@
     <ClInclude Include="src\platform\process_resolver.h">
       <Filter>Header Files\Platform</Filter>
     </ClInclude>
-  </ItemGroup>
+  <ClInclude Include="src\dispatch\ioctl_registry.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\dispatch\ioctl_validation.h"><Filter>Header Files</Filter></ClInclude></ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\features\callback\callback_runtime.c">
       <Filter>Source Files\Features\Callback</Filter>
@@ -155,5 +155,5 @@
     <ClCompile Include="src\platform\process_resolver.c">
       <Filter>Source Files\Platform</Filter>
     </ClCompile>
-  </ItemGroup>
+  <ClCompile Include="src\dispatch\ioctl_registry.c"><Filter>Source Files\Dispatch</Filter></ClCompile><ClCompile Include="src\dispatch\ioctl_validation.c"><Filter>Source Files\Dispatch</Filter></ClCompile><ClCompile Include="src\features\process\process_ioctl.c"><Filter>Source Files\Features</Filter></ClCompile><ClCompile Include="src\features\file\file_ioctl.c"><Filter>Source Files\Features</Filter></ClCompile><ClCompile Include="src\features\kernel\kernel_ioctl.c"><Filter>Source Files\Features\Kernel</Filter></ClCompile><ClCompile Include="src\features\callback\callback_ioctl.c"><Filter>Source Files\Features\Callback</Filter></ClCompile></ItemGroup>
 </Project>

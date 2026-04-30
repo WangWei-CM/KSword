@@ -1,7 +1,6 @@
-﻿#include "KernelDock.h"
+#include "KernelDock.h"
 
-#include "../../../shared/KswordArkLogProtocol.h"
-#include "../../../shared/driver/KswordArkCallbackIoctl.h"
+#include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../theme.h"
 
@@ -13,23 +12,9 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QVBoxLayout>
-#include <QMutex>
-#include <QMutexLocker>
 
 namespace
 {
-    QMutex& callbackRemoveHandleMutex()
-    {
-        static QMutex handleMutex;
-        return handleMutex;
-    }
-
-    HANDLE& callbackRemoveCachedHandle()
-    {
-        static HANDLE cachedHandle = INVALID_HANDLE_VALUE;
-        return cachedHandle;
-    }
-
     // callbackRemoveParseAddress：
     // - 作用：把输入文本解析为 64 位地址（支持 0x 前缀）。
     bool callbackRemoveParseAddress(const QString& textValue, quint64& addressOut)
@@ -157,36 +142,7 @@ namespace
         return mappedServiceName;
     }
 
-    // callbackRemoveAcquireDriverHandle：缓存驱动句柄，避免每次点击都重复打开设备。
-    HANDLE callbackRemoveAcquireDriverHandle()
-    {
-        QMutexLocker lockGuard(&callbackRemoveHandleMutex());
-        if (callbackRemoveCachedHandle() != INVALID_HANDLE_VALUE)
-        {
-            return callbackRemoveCachedHandle();
-        }
 
-        callbackRemoveCachedHandle() = ::CreateFileW(
-            KSWORD_ARK_LOG_WIN32_PATH,
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        return callbackRemoveCachedHandle();
-    }
-
-    // callbackRemoveInvalidateDriverHandle：当句柄失效时重置缓存。
-    void callbackRemoveInvalidateDriverHandle()
-    {
-        QMutexLocker lockGuard(&callbackRemoveHandleMutex());
-        if (callbackRemoveCachedHandle() != INVALID_HANDLE_VALUE)
-        {
-            ::CloseHandle(callbackRemoveCachedHandle());
-            callbackRemoveCachedHandle() = INVALID_HANDLE_VALUE;
-        }
-    }
 }
 
 void KernelDock::initializeCallbackRemoveTab()
@@ -241,15 +197,6 @@ void KernelDock::initializeCallbackRemoveTab()
     m_callbackRemoveLayout->addWidget(m_callbackRemoveDetailEditor, 1);
 
     connect(m_callbackRemoveButton, &QPushButton::clicked, this, [this]() {
-        HANDLE deviceHandle = callbackRemoveAcquireDriverHandle();
-        if (deviceHandle == INVALID_HANDLE_VALUE)
-        {
-            const DWORD errorCode = ::GetLastError();
-            m_callbackRemoveStatusLabel->setText(QStringLiteral("状态：连接驱动失败，error=%1").arg(errorCode));
-            QMessageBox::warning(this, QStringLiteral("回调移除"), m_callbackRemoveStatusLabel->text());
-            return;
-        }
-
         quint64 callbackAddress = 0;
         if (!callbackRemoveParseAddress(m_callbackRemoveAddressEdit->text(), callbackAddress) || callbackAddress == 0)
         {
@@ -264,26 +211,18 @@ void KernelDock::initializeCallbackRemoveTab()
         requestPacket.flags = KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_FLAG_NONE;
         requestPacket.callbackAddress = callbackAddress;
 
-        KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE responsePacket{};
-        DWORD bytesReturned = 0;
-        const BOOL ioctlOk = ::DeviceIoControl(
-            deviceHandle,
-            IOCTL_KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK,
-            &requestPacket,
-            static_cast<DWORD>(sizeof(requestPacket)),
-            &responsePacket,
-            static_cast<DWORD>(sizeof(responsePacket)),
-            &bytesReturned,
-            nullptr);
-        const DWORD lastError = ::GetLastError();
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::CallbackRemoveResult removeResult = driverClient.removeExternalCallback(requestPacket);
+        const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE& responsePacket = removeResult.response;
+        const DWORD bytesReturned = removeResult.io.bytesReturned;
 
-        if (!ioctlOk)
+        if (!removeResult.io.ok)
         {
-            callbackRemoveInvalidateDriverHandle();
-            m_callbackRemoveStatusLabel->setText(QStringLiteral("状态：移除失败，error=%1").arg(lastError));
-            m_callbackRemoveDetailEditor->setText(QStringLiteral("DeviceIoControl 失败，Win32 错误码=%1。\n地址=0x%2")
-                .arg(lastError)
-                .arg(QString::number(callbackAddress, 16).toUpper()));
+            m_callbackRemoveStatusLabel->setText(QStringLiteral("状态：移除失败，error=%1").arg(removeResult.io.win32Error));
+            m_callbackRemoveDetailEditor->setText(QStringLiteral("ArkDriverClient 调用失败，Win32 错误码=%1。\n地址=0x%2\n详情=%3")
+                .arg(removeResult.io.win32Error)
+                .arg(QString::number(callbackAddress, 16).toUpper())
+                .arg(QString::fromStdString(removeResult.io.message)));
             QMessageBox::warning(this, QStringLiteral("回调移除"), m_callbackRemoveStatusLabel->text());
             return;
         }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ntddk.h>
+#include "driver/KswordArkFileIoctl.h"
 
 EXTERN_C_START
 

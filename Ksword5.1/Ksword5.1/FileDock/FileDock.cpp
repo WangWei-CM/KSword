@@ -1,4 +1,4 @@
-﻿#include "FileDock.h"
+#include "FileDock.h"
 #include "FilePropertyPeAnalyzer.h"
 #include "FileHandleUsageScanner.h"
 
@@ -12,9 +12,7 @@
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/HexEditorWidget.h"
-#include "../../../shared/KswordArkLogProtocol.h"
-#include "../../../shared/driver/KswordArkFileIoctl.h"
-#include "../../../shared/driver/KswordArkProcessIoctl.h"
+#include "../ArkDriverClient/ArkDriverClient.h"
 
 #include <QApplication>
 #include <QAbstractItemView>
@@ -253,24 +251,18 @@ namespace
     }
 
     // openKswordArkDriverHandle：
-    // - 作用：连接 KswordARK 控制设备，供后续多次发送删除 IOCTL；
-    // - 失败时返回 INVALID_HANDLE_VALUE，并写出详细错误描述。
-    HANDLE openKswordArkDriverHandle(std::string* const detailTextOut)
+    // - 作用：通过 ArkDriverClient 连接 KswordARK 控制设备；
+    // - 返回 move-only 句柄对象，避免 Dock 直接 CloseHandle。
+    ksword::ark::DriverHandle openKswordArkDriverHandle(std::string* const detailTextOut)
     {
         if (detailTextOut != nullptr)
         {
             detailTextOut->clear();
         }
 
-        const HANDLE driverHandle = ::CreateFileW(
-            KSWORD_ARK_LOG_WIN32_PATH,
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        if (driverHandle != INVALID_HANDLE_VALUE)
+        const ksword::ark::DriverClient driverClient;
+        ksword::ark::DriverHandle driverHandle = driverClient.open();
+        if (driverHandle.isValid())
         {
             return driverHandle;
         }
@@ -279,17 +271,17 @@ namespace
         {
             const DWORD lastError = ::GetLastError();
             std::ostringstream oss;
-            oss << "CreateFileW(" << "\\\\.\\KswordARKLog" << ") failed, error=" << lastError;
+            oss << "open KswordARK driver failed, error=" << lastError;
             *detailTextOut = oss.str();
         }
-        return INVALID_HANDLE_VALUE;
+        return driverHandle;
     }
 
     // deletePathByR0Driver：
-    // - 作用：向 KswordARK 驱动发送“删除单一路径”IOCTL；
+    // - 作用：向 ArkDriverClient 发送“删除单一路径”IOCTL；
     // - 参数 isDirectory 用于驱动端选择目录/文件打开语义。
     bool deletePathByR0Driver(
-        const HANDLE driverHandle,
+        ksword::ark::DriverHandle& driverHandle,
         const QString& path,
         const bool isDirectory,
         std::string* const detailTextOut)
@@ -299,7 +291,7 @@ namespace
             detailTextOut->clear();
         }
 
-        if (driverHandle == nullptr || driverHandle == INVALID_HANDLE_VALUE)
+        if (!driverHandle.isValid())
         {
             if (detailTextOut != nullptr)
             {
@@ -319,60 +311,36 @@ namespace
         }
 
         const std::wstring ntPathText = driverNtPath.toStdWString();
-        if (ntPathText.empty() || ntPathText.size() >= KSWORD_ARK_DELETE_PATH_MAX_CHARS)
-        {
-            if (detailTextOut != nullptr)
-            {
-                std::ostringstream oss;
-                oss << "path too long for ioctl, chars=" << ntPathText.size();
-                *detailTextOut = oss.str();
-            }
-            return false;
-        }
-
-        KSWORD_ARK_DELETE_PATH_REQUEST request{};
-        request.flags = isDirectory ? KSWORD_ARK_DELETE_PATH_FLAG_DIRECTORY : 0UL;
-        request.pathLengthChars = static_cast<unsigned short>(ntPathText.size());
-        std::copy(ntPathText.begin(), ntPathText.end(), request.path);
-        request.path[request.pathLengthChars] = L'\0';
-
-        DWORD bytesReturned = 0;
-        const BOOL ioctlOk = ::DeviceIoControl(
-            driverHandle,
-            IOCTL_KSWORD_ARK_DELETE_PATH,
-            &request,
-            static_cast<DWORD>(sizeof(request)),
-            nullptr,
-            0,
-            &bytesReturned,
-            nullptr);
-        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
-
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::IoResult result = driverClient.deletePath(driverHandle, ntPathText, isDirectory);
         if (detailTextOut != nullptr)
         {
             std::ostringstream oss;
             oss << "path=" << QDir::toNativeSeparators(path).toStdString()
                 << ", directory=" << (isDirectory ? 1 : 0)
-                << ", bytesReturned=" << bytesReturned;
-            if (ioctlOk)
+                << ", bytesReturned=" << result.bytesReturned;
+            if (result.ok)
             {
                 oss << ", ioctl=ok";
             }
             else
             {
-                oss << ", ioctl=fail, error=" << ioctlError;
+                oss << ", ioctl=fail, error=" << result.win32Error;
+                if (!result.message.empty())
+                {
+                    oss << ", detail=" << result.message;
+                }
             }
             *detailTextOut = oss.str();
         }
-
-        return ioctlOk != FALSE;
+        return result.ok;
     }
 
     // terminateProcessByR0Driver：
-    // - 作用：复用同一个驱动句柄，向 R0 发送结束进程 IOCTL；
+    // - 作用：复用同一个 ArkDriverClient 句柄发送结束进程 IOCTL；
     // - 返回值：true=驱动返回成功，false=驱动返回失败或句柄无效。
     bool terminateProcessByR0Driver(
-        const HANDLE driverHandle,
+        ksword::ark::DriverHandle& driverHandle,
         const std::uint32_t processId,
         std::string* const detailTextOut)
     {
@@ -381,7 +349,7 @@ namespace
             detailTextOut->clear();
         }
 
-        if (driverHandle == nullptr || driverHandle == INVALID_HANDLE_VALUE)
+        if (!driverHandle.isValid())
         {
             if (detailTextOut != nullptr)
             {
@@ -399,39 +367,16 @@ namespace
             return false;
         }
 
-        KSWORD_ARK_TERMINATE_PROCESS_REQUEST request{};
-        request.processId = processId;
-        request.exitStatus = static_cast<long>(0xC0000005u);
-
-        DWORD bytesReturned = 0;
-        const BOOL ioctlOk = ::DeviceIoControl(
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::IoResult result = driverClient.terminateProcess(
             driverHandle,
-            IOCTL_KSWORD_ARK_TERMINATE_PROCESS,
-            &request,
-            static_cast<DWORD>(sizeof(request)),
-            nullptr,
-            0,
-            &bytesReturned,
-            nullptr);
-        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
-
+            processId,
+            static_cast<long>(0xC0000005u));
         if (detailTextOut != nullptr)
         {
-            std::ostringstream oss;
-            oss << "pid=" << processId
-                << ", bytesReturned=" << bytesReturned;
-            if (ioctlOk)
-            {
-                oss << ", ioctl=ok";
-            }
-            else
-            {
-                oss << ", ioctl=fail, error=" << ioctlError;
-            }
-            *detailTextOut = oss.str();
+            *detailTextOut = result.message;
         }
-
-        return ioctlOk != FALSE;
+        return result.ok;
     }
 
     bool terminateProcessByR3(
@@ -4888,8 +4833,8 @@ void FileDock::deleteSelectedItemByDriver(FilePanelWidgets& panel)
     }
 
     std::string openDriverDetailText;
-    const HANDLE driverHandle = openKswordArkDriverHandle(&openDriverDetailText);
-    if (driverHandle == INVALID_HANDLE_VALUE)
+    ksword::ark::DriverHandle driverHandle = openKswordArkDriverHandle(&openDriverDetailText);
+    if (!driverHandle.isValid())
     {
         kLogEvent event;
         warn << event
@@ -4946,7 +4891,7 @@ void FileDock::deleteSelectedItemByDriver(FilePanelWidgets& panel)
         kPro.set(progressPid, "驱动删除处理中", 0, progress);
     }
 
-    ::CloseHandle(driverHandle);
+    driverHandle.reset();
 
     refreshPanel(panel);
     kPro.set(progressPid, "驱动删除完成", 0, 100.0f);
@@ -5194,12 +5139,12 @@ void FileDock::unlockPathsByDriver(
             0,
             55.0f);
 
-        HANDLE driverHandle = INVALID_HANDLE_VALUE;
+        ksword::ark::DriverHandle driverHandle;
         if (jobResult.terminateMode == UnlockTerminateMode::R0)
         {
             std::string openDriverDetailText;
             driverHandle = openKswordArkDriverHandle(&openDriverDetailText);
-            if (driverHandle == INVALID_HANDLE_VALUE)
+            if (!driverHandle.isValid())
             {
                 jobResult.driverErrorText = QString::fromStdString(openDriverDetailText);
             }
@@ -5212,7 +5157,7 @@ void FileDock::unlockPathsByDriver(
         }
 
         if (jobResult.terminateMode == UnlockTerminateMode::R0
-            && (driverHandle == nullptr || driverHandle == INVALID_HANDLE_VALUE))
+            && !driverHandle.isValid())
         {
             jobResult.terminateFailList.push_back(
                 QStringLiteral("R0 驱动连接失败：%1")
@@ -5267,10 +5212,7 @@ void FileDock::unlockPathsByDriver(
             }
         }
 
-        if (driverHandle != nullptr && driverHandle != INVALID_HANDLE_VALUE)
-        {
-            ::CloseHandle(driverHandle);
-        }
+        driverHandle.reset();
 
         if (safeThis.isNull())
         {

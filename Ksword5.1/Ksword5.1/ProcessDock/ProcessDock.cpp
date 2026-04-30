@@ -1,9 +1,8 @@
-﻿#include "ProcessDock.h"
+#include "ProcessDock.h"
 
 #include "../theme.h"
 #include "ProcessDetailWindow.h"
-#include "../../../shared/KswordArkLogProtocol.h"
-#include "../../../shared/driver/KswordArkProcessIoctl.h"
+#include "../ArkDriverClient/ArkDriverClient.h"
 
 #include <QAbstractItemView>
 #include <QAbstractScrollArea>
@@ -237,8 +236,8 @@ namespace
     }
 
     // terminateProcessByR0Driver 作用：
-    // - 通过 R0 驱动设备发送“结束进程”IOCTL；
-    // - 使用共享协议头中的结构体，避免两侧字段漂移。
+    // - 通过 ArkDriverClient 发送“结束进程”IOCTL；
+    // - Dock 不再直接打开 KswordARK 设备或调用 DeviceIoControl。
     bool terminateProcessByR0Driver(const std::uint32_t targetPid, std::string* const detailTextOut)
     {
         if (detailTextOut != nullptr)
@@ -255,68 +254,20 @@ namespace
             return false;
         }
 
-        const HANDLE driverHandle = ::CreateFileW(
-            KSWORD_ARK_LOG_WIN32_PATH,
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        if (driverHandle == INVALID_HANDLE_VALUE)
-        {
-            const DWORD lastError = ::GetLastError();
-            if (detailTextOut != nullptr)
-            {
-                std::ostringstream oss;
-                oss << "CreateFileW(" << "\\\\.\\KswordARKLog" << ") failed, error=" << lastError;
-                *detailTextOut = oss.str();
-            }
-            return false;
-        }
-
-        KSWORD_ARK_TERMINATE_PROCESS_REQUEST request{};
-        request.processId = targetPid;
-        request.exitStatus = static_cast<long>(0xC0000005u);
-
-        DWORD bytesReturned = 0;
-        const BOOL ioctlOk = ::DeviceIoControl(
-            driverHandle,
-            IOCTL_KSWORD_ARK_TERMINATE_PROCESS,
-            &request,
-            static_cast<DWORD>(sizeof(request)),
-            nullptr,
-            0,
-            &bytesReturned,
-            nullptr);
-        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
-        ::CloseHandle(driverHandle);
-
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::IoResult result = driverClient.terminateProcess(
+            targetPid,
+            static_cast<long>(0xC0000005u));
         if (detailTextOut != nullptr)
         {
-            std::ostringstream oss;
-            oss << "pid=" << targetPid << ", bytesReturned=" << bytesReturned;
-            if (ioctlOk)
-            {
-                oss << ", ioctl=ok";
-            }
-            else
-            {
-                oss << ", ioctl=fail, error=" << ioctlError;
-                if (ioctlError == ERROR_ACCESS_DENIED)
-                {
-                    oss << " (driver returned failing NTSTATUS, check R0 log for status)";
-                }
-            }
-            *detailTextOut = oss.str();
+            *detailTextOut = result.message;
         }
-
-        return ioctlOk != FALSE;
+        return result.ok;
     }
 
     // suspendProcessByR0Driver 作用：
-    // - 通过 R0 驱动设备发送“挂起进程”IOCTL；
-    // - 使用共享协议头中的结构体，避免两侧字段漂移。
+    // - 通过 ArkDriverClient 发送“挂起进程”IOCTL；
+    // - 保持旧 detailText 输出格式，降低 UI 行为变化。
     bool suspendProcessByR0Driver(const std::uint32_t targetPid, std::string* const detailTextOut)
     {
         if (detailTextOut != nullptr)
@@ -333,62 +284,17 @@ namespace
             return false;
         }
 
-        const HANDLE driverHandle = ::CreateFileW(
-            KSWORD_ARK_LOG_WIN32_PATH,
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        if (driverHandle == INVALID_HANDLE_VALUE)
-        {
-            const DWORD lastError = ::GetLastError();
-            if (detailTextOut != nullptr)
-            {
-                std::ostringstream oss;
-                oss << "CreateFileW(" << "\\\\.\\KswordARKLog" << ") failed, error=" << lastError;
-                *detailTextOut = oss.str();
-            }
-            return false;
-        }
-
-        KSWORD_ARK_SUSPEND_PROCESS_REQUEST request{};
-        request.processId = targetPid;
-
-        DWORD bytesReturned = 0;
-        const BOOL ioctlOk = ::DeviceIoControl(
-            driverHandle,
-            IOCTL_KSWORD_ARK_SUSPEND_PROCESS,
-            &request,
-            static_cast<DWORD>(sizeof(request)),
-            nullptr,
-            0,
-            &bytesReturned,
-            nullptr);
-        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
-        ::CloseHandle(driverHandle);
-
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::IoResult result = driverClient.suspendProcess(targetPid);
         if (detailTextOut != nullptr)
         {
-            std::ostringstream oss;
-            oss << "pid=" << targetPid << ", bytesReturned=" << bytesReturned;
-            if (ioctlOk)
-            {
-                oss << ", ioctl=ok";
-            }
-            else
-            {
-                oss << ", ioctl=fail, error=" << ioctlError;
-            }
-            *detailTextOut = oss.str();
+            *detailTextOut = result.message;
         }
-
-        return ioctlOk != FALSE;
+        return result.ok;
     }
 
     // setPplProtectionLevelByR0Driver 作用：
-    // - 通过 R0 驱动设备发送“设置 PPL 保护层级”IOCTL；
+    // - 通过 ArkDriverClient 发送“设置 PPL 保护层级”IOCTL；
     // - protectionLevel 与 ProcessProtectionInformation 的单字节层级编码保持一致。
     bool setPplProtectionLevelByR0Driver(
         const std::uint32_t targetPid,
@@ -409,65 +315,13 @@ namespace
             return false;
         }
 
-        const HANDLE driverHandle = ::CreateFileW(
-            KSWORD_ARK_LOG_WIN32_PATH,
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        if (driverHandle == INVALID_HANDLE_VALUE)
-        {
-            const DWORD lastError = ::GetLastError();
-            if (detailTextOut != nullptr)
-            {
-                std::ostringstream oss;
-                oss << "CreateFileW(" << "\\\\.\\KswordARKLog" << ") failed, error=" << lastError;
-                *detailTextOut = oss.str();
-            }
-            return false;
-        }
-
-        KSWORD_ARK_SET_PPL_LEVEL_REQUEST request{};
-        request.processId = targetPid;
-        request.protectionLevel = protectionLevel;
-
-        DWORD bytesReturned = 0;
-        const BOOL ioctlOk = ::DeviceIoControl(
-            driverHandle,
-            IOCTL_KSWORD_ARK_SET_PPL_LEVEL,
-            &request,
-            static_cast<DWORD>(sizeof(request)),
-            nullptr,
-            0,
-            &bytesReturned,
-            nullptr);
-        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
-        ::CloseHandle(driverHandle);
-
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::IoResult result = driverClient.setProcessProtection(targetPid, protectionLevel);
         if (detailTextOut != nullptr)
         {
-            std::ostringstream oss;
-            oss << "pid=" << targetPid
-                << ", protectionLevel=0x"
-                << std::hex
-                << std::uppercase
-                << static_cast<unsigned int>(protectionLevel)
-                << std::dec
-                << ", bytesReturned=" << bytesReturned;
-            if (ioctlOk)
-            {
-                oss << ", ioctl=ok";
-            }
-            else
-            {
-                oss << ", ioctl=fail, error=" << ioctlError;
-            }
-            *detailTextOut = oss.str();
+            *detailTextOut = result.message;
         }
-
-        return ioctlOk != FALSE;
+        return result.ok;
     }
 
     // KernelProcessSnapshotEntry 作用：
@@ -484,17 +338,8 @@ namespace
     // 内核专属记录使用固定创建时间种子，避免与 R3 常规 identity 发生冲突。
     constexpr std::uint64_t KernelOnlyCreationTimeSeed = 0xFFFFFFFF00000000ULL;
 
-    // 读取 R0 短进程名（char[16]），并去除尾部 NUL。
-    std::string toKernelImageName(const KSWORD_ARK_PROCESS_ENTRY& processEntry)
-    {
-        const char* beginPtr = processEntry.imageName;
-        const char* endPtr = beginPtr + sizeof(processEntry.imageName);
-        const char* nulPtr = std::find(beginPtr, endPtr, '\0');
-        return std::string(beginPtr, nulPtr);
-    }
-
     // enumerateProcessesByR0Driver 作用：
-    // - 调用驱动 IOCTL 获取内核侧进程列表；
+    // - 通过 ArkDriverClient 获取内核侧进程列表；
     // - 输出可用于“R3 列表 vs R0 列表”差异比对的数据。
     bool enumerateProcessesByR0Driver(
         std::vector<KernelProcessSnapshotEntry>* const processListOut,
@@ -510,113 +355,32 @@ namespace
             detailTextOut->clear();
         }
 
-        const HANDLE driverHandle = ::CreateFileW(
-            KSWORD_ARK_LOG_WIN32_PATH,
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        if (driverHandle == INVALID_HANDLE_VALUE)
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::ProcessEnumResult enumResult = driverClient.enumerateProcesses(
+            KSWORD_ARK_ENUM_PROCESS_FLAG_SCAN_CID_TABLE);
+        if (!enumResult.io.ok)
         {
-            const DWORD lastError = ::GetLastError();
             if (detailTextOut != nullptr)
             {
-                std::ostringstream oss;
-                oss << "CreateFileW(" << "\\\\.\\KswordARKLog" << ") failed, error=" << lastError;
-                *detailTextOut = oss.str();
+                *detailTextOut = enumResult.io.message;
             }
             return false;
         }
 
-        KSWORD_ARK_ENUM_PROCESS_REQUEST request{};
-        request.flags = KSWORD_ARK_ENUM_PROCESS_FLAG_SCAN_CID_TABLE;
-        request.startPid = 0U;
-        request.endPid = 0U;
-
-        std::vector<std::uint8_t> responseBuffer(1024 * 1024, 0U);
-        DWORD bytesReturned = 0;
-        const BOOL ioctlOk = ::DeviceIoControl(
-            driverHandle,
-            IOCTL_KSWORD_ARK_ENUM_PROCESS,
-            &request,
-            static_cast<DWORD>(sizeof(request)),
-            responseBuffer.data(),
-            static_cast<DWORD>(responseBuffer.size()),
-            &bytesReturned,
-            nullptr);
-        const DWORD ioctlError = ioctlOk ? ERROR_SUCCESS : ::GetLastError();
-        ::CloseHandle(driverHandle);
-
-        if (ioctlOk == FALSE)
+        processListOut->reserve(enumResult.entries.size());
+        for (const ksword::ark::ProcessEntry& entry : enumResult.entries)
         {
-            if (detailTextOut != nullptr)
-            {
-                std::ostringstream oss;
-                oss << "DeviceIoControl(IOCTL_KSWORD_ARK_ENUM_PROCESS) failed, error=" << ioctlError;
-                *detailTextOut = oss.str();
-            }
-            return false;
-        }
-
-        constexpr std::size_t enumResponseHeaderSize =
-            sizeof(KSWORD_ARK_ENUM_PROCESS_RESPONSE) - sizeof(KSWORD_ARK_PROCESS_ENTRY);
-        if (bytesReturned < enumResponseHeaderSize)
-        {
-            if (detailTextOut != nullptr)
-            {
-                std::ostringstream oss;
-                oss << "enum-process response too small, bytesReturned=" << bytesReturned;
-                *detailTextOut = oss.str();
-            }
-            return false;
-        }
-
-        const auto* responseHeader =
-            reinterpret_cast<const KSWORD_ARK_ENUM_PROCESS_RESPONSE*>(responseBuffer.data());
-        if (responseHeader->entrySize < sizeof(KSWORD_ARK_PROCESS_ENTRY))
-        {
-            if (detailTextOut != nullptr)
-            {
-                std::ostringstream oss;
-                oss << "enum-process entry size invalid, entrySize=" << responseHeader->entrySize;
-                *detailTextOut = oss.str();
-            }
-            return false;
-        }
-
-        const std::size_t availableEntryCountByBytes =
-            (bytesReturned - enumResponseHeaderSize) / static_cast<std::size_t>(responseHeader->entrySize);
-        const std::size_t returnedEntryCount = std::min<std::size_t>(
-            static_cast<std::size_t>(responseHeader->returnedCount),
-            availableEntryCountByBytes);
-        processListOut->reserve(returnedEntryCount);
-
-        for (std::size_t entryIndex = 0; entryIndex < returnedEntryCount; ++entryIndex)
-        {
-            const std::size_t entryOffset =
-                enumResponseHeaderSize + (entryIndex * static_cast<std::size_t>(responseHeader->entrySize));
-            const auto* entry = reinterpret_cast<const KSWORD_ARK_PROCESS_ENTRY*>(
-                responseBuffer.data() + entryOffset);
-
             KernelProcessSnapshotEntry processEntry{};
-            processEntry.processId = static_cast<std::uint32_t>(entry->processId);
-            processEntry.parentProcessId = static_cast<std::uint32_t>(entry->parentProcessId);
-            processEntry.flags = static_cast<std::uint32_t>(entry->flags);
-            processEntry.imageName = toKernelImageName(*entry);
+            processEntry.processId = entry.processId;
+            processEntry.parentProcessId = entry.parentProcessId;
+            processEntry.flags = entry.flags;
+            processEntry.imageName = entry.imageName;
             processListOut->push_back(std::move(processEntry));
         }
 
         if (detailTextOut != nullptr)
         {
-            std::ostringstream oss;
-            oss << "version=" << responseHeader->version
-                << ", total=" << responseHeader->totalCount
-                << ", returned=" << responseHeader->returnedCount
-                << ", parsed=" << processListOut->size()
-                << ", bytesReturned=" << bytesReturned;
-            *detailTextOut = oss.str();
+            *detailTextOut = enumResult.io.message;
         }
         return true;
     }
@@ -1044,13 +808,14 @@ void ProcessDock::initializeUi()
     m_sideTabWidget->setIconSize(SideTabIconSize);
 
     // 左侧页签使用内容自适应宽度，避免固定宽度导致不同字号/语言下被截断。
+    // 页签字号不在局部 QSS 中设置，统一继承 Qt 默认应用字号。
     if (m_sideTabWidget->tabBar() != nullptr)
     {
         m_sideTabWidget->tabBar()->setExpanding(false);
         m_sideTabWidget->tabBar()->setUsesScrollButtons(true);
         m_sideTabWidget->tabBar()->setStyleSheet(QStringLiteral(
             "QTabBar{background:transparent;border:none;}"
-            "QTabBar::tab{min-height:%1px;padding:5px 5px;margin:0px;border:none;border-radius:0px;font-size:14px;}"
+            "QTabBar::tab{min-height:%1px;padding:5px 5px;margin:0px;border:none;border-radius:0px;}"
             "QTabBar::tab:selected{background-color:%2;color:#FFFFFF;font-weight:700;}"
             "QTabBar::tab:hover:!selected{background-color:%3;color:%4;}" )
             .arg(ProcessSideTabMinHeightPx)

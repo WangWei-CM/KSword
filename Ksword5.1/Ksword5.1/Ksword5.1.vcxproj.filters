@@ -1,5 +1,5 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<?xml version='1.0' encoding='utf-8'?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
   <ItemGroup>
     <Filter Include="Source Files">
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
@@ -24,7 +24,7 @@
     <Filter Include="Source Files\NewFilter1">
       <UniqueIdentifier>{bc5f3e62-aac4-4ec6-94a8-3b5dc6d07a02}</UniqueIdentifier>
     </Filter>
-  </ItemGroup>
+  <Filter Include="Source Files\ArkDriverClient"><UniqueIdentifier>{00000000-0000-0000-0000-000000000000}</UniqueIdentifier></Filter><Filter Include="Header Files\ArkDriverClient"><UniqueIdentifier>{00000000-0000-0000-0000-000000000000}</UniqueIdentifier></Filter></ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="AppIcon.rc">
       <Filter>Resource Files</Filter>
@@ -391,7 +391,7 @@
     <ClCompile Include="句柄\HandleObjectTypeWorker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-  </ItemGroup>
+  <ClCompile Include="ArkDriverClient\ArkDriverClient.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverError.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverCapabilities.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverProcess.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverFile.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile></ItemGroup>
   <ItemGroup>
     <QtMoc Include="Ksword5.cpp">
       <Filter>Source Files</Filter>
@@ -477,7 +477,7 @@
     <ClInclude Include="句柄\HandleObjectTypeWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-  </ItemGroup>
+  <ClInclude Include="ArkDriverClient\ArkDriverClient.h"><Filter>Header Files\ArkDriverClient</Filter></ClInclude><ClInclude Include="ArkDriverClient\ArkDriverTypes.h"><Filter>Header Files\ArkDriverClient</Filter></ClInclude><ClInclude Include="ArkDriverClient\ArkDriverError.h"><Filter>Header Files\ArkDriverClient</Filter></ClInclude><ClInclude Include="ArkDriverClient\ArkDriverCapabilities.h"><Filter>Header Files\ArkDriverClient</Filter></ClInclude></ItemGroup>
   <ItemGroup>
     <ClInclude Include="UI\UI.css\UI_css.h">
       <Filter>Header Files</Filter>
