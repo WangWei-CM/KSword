@@ -41,7 +41,7 @@ const QString QSS_MainWindow_TabWidget = R"(
     }
 
     QTabBar::tab:hover:!selected {
-        background-color: palette(midlight);
+        background-color: rgba(67,160,255,0.22);
         color: palette(text);
     }
 )";
@@ -99,7 +99,7 @@ const QString QSS_MainWindow_dockStyle = R"(
     }
 
     QMainWindow QTabBar::tab:hover:!selected {
-        background-color: palette(midlight);
+        background-color: rgba(67,160,255,0.22);
         color: palette(text);
     }
 
@@ -149,7 +149,13 @@ const QString QSS_MainWindow_dockStyle = R"(
 
     ads--CDockWidgetTab:hover,
     ads--CAutoHideTab:hover {
-        background-color: palette(midlight);
+        background-color: #173553;
+        color: palette(text);
+    }
+
+    ads--CDockWidgetTab:hover QLabel,
+    ads--CAutoHideTab:hover QLabel {
+        background-color: transparent;
         color: palette(text);
     }
 

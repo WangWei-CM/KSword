@@ -193,6 +193,17 @@ private:
     // showLicenseFromMenu 作用：读取程序同目录 license 文件并展示许可证内容。
     void showLicenseFromMenu();
 
+    // buildTopActionButtonStyle 作用：
+    // - 统一生成标题栏下方功能按钮样式；
+    // - 在深浅主题切换后可重复应用，避免顶部菜单文字颜色漂移。
+    // 返回：可直接设置到 QToolButton 的样式文本。
+    QString buildTopActionButtonStyle() const;
+
+    // refreshTopActionButtonStyles 作用：
+    // - 根据当前主题刷新“检查更新/许可证/退出/设置”四个顶部功能按钮；
+    // - 解决深色模式切换后旧浅色样式残留的问题。
+    void refreshTopActionButtonStyles();
+
     void initializeNextDeferredDock();
 
     // reportStartupProgress 作用：

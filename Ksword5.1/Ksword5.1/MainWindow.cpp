@@ -2012,50 +2012,6 @@ void MainWindow::initMenus()
     m_topActionRowLayout->setContentsMargins(8, 1, 8, 1);
     m_topActionRowLayout->setSpacing(8);
 
-    const bool topMenuDarkModeEnabled = KswordTheme::IsDarkModeEnabled();
-    const QString topMenuHoverColor = topMenuDarkModeEnabled
-        ? QStringLiteral("rgba(63,143,232,0.16)")
-        : QStringLiteral("#DCEBFB");
-    const QString topMenuPressedColor = topMenuDarkModeEnabled
-        ? QStringLiteral("rgba(63,143,232,0.24)")
-        : QStringLiteral("#C7DFF8");
-    const QString topMenuTextColor = topMenuDarkModeEnabled
-        ? QStringLiteral("#EAF2FF")
-        : QStringLiteral("#173554");
-    const QString topMenuButtonStyle = QStringLiteral(
-        "QToolButton{"
-        "  background:transparent !important;"
-        "  color:%1 !important;"
-        "  border:1px solid transparent !important;"
-        "  border-radius:4px;"
-        "  margin:0;"
-        "  padding:2px 8px 2px 6px;"
-        "  font-size:12px;"
-        "  font-weight:500;"
-        "  text-align:left;"
-        "}"
-        "QToolButton:hover{"
-        "  background:%2 !important;"
-        "  color:%1 !important;"
-        "  border-color:%3 !important;"
-        "}"
-        "QToolButton:pressed{"
-        "  background:%4 !important;"
-        "  color:%1 !important;"
-        "  border-color:%3 !important;"
-        "}"
-        "QToolButton::menu-indicator{"
-        "  image:none;"
-        "  width:0;"
-        "  height:0;"
-        "}")
-        .arg(topMenuTextColor)
-        .arg(topMenuHoverColor)
-        .arg(topMenuDarkModeEnabled
-            ? QStringLiteral("rgba(83,167,255,0.38)")
-            : QStringLiteral("#A8C9EA"))
-        .arg(topMenuPressedColor);
-
     m_updateMenuButton = new QToolButton(m_topActionRowWidget);
     m_updateMenuButton->setObjectName(QStringLiteral("ksUpdateMenuButton"));
     m_updateMenuButton->setText(QStringLiteral("检查更新"));
@@ -2063,7 +2019,6 @@ void MainWindow::initMenus()
     m_updateMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_updateMenuButton->setAutoRaise(true);
     m_updateMenuButton->setFixedHeight(22);
-    m_updateMenuButton->setStyleSheet(topMenuButtonStyle);
     connect(m_updateMenuButton, &QToolButton::clicked, this, &MainWindow::openReleasePageFromMenu);
 
     m_licenseMenuButton = new QToolButton(m_topActionRowWidget);
@@ -2073,7 +2028,6 @@ void MainWindow::initMenus()
     m_licenseMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_licenseMenuButton->setAutoRaise(true);
     m_licenseMenuButton->setFixedHeight(22);
-    m_licenseMenuButton->setStyleSheet(topMenuButtonStyle);
     connect(m_licenseMenuButton, &QToolButton::clicked, this, &MainWindow::showLicenseFromMenu);
 
     m_exitMenuButton = new QToolButton(m_topActionRowWidget);
@@ -2083,7 +2037,6 @@ void MainWindow::initMenus()
     m_exitMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_exitMenuButton->setAutoRaise(true);
     m_exitMenuButton->setFixedHeight(22);
-    m_exitMenuButton->setStyleSheet(topMenuButtonStyle);
     m_exitMenuButton->setShortcut(QKeySequence(QStringLiteral("Ctrl+Q")));
     connect(m_exitMenuButton, &QToolButton::clicked, QApplication::instance(), &QApplication::quit);
 
@@ -2094,10 +2047,11 @@ void MainWindow::initMenus()
     m_settingsMenuButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_settingsMenuButton->setAutoRaise(true);
     m_settingsMenuButton->setFixedHeight(22);
-    m_settingsMenuButton->setStyleSheet(topMenuButtonStyle);
     connect(m_settingsMenuButton, &QToolButton::clicked, this, [this]() {
         showSettingsPanelFromMenu();
     });
+
+    refreshTopActionButtonStyles();
 
     m_topActionRowLayout->addWidget(m_updateMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_topActionRowLayout->addWidget(m_licenseMenuButton, 0, Qt::AlignLeft | Qt::AlignVCenter);
@@ -2109,6 +2063,75 @@ void MainWindow::initMenus()
     {
         // 插入到根布局顶部；后续 initCustomTitleBar 会插到 index=0，因此标题栏仍在最上方。
         m_mainRootLayout->insertWidget(0, m_topActionRowWidget, 0);
+    }
+}
+
+QString MainWindow::buildTopActionButtonStyle() const
+{
+    // 顶部功能按钮样式按当前主题实时生成，避免主题切换后保留旧颜色。
+    const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
+    const QString hoverColor = darkModeEnabled
+        ? QStringLiteral("rgba(67,160,255,0.22)")
+        : QStringLiteral("#DCEBFB");
+    const QString pressedColor = darkModeEnabled
+        ? QStringLiteral("rgba(67,160,255,0.34)")
+        : QStringLiteral("#C7DFF8");
+    const QString textColor = darkModeEnabled
+        ? KswordTheme::TextPrimaryColorHex()
+        : QStringLiteral("#173554");
+    const QString borderColor = darkModeEnabled
+        ? QStringLiteral("rgba(83,167,255,0.46)")
+        : QStringLiteral("#A8C9EA");
+
+    return QStringLiteral(
+        "QToolButton{"
+        "  background:transparent !important;"
+        "  color:%1 !important;"
+        "  border:1px solid transparent !important;"
+        "  border-radius:4px;"
+        "  margin:0;"
+        "  padding:2px 8px 2px 6px;"
+        "  font-size:12px;"
+        "  font-weight:600;"
+        "  text-align:left;"
+        "}"
+        "QToolButton:hover{"
+        "  background:%2 !important;"
+        "  color:%1 !important;"
+        "  border-color:%4 !important;"
+        "}"
+        "QToolButton:pressed{"
+        "  background:%3 !important;"
+        "  color:%1 !important;"
+        "  border-color:%4 !important;"
+        "}"
+        "QToolButton::menu-indicator{"
+        "  image:none;"
+        "  width:0;"
+        "  height:0;"
+        "}")
+        .arg(textColor)
+        .arg(hoverColor)
+        .arg(pressedColor)
+        .arg(borderColor);
+}
+
+void MainWindow::refreshTopActionButtonStyles()
+{
+    // 顶部功能按钮刷新：主题切换后四个按钮都重新套用同一份 QSS。
+    const QString topActionButtonStyle = buildTopActionButtonStyle();
+    const QList<QToolButton*> topActionButtonList{
+        m_updateMenuButton,
+        m_licenseMenuButton,
+        m_exitMenuButton,
+        m_settingsMenuButton
+    };
+    for (QToolButton* button : topActionButtonList)
+    {
+        if (button != nullptr)
+        {
+            button->setStyleSheet(topActionButtonStyle);
+        }
     }
 }
 
@@ -4284,6 +4307,7 @@ void MainWindow::initDockWidgets()
             "#ksCurrentOperationDock QAbstractScrollArea::viewport{"
             "  background:transparent;"
             "  background-color:transparent;"
+            "  color:palette(text);"
             "  border:none;"
             "}"));
     }
@@ -4816,6 +4840,11 @@ void MainWindow::applyAppearanceSettings(
     applyNativeWindowFrameVisualStyle();
     rebuildWindowBackgroundBrush();
     refreshPrivilegeStatusButtons();
+    refreshTopActionButtonStyles();
+    if (m_progressWidget != nullptr)
+    {
+        m_progressWidget->refreshThemeVisuals();
+    }
 
     const QString effectiveModeText = darkModeEnabled ? QStringLiteral("dark") : QStringLiteral("light");
     info << appearanceApplyEvent
@@ -4989,13 +5018,16 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     const QString activeTabColor = activeThemeColor;
     const QString activeTabTextColor = selectedTextColor;
     const QString tabHoverColor = darkModeEnabled
-        ? QStringLiteral("rgba(67,160,255,0.16)")
+        ? QStringLiteral("#173553")
         : subtleThemeColor;
     const QString comboBackgroundColor = surfaceBackgroundText;
     const QString comboTextColor = primaryTextColor;
     const QString comboBorderColor = borderColorText;
     const QString comboPopupBackgroundColor = surfaceBackgroundText;
     const QString comboPopupHoverColor = tabHoverColor;
+    const QString comboArrowIconPath = darkModeEnabled
+        ? QStringLiteral(":/Icon/ks_combo_arrow_dark.svg")
+        : QStringLiteral(":/Icon/ks_combo_arrow_light.svg");
 
     const QString tooltipStyle = QStringLiteral(
         "QToolTip{"
@@ -5212,12 +5244,15 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  width:18px;"
         "}"
         "QComboBox::down-arrow{"
-        "  image:none;"
-        "  border-left:4px solid transparent;"
-        "  border-right:4px solid transparent;"
-        "  border-top:5px solid %2;"
-        "  width:0px;"
-        "  height:0px;"
+        "  image:url(%9);"
+        "  width:12px;"
+        "  height:12px;"
+        "  margin-right:4px;"
+        "  subcontrol-origin:padding;"
+        "  subcontrol-position:center right;"
+        "}"
+        "QComboBox::down-arrow:disabled{"
+        "  image:url(%9);"
         "}"
         "QComboBox QAbstractItemView{"
         "  background-color:%5 !important;"
@@ -5247,7 +5282,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         .arg(comboPopupBackgroundColor)
         .arg(comboPopupHoverColor)
         .arg(selectedTextColor)
-        .arg(disabledTextColor);
+        .arg(disabledTextColor)
+        .arg(comboArrowIconPath);
 
     const QString tabStyle = QStringLiteral(
         "QTabBar{"
@@ -5305,7 +5341,27 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "}"
         "ads--CDockWidgetTab:hover,ads--CAutoHideTab:hover{"
         "  background-color:%6 !important;"
+        "  background:%6 !important;"
         "  color:%2 !important;"
+        "}"
+        "ads--CDockWidgetTab:hover[activeTab=\"false\"],"
+        "ads--CAutoHideTab:hover[activeTab=\"false\"]{"
+        "  background-color:%6 !important;"
+        "  background:%6 !important;"
+        "  color:%2 !important;"
+        "}"
+        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CDockWidgetTab:hover,"
+        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CAutoHideTab:hover{"
+        "  background-color:%6 !important;"
+        "  background:%6 !important;"
+        "  color:%2 !important;"
+        "  border:none !important;"
+        "}"
+        "ads--CDockWidgetTab:hover QLabel,ads--CAutoHideTab:hover QLabel,"
+        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CDockWidgetTab:hover QLabel,"
+        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CAutoHideTab:hover QLabel{"
+        "  color:%2 !important;"
+        "  background:transparent !important;"
         "}"
         "ads--CDockAreaTitleBar QToolButton,ads--CDockAreaTitleBar QPushButton{"
         "  border:none !important;"
