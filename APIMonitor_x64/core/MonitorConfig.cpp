@@ -66,11 +66,16 @@ namespace apimon
             configValue.configPath,
             L"stop_flag_path",
             ks::winapi_monitor::buildStopFlagPathForPid(configValue.targetPid).c_str());
+        configValue.agentDllPath = QueryIniText(
+            configValue.configPath,
+            L"agent_dll_path",
+            L"");
         configValue.enableFile = QueryIniBool(configValue.configPath, L"enable_file", true);
         configValue.enableRegistry = QueryIniBool(configValue.configPath, L"enable_registry", true);
         configValue.enableNetwork = QueryIniBool(configValue.configPath, L"enable_network", true);
         configValue.enableProcess = QueryIniBool(configValue.configPath, L"enable_process", true);
         configValue.enableLoader = QueryIniBool(configValue.configPath, L"enable_loader", true);
+        configValue.autoInjectChild = QueryIniBool(configValue.configPath, L"auto_inject_child", false);
 
         const int rawDetailLimit = static_cast<int>(::GetPrivateProfileIntW(
             L"monitor",

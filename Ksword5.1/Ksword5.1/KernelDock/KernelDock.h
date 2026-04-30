@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // ============================================================
 // KernelDock.h
@@ -134,6 +134,118 @@ struct KernelSsdtEntry
 };
 
 // ============================================================
+// KernelDynDataModuleIdentity
+// 作用：
+// - 表示 DynData 精确匹配时使用的内核模块身份；
+// - 统一承载模块名、PE Machine、TimeDateStamp、SizeOfImage 和加载基址。
+// ============================================================
+struct KernelDynDataModuleIdentity
+{
+    bool present = false;                // present：模块当前是否已加载并被 R0 识别。
+    std::uint32_t classId = 0;           // classId：System Informer DynData profile class。
+    std::uint32_t machine = 0;           // machine：PE FileHeader.Machine。
+    std::uint32_t timeDateStamp = 0;     // timeDateStamp：PE FileHeader.TimeDateStamp。
+    std::uint32_t sizeOfImage = 0;       // sizeOfImage：PE OptionalHeader.SizeOfImage。
+    std::uint64_t imageBase = 0;         // imageBase：模块加载基址。
+    QString moduleNameText;              // moduleNameText：模块文件名。
+};
+
+// ============================================================
+// KernelDynDataSummary
+// 作用：
+// - 表示动态偏移页顶部摘要；
+// - 同时缓存 status/fields 两类 IOCTL 的成功状态和 R0 诊断字段。
+// ============================================================
+struct KernelDynDataSummary
+{
+    bool statusQueryOk = false;          // statusQueryOk：QUERY_DYN_STATUS 是否成功。
+    bool fieldsQueryOk = false;          // fieldsQueryOk：QUERY_DYN_FIELDS 是否成功。
+    std::uint32_t statusFlags = 0;       // statusFlags：KSW_DYN_STATUS_FLAG_* 位图。
+    std::uint32_t systemInformerDataVersion = 0; // systemInformerDataVersion：System Informer 数据版本。
+    std::uint32_t systemInformerDataLength = 0;  // systemInformerDataLength：KphDynConfig 字节长度。
+    long lastStatus = 0;                 // lastStatus：R0 最后一次 DynData 激活 NTSTATUS。
+    std::uint32_t matchedProfileClass = 0; // matchedProfileClass：匹配到的 profile class。
+    std::uint32_t matchedProfileOffset = 0; // matchedProfileOffset：匹配字段 payload 偏移。
+    std::uint32_t matchedFieldsId = 0;   // matchedFieldsId：保留字段集标识。
+    std::uint32_t fieldCount = 0;        // fieldCount：R0 声明字段总数。
+    std::uint64_t capabilityMask = 0;    // capabilityMask：KSW_CAP_* 能力位图。
+    KernelDynDataModuleIdentity ntoskrnl; // ntoskrnl：当前内核模块身份。
+    KernelDynDataModuleIdentity lxcore;  // lxcore：可选 WSL/lxcore 模块身份。
+    QString unavailableReasonText;       // unavailableReasonText：R0 不可用原因。
+    QString statusIoMessageText;         // statusIoMessageText：R3 状态查询诊断文本。
+    QString fieldsIoMessageText;         // fieldsIoMessageText：R3 字段查询诊断文本。
+};
+
+// ============================================================
+// KernelDynDataFieldEntry
+// 作用：
+// - 表示动态偏移字段表的一行；
+// - 保存字段来源、可用状态、能力依赖和详情文本。
+// ============================================================
+struct KernelDynDataFieldEntry
+{
+    std::uint32_t fieldId = 0;           // fieldId：KSW_DYN_FIELD_ID_*。
+    std::uint32_t flags = 0;             // flags：KSW_DYN_FIELD_FLAG_*。
+    std::uint32_t source = 0;            // source：KSW_DYN_FIELD_SOURCE_*。
+    std::uint32_t offset = 0;            // offset：字段偏移；不可用时为哨兵值。
+    std::uint64_t capabilityMask = 0;    // capabilityMask：本字段参与的 KSW_CAP_* 位。
+    QString fieldNameText;               // fieldNameText：字段名。
+    QString sourceNameText;              // sourceNameText：来源名。
+    QString featureNameText;             // featureNameText：所属功能名。
+    QString statusText;                  // statusText：可用/缺失状态。
+    QString detailText;                  // detailText：详情面板文本。
+};
+
+// ============================================================
+// KernelDriverStatusSummary
+// 作用：
+// - 表示 Phase 1 统一驱动状态查询的摘要；
+// - 缓存协议版本、安全策略、DynData 状态和最近一次 R0 错误。
+// ============================================================
+struct KernelDriverStatusSummary
+{
+    bool queryOk = false;                    // queryOk：统一能力 IOCTL 是否成功。
+    bool driverLoaded = false;               // driverLoaded：R3 是否成功打开并查询 KswordARK 驱动。
+    bool protocolOk = false;                 // protocolOk：R0 协议版本是否匹配当前 R3 期望。
+    bool dynDataMissing = true;              // dynDataMissing：DynData 是否缺失或未命中 ntos profile。
+    bool limited = true;                     // limited：是否处于能力受限状态。
+    std::uint32_t version = 0;               // version：能力查询协议版本。
+    std::uint32_t driverProtocolVersion = 0; // driverProtocolVersion：R0 主协议版本。
+    std::uint32_t statusFlags = 0;           // statusFlags：KSWORD_ARK_DRIVER_STATUS_FLAG_*。
+    std::uint32_t securityPolicyFlags = 0;   // securityPolicyFlags：KSWORD_ARK_SECURITY_POLICY_*。
+    std::uint32_t dynDataStatusFlags = 0;    // dynDataStatusFlags：KSW_DYN_STATUS_FLAG_*。
+    long lastErrorStatus = 0;                // lastErrorStatus：最近一次 R0 记录的 NTSTATUS。
+    std::uint32_t totalFeatureCount = 0;     // totalFeatureCount：R0 声明的功能总数。
+    std::uint32_t returnedFeatureCount = 0;  // returnedFeatureCount：本次响应返回的功能行数。
+    std::uint64_t dynDataCapabilityMask = 0; // dynDataCapabilityMask：当前 DynData capability 位图。
+    QString lastErrorSourceText;             // lastErrorSourceText：最近错误来源。
+    QString lastErrorSummaryText;            // lastErrorSummaryText：最近错误摘要。
+    QString ioMessageText;                   // ioMessageText：R3 IO 诊断文本。
+};
+
+// ============================================================
+// KernelDriverCapabilityEntry
+// 作用：
+// - 表示统一能力矩阵的一行；
+// - 保存功能名、状态、安全策略依赖、DynData 依赖和详情文本。
+// ============================================================
+struct KernelDriverCapabilityEntry
+{
+    std::uint32_t featureId = 0;             // featureId：KSWORD_ARK_FEATURE_ID_*。
+    std::uint32_t state = 0;                 // state：KSWORD_ARK_FEATURE_STATE_*。
+    std::uint32_t flags = 0;                 // flags：KSWORD_ARK_FEATURE_FLAG_*。
+    std::uint32_t requiredPolicyFlags = 0;   // requiredPolicyFlags：启用所需安全策略位。
+    std::uint32_t deniedPolicyFlags = 0;     // deniedPolicyFlags：当前策略缺失位。
+    std::uint64_t requiredDynDataMask = 0;   // requiredDynDataMask：启用所需 KSW_CAP_* 位。
+    std::uint64_t presentDynDataMask = 0;    // presentDynDataMask：当前已满足 KSW_CAP_* 位。
+    QString featureNameText;                 // featureNameText：功能名。
+    QString stateNameText;                   // stateNameText：功能状态名。
+    QString dependencyText;                  // dependencyText：依赖字段说明。
+    QString reasonText;                      // reasonText：不可用/降级原因。
+    QString detailText;                      // detailText：详情面板文本。
+};
+
+// ============================================================
 // KernelDock
 // 作用：
 // - 内核分析主控件；
@@ -176,6 +288,14 @@ private:
     // - 作用：创建“SSDT 遍历”页。
     void initializeSsdtTab();
 
+    // initializeDynDataTab：
+    // - 作用：创建“动态偏移”诊断页。
+    void initializeDynDataTab();
+
+    // initializeDriverStatusTab：
+    // - 作用：创建“驱动状态”页，展示统一状态卡片和能力矩阵。
+    void initializeDriverStatusTab();
+
     // initializeCallbackInterceptTab：
     // - 作用：创建“驱动回调”页签（规则组/规则编辑/导入导出/应用/状态）。
     void initializeCallbackInterceptTab();
@@ -209,6 +329,14 @@ private:
     // refreshSsdtAsync：
     // - 作用：后台刷新 SSDT 遍历结果。
     void refreshSsdtAsync();
+
+    // refreshDynDataAsync：
+    // - 作用：后台查询 R0 DynData 状态、字段列表和 capability 位图。
+    void refreshDynDataAsync();
+
+    // refreshDriverStatusAsync：
+    // - 作用：后台查询 Phase 1 统一驱动能力、协议、安全策略和最近错误。
+    void refreshDriverStatusAsync();
 
     // ==================== 表格渲染 ====================
     // rebuildObjectNamespaceTable：
@@ -267,6 +395,16 @@ private:
     // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
     void rebuildSsdtTable(const QString& filterKeyword);
 
+    // rebuildDynDataFieldTable：
+    // - 作用：根据筛选关键词重建动态偏移字段表。
+    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
+    void rebuildDynDataFieldTable(const QString& filterKeyword);
+
+    // rebuildDriverCapabilityTable：
+    // - 作用：根据筛选关键词重建驱动能力矩阵。
+    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
+    void rebuildDriverCapabilityTable(const QString& filterKeyword);
+
     // ==================== 详情联动 ====================
     // showObjectNamespaceDetailByCurrentRow：
     // - 作用：根据当前选中行显示对象命名空间详情。
@@ -283,6 +421,14 @@ private:
     // showSsdtDetailByCurrentRow：
     // - 作用：根据当前选中行显示 SSDT 详情。
     void showSsdtDetailByCurrentRow();
+
+    // showDynDataDetailByCurrentRow：
+    // - 作用：根据当前选中行显示动态偏移字段详情。
+    void showDynDataDetailByCurrentRow();
+
+    // showDriverCapabilityDetailByCurrentRow：
+    // - 作用：根据当前选中行显示功能依赖、策略和 DynData 位图详情。
+    void showDriverCapabilityDetailByCurrentRow();
 
     // ==================== 右键菜单 ====================
     // showObjectNamespaceContextMenu：
@@ -314,6 +460,18 @@ private:
     // - 返回：true=读取成功；false=无选中或越界。
     bool currentSsdtSourceIndex(std::size_t& sourceIndexOut) const;
 
+    // currentDynDataFieldSourceIndex：
+    // - 作用：读取动态偏移字段表当前行映射到缓存向量的索引。
+    // - 传出 sourceIndexOut：缓存索引。
+    // - 返回：true=读取成功；false=无选中或越界。
+    bool currentDynDataFieldSourceIndex(std::size_t& sourceIndexOut) const;
+
+    // currentDriverCapabilitySourceIndex：
+    // - 作用：读取能力矩阵当前行映射到缓存向量的索引。
+    // - 传出 sourceIndexOut：缓存索引。
+    // - 返回：true=读取成功；false=无选中或越界。
+    bool currentDriverCapabilitySourceIndex(std::size_t& sourceIndexOut) const;
+
     // currentObjectNamespaceEntry：
     // - 作用：返回对象命名空间当前选中项。
     // - 返回：命中返回指针；否则 nullptr。
@@ -329,6 +487,16 @@ private:
     // - 返回：命中返回指针；否则 nullptr。
     const KernelSsdtEntry* currentSsdtEntry() const;
 
+    // currentDynDataFieldEntry：
+    // - 作用：返回动态偏移字段表当前选中项。
+    // - 返回：命中返回指针；否则 nullptr。
+    const KernelDynDataFieldEntry* currentDynDataFieldEntry() const;
+
+    // currentDriverCapabilityEntry：
+    // - 作用：返回能力矩阵当前选中项。
+    // - 返回：命中返回指针；否则 nullptr。
+    const KernelDriverCapabilityEntry* currentDriverCapabilityEntry() const;
+
 private:
     // ==================== 根级控件 ====================
     QVBoxLayout* m_rootLayout = nullptr; // m_rootLayout：KernelDock 根布局。
@@ -338,12 +506,16 @@ private:
     int m_objectNamespaceTabIndex = -1;  // m_objectNamespaceTabIndex：对象命名空间页签索引。
     int m_atomTabIndex = -1;             // m_atomTabIndex：原子表页签索引。
     int m_ssdtTabIndex = -1;             // m_ssdtTabIndex：SSDT 页签索引。
+    int m_dynDataTabIndex = -1;          // m_dynDataTabIndex：动态偏移页签索引。
+    int m_driverStatusTabIndex = -1;      // m_driverStatusTabIndex：驱动状态页签索引。
     int m_ntQueryTabIndex = -1;          // m_ntQueryTabIndex：历史 NtQuery 页签索引。
     int m_callbackTabIndex = -1;         // m_callbackTabIndex：驱动回调页签索引。
     int m_callbackRemoveTabIndex = -1;   // m_callbackRemoveTabIndex：回调移除页签索引。
     bool m_objectNamespaceTabInitialized = false; // m_objectNamespaceTabInitialized：对象命名空间页是否已初始化。
     bool m_atomTabInitialized = false;            // m_atomTabInitialized：原子表页是否已初始化。
     bool m_ssdtTabInitialized = false;            // m_ssdtTabInitialized：SSDT 页是否已初始化。
+    bool m_dynDataTabInitialized = false;          // m_dynDataTabInitialized：动态偏移页是否已初始化。
+    bool m_driverStatusTabInitialized = false;     // m_driverStatusTabInitialized：驱动状态页是否已初始化。
     bool m_ntQueryTabInitialized = false;         // m_ntQueryTabInitialized：历史 NtQuery 页是否已初始化。
     bool m_callbackTabInitialized = false;        // m_callbackTabInitialized：驱动回调页是否已初始化。
     bool m_callbackRemoveTabInitialized = false;  // m_callbackRemoveTabInitialized：回调移除页是否已初始化。
@@ -388,6 +560,31 @@ private:
     QTableWidget* m_ssdtTable = nullptr;               // m_ssdtTable：SSDT 结果表。
     CodeEditorWidget* m_ssdtDetailEditor = nullptr;    // m_ssdtDetailEditor：SSDT 详情编辑器（只读）。
 
+    // ==================== 动态偏移页 ====================
+    QWidget* m_dynDataPage = nullptr;                  // m_dynDataPage：动态偏移页容器。
+    QVBoxLayout* m_dynDataLayout = nullptr;            // m_dynDataLayout：动态偏移页布局。
+    QHBoxLayout* m_dynDataToolLayout = nullptr;        // m_dynDataToolLayout：动态偏移工具栏布局。
+    QPushButton* m_refreshDynDataButton = nullptr;     // m_refreshDynDataButton：动态偏移刷新按钮。
+    QPushButton* m_copyDynDataReportButton = nullptr;  // m_copyDynDataReportButton：复制诊断报告按钮。
+    QLineEdit* m_dynDataFilterEdit = nullptr;          // m_dynDataFilterEdit：动态偏移字段筛选输入框。
+    QLabel* m_dynDataStatusLabel = nullptr;            // m_dynDataStatusLabel：动态偏移状态文本。
+    QLabel* m_dynDataKernelBadge = nullptr;            // m_dynDataKernelBadge：R0/Kernel 视觉标识。
+    QTableWidget* m_dynDataSummaryTable = nullptr;     // m_dynDataSummaryTable：动态偏移摘要表。
+    QTableWidget* m_dynDataFieldTable = nullptr;       // m_dynDataFieldTable：动态偏移字段表。
+    CodeEditorWidget* m_dynDataDetailEditor = nullptr; // m_dynDataDetailEditor：动态偏移详情编辑器（只读）。
+
+    // ==================== 驱动状态页 ====================
+    QWidget* m_driverStatusPage = nullptr;                  // m_driverStatusPage：驱动状态页容器。
+    QVBoxLayout* m_driverStatusLayout = nullptr;            // m_driverStatusLayout：驱动状态页布局。
+    QHBoxLayout* m_driverStatusToolLayout = nullptr;        // m_driverStatusToolLayout：驱动状态工具栏布局。
+    QPushButton* m_refreshDriverStatusButton = nullptr;     // m_refreshDriverStatusButton：刷新统一能力按钮。
+    QPushButton* m_copyDriverStatusReportButton = nullptr;  // m_copyDriverStatusReportButton：复制诊断报告按钮。
+    QLineEdit* m_driverStatusFilterEdit = nullptr;          // m_driverStatusFilterEdit：能力矩阵筛选输入框。
+    QLabel* m_driverStatusLabel = nullptr;                  // m_driverStatusLabel：整体状态文本。
+    QTableWidget* m_driverStatusSummaryTable = nullptr;     // m_driverStatusSummaryTable：驱动状态摘要表。
+    QTableWidget* m_driverCapabilityTable = nullptr;        // m_driverCapabilityTable：能力矩阵表。
+    CodeEditorWidget* m_driverCapabilityDetailEditor = nullptr; // m_driverCapabilityDetailEditor：能力详情编辑器。
+
     // ==================== 驱动回调页 ====================
     QWidget* m_callbackInterceptPage = nullptr;                     // m_callbackInterceptPage：驱动回调页容器。
     CallbackInterceptController* m_callbackInterceptController = nullptr; // m_callbackInterceptController：驱动回调页控制器。
@@ -407,10 +604,16 @@ private:
     std::vector<KernelAtomEntry> m_atomRows;                       // m_atomRows：原子快照行。
     std::vector<KernelNtQueryResultEntry> m_ntQueryResults;        // m_ntQueryResults：历史 NtQuery 快照行。
     std::vector<KernelSsdtEntry> m_ssdtRows;                       // m_ssdtRows：SSDT 快照行。
+    KernelDynDataSummary m_dynDataSummary;                         // m_dynDataSummary：动态偏移摘要快照。
+    std::vector<KernelDynDataFieldEntry> m_dynDataRows;            // m_dynDataRows：动态偏移字段快照行。
+    KernelDriverStatusSummary m_driverStatusSummary;               // m_driverStatusSummary：统一驱动状态摘要快照。
+    std::vector<KernelDriverCapabilityEntry> m_driverCapabilityRows; // m_driverCapabilityRows：能力矩阵快照行。
 
     // ==================== 刷新状态 ====================
     std::atomic_bool m_objectNamespaceRefreshRunning{ false }; // m_objectNamespaceRefreshRunning：对象命名空间刷新状态。
     std::atomic_bool m_atomRefreshRunning{ false };            // m_atomRefreshRunning：原子表刷新状态。
     std::atomic_bool m_ntQueryRefreshRunning{ false };         // m_ntQueryRefreshRunning：历史 NtQuery 刷新状态。
     std::atomic_bool m_ssdtRefreshRunning{ false };            // m_ssdtRefreshRunning：SSDT 刷新状态。
+    std::atomic_bool m_dynDataRefreshRunning{ false };         // m_dynDataRefreshRunning：动态偏移刷新状态。
+    std::atomic_bool m_driverStatusRefreshRunning{ false };    // m_driverStatusRefreshRunning：驱动状态刷新状态。
 };

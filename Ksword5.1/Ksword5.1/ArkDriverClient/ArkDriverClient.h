@@ -58,5 +58,9 @@ namespace ksword::ark
         IoResult answerCallbackEvent(const KSWORD_ARK_CALLBACK_ANSWER_REQUEST& request) const;
         IoResult cancelAllPendingCallbackDecisions() const;
         CallbackRemoveResult removeExternalCallback(const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_REQUEST& request) const;
+        DriverCapabilitiesQueryResult queryDriverCapabilities() const;
+        DynDataStatusResult queryDynDataStatus() const;
+        DynDataFieldsResult queryDynDataFields() const;
+        DynDataCapabilitiesResult queryDynDataCapabilities() const;
     };
 }

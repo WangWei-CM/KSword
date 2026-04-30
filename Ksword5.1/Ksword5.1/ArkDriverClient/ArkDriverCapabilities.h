@@ -12,7 +12,8 @@ namespace ksword::ark
         ProcessActions = 1U << 0,
         FileDelete = 1U << 1,
         SsdtSnapshot = 1U << 2,
-        CallbackControl = 1U << 3
+        CallbackControl = 1U << 3,
+        DynDataStatus = 1U << 4
     };
 
     // DriverCapabilities is intentionally lightweight in Phase -1. Later phases

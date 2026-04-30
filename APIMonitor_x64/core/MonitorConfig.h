@@ -22,11 +22,13 @@ namespace apimon
         std::wstring configPath;                // configPath：INI 配置文件完整路径。
         std::wstring pipeName;                  // pipeName：命名管道名。
         std::wstring stopFlagPath;              // stopFlagPath：停止标记文件路径。
+        std::wstring agentDllPath;              // agentDllPath：当前 APIMonitor_x64.dll 路径，供子进程自动注入复用。
         bool enableFile = true;                 // enableFile：是否启用文件 API Hook。
         bool enableRegistry = true;             // enableRegistry：是否启用注册表 API Hook。
         bool enableNetwork = true;              // enableNetwork：是否启用网络 API Hook。
         bool enableProcess = true;              // enableProcess：是否启用进程 API Hook。
         bool enableLoader = true;               // enableLoader：是否启用加载器 API Hook。
+        bool autoInjectChild = false;           // autoInjectChild：CreateProcessW 成功后是否自动注入新子进程。
         std::size_t detailLimitChars = 256;     // detailLimitChars：详情文本截断长度。
         bool valid = false;                     // valid：当前配置是否通过基本校验。
     };

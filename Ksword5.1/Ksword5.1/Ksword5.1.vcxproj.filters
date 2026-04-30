@@ -1,4 +1,4 @@
-<?xml version='1.0' encoding='utf-8'?>
+﻿<?xml version='1.0' encoding='utf-8'?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
   <ItemGroup>
     <Filter Include="Source Files">
@@ -95,6 +95,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="KernelDock\KernelDock.ContextMenu.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDock.DynData.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="KernelDock\KernelDock.Runtime.cpp">
@@ -391,7 +394,7 @@
     <ClCompile Include="句柄\HandleObjectTypeWorker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-  <ClCompile Include="ArkDriverClient\ArkDriverClient.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverError.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverCapabilities.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverProcess.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverFile.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile></ItemGroup>
+  <ClCompile Include="KernelDock\KernelDock.DriverStatus.cpp"><Filter>Source Files</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverClient.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverError.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverCapability.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverDynData.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverCapabilities.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverProcess.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverFile.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile></ItemGroup>
   <ItemGroup>
     <QtMoc Include="Ksword5.cpp">
       <Filter>Source Files</Filter>

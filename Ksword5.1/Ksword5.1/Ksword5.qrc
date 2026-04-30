@@ -2,6 +2,7 @@
     <qresource prefix="/Ksword5"/>
     <qresource prefix="/Image">
         <file>Resource/Logo/MainLogo.png</file>
+        <file alias="kernel_badge.png">Resource/Kernel.png</file>
     </qresource>
     <qresource prefix="/Data">
         <file alias="startup_registry_locations.txt">StartupDock/startup_registry_locations.txt</file>

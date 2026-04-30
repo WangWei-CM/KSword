@@ -442,11 +442,13 @@ bool WinAPIDock::writeSessionConfigFile(QString* errorTextOut) const
     outputStream << "[monitor]\n";
     outputStream << "pipe_name=" << m_currentPipeName << '\n';
     outputStream << "stop_flag_path=" << m_currentStopFlagPath << '\n';
+    outputStream << "agent_dll_path=" << (m_agentDllPathEdit != nullptr ? QDir::cleanPath(m_agentDllPathEdit->text().trimmed()) : QString()) << '\n';
     outputStream << "enable_file=" << ((m_hookFileCheck != nullptr && m_hookFileCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "enable_registry=" << ((m_hookRegistryCheck != nullptr && m_hookRegistryCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "enable_network=" << ((m_hookNetworkCheck != nullptr && m_hookNetworkCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "enable_process=" << ((m_hookProcessCheck != nullptr && m_hookProcessCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "enable_loader=" << ((m_hookLoaderCheck != nullptr && m_hookLoaderCheck->isChecked()) ? 1 : 0) << '\n';
+    outputStream << "auto_inject_child=" << ((m_autoInjectChildCheck != nullptr && m_autoInjectChildCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "detail_limit=" << static_cast<int>(ks::winapi_monitor::kMaxDetailChars - 1) << '\n';
     configFile.close();
     return true;
@@ -520,6 +522,11 @@ void WinAPIDock::startMonitoring()
     m_pipeStopFlag.store(false);
     m_pipeRunning.store(true);
     m_pipeConnected.store(false);
+    {
+        std::lock_guard<std::mutex> lock(m_childPipeMutex);
+        m_childSessionPids.clear();
+        m_childPipeHandleValues.clear();
+    }
 
     if (m_sessionProgressPid == 0)
     {
@@ -562,6 +569,7 @@ void WinAPIDock::stopMonitoringInternal(const bool waitForThread)
     }
 
     m_pipeStopFlag.store(true);
+    writeChildStopFlags();
 
     if (!m_currentStopFlagPath.trimmed().isEmpty())
     {
@@ -578,12 +586,14 @@ void WinAPIDock::stopMonitoringInternal(const bool waitForThread)
     {
         ::CloseHandle(reinterpret_cast<HANDLE>(pipeHandleValue));
     }
+    closeChildPipeHandles();
 
     if (m_pipeThread != nullptr && m_pipeThread->joinable())
     {
         m_pipeThread->join();
     }
     m_pipeThread.reset();
+    joinChildPipeThreads();
 
     m_pipeRunning.store(false);
     m_pipeConnected.store(false);

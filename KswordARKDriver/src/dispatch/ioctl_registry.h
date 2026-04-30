@@ -16,20 +16,20 @@ typedef NTSTATUS
     _Out_ size_t* BytesReturned
     );
 
-// Registry row consumed by ioctl_dispatch.c. Name is for trace/log text; the
-// capability and flag fields are placeholders for Phase 1 gating without future
-// dispatch churn.
+// Registry row consumed by ioctl_dispatch.c. Name is for trace/log text, while
+// RequiredCapability stores a KSW_CAP_* dependency used for Phase 1 fail-closed
+// gating before dispatching private-offset features.
 typedef struct _KSWORD_ARK_IOCTL_ENTRY
 {
     ULONG IoControlCode;
     KSWORD_ARK_IOCTL_HANDLER Handler;
     const char* Name;
-    ULONG RequiredCapability;
+    ULONG64 RequiredCapability;
     ULONG Flags;
 } KSWORD_ARK_IOCTL_ENTRY;
 
 #define KSWORD_ARK_IOCTL_FLAG_NONE 0x00000000UL
-#define KSWORD_ARK_IOCTL_CAPABILITY_NONE 0x00000000UL
+#define KSWORD_ARK_IOCTL_CAPABILITY_NONE 0ULL
 
 _Must_inspect_result_
 const KSWORD_ARK_IOCTL_ENTRY*

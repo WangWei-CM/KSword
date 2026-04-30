@@ -158,24 +158,28 @@ void WinAPIDock::initializeUi()
     m_hookNetworkCheck = new QCheckBox(QStringLiteral("网络 API"), categoryFrame);
     m_hookProcessCheck = new QCheckBox(QStringLiteral("进程 API"), categoryFrame);
     m_hookLoaderCheck = new QCheckBox(QStringLiteral("加载器 API"), categoryFrame);
+    m_autoInjectChildCheck = new QCheckBox(QStringLiteral("自动注入子进程"), categoryFrame);
 
     m_hookFileCheck->setChecked(true);
     m_hookRegistryCheck->setChecked(true);
     m_hookNetworkCheck->setChecked(true);
     m_hookProcessCheck->setChecked(true);
     m_hookLoaderCheck->setChecked(false);
+    m_autoInjectChildCheck->setChecked(false);
 
     m_hookFileCheck->setToolTip(QStringLiteral("CreateFileW / ReadFile / WriteFile 等文件访问相关 API。"));
-    m_hookRegistryCheck->setToolTip(QStringLiteral("RegOpenKeyExW / RegSetValueExW 等注册表相关 API。"));
-    m_hookNetworkCheck->setToolTip(QStringLiteral("connect / send / recv 等网络相关 API。"));
+    m_hookRegistryCheck->setToolTip(QStringLiteral("RegOpenKeyExW / RegQueryValueExW / RegSetValueExW / RegDeleteValueW / RegEnum* 等注册表相关 API。"));
+    m_hookNetworkCheck->setToolTip(QStringLiteral("connect / WSAConnect / send / WSASend / sendto / recv / WSARecv / recvfrom 等网络相关 API。"));
     m_hookProcessCheck->setToolTip(QStringLiteral("CreateProcessW 等进程控制相关 API。"));
     m_hookLoaderCheck->setToolTip(QStringLiteral("LoadLibraryW / LoadLibraryExW 等模块加载相关 API。该类 Hook 对 GUI 进程稳定性风险更高，默认关闭。"));
+    m_autoInjectChildCheck->setToolTip(QStringLiteral("启用后，Agent 会在 CreateProcessW 成功时把同一个 APIMonitor_x64.dll 注入到新子进程；仅支持 x64 子进程。"));
 
     categoryLayout->addWidget(m_hookFileCheck, 0);
     categoryLayout->addWidget(m_hookRegistryCheck, 0);
     categoryLayout->addWidget(m_hookNetworkCheck, 0);
     categoryLayout->addWidget(m_hookProcessCheck, 0);
     categoryLayout->addWidget(m_hookLoaderCheck, 0);
+    categoryLayout->addWidget(m_autoInjectChildCheck, 0);
     sessionPanelLayout->addWidget(categoryFrame, 0);
 
     QHBoxLayout* sessionButtonLayout = new QHBoxLayout();

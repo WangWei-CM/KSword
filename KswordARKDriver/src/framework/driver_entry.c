@@ -54,6 +54,7 @@ Return Value:
 
     // Initialize WPP tracing as soon as possible.
     WPP_INIT_TRACING(DriverObject, RegistryPath);
+    KswordARKCapabilityInitialize();
 
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Entry");
 
@@ -114,6 +115,7 @@ Return Value:
 
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Entry");
     KswordARKCallbackUninitialize();
+    KswordARKDynDataUninitialize();
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Exit");
 }
 

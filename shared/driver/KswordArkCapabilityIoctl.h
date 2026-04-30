@@ -1,0 +1,110 @@
+#pragma once
+
+#include "KswordArkDynDataIoctl.h"
+
+// ============================================================
+// KswordArkCapabilityIoctl.h
+// Purpose:
+// - Shared R3/R0 protocol for Phase 1 unified driver status and capability
+//   queries.
+// - This protocol merges driver version, security policy, DynData state, feature
+//   availability, and last-error summary into one safe diagnostic IOCTL.
+// ============================================================
+
+#define KSWORD_ARK_DRIVER_CAPABILITY_PROTOCOL_VERSION 1UL
+#define KSWORD_ARK_DRIVER_PROTOCOL_VERSION 0x00010001UL
+
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_DRIVER_CAPABILITIES 0x80A
+
+#define IOCTL_KSWORD_ARK_QUERY_DRIVER_CAPABILITIES \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_DRIVER_CAPABILITIES, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define KSWORD_ARK_DRIVER_STATUS_FLAG_DRIVER_LOADED       0x00000001UL
+#define KSWORD_ARK_DRIVER_STATUS_FLAG_PROTOCOL_OK         0x00000002UL
+#define KSWORD_ARK_DRIVER_STATUS_FLAG_DYNDATA_INITIALIZED 0x00000004UL
+#define KSWORD_ARK_DRIVER_STATUS_FLAG_DYNDATA_ACTIVE      0x00000008UL
+#define KSWORD_ARK_DRIVER_STATUS_FLAG_DYNDATA_MISSING     0x00000010UL
+#define KSWORD_ARK_DRIVER_STATUS_FLAG_LIMITED             0x00000020UL
+#define KSWORD_ARK_DRIVER_STATUS_FLAG_LAST_ERROR_PRESENT  0x00000040UL
+#define KSWORD_ARK_DRIVER_STATUS_FLAG_SECURITY_POLICY_ON  0x00000080UL
+
+#define KSWORD_ARK_SECURITY_POLICY_FLAG_ACTIVE                 0x00000001UL
+#define KSWORD_ARK_SECURITY_POLICY_ALLOW_MUTATING_ACTIONS      0x00000002UL
+#define KSWORD_ARK_SECURITY_POLICY_ALLOW_FILE_DELETE           0x00000004UL
+#define KSWORD_ARK_SECURITY_POLICY_ALLOW_CALLBACK_CONTROL      0x00000008UL
+#define KSWORD_ARK_SECURITY_POLICY_ALLOW_PROCESS_PROTECTION    0x00000010UL
+#define KSWORD_ARK_SECURITY_POLICY_ALLOW_KERNEL_SNAPSHOTS      0x00000020UL
+#define KSWORD_ARK_SECURITY_POLICY_ALLOW_ALL                   0x0000003FUL
+
+#define KSWORD_ARK_FEATURE_STATE_UNKNOWN          0UL
+#define KSWORD_ARK_FEATURE_STATE_AVAILABLE        1UL
+#define KSWORD_ARK_FEATURE_STATE_UNAVAILABLE      2UL
+#define KSWORD_ARK_FEATURE_STATE_DEGRADED         3UL
+#define KSWORD_ARK_FEATURE_STATE_DENIED_BY_POLICY 4UL
+
+#define KSWORD_ARK_FEATURE_FLAG_REQUIRES_DYNDATA 0x00000001UL
+#define KSWORD_ARK_FEATURE_FLAG_MUTATING         0x00000002UL
+#define KSWORD_ARK_FEATURE_FLAG_KERNEL_ONLY      0x00000004UL
+#define KSWORD_ARK_FEATURE_FLAG_READ_ONLY        0x00000008UL
+#define KSWORD_ARK_FEATURE_FLAG_POLICY_GATED     0x00000010UL
+
+#define KSWORD_ARK_FEATURE_ID_DRIVER_HEALTH             1UL
+#define KSWORD_ARK_FEATURE_ID_PROCESS_BASIC_ACTIONS     2UL
+#define KSWORD_ARK_FEATURE_ID_FILE_DELETE               3UL
+#define KSWORD_ARK_FEATURE_ID_SSDT_SNAPSHOT             4UL
+#define KSWORD_ARK_FEATURE_ID_CALLBACK_CONTROL          5UL
+#define KSWORD_ARK_FEATURE_ID_DYNDATA_STATUS            6UL
+#define KSWORD_ARK_FEATURE_ID_PROCESS_PROTECTION_PATCH  7UL
+#define KSWORD_ARK_FEATURE_ID_PROCESS_HANDLE_TABLE      8UL
+#define KSWORD_ARK_FEATURE_ID_OBJECT_TYPE_FIELDS        9UL
+#define KSWORD_ARK_FEATURE_ID_THREAD_STACK_FIELDS       10UL
+#define KSWORD_ARK_FEATURE_ID_THREAD_IO_COUNTERS        11UL
+#define KSWORD_ARK_FEATURE_ID_ALPC_FIELDS               12UL
+#define KSWORD_ARK_FEATURE_ID_SECTION_CONTROL_AREA      13UL
+#define KSWORD_ARK_FEATURE_ID_WSL_LXCORE_FIELDS         14UL
+
+#define KSWORD_ARK_CAPABILITY_NAME_CHARS 80U
+#define KSWORD_ARK_CAPABILITY_STATE_CHARS 32U
+#define KSWORD_ARK_CAPABILITY_DEPENDENCY_CHARS 192U
+#define KSWORD_ARK_CAPABILITY_REASON_CHARS 192U
+#define KSWORD_ARK_CAPABILITY_ERROR_SOURCE_CHARS 64U
+#define KSWORD_ARK_CAPABILITY_ERROR_SUMMARY_CHARS 192U
+
+typedef struct _KSWORD_ARK_FEATURE_CAPABILITY_ENTRY
+{
+    unsigned long featureId;
+    unsigned long state;
+    unsigned long flags;
+    unsigned long requiredPolicyFlags;
+    unsigned long deniedPolicyFlags;
+    unsigned long reserved;
+    unsigned long long requiredDynDataMask;
+    unsigned long long presentDynDataMask;
+    char featureName[KSWORD_ARK_CAPABILITY_NAME_CHARS];
+    char stateName[KSWORD_ARK_CAPABILITY_STATE_CHARS];
+    char dependencyText[KSWORD_ARK_CAPABILITY_DEPENDENCY_CHARS];
+    char reasonText[KSWORD_ARK_CAPABILITY_REASON_CHARS];
+} KSWORD_ARK_FEATURE_CAPABILITY_ENTRY;
+
+typedef struct _KSWORD_ARK_QUERY_DRIVER_CAPABILITIES_RESPONSE
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long driverProtocolVersion;
+    unsigned long statusFlags;
+    unsigned long securityPolicyFlags;
+    unsigned long dynDataStatusFlags;
+    long lastErrorStatus;
+    unsigned long totalFeatureCount;
+    unsigned long returnedFeatureCount;
+    unsigned long entrySize;
+    unsigned long reserved;
+    unsigned long long dynDataCapabilityMask;
+    char lastErrorSource[KSWORD_ARK_CAPABILITY_ERROR_SOURCE_CHARS];
+    char lastErrorSummary[KSWORD_ARK_CAPABILITY_ERROR_SUMMARY_CHARS];
+    KSWORD_ARK_FEATURE_CAPABILITY_ENTRY entries[1];
+} KSWORD_ARK_QUERY_DRIVER_CAPABILITIES_RESPONSE;
