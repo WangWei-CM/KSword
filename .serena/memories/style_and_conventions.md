@@ -1,1 +1,0 @@
-Code is C++/C for Windows/Qt GUI and WDK driver. Existing style uses PascalCase/camelCase member names, Qt widgets/signals, Windows HANDLE/NTSTATUS APIs, and shared IOCTL structs with `KSWORD_ARK_*` names. Keep edits minimal, preserve existing Chinese UI labels/messages, and update `.vcxproj`/filters when adding source files.
