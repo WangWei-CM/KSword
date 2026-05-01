@@ -5289,17 +5289,17 @@ void MonitorDock::initializeEtwFilterPanels()
             actionLayout->setContentsMargins(0, 0, 0, 0);
             actionLayout->setSpacing(6);
 
-            addGroupButtonOut = new QPushButton(QIcon(":/Icon/plus.svg"), QStringLiteral("新增规则组"), panelOut);
+            addGroupButtonOut = new QPushButton(QIcon(":/Icon/codeeditor_new.svg"), QStringLiteral("新增规则组"), panelOut);
             addGroupButtonOut->setStyleSheet(blueButtonStyle());
             applyButtonOut = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("应用"), panelOut);
             applyButtonOut->setStyleSheet(blueButtonStyle());
             clearButtonOut = new QPushButton(QIcon(":/Icon/log_clear.svg"), QStringLiteral("清空"), panelOut);
             clearButtonOut->setStyleSheet(blueButtonStyle());
-            loadDefaultButtonOut = new QPushButton(QIcon(":/Icon/folder_open_line.svg"), QStringLiteral("加载默认"), panelOut);
+            loadDefaultButtonOut = new QPushButton(QIcon(":/Icon/codeeditor_open.svg"), QStringLiteral("加载默认"), panelOut);
             loadDefaultButtonOut->setStyleSheet(blueButtonStyle());
             saveDefaultButtonOut = new QPushButton(QIcon(":/Icon/log_export.svg"), QStringLiteral("保存默认"), panelOut);
             saveDefaultButtonOut->setStyleSheet(blueButtonStyle());
-            importButtonOut = new QPushButton(QIcon(":/Icon/folder_open_line.svg"), QStringLiteral("导入"), panelOut);
+            importButtonOut = new QPushButton(QIcon(":/Icon/codeeditor_open.svg"), QStringLiteral("导入"), panelOut);
             importButtonOut->setStyleSheet(blueButtonStyle());
             exportButtonOut = new QPushButton(QIcon(":/Icon/log_export.svg"), QStringLiteral("导出"), panelOut);
             exportButtonOut->setStyleSheet(blueButtonStyle());
