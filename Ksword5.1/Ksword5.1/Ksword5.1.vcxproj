@@ -1,4 +1,4 @@
-<?xml version='1.0' encoding='utf-8'?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build" ToolsVersion="17.0">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -36,7 +36,6 @@
     <Import Project="$(QtMsBuild)\qt_defaults.props" />
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
-    
     <QtInstall Condition="'$(KSWORD_QT_DIR)' != ''">$(KSWORD_QT_DIR)</QtInstall>
     <QtInstall Condition="'$(QtInstall)' == '' and '$(QTDIR)' != ''">$(QTDIR)</QtInstall>
     <QtInstall Condition="'$(QtInstall)' == ''">Qt</QtInstall>
@@ -44,7 +43,6 @@
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
-    
     <QtInstall Condition="'$(KSWORD_QT_DIR)' != ''">$(KSWORD_QT_DIR)</QtInstall>
     <QtInstall Condition="'$(QtInstall)' == '' and '$(QTDIR)' != ''">$(QTDIR)</QtInstall>
     <QtInstall Condition="'$(QtInstall)' == ''">Qt</QtInstall>
@@ -94,6 +92,7 @@
     </ClCompile>
     <Link>
       <AdditionalDependencies>qtadvanceddocking.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <UACUIAccess>false</UACUIAccess>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
@@ -258,7 +257,19 @@
     </QtMoc>
     <ClCompile Include="main.cpp" />
     <QtUic Include="WelcomeDock\Welcome.ui" />
-  <ClCompile Include="ArkDriverClient\ArkDriverClient.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverError.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverCapability.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverDynData.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverCapabilities.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverProcess.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverHandle.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverAlpc.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverSection.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverFile.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp" /></ItemGroup>
+    <ClCompile Include="ArkDriverClient\ArkDriverClient.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverError.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverCapability.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverDynData.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverCapabilities.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverProcess.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverHandle.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverAlpc.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverSection.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverFile.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp" />
+  </ItemGroup>
   <ItemGroup>
     <QtMoc Include="MainWindow.h" />
     <QtMoc Include="Framework\CustomTitleBar.h" />
@@ -329,7 +340,11 @@
     <ClInclude Include="MonitorDock\WinApiMonitorProtocol.h" />
     <ClInclude Include="WindowDock\WindowDock.h" />
     <QtMoc Include="WelcomeDock\WelcomeDock.h" />
-  <ClInclude Include="ArkDriverClient\ArkDriverClient.h" /><ClInclude Include="ArkDriverClient\ArkDriverTypes.h" /><ClInclude Include="ArkDriverClient\ArkDriverError.h" /><ClInclude Include="ArkDriverClient\ArkDriverCapabilities.h" /></ItemGroup>
+    <ClInclude Include="ArkDriverClient\ArkDriverClient.h" />
+    <ClInclude Include="ArkDriverClient\ArkDriverTypes.h" />
+    <ClInclude Include="ArkDriverClient\ArkDriverError.h" />
+    <ClInclude Include="ArkDriverClient\ArkDriverCapabilities.h" />
+  </ItemGroup>
   <ItemGroup>
     <None Include="qtvars.pro" />
   </ItemGroup>
@@ -339,22 +354,22 @@
     </PropertyGroup>
     <Copy SourceFiles="$(TaskmgrHijackScriptSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(TaskmgrHijackScriptSource)')" />
   </Target>
+  <!-- 把公钥证书复制到主程序输出目录，UIAccess 按钮只导入 .cer，不接触本地 .pfx 私钥。 -->
+  <Target Name="CopyKswordTestSigningCertificate" AfterTargets="Build">
+    <PropertyGroup>
+      <KswordTestSigningCertificateSource>$(MSBuildProjectDirectory)\..\..\.cert\KswordARK-TestSigning.cer</KswordTestSigningCertificateSource>
+    </PropertyGroup>
+    <Copy SourceFiles="$(KswordTestSigningCertificateSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(KswordTestSigningCertificateSource)')" />
+  </Target>
   <!-- Release 主程序构建完成后复用驱动测试签名证书，签名失败只告警，避免阻断普通编译。 -->
-  <Target Name="KswordMainAutoTestSignAfterBuild"
-          AfterTargets="Build"
-          Condition="'$(Configuration)|$(Platform)'=='Release|x64' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoTestSign)'!='true'">
+  <Target Name="KswordMainAutoTestSignAfterBuild" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='Release|x64' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoTestSign)'!='true'">
     <PropertyGroup>
       <KswordArkSignScript>$(MSBuildProjectDirectory)\..\..\scripts\Sign-KswordArkDriverTest.ps1</KswordArkSignScript>
       <KswordArkPowerShellExe Condition="'$(KswordArkPowerShellExe)'==''">powershell</KswordArkPowerShellExe>
     </PropertyGroup>
-    <Message Importance="High"
-             Text="Ksword5.1: attempting non-fatal test-sign for $(TargetPath). Set /p:KswordArkSkipAutoTestSign=true to skip." />
-    <Exec Command="&quot;$(KswordArkPowerShellExe)&quot; -ExecutionPolicy Bypass -File &quot;$(KswordArkSignScript)&quot; -TargetPath &quot;$(TargetPath)&quot; -NonFatal"
-          ContinueOnError="WarnAndContinue"
-          IgnoreStandardErrorWarningFormat="true"
-          Condition="Exists('$(KswordArkSignScript)')" />
-    <Warning Condition="!Exists('$(KswordArkSignScript)')"
-             Text="Ksword5.1 auto test-sign skipped because script was not found: $(KswordArkSignScript)" />
+    <Message Importance="High" Text="Ksword5.1: attempting non-fatal test-sign for $(TargetPath). Set /p:KswordArkSkipAutoTestSign=true to skip." />
+    <Exec Command="&quot;$(KswordArkPowerShellExe)&quot; -ExecutionPolicy Bypass -File &quot;$(KswordArkSignScript)&quot; -TargetPath &quot;$(TargetPath)&quot; -NonFatal" ContinueOnError="WarnAndContinue" IgnoreStandardErrorWarningFormat="true" Condition="Exists('$(KswordArkSignScript)')" />
+    <Warning Condition="!Exists('$(KswordArkSignScript)')" Text="Ksword5.1 auto test-sign skipped because script was not found: $(KswordArkSignScript)" />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">

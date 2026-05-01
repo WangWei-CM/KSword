@@ -163,7 +163,40 @@ private:
     void initPrivilegeStatusButtons();
     void refreshPrivilegeStatusButtons();
     void applyPrivilegeButtonStyle(QPushButton* button, bool activeState);
+
+    // handleUiAccessButtonClicked 作用：
+    // - 处理标题栏 UIAccess 按钮点击；
+    // - 先处理证书信任，再按需尝试 SYSTEM TokenUIAccess fallback 启动。
+    void handleUiAccessButtonClicked();
     void handleR0StatusButtonClicked();
+
+    // isUiAccessCertificateTrusted 作用：
+    // - 检查 KswordARK 测试签名证书是否已在本机 Root 与 TrustedPublisher。
+    bool isUiAccessCertificateTrusted() const;
+
+    // resolveUiAccessCertificatePath 作用：
+    // - 在发行目录和仓库 .cert 目录中定位公钥证书文件。
+    QString resolveUiAccessCertificatePath() const;
+
+    // installUiAccessCertificate 作用：
+    // - 把公钥证书导入 LocalMachine 证书存储；
+    // - 不读取、不导入 PFX 私钥。
+    bool installUiAccessCertificate(QString* detailTextOut);
+
+    // confirmUiAccessTrustImport 作用：
+    // - 弹出导入前确认框，说明系统信任和私钥泄露风险。
+    bool confirmUiAccessTrustImport(const QString& certificatePath);
+
+    // hasUiAccessPrivilege 作用：
+    // - 查询当前进程令牌 TokenUIAccess 状态；
+    // - 返回 true 表示当前实例已经带 UIAccess 位。
+    bool hasUiAccessPrivilege() const;
+
+    // launchSelfWithSystemUiAccessToken 作用：
+    // - 获取 SYSTEM 进程令牌，DuplicateTokenEx 为主令牌；
+    // - 对复制令牌调用 SetTokenInformation(TokenUIAccess)；
+    // - 最后通过 CreateProcessAsUserW 启动自身。
+    bool launchSelfWithSystemUiAccessToken(QString* detailTextOut);
     bool queryR0DriverServiceRunning(bool& runningOut, bool fatalOnError);
     bool startR0DriverService();
     bool stopR0DriverService(bool suppressErrorDialog = false);
@@ -179,7 +212,6 @@ private:
     bool hasAdminPrivilege() const;
     bool hasDebugPrivilege() const;
     bool hasSystemPrivilege() const;
-    bool hasTrustedInstallerPrivilege() const;
     bool enableSeDebugPrivilege(std::string& errorTextOut) const;
     void initDockWidgets();
     QWidget* createDockPlaceholderWidget(const QString& titleText) const;
@@ -370,10 +402,11 @@ private:
     bool m_windowPinned = false;                        // m_windowPinned：主窗口当前是否置顶。
 
     // 顶部菜单栏右侧权限按钮（纯文字）：
+    // - UIAccess：证书信任检查与 SYSTEM TokenUIAccess fallback；
     // - Admin：管理员权限状态与提权入口；
     // - Debug：SeDebugPrivilege 状态与申请入口；
     // - System：是否 LocalSystem 身份；
-    // - TI/R0：TrustedInstaller 与驱动服务快捷开关。
+    // - R0：驱动服务快捷开关。
     QWidget* m_privilegeButtonContainer = nullptr;
     QWidget* m_topActionRowWidget = nullptr;     // m_topActionRowWidget：标题栏下方的功能条容器（常用动作 + 权限按钮）。
     QHBoxLayout* m_topActionRowLayout = nullptr; // m_topActionRowLayout：功能条水平布局。
@@ -381,10 +414,10 @@ private:
     QToolButton* m_licenseMenuButton = nullptr;  // m_licenseMenuButton：功能条左侧“许可证”按钮。
     QToolButton* m_exitMenuButton = nullptr;     // m_exitMenuButton：功能条左侧“退出”按钮。
     QToolButton* m_settingsMenuButton = nullptr; // m_settingsMenuButton：功能条左侧“设置”入口按钮。
+    QPushButton* m_uiAccessStatusButton = nullptr; // m_uiAccessStatusButton：导入 UIAccess 测试签名公钥证书的入口。
     QPushButton* m_adminStatusButton = nullptr;
     QPushButton* m_debugStatusButton = nullptr;
     QPushButton* m_systemStatusButton = nullptr;
-    QPushButton* m_tiStatusButton = nullptr;
     QPushButton* m_r0StatusButton = nullptr;
     bool m_r0DriverServiceRunning = false;      // m_r0DriverServiceRunning：KswordARK 驱动服务当前是否运行。
     std::atomic_bool m_r0DriverLogPollerRunning{ false }; // m_r0DriverLogPollerRunning：R0 日志轮询线程运行标记。
