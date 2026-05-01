@@ -1,1 +1,0 @@
-KSword is a Windows C++/Qt-style GUI plus kernel driver project. Main GUI sources are under `Ksword5.1/Ksword5.1`, driver code under `KswordARKDriver`, and shared IOCTL contracts under `shared/driver`. The recent work adds kernel callback removal UI/IOCTLs and FileDock file-unlocker/context-menu integration.
