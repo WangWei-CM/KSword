@@ -230,7 +230,7 @@ private:
     };
 
 public:
-    // ProcessActivityMetric：进程活动条形图支持切换显示的指标。
+    // ProcessActivityMetric：进程活动折线图支持切换显示的指标。
     enum class ProcessActivityMetric : int
     {
         Cpu = 0,     // CPU 百分比。
@@ -245,6 +245,9 @@ public:
     {
         std::string identityKey;       // identityKey：PID + 创建时间，和表格选择保持一致。
         std::string processName;       // processName：快照悬停展示用短名称。
+        std::string imagePath;         // imagePath：采样时的可执行路径，用于历史表格恢复真实图标。
+        std::string iconCacheKey;      // iconCacheKey：进程名 + 路径组成的稳定图标缓存键。
+        std::uint64_t creationTime100ns = 0; // creationTime100ns：原始进程创建时间，用于历史表格保持 identity。
         std::uint32_t pid = 0;         // pid：快照悬停展示和排查用。
         double cpuPercent = 0.0;       // cpuPercent：该进程采样时 CPU。
         double memoryMB = 0.0;         // memoryMB：该进程采样时工作集。
@@ -256,8 +259,8 @@ public:
     // ProcessActivitySample：一次进程列表活动采样。
     struct ProcessActivitySample
     {
-        std::uint64_t sequence = 0;           // sequence：录制内单调递增序号。
-        std::uint64_t elapsedMs = 0;          // elapsedMs：距本次录制开始的毫秒数。
+        std::uint64_t sequence = 0;           // sequence：记录内单调递增序号。
+        std::uint64_t elapsedMs = 0;          // elapsedMs：距本次记录开始的毫秒数。
         std::int64_t unixMilliseconds = 0;    // unixMilliseconds：本地时间戳，便于 UI 格式化。
         double totalCpuPercent = 0.0;         // totalCpuPercent：全局聚合 CPU。
         double totalMemoryMB = 0.0;           // totalMemoryMB：全局聚合工作集。
@@ -282,6 +285,8 @@ private:
     void applyAdaptiveColumnWidths();
     int refreshIntervalMillisecondsFromInput() const;
     void applyRefreshIntervalInput();
+    int tableRefreshIntervalMillisecondsFromInput() const;
+    void applyTableRefreshIntervalInput();
     void initializeCreateProcessConnections();
     void focusProcessSearchBox(bool selectAllText);
     QString currentProcessSearchText() const;
@@ -289,14 +294,16 @@ private:
 
     // ======== 刷新与渲染 ========
     void requestAsyncRefresh(bool forceRefresh);
-    void applyRefreshResult(const RefreshResult& refreshResult);
+    void applyRefreshResult(const RefreshResult& refreshResult, bool forceUiRefresh);
     void rebuildTable();
+    bool shouldRebuildProcessTableForRefresh(bool forceUiRefresh) const;
     void requestAsyncThreadRefresh(bool forceRefresh);
     void rebuildThreadTable();
     void applyThreadStatusUi(bool refreshing, const QString& stateText);
     std::vector<DisplayRow> buildDisplayOrder() const;
     std::vector<DisplayRow> buildTreeDisplayOrder() const;
     std::vector<DisplayRow> buildListDisplayOrder() const;
+    std::vector<DisplayRow> buildActivitySnapshotDisplayOrder() const;
     void applyR0ColumnAvailability(const std::vector<DisplayRow>& displayRows);
 
     // ======== 视图控制 ========
@@ -325,7 +332,7 @@ private:
     void executeTerminateThreadAction();
     void updateUsageSummaryInHeader(const std::vector<DisplayRow>& displayRows);
 
-    // ======== 进程活动录制与时间轴 ========
+    // ======== 进程活动记录与时间轴 ========
     bool isProcessActivityMetricEnabled(ProcessActivityMetric metric) const;
     bool isProcessActivityRecordingAllowedNow() const;
     bool isProcessListPageVisibleForRecording() const;
@@ -334,7 +341,11 @@ private:
     void refreshProcessActivityTimeline(bool indexShiftedLeft = false);
     void refreshProcessActivityChart();
     void updateProcessActivityStatusLabel();
+    void previewProcessActivitySnapshotForIndex(int sampleIndex);
     void showProcessActivitySnapshotForIndex(int sampleIndex);
+    void commitProcessActivityTimelineIndex(int sampleIndex);
+    bool isProcessActivityTableSnapshotActive() const;
+    void rebuildProcessActivityTableSnapshotRecords();
     QString buildProcessActivitySnapshotText(int sampleIndex) const;
     std::vector<std::string> currentProcessActivitySelectionKeys() const;
 
@@ -459,30 +470,34 @@ private:
     QPushButton* m_pauseButton = nullptr;     // 暂停监视按钮。
     QCheckBox* m_kernelCompareCheck = nullptr;// 刷新时是否额外请求内核进程列表并做差异对比。
     QLineEdit* m_processSearchLineEdit = nullptr; // 进程搜索框；用于按名称/PID/路径等关键词过滤当前列表。
-    QLabel* m_refreshLabel = nullptr;         // 刷新间隔标签。
-    QLineEdit* m_refreshIntervalEdit = nullptr; // 刷新/打点间隔输入框，允许小数秒。
+    QLabel* m_refreshLabel = nullptr;         // 列表刷新间隔标签。
+    QLineEdit* m_tableRefreshIntervalEdit = nullptr; // 进程表格重绘间隔输入框，默认 2 秒。
+    QLabel* m_sampleIntervalLabel = nullptr;  // 记录打点间隔标签。
+    QLineEdit* m_refreshIntervalEdit = nullptr; // 记录打点/后台监视间隔输入框，允许小数秒，默认 0.1 秒。
     QLabel* m_refreshStateLabel = nullptr;    // 刷新状态标签（明显展示“刷新中/空闲+耗时”）。
 
-    // ======== 进程活动录制面板 ========
+    // ======== 进程活动记录面板 ========
     QWidget* m_activityPanelWidget = nullptr;       // m_activityPanelWidget：进程活动图表面板。
-    ProcessActivityChartWidget* m_activityChartWidget = nullptr; // m_activityChartWidget：时间轴叠加条形图。
-    ProcessActivityTimelineSlider* m_activityTimelineSlider = nullptr; // m_activityTimelineSlider：历史窗口横向时间轴。
-    QPushButton* m_activityRecordButton = nullptr;  // m_activityRecordButton：开始/停止录制进程活动。
-    QPushButton* m_activityClearButton = nullptr;   // m_activityClearButton：清空当前录制缓存。
-    QCheckBox* m_activityBackgroundRecordCheck = nullptr; // 后台保持记录开关。
+    ProcessActivityChartWidget* m_activityChartWidget = nullptr; // m_activityChartWidget：时间轴百分比折线图。
+    ProcessActivityTimelineSlider* m_activityTimelineSlider = nullptr; // m_activityTimelineSlider：隐藏内部时间轴，公开交互由折线图点击完成。
+    QPushButton* m_activityClearButton = nullptr;   // m_activityClearButton：清空当前刷新记录缓存。
+    QCheckBox* m_activityBackgroundRecordCheck = nullptr; // 后台保持刷新/记录开关。
     QPushButton* m_activityCpuButton = nullptr;     // CPU 指标显示按钮。
     QPushButton* m_activityMemoryButton = nullptr;  // 内存指标显示按钮。
     QPushButton* m_activityDiskButton = nullptr;    // 磁盘指标显示按钮。
     QPushButton* m_activityNetworkButton = nullptr; // 网络指标显示按钮。
     QPushButton* m_activityGpuButton = nullptr;     // GPU 指标显示按钮。
-    QLabel* m_activityStatusLabel = nullptr;        // 活动录制状态标签。
+    QLabel* m_activityStatusLabel = nullptr;        // 活动记录状态标签。
     QLabel* m_activitySnapshotLabel = nullptr;      // 时间轴悬停快照摘要。
-    bool m_activityRecordingEnabled = false;        // 用户是否启用录制。
+    bool m_activityRecordingEnabled = false;        // m_activityRecordingEnabled：由刷新状态派生，刷新即记录。
     bool m_activityTimelinePinnedToLatest = true;   // 时间轴在最右侧时自动吸附最新。
     bool m_activityTimelineSliderUpdating = false;  // 程序更新滑块时屏蔽用户态判定。
-    std::uint64_t m_activityNextSequence = 0;       // 录制样本序号。
-    std::uint64_t m_activityRecordingStartTick100ns = 0; // 本次录制开始 steady tick。
-    std::vector<ProcessActivitySample> m_activitySamples; // 有界环形录制缓存。
+    int m_activityTableSnapshotIndex = -1;           // 下方进程表当前绑定的历史样本，-1 表示实时列表。
+    std::uint64_t m_activityNextSequence = 0;       // 记录样本序号。
+    std::uint64_t m_activityRecordingStartTick100ns = 0; // 本次记录开始 steady tick。
+    double m_activityTotalPhysicalMemoryMB = 0.0;    // 物理内存总量，用于把内存指标转换为百分比。
+    std::vector<ProcessActivitySample> m_activitySamples; // 有界环形记录缓存。
+    std::vector<ks::process::ProcessRecord> m_activityTableSnapshotRecords; // 历史样本映射出的进程表记录。
 
     // ======== 进程表格 ========
     QTreeWidget* m_processTable = nullptr;    // 进程列表表格（支持列拖动/排序/右键）。
@@ -573,12 +588,14 @@ private:
     std::uint64_t m_refreshTicket = 0;        // 刷新请求序号（防乱序）。
     std::uint32_t m_logicalCpuCount = 1;      // CPU 核心数（CPU 百分比换算）。
     std::chrono::steady_clock::time_point m_lastRefreshStartTime{}; // 主线程记录的刷新开始时刻。
+    std::chrono::steady_clock::time_point m_lastProcessTableRebuildTime{}; // 最近一次进程表重绘时间。
     int m_refreshProgressTaskPid = 0;         // 绑定到 kPro 的“进程刷新任务”PID。
 
     // ======== 数据缓存 ========
     std::unordered_map<std::string, CacheEntry> m_cacheByIdentity; // 进程缓存（PID+CreateTime）。
     std::unordered_map<std::string, ks::process::CounterSample> m_counterSampleByIdentity; // 差值样本。
     QHash<QString, QIcon> m_iconCacheByPath;  // 进程图标缓存，避免重复提取。
+    QHash<QString, QIcon> m_activityIconCacheByProcessKey; // 历史活动图标缓存：进程名+路径 -> 图标。
     std::unordered_map<std::string, QPointer<ProcessDetailWindow>> m_detailWindowByIdentity; // 详情窗口缓存（同进程复用窗口）。
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_detailWindowLastSyncTimeByIdentity; // 详情窗口最近一次同步时间，避免每轮刷新都触发重型解析。
     std::string m_trackedSelectedIdentityKey; // 当前选中进程 identityKey；表格刷新重建后用于恢复高亮。

@@ -43,7 +43,7 @@ class QTableWidgetItem;
 class QTableView;
 class QTabWidget;
 class QTimer;
-class QToolBox;
+class QEvent;
 class QScrollArea;
 class QVBoxLayout;
 class QGridLayout;
@@ -83,6 +83,12 @@ public:
     void activateMonitorTab(const QString& tabKey);
 
 protected:
+    // event：
+    // - 作用：捕获主题/调色板变化并刷新动态样式；
+    // - 入参 eventPointer：Qt 分发的事件对象；
+    // - 返回：true 表示事件被当前控件或基类处理。
+    bool event(QEvent* eventPointer) override;
+
     // showEvent：
     // - 首次显示时再触发 WMI/ETW Provider 枚举；
     // - 避免主窗口启动阶段并发拉起多路后台发现任务。
@@ -443,13 +449,23 @@ private:
     // - 返回：无返回值。
     void flushEtwPendingRows(bool captureFinished);
     // applyEtwTimelineSelection：
-    // - 作用：接收 ETW 时间轴控件发出的绝对起止时间；
-    // - 处理：记录时间窗口并复用后置筛选流程隐藏表格行；
+    // - 作用：接收 ETW 时间轴控件发出的“已扣除暂停区间”的有效起止时间；
+    // - 处理：记录有效时间窗口并复用后置筛选流程隐藏表格行；
     // - 返回：无返回值。
     void applyEtwTimelineSelection(std::uint64_t start100ns, std::uint64_t end100ns);
+    // etwRawTimestampToTimelineTimestamp：
+    // - 作用：把 ETW 原始绝对 100ns 时间戳转换为扣除暂停区间后的时间轴时间；
+    // - 入参 rawTimestamp100ns：事件或范围边界的原始 ETW 时间戳；
+    // - 返回：可交给时间轴控件绘制/筛选的有效时间戳。
+    std::uint64_t etwRawTimestampToTimelineTimestamp(std::uint64_t rawTimestamp100ns) const;
+    // closeEtwTimelinePauseInterval：
+    // - 作用：在继续监听时把当前暂停段固化为闭区间；
+    // - 入参 resumeTime100ns：恢复监听瞬间的原始系统时间；
+    // - 返回：无返回值。
+    void closeEtwTimelinePauseInterval(std::uint64_t resumeTime100ns);
     // refreshEtwTimelineRange：
-    // - 作用：根据 ETW 监听运行/停止状态更新时间轴左右边界；
-    // - 入参 captureFinished：true 表示右侧固定为停止时间，false 表示右侧跟随系统时间；
+    // - 作用：根据 ETW 监听运行/暂停/停止状态更新时间轴左右边界；
+    // - 入参 captureFinished：true 表示右侧固定为停止有效时间，false 表示右侧跟随运行有效时间；
     // - 返回：无返回值。
     void refreshEtwTimelineRange(bool captureFinished);
     // refreshEtwTimelinePoints：
@@ -461,8 +477,8 @@ private:
     // - 返回：true 表示后置筛选需要额外叠加时间范围判断。
     bool isEtwTimelineFilterActive() const;
     // updateEtwCollapseHeight：
-    // - 作用：按当前展开项内容重算 ETW 折叠区高度，避免压缩折叠页内部控件；
-    // - 说明：高度不足时交给外层滚动区域处理，不在折叠页内部压缩。
+    // - 作用：触发 ETW 独立折叠区重新计算几何尺寸；
+    // - 说明：当前折叠区不再使用 QToolBox，因此不会强制保留一个展开页。
     void updateEtwCollapseHeight();
     static void WINAPI etwEventRecordCallback(struct _EVENT_RECORD* eventRecordPtr);
     void enqueueEtwEventFromRecord(const struct _EVENT_RECORD* eventRecordPtr);
@@ -554,6 +570,8 @@ private:
     // ========================= WMI 页 ===========================
     QWidget* m_wmiPage = nullptr;                  // WMI 主页面。
     QVBoxLayout* m_wmiLayout = nullptr;            // WMI 页面布局。
+    QWidget* m_wmiTopConfigPanel = nullptr;        // WMI 顶部独立折叠区。
+    QHBoxLayout* m_wmiTopConfigLayout = nullptr;   // WMI 顶部折叠区横向布局。
     QWidget* m_wmiProviderPanel = nullptr;         // Provider 面板。
     QVBoxLayout* m_wmiProviderPanelLayout = nullptr; // Provider 面板布局。
     QHBoxLayout* m_wmiProviderControlLayout = nullptr; // Provider 控制栏布局。
@@ -606,7 +624,8 @@ private:
     // ========================= ETW 页 ===========================
     QWidget* m_etwPage = nullptr;                    // ETW 主页面。
     QVBoxLayout* m_etwLayout = nullptr;              // ETW 页面布局。
-    QToolBox* m_etwSideToolBox = nullptr;            // ETW 侧边折叠菜单。
+    QWidget* m_etwCollapseHostWidget = nullptr;      // ETW 独立折叠区宿主。
+    QVBoxLayout* m_etwCollapseHostLayout = nullptr;  // ETW 独立折叠区布局。
     QWidget* m_etwProviderPanel = nullptr;           // ETW Provider 面板。
     QVBoxLayout* m_etwProviderPanelLayout = nullptr; // ETW Provider 布局。
     QHBoxLayout* m_etwProviderControlLayout = nullptr; // ETW 控制栏。
@@ -676,7 +695,7 @@ private:
     std::mutex m_etwPreFilterSnapshotMutex;          // 前置筛选快照互斥锁。
     std::vector<EtwCapturedEventRow> m_etwPendingRows; // ETW 待刷入 UI 的事件缓存。
     std::vector<EtwCapturedEventRow> m_etwCapturedRows; // ETW 已捕获事件缓存（后置筛选仅隐藏）。
-    std::vector<ProcessTraceTimelineEventPoint> m_etwTimelineEventPoints; // ETW 时间轴绘制用轻量事件缓存。
+    std::vector<ProcessTraceTimelineEventPoint> m_etwTimelineEventPoints; // ETW 时间轴绘制用有效时间点缓存。
     std::mutex m_etwPendingMutex;                    // ETW 待刷入队列互斥锁。
     std::atomic_bool m_etwCaptureRunning{ false };   // ETW 捕获运行状态。
     std::atomic_bool m_etwCapturePaused{ false };    // ETW 捕获暂停状态。
@@ -689,8 +708,10 @@ private:
     QString m_etwSessionName;                        // ETW 会话名（Stop/Query 复用）。
     std::uint64_t m_etwCaptureStartTime100ns = 0;     // ETW 时间轴左边界时间。
     std::uint64_t m_etwCaptureStopTime100ns = 0;      // ETW 时间轴停止时右边界时间。
-    std::uint64_t m_etwTimelineSelectionStart100ns = 0; // ETW 时间轴框选起点。
-    std::uint64_t m_etwTimelineSelectionEnd100ns = 0;   // ETW 时间轴框选终点。
+    std::uint64_t m_etwTimelinePauseTime100ns = 0;    // ETW 暂停时冻结的时间轴右边界。
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> m_etwTimelinePauseIntervals; // ETW 已完成暂停区间列表。
+    std::uint64_t m_etwTimelineSelectionStart100ns = 0; // ETW 有效时间轴框选起点。
+    std::uint64_t m_etwTimelineSelectionEnd100ns = 0;   // ETW 有效时间轴框选终点。
     bool m_etwTimelineUserSelectionActive = false;    // 用户是否已启用 ETW 时间框选。
     bool m_initialDiscoveryDone = false;             // 首次显示时是否已触发 WMI/ETW Provider 枚举。
 };

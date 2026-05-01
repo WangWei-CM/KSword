@@ -15,6 +15,9 @@
     - Ksword5.1\x64\Release\KswordARKDriver\KswordARK.sys
     - Ksword5.1\x64\Debug\KswordARKDriver\KswordARK.sys
 
+    也可以通过 -TargetPath 显式指定主程序、DLL 或其它最终产物。
+    该模式复用同一份 .cert\KswordARK-TestSigning.pfx/.cer，不会生成第二套签名证书。
+
     推荐用管理员 PowerShell 运行。管理员运行时会把测试证书导入 LocalMachine
     的 Root 和 TrustedPublisher；非管理员运行时只能导入 CurrentUser，文件会被签名，
     但内核加载仍可能因为机器级信任缺失而报 577。
@@ -25,6 +28,9 @@ param(
     # DriverPath：显式指定一个或多个 .sys 路径；不指定时自动签名仓库内已存在的 KswordARK.sys。
     [Parameter(ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
     [string[]] $DriverPath,
+
+    # TargetPath：显式指定一个或多个待签名文件；主程序最终签名通过该参数复用驱动测试证书。
+    [string[]] $TargetPath,
 
     # Subject：测试证书主题；保持稳定可让后续构建复用同一证书。
     [string] $Subject = 'CN=KswordARK Test Signing Certificate',
@@ -65,6 +71,11 @@ if ($PSVersionTable.PSVersion.Major -lt 7 -and -not $env:KSWORD_SIGN_SCRIPT_PWSH
         if ($DriverPath) {
             foreach ($pathItem in $DriverPath) {
                 $forwardArgs += @('-DriverPath', $pathItem)
+            }
+        }
+        if ($TargetPath) {
+            foreach ($pathItem in $TargetPath) {
+                $forwardArgs += @('-TargetPath', $pathItem)
             }
         }
         if ($EnableTestSigning) {
@@ -317,6 +328,35 @@ function Import-TestCertificateTrust {
     }
 }
 
+# Resolve-SignTargets：
+# - 输入：仓库根目录、显式最终产物路径、兼容旧参数的驱动路径；
+# - 处理：优先归一化显式路径；未提供显式路径时回落到默认驱动输出扫描；
+# - 返回：去重后的签名目标绝对路径数组。
+function Resolve-SignTargets {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RepoRoot,
+
+        [string[]] $ExplicitTargetPaths,
+
+        [string[]] $ExplicitDriverPaths
+    )
+
+    $combinedExplicitPaths = @()
+    if ($ExplicitTargetPaths) {
+        $combinedExplicitPaths += $ExplicitTargetPaths
+    }
+    if ($ExplicitDriverPaths) {
+        $combinedExplicitPaths += $ExplicitDriverPaths
+    }
+    $combinedExplicitPaths = @($combinedExplicitPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($combinedExplicitPaths.Count -gt 0) {
+        return Resolve-DriverTargets -RepoRoot $RepoRoot -ExplicitPaths $combinedExplicitPaths
+    }
+
+    return Resolve-DriverTargets -RepoRoot $RepoRoot
+}
+
 # Resolve-DriverTargets：
 # - 输入：仓库根目录与用户显式路径；
 # - 处理：显式路径优先，否则收集仓库内常见输出路径；
@@ -329,7 +369,7 @@ function Resolve-DriverTargets {
         [string[]] $ExplicitPaths
     )
 
-    $explicitPathList = @($ExplicitPaths)
+    $explicitPathList = @($ExplicitPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     if ($explicitPathList.Count -gt 0) {
         return $explicitPathList |
             ForEach-Object {
@@ -384,8 +424,8 @@ function Enable-TestSigningIfRequested {
 }
 
 # Invoke-SignTool：
-# - 输入：signtool 路径、证书信息、驱动路径；
-# - 处理：使用文件型 PFX 对驱动进行嵌入式签名；
+# - 输入：signtool 路径、证书信息、待签名文件路径；
+# - 处理：使用文件型 PFX 对主程序、DLL 或驱动进行嵌入式签名；
 # - 返回：无返回值。
 function Invoke-SignTool {
     param(
@@ -399,7 +439,7 @@ function Invoke-SignTool {
         [string] $TargetPath
     )
 
-    Write-Host "签名驱动：$TargetPath"
+    Write-Host "签名目标：$TargetPath"
     $signOutput = & $SignToolPath sign /v /fd SHA256 /f $CertificateInfo.PfxPath /p $CertificateInfo.Password $TargetPath 2>&1
     $signExitCode = $LASTEXITCODE
     $signOutput | ForEach-Object { Write-Host $_ }
@@ -442,9 +482,9 @@ try {
         -PlainPassword $PfxPassword
     Import-TestCertificateTrust -CerPath $certificateInfo.CerPath -SkipMachine ([bool]$SkipMachineTrust)
 
-$targets = @(Resolve-DriverTargets -RepoRoot $repoRoot -ExplicitPaths $DriverPath)
+    $targets = @(Resolve-SignTargets -RepoRoot $repoRoot -ExplicitTargetPaths $TargetPath -ExplicitDriverPaths $DriverPath)
 if (-not $targets -or $targets.Count -eq 0) {
-        throw '未找到可签名的 KswordARK.sys。请先编译驱动，或通过 -DriverPath 指定 .sys 路径。'
+        throw '未找到可签名的目标文件。请先编译驱动/主程序，或通过 -TargetPath/-DriverPath 指定路径。'
     }
 
     foreach ($target in $targets) {
@@ -452,10 +492,13 @@ if (-not $targets -or $targets.Count -eq 0) {
     }
 
     Write-Host ''
-    Write-Host '完成。若加载仍返回 577，请确认：'
-    Write-Host '1. bcdedit /enum 中 testsigning 为 Yes，并且已经重启；'
-    Write-Host '2. 证书已在 LocalMachine\Root 与 LocalMachine\TrustedPublisher；'
-    Write-Host '3. 服务 ImagePath 指向的正是刚刚签名的 KswordARK.sys。'
+    Write-Host '完成。'
+    if (-not $TargetPath) {
+        Write-Host '若加载仍返回 577，请确认：'
+        Write-Host '1. bcdedit /enum 中 testsigning 为 Yes，并且已经重启；'
+        Write-Host '2. 证书已在 LocalMachine\Root 与 LocalMachine\TrustedPublisher；'
+        Write-Host '3. 服务 ImagePath 指向的正是刚刚签名的 KswordARK.sys。'
+    }
 }
 catch {
     if ($NonFatal) {

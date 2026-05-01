@@ -17,6 +17,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QEvent>
 #include <QFileInfo>
 #include <QFile>
 #include <QFileDialog>
@@ -29,6 +30,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QJsonArray>
+#include <QList>
 #include <QMenu>
 #include <QMessageBox>
 #include <QJsonDocument>
@@ -50,7 +52,7 @@
 #include <QTableWidget>
 #include <QTextStream>
 #include <QTimer>
-#include <QToolBox>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <QtCharts/QBarCategoryAxis>
@@ -119,6 +121,155 @@ namespace
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::BorderHex());
+    }
+
+    // collapsePanelStyle 作用：
+    // - 为 WMI/ETW 顶部独立折叠面板提供主题自适应边框与背景；
+    // - 返回：可直接应用到折叠面板宿主 QWidget 的样式表。
+    QString collapsePanelStyle()
+    {
+        return QStringLiteral(
+            "QWidget[kswordCollapsePanel=\"true\"]{"
+            "  background:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  border-radius:5px;"
+            "}"
+            "QWidget[kswordCollapseContent=\"true\"]{"
+            "  background:%1;"
+            "  color:%2;"
+            "  border:none;"
+            "}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex());
+    }
+
+    // collapseHeaderButtonStyle 作用：
+    // - 重写折叠头按钮主题，避免继承旧 Collapse/QToolBox 的固定配色；
+    // - 返回：可直接应用到 QToolButton 的样式表。
+    QString collapseHeaderButtonStyle()
+    {
+        return QStringLiteral(
+            "QToolButton{"
+            "  background:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  border-radius:5px;"
+            "  padding:5px 8px;"
+            "  font-weight:600;"
+            "  text-align:left;"
+            "}"
+            "QToolButton:hover{"
+            "  background:%4;"
+            "  color:%2;"
+            "  border-color:%5;"
+            "}"
+            "QToolButton:checked{"
+            "  background:%4;"
+            "  color:%2;"
+            "  border-color:%5;"
+            "}")
+            .arg(KswordTheme::SurfaceAltHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueSubtleHex())
+            .arg(KswordTheme::PrimaryBlueHex);
+    }
+
+    // createIndependentCollapseSection 作用：
+    // - 构造一个不互斥的折叠段，允许所有段同时收起；
+    // - 入参 parent：父控件；titleText：标题；contentWidget：已有内容页；expanded：初始展开状态；
+    // - 返回：外层折叠段 QWidget，内部 header/content 均随父对象释放。
+    QWidget* createIndependentCollapseSection(
+        QWidget* parent,
+        const QString& titleText,
+        QWidget* contentWidget,
+        const bool expanded)
+    {
+        QWidget* sectionWidget = new QWidget(parent);
+        sectionWidget->setProperty("kswordCollapsePanel", QStringLiteral("true"));
+        sectionWidget->setStyleSheet(collapsePanelStyle());
+        sectionWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+
+        QVBoxLayout* sectionLayout = new QVBoxLayout(sectionWidget);
+        sectionLayout->setContentsMargins(0, 0, 0, 0);
+        sectionLayout->setSpacing(0);
+
+        QToolButton* headerButton = new QToolButton(sectionWidget);
+        headerButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        headerButton->setText(titleText);
+        headerButton->setCheckable(true);
+        headerButton->setChecked(expanded);
+        headerButton->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+        headerButton->setStyleSheet(collapseHeaderButtonStyle());
+        headerButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+        QWidget* contentHostWidget = new QWidget(sectionWidget);
+        contentHostWidget->setProperty("kswordCollapseContent", QStringLiteral("true"));
+        contentHostWidget->setStyleSheet(collapsePanelStyle());
+        contentHostWidget->setVisible(expanded);
+        contentHostWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+
+        QVBoxLayout* contentHostLayout = new QVBoxLayout(contentHostWidget);
+        contentHostLayout->setContentsMargins(4, 4, 4, 4);
+        contentHostLayout->setSpacing(4);
+        contentHostLayout->addWidget(contentWidget);
+
+        sectionLayout->addWidget(headerButton, 0);
+        sectionLayout->addWidget(contentHostWidget, 0);
+
+        QObject::connect(headerButton, &QToolButton::toggled, sectionWidget,
+            [headerButton, contentHostWidget, sectionWidget](const bool checked) {
+                // 每个折叠段只控制自己的内容区，不影响兄弟段展开状态。
+                headerButton->setArrowType(checked ? Qt::DownArrow : Qt::RightArrow);
+                contentHostWidget->setVisible(checked);
+                sectionWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+                sectionWidget->updateGeometry();
+                if (QWidget* parentWidget = sectionWidget->parentWidget())
+                {
+                    parentWidget->updateGeometry();
+                }
+            });
+
+        return sectionWidget;
+    }
+
+    // refreshIndependentCollapseTheme 作用：
+    // - 递归刷新独立折叠段样式，响应深浅主题切换；
+    // - 入参 rootWidget：需要扫描的根控件；
+    // - 返回：无返回值。
+    void refreshIndependentCollapseTheme(QWidget* rootWidget)
+    {
+        if (rootWidget == nullptr)
+        {
+            return;
+        }
+
+        const QList<QWidget*> widgetList = rootWidget->findChildren<QWidget*>();
+        for (QWidget* widgetPointer : widgetList)
+        {
+            if (widgetPointer == nullptr)
+            {
+                continue;
+            }
+            if (widgetPointer->property("kswordCollapsePanel").toString() == QStringLiteral("true")
+                || widgetPointer->property("kswordCollapseContent").toString() == QStringLiteral("true"))
+            {
+                widgetPointer->setStyleSheet(collapsePanelStyle());
+            }
+        }
+
+        const QList<QToolButton*> headerButtonList = rootWidget->findChildren<QToolButton*>();
+        for (QToolButton* buttonPointer : headerButtonList)
+        {
+            if (buttonPointer != nullptr
+                && buttonPointer->parentWidget() != nullptr
+                && buttonPointer->parentWidget()->property("kswordCollapsePanel").toString() == QStringLiteral("true"))
+            {
+                buttonPointer->setStyleSheet(collapseHeaderButtonStyle());
+            }
+        }
     }
 
     // buildStatusStyle 作用：
@@ -3733,6 +3884,22 @@ void MonitorDock::showEvent(QShowEvent* event)
         });
 }
 
+bool MonitorDock::event(QEvent* eventPointer)
+{
+    // 主题切换会更新全局 palette，折叠面板使用动态样式表，需要在事件到达时重新拼接。
+    const bool handled = QWidget::event(eventPointer);
+    if (eventPointer != nullptr
+        && (eventPointer->type() == QEvent::PaletteChange
+            || eventPointer->type() == QEvent::ApplicationPaletteChange
+            || eventPointer->type() == QEvent::StyleChange))
+    {
+        refreshIndependentCollapseTheme(m_wmiPage);
+        refreshIndependentCollapseTheme(m_etwPage);
+        updateEtwCollapseHeight();
+    }
+    return handled;
+}
+
 void MonitorDock::ensureWinApiTabInitialized()
 {
     if (m_winApiPage == nullptr)
@@ -4377,20 +4544,18 @@ void MonitorDock::initializeWmiTab()
     m_wmiLayout->setContentsMargins(3, 3, 3, 3);
     m_wmiLayout->setSpacing(4);
 
-    // WMI 顶部配置区改为左右分栏：
+    // WMI 顶部配置区改为独立折叠段：
     // - 左侧：Provider 枚举与过滤；
     // - 右侧：订阅类选择、WHERE 模板与订阅控制；
-    // - 不再使用折叠栏，避免频繁切页与空间浪费。
-    QWidget* wmiTopConfigPanel = new QWidget(m_wmiPage);
-    QHBoxLayout* wmiTopConfigLayout = new QHBoxLayout(wmiTopConfigPanel);
-    wmiTopConfigLayout->setContentsMargins(0, 0, 0, 0);
-    wmiTopConfigLayout->setSpacing(4);
-    // 顶部配置区固定为紧凑高度，避免把下方监听结果表挤压到不可用。
-    wmiTopConfigPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
-    wmiTopConfigPanel->setMaximumHeight(220);
+    // - 折叠段之间不互斥，允许用户把所有配置区同时收起。
+    m_wmiTopConfigPanel = new QWidget(m_wmiPage);
+    m_wmiTopConfigLayout = new QHBoxLayout(m_wmiTopConfigPanel);
+    m_wmiTopConfigLayout->setContentsMargins(0, 0, 0, 0);
+    m_wmiTopConfigLayout->setSpacing(4);
+    m_wmiTopConfigPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
 
     // Provider 左侧面板。
-    m_wmiProviderPanel = new QWidget(wmiTopConfigPanel);
+    m_wmiProviderPanel = new QWidget(m_wmiTopConfigPanel);
     m_wmiProviderPanelLayout = new QVBoxLayout(m_wmiProviderPanel);
     m_wmiProviderPanelLayout->setContentsMargins(3, 3, 3, 3);
     m_wmiProviderPanelLayout->setSpacing(4);
@@ -4445,10 +4610,14 @@ void MonitorDock::initializeWmiTab()
 
     m_wmiProviderPanelLayout->addLayout(m_wmiProviderControlLayout);
     m_wmiProviderPanelLayout->addWidget(m_wmiProviderTableView, 1);
-    wmiTopConfigLayout->addWidget(m_wmiProviderPanel, 1);
+    m_wmiTopConfigLayout->addWidget(createIndependentCollapseSection(
+        m_wmiTopConfigPanel,
+        QStringLiteral("WMI Providers"),
+        m_wmiProviderPanel,
+        true), 1);
 
     // 订阅右侧面板。
-    m_wmiSubscribePanel = new QWidget(wmiTopConfigPanel);
+    m_wmiSubscribePanel = new QWidget(m_wmiTopConfigPanel);
     m_wmiSubscribeLayout = new QVBoxLayout(m_wmiSubscribePanel);
     m_wmiSubscribeLayout->setContentsMargins(3, 3, 3, 3);
     m_wmiSubscribeLayout->setSpacing(4);
@@ -4569,10 +4738,14 @@ void MonitorDock::initializeWmiTab()
     // 初始化时先按“紧凑高度”收敛事件类表，防止首帧就出现多余滚动条。
     updateWmiSubscribePanelCompactLayout();
 
-    wmiTopConfigLayout->addWidget(m_wmiSubscribePanel, 1);
+    m_wmiTopConfigLayout->addWidget(createIndependentCollapseSection(
+        m_wmiTopConfigPanel,
+        QStringLiteral("WMI订阅配置"),
+        m_wmiSubscribePanel,
+        true), 1);
 
-    // 顶部左右分栏统一加入 WMI 主布局。
-    m_wmiLayout->addWidget(wmiTopConfigPanel, 0);
+    // 顶部两个配置块各自拥有折叠头，互不排斥，可同时收起。
+    m_wmiLayout->addWidget(m_wmiTopConfigPanel, 0);
 
     // 结果表。
     m_wmiEventTable = new QTableWidget(m_wmiPage);
@@ -4712,25 +4885,24 @@ void MonitorDock::updateWmiSubscribePanelCompactLayout()
 
 void MonitorDock::updateEtwCollapseHeight()
 {
-    if (m_etwSideToolBox == nullptr || m_etwSideToolBox->count() <= 0)
+    if (m_etwCollapseHostWidget == nullptr)
     {
         return;
     }
 
-    QWidget* currentItem = m_etwSideToolBox->currentWidget();
-    if (currentItem != nullptr && currentItem->layout() != nullptr)
+    if (m_etwCollapseHostLayout != nullptr)
     {
-        currentItem->layout()->activate();
-    }
-    if (m_etwSideToolBox->layout() != nullptr)
-    {
-        m_etwSideToolBox->layout()->activate();
+        m_etwCollapseHostLayout->activate();
     }
 
-    // 取消折叠区的显式高度钳制，交给外层布局自然分配。
-    m_etwSideToolBox->setMinimumHeight(0);
-    m_etwSideToolBox->setMaximumHeight(QWIDGETSIZE_MAX);
-    m_etwSideToolBox->updateGeometry();
+    // 自定义折叠区允许全部收起，因此只通知布局重算，不再按“当前页”钳制高度。
+    m_etwCollapseHostWidget->setMinimumHeight(0);
+    m_etwCollapseHostWidget->setMaximumHeight(QWIDGETSIZE_MAX);
+    m_etwCollapseHostWidget->updateGeometry();
+    if (m_etwPage != nullptr)
+    {
+        m_etwPage->updateGeometry();
+    }
 }
 
 void MonitorDock::initializeEtwTab()
@@ -4740,15 +4912,18 @@ void MonitorDock::initializeEtwTab()
     m_etwLayout->setContentsMargins(4, 4, 4, 4);
     m_etwLayout->setSpacing(6);
 
-    // 折叠区直接挂在 ETW 主布局，避免额外包装层引入独立滚动/高度约束。
-    m_etwSideToolBox = new QToolBox(m_etwPage);
-    m_etwSideToolBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    m_etwSideToolBox->setMinimumHeight(0);
-    m_etwSideToolBox->setMaximumHeight(QWIDGETSIZE_MAX);
-    m_etwLayout->addWidget(m_etwSideToolBox, 0);
+    // ETW 顶部配置区使用自定义独立折叠段：
+    // - 替换 QToolBox，解除“必须保留一个展开页”的限制；
+    // - 每个段只控制自己的内容，用户可以把所有配置段全部收起。
+    m_etwCollapseHostWidget = new QWidget(m_etwPage);
+    m_etwCollapseHostWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    m_etwCollapseHostLayout = new QVBoxLayout(m_etwCollapseHostWidget);
+    m_etwCollapseHostLayout->setContentsMargins(0, 0, 0, 0);
+    m_etwCollapseHostLayout->setSpacing(4);
+    m_etwLayout->addWidget(m_etwCollapseHostWidget, 0);
 
     // Providers + 会话共用一个折叠页，并在页内左右并排布局。
-    QWidget* etwProviderSessionPanel = new QWidget(m_etwSideToolBox);
+    QWidget* etwProviderSessionPanel = new QWidget(m_etwCollapseHostWidget);
     QHBoxLayout* etwProviderSessionLayout = new QHBoxLayout(etwProviderSessionPanel);
     etwProviderSessionLayout->setContentsMargins(4, 4, 4, 4);
     etwProviderSessionLayout->setSpacing(6);
@@ -4841,7 +5016,7 @@ void MonitorDock::initializeEtwTab()
         item->setData(Qt::UserRole, providerNameText);
         item->setData(Qt::UserRole + 1, categoryText);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(Qt::Unchecked);
+        item->setCheckState(Qt::Checked);
     }
 
     QWidget* etwAllProviderWidget = new QWidget(m_etwProviderPanel);
@@ -4916,10 +5091,14 @@ void MonitorDock::initializeEtwTab()
 
     etwProviderSessionLayout->addWidget(m_etwProviderPanel, 3);
     etwProviderSessionLayout->addWidget(m_etwSessionPanel, 2);
-    m_etwSideToolBox->addItem(etwProviderSessionPanel, QStringLiteral("ETW Providers / 会话"));
+    m_etwCollapseHostLayout->addWidget(createIndependentCollapseSection(
+        m_etwCollapseHostWidget,
+        QStringLiteral("ETW Providers / 会话"),
+        etwProviderSessionPanel,
+        true), 0);
 
     // 参数折叠页。
-    QWidget* capturePanel = new QWidget(m_etwSideToolBox);
+    QWidget* capturePanel = new QWidget(m_etwCollapseHostWidget);
     QVBoxLayout* captureLayout = new QVBoxLayout(capturePanel);
     captureLayout->setContentsMargins(4, 4, 4, 4);
     captureLayout->setSpacing(6);
@@ -5006,7 +5185,11 @@ void MonitorDock::initializeEtwTab()
     m_etwCaptureControlLayout->addWidget(m_etwCaptureStatusLabel);
 
     captureLayout->addLayout(formLayout);
-    m_etwSideToolBox->addItem(capturePanel, QStringLiteral("ETW捕获"));
+    m_etwCollapseHostLayout->addWidget(createIndependentCollapseSection(
+        m_etwCollapseHostWidget,
+        QStringLiteral("ETW捕获"),
+        capturePanel,
+        false), 0);
 
     initializeEtwFilterPanels();
 
@@ -5060,7 +5243,7 @@ void MonitorDock::initializeEtwTab()
 
 void MonitorDock::initializeEtwFilterPanels()
 {
-    QWidget* etwFilterPanel = new QWidget(m_etwSideToolBox);
+    QWidget* etwFilterPanel = new QWidget(m_etwCollapseHostWidget);
     QHBoxLayout* etwFilterPanelLayout = new QHBoxLayout(etwFilterPanel);
     etwFilterPanelLayout->setContentsMargins(4, 4, 4, 4);
     etwFilterPanelLayout->setSpacing(6);
@@ -5179,7 +5362,14 @@ void MonitorDock::initializeEtwFilterPanels()
 
     etwFilterPanelLayout->addWidget(m_etwPreFilterPanel, 1);
     etwFilterPanelLayout->addWidget(m_etwPostFilterPanel, 1);
-    m_etwSideToolBox->addItem(etwFilterPanel, QStringLiteral("ETW筛选"));
+    if (m_etwCollapseHostLayout != nullptr)
+    {
+        m_etwCollapseHostLayout->addWidget(createIndependentCollapseSection(
+            m_etwCollapseHostWidget,
+            QStringLiteral("ETW筛选"),
+            etwFilterPanel,
+            false), 0);
+    }
 
     addEtwFilterRuleGroup(EtwFilterStage::Pre);
     addEtwFilterRuleGroup(EtwFilterStage::Post);
@@ -5203,12 +5393,6 @@ void MonitorDock::initializeConnections()
             ensureWinApiTabInitialized();
         }
     });
-    if (m_etwSideToolBox != nullptr)
-    {
-        connect(m_etwSideToolBox, &QToolBox::currentChanged, this, [this](const int) {
-            updateEtwCollapseHeight();
-        });
-    }
     if (m_etwTimelineWidget != nullptr)
     {
         m_etwTimelineWidget->setSelectionChangedCallback(
@@ -6234,9 +6418,11 @@ void MonitorDock::applyEtwPostFilterToTable()
         }
         if (visible && timelineFilterActive)
         {
-            // 时间轴是外层时间窗口约束，不受后置规则组的反向匹配影响。
-            visible = rowData.timestampValue >= m_etwTimelineSelectionStart100ns
-                && rowData.timestampValue <= m_etwTimelineSelectionEnd100ns;
+            // 时间轴是外层有效运行时间窗口约束，中间暂停段不参与坐标比较。
+            const std::uint64_t rowTimelineTimestamp100ns =
+                etwRawTimestampToTimelineTimestamp(rowData.timestampValue);
+            visible = rowTimelineTimestamp100ns >= m_etwTimelineSelectionStart100ns
+                && rowTimelineTimestamp100ns <= m_etwTimelineSelectionEnd100ns;
         }
         m_etwEventTable->setRowHidden(row, !visible);
     }
@@ -8793,8 +8979,10 @@ void MonitorDock::startEtwCapture()
     }
     m_etwCapturedRows.clear();
     m_etwTimelineEventPoints.clear();
+    m_etwTimelinePauseIntervals.clear();
     m_etwCaptureStartTime100ns = currentSystemTime100ns();
     m_etwCaptureStopTime100ns = 0;
+    m_etwTimelinePauseTime100ns = 0;
     m_etwTimelineSelectionStart100ns = m_etwCaptureStartTime100ns;
     m_etwTimelineSelectionEnd100ns = m_etwCaptureStartTime100ns;
     m_etwTimelineUserSelectionActive = false;
@@ -8819,6 +9007,7 @@ void MonitorDock::startEtwCapture()
 
     m_etwCaptureRunning.store(true);
     m_etwCapturePaused.store(false);
+    m_etwTimelinePauseTime100ns = 0;
     m_etwCaptureStopFlag.store(false);
     m_etwSessionHandle.store(0);
     m_etwTraceHandle.store(0);
@@ -8910,6 +9099,7 @@ void MonitorDock::startEtwCapture()
                 }
                 guardThis->m_etwCaptureRunning.store(false);
                 guardThis->m_etwCapturePaused.store(false);
+                guardThis->m_etwTimelinePauseTime100ns = 0;
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● 启动失败:%1").arg(startStatus));
                 guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
                 guardThis->updateEtwCaptureActionState();
@@ -8966,6 +9156,7 @@ void MonitorDock::startEtwCapture()
                 }
                 guardThis->m_etwCaptureRunning.store(false);
                 guardThis->m_etwCapturePaused.store(false);
+                guardThis->m_etwTimelinePauseTime100ns = 0;
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● 无可用Provider"));
                 guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
                 guardThis->updateEtwCaptureActionState();
@@ -8995,6 +9186,7 @@ void MonitorDock::startEtwCapture()
                 }
                 guardThis->m_etwCaptureRunning.store(false);
                 guardThis->m_etwCapturePaused.store(false);
+                guardThis->m_etwTimelinePauseTime100ns = 0;
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● OpenTrace失败:%1").arg(lastError));
                 guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
                 guardThis->updateEtwCaptureActionState();
@@ -9028,12 +9220,21 @@ void MonitorDock::startEtwCapture()
             {
                 return;
             }
+            const bool wasPaused = guardThis->m_etwCapturePaused.load();
+            const std::uint64_t pauseEnd100ns = guardThis->m_etwTimelinePauseTime100ns;
             guardThis->m_etwCaptureRunning.store(false);
             guardThis->m_etwCapturePaused.store(false);
             if (guardThis->m_etwCaptureStopTime100ns == 0)
             {
-                guardThis->m_etwCaptureStopTime100ns = currentSystemTime100ns();
+                guardThis->m_etwCaptureStopTime100ns = wasPaused && pauseEnd100ns != 0
+                    ? pauseEnd100ns
+                    : currentSystemTime100ns();
             }
+            if (wasPaused && pauseEnd100ns != 0)
+            {
+                guardThis->closeEtwTimelinePauseInterval(pauseEnd100ns);
+            }
+            guardThis->m_etwTimelinePauseTime100ns = 0;
 
             if (processStatus == ERROR_SUCCESS)
             {
@@ -9075,7 +9276,9 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
     if (m_etwCaptureRunning.load() && m_etwCaptureStopTime100ns == 0)
     {
         // 停止按钮按下时立即冻结时间轴右边界，避免等待后台线程退出期间继续扩大窗口。
-        m_etwCaptureStopTime100ns = currentSystemTime100ns();
+        m_etwCaptureStopTime100ns = m_etwCapturePaused.load() && m_etwTimelinePauseTime100ns != 0
+            ? m_etwTimelinePauseTime100ns
+            : currentSystemTime100ns();
         refreshEtwTimelineRange(true);
     }
 
@@ -9112,9 +9315,21 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
 
     if (m_etwCaptureThread == nullptr || !m_etwCaptureThread->joinable())
     {
+        // 没有后台线程时也可能处于暂停状态，停止边界应沿用暂停冻结点。
+        const bool wasPaused = m_etwCapturePaused.load();
+        const std::uint64_t pauseEnd100ns = m_etwTimelinePauseTime100ns;
+        if (m_etwCaptureStopTime100ns == 0 && wasPaused && pauseEnd100ns != 0)
+        {
+            m_etwCaptureStopTime100ns = pauseEnd100ns;
+        }
+        if (wasPaused && pauseEnd100ns != 0)
+        {
+            closeEtwTimelinePauseInterval(pauseEnd100ns);
+        }
         m_etwCaptureThread.reset();
         m_etwCaptureRunning.store(false);
         m_etwCapturePaused.store(false);
+        m_etwTimelinePauseTime100ns = 0;
         if (m_etwCaptureStatusLabel != nullptr)
         {
             m_etwCaptureStatusLabel->setText(QStringLiteral("● 已停止"));
@@ -9135,11 +9350,23 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
 
     if (waitForThread)
     {
+        // 同步停止可能来自析构路径，先保存暂停边界再清除暂停状态。
+        const bool wasPaused = m_etwCapturePaused.load();
+        const std::uint64_t pauseEnd100ns = m_etwTimelinePauseTime100ns;
+        if (m_etwCaptureStopTime100ns == 0 && wasPaused && pauseEnd100ns != 0)
+        {
+            m_etwCaptureStopTime100ns = pauseEnd100ns;
+        }
+        if (wasPaused && pauseEnd100ns != 0)
+        {
+            closeEtwTimelinePauseInterval(pauseEnd100ns);
+        }
         // 析构路径：同步等待线程退出，确保对象销毁前完全回收 ETW 线程。
         m_etwCaptureThread->join();
         m_etwCaptureThread.reset();
         m_etwCaptureRunning.store(false);
         m_etwCapturePaused.store(false);
+        m_etwTimelinePauseTime100ns = 0;
         if (m_etwCaptureStatusLabel != nullptr)
         {
             m_etwCaptureStatusLabel->setText(QStringLiteral("● 已停止"));
@@ -9176,8 +9403,20 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
             {
                 return;
             }
+            // 异步回收结束时仍需保留暂停边界，否则停止刷新会退回当前系统时间。
+            const bool wasPaused = guardThis->m_etwCapturePaused.load();
+            const std::uint64_t pauseEnd100ns = guardThis->m_etwTimelinePauseTime100ns;
+            if (guardThis->m_etwCaptureStopTime100ns == 0 && wasPaused && pauseEnd100ns != 0)
+            {
+                guardThis->m_etwCaptureStopTime100ns = pauseEnd100ns;
+            }
+            if (wasPaused && pauseEnd100ns != 0)
+            {
+                guardThis->closeEtwTimelinePauseInterval(pauseEnd100ns);
+            }
             guardThis->m_etwCaptureRunning.store(false);
             guardThis->m_etwCapturePaused.store(false);
+            guardThis->m_etwTimelinePauseTime100ns = 0;
             if (guardThis->m_etwCaptureStatusLabel != nullptr)
             {
                 guardThis->m_etwCaptureStatusLabel->setText(QStringLiteral("● 已停止"));
@@ -9215,14 +9454,33 @@ void MonitorDock::setEtwCapturePaused(bool paused)
         return;
     }
 
-    m_etwCapturePaused.store(paused);
     if (paused)
     {
+        if (m_etwCapturePaused.load() && m_etwTimelinePauseTime100ns != 0)
+        {
+            return;
+        }
+        // 暂停时记录原始时间点，时间轴坐标会在映射时扣除这段等待时间。
+        m_etwTimelinePauseTime100ns = currentSystemTime100ns();
+        if (m_etwTimelinePauseTime100ns <= m_etwCaptureStartTime100ns)
+        {
+            m_etwTimelinePauseTime100ns = m_etwCaptureStartTime100ns + 1;
+        }
+        m_etwCapturePaused.store(true);
+        refreshEtwTimelineRange(false);
         m_etwCaptureStatusLabel->setText(QStringLiteral("● 已暂停"));
         m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
     }
     else
     {
+        // 继续监听时固化暂停区间；后续时间轴把该区间从可见时长中扣除。
+        const std::uint64_t resumeTime100ns = currentSystemTime100ns();
+        closeEtwTimelinePauseInterval(resumeTime100ns);
+        m_etwCapturePaused.store(false);
+        m_etwTimelinePauseTime100ns = 0;
+        refreshEtwTimelineRange(false);
+        refreshEtwTimelinePoints();
+        applyEtwPostFilterToTable();
         m_etwCaptureStatusLabel->setText(QStringLiteral("● 监听中"));
         m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
     }
@@ -9279,10 +9537,14 @@ void MonitorDock::flushEtwPendingRows(const bool captureFinished)
 
     if (rows.empty())
     {
-        // 空刷新仍要维护时间轴范围，尤其是监听中没有事件但时间继续推进的场景。
-        refreshEtwTimelineRange(captureFinished);
-        refreshEtwTimelinePoints();
-        if (captureFinished || isEtwTimelineFilterActive())
+        // 空刷新在暂停时不推进范围、不重推点集，防止瀑布流右边界持续压缩既有事件。
+        const bool paused = m_etwCapturePaused.load();
+        if (captureFinished || !paused)
+        {
+            refreshEtwTimelineRange(captureFinished);
+            refreshEtwTimelinePoints();
+        }
+        if (captureFinished || (!paused && isEtwTimelineFilterActive()))
         {
             applyEtwPostFilterToTable();
         }
@@ -9322,7 +9584,8 @@ void MonitorDock::flushEtwPendingRows(const bool captureFinished)
         }
 
         ProcessTraceTimelineEventPoint pointValue;
-        pointValue.time100ns = captured.timestampValue;
+        // 时间轴使用“有效运行时间”坐标，暂停区间不会占用横向宽度。
+        pointValue.time100ns = etwRawTimestampToTimelineTimestamp(captured.timestampValue);
         pointValue.typeText = etwTimelineTypeFromCapturedRow(captured);
         m_etwTimelineEventPoints.push_back(std::move(pointValue));
     }
@@ -9353,11 +9616,57 @@ void MonitorDock::applyEtwTimelineSelection(
     const std::uint64_t end100ns)
 {
     // 时间轴控件只解释鼠标/滚轮动作，表格可见性仍交给 ETW 后置筛选统一处理。
-    // 这里保存绝对 100ns 时间戳，避免把图形坐标和表格行号耦合在一起。
+    // 这里保存的是“扣除暂停段后的有效时间戳”，表格筛选时会把事件原始时间映射后比较。
     m_etwTimelineSelectionStart100ns = std::min(start100ns, end100ns);
     m_etwTimelineSelectionEnd100ns = std::max(start100ns, end100ns);
     m_etwTimelineUserSelectionActive = true;
     applyEtwPostFilterToTable();
+}
+
+std::uint64_t MonitorDock::etwRawTimestampToTimelineTimestamp(const std::uint64_t rawTimestamp100ns) const
+{
+    if (m_etwCaptureStartTime100ns == 0 || rawTimestamp100ns <= m_etwCaptureStartTime100ns)
+    {
+        return m_etwCaptureStartTime100ns;
+    }
+
+    // pausedDuration100ns 统计 rawTimestamp100ns 之前已经消耗在暂停状态里的时长。
+    std::uint64_t pausedDuration100ns = 0;
+    for (const auto& pauseInterval : m_etwTimelinePauseIntervals)
+    {
+        const std::uint64_t pauseStart100ns = pauseInterval.first;
+        const std::uint64_t pauseEnd100ns = pauseInterval.second;
+        if (pauseEnd100ns <= pauseStart100ns || rawTimestamp100ns <= pauseStart100ns)
+        {
+            continue;
+        }
+
+        const std::uint64_t effectivePauseEnd100ns = std::min(rawTimestamp100ns, pauseEnd100ns);
+        pausedDuration100ns += effectivePauseEnd100ns - pauseStart100ns;
+    }
+
+    // 当前仍处于暂停时，把暂停起点到当前边界这段也从右边界显示时间里扣掉。
+    if (m_etwCapturePaused.load() && m_etwTimelinePauseTime100ns != 0 && rawTimestamp100ns > m_etwTimelinePauseTime100ns)
+    {
+        pausedDuration100ns += rawTimestamp100ns - m_etwTimelinePauseTime100ns;
+    }
+
+    const std::uint64_t rawElapsed100ns = rawTimestamp100ns - m_etwCaptureStartTime100ns;
+    const std::uint64_t effectiveElapsed100ns = rawElapsed100ns > pausedDuration100ns
+        ? rawElapsed100ns - pausedDuration100ns
+        : 0;
+    return m_etwCaptureStartTime100ns + effectiveElapsed100ns;
+}
+
+void MonitorDock::closeEtwTimelinePauseInterval(const std::uint64_t resumeTime100ns)
+{
+    if (m_etwTimelinePauseTime100ns == 0 || resumeTime100ns <= m_etwTimelinePauseTime100ns)
+    {
+        return;
+    }
+
+    // 区间保存原始 ETW 绝对时间，映射函数统一把其换算为有效运行时间。
+    m_etwTimelinePauseIntervals.emplace_back(m_etwTimelinePauseTime100ns, resumeTime100ns);
 }
 
 void MonitorDock::refreshEtwTimelineRange(const bool captureFinished)
@@ -9367,12 +9676,25 @@ void MonitorDock::refreshEtwTimelineRange(const bool captureFinished)
         return;
     }
 
-    // captureEnd100ns：
-    // - 监听中使用当前系统时间，保证右侧边界持续推进；
-    // - 停止后固定到停止瞬间，避免用户复查时选区继续漂移。
-    std::uint64_t captureEnd100ns = captureFinished && m_etwCaptureStopTime100ns != 0
-        ? m_etwCaptureStopTime100ns
-        : currentSystemTime100ns();
+    // captureEndRaw100ns：
+    // - 停止后固定到停止瞬间，避免用户复查时选区继续漂移；
+    // - 暂停时固定到暂停瞬间，避免瀑布流在无新事件时被不断压缩；
+    // - 正常监听时才使用当前系统时间推进右边界。
+    std::uint64_t captureEndRaw100ns = currentSystemTime100ns();
+    if (captureFinished && m_etwCaptureStopTime100ns != 0)
+    {
+        captureEndRaw100ns = m_etwCaptureStopTime100ns;
+    }
+    else if (m_etwCapturePaused.load() && m_etwTimelinePauseTime100ns != 0)
+    {
+        captureEndRaw100ns = m_etwTimelinePauseTime100ns;
+    }
+    if (captureEndRaw100ns <= m_etwCaptureStartTime100ns)
+    {
+        captureEndRaw100ns = m_etwCaptureStartTime100ns + 1;
+    }
+
+    std::uint64_t captureEnd100ns = etwRawTimestampToTimelineTimestamp(captureEndRaw100ns);
     if (captureEnd100ns <= m_etwCaptureStartTime100ns)
     {
         captureEnd100ns = m_etwCaptureStartTime100ns + 1;
@@ -9405,9 +9727,16 @@ bool MonitorDock::isEtwTimelineFilterActive() const
         return false;
     }
 
-    const std::uint64_t effectiveEnd100ns = m_etwCaptureStopTime100ns != 0
-        ? m_etwCaptureStopTime100ns
-        : currentSystemTime100ns();
+    std::uint64_t effectiveEndRaw100ns = currentSystemTime100ns();
+    if (m_etwCaptureStopTime100ns != 0)
+    {
+        effectiveEndRaw100ns = m_etwCaptureStopTime100ns;
+    }
+    else if (m_etwCapturePaused.load() && m_etwTimelinePauseTime100ns != 0)
+    {
+        effectiveEndRaw100ns = m_etwTimelinePauseTime100ns;
+    }
+    std::uint64_t effectiveEnd100ns = etwRawTimestampToTimelineTimestamp(effectiveEndRaw100ns);
     if (effectiveEnd100ns <= m_etwCaptureStartTime100ns)
     {
         return false;

@@ -339,6 +339,23 @@
     </PropertyGroup>
     <Copy SourceFiles="$(TaskmgrHijackScriptSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(TaskmgrHijackScriptSource)')" />
   </Target>
+  <!-- Release 主程序构建完成后复用驱动测试签名证书，签名失败只告警，避免阻断普通编译。 -->
+  <Target Name="KswordMainAutoTestSignAfterBuild"
+          AfterTargets="Build"
+          Condition="'$(Configuration)|$(Platform)'=='Release|x64' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoTestSign)'!='true'">
+    <PropertyGroup>
+      <KswordArkSignScript>$(MSBuildProjectDirectory)\..\..\scripts\Sign-KswordArkDriverTest.ps1</KswordArkSignScript>
+      <KswordArkPowerShellExe Condition="'$(KswordArkPowerShellExe)'==''">powershell</KswordArkPowerShellExe>
+    </PropertyGroup>
+    <Message Importance="High"
+             Text="Ksword5.1: attempting non-fatal test-sign for $(TargetPath). Set /p:KswordArkSkipAutoTestSign=true to skip." />
+    <Exec Command="&quot;$(KswordArkPowerShellExe)&quot; -ExecutionPolicy Bypass -File &quot;$(KswordArkSignScript)&quot; -TargetPath &quot;$(TargetPath)&quot; -NonFatal"
+          ContinueOnError="WarnAndContinue"
+          IgnoreStandardErrorWarningFormat="true"
+          Condition="Exists('$(KswordArkSignScript)')" />
+    <Warning Condition="!Exists('$(KswordArkSignScript)')"
+             Text="Ksword5.1 auto test-sign skipped because script was not found: $(KswordArkSignScript)" />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">
     <Import Project="$(QtMsBuild)\qt.targets" />

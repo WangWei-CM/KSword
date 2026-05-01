@@ -13,4 +13,13 @@ tmp-qmake-mm*/
 windeployqt_raw.txt
 vs_install.json
 aqtinstall.log
-.cert/
+# 本地签名私钥材料只允许留在开发机，避免误传 GitHub。
+*.pfx
+*.p12
+*.pvk
+*.key
+*.snk
+*.pem
+.cert/*
+!.cert/
+!.cert/KswordARK-TestSigning.cer
