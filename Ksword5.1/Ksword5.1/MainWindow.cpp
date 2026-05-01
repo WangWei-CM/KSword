@@ -1,4 +1,4 @@
-﻿#include "MainWindow.h"
+#include "MainWindow.h"
 #include <QMenu>
 #include <QAction>
 #include <QEasingCurve>
@@ -36,8 +36,10 @@
 #include <QScrollBar>
 #include <QImageReader>
 #include <QDialog>
+#include <QIODevice>
 #include <QMessageBox>
 #include <QProcess>
+#include <QStringList>
 #include <QToolTip>
 #include <QStyleHints>
 #include <QUrl>
@@ -65,6 +67,7 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <sddl.h>
+#include <wincrypt.h>
 #include <winternl.h>
 
 #include <algorithm>
@@ -77,6 +80,7 @@
 #include <TlHelp32.h>
 
 #pragma comment(lib, "Dwmapi.lib")
+#pragma comment(lib, "Crypt32.lib")
 
 namespace
 {
@@ -533,6 +537,7 @@ namespace
     constexpr char kR0LogPrefixWarn[] = "[Warn]";
     constexpr char kR0LogPrefixError[] = "[Error]";
     constexpr char kR0LogPrefixFatal[] = "[Fatal]";
+    constexpr wchar_t kUiAccessCertificateFileName[] = L"KswordARK-TestSigning.cer";
 
     // sharedR0DriverLogEvent 作用：
     // - 统一承载 R3 进程内“驱动日志转发”链路的 GUID；
@@ -618,6 +623,283 @@ namespace
         SC_HANDLE m_handle = nullptr;
     };
 
+    class ScopedHandle final
+    {
+    public:
+        // 构造函数：
+        // - 输入：Windows 内核对象句柄；
+        // - 处理：保存句柄并在析构时自动 CloseHandle；
+        // - 返回：无返回值。
+        explicit ScopedHandle(const HANDLE handleValue = nullptr)
+            : m_handle(handleValue)
+        {
+        }
+
+        ScopedHandle(const ScopedHandle&) = delete;
+        ScopedHandle& operator=(const ScopedHandle&) = delete;
+
+        // 移动构造：
+        // - 输入：另一个句柄托管对象；
+        // - 处理：转移句柄所有权，避免两个对象重复关闭同一句柄；
+        // - 返回：无返回值。
+        ScopedHandle(ScopedHandle&& other) noexcept
+            : m_handle(other.m_handle)
+        {
+            other.m_handle = nullptr;
+        }
+
+        // 移动赋值：
+        // - 输入：另一个句柄托管对象；
+        // - 处理：关闭当前旧句柄，再接管对方句柄；
+        // - 返回：当前对象引用。
+        ScopedHandle& operator=(ScopedHandle&& other) noexcept
+        {
+            if (this != &other)
+            {
+                reset();
+                m_handle = other.m_handle;
+                other.m_handle = nullptr;
+            }
+            return *this;
+        }
+
+        // 析构函数：
+        // - 输入：无；
+        // - 处理：关闭仍由对象持有的句柄；
+        // - 返回：无返回值。
+        ~ScopedHandle()
+        {
+            reset();
+        }
+
+        // reset：
+        // - 输入：新的句柄，默认空句柄；
+        // - 处理：关闭旧句柄并保存新句柄；
+        // - 返回：无返回值。
+        void reset(const HANDLE newHandle = nullptr)
+        {
+            if (m_handle != nullptr && m_handle != INVALID_HANDLE_VALUE)
+            {
+                ::CloseHandle(m_handle);
+            }
+            m_handle = newHandle;
+        }
+
+        // release：
+        // - 输入：无；
+        // - 处理：放弃托管但不关闭句柄；
+        // - 返回：原始句柄，调用方接管关闭责任。
+        HANDLE release()
+        {
+            const HANDLE oldHandle = m_handle;
+            m_handle = nullptr;
+            return oldHandle;
+        }
+
+        // get：
+        // - 输入：无；
+        // - 处理：返回当前原始句柄；
+        // - 返回：HANDLE，可能为空。
+        HANDLE get() const
+        {
+            return m_handle;
+        }
+
+        // isValid：
+        // - 输入：无；
+        // - 处理：判断句柄是否可用于 Win32 API；
+        // - 返回：true 表示非空且非 INVALID_HANDLE_VALUE。
+        bool isValid() const
+        {
+            return m_handle != nullptr && m_handle != INVALID_HANDLE_VALUE;
+        }
+
+    private:
+        HANDLE m_handle = nullptr; // m_handle：当前托管的 Win32 句柄。
+    };
+
+    class ScopedThreadImpersonation final
+    {
+    public:
+        ScopedThreadImpersonation() = default;
+        ScopedThreadImpersonation(const ScopedThreadImpersonation&) = delete;
+        ScopedThreadImpersonation& operator=(const ScopedThreadImpersonation&) = delete;
+
+        // 析构函数：
+        // - 输入：无；
+        // - 处理：如果当前对象启用了线程模拟，则自动 RevertToSelf；
+        // - 返回：无返回值。
+        ~ScopedThreadImpersonation()
+        {
+            reset();
+        }
+
+        // impersonate：
+        // - 输入：可模拟的令牌句柄；
+        // - 处理：让当前线程进入该令牌的安全上下文；
+        // - 返回：true 表示模拟成功。
+        bool impersonate(const HANDLE tokenHandle, DWORD* const errorCodeOut)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ERROR_SUCCESS;
+            }
+            reset();
+            if (tokenHandle == nullptr)
+            {
+                if (errorCodeOut != nullptr)
+                {
+                    *errorCodeOut = ERROR_INVALID_HANDLE;
+                }
+                return false;
+            }
+            if (::ImpersonateLoggedOnUser(tokenHandle) == FALSE)
+            {
+                if (errorCodeOut != nullptr)
+                {
+                    *errorCodeOut = ::GetLastError();
+                }
+                return false;
+            }
+            m_active = true;
+            return true;
+        }
+
+        // reset：
+        // - 输入：无；
+        // - 处理：撤销当前线程模拟，恢复调用线程自身身份；
+        // - 返回：无返回值。
+        void reset()
+        {
+            if (m_active)
+            {
+                ::RevertToSelf();
+                m_active = false;
+            }
+        }
+
+    private:
+        bool m_active = false; // m_active：记录析构时是否需要撤销线程模拟。
+    };
+
+    class ScopedCertStore final
+    {
+    public:
+        // 构造函数：
+        // - 输入：Windows 证书存储句柄；
+        // - 处理：保存句柄并在析构时自动关闭；
+        // - 返回：无返回值。
+        explicit ScopedCertStore(const HCERTSTORE storeHandle = nullptr)
+            : m_storeHandle(storeHandle)
+        {
+        }
+
+        ScopedCertStore(const ScopedCertStore&) = delete;
+        ScopedCertStore& operator=(const ScopedCertStore&) = delete;
+
+        // 析构函数：
+        // - 输入：无；
+        // - 处理：关闭证书存储句柄，避免重复泄露；
+        // - 返回：无返回值。
+        ~ScopedCertStore()
+        {
+            reset();
+        }
+
+        // reset：
+        // - 输入：新的证书存储句柄；
+        // - 处理：先关闭旧句柄，再接管新句柄；
+        // - 返回：无返回值。
+        void reset(const HCERTSTORE newStoreHandle = nullptr)
+        {
+            if (m_storeHandle != nullptr)
+            {
+                ::CertCloseStore(m_storeHandle, 0);
+            }
+            m_storeHandle = newStoreHandle;
+        }
+
+        // get：
+        // - 输入：无；
+        // - 处理：返回当前证书存储句柄；
+        // - 返回：HCERTSTORE，可能为空。
+        HCERTSTORE get() const
+        {
+            return m_storeHandle;
+        }
+
+        // isValid：
+        // - 输入：无；
+        // - 处理：判断当前句柄是否可用；
+        // - 返回：true 表示有效。
+        bool isValid() const
+        {
+            return m_storeHandle != nullptr;
+        }
+
+    private:
+        HCERTSTORE m_storeHandle = nullptr; // m_storeHandle：当前托管的系统证书存储句柄。
+    };
+
+    class ScopedCertContext final
+    {
+    public:
+        // 构造函数：
+        // - 输入：证书上下文指针；
+        // - 处理：保存指针并在析构时释放；
+        // - 返回：无返回值。
+        explicit ScopedCertContext(PCCERT_CONTEXT certificateContext = nullptr)
+            : m_certificateContext(certificateContext)
+        {
+        }
+
+        ScopedCertContext(const ScopedCertContext&) = delete;
+        ScopedCertContext& operator=(const ScopedCertContext&) = delete;
+
+        // 析构函数：
+        // - 输入：无；
+        // - 处理：释放证书上下文；
+        // - 返回：无返回值。
+        ~ScopedCertContext()
+        {
+            reset();
+        }
+
+        // reset：
+        // - 输入：新的证书上下文；
+        // - 处理：先释放旧上下文，再接管新上下文；
+        // - 返回：无返回值。
+        void reset(PCCERT_CONTEXT newCertificateContext = nullptr)
+        {
+            if (m_certificateContext != nullptr)
+            {
+                ::CertFreeCertificateContext(m_certificateContext);
+            }
+            m_certificateContext = newCertificateContext;
+        }
+
+        // get：
+        // - 输入：无；
+        // - 处理：返回当前证书上下文；
+        // - 返回：PCCERT_CONTEXT，可能为空。
+        PCCERT_CONTEXT get() const
+        {
+            return m_certificateContext;
+        }
+
+        // isValid：
+        // - 输入：无；
+        // - 处理：判断当前证书上下文是否存在；
+        // - 返回：true 表示有效。
+        bool isValid() const
+        {
+            return m_certificateContext != nullptr;
+        }
+
+    private:
+        PCCERT_CONTEXT m_certificateContext = nullptr; // m_certificateContext：待自动释放的证书上下文。
+    };
+
     QString formatWin32ErrorText(const DWORD errorCode)
     {
         if (errorCode == ERROR_SUCCESS)
@@ -649,6 +931,537 @@ namespace
             messageText = QStringLiteral("未知系统错误");
         }
         return messageText;
+    }
+
+    QString formatCertificateDigestText(const QByteArray& digestBytes)
+    {
+        if (digestBytes.isEmpty())
+        {
+            return QStringLiteral("Unavailable");
+        }
+
+        QStringList digestPartList;
+        digestPartList.reserve(digestBytes.size());
+        for (const unsigned char digestByte : digestBytes)
+        {
+            digestPartList.append(QStringLiteral("%1")
+                .arg(static_cast<unsigned int>(digestByte), 2, 16, QChar('0'))
+                .toUpper());
+        }
+        return digestPartList.join(QStringLiteral(":"));
+    }
+
+    bool readCertificateContextFromFile(
+        const QString& certificatePath,
+        ScopedCertContext& certificateContextOut,
+        QString* detailTextOut)
+    {
+        // certificateContextOut 用途：把解析出的 DER/CRT 证书上下文交给调用方托管。
+        certificateContextOut.reset();
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+
+        // certificateFile 用途：只读取公钥证书文件，不接触 .pfx 私钥材料。
+        QFile certificateFile(certificatePath);
+        if (!certificateFile.open(QIODevice::ReadOnly))
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = QStringLiteral("无法读取证书文件：%1").arg(certificateFile.errorString());
+            }
+            return false;
+        }
+
+        // certificateBytes 用途：保存证书文件原始二进制，供 WinCrypt 解析。
+        const QByteArray certificateBytes = certificateFile.readAll();
+        if (certificateBytes.isEmpty())
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = QStringLiteral("证书文件为空。");
+            }
+            return false;
+        }
+
+        // rawContext 用途：WinCrypt 返回的证书上下文，成功后交给 ScopedCertContext 管理。
+        PCCERT_CONTEXT rawContext = ::CertCreateCertificateContext(
+            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+            reinterpret_cast<const BYTE*>(certificateBytes.constData()),
+            static_cast<DWORD>(certificateBytes.size()));
+        if (rawContext == nullptr)
+        {
+            const DWORD errorCode = ::GetLastError();
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = QStringLiteral("解析证书失败，错误码：%1，系统信息：%2")
+                    .arg(errorCode)
+                    .arg(formatWin32ErrorText(errorCode));
+            }
+            return false;
+        }
+
+        certificateContextOut.reset(rawContext);
+        return true;
+    }
+
+    QByteArray certificateSha1Digest(const PCCERT_CONTEXT certificateContext)
+    {
+        if (certificateContext == nullptr)
+        {
+            return {};
+        }
+
+        // digestSize 用途：先查询证书 SHA1 指纹所需缓冲区长度。
+        DWORD digestSize = 0;
+        if (::CertGetCertificateContextProperty(
+            certificateContext,
+            CERT_HASH_PROP_ID,
+            nullptr,
+            &digestSize) == FALSE ||
+            digestSize == 0)
+        {
+            return {};
+        }
+
+        // digestBytes 用途：保存证书 SHA1 指纹，用于系统证书存储查重。
+        QByteArray digestBytes(static_cast<int>(digestSize), Qt::Uninitialized);
+        if (::CertGetCertificateContextProperty(
+            certificateContext,
+            CERT_HASH_PROP_ID,
+            reinterpret_cast<BYTE*>(digestBytes.data()),
+            &digestSize) == FALSE)
+        {
+            return {};
+        }
+        digestBytes.resize(static_cast<int>(digestSize));
+        return digestBytes;
+    }
+
+    bool certificateExistsInStore(
+        const wchar_t* storeName,
+        const QByteArray& certificateDigest,
+        DWORD* errorCodeOut)
+    {
+        if (errorCodeOut != nullptr)
+        {
+            *errorCodeOut = ERROR_SUCCESS;
+        }
+        if (storeName == nullptr || storeName[0] == L'\0' || certificateDigest.isEmpty())
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ERROR_INVALID_PARAMETER;
+            }
+            return false;
+        }
+
+        // storeHandle 用途：打开本机系统证书存储，只读查询当前证书是否已存在。
+        ScopedCertStore storeHandle(::CertOpenStore(
+            CERT_STORE_PROV_SYSTEM_W,
+            0,
+            static_cast<HCRYPTPROV_LEGACY>(0),
+            CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_OPEN_EXISTING_FLAG | CERT_STORE_READONLY_FLAG,
+            storeName));
+        if (!storeHandle.isValid())
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            return false;
+        }
+
+        // hashBlob 用途：把 SHA1 指纹包装成 CertFindCertificateInStore 所需结构。
+        CRYPT_HASH_BLOB hashBlob{};
+        hashBlob.cbData = static_cast<DWORD>(certificateDigest.size());
+        hashBlob.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(certificateDigest.constData()));
+        // foundContext 用途：承接查找到的证书上下文，析构时自动释放。
+        ScopedCertContext foundContext(::CertFindCertificateInStore(
+            storeHandle.get(),
+            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+            0,
+            CERT_FIND_SHA1_HASH,
+            &hashBlob,
+            nullptr));
+        if (foundContext.isValid())
+        {
+            return true;
+        }
+
+        const DWORD findError = ::GetLastError();
+        if (findError != CRYPT_E_NOT_FOUND && errorCodeOut != nullptr)
+        {
+            *errorCodeOut = findError;
+        }
+        return false;
+    }
+
+    bool addCertificateToLocalMachineStore(
+        const wchar_t* storeName,
+        const PCCERT_CONTEXT certificateContext,
+        DWORD* errorCodeOut)
+    {
+        if (errorCodeOut != nullptr)
+        {
+            *errorCodeOut = ERROR_SUCCESS;
+        }
+        if (storeName == nullptr || storeName[0] == L'\0' || certificateContext == nullptr)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ERROR_INVALID_PARAMETER;
+            }
+            return false;
+        }
+
+        // storeHandle 用途：打开本机系统证书存储，写入公钥证书信任项。
+        ScopedCertStore storeHandle(::CertOpenStore(
+            CERT_STORE_PROV_SYSTEM_W,
+            0,
+            static_cast<HCRYPTPROV_LEGACY>(0),
+            CERT_SYSTEM_STORE_LOCAL_MACHINE,
+            storeName));
+        if (!storeHandle.isValid())
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            return false;
+        }
+
+        if (::CertAddCertificateContextToStore(
+            storeHandle.get(),
+            certificateContext,
+            CERT_STORE_ADD_REPLACE_EXISTING,
+            nullptr) == FALSE)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            return false;
+        }
+        return true;
+    }
+
+    QString quoteWin32CommandLineArgument(const std::wstring& argumentText)
+    {
+        // argumentText 用途：把 exe 路径包装为 CreateProcessAsUserW 可安全解析的命令行参数。
+        QString escapedText = QString::fromStdWString(argumentText);
+        escapedText.replace(QStringLiteral("\""), QStringLiteral("\\\""));
+        return QStringLiteral("\"%1\"").arg(escapedText);
+    }
+
+    QString formatWin32StepFailure(const QString& stepText, const DWORD errorCode)
+    {
+        // stepText 用途：描述失败 API 或阶段，便于 UI 与日志直接定位。
+        return QStringLiteral("%1 失败，错误码：%2，系统信息：%3")
+            .arg(stepText)
+            .arg(errorCode)
+            .arg(formatWin32ErrorText(errorCode));
+    }
+
+    QString privilegeNameToDisplayText(const wchar_t* const privilegeName)
+    {
+        // privilegeName 用途：把 Win32 权限常量转换成 QString，便于诊断输出。
+        if (privilegeName == nullptr || privilegeName[0] == L'\0')
+        {
+            return QStringLiteral("<empty>");
+        }
+        return QString::fromWCharArray(privilegeName);
+    }
+
+    bool enableTokenPrivilege(
+        const HANDLE tokenHandle,
+        const wchar_t* const privilegeName,
+        DWORD* const errorCodeOut)
+    {
+        // errorCodeOut 用途：向调用方返回 LookupPrivilegeValue/AdjustTokenPrivileges 的失败原因。
+        if (errorCodeOut != nullptr)
+        {
+            *errorCodeOut = ERROR_SUCCESS;
+        }
+        if (tokenHandle == nullptr || privilegeName == nullptr || privilegeName[0] == L'\0')
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ERROR_INVALID_PARAMETER;
+            }
+            return false;
+        }
+
+        // privilegeLuid 用途：把权限名解析成当前系统中的 LUID。
+        LUID privilegeLuid{};
+        if (::LookupPrivilegeValueW(nullptr, privilegeName, &privilegeLuid) == FALSE)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            return false;
+        }
+
+        // tokenPrivileges 用途：只启用一个目标权限，不改动其它权限状态。
+        TOKEN_PRIVILEGES tokenPrivileges{};
+        tokenPrivileges.PrivilegeCount = 1;
+        tokenPrivileges.Privileges[0].Luid = privilegeLuid;
+        tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (::AdjustTokenPrivileges(
+            tokenHandle,
+            FALSE,
+            &tokenPrivileges,
+            sizeof(tokenPrivileges),
+            nullptr,
+            nullptr) == FALSE)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            return false;
+        }
+
+        const DWORD adjustError = ::GetLastError();
+        if (adjustError != ERROR_SUCCESS)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = adjustError;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool enableCurrentProcessPrivilege(const wchar_t* const privilegeName, DWORD* const errorCodeOut);
+
+    QString tryEnableCurrentProcessPrivilegeForUiAccess(const wchar_t* const privilegeName)
+    {
+        // privilegeName 用途：指定为 UIAccess fallback 准备的当前进程权限。
+        DWORD privilegeError = ERROR_SUCCESS;
+        const bool enableOk = enableCurrentProcessPrivilege(privilegeName, &privilegeError);
+        if (enableOk)
+        {
+            return QStringLiteral("%1：已启用").arg(privilegeNameToDisplayText(privilegeName));
+        }
+        return QStringLiteral("%1：未启用（%2，%3）")
+            .arg(privilegeNameToDisplayText(privilegeName))
+            .arg(privilegeError)
+            .arg(formatWin32ErrorText(privilegeError));
+    }
+
+    bool queryTokenSessionId(const HANDLE tokenHandle, DWORD* const sessionIdOut, DWORD* const errorCodeOut)
+    {
+        // sessionIdOut 用途：返回令牌所属 Session，决定新进程能否显示在当前交互桌面。
+        if (sessionIdOut != nullptr)
+        {
+            *sessionIdOut = 0;
+        }
+        if (errorCodeOut != nullptr)
+        {
+            *errorCodeOut = ERROR_SUCCESS;
+        }
+        if (tokenHandle == nullptr || sessionIdOut == nullptr)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ERROR_INVALID_PARAMETER;
+            }
+            return false;
+        }
+
+        DWORD returnLength = 0;
+        DWORD tokenSessionId = 0;
+        if (::GetTokenInformation(
+            tokenHandle,
+            TokenSessionId,
+            &tokenSessionId,
+            sizeof(tokenSessionId),
+            &returnLength) == FALSE)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            return false;
+        }
+
+        *sessionIdOut = tokenSessionId;
+        return true;
+    }
+
+    bool tokenBelongsToLocalSystem(const HANDLE tokenHandle, DWORD* const errorCodeOut)
+    {
+        // errorCodeOut 用途：保留查询失败原因；返回 false 不一定代表“不是 SYSTEM”。
+        if (errorCodeOut != nullptr)
+        {
+            *errorCodeOut = ERROR_SUCCESS;
+        }
+        if (tokenHandle == nullptr)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ERROR_INVALID_HANDLE;
+            }
+            return false;
+        }
+
+        DWORD requiredLength = 0;
+        ::GetTokenInformation(tokenHandle, TokenUser, nullptr, 0, &requiredLength);
+        if (requiredLength == 0)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            return false;
+        }
+
+        // userBuffer 用途：保存 TOKEN_USER，可变长度结构必须用动态缓冲区承接。
+        std::vector<BYTE> userBuffer(requiredLength, 0);
+        if (::GetTokenInformation(
+            tokenHandle,
+            TokenUser,
+            userBuffer.data(),
+            requiredLength,
+            &requiredLength) == FALSE)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            return false;
+        }
+
+        BYTE systemSidBuffer[SECURITY_MAX_SID_SIZE] = {};
+        DWORD systemSidLength = static_cast<DWORD>(std::size(systemSidBuffer));
+        if (::CreateWellKnownSid(
+            WinLocalSystemSid,
+            nullptr,
+            systemSidBuffer,
+            &systemSidLength) == FALSE)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            return false;
+        }
+
+        const TOKEN_USER* tokenUser = reinterpret_cast<const TOKEN_USER*>(userBuffer.data());
+        return ::EqualSid(tokenUser->User.Sid, systemSidBuffer) != FALSE;
+    }
+
+    bool findSystemProcessTokenCandidate(
+        const DWORD currentSessionId,
+        DWORD* const processIdOut,
+        QString* const processNameOut,
+        DWORD* const processSessionIdOut,
+        QString* const detailTextOut)
+    {
+        // processIdOut/processNameOut/processSessionIdOut 用途：返回最适合作为 SYSTEM 令牌源的进程。
+        if (processIdOut != nullptr)
+        {
+            *processIdOut = 0;
+        }
+        if (processNameOut != nullptr)
+        {
+            processNameOut->clear();
+        }
+        if (processSessionIdOut != nullptr)
+        {
+            *processSessionIdOut = 0;
+        }
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+
+        // candidateRank 用途：
+        // - 0 表示尚未找到；
+        // - 数值越大优先级越高，同 Session 的 winlogon.exe 最优。
+        int bestRank = 0;
+        DWORD bestPid = 0;
+        DWORD bestSessionId = 0;
+        QString bestProcessName;
+
+        ScopedHandle snapshotHandle(::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+        if (!snapshotHandle.isValid())
+        {
+            const DWORD errorCode = ::GetLastError();
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = formatWin32StepFailure(QStringLiteral("CreateToolhelp32Snapshot"), errorCode);
+            }
+            return false;
+        }
+
+        PROCESSENTRY32W processEntry{};
+        processEntry.dwSize = sizeof(processEntry);
+        if (::Process32FirstW(snapshotHandle.get(), &processEntry) == FALSE)
+        {
+            const DWORD errorCode = ::GetLastError();
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = formatWin32StepFailure(QStringLiteral("Process32FirstW"), errorCode);
+            }
+            return false;
+        }
+
+        do
+        {
+            // processSessionId 用途：优先选择当前交互 Session 的 winlogon，降低不可见启动概率。
+            DWORD processSessionId = 0;
+            if (::ProcessIdToSessionId(processEntry.th32ProcessID, &processSessionId) == FALSE)
+            {
+                processSessionId = 0;
+            }
+
+            int rank = 0;
+            const bool sameSession = processSessionId == currentSessionId;
+            if (_wcsicmp(processEntry.szExeFile, L"winlogon.exe") == 0)
+            {
+                rank = sameSession ? 40 : 30;
+            }
+            else if (_wcsicmp(processEntry.szExeFile, L"services.exe") == 0)
+            {
+                rank = sameSession ? 20 : 10;
+            }
+
+            if (rank > bestRank)
+            {
+                bestRank = rank;
+                bestPid = processEntry.th32ProcessID;
+                bestSessionId = processSessionId;
+                bestProcessName = QString::fromWCharArray(processEntry.szExeFile);
+            }
+        } while (::Process32NextW(snapshotHandle.get(), &processEntry) != FALSE);
+
+        if (bestPid == 0)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = QStringLiteral("没有找到可用的 SYSTEM 令牌源进程（优先 winlogon.exe，其次 services.exe）。");
+            }
+            return false;
+        }
+
+        if (processIdOut != nullptr)
+        {
+            *processIdOut = bestPid;
+        }
+        if (processNameOut != nullptr)
+        {
+            *processNameOut = bestProcessName;
+        }
+        if (processSessionIdOut != nullptr)
+        {
+            *processSessionIdOut = bestSessionId;
+        }
+        return true;
     }
 
     QString serviceStateToText(const DWORD serviceState)
@@ -1274,7 +2087,7 @@ MainWindow::MainWindow(
     initCustomTitleBar();
 
     // 初始化权限状态按钮：
-    // - Admin / Debug / System / TI / R0；
+    // - UIAccess / Admin / Debug / System / R0；
     // - 挂载到自绘标题栏右侧，不再依赖原生菜单栏。
     reportStartupProgress(46, QStringLiteral("正在初始化权限状态按钮..."));
     initPrivilegeStatusButtons();
@@ -2448,19 +3261,19 @@ void MainWindow::initPrivilegeStatusButtons()
     buttonLayout->setContentsMargins(0, 0, 4, 0);
     buttonLayout->setSpacing(6);
 
-    // 按钮文本采用纯文字，满足用户要求。
+    // 按钮文本采用纯文字，满足用户要求；UIAccess 放在最左侧用于导入本机信任证书。
+    m_uiAccessStatusButton = new QPushButton("UIAccess", m_privilegeButtonContainer);
     m_adminStatusButton = new QPushButton("Admin", m_privilegeButtonContainer);
     m_debugStatusButton = new QPushButton("Debug", m_privilegeButtonContainer);
     m_systemStatusButton = new QPushButton("System", m_privilegeButtonContainer);
-    m_tiStatusButton = new QPushButton("TI", m_privilegeButtonContainer);
     m_r0StatusButton = new QPushButton("R0", m_privilegeButtonContainer);
 
     // 统一按钮尺寸，保证右上角布局整齐。
     const std::array<QPushButton*, 5> statusButtons{
+        m_uiAccessStatusButton,
         m_adminStatusButton,
         m_debugStatusButton,
         m_systemStatusButton,
-        m_tiStatusButton,
         m_r0StatusButton
     };
     for (QPushButton* statusButton : statusButtons)
@@ -2473,8 +3286,12 @@ void MainWindow::initPrivilegeStatusButtons()
         statusButton->setMinimumWidth(56);
         buttonLayout->addWidget(statusButton);
     }
+    if (m_uiAccessStatusButton != nullptr)
+    {
+        m_uiAccessStatusButton->setMinimumWidth(74);
+    }
 
-    m_tiStatusButton->setToolTip("TrustedInstaller 状态位");
+    m_uiAccessStatusButton->setToolTip("UIAccess：导入公钥证书并尝试 SYSTEM TokenUIAccess fallback 启动");
     m_r0StatusButton->setToolTip("R0：KswordARK 驱动服务快捷开关");
 
     // 把容器挂到功能条右侧。
@@ -2482,6 +3299,13 @@ void MainWindow::initPrivilegeStatusButtons()
     {
         m_topActionRowLayout->addWidget(m_privilegeButtonContainer, 0, Qt::AlignRight | Qt::AlignVCenter);
     }
+
+    // UIAccess 按钮：
+    // - 弹出风险确认；
+    // - 用户确认后把测试签名公钥导入本机 Root 与 TrustedPublisher。
+    connect(m_uiAccessStatusButton, &QPushButton::clicked, this, [this]() {
+        handleUiAccessButtonClicked();
+    });
 
     // Admin 按钮：
     // - 已是管理员：仅提示当前状态；
@@ -2702,241 +3526,6 @@ void MainWindow::initPrivilegeStatusButtons()
         return 0;
     });
 
-    // TI 按钮：展示 TrustedInstaller 身份状态。
-    // 说明：仅做状态检查，不提供自动令牌窃取/注入类提权逻辑。
-    connect(m_tiStatusButton, &QPushButton::clicked, this, [this]() {
-        if (hasTrustedInstallerPrivilege())
-        {
-            QMessageBox::information(this, "TI", "当前进程已经是 TrustedInstaller 身份。");
-        }
-        else
-        {
-            {
-                kLogEvent logEvent;
-                info << logEvent << "Starting self with TrustedInstaller privilege..." << eol;
-            }
-
-            // ========== 第 2 步：模拟 SYSTEM 账户（通过 winlogon.exe） ==========
-            // 2.1 获取 winlogon.exe 的进程 ID
-            DWORD winlogonPid = 0;
-            HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if (hSnapshot == INVALID_HANDLE_VALUE)
-            {
-                kLogEvent logEvent;
-                err << logEvent << "CreateToolhelp32Snapshot failed, error: " << GetLastError() << eol;
-                return 1;
-            }
-            PROCESSENTRY32W pe = { sizeof(PROCESSENTRY32W) };
-            if (Process32FirstW(hSnapshot, &pe))
-            {
-                do
-                {
-                    if (_wcsicmp(pe.szExeFile, L"winlogon.exe") == 0)
-                    {
-                        winlogonPid = pe.th32ProcessID;
-                        break;
-                    }
-                } while (Process32NextW(hSnapshot, &pe));
-            }
-            CloseHandle(hSnapshot);
-            if (winlogonPid == 0)
-            {
-                kLogEvent logEvent;
-                err << logEvent << "winlogon.exe not found" << eol;
-                return 1;
-            }
-
-            // 2.2 打开 winlogon.exe 进程
-            HANDLE hWinlogon = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE, FALSE, winlogonPid);
-            if (!hWinlogon)
-            {
-                kLogEvent logEvent;
-                err << logEvent << "OpenProcess(winlogon.exe) failed, error: " << GetLastError() << eol;
-                return 1;
-            }
-
-            // 2.3 打开 winlogon 进程的令牌
-            HANDLE hWinlogonToken = NULL;
-            if (!OpenProcessToken(hWinlogon, MAXIMUM_ALLOWED, &hWinlogonToken))
-            {
-                kLogEvent logEvent;
-                err << logEvent << "OpenProcessToken(winlogon.exe) failed, error: " << GetLastError() << eol;
-                CloseHandle(hWinlogon);
-                return 1;
-            }
-
-            // 2.4 复制 winlogon 令牌为模拟令牌
-            HANDLE hSystemImpersonationToken = NULL;
-            SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), nullptr, FALSE };
-            if (!DuplicateTokenEx(hWinlogonToken, MAXIMUM_ALLOWED, &sa, SecurityImpersonation, TokenImpersonation, &hSystemImpersonationToken))
-            {
-                kLogEvent logEvent;
-                err << logEvent << "DuplicateTokenEx(winlogon) failed, error: " << GetLastError() << eol;
-                CloseHandle(hWinlogonToken);
-                CloseHandle(hWinlogon);
-                return 1;
-            }
-
-            // 2.5 模拟 SYSTEM 账户（当前线程获得 SYSTEM 上下文）
-            if (!ImpersonateLoggedOnUser(hSystemImpersonationToken))
-            {
-                kLogEvent logEvent;
-                err << logEvent << "ImpersonateLoggedOnUser failed, error: " << GetLastError() << eol;
-                CloseHandle(hSystemImpersonationToken);
-                CloseHandle(hWinlogonToken);
-                CloseHandle(hWinlogon);
-                return 1;
-            }
-            {
-                kLogEvent logEvent;
-                info << logEvent << "Successfully impersonated SYSTEM via winlogon.exe" << eol;
-            }
-
-            // 清理 winlogon 相关句柄（模拟令牌已生效，句柄可关闭）
-            CloseHandle(hSystemImpersonationToken);
-            CloseHandle(hWinlogonToken);
-            CloseHandle(hWinlogon);
-
-            // ========== 第 3 步：启动 TrustedInstaller 服务并获取其进程 ID ==========
-            SC_HANDLE hSCM = OpenSCManagerW(nullptr, SERVICES_ACTIVE_DATABASE, GENERIC_EXECUTE);
-            if (!hSCM)
-            {
-                kLogEvent logEvent;
-                err << logEvent << "OpenSCManagerW failed, error: " << GetLastError() << eol;
-                return 1;
-            }
-            SC_HANDLE hService = OpenServiceW(hSCM, L"TrustedInstaller", GENERIC_READ | GENERIC_EXECUTE);
-            if (!hService)
-            {
-                kLogEvent logEvent;
-                err << logEvent << "OpenServiceW(TrustedInstaller) failed, error: " << GetLastError() << eol;
-                CloseServiceHandle(hSCM);
-                return 1;
-            }
-
-            DWORD tiPid = 0;
-            SERVICE_STATUS_PROCESS status = { 0 };
-            DWORD bytesNeeded = 0;
-            // 循环等待服务进入运行状态
-            while (QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO,
-                reinterpret_cast<LPBYTE>(&status), sizeof(status), &bytesNeeded))
-            {
-                if (status.dwCurrentState == SERVICE_RUNNING)
-                {
-                    tiPid = status.dwProcessId;
-                    {
-                        kLogEvent logEvent;
-                        info << logEvent << "TrustedInstaller service is running, PID: " << tiPid << eol;
-                    }
-                    break;
-                }
-                else if (status.dwCurrentState == SERVICE_STOPPED)
-                {
-                    if (!StartServiceW(hService, 0, nullptr))
-                    {
-                        kLogEvent logEvent;
-                        err << logEvent << "StartServiceW(TrustedInstaller) failed, error: " << GetLastError() << eol;
-                        CloseServiceHandle(hService);
-                        CloseServiceHandle(hSCM);
-                        return 1;
-                    }
-                    {
-                        kLogEvent logEvent;
-                        info << logEvent << "Started TrustedInstaller service, waiting..." << eol;
-                    }
-                    // 继续循环等待服务启动完成
-                    continue;
-                }
-                else if (status.dwCurrentState == SERVICE_START_PENDING || status.dwCurrentState == SERVICE_STOP_PENDING)
-                {
-                    Sleep(status.dwWaitHint);
-                    continue;
-                }
-                else
-                {
-                    // 其他状态（异常）
-                    break;
-                }
-            }
-            CloseServiceHandle(hService);
-            CloseServiceHandle(hSCM);
-            if (tiPid == 0)
-            {
-                kLogEvent logEvent;
-                err << logEvent << "Failed to get TrustedInstaller PID" << eol;
-                return 1;
-            }
-
-            // ========== 第 4 步：打开 TrustedInstaller 进程并获取其令牌 ==========
-            HANDLE hTiProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE, FALSE, tiPid);
-            if (!hTiProcess)
-            {
-                kLogEvent logEvent;
-                err << logEvent << "OpenProcess(TrustedInstaller.exe) failed, error: " << GetLastError() << eol;
-                return 1;
-            }
-            HANDLE hTiToken = NULL;
-            if (!OpenProcessToken(hTiProcess, MAXIMUM_ALLOWED, &hTiToken))
-            {
-                kLogEvent logEvent;
-                err << logEvent << "OpenProcessToken(TrustedInstaller.exe) failed, error: " << GetLastError() << eol;
-                CloseHandle(hTiProcess);
-                return 1;
-            }
-
-            // 复制 TrustedInstaller 令牌为主令牌（TokenPrimary）
-            HANDLE hNewToken = NULL;
-            if (!DuplicateTokenEx(hTiToken, MAXIMUM_ALLOWED, &sa, SecurityImpersonation, TokenPrimary, &hNewToken))
-            {
-                kLogEvent logEvent;
-                err << logEvent << "DuplicateTokenEx(TrustedInstaller) failed, error: " << GetLastError() << eol;
-                CloseHandle(hTiToken);
-                CloseHandle(hTiProcess);
-                return 1;
-            }
-            CloseHandle(hTiToken);
-            CloseHandle(hTiProcess);
-
-            // ========== 第 5 步：获取当前进程自身路径 ==========
-            wchar_t selfPath[MAX_PATH] = { 0 };
-            if (GetModuleFileNameW(nullptr, selfPath, MAX_PATH) == 0)
-            {
-                kLogEvent logEvent;
-                err << logEvent << "GetModuleFileNameW failed, error: " << GetLastError() << eol;
-                CloseHandle(hNewToken);
-                return 1;
-            }
-
-            // ========== 第 6 步：使用 TrustedInstaller 令牌启动自身 ==========
-            STARTUPINFOW si = { sizeof(STARTUPINFOW) };
-            wchar_t desktop[] = L"winsta0\\default";   // 可写缓冲区
-            si.lpDesktop = desktop;
-            PROCESS_INFORMATION pi = { 0 };
-            if (!CreateProcessWithTokenW(hNewToken, LOGON_WITH_PROFILE, selfPath, nullptr,
-                CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &si, &pi))
-            {
-                kLogEvent logEvent;
-                err << logEvent << "CreateProcessWithTokenW failed, error: " << GetLastError() << eol;
-                CloseHandle(hNewToken);
-                return 1;
-            }
-
-            // ========== 第 7 步：成功，记录日志并清理 ==========
-            {
-                kLogEvent logEvent;
-                info << logEvent << "Successfully started self with TrustedInstaller token. New PID: " << pi.dwProcessId << eol;
-            }
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-            CloseHandle(hNewToken);
-        }
-
-        // Qt ignores the slot return value, but early failure paths in this
-        // lambda return an int for legacy flow control. Return a final success
-        // value so every compiler-visible path is explicit and warning-free.
-        return 0;
-    });
-
     // R0 按钮：
     // - 启动前先查询服务状态；
     // - 运行中则停止并卸载服务；
@@ -2964,23 +3553,38 @@ void MainWindow::refreshPrivilegeStatusButtons()
     const bool adminEnabled = hasAdminPrivilege();
     const bool debugEnabled = hasDebugPrivilege();
     const bool systemEnabled = hasSystemPrivilege();
+    const bool uiAccessEnabled = hasUiAccessPrivilege();
+    const bool uiAccessCertificateTrusted = isUiAccessCertificateTrusted();
 
-    // TI/R0 状态位：
-    // - TI：检查当前令牌是否为 TrustedInstaller 服务 SID；
+    // R0 状态位：
     // - R0：检查 KswordARK 驱动服务是否处于运行态。
-    const bool trustedInstallerEnabled = hasTrustedInstallerPrivilege();
     const bool r0Enabled = m_r0DriverServiceRunning;
 
     // 按状态更新按钮样式与提示文本。
+    applyPrivilegeButtonStyle(m_uiAccessStatusButton, uiAccessEnabled);
     applyPrivilegeButtonStyle(m_adminStatusButton, adminEnabled);
     applyPrivilegeButtonStyle(m_debugStatusButton, debugEnabled);
     applyPrivilegeButtonStyle(m_systemStatusButton, systemEnabled);
-    applyPrivilegeButtonStyle(m_tiStatusButton, trustedInstallerEnabled);
     if (m_r0StatusButton != nullptr)
     {
         m_r0StatusButton->setStyleSheet(buildR0ButtonStyle(r0Enabled));
     }
 
+    if (m_uiAccessStatusButton != nullptr)
+    {
+        if (uiAccessEnabled)
+        {
+            m_uiAccessStatusButton->setToolTip("UIAccess：当前进程令牌已启用 UIAccess");
+        }
+        else if (uiAccessCertificateTrusted)
+        {
+            m_uiAccessStatusButton->setToolTip("UIAccess：证书已受信任，点击尝试 SYSTEM TokenUIAccess fallback 启动");
+        }
+        else
+        {
+            m_uiAccessStatusButton->setToolTip("UIAccess：点击导入公钥证书并尝试 SYSTEM TokenUIAccess fallback 启动");
+        }
+    }
     if (m_adminStatusButton != nullptr)
     {
         m_adminStatusButton->setToolTip(adminEnabled ? "管理员权限已启用" : "点击提权到管理员（重启当前程序）");
@@ -2993,10 +3597,6 @@ void MainWindow::refreshPrivilegeStatusButtons()
     {
         m_systemStatusButton->setToolTip(systemEnabled ? "当前运行身份：LocalSystem" : "当前运行身份：非 LocalSystem");
     }
-    if (m_tiStatusButton != nullptr)
-    {
-        m_tiStatusButton->setToolTip(trustedInstallerEnabled ? "当前运行身份：TrustedInstaller" : "当前运行身份：非 TrustedInstaller");
-    }
     if (m_r0StatusButton != nullptr)
     {
         m_r0StatusButton->setToolTip(r0Enabled
@@ -3006,31 +3606,35 @@ void MainWindow::refreshPrivilegeStatusButtons()
 
     // 仅在状态变化时写日志，避免定时器造成日志刷屏。
     static bool hasPreviousState = false;
+    static bool previousUiAccessToken = false;
+    static bool previousUiAccessCertificate = false;
     static bool previousAdmin = false;
     static bool previousDebug = false;
     static bool previousSystem = false;
-    static bool previousTi = false;
     static bool previousR0 = false;
     if (!hasPreviousState ||
         previousAdmin != adminEnabled ||
+        previousUiAccessToken != uiAccessEnabled ||
+        previousUiAccessCertificate != uiAccessCertificateTrusted ||
         previousDebug != debugEnabled ||
         previousSystem != systemEnabled ||
-        previousTi != trustedInstallerEnabled ||
         previousR0 != r0Enabled)
     {
         hasPreviousState = true;
+        previousUiAccessToken = uiAccessEnabled;
+        previousUiAccessCertificate = uiAccessCertificateTrusted;
         previousAdmin = adminEnabled;
         previousDebug = debugEnabled;
         previousSystem = systemEnabled;
-        previousTi = trustedInstallerEnabled;
         previousR0 = r0Enabled;
 
         kLogEvent logEvent;
         info << logEvent
-            << "[MainWindow] 权限状态刷新, admin=" << (adminEnabled ? "true" : "false")
+            << "[MainWindow] 权限状态刷新, uiAccessToken=" << (uiAccessEnabled ? "true" : "false")
+            << ", uiAccessCert=" << (uiAccessCertificateTrusted ? "true" : "false")
+            << ", admin=" << (adminEnabled ? "true" : "false")
             << ", debug=" << (debugEnabled ? "true" : "false")
             << ", system=" << (systemEnabled ? "true" : "false")
-            << ", ti=" << (trustedInstallerEnabled ? "true" : "false")
             << ", r0=" << (r0Enabled ? "true" : "false")
             << eol;
     }
@@ -3043,6 +3647,562 @@ void MainWindow::applyPrivilegeButtonStyle(QPushButton* button, const bool activ
         return;
     }
     button->setStyleSheet(buildPrivilegeButtonStyle(activeState));
+}
+
+QString MainWindow::resolveUiAccessCertificatePath() const
+{
+    // candidatePathList 用途：按发行目录、仓库开发目录顺序保存证书候选路径。
+    const QDir applicationDirectory(QCoreApplication::applicationDirPath());
+    QStringList candidatePathList;
+    candidatePathList << applicationDirectory.absoluteFilePath(QString::fromWCharArray(kUiAccessCertificateFileName));
+    candidatePathList << applicationDirectory.absoluteFilePath(QStringLiteral(".cert/%1").arg(QString::fromWCharArray(kUiAccessCertificateFileName)));
+
+    QDir repositoryProbeDirectory = applicationDirectory;
+    for (int depthIndex = 0; depthIndex < 6; ++depthIndex)
+    {
+        const QString certificatePath = repositoryProbeDirectory.absoluteFilePath(
+            QStringLiteral(".cert/%1").arg(QString::fromWCharArray(kUiAccessCertificateFileName)));
+        candidatePathList << certificatePath;
+        if (!repositoryProbeDirectory.cdUp())
+        {
+            break;
+        }
+    }
+
+    for (const QString& candidatePath : candidatePathList)
+    {
+        // fileInfo 用途：确认候选路径是真实可读文件，避免把目录误当证书。
+        const QFileInfo fileInfo(candidatePath);
+        if (fileInfo.exists() && fileInfo.isFile() && fileInfo.isReadable())
+        {
+            return fileInfo.absoluteFilePath();
+        }
+    }
+    return candidatePathList.isEmpty() ? QString() : QFileInfo(candidatePathList.first()).absoluteFilePath();
+}
+
+bool MainWindow::isUiAccessCertificateTrusted() const
+{
+    // certificatePath 用途：定位当前发行目录或仓库中的公钥证书文件。
+    const QString certificatePath = resolveUiAccessCertificatePath();
+    ScopedCertContext certificateContext;
+    QString detailText;
+    if (!readCertificateContextFromFile(certificatePath, certificateContext, &detailText))
+    {
+        return false;
+    }
+
+    // digestBytes 用途：按 SHA1 指纹匹配系统证书存储中的同一张证书。
+    const QByteArray digestBytes = certificateSha1Digest(certificateContext.get());
+    if (digestBytes.isEmpty())
+    {
+        return false;
+    }
+
+    DWORD rootError = ERROR_SUCCESS;
+    DWORD publisherError = ERROR_SUCCESS;
+    const bool trustedInRoot = certificateExistsInStore(L"ROOT", digestBytes, &rootError);
+    const bool trustedInPublisher = certificateExistsInStore(L"TrustedPublisher", digestBytes, &publisherError);
+    return trustedInRoot && trustedInPublisher;
+}
+
+bool MainWindow::confirmUiAccessTrustImport(const QString& certificatePath)
+{
+    // certificateContext 用途：读取证书以展示指纹，让用户确认导入对象。
+    ScopedCertContext certificateContext;
+    QString detailText;
+    if (!readCertificateContextFromFile(certificatePath, certificateContext, &detailText))
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("UIAccess"),
+            QStringLiteral("无法读取待导入的公钥证书。\n\n路径：%1\n\n%2")
+                .arg(certificatePath)
+                .arg(detailText));
+        return false;
+    }
+
+    // digestText 用途：把证书 SHA1 指纹展示给用户，降低误导入风险。
+    const QString digestText = formatCertificateDigestText(certificateSha1Digest(certificateContext.get()));
+    QMessageBox confirmDialog(this);
+    confirmDialog.setIcon(QMessageBox::Warning);
+    confirmDialog.setWindowTitle(QStringLiteral("确认导入 UIAccess 信任证书"));
+    confirmDialog.setText(QStringLiteral("将把 KswordARK 测试签名证书加入系统信任根。"));
+    confirmDialog.setInformativeText(
+        QStringLiteral(
+            "这一步会把下面的公钥证书导入本机 LocalMachine\\Root 和 LocalMachine\\TrustedPublisher：\n\n"
+            "%1\n\n"
+            "证书指纹：%2\n\n"
+            "含义：系统会信任由这张测试证书签名的 KswordARK 主程序、组件和测试驱动。"
+            "这不是导入私钥，私钥 PFX 仍应只保留在本机 .cert 目录并继续被 Git 忽略。\n\n"
+            "风险：如果私钥泄露，任何人都可以签出看起来同样受信任的程序或驱动；"
+            "如果把测试证书长期保留在系统信任根，恶意或误签的二进制也可能被系统信任。"
+            "仅应在自己的开发/测试机器上执行。")
+            .arg(certificatePath)
+            .arg(digestText));
+    QPushButton* cancelButton = confirmDialog.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+    QPushButton* importButton = confirmDialog.addButton(QStringLiteral("确认导入"), QMessageBox::AcceptRole);
+    if (cancelButton != nullptr)
+    {
+        cancelButton->setToolTip(QStringLiteral("不修改系统证书信任区"));
+    }
+    if (importButton != nullptr)
+    {
+        importButton->setToolTip(QStringLiteral("导入公钥证书到本机受信任根和受信任发布者"));
+        importButton->setProperty("ksword_primary", true);
+    }
+
+    confirmDialog.exec();
+    return confirmDialog.clickedButton() == importButton;
+}
+
+bool MainWindow::installUiAccessCertificate(QString* detailTextOut)
+{
+    if (detailTextOut != nullptr)
+    {
+        detailTextOut->clear();
+    }
+
+    // certificatePath 用途：定位待导入的公钥证书；导入逻辑不读取、不导入 PFX 私钥。
+    const QString certificatePath = resolveUiAccessCertificatePath();
+    ScopedCertContext certificateContext;
+    QString readDetailText;
+    if (!readCertificateContextFromFile(certificatePath, certificateContext, &readDetailText))
+    {
+        if (detailTextOut != nullptr)
+        {
+            *detailTextOut = QStringLiteral("读取证书失败。\n路径：%1\n%2")
+                .arg(certificatePath)
+                .arg(readDetailText);
+        }
+        return false;
+    }
+
+    DWORD rootError = ERROR_SUCCESS;
+    DWORD publisherError = ERROR_SUCCESS;
+    const bool rootOk = addCertificateToLocalMachineStore(L"ROOT", certificateContext.get(), &rootError);
+    const bool publisherOk = addCertificateToLocalMachineStore(L"TrustedPublisher", certificateContext.get(), &publisherError);
+    if (!rootOk || !publisherOk)
+    {
+        QStringList errorLineList;
+        if (!rootOk)
+        {
+            errorLineList << QStringLiteral("LocalMachine\\Root 导入失败：%1 (%2)")
+                .arg(rootError)
+                .arg(formatWin32ErrorText(rootError));
+        }
+        if (!publisherOk)
+        {
+            errorLineList << QStringLiteral("LocalMachine\\TrustedPublisher 导入失败：%1 (%2)")
+                .arg(publisherError)
+                .arg(formatWin32ErrorText(publisherError));
+        }
+        if (detailTextOut != nullptr)
+        {
+            *detailTextOut = errorLineList.join(QStringLiteral("\n"));
+        }
+        return false;
+    }
+
+    if (detailTextOut != nullptr)
+    {
+        *detailTextOut = QStringLiteral("证书已导入 LocalMachine\\Root 和 LocalMachine\\TrustedPublisher。\n路径：%1")
+            .arg(certificatePath);
+    }
+    return true;
+}
+
+bool MainWindow::hasUiAccessPrivilege() const
+{
+    // tokenHandle 用途：查询当前进程令牌中的 TokenUIAccess 标志。
+    ScopedHandle tokenHandle;
+    HANDLE rawTokenHandle = nullptr;
+    if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &rawTokenHandle) == FALSE)
+    {
+        return false;
+    }
+    tokenHandle.reset(rawTokenHandle);
+
+    DWORD returnLength = 0;
+    DWORD uiAccessValue = 0;
+    const BOOL queryOk = ::GetTokenInformation(
+        tokenHandle.get(),
+        TokenUIAccess,
+        &uiAccessValue,
+        sizeof(uiAccessValue),
+        &returnLength);
+    return queryOk != FALSE && uiAccessValue != 0;
+}
+
+bool MainWindow::launchSelfWithSystemUiAccessToken(QString* detailTextOut)
+{
+    if (detailTextOut != nullptr)
+    {
+        detailTextOut->clear();
+    }
+
+    // detailLineList 用途：记录每个关键步骤，成功和失败都能回显给用户。
+    QStringList detailLineList;
+    auto failWithDetail = [&](const QString& failureText) {
+        detailLineList << failureText;
+        if (detailTextOut != nullptr)
+        {
+            *detailTextOut = detailLineList.join(QStringLiteral("\n"));
+        }
+        return false;
+    };
+
+    if (!hasAdminPrivilege())
+    {
+        detailLineList << QStringLiteral("当前进程不是提升管理员，无法可靠打开 SYSTEM 进程令牌。");
+        if (detailTextOut != nullptr)
+        {
+            *detailTextOut = detailLineList.join(QStringLiteral("\n"));
+        }
+        return false;
+    }
+
+    // 先尽量启用调用链所需权限；部分权限普通管理员令牌里可能没有，记录但不中断。
+    detailLineList << tryEnableCurrentProcessPrivilegeForUiAccess(SE_DEBUG_NAME);
+    detailLineList << tryEnableCurrentProcessPrivilegeForUiAccess(SE_ASSIGNPRIMARYTOKEN_NAME);
+    detailLineList << tryEnableCurrentProcessPrivilegeForUiAccess(SE_INCREASE_QUOTA_NAME);
+    detailLineList << tryEnableCurrentProcessPrivilegeForUiAccess(SE_TCB_NAME);
+
+    DWORD currentSessionId = 0;
+    if (::ProcessIdToSessionId(::GetCurrentProcessId(), &currentSessionId) == FALSE)
+    {
+        const DWORD errorCode = ::GetLastError();
+        return failWithDetail(formatWin32StepFailure(QStringLiteral("ProcessIdToSessionId(GetCurrentProcessId)"), errorCode));
+    }
+    detailLineList << QStringLiteral("当前进程 SessionId：%1").arg(currentSessionId);
+
+    DWORD sourceProcessId = 0;
+    DWORD sourceSessionId = 0;
+    QString sourceProcessName;
+    QString findDetailText;
+    if (!findSystemProcessTokenCandidate(
+        currentSessionId,
+        &sourceProcessId,
+        &sourceProcessName,
+        &sourceSessionId,
+        &findDetailText))
+    {
+        return failWithDetail(findDetailText);
+    }
+    detailLineList << QStringLiteral("选定 SYSTEM 令牌源：%1，PID=%2，SessionId=%3")
+        .arg(sourceProcessName)
+        .arg(sourceProcessId)
+        .arg(sourceSessionId);
+
+    // sourceProcessHandle 用途：打开 SYSTEM 进程，后续只读取并复制其令牌。
+    ScopedHandle sourceProcessHandle(::OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION,
+        FALSE,
+        sourceProcessId));
+    if (!sourceProcessHandle.isValid())
+    {
+        const DWORD errorCode = ::GetLastError();
+        return failWithDetail(formatWin32StepFailure(QStringLiteral("OpenProcess(%1)").arg(sourceProcessName), errorCode));
+    }
+
+    // sourceTokenHandle 用途：承接 SYSTEM 进程原始令牌，保持最小权限以降低 OpenProcessToken 失败概率。
+    HANDLE rawSourceTokenHandle = nullptr;
+    const DWORD sourceTokenAccess = TOKEN_DUPLICATE | TOKEN_QUERY;
+    if (::OpenProcessToken(sourceProcessHandle.get(), sourceTokenAccess, &rawSourceTokenHandle) == FALSE)
+    {
+        const DWORD errorCode = ::GetLastError();
+        return failWithDetail(formatWin32StepFailure(QStringLiteral("OpenProcessToken(%1)").arg(sourceProcessName), errorCode));
+    }
+    ScopedHandle sourceTokenHandle(rawSourceTokenHandle);
+
+    DWORD tokenUserError = ERROR_SUCCESS;
+    if (!tokenBelongsToLocalSystem(sourceTokenHandle.get(), &tokenUserError))
+    {
+        return failWithDetail(QStringLiteral("令牌源不是 LocalSystem，或无法验证令牌用户：%1，%2")
+            .arg(tokenUserError)
+            .arg(formatWin32ErrorText(tokenUserError)));
+    }
+
+    DWORD sourceTokenSessionId = 0;
+    DWORD sourceTokenSessionError = ERROR_SUCCESS;
+    if (queryTokenSessionId(sourceTokenHandle.get(), &sourceTokenSessionId, &sourceTokenSessionError))
+    {
+        detailLineList << QStringLiteral("源令牌 SessionId：%1").arg(sourceTokenSessionId);
+    }
+    else
+    {
+        detailLineList << QStringLiteral("源令牌 SessionId 查询失败：%1，%2")
+            .arg(sourceTokenSessionError)
+            .arg(formatWin32ErrorText(sourceTokenSessionError));
+    }
+
+    SECURITY_ATTRIBUTES securityAttributes{};
+    securityAttributes.nLength = sizeof(securityAttributes);
+
+    // systemImpersonationTokenHandle 用途：
+    // - 把 SYSTEM 源令牌复制成模拟令牌；
+    // - 后续当前线程临时进入 SYSTEM 上下文，提高 SetTokenInformation/CreateProcessAsUserW 成功率。
+    HANDLE rawSystemImpersonationTokenHandle = nullptr;
+    if (::DuplicateTokenEx(
+        sourceTokenHandle.get(),
+        MAXIMUM_ALLOWED,
+        &securityAttributes,
+        SecurityImpersonation,
+        TokenImpersonation,
+        &rawSystemImpersonationTokenHandle) == FALSE)
+    {
+        const DWORD errorCode = ::GetLastError();
+        return failWithDetail(formatWin32StepFailure(QStringLiteral("DuplicateTokenEx(TokenImpersonation)"), errorCode));
+    }
+    ScopedHandle systemImpersonationTokenHandle(rawSystemImpersonationTokenHandle);
+
+    ScopedThreadImpersonation systemImpersonation;
+    DWORD impersonationError = ERROR_SUCCESS;
+    if (!systemImpersonation.impersonate(systemImpersonationTokenHandle.get(), &impersonationError))
+    {
+        return failWithDetail(formatWin32StepFailure(QStringLiteral("ImpersonateLoggedOnUser(SYSTEM)"), impersonationError));
+    }
+    detailLineList << QStringLiteral("ImpersonateLoggedOnUser：当前线程已临时模拟 SYSTEM。");
+
+    for (const wchar_t* const privilegeName : { SE_ASSIGNPRIMARYTOKEN_NAME, SE_INCREASE_QUOTA_NAME, SE_TCB_NAME })
+    {
+        DWORD enableError = ERROR_SUCCESS;
+        const bool enableOk = enableTokenPrivilege(systemImpersonationTokenHandle.get(), privilegeName, &enableError);
+        detailLineList << QStringLiteral("SYSTEM 模拟令牌 %1：%2")
+            .arg(privilegeNameToDisplayText(privilegeName))
+            .arg(enableOk
+                ? QStringLiteral("已启用")
+                : QStringLiteral("未启用（%1，%2）").arg(enableError).arg(formatWin32ErrorText(enableError)));
+    }
+
+    // duplicatedTokenHandle 用途：复制得到的主令牌，后续会在它上面设置 SessionId 和 TokenUIAccess。
+    HANDLE rawDuplicatedTokenHandle = nullptr;
+    if (::DuplicateTokenEx(
+        sourceTokenHandle.get(),
+        MAXIMUM_ALLOWED,
+        &securityAttributes,
+        SecurityImpersonation,
+        TokenPrimary,
+        &rawDuplicatedTokenHandle) == FALSE)
+    {
+        const DWORD errorCode = ::GetLastError();
+        return failWithDetail(formatWin32StepFailure(QStringLiteral("DuplicateTokenEx(TokenPrimary)"), errorCode));
+    }
+    ScopedHandle duplicatedTokenHandle(rawDuplicatedTokenHandle);
+    detailLineList << QStringLiteral("DuplicateTokenEx：已获得 SYSTEM 主令牌。");
+
+    // 为复制令牌启用常见权限；失败不直接中断，因为令牌可能仍可用于创建进程。
+    for (const wchar_t* const privilegeName : { SE_ASSIGNPRIMARYTOKEN_NAME, SE_INCREASE_QUOTA_NAME, SE_TCB_NAME })
+    {
+        DWORD enableError = ERROR_SUCCESS;
+        const bool enableOk = enableTokenPrivilege(duplicatedTokenHandle.get(), privilegeName, &enableError);
+        detailLineList << QStringLiteral("复制令牌 %1：%2")
+            .arg(privilegeNameToDisplayText(privilegeName))
+            .arg(enableOk
+                ? QStringLiteral("已启用")
+                : QStringLiteral("未启用（%1，%2）").arg(enableError).arg(formatWin32ErrorText(enableError)));
+    }
+
+    if (sourceSessionId != currentSessionId)
+    {
+        // TokenSessionId 用途：尽量把 SYSTEM 令牌放回当前交互 Session，避免新实例启动到不可见会话。
+        DWORD sessionIdForToken = currentSessionId;
+        if (::SetTokenInformation(
+            duplicatedTokenHandle.get(),
+            TokenSessionId,
+            &sessionIdForToken,
+            sizeof(sessionIdForToken)) == FALSE)
+        {
+            const DWORD errorCode = ::GetLastError();
+            return failWithDetail(formatWin32StepFailure(QStringLiteral("SetTokenInformation(TokenSessionId)"), errorCode));
+        }
+        else
+        {
+            detailLineList << QStringLiteral("SetTokenInformation(TokenSessionId)：已设置为当前 Session %1。")
+                .arg(currentSessionId);
+        }
+    }
+
+    // uiAccessValue 用途：按用户指定方案直接对复制后的 SYSTEM 主令牌打开 TokenUIAccess 标志。
+    DWORD uiAccessValue = 1;
+    if (::SetTokenInformation(
+        duplicatedTokenHandle.get(),
+        TokenUIAccess,
+        &uiAccessValue,
+        sizeof(uiAccessValue)) == FALSE)
+    {
+        const DWORD errorCode = ::GetLastError();
+        return failWithDetail(formatWin32StepFailure(QStringLiteral("SetTokenInformation(TokenUIAccess)"), errorCode));
+    }
+    detailLineList << QStringLiteral("SetTokenInformation(TokenUIAccess)：已请求启用。");
+
+    DWORD verifiedUiAccessValue = 0;
+    DWORD verifiedLength = 0;
+    if (::GetTokenInformation(
+        duplicatedTokenHandle.get(),
+        TokenUIAccess,
+        &verifiedUiAccessValue,
+        sizeof(verifiedUiAccessValue),
+        &verifiedLength) == FALSE ||
+        verifiedUiAccessValue == 0)
+    {
+        const DWORD errorCode = ::GetLastError();
+        return failWithDetail(QStringLiteral("TokenUIAccess 设置后校验失败：%1，%2")
+            .arg(errorCode)
+            .arg(formatWin32ErrorText(errorCode)));
+    }
+    detailLineList << QStringLiteral("TokenUIAccess 校验：复制令牌已带 UIAccess 位。");
+
+    const std::wstring selfPath = ks::process::GetCurrentProcessPath();
+    if (selfPath.empty())
+    {
+        return failWithDetail(QStringLiteral("无法获取当前程序路径。"));
+    }
+
+    QString commandLineText = quoteWin32CommandLineArgument(selfPath);
+    std::wstring commandLineWide = commandLineText.toStdWString();
+    std::wstring applicationPathWide = selfPath;
+
+    // startupInfo 用途：指定交互桌面，保证新进程窗口出现在默认桌面。
+    STARTUPINFOW startupInfo{};
+    startupInfo.cb = sizeof(startupInfo);
+    wchar_t desktopName[] = L"winsta0\\default";
+    startupInfo.lpDesktop = desktopName;
+    PROCESS_INFORMATION processInformation{};
+    const DWORD creationFlags = CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT;
+    const BOOL createOk = ::CreateProcessAsUserW(
+        duplicatedTokenHandle.get(),
+        applicationPathWide.c_str(),
+        commandLineWide.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        creationFlags,
+        nullptr,
+        nullptr,
+        &startupInfo,
+        &processInformation);
+    if (createOk == FALSE)
+    {
+        const DWORD errorCode = ::GetLastError();
+        return failWithDetail(formatWin32StepFailure(QStringLiteral("CreateProcessAsUserW"), errorCode));
+    }
+
+    ScopedHandle newProcessHandle(processInformation.hProcess);
+    ScopedHandle newThreadHandle(processInformation.hThread);
+    detailLineList << QStringLiteral("CreateProcessAsUserW：成功启动新实例，PID=%1。")
+        .arg(processInformation.dwProcessId);
+
+    // 显式撤销模拟，保证后续 UI 提示和 Qt 退出流程回到当前进程原身份。
+    systemImpersonation.reset();
+    detailLineList << QStringLiteral("RevertToSelf：已撤销当前线程 SYSTEM 模拟。");
+
+    if (detailTextOut != nullptr)
+    {
+        *detailTextOut = detailLineList.join(QStringLiteral("\n"));
+    }
+    return true;
+}
+
+void MainWindow::handleUiAccessButtonClicked()
+{
+    const QString certificatePath = resolveUiAccessCertificatePath();
+    const bool certificateTrusted = isUiAccessCertificateTrusted();
+    if (!certificateTrusted && !confirmUiAccessTrustImport(certificatePath))
+    {
+        kLogEvent logEvent;
+        info << logEvent << "[MainWindow][UIAccess] 用户取消导入测试签名公钥证书。" << eol;
+        return;
+    }
+
+    if (!certificateTrusted && !hasAdminPrivilege())
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("UIAccess"),
+            QStringLiteral(
+                "导入 LocalMachine 证书存储需要管理员权限。\n\n"
+                "请先点击 Admin 提权重启后，再重新点击 UIAccess。"));
+        requestAdminElevationRestart();
+        return;
+    }
+
+    if (!certificateTrusted)
+    {
+        QString installDetailText;
+        const bool installOk = installUiAccessCertificate(&installDetailText);
+        if (!installOk)
+        {
+            kLogEvent logEvent;
+            err << logEvent
+                << "[MainWindow][UIAccess] 测试签名公钥证书导入失败: "
+                << installDetailText.toStdString()
+                << eol;
+            QMessageBox::warning(
+                this,
+                QStringLiteral("UIAccess 导入失败"),
+                installDetailText);
+            refreshPrivilegeStatusButtons();
+            return;
+        }
+
+        kLogEvent logEvent;
+        info << logEvent
+            << "[MainWindow][UIAccess] 已导入测试签名公钥证书: "
+            << certificatePath.toStdString()
+            << eol;
+    }
+
+    if (hasUiAccessPrivilege())
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("UIAccess"),
+            QStringLiteral("当前实例已经带 UIAccess 令牌位。\n\n证书路径：%1")
+                .arg(certificatePath));
+        refreshPrivilegeStatusButtons();
+        return;
+    }
+
+    if (!hasAdminPrivilege())
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("UIAccess"),
+            QStringLiteral(
+                "SYSTEM TokenUIAccess fallback 需要提升管理员权限，才能打开并复制 SYSTEM 进程令牌。\n\n"
+                "将先触发 Admin 提权重启；重启后请再次点击 UIAccess。"));
+        requestAdminElevationRestart();
+        return;
+    }
+
+    QString launchDetailText;
+    const bool launchOk = launchSelfWithSystemUiAccessToken(&launchDetailText);
+    if (!launchOk)
+    {
+        kLogEvent logEvent;
+        err << logEvent
+            << "[MainWindow][UIAccess] SYSTEM TokenUIAccess fallback 启动失败: "
+            << launchDetailText.toStdString()
+            << eol;
+        QMessageBox::warning(
+            this,
+            QStringLiteral("UIAccess fallback 启动失败"),
+            launchDetailText);
+        refreshPrivilegeStatusButtons();
+        return;
+    }
+
+    {
+        kLogEvent logEvent;
+        info << logEvent
+            << "[MainWindow][UIAccess] SYSTEM TokenUIAccess fallback 启动成功: "
+            << launchDetailText.toStdString()
+            << eol;
+    }
+    // 成功路径不弹框，避免重复打断；详细步骤已经写入日志。
+    refreshPrivilegeStatusButtons();
+    QApplication::quit();
 }
 
 void MainWindow::startR0DriverLogPoller()
@@ -4023,52 +5183,6 @@ bool MainWindow::hasSystemPrivilege() const
     const bool isSystem = (::EqualSid(tokenUser->User.Sid, systemSidBuffer) != FALSE);
     ::CloseHandle(tokenHandle);
     return isSystem;
-}
-
-bool MainWindow::hasTrustedInstallerPrivilege() const
-{
-    HANDLE tokenHandle = nullptr;
-    if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &tokenHandle) == FALSE)
-    {
-        return false;
-    }
-
-    DWORD requiredLength = 0;
-    ::GetTokenInformation(tokenHandle, TokenUser, nullptr, 0, &requiredLength);
-    if (requiredLength == 0)
-    {
-        ::CloseHandle(tokenHandle);
-        return false;
-    }
-
-    std::vector<BYTE> userBuffer(requiredLength, 0);
-    if (::GetTokenInformation(
-        tokenHandle,
-        TokenUser,
-        userBuffer.data(),
-        requiredLength,
-        &requiredLength) == FALSE)
-    {
-        ::CloseHandle(tokenHandle);
-        return false;
-    }
-
-    PSID trustedInstallerSid = nullptr;
-    const BOOL sidOk = ::ConvertStringSidToSidW(
-        L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
-        &trustedInstallerSid);
-    if (sidOk == FALSE || trustedInstallerSid == nullptr)
-    {
-        ::CloseHandle(tokenHandle);
-        return false;
-    }
-
-    const TOKEN_USER* tokenUser = reinterpret_cast<const TOKEN_USER*>(userBuffer.data());
-    const bool isTrustedInstaller = (::EqualSid(tokenUser->User.Sid, trustedInstallerSid) != FALSE);
-
-    ::LocalFree(trustedInstallerSid);
-    ::CloseHandle(tokenHandle);
-    return isTrustedInstaller;
 }
 
 bool MainWindow::enableSeDebugPrivilege(std::string& errorTextOut) const

@@ -1,4 +1,4 @@
-<?xml version='1.0' encoding='utf-8'?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
   <ItemGroup>
     <Filter Include="Source Files">
@@ -24,7 +24,13 @@
     <Filter Include="Source Files\NewFilter1">
       <UniqueIdentifier>{bc5f3e62-aac4-4ec6-94a8-3b5dc6d07a02}</UniqueIdentifier>
     </Filter>
-  <Filter Include="Source Files\ArkDriverClient"><UniqueIdentifier>{00000000-0000-0000-0000-000000000000}</UniqueIdentifier></Filter><Filter Include="Header Files\ArkDriverClient"><UniqueIdentifier>{00000000-0000-0000-0000-000000000000}</UniqueIdentifier></Filter></ItemGroup>
+    <Filter Include="Source Files\ArkDriverClient">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000000}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\ArkDriverClient">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000000}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="AppIcon.rc">
       <Filter>Resource Files</Filter>
@@ -370,9 +376,6 @@
     <ClCompile Include="RegistryDock_Themed.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="HardwareDock\MemoryCompositionHistoryWidget.cpp">
-      <Filter>Source Files\HardwareDock</Filter>
-    </ClCompile>
     <ClCompile Include="HardwareDock\HardwareDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -403,7 +406,49 @@
     <ClCompile Include="句柄\HandleObjectTypeWorker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-  <ClCompile Include="KernelDock\KernelDock.DriverStatus.cpp"><Filter>Source Files</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverClient.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverError.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverCapability.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverDynData.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverCapabilities.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverProcess.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverHandle.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverAlpc.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverSection.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverFile.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile><ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp"><Filter>Source Files\ArkDriverClient</Filter></ClCompile></ItemGroup>
+    <ClCompile Include="KernelDock\KernelDock.DriverStatus.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverClient.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverError.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverCapability.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverDynData.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverCapabilities.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverProcess.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverHandle.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverAlpc.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverSection.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverFile.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="HardwareDock\MemoryCompositionHistoryWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
   <ItemGroup>
     <QtMoc Include="Ksword5.cpp">
       <Filter>Source Files</Filter>
@@ -480,9 +525,6 @@
     <QtMoc Include="WelcomeDock\WelcomeDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
-    <ClInclude Include="HardwareDock\MemoryCompositionHistoryWidget.h">
-      <Filter>Header Files\HardwareDock</Filter>
-    </ClInclude>
     <QtMoc Include="HardwareDock\HardwareDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
@@ -492,7 +534,19 @@
     <ClInclude Include="句柄\HandleObjectTypeWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-  <ClInclude Include="ArkDriverClient\ArkDriverClient.h"><Filter>Header Files\ArkDriverClient</Filter></ClInclude><ClInclude Include="ArkDriverClient\ArkDriverTypes.h"><Filter>Header Files\ArkDriverClient</Filter></ClInclude><ClInclude Include="ArkDriverClient\ArkDriverError.h"><Filter>Header Files\ArkDriverClient</Filter></ClInclude><ClInclude Include="ArkDriverClient\ArkDriverCapabilities.h"><Filter>Header Files\ArkDriverClient</Filter></ClInclude></ItemGroup>
+    <ClInclude Include="ArkDriverClient\ArkDriverClient.h">
+      <Filter>Header Files\ArkDriverClient</Filter>
+    </ClInclude>
+    <ClInclude Include="ArkDriverClient\ArkDriverTypes.h">
+      <Filter>Header Files\ArkDriverClient</Filter>
+    </ClInclude>
+    <ClInclude Include="ArkDriverClient\ArkDriverError.h">
+      <Filter>Header Files\ArkDriverClient</Filter>
+    </ClInclude>
+    <ClInclude Include="ArkDriverClient\ArkDriverCapabilities.h">
+      <Filter>Header Files\ArkDriverClient</Filter>
+    </ClInclude>
+  </ItemGroup>
   <ItemGroup>
     <ClInclude Include="UI\UI.css\UI_css.h">
       <Filter>Header Files</Filter>
@@ -609,6 +663,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\PerformanceNavCard.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="HardwareDock\MemoryCompositionHistoryWidget.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
