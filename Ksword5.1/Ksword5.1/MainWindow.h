@@ -243,6 +243,12 @@ private:
     // 调用方式：窗口句柄创建完成后、主题切换后调用。
     void applyNativeWindowFrameVisualStyle();
 
+    // ensureStartupWindowVisibleOnScreen 作用：
+    // - 在主窗口首次 show 后，把窗口尺寸与位置约束到当前可见屏幕；
+    // - 修复低分辨率/高缩放下窗口初始区域落到屏幕外或整体超出可视区域的问题；
+    // - 仅修正普通窗口态，最大化态保持系统接管。
+    void ensureStartupWindowVisibleOnScreen();
+
     // isWindowActuallyMaximized 作用：
     // - 综合 Qt 状态与 Win32 IsZoomed 判断真实最大化状态；
     // - 避免仅依赖 isMaximized() 造成“按钮状态漂移”。
@@ -389,6 +395,7 @@ private:
     // m_currentAppearanceSettings 作用：缓存当前外观配置（主题/背景图/透明度）。
     ks::settings::AppearanceSettings m_currentAppearanceSettings;
     StartupProgressCallback m_startupProgressCallback; // m_startupProgressCallback：主窗口启动阶段进度回调。
+    bool m_startupWindowVisibilityAdjusted = false; // m_startupWindowVisibilityAdjusted：是否已完成首次显示区域修正。
     bool m_deferredDockInitializationStarted = false; // m_deferredDockInitializationStarted：是否已启动显示后补载流程。
     std::size_t m_nextDeferredDockIndex = 0;          // m_nextDeferredDockIndex：下一个待补载 Dock 队列索引。
     std::vector<ads::CDockWidget*> m_deferredDockLoadQueue; // m_deferredDockLoadQueue：显示后依次补载的 Dock 队列。

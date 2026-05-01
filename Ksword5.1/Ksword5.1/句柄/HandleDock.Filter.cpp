@@ -27,6 +27,8 @@ void HandleDock::applyLocalHandleFilters()
     const QString pidText = (m_pidFilterEdit != nullptr) ? m_pidFilterEdit->text().trimmed() : QString();
     const QString keywordText = (m_keywordFilterEdit != nullptr) ? m_keywordFilterEdit->text().trimmed().toLower() : QString();
     const QString typeFilterText = (m_typeFilterCombo != nullptr) ? m_typeFilterCombo->currentText().trimmed() : QString();
+    const HandleDiffStatus diffFilter = resolveHandleDiffFilterFromText(
+        (m_diffFilterCombo != nullptr) ? m_diffFilterCombo->currentText().trimmed() : QString());
     const bool onlyNamed = (m_onlyNamedCheckBox != nullptr) && m_onlyNamedCheckBox->isChecked();
 
     bool pidParseOk = false;
@@ -58,6 +60,10 @@ void HandleDock::applyLocalHandleFilters()
         {
             continue;
         }
+        if (diffFilter != HandleDiffStatus::NotCompared && row.diffStatus != diffFilter)
+        {
+            continue;
+        }
         if (onlyNamed && row.objectName.trimmed().isEmpty())
         {
             continue;
@@ -72,6 +78,9 @@ void HandleDock::applyLocalHandleFilters()
             const QString addressText = QStringLiteral("0x%1").arg(static_cast<qulonglong>(row.objectAddress), 0, 16).toLower();
             const QString accessText = QStringLiteral("0x%1").arg(row.grantedAccess, 8, 16, QChar('0')).toLower();
             const QString accessDecodedText = decodeGrantedAccessText(row.typeName, row.grantedAccess).toLower();
+            const QString sourceText = formatHandleSourceText(row.sourceMode).toLower();
+            const QString decodeStatusText = formatHandleDecodeStatusText(row.decodeStatus).toLower();
+            const QString diffStatusText = formatHandleDiffStatusText(row.diffStatus).toLower();
 
             const bool matched =
                 row.processName.toLower().contains(normalizedKeyword) ||
@@ -82,7 +91,10 @@ void HandleDock::applyLocalHandleFilters()
                 handleText.contains(normalizedKeyword) ||
                 addressText.contains(normalizedKeyword) ||
                 accessText.contains(normalizedKeyword) ||
-                accessDecodedText.contains(normalizedKeyword);
+                accessDecodedText.contains(normalizedKeyword) ||
+                sourceText.contains(normalizedKeyword) ||
+                decodeStatusText.contains(normalizedKeyword) ||
+                diffStatusText.contains(normalizedKeyword);
             if (!matched)
             {
                 continue;

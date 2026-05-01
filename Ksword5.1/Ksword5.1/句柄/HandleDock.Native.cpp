@@ -1,6 +1,7 @@
 #include "HandleDock.h"
 
 #include "HandleObjectTypeWorker.h"
+#include "../ArkDriverClient/ArkDriverClient.h"
 
 #include <QChar>
 
@@ -11,6 +12,7 @@
 #include <cstring>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -195,6 +197,33 @@ namespace
         std::uint64_t objectAddress = 0;   // objectAddress：对象地址。
         std::uint32_t grantedAccess = 0;   // grantedAccess：授权掩码。
         std::uint32_t attributes = 0;      // attributes：句柄属性位。
+    };
+
+    // HandleIdentityKey 作用：
+    // - 以 PID + HandleValue 标识一个句柄槽位；
+    // - 差异视图只比较“句柄是否在某来源出现”，对象地址只用于展示和辅助审计。
+    struct HandleIdentityKey
+    {
+        std::uint32_t processId = 0;       // processId：句柄所属 PID。
+        std::uint64_t handleValue = 0;     // handleValue：句柄值。
+
+        bool operator==(const HandleIdentityKey& other) const noexcept
+        {
+            return processId == other.processId && handleValue == other.handleValue;
+        }
+    };
+
+    // HandleIdentityKeyHash 作用：
+    // - 为 unordered_map/unordered_set 提供稳定 hash；
+    // - 不使用对象地址，避免把内核地址当作身份凭据。
+    struct HandleIdentityKeyHash
+    {
+        std::size_t operator()(const HandleIdentityKey& key) const noexcept
+        {
+            const std::size_t pidHash = std::hash<std::uint32_t>{}(key.processId);
+            const std::size_t handleHash = std::hash<std::uint64_t>{}(key.handleValue);
+            return pidHash ^ (handleHash + 0x9e3779b97f4a7c15ULL + (pidHash << 6) + (pidHash >> 2));
+        }
     };
 
     // ntStatusToHexText 作用：把 NTSTATUS 格式化为十六进制文本。
@@ -738,36 +767,34 @@ namespace
         return false;
     }
 
-    // rowMatchesKeyword 作用：判断行是否命中关键字搜索。
-    template<typename TRow>
-    bool rowMatchesKeyword(const TRow& row, const QString& keywordText)
+    // mergeTypeNameCaches 作用：
+    // - 优先沿用对象类型页的精确映射；
+    // - 再叠加本轮句柄页历史缓存，减少 DuplicateHandle 类型探测。
+    template<typename TOptions>
+    std::unordered_map<std::uint16_t, std::string> mergeTypeNameCaches(
+        const TOptions& options)
     {
-        if (keywordText.trimmed().isEmpty())
+        std::unordered_map<std::uint16_t, std::string> typeNameCache = options.typeNameCacheByIndex;
+        for (const auto& pairItem : options.typeNameMapFromObjectTab)
         {
-            return true;
+            typeNameCache[pairItem.first] = pairItem.second;
         }
+        return typeNameCache;
+    }
 
-        const QString normalizedKeyword = keywordText.toLower();
-        const QString pidText = QString::number(row.processId);
-        const QString typeIndexText = QString::number(row.typeIndex);
-        const QString handleText = QStringLiteral("0x%1")
-            .arg(static_cast<qulonglong>(row.handleValue), 0, 16)
-            .toLower();
-        const QString addressText = QStringLiteral("0x%1")
-            .arg(static_cast<qulonglong>(row.objectAddress), 0, 16)
-            .toLower();
-        const QString accessText = QStringLiteral("0x%1")
-            .arg(row.grantedAccess, 8, 16, QChar('0'))
-            .toLower();
-
-        return row.processName.toLower().contains(normalizedKeyword) ||
-            row.typeName.toLower().contains(normalizedKeyword) ||
-            row.objectName.toLower().contains(normalizedKeyword) ||
-            pidText.contains(normalizedKeyword) ||
-            typeIndexText.contains(normalizedKeyword) ||
-            handleText.contains(normalizedKeyword) ||
-            addressText.contains(normalizedKeyword) ||
-            accessText.contains(normalizedKeyword);
+    // resolveTypeNameFromCache 作用：
+    // - 把 TypeIndex 转成 UI 类型名；
+    // - 缓存未命中时使用 Type#N 占位，后续对象类型页刷新可同步更新。
+    QString resolveTypeNameFromCache(
+        const std::uint16_t typeIndex,
+        const std::unordered_map<std::uint16_t, std::string>& typeNameCache)
+    {
+        const auto typeIt = typeNameCache.find(typeIndex);
+        if (typeIt != typeNameCache.end() && !typeIt->second.empty())
+        {
+            return QString::fromStdString(typeIt->second);
+        }
+        return QStringLiteral("Type#%1").arg(typeIndex);
     }
 }
 
@@ -775,6 +802,15 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
 {
     HandleRefreshResult result{};
     const auto beginTime = std::chrono::steady_clock::now();
+
+    if (options.enumMode == HandleEnumMode::KernelHandleTable && !options.hasPidFilter)
+    {
+        result.elapsedMs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - beginTime).count());
+        result.diagnosticText = QStringLiteral("Kernel HandleTable 模式需要先输入目标 PID。");
+        return result;
+    }
 
     // 第一步：枚举系统句柄快照。
     const NtApiSet apiSet = queryNtApis();
@@ -906,7 +942,6 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
     std::unordered_map<std::uint64_t, CachedObjectSnapshot> objectSnapshotCacheByAddress;
     std::set<QString> typeNameSet;
     result.rows.reserve(rawRecords.size());
-
     for (const RawHandleRecord& rawRow : rawRecords)
     {
         if (rawRow.processId == 0)
@@ -921,6 +956,14 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
         row.objectAddress = rawRow.objectAddress;
         row.grantedAccess = rawRow.grantedAccess;
         row.attributes = rawRow.attributes;
+        row.sourceMode = options.enumMode == HandleEnumMode::UserSnapshot
+            ? HandleEnumMode::UserSnapshot
+            : HandleEnumMode::DuplicateHandle;
+        row.decodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_OK;
+        if (options.enumMode == HandleEnumMode::KernelHandleTable)
+        {
+            row.diffStatus = HandleDiffStatus::UserOnly;
+        }
 
         const auto typeIt = typeNameCache.find(rawRow.typeIndex);
         if (typeIt != typeNameCache.end() && !typeIt->second.empty())
@@ -977,8 +1020,12 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
         // BasicInformation 与对象名查询彻底解耦：
         // - 只要 DuplicateHandle 成功，就尝试独立读取 HandleCount/PointerCount；
         // - 对象名仍受预算与类型白名单控制，避免名称查询无限膨胀。
-        const bool shouldQueryBasicInfo = !row.basicInfoAvailable;
+        const bool allowDuplicateQueries =
+            options.enumMode == HandleEnumMode::DuplicateHandle ||
+            options.enumMode == HandleEnumMode::KernelHandleTable;
+        const bool shouldQueryBasicInfo = allowDuplicateQueries && !row.basicInfoAvailable;
         const bool typeEligibleForNameResolve =
+            allowDuplicateQueries &&
             options.resolveObjectName &&
             candidateForNameResolve &&
             shouldAttemptNameQuery(row.typeName);
@@ -1100,6 +1147,126 @@ HandleDock::HandleRefreshResult HandleDock::buildHandleRefreshResult(const Handl
             }
         }
         result.rows.push_back(std::move(row));
+    }
+
+    if (options.enumMode == HandleEnumMode::KernelHandleTable)
+    {
+        using ksword::ark::DriverClient;
+
+        std::size_t kernelDecodeProblemCount = 0;
+        std::size_t kernelMappedTypeCount = 0;
+        std::unordered_map<HandleIdentityKey, std::size_t, HandleIdentityKeyHash> rowIndexByKey;
+        rowIndexByKey.reserve(result.rows.size());
+        for (std::size_t rowIndex = 0; rowIndex < result.rows.size(); ++rowIndex)
+        {
+            const HandleRow& row = result.rows[rowIndex];
+            rowIndexByKey[HandleIdentityKey{ row.processId, row.handleValue }] = rowIndex;
+        }
+
+        const auto kernelResult = DriverClient().enumerateProcessHandles(
+            options.pidFilter,
+            KSWORD_ARK_ENUM_HANDLE_FLAG_INCLUDE_ALL);
+        if (!kernelResult.io.ok)
+        {
+            queryDiagnosticText = QStringLiteral("R0 HandleTable 枚举失败: %1")
+                .arg(QString::fromStdString(kernelResult.io.message));
+        }
+        else
+        {
+            result.kernelHandleCount = kernelResult.entries.size();
+            for (const auto& kernelEntry : kernelResult.entries)
+            {
+                const HandleIdentityKey key{
+                    kernelEntry.processId,
+                    static_cast<std::uint64_t>(kernelEntry.handleValue)
+                };
+                const auto existingIt = rowIndexByKey.find(key);
+                HandleRow* row = nullptr;
+                if (existingIt != rowIndexByKey.end())
+                {
+                    row = &result.rows[existingIt->second];
+                    row->diffStatus = HandleDiffStatus::Both;
+                }
+                else
+                {
+                    HandleRow kernelRow{};
+                    kernelRow.processId = kernelEntry.processId;
+                    kernelRow.processName = processNameOf(kernelEntry.processId);
+                    kernelRow.handleValue = static_cast<std::uint64_t>(kernelEntry.handleValue);
+                    kernelRow.diffStatus = HandleDiffStatus::KernelOnly;
+                    result.rows.push_back(std::move(kernelRow));
+                    row = &result.rows.back();
+                    rowIndexByKey[key] = result.rows.size() - 1U;
+                }
+
+                row->sourceMode = HandleEnumMode::KernelHandleTable;
+                row->typeIndex = static_cast<std::uint16_t>(kernelEntry.objectTypeIndex);
+                row->objectAddress = kernelEntry.objectAddress;
+                row->grantedAccess = kernelEntry.grantedAccess;
+                row->attributes = kernelEntry.attributes;
+                row->decodeStatus = kernelEntry.decodeStatus;
+                row->r0FieldFlags = kernelEntry.fieldFlags;
+                row->r0DynDataCapabilityMask = kernelEntry.dynDataCapabilityMask;
+                row->epObjectTableOffset = kernelEntry.epObjectTableOffset;
+                row->htHandleContentionEventOffset = kernelEntry.htHandleContentionEventOffset;
+                row->obDecodeShift = kernelEntry.obDecodeShift;
+                row->obAttributesShift = kernelEntry.obAttributesShift;
+                row->otNameOffset = kernelEntry.otNameOffset;
+                row->otIndexOffset = kernelEntry.otIndexOffset;
+                row->typeName = resolveTypeNameFromCache(row->typeIndex, typeNameCache);
+                typeNameSet.insert(row->typeName);
+                if ((kernelEntry.fieldFlags & KSWORD_ARK_HANDLE_FIELD_TYPE_INDEX_PRESENT) != 0U)
+                {
+                    ++kernelMappedTypeCount;
+                }
+                if (kernelEntry.decodeStatus != KSWORD_ARK_HANDLE_DECODE_STATUS_OK)
+                {
+                    ++kernelDecodeProblemCount;
+                }
+            }
+
+            for (const HandleRow& row : result.rows)
+            {
+                if (row.diffStatus == HandleDiffStatus::UserOnly)
+                {
+                    ++result.userOnlyCount;
+                }
+                else if (row.diffStatus == HandleDiffStatus::KernelOnly)
+                {
+                    ++result.kernelOnlyCount;
+                }
+                else if (row.diffStatus == HandleDiffStatus::Both)
+                {
+                    ++result.bothCount;
+                }
+            }
+            if (kernelResult.totalCount > kernelResult.returnedCount)
+            {
+                queryDiagnosticText = QStringLiteral("%1%2R0 HandleTable 输出截断 total=%3 returned=%4")
+                    .arg(queryDiagnosticText)
+                    .arg(queryDiagnosticText.trimmed().isEmpty() ? QString() : QStringLiteral(" | "))
+                    .arg(kernelResult.totalCount)
+                    .arg(kernelResult.returnedCount);
+            }
+            if (kernelDecodeProblemCount > 0)
+            {
+                queryDiagnosticText = QStringLiteral("%1%2R0 解码异常:%3")
+                    .arg(queryDiagnosticText)
+                    .arg(queryDiagnosticText.trimmed().isEmpty() ? QString() : QStringLiteral(" | "))
+                    .arg(kernelDecodeProblemCount);
+            }
+            if (kernelMappedTypeCount > 0)
+            {
+                queryDiagnosticText = QStringLiteral("%1%2R0 类型索引:%3")
+                    .arg(queryDiagnosticText)
+                    .arg(queryDiagnosticText.trimmed().isEmpty() ? QString() : QStringLiteral(" | "))
+                    .arg(kernelMappedTypeCount);
+            }
+        }
+    }
+    else
+    {
+        result.userOnlyCount = result.rows.size();
     }
 
     std::sort(
@@ -1258,6 +1425,67 @@ QString HandleDock::formatObjectNameDisplayText(const HandleRow& row)
     return QStringLiteral("未查询");
 }
 
+QString HandleDock::formatHandleSourceText(const HandleEnumMode mode)
+{
+    switch (mode)
+    {
+    case HandleEnumMode::UserSnapshot:
+        return QStringLiteral("User Snapshot");
+    case HandleEnumMode::DuplicateHandle:
+        return QStringLiteral("DuplicateHandle");
+    case HandleEnumMode::KernelHandleTable:
+        return QStringLiteral("Kernel HandleTable");
+    default:
+        return QStringLiteral("Unknown");
+    }
+}
+
+QString HandleDock::formatHandleDecodeStatusText(const std::uint32_t status)
+{
+    switch (status)
+    {
+    case KSWORD_ARK_HANDLE_DECODE_STATUS_OK:
+        return QStringLiteral("OK");
+    case KSWORD_ARK_HANDLE_DECODE_STATUS_PARTIAL:
+        return QStringLiteral("Partial");
+    case KSWORD_ARK_HANDLE_DECODE_STATUS_DYNDATA_MISSING:
+        return QStringLiteral("DynData Missing");
+    case KSWORD_ARK_HANDLE_DECODE_STATUS_PROCESS_LOOKUP_FAILED:
+        return QStringLiteral("Process Lookup Failed");
+    case KSWORD_ARK_HANDLE_DECODE_STATUS_PROCESS_EXITING:
+        return QStringLiteral("Process Exiting");
+    case KSWORD_ARK_HANDLE_DECODE_STATUS_HANDLE_TABLE_MISSING:
+        return QStringLiteral("HandleTable Missing");
+    case KSWORD_ARK_HANDLE_DECODE_STATUS_OBJECT_DECODE_FAILED:
+        return QStringLiteral("Object Decode Failed");
+    case KSWORD_ARK_HANDLE_DECODE_STATUS_TYPE_DECODE_FAILED:
+        return QStringLiteral("Type Decode Failed");
+    case KSWORD_ARK_HANDLE_DECODE_STATUS_READ_FAILED:
+        return QStringLiteral("Read Failed");
+    case KSWORD_ARK_HANDLE_DECODE_STATUS_BUFFER_TOO_SMALL:
+        return QStringLiteral("Buffer Too Small");
+    case KSWORD_ARK_HANDLE_DECODE_STATUS_UNAVAILABLE:
+    default:
+        return QStringLiteral("Unavailable");
+    }
+}
+
+QString HandleDock::formatHandleDiffStatusText(const HandleDiffStatus status)
+{
+    switch (status)
+    {
+    case HandleDiffStatus::UserOnly:
+        return QStringLiteral("仅用户态可见");
+    case HandleDiffStatus::KernelOnly:
+        return QStringLiteral("仅内核可见");
+    case HandleDiffStatus::Both:
+        return QStringLiteral("两者均可见");
+    case HandleDiffStatus::NotCompared:
+    default:
+        return QStringLiteral("未对比");
+    }
+}
+
 QString HandleDock::formatTypeIndexDisplayText(
     const std::uint16_t typeIndex,
     const QString& typeName)
@@ -1296,4 +1524,36 @@ QString HandleDock::formatHandleAttributes(const std::uint32_t attributes)
         return QStringLiteral("None");
     }
     return flagTextList.join('|');
+}
+
+HandleDock::HandleEnumMode HandleDock::resolveHandleEnumModeFromText(const QString& modeText)
+{
+    const QString normalizedText = modeText.trimmed().toLower();
+    if (normalizedText.contains(QStringLiteral("kernel")))
+    {
+        return HandleEnumMode::KernelHandleTable;
+    }
+    if (normalizedText.contains(QStringLiteral("duplicate")))
+    {
+        return HandleEnumMode::DuplicateHandle;
+    }
+    return HandleEnumMode::UserSnapshot;
+}
+
+HandleDock::HandleDiffStatus HandleDock::resolveHandleDiffFilterFromText(const QString& filterText)
+{
+    const QString normalizedText = filterText.trimmed().toLower();
+    if (normalizedText.contains(QStringLiteral("仅用户")) || normalizedText.contains(QStringLiteral("user")))
+    {
+        return HandleDiffStatus::UserOnly;
+    }
+    if (normalizedText.contains(QStringLiteral("仅内核")) || normalizedText.contains(QStringLiteral("kernel")))
+    {
+        return HandleDiffStatus::KernelOnly;
+    }
+    if (normalizedText.contains(QStringLiteral("两者")) || normalizedText.contains(QStringLiteral("both")))
+    {
+        return HandleDiffStatus::Both;
+    }
+    return HandleDiffStatus::NotCompared;
 }

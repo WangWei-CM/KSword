@@ -6,6 +6,115 @@
 
 namespace ksword::ark
 {
+    namespace
+    {
+        std::wstring fixedWideToWString(const wchar_t* textBuffer, const std::size_t maxChars)
+        {
+            // textBuffer 用途：解析驱动固定宽字符响应缓冲。
+            // maxChars 用途：限制扫描边界，防止旧驱动响应缺少 NUL 时越界。
+            if (textBuffer == nullptr || maxChars == 0U)
+            {
+                return {};
+            }
+
+            std::size_t length = 0U;
+            while (length < maxChars && textBuffer[length] != L'\0')
+            {
+                ++length;
+            }
+            return std::wstring(textBuffer, textBuffer + length);
+        }
+    }
+
+    FileInfoQueryResult DriverClient::queryFileInfo(const std::wstring& ntPath, const unsigned long flags) const
+    {
+        // 作用：用独立控制句柄查询 R0 文件基础信息。
+        // 返回：FileInfoQueryResult，失败时 io.message 包含 Win32/协议诊断。
+        DriverHandle handle = open();
+        return queryFileInfo(handle, ntPath, flags);
+    }
+
+    FileInfoQueryResult DriverClient::queryFileInfo(
+        DriverHandle& handle,
+        const std::wstring& ntPath,
+        const unsigned long flags) const
+    {
+        // 作用：调用 IOCTL_KSWORD_ARK_QUERY_FILE_INFO。
+        // 处理：只传 NT 路径和 flags；驱动返回 FileBasic/FileStandard 与对象诊断字段。
+        // 返回：解析后的 FileInfoQueryResult。
+        FileInfoQueryResult queryResult{};
+        if (ntPath.empty() || ntPath.size() >= KSWORD_ARK_FILE_INFO_PATH_MAX_CHARS)
+        {
+            queryResult.io.ok = false;
+            queryResult.io.win32Error = ERROR_INVALID_PARAMETER;
+            queryResult.io.message = "file-info path invalid, chars=" + std::to_string(ntPath.size());
+            return queryResult;
+        }
+
+        KSWORD_ARK_QUERY_FILE_INFO_REQUEST request{};
+        KSWORD_ARK_QUERY_FILE_INFO_RESPONSE response{};
+        request.flags = flags;
+        request.pathLengthChars = static_cast<unsigned short>(ntPath.size());
+        std::copy(ntPath.begin(), ntPath.end(), request.path);
+        request.path[request.pathLengthChars] = L'\0';
+
+        queryResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_QUERY_FILE_INFO,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            &response,
+            static_cast<unsigned long>(sizeof(response)),
+            &handle);
+        if (!queryResult.io.ok)
+        {
+            queryResult.io.message =
+                "DeviceIoControl(IOCTL_KSWORD_ARK_QUERY_FILE_INFO) failed, error=" +
+                std::to_string(queryResult.io.win32Error);
+            return queryResult;
+        }
+        if (queryResult.io.bytesReturned < sizeof(KSWORD_ARK_QUERY_FILE_INFO_RESPONSE))
+        {
+            queryResult.io.ok = false;
+            queryResult.io.message =
+                "query-file-info response too small, bytesReturned=" +
+                std::to_string(queryResult.io.bytesReturned);
+            return queryResult;
+        }
+
+        queryResult.version = static_cast<std::uint32_t>(response.version);
+        queryResult.fieldFlags = static_cast<std::uint32_t>(response.fieldFlags);
+        queryResult.queryStatus = static_cast<std::uint32_t>(response.queryStatus);
+        queryResult.openStatus = static_cast<long>(response.openStatus);
+        queryResult.basicStatus = static_cast<long>(response.basicStatus);
+        queryResult.standardStatus = static_cast<long>(response.standardStatus);
+        queryResult.objectStatus = static_cast<long>(response.objectStatus);
+        queryResult.nameStatus = static_cast<long>(response.nameStatus);
+        queryResult.fileAttributes = static_cast<std::uint32_t>(response.fileAttributes);
+        queryResult.allocationSize = static_cast<std::int64_t>(response.allocationSize);
+        queryResult.endOfFile = static_cast<std::int64_t>(response.endOfFile);
+        queryResult.creationTime = static_cast<std::int64_t>(response.creationTime);
+        queryResult.lastAccessTime = static_cast<std::int64_t>(response.lastAccessTime);
+        queryResult.lastWriteTime = static_cast<std::int64_t>(response.lastWriteTime);
+        queryResult.changeTime = static_cast<std::int64_t>(response.changeTime);
+        queryResult.fileObjectAddress = static_cast<std::uint64_t>(response.fileObjectAddress);
+        queryResult.sectionObjectPointersAddress = static_cast<std::uint64_t>(response.sectionObjectPointersAddress);
+        queryResult.dataSectionObjectAddress = static_cast<std::uint64_t>(response.dataSectionObjectAddress);
+        queryResult.imageSectionObjectAddress = static_cast<std::uint64_t>(response.imageSectionObjectAddress);
+        queryResult.ntPath = fixedWideToWString(response.ntPath, KSWORD_ARK_FILE_INFO_PATH_MAX_CHARS);
+        queryResult.objectName = fixedWideToWString(response.objectName, KSWORD_ARK_FILE_INFO_OBJECT_NAME_MAX_CHARS);
+
+        std::ostringstream stream;
+        stream << "version=" << queryResult.version
+            << ", status=" << queryResult.queryStatus
+            << ", fields=0x" << std::hex << std::uppercase << queryResult.fieldFlags
+            << ", openStatus=0x" << static_cast<unsigned long>(static_cast<std::uint32_t>(queryResult.openStatus))
+            << ", basicStatus=0x" << static_cast<unsigned long>(static_cast<std::uint32_t>(queryResult.basicStatus))
+            << ", standardStatus=0x" << static_cast<unsigned long>(static_cast<std::uint32_t>(queryResult.standardStatus))
+            << std::dec << ", bytesReturned=" << queryResult.io.bytesReturned;
+        queryResult.io.message = stream.str();
+        return queryResult;
+    }
+
     IoResult DriverClient::deletePath(const std::wstring& ntPath, const bool isDirectory) const
     {
         DriverHandle handle = open();

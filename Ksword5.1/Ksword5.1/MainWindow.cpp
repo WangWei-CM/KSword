@@ -17,6 +17,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QScreen>
+#include <QWindow>
 #include <QWidget>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -1401,6 +1403,39 @@ void MainWindow::showEvent(QShowEvent* event)
     applyNativeWindowFrameVisualStyle();
     syncCustomTitleBarMaximizedState();
 
+    {
+        kLogEvent showEventLog;
+        const QRect currentFrameRect = frameGeometry();
+        info << showEventLog
+            << "[MainWindow] showEvent 触发。 spontaneous="
+            << ((event != nullptr && event->spontaneous()) ? "true" : "false")
+            << ", visible="
+            << (isVisible() ? "true" : "false")
+            << ", minimized="
+            << (isMinimized() ? "true" : "false")
+            << ", frame="
+            << currentFrameRect.x()
+            << ","
+            << currentFrameRect.y()
+            << " "
+            << currentFrameRect.width()
+            << "x"
+            << currentFrameRect.height()
+            << eol;
+    }
+
+    // 首次显示可见性修正：
+    // - 低分辨率或高缩放下，Qt/Win32 组合后的初始几何有机会落到屏幕外；
+    // - 这里在 show 后异步校正一次，确保主窗口至少能落在当前可见区域内。
+    if (!m_startupWindowVisibilityAdjusted)
+    {
+        m_startupWindowVisibilityAdjusted = true;
+        QTimer::singleShot(0, this, [this]()
+            {
+                ensureStartupWindowVisibleOnScreen();
+            });
+    }
+
     if (m_deferredDockInitializationStarted)
     {
         return;
@@ -1425,6 +1460,128 @@ void MainWindow::changeEvent(QEvent* event)
     {
         syncCustomTitleBarMaximizedState();
     }
+}
+
+void MainWindow::ensureStartupWindowVisibleOnScreen()
+{
+    // 最大化窗口交给系统管理：
+    // - 避免把最大化态错误改回普通窗口态；
+    // - 这里只处理“窗口已 show 但普通态不可见/越界”的情况。
+    if (isWindowActuallyMaximized())
+    {
+        return;
+    }
+
+    // targetFrameRect 用途：以顶层 frame 几何为准，保证标题栏和边框也在可见区域内。
+    QRect targetFrameRect = frameGeometry();
+    if (!targetFrameRect.isValid() || targetFrameRect.width() <= 0 || targetFrameRect.height() <= 0)
+    {
+        targetFrameRect = geometry();
+    }
+    if (!targetFrameRect.isValid() || targetFrameRect.width() <= 0 || targetFrameRect.height() <= 0)
+    {
+        return;
+    }
+
+    // targetScreen 用途：优先使用窗口当前所在屏幕；若中心点不在任何屏幕内，则回退主屏。
+    QScreen* targetScreen = nullptr;
+    if (windowHandle() != nullptr)
+    {
+        targetScreen = windowHandle()->screen();
+    }
+    if (targetScreen == nullptr)
+    {
+        targetScreen = QGuiApplication::screenAt(targetFrameRect.center());
+    }
+    if (targetScreen == nullptr)
+    {
+        targetScreen = QGuiApplication::primaryScreen();
+    }
+    if (targetScreen == nullptr)
+    {
+        return;
+    }
+
+    // availableRect 用途：当前屏幕的可用工作区，不覆盖任务栏。
+    const QRect availableRect = targetScreen->availableGeometry();
+    if (!availableRect.isValid() || availableRect.width() <= 0 || availableRect.height() <= 0)
+    {
+        return;
+    }
+
+    // 先裁剪窗口尺寸：
+    // - 防止低分辨率下默认 1024x768 超出工作区；
+    // - 保留最小 320x240，避免把窗口缩到不可操作。
+    const int adjustedWidth = std::clamp(targetFrameRect.width(), 320, availableRect.width());
+    const int adjustedHeight = std::clamp(targetFrameRect.height(), 240, availableRect.height());
+
+    // 再裁剪窗口位置：
+    // - 只要有一部分落屏外，就把左上角拉回可见区域；
+    // - 保证整个 frameRect 都能处于 availableRect 范围内。
+    const int adjustedLeft = std::clamp(
+        targetFrameRect.left(),
+        availableRect.left(),
+        availableRect.right() - adjustedWidth + 1);
+    const int adjustedTop = std::clamp(
+        targetFrameRect.top(),
+        availableRect.top(),
+        availableRect.bottom() - adjustedHeight + 1);
+
+    const QRect adjustedFrameRect(adjustedLeft, adjustedTop, adjustedWidth, adjustedHeight);
+    if (adjustedFrameRect == targetFrameRect)
+    {
+        kLogEvent noAdjustEvent;
+        info << noAdjustEvent
+            << "[MainWindow] 首次显示区域检查完成，无需修正。 frame="
+            << targetFrameRect.x()
+            << ","
+            << targetFrameRect.y()
+            << " "
+            << targetFrameRect.width()
+            << "x"
+            << targetFrameRect.height()
+            << eol;
+        return;
+    }
+
+    // 使用 frameGeometry 差值反推出 client 几何：
+    // - move/resize 直接作用于 QWidget 客户区；
+    // - 这样可以把 frame 目标位置尽量精确映射回 Qt 几何。
+    const QRect currentClientRect = geometry();
+    const int frameOffsetX = targetFrameRect.left() - currentClientRect.left();
+    const int frameOffsetY = targetFrameRect.top() - currentClientRect.top();
+    const int clientWidthDelta = targetFrameRect.width() - currentClientRect.width();
+    const int clientHeightDelta = targetFrameRect.height() - currentClientRect.height();
+
+    const QRect adjustedClientRect(
+        adjustedFrameRect.left() - frameOffsetX,
+        adjustedFrameRect.top() - frameOffsetY,
+        std::max(1, adjustedFrameRect.width() - clientWidthDelta),
+        std::max(1, adjustedFrameRect.height() - clientHeightDelta));
+
+    {
+        kLogEvent adjustEvent;
+        warn << adjustEvent
+            << "[MainWindow] 首次显示区域已修正。 old_frame="
+            << targetFrameRect.x()
+            << ","
+            << targetFrameRect.y()
+            << " "
+            << targetFrameRect.width()
+            << "x"
+            << targetFrameRect.height()
+            << ", new_frame="
+            << adjustedFrameRect.x()
+            << ","
+            << adjustedFrameRect.y()
+            << " "
+            << adjustedFrameRect.width()
+            << "x"
+            << adjustedFrameRect.height()
+            << eol;
+    }
+
+    setGeometry(adjustedClientRect);
 }
 
 void MainWindow::syncCustomTitleBarMaximizedState()
@@ -3340,10 +3497,23 @@ bool MainWindow::showUnsignedDriverFailureDialog(
     QLabel* signatureMechanismLabel = new QLabel(
         QStringLiteral(
             "Windows 内核驱动默认启用“强制数字签名”机制：系统在加载 .sys 时会校验证书链与镜像完整性。"
-            "当驱动未签名、签名损坏或证书不被信任时，系统会阻止加载。"),
+            "当驱动未签名、签名损坏或证书不被信任时，系统会阻止加载。\n\n"
+            "注意：测试模式不是完全关闭 x64 内核代码完整性。"
+            "如果 KswordARK.sys 仍然是 NotSigned，或者测试证书没有导入本机受信任根/发布者，"
+            "即使已经看到桌面右下角“测试模式”，StartServiceW 仍可能返回 577。"),
         &decisionDialog);
     signatureMechanismLabel->setWordWrap(true);
     rootLayout->addWidget(signatureMechanismLabel);
+
+    QLabel* testSignCommandLabel = new QLabel(
+        QStringLiteral(
+            "开发环境修复命令：请在管理员 PowerShell 中从仓库根目录执行：\n"
+            "powershell -ExecutionPolicy Bypass -File scripts\\Sign-KswordArkDriverTest.ps1 -EnableTestSigning\n"
+            "执行后重启系统，再确认服务 ImagePath 指向刚签名的 KswordARK.sys。"),
+        &decisionDialog);
+    testSignCommandLabel->setWordWrap(true);
+    testSignCommandLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    rootLayout->addWidget(testSignCommandLabel);
 
     QLabel* actionTitleLabel = new QLabel(QStringLiteral("我可以做什么？"), &decisionDialog);
     actionTitleLabel->setStyleSheet(QStringLiteral("font-size:16px;font-weight:700;"));
@@ -3351,11 +3521,12 @@ bool MainWindow::showUnsignedDriverFailureDialog(
 
     QLabel* testModeDescriptionLabel = new QLabel(
         QStringLiteral(
-            "测试模式（Test Signing）会放宽驱动签名限制，便于开发调试。\n"
+            "测试模式（Test Signing）会允许加载本机信任的测试签名驱动，便于开发调试。\n"
             "风险说明：\n"
-            "1. 未经签名的恶意驱动同样可以加载。\n"
+            "1. 被本机信任测试证书签名的恶意驱动同样可能加载。\n"
             "2. 反作弊程序会阻止所有游戏启动。\n"
-            "3. 开启和关闭测试模式都需要重启电脑。"),
+            "3. 开启和关闭测试模式都需要重启电脑。\n"
+            "4. 完全未签名的 .sys 仍应先执行测试签名脚本。"),
         &decisionDialog);
     testModeDescriptionLabel->setWordWrap(true);
     rootLayout->addWidget(testModeDescriptionLabel);
@@ -4102,6 +4273,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
             "  background-color:transparent;"
             "}"));
 
+    const bool shouldSuppressOuterScrollArea = isNetworkDock || (dockKey == QStringLiteral("hardware"));
     if (isNetworkDock)
     {
         // 网络页额外要求：
@@ -4117,7 +4289,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     QWidget* oldWidget = dockWidget->takeWidget();
     dockWidget->setWidget(
         realWidget,
-        isNetworkDock ? ads::CDockWidget::ForceNoScrollArea : ads::CDockWidget::AutoScrollArea);
+        shouldSuppressOuterScrollArea ? ads::CDockWidget::ForceNoScrollArea : ads::CDockWidget::AutoScrollArea);
     dockWidget->setProperty("ks_lazy_initialized", true);
     if (oldWidget != nullptr)
     {
@@ -4227,6 +4399,8 @@ void MainWindow::initDockWidgets()
         const QString& dockKey)
         {
             const bool isNetworkDock = (dockKey == QStringLiteral("network"));
+            const bool shouldSuppressOuterScrollArea =
+                isNetworkDock || (dockKey == QStringLiteral("hardware"));
             QWidget* dockContentWidget = eagerWidget;
             if (dockContentWidget == nullptr)
             {
@@ -4237,7 +4411,7 @@ void MainWindow::initDockWidgets()
             dockOut = createDockWidget(
                 dockContentWidget,
                 title,
-                isNetworkDock ? ads::CDockWidget::ForceNoScrollArea : ads::CDockWidget::AutoScrollArea);
+                shouldSuppressOuterScrollArea ? ads::CDockWidget::ForceNoScrollArea : ads::CDockWidget::AutoScrollArea);
             dockOut->setProperty("ks_lazy_key", dockKey);
             dockOut->setProperty("ks_lazy_initialized", eagerWidget != nullptr);
             if (isNetworkDock)

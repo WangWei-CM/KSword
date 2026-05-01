@@ -1,4 +1,4 @@
-#include "MainWindow.h"
+﻿#include "MainWindow.h"
 
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
@@ -21,8 +21,11 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 #include <cwctype>
+#include <fstream>
+#include <iostream>
 #include <vector>
 #include <string>
 
@@ -37,6 +40,103 @@ namespace
     // - 定义启动分辨率审查的最低建议逻辑宽度；
     // - 低于该宽度时才弹出缩放推荐对话框。
     constexpr int kStartupScaleRecommendedLogicalWidth = 1920;
+
+    // queryCurrentDirectoryPath 作用：
+    // - 在 QApplication 创建前直接读取当前工作目录；
+    // - 用于启动追踪中确认双击启动时的工作目录是否符合预期。
+    // 返回：当前工作目录绝对路径；失败返回空字符串。
+    std::wstring queryCurrentDirectoryPath()
+    {
+        std::vector<wchar_t> directoryBuffer(1024, L'\0');
+        while (directoryBuffer.size() < 32768)
+        {
+            const DWORD copiedLength = ::GetCurrentDirectoryW(
+                static_cast<DWORD>(directoryBuffer.size()),
+                directoryBuffer.data());
+            if (copiedLength == 0)
+            {
+                return std::wstring();
+            }
+            if (copiedLength < directoryBuffer.size())
+            {
+                return std::wstring(directoryBuffer.data(), copiedLength);
+            }
+            directoryBuffer.resize(static_cast<std::size_t>(copiedLength) + 1, L'\0');
+        }
+        return std::wstring();
+    }
+
+    // buildStartupTraceFilePath 作用：
+    // - 为“启动原生追踪”选择稳定输出文件；
+    // - 优先写入 %TEMP%，便于即使控制台秒退也能保留日志。
+    // 返回：追踪日志文件完整路径。
+    std::wstring buildStartupTraceFilePath()
+    {
+        wchar_t tempPathBuffer[MAX_PATH] = {};
+        const DWORD tempLength = ::GetTempPathW(MAX_PATH, tempPathBuffer);
+        if (tempLength > 0 && tempLength < MAX_PATH)
+        {
+            std::wstring tempDirectory(tempPathBuffer, tempLength);
+            if (!tempDirectory.empty() && tempDirectory.back() != L'\\' && tempDirectory.back() != L'/')
+            {
+                tempDirectory.push_back(L'\\');
+            }
+            return tempDirectory + L"Ksword5.1-startup-trace.log";
+        }
+
+        const std::wstring currentDirectory = queryCurrentDirectoryPath();
+        if (!currentDirectory.empty())
+        {
+            return currentDirectory + L"\\Ksword5.1-startup-trace.log";
+        }
+        return L"Ksword5.1-startup-trace.log";
+    }
+
+    // appendStartupTraceFile 作用：
+    // - 把原生启动追踪文本附加写入文件；
+    // - 避免控制台窗口闪退时丢失关键定位信息。
+    // 入参 traceLineText：已带换行的一整行追踪文本（UTF-8）。
+    void appendStartupTraceFile(const std::string& traceLineText)
+    {
+        const std::wstring traceFilePath = buildStartupTraceFilePath();
+        FILE* traceFileHandle = nullptr;
+        if (_wfopen_s(&traceFileHandle, traceFilePath.c_str(), L"ab") != 0 || traceFileHandle == nullptr)
+        {
+            return;
+        }
+
+        std::fwrite(traceLineText.data(), 1, traceLineText.size(), traceFileHandle);
+        std::fclose(traceFileHandle);
+    }
+
+    // startupTraceRaw 作用：
+    // - 在 kLog 之外提供一条“原生启动追踪”旁路；
+    // - 同时写控制台、OutputDebugStringA 与临时文件；
+    // - 用于定位“main 早期即退出，kLog 尚未来得及显示”的问题。
+    // 入参 traceText：单行追踪文本（不含换行）。
+    void startupTraceRaw(const std::string& traceText)
+    {
+        SYSTEMTIME localTime = {};
+        ::GetLocalTime(&localTime);
+
+        char timePrefixBuffer[64] = {};
+        std::snprintf(
+            timePrefixBuffer,
+            sizeof(timePrefixBuffer),
+            "[trace][%04u-%02u-%02u %02u:%02u:%02u.%03u] ",
+            static_cast<unsigned int>(localTime.wYear),
+            static_cast<unsigned int>(localTime.wMonth),
+            static_cast<unsigned int>(localTime.wDay),
+            static_cast<unsigned int>(localTime.wHour),
+            static_cast<unsigned int>(localTime.wMinute),
+            static_cast<unsigned int>(localTime.wSecond),
+            static_cast<unsigned int>(localTime.wMilliseconds));
+
+        std::string fullTraceLine = std::string(timePrefixBuffer) + traceText + "\r\n";
+        appendStartupTraceFile(fullTraceLine);
+        ::OutputDebugStringA(fullTraceLine.c_str());
+
+    }
 
     // queryCurrentExecutablePath 作用：
     // - 动态获取当前进程可执行文件绝对路径；
@@ -68,6 +168,21 @@ namespace
             pathBuffer.resize(pathBuffer.size() * 2, L'\0');
         }
         return std::wstring();
+    }
+
+    // resolveExecutableDirectoryPath 作用：
+    // - 从 exe 完整路径解析工作目录；
+    // - CreateProcess 显式传入目录，避免自动重启后当前目录漂移。
+    // 入参 executablePath：当前 exe 绝对路径。
+    // 返回：exe 所在目录，无法解析时返回空字符串。
+    std::wstring resolveExecutableDirectoryPath(const std::wstring& executablePath)
+    {
+        const std::size_t slashPosition = executablePath.find_last_of(L"\\/");
+        if (slashPosition == std::wstring::npos)
+        {
+            return std::wstring();
+        }
+        return executablePath.substr(0, slashPosition);
     }
 
     bool writeRegistryString(
@@ -236,22 +351,23 @@ namespace
 
         // parameterText 作用：保存当前命令行参数，传递给新启动实例。
         const std::wstring parameterText = extractCurrentProcessParameterText();
+        const std::wstring executableDirectory = resolveExecutableDirectoryPath(executablePath);
         HINSTANCE shellResult = ::ShellExecuteW(
             nullptr,
             L"runas",
             executablePath.c_str(),
             parameterText.empty() ? nullptr : parameterText.c_str(),
-            nullptr,
+            executableDirectory.empty() ? nullptr : executableDirectory.c_str(),
             SW_SHOWNORMAL);
         return reinterpret_cast<INT_PTR>(shellResult) > 32;
     }
 
-    // tryLaunchRestartedSelfBeforeSplash 作用：
-    // - 在 QApplication 创建前按原命令行参数重新启动当前程序；
-    // - 用于缩放配置保存后，让新进程从冷启动阶段读取最新 QT_SCALE_FACTOR；
+    // tryCreateRestartedSelfBeforeSplash 作用：
+    // - 在 QApplication 创建前使用 CreateProcessW 重新启动当前程序；
+    // - 只依赖配置文件承载缩放结果，不通过参数传递缩放状态；
     // - 当前进程只负责启动新实例，退出由 main 根据返回值执行。
     // 返回：true=新实例已拉起；false=启动失败，调用方继续当前启动流程。
-    bool tryLaunchRestartedSelfBeforeSplash()
+    bool tryCreateRestartedSelfBeforeSplash()
     {
         const std::wstring executablePath = queryCurrentExecutablePath();
         if (executablePath.empty())
@@ -259,16 +375,41 @@ namespace
             return false;
         }
 
-        // parameterText 作用：保留本次启动参数，避免 --unlock 等入口在重启后丢失。
+        // commandLineText 作用：CreateProcessW 要求可写命令行缓冲区。
+        std::wstring commandLineText = L"\"" + executablePath + L"\"";
         const std::wstring parameterText = extractCurrentProcessParameterText();
-        HINSTANCE shellResult = ::ShellExecuteW(
-            nullptr,
-            L"open",
+        if (!parameterText.empty())
+        {
+            commandLineText += L" ";
+            commandLineText += parameterText;
+        }
+
+        const std::wstring executableDirectory = resolveExecutableDirectoryPath(executablePath);
+        STARTUPINFOW startupInfo = {};
+        startupInfo.cb = sizeof(startupInfo);
+        startupInfo.dwFlags = STARTF_USESHOWWINDOW;
+        startupInfo.wShowWindow = SW_SHOWNORMAL;
+
+        PROCESS_INFORMATION processInformation = {};
+        const BOOL createOk = ::CreateProcessW(
             executablePath.c_str(),
-            parameterText.empty() ? nullptr : parameterText.c_str(),
+            &commandLineText[0],
             nullptr,
-            SW_SHOWNORMAL);
-        return reinterpret_cast<INT_PTR>(shellResult) > 32;
+            nullptr,
+            FALSE,
+            0,
+            nullptr,
+            executableDirectory.empty() ? nullptr : executableDirectory.c_str(),
+            &startupInfo,
+            &processInformation);
+        if (createOk == FALSE)
+        {
+            return false;
+        }
+
+        ::CloseHandle(processInformation.hThread);
+        ::CloseHandle(processInformation.hProcess);
+        return true;
     }
 
     // initializeProcessDpiAwareness 作用：
@@ -353,27 +494,24 @@ namespace
     }
 
     // showStartupScaleRecommendationDialog 作用：
-    // - 在启动前提示是否应用推荐缩放；
-    // - 弹窗内包含“不再提示”勾选框。
+    // - 在首次低分辨率启动前提示是否应用推荐缩放；
+    // - 仅提供“应用推荐缩放”与“保持当前缩放”两种结果。
     // 入参 logicalClientWidth：按“物理像素/系统缩放”得到的可用宽度。
     // 入参 currentScaleFactor：当前配置缩放因子。
     // 入参 recommendedScaleFactor：推荐缩放因子。
     // 出参 applyRecommendedOut：是否应用推荐值。
-    // 出参 disablePromptOut：是否勾选不再提示。
-    // 返回：true=完成选择；false=弹窗失败或被关闭。
+    // 返回：true=弹窗成功返回；false=弹窗调用失败。
     bool showStartupScaleRecommendationDialog(
         const int logicalClientWidth,
         const double currentScaleFactor,
         const double recommendedScaleFactor,
-        bool* applyRecommendedOut,
-        bool* disablePromptOut)
+        bool* applyRecommendedOut)
     {
-        if (applyRecommendedOut == nullptr || disablePromptOut == nullptr)
+        if (applyRecommendedOut == nullptr)
         {
             return false;
         }
         *applyRecommendedOut = false;
-        *disablePromptOut = false;
 
         const std::wstring currentScaleText = buildPercentText(currentScaleFactor);
         const std::wstring recommendedScaleText = buildPercentText(recommendedScaleFactor);
@@ -401,44 +539,45 @@ namespace
         dialogConfig.pButtons = dialogButtons;
         dialogConfig.cButtons = ARRAYSIZE(dialogButtons);
         dialogConfig.nDefaultButton = IDYES;
-        dialogConfig.pszVerificationText = L"不再提示";
 
         int pressedButtonId = 0;
-        BOOL verificationChecked = FALSE;
         const HRESULT dialogResult = ::TaskDialogIndirect(
             &dialogConfig,
             &pressedButtonId,
             nullptr,
-            &verificationChecked);
+            nullptr);
         if (FAILED(dialogResult))
         {
             return false;
         }
 
         *applyRecommendedOut = (pressedButtonId == IDYES);
-        *disablePromptOut = (verificationChecked != FALSE);
         return true;
     }
 
     // maybeApplyStartupScaleRecommendation 作用：
-    // - 当可用宽度小于最低建议宽度时提示推荐缩放；
-    // - 可写回“缩放因子 + 不再提示”到配置文件。
+    // - 仅在“没有检测到配置文件”且低分辨率时提示推荐缩放；
+    // - 把用户选择直接写回 startupSettings，随后由当前进程继续完成 Qt 初始化；
+    // - 最佳努力保存配置文件，但保存失败时也不能阻断主窗口启动。
     // 调用方式：QApplication 创建前调用。
     // 入参 startupSettings：启动配置对象（按需被更新）。
-    // 返回：true=已启动重启实例，当前进程应立即退出；false=继续当前启动流程。
+    // 返回：true=当前进程已被其它实例接管，应立即退出；false=继续当前启动流程。
     bool maybeApplyStartupScaleRecommendation(ks::settings::AppearanceSettings* startupSettings)
     {
+        startupTraceRaw("enter maybeApplyStartupScaleRecommendation");
         if (startupSettings == nullptr)
         {
+            startupTraceRaw("maybeApplyStartupScaleRecommendation: startupSettings is null");
             return false;
         }
 
         // scaleDecisionEvent 作用：串联启动缩放决策链路日志。
         kLogEvent scaleDecisionEvent;
-        if (startupSettings->startupScaleRecommendPromptDisabled)
+        if (ks::settings::settingsJsonFileExistsForRead())
         {
+            startupTraceRaw("maybeApplyStartupScaleRecommendation: settings file exists, skip first-run prompt");
             info << scaleDecisionEvent
-                << "[main] 启动缩放推荐提示已禁用，跳过检测。"
+                << "[main] 已检测到配置文件，按配置文件直接启动。"
                 << eol;
             return false;
         }
@@ -449,6 +588,11 @@ namespace
             std::lround((static_cast<double>(physicalScreenWidth) * 100.0) / static_cast<double>(systemScalePercent)));
         if (logicalClientWidth >= kStartupScaleRecommendedLogicalWidth)
         {
+            startupTraceRaw(
+                std::string("maybeApplyStartupScaleRecommendation: logical width >= threshold, logicalWidth=")
+                + std::to_string(logicalClientWidth)
+                + ", threshold="
+                + std::to_string(kStartupScaleRecommendedLogicalWidth));
             info << scaleDecisionEvent
                 << "[main] 可用宽度满足要求，跳过推荐缩放。 logicalWidth="
                 << logicalClientWidth
@@ -466,6 +610,11 @@ namespace
                 static_cast<double>(logicalClientWidth) / static_cast<double>(kStartupScaleRecommendedLogicalWidth)));
         if (recommendedScaleFactor >= currentScaleFactor - 0.0001)
         {
+            startupTraceRaw(
+                std::string("maybeApplyStartupScaleRecommendation: recommended scale not smaller than current, current=")
+                + std::to_string(currentScaleFactor)
+                + ", recommended="
+                + std::to_string(recommendedScaleFactor));
             info << scaleDecisionEvent
                 << "[main] 当前缩放已不大于推荐值，无需提示。 current="
                 << currentScaleFactor
@@ -476,54 +625,51 @@ namespace
         }
 
         bool applyRecommendedScale = false;
-        bool disablePrompt = false;
         const bool promptHandled = showStartupScaleRecommendationDialog(
             logicalClientWidth,
             currentScaleFactor,
             recommendedScaleFactor,
-            &applyRecommendedScale,
-            &disablePrompt);
+            &applyRecommendedScale);
+        startupTraceRaw(
+            std::string("maybeApplyStartupScaleRecommendation: dialog returned, handled=")
+            + (promptHandled ? "true" : "false")
+            + ", applyRecommendedScale="
+            + (applyRecommendedScale ? "true" : "false"));
         if (!promptHandled)
         {
             warn << scaleDecisionEvent
-                << "[main] 启动缩放推荐弹窗失败或被关闭，保持当前设置。"
+                << "[main] 首次启动缩放推荐弹窗调用失败，改为按当前缩放继续启动。"
                 << eol;
             return false;
         }
 
-        bool hasSettingsChanged = false;
-        if (applyRecommendedScale)
-        {
-            startupSettings->startupWindowScaleFactor = recommendedScaleFactor;
-            hasSettingsChanged = true;
-        }
-        if (disablePrompt)
-        {
-            startupSettings->startupScaleRecommendPromptDisabled = true;
-            hasSettingsChanged = true;
-        }
-
-        if (!hasSettingsChanged)
-        {
-            info << scaleDecisionEvent
-                << "[main] 用户未修改缩放建议配置。"
-                << eol;
-            return false;
-        }
+        // 直接更新内存中的启动配置：
+        // - “应用推荐缩放”会让后续 QT_SCALE_FACTOR 使用推荐值；
+        // - “保持当前设置”则沿用当前缩放，但同样落盘首启配置，避免重复弹窗。
+        startupSettings->startupWindowScaleFactor = applyRecommendedScale
+            ? recommendedScaleFactor
+            : currentScaleFactor;
+        startupSettings->startupScaleRecommendPromptDisabled = false;
 
         QString saveErrorText;
         const bool saveOk = ks::settings::saveAppearanceSettings(*startupSettings, &saveErrorText);
+        startupTraceRaw(
+            std::string("maybeApplyStartupScaleRecommendation: saveAppearanceSettings returned ")
+            + (saveOk ? "true" : "false"));
         if (!saveOk)
         {
-            err << scaleDecisionEvent
-                << "[main] 启动缩放推荐配置保存失败, error="
+            // 保存失败只影响“下次启动是否仍会再次提示”：
+            // - 当前这次启动仍可继续；
+            // - 不能因为配置文件写入失败就让主窗口完全不出来。
+            warn << scaleDecisionEvent
+                << "[main] 首次启动缩放配置保存失败，本次按内存中的缩放继续启动, error="
                 << saveErrorText.toStdString()
                 << eol;
             return false;
         }
 
         info << scaleDecisionEvent
-            << "[main] 启动缩放推荐配置已更新, logicalWidth="
+            << "[main] 首次启动缩放配置已写入, logicalWidth="
             << logicalClientWidth
             << ", current="
             << currentScaleFactor
@@ -531,30 +677,16 @@ namespace
             << recommendedScaleFactor
             << ", applied="
             << (applyRecommendedScale ? "true" : "false")
-            << ", disablePrompt="
-            << (startupSettings->startupScaleRecommendPromptDisabled ? "true" : "false")
             << eol;
 
-        if (!applyRecommendedScale)
-        {
-            return false;
-        }
-
-        // restartEvent 作用：记录“用户接受推荐缩放后立即重启”的执行结果。
-        kLogEvent restartEvent;
-        const bool restarted = tryLaunchRestartedSelfBeforeSplash();
-        if (!restarted)
-        {
-            err << restartEvent
-                << "[main] 启动缩放推荐配置已保存，但自动重启失败；继续当前启动流程。"
-                << eol;
-            return false;
-        }
-
-        info << restartEvent
-            << "[main] 用户已应用启动缩放推荐，新实例已启动，当前实例退出。"
+        // 当前函数运行时 QApplication 尚未创建：
+        // - 后续 main 仍会根据 startupSettings 设置 QT_SCALE_FACTOR；
+        // - 因此这里无需重启，直接继续当前启动链即可。
+        info << scaleDecisionEvent
+            << "[main] 首次启动缩放决策完成，继续当前实例启动。"
             << eol;
-        return true;
+        startupTraceRaw("leave maybeApplyStartupScaleRecommendation with false");
+        return false;
     }
 
     // applyQtScaleFactorEnvironment 作用：
@@ -748,35 +880,125 @@ int main(int argc, char* argv[])
     // 3) 按配置处理自动提权；
     // 4) 设置 QT_SCALE_FACTOR；
     // 5) 显示 Framework 启动页并创建主窗口。
+    startupTraceRaw("startup trace initialized without console binding");
     initializeProcessDpiAwareness();
+    startupTraceRaw("initializeProcessDpiAwareness finished");
+
+    {
+        kLogEvent startupMainEvent;
+        info << startupMainEvent
+            << "[main] 进入主函数。 argc="
+            << argc
+            << eol;
+    }
 
     // startupSettings 作用：缓存本次启动所需配置快照。
+    const std::wstring executablePathForTrace = queryCurrentExecutablePath();
+    const std::wstring currentDirectoryForTrace = queryCurrentDirectoryPath();
+    const QString settingsReadPath = ks::settings::resolveSettingsJsonPathForRead();
+    const bool settingsFileExists = ks::settings::settingsJsonFileExistsForRead();
+    startupTraceRaw(
+        std::string("startup paths: cwd=")
+        + QString::fromStdWString(currentDirectoryForTrace).toUtf8().toStdString()
+        + ", exe="
+        + QString::fromStdWString(executablePathForTrace).toUtf8().toStdString()
+        + ", settings_path="
+        + settingsReadPath.toUtf8().toStdString()
+        + ", settings_exists="
+        + (settingsFileExists ? "true" : "false"));
+
     ks::settings::AppearanceSettings startupSettings = ks::settings::loadAppearanceSettings();
+    startupTraceRaw(
+        std::string("startup settings loaded: scale_factor=")
+        + std::to_string(startupSettings.startupWindowScaleFactor)
+        + ", startup_tab="
+        + startupSettings.startupDefaultTabKey.toUtf8().toStdString()
+        + ", startup_maximized="
+        + (startupSettings.launchMaximizedOnStartup ? "true" : "false")
+        + ", auto_admin="
+        + (startupSettings.autoRequestAdminOnStartup ? "true" : "false"));
+    {
+        kLogEvent settingsEvent;
+        info << settingsEvent
+            << "[main] 启动配置已加载。 startup_tab="
+            << startupSettings.startupDefaultTabKey
+            << ", startup_maximized="
+            << (startupSettings.launchMaximizedOnStartup ? "true" : "false")
+            << ", auto_admin="
+            << (startupSettings.autoRequestAdminOnStartup ? "true" : "false")
+            << ", startup_scale_factor="
+            << startupSettings.startupWindowScaleFactor
+            << ", scale_prompt_disabled="
+            << (startupSettings.startupScaleRecommendPromptDisabled ? "true" : "false")
+            << eol;
+    }
+
+    startupTraceRaw("before maybeApplyStartupScaleRecommendation");
     if (maybeApplyStartupScaleRecommendation(&startupSettings))
     {
+        startupTraceRaw("maybeApplyStartupScaleRecommendation returned true, exiting current instance");
+        kLogEvent restartTakeoverEvent;
+        warn << restartTakeoverEvent
+            << "[main] maybeApplyStartupScaleRecommendation 返回 true，当前实例提前退出。"
+            << eol;
         return 0;
     }
 
     if (startupSettings.autoRequestAdminOnStartup && !isCurrentProcessElevated())
     {
+        startupTraceRaw("autoRequestAdminOnStartup enabled and process not elevated");
+        kLogEvent adminRequestEvent;
+        info << adminRequestEvent
+            << "[main] 检测到启用自动管理员请求，准备在 splash 前尝试提权重启。"
+            << eol;
         const bool elevatedLaunchStarted = tryLaunchElevatedSelfBeforeSplash();
         if (elevatedLaunchStarted)
         {
+            startupTraceRaw("tryLaunchElevatedSelfBeforeSplash succeeded, exiting current instance");
+            warn << adminRequestEvent
+                << "[main] 管理员实例已启动，当前普通权限实例退出。"
+                << eol;
             return 0;
         }
+        warn << adminRequestEvent
+            << "[main] 自动管理员请求未拉起新实例，将继续当前实例启动。"
+            << eol;
     }
 
+    startupTraceRaw("before applyQtScaleFactorEnvironment");
     applyQtScaleFactorEnvironment(startupSettings.startupWindowScaleFactor);
+    startupTraceRaw("after applyQtScaleFactorEnvironment");
 
     const bool splashReady = kSplash.show();
+    startupTraceRaw(std::string("kSplash.show finished, result=") + (splashReady ? "true" : "false"));
+    {
+        kLogEvent splashEvent;
+        info << splashEvent
+            << "[main] 启动画面 show 结果="
+            << (splashReady ? "true" : "false")
+            << eol;
+    }
     if (splashReady)
     {
         kSplash.progress("正在初始化 Qt 运行时...", 6);
     }
 
+    startupTraceRaw("before QApplication construction");
     QApplication app(argc, argv);
+    startupTraceRaw("QApplication constructed");
     ks::ui::InstallGlobalMessageBoxTheme(&app);
+    startupTraceRaw("InstallGlobalMessageBoxTheme finished");
     const QStringList argumentList = QCoreApplication::arguments();
+    startupTraceRaw(
+        std::string("QCoreApplication::arguments fetched, count=")
+        + std::to_string(argumentList.size()));
+    {
+        kLogEvent argumentEvent;
+        info << argumentEvent
+            << "[main] QApplication 已创建。 argument_count="
+            << argumentList.size()
+            << eol;
+    }
 
     const bool shouldRegisterUnlockerMenu = argumentList.contains(QStringLiteral("--register-unlocker-context-menu"));
     const bool shouldUnregisterUnlockerMenu = argumentList.contains(QStringLiteral("--unregister-unlocker-context-menu"));
@@ -865,6 +1087,13 @@ int main(int argc, char* argv[])
                 return;
             }
             kSplash.progress(statusText.toUtf8().toStdString(), progressPercent);
+            kLogEvent splashProgressEvent;
+            info << splashProgressEvent
+                << "[main] StartupProgressCallback progress="
+                << progressPercent
+                << ", status="
+                << statusText
+                << eol;
         };
 
     if (splashReady)
@@ -874,6 +1103,22 @@ int main(int argc, char* argv[])
     }
 
     MainWindow window(nullptr, startupProgressCallback);
+    startupTraceRaw("MainWindow constructed");
+    {
+        kLogEvent windowConstructEvent;
+        info << windowConstructEvent
+            << "[main] MainWindow 构造已完成。 visible="
+            << (window.isVisible() ? "true" : "false")
+            << ", geometry="
+            << window.geometry().x()
+            << ","
+            << window.geometry().y()
+            << " "
+            << window.geometry().width()
+            << "x"
+            << window.geometry().height()
+            << eol;
+    }
     FirstFrameSplashHider firstFrameHider(&window, &kSplash);
     window.installEventFilter(&firstFrameHider);
     if (window.centralWidget() != nullptr)
@@ -887,6 +1132,25 @@ int main(int argc, char* argv[])
     }
 
     window.show();
+    startupTraceRaw("window.show invoked");
+    {
+        kLogEvent showEvent;
+        const QRect visibleGeometry = window.frameGeometry();
+        info << showEvent
+            << "[main] 已调用 window.show()。 isVisible="
+            << (window.isVisible() ? "true" : "false")
+            << ", isMinimized="
+            << (window.isMinimized() ? "true" : "false")
+            << ", frame="
+            << visibleGeometry.x()
+            << ","
+            << visibleGeometry.y()
+            << " "
+            << visibleGeometry.width()
+            << "x"
+            << visibleGeometry.height()
+            << eol;
+    }
     if (startupSettings.launchMaximizedOnStartup)
     {
         QTimer::singleShot(0, &window, [&window]()
@@ -905,6 +1169,19 @@ int main(int argc, char* argv[])
                 {
                     window.showMaximized();
                 }
+
+                kLogEvent maximizeEvent;
+                const QRect maximizedFrame = window.frameGeometry();
+                info << maximizeEvent
+                    << "[main] 启动最大化请求已执行。 frame="
+                    << maximizedFrame.x()
+                    << ","
+                    << maximizedFrame.y()
+                    << " "
+                    << maximizedFrame.width()
+                    << "x"
+                    << maximizedFrame.height()
+                    << eol;
             });
     }
     applyNativeAppIconToWidget(&window);
@@ -929,11 +1206,67 @@ int main(int argc, char* argv[])
         // - 4 秒后强制隐藏启动页。
         QTimer::singleShot(4000, &window, []()
             {
+                kLogEvent splashFallbackEvent;
+                warn << splashFallbackEvent
+                    << "[main] 首帧隐藏 splash 的 4 秒兜底计时器触发。"
+                    << eol;
                 kSplash.hide();
             });
     }
 
+    QTimer::singleShot(200, &window, [&window]()
+        {
+            kLogEvent firstSnapshotEvent;
+            const QRect snapshotFrame = window.frameGeometry();
+            info << firstSnapshotEvent
+                << "[main] 启动后 200ms 窗口快照。 visible="
+                << (window.isVisible() ? "true" : "false")
+                << ", minimized="
+                << (window.isMinimized() ? "true" : "false")
+                << ", active="
+                << (window.isActiveWindow() ? "true" : "false")
+                << ", frame="
+                << snapshotFrame.x()
+                << ","
+                << snapshotFrame.y()
+                << " "
+                << snapshotFrame.width()
+                << "x"
+                << snapshotFrame.height()
+                << eol;
+        });
+
+    QTimer::singleShot(1200, &window, [&window]()
+        {
+            kLogEvent secondSnapshotEvent;
+            const QRect snapshotFrame = window.frameGeometry();
+            info << secondSnapshotEvent
+                << "[main] 启动后 1200ms 窗口快照。 visible="
+                << (window.isVisible() ? "true" : "false")
+                << ", minimized="
+                << (window.isMinimized() ? "true" : "false")
+                << ", active="
+                << (window.isActiveWindow() ? "true" : "false")
+                << ", frame="
+                << snapshotFrame.x()
+                << ","
+                << snapshotFrame.y()
+                << " "
+                << snapshotFrame.width()
+                << "x"
+                << snapshotFrame.height()
+                << eol;
+        });
+
     const int exitCode = app.exec();
+    startupTraceRaw(std::string("QApplication::exec returned, exitCode=") + std::to_string(exitCode));
+    {
+        kLogEvent exitLoopEvent;
+        info << exitLoopEvent
+            << "[main] QApplication::exec() 已返回。 exitCode="
+            << exitCode
+            << eol;
+    }
     kSplash.hide();
     return exitCode;
 }

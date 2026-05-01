@@ -25,6 +25,7 @@
 #include <QTextStream>
 
 #include <algorithm>
+#include <string>
 
 namespace
 {
@@ -38,32 +39,15 @@ namespace
             return;
         }
 
+        // 事件表右键跳转必须快速返回 UI：
+        // - 不在这里做 QueryProcessStaticDetailByPid；
+        // - 详情窗口后台补齐慢字段并按需加载重型页。
         ks::process::ProcessRecord record;
-        bool queryOk = ks::process::QueryProcessStaticDetailByPid(pidValue, record);
-        if (!queryOk)
+        record.pid = pidValue;
+        record.processName = ks::process::GetProcessNameByPID(pidValue);
+        if (record.processName.empty())
         {
-            std::vector<ks::process::ProcessRecord> processList = ks::process::EnumerateProcesses(
-                ks::process::ProcessEnumStrategy::Auto);
-            const auto found = std::find_if(
-                processList.begin(),
-                processList.end(),
-                [pidValue](const ks::process::ProcessRecord& item) {
-                    return item.pid == pidValue;
-                });
-            if (found != processList.end())
-            {
-                record = *found;
-                queryOk = true;
-            }
-        }
-
-        if (!queryOk)
-        {
-            QMessageBox::warning(
-                parentWidget,
-                QStringLiteral("进程详情"),
-                QStringLiteral("未找到 PID=%1 的进程。").arg(pidValue));
-            return;
+            record.processName = "PID_" + std::to_string(pidValue);
         }
 
         ProcessDetailWindow* detailWindow = new ProcessDetailWindow(record, nullptr);

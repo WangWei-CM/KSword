@@ -7,6 +7,7 @@
 #include <QPainterPath>
 #include <QPaintEvent>
 #include <QPen>
+#include <QSizePolicy>
 
 #include <algorithm>
 #include <array>
@@ -36,7 +37,9 @@ namespace
 MemoryCompositionHistoryWidget::MemoryCompositionHistoryWidget(QWidget* parent)
     : QWidget(parent)
 {
-    setMinimumHeight(56);
+    // 利用率页要求宽高不足时图表自动压缩，不能用固定最小高度撑出外层滚动条。
+    setMinimumSize(0, 0);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setMouseTracking(true);
     setAttribute(Qt::WA_StyledBackground, false);
     setAutoFillBackground(false);
@@ -108,7 +111,11 @@ void MemoryCompositionHistoryWidget::paintEvent(QPaintEvent* paintEventPointer)
         : QColor(67, 160, 255, 45);
 
     painter.fillRect(rect(), Qt::transparent);
-    const QRectF plotRect = rect().adjusted(8.0, 10.0, -8.0, -24.0);
+    // 图例空间随高度缩放；低高度时舍弃下方图例，优先保留折线和构成填充。
+    const bool compactHeight = height() < 70;
+    const QRectF plotRect = compactHeight
+        ? rect().adjusted(4.0, 4.0, -4.0, -4.0)
+        : rect().adjusted(8.0, 10.0, -8.0, -24.0);
     if (plotRect.width() <= 4.0 || plotRect.height() <= 4.0)
     {
         return;
@@ -126,13 +133,16 @@ void MemoryCompositionHistoryWidget::paintEvent(QPaintEvent* paintEventPointer)
     drawStackedComposition(painter, plotRect);
     drawUsageLine(painter, plotRect);
 
-    painter.setPen(textColor);
-    painter.setFont(QFont(painter.font().family(), 9));
-    painter.drawText(
-        plotRect.adjusted(6.0, 4.0, -6.0, -4.0),
-        Qt::AlignTop | Qt::AlignLeft,
-        QStringLiteral("内存占用历史 / 构成填充"));
-    drawLegend(painter, plotRect);
+    if (!compactHeight)
+    {
+        painter.setPen(textColor);
+        painter.setFont(QFont(painter.font().family(), 9));
+        painter.drawText(
+            plotRect.adjusted(6.0, 4.0, -6.0, -4.0),
+            Qt::AlignTop | Qt::AlignLeft,
+            QStringLiteral("内存占用历史 / 构成填充"));
+        drawLegend(painter, plotRect);
+    }
 }
 
 double MemoryCompositionHistoryWidget::boundedPercent(const double percentValue)

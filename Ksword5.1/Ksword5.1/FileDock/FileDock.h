@@ -284,6 +284,12 @@ private:
     // - 参数 scanPaths：待扫描路径集合（文件或目录）。
     void openHandleUsageScanWindow(const std::vector<QString>& scanPaths);
 
+    // openMappedProcessScanWindow：
+    // - 作用：基于选中文件打开 R0 Section/ControlArea“映射进程”扫描窗口；
+    // - 说明：当前第一版只接受文件，目录会被跳过，失败原因在窗口状态栏展示。
+    // - 参数 scanPaths：待扫描文件路径集合。
+    void openMappedProcessScanWindow(const std::vector<QString>& scanPaths);
+
     // ======================= 工具函数 =========================
     // currentIndexPath：
     // - 作用：获取面板当前选中索引对应的绝对路径。

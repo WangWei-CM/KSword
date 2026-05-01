@@ -37,7 +37,7 @@ namespace ks::settings
     struct AppearanceSettings
     {
         ThemeMode themeMode = ThemeMode::FollowSystem;
-        QString backgroundImagePath = QStringLiteral("style/ksword_background.png");
+        QString backgroundImagePath = QStringLiteral("Style/ksword_background.png");
         int backgroundOpacityPercent = 35;
         QString startupDefaultTabKey = QStringLiteral("welcome");
         bool launchMaximizedOnStartup = false;
@@ -67,7 +67,7 @@ namespace ks::settings
     // appearanceSettingsJsonRelativePath 作用：
     // - 返回外观配置 JSON 的默认相对路径。
     // 调用方式：构建读写路径时调用。
-    // 返回：例如 style/appearance_settings.json。
+    // 返回：例如 Style/appearance_settings.json。
     QString appearanceSettingsJsonRelativePath();
 
     // resolveSettingsJsonPathForRead 作用：
@@ -75,6 +75,12 @@ namespace ks::settings
     // 调用方式：loadAppearanceSettings 内部调用。
     // 返回：最终用于读文件的绝对路径。
     QString resolveSettingsJsonPathForRead();
+
+    // settingsJsonFileExistsForRead 作用：
+    // - 判断启动时是否已经存在可读取的配置文件；
+    // - 供 main 区分“首次启动”与“按已有配置启动”。
+    // 返回：true=存在配置文件；false=不存在。
+    bool settingsJsonFileExistsForRead();
 
     // resolveSettingsJsonPathForWrite 作用：
     // - 获取保存 JSON 时使用的绝对路径。

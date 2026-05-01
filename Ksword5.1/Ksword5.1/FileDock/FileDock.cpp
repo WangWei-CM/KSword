@@ -45,9 +45,11 @@
 #include <QMetaObject>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QProgressBar>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QRunnable>
 #include <QScrollArea>
 #include <QShortcut>
 #include <QSortFilterProxyModel>
@@ -59,8 +61,12 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QThreadPool>
 #include <QToolButton>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QTreeView>
+#include <QTimeZone>
 #include <QUrl>
 #include <QVector>
 #include <QVBoxLayout>
@@ -1205,6 +1211,7 @@ namespace
             : QDialog(parent)
             , m_filePath(filePath)
         {
+            m_hashCancelRequested = std::make_shared<std::atomic_bool>(false);
             setAttribute(Qt::WA_DeleteOnClose, true);
             setObjectName(QStringLiteral("FileDetailDialogRoot"));
             setAttribute(Qt::WA_StyledBackground, true);
@@ -1220,6 +1227,7 @@ namespace
             tabWidget->addTab(buildGeneralTab(), QStringLiteral("常规信息"));
             tabWidget->addTab(buildSecurityTab(), QStringLiteral("安全与权限"));
             tabWidget->addTab(buildHashTab(), QStringLiteral("哈希与完整性"));
+            tabWidget->addTab(buildUsageTab(), QStringLiteral("文件占用"));
             tabWidget->addTab(buildSignatureTab(), QStringLiteral("数字签名"));
             tabWidget->addTab(buildPeTab(), QStringLiteral("PE信息"));
             tabWidget->addTab(buildStringsTab(), QStringLiteral("字符串"));
@@ -1227,6 +1235,450 @@ namespace
         }
 
     private:
+        struct HashCalculationResult
+        {
+            bool openOk = false;       // openOk：文件是否成功打开。
+            bool cancelled = false;    // cancelled：用户是否取消。
+            qint64 totalBytes = 0;     // totalBytes：文件总大小。
+            qint64 readBytes = 0;      // readBytes：实际读取字节数。
+            qint64 elapsedMs = 0;      // elapsedMs：耗时毫秒。
+            QString sha256Text;        // sha256Text：十六进制 SHA256。
+            QString errorText;         // errorText：失败原因。
+        };
+
+        static QString formatHex64(const std::uint64_t value)
+        {
+            // 用途：统一格式化 R0 诊断地址。
+            // 返回：0x 前缀大写十六进制字符串。
+            return QStringLiteral("0x%1")
+                .arg(static_cast<qulonglong>(value), 0, 16)
+                .toUpper();
+        }
+
+        static QString formatNtStatus(const long status)
+        {
+            // 用途：NTSTATUS 同时显示十六进制和十进制，便于对照 WinDbg。
+            // 返回：例如 0xC0000034 (-1073741772)。
+            return QStringLiteral("0x%1 (%2)")
+                .arg(static_cast<qulonglong>(static_cast<std::uint32_t>(status)), 8, 16, QChar('0'))
+                .arg(status)
+                .toUpper();
+        }
+
+        static QString fileTimeToText(const std::int64_t fileTimeValue)
+        {
+            // 用途：把 Windows FILETIME 语义的 100ns 时间戳转为本地时间文本。
+            // 返回：可读时间；0 表示不可用。
+            if (fileTimeValue <= 0)
+            {
+                return QStringLiteral("<Unavailable>");
+            }
+
+            constexpr std::int64_t windowsToUnix100Ns = 116444736000000000LL;
+            const std::int64_t unixMilliseconds = (fileTimeValue - windowsToUnix100Ns) / 10000LL;
+            if (unixMilliseconds <= 0)
+            {
+                return QStringLiteral("<Invalid:%1>").arg(fileTimeValue);
+            }
+            // Qt 6.9 已废弃 Qt::TimeSpec 重载；这里显式使用 UTC 时区，
+            // 再转换为本地时间，保持 FILETIME 展示语义不变。
+            return QDateTime::fromMSecsSinceEpoch(unixMilliseconds, QTimeZone::UTC)
+                .toLocalTime()
+                .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
+        }
+
+        static QString fileAttributesToText(const std::uint32_t attributes)
+        {
+            // 用途：拆解 FILE_ATTRIBUTE_*，让 R0 和 R3 属性差异可读。
+            // 返回：属性名列表；无显式位时返回 NORMAL/0。
+            QStringList parts;
+            if ((attributes & FILE_ATTRIBUTE_READONLY) != 0U) parts << QStringLiteral("READONLY");
+            if ((attributes & FILE_ATTRIBUTE_HIDDEN) != 0U) parts << QStringLiteral("HIDDEN");
+            if ((attributes & FILE_ATTRIBUTE_SYSTEM) != 0U) parts << QStringLiteral("SYSTEM");
+            if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U) parts << QStringLiteral("DIRECTORY");
+            if ((attributes & FILE_ATTRIBUTE_ARCHIVE) != 0U) parts << QStringLiteral("ARCHIVE");
+            if ((attributes & FILE_ATTRIBUTE_DEVICE) != 0U) parts << QStringLiteral("DEVICE");
+            if ((attributes & FILE_ATTRIBUTE_NORMAL) != 0U) parts << QStringLiteral("NORMAL");
+            if ((attributes & FILE_ATTRIBUTE_TEMPORARY) != 0U) parts << QStringLiteral("TEMPORARY");
+            if ((attributes & FILE_ATTRIBUTE_SPARSE_FILE) != 0U) parts << QStringLiteral("SPARSE_FILE");
+            if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) parts << QStringLiteral("REPARSE_POINT");
+            if ((attributes & FILE_ATTRIBUTE_COMPRESSED) != 0U) parts << QStringLiteral("COMPRESSED");
+            if ((attributes & FILE_ATTRIBUTE_OFFLINE) != 0U) parts << QStringLiteral("OFFLINE");
+            if ((attributes & FILE_ATTRIBUTE_NOT_CONTENT_INDEXED) != 0U) parts << QStringLiteral("NOT_CONTENT_INDEXED");
+            if ((attributes & FILE_ATTRIBUTE_ENCRYPTED) != 0U) parts << QStringLiteral("ENCRYPTED");
+            if ((attributes & FILE_ATTRIBUTE_INTEGRITY_STREAM) != 0U) parts << QStringLiteral("INTEGRITY_STREAM");
+            if ((attributes & FILE_ATTRIBUTE_NO_SCRUB_DATA) != 0U) parts << QStringLiteral("NO_SCRUB_DATA");
+            if (parts.isEmpty())
+            {
+                parts << QStringLiteral("0");
+            }
+            return QStringLiteral("0x%1 (%2)")
+                .arg(attributes, 8, 16, QChar('0'))
+                .arg(parts.join(QStringLiteral("|")))
+                .toUpper();
+        }
+
+        static QString fileInfoStatusText(const std::uint32_t status)
+        {
+            // 用途：把共享协议状态码翻译为 UI 文本。
+            // 返回：状态名称。
+            switch (status)
+            {
+            case KSWORD_ARK_FILE_INFO_STATUS_OK:
+                return QStringLiteral("OK");
+            case KSWORD_ARK_FILE_INFO_STATUS_PARTIAL:
+                return QStringLiteral("Partial");
+            case KSWORD_ARK_FILE_INFO_STATUS_OPEN_FAILED:
+                return QStringLiteral("Open Failed");
+            case KSWORD_ARK_FILE_INFO_STATUS_BASIC_FAILED:
+                return QStringLiteral("Basic Failed");
+            case KSWORD_ARK_FILE_INFO_STATUS_STANDARD_FAILED:
+                return QStringLiteral("Standard Failed");
+            case KSWORD_ARK_FILE_INFO_STATUS_OBJECT_FAILED:
+                return QStringLiteral("Object Failed");
+            case KSWORD_ARK_FILE_INFO_STATUS_NAME_FAILED:
+                return QStringLiteral("Name Failed");
+            default:
+                return QStringLiteral("Unavailable");
+            }
+        }
+
+        ksword::ark::FileInfoQueryResult queryR0FileInfo(const QFileInfo& info, const QString& ntPathText) const
+        {
+            // 用途：通过 ArkDriverClient 调用 R0 文件基础信息查询。
+            // 返回：驱动不可用时 ok=false，常规页自动回退 R3 展示。
+            ksword::ark::FileInfoQueryResult result{};
+            if (ntPathText.trimmed().isEmpty())
+            {
+                result.io.ok = false;
+                result.io.win32Error = ERROR_INVALID_PARAMETER;
+                result.io.message = "empty nt path";
+                return result;
+            }
+
+            unsigned long flags = KSWORD_ARK_QUERY_FILE_INFO_FLAG_INCLUDE_ALL;
+            if (info.isDir())
+            {
+                flags |= KSWORD_ARK_QUERY_FILE_INFO_FLAG_DIRECTORY;
+            }
+
+            const ksword::ark::DriverClient driverClient;
+            return driverClient.queryFileInfo(ntPathText.toStdWString(), flags);
+        }
+
+        QString formatR0FileInfoText(const ksword::ark::FileInfoQueryResult& result) const
+        {
+            // 用途：生成 R0 文件信息页文本。
+            // 返回：包含状态、大小、时间戳、对象诊断地址和失败原因的多行文本。
+            QString content;
+            if (!result.io.ok)
+            {
+                content += QStringLiteral("状态: Unavailable\n");
+                content += QStringLiteral("原因: %1\n").arg(QString::fromStdString(result.io.message));
+                content += QStringLiteral("Win32错误: %1\n").arg(result.io.win32Error);
+                return content;
+            }
+
+            content += QStringLiteral("协议版本: %1\n").arg(result.version);
+            content += QStringLiteral("查询状态: %1 (%2)\n").arg(fileInfoStatusText(result.queryStatus)).arg(result.queryStatus);
+            content += QStringLiteral("字段标志: 0x%1\n").arg(result.fieldFlags, 8, 16, QChar('0')).toUpper();
+            content += QStringLiteral("OpenStatus: %1\n").arg(formatNtStatus(result.openStatus));
+            content += QStringLiteral("BasicStatus: %1\n").arg(formatNtStatus(result.basicStatus));
+            content += QStringLiteral("StandardStatus: %1\n").arg(formatNtStatus(result.standardStatus));
+            content += QStringLiteral("ObjectStatus: %1\n").arg(formatNtStatus(result.objectStatus));
+            content += QStringLiteral("NameStatus: %1\n").arg(formatNtStatus(result.nameStatus));
+            content += QStringLiteral("大小(EndOfFile): %1 字节\n").arg(static_cast<qlonglong>(result.endOfFile));
+            content += QStringLiteral("分配大小: %1 字节\n").arg(static_cast<qlonglong>(result.allocationSize));
+            content += QStringLiteral("属性: %1\n").arg(fileAttributesToText(result.fileAttributes));
+            content += QStringLiteral("创建时间: %1\n").arg(fileTimeToText(result.creationTime));
+            content += QStringLiteral("最后访问: %1\n").arg(fileTimeToText(result.lastAccessTime));
+            content += QStringLiteral("最后写入: %1\n").arg(fileTimeToText(result.lastWriteTime));
+            content += QStringLiteral("ChangeTime: %1\n").arg(fileTimeToText(result.changeTime));
+            content += QStringLiteral("FileObject: %1\n").arg(formatHex64(result.fileObjectAddress));
+            content += QStringLiteral("SectionObjectPointers: %1\n").arg(formatHex64(result.sectionObjectPointersAddress));
+            content += QStringLiteral("DataSectionObject: %1\n").arg(formatHex64(result.dataSectionObjectAddress));
+            content += QStringLiteral("ImageSectionObject: %1\n").arg(formatHex64(result.imageSectionObjectAddress));
+            content += QStringLiteral("R0消息: %1\n").arg(QString::fromStdString(result.io.message));
+            return content;
+        }
+
+        void startHashCalculation(
+            CodeEditorWidget* textEditorWidget,
+            QProgressBar* progressBar,
+            QPushButton* startButton,
+            QPushButton* cancelButton)
+        {
+            // 用途：启动 SHA256 后台流式计算。
+            // 处理：每块读取后检查取消标记并异步更新进度。
+            // 返回：无；结果通过 QueuedConnection 回填 UI。
+            if (textEditorWidget == nullptr || progressBar == nullptr ||
+                startButton == nullptr || cancelButton == nullptr)
+            {
+                return;
+            }
+
+            if (m_hashCancelRequested == nullptr)
+            {
+                m_hashCancelRequested = std::make_shared<std::atomic_bool>(false);
+            }
+            m_hashCancelRequested->store(false);
+
+            startButton->setEnabled(false);
+            cancelButton->setEnabled(true);
+            cancelButton->setText(QStringLiteral("取消"));
+            progressBar->setValue(0);
+            textEditorWidget->setText(QStringLiteral("正在计算 SHA256，请等待...\n目标: %1")
+                .arg(QDir::toNativeSeparators(m_filePath)));
+
+            const QString filePathSnapshot = m_filePath;
+            const auto cancelFlag = m_hashCancelRequested;
+            QPointer<FileDetailDialog> guardThis(this);
+            QPointer<CodeEditorWidget> editorGuard(textEditorWidget);
+            QPointer<QProgressBar> progressGuard(progressBar);
+            QPointer<QPushButton> startGuard(startButton);
+            QPointer<QPushButton> cancelGuard(cancelButton);
+
+            auto* task = QRunnable::create([guardThis, editorGuard, progressGuard, startGuard, cancelGuard, filePathSnapshot, cancelFlag]()
+                {
+                    HashCalculationResult result{};
+                    const auto beginTime = std::chrono::steady_clock::now();
+                    QFile file(filePathSnapshot);
+                    result.totalBytes = QFileInfo(filePathSnapshot).size();
+
+                    if (!file.open(QIODevice::ReadOnly))
+                    {
+                        result.errorText = file.errorString();
+                    }
+                    else
+                    {
+                        result.openOk = true;
+                        QCryptographicHash sha256(QCryptographicHash::Sha256);
+                        constexpr qint64 chunkBytes = 1024 * 1024;
+                        auto lastProgressTime = std::chrono::steady_clock::now();
+
+                        while (!file.atEnd())
+                        {
+                            if (cancelFlag != nullptr && cancelFlag->load())
+                            {
+                                result.cancelled = true;
+                                break;
+                            }
+
+                            const QByteArray chunk = file.read(chunkBytes);
+                            if (chunk.isEmpty())
+                            {
+                                if (file.error() != QFileDevice::NoError)
+                                {
+                                    result.errorText = file.errorString();
+                                }
+                                break;
+                            }
+
+                            sha256.addData(chunk);
+                            result.readBytes += chunk.size();
+
+                            const auto nowTime = std::chrono::steady_clock::now();
+                            const bool shouldReport =
+                                std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - lastProgressTime).count() >= 100;
+                            if (shouldReport && guardThis != nullptr && progressGuard != nullptr)
+                            {
+                                lastProgressTime = nowTime;
+                                const int progressValue = result.totalBytes > 0
+                                    ? static_cast<int>((result.readBytes * 1000LL) / result.totalBytes)
+                                    : 1000;
+                                FileDetailDialog* targetDialog = guardThis.data();
+                                if (targetDialog == nullptr)
+                                {
+                                    continue;
+                                }
+                                QMetaObject::invokeMethod(
+                                    targetDialog,
+                                    [progressGuard, progressValue]()
+                                    {
+                                        if (progressGuard != nullptr)
+                                        {
+                                            progressGuard->setValue(std::min(progressValue, 1000));
+                                        }
+                                    },
+                                    Qt::QueuedConnection);
+                            }
+                        }
+
+                        if (!result.cancelled && result.errorText.isEmpty())
+                        {
+                            result.sha256Text = QString::fromLatin1(sha256.result().toHex());
+                        }
+                        file.close();
+                    }
+
+                    result.elapsedMs = static_cast<qint64>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - beginTime).count());
+
+                    FileDetailDialog* targetDialog = guardThis.data();
+                    if (targetDialog == nullptr)
+                    {
+                        return;
+                    }
+
+                    QMetaObject::invokeMethod(
+                        targetDialog,
+                        [guardThis, editorGuard, progressGuard, startGuard, cancelGuard, result]()
+                        {
+                            if (guardThis == nullptr || editorGuard == nullptr ||
+                                progressGuard == nullptr || startGuard == nullptr ||
+                                cancelGuard == nullptr)
+                            {
+                                return;
+                            }
+
+                            startGuard->setEnabled(true);
+                            cancelGuard->setEnabled(false);
+                            cancelGuard->setText(QStringLiteral("取消"));
+                            progressGuard->setValue(result.totalBytes > 0
+                                ? static_cast<int>((result.readBytes * 1000LL) / result.totalBytes)
+                                : 1000);
+
+                            const double elapsedSeconds = std::max(0.001, static_cast<double>(result.elapsedMs) / 1000.0);
+                            const double speedMiB = (static_cast<double>(result.readBytes) / (1024.0 * 1024.0)) / elapsedSeconds;
+
+                            QString content;
+                            content += QStringLiteral("算法: SHA256\n");
+                            content += QStringLiteral("来源: 用户态流式读取(QCryptographicHash)\n");
+                            content += QStringLiteral("文件: %1\n").arg(QDir::toNativeSeparators(guardThis->m_filePath));
+                            content += QStringLiteral("总大小: %1 字节\n").arg(result.totalBytes);
+                            content += QStringLiteral("已读取: %1 字节\n").arg(result.readBytes);
+                            content += QStringLiteral("耗时: %1 ms\n").arg(result.elapsedMs);
+                            content += QStringLiteral("速度: %1 MiB/s\n").arg(QString::number(speedMiB, 'f', 2));
+                            content += QStringLiteral("是否取消: %1\n").arg(result.cancelled ? QStringLiteral("是") : QStringLiteral("否"));
+                            if (!result.errorText.isEmpty())
+                            {
+                                content += QStringLiteral("错误: %1\n").arg(result.errorText);
+                            }
+                            if (!result.sha256Text.isEmpty())
+                            {
+                                content += QStringLiteral("SHA256: %1\n").arg(result.sha256Text);
+                            }
+                            editorGuard->setText(content);
+                        },
+                        Qt::QueuedConnection);
+                });
+            task->setAutoDelete(true);
+            QThreadPool::globalInstance()->start(task);
+        }
+
+        void requestHashCancel(QPushButton* cancelButton)
+        {
+            // 用途：设置哈希取消标记。
+            // 返回：无；后台线程在下一次块边界观察该标记。
+            if (m_hashCancelRequested != nullptr)
+            {
+                m_hashCancelRequested->store(true);
+            }
+            if (cancelButton != nullptr)
+            {
+                cancelButton->setEnabled(false);
+                cancelButton->setText(QStringLiteral("正在取消..."));
+            }
+        }
+
+        void refreshUsageTable(QTreeWidget* table, QLabel* statusLabel, QPushButton* refreshButton)
+        {
+            // 用途：异步刷新属性页内的文件占用列表。
+            // 处理：调用 FileHandleUsageScanner，结果显示 PID/Handle/GrantedAccess/来源。
+            // 返回：无。
+            if (table == nullptr || statusLabel == nullptr || refreshButton == nullptr)
+            {
+                return;
+            }
+
+            QFileInfo info(m_filePath);
+            if (!info.exists())
+            {
+                statusLabel->setText(QStringLiteral("● 目标不存在，无法扫描占用。"));
+                return;
+            }
+
+            refreshButton->setEnabled(false);
+            table->clear();
+            statusLabel->setText(QStringLiteral("● 正在扫描文件占用..."));
+
+            const std::vector<QString> targetPaths{ info.absoluteFilePath() };
+            QPointer<FileDetailDialog> guardThis(this);
+            QPointer<QTreeWidget> tableGuard(table);
+            QPointer<QLabel> statusGuard(statusLabel);
+            QPointer<QPushButton> refreshGuard(refreshButton);
+
+            auto* task = QRunnable::create([guardThis, tableGuard, statusGuard, refreshGuard, targetPaths]()
+                {
+                    const filedock::handleusage::HandleUsageScanResult scanResult =
+                        filedock::handleusage::scanHandleUsageByPaths(targetPaths, 0);
+                    FileDetailDialog* targetDialog = guardThis.data();
+                    if (targetDialog == nullptr)
+                    {
+                        return;
+                    }
+
+                    QMetaObject::invokeMethod(
+                        targetDialog,
+                        [tableGuard, statusGuard, refreshGuard, scanResult]()
+                        {
+                            if (tableGuard == nullptr || statusGuard == nullptr || refreshGuard == nullptr)
+                            {
+                                return;
+                            }
+
+                            tableGuard->setSortingEnabled(false);
+                            tableGuard->clear();
+                            for (const filedock::handleusage::HandleUsageEntry& entry : scanResult.entries)
+                            {
+                                auto* item = new QTreeWidgetItem();
+                                item->setText(0, QString::number(entry.processId));
+                                item->setText(1, entry.processName);
+                                item->setText(2, entry.handleValue == 0
+                                    ? QStringLiteral("-")
+                                    : formatHex64(entry.handleValue));
+                                item->setText(3, entry.grantedAccess == 0
+                                    ? QStringLiteral("-")
+                                    : QStringLiteral("0x%1").arg(entry.grantedAccess, 8, 16, QChar('0')).toUpper());
+                                item->setText(4, entry.objectName);
+                                item->setText(5, entry.matchedTargetPath);
+                                const QString sourceText = entry.enumerationSource.trimmed().isEmpty()
+                                    ? QStringLiteral("R3 DuplicateHandle")
+                                    : entry.enumerationSource;
+                                const QString ruleText = entry.matchRuleText.trimmed().isEmpty()
+                                    ? (entry.matchedByDirectoryRule ? QStringLiteral("目录前缀") : QStringLiteral("精确"))
+                                    : entry.matchRuleText;
+                                item->setText(6, QStringLiteral("%1 | %2").arg(sourceText, ruleText));
+                                tableGuard->addTopLevelItem(item);
+                            }
+                            tableGuard->setSortingEnabled(true);
+                            if (tableGuard->header() != nullptr)
+                            {
+                                tableGuard->resizeColumnToContents(0);
+                                tableGuard->resizeColumnToContents(1);
+                                tableGuard->resizeColumnToContents(2);
+                                tableGuard->resizeColumnToContents(3);
+                            }
+
+                            QString statusText = QStringLiteral("● 扫描完成 %1 ms | 总句柄:%2 | 文件句柄:%3 | 命中:%4")
+                                .arg(scanResult.elapsedMs)
+                                .arg(scanResult.totalHandleCount)
+                                .arg(scanResult.fileLikeHandleCount)
+                                .arg(scanResult.matchedHandleCount);
+                            if (!scanResult.diagnosticText.trimmed().isEmpty())
+                            {
+                                statusText += QStringLiteral(" | %1").arg(scanResult.diagnosticText);
+                            }
+                            statusGuard->setText(statusText);
+                            refreshGuard->setEnabled(true);
+                        },
+                        Qt::QueuedConnection);
+                });
+            task->setAutoDelete(true);
+            QThreadPool::globalInstance()->start(task);
+        }
+
         QWidget* buildGeneralTab()
         {
             QWidget* page = new QWidget(this);
@@ -1235,7 +1687,19 @@ namespace
             textEditorWidget->setReadOnly(true);
 
             const QFileInfo info(m_filePath);
+            const QString ntPathText = buildDriverNtPath(info.absoluteFilePath());
+            const ksword::ark::FileInfoQueryResult r0Info = queryR0FileInfo(info, ntPathText);
             QString content;
+            content += QStringLiteral("[路径]\n");
+            content += QStringLiteral("Win32路径: %1\n").arg(QDir::toNativeSeparators(info.absoluteFilePath()));
+            content += QStringLiteral("NT路径: %1\n").arg(ntPathText.isEmpty() ? QStringLiteral("<转换失败>") : ntPathText);
+            if (!r0Info.objectName.empty())
+            {
+                content += QStringLiteral("R0对象名: %1\n").arg(QString::fromStdWString(r0Info.objectName));
+            }
+            content += QStringLiteral("查询来源: %1\n\n").arg(r0Info.io.ok ? QStringLiteral("R0 KswordARK + R3 QFileInfo") : QStringLiteral("R3 QFileInfo (R0不可用)"));
+
+            content += QStringLiteral("[R3 QFileInfo]\n");
             content += QStringLiteral("完整路径: %1\n").arg(info.absoluteFilePath());
             content += QStringLiteral("文件名: %1\n").arg(info.fileName());
             content += QStringLiteral("类型: %1\n").arg(info.suffix());
@@ -1246,6 +1710,9 @@ namespace
             content += QStringLiteral("是否可执行: %1\n").arg(info.isExecutable() ? QStringLiteral("是") : QStringLiteral("否"));
             content += QStringLiteral("是否隐藏: %1\n").arg(info.isHidden() ? QStringLiteral("是") : QStringLiteral("否"));
             content += QStringLiteral("是否可写: %1\n").arg(info.isWritable() ? QStringLiteral("是") : QStringLiteral("否"));
+
+            content += QStringLiteral("\n[R0 文件基础信息]\n");
+            content += formatR0FileInfoText(r0Info);
             textEditorWidget->setText(content);
 
             layout->addWidget(textEditorWidget, 1);
@@ -1342,41 +1809,93 @@ namespace
         {
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
+
+            QHBoxLayout* toolbarLayout = new QHBoxLayout();
+            QPushButton* startButton = new QPushButton(QStringLiteral("计算 SHA256"), page);
+            QPushButton* cancelButton = new QPushButton(QStringLiteral("取消"), page);
+            cancelButton->setEnabled(false);
+            toolbarLayout->addWidget(startButton, 0);
+            toolbarLayout->addWidget(cancelButton, 0);
+            toolbarLayout->addStretch(1);
+            layout->addLayout(toolbarLayout);
+
+            QProgressBar* progressBar = new QProgressBar(page);
+            progressBar->setRange(0, 1000);
+            progressBar->setValue(0);
+            layout->addWidget(progressBar, 0);
+
             CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
             textEditorWidget->setReadOnly(true);
-
-            QFile file(m_filePath);
-            QString content;
-            if (!file.open(QIODevice::ReadOnly))
-            {
-                content = QStringLiteral("无法打开文件，哈希计算失败。");
-                textEditorWidget->setText(content);
-                layout->addWidget(textEditorWidget, 1);
-                return page;
-            }
-
-            QCryptographicHash md5(QCryptographicHash::Md5);
-            QCryptographicHash sha1(QCryptographicHash::Sha1);
-            QCryptographicHash sha256(QCryptographicHash::Sha256);
-            QCryptographicHash sha512(QCryptographicHash::Sha512);
-
-            while (!file.atEnd())
-            {
-                const QByteArray chunk = file.read(1024 * 256);
-                md5.addData(chunk);
-                sha1.addData(chunk);
-                sha256.addData(chunk);
-                sha512.addData(chunk);
-            }
-            file.close();
-
-            content += QStringLiteral("MD5: %1\n").arg(QString::fromLatin1(md5.result().toHex()));
-            content += QStringLiteral("SHA1: %1\n").arg(QString::fromLatin1(sha1.result().toHex()));
-            content += QStringLiteral("SHA256: %1\n").arg(QString::fromLatin1(sha256.result().toHex()));
-            content += QStringLiteral("SHA512: %1\n").arg(QString::fromLatin1(sha512.result().toHex()));
-            textEditorWidget->setText(content);
-
             layout->addWidget(textEditorWidget, 1);
+
+            textEditorWidget->setText(QStringLiteral(
+                "Phase 10 哈希页：\n"
+                "- SHA256 使用用户态流式读取，避免一次性读入大文件。\n"
+                "- 点击“取消”会在下一个块读取边界停止。\n"
+                "- 可用 PowerShell Get-FileHash -Algorithm SHA256 进行对比。\n"));
+
+            connect(startButton, &QPushButton::clicked, this, [this, textEditorWidget, progressBar, startButton, cancelButton]()
+                {
+                    startHashCalculation(textEditorWidget, progressBar, startButton, cancelButton);
+                });
+            connect(cancelButton, &QPushButton::clicked, this, [this, cancelButton]()
+                {
+                    requestHashCancel(cancelButton);
+                });
+            return page;
+        }
+
+        QWidget* buildUsageTab()
+        {
+            // 用途：Phase-10 把现有文件占用扫描结果直接嵌入属性窗口。
+            // 处理：后台调用 FileHandleUsageScanner；Scanner 当前会优先使用用户态句柄快照，
+            // 并在诊断中标记 DuplicateHandle/NtObjectName 等来源。后续 R0 HandleTable
+            // 增强可以在 Scanner 内部扩展，属性页无需直接 DeviceIoControl。
+            QWidget* page = new QWidget(this);
+            QVBoxLayout* layout = new QVBoxLayout(page);
+
+            QHBoxLayout* toolbarLayout = new QHBoxLayout();
+            QPushButton* refreshButton = new QPushButton(QStringLiteral("刷新占用"), page);
+            QLabel* statusLabel = new QLabel(QStringLiteral("● 等待扫描"), page);
+            statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            toolbarLayout->addWidget(refreshButton, 0);
+            toolbarLayout->addWidget(statusLabel, 1);
+            layout->addLayout(toolbarLayout);
+
+            QTreeWidget* table = new QTreeWidget(page);
+            table->setColumnCount(7);
+            table->setHeaderLabels(QStringList{
+                QStringLiteral("PID"),
+                QStringLiteral("进程名"),
+                QStringLiteral("Handle"),
+                QStringLiteral("GrantedAccess"),
+                QStringLiteral("对象/路径"),
+                QStringLiteral("命中目标"),
+                QStringLiteral("枚举来源")
+                });
+            table->setRootIsDecorated(false);
+            table->setAlternatingRowColors(true);
+            table->setSelectionBehavior(QAbstractItemView::SelectRows);
+            table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+            table->setSortingEnabled(true);
+            if (table->header() != nullptr)
+            {
+                table->header()->setStretchLastSection(true);
+            }
+            layout->addWidget(table, 1);
+
+            connect(refreshButton, &QPushButton::clicked, this, [this, table, statusLabel, refreshButton]()
+                {
+                    refreshUsageTable(table, statusLabel, refreshButton);
+                });
+
+            QMetaObject::invokeMethod(
+                page,
+                [this, table, statusLabel, refreshButton]()
+                {
+                    refreshUsageTable(table, statusLabel, refreshButton);
+                },
+                Qt::QueuedConnection);
             return page;
         }
 
@@ -1573,6 +2092,7 @@ namespace
 
     private:
         QString m_filePath;   // 当前详情窗口对应的文件路径。
+        std::shared_ptr<std::atomic_bool> m_hashCancelRequested; // 哈希计算取消标记，后台线程共享。
     };
 }
 
@@ -3697,6 +4217,7 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* hexAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("十六进制查看"));
     QAction* peAction = menu.addAction(QIcon(":/Icon/process_list.svg"), QStringLiteral("在PE查看器中打开"));
     QAction* handleScanAction = menu.addAction(QIcon(":/Icon/handle_refresh.svg"), QStringLiteral("扫描占用句柄"));
+    QAction* mappedProcessScanAction = menu.addAction(QIcon(":/Icon/process_tree.svg"), QStringLiteral("扫描映射进程(R0)"));
 
     // 结合选中集合动态启用菜单项，保证“多选”和“右键动作”行为一致。
     const bool singleFileOnly = isSingleSelection && QFileInfo(firstPath).isFile();
@@ -3720,6 +4241,7 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     hexAction->setEnabled(singleFileOnly);
     peAction->setEnabled(singleFileOnly);
     handleScanAction->setEnabled(hasSelection);
+    mappedProcessScanAction->setEnabled(hasAnyFile);
 
     QAction* selectedAction = menu.exec(panel.fileView->viewport()->mapToGlobal(localPos));
     if (selectedAction == nullptr)
@@ -4181,6 +4703,11 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     if (selectedAction == handleScanAction)
     {
         openHandleUsageScanWindow(menuPaths);
+        return;
+    }
+    if (selectedAction == mappedProcessScanAction)
+    {
+        openMappedProcessScanWindow(menuPaths);
         return;
     }
 }

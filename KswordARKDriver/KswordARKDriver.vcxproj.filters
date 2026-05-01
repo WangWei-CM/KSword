@@ -32,6 +32,27 @@
     <Filter Include="Source Files\\Features\\Kernel">
       <UniqueIdentifier>{3C9A808C-7B1F-4E1A-9A24-2A70C4FA2287}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\\Features\\Thread">
+      <UniqueIdentifier>{9C5A3C0C-2B91-4E39-85C3-92FC8804AA8A}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\\Features\\Alpc">
+      <UniqueIdentifier>{6DA7D558-6C19-4F0B-9E54-18A8057F62A6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\\Features\\Section">
+      <UniqueIdentifier>{D0CF50FD-7E50-4D4C-82D7-8236C7ECF50E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\\Features\\WSL">
+      <UniqueIdentifier>{E47C5901-B0C6-4E2A-B81E-1D61B073D2D9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\\Features\\Trust">
+      <UniqueIdentifier>{C7C90C1D-F34C-4B52-80AA-2835EB5D7BF7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\\Features\\Safety">
+      <UniqueIdentifier>{46FB8906-2B4B-4E0A-A0BA-C3E21CFB2D2D}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\\Features\\Preflight">
+      <UniqueIdentifier>{DB4F3674-6C54-4925-9F6C-76E2BF199B65}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Source Files\\Platform">
       <UniqueIdentifier>{75A4CDCC-C7CA-4466-A916-060582F95507}</UniqueIdentifier>
     </Filter>
@@ -114,6 +135,45 @@
     <ClInclude Include="include\ark\ark_capability.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
+    <ClInclude Include="include\ark\ark_thread.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_handle.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="src\features\handle\handle_support.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_alpc.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="src\features\alpc\alpc_support.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_section.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="src\features\section\section_support.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_memory.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_file_monitor.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_wsl_silo.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_trust.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_safety.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_preflight.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
     <ClInclude Include="..\third_party\systeminformer_dyn\ksw_si_dynconfig.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -152,7 +212,16 @@
     <ClCompile Include="src\features\kernel\ssdt_query.c">
       <Filter>Source Files\Features\Kernel</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\kernel\driver_object_query.c">
+      <Filter>Source Files\Features\Kernel</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\file\file_actions.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\file_monitor\file_monitor_runtime.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\file_monitor\file_monitor_ioctl.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>
     <ClCompile Include="src\framework\driver_entry.c">
@@ -173,7 +242,19 @@
     <ClCompile Include="src\features\process\process_actions.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\process\process_terminate.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\process\process_terminate_memory.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\process\process_extended.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\process\process_memory.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\process\process_memory_ioctl.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>
     <ClCompile Include="src\platform\process_resolver.c">
@@ -196,6 +277,66 @@
     </ClCompile>
     <ClCompile Include="src\features\capability\capability_ioctl.c">
       <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\thread\thread_query.c">
+      <Filter>Source Files\Features\Thread</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\thread\thread_ioctl.c">
+      <Filter>Source Files\Features\Thread</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\handle\handle_support.c">
+      <Filter>Source Files\Features\Handle</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\handle\handle_object_query.c">
+      <Filter>Source Files\Features\Handle</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\handle\handle_query.c">
+      <Filter>Source Files\Features\Handle</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\handle\handle_ioctl.c">
+      <Filter>Source Files\Features\Handle</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\alpc\alpc_support.c">
+      <Filter>Source Files\Features\Alpc</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\alpc\alpc_query.c">
+      <Filter>Source Files\Features\Alpc</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\alpc\alpc_ioctl.c">
+      <Filter>Source Files\Features\Alpc</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\section\section_support.c">
+      <Filter>Source Files\Features\Section</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\section\section_query.c">
+      <Filter>Source Files\Features\Section</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\section\section_ioctl.c">
+      <Filter>Source Files\Features\Section</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\wsl\wsl_silo_query.c">
+      <Filter>Source Files\Features\WSL</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\wsl\wsl_silo_ioctl.c">
+      <Filter>Source Files\Features\WSL</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\trust\trust_query.c">
+      <Filter>Source Files\Features\Trust</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\trust\trust_ioctl.c">
+      <Filter>Source Files\Features\Trust</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\safety\safety_policy.c">
+      <Filter>Source Files\Features\Safety</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\safety\safety_ioctl.c">
+      <Filter>Source Files\Features\Safety</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\preflight\preflight_query.c">
+      <Filter>Source Files\Features\Preflight</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\preflight\preflight_ioctl.c">
+      <Filter>Source Files\Features\Preflight</Filter>
     </ClCompile>
     <ClCompile Include="..\third_party\systeminformer_dyn\kphdyn.c">
       <Filter>Source Files\ThirdParty</Filter>

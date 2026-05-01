@@ -13,3 +13,4 @@ tmp-qmake-mm*/
 windeployqt_raw.txt
 vs_install.json
 aqtinstall.log
+.cert/

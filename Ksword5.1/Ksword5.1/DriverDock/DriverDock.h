@@ -10,6 +10,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../ArkDriverClient/ArkDriverClient.h"
 
 #include <QWidget>
 
@@ -99,6 +100,11 @@ private:
     // - 作用：构建“调试输出”页（DBWIN 捕获控制与输出框）。
     void initializeDebugOutputTab();
 
+    // initializeObjectInfoTab：
+    // - 构建 Phase-9 “对象信息”页；
+    // - 通过 ArkDriverClient 查询 DriverObject、MajorFunction 和 DeviceObject 链。
+    void initializeObjectInfoTab();
+
     // initializeConnections：
     // - 作用：连接全部控件信号与业务槽函数。
     void initializeConnections();
@@ -111,6 +117,21 @@ private:
     // refreshLoadedKernelModuleRecords：
     // - 作用：刷新已加载内核模块缓存并重建模块表格。
     void refreshLoadedKernelModuleRecords();
+
+    // querySelectedDriverObjectInfo：
+    // - 根据对象页输入的 \Driver\Name 查询 R0 DriverObject；
+    // - 后台执行，完成后回填基础字段、MajorFunction 表和 DeviceObject 表。
+    void querySelectedDriverObjectInfo();
+
+    // applyDriverObjectQueryResult：
+    // - 回填 Phase-9 DriverObject 查询结果；
+    // - 参数 result 为 ArkDriverClient 解析后的结构化响应。
+    void applyDriverObjectQueryResult(const ksword::ark::DriverObjectQueryResult& result);
+
+    // fillObjectDriverNameFromSelection：
+    // - 从概览页当前选中服务名推导 \Driver\Name；
+    // - 便于用户双击服务后直接查询对象。
+    void fillObjectDriverNameFromSelection();
 
     // rebuildDriverServiceTableByFilter：
     // - 作用：按过滤关键词重建驱动服务表格。
@@ -260,6 +281,19 @@ private:
     QPushButton* m_copyDebugOutputButton = nullptr;   // 复制输出按钮。
     QLabel* m_debugCaptureStatusLabel = nullptr;      // 捕获状态标签。
     QPlainTextEdit* m_debugOutputEdit = nullptr;      // 调试输出文本框。
+
+    // ========================= 页签4：对象信息 =========================
+    QWidget* m_objectInfoPage = nullptr;              // 对象信息页容器。
+    QVBoxLayout* m_objectInfoLayout = nullptr;        // 对象信息页主布局。
+    QLineEdit* m_objectDriverNameEdit = nullptr;      // \Driver\Name 输入框。
+    QPushButton* m_fillObjectDriverNameButton = nullptr; // 从选中服务填充按钮。
+    QPushButton* m_queryObjectInfoButton = nullptr;   // R0 查询按钮。
+    QLabel* m_objectInfoStatusLabel = nullptr;        // 查询状态标签。
+    QPlainTextEdit* m_objectInfoSummaryEdit = nullptr;// DriverObject 摘要。
+    QTableWidget* m_majorFunctionTable = nullptr;     // MajorFunction 表。
+    QTableWidget* m_deviceObjectTable = nullptr;      // DeviceObject/AttachedDevice 表。
+    bool m_objectInfoQuerying = false;                // 查询中标记。
+    std::uint64_t m_objectInfoQueryTicket = 0;        // 查询序号。
 
     // ========================= 数据缓存 =========================
     std::vector<DriverServiceRecord> m_driverServiceCache;      // 驱动服务缓存。

@@ -119,7 +119,7 @@ private:
     void openBackgroundFileDialog();
 
     // resetBackgroundPathToDefault 作用：
-    // - 把背景图路径恢复为默认 style/ksword_background.png。
+    // - 把背景图路径恢复为默认 Style/ksword_background.png。
     // 调用方式：点击“恢复默认背景路径”按钮时调用。
     void resetBackgroundPathToDefault();
 

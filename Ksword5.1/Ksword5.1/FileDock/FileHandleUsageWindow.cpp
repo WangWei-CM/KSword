@@ -161,6 +161,7 @@ void FileHandleUsageWindow::initializeUi()
         QStringLiteral("访问掩码"),
         QStringLiteral("命中目标"),
         QStringLiteral("命中规则"),
+        QStringLiteral("来源"),
         QStringLiteral("进程路径")
         });
     m_resultTable->setRootIsDecorated(false);
@@ -344,6 +345,9 @@ void FileHandleUsageWindow::rebuildTable(const std::vector<filedock::handleusage
             entry.matchRuleText.trimmed().isEmpty()
             ? (entry.matchedByDirectoryRule ? QStringLiteral("目录前缀") : QStringLiteral("精确"))
             : entry.matchRuleText);
+        item->setText(
+            static_cast<int>(TableColumn::Source),
+            entry.enumerationSource.trimmed().isEmpty() ? QStringLiteral("R3 DuplicateHandle") : entry.enumerationSource);
         item->setText(static_cast<int>(TableColumn::ProcessPath), entry.processImagePath);
         item->setData(static_cast<int>(TableColumn::ProcessId), Qt::UserRole, static_cast<qulonglong>(rowIndex));
         m_resultTable->addTopLevelItem(item);
@@ -380,6 +384,7 @@ void FileHandleUsageWindow::applyAdaptiveColumnWidths()
     const int typeWidth = 140;
     const int accessWidth = 120;
     const int ruleWidth = 150;
+    const int sourceWidth = 150;
 
     m_resultTable->setColumnWidth(static_cast<int>(TableColumn::ProcessId), pidWidth);
     m_resultTable->setColumnWidth(static_cast<int>(TableColumn::ProcessName), processNameWidth);
@@ -387,9 +392,10 @@ void FileHandleUsageWindow::applyAdaptiveColumnWidths()
     m_resultTable->setColumnWidth(static_cast<int>(TableColumn::TypeName), typeWidth);
     m_resultTable->setColumnWidth(static_cast<int>(TableColumn::AccessMask), accessWidth);
     m_resultTable->setColumnWidth(static_cast<int>(TableColumn::MatchRule), ruleWidth);
+    m_resultTable->setColumnWidth(static_cast<int>(TableColumn::Source), sourceWidth);
 
     const int fixedWidth =
-        pidWidth + processNameWidth + handleWidth + typeWidth + accessWidth + ruleWidth;
+        pidWidth + processNameWidth + handleWidth + typeWidth + accessWidth + ruleWidth + sourceWidth;
     const int flexibleWidth = std::max(420, viewportWidth - fixedWidth - 24);
 
     const int objectNameWidth = std::max(240, static_cast<int>(flexibleWidth * 0.40));

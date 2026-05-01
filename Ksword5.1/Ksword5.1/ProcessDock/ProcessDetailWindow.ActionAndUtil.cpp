@@ -455,3 +455,93 @@ ks::process::ProcessModuleRecord* ProcessDetailWindow::selectedModuleRecord()
         << eol;
     return &(*foundIt);
 }
+
+void ProcessDetailWindow::openSelectedThreadStackWindow()
+{
+    // 调用栈窗口入口：
+    // - 当前表格行可能经过排序，因此优先读取 ThreadID 单元格保存的缓存索引；
+    // - 缓存索引失效时按 TID 兜底查找，避免排序/刷新边界导致无法打开。
+    if (m_threadInspectTable == nullptr)
+    {
+        return;
+    }
+
+    const int currentRow = m_threadInspectTable->currentRow();
+    if (currentRow < 0)
+    {
+        updateThreadInspectStatusLabel(QStringLiteral("● 请先选择一个线程。"), false);
+        return;
+    }
+
+    QTableWidgetItem* threadIdItem = m_threadInspectTable->item(
+        currentRow,
+        toThreadColumnIndex(ThreadRowColumn::ThreadId));
+    if (threadIdItem == nullptr)
+    {
+        updateThreadInspectStatusLabel(QStringLiteral("● 当前线程行缺少 ThreadID。"), false);
+        return;
+    }
+
+    const std::size_t cacheIndex =
+        static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong());
+    const ThreadInspectItem* selectedThread = nullptr;
+    if (cacheIndex < m_threadInspectRows.size())
+    {
+        selectedThread = &m_threadInspectRows[cacheIndex];
+    }
+
+    const std::uint32_t selectedTid =
+        static_cast<std::uint32_t>(threadIdItem->data(Qt::UserRole + 1).toUInt());
+    if (selectedThread == nullptr || selectedThread->threadId != selectedTid)
+    {
+        const auto foundIt = std::find_if(
+            m_threadInspectRows.begin(),
+            m_threadInspectRows.end(),
+            [selectedTid](const ThreadInspectItem& rowItem)
+            {
+                return rowItem.threadId == selectedTid;
+            });
+        if (foundIt != m_threadInspectRows.end())
+        {
+            selectedThread = &(*foundIt);
+        }
+    }
+
+    if (selectedThread == nullptr)
+    {
+        updateThreadInspectStatusLabel(QStringLiteral("● 线程缓存已过期，请先刷新线程列表。"), false);
+        return;
+    }
+
+    ThreadStackTarget target{};
+    target.processId = selectedThread->processId != 0 ? selectedThread->processId : m_baseRecord.pid;
+    target.threadId = selectedThread->threadId;
+    target.processName = QString::fromStdString(
+        m_baseRecord.processName.empty() ? std::string("Unknown") : m_baseRecord.processName);
+    target.processPath = QString::fromStdString(m_baseRecord.imagePath);
+    target.startAddress = selectedThread->startAddress;
+    target.win32StartAddress = selectedThread->win32StartAddress;
+    target.tebBaseAddress = selectedThread->tebAddress;
+    target.userStackBase = selectedThread->userStackBase;
+    target.userStackLimit = selectedThread->userStackLimit;
+    target.r0KernelStack = selectedThread->r0KernelStack;
+    target.r0StackBase = selectedThread->r0StackBase;
+    target.r0StackLimit = selectedThread->r0StackLimit;
+    target.r0InitialStack = selectedThread->r0InitialStack;
+    target.r0ThreadStatus = selectedThread->r0ThreadStatus;
+    target.r0CapabilityMask = selectedThread->r0CapabilityMask;
+
+    auto* stackWindow = new ThreadStackWindow(target, this);
+    stackWindow->setAttribute(Qt::WA_DeleteOnClose, true);
+    stackWindow->show();
+    stackWindow->raise();
+    stackWindow->activateWindow();
+
+    kLogEvent actionEvent;
+    info << actionEvent
+        << "[ProcessDetailWindow] openSelectedThreadStackWindow: pid="
+        << target.processId
+        << ", tid="
+        << target.threadId
+        << eol;
+}

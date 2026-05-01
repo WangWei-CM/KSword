@@ -9,7 +9,9 @@
 // ============================================================
 
 #include "ProcessDetailWindow.h"
+#include "ThreadStackWindow.h"
 
+#include "../ArkDriverClient/ArkDriverClient.h"
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../../../shared/driver/KswordArkDynDataIoctl.h"
@@ -46,6 +48,7 @@
 #include <QThreadPool>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
+#include <QtGlobal>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -54,7 +57,9 @@
 #include <cstring>
 #include <memory>
 #include <sstream>
+#include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -85,6 +90,7 @@ namespace process_detail_window_internal
         TebAddress,      // TEB 地址。
         Affinity,        // 亲和性信息。
         RegisterSummary, // 寄存器摘要。
+        StackBoundary,   // R0/用户栈边界摘要。
         Count            // 列总数。
     };
 

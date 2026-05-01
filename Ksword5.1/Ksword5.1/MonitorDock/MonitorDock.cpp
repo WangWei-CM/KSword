@@ -520,8 +520,11 @@ namespace
         window->activateWindow();
     }
 
-    // 当前时间转 100ns 文本。
-    QString now100nsText()
+    // currentSystemTime100ns：
+    // - 作用：把当前系统时间读取为 FILETIME 兼容的 100ns 时间戳；
+    // - 调用：ETW 监听开始/停止、时间轴实时右边界与兜底时间戳复用；
+    // - 返回：自 1601-01-01 UTC 起算的 100ns 单位整数。
+    std::uint64_t currentSystemTime100ns()
     {
         FILETIME fileTime{};
         ::GetSystemTimeAsFileTime(&fileTime);
@@ -529,7 +532,13 @@ namespace
         ULARGE_INTEGER value{};
         value.LowPart = fileTime.dwLowDateTime;
         value.HighPart = fileTime.dwHighDateTime;
-        return QString::number(static_cast<qulonglong>(value.QuadPart));
+        return static_cast<std::uint64_t>(value.QuadPart);
+    }
+
+    // 当前时间转 100ns 文本。
+    QString now100nsText()
+    {
+        return QString::number(static_cast<qulonglong>(currentSystemTime100ns()));
     }
 
     // 文本 GUID 转结构 GUID：支持 "{...}" 或 "..." 两种输入。
@@ -681,6 +690,74 @@ namespace
             return QStringLiteral("脚本管理");
         }
         return QStringLiteral("自定义/其他");
+    }
+
+    // etwTimelineTypeFromCapturedRow：
+    // - 作用：把 ETW 捕获行归一化为时间轴控件已支持的颜色/泳道类型；
+    // - 处理：优先按 Provider 名细分进程、线程、镜像等事件，再用语义资源类型兜底；
+    // - 返回：时间轴点的 typeText，未知时返回“其他”。
+    QString etwTimelineTypeFromCapturedRow(const MonitorDock::EtwCapturedEventRow& rowData)
+    {
+        const QString providerNameText = rowData.providerName.trimmed();
+        if (providerNameText.contains(QStringLiteral("Kernel-Process"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("进程");
+        }
+        if (providerNameText.contains(QStringLiteral("Kernel-Thread"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("线程");
+        }
+        if (providerNameText.contains(QStringLiteral("Kernel-Image"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("镜像");
+        }
+        if (providerNameText.contains(QStringLiteral("Kernel-File"), Qt::CaseInsensitive)
+            || rowData.resourceTypeText.compare(QStringLiteral("文件"), Qt::CaseInsensitive) == 0)
+        {
+            return QStringLiteral("文件");
+        }
+        if (providerNameText.contains(QStringLiteral("Kernel-Registry"), Qt::CaseInsensitive)
+            || rowData.resourceTypeText.compare(QStringLiteral("注册表"), Qt::CaseInsensitive) == 0)
+        {
+            return QStringLiteral("注册表");
+        }
+        if (providerNameText.contains(QStringLiteral("DNS-Client"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("DNS");
+        }
+        if (providerNameText.contains(QStringLiteral("TCPIP"), Qt::CaseInsensitive)
+            || providerNameText.contains(QStringLiteral("AFD"), Qt::CaseInsensitive)
+            || providerNameText.contains(QStringLiteral("Winsock"), Qt::CaseInsensitive)
+            || rowData.resourceTypeText.compare(QStringLiteral("网络"), Qt::CaseInsensitive) == 0)
+        {
+            return QStringLiteral("网络");
+        }
+        if (providerNameText.contains(QStringLiteral("PowerShell"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("PowerShell");
+        }
+        if (providerNameText.contains(QStringLiteral("WMI-Activity"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("WMI");
+        }
+        if (providerNameText.contains(QStringLiteral("TaskScheduler"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("计划任务");
+        }
+        if (providerNameText.contains(QStringLiteral("Security-Auditing"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("安全审计");
+        }
+        if (providerNameText.contains(QStringLiteral("Defender"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("Defender");
+        }
+        if (rowData.providerCategory.compare(QStringLiteral("进程线程"), Qt::CaseInsensitive) == 0
+            || rowData.resourceTypeText.compare(QStringLiteral("进程线程"), Qt::CaseInsensitive) == 0)
+        {
+            return QStringLiteral("进程");
+        }
+        return QStringLiteral("其他");
     }
 
     const std::vector<EtwFilterFieldDescriptor>& etwFilterFieldDescriptorList()
@@ -4936,6 +5013,15 @@ void MonitorDock::initializeEtwTab()
     // 把 ETW 控制栏放在折叠栏外，统一和 WMI 的操作区布局。
     m_etwLayout->addLayout(m_etwCaptureControlLayout, 0);
 
+    // ETW 时间轴：
+    // - 复用“进程定向”页的紧凑瀑布流控件，保证两个监控页的交互语义一致；
+    // - 时间轴只保存轻量时间点，实际显示/隐藏仍由 ETW 后置筛选统一执行；
+    // - 默认全范围选区不产生过滤，用户拖动或滚轮缩放后才叠加时间窗口。
+    m_etwTimelineWidget = new ProcessTraceTimelineWidget(m_etwPage);
+    m_etwTimelineWidget->setToolTip(QStringLiteral(
+        "ETW 事件瀑布流时间轴：拖动矩形移动时间窗口；拖动左右边调整边界；滚轮向上放大窗口、向下缩小窗口。"));
+    m_etwLayout->addWidget(m_etwTimelineWidget, 0);
+
     // 结果表。
     m_etwEventTable = new QTableWidget(m_etwPage);
     m_etwEventTable->setColumnCount(7);
@@ -5122,6 +5208,13 @@ void MonitorDock::initializeConnections()
         connect(m_etwSideToolBox, &QToolBox::currentChanged, this, [this](const int) {
             updateEtwCollapseHeight();
         });
+    }
+    if (m_etwTimelineWidget != nullptr)
+    {
+        m_etwTimelineWidget->setSelectionChangedCallback(
+            [this](const std::uint64_t start100ns, const std::uint64_t end100ns) {
+                applyEtwTimelineSelection(start100ns, end100ns);
+            });
     }
 
     // WMI 基础交互。
@@ -5412,7 +5505,7 @@ void MonitorDock::initializeConnections()
     if (m_etwPostFilterClearButton != nullptr)
     {
         connect(m_etwPostFilterClearButton, &QPushButton::clicked, this, [this]() {
-            clearEtwFilterGroups(EtwFilterStage::Post);
+            clearEtwFilterGroups(EtwFilterStage::Post, true);
             applyEtwFilterRules(EtwFilterStage::Post);
         });
     }
@@ -5508,62 +5601,7 @@ void MonitorDock::initializeConnections()
     });
 
     connect(m_etwUiUpdateTimer, &QTimer::timeout, this, [this]() {
-        std::vector<EtwCapturedEventRow> rows;
-        {
-            std::lock_guard<std::mutex> lock(m_etwPendingMutex);
-            rows.swap(m_etwPendingRows);
-        }
-
-        if (rows.empty())
-        {
-            return;
-        }
-
-        m_etwEventTable->setUpdatesEnabled(false);
-
-        for (EtwCapturedEventRow& rowData : rows)
-        {
-            m_etwCapturedRows.push_back(std::move(rowData));
-            EtwCapturedEventRow& captured = m_etwCapturedRows.back();
-
-            const int row = m_etwEventTable->rowCount();
-            m_etwEventTable->insertRow(row);
-
-            const QStringList rowTextList{
-                captured.timestampText,
-                captured.providerName,
-                QString::number(captured.eventId),
-                captured.eventName,
-                captured.pidTidText,
-                captured.detailSummary,
-                captured.activityId
-            };
-
-            for (int col = 0; col < rowTextList.size(); ++col)
-            {
-                const QString cellText = rowTextList.at(col);
-                QTableWidgetItem* item = new QTableWidgetItem(cellText);
-                item->setToolTip(cellText);
-                if (col == 5)
-                {
-                    item->setData(Qt::UserRole, captured.detailJson);
-                }
-                m_etwEventTable->setItem(row, col, item);
-            }
-        }
-
-        while (m_etwEventTable->rowCount() > 6000)
-        {
-            m_etwEventTable->removeRow(0);
-            if (!m_etwCapturedRows.empty())
-            {
-                m_etwCapturedRows.erase(m_etwCapturedRows.begin());
-            }
-        }
-
-        applyEtwPostFilterToTable();
-        m_etwEventTable->setUpdatesEnabled(true);
-        m_etwEventTable->viewport()->update();
+        flushEtwPendingRows(false);
     });
 
     connect(m_etwEventTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
@@ -5843,7 +5881,7 @@ void MonitorDock::removeEtwFilterRuleGroup(const EtwFilterStage stage, const int
     applyEtwFilterRules(stage);
 }
 
-void MonitorDock::clearEtwFilterGroups(const EtwFilterStage stage)
+void MonitorDock::clearEtwFilterGroups(const EtwFilterStage stage, const bool resetTimelineSelection)
 {
     std::vector<std::unique_ptr<EtwFilterRuleGroupUiState>>& groupList =
         stage == EtwFilterStage::Pre ? m_etwPreFilterRuleGroupUiList : m_etwPostFilterRuleGroupUiList;
@@ -5862,6 +5900,14 @@ void MonitorDock::clearEtwFilterGroups(const EtwFilterStage stage)
     else
     {
         m_etwPostFilterNextGroupId = 1;
+    }
+    if (stage == EtwFilterStage::Post && resetTimelineSelection && m_etwTimelineWidget != nullptr)
+    {
+        // 后置筛选的“清空”语义覆盖显示层过滤，时间轴选区也一并恢复为完整范围。
+        m_etwTimelineWidget->resetSelectionToFullRange();
+        m_etwTimelineSelectionStart100ns = m_etwTimelineWidget->selectionStart100ns();
+        m_etwTimelineSelectionEnd100ns = m_etwTimelineWidget->selectionEnd100ns();
+        m_etwTimelineUserSelectionActive = false;
     }
     addEtwFilterRuleGroup(stage);
     rebuildEtwFilterRuleGroupUi(stage);
@@ -6101,8 +6147,27 @@ void MonitorDock::updateEtwFilterStateLabel(const EtwFilterStage stage)
         const QString tailText = stage == EtwFilterStage::Pre
             ? QStringLiteral("前置筛选当前无规则（全部捕获）")
             : QStringLiteral("后置筛选当前无规则（全部显示）");
-        stateLabel->setText(tailText);
-        stateLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
+        if (stage == EtwFilterStage::Post && m_etwEventTable != nullptr && isEtwTimelineFilterActive())
+        {
+            int visibleCount = 0;
+            for (int row = 0; row < m_etwEventTable->rowCount(); ++row)
+            {
+                if (!m_etwEventTable->isRowHidden(row))
+                {
+                    ++visibleCount;
+                }
+            }
+            stateLabel->setText(QStringLiteral("%1 | 可见: %2 / %3 | 时间轴已筛选")
+                .arg(QStringLiteral("后置筛选当前无规则"))
+                .arg(visibleCount)
+                .arg(m_etwEventTable->rowCount()));
+            stateLabel->setStyleSheet(buildStatusStyle(monitorInfoColorHex()));
+        }
+        else
+        {
+            stateLabel->setText(tailText);
+            stateLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
+        }
         return;
     }
 
@@ -6128,6 +6193,10 @@ void MonitorDock::updateEtwFilterStateLabel(const EtwFilterStage stage)
             }
         }
         summaryText += QStringLiteral(" | 可见: %1 / %2").arg(visibleCount).arg(m_etwEventTable->rowCount());
+        if (isEtwTimelineFilterActive())
+        {
+            summaryText += QStringLiteral(" | 时间轴已筛选");
+        }
     }
 
     stateLabel->setText(summaryText);
@@ -6146,13 +6215,14 @@ void MonitorDock::applyEtwPostFilterToTable()
         static_cast<int>(m_etwCapturedRows.size()));
 
     const bool hasPostRules = !m_etwPostFilterCompiledGroupList.empty();
+    const bool timelineFilterActive = isEtwTimelineFilterActive();
     for (int row = 0; row < rowCount; ++row)
     {
         bool visible = true;
+        const EtwCapturedEventRow& rowData = m_etwCapturedRows[static_cast<std::size_t>(row)];
         if (hasPostRules)
         {
             visible = false;
-            const EtwCapturedEventRow& rowData = m_etwCapturedRows[static_cast<std::size_t>(row)];
             for (const EtwFilterRuleGroupCompiled& groupRule : m_etwPostFilterCompiledGroupList)
             {
                 if (etwFilterGroupMatches(groupRule, rowData))
@@ -6161,6 +6231,12 @@ void MonitorDock::applyEtwPostFilterToTable()
                     break;
                 }
             }
+        }
+        if (visible && timelineFilterActive)
+        {
+            // 时间轴是外层时间窗口约束，不受后置规则组的反向匹配影响。
+            visible = rowData.timestampValue >= m_etwTimelineSelectionStart100ns
+                && rowData.timestampValue <= m_etwTimelineSelectionEnd100ns;
         }
         m_etwEventTable->setRowHidden(row, !visible);
     }
@@ -8707,6 +8783,29 @@ void MonitorDock::startEtwCapture()
         return;
     }
 
+    // 新一轮 ETW 监听开始前清空旧结果：
+    // - 表格、后置缓存与时间轴点必须同步归零；
+    // - 时间轴起点使用启动瞬间的 100ns 时间戳，后续右边界实时跟随。
+    if (m_etwEventTable != nullptr)
+    {
+        m_etwEventTable->clearContents();
+        m_etwEventTable->setRowCount(0);
+    }
+    m_etwCapturedRows.clear();
+    m_etwTimelineEventPoints.clear();
+    m_etwCaptureStartTime100ns = currentSystemTime100ns();
+    m_etwCaptureStopTime100ns = 0;
+    m_etwTimelineSelectionStart100ns = m_etwCaptureStartTime100ns;
+    m_etwTimelineSelectionEnd100ns = m_etwCaptureStartTime100ns;
+    m_etwTimelineUserSelectionActive = false;
+    if (m_etwTimelineWidget != nullptr)
+    {
+        m_etwTimelineWidget->resetTimeline(m_etwCaptureStartTime100ns);
+        m_etwTimelineSelectionStart100ns = m_etwTimelineWidget->selectionStart100ns();
+        m_etwTimelineSelectionEnd100ns = m_etwTimelineWidget->selectionEnd100ns();
+    }
+    applyEtwPostFilterToTable();
+
     // 清空待刷新队列，避免把上一轮数据混入本轮。
     {
         std::lock_guard<std::mutex> lock(m_etwPendingMutex);
@@ -8931,6 +9030,10 @@ void MonitorDock::startEtwCapture()
             }
             guardThis->m_etwCaptureRunning.store(false);
             guardThis->m_etwCapturePaused.store(false);
+            if (guardThis->m_etwCaptureStopTime100ns == 0)
+            {
+                guardThis->m_etwCaptureStopTime100ns = currentSystemTime100ns();
+            }
 
             if (processStatus == ERROR_SUCCESS)
             {
@@ -8943,6 +9046,11 @@ void MonitorDock::startEtwCapture()
                 guardThis->m_etwCaptureStatusLabel->setStyleSheet(buildStatusStyle(monitorWarningColorHex()));
             }
             guardThis->updateEtwCaptureActionState();
+            if (guardThis->m_etwUiUpdateTimer != nullptr && guardThis->m_etwUiUpdateTimer->isActive())
+            {
+                guardThis->m_etwUiUpdateTimer->stop();
+            }
+            guardThis->flushEtwPendingRows(true);
             kPro.set(guardThis->m_etwCaptureProgressPid, "ETW监听结束", 0, 100.0f);
         }, Qt::QueuedConnection);
     });
@@ -8964,6 +9072,12 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
     }
 
     m_etwCaptureStopFlag.store(true);
+    if (m_etwCaptureRunning.load() && m_etwCaptureStopTime100ns == 0)
+    {
+        // 停止按钮按下时立即冻结时间轴右边界，避免等待后台线程退出期间继续扩大窗口。
+        m_etwCaptureStopTime100ns = currentSystemTime100ns();
+        refreshEtwTimelineRange(true);
+    }
 
     // 先关闭消费句柄，打断 ProcessTrace 阻塞。
     const std::uint64_t ownedTraceHandle = m_etwTraceHandle.exchange(0);
@@ -9010,6 +9124,7 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
         {
             m_etwUiUpdateTimer->stop();
         }
+        flushEtwPendingRows(true);
         updateEtwCaptureActionState();
         kLogEvent event;
         dbg << event
@@ -9034,6 +9149,7 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
         {
             m_etwUiUpdateTimer->stop();
         }
+        flushEtwPendingRows(true);
         updateEtwCaptureActionState();
         kLogEvent event;
         info << event
@@ -9071,6 +9187,7 @@ void MonitorDock::stopEtwCaptureInternal(bool waitForThread)
             {
                 guardThis->m_etwUiUpdateTimer->stop();
             }
+            guardThis->flushEtwPendingRows(true);
             guardThis->updateEtwCaptureActionState();
 
             kLogEvent event;
@@ -9145,6 +9262,160 @@ void MonitorDock::updateEtwCaptureActionState()
         m_etwPauseButton->setIcon(QIcon(QStringLiteral(":/Icon/process_pause.svg")));
         m_etwPauseButton->setToolTip(QStringLiteral("暂停监听"));
     }
+}
+
+void MonitorDock::flushEtwPendingRows(const bool captureFinished)
+{
+    if (m_etwEventTable == nullptr)
+    {
+        return;
+    }
+
+    std::vector<EtwCapturedEventRow> rows;
+    {
+        std::lock_guard<std::mutex> lock(m_etwPendingMutex);
+        rows.swap(m_etwPendingRows);
+    }
+
+    if (rows.empty())
+    {
+        // 空刷新仍要维护时间轴范围，尤其是监听中没有事件但时间继续推进的场景。
+        refreshEtwTimelineRange(captureFinished);
+        refreshEtwTimelinePoints();
+        if (captureFinished || isEtwTimelineFilterActive())
+        {
+            applyEtwPostFilterToTable();
+        }
+        return;
+    }
+
+    m_etwEventTable->setUpdatesEnabled(false);
+    for (EtwCapturedEventRow& rowData : rows)
+    {
+        m_etwCapturedRows.push_back(std::move(rowData));
+        EtwCapturedEventRow& captured = m_etwCapturedRows.back();
+
+        const int row = m_etwEventTable->rowCount();
+        m_etwEventTable->insertRow(row);
+
+        const QStringList rowTextList{
+            captured.timestampText,
+            captured.providerName,
+            QString::number(captured.eventId),
+            captured.eventName,
+            captured.pidTidText,
+            captured.detailSummary,
+            captured.activityId
+        };
+
+        for (int col = 0; col < rowTextList.size(); ++col)
+        {
+            const QString cellText = rowTextList.at(col);
+            QTableWidgetItem* item = new QTableWidgetItem(cellText);
+            item->setToolTip(cellText);
+            if (col == 5)
+            {
+                // Detail 列的 UserRole 保存完整 JSON，表格文本只显示摘要。
+                item->setData(Qt::UserRole, captured.detailJson);
+            }
+            m_etwEventTable->setItem(row, col, item);
+        }
+
+        ProcessTraceTimelineEventPoint pointValue;
+        pointValue.time100ns = captured.timestampValue;
+        pointValue.typeText = etwTimelineTypeFromCapturedRow(captured);
+        m_etwTimelineEventPoints.push_back(std::move(pointValue));
+    }
+
+    while (m_etwEventTable->rowCount() > 6000)
+    {
+        // 表格、完整事件缓存和时间轴点必须同步裁剪，保证行号与缓存索引继续一一对应。
+        m_etwEventTable->removeRow(0);
+        if (!m_etwCapturedRows.empty())
+        {
+            m_etwCapturedRows.erase(m_etwCapturedRows.begin());
+        }
+        if (!m_etwTimelineEventPoints.empty())
+        {
+            m_etwTimelineEventPoints.erase(m_etwTimelineEventPoints.begin());
+        }
+    }
+
+    refreshEtwTimelineRange(captureFinished);
+    refreshEtwTimelinePoints();
+    applyEtwPostFilterToTable();
+    m_etwEventTable->setUpdatesEnabled(true);
+    m_etwEventTable->viewport()->update();
+}
+
+void MonitorDock::applyEtwTimelineSelection(
+    const std::uint64_t start100ns,
+    const std::uint64_t end100ns)
+{
+    // 时间轴控件只解释鼠标/滚轮动作，表格可见性仍交给 ETW 后置筛选统一处理。
+    // 这里保存绝对 100ns 时间戳，避免把图形坐标和表格行号耦合在一起。
+    m_etwTimelineSelectionStart100ns = std::min(start100ns, end100ns);
+    m_etwTimelineSelectionEnd100ns = std::max(start100ns, end100ns);
+    m_etwTimelineUserSelectionActive = true;
+    applyEtwPostFilterToTable();
+}
+
+void MonitorDock::refreshEtwTimelineRange(const bool captureFinished)
+{
+    if (m_etwTimelineWidget == nullptr || m_etwCaptureStartTime100ns == 0)
+    {
+        return;
+    }
+
+    // captureEnd100ns：
+    // - 监听中使用当前系统时间，保证右侧边界持续推进；
+    // - 停止后固定到停止瞬间，避免用户复查时选区继续漂移。
+    std::uint64_t captureEnd100ns = captureFinished && m_etwCaptureStopTime100ns != 0
+        ? m_etwCaptureStopTime100ns
+        : currentSystemTime100ns();
+    if (captureEnd100ns <= m_etwCaptureStartTime100ns)
+    {
+        captureEnd100ns = m_etwCaptureStartTime100ns + 1;
+    }
+
+    m_etwTimelineWidget->setCaptureRange(m_etwCaptureStartTime100ns, captureEnd100ns);
+    m_etwTimelineSelectionStart100ns = m_etwTimelineWidget->selectionStart100ns();
+    m_etwTimelineSelectionEnd100ns = m_etwTimelineWidget->selectionEnd100ns();
+}
+
+void MonitorDock::refreshEtwTimelinePoints()
+{
+    if (m_etwTimelineWidget == nullptr)
+    {
+        return;
+    }
+
+    // 控件只接收轻量点缓存，完整事件仍保留在 m_etwCapturedRows 中供筛选和导出使用。
+    m_etwTimelineWidget->setEventPoints(m_etwTimelineEventPoints);
+}
+
+bool MonitorDock::isEtwTimelineFilterActive() const
+{
+    if (m_etwCaptureStartTime100ns == 0
+        || !m_etwTimelineUserSelectionActive
+        || m_etwTimelineSelectionStart100ns == 0
+        || m_etwTimelineSelectionEnd100ns == 0
+        || m_etwTimelineSelectionEnd100ns <= m_etwTimelineSelectionStart100ns)
+    {
+        return false;
+    }
+
+    const std::uint64_t effectiveEnd100ns = m_etwCaptureStopTime100ns != 0
+        ? m_etwCaptureStopTime100ns
+        : currentSystemTime100ns();
+    if (effectiveEnd100ns <= m_etwCaptureStartTime100ns)
+    {
+        return false;
+    }
+
+    // 全范围选区不是筛选条件；只有用户主动缩小或平移窗口后才隐藏时间窗口外的事件。
+    return m_etwTimelineSelectionStart100ns > m_etwCaptureStartTime100ns
+        || m_etwTimelineSelectionEnd100ns < effectiveEnd100ns;
 }
 
 void MonitorDock::appendEtwEventRow(

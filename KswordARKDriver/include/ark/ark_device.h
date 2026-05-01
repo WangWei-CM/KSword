@@ -34,7 +34,8 @@ KswordARKDriverCreateDevice(
 
 NTSTATUS
 KswordARKDriverCreateControlDevice(
-    _In_ WDFDRIVER Driver
+    _In_ WDFDRIVER Driver,
+    _Out_opt_ WDFDEVICE* DeviceOut
     );
 
 // Function to select the device's USB configuration and get a WDFUSBDEVICE

@@ -8,6 +8,8 @@
 // - 同时补充进程映像与已加载模块两类非 File 句柄占用来源。
 // ============================================================
 
+#include "../ArkDriverClient/ArkDriverClient.h"
+
 #include <QChar>
 #include <QDir>
 #include <QFileInfo>
@@ -757,6 +759,9 @@ namespace filedock::handleusage
             std::size_t& processImageMatchCountOut,
             std::size_t& loadedModuleMatchCountOut,
             const int progressPid);
+        HandleUsageScanResult scanKernelHandleTableOccupancy(
+            const std::vector<TargetPathPattern>& targetPatterns,
+            const std::unordered_map<std::uint32_t, QString>& processNameMap);
 
         struct FileHandleScanSharedState
         {
@@ -986,6 +991,7 @@ namespace filedock::handleusage
                 entry.matchedTargetPath = matchedTargetPath;
                 entry.matchedByDirectoryRule = matchedByDirectoryRule;
                 entry.matchRuleText = buildPathRuleText(QStringLiteral("文件句柄"), matchedByDirectoryRule);
+                entry.enumerationSource = QStringLiteral("R3 DuplicateHandle");
 
                 {
                     std::lock_guard<std::mutex> lock(sharedState->dataMutex);
@@ -1250,6 +1256,149 @@ namespace filedock::handleusage
             return result;
         }
 
+        HandleUsageScanResult scanKernelHandleTableOccupancy(
+            const std::vector<TargetPathPattern>& targetPatterns,
+            const std::unordered_map<std::uint32_t, QString>& processNameMap)
+        {
+            // 作用：使用 Phase-4 R0 HandleTable 枚举提升文件占用扫描能力。
+            // 处理：先 R0 枚举每个进程句柄，再对疑似 File 的句柄查询对象名并匹配目标路径。
+            // 返回：只包含 KernelHandleTable 命中的扫描结果；失败原因写入 diagnosticText。
+            HandleUsageScanResult result{};
+            if (targetPatterns.empty())
+            {
+                result.diagnosticText = QStringLiteral("KernelHandleTable:目标为空");
+                return result;
+            }
+
+            ksword::ark::DriverClient driverClient;
+            const ksword::ark::ProcessEnumResult processResult =
+                driverClient.enumerateProcesses(KSWORD_ARK_ENUM_PROCESS_FLAG_SCAN_CID_TABLE);
+            if (!processResult.io.ok || processResult.entries.empty())
+            {
+                result.diagnosticText = QStringLiteral("KernelHandleTable不可用:%1")
+                    .arg(QString::fromStdString(processResult.io.message));
+                return result;
+            }
+
+            std::unordered_set<std::uint64_t> emittedHandleKeySet;
+            emittedHandleKeySet.reserve(256);
+            std::size_t enumFailedCount = 0;
+            std::size_t objectQueryFailedCount = 0;
+            std::size_t nonFileSkippedCount = 0;
+
+            for (const ksword::ark::ProcessEntry& processEntry : processResult.entries)
+            {
+                if (processEntry.processId == 0)
+                {
+                    continue;
+                }
+
+                const ksword::ark::HandleEnumResult handleResult =
+                    driverClient.enumerateProcessHandles(
+                        processEntry.processId,
+                        KSWORD_ARK_ENUM_HANDLE_FLAG_INCLUDE_ALL);
+                if (!handleResult.io.ok || handleResult.entries.empty())
+                {
+                    ++enumFailedCount;
+                    continue;
+                }
+
+                result.totalHandleCount += handleResult.entries.size();
+                for (const ksword::ark::HandleEntry& handleEntry : handleResult.entries)
+                {
+                    const std::uint64_t handleKey = buildHandleKey(
+                        handleEntry.processId,
+                        handleEntry.handleValue);
+                    if (emittedHandleKeySet.find(handleKey) != emittedHandleKeySet.end())
+                    {
+                        continue;
+                    }
+
+                    const ksword::ark::HandleObjectQueryResult objectResult =
+                        driverClient.queryHandleObject(
+                            handleEntry.processId,
+                            handleEntry.handleValue,
+                            KSWORD_ARK_QUERY_OBJECT_FLAG_INCLUDE_ALL);
+                    if (!objectResult.io.ok ||
+                        objectResult.queryStatus == KSWORD_ARK_OBJECT_QUERY_STATUS_HANDLE_REFERENCE_FAILED)
+                    {
+                        ++objectQueryFailedCount;
+                        continue;
+                    }
+
+                    const QString typeName = QString::fromStdWString(objectResult.typeName);
+                    if (typeName.compare(QStringLiteral("File"), Qt::CaseInsensitive) != 0 &&
+                        !typeName.contains(QStringLiteral("File"), Qt::CaseInsensitive))
+                    {
+                        ++nonFileSkippedCount;
+                        continue;
+                    }
+
+                    const QString objectName = QString::fromStdWString(objectResult.objectName);
+                    if (objectName.trimmed().isEmpty())
+                    {
+                        ++objectQueryFailedCount;
+                        continue;
+                    }
+
+                    const QString normalizedObjectName = normalizePathForCompare(objectName);
+                    QString matchedTargetPath;
+                    bool matchedByDirectoryRule = false;
+                    if (!matchTargetPath(
+                        normalizedObjectName,
+                        targetPatterns,
+                        matchedTargetPath,
+                        matchedByDirectoryRule))
+                    {
+                        continue;
+                    }
+
+                    HandleUsageEntry entry{};
+                    entry.processId = handleEntry.processId;
+                    const auto processNameIt = processNameMap.find(entry.processId);
+                    entry.processName = (processNameIt != processNameMap.end())
+                        ? processNameIt->second
+                        : QStringLiteral("PID_%1").arg(entry.processId);
+                    entry.processImagePath.clear();
+                    entry.handleValue = handleEntry.handleValue;
+                    entry.typeIndex = static_cast<std::uint16_t>(objectResult.objectTypeIndex);
+                    entry.typeName = typeName.isEmpty() ? QStringLiteral("File") : typeName;
+                    entry.objectName = objectName;
+                    entry.grantedAccess = objectResult.actualGrantedAccess != 0
+                        ? objectResult.actualGrantedAccess
+                        : handleEntry.grantedAccess;
+                    entry.attributes = handleEntry.attributes;
+                    entry.matchedTargetPath = matchedTargetPath;
+                    entry.matchedByDirectoryRule = matchedByDirectoryRule;
+                    entry.matchRuleText = buildPathRuleText(QStringLiteral("文件句柄"), matchedByDirectoryRule);
+                    entry.enumerationSource = QStringLiteral("Kernel HandleTable");
+                    emittedHandleKeySet.insert(handleKey);
+                    result.entries.push_back(std::move(entry));
+                }
+            }
+
+            result.fileLikeHandleCount = result.entries.size();
+            result.matchedHandleCount = result.entries.size();
+            result.kernelHandleMatchCount = result.entries.size();
+
+            QStringList diagnosticList;
+            diagnosticList.push_back(QStringLiteral("KernelHandleTable进程:%1").arg(processResult.entries.size()));
+            if (enumFailedCount > 0)
+            {
+                diagnosticList.push_back(QStringLiteral("R0枚举失败进程:%1").arg(enumFailedCount));
+            }
+            if (objectQueryFailedCount > 0)
+            {
+                diagnosticList.push_back(QStringLiteral("R0对象查询失败:%1").arg(objectQueryFailedCount));
+            }
+            if (nonFileSkippedCount > 0)
+            {
+                diagnosticList.push_back(QStringLiteral("R0非File跳过:%1").arg(nonFileSkippedCount));
+            }
+            result.diagnosticText = diagnosticList.join(QStringLiteral(" | "));
+            return result;
+        }
+
         void appendSyntheticOccupancyEntries(
             const std::vector<TargetPathPattern>& targetPatterns,
             std::unordered_map<std::uint32_t, QString>& processImagePathCache,
@@ -1298,6 +1447,7 @@ namespace filedock::handleusage
                 entry.matchedTargetPath = matchedTargetPath;
                 entry.matchedByDirectoryRule = matchedByDirectoryRule;
                 entry.matchRuleText = buildPathRuleText(QStringLiteral("进程映像"), matchedByDirectoryRule);
+                entry.enumerationSource = QStringLiteral("R3 ProcessImage");
                 entryList.push_back(std::move(entry));
                 ++processImageMatchCountOut;
             }
@@ -1346,6 +1496,7 @@ namespace filedock::handleusage
                             entry.matchedTargetPath = matchedTargetPath;
                             entry.matchedByDirectoryRule = matchedByDirectoryRule;
                             entry.matchRuleText = buildPathRuleText(QStringLiteral("模块加载"), matchedByDirectoryRule);
+                            entry.enumerationSource = QStringLiteral("R3 ModuleSnapshot");
                             entryList.push_back(std::move(entry));
                             ++loadedModuleMatchCountOut;
                         }
@@ -1379,7 +1530,14 @@ namespace filedock::handleusage
             kPro.set(progressPid, "开始扫描占用来源", 0, 5.0f);
         }
 
-        const HandleUsageScanResult fileHandleResult = scanFileHandleOccupancy(targetPatterns, progressPid);
+        const HandleUsageScanResult kernelHandleResult =
+            scanKernelHandleTableOccupancy(targetPatterns, processNameMap);
+        const bool kernelUsable = kernelHandleResult.diagnosticText.contains(
+            QStringLiteral("KernelHandleTable进程:"));
+        const HandleUsageScanResult fileHandleResult =
+            kernelHandleResult.entries.empty()
+            ? scanFileHandleOccupancy(targetPatterns, progressPid)
+            : kernelHandleResult;
         result = fileHandleResult;
 
         appendSyntheticOccupancyEntries(
@@ -1412,6 +1570,18 @@ namespace filedock::handleusage
         if (!result.diagnosticText.trimmed().isEmpty())
         {
             diagnosticList.push_back(result.diagnosticText);
+        }
+        if (kernelHandleResult.entries.empty())
+        {
+            if (!kernelHandleResult.diagnosticText.trimmed().isEmpty())
+            {
+                diagnosticList.push_back(QStringLiteral("R0回退原因:%1").arg(kernelHandleResult.diagnosticText));
+            }
+            diagnosticList.push_back(QStringLiteral("文件句柄来源:R3 DuplicateHandle"));
+        }
+        else if (kernelUsable)
+        {
+            diagnosticList.push_back(QStringLiteral("文件句柄来源:Kernel HandleTable"));
         }
         if (result.processImageMatchCount > 0)
         {

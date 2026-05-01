@@ -18,6 +18,7 @@
 
 #include <algorithm>   // std::max/std::clamp：衍生指标计算。
 #include <chrono>      // steady_clock：跨刷新轮次计时。
+#include <cstddef>     // offsetof：校验变长系统句柄表缓冲区。
 #include <cstring>     // std::memset：远程结构读取前清零输出缓冲。
 #include <cwchar>      // std::swprintf：拼接版本信息查询路径。
 #include <filesystem>  // std::filesystem：路径存在性与目录判断。
@@ -242,6 +243,48 @@ namespace
         ULONG WaitReason;               // 等待原因码（KWAIT_REASON）。
     };
 
+    // SystemExtendedThreadInformationRecord：
+    // - SystemExtendedProcessInformation(57) 的线程记录扩展布局；
+    // - 在基础 SystemThreadInformation 之后额外提供 StackBase/StackLimit、
+    //   Win32StartAddress 和 TebBaseAddress；
+    // - 这些字段属于公开 NtQuery 返回，不依赖 R0 驱动。
+    struct SystemExtendedThreadInformationRecord
+    {
+        SystemThreadInformationRecord ThreadInfo{};
+        PVOID StackBase = nullptr;
+        PVOID StackLimit = nullptr;
+        PVOID Win32StartAddress = nullptr;
+        PVOID TebBaseAddress = nullptr;
+        ULONG_PTR Reserved2 = 0;
+        ULONG_PTR Reserved3 = 0;
+        ULONG_PTR Reserved4 = 0;
+    };
+
+    // SystemHandleTableEntryInfoExLocal：
+    // - SystemExtendedHandleInformation(64) 的单条句柄记录；
+    // - 用于在 R3 中直接按 PID 聚合句柄数量，避免依赖目标进程可打开。
+    struct SystemHandleTableEntryInfoExLocal
+    {
+        PVOID objectAddress = nullptr;          // objectAddress：内核对象地址，本函数不使用。
+        ULONG_PTR uniqueProcessId = 0;          // uniqueProcessId：句柄所属 PID。
+        ULONG_PTR handleValue = 0;              // handleValue：句柄值，本函数不使用。
+        ULONG grantedAccess = 0;                // grantedAccess：访问掩码，本函数不使用。
+        USHORT creatorBackTraceIndex = 0;       // creatorBackTraceIndex：创建栈索引，本函数不使用。
+        USHORT objectTypeIndex = 0;             // objectTypeIndex：对象类型编号，本函数不使用。
+        ULONG handleAttributes = 0;             // handleAttributes：句柄属性，本函数不使用。
+        ULONG reserved = 0;                     // reserved：保留字段。
+    };
+
+    // SystemHandleInformationExLocal：
+    // - SystemExtendedHandleInformation(64) 的缓冲区头；
+    // - handles 是变长数组，访问前必须按缓冲区大小二次校验。
+    struct SystemHandleInformationExLocal
+    {
+        ULONG_PTR numberOfHandles = 0;                    // numberOfHandles：系统句柄总数。
+        ULONG_PTR reserved = 0;                           // reserved：保留字段。
+        SystemHandleTableEntryInfoExLocal handles[1] = {}; // handles：变长句柄数组首元素。
+    };
+
     // 格式化 Win32 错误码文本，便于 UI 提示详细失败原因。
     std::string FormatLastErrorMessage(const DWORD errorCode)
     {
@@ -334,6 +377,85 @@ namespace
         ::CloseHandle(processToken);
 
         return adjustResult != FALSE && adjustError == ERROR_SUCCESS;
+    }
+
+    // QueryProcessHandleCountsBySystemSnapshot 作用：
+    // - 复用句柄模块相同思路，通过 NtQuerySystemInformation(64) 获取全系统句柄快照；
+    // - 按 uniqueProcessId 聚合每个 PID 的句柄数量；
+    // - 该路径不需要打开目标进程，因此可为 PPL/高权限进程提供 R3 可感知的句柄数。
+    std::unordered_map<std::uint32_t, std::uint32_t> QueryProcessHandleCountsBySystemSnapshot()
+    {
+        std::unordered_map<std::uint32_t, std::uint32_t> handleCountByPid;
+
+        const auto ntQuerySystemInformation = reinterpret_cast<NtQuerySystemInformationFn>(
+            GetNtdllProcAddress("NtQuerySystemInformation"));
+        if (ntQuerySystemInformation == nullptr)
+        {
+            return handleCountByPid;
+        }
+
+        const SYSTEM_INFORMATION_CLASS systemExtendedHandleInformation =
+            static_cast<SYSTEM_INFORMATION_CLASS>(64);
+        constexpr NTSTATUS statusBufferOverflow = static_cast<NTSTATUS>(0x80000005L);
+        constexpr NTSTATUS statusBufferTooSmall = static_cast<NTSTATUS>(0xC0000023L);
+        constexpr ULONG maxBufferLength = 256UL * 1024UL * 1024UL;
+        ULONG bufferLength = 2UL * 1024UL * 1024UL;
+        ULONG returnLength = 0;
+        std::vector<BYTE> informationBuffer(bufferLength);
+
+        NTSTATUS queryStatus = ntQuerySystemInformation(
+            systemExtendedHandleInformation,
+            informationBuffer.data(),
+            bufferLength,
+            &returnLength);
+
+        while (queryStatus == StatusInfoLengthMismatch ||
+            queryStatus == statusBufferOverflow ||
+            queryStatus == statusBufferTooSmall)
+        {
+            ULONG nextLength = (returnLength > bufferLength)
+                ? returnLength
+                : (bufferLength + bufferLength / 2UL + 64UL * 1024UL);
+            if (nextLength <= bufferLength || nextLength > maxBufferLength)
+            {
+                return handleCountByPid;
+            }
+
+            bufferLength = nextLength;
+            informationBuffer.assign(bufferLength, 0);
+            returnLength = 0;
+            queryStatus = ntQuerySystemInformation(
+                systemExtendedHandleInformation,
+                informationBuffer.data(),
+                bufferLength,
+                &returnLength);
+        }
+
+        if (!NT_SUCCESS(queryStatus) ||
+            informationBuffer.size() < sizeof(SystemHandleInformationExLocal))
+        {
+            return handleCountByPid;
+        }
+
+        const auto* handleInfo =
+            reinterpret_cast<const SystemHandleInformationExLocal*>(informationBuffer.data());
+        const std::size_t headerBytes =
+            offsetof(SystemHandleInformationExLocal, handles);
+        const std::size_t availableEntryBytes =
+            informationBuffer.size() > headerBytes ? informationBuffer.size() - headerBytes : 0;
+        const std::size_t safeHandleCount = std::min<std::size_t>(
+            static_cast<std::size_t>(handleInfo->numberOfHandles),
+            availableEntryBytes / sizeof(SystemHandleTableEntryInfoExLocal));
+
+        handleCountByPid.reserve(std::min<std::size_t>(safeHandleCount, 8192));
+        for (std::size_t handleIndex = 0; handleIndex < safeHandleCount; ++handleIndex)
+        {
+            const auto& handleEntry = handleInfo->handles[handleIndex];
+            const std::uint32_t processId = static_cast<std::uint32_t>(handleEntry.uniqueProcessId);
+            ++handleCountByPid[processId];
+        }
+
+        return handleCountByPid;
     }
 
     // 读取进程可执行路径（UTF-8），失败返回空串。
@@ -2182,6 +2304,34 @@ namespace ks::process
         const ProcessEnumStrategy strategy,
         ProcessEnumStrategy* const actualStrategyOut)
     {
+        // applyHandleCountFallback 作用：
+        // - 最后一遍用系统句柄快照覆盖句柄数量；
+        // - 这样即便目标进程因 PPL/权限原因无法 OpenProcess，句柄数仍能由 R3 感知。
+        const auto applyHandleCountFallback =
+            [](std::vector<ProcessRecord>& processList) -> void
+            {
+                if (processList.empty())
+                {
+                    return;
+                }
+
+                const std::unordered_map<std::uint32_t, std::uint32_t> handleCountByPid =
+                    QueryProcessHandleCountsBySystemSnapshot();
+                if (handleCountByPid.empty())
+                {
+                    return;
+                }
+
+                for (ProcessRecord& processRecord : processList)
+                {
+                    const auto handleCountIt = handleCountByPid.find(processRecord.pid);
+                    if (handleCountIt != handleCountByPid.end())
+                    {
+                        processRecord.handleCount = handleCountIt->second;
+                    }
+                }
+            };
+
         // 内部 lambda：Toolhelp 路径。
         const auto enumerateBySnapshot = []() -> std::vector<ProcessRecord>
             {
@@ -2330,7 +2480,9 @@ namespace ks::process
             {
                 *actualStrategyOut = ProcessEnumStrategy::SnapshotProcess32;
             }
-            return enumerateBySnapshot();
+            std::vector<ProcessRecord> processList = enumerateBySnapshot();
+            applyHandleCountFallback(processList);
+            return processList;
         }
         if (strategy == ProcessEnumStrategy::NtQuerySystemInfo)
         {
@@ -2338,7 +2490,9 @@ namespace ks::process
             {
                 *actualStrategyOut = ProcessEnumStrategy::NtQuerySystemInfo;
             }
-            return enumerateByNtQuery();
+            std::vector<ProcessRecord> processList = enumerateByNtQuery();
+            applyHandleCountFallback(processList);
+            return processList;
         }
 
         // Auto：优先 NtQuery，失败回退 Snapshot。
@@ -2349,13 +2503,16 @@ namespace ks::process
             {
                 *actualStrategyOut = ProcessEnumStrategy::NtQuerySystemInfo;
             }
+            applyHandleCountFallback(processList);
             return processList;
         }
         if (actualStrategyOut != nullptr)
         {
             *actualStrategyOut = ProcessEnumStrategy::SnapshotProcess32;
         }
-        return enumerateBySnapshot();
+        processList = enumerateBySnapshot();
+        applyHandleCountFallback(processList);
+        return processList;
     }
 
     std::vector<SystemThreadRecord> EnumerateSystemThreads(
@@ -2374,15 +2531,20 @@ namespace ks::process
             diagnosticTextOut->clear();
         }
 
-        // 第一阶段：优先尝试 NtQuerySystemInformation(SystemProcessInformation)。
+        // 第一阶段：优先尝试 NtQuerySystemInformation(SystemExtendedProcessInformation)。
+        // 该信息类在基础线程字段外提供 TEB 和用户栈边界；失败时再回退基础类。
         const auto ntQuerySystemInformation = reinterpret_cast<NtQuerySystemInformationFn>(
             GetNtdllProcAddress("NtQuerySystemInformation"));
         if (ntQuerySystemInformation != nullptr)
         {
+            const SYSTEM_INFORMATION_CLASS primaryThreadInfoClass =
+                static_cast<SYSTEM_INFORMATION_CLASS>(57);
+            SYSTEM_INFORMATION_CLASS activeThreadInfoClass = primaryThreadInfoClass;
+            bool usedExtendedThreadInfo = true;
             ULONG bufferLength = 2 * 1024 * 1024;
             std::vector<BYTE> informationBuffer(bufferLength);
             NTSTATUS queryStatus = ntQuerySystemInformation(
-                SystemProcessInformation,
+                activeThreadInfoClass,
                 informationBuffer.data(),
                 bufferLength,
                 &bufferLength);
@@ -2392,10 +2554,34 @@ namespace ks::process
                 bufferLength = (bufferLength * 3) / 2 + 64 * 1024;
                 informationBuffer.resize(bufferLength);
                 queryStatus = ntQuerySystemInformation(
-                    SystemProcessInformation,
+                    activeThreadInfoClass,
                     informationBuffer.data(),
                     bufferLength,
                     &bufferLength);
+            }
+
+            if (!NT_SUCCESS(queryStatus))
+            {
+                // 某些受限环境可能拒绝扩展信息类；回退基础类仍能保证线程页可用。
+                activeThreadInfoClass = SystemProcessInformation;
+                usedExtendedThreadInfo = false;
+                bufferLength = 2 * 1024 * 1024;
+                informationBuffer.assign(bufferLength, 0);
+                queryStatus = ntQuerySystemInformation(
+                    activeThreadInfoClass,
+                    informationBuffer.data(),
+                    bufferLength,
+                    &bufferLength);
+                while (queryStatus == StatusInfoLengthMismatch)
+                {
+                    bufferLength = (bufferLength * 3) / 2 + 64 * 1024;
+                    informationBuffer.resize(bufferLength);
+                    queryStatus = ntQuerySystemInformation(
+                        activeThreadInfoClass,
+                        informationBuffer.data(),
+                        bufferLength,
+                        &bufferLength);
+                }
             }
 
             if (NT_SUCCESS(queryStatus))
@@ -2433,32 +2619,47 @@ namespace ks::process
                     }
 
                     // threadArrayPointer 用途：定位到当前进程条目后紧跟的线程数组。
-                    const auto* threadArrayPointer =
-                        reinterpret_cast<const SystemThreadInformationRecord*>(processInfo + 1);
+                    const BYTE* threadArrayPointer = reinterpret_cast<const BYTE*>(processInfo + 1);
+                    const std::size_t threadRecordSize = usedExtendedThreadInfo
+                        ? sizeof(SystemExtendedThreadInformationRecord)
+                        : sizeof(SystemThreadInformationRecord);
                     for (ULONG threadIndex = 0; threadIndex < processInfo->NumberOfThreads; ++threadIndex)
                     {
-                        const SystemThreadInformationRecord& threadInfo = threadArrayPointer[threadIndex];
+                        const BYTE* threadRecordPointer =
+                            threadArrayPointer + (static_cast<std::size_t>(threadIndex) * threadRecordSize);
+                        const auto* threadInfo =
+                            reinterpret_cast<const SystemThreadInformationRecord*>(threadRecordPointer);
 
                         SystemThreadRecord threadRecord{};
                         threadRecord.threadId = static_cast<std::uint32_t>(
-                            reinterpret_cast<std::uintptr_t>(threadInfo.ClientId.UniqueThread));
+                            reinterpret_cast<std::uintptr_t>(threadInfo->ClientId.UniqueThread));
                         threadRecord.ownerPid = static_cast<std::uint32_t>(
-                            reinterpret_cast<std::uintptr_t>(threadInfo.ClientId.UniqueProcess));
+                            reinterpret_cast<std::uintptr_t>(threadInfo->ClientId.UniqueProcess));
                         if (threadRecord.ownerPid == 0)
                         {
                             threadRecord.ownerPid = processPid;
                         }
                         threadRecord.ownerProcessName = processNameText;
-                        threadRecord.startAddress = reinterpret_cast<std::uint64_t>(threadInfo.StartAddress);
-                        threadRecord.priority = static_cast<int>(threadInfo.Priority);
-                        threadRecord.basePriority = static_cast<int>(threadInfo.BasePriority);
-                        threadRecord.threadState = static_cast<std::uint32_t>(threadInfo.ThreadState);
-                        threadRecord.waitReason = static_cast<std::uint32_t>(threadInfo.WaitReason);
-                        threadRecord.kernelTime100ns = static_cast<std::uint64_t>(threadInfo.ReservedTime[0].QuadPart);
-                        threadRecord.userTime100ns = static_cast<std::uint64_t>(threadInfo.ReservedTime[1].QuadPart);
-                        threadRecord.createTime100ns = static_cast<std::uint64_t>(threadInfo.ReservedTime[2].QuadPart);
-                        threadRecord.waitTimeTick = static_cast<std::uint32_t>(threadInfo.WaitTime);
-                        threadRecord.contextSwitchCount = static_cast<std::uint32_t>(threadInfo.ContextSwitches);
+                        threadRecord.startAddress = reinterpret_cast<std::uint64_t>(threadInfo->StartAddress);
+                        threadRecord.priority = static_cast<int>(threadInfo->Priority);
+                        threadRecord.basePriority = static_cast<int>(threadInfo->BasePriority);
+                        threadRecord.threadState = static_cast<std::uint32_t>(threadInfo->ThreadState);
+                        threadRecord.waitReason = static_cast<std::uint32_t>(threadInfo->WaitReason);
+                        threadRecord.kernelTime100ns = static_cast<std::uint64_t>(threadInfo->ReservedTime[0].QuadPart);
+                        threadRecord.userTime100ns = static_cast<std::uint64_t>(threadInfo->ReservedTime[1].QuadPart);
+                        threadRecord.createTime100ns = static_cast<std::uint64_t>(threadInfo->ReservedTime[2].QuadPart);
+                        threadRecord.waitTimeTick = static_cast<std::uint32_t>(threadInfo->WaitTime);
+                        threadRecord.contextSwitchCount = static_cast<std::uint32_t>(threadInfo->ContextSwitches);
+
+                        if (usedExtendedThreadInfo)
+                        {
+                            const auto* extendedThreadInfo =
+                                reinterpret_cast<const SystemExtendedThreadInformationRecord*>(threadRecordPointer);
+                            threadRecord.stackBase = reinterpret_cast<std::uint64_t>(extendedThreadInfo->StackBase);
+                            threadRecord.stackLimit = reinterpret_cast<std::uint64_t>(extendedThreadInfo->StackLimit);
+                            threadRecord.win32StartAddress = reinterpret_cast<std::uint64_t>(extendedThreadInfo->Win32StartAddress);
+                            threadRecord.tebBaseAddress = reinterpret_cast<std::uint64_t>(extendedThreadInfo->TebBaseAddress);
+                        }
                         threadList.push_back(std::move(threadRecord));
                     }
 
@@ -2488,8 +2689,9 @@ namespace ks::process
                 }
                 if (diagnosticTextOut != nullptr)
                 {
-                    *diagnosticTextOut =
-                        "NtQuerySystemInformation(SystemProcessInformation) success";
+                    *diagnosticTextOut = usedExtendedThreadInfo
+                        ? "NtQuerySystemInformation(SystemExtendedProcessInformation) success"
+                        : "NtQuerySystemInformation(SystemProcessInformation) success";
                 }
                 return threadList;
             }
@@ -3711,7 +3913,10 @@ namespace ks::process
         return OpenInExplorerByPath(processPath, errorMessage);
     }
 
-    bool QueryProcessStaticDetailByPid(const std::uint32_t pid, ProcessRecord& outRecord)
+    bool QueryProcessStaticDetailByPid(
+        const std::uint32_t pid,
+        ProcessRecord& outRecord,
+        const bool includeSignatureCheck)
     {
         outRecord = ProcessRecord{};
         outRecord.pid = pid;
@@ -3720,8 +3925,10 @@ namespace ks::process
         // 先刷新动态计数器，保证创建时间/内存等字段尽可能可用。
         RefreshProcessDynamicCounters(outRecord);
 
-        // 再补静态详情（签名默认开启）。
-        const bool staticOk = FillProcessStaticDetails(outRecord, true);
+        // 再补静态详情：
+        // - includeSignatureCheck=false 时跳过 WinVerifyTrust；
+        // - 供 UI 快速开窗或后台分阶段刷新使用。
+        const bool staticOk = FillProcessStaticDetails(outRecord, includeSignatureCheck);
 
         // 最后做一次兜底：若进程名仍为空，用 PID 文本占位。
         if (outRecord.processName.empty())

@@ -68,6 +68,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -868,32 +869,14 @@ namespace
             return;
         }
 
+        // 窗口列表跳转只需要 PID 和名称即可立即开窗。
+        // 完整路径/签名/令牌等慢字段由 ProcessDetailWindow 后台补齐。
         ks::process::ProcessRecord record;
-        bool found = ks::process::QueryProcessStaticDetailByPid(pid, record);
-        if (!found)
+        record.pid = pid;
+        record.processName = ks::process::GetProcessNameByPID(pid);
+        if (record.processName.empty())
         {
-            std::vector<ks::process::ProcessRecord> list =
-                ks::process::EnumerateProcesses(ks::process::ProcessEnumStrategy::Auto);
-            const auto it = std::find_if(
-                list.begin(),
-                list.end(),
-                [pid](const ks::process::ProcessRecord& item) {
-                    return item.pid == pid;
-                });
-            if (it != list.end())
-            {
-                record = *it;
-                found = true;
-            }
-        }
-
-        if (!found)
-        {
-            QMessageBox::warning(
-                parent,
-                QStringLiteral("进程详情"),
-                QStringLiteral("未找到 PID=%1 对应进程。").arg(pid));
-            return;
+            record.processName = "PID_" + std::to_string(pid);
         }
 
         ProcessDetailWindow* detailWindow = new ProcessDetailWindow(record, nullptr);

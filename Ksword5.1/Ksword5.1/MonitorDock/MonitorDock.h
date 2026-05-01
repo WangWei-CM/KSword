@@ -8,6 +8,7 @@
 // 3) 提供 ETW Provider 枚举、参数配置、实时结果表与导出能力。
 // ============================================================
 
+#include "ProcessTraceTimelineWidget.h"
 #include "../Framework.h"
 
 #include <QRegularExpression>
@@ -436,6 +437,29 @@ private:
     void stopEtwCapture();
     void setEtwCapturePaused(bool paused);
     void updateEtwCaptureActionState();
+    // flushEtwPendingRows：
+    // - 作用：把 ETW 后台线程积攒的事件批量刷入表格和时间轴缓存；
+    // - 入参 captureFinished：true 表示刷新后按停止状态固定时间轴右边界；
+    // - 返回：无返回值。
+    void flushEtwPendingRows(bool captureFinished);
+    // applyEtwTimelineSelection：
+    // - 作用：接收 ETW 时间轴控件发出的绝对起止时间；
+    // - 处理：记录时间窗口并复用后置筛选流程隐藏表格行；
+    // - 返回：无返回值。
+    void applyEtwTimelineSelection(std::uint64_t start100ns, std::uint64_t end100ns);
+    // refreshEtwTimelineRange：
+    // - 作用：根据 ETW 监听运行/停止状态更新时间轴左右边界；
+    // - 入参 captureFinished：true 表示右侧固定为停止时间，false 表示右侧跟随系统时间；
+    // - 返回：无返回值。
+    void refreshEtwTimelineRange(bool captureFinished);
+    // refreshEtwTimelinePoints：
+    // - 作用：把 ETW 已捕获事件的轻量点缓存推送给时间轴重绘；
+    // - 返回：无返回值。
+    void refreshEtwTimelinePoints();
+    // isEtwTimelineFilterActive：
+    // - 作用：判断用户是否已经通过 ETW 时间轴启用时间窗口筛选；
+    // - 返回：true 表示后置筛选需要额外叠加时间范围判断。
+    bool isEtwTimelineFilterActive() const;
     // updateEtwCollapseHeight：
     // - 作用：按当前展开项内容重算 ETW 折叠区高度，避免压缩折叠页内部控件；
     // - 说明：高度不足时交给外层滚动区域处理，不在折叠页内部压缩。
@@ -459,7 +483,7 @@ private:
     void addEtwFilterRuleGroup(EtwFilterStage stage);
     void removeEtwFilterRuleGroup(EtwFilterStage stage, int groupId);
     void rebuildEtwFilterRuleGroupUi(EtwFilterStage stage);
-    void clearEtwFilterGroups(EtwFilterStage stage);
+    void clearEtwFilterGroups(EtwFilterStage stage, bool resetTimelineSelection = false);
     void applyEtwFilterRules(EtwFilterStage stage);
     void applyEtwPostFilterToTable();
     void updateEtwFilterStateLabel(EtwFilterStage stage);
@@ -636,6 +660,7 @@ private:
     QScrollArea* m_etwPostFilterScrollArea = nullptr; // 后置筛选滚动容器。
     QWidget* m_etwPostFilterGroupHostWidget = nullptr; // 后置筛选规则组宿主。
     QVBoxLayout* m_etwPostFilterGroupHostLayout = nullptr; // 后置筛选规则组布局。
+    ProcessTraceTimelineWidget* m_etwTimelineWidget = nullptr; // ETW 事件瀑布流时间轴。
     QTableWidget* m_etwEventTable = nullptr;         // ETW 事件表。
     QTimer* m_etwUiUpdateTimer = nullptr;            // 100ms 刷新节流定时器。
 
@@ -651,6 +676,7 @@ private:
     std::mutex m_etwPreFilterSnapshotMutex;          // 前置筛选快照互斥锁。
     std::vector<EtwCapturedEventRow> m_etwPendingRows; // ETW 待刷入 UI 的事件缓存。
     std::vector<EtwCapturedEventRow> m_etwCapturedRows; // ETW 已捕获事件缓存（后置筛选仅隐藏）。
+    std::vector<ProcessTraceTimelineEventPoint> m_etwTimelineEventPoints; // ETW 时间轴绘制用轻量事件缓存。
     std::mutex m_etwPendingMutex;                    // ETW 待刷入队列互斥锁。
     std::atomic_bool m_etwCaptureRunning{ false };   // ETW 捕获运行状态。
     std::atomic_bool m_etwCapturePaused{ false };    // ETW 捕获暂停状态。
@@ -661,5 +687,10 @@ private:
     std::atomic<std::uint64_t> m_etwSessionHandle{ 0 }; // ETW 会话句柄（TRACEHANDLE）。
     std::atomic<std::uint64_t> m_etwTraceHandle{ 0 };   // ETW 消费句柄（TRACEHANDLE）。
     QString m_etwSessionName;                        // ETW 会话名（Stop/Query 复用）。
+    std::uint64_t m_etwCaptureStartTime100ns = 0;     // ETW 时间轴左边界时间。
+    std::uint64_t m_etwCaptureStopTime100ns = 0;      // ETW 时间轴停止时右边界时间。
+    std::uint64_t m_etwTimelineSelectionStart100ns = 0; // ETW 时间轴框选起点。
+    std::uint64_t m_etwTimelineSelectionEnd100ns = 0;   // ETW 时间轴框选终点。
+    bool m_etwTimelineUserSelectionActive = false;    // 用户是否已启用 ETW 时间框选。
     bool m_initialDiscoveryDone = false;             // 首次显示时是否已触发 WMI/ETW Provider 枚举。
 };

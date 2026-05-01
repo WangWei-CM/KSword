@@ -1,4 +1,4 @@
-﻿<?xml version='1.0' encoding='utf-8'?>
+<?xml version='1.0' encoding='utf-8'?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build" ToolsVersion="17.0">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -131,6 +131,7 @@
     <ClCompile Include="FileDock\FileDock.HandleUsage.cpp" />
     <ClCompile Include="FileDock\FileHandleUsageScanner.cpp" />
     <ClCompile Include="FileDock\FileHandleUsageWindow.cpp" />
+    <ClCompile Include="FileDock\FileMappedProcessWindow.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.Directories.cpp" />
     <ClCompile Include="FileDock\FilePropertyPeAnalyzer.Tables.cpp" />
@@ -210,6 +211,7 @@
     <ClCompile Include="ProcessDock\ProcessDetailWindow.AdvancedInfo.cpp" />
     <ClCompile Include="ProcessDock\ProcessDock.cpp" />
     <ClCompile Include="ProcessDock\ProcessDock.ThreadTab.cpp" />
+    <ClCompile Include="ProcessDock\ThreadStackWindow.cpp" />
     <ClCompile Include="ProcessDock\Process_Tool.cpp" />
     <ClCompile Include="SettingsDock\AppearanceSettings.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.cpp" />
@@ -256,7 +258,7 @@
     </QtMoc>
     <ClCompile Include="main.cpp" />
     <QtUic Include="WelcomeDock\Welcome.ui" />
-  <ClCompile Include="ArkDriverClient\ArkDriverClient.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverError.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverCapability.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverDynData.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverCapabilities.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverProcess.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverFile.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp" /></ItemGroup>
+  <ClCompile Include="ArkDriverClient\ArkDriverClient.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverError.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverCapability.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverDynData.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverCapabilities.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverProcess.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverHandle.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverAlpc.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverSection.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverFile.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp" /><ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp" /></ItemGroup>
   <ItemGroup>
     <QtMoc Include="MainWindow.h" />
     <QtMoc Include="Framework\CustomTitleBar.h" />
@@ -267,6 +269,7 @@
     <ClInclude Include="FileDock\ManualFileSystemParser.h" />
     <ClInclude Include="FileDock\FileHandleUsageScanner.h" />
     <ClInclude Include="FileDock\FileHandleUsageWindow.h" />
+    <ClInclude Include="FileDock\FileMappedProcessWindow.h" />
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.h" />
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.Internal.h" />
     <ClInclude Include="Framework\LogDockWidget.h" />
@@ -309,6 +312,7 @@
     <QtMoc Include="RegistryDock\RegistryDock.h" />
     <QtMoc Include="ProcessDock\ProcessDetailWindow.h" />
     <ClInclude Include="ProcessDock\ProcessDetailWindow.InternalCommon.h" />
+    <ClInclude Include="ProcessDock\ThreadStackWindow.h" />
     <QtMoc Include="ProcessDock\ProcessDock.h" />
     <QtMoc Include="SettingsDock\SettingsDock.h" />
     <QtMoc Include="UI\CodeEditorWidget.h" />

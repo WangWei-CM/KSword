@@ -68,6 +68,201 @@ void DriverDock::refreshLoadedKernelModuleRecords()
     info << refreshEvent << "[DriverDock] 刷新模块完成, count=" << m_loadedModuleCache.size() << eol;
 }
 
+void DriverDock::fillObjectDriverNameFromSelection()
+{
+    // 从当前服务行推导 DriverObject 名称：
+    // - 大多数服务名与 \Driver\Name 一致；
+    // - 如果用户已手工输入内容，本按钮仍明确覆盖，避免隐式猜测。
+    if (m_serviceTable == nullptr ||
+        m_serviceTable->selectionModel() == nullptr ||
+        m_objectDriverNameEdit == nullptr)
+    {
+        return;
+    }
+
+    const QModelIndexList rowList = m_serviceTable->selectionModel()->selectedRows(0);
+    if (rowList.isEmpty())
+    {
+        m_objectInfoStatusLabel->setText(QStringLiteral("状态：请先在驱动服务表选中一行。"));
+        return;
+    }
+
+    QTableWidgetItem* serviceNameItem = m_serviceTable->item(rowList.front().row(), 0);
+    if (serviceNameItem == nullptr)
+    {
+        return;
+    }
+
+    const QString serviceNameText = serviceNameItem->data(Qt::UserRole).toString().trimmed();
+    if (serviceNameText.isEmpty())
+    {
+        return;
+    }
+    m_objectDriverNameEdit->setText(QStringLiteral("\\Driver\\%1").arg(serviceNameText));
+    if (m_tabWidget != nullptr && m_objectInfoPage != nullptr)
+    {
+        m_tabWidget->setCurrentWidget(m_objectInfoPage);
+    }
+}
+
+void DriverDock::querySelectedDriverObjectInfo()
+{
+    // DriverObject 查询：
+    // - 只接受对象名，不接受地址；
+    // - 后台线程中通过 ArkDriverClient 访问 KswordARK，避免阻塞 UI。
+    if (m_objectInfoQuerying || m_objectDriverNameEdit == nullptr)
+    {
+        return;
+    }
+
+    const QString driverNameText = m_objectDriverNameEdit->text().trimmed();
+    if (driverNameText.isEmpty())
+    {
+        if (m_objectInfoStatusLabel != nullptr)
+        {
+            m_objectInfoStatusLabel->setText(QStringLiteral("状态：DriverObject 名称不能为空。"));
+        }
+        return;
+    }
+
+    m_objectInfoQuerying = true;
+    const std::uint64_t ticketValue = ++m_objectInfoQueryTicket;
+    if (m_queryObjectInfoButton != nullptr)
+    {
+        m_queryObjectInfoButton->setEnabled(false);
+    }
+    if (m_objectInfoStatusLabel != nullptr)
+    {
+        m_objectInfoStatusLabel->setText(QStringLiteral("状态：正在查询 DriverObject..."));
+    }
+
+    QPointer<DriverDock> guardThis(this);
+    const std::wstring driverNameWide = driverNameText.toStdWString();
+    auto* queryTask = QRunnable::create([guardThis, ticketValue, driverNameWide]()
+        {
+            const ksword::ark::DriverObjectQueryResult result =
+                ksword::ark::DriverClient().queryDriverObject(
+                    driverNameWide,
+                    KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_ALL,
+                    KSWORD_ARK_DRIVER_DEVICE_LIMIT_DEFAULT,
+                    KSWORD_ARK_DRIVER_ATTACHED_LIMIT_DEFAULT);
+
+            QMetaObject::invokeMethod(
+                guardThis,
+                [guardThis, ticketValue, result]()
+                {
+                    if (guardThis == nullptr ||
+                        guardThis->m_objectInfoQueryTicket != ticketValue)
+                    {
+                        return;
+                    }
+                    guardThis->applyDriverObjectQueryResult(result);
+                },
+                Qt::QueuedConnection);
+        });
+    queryTask->setAutoDelete(true);
+    QThreadPool::globalInstance()->start(queryTask);
+}
+
+void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQueryResult& result)
+{
+    // 查询结果回填：
+    // - 所有地址都作为诊断文本展示；
+    // - 不在 UI 中将地址作为任何二次操作输入。
+    m_objectInfoQuerying = false;
+    if (m_queryObjectInfoButton != nullptr)
+    {
+        m_queryObjectInfoButton->setEnabled(true);
+    }
+
+    if (m_objectInfoStatusLabel != nullptr)
+    {
+        m_objectInfoStatusLabel->setText(QStringLiteral("状态：%1 | %2")
+            .arg(result.io.ok ? driverObjectQueryStatusText(result.queryStatus) : QStringLiteral("IO failed"))
+            .arg(QString::fromStdString(result.io.message)));
+    }
+
+    if (m_objectInfoSummaryEdit != nullptr)
+    {
+        QStringList summaryLines;
+        summaryLines << QStringLiteral("[DriverObject]");
+        summaryLines << QStringLiteral("IO: %1").arg(QString::fromStdString(result.io.message));
+        summaryLines << QStringLiteral("QueryStatus: %1").arg(driverObjectQueryStatusText(result.queryStatus));
+        summaryLines << QStringLiteral("LastStatus: %1").arg(formatNtStatusText(result.lastStatus));
+        summaryLines << QStringLiteral("DriverName: %1").arg(QString::fromStdWString(result.driverName));
+        summaryLines << QStringLiteral("ServiceKey: %1").arg(QString::fromStdWString(result.serviceKeyName));
+        summaryLines << QStringLiteral("ImagePath: %1").arg(QString::fromStdWString(result.imagePath));
+        summaryLines << QStringLiteral("DriverObject: %1").arg(formatCompactAddress(result.driverObjectAddress));
+        summaryLines << QStringLiteral("DriverStart: %1 Size=%2")
+            .arg(formatCompactAddress(result.driverStart))
+            .arg(formatHex32(result.driverSize));
+        summaryLines << QStringLiteral("DriverSection: %1").arg(formatCompactAddress(result.driverSection));
+        summaryLines << QStringLiteral("DriverUnload: %1").arg(formatCompactAddress(result.driverUnload));
+        summaryLines << QStringLiteral("Flags: %1 FieldFlags=%2")
+            .arg(formatHex32(result.driverFlags))
+            .arg(formatHex32(result.fieldFlags));
+        summaryLines << QStringLiteral("MajorFunctions: %1 DeviceObjects: %2/%3")
+            .arg(result.majorFunctions.size())
+            .arg(result.devices.size())
+            .arg(result.totalDeviceCount);
+        m_objectInfoSummaryEdit->setPlainText(summaryLines.join('\n'));
+    }
+
+    if (m_majorFunctionTable != nullptr)
+    {
+        m_majorFunctionTable->setRowCount(0);
+        for (const ksword::ark::DriverMajorFunctionEntry& majorEntry : result.majorFunctions)
+        {
+            const int rowIndex = m_majorFunctionTable->rowCount();
+            m_majorFunctionTable->insertRow(rowIndex);
+            m_majorFunctionTable->setItem(rowIndex, 0, createReadOnlyItem(driverMajorFunctionName(majorEntry.majorFunction)));
+            m_majorFunctionTable->setItem(rowIndex, 1, createReadOnlyItem(formatCompactAddress(majorEntry.dispatchAddress)));
+            m_majorFunctionTable->setItem(rowIndex, 2, createReadOnlyItem(QString::fromStdWString(majorEntry.moduleName).isEmpty()
+                ? QStringLiteral("-")
+                : QString::fromStdWString(majorEntry.moduleName)));
+            m_majorFunctionTable->setItem(rowIndex, 3, createReadOnlyItem(formatCompactAddress(majorEntry.moduleBase)));
+            m_majorFunctionTable->setItem(rowIndex, 4, createReadOnlyItem(driverDispatchLocationText(majorEntry.flags)));
+            if ((majorEntry.flags & 0x00000002U) == 0U)
+            {
+                for (int columnIndex = 0; columnIndex < m_majorFunctionTable->columnCount(); ++columnIndex)
+                {
+                    QTableWidgetItem* cellItem = m_majorFunctionTable->item(rowIndex, columnIndex);
+                    if (cellItem != nullptr)
+                    {
+                        cellItem->setToolTip(QStringLiteral("Dispatch 不在 DriverObject 自身镜像范围内。"));
+                    }
+                }
+            }
+        }
+    }
+
+    if (m_deviceObjectTable != nullptr)
+    {
+        m_deviceObjectTable->setRowCount(0);
+        for (const ksword::ark::DriverDeviceEntry& deviceEntry : result.devices)
+        {
+            const int rowIndex = m_deviceObjectTable->rowCount();
+            m_deviceObjectTable->insertRow(rowIndex);
+            m_deviceObjectTable->setItem(rowIndex, 0, createReadOnlyItem(deviceEntry.relationDepth == 0U
+                ? QStringLiteral("Root")
+                : QStringLiteral("Attached +%1").arg(deviceEntry.relationDepth)));
+            m_deviceObjectTable->setItem(rowIndex, 1, createReadOnlyItem(formatCompactAddress(deviceEntry.deviceObjectAddress)));
+            QTableWidgetItem* nameItem = createReadOnlyItem(QString::fromStdWString(deviceEntry.deviceName).isEmpty()
+                ? QStringLiteral("(unnamed)")
+                : QString::fromStdWString(deviceEntry.deviceName));
+            nameItem->setToolTip(QStringLiteral("NameStatus=%1").arg(formatNtStatusText(deviceEntry.nameStatus)));
+            m_deviceObjectTable->setItem(rowIndex, 2, nameItem);
+            m_deviceObjectTable->setItem(rowIndex, 3, createReadOnlyItem(driverDeviceTypeText(deviceEntry.deviceType)));
+            m_deviceObjectTable->setItem(rowIndex, 4, createReadOnlyItem(formatHex32(deviceEntry.flags)));
+            m_deviceObjectTable->setItem(rowIndex, 5, createReadOnlyItem(formatHex32(deviceEntry.characteristics)));
+            m_deviceObjectTable->setItem(rowIndex, 6, createReadOnlyItem(QString::number(deviceEntry.stackSize)));
+            m_deviceObjectTable->setItem(rowIndex, 7, createReadOnlyItem(formatCompactAddress(deviceEntry.nextDeviceObjectAddress)));
+            m_deviceObjectTable->setItem(rowIndex, 8, createReadOnlyItem(formatCompactAddress(deviceEntry.attachedDeviceObjectAddress)));
+            m_deviceObjectTable->setItem(rowIndex, 9, createReadOnlyItem(formatCompactAddress(deviceEntry.driverObjectAddress)));
+        }
+    }
+}
+
 void DriverDock::rebuildDriverServiceTableByFilter()
 {
     if (m_serviceTable == nullptr)
@@ -488,6 +683,27 @@ void DriverDock::loadSelectedDriverService()
         const DWORD lastError = ::GetLastError();
         if (lastError != ERROR_SERVICE_ALREADY_RUNNING)
         {
+            // 577 等签名失败需要单独解释：
+            // - 用户可能已经开启测试模式；
+            // - 但完全未签名的 x64 驱动仍会被系统拒绝。
+            if (isDriverSignatureLoadError(lastError))
+            {
+                const QString binaryPathText =
+                    (m_binaryPathEdit == nullptr) ? QString() : m_binaryPathEdit->text().trimmed();
+                const QString adviceText =
+                    buildDriverSignatureLoadAdvice(lastError, serviceNameText, binaryPathText);
+                appendOperateLogLine(adviceText);
+                err << operationEvent
+                    << "[DriverDock] 挂载失败：驱动签名/镜像校验失败, service="
+                    << serviceNameText.toStdString()
+                    << ", error="
+                    << lastError
+                    << ", path="
+                    << binaryPathText.toStdString()
+                    << eol;
+                return;
+            }
+
             appendOperateLogLine(QStringLiteral("挂载失败：StartServiceW 失败（%1）").arg(formatWin32ErrorText(lastError)));
             err << operationEvent << "[DriverDock] 挂载失败：StartServiceW 失败, error=" << lastError << eol;
             return;

@@ -13,11 +13,14 @@
 #include <QHash>
 #include <QIcon>
 #include <QPointer>
+#include <QStringList>
 #include <QWidget>
 
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include "../../../shared/driver/KswordArkThreadIoctl.h"
 
 // 前置声明：减少头文件依赖，提升编译速度。
 class QCheckBox;
@@ -79,6 +82,7 @@ private:
     struct ThreadInspectItem
     {
         std::uint32_t threadId = 0;        // 线程 ID。
+        std::uint32_t processId = 0;       // 所属进程 PID。
         QString stateText;                 // 状态文本（运行/结束/未知）。
         int priorityValue = 0;             // 线程优先级值。
         quint64 switchCount = 0;           // 上下文切换计数（当前实现可能为 0）。
@@ -86,6 +90,17 @@ private:
         QString tebAddressText;            // 线程 TEB 地址（十六进制）。
         QString affinityText;              // 线程亲和性文本。
         QString registerSummaryText;       // 寄存器摘要文本。
+        std::uint64_t startAddress = 0;    // 起始地址原始值。
+        std::uint64_t win32StartAddress = 0; // Win32StartAddress 原始值。
+        std::uint64_t tebAddress = 0;      // TEB 地址原始值。
+        std::uint64_t userStackBase = 0;   // 用户栈基址。
+        std::uint64_t userStackLimit = 0;  // 用户栈边界。
+        std::uint64_t r0KernelStack = 0;   // KTHREAD.KernelStack。
+        std::uint64_t r0StackBase = 0;     // KTHREAD.StackBase。
+        std::uint64_t r0StackLimit = 0;    // KTHREAD.StackLimit。
+        std::uint64_t r0InitialStack = 0;  // KTHREAD.InitialStack。
+        std::uint32_t r0ThreadStatus = KSWORD_ARK_THREAD_R0_STATUS_UNAVAILABLE; // R0 线程状态。
+        std::uint64_t r0CapabilityMask = 0; // R0 capability。
     };
 
     // ThreadInspectRefreshResult：线程细节异步刷新结果。
@@ -102,6 +117,23 @@ private:
         QString detailText;               // 展示文本内容。
         QString diagnosticText;           // 诊断文本。
         std::uint64_t elapsedMs = 0;      // 刷新耗时（毫秒）。
+    };
+
+    // SectionRefreshResult：进程 SectionObject / ControlArea 异步查询结果。
+    struct SectionRefreshResult
+    {
+        QString detailText;              // 展示文本内容。
+        QString diagnosticText;          // 诊断文本。
+        std::uint64_t elapsedMs = 0;     // 刷新耗时（毫秒）。
+    };
+
+    // StaticDetailRefreshResult：进程静态详情后台补齐结果。
+    struct StaticDetailRefreshResult
+    {
+        ks::process::ProcessRecord processRecord; // 后台读取到的最新进程记录。
+        QString diagnosticText;                   // 失败或降级原因。
+        std::uint64_t elapsedMs = 0;              // 后台查询耗时（毫秒）。
+        bool queryOk = false;                     // true 表示基础静态详情读取成功。
     };
 
 private:
@@ -147,6 +179,27 @@ private:
 
     // ======== 详情页刷新 ========
     void refreshDetailTabTexts();
+    // requestAsyncStaticDetailRefresh 作用：
+    // - 在后台补齐路径、命令行、用户、签名等慢字段；
+    // - 避免在窗口构造或周期同步时阻塞 UI 线程。
+    // 调用方式：构造完成后、外部快照字段不完整时调用。
+    // 参数 includeSignatureCheck：true 表示后台允许执行 WinVerifyTrust 签名校验。
+    // 返回：无。
+    void requestAsyncStaticDetailRefresh(bool includeSignatureCheck);
+    // applyStaticDetailRefreshResult 作用：
+    // - 在主线程合并后台静态详情结果；
+    // - 只使用非空/有效字段覆盖当前缓存。
+    // 调用方式：requestAsyncStaticDetailRefresh 的后台任务完成后投递。
+    // 参数 refreshResult：后台查询结果。
+    // 返回：无。
+    void applyStaticDetailRefreshResult(const StaticDetailRefreshResult& refreshResult);
+    // requestInitialRefreshForCurrentTab 作用：
+    // - 按当前 Tab 懒启动首次重型刷新；
+    // - 打开窗口时只展示“详细信息”页，不立即扫描模块/PEB/令牌。
+    // 调用方式：currentChanged 信号和构造完成后调用。
+    // 参数：无。
+    // 返回：无。
+    void requestInitialRefreshForCurrentTab();
     // refreshKernelObjectTabTexts 作用：
     // - 根据 m_baseRecord 刷新“内核对象”页所有标签；
     // - DynData 未命中时显示 Unavailable，避免误导用户可直接进入后续句柄/Section 枚举。
@@ -159,12 +212,33 @@ private:
     void requestAsyncThreadInspectRefresh();
     void applyThreadInspectResult(const ThreadInspectRefreshResult& refreshResult);
     void updateThreadInspectStatusLabel(const QString& statusText, bool refreshing);
+    // openSelectedThreadStackWindow 作用：
+    // - 根据线程页当前选中行打开 Phase-8 调用栈窗口；
+    // - 使用最近一次线程刷新缓存中的 TID/PID/栈边界构造目标。
+    // 调用方式：线程页按钮或表格双击。
+    // 参数：无。
+    // 返回：无。
+    void openSelectedThreadStackWindow();
 
     // ======== 令牌页/PEB页刷新 ========
     void requestAsyncTokenRefresh();
     void requestAsyncPebRefresh();
     void applyTokenRefreshResult(const TextRefreshResult& refreshResult);
     void applyPebRefreshResult(const TextRefreshResult& refreshResult);
+    // requestAsyncSectionRefresh 作用：
+    // - 通过 ArkDriverClient 异步查询 R0 SectionObject / ControlArea；
+    // - 只传 PID，不把 UI 看到的内核地址传回驱动。
+    // 调用方式：内核对象页刷新按钮或首次初始化后调用。
+    // 参数：无。
+    // 返回：无。
+    void requestAsyncSectionRefresh();
+    // applySectionRefreshResult 作用：
+    // - 在主线程回填 Section/ControlArea 详情文本；
+    // - 同步刷新状态标签。
+    // 调用方式：后台任务完成后 invokeMethod 调用。
+    // 参数 refreshResult：后台查询结果。
+    // 返回：无。
+    void applySectionRefreshResult(const SectionRefreshResult& refreshResult);
     // refreshTokenSwitchStates 作用：
     // - 读取当前目标进程令牌开关状态；
     // - 把读取结果同步到“令牌开关”页的复选框。
@@ -315,14 +389,17 @@ private:
     std::vector<ks::process::ProcessModuleRecord> m_moduleRecords; // 当前模块数据缓存。
 
     bool m_moduleRefreshing = false;           // 模块刷新进行中标记。
+    bool m_moduleInitialRefreshStarted = false; // 模块页首次刷新是否已经按需启动。
     bool m_firstModuleRefreshDone = false;     // 首轮模块刷新是否已完成。
     std::uint64_t m_moduleRefreshTicket = 0;   // 模块刷新序号（防乱序）。
     int m_moduleRefreshProgressPid = 0;        // 首轮模块刷新对应的 kPro 任务 PID。
 
     // ======== 线程细节刷新状态 ========
     bool m_threadInspectRefreshing = false;        // 线程细节是否正在刷新。
+    bool m_threadInspectInitialRefreshStarted = false; // 线程页首次刷新是否已经按需启动。
     std::uint64_t m_threadInspectRefreshTicket = 0;// 线程细节刷新序号。
     int m_threadInspectRefreshProgressPid = 0;     // 线程细节刷新对应进度 PID。
+    std::vector<ThreadInspectItem> m_threadInspectRows; // 线程详情页最近一次刷新缓存。
 
     // ======== 内核对象页控件 ========
     QVBoxLayout* m_kernelObjectLayout = nullptr; // 内核对象页总布局。
@@ -346,6 +423,13 @@ private:
     QLabel* m_kernelObjectSectionSignatureOffsetValue = nullptr; // SectionSignatureLevel 偏移。
     QLabel* m_kernelObjectObjectTableOffsetValue = nullptr; // ObjectTable 偏移。
     QLabel* m_kernelObjectSectionObjectOffsetValue = nullptr; // SectionObject 偏移。
+    QPushButton* m_refreshSectionInfoButton = nullptr; // 刷新 Section/ControlArea 按钮。
+    QLabel* m_sectionInfoStatusLabel = nullptr; // Section/ControlArea 查询状态。
+    CodeEditorWidget* m_sectionInfoOutput = nullptr; // Section/ControlArea 详情文本输出。
+    bool m_sectionInfoRefreshing = false; // Section 查询是否进行中。
+    bool m_sectionInfoInitialRefreshStarted = false; // Section 页首次查询是否已经按需启动。
+    std::uint64_t m_sectionInfoRefreshTicket = 0; // Section 查询序号。
+    int m_sectionInfoRefreshProgressPid = 0; // Section 查询 kPro 任务 PID。
 
     // ======== 令牌页控件与状态 ========
     QVBoxLayout* m_tokenLayout = nullptr;          // 令牌页布局。
@@ -353,6 +437,7 @@ private:
     QLabel* m_tokenStatusLabel = nullptr;          // 令牌页状态文本。
     CodeEditorWidget* m_tokenDetailOutput = nullptr; // 令牌信息输出框（统一文本编辑器组件，只读）。
     bool m_tokenRefreshing = false;                // 令牌页刷新状态。
+    bool m_tokenInitialRefreshStarted = false;     // 令牌页首次刷新是否已经按需启动。
     std::uint64_t m_tokenRefreshTicket = 0;        // 令牌页刷新序号。
     int m_tokenRefreshProgressPid = 0;             // 令牌页刷新进度 PID。
 
@@ -362,6 +447,7 @@ private:
     QPushButton* m_applyTokenSwitchButton = nullptr;   // 应用令牌开关按钮。
     QPushButton* m_refreshTokenAllInfoButton = nullptr; // 刷新全部令牌信息按钮（触发全信息类枚举）。
     QLabel* m_tokenSwitchStatusLabel = nullptr;    // 令牌开关应用状态文本。
+    bool m_tokenSwitchInitialRefreshStarted = false; // 令牌开关页首次回读是否已经按需启动。
     QCheckBox* m_tokenSandboxInertCheck = nullptr; // SandboxInert 开关。
     QCheckBox* m_tokenVirtualizationAllowedCheck = nullptr; // VirtualizationAllowed 开关。
     QCheckBox* m_tokenVirtualizationEnabledCheck = nullptr; // VirtualizationEnabled 开关。
@@ -385,8 +471,12 @@ private:
     QLabel* m_pebStatusLabel = nullptr;            // PEB 页状态文本。
     CodeEditorWidget* m_pebDetailOutput = nullptr;   // PEB 信息输出框（统一文本编辑器组件，只读）。
     bool m_pebRefreshing = false;                  // PEB 页刷新状态。
+    bool m_pebInitialRefreshStarted = false;       // PEB 页首次刷新是否已经按需启动。
     std::uint64_t m_pebRefreshTicket = 0;          // PEB 页刷新序号。
     int m_pebRefreshProgressPid = 0;               // PEB 页刷新进度 PID。
+    bool m_staticDetailRefreshing = false;         // 静态详情后台补齐是否进行中。
+    bool m_staticDetailRefreshAttempted = false;   // 静态详情是否已经尝试后台补齐，避免周期刷新重复排队。
+    std::uint64_t m_staticDetailRefreshTicket = 0; // 静态详情刷新序号。
     bool m_themeStyleApplying = false;             // 主题样式重建防重入标记，避免 changeEvent 循环触发。
 
     // 图标缓存：路径 -> 图标，避免重复读取系统图标。

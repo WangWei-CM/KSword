@@ -10,6 +10,7 @@
 
 #include "../Framework.h"
 #include "HandleObjectTypeWorker.h"
+#include "../../../shared/driver/KswordArkHandleIoctl.h"
 
 #include <QHash>
 #include <QIcon>
@@ -80,6 +81,9 @@ private:
         Attributes,      // Attributes：句柄属性文本。
         HandleCount,     // HandleCount：对象当前 HandleCount。
         PointerCount,    // PointerCount：对象当前 PointerCount。
+        Source,          // Source：本行句柄来自用户态快照、DuplicateHandle 解析或 R0 HandleTable。
+        DecodeStatus,    // DecodeStatus：R0 解码状态或用户态解析状态。
+        DiffStatus,      // DiffStatus：用户态/R0 差异状态。
         Count            // Count：列总数。
     };
 
@@ -96,6 +100,27 @@ private:
         SecurityRequired,   // SecurityRequired：是否需要安全检查。
         MaintainCount,      // MaintainCount：是否维护句柄计数。
         Count               // Count：列总数。
+    };
+
+    // HandleEnumMode 作用：
+    // - 描述句柄刷新时使用的枚举来源；
+    // - UserSnapshot 保持原 NtQuerySystemInformation 路径，DuplicateHandle 表示用户态快照并解析对象信息，KernelHandleTable 表示 R0 直接读 HandleTable。
+    enum class HandleEnumMode : int
+    {
+        UserSnapshot = 0,    // UserSnapshot：仅用户态系统句柄快照，不强制解析对象名。
+        DuplicateHandle,     // DuplicateHandle：用户态快照 + DuplicateHandle 解析对象计数/名称。
+        KernelHandleTable    // KernelHandleTable：R0 目标进程 HandleTable 枚举。
+    };
+
+    // HandleDiffStatus 作用：
+    // - 表示 R0/R3 两种枚举路径的差异关系；
+    // - 用于 Phase-4 差异视图过滤。
+    enum class HandleDiffStatus : int
+    {
+        NotCompared = 0, // NotCompared：当前模式未做双源对比。
+        UserOnly,        // UserOnly：仅用户态快照可见。
+        KernelOnly,      // KernelOnly：仅 R0 HandleTable 可见。
+        Both             // Both：两者均可见。
     };
 
     // HandleRow 作用：
@@ -118,6 +143,17 @@ private:
         bool objectNameAvailable = false;  // objectNameAvailable：是否成功完成对象名查询（允许结果为空串）。
         bool objectNameFailed = false;     // objectNameFailed：对象名查询已尝试但失败。
         bool objectNameFromFallback = false; // objectNameFromFallback：对象名是否来自类型专用回退查询。
+        HandleEnumMode sourceMode = HandleEnumMode::UserSnapshot; // sourceMode：记录本行主要来源。
+        HandleDiffStatus diffStatus = HandleDiffStatus::NotCompared; // diffStatus：R0/R3 差异状态。
+        std::uint32_t decodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_UNAVAILABLE; // decodeStatus：R0 解码状态或用户态解析状态。
+        std::uint32_t r0FieldFlags = 0; // r0FieldFlags：R0 返回的字段可用位。
+        std::uint64_t r0DynDataCapabilityMask = 0; // r0DynDataCapabilityMask：R0 枚举时的 DynData capability。
+        std::uint32_t epObjectTableOffset = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE; // epObjectTableOffset：EPROCESS.ObjectTable 偏移。
+        std::uint32_t htHandleContentionEventOffset = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE; // htHandleContentionEventOffset：HandleTable 解锁偏移。
+        std::uint32_t obDecodeShift = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE; // obDecodeShift：对象指针解码 shift。
+        std::uint32_t obAttributesShift = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE; // obAttributesShift：属性解码 shift。
+        std::uint32_t otNameOffset = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE; // otNameOffset：OBJECT_TYPE.Name 偏移。
+        std::uint32_t otIndexOffset = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE; // otIndexOffset：OBJECT_TYPE.Index 偏移。
     };
 
     // HandleRefreshOptions 作用：
@@ -132,6 +168,8 @@ private:
         bool onlyNamed = false;                    // onlyNamed：仅显示“有对象名”的句柄。
         bool resolveObjectName = true;             // resolveObjectName：是否尝试解析对象名。
         int nameResolveBudget = 300;               // nameResolveBudget：对象名解析预算数量。
+        HandleEnumMode enumMode = HandleEnumMode::DuplicateHandle; // enumMode：本轮刷新选择的枚举模式。
+        HandleDiffStatus diffFilter = HandleDiffStatus::NotCompared; // diffFilter：差异状态过滤。
         std::unordered_map<std::uint16_t, std::string> typeNameCacheByIndex; // typeNameCacheByIndex：上一轮类型缓存。
         std::unordered_map<std::uint16_t, std::string> typeNameMapFromObjectTab; // typeNameMapFromObjectTab：对象类型页产出的映射。
     };
@@ -150,6 +188,10 @@ private:
         std::size_t resolvedNameCount = 0;         // resolvedNameCount：成功解析对象名数量。
         std::size_t fallbackNameCount = 0;         // fallbackNameCount：通过类型专用回退拿到对象名的数量。
         std::size_t objectTypeMappedCount = 0;     // objectTypeMappedCount：通过对象类型页映射命中的数量。
+        std::size_t kernelHandleCount = 0;         // kernelHandleCount：R0 HandleTable 返回数量。
+        std::size_t userOnlyCount = 0;             // userOnlyCount：差异视图中仅用户态可见数量。
+        std::size_t kernelOnlyCount = 0;           // kernelOnlyCount：差异视图中仅 R0 可见数量。
+        std::size_t bothCount = 0;                 // bothCount：差异视图中双源均可见数量。
         std::uint64_t elapsedMs = 0;               // elapsedMs：后台耗时毫秒。
         QString diagnosticText;                    // diagnosticText：诊断信息（失败/降级/预算等）。
     };
@@ -489,6 +531,36 @@ private:
     // 传出：QString 文本。
     static QString formatHandleAttributes(std::uint32_t attributes);
 
+    // formatHandleSourceText 作用：把行来源枚举转换为 UI 文本。
+    // 调用方法：句柄表渲染、详情面板和过滤时调用。
+    // 传入 mode：来源枚举值。
+    // 传出：QString 文本。
+    static QString formatHandleSourceText(HandleEnumMode mode);
+
+    // formatHandleDecodeStatusText 作用：把 R0 解码状态或用户态状态转换为 UI 文本。
+    // 调用方法：句柄表渲染、详情面板和过滤时调用。
+    // 传入 status：KSWORD_ARK_HANDLE_DECODE_STATUS_*。
+    // 传出：QString 文本。
+    static QString formatHandleDecodeStatusText(std::uint32_t status);
+
+    // formatHandleDiffStatusText 作用：把差异状态转换为 UI 文本。
+    // 调用方法：句柄表渲染、详情面板和过滤时调用。
+    // 传入 status：HandleDiffStatus。
+    // 传出：QString 文本。
+    static QString formatHandleDiffStatusText(HandleDiffStatus status);
+
+    // resolveHandleEnumModeFromText 作用：把 UI 下拉框文本转换为枚举模式。
+    // 调用方法：collectHandleRefreshOptions 内部调用。
+    // 传入 modeText：下拉框当前文本。
+    // 传出：HandleEnumMode。
+    static HandleEnumMode resolveHandleEnumModeFromText(const QString& modeText);
+
+    // resolveHandleDiffFilterFromText 作用：把 UI 下拉框文本转换为差异过滤枚举。
+    // 调用方法：collectHandleRefreshOptions/applyLocalHandleFilters 内部调用。
+    // 传入 filterText：下拉框当前文本。
+    // 传出：HandleDiffStatus。
+    static HandleDiffStatus resolveHandleDiffFilterFromText(const QString& filterText);
+
     // resolveProcessIconByPid 作用：
     // - 根据 PID 解析进程图标并做缓存；
     // - 同一个 PID 只在首次渲染时解析一次，后续直接复用缓存图标。
@@ -524,6 +596,8 @@ private:
     QLineEdit* m_pidFilterEdit = nullptr;        // m_pidFilterEdit：PID 过滤输入框。
     QLineEdit* m_keywordFilterEdit = nullptr;    // m_keywordFilterEdit：关键字过滤输入框。
     QComboBox* m_typeFilterCombo = nullptr;      // m_typeFilterCombo：对象类型过滤下拉。
+    QComboBox* m_enumModeCombo = nullptr;        // m_enumModeCombo：枚举模式下拉。
+    QComboBox* m_diffFilterCombo = nullptr;      // m_diffFilterCombo：差异状态过滤下拉。
     QCheckBox* m_onlyNamedCheckBox = nullptr;    // m_onlyNamedCheckBox：仅显示有对象名句柄。
     QCheckBox* m_resolveNameCheckBox = nullptr;  // m_resolveNameCheckBox：是否开启对象名解析。
     QSpinBox* m_nameBudgetSpinBox = nullptr;     // m_nameBudgetSpinBox：对象名解析预算。

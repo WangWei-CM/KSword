@@ -14,6 +14,7 @@
 #include <vector>  // std::vector：进程列表容器。
 
 #include "../../../../shared/driver/KswordArkProcessIoctl.h" // R0 进程扩展字段常量。
+#include "../../../../shared/driver/KswordArkThreadIoctl.h"  // R0 线程扩展字段常量。
 
 namespace ks::process
 {
@@ -270,6 +271,35 @@ namespace ks::process
         std::uint64_t createTime100ns = 0;     // 创建时间（FILETIME 100ns）。
         std::uint32_t waitTimeTick = 0;        // 等待时长计数（Nt 原始字段）。
         std::uint32_t contextSwitchCount = 0;  // 上下文切换次数（Nt 原始字段）。
+        std::uint64_t stackBase = 0;           // R3 SystemExtendedProcessInformation 返回的用户栈基址。
+        std::uint64_t stackLimit = 0;          // R3 SystemExtendedProcessInformation 返回的用户栈边界。
+        std::uint64_t win32StartAddress = 0;   // R3 SystemExtendedProcessInformation 返回的 Win32StartAddress。
+        std::uint64_t tebBaseAddress = 0;      // R3 SystemExtendedProcessInformation 返回的 TEB 基址。
+        std::uint32_t r0ThreadFieldFlags = 0;  // KSWORD_ARK_THREAD_FIELD_* 可用性位图。
+        std::uint32_t r0ThreadStatus = KSWORD_ARK_THREAD_R0_STATUS_UNAVAILABLE; // R0 KTHREAD 扩展状态。
+        std::uint32_t r0StackFieldSource = KSW_DYN_FIELD_SOURCE_UNAVAILABLE; // KTHREAD 栈字段来源。
+        std::uint32_t r0IoFieldSource = KSW_DYN_FIELD_SOURCE_UNAVAILABLE;    // KTHREAD I/O counter 来源。
+        std::uint64_t r0InitialStack = 0;      // KTHREAD.InitialStack。
+        std::uint64_t r0StackLimit = 0;        // KTHREAD.StackLimit。
+        std::uint64_t r0StackBase = 0;         // KTHREAD.StackBase。
+        std::uint64_t r0KernelStack = 0;       // KTHREAD.KernelStack。
+        std::uint64_t r0ReadOperationCount = 0; // KTHREAD ReadOperationCount。
+        std::uint64_t r0WriteOperationCount = 0; // KTHREAD WriteOperationCount。
+        std::uint64_t r0OtherOperationCount = 0; // KTHREAD OtherOperationCount。
+        std::uint64_t r0ReadTransferCount = 0; // KTHREAD ReadTransferCount。
+        std::uint64_t r0WriteTransferCount = 0; // KTHREAD WriteTransferCount。
+        std::uint64_t r0OtherTransferCount = 0; // KTHREAD OtherTransferCount。
+        std::uint32_t r0KtInitialStackOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE; // DynData KtInitialStack 偏移。
+        std::uint32_t r0KtStackLimitOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;   // DynData KtStackLimit 偏移。
+        std::uint32_t r0KtStackBaseOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;    // DynData KtStackBase 偏移。
+        std::uint32_t r0KtKernelStackOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;  // DynData KtKernelStack 偏移。
+        std::uint32_t r0KtReadOperationCountOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE; // DynData KtReadOperationCount 偏移。
+        std::uint32_t r0KtWriteOperationCountOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE; // DynData KtWriteOperationCount 偏移。
+        std::uint32_t r0KtOtherOperationCountOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE; // DynData KtOtherOperationCount 偏移。
+        std::uint32_t r0KtReadTransferCountOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;   // DynData KtReadTransferCount 偏移。
+        std::uint32_t r0KtWriteTransferCountOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;  // DynData KtWriteTransferCount 偏移。
+        std::uint32_t r0KtOtherTransferCountOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;  // DynData KtOtherTransferCount 偏移。
+        std::uint64_t r0ThreadDynDataCapabilityMask = 0; // 驱动 DynData capability 位图快照。
     };
 
     // ProcessModuleSnapshot：模块页签所需快照数据（模块 + 线程）。
@@ -453,8 +483,16 @@ namespace ks::process
 
     // QueryProcessStaticDetailByPid 作用：
     // - 以 PID 为入口，查询单个进程的静态详情快照；
-    // - 失败时返回 false，outRecord 保留已获得字段。
-    bool QueryProcessStaticDetailByPid(std::uint32_t pid, ProcessRecord& outRecord);
+    // - includeSignatureCheck=true 时执行签名校验，可能较慢；
+    // - UI 开窗路径应传 false 或改用后台任务，避免阻塞事件循环。
+    // 参数 pid：目标进程 PID。
+    // 参数 outRecord：输出记录，失败时保留已获得字段。
+    // 参数 includeSignatureCheck：是否同步执行 WinVerifyTrust 签名校验。
+    // 返回值：基础静态详情读取成功返回 true，失败返回 false。
+    bool QueryProcessStaticDetailByPid(
+        std::uint32_t pid,
+        ProcessRecord& outRecord,
+        bool includeSignatureCheck = true);
 
     // EnumerateProcessModulesAndThreads 作用：
     // - 枚举目标进程模块 + 线程信息（供“模块”Tab 刷新）；

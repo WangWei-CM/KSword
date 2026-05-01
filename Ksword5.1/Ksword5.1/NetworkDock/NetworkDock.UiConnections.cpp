@@ -1,6 +1,8 @@
 #include "NetworkDock.InternalCommon.h"
 #include "../theme.h"
 
+#include <string>
+
 using namespace network_dock_detail;
 void NetworkDock::initializeConnections()
 {
@@ -169,21 +171,15 @@ void NetworkDock::initializeConnections()
     // - 统一维护日志与错误提示格式。
     const auto openProcessDetailByPid = [this](const std::uint32_t targetPid, const QString& sourceTag) -> void
         {
+            // 连接表跳转必须避免同步完整静态查询：
+            // - QueryProcessStaticDetailByPid 内部默认包含签名校验；
+            // - 详情窗口负责后台补齐字段并懒加载高级页面。
             ks::process::ProcessRecord processRecord;
-            if (!ks::process::QueryProcessStaticDetailByPid(targetPid, processRecord))
+            processRecord.pid = targetPid;
+            processRecord.processName = ks::process::GetProcessNameByPID(targetPid);
+            if (processRecord.processName.empty())
             {
-                QMessageBox::warning(
-                    this,
-                    QStringLiteral("进程详情"),
-                    QStringLiteral("查询 PID=%1 的进程信息失败。").arg(targetPid));
-
-                kLogEvent processDetailFailEvent;
-                warn << processDetailFailEvent
-                    << "[NetworkDock] 连接表打开进程详情失败, source="
-                    << sourceTag.toStdString()
-                    << ", pid=" << targetPid
-                    << eol;
-                return;
+                processRecord.processName = "PID_" + std::to_string(targetPid);
             }
 
             ProcessDetailWindow* detailWindow = new ProcessDetailWindow(processRecord, nullptr);

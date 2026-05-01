@@ -10,9 +10,11 @@
 
 #include "../theme.h"
 
+#include <QFontMetrics>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QSizePolicy>
 
 #include <algorithm>
 
@@ -23,8 +25,9 @@ PerformanceNavCard::PerformanceNavCard(QWidget* parent)
 {
     setAttribute(Qt::WA_StyledBackground, true);
     setAutoFillBackground(false);
-    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    setMinimumHeight(68);
+    // 左侧设备列表会按 Dock 可用高度动态压缩卡片，因此这里不能设置固定最小高度。
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    setMinimumSize(0, 0);
 }
 
 void PerformanceNavCard::setTitleText(const QString& titleText)
@@ -141,7 +144,8 @@ void PerformanceNavCard::clearSamples()
 
 QSize PerformanceNavCard::sizeHint() const
 {
-    return QSize(252, 68);
+    // 默认高度压到 52px，实际高度由 HardwareDock 按列表可见高度继续动态下调。
+    return QSize(208, 52);
 }
 
 int PerformanceNavCard::sampleCapacity() const
@@ -171,7 +175,15 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     painter.drawRoundedRect(cardRect, 4.0, 4.0);
 
     // 缩略图区域：保留边框与曲线，内部背景保持透明。
-    const QRect sparkRect(cardRect.left() + 6, cardRect.top() + 7, 64, cardRect.height() - 14);
+    // compactMode 用途：窄宽度/低高度下收缩缩略图和文字字号，避免左侧列表触发滚动条。
+    const bool compactMode = cardRect.width() < 176 || cardRect.height() < 48;
+    const int sparkInset = compactMode ? 4 : 5;
+    const int sparkWidth = std::clamp(cardRect.width() / 3, 8, compactMode ? 44 : 56);
+    const QRect sparkRect(
+        cardRect.left() + sparkInset,
+        cardRect.top() + sparkInset,
+        sparkWidth,
+        std::max(1, cardRect.height() - sparkInset * 2));
     // sparkBorderColor 用途：缩略图边框颜色；选中时使用实色，未选中时降低透明度。
     const QColor sparkBorderColor = QColor(
         m_accentColor.red(),
@@ -252,20 +264,32 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
     drawSeriesPath(m_primarySamples, m_primarySeriesColor);
 
     // 文本区域：主标题加粗，副标题使用次级颜色。
-    const QRect titleRect(sparkRect.right() + 8, cardRect.top() + 5, cardRect.width() - sparkRect.width() - 18, 30);
-    const QRect subtitleRect(sparkRect.right() + 8, cardRect.top() + 32, cardRect.width() - sparkRect.width() - 18, 28);
+    const int textLeft = sparkRect.right() + (compactMode ? 5 : 7);
+    const int textWidth = std::max(0, cardRect.right() - textLeft - 4);
+    const int titleHeight = std::max(1, cardRect.height() / 2);
+    const QRect titleRect(textLeft, cardRect.top() + 2, textWidth, titleHeight);
+    const QRect subtitleRect(
+        textLeft,
+        titleRect.bottom() - 1,
+        textWidth,
+        std::max(1, cardRect.bottom() - titleRect.bottom()));
 
     QFont titleFont = painter.font();
-    titleFont.setPointSizeF(18.0);
+    // 设备名主标题按需求改小，并在紧凑模式下继续压缩。
+    titleFont.setPointSizeF(compactMode ? 11.0 : 12.5);
     titleFont.setBold(true);
     painter.setFont(titleFont);
     painter.setPen(KswordTheme::IsDarkModeEnabled() ? QColor(240, 240, 240) : QColor(26, 32, 38));
-    painter.drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter, m_titleText);
+    const QString elidedTitleText =
+        QFontMetrics(titleFont).elidedText(m_titleText, Qt::ElideRight, titleRect.width());
+    painter.drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter, elidedTitleText);
 
     QFont subtitleFont = painter.font();
-    subtitleFont.setPointSizeF(11.5);
+    subtitleFont.setPointSizeF(compactMode ? 8.5 : 9.5);
     subtitleFont.setBold(false);
     painter.setFont(subtitleFont);
     painter.setPen(KswordTheme::IsDarkModeEnabled() ? QColor(198, 212, 225) : QColor(63, 83, 102));
-    painter.drawText(subtitleRect, Qt::AlignLeft | Qt::AlignVCenter, m_subtitleText);
+    const QString elidedSubtitleText =
+        QFontMetrics(subtitleFont).elidedText(m_subtitleText, Qt::ElideRight, subtitleRect.width());
+    painter.drawText(subtitleRect, Qt::AlignLeft | Qt::AlignVCenter, elidedSubtitleText);
 }

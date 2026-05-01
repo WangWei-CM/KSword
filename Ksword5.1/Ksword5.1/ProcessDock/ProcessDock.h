@@ -48,6 +48,8 @@ class QHBoxLayout;
 class QPoint;
 class QWidget;
 class ProcessDetailWindow;
+class ProcessActivityChartWidget;
+class ProcessActivityTimelineSlider;
 
 namespace ks::process
 {
@@ -59,6 +61,8 @@ namespace ks::process
 class ProcessDock final : public QWidget
 {
     Q_OBJECT
+    friend class ProcessActivityChartWidget;
+    friend class ProcessActivityTimelineSlider;
 
 public:
     // 构造函数作用：
@@ -132,6 +136,21 @@ private:
         OwnerPid,          // 所属进程 PID。
         ProcessName,       // 所属进程名（含图标）。
         StartAddress,      // 线程启动地址。
+        Win32StartAddress, // Win32StartAddress（R3 扩展线程信息）。
+        TebBaseAddress,    // TEB 基址（R3 扩展线程信息）。
+        UserStackBase,     // 用户栈基址（R3 扩展线程信息）。
+        UserStackLimit,    // 用户栈边界（R3 扩展线程信息）。
+        KernelStack,       // KTHREAD.KernelStack（R0 DynData）。
+        KStackBase,        // KTHREAD.StackBase（R0 DynData）。
+        KStackLimit,       // KTHREAD.StackLimit（R0 DynData）。
+        InitialStack,      // KTHREAD.InitialStack（R0 DynData）。
+        ReadOps,           // KTHREAD ReadOperationCount。
+        WriteOps,          // KTHREAD WriteOperationCount。
+        OtherOps,          // KTHREAD OtherOperationCount。
+        ReadBytes,         // KTHREAD ReadTransferCount。
+        WriteBytes,        // KTHREAD WriteTransferCount。
+        OtherBytes,        // KTHREAD OtherTransferCount。
+        ThreadR0Status,    // R0 线程扩展字段状态。
         Priority,          // 动态优先级。
         BasePriority,      // 基础优先级。
         ThreadState,       // 线程状态码（含文本）。
@@ -210,10 +229,49 @@ private:
         std::string kernelQueryDetailText;      // 内核查询诊断文本（错误或统计）。
     };
 
+public:
+    // ProcessActivityMetric：进程活动条形图支持切换显示的指标。
+    enum class ProcessActivityMetric : int
+    {
+        Cpu = 0,     // CPU 百分比。
+        Memory,      // 内存工作集 MB。
+        Disk,        // 磁盘吞吐 MB/s。
+        Network,     // 网络吞吐 KB/s。
+        Gpu          // GPU 百分比。
+    };
+
+    // ProcessActivityProcessPoint：单个采样点中的单进程轻量快照。
+    struct ProcessActivityProcessPoint
+    {
+        std::string identityKey;       // identityKey：PID + 创建时间，和表格选择保持一致。
+        std::string processName;       // processName：快照悬停展示用短名称。
+        std::uint32_t pid = 0;         // pid：快照悬停展示和排查用。
+        double cpuPercent = 0.0;       // cpuPercent：该进程采样时 CPU。
+        double memoryMB = 0.0;         // memoryMB：该进程采样时工作集。
+        double diskMBps = 0.0;         // diskMBps：该进程采样时磁盘吞吐。
+        double netKBps = 0.0;          // netKBps：该进程采样时网络吞吐。
+        double gpuPercent = 0.0;       // gpuPercent：该进程采样时 GPU。
+    };
+
+    // ProcessActivitySample：一次进程列表活动采样。
+    struct ProcessActivitySample
+    {
+        std::uint64_t sequence = 0;           // sequence：录制内单调递增序号。
+        std::uint64_t elapsedMs = 0;          // elapsedMs：距本次录制开始的毫秒数。
+        std::int64_t unixMilliseconds = 0;    // unixMilliseconds：本地时间戳，便于 UI 格式化。
+        double totalCpuPercent = 0.0;         // totalCpuPercent：全局聚合 CPU。
+        double totalMemoryMB = 0.0;           // totalMemoryMB：全局聚合工作集。
+        double totalDiskMBps = 0.0;           // totalDiskMBps：全局聚合磁盘吞吐。
+        double totalNetKBps = 0.0;            // totalNetKBps：全局聚合网络吞吐。
+        double totalGpuPercent = 0.0;         // totalGpuPercent：全局聚合 GPU。
+        std::vector<ProcessActivityProcessPoint> processes; // processes：该时刻仍存活的进程快照。
+    };
+
 private:
     // ======== UI 初始化相关 ========
     void initializeUi();
     void initializeTopControls();
+    void initializeProcessActivityPanel();
     void initializeProcessTable();
     void initializeCreateProcessPage();
     void initializeThreadPage();
@@ -222,6 +280,8 @@ private:
     void initializeTimer();
     void updateRefreshStateUi(bool refreshing, const QString& stateText);
     void applyAdaptiveColumnWidths();
+    int refreshIntervalMillisecondsFromInput() const;
+    void applyRefreshIntervalInput();
     void initializeCreateProcessConnections();
     void focusProcessSearchBox(bool selectAllText);
     QString currentProcessSearchText() const;
@@ -237,6 +297,7 @@ private:
     std::vector<DisplayRow> buildDisplayOrder() const;
     std::vector<DisplayRow> buildTreeDisplayOrder() const;
     std::vector<DisplayRow> buildListDisplayOrder() const;
+    void applyR0ColumnAvailability(const std::vector<DisplayRow>& displayRows);
 
     // ======== 视图控制 ========
     void applyViewMode(ViewMode viewMode);
@@ -255,10 +316,27 @@ private:
     void openProcessDetailsPlaceholder();
     void openProcessDetailWindowByPid(std::uint32_t pid);
     void openThreadOwnerProcessDetails();
+    // openThreadStackWindow 作用：
+    // - 为当前线程列表选中行打开 Phase-8 调用栈窗口；
+    // - R3 捕获用户栈，R0 字段只作为内核栈边界辅助诊断。
+    void openThreadStackWindow();
     void executeSuspendThreadAction();
     void executeResumeThreadAction();
     void executeTerminateThreadAction();
     void updateUsageSummaryInHeader(const std::vector<DisplayRow>& displayRows);
+
+    // ======== 进程活动录制与时间轴 ========
+    bool isProcessActivityMetricEnabled(ProcessActivityMetric metric) const;
+    bool isProcessActivityRecordingAllowedNow() const;
+    bool isProcessListPageVisibleForRecording() const;
+    void appendProcessActivitySample();
+    bool trimProcessActivitySamples();
+    void refreshProcessActivityTimeline(bool indexShiftedLeft = false);
+    void refreshProcessActivityChart();
+    void updateProcessActivityStatusLabel();
+    void showProcessActivitySnapshotForIndex(int sampleIndex);
+    QString buildProcessActivitySnapshotText(int sampleIndex) const;
+    std::vector<std::string> currentProcessActivitySelectionKeys() const;
 
     // ======== 进程控制动作 ========
     // executeTerminateProcessAction 作用：
@@ -382,8 +460,29 @@ private:
     QCheckBox* m_kernelCompareCheck = nullptr;// 刷新时是否额外请求内核进程列表并做差异对比。
     QLineEdit* m_processSearchLineEdit = nullptr; // 进程搜索框；用于按名称/PID/路径等关键词过滤当前列表。
     QLabel* m_refreshLabel = nullptr;         // 刷新间隔标签。
-    QSlider* m_refreshSlider = nullptr;       // 刷新间隔滑块（秒）。
+    QLineEdit* m_refreshIntervalEdit = nullptr; // 刷新/打点间隔输入框，允许小数秒。
     QLabel* m_refreshStateLabel = nullptr;    // 刷新状态标签（明显展示“刷新中/空闲+耗时”）。
+
+    // ======== 进程活动录制面板 ========
+    QWidget* m_activityPanelWidget = nullptr;       // m_activityPanelWidget：进程活动图表面板。
+    ProcessActivityChartWidget* m_activityChartWidget = nullptr; // m_activityChartWidget：时间轴叠加条形图。
+    ProcessActivityTimelineSlider* m_activityTimelineSlider = nullptr; // m_activityTimelineSlider：历史窗口横向时间轴。
+    QPushButton* m_activityRecordButton = nullptr;  // m_activityRecordButton：开始/停止录制进程活动。
+    QPushButton* m_activityClearButton = nullptr;   // m_activityClearButton：清空当前录制缓存。
+    QCheckBox* m_activityBackgroundRecordCheck = nullptr; // 后台保持记录开关。
+    QPushButton* m_activityCpuButton = nullptr;     // CPU 指标显示按钮。
+    QPushButton* m_activityMemoryButton = nullptr;  // 内存指标显示按钮。
+    QPushButton* m_activityDiskButton = nullptr;    // 磁盘指标显示按钮。
+    QPushButton* m_activityNetworkButton = nullptr; // 网络指标显示按钮。
+    QPushButton* m_activityGpuButton = nullptr;     // GPU 指标显示按钮。
+    QLabel* m_activityStatusLabel = nullptr;        // 活动录制状态标签。
+    QLabel* m_activitySnapshotLabel = nullptr;      // 时间轴悬停快照摘要。
+    bool m_activityRecordingEnabled = false;        // 用户是否启用录制。
+    bool m_activityTimelinePinnedToLatest = true;   // 时间轴在最右侧时自动吸附最新。
+    bool m_activityTimelineSliderUpdating = false;  // 程序更新滑块时屏蔽用户态判定。
+    std::uint64_t m_activityNextSequence = 0;       // 录制样本序号。
+    std::uint64_t m_activityRecordingStartTick100ns = 0; // 本次录制开始 steady tick。
+    std::vector<ProcessActivitySample> m_activitySamples; // 有界环形录制缓存。
 
     // ======== 进程表格 ========
     QTreeWidget* m_processTable = nullptr;    // 进程列表表格（支持列拖动/排序/右键）。
@@ -470,6 +569,7 @@ private:
     QTimer* m_refreshTimer = nullptr;         // 周期刷新定时器。
     bool m_monitoringEnabled = true;          // 当前是否处于监视状态。
     bool m_refreshInProgress = false;         // 防止并发刷新的互斥标记。
+    bool m_autoHideUnavailableR0Columns = false; // 当 R0 扩展整轮不可用时自动隐藏内核专属列。
     std::uint64_t m_refreshTicket = 0;        // 刷新请求序号（防乱序）。
     std::uint32_t m_logicalCpuCount = 1;      // CPU 核心数（CPU 百分比换算）。
     std::chrono::steady_clock::time_point m_lastRefreshStartTime{}; // 主线程记录的刷新开始时刻。
