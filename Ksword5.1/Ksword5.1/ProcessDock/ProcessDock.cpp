@@ -134,7 +134,35 @@ namespace
     constexpr int ProcessEfficiencyModeKnownRole = Qt::UserRole + 202;
     constexpr int ActivityMinimumIntervalMilliseconds = 50;
     constexpr int ActivityMaximumIntervalMilliseconds = 60000;
+    constexpr int ProcessTableMinimumIntervalMilliseconds = 500;
+    constexpr int ProcessTableMaximumIntervalMilliseconds = 60000;
     constexpr std::size_t ActivityMaximumSampleCount = 1800;
+
+    // clampPercentValue 作用：
+    // - 把所有图表输入值统一夹到 0~100；
+    // - 折线图只绘制百分比，避免不同单位直接叠加造成误读。
+    double clampPercentValue(const double percentValue)
+    {
+        if (!std::isfinite(percentValue))
+        {
+            return 0.0;
+        }
+        return std::clamp(percentValue, 0.0, 100.0);
+    }
+
+    // totalPhysicalMemoryMB 作用：
+    // - 读取系统物理内存总量；
+    // - 用于把进程工作集 MB 转换成百分比。
+    double totalPhysicalMemoryMB()
+    {
+        MEMORYSTATUSEX memoryStatus{};
+        memoryStatus.dwLength = sizeof(memoryStatus);
+        if (::GlobalMemoryStatusEx(&memoryStatus) == FALSE || memoryStatus.ullTotalPhys == 0ULL)
+        {
+            return 0.0;
+        }
+        return static_cast<double>(memoryStatus.ullTotalPhys) / (1024.0 * 1024.0);
+    }
 
     // processActivityMetricText 作用：
     // - 将活动图内部指标枚举映射为 UI 显示名称；
@@ -188,21 +216,18 @@ namespace
         switch (metric)
         {
         case ProcessDock::ProcessActivityMetric::Cpu:
+        case ProcessDock::ProcessActivityMetric::Memory:
+        case ProcessDock::ProcessActivityMetric::Disk:
+        case ProcessDock::ProcessActivityMetric::Network:
         case ProcessDock::ProcessActivityMetric::Gpu:
             return QStringLiteral("%");
-        case ProcessDock::ProcessActivityMetric::Memory:
-            return QStringLiteral("MB");
-        case ProcessDock::ProcessActivityMetric::Disk:
-            return QStringLiteral("MB/s");
-        case ProcessDock::ProcessActivityMetric::Network:
-            return QStringLiteral("KB/s");
         default:
             return QString();
         }
     }
 
     // formatActivityElapsedText 作用：
-    // - 将录制相对毫秒转换为紧凑时间轴标签；
+    // - 将记录相对毫秒转换为紧凑时间轴标签；
     // - 小于 1 秒时保留 0.1s 精度，便于 0.1s 打点场景定位。
     QString formatActivityElapsedText(const std::uint64_t elapsedMs)
     {
@@ -306,14 +331,14 @@ public:
 
 protected:
     // paintEvent：
-    // - 以时间为横轴绘制叠加条形统计图；
+    // - 以时间为横轴绘制多指标百分比折线图；
     // - 无返回值，所有数据都从宿主的有界样本缓存读取。
     void paintEvent(QPaintEvent* eventPointer) override
     {
         (void)eventPointer;
 
         QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.setRenderHint(QPainter::Antialiasing, true);
         painter.fillRect(rect(), themeColorFromText(
             KswordTheme::SurfaceHex(),
             KswordTheme::IsDarkModeEnabled() ? QColor(28, 32, 38) : QColor(250, 252, 255)));
@@ -333,7 +358,7 @@ protected:
         if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty())
         {
             painter.setPen(textColor);
-            painter.drawText(plotRect, Qt::AlignCenter, QStringLiteral("未开始录制进程列表活动"));
+            painter.drawText(plotRect, Qt::AlignCenter, QStringLiteral("未开始刷新进程列表活动"));
             return;
         }
 
@@ -346,18 +371,10 @@ protected:
         }
 
         std::vector<std::string> selectionKeys = m_ownerDock->currentProcessActivitySelectionKeys();
-        double maxStackValue = 0.0;
-        for (const ProcessDock::ProcessActivitySample& sample : m_ownerDock->m_activitySamples)
-        {
-            maxStackValue = std::max(maxStackValue, sampleStackValue(sample, enabledMetrics, selectionKeys));
-        }
-        if (maxStackValue <= 0.0)
-        {
-            maxStackValue = 1.0;
-        }
+        const MetricScale metricScale = calculateMetricScale(enabledMetrics, selectionKeys);
 
-        drawGrid(painter, plotRect, borderColor, textColor, maxStackValue);
-        drawBars(painter, plotRect, enabledMetrics, selectionKeys, maxStackValue);
+        drawGrid(painter, plotRect, borderColor, textColor);
+        drawLines(painter, plotRect, enabledMetrics, selectionKeys, metricScale);
         drawLegend(painter, enabledMetrics, textColor);
         drawFocusLine(painter, plotRect);
     }
@@ -377,7 +394,7 @@ protected:
         if (sampleIndex >= 0)
         {
             const bool oldPinnedToLatest = m_ownerDock->m_activityTimelinePinnedToLatest;
-            m_ownerDock->showProcessActivitySnapshotForIndex(sampleIndex);
+            m_ownerDock->previewProcessActivitySnapshotForIndex(sampleIndex);
             m_ownerDock->m_activityTimelinePinnedToLatest = oldPinnedToLatest;
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
             const QPoint globalPosition = eventPointer->globalPosition().toPoint();
@@ -406,9 +423,10 @@ protected:
         const int sampleIndex = sampleIndexAtX(activityMousePosition(eventPointer).x());
         if (sampleIndex >= 0)
         {
-            m_ownerDock->showProcessActivitySnapshotForIndex(sampleIndex);
-            m_ownerDock->m_activityTimelinePinnedToLatest =
-                (sampleIndex >= static_cast<int>(m_ownerDock->m_activitySamples.size()) - 1);
+            // 图表本身现在就是唯一时间轴：
+            // - 左键点击提交历史时刻；
+            // - 提交会同步更新下方进程表到对应快照。
+            m_ownerDock->commitProcessActivityTimelineIndex(sampleIndex);
             eventPointer->accept();
             return;
         }
@@ -435,7 +453,7 @@ private:
 
     // enabledMetricList：
     // - 从宿主按钮状态读取当前可见指标；
-    // - 返回顺序即条形堆叠顺序。
+    // - 返回顺序即折线绘制顺序。
     std::vector<ProcessDock::ProcessActivityMetric> enabledMetricList() const
     {
         std::vector<ProcessDock::ProcessActivityMetric> metricList;
@@ -460,10 +478,20 @@ private:
         return metricList;
     }
 
-    // sampleMetricValue：
-    // - 读取某个采样点的单项指标；
+    // MetricScale 作用：
+    // - 保存折线图百分比归一化分母；
+    // - 磁盘/网络使用当前历史窗口最大值作为 100%。
+    struct MetricScale
+    {
+        double memoryDenominatorMB = 1.0;     // memoryDenominatorMB：物理内存总量或历史最大内存。
+        double diskDenominatorMBps = 1.0;     // diskDenominatorMBps：历史最大磁盘吞吐。
+        double networkDenominatorKBps = 1.0;  // networkDenominatorKBps：历史最大网络吞吐。
+    };
+
+    // sampleRawMetricValue：
+    // - 读取某个采样点的原始单项指标；
     // - selectionKeys 为空时返回总体聚合，否则返回选中进程之和。
-    double sampleMetricValue(
+    double sampleRawMetricValue(
         const ProcessDock::ProcessActivitySample& sample,
         const ProcessDock::ProcessActivityMetric metric,
         const std::vector<std::string>& selectionKeys) const
@@ -518,20 +546,63 @@ private:
         return value;
     }
 
-    // sampleStackValue：
-    // - 计算一次采样在当前指标组合下的总堆叠高度；
-    // - 用于自适应 Y 轴最大值。
-    double sampleStackValue(
-        const ProcessDock::ProcessActivitySample& sample,
+    // calculateMetricScale：
+    // - 每次绘制都重新扫描历史最大值；
+    // - 当磁盘/网络出现新峰值时，本轮立刻重算百分比并重绘。
+    MetricScale calculateMetricScale(
         const std::vector<ProcessDock::ProcessActivityMetric>& metricList,
         const std::vector<std::string>& selectionKeys) const
     {
-        double stackValue = 0.0;
-        for (const ProcessDock::ProcessActivityMetric metric : metricList)
+        MetricScale scale{};
+        if (m_ownerDock == nullptr)
         {
-            stackValue += sampleMetricValue(sample, metric, selectionKeys);
+            return scale;
         }
-        return stackValue;
+
+        scale.memoryDenominatorMB = std::max(1.0, m_ownerDock->m_activityTotalPhysicalMemoryMB);
+        double maxMemoryMB = 0.0;
+        double maxDiskMBps = 0.0;
+        double maxNetworkKBps = 0.0;
+        for (const ProcessDock::ProcessActivitySample& sample : m_ownerDock->m_activitySamples)
+        {
+            maxMemoryMB = std::max(maxMemoryMB, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Memory, selectionKeys));
+            maxDiskMBps = std::max(maxDiskMBps, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Disk, selectionKeys));
+            maxNetworkKBps = std::max(maxNetworkKBps, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Network, selectionKeys));
+        }
+        if (scale.memoryDenominatorMB <= 1.0 && maxMemoryMB > 0.0)
+        {
+            scale.memoryDenominatorMB = maxMemoryMB;
+        }
+        scale.diskDenominatorMBps = std::max(1.0, maxDiskMBps);
+        scale.networkDenominatorKBps = std::max(1.0, maxNetworkKBps);
+        (void)metricList;
+        return scale;
+    }
+
+    // samplePercentMetricValue：
+    // - 把原始指标统一转换为百分比；
+    // - 磁盘/网络按历史最大值归一化，CPU/GPU 天然是百分比。
+    double samplePercentMetricValue(
+        const ProcessDock::ProcessActivitySample& sample,
+        const ProcessDock::ProcessActivityMetric metric,
+        const std::vector<std::string>& selectionKeys,
+        const MetricScale& scale) const
+    {
+        const double rawValue = sampleRawMetricValue(sample, metric, selectionKeys);
+        switch (metric)
+        {
+        case ProcessDock::ProcessActivityMetric::Cpu:
+        case ProcessDock::ProcessActivityMetric::Gpu:
+            return clampPercentValue(rawValue);
+        case ProcessDock::ProcessActivityMetric::Memory:
+            return clampPercentValue((rawValue / std::max(1.0, scale.memoryDenominatorMB)) * 100.0);
+        case ProcessDock::ProcessActivityMetric::Disk:
+            return clampPercentValue((rawValue / std::max(1.0, scale.diskDenominatorMBps)) * 100.0);
+        case ProcessDock::ProcessActivityMetric::Network:
+            return clampPercentValue((rawValue / std::max(1.0, scale.networkDenominatorKBps)) * 100.0);
+        default:
+            return 0.0;
+        }
     }
 
     // sampleIndexAtX：
@@ -558,13 +629,13 @@ private:
     }
 
     // sampleIndexToX：
-    // - 将样本下标映射为条形中心 X；
+    // - 将样本下标映射为折线点 X；
     // - 绘制焦点线和时间标签复用该函数。
     double sampleIndexToX(const int sampleIndex, const QRectF& plotRect) const
     {
         if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.size() <= 1U)
         {
-            return plotRect.left();
+            return plotRect.left() + plotRect.width() * 0.5;
         }
         const double ratio = static_cast<double>(sampleIndex)
             / static_cast<double>(m_ownerDock->m_activitySamples.size() - 1U);
@@ -578,8 +649,7 @@ private:
         QPainter& painter,
         const QRectF& plotRect,
         const QColor& borderColor,
-        const QColor& textColor,
-        const double maxStackValue) const
+        const QColor& textColor) const
     {
         painter.setPen(QPen(borderColor, 0.5));
         for (int i = 1; i <= 3; ++i)
@@ -590,9 +660,11 @@ private:
 
         painter.setPen(textColor);
         painter.drawText(QRectF(2.0, plotRect.top() - 2.0, 38.0, 18.0), Qt::AlignRight | Qt::AlignVCenter,
-            QString::number(maxStackValue, 'f', maxStackValue >= 100.0 ? 0 : 1));
+            QStringLiteral("100%"));
+        painter.drawText(QRectF(2.0, plotRect.center().y() - 9.0, 38.0, 18.0), Qt::AlignRight | Qt::AlignVCenter,
+            QStringLiteral("50%"));
         painter.drawText(QRectF(2.0, plotRect.bottom() - 16.0, 38.0, 18.0), Qt::AlignRight | Qt::AlignVCenter,
-            QStringLiteral("0"));
+            QStringLiteral("0%"));
 
         if (m_ownerDock != nullptr && !m_ownerDock->m_activitySamples.empty())
         {
@@ -607,15 +679,15 @@ private:
         }
     }
 
-    // drawBars：
-    // - 绘制按时间排列的堆叠条形图；
-    // - 每个样本一个竖条，指标越多越高，按钮可减少叠加复杂度。
-    void drawBars(
+    // drawLines：
+    // - 绘制按时间排列的多指标折线；
+    // - 所有指标已转为 0~100%，不同单位可以共用同一 Y 轴。
+    void drawLines(
         QPainter& painter,
         const QRectF& plotRect,
         const std::vector<ProcessDock::ProcessActivityMetric>& metricList,
         const std::vector<std::string>& selectionKeys,
-        const double maxStackValue) const
+        const MetricScale& metricScale) const
     {
         if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty())
         {
@@ -623,39 +695,51 @@ private:
         }
 
         const std::size_t sampleCount = m_ownerDock->m_activitySamples.size();
-        const double slotWidth = plotRect.width() / static_cast<double>(std::max<std::size_t>(sampleCount, 1U));
-        const double barWidth = std::clamp(slotWidth * 0.78, 1.0, 14.0);
-        for (std::size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
+        for (const ProcessDock::ProcessActivityMetric metric : metricList)
         {
-            const ProcessDock::ProcessActivitySample& sample = m_ownerDock->m_activitySamples[sampleIndex];
-            const double xCenter = (sampleCount <= 1U)
-                ? plotRect.left() + plotRect.width() * 0.5
-                : sampleIndexToX(static_cast<int>(sampleIndex), plotRect);
-            double yCursor = plotRect.bottom();
-            for (const ProcessDock::ProcessActivityMetric metric : metricList)
+            QPainterPath metricPath;
+            bool hasPoint = false;
+            std::vector<QPointF> pointList;
+            pointList.reserve(sampleCount);
+            for (std::size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
             {
-                const double metricValue = sampleMetricValue(sample, metric, selectionKeys);
-                if (metricValue <= 0.0)
+                const ProcessDock::ProcessActivitySample& sample = m_ownerDock->m_activitySamples[sampleIndex];
+                const double percentValue = samplePercentMetricValue(sample, metric, selectionKeys, metricScale);
+                const double xValue = sampleIndexToX(static_cast<int>(sampleIndex), plotRect);
+                const double yValue = plotRect.bottom() - (percentValue / 100.0) * plotRect.height();
+                const QPointF point(xValue, yValue);
+                pointList.push_back(point);
+                if (!hasPoint)
                 {
-                    continue;
+                    metricPath.moveTo(point);
+                    hasPoint = true;
                 }
-                const double segmentHeight = std::clamp(metricValue / maxStackValue, 0.0, 1.0) * plotRect.height();
-                QRectF barRect(
-                    xCenter - barWidth * 0.5,
-                    yCursor - segmentHeight,
-                    barWidth,
-                    segmentHeight);
-                QColor fillColor = processActivityMetricColor(metric);
-                fillColor.setAlpha(185);
-                painter.fillRect(barRect, fillColor);
-                yCursor -= segmentHeight;
+                else
+                {
+                    metricPath.lineTo(point);
+                }
+            }
+
+            QColor lineColor = processActivityMetricColor(metric);
+            lineColor.setAlpha(230);
+            painter.setPen(QPen(lineColor, 2.0));
+            painter.drawPath(metricPath);
+
+            QColor pointColor = lineColor;
+            pointColor.setAlpha(245);
+            painter.setBrush(pointColor);
+            painter.setPen(Qt::NoPen);
+            const int pointStride = static_cast<int>(std::max<std::size_t>(1U, sampleCount / 80U));
+            for (std::size_t pointIndex = 0; pointIndex < pointList.size(); pointIndex += static_cast<std::size_t>(pointStride))
+            {
+                painter.drawEllipse(pointList[pointIndex], 2.2, 2.2);
             }
         }
     }
 
     // drawLegend：
     // - 在图表上沿绘制当前启用指标图例；
-    // - 用户可据此确认按钮筛选后的叠加顺序。
+    // - 用户可据此确认按钮筛选后的折线颜色。
     void drawLegend(
         QPainter& painter,
         const std::vector<ProcessDock::ProcessActivityMetric>& metricList,
@@ -725,31 +809,9 @@ protected:
         if (eventPointer != nullptr && m_ownerDock != nullptr && !m_ownerDock->m_activitySamples.empty())
         {
             const int sampleIndex = valueAtPosition(activityMousePosition(eventPointer).x());
-
-            // 拖拽路径：
-            // - 自定义 mousePressEvent 不再依赖 QSlider 内部 pressed 状态；
-            // - 因此按住左键移动时必须显式 setValue，保证“拉到最右侧吸附最新”可用。
-            if (eventPointer->buttons().testFlag(Qt::LeftButton))
-            {
-                m_ownerDock->m_activityTimelinePinnedToLatest = (sampleIndex >= maximum());
-                setValue(sampleIndex);
-                m_ownerDock->showProcessActivitySnapshotForIndex(sampleIndex);
-                m_ownerDock->m_activityTimelinePinnedToLatest = (sampleIndex >= maximum());
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-                const QPoint globalPosition = eventPointer->globalPosition().toPoint();
-#else
-                const QPoint globalPosition = eventPointer->globalPos();
-#endif
-                QToolTip::showText(globalPosition, m_ownerDock->buildProcessActivitySnapshotText(sampleIndex), this);
-                eventPointer->accept();
-                return;
-            }
-
-            // 悬停路径：
-            // - 只展示历史快照，不改变“是否吸附最新”的持久状态；
-            // - 单样本时 maximum==minimum，也应显示该唯一快照。
+            // 悬停只更新快照提示，不改变滑块值，也不重绘下方进程表。
             const bool oldPinnedToLatest = m_ownerDock->m_activityTimelinePinnedToLatest;
-            m_ownerDock->showProcessActivitySnapshotForIndex(sampleIndex);
+            m_ownerDock->previewProcessActivitySnapshotForIndex(sampleIndex);
             m_ownerDock->m_activityTimelinePinnedToLatest = oldPinnedToLatest;
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
             const QPoint globalPosition = eventPointer->globalPosition().toPoint();
@@ -769,15 +831,10 @@ protected:
         if (eventPointer != nullptr && eventPointer->button() == Qt::LeftButton && maximum() >= minimum())
         {
             const int sampleIndex = valueAtPosition(activityMousePosition(eventPointer).x());
-            if (m_ownerDock != nullptr)
-            {
-                m_ownerDock->m_activityTimelinePinnedToLatest = (sampleIndex >= maximum());
-            }
             setValue(sampleIndex);
             if (m_ownerDock != nullptr)
             {
-                m_ownerDock->showProcessActivitySnapshotForIndex(sampleIndex);
-                m_ownerDock->m_activityTimelinePinnedToLatest = (sampleIndex >= maximum());
+                m_ownerDock->commitProcessActivityTimelineIndex(sampleIndex);
             }
             eventPointer->accept();
             return;
@@ -1743,6 +1800,7 @@ ProcessDock::ProcessDock(QWidget* parent)
     m_logicalCpuCount = std::max<std::uint32_t>(1, std::thread::hardware_concurrency());
 
     // 构造阶段按“UI -> 连接 -> 定时器 -> 首次刷新”顺序执行。
+    m_activityTotalPhysicalMemoryMB = totalPhysicalMemoryMB();
     initializeUi();
     initializeConnections();
     initializeTimer();
@@ -1768,6 +1826,20 @@ void ProcessDock::showEvent(QShowEvent* event)
 
     m_initialRefreshScheduled = true;
     m_monitoringEnabled = true;
+    m_activityRecordingEnabled = true;
+    if (m_activitySamples.empty())
+    {
+        m_activityRecordingStartTick100ns = steadyNow100ns();
+        m_activityNextSequence = 0;
+    }
+    if (m_tableRefreshIntervalEdit != nullptr)
+    {
+        m_tableRefreshIntervalEdit->setEnabled(true);
+    }
+    if (m_refreshIntervalEdit != nullptr)
+    {
+        m_refreshIntervalEdit->setEnabled(true);
+    }
     if (m_refreshTimer != nullptr)
     {
         m_refreshTimer->start();
@@ -1892,20 +1964,34 @@ void ProcessDock::initializeTopControls()
     m_pauseButton->setIconSize(DefaultIconSize);
     m_startButton->setFixedSize(CompactIconButtonSize);
     m_pauseButton->setFixedSize(CompactIconButtonSize);
-    m_startButton->setToolTip("开始周期性刷新进程列表");
-    m_pauseButton->setToolTip("暂停周期性刷新进程列表");
+    m_startButton->setToolTip("开始周期性刷新进程列表，并同步记录进程活动");
+    m_pauseButton->setToolTip("暂停周期性刷新进程列表，并同步停止记录");
 
-    // 刷新/打点间隔输入框：
+    // 进程表刷新间隔：
+    // - 该间隔只控制下方进程表格重绘频率，默认 2 秒；
+    // - 后台监视和活动打点仍走 0.1 秒采样，避免表格渲染成本影响记录精度。
+    m_refreshLabel = new QLabel("列表刷新(s):", this);
+    m_tableRefreshIntervalEdit = new QLineEdit(this);
+    m_tableRefreshIntervalEdit->setText(QStringLiteral("2.0"));
+    m_tableRefreshIntervalEdit->setFixedWidth(64);
+    m_tableRefreshIntervalEdit->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_tableRefreshIntervalEdit->setValidator(new QDoubleValidator(0.5, 60.0, 2, m_tableRefreshIntervalEdit));
+    m_tableRefreshIntervalEdit->setToolTip("只控制下方进程表格刷新频率，默认 2 秒。");
+    m_tableRefreshIntervalEdit->setStyleSheet(buildBlueLineEditStyle());
+    m_tableRefreshIntervalEdit->setEnabled(false);
+
+    // 记录/打点间隔输入框：
     // - 允许小数秒，默认 0.1s；
-    // - 同一个间隔驱动列表刷新和进程活动录制打点。
-    m_refreshLabel = new QLabel("刷新/打点间隔(s):", this);
+    // - 该间隔驱动后台监视刷新和活动记录采样。
+    m_sampleIntervalLabel = new QLabel("记录打点(s):", this);
     m_refreshIntervalEdit = new QLineEdit(this);
     m_refreshIntervalEdit->setText(QStringLiteral("0.1"));
     m_refreshIntervalEdit->setFixedWidth(64);
     m_refreshIntervalEdit->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_refreshIntervalEdit->setValidator(new QDoubleValidator(0.05, 60.0, 3, m_refreshIntervalEdit));
-    m_refreshIntervalEdit->setToolTip("允许输入小数秒，默认 0.1；过小间隔会提高系统枚举开销。");
+    m_refreshIntervalEdit->setToolTip("记录打点间隔，允许输入小数秒，默认 0.1；过小间隔会提高系统枚举开销。");
     m_refreshIntervalEdit->setStyleSheet(buildBlueLineEditStyle());
+    m_refreshIntervalEdit->setEnabled(false);
 
     // 刷新状态标签：明确告诉用户当前是否在刷新，以及最后耗时。
     m_refreshStateLabel = new QLabel("● 空闲", this);
@@ -1947,6 +2033,8 @@ void ProcessDock::initializeTopControls()
     m_controlLayout->addWidget(m_kernelCompareCheck);
     m_controlLayout->addStretch(1);
     m_controlLayout->addWidget(m_refreshLabel);
+    m_controlLayout->addWidget(m_tableRefreshIntervalEdit);
+    m_controlLayout->addWidget(m_sampleIntervalLabel);
     m_controlLayout->addWidget(m_refreshIntervalEdit);
     // 第二行只放“监控状态”，避免与操作按钮挤在同一行导致横向滚动。
     m_statusLayout->addWidget(m_refreshStateLabel, 1);
@@ -1982,17 +2070,12 @@ void ProcessDock::initializeProcessActivityPanel()
     toolbarLayout->setContentsMargins(0, 0, 0, 0);
     toolbarLayout->setSpacing(6);
 
-    m_activityRecordButton = new QPushButton(QIcon(IconStart), QStringLiteral("录制"), m_activityPanelWidget);
-    m_activityRecordButton->setCheckable(true);
-    m_activityRecordButton->setToolTip(QStringLiteral("开始/停止记录进程列表活动，采样间隔使用右上角输入值。"));
-    m_activityRecordButton->setStyleSheet(buildBlueButtonStyle(false));
-
     m_activityClearButton = new QPushButton(QStringLiteral("清空"), m_activityPanelWidget);
-    m_activityClearButton->setToolTip(QStringLiteral("清空当前录制的进程活动样本。"));
+    m_activityClearButton->setToolTip(QStringLiteral("清空当前刷新同步记录的进程活动样本。"));
     m_activityClearButton->setStyleSheet(buildBlueButtonStyle(false));
 
-    m_activityBackgroundRecordCheck = new QCheckBox(QStringLiteral("后台保持记录"), m_activityPanelWidget);
-    m_activityBackgroundRecordCheck->setToolTip(QStringLiteral("默认仅进程列表 Tab 显示时记录；勾选后切到其它 Tab 仍继续记录。"));
+    m_activityBackgroundRecordCheck = new QCheckBox(QStringLiteral("后台保持刷新/记录"), m_activityPanelWidget);
+    m_activityBackgroundRecordCheck->setToolTip(QStringLiteral("默认仅进程列表 Tab 显示时刷新和记录；勾选后切到其它 Tab 仍继续刷新并记录。"));
 
     const QString metricButtonStyle = QStringLiteral(
         "QPushButton {"
@@ -2015,7 +2098,7 @@ void ProcessDock::initializeProcessActivityPanel()
         .arg(KswordTheme::BorderHex())
         .arg(KswordTheme::PrimaryBlueHex);
 
-    // 指标按钮必须可独立开关，避免 CPU/内存/磁盘/网络/GPU 全部叠加后难以阅读。
+    // 指标按钮必须可独立开关，避免 CPU/内存/磁盘/网络/GPU 全部显示后难以阅读。
     auto createMetricButton =
         [this, &metricButtonStyle](const QString& text, const bool checkedByDefault)
         {
@@ -2023,7 +2106,7 @@ void ProcessDock::initializeProcessActivityPanel()
             button->setCheckable(true);
             button->setChecked(checkedByDefault);
             button->setStyleSheet(metricButtonStyle);
-            button->setToolTip(QStringLiteral("切换该指标是否绘制在上方叠加条形图中。"));
+            button->setToolTip(QStringLiteral("切换该指标是否绘制在上方百分比折线图中。"));
             return button;
         };
     m_activityCpuButton = createMetricButton(QStringLiteral("CPU"), true);
@@ -2032,10 +2115,9 @@ void ProcessDock::initializeProcessActivityPanel()
     m_activityNetworkButton = createMetricButton(QStringLiteral("网络"), false);
     m_activityGpuButton = createMetricButton(QStringLiteral("GPU"), false);
 
-    m_activityStatusLabel = new QLabel(QStringLiteral("活动录制：未开始 | 样本 0"), m_activityPanelWidget);
+    m_activityStatusLabel = new QLabel(QStringLiteral("进程活动：未开始刷新 | 样本 0"), m_activityPanelWidget);
     m_activityStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
 
-    toolbarLayout->addWidget(m_activityRecordButton);
     toolbarLayout->addWidget(m_activityClearButton);
     toolbarLayout->addWidget(m_activityBackgroundRecordCheck);
     toolbarLayout->addSpacing(8);
@@ -2049,12 +2131,13 @@ void ProcessDock::initializeProcessActivityPanel()
     toolbarLayout->addWidget(m_activityStatusLabel);
 
     m_activityChartWidget = new ProcessActivityChartWidget(this, m_activityPanelWidget);
-    m_activityChartWidget->setToolTip(QStringLiteral("横轴为录制时间；未选进程显示总体，选中一个或多个进程时显示选中进程聚合。"));
+    m_activityChartWidget->setToolTip(QStringLiteral("横轴为记录时间；纵轴统一为百分比；悬停查看快照，左键点击切换下方列表到该时刻。"));
 
     m_activityTimelineSlider = new ProcessActivityTimelineSlider(this, m_activityPanelWidget);
     m_activityTimelineSlider->setRange(0, 0);
     m_activityTimelineSlider->setValue(0);
-    m_activityTimelineSlider->setToolTip(QStringLiteral("时间轴：拖动到历史位置查看该时刻进程快照；拖到最右侧后自动吸附最新。"));
+    m_activityTimelineSlider->setVisible(false);
+    m_activityTimelineSlider->setToolTip(QStringLiteral("隐藏时间轴：内部仅保存当前样本索引，用户通过折线图点击切换历史时刻。"));
 
     m_activitySnapshotLabel = new QLabel(QStringLiteral("时间轴快照：暂无样本"), m_activityPanelWidget);
     m_activitySnapshotLabel->setWordWrap(true);
@@ -2074,7 +2157,6 @@ void ProcessDock::initializeProcessActivityPanel()
 
     panelLayout->addLayout(toolbarLayout);
     panelLayout->addWidget(m_activityChartWidget);
-    panelLayout->addWidget(m_activityTimelineSlider);
     panelLayout->addWidget(m_activitySnapshotLabel);
     m_processPageLayout->addWidget(m_activityPanelWidget, 0);
 }
@@ -2592,6 +2674,8 @@ void ProcessDock::initializeConnections()
 
     // 内核对比勾选变更后立即刷新，确保列表高亮状态与开关一致。
     connect(m_kernelCompareCheck, &QCheckBox::toggled, this, [this](const bool checked) {
+        m_activityTableSnapshotIndex = -1;
+        m_activityTableSnapshotRecords.clear();
         kLogEvent logEvent;
         info << logEvent
             << "[ProcessDock] 内核进程对比开关变更, enabled="
@@ -2602,6 +2686,8 @@ void ProcessDock::initializeConnections()
 
     // 树/列表切换：仅图标切换（不显示文字），并立即重建表格。
     connect(m_treeToggleButton, &QPushButton::toggled, this, [this](const bool checked) {
+        m_activityTableSnapshotIndex = -1;
+        m_activityTableSnapshotRecords.clear();
         if (checked)
         {
             m_treeToggleButton->setIcon(QIcon(IconList));
@@ -2621,6 +2707,8 @@ void ProcessDock::initializeConnections()
 
     // 视图模式切换：重置默认可见列。
     connect(m_viewModeCombo, &QComboBox::currentIndexChanged, this, [this](const int modeIndex) {
+        m_activityTableSnapshotIndex = -1;
+        m_activityTableSnapshotRecords.clear();
         kLogEvent logEvent;
         info << logEvent
             << "[ProcessDock] 视图模式切换, modeIndex=" << modeIndex
@@ -2634,69 +2722,80 @@ void ProcessDock::initializeConnections()
     // 开始/暂停监视：仅切换标记和定时器，不阻塞 UI。
     connect(m_startButton, &QPushButton::clicked, this, [this]() {
         kLogEvent logEvent;
-        info << logEvent << "[ProcessDock] 用户点击开始监视，恢复周期刷新。" << eol;
+        info << logEvent << "[ProcessDock] 用户点击开始刷新，恢复周期刷新并同步记录进程活动。" << eol;
         m_monitoringEnabled = true;
+        m_activityRecordingEnabled = true;
+        if (m_activitySamples.empty())
+        {
+            m_activityRecordingStartTick100ns = steadyNow100ns();
+            m_activityNextSequence = 0;
+        }
+        m_activityTimelinePinnedToLatest = true;
+        m_activityTableSnapshotIndex = -1;
+        m_activityTableSnapshotRecords.clear();
+        if (m_tableRefreshIntervalEdit != nullptr)
+        {
+            m_tableRefreshIntervalEdit->setEnabled(true);
+        }
+        if (m_refreshIntervalEdit != nullptr)
+        {
+            m_refreshIntervalEdit->setEnabled(true);
+        }
         if (m_refreshTimer != nullptr)
         {
-            m_refreshTimer->start();
+            if (isProcessActivityRecordingAllowedNow())
+            {
+                m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
+            }
+            else
+            {
+                m_refreshTimer->stop();
+            }
         }
         requestAsyncRefresh(true);
     });
     connect(m_pauseButton, &QPushButton::clicked, this, [this]() {
         kLogEvent logEvent;
-        warn << logEvent << "[ProcessDock] 用户点击暂停监视，暂停周期刷新。" << eol;
+        warn << logEvent << "[ProcessDock] 用户点击暂停刷新，周期刷新与进程活动记录一起暂停。" << eol;
         m_monitoringEnabled = false;
+        m_activityRecordingEnabled = false;
+        if (m_tableRefreshIntervalEdit != nullptr)
+        {
+            m_tableRefreshIntervalEdit->setEnabled(false);
+        }
+        if (m_refreshIntervalEdit != nullptr)
+        {
+            m_refreshIntervalEdit->setEnabled(false);
+        }
         if (m_refreshTimer != nullptr)
         {
             m_refreshTimer->stop();
         }
-        updateRefreshStateUi(false, "● 已暂停监视");
+        updateRefreshStateUi(false, "● 已暂停刷新/记录");
+        updateProcessActivityStatusLabel();
     });
 
-    // 刷新/打点间隔输入：
+    // 记录打点间隔输入：
     // - 支持 0.1 这类小数秒；
-    // - 编辑完成后立即应用到周期定时器。
+    // - 编辑完成后立即应用到后台监视定时器。
     connect(m_refreshIntervalEdit, &QLineEdit::editingFinished, this, [this]() {
         applyRefreshIntervalInput();
     });
-
-    // 录制开关：只改变“是否采样”的状态，不额外启动重型枚举。
-    connect(m_activityRecordButton, &QPushButton::toggled, this, [this](const bool checked) {
-        m_activityRecordingEnabled = checked;
-        m_activityRecordButton->setIcon(QIcon(checked ? IconPause : IconStart));
-        m_activityRecordButton->setText(checked ? QStringLiteral("停止") : QStringLiteral("录制"));
-        if (checked && m_activitySamples.empty())
-        {
-            m_activityRecordingStartTick100ns = steadyNow100ns();
-            m_activityNextSequence = 0;
-        }
-        if (checked)
-        {
-            m_activityTimelinePinnedToLatest = true;
-        }
-        updateProcessActivityStatusLabel();
-        if (checked)
-        {
-            if (!m_monitoringEnabled)
-            {
-                m_monitoringEnabled = true;
-            }
-            if (m_refreshTimer != nullptr && !m_refreshTimer->isActive())
-            {
-                m_refreshTimer->start();
-            }
-            requestAsyncRefresh(true);
-        }
+    connect(m_tableRefreshIntervalEdit, &QLineEdit::editingFinished, this, [this]() {
+        applyTableRefreshIntervalInput();
     });
 
-    // 清空录制缓存：重置序号、时间轴和吸附状态。
+    // 清空记录缓存：重置序号、时间轴和吸附状态。
     connect(m_activityClearButton, &QPushButton::clicked, this, [this]() {
         m_activitySamples.clear();
+        m_activityTableSnapshotIndex = -1;
+        m_activityTableSnapshotRecords.clear();
         m_activityNextSequence = 0;
         m_activityRecordingStartTick100ns = steadyNow100ns();
         m_activityTimelinePinnedToLatest = true;
         refreshProcessActivityTimeline();
         refreshProcessActivityChart();
+        rebuildTable();
         updateProcessActivityStatusLabel();
         if (m_activitySnapshotLabel != nullptr)
         {
@@ -2715,7 +2814,7 @@ void ProcessDock::initializeConnections()
             const int sampleIndex = (m_activityTimelineSlider != nullptr) ? m_activityTimelineSlider->value() : -1;
             if (sampleIndex >= 0)
             {
-                showProcessActivitySnapshotForIndex(sampleIndex);
+                previewProcessActivitySnapshotForIndex(sampleIndex);
             }
         });
     };
@@ -2733,15 +2832,31 @@ void ProcessDock::initializeConnections()
         }
         if (!m_activityTimelineSliderUpdating)
         {
-            m_activityTimelinePinnedToLatest = (sampleIndex >= m_activityTimelineSlider->maximum());
+            // 用户要求：只有点击时间轴才切换表格时刻。
+            // 普通 valueChanged 可能来自程序同步或键盘操作，这里只更新快照提示。
+            previewProcessActivitySnapshotForIndex(sampleIndex);
+            return;
         }
-        showProcessActivitySnapshotForIndex(sampleIndex);
+        previewProcessActivitySnapshotForIndex(sampleIndex);
     });
 
-    // 后台记录复选框：切换后刷新状态提示，采样判定在 appendProcessActivitySample 中执行。
+    // 后台保持刷新/记录：
+    // - 未勾选时，进程页隐藏后周期刷新和记录都会自动暂停；
+    // - 勾选后允许后台继续刷新，因此也继续写入活动样本。
     connect(m_activityBackgroundRecordCheck, &QCheckBox::toggled, this, [this]() {
         updateProcessActivityStatusLabel();
-        if (m_activityRecordingEnabled)
+        if (m_refreshTimer != nullptr && m_monitoringEnabled)
+        {
+            if (isProcessActivityRecordingAllowedNow())
+            {
+                m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
+            }
+            else
+            {
+                m_refreshTimer->stop();
+            }
+        }
+        if (m_monitoringEnabled && isProcessActivityRecordingAllowedNow())
         {
             requestAsyncRefresh(true);
         }
@@ -2777,9 +2892,25 @@ void ProcessDock::initializeConnections()
         QWidget* currentPage = m_sideTabWidget->widget(currentIndex);
         if (currentPage == m_processListPage)
         {
+            if (m_monitoringEnabled && m_refreshTimer != nullptr && !m_refreshTimer->isActive())
+            {
+                m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
+            }
             focusProcessSearchBox(true);
             updateProcessActivityStatusLabel();
+            if (m_monitoringEnabled)
+            {
+                requestAsyncRefresh(true);
+            }
             return;
+        }
+        if (m_monitoringEnabled &&
+            m_activityBackgroundRecordCheck != nullptr &&
+            !m_activityBackgroundRecordCheck->isChecked() &&
+            m_refreshTimer != nullptr)
+        {
+            m_refreshTimer->stop();
+            updateRefreshStateUi(false, "● 进程页隐藏，刷新/记录自动暂停");
         }
         if (currentPage == m_threadPage)
         {
@@ -2821,7 +2952,7 @@ void ProcessDock::initializeConnections()
         refreshProcessActivityChart();
         if (m_activityTimelineSlider != nullptr && !m_activitySamples.empty())
         {
-            showProcessActivitySnapshotForIndex(m_activityTimelineSlider->value());
+            previewProcessActivitySnapshotForIndex(m_activityTimelineSlider->value());
         }
     });
 
@@ -2974,7 +3105,9 @@ void ProcessDock::initializeCreateProcessConnections()
 
 void ProcessDock::initializeTimer()
 {
-    // 周期刷新定时器：默认 0.1 秒，和进程活动打点间隔保持一致。
+    // 周期监视定时器：
+    // - 默认 0.1 秒执行后台进程刷新和活动打点；
+    // - 下方进程表格是否重绘由独立“列表刷新(s)”输入框节流。
     m_refreshTimer = new QTimer(this);
     m_refreshTimer->setInterval(refreshIntervalMillisecondsFromInput());
     connect(m_refreshTimer, &QTimer::timeout, this, [this]() {
@@ -3023,16 +3156,62 @@ void ProcessDock::applyRefreshIntervalInput()
     if (m_refreshTimer != nullptr)
     {
         m_refreshTimer->setInterval(intervalMs);
-        if (m_monitoringEnabled && !m_refreshTimer->isActive())
+        if (m_monitoringEnabled)
         {
-            m_refreshTimer->start();
+            m_refreshTimer->start(intervalMs);
         }
     }
     updateProcessActivityStatusLabel();
 
     kLogEvent logEvent;
     info << logEvent
-        << "[ProcessDock] 刷新/打点间隔变更为 "
+        << "[ProcessDock] 记录打点/后台监视间隔变更为 "
+        << intervalMs
+        << " ms。"
+        << eol;
+}
+
+int ProcessDock::tableRefreshIntervalMillisecondsFromInput() const
+{
+    // 表格刷新默认 2 秒；该值只影响 UI 重绘，不影响 0.1 秒后台采样。
+    bool parseOk = false;
+    double secondsValue = (m_tableRefreshIntervalEdit != nullptr)
+        ? m_tableRefreshIntervalEdit->text().trimmed().toDouble(&parseOk)
+        : 2.0;
+    if (parseOk && !std::isfinite(secondsValue))
+    {
+        parseOk = false;
+        secondsValue = 2.0;
+    }
+    const double safeSeconds = parseOk ? secondsValue : 2.0;
+    const double clampedSeconds = std::clamp(
+        safeSeconds,
+        static_cast<double>(ProcessTableMinimumIntervalMilliseconds) / 1000.0,
+        static_cast<double>(ProcessTableMaximumIntervalMilliseconds) / 1000.0);
+    const int milliseconds = static_cast<int>(std::llround(clampedSeconds * 1000.0));
+    return std::clamp(
+        milliseconds,
+        ProcessTableMinimumIntervalMilliseconds,
+        ProcessTableMaximumIntervalMilliseconds);
+}
+
+void ProcessDock::applyTableRefreshIntervalInput()
+{
+    const int intervalMs = tableRefreshIntervalMillisecondsFromInput();
+    const double normalizedSeconds = static_cast<double>(intervalMs) / 1000.0;
+
+    // 规范化显示，避免输入非法值后 UI 留下误导文本。
+    if (m_tableRefreshIntervalEdit != nullptr)
+    {
+        QSignalBlocker blocker(m_tableRefreshIntervalEdit);
+        m_tableRefreshIntervalEdit->setText(QString::number(normalizedSeconds, 'f', normalizedSeconds < 1.0 ? 2 : 1));
+    }
+
+    updateProcessActivityStatusLabel();
+
+    kLogEvent logEvent;
+    info << logEvent
+        << "[ProcessDock] 进程表格刷新间隔变更为 "
         << intervalMs
         << " ms。"
         << eol;
@@ -3291,6 +3470,18 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
                 << eol;
             return;
         }
+
+        // 后台保持刷新/记录现在同时约束“刷新”和“记录”：
+        // - 默认离开进程列表页就不再继续刷新；
+        // - 勾选后才允许后台继续采样，避免隐藏页仍高频枚举造成额外开销。
+        if (!isProcessActivityRecordingAllowedNow())
+        {
+            kLogEvent logEvent;
+            dbg << logEvent << "[ProcessDock] 跳过非强制刷新：进程页不可见且未启用后台保持刷新/记录。" << eol;
+            updateRefreshStateUi(false, "● 进程页隐藏，刷新/记录自动暂停");
+            updateProcessActivityStatusLabel();
+            return;
+        }
     }
 
     // 强制刷新也要避免并发任务叠加。
@@ -3307,7 +3498,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     {
         m_refreshProgressTaskPid = kPro.add("进程列表刷新", "初始化刷新任务");
     }
-    kPro.set(m_refreshProgressTaskPid, "准备刷新参数...", 0, 0.02f);
+    kPro.set(m_refreshProgressTaskPid, forceRefresh ? "准备刷新列表参数..." : "准备监视采样参数...", 0, 0.02f);
 
     // 复制当前缓存快照给后台线程，避免跨线程读写冲突。
     const int strategyIndex = m_strategyCombo->currentIndex();
@@ -3329,8 +3520,8 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     QPointer<ProcessDock> guard(this);
 
     // 刷新前先更新 UI 状态与日志，给出明显“刷新中”提示。
-    const QString forceReasonText = (!forceRefresh && m_activityRecordingEnabled && !isProcessActivityRecordingAllowedNow())
-        ? QStringLiteral(" | 活动录制=自动暂停")
+    const QString forceReasonText = (!forceRefresh && m_monitoringEnabled && !isProcessActivityRecordingAllowedNow())
+        ? QStringLiteral(" | 刷新/记录=自动暂停")
         : QString();
     updateRefreshStateUi(
         true,
@@ -3342,17 +3533,23 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     {
         kLogEvent logEvent;
         info << logEvent
-            << "[ProcessDock] 刷新开始, ticket=" << localTicket
+            << "[ProcessDock] 进程监视刷新开始, ticket=" << localTicket
             << ", force=" << (forceRefresh ? "true" : "false")
             << ", strategy=" << strategyToText(toStrategy(strategyIndex))
             << ", detailMode=" << (detailModeEnabled ? "true" : "false")
             << ", kernelCompare=" << (queryKernelProcessList ? "true" : "false")
             << ", staticBudget=" << staticDetailFillBudget
             << ", cacheSize=" << previousCache.size()
+            << ", uiTableIntervalMs=" << tableRefreshIntervalMillisecondsFromInput()
+            << ", sampleIntervalMs=" << refreshIntervalMillisecondsFromInput()
             << eol;
     }
 
     // QRunnable + 线程池：满足“异步刷新，不阻塞 GUI”。
+    // 注意：forceUiRefresh 必须在进入后台 lambda 前保存成局部值；
+    // 否则内层 QueuedConnection lambda 在工作线程里无法再引用 requestAsyncRefresh 的参数。
+    const bool forceUiRefresh = forceRefresh;
+    const int progressPid = m_refreshProgressTaskPid;
     QRunnable* backgroundTask = QRunnable::create([
         guard,
         localTicket,
@@ -3361,7 +3558,8 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         queryKernelProcessList,
         staticDetailFillBudget,
         cpuCount,
-        progressPid = m_refreshProgressTaskPid,
+        progressPid,
+        forceUiRefresh,
         previousCache,
         previousCounters]() mutable {
         const ProcessDock::RefreshResult refreshResult = ProcessDock::buildRefreshResult(
@@ -3381,7 +3579,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         }
 
         // 结果通过队列连接回主线程更新 UI。
-        QMetaObject::invokeMethod(guard, [guard, localTicket, refreshResult]() {
+        QMetaObject::invokeMethod(guard, [guard, localTicket, refreshResult, forceUiRefresh]() {
             if (guard == nullptr)
             {
                 return;
@@ -3394,7 +3592,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
                 return;
             }
 
-            guard->applyRefreshResult(refreshResult);
+            guard->applyRefreshResult(refreshResult, forceUiRefresh);
             guard->m_refreshInProgress = false;
         }, Qt::QueuedConnection);
     });
@@ -3403,7 +3601,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     QThreadPool::globalInstance()->start(backgroundTask);
 }
 
-void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult)
+void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult, const bool forceUiRefresh)
 {
     // 计算主线程观测耗时，用于“刷新状态标签”和日志输出。
     const auto nowTime = std::chrono::steady_clock::now();
@@ -3456,12 +3654,20 @@ void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult)
         ++windowIt;
     }
 
-    // 用新结果替换缓存，并重建表格。
+    // 用新结果替换缓存；表格重绘由独立“列表刷新(s)”节流，避免 0.1s 打点拖垮 UI。
     m_cacheByIdentity = refreshResult.nextCache;
     m_counterSampleByIdentity = refreshResult.nextCounters;
 
     appendProcessActivitySample();
-    rebuildTable();
+    if (isProcessActivityTableSnapshotActive())
+    {
+        rebuildProcessActivityTableSnapshotRecords();
+    }
+    if (shouldRebuildProcessTableForRefresh(forceUiRefresh))
+    {
+        rebuildTable();
+        m_lastProcessTableRebuildTime = nowTime;
+    }
     if (m_sideTabWidget != nullptr && m_sideTabWidget->currentWidget() == m_threadPage)
     {
         requestAsyncThreadRefresh(false);
@@ -3516,8 +3722,24 @@ void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult)
             << ", kernelOnly=" << refreshResult.kernelOnlyCount
             << ", kernelDetail=" << refreshResult.kernelQueryDetailText
             << ", cacheNow=" << m_cacheByIdentity.size()
+            << ", uiRebuildForced=" << (forceUiRefresh ? "true" : "false")
             << eol;
     }
+}
+
+bool ProcessDock::shouldRebuildProcessTableForRefresh(const bool forceUiRefresh) const
+{
+    // 强制刷新、历史快照表格、首轮显示必须立刻重绘。
+    if (forceUiRefresh || isProcessActivityTableSnapshotActive() || m_lastProcessTableRebuildTime.time_since_epoch().count() == 0)
+    {
+        return true;
+    }
+
+    // 非强制后台监视按独立 UI 间隔节流，避免每 0.1s 重建整张进程表。
+    const int intervalMs = tableRefreshIntervalMillisecondsFromInput();
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - m_lastProcessTableRebuildTime).count();
+    return elapsedMs >= intervalMs;
 }
 
 ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
@@ -4090,6 +4312,11 @@ void ProcessDock::rebuildTable()
         return;
     }
 
+    if (isProcessActivityTableSnapshotActive())
+    {
+        rebuildProcessActivityTableSnapshotRecords();
+    }
+
     // 记录用户当前排序列与顺序，解决“刷新后被重置为 PID 排序”的问题。
     const int previousSortColumn = m_processTable->header()->sortIndicatorSection();
     const Qt::SortOrder previousSortOrder = m_processTable->header()->sortIndicatorOrder();
@@ -4127,7 +4354,8 @@ void ProcessDock::rebuildTable()
     m_processTable->clear();
 
     // 树状模式下保持父子顺序，禁用自动排序。
-    const bool enableSorting = !isTreeModeEnabled();
+    const bool activitySnapshotActive = isProcessActivityTableSnapshotActive();
+    const bool enableSorting = activitySnapshotActive || !isTreeModeEnabled();
     m_processTable->setSortingEnabled(false);
 
     const std::vector<DisplayRow> displayRows = buildDisplayOrder();
@@ -4189,6 +4417,11 @@ void ProcessDock::rebuildTable()
             processRecord.pid,
             processRecord.creationTime100ns);
         rowItem->setData(0, Qt::UserRole, QString::fromStdString(identityKey));
+        rowItem->setToolTip(
+            toColumnIndex(TableColumn::Name),
+            activitySnapshotActive
+                ? QStringLiteral("历史快照行：该行来自时间轴样本，不代表当前实时进程状态。")
+                : QString::fromStdString(processRecord.processName));
 
         // 每一列文本填充，Name 列附加图标。
         for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
@@ -4626,8 +4859,8 @@ namespace
 
 bool ProcessDock::isProcessListPageVisibleForRecording() const
 {
-    // 默认只有进程列表页处于当前页时才记录；
-    // 用户勾选“后台保持记录”后才允许切到其它子页继续记录。
+    // 默认只有进程列表页处于当前页时才刷新/记录；
+    // 用户勾选“后台保持刷新/记录”后才允许切到其它子页继续刷新/记录。
     return m_sideTabWidget != nullptr &&
         m_processListPage != nullptr &&
         m_sideTabWidget->currentWidget() == m_processListPage &&
@@ -4636,7 +4869,10 @@ bool ProcessDock::isProcessListPageVisibleForRecording() const
 
 bool ProcessDock::isProcessActivityRecordingAllowedNow() const
 {
-    if (!m_activityRecordingEnabled)
+    // 记录不再是独立开关：
+    // - m_monitoringEnabled=true 表示“正在刷新进程”；
+    // - 每次刷新结果都会同步写入活动样本。
+    if (!m_monitoringEnabled)
     {
         return false;
     }
@@ -4684,6 +4920,9 @@ void ProcessDock::appendProcessActivitySample()
         ProcessActivityProcessPoint processPoint{};
         processPoint.identityKey = cachePair.first;
         processPoint.processName = processRecord.processName;
+        processPoint.imagePath = processRecord.imagePath;
+        processPoint.iconCacheKey = processRecord.processName + "|" + processRecord.imagePath;
+        processPoint.creationTime100ns = processRecord.creationTime100ns;
         processPoint.pid = processRecord.pid;
         processPoint.cpuPercent = processRecord.cpuPercent;
         processPoint.memoryMB = processRecord.workingSetMB;
@@ -4702,11 +4941,28 @@ void ProcessDock::appendProcessActivitySample()
         sample.totalDiskMBps += processRecord.diskMBps;
         sample.totalNetKBps += processRecord.netKBps;
         sample.totalGpuPercent += processRecord.gpuPercent;
+
+        // 历史快照只保存轻量数据，但图标必须能按“进程名+路径”恢复：
+        // - 这里复用实时列表的 resolveProcessIcon；
+        // - 缓存的是 QIcon 副本，后续查看历史表格时不会再走 PID 查询。
+        if (!processPoint.iconCacheKey.empty())
+        {
+            const QString iconKey = QString::fromStdString(processPoint.iconCacheKey);
+            if (!m_activityIconCacheByProcessKey.contains(iconKey))
+            {
+                m_activityIconCacheByProcessKey.insert(iconKey, resolveProcessIcon(processRecord));
+            }
+        }
         sample.processes.push_back(std::move(processPoint));
     }
 
     m_activitySamples.push_back(std::move(sample));
     const bool sampleIndexShiftedLeft = trimProcessActivitySamples();
+    if (m_activityTableSnapshotIndex >= static_cast<int>(m_activitySamples.size()))
+    {
+        m_activityTableSnapshotIndex = -1;
+        m_activityTableSnapshotRecords.clear();
+    }
     refreshProcessActivityTimeline(sampleIndexShiftedLeft);
     refreshProcessActivityChart();
     updateProcessActivityStatusLabel();
@@ -4714,7 +4970,7 @@ void ProcessDock::appendProcessActivitySample()
 
 bool ProcessDock::trimProcessActivitySamples()
 {
-    // 样本缓存固定上限，避免 0.1s 长时间录制造成内存无限增长。
+    // 样本缓存固定上限，避免 0.1s 长时间记录造成内存无限增长。
     if (m_activitySamples.size() <= ActivityMaximumSampleCount)
     {
         return false;
@@ -4722,6 +4978,15 @@ bool ProcessDock::trimProcessActivitySamples()
 
     const std::size_t removeCount = m_activitySamples.size() - ActivityMaximumSampleCount;
     m_activitySamples.erase(m_activitySamples.begin(), m_activitySamples.begin() + static_cast<std::ptrdiff_t>(removeCount));
+    if (m_activityTableSnapshotIndex >= 0)
+    {
+        m_activityTableSnapshotIndex -= static_cast<int>(removeCount);
+        if (m_activityTableSnapshotIndex < 0)
+        {
+            m_activityTableSnapshotIndex = -1;
+            m_activityTableSnapshotRecords.clear();
+        }
+    }
     return removeCount > 0;
 }
 
@@ -4735,7 +5000,7 @@ void ProcessDock::refreshProcessActivityTimeline(const bool indexShiftedLeft)
     const bool oldUpdating = m_activityTimelineSliderUpdating;
     const int sampleCount = static_cast<int>(m_activitySamples.size());
     const int previousValue = (indexShiftedLeft && !m_activityTimelinePinnedToLatest)
-        ? std::max(0, m_activityTimelineSlider->value() - 1)
+        ? std::max(0, m_activityTimelineSlider->value())
         : m_activityTimelineSlider->value();
     const int previousMaximum = m_activityTimelineSlider->maximum();
     const bool shouldPinToLatest = m_activityTimelinePinnedToLatest || previousValue >= previousMaximum;
@@ -4761,7 +5026,16 @@ void ProcessDock::refreshProcessActivityTimeline(const bool indexShiftedLeft)
 
     if (sampleCount > 0)
     {
-        showProcessActivitySnapshotForIndex(m_activityTimelineSlider->value());
+        if (m_activityTimelinePinnedToLatest)
+        {
+            m_activityTableSnapshotIndex = -1;
+            m_activityTableSnapshotRecords.clear();
+        }
+        else if (isProcessActivityTableSnapshotActive())
+        {
+            rebuildProcessActivityTableSnapshotRecords();
+        }
+        previewProcessActivitySnapshotForIndex(m_activityTimelineSlider->value());
     }
     else if (m_activityChartWidget != nullptr)
     {
@@ -4787,33 +5061,39 @@ void ProcessDock::updateProcessActivityStatusLabel()
     }
 
     QString stateText;
-    if (!m_activityRecordingEnabled)
+    m_activityRecordingEnabled = m_monitoringEnabled;
+    if (!m_monitoringEnabled)
     {
-        stateText = QStringLiteral("未录制");
+        stateText = QStringLiteral("已暂停刷新/记录");
     }
     else if (isProcessActivityRecordingAllowedNow())
     {
-        stateText = QStringLiteral("录制中");
+        stateText = QStringLiteral("刷新中，同步记录");
     }
     else
     {
-        stateText = QStringLiteral("Tab 隐藏，已自动暂停");
+        stateText = QStringLiteral("进程页隐藏，刷新/记录自动暂停");
     }
 
     const int intervalMs = refreshIntervalMillisecondsFromInput();
-    m_activityStatusLabel->setText(QStringLiteral("活动录制：%1 | 样本 %2 | 间隔 %3s%4")
+    const int tableIntervalMs = tableRefreshIntervalMillisecondsFromInput();
+    m_activityStatusLabel->setText(QStringLiteral("进程活动：%1 | 样本 %2 | 打点 %3s | 列表 %4s%5%6")
         .arg(stateText)
         .arg(static_cast<qulonglong>(m_activitySamples.size()))
         .arg(static_cast<double>(intervalMs) / 1000.0, 0, 'f', intervalMs < 1000 ? 2 : 1)
+        .arg(static_cast<double>(tableIntervalMs) / 1000.0, 0, 'f', tableIntervalMs < 1000 ? 2 : 1)
         .arg((m_activityBackgroundRecordCheck != nullptr && m_activityBackgroundRecordCheck->isChecked())
             ? QStringLiteral(" | 后台")
-            : QString()));
+            : QString())
+        .arg(isProcessActivityTableSnapshotActive() ? QStringLiteral(" | 表格=历史快照") : QStringLiteral(" | 表格=实时")));
 }
 
-void ProcessDock::showProcessActivitySnapshotForIndex(const int sampleIndex)
+void ProcessDock::previewProcessActivitySnapshotForIndex(const int sampleIndex)
 {
     if (m_activitySamples.empty())
     {
+        m_activityTableSnapshotIndex = -1;
+        m_activityTableSnapshotRecords.clear();
         if (m_activitySnapshotLabel != nullptr)
         {
             m_activitySnapshotLabel->setText(QStringLiteral("时间轴快照：暂无样本"));
@@ -4826,21 +5106,6 @@ void ProcessDock::showProcessActivitySnapshotForIndex(const int sampleIndex)
     }
 
     const int safeIndex = std::clamp(sampleIndex, 0, static_cast<int>(m_activitySamples.size()) - 1);
-    if (m_activityTimelineSlider != nullptr && m_activityTimelineSlider->value() != safeIndex)
-    {
-        const bool oldUpdating = m_activityTimelineSliderUpdating;
-        m_activityTimelineSliderUpdating = true;
-        m_activityTimelineSlider->setValue(safeIndex);
-        m_activityTimelineSliderUpdating = oldUpdating;
-        if (!oldUpdating && m_activityTimelineSlider != nullptr)
-        {
-            m_activityTimelinePinnedToLatest = (safeIndex >= m_activityTimelineSlider->maximum());
-        }
-    }
-    else if (m_activityTimelineSlider != nullptr && !m_activityTimelineSliderUpdating)
-    {
-        m_activityTimelinePinnedToLatest = (safeIndex >= m_activityTimelineSlider->maximum());
-    }
     if (m_activityChartWidget != nullptr)
     {
         m_activityChartWidget->setFocusedSampleIndex(safeIndex);
@@ -4848,6 +5113,93 @@ void ProcessDock::showProcessActivitySnapshotForIndex(const int sampleIndex)
     if (m_activitySnapshotLabel != nullptr)
     {
         m_activitySnapshotLabel->setText(buildProcessActivitySnapshotText(safeIndex));
+    }
+}
+
+void ProcessDock::showProcessActivitySnapshotForIndex(const int sampleIndex)
+{
+    previewProcessActivitySnapshotForIndex(sampleIndex);
+}
+
+void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex)
+{
+    if (m_activitySamples.empty())
+    {
+        m_activityTableSnapshotIndex = -1;
+        m_activityTableSnapshotRecords.clear();
+        previewProcessActivitySnapshotForIndex(-1);
+        rebuildTable();
+        updateProcessActivityStatusLabel();
+        return;
+    }
+
+    const int safeIndex = std::clamp(sampleIndex, 0, static_cast<int>(m_activitySamples.size()) - 1);
+    const bool latestSelected =
+        (m_activityTimelineSlider != nullptr && safeIndex >= m_activityTimelineSlider->maximum()) ||
+        (safeIndex >= static_cast<int>(m_activitySamples.size()) - 1);
+
+    m_activityTimelinePinnedToLatest = latestSelected;
+    m_activityTableSnapshotIndex = latestSelected ? -1 : safeIndex;
+    if (m_activityTimelineSlider != nullptr && m_activityTimelineSlider->value() != safeIndex)
+    {
+        const bool oldUpdating = m_activityTimelineSliderUpdating;
+        m_activityTimelineSliderUpdating = true;
+        m_activityTimelineSlider->setValue(safeIndex);
+        m_activityTimelineSliderUpdating = oldUpdating;
+    }
+
+    previewProcessActivitySnapshotForIndex(safeIndex);
+    rebuildProcessActivityTableSnapshotRecords();
+    rebuildTable();
+    updateProcessActivityStatusLabel();
+}
+
+bool ProcessDock::isProcessActivityTableSnapshotActive() const
+{
+    return m_activityTableSnapshotIndex >= 0 &&
+        m_activityTableSnapshotIndex < static_cast<int>(m_activitySamples.size());
+}
+
+void ProcessDock::rebuildProcessActivityTableSnapshotRecords()
+{
+    m_activityTableSnapshotRecords.clear();
+    if (!isProcessActivityTableSnapshotActive())
+    {
+        return;
+    }
+
+    const ProcessActivitySample& sample =
+        m_activitySamples[static_cast<std::size_t>(m_activityTableSnapshotIndex)];
+    m_activityTableSnapshotRecords.reserve(sample.processes.size());
+    for (const ProcessActivityProcessPoint& processPoint : sample.processes)
+    {
+        ks::process::ProcessRecord record{};
+        record.pid = processPoint.pid;
+        record.parentPid = 0;
+        record.threadCount = 0;
+        record.handleCount = 0;
+        record.creationTime100ns = processPoint.creationTime100ns;
+        if (record.creationTime100ns == 0)
+        {
+            record.creationTime100ns = (sample.sequence + 1U) * 100000ULL + processPoint.pid;
+        }
+        record.processName = processPoint.processName.empty() ? std::string("PID ") + std::to_string(processPoint.pid) : processPoint.processName;
+        record.imagePath = processPoint.imagePath.empty() ? std::string("历史快照") : processPoint.imagePath;
+        record.commandLine = "时间轴历史样本";
+        record.userName = "-";
+        record.signatureState = "历史快照";
+        record.startTimeText = QDateTime::fromMSecsSinceEpoch(sample.unixMilliseconds)
+            .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"))
+            .toStdString();
+        record.cpuPercent = processPoint.cpuPercent;
+        record.ramMB = processPoint.memoryMB;
+        record.workingSetMB = processPoint.memoryMB;
+        record.diskMBps = processPoint.diskMBps;
+        record.netKBps = processPoint.netKBps;
+        record.gpuPercent = processPoint.gpuPercent;
+        record.staticDetailsReady = true;
+        record.dynamicCountersReady = true;
+        m_activityTableSnapshotRecords.push_back(std::move(record));
     }
 }
 
@@ -4867,6 +5219,17 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
     const double diskValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Disk, selectionKeys);
     const double netValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Network, selectionKeys);
     const double gpuValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Gpu, selectionKeys);
+    double maxDiskValue = 0.0;
+    double maxNetValue = 0.0;
+    for (const ProcessActivitySample& historySample : m_activitySamples)
+    {
+        maxDiskValue = std::max(maxDiskValue, processActivitySampleMetricValue(historySample, ProcessActivityMetric::Disk, selectionKeys));
+        maxNetValue = std::max(maxNetValue, processActivitySampleMetricValue(historySample, ProcessActivityMetric::Network, selectionKeys));
+    }
+    const double memoryPercent = clampPercentValue(
+        (memoryValue / std::max(1.0, m_activityTotalPhysicalMemoryMB)) * 100.0);
+    const double diskPercent = clampPercentValue((diskValue / std::max(1.0, maxDiskValue)) * 100.0);
+    const double netPercent = clampPercentValue((netValue / std::max(1.0, maxNetValue)) * 100.0);
     std::vector<ProcessActivityProcessPoint> matchedProcesses;
     if (!selectionKeys.empty())
     {
@@ -4881,15 +5244,18 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
     }
 
     const QDateTime sampleDateTime = QDateTime::fromMSecsSinceEpoch(sample.unixMilliseconds);
-    QString text = QStringLiteral("时间轴快照：%1 / +%2 | 范围:%3 | CPU %4% | 内存 %5 MB | 磁盘 %6 MB/s | 网络 %7 KB/s | GPU %8%")
+    QString text = QStringLiteral("时间轴快照：%1 / +%2 | 范围:%3 | CPU %4% | 内存 %5% (%6 MB) | 磁盘 %7% (%8 MB/s) | 网络 %9% (%10 KB/s) | GPU %11%")
         .arg(sampleDateTime.toString(QStringLiteral("HH:mm:ss.zzz")))
         .arg(formatActivityElapsedText(sample.elapsedMs))
         .arg(selectionKeys.empty()
             ? QStringLiteral("总体")
             : QStringLiteral("选中%1个进程").arg(static_cast<qulonglong>(selectionKeys.size())))
-        .arg(cpuValue, 0, 'f', 2)
+        .arg(clampPercentValue(cpuValue), 0, 'f', 2)
+        .arg(memoryPercent, 0, 'f', 2)
         .arg(memoryValue, 0, 'f', 1)
+        .arg(diskPercent, 0, 'f', 2)
         .arg(diskValue, 0, 'f', 2)
+        .arg(netPercent, 0, 'f', 2)
         .arg(netValue, 0, 'f', 2)
         .arg(gpuValue, 0, 'f', 1);
 
@@ -4906,9 +5272,29 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
         if (isProcessActivityMetricEnabled(metric))
         {
             const double metricValue = processActivitySampleMetricValue(sample, metric, selectionKeys);
+            double percentValue = 0.0;
+            switch (metric)
+            {
+            case ProcessActivityMetric::Cpu:
+            case ProcessActivityMetric::Gpu:
+                percentValue = clampPercentValue(metricValue);
+                break;
+            case ProcessActivityMetric::Memory:
+                percentValue = memoryPercent;
+                break;
+            case ProcessActivityMetric::Disk:
+                percentValue = diskPercent;
+                break;
+            case ProcessActivityMetric::Network:
+                percentValue = netPercent;
+                break;
+            default:
+                percentValue = 0.0;
+                break;
+            }
             enabledMetricTextList << QStringLiteral("%1 %2%3")
                 .arg(processActivityMetricText(metric))
-                .arg(metricValue, 0, 'f', metricValue >= 100.0 ? 1 : 2)
+                .arg(percentValue, 0, 'f', percentValue >= 100.0 ? 1 : 2)
                 .arg(processActivityMetricUnit(metric));
         }
     }
@@ -4965,6 +5351,10 @@ std::vector<std::string> ProcessDock::currentProcessActivitySelectionKeys() cons
             }
         }
     }
+    if (isProcessActivityTableSnapshotActive() && selectionKeys.empty())
+    {
+        return selectionKeys;
+    }
     if (selectionKeys.empty())
     {
         for (const std::string& identityKey : m_trackedSelectedIdentityKeys)
@@ -4982,6 +5372,11 @@ std::vector<std::string> ProcessDock::currentProcessActivitySelectionKeys() cons
 
 std::vector<ProcessDock::DisplayRow> ProcessDock::buildDisplayOrder() const
 {
+    if (isProcessActivityTableSnapshotActive())
+    {
+        return buildActivitySnapshotDisplayOrder();
+    }
+
     // 搜索激活时统一返回扁平结果：
     // - 用户搜索的目标是“快速定位进程”，不需要树结构干扰；
     // - 扁平结果还能避免父节点未命中时留下孤立缩进。
@@ -4991,6 +5386,39 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildDisplayOrder() const
     }
 
     return isTreeModeEnabled() ? buildTreeDisplayOrder() : buildListDisplayOrder();
+}
+
+std::vector<ProcessDock::DisplayRow> ProcessDock::buildActivitySnapshotDisplayOrder() const
+{
+    // 历史时间轴模式：
+    // - 下方进程表直接展示当时样本中的进程快照；
+    // - 不走实时缓存和树形父子排序，避免把历史时刻与当前系统状态混合。
+    std::vector<DisplayRow> displayRows;
+    displayRows.reserve(m_activityTableSnapshotRecords.size());
+    for (const ks::process::ProcessRecord& processRecord : m_activityTableSnapshotRecords)
+    {
+        if (!processRecordMatchesSearch(processRecord))
+        {
+            continue;
+        }
+
+        DisplayRow displayRow{};
+        displayRow.record = const_cast<ks::process::ProcessRecord*>(&processRecord);
+        displayRow.depth = 0;
+        displayRow.isNew = false;
+        displayRow.isExited = false;
+        displayRow.isKernelOnly = false;
+        displayRows.push_back(displayRow);
+    }
+
+    std::sort(displayRows.begin(), displayRows.end(), [](const DisplayRow& leftRow, const DisplayRow& rightRow) {
+        if (leftRow.record == nullptr || rightRow.record == nullptr)
+        {
+            return false;
+        }
+        return leftRow.record->pid < rightRow.record->pid;
+    });
+    return displayRows;
 }
 
 std::vector<ProcessDock::DisplayRow> ProcessDock::buildListDisplayOrder() const
@@ -5989,10 +6417,23 @@ QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processR
 
 QIcon ProcessDock::resolveProcessIcon(const ks::process::ProcessRecord& processRecord)
 {
+    const QString processNameText = QString::fromStdString(processRecord.processName).trimmed();
     // 仅使用后台缓存中的 imagePath：
     // - 禁止在 UI 线程里按 PID 再查路径，避免刷新阶段出现卡顿。
     QString pathText = QString::fromStdString(processRecord.imagePath);
-    if (pathText.trimmed().isEmpty() || pathText.startsWith('['))
+    pathText = pathText.trimmed();
+
+    // 历史快照表格没有实时 PID 查询能力：
+    // - 采样时已维护“进程名+路径 -> 图标”的稳定映射；
+    // - 查看旧时间点时优先命中该映射，避免所有行退化成同一个占位图标。
+    const QString activityIconKey = processNameText + QStringLiteral("|") + pathText;
+    const auto activityIconIt = m_activityIconCacheByProcessKey.find(activityIconKey);
+    if (activityIconIt != m_activityIconCacheByProcessKey.end())
+    {
+        return activityIconIt.value();
+    }
+
+    if (pathText.isEmpty() || pathText.startsWith('[') || pathText == QStringLiteral("历史快照"))
     {
         return QIcon(":/Icon/process_main.svg");
     }
@@ -6015,6 +6456,10 @@ QIcon ProcessDock::resolveProcessIcon(const ks::process::ProcessRecord& processR
         processIcon = QIcon(":/Icon/process_main.svg");
     }
     m_iconCacheByPath.insert(pathText, processIcon);
+    if (!activityIconKey.trimmed().isEmpty())
+    {
+        m_activityIconCacheByProcessKey.insert(activityIconKey, processIcon);
+    }
     return processIcon;
 }
 
