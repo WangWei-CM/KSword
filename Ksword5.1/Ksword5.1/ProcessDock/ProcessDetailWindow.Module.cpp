@@ -38,6 +38,10 @@ void ProcessDetailWindow::requestAsyncModuleRefresh(const bool forceRefresh)
         return;
     }
 
+    // 任何进入模块刷新函数的真实请求都视为模块页已按需加载。
+    // 这样用户手动点击刷新后，后续切回模块页不会再触发一次自动首刷。
+    m_moduleInitialRefreshStarted = true;
+
     const std::uint32_t pidValue = m_baseRecord.pid;
     const bool includeSignatureCheck = (m_signatureCheckBox != nullptr) && m_signatureCheckBox->isChecked();
     const bool firstRefresh = !m_firstModuleRefreshDone;

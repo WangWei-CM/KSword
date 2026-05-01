@@ -4,8 +4,8 @@
 
 [Version]
 Signature="$WINDOWS NT$"
-Class=USBDevice
-ClassGuid={88BAE032-5A81-49f0-BC3D-A4FF138216D6}
+Class=ActivityMonitor
+ClassGuid={b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
 Provider=%ManufacturerName%
 CatalogFile=KswordARKDriver.cat
 DriverVer=
@@ -55,6 +55,13 @@ ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
 StartType      = 3               ; SERVICE_DEMAND_START
 ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
 ServiceBinary  = %13%\KswordARK.sys
+LoadOrderGroup = "FSFilter Activity Monitor"
+AddReg         = KswordARKDriver_Service_AddReg
+
+[KswordARKDriver_Service_AddReg]
+HKR,"Instances","DefaultInstance",0x00000000,%KswordARKDriver.DefaultInstance%
+HKR,"Instances\KswordARK Instance","Altitude",0x00000000,%KswordARKDriver.Altitude%
+HKR,"Instances\KswordARK Instance","Flags",0x00010001,0
 
 [KswordARKDriver_Device.NT.Wdf]
 KmdfService =  KswordARK, KswordARKDriver_wdfsect
@@ -64,7 +71,10 @@ KmdfLibraryVersion = $KMDFVERSION$
 
 [Strings]
 SPSVCINST_ASSOCSERVICE= 0x00000002
-ManufacturerName="<Your manufacturer name>" ;TODO: Replace with your manufacturer name
+ManufacturerName="Ksword"
 DiskName = "KswordARKDriver Installation Disk"
 KswordARKDriver.DeviceDesc = "KswordARKDriver Device"
 KswordARKDriver.SVCDESC = "KswordARKDriver Service"
+KswordARKDriver.DefaultInstance = "KswordARK Instance"
+KswordARKDriver.Altitude = "385210"
+

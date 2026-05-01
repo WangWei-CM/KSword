@@ -150,7 +150,10 @@ ProcessDetailWindow::ProcessDetailWindow(const ks::process::ProcessRecord& baseR
         m_baseRecord.pid,
         m_baseRecord.creationTime100ns);
 
-    // 详情窗口创建时尽量补齐静态字段，避免首次展示出现空路径/空命令行。
+    // 构造阶段不做同步静态详情查询：
+    // - QueryProcessStaticDetailByPid 会读取命令行、令牌、签名等慢字段；
+    // - WinVerifyTrust 在证书链/网络策略异常时可能明显阻塞 UI；
+    // - 打开窗口必须先返回事件循环，缺失字段交给后台任务补齐。
     const bool needStaticQuery =
         m_baseRecord.imagePath.empty() ||
         m_baseRecord.commandLine.empty() ||
@@ -159,52 +162,19 @@ ProcessDetailWindow::ProcessDetailWindow(const ks::process::ProcessRecord& baseR
         m_baseRecord.signatureState == "Pending";
     if (needStaticQuery && m_baseRecord.pid != 0)
     {
-        ks::process::ProcessRecord queriedRecord{};
-        if (ks::process::QueryProcessStaticDetailByPid(m_baseRecord.pid, queriedRecord))
-        {
-            if (!queriedRecord.processName.empty()) m_baseRecord.processName = queriedRecord.processName;
-            if (!queriedRecord.imagePath.empty()) m_baseRecord.imagePath = queriedRecord.imagePath;
-            if (!queriedRecord.commandLine.empty()) m_baseRecord.commandLine = queriedRecord.commandLine;
-            if (!queriedRecord.userName.empty()) m_baseRecord.userName = queriedRecord.userName;
-            if (!queriedRecord.startTimeText.empty()) m_baseRecord.startTimeText = queriedRecord.startTimeText;
-            if (!queriedRecord.architectureText.empty()) m_baseRecord.architectureText = queriedRecord.architectureText;
-            if (!queriedRecord.priorityText.empty()) m_baseRecord.priorityText = queriedRecord.priorityText;
-            if (!queriedRecord.signatureState.empty()) m_baseRecord.signatureState = queriedRecord.signatureState;
-            if (!queriedRecord.signaturePublisher.empty()) m_baseRecord.signaturePublisher = queriedRecord.signaturePublisher;
-            m_baseRecord.signatureTrusted = queriedRecord.signatureTrusted;
-            m_baseRecord.isAdmin = queriedRecord.isAdmin;
-            if (queriedRecord.parentPid != 0) m_baseRecord.parentPid = queriedRecord.parentPid;
-            if (queriedRecord.sessionId != 0) m_baseRecord.sessionId = queriedRecord.sessionId;
-            if (queriedRecord.threadCount != 0) m_baseRecord.threadCount = queriedRecord.threadCount;
-            if (queriedRecord.handleCount != 0) m_baseRecord.handleCount = queriedRecord.handleCount;
-            if (queriedRecord.creationTime100ns != 0) m_baseRecord.creationTime100ns = queriedRecord.creationTime100ns;
-            if (m_baseRecord.r0FieldFlags == 0U) m_baseRecord.r0FieldFlags = queriedRecord.r0FieldFlags;
-            if (m_baseRecord.r0ImagePath.empty()) m_baseRecord.r0ImagePath = queriedRecord.r0ImagePath;
-            kLogEvent ctorStaticQuerySuccessEvent;
-            info << ctorStaticQuerySuccessEvent
-                << "[ProcessDetailWindow] 构造阶段补齐静态信息成功, pid="
-                << m_baseRecord.pid
-                << eol;
-        }
-        else
-        {
-            kLogEvent ctorStaticQueryFailEvent;
-            warn << ctorStaticQueryFailEvent
-                << "[ProcessDetailWindow] 构造阶段静态信息查询失败, pid="
-                << m_baseRecord.pid
-                << eol;
-        }
+        kLogEvent ctorStaticQueryDeferredEvent;
+        info << ctorStaticQueryDeferredEvent
+            << "[ProcessDetailWindow] 构造阶段跳过同步静态查询，改为后台补齐, pid="
+            << m_baseRecord.pid
+            << eol;
     }
 
     // 按“建 UI -> 连信号 -> 填初值 -> 首次异步刷新”顺序初始化。
     initializeUi();
     initializeConnections();
     refreshDetailTabTexts();
-    requestAsyncModuleRefresh(true);
-    requestAsyncThreadInspectRefresh();
-    requestAsyncTokenRefresh();
-    refreshTokenSwitchStates();
-    requestAsyncPebRefresh();
+    requestAsyncStaticDetailRefresh(true);
+    requestInitialRefreshForCurrentTab();
 
     // 构造结束日志：标记窗口初始化链路完成。
     kLogEvent ctorFinishEvent;
@@ -226,6 +196,8 @@ void ProcessDetailWindow::updateBaseRecord(const ks::process::ProcessRecord& bas
         << ", oldIdentity="
         << m_identityKey
         << eol;
+
+    const std::string oldIdentityKey = m_identityKey;
 
     // 外部推送新快照时：
     // 1) 先保留已有的“已补齐字段”；
@@ -265,52 +237,47 @@ void ProcessDetailWindow::updateBaseRecord(const ks::process::ProcessRecord& bas
         mergedRecord.userName.empty() ||
         mergedRecord.signatureState.empty() ||
         mergedRecord.signatureState == "Pending";
+    const bool shouldTryStaticBackgroundRefresh =
+        needStaticQuery &&
+        mergedRecord.pid != 0 &&
+        !m_staticDetailRefreshing &&
+        !m_staticDetailRefreshAttempted;
     if (needStaticQuery && mergedRecord.pid != 0)
     {
-        ks::process::ProcessRecord queriedRecord{};
-        if (ks::process::QueryProcessStaticDetailByPid(mergedRecord.pid, queriedRecord))
-        {
-            if (!queriedRecord.processName.empty()) mergedRecord.processName = queriedRecord.processName;
-            if (!queriedRecord.imagePath.empty()) mergedRecord.imagePath = queriedRecord.imagePath;
-            if (!queriedRecord.commandLine.empty()) mergedRecord.commandLine = queriedRecord.commandLine;
-            if (!queriedRecord.userName.empty()) mergedRecord.userName = queriedRecord.userName;
-            if (!queriedRecord.startTimeText.empty()) mergedRecord.startTimeText = queriedRecord.startTimeText;
-            if (!queriedRecord.architectureText.empty()) mergedRecord.architectureText = queriedRecord.architectureText;
-            if (!queriedRecord.priorityText.empty()) mergedRecord.priorityText = queriedRecord.priorityText;
-            if (!queriedRecord.signatureState.empty()) mergedRecord.signatureState = queriedRecord.signatureState;
-            if (!queriedRecord.signaturePublisher.empty()) mergedRecord.signaturePublisher = queriedRecord.signaturePublisher;
-            mergedRecord.signatureTrusted = queriedRecord.signatureTrusted;
-            mergedRecord.isAdmin = queriedRecord.isAdmin;
-            if (queriedRecord.parentPid != 0) mergedRecord.parentPid = queriedRecord.parentPid;
-            if (queriedRecord.sessionId != 0) mergedRecord.sessionId = queriedRecord.sessionId;
-            if (queriedRecord.threadCount != 0) mergedRecord.threadCount = queriedRecord.threadCount;
-            if (queriedRecord.handleCount != 0) mergedRecord.handleCount = queriedRecord.handleCount;
-            if (queriedRecord.creationTime100ns != 0) mergedRecord.creationTime100ns = queriedRecord.creationTime100ns;
-            kLogEvent updateRecordStaticSuccessEvent;
-            dbg << updateRecordStaticSuccessEvent
-                << "[ProcessDetailWindow] updateBaseRecord: 静态信息补齐成功, pid="
-                << mergedRecord.pid
-                << eol;
-        }
-        else
-        {
-            kLogEvent updateRecordStaticFailEvent;
-            warn << updateRecordStaticFailEvent
-                << "[ProcessDetailWindow] updateBaseRecord: 静态信息补齐失败, pid="
-                << mergedRecord.pid
-                << eol;
-        }
+        // updateBaseRecord 可能由 ProcessDock 周期刷新触发。
+        // 这里不能同步调用 QueryProcessStaticDetailByPid，否则打开详情窗口后每轮刷新都可能卡 UI。
+        kLogEvent updateRecordStaticDeferredEvent;
+        dbg << updateRecordStaticDeferredEvent
+            << "[ProcessDetailWindow] updateBaseRecord: 静态信息缺失，保留现有值并等待后台补齐, pid="
+            << mergedRecord.pid
+            << eol;
     }
 
     m_baseRecord = mergedRecord;
     m_identityKey = ks::process::BuildProcessIdentityKey(
         m_baseRecord.pid,
         m_baseRecord.creationTime100ns);
+    const bool identityChanged = m_identityKey != oldIdentityKey;
+    if (identityChanged)
+    {
+        // 同一窗口如果被复用于新 identity，需要重置一次性后台刷新状态。
+        // 否则旧进程的首刷标记会阻止新进程数据按需加载。
+        m_staticDetailRefreshing = false;
+        m_staticDetailRefreshAttempted = false;
+        ++m_staticDetailRefreshTicket;
+        m_threadInspectInitialRefreshStarted = false;
+        m_moduleInitialRefreshStarted = false;
+        m_tokenInitialRefreshStarted = false;
+        m_tokenSwitchInitialRefreshStarted = false;
+        m_sectionInfoInitialRefreshStarted = false;
+        m_pebInitialRefreshStarted = false;
+    }
     refreshDetailTabTexts();
-    requestAsyncThreadInspectRefresh();
-    requestAsyncTokenRefresh();
-    refreshTokenSwitchStates();
-    requestAsyncPebRefresh();
+    if (shouldTryStaticBackgroundRefresh || identityChanged)
+    {
+        requestAsyncStaticDetailRefresh(true);
+    }
+    requestInitialRefreshForCurrentTab();
 
     // 更新结束日志：输出新 identity 与关键字段状态。
     kLogEvent updateRecordFinishEvent;
@@ -597,6 +564,251 @@ void ProcessDetailWindow::initializeUi()
     updateWindowTitle();
 }
 
+void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
+{
+    // 懒加载策略：
+    // - 详情页只显示构造时已有的轻量字段；
+    // - 线程/模块/令牌/PEB/Section 等重型查询等用户切到对应页后再启动；
+    // - 每页自动首刷只执行一次，用户点击刷新按钮仍可手动刷新。
+    if (m_tabWidget == nullptr)
+    {
+        return;
+    }
+
+    QWidget* const currentTab = m_tabWidget->currentWidget();
+    if (currentTab == nullptr)
+    {
+        return;
+    }
+
+    if (currentTab == m_threadTab)
+    {
+        if (!m_threadInspectInitialRefreshStarted)
+        {
+            requestAsyncThreadInspectRefresh();
+        }
+        return;
+    }
+
+    if (currentTab == m_moduleTab)
+    {
+        if (!m_moduleInitialRefreshStarted)
+        {
+            requestAsyncModuleRefresh(true);
+        }
+        return;
+    }
+
+    if (currentTab == m_tokenTab)
+    {
+        if (!m_tokenInitialRefreshStarted)
+        {
+            requestAsyncTokenRefresh();
+        }
+        return;
+    }
+
+    if (currentTab == m_tokenSwitchTab)
+    {
+        if (!m_tokenSwitchInitialRefreshStarted)
+        {
+            refreshTokenSwitchStates();
+        }
+        return;
+    }
+
+    if (currentTab == m_kernelObjectTab)
+    {
+        if (!m_sectionInfoInitialRefreshStarted)
+        {
+            requestAsyncSectionRefresh();
+        }
+        return;
+    }
+
+    if (currentTab == m_pebTab && !m_pebInitialRefreshStarted)
+    {
+        requestAsyncPebRefresh();
+    }
+}
+
+void ProcessDetailWindow::requestAsyncStaticDetailRefresh(const bool includeSignatureCheck)
+{
+    // 静态详情补齐防重入：
+    // - 周期刷新可能频繁调用 updateBaseRecord；
+    // - 同一个窗口只允许一个后台静态详情任务，避免签名校验堆积。
+    const std::uint32_t currentPid = m_baseRecord.pid;
+    const std::uint64_t currentCreationTime = m_baseRecord.creationTime100ns;
+    if (currentPid == 0 || m_staticDetailRefreshing || m_staticDetailRefreshAttempted)
+    {
+        return;
+    }
+
+    const bool needStaticQuery =
+        m_baseRecord.imagePath.empty() ||
+        m_baseRecord.commandLine.empty() ||
+        m_baseRecord.userName.empty() ||
+        m_baseRecord.startTimeText.empty() ||
+        m_baseRecord.architectureText.empty() ||
+        m_baseRecord.priorityText.empty() ||
+        m_baseRecord.signatureState.empty() ||
+        m_baseRecord.signatureState == "Pending";
+    if (!needStaticQuery)
+    {
+        return;
+    }
+
+    m_staticDetailRefreshing = true;
+    m_staticDetailRefreshAttempted = true;
+    const std::uint64_t ticketValue = ++m_staticDetailRefreshTicket;
+    const std::uint32_t pidValue = currentPid;
+    const std::uint64_t creationTimeValue = currentCreationTime;
+    const std::string identityKeyValue = ks::process::BuildProcessIdentityKey(
+        pidValue,
+        creationTimeValue);
+    QPointer<ProcessDetailWindow> guardThis(this);
+
+    kLogEvent requestStaticDetailEvent;
+    info << requestStaticDetailEvent
+        << "[ProcessDetailWindow] requestAsyncStaticDetailRefresh: 后台补齐静态详情, pid="
+        << pidValue
+        << ", includeSignature="
+        << (includeSignatureCheck ? "true" : "false")
+        << eol;
+
+    QRunnable* refreshTask = QRunnable::create(
+        [guardThis, ticketValue, pidValue, creationTimeValue, identityKeyValue, includeSignatureCheck]()
+        {
+            StaticDetailRefreshResult refreshResult{};
+            const auto beginTime = std::chrono::steady_clock::now();
+            refreshResult.processRecord.pid = pidValue;
+            refreshResult.processRecord.creationTime100ns = creationTimeValue;
+            refreshResult.processRecord.processName = ks::process::GetProcessNameByPID(pidValue);
+
+            // 动态计数器只补轻量数值；签名校验由 FillProcessStaticDetails 的参数控制。
+            ks::process::RefreshProcessDynamicCounters(refreshResult.processRecord);
+            if (creationTimeValue != 0 &&
+                refreshResult.processRecord.creationTime100ns != 0 &&
+                refreshResult.processRecord.creationTime100ns != creationTimeValue)
+            {
+                // PID 已经复用：丢弃本轮结果，避免把新进程信息写回旧窗口。
+                QMetaObject::invokeMethod(
+                    guardThis,
+                    [guardThis, ticketValue, identityKeyValue]()
+                    {
+                        if (guardThis == nullptr || guardThis->m_staticDetailRefreshTicket != ticketValue)
+                        {
+                            return;
+                        }
+                        const std::string currentIdentityKey = ks::process::BuildProcessIdentityKey(
+                            guardThis->m_baseRecord.pid,
+                            guardThis->m_baseRecord.creationTime100ns);
+                        if (currentIdentityKey == identityKeyValue)
+                        {
+                            guardThis->m_staticDetailRefreshing = false;
+                            guardThis->m_staticDetailRefreshAttempted = true;
+                        }
+                    },
+                    Qt::QueuedConnection);
+                return;
+            }
+            refreshResult.queryOk = ks::process::FillProcessStaticDetails(
+                refreshResult.processRecord,
+                includeSignatureCheck);
+            if (creationTimeValue == 0 && refreshResult.processRecord.creationTime100ns != 0)
+            {
+                // 轻量开窗记录没有创建时间时，保持 identity 为 PID#0。
+                // 这样 ProcessDock 的窗口缓存键不会在后台补齐后漂移。
+                refreshResult.processRecord.creationTime100ns = creationTimeValue;
+            }
+            if (!refreshResult.queryOk)
+            {
+                refreshResult.diagnosticText = QStringLiteral("静态详情读取失败或权限不足");
+            }
+            if (refreshResult.processRecord.processName.empty())
+            {
+                refreshResult.processRecord.processName = "PID_" + std::to_string(pidValue);
+            }
+
+            refreshResult.elapsedMs = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - beginTime).count());
+
+            QMetaObject::invokeMethod(
+                guardThis,
+                [guardThis, ticketValue, identityKeyValue, includeSignatureCheck, refreshResult]()
+                {
+                    if (guardThis == nullptr || guardThis->m_staticDetailRefreshTicket != ticketValue)
+                    {
+                        return;
+                    }
+                    const std::string currentIdentityKey = ks::process::BuildProcessIdentityKey(
+                        guardThis->m_baseRecord.pid,
+                        guardThis->m_baseRecord.creationTime100ns);
+                    if (currentIdentityKey != identityKeyValue)
+                    {
+                        // 目标进程 identity 已变化时丢弃旧结果，并允许新 identity 重新排队补齐。
+                        guardThis->m_staticDetailRefreshing = false;
+                        guardThis->m_staticDetailRefreshAttempted = false;
+                        guardThis->requestAsyncStaticDetailRefresh(includeSignatureCheck);
+                        return;
+                    }
+                    guardThis->applyStaticDetailRefreshResult(refreshResult);
+                },
+                Qt::QueuedConnection);
+        });
+    refreshTask->setAutoDelete(true);
+    QThreadPool::globalInstance()->start(refreshTask);
+}
+
+void ProcessDetailWindow::applyStaticDetailRefreshResult(const StaticDetailRefreshResult& refreshResult)
+{
+    // 后台静态详情回填：
+    // - 只合并有效字段，避免权限不足结果清空用户当前看到的缓存字段；
+    // - 保留 R0 扩展字段，因为它们可能来自进程列表或驱动枚举。
+    m_staticDetailRefreshing = false;
+    if (refreshResult.processRecord.pid != m_baseRecord.pid)
+    {
+        return;
+    }
+
+    const ks::process::ProcessRecord& queriedRecord = refreshResult.processRecord;
+    if (!queriedRecord.processName.empty()) m_baseRecord.processName = queriedRecord.processName;
+    if (!queriedRecord.imagePath.empty()) m_baseRecord.imagePath = queriedRecord.imagePath;
+    if (!queriedRecord.commandLine.empty()) m_baseRecord.commandLine = queriedRecord.commandLine;
+    if (!queriedRecord.userName.empty()) m_baseRecord.userName = queriedRecord.userName;
+    if (!queriedRecord.startTimeText.empty()) m_baseRecord.startTimeText = queriedRecord.startTimeText;
+    if (!queriedRecord.architectureText.empty()) m_baseRecord.architectureText = queriedRecord.architectureText;
+    if (!queriedRecord.priorityText.empty()) m_baseRecord.priorityText = queriedRecord.priorityText;
+    if (!queriedRecord.signatureState.empty()) m_baseRecord.signatureState = queriedRecord.signatureState;
+    if (!queriedRecord.signaturePublisher.empty()) m_baseRecord.signaturePublisher = queriedRecord.signaturePublisher;
+    m_baseRecord.signatureTrusted = queriedRecord.signatureTrusted;
+    m_baseRecord.isAdmin = queriedRecord.isAdmin;
+    if (queriedRecord.parentPid != 0) m_baseRecord.parentPid = queriedRecord.parentPid;
+    if (queriedRecord.sessionId != 0) m_baseRecord.sessionId = queriedRecord.sessionId;
+    if (queriedRecord.threadCount != 0) m_baseRecord.threadCount = queriedRecord.threadCount;
+    if (queriedRecord.handleCount != 0) m_baseRecord.handleCount = queriedRecord.handleCount;
+    if (queriedRecord.creationTime100ns != 0) m_baseRecord.creationTime100ns = queriedRecord.creationTime100ns;
+    if (queriedRecord.staticDetailsReady) m_baseRecord.staticDetailsReady = true;
+
+    m_identityKey = ks::process::BuildProcessIdentityKey(
+        m_baseRecord.pid,
+        m_baseRecord.creationTime100ns);
+    refreshDetailTabTexts();
+
+    kLogEvent applyStaticDetailEvent;
+    (refreshResult.queryOk ? info : warn) << applyStaticDetailEvent
+        << "[ProcessDetailWindow] applyStaticDetailRefreshResult: 完成, pid="
+        << m_baseRecord.pid
+        << ", queryOk="
+        << (refreshResult.queryOk ? "true" : "false")
+        << ", elapsedMs="
+        << refreshResult.elapsedMs
+        << ", diagnostic="
+        << refreshResult.diagnosticText.toStdString()
+        << eol;
+}
+
 void ProcessDetailWindow::initializeDetailTab()
 {
     // 详情页初始化日志：确认详细信息面板构建开始。
@@ -732,10 +944,13 @@ void ProcessDetailWindow::initializeThreadTab()
     QHBoxLayout* threadTopBarLayout = new QHBoxLayout();
     m_refreshThreadInspectButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), "刷新线程", threadGroup);
     m_refreshThreadInspectButton->setToolTip("异步刷新线程枚举、TEB、起始地址与寄存器摘要");
+    auto* openThreadStackButton = new QPushButton(QIcon(":/Icon/process_threads.svg"), "查看调用栈", threadGroup);
+    openThreadStackButton->setToolTip("打开当前选中线程的 Phase-8 调用栈窗口");
     m_threadInspectStatusLabel = new QLabel("● 尚未刷新", threadGroup);
     m_threadInspectStatusLabel->setStyleSheet(
         QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
     threadTopBarLayout->addWidget(m_refreshThreadInspectButton);
+    threadTopBarLayout->addWidget(openThreadStackButton);
     threadTopBarLayout->addWidget(m_threadInspectStatusLabel, 1);
     threadGroupLayout->addLayout(threadTopBarLayout);
 
@@ -759,12 +974,20 @@ void ProcessDetailWindow::initializeThreadTab()
     m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::StartAddress), 130);
     m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::TebAddress), 130);
     m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::Affinity), 108);
+    m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::StackBoundary), 260);
     threadGroupLayout->addWidget(m_threadInspectTable, 1);
 
     m_threadLayout->addWidget(threadGroup, 1);
 
     const QString buttonStyle = buildBlueButtonStyle();
     m_refreshThreadInspectButton->setStyleSheet(buttonStyle);
+    openThreadStackButton->setStyleSheet(buttonStyle);
+    connect(openThreadStackButton, &QPushButton::clicked, this, [this]() {
+        openSelectedThreadStackWindow();
+        });
+    connect(m_threadInspectTable, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
+        openSelectedThreadStackWindow();
+        });
 }
 
 void ProcessDetailWindow::initializeActionTab()
@@ -1067,7 +1290,7 @@ void ProcessDetailWindow::initializeKernelObjectTab()
     m_kernelObjectLayout->setSpacing(8);
 
     QLabel* hintLabel = new QLabel(
-        QStringLiteral("本页只展示 R0 读取到的 EPROCESS 字段来源、偏移和可用性；DynData 未命中时不会提供直接句柄表/Section 枚举入口。"),
+        QStringLiteral("本页展示 R0 读取到的 EPROCESS 字段来源、偏移和可用性；Section/ControlArea 查询只通过 PID 调用驱动，不把诊断地址作为凭据。"),
         m_kernelObjectTab);
     hintLabel->setWordWrap(true);
     hintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
@@ -1162,6 +1385,28 @@ void ProcessDetailWindow::initializeKernelObjectTab()
     offsetFormLayout->addRow(QStringLiteral("ObjectTable"), m_kernelObjectObjectTableOffsetValue);
     offsetFormLayout->addRow(QStringLiteral("SectionObject"), m_kernelObjectSectionObjectOffsetValue);
     m_kernelObjectLayout->addWidget(offsetGroup);
+
+    QGroupBox* sectionGroup = new QGroupBox(QStringLiteral("Section / ControlArea 映射关系"), m_kernelObjectTab);
+    QVBoxLayout* sectionGroupLayout = new QVBoxLayout(sectionGroup);
+    sectionGroupLayout->setContentsMargins(8, 8, 8, 8);
+    sectionGroupLayout->setSpacing(6);
+
+    QHBoxLayout* sectionTopBarLayout = new QHBoxLayout();
+    m_refreshSectionInfoButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("刷新 Section"), sectionGroup);
+    m_refreshSectionInfoButton->setToolTip(QStringLiteral("通过 R0 查询当前进程 SectionObject、ControlArea 和映射摘要"));
+    m_sectionInfoStatusLabel = new QLabel(QStringLiteral("● 尚未刷新"), sectionGroup);
+    m_sectionInfoStatusLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-weight:600;")
+        .arg(KswordTheme::TextSecondaryHex()));
+    sectionTopBarLayout->addWidget(m_refreshSectionInfoButton);
+    sectionTopBarLayout->addWidget(m_sectionInfoStatusLabel, 1);
+    sectionGroupLayout->addLayout(sectionTopBarLayout);
+
+    m_sectionInfoOutput = new CodeEditorWidget(sectionGroup);
+    m_sectionInfoOutput->setReadOnly(true);
+    m_sectionInfoOutput->setText(QStringLiteral("Section/ControlArea 查询结果将在此处显示。"));
+    sectionGroupLayout->addWidget(m_sectionInfoOutput, 1);
+    m_kernelObjectLayout->addWidget(sectionGroup, 1);
 
     m_kernelObjectLayout->addStretch(1);
 }
@@ -1549,6 +1794,19 @@ void ProcessDetailWindow::initializeConnections()
     // PEB 页刷新按钮。
     connect(m_refreshPebButton, &QPushButton::clicked, this, [this]() {
         requestAsyncPebRefresh();
+    });
+
+    // Section/ControlArea 刷新按钮：只传 PID 给 ArkDriverClient，避免 UI 回传内核地址。
+    connect(m_refreshSectionInfoButton, &QPushButton::clicked, this, [this]() {
+        requestAsyncSectionRefresh();
+    });
+
+    // Tab 首次切换时再启动对应重型刷新：
+    // - 进程详情窗口打开路径只构建 UI 和轻量文本；
+    // - 这样用户能立即看到窗口，后台扫描不会同时挤占线程池与 UI 回填。
+    connect(m_tabWidget, &QTabWidget::currentChanged, this, [this](const int tabIndex) {
+        Q_UNUSED(tabIndex);
+        requestInitialRefreshForCurrentTab();
     });
 
     // 操作页按钮连接：

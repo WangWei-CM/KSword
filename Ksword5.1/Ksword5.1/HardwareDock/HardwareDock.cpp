@@ -31,6 +31,7 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QShowEvent>
+#include <QSizePolicy>
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -142,6 +143,36 @@ namespace
         chartPointer->setPlotAreaBackgroundVisible(false);
         chartPointer->setBackgroundRoundness(0);
         chartPointer->setMargins(QMargins(0, 0, 0, 0));
+    }
+
+    // configureCompressibleWidget 作用：
+    // - 清掉控件默认最小尺寸，允许 Dock 窄宽/低高时继续压缩而不是请求外层滚动条；
+    // - horizontalPolicy/verticalPolicy 用于按页面角色指定横纵向分配策略；
+    // - 返回行为：无返回值，只修改 QWidget 的布局属性。
+    void configureCompressibleWidget(
+        QWidget* widgetPointer,
+        const QSizePolicy::Policy horizontalPolicy = QSizePolicy::Preferred,
+        const QSizePolicy::Policy verticalPolicy = QSizePolicy::Preferred)
+    {
+        if (widgetPointer == nullptr)
+        {
+            return;
+        }
+
+        widgetPointer->setMinimumSize(0, 0);
+        widgetPointer->setSizePolicy(horizontalPolicy, verticalPolicy);
+    }
+
+    // configureCompressibleLabel 作用：
+    // - 让长设备名、CPU/GPU 型号和详情文本在空间不足时被布局压缩/裁剪；
+    // - 这样页面宽高变小时优先缩小内容，而不是把外层 QScrollArea 撑出滚动条；
+    // - 返回行为：无返回值，只修改 QLabel 的布局属性。
+    void configureCompressibleLabel(
+        QLabel* labelPointer,
+        const QSizePolicy::Policy horizontalPolicy = QSizePolicy::Ignored,
+        const QSizePolicy::Policy verticalPolicy = QSizePolicy::Preferred)
+    {
+        configureCompressibleWidget(labelPointer, horizontalPolicy, verticalPolicy);
     }
 
     // bytesToGiBText 作用：
@@ -436,7 +467,11 @@ namespace
         QChartView* chartView = new QChartView(chart, parentWidget);
         chartView->setRenderHint(QPainter::Antialiasing, true);
         chartView->setFrameShape(QFrame::NoFrame);
-        chartView->setMinimumHeight(56);
+        // ChartView 本身也可能产生 QGraphicsView 滚动条，这里统一关闭并允许高度压到 0。
+        chartView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        chartView->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        chartView->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+        configureCompressibleWidget(chartView, QSizePolicy::Expanding, QSizePolicy::Expanding);
         appendTransparentBackgroundStyle(chartView);
         return chartView;
     }
@@ -863,6 +898,8 @@ HardwareDock::HardwareDock(QWidget* parent)
     // 构造流程日志：便于定位硬件页初始化失败点。
     kLogEvent event;
     info << event << "[HardwareDock] 构造开始。" << eol;
+    // 硬件页整体不向 ADS 外层申请最小尺寸，窄面板下由内部图表主动压缩。
+    configureCompressibleWidget(this, QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     initializeUi();
     initializeConnections();
@@ -961,6 +998,7 @@ void HardwareDock::initializeUi()
     m_rootLayout->setSpacing(6);
 
     m_sideTabWidget = new QTabWidget(this);
+    configureCompressibleWidget(m_sideTabWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_sideTabWidget->setTabPosition(QTabWidget::West);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
@@ -1024,6 +1062,7 @@ void HardwareDock::initializeOverviewTab()
 void HardwareDock::initializeUtilizationTab()
 {
     m_utilizationPage = new QWidget(m_sideTabWidget);
+    configureCompressibleWidget(m_utilizationPage, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_utilizationPage);
     m_utilizationLayout = new QVBoxLayout(m_utilizationPage);
     m_utilizationLayout->setContentsMargins(4, 4, 4, 4);
@@ -1040,11 +1079,14 @@ void HardwareDock::initializeUtilizationTab()
     m_utilizationSidebarList = new QListWidget(m_utilizationPage);
     m_utilizationSidebarList->setFrameShape(QFrame::NoFrame);
     m_utilizationSidebarList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_utilizationSidebarList->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    // 需求要求利用率页不显示纵向/横向滚动条，左侧卡片改为按可见高度压缩。
+    m_utilizationSidebarList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_utilizationSidebarList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_utilizationSidebarList->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_utilizationSidebarList->setSpacing(2);
-    m_utilizationSidebarList->setFixedWidth(268);
+    m_utilizationSidebarList->setSpacing(1);
+    configureCompressibleWidget(m_utilizationSidebarList, QSizePolicy::Preferred, QSizePolicy::Expanding);
+    m_utilizationSidebarList->setMinimumWidth(64);
+    m_utilizationSidebarList->setMaximumWidth(228);
     m_utilizationSidebarList->setStyleSheet(
         QStringLiteral(
             "QListWidget{border:none;background:transparent;}"
@@ -1054,6 +1096,7 @@ void HardwareDock::initializeUtilizationTab()
     m_utilizationBodyLayout->addWidget(m_utilizationSidebarList, 0);
 
     m_utilizationDetailStack = new QStackedWidget(m_utilizationPage);
+    configureCompressibleWidget(m_utilizationDetailStack, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_utilizationDetailStack);
     m_utilizationBodyLayout->addWidget(m_utilizationDetailStack, 1);
 
@@ -1203,63 +1246,127 @@ void HardwareDock::syncUtilizationSidebarSelection(const int selectedRowIndex)
 
 void HardwareDock::adjustUtilizationChartHeights()
 {
+    // applyFixedHeightIfChanged 作用：
+    // - 仅在目标高度变化时写入最小/最大高度，避免无意义重排触发递归 resize；
+    // - widgetPointer：待设置控件；heightValue：目标固定高度（像素）；
+    // - 返回行为：无返回值，非法高度直接忽略。
+    auto applyFixedHeightIfChanged =
+        [](QWidget* widgetPointer, const int heightValue)
+        {
+            if (widgetPointer == nullptr || heightValue <= 0)
+            {
+                return;
+            }
+            if (widgetPointer->minimumHeight() == heightValue
+                && widgetPointer->maximumHeight() == heightValue)
+            {
+                return;
+            }
+            widgetPointer->setMinimumHeight(heightValue);
+            widgetPointer->setMaximumHeight(heightValue);
+        };
+
+    // applyMaxHeightIfChanged 作用：
+    // - 仅调整最大高度，最小高度保持 0，防止文字区反向撑大父布局；
+    // - widgetPointer：目标控件；maxHeightValue：目标最大高度（像素）；
+    // - 返回行为：无返回值，非法高度直接忽略。
+    auto applyMaxHeightIfChanged =
+        [](QWidget* widgetPointer, const int maxHeightValue)
+        {
+            if (widgetPointer == nullptr || maxHeightValue <= 0)
+            {
+                return;
+            }
+            if (widgetPointer->minimumHeight() == 0
+                && widgetPointer->maximumHeight() == maxHeightValue)
+            {
+                return;
+            }
+            widgetPointer->setMinimumHeight(0);
+            widgetPointer->setMaximumHeight(maxHeightValue);
+        };
+
+    // ===================== 左侧设备列表：按宽高动态压缩 =====================
+    if (m_utilizationPage != nullptr && m_utilizationSidebarList != nullptr)
+    {
+        // pageWidth 用途：根据利用率页实际宽度估算左侧栏宽，窄面板下主动让出图表区域。
+        const int pageWidth = std::max(0, m_utilizationPage->contentsRect().width());
+        const int sidebarWidth = std::clamp(pageWidth / 4, 64, 228);
+        if (m_utilizationSidebarList->minimumWidth() != sidebarWidth
+            || m_utilizationSidebarList->maximumWidth() != sidebarWidth)
+        {
+            m_utilizationSidebarList->setMinimumWidth(sidebarWidth);
+            m_utilizationSidebarList->setMaximumWidth(sidebarWidth);
+        }
+
+        // cardHeight 用途：把所有设备卡片压进当前可见高度，彻底避免左侧列表出现垂直滚动条。
+        const int itemCount = std::max(1, m_utilizationSidebarList->count());
+        const int spacingHeight = std::max(0, m_utilizationSidebarList->spacing()) * std::max(0, itemCount - 1);
+        const int viewportHeight = m_utilizationSidebarList->viewport() != nullptr
+            ? m_utilizationSidebarList->viewport()->height()
+            : m_utilizationSidebarList->height();
+        const int availableHeight = std::max(1, viewportHeight - spacingHeight);
+        const int rawCardHeight = std::max(1, availableHeight / itemCount);
+        const int cardHeight = std::clamp(rawCardHeight, 1, 52);
+        const int effectiveSpacing = rawCardHeight <= 1 ? 0 : m_utilizationSidebarList->spacing();
+        if (m_utilizationSidebarList->spacing() != effectiveSpacing)
+        {
+            m_utilizationSidebarList->setSpacing(effectiveSpacing);
+        }
+        for (int rowIndex = 0; rowIndex < m_utilizationSidebarList->count(); ++rowIndex)
+        {
+            QListWidgetItem* itemPointer = m_utilizationSidebarList->item(rowIndex);
+            if (itemPointer == nullptr)
+            {
+                continue;
+            }
+            const QSize nextSizeHint(sidebarWidth, cardHeight);
+            if (itemPointer->sizeHint() != nextSizeHint)
+            {
+                itemPointer->setSizeHint(nextSizeHint);
+            }
+        }
+    }
+
     // ===================== CPU 页：按核心网格动态压缩高度 =====================
     if (m_utilizationCpuSubPage != nullptr
         && m_coreChartHostWidget != nullptr
         && m_coreChartGridLayout != nullptr
         && !m_coreChartEntries.empty())
     {
-        // applyFixedHeightIfChanged 作用：
-        // - 仅在目标高度变化时写入最小/最大高度，避免无意义重排触发递归 resize；
-        // - widgetPointer：待设置控件；heightValue：目标固定高度（像素）。
-        auto applyFixedHeightIfChanged =
-            [](QWidget* widgetPointer, const int heightValue)
-            {
-                if (widgetPointer == nullptr || heightValue <= 0)
-                {
-                    return;
-                }
-                if (widgetPointer->minimumHeight() == heightValue
-                    && widgetPointer->maximumHeight() == heightValue)
-                {
-                    return;
-                }
-                widgetPointer->setMinimumHeight(heightValue);
-                widgetPointer->setMaximumHeight(heightValue);
-            };
-
-        // chartViewportHeight 用途：滚动区当前可见高度，作为核心网格高度分配基线。
-        int chartViewportHeight = 0;
-        if (m_coreChartScrollArea != nullptr && m_coreChartScrollArea->viewport() != nullptr)
+        // cpuReferenceHeight 用途：稳定页面高度，避免用子控件 sizeHint 反向撑高外层 Dock。
+        int cpuReferenceHeight = 0;
+        if (m_utilizationDetailStack != nullptr)
         {
-            chartViewportHeight = m_coreChartScrollArea->viewport()->height();
+            cpuReferenceHeight = m_utilizationDetailStack->contentsRect().height();
         }
-        if (chartViewportHeight <= 0 && m_coreChartScrollArea != nullptr)
+        if (cpuReferenceHeight <= 0)
         {
-            chartViewportHeight = m_coreChartScrollArea->height();
+            cpuReferenceHeight = m_utilizationCpuSubPage->contentsRect().height();
         }
-        if (chartViewportHeight < 120)
+        if (cpuReferenceHeight <= 0)
         {
-            // cpuReferenceHeight 用途：CPU 页稳定参考高度，避免初始化阶段拿到过小 viewport。
-            int cpuReferenceHeight = 0;
-            if (m_utilizationDetailStack != nullptr)
-            {
-                cpuReferenceHeight = m_utilizationDetailStack->contentsRect().height();
-            }
-            if (cpuReferenceHeight <= 0)
-            {
-                cpuReferenceHeight = m_utilizationCpuSubPage->contentsRect().height();
-            }
-            chartViewportHeight = std::max(120, cpuReferenceHeight / 2);
+            cpuReferenceHeight = 240;
         }
 
-        // availableChartAreaHeight 用途：核心图总可用高度；取滚动区可见高度阻断“高度递增反馈环”。
-        const int availableChartAreaHeight = std::max(1, chartViewportHeight);
+        const int headerHeight = std::max(
+            m_cpuModelLabel != nullptr ? m_cpuModelLabel->sizeHint().height() : 0,
+            30);
+        const int summaryHeight = m_utilizationSummaryLabel != nullptr
+            ? m_utilizationSummaryLabel->sizeHint().height()
+            : 16;
+        const int detailHeight = std::max(
+            m_cpuUtilPrimaryDetailLabel != nullptr ? m_cpuUtilPrimaryDetailLabel->sizeHint().height() : 0,
+            m_cpuUtilSecondaryDetailLabel != nullptr ? m_cpuUtilSecondaryDetailLabel->sizeHint().height() : 0);
+        // availableChartAreaHeight 用途：核心图可用高度；允许极小高度，保证页面整体不冒滚动条。
+        const int availableChartAreaHeight = std::max(
+            1,
+            cpuReferenceHeight - headerHeight - summaryHeight - detailHeight - 30);
         const int gridRows = std::max(1, m_cpuCoreGridRowCount);
         const int gridSpacing = std::max(0, m_coreChartGridLayout->verticalSpacing());
-        // cellHeight 用途：每个逻辑处理器小卡片高度；过小时允许滚动条接管，不强行拉伸父容器。
+        // cellHeight 用途：每个逻辑处理器小卡片高度；低高度下继续压缩而不是让滚动条接管。
         const int cellHeight = std::max(
-            18,
+            1,
             (availableChartAreaHeight - gridSpacing * (gridRows - 1)) / gridRows);
 
         for (CoreChartEntry& chartEntry : m_coreChartEntries)
@@ -1270,7 +1377,7 @@ void HardwareDock::adjustUtilizationChartHeights()
             }
             if (chartEntry.chartView != nullptr)
             {
-                const int chartHeight = std::max(10, cellHeight - 12);
+                const int chartHeight = std::max(1, cellHeight - 10);
                 applyFixedHeightIfChanged(chartEntry.chartView, chartHeight);
             }
         }
@@ -1279,19 +1386,12 @@ void HardwareDock::adjustUtilizationChartHeights()
         applyFixedHeightIfChanged(m_coreChartHostWidget, hostHeight);
         if (m_coreChartScrollArea != nullptr)
         {
-            // 这里不再把滚动区本身锁成固定高度，避免布局在每次重算后持续推高父容器。
-            m_coreChartScrollArea->setMinimumHeight(0);
-            m_coreChartScrollArea->setMaximumHeight(QWIDGETSIZE_MAX);
+            // CPU 核心图区域固定到可用高度，核心多时压缩单元格，不显示滚动条。
+            applyFixedHeightIfChanged(m_coreChartScrollArea, availableChartAreaHeight);
         }
 
-        if (m_cpuUtilPrimaryDetailLabel != nullptr)
-        {
-            m_cpuUtilPrimaryDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
-        }
-        if (m_cpuUtilSecondaryDetailLabel != nullptr)
-        {
-            m_cpuUtilSecondaryDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
-        }
+        applyMaxHeightIfChanged(m_cpuUtilPrimaryDetailLabel, std::max(1, m_cpuUtilPrimaryDetailLabel != nullptr ? m_cpuUtilPrimaryDetailLabel->sizeHint().height() : 1));
+        applyMaxHeightIfChanged(m_cpuUtilSecondaryDetailLabel, std::max(1, m_cpuUtilSecondaryDetailLabel != nullptr ? m_cpuUtilSecondaryDetailLabel->sizeHint().height() : 1));
     }
 
     // ===================== 其他页：按页面高度比例压缩主图 =====================
@@ -1308,68 +1408,47 @@ void HardwareDock::adjustUtilizationChartHeights()
                 return;
             }
             const int pageHeight = pageWidget->contentsRect().height();
-            const int maxAllowedHeight = std::max(minHeightValue, pageHeight - reserveHeightValue);
+            if (pageHeight <= 0)
+            {
+                return;
+            }
+            const int safeMinHeight = std::max(1, minHeightValue);
+            const int maxAllowedHeight = std::max(1, pageHeight - reserveHeightValue);
             const int expectedHeight = static_cast<int>(std::round(static_cast<double>(pageHeight) * ratioValue));
-            const int finalHeight = std::clamp(expectedHeight, minHeightValue, maxAllowedHeight);
-            chartView->setMinimumHeight(finalHeight);
-            chartView->setMaximumHeight(finalHeight);
+            const int finalHeight = std::clamp(expectedHeight, 1, maxAllowedHeight);
+            const int boundedHeight = std::min(finalHeight, std::max(safeMinHeight, maxAllowedHeight));
+            if (chartView->minimumHeight() != boundedHeight
+                || chartView->maximumHeight() != boundedHeight)
+            {
+                chartView->setMinimumHeight(boundedHeight);
+                chartView->setMaximumHeight(boundedHeight);
+            }
         };
 
-    adjustMainChartHeight(m_utilizationMemorySubPage, m_memoryCompositionHistoryWidget, 0.36, 56, 116);
-    adjustMainChartHeight(m_utilizationDiskSubPage, m_diskUtilChartView, 0.40, 58, 120);
-    adjustMainChartHeight(m_utilizationNetworkSubPage, m_networkUtilChartView, 0.40, 58, 120);
+    adjustMainChartHeight(m_utilizationMemorySubPage, m_memoryCompositionHistoryWidget, 0.36, 24, 116);
+    adjustMainChartHeight(m_utilizationDiskSubPage, m_diskUtilChartView, 0.40, 24, 120);
+    adjustMainChartHeight(m_utilizationNetworkSubPage, m_networkUtilChartView, 0.40, 24, 120);
 
-    if (m_memoryUtilPrimaryDetailLabel != nullptr)
-    {
-        m_memoryUtilPrimaryDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
-    }
-    if (m_memoryUtilSecondaryDetailLabel != nullptr)
-    {
-        m_memoryUtilSecondaryDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
-    }
-    if (m_diskUtilDetailLabel != nullptr)
-    {
-        m_diskUtilDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
-    }
-    if (m_networkUtilDetailLabel != nullptr)
-    {
-        m_networkUtilDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
-    }
+    applyMaxHeightIfChanged(m_memoryUtilPrimaryDetailLabel, std::max(1, m_memoryUtilPrimaryDetailLabel != nullptr ? m_memoryUtilPrimaryDetailLabel->sizeHint().height() : 1));
+    applyMaxHeightIfChanged(m_memoryUtilSecondaryDetailLabel, std::max(1, m_memoryUtilSecondaryDetailLabel != nullptr ? m_memoryUtilSecondaryDetailLabel->sizeHint().height() : 1));
+    applyMaxHeightIfChanged(m_diskUtilDetailLabel, std::max(1, m_diskUtilDetailLabel != nullptr ? m_diskUtilDetailLabel->sizeHint().height() : 1));
+    applyMaxHeightIfChanged(m_networkUtilDetailLabel, std::max(1, m_networkUtilDetailLabel != nullptr ? m_networkUtilDetailLabel->sizeHint().height() : 1));
     for (DiskUtilizationDevice& device : m_diskUtilDevices)
     {
-        adjustMainChartHeight(device.pageWidget, device.chartView, 0.40, 58, 120);
+        adjustMainChartHeight(device.pageWidget, device.chartView, 0.40, 24, 120);
         if (device.detailLabel != nullptr)
         {
-            device.detailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
+            applyMaxHeightIfChanged(device.detailLabel, std::max(1, device.detailLabel->sizeHint().height()));
         }
     }
     for (NetworkUtilizationDevice& device : m_networkUtilDevices)
     {
-        adjustMainChartHeight(device.pageWidget, device.chartView, 0.40, 58, 120);
+        adjustMainChartHeight(device.pageWidget, device.chartView, 0.40, 24, 120);
         if (device.detailLabel != nullptr)
         {
-            device.detailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
+            applyMaxHeightIfChanged(device.detailLabel, std::max(1, device.detailLabel->sizeHint().height()));
         }
     }
-
-    // applyMaxHeightIfChanged 作用：
-    // - 仅调整最大高度，最小高度保持 0，防止子控件反向撑大父布局；
-    // - widgetPointer：目标控件；maxHeightValue：目标最大高度（像素）。
-    auto applyMaxHeightIfChanged =
-        [](QWidget* widgetPointer, const int maxHeightValue)
-        {
-            if (widgetPointer == nullptr || maxHeightValue <= 0)
-            {
-                return;
-            }
-            if (widgetPointer->minimumHeight() == 0
-                && widgetPointer->maximumHeight() == maxHeightValue)
-            {
-                return;
-            }
-            widgetPointer->setMinimumHeight(0);
-            widgetPointer->setMaximumHeight(maxHeightValue);
-        };
 
     // GPU 页：四个引擎图 + 两条显存曲线全部动态压缩。
     if (m_utilizationGpuSubPage != nullptr)
@@ -1400,24 +1479,26 @@ void HardwareDock::adjustUtilizationChartHeights()
             : 22;
         // reservedHeight 用途：GPU 页非图表区预留高度（含布局间距与上下边距）。
         const int reservedHeight = titleHeight + summaryHeight + detailHeight + 38;
-        const int availableHeight = std::max(120, gpuReferenceHeight - reservedHeight);
+        const int availableHeight = std::max(1, gpuReferenceHeight - reservedHeight);
 
         // engineAreaHeight 用途：分配给 2x2 引擎图区域的高度。
-        const int engineAreaHeight = static_cast<int>(std::round(static_cast<double>(availableHeight) * 0.52));
-        const int memoryAreaEachHeight = std::max(34, (availableHeight - engineAreaHeight - 8) / 2);
+        const int engineAreaHeight = std::max(
+            1,
+            static_cast<int>(std::round(static_cast<double>(availableHeight) * 0.52)));
+        const int memoryAreaEachHeight = std::max(1, (availableHeight - engineAreaHeight - 8) / 2);
         if (m_gpuEngineHostWidget != nullptr && m_gpuEngineGridLayout != nullptr)
         {
             const int rowSpacing = std::max(0, m_gpuEngineGridLayout->verticalSpacing());
-            const int cellHeight = std::max(30, (engineAreaHeight - rowSpacing) / 2);
+            const int cellHeight = std::max(1, (engineAreaHeight - rowSpacing) / 2);
             for (GpuEngineChartEntry& chartEntry : m_gpuEngineCharts)
             {
                 if (chartEntry.chartView != nullptr)
                 {
-                    applyMaxHeightIfChanged(chartEntry.chartView, std::max(18, cellHeight - 10));
+                    applyMaxHeightIfChanged(chartEntry.chartView, std::max(1, cellHeight - 10));
                 }
                 if (chartEntry.titleLabel != nullptr)
                 {
-                    chartEntry.titleLabel->setMinimumHeight(14);
+                    chartEntry.titleLabel->setMinimumHeight(0);
                     chartEntry.titleLabel->setMaximumHeight(18);
                 }
             }
@@ -1434,7 +1515,7 @@ void HardwareDock::adjustUtilizationChartHeights()
         }
         if (m_gpuUtilDetailLabel != nullptr)
         {
-            m_gpuUtilDetailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
+            applyMaxHeightIfChanged(m_gpuUtilDetailLabel, std::max(1, m_gpuUtilDetailLabel->sizeHint().height()));
         }
     }
     for (GpuUtilizationDevice& device : m_gpuUtilDevices)
@@ -1468,19 +1549,24 @@ void HardwareDock::adjustUtilizationChartHeights()
             ? device.detailLabel->sizeHint().height()
             : 0;
         const int reservedHeight = headerHeight + summaryHeight + detailHeight + layoutSpacing * 7 + 12;
-        const int graphAreaHeight = std::max(126, gpuReferenceHeight - reservedHeight);
-        const int engineAreaHeight = std::max(64, graphAreaHeight / 2);
-        const int memoryAreaEachHeight = std::max(42, graphAreaHeight / 4);
+        const int graphAreaHeight = std::max(1, gpuReferenceHeight - reservedHeight);
+        const int engineAreaHeight = std::max(1, graphAreaHeight / 2);
+        const int memoryAreaEachHeight = std::max(1, graphAreaHeight / 4);
 
         if (device.engineHostWidget != nullptr && device.engineGridLayout != nullptr)
         {
             const int rowSpacing = std::max(0, device.engineGridLayout->verticalSpacing());
-            const int cellHeight = std::max(26, (engineAreaHeight - rowSpacing) / 2);
+            const int cellHeight = std::max(1, (engineAreaHeight - rowSpacing) / 2);
             for (GpuEngineChartEntry& chartEntry : device.engineCharts)
             {
                 if (chartEntry.chartView != nullptr)
                 {
-                    applyMaxHeightIfChanged(chartEntry.chartView, std::max(14, cellHeight - 14));
+                    applyMaxHeightIfChanged(chartEntry.chartView, std::max(1, cellHeight - 14));
+                }
+                if (chartEntry.titleLabel != nullptr)
+                {
+                    chartEntry.titleLabel->setMinimumHeight(0);
+                    chartEntry.titleLabel->setMaximumHeight(18);
                 }
             }
             applyMaxHeightIfChanged(device.engineHostWidget, engineAreaHeight);
@@ -1489,7 +1575,7 @@ void HardwareDock::adjustUtilizationChartHeights()
         applyMaxHeightIfChanged(device.sharedMemoryChartView, memoryAreaEachHeight);
         if (device.detailLabel != nullptr)
         {
-            device.detailLabel->setMaximumHeight(QWIDGETSIZE_MAX);
+            applyMaxHeightIfChanged(device.detailLabel, std::max(1, device.detailLabel->sizeHint().height()));
         }
     }
 }
@@ -1497,6 +1583,7 @@ void HardwareDock::adjustUtilizationChartHeights()
 void HardwareDock::initializeUtilizationCpuSubTab()
 {
     m_utilizationCpuSubPage = new QWidget(m_utilizationDetailStack);
+    configureCompressibleWidget(m_utilizationCpuSubPage, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_utilizationCpuSubPage);
     QVBoxLayout* cpuSubLayout = new QVBoxLayout(m_utilizationCpuSubPage);
     cpuSubLayout->setContentsMargins(4, 4, 4, 4);
@@ -1504,10 +1591,12 @@ void HardwareDock::initializeUtilizationCpuSubTab()
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
     QLabel* titleLabel = new QLabel(QStringLiteral("CPU"), m_utilizationCpuSubPage);
+    configureCompressibleLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     m_cpuModelLabel = new QLabel(QStringLiteral("检测中..."), m_utilizationCpuSubPage);
+    configureCompressibleLabel(m_cpuModelLabel);
     m_cpuModelLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_cpuModelLabel->setStyleSheet(
         QStringLiteral("font-size:15px;font-weight:500;color:%1;")
@@ -1518,6 +1607,7 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     cpuSubLayout->addLayout(headerLayout, 0);
 
     m_utilizationSummaryLabel = new QLabel(QStringLiteral("30 秒内的利用率 %"), m_utilizationCpuSubPage);
+    configureCompressibleLabel(m_utilizationSummaryLabel);
     m_utilizationSummaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     cpuSubLayout->addWidget(m_utilizationSummaryLabel, 0);
@@ -1525,12 +1615,14 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     m_coreChartScrollArea = new QScrollArea(m_utilizationCpuSubPage);
     m_coreChartScrollArea->setWidgetResizable(true);
     m_coreChartScrollArea->setFrameShape(QFrame::NoFrame);
-    // 当核心数量很多时允许内部滚动，避免核心图反向把整个 Dock 顶高到屏幕外。
-    m_coreChartScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    // 核心数量很多时压缩网格，不显示内部滚动条。
+    m_coreChartScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_coreChartScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_coreChartScrollArea->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+    configureCompressibleWidget(m_coreChartScrollArea, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_coreChartScrollArea);
     m_coreChartHostWidget = new QWidget(m_coreChartScrollArea);
+    configureCompressibleWidget(m_coreChartHostWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_coreChartHostWidget);
     m_coreChartGridLayout = new QGridLayout(m_coreChartHostWidget);
     m_coreChartGridLayout->setContentsMargins(0, 0, 0, 0);
@@ -1543,6 +1635,8 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     detailLayout->setSpacing(16);
     m_cpuUtilPrimaryDetailLabel = new QLabel(QStringLiteral("CPU 详情采样中..."), m_utilizationCpuSubPage);
     m_cpuUtilSecondaryDetailLabel = new QLabel(QStringLiteral("硬件参数读取中..."), m_utilizationCpuSubPage);
+    configureCompressibleLabel(m_cpuUtilPrimaryDetailLabel);
+    configureCompressibleLabel(m_cpuUtilSecondaryDetailLabel);
     m_cpuUtilPrimaryDetailLabel->setWordWrap(false);
     m_cpuUtilSecondaryDetailLabel->setWordWrap(false);
     m_cpuUtilPrimaryDetailLabel->setStyleSheet(
@@ -1560,6 +1654,7 @@ void HardwareDock::initializeUtilizationCpuSubTab()
 void HardwareDock::initializeUtilizationMemorySubTab()
 {
     m_utilizationMemorySubPage = new QWidget(m_utilizationDetailStack);
+    configureCompressibleWidget(m_utilizationMemorySubPage, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_utilizationMemorySubPage);
     QVBoxLayout* memorySubLayout = new QVBoxLayout(m_utilizationMemorySubPage);
     memorySubLayout->setContentsMargins(4, 4, 4, 4);
@@ -1567,10 +1662,12 @@ void HardwareDock::initializeUtilizationMemorySubTab()
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
     QLabel* titleLabel = new QLabel(QStringLiteral("内存"), m_utilizationMemorySubPage);
+    configureCompressibleLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     m_memoryCapacityLabel = new QLabel(QStringLiteral("读取中..."), m_utilizationMemorySubPage);
+    configureCompressibleLabel(m_memoryCapacityLabel);
     m_memoryCapacityLabel->setStyleSheet(
         QStringLiteral("font-size:31px;font-weight:500;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
@@ -1580,18 +1677,21 @@ void HardwareDock::initializeUtilizationMemorySubTab()
     memorySubLayout->addLayout(headerLayout, 0);
 
     m_memoryUtilSummaryLabel = new QLabel(QStringLiteral("内存使用量"), m_utilizationMemorySubPage);
+    configureCompressibleLabel(m_memoryUtilSummaryLabel);
     m_memoryUtilSummaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     memorySubLayout->addWidget(m_memoryUtilSummaryLabel, 0);
 
     m_memoryCompositionHistoryWidget = new MemoryCompositionHistoryWidget(m_utilizationMemorySubPage);
-    m_memoryCompositionHistoryWidget->setMinimumHeight(116);
+    configureCompressibleWidget(m_memoryCompositionHistoryWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
     memorySubLayout->addWidget(m_memoryCompositionHistoryWidget, 1);
 
     QHBoxLayout* detailLayout = new QHBoxLayout();
     detailLayout->setSpacing(16);
     m_memoryUtilPrimaryDetailLabel = new QLabel(QStringLiteral("内存参数采样中..."), m_utilizationMemorySubPage);
     m_memoryUtilSecondaryDetailLabel = new QLabel(QStringLiteral("硬件参数读取中..."), m_utilizationMemorySubPage);
+    configureCompressibleLabel(m_memoryUtilPrimaryDetailLabel);
+    configureCompressibleLabel(m_memoryUtilSecondaryDetailLabel);
     m_memoryUtilPrimaryDetailLabel->setWordWrap(false);
     m_memoryUtilSecondaryDetailLabel->setWordWrap(false);
     m_memoryUtilPrimaryDetailLabel->setStyleSheet(
@@ -1608,18 +1708,21 @@ void HardwareDock::initializeUtilizationMemorySubTab()
 void HardwareDock::initializeUtilizationDiskSubTab()
 {
     m_utilizationDiskSubPage = new QWidget(m_utilizationDetailStack);
+    configureCompressibleWidget(m_utilizationDiskSubPage, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_utilizationDiskSubPage);
     QVBoxLayout* diskSubLayout = new QVBoxLayout(m_utilizationDiskSubPage);
     diskSubLayout->setContentsMargins(4, 4, 4, 4);
     diskSubLayout->setSpacing(6);
 
     QLabel* titleLabel = new QLabel(QStringLiteral("磁盘"), m_utilizationDiskSubPage);
+    configureCompressibleLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     diskSubLayout->addWidget(titleLabel, 0);
 
     m_diskUtilSummaryLabel = new QLabel(QStringLiteral("磁盘采样初始化中..."), m_utilizationDiskSubPage);
+    configureCompressibleLabel(m_diskUtilSummaryLabel);
     m_diskUtilSummaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     diskSubLayout->addWidget(m_diskUtilSummaryLabel, 0);
@@ -1667,6 +1770,7 @@ void HardwareDock::initializeUtilizationDiskSubTab()
     diskSubLayout->addWidget(m_diskUtilChartView, 1);
 
     m_diskUtilDetailLabel = new QLabel(QStringLiteral("磁盘参数采样中..."), m_utilizationDiskSubPage);
+    configureCompressibleLabel(m_diskUtilDetailLabel);
     m_diskUtilDetailLabel->setWordWrap(false);
     m_diskUtilDetailLabel->setStyleSheet(
         QStringLiteral("font-size:14px;color:%1;").arg(KswordTheme::TextPrimaryHex()));
@@ -1678,18 +1782,21 @@ void HardwareDock::initializeUtilizationDiskSubTab()
 void HardwareDock::initializeUtilizationNetworkSubTab()
 {
     m_utilizationNetworkSubPage = new QWidget(m_utilizationDetailStack);
+    configureCompressibleWidget(m_utilizationNetworkSubPage, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_utilizationNetworkSubPage);
     QVBoxLayout* networkSubLayout = new QVBoxLayout(m_utilizationNetworkSubPage);
     networkSubLayout->setContentsMargins(4, 4, 4, 4);
     networkSubLayout->setSpacing(6);
 
     QLabel* titleLabel = new QLabel(QStringLiteral("以太网"), m_utilizationNetworkSubPage);
+    configureCompressibleLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     networkSubLayout->addWidget(titleLabel, 0);
 
     m_networkUtilSummaryLabel = new QLabel(QStringLiteral("网络采样初始化中..."), m_utilizationNetworkSubPage);
+    configureCompressibleLabel(m_networkUtilSummaryLabel);
     m_networkUtilSummaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     networkSubLayout->addWidget(m_networkUtilSummaryLabel, 0);
@@ -1737,6 +1844,7 @@ void HardwareDock::initializeUtilizationNetworkSubTab()
     networkSubLayout->addWidget(m_networkUtilChartView, 1);
 
     m_networkUtilDetailLabel = new QLabel(QStringLiteral("网络参数采样中..."), m_utilizationNetworkSubPage);
+    configureCompressibleLabel(m_networkUtilDetailLabel);
     m_networkUtilDetailLabel->setWordWrap(false);
     m_networkUtilDetailLabel->setStyleSheet(
         QStringLiteral("font-size:14px;color:%1;").arg(KswordTheme::TextPrimaryHex()));
@@ -1748,6 +1856,7 @@ void HardwareDock::initializeUtilizationNetworkSubTab()
 void HardwareDock::initializeUtilizationGpuSubTab()
 {
     m_utilizationGpuSubPage = new QWidget(m_utilizationDetailStack);
+    configureCompressibleWidget(m_utilizationGpuSubPage, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_utilizationGpuSubPage);
     QVBoxLayout* gpuSubLayout = new QVBoxLayout(m_utilizationGpuSubPage);
     gpuSubLayout->setContentsMargins(4, 4, 4, 4);
@@ -1755,10 +1864,12 @@ void HardwareDock::initializeUtilizationGpuSubTab()
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
     QLabel* titleLabel = new QLabel(QStringLiteral("GPU"), m_utilizationGpuSubPage);
+    configureCompressibleLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     m_gpuAdapterTitleLabel = new QLabel(QStringLiteral("适配器读取中..."), m_utilizationGpuSubPage);
+    configureCompressibleLabel(m_gpuAdapterTitleLabel);
     m_gpuAdapterTitleLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_gpuAdapterTitleLabel->setStyleSheet(
         QStringLiteral("font-size:18px;font-weight:500;color:%1;")
@@ -1769,6 +1880,7 @@ void HardwareDock::initializeUtilizationGpuSubTab()
     gpuSubLayout->addLayout(headerLayout, 0);
 
     m_gpuUtilSummaryLabel = new QLabel(QStringLiteral("GPU采样初始化中..."), m_utilizationGpuSubPage);
+    configureCompressibleLabel(m_gpuUtilSummaryLabel);
     m_gpuUtilSummaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     gpuSubLayout->addWidget(m_gpuUtilSummaryLabel, 0);
@@ -1777,6 +1889,7 @@ void HardwareDock::initializeUtilizationGpuSubTab()
     // - 对齐任务管理器的 3D / Copy / Video Encode / Video Decode；
     // - 每个引擎独立曲线和标题，便于定位瓶颈引擎。
     m_gpuEngineHostWidget = new QWidget(m_utilizationGpuSubPage);
+    configureCompressibleWidget(m_gpuEngineHostWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_gpuEngineHostWidget);
     m_gpuEngineGridLayout = new QGridLayout(m_gpuEngineHostWidget);
     m_gpuEngineGridLayout->setContentsMargins(0, 0, 0, 0);
@@ -1788,12 +1901,14 @@ void HardwareDock::initializeUtilizationGpuSubTab()
         [this](const QString& engineKeyText, const QString& displayNameText, const QColor& lineColor, const int rowIndex, const int columnIndex)
         {
             QWidget* cellWidget = new QWidget(m_gpuEngineHostWidget);
+            configureCompressibleWidget(cellWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
             appendTransparentBackgroundStyle(cellWidget);
             QVBoxLayout* cellLayout = new QVBoxLayout(cellWidget);
             cellLayout->setContentsMargins(0, 0, 0, 0);
             cellLayout->setSpacing(2);
 
             QLabel* cellTitle = new QLabel(displayNameText, cellWidget);
+            configureCompressibleLabel(cellTitle);
             cellTitle->setStyleSheet(
                 QStringLiteral("font-size:14px;font-weight:600;color:%1;")
                 .arg(KswordTheme::TextPrimaryHex()));
@@ -1926,6 +2041,7 @@ void HardwareDock::initializeUtilizationGpuSubTab()
     gpuSubLayout->addWidget(m_gpuSharedMemoryChartView, 0);
 
     m_gpuUtilDetailLabel = new QLabel(QStringLiteral("GPU参数采样中..."), m_utilizationGpuSubPage);
+    configureCompressibleLabel(m_gpuUtilDetailLabel);
     m_gpuUtilDetailLabel->setWordWrap(false);
     m_gpuUtilDetailLabel->setStyleSheet(
         QStringLiteral("font-size:14px;color:%1;").arg(KswordTheme::TextPrimaryHex()));
@@ -2018,6 +2134,7 @@ void HardwareDock::initializeCoreCharts()
     {
         CoreChartEntry chartEntry;
         chartEntry.containerWidget = new QWidget(m_coreChartHostWidget);
+        configureCompressibleWidget(chartEntry.containerWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
         appendTransparentBackgroundStyle(chartEntry.containerWidget);
         QVBoxLayout* containerLayout = new QVBoxLayout(chartEntry.containerWidget);
         containerLayout->setContentsMargins(4, 4, 4, 4);
@@ -2026,10 +2143,10 @@ void HardwareDock::initializeCoreCharts()
         chartEntry.titleLabel = new QLabel(
             QStringLiteral("CPU %1").arg(coreIndex),
             chartEntry.containerWidget);
+        configureCompressibleLabel(chartEntry.titleLabel);
         chartEntry.titleLabel->setStyleSheet(
             QStringLiteral("color:%1;font-weight:600;").arg(buildStatusColor().name()));
         chartEntry.titleLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-        chartEntry.titleLabel->setMinimumWidth(128);
         containerLayout->addWidget(chartEntry.titleLabel, 0);
 
         chartEntry.lineSeries = new QLineSeries(chartEntry.containerWidget);
@@ -2231,18 +2348,21 @@ void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* device
     }
 
     devicePointer->pageWidget = new QWidget(m_utilizationDetailStack);
+    configureCompressibleWidget(devicePointer->pageWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(devicePointer->pageWidget);
     QVBoxLayout* pageLayout = new QVBoxLayout(devicePointer->pageWidget);
     pageLayout->setContentsMargins(4, 4, 4, 4);
     pageLayout->setSpacing(6);
 
     QLabel* titleLabel = new QLabel(devicePointer->displayNameText, devicePointer->pageWidget);
+    configureCompressibleLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     pageLayout->addWidget(titleLabel, 0);
 
     devicePointer->summaryLabel = new QLabel(QStringLiteral("磁盘采样初始化中..."), devicePointer->pageWidget);
+    configureCompressibleLabel(devicePointer->summaryLabel);
     devicePointer->summaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     pageLayout->addWidget(devicePointer->summaryLabel, 0);
@@ -2283,6 +2403,7 @@ void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* device
     pageLayout->addWidget(devicePointer->chartView, 1);
 
     devicePointer->detailLabel = new QLabel(QStringLiteral("磁盘参数采样中..."), devicePointer->pageWidget);
+    configureCompressibleLabel(devicePointer->detailLabel);
     devicePointer->detailLabel->setWordWrap(false);
     devicePointer->detailLabel->setStyleSheet(
         QStringLiteral("font-size:14px;color:%1;").arg(KswordTheme::TextPrimaryHex()));
@@ -2299,18 +2420,21 @@ void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* 
     }
 
     devicePointer->pageWidget = new QWidget(m_utilizationDetailStack);
+    configureCompressibleWidget(devicePointer->pageWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(devicePointer->pageWidget);
     QVBoxLayout* pageLayout = new QVBoxLayout(devicePointer->pageWidget);
     pageLayout->setContentsMargins(4, 4, 4, 4);
     pageLayout->setSpacing(6);
 
     QLabel* titleLabel = new QLabel(devicePointer->displayNameText, devicePointer->pageWidget);
+    configureCompressibleLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     pageLayout->addWidget(titleLabel, 0);
 
     devicePointer->summaryLabel = new QLabel(QStringLiteral("网络采样初始化中..."), devicePointer->pageWidget);
+    configureCompressibleLabel(devicePointer->summaryLabel);
     devicePointer->summaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     pageLayout->addWidget(devicePointer->summaryLabel, 0);
@@ -2351,6 +2475,7 @@ void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* 
     pageLayout->addWidget(devicePointer->chartView, 1);
 
     devicePointer->detailLabel = new QLabel(QStringLiteral("网络参数采样中..."), devicePointer->pageWidget);
+    configureCompressibleLabel(devicePointer->detailLabel);
     devicePointer->detailLabel->setWordWrap(false);
     devicePointer->detailLabel->setStyleSheet(
         QStringLiteral("font-size:14px;color:%1;").arg(KswordTheme::TextPrimaryHex()));
@@ -2367,6 +2492,7 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
     }
 
     devicePointer->pageWidget = new QWidget(m_utilizationDetailStack);
+    configureCompressibleWidget(devicePointer->pageWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(devicePointer->pageWidget);
     QVBoxLayout* pageLayout = new QVBoxLayout(devicePointer->pageWidget);
     pageLayout->setContentsMargins(4, 4, 4, 4);
@@ -2374,10 +2500,12 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
     QLabel* titleLabel = new QLabel(devicePointer->displayNameText, devicePointer->pageWidget);
+    configureCompressibleLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     devicePointer->adapterTitleLabel = new QLabel(QStringLiteral("适配器读取中..."), devicePointer->pageWidget);
+    configureCompressibleLabel(devicePointer->adapterTitleLabel);
     devicePointer->adapterTitleLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     devicePointer->adapterTitleLabel->setStyleSheet(
         QStringLiteral("font-size:15px;font-weight:500;color:%1;")
@@ -2388,11 +2516,13 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
     pageLayout->addLayout(headerLayout, 0);
 
     devicePointer->summaryLabel = new QLabel(QStringLiteral("GPU采样初始化中..."), devicePointer->pageWidget);
+    configureCompressibleLabel(devicePointer->summaryLabel);
     devicePointer->summaryLabel->setStyleSheet(
         QStringLiteral("color:%1;font-size:14px;font-weight:600;").arg(buildStatusColor().name()));
     pageLayout->addWidget(devicePointer->summaryLabel, 0);
 
     devicePointer->engineHostWidget = new QWidget(devicePointer->pageWidget);
+    configureCompressibleWidget(devicePointer->engineHostWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(devicePointer->engineHostWidget);
     devicePointer->engineGridLayout = new QGridLayout(devicePointer->engineHostWidget);
     devicePointer->engineGridLayout->setContentsMargins(0, 0, 0, 0);
@@ -2409,6 +2539,7 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
             const int columnIndex)
         {
             QWidget* cellWidget = new QWidget(devicePointer->engineHostWidget);
+            configureCompressibleWidget(cellWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
             appendTransparentBackgroundStyle(cellWidget);
             QVBoxLayout* cellLayout = new QVBoxLayout(cellWidget);
             cellLayout->setContentsMargins(3, 3, 3, 3);
@@ -2418,6 +2549,7 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
             chartEntry.engineKeyText = keyText;
             chartEntry.displayNameText = displayText;
             chartEntry.titleLabel = new QLabel(displayText, cellWidget);
+            configureCompressibleLabel(chartEntry.titleLabel);
             chartEntry.titleLabel->setStyleSheet(
                 QStringLiteral("font-size:12px;color:%1;").arg(KswordTheme::TextPrimaryHex()));
             cellLayout->addWidget(chartEntry.titleLabel, 0);
@@ -2507,6 +2639,7 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
     pageLayout->addWidget(devicePointer->sharedMemoryChartView, 0);
 
     devicePointer->detailLabel = new QLabel(QStringLiteral("GPU参数采样中..."), devicePointer->pageWidget);
+    configureCompressibleLabel(devicePointer->detailLabel);
     devicePointer->detailLabel->setWordWrap(false);
     devicePointer->detailLabel->setStyleSheet(
         QStringLiteral("font-size:14px;color:%1;").arg(KswordTheme::TextPrimaryHex()));

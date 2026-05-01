@@ -136,7 +136,7 @@ void SettingsDock::initializeAppearanceTab()
     backgroundLayout->setSpacing(8);
 
     QLabel* pathHintLabel = new QLabel(
-        QStringLiteral("默认路径：style/ksword_background.png，可手动选择 PNG/JPG/BMP。"),
+        QStringLiteral("默认路径：Style/ksword_background.png，可手动选择 PNG/JPG/BMP。"),
         backgroundGroupBox);
     pathHintLabel->setWordWrap(true);
     backgroundLayout->addWidget(pathHintLabel);
@@ -146,7 +146,7 @@ void SettingsDock::initializeAppearanceTab()
 
     // m_backgroundPathEdit 作用：用户输入背景图路径文本。
     m_backgroundPathEdit = new QLineEdit(backgroundGroupBox);
-    m_backgroundPathEdit->setPlaceholderText(QStringLiteral("style/ksword_background.png"));
+    m_backgroundPathEdit->setPlaceholderText(QStringLiteral("Style/ksword_background.png"));
     pathLayout->addWidget(m_backgroundPathEdit, 1);
 
     // m_browseBackgroundButton 作用：打开文件对话框选择背景图。
@@ -494,7 +494,7 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
 
     const QString rawPathText = m_backgroundPathEdit->text().trimmed();
     collectedSettings.backgroundImagePath = rawPathText.isEmpty()
-        ? QStringLiteral("style/ksword_background.png")
+        ? QStringLiteral("Style/ksword_background.png")
         : rawPathText;
 
     collectedSettings.backgroundOpacityPercent = m_backgroundOpacitySlider->value();
@@ -766,6 +766,6 @@ void SettingsDock::openBackgroundFileDialog()
 
 void SettingsDock::resetBackgroundPathToDefault()
 {
-    m_backgroundPathEdit->setText(QStringLiteral("style/ksword_background.png"));
+    m_backgroundPathEdit->setText(QStringLiteral("Style/ksword_background.png"));
     markPendingChanges(QStringLiteral("恢复默认背景路径"));
 }

@@ -16,6 +16,16 @@
 #include "ark_kernel.h"
 #include "ark_dyndata.h"
 #include "ark_capability.h"
+#include "ark_thread.h"
+#include "ark_handle.h"
+#include "ark_alpc.h"
+#include "ark_section.h"
+#include "ark_memory.h"
+#include "ark_file_monitor.h"
+#include "ark_wsl_silo.h"
+#include "ark_trust.h"
+#include "ark_safety.h"
+#include "ark_preflight.h"
 #include "Trace.h"
 
 EXTERN_C_START

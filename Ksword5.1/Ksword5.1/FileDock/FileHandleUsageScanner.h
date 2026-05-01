@@ -35,6 +35,7 @@ namespace filedock::handleusage
         QString matchedTargetPath;          // matchedTargetPath：命中的目标路径（用户视角）。
         bool matchedByDirectoryRule = false; // matchedByDirectoryRule：true=目录前缀命中；false=精确命中。
         QString matchRuleText;              // matchRuleText：命中来源说明（文件句柄/进程映像/模块映像等）。
+        QString enumerationSource;          // enumerationSource：枚举来源（KernelHandleTable/R3DuplicateHandle/合成来源）。
     };
 
     // HandleUsageScanResult 作用：
@@ -48,6 +49,7 @@ namespace filedock::handleusage
         std::size_t matchedHandleCount = 0;    // matchedHandleCount：命中目标路径的句柄数量。
         std::size_t processImageMatchCount = 0; // processImageMatchCount：命中“进程映像占用”的数量。
         std::size_t loadedModuleMatchCount = 0; // loadedModuleMatchCount：命中“模块加载占用”的数量。
+        std::size_t kernelHandleMatchCount = 0; // kernelHandleMatchCount：R0 HandleTable 命中文件句柄数。
         std::uint64_t elapsedMs = 0;           // elapsedMs：扫描耗时毫秒。
         QString diagnosticText;                // diagnosticText：诊断文本（失败计数/降级信息）。
     };

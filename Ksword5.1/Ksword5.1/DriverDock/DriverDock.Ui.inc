@@ -10,6 +10,7 @@ void DriverDock::initializeUi()
     initializeOverviewTab();
     initializeOperateTab();
     initializeDebugOutputTab();
+    initializeObjectInfoTab();
 }
 
 void DriverDock::initializeOverviewTab()
@@ -264,6 +265,112 @@ void DriverDock::initializeDebugOutputTab()
     m_tabWidget->addTab(m_debugOutputPage, QIcon(":/Icon/log_track.svg"), QStringLiteral("调试输出"));
 }
 
+void DriverDock::initializeObjectInfoTab()
+{
+    // Phase-9 对象信息页：
+    // - 输入 DriverObject 名称，R0 侧自行引用对象；
+    // - UI 只展示诊断地址、MajorFunction 和 DeviceObject 链。
+    m_objectInfoPage = new QWidget(m_tabWidget);
+    m_objectInfoLayout = new QVBoxLayout(m_objectInfoPage);
+    m_objectInfoLayout->setContentsMargins(4, 4, 4, 4);
+    m_objectInfoLayout->setSpacing(6);
+
+    QHBoxLayout* queryLayout = new QHBoxLayout();
+    queryLayout->setContentsMargins(0, 0, 0, 0);
+    queryLayout->setSpacing(6);
+
+    m_objectDriverNameEdit = new QLineEdit(m_objectInfoPage);
+    m_objectDriverNameEdit->setPlaceholderText(QStringLiteral("\\Driver\\Null 或 Null"));
+    m_objectDriverNameEdit->setToolTip(QStringLiteral("只接受 DriverObject 名称；不要输入内核地址。"));
+
+    m_fillObjectDriverNameButton = new QPushButton(QIcon(":/Icon/process_details.svg"), QString(), m_objectInfoPage);
+    m_fillObjectDriverNameButton->setFixedWidth(34);
+    m_fillObjectDriverNameButton->setToolTip(QStringLiteral("从驱动服务列表当前选中行填充 \\Driver\\服务名"));
+
+    m_queryObjectInfoButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_objectInfoPage);
+    m_queryObjectInfoButton->setFixedWidth(34);
+    m_queryObjectInfoButton->setToolTip(QStringLiteral("通过 KswordARK 查询 DriverObject / DeviceObject"));
+
+    m_objectInfoStatusLabel = new QLabel(QStringLiteral("状态：等待查询"), m_objectInfoPage);
+    m_objectInfoStatusLabel->setWordWrap(true);
+
+    queryLayout->addWidget(new QLabel(QStringLiteral("DriverObject:"), m_objectInfoPage));
+    queryLayout->addWidget(m_objectDriverNameEdit, 1);
+    queryLayout->addWidget(m_fillObjectDriverNameButton);
+    queryLayout->addWidget(m_queryObjectInfoButton);
+    queryLayout->addWidget(m_objectInfoStatusLabel, 1);
+    m_objectInfoLayout->addLayout(queryLayout);
+
+    m_objectInfoSummaryEdit = new QPlainTextEdit(m_objectInfoPage);
+    m_objectInfoSummaryEdit->setReadOnly(true);
+    m_objectInfoSummaryEdit->setMaximumHeight(145);
+    m_objectInfoSummaryEdit->setPlaceholderText(QStringLiteral("DriverObject 摘要显示在这里。"));
+    m_objectInfoLayout->addWidget(m_objectInfoSummaryEdit);
+
+    QSplitter* objectSplitter = new QSplitter(Qt::Vertical, m_objectInfoPage);
+    m_objectInfoLayout->addWidget(objectSplitter, 1);
+
+    QWidget* majorContainer = new QWidget(objectSplitter);
+    QVBoxLayout* majorLayout = new QVBoxLayout(majorContainer);
+    majorLayout->setContentsMargins(0, 0, 0, 0);
+    majorLayout->setSpacing(4);
+    majorLayout->addWidget(new QLabel(QStringLiteral("MajorFunction 表"), majorContainer));
+
+    m_majorFunctionTable = new QTableWidget(majorContainer);
+    m_majorFunctionTable->setColumnCount(5);
+    m_majorFunctionTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("IRP_MJ"),
+        QStringLiteral("Dispatch"),
+        QStringLiteral("模块"),
+        QStringLiteral("模块基址"),
+        QStringLiteral("位置")
+        });
+    m_majorFunctionTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_majorFunctionTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_majorFunctionTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_majorFunctionTable->setAlternatingRowColors(true);
+    m_majorFunctionTable->verticalHeader()->setVisible(false);
+    m_majorFunctionTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_majorFunctionTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    majorLayout->addWidget(m_majorFunctionTable, 1);
+
+    QWidget* deviceContainer = new QWidget(objectSplitter);
+    QVBoxLayout* deviceLayout = new QVBoxLayout(deviceContainer);
+    deviceLayout->setContentsMargins(0, 0, 0, 0);
+    deviceLayout->setSpacing(4);
+    deviceLayout->addWidget(new QLabel(QStringLiteral("DeviceObject / AttachedDevice 链"), deviceContainer));
+
+    m_deviceObjectTable = new QTableWidget(deviceContainer);
+    m_deviceObjectTable->setColumnCount(10);
+    m_deviceObjectTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("关系"),
+        QStringLiteral("DeviceObject"),
+        QStringLiteral("设备名"),
+        QStringLiteral("Type"),
+        QStringLiteral("Flags"),
+        QStringLiteral("Characteristics"),
+        QStringLiteral("Stack"),
+        QStringLiteral("NextDevice"),
+        QStringLiteral("AttachedDevice"),
+        QStringLiteral("DriverObject")
+        });
+    m_deviceObjectTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_deviceObjectTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_deviceObjectTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_deviceObjectTable->setAlternatingRowColors(true);
+    m_deviceObjectTable->verticalHeader()->setVisible(false);
+    m_deviceObjectTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_deviceObjectTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    deviceLayout->addWidget(m_deviceObjectTable, 1);
+
+    objectSplitter->addWidget(majorContainer);
+    objectSplitter->addWidget(deviceContainer);
+    objectSplitter->setStretchFactor(0, 3);
+    objectSplitter->setStretchFactor(1, 2);
+
+    m_tabWidget->addTab(m_objectInfoPage, QIcon(":/Icon/process_details.svg"), QStringLiteral("对象信息"));
+}
+
 void DriverDock::initializeConnections()
 {
     // 概览页：刷新与过滤连接。
@@ -352,5 +459,18 @@ void DriverDock::initializeConnections()
             }
             QGuiApplication::clipboard()->setText(m_debugOutputEdit->toPlainText());
         });
-}
 
+    // 对象信息页：从服务名填充 DriverObject 名称并执行 R0 查询。
+    connect(m_fillObjectDriverNameButton, &QPushButton::clicked, this, [this]()
+        {
+            fillObjectDriverNameFromSelection();
+        });
+    connect(m_queryObjectInfoButton, &QPushButton::clicked, this, [this]()
+        {
+            querySelectedDriverObjectInfo();
+        });
+    connect(m_objectDriverNameEdit, &QLineEdit::returnPressed, this, [this]()
+        {
+            querySelectedDriverObjectInfo();
+        });
+}

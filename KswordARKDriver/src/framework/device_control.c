@@ -34,7 +34,8 @@ static const WCHAR g_KswordArkControlDeviceSddl[] =
 
 NTSTATUS
 KswordARKDriverCreateControlDevice(
-    _In_ WDFDRIVER Driver
+    _In_ WDFDRIVER Driver,
+    _Out_opt_ WDFDEVICE* DeviceOut
     )
 /*++
 
@@ -62,6 +63,10 @@ Return Value:
     DECLARE_CONST_UNICODE_STRING(symbolicName, KSWORD_ARK_LOG_DOS_NAME);
 
     PAGED_CODE();
+
+    if (DeviceOut != NULL) {
+        *DeviceOut = WDF_NO_HANDLE;
+    }
 
     RtlInitUnicodeString(&sddlText, g_KswordArkControlDeviceSddl);
     deviceInit = WdfControlDeviceInitAllocate(Driver, &sddlText);
@@ -130,6 +135,9 @@ Return Value:
     }
 
     WdfControlFinishInitializing(device);
+    if (DeviceOut != NULL) {
+        *DeviceOut = device;
+    }
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DEVICE, "Control log device created successfully");
     return STATUS_SUCCESS;
 }

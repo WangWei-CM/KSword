@@ -23,6 +23,9 @@ Environment:
 #define KSWORD_ARK_ENUM_SSDT_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_ENUM_SSDT_RESPONSE) - sizeof(KSWORD_ARK_SSDT_ENTRY))
 
+#define KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE_HEADER_SIZE \
+    (sizeof(KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE) - sizeof(KSWORD_ARK_DRIVER_DEVICE_ENTRY))
+
 static VOID
 KswordARKKernelIoctlLog(
     _In_ WDFDEVICE Device,
@@ -137,6 +140,95 @@ Return Value:
     }
     else {
         KswordARKKernelIoctlLog(Device, "Warn", "R0 enum-ssdt success: outBytes=%Iu (header partial).", *BytesReturned);
+    }
+
+    return status;
+}
+
+NTSTATUS
+KswordARKKernelIoctlQueryDriverObject(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle IOCTL_KSWORD_ARK_QUERY_DRIVER_OBJECT. The UI supplies only a driver
+    object namespace name; kernel mode references the DriverObject itself and
+    returns diagnostic-only addresses, dispatch table rows and device chains.
+
+Arguments:
+
+    Device - WDF device used for logging.
+    Request - Current IOCTL request.
+    InputBufferLength - Supplied input bytes.
+    OutputBufferLength - Supplied output bytes.
+    BytesReturned - Receives the feature-written response byte count.
+
+Return Value:
+
+    NTSTATUS from buffer retrieval or KswordARKDriverQueryDriverObject.
+
+--*/
+{
+    KSWORD_ARK_QUERY_DRIVER_OBJECT_REQUEST* queryRequest = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualOutputLength = 0;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0;
+
+    status = KswordARKRetrieveRequiredInputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_QUERY_DRIVER_OBJECT_REQUEST),
+        (PVOID*)&queryRequest,
+        NULL);
+    if (!NT_SUCCESS(status)) {
+        KswordARKKernelIoctlLog(Device, "Error", "R0 query-driver-object ioctl: input invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE_HEADER_SIZE,
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKKernelIoctlLog(Device, "Error", "R0 query-driver-object ioctl: output invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKDriverQueryDriverObject(
+        outputBuffer,
+        actualOutputLength,
+        queryRequest,
+        BytesReturned);
+    if (!NT_SUCCESS(status)) {
+        KswordARKKernelIoctlLog(Device, "Error", "R0 query-driver-object failed: status=0x%08X, outBytes=%Iu.", (unsigned int)status, *BytesReturned);
+        return status;
+    }
+
+    if (*BytesReturned >= KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE_HEADER_SIZE) {
+        KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE* responseHeader =
+            (KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE*)outputBuffer;
+        KswordARKKernelIoctlLog(
+            Device,
+            "Info",
+            "R0 query-driver-object success: status=%lu, devices=%lu/%lu, outBytes=%Iu.",
+            (unsigned long)responseHeader->queryStatus,
+            (unsigned long)responseHeader->returnedDeviceCount,
+            (unsigned long)responseHeader->totalDeviceCount,
+            *BytesReturned);
     }
 
     return status;

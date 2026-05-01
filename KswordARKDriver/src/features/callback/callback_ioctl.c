@@ -92,6 +92,18 @@ Return Value:
         return STATUS_INVALID_PARAMETER;
     }
     *BytesReturned = 0;
+    {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_CALLBACK_SET_RULES;
+        safetyContext.TargetProcessId = 0UL;
+        safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+        if (!NT_SUCCESS(status)) {
+            KswordARKCallbackIoctlLog(Device, "Warn", "Callback rules denied by safety policy, status=0x%08X.", (unsigned int)status);
+            return status;
+        }
+    }
 
     status = KswordARKCallbackIoctlSetRules(Request, InputBufferLength, BytesReturned);
     if (NT_SUCCESS(status)) {
@@ -263,6 +275,18 @@ Return Value:
         return STATUS_INVALID_PARAMETER;
     }
     *BytesReturned = 0;
+    {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_CALLBACK_CANCEL_PENDING;
+        safetyContext.TargetProcessId = 0UL;
+        safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+        if (!NT_SUCCESS(status)) {
+            KswordARKCallbackIoctlLog(Device, "Warn", "Cancel-all pending decisions denied by safety policy, status=0x%08X.", (unsigned int)status);
+            return status;
+        }
+    }
 
     status = KswordARKCallbackIoctlCancelAllPending(BytesReturned);
     if (!NT_SUCCESS(status)) {
@@ -306,6 +330,18 @@ Return Value:
         return STATUS_INVALID_PARAMETER;
     }
     *BytesReturned = 0;
+    {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_CALLBACK_REMOVE_EXTERNAL;
+        safetyContext.TargetProcessId = 0UL;
+        safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+        if (!NT_SUCCESS(status)) {
+            KswordARKCallbackIoctlLog(Device, "Warn", "Remove external callback denied by safety policy, status=0x%08X.", (unsigned int)status);
+            return status;
+        }
+    }
 
     status = KswordARKValidateDeviceIoControlWriteAccess(Request);
     if (!NT_SUCCESS(status)) {

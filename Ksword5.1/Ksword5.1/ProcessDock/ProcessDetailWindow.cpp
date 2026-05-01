@@ -1,4 +1,4 @@
-﻿#include "ProcessDetailWindow.InternalCommon.h"
+#include "ProcessDetailWindow.InternalCommon.h"
 
 // ============================================================
 // ProcessDetailWindow.cpp
@@ -18,7 +18,8 @@ namespace process_detail_window_internal
         "起始地址",
         "TEB地址",
         "亲和性",
-        "寄存器"
+        "寄存器",
+        "R0栈边界"
     };
 
     int toThreadColumnIndex(const ThreadRowColumn column)

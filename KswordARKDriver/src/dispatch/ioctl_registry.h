@@ -37,4 +37,14 @@ KswordARKLookupIoctlEntry(
     _In_ ULONG IoControlCode
     );
 
+ULONG
+KswordARKGetRegisteredIoctlCount(
+    VOID
+    );
+
+ULONG
+KswordARKGetDuplicateIoctlCount(
+    VOID
+    );
+
 EXTERN_C_END

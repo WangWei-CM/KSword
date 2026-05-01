@@ -14,8 +14,12 @@
 #include "../../../shared/driver/KswordArkCapabilityIoctl.h"
 #include "../../../shared/driver/KswordArkDynDataIoctl.h"
 #include "../../../shared/driver/KswordArkFileIoctl.h"
+#include "../../../shared/driver/KswordArkHandleIoctl.h"
 #include "../../../shared/driver/KswordArkKernelIoctl.h"
 #include "../../../shared/driver/KswordArkProcessIoctl.h"
+#include "../../../shared/driver/KswordArkThreadIoctl.h"
+#include "../../../shared/driver/KswordArkAlpcIoctl.h"
+#include "../../../shared/driver/KswordArkSectionIoctl.h"
 
 namespace ksword::ark
 {
@@ -95,6 +99,248 @@ namespace ksword::ark
         std::vector<ProcessEntry> entries;
     };
 
+    // ThreadEntry 是 R0 KTHREAD 扩展字段的 R3 侧模型。
+    struct ThreadEntry
+    {
+        std::uint32_t threadId = 0;
+        std::uint32_t processId = 0;
+        std::uint32_t flags = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t r0Status = KSWORD_ARK_THREAD_R0_STATUS_UNAVAILABLE;
+        std::uint32_t stackFieldSource = KSW_DYN_FIELD_SOURCE_UNAVAILABLE;
+        std::uint32_t ioFieldSource = KSW_DYN_FIELD_SOURCE_UNAVAILABLE;
+        std::uint64_t initialStack = 0;
+        std::uint64_t stackLimit = 0;
+        std::uint64_t stackBase = 0;
+        std::uint64_t kernelStack = 0;
+        std::uint64_t readOperationCount = 0;
+        std::uint64_t writeOperationCount = 0;
+        std::uint64_t otherOperationCount = 0;
+        std::uint64_t readTransferCount = 0;
+        std::uint64_t writeTransferCount = 0;
+        std::uint64_t otherTransferCount = 0;
+        std::uint32_t ktInitialStackOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t ktStackLimitOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t ktStackBaseOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t ktKernelStackOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t ktReadOperationCountOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t ktWriteOperationCountOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t ktOtherOperationCountOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t ktReadTransferCountOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t ktWriteTransferCountOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t ktOtherTransferCountOffset = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint64_t dynDataCapabilityMask = 0;
+    };
+
+    // ThreadEnumResult 承载 R0 线程扩展枚举响应。
+    struct ThreadEnumResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::vector<ThreadEntry> entries;
+    };
+
+    // HandleEntry 是 R0 HandleTable 直接枚举的 R3 侧模型。
+    struct HandleEntry
+    {
+        std::uint32_t processId = 0;
+        std::uint32_t handleValue = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t decodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_UNAVAILABLE;
+        std::uint32_t grantedAccess = 0;
+        std::uint32_t attributes = 0;
+        std::uint32_t objectTypeIndex = 0;
+        std::uint64_t objectAddress = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
+        std::uint32_t epObjectTableOffset = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE;
+        std::uint32_t htHandleContentionEventOffset = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE;
+        std::uint32_t obDecodeShift = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE;
+        std::uint32_t obAttributesShift = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE;
+        std::uint32_t otNameOffset = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE;
+        std::uint32_t otIndexOffset = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE;
+    };
+
+    // HandleEnumResult 承载 R0 进程 HandleTable 枚举响应。
+    struct HandleEnumResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint32_t processId = 0;
+        std::uint32_t overallStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_UNAVAILABLE;
+        long lastStatus = 0;
+        std::vector<HandleEntry> entries;
+    };
+
+    // HandleObjectQueryResult 承载 R0 对象类型/对象名查询结果。
+    struct HandleObjectQueryResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t processId = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint64_t handleValue = 0;
+        std::uint64_t objectAddress = 0;
+        std::uint32_t objectTypeIndex = 0;
+        std::uint32_t queryStatus = KSWORD_ARK_OBJECT_QUERY_STATUS_UNAVAILABLE;
+        long objectReferenceStatus = 0;
+        long typeStatus = 0;
+        long nameStatus = 0;
+        std::uint32_t proxyStatus = KSWORD_ARK_OBJECT_PROXY_STATUS_NOT_REQUESTED;
+        long proxyNtStatus = 0;
+        std::uint32_t proxyPolicyFlags = 0;
+        std::uint32_t requestedAccess = 0;
+        std::uint32_t actualGrantedAccess = 0;
+        std::uint64_t proxyHandle = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
+        std::uint32_t otNameOffset = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE;
+        std::uint32_t otIndexOffset = KSWORD_ARK_HANDLE_OFFSET_UNAVAILABLE;
+        std::wstring typeName;
+        std::wstring objectName;
+    };
+
+    // AlpcPortInfo 是 R0 ALPC Port 查询中单个端口节点的 R3 展示模型。
+    struct AlpcPortInfo
+    {
+        std::uint32_t relation = KSWORD_ARK_ALPC_PORT_RELATION_QUERY;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t ownerProcessId = 0;
+        std::uint32_t flags = 0;
+        std::uint32_t state = 0;
+        std::uint32_t sequenceNo = 0;
+        long basicStatus = 0;
+        long nameStatus = 0;
+        std::uint64_t objectAddress = 0;
+        std::uint64_t portContext = 0;
+        std::wstring portName;
+    };
+
+    // AlpcPortQueryResult 承载 Phase-6 R0 ALPC 查询响应。
+    struct AlpcPortQueryResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t processId = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint64_t handleValue = 0;
+        std::uint32_t queryStatus = KSWORD_ARK_ALPC_QUERY_STATUS_UNAVAILABLE;
+        long objectReferenceStatus = 0;
+        long typeStatus = 0;
+        long basicStatus = 0;
+        long communicationStatus = 0;
+        long nameStatus = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
+        std::uint32_t alpcCommunicationInfoOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::uint32_t alpcOwnerProcessOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::uint32_t alpcConnectionPortOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::uint32_t alpcServerCommunicationPortOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::uint32_t alpcClientCommunicationPortOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::uint32_t alpcHandleTableOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::uint32_t alpcHandleTableLockOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::uint32_t alpcAttributesOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::uint32_t alpcAttributesFlagsOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::uint32_t alpcPortContextOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::uint32_t alpcPortObjectLockOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::uint32_t alpcSequenceNoOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::uint32_t alpcStateOffset = KSWORD_ARK_ALPC_OFFSET_UNAVAILABLE;
+        std::wstring typeName;
+        AlpcPortInfo queryPort;
+        AlpcPortInfo connectionPort;
+        AlpcPortInfo serverPort;
+        AlpcPortInfo clientPort;
+    };
+
+    // SectionMappingEntry 是 R0 ControlArea 映射关系的一行 R3 模型。
+    struct SectionMappingEntry
+    {
+        std::uint32_t viewMapType = KSWORD_ARK_SECTION_MAP_TYPE_UNKNOWN;
+        std::uint32_t processId = 0;
+        std::uint64_t startVa = 0;
+        std::uint64_t endVa = 0;
+    };
+
+    // ProcessSectionQueryResult 承载 Phase-7 进程 SectionObject / ControlArea 查询响应。
+    struct ProcessSectionQueryResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint32_t processId = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t queryStatus = KSWORD_ARK_SECTION_QUERY_STATUS_UNAVAILABLE;
+        long lastStatus = 0;
+        std::uint64_t sectionObjectAddress = 0;
+        std::uint64_t controlAreaAddress = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
+        std::uint32_t epSectionObjectOffset = KSWORD_ARK_SECTION_OFFSET_UNAVAILABLE;
+        std::uint32_t mmSectionControlAreaOffset = KSWORD_ARK_SECTION_OFFSET_UNAVAILABLE;
+        std::uint32_t mmControlAreaListHeadOffset = KSWORD_ARK_SECTION_OFFSET_UNAVAILABLE;
+        std::uint32_t mmControlAreaLockOffset = KSWORD_ARK_SECTION_OFFSET_UNAVAILABLE;
+        std::vector<SectionMappingEntry> mappings;
+    };
+
+    // FileSectionMappingEntry 是 R0 文件 Data/Image ControlArea 映射关系的一行 R3 模型。
+    struct FileSectionMappingEntry
+    {
+        std::uint32_t sectionKind = KSWORD_ARK_FILE_SECTION_KIND_UNKNOWN; // Data 或 Image。
+        std::uint32_t viewMapType = KSWORD_ARK_SECTION_MAP_TYPE_UNKNOWN;  // Process/Session/SystemCache。
+        std::uint32_t processId = 0;                                      // 命中映射进程 PID。
+        std::uint64_t controlAreaAddress = 0;                             // 仅诊断展示。
+        std::uint64_t startVa = 0;                                        // 映射起始 VA。
+        std::uint64_t endVa = 0;                                          // 映射结束 VA。
+    };
+
+    // FileSectionMappingsQueryResult 承载 Phase-7 文件反查映射进程响应。
+    struct FileSectionMappingsQueryResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t queryStatus = KSWORD_ARK_FILE_SECTION_QUERY_STATUS_UNAVAILABLE;
+        long lastStatus = 0;
+        std::uint64_t fileObjectAddress = 0;
+        std::uint64_t sectionObjectPointersAddress = 0;
+        std::uint64_t dataControlAreaAddress = 0;
+        std::uint64_t imageControlAreaAddress = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
+        std::uint32_t mmControlAreaListHeadOffset = KSWORD_ARK_SECTION_OFFSET_UNAVAILABLE;
+        std::uint32_t mmControlAreaLockOffset = KSWORD_ARK_SECTION_OFFSET_UNAVAILABLE;
+        std::vector<FileSectionMappingEntry> mappings;
+    };
+
+    // FileInfoQueryResult 是 Phase-10 R0 文件基础信息查询的 R3 模型。
+    struct FileInfoQueryResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;        // 协议版本。
+        std::uint32_t fieldFlags = 0;     // KSWORD_ARK_FILE_INFO_FIELD_*。
+        std::uint32_t queryStatus = KSWORD_ARK_FILE_INFO_STATUS_UNAVAILABLE; // 查询聚合状态。
+        long openStatus = 0;              // ZwCreateFile 状态。
+        long basicStatus = 0;             // FileBasicInformation 查询状态。
+        long standardStatus = 0;          // FileStandardInformation 查询状态。
+        long objectStatus = 0;            // ObReferenceObjectByHandle/SectionPointer 状态。
+        long nameStatus = 0;              // ObQueryNameString 状态。
+        std::uint32_t fileAttributes = 0; // FILE_ATTRIBUTE_*。
+        std::int64_t allocationSize = 0;  // 分配大小。
+        std::int64_t endOfFile = 0;       // 文件逻辑大小。
+        std::int64_t creationTime = 0;    // FILETIME 兼容时间戳。
+        std::int64_t lastAccessTime = 0;  // FILETIME 兼容时间戳。
+        std::int64_t lastWriteTime = 0;   // FILETIME 兼容时间戳。
+        std::int64_t changeTime = 0;      // NTFS change time。
+        std::uint64_t fileObjectAddress = 0; // 诊断展示，不作为凭据。
+        std::uint64_t sectionObjectPointersAddress = 0; // 诊断展示。
+        std::uint64_t dataSectionObjectAddress = 0;     // 诊断展示。
+        std::uint64_t imageSectionObjectAddress = 0;    // 诊断展示。
+        std::wstring ntPath;            // 请求 NT 路径回显。
+        std::wstring objectName;        // ObQueryNameString 文件对象名。
+    };
+
     // SsdtEntry is the R3 model of one kernel SSDT response row.
     struct SsdtEntry
     {
@@ -116,6 +362,58 @@ namespace ksword::ark
         std::uint64_t serviceTableBase = 0;
         std::uint32_t serviceCountFromTable = 0;
         std::vector<SsdtEntry> entries;
+    };
+
+    // DriverMajorFunctionEntry 是 Phase-9 DriverObject.MajorFunction 单行模型。
+    struct DriverMajorFunctionEntry
+    {
+        std::uint32_t majorFunction = 0;       // IRP_MJ_* 编号。
+        std::uint32_t flags = 0;               // R0 诊断 flags。
+        std::uint64_t dispatchAddress = 0;     // dispatch 入口地址，仅展示。
+        std::uint64_t moduleBase = 0;          // 所属模块基址，仅展示。
+        std::wstring moduleName;               // 所属模块名。
+    };
+
+    // DriverDeviceEntry 是 Phase-9 DeviceObject/AttachedDevice 单行模型。
+    struct DriverDeviceEntry
+    {
+        std::uint32_t relationDepth = 0;       // 0=DriverObject->DeviceObject 链，>0=AttachedDevice 深度。
+        std::uint32_t deviceType = 0;          // DEVICE_TYPE。
+        std::uint32_t flags = 0;               // DO_* flags。
+        std::uint32_t characteristics = 0;     // FILE_DEVICE_* characteristics。
+        std::uint32_t stackSize = 0;           // DeviceObject.StackSize。
+        std::uint32_t alignmentRequirement = 0;// DeviceObject.AlignmentRequirement。
+        long nameStatus = 0;                   // ObQueryNameString 状态。
+        std::uint64_t rootDeviceObjectAddress = 0; // 根 DeviceObject。
+        std::uint64_t deviceObjectAddress = 0;     // 当前 DeviceObject。
+        std::uint64_t nextDeviceObjectAddress = 0; // NextDevice。
+        std::uint64_t attachedDeviceObjectAddress = 0; // AttachedDevice。
+        std::uint64_t driverObjectAddress = 0;    // DeviceObject.DriverObject。
+        std::wstring deviceName;              // 设备对象名，可能为空。
+    };
+
+    // DriverObjectQueryResult 承载 Phase-9 DriverObject/DeviceObject 查询响应。
+    struct DriverObjectQueryResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t queryStatus = KSWORD_ARK_DRIVER_OBJECT_QUERY_STATUS_UNAVAILABLE;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t majorFunctionCount = 0;
+        std::uint32_t totalDeviceCount = 0;
+        std::uint32_t returnedDeviceCount = 0;
+        long lastStatus = 0;
+        std::uint32_t driverFlags = 0;
+        std::uint32_t driverSize = 0;
+        std::uint64_t driverObjectAddress = 0;
+        std::uint64_t driverStart = 0;
+        std::uint64_t driverSection = 0;
+        std::uint64_t driverUnload = 0;
+        std::wstring driverName;
+        std::wstring serviceKeyName;
+        std::wstring imagePath;
+        std::vector<DriverMajorFunctionEntry> majorFunctions;
+        std::vector<DriverDeviceEntry> devices;
     };
 
     // CallbackRuntimeResult wraps the runtime-state response packet.

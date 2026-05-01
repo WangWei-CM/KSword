@@ -1,5 +1,7 @@
-﻿#include "ProcessDock.h"
+#include "ProcessDock.h"
+#include "ThreadStackWindow.h"
 
+#include "../ArkDriverClient/ArkDriverClient.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -22,7 +24,9 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
+#include <sstream>
 #include <unordered_map>
 
 namespace
@@ -33,6 +37,21 @@ namespace
         "PID",
         "进程",
         "启动地址",
+        "Win32Start",
+        "TEB",
+        "UserStackBase",
+        "UserStackLimit",
+        "KernelStack",
+        "KStackBase",
+        "KStackLimit",
+        "InitialStack",
+        "ReadOps",
+        "WriteOps",
+        "OtherOps",
+        "ReadBytes",
+        "WriteBytes",
+        "OtherBytes",
+        "R0状态",
         "动态优先级",
         "基础优先级",
         "线程状态",
@@ -53,6 +72,190 @@ namespace
     // 线程页按钮图标尺寸：与 ProcessDock 主控栏保持一致。
     constexpr QSize ThreadDefaultIconSize(16, 16);
     constexpr QSize ThreadCompactIconButtonSize(28, 28);
+
+    // ThreadIdentityKey：按 PID/TID 合并 R3 基础线程与 R0 KTHREAD 扩展。
+    struct ThreadIdentityKey
+    {
+        std::uint32_t processId = 0;
+        std::uint32_t threadId = 0;
+
+        bool operator==(const ThreadIdentityKey& other) const noexcept
+        {
+            return processId == other.processId && threadId == other.threadId;
+        }
+    };
+
+    // ThreadIdentityKeyHash：为 unordered_map 提供轻量哈希。
+    struct ThreadIdentityKeyHash
+    {
+        std::size_t operator()(const ThreadIdentityKey& key) const noexcept
+        {
+            const std::uint64_t combined =
+                (static_cast<std::uint64_t>(key.processId) << 32U) |
+                static_cast<std::uint64_t>(key.threadId);
+            return std::hash<std::uint64_t>{}(combined);
+        }
+    };
+
+    // hexPointerText 作用：统一格式化地址；不可用地址按调用方要求显示 Unavailable。
+    QString hexPointerText(const std::uint64_t addressValue, const bool zeroAsUnavailable)
+    {
+        if (zeroAsUnavailable && addressValue == 0U)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return QStringLiteral("0x%1")
+            .arg(static_cast<qulonglong>(addressValue), 0, 16)
+            .toUpper();
+    }
+
+    // threadR0StatusText 作用：把共享协议状态转换为线程表短文本。
+    QString threadR0StatusText(const std::uint32_t statusValue)
+    {
+        switch (statusValue)
+        {
+        case KSWORD_ARK_THREAD_R0_STATUS_OK:
+            return QStringLiteral("OK");
+        case KSWORD_ARK_THREAD_R0_STATUS_PARTIAL:
+            return QStringLiteral("Partial");
+        case KSWORD_ARK_THREAD_R0_STATUS_DYNDATA_MISSING:
+            return QStringLiteral("DynData missing");
+        case KSWORD_ARK_THREAD_R0_STATUS_READ_FAILED:
+            return QStringLiteral("Read failed");
+        default:
+            return QStringLiteral("Unavailable");
+        }
+    }
+
+    // threadR0DiagnosticText 作用：
+    // - 选中线程或悬停 R0 状态列时展示字段来源与原始偏移；
+    // - Phase 3 暂不新增详情页，先用状态栏/tooltip 暴露诊断信息。
+    QString threadR0DiagnosticText(const ks::process::SystemThreadRecord& threadRecord)
+    {
+        auto offsetText = [](const std::uint32_t offsetValue) -> QString {
+            if (offsetValue == KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE)
+            {
+                return QStringLiteral("Unavailable");
+            }
+            return QStringLiteral("0x%1").arg(offsetValue, 0, 16).toUpper();
+        };
+
+        QStringList offsetParts;
+        offsetParts
+            << QStringLiteral("Initial=%1").arg(offsetText(threadRecord.r0KtInitialStackOffset))
+            << QStringLiteral("StackLimit=%1").arg(offsetText(threadRecord.r0KtStackLimitOffset))
+            << QStringLiteral("StackBase=%1").arg(offsetText(threadRecord.r0KtStackBaseOffset))
+            << QStringLiteral("KernelStack=%1").arg(offsetText(threadRecord.r0KtKernelStackOffset))
+            << QStringLiteral("ReadOps=%1").arg(offsetText(threadRecord.r0KtReadOperationCountOffset))
+            << QStringLiteral("WriteOps=%1").arg(offsetText(threadRecord.r0KtWriteOperationCountOffset))
+            << QStringLiteral("OtherOps=%1").arg(offsetText(threadRecord.r0KtOtherOperationCountOffset))
+            << QStringLiteral("ReadBytes=%1").arg(offsetText(threadRecord.r0KtReadTransferCountOffset))
+            << QStringLiteral("WriteBytes=%1").arg(offsetText(threadRecord.r0KtWriteTransferCountOffset))
+            << QStringLiteral("OtherBytes=%1").arg(offsetText(threadRecord.r0KtOtherTransferCountOffset));
+
+        return QStringLiteral("R0=%1 | StackSource=%2 | IoSource=%3 | Cap=0x%4 | Offsets: %5")
+            .arg(threadR0StatusText(threadRecord.r0ThreadStatus))
+            .arg(threadRecord.r0StackFieldSource)
+            .arg(threadRecord.r0IoFieldSource)
+            .arg(static_cast<qulonglong>(threadRecord.r0ThreadDynDataCapabilityMask), 0, 16)
+            .arg(offsetParts.join(QStringLiteral(", ")));
+    }
+
+    // mergeThreadR0Entry 作用：把 ArkDriverClient 解析后的 R0 行覆盖到 R3 线程记录中。
+    void mergeThreadR0Entry(
+        ks::process::SystemThreadRecord& threadRecord,
+        const ksword::ark::ThreadEntry& r0Entry)
+    {
+        threadRecord.r0ThreadFieldFlags = r0Entry.fieldFlags;
+        threadRecord.r0ThreadStatus = r0Entry.r0Status;
+        threadRecord.r0StackFieldSource = r0Entry.stackFieldSource;
+        threadRecord.r0IoFieldSource = r0Entry.ioFieldSource;
+        threadRecord.r0InitialStack = r0Entry.initialStack;
+        threadRecord.r0StackLimit = r0Entry.stackLimit;
+        threadRecord.r0StackBase = r0Entry.stackBase;
+        threadRecord.r0KernelStack = r0Entry.kernelStack;
+        threadRecord.r0ReadOperationCount = r0Entry.readOperationCount;
+        threadRecord.r0WriteOperationCount = r0Entry.writeOperationCount;
+        threadRecord.r0OtherOperationCount = r0Entry.otherOperationCount;
+        threadRecord.r0ReadTransferCount = r0Entry.readTransferCount;
+        threadRecord.r0WriteTransferCount = r0Entry.writeTransferCount;
+        threadRecord.r0OtherTransferCount = r0Entry.otherTransferCount;
+        threadRecord.r0KtInitialStackOffset = r0Entry.ktInitialStackOffset;
+        threadRecord.r0KtStackLimitOffset = r0Entry.ktStackLimitOffset;
+        threadRecord.r0KtStackBaseOffset = r0Entry.ktStackBaseOffset;
+        threadRecord.r0KtKernelStackOffset = r0Entry.ktKernelStackOffset;
+        threadRecord.r0KtReadOperationCountOffset = r0Entry.ktReadOperationCountOffset;
+        threadRecord.r0KtWriteOperationCountOffset = r0Entry.ktWriteOperationCountOffset;
+        threadRecord.r0KtOtherOperationCountOffset = r0Entry.ktOtherOperationCountOffset;
+        threadRecord.r0KtReadTransferCountOffset = r0Entry.ktReadTransferCountOffset;
+        threadRecord.r0KtWriteTransferCountOffset = r0Entry.ktWriteTransferCountOffset;
+        threadRecord.r0KtOtherTransferCountOffset = r0Entry.ktOtherTransferCountOffset;
+        threadRecord.r0ThreadDynDataCapabilityMask = r0Entry.dynDataCapabilityMask;
+    }
+
+    // mergeThreadR0Snapshot 作用：
+    // - R3 基础线程列表一定先保留；
+    // - 驱动缺失或 IOCTL 失败时仅追加诊断，不清空 R3 结果；
+    // - 成功时按 PID/TID 合并 KTHREAD 栈字段和 I/O counter。
+    bool mergeThreadR0Snapshot(
+        std::vector<ks::process::SystemThreadRecord>& threadList,
+        std::string* diagnosticTextOut)
+    {
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::ThreadEnumResult r0Result =
+            driverClient.enumerateThreads(KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_ALL);
+        if (!r0Result.io.ok)
+        {
+            if (diagnosticTextOut != nullptr)
+            {
+                if (!diagnosticTextOut->empty())
+                {
+                    *diagnosticTextOut += " | ";
+                }
+                *diagnosticTextOut += "R0 thread extension unavailable: " + r0Result.io.message;
+            }
+            return false;
+        }
+
+        std::unordered_map<ThreadIdentityKey, const ksword::ark::ThreadEntry*, ThreadIdentityKeyHash> r0ByThread;
+        r0ByThread.reserve(r0Result.entries.size());
+        for (const ksword::ark::ThreadEntry& r0Entry : r0Result.entries)
+        {
+            if (r0Entry.threadId == 0U)
+            {
+                continue;
+            }
+            r0ByThread.insert_or_assign(
+                ThreadIdentityKey{ r0Entry.processId, r0Entry.threadId },
+                &r0Entry);
+        }
+
+        std::size_t mergedCount = 0;
+        for (ks::process::SystemThreadRecord& threadRecord : threadList)
+        {
+            const auto r0It = r0ByThread.find(ThreadIdentityKey{ threadRecord.ownerPid, threadRecord.threadId });
+            if (r0It == r0ByThread.end() || r0It->second == nullptr)
+            {
+                continue;
+            }
+            mergeThreadR0Entry(threadRecord, *(r0It->second));
+            ++mergedCount;
+        }
+
+        if (diagnosticTextOut != nullptr)
+        {
+            if (!diagnosticTextOut->empty())
+            {
+                *diagnosticTextOut += " | ";
+            }
+            std::ostringstream stream;
+            stream << "R0 thread extension merged: " << mergedCount
+                << "/" << threadList.size()
+                << ", " << r0Result.io.message;
+            *diagnosticTextOut += stream.str();
+        }
+        return true;
+    }
 
     // buildThreadButtonStyle 作用：
     // - 提供线程页按钮统一蓝色样式；
@@ -184,6 +387,21 @@ void ProcessDock::initializeThreadPage()
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::OwnerPid), 90);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ProcessName), 240);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::StartAddress), 140);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::Win32StartAddress), 140);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::TebBaseAddress), 140);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::UserStackBase), 140);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::UserStackLimit), 140);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::KernelStack), 140);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::KStackBase), 140);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::KStackLimit), 140);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::InitialStack), 140);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ReadOps), 100);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::WriteOps), 100);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::OtherOps), 100);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ReadBytes), 120);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::WriteBytes), 120);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::OtherBytes), 120);
+    m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ThreadR0Status), 130);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::Priority), 96);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::BasePriority), 96);
     m_threadTable->setColumnWidth(toThreadColumnIndex(ThreadTableColumn::ThreadState), 140);
@@ -295,8 +513,9 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
         std::string diagnosticText;
         std::vector<ks::process::SystemThreadRecord> threadList =
             ks::process::EnumerateSystemThreads(&usedNtQuery, &diagnosticText);
+        const bool r0ThreadExtensionMerged = mergeThreadR0Snapshot(threadList, &diagnosticText);
 
-        QMetaObject::invokeMethod(guardThis, [guardThis, localTicket, usedNtQuery, diagnosticText, threadList = std::move(threadList)]() mutable {
+        QMetaObject::invokeMethod(guardThis, [guardThis, localTicket, usedNtQuery, r0ThreadExtensionMerged, diagnosticText, threadList = std::move(threadList)]() mutable {
             if (guardThis == nullptr)
             {
                 return;
@@ -322,6 +541,9 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
             QString statusText = QString("● 刷新完成 | 线程:%1 | 方法:%2")
                 .arg(guardThis->m_threadRecordList.size())
                 .arg(strategyText);
+            statusText += r0ThreadExtensionMerged
+                ? QStringLiteral(" | R0扩展:已合并")
+                : QStringLiteral(" | R0扩展:Unavailable");
             if (!guardThis->m_threadDiagnosticText.empty())
             {
                 statusText += QString(" | %1").arg(QString::fromStdString(guardThis->m_threadDiagnosticText));
@@ -334,6 +556,7 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
                     << "[ProcessDock] 线程列表刷新完成, ticket=" << localTicket
                     << ", count=" << guardThis->m_threadRecordList.size()
                     << ", usedNtQuery=" << (usedNtQuery ? "true" : "false")
+                    << ", r0ThreadExtensionMerged=" << (r0ThreadExtensionMerged ? "true" : "false")
                     << ", diagnostic=" << guardThis->m_threadDiagnosticText
                     << eol;
             }
@@ -367,8 +590,12 @@ bool ProcessDock::threadRecordMatchesSearch(const ks::process::SystemThreadRecor
         QString::number(threadRecord.ownerPid),
         QString::fromStdString(threadRecord.ownerProcessName),
         QString("0x%1").arg(static_cast<qulonglong>(threadRecord.startAddress), 0, 16).toUpper(),
+        QString("0x%1").arg(static_cast<qulonglong>(threadRecord.win32StartAddress), 0, 16).toUpper(),
+        QString("0x%1").arg(static_cast<qulonglong>(threadRecord.tebBaseAddress), 0, 16).toUpper(),
+        QString("0x%1").arg(static_cast<qulonglong>(threadRecord.r0KernelStack), 0, 16).toUpper(),
         threadStateText(threadRecord.threadState),
-        threadWaitReasonText(threadRecord.waitReason)
+        threadWaitReasonText(threadRecord.waitReason),
+        threadR0StatusText(threadRecord.r0ThreadStatus)
     };
     for (const QString& fieldText : searchableFields)
     {
@@ -454,6 +681,9 @@ void ProcessDock::rebuildThreadTable()
             toThreadColumnIndex(ThreadTableColumn::ThreadId),
             Qt::UserRole + 1,
             QVariant::fromValue(static_cast<qulonglong>(threadRecord.ownerPid)));
+        rowItem->setToolTip(
+            toThreadColumnIndex(ThreadTableColumn::ThreadR0Status),
+            threadR0DiagnosticText(threadRecord));
 
         // 已终止线程统一灰色提示，便于快速识别不可操作项。
         if (threadRecord.threadState == 4)
@@ -484,7 +714,77 @@ QString ProcessDock::formatThreadColumnText(
     case ThreadTableColumn::ProcessName:
         return QString::fromStdString(threadRecord.ownerProcessName.empty() ? "Unknown" : threadRecord.ownerProcessName);
     case ThreadTableColumn::StartAddress:
-        return QString("0x%1").arg(static_cast<qulonglong>(threadRecord.startAddress), 0, 16).toUpper();
+        return hexPointerText(threadRecord.startAddress, false);
+    case ThreadTableColumn::Win32StartAddress:
+        return hexPointerText(threadRecord.win32StartAddress, true);
+    case ThreadTableColumn::TebBaseAddress:
+        return hexPointerText(threadRecord.tebBaseAddress, true);
+    case ThreadTableColumn::UserStackBase:
+        return hexPointerText(threadRecord.stackBase, true);
+    case ThreadTableColumn::UserStackLimit:
+        return hexPointerText(threadRecord.stackLimit, true);
+    case ThreadTableColumn::KernelStack:
+        if ((threadRecord.r0ThreadFieldFlags & KSWORD_ARK_THREAD_FIELD_KERNEL_STACK_PRESENT) == 0U)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return hexPointerText(threadRecord.r0KernelStack, true);
+    case ThreadTableColumn::KStackBase:
+        if ((threadRecord.r0ThreadFieldFlags & KSWORD_ARK_THREAD_FIELD_STACK_BASE_PRESENT) == 0U)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return hexPointerText(threadRecord.r0StackBase, true);
+    case ThreadTableColumn::KStackLimit:
+        if ((threadRecord.r0ThreadFieldFlags & KSWORD_ARK_THREAD_FIELD_STACK_LIMIT_PRESENT) == 0U)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return hexPointerText(threadRecord.r0StackLimit, true);
+    case ThreadTableColumn::InitialStack:
+        if ((threadRecord.r0ThreadFieldFlags & KSWORD_ARK_THREAD_FIELD_INITIAL_STACK_PRESENT) == 0U)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return hexPointerText(threadRecord.r0InitialStack, true);
+    case ThreadTableColumn::ReadOps:
+        if ((threadRecord.r0ThreadFieldFlags & KSWORD_ARK_THREAD_FIELD_READ_OPERATION_COUNT_PRESENT) == 0U)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return QString::number(static_cast<qulonglong>(threadRecord.r0ReadOperationCount));
+    case ThreadTableColumn::WriteOps:
+        if ((threadRecord.r0ThreadFieldFlags & KSWORD_ARK_THREAD_FIELD_WRITE_OPERATION_COUNT_PRESENT) == 0U)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return QString::number(static_cast<qulonglong>(threadRecord.r0WriteOperationCount));
+    case ThreadTableColumn::OtherOps:
+        if ((threadRecord.r0ThreadFieldFlags & KSWORD_ARK_THREAD_FIELD_OTHER_OPERATION_COUNT_PRESENT) == 0U)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return QString::number(static_cast<qulonglong>(threadRecord.r0OtherOperationCount));
+    case ThreadTableColumn::ReadBytes:
+        if ((threadRecord.r0ThreadFieldFlags & KSWORD_ARK_THREAD_FIELD_READ_TRANSFER_COUNT_PRESENT) == 0U)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return QString::number(static_cast<qulonglong>(threadRecord.r0ReadTransferCount));
+    case ThreadTableColumn::WriteBytes:
+        if ((threadRecord.r0ThreadFieldFlags & KSWORD_ARK_THREAD_FIELD_WRITE_TRANSFER_COUNT_PRESENT) == 0U)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return QString::number(static_cast<qulonglong>(threadRecord.r0WriteTransferCount));
+    case ThreadTableColumn::OtherBytes:
+        if ((threadRecord.r0ThreadFieldFlags & KSWORD_ARK_THREAD_FIELD_OTHER_TRANSFER_COUNT_PRESENT) == 0U)
+        {
+            return QStringLiteral("Unavailable");
+        }
+        return QString::number(static_cast<qulonglong>(threadRecord.r0OtherTransferCount));
+    case ThreadTableColumn::ThreadR0Status:
+        return threadR0StatusText(threadRecord.r0ThreadStatus);
     case ThreadTableColumn::Priority:
         return QString::number(threadRecord.priority);
     case ThreadTableColumn::BasePriority:
@@ -743,6 +1043,9 @@ void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
     QAction* detailAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_details.svg"),
         "转到进程详细信息");
+    QAction* stackAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_threads.svg"),
+        "查看调用栈");
     QAction* suspendAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_suspend.svg"),
         "挂起线程");
@@ -772,6 +1075,7 @@ void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
     if (selectedAction == copyCellAction) { copyCurrentThreadCell(); }
     else if (selectedAction == copyRowAction) { copyCurrentThreadRow(); }
     else if (selectedAction == detailAction) { openThreadOwnerProcessDetails(); }
+    else if (selectedAction == stackAction) { openThreadStackWindow(); }
     else if (selectedAction == suspendAction) { executeSuspendThreadAction(); }
     else if (selectedAction == resumeAction) { executeResumeThreadAction(); }
     else if (selectedAction == terminateAction) { executeTerminateThreadAction(); }
@@ -845,6 +1149,57 @@ void ProcessDock::openThreadOwnerProcessDetails()
         << ", tid=" << threadRecord->threadId
         << eol;
     openProcessDetailWindowByPid(threadRecord->ownerPid);
+}
+
+void ProcessDock::openThreadStackWindow()
+{
+    // Phase-8 调用栈入口：
+    // - 从当前线程行构造 ThreadStackTarget；
+    // - 用户态调用栈由 ThreadStackWindow 捕获；
+    // - R0 KTHREAD 字段只作为内核栈边界诊断展示。
+    const ks::process::SystemThreadRecord* threadRecord = selectedThreadRecord();
+    if (threadRecord == nullptr)
+    {
+        return;
+    }
+
+    ThreadStackTarget target{};
+    target.processId = threadRecord->ownerPid;
+    target.threadId = threadRecord->threadId;
+    target.processName = QString::fromStdString(threadRecord->ownerProcessName);
+    target.startAddress = threadRecord->startAddress;
+    target.win32StartAddress = threadRecord->win32StartAddress;
+    target.tebBaseAddress = threadRecord->tebBaseAddress;
+    target.userStackBase = threadRecord->stackBase;
+    target.userStackLimit = threadRecord->stackLimit;
+    target.r0KernelStack = threadRecord->r0KernelStack;
+    target.r0StackBase = threadRecord->r0StackBase;
+    target.r0StackLimit = threadRecord->r0StackLimit;
+    target.r0InitialStack = threadRecord->r0InitialStack;
+    target.r0ThreadStatus = threadRecord->r0ThreadStatus;
+    target.r0CapabilityMask = threadRecord->r0ThreadDynDataCapabilityMask;
+
+    for (const auto& cachePair : m_cacheByIdentity)
+    {
+        if (cachePair.second.record.pid == threadRecord->ownerPid &&
+            !cachePair.second.record.imagePath.empty())
+        {
+            target.processPath = QString::fromStdString(cachePair.second.record.imagePath);
+            break;
+        }
+    }
+
+    auto* stackWindow = new ThreadStackWindow(target, this);
+    stackWindow->setAttribute(Qt::WA_DeleteOnClose, true);
+    stackWindow->show();
+    stackWindow->raise();
+    stackWindow->activateWindow();
+
+    kLogEvent actionEvent;
+    info << actionEvent
+        << "[ProcessDock] openThreadStackWindow: pid=" << target.processId
+        << ", tid=" << target.threadId
+        << eol;
 }
 
 void ProcessDock::executeSuspendThreadAction()

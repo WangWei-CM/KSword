@@ -125,6 +125,18 @@ Return Value:
         KswordARKProcessIoctlLog(Device, "Warn", "R0 terminate ioctl: pid=%lu rejected.", (unsigned long)terminateRequest->processId);
         return status;
     }
+    {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_PROCESS_TERMINATE;
+        safetyContext.TargetProcessId = (ULONG)terminateRequest->processId;
+        safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+        if (!NT_SUCCESS(status)) {
+            KswordARKProcessIoctlLog(Device, "Warn", "R0 terminate denied by safety policy: pid=%lu, status=0x%08X.", (unsigned long)terminateRequest->processId, (unsigned int)status);
+            return status;
+        }
+    }
 
     KswordARKProcessIoctlLog(Device, "Info", "R0 terminate ioctl: pid=%lu, exit=0x%08X.", (unsigned long)terminateRequest->processId, (unsigned int)terminateRequest->exitStatus);
     status = KswordARKDriverTerminateProcessByPid(Device, (ULONG)terminateRequest->processId, (NTSTATUS)terminateRequest->exitStatus);
@@ -196,6 +208,18 @@ Return Value:
         KswordARKProcessIoctlLog(Device, "Warn", "R0 suspend ioctl: pid=%lu rejected.", (unsigned long)suspendRequest->processId);
         return status;
     }
+    {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_PROCESS_SUSPEND;
+        safetyContext.TargetProcessId = (ULONG)suspendRequest->processId;
+        safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+        if (!NT_SUCCESS(status)) {
+            KswordARKProcessIoctlLog(Device, "Warn", "R0 suspend denied by safety policy: pid=%lu, status=0x%08X.", (unsigned long)suspendRequest->processId, (unsigned int)status);
+            return status;
+        }
+    }
 
     KswordARKProcessIoctlLog(Device, "Info", "R0 suspend ioctl: pid=%lu.", (unsigned long)suspendRequest->processId);
     status = KswordARKDriverSuspendProcessByPid((ULONG)suspendRequest->processId);
@@ -263,6 +287,18 @@ Return Value:
     if (!NT_SUCCESS(status)) {
         KswordARKProcessIoctlLog(Device, "Warn", "R0 set PPL ioctl: pid=%lu rejected.", (unsigned long)setPplRequest->processId);
         return status;
+    }
+    {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_PROCESS_SET_PROTECTION;
+        safetyContext.TargetProcessId = (ULONG)setPplRequest->processId;
+        safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+        if (!NT_SUCCESS(status)) {
+            KswordARKProcessIoctlLog(Device, "Warn", "R0 set PPL denied by safety policy: pid=%lu, status=0x%08X.", (unsigned long)setPplRequest->processId, (unsigned int)status);
+            return status;
+        }
     }
 
     KswordARKProcessIoctlLog(Device, "Info", "R0 set PPL ioctl: pid=%lu, level=0x%02X.", (unsigned long)setPplRequest->processId, (unsigned int)setPplRequest->protectionLevel);

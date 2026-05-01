@@ -16,6 +16,7 @@ Environment:
 
 #include "ark/ark_capability.h"
 #include "ark/ark_dyndata.h"
+#include "ark/ark_safety.h"
 
 #include <ntstrsafe.h>
 
@@ -56,7 +57,9 @@ static const KSW_CAP_FEATURE_TEMPLATE g_KswordArkFeatureTemplates[] = {
     { KSWORD_ARK_FEATURE_ID_THREAD_IO_COUNTERS, "Thread I/O counters", KSWORD_ARK_FEATURE_FLAG_REQUIRES_DYNDATA | KSWORD_ARK_FEATURE_FLAG_KERNEL_ONLY, 0UL, KSW_CAP_THREAD_IO_COUNTERS, "KTHREAD read/write/other operation and transfer counters" },
     { KSWORD_ARK_FEATURE_ID_ALPC_FIELDS, "ALPC fields", KSWORD_ARK_FEATURE_FLAG_REQUIRES_DYNDATA | KSWORD_ARK_FEATURE_FLAG_KERNEL_ONLY, 0UL, KSW_CAP_ALPC_FIELDS, "ALPC port and communication-info fields" },
     { KSWORD_ARK_FEATURE_ID_SECTION_CONTROL_AREA, "Section ControlArea", KSWORD_ARK_FEATURE_FLAG_REQUIRES_DYNDATA | KSWORD_ARK_FEATURE_FLAG_KERNEL_ONLY, 0UL, KSW_CAP_SECTION_CONTROL_AREA, "EpSectionObject + MmSectionControlArea + MmControlAreaListHead + MmControlAreaLock" },
-    { KSWORD_ARK_FEATURE_ID_WSL_LXCORE_FIELDS, "WSL lxcore fields", KSWORD_ARK_FEATURE_FLAG_REQUIRES_DYNDATA | KSWORD_ARK_FEATURE_FLAG_KERNEL_ONLY, 0UL, KSW_CAP_WSL_LXCORE_FIELDS, "LxPicoProc + LxPicoProcInfo + PID/TID fields" }
+    { KSWORD_ARK_FEATURE_ID_WSL_LXCORE_FIELDS, "WSL lxcore fields", KSWORD_ARK_FEATURE_FLAG_REQUIRES_DYNDATA | KSWORD_ARK_FEATURE_FLAG_KERNEL_ONLY, 0UL, KSW_CAP_WSL_LXCORE_FIELDS, "LxPicoProc + LxPicoProcInfo + PID/TID fields" },
+    { KSWORD_ARK_FEATURE_ID_IMAGE_TRUST_CI, "Image trust CI", KSWORD_ARK_FEATURE_FLAG_KERNEL_ONLY | KSWORD_ARK_FEATURE_FLAG_READ_ONLY, 0UL, 0ULL, "SystemCodeIntegrityInformation + cached file signing level" },
+    { KSWORD_ARK_FEATURE_ID_DANGEROUS_ACTION_GOVERNANCE, "Dangerous action governance", KSWORD_ARK_FEATURE_FLAG_KERNEL_ONLY | KSWORD_ARK_FEATURE_FLAG_POLICY_GATED, KSWORD_ARK_SECURITY_POLICY_REQUIRE_CONFIRMATION | KSWORD_ARK_SECURITY_POLICY_DENY_CRITICAL_PROCESS | KSWORD_ARK_SECURITY_POLICY_ADVANCED_MODE, 0ULL, "Central safety policy + audit for mutating IOCTLs" }
 };
 
 VOID
@@ -184,8 +187,45 @@ Return Value:
 
 --*/
 {
-    return KSWORD_ARK_SECURITY_POLICY_FLAG_ACTIVE |
-        KSWORD_ARK_SECURITY_POLICY_ALLOW_ALL;
+    ULONG policyFlags = KSWORD_ARK_SECURITY_POLICY_FLAG_ACTIVE;
+    KSWORD_ARK_QUERY_SAFETY_POLICY_RESPONSE safetyResponse;
+    size_t bytesWritten = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    RtlZeroMemory(&safetyResponse, sizeof(safetyResponse));
+    status = KswordARKSafetyQueryPolicy(
+        &safetyResponse,
+        sizeof(safetyResponse),
+        &bytesWritten);
+    if (!NT_SUCCESS(status) || bytesWritten < sizeof(safetyResponse)) {
+        return policyFlags;
+    }
+
+    if ((safetyResponse.policyFlags & KSWORD_ARK_SAFETY_POLICY_FLAG_ALLOW_PROCESS_TERMINATE) != 0UL ||
+        (safetyResponse.policyFlags & KSWORD_ARK_SAFETY_POLICY_FLAG_ALLOW_PROCESS_SUSPEND) != 0UL) {
+        policyFlags |= KSWORD_ARK_SECURITY_POLICY_ALLOW_MUTATING_ACTIONS;
+    }
+    if ((safetyResponse.policyFlags & KSWORD_ARK_SAFETY_POLICY_FLAG_ALLOW_FILE_DELETE) != 0UL) {
+        policyFlags |= KSWORD_ARK_SECURITY_POLICY_ALLOW_FILE_DELETE;
+    }
+    if ((safetyResponse.policyFlags & KSWORD_ARK_SAFETY_POLICY_FLAG_ALLOW_CALLBACK_CONTROL) != 0UL) {
+        policyFlags |= KSWORD_ARK_SECURITY_POLICY_ALLOW_CALLBACK_CONTROL;
+    }
+    if ((safetyResponse.policyFlags & KSWORD_ARK_SAFETY_POLICY_FLAG_ALLOW_PROCESS_PROTECTION) != 0UL) {
+        policyFlags |= KSWORD_ARK_SECURITY_POLICY_ALLOW_PROCESS_PROTECTION;
+    }
+    if ((safetyResponse.policyFlags & KSWORD_ARK_SAFETY_POLICY_FLAG_REQUIRE_CONFIRMATION_HIGH_RISK) != 0UL) {
+        policyFlags |= KSWORD_ARK_SECURITY_POLICY_REQUIRE_CONFIRMATION;
+    }
+    if ((safetyResponse.policyFlags & KSWORD_ARK_SAFETY_POLICY_FLAG_DENY_CRITICAL_PROCESS) != 0UL) {
+        policyFlags |= KSWORD_ARK_SECURITY_POLICY_DENY_CRITICAL_PROCESS;
+    }
+    if ((safetyResponse.policyFlags & KSWORD_ARK_SAFETY_POLICY_FLAG_ADVANCED_MODE) != 0UL) {
+        policyFlags |= KSWORD_ARK_SECURITY_POLICY_ADVANCED_MODE;
+    }
+
+    policyFlags |= KSWORD_ARK_SECURITY_POLICY_ALLOW_KERNEL_SNAPSHOTS;
+    return policyFlags;
 }
 
 static PCSTR

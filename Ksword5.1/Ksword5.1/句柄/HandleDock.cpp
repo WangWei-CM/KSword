@@ -1,4 +1,4 @@
-﻿#include "HandleDock.h"
+#include "HandleDock.h"
 
 #include "../theme.h"
 
@@ -283,6 +283,24 @@ void HandleDock::initializeHandleListTab()
     m_typeFilterCombo->setMinimumWidth(260);
     m_typeFilterCombo->addItem(QStringLiteral("全部类型"));
 
+    m_enumModeCombo = new QComboBox(m_handleListPage);
+    m_enumModeCombo->setToolTip(QStringLiteral("选择句柄枚举来源：用户态快照、DuplicateHandle 增强解析或 R0 HandleTable。"));
+    m_enumModeCombo->setStyleSheet(buildComboAndSpinStyle());
+    m_enumModeCombo->setMinimumWidth(180);
+    m_enumModeCombo->addItem(QStringLiteral("User Snapshot"));
+    m_enumModeCombo->addItem(QStringLiteral("DuplicateHandle"));
+    m_enumModeCombo->addItem(QStringLiteral("Kernel HandleTable"));
+    m_enumModeCombo->setCurrentText(QStringLiteral("DuplicateHandle"));
+
+    m_diffFilterCombo = new QComboBox(m_handleListPage);
+    m_diffFilterCombo->setToolTip(QStringLiteral("按 R0/R3 差异状态过滤；Kernel HandleTable 模式会自动生成对比。"));
+    m_diffFilterCombo->setStyleSheet(buildComboAndSpinStyle());
+    m_diffFilterCombo->setMinimumWidth(150);
+    m_diffFilterCombo->addItem(QStringLiteral("全部差异"));
+    m_diffFilterCombo->addItem(QStringLiteral("仅用户态可见"));
+    m_diffFilterCombo->addItem(QStringLiteral("仅内核可见"));
+    m_diffFilterCombo->addItem(QStringLiteral("两者均可见"));
+
     m_onlyNamedCheckBox = new QCheckBox(QStringLiteral("仅命名对象"), m_handleListPage);
     m_onlyNamedCheckBox->setToolTip(QStringLiteral("只显示对象名非空的句柄。"));
     m_onlyNamedCheckBox->setStyleSheet(
@@ -306,6 +324,8 @@ void HandleDock::initializeHandleListTab()
     m_toolbarLayout->addWidget(m_pidFilterEdit, 0);
     m_toolbarLayout->addWidget(m_keywordFilterEdit, 1);
     m_toolbarLayout->addWidget(m_typeFilterCombo);
+    m_toolbarLayout->addWidget(m_enumModeCombo);
+    m_toolbarLayout->addWidget(m_diffFilterCombo);
     m_toolbarLayout->addWidget(m_onlyNamedCheckBox);
     m_toolbarLayout->addWidget(m_resolveNameCheckBox);
     m_toolbarLayout->addWidget(m_nameBudgetSpinBox);
@@ -398,7 +418,10 @@ void HandleDock::initializeHandleTable()
         QStringLiteral("访问掩码"),
         QStringLiteral("属性"),
         QStringLiteral("HandleCount"),
-        QStringLiteral("PointerCount")
+        QStringLiteral("PointerCount"),
+        QStringLiteral("来源"),
+        QStringLiteral("解码状态"),
+        QStringLiteral("差异")
     };
 
     m_tableWidget->setColumnCount(static_cast<int>(HandleTableColumn::Count));
@@ -430,6 +453,9 @@ void HandleDock::initializeHandleTable()
     m_tableWidget->setColumnWidth(static_cast<int>(HandleTableColumn::Attributes), 120);
     m_tableWidget->setColumnWidth(static_cast<int>(HandleTableColumn::HandleCount), 105);
     m_tableWidget->setColumnWidth(static_cast<int>(HandleTableColumn::PointerCount), 110);
+    m_tableWidget->setColumnWidth(static_cast<int>(HandleTableColumn::Source), 140);
+    m_tableWidget->setColumnWidth(static_cast<int>(HandleTableColumn::DecodeStatus), 140);
+    m_tableWidget->setColumnWidth(static_cast<int>(HandleTableColumn::DiffStatus), 120);
 }
 
 void HandleDock::initializeObjectTypeTable()
@@ -496,6 +522,16 @@ void HandleDock::initializeConnections()
         });
 
     connect(m_typeFilterCombo, &QComboBox::currentTextChanged, this, [this](const QString&)
+        {
+            applyLocalHandleFilters();
+        });
+
+    connect(m_enumModeCombo, &QComboBox::currentTextChanged, this, [this](const QString&)
+        {
+            requestAsyncRefresh(true);
+        });
+
+    connect(m_diffFilterCombo, &QComboBox::currentTextChanged, this, [this](const QString&)
         {
             applyLocalHandleFilters();
         });
@@ -593,6 +629,10 @@ void HandleDock::requestAsyncRefresh(const bool forceRefresh)
         << (options.resolveObjectName ? "true" : "false")
         << ", nameBudget="
         << options.nameResolveBudget
+        << ", enumMode="
+        << static_cast<int>(options.enumMode)
+        << ", diffFilter="
+        << static_cast<int>(options.diffFilter)
         << ", objectTypeMapSize="
         << options.typeNameMapFromObjectTab.size()
         << eol;
@@ -681,14 +721,18 @@ void HandleDock::applyHandleRefreshResult(
     applyLocalHandleFilters();
 
     QString statusText = QStringLiteral(
-        "● 刷新完成 %1 ms | 总句柄:%2 | 显示:%3 | 计数已解析:%4 | 名称已解析:%5 | 名称回退:%6 | 类型映射命中:%7")
+        "● 刷新完成 %1 ms | 总句柄:%2 | 显示:%3 | 计数已解析:%4 | 名称已解析:%5 | 名称回退:%6 | 类型映射命中:%7 | R0:%8 | 仅R3:%9 | 仅R0:%10 | 双源:%11")
         .arg(refreshResult.elapsedMs)
         .arg(refreshResult.totalHandleCount)
         .arg(m_rows.size())
         .arg(refreshResult.basicInfoResolvedCount)
         .arg(refreshResult.resolvedNameCount)
         .arg(refreshResult.fallbackNameCount)
-        .arg(refreshResult.objectTypeMappedCount);
+        .arg(refreshResult.objectTypeMappedCount)
+        .arg(refreshResult.kernelHandleCount)
+        .arg(refreshResult.userOnlyCount)
+        .arg(refreshResult.kernelOnlyCount)
+        .arg(refreshResult.bothCount);
     if (!refreshResult.diagnosticText.trimmed().isEmpty())
     {
         statusText += QStringLiteral(" | %1").arg(refreshResult.diagnosticText);
@@ -790,10 +834,25 @@ void HandleDock::rebuildHandleTable()
         item->setText(
             static_cast<int>(HandleTableColumn::PointerCount),
             formatOptionalObjectCount(row.pointerCount, row.basicInfoAvailable));
+        item->setText(static_cast<int>(HandleTableColumn::Source), formatHandleSourceText(row.sourceMode));
+        item->setText(static_cast<int>(HandleTableColumn::DecodeStatus), formatHandleDecodeStatusText(row.decodeStatus));
+        item->setText(static_cast<int>(HandleTableColumn::DiffStatus), formatHandleDiffStatusText(row.diffStatus));
         item->setData(static_cast<int>(HandleTableColumn::ProcessId), Qt::UserRole, static_cast<qulonglong>(rowIndex));
         item->setToolTip(
             static_cast<int>(HandleTableColumn::GrantedAccess),
             decodeGrantedAccessText(row.typeName, row.grantedAccess));
+        item->setToolTip(
+            static_cast<int>(HandleTableColumn::Source),
+            QStringLiteral("Object 地址仅用于展示和差异检测，不可作为后续操作凭据。"));
+        item->setToolTip(
+            static_cast<int>(HandleTableColumn::DecodeStatus),
+            QStringLiteral("EP.ObjectTable=0x%1, HtContention=0x%2, ObDecodeShift=%3, ObAttributesShift=%4, OtName=0x%5, OtIndex=0x%6")
+            .arg(static_cast<qulonglong>(row.epObjectTableOffset), 0, 16)
+            .arg(static_cast<qulonglong>(row.htHandleContentionEventOffset), 0, 16)
+            .arg(row.obDecodeShift)
+            .arg(row.obAttributesShift)
+            .arg(static_cast<qulonglong>(row.otNameOffset), 0, 16)
+            .arg(static_cast<qulonglong>(row.otIndexOffset), 0, 16));
 
         // 占位状态统一弱化显示，并附带 tooltip 解释来源，避免用户把“无名称”和“未查到”误看成同一种状态。
         if (!row.objectNameAvailable || row.objectName.trimmed().isEmpty())
@@ -903,6 +962,13 @@ HandleDock::HandleRefreshOptions HandleDock::collectHandleRefreshOptions() const
     options.onlyNamed = m_onlyNamedCheckBox->isChecked();
     options.resolveObjectName = m_resolveNameCheckBox->isChecked();
     options.nameResolveBudget = m_nameBudgetSpinBox->value();
+    options.enumMode = resolveHandleEnumModeFromText(m_enumModeCombo != nullptr ? m_enumModeCombo->currentText() : QString());
+    options.diffFilter = resolveHandleDiffFilterFromText(m_diffFilterCombo != nullptr ? m_diffFilterCombo->currentText() : QString());
+    if (options.enumMode == HandleEnumMode::UserSnapshot)
+    {
+        options.resolveObjectName = false;
+        options.nameResolveBudget = 0;
+    }
     options.typeNameCacheByIndex = m_typeNameCacheByIndex;
     options.typeNameMapFromObjectTab = m_typeNameMapByIndexFromObjectTab;
 

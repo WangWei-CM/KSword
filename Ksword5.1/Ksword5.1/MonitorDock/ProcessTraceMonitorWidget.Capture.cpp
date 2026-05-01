@@ -1018,7 +1018,9 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
     if (needsLazyDetailLookup && displayPidValue != 0)
     {
         ks::process::ProcessRecord detailRecord;
-        if (ks::process::QueryProcessStaticDetailByPid(displayPidValue, detailRecord))
+        // ETW 捕获线程只需要名称/路径用于显示，不能同步做签名校验。
+        // includeSignatureCheck=false 可避免事件处理被 WinVerifyTrust 拖慢。
+        if (ks::process::QueryProcessStaticDetailByPid(displayPidValue, detailRecord, false))
         {
             processNameText = QString::fromStdString(detailRecord.processName);
             processPathText = QString::fromStdString(detailRecord.imagePath);

@@ -17,6 +17,7 @@
 #include <QStandardItemModel>
 
 #include <algorithm>
+#include <string>
 #include <unordered_map>
 
 using namespace network_dock_detail;
@@ -1753,12 +1754,15 @@ void NetworkDock::gotoProcessDetailByTableRow(const int row)
         return;
     }
 
+    // 网络表跳转只创建轻量记录：
+    // - 完整静态详情和签名校验放到 ProcessDetailWindow 后台执行；
+    // - 避免右键菜单动作在 UI 线程等待进程令牌/证书链查询。
     ks::process::ProcessRecord processRecord;
-    if (!ks::process::QueryProcessStaticDetailByPid(targetPid, processRecord))
+    processRecord.pid = targetPid;
+    processRecord.processName = ks::process::GetProcessNameByPID(targetPid);
+    if (processRecord.processName.empty())
     {
-        QMessageBox::warning(this, QStringLiteral("进程详情"),
-            QStringLiteral("查询 PID=%1 的进程信息失败。").arg(targetPid));
-        return;
+        processRecord.processName = "PID_" + std::to_string(targetPid);
     }
 
     ProcessDetailWindow* detailWindow = new ProcessDetailWindow(processRecord, nullptr);

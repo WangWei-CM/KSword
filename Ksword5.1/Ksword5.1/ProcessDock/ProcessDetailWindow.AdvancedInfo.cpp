@@ -861,6 +861,60 @@ namespace
         LONG basePriority = 0;             // 基础优先级。
     };
 
+    // threadInspectR0StatusText：
+    // - 把 R0 线程扩展状态转换为详情页短文本；
+    // - 与 ProcessDock 线程总览页保持相同语义。
+    QString threadInspectR0StatusText(const std::uint32_t statusValue)
+    {
+        switch (statusValue)
+        {
+        case KSWORD_ARK_THREAD_R0_STATUS_OK:
+            return QStringLiteral("OK");
+        case KSWORD_ARK_THREAD_R0_STATUS_PARTIAL:
+            return QStringLiteral("Partial");
+        case KSWORD_ARK_THREAD_R0_STATUS_DYNDATA_MISSING:
+            return QStringLiteral("DynData missing");
+        case KSWORD_ARK_THREAD_R0_STATUS_READ_FAILED:
+            return QStringLiteral("Read failed");
+        default:
+            return QStringLiteral("Unavailable");
+        }
+    }
+
+    // readThreadUserStackFromTeb：
+    // - 从目标进程 TEB 的 NT_TIB 起始字段读取用户栈边界；
+    // - 失败只影响调用栈窗口的边界提示，不影响线程行本身展示。
+    bool readThreadUserStackFromTeb(
+        HANDLE processHandle,
+        const std::uint64_t tebAddress,
+        std::uint64_t& stackBaseOut,
+        std::uint64_t& stackLimitOut)
+    {
+        stackBaseOut = 0;
+        stackLimitOut = 0;
+        if (processHandle == nullptr || tebAddress == 0)
+        {
+            return false;
+        }
+
+        NT_TIB tibSnapshot{};
+        SIZE_T bytesRead = 0;
+        const BOOL readOk = ReadProcessMemory(
+            processHandle,
+            reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(tebAddress)),
+            &tibSnapshot,
+            sizeof(tibSnapshot),
+            &bytesRead);
+        if (readOk == FALSE || bytesRead < sizeof(PVOID) * 2)
+        {
+            return false;
+        }
+
+        stackBaseOut = reinterpret_cast<std::uint64_t>(tibSnapshot.StackBase);
+        stackLimitOut = reinterpret_cast<std::uint64_t>(tibSnapshot.StackLimit);
+        return true;
+    }
+
     // queryTokenInfoBuffer：
     // - 统一读取令牌信息；
     // - 成功时把字节内容写入 bufferOut。
@@ -1144,6 +1198,10 @@ void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
         return;
     }
 
+    // 线程细节刷新一旦真正排队，即认为线程页已完成首刷调度。
+    // 用户手动刷新和自动懒加载共享这个标记，避免重复排队。
+    m_threadInspectInitialRefreshStarted = true;
+
     m_threadInspectRefreshing = true;
     const std::uint64_t ticketValue = ++m_threadInspectRefreshTicket;
     updateThreadInspectStatusLabel(QStringLiteral("● 正在刷新线程细节..."), true);
@@ -1164,11 +1222,51 @@ void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
         {
             ThreadInspectRefreshResult refreshResult{};
             const auto beginTime = std::chrono::steady_clock::now();
+            std::unordered_map<std::uint32_t, const ksword::ark::ThreadEntry*> r0ThreadByTid;
+
+            // R0 线程扩展是可选增强：驱动未加载或 DynData 不满足时，R3 线程枚举继续展示。
+            const ksword::ark::ThreadEnumResult r0ThreadResult =
+                ksword::ark::DriverClient().enumerateThreads(
+                    KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_ALL,
+                    pidValue);
+            if (r0ThreadResult.io.ok)
+            {
+                r0ThreadByTid.reserve(r0ThreadResult.entries.size());
+                for (const ksword::ark::ThreadEntry& r0Entry : r0ThreadResult.entries)
+                {
+                    if (r0Entry.threadId != 0U)
+                    {
+                        r0ThreadByTid.insert_or_assign(r0Entry.threadId, &r0Entry);
+                    }
+                }
+            }
+            else
+            {
+                refreshResult.diagnosticText = QStringLiteral("R0线程扩展不可用: %1")
+                    .arg(QString::fromStdString(r0ThreadResult.io.message));
+            }
+
+            HANDLE processHandle = OpenProcess(
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                FALSE,
+                pidValue);
+            if (processHandle == nullptr)
+            {
+                if (!refreshResult.diagnosticText.trimmed().isEmpty())
+                {
+                    refreshResult.diagnosticText += QStringLiteral(" | ");
+                }
+                refreshResult.diagnosticText += QStringLiteral("OpenProcess读取TEB失败(%1)").arg(GetLastError());
+            }
 
             HANDLE snapshotHandle = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
             if (snapshotHandle == INVALID_HANDLE_VALUE)
             {
-                refreshResult.diagnosticText = QString("CreateToolhelp32Snapshot失败(%1)").arg(GetLastError());
+                if (!refreshResult.diagnosticText.trimmed().isEmpty())
+                {
+                    refreshResult.diagnosticText += QStringLiteral(" | ");
+                }
+                refreshResult.diagnosticText += QString("CreateToolhelp32Snapshot失败(%1)").arg(GetLastError());
             }
             else
             {
@@ -1189,6 +1287,7 @@ void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
                     {
                         ThreadInspectItem rowItem{};
                         rowItem.threadId = threadEntry.th32ThreadID;
+                        rowItem.processId = pidValue;
                         rowItem.stateText = QStringLiteral("Unknown");
                         rowItem.priorityValue = 0;
                         rowItem.switchCount = 0;
@@ -1215,12 +1314,25 @@ void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
                                     nullptr);
                                 if (NT_SUCCESS(basicStatus))
                                 {
+                                    rowItem.tebAddress =
+                                        reinterpret_cast<std::uint64_t>(basicInfo.tebBaseAddress);
                                     rowItem.tebAddressText = uint64ToHex(
-                                        reinterpret_cast<std::uint64_t>(basicInfo.tebBaseAddress));
+                                        rowItem.tebAddress);
                                     rowItem.affinityText = uint64ToHex(basicInfo.affinityMask);
                                     rowItem.stateText = (basicInfo.exitStatus == STATUS_PENDING)
                                         ? QStringLiteral("Running")
                                         : QStringLiteral("Exited");
+                                    std::uint64_t userStackBase = 0;
+                                    std::uint64_t userStackLimit = 0;
+                                    if (readThreadUserStackFromTeb(
+                                        processHandle,
+                                        rowItem.tebAddress,
+                                        userStackBase,
+                                        userStackLimit))
+                                    {
+                                        rowItem.userStackBase = userStackBase;
+                                        rowItem.userStackLimit = userStackLimit;
+                                    }
                                 }
 
                                 PVOID startAddress = nullptr;
@@ -1232,8 +1344,11 @@ void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
                                     nullptr);
                                 if (NT_SUCCESS(startStatus))
                                 {
+                                    rowItem.startAddress =
+                                        reinterpret_cast<std::uint64_t>(startAddress);
+                                    rowItem.win32StartAddress = rowItem.startAddress;
                                     rowItem.startAddressText = uint64ToHex(
-                                        reinterpret_cast<std::uint64_t>(startAddress));
+                                        rowItem.startAddress);
                                 }
                             }
 
@@ -1266,12 +1381,30 @@ void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
                             rowItem.stateText = QStringLiteral("AccessDenied");
                         }
 
+                        const auto r0It = r0ThreadByTid.find(rowItem.threadId);
+                        if (r0It != r0ThreadByTid.end() && r0It->second != nullptr)
+                        {
+                            // 合并 R0 KTHREAD 扩展：
+                            // - 这些字段仅用于边界诊断；
+                            // - 不把内核地址作为后续 IOCTL 的输入凭据。
+                            rowItem.r0ThreadStatus = r0It->second->r0Status;
+                            rowItem.r0CapabilityMask = r0It->second->dynDataCapabilityMask;
+                            rowItem.r0KernelStack = r0It->second->kernelStack;
+                            rowItem.r0StackBase = r0It->second->stackBase;
+                            rowItem.r0StackLimit = r0It->second->stackLimit;
+                            rowItem.r0InitialStack = r0It->second->initialStack;
+                        }
+
                         refreshResult.rows.push_back(std::move(rowItem));
                     }
 
                     hasThread = Thread32Next(snapshotHandle, &threadEntry);
                 }
                 CloseHandle(snapshotHandle);
+            }
+            if (processHandle != nullptr)
+            {
+                CloseHandle(processHandle);
             }
 
             std::sort(
@@ -1309,15 +1442,49 @@ void ProcessDetailWindow::applyThreadInspectResult(const ThreadInspectRefreshRes
         m_refreshThreadInspectButton->setEnabled(true);
     }
 
+    m_threadInspectRows = refreshResult.rows;
+
     if (m_threadInspectTable != nullptr)
     {
+        // 栈边界列文本生成：
+        // - 在成员函数内部访问 ThreadInspectItem，保持类型仍为窗口私有实现细节；
+        // - 文本同时呈现 R3 用户栈和 R0 KTHREAD 边界。
+        const auto stackBoundaryText = [](const ThreadInspectItem& rowItem) -> QString
+        {
+            const QString userText =
+                (rowItem.userStackBase != 0 || rowItem.userStackLimit != 0)
+                ? QStringLiteral("U:%1-%2")
+                    .arg(uint64ToHex(rowItem.userStackLimit))
+                    .arg(uint64ToHex(rowItem.userStackBase))
+                : QStringLiteral("U:Unavailable");
+            const QString kernelText =
+                (rowItem.r0KernelStack != 0 ||
+                    rowItem.r0StackBase != 0 ||
+                    rowItem.r0StackLimit != 0 ||
+                    rowItem.r0InitialStack != 0)
+                ? QStringLiteral("K:%1/%2-%3 I=%4")
+                    .arg(uint64ToHex(rowItem.r0KernelStack))
+                    .arg(uint64ToHex(rowItem.r0StackLimit))
+                    .arg(uint64ToHex(rowItem.r0StackBase))
+                    .arg(uint64ToHex(rowItem.r0InitialStack))
+                : QStringLiteral("K:Unavailable");
+            return QStringLiteral("%1 | %2 | %3")
+                .arg(userText)
+                .arg(kernelText)
+                .arg(threadInspectR0StatusText(rowItem.r0ThreadStatus));
+        };
+
         m_threadInspectTable->setSortingEnabled(false);
         m_threadInspectTable->setRowCount(0);
-        for (const ThreadInspectItem& rowItem : refreshResult.rows)
+        for (std::size_t cacheIndex = 0; cacheIndex < m_threadInspectRows.size(); ++cacheIndex)
         {
+            const ThreadInspectItem& rowItem = m_threadInspectRows[cacheIndex];
             const int row = m_threadInspectTable->rowCount();
             m_threadInspectTable->insertRow(row);
-            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::ThreadId), new QTableWidgetItem(QString::number(rowItem.threadId)));
+            auto* threadIdItem = new QTableWidgetItem(QString::number(rowItem.threadId));
+            threadIdItem->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(cacheIndex)));
+            threadIdItem->setData(Qt::UserRole + 1, QVariant::fromValue<qulonglong>(rowItem.threadId));
+            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::ThreadId), threadIdItem);
             m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::State), new QTableWidgetItem(rowItem.stateText));
             m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::Priority), new QTableWidgetItem(QString::number(rowItem.priorityValue)));
             m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::SwitchCount), new QTableWidgetItem(QString::number(rowItem.switchCount)));
@@ -1325,6 +1492,17 @@ void ProcessDetailWindow::applyThreadInspectResult(const ThreadInspectRefreshRes
             m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::TebAddress), new QTableWidgetItem(rowItem.tebAddressText));
             m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::Affinity), new QTableWidgetItem(rowItem.affinityText));
             m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::RegisterSummary), new QTableWidgetItem(rowItem.registerSummaryText));
+            auto* stackBoundaryItem = new QTableWidgetItem(stackBoundaryText(rowItem));
+            stackBoundaryItem->setToolTip(QStringLiteral("UserStackBase=%1\nUserStackLimit=%2\nR0KernelStack=%3\nR0StackBase=%4\nR0StackLimit=%5\nR0InitialStack=%6\nR0Status=%7\nCapability=0x%8")
+                .arg(uint64ToHex(rowItem.userStackBase))
+                .arg(uint64ToHex(rowItem.userStackLimit))
+                .arg(uint64ToHex(rowItem.r0KernelStack))
+                .arg(uint64ToHex(rowItem.r0StackBase))
+                .arg(uint64ToHex(rowItem.r0StackLimit))
+                .arg(uint64ToHex(rowItem.r0InitialStack))
+                .arg(threadInspectR0StatusText(rowItem.r0ThreadStatus))
+                .arg(static_cast<qulonglong>(rowItem.r0CapabilityMask), 0, 16));
+            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::StackBoundary), stackBoundaryItem);
         }
         m_threadInspectTable->setSortingEnabled(true);
     }
@@ -1349,6 +1527,9 @@ void ProcessDetailWindow::requestAsyncTokenRefresh()
     {
         return;
     }
+
+    // 令牌文本页刷新较重，首刷标记用于阻止切页后重复自动刷新。
+    m_tokenInitialRefreshStarted = true;
 
     m_tokenRefreshing = true;
     const std::uint64_t ticketValue = ++m_tokenRefreshTicket;
@@ -1723,6 +1904,9 @@ void ProcessDetailWindow::refreshTokenSwitchStates()
         << "[ProcessDetailWindow] refreshTokenSwitchStates: pid="
         << m_baseRecord.pid
         << eol;
+
+    // 开关页回读属于该页首刷动作；手动刷新也复用此标记。
+    m_tokenSwitchInitialRefreshStarted = true;
 
     // setStatusLabel 作用：
     // - 统一写入状态文本与颜色；
@@ -2454,6 +2638,9 @@ void ProcessDetailWindow::requestAsyncPebRefresh()
         return;
     }
 
+    // PEB/地址空间扫描只在用户进入该页或手动刷新时执行。
+    m_pebInitialRefreshStarted = true;
+
     {
         kLogEvent event;
         info << event
@@ -3110,4 +3297,202 @@ void ProcessDetailWindow::applyPebRefreshResult(const TextRefreshResult& refresh
         << ", diagnostic="
         << refreshResult.diagnosticText.toStdString()
         << eol;
+}
+
+void ProcessDetailWindow::requestAsyncSectionRefresh()
+{
+    // Section/ControlArea 查询入口：
+    // - 不把 m_baseRecord.r0SectionObjectAddress 传给驱动；
+    // - 驱动侧根据 PID 重新查 EPROCESS.SectionObject，避免诊断地址成为凭据。
+    if (m_sectionInfoRefreshing)
+    {
+        return;
+    }
+    if (m_baseRecord.pid == 0)
+    {
+        return;
+    }
+
+    // Section/ControlArea 查询依赖驱动 IOCTL，使用首刷标记避免切页重复触发。
+    m_sectionInfoInitialRefreshStarted = true;
+
+    m_sectionInfoRefreshing = true;
+    ++m_sectionInfoRefreshTicket;
+    const std::uint64_t ticketValue = m_sectionInfoRefreshTicket;
+    const std::uint32_t processId = m_baseRecord.pid;
+    QPointer<ProcessDetailWindow> guardThis(this);
+    if (m_refreshSectionInfoButton != nullptr)
+    {
+        m_refreshSectionInfoButton->setEnabled(false);
+    }
+    if (m_sectionInfoStatusLabel != nullptr)
+    {
+        m_sectionInfoStatusLabel->setText(QStringLiteral("● 正在查询 Section/ControlArea..."));
+        m_sectionInfoStatusLabel->setStyleSheet(buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700));
+    }
+
+    // kProgress 当前只暴露 add/set 两阶段接口：
+    // - add 创建任务卡片并返回任务 ID；
+    // - set 刷新步骤文本与进度，最终由 100% 触发自动隐藏。
+    if (m_sectionInfoRefreshProgressPid == 0)
+    {
+        m_sectionInfoRefreshProgressPid = kPro.add("进程详情", "查询 Section/ControlArea");
+    }
+    kPro.set(m_sectionInfoRefreshProgressPid, QStringLiteral("查询 PID=%1 的 Section/ControlArea").arg(processId).toStdString(), 0, 5.0f);
+
+    auto* refreshTask = QRunnable::create(
+        [guardThis, ticketValue, processId]()
+        {
+            const auto beginTime = std::chrono::steady_clock::now();
+            SectionRefreshResult refreshResult{};
+            std::wstringstream textBuilder;
+
+            const auto sectionResult = ksword::ark::DriverClient().queryProcessSection(
+                processId,
+                KSWORD_ARK_SECTION_QUERY_FLAG_INCLUDE_ALL,
+                KSWORD_ARK_SECTION_MAPPING_LIMIT_DEFAULT);
+
+            const auto statusHex = [](const long status) -> QString
+                {
+                    return QStringLiteral("0x%1")
+                        .arg(static_cast<quint32>(status), 8, 16, QChar('0'))
+                        .toUpper();
+                };
+            const auto sectionStatusText = [](const std::uint32_t statusValue) -> QString
+                {
+                    switch (statusValue)
+                    {
+                    case KSWORD_ARK_SECTION_QUERY_STATUS_OK:
+                        return QStringLiteral("OK");
+                    case KSWORD_ARK_SECTION_QUERY_STATUS_PARTIAL:
+                        return QStringLiteral("Partial");
+                    case KSWORD_ARK_SECTION_QUERY_STATUS_DYNDATA_MISSING:
+                        return QStringLiteral("DynData Missing");
+                    case KSWORD_ARK_SECTION_QUERY_STATUS_PROCESS_LOOKUP_FAILED:
+                        return QStringLiteral("Process Lookup Failed");
+                    case KSWORD_ARK_SECTION_QUERY_STATUS_SECTION_OBJECT_MISSING:
+                        return QStringLiteral("SectionObject Missing");
+                    case KSWORD_ARK_SECTION_QUERY_STATUS_CONTROL_AREA_MISSING:
+                        return QStringLiteral("ControlArea Missing");
+                    case KSWORD_ARK_SECTION_QUERY_STATUS_REMOTE_UNSUPPORTED:
+                        return QStringLiteral("Remote Mapping Unsupported");
+                    case KSWORD_ARK_SECTION_QUERY_STATUS_MAPPING_QUERY_FAILED:
+                        return QStringLiteral("Mapping Query Failed");
+                    case KSWORD_ARK_SECTION_QUERY_STATUS_BUFFER_TOO_SMALL:
+                        return QStringLiteral("Buffer Too Small");
+                    default:
+                        return QStringLiteral("Unavailable");
+                    }
+                };
+            const auto mappingTypeText = [](const std::uint32_t typeValue) -> QString
+                {
+                    switch (typeValue)
+                    {
+                    case KSWORD_ARK_SECTION_MAP_TYPE_PROCESS:
+                        return QStringLiteral("Process");
+                    case KSWORD_ARK_SECTION_MAP_TYPE_SESSION:
+                        return QStringLiteral("Session");
+                    case KSWORD_ARK_SECTION_MAP_TYPE_SYSTEM_CACHE:
+                        return QStringLiteral("SystemCache");
+                    default:
+                        return QStringLiteral("Unknown");
+                    }
+                };
+
+            textBuilder << L"[R0 Section Query]\n";
+            textBuilder << L"IO: " << QString::fromStdString(sectionResult.io.message).toStdWString() << L"\n";
+            if (!sectionResult.io.ok)
+            {
+                refreshResult.diagnosticText = QString::fromStdString(sectionResult.io.message);
+            }
+            else
+            {
+                textBuilder << L"Status: " << sectionStatusText(sectionResult.queryStatus).toStdWString() << L"\n";
+                textBuilder << L"LastStatus: " << statusHex(sectionResult.lastStatus).toStdWString() << L"\n";
+                textBuilder << L"FieldFlags: " << uint64ToHex(sectionResult.fieldFlags).toStdWString() << L"\n";
+                textBuilder << L"DynDataCapability: " << uint64ToHex(sectionResult.dynDataCapabilityMask).toStdWString() << L"\n";
+                textBuilder << L"SectionObject: " << uint64ToHex(sectionResult.sectionObjectAddress).toStdWString() << L"\n";
+                textBuilder << L"ControlArea: " << uint64ToHex(sectionResult.controlAreaAddress).toStdWString() << L"\n";
+                textBuilder << L"EpSectionObjectOffset: " << uint64ToHex(sectionResult.epSectionObjectOffset).toStdWString() << L"\n";
+                textBuilder << L"MmSectionControlAreaOffset: " << uint64ToHex(sectionResult.mmSectionControlAreaOffset).toStdWString() << L"\n";
+                textBuilder << L"MmControlAreaListHeadOffset: " << uint64ToHex(sectionResult.mmControlAreaListHeadOffset).toStdWString() << L"\n";
+                textBuilder << L"MmControlAreaLockOffset: " << uint64ToHex(sectionResult.mmControlAreaLockOffset).toStdWString() << L"\n";
+                textBuilder << L"Mappings: total=" << sectionResult.totalCount
+                    << L", returned=" << sectionResult.returnedCount
+                    << L", parsed=" << sectionResult.mappings.size() << L"\n";
+
+                if ((sectionResult.fieldFlags & KSWORD_ARK_SECTION_FIELD_REMOTE_MAPPING_UNSUPPORTED) != 0U)
+                {
+                    textBuilder << L"RemoteMapping: unsupported by current ControlArea marker\n";
+                }
+                if ((sectionResult.fieldFlags & KSWORD_ARK_SECTION_FIELD_MAPPING_TRUNCATED) != 0U)
+                {
+                    textBuilder << L"MappingList: truncated\n";
+                }
+
+                textBuilder << L"[Mappings]\n";
+                if (sectionResult.mappings.empty())
+                {
+                    textBuilder << L"  <empty or unavailable>\n";
+                }
+                else
+                {
+                    for (const auto& mappingEntry : sectionResult.mappings)
+                    {
+                        textBuilder << L"  "
+                            << mappingTypeText(mappingEntry.viewMapType).toStdWString()
+                            << L" | PID=" << mappingEntry.processId
+                            << L" | "
+                            << uint64ToHex(mappingEntry.startVa).toStdWString()
+                            << L"-"
+                            << uint64ToHex(mappingEntry.endVa).toStdWString()
+                            << L"\n";
+                    }
+                }
+            }
+
+            refreshResult.detailText = QString::fromStdWString(textBuilder.str());
+            refreshResult.elapsedMs = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - beginTime).count());
+
+            QMetaObject::invokeMethod(
+                guardThis,
+                [guardThis, refreshResult, ticketValue]()
+                {
+                    if (guardThis == nullptr || guardThis->m_sectionInfoRefreshTicket != ticketValue)
+                    {
+                        return;
+                    }
+                    guardThis->applySectionRefreshResult(refreshResult);
+                },
+                Qt::QueuedConnection);
+        });
+    QThreadPool::globalInstance()->start(refreshTask);
+}
+
+void ProcessDetailWindow::applySectionRefreshResult(const SectionRefreshResult& refreshResult)
+{
+    m_sectionInfoRefreshing = false;
+    if (m_refreshSectionInfoButton != nullptr)
+    {
+        m_refreshSectionInfoButton->setEnabled(true);
+    }
+    if (m_sectionInfoOutput != nullptr)
+    {
+        m_sectionInfoOutput->setText(refreshResult.detailText);
+    }
+    if (m_sectionInfoStatusLabel != nullptr)
+    {
+        QString statusText = QStringLiteral("● 刷新完成 %1 ms").arg(refreshResult.elapsedMs);
+        QString statusStyle = buildStateLabelStyle(statusIdleColor(), 600);
+        if (!refreshResult.diagnosticText.trimmed().isEmpty())
+        {
+            statusText += QStringLiteral(" | %1").arg(refreshResult.diagnosticText);
+            statusStyle = buildStateLabelStyle(statusWarningColor(), 700);
+        }
+        m_sectionInfoStatusLabel->setText(statusText);
+        m_sectionInfoStatusLabel->setStyleSheet(statusStyle);
+    }
+    kPro.set(m_sectionInfoRefreshProgressPid, "Section/ControlArea 查询完成", 0, 100.0f);
 }

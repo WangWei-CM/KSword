@@ -17,28 +17,16 @@
 
 namespace
 {
-    // resolveExecutableDirectoryPath 作用：
-    // - 在 QApplication 尚未创建时，仍可直接拿到当前 exe 所在目录；
-    // - 供启动前读取配置文件时参与候选路径探测。
-    // 返回：exe 所在目录绝对路径；失败时返回空字符串。
-    QString resolveExecutableDirectoryPath()
-    {
-        wchar_t executablePathBuffer[MAX_PATH] = {};
-        const DWORD pathLength = ::GetModuleFileNameW(nullptr, executablePathBuffer, MAX_PATH);
-        if (pathLength == 0 || pathLength >= MAX_PATH)
-        {
-            return QString();
-        }
-
-        // executablePathText 作用：承载当前进程 exe 的完整绝对路径文本。
-        const QString executablePathText = QString::fromWCharArray(executablePathBuffer, static_cast<int>(pathLength));
-        return QFileInfo(executablePathText).absolutePath();
-    }
+    // kPrimaryStyleDirectoryName / kFallbackStyleDirectoryName 作用：
+    // - 同时兼容发行版常见的 "Style" 目录与开发期历史遗留的 "style" 目录；
+    // - 读写配置时优先使用发行版目录名，避免把客户配置写回源码树。
+    constexpr auto kPrimaryStyleDirectoryName = "Style";
+    constexpr auto kFallbackStyleDirectoryName = "style";
 
     // appendUniquePath 作用：
     // - 向候选路径列表追加“去重后的规范路径”；
     // - 使用大小写不敏感比较，兼容 Windows 路径规则。
-    // 调用方式：collectCandidateRootPaths 内部调用。
+    // 调用方式：各类候选路径收集函数内部调用。
     // 入参 pathList：候选路径列表指针。
     // 入参 rawPath：待追加路径文本。
     void appendUniquePath(QStringList* pathList, const QString& rawPath)
@@ -61,12 +49,102 @@ namespace
         }
     }
 
-    // collectCandidateRootPaths 作用：
-    // - 生成资源路径解析用的根目录候选集；
-    // - 兼容“工作目录在仓库根目录”与“可执行文件在 x64/Debug”两类启动方式。
-    // 调用方式：配置/背景路径解析前调用。
-    // 返回：按优先级排序的根目录列表。
-    QStringList collectCandidateRootPaths()
+    // resolveExecutableDirectoryPath 作用：
+    // - 在 QApplication 尚未创建时，仍可直接拿到当前 exe 所在目录；
+    // - 供启动前读取配置文件时参与候选路径探测。
+    // 返回：exe 所在目录绝对路径；失败时返回空字符串。
+    QString resolveExecutableDirectoryPath()
+    {
+        wchar_t executablePathBuffer[MAX_PATH] = {};
+        const DWORD pathLength = ::GetModuleFileNameW(nullptr, executablePathBuffer, MAX_PATH);
+        if (pathLength == 0 || pathLength >= MAX_PATH)
+        {
+            return QString();
+        }
+
+        // executablePathText 作用：承载当前进程 exe 的完整绝对路径文本。
+        const QString executablePathText = QString::fromWCharArray(executablePathBuffer, static_cast<int>(pathLength));
+        return QFileInfo(executablePathText).absolutePath();
+    }
+
+    // directoryContainsStyleFolder 作用：
+    // - 判断指定根目录下是否存在 Style/style 目录；
+    // - 用于发行版根目录探测与资源根目录选择。
+    // 入参 rootDirectoryPath：待检查的根目录。
+    // 返回：true=存在样式目录；false=不存在。
+    bool directoryContainsStyleFolder(const QString& rootDirectoryPath)
+    {
+        const QDir rootDirectory(rootDirectoryPath);
+        const QFileInfo primaryStyleInfo(rootDirectory.absoluteFilePath(QString::fromLatin1(kPrimaryStyleDirectoryName)));
+        if (primaryStyleInfo.exists() && primaryStyleInfo.isDir())
+        {
+            return true;
+        }
+
+        const QFileInfo fallbackStyleInfo(rootDirectory.absoluteFilePath(QString::fromLatin1(kFallbackStyleDirectoryName)));
+        return fallbackStyleInfo.exists() && fallbackStyleInfo.isDir();
+    }
+
+    // resolveStyleDirectoryNameForRoot 作用：
+    // - 在给定根目录下确定实际使用的样式目录名；
+    // - 发行版优先 "Style"，开发期回退 "style"。
+    // 入参 rootDirectoryPath：样式资源根目录。
+    // 返回：目录名；若都不存在则默认返回 "Style"。
+    QString resolveStyleDirectoryNameForRoot(const QString& rootDirectoryPath)
+    {
+        const QDir rootDirectory(rootDirectoryPath);
+        const QFileInfo primaryStyleInfo(rootDirectory.absoluteFilePath(QString::fromLatin1(kPrimaryStyleDirectoryName)));
+        if (primaryStyleInfo.exists() && primaryStyleInfo.isDir())
+        {
+            return QString::fromLatin1(kPrimaryStyleDirectoryName);
+        }
+
+        const QFileInfo fallbackStyleInfo(rootDirectory.absoluteFilePath(QString::fromLatin1(kFallbackStyleDirectoryName)));
+        if (fallbackStyleInfo.exists() && fallbackStyleInfo.isDir())
+        {
+            return QString::fromLatin1(kFallbackStyleDirectoryName);
+        }
+        return QString::fromLatin1(kPrimaryStyleDirectoryName);
+    }
+
+    // collectExecutableNearbyRootPaths 作用：
+    // - 生成“以 exe 所在目录为中心”的候选根目录列表；
+    // - 首项永远是 exe 当前目录，保证客户版固定优先使用 exe 同级配置；
+    // - 后续再向上回溯若干层，兼容历史包把 Style/style 放在上级目录的情况。
+    // 返回：按优先级排序的 exe 邻近候选根目录。
+    QStringList collectExecutableNearbyRootPaths()
+    {
+        QStringList preferredRootPaths;
+        QString walkingPath = QDir::cleanPath(resolveExecutableDirectoryPath());
+        if (walkingPath.isEmpty())
+        {
+            return preferredRootPaths;
+        }
+
+        appendUniquePath(&preferredRootPaths, walkingPath);
+        for (int depthIndex = 0; depthIndex < 8; ++depthIndex)
+        {
+            if (depthIndex > 0)
+            {
+                appendUniquePath(&preferredRootPaths, walkingPath);
+            }
+
+            QDir walkingDirectory(walkingPath);
+            if (!walkingDirectory.cdUp())
+            {
+                break;
+            }
+            walkingPath = QDir::cleanPath(walkingDirectory.absolutePath());
+        }
+        return preferredRootPaths;
+    }
+
+    // collectDevelopmentFallbackRootPaths 作用：
+    // - 生成开发期兼容读取用的回退根目录集合；
+    // - 仅用于“读旧配置/旧背景图”，避免客户版没有源码时误命中工程目录；
+    // - 不参与写入目标决策。
+    // 返回：按优先级排序的开发期回退根目录列表。
+    QStringList collectDevelopmentFallbackRootPaths()
     {
         QStringList candidateRootPaths;
 
@@ -96,33 +174,71 @@ namespace
             }
         };
 
-        // 先用当前工作目录与 exe 目录做探测，保证 pre-Qt 阶段也能稳定读取配置。
+        // 只保留开发期常见起点，供兼容读取旧版 style 目录。
         appendFromStartPath(QDir::currentPath());
         appendFromStartPath(resolveExecutableDirectoryPath());
         appendFromStartPath(QCoreApplication::applicationDirPath());
         return candidateRootPaths;
     }
 
-    // resolvePreferredResourceRootPath 作用：
-    // - 选出“包含 style 目录”的优先资源根目录；
-    // - 保证 style/ksword_background.png 默认相对路径可被稳定解析。
-    // 调用方式：读写设置文件、回退路径解析时调用。
-    // 返回：资源根目录绝对路径。
-    QString resolvePreferredResourceRootPath()
+    // resolveExecutablePrimaryRootPath 作用：
+    // - 返回“客户配置应固定落点”的主根目录；
+    // - 这里直接使用当前 exe 所在目录，不再把源码树作为默认写入位置。
+    // 返回：exe 所在目录；极端失败时回退 applicationDirPath/currentPath。
+    QString resolveExecutablePrimaryRootPath()
     {
-        // candidateRootPaths 作用：候选资源根目录列表。
-        const QStringList candidateRootPaths = collectCandidateRootPaths();
+        const QString executableDirectoryPath = QDir::cleanPath(resolveExecutableDirectoryPath());
+        if (!executableDirectoryPath.isEmpty())
+        {
+            return executableDirectoryPath;
+        }
+
+        const QString applicationDirectoryPath = QDir::cleanPath(QCoreApplication::applicationDirPath());
+        if (!applicationDirectoryPath.isEmpty())
+        {
+            return applicationDirectoryPath;
+        }
+
+        return QDir::cleanPath(QDir::currentPath());
+    }
+
+    // resolvePreferredReadableRootPath 作用：
+    // - 选出“读取配置/资源时”优先使用的根目录；
+    // - 首先固定检查 exe 当前目录，然后检查 exe 上级目录的历史布局；
+    // - 最后才允许回退到开发期源码树中的 style 目录。
+    // 调用方式：读取设置文件、解析相对资源路径时调用。
+    // 返回：读取侧优先根目录绝对路径。
+    QString resolvePreferredReadableRootPath()
+    {
+        const QStringList executableNearbyRootPaths = collectExecutableNearbyRootPaths();
+        for (const QString& preferredRootPath : executableNearbyRootPaths)
+        {
+            if (directoryContainsStyleFolder(preferredRootPath))
+            {
+                return preferredRootPath;
+            }
+        }
+
+        // candidateRootPaths 作用：开发期兼容读取的回退根目录列表。
+        const QStringList candidateRootPaths = collectDevelopmentFallbackRootPaths();
         for (const QString& candidateRootPath : candidateRootPaths)
         {
-            const QFileInfo styleDirectoryInfo(
-                QDir(candidateRootPath).absoluteFilePath(QStringLiteral("style")));
-            if (styleDirectoryInfo.exists() && styleDirectoryInfo.isDir())
+            if (directoryContainsStyleFolder(candidateRootPath))
             {
                 return candidateRootPath;
             }
         }
 
-        return QDir::cleanPath(QDir::currentPath());
+        return resolveExecutablePrimaryRootPath();
+    }
+
+    // resolvePreferredWritableRootPath 作用：
+    // - 选出“保存配置时”必须落点的根目录；
+    // - 始终固定到 exe 当前目录，避免把客户配置写回源码树。
+    // 返回：写入侧根目录绝对路径。
+    QString resolvePreferredWritableRootPath()
+    {
+        return resolveExecutablePrimaryRootPath();
     }
 
     // clampOpacityPercent 作用：
@@ -189,8 +305,8 @@ namespace
     }
 
     // resolvePathAgainstCandidateRoots 作用：
-    // - 对相对路径做多根目录探测（工作目录/可执行目录/上级目录/Ksword5.1 子目录）；
-    // - 首个存在路径即返回，不存在时回退到“优先资源根目录”拼接结果。
+    // - 对相对路径做“exe 邻近目录优先、开发目录回退”的多根目录探测；
+    // - 首个存在路径即返回，不存在时回退到“可写根目录”拼接结果。
     // 调用方式：读取 JSON、加载背景图时调用。
     // 入参 maybeRelativePath：相对或绝对路径文本。
     // 返回：可用于后续文件访问的绝对路径。
@@ -207,8 +323,14 @@ namespace
             return QDir::cleanPath(maybeRelativePath);
         }
 
-        // candidateRootPaths 作用：多种启动路径下的候选根目录集合。
-        const QStringList candidateRootPaths = collectCandidateRootPaths();
+        // candidateRootPaths 作用：读取侧候选根目录集合，先客户目录，后开发目录。
+        QStringList candidateRootPaths = collectExecutableNearbyRootPaths();
+        const QStringList fallbackRootPaths = collectDevelopmentFallbackRootPaths();
+        for (const QString& fallbackRootPath : fallbackRootPaths)
+        {
+            appendUniquePath(&candidateRootPaths, fallbackRootPath);
+        }
+
         for (const QString& candidateRootPath : candidateRootPaths)
         {
             const QString resolvedPath = resolveRelativePath(candidateRootPath, maybeRelativePath);
@@ -218,8 +340,8 @@ namespace
             }
         }
 
-        // preferredRootPath 作用：当候选集中暂未命中时，提供稳定回退位置。
-        const QString preferredRootPath = resolvePreferredResourceRootPath();
+        // preferredRootPath 作用：当候选集中暂未命中时，提供稳定且可写的落点。
+        const QString preferredRootPath = resolvePreferredWritableRootPath();
         return resolveRelativePath(preferredRootPath, maybeRelativePath);
     }
 
@@ -231,7 +353,7 @@ namespace
     {
         ks::settings::AppearanceSettings defaultSettings;
         defaultSettings.themeMode = ks::settings::ThemeMode::FollowSystem;
-        defaultSettings.backgroundImagePath = QStringLiteral("style/ksword_background.png");
+        defaultSettings.backgroundImagePath = QStringLiteral("Style/ksword_background.png");
         defaultSettings.backgroundOpacityPercent = 35;
         defaultSettings.startupDefaultTabKey = QStringLiteral("welcome");
         defaultSettings.launchMaximizedOnStartup = false;
@@ -276,7 +398,9 @@ ks::settings::ThemeMode ks::settings::themeModeFromJsonText(const QString& jsonT
 
 QString ks::settings::appearanceSettingsJsonRelativePath()
 {
-    return QStringLiteral("style/appearance_settings.json");
+    const QString preferredRootPath = resolvePreferredWritableRootPath();
+    const QString styleDirectoryName = resolveStyleDirectoryNameForRoot(preferredRootPath);
+    return styleDirectoryName + QStringLiteral("/appearance_settings.json");
 }
 
 QString ks::settings::resolveSettingsJsonPathForRead()
@@ -285,10 +409,15 @@ QString ks::settings::resolveSettingsJsonPathForRead()
     return resolvePathAgainstCandidateRoots(relativePath);
 }
 
+bool ks::settings::settingsJsonFileExistsForRead()
+{
+    return QFileInfo::exists(resolveSettingsJsonPathForRead());
+}
+
 QString ks::settings::resolveSettingsJsonPathForWrite()
 {
-    // preferredRootPath 作用：定位包含 style 目录的资源根目录，确保写入路径稳定。
-    const QString preferredRootPath = resolvePreferredResourceRootPath();
+    // preferredRootPath 作用：固定写入到 exe 同级目录，避免客户配置误写回源码树。
+    const QString preferredRootPath = resolvePreferredWritableRootPath();
     return resolveRelativePath(preferredRootPath, appearanceSettingsJsonRelativePath());
 }
 
@@ -334,7 +463,7 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     const QString backgroundPathText = rootObject.value(QStringLiteral("background_image_path"))
         .toString(loadedSettings.backgroundImagePath);
     loadedSettings.backgroundImagePath = backgroundPathText.trimmed().isEmpty()
-        ? QStringLiteral("style/ksword_background.png")
+        ? (resolveStyleDirectoryNameForRoot(resolvePreferredReadableRootPath()) + QStringLiteral("/ksword_background.png"))
         : backgroundPathText;
 
     // backgroundOpacityPercentValue 作用：读取透明度字段并做边界校正。

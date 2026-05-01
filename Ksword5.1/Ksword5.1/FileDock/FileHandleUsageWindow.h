@@ -65,6 +65,7 @@ private:
         AccessMask,      // AccessMask：访问掩码。
         MatchPath,       // MatchPath：命中目标路径。
         MatchRule,       // MatchRule：命中规则（目录/精确）。
+        Source,          // Source：枚举来源。
         ProcessPath,     // ProcessPath：进程镜像路径。
         Count            // Count：列总数。
     };

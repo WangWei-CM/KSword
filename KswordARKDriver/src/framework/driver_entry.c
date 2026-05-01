@@ -51,10 +51,13 @@ Return Value:
     NTSTATUS status;
     WDF_OBJECT_ATTRIBUTES attributes;
     WDFDRIVER driverHandle = WDF_NO_HANDLE;
+    WDFDEVICE controlDevice = WDF_NO_HANDLE;
 
     // Initialize WPP tracing as soon as possible.
     WPP_INIT_TRACING(DriverObject, RegistryPath);
     KswordARKCapabilityInitialize();
+    KswordARKTrustInitialize();
+    KswordARKSafetyInitialize();
 
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Entry");
 
@@ -78,11 +81,16 @@ Return Value:
         return status;
     }
 
-    status = KswordARKDriverCreateControlDevice(driverHandle);
+    status = KswordARKDriverCreateControlDevice(driverHandle, &controlDevice);
     if (!NT_SUCCESS(status)) {
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DRIVER, "KswordARKDriverCreateControlDevice failed %!STATUS!", status);
         WPP_CLEANUP(DriverObject);
         return status;
+    }
+
+    status = KswordARKFileMonitorInitialize(DriverObject, RegistryPath, controlDevice);
+    if (!NT_SUCCESS(status)) {
+        TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, "KswordARKFileMonitorInitialize recorded failure %!STATUS!", status);
     }
 
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Exit");
@@ -114,6 +122,7 @@ Return Value:
     PAGED_CODE();
 
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Entry");
+    KswordARKFileMonitorUninitialize();
     KswordARKCallbackUninitialize();
     KswordARKDynDataUninitialize();
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Exit");
