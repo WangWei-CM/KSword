@@ -15,6 +15,8 @@ Environment: // 描述运行环境字段。
 --*/ // 结束头注释块。
 
 #include "callback_internal.h" // 引入回调内部共享声明。
+#define KSWORD_ARK_CALLBACK_EXTERNAL_ENABLE_FULL 1 // 启用外部回调完整移除声明。
+#include "callback_external_core.h" // 引入外部回调安全移除扩展声明。
 
 #define SystemModuleInformation 11 // 声明 ZwQuerySystemInformation 的系统模块信息类别值。
 
@@ -163,11 +165,14 @@ KswordARKCallbackIoctlRemoveExternalCallback( // 实现外部回调移除 IOCTL 
     size_t outputBufferLength = 0; // 初始化输出缓冲区实际长度。
     KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_REQUEST* requestPacket = NULL; // 初始化请求结构体指针。
     KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE* responsePacket = NULL; // 初始化响应结构体指针。
+    KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_REQUEST requestCopy; // 缓存完整请求以规避 METHOD_BUFFERED 输入输出同缓冲覆盖。
     ULONG requestVersion = 0UL; // 缓存请求协议版本以规避 METHOD_BUFFERED 覆写风险。
     ULONG requestCallbackClass = 0UL; // 缓存请求回调类别以规避 METHOD_BUFFERED 覆写风险。
     ULONG64 requestCallbackAddress = 0ULL; // 缓存请求回调地址以规避 METHOD_BUFFERED 覆写风险。
     ULONG64 moduleBase = 0ULL; // 初始化模块基址输出。
     ULONG moduleSize = 0UL; // 初始化模块大小输出。
+
+    RtlZeroMemory(&requestCopy, sizeof(requestCopy)); // 默认清空请求副本。
 
     if (CompleteBytesOut == NULL) { // 校验完成字节数输出指针。
         return STATUS_INVALID_PARAMETER; // 输出指针为空时返回参数错误。
@@ -210,6 +215,7 @@ KswordARKCallbackIoctlRemoveExternalCallback( // 实现外部回调移除 IOCTL 
     requestVersion = requestPacket->version; // 先缓存协议版本避免输出清零覆盖输入。
     requestCallbackClass = requestPacket->callbackClass; // 先缓存回调类别避免输出清零覆盖输入。
     requestCallbackAddress = requestPacket->callbackAddress; // 先缓存回调地址避免输出清零覆盖输入。
+    requestCopy = *requestPacket; // 保存完整请求副本供后续外部移除子模块使用。
     RtlZeroMemory(responsePacket, sizeof(KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE)); // 清零响应结构体。
     responsePacket->size = sizeof(KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE); // 写入响应结构体大小。
     responsePacket->version = requestVersion; // 回填缓存后的协议版本。
@@ -227,8 +233,20 @@ KswordARKCallbackIoctlRemoveExternalCallback( // 实现外部回调移除 IOCTL 
     responsePacket->moduleBase = moduleBase; // 回填解析到的模块基址。
     responsePacket->moduleSize = moduleSize; // 回填解析到的模块大小。
     if (responsePacket->modulePath[0] != L'\0') { // 判断是否解析到有效模块路径。
-        responsePacket->mappingFlags = 1UL; // 标记模块映射成功。
+        responsePacket->mappingFlags = KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_MODULE; // 标记模块映射成功。
     } // 结束模块映射标志设置分支。
+
+    if (requestCallbackClass == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_PROCESS || // 进程 notify 移除必须先确认函数地址落在内核模块范围。
+        requestCallbackClass == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_THREAD || // 线程 notify 移除必须先确认函数地址落在内核模块范围。
+        requestCallbackClass == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_IMAGE || // 镜像 notify 移除必须先确认函数地址落在内核模块范围。
+        requestCallbackClass == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_OBJECT || // 对象回调扩展移除必须先确认函数地址可验证。
+        requestCallbackClass == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_REGISTRY || // 注册表回调扩展移除必须先确认函数地址可验证。
+        requestCallbackClass == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_ETW_PROVIDER) { // ETW 回调扩展移除必须先确认函数地址可验证。
+        if (moduleBase == 0ULL || moduleSize == 0UL) { // 未命中系统模块表时拒绝继续进入任何移除路径。
+            operationStatus = STATUS_INVALID_PARAMETER; // 返回参数非法，避免对不可验证地址调用卸载 API。
+            goto CompleteRemoveExternalCallback; // 跳转到统一响应和日志路径。
+        } // 结束模块范围校验失败分支。
+    } // 结束需要内核函数地址类别的统一校验。
 
     switch (requestCallbackClass) { // 根据缓存后的回调类型分发移除逻辑。
     case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_PROCESS: // 处理进程创建回调移除。
@@ -252,12 +270,14 @@ KswordARKCallbackIoctlRemoveExternalCallback( // 实现外部回调移除 IOCTL 
             (KSWORD_ARK_IMAGE_NOTIFY)(ULONG_PTR)requestCallbackAddress); // 传入缓存后的镜像回调地址。
         break; // 结束镜像回调类型处理。
 
-    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_OBJECT: // 对象回调暂不支持移除。
-    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_REGISTRY: // 注册表回调暂不支持移除。
-    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_MINIFILTER: // 微过滤器回调暂不支持移除。
-    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_WFP_CALLOUT: // WFP callout 回调暂不支持移除。
-    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_ETW_PROVIDER: // ETW provider 回调暂不支持移除。
-        operationStatus = STATUS_NOT_SUPPORTED; // 返回当前类型不支持状态。
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_OBJECT: // 对象回调交给外部安全移除扩展处理。
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_REGISTRY: // 注册表回调交给外部安全移除扩展处理。
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_MINIFILTER: // 微过滤器回调优先使用 Filter Manager 公开路径。
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_WFP_CALLOUT: // WFP callout 回调优先使用 WFP 管理 API。
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_ETW_PROVIDER: // ETW provider 回调仅在安全可验证时处理。
+        operationStatus = KswordArkCallbackExternalRemoveByRequest( // 调用外部回调安全移除聚合函数。
+            &requestCopy, // 传入请求副本，避免 METHOD_BUFFERED 输出清零覆盖输入。
+            responsePacket); // 传入响应包以补充公开 API 验证结果。
         break; // 结束不支持类型处理。
 
     default: // 处理未知回调类型。
@@ -265,6 +285,7 @@ KswordARKCallbackIoctlRemoveExternalCallback( // 实现外部回调移除 IOCTL 
         break; // 结束未知类型处理。
     } // 结束回调类型分发分支。
 
+CompleteRemoveExternalCallback: // 统一完成响应和日志路径。
     responsePacket->ntstatus = operationStatus; // 回填具体操作状态码。
     *CompleteBytesOut = sizeof(KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE); // 指定完成输出字节数。
 

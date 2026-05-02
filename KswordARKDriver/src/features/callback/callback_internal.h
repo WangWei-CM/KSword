@@ -11,6 +11,7 @@
 #define KSWORD_ARK_CALLBACK_TAG_RUNTIME 'rCbK'
 #define KSWORD_ARK_CALLBACK_TAG_SNAPSHOT 'sCbK'
 #define KSWORD_ARK_CALLBACK_TAG_PENDING 'pCbK'
+#define KSWORD_ARK_CALLBACK_TAG_EXTERNAL 'xCbK'
 
 #define KSWORD_ARK_CALLBACK_REGISTERED_REGISTRY 0x00000001UL
 #define KSWORD_ARK_CALLBACK_REGISTERED_PROCESS 0x00000002UL
@@ -133,6 +134,42 @@ typedef struct _KSWORD_ARK_PENDING_DECISION
     WCHAR TargetPath[KSWORD_ARK_CALLBACK_EVENT_MAX_TARGET_CHARS];
 } KSWORD_ARK_PENDING_DECISION;
 
+typedef struct _KSWORD_ARK_CALLBACK_ENUM_BUILDER
+{
+    KSWORD_ARK_ENUM_CALLBACKS_RESPONSE* Response;
+    ULONG EntryCapacity;
+    ULONG TotalCount;
+    ULONG ReturnedCount;
+    ULONG Flags;
+    NTSTATUS LastStatus;
+} KSWORD_ARK_CALLBACK_ENUM_BUILDER;
+
+typedef struct _KSWORD_ARK_CALLBACK_MODULE_ENTRY
+{
+    HANDLE Section;
+    PVOID MappedBase;
+    PVOID ImageBase;
+    ULONG ImageSize;
+    ULONG Flags;
+    USHORT LoadOrderIndex;
+    USHORT InitOrderIndex;
+    USHORT LoadCount;
+    USHORT OffsetToFileName;
+    UCHAR FullPathName[256];
+} KSWORD_ARK_CALLBACK_MODULE_ENTRY;
+
+typedef struct _KSWORD_ARK_CALLBACK_MODULE_INFORMATION
+{
+    ULONG NumberOfModules;
+    KSWORD_ARK_CALLBACK_MODULE_ENTRY Modules[1];
+} KSWORD_ARK_CALLBACK_MODULE_INFORMATION;
+
+typedef struct _KSWORD_ARK_CALLBACK_MODULE_CACHE
+{
+    KSWORD_ARK_CALLBACK_MODULE_INFORMATION* ModuleInfo;
+    ULONG ModuleInfoBytes;
+} KSWORD_ARK_CALLBACK_MODULE_CACHE;
+
 EXTERN_C_START
 
 KSWORD_ARK_CALLBACK_RUNTIME*
@@ -195,6 +232,70 @@ PVOID
 KswordArkAllocateNonPaged(
     _In_ SIZE_T bytes,
     _In_ ULONG poolTag
+    );
+
+VOID
+KswordArkCallbackEnumCopyWide(
+    _Out_writes_(DestinationChars) PWCHAR Destination,
+    _In_ ULONG DestinationChars,
+    _In_opt_z_ PCWSTR Source
+    );
+
+VOID
+KswordArkCallbackEnumCopyUnicode(
+    _Out_writes_(DestinationChars) PWCHAR Destination,
+    _In_ ULONG DestinationChars,
+    _In_opt_ PCUNICODE_STRING Source
+    );
+
+VOID
+KswordArkCallbackEnumInitModuleCache(
+    _Out_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache
+    );
+
+VOID
+KswordArkCallbackEnumFreeModuleCache(
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache
+    );
+
+NTSTATUS
+KswordArkCallbackEnumEnsureModuleCache(
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache
+    );
+
+NTSTATUS
+KswordArkCallbackEnumResolveModuleByAddressCached(
+    _Inout_opt_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
+    _In_ ULONG64 CallbackAddress,
+    _Out_writes_(ModulePathChars) PWCHAR ModulePath,
+    _In_ ULONG ModulePathChars,
+    _Out_opt_ ULONG64* ModuleBaseOut,
+    _Out_opt_ ULONG* ModuleSizeOut
+    );
+
+BOOLEAN
+KswordArkCallbackEnumIsKernelModuleAddress(
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
+    _In_ ULONG64 CandidateAddress
+    );
+
+KSWORD_ARK_CALLBACK_ENUM_ENTRY*
+KswordArkCallbackEnumReserveEntry(
+    _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder
+    );
+
+VOID
+KswordArkCallbackEnumFinalizeModuleCached(
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
+    _Inout_ KSWORD_ARK_CALLBACK_ENUM_ENTRY* Entry
+    );
+
+VOID
+KswordArkCallbackEnumAddUnsupportedRow(
+    _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder,
+    _In_ ULONG CallbackClass,
+    _In_opt_z_ PCWSTR NameText,
+    _In_opt_z_ PCWSTR DetailText
     );
 
 VOID

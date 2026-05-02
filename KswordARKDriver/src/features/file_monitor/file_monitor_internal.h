@@ -36,4 +36,11 @@ KswordArkMinifilterCallbackUpdateState(
     _In_ BOOLEAN Started
     );
 
+NTSTATUS
+KswordARKRedirectTryRewriteFileCreate(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _Out_ BOOLEAN* RedirectedOut
+    );
+
 EXTERN_C_END

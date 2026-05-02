@@ -17,3 +17,5 @@
 #include "driver/KswordArkSafetyIoctl.h"
 #include "driver/KswordArkPreflightIoctl.h"
 #include "driver/KswordArkRegistryIoctl.h"
+#include "driver/KswordArkRedirectIoctl.h"
+#include "driver/KswordArkNetworkIoctl.h"

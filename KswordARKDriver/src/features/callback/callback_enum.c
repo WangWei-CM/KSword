@@ -16,6 +16,8 @@ Environment:
 
 #include <fltKernel.h>
 #include "callback_internal.h"
+#define KSWORD_ARK_CALLBACK_EXTERNAL_ENABLE_FULL 1
+#include "callback_external_core.h"
 #include "ark/ark_dyndata.h"
 
 #define KSWORD_ARK_CALLBACK_ENUM_TAG 'eCbK'
@@ -38,42 +40,6 @@ ZwQuerySystemInformation(
     _In_ ULONG SystemInformationLength,
     _Out_opt_ PULONG ReturnLength
     );
-
-typedef struct _KSWORD_ARK_ENUM_SYSTEM_MODULE_ENTRY
-{
-    HANDLE Section;
-    PVOID MappedBase;
-    PVOID ImageBase;
-    ULONG ImageSize;
-    ULONG Flags;
-    USHORT LoadOrderIndex;
-    USHORT InitOrderIndex;
-    USHORT LoadCount;
-    USHORT OffsetToFileName;
-    UCHAR FullPathName[256];
-} KSWORD_ARK_ENUM_SYSTEM_MODULE_ENTRY;
-
-typedef struct _KSWORD_ARK_ENUM_SYSTEM_MODULE_INFORMATION
-{
-    ULONG NumberOfModules;
-    KSWORD_ARK_ENUM_SYSTEM_MODULE_ENTRY Modules[1];
-} KSWORD_ARK_ENUM_SYSTEM_MODULE_INFORMATION;
-
-typedef struct _KSWORD_ARK_CALLBACK_ENUM_BUILDER
-{
-    KSWORD_ARK_ENUM_CALLBACKS_RESPONSE* Response;
-    ULONG EntryCapacity;
-    ULONG TotalCount;
-    ULONG ReturnedCount;
-    ULONG Flags;
-    NTSTATUS LastStatus;
-} KSWORD_ARK_CALLBACK_ENUM_BUILDER;
-
-typedef struct _KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE
-{
-    KSWORD_ARK_ENUM_SYSTEM_MODULE_INFORMATION* ModuleInfo;
-    ULONG ModuleInfoBytes;
-} KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE;
 
 typedef struct _KSWORD_ARK_CALLBACK_ENUM_CODE_CANDIDATE
 {
@@ -144,7 +110,7 @@ KswordArkMinifilterPreOperation(
     _Outptr_result_maybenull_ PVOID* CompletionContext
     );
 
-static VOID
+VOID
 KswordArkCallbackEnumCopyWide(
     _Out_writes_(DestinationChars) PWCHAR Destination,
     _In_ ULONG DestinationChars,
@@ -182,7 +148,7 @@ Return Value:
     Destination[DestinationChars - 1UL] = L'\0';
 }
 
-static VOID
+VOID
 KswordArkCallbackEnumCopyUnicode(
     _Out_writes_(DestinationChars) PWCHAR Destination,
     _In_ ULONG DestinationChars,
@@ -238,9 +204,9 @@ KswordArkCallbackEnumCopyAnsiPathToWide(
     Destination[index] = L'\0';
 }
 
-static VOID
+VOID
 KswordArkCallbackEnumInitModuleCache(
-    _Out_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache
+    _Out_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache
     )
 /*++
 
@@ -267,9 +233,9 @@ Return Value:
     ModuleCache->ModuleInfoBytes = 0UL;
 }
 
-static VOID
+VOID
 KswordArkCallbackEnumFreeModuleCache(
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache
     )
 /*++
 
@@ -300,9 +266,9 @@ Return Value:
 }
 
 _Must_inspect_result_
-static NTSTATUS
+NTSTATUS
 KswordArkCallbackEnumEnsureModuleCache(
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache
     )
 /*++
 
@@ -336,7 +302,7 @@ Return Value:
         return STATUS_UNSUCCESSFUL;
     }
 
-    ModuleCache->ModuleInfo = (KSWORD_ARK_ENUM_SYSTEM_MODULE_INFORMATION*)KswordArkAllocateNonPaged(
+    ModuleCache->ModuleInfo = (KSWORD_ARK_CALLBACK_MODULE_INFORMATION*)KswordArkAllocateNonPaged(
         requiredBytes,
         KSWORD_ARK_CALLBACK_ENUM_TAG);
     if (ModuleCache->ModuleInfo == NULL) {
@@ -358,9 +324,9 @@ Return Value:
 }
 
 _Must_inspect_result_
-static NTSTATUS
+NTSTATUS
 KswordArkCallbackEnumResolveModuleByAddressCached(
-    _Inout_opt_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache,
+    _Inout_opt_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _In_ ULONG64 CallbackAddress,
     _Out_writes_(ModulePathChars) PWCHAR ModulePath,
     _In_ ULONG ModulePathChars,
@@ -422,7 +388,7 @@ Return Value:
     }
 
     for (moduleIndex = 0UL; moduleIndex < ModuleCache->ModuleInfo->NumberOfModules; ++moduleIndex) {
-        const KSWORD_ARK_ENUM_SYSTEM_MODULE_ENTRY* moduleEntry =
+        const KSWORD_ARK_CALLBACK_MODULE_ENTRY* moduleEntry =
             &ModuleCache->ModuleInfo->Modules[moduleIndex];
         const ULONG64 moduleBase = (ULONG64)(ULONG_PTR)moduleEntry->ImageBase;
         const ULONG64 moduleEnd = moduleBase + (ULONG64)moduleEntry->ImageSize;
@@ -447,9 +413,9 @@ Return Value:
     return STATUS_NOT_FOUND;
 }
 
-static BOOLEAN
+BOOLEAN
 KswordArkCallbackEnumIsKernelModuleAddress(
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache,
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _In_ ULONG64 CandidateAddress
     )
 /*++
@@ -892,7 +858,7 @@ Return Value:
     NTSTATUS status = STATUS_SUCCESS;
     ULONG requiredBytes = 0UL;
     ULONG moduleIndex = 0UL;
-    KSWORD_ARK_ENUM_SYSTEM_MODULE_INFORMATION* moduleInfo = NULL;
+    KSWORD_ARK_CALLBACK_MODULE_INFORMATION* moduleInfo = NULL;
 
     if (ModulePath == NULL || ModulePathChars == 0UL) {
         return STATUS_INVALID_PARAMETER;
@@ -914,7 +880,7 @@ Return Value:
         return STATUS_UNSUCCESSFUL;
     }
 
-    moduleInfo = (KSWORD_ARK_ENUM_SYSTEM_MODULE_INFORMATION*)KswordArkAllocateNonPaged(
+    moduleInfo = (KSWORD_ARK_CALLBACK_MODULE_INFORMATION*)KswordArkAllocateNonPaged(
         requiredBytes,
         KSWORD_ARK_CALLBACK_ENUM_TAG);
     if (moduleInfo == NULL) {
@@ -928,7 +894,7 @@ Return Value:
     }
 
     for (moduleIndex = 0UL; moduleIndex < moduleInfo->NumberOfModules; ++moduleIndex) {
-        const KSWORD_ARK_ENUM_SYSTEM_MODULE_ENTRY* moduleEntry = &moduleInfo->Modules[moduleIndex];
+        const KSWORD_ARK_CALLBACK_MODULE_ENTRY* moduleEntry = &moduleInfo->Modules[moduleIndex];
         const ULONG64 moduleBase = (ULONG64)(ULONG_PTR)moduleEntry->ImageBase;
         const ULONG64 moduleEnd = moduleBase + (ULONG64)moduleEntry->ImageSize;
         if (CallbackAddress < moduleBase || CallbackAddress >= moduleEnd) {
@@ -954,7 +920,7 @@ Return Value:
     return STATUS_NOT_FOUND;
 }
 
-static KSWORD_ARK_CALLBACK_ENUM_ENTRY*
+KSWORD_ARK_CALLBACK_ENUM_ENTRY*
 KswordArkCallbackEnumReserveEntry(
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder
     )
@@ -1000,9 +966,9 @@ KswordArkCallbackEnumFinalizeModule(
     }
 }
 
-static VOID
+VOID
 KswordArkCallbackEnumFinalizeModuleCached(
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache,
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_ENTRY* Entry
     )
 /*++
@@ -1191,7 +1157,7 @@ Return Value:
     KswordArkCallbackEnumFinalizeModule(entry);
 }
 
-static VOID
+VOID
 KswordArkCallbackEnumAddUnsupportedRow(
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder,
     _In_ ULONG CallbackClass,
@@ -1400,9 +1366,11 @@ Return Value:
     entry->source = KSWORD_ARK_CALLBACK_ENUM_SOURCE_FLTMGR_ENUMERATION;
     entry->callbackAddress = (ULONG64)(ULONG_PTR)FilterObject;
     entry->registrationAddress = (ULONG64)(ULONG_PTR)FilterObject;
-    entry->fieldFlags = KSWORD_ARK_CALLBACK_ENUM_FIELD_CALLBACK_ADDRESS |
+    entry->fieldFlags = KSWORD_ARK_CALLBACK_ENUM_FIELD_HANDLE |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_CALLBACK_ADDRESS |
         KSWORD_ARK_CALLBACK_ENUM_FIELD_REGISTRATION_ADDRESS |
-        KSWORD_ARK_CALLBACK_ENUM_FIELD_NAME;
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_NAME |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_REMOVABLE_CANDIDATE;
     entry->lastStatus = status;
 
     if (NT_SUCCESS(status) && filterInfo != NULL && ((filterInfo->Flags & FLTFL_ASI_IS_MINIFILTER) != 0UL)) {
@@ -1875,7 +1843,7 @@ Return Value:
 
 static NTSTATUS
 KswordArkCallbackEnumLocateObpCallPreOperationCallbacks(
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache,
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _Out_ ULONG64* RoutineAddressOut
     )
 /*++
@@ -1947,7 +1915,7 @@ Return Value:
 static VOID
 KswordArkCallbackEnumAddNotifyArrayEntry(
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder,
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache,
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _In_ ULONG CallbackClass,
     _In_ ULONG OperationMask,
     _In_ ULONG SlotIndex,
@@ -2027,7 +1995,7 @@ Return Value:
 static ULONG
 KswordArkCallbackEnumAddNotifyArray(
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder,
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache,
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _In_ ULONG CallbackClass,
     _In_ ULONG OperationMask,
     _In_ ULONG64 ArrayAddress,
@@ -2114,7 +2082,7 @@ Return Value:
 static VOID
 KswordArkCallbackEnumAddRegistryEntry(
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder,
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache,
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _In_ ULONG EntryIndex,
     _In_ ULONG64 EntryAddress,
     _In_ ULONG64 FunctionAddress,
@@ -2191,7 +2159,7 @@ Return Value:
 
 static BOOLEAN
 KswordArkCallbackEnumFindRegistryFields(
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache,
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _In_ ULONG64 EntryAddress,
     _Out_ ULONG64* FunctionAddressOut,
     _Out_ ULONG64* ContextAddressOut,
@@ -2292,7 +2260,7 @@ Return Value:
 static ULONG
 KswordArkCallbackEnumAddRegistryList(
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder,
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache,
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _In_ ULONG64 ListHeadAddress
     )
 /*++
@@ -2476,7 +2444,7 @@ Return Value:
 
 static BOOLEAN
 KswordArkCallbackEnumFindObjectCallbackFields(
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache,
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _In_ ULONG64 NodeAddress,
     _Out_ KSWORD_ARK_CALLBACK_ENUM_OBJECT_SCAN_RESULT* ResultOut
     )
@@ -2598,7 +2566,7 @@ Return Value:
 static VOID
 KswordArkCallbackEnumAddObjectCallbackEntry(
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder,
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache,
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _In_ ULONG EntryIndex,
     _In_ ULONG ObjectTypeMask,
     _In_z_ PCWSTR ObjectTypeName,
@@ -2682,7 +2650,7 @@ Return Value:
 static ULONG
 KswordArkCallbackEnumAddObjectTypeCallbackList(
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder,
-    _Inout_ KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE* ModuleCache,
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _In_ POBJECT_TYPE ObjectType,
     _In_ ULONG ObjectTypeMask,
     _In_z_ PCWSTR ObjectTypeName
@@ -2797,7 +2765,7 @@ Return Value:
 
 --*/
 {
-    KSWORD_ARK_CALLBACK_ENUM_MODULE_CACHE moduleCache;
+    KSWORD_ARK_CALLBACK_MODULE_CACHE moduleCache;
     NTSTATUS status = STATUS_SUCCESS;
     ULONG64 processArray = 0ULL;
     ULONG64 threadArray = 0ULL;
@@ -3050,8 +3018,8 @@ KswordArkCallbackEnumAddUnsupportedKinds(
 
 Routine Description:
 
-    添加仍未覆盖类别的说明行。中文说明：进程、线程、镜像、注册表和部分对象
-    回调已经由私有扫描阶段处理；此处只保留 WFP/ETW 等暂未实现类别说明。
+    添加仍未覆盖类别的说明行。中文说明：进程、线程、镜像、注册表、对象和
+    WFP 已由其它阶段处理；此处只保留 ETW 仍缺少安全全局入口的说明。
 
 Arguments:
 
@@ -3064,11 +3032,6 @@ Return Value:
 --*/
 {
     KswordArkCallbackEnumAddSystemInformerDynDataRow(Builder);
-    KswordArkCallbackEnumAddUnsupportedRow(
-        Builder,
-        KSWORD_ARK_CALLBACK_ENUM_CLASS_WFP_CALLOUT,
-        L"WFP callouts",
-        L"WFP callout 枚举没有当前驱动内的稳定实现；需要引入 BFE/WFP 内核结构适配后补齐。");
     KswordArkCallbackEnumAddUnsupportedRow(
         Builder,
         KSWORD_ARK_CALLBACK_ENUM_CLASS_ETW_PROVIDER,
@@ -3194,6 +3157,7 @@ Return Value:
     }
     if ((requestFlags & KSWORD_ARK_ENUM_CALLBACK_FLAG_INCLUDE_PRIVATE) != 0UL) {
         KswordArkCallbackEnumAddPrivateCallbacks(&builder);
+        KswordArkCallbackExternalAddCallbacks(&builder);
     }
     if ((requestFlags & KSWORD_ARK_ENUM_CALLBACK_FLAG_INCLUDE_UNSUPPORTED) != 0UL) {
         KswordArkCallbackEnumAddUnsupportedKinds(&builder);
