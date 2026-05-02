@@ -1,3 +1,8 @@
+﻿#include "DriverDock.Internal.h"
+
+// 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
+using namespace ksword::driver_dock_internal;
+
 void DriverDock::refreshDriverServiceRecords()
 {
     kLogEvent refreshEvent;
@@ -225,6 +230,154 @@ void DriverDock::forceUnloadDriverFromServiceRow(const int rowIndex)
                         .arg(formatNtStatusText(result.waitStatus))
                         .arg(formatCompactAddress(result.driverObjectAddress))
                         .arg(formatCompactAddress(result.driverUnloadAddress));
+                    guardThis->appendOperateLogLine(resultLine);
+                    guardThis->refreshDriverServiceRecords();
+                    guardThis->refreshLoadedKernelModuleRecords();
+                },
+                Qt::QueuedConnection);
+        });
+    unloadTask->setAutoDelete(true);
+    QThreadPool::globalInstance()->start(unloadTask);
+}
+
+void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
+{
+    // 模块表右键入口：
+    // - 服务已停止但模块仍残留时，服务名路径可能已经失效；
+    // - 这里改用模块基址，让 R0 扫描对象目录反查 DriverObject。
+    if (m_moduleTable == nullptr)
+    {
+        return;
+    }
+
+    const QModelIndex clickedIndex = m_moduleTable->indexAt(localPosition);
+    if (clickedIndex.isValid())
+    {
+        m_moduleTable->selectRow(clickedIndex.row());
+    }
+
+    const QModelIndexList selectedRows =
+        (m_moduleTable->selectionModel() == nullptr)
+        ? QModelIndexList()
+        : m_moduleTable->selectionModel()->selectedRows(0);
+    if (selectedRows.isEmpty())
+    {
+        return;
+    }
+
+    QMenu contextMenu(this);
+    contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+    QAction* forceCleanupByBaseAction = contextMenu.addAction(
+        QIcon(":/Icon/process_uncritical.svg"),
+        QStringLiteral("R0 按模块基址强制清理 DriverObject"));
+    forceCleanupByBaseAction->setToolTip(
+        QStringLiteral("不摘 PsLoadedModuleList；仅按模块基址反查 DriverObject 后清 Dispatch/DeviceObject。"));
+    QAction* forceDeepCleanupByBaseAction = contextMenu.addAction(
+        QIcon(":/Icon/process_uncritical.svg"),
+        QStringLiteral("R0 强力清理模块回调 + DriverObject"));
+    forceDeepCleanupByBaseAction->setToolTip(
+        QStringLiteral("先按模块基址移除可验证回调，再清理 DriverObject；仍不摘 PsLoadedModuleList。"));
+
+    QAction* selectedAction = contextMenu.exec(m_moduleTable->viewport()->mapToGlobal(localPosition));
+    if (selectedAction == forceCleanupByBaseAction)
+    {
+        // 普通模块基址清理不需要二次确认，直接复用当前选中行。
+        forceUnloadDriverFromModuleRow(selectedRows.front().row());
+        return;
+    }
+    if (selectedAction == forceDeepCleanupByBaseAction)
+    {
+        // 强力清理是高风险动作，因此保留二次确认：
+        // - 全局 QMessageBox 主题器已不再拦截 Close 事件；
+        // - 这里可以恢复使用标准按钮返回值，避免业务层绕过全局弹窗语义。
+        const QMessageBox::StandardButton confirmResult = QMessageBox::warning(
+            this,
+            QStringLiteral("R0 强力清理"),
+            QStringLiteral("该操作会按模块基址批量移除进程/线程/镜像/Minifilter/WFP 等可验证回调，随后清理 DriverObject。\n\n不会摘 PsLoadedModuleList，但目标驱动若正在处理请求仍可能导致系统不稳定。\n\n是否继续？"),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        if (confirmResult == QMessageBox::Yes)
+        {
+            forceUnloadDriverFromModuleRow(selectedRows.front().row(), true);
+        }
+        return;
+    }
+}
+
+void DriverDock::forceUnloadDriverFromModuleRow(const int rowIndex, const bool removeCallbacksFirst)
+{
+    // 按模块基址清理：
+    // - R3 只传模块基址和模块名兜底文本；
+    // - R0 仍只接受“匹配到的真实 DriverObject”作为清理目标；
+    // - 不直接从 R3 传 DriverObject 地址，避免地址成为操作凭据。
+    if (m_moduleTable == nullptr || rowIndex < 0 || rowIndex >= m_moduleTable->rowCount())
+    {
+        return;
+    }
+
+    QTableWidgetItem* moduleNameItem = m_moduleTable->item(rowIndex, 0);
+    QTableWidgetItem* moduleBaseItem = m_moduleTable->item(rowIndex, 1);
+    if (moduleNameItem == nullptr || moduleBaseItem == nullptr)
+    {
+        return;
+    }
+
+    const QString moduleNameText = moduleNameItem->text().trimmed();
+    const std::uint64_t moduleBaseValue = moduleBaseItem->data(Qt::UserRole).toULongLong();
+    if (moduleBaseValue == 0U)
+    {
+        appendOperateLogLine(QStringLiteral("模块基址清理失败：模块基址为空。"));
+        return;
+    }
+
+    QString fallbackNameText = moduleNameText;
+    if (fallbackNameText.endsWith(QStringLiteral(".sys"), Qt::CaseInsensitive))
+    {
+        fallbackNameText.chop(4);
+    }
+
+    appendOperateLogLine(QStringLiteral("开始 R0 按模块基址%1：%2 | base=%3")
+        .arg(removeCallbacksFirst ? QStringLiteral("强力清理回调+DriverObject") : QStringLiteral("强制清理 DriverObject"))
+        .arg(moduleNameText, formatCompactAddress(moduleBaseValue)));
+
+    QPointer<DriverDock> guardThis(this);
+    const std::wstring fallbackNameWide = fallbackNameText.toStdWString();
+    auto* unloadTask = QRunnable::create([guardThis, moduleNameText, moduleBaseValue, fallbackNameWide, removeCallbacksFirst]()
+        {
+            const unsigned long cleanupFlags = KSWORD_ARK_DRIVER_UNLOAD_FLAG_FORCE_CLEANUP |
+                (removeCallbacksFirst ? KSWORD_ARK_DRIVER_UNLOAD_FLAG_REMOVE_CALLBACKS_BY_MODULE_BASE : 0UL);
+            const ksword::ark::DriverForceUnloadResult result =
+                ksword::ark::DriverClient().forceUnloadDriverByModuleBase(
+                    moduleBaseValue,
+                    fallbackNameWide,
+                    cleanupFlags,
+                    3000UL);
+
+            QMetaObject::invokeMethod(
+                guardThis,
+                [guardThis, moduleNameText, moduleBaseValue, removeCallbacksFirst, result]()
+                {
+                    if (guardThis == nullptr)
+                    {
+                        return;
+                    }
+
+                    const QString resultLine = QStringLiteral(
+                        "R0 模块基址%1完成：%2 | Base=%3 | IO=%4 | Status=%5 | Last=%6 | Wait=%7 | Object=%8 | Unload=%9 | Callbacks=%10/%11 fail=%12 last=%13 | Name=%14")
+                        .arg(removeCallbacksFirst ? QStringLiteral("强力清理") : QStringLiteral("清理"))
+                        .arg(moduleNameText)
+                        .arg(formatCompactAddress(moduleBaseValue))
+                        .arg(QString::fromStdString(result.io.message))
+                        .arg(driverForceUnloadStatusText(result.status))
+                        .arg(formatNtStatusText(result.lastStatus))
+                        .arg(formatNtStatusText(result.waitStatus))
+                        .arg(formatCompactAddress(result.driverObjectAddress))
+                        .arg(formatCompactAddress(result.driverUnloadAddress))
+                        .arg(result.callbacksRemoved)
+                        .arg(result.callbackCandidates)
+                        .arg(result.callbackFailures)
+                        .arg(formatNtStatusText(result.callbackLastStatus))
+                        .arg(QString::fromStdWString(result.driverName));
                     guardThis->appendOperateLogLine(resultLine);
                     guardThis->refreshDriverServiceRecords();
                     guardThis->refreshLoadedKernelModuleRecords();
@@ -475,7 +628,10 @@ void DriverDock::rebuildLoadedModuleTable()
         const int rowIndex = m_moduleTable->rowCount();
         m_moduleTable->insertRow(rowIndex);
         m_moduleTable->setItem(rowIndex, 0, createReadOnlyItem(moduleRecord.moduleName));
-        m_moduleTable->setItem(rowIndex, 1, createReadOnlyItem(formatAddress(moduleRecord.baseAddress)));
+        QTableWidgetItem* baseItem = createReadOnlyItem(formatAddress(moduleRecord.baseAddress));
+        baseItem->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(
+            static_cast<qulonglong>(moduleRecord.baseAddress)));
+        m_moduleTable->setItem(rowIndex, 1, baseItem);
         QTableWidgetItem* pathItem = createReadOnlyItem(moduleRecord.imagePath);
         pathItem->setToolTip(moduleRecord.imagePath);
         m_moduleTable->setItem(rowIndex, 2, pathItem);

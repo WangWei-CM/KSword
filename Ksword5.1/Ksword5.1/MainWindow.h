@@ -217,6 +217,29 @@ private:
     QWidget* createDockPlaceholderWidget(const QString& titleText) const;
     void ensureDockContentInitialized(ads::CDockWidget* dockWidget);
 
+    // configureDockWidgetPersistentIdentity 作用：
+    // - 为每个 ADS Dock 设置稳定 objectName；
+    // - ADS saveState/restoreState 依赖 objectName 匹配 Dock，不能依赖可变标题文本；
+    // - 入参 dockWidget：待配置的 Dock；dockKey：稳定英文 key。
+    void configureDockWidgetPersistentIdentity(ads::CDockWidget* dockWidget, const QString& dockKey) const;
+
+    // restoreDockLayoutFromConfig 作用：
+    // - 在默认 Dock 拓扑创建完毕后读取布局配置；
+    // - 成功时恢复用户上次拖拽/浮动/Tab 激活状态；
+    // - 返回 true 表示恢复成功，false 表示没有配置或恢复失败。
+    bool restoreDockLayoutFromConfig();
+
+    // saveDockLayoutToConfig 作用：
+    // - 退出前保存 ADS DockManager 布局状态；
+    // - 配置文件保存到应用程序 exe 所在目录的 config/ksword_ads_layout.bin；
+    // - 返回 true 表示写入成功。
+    bool saveDockLayoutToConfig() const;
+
+    // resolveDockLayoutConfigPath 作用：
+    // - 统一生成 ADS 布局配置文件绝对路径；
+    // - 写入落点固定为应用程序 exe 所在目录的 config 文件夹，不回退源码树。
+    QString resolveDockLayoutConfigPath() const;
+
     // showSettingsPanelFromMenu：
     // - 作用：从顶部菜单栏打开设置内容，替代主 Dock Tab 中的“设置”页签。
     void showSettingsPanelFromMenu();
@@ -302,6 +325,18 @@ private:
     // togglePinnedWindowState 作用：
     // - 在当前置顶状态基础上做取反切换。
     void togglePinnedWindowState();
+
+    // setCaptureProtectionState 作用：
+    // - 设置主窗口截屏屏蔽状态并同步标题栏眼睛图标；
+    // - Windows 10 20H2+ 优先使用 WDA_EXCLUDEFROMCAPTURE 隐藏窗口；
+    // - 旧系统回退 WDA_MONITOR，让截图/录屏里显示黑屏。
+    // 入参 protectedState：true=启用截屏屏蔽，false=允许截屏。
+    // 入参 emitLog：是否记录状态切换日志。
+    void setCaptureProtectionState(bool protectedState, bool emitLog = true);
+
+    // toggleCaptureProtectionState 作用：
+    // - 在当前截屏屏蔽状态基础上做取反切换。
+    void toggleCaptureProtectionState();
 
     // executeCommandInNewConsole 作用：
     // - 使用 CREATE_NEW_CONSOLE 打开可见 cmd 并执行 /K 命令；
@@ -400,6 +435,7 @@ private:
     CodeEditorWidget* m_immediateEditorWidget = nullptr; // 即时窗口统一代码编辑器组件。
     ks::ui::CustomTitleBar* m_customTitleBar = nullptr; // m_customTitleBar：主窗口自绘标题栏组件。
     bool m_windowPinned = false;                        // m_windowPinned：主窗口当前是否置顶。
+    bool m_captureProtectionEnabled = false;            // m_captureProtectionEnabled：主窗口当前是否启用截屏屏蔽。
 
     // 顶部菜单栏右侧权限按钮（纯文字）：
     // - UIAccess：证书信任检查与 SYSTEM TokenUIAccess fallback；
@@ -430,6 +466,7 @@ private:
     StartupProgressCallback m_startupProgressCallback; // m_startupProgressCallback：主窗口启动阶段进度回调。
     bool m_startupWindowVisibilityAdjusted = false; // m_startupWindowVisibilityAdjusted：是否已完成首次显示区域修正。
     bool m_deferredDockInitializationStarted = false; // m_deferredDockInitializationStarted：是否已启动显示后补载流程。
+    bool m_dockLayoutRestoredFromConfig = false;     // m_dockLayoutRestoredFromConfig：启动时是否已从配置恢复 ADS 布局。
     std::size_t m_nextDeferredDockIndex = 0;          // m_nextDeferredDockIndex：下一个待补载 Dock 队列索引。
     std::vector<ads::CDockWidget*> m_deferredDockLoadQueue; // m_deferredDockLoadQueue：显示后依次补载的 Dock 队列。
 };

@@ -1,112 +1,7 @@
-#include "DriverDock.h"
-#include "../theme.h"
+#include "DriverDock.Internal.h"
 
-// ============================================================
-// DriverDock.cpp
-// 作用说明：
-// 1) 提供驱动服务枚举、注册、挂载、卸载、删除；
-// 2) 提供已加载内核模块枚举；
-// 3) 提供 DBWIN 调试输出读取；
-// 4) 提供驱动操作日志与状态可视化输出。
-// ============================================================
-
-#include <QAbstractItemView>
-#include <QClipboard>
-#include <QColor>
-#include <QComboBox>
-#include <QDateTime>
-#include <QFileDialog>
-#include <QFileInfo>
-#include <QGridLayout>
-#include <QGuiApplication>
-#include <QHeaderView>
-#include <QHBoxLayout>
-#include <QLabel>
-#include <QLineEdit>
-#include <QMenu>
-#include <QMetaObject>
-#include <QPlainTextEdit>
-#include <QPointer>
-#include <QPushButton>
-#include <QRunnable>
-#include <QSplitter>
-#include <QTableWidget>
-#include <QTableWidgetItem>
-#include <QThreadPool>
-#include <QTabWidget>
-#include <QTimer>
-#include <QVBoxLayout>
-
-#include <algorithm> // std::sort：结果列表排序。
-#include <array>     // std::array：固定长度驱动名缓冲。
-#include <chrono>    // std::chrono：等待服务状态超时控制。
-#include <cstdint>   // std::uint8_t/std::uintptr_t：字节与地址转换。
-#include <cstring>   // std::memcpy：DBWIN 缓冲拷贝。
-#include <string>    // std::string/std::wstring：Win32 文本桥接。
-#include <vector>    // std::vector：枚举缓存容器。
-
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
-#include <Psapi.h>
-#include <winsvc.h>
-
-#pragma comment(lib, "Advapi32.lib")
-#pragma comment(lib, "Psapi.lib")
-
-namespace
+namespace ksword::driver_dock_internal
 {
-    // ServiceHandleGuard：
-    // - 作用：SC_HANDLE 的 RAII 关闭器；
-    // - 避免错误分支提前 return 时句柄泄露。
-    class ServiceHandleGuard
-    {
-    public:
-        explicit ServiceHandleGuard(SC_HANDLE handleValue = nullptr)
-            : m_handle(handleValue)
-        {
-        }
-
-        ~ServiceHandleGuard()
-        {
-            reset(nullptr);
-        }
-
-        ServiceHandleGuard(const ServiceHandleGuard&) = delete;
-        ServiceHandleGuard& operator=(const ServiceHandleGuard&) = delete;
-
-        SC_HANDLE get() const
-        {
-            return m_handle;
-        }
-
-        bool valid() const
-        {
-            return m_handle != nullptr;
-        }
-
-        void reset(SC_HANDLE newHandle)
-        {
-            if (m_handle != nullptr)
-            {
-                ::CloseServiceHandle(m_handle);
-            }
-            m_handle = newHandle;
-        }
-
-    private:
-        SC_HANDLE m_handle = nullptr; // m_handle：当前持有的服务句柄。
-    };
-
-    // DbwinBufferPacket：
-    // - 作用：DBWIN 共享内存的数据结构定义。
-    struct DbwinBufferPacket
-    {
-        DWORD processId = 0;                            // processId：发出调试输出的进程 PID。
-        char messageBuffer[4096 - sizeof(DWORD)] = {}; // messageBuffer：ANSI 调试文本。
-    };
-
     // toWideString：
     // - 作用：QString 转 std::wstring。
     std::wstring toWideString(const QString& textValue)
@@ -422,6 +317,9 @@ namespace
     }
 }
 
+
+using namespace ksword::driver_dock_internal;
+
 DriverDock::DriverDock(QWidget* parent)
     : QWidget(parent)
 {
@@ -465,11 +363,3 @@ DriverDock::~DriverDock()
     kLogEvent destroyEvent;
     info << destroyEvent << "[DriverDock] 驱动页已析构。" << eol;
 }
-
-
-// ============================================================
-// 说明：为控制单文件体积，具体实现按功能拆分到多个 .inc 文件。
-// ============================================================
-#include "DriverDock.Ui.inc"
-#include "DriverDock.Operation.inc"
-#include "DriverDock.DebugAndUtils.inc"

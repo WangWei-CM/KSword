@@ -1419,7 +1419,7 @@ Return Value:
     }
 }
 
-static VOID
+VOID
 KswordArkCallbackEnumAddMinifilters(
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder
     )
@@ -2744,7 +2744,7 @@ Return Value:
     return addedCount;
 }
 
-static VOID
+VOID
 KswordArkCallbackEnumAddPrivateCallbacks(
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder
     )

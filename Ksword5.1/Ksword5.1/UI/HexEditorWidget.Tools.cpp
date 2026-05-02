@@ -1,5 +1,10 @@
+﻿#include "HexEditorWidget.Internal.h"
+
+// 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
+using namespace ksword::ui::hex_editor_internal;
+
 // ============================================================
-// HexEditorWidget.Tools.inc
+// HexEditorWidget.Tools.cpp
 // 作用：承载查找解析、异步搜索、复制导出等工具能力。
 // ============================================================
 

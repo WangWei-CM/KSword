@@ -130,6 +130,8 @@ namespace
                 KSWORD_ARK_OBJECT_OP_HANDLE_DUPLICATE |
                 KSWORD_ARK_OBJECT_OP_TYPE_PROCESS |
                 KSWORD_ARK_OBJECT_OP_TYPE_THREAD;
+        case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER:
+            return KSWORD_ARK_MINIFILTER_OP_ALL;
         default:
             return 0U;
         }
@@ -163,6 +165,13 @@ namespace
                 { QStringLiteral("降权拦截"), KSWORD_ARK_RULE_ACTION_STRIP_ACCESS },
                 { QStringLiteral("记录日志"), KSWORD_ARK_RULE_ACTION_LOG_ONLY }
             };
+        case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER:
+            return {
+                { QStringLiteral("允许"), KSWORD_ARK_RULE_ACTION_ALLOW },
+                { QStringLiteral("拒绝"), KSWORD_ARK_RULE_ACTION_DENY },
+                { QStringLiteral("询问用户"), KSWORD_ARK_RULE_ACTION_ASK_USER },
+                { QStringLiteral("记录日志"), KSWORD_ARK_RULE_ACTION_LOG_ONLY }
+            };
         default:
             return {};
         }
@@ -170,7 +179,10 @@ namespace
 
     QList<QPair<QString, quint32>> allowedMatchModeListByType(const quint32 callbackType)
     {
-        if (callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY)
+        // 注册表和文件系统微过滤器都支持 ASK_USER 前置的 Regex 规则。
+        // 这里必须与 R0 blob 校验保持一致，否则 UI 无法选择已支持的匹配模式。
+        if (callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY ||
+            callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER)
         {
             return {
                 { QStringLiteral("精确匹配"), KSWORD_ARK_MATCH_MODE_EXACT },
@@ -185,6 +197,44 @@ namespace
             { QStringLiteral("前缀匹配"), KSWORD_ARK_MATCH_MODE_PREFIX },
             { QStringLiteral("通配符匹配"), KSWORD_ARK_MATCH_MODE_WILDCARD }
         };
+    }
+
+    bool hasActiveMinifilterRule(const CallbackConfigDocument& configDocument)
+    {
+        // 作用：判断应用后的配置中是否存在真正会进入 R0 快路径的 Minifilter 规则。
+        // 返回：存在“规则启用 + 规则组启用”的文件系统微过滤器规则时返回 true。
+        QHash<quint32, bool> groupEnabledById;
+        for (const CallbackRuleGroupModel& groupModel : configDocument.groups)
+        {
+            groupEnabledById.insert(groupModel.groupId, groupModel.enabled);
+        }
+
+        for (const CallbackRuleModel& ruleModel : configDocument.rules)
+        {
+            if (!ruleModel.enabled)
+            {
+                continue;
+            }
+            if (ruleModel.callbackType != KSWORD_ARK_CALLBACK_TYPE_MINIFILTER)
+            {
+                continue;
+            }
+            if (!groupEnabledById.value(ruleModel.groupId, false))
+            {
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    QString formatCallbackNtStatusHex(const long statusValue)
+    {
+        // 作用：将 R0 返回的 NTSTATUS 统一格式化为 8 位十六进制。
+        // 返回：形如 0xC0000184 的字符串，便于和驱动日志、WinDbg 常量对齐。
+        return QStringLiteral("0x%1")
+            .arg(static_cast<quint32>(statusValue), 8, 16, QChar('0'))
+            .toUpper();
     }
 
     QList<QPair<QString, quint32>> decisionOptionList()
@@ -282,6 +332,17 @@ namespace
                 { QStringLiteral("句柄复制"), KSWORD_ARK_OBJECT_OP_HANDLE_DUPLICATE },
                 { QStringLiteral("进程对象"), KSWORD_ARK_OBJECT_OP_TYPE_PROCESS },
                 { QStringLiteral("线程对象"), KSWORD_ARK_OBJECT_OP_TYPE_THREAD }
+            };
+        case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER:
+            return {
+                { QStringLiteral("创建/打开"), KSWORD_ARK_MINIFILTER_OP_CREATE },
+                { QStringLiteral("读取"), KSWORD_ARK_MINIFILTER_OP_READ },
+                { QStringLiteral("写入"), KSWORD_ARK_MINIFILTER_OP_WRITE },
+                { QStringLiteral("设置信息"), KSWORD_ARK_MINIFILTER_OP_SETINFO },
+                { QStringLiteral("重命名/硬链"), KSWORD_ARK_MINIFILTER_OP_RENAME },
+                { QStringLiteral("删除"), KSWORD_ARK_MINIFILTER_OP_DELETE },
+                { QStringLiteral("清理"), KSWORD_ARK_MINIFILTER_OP_CLEANUP },
+                { QStringLiteral("关闭"), KSWORD_ARK_MINIFILTER_OP_CLOSE }
             };
 
         default:
@@ -424,6 +485,8 @@ namespace
             return QStringLiteral("例如：* 或 C:\\Windows\\System32\\notepad.exe（支持自动转换）");
         case KSWORD_ARK_CALLBACK_TYPE_OBJECT:
             return QStringLiteral("例如：* 或 C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe（支持自动转换）");
+        case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER:
+            return QStringLiteral("例如：* 或 C:\\Windows\\System32\\notepad.exe（支持自动转换）");
         default:
             return QStringLiteral("例如：*");
         }
@@ -443,6 +506,8 @@ namespace
             return QStringLiteral("例如：C:\\Windows\\System32\\kernel32.dll（支持自动转换）");
         case KSWORD_ARK_CALLBACK_TYPE_OBJECT:
             return QStringLiteral("例如：C:\\Windows\\System32\\notepad.exe（被打开句柄的目标进程，支持自动转换）");
+        case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER:
+            return QStringLiteral("例如：C:\\Users\\*\\Documents\\*.docx 或 \\Device\\HarddiskVolume*\\*.sys");
         default:
             return QStringLiteral("例如：*");
         }
@@ -1174,20 +1239,7 @@ private:
         createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE, QStringLiteral("线程创建"));
         createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD, QStringLiteral("镜像加载"));
         createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_OBJECT, QStringLiteral("对象管理器"));
-
-        auto* reservedPage = new QWidget(m_ruleTabWidget);
-        auto* reservedLayout = new QVBoxLayout(reservedPage);
-        reservedLayout->setContentsMargins(12, 12, 12, 12);
-        auto* reservedLabel = new QLabel(
-            QStringLiteral("文件系统微过滤器（预留）\n当前版本未实现。"),
-            reservedPage);
-        reservedLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
-        reservedLabel->setAlignment(Qt::AlignCenter);
-        reservedLayout->addStretch(1);
-        reservedLayout->addWidget(reservedLabel, 0);
-        reservedLayout->addStretch(1);
-        const int reservedTabIndex = m_ruleTabWidget->addTab(reservedPage, QStringLiteral("文件系统微过滤器（预留）"));
-        m_tabCallbackTypeMap.insert(reservedTabIndex, KSWORD_ARK_CALLBACK_TYPE_MINIFILTER_RESERVED);
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_MINIFILTER, QStringLiteral("文件系统微过滤器"));
 
         auto* logTabWidget = new QTabWidget(scrollContent);
         m_appLogEditor = new QPlainTextEdit(logTabWidget);
@@ -1278,12 +1330,11 @@ private:
         });
 
         connect(m_ruleTabWidget, &QTabWidget::currentChanged, m_hostPage, [this](int) {
-            const quint32 callbackType = currentRuleCallbackType();
-            const bool reservedTab = (callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER_RESERVED);
-            m_addRuleButton->setEnabled(!reservedTab);
-            m_removeRuleButton->setEnabled(!reservedTab);
-            m_moveRuleUpButton->setEnabled(!reservedTab);
-            m_moveRuleDownButton->setEnabled(!reservedTab);
+            // 当前所有回调类型均已经接入规则表；切换 Tab 时保持工具按钮可用。
+            m_addRuleButton->setEnabled(currentRuleTable() != nullptr);
+            m_removeRuleButton->setEnabled(currentRuleTable() != nullptr);
+            m_moveRuleUpButton->setEnabled(currentRuleTable() != nullptr);
+            m_moveRuleDownButton->setEnabled(currentRuleTable() != nullptr);
         });
     }
 
@@ -1536,7 +1587,8 @@ private:
                 : actionOptionList.front().second;
         }
 
-        if (callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY &&
+        if ((callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY ||
+            callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) &&
             pastedRuleModel.matchMode == KSWORD_ARK_MATCH_MODE_REGEX &&
             pastedRuleModel.action != KSWORD_ARK_RULE_ACTION_ASK_USER &&
             containsOptionValue(actionOptionList, KSWORD_ARK_RULE_ACTION_ASK_USER))
@@ -1589,7 +1641,7 @@ private:
         const quint32 callbackType,
         const QPoint& localPos)
     {
-        if (ruleTable == nullptr || callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER_RESERVED)
+        if (ruleTable == nullptr)
         {
             return;
         }
@@ -2265,7 +2317,7 @@ private:
     {
         const quint32 callbackType = currentRuleCallbackType();
         QTableWidget* ruleTable = currentRuleTable();
-        if (ruleTable == nullptr || callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER_RESERVED)
+        if (ruleTable == nullptr)
         {
             return;
         }
@@ -2467,7 +2519,8 @@ private:
                 ? static_cast<quint32>(currentActionCombo->currentData().toUInt())
                 : KSWORD_ARK_RULE_ACTION_ALLOW;
 
-            if (callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY &&
+            if ((callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY ||
+                callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) &&
                 matchMode == KSWORD_ARK_MATCH_MODE_REGEX &&
                 actionType != KSWORD_ARK_RULE_ACTION_ASK_USER &&
                 currentActionCombo != nullptr)
@@ -3013,6 +3066,90 @@ private:
         updateStatusLabel();
     }
 
+    void ensureMinifilterRuntimeStarted(
+        const CallbackConfigDocument& configDocument,
+        const ksword::ark::DriverClient& driverClient)
+    {
+        // 作用：应用含 Minifilter 规则后自动启动共享 file-monitor minifilter。
+        // 处理：只发 START，不主动 STOP，避免覆盖用户在文件监控页已有的运行意图。
+        // 返回：无；失败只写应用日志，规则应用本身仍然保持成功。
+        if (!hasActiveMinifilterRule(configDocument))
+        {
+            return;
+        }
+
+        const ksword::ark::FileMonitorStatusResult beforeStatus =
+            driverClient.queryFileMonitorStatus();
+        if (beforeStatus.io.ok &&
+            (beforeStatus.runtimeFlags & KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED) != 0U)
+        {
+            appendAppLog(
+                QStringLiteral("文件系统微过滤器已处于启动状态：mask=0x%1, queued=%2, dropped=%3。")
+                .arg(beforeStatus.operationMask, 8, 16, QChar('0')).toUpper()
+                .arg(beforeStatus.queuedCount)
+                .arg(beforeStatus.droppedCount));
+            return;
+        }
+
+        if (!beforeStatus.io.ok)
+        {
+            appendAppLog(
+                QStringLiteral("查询文件系统微过滤器状态失败，仍尝试启动：error=%1，detail=%2")
+                .arg(beforeStatus.io.win32Error)
+                .arg(QString::fromStdString(beforeStatus.io.message)));
+        }
+
+        const ksword::ark::IoResult startResult = driverClient.controlFileMonitor(
+            KSWORD_ARK_FILE_MONITOR_ACTION_START,
+            KSWORD_ARK_FILE_MONITOR_OPERATION_ALL,
+            0UL,
+            0UL);
+        if (!startResult.ok)
+        {
+            const ksword::ark::FileMonitorStatusResult failStatus =
+                driverClient.queryFileMonitorStatus();
+            const QString statusSuffix = failStatus.io.ok
+                ? QStringLiteral("；status=%1，flags=0x%2，mask=0x%3，register=%4，start=%5，last=%6，queued=%7，dropped=%8")
+                    .arg(QString::fromStdString(failStatus.io.message))
+                    .arg(failStatus.runtimeFlags, 8, 16, QChar('0')).toUpper()
+                    .arg(failStatus.operationMask, 8, 16, QChar('0')).toUpper()
+                    .arg(formatCallbackNtStatusHex(failStatus.registerStatus))
+                    .arg(formatCallbackNtStatusHex(failStatus.startStatus))
+                    .arg(formatCallbackNtStatusHex(failStatus.lastErrorStatus))
+                    .arg(failStatus.queuedCount)
+                    .arg(failStatus.droppedCount)
+                : QStringLiteral("；status-query-failed error=%1，detail=%2")
+                    .arg(failStatus.io.win32Error)
+                    .arg(QString::fromStdString(failStatus.io.message));
+            appendAppLog(
+                QStringLiteral("警告：文件系统微过滤器启动失败，Minifilter 自定义规则暂时不会收到文件事件：error=%1，detail=%2%3")
+                .arg(startResult.win32Error)
+                .arg(QString::fromStdString(startResult.message))
+                .arg(statusSuffix));
+            return;
+        }
+
+        const ksword::ark::FileMonitorStatusResult afterStatus =
+            driverClient.queryFileMonitorStatus();
+        if (afterStatus.io.ok)
+        {
+            appendAppLog(
+                QStringLiteral("文件系统微过滤器已启动：flags=0x%1, mask=0x%2, register=%3, start=%4, last=%5。")
+                .arg(afterStatus.runtimeFlags, 8, 16, QChar('0')).toUpper()
+                .arg(afterStatus.operationMask, 8, 16, QChar('0')).toUpper()
+                .arg(formatCallbackNtStatusHex(afterStatus.registerStatus))
+                .arg(formatCallbackNtStatusHex(afterStatus.startStatus))
+                .arg(formatCallbackNtStatusHex(afterStatus.lastErrorStatus)));
+        }
+        else
+        {
+            appendAppLog(
+                QStringLiteral("文件系统微过滤器启动命令已下发，但状态复查失败：error=%1，detail=%2")
+                .arg(afterStatus.io.win32Error)
+                .arg(QString::fromStdString(afterStatus.io.message)));
+        }
+    }
+
     void applyRulesToDriver()
     {
         CallbackConfigDocument configDocument;
@@ -3060,13 +3197,15 @@ private:
             .arg(configDocument.rules.size())
             .arg(blobBytes.size()));
 
+        ensureMinifilterRuntimeStarted(configDocument, driverClient);
         reloadRuntimeState();
         const bool hasAskUserRule = std::any_of(
             configDocument.rules.cbegin(),
             configDocument.rules.cend(),
             [](const CallbackRuleModel& ruleModel) {
                 return ruleModel.enabled &&
-                    ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY &&
+                    (ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY ||
+                        ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) &&
                     ruleModel.action == KSWORD_ARK_RULE_ACTION_ASK_USER;
             });
         if (hasAskUserRule && m_runtimeState.waitingReceiverCount == 0U)

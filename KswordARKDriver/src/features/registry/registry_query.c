@@ -18,7 +18,22 @@ Environment:
 
 #include <ntstrsafe.h>
 
+#ifndef STATUS_NO_MORE_ENTRIES
+#define STATUS_NO_MORE_ENTRIES ((NTSTATUS)0x8000001AL)
+#endif
+
+#ifndef STATUS_OBJECT_NAME_COLLISION
+#define STATUS_OBJECT_NAME_COLLISION ((NTSTATUS)0xC0000035L)
+#endif
+
 #define KSWORD_ARK_REGISTRY_QUERY_TAG 'gRsK'
+
+NTKERNELAPI
+NTSTATUS
+ZwRenameKey(
+    _In_ HANDLE KeyHandle,
+    _In_ PUNICODE_STRING NewName
+    );
 
 static USHORT
 KswordARKRegistryBoundedWideLength(
@@ -133,6 +148,174 @@ Return Value:
     *ResponseOut = response;
 }
 
+static NTSTATUS
+KswordARKRegistryBuildKernelPath(
+    _In_reads_(KSWORD_ARK_REGISTRY_PATH_CHARS) const WCHAR* SourcePath,
+    _Out_ UNICODE_STRING* PathOut
+    )
+/*++
+
+Routine Description:
+
+    从共享协议固定路径数组构造 UNICODE_STRING。中文说明：所有 R0 注册表
+    操作都必须先经过这里，统一检查 NUL、长度和 \REGISTRY\ 前缀，避免各个
+    Zw* 调用点重复散落路径校验逻辑。
+
+Arguments:
+
+    SourcePath - 请求中的固定 WCHAR 路径数组。
+    PathOut - 输出 UNICODE_STRING，Buffer 指向 SourcePath，不分配内存。
+
+Return Value:
+
+    STATUS_SUCCESS 或路径参数错误状态。
+
+--*/
+{
+    USHORT pathChars = 0U;
+
+    if (SourcePath == NULL || PathOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(PathOut, sizeof(*PathOut));
+    pathChars = KswordARKRegistryBoundedWideLength(
+        SourcePath,
+        (USHORT)KSWORD_ARK_REGISTRY_PATH_CHARS);
+    if (pathChars == 0U || pathChars >= KSWORD_ARK_REGISTRY_PATH_CHARS) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    PathOut->Buffer = (PWSTR)SourcePath;
+    PathOut->Length = (USHORT)(pathChars * sizeof(WCHAR));
+    PathOut->MaximumLength = PathOut->Length;
+    if (!KswordARKRegistryValidateKernelPath(PathOut)) {
+        return STATUS_OBJECT_PATH_SYNTAX_BAD;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static VOID
+KswordARKRegistryBuildValueName(
+    _In_reads_(KSWORD_ARK_REGISTRY_VALUE_NAME_CHARS) const WCHAR* SourceName,
+    _In_ BOOLEAN NamePresent,
+    _Out_ UNICODE_STRING* NameOut
+    )
+/*++
+
+Routine Description:
+
+    从共享协议固定值名数组构造 UNICODE_STRING。中文说明：默认值用空
+    UNICODE_STRING 表示，ZwQueryValueKey/ZwSetValueKey/ZwDeleteValueKey 都
+    接受这种形式。
+
+Arguments:
+
+    SourceName - 请求中的值名数组。
+    NamePresent - TRUE 表示数组内是命名值；FALSE 表示默认值。
+    NameOut - 输出值名 UNICODE_STRING。
+
+Return Value:
+
+    None. 本函数没有返回值。
+
+--*/
+{
+    USHORT nameChars = 0U;
+
+    RtlZeroMemory(NameOut, sizeof(*NameOut));
+    if (!NamePresent || SourceName == NULL) {
+        return;
+    }
+
+    nameChars = KswordARKRegistryBoundedWideLength(
+        SourceName,
+        (USHORT)KSWORD_ARK_REGISTRY_VALUE_NAME_CHARS);
+    NameOut->Buffer = (PWSTR)SourceName;
+    NameOut->Length = (USHORT)(nameChars * sizeof(WCHAR));
+    NameOut->MaximumLength = NameOut->Length;
+}
+
+static VOID
+KswordARKRegistryPrepareOperationResponse(
+    _Out_writes_bytes_(OutputBufferLength) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Outptr_ KSWORD_ARK_REGISTRY_OPERATION_RESPONSE** ResponseOut
+    )
+/*++
+
+Routine Description:
+
+    初始化通用写操作响应。中文说明：创建/删除/重命名等动作都只需要
+    聚合状态和底层 NTSTATUS，因此共用此响应结构。
+
+Arguments:
+
+    OutputBuffer - 输出缓冲。
+    OutputBufferLength - 输出缓冲长度。
+    ResponseOut - 输出响应指针。
+
+Return Value:
+
+    None. 本函数没有返回值。
+
+--*/
+{
+    KSWORD_ARK_REGISTRY_OPERATION_RESPONSE* response = NULL;
+
+    if (ResponseOut == NULL) {
+        return;
+    }
+    *ResponseOut = NULL;
+
+    if (OutputBuffer == NULL ||
+        OutputBufferLength < sizeof(KSWORD_ARK_REGISTRY_OPERATION_RESPONSE)) {
+        return;
+    }
+
+    RtlZeroMemory(OutputBuffer, OutputBufferLength);
+    response = (KSWORD_ARK_REGISTRY_OPERATION_RESPONSE*)OutputBuffer;
+    response->version = KSWORD_ARK_REGISTRY_PROTOCOL_VERSION;
+    response->status = KSWORD_ARK_REGISTRY_OPERATION_STATUS_UNKNOWN;
+    response->lastStatus = STATUS_UNSUCCESSFUL;
+    *ResponseOut = response;
+}
+
+static ULONG
+KswordARKRegistryMapOperationStatus(
+    _In_ NTSTATUS Status
+    )
+/*++
+
+Routine Description:
+
+    把 NTSTATUS 转换为 R3 易展示的注册表操作状态。中文说明：IOCTL 本身尽量
+    返回 STATUS_SUCCESS，实际成败放在结构化响应内。
+
+Arguments:
+
+    Status - 底层 Zw* 返回状态。
+
+Return Value:
+
+    KSWORD_ARK_REGISTRY_OPERATION_STATUS_*。
+
+--*/
+{
+    if (NT_SUCCESS(Status)) {
+        return KSWORD_ARK_REGISTRY_OPERATION_STATUS_SUCCESS;
+    }
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND ||
+        Status == STATUS_OBJECT_PATH_NOT_FOUND) {
+        return KSWORD_ARK_REGISTRY_OPERATION_STATUS_NOT_FOUND;
+    }
+    if (Status == STATUS_OBJECT_NAME_COLLISION) {
+        return KSWORD_ARK_REGISTRY_OPERATION_STATUS_ALREADY_EXISTS;
+    }
+    return KSWORD_ARK_REGISTRY_OPERATION_STATUS_FAILED;
+}
+
 NTSTATUS
 KswordARKDriverReadRegistryValue(
     _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
@@ -171,7 +354,6 @@ Return Value:
     ULONG boundedQueryLength = 0UL;
     PKEY_VALUE_PARTIAL_INFORMATION valueInformation = NULL;
     NTSTATUS status = STATUS_SUCCESS;
-    USHORT keyPathChars = 0U;
     USHORT valueNameChars = 0U;
 
     if (OutputBuffer == NULL || Request == NULL || BytesWrittenOut == NULL) {
@@ -194,21 +376,10 @@ Return Value:
         return STATUS_SUCCESS;
     }
 
-    keyPathChars = KswordARKRegistryBoundedWideLength(
-        Request->keyPath,
-        (USHORT)KSWORD_ARK_REGISTRY_PATH_CHARS);
-    if (keyPathChars == 0U || keyPathChars >= KSWORD_ARK_REGISTRY_PATH_CHARS) {
+    status = KswordARKRegistryBuildKernelPath(Request->keyPath, &keyPath);
+    if (!NT_SUCCESS(status)) {
         response->status = KSWORD_ARK_REGISTRY_READ_STATUS_FAILED;
-        response->lastStatus = STATUS_INVALID_PARAMETER;
-        return STATUS_SUCCESS;
-    }
-
-    keyPath.Buffer = (PWSTR)Request->keyPath;
-    keyPath.Length = (USHORT)(keyPathChars * sizeof(WCHAR));
-    keyPath.MaximumLength = keyPath.Length;
-    if (!KswordARKRegistryValidateKernelPath(&keyPath)) {
-        response->status = KSWORD_ARK_REGISTRY_READ_STATUS_FAILED;
-        response->lastStatus = STATUS_OBJECT_PATH_SYNTAX_BAD;
+        response->lastStatus = status;
         return STATUS_SUCCESS;
     }
 
@@ -362,5 +533,568 @@ Return Value:
     }
 
     ExFreePoolWithTag(valueInformation, KSWORD_ARK_REGISTRY_QUERY_TAG);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKDriverEnumRegistryKey(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _In_ const KSWORD_ARK_ENUM_REGISTRY_KEY_REQUEST* Request,
+    _Out_ size_t* BytesWrittenOut
+    )
+/*++
+
+Routine Description:
+
+    枚举指定注册表键的子键和值。中文说明：R3 树展开和值列表刷新在 R0 在线
+    时通过该函数完成，避免同一 UI 页面混用 Win32 与 R0 读路径。
+
+Arguments:
+
+    OutputBuffer - 输出枚举响应。
+    OutputBufferLength - 输出缓冲长度。
+    Request - 枚举请求。
+    BytesWrittenOut - 返回写入字节数。
+
+Return Value:
+
+    STATUS_SUCCESS 表示结构化响应已写入；参数错误返回失败。
+
+--*/
+{
+    KSWORD_ARK_ENUM_REGISTRY_KEY_RESPONSE* response = NULL;
+    OBJECT_ATTRIBUTES objectAttributes;
+    UNICODE_STRING keyPath;
+    HANDLE keyHandle = NULL;
+    ULONG subKeyIndex = 0UL;
+    ULONG valueIndex = 0UL;
+    ULONG maxSubKeys = KSWORD_ARK_REGISTRY_ENUM_MAX_SUBKEYS;
+    ULONG maxValues = KSWORD_ARK_REGISTRY_ENUM_MAX_VALUES;
+    ULONG maxValueDataBytes = KSWORD_ARK_REGISTRY_ENUM_VALUE_DATA_MAX_BYTES;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (OutputBuffer == NULL || Request == NULL || BytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+    if (OutputBufferLength < sizeof(KSWORD_ARK_ENUM_REGISTRY_KEY_RESPONSE)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlZeroMemory(OutputBuffer, OutputBufferLength);
+    response = (KSWORD_ARK_ENUM_REGISTRY_KEY_RESPONSE*)OutputBuffer;
+    response->version = KSWORD_ARK_REGISTRY_PROTOCOL_VERSION;
+    response->status = KSWORD_ARK_REGISTRY_ENUM_STATUS_UNKNOWN;
+    response->lastStatus = STATUS_UNSUCCESSFUL;
+    *BytesWrittenOut = sizeof(*response);
+
+    if (Request->version != KSWORD_ARK_REGISTRY_PROTOCOL_VERSION) {
+        response->status = KSWORD_ARK_REGISTRY_ENUM_STATUS_FAILED;
+        response->lastStatus = STATUS_REVISION_MISMATCH;
+        return STATUS_SUCCESS;
+    }
+
+    status = KswordARKRegistryBuildKernelPath(Request->keyPath, &keyPath);
+    if (!NT_SUCCESS(status)) {
+        response->status = KSWORD_ARK_REGISTRY_ENUM_STATUS_FAILED;
+        response->lastStatus = status;
+        return STATUS_SUCCESS;
+    }
+
+    InitializeObjectAttributes(
+        &objectAttributes,
+        &keyPath,
+        OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+        NULL,
+        NULL);
+
+    status = ZwOpenKey(&keyHandle, KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS, &objectAttributes);
+    if (!NT_SUCCESS(status)) {
+        response->status = (status == STATUS_OBJECT_NAME_NOT_FOUND ||
+            status == STATUS_OBJECT_PATH_NOT_FOUND) ?
+            KSWORD_ARK_REGISTRY_ENUM_STATUS_NOT_FOUND :
+            KSWORD_ARK_REGISTRY_ENUM_STATUS_FAILED;
+        response->lastStatus = status;
+        return STATUS_SUCCESS;
+    }
+
+    if (Request->maxSubKeys != 0UL && Request->maxSubKeys < maxSubKeys) {
+        maxSubKeys = Request->maxSubKeys;
+    }
+    if (Request->maxValues != 0UL && Request->maxValues < maxValues) {
+        maxValues = Request->maxValues;
+    }
+    if (Request->maxValueDataBytes != 0UL && Request->maxValueDataBytes < maxValueDataBytes) {
+        maxValueDataBytes = Request->maxValueDataBytes;
+    }
+
+    if ((Request->flags & KSWORD_ARK_REGISTRY_ENUM_FLAG_INCLUDE_SUBKEYS) != 0UL) {
+        for (subKeyIndex = 0UL; ; ++subKeyIndex) {
+            UCHAR informationBuffer[sizeof(KEY_BASIC_INFORMATION) + (KSWORD_ARK_REGISTRY_ENUM_KEY_NAME_CHARS * sizeof(WCHAR))] = { 0 };
+            PKEY_BASIC_INFORMATION keyInformation = (PKEY_BASIC_INFORMATION)informationBuffer;
+            ULONG resultLength = 0UL;
+            ULONG copyBytes = 0UL;
+
+            status = ZwEnumerateKey(
+                keyHandle,
+                subKeyIndex,
+                KeyBasicInformation,
+                keyInformation,
+                sizeof(informationBuffer),
+                &resultLength);
+            if (status == STATUS_NO_MORE_ENTRIES) {
+                break;
+            }
+            if (!NT_SUCCESS(status) && status != STATUS_BUFFER_OVERFLOW) {
+                response->lastStatus = status;
+                break;
+            }
+
+            response->subKeyCount += 1UL;
+            if (response->returnedSubKeyCount >= maxSubKeys ||
+                response->returnedSubKeyCount >= KSWORD_ARK_REGISTRY_ENUM_MAX_SUBKEYS) {
+                response->status = KSWORD_ARK_REGISTRY_ENUM_STATUS_PARTIAL;
+                continue;
+            }
+
+            copyBytes = keyInformation->NameLength;
+            if (copyBytes > ((KSWORD_ARK_REGISTRY_ENUM_KEY_NAME_CHARS - 1U) * sizeof(WCHAR))) {
+                copyBytes = (KSWORD_ARK_REGISTRY_ENUM_KEY_NAME_CHARS - 1U) * sizeof(WCHAR);
+                response->status = KSWORD_ARK_REGISTRY_ENUM_STATUS_PARTIAL;
+            }
+            if (copyBytes != 0UL) {
+                RtlCopyMemory(
+                    response->subKeys[response->returnedSubKeyCount].name,
+                    keyInformation->Name,
+                    copyBytes);
+            }
+            response->returnedSubKeyCount += 1UL;
+        }
+    }
+
+    if ((Request->flags & KSWORD_ARK_REGISTRY_ENUM_FLAG_INCLUDE_VALUES) != 0UL) {
+        for (valueIndex = 0UL; ; ++valueIndex) {
+            UCHAR informationBuffer[sizeof(KEY_VALUE_FULL_INFORMATION) +
+                (KSWORD_ARK_REGISTRY_VALUE_NAME_CHARS * sizeof(WCHAR)) +
+                KSWORD_ARK_REGISTRY_ENUM_VALUE_DATA_MAX_BYTES] = { 0 };
+            PKEY_VALUE_FULL_INFORMATION valueInformation = (PKEY_VALUE_FULL_INFORMATION)informationBuffer;
+            ULONG resultLength = 0UL;
+            ULONG nameBytes = 0UL;
+            ULONG dataBytes = 0UL;
+
+            status = ZwEnumerateValueKey(
+                keyHandle,
+                valueIndex,
+                KeyValueFullInformation,
+                valueInformation,
+                sizeof(informationBuffer),
+                &resultLength);
+            if (status == STATUS_NO_MORE_ENTRIES) {
+                break;
+            }
+            if (!NT_SUCCESS(status) && status != STATUS_BUFFER_OVERFLOW) {
+                response->lastStatus = status;
+                break;
+            }
+
+            response->valueCount += 1UL;
+            if (response->returnedValueCount >= maxValues ||
+                response->returnedValueCount >= KSWORD_ARK_REGISTRY_ENUM_MAX_VALUES) {
+                response->status = KSWORD_ARK_REGISTRY_ENUM_STATUS_PARTIAL;
+                continue;
+            }
+
+            nameBytes = valueInformation->NameLength;
+            if (nameBytes > ((KSWORD_ARK_REGISTRY_VALUE_NAME_CHARS - 1U) * sizeof(WCHAR))) {
+                nameBytes = (KSWORD_ARK_REGISTRY_VALUE_NAME_CHARS - 1U) * sizeof(WCHAR);
+                response->status = KSWORD_ARK_REGISTRY_ENUM_STATUS_PARTIAL;
+            }
+            if (nameBytes != 0UL) {
+                RtlCopyMemory(
+                    response->values[response->returnedValueCount].name,
+                    valueInformation->Name,
+                    nameBytes);
+                response->values[response->returnedValueCount].flags |=
+                    KSWORD_ARK_REGISTRY_ENUM_VALUE_FLAG_NAME_PRESENT;
+            }
+
+            response->values[response->returnedValueCount].valueType = valueInformation->Type;
+            response->values[response->returnedValueCount].requiredBytes = valueInformation->DataLength;
+            dataBytes = valueInformation->DataLength;
+            if (dataBytes > maxValueDataBytes) {
+                dataBytes = maxValueDataBytes;
+                response->status = KSWORD_ARK_REGISTRY_ENUM_STATUS_PARTIAL;
+            }
+            if (dataBytes > KSWORD_ARK_REGISTRY_ENUM_VALUE_DATA_MAX_BYTES) {
+                dataBytes = KSWORD_ARK_REGISTRY_ENUM_VALUE_DATA_MAX_BYTES;
+                response->status = KSWORD_ARK_REGISTRY_ENUM_STATUS_PARTIAL;
+            }
+            if (dataBytes != 0UL &&
+                valueInformation->DataOffset != 0UL &&
+                valueInformation->DataOffset < sizeof(informationBuffer) &&
+                dataBytes <= (sizeof(informationBuffer) - valueInformation->DataOffset)) {
+                RtlCopyMemory(
+                    response->values[response->returnedValueCount].data,
+                    ((PUCHAR)valueInformation) + valueInformation->DataOffset,
+                    dataBytes);
+                response->values[response->returnedValueCount].dataBytes = dataBytes;
+            }
+            response->returnedValueCount += 1UL;
+        }
+    }
+
+    ZwClose(keyHandle);
+    if (response->status == KSWORD_ARK_REGISTRY_ENUM_STATUS_UNKNOWN) {
+        response->status = KSWORD_ARK_REGISTRY_ENUM_STATUS_SUCCESS;
+    }
+    if (response->lastStatus == STATUS_UNSUCCESSFUL) {
+        response->lastStatus = STATUS_SUCCESS;
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKDriverSetRegistryValue(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _In_ const KSWORD_ARK_SET_REGISTRY_VALUE_REQUEST* Request,
+    _Out_ size_t* BytesWrittenOut
+    )
+{
+    KSWORD_ARK_REGISTRY_OPERATION_RESPONSE* response = NULL;
+    OBJECT_ATTRIBUTES objectAttributes;
+    UNICODE_STRING keyPath;
+    UNICODE_STRING valueName;
+    HANDLE keyHandle = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (OutputBuffer == NULL || Request == NULL || BytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+    if (OutputBufferLength < sizeof(KSWORD_ARK_REGISTRY_OPERATION_RESPONSE)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    KswordARKRegistryPrepareOperationResponse(OutputBuffer, OutputBufferLength, &response);
+    *BytesWrittenOut = sizeof(*response);
+
+    if (Request->version != KSWORD_ARK_REGISTRY_PROTOCOL_VERSION ||
+        Request->dataBytes > KSWORD_ARK_REGISTRY_DATA_MAX_BYTES) {
+        response->status = KSWORD_ARK_REGISTRY_OPERATION_STATUS_FAILED;
+        response->lastStatus = STATUS_INVALID_PARAMETER;
+        return STATUS_SUCCESS;
+    }
+
+    status = KswordARKRegistryBuildKernelPath(Request->keyPath, &keyPath);
+    if (NT_SUCCESS(status)) {
+        KswordARKRegistryBuildValueName(
+            Request->valueName,
+            ((Request->flags & KSWORD_ARK_REGISTRY_SET_FLAG_VALUE_NAME_PRESENT) != 0UL),
+            &valueName);
+        InitializeObjectAttributes(&objectAttributes, &keyPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+        status = ZwOpenKey(&keyHandle, KEY_SET_VALUE, &objectAttributes);
+        if (NT_SUCCESS(status)) {
+            status = ZwSetValueKey(
+                keyHandle,
+                &valueName,
+                0UL,
+                Request->valueType,
+                (PVOID)Request->data,
+                Request->dataBytes);
+            ZwClose(keyHandle);
+        }
+    }
+
+    response->status = KswordARKRegistryMapOperationStatus(status);
+    response->lastStatus = status;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKDriverDeleteRegistryValue(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _In_ const KSWORD_ARK_REGISTRY_VALUE_NAME_REQUEST* Request,
+    _Out_ size_t* BytesWrittenOut
+    )
+{
+    KSWORD_ARK_REGISTRY_OPERATION_RESPONSE* response = NULL;
+    OBJECT_ATTRIBUTES objectAttributes;
+    UNICODE_STRING keyPath;
+    UNICODE_STRING valueName;
+    HANDLE keyHandle = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (OutputBuffer == NULL || Request == NULL || BytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+    if (OutputBufferLength < sizeof(KSWORD_ARK_REGISTRY_OPERATION_RESPONSE)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    KswordARKRegistryPrepareOperationResponse(OutputBuffer, OutputBufferLength, &response);
+    *BytesWrittenOut = sizeof(*response);
+
+    if (Request->version != KSWORD_ARK_REGISTRY_PROTOCOL_VERSION) {
+        response->status = KSWORD_ARK_REGISTRY_OPERATION_STATUS_FAILED;
+        response->lastStatus = STATUS_REVISION_MISMATCH;
+        return STATUS_SUCCESS;
+    }
+
+    status = KswordARKRegistryBuildKernelPath(Request->keyPath, &keyPath);
+    if (NT_SUCCESS(status)) {
+        KswordARKRegistryBuildValueName(
+            Request->valueName,
+            ((Request->flags & KSWORD_ARK_REGISTRY_DELETE_VALUE_FLAG_NAME_PRESENT) != 0UL),
+            &valueName);
+        InitializeObjectAttributes(&objectAttributes, &keyPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+        status = ZwOpenKey(&keyHandle, KEY_SET_VALUE, &objectAttributes);
+        if (NT_SUCCESS(status)) {
+            status = ZwDeleteValueKey(keyHandle, &valueName);
+            ZwClose(keyHandle);
+        }
+    }
+
+    response->status = KswordARKRegistryMapOperationStatus(status);
+    response->lastStatus = status;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKDriverCreateRegistryKey(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _In_ const KSWORD_ARK_REGISTRY_KEY_PATH_REQUEST* Request,
+    _Out_ size_t* BytesWrittenOut
+    )
+{
+    KSWORD_ARK_REGISTRY_OPERATION_RESPONSE* response = NULL;
+    OBJECT_ATTRIBUTES objectAttributes;
+    UNICODE_STRING keyPath;
+    HANDLE keyHandle = NULL;
+    ULONG disposition = 0UL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (OutputBuffer == NULL || Request == NULL || BytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+    if (OutputBufferLength < sizeof(KSWORD_ARK_REGISTRY_OPERATION_RESPONSE)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    KswordARKRegistryPrepareOperationResponse(OutputBuffer, OutputBufferLength, &response);
+    *BytesWrittenOut = sizeof(*response);
+
+    if (Request->version != KSWORD_ARK_REGISTRY_PROTOCOL_VERSION) {
+        response->status = KSWORD_ARK_REGISTRY_OPERATION_STATUS_FAILED;
+        response->lastStatus = STATUS_REVISION_MISMATCH;
+        return STATUS_SUCCESS;
+    }
+
+    status = KswordARKRegistryBuildKernelPath(Request->keyPath, &keyPath);
+    if (NT_SUCCESS(status)) {
+        InitializeObjectAttributes(&objectAttributes, &keyPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+        status = ZwCreateKey(
+            &keyHandle,
+            KEY_READ | KEY_WRITE,
+            &objectAttributes,
+            0UL,
+            NULL,
+            REG_OPTION_NON_VOLATILE,
+            &disposition);
+        if (NT_SUCCESS(status)) {
+            ZwClose(keyHandle);
+        }
+    }
+
+    response->status = KswordARKRegistryMapOperationStatus(status);
+    response->lastStatus = status;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKDriverDeleteRegistryKey(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _In_ const KSWORD_ARK_REGISTRY_KEY_PATH_REQUEST* Request,
+    _Out_ size_t* BytesWrittenOut
+    )
+{
+    KSWORD_ARK_REGISTRY_OPERATION_RESPONSE* response = NULL;
+    OBJECT_ATTRIBUTES objectAttributes;
+    UNICODE_STRING keyPath;
+    HANDLE keyHandle = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (OutputBuffer == NULL || Request == NULL || BytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+    if (OutputBufferLength < sizeof(KSWORD_ARK_REGISTRY_OPERATION_RESPONSE)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    KswordARKRegistryPrepareOperationResponse(OutputBuffer, OutputBufferLength, &response);
+    *BytesWrittenOut = sizeof(*response);
+
+    if (Request->version != KSWORD_ARK_REGISTRY_PROTOCOL_VERSION) {
+        response->status = KSWORD_ARK_REGISTRY_OPERATION_STATUS_FAILED;
+        response->lastStatus = STATUS_REVISION_MISMATCH;
+        return STATUS_SUCCESS;
+    }
+
+    status = KswordARKRegistryBuildKernelPath(Request->keyPath, &keyPath);
+    if (NT_SUCCESS(status)) {
+        InitializeObjectAttributes(&objectAttributes, &keyPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+        status = ZwOpenKey(&keyHandle, DELETE, &objectAttributes);
+        if (NT_SUCCESS(status)) {
+            status = ZwDeleteKey(keyHandle);
+            ZwClose(keyHandle);
+        }
+    }
+
+    response->status = KswordARKRegistryMapOperationStatus(status);
+    response->lastStatus = status;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKDriverRenameRegistryValue(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _In_ const KSWORD_ARK_RENAME_REGISTRY_VALUE_REQUEST* Request,
+    _Out_ size_t* BytesWrittenOut
+    )
+{
+    KSWORD_ARK_REGISTRY_OPERATION_RESPONSE* response = NULL;
+    OBJECT_ATTRIBUTES objectAttributes;
+    UNICODE_STRING keyPath;
+    UNICODE_STRING oldValueName;
+    UNICODE_STRING newValueName;
+    HANDLE keyHandle = NULL;
+    ULONG resultLength = 0UL;
+    PKEY_VALUE_PARTIAL_INFORMATION valueInformation = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (OutputBuffer == NULL || Request == NULL || BytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+    if (OutputBufferLength < sizeof(KSWORD_ARK_REGISTRY_OPERATION_RESPONSE)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    KswordARKRegistryPrepareOperationResponse(OutputBuffer, OutputBufferLength, &response);
+    *BytesWrittenOut = sizeof(*response);
+
+    if (Request->version != KSWORD_ARK_REGISTRY_PROTOCOL_VERSION) {
+        response->status = KSWORD_ARK_REGISTRY_OPERATION_STATUS_FAILED;
+        response->lastStatus = STATUS_REVISION_MISMATCH;
+        return STATUS_SUCCESS;
+    }
+
+    status = KswordARKRegistryBuildKernelPath(Request->keyPath, &keyPath);
+    if (NT_SUCCESS(status)) {
+        KswordARKRegistryBuildValueName(Request->oldValueName, TRUE, &oldValueName);
+        KswordARKRegistryBuildValueName(Request->newValueName, TRUE, &newValueName);
+        InitializeObjectAttributes(&objectAttributes, &keyPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+        status = ZwOpenKey(&keyHandle, KEY_QUERY_VALUE | KEY_SET_VALUE, &objectAttributes);
+    }
+    if (NT_SUCCESS(status)) {
+        status = ZwQueryValueKey(keyHandle, &oldValueName, KeyValuePartialInformation, NULL, 0UL, &resultLength);
+        if (status == STATUS_BUFFER_TOO_SMALL || status == STATUS_BUFFER_OVERFLOW) {
+#pragma warning(push)
+#pragma warning(disable:4996)
+            valueInformation = (PKEY_VALUE_PARTIAL_INFORMATION)ExAllocatePoolWithTag(
+                NonPagedPoolNx,
+                resultLength,
+                KSWORD_ARK_REGISTRY_QUERY_TAG);
+#pragma warning(pop)
+            if (valueInformation == NULL) {
+                status = STATUS_INSUFFICIENT_RESOURCES;
+            }
+            else {
+                RtlZeroMemory(valueInformation, resultLength);
+                status = ZwQueryValueKey(keyHandle, &oldValueName, KeyValuePartialInformation, valueInformation, resultLength, &resultLength);
+            }
+        }
+        if (NT_SUCCESS(status) && valueInformation != NULL) {
+            status = ZwSetValueKey(
+                keyHandle,
+                &newValueName,
+                0UL,
+                valueInformation->Type,
+                valueInformation->Data,
+                valueInformation->DataLength);
+            if (NT_SUCCESS(status)) {
+                status = ZwDeleteValueKey(keyHandle, &oldValueName);
+            }
+        }
+        if (valueInformation != NULL) {
+            ExFreePoolWithTag(valueInformation, KSWORD_ARK_REGISTRY_QUERY_TAG);
+        }
+        ZwClose(keyHandle);
+    }
+
+    response->status = KswordARKRegistryMapOperationStatus(status);
+    response->lastStatus = status;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKDriverRenameRegistryKey(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _In_ const KSWORD_ARK_RENAME_REGISTRY_KEY_REQUEST* Request,
+    _Out_ size_t* BytesWrittenOut
+    )
+{
+    KSWORD_ARK_REGISTRY_OPERATION_RESPONSE* response = NULL;
+    OBJECT_ATTRIBUTES objectAttributes;
+    UNICODE_STRING keyPath;
+    UNICODE_STRING newKeyName;
+    HANDLE keyHandle = NULL;
+    USHORT newNameChars = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (OutputBuffer == NULL || Request == NULL || BytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+    if (OutputBufferLength < sizeof(KSWORD_ARK_REGISTRY_OPERATION_RESPONSE)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    KswordARKRegistryPrepareOperationResponse(OutputBuffer, OutputBufferLength, &response);
+    *BytesWrittenOut = sizeof(*response);
+
+    if (Request->version != KSWORD_ARK_REGISTRY_PROTOCOL_VERSION) {
+        response->status = KSWORD_ARK_REGISTRY_OPERATION_STATUS_FAILED;
+        response->lastStatus = STATUS_REVISION_MISMATCH;
+        return STATUS_SUCCESS;
+    }
+
+    newNameChars = KswordARKRegistryBoundedWideLength(
+        Request->newKeyName,
+        (USHORT)KSWORD_ARK_REGISTRY_ENUM_KEY_NAME_CHARS);
+    if (newNameChars == 0U || newNameChars >= KSWORD_ARK_REGISTRY_ENUM_KEY_NAME_CHARS) {
+        response->status = KSWORD_ARK_REGISTRY_OPERATION_STATUS_FAILED;
+        response->lastStatus = STATUS_INVALID_PARAMETER;
+        return STATUS_SUCCESS;
+    }
+    newKeyName.Buffer = (PWSTR)Request->newKeyName;
+    newKeyName.Length = (USHORT)(newNameChars * sizeof(WCHAR));
+    newKeyName.MaximumLength = newKeyName.Length;
+
+    status = KswordARKRegistryBuildKernelPath(Request->keyPath, &keyPath);
+    if (NT_SUCCESS(status)) {
+        InitializeObjectAttributes(&objectAttributes, &keyPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+        status = ZwOpenKey(&keyHandle, KEY_WRITE, &objectAttributes);
+        if (NT_SUCCESS(status)) {
+            status = ZwRenameKey(keyHandle, &newKeyName);
+            ZwClose(keyHandle);
+        }
+    }
+
+    response->status = KswordARKRegistryMapOperationStatus(status);
+    response->lastStatus = status;
     return STATUS_SUCCESS;
 }

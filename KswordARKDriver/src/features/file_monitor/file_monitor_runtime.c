@@ -18,9 +18,13 @@ Environment:
 #include "file_monitor_internal.h"
 #include "ark/ark_driver.h"
 
+#include <stdarg.h>
 #include <ntstrsafe.h>
 
 #define KSWORD_ARK_FILE_MONITOR_TAG 'mFsK'
+#define KSWORD_ARK_FILE_MONITOR_INSTANCE_KEY_NAME L"Instances"
+#define KSWORD_ARK_FILE_MONITOR_DEFAULT_INSTANCE_NAME L"KswordARK Instance"
+#define KSWORD_ARK_FILE_MONITOR_ALTITUDE_TEXT L"385210"
 
 typedef struct _KSWORD_ARK_FILE_MONITOR_RUNTIME
 {
@@ -151,6 +155,269 @@ Return Value:
         device,
         LevelText != NULL ? LevelText : "Info",
         MessageText != NULL ? MessageText : "");
+}
+
+static VOID
+KswordARKFileMonitorLogFormat(
+    _In_z_ PCSTR LevelText,
+    _In_z_ _Printf_format_string_ PCSTR FormatText,
+    ...
+    )
+/*++
+
+Routine Description:
+
+    格式化写入文件监控运行时日志。中文说明：初始化/启动路径不是热路径，允许
+    使用栈上小缓冲补充 NTSTATUS，避免 R3 只能看到 Win32 error=22。
+
+Arguments:
+
+    LevelText - 日志级别。
+    FormatText - printf 风格格式串。
+    ... - 格式化参数。
+
+Return Value:
+
+    None. 本函数没有返回值。
+
+--*/
+{
+    CHAR logBuffer[KSWORD_ARK_LOG_ENTRY_MAX_BYTES] = { 0 };
+    va_list arguments;
+
+    if (FormatText == NULL) {
+        return;
+    }
+
+    va_start(arguments, FormatText);
+    if (NT_SUCCESS(RtlStringCbVPrintfA(logBuffer, sizeof(logBuffer), FormatText, arguments))) {
+        KswordARKFileMonitorLog(LevelText, logBuffer);
+    }
+    va_end(arguments);
+}
+
+static NTSTATUS
+KswordARKFileMonitorWriteRegistryStringValue(
+    _In_ HANDLE KeyHandle,
+    _In_z_ PCWSTR ValueNameText,
+    _In_z_ PCWSTR ValueDataText
+    )
+/*++
+
+Routine Description:
+
+    写入 minifilter 实例注册表字符串值。中文说明：FltRegisterFilter 依赖
+    Instances\DefaultInstance 和实例 Altitude；SCM CreateService 不会自动生成这些值。
+
+Arguments:
+
+    KeyHandle - 已打开的目标键句柄。
+    ValueNameText - REG_SZ 值名。
+    ValueDataText - REG_SZ 字符串数据。
+
+Return Value:
+
+    ZwSetValueKey 返回状态。
+
+--*/
+{
+    UNICODE_STRING valueName;
+    UNICODE_STRING valueData;
+
+    if (KeyHandle == NULL || ValueNameText == NULL || ValueDataText == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlInitUnicodeString(&valueName, ValueNameText);
+    RtlInitUnicodeString(&valueData, ValueDataText);
+    return ZwSetValueKey(
+        KeyHandle,
+        &valueName,
+        0UL,
+        REG_SZ,
+        valueData.Buffer,
+        (ULONG)valueData.Length + sizeof(WCHAR));
+}
+
+static NTSTATUS
+KswordARKFileMonitorWriteRegistryDwordValue(
+    _In_ HANDLE KeyHandle,
+    _In_z_ PCWSTR ValueNameText,
+    _In_ ULONG ValueData
+    )
+/*++
+
+Routine Description:
+
+    写入 minifilter 实例注册表 DWORD 值。中文说明：Flags=0 表示默认实例可自动
+    attach，和 INF 中的配置保持一致。
+
+Arguments:
+
+    KeyHandle - 已打开的目标键句柄。
+    ValueNameText - REG_DWORD 值名。
+    ValueData - DWORD 数据。
+
+Return Value:
+
+    ZwSetValueKey 返回状态。
+
+--*/
+{
+    UNICODE_STRING valueName;
+
+    if (KeyHandle == NULL || ValueNameText == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlInitUnicodeString(&valueName, ValueNameText);
+    return ZwSetValueKey(
+        KeyHandle,
+        &valueName,
+        0UL,
+        REG_DWORD,
+        &ValueData,
+        sizeof(ValueData));
+}
+
+static NTSTATUS
+KswordARKFileMonitorCreateSubKey(
+    _In_opt_ HANDLE RootHandle,
+    _In_ PUNICODE_STRING KeyName,
+    _Out_ HANDLE* KeyHandleOut
+    )
+/*++
+
+Routine Description:
+
+    创建或打开一个相对注册表键。中文说明：使用 RootHandle 逐级创建，避免拼接
+    RegistryPath 字符串时出现长度截断或转义错误。
+
+Arguments:
+
+    RootHandle - 父键句柄，可为空；为空时 KeyName 必须是绝对路径。
+    KeyName - 子键名或绝对键路径。
+    KeyHandleOut - 返回新打开的键句柄。
+
+Return Value:
+
+    ZwCreateKey 返回状态。
+
+--*/
+{
+    OBJECT_ATTRIBUTES objectAttributes;
+    ULONG disposition = 0UL;
+
+    if (KeyName == NULL || KeyName->Buffer == NULL || KeyHandleOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *KeyHandleOut = NULL;
+    InitializeObjectAttributes(
+        &objectAttributes,
+        KeyName,
+        OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+        RootHandle,
+        NULL);
+    return ZwCreateKey(
+        KeyHandleOut,
+        KEY_READ | KEY_WRITE,
+        &objectAttributes,
+        0UL,
+        NULL,
+        REG_OPTION_NON_VOLATILE,
+        &disposition);
+}
+
+static NTSTATUS
+KswordARKFileMonitorEnsureRegistryInstances(
+    _In_ PUNICODE_STRING RegistryPath
+    )
+/*++
+
+Routine Description:
+
+    确保服务键下存在 FltMgr 要求的 minifilter Instances 配置。中文说明：正式
+    INF 安装会写入这些值，但当前 R3 快捷启动路径通过 CreateServiceW 直接注册
+    .sys，因此驱动需要在 DriverEntry 内自愈，保证 FltRegisterFilter 可用。
+
+Arguments:
+
+    RegistryPath - DriverEntry 传入的服务注册表绝对路径。
+
+Return Value:
+
+    STATUS_SUCCESS 或底层注册表写入失败状态。
+
+--*/
+{
+    UNICODE_STRING instancesKeyName;
+    UNICODE_STRING instanceKeyName;
+    HANDLE serviceKeyHandle = NULL;
+    HANDLE instancesKeyHandle = NULL;
+    HANDLE instanceKeyHandle = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS closeStatus = STATUS_SUCCESS;
+
+    if (RegistryPath == NULL || RegistryPath->Buffer == NULL || RegistryPath->Length == 0U) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = KswordARKFileMonitorCreateSubKey(NULL, RegistryPath, &serviceKeyHandle);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    RtlInitUnicodeString(&instancesKeyName, KSWORD_ARK_FILE_MONITOR_INSTANCE_KEY_NAME);
+    status = KswordARKFileMonitorCreateSubKey(serviceKeyHandle, &instancesKeyName, &instancesKeyHandle);
+    if (!NT_SUCCESS(status)) {
+        ZwClose(serviceKeyHandle);
+        return status;
+    }
+
+    status = KswordARKFileMonitorWriteRegistryStringValue(
+        instancesKeyHandle,
+        L"DefaultInstance",
+        KSWORD_ARK_FILE_MONITOR_DEFAULT_INSTANCE_NAME);
+    if (!NT_SUCCESS(status)) {
+        ZwClose(instancesKeyHandle);
+        ZwClose(serviceKeyHandle);
+        return status;
+    }
+
+    RtlInitUnicodeString(&instanceKeyName, KSWORD_ARK_FILE_MONITOR_DEFAULT_INSTANCE_NAME);
+    status = KswordARKFileMonitorCreateSubKey(instancesKeyHandle, &instanceKeyName, &instanceKeyHandle);
+    if (!NT_SUCCESS(status)) {
+        ZwClose(instancesKeyHandle);
+        ZwClose(serviceKeyHandle);
+        return status;
+    }
+
+    status = KswordARKFileMonitorWriteRegistryStringValue(
+        instanceKeyHandle,
+        L"Altitude",
+        KSWORD_ARK_FILE_MONITOR_ALTITUDE_TEXT);
+    if (NT_SUCCESS(status)) {
+        status = KswordARKFileMonitorWriteRegistryDwordValue(
+            instanceKeyHandle,
+            L"Flags",
+            0UL);
+    }
+
+    closeStatus = ZwClose(instanceKeyHandle);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(closeStatus)) {
+        status = closeStatus;
+    }
+    closeStatus = ZwClose(instancesKeyHandle);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(closeStatus)) {
+        status = closeStatus;
+    }
+    closeStatus = ZwClose(serviceKeyHandle);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(closeStatus)) {
+        status = closeStatus;
+    }
+
+    return status;
 }
 
 static VOID
@@ -568,8 +835,7 @@ Return Value:
 --*/
 {
     NTSTATUS status = STATUS_SUCCESS;
-
-    UNREFERENCED_PARAMETER(RegistryPath);
+    NTSTATUS registryStatus = STATUS_SUCCESS;
 
     RtlZeroMemory(&g_KswordArkFileMonitorRuntime, sizeof(g_KswordArkFileMonitorRuntime));
     g_KswordArkFileMonitorRuntime.Device = Device;
@@ -577,6 +843,20 @@ Return Value:
     g_KswordArkFileMonitorRuntime.RegisterStatus = STATUS_NOT_SUPPORTED;
     g_KswordArkFileMonitorRuntime.StartStatus = STATUS_NOT_SUPPORTED;
     KeInitializeSpinLock(&g_KswordArkFileMonitorRuntime.RingLock);
+
+    registryStatus = KswordARKFileMonitorEnsureRegistryInstances(RegistryPath);
+    if (!NT_SUCCESS(registryStatus)) {
+        /*
+         * 中文说明：实例注册表补齐失败不立即终止初始化。若用户通过 INF 安装过驱动，
+         * FltMgr 仍可能从已有配置完成注册；若确实缺失，后面的 FltRegisterFilter
+         * 会返回更贴近 FltMgr 的失败状态并写入 RegisterStatus。
+         */
+        g_KswordArkFileMonitorRuntime.LastErrorStatus = registryStatus;
+        KswordARKFileMonitorLogFormat(
+            "Warn",
+            "KswordARK file monitor ensure minifilter registry instances failed, status=0x%08X.",
+            registryStatus);
+    }
 
     status = FltRegisterFilter(
         DriverObject,
@@ -586,10 +866,16 @@ Return Value:
     if (!NT_SUCCESS(status)) {
         g_KswordArkFileMonitorRuntime.Filter = NULL;
         g_KswordArkFileMonitorRuntime.LastErrorStatus = status;
+        KswordARKFileMonitorLogFormat(
+            "Warn",
+            "KswordARK file monitor FltRegisterFilter failed, status=0x%08X, registryStatus=0x%08X.",
+            status,
+            registryStatus);
         return status;
     }
 
     g_KswordArkFileMonitorRuntime.RuntimeFlags |= KSWORD_ARK_FILE_MONITOR_RUNTIME_REGISTERED;
+    g_KswordArkFileMonitorRuntime.LastErrorStatus = STATUS_SUCCESS;
     KswordARKFileMonitorLog("Info", "KswordARK file monitor minifilter registered.");
     return STATUS_SUCCESS;
 }
@@ -690,6 +976,7 @@ Return Value:
         }
 
         g_KswordArkFileMonitorRuntime.RuntimeFlags |= KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED;
+        g_KswordArkFileMonitorRuntime.LastErrorStatus = STATUS_SUCCESS;
         KswordArkMinifilterCallbackUpdateState(
             g_KswordArkFileMonitorRuntime.Filter,
             g_KswordArkFileMonitorRuntime.RegisterStatus,

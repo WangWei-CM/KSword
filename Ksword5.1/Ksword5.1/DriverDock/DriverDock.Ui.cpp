@@ -1,3 +1,8 @@
+﻿#include "DriverDock.Internal.h"
+
+// 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
+using namespace ksword::driver_dock_internal;
+
 void DriverDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
@@ -97,6 +102,7 @@ void DriverDock::initializeOverviewTab()
     m_moduleTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_moduleTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_moduleTable->setAlternatingRowColors(true);
+    m_moduleTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_moduleTable->verticalHeader()->setVisible(false);
     m_moduleTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_moduleTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
@@ -406,6 +412,10 @@ void DriverDock::initializeConnections()
     connect(m_serviceTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
         {
             showServiceTableContextMenu(localPosition);
+        });
+    connect(m_moduleTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
+        {
+            showModuleTableContextMenu(localPosition);
         });
 
     // 操作页：浏览路径、注册更新、挂载卸载、删除、状态查询。

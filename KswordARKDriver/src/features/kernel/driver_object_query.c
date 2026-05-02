@@ -582,6 +582,150 @@ Return Value:
     Response->returnedDeviceCount = returnedRows;
 }
 
+// 判断对象路径是否带指定前缀。中文说明：只处理 ASCII 范围大小写，足够覆盖 NT 对象目录名。
+static BOOLEAN
+KswordARKDriverObjectNameHasPrefix(
+    _In_reads_(KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS) const WCHAR* ObjectName,
+    _In_z_ const WCHAR* Prefix
+    )
+{
+    ULONG index = 0UL;
+
+    if (ObjectName == NULL || Prefix == NULL) {
+        return FALSE;
+    }
+
+    while (Prefix[index] != L'\0') {
+        WCHAR left = ObjectName[index];
+        WCHAR right = Prefix[index];
+
+        if (left >= L'a' && left <= L'z') {
+            left = (WCHAR)(left - L'a' + L'A');
+        }
+        if (right >= L'a' && right <= L'z') {
+            right = (WCHAR)(right - L'a' + L'A');
+        }
+        if (left != right) {
+            return FALSE;
+        }
+        ++index;
+    }
+
+    return TRUE;
+}
+
+// 提取对象路径最后一级。中文说明：\FileSystem\Filters\X 会提取 X。
+static NTSTATUS
+KswordARKDriverObjectExtractLeafName(
+    _In_reads_(KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS) const WCHAR* ObjectName,
+    _Out_writes_(LeafChars) PWCHAR LeafName,
+    _In_ ULONG LeafChars
+    )
+{
+    ULONG index = 0UL;
+    ULONG leafStart = 0UL;
+
+    if (ObjectName == NULL || LeafName == NULL || LeafChars == 0UL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    LeafName[0] = L'\0';
+    while (index < KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS &&
+        ObjectName[index] != L'\0') {
+        if (ObjectName[index] == L'\\') {
+            leafStart = index + 1UL;
+        }
+        ++index;
+    }
+    if (index == 0UL || leafStart >= index) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    return RtlStringCchCopyW(LeafName, LeafChars, ObjectName + leafStart);
+}
+
+// 构造第一候选对象路径。中文说明：完整路径保持原样，裸名称默认走 \Driver\。
+static NTSTATUS
+KswordARKDriverObjectBuildObjectName(
+    _In_reads_(KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS) const WCHAR* SourceName,
+    _Out_writes_(DestinationChars) PWCHAR DestinationName,
+    _In_ ULONG DestinationChars
+    )
+{
+    ULONG inputChars = 0UL;
+
+    if (SourceName == NULL || DestinationName == NULL || DestinationChars == 0UL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    DestinationName[0] = L'\0';
+    while (inputChars < KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS &&
+        SourceName[inputChars] != L'\0') {
+        ++inputChars;
+    }
+    if (inputChars == 0UL || inputChars >= KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (SourceName[0] == L'\\') {
+        return RtlStringCchCopyNW(
+            DestinationName,
+            DestinationChars,
+            SourceName,
+            inputChars);
+    }
+
+    return RtlStringCchPrintfW(
+        DestinationName,
+        DestinationChars,
+        L"\\Driver\\%ws",
+        SourceName);
+}
+
+// 引用单个完整 DriverObject 路径。中文说明：成功时调用者负责 ObDereferenceObject。
+static NTSTATUS
+KswordARKDriverObjectReferenceCandidateName(
+    _In_z_ const WCHAR* CandidateName,
+    _Outptr_ PDRIVER_OBJECT* DriverObjectOut
+    )
+{
+    UNICODE_STRING objectName;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (CandidateName == NULL || DriverObjectOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *DriverObjectOut = NULL;
+    RtlInitUnicodeString(&objectName, CandidateName);
+    // ObReferenceObjectByName 返回对象引用而不是句柄；中文说明：这里不能使用
+    // OBJ_KERNEL_HANDLE，否则会把句柄属性传给对象名解析路径并触发参数错误。
+    status = ObReferenceObjectByName(
+        &objectName,
+        OBJ_CASE_INSENSITIVE,
+        NULL,
+        0,
+        *IoDriverObjectType,
+        KernelMode,
+        NULL,
+        (PVOID*)DriverObjectOut);
+    if (!NT_SUCCESS(status)) {
+        *DriverObjectOut = NULL;
+    }
+    return status;
+}
+
+// 判断是否继续尝试其它目录。中文说明：参数/权限类错误不应被 fallback 掩盖。
+static BOOLEAN
+KswordARKDriverObjectShouldTryAlternateName(
+    _In_ NTSTATUS Status
+    )
+{
+    return (Status == STATUS_OBJECT_NAME_NOT_FOUND ||
+        Status == STATUS_OBJECT_PATH_NOT_FOUND ||
+        Status == STATUS_NOT_FOUND) ? TRUE : FALSE;
+}
+
 static NTSTATUS
 KswordARKReferenceDriverObjectByRequestName(
     _In_ const KSWORD_ARK_QUERY_DRIVER_OBJECT_REQUEST* Request,
@@ -604,9 +748,9 @@ Return Value:
 
 --*/
 {
-    WCHAR objectNameBuffer[KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS + 16U] = { 0 };
-    UNICODE_STRING objectName;
-    ULONG inputChars = 0UL;
+    WCHAR firstCandidate[KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS] = { 0 };
+    WCHAR leafName[KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS] = { 0 };
+    WCHAR alternateName[KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS] = { 0 };
     NTSTATUS status = STATUS_SUCCESS;
 
     if (Request == NULL || DriverObjectOut == NULL) {
@@ -614,47 +758,85 @@ Return Value:
     }
 
     *DriverObjectOut = NULL;
-    while (inputChars < KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS &&
-        Request->driverName[inputChars] != L'\0') {
-        ++inputChars;
-    }
-    if (inputChars == 0UL || inputChars >= KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS) {
-        return STATUS_INVALID_PARAMETER;
+
+    status = KswordARKDriverObjectBuildObjectName(
+        Request->driverName,
+        firstCandidate,
+        RTL_NUMBER_OF(firstCandidate));
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
-    if (inputChars >= 8UL &&
-        (Request->driverName[0] == L'\\') &&
-        ((Request->driverName[1] == L'D') || (Request->driverName[1] == L'd')) &&
-        ((Request->driverName[2] == L'R') || (Request->driverName[2] == L'r')) &&
-        ((Request->driverName[3] == L'I') || (Request->driverName[3] == L'i')) &&
-        ((Request->driverName[4] == L'V') || (Request->driverName[4] == L'v')) &&
-        ((Request->driverName[5] == L'E') || (Request->driverName[5] == L'e')) &&
-        ((Request->driverName[6] == L'R') || (Request->driverName[6] == L'r')) &&
-        Request->driverName[7] == L'\\') {
-        RtlCopyMemory(objectNameBuffer, Request->driverName, inputChars * sizeof(WCHAR));
-        objectNameBuffer[inputChars] = L'\0';
+    status = KswordARKDriverObjectReferenceCandidateName(firstCandidate, DriverObjectOut);
+    if (NT_SUCCESS(status) || !KswordARKDriverObjectShouldTryAlternateName(status)) {
+        return status;
     }
-    else {
-        status = RtlStringCchPrintfW(
-            objectNameBuffer,
-            RTL_NUMBER_OF(objectNameBuffer),
-            L"\\Driver\\%ws",
-            Request->driverName);
-        if (!NT_SUCCESS(status)) {
-            return status;
+
+    /*
+     * 中文说明：和强制卸载路径保持一致。很多文件系统/过滤驱动对象位于
+     * \FileSystem 或 \FileSystem\Filters，不能只把服务名拼成 \Driver\Name。
+     */
+    if (!NT_SUCCESS(KswordARKDriverObjectExtractLeafName(
+        firstCandidate,
+        leafName,
+        RTL_NUMBER_OF(leafName)))) {
+        return status;
+    }
+
+    if (!KswordARKDriverObjectNameHasPrefix(firstCandidate, L"\\FileSystem\\")) {
+        NTSTATUS alternateStatus = RtlStringCchPrintfW(
+            alternateName,
+            RTL_NUMBER_OF(alternateName),
+            L"\\FileSystem\\%ws",
+            leafName);
+        if (NT_SUCCESS(alternateStatus)) {
+            alternateStatus = KswordARKDriverObjectReferenceCandidateName(
+                alternateName,
+                DriverObjectOut);
+            if (NT_SUCCESS(alternateStatus) ||
+                !KswordARKDriverObjectShouldTryAlternateName(alternateStatus)) {
+                return alternateStatus;
+            }
+            status = alternateStatus;
         }
     }
 
-    RtlInitUnicodeString(&objectName, objectNameBuffer);
-    status = ObReferenceObjectByName(
-        &objectName,
-        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
-        NULL,
-        0,
-        *IoDriverObjectType,
-        KernelMode,
-        NULL,
-        (PVOID*)DriverObjectOut);
+    if (!KswordARKDriverObjectNameHasPrefix(firstCandidate, L"\\FileSystem\\Filters\\")) {
+        NTSTATUS alternateStatus = RtlStringCchPrintfW(
+            alternateName,
+            RTL_NUMBER_OF(alternateName),
+            L"\\FileSystem\\Filters\\%ws",
+            leafName);
+        if (NT_SUCCESS(alternateStatus)) {
+            alternateStatus = KswordARKDriverObjectReferenceCandidateName(
+                alternateName,
+                DriverObjectOut);
+            if (NT_SUCCESS(alternateStatus) ||
+                !KswordARKDriverObjectShouldTryAlternateName(alternateStatus)) {
+                return alternateStatus;
+            }
+            status = alternateStatus;
+        }
+    }
+
+    if (!KswordARKDriverObjectNameHasPrefix(firstCandidate, L"\\Driver\\")) {
+        NTSTATUS alternateStatus = RtlStringCchPrintfW(
+            alternateName,
+            RTL_NUMBER_OF(alternateName),
+            L"\\Driver\\%ws",
+            leafName);
+        if (NT_SUCCESS(alternateStatus)) {
+            alternateStatus = KswordARKDriverObjectReferenceCandidateName(
+                alternateName,
+                DriverObjectOut);
+            if (NT_SUCCESS(alternateStatus) ||
+                !KswordARKDriverObjectShouldTryAlternateName(alternateStatus)) {
+                return alternateStatus;
+            }
+            status = alternateStatus;
+        }
+    }
+
     return status;
 }
 
@@ -688,6 +870,7 @@ Return Value:
     const size_t responseHeaderSize =
         sizeof(KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE) - sizeof(KSWORD_ARK_DRIVER_DEVICE_ENTRY);
     KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE* response = NULL;
+    KSWORD_ARK_QUERY_DRIVER_OBJECT_REQUEST requestSnapshot;
     PDRIVER_OBJECT driverObject = NULL;
     KSW_SYSTEM_MODULE_INFORMATION* moduleInfo = NULL;
     ULONG moduleInfoBytes = 0UL;
@@ -706,6 +889,13 @@ Return Value:
         return STATUS_BUFFER_TOO_SMALL;
     }
 
+    /*
+     * 中文说明：该 IOCTL 是 METHOD_BUFFERED，输入和输出可能共用同一个
+     * SystemBuffer；清零响应前先复制请求，避免 driverName 被擦掉后变成
+     * STATUS_INVALID_PARAMETER。
+     */
+    RtlCopyMemory(&requestSnapshot, request, sizeof(requestSnapshot));
+
     response = (KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE*)outputBuffer;
     RtlZeroMemory(outputBuffer, outputBufferLength);
     response->version = KSWORD_ARK_DRIVER_OBJECT_PROTOCOL_VERSION;
@@ -714,12 +904,12 @@ Return Value:
     response->lastStatus = STATUS_SUCCESS;
 
     deviceCapacity = (ULONG)((outputBufferLength - responseHeaderSize) / sizeof(KSWORD_ARK_DRIVER_DEVICE_ENTRY));
-    includeMajor = ((request->flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_MAJOR_FUNCTIONS) != 0UL) ? TRUE : FALSE;
-    includeDevices = ((request->flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_DEVICES) != 0UL) ? TRUE : FALSE;
-    includeNames = ((request->flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_NAMES) != 0UL) ? TRUE : FALSE;
-    includeAttached = ((request->flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_ATTACHED) != 0UL) ? TRUE : FALSE;
+    includeMajor = ((requestSnapshot.flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_MAJOR_FUNCTIONS) != 0UL) ? TRUE : FALSE;
+    includeDevices = ((requestSnapshot.flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_DEVICES) != 0UL) ? TRUE : FALSE;
+    includeNames = ((requestSnapshot.flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_NAMES) != 0UL) ? TRUE : FALSE;
+    includeAttached = ((requestSnapshot.flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_ATTACHED) != 0UL) ? TRUE : FALSE;
 
-    status = KswordARKReferenceDriverObjectByRequestName(request, &driverObject);
+    status = KswordARKReferenceDriverObjectByRequestName(&requestSnapshot, &driverObject);
     response->lastStatus = status;
     if (!NT_SUCCESS(status)) {
         response->queryStatus =
@@ -785,8 +975,8 @@ Return Value:
     if (includeDevices) {
         KswordARKFillDeviceRows(
             driverObject,
-            request->maxDevices,
-            request->maxAttachedDevices,
+            requestSnapshot.maxDevices,
+            requestSnapshot.maxAttachedDevices,
             includeAttached,
             response,
             deviceCapacity);

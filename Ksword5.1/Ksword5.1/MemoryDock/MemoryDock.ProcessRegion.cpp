@@ -1,5 +1,10 @@
+﻿#include "MemoryDock.Internal.h"
+
+// 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
+using namespace ksword::memory_dock_internal;
+
 // ============================================================
-// MemoryDock.ProcessRegion.inc
+// MemoryDock.ProcessRegion.cpp
 // 作用：
 // - 负责进程列表、模块列表、内存区域枚举与过滤展示。
 // - 聚焦“附加目标与地址空间概览”能力。
@@ -161,6 +166,7 @@ void MemoryDock::updateProcessComboFromCache()
     }
 
     // 当前附加 PID 还存在时，默认选中它。
+    bool selectedAttachedProcess = false;
     if (m_attachedPid != 0)
     {
         for (int comboIndex = 0; comboIndex < m_processCombo->count(); ++comboIndex)
@@ -168,14 +174,18 @@ void MemoryDock::updateProcessComboFromCache()
             if (m_processCombo->itemData(comboIndex, Qt::UserRole).toUInt() == m_attachedPid)
             {
                 m_processCombo->setCurrentIndex(comboIndex);
-                return;
+                selectedAttachedProcess = true;
+                break;
             }
         }
     }
-    if (m_processCombo->count() > 0)
+    if (!selectedAttachedProcess && m_processCombo->count() > 0)
     {
         m_processCombo->setCurrentIndex(0);
     }
+
+    // Tab6 的 R0 读写页也复用进程缓存；顶部下拉重建完成后同步刷新目标选择。
+    updateDriverMemoryBaseComboFromProcessCache();
 }
 
 void MemoryDock::rebuildModuleTableFromCache()

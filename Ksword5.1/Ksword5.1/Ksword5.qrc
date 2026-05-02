@@ -10,6 +10,7 @@
     <qresource prefix="/Icon">
         <!-- 日志面板使用的图标资源（均来自 Resource/Icon 图标库） -->
         <file alias="log_export.svg">Resource/Icon/file/file_export_line.svg</file>
+        <file alias="reg_import.svg">Resource/Icon/file/file_import_line.svg</file>
         <file alias="log_clear.svg">Resource/Icon/system/delete_2_line.svg</file>
         <file alias="log_copy.svg">Resource/Icon/file/copy_line.svg</file>
         <file alias="log_clipboard.svg">Resource/Icon/file/clipboard_line.svg</file>
@@ -48,6 +49,8 @@
         <file alias="desktop_switch.svg">Resource/Icon/system/switch_line.svg</file>
         <file alias="desktop_create.svg">Resource/Icon/system/add_square_line.svg</file>
         <file alias="window_picker_target.svg">Resource/Icon/business/target_line.svg</file>
+        <file alias="titlebar_capture_allowed.svg">Resource/Icon/system/eye_line.svg</file>
+        <file alias="titlebar_capture_protected.svg">Resource/Icon/system/eye_close_line.svg</file>
         <file alias="titlebar_pin_line.svg">Resource/Icon/file/pin_line.svg</file>
         <file alias="titlebar_pin_fill.svg">Resource/Icon/file/pin_fill.svg</file>
         <file alias="titlebar_minimize.svg">Resource/Icon/system/minimize_line.svg</file>

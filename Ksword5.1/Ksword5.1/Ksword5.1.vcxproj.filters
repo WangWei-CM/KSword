@@ -73,6 +73,15 @@
     <ClCompile Include="DriverDock\DriverDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DriverDock\DriverDock.Ui.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DriverDock\DriverDock.Operation.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DriverDock\DriverDock.DebugAndUtils.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="FileDock\FileDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -152,6 +161,24 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDock.DriverMemoryRw.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDock.UiBuild.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDock.UiWireAndStatus.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDock.ProcessRegion.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDock.SearchParseAndFilter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDock.SearchFlow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDock.ViewBreakpointUtil.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MiscDock\BootEditor\BootEditorTab.cpp">
@@ -367,6 +394,12 @@
     <ClCompile Include="UI\HexEditorWidget.Selection.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\HexEditorWidget.Ui.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\HexEditorWidget.Tools.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\CodeEditorWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -504,6 +537,9 @@
     <QtMoc Include="DriverDock\DriverDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="DriverDock\DriverDock.Internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <QtMoc Include="FileDock\FileDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
@@ -516,6 +552,9 @@
     <QtMoc Include="MemoryDock\MemoryDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="MemoryDock\MemoryDock.Internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <QtMoc Include="MiscDock\BootEditor\BootEditorTab.h">
       <Filter>Header Files</Filter>
     </QtMoc>
@@ -582,6 +621,9 @@
     <QtMoc Include="UI\HexEditorWidget.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="UI\HexEditorWidget.Internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <QtMoc Include="UI\CodeEditorWidget.h">
       <Filter>Header Files</Filter>
     </QtMoc>

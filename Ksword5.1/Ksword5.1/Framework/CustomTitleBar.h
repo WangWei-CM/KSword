@@ -52,6 +52,13 @@ namespace ks::ui
         // - 传出：无。
         void setPinnedState(bool pinnedState);
 
+        // setCaptureProtectionState：
+        // - 作用：同步截屏屏蔽按钮显示状态（眼睛/闭眼）；
+        // - 调用：MainWindow 每次 SetWindowDisplayAffinity 状态变化后调用；
+        // - 传入 protectedState：true=已屏蔽截屏，false=允许截屏；
+        // - 传出：无。
+        void setCaptureProtectionState(bool protectedState);
+
         // setMaximizedState：
         // - 作用：同步最大化按钮图标（最大化/还原）；
         // - 调用：MainWindow 在窗口状态变化时调用；
@@ -89,6 +96,11 @@ namespace ks::ui
         // - 作用：请求切换置顶状态；
         // - 触发：点击图钉按钮时触发。
         void requestTogglePinned();
+
+        // requestToggleCaptureProtection：
+        // - 作用：请求切换主窗口截屏屏蔽状态；
+        // - 触发：点击标题栏眼睛按钮时触发。
+        void requestToggleCaptureProtection();
 
         // requestMinimizeWindow：
         // - 作用：请求最小化主窗口；
@@ -154,6 +166,13 @@ namespace ks::ui
         // - 作用：把命令输入框宽度调整为标题栏可用宽度的 1/3。
         void updateCommandLineWidth();
 
+        // updateUserBadgeWidth：
+        // - 作用：根据当前展示用户名重新计算用户名徽标宽度；
+        // - 调用：用户名文本或主题字体刷新后调用；
+        // - 传入 displayUserNameText：按钮实际显示的用户名文本；
+        // - 传出：无。
+        void updateUserBadgeWidth(const QString& displayUserNameText);
+
         // tryStartWindowSystemMove：
         // - 作用：向宿主窗口发起一次系统级拖动；
         // - 调用：mouseMoveEvent 在达到拖动阈值后调用；
@@ -195,6 +214,7 @@ namespace ks::ui
         QWidget* m_rightWidget = nullptr;         // m_rightWidget：右侧按钮区容器。
         QHBoxLayout* m_rightLayout = nullptr;     // m_rightLayout：右侧按钮区布局。
         QWidget* m_customRightWidget = nullptr;   // m_customRightWidget：右侧控制按钮前的自定义扩展控件。
+        QPushButton* m_captureProtectionButton = nullptr; // m_captureProtectionButton：截屏屏蔽切换按钮。
         QPushButton* m_pinButton = nullptr;       // m_pinButton：置顶切换图钉按钮。
         QPushButton* m_minButton = nullptr;       // m_minButton：最小化按钮。
         QPushButton* m_maxButton = nullptr;       // m_maxButton：最大化/还原按钮。
@@ -204,6 +224,7 @@ namespace ks::ui
 
         QString m_rawUserNameText;                // m_rawUserNameText：读取到的原始用户名。
         bool m_isSpecialUser = false;             // m_isSpecialUser：是否命中“33251”特判。
+        bool m_captureProtectionEnabled = false;  // m_captureProtectionEnabled：当前是否启用截屏屏蔽。
         bool m_isPinned = false;                  // m_isPinned：当前置顶状态。
         bool m_isMaximized = false;               // m_isMaximized：当前窗口是否最大化。
         bool m_darkModeEnabled = false;           // m_darkModeEnabled：当前是否深色主题。

@@ -126,6 +126,9 @@
   <ItemGroup>
     <ResourceCompile Include="AppIcon.rc" />
     <ClCompile Include="DriverDock\DriverDock.cpp" />
+    <ClCompile Include="DriverDock\DriverDock.Ui.cpp" />
+    <ClCompile Include="DriverDock\DriverDock.Operation.cpp" />
+    <ClCompile Include="DriverDock\DriverDock.DebugAndUtils.cpp" />
     <ClCompile Include="FileDock\FileDock.cpp" />
     <ClCompile Include="FileDock\FileDock.HandleUsage.cpp" />
     <ClCompile Include="FileDock\FileHandleUsageScanner.cpp" />
@@ -179,6 +182,12 @@
     <ClCompile Include="MiscDock\DiskEditor\DiskMapWidget.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.DriverMemoryRw.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDock.UiBuild.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDock.UiWireAndStatus.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDock.ProcessRegion.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDock.SearchParseAndFilter.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDock.SearchFlow.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDock.ViewBreakpointUtil.cpp" />
     <ClCompile Include="MiscDock\BootEditor\BootEditorTab.cpp" />
     <ClCompile Include="MiscDock\MiscDock.cpp" />
     <ClCompile Include="MonitorDock\MonitorDock.cpp" />
@@ -247,6 +256,8 @@
     <ClCompile Include="UI\GlobalDialogTheme.cpp" />
     <ClCompile Include="UI\HexEditorWidget.cpp" />
     <ClCompile Include="UI\HexEditorWidget.Selection.cpp" />
+    <ClCompile Include="UI\HexEditorWidget.Ui.cpp" />
+    <ClCompile Include="UI\HexEditorWidget.Tools.cpp" />
     <ClCompile Include="UI\PerformanceNavCard.cpp" />
     <ClCompile Include="UI\ThemedMessageBox.cpp" />
     <ClCompile Include="UI\UIBaseFunction.cpp" />
@@ -311,6 +322,7 @@
     <ClInclude Include="theme.h" />
     <ClInclude Include="UI\UI_All.h" />
     <QtMoc Include="DriverDock\DriverDock.h" />
+    <ClInclude Include="DriverDock\DriverDock.Internal.h" />
     <QtMoc Include="FileDock\FileDock.h" />
     <QtMoc Include="句柄\HandleDock.h" />
     <ClInclude Include="句柄\HandleObjectTypeWorker.h" />
@@ -321,6 +333,7 @@
     <QtMoc Include="KernelDock\KernelDock.h" />
     <QtMoc Include="KernelDock\KernelDock.CallbackPromptManager.h" />
     <QtMoc Include="MemoryDock\MemoryDock.h" />
+    <ClInclude Include="MemoryDock\MemoryDock.Internal.h" />
     <QtMoc Include="MiscDock\BootEditor\BootEditorTab.h" />
     <ClInclude Include="MiscDock\DiskEditor\DiskAdvancedModels.h" />
     <ClInclude Include="MiscDock\DiskEditor\DiskEditorBackend.h" />
@@ -351,6 +364,7 @@
     <QtMoc Include="UI\CodeEditorWidget.h" />
     <ClInclude Include="UI\GlobalDialogTheme.h" />
     <QtMoc Include="UI\HexEditorWidget.h" />
+    <ClInclude Include="UI\HexEditorWidget.Internal.h" />
     <ClInclude Include="UI\PerformanceNavCard.h" />
     <ClInclude Include="UI\ThemedMessageBox.h" />
     <ClInclude Include="SettingsDock\AppearanceSettings.h" />

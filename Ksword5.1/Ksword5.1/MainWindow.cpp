@@ -85,6 +85,16 @@
 
 namespace
 {
+    // kDockLayoutConfigFileVersion 作用：
+    // - 作为 ADS saveState/restoreState 的版本号；
+    // - Dock 集合或默认布局发生不兼容变化时递增，可自动放弃旧布局。
+    constexpr int kDockLayoutConfigFileVersion = 1;
+
+    // kDockLayoutConfigFileName 作用：
+    // - 定义用户拖拽后的 ADS 布局配置文件名；
+    // - 文件落在 exe 同级 config 目录，便于发行包独立携带配置。
+    constexpr const char* kDockLayoutConfigFileName = "ksword_ads_layout.bin";
+
     // GlobalContextMenuThemeFilter 作用：
     // - 在应用层拦截所有 QMenu 的显示/样式变化事件；
     // - 对“未显式设置样式”的菜单自动套用统一主题样式，避免遗漏单点 setStyleSheet。
@@ -528,6 +538,13 @@ namespace
     // - 传给 DWMWA_BORDER_COLOR 后表示“不绘制可见边框”；
     // - 保留阴影与缩放能力，仅移除闪白边线。
     constexpr DWORD kDwmColorNone = 0xFFFFFFFE;
+    // WDA_* 兼容常量：
+    // - WDA_EXCLUDEFROMCAPTURE 在 Windows 10 20H2+ 支持，截图/录屏中直接隐藏窗口；
+    // - WDA_MONITOR 是旧系统可用回退，截图/录屏中窗口区域显示为黑屏；
+    // - WDA_NONE 用于关闭截屏屏蔽，恢复正常捕获。
+    constexpr DWORD kWindowDisplayAffinityAllowCapture = 0x00000000;
+    constexpr DWORD kWindowDisplayAffinityMonitorOnly = 0x00000001;
+    constexpr DWORD kWindowDisplayAffinityExcludeFromCapture = 0x00000011;
     constexpr wchar_t kR0DriverServiceName[] = L"KswordARK";
     constexpr wchar_t kR0DriverDisplayName[] = L"KswordARK Driver Service";
     constexpr DWORD kR0ServiceWaitTimeoutMs = 9000;
@@ -2150,6 +2167,9 @@ void MainWindow::closeEvent(QCloseEvent* event)
     kLogEvent closeEventLog;
     info << closeEventLog << "[MainWindow] 收到关闭事件，准备退出进程。" << eol;
 
+    // 退出时优先保存 ADS 布局，确保用户拖拽/浮动/激活 Tab 状态下次启动可恢复。
+    saveDockLayoutToConfig();
+
     // 停止权限状态定时器，避免退出阶段继续触发 UI 更新。
     if (m_privilegeStatusTimer != nullptr)
     {
@@ -2750,6 +2770,7 @@ void MainWindow::initCustomTitleBar()
 
     m_customTitleBar = new ks::ui::CustomTitleBar(this);
     m_customTitleBar->setPinnedState(m_windowPinned);
+    m_customTitleBar->setCaptureProtectionState(m_captureProtectionEnabled);
     syncCustomTitleBarMaximizedState();
     m_customTitleBar->setDarkModeEnabled(KswordTheme::IsDarkModeEnabled());
     if (menuBar() != nullptr)
@@ -2773,6 +2794,9 @@ void MainWindow::initCustomTitleBar()
 
     connect(m_customTitleBar, &ks::ui::CustomTitleBar::requestTogglePinned, this, [this]() {
         togglePinnedWindowState();
+    });
+    connect(m_customTitleBar, &ks::ui::CustomTitleBar::requestToggleCaptureProtection, this, [this]() {
+        toggleCaptureProtectionState();
     });
     connect(m_customTitleBar, &ks::ui::CustomTitleBar::requestMinimizeWindow, this, [this]() {
         showMinimized();
@@ -2893,6 +2917,89 @@ void MainWindow::togglePinnedWindowState()
     setPinnedWindowState(!m_windowPinned, true);
 }
 
+void MainWindow::setCaptureProtectionState(const bool protectedState, const bool emitLog)
+{
+    if (m_captureProtectionEnabled == protectedState)
+    {
+        if (m_customTitleBar != nullptr)
+        {
+            m_customTitleBar->setCaptureProtectionState(m_captureProtectionEnabled);
+        }
+        return;
+    }
+
+    const HWND mainWindowHandle = reinterpret_cast<HWND>(winId());
+    if (mainWindowHandle == nullptr || ::IsWindow(mainWindowHandle) == FALSE)
+    {
+        kLogEvent failedEvent;
+        err << failedEvent << "[MainWindow] 截屏屏蔽切换失败：主窗口句柄无效。" << eol;
+        return;
+    }
+
+    // 目标策略：
+    // - 开启时先请求 WDA_EXCLUDEFROMCAPTURE，Windows 10 20H2+ 会从截图/录屏中隐藏窗口；
+    // - 若系统或窗口组合不支持，则回退 WDA_MONITOR，旧系统会在截图/录屏中显示黑屏；
+    // - 关闭时写入 WDA_NONE，恢复正常捕获。
+    DWORD appliedAffinity = kWindowDisplayAffinityAllowCapture;
+    BOOL setAffinityResult = FALSE;
+    if (protectedState)
+    {
+        appliedAffinity = kWindowDisplayAffinityExcludeFromCapture;
+        setAffinityResult = ::SetWindowDisplayAffinity(mainWindowHandle, appliedAffinity);
+        if (setAffinityResult == FALSE)
+        {
+            appliedAffinity = kWindowDisplayAffinityMonitorOnly;
+            setAffinityResult = ::SetWindowDisplayAffinity(mainWindowHandle, appliedAffinity);
+        }
+    }
+    else
+    {
+        appliedAffinity = kWindowDisplayAffinityAllowCapture;
+        setAffinityResult = ::SetWindowDisplayAffinity(mainWindowHandle, appliedAffinity);
+    }
+
+    if (setAffinityResult == FALSE)
+    {
+        const DWORD errorCode = ::GetLastError();
+        kLogEvent failedEvent;
+        err << failedEvent
+            << "[MainWindow] 截屏屏蔽切换失败, targetProtected="
+            << (protectedState ? "true" : "false")
+            << ", errorCode="
+            << errorCode
+            << eol;
+        QMessageBox::warning(
+            this,
+            QStringLiteral("截屏屏蔽"),
+            QStringLiteral("截屏屏蔽切换失败，错误码：%1").arg(errorCode));
+        return;
+    }
+
+    m_captureProtectionEnabled = protectedState;
+    if (m_customTitleBar != nullptr)
+    {
+        m_customTitleBar->setCaptureProtectionState(m_captureProtectionEnabled);
+    }
+
+    if (emitLog)
+    {
+        kLogEvent captureProtectionEvent;
+        info << captureProtectionEvent
+            << "[MainWindow] 截屏屏蔽状态已切换, protected="
+            << (m_captureProtectionEnabled ? "true" : "false")
+            << ", affinity=0x"
+            << std::hex
+            << static_cast<unsigned long>(appliedAffinity)
+            << std::dec
+            << eol;
+    }
+}
+
+void MainWindow::toggleCaptureProtectionState()
+{
+    setCaptureProtectionState(!m_captureProtectionEnabled, true);
+}
+
 void MainWindow::executeCommandInNewConsole(const QString& commandText)
 {
     const QString trimmedCommandText = commandText.trimmed();
@@ -3009,7 +3116,7 @@ void MainWindow::initMenus()
     m_exitMenuButton->setAutoRaise(true);
     m_exitMenuButton->setFixedHeight(22);
     m_exitMenuButton->setShortcut(QKeySequence(QStringLiteral("Ctrl+Q")));
-    connect(m_exitMenuButton, &QToolButton::clicked, QApplication::instance(), &QApplication::quit);
+    connect(m_exitMenuButton, &QToolButton::clicked, this, &MainWindow::close);
 
     m_settingsMenuButton = new QToolButton(m_topActionRowWidget);
     m_settingsMenuButton->setObjectName(QStringLiteral("ksSettingsMenuButton"));
@@ -5423,6 +5530,148 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     kPro.set(progressPid, QStringLiteral("%1页加载完成").arg(dockTitleText).toStdString(), 0, 100.0f);
 }
 
+void MainWindow::configureDockWidgetPersistentIdentity(
+    ads::CDockWidget* dockWidget,
+    const QString& dockKey) const
+{
+    if (dockWidget == nullptr)
+    {
+        return;
+    }
+
+    // normalizedKey 用途：生成稳定、语言无关的 ADS objectName。
+    const QString normalizedKey = dockKey.trimmed().toLower();
+    if (normalizedKey.isEmpty())
+    {
+        return;
+    }
+
+    dockWidget->setObjectName(QStringLiteral("ksDock_%1").arg(normalizedKey));
+    dockWidget->setProperty("ks_dock_layout_key", normalizedKey);
+}
+
+QString MainWindow::resolveDockLayoutConfigPath() const
+{
+    // applicationDirectoryPath 用途：固定指向当前 exe 所在目录，不向源码目录回退。
+    const QString applicationDirectoryPath = QDir::cleanPath(QCoreApplication::applicationDirPath());
+    const QDir rootDirectory(applicationDirectoryPath);
+    return QDir::cleanPath(
+        rootDirectory.absoluteFilePath(
+            QStringLiteral("config/%1").arg(QString::fromLatin1(kDockLayoutConfigFileName))));
+}
+
+bool MainWindow::restoreDockLayoutFromConfig()
+{
+    if (m_pDockManager == nullptr)
+    {
+        return false;
+    }
+
+    const QString layoutConfigPath = resolveDockLayoutConfigPath();
+    QFile layoutFile(layoutConfigPath);
+    if (!layoutFile.exists())
+    {
+        kLogEvent layoutEvent;
+        info << layoutEvent
+            << "[MainWindow][ADS] 未发现布局配置，使用默认 Dock 布局。 path="
+            << layoutConfigPath.toStdString()
+            << eol;
+        return false;
+    }
+
+    if (!layoutFile.open(QIODevice::ReadOnly))
+    {
+        kLogEvent layoutEvent;
+        warn << layoutEvent
+            << "[MainWindow][ADS] 打开布局配置失败，使用默认 Dock 布局。 path="
+            << layoutConfigPath.toStdString()
+            << eol;
+        return false;
+    }
+
+    const QByteArray savedStateBytes = layoutFile.readAll();
+    layoutFile.close();
+    if (savedStateBytes.isEmpty())
+    {
+        kLogEvent layoutEvent;
+        warn << layoutEvent
+            << "[MainWindow][ADS] 布局配置为空，使用默认 Dock 布局。 path="
+            << layoutConfigPath.toStdString()
+            << eol;
+        return false;
+    }
+
+    const bool restoreOk = m_pDockManager->restoreState(
+        savedStateBytes,
+        kDockLayoutConfigFileVersion);
+    m_dockLayoutRestoredFromConfig = restoreOk;
+
+    kLogEvent layoutEvent;
+    (restoreOk ? info : warn) << layoutEvent
+        << "[MainWindow][ADS] 布局配置恢复"
+        << (restoreOk ? "成功" : "失败")
+        << "。 path="
+        << layoutConfigPath.toStdString()
+        << ", bytes="
+        << savedStateBytes.size()
+        << eol;
+    return restoreOk;
+}
+
+bool MainWindow::saveDockLayoutToConfig() const
+{
+    if (m_pDockManager == nullptr)
+    {
+        return false;
+    }
+
+    const QString layoutConfigPath = resolveDockLayoutConfigPath();
+    const QFileInfo layoutFileInfo(layoutConfigPath);
+    QDir layoutDirectory(layoutFileInfo.absolutePath());
+    if (!layoutDirectory.exists() && !layoutDirectory.mkpath(QStringLiteral(".")))
+    {
+        kLogEvent layoutEvent;
+        warn << layoutEvent
+            << "[MainWindow][ADS] 创建布局配置目录失败。 dir="
+            << layoutDirectory.absolutePath().toStdString()
+            << eol;
+        return false;
+    }
+
+    const QByteArray stateBytes = m_pDockManager->saveState(kDockLayoutConfigFileVersion);
+    if (stateBytes.isEmpty())
+    {
+        kLogEvent layoutEvent;
+        warn << layoutEvent << "[MainWindow][ADS] 当前布局状态为空，跳过保存。" << eol;
+        return false;
+    }
+
+    QFile layoutFile(layoutConfigPath);
+    if (!layoutFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    {
+        kLogEvent layoutEvent;
+        warn << layoutEvent
+            << "[MainWindow][ADS] 打开布局配置写入失败。 path="
+            << layoutConfigPath.toStdString()
+            << eol;
+        return false;
+    }
+
+    const qint64 writtenBytes = layoutFile.write(stateBytes);
+    layoutFile.close();
+    const bool saveOk = (writtenBytes == stateBytes.size());
+    kLogEvent layoutEvent;
+    (saveOk ? info : warn) << layoutEvent
+        << "[MainWindow][ADS] 布局配置保存"
+        << (saveOk ? "成功" : "失败")
+        << "。 path="
+        << layoutConfigPath.toStdString()
+        << ", bytes="
+        << writtenBytes
+        << eol;
+    return saveOk;
+}
+
 void MainWindow::initializeNextDeferredDock()
 {
     while (m_nextDeferredDockIndex < m_deferredDockLoadQueue.size())
@@ -5486,8 +5735,10 @@ void MainWindow::initDockWidgets()
     auto createDockWidget = [this](
         QWidget* widget,
         const QString& title,
+        const QString& dockKey,
         const ads::CDockWidget::eInsertMode insertMode = ads::CDockWidget::AutoScrollArea) -> ads::CDockWidget* {
         ads::CDockWidget* dock = new ads::CDockWidget(title);
+        configureDockWidgetPersistentIdentity(dock, dockKey);
         dock->setWidget(widget, insertMode);
         // DockWidgetClosable 禁用：统一去掉每个 Dock 标签旁边的关闭叉。
         dock->setFeature(ads::CDockWidget::DockWidgetClosable, false);
@@ -5526,6 +5777,7 @@ void MainWindow::initDockWidgets()
             dockOut = createDockWidget(
                 dockContentWidget,
                 title,
+                dockKey,
                 shouldSuppressOuterScrollArea ? ads::CDockWidget::ForceNoScrollArea : ads::CDockWidget::AutoScrollArea);
             dockOut->setProperty("ks_lazy_key", dockKey);
             dockOut->setProperty("ks_lazy_initialized", eagerWidget != nullptr);
@@ -5566,7 +5818,7 @@ void MainWindow::initDockWidgets()
     };
 
     // 创建所有 Dock 壳；重页面若未预加载，则先挂占位页并排入显示后补载队列。
-    m_dockWelcome = createDockWidget(m_welcomeWidget, "欢迎");
+    m_dockWelcome = createDockWidget(m_welcomeWidget, "欢迎", QStringLiteral("welcome"));
     createLazyDockWidget(m_dockProcess, m_processWidget, "进程", QStringLiteral("process"));
     createLazyDockWidget(m_dockNetwork, m_networkWidget, "网络", QStringLiteral("network"));
     createLazyDockWidget(m_dockMemory, m_memoryWidget, "内存", QStringLiteral("memory"));
@@ -5584,11 +5836,11 @@ void MainWindow::initDockWidgets()
     createLazyDockWidget(m_dockMisc, m_miscWidget, "杂项", QStringLiteral("misc"));
 
     // 创建右侧和底部的基本Widgets
-    m_dockCurrentOp = createDockWidget(m_progressWidget, "当前操作");
-    m_dockLog = createDockWidget(m_logWidget, "日志输出");
-    m_dockImmediate = createDockWidget(m_immediateEditorWidget, "即时窗口");
+    m_dockCurrentOp = createDockWidget(m_progressWidget, "当前操作", QStringLiteral("current_op"));
+    m_dockLog = createDockWidget(m_logWidget, "日志输出", QStringLiteral("log"));
+    m_dockImmediate = createDockWidget(m_immediateEditorWidget, "即时窗口", QStringLiteral("immediate"));
     // 左下角“监视面板”接入独立性能图组件（CPU每核/内存/磁盘/网络）。
-    m_dockMonitor = createDockWidget(m_monitorPanelWidget, "监视面板");
+    m_dockMonitor = createDockWidget(m_monitorPanelWidget, "监视面板", QStringLiteral("monitor_panel"));
 
     // 当前操作 Dock 专项透明策略：
     // - Dock 自身背景透明；
@@ -5702,6 +5954,11 @@ void MainWindow::setupDockLayout()
     m_dockWelcome->raise();
     m_dockCurrentOp->raise();
     m_dockMonitor->raise();
+
+    // 7. 默认布局搭建完成后再恢复用户布局：
+    // - ADS restoreState 要求所有 DockWidget 已注册；
+    // - objectName 已在 initDockWidgets 中固定为英文 key，避免中文标题变化破坏恢复。
+    restoreDockLayoutFromConfig();
 }
 
 void MainWindow::focusHandleDockByPid(const quint32 pid)
@@ -6006,7 +6263,14 @@ void MainWindow::initAppearanceSettings()
 
     reportStartupProgress(90, QStringLiteral("正在应用主界面主题..."));
     applyAppearanceSettings(m_currentAppearanceSettings, QStringLiteral("初始化加载"));
-    raiseStartupDockByKey(m_currentAppearanceSettings.startupDefaultTabKey, QStringLiteral("初始化加载"));
+    if (!m_dockLayoutRestoredFromConfig)
+    {
+        raiseStartupDockByKey(m_currentAppearanceSettings.startupDefaultTabKey, QStringLiteral("初始化加载"));
+    }
+    else
+    {
+        info << appearanceInitEvent << "[MainWindow] 已恢复 ADS 布局，跳过启动默认页签覆盖。" << eol;
+    }
     info << appearanceInitEvent << "[MainWindow] 外观设置系统初始化完成。" << eol;
 }
 
@@ -6137,6 +6401,7 @@ void MainWindow::applyAppearanceSettings(
     {
         m_customTitleBar->setDarkModeEnabled(darkModeEnabled);
         m_customTitleBar->setPinnedState(m_windowPinned);
+        m_customTitleBar->setCaptureProtectionState(m_captureProtectionEnabled);
         syncCustomTitleBarMaximizedState();
     }
 
