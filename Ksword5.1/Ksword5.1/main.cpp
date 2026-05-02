@@ -11,7 +11,8 @@
 #include <QtWidgets/QWidget>
 
 #include "Framework.h"
-#include "Framework/ThemedMessageBox.h"
+#include "UI/ThemedMessageBox.h"
+#include "UI/GlobalDialogTheme.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -988,6 +989,8 @@ int main(int argc, char* argv[])
     startupTraceRaw("QApplication constructed");
     ks::ui::InstallGlobalMessageBoxTheme(&app);
     startupTraceRaw("InstallGlobalMessageBoxTheme finished");
+    ks::ui::InstallGlobalDialogTheme(&app);
+    startupTraceRaw("InstallGlobalDialogTheme finished");
     const QStringList argumentList = QCoreApplication::arguments();
     startupTraceRaw(
         std::string("QCoreApplication::arguments fetched, count=")

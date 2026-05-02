@@ -3,7 +3,7 @@
 // ============================================================
 // HardwareDock.h
 // 作用：
-// 1) 提供“利用率/概览/CPU/显卡/内存”五个侧边 Tab，并让利用率拥有最高优先级；
+// 1) 提供“利用率/概览/CPU/显卡/内存/硬盘监控”等侧边 Tab，并让利用率拥有最高优先级；
 // 2) 利用率页按任务管理器风格实现“左侧缩略卡片 + 右侧详情页”；
 // 3) CPU/显卡/内存页保留文本化详情，便于排障与审计。
 // ============================================================
@@ -17,7 +17,9 @@
 #include <vector>   // std::vector：保存每核图表与采样数据。
 
 class CodeEditorWidget;
+class DiskMonitorPage;
 class MemoryCompositionHistoryWidget;
+class HardwareOtherDevicesPage;
 class PerformanceNavCard;
 class QChartView;
 class QGridLayout;
@@ -279,8 +281,11 @@ private:
     void initializeCpuTab();
     void initializeGpuTab();
     void initializeMemoryTab();
+    void initializeDiskMonitorTab();
+    void initializeOtherDevicesTab();
     void initializeCoreCharts();
     void initializeConnections();
+    void scheduleUtilizationLayoutRefresh();
     void syncUtilizationSidebarSelection(int selectedRowIndex);
     void adjustUtilizationChartHeights();
     PerformanceNavCard* addUtilizationSidebarCard(
@@ -492,6 +497,8 @@ private:
     QWidget* m_memoryPage = nullptr;            // m_memoryPage：内存 Tab。
     QVBoxLayout* m_memoryLayout = nullptr;      // m_memoryLayout：内存布局。
     CodeEditorWidget* m_memoryEditor = nullptr; // m_memoryEditor：内存详情文本。
+    DiskMonitorPage* m_diskMonitorPage = nullptr; // m_diskMonitorPage：硬盘监控 Tab。
+    HardwareOtherDevicesPage* m_otherDevicesPage = nullptr; // m_otherDevicesPage：其他硬件设备内侧边 Tab。
 
     // 运行状态缓存。
     int m_historyLength = 60;                 // m_historyLength：曲线保留点数。

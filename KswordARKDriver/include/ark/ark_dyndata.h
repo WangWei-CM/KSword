@@ -18,6 +18,8 @@ typedef struct _KSW_DYN_KERNEL_OFFSETS
     ULONG OtIndex;
     ULONG ObDecodeShift;
     ULONG ObAttributesShift;
+    ULONG EgeGuid;
+    ULONG EreGuidEntry;
     ULONG KtInitialStack;
     ULONG KtStackLimit;
     ULONG KtStackBase;

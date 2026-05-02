@@ -70,6 +70,7 @@ void DriverDock::initializeOverviewTab()
     m_serviceTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_serviceTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_serviceTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_serviceTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_serviceTable->setAlternatingRowColors(true);
     m_serviceTable->verticalHeader()->setVisible(false);
     m_serviceTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
@@ -399,6 +400,10 @@ void DriverDock::initializeConnections()
             {
                 m_tabWidget->setCurrentWidget(m_operatePage);
             }
+        });
+    connect(m_serviceTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
+        {
+            showServiceTableContextMenu(localPosition);
         });
 
     // 操作页：浏览路径、注册更新、挂载卸载、删除、状态查询。

@@ -108,6 +108,8 @@ Return Value:
     Offsets->OtIndex = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->ObDecodeShift = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->ObAttributesShift = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EgeGuid = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EreGuidEntry = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->KtInitialStack = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->KtStackLimit = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->KtStackBase = KSW_DYN_OFFSET_UNAVAILABLE;
@@ -448,6 +450,8 @@ Return Value:
     State->Kernel.OtIndex = KswordARKDynDataConvertOffset(fields.OtIndex);
     State->Kernel.ObDecodeShift = KswordARKDynDataConvertOffset(fields.ObDecodeShift);
     State->Kernel.ObAttributesShift = KswordARKDynDataConvertOffset(fields.ObAttributesShift);
+    State->Kernel.EgeGuid = KswordARKDynDataConvertOffset(fields.EgeGuid);
+    State->Kernel.EreGuidEntry = KswordARKDynDataConvertOffset(fields.EreGuidEntry);
     State->Kernel.KtInitialStack = KswordARKDynDataConvertOffset(fields.KtInitialStack);
     State->Kernel.KtStackLimit = KswordARKDynDataConvertOffset(fields.KtStackLimit);
     State->Kernel.KtStackBase = KswordARKDynDataConvertOffset(fields.KtStackBase);

@@ -105,6 +105,136 @@ void DriverDock::fillObjectDriverNameFromSelection()
     }
 }
 
+void DriverDock::showServiceTableContextMenu(const QPoint& localPosition)
+{
+    // 右键菜单入口：
+    // - 普通 SCM 操作仍使用既有按钮/函数；
+    // - R0 强制卸载仅挂在驱动服务列表，满足“第四点右键菜单形式”要求。
+    if (m_serviceTable == nullptr)
+    {
+        return;
+    }
+
+    const QModelIndex clickedIndex = m_serviceTable->indexAt(localPosition);
+    if (clickedIndex.isValid())
+    {
+        m_serviceTable->selectRow(clickedIndex.row());
+        syncOperateFormBySelectedService();
+    }
+
+    const QModelIndexList selectedRows =
+        (m_serviceTable->selectionModel() == nullptr)
+        ? QModelIndexList()
+        : m_serviceTable->selectionModel()->selectedRows(0);
+    if (selectedRows.isEmpty())
+    {
+        return;
+    }
+
+    QMenu contextMenu(this);
+    contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+    QAction* fillObjectNameAction = contextMenu.addAction(
+        QIcon(":/Icon/process_details.svg"),
+        QStringLiteral("填充 DriverObject 名称"));
+    QAction* queryObjectAction = contextMenu.addAction(
+        QIcon(":/Icon/process_refresh.svg"),
+        QStringLiteral("查询 DriverObject 信息"));
+    contextMenu.addSeparator();
+    QAction* forceUnloadAction = contextMenu.addAction(
+        QIcon(":/Icon/process_uncritical.svg"),
+        QStringLiteral("R0 强制卸载 DriverObject"));
+    forceUnloadAction->setToolTip(QStringLiteral("调用 DriverUnload 后清理 dispatch/unload 指针；无 DriverUnload 时尝试清设备链。高风险操作。"));
+
+    QAction* selectedAction = contextMenu.exec(m_serviceTable->viewport()->mapToGlobal(localPosition));
+    if (selectedAction == nullptr)
+    {
+        return;
+    }
+
+    if (selectedAction == fillObjectNameAction)
+    {
+        fillObjectDriverNameFromSelection();
+        return;
+    }
+    if (selectedAction == queryObjectAction)
+    {
+        fillObjectDriverNameFromSelection();
+        querySelectedDriverObjectInfo();
+        return;
+    }
+    if (selectedAction == forceUnloadAction)
+    {
+        forceUnloadDriverFromServiceRow(selectedRows.front().row());
+        return;
+    }
+}
+
+void DriverDock::forceUnloadDriverFromServiceRow(const int rowIndex)
+{
+    // 强制卸载流程：
+    // - 使用服务名推导 \Driver\ServiceName；
+    // - R0 内部再通过 ObReferenceObjectByName 引用对象；
+    // - 右键入口使用 FORCE_CLEANUP，使行为接近 SKT64 的强制卸载；
+    // - UI 不传递 DriverObject 地址，避免地址成为操作凭据。
+    if (m_serviceTable == nullptr || rowIndex < 0 || rowIndex >= m_serviceTable->rowCount())
+    {
+        return;
+    }
+
+    QTableWidgetItem* serviceNameItem = m_serviceTable->item(rowIndex, 0);
+    if (serviceNameItem == nullptr)
+    {
+        return;
+    }
+
+    const QString serviceNameText = serviceNameItem->data(Qt::UserRole).toString().trimmed();
+    if (serviceNameText.isEmpty())
+    {
+        appendOperateLogLine(QStringLiteral("强制卸载失败：服务名为空。"));
+        return;
+    }
+
+    const QString driverObjectNameText = QStringLiteral("\\Driver\\%1").arg(serviceNameText);
+    appendOperateLogLine(QStringLiteral("开始 R0 强制卸载：%1").arg(driverObjectNameText));
+
+    QPointer<DriverDock> guardThis(this);
+    const std::wstring driverObjectNameWide = driverObjectNameText.toStdWString();
+    auto* unloadTask = QRunnable::create([guardThis, driverObjectNameText, driverObjectNameWide]()
+        {
+            const ksword::ark::DriverForceUnloadResult result =
+                ksword::ark::DriverClient().forceUnloadDriver(
+                    driverObjectNameWide,
+                    KSWORD_ARK_DRIVER_UNLOAD_FLAG_FORCE_CLEANUP,
+                    3000UL);
+
+            QMetaObject::invokeMethod(
+                guardThis,
+                [guardThis, driverObjectNameText, result]()
+                {
+                    if (guardThis == nullptr)
+                    {
+                        return;
+                    }
+
+                    const QString resultLine = QStringLiteral(
+                        "R0 强制卸载完成：%1 | IO=%2 | Status=%3 | Last=%4 | Wait=%5 | Object=%6 | Unload=%7")
+                        .arg(driverObjectNameText)
+                        .arg(QString::fromStdString(result.io.message))
+                        .arg(driverForceUnloadStatusText(result.status))
+                        .arg(formatNtStatusText(result.lastStatus))
+                        .arg(formatNtStatusText(result.waitStatus))
+                        .arg(formatCompactAddress(result.driverObjectAddress))
+                        .arg(formatCompactAddress(result.driverUnloadAddress));
+                    guardThis->appendOperateLogLine(resultLine);
+                    guardThis->refreshDriverServiceRecords();
+                    guardThis->refreshLoadedKernelModuleRecords();
+                },
+                Qt::QueuedConnection);
+        });
+    unloadTask->setAutoDelete(true);
+    QThreadPool::globalInstance()->start(unloadTask);
+}
+
 void DriverDock::querySelectedDriverObjectInfo()
 {
     // DriverObject 查询：

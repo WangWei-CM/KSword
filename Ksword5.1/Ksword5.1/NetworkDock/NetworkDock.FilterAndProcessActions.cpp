@@ -996,6 +996,7 @@ void NetworkDock::clearAllMonitorFilterConfigurations()
     m_monitorFilterNextGroupId = 1;
     addMonitorFilterRuleGroup();
     rebuildMonitorFilterRuleGroupUi();
+    resetPacketTimelineToCurrentRange();
     applyMonitorFilters();
 }
 
@@ -1214,9 +1215,12 @@ void NetworkDock::updateMonitorFilterStateLabel()
         return;
     }
 
+    const bool timelineFilterActive = isPacketTimelineFilterActive();
     if (m_activeMonitorFilterGroupList.empty())
     {
-        m_monitorFilterStateLabel->setText(QStringLiteral("当前过滤：无"));
+        m_monitorFilterStateLabel->setText(timelineFilterActive
+            ? QStringLiteral("当前过滤：时间轴已筛选")
+            : QStringLiteral("当前过滤：无"));
         return;
     }
 
@@ -1257,7 +1261,13 @@ void NetworkDock::updateMonitorFilterStateLabel()
         ++displayIndex;
     }
 
-    m_monitorFilterStateLabel->setText(QStringLiteral("当前过滤：%1").arg(groupSummaryList.join(QStringLiteral("  OR  "))));
+    QString summaryText = QStringLiteral("当前过滤：%1").arg(groupSummaryList.join(QStringLiteral("  OR  ")));
+    if (timelineFilterActive)
+    {
+        // 时间轴是独立于规则组的外层时间窗口，这里追加提示，避免用户误以为只剩规则组过滤。
+        summaryText += QStringLiteral(" | 时间轴已筛选");
+    }
+    m_monitorFilterStateLabel->setText(summaryText);
 }
 
 bool NetworkDock::packetMatchesMonitorFilterGroup(

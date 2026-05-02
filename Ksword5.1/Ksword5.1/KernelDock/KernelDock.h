@@ -134,6 +134,91 @@ struct KernelSsdtEntry
 };
 
 // ============================================================
+// KernelInlineHookEntry
+// 作用：
+// - 表示内核导出函数开头的 Inline Hook 检测结果；
+// - 保存函数地址、跳转目标、模块归属、字节快照和 UI 详情文本。
+// ============================================================
+struct KernelInlineHookEntry
+{
+    std::uint32_t status = 0;               // status：R0 行状态。
+    std::uint32_t hookType = 0;             // hookType：Inline Hook 指令形态。
+    std::uint32_t flags = 0;                // flags：R0 诊断标志。
+    std::uint32_t originalByteCount = 0;    // originalByteCount：基准字节数。
+    std::uint32_t currentByteCount = 0;     // currentByteCount：当前字节数。
+    std::uint64_t functionAddress = 0;      // functionAddress：函数入口地址。
+    std::uint64_t targetAddress = 0;        // targetAddress：解析出的跳转目标。
+    std::uint64_t moduleBase = 0;           // moduleBase：所属模块基址。
+    std::uint64_t targetModuleBase = 0;     // targetModuleBase：目标模块基址。
+    QString moduleNameText;                 // moduleNameText：所属模块名。
+    QString functionNameText;               // functionNameText：导出函数名。
+    QString targetModuleNameText;           // targetModuleNameText：目标模块名。
+    QString hookTypeText;                   // hookTypeText：Hook 类型文本。
+    QString statusText;                     // statusText：状态文本。
+    QString currentBytesText;               // currentBytesText：当前字节十六进制文本。
+    QString expectedBytesText;              // expectedBytesText：基准字节十六进制文本。
+    QString detailText;                     // detailText：详情文本。
+    std::vector<std::uint8_t> currentBytes; // currentBytes：当前字节缓存。
+    std::vector<std::uint8_t> expectedBytes; // expectedBytes：基准字节缓存。
+};
+
+// ============================================================
+// KernelIatEatHookEntry
+// 作用：
+// - 表示内核模块 IAT/EAT 指针检测结果；
+// - 保存 thunk/EAT 项、目标地址、声明导入模块和状态文本。
+// ============================================================
+struct KernelIatEatHookEntry
+{
+    std::uint32_t hookClass = 0;          // hookClass：IAT 或 EAT。
+    std::uint32_t status = 0;             // status：R0 行状态。
+    std::uint32_t flags = 0;              // flags：R0 诊断标志。
+    std::uint32_t ordinal = 0;            // ordinal：导出序号或 thunk 序号。
+    std::uint64_t moduleBase = 0;         // moduleBase：所属模块基址。
+    std::uint64_t thunkAddress = 0;       // thunkAddress：IAT thunk 或 EAT 项地址。
+    std::uint64_t currentTarget = 0;      // currentTarget：当前目标地址。
+    std::uint64_t expectedTarget = 0;     // expectedTarget：期望目标地址。
+    std::uint64_t targetModuleBase = 0;   // targetModuleBase：目标模块基址。
+    QString classText;                    // classText：IAT/EAT 文本。
+    QString statusText;                   // statusText：状态文本。
+    QString moduleNameText;               // moduleNameText：所属模块名。
+    QString importModuleNameText;         // importModuleNameText：IAT 声明导入模块。
+    QString functionNameText;             // functionNameText：函数名/占位符。
+    QString targetModuleNameText;         // targetModuleNameText：当前目标模块名。
+    QString detailText;                   // detailText：详情文本。
+};
+
+
+// ============================================================
+// KernelCallbackEnumEntry
+// 作用：
+// - 表示 R0 回调遍历返回的一条记录；
+// - 保存回调类别、来源、地址、模块、状态和详情文本。
+// ============================================================
+struct KernelCallbackEnumEntry
+{
+    std::uint32_t callbackClass = 0;       // callbackClass：回调类别。
+    std::uint32_t source = 0;              // source：枚举来源。
+    std::uint32_t status = 0;              // status：R0 行状态。
+    std::uint32_t fieldFlags = 0;          // fieldFlags：有效字段位图。
+    std::uint32_t operationMask = 0;       // operationMask：操作掩码。
+    std::uint32_t objectTypeMask = 0;      // objectTypeMask：对象类型掩码。
+    long lastStatus = 0;                   // lastStatus：底层 NTSTATUS。
+    std::uint64_t callbackAddress = 0;     // callbackAddress：回调函数或对象地址。
+    std::uint64_t contextAddress = 0;      // contextAddress：上下文或扩展诊断值。
+    std::uint64_t registrationAddress = 0; // registrationAddress：注册句柄/cookie。
+    std::uint64_t moduleBase = 0;          // moduleBase：所属模块基址。
+    std::uint32_t moduleSize = 0;          // moduleSize：所属模块大小。
+    QString classText;                     // classText：类别文本。
+    QString sourceText;                    // sourceText：来源文本。
+    QString statusText;                    // statusText：状态文本。
+    QString nameText;                      // nameText：回调/过滤器名称。
+    QString altitudeText;                  // altitudeText：Altitude。
+    QString modulePathText;                // modulePathText：模块路径。
+    QString detailText;                    // detailText：详情文本。
+};
+
+// ============================================================
 // KernelDynDataModuleIdentity
 // 作用：
 // - 表示 DynData 精确匹配时使用的内核模块身份；
@@ -304,6 +389,22 @@ private:
     // - 作用：创建“回调移除”页签（移除其他驱动注册的 notify 回调）。
     void initializeCallbackRemoveTab();
 
+    // initializeCallbackEnumTab：
+    // - 作用：创建“回调遍历”页签，展示 R0 枚举到的回调记录。
+    void initializeCallbackEnumTab();
+
+    // initializeShadowSsdtTab：
+    // - 作用：创建“SSSDT解析”页签，展示 win32k/win32u shadow syscall 信息。
+    void initializeShadowSsdtTab();
+
+    // initializeInlineHookTab：
+    // - 作用：创建“Inline Hook 检测 & 摘除”页签，提供扫描和强制摘除入口。
+    void initializeInlineHookTab();
+
+    // initializeIatEatHookTab：
+    // - 作用：创建“IAT/EAT 钩子检测”页签，展示导入/导出表可疑指针。
+    void initializeIatEatHookTab();
+
     // initializeConnections：
     // - 作用：绑定按钮、筛选框、表格联动与右键菜单。
     void initializeConnections();
@@ -337,6 +438,22 @@ private:
     // refreshDriverStatusAsync：
     // - 作用：后台查询 Phase 1 统一驱动能力、协议、安全策略和最近错误。
     void refreshDriverStatusAsync();
+
+    // refreshCallbackEnumAsync：
+    // - 作用：后台调用 ArkDriverClient 枚举回调记录。
+    void refreshCallbackEnumAsync();
+
+    // refreshShadowSsdtAsync：
+    // - 作用：后台调用 ArkDriverClient 解析 SSSDT/Shadow SSDT。
+    void refreshShadowSsdtAsync();
+
+    // refreshInlineHooksAsync：
+    // - 作用：后台扫描内核模块导出函数 Inline Hook。
+    void refreshInlineHooksAsync();
+
+    // refreshIatEatHooksAsync：
+    // - 作用：后台扫描内核模块 IAT/EAT 可疑指针。
+    void refreshIatEatHooksAsync();
 
     // ==================== 表格渲染 ====================
     // rebuildObjectNamespaceTable：
@@ -405,6 +522,26 @@ private:
     // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
     void rebuildDriverCapabilityTable(const QString& filterKeyword);
 
+    // rebuildCallbackEnumTable：
+    // - 作用：根据筛选关键词重建回调遍历表。
+    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
+    void rebuildCallbackEnumTable(const QString& filterKeyword);
+
+    // rebuildShadowSsdtTable：
+    // - 作用：根据筛选关键词重建 SSSDT 表格。
+    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
+    void rebuildShadowSsdtTable(const QString& filterKeyword);
+
+    // rebuildInlineHookTable：
+    // - 作用：根据筛选关键词重建 Inline Hook 表格。
+    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
+    void rebuildInlineHookTable(const QString& filterKeyword);
+
+    // rebuildIatEatHookTable：
+    // - 作用：根据筛选关键词重建 IAT/EAT Hook 表格。
+    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
+    void rebuildIatEatHookTable(const QString& filterKeyword);
+
     // ==================== 详情联动 ====================
     // showObjectNamespaceDetailByCurrentRow：
     // - 作用：根据当前选中行显示对象命名空间详情。
@@ -430,6 +567,22 @@ private:
     // - 作用：根据当前选中行显示功能依赖、策略和 DynData 位图详情。
     void showDriverCapabilityDetailByCurrentRow();
 
+    // showCallbackEnumDetailByCurrentRow：
+    // - 作用：根据当前选中行显示回调遍历详情。
+    void showCallbackEnumDetailByCurrentRow();
+
+    // showShadowSsdtDetailByCurrentRow：
+    // - 作用：根据当前选中行显示 SSSDT 详情。
+    void showShadowSsdtDetailByCurrentRow();
+
+    // showInlineHookDetailByCurrentRow：
+    // - 作用：根据当前选中行显示 Inline Hook 详情。
+    void showInlineHookDetailByCurrentRow();
+
+    // showIatEatHookDetailByCurrentRow：
+    // - 作用：根据当前选中行显示 IAT/EAT Hook 详情。
+    void showIatEatHookDetailByCurrentRow();
+
     // ==================== 右键菜单 ====================
     // showObjectNamespaceContextMenu：
     // - 作用：弹出对象命名空间表格右键菜单（复制 + 对象操作）。
@@ -440,6 +593,33 @@ private:
     // - 作用：弹出原子表格右键菜单（复制 + 原子操作）。
     // - 参数 localPosition：表格视口坐标。
     void showAtomContextMenu(const QPoint& localPosition);
+
+    // showCallbackEnumContextMenu：
+    // - 作用：弹出回调遍历表格右键菜单；
+    // - 支持复制当前列、指定栏目、选中行和详情；
+    // - 右键动作对 Ctrl 多选后的所有选中行生效。
+    // 参数 localPosition：表格视口坐标。
+    // 返回值：无。
+    void showCallbackEnumContextMenu(const QPoint& localPosition);
+
+    // showShadowSsdtContextMenu：
+    // - 作用：弹出 SSSDT 表格右键复制菜单。
+    // - 参数 localPosition：表格视口坐标。
+    void showShadowSsdtContextMenu(const QPoint& localPosition);
+
+    // showInlineHookContextMenu：
+    // - 作用：弹出 Inline Hook 表格右键菜单，支持复制和摘除选中项。
+    // - 参数 localPosition：表格视口坐标。
+    void showInlineHookContextMenu(const QPoint& localPosition);
+
+    // showIatEatHookContextMenu：
+    // - 作用：弹出 IAT/EAT Hook 表格右键复制菜单。
+    // - 参数 localPosition：表格视口坐标。
+    void showIatEatHookContextMenu(const QPoint& localPosition);
+
+    // patchSelectedInlineHookWithNop：
+    // - 作用：对当前选中的 Inline Hook 先普通请求，再经用户确认后 force NOP 摘除。
+    void patchSelectedInlineHookWithNop();
 
     // ==================== 当前行索引辅助 ====================
     // currentObjectNamespaceSourceIndex：
@@ -472,6 +652,30 @@ private:
     // - 返回：true=读取成功；false=无选中或越界。
     bool currentDriverCapabilitySourceIndex(std::size_t& sourceIndexOut) const;
 
+    // currentCallbackEnumSourceIndex：
+    // - 作用：读取回调遍历当前行映射到缓存向量的索引。
+    // - 传出 sourceIndexOut：缓存索引。
+    // - 返回：true=读取成功；false=无选中或越界。
+    bool currentCallbackEnumSourceIndex(std::size_t& sourceIndexOut) const;
+
+    // currentShadowSsdtSourceIndex：
+    // - 作用：读取 SSSDT 当前行映射到缓存向量的索引。
+    // - 传出 sourceIndexOut：缓存索引。
+    // - 返回：true=读取成功；false=无选中或越界。
+    bool currentShadowSsdtSourceIndex(std::size_t& sourceIndexOut) const;
+
+    // currentInlineHookSourceIndex：
+    // - 作用：读取 Inline Hook 当前行映射到缓存向量的索引。
+    // - 传出 sourceIndexOut：缓存索引。
+    // - 返回：true=读取成功；false=无选中或越界。
+    bool currentInlineHookSourceIndex(std::size_t& sourceIndexOut) const;
+
+    // currentIatEatHookSourceIndex：
+    // - 作用：读取 IAT/EAT 当前行映射到缓存向量的索引。
+    // - 传出 sourceIndexOut：缓存索引。
+    // - 返回：true=读取成功；false=无选中或越界。
+    bool currentIatEatHookSourceIndex(std::size_t& sourceIndexOut) const;
+
     // currentObjectNamespaceEntry：
     // - 作用：返回对象命名空间当前选中项。
     // - 返回：命中返回指针；否则 nullptr。
@@ -497,6 +701,26 @@ private:
     // - 返回：命中返回指针；否则 nullptr。
     const KernelDriverCapabilityEntry* currentDriverCapabilityEntry() const;
 
+    // currentCallbackEnumEntry：
+    // - 作用：返回回调遍历当前选中项。
+    // - 返回：命中返回指针；否则 nullptr。
+    const KernelCallbackEnumEntry* currentCallbackEnumEntry() const;
+
+    // currentShadowSsdtEntry：
+    // - 作用：返回 SSSDT 当前选中项。
+    // - 返回：命中返回指针；否则 nullptr。
+    const KernelSsdtEntry* currentShadowSsdtEntry() const;
+
+    // currentInlineHookEntry：
+    // - 作用：返回 Inline Hook 当前选中项。
+    // - 返回：命中返回指针；否则 nullptr。
+    const KernelInlineHookEntry* currentInlineHookEntry() const;
+
+    // currentIatEatHookEntry：
+    // - 作用：返回 IAT/EAT 当前选中项。
+    // - 返回：命中返回指针；否则 nullptr。
+    const KernelIatEatHookEntry* currentIatEatHookEntry() const;
+
 private:
     // ==================== 根级控件 ====================
     QVBoxLayout* m_rootLayout = nullptr; // m_rootLayout：KernelDock 根布局。
@@ -510,7 +734,11 @@ private:
     int m_driverStatusTabIndex = -1;      // m_driverStatusTabIndex：驱动状态页签索引。
     int m_ntQueryTabIndex = -1;          // m_ntQueryTabIndex：历史 NtQuery 页签索引。
     int m_callbackTabIndex = -1;         // m_callbackTabIndex：驱动回调页签索引。
+    int m_callbackEnumTabIndex = -1;     // m_callbackEnumTabIndex：回调遍历页签索引。
     int m_callbackRemoveTabIndex = -1;   // m_callbackRemoveTabIndex：回调移除页签索引。
+    int m_shadowSsdtTabIndex = -1;       // m_shadowSsdtTabIndex：SSSDT 解析页签索引。
+    int m_inlineHookTabIndex = -1;       // m_inlineHookTabIndex：Inline Hook 页签索引。
+    int m_iatEatHookTabIndex = -1;       // m_iatEatHookTabIndex：IAT/EAT Hook 页签索引。
     bool m_objectNamespaceTabInitialized = false; // m_objectNamespaceTabInitialized：对象命名空间页是否已初始化。
     bool m_atomTabInitialized = false;            // m_atomTabInitialized：原子表页是否已初始化。
     bool m_ssdtTabInitialized = false;            // m_ssdtTabInitialized：SSDT 页是否已初始化。
@@ -518,7 +746,11 @@ private:
     bool m_driverStatusTabInitialized = false;     // m_driverStatusTabInitialized：驱动状态页是否已初始化。
     bool m_ntQueryTabInitialized = false;         // m_ntQueryTabInitialized：历史 NtQuery 页是否已初始化。
     bool m_callbackTabInitialized = false;        // m_callbackTabInitialized：驱动回调页是否已初始化。
+    bool m_callbackEnumTabInitialized = false;    // m_callbackEnumTabInitialized：回调遍历页是否已初始化。
     bool m_callbackRemoveTabInitialized = false;  // m_callbackRemoveTabInitialized：回调移除页是否已初始化。
+    bool m_shadowSsdtTabInitialized = false;      // m_shadowSsdtTabInitialized：SSSDT 页是否已初始化。
+    bool m_inlineHookTabInitialized = false;      // m_inlineHookTabInitialized：Inline Hook 页是否已初始化。
+    bool m_iatEatHookTabInitialized = false;      // m_iatEatHookTabInitialized：IAT/EAT 页是否已初始化。
 
     // ==================== 对象命名空间页 ====================
     QWidget* m_objectNamespacePage = nullptr;                  // m_objectNamespacePage：对象命名空间页容器。
@@ -560,6 +792,41 @@ private:
     QTableWidget* m_ssdtTable = nullptr;               // m_ssdtTable：SSDT 结果表。
     CodeEditorWidget* m_ssdtDetailEditor = nullptr;    // m_ssdtDetailEditor：SSDT 详情编辑器（只读）。
 
+    // ==================== SSSDT 解析页 ====================
+    QWidget* m_shadowSsdtPage = nullptr;               // m_shadowSsdtPage：SSSDT 页容器。
+    QVBoxLayout* m_shadowSsdtLayout = nullptr;         // m_shadowSsdtLayout：SSSDT 页布局。
+    QHBoxLayout* m_shadowSsdtToolLayout = nullptr;     // m_shadowSsdtToolLayout：SSSDT 工具栏布局。
+    QPushButton* m_refreshShadowSsdtButton = nullptr;  // m_refreshShadowSsdtButton：SSSDT 刷新按钮。
+    QLineEdit* m_shadowSsdtFilterEdit = nullptr;       // m_shadowSsdtFilterEdit：SSSDT 筛选框。
+    QLabel* m_shadowSsdtStatusLabel = nullptr;         // m_shadowSsdtStatusLabel：SSSDT 状态文本。
+    QTableWidget* m_shadowSsdtTable = nullptr;         // m_shadowSsdtTable：SSSDT 表格。
+    CodeEditorWidget* m_shadowSsdtDetailEditor = nullptr; // m_shadowSsdtDetailEditor：SSSDT 详情文本框。
+
+    // ==================== Inline Hook 页 ====================
+    QWidget* m_inlineHookPage = nullptr;                    // m_inlineHookPage：Inline Hook 页容器。
+    QVBoxLayout* m_inlineHookLayout = nullptr;              // m_inlineHookLayout：Inline Hook 页布局。
+    QHBoxLayout* m_inlineHookToolLayout = nullptr;          // m_inlineHookToolLayout：Inline Hook 工具栏布局。
+    QPushButton* m_refreshInlineHookButton = nullptr;       // m_refreshInlineHookButton：刷新按钮。
+    QPushButton* m_patchInlineHookButton = nullptr;         // m_patchInlineHookButton：NOP 摘除按钮。
+    QLineEdit* m_inlineHookFilterEdit = nullptr;            // m_inlineHookFilterEdit：本地筛选框。
+    QLineEdit* m_inlineHookModuleEdit = nullptr;            // m_inlineHookModuleEdit：R0 模块过滤框。
+    QComboBox* m_inlineHookIncludeCombo = nullptr;          // m_inlineHookIncludeCombo：扫描范围选项。
+    QLabel* m_inlineHookStatusLabel = nullptr;              // m_inlineHookStatusLabel：状态文本。
+    QTableWidget* m_inlineHookTable = nullptr;              // m_inlineHookTable：Inline Hook 表格。
+    CodeEditorWidget* m_inlineHookDetailEditor = nullptr;   // m_inlineHookDetailEditor：详情文本框。
+
+    // ==================== IAT/EAT Hook 页 ====================
+    QWidget* m_iatEatHookPage = nullptr;                    // m_iatEatHookPage：IAT/EAT 页容器。
+    QVBoxLayout* m_iatEatHookLayout = nullptr;              // m_iatEatHookLayout：IAT/EAT 页布局。
+    QHBoxLayout* m_iatEatHookToolLayout = nullptr;          // m_iatEatHookToolLayout：IAT/EAT 工具栏布局。
+    QPushButton* m_refreshIatEatHookButton = nullptr;       // m_refreshIatEatHookButton：刷新按钮。
+    QLineEdit* m_iatEatHookFilterEdit = nullptr;            // m_iatEatHookFilterEdit：本地筛选框。
+    QLineEdit* m_iatEatHookModuleEdit = nullptr;            // m_iatEatHookModuleEdit：R0 模块过滤框。
+    QComboBox* m_iatEatHookIncludeCombo = nullptr;          // m_iatEatHookIncludeCombo：IAT/EAT 范围选项。
+    QLabel* m_iatEatHookStatusLabel = nullptr;              // m_iatEatHookStatusLabel：状态文本。
+    QTableWidget* m_iatEatHookTable = nullptr;              // m_iatEatHookTable：IAT/EAT 表格。
+    CodeEditorWidget* m_iatEatHookDetailEditor = nullptr;   // m_iatEatHookDetailEditor：详情文本框。
+
     // ==================== 动态偏移页 ====================
     QWidget* m_dynDataPage = nullptr;                  // m_dynDataPage：动态偏移页容器。
     QVBoxLayout* m_dynDataLayout = nullptr;            // m_dynDataLayout：动态偏移页布局。
@@ -588,6 +855,14 @@ private:
     // ==================== 驱动回调页 ====================
     QWidget* m_callbackInterceptPage = nullptr;                     // m_callbackInterceptPage：驱动回调页容器。
     CallbackInterceptController* m_callbackInterceptController = nullptr; // m_callbackInterceptController：驱动回调页控制器。
+    QWidget* m_callbackEnumPage = nullptr;                          // m_callbackEnumPage：回调遍历页容器。
+    QVBoxLayout* m_callbackEnumLayout = nullptr;                    // m_callbackEnumLayout：回调遍历页布局。
+    QHBoxLayout* m_callbackEnumToolLayout = nullptr;                // m_callbackEnumToolLayout：回调遍历工具栏布局。
+    QPushButton* m_refreshCallbackEnumButton = nullptr;             // m_refreshCallbackEnumButton：回调遍历刷新按钮。
+    QLineEdit* m_callbackEnumFilterEdit = nullptr;                  // m_callbackEnumFilterEdit：回调遍历筛选输入框。
+    QLabel* m_callbackEnumStatusLabel = nullptr;                    // m_callbackEnumStatusLabel：回调遍历状态文本。
+    QTableWidget* m_callbackEnumTable = nullptr;                    // m_callbackEnumTable：回调遍历表。
+    CodeEditorWidget* m_callbackEnumDetailEditor = nullptr;         // m_callbackEnumDetailEditor：回调遍历详情文本框。
     QWidget* m_callbackRemovePage = nullptr;                        // m_callbackRemovePage：回调移除页容器。
     QVBoxLayout* m_callbackRemoveLayout = nullptr;                  // m_callbackRemoveLayout：回调移除页布局。
     QWidget* m_callbackRemoveContentWidget = nullptr;               // m_callbackRemoveContentWidget：回调移除页滚动内容容器。
@@ -608,6 +883,10 @@ private:
     std::vector<KernelDynDataFieldEntry> m_dynDataRows;            // m_dynDataRows：动态偏移字段快照行。
     KernelDriverStatusSummary m_driverStatusSummary;               // m_driverStatusSummary：统一驱动状态摘要快照。
     std::vector<KernelDriverCapabilityEntry> m_driverCapabilityRows; // m_driverCapabilityRows：能力矩阵快照行。
+    std::vector<KernelCallbackEnumEntry> m_callbackEnumRows;        // m_callbackEnumRows：回调遍历快照行。
+    std::vector<KernelSsdtEntry> m_shadowSsdtRows;                  // m_shadowSsdtRows：SSSDT 快照行。
+    std::vector<KernelInlineHookEntry> m_inlineHookRows;            // m_inlineHookRows：Inline Hook 快照行。
+    std::vector<KernelIatEatHookEntry> m_iatEatHookRows;            // m_iatEatHookRows：IAT/EAT 快照行。
 
     // ==================== 刷新状态 ====================
     std::atomic_bool m_objectNamespaceRefreshRunning{ false }; // m_objectNamespaceRefreshRunning：对象命名空间刷新状态。
@@ -616,4 +895,8 @@ private:
     std::atomic_bool m_ssdtRefreshRunning{ false };            // m_ssdtRefreshRunning：SSDT 刷新状态。
     std::atomic_bool m_dynDataRefreshRunning{ false };         // m_dynDataRefreshRunning：动态偏移刷新状态。
     std::atomic_bool m_driverStatusRefreshRunning{ false };    // m_driverStatusRefreshRunning：驱动状态刷新状态。
+    std::atomic_bool m_callbackEnumRefreshRunning{ false };    // m_callbackEnumRefreshRunning：回调遍历刷新状态。
+    std::atomic_bool m_shadowSsdtRefreshRunning{ false };      // m_shadowSsdtRefreshRunning：SSSDT 刷新状态。
+    std::atomic_bool m_inlineHookRefreshRunning{ false };      // m_inlineHookRefreshRunning：Inline Hook 刷新状态。
+    std::atomic_bool m_iatEatHookRefreshRunning{ false };      // m_iatEatHookRefreshRunning：IAT/EAT 刷新状态。
 };

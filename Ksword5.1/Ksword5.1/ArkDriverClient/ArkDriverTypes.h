@@ -16,10 +16,12 @@
 #include "../../../shared/driver/KswordArkFileIoctl.h"
 #include "../../../shared/driver/KswordArkHandleIoctl.h"
 #include "../../../shared/driver/KswordArkKernelIoctl.h"
+#include "../../../shared/driver/KswordArkMemoryIoctl.h"
 #include "../../../shared/driver/KswordArkProcessIoctl.h"
 #include "../../../shared/driver/KswordArkThreadIoctl.h"
 #include "../../../shared/driver/KswordArkAlpcIoctl.h"
 #include "../../../shared/driver/KswordArkSectionIoctl.h"
+#include "../../../shared/driver/KswordArkRegistryIoctl.h"
 
 namespace ksword::ark
 {
@@ -97,6 +99,44 @@ namespace ksword::ark
         std::uint32_t totalCount = 0;
         std::uint32_t returnedCount = 0;
         std::vector<ProcessEntry> entries;
+    };
+
+    // ProcessVisibilityResult 承载 R0 可恢复隐藏标记的更新结果。
+    struct ProcessVisibilityResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t processId = 0;
+        std::uint32_t status = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_UNKNOWN;
+        std::uint32_t hiddenCount = 0;
+        long lastStatus = 0;
+    };
+
+    // ProcessSpecialFlagsResult 承载 BreakOnTermination/APC 插入控制响应。
+    struct ProcessSpecialFlagsResult
+    {
+        IoResult io;                         // io：DeviceIoControl 调用状态。
+        std::uint32_t version = 0;           // version：协议版本。
+        std::uint32_t processId = 0;         // processId：目标 PID。
+        std::uint32_t action = 0;            // action：请求动作。
+        std::uint32_t status = KSWORD_ARK_PROCESS_SPECIAL_STATUS_UNKNOWN; // status：R0 聚合状态。
+        std::uint32_t appliedFlags = 0;      // appliedFlags：已应用标志。
+        std::uint32_t touchedThreadCount = 0;// touchedThreadCount：禁 APC 时改变的线程数。
+        long lastStatus = 0;                 // lastStatus：底层 NTSTATUS。
+    };
+
+    // ProcessDkomResult 承载 PspCidTable DKOM 删除响应。
+    struct ProcessDkomResult
+    {
+        IoResult io;                         // io：DeviceIoControl 调用状态。
+        std::uint32_t version = 0;           // version：协议版本。
+        std::uint32_t processId = 0;         // processId：目标 PID。
+        std::uint32_t action = 0;            // action：请求动作。
+        std::uint32_t status = KSWORD_ARK_PROCESS_DKOM_STATUS_UNKNOWN; // status：R0 聚合状态。
+        std::uint32_t removedEntries = 0;    // removedEntries：清零的 CID 表项数。
+        long lastStatus = 0;                 // lastStatus：底层 NTSTATUS。
+        std::uint64_t pspCidTableAddress = 0;// pspCidTableAddress：诊断地址。
+        std::uint64_t processObjectAddress = 0; // processObjectAddress：诊断地址。
     };
 
     // ThreadEntry 是 R0 KTHREAD 扩展字段的 R3 侧模型。
@@ -341,6 +381,54 @@ namespace ksword::ark
         std::wstring objectName;        // ObQueryNameString 文件对象名。
     };
 
+    // RegistryReadResult 是 R0 注册表值读取响应的 R3 模型。
+    struct RegistryReadResult
+    {
+        IoResult io;                    // io：DeviceIoControl 调用状态。
+        std::uint32_t version = 0;      // version：协议版本。
+        std::uint32_t status = KSWORD_ARK_REGISTRY_READ_STATUS_UNKNOWN; // status：R0 聚合状态。
+        std::uint32_t valueType = 0;    // valueType：REG_* 类型。
+        std::uint32_t dataBytes = 0;    // dataBytes：返回数据长度。
+        std::uint32_t requiredBytes = 0; // requiredBytes：完整值数据长度。
+        long lastStatus = 0;            // lastStatus：底层 Zw* 状态。
+        std::vector<std::uint8_t> data; // data：原始注册表值数据。
+    };
+
+    // VirtualMemoryReadResult 是 R0 读目标进程虚拟内存的 R3 模型。
+    struct VirtualMemoryReadResult
+    {
+        IoResult io;                    // io：DeviceIoControl 调用状态。
+        std::uint32_t version = 0;      // version：协议版本。
+        std::uint32_t processId = 0;    // processId：目标 PID。
+        std::uint32_t fieldFlags = 0;   // fieldFlags：KSWORD_ARK_MEMORY_FIELD_*。
+        std::uint32_t readStatus = KSWORD_ARK_MEMORY_READ_STATUS_UNAVAILABLE; // readStatus：R0 读聚合状态。
+        long lookupStatus = 0;          // lookupStatus：PsLookupProcessByProcessId 状态。
+        long copyStatus = 0;            // copyStatus：MmCopyVirtualMemory 状态。
+        std::uint32_t source = 0;       // source：数据来源。
+        std::uint64_t requestedBaseAddress = 0; // requestedBaseAddress：请求基址。
+        std::uint32_t requestedBytes = 0;       // requestedBytes：请求长度。
+        std::uint32_t bytesRead = 0;            // bytesRead：R0 返回有效长度。
+        std::uint32_t maxBytesPerRequest = 0;   // maxBytesPerRequest：驱动限制。
+        std::vector<std::uint8_t> data;         // data：读回数据，失败区域按 R0 策略可为 00。
+    };
+
+    // VirtualMemoryWriteResult 是 R0 写目标进程虚拟内存的 R3 模型。
+    struct VirtualMemoryWriteResult
+    {
+        IoResult io;                    // io：DeviceIoControl 调用状态。
+        std::uint32_t version = 0;      // version：协议版本。
+        std::uint32_t processId = 0;    // processId：目标 PID。
+        std::uint32_t fieldFlags = 0;   // fieldFlags：KSWORD_ARK_MEMORY_FIELD_*。
+        std::uint32_t writeStatus = KSWORD_ARK_MEMORY_WRITE_STATUS_UNAVAILABLE; // writeStatus：R0 写聚合状态。
+        long lookupStatus = 0;          // lookupStatus：PsLookupProcessByProcessId 状态。
+        long copyStatus = 0;            // copyStatus：MmCopyVirtualMemory 状态。
+        std::uint32_t source = 0;       // source：写入来源。
+        std::uint64_t requestedBaseAddress = 0; // requestedBaseAddress：请求基址。
+        std::uint32_t requestedBytes = 0;       // requestedBytes：请求写入长度。
+        std::uint32_t bytesWritten = 0;         // bytesWritten：实际写入长度。
+        std::uint32_t maxBytesPerRequest = 0;   // maxBytesPerRequest：驱动限制。
+    };
+
     // SsdtEntry is the R3 model of one kernel SSDT response row.
     struct SsdtEntry
     {
@@ -362,6 +450,83 @@ namespace ksword::ark
         std::uint64_t serviceTableBase = 0;
         std::uint32_t serviceCountFromTable = 0;
         std::vector<SsdtEntry> entries;
+    };
+
+    // KernelInlineHookEntry 是 R0 Inline Hook 扫描返回的一行 R3 模型。
+    struct KernelInlineHookEntry
+    {
+        std::uint32_t status = KSWORD_ARK_KERNEL_HOOK_STATUS_UNKNOWN; // 行状态。
+        std::uint32_t hookType = KSWORD_ARK_INLINE_HOOK_TYPE_NONE;    // 命中的补丁形态。
+        std::uint32_t flags = 0;                                      // R0 诊断标志。
+        std::uint32_t originalByteCount = 0;                          // 基准字节长度。
+        std::uint32_t currentByteCount = 0;                           // 当前字节长度。
+        std::uint64_t functionAddress = 0;                            // 函数入口地址。
+        std::uint64_t targetAddress = 0;                              // 跳转/补丁目标。
+        std::uint64_t moduleBase = 0;                                 // 所属模块基址。
+        std::uint64_t targetModuleBase = 0;                           // 目标模块基址。
+        std::string functionName;                                     // 导出函数名。
+        std::wstring moduleName;                                      // 所属模块名。
+        std::wstring targetModuleName;                                // 目标模块名。
+        std::vector<std::uint8_t> currentBytes;                       // 当前函数头字节。
+        std::vector<std::uint8_t> expectedBytes;                      // 基准字节。
+    };
+
+    // KernelInlineHookScanResult 承载 R0 Inline Hook 扫描响应。
+    struct KernelInlineHookScanResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t status = KSWORD_ARK_KERNEL_HOOK_STATUS_UNKNOWN;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint32_t moduleCount = 0;
+        long lastStatus = 0;
+        std::vector<KernelInlineHookEntry> entries;
+    };
+
+    // KernelInlinePatchResult 承载 R0 Inline Hook 摘除/修复响应。
+    struct KernelInlinePatchResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t status = KSWORD_ARK_KERNEL_HOOK_STATUS_UNKNOWN;
+        std::uint32_t bytesPatched = 0;
+        std::uint32_t fieldFlags = 0;
+        long lastStatus = 0;
+        std::uint64_t functionAddress = 0;
+        std::vector<std::uint8_t> beforeBytes;
+        std::vector<std::uint8_t> afterBytes;
+    };
+
+    // KernelIatEatHookEntry 是内核模块 IAT/EAT 指针检查的一行 R3 模型。
+    struct KernelIatEatHookEntry
+    {
+        std::uint32_t hookClass = KSWORD_ARK_IAT_EAT_HOOK_CLASS_IAT; // IAT 或 EAT。
+        std::uint32_t status = KSWORD_ARK_KERNEL_HOOK_STATUS_UNKNOWN; // 行状态。
+        std::uint32_t flags = 0;                                      // R0 诊断标志。
+        std::uint32_t ordinal = 0;                                    // 导出序号或 thunk 序号。
+        std::uint64_t moduleBase = 0;                                 // 所属模块基址。
+        std::uint64_t thunkAddress = 0;                               // IAT thunk 或 EAT 项地址。
+        std::uint64_t currentTarget = 0;                              // 当前目标地址。
+        std::uint64_t expectedTarget = 0;                             // 期望目标地址。
+        std::uint64_t targetModuleBase = 0;                           // 目标模块基址。
+        std::string functionName;                                     // 函数名或占位符。
+        std::wstring moduleName;                                      // 所属模块名。
+        std::wstring importModuleName;                                // IAT 声明导入模块名。
+        std::wstring targetModuleName;                                // 当前目标模块名。
+    };
+
+    // KernelIatEatHookScanResult 承载 R0 IAT/EAT 扫描响应。
+    struct KernelIatEatHookScanResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t status = KSWORD_ARK_KERNEL_HOOK_STATUS_UNKNOWN;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint32_t moduleCount = 0;
+        long lastStatus = 0;
+        std::vector<KernelIatEatHookEntry> entries;
     };
 
     // DriverMajorFunctionEntry 是 Phase-9 DriverObject.MajorFunction 单行模型。
@@ -416,6 +581,20 @@ namespace ksword::ark
         std::vector<DriverDeviceEntry> devices;
     };
 
+    // DriverForceUnloadResult 承载 R0 DriverObject 强制卸载响应。
+    struct DriverForceUnloadResult
+    {
+        IoResult io;                         // io：DeviceIoControl 调用状态。
+        std::uint32_t version = 0;           // version：协议版本。
+        std::uint32_t status = KSWORD_ARK_DRIVER_UNLOAD_STATUS_UNKNOWN; // status：卸载聚合状态。
+        std::uint32_t flags = 0;             // flags：请求 flags 回显。
+        long lastStatus = 0;                 // lastStatus：卸载线程/后端状态。
+        long waitStatus = 0;                 // waitStatus：KeWaitForSingleObject 状态。
+        std::uint64_t driverObjectAddress = 0; // driverObjectAddress：诊断地址。
+        std::uint64_t driverUnloadAddress = 0; // driverUnloadAddress：DriverUnload 入口。
+        std::wstring driverName;             // driverName：R0 规范化对象名。
+    };
+
     // CallbackRuntimeResult wraps the runtime-state response packet.
     struct CallbackRuntimeResult
     {
@@ -428,6 +607,39 @@ namespace ksword::ark
     {
         IoResult io;
         KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE response{};
+    };
+
+    // CallbackEnumEntry 是 R0 回调遍历的一行 R3 模型。
+    struct CallbackEnumEntry
+    {
+        std::uint32_t callbackClass = 0;
+        std::uint32_t source = 0;
+        std::uint32_t status = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t operationMask = 0;
+        std::uint32_t objectTypeMask = 0;
+        long lastStatus = 0;
+        std::uint64_t callbackAddress = 0;
+        std::uint64_t contextAddress = 0;
+        std::uint64_t registrationAddress = 0;
+        std::uint64_t moduleBase = 0;
+        std::uint32_t moduleSize = 0;
+        std::wstring name;
+        std::wstring altitude;
+        std::wstring modulePath;
+        std::wstring detail;
+    };
+
+    // CallbackEnumResult 承载 R0 回调遍历响应。
+    struct CallbackEnumResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint32_t flags = 0;
+        long lastStatus = 0;
+        std::vector<CallbackEnumEntry> entries;
     };
 
     // ArkDynModuleIdentity 是 R3 侧模块身份展示结构。

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <fltKernel.h>
 #include <ntifs.h>
 #include <ntstrsafe.h>
 #include <wdf.h>
@@ -16,6 +17,7 @@
 #define KSWORD_ARK_CALLBACK_REGISTERED_THREAD 0x00000004UL
 #define KSWORD_ARK_CALLBACK_REGISTERED_IMAGE 0x00000008UL
 #define KSWORD_ARK_CALLBACK_REGISTERED_OBJECT 0x00000010UL
+#define KSWORD_ARK_CALLBACK_REGISTERED_MINIFILTER 0x00000020UL
 
 typedef struct _KSWORD_ARK_CALLBACK_RULE_SNAPSHOT KSWORD_ARK_CALLBACK_RULE_SNAPSHOT;
 typedef struct _KSWORD_ARK_PENDING_DECISION KSWORD_ARK_PENDING_DECISION;
@@ -100,6 +102,10 @@ typedef struct _KSWORD_ARK_CALLBACK_RUNTIME
 
     LARGE_INTEGER RegistryCookie;
     PVOID ObRegistrationHandle;
+    PFLT_FILTER MiniFilterHandle;
+    BOOLEAN MiniFilterStarted;
+    NTSTATUS MiniFilterRegisterStatus;
+    NTSTATUS MiniFilterStartStatus;
     ULONG RegisteredCallbacksMask;
     BOOLEAN Initialized;
 } KSWORD_ARK_CALLBACK_RUNTIME;
@@ -320,6 +326,43 @@ KswordArkObjectCallbackRegister(
 VOID
 KswordArkObjectCallbackUnregister(
     _In_ KSWORD_ARK_CALLBACK_RUNTIME* runtime
+    );
+
+VOID
+KswordArkMinifilterCallbackUnregister(
+    _In_ KSWORD_ARK_CALLBACK_RUNTIME* runtime
+    );
+
+VOID
+KswordArkMinifilterCallbackUpdateState(
+    _In_opt_ PFLT_FILTER FilterHandle,
+    _In_ NTSTATUS RegisterStatus,
+    _In_ NTSTATUS StartStatus,
+    _In_ BOOLEAN Started
+    );
+
+FLT_PREOP_CALLBACK_STATUS
+FLTAPI
+KswordArkMinifilterPreOperation(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _Outptr_result_maybenull_ PVOID* CompletionContext
+    );
+
+FLT_POSTOP_CALLBACK_STATUS
+FLTAPI
+KswordArkMinifilterPostOperation(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_opt_ PVOID CompletionContext,
+    _In_ FLT_POST_OPERATION_FLAGS Flags
+    );
+
+FLT_PREOP_CALLBACK_STATUS
+KswordArkMinifilterApplyRule(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_ ULONG OperationType
     );
 
 EXTERN_C_END

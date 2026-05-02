@@ -16,7 +16,7 @@ Environment:
 
 #include "callback_internal.h"
 
-static VOID
+VOID
 KswordArkProcessCreateNotifyEx(
     _Inout_ PEPROCESS Process,
     _In_ HANDLE ProcessId,

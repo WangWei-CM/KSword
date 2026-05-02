@@ -23,6 +23,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMetaObject>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -256,6 +257,34 @@ namespace
             return QStringLiteral("Query failed");
         default:
             return QStringLiteral("Unavailable");
+        }
+    }
+
+    // driverForceUnloadStatusText：
+    // - 作用：把 R0 强制卸载状态转成 DriverDock 日志文本；
+    // - 返回：中文状态描述，原始 NTSTATUS 仍单独展示。
+    QString driverForceUnloadStatusText(const std::uint32_t statusValue)
+    {
+        switch (statusValue)
+        {
+        case KSWORD_ARK_DRIVER_UNLOAD_STATUS_UNLOADED:
+            return QStringLiteral("已调用 DriverUnload");
+        case KSWORD_ARK_DRIVER_UNLOAD_STATUS_UNLOAD_ROUTINE_MISSING:
+            return QStringLiteral("缺少 DriverUnload");
+        case KSWORD_ARK_DRIVER_UNLOAD_STATUS_REFERENCE_FAILED:
+            return QStringLiteral("引用 DriverObject 失败");
+        case KSWORD_ARK_DRIVER_UNLOAD_STATUS_THREAD_FAILED:
+            return QStringLiteral("系统线程失败");
+        case KSWORD_ARK_DRIVER_UNLOAD_STATUS_WAIT_TIMEOUT:
+            return QStringLiteral("等待超时");
+        case KSWORD_ARK_DRIVER_UNLOAD_STATUS_OPERATION_FAILED:
+            return QStringLiteral("操作失败");
+        case KSWORD_ARK_DRIVER_UNLOAD_STATUS_FORCED_CLEANUP:
+            return QStringLiteral("已强制清理");
+        case KSWORD_ARK_DRIVER_UNLOAD_STATUS_CLEANUP_FAILED:
+            return QStringLiteral("清理失败");
+        default:
+            return QStringLiteral("未知状态");
         }
     }
 

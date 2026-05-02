@@ -87,6 +87,44 @@ QIcon NetworkDock::resolveProcessIconByPid(const std::uint32_t processId, const 
 
 bool NetworkDock::packetPassesMonitorFilter(const ks::network::PacketRecord& packetRecord) const
 {
+    if (!packetPassesTimelineFilter(packetRecord))
+    {
+        return false;
+    }
+
+    if (m_activeMonitorFilterGroupList.empty())
+    {
+        return true;
+    }
+
+    for (const MonitorFilterRuleGroupCompiled& groupFilter : m_activeMonitorFilterGroupList)
+    {
+        if (!groupFilter.enabled)
+        {
+            continue;
+        }
+
+        if (packetMatchesMonitorFilterGroup(packetRecord, groupFilter))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool NetworkDock::packetPassesMonitorFilter(
+    const std::uint64_t sequenceId,
+    const ks::network::PacketRecord& packetRecord) const
+{
+    // 序号版本用于历史缓存重建：
+    // - 时间轴过滤需要使用报文首次入库时缓存的压缩时间；
+    // - 其余规则仍复用原来的进程/IP/端口/包长匹配逻辑。
+    if (!packetPassesTimelineFilter(sequenceId, packetRecord))
+    {
+        return false;
+    }
+
     if (m_activeMonitorFilterGroupList.empty())
     {
         return true;

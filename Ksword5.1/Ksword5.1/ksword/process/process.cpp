@@ -15,29 +15,39 @@
 #include <Shellapi.h>
 #include <winternl.h>
 #include <RestartManager.h>
+#include <pdh.h>
+#include <pdhmsg.h>
 
 #include <algorithm>   // std::max/std::clamp：衍生指标计算。
 #include <chrono>      // steady_clock：跨刷新轮次计时。
+#include <cmath>       // std::isfinite：过滤 PDH 返回的异常浮点值。
 #include <cstddef>     // offsetof：校验变长系统句柄表缓冲区。
 #include <cstring>     // std::memset：远程结构读取前清零输出缓冲。
-#include <cwchar>      // std::swprintf：拼接版本信息查询路径。
+#include <cwchar>      // std::swprintf/std::wcstoul：拼接版本信息查询路径与解析 PDH PID。
+#include <cwctype>     // std::towlower：解析 GPU Engine 实例名时做大小写归一。
 #include <filesystem>  // std::filesystem：路径存在性与目录判断。
 #include <fstream>     // std::ifstream：读取 PE 头计算入口 RVA。
 #include <iomanip>     // std::hex：格式化十六进制文本。
 #include <iterator>    // std::size：静态数组长度。
+#include <limits>      // std::numeric_limits：数值边界检查。
+#include <mutex>       // std::mutex：保护全局 PDH 查询句柄。
 #include <sstream>     // std::ostringstream：错误文本拼接。
+#include <string>      // std::string/std::wstring：进程文本与 PDH 实例名。
 #include <unordered_map> // std::unordered_map：线程枚举时缓存 PID->进程名。
+#include <utility>     // std::move：容器写入记录时避免额外拷贝。
 #include <vector>      // std::vector：系统信息缓冲与容器。
 
 // 链接依赖库：
 // - Psapi：GetProcessMemoryInfo；
 // - Wintrust/Crypt32：数字签名校验；
 // - Version：读取文件版本信息中的 CompanyName（厂家兜底）。
+// - Pdh：读取 Windows GPU Engine 性能计数器，补齐每进程 GPU 利用率。
 #pragma comment(lib, "Psapi.lib")
 #pragma comment(lib, "Wintrust.lib")
 #pragma comment(lib, "Crypt32.lib")
 #pragma comment(lib, "Version.lib")
 #pragma comment(lib, "Advapi32.lib")
+#pragma comment(lib, "Pdh.lib")
 
 namespace
 {
@@ -106,6 +116,7 @@ namespace
     using NtTerminateThreadFn = NTSTATUS(NTAPI*)(HANDLE, NTSTATUS);
     using NtTerminateJobObjectFn = NTSTATUS(NTAPI*)(HANDLE, NTSTATUS);
     using NtUnmapViewOfSectionFn = NTSTATUS(NTAPI*)(HANDLE, PVOID);
+    using PdhAddEnglishCounterWFn = PDH_STATUS(WINAPI*)(HQUERY, LPCWSTR, DWORD_PTR, HCOUNTER*);
 
     // ProcessBasicInformation 结果结构（与 NtQueryInformationProcess 对应）。
     struct ProcessBasicInformationLocal
@@ -456,6 +467,320 @@ namespace
         }
 
         return handleCountByPid;
+    }
+
+    // containsGpuEnginePidPrefixAt 作用：
+    // - 判断 GPU Engine 实例名某个位置是否为 "pid_"；
+    // - PDH 实例名通常为 pid_1234_luid_..._engtype_3D；
+    // - 这里不依赖大小写，避免不同 Windows 构建输出大小写差异。
+    bool containsGpuEnginePidPrefixAt(
+        const std::wstring& instanceName,
+        const std::size_t offset)
+    {
+        constexpr wchar_t expectedPrefix[] = L"pid_";
+        constexpr std::size_t expectedPrefixLength = 4;
+        if (offset + expectedPrefixLength > instanceName.size())
+        {
+            return false;
+        }
+
+        for (std::size_t prefixIndex = 0; prefixIndex < expectedPrefixLength; ++prefixIndex)
+        {
+            const wchar_t actualChar = static_cast<wchar_t>(
+                std::towlower(instanceName[offset + prefixIndex]));
+            if (actualChar != expectedPrefix[prefixIndex])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // ExtractPidFromGpuEngineInstanceName 作用：
+    // - 从 PDH GPU Engine 实例名中解析 pid_ 后面的十进制 PID；
+    // - 返回 0 表示实例名不含可用 PID，调用方会忽略该条计数器。
+    std::uint32_t ExtractPidFromGpuEngineInstanceName(const wchar_t* const rawInstanceName)
+    {
+        if (rawInstanceName == nullptr || rawInstanceName[0] == L'\0')
+        {
+            return 0;
+        }
+
+        const std::wstring instanceName(rawInstanceName);
+        for (std::size_t offset = 0; offset < instanceName.size(); ++offset)
+        {
+            if (!containsGpuEnginePidPrefixAt(instanceName, offset))
+            {
+                continue;
+            }
+
+            const wchar_t* const digitBegin = instanceName.c_str() + offset + 4;
+            if (*digitBegin == L'\0' || std::iswdigit(*digitBegin) == 0)
+            {
+                continue;
+            }
+
+            wchar_t* digitEnd = nullptr;
+            const unsigned long parsedPid = std::wcstoul(digitBegin, &digitEnd, 10);
+            if (digitEnd == digitBegin || parsedPid == 0UL)
+            {
+                continue;
+            }
+            if (parsedPid > static_cast<unsigned long>(std::numeric_limits<std::uint32_t>::max()))
+            {
+                continue;
+            }
+            return static_cast<std::uint32_t>(parsedPid);
+        }
+
+        return 0;
+    }
+
+    // GpuPdhQueryState：保存跨刷新轮次复用的 PDH 查询对象。
+    struct GpuPdhQueryState
+    {
+        HQUERY queryHandle = nullptr;     // queryHandle：PDH 查询句柄，进程退出时由系统回收。
+        HCOUNTER counterHandle = nullptr; // counterHandle：GPU Engine 通配计数器句柄。
+        bool permanentlyUnavailable = false; // permanentlyUnavailable：当前系统没有可用 GPU Engine 计数器。
+        bool hasBaselineSample = false;   // hasBaselineSample：百分比计数器需要至少两轮采样才有有效差值。
+    };
+
+    // gpuPdhQueryState 作用：
+    // - 返回函数内静态状态，避免暴露全局符号；
+    // - 该状态只在 QueryGpuUsagePercentByPid 的互斥锁保护下访问。
+    GpuPdhQueryState& gpuPdhQueryState()
+    {
+        static GpuPdhQueryState state;
+        return state;
+    }
+
+    // gpuPdhQueryMutex 作用：
+    // - 保护 PDH 查询句柄和内部采样状态；
+    // - 避免多个 UI/后台线程同时刷新进程列表时破坏 PDH 查询。
+    std::mutex& gpuPdhQueryMutex()
+    {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    // addGpuEnglishCounter 作用：
+    // - 优先动态调用 PdhAddEnglishCounterW，确保中文系统也能使用英文计数器路径；
+    // - 若极旧运行环境没有该导出，则回退到 PdhAddCounterW。
+    PDH_STATUS addGpuEnglishCounter(
+        const HQUERY queryHandle,
+        HCOUNTER* const counterHandleOut)
+    {
+        if (counterHandleOut == nullptr)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        HMODULE pdhModule = ::GetModuleHandleW(L"pdh.dll");
+        if (pdhModule == nullptr)
+        {
+            pdhModule = ::LoadLibraryW(L"pdh.dll");
+        }
+
+        const auto addEnglishCounter = reinterpret_cast<PdhAddEnglishCounterWFn>(
+            pdhModule != nullptr ? ::GetProcAddress(pdhModule, "PdhAddEnglishCounterW") : nullptr);
+        if (addEnglishCounter != nullptr)
+        {
+            return addEnglishCounter(
+                queryHandle,
+                L"\\GPU Engine(*)\\Utilization Percentage",
+                0,
+                counterHandleOut);
+        }
+
+        return ::PdhAddCounterW(
+            queryHandle,
+            L"\\GPU Engine(*)\\Utilization Percentage",
+            0,
+            counterHandleOut);
+    }
+
+    // resetGpuPdhQueryState 作用：
+    // - 关闭当前 PDH 查询；
+    // - markUnavailable 为 true 时后续不再重复初始化，避免无 GPU 机器反复开销。
+    void resetGpuPdhQueryState(
+        GpuPdhQueryState& state,
+        const bool markUnavailable)
+    {
+        if (state.queryHandle != nullptr)
+        {
+            ::PdhCloseQuery(state.queryHandle);
+        }
+        state.queryHandle = nullptr;
+        state.counterHandle = nullptr;
+        state.hasBaselineSample = false;
+        if (markUnavailable)
+        {
+            state.permanentlyUnavailable = true;
+        }
+    }
+
+    // ensureGpuPdhQueryReadyLocked 作用：
+    // - 初始化 Windows GPU Engine PDH 通配计数器；
+    // - 调用方必须已经持有 gpuPdhQueryMutex；
+    // - 返回 false 表示当前系统/权限下无法读取 GPU Engine。
+    bool ensureGpuPdhQueryReadyLocked(GpuPdhQueryState& state)
+    {
+        if (state.permanentlyUnavailable)
+        {
+            return false;
+        }
+        if (state.queryHandle != nullptr && state.counterHandle != nullptr)
+        {
+            return true;
+        }
+
+        HQUERY queryHandle = nullptr;
+        PDH_STATUS status = ::PdhOpenQueryW(nullptr, 0, &queryHandle);
+        if (status != ERROR_SUCCESS || queryHandle == nullptr)
+        {
+            resetGpuPdhQueryState(state, true);
+            return false;
+        }
+
+        HCOUNTER counterHandle = nullptr;
+        // 使用 English Counter 路径，避免中文系统上本地化计数器名称导致 AddCounter 失败。
+        // addGpuEnglishCounter 内部会在极旧环境中回退 PdhAddCounterW。
+        status = addGpuEnglishCounter(queryHandle, &counterHandle);
+        if (status != ERROR_SUCCESS || counterHandle == nullptr)
+        {
+            ::PdhCloseQuery(queryHandle);
+            resetGpuPdhQueryState(state, true);
+            return false;
+        }
+
+        state.queryHandle = queryHandle;
+        state.counterHandle = counterHandle;
+        state.hasBaselineSample = false;
+        state.permanentlyUnavailable = false;
+        return true;
+    }
+
+    // QueryGpuUsagePercentByPid 作用：
+    // - 读取 \GPU Engine(*)\Utilization Percentage；
+    // - 按实例名中的 pid_XXXX 聚合同一进程的多个 engine；
+    // - 返回 PID -> GPU 百分比，失败时返回空表。
+    std::unordered_map<std::uint32_t, double> QueryGpuUsagePercentByPid()
+    {
+        std::unordered_map<std::uint32_t, double> gpuPercentByPid;
+
+        std::lock_guard<std::mutex> queryLock(gpuPdhQueryMutex());
+        GpuPdhQueryState& state = gpuPdhQueryState();
+        if (!ensureGpuPdhQueryReadyLocked(state))
+        {
+            return gpuPercentByPid;
+        }
+
+        const PDH_STATUS collectStatus = ::PdhCollectQueryData(state.queryHandle);
+        if (collectStatus != ERROR_SUCCESS)
+        {
+            // 临时采样失败时允许下一轮重建查询，避免设备重置后长期卡死。
+            resetGpuPdhQueryState(state, false);
+            return gpuPercentByPid;
+        }
+        if (!state.hasBaselineSample)
+        {
+            // GPU Engine Utilization Percentage 和 System Informer 同类 PDH 方案一样需要基线样本。
+            // 首次 Collect 只建立内部历史值，下一次刷新再读取格式化数组，避免首轮误报异常。
+            state.hasBaselineSample = true;
+            return gpuPercentByPid;
+        }
+
+        DWORD bufferSize = 0;
+        DWORD itemCount = 0;
+        PDH_STATUS formatStatus = ::PdhGetFormattedCounterArrayW(
+            state.counterHandle,
+            PDH_FMT_DOUBLE,
+            &bufferSize,
+            &itemCount,
+            nullptr);
+        if (formatStatus == PDH_INVALID_DATA)
+        {
+            // PDH 许多百分比计数器需要两次 Collect；首轮无历史样本属于正常热身。
+            return gpuPercentByPid;
+        }
+        if (formatStatus != PDH_MORE_DATA || bufferSize == 0 || itemCount == 0)
+        {
+            return gpuPercentByPid;
+        }
+
+        // PDH 输出缓冲区内既包含结构数组也包含实例名字符串；
+        // 用 uint64_t 做底层存储可满足指针/DOUBLE 字段对齐要求。
+        std::vector<std::uint64_t> itemStorage(
+            (static_cast<std::size_t>(bufferSize) + sizeof(std::uint64_t) - 1U) /
+            sizeof(std::uint64_t));
+        auto* const itemList = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(itemStorage.data());
+        formatStatus = ::PdhGetFormattedCounterArrayW(
+            state.counterHandle,
+            PDH_FMT_DOUBLE,
+            &bufferSize,
+            &itemCount,
+            itemList);
+        if (formatStatus != ERROR_SUCCESS)
+        {
+            return gpuPercentByPid;
+        }
+
+        gpuPercentByPid.reserve(static_cast<std::size_t>(itemCount));
+        for (DWORD itemIndex = 0; itemIndex < itemCount; ++itemIndex)
+        {
+            const PDH_FMT_COUNTERVALUE_ITEM_W& item = itemList[itemIndex];
+            const std::uint32_t processId = ExtractPidFromGpuEngineInstanceName(item.szName);
+            if (processId == 0)
+            {
+                continue;
+            }
+            if (item.FmtValue.CStatus != ERROR_SUCCESS)
+            {
+                continue;
+            }
+
+            const double enginePercent = item.FmtValue.doubleValue;
+            if (!std::isfinite(enginePercent) || enginePercent <= 0.0)
+            {
+                continue;
+            }
+
+            // 同一 PID 可能同时使用 3D/Copy/VideoDecode/Compute 等多个 engine，这里做总和。
+            gpuPercentByPid[processId] += enginePercent;
+        }
+
+        for (auto& gpuPair : gpuPercentByPid)
+        {
+            // UI 列按 0~100% 展示，异常累计值统一夹紧，避免多适配器场景破坏排序和高亮。
+            gpuPair.second = std::clamp(gpuPair.second, 0.0, 100.0);
+        }
+        return gpuPercentByPid;
+    }
+
+    // ApplyGpuUsageCountersToProcessList 作用：
+    // - 将 PID 聚合后的 GPU 利用率写回进程快照；
+    // - PDH 不可用时保持默认 0，不影响进程枚举主流程。
+    void ApplyGpuUsageCountersToProcessList(std::vector<ks::process::ProcessRecord>& processList)
+    {
+        if (processList.empty())
+        {
+            return;
+        }
+
+        const std::unordered_map<std::uint32_t, double> gpuPercentByPid =
+            QueryGpuUsagePercentByPid();
+        if (gpuPercentByPid.empty())
+        {
+            return;
+        }
+
+        for (ks::process::ProcessRecord& processRecord : processList)
+        {
+            const auto gpuIt = gpuPercentByPid.find(processRecord.pid);
+            processRecord.gpuPercent = (gpuIt == gpuPercentByPid.end())
+                ? 0.0
+                : gpuIt->second;
+        }
     }
 
     // 读取进程可执行路径（UTF-8），失败返回空串。
@@ -2006,8 +2331,7 @@ namespace ks::process
         }
         ::CloseHandle(processHandle);
 
-        // GPU/Net 当前预留，统一置零。
-        processRecord.gpuPercent = 0.0;
+        // GPU 由进程列表枚举阶段统一通过 PDH GPU Engine 聚合，避免单进程打开句柄时重复采样。
         processRecord.netKBps = 0.0;
         processRecord.dynamicCountersReady = true;
         return true;
@@ -2241,22 +2565,20 @@ namespace ks::process
         processRecord.workingSetMB = static_cast<double>(processRecord.rawWorkingSetBytes) / (1024.0 * 1024.0);
         processRecord.ramMB = static_cast<double>(processRecord.rawPrivateBytes) / (1024.0 * 1024.0);
 
-        // 无历史样本时，CPU/Disk 无法计算差值，置 0。
+        // 无历史样本时，CPU/Disk 无法计算差值，GPU 保留 PDH 枚举阶段写入值。
         if (previousSample == nullptr)
         {
             processRecord.cpuPercent = 0.0;
             processRecord.diskMBps = 0.0;
-            processRecord.gpuPercent = 0.0;
             processRecord.netKBps = 0.0;
             return;
         }
 
-        // 采样间隔过小或时钟回退时，避免除零。
+        // 采样间隔过小或时钟回退时，避免除零；GPU 同样保留本轮 PDH 值。
         if (currentTick100ns <= previousSample->sampleTick100ns)
         {
             processRecord.cpuPercent = 0.0;
             processRecord.diskMBps = 0.0;
-            processRecord.gpuPercent = 0.0;
             processRecord.netKBps = 0.0;
             return;
         }
@@ -2295,8 +2617,7 @@ namespace ks::process
             processRecord.diskMBps = 0.0;
         }
 
-        // GPU/Net 当前预留，暂置 0；后续可接入 ETW/PDH。
-        processRecord.gpuPercent = 0.0;
+        // Net 当前预留，暂置 0；GPU 不在这里清零，避免覆盖 PDH 采样结果。
         processRecord.netKBps = 0.0;
     }
 
@@ -2330,6 +2651,15 @@ namespace ks::process
                         processRecord.handleCount = handleCountIt->second;
                     }
                 }
+            };
+
+        // applyGpuUsageFallback 作用：
+        // - 用 Windows PDH GPU Engine 计数器补齐每进程 GPU 利用率；
+        // - 枚举策略本身不提供 GPU 字段，因此必须在返回列表前统一聚合。
+        const auto applyGpuUsageFallback =
+            [](std::vector<ProcessRecord>& processList) -> void
+            {
+                ApplyGpuUsageCountersToProcessList(processList);
             };
 
         // 内部 lambda：Toolhelp 路径。
@@ -2482,6 +2812,7 @@ namespace ks::process
             }
             std::vector<ProcessRecord> processList = enumerateBySnapshot();
             applyHandleCountFallback(processList);
+            applyGpuUsageFallback(processList);
             return processList;
         }
         if (strategy == ProcessEnumStrategy::NtQuerySystemInfo)
@@ -2492,6 +2823,7 @@ namespace ks::process
             }
             std::vector<ProcessRecord> processList = enumerateByNtQuery();
             applyHandleCountFallback(processList);
+            applyGpuUsageFallback(processList);
             return processList;
         }
 
@@ -2504,6 +2836,7 @@ namespace ks::process
                 *actualStrategyOut = ProcessEnumStrategy::NtQuerySystemInfo;
             }
             applyHandleCountFallback(processList);
+            applyGpuUsageFallback(processList);
             return processList;
         }
         if (actualStrategyOut != nullptr)
@@ -2512,6 +2845,7 @@ namespace ks::process
         }
         processList = enumerateBySnapshot();
         applyHandleCountFallback(processList);
+        applyGpuUsageFallback(processList);
         return processList;
     }
 

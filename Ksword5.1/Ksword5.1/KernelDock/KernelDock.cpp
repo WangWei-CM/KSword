@@ -210,7 +210,11 @@ void KernelDock::initializeUi()
     m_driverStatusPage = new QWidget(m_tabWidget);
     m_ntQueryPage = new QWidget(m_tabWidget);
     m_callbackInterceptPage = new QWidget(m_tabWidget);
+    m_callbackEnumPage = new QWidget(m_tabWidget);
     m_callbackRemovePage = new QWidget(m_tabWidget);
+    m_shadowSsdtPage = new QWidget(m_tabWidget);
+    m_inlineHookPage = new QWidget(m_tabWidget);
+    m_iatEatHookPage = new QWidget(m_tabWidget);
 
     m_objectNamespaceTabIndex = m_tabWidget->addTab(
         m_objectNamespacePage,
@@ -236,6 +240,24 @@ void KernelDock::initializeUi()
         QStringLiteral("SSDT遍历"));
     m_tabWidget->setTabToolTip(m_ssdtTabIndex, QStringLiteral("驱动侧 SSDT 服务索引遍历结果"));
 
+    m_shadowSsdtTabIndex = m_tabWidget->addTab(
+        m_shadowSsdtPage,
+        tabIcon(QStringLiteral(":/Icon/process_list.svg")),
+        QStringLiteral("SSSDT解析"));
+    m_tabWidget->setTabToolTip(m_shadowSsdtTabIndex, QStringLiteral("参考 System Informer 的 win32k/win32u shadow syscall 解析"));
+
+    m_inlineHookTabIndex = m_tabWidget->addTab(
+        m_inlineHookPage,
+        tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
+        QStringLiteral("Inline Hook 检测 & 摘除"));
+    m_tabWidget->setTabToolTip(m_inlineHookTabIndex, QStringLiteral("扫描内核模块导出函数头部跳转补丁，并提供 force 后 NOP 摘除"));
+
+    m_iatEatHookTabIndex = m_tabWidget->addTab(
+        m_iatEatHookPage,
+        tabIcon(QStringLiteral(":/Icon/process_details.svg")),
+        QStringLiteral("IAT/EAT 钩子检测"));
+    m_tabWidget->setTabToolTip(m_iatEatHookTabIndex, QStringLiteral("检测内核模块导入表和导出表可疑目标指针"));
+
     m_dynDataTabIndex = m_tabWidget->addTab(
         m_dynDataPage,
         tabIcon(QStringLiteral(":/Icon/process_priority.svg")),
@@ -253,6 +275,12 @@ void KernelDock::initializeUi()
         tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
         QStringLiteral("驱动回调"));
     m_tabWidget->setTabToolTip(m_callbackTabIndex, QStringLiteral("驱动回调拦截规则管理与询问事件处理"));
+
+    m_callbackEnumTabIndex = m_tabWidget->addTab(
+        m_callbackEnumPage,
+        tabIcon(QStringLiteral(":/Icon/process_list.svg")),
+        QStringLiteral("回调遍历"));
+    m_tabWidget->setTabToolTip(m_callbackEnumTabIndex, QStringLiteral("遍历 KswordARK 可见的系统回调、minifilter 和 System Informer DynData 诊断项"));
 
     m_callbackRemoveTabIndex = m_tabWidget->addTab(
         m_callbackRemovePage,
@@ -351,9 +379,13 @@ void KernelDock::updateTabIconContrast()
     m_tabWidget->setTabIcon(m_atomTabIndex, tabIcon(QStringLiteral(":/Icon/process_threads.svg")));
     m_tabWidget->setTabIcon(m_ntQueryTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
     m_tabWidget->setTabIcon(m_ssdtTabIndex, tabIcon(QStringLiteral(":/Icon/process_list.svg")));
+    m_tabWidget->setTabIcon(m_shadowSsdtTabIndex, tabIcon(QStringLiteral(":/Icon/process_list.svg")));
+    m_tabWidget->setTabIcon(m_inlineHookTabIndex, tabIcon(QStringLiteral(":/Icon/process_critical.svg")));
+    m_tabWidget->setTabIcon(m_iatEatHookTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
     m_tabWidget->setTabIcon(m_dynDataTabIndex, tabIcon(QStringLiteral(":/Icon/process_priority.svg")));
     m_tabWidget->setTabIcon(m_driverStatusTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
     m_tabWidget->setTabIcon(m_callbackTabIndex, tabIcon(QStringLiteral(":/Icon/process_critical.svg")));
+    m_tabWidget->setTabIcon(m_callbackEnumTabIndex, tabIcon(QStringLiteral(":/Icon/process_list.svg")));
     m_tabWidget->setTabIcon(m_callbackRemoveTabIndex, tabIcon(QStringLiteral(":/Icon/process_terminate.svg")));
 
     if (currentIndex == m_objectNamespaceTabIndex)
@@ -372,6 +404,18 @@ void KernelDock::updateTabIconContrast()
     {
         m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_list.svg")));
     }
+    else if (currentIndex == m_shadowSsdtTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_list.svg")));
+    }
+    else if (currentIndex == m_inlineHookTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_critical.svg")));
+    }
+    else if (currentIndex == m_iatEatHookTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_details.svg")));
+    }
     else if (currentIndex == m_dynDataTabIndex)
     {
         m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_priority.svg")));
@@ -383,6 +427,10 @@ void KernelDock::updateTabIconContrast()
     else if (currentIndex == m_callbackTabIndex)
     {
         m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_critical.svg")));
+    }
+    else if (currentIndex == m_callbackEnumTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_list.svg")));
     }
     else if (currentIndex == m_callbackRemoveTabIndex)
     {
@@ -693,6 +741,36 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         return;
     }
 
+    if (tabIndex == m_shadowSsdtTabIndex && !m_shadowSsdtTabInitialized)
+    {
+        showTabInitializingProgress(tabIndex, QStringLiteral("SSSDT解析"));
+        initializeShadowSsdtTab();
+        m_shadowSsdtTabInitialized = true;
+        hideTabInitializingProgress();
+        refreshShadowSsdtAsync();
+        return;
+    }
+
+    if (tabIndex == m_inlineHookTabIndex && !m_inlineHookTabInitialized)
+    {
+        showTabInitializingProgress(tabIndex, QStringLiteral("Inline Hook 检测"));
+        initializeInlineHookTab();
+        m_inlineHookTabInitialized = true;
+        hideTabInitializingProgress();
+        refreshInlineHooksAsync();
+        return;
+    }
+
+    if (tabIndex == m_iatEatHookTabIndex && !m_iatEatHookTabInitialized)
+    {
+        showTabInitializingProgress(tabIndex, QStringLiteral("IAT/EAT 钩子检测"));
+        initializeIatEatHookTab();
+        m_iatEatHookTabInitialized = true;
+        hideTabInitializingProgress();
+        refreshIatEatHooksAsync();
+        return;
+    }
+
     if (tabIndex == m_dynDataTabIndex && !m_dynDataTabInitialized)
     {
         showTabInitializingProgress(tabIndex, QStringLiteral("动态偏移"));
@@ -719,6 +797,16 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         initializeCallbackInterceptTab();
         m_callbackTabInitialized = true;
         hideTabInitializingProgress();
+        return;
+    }
+
+    if (tabIndex == m_callbackEnumTabIndex && !m_callbackEnumTabInitialized)
+    {
+        showTabInitializingProgress(tabIndex, QStringLiteral("回调遍历"));
+        initializeCallbackEnumTab();
+        m_callbackEnumTabInitialized = true;
+        hideTabInitializingProgress();
+        refreshCallbackEnumAsync();
         return;
     }
 

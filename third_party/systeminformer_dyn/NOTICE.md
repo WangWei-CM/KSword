@@ -7,7 +7,7 @@ Imported for Ksword ARK Phase 0 DynData matching.
 - License: MIT License, copied in LICENSE.txt
 - Upstream copyright: Copyright (c) 2022 Winsider Seminars & Solutions, Inc.
 - Imported files: kphdyn.xml, kphdyn.c, kphdyn.h
-- Local source snapshot: H:\Project\systeminformer-master
+- Local import target: third_party/systeminformer_dyn
 - Import date: 2026-04-30
 - Source commit: unavailable in the local snapshot (no .git metadata present)
 

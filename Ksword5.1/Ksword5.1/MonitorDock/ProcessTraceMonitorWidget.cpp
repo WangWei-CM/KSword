@@ -11,12 +11,16 @@
 #include "../theme.h"
 
 #include <QDateTime>
+#include <QEvent>
 #include <QLabel>
+#include <QList>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QToolButton>
 #include <QTimer>
+#include <QWidget>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -67,6 +71,22 @@ ProcessTraceMonitorWidget::~ProcessTraceMonitorWidget()
     info << destroyEvent << "[ProcessTraceMonitorWidget] 进程定向监控页已析构。" << eol;
 }
 
+bool ProcessTraceMonitorWidget::event(QEvent* eventPointer)
+{
+    // handled：
+    // - 先保留 QWidget 原始事件处理结果，避免主题刷新逻辑吞掉其它输入/布局事件；
+    // - 后续只在样式相关事件上补刷 Collapse 动态样式。
+    const bool handled = QWidget::event(eventPointer);
+    if (eventPointer != nullptr
+        && (eventPointer->type() == QEvent::PaletteChange
+            || eventPointer->type() == QEvent::ApplicationPaletteChange
+            || eventPointer->type() == QEvent::StyleChange))
+    {
+        refreshCollapseTheme(this);
+    }
+    return handled;
+}
+
 QString ProcessTraceMonitorWidget::blueButtonStyle()
 {
     return KswordTheme::ThemedButtonStyle();
@@ -90,6 +110,101 @@ QString ProcessTraceMonitorWidget::blueHeaderStyle()
         .arg(KswordTheme::PrimaryBlueHex)
         .arg(KswordTheme::SurfaceHex())
         .arg(KswordTheme::BorderHex());
+}
+
+QString ProcessTraceMonitorWidget::collapsePanelStyle()
+{
+    // 样式复用 MonitorDock 已有独立 Collapse 约定：
+    // - 外层使用 kswordCollapsePanel 标记，显示统一边框和圆角；
+    // - 内容宿主使用 kswordCollapseContent 标记，避免嵌套区域重复描边。
+    return QStringLiteral(
+        "QWidget[kswordCollapsePanel=\"true\"]{"
+        "  background:%1;"
+        "  color:%2;"
+        "  border:1px solid %3;"
+        "  border-radius:5px;"
+        "}"
+        "QWidget[kswordCollapseContent=\"true\"]{"
+        "  background:%1;"
+        "  color:%2;"
+        "  border:none;"
+        "}")
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::TextPrimaryHex())
+        .arg(KswordTheme::BorderHex());
+}
+
+QString ProcessTraceMonitorWidget::collapseHeaderButtonStyle()
+{
+    // 头部按钮与 MonitorDock 自定义折叠段保持同款：
+    // - 普通态使用次级面板底色；
+    // - 悬停/展开态使用主蓝弱背景，强调当前配置区仍处于展开状态。
+    return QStringLiteral(
+        "QToolButton{"
+        "  background:%1;"
+        "  color:%2;"
+        "  border:1px solid %3;"
+        "  border-radius:5px;"
+        "  padding:5px 8px;"
+        "  font-weight:600;"
+        "  text-align:left;"
+        "}"
+        "QToolButton:hover{"
+        "  background:%4;"
+        "  color:%2;"
+        "  border-color:%5;"
+        "}"
+        "QToolButton:checked{"
+        "  background:%4;"
+        "  color:%2;"
+        "  border-color:%5;"
+        "}")
+        .arg(KswordTheme::SurfaceAltHex())
+        .arg(KswordTheme::TextPrimaryHex())
+        .arg(KswordTheme::BorderHex())
+        .arg(KswordTheme::PrimaryBlueSubtleHex())
+        .arg(KswordTheme::PrimaryBlueHex);
+}
+
+void ProcessTraceMonitorWidget::refreshCollapseTheme(QWidget* rootWidget)
+{
+    // 空根直接返回，便于 event() 在极早期初始化阶段安全调用。
+    if (rootWidget == nullptr)
+    {
+        return;
+    }
+
+    // 面板样式按属性刷新：
+    // - palette()/主题函数值会随深浅主题改变；
+    // - 重新 setStyleSheet 可强制 Qt 重新解析动态颜色。
+    const QList<QWidget*> widgetList = rootWidget->findChildren<QWidget*>();
+    for (QWidget* widgetPointer : widgetList)
+    {
+        if (widgetPointer == nullptr)
+        {
+            continue;
+        }
+
+        if (widgetPointer->property("kswordCollapsePanel").toString() == QStringLiteral("true")
+            || widgetPointer->property("kswordCollapseContent").toString() == QStringLiteral("true"))
+        {
+            widgetPointer->setStyleSheet(collapsePanelStyle());
+        }
+    }
+
+    // 头部按钮单独刷新：
+    // - 只匹配折叠段外层下的 QToolButton，避免误改普通工具按钮；
+    // - 返回值为空，本函数只负责主题同步副作用。
+    const QList<QToolButton*> headerButtonList = rootWidget->findChildren<QToolButton*>();
+    for (QToolButton* buttonPointer : headerButtonList)
+    {
+        if (buttonPointer != nullptr
+            && buttonPointer->parentWidget() != nullptr
+            && buttonPointer->parentWidget()->property("kswordCollapsePanel").toString() == QStringLiteral("true"))
+        {
+            buttonPointer->setStyleSheet(collapseHeaderButtonStyle());
+        }
+    }
 }
 
 QString ProcessTraceMonitorWidget::buildStatusStyle(const QString& colorHex)

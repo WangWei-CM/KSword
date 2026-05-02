@@ -91,9 +91,87 @@ PsGetProcessImageFileName(
 #define KSWORD_ARK_ENUM_PID_STEP 4UL
 #define KSWORD_ARK_ENUM_SCAN_MAX_PID 0x00400000UL
 #define KSWORD_ARK_ENUM_SCAN_MIN_PID KSWORD_ARK_ENUM_PID_STEP
+#define KSWORD_ARK_PROCESS_HIDE_MAX_PIDS 256UL
+
 typedef PEPROCESS(NTAPI* KSWORD_PS_GET_NEXT_PROCESS_FN)(
     _In_opt_ PEPROCESS Process
     );
+
+typedef struct _KSWORD_ARK_PROCESS_HIDE_STATE
+{
+    EX_PUSH_LOCK Lock;
+    BOOLEAN Initialized;
+    ULONG Count;
+    ULONG Pids[KSWORD_ARK_PROCESS_HIDE_MAX_PIDS];
+} KSWORD_ARK_PROCESS_HIDE_STATE;
+
+static KSWORD_ARK_PROCESS_HIDE_STATE g_KswordArkProcessHideState;
+
+static VOID
+KswordARKDriverEnsureProcessHideStateInitialized(
+    VOID
+    )
+/*++
+
+Routine Description:
+
+    初始化驱动内进程隐藏状态表。中文说明：该表只影响 Ksword 自身的 R0
+    枚举标记和 R3 展示过滤，不修改 EPROCESS 链表，保证可恢复。
+
+Arguments:
+
+    None.
+
+Return Value:
+
+    None. 本函数没有返回值。
+
+--*/
+{
+    if (g_KswordArkProcessHideState.Initialized) {
+        return;
+    }
+
+    RtlZeroMemory(&g_KswordArkProcessHideState, sizeof(g_KswordArkProcessHideState));
+    ExInitializePushLock(&g_KswordArkProcessHideState.Lock);
+    g_KswordArkProcessHideState.Initialized = TRUE;
+}
+
+static BOOLEAN
+KswordARKDriverIsProcessHiddenByUi(
+    _In_ ULONG ProcessId
+    )
+/*++
+
+Routine Description:
+
+    查询 PID 是否被 Ksword R0 可恢复隐藏表标记。中文说明：调用方只读取
+    状态，不做写入，读锁保护 Count/Pids 的一致性。
+
+Arguments:
+
+    ProcessId - 目标 PID。
+
+Return Value:
+
+    TRUE 表示该 PID 当前被标记隐藏；FALSE 表示未隐藏。
+
+--*/
+{
+    ULONG index = 0UL;
+    BOOLEAN hidden = FALSE;
+
+    KswordARKDriverEnsureProcessHideStateInitialized();
+    ExAcquirePushLockShared(&g_KswordArkProcessHideState.Lock);
+    for (index = 0UL; index < g_KswordArkProcessHideState.Count; ++index) {
+        if (g_KswordArkProcessHideState.Pids[index] == ProcessId) {
+            hidden = TRUE;
+            break;
+        }
+    }
+    ExReleasePushLockShared(&g_KswordArkProcessHideState.Lock);
+    return hidden;
+}
 
 static KSWORD_PS_GET_NEXT_PROCESS_FN
 KswordARKDriverResolvePsGetNextProcess(
@@ -175,6 +253,120 @@ KswordARKDriverBitmapHasPid(
 
     bitMask = (UCHAR)(1U << (bitIndex & 0x07U));
     return ((bitmap[byteIndex] & bitMask) != 0U) ? TRUE : FALSE;
+}
+
+static BOOLEAN
+KswordARKDriverProcessDynOffsetPresent(
+    _In_ ULONG Offset
+    )
+/*++
+
+Routine Description:
+
+    判断 DynData 提供的 EPROCESS 偏移是否可以用于安全读取。
+
+Arguments:
+
+    Offset - 来自统一 DynData 状态的候选偏移。
+
+Return Value:
+
+    偏移有效时返回 TRUE；偏移缺失或为旧版哨兵值时返回 FALSE。
+
+--*/
+{
+    return (Offset != KSW_DYN_OFFSET_UNAVAILABLE && Offset != 0x0000FFFFUL) ? TRUE : FALSE;
+}
+
+static NTSTATUS
+KswordARKDriverReadProcessPointerField(
+    _In_ PEPROCESS ProcessObject,
+    _In_ ULONG Offset,
+    _Out_ ULONG64* ValueOut
+    )
+/*++
+
+Routine Description:
+
+    按 EPROCESS 偏移读取一个指针字段，并用 SEH 防护异常地址访问。
+
+Arguments:
+
+    ProcessObject - 目标 EPROCESS 对象。
+    Offset - 目标字段在 EPROCESS 内部的偏移。
+    ValueOut - 返回读取到的指针值，统一扩展为 ULONG64。
+
+Return Value:
+
+    读取成功返回 STATUS_SUCCESS；参数错误、偏移缺失或异常读取返回对应状态。
+
+--*/
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    PVOID pointerValue = NULL;
+
+    if (ProcessObject == NULL || ValueOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *ValueOut = 0ULL;
+    if (!KswordARKDriverProcessDynOffsetPresent(Offset)) {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    __try {
+        RtlCopyMemory(&pointerValue, (PUCHAR)ProcessObject + Offset, sizeof(pointerValue));
+        *ValueOut = (ULONG64)(ULONG_PTR)pointerValue;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+    }
+
+    return status;
+}
+
+static BOOLEAN
+KswordARKDriverShouldSkipTerminatingProcess(
+    _In_ PEPROCESS ProcessObject,
+    _In_ const KSW_DYN_STATE* DynState
+    )
+/*++
+
+Routine Description:
+
+    参照 SKT64 的进程遍历逻辑，通过 EPROCESS.ObjectTable 过滤已经退出的进程。
+
+Arguments:
+
+    ProcessObject - 候选进程 EPROCESS。
+    DynState - 本次枚举开始时截取的统一 DynData 状态。
+
+Return Value:
+
+    ObjectTable 可读且为 NULL 时返回 TRUE，表示该进程处于 terminating/exited 状态。
+    偏移不可用或读取失败时返回 FALSE，避免因为诊断数据缺失误隐藏正常进程。
+
+--*/
+{
+    ULONG64 objectTableAddress = 0ULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (ProcessObject == NULL || DynState == NULL) {
+        return FALSE;
+    }
+    if (!DynState->Initialized || !KswordARKDriverProcessDynOffsetPresent(DynState->Kernel.EpObjectTable)) {
+        return FALSE;
+    }
+
+    status = KswordARKDriverReadProcessPointerField(
+        ProcessObject,
+        DynState->Kernel.EpObjectTable,
+        &objectTableAddress);
+    if (!NT_SUCCESS(status)) {
+        return FALSE;
+    }
+
+    return (objectTableAddress == 0ULL) ? TRUE : FALSE;
 }
 
 static VOID
@@ -316,6 +508,106 @@ KswordARKDriverPatchProcessProtectionStateByPid(
 }
 
 NTSTATUS
+KswordARKDriverSetProcessVisibility(
+    _In_ ULONG ProcessId,
+    _In_ ULONG Action,
+    _Out_ ULONG* StatusOut,
+    _Out_ ULONG* HiddenCountOut
+    )
+/*++
+
+Routine Description:
+
+    更新 Ksword 驱动内维护的进程隐藏标记。中文说明：这不是 DKOM 断链，
+    只改变本驱动枚举响应中的 KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI，
+    R3 进程列表可据此过滤/恢复，避免不可控内核链表破坏。
+
+Arguments:
+
+    ProcessId - 目标 PID；ClearAll 动作忽略该值。
+    Action - HIDE/UNHIDE/CLEAR_ALL。
+    StatusOut - 返回可读状态枚举。
+    HiddenCountOut - 返回当前隐藏 PID 数量。
+
+Return Value:
+
+    STATUS_SUCCESS 或参数/资源状态。
+
+--*/
+{
+    ULONG index = 0UL;
+    ULONG foundIndex = MAXULONG;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (StatusOut == NULL || HiddenCountOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_UNKNOWN;
+    *HiddenCountOut = 0UL;
+    KswordARKDriverEnsureProcessHideStateInitialized();
+
+    if (Action != KSWORD_ARK_PROCESS_VISIBILITY_ACTION_CLEAR_ALL &&
+        (ProcessId == 0UL || ProcessId <= 4UL)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ExAcquirePushLockExclusive(&g_KswordArkProcessHideState.Lock);
+    __try {
+        for (index = 0UL; index < g_KswordArkProcessHideState.Count; ++index) {
+            if (g_KswordArkProcessHideState.Pids[index] == ProcessId) {
+                foundIndex = index;
+                break;
+            }
+        }
+
+        if (Action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_CLEAR_ALL) {
+            RtlZeroMemory(
+                g_KswordArkProcessHideState.Pids,
+                sizeof(g_KswordArkProcessHideState.Pids));
+            g_KswordArkProcessHideState.Count = 0UL;
+            *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_CLEARED;
+        }
+        else if (Action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE) {
+            if (foundIndex != MAXULONG) {
+                *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN;
+            }
+            else if (g_KswordArkProcessHideState.Count >= KSWORD_ARK_PROCESS_HIDE_MAX_PIDS) {
+                status = STATUS_INSUFFICIENT_RESOURCES;
+            }
+            else {
+                g_KswordArkProcessHideState.Pids[g_KswordArkProcessHideState.Count] = ProcessId;
+                g_KswordArkProcessHideState.Count += 1UL;
+                *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN;
+            }
+        }
+        else if (Action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_UNHIDE) {
+            if (foundIndex != MAXULONG) {
+                for (index = foundIndex + 1UL; index < g_KswordArkProcessHideState.Count; ++index) {
+                    g_KswordArkProcessHideState.Pids[index - 1UL] =
+                        g_KswordArkProcessHideState.Pids[index];
+                }
+                if (g_KswordArkProcessHideState.Count > 0UL) {
+                    g_KswordArkProcessHideState.Count -= 1UL;
+                    g_KswordArkProcessHideState.Pids[g_KswordArkProcessHideState.Count] = 0UL;
+                }
+            }
+            *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_VISIBLE;
+        }
+        else {
+            status = STATUS_INVALID_PARAMETER;
+        }
+
+        *HiddenCountOut = g_KswordArkProcessHideState.Count;
+    }
+    __finally {
+        ExReleasePushLockExclusive(&g_KswordArkProcessHideState.Lock);
+    }
+
+    return status;
+}
+
+NTSTATUS
 KswordARKDriverSuspendProcessByPid(
     _In_ ULONG processId
     )
@@ -447,6 +739,7 @@ KswordARKDriverEnumerateProcesses(
     ULONG scanPid = 0;
     KSWORD_PS_GET_NEXT_PROCESS_FN psGetNextProcess = NULL;
     PEPROCESS processCursor = NULL;
+    KSW_DYN_STATE dynState;
 
     if (outputBuffer == NULL || bytesWrittenOut == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -463,6 +756,9 @@ KswordARKDriverEnumerateProcesses(
     response->entrySize = sizeof(KSWORD_ARK_PROCESS_ENTRY);
     entryCapacity =
         (outputBufferLength - KSWORD_ARK_ENUM_RESPONSE_HEADER_SIZE) / sizeof(KSWORD_ARK_PROCESS_ENTRY);
+
+    RtlZeroMemory(&dynState, sizeof(dynState));
+    KswordARKDynDataSnapshot(&dynState);
 
     if (request != NULL) {
         requestFlags = request->flags;
@@ -523,17 +819,24 @@ KswordARKDriverEnumerateProcesses(
             const ULONG parentProcessId =
                 HandleToULong(PsGetProcessInheritedFromUniqueProcessId(processCursor));
             const CHAR* imageName = PsGetProcessImageFileName(processCursor);
-            const ULONG processFlags = KSWORD_ARK_PROCESS_FLAG_KERNEL_ENUMERATED;
+            ULONG processFlags = KSWORD_ARK_PROCESS_FLAG_KERNEL_ENUMERATED;
             PEPROCESS nextProcess = NULL;
+            const BOOLEAN skipTerminatingProcess =
+                KswordARKDriverShouldSkipTerminatingProcess(processCursor, &dynState);
 
-            KswordARKDriverAppendProcessEntry(
-                response,
-                entryCapacity,
-                processId,
-                parentProcessId,
-                processFlags,
-                imageName,
-                processCursor);
+            if (!skipTerminatingProcess) {
+                if (KswordARKDriverIsProcessHiddenByUi(processId)) {
+                    processFlags |= KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI;
+                }
+                KswordARKDriverAppendProcessEntry(
+                    response,
+                    entryCapacity,
+                    processId,
+                    parentProcessId,
+                    processFlags,
+                    imageName,
+                    processCursor);
+            }
 
             if (scanCidTable && KswordARKDriverPidInScanRange(processId, scanStartPid, scanEndPid)) {
                 KswordARKDriverBitmapSetPid(pidBitmap, pidBitmapBytes, processId);
@@ -567,15 +870,20 @@ KswordARKDriverEnumerateProcesses(
                     if (psGetNextProcess != NULL && pidBitmap != NULL) {
                         processFlags |= KSWORD_ARK_PROCESS_FLAG_HIDDEN_FROM_ACTIVE_LIST;
                     }
+                    if (KswordARKDriverIsProcessHiddenByUi(scanPid)) {
+                        processFlags |= KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI;
+                    }
 
-                    KswordARKDriverAppendProcessEntry(
-                        response,
-                        entryCapacity,
-                        scanPid,
-                        parentProcessId,
-                        processFlags,
-                        imageName,
-                        hiddenProcessObject);
+                    if (!KswordARKDriverShouldSkipTerminatingProcess(hiddenProcessObject, &dynState)) {
+                        KswordARKDriverAppendProcessEntry(
+                            response,
+                            entryCapacity,
+                            scanPid,
+                            parentProcessId,
+                            processFlags,
+                            imageName,
+                            hiddenProcessObject);
+                    }
                     ObDereferenceObject(hiddenProcessObject);
                 }
             }

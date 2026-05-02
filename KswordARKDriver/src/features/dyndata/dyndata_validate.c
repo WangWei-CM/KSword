@@ -40,6 +40,8 @@ static const KSW_DYN_FIELD_BINDING g_KswordDynFieldBindings[] = {
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_OT_INDEX, "OtIndex", "Object Type", KSW_CAP_OBJECT_TYPE_FIELDS | KSW_CAP_HANDLE_TABLE_DECODE, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.OtIndex),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_OB_DECODE_SHIFT, "ObDecodeShift", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.ObDecodeShift),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_OB_ATTRIBUTES_SHIFT, "ObAttributesShift", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.ObAttributesShift),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EGE_GUID, "EgeGuid", "ETW GUID Entry", KSW_CAP_ETW_GUID_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.EgeGuid),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_ERE_GUID_ENTRY, "EreGuidEntry", "ETW Registration Entry", KSW_CAP_ETW_GUID_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.EreGuidEntry),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KT_INITIAL_STACK, "KtInitialStack", "Thread Stack", KSW_CAP_THREAD_STACK_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.KtInitialStack),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KT_STACK_LIMIT, "KtStackLimit", "Thread Stack", KSW_CAP_THREAD_STACK_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.KtStackLimit),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KT_STACK_BASE, "KtStackBase", "Thread Stack", KSW_CAP_THREAD_STACK_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.KtStackBase),
@@ -353,6 +355,7 @@ Return Value:
     const ULONG alpcFields[] = { State->Kernel.AlpcCommunicationInfo, State->Kernel.AlpcOwnerProcess, State->Kernel.AlpcConnectionPort, State->Kernel.AlpcServerCommunicationPort, State->Kernel.AlpcClientCommunicationPort, State->Kernel.AlpcHandleTable, State->Kernel.AlpcHandleTableLock, State->Kernel.AlpcAttributes, State->Kernel.AlpcAttributesFlags, State->Kernel.AlpcPortContext, State->Kernel.AlpcPortObjectLock, State->Kernel.AlpcSequenceNo, State->Kernel.AlpcState };
     const ULONG sectionFields[] = { State->Kernel.EpSectionObject, State->Kernel.MmSectionControlArea, State->Kernel.MmControlAreaListHead, State->Kernel.MmControlAreaLock };
     const ULONG protectionFields[] = { State->Kernel.EpProtection, State->Kernel.EpSignatureLevel, State->Kernel.EpSectionSignatureLevel };
+    const ULONG etwFields[] = { State->Kernel.EgeGuid, State->Kernel.EreGuidEntry };
     const ULONG lxcoreFields[] = { State->LxcoreOffsets.LxPicoProc, State->LxcoreOffsets.LxPicoProcInfo, State->LxcoreOffsets.LxPicoProcInfoPID, State->LxcoreOffsets.LxPicoThrdInfo, State->LxcoreOffsets.LxPicoThrdInfoTID };
 
     if (State->NtosActive) {
@@ -381,6 +384,9 @@ Return Value:
     }
     if (KswordARKDynDataHasAll(protectionFields, RTL_NUMBER_OF(protectionFields))) {
         capabilities |= KSW_CAP_PROCESS_PROTECTION_PATCH;
+    }
+    if (KswordARKDynDataHasAll(etwFields, RTL_NUMBER_OF(etwFields))) {
+        capabilities |= KSW_CAP_ETW_GUID_FIELDS;
     }
     if (State->LxcoreActive && KswordARKDynDataHasAll(lxcoreFields, RTL_NUMBER_OF(lxcoreFields))) {
         capabilities |= KSW_CAP_WSL_LXCORE_FIELDS;

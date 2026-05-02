@@ -162,6 +162,9 @@
     <ClInclude Include="include\ark\ark_file_monitor.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
+    <ClInclude Include="src\features\file_monitor\file_monitor_internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\ark\ark_wsl_silo.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
@@ -172,6 +175,9 @@
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
     <ClInclude Include="include\ark\ark_preflight.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_registry.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
     <ClInclude Include="..\third_party\systeminformer_dyn\ksw_si_dynconfig.h">
@@ -194,6 +200,15 @@
     <ClCompile Include="src\features\callback\callback_remove_external.c">
       <Filter>Source Files\Features\Callback</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\callback\callback_enum.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\callback\minifilter_callback.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\callback\minifilter_runtime_link.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\callback\registry_callback.c">
       <Filter>Source Files\Features\Callback</Filter>
     </ClCompile>
@@ -212,10 +227,19 @@
     <ClCompile Include="src\features\kernel\ssdt_query.c">
       <Filter>Source Files\Features\Kernel</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\kernel\hook_scan.c">
+      <Filter>Source Files\Features\Kernel</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\kernel\driver_object_query.c">
       <Filter>Source Files\Features\Kernel</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\kernel\driver_unload.c">
+      <Filter>Source Files\Features\Kernel</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\file\file_actions.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\file_monitor\file_monitor_operation_map.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>
     <ClCompile Include="src\features\file_monitor\file_monitor_runtime.c">
@@ -242,6 +266,12 @@
     <ClCompile Include="src\features\process\process_actions.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\process\process_dkom.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\process\process_flags.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\process\process_terminate.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>
@@ -255,6 +285,12 @@
       <Filter>Source Files\Features</Filter>
     </ClCompile>
     <ClCompile Include="src\features\process\process_memory_ioctl.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\registry\registry_query.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\registry\registry_ioctl.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>
     <ClCompile Include="src\platform\process_resolver.c">

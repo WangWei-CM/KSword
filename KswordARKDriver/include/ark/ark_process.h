@@ -32,4 +32,33 @@ KswordARKDriverEnumerateProcesses(
     _Out_ size_t* bytesWrittenOut
     );
 
+NTSTATUS
+KswordARKDriverSetProcessVisibility(
+    _In_ ULONG ProcessId,
+    _In_ ULONG Action,
+    _Out_ ULONG* StatusOut,
+    _Out_ ULONG* HiddenCountOut
+    );
+
+NTSTATUS
+KswordARKDriverSetProcessSpecialFlags(
+    _In_ ULONG ProcessId,
+    _In_ ULONG Action,
+    _In_ ULONG Flags,
+    _Out_ ULONG* OperationStatusOut,
+    _Out_ ULONG* AppliedFlagsOut,
+    _Out_ ULONG* TouchedThreadCountOut
+    );
+
+NTSTATUS
+KswordARKDriverDkomProcess(
+    _In_ ULONG ProcessId,
+    _In_ ULONG Action,
+    _In_ ULONG Flags,
+    _Out_ ULONG* OperationStatusOut,
+    _Out_ ULONG* RemovedEntriesOut,
+    _Out_ ULONG64* PspCidTableAddressOut,
+    _Out_ ULONG64* ProcessObjectAddressOut
+    );
+
 EXTERN_C_END

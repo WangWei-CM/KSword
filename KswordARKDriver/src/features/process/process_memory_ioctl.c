@@ -20,8 +20,14 @@ Environment:
 #include <ntstrsafe.h>
 #include <stdarg.h>
 
+#ifndef STATUS_REQUEST_NOT_ACCEPTED
+#define STATUS_REQUEST_NOT_ACCEPTED ((NTSTATUS)0xC00000D0L)
+#endif
+
 #define KSWORD_ARK_MEMORY_READ_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE) - sizeof(((KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE*)0)->data))
+#define KSWORD_ARK_MEMORY_WRITE_REQUEST_HEADER_SIZE \
+    (sizeof(KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST) - sizeof(((KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST*)0)->data))
 
 static VOID
 KswordARKMemoryIoctlLog(
@@ -217,7 +223,7 @@ Return Value:
     }
 
     readRequest = (KSWORD_ARK_READ_VIRTUAL_MEMORY_REQUEST*)inputBuffer;
-    if (readRequest->flags != 0UL) {
+    if ((readRequest->flags & ~KSWORD_ARK_MEMORY_READ_FLAG_ZERO_FILL_UNREADABLE) != 0UL) {
         KswordARKMemoryIoctlLog(Device, "Warn", "R0 read-vm ioctl: flags rejected, flags=0x%08X.", (unsigned int)readRequest->flags);
         return STATUS_INVALID_PARAMETER;
     }
@@ -262,6 +268,175 @@ Return Value:
             (unsigned long)response->readStatus,
             (unsigned long)response->requestedBytes,
             (unsigned long)response->bytesRead);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKMemoryIoctlWriteVirtualMemory(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    处理 IOCTL_KSWORD_ARK_WRITE_VIRTUAL_MEMORY。中文说明：该 handler 只接受
+    R3 已确认的差异块写入请求，并在进入 feature 前完成访问权限、长度和策略检查。
+
+Arguments:
+
+    Device - WDF 设备对象，用于日志和 safety policy。
+    Request - 当前 IOCTL 请求。
+    InputBufferLength - 输入长度；METHOD_BUFFERED 下由 WDF 再校验。
+    OutputBufferLength - 输出长度；METHOD_BUFFERED 下由 WDF 再校验。
+    BytesReturned - 接收写入字节数。
+
+Return Value:
+
+    NTSTATUS from validation, safety policy or feature backend.
+
+--*/
+{
+    KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST* writeRequest = NULL;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    size_t requiredInputLength = 0U;
+    const ULONG allowedFlags =
+        KSWORD_ARK_MEMORY_WRITE_FLAG_UI_CONFIRMED |
+        KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKValidateDeviceIoControlWriteAccess(Request);
+    if (!NT_SUCCESS(status)) {
+        KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm ioctl denied: write access required, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredInputBuffer(
+        Request,
+        KSWORD_ARK_MEMORY_WRITE_REQUEST_HEADER_SIZE,
+        &inputBuffer,
+        &actualInputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKMemoryIoctlLog(Device, "Error", "R0 write-vm ioctl: input invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    writeRequest = (KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST*)inputBuffer;
+    if ((writeRequest->flags & ~allowedFlags) != 0UL) {
+        KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm ioctl: flags rejected, flags=0x%08X.", (unsigned int)writeRequest->flags);
+        return STATUS_INVALID_PARAMETER;
+    }
+    status = KswordARKValidateUserPid(writeRequest->processId);
+    if (!NT_SUCCESS(status)) {
+        KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm ioctl: pid rejected, pid=%lu.", (unsigned long)writeRequest->processId);
+        return status;
+    }
+    if (writeRequest->bytesToWrite == 0UL ||
+        writeRequest->bytesToWrite > KSWORD_ARK_MEMORY_WRITE_MAX_BYTES) {
+        KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm ioctl: size rejected, pid=%lu, bytes=%lu.", (unsigned long)writeRequest->processId, (unsigned long)writeRequest->bytesToWrite);
+        return STATUS_INVALID_PARAMETER;
+    }
+    if ((SIZE_T)writeRequest->bytesToWrite >
+        (MAXSIZE_T - KSWORD_ARK_MEMORY_WRITE_REQUEST_HEADER_SIZE)) {
+        KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm ioctl: size overflow rejected, bytes=%lu.", (unsigned long)writeRequest->bytesToWrite);
+        return STATUS_INVALID_PARAMETER;
+    }
+    requiredInputLength =
+        KSWORD_ARK_MEMORY_WRITE_REQUEST_HEADER_SIZE +
+        (SIZE_T)writeRequest->bytesToWrite;
+    if (actualInputLength < requiredInputLength) {
+        KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm ioctl: input truncated, actual=%Iu, required=%Iu.", actualInputLength, requiredInputLength);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_WRITE_VIRTUAL_MEMORY_RESPONSE),
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKMemoryIoctlLog(Device, "Error", "R0 write-vm ioctl: output invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    if ((writeRequest->flags & KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE) == 0UL) {
+        KSWORD_ARK_WRITE_VIRTUAL_MEMORY_RESPONSE* response =
+            (KSWORD_ARK_WRITE_VIRTUAL_MEMORY_RESPONSE*)outputBuffer;
+        RtlZeroMemory(outputBuffer, actualOutputLength);
+        response->version = KSWORD_ARK_MEMORY_PROTOCOL_VERSION;
+        response->size = sizeof(*response);
+        response->processId = writeRequest->processId;
+        response->fieldFlags =
+            KSWORD_ARK_MEMORY_FIELD_ADDRESS_USER_RANGE |
+            KSWORD_ARK_MEMORY_FIELD_WRITE_DATA_PRESENT |
+            KSWORD_ARK_MEMORY_FIELD_FORCE_WRITE_REQUIRED;
+        response->writeStatus = KSWORD_ARK_MEMORY_WRITE_STATUS_FORCE_REQUIRED;
+        response->lookupStatus = STATUS_SUCCESS;
+        response->copyStatus = STATUS_REQUEST_NOT_ACCEPTED;
+        response->source = KSWORD_ARK_MEMORY_SOURCE_R0_MM_WRITE_VIRTUAL_MEMORY;
+        response->requestedBaseAddress = writeRequest->baseAddress;
+        response->requestedBytes = writeRequest->bytesToWrite;
+        response->maxBytesPerRequest = KSWORD_ARK_MEMORY_WRITE_MAX_BYTES;
+        *BytesReturned = sizeof(*response);
+        KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm requires force confirmation: pid=%lu, address=0x%I64X, bytes=%lu.", (unsigned long)writeRequest->processId, writeRequest->baseAddress, (unsigned long)writeRequest->bytesToWrite);
+        return STATUS_SUCCESS;
+    }
+
+    {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_MEMORY_WRITE;
+        safetyContext.TargetProcessId = writeRequest->processId;
+        safetyContext.ContextFlags =
+            ((writeRequest->flags & KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE) != 0UL) ?
+            KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED :
+            0UL;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+        if (!NT_SUCCESS(status)) {
+            KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm denied by safety policy: pid=%lu, address=0x%I64X, bytes=%lu, status=0x%08X.", (unsigned long)writeRequest->processId, writeRequest->baseAddress, (unsigned long)writeRequest->bytesToWrite, (unsigned int)status);
+            return status;
+        }
+    }
+
+    status = KswordARKDriverWriteVirtualMemory(
+        outputBuffer,
+        actualOutputLength,
+        writeRequest,
+        actualInputLength,
+        BytesReturned);
+    if (!NT_SUCCESS(status)) {
+        KswordARKMemoryIoctlLog(Device, "Error", "R0 write-vm failed: pid=%lu, address=0x%I64X, bytes=%lu, status=0x%08X.", (unsigned long)writeRequest->processId, writeRequest->baseAddress, (unsigned long)writeRequest->bytesToWrite, (unsigned int)status);
+        return status;
+    }
+
+    if (*BytesReturned >= sizeof(KSWORD_ARK_WRITE_VIRTUAL_MEMORY_RESPONSE)) {
+        KSWORD_ARK_WRITE_VIRTUAL_MEMORY_RESPONSE* response =
+            (KSWORD_ARK_WRITE_VIRTUAL_MEMORY_RESPONSE*)outputBuffer;
+        KswordARKMemoryIoctlLog(
+            Device,
+            "Info",
+            "R0 write-vm success: pid=%lu, address=0x%I64X, status=%lu, requested=%lu, written=%lu.",
+            (unsigned long)response->processId,
+            response->requestedBaseAddress,
+            (unsigned long)response->writeStatus,
+            (unsigned long)response->requestedBytes,
+            (unsigned long)response->bytesWritten);
     }
 
     return STATUS_SUCCESS;

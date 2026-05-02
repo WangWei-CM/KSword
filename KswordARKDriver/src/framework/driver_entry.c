@@ -88,6 +88,14 @@ Return Value:
         return status;
     }
 
+    status = KswordARKCallbackInitialize(controlDevice);
+    if (!NT_SUCCESS(status)) {
+        TraceEvents(TRACE_LEVEL_ERROR, TRACE_DRIVER, "KswordARKCallbackInitialize failed %!STATUS!", status);
+        WdfObjectDelete(controlDevice);
+        WPP_CLEANUP(DriverObject);
+        return status;
+    }
+
     status = KswordARKFileMonitorInitialize(DriverObject, RegistryPath, controlDevice);
     if (!NT_SUCCESS(status)) {
         TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, "KswordARKFileMonitorInitialize recorded failure %!STATUS!", status);
@@ -122,8 +130,8 @@ Return Value:
     PAGED_CODE();
 
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Entry");
-    KswordARKFileMonitorUninitialize();
     KswordARKCallbackUninitialize();
+    KswordARKFileMonitorUninitialize();
     KswordARKDynDataUninitialize();
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "%!FUNC! Exit");
 }

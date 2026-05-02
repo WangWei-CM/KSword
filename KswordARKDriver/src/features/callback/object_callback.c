@@ -92,7 +92,7 @@ KswordArkObjectBuildStripMask(
     return 0U;
 }
 
-static OB_PREOP_CALLBACK_STATUS
+OB_PREOP_CALLBACK_STATUS
 KswordArkObjectPreOperation(
     _In_ PVOID RegistrationContext,
     _Inout_ POB_PRE_OPERATION_INFORMATION OperationInformation

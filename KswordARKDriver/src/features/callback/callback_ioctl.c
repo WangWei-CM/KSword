@@ -355,3 +355,54 @@ Return Value:
     }
     return status;
 }
+
+NTSTATUS
+KswordARKCallbackIoctlEnumCallbacksHandler(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle IOCTL_KSWORD_ARK_ENUM_CALLBACKS. The operation is read-only and keeps
+    all business traversal inside the callback feature module.
+
+Arguments:
+
+    Device - WDF device used for diagnostic logging.
+    Request - Current IOCTL request.
+    InputBufferLength - Enumeration request length.
+    OutputBufferLength - Enumeration response buffer length.
+    BytesReturned - Receives response byte count.
+
+Return Value:
+
+    NTSTATUS from KswordARKCallbackIoctlEnumCallbacks.
+
+--*/
+{
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0;
+
+    status = KswordARKCallbackIoctlEnumCallbacks(
+        Request,
+        InputBufferLength,
+        OutputBufferLength,
+        BytesReturned);
+    if (!NT_SUCCESS(status)) {
+        KswordARKCallbackIoctlLog(
+            Device,
+            "Warn",
+            "Callback enumeration failed, status=0x%08X.",
+            (unsigned int)status);
+    }
+    return status;
+}

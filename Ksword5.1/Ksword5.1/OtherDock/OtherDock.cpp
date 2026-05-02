@@ -2827,6 +2827,16 @@ OtherDock::~OtherDock()
     {
         m_autoRefreshTimer->stop();
     }
+
+    // 关闭本进程主动保留的新建桌面句柄，避免桌面对象在程序退出后残留引用。
+    for (const CreatedDesktopRecord& desktopRecord : m_createdDesktopHandles)
+    {
+        if (desktopRecord.desktopHandle != nullptr)
+        {
+            ::CloseDesktop(reinterpret_cast<HDESK>(desktopRecord.desktopHandle));
+        }
+    }
+    m_createdDesktopHandles.clear();
 }
 
 void OtherDock::initializeUi()
@@ -3049,10 +3059,15 @@ void OtherDock::initializeUi()
     m_desktopRefreshButton->setStyleSheet(blueButtonStyle());
     m_desktopRefreshButton->setFixedWidth(32);
 
-    m_desktopSwitchButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_desktopPage);
+    m_desktopSwitchButton = new QPushButton(QIcon(":/Icon/desktop_switch.svg"), QString(), m_desktopPage);
     m_desktopSwitchButton->setToolTip(QStringLiteral("切换到选中桌面（SwitchDesktop）"));
     m_desktopSwitchButton->setStyleSheet(blueButtonStyle());
     m_desktopSwitchButton->setFixedWidth(32);
+
+    m_desktopCreateButton = new QPushButton(QIcon(":/Icon/desktop_create.svg"), QString(), m_desktopPage);
+    m_desktopCreateButton->setToolTip(QStringLiteral("新建桌面：在弹出窗口中设置名称、权限、安全描述符和私有访问参数"));
+    m_desktopCreateButton->setStyleSheet(blueButtonStyle());
+    m_desktopCreateButton->setFixedWidth(32);
 
     m_desktopStatusLabel = new QLabel(
         QStringLiteral("支持枚举窗口站/桌面；切换会尝试“桌面名”和“窗口站\\\\桌面名”两种方式。"),
@@ -3061,6 +3076,7 @@ void OtherDock::initializeUi()
 
     m_desktopToolLayout->addWidget(m_desktopRefreshButton, 0);
     m_desktopToolLayout->addWidget(m_desktopSwitchButton, 0);
+    m_desktopToolLayout->addWidget(m_desktopCreateButton, 0);
     m_desktopToolLayout->addWidget(m_desktopStatusLabel, 1);
     m_desktopPageLayout->addLayout(m_desktopToolLayout, 0);
 
@@ -3349,7 +3365,7 @@ void OtherDock::initializeConnections()
         QMessageBox::information(this, QStringLiteral("窗口截图"), QStringLiteral("截图已保存：%1").arg(savePath));
     });
 
-    // 桌面管理页连接：刷新按钮、切换按钮、双击表格三条链路都指向同一切换逻辑。
+    // 桌面管理页连接：刷新、切换、新建、双击和右键菜单分别进入对应桌面操作链路。
     connect(m_desktopRefreshButton, &QPushButton::clicked, this, [this]() {
         kLogEvent event;
         info << event
@@ -3359,6 +3375,9 @@ void OtherDock::initializeConnections()
     });
     connect(m_desktopSwitchButton, &QPushButton::clicked, this, [this]() {
         switchToSelectedDesktop();
+    });
+    connect(m_desktopCreateButton, &QPushButton::clicked, this, [this]() {
+        showCreateDesktopDialog();
     });
     connect(m_desktopTable, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
         switchToSelectedDesktop();

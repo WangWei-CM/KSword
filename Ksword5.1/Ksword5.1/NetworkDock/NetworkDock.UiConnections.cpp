@@ -20,6 +20,18 @@ void NetworkDock::initializeConnections()
             clearAllPacketRows();
         });
 
+    // 流量时间轴连接：
+    // - ProcessTraceTimelineWidget 内部复用了 ETW 页的框选、拖拽和滚轮缩放工具；
+    // - 这里仅接收最终时间范围，并把它叠加到现有规则组过滤与表格重建流程。
+    if (m_packetTimelineWidget != nullptr)
+    {
+        m_packetTimelineWidget->setSelectionChangedCallback(
+            [this](const std::uint64_t start100ns, const std::uint64_t end100ns)
+            {
+                applyPacketTimelineSelection(start100ns, end100ns);
+            });
+    }
+
     // 组合过滤控制连接：
     // - 漏斗按钮控制折叠面板显隐；
     // - 规则组支持新增、应用、导入、导出、默认保存、一键清空。
@@ -815,12 +827,16 @@ void NetworkDock::startTrafficMonitor()
 
     const bool startIssued = m_trafficService->StartCapture();
     m_monitorRunning = startIssued && m_trafficService->IsRunning();
-    if (!startIssued)
+    if (!startIssued || !m_monitorRunning)
     {
         m_monitorStatusLabel->setText(QStringLiteral("状态：启动失败"));
     }
     else
     {
+        // 监控成功启动后才登记时间轴会话：
+        // - 未启动监控的等待时间不进入横轴；
+        // - 多次启动/停止会按活动时长连续拼接。
+        beginPacketTimelineMonitorSession();
         m_monitorStatusLabel->setText(QStringLiteral("状态：启动中..."));
     }
 
@@ -881,6 +897,7 @@ void NetworkDock::stopTrafficMonitor()
             guardThis->m_monitorStopThread.reset();
             guardThis->m_monitorStopInProgress.store(false);
             guardThis->m_monitorRunning = false;
+            guardThis->endPacketTimelineMonitorSession();
             if (guardThis->m_monitorStatusLabel != nullptr)
             {
                 guardThis->m_monitorStatusLabel->setText(QStringLiteral("状态：已停止"));

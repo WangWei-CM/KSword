@@ -4,12 +4,20 @@
 
 #include <QAbstractButton>
 #include <QApplication>
+#include <QCoreApplication>
 #include <QDialogButtonBox>
 #include <QEvent>
+#include <QFileIconProvider>
+#include <QFileInfo>
+#include <QGridLayout>
+#include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
+#include <QLayoutItem>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QPointer>
+#include <QPixmap>
 #include <QPushButton>
 #include <QScreen>
 #include <QSize>
@@ -17,8 +25,10 @@
 #include <QStyle>
 #include <QTextEdit>
 #include <QWidget>
+#include <QWindow>
 
 #include <algorithm>
+#include <vector>
 
 namespace
 {
@@ -37,6 +47,26 @@ namespace
     // - 避免同一主题下重复 setStyleSheet/setPalette 触发额外样式事件。
     constexpr const char* kThemeModePropertyName = "ksword_theme_dark_mode";
 
+    // kMessageBoxTitleBarObjectName 作用：
+    // - 标记 QMessageBox 内部自绘标题栏；
+    // - 用于重复刷新时定位已有标题栏，避免重复插入。
+    constexpr const char* kMessageBoxTitleBarObjectName = "KswordThemedMessageBoxTitleBar";
+
+    // kMessageBoxTitleBarInstalledPropertyName 作用：
+    // - 标记 QMessageBox 布局已经为自绘标题栏下移过；
+    // - 避免 Palette/StyleChange 多次触发后重复移动内部布局项。
+    constexpr const char* kMessageBoxTitleBarInstalledPropertyName = "ksword_message_box_titlebar_installed";
+
+    // kMessageBoxTitleLabelObjectName 作用：
+    // - 标记自绘标题栏中的标题文本控件；
+    // - 每次 polish 时同步 QMessageBox 当前 windowTitle。
+    constexpr const char* kMessageBoxTitleLabelObjectName = "KswordThemedMessageBoxTitleLabel";
+
+    // kMessageBoxCloseButtonObjectName 作用：
+    // - 标记自绘标题栏中的关闭按钮；
+    // - QSS 使用该对象名设置右上角关闭按钮样式。
+    constexpr const char* kMessageBoxCloseButtonObjectName = "KswordThemedMessageBoxCloseButton";
+
     // 消息框尺寸常量：
     // - kMessageBoxMinWidth：消息框允许的最小宽度；
     // - kMessageBoxPreferredWidth：默认偏好的可读宽度；
@@ -48,6 +78,13 @@ namespace
     constexpr int kMessageBoxHardMaxWidth = 820;
     constexpr int kMessageBoxScreenMargin = 96;
     constexpr int kMessageLabelHorizontalReserve = 148;
+    constexpr int kMessageTitleBarHeight = 34;
+    constexpr int kMessageLogoSize = 22;
+    constexpr int kMessageCloseButtonSize = 28;
+    // kMessageTitleBarColumnSpanToRightEdge 作用：
+    // - QGridLayout::addWidget 的 colSpan 传 -1 表示一直延伸到最右列；
+    // - 用它避免 Qt 内部布局尚未完成统计时 columnCount() 只覆盖左侧文字列。
+    constexpr int kMessageTitleBarColumnSpanToRightEdge = -1;
 
     // computeMessageBoxMaxWidth 作用：
     // - 按当前消息框所在屏幕计算安全最大宽度；
@@ -89,46 +126,260 @@ namespace
         targetLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     }
 
+    // resolveApplicationIcon 作用：
+    // - 优先从当前进程 EXE 读取 Win32 原生应用程序图标；
+    // - 其次复用 QApplication 或宿主窗口已经设置的 windowIcon；
+    // - 返回值：可用于标题栏和窗口图标的 QIcon，全部来源失败时返回空图标。
+    QIcon resolveApplicationIcon(const QMessageBox* messageBox)
+    {
+        // executablePathText 用途：定位当前运行的 Ksword5.1.exe。
+        const QString executablePathText = QCoreApplication::applicationFilePath();
+        if (!executablePathText.trimmed().isEmpty())
+        {
+            // executableFileInfo 用途：交给 QFileIconProvider 从 EXE 资源中解析系统应用图标。
+            const QFileInfo executableFileInfo(executablePathText);
+            if (executableFileInfo.exists())
+            {
+                // iconProvider 用途：使用 Windows Shell 相同的图标解析路径，避免误用 MainLogo。
+                QFileIconProvider iconProvider;
+                const QIcon executableIcon = iconProvider.icon(executableFileInfo);
+                if (!executableIcon.isNull())
+                {
+                    return executableIcon;
+                }
+            }
+        }
+
+        if (qApp != nullptr)
+        {
+            // applicationIcon 用途：兼容未来 main.cpp 显式设置 QApplication 默认图标的场景。
+            const QIcon applicationIcon = QApplication::windowIcon();
+            if (!applicationIcon.isNull())
+            {
+                return applicationIcon;
+            }
+        }
+
+        // parentWidget 用途：向上查找业务父窗口，兼容局部窗口单独设置图标的场景。
+        const QWidget* parentWidget = messageBox != nullptr ? messageBox->parentWidget() : nullptr;
+        while (parentWidget != nullptr)
+        {
+            const QIcon parentWindowIcon = parentWidget->windowIcon();
+            if (!parentWindowIcon.isNull())
+            {
+                return parentWindowIcon;
+            }
+            parentWidget = parentWidget->parentWidget();
+        }
+
+        // messageBoxIcon 用途：最后保留 QMessageBox 自身 windowIcon，避免完全无图标。
+        const QIcon messageBoxIcon = messageBox != nullptr ? messageBox->windowIcon() : QIcon();
+        if (!messageBoxIcon.isNull())
+        {
+            return messageBoxIcon;
+        }
+
+        return QIcon();
+    }
+
+    // MessageBoxTitleBar 作用：
+    // - 作为 QMessageBox 的自绘标题栏；
+    // - 负责左侧 Logo/标题展示、右侧关闭按钮，以及鼠标拖动窗口。
+    class MessageBoxTitleBar final : public QWidget
+    {
+    public:
+        // 构造函数：
+        // - 参数 ownerMessageBox：所属 QMessageBox；
+        // - 处理逻辑：创建 Logo、标题和关闭按钮，绑定关闭动作；
+        // - 返回值：无。
+        explicit MessageBoxTitleBar(QMessageBox* ownerMessageBox)
+            : QWidget(ownerMessageBox),
+              m_ownerMessageBox(ownerMessageBox)
+        {
+            setObjectName(QString::fromLatin1(kMessageBoxTitleBarObjectName));
+            setFixedHeight(kMessageTitleBarHeight);
+            setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            setAttribute(Qt::WA_StyledBackground, true);
+
+            QHBoxLayout* titleLayout = new QHBoxLayout(this);
+            titleLayout->setContentsMargins(10, 4, 4, 4);
+            titleLayout->setSpacing(8);
+
+            QLabel* logoLabel = new QLabel(this);
+            logoLabel->setFixedSize(kMessageLogoSize, kMessageLogoSize);
+            logoLabel->setAlignment(Qt::AlignCenter);
+            const QIcon applicationIcon = resolveApplicationIcon(ownerMessageBox);
+            if (!applicationIcon.isNull())
+            {
+                // titlePixmap 用途：按标题栏固定尺寸取图，避免把启动页 MainLogo 当作窗口图标。
+                const QPixmap titlePixmap = applicationIcon.pixmap(QSize(kMessageLogoSize, kMessageLogoSize));
+                logoLabel->setPixmap(titlePixmap);
+            }
+
+            m_titleLabel = new QLabel(this);
+            m_titleLabel->setObjectName(QString::fromLatin1(kMessageBoxTitleLabelObjectName));
+            m_titleLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+            m_titleLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+            QPushButton* closeButton = new QPushButton(this);
+            closeButton->setObjectName(QString::fromLatin1(kMessageBoxCloseButtonObjectName));
+            closeButton->setFixedSize(kMessageCloseButtonSize, kMessageCloseButtonSize);
+            closeButton->setCursor(Qt::PointingHandCursor);
+            closeButton->setFocusPolicy(Qt::NoFocus);
+            closeButton->setText(QStringLiteral("×"));
+            closeButton->setToolTip(QStringLiteral("关闭"));
+            QObject::connect(closeButton, &QPushButton::clicked, ownerMessageBox, &QMessageBox::reject);
+
+            titleLayout->addWidget(logoLabel, 0, Qt::AlignVCenter);
+            titleLayout->addWidget(m_titleLabel, 1);
+            titleLayout->addWidget(closeButton, 0, Qt::AlignVCenter);
+            updateTitleText();
+        }
+
+        // updateTitleText 作用：
+        // - 同步 QMessageBox 当前标题文本；
+        // - 若业务未设置标题，则使用应用名兜底。
+        void updateTitleText()
+        {
+            QString titleText = m_ownerMessageBox != nullptr ? m_ownerMessageBox->windowTitle().trimmed() : QString();
+            if (titleText.isEmpty() && qApp != nullptr)
+            {
+                titleText = qApp->applicationDisplayName().trimmed();
+                if (titleText.isEmpty())
+                {
+                    titleText = qApp->applicationName().trimmed();
+                }
+            }
+            if (titleText.isEmpty())
+            {
+                titleText = QStringLiteral("Ksword");
+            }
+            if (m_titleLabel != nullptr)
+            {
+                m_titleLabel->setText(titleText);
+            }
+        }
+
+    protected:
+        // mousePressEvent 作用：
+        // - 记录标题栏拖动起点；
+        // - 返回值：无，只更新拖动状态。
+        void mousePressEvent(QMouseEvent* mouseEventPointer) override
+        {
+            if (mouseEventPointer != nullptr && mouseEventPointer->button() == Qt::LeftButton)
+            {
+                m_dragCandidateActive = true;
+                m_dragInProgress = false;
+                m_dragPressGlobalPos = mouseEventPointer->globalPosition().toPoint();
+                if (QWidget* hostWidget = window())
+                {
+                    m_windowPressTopLeft = hostWidget->frameGeometry().topLeft();
+                }
+                mouseEventPointer->accept();
+                return;
+            }
+            QWidget::mousePressEvent(mouseEventPointer);
+        }
+
+        // mouseMoveEvent 作用：
+        // - 达到拖动阈值后发起系统窗口拖动；
+        // - 若平台不支持 startSystemMove，则回退手工 move。
+        void mouseMoveEvent(QMouseEvent* mouseEventPointer) override
+        {
+            if (mouseEventPointer != nullptr
+                && m_dragCandidateActive
+                && (mouseEventPointer->buttons() & Qt::LeftButton))
+            {
+                const QPoint currentGlobalPos = mouseEventPointer->globalPosition().toPoint();
+                const int dragDistance = (currentGlobalPos - m_dragPressGlobalPos).manhattanLength();
+                QWidget* hostWidget = window();
+                if (hostWidget != nullptr && dragDistance >= QApplication::startDragDistance())
+                {
+                    if (!m_dragInProgress)
+                    {
+                        m_dragInProgress = true;
+                        QWindow* hostWindowHandle = hostWidget->windowHandle();
+                        if (hostWindowHandle != nullptr && hostWindowHandle->startSystemMove())
+                        {
+                            mouseEventPointer->accept();
+                            return;
+                        }
+                    }
+
+                    hostWidget->move(m_windowPressTopLeft + currentGlobalPos - m_dragPressGlobalPos);
+                    mouseEventPointer->accept();
+                    return;
+                }
+            }
+            QWidget::mouseMoveEvent(mouseEventPointer);
+        }
+
+        // mouseReleaseEvent 作用：
+        // - 清理拖动候选状态；
+        // - 返回值：无。
+        void mouseReleaseEvent(QMouseEvent* mouseEventPointer) override
+        {
+            m_dragCandidateActive = false;
+            m_dragInProgress = false;
+            QWidget::mouseReleaseEvent(mouseEventPointer);
+        }
+
+    private:
+        QPointer<QMessageBox> m_ownerMessageBox; // m_ownerMessageBox：所属消息框。
+        QLabel* m_titleLabel = nullptr;          // m_titleLabel：标题文本控件。
+        bool m_dragCandidateActive = false;      // m_dragCandidateActive：是否处于拖动候选。
+        bool m_dragInProgress = false;           // m_dragInProgress：是否已经开始拖动。
+        QPoint m_dragPressGlobalPos;             // m_dragPressGlobalPos：按下时全局坐标。
+        QPoint m_windowPressTopLeft;             // m_windowPressTopLeft：按下时窗口左上角。
+    };
+
     // messageBoxWindowColor 作用：返回消息框主背景色。
     QColor messageBoxWindowColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(10, 15, 22) : QColor(248, 251, 255);
+        Q_UNUSED(darkModeEnabled);
+        return KswordTheme::WindowColor();
     }
 
     // messageBoxSurfaceColor 作用：返回消息框内部面板色。
     QColor messageBoxSurfaceColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(17, 25, 36) : QColor(255, 255, 255);
+        Q_UNUSED(darkModeEnabled);
+        return KswordTheme::SurfaceColor();
     }
 
     // messageBoxBorderColor 作用：返回消息框边框色。
     QColor messageBoxBorderColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(55, 80, 106) : QColor(190, 211, 233);
+        Q_UNUSED(darkModeEnabled);
+        return KswordTheme::BorderColor();
     }
 
     // messageBoxTextColor 作用：返回消息框主文本色。
     QColor messageBoxTextColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(237, 246, 255) : QColor(16, 35, 54);
+        Q_UNUSED(darkModeEnabled);
+        return KswordTheme::TextPrimaryColor();
     }
 
     // messageBoxSecondaryTextColor 作用：返回说明文本色。
     QColor messageBoxSecondaryTextColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(179, 198, 218) : QColor(79, 99, 120);
+        Q_UNUSED(darkModeEnabled);
+        return KswordTheme::TextSecondaryColor();
     }
 
     // messageBoxSecondaryButtonColor 作用：返回次级按钮底色。
     QColor messageBoxSecondaryButtonColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(24, 35, 50) : QColor(255, 255, 255);
+        Q_UNUSED(darkModeEnabled);
+        return KswordTheme::SurfaceAltColor();
     }
 
     // messageBoxSecondaryButtonHoverColor 作用：返回次级按钮悬停底色。
     QColor messageBoxSecondaryButtonHoverColor(const bool darkModeEnabled)
     {
-        return darkModeEnabled ? QColor(30, 43, 60) : QColor(234, 244, 255);
+        Q_UNUSED(darkModeEnabled);
+        return KswordTheme::SurfaceMutedColor();
     }
 
     // buildMessageBoxStyleSheet 作用：
@@ -149,11 +400,42 @@ namespace
             "  background-color:%2;"
             "  color:%3;"
             "  border:1px solid %4;"
-            "  border-radius:10px;"
+            "  border-radius:0px;"
             "}"
             "QMessageBox#%1 QWidget{"
             "  background:transparent;"
             "  color:%3;"
+            "}"
+            "QMessageBox#%1 QWidget#%10{"
+            "  background-color:%11;"
+            "  color:%3;"
+            "  border-bottom:1px solid %4;"
+            "}"
+            "QMessageBox#%1 QLabel#%12{"
+            "  color:%3;"
+            "  font-size:13px;"
+            "  font-weight:700;"
+            "}"
+            "QMessageBox#%1 QPushButton#%13{"
+            "  background-color:transparent;"
+            "  color:%3;"
+            "  border:0px;"
+            "  border-radius:0px;"
+            "  font-size:18px;"
+            "  font-weight:700;"
+            "  min-width:%14px;"
+            "  max-width:%14px;"
+            "  min-height:%14px;"
+            "  max-height:%14px;"
+            "  padding:0px;"
+            "}"
+            "QMessageBox#%1 QPushButton#%13:hover{"
+            "  background-color:#E81123;"
+            "  color:#FFFFFF;"
+            "}"
+            "QMessageBox#%1 QPushButton#%13:pressed{"
+            "  background-color:#B50D1E;"
+            "  color:#FFFFFF;"
             "}"
             "QMessageBox#%1 QLabel#qt_msgbox_label{"
             "  font-size:14px;"
@@ -180,7 +462,7 @@ namespace
             "  background:%6;"
             "  color:%3;"
             "  border:1px solid %4;"
-            "  border-radius:6px;"
+            "  border-radius:0px;"
             "  padding:4px 10px;"
             "  min-width:76px;"
             "  min-height:28px;"
@@ -212,7 +494,7 @@ namespace
             "  background:__MESSAGE_SURFACE__;"
             "  color:%3;"
             "  border:1px solid %4;"
-            "  border-radius:6px;"
+            "  border-radius:0px;"
             "  padding:8px;"
             "  selection-background-color:%8;"
             "  selection-color:#FFFFFF;"
@@ -226,6 +508,11 @@ namespace
             .arg(secondaryButtonHoverColorText)
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBluePressedHex)
+            .arg(QString::fromLatin1(kMessageBoxTitleBarObjectName))
+            .arg(surfaceColorText)
+            .arg(QString::fromLatin1(kMessageBoxTitleLabelObjectName))
+            .arg(QString::fromLatin1(kMessageBoxCloseButtonObjectName))
+            .arg(kMessageCloseButtonSize)
             .replace(QStringLiteral("__MESSAGE_SURFACE__"), surfaceColorText)
             .replace(QStringLiteral("__MESSAGE_PRIMARY_HOVER__"), KswordTheme::PrimaryBlueSolidHoverHex());
     }
@@ -299,6 +586,121 @@ namespace
         case QMessageBox::Help: return QStringLiteral("查看当前提示的帮助信息");
         default: return QStringLiteral("执行该按钮对应的消息框动作");
         }
+    }
+
+    // findMessageBoxGridLayout 作用：
+    // - QMessageBox 内部通常使用 QGridLayout；
+    // - 返回该布局后才能把原内容整体下移一行，为自绘标题栏腾出第 0 行。
+    QGridLayout* findMessageBoxGridLayout(QMessageBox* messageBox)
+    {
+        if (messageBox == nullptr)
+        {
+            return nullptr;
+        }
+        return qobject_cast<QGridLayout*>(messageBox->layout());
+    }
+
+    // moveGridLayoutItemsDown 作用：
+    // - 把 QMessageBox 原有布局项整体下移；
+    // - 只执行一次，避免多次主题刷新导致内容不断下沉。
+    void moveGridLayoutItemsDown(QGridLayout* gridLayout)
+    {
+        if (gridLayout == nullptr)
+        {
+            return;
+        }
+
+        struct GridItemSnapshot
+        {
+            QLayoutItem* layoutItem = nullptr; // layoutItem：原布局项对象。
+            int row = 0;                       // row：原行号。
+            int column = 0;                    // column：原列号。
+            int rowSpan = 1;                   // rowSpan：原行跨度。
+            int columnSpan = 1;                // columnSpan：原列跨度。
+            Qt::Alignment alignment;           // alignment：原对齐方式。
+        };
+
+        std::vector<GridItemSnapshot> itemList;
+        const int itemCount = gridLayout->count();
+        itemList.reserve(static_cast<std::size_t>(itemCount));
+        for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex)
+        {
+            QLayoutItem* layoutItem = gridLayout->itemAt(itemIndex);
+            if (layoutItem == nullptr)
+            {
+                continue;
+            }
+
+            int row = 0;
+            int column = 0;
+            int rowSpan = 1;
+            int columnSpan = 1;
+            gridLayout->getItemPosition(itemIndex, &row, &column, &rowSpan, &columnSpan);
+            itemList.push_back(GridItemSnapshot{
+                layoutItem,
+                row,
+                column,
+                rowSpan,
+                columnSpan,
+                layoutItem->alignment()
+            });
+        }
+
+        for (const GridItemSnapshot& itemSnapshot : itemList)
+        {
+            gridLayout->removeItem(itemSnapshot.layoutItem);
+        }
+
+        for (const GridItemSnapshot& itemSnapshot : itemList)
+        {
+            gridLayout->addItem(
+                itemSnapshot.layoutItem,
+                itemSnapshot.row + 1,
+                itemSnapshot.column,
+                itemSnapshot.rowSpan,
+                itemSnapshot.columnSpan,
+                itemSnapshot.alignment);
+        }
+    }
+
+    // ensureCustomMessageBoxTitleBar 作用：
+    // - 给 QMessageBox 安装自绘标题栏；
+    // - 隐藏系统标题栏，左侧显示应用 Logo，右侧提供关闭按钮。
+    void ensureCustomMessageBoxTitleBar(QMessageBox* messageBox)
+    {
+        if (messageBox == nullptr)
+        {
+            return;
+        }
+
+        messageBox->setWindowFlag(Qt::FramelessWindowHint, true);
+        messageBox->setWindowFlag(Qt::WindowSystemMenuHint, false);
+        messageBox->setWindowFlag(Qt::WindowMinMaxButtonsHint, false);
+        messageBox->setWindowFlag(Qt::WindowCloseButtonHint, false);
+
+        QGridLayout* gridLayout = findMessageBoxGridLayout(messageBox);
+        if (gridLayout == nullptr)
+        {
+            return;
+        }
+
+        if (!messageBox->property(kMessageBoxTitleBarInstalledPropertyName).toBool())
+        {
+            moveGridLayoutItemsDown(gridLayout);
+            messageBox->setProperty(kMessageBoxTitleBarInstalledPropertyName, true);
+        }
+
+        QWidget* titleBarWidget = messageBox->findChild<QWidget*>(
+            QString::fromLatin1(kMessageBoxTitleBarObjectName),
+            Qt::FindDirectChildrenOnly);
+        MessageBoxTitleBar* titleBar = dynamic_cast<MessageBoxTitleBar*>(titleBarWidget);
+        if (titleBar == nullptr)
+        {
+            titleBar = new MessageBoxTitleBar(messageBox);
+            gridLayout->addWidget(titleBar, 0, 0, 1, kMessageTitleBarColumnSpanToRightEdge);
+        }
+        titleBar->updateTitleText();
+        titleBar->show();
     }
 
     // GlobalMessageBoxStyler 作用：
@@ -390,6 +792,7 @@ namespace
             messageBox->setMinimumWidth(kMessageBoxMinWidth);
             messageBox->setMaximumWidth(dialogMaxWidth);
             messageBox->setProperty(kThemeModePropertyName, darkModeEnabled);
+            ensureCustomMessageBoxTitleBar(messageBox);
 
             // 相同主题重复进入时，只刷新按钮与文本可选属性，避免重复 setStyleSheet 造成样式风暴。
             if (!themeAlreadyApplied)

@@ -16,7 +16,7 @@ Environment:
 
 #include "callback_internal.h"
 
-static VOID
+VOID
 KswordArkThreadCreateNotify(
     _In_ HANDLE ProcessId,
     _In_ HANDLE ThreadId,

@@ -15,6 +15,7 @@ Environment:
 --*/
 
 #include <fltKernel.h>
+#include "file_monitor_internal.h"
 #include "ark/ark_driver.h"
 
 #include <ntstrsafe.h>
@@ -47,15 +48,17 @@ KswordARKFileMonitorUnloadCallback(
     _In_ FLT_FILTER_UNLOAD_FLAGS Flags
     );
 
-static FLT_PREOP_CALLBACK_STATUS FLTAPI
-KswordARKFileMonitorPreOperation(
+FLT_PREOP_CALLBACK_STATUS
+FLTAPI
+KswordArkMinifilterPreOperation(
     _Inout_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
     _Outptr_result_maybenull_ PVOID* CompletionContext
     );
 
-static FLT_POSTOP_CALLBACK_STATUS FLTAPI
-KswordARKFileMonitorPostOperation(
+FLT_POSTOP_CALLBACK_STATUS
+FLTAPI
+KswordArkMinifilterPostOperation(
     _Inout_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
     _In_opt_ PVOID CompletionContext,
@@ -64,12 +67,12 @@ KswordARKFileMonitorPostOperation(
 
 static const FLT_OPERATION_REGISTRATION g_KswordArkFileMonitorOperations[] =
 {
-    { IRP_MJ_CREATE, 0, KswordARKFileMonitorPreOperation, KswordARKFileMonitorPostOperation },
-    { IRP_MJ_READ, 0, KswordARKFileMonitorPreOperation, NULL },
-    { IRP_MJ_WRITE, 0, KswordARKFileMonitorPreOperation, NULL },
-    { IRP_MJ_SET_INFORMATION, 0, KswordARKFileMonitorPreOperation, KswordARKFileMonitorPostOperation },
-    { IRP_MJ_CLEANUP, 0, KswordARKFileMonitorPreOperation, NULL },
-    { IRP_MJ_CLOSE, 0, KswordARKFileMonitorPreOperation, NULL },
+    { IRP_MJ_CREATE, 0, KswordArkMinifilterPreOperation, KswordArkMinifilterPostOperation },
+    { IRP_MJ_READ, 0, KswordArkMinifilterPreOperation, NULL },
+    { IRP_MJ_WRITE, 0, KswordArkMinifilterPreOperation, NULL },
+    { IRP_MJ_SET_INFORMATION, 0, KswordArkMinifilterPreOperation, KswordArkMinifilterPostOperation },
+    { IRP_MJ_CLEANUP, 0, KswordArkMinifilterPreOperation, NULL },
+    { IRP_MJ_CLOSE, 0, KswordArkMinifilterPreOperation, NULL },
     { IRP_MJ_OPERATION_END }
 };
 
@@ -148,64 +151,6 @@ Return Value:
         device,
         LevelText != NULL ? LevelText : "Info",
         MessageText != NULL ? MessageText : "");
-}
-
-static ULONG
-KswordARKFileMonitorMapMajorToOperation(
-    _In_ UCHAR MajorFunction,
-    _In_ UCHAR MinorFunction,
-    _In_opt_ PFLT_PARAMETERS Parameters
-    )
-/*++
-
-Routine Description:
-
-    将 IRP major/minor 映射为协议 operation mask。中文说明：Rename/Delete 都从
-    IRP_MJ_SET_INFORMATION 细分，无法识别时保留 SETINFO 语义。
-
-Arguments:
-
-    MajorFunction - IRP major function。
-    MinorFunction - IRP minor function。
-    Parameters - 当前 I/O 参数，可为空。
-
-Return Value:
-
-    KSWORD_ARK_FILE_MONITOR_OPERATION_* 位。
-
---*/
-{
-    UNREFERENCED_PARAMETER(MinorFunction);
-
-    switch (MajorFunction) {
-    case IRP_MJ_CREATE:
-        return KSWORD_ARK_FILE_MONITOR_OPERATION_CREATE;
-    case IRP_MJ_READ:
-        return KSWORD_ARK_FILE_MONITOR_OPERATION_READ;
-    case IRP_MJ_WRITE:
-        return KSWORD_ARK_FILE_MONITOR_OPERATION_WRITE;
-    case IRP_MJ_CLEANUP:
-        return KSWORD_ARK_FILE_MONITOR_OPERATION_CLEANUP;
-    case IRP_MJ_CLOSE:
-        return KSWORD_ARK_FILE_MONITOR_OPERATION_CLOSE;
-    case IRP_MJ_SET_INFORMATION:
-        if (Parameters != NULL) {
-            FILE_INFORMATION_CLASS informationClass = Parameters->SetFileInformation.FileInformationClass;
-            if (informationClass == FileRenameInformation ||
-                informationClass == FileRenameInformationEx ||
-                informationClass == FileLinkInformation ||
-                informationClass == FileLinkInformationEx) {
-                return KSWORD_ARK_FILE_MONITOR_OPERATION_RENAME;
-            }
-            if (informationClass == FileDispositionInformation ||
-                informationClass == FileDispositionInformationEx) {
-                return KSWORD_ARK_FILE_MONITOR_OPERATION_DELETE;
-            }
-        }
-        return KSWORD_ARK_FILE_MONITOR_OPERATION_SETINFO;
-    default:
-        return 0UL;
-    }
 }
 
 static VOID
@@ -438,8 +383,9 @@ Return Value:
     return TRUE;
 }
 
-static FLT_PREOP_CALLBACK_STATUS FLTAPI
-KswordARKFileMonitorPreOperation(
+FLT_PREOP_CALLBACK_STATUS
+FLTAPI
+KswordArkMinifilterPreOperation(
     _Inout_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
     _Outptr_result_maybenull_ PVOID* CompletionContext
@@ -464,10 +410,24 @@ Return Value:
 --*/
 {
     ULONG operationType = 0UL;
+    FLT_PREOP_CALLBACK_STATUS callbackStatus = FLT_PREOP_SUCCESS_NO_CALLBACK;
     KSWORD_ARK_FILE_MONITOR_EVENT event;
 
     if (CompletionContext != NULL) {
         *CompletionContext = NULL;
+    }
+
+    operationType = KswordARKMinifilterMapMajorToOperation(
+        Data->Iopb->MajorFunction,
+        Data->Iopb->MinorFunction,
+        &Data->Iopb->Parameters);
+
+    callbackStatus = KswordArkMinifilterApplyRule(
+        Data,
+        FltObjects,
+        operationType);
+    if (callbackStatus == FLT_PREOP_COMPLETE) {
+        return FLT_PREOP_COMPLETE;
     }
 
     operationType = KswordARKFileMonitorMapMajorToOperation(
@@ -493,8 +453,9 @@ Return Value:
     return FLT_PREOP_SUCCESS_NO_CALLBACK;
 }
 
-static FLT_POSTOP_CALLBACK_STATUS FLTAPI
-KswordARKFileMonitorPostOperation(
+FLT_POSTOP_CALLBACK_STATUS
+FLTAPI
+KswordArkMinifilterPostOperation(
     _Inout_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
     _In_opt_ PVOID CompletionContext,
@@ -646,6 +607,11 @@ Return Value:
 --*/
 {
     g_KswordArkFileMonitorRuntime.RuntimeFlags &= ~KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED;
+    KswordArkMinifilterCallbackUpdateState(
+        g_KswordArkFileMonitorRuntime.Filter,
+        g_KswordArkFileMonitorRuntime.RegisterStatus,
+        g_KswordArkFileMonitorRuntime.StartStatus,
+        FALSE);
 
     if (g_KswordArkFileMonitorRuntime.Filter != NULL) {
         FltUnregisterFilter(g_KswordArkFileMonitorRuntime.Filter);
@@ -653,6 +619,7 @@ Return Value:
     }
 
     g_KswordArkFileMonitorRuntime.RuntimeFlags = 0UL;
+    KswordArkMinifilterCallbackUpdateState(NULL, STATUS_NOT_SUPPORTED, STATUS_NOT_SUPPORTED, FALSE);
 }
 
 NTSTATUS
@@ -704,16 +671,31 @@ Return Value:
             g_KswordArkFileMonitorRuntime.StartStatus = status;
             if (!NT_SUCCESS(status)) {
                 g_KswordArkFileMonitorRuntime.LastErrorStatus = status;
+                KswordArkMinifilterCallbackUpdateState(
+                    g_KswordArkFileMonitorRuntime.Filter,
+                    g_KswordArkFileMonitorRuntime.RegisterStatus,
+                    status,
+                    FALSE);
                 return status;
             }
         }
 
         g_KswordArkFileMonitorRuntime.RuntimeFlags |= KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED;
+        KswordArkMinifilterCallbackUpdateState(
+            g_KswordArkFileMonitorRuntime.Filter,
+            g_KswordArkFileMonitorRuntime.RegisterStatus,
+            g_KswordArkFileMonitorRuntime.StartStatus,
+            TRUE);
         KswordARKFileMonitorLog("Info", "KswordARK file monitor started.");
         return STATUS_SUCCESS;
 
     case KSWORD_ARK_FILE_MONITOR_ACTION_STOP:
         g_KswordArkFileMonitorRuntime.RuntimeFlags &= ~KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED;
+        KswordArkMinifilterCallbackUpdateState(
+            g_KswordArkFileMonitorRuntime.Filter,
+            g_KswordArkFileMonitorRuntime.RegisterStatus,
+            g_KswordArkFileMonitorRuntime.StartStatus,
+            FALSE);
         KswordARKFileMonitorLog("Info", "KswordARK file monitor stopped.");
         return STATUS_SUCCESS;
 

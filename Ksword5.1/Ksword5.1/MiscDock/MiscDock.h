@@ -15,6 +15,10 @@
 class QTabWidget;
 class QVBoxLayout;
 class BootEditorTab;
+namespace ks::misc
+{
+    class DiskEditorTab;
+}
 
 class MiscDock final : public QWidget
 {
@@ -37,5 +41,5 @@ private:
     QVBoxLayout* m_rootLayout = nullptr;      // m_rootLayout：杂项页根布局。
     QTabWidget* m_mainTabWidget = nullptr;    // m_mainTabWidget：杂项页内部 Tab 容器。
     BootEditorTab* m_bootEditorTab = nullptr; // m_bootEditorTab：引导编辑器页组件。
+    ks::misc::DiskEditorTab* m_diskEditorTab = nullptr; // m_diskEditorTab：磁盘编辑器页组件。
 };
-

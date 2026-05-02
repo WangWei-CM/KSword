@@ -52,10 +52,11 @@
 #include "Framework/LogDockWidget.h"
 #include "Framework/ProgressDockWidget.h"
 #include "Framework/CustomTitleBar.h"
-#include "Framework/ThemedMessageBox.h"
 #include "include/ads/DockWidgetTab.h"
 #include "KernelDock/KernelDock.CallbackPromptManager.h"
 #include "UI/CodeEditorWidget.h"
+#include "UI/GlobalDialogTheme.h"
+#include "UI/ThemedMessageBox.h"
 #include "theme.h"
 #include "../../shared/KswordArkLogProtocol.h"
 #include <windows.h>
@@ -6081,6 +6082,10 @@ void MainWindow::applyAppearanceSettings(
     // - 深浅色切换后，已打开的消息框也同步改为当前主题；
     // - 修复深色模式下消息框仍残留白底的问题。
     ks::ui::RefreshGlobalMessageBoxTheme();
+    // 全局普通弹窗主题刷新：
+    // - 深浅色切换后，QInputDialog 和普通 QDialog 同步纯黑/纯白背景；
+    // - 业务代码后续无需逐个对话框手写背景样式。
+    ks::ui::RefreshGlobalDialogTheme();
 
     if (menuBar() != nullptr)
     {

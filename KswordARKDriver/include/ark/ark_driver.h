@@ -26,6 +26,7 @@
 #include "ark_trust.h"
 #include "ark_safety.h"
 #include "ark_preflight.h"
+#include "ark_registry.h"
 #include "Trace.h"
 
 EXTERN_C_START

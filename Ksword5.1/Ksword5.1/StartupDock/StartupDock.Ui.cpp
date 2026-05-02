@@ -412,20 +412,21 @@ void StartupDock::rebuildRegistryTree()
 
     for (const QString& groupLocationText : knownLocationList)
     {
+        const std::vector<int> totalEntryIndexList = totalEntryIndexMap.value(groupLocationText);
+        const std::vector<int> visibleEntryIndexList = visibleEntryIndexMap.value(groupLocationText);
+        if (hideEmptyPath && totalEntryIndexList.empty())
+        {
+            // hideEmptyPath 用途：按用户要求完全跳过无任何条目的注册表位置节点。
+            // 这里必须在创建 QTreeWidgetItem 前返回，否则树里会残留没有文字的空白行。
+            continue;
+        }
+
         QTreeWidgetItem* groupItem = new QTreeWidgetItem(m_registryTree);
         groupItem->setData(0, kStartupEntryIndexRole, -1);
         groupItem->setData(0, kStartupTreeNodeKindRole, static_cast<int>(StartupTreeNodeKind::Group));
         groupItem->setData(0, kStartupTreeLocationRole, groupLocationText);
         groupItem->setFirstColumnSpanned(true);
         groupItem->setIcon(toStartupColumn(StartupColumn::Name), createBlueIcon(":/Icon/file_find.svg"));
-
-        const std::vector<int> totalEntryIndexList = totalEntryIndexMap.value(groupLocationText);
-        const std::vector<int> visibleEntryIndexList = visibleEntryIndexMap.value(groupLocationText);
-        if (hideEmptyPath && totalEntryIndexList.empty())
-        {
-            // hideEmptyPath 用途：按用户要求隐藏无任何条目的注册表位置节点。
-            continue;
-        }
 
         if (!visibleEntryIndexList.empty())
         {

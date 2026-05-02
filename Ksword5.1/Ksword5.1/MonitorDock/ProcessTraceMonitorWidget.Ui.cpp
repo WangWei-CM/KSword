@@ -23,10 +23,12 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
+#include <QSizePolicy>
 #include <QSplitter>
 #include <QSvgRenderer>
 #include <QTableWidget>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 namespace
@@ -71,6 +73,71 @@ namespace
         buttonPointer->setFixedSize(QSize(28, 28));
         return buttonPointer;
     }
+
+}
+
+QWidget* ProcessTraceMonitorWidget::createConfigurationCollapseSection(
+    QWidget* parentWidget,
+    const QString& titleText,
+    QWidget* contentWidget,
+    const bool expanded) const
+{
+    // 外层折叠段：
+    // - 使用和 MonitorDock 现有 Collapse 一致的动态属性；
+    // - Maximum 垂直策略确保配置段按内容高度参与布局，不挤占事件表弹性区域。
+    QWidget* sectionWidget = new QWidget(parentWidget);
+    sectionWidget->setProperty("kswordCollapsePanel", QStringLiteral("true"));
+    sectionWidget->setStyleSheet(collapsePanelStyle());
+    sectionWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+
+    QVBoxLayout* sectionLayout = new QVBoxLayout(sectionWidget);
+    sectionLayout->setContentsMargins(0, 0, 0, 0);
+    sectionLayout->setSpacing(0);
+
+    // 折叠头：
+    // - 默认展开，箭头方向和 checked 状态保持同步；
+    // - 用户收起后只隐藏配置内容，不影响时间轴和下方表格。
+    QToolButton* headerButton = new QToolButton(sectionWidget);
+    headerButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    headerButton->setText(titleText);
+    headerButton->setCheckable(true);
+    headerButton->setChecked(expanded);
+    headerButton->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+    headerButton->setStyleSheet(collapseHeaderButtonStyle());
+    headerButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+    // 内容宿主：
+    // - 单独包一层是为了复用 kswordCollapseContent 样式；
+    // - 内容页本身由 initializeUi 构建并交给宿主布局托管。
+    QWidget* contentHostWidget = new QWidget(sectionWidget);
+    contentHostWidget->setProperty("kswordCollapseContent", QStringLiteral("true"));
+    contentHostWidget->setStyleSheet(collapsePanelStyle());
+    contentHostWidget->setVisible(expanded);
+    contentHostWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+
+    QVBoxLayout* contentHostLayout = new QVBoxLayout(contentHostWidget);
+    contentHostLayout->setContentsMargins(4, 4, 4, 4);
+    contentHostLayout->setSpacing(4);
+    contentHostLayout->addWidget(contentWidget);
+
+    sectionLayout->addWidget(headerButton, 0);
+    sectionLayout->addWidget(contentHostWidget, 0);
+
+    QObject::connect(headerButton, &QToolButton::toggled, sectionWidget,
+        [headerButton, contentHostWidget, sectionWidget](const bool checked) {
+            // 只折叠配置内容区，不影响时间轴和事件表；
+            // 折叠后根布局会把释放出的高度全部交给下方事件表。
+            headerButton->setArrowType(checked ? Qt::DownArrow : Qt::RightArrow);
+            contentHostWidget->setVisible(checked);
+            sectionWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+            sectionWidget->updateGeometry();
+            if (QWidget* parentPointer = sectionWidget->parentWidget())
+            {
+                parentPointer->updateGeometry();
+            }
+        });
+
+    return sectionWidget;
 }
 
 void ProcessTraceMonitorWidget::initializeUi()
@@ -83,8 +150,18 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_rootLayout->setContentsMargins(6, 6, 6, 6);
     m_rootLayout->setSpacing(6);
 
-    m_topSplitter = new QSplitter(Qt::Horizontal, this);
-    m_rootLayout->addWidget(m_topSplitter, 0);
+    // 顶部配置内容统一放入默认展开的 Collapse：
+    // - 包含可选进程、监控目标、控制栏和事件筛选区；
+    // - 时间轴不放入折叠段，便于持续保留可见的时间窗口交互；
+    // - 折叠段的垂直策略为 Maximum，避免再次抢占下方事件表剩余空间。
+    m_configurationPanel = new QWidget(this);
+    m_configurationPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    QVBoxLayout* configurationLayout = new QVBoxLayout(m_configurationPanel);
+    configurationLayout->setContentsMargins(0, 0, 0, 0);
+    configurationLayout->setSpacing(6);
+
+    m_topSplitter = new QSplitter(Qt::Horizontal, m_configurationPanel);
+    configurationLayout->addWidget(m_topSplitter, 0);
 
     // 可选进程面板：
     // - 提供当前进程快照、关键词过滤与“添加到监控目标”入口；
@@ -228,7 +305,7 @@ void ProcessTraceMonitorWidget::initializeUi()
     // 控制栏：
     // - 中间说明固定采用“全量预置 Provider + 进程树辅助快照”；
     // - 用户不再手工勾选事件类型，统一由程序尽可能宽覆盖。
-    m_controlPanel = new QWidget(this);
+    m_controlPanel = new QWidget(m_configurationPanel);
     QHBoxLayout* controlLayout = new QHBoxLayout(m_controlPanel);
     controlLayout->setContentsMargins(6, 6, 6, 6);
     controlLayout->setSpacing(6);
@@ -272,12 +349,12 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_statusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
     controlLayout->addWidget(m_statusLabel, 0);
 
-    m_rootLayout->addWidget(m_controlPanel, 0);
+    configurationLayout->addWidget(m_controlPanel, 0);
 
     // 事件筛选区：
     // - 类型单独做下拉框，其他字段使用文本过滤；
     // - 结果表刷新后统一走 applyEventFilter，便于维持交互一致性。
-    m_filterPanel = new QWidget(this);
+    m_filterPanel = new QWidget(m_configurationPanel);
     QGridLayout* filterLayout = new QGridLayout(m_filterPanel);
     filterLayout->setContentsMargins(6, 6, 6, 6);
     filterLayout->setHorizontalSpacing(6);
@@ -355,7 +432,14 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_eventFilterStatusLabel->setStyleSheet(buildStatusStyle(monitorIdleColorHex()));
     filterLayout->addWidget(m_eventFilterStatusLabel, 2, 5, 1, 3);
 
-    m_rootLayout->addWidget(m_filterPanel, 0);
+    configurationLayout->addWidget(m_filterPanel, 0);
+
+    m_configurationCollapseWidget = createConfigurationCollapseSection(
+        this,
+        QStringLiteral("进程定向配置 / 筛选"),
+        m_configurationPanel,
+        true);
+    m_rootLayout->addWidget(m_configurationCollapseWidget, 0);
 
     // ETW 时间轴：
     // - 高度固定 40px，宽度由根布局自动填满；
@@ -402,6 +486,7 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnRelation, QHeaderView::ResizeToContents);
     m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnDetail, QHeaderView::Stretch);
     m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnActivityId, QHeaderView::ResizeToContents);
+    m_eventTable->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_rootLayout->addWidget(m_eventTable, 1);
 
     // 定时器：

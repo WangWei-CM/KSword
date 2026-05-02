@@ -117,7 +117,7 @@ void MemoryDock::initializeTabs()
     // 记录 Tab 初始化日志：便于排查某个页面未创建的问题。
     kLogEvent tabInitEvent;
     info << tabInitEvent
-        << "[MemoryDock] initializeTabs: 开始创建 5 个功能页。"
+        << "[MemoryDock] initializeTabs: 开始创建 6 个功能页。"
         << eol;
 
     // 五个子页面统一由 QTabWidget 承载。
@@ -130,6 +130,7 @@ void MemoryDock::initializeTabs()
     initializeMemorySearchTab();
     initializeMemoryViewerTab();
     initializeBreakpointBookmarkTab();
+    initializeDriverMemoryRwTab();
 }
 
 void MemoryDock::initializeProcessModuleTab()
@@ -565,3 +566,74 @@ void MemoryDock::initializeBreakpointBookmarkTab()
     m_tabWidget->addTab(m_tabBpBookmark, "断点与书签");
 }
 
+void MemoryDock::initializeDriverMemoryRwTab()
+{
+    // Tab6 初始化日志：记录驱动读写页开始构建。
+    kLogEvent tab6InitEvent;
+    info << tab6InitEvent
+        << "[MemoryDock] initializeDriverMemoryRwTab: 构建驱动内存读写页面。"
+        << eol;
+
+    // Tab6：驱动内存读写，和原 Win32 查看器分离，避免编辑即写入真实内存。
+    m_tabDriverMemoryRw = new QWidget(m_tabWidget);
+    QVBoxLayout* tabLayout = new QVBoxLayout(m_tabDriverMemoryRw);
+    tabLayout->setContentsMargins(6, 6, 6, 6);
+    tabLayout->setSpacing(6);
+
+    const QString inputStyle = buildBlueInputStyle();
+    const QString buttonStyle = buildBlueButtonStyle();
+
+    QGroupBox* requestGroup = new QGroupBox("读取范围", m_tabDriverMemoryRw);
+    QGridLayout* requestLayout = new QGridLayout(requestGroup);
+    requestLayout->setHorizontalSpacing(8);
+    requestLayout->setVerticalSpacing(6);
+
+    m_driverMemoryAddressEdit = new QLineEdit(requestGroup);
+    m_driverMemoryAddressEdit->setPlaceholderText("中心地址，例如 0x00007FF700001000");
+    m_driverMemoryAddressEdit->setStyleSheet(inputStyle);
+
+    m_driverMemoryBeforeSpin = new QSpinBox(requestGroup);
+    m_driverMemoryBeforeSpin->setRange(0, static_cast<int>(KSWORD_ARK_MEMORY_READ_MAX_BYTES / 2UL));
+    m_driverMemoryBeforeSpin->setValue(1024);
+    m_driverMemoryBeforeSpin->setSuffix(" B");
+
+    m_driverMemoryAfterSpin = new QSpinBox(requestGroup);
+    m_driverMemoryAfterSpin->setRange(1, static_cast<int>(KSWORD_ARK_MEMORY_READ_MAX_BYTES / 2UL));
+    m_driverMemoryAfterSpin->setValue(1024);
+    m_driverMemoryAfterSpin->setSuffix(" B");
+
+    m_driverMemoryReadButton = new QPushButton("R0读取", requestGroup);
+    m_driverMemoryApplyButton = new QPushButton("应用差异到真实内存", requestGroup);
+    m_driverMemoryResetButton = new QPushButton("清空缓存", requestGroup);
+    m_driverMemoryReadButton->setStyleSheet(buttonStyle);
+    m_driverMemoryApplyButton->setStyleSheet(buttonStyle);
+    m_driverMemoryResetButton->setStyleSheet(buttonStyle);
+    m_driverMemoryApplyButton->setEnabled(false);
+
+    requestLayout->addWidget(new QLabel("中心地址", requestGroup), 0, 0);
+    requestLayout->addWidget(m_driverMemoryAddressEdit, 0, 1, 1, 4);
+    requestLayout->addWidget(new QLabel("向前", requestGroup), 1, 0);
+    requestLayout->addWidget(m_driverMemoryBeforeSpin, 1, 1);
+    requestLayout->addWidget(new QLabel("向后", requestGroup), 1, 2);
+    requestLayout->addWidget(m_driverMemoryAfterSpin, 1, 3);
+    requestLayout->addWidget(m_driverMemoryReadButton, 1, 4);
+    requestLayout->addWidget(m_driverMemoryApplyButton, 2, 3);
+    requestLayout->addWidget(m_driverMemoryResetButton, 2, 4);
+    tabLayout->addWidget(requestGroup);
+
+    m_driverMemoryRangeLabel = new QLabel("范围: 未读取", m_tabDriverMemoryRw);
+    m_driverMemoryRangeLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    tabLayout->addWidget(m_driverMemoryRangeLabel);
+
+    // HexEditor 在本页允许编辑，但 byteEdited 只更新 R3 缓存，不直接写目标进程。
+    m_driverMemoryHexEditor = new HexEditorWidget(m_tabDriverMemoryRw);
+    m_driverMemoryHexEditor->setBytesPerRow(16);
+    m_driverMemoryHexEditor->setEditable(true);
+    tabLayout->addWidget(m_driverMemoryHexEditor, 1);
+
+    m_driverMemoryStatusLabel = new QLabel("输入地址后点击 R0读取；修改缓存后点击“应用差异到真实内存”。", m_tabDriverMemoryRw);
+    m_driverMemoryStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    tabLayout->addWidget(m_driverMemoryStatusLabel);
+
+    m_tabWidget->addTab(m_tabDriverMemoryRw, "驱动内存读写");
+}
