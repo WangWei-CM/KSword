@@ -1,12 +1,7 @@
 ﻿#include "WelcomeDock.h"
 #include "../UI/UI.css/UI_css.h"
 #include "../theme.h"
-#include <QStyle>
-#include <QDir>
 #include <QPixmap>
-#include <QStandardPaths>
-#include <windows.h>  // Windows API 头文件
-#include <shlobj.h>   // 用于获取用户目录（需链接 shell32.lib）
 
 namespace
 {
@@ -19,102 +14,40 @@ namespace
     // - 欢迎页显示的精确编译时间；
     // - 由发布脚本按注释标记替换。
     const QString kReleaseBuildTimeText = QStringLiteral("2026-04-04 14:25:53.649 +08:00"); // RELEASE_META_BUILD_TIME_MARKER
+
+    // kQQGroupInviteUrl 作用：QQ 群按钮点击后打开的官方加群邀请链接。
+    const QString kQQGroupInviteUrl = QStringLiteral("https://qm.qq.com/q/5tWNPfIxkk");
+
+    // kPplControlRepositoryUrl 作用：参考项目按钮点击后打开 PPLcontrol 仓库。
+    const QString kPplControlRepositoryUrl = QStringLiteral("https://github.com/itm4n/PPLcontrol");
+
+    // kSystemInformerRepositoryUrl 作用：参考项目按钮点击后打开 System Informer 仓库。
+    const QString kSystemInformerRepositoryUrl = QStringLiteral("https://github.com/winsiderss/systeminformer");
+
+    // kSkt64RepositoryUrl 作用：参考项目按钮点击后打开 SKT64 仓库。
+    const QString kSkt64RepositoryUrl = QStringLiteral("https://github.com/PspExitThread/SKT64");
 }
 
-// 获取 Windows 登录头像路径（优先找用户自定义头像，找不到用系统默认）
-QString WelcomeDock::getWindowsUserName() {
-    WCHAR userNameBuffer[256] = { 0 }; // 存储用户名的缓冲区
-    DWORD bufferSize = sizeof(userNameBuffer) / sizeof(WCHAR); // 缓冲区大小
-
-    // 调用Windows API获取用户名（宽字符版本，支持中文）
-    if (GetUserNameW(userNameBuffer, &bufferSize)) {
-        return QString::fromWCharArray(userNameBuffer); // 转换为QString
-    }
-    else {
-        return "用户"; // 获取失败时的默认文本
-    }
-}
-QString WelcomeDock::getWindowsUserAvatarPath() {
-    // 1. 用户自定义头像路径（Win10/Win11 通用）
-    QString accountPicsPath = QStandardPaths::writableLocation(QStandardPaths::HomeLocation)
-        + "/AppData/Roaming/Microsoft/Windows/Account Pictures/";
-
-    QDir accountDir(accountPicsPath);
-    if (accountDir.exists()) {
-        // 查找目录下的图片文件（优先 .png，其次 .jpg）
-        QStringList filters;
-        filters << "*.png" << "*.jpg" << "*.jpeg";
-        QFileInfoList fileList = accountDir.entryInfoList(filters, QDir::Files);
-
-        // 低 Qt 版本无 SizeReversed，手动按文件大小排序（取最大文件，通常是高清头像）
-        std::sort(fileList.begin(), fileList.end(), [](const QFileInfo& a, const QFileInfo& b) {
-            return a.size() > b.size(); // 降序排序（大文件在前）
-            });
-
-        if (!fileList.isEmpty()) {
-            return fileList.first().absoluteFilePath();
-        }
-    }
-
-    // 2. 系统默认头像路径（如果用户未自定义）
-    QString defaultAvatarPath = "C:/ProgramData/Microsoft/User Account Pictures/default.png";
-    if (QFile::exists(defaultAvatarPath)) {
-        return defaultAvatarPath;
-    }
-
-    // 3. 兜底：系统默认备选头像（不同版本路径可能不同）
-    QString defaultAvatarBackup = "C:/ProgramData/Microsoft/User Account Pictures/guest.png";
-    if (QFile::exists(defaultAvatarBackup)) {
-        return defaultAvatarBackup;
-    }
-
-    return "";  // 未找到头像
-}// 加载头像并显示到 QLabel（自动缩放，保持比例）
-void WelcomeDock::loadUserAvatar(QLabel* avatarLabel) {
-    QString avatarPath = WelcomeDock::getWindowsUserAvatarPath();
-    if (avatarPath.isEmpty() || !QFile::exists(avatarPath)) {
-        // 加载失败：显示占位文本
-        avatarLabel->setText("当前Windows<br>登陆账户图片");
-        return;
-    }
-
-    // 加载图片并缩放（适配 QLabel 尺寸，保持宽高比，抗锯齿）
-    QPixmap avatarPixmap(avatarPath);
-    if (avatarPixmap.isNull()) {
-        avatarLabel->setText("当前Windows<br>登陆账户图片");
-        return;
-    }
-
-    // 缩放图片（最小尺寸 100x100，最大尺寸不超过标签大小）
-    QSize labelSize = avatarLabel->minimumSize();
-    QPixmap scaledPixmap = avatarPixmap.scaled(labelSize,
-        Qt::KeepAspectRatio,
-        Qt::SmoothTransformation);
-
-    // 显示图片
-    avatarLabel->setPixmap(scaledPixmap);
-    avatarLabel->setText("");  // 清空占位文本
-}
 WelcomeDock::WelcomeDock(QWidget* parent) : QWidget(parent) {
     // ==== 1. 初始化组件 ====
-// 左侧图片（用占位文本模拟，实际可替换为QPixmap）
+    // 左侧图片：显示项目主 Logo；本构造函数仅初始化 UI，无返回值。
     m_leftImage = new QLabel(this);
-    // 1. 设置 QLabel 固定大小为图片原始尺寸（655x250）
+    // 固定为图片原始尺寸，避免布局伸缩导致 Logo 模糊或变形。
     m_leftImage->setFixedSize(655, 250);
-    // 2. 关闭自动扩展（避免被布局拉伸）
+    // 关闭自动扩展，保持欢迎页视觉中心稳定。
     m_leftImage->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     m_leftImage->setAlignment(Qt::AlignCenter);
 
-    // 加载图片（不缩放，直接使用原始尺寸）
+    // 加载图片：优先使用资源文件中的 MainLogo.png；失败时显示占位文本。
     QPixmap pixmap(":/Image/Resource/Logo/MainLogo.png");
     if (!pixmap.isNull()) {
-        // 直接设置原图（不调用 scaled，保持 655x250 像素）
+        // 直接设置原图，不调用 scaled，保持 655x250 像素。
         m_leftImage->setPixmap(pixmap);
     }
     else {
         m_leftImage->setText("左侧图片区域");
     }
-    // 版权信息
+    // 版权信息：展示团队信息、版本号和编译时间。
     m_copyright = new QLabel(this);
     // 欢迎页发布信息：
     // - 版本号使用更大字号；
@@ -129,74 +62,118 @@ WelcomeDock::WelcomeDock(QWidget* parent) : QWidget(parent) {
     m_copyright->setWordWrap(true); // 开启自动换行
     m_copyright->setTextInteractionFlags(Qt::TextSelectableByMouse); // 允许选中
     m_copyright->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    // 可选：限制最大高度（防止内容过多时占满空间）
+    // 限制最大高度，避免发布信息在小窗口内挤占按钮区域。
     m_copyright->setMaximumHeight(140); // 发布信息增加“版本+编译时间”后提高可视高度，避免文本被裁切。
-    // 按钮
+
+    // 贡献者信息：放在现有发布信息下方，避免改变顶部 Logo 与版本区的识别位置。
+    m_contributors = new QLabel(this);
+    // 文本格式：使用 HTML 加粗标题，名单保持纯文本便于后续追加。
+    m_contributors->setText(QStringLiteral(
+        "<b>贡献者：</b>WangWei_CM.，OB_BUFF，KALI_MC"));
+    // 自动换行：当 Dock 宽度较窄时，贡献者名单可自然折行。
+    m_contributors->setWordWrap(true);
+    // 允许复制：用户可以直接复制贡献者名单。
+    m_contributors->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    // 高度策略：仅占用文本所需高度，不挤压参考项目按钮。
+    m_contributors->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+    // 参考项目标题：与贡献者区域保持同一层级，提示下方按钮会打开外部仓库。
+    m_referenceTitle = new QLabel(QStringLiteral("<b>参考项目：</b>"), this);
+    // 标题高度固定在内容高度范围内，避免空白过多。
+    m_referenceTitle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    // 标题文本无需换行，但保留富文本显示能力。
+    m_referenceTitle->setTextFormat(Qt::RichText);
+
+    // 按钮样式：根据当前深浅色状态选择欢迎页按钮样式。
     // welcomeButtonStyle 作用：根据当前深浅色状态选择欢迎页按钮样式。
     const QString welcomeButtonStyle = KswordTheme::IsDarkModeEnabled() ? QSS_Buttons_Dark : QSS_Buttons_Light;
 
+    // Github 按钮：保留项目仓库入口。
     m_githubBtn = new QPushButton("Github仓库", this);
     m_githubBtn->setStyleSheet(welcomeButtonStyle);
     m_githubBtn->setToolTip("打开项目 Github 仓库主页");
 
+    // QQ 群按钮：保留项目交流群入口。
     m_qqBtn = new QPushButton("QQ群", this);
 	m_qqBtn->setStyleSheet(welcomeButtonStyle);
     m_qqBtn->setToolTip("加入项目 QQ 交流群");
 
-    m_webBtn = new QPushButton("网站", this);
-	m_webBtn->setStyleSheet(welcomeButtonStyle);
-    m_webBtn->setToolTip("访问项目官方网站");
+    // PPLcontrol 参考按钮：点击后打开上游参考仓库。
+    m_pplControlBtn = new QPushButton("PPLcontrol", this);
+    m_pplControlBtn->setStyleSheet(welcomeButtonStyle);
+    m_pplControlBtn->setToolTip(QStringLiteral("打开 PPLcontrol 参考项目仓库"));
 
-    // 右侧用户头像（用占位文本模拟）
-    // 右侧用户头像（初始隐藏文本，加载成功显示图片，失败显示占位）
-    m_userAvatar = new QLabel(this);
-    //m_userAvatar->setStyleSheet("padding: 15px;");
-    m_userAvatar->setAlignment(Qt::AlignCenter);
-    m_userAvatar->setMinimumSize(100, 100);
-    loadUserAvatar(m_userAvatar);  // 加载 Windows 头像
+    // System Informer 参考按钮：点击后打开上游参考仓库。
+    m_systemInformerBtn = new QPushButton("System Informer", this);
+    m_systemInformerBtn->setStyleSheet(welcomeButtonStyle);
+    m_systemInformerBtn->setToolTip(QStringLiteral("打开 System Informer 参考项目仓库"));
 
-    // 问候语（显示实际 Windows 用户名）
-    QString userName = getWindowsUserName();// 获取当前 Windows 用户名
-    m_greeting = new QLabel(QString("早上好！%1").arg(userName), this);
-    m_greeting->setStyleSheet("font-size: 16px;");
-    m_greeting->setAlignment(Qt::AlignCenter);
+    // SKT64 参考按钮：点击后打开上游参考仓库。
+    m_skt64Btn = new QPushButton("SKT64", this);
+    m_skt64Btn->setStyleSheet(welcomeButtonStyle);
+    m_skt64Btn->setToolTip(QStringLiteral("打开 SKT64 参考项目仓库"));
 
     // ==== 2. 布局管理 ====
-    // 按钮布局（水平排列，等宽拉伸）
+    // 按钮布局：保留 Github 与 QQ 群，作为项目自身入口。
     m_btnLayout = new QHBoxLayout();
     m_btnLayout->addWidget(m_githubBtn, 1); // 占1份宽度
     m_btnLayout->addWidget(m_qqBtn, 1);
-    m_btnLayout->addWidget(m_webBtn, 1);
     m_btnLayout->setSpacing(10); // 按钮间距
 
-    // 左侧布局（垂直排列：图片 -> 版权 -> 按钮）
+    // 参考项目布局：三个按钮等宽展示，点击后均通过默认浏览器打开。
+    m_referenceLayout = new QHBoxLayout();
+    m_referenceLayout->addWidget(m_pplControlBtn, 1);
+    m_referenceLayout->addWidget(m_systemInformerBtn, 1);
+    m_referenceLayout->addWidget(m_skt64Btn, 1);
+    // 参考按钮间距与项目入口按钮一致，保持欢迎页视觉节奏。
+    m_referenceLayout->setSpacing(10);
+
+    // 左侧布局：按 Logo、版权发布信息、按钮区排列。
     m_leftLayout = new QVBoxLayout();
     m_leftLayout->addWidget(m_leftImage);
     m_leftLayout->addWidget(m_copyright);
     m_leftLayout->addLayout(m_btnLayout);
+    // 贡献者：添加在现有项目入口下面，满足“在现有的东西下面加”的位置要求。
+    m_leftLayout->addWidget(m_contributors);
+    // 参考项目标题：放在贡献者下面，明确按钮含义。
+    m_leftLayout->addWidget(m_referenceTitle);
+    // 参考项目按钮：作为可点击仓库入口，不使用普通文本链接。
+    m_leftLayout->addLayout(m_referenceLayout);
+    // 底部留白由 stretch 承担，避免重复添加按钮布局。
+    m_leftLayout->addStretch(1);
     m_leftLayout->setSpacing(20); // 组件间距
     m_leftLayout->setContentsMargins(20, 20, 20, 20); // 左布局内边距
-    m_leftLayout->addStretch(1);
-    m_leftLayout->addLayout(m_btnLayout);
-    m_leftLayout->setSpacing(20);
-    m_leftLayout->setContentsMargins(20, 20, 20, 20);
-    // 右侧布局（垂直排列：头像 -> 问候语，居中对齐）
-    m_rightLayout = new QVBoxLayout();
-    m_rightLayout->addWidget(m_userAvatar);
-    m_rightLayout->addWidget(m_greeting);
-    m_rightLayout->setAlignment(Qt::AlignTop); // 整体居中
-    m_rightLayout->setContentsMargins(0,0,0,0); // 右布局内边距
 
-    // 主布局（水平分栏：左侧占3份，右侧占1份）
+    // 主布局：移除右侧用户区后，只承载欢迎主体内容。
     m_mainLayout = new QHBoxLayout(this);
-    m_mainLayout->addLayout(m_leftLayout, 3); // 左侧占3/4宽度
-    m_mainLayout->addLayout(m_rightLayout, 1); // 右侧占1/4宽度
+    m_mainLayout->addLayout(m_leftLayout, 1); // 主体内容占满欢迎页宽度。
     m_mainLayout->setContentsMargins(0, 0, 0, 0); // 主布局无边距（消除白边）
     setLayout(m_mainLayout);
 
 
-    // ==== 3. 信号连接（示例：Github按钮打开链接） ====
+    // ==== 3. 信号连接 ====
+    // Github 按钮：点击后交给系统默认浏览器打开项目仓库；无返回值。
     connect(m_githubBtn, &QPushButton::clicked, this, [=]() {
         QDesktopServices::openUrl(QUrl("https://github.com/WangWei-CM/KSword"));
+        });
+
+    // QQ 群按钮：点击后交给系统默认浏览器打开加群页面；无返回值。
+    connect(m_qqBtn, &QPushButton::clicked, this, [=]() {
+        QDesktopServices::openUrl(QUrl(kQQGroupInviteUrl));
+        });
+
+    // PPLcontrol 参考按钮：点击后打开参考仓库；无返回值。
+    connect(m_pplControlBtn, &QPushButton::clicked, this, [=]() {
+        QDesktopServices::openUrl(QUrl(kPplControlRepositoryUrl));
+        });
+
+    // System Informer 参考按钮：点击后打开参考仓库；无返回值。
+    connect(m_systemInformerBtn, &QPushButton::clicked, this, [=]() {
+        QDesktopServices::openUrl(QUrl(kSystemInformerRepositoryUrl));
+        });
+
+    // SKT64 参考按钮：点击后打开参考仓库；无返回值。
+    connect(m_skt64Btn, &QPushButton::clicked, this, [=]() {
+        QDesktopServices::openUrl(QUrl(kSkt64RepositoryUrl));
         });
 }

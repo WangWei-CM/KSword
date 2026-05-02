@@ -914,14 +914,18 @@ namespace
                         const int score = (nameNamespace == 1 || nameNamespace == 3) ? 2 : (nameNamespace == 0 ? 1 : 0);
                         const std::uint64_t parentIndexValue = (parentRef & 0x0000FFFFFFFFFFFFULL);
 
-                        // nameLinks：对同一父目录只保留最佳可显示名称，避免 DOS 名和长名重复污染列表。
+                        // nameLinks：NTFS 目录项本质上是“文件名链接”，不是“一个记录只能显示一行”。
+                        // 这里按“父目录 + 文件名”保留链接，避免同一目录下多个硬链接被压成一个。
                         bool parentLinkUpdated = false;
                         for (NtfsNameLink& nameLink : recordOut.nameLinks)
                         {
-                            if (nameLink.parentIndex != parentIndexValue)
+                            if (nameLink.parentIndex != parentIndexValue
+                                || nameLink.fileName.compare(candidateName, Qt::CaseSensitive) != 0)
                             {
                                 continue;
                             }
+
+                            // 同名链接只保留更适合展示的命名空间版本，主要用于消除大小写/命名空间重复。
                             if (score >= nameLink.nameScore)
                             {
                                 nameLink.fileName = candidateName;
@@ -939,6 +943,7 @@ namespace
                             recordOut.nameLinks.push_back(std::move(nameLink));
                         }
 
+                        // preferredName：记录级默认名称只用于路径提示，不参与目录行去重。
                         if (score >= preferredNameScore)
                         {
                             preferredNameScore = score;
@@ -1016,6 +1021,30 @@ namespace
 
             attrOffset += attrLength;
         }
+
+        // parentHasDisplayNameSet：先记录每个父目录是否已有非 DOS 名称，避免 remove_if 期间读写同一 vector。
+        QSet<qulonglong> parentHasDisplayNameSet;
+        for (const NtfsNameLink& linkValue : recordOut.nameLinks)
+        {
+            if (linkValue.nameScore > 0)
+            {
+                parentHasDisplayNameSet.insert(static_cast<qulonglong>(linkValue.parentIndex));
+            }
+        }
+
+        // 纯 DOS 短名只是同一目录链接的 8.3 别名；当该父目录已有 Win32/POSIX 名称时不单独展示。
+        recordOut.nameLinks.erase(
+            std::remove_if(
+                recordOut.nameLinks.begin(),
+                recordOut.nameLinks.end(),
+                [&parentHasDisplayNameSet](const NtfsNameLink& linkValue) {
+                    if (linkValue.nameScore != 0)
+                    {
+                        return false;
+                    }
+                    return parentHasDisplayNameSet.contains(static_cast<qulonglong>(linkValue.parentIndex));
+                }),
+            recordOut.nameLinks.end());
 
         recordOut.fileName = preferredName;
         return true;

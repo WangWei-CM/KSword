@@ -16,7 +16,7 @@ Environment:
 
 #include "callback_internal.h"
 
-static VOID
+VOID
 KswordArkLoadImageNotify(
     _In_opt_ PUNICODE_STRING FullImageName,
     _In_ HANDLE ProcessId,

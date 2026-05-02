@@ -11,6 +11,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../MonitorDock/ProcessTraceTimelineWidget.h"
 
 #include <QHash>
 #include <QIcon>
@@ -228,6 +229,27 @@ private:
         MonitorTextRuleFieldUiState packetSizeField;
     };
 
+    // PacketTimelineCaptureSession：
+    // - 作用：记录一次“用户真正开启监控”的连续时间段；
+    // - startUnixMs/endUnixMs 使用真实 Unix ms，baseStart100ns 使用压缩后的监控时长轴；
+    // - 停止监控到下次启动之间的真实等待时间不会进入 baseStart100ns。
+    struct PacketTimelineCaptureSession
+    {
+        std::uint64_t startUnixMs = 0; // startUnixMs：本次监控会话开始的真实时间。
+        std::uint64_t endUnixMs = 0; // endUnixMs：本次监控会话结束的真实时间，0 表示仍在运行。
+        std::uint64_t baseStart100ns = 0; // baseStart100ns：本次会话映射到时间轴时的起始偏移。
+    };
+
+    // PacketTimelineRateBucket：
+    // - 作用：按压缩后的“第 N 秒”累计上传/下载字节；
+    // - 上传使用出站报文，下载使用入站报文；
+    // - 后续推送到时间轴控件后绘制为两条折线。
+    struct PacketTimelineRateBucket
+    {
+        std::uint64_t uploadBytes = 0; // uploadBytes：该秒出站累计字节数。
+        std::uint64_t downloadBytes = 0; // downloadBytes：该秒入站累计字节数。
+    };
+
 private:
     // MultiThreadDownloadSegmentState：
     // - 作用：保存单分段下载进度状态；
@@ -383,6 +405,109 @@ private:
     // - 作用：清空缓存与表格行，同时清空后台待刷新队列。
     // - 返回：无。
     void clearAllPacketRows();
+
+    // applyPacketTimelineSelection：
+    // - 作用：接收流量时间轴框选工具输出的 100ns 起止时间；
+    // - 参数 start100ns/end100ns：时间轴选区边界，单位为 100ns，允许调用方传入未排序值；
+    // - 返回：无，内部会重建流量表并刷新过滤状态提示。
+    void applyPacketTimelineSelection(std::uint64_t start100ns, std::uint64_t end100ns);
+
+    // resetPacketTimelineToCurrentRange：
+    // - 作用：清空时间轴选区并按当前报文缓存重建完整显示范围；
+    // - 返回：无，调用方负责按需要重建表格。
+    void resetPacketTimelineToCurrentRange();
+
+    // refreshPacketTimelineRange：
+    // - 作用：按当前报文缓存和抓包状态更新时间轴左右边界；
+    // - 返回：无，控件为空时直接跳过。
+    void refreshPacketTimelineRange();
+
+    // refreshPacketTimelinePoints：
+    // - 作用：把报文轻量点缓存推送给 ETW 同款时间轴控件重绘；
+    // - 返回：无。
+    void refreshPacketTimelinePoints();
+
+    // isPacketTimelineFilterActive：
+    // - 作用：判断用户是否已通过时间轴启用时间窗口筛选；
+    // - 返回：true 表示流量表需要叠加时间范围过滤。
+    bool isPacketTimelineFilterActive() const;
+
+    // packetPassesTimelineFilter：
+    // - 作用：判断单条报文是否落在当前时间轴框选范围内；
+    // - 参数 packetRecord：待判断报文；
+    // - 返回：true=时间轴允许显示；false=被时间轴过滤。
+    bool packetPassesTimelineFilter(const ks::network::PacketRecord& packetRecord) const;
+
+    // packetPassesTimelineFilter：
+    // - 作用：使用已缓存序号时间判断报文是否落在当前时间轴框选范围内；
+    // - 参数 sequenceId：报文序号，用于读取压缩时间轴缓存；
+    // - 参数 packetRecord：待判断报文；
+    // - 返回：true=时间轴允许显示；false=被时间轴过滤。
+    bool packetPassesTimelineFilter(
+        std::uint64_t sequenceId,
+        const ks::network::PacketRecord& packetRecord) const;
+
+    // beginPacketTimelineMonitorSession：
+    // - 作用：在用户启动监控成功后登记一个新的连续监控会话；
+    // - 处理逻辑：把会话起点映射到当前累计监控时长，不包含历史停机间隔；
+    // - 返回：无。
+    void beginPacketTimelineMonitorSession();
+
+    // endPacketTimelineMonitorSession：
+    // - 作用：在用户停止监控后关闭当前连续监控会话；
+    // - 处理逻辑：累计本次会话运行时长，后续启动从该累计值继续；
+    // - 返回：无。
+    void endPacketTimelineMonitorSession();
+
+    // resetPacketTimelineClockForCurrentState：
+    // - 作用：清空报文时重置压缩时间轴时钟；
+    // - 处理逻辑：如果监控仍在运行，则从当前真实时间重新开启 0 秒会话；
+    // - 返回：无。
+    void resetPacketTimelineClockForCurrentState();
+
+    // packetTimelineTimeForRecord：
+    // - 作用：把报文真实捕获时间映射到“仅监控开启时长”的压缩时间轴；
+    // - 参数 packetRecord：待映射报文；
+    // - 返回：压缩后的 100ns 时间戳。
+    std::uint64_t packetTimelineTimeForRecord(const ks::network::PacketRecord& packetRecord) const;
+
+    // packetTimelineTimeForSequence：
+    // - 作用：优先按序号读取已缓存的压缩时间，缺失时回退到报文映射；
+    // - 参数 sequenceId：报文序号；
+    // - 参数 packetRecord：回退映射使用的报文实体；
+    // - 返回：压缩后的 100ns 时间戳。
+    std::uint64_t packetTimelineTimeForSequence(
+        std::uint64_t sequenceId,
+        const ks::network::PacketRecord& packetRecord) const;
+
+    // currentPacketTimelineEnd100ns：
+    // - 作用：返回当前压缩时间轴右边界；
+    // - 处理逻辑：运行中按当前会话实时增长，停止后保持累计监控时长；
+    // - 返回：压缩后的 100ns 时间戳。
+    std::uint64_t currentPacketTimelineEnd100ns() const;
+
+    // addPacketTimelineRateSample：
+    // - 作用：把单条报文计入对应秒的上传/下载速率桶；
+    // - 参数 packetRecord：报文实体；
+    // - 参数 timelineTime100ns：报文压缩时间；
+    // - 返回：无。
+    void addPacketTimelineRateSample(
+        const ks::network::PacketRecord& packetRecord,
+        std::uint64_t timelineTime100ns);
+
+    // removePacketTimelineRateSample：
+    // - 作用：缓存裁剪时从速率桶中扣除被删除报文；
+    // - 参数 packetRecord：报文实体；
+    // - 参数 timelineTime100ns：报文压缩时间；
+    // - 返回：无。
+    void removePacketTimelineRateSample(
+        const ks::network::PacketRecord& packetRecord,
+        std::uint64_t timelineTime100ns);
+
+    // refreshPacketTimelineRatePoints：
+    // - 作用：把按秒速率桶转换为时间轴控件可绘制的上传/下载折线；
+    // - 返回：无。
+    void refreshPacketTimelineRatePoints();
 
     // ========================= 流量过滤 ==========================
     // applyMonitorFilters：
@@ -923,6 +1048,15 @@ private:
     // - 返回：true=通过；false=被过滤。
     bool packetPassesMonitorFilter(const ks::network::PacketRecord& packetRecord) const;
 
+    // packetPassesMonitorFilter：
+    // - 作用：判断指定序号报文是否满足当前所有已启用过滤条件；
+    // - 参数 sequenceId：报文序号，用于稳定读取压缩时间轴时间；
+    // - 参数 packetRecord：待判断报文；
+    // - 返回：true=通过；false=被过滤。
+    bool packetPassesMonitorFilter(
+        std::uint64_t sequenceId,
+        const ks::network::PacketRecord& packetRecord) const;
+
 private:
     // ========================= 顶层布局 =========================
     QVBoxLayout* m_rootLayout = nullptr;   // 根布局，只承载侧边栏 Tab 容器。
@@ -952,6 +1086,7 @@ private:
     QPushButton* m_importMonitorFilterButton = nullptr;     // 导入配置按钮。
     QPushButton* m_exportMonitorFilterButton = nullptr;     // 导出配置按钮。
     QLabel* m_monitorFilterStateLabel = nullptr;            // 当前过滤状态汇总标签。
+    ProcessTraceTimelineWidget* m_packetTimelineWidget = nullptr; // 流量监控页时间轴（复用 ETW 框选交互控件）。
     QTableWidget* m_packetTable = nullptr;             // 全量发送报文表格。
 
     // ========================= Tab2：进程限速 ====================
@@ -1113,6 +1248,18 @@ private:
     static constexpr std::size_t kMaxPendingPacketQueueCount = 80000;
     std::deque<std::uint64_t> m_packetSequenceOrder; // 报文序号按时间顺序缓存。
     std::unordered_map<std::uint64_t, ks::network::PacketRecord> m_packetBySequence; // 序号 -> 报文映射。
+    std::vector<ProcessTraceTimelineEventPoint> m_packetTimelineEventPoints; // 报文时间轴绘制点缓存。
+    std::vector<PacketTimelineCaptureSession> m_packetTimelineSessionList; // 监控开启会话列表，用于剔除停机间隔。
+    std::unordered_map<std::uint64_t, std::uint64_t> m_packetTimelineTimeBySequence; // 报文序号 -> 压缩时间轴时间。
+    std::unordered_map<std::uint64_t, PacketTimelineRateBucket> m_packetTimelineRateBucketBySecond; // 第 N 秒 -> 上传/下载速率桶。
+    std::uint64_t m_packetTimelineRangeStart100ns = 0; // 时间轴左边界，固定为压缩监控时长 0。
+    std::uint64_t m_packetTimelineRangeEnd100ns = 0;   // 时间轴右边界，压缩后的累计监控时长。
+    std::uint64_t m_packetTimelineSelectionStart100ns = 0; // 用户框选起点，单位 100ns。
+    std::uint64_t m_packetTimelineSelectionEnd100ns = 0;   // 用户框选终点，单位 100ns。
+    std::uint64_t m_packetTimelineAccumulatedActive100ns = 0; // 已完成会话累计监控时长，停机时不增加。
+    std::uint64_t m_packetTimelineLastHeartbeatSecond = 0; // 时间轴空闲刷新秒号，用于空流量时补零速率。
+    bool m_packetTimelineUserSelectionActive = false;      // 用户是否已启用流量时间轴框选过滤。
+    bool m_packetTimelineSessionActive = false;            // 是否存在正在运行的时间轴监控会话。
 
     // 后台线程 -> UI 线程的报文暂存队列（只存数据，不碰 UI 控件）。
     std::deque<ks::network::PacketRecord> m_pendingPacketQueue;

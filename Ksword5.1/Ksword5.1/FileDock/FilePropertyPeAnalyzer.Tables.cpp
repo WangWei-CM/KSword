@@ -1,4 +1,4 @@
-#include "FilePropertyPeAnalyzer.h"
+﻿#include "FilePropertyPeAnalyzer.h"
 #include "FilePropertyPeAnalyzer.Internal.h"
 
 // ============================================================
@@ -239,6 +239,8 @@ namespace file_dock_detail
         void dumpDelayImportTable(
             QTextStream& outputStream,
             const QByteArray& fileBytes,
+
+
             const bool isPe64,
             const std::uint32_t sizeOfHeadersValue,
             const std::vector<IMAGE_SECTION_HEADER>& sectionList,

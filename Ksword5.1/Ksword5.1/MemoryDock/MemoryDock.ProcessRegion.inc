@@ -617,6 +617,7 @@ void MemoryDock::detachProcess()
         m_hexEditorWidget->setEditable(false);
         m_hexEditorWidget->clearData();
     }
+    resetDriverMemoryRwState();
     m_viewerStatusLabel->setText("未附加进程。");
 
     updateStatusBarText();

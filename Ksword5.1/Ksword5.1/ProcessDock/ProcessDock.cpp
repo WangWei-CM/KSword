@@ -22,6 +22,7 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
+#include <QHelpEvent>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
 #include <QLabel>
@@ -120,9 +121,12 @@ namespace
     constexpr const char* IconStart = ":/Icon/process_start.svg";
     constexpr const char* IconPause = ":/Icon/process_pause.svg";
     constexpr const char* IconThreadTab = ":/Icon/process_threads.svg";
-    // Kernel 标识图路径：按项目规范固定使用 Resource\Kernel.png。
+    constexpr const char* IconWindowPickerTarget = ":/Icon/window_picker_target.svg";
+    // Kernel 标识图路径：
+    // - 使用 qrc 资源路径，避免把开发机绝对路径写入源码；
+    // - 实际文件仍由 Ksword5.qrc 映射到 Resource/Kernel.png。
     const QString KernelBadgeImagePath = QStringLiteral(
-        "H:/Project/Ksword5.1/Ksword5.1/Ksword5.1/Resource/Kernel.png");
+        ":/Image/kernel_badge.png");
 
     // 默认按钮图标尺寸。
     constexpr QSize DefaultIconSize(18, 18);
@@ -297,6 +301,121 @@ namespace
         }
     };
 
+    // ProcessWindowPickerDragButton：
+    // - 作用：复用窗口页“准星拖拽拾取”的输入模型；
+    // - 按住按钮拖到任意窗口后松开，向宿主回调全局屏幕坐标；
+    // - 只负责输入捕获，不直接读取 HWND/PID，避免 UI 控件承担业务逻辑。
+    class ProcessWindowPickerDragButton final : public QPushButton
+    {
+    public:
+        using ReleaseCallback = std::function<void(const QPoint&)>;
+
+        // 构造函数：
+        // - parent：Qt 父控件；
+        // - 处理：启用鼠标追踪，允许拖拽过程中持续计算距离；
+        // - 返回：无返回值。
+        explicit ProcessWindowPickerDragButton(QWidget* parent = nullptr)
+            : QPushButton(parent)
+        {
+            setMouseTracking(true);
+        }
+
+        // setReleaseCallback：
+        // - callback：鼠标释放时接收全局坐标的函数；
+        // - 处理：保存到成员变量，供 mouseReleaseEvent 调用；
+        // - 返回：无返回值。
+        void setReleaseCallback(ReleaseCallback callback)
+        {
+            m_releaseCallback = std::move(callback);
+        }
+
+    protected:
+        // mousePressEvent：
+        // - 输入：Qt 鼠标按下事件；
+        // - 处理：记录左键起点并抓取鼠标，光标切换成准星；
+        // - 返回：无返回值。
+        void mousePressEvent(QMouseEvent* eventPointer) override
+        {
+            if (eventPointer != nullptr && eventPointer->button() == Qt::LeftButton)
+            {
+                m_dragTracking = true;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+                m_pressGlobalPos = eventPointer->globalPosition().toPoint();
+#else
+                m_pressGlobalPos = eventPointer->globalPos();
+#endif
+                m_hasReachedDragThreshold = false;
+                grabMouse(QCursor(Qt::CrossCursor));
+            }
+            QPushButton::mousePressEvent(eventPointer);
+        }
+
+        // mouseMoveEvent：
+        // - 输入：Qt 鼠标移动事件；
+        // - 处理：超过系统拖拽阈值后才允许释放触发，避免普通点击误拾取；
+        // - 返回：无返回值。
+        void mouseMoveEvent(QMouseEvent* eventPointer) override
+        {
+            if (m_dragTracking && eventPointer != nullptr)
+            {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+                const QPoint currentGlobalPos = eventPointer->globalPosition().toPoint();
+#else
+                const QPoint currentGlobalPos = eventPointer->globalPos();
+#endif
+                const int moveDistance = (currentGlobalPos - m_pressGlobalPos).manhattanLength();
+                if (moveDistance >= QApplication::startDragDistance())
+                {
+                    m_hasReachedDragThreshold = true;
+                }
+            }
+            QPushButton::mouseMoveEvent(eventPointer);
+        }
+
+        // mouseReleaseEvent：
+        // - 输入：Qt 鼠标释放事件；
+        // - 处理：释放鼠标抓取，并在有效拖拽时回调释放坐标；
+        // - 返回：无返回值。
+        void mouseReleaseEvent(QMouseEvent* eventPointer) override
+        {
+            const bool shouldDispatch =
+                m_dragTracking &&
+                m_hasReachedDragThreshold &&
+                eventPointer != nullptr &&
+                eventPointer->button() == Qt::LeftButton;
+
+            if (m_dragTracking)
+            {
+                releaseMouse();
+                m_dragTracking = false;
+            }
+            m_hasReachedDragThreshold = false;
+
+            QPoint releaseGlobalPos;
+            if (eventPointer != nullptr)
+            {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+                releaseGlobalPos = eventPointer->globalPosition().toPoint();
+#else
+                releaseGlobalPos = eventPointer->globalPos();
+#endif
+            }
+
+            QPushButton::mouseReleaseEvent(eventPointer);
+
+            if (shouldDispatch && m_releaseCallback)
+            {
+                m_releaseCallback(releaseGlobalPos);
+            }
+        }
+
+    private:
+        bool m_dragTracking = false;             // m_dragTracking：当前是否处于准星拖拽链路。
+        bool m_hasReachedDragThreshold = false;  // m_hasReachedDragThreshold：是否达到系统拖拽阈值。
+        QPoint m_pressGlobalPos;                 // m_pressGlobalPos：左键按下时的全局坐标。
+        ReleaseCallback m_releaseCallback;       // m_releaseCallback：释放后通知宿主处理 PID 过滤。
+    };
+
 }
 
 class ProcessActivityChartWidget final : public QWidget
@@ -330,6 +449,22 @@ public:
     }
 
 protected:
+    // event：
+    // - 输入：Qt 通用事件，重点处理 ToolTip 事件；
+    // - 处理：在提示即将显示时重新按当前鼠标位置计算最近样本；
+    // - 返回：true 表示 tooltip 已由控件接管，false 表示交给 QWidget 默认处理。
+    bool event(QEvent* eventPointer) override
+    {
+        if (eventPointer != nullptr && eventPointer->type() == QEvent::ToolTip)
+        {
+            QHelpEvent* helpEvent = static_cast<QHelpEvent*>(eventPointer);
+            showSnapshotToolTipAtPosition(helpEvent->pos(), helpEvent->globalPos());
+            eventPointer->accept();
+            return true;
+        }
+        return QWidget::event(eventPointer);
+    }
+
     // paintEvent：
     // - 以时间为横轴绘制多指标百分比折线图；
     // - 无返回值，所有数据都从宿主的有界样本缓存读取。
@@ -401,7 +536,7 @@ protected:
 #else
             const QPoint globalPosition = eventPointer->globalPos();
 #endif
-            QToolTip::showText(globalPosition, m_ownerDock->buildProcessActivitySnapshotText(sampleIndex), this);
+            showSnapshotToolTipAtPosition(activityMousePosition(eventPointer), globalPosition);
         }
         eventPointer->accept();
     }
@@ -443,6 +578,33 @@ protected:
     }
 
 private:
+    // showSnapshotToolTipAtPosition：
+    // - localPosition：图表本地坐标，用于映射最近样本；
+    // - globalPosition：屏幕坐标，用于放置 tooltip；
+    // - 返回：无；没有样本时主动隐藏，避免显示控件静态 tooltip。
+    void showSnapshotToolTipAtPosition(const QPoint& localPosition, const QPoint& globalPosition)
+    {
+        if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty())
+        {
+            QToolTip::hideText();
+            return;
+        }
+
+        const int sampleIndex = sampleIndexAtX(localPosition.x());
+        if (sampleIndex < 0)
+        {
+            QToolTip::hideText();
+            return;
+        }
+
+        const QRect toolTipRect(localPosition - QPoint(6, 6), QSize(12, 12));
+        QToolTip::showText(
+            globalPosition,
+            m_ownerDock->buildProcessActivitySnapshotText(sampleIndex),
+            this,
+            toolTipRect);
+    }
+
     // chartRect：
     // - 计算图表实际绘制区域；
     // - 给左侧刻度和底部时间标签预留固定空间。
@@ -722,6 +884,9 @@ private:
 
             QColor lineColor = processActivityMetricColor(metric);
             lineColor.setAlpha(230);
+            // 折线只允许描边，不允许沿用上一条指标采样点留下的 brush。
+            // Qt 的 drawPath 会同时 stroke 和 fill；如果 brush 未清空，开放折线路径会被隐式闭合填充。
+            painter.setBrush(Qt::NoBrush);
             painter.setPen(QPen(lineColor, 2.0));
             painter.drawPath(metricPath);
 
@@ -734,6 +899,8 @@ private:
             {
                 painter.drawEllipse(pointList[pointIndex], 2.2, 2.2);
             }
+            // 采样点绘制会设置实心 brush，循环下一条折线前必须恢复为空画刷。
+            painter.setBrush(Qt::NoBrush);
         }
     }
 
@@ -1105,6 +1272,107 @@ namespace
             *detailTextOut = result.message;
         }
         return result.ok;
+    }
+
+    bool setProcessVisibilityByR0Driver(
+        const std::uint32_t targetPid,
+        const unsigned long action,
+        std::string* const detailTextOut)
+    {
+        // 作用：调用 ArkDriverClient 更新 R0 可恢复隐藏标记。
+        // 返回：true 表示驱动接受并更新；false 表示 IOCTL 或 R0 状态失败。
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+
+        if (action != KSWORD_ARK_PROCESS_VISIBILITY_ACTION_CLEAR_ALL &&
+            (targetPid == 0U || targetPid <= 4U))
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = "invalid target pid";
+            }
+            return false;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::ProcessVisibilityResult result =
+            driverClient.setProcessVisibility(targetPid, action);
+        if (detailTextOut != nullptr)
+        {
+            *detailTextOut = result.io.message;
+        }
+        return result.io.ok &&
+            result.lastStatus >= 0 &&
+            (result.status == KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN ||
+                result.status == KSWORD_ARK_PROCESS_VISIBILITY_STATUS_VISIBLE ||
+                result.status == KSWORD_ARK_PROCESS_VISIBILITY_STATUS_CLEARED);
+    }
+
+    bool setProcessSpecialFlagsByR0Driver(
+        const std::uint32_t targetPid,
+        const unsigned long action,
+        std::string* const detailTextOut)
+    {
+        // 作用：封装 BreakOnTermination/APC 插入控制 IOCTL。
+        // 返回：true 表示 R0 完成动作；false 表示 IOCTL 或 R0 状态失败。
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+        if (targetPid == 0U || targetPid <= 4U)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = "invalid target pid";
+            }
+            return false;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::ProcessSpecialFlagsResult result =
+            driverClient.setProcessSpecialFlags(targetPid, action);
+        if (detailTextOut != nullptr)
+        {
+            *detailTextOut = result.io.message;
+        }
+        return result.io.ok &&
+            result.lastStatus >= 0 &&
+            result.status == KSWORD_ARK_PROCESS_SPECIAL_STATUS_APPLIED;
+    }
+
+    bool dkomProcessByR0Driver(
+        const std::uint32_t targetPid,
+        const unsigned long action,
+        std::string* const detailTextOut)
+    {
+        // 作用：封装 PspCidTable DKOM 删除 IOCTL。
+        // 返回：true 表示 R0 至少删除一个 CID entry。
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+        if (targetPid == 0U || targetPid <= 4U)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = "invalid target pid";
+            }
+            return false;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::ProcessDkomResult result =
+            driverClient.dkomProcess(targetPid, action);
+        if (detailTextOut != nullptr)
+        {
+            *detailTextOut = result.io.message;
+        }
+        return result.io.ok &&
+            result.lastStatus >= 0 &&
+            result.status == KSWORD_ARK_PROCESS_DKOM_STATUS_REMOVED &&
+            result.removedEntries > 0U;
     }
 
     // KernelProcessSnapshotEntry 作用：
@@ -2017,6 +2285,13 @@ void ProcessDock::initializeTopControls()
     m_kernelCompareCheck->setChecked(false);
     m_kernelCompareCheck->setToolTip("勾选后刷新会额外请求驱动进程列表，并高亮仅内核可见的进程。");
 
+    // Ksword 可恢复隐藏显示开关：
+    // - 默认不显示 R0 标记隐藏的进程；
+    // - 勾选后仍展示这些行，便于右键“取消隐藏”。
+    m_showKswordHiddenProcessCheck = new QCheckBox(QStringLiteral("显示Ksword隐藏项"), this);
+    m_showKswordHiddenProcessCheck->setChecked(false);
+    m_showKswordHiddenProcessCheck->setToolTip(QStringLiteral("显示通过 R0 可恢复隐藏标记过滤的进程，用于取消隐藏或核对状态。"));
+
     // 按钮统一蓝色风格（图标按钮版本）。
     const QString buttonStyle = buildBlueButtonStyle(true);
     m_treeToggleButton->setStyleSheet(buttonStyle);
@@ -2031,6 +2306,7 @@ void ProcessDock::initializeTopControls()
     m_controlLayout->addWidget(m_pauseButton);
     m_controlLayout->addWidget(m_processSearchLineEdit);
     m_controlLayout->addWidget(m_kernelCompareCheck);
+    m_controlLayout->addWidget(m_showKswordHiddenProcessCheck);
     m_controlLayout->addStretch(1);
     m_controlLayout->addWidget(m_refreshLabel);
     m_controlLayout->addWidget(m_tableRefreshIntervalEdit);
@@ -2077,6 +2353,9 @@ void ProcessDock::initializeProcessActivityPanel()
     m_activityBackgroundRecordCheck = new QCheckBox(QStringLiteral("后台保持刷新/记录"), m_activityPanelWidget);
     m_activityBackgroundRecordCheck->setToolTip(QStringLiteral("默认仅进程列表 Tab 显示时刷新和记录；勾选后切到其它 Tab 仍继续刷新并记录。"));
 
+    m_activityListOnlyRefreshCheck = new QCheckBox(QStringLiteral("只刷新列表"), m_activityPanelWidget);
+    m_activityListOnlyRefreshCheck->setToolTip(QStringLiteral("勾选后周期刷新仍会更新进程列表，但不会向上方时间轴写入新的活动记录。"));
+
     const QString metricButtonStyle = QStringLiteral(
         "QPushButton {"
         "  color:%1;"
@@ -2098,7 +2377,9 @@ void ProcessDock::initializeProcessActivityPanel()
         .arg(KswordTheme::BorderHex())
         .arg(KswordTheme::PrimaryBlueHex);
 
-    // 指标按钮必须可独立开关，避免 CPU/内存/磁盘/网络/GPU 全部显示后难以阅读。
+    // 指标按钮必须可独立开关：
+    // - 默认全部点亮，用户打开页面即可看到 CPU/内存/磁盘/网络/GPU 全部曲线；
+    // - 后续可以按需关闭单项指标，避免曲线过密。
     auto createMetricButton =
         [this, &metricButtonStyle](const QString& text, const bool checkedByDefault)
         {
@@ -2111,15 +2392,30 @@ void ProcessDock::initializeProcessActivityPanel()
         };
     m_activityCpuButton = createMetricButton(QStringLiteral("CPU"), true);
     m_activityMemoryButton = createMetricButton(QStringLiteral("内存"), true);
-    m_activityDiskButton = createMetricButton(QStringLiteral("磁盘"), false);
-    m_activityNetworkButton = createMetricButton(QStringLiteral("网络"), false);
-    m_activityGpuButton = createMetricButton(QStringLiteral("GPU"), false);
+    m_activityDiskButton = createMetricButton(QStringLiteral("磁盘"), true);
+    m_activityNetworkButton = createMetricButton(QStringLiteral("网络"), true);
+    m_activityGpuButton = createMetricButton(QStringLiteral("GPU"), true);
+
+    // 准星按钮放在“网络/GPU”等时间轴指标按钮右侧：
+    // - 交互与窗口页拾取按钮一致，必须按住拖到目标窗口后松开；
+    // - 释放后不打开窗口详情，而是按目标窗口所属 PID 过滤进程列表并打开进程详情。
+    ProcessWindowPickerDragButton* processPickerButton = new ProcessWindowPickerDragButton(m_activityPanelWidget);
+    processPickerButton->setIcon(QIcon(IconWindowPickerTarget));
+    processPickerButton->setIconSize(QSize(16, 16));
+    processPickerButton->setFixedSize(CompactIconButtonSize);
+    processPickerButton->setStyleSheet(buildBlueButtonStyle(true));
+    processPickerButton->setToolTip(QStringLiteral("按住并拖拽准星到目标窗口，松开后按该窗口 PID 筛选进程并打开进程详细信息"));
+    processPickerButton->setReleaseCallback([this](const QPoint& globalPos) {
+        handleProcessWindowPickerRelease(globalPos);
+    });
+    m_activityProcessPickerButton = processPickerButton;
 
     m_activityStatusLabel = new QLabel(QStringLiteral("进程活动：未开始刷新 | 样本 0"), m_activityPanelWidget);
     m_activityStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
 
     toolbarLayout->addWidget(m_activityClearButton);
     toolbarLayout->addWidget(m_activityBackgroundRecordCheck);
+    toolbarLayout->addWidget(m_activityListOnlyRefreshCheck);
     toolbarLayout->addSpacing(8);
     toolbarLayout->addWidget(new QLabel(QStringLiteral("显示:"), m_activityPanelWidget));
     toolbarLayout->addWidget(m_activityCpuButton);
@@ -2127,11 +2423,12 @@ void ProcessDock::initializeProcessActivityPanel()
     toolbarLayout->addWidget(m_activityDiskButton);
     toolbarLayout->addWidget(m_activityNetworkButton);
     toolbarLayout->addWidget(m_activityGpuButton);
+    toolbarLayout->addWidget(m_activityProcessPickerButton);
     toolbarLayout->addStretch(1);
     toolbarLayout->addWidget(m_activityStatusLabel);
 
     m_activityChartWidget = new ProcessActivityChartWidget(this, m_activityPanelWidget);
-    m_activityChartWidget->setToolTip(QStringLiteral("横轴为记录时间；纵轴统一为百分比；悬停查看快照，左键点击切换下方列表到该时刻。"));
+    m_activityChartWidget->setToolTip(QString());
 
     m_activityTimelineSlider = new ProcessActivityTimelineSlider(this, m_activityPanelWidget);
     m_activityTimelineSlider->setRange(0, 0);
@@ -2159,6 +2456,114 @@ void ProcessDock::initializeProcessActivityPanel()
     panelLayout->addWidget(m_activityChartWidget);
     panelLayout->addWidget(m_activitySnapshotLabel);
     m_processPageLayout->addWidget(m_activityPanelWidget, 0);
+}
+
+void ProcessDock::handleProcessWindowPickerRelease(const QPoint& globalPos)
+{
+    // 该函数是进程页准星拾取的业务入口：
+    // - 命中逻辑与窗口页保持一致，先拿鼠标下窗口，再回退到根窗口；
+    // - 结果不进入窗口详情，而是转成 PID 过滤和进程详情。
+    kLogEvent pickEvent;
+    info << pickEvent
+        << "[ProcessDock] 进程准星拾取释放, x="
+        << globalPos.x()
+        << ", y="
+        << globalPos.y()
+        << eol;
+
+    POINT nativePoint{};
+    nativePoint.x = globalPos.x();
+    nativePoint.y = globalPos.y();
+
+    // rawWindowHandle 是鼠标下最细粒度窗口；rootWindowHandle 用于顶级窗口回退。
+    HWND rawWindowHandle = ::WindowFromPoint(nativePoint);
+    HWND rootWindowHandle = rawWindowHandle != nullptr ? ::GetAncestor(rawWindowHandle, GA_ROOT) : nullptr;
+    HWND targetWindowHandle = rawWindowHandle != nullptr ? rawWindowHandle : rootWindowHandle;
+    if (targetWindowHandle == nullptr || ::IsWindow(targetWindowHandle) == FALSE)
+    {
+        warn << pickEvent
+            << "[ProcessDock] 进程准星拾取失败：WindowFromPoint 未命中有效窗口。"
+            << eol;
+        QMessageBox::information(
+            this,
+            QStringLiteral("进程拾取"),
+            QStringLiteral("未命中可用窗口，请重试。"));
+        return;
+    }
+
+    // 优先解析原始窗口 PID；异常时再用根窗口 PID 兜底，贴近窗口页拾取体验。
+    DWORD targetPid = 0;
+    DWORD targetTid = ::GetWindowThreadProcessId(targetWindowHandle, &targetPid);
+    if ((targetPid == 0 || targetTid == 0) && rootWindowHandle != nullptr && rootWindowHandle != targetWindowHandle)
+    {
+        targetWindowHandle = rootWindowHandle;
+        targetPid = 0;
+        targetTid = ::GetWindowThreadProcessId(targetWindowHandle, &targetPid);
+    }
+
+    const quint64 targetHwndValue = static_cast<quint64>(reinterpret_cast<quintptr>(targetWindowHandle));
+    if (targetPid == 0)
+    {
+        warn << pickEvent
+            << "[ProcessDock] 进程准星拾取失败：无法解析目标窗口 PID, hwnd=0x"
+            << std::hex
+            << targetHwndValue
+            << std::dec
+            << eol;
+        QMessageBox::warning(
+            this,
+            QStringLiteral("进程拾取"),
+            QStringLiteral("无法读取目标窗口所属进程 PID。"));
+        return;
+    }
+
+    // 切回实时表格：用户拖窗口定位的是当前系统进程，历史快照表格不应继续覆盖实时列表。
+    m_activityTimelinePinnedToLatest = true;
+    m_activityTableSnapshotIndex = -1;
+    m_activityTableSnapshotRecords.clear();
+    if (m_activityTimelineSlider != nullptr && !m_activitySamples.empty())
+    {
+        const bool oldUpdating = m_activityTimelineSliderUpdating;
+        m_activityTimelineSliderUpdating = true;
+        m_activityTimelineSlider->setValue(static_cast<int>(m_activitySamples.size()) - 1);
+        m_activityTimelineSliderUpdating = oldUpdating;
+    }
+
+    // 设置进程列表筛选器为 PID：
+    // - 直接写入顶部搜索框，复用现有过滤逻辑和 UI 可见状态；
+    // - blockSignals 后手动 rebuild，避免历史状态切换时重复重建。
+    if (m_processSearchLineEdit != nullptr)
+    {
+        QSignalBlocker blocker(m_processSearchLineEdit);
+        m_processSearchLineEdit->setText(QStringLiteral("pid:%1").arg(static_cast<qulonglong>(targetPid)));
+    }
+    // 优先把目标 PID 对应行设为重建后的当前行，筛选后用户能直接看到定位结果。
+    m_trackedSelectedIdentityKey.clear();
+    m_trackedSelectedIdentityKeys.clear();
+    for (const auto& cachePair : m_cacheByIdentity)
+    {
+        if (cachePair.second.record.pid == targetPid)
+        {
+            m_trackedSelectedIdentityKey = cachePair.first;
+            m_trackedSelectedIdentityKeys.push_back(cachePair.first);
+            break;
+        }
+    }
+    rebuildTable();
+    updateProcessActivityStatusLabel();
+
+    info << pickEvent
+        << "[ProcessDock] 进程准星拾取成功, hwnd=0x"
+        << std::hex
+        << targetHwndValue
+        << std::dec
+        << ", pid="
+        << targetPid
+        << ", tid="
+        << targetTid
+        << "，已设置进程列表筛选器并打开进程详情。"
+        << eol;
+    openProcessDetailWindowByPid(static_cast<std::uint32_t>(targetPid));
 }
 
 void ProcessDock::initializeProcessTable()
@@ -2684,6 +3089,16 @@ void ProcessDock::initializeConnections()
         requestAsyncRefresh(true);
     });
 
+    // 显示隐藏项开关只影响本地过滤；若需要重新拉 R0 标记，用户可手动刷新。
+    connect(m_showKswordHiddenProcessCheck, &QCheckBox::toggled, this, [this](const bool checked) {
+        kLogEvent logEvent;
+        info << logEvent
+            << "[ProcessDock] Ksword隐藏项显示开关变更, visible="
+            << (checked ? "true" : "false")
+            << eol;
+        rebuildTable();
+    });
+
     // 树/列表切换：仅图标切换（不显示文字），并立即重建表格。
     connect(m_treeToggleButton, &QPushButton::toggled, this, [this](const bool checked) {
         m_activityTableSnapshotIndex = -1;
@@ -2743,7 +3158,7 @@ void ProcessDock::initializeConnections()
         }
         if (m_refreshTimer != nullptr)
         {
-            if (isProcessActivityRecordingAllowedNow())
+            if (isProcessActivityRefreshAllowedNow())
             {
                 m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
             }
@@ -2842,12 +3257,12 @@ void ProcessDock::initializeConnections()
 
     // 后台保持刷新/记录：
     // - 未勾选时，进程页隐藏后周期刷新和记录都会自动暂停；
-    // - 勾选后允许后台继续刷新，因此也继续写入活动样本。
+    // - 勾选后允许后台继续刷新，除非“只刷新列表”主动禁止写记录。
     connect(m_activityBackgroundRecordCheck, &QCheckBox::toggled, this, [this]() {
         updateProcessActivityStatusLabel();
         if (m_refreshTimer != nullptr && m_monitoringEnabled)
         {
-            if (isProcessActivityRecordingAllowedNow())
+            if (isProcessActivityRefreshAllowedNow())
             {
                 m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
             }
@@ -2856,10 +3271,23 @@ void ProcessDock::initializeConnections()
                 m_refreshTimer->stop();
             }
         }
-        if (m_monitoringEnabled && isProcessActivityRecordingAllowedNow())
+        if (m_monitoringEnabled && isProcessActivityRefreshAllowedNow())
         {
             requestAsyncRefresh(true);
         }
+    });
+
+    // 只刷新列表：
+    // - 勾选时不清空历史样本，只暂停后续 append；
+    // - 取消后继续沿用同一条记录时间轴，方便对比前后变化。
+    connect(m_activityListOnlyRefreshCheck, &QCheckBox::toggled, this, [this](const bool checked) {
+        kLogEvent logEvent;
+        info << logEvent
+            << "[ProcessDock] 只刷新列表开关变更, listOnly="
+            << (checked ? "true" : "false")
+            << eol;
+        updateProcessActivityStatusLabel();
+        refreshProcessActivityChart();
     });
 
     // 表格右键菜单。
@@ -3156,7 +3584,7 @@ void ProcessDock::applyRefreshIntervalInput()
     if (m_refreshTimer != nullptr)
     {
         m_refreshTimer->setInterval(intervalMs);
-        if (m_monitoringEnabled)
+        if (m_monitoringEnabled && isProcessActivityRefreshAllowedNow())
         {
             m_refreshTimer->start(intervalMs);
         }
@@ -3258,6 +3686,21 @@ bool ProcessDock::processRecordMatchesSearch(const ks::process::ProcessRecord& p
     if (searchText.isEmpty())
     {
         return true;
+    }
+
+    // 显式 PID 过滤语法：
+    // - 准星拾取会写入 pid:<数字>，保证只收敛到目标窗口所属进程；
+    // - 普通纯数字输入仍保留原来的模糊搜索行为，不破坏用户既有习惯。
+    const QString lowerSearchText = searchText.toLower();
+    if (lowerSearchText.startsWith(QStringLiteral("pid:")) ||
+        lowerSearchText.startsWith(QStringLiteral("pid=")))
+    {
+        bool pidParseOk = false;
+        const std::uint32_t filterPid = searchText.mid(4).trimmed().toUInt(&pidParseOk);
+        if (pidParseOk)
+        {
+            return processRecord.pid == filterPid;
+        }
     }
 
     // 搜索字段覆盖：
@@ -3471,10 +3914,11 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
             return;
         }
 
-        // 后台保持刷新/记录现在同时约束“刷新”和“记录”：
+        // 后台保持刷新/记录约束“是否继续刷新”：
         // - 默认离开进程列表页就不再继续刷新；
-        // - 勾选后才允许后台继续采样，避免隐藏页仍高频枚举造成额外开销。
-        if (!isProcessActivityRecordingAllowedNow())
+        // - 勾选后允许后台继续枚举；
+        // - “只刷新列表”只影响是否写记录，不应阻断列表刷新。
+        if (!isProcessActivityRefreshAllowedNow())
         {
             kLogEvent logEvent;
             dbg << logEvent << "[ProcessDock] 跳过非强制刷新：进程页不可见且未启用后台保持刷新/记录。" << eol;
@@ -3520,7 +3964,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     QPointer<ProcessDock> guard(this);
 
     // 刷新前先更新 UI 状态与日志，给出明显“刷新中”提示。
-    const QString forceReasonText = (!forceRefresh && m_monitoringEnabled && !isProcessActivityRecordingAllowedNow())
+    const QString forceReasonText = (!forceRefresh && m_monitoringEnabled && !isProcessActivityRefreshAllowedNow())
         ? QStringLiteral(" | 刷新/记录=自动暂停")
         : QString();
     updateRefreshStateUi(
@@ -4777,7 +5221,9 @@ void ProcessDock::applyR0ColumnAvailability(const std::vector<DisplayRow>& displ
 
 bool ProcessDock::isProcessActivityMetricEnabled(const ProcessActivityMetric metric) const
 {
-    // 按钮为空时采用保守默认：CPU/内存显示，其它隐藏；
+    // 按钮为空时采用默认全显示：
+    // - 与初始化后的按钮状态保持一致；
+    // - 这样首帧绘制不会因为控件尚未绑定而漏掉磁盘/网络/GPU。
     // 这保证面板初始化前调用也不会产生空指针。
     switch (metric)
     {
@@ -4786,11 +5232,11 @@ bool ProcessDock::isProcessActivityMetricEnabled(const ProcessActivityMetric met
     case ProcessActivityMetric::Memory:
         return m_activityMemoryButton == nullptr || m_activityMemoryButton->isChecked();
     case ProcessActivityMetric::Disk:
-        return m_activityDiskButton != nullptr && m_activityDiskButton->isChecked();
+        return m_activityDiskButton == nullptr || m_activityDiskButton->isChecked();
     case ProcessActivityMetric::Network:
-        return m_activityNetworkButton != nullptr && m_activityNetworkButton->isChecked();
+        return m_activityNetworkButton == nullptr || m_activityNetworkButton->isChecked();
     case ProcessActivityMetric::Gpu:
-        return m_activityGpuButton != nullptr && m_activityGpuButton->isChecked();
+        return m_activityGpuButton == nullptr || m_activityGpuButton->isChecked();
     default:
         return false;
     }
@@ -4867,11 +5313,12 @@ bool ProcessDock::isProcessListPageVisibleForRecording() const
         m_processListPage->isVisible();
 }
 
-bool ProcessDock::isProcessActivityRecordingAllowedNow() const
+bool ProcessDock::isProcessActivityRefreshAllowedNow() const
 {
-    // 记录不再是独立开关：
-    // - m_monitoringEnabled=true 表示“正在刷新进程”；
-    // - 每次刷新结果都会同步写入活动样本。
+    // 刷新允许逻辑只关心“是否应该继续枚举列表”：
+    // - 暂停按钮关闭后不再刷新；
+    // - 当前在进程列表页时允许刷新；
+    // - 后台保持开关允许离开进程列表页后继续刷新。
     if (!m_monitoringEnabled)
     {
         return false;
@@ -4883,6 +5330,24 @@ bool ProcessDock::isProcessActivityRecordingAllowedNow() const
     }
 
     return isProcessListPageVisibleForRecording();
+}
+
+bool ProcessDock::isProcessActivityRecordingAllowedNow() const
+{
+    // 记录允许逻辑在刷新允许之上额外叠加“只刷新列表”：
+    // - 这样可以继续更新下方列表；
+    // - 同时不污染上方时间轴样本。
+    if (!isProcessActivityRefreshAllowedNow())
+    {
+        return false;
+    }
+
+    if (m_activityListOnlyRefreshCheck != nullptr && m_activityListOnlyRefreshCheck->isChecked())
+    {
+        return false;
+    }
+
+    return true;
 }
 
 void ProcessDock::appendProcessActivitySample()
@@ -5061,29 +5526,42 @@ void ProcessDock::updateProcessActivityStatusLabel()
     }
 
     QString stateText;
-    m_activityRecordingEnabled = m_monitoringEnabled;
+    const bool refreshAllowed = isProcessActivityRefreshAllowedNow();
+    const bool recordingAllowed = isProcessActivityRecordingAllowedNow();
+    m_activityRecordingEnabled = recordingAllowed;
     if (!m_monitoringEnabled)
     {
         stateText = QStringLiteral("已暂停刷新/记录");
     }
-    else if (isProcessActivityRecordingAllowedNow())
+    else if (!refreshAllowed)
     {
-        stateText = QStringLiteral("刷新中，同步记录");
+        stateText = QStringLiteral("进程页隐藏，刷新/记录自动暂停");
+    }
+    else if (!recordingAllowed)
+    {
+        stateText = QStringLiteral("刷新中，不写记录");
+    }
+    else if (m_activityBackgroundRecordCheck != nullptr && m_activityBackgroundRecordCheck->isChecked())
+    {
+        stateText = QStringLiteral("后台刷新，同步记录");
     }
     else
     {
-        stateText = QStringLiteral("进程页隐藏，刷新/记录自动暂停");
+        stateText = QStringLiteral("刷新中，同步记录");
     }
 
     const int intervalMs = refreshIntervalMillisecondsFromInput();
     const int tableIntervalMs = tableRefreshIntervalMillisecondsFromInput();
-    m_activityStatusLabel->setText(QStringLiteral("进程活动：%1 | 样本 %2 | 打点 %3s | 列表 %4s%5%6")
+    m_activityStatusLabel->setText(QStringLiteral("进程活动：%1 | 样本 %2 | 打点 %3s | 列表 %4s%5%6%7")
         .arg(stateText)
         .arg(static_cast<qulonglong>(m_activitySamples.size()))
         .arg(static_cast<double>(intervalMs) / 1000.0, 0, 'f', intervalMs < 1000 ? 2 : 1)
         .arg(static_cast<double>(tableIntervalMs) / 1000.0, 0, 'f', tableIntervalMs < 1000 ? 2 : 1)
         .arg((m_activityBackgroundRecordCheck != nullptr && m_activityBackgroundRecordCheck->isChecked())
             ? QStringLiteral(" | 后台")
+            : QString())
+        .arg((m_activityListOnlyRefreshCheck != nullptr && m_activityListOnlyRefreshCheck->isChecked())
+            ? QStringLiteral(" | 不记录")
             : QString())
         .arg(isProcessActivityTableSnapshotActive() ? QStringLiteral(" | 表格=历史快照") : QStringLiteral(" | 表格=实时")));
 }
@@ -5428,6 +5906,15 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildListDisplayOrder() const
 
     for (const auto& cachePair : m_cacheByIdentity)
     {
+        const bool isKswordHidden =
+            ((cachePair.second.record.r0Flags & KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI) != 0U) ||
+            (m_hiddenProcessPidSet.find(cachePair.second.record.pid) != m_hiddenProcessPidSet.end());
+        const bool showKswordHidden =
+            (m_showKswordHiddenProcessCheck != nullptr && m_showKswordHiddenProcessCheck->isChecked());
+        if (isKswordHidden && !showKswordHidden)
+        {
+            continue;
+        }
         if (!processRecordMatchesSearch(cachePair.second.record))
         {
             continue;
@@ -5464,6 +5951,15 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildTreeDisplayOrder() const
     nodes.reserve(m_cacheByIdentity.size());
     for (const auto& cachePair : m_cacheByIdentity)
     {
+        const bool isKswordHidden =
+            ((cachePair.second.record.r0Flags & KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI) != 0U) ||
+            (m_hiddenProcessPidSet.find(cachePair.second.record.pid) != m_hiddenProcessPidSet.end());
+        const bool showKswordHidden =
+            (m_showKswordHiddenProcessCheck != nullptr && m_showKswordHiddenProcessCheck->isChecked());
+        if (isKswordHidden && !showKswordHidden)
+        {
+            continue;
+        }
         nodes.push_back(Node{ &cachePair.first, &cachePair.second });
     }
 
@@ -5731,6 +6227,41 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
             presetAction->setToolTip(QStringLiteral("该 Signer 在当前驱动下暂无签名级别联动映射。"));
         }
     }
+    QMenu* r0VisibilitySubMenu = contextMenu.addMenu(
+        buildR0ActionIcon(":/Icon/process_details.svg"),
+        QStringLiteral("R0进程隐藏(可恢复)"));
+    QAction* r0HideProcessAction = r0VisibilitySubMenu->addAction(
+        buildR0ActionIcon(":/Icon/process_suspend.svg"),
+        QStringLiteral("隐藏选中进程"));
+    QAction* r0UnhideProcessAction = r0VisibilitySubMenu->addAction(
+        buildR0ActionIcon(":/Icon/process_resume.svg"),
+        QStringLiteral("取消隐藏选中进程"));
+    QAction* r0ClearHiddenProcessAction = r0VisibilitySubMenu->addAction(
+        buildR0ActionIcon(":/Icon/process_refresh.svg"),
+        QStringLiteral("清空全部隐藏标记"));
+    r0HideProcessAction->setToolTip(QStringLiteral("只更新 Ksword 驱动内可恢复隐藏表，不执行 DKOM 断链。"));
+    r0UnhideProcessAction->setToolTip(QStringLiteral("从 Ksword 驱动隐藏表移除选中 PID。"));
+    r0ClearHiddenProcessAction->setToolTip(QStringLiteral("清空驱动内所有隐藏 PID 标记。"));
+    QMenu* r0DangerSubMenu = contextMenu.addMenu(
+        buildR0ActionIcon(":/Icon/process_uncritical.svg"),
+        QStringLiteral("R0危险进程标志/DKOM"));
+    QAction* r0EnableBreakAction = r0DangerSubMenu->addAction(
+        buildR0ActionIcon(":/Icon/process_critical.svg"),
+        QStringLiteral("启用 BreakOnTermination"));
+    QAction* r0DisableBreakAction = r0DangerSubMenu->addAction(
+        buildR0ActionIcon(":/Icon/process_uncritical.svg"),
+        QStringLiteral("关闭 BreakOnTermination"));
+    QAction* r0DisableApcAction = r0DangerSubMenu->addAction(
+        buildR0ActionIcon(":/Icon/process_suspend.svg"),
+        QStringLiteral("禁止APC插入(现有线程)"));
+    r0DangerSubMenu->addSeparator();
+    QAction* r0DkomCidRemoveAction = r0DangerSubMenu->addAction(
+        buildR0ActionIcon(":/Icon/process_uncritical.svg"),
+        QStringLiteral("DKOM从PspCidTable删除"));
+    r0EnableBreakAction->setToolTip(QStringLiteral("调用 ZwSetInformationProcess(ProcessBreakOnTermination=1)。"));
+    r0DisableBreakAction->setToolTip(QStringLiteral("调用 ZwSetInformationProcess(ProcessBreakOnTermination=0)。"));
+    r0DisableApcAction->setToolTip(QStringLiteral("清除目标进程现有线程 ETHREAD ApcQueueable 位；新建线程不自动继承。"));
+    r0DkomCidRemoveAction->setToolTip(QStringLiteral("从 PspCidTable 清零目标 EPROCESS 的 CID 表项；高风险且不可通过本菜单恢复。"));
     contextMenu.addSeparator();
 
     QAction* suspendAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_suspend.svg"), "挂起进程");
@@ -5793,6 +6324,13 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         else if (selectedAction == terminateProcessAction) { executeTerminateProcessAction(); }
         else if (selectedAction == r0TerminateAction) { executeR0TerminateProcessAction(); }
         else if (selectedAction == r0SuspendAction) { executeR0SuspendProcessAction(); }
+        else if (selectedAction == r0HideProcessAction) { executeR0SetProcessHiddenAction(true); }
+        else if (selectedAction == r0UnhideProcessAction) { executeR0SetProcessHiddenAction(false); }
+        else if (selectedAction == r0ClearHiddenProcessAction) { executeR0ClearProcessHiddenAction(); }
+        else if (selectedAction == r0EnableBreakAction) { executeR0SetBreakOnTerminationAction(true); }
+        else if (selectedAction == r0DisableBreakAction) { executeR0SetBreakOnTerminationAction(false); }
+        else if (selectedAction == r0DisableApcAction) { executeR0DisableApcInsertionAction(); }
+        else if (selectedAction == r0DkomCidRemoveAction) { executeR0DkomRemoveFromCidTableAction(); }
         else if (selectedAction == refreshPplLevelAction) { executeRefreshPplProtectionLevelAction(); }
         else if (selectedAction == suspendAction) { executeSuspendAction(); }
         else if (selectedAction == resumeAction) { executeResumeAction(); }
@@ -7270,6 +7808,247 @@ void ProcessDock::executeR0SuspendProcessAction()
             return suspendProcessByR0Driver(actionTarget.record.pid, detailTextOut);
         },
         false);
+}
+
+void ProcessDock::executeR0SetProcessHiddenAction(const bool hidden)
+{
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] executeR0SetProcessHiddenAction 被忽略：当前没有选中进程。" << eol;
+        return;
+    }
+
+    if (hidden)
+    {
+        const QMessageBox::StandardButton choice = QMessageBox::warning(
+            this,
+            QStringLiteral("R0进程隐藏(可恢复)"),
+            QStringLiteral(
+                "将把选中的 %1 个进程写入 Ksword 驱动隐藏表。\n\n"
+                "说明：当前实现只影响 Ksword 进程列表过滤和 R0 枚举标记，不做 DKOM 断链；"
+                "可通过“显示Ksword隐藏项”或“清空全部隐藏标记”恢复。")
+                .arg(actionTargets.size()),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        if (choice != QMessageBox::Yes)
+        {
+            return;
+        }
+    }
+
+    std::size_t successCount = 0U;
+    std::size_t failureCount = 0U;
+    QStringList detailLines;
+    const unsigned long action = hidden
+        ? KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE
+        : KSWORD_ARK_PROCESS_VISIBILITY_ACTION_UNHIDE;
+
+    for (const ProcessActionTarget& actionTarget : actionTargets)
+    {
+        std::string detailText;
+        const bool actionOk = setProcessVisibilityByR0Driver(
+            actionTarget.record.pid,
+            action,
+            &detailText);
+        if (actionOk)
+        {
+            ++successCount;
+            if (hidden)
+            {
+                m_hiddenProcessPidSet.insert(actionTarget.record.pid);
+            }
+            else
+            {
+                m_hiddenProcessPidSet.erase(actionTarget.record.pid);
+            }
+        }
+        else
+        {
+            ++failureCount;
+        }
+        detailLines.push_back(QStringLiteral("PID=%1 %2 | %3")
+            .arg(actionTarget.record.pid)
+            .arg(actionOk ? QStringLiteral("OK") : QStringLiteral("FAIL"))
+            .arg(QString::fromStdString(detailText.empty() ? std::string("无附加信息") : detailText)));
+    }
+
+    const QString titleText = hidden
+        ? QStringLiteral("R0隐藏进程")
+        : QStringLiteral("R0取消隐藏进程");
+    const QString summaryText = QStringLiteral("%1 完成：成功 %2，失败 %3\n\n%4")
+        .arg(titleText)
+        .arg(successCount)
+        .arg(failureCount)
+        .arg(detailLines.join(QLatin1Char('\n')));
+
+    kLogEvent logEvent;
+    (failureCount == 0U ? info : warn) << logEvent
+        << "[ProcessDock] " << titleText.toStdString()
+        << " completed, success=" << successCount
+        << ", failure=" << failureCount
+        << eol;
+    showActionResultMessage(titleText, failureCount == 0U, summaryText.toStdString(), logEvent);
+    requestAsyncRefresh(true);
+}
+
+void ProcessDock::executeR0ClearProcessHiddenAction()
+{
+    const QMessageBox::StandardButton choice = QMessageBox::question(
+        this,
+        QStringLiteral("清空R0隐藏标记"),
+        QStringLiteral("确定清空 Ksword 驱动内全部可恢复进程隐藏标记吗？"),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (choice != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    std::string detailText;
+    const bool actionOk = setProcessVisibilityByR0Driver(
+        0U,
+        KSWORD_ARK_PROCESS_VISIBILITY_ACTION_CLEAR_ALL,
+        &detailText);
+    if (actionOk)
+    {
+        m_hiddenProcessPidSet.clear();
+    }
+
+    kLogEvent logEvent;
+    (actionOk ? info : warn) << logEvent
+        << "[ProcessDock] 清空R0隐藏标记完成, ok="
+        << (actionOk ? "true" : "false")
+        << ", detail=" << (detailText.empty() ? "无附加信息" : detailText)
+        << eol;
+    showActionResultMessage(
+        QStringLiteral("清空R0隐藏标记"),
+        actionOk,
+        detailText.empty() ? std::string("无附加信息") : detailText,
+        logEvent);
+    requestAsyncRefresh(true);
+}
+
+void ProcessDock::executeR0SetBreakOnTerminationAction(const bool enabled)
+{
+    // BreakOnTermination：
+    // - R0 侧使用 ZwSetInformationProcess，不直接硬编码 EPROCESS.Flags；
+    // - 批量目标逐个分发，失败详情写入统一动作日志。
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] executeR0SetBreakOnTerminationAction 被忽略：当前没有选中进程。" << eol;
+        return;
+    }
+
+    const QMessageBox::StandardButton choice = QMessageBox::warning(
+        this,
+        enabled ? QStringLiteral("启用 BreakOnTermination") : QStringLiteral("关闭 BreakOnTermination"),
+        enabled
+        ? QStringLiteral("将把选中的 %1 个进程设为关键进程。目标退出可能触发系统崩溃保护。是否继续？").arg(actionTargets.size())
+        : QStringLiteral("将清除选中 %1 个进程的 BreakOnTermination。是否继续？").arg(actionTargets.size()),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (choice != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    const unsigned long action = enabled
+        ? KSWORD_ARK_PROCESS_SPECIAL_ACTION_ENABLE_BREAK_ON_TERMINATION
+        : KSWORD_ARK_PROCESS_SPECIAL_ACTION_DISABLE_BREAK_ON_TERMINATION;
+    dispatchProcessActionTargetsInParallel(
+        enabled ? QStringLiteral("R0启用BreakOnTermination") : QStringLiteral("R0关闭BreakOnTermination"),
+        actionTargets,
+        [action](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return setProcessSpecialFlagsByR0Driver(actionTarget.record.pid, action, detailTextOut);
+        },
+        false);
+}
+
+void ProcessDock::executeR0DisableApcInsertionAction()
+{
+    // 禁 APC 插入：
+    // - R0 侧只处理当前已有线程的 ApcQueueable 位；
+    // - 新创建线程不在本次结果范围内，因此提示中明确边界。
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] executeR0DisableApcInsertionAction 被忽略：当前没有选中进程。" << eol;
+        return;
+    }
+
+    const QMessageBox::StandardButton choice = QMessageBox::warning(
+        this,
+        QStringLiteral("禁止APC插入"),
+        QStringLiteral(
+            "将清除选中 %1 个进程当前线程的 ApcQueueable 位。\n\n"
+            "说明：该动作影响现有线程；目标后续新建线程不自动覆盖。错误线程偏移可能导致系统不稳定。是否继续？")
+            .arg(actionTargets.size()),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (choice != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    dispatchProcessActionTargetsInParallel(
+        QStringLiteral("R0禁止APC插入"),
+        actionTargets,
+        [](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return setProcessSpecialFlagsByR0Driver(
+                actionTarget.record.pid,
+                KSWORD_ARK_PROCESS_SPECIAL_ACTION_DISABLE_APC_INSERTION,
+                detailTextOut);
+        },
+        false);
+}
+
+void ProcessDock::executeR0DkomRemoveFromCidTableAction()
+{
+    // PspCidTable DKOM：
+    // - 目标对象由 R0 根据 PID 引用；
+    // - UI 不传 EPROCESS 地址；
+    // - 删除后 PsLookupProcessByProcessId 可能无法再找到目标，需刷新列表。
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] executeR0DkomRemoveFromCidTableAction 被忽略：当前没有选中进程。" << eol;
+        return;
+    }
+
+    const QMessageBox::StandardButton choice = QMessageBox::critical(
+        this,
+        QStringLiteral("DKOM从PspCidTable删除"),
+        QStringLiteral(
+            "将从 PspCidTable 删除选中 %1 个进程的 CID 表项。\n\n"
+            "风险：该动作不可通过当前菜单恢复，可能破坏句柄/PID 查询语义，错误系统版本或竞态会导致蓝屏。是否继续？")
+            .arg(actionTargets.size()),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (choice != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    dispatchProcessActionTargetsInParallel(
+        QStringLiteral("R0 DKOM PspCidTable删除"),
+        actionTargets,
+        [](const ProcessActionTarget& actionTarget, std::string* detailTextOut)
+        {
+            return dkomProcessByR0Driver(
+                actionTarget.record.pid,
+                KSWORD_ARK_PROCESS_DKOM_ACTION_REMOVE_FROM_PSP_CID_TABLE,
+                detailTextOut);
+        },
+        false);
+    requestAsyncRefresh(true);
 }
 
 void ProcessDock::executeR0SetPplProtectionAction(

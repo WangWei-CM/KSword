@@ -1,5 +1,7 @@
 #include "HardwareDock.h"
+#include "DiskMonitorPage.h"
 #include "MemoryCompositionHistoryWidget.h"
+#include "HardwareOtherDevicesPage.h"
 
 // ============================================================
 // HardwareDock.cpp
@@ -173,6 +175,25 @@ namespace
         const QSizePolicy::Policy verticalPolicy = QSizePolicy::Preferred)
     {
         configureCompressibleWidget(labelPointer, horizontalPolicy, verticalPolicy);
+    }
+
+    // configurePersistentHeaderLabel 作用：
+    // - 用于“利用率”详情页顶部标题和右侧设备型号备注；
+    // - 这些标签必须始终保留一行可见高度，不能被图表区域压缩到 0；
+    // - 返回行为：无返回值，只调整 QLabel 的单行布局策略。
+    void configurePersistentHeaderLabel(
+        QLabel* labelPointer,
+        const QSizePolicy::Policy horizontalPolicy = QSizePolicy::Preferred)
+    {
+        if (labelPointer == nullptr)
+        {
+            return;
+        }
+
+        labelPointer->setMinimumSize(0, 0);
+        labelPointer->setWordWrap(false);
+        labelPointer->setSizePolicy(horizontalPolicy, QSizePolicy::Fixed);
+        labelPointer->setMinimumHeight(std::max(1, labelPointer->sizeHint().height()));
     }
 
     // bytesToGiBText 作用：
@@ -646,7 +667,30 @@ namespace
         QString reasonText; // reasonText：失败时的原因汇总。
         QString rawOutputText; // rawOutputText：脚本原始返回文本，便于诊断。
         bool success = false; // success：本次探测是否读到有效值。
+        bool expectedUnavailable = false; // expectedUnavailable：传感器源按系统能力缺失，属于可预期不可用。
     };
+
+#pragma pack(push, 4)
+    // CoreTempSharedDataPrefix 作用：
+    // - 映射 Core Temp 共享内存结构中长期兼容的原始前缀；
+    // - 新版 CoreTempMappingObjectEx 会在该前缀后追加字段，温度读取只需要前缀；
+    // - 结构体成员顺序来自 Core Temp 开发者文档，4 字节对齐必须保持一致。
+    struct CoreTempSharedDataPrefix
+    {
+        unsigned int uiLoad[256];      // uiLoad：每线程/核心负载，当前温度读取不使用。
+        unsigned int uiTjMax[128];     // uiTjMax：每核心 TjMax，用于 DeltaToTjMax 转换。
+        unsigned int uiCoreCnt;        // uiCoreCnt：单 CPU 核心数量。
+        unsigned int uiCPUCnt;         // uiCPUCnt：CPU 封装数量。
+        float fTemp[256];              // fTemp：每核心温度或到 TjMax 距离。
+        float fVID;                    // fVID：Core Temp 上报的 VID 电压。
+        float fCPUSpeed;               // fCPUSpeed：CPU 当前频率。
+        float fFSBSpeed;               // fFSBSpeed：总线频率。
+        float fMultiplier;             // fMultiplier：倍频。
+        char sCPUName[100];            // sCPUName：Core Temp 识别到的 CPU 名称。
+        unsigned char ucFahrenheit;    // ucFahrenheit：温度是否为华氏度。
+        unsigned char ucDeltaToTjMax;  // ucDeltaToTjMax：温度字段是否为到 TjMax 的距离。
+    };
+#pragma pack(pop)
 
     // isReadableSensorValue 作用：
     // - 判断传感器文本是否是可展示的有效值；
@@ -655,6 +699,19 @@ namespace
     {
         const QString trimmedValueText = sensorValueText.trimmed();
         return !trimmedValueText.isEmpty() && trimmedValueText != QStringLiteral("N/A");
+    }
+
+    // formatCelsiusSensorValue 作用：
+    // - 统一校验并格式化摄氏温度；
+    // - 输入 valueCelsius 为摄氏度浮点值；
+    // - 返回空串表示越界或 NaN，否则返回带 °C 后缀的展示文本。
+    QString formatCelsiusSensorValue(const double valueCelsius)
+    {
+        if (!std::isfinite(valueCelsius) || valueCelsius < -30.0 || valueCelsius > 130.0)
+        {
+            return QString();
+        }
+        return QStringLiteral("%1°C").arg(valueCelsius, 0, 'f', 1);
     }
 
     // parseSensorProbeOutput 作用：
@@ -758,12 +815,218 @@ namespace
             .arg(probeResult.reasonText.isEmpty() ? QStringLiteral("未提供原因。") : probeResult.reasonText);
     }
 
+    // sensorReasonContainsAny 作用：
+    // - 在探测诊断文本中查找任一特征片段；
+    // - 参数 reasonText 为 PowerShell/CIM/Counter 汇总原因；
+    // - 参数 markerTextList 为需要匹配的可预期或硬失败关键字；
+    // - 返回 true 表示至少命中一个关键字，否则返回 false。
+    bool sensorReasonContainsAny(
+        const QString& reasonText,
+        const QStringList& markerTextList)
+    {
+        for (const QString& markerText : markerTextList)
+        {
+            if (!markerText.isEmpty() && reasonText.contains(markerText, Qt::CaseInsensitive))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // sensorProbeHasExecutionFailure 作用：
+    // - 区分“脚本/权限/进程执行失败”和“硬件传感器源本来不存在”；
+    // - 真正执行异常仍需要 WARN，避免把 PowerShell 超时或拒绝访问静默吞掉；
+    // - 返回 true 表示应按异常失败处理，false 表示还需继续做可预期不可用判定。
+    bool sensorProbeHasExecutionFailure(const SensorProbeResult& probeResult)
+    {
+        const QString diagnosticText = probeResult.reasonText
+            + QStringLiteral("\n")
+            + probeResult.rawOutputText;
+        static const QStringList hardFailureMarkerList = {
+            QStringLiteral("PowerShell启动失败"),
+            QStringLiteral("PowerShell执行失败"),
+            QStringLiteral("PowerShell执行超时"),
+            QStringLiteral("脚本无输出"),
+            QStringLiteral("脚本返回成功标记"),
+            QStringLiteral("脚本仅返回"),
+            QStringLiteral("拒绝访问"),
+            QStringLiteral("Access denied"),
+            QStringLiteral("RPC")
+        };
+        return sensorReasonContainsAny(diagnosticText, hardFailureMarkerList);
+    }
+
+    // isExpectedCpuTemperatureUnavailable 作用：
+    // - 识别 Windows 常见的 CPU 温度不可暴露场景；
+    // - Libre/OpenHardwareMonitor 命名空间缺失、ACPI 热区不支持、热区计数器无实例都很常见；
+    // - 返回 true 时 UI 继续展示 N/A，但日志不应升级为 WARN。
+    bool isExpectedCpuTemperatureUnavailable(const SensorProbeResult& probeResult)
+    {
+        if (probeResult.success || probeResult.reasonText.isEmpty())
+        {
+            return false;
+        }
+        if (sensorProbeHasExecutionFailure(probeResult))
+        {
+            return false;
+        }
+
+        static const QStringList expectedTemperatureMarkerList = {
+            QStringLiteral("Core Temp共享内存未打开"),
+            QStringLiteral("无效命名空间"),
+            QStringLiteral("Invalid namespace"),
+            QStringLiteral("不支持"),
+            QStringLiteral("Not supported"),
+            QStringLiteral("指定的实例不存在"),
+            QStringLiteral("does not exist"),
+            QStringLiteral("未找到CPU温度传感器"),
+            QStringLiteral("无热区数据"),
+            QStringLiteral("读取值无效"),
+            QStringLiteral("样本值无效"),
+            QStringLiteral("无数据"),
+            QStringLiteral("传感器存在但值无效"),
+            QStringLiteral("热区值超出有效范围"),
+            QStringLiteral("未找到可用温度来源")
+        };
+        return sensorReasonContainsAny(probeResult.reasonText, expectedTemperatureMarkerList);
+    }
+
+    // isExpectedCpuVoltageUnavailable 作用：
+    // - 识别 Win32_Processor CurrentVoltage 不提供或不可解析的常见情况；
+    // - 这些值来自 SMBIOS，很多主板/虚拟化环境不会提供真实核心电压；
+    // - 返回 true 时只保留 N/A 展示，不输出误导性的 WARN。
+    bool isExpectedCpuVoltageUnavailable(const SensorProbeResult& probeResult)
+    {
+        if (probeResult.success || probeResult.reasonText.isEmpty())
+        {
+            return false;
+        }
+        if (sensorProbeHasExecutionFailure(probeResult))
+        {
+            return false;
+        }
+
+        static const QStringList expectedVoltageMarkerList = {
+            QStringLiteral("CurrentVoltage"),
+            QStringLiteral("无法解析"),
+            QStringLiteral("未返回处理器对象"),
+            QStringLiteral("WMIC path Win32_Processor: 无输出")
+        };
+        return sensorReasonContainsAny(probeResult.reasonText, expectedVoltageMarkerList);
+    }
+
+    // queryCoreTempSharedMemoryProbeResult 作用：
+    // - 读取 Core Temp 暴露的全局共享内存 CoreTempMappingObject；
+    // - CPU-Z/硬件监控类工具通常依赖驱动/MSR，Windows WMI 读不到时可借助此类后端；
+    // - 成功时返回当前核心温度最大值，失败时返回结构化原因。
+    SensorProbeResult queryCoreTempSharedMemoryProbeResult()
+    {
+        SensorProbeResult probeResult;
+        HANDLE mappingHandle = ::OpenFileMappingW(
+            FILE_MAP_READ,
+            FALSE,
+            L"Global\\CoreTempMappingObjectEx");
+        if (mappingHandle == nullptr)
+        {
+            mappingHandle = ::OpenFileMappingW(
+                FILE_MAP_READ,
+                FALSE,
+                L"CoreTempMappingObjectEx");
+        }
+        if (mappingHandle == nullptr)
+        {
+            mappingHandle = ::OpenFileMappingW(
+                FILE_MAP_READ,
+                FALSE,
+                L"Global\\CoreTempMappingObject");
+        }
+        if (mappingHandle == nullptr)
+        {
+            mappingHandle = ::OpenFileMappingW(
+                FILE_MAP_READ,
+                FALSE,
+                L"CoreTempMappingObject");
+        }
+        if (mappingHandle == nullptr)
+        {
+            probeResult.reasonText = QStringLiteral("Core Temp共享内存未打开。");
+            return probeResult;
+        }
+
+        const void* mappedViewPointer = ::MapViewOfFile(
+            mappingHandle,
+            FILE_MAP_READ,
+            0,
+            0,
+            sizeof(CoreTempSharedDataPrefix));
+        if (mappedViewPointer == nullptr)
+        {
+            const DWORD errorCode = ::GetLastError();
+            ::CloseHandle(mappingHandle);
+            probeResult.reasonText = QStringLiteral("Core Temp共享内存映射失败，Win32错误=%1。")
+                .arg(errorCode);
+            return probeResult;
+        }
+
+        const CoreTempSharedDataPrefix* sharedDataPointer =
+            static_cast<const CoreTempSharedDataPrefix*>(mappedViewPointer);
+        const unsigned int packageCount = std::clamp(sharedDataPointer->uiCPUCnt, 1U, 128U);
+        const unsigned int coreCount = std::clamp(sharedDataPointer->uiCoreCnt, 1U, 256U);
+        const unsigned int sampleCount = std::min(256U, std::max(coreCount, packageCount * coreCount));
+        double maxTemperatureCelsius = -1000.0;
+        for (unsigned int sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
+        {
+            double valueCelsius = static_cast<double>(sharedDataPointer->fTemp[sampleIndex]);
+            if (sharedDataPointer->ucFahrenheit != 0U)
+            {
+                valueCelsius = (valueCelsius - 32.0) * 5.0 / 9.0;
+            }
+            if (sharedDataPointer->ucDeltaToTjMax != 0U)
+            {
+                const unsigned int tjMaxIndex = std::min(sampleIndex, 127U);
+                const double tjMaxValue = static_cast<double>(sharedDataPointer->uiTjMax[tjMaxIndex]);
+                if (tjMaxValue > 0.0)
+                {
+                    valueCelsius = tjMaxValue - valueCelsius;
+                }
+            }
+            if (!std::isfinite(valueCelsius) || valueCelsius < -30.0 || valueCelsius > 130.0)
+            {
+                continue;
+            }
+            maxTemperatureCelsius = std::max(maxTemperatureCelsius, valueCelsius);
+        }
+
+        const QString valueText = formatCelsiusSensorValue(maxTemperatureCelsius);
+        if (isReadableSensorValue(valueText))
+        {
+            probeResult.valueText = valueText;
+            probeResult.sourceText = QStringLiteral("Core Temp共享内存 / 核心最高温");
+            probeResult.success = true;
+        }
+        else
+        {
+            probeResult.reasonText = QStringLiteral("Core Temp共享内存存在，但未得到有效核心温度样本。");
+        }
+
+        ::UnmapViewOfFile(mappedViewPointer);
+        ::CloseHandle(mappingHandle);
+        return probeResult;
+    }
+
     // queryCpuTemperatureProbeResult 作用：
     // - 查询 CPU 温度第一可用值（单位 °C）；
     // - 按“Libre/OpenHardwareMonitor -> CIM/WMI 热区 -> Thermal Counter -> TemperatureProbe”顺序回退；
     // - 失败时返回结构化原因文本。
     SensorProbeResult queryCpuTemperatureProbeResult()
     {
+        SensorProbeResult coreTempProbeResult = queryCoreTempSharedMemoryProbeResult();
+        if (coreTempProbeResult.success)
+        {
+            return coreTempProbeResult;
+        }
+
         const QString temperatureScript = QStringLiteral(
             "$ErrorActionPreference='Stop'; "
             "function Add-Reason($list,[string]$reason){ if(-not [string]::IsNullOrWhiteSpace($reason)){ [void]$list.Add($reason) } }; "
@@ -773,14 +1036,27 @@ namespace
             "  return ([math]::Round($value,1)).ToString() + '°C'; "
             "}; "
             "function Emit-Success([string]$value,[string]$source){ Write-Output ('OK|' + $value + '|' + $source); exit 0 }; "
+            "function Test-CpuSensor($sensor){ "
+            "  $name=[string]$sensor.Name; $identifier=[string]$sensor.Identifier; $hardwareName=[string]$sensor.HardwareName; "
+            "  $text=($name + ' ' + $identifier + ' ' + $hardwareName); "
+            "  if($text -match '(?i)cpu|processor|package|core|xeon|intel'){ return $true }; "
+            "  if($identifier -match '(?i)/intelcpu|/cpu|/amdcpu'){ return $true }; "
+            "  return $false; "
+            "}; "
             "$reasons = New-Object 'System.Collections.Generic.List[string]'; "
+            "foreach($serviceName in @('LibreHardwareMonitor','OpenHardwareMonitor','CoreTemp','HWiNFO64','HWiNFO32')){ "
+            "  try { "
+            "    $svc=Get-Service -Name $serviceName -ErrorAction SilentlyContinue; "
+            "    if($null -ne $svc){ Add-Reason $reasons ('服务 ' + $serviceName + ': ' + [string]$svc.Status) } "
+            "  } catch { } "
+            "}; "
             "foreach($ns in @('root/LibreHardwareMonitor','root/OpenHardwareMonitor')){ "
             "  try { "
             "    $sensorRows=@(Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction Stop); "
             "    $cpuTemps=@($sensorRows | Where-Object { "
             "      $_.SensorType -eq 'Temperature' -and "
-            "      (($_.Name -match 'Package|CPU') -or ($_.Identifier -match '/cpu')) "
-            "    } | Sort-Object @{Expression={if($_.Name -match 'Package'){0}else{1}}}, Name); "
+            "      (Test-CpuSensor $_) "
+            "    } | Sort-Object @{Expression={if($_.Name -match 'Package|CPU Package'){0}elseif($_.Name -match 'Core'){1}else{2}}}, Name); "
             "    if($cpuTemps.Count -le 0){ Add-Reason $reasons ('CIM ' + $ns + ': 未找到CPU温度传感器'); continue }; "
             "    foreach($sensor in $cpuTemps){ "
             "      $temp=Format-Temp ([double]$sensor.Value); "
@@ -788,6 +1064,26 @@ namespace
             "    } "
             "    Add-Reason $reasons ('CIM ' + $ns + ': 传感器存在但值无效'); "
             "  } catch { Add-Reason $reasons ('CIM ' + $ns + ': ' + $_.Exception.Message) } "
+            "}; "
+            "foreach($ns in @('root/CIMV2','root/WMI')){ "
+            "  foreach($className in @('Sensor','HardwareMonitor')){ "
+            "    try { "
+            "      $genericRows=@(Get-CimInstance -Namespace $ns -ClassName $className -ErrorAction Stop); "
+            "      $genericTemps=@($genericRows | Where-Object { "
+            "        (($_.SensorType -eq 'Temperature') -or ($_.Type -eq 'Temperature') -or ($_.Name -match '(?i)temperature|temp')) -and "
+            "        (Test-CpuSensor $_) "
+            "      }); "
+            "      foreach($sensor in $genericTemps){ "
+            "        $rawValue=$null; "
+            "        if($null -ne $sensor.Value){ $rawValue=$sensor.Value } elseif($null -ne $sensor.CurrentValue){ $rawValue=$sensor.CurrentValue } elseif($null -ne $sensor.CurrentReading){ $rawValue=$sensor.CurrentReading }; "
+            "        if($null -ne $rawValue){ "
+            "          $temp=Format-Temp ([double]$rawValue); "
+            "          if($null -ne $temp){ Emit-Success $temp ('CIM ' + $ns + ' / ' + $className + ' / ' + [string]$sensor.Name) } "
+            "        } "
+            "      } "
+            "      if($genericRows.Count -gt 0){ Add-Reason $reasons ('CIM ' + $ns + '/' + $className + ': 未找到可用CPU温度值') } "
+            "    } catch { } "
+            "  } "
             "}; "
             "try { "
             "  $zoneRows=@(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop); "
@@ -832,7 +1128,22 @@ namespace
             "} catch { Add-Reason $reasons ('CIM Win32_TemperatureProbe: ' + $_.Exception.Message) } "
             "if($reasons.Count -le 0){ Add-Reason $reasons '未找到可用温度来源' }; "
             "Write-Output ('ERR|' + ($reasons -join ' || '));");
-        return parseSensorProbeOutput(queryPowerShellTextSync(temperatureScript, 5200));
+        SensorProbeResult probeResult = parseSensorProbeOutput(queryPowerShellTextSync(temperatureScript, 5200));
+        if (!coreTempProbeResult.reasonText.isEmpty())
+        {
+            probeResult.reasonText = coreTempProbeResult.reasonText
+                + QStringLiteral(" || ")
+                + probeResult.reasonText;
+        }
+        if (isExpectedCpuTemperatureUnavailable(probeResult))
+        {
+            probeResult.expectedUnavailable = true;
+            probeResult.reasonText = QStringLiteral(
+                "当前系统未暴露CPU温度传感器；已保持N/A。"
+                "CPU本身可能有DTS，但Windows WMI通常不直接暴露；"
+                "请开启Core Temp共享内存、LibreHardwareMonitor或OpenHardwareMonitor的WMI后端。");
+        }
+        return probeResult;
     }
 
     // queryCpuVoltageProbeResult 作用：
@@ -888,7 +1199,15 @@ namespace
             "} catch { Add-Reason $reasons ('WMIC path Win32_Processor: ' + $_.Exception.Message) } "
             "if($reasons.Count -le 0){ Add-Reason $reasons '未找到可用电压来源' }; "
             "Write-Output ('ERR|' + ($reasons -join ' || '));");
-        return parseSensorProbeOutput(queryPowerShellTextSync(voltageScript, 4200));
+        SensorProbeResult probeResult = parseSensorProbeOutput(queryPowerShellTextSync(voltageScript, 4200));
+        if (isExpectedCpuVoltageUnavailable(probeResult))
+        {
+            probeResult.expectedUnavailable = true;
+            probeResult.reasonText = QStringLiteral(
+                "当前系统未暴露CPU电压传感器；已保持N/A。"
+                "Win32_Processor CurrentVoltage 常由SMBIOS决定，可能不是可读传感器。");
+        }
+        return probeResult;
     }
 }
 
@@ -979,16 +1298,8 @@ void HardwareDock::showEvent(QShowEvent* showEventPointer)
         }
     }
 
-    // 首次显示阶段延迟一帧再重排，确保滚动区 viewport 高度已经稳定。
-    QTimer::singleShot(0, this, [this]()
-    {
-        adjustUtilizationChartHeights();
-    });
-    // 某些 Dock 场景首次显示后仍会继续布局，补一帧延迟可避免 CPU 子页首帧挤压。
-    QTimer::singleShot(80, this, [this]()
-    {
-        adjustUtilizationChartHeights();
-    });
+    // 首次显示阶段分阶段重排，确保滚动区 viewport 高度已经稳定。
+    scheduleUtilizationLayoutRefresh();
 }
 
 void HardwareDock::initializeUi()
@@ -1008,6 +1319,8 @@ void HardwareDock::initializeUi()
     initializeCpuTab();
     initializeGpuTab();
     initializeMemoryTab();
+    initializeDiskMonitorTab();
+    initializeOtherDevicesTab();
 
     if (m_sideTabWidget != nullptr)
     {
@@ -1026,16 +1339,8 @@ void HardwareDock::initializeUi()
                 {
                     return;
                 }
-                // 进入“利用率”总页时刷新一次高度，修复首次进入 CPU 子页时尚未正确撑开的问题。
-                adjustUtilizationChartHeights();
-                QTimer::singleShot(0, this, [this]()
-                {
-                    adjustUtilizationChartHeights();
-                });
-                QTimer::singleShot(80, this, [this]()
-                {
-                    adjustUtilizationChartHeights();
-                });
+                // 进入“利用率”总页时刷新高度，修复首次进入 CPU 子页时尚未正确撑开的问题。
+                scheduleUtilizationLayoutRefresh();
             });
     }
 }
@@ -1079,13 +1384,13 @@ void HardwareDock::initializeUtilizationTab()
     m_utilizationSidebarList = new QListWidget(m_utilizationPage);
     m_utilizationSidebarList->setFrameShape(QFrame::NoFrame);
     m_utilizationSidebarList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    // 需求要求利用率页不显示纵向/横向滚动条，左侧卡片改为按可见高度压缩。
-    m_utilizationSidebarList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // 设备数量较多时不能继续把缩略卡片压到不可读高度，改为保留卡片高度并允许左侧独立滚动。
+    m_utilizationSidebarList->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_utilizationSidebarList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_utilizationSidebarList->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_utilizationSidebarList->setSpacing(1);
+    m_utilizationSidebarList->setSpacing(2);
     configureCompressibleWidget(m_utilizationSidebarList, QSizePolicy::Preferred, QSizePolicy::Expanding);
-    m_utilizationSidebarList->setMinimumWidth(64);
+    m_utilizationSidebarList->setMinimumWidth(96);
     m_utilizationSidebarList->setMaximumWidth(228);
     m_utilizationSidebarList->setStyleSheet(
         QStringLiteral(
@@ -1231,17 +1536,7 @@ void HardwareDock::syncUtilizationSidebarSelection(const int selectedRowIndex)
     }
 
     // 选项切换后立即重算大图高度，避免首帧出现滚动条。
-    adjustUtilizationChartHeights();
-    // 延迟到事件循环末尾再重算一次，确保拿到切页后的真实 viewport 高度。
-    QTimer::singleShot(0, this, [this]()
-    {
-        adjustUtilizationChartHeights();
-    });
-    // 补一次短延迟重排，规避 Dock 动画/布局链导致的 CPU 首帧高度过小。
-    QTimer::singleShot(80, this, [this]()
-    {
-        adjustUtilizationChartHeights();
-    });
+    scheduleUtilizationLayoutRefresh();
 }
 
 void HardwareDock::adjustUtilizationChartHeights()
@@ -1286,12 +1581,12 @@ void HardwareDock::adjustUtilizationChartHeights()
             widgetPointer->setMaximumHeight(maxHeightValue);
         };
 
-    // ===================== 左侧设备列表：按宽高动态压缩 =====================
+    // ===================== 左侧设备列表：按宽度收缩，按高度滚动 =====================
     if (m_utilizationPage != nullptr && m_utilizationSidebarList != nullptr)
     {
         // pageWidth 用途：根据利用率页实际宽度估算左侧栏宽，窄面板下主动让出图表区域。
         const int pageWidth = std::max(0, m_utilizationPage->contentsRect().width());
-        const int sidebarWidth = std::clamp(pageWidth / 4, 64, 228);
+        const int sidebarWidth = std::clamp(pageWidth / 4, 96, 228);
         if (m_utilizationSidebarList->minimumWidth() != sidebarWidth
             || m_utilizationSidebarList->maximumWidth() != sidebarWidth)
         {
@@ -1299,19 +1594,11 @@ void HardwareDock::adjustUtilizationChartHeights()
             m_utilizationSidebarList->setMaximumWidth(sidebarWidth);
         }
 
-        // cardHeight 用途：把所有设备卡片压进当前可见高度，彻底避免左侧列表出现垂直滚动条。
-        const int itemCount = std::max(1, m_utilizationSidebarList->count());
-        const int spacingHeight = std::max(0, m_utilizationSidebarList->spacing()) * std::max(0, itemCount - 1);
-        const int viewportHeight = m_utilizationSidebarList->viewport() != nullptr
-            ? m_utilizationSidebarList->viewport()->height()
-            : m_utilizationSidebarList->height();
-        const int availableHeight = std::max(1, viewportHeight - spacingHeight);
-        const int rawCardHeight = std::max(1, availableHeight / itemCount);
-        const int cardHeight = std::clamp(rawCardHeight, 1, 52);
-        const int effectiveSpacing = rawCardHeight <= 1 ? 0 : m_utilizationSidebarList->spacing();
-        if (m_utilizationSidebarList->spacing() != effectiveSpacing)
+        // cardHeight 用途：保持缩略图最小可读高度；多磁盘/多网卡/GPU 时由列表滚动承接溢出。
+        const int cardHeight = 52;
+        if (m_utilizationSidebarList->spacing() != 2)
         {
-            m_utilizationSidebarList->setSpacing(effectiveSpacing);
+            m_utilizationSidebarList->setSpacing(2);
         }
         for (int rowIndex = 0; rowIndex < m_utilizationSidebarList->count(); ++rowIndex)
         {
@@ -1351,7 +1638,7 @@ void HardwareDock::adjustUtilizationChartHeights()
 
         const int headerHeight = std::max(
             m_cpuModelLabel != nullptr ? m_cpuModelLabel->sizeHint().height() : 0,
-            30);
+            58);
         const int summaryHeight = m_utilizationSummaryLabel != nullptr
             ? m_utilizationSummaryLabel->sizeHint().height()
             : 16;
@@ -1361,7 +1648,7 @@ void HardwareDock::adjustUtilizationChartHeights()
         // availableChartAreaHeight 用途：核心图可用高度；允许极小高度，保证页面整体不冒滚动条。
         const int availableChartAreaHeight = std::max(
             1,
-            cpuReferenceHeight - headerHeight - summaryHeight - detailHeight - 30);
+            cpuReferenceHeight - headerHeight - summaryHeight - detailHeight - 42);
         const int gridRows = std::max(1, m_cpuCoreGridRowCount);
         const int gridSpacing = std::max(0, m_coreChartGridLayout->verticalSpacing());
         // cellHeight 用途：每个逻辑处理器小卡片高度；低高度下继续压缩而不是让滚动条接管。
@@ -1470,7 +1757,7 @@ void HardwareDock::adjustUtilizationChartHeights()
 
         const int titleHeight = std::max(
             m_gpuAdapterTitleLabel != nullptr ? m_gpuAdapterTitleLabel->sizeHint().height() : 0,
-            44);
+            58);
         const int summaryHeight = m_gpuUtilSummaryLabel != nullptr
             ? m_gpuUtilSummaryLabel->sizeHint().height()
             : 20;
@@ -1541,7 +1828,7 @@ void HardwareDock::adjustUtilizationChartHeights()
         }
 
         const int layoutSpacing = 6;
-        const int headerHeight = 24;
+        const int headerHeight = 58;
         const int summaryHeight = device.summaryLabel != nullptr
             ? device.summaryLabel->sizeHint().height()
             : 0;
@@ -1591,12 +1878,12 @@ void HardwareDock::initializeUtilizationCpuSubTab()
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
     QLabel* titleLabel = new QLabel(QStringLiteral("CPU"), m_utilizationCpuSubPage);
-    configureCompressibleLabel(titleLabel);
+    configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     m_cpuModelLabel = new QLabel(QStringLiteral("检测中..."), m_utilizationCpuSubPage);
-    configureCompressibleLabel(m_cpuModelLabel);
+    configurePersistentHeaderLabel(m_cpuModelLabel, QSizePolicy::Ignored);
     m_cpuModelLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_cpuModelLabel->setStyleSheet(
         QStringLiteral("font-size:15px;font-weight:500;color:%1;")
@@ -1662,12 +1949,12 @@ void HardwareDock::initializeUtilizationMemorySubTab()
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
     QLabel* titleLabel = new QLabel(QStringLiteral("内存"), m_utilizationMemorySubPage);
-    configureCompressibleLabel(titleLabel);
+    configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     m_memoryCapacityLabel = new QLabel(QStringLiteral("读取中..."), m_utilizationMemorySubPage);
-    configureCompressibleLabel(m_memoryCapacityLabel);
+    configurePersistentHeaderLabel(m_memoryCapacityLabel, QSizePolicy::Ignored);
     m_memoryCapacityLabel->setStyleSheet(
         QStringLiteral("font-size:31px;font-weight:500;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
@@ -1715,7 +2002,7 @@ void HardwareDock::initializeUtilizationDiskSubTab()
     diskSubLayout->setSpacing(6);
 
     QLabel* titleLabel = new QLabel(QStringLiteral("磁盘"), m_utilizationDiskSubPage);
-    configureCompressibleLabel(titleLabel);
+    configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
@@ -1789,7 +2076,7 @@ void HardwareDock::initializeUtilizationNetworkSubTab()
     networkSubLayout->setSpacing(6);
 
     QLabel* titleLabel = new QLabel(QStringLiteral("以太网"), m_utilizationNetworkSubPage);
-    configureCompressibleLabel(titleLabel);
+    configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
@@ -1864,12 +2151,12 @@ void HardwareDock::initializeUtilizationGpuSubTab()
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
     QLabel* titleLabel = new QLabel(QStringLiteral("GPU"), m_utilizationGpuSubPage);
-    configureCompressibleLabel(titleLabel);
+    configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     m_gpuAdapterTitleLabel = new QLabel(QStringLiteral("适配器读取中..."), m_utilizationGpuSubPage);
-    configureCompressibleLabel(m_gpuAdapterTitleLabel);
+    configurePersistentHeaderLabel(m_gpuAdapterTitleLabel, QSizePolicy::Ignored);
     m_gpuAdapterTitleLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_gpuAdapterTitleLabel->setStyleSheet(
         QStringLiteral("font-size:18px;font-weight:500;color:%1;")
@@ -2117,6 +2404,20 @@ void HardwareDock::initializeMemoryTab()
     m_sideTabWidget->addTab(m_memoryPage, QStringLiteral("内存"));
 }
 
+void HardwareDock::initializeDiskMonitorTab()
+{
+    // 硬盘监控页独立承载资源监视器式进程 IO 表，避免塞进“利用率”详情页造成导航混乱。
+    m_diskMonitorPage = new DiskMonitorPage(m_sideTabWidget);
+    m_sideTabWidget->addTab(m_diskMonitorPage, QStringLiteral("硬盘监控"));
+}
+
+void HardwareDock::initializeOtherDevicesTab()
+{
+    // 其他设备页必须挂在 HardwareDock 内部侧边 Tab，不创建新的主窗口 ADS Dock。
+    m_otherDevicesPage = new HardwareOtherDevicesPage(m_sideTabWidget);
+    m_sideTabWidget->addTab(m_otherDevicesPage, QStringLiteral("其他设备"));
+}
+
 void HardwareDock::initializeCoreCharts()
 {
     const DWORD logicalProcessorCount = std::max<DWORD>(1, ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
@@ -2197,6 +2498,22 @@ void HardwareDock::initializeConnections()
     // 暂无额外交互按钮，预留函数用于后续扩展。
 }
 
+void HardwareDock::scheduleUtilizationLayoutRefresh()
+{
+    // 当前事件循环先重排一次，确保新追加设备卡片能立即拿到稳定尺寸。
+    adjustUtilizationChartHeights();
+    // 0ms 延迟用于等待 QListWidget 插入行后完成 viewport 尺寸更新。
+    QTimer::singleShot(0, this, [this]()
+    {
+        adjustUtilizationChartHeights();
+    });
+    // 80ms 延迟用于 ADS Dock 动画或首次显示链路完成后再校准一次。
+    QTimer::singleShot(80, this, [this]()
+    {
+        adjustUtilizationChartHeights();
+    });
+}
+
 int HardwareDock::findDiskUtilizationDeviceIndexByInstance(const QString& instanceNameText) const
 {
     for (int indexValue = 0; indexValue < static_cast<int>(m_diskUtilDevices.size()); ++indexValue)
@@ -2242,6 +2559,7 @@ int HardwareDock::ensureDiskUtilizationDevice(
             QColor(80, 170, 255),
             QColor(255, 190, 105));
     }
+    scheduleUtilizationLayoutRefresh();
     return deviceIndex;
 }
 
@@ -2295,6 +2613,7 @@ int HardwareDock::ensureNetworkUtilizationDevice(
             QColor(80, 170, 255),
             QColor(255, 190, 105));
     }
+    scheduleUtilizationLayoutRefresh();
     return deviceIndex;
 }
 
@@ -2337,6 +2656,7 @@ int HardwareDock::ensureGpuUtilizationDevice(
         QColor(105, 173, 255),
         UtilizationDeviceKind::Gpu,
         deviceIndex);
+    scheduleUtilizationLayoutRefresh();
     return deviceIndex;
 }
 
@@ -2355,7 +2675,7 @@ void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* device
     pageLayout->setSpacing(6);
 
     QLabel* titleLabel = new QLabel(devicePointer->displayNameText, devicePointer->pageWidget);
-    configureCompressibleLabel(titleLabel);
+    configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
@@ -2427,7 +2747,7 @@ void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* 
     pageLayout->setSpacing(6);
 
     QLabel* titleLabel = new QLabel(devicePointer->displayNameText, devicePointer->pageWidget);
-    configureCompressibleLabel(titleLabel);
+    configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
@@ -2500,12 +2820,12 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
     QLabel* titleLabel = new QLabel(devicePointer->displayNameText, devicePointer->pageWidget);
-    configureCompressibleLabel(titleLabel);
+    configurePersistentHeaderLabel(titleLabel);
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
     devicePointer->adapterTitleLabel = new QLabel(QStringLiteral("适配器读取中..."), devicePointer->pageWidget);
-    configureCompressibleLabel(devicePointer->adapterTitleLabel);
+    configurePersistentHeaderLabel(devicePointer->adapterTitleLabel, QSizePolicy::Ignored);
     devicePointer->adapterTitleLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     devicePointer->adapterTitleLabel->setStyleSheet(
         QStringLiteral("font-size:15px;font-weight:500;color:%1;")
@@ -5137,8 +5457,13 @@ void HardwareDock::requestAsyncSensorRefresh()
                 {
                     safeThis->m_lastSensorLogSignatureText = logSignatureText;
 
-                    const bool hasFailure = !temperatureProbeResult.success || !voltageProbeResult.success;
-                    if (hasFailure)
+                    // hasUnexpectedFailure 用途：只把脚本失败、权限异常、执行超时等真正异常升为 WARN。
+                    // allProbeSucceeded 用途：只有温度/电压均恢复可读时才输出恢复日志，避免 N/A 常态被误报。
+                    const bool hasUnexpectedFailure =
+                        (!temperatureProbeResult.success && !temperatureProbeResult.expectedUnavailable)
+                        || (!voltageProbeResult.success && !voltageProbeResult.expectedUnavailable);
+                    const bool allProbeSucceeded = temperatureProbeResult.success && voltageProbeResult.success;
+                    if (hasUnexpectedFailure)
                     {
                         warn << event
                              << "[HardwareDock] CPU传感器读取失败："
@@ -5147,7 +5472,7 @@ void HardwareDock::requestAsyncSensorRefresh()
                              << buildSensorProbeLogFragment(QStringLiteral("电压"), voltageProbeResult)
                              << eol;
                     }
-                    else if (!previousLogSignatureText.isEmpty())
+                    else if (allProbeSucceeded && !previousLogSignatureText.isEmpty())
                     {
                         info << event
                              << "[HardwareDock] CPU传感器读取恢复："

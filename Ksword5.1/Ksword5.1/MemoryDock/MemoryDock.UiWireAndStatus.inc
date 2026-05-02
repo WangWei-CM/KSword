@@ -52,6 +52,11 @@ void MemoryDock::initializeConnections()
         if (tabIndex == 4)
         {
             refreshBookmarkValues();
+            return;
+        }
+        if (tabIndex == 5)
+        {
+            driverReadMemoryFromUi();
         }
         });
 
@@ -935,6 +940,68 @@ void MemoryDock::initializeConnections()
             << formatAddress(m_bookmarkCache[static_cast<std::size_t>(row)].address).toStdString()
             << eol;
         jumpToAddress(m_bookmarkCache[static_cast<std::size_t>(row)].address);
+        });
+
+    // ========================================================
+    // Tab6：驱动内存读写
+    // ========================================================
+
+    connect(m_driverMemoryReadButton, &QPushButton::clicked, this, [this]() {
+        kLogEvent driverReadClickEvent;
+        info << driverReadClickEvent
+            << "[MemoryDock] 驱动内存读写页点击 R0读取。"
+            << eol;
+        driverReadMemoryFromUi();
+        });
+
+    connect(m_driverMemoryAddressEdit, &QLineEdit::returnPressed, this, [this]() {
+        kLogEvent driverReadEnterEvent;
+        info << driverReadEnterEvent
+            << "[MemoryDock] 驱动内存读写页地址框回车读取。"
+            << eol;
+        driverReadMemoryFromUi();
+        });
+
+    connect(m_driverMemoryApplyButton, &QPushButton::clicked, this, [this]() {
+        kLogEvent driverApplyClickEvent;
+        info << driverApplyClickEvent
+            << "[MemoryDock] 驱动内存读写页点击应用差异。"
+            << eol;
+        driverApplyMemoryDiffFromUi();
+        });
+
+    connect(m_driverMemoryResetButton, &QPushButton::clicked, this, [this]() {
+        kLogEvent driverResetClickEvent;
+        info << driverResetClickEvent
+            << "[MemoryDock] 驱动内存读写页点击清空缓存。"
+            << eol;
+        resetDriverMemoryRwState();
+        });
+
+    connect(m_driverMemoryHexEditor, &HexEditorWidget::byteEdited, this,
+        [this](const std::uint64_t absoluteAddress, const std::uint8_t oldValue, const std::uint8_t newValue) {
+            Q_UNUSED(oldValue);
+            if (!m_driverMemoryHasSnapshot || absoluteAddress < m_driverMemoryBaseAddress)
+            {
+                return;
+            }
+
+            const std::uint64_t offset = absoluteAddress - m_driverMemoryBaseAddress;
+            if (offset >= static_cast<std::uint64_t>(m_driverMemoryEditedBytes.size()))
+            {
+                return;
+            }
+
+            m_driverMemoryEditedBytes[static_cast<int>(offset)] = static_cast<char>(newValue);
+            std::vector<DriverDiffBlock> diffBlocks;
+            collectDriverMemoryDiffBlocks(diffBlocks);
+            m_driverMemoryApplyButton->setEnabled(!diffBlocks.empty());
+            if (m_driverMemoryStatusLabel != nullptr)
+            {
+                m_driverMemoryStatusLabel->setText(
+                    QString("缓存已修改：差异块=%1，点击“应用差异到真实内存”后才会写入。")
+                    .arg(diffBlocks.size()));
+            }
         });
 }
 

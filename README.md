@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Website/Images/logo.png" alt="Ksword Logo" width="420" />
+  <img src="https://github.com/WangWei-CM/KSword/blob/main/Ksword5.1/Ksword5.1/Resource/Logo/MainLogo.png" alt="Ksword Logo" width="420" />
 </p>
 
 <h1 align="center">Ksword5.1</h1>

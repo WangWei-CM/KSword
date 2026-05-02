@@ -25,6 +25,8 @@
 #endif
 #include <Windows.h>
 
+#include <vector>
+
 namespace
 {
     // 桌面管理表格列索引：
@@ -104,6 +106,34 @@ namespace
         openResult.detailText = detailTextList.join(QStringLiteral("；"));
         return openResult;
     }
+
+    // findRetainedDesktopHandle：
+    // - 作用：在 OtherDock 保留的新建桌面句柄列表中查找目标桌面；
+    // - 调用：OpenDesktopW 失败后作为私有 DACL 桌面的切换回退路径；
+    // - 返回：命中时返回 HDESK，未命中返回 nullptr。
+    HDESK findRetainedDesktopHandle(
+        const std::vector<OtherDock::CreatedDesktopRecord>& desktopRecords,
+        const QString& windowStationName,
+        const QString& desktopName)
+    {
+        for (const OtherDock::CreatedDesktopRecord& record : desktopRecords)
+        {
+            if (record.desktopHandle == nullptr)
+            {
+                continue;
+            }
+            const bool stationMatched = record.windowStationName.isEmpty()
+                || windowStationName.isEmpty()
+                || QString::compare(record.windowStationName, windowStationName, Qt::CaseInsensitive) == 0;
+            const bool desktopMatched = QString::compare(record.desktopName, desktopName, Qt::CaseInsensitive) == 0;
+            const bool switchAccessPresent = (record.desiredAccess & DESKTOP_SWITCHDESKTOP) != 0;
+            if (stationMatched && desktopMatched && switchAccessPresent)
+            {
+                return reinterpret_cast<HDESK>(record.desktopHandle);
+            }
+        }
+        return nullptr;
+    }
 }
 
 void OtherDock::switchToSelectedDesktop()
@@ -182,8 +212,45 @@ void OtherDock::switchToSelectedDesktop()
             << ", detail="
             << openResult.detailText.toStdString()
             << eol;
+        HDESK retainedDesktopHandle = findRetainedDesktopHandle(
+            m_createdDesktopHandles,
+            windowStationName,
+            desktopName);
+        if (retainedDesktopHandle == nullptr)
+        {
+            m_desktopStatusLabel->setText(
+                QStringLiteral("切换失败：OpenDesktopW 详情=%1").arg(openResult.detailText));
+            return;
+        }
+
+        const BOOL retainedSwitchOk = ::SwitchDesktop(retainedDesktopHandle);
+        const DWORD retainedSwitchErrorCode = retainedSwitchOk ? ERROR_SUCCESS : ::GetLastError();
+        if (retainedSwitchOk == FALSE)
+        {
+            err << actionEvent
+                << "[OtherDock] 切换桌面失败：保留句柄 SwitchDesktop 失败, station="
+                << windowStationName.toStdString()
+                << ", desktop="
+                << desktopName.toStdString()
+                << ", code="
+                << retainedSwitchErrorCode
+                << eol;
+            m_desktopStatusLabel->setText(
+                QStringLiteral("切换失败：OpenDesktopW 失败且保留句柄 SwitchDesktop 错误码=%1")
+                .arg(retainedSwitchErrorCode));
+            return;
+        }
+
+        info << actionEvent
+            << "[OtherDock] 切换桌面成功（保留句柄）, station="
+            << windowStationName.toStdString()
+            << ", desktop="
+            << desktopName.toStdString()
+            << eol;
         m_desktopStatusLabel->setText(
-            QStringLiteral("切换失败：OpenDesktopW 详情=%1").arg(openResult.detailText));
+            QStringLiteral("切换成功：%1\\%2（方式=本进程保留句柄）")
+            .arg(windowStationName, desktopName));
+        refreshDesktopList();
         return;
     }
 
@@ -261,7 +328,8 @@ void OtherDock::showDesktopContextMenu(const QPoint& localPos)
     QMenu menu(this);
     // 显式填充菜单背景，避免浅色模式下继承透明样式出现黑底。
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
-    QAction* goDesktopAction = menu.addAction(QIcon(":/Icon/process_start.svg"), QStringLiteral("转到桌面"));
+    QAction* goDesktopAction = menu.addAction(QIcon(":/Icon/desktop_switch.svg"), QStringLiteral("转到桌面"));
+    QAction* createDesktopAction = menu.addAction(QIcon(":/Icon/desktop_create.svg"), QStringLiteral("新建桌面"));
     QAction* sidDetailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("查看SID详情"));
     QAction* copySidAction = menu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("复制SID"));
     QAction* copyDesktopAction = menu.addAction(QIcon(":/Icon/process_tree.svg"), QStringLiteral("复制完整桌面名"));
@@ -282,6 +350,12 @@ void OtherDock::showDesktopContextMenu(const QPoint& localPos)
     if (selectedAction == goDesktopAction)
     {
         switchToSelectedDesktop();
+        return;
+    }
+
+    if (selectedAction == createDesktopAction)
+    {
+        showCreateDesktopDialog();
         return;
     }
 

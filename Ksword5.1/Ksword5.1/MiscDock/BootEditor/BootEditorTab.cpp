@@ -140,7 +140,7 @@ void BootEditorTab::initializeUi()
 {
     // 根布局：
     // - 顶部工具栏；
-    // - 中部左右分栏；
+    // - 中部上方条目表与下方三栏编辑区；
     // - 底部状态摘要。
     m_rootLayout = new QVBoxLayout(this);
     m_rootLayout->setContentsMargins(6, 6, 6, 6);
@@ -222,7 +222,7 @@ void BootEditorTab::initializeCenterPane()
 {
     // 主体改为上下布局：
     // - 上半区只放条目表，避免被编辑区挤压；
-    // - 下半区放编辑区，再细分为左右两栏。
+    // - 下半区放编辑区，再细分为基础字段、高级开关、原始输出三栏。
     m_mainSplitter = new QSplitter(Qt::Vertical, this);
     m_mainSplitter->setChildrenCollapsible(false);
     m_rootLayout->addWidget(m_mainSplitter, 1);
@@ -258,7 +258,10 @@ void BootEditorTab::initializeCenterPane()
     entryHeader->setSectionResizeMode(kColumnPath, QHeaderView::Stretch);
     entryHeader->setSectionResizeMode(kColumnFlags, QHeaderView::ResizeToContents);
 
-    // 下方编辑区：再拆成左右两栏，降低单列过长问题。
+    // 下方编辑区：
+    // - 第一栏承载基础字段、传统引导快捷操作与应用按钮；
+    // - 第二栏承载高级开关与自定义命令；
+    // - 第三栏独立承载原始输出，避免日志区域挤占配置控件。
     m_editorPane = new QWidget(m_mainSplitter);
     m_editorPaneLayout = new QVBoxLayout(m_editorPane);
     m_editorPaneLayout->setContentsMargins(0, 0, 0, 0);
@@ -273,10 +276,15 @@ void BootEditorTab::initializeCenterPane()
     leftEditorLayout->setContentsMargins(0, 0, 0, 0);
     leftEditorLayout->setSpacing(6);
 
-    QWidget* rightEditorColumn = new QWidget(editorColumnsSplitter);
-    QVBoxLayout* rightEditorLayout = new QVBoxLayout(rightEditorColumn);
-    rightEditorLayout->setContentsMargins(0, 0, 0, 0);
-    rightEditorLayout->setSpacing(6);
+    QWidget* middleEditorColumn = new QWidget(editorColumnsSplitter);
+    QVBoxLayout* middleEditorLayout = new QVBoxLayout(middleEditorColumn);
+    middleEditorLayout->setContentsMargins(0, 0, 0, 0);
+    middleEditorLayout->setSpacing(6);
+
+    QWidget* outputEditorColumn = new QWidget(editorColumnsSplitter);
+    QVBoxLayout* outputEditorLayout = new QVBoxLayout(outputEditorColumn);
+    outputEditorLayout->setContentsMargins(0, 0, 0, 0);
+    outputEditorLayout->setSpacing(6);
 
     // 基础字段编辑组。
     QGroupBox* basicGroup = new QGroupBox(QStringLiteral("基础字段"), leftEditorColumn);
@@ -366,7 +374,7 @@ void BootEditorTab::initializeCenterPane()
     leftEditorLayout->addWidget(legacyGroup);
 
     // 高级开关组。
-    QGroupBox* flagGroup = new QGroupBox(QStringLiteral("高级开关"), rightEditorColumn);
+    QGroupBox* flagGroup = new QGroupBox(QStringLiteral("高级开关"), middleEditorColumn);
     QVBoxLayout* flagLayout = new QVBoxLayout(flagGroup);
     // 标题与内容之间保留额外顶部空间，避免全局 QGroupBox 标题压住第一个复选框。
     flagLayout->setContentsMargins(8, 14, 8, 8);
@@ -394,7 +402,7 @@ void BootEditorTab::initializeCenterPane()
     flagLayout->addWidget(m_recoveryEnabledCheck);
     flagLayout->addWidget(new QLabel(QStringLiteral("safeboot 模式"), flagGroup));
     flagLayout->addWidget(m_safeBootCombo);
-    rightEditorLayout->addWidget(flagGroup);
+    middleEditorLayout->addWidget(flagGroup);
 
     // 应用动作区：分离“当前条目修改”和“bootmgr 全局参数”。
     QWidget* actionWidget = new QWidget(leftEditorColumn);
@@ -403,13 +411,13 @@ void BootEditorTab::initializeCenterPane()
     actionLayout->setSpacing(6);
 
     m_applyEntryButton = new QPushButton(QStringLiteral("应用当前条目"), actionWidget);
-    m_applyEntryButton->setToolTip(QStringLiteral("按右侧字段写回当前选中的 BCD 条目"));
+    m_applyEntryButton->setToolTip(QStringLiteral("按基础字段与高级开关写回当前选中的 BCD 条目"));
     m_applyEntryButton->setIcon(QIcon(QStringLiteral(":/Icon/process_start.svg")));
     m_applyBootMgrButton = new QPushButton(QStringLiteral("应用 bootmgr 超时"), actionWidget);
     m_applyBootMgrButton->setToolTip(QStringLiteral("仅写入 bcdedit /timeout 参数"));
     m_applyBootMgrButton->setIcon(QIcon(QStringLiteral(":/Icon/process_priority.svg")));
     m_reloadOneButton = new QPushButton(QStringLiteral("重读当前条目"), actionWidget);
-    m_reloadOneButton->setToolTip(QStringLiteral("按当前选中行重新加载右侧字段（不写入）"));
+    m_reloadOneButton->setToolTip(QStringLiteral("按当前选中行重新加载编辑字段（不写入）"));
     m_reloadOneButton->setIcon(QIcon(QStringLiteral(":/Icon/process_refresh.svg")));
 
     actionLayout->addWidget(m_applyEntryButton);
@@ -420,7 +428,7 @@ void BootEditorTab::initializeCenterPane()
     leftEditorLayout->addStretch(1);
 
     // 自定义命令组：支持输入任意 bcdedit 参数。
-    QGroupBox* customGroup = new QGroupBox(QStringLiteral("自定义命令"), rightEditorColumn);
+    QGroupBox* customGroup = new QGroupBox(QStringLiteral("自定义命令"), middleEditorColumn);
     QHBoxLayout* customLayout = new QHBoxLayout(customGroup);
     customLayout->setContentsMargins(8, 8, 8, 8);
     customLayout->setSpacing(6);
@@ -435,10 +443,13 @@ void BootEditorTab::initializeCenterPane()
 
     customLayout->addWidget(m_customCommandEdit, 1);
     customLayout->addWidget(m_runCustomCommandButton, 0);
-    rightEditorLayout->addWidget(customGroup);
+    middleEditorLayout->addWidget(customGroup);
+    middleEditorLayout->addStretch(1);
 
-    // 原始输出组：记录命令与输出，方便审计。
-    QGroupBox* outputGroup = new QGroupBox(QStringLiteral("原始输出"), rightEditorColumn);
+    // 原始输出组：
+    // - 独立放入第三栏，形成稳定的日志观察区域；
+    // - 与第二栏的高级开关/自定义命令分离，避免横向扩展时互相挤压。
+    QGroupBox* outputGroup = new QGroupBox(QStringLiteral("原始输出"), outputEditorColumn);
     QVBoxLayout* outputLayout = new QVBoxLayout(outputGroup);
     outputLayout->setContentsMargins(8, 8, 8, 8);
     outputLayout->setSpacing(4);
@@ -448,7 +459,7 @@ void BootEditorTab::initializeCenterPane()
     m_rawOutputEdit->setPlaceholderText(QStringLiteral("这里显示 bcdedit 原始输出与命令执行日志。"));
     m_rawOutputEdit->setMinimumHeight(180);
     outputLayout->addWidget(m_rawOutputEdit);
-    rightEditorLayout->addWidget(outputGroup, 1);
+    outputEditorLayout->addWidget(outputGroup, 1);
 
     // 分割比例：
     // - 上表格优先保证可读；
@@ -457,9 +468,10 @@ void BootEditorTab::initializeCenterPane()
     m_mainSplitter->setStretchFactor(1, 5);
     m_mainSplitter->setSizes(QList<int>{ 380, 320 });
 
-    editorColumnsSplitter->setStretchFactor(0, 5);
-    editorColumnsSplitter->setStretchFactor(1, 5);
-    editorColumnsSplitter->setSizes(QList<int>{ 1, 1 });
+    editorColumnsSplitter->setStretchFactor(0, 4);
+    editorColumnsSplitter->setStretchFactor(1, 3);
+    editorColumnsSplitter->setStretchFactor(2, 5);
+    editorColumnsSplitter->setSizes(QList<int>{ 360, 320, 420 });
 }
 
 void BootEditorTab::initializeConnections()

@@ -143,6 +143,15 @@ KswordArkCallbackActionIsValidForType(
         }
         return FALSE;
 
+    case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER:
+        if (actionType == KSWORD_ARK_RULE_ACTION_ALLOW ||
+            actionType == KSWORD_ARK_RULE_ACTION_DENY ||
+            actionType == KSWORD_ARK_RULE_ACTION_ASK_USER ||
+            actionType == KSWORD_ARK_RULE_ACTION_LOG_ONLY) {
+            return TRUE;
+        }
+        return FALSE;
+
     default:
         return FALSE;
     }
@@ -400,7 +409,7 @@ KswordArkCallbackBuildSnapshotFromBlob(
         }
 
         if (ruleBlob->callbackType == KSWORD_ARK_CALLBACK_TYPE_NONE ||
-            ruleBlob->callbackType > KSWORD_ARK_CALLBACK_TYPE_OBJECT) {
+            ruleBlob->callbackType > KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) {
             return STATUS_INVALID_PARAMETER;
         }
 
@@ -716,7 +725,7 @@ KswordArkCallbackMatchRule(
 
     RtlZeroMemory(matchResultOut, sizeof(*matchResultOut));
     if (callbackType == KSWORD_ARK_CALLBACK_TYPE_NONE ||
-        callbackType > KSWORD_ARK_CALLBACK_TYPE_OBJECT) {
+        callbackType > KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) {
         return STATUS_INVALID_PARAMETER;
     }
 

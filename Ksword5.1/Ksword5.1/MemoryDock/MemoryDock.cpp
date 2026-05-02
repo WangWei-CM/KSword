@@ -1,6 +1,7 @@
 ﻿#include "MemoryDock.h"
 
 #include "../theme.h"
+#include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/HexEditorWidget.h"
 
 #include <QAction>
@@ -54,6 +55,7 @@
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <type_traits>
 
 // Win32 API 头文件：进程枚举、模块枚举、内存遍历、读写内存全部来自这些头。
 #ifndef NOMINMAX

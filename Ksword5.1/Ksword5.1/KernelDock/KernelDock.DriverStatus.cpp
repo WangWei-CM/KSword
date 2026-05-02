@@ -47,8 +47,10 @@ namespace
         const wchar_t* title = nullptr;
     };
 
-    // kDynCapabilities lists every KSW_CAP_* bit that can gate private-offset features.
-    constexpr std::array<CapabilityDisplay, 11> kDynCapabilities{ {
+    // kDynCapabilities：
+    // - 作用：列出所有可由 R0 DynData 暴露的 capability bit；
+    // - 处理逻辑：驱动状态页、能力详情和筛选都复用该表。
+    constexpr std::array<CapabilityDisplay, 12> kDynCapabilities{ {
         { KSW_CAP_DYN_NTOS_ACTIVE, "KSW_CAP_DYN_NTOS_ACTIVE", L"ntoskrnl profile 已激活" },
         { KSW_CAP_DYN_LXCORE_ACTIVE, "KSW_CAP_DYN_LXCORE_ACTIVE", L"lxcore profile 已激活" },
         { KSW_CAP_OBJECT_TYPE_FIELDS, "KSW_CAP_OBJECT_TYPE_FIELDS", L"对象类型字段" },
@@ -59,7 +61,8 @@ namespace
         { KSW_CAP_ALPC_FIELDS, "KSW_CAP_ALPC_FIELDS", L"ALPC 字段" },
         { KSW_CAP_SECTION_CONTROL_AREA, "KSW_CAP_SECTION_CONTROL_AREA", L"Section/ControlArea" },
         { KSW_CAP_PROCESS_PROTECTION_PATCH, "KSW_CAP_PROCESS_PROTECTION_PATCH", L"进程保护修改" },
-        { KSW_CAP_WSL_LXCORE_FIELDS, "KSW_CAP_WSL_LXCORE_FIELDS", L"WSL/lxcore 字段" }
+        { KSW_CAP_WSL_LXCORE_FIELDS, "KSW_CAP_WSL_LXCORE_FIELDS", L"WSL/lxcore 字段" },
+        { KSW_CAP_ETW_GUID_FIELDS, "KSW_CAP_ETW_GUID_FIELDS", L"ETW GUID/Registration 字段" }
     } };
 
     // kSecurityPolicies lists every policy bit currently surfaced by Phase 1.

@@ -195,7 +195,7 @@ namespace ks::process
         double ramMB = 0.0;                // RAM 申请内存（MB，优先 PrivateUsage）。
         double workingSetMB = 0.0;         // RAM 实际使用工作集（MB）。
         double diskMBps = 0.0;             // 磁盘吞吐（MB/s）。
-        double gpuPercent = 0.0;           // GPU（当前预留，默认 0）。
+        double gpuPercent = 0.0;           // GPU 百分比（R3 通过 PDH GPU Engine 按 PID 聚合）。
         double netKBps = 0.0;              // 网络（当前预留，默认 0）。
 
         bool staticDetailsReady = false;   // true 表示详情字段已完整填充。
@@ -380,7 +380,8 @@ namespace ks::process
 
     // UpdateDerivedCounters 作用：
     // - 根据“上一轮样本 + 当前原始计数器”计算 CPU%、DiskMB/s；
-    // - GPU/Net 当前默认保留为 0（后续可扩展）。
+    // - GPU 由枚举阶段的 PDH GPU Engine 采样写入，本函数只保留该值；
+    // - Net 当前默认保留为 0（后续可扩展）。
     // 参数 processRecord：目标记录（按引用写入衍生值）。
     // 参数 previousSample：上一轮样本（可空）。
     // 参数 nextSampleOut：输出下一轮样本。

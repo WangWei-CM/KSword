@@ -705,6 +705,39 @@ void OtherDock::refreshDesktopList()
     int selectRowIndex = -1;
     int desktopCountForStatus = 0;
     int accessibleWindowStationCount = 0;
+    QStringList enumeratedDesktopKeyList; // 已由 EnumDesktopsW 枚举出的真实桌面键，后续用于补齐私有保留句柄行。
+
+    // makeDesktopKey：
+    // - 作用：把窗口站名和桌面名折叠为大小写无关的去重键；
+    // - 输入：windowStationName/desktopName；
+    // - 输出：station\desktop 形式的小写键。
+    auto makeDesktopKey = [](const QString& windowStationName, const QString& desktopName) -> QString {
+        return QStringLiteral("%1\\%2")
+            .arg(windowStationName.trimmed().toLower(), desktopName.trimmed().toLower());
+    };
+
+    // findRetainedRecord：
+    // - 作用：按窗口站/桌面名称查找本进程保留的新建桌面句柄；
+    // - 输入：windowStationName/desktopName 来自当前枚举行；
+    // - 输出：命中时返回只读记录指针，否则返回 nullptr。
+    auto findRetainedRecord = [this](const QString& windowStationName, const QString& desktopName) -> const CreatedDesktopRecord* {
+        for (const CreatedDesktopRecord& createdRecord : m_createdDesktopHandles)
+        {
+            if (createdRecord.desktopHandle == nullptr)
+            {
+                continue;
+            }
+            const bool stationMatched = createdRecord.windowStationName.isEmpty()
+                || windowStationName.isEmpty()
+                || QString::compare(createdRecord.windowStationName, windowStationName, Qt::CaseInsensitive) == 0;
+            const bool desktopMatched = QString::compare(createdRecord.desktopName, desktopName, Qt::CaseInsensitive) == 0;
+            if (stationMatched && desktopMatched)
+            {
+                return &createdRecord;
+            }
+        }
+        return static_cast<const CreatedDesktopRecord*>(nullptr);
+    };
 
     for (const QString& windowStationName : windowStationNameList)
     {
@@ -831,6 +864,9 @@ void OtherDock::refreshDesktopList()
             // remarkList：聚合本行的工作站标志、输入能力、错误码与限制说明。
             QStringList remarkList;
             remarkList << QStringLiteral("工作站标志=%1").arg(stationFlagsText);
+            const CreatedDesktopRecord* retainedRecord = findRetainedRecord(
+                rowData.windowStationName,
+                rowData.desktopName);
             const DesktopOpenResult readOpenResult = tryOpenDesktopHandle(
                 windowStationName,
                 desktopName,
@@ -871,10 +907,36 @@ void OtherDock::refreshDesktopList()
             }
             else
             {
-                rowData.readCapability = DesktopCapabilityState::No;
-                rowData.heapSizeText = QStringLiteral("-");
-                remarkList << QStringLiteral("打开(读)失败=%1").arg(readOpenResult.detailText);
-                remarkList << QStringLiteral("所有者来源=窗口站");
+                if (retainedRecord != nullptr && retainedRecord->desktopHandle != nullptr)
+                {
+                    HDESK retainedDesktopHandle = reinterpret_cast<HDESK>(retainedRecord->desktopHandle);
+                    rowData.readCapability = DesktopCapabilityState::Yes;
+                    rowData.heapSizeText = queryDesktopHeapSizeText(retainedDesktopHandle);
+                    remarkList << QStringLiteral("打开(读)失败=%1").arg(readOpenResult.detailText);
+                    remarkList << QStringLiteral("读取回退=本进程保留句柄");
+
+                    bool inputDesktopEnabled = false;
+                    if (queryDesktopInputState(retainedDesktopHandle, inputDesktopEnabled))
+                    {
+                        rowData.inputDesktopKnown = true;
+                        rowData.inputDesktopEnabled = inputDesktopEnabled;
+                        remarkList << QStringLiteral("接收输入=%1")
+                            .arg(inputDesktopEnabled ? QStringLiteral("是") : QStringLiteral("否"));
+                    }
+
+                    const SidDescription retainedOwnerInfo = queryWindowObjectOwnerInfo(retainedDesktopHandle);
+                    rowData.ownerAccountText = retainedOwnerInfo.accountText;
+                    rowData.ownerSidText = retainedOwnerInfo.sidText;
+                    rowData.ownerSidDetailText = retainedOwnerInfo.detailText;
+                    remarkList << QStringLiteral("所有者来源=本进程保留句柄");
+                }
+                else
+                {
+                    rowData.readCapability = DesktopCapabilityState::No;
+                    rowData.heapSizeText = QStringLiteral("-");
+                    remarkList << QStringLiteral("打开(读)失败=%1").arg(readOpenResult.detailText);
+                    remarkList << QStringLiteral("所有者来源=窗口站");
+                }
             }
 
             const DesktopOpenResult switchOpenResult = tryOpenDesktopHandle(
@@ -889,8 +951,20 @@ void OtherDock::refreshDesktopList()
             }
             else
             {
-                rowData.switchCapability = DesktopCapabilityState::No;
-                remarkList << QStringLiteral("打开(切换)失败=%1").arg(switchOpenResult.detailText);
+                const bool retainedHandleMatched = retainedRecord != nullptr
+                    && retainedRecord->desktopHandle != nullptr
+                    && (retainedRecord->desiredAccess & DESKTOP_SWITCHDESKTOP) != 0;
+                if (retainedHandleMatched)
+                {
+                    rowData.switchCapability = DesktopCapabilityState::Yes;
+                    remarkList << QStringLiteral("打开(切换)失败=%1").arg(switchOpenResult.detailText);
+                    remarkList << QStringLiteral("切换回退=本进程保留句柄");
+                }
+                else
+                {
+                    rowData.switchCapability = DesktopCapabilityState::No;
+                    remarkList << QStringLiteral("打开(切换)失败=%1").arg(switchOpenResult.detailText);
+                }
             }
 
             if (!isCurrentWindowStation)
@@ -900,6 +974,7 @@ void OtherDock::refreshDesktopList()
 
             rowData.remarkText = remarkList.join(QStringLiteral("；"));
             rowDataList.push_back(rowData);
+            enumeratedDesktopKeyList << makeDesktopKey(rowData.windowStationName, rowData.desktopName);
 
             if (rowData.isCurrentDesktop)
             {
@@ -910,6 +985,71 @@ void OtherDock::refreshDesktopList()
         if (needCloseWindowStation)
         {
             ::CloseWindowStation(windowStationHandle);
+        }
+    }
+
+    // 私有 DACL 桌面可能无法被 OpenDesktopW 重新打开，极端情况下也可能无法稳定枚举。
+    // 因此把本进程保留的创建句柄补成合成行，保证用户仍可在表格中看到并执行切换。
+    for (const CreatedDesktopRecord& createdRecord : m_createdDesktopHandles)
+    {
+        if (createdRecord.desktopHandle == nullptr || createdRecord.desktopName.trimmed().isEmpty())
+        {
+            continue;
+        }
+
+        const QString retainedWindowStationName = createdRecord.windowStationName.trimmed().isEmpty()
+            ? currentWindowStationName
+            : createdRecord.windowStationName.trimmed();
+        const QString retainedKey = makeDesktopKey(retainedWindowStationName, createdRecord.desktopName);
+        if (enumeratedDesktopKeyList.contains(retainedKey, Qt::CaseInsensitive))
+        {
+            continue;
+        }
+
+        HDESK retainedDesktopHandle = reinterpret_cast<HDESK>(createdRecord.desktopHandle);
+        DesktopRowData rowData;
+        rowData.windowStationName = retainedWindowStationName;
+        rowData.desktopName = createdRecord.desktopName;
+        rowData.isCurrentWindowStation = !currentWindowStationName.isEmpty()
+            && QString::compare(retainedWindowStationName, currentWindowStationName, Qt::CaseInsensitive) == 0;
+        rowData.isCurrentDesktop = rowData.isCurrentWindowStation
+            && !currentDesktopName.isEmpty()
+            && QString::compare(createdRecord.desktopName, currentDesktopName, Qt::CaseInsensitive) == 0;
+        rowData.isInteractiveWindowStation = rowData.isCurrentWindowStation;
+        rowData.sessionId = currentSessionId;
+        rowData.readCapability = DesktopCapabilityState::Yes;
+        rowData.switchCapability = (createdRecord.desiredAccess & DESKTOP_SWITCHDESKTOP) != 0
+            ? DesktopCapabilityState::Yes
+            : DesktopCapabilityState::No;
+        rowData.heapSizeText = queryDesktopHeapSizeText(retainedDesktopHandle);
+
+        bool inputDesktopEnabled = false;
+        if (queryDesktopInputState(retainedDesktopHandle, inputDesktopEnabled))
+        {
+            rowData.inputDesktopKnown = true;
+            rowData.inputDesktopEnabled = inputDesktopEnabled;
+        }
+
+        const SidDescription retainedOwnerInfo = queryWindowObjectOwnerInfo(retainedDesktopHandle);
+        rowData.ownerAccountText = retainedOwnerInfo.accountText;
+        rowData.ownerSidText = retainedOwnerInfo.sidText;
+        rowData.ownerSidDetailText = retainedOwnerInfo.detailText;
+        rowData.remarkText = QStringLiteral(
+            "本进程保留句柄合成行；私有=%1；句柄继承=%2；访问掩码=0x%3；接收输入=%4")
+            .arg(createdRecord.privateAccess ? QStringLiteral("是") : QStringLiteral("否"))
+            .arg(createdRecord.inheritableHandle ? QStringLiteral("是") : QStringLiteral("否"))
+            .arg(QStringLiteral("%1")
+                .arg(static_cast<qulonglong>(createdRecord.desiredAccess), 8, 16, QChar('0'))
+                .toUpper())
+            .arg(rowData.inputDesktopKnown
+                ? (rowData.inputDesktopEnabled ? QStringLiteral("是") : QStringLiteral("否"))
+                : QStringLiteral("未知"));
+
+        rowDataList.push_back(rowData);
+        ++desktopCountForStatus;
+        if (rowData.isCurrentDesktop)
+        {
+            selectRowIndex = static_cast<int>(rowDataList.size()) - 1;
         }
     }
 

@@ -12,9 +12,11 @@
 
 #include <QColor>
 #include <QEvent>
+#include <QFont>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
+#include <QPolygonF>
 #include <QSizePolicy>
 #include <QtGlobal>
 #include <QWheelEvent>
@@ -165,6 +167,7 @@ void ProcessTraceTimelineWidget::setCaptureRange(
 void ProcessTraceTimelineWidget::resetTimeline(const std::uint64_t start100ns)
 {
     m_eventPointList.clear();
+    m_ratePointList.clear();
     m_rangeStart100ns = start100ns;
     m_rangeEnd100ns = start100ns + kDefaultRange100ns;
     m_selectionStart100ns = m_rangeStart100ns;
@@ -193,6 +196,16 @@ void ProcessTraceTimelineWidget::setEventPoints(
     const std::vector<ProcessTraceTimelineEventPoint>& eventPointList)
 {
     m_eventPointList = eventPointList;
+    update();
+}
+
+void ProcessTraceTimelineWidget::setRateOverlayPoints(
+    const std::vector<ProcessTraceTimelineRatePoint>& ratePointList)
+{
+    // 速率折线是可选叠加层：
+    // - ETW 页不会设置该列表，因此原有事件瀑布流绘制不受影响；
+    // - 网络页传入按秒聚合后的上传/下载速率，控件只负责映射到当前时间范围。
+    m_ratePointList = ratePointList;
     update();
 }
 
@@ -267,6 +280,94 @@ void ProcessTraceTimelineWidget::paintEvent(QPaintEvent* eventPointer)
         painter.setPen(Qt::NoPen);
         painter.setBrush(colorForType(pointValue.typeText));
         painter.drawEllipse(QPointF(xValue, yValue), 1.7, 1.7);
+    }
+
+    // 速率折线叠加：
+    // - 折线使用同一条 X 轴，Y 轴按当前可见范围内的峰值自适应；
+    // - 绿色表示上传/出站，蓝色表示下载/入站；
+    // - 折线绘制在选区框之前，保证框选区域仍然位于最上层。
+    if (!m_ratePointList.empty() && m_rangeEnd100ns > m_rangeStart100ns)
+    {
+        double maxVisibleRate = 0.0;
+        for (const ProcessTraceTimelineRatePoint& ratePoint : m_ratePointList)
+        {
+            if (ratePoint.time100ns < m_rangeStart100ns || ratePoint.time100ns > m_rangeEnd100ns)
+            {
+                continue;
+            }
+            maxVisibleRate = std::max(maxVisibleRate, ratePoint.uploadBytesPerSecond);
+            maxVisibleRate = std::max(maxVisibleRate, ratePoint.downloadBytesPerSecond);
+        }
+
+        if (maxVisibleRate > 0.0)
+        {
+            QPolygonF uploadPolygon;
+            QPolygonF downloadPolygon;
+            const QRectF rateRect = axisRect.adjusted(0.0, 3.0, 0.0, -4.0);
+
+            // appendRatePoint 用途：把“某秒 B/s”映射成折线坐标点。
+            const auto appendRatePoint = [this, &rateRect, maxVisibleRate](
+                QPolygonF& polygon,
+                const std::uint64_t time100ns,
+                const double bytesPerSecond)
+                {
+                    const double clampedRate = std::clamp(bytesPerSecond, 0.0, maxVisibleRate);
+                    const double ratio = maxVisibleRate <= 0.0 ? 0.0 : clampedRate / maxVisibleRate;
+                    const double xValue = timeToX(time100ns);
+                    const double yValue = rateRect.bottom() - rateRect.height() * ratio;
+                    polygon << QPointF(xValue, yValue);
+                };
+
+            for (const ProcessTraceTimelineRatePoint& ratePoint : m_ratePointList)
+            {
+                if (ratePoint.time100ns < m_rangeStart100ns || ratePoint.time100ns > m_rangeEnd100ns)
+                {
+                    continue;
+                }
+                appendRatePoint(uploadPolygon, ratePoint.time100ns, ratePoint.uploadBytesPerSecond);
+                appendRatePoint(downloadPolygon, ratePoint.time100ns, ratePoint.downloadBytesPerSecond);
+            }
+
+            QColor uploadLineColor(76, 175, 80, 220);
+            QColor downloadLineColor(33, 150, 243, 220);
+            painter.setBrush(Qt::NoBrush);
+
+            // drawPolyline 需要至少两个点；单秒只有一个采样时退化成圆点，避免折线不可见。
+            painter.setPen(QPen(downloadLineColor, 1.5));
+            if (downloadPolygon.size() > 1)
+            {
+                painter.drawPolyline(downloadPolygon);
+            }
+            else if (downloadPolygon.size() == 1)
+            {
+                painter.setBrush(downloadLineColor);
+                painter.drawEllipse(downloadPolygon.first(), 2.0, 2.0);
+                painter.setBrush(Qt::NoBrush);
+            }
+
+            painter.setPen(QPen(uploadLineColor, 1.5));
+            if (uploadPolygon.size() > 1)
+            {
+                painter.drawPolyline(uploadPolygon);
+            }
+            else if (uploadPolygon.size() == 1)
+            {
+                painter.setBrush(uploadLineColor);
+                painter.drawEllipse(uploadPolygon.first(), 2.0, 2.0);
+                painter.setBrush(Qt::NoBrush);
+            }
+
+            // 简短图例直接绘制在轴内，避免新增控件占用网络 Dock 垂直空间。
+            const QFont originalFont = painter.font();
+            QFont legendFont = originalFont;
+            legendFont.setPointSizeF(std::max(7.0, originalFont.pointSizeF() - 1.0));
+            painter.setFont(legendFont);
+            painter.setPen(uploadLineColor);
+            painter.drawText(axisRect.adjusted(54.0, 1.0, -54.0, 0.0), Qt::AlignTop | Qt::AlignHCenter, QStringLiteral("上行"));
+            painter.setPen(downloadLineColor);
+            painter.drawText(axisRect.adjusted(96.0, 1.0, -12.0, 0.0), Qt::AlignTop | Qt::AlignLeft, QStringLiteral("下行"));
+            painter.setFont(originalFont);
+        }
     }
 
     // 选区框放在事件点之后绘制，保证拖拽框始终可见。

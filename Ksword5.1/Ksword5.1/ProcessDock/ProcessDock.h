@@ -22,6 +22,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // 前置声明：减少头文件编译开销。
@@ -110,7 +111,7 @@ private:
         Cpu,           // CPU 百分比。
         Ram,           // RAM（MB）。
         Disk,          // DISK（MB/s）。
-        Gpu,           // GPU（预留）。
+        Gpu,           // GPU 百分比（R3 PDH GPU Engine 聚合）。
         Net,           // Net（预留）。
         Signature,     // 数字签名状态。
         Path,          // 可执行路径。
@@ -253,7 +254,7 @@ public:
         double memoryMB = 0.0;         // memoryMB：该进程采样时工作集。
         double diskMBps = 0.0;         // diskMBps：该进程采样时磁盘吞吐。
         double netKBps = 0.0;          // netKBps：该进程采样时网络吞吐。
-        double gpuPercent = 0.0;       // gpuPercent：该进程采样时 GPU。
+        double gpuPercent = 0.0;       // gpuPercent：该进程采样时 GPU 百分比。
     };
 
     // ProcessActivitySample：一次进程列表活动采样。
@@ -334,6 +335,7 @@ private:
 
     // ======== 进程活动记录与时间轴 ========
     bool isProcessActivityMetricEnabled(ProcessActivityMetric metric) const;
+    bool isProcessActivityRefreshAllowedNow() const;
     bool isProcessActivityRecordingAllowedNow() const;
     bool isProcessListPageVisibleForRecording() const;
     void appendProcessActivitySample();
@@ -344,6 +346,13 @@ private:
     void previewProcessActivitySnapshotForIndex(int sampleIndex);
     void showProcessActivitySnapshotForIndex(int sampleIndex);
     void commitProcessActivityTimelineIndex(int sampleIndex);
+    // handleProcessWindowPickerRelease 作用：
+    // - 接收“进程页准星拖拽拾取”释放坐标；
+    // - 按窗口页同类逻辑命中鼠标下窗口并解析所属 PID；
+    // - 设置进程列表筛选器为 PID，并打开对应进程详细信息窗口。
+    // 参数 globalPos：鼠标释放时的全局屏幕坐标。
+    // 返回值：无，失败时通过提示框和日志反馈。
+    void handleProcessWindowPickerRelease(const QPoint& globalPos);
     bool isProcessActivityTableSnapshotActive() const;
     void rebuildProcessActivityTableSnapshotRecords();
     QString buildProcessActivitySnapshotText(int sampleIndex) const;
@@ -367,6 +376,23 @@ private:
     // - 通过 R0 驱动 IOCTL 请求设置目标进程 PPL 保护层级；
     // - protectionLevel 使用单字节原生层级编码（Signer<<4 | Type）。
     void executeR0SetPplProtectionAction(std::uint8_t protectionLevel, const QString& levelDisplayText);
+    // executeR0SetProcessHiddenAction：
+    // - 作用：通过 R0 更新可恢复隐藏标记，并让本进程列表默认过滤这些 PID。
+    // - 参数 hidden：true=隐藏选中进程；false=取消隐藏选中进程。
+    void executeR0SetProcessHiddenAction(bool hidden);
+    // executeR0ClearProcessHiddenAction：
+    // - 作用：清空驱动内所有可恢复隐藏标记，并刷新进程列表。
+    void executeR0ClearProcessHiddenAction();
+    // executeR0SetBreakOnTerminationAction：
+    // - 作用：通过 R0 设置或清除 BreakOnTermination 关键进程标记。
+    // - 参数 enabled：true=启用；false=关闭。
+    void executeR0SetBreakOnTerminationAction(bool enabled);
+    // executeR0DisableApcInsertionAction：
+    // - 作用：通过 R0 清除目标进程现有线程 ApcQueueable 位。
+    void executeR0DisableApcInsertionAction();
+    // executeR0DkomRemoveFromCidTableAction：
+    // - 作用：通过 R0 从 PspCidTable 删除目标进程 CID 表项。
+    void executeR0DkomRemoveFromCidTableAction();
     // executeRefreshPplProtectionLevelAction 作用：
     // - 手动刷新当前可见进程的 PPL 保护级别枚举；
     // - 结果仅写入当前 UI 快照，不参与下一轮缓存复用。
@@ -469,6 +495,7 @@ private:
     QPushButton* m_startButton = nullptr;     // 开始监视按钮。
     QPushButton* m_pauseButton = nullptr;     // 暂停监视按钮。
     QCheckBox* m_kernelCompareCheck = nullptr;// 刷新时是否额外请求内核进程列表并做差异对比。
+    QCheckBox* m_showKswordHiddenProcessCheck = nullptr; // 是否显示被 Ksword R0 标记隐藏的进程。
     QLineEdit* m_processSearchLineEdit = nullptr; // 进程搜索框；用于按名称/PID/路径等关键词过滤当前列表。
     QLabel* m_refreshLabel = nullptr;         // 列表刷新间隔标签。
     QLineEdit* m_tableRefreshIntervalEdit = nullptr; // 进程表格重绘间隔输入框，默认 2 秒。
@@ -482,11 +509,13 @@ private:
     ProcessActivityTimelineSlider* m_activityTimelineSlider = nullptr; // m_activityTimelineSlider：隐藏内部时间轴，公开交互由折线图点击完成。
     QPushButton* m_activityClearButton = nullptr;   // m_activityClearButton：清空当前刷新记录缓存。
     QCheckBox* m_activityBackgroundRecordCheck = nullptr; // 后台保持刷新/记录开关。
+    QCheckBox* m_activityListOnlyRefreshCheck = nullptr; // 只刷新进程列表、不写入活动记录的开关。
     QPushButton* m_activityCpuButton = nullptr;     // CPU 指标显示按钮。
     QPushButton* m_activityMemoryButton = nullptr;  // 内存指标显示按钮。
     QPushButton* m_activityDiskButton = nullptr;    // 磁盘指标显示按钮。
     QPushButton* m_activityNetworkButton = nullptr; // 网络指标显示按钮。
     QPushButton* m_activityGpuButton = nullptr;     // GPU 指标显示按钮。
+    QPushButton* m_activityProcessPickerButton = nullptr; // 准星拖拽按钮：按目标窗口 PID 过滤进程并打开进程详情。
     QLabel* m_activityStatusLabel = nullptr;        // 活动记录状态标签。
     QLabel* m_activitySnapshotLabel = nullptr;      // 时间轴悬停快照摘要。
     bool m_activityRecordingEnabled = false;        // m_activityRecordingEnabled：由刷新状态派生，刷新即记录。
@@ -603,6 +632,7 @@ private:
     int m_trackedSelectedColumn = 0;          // 当前选中列索引；恢复 currentItem 时尽量保持用户焦点列。
     std::vector<ks::process::SystemThreadRecord> m_threadRecordList; // 线程页最近一次刷新结果缓存。
     std::string m_threadDiagnosticText;       // 线程页最近一次刷新诊断文本。
+    std::unordered_set<std::uint32_t> m_hiddenProcessPidSet; // 本会话已通过 R0 标记隐藏的 PID 集合。
 
     // ======== 右键菜单绑定状态 ========
     std::string m_contextActionIdentityKey;      // 当前菜单动作绑定的 identityKey。

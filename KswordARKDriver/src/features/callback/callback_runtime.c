@@ -302,6 +302,7 @@ KswordArkCallbackDestroyRuntime(
         return;
     }
 
+    KswordArkMinifilterCallbackUnregister(runtime);
     KswordArkObjectCallbackUnregister(runtime);
     KswordArkImageCallbackUnregister(runtime);
     KswordArkThreadCallbackUnregister(runtime);
@@ -352,6 +353,10 @@ KswordARKCallbackInitialize(
     runtime->Device = Device;
     runtime->WaitQueue = WDF_NO_HANDLE;
     runtime->ObRegistrationHandle = NULL;
+    runtime->MiniFilterHandle = NULL;
+    runtime->MiniFilterStarted = FALSE;
+    runtime->MiniFilterRegisterStatus = STATUS_NOT_SUPPORTED;
+    runtime->MiniFilterStartStatus = STATUS_NOT_SUPPORTED;
     runtime->RegisteredCallbacksMask = 0U;
     runtime->Initialized = FALSE;
     ExInitializePushLock(&runtime->SnapshotLock);

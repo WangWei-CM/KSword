@@ -22,8 +22,9 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
-#include <QPlainTextEdit>
 #include <QClipboard>
+#include <QPlainTextEdit>
+#include <QPixmap>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSize>
@@ -34,6 +35,7 @@
 #include <QTableWidgetItem>
 #include <QTimeZone>
 #include <QUrl>
+#include <QVariant>
 #include <QVBoxLayout>
 
 #include <Windows.h>
@@ -107,9 +109,19 @@ namespace
 
     quint32 defaultOperationMaskByType(const quint32 callbackType)
     {
+        // 作用：为新增规则提供默认操作掩码，只包含当前 UI 暴露的基础操作位。
+        // 返回：协议层 operationMask，后续仍可通过“自定义掩码”补充额外位。
         switch (callbackType)
         {
-        case KSWORD_ARK_CALLBACK_TYPE_REGISTRY: return KSWORD_ARK_REG_OP_ALL;
+        case KSWORD_ARK_CALLBACK_TYPE_REGISTRY:
+            return KSWORD_ARK_REG_OP_CREATE_KEY |
+                KSWORD_ARK_REG_OP_OPEN_KEY |
+                KSWORD_ARK_REG_OP_DELETE_KEY |
+                KSWORD_ARK_REG_OP_SET_VALUE |
+                KSWORD_ARK_REG_OP_DELETE_VALUE |
+                KSWORD_ARK_REG_OP_RENAME_KEY |
+                KSWORD_ARK_REG_OP_SET_INFO |
+                KSWORD_ARK_REG_OP_QUERY_VALUE;
         case KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE: return KSWORD_ARK_PROCESS_OP_CREATE;
         case KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE: return KSWORD_ARK_THREAD_OP_CREATE | KSWORD_ARK_THREAD_OP_EXIT;
         case KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD: return KSWORD_ARK_IMAGE_OP_LOAD;
@@ -230,17 +242,14 @@ namespace
             .toUpper();
     }
 
-    QList<QPair<QString, quint32>> operationPresetListByType(const quint32 callbackType)
+    QList<QPair<QString, quint32>> operationCheckboxListByType(const quint32 callbackType)
     {
+        // 作用：把原来的“操作类型下拉预设”拆成可直接勾选的基础位。
+        // 入参 callbackType：当前回调 Tab 类型；返回值：显示名称与协议掩码位。
         switch (callbackType)
         {
         case KSWORD_ARK_CALLBACK_TYPE_REGISTRY:
             return {
-                { QStringLiteral("全部"), KSWORD_ARK_REG_OP_ALL },
-                { QStringLiteral("常见增"), KSWORD_ARK_REG_OP_CREATE_KEY | KSWORD_ARK_REG_OP_SET_VALUE },
-                { QStringLiteral("常见删"), KSWORD_ARK_REG_OP_DELETE_KEY | KSWORD_ARK_REG_OP_DELETE_VALUE },
-                { QStringLiteral("常见改"), KSWORD_ARK_REG_OP_SET_VALUE | KSWORD_ARK_REG_OP_RENAME_KEY | KSWORD_ARK_REG_OP_SET_INFO },
-                { QStringLiteral("常见查"), KSWORD_ARK_REG_OP_OPEN_KEY | KSWORD_ARK_REG_OP_QUERY_VALUE },
                 { QStringLiteral("创建键"), KSWORD_ARK_REG_OP_CREATE_KEY },
                 { QStringLiteral("打开键"), KSWORD_ARK_REG_OP_OPEN_KEY },
                 { QStringLiteral("删除键"), KSWORD_ARK_REG_OP_DELETE_KEY },
@@ -259,8 +268,7 @@ namespace
         case KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE:
             return {
                 { QStringLiteral("线程创建"), KSWORD_ARK_THREAD_OP_CREATE },
-                { QStringLiteral("线程退出"), KSWORD_ARK_THREAD_OP_EXIT },
-                { QStringLiteral("创建+退出"), KSWORD_ARK_THREAD_OP_CREATE | KSWORD_ARK_THREAD_OP_EXIT }
+                { QStringLiteral("线程退出"), KSWORD_ARK_THREAD_OP_EXIT }
             };
 
         case KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD:
@@ -270,8 +278,6 @@ namespace
 
         case KSWORD_ARK_CALLBACK_TYPE_OBJECT:
             return {
-                { QStringLiteral("全部"), KSWORD_ARK_OBJECT_OP_HANDLE_CREATE | KSWORD_ARK_OBJECT_OP_HANDLE_DUPLICATE |
-                    KSWORD_ARK_OBJECT_OP_TYPE_PROCESS | KSWORD_ARK_OBJECT_OP_TYPE_THREAD },
                 { QStringLiteral("句柄创建"), KSWORD_ARK_OBJECT_OP_HANDLE_CREATE },
                 { QStringLiteral("句柄复制"), KSWORD_ARK_OBJECT_OP_HANDLE_DUPLICATE },
                 { QStringLiteral("进程对象"), KSWORD_ARK_OBJECT_OP_TYPE_PROCESS },
@@ -281,6 +287,127 @@ namespace
         default:
             return {};
         }
+    }
+
+    QString normalizeMaskTextForEdit(const QString& rawText)
+    {
+        // 作用：规范用户输入的自定义掩码，缺少 0x 前缀时自动补齐。
+        // 入参 rawText：用户原始输入；返回值：空文本或大写 0x 十六进制文本。
+        QString textValue = rawText.trimmed();
+        if (textValue.isEmpty())
+        {
+            return QString();
+        }
+
+        if (!textValue.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+        {
+            textValue.prepend(QStringLiteral("0x"));
+        }
+
+        return textValue.left(2).toLower() + textValue.mid(2).toUpper();
+    }
+
+    QString callbackRulePanelStyle()
+    {
+        // 作用：提供自定义单元格面板的统一不透明样式，避免透明父容器导致可读性下降。
+        // 返回：Qt stylesheet 字符串，供第一排操作复选区和第二排详情区复用。
+        return QStringLiteral(
+            "QWidget#ksCallbackRuleOperationPanel,"
+            "QWidget#ksCallbackRuleDetailPanel{"
+            "  background:%1;"
+            "  color:%2;"
+            "}"
+            "QWidget#ksCallbackRuleOperationPanel QCheckBox,"
+            "QWidget#ksCallbackRuleDetailPanel QLabel{"
+            "  color:%2;"
+            "}"
+            "QLabel#ksCallbackRuleFieldTitle{"
+            "  color:%3;"
+            "  font-weight:600;"
+            "}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::PrimaryBlueHex);
+    }
+
+    QString callbackRuleTableStyle()
+    {
+        // 作用：统一回调规则表格的表头、选中态和网格颜色。
+        // 返回：Qt stylesheet 字符串，所有回调类型 Tab 共享。
+        return QStringLiteral(
+            "QTableWidget{"
+            "  background:%1;"
+            "  alternate-background-color:%2;"
+            "  color:%3;"
+            "  gridline-color:%4;"
+            "}"
+            "QTableWidget::item:selected{"
+            "  background:%5;"
+            "  color:#FFFFFF;"
+            "}"
+            "QHeaderView::section{"
+            "  background:%2;"
+            "  color:%5;"
+            "  border:1px solid %4;"
+            "  padding:3px 6px;"
+            "  font-weight:600;"
+            "}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::SurfaceAltHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueHex);
+    }
+
+    QString callbackRuleContextMenuStyle()
+    {
+        // 作用：右键菜单强制使用不透明背景，避免浅色模式继承黑底黑字。
+        // 返回：Qt stylesheet 字符串，仅用于驱动回调规则表菜单。
+        return QStringLiteral(
+            "QMenu{"
+            "  background:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "}"
+            "QMenu::item{"
+            "  background:transparent;"
+            "  color:%2;"
+            "  padding:5px 26px 5px 26px;"
+            "}"
+            "QMenu::item:selected{"
+            "  background:%4;"
+            "  color:#FFFFFF;"
+            "}"
+            "QMenu::item:disabled{"
+            "  color:%5;"
+            "}"
+            "QMenu::separator{"
+            "  height:1px;"
+            "  background:%3;"
+            "  margin:4px 8px;"
+            "}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::TextDisabledColorHex());
+    }
+
+    QString normalizeCustomMaskEditText(QLineEdit* maskEdit)
+    {
+        // 作用：在用户离开自定义掩码输入框时补齐 0x 前缀，并同步规范显示。
+        // 入参 maskEdit：自定义掩码输入框；返回：规范后的文本，空指针时返回空串。
+        if (maskEdit == nullptr)
+        {
+            return QString();
+        }
+
+        const QString normalizedText = normalizeMaskTextForEdit(maskEdit->text());
+        if (normalizedText != maskEdit->text())
+        {
+            maskEdit->setText(normalizedText);
+        }
+        return normalizedText;
     }
 
     QString initiatorPlaceholderByType(const quint32 callbackType)
@@ -321,54 +448,60 @@ namespace
         }
     }
 
-    quint32 currentOperationMaskFromCombo(const QComboBox* comboBox, bool* okOut)
+    quint32 currentOperationMaskFromPanel(const QWidget* operationPanel, bool* okOut)
     {
+        // 作用：从“操作类型”复选区和自定义掩码输入框合成最终 operationMask。
+        // 入参 operationPanel：表格第一排操作单元格控件；okOut：返回解析状态。
         if (okOut != nullptr)
         {
             *okOut = false;
         }
-        if (comboBox == nullptr)
+        if (operationPanel == nullptr)
         {
             return 0U;
         }
 
         quint32 operationMask = 0U;
-        if (parseUnsignedText(comboBox->currentText(), &operationMask))
+        const QList<QCheckBox*> checkBoxList = operationPanel->findChildren<QCheckBox*>(
+            QString(),
+            Qt::FindDirectChildrenOnly);
+        for (const QCheckBox* checkBox : checkBoxList)
         {
-            if (okOut != nullptr)
+            if (checkBox == nullptr || !checkBox->isChecked())
             {
-                *okOut = true;
+                continue;
             }
-            return operationMask;
+
+            bool bitOk = false;
+            const quint32 bitValue = checkBox->property("operationMaskBit").toUInt(&bitOk);
+            if (bitOk)
+            {
+                operationMask |= bitValue;
+            }
         }
 
-        const QString fullText = comboBox->currentText().trimmed();
-        const int leftBracketIndex = fullText.lastIndexOf('(');
-        const int rightBracketIndex = fullText.lastIndexOf(')');
-        if (leftBracketIndex >= 0 && rightBracketIndex > leftBracketIndex)
+        const auto* customMaskEdit = operationPanel->findChild<QLineEdit*>(
+            QStringLiteral("ksCallbackRuleCustomMaskEdit"),
+            Qt::FindDirectChildrenOnly);
+        if (customMaskEdit != nullptr)
         {
-            const QString innerText = fullText.mid(leftBracketIndex + 1, rightBracketIndex - leftBracketIndex - 1).trimmed();
-            if (parseUnsignedText(innerText, &operationMask))
+            const QString maskText = customMaskEdit->text().trimmed();
+            if (!maskText.isEmpty())
             {
-                if (okOut != nullptr)
+                quint32 customMask = 0U;
+                if (!parseUnsignedText(normalizeMaskTextForEdit(maskText), &customMask))
                 {
-                    *okOut = true;
+                    return 0U;
                 }
-                return operationMask;
+                operationMask |= customMask;
             }
         }
 
-        bool dataOk = false;
-        const qulonglong dataValue = comboBox->currentData().toULongLong(&dataOk);
-        if (dataOk && dataValue <= std::numeric_limits<quint32>::max())
+        if (okOut != nullptr)
         {
-            if (okOut != nullptr)
-            {
-                *okOut = true;
-            }
-            return static_cast<quint32>(dataValue);
+            *okOut = true;
         }
-        return 0U;
+        return operationMask;
     }
 
     QString normalizeMatchAllPattern(const QString& rawPatternText)
@@ -976,7 +1109,7 @@ private:
         m_renameGroupButton = new QPushButton(QStringLiteral("重命名"), groupPane);
         m_moveGroupUpButton = new QPushButton(QStringLiteral("上移"), groupPane);
         m_moveGroupDownButton = new QPushButton(QStringLiteral("下移"), groupPane);
-        setupIconButton(m_addGroupButton, QIcon(QStringLiteral(":/Icon/process_start.svg")), QStringLiteral("新增规则组"));
+        setupIconButton(m_addGroupButton, QIcon(QStringLiteral(":/Icon/plus.svg")), QStringLiteral("新增规则组"));
         setupIconButton(m_removeGroupButton, QIcon(QStringLiteral(":/Icon/log_clear.svg")), QStringLiteral("删除当前规则组"));
         setupIconButton(m_renameGroupButton, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("重命名当前规则组"));
         setupIconButton(m_moveGroupUpButton, QIcon(QStringLiteral(":/Icon/file_nav_up.svg")), QStringLiteral("规则组上移"));
@@ -1022,7 +1155,7 @@ private:
         m_removeRuleButton = new QPushButton(QStringLiteral("删除规则"), rightPane);
         m_moveRuleUpButton = new QPushButton(QStringLiteral("规则上移"), rightPane);
         m_moveRuleDownButton = new QPushButton(QStringLiteral("规则下移"), rightPane);
-        setupIconButton(m_addRuleButton, QIcon(QStringLiteral(":/Icon/process_start.svg")), QStringLiteral("新增规则"));
+        setupIconButton(m_addRuleButton, QIcon(QStringLiteral(":/Icon/plus.svg")), QStringLiteral("新增规则"));
         setupIconButton(m_removeRuleButton, QIcon(QStringLiteral(":/Icon/log_clear.svg")), QStringLiteral("删除当前规则"));
         setupIconButton(m_moveRuleUpButton, QIcon(QStringLiteral(":/Icon/file_nav_up.svg")), QStringLiteral("规则上移"));
         setupIconButton(m_moveRuleDownButton, QIcon(QStringLiteral(":/Icon/codeeditor_goto.svg")), QStringLiteral("规则下移"));
@@ -1064,6 +1197,21 @@ private:
         logTabWidget->addTab(m_appLogEditor, QStringLiteral("应用日志"));
         logTabWidget->addTab(m_eventLogEditor, QStringLiteral("事件日志"));
         rootLayout->addWidget(logTabWidget, 0);
+
+        auto* kernelBadgeLayout = new QHBoxLayout();
+        kernelBadgeLayout->setContentsMargins(0, 0, 0, 0);
+        kernelBadgeLayout->setSpacing(0);
+        m_kernelBadgeLabel = new QLabel(scrollContent);
+        m_kernelBadgeLabel->setToolTip(QStringLiteral("Kernel/R0 功能入口标识"));
+        m_kernelBadgeLabel->setPixmap(QPixmap(QStringLiteral(":/Image/kernel_badge.png")).scaled(
+            20,
+            20,
+            Qt::KeepAspectRatio,
+            Qt::SmoothTransformation));
+        m_kernelBadgeLabel->setFixedSize(24, 24);
+        kernelBadgeLayout->addStretch(1);
+        kernelBadgeLayout->addWidget(m_kernelBadgeLabel, 0);
+        rootLayout->addLayout(kernelBadgeLayout, 0);
 
         mainSplitter->setStretchFactor(0, 3);
         mainSplitter->setStretchFactor(1, 7);
@@ -1171,8 +1319,25 @@ private:
         ruleTable->setWordWrap(false);
         ruleTable->setContextMenuPolicy(Qt::CustomContextMenu);
         ruleTable->verticalHeader()->setVisible(false);
-        ruleTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-        ruleTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(RuleColumn::RuleName), QHeaderView::Stretch);
+        ruleTable->setAlternatingRowColors(true);
+        ruleTable->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+        ruleTable->setStyleSheet(callbackRuleTableStyle());
+
+        // 表头允许用户拖动调整列宽；默认宽度优先压缩身份列，把空间留给操作和匹配字段。
+        QHeaderView* ruleHeader = ruleTable->horizontalHeader();
+        ruleHeader->setSectionResizeMode(QHeaderView::Interactive);
+        ruleHeader->setStretchLastSection(false);
+        ruleHeader->setSectionsMovable(false);
+        ruleTable->setColumnWidth(static_cast<int>(RuleColumn::Enabled), 42);
+        ruleTable->setColumnWidth(static_cast<int>(RuleColumn::RuleId), 58);
+        ruleTable->setColumnWidth(static_cast<int>(RuleColumn::GroupId), 96);
+        ruleTable->setColumnWidth(static_cast<int>(RuleColumn::RuleName), 170);
+        ruleTable->setColumnWidth(static_cast<int>(RuleColumn::OperationMask), 480);
+        ruleTable->setColumnWidth(static_cast<int>(RuleColumn::MatchMode), 104);
+        ruleTable->setColumnWidth(static_cast<int>(RuleColumn::Action), 104);
+        ruleTable->setColumnWidth(static_cast<int>(RuleColumn::TimeoutMs), 72);
+        ruleTable->setColumnWidth(static_cast<int>(RuleColumn::TimeoutDefaultDecision), 78);
+        ruleTable->setColumnWidth(static_cast<int>(RuleColumn::Priority), 58);
         tabLayout->addWidget(ruleTable, 1);
 
         connect(ruleTable, &QTableWidget::itemChanged, m_hostPage, [this](QTableWidgetItem*) {
@@ -1444,8 +1609,9 @@ private:
         const bool hasCurrentRule = (logicalRuleIndex >= 0 && logicalRuleIndex < ruleCount);
 
         QMenu contextMenu(ruleTable);
+        contextMenu.setStyleSheet(callbackRuleContextMenuStyle());
         QAction* addRuleAction = contextMenu.addAction(
-            QIcon(QStringLiteral(":/Icon/process_start.svg")),
+            QIcon(QStringLiteral(":/Icon/plus.svg")),
             QStringLiteral("新增规则"));
         QAction* removeRuleAction = contextMenu.addAction(
             QIcon(QStringLiteral(":/Icon/log_clear.svg")),
@@ -1667,6 +1833,246 @@ private:
             }
         }
         return false;
+    }
+
+    void setRuleHeaderCell(
+        QTableWidget* ruleTable,
+        const int headerRow,
+        const RuleColumn column,
+        QTableWidgetItem* item)
+    {
+        // 作用：写入第一排普通单元格，同时清理旧 span，保证重建表格后列宽可调。
+        // 入参 ruleTable/headerRow/column/item：目标表、第一排、列枚举和待接管 item。
+        if (ruleTable == nullptr || item == nullptr)
+        {
+            delete item;
+            return;
+        }
+
+        ruleTable->setSpan(headerRow, static_cast<int>(column), 1, 1);
+        ruleTable->setItem(headerRow, static_cast<int>(column), item);
+    }
+
+    void setRuleHeaderWidget(
+        QTableWidget* ruleTable,
+        const int headerRow,
+        const RuleColumn column,
+        QWidget* widget)
+    {
+        // 作用：写入第一排控件单元格，所有字段保持表头约束。
+        // 入参 widget：Qt 会接管生命周期，空指针时只清理 span。
+        if (ruleTable == nullptr)
+        {
+            delete widget;
+            return;
+        }
+
+        ruleTable->setSpan(headerRow, static_cast<int>(column), 1, 1);
+        ruleTable->setCellWidget(headerRow, static_cast<int>(column), widget);
+    }
+
+    void setRuleDetailWidget(
+        QTableWidget* ruleTable,
+        const int detailRow,
+        QWidget* detailWidget)
+    {
+        // 作用：让第二排从 GroupID 列开始横跨右侧字段区，保留左侧固定身份列。
+        // 入参 detailWidget：包含发起程序、目标程序、备注三段 1:1:1 布局的容器。
+        if (ruleTable == nullptr)
+        {
+            delete detailWidget;
+            return;
+        }
+
+        const int firstColumn = static_cast<int>(RuleColumn::GroupId);
+        const int columnCount = static_cast<int>(RuleColumn::Count) - firstColumn;
+        ruleTable->setSpan(detailRow, firstColumn, 1, columnCount);
+        ruleTable->setCellWidget(detailRow, firstColumn, detailWidget);
+    }
+
+    void setRuleIdentityColumnSpan(
+        QTableWidget* ruleTable,
+        const int headerRow)
+    {
+        // 作用：把“启用”和 RuleID 固定为跨两排的窄列，右侧再承载规则主体和匹配详情。
+        // 入参 ruleTable/headerRow：目标规则表与当前规则第一排；无返回值。
+        if (ruleTable == nullptr)
+        {
+            return;
+        }
+
+        ruleTable->setSpan(headerRow, static_cast<int>(RuleColumn::Enabled), 2, 1);
+        ruleTable->setSpan(headerRow, static_cast<int>(RuleColumn::RuleId), 2, 1);
+    }
+
+    QWidget* createOperationMaskPanel(
+        QTableWidget* ruleTable,
+        const quint32 callbackType,
+        const quint32 operationMask)
+    {
+        // 作用：创建第一排“操作类型”复选框面板，并追加“自定义掩码”输入。
+        // 入参 operationMask：当前规则掩码；返回：可直接放入 QTableWidget 的 QWidget。
+        auto* operationPanel = new QWidget(ruleTable);
+        operationPanel->setObjectName(QStringLiteral("ksCallbackRuleOperationPanel"));
+        operationPanel->setAutoFillBackground(true);
+        operationPanel->setAttribute(Qt::WA_StyledBackground, true);
+        operationPanel->setStyleSheet(callbackRulePanelStyle());
+
+        auto* panelLayout = new QGridLayout(operationPanel);
+        panelLayout->setContentsMargins(3, 1, 3, 1);
+        panelLayout->setHorizontalSpacing(6);
+        panelLayout->setVerticalSpacing(2);
+
+        // kOperationCheckColumns 作用：基础操作位按四列排布，注册表 8 个位正好压成两排。
+        constexpr int kOperationCheckColumns = 4;
+        constexpr int kOperationTotalColumns = 6;
+        const QList<QPair<QString, quint32>> operationBitList = operationCheckboxListByType(callbackType);
+        for (int bitIndex = 0; bitIndex < operationBitList.size(); ++bitIndex)
+        {
+            const QPair<QString, quint32>& bitPair = operationBitList.at(bitIndex);
+            auto* checkBox = new QCheckBox(bitPair.first, operationPanel);
+            checkBox->setProperty("operationMaskBit", QVariant::fromValue(bitPair.second));
+            checkBox->setChecked((operationMask & bitPair.second) == bitPair.second);
+            checkBox->setToolTip(
+                QStringLiteral("%1：%2")
+                .arg(bitPair.first, operationMaskToText(bitPair.second)));
+            connect(checkBox, &QCheckBox::toggled, m_hostPage, [this](bool) {
+                if (!m_ignoreUiSignal)
+                {
+                    setDirtyState(true);
+                }
+            });
+
+            const int rowIndex = bitIndex / kOperationCheckColumns;
+            const int columnIndex = bitIndex % kOperationCheckColumns;
+            panelLayout->addWidget(checkBox, rowIndex, columnIndex, Qt::Alignment());
+        }
+
+        quint32 checkedOperationMask = 0U;
+        for (const QPair<QString, quint32>& bitPair : operationBitList)
+        {
+            if ((operationMask & bitPair.second) == bitPair.second)
+            {
+                checkedOperationMask |= bitPair.second;
+            }
+        }
+
+        const quint32 customMask = operationMask & ~checkedOperationMask;
+        auto* customMaskEdit = new QLineEdit(operationPanel);
+        customMaskEdit->setObjectName(QStringLiteral("ksCallbackRuleCustomMaskEdit"));
+        customMaskEdit->setPlaceholderText(QStringLiteral("自定义掩码"));
+        customMaskEdit->setText(customMask != 0U ? operationMaskToText(customMask) : QString());
+        customMaskEdit->setToolTip(QStringLiteral("输入十六进制或十进制掩码；缺少 0x/0X 时会自动补全。"));
+        applyRuleLineEditStyle(customMaskEdit);
+
+        connect(customMaskEdit, &QLineEdit::textEdited, m_hostPage, [this](const QString&) {
+            if (!m_ignoreUiSignal)
+            {
+                setDirtyState(true);
+            }
+        });
+        connect(customMaskEdit, &QLineEdit::editingFinished, m_hostPage, [customMaskEdit]() {
+            normalizeCustomMaskEditText(customMaskEdit);
+        });
+
+        // customRowIndex 作用：小类型把自定义掩码放在第一排；注册表等多位类型放在第二排右侧。
+        const int operationBitCount = static_cast<int>(operationBitList.size());
+        const int customRowIndex = (operationBitCount > kOperationCheckColumns) ? 1 : 0;
+        auto* customMaskLabel = new QLabel(QStringLiteral("自定义掩码"), operationPanel);
+        customMaskLabel->setObjectName(QStringLiteral("ksCallbackRuleFieldTitle"));
+        panelLayout->addWidget(customMaskLabel, customRowIndex, 4, 1, 1);
+        panelLayout->addWidget(customMaskEdit, customRowIndex, 5, 1, 1);
+        for (int columnIndex = 0; columnIndex < kOperationTotalColumns; ++columnIndex)
+        {
+            const int stretchValue = (columnIndex == 5) ? 2 : 1;
+            panelLayout->setColumnStretch(columnIndex, stretchValue);
+        }
+
+        return operationPanel;
+    }
+
+    QLineEdit* createRuleDetailEdit(
+        QWidget* parentWidget,
+        const QString& titleText,
+        const QString& valueText,
+        const QString& placeholderText)
+    {
+        // 作用：创建第二排三等分字段编辑器，统一标题、占位符和样式。
+        // 返回：QLineEdit 指针，调用方用 objectName 再区分字段用途。
+        auto* edit = new QLineEdit(parentWidget);
+        edit->setText(valueText);
+        edit->setPlaceholderText(placeholderText);
+        edit->setToolTip(titleText);
+        applyRuleLineEditStyle(edit);
+        return edit;
+    }
+
+    QWidget* createRuleDetailPanel(
+        QTableWidget* ruleTable,
+        const quint32 callbackType,
+        const CallbackRuleModel& ruleModel)
+    {
+        // 作用：创建第二排横向贯通详情面板，三段字段按 1:1:1 自动分配宽度。
+        // 入参 ruleModel：当前规则值；返回：可放入 detailRow 的 QWidget。
+        auto* detailPanel = new QWidget(ruleTable);
+        detailPanel->setObjectName(QStringLiteral("ksCallbackRuleDetailPanel"));
+        detailPanel->setAutoFillBackground(true);
+        detailPanel->setAttribute(Qt::WA_StyledBackground, true);
+        detailPanel->setStyleSheet(callbackRulePanelStyle());
+
+        auto* detailLayout = new QGridLayout(detailPanel);
+        detailLayout->setContentsMargins(6, 4, 6, 4);
+        detailLayout->setHorizontalSpacing(8);
+        detailLayout->setVerticalSpacing(3);
+
+        const QStringList titleList{
+            QStringLiteral("发起程序匹配"),
+            QStringLiteral("目标程序匹配"),
+            QStringLiteral("备注")
+        };
+        for (int columnIndex = 0; columnIndex < titleList.size(); ++columnIndex)
+        {
+            auto* titleLabel = new QLabel(titleList.at(columnIndex), detailPanel);
+            titleLabel->setObjectName(QStringLiteral("ksCallbackRuleFieldTitle"));
+            detailLayout->addWidget(titleLabel, 0, columnIndex);
+            detailLayout->setColumnStretch(columnIndex, 1);
+        }
+
+        QLineEdit* initiatorEdit = createRuleDetailEdit(
+            detailPanel,
+            titleList.at(0),
+            ruleModel.initiatorPattern,
+            initiatorPlaceholderByType(callbackType));
+        initiatorEdit->setObjectName(QStringLiteral("ksCallbackRuleInitiatorEdit"));
+
+        QLineEdit* targetEdit = createRuleDetailEdit(
+            detailPanel,
+            titleList.at(1),
+            ruleModel.targetPattern,
+            targetPlaceholderByType(callbackType));
+        targetEdit->setObjectName(QStringLiteral("ksCallbackRuleTargetEdit"));
+
+        QLineEdit* commentEdit = createRuleDetailEdit(
+            detailPanel,
+            titleList.at(2),
+            ruleModel.comment,
+            QStringLiteral("备注"));
+        commentEdit->setObjectName(QStringLiteral("ksCallbackRuleCommentEdit"));
+
+        const QList<QLineEdit*> editList{ initiatorEdit, targetEdit, commentEdit };
+        for (int columnIndex = 0; columnIndex < editList.size(); ++columnIndex)
+        {
+            QLineEdit* edit = editList.at(columnIndex);
+            connect(edit, &QLineEdit::textEdited, m_hostPage, [this](const QString&) {
+                if (!m_ignoreUiSignal)
+                {
+                    setDirtyState(true);
+                }
+            });
+            detailLayout->addWidget(edit, 1, columnIndex);
+        }
+
+        return detailPanel;
     }
 
     int ruleCountOfTable(const QTableWidget* ruleTable) const
@@ -1999,60 +2405,40 @@ private:
         ruleTable->insertRow(headerRow);
         ruleTable->insertRow(detailRow);
 
-        ruleTable->setSpan(headerRow, static_cast<int>(RuleColumn::Enabled), 2, 1);
-        ruleTable->setSpan(headerRow, static_cast<int>(RuleColumn::RuleId), 2, 1);
+        // 每条规则使用两排展示：左侧启用/RuleID 跨两排，右侧第一排放规则属性。
+        // 第二排从 GroupID 开始放匹配详情，避免匹配条件脱离表格布局。
+        const int operationBitCount = operationCheckboxListByType(callbackType).size();
+        const int headerRowHeight = (operationBitCount > 4) ? 60 : 46;
+        ruleTable->setRowHeight(headerRow, headerRowHeight);
+        ruleTable->setRowHeight(detailRow, 52);
 
         auto* enabledItem = new QTableWidgetItem();
         enabledItem->setFlags(enabledItem->flags() | Qt::ItemIsUserCheckable);
         enabledItem->setCheckState(ruleModel.enabled ? Qt::Checked : Qt::Unchecked);
-        ruleTable->setItem(headerRow, static_cast<int>(RuleColumn::Enabled), enabledItem);
-        ruleTable->setItem(headerRow, static_cast<int>(RuleColumn::RuleId), makeReadOnlyItem(QString::number(ruleModel.ruleId)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::Enabled, enabledItem);
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::RuleId, makeReadOnlyItem(QString::number(ruleModel.ruleId)));
+        setRuleIdentityColumnSpan(ruleTable, headerRow);
 
         auto* groupCombo = new QComboBox(ruleTable);
         applyRuleComboStyle(groupCombo);
-        ruleTable->setCellWidget(headerRow, static_cast<int>(RuleColumn::GroupId), groupCombo);
-        ruleTable->setItem(headerRow, static_cast<int>(RuleColumn::RuleName), new QTableWidgetItem(ruleModel.ruleName));
-
-        auto* operationCombo = new QComboBox(ruleTable);
-        applyRuleComboStyle(operationCombo);
-        operationCombo->setEditable(true);
-        operationCombo->setInsertPolicy(QComboBox::NoInsert);
-        if (operationCombo->lineEdit() != nullptr)
-        {
-            operationCombo->lineEdit()->setPlaceholderText(QStringLiteral("可选预设或自定义，例如 0xFFFFFFFF"));
-        }
-        const QList<QPair<QString, quint32>> operationPresetList = operationPresetListByType(callbackType);
-        for (const QPair<QString, quint32>& presetPair : operationPresetList)
-        {
-            operationCombo->addItem(
-                QStringLiteral("%1 (%2)").arg(presetPair.first, operationMaskToText(presetPair.second)),
-                presetPair.second);
-        }
-        const int operationPresetIndex = operationCombo->findData(ruleModel.operationMask);
-        if (operationPresetIndex >= 0)
-        {
-            operationCombo->setCurrentIndex(operationPresetIndex);
-        }
-        else
-        {
-            operationCombo->setEditText(operationMaskToText(ruleModel.operationMask));
-        }
-        connect(operationCombo, &QComboBox::currentIndexChanged, m_hostPage, [this](int) {
+        setRuleHeaderWidget(ruleTable, headerRow, RuleColumn::GroupId, groupCombo);
+        connect(groupCombo, &QComboBox::currentIndexChanged, m_hostPage, [this](int) {
             if (!m_ignoreUiSignal)
             {
                 setDirtyState(true);
             }
         });
-        if (operationCombo->lineEdit() != nullptr)
-        {
-            connect(operationCombo->lineEdit(), &QLineEdit::textEdited, m_hostPage, [this](const QString&) {
-                if (!m_ignoreUiSignal)
-                {
-                    setDirtyState(true);
-                }
-            });
-        }
-        ruleTable->setCellWidget(headerRow, static_cast<int>(RuleColumn::OperationMask), operationCombo);
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::RuleName, new QTableWidgetItem(ruleModel.ruleName));
+
+        QWidget* operationPanel = createOperationMaskPanel(
+            ruleTable,
+            callbackType,
+            ruleModel.operationMask);
+        setRuleHeaderWidget(
+            ruleTable,
+            headerRow,
+            RuleColumn::OperationMask,
+            operationPanel);
 
         auto* matchModeCombo = new QComboBox(ruleTable);
         applyRuleComboStyle(matchModeCombo);
@@ -2097,7 +2483,7 @@ private:
             }
             setDirtyState(true);
         });
-        ruleTable->setCellWidget(headerRow, static_cast<int>(RuleColumn::MatchMode), matchModeCombo);
+        setRuleHeaderWidget(ruleTable, headerRow, RuleColumn::MatchMode, matchModeCombo);
 
         auto* actionCombo = new QComboBox(ruleTable);
         applyRuleComboStyle(actionCombo);
@@ -2151,11 +2537,12 @@ private:
             }
             setDirtyState(true);
         });
-        ruleTable->setCellWidget(headerRow, static_cast<int>(RuleColumn::Action), actionCombo);
+        setRuleHeaderWidget(ruleTable, headerRow, RuleColumn::Action, actionCombo);
 
-        ruleTable->setItem(
+        setRuleHeaderCell(
+            ruleTable,
             headerRow,
-            static_cast<int>(RuleColumn::TimeoutMs),
+            RuleColumn::TimeoutMs,
             new QTableWidgetItem(QString::number(ruleModel.timeoutMs)));
 
         auto* timeoutDecisionCombo = new QComboBox(ruleTable);
@@ -2172,55 +2559,20 @@ private:
                 setDirtyState(true);
             }
         });
-        ruleTable->setCellWidget(
+        setRuleHeaderWidget(
+            ruleTable,
             headerRow,
-            static_cast<int>(RuleColumn::TimeoutDefaultDecision),
+            RuleColumn::TimeoutDefaultDecision,
             timeoutDecisionCombo);
 
-        ruleTable->setItem(
+        setRuleHeaderCell(
+            ruleTable,
             headerRow,
-            static_cast<int>(RuleColumn::Priority),
+            RuleColumn::Priority,
             new QTableWidgetItem(QString::number(ruleModel.priority)));
 
-        ruleTable->setItem(detailRow, static_cast<int>(RuleColumn::GroupId), makeReadOnlyItem(QStringLiteral("发起程序匹配")));
-        auto* initiatorEdit = new QLineEdit(ruleTable);
-        initiatorEdit->setText(ruleModel.initiatorPattern);
-        initiatorEdit->setPlaceholderText(initiatorPlaceholderByType(callbackType));
-        applyRuleLineEditStyle(initiatorEdit);
-        connect(initiatorEdit, &QLineEdit::textEdited, m_hostPage, [this](const QString&) {
-            if (!m_ignoreUiSignal)
-            {
-                setDirtyState(true);
-            }
-        });
-        ruleTable->setCellWidget(detailRow, static_cast<int>(RuleColumn::RuleName), initiatorEdit);
-
-        ruleTable->setItem(detailRow, static_cast<int>(RuleColumn::OperationMask), makeReadOnlyItem(QStringLiteral("目标匹配")));
-        auto* targetEdit = new QLineEdit(ruleTable);
-        targetEdit->setText(ruleModel.targetPattern);
-        targetEdit->setPlaceholderText(targetPlaceholderByType(callbackType));
-        applyRuleLineEditStyle(targetEdit);
-        connect(targetEdit, &QLineEdit::textEdited, m_hostPage, [this](const QString&) {
-            if (!m_ignoreUiSignal)
-            {
-                setDirtyState(true);
-            }
-        });
-        ruleTable->setCellWidget(detailRow, static_cast<int>(RuleColumn::MatchMode), targetEdit);
-
-        ruleTable->setItem(detailRow, static_cast<int>(RuleColumn::Action), makeReadOnlyItem(QStringLiteral("备注")));
-        ruleTable->setSpan(detailRow, static_cast<int>(RuleColumn::TimeoutMs), 1, 3);
-        auto* commentEdit = new QLineEdit(ruleTable);
-        commentEdit->setText(ruleModel.comment);
-        commentEdit->setPlaceholderText(QStringLiteral("备注"));
-        applyRuleLineEditStyle(commentEdit);
-        connect(commentEdit, &QLineEdit::textEdited, m_hostPage, [this](const QString&) {
-            if (!m_ignoreUiSignal)
-            {
-                setDirtyState(true);
-            }
-        });
-        ruleTable->setCellWidget(detailRow, static_cast<int>(RuleColumn::TimeoutMs), commentEdit);
+        QWidget* detailPanel = createRuleDetailPanel(ruleTable, callbackType, ruleModel);
+        setRuleDetailWidget(ruleTable, detailRow, detailPanel);
 
         refreshRuleGroupComboForCell(groupCombo, ruleModel.groupId);
     }
@@ -2233,6 +2585,7 @@ private:
         }
 
         applyRuleComboStyle(groupCombo);
+        groupCombo->blockSignals(true);
         groupCombo->clear();
         for (int rowIndex = 0; rowIndex < m_groupTable->rowCount(); ++rowIndex)
         {
@@ -2259,12 +2612,7 @@ private:
             targetIndex = 0;
         }
         groupCombo->setCurrentIndex(targetIndex);
-        connect(groupCombo, &QComboBox::currentIndexChanged, m_hostPage, [this](int) {
-            if (!m_ignoreUiSignal)
-            {
-                setDirtyState(true);
-            }
-        });
+        groupCombo->blockSignals(false);
     }
 
     void refreshRuleGroupComboOptions()
@@ -2388,17 +2736,24 @@ private:
             QTableWidgetItem* timeoutItem = ruleTable->item(headerRow, static_cast<int>(RuleColumn::TimeoutMs));
             QTableWidgetItem* priorityItem = ruleTable->item(headerRow, static_cast<int>(RuleColumn::Priority));
             auto* groupCombo = qobject_cast<QComboBox*>(ruleTable->cellWidget(headerRow, static_cast<int>(RuleColumn::GroupId)));
-            auto* operationCombo = qobject_cast<QComboBox*>(ruleTable->cellWidget(headerRow, static_cast<int>(RuleColumn::OperationMask)));
+            auto* operationPanel = ruleTable->cellWidget(headerRow, static_cast<int>(RuleColumn::OperationMask));
             auto* matchModeCombo = qobject_cast<QComboBox*>(ruleTable->cellWidget(headerRow, static_cast<int>(RuleColumn::MatchMode)));
             auto* actionCombo = qobject_cast<QComboBox*>(ruleTable->cellWidget(headerRow, static_cast<int>(RuleColumn::Action)));
             auto* timeoutDecisionCombo = qobject_cast<QComboBox*>(ruleTable->cellWidget(headerRow, static_cast<int>(RuleColumn::TimeoutDefaultDecision)));
-            auto* initiatorEdit = qobject_cast<QLineEdit*>(ruleTable->cellWidget(detailRow, static_cast<int>(RuleColumn::RuleName)));
-            auto* targetEdit = qobject_cast<QLineEdit*>(ruleTable->cellWidget(detailRow, static_cast<int>(RuleColumn::MatchMode)));
-            auto* commentEdit = qobject_cast<QLineEdit*>(ruleTable->cellWidget(detailRow, static_cast<int>(RuleColumn::TimeoutMs)));
+            auto* detailPanel = ruleTable->cellWidget(detailRow, static_cast<int>(RuleColumn::GroupId));
+            auto* initiatorEdit = detailPanel != nullptr
+                ? detailPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleInitiatorEdit"))
+                : nullptr;
+            auto* targetEdit = detailPanel != nullptr
+                ? detailPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleTargetEdit"))
+                : nullptr;
+            auto* commentEdit = detailPanel != nullptr
+                ? detailPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCommentEdit"))
+                : nullptr;
 
             if (ruleIdItem == nullptr || ruleNameItem == nullptr || enabledItem == nullptr ||
                 timeoutItem == nullptr || priorityItem == nullptr ||
-                groupCombo == nullptr || operationCombo == nullptr ||
+                groupCombo == nullptr || operationPanel == nullptr ||
                 matchModeCombo == nullptr || actionCombo == nullptr || timeoutDecisionCombo == nullptr ||
                 initiatorEdit == nullptr || targetEdit == nullptr || commentEdit == nullptr)
             {
@@ -2426,8 +2781,8 @@ private:
             }
 
             bool operationParseOk = false;
-            ruleModel.operationMask = currentOperationMaskFromCombo(operationCombo, &operationParseOk);
-            if (!operationParseOk)
+            ruleModel.operationMask = currentOperationMaskFromPanel(operationPanel, &operationParseOk);
+            if (!operationParseOk || ruleModel.operationMask == 0U)
             {
                 if (errorTextOut != nullptr)
                 {
@@ -2893,6 +3248,7 @@ private:
     QPushButton* m_importButton = nullptr;
     QPushButton* m_exportButton = nullptr;
     QLabel* m_statusLabel = nullptr;
+    QLabel* m_kernelBadgeLabel = nullptr;
 
     QPushButton* m_addGroupButton = nullptr;
     QPushButton* m_removeGroupButton = nullptr;

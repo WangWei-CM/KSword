@@ -54,6 +54,12 @@
 #include <evntcons.h>
 #include <tdh.h>
 
+// 兼容旧版 SDK：EVENT_TRACE_FLAG_SYSTEMCALL 是 PERF_SYSCALL 的 legacy kernel flag。
+// 若头文件未暴露该宏，使用 evntrace.h 中长期稳定的系统调用事件标志位。
+#ifndef EVENT_TRACE_FLAG_SYSTEMCALL
+#define EVENT_TRACE_FLAG_SYSTEMCALL 0x00000080
+#endif
+
 #pragma comment(lib, "Advapi32.lib")
 #pragma comment(lib, "Tdh.lib")
 
@@ -64,10 +70,8 @@ namespace
     constexpr int kRoleServiceSearchText = Qt::UserRole + 2;
     constexpr int kRoleDetailText = Qt::UserRole + 3;
 
-    constexpr GUID kSystemTraceControlGuid =
-        { 0x9e814aad, 0x3204, 0x11d2, { 0x9a, 0x82, 0x00, 0x60, 0x08, 0xa8, 0x69, 0x39 } };
-    constexpr GUID kSystemSyscallProviderGuid =
-        { 0x434286f7, 0x6f1b, 0x45bb, { 0xb3, 0x7e, 0x95, 0xf6, 0x23, 0x04, 0x6c, 0x7c } };
+    constexpr GUID kKswordDirectKernelCallSessionGuid =
+        { 0xd22e25bd, 0x51fe, 0x4219, { 0x9a, 0xcf, 0x81, 0xc8, 0xaa, 0x73, 0xc7, 0x8d } };
 
     QString blueButtonStyle()
     {
@@ -159,6 +163,16 @@ namespace
         return QStringLiteral("0x%1")
             .arg(static_cast<qulonglong>(addressValue), 16, 16, QChar(u'0'))
             .toUpper();
+    }
+
+    bool isKernelModeAddress(const std::uint64_t addressValue)
+    {
+        // 说明：
+        // - SysCallEnter 的 SysCallAddress 是内核服务例程地址，不是用户态 syscall 指令位置；
+        // - x64 内核地址通常位于 canonical high-half，x86 兼容地址通常从 0x80000000 起；
+        // - 该判断只用于避免把内核地址误判成“用户态直接 syscall”。
+        return addressValue >= 0xFFFF000000000000ULL
+            || (addressValue <= 0xFFFFFFFFULL && addressValue >= 0x80000000ULL);
     }
 
     QString normalizeName(const QString& text)
@@ -1028,9 +1042,15 @@ void DirectKernelCallMonitorWidget::startCapture()
         properties->Wnode.BufferSize = propertyBufferSize;
         properties->Wnode.ClientContext = 2;
         properties->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-        properties->Wnode.Guid = kSystemTraceControlGuid;
+        // 私有 SystemTraceProvider 会话不能使用 SystemTraceControlGuid。
+        // 如果 private logger name 搭配 SystemTraceControlGuid，StartTraceW 会返回 87。
+        properties->Wnode.Guid = kKswordDirectKernelCallSessionGuid;
         properties->LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE;
         properties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
+        // 使用 legacy EnableFlags 启用 syscall 事件，避免较新 System Provider
+        // EnableTraceEx2 路径在部分系统/SDK 组合上返回 ERROR_INVALID_PARAMETER。
+        properties->EnableFlags = EVENT_TRACE_FLAG_SYSTEMCALL;
+        properties->FlushTimer = 1;
         properties->BufferSize = static_cast<ULONG>(bufferSizeKb);
         properties->MinimumBuffers = 32;
         properties->MaximumBuffers = 128;
@@ -1064,35 +1084,7 @@ void DirectKernelCallMonitorWidget::startCapture()
         }
 
         guardThis->m_sessionHandle.store(static_cast<std::uint64_t>(sessionHandle));
-        kPro.set(guardThis->m_captureProgressPid, "启用 SystemSyscallProvider", 0, 30.0f);
-
-        const ULONG enableStatus = ::EnableTraceEx2(
-            sessionHandle,
-            const_cast<GUID*>(&kSystemSyscallProviderGuid),
-            EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-            TRACE_LEVEL_VERBOSE,
-            SYSTEM_SYSCALL_KW_GENERAL,
-            0,
-            0,
-            nullptr);
-        if (enableStatus != ERROR_SUCCESS)
-        {
-            ::ControlTraceW(sessionHandle, loggerNamePointer, properties, EVENT_TRACE_CONTROL_STOP);
-            guardThis->m_sessionHandle.store(0);
-            QMetaObject::invokeMethod(qApp, [guardThis, enableStatus]() {
-                if (guardThis == nullptr)
-                {
-                    return;
-                }
-                guardThis->m_captureRunning.store(false);
-                guardThis->m_capturePaused.store(false);
-                guardThis->m_statusLabel->setText(QStringLiteral("● EnableTrace失败:%1").arg(enableStatus));
-                guardThis->m_statusLabel->setStyleSheet(buildStatusStyle(monitorErrorColorHex()));
-                guardThis->updateActionState();
-                kPro.set(guardThis->m_captureProgressPid, "SystemSyscallProvider 启用失败", 0, 100.0f);
-            }, Qt::QueuedConnection);
-            return;
-        }
+        kPro.set(guardThis->m_captureProgressPid, "已启用 syscall kernel flag", 0, 30.0f);
 
         EVENT_TRACE_LOGFILEW traceLogFile{};
         traceLogFile.LoggerName = loggerNamePointer;
@@ -1511,6 +1503,10 @@ DirectKernelCallMonitorWidget::CapturedEventRow DirectKernelCallMonitorWidget::b
     if (row.callAddress == 0)
     {
         row.verdictText = QStringLiteral("待判定");
+    }
+    else if (isKernelModeAddress(row.callAddress))
+    {
+        row.verdictText = QStringLiteral("内核服务入口");
     }
     else if (callModuleText.compare(QStringLiteral("ntdll.dll"), Qt::CaseInsensitive) == 0
         || callModuleText.compare(QStringLiteral("win32u.dll"), Qt::CaseInsensitive) == 0)

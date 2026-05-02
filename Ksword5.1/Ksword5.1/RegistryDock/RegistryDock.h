@@ -105,6 +105,15 @@ private:
     // copySelectedValueKernelPathToClipboard：
     // - 作用：把当前值（或当前键）路径转换为 \REGISTRY\... 后写入剪贴板。
     void copySelectedValueKernelPathToClipboard();
+    // readSelectedValueByR0：
+    // - 作用：通过 KswordARK 驱动读取当前选中注册表值。
+    void readSelectedValueByR0();
+    // readDefaultValueByR0：
+    // - 作用：通过 KswordARK 驱动读取当前键默认值。
+    void readDefaultValueByR0();
+    // readRegistryValueByR0：
+    // - 作用：内部公共实现，输入值名后调用 R0 只读 IOCTL。
+    void readRegistryValueByR0(const QString& valueName);
 
     // ===================== 导入导出 =====================
     void exportCurrentKeyAsync();

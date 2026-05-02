@@ -409,3 +409,365 @@ Return Value:
 
     return status;
 }
+
+NTSTATUS
+KswordARKProcessIoctlSetVisibility(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    处理 IOCTL_KSWORD_ARK_SET_PROCESS_VISIBILITY。中文说明：该 IOCTL 只更新
+    驱动内可恢复隐藏标记，不执行 DKOM 断链，实际过滤由 R3 进程列表完成。
+
+Arguments:
+
+    Device - WDF 设备对象，用于日志。
+    Request - 当前 IOCTL 请求。
+    InputBufferLength - 输入长度；必须包含固定请求。
+    OutputBufferLength - 输出长度；必须容纳固定响应。
+    BytesReturned - 返回写入字节数。
+
+Return Value:
+
+    NTSTATUS from validation or feature backend.
+
+--*/
+{
+    KSWORD_ARK_SET_PROCESS_VISIBILITY_REQUEST* visibilityRequest = NULL;
+    KSWORD_ARK_SET_PROCESS_VISIBILITY_RESPONSE* visibilityResponse = NULL;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    ULONG visibilityStatus = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_UNKNOWN;
+    ULONG hiddenCount = 0UL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKValidateDeviceIoControlWriteAccess(Request);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Warn", "R0 process visibility denied: write access required, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredInputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_SET_PROCESS_VISIBILITY_REQUEST),
+        &inputBuffer,
+        &actualInputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Error", "R0 process visibility ioctl: input invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_SET_PROCESS_VISIBILITY_RESPONSE),
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Error", "R0 process visibility ioctl: output invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    visibilityRequest = (KSWORD_ARK_SET_PROCESS_VISIBILITY_REQUEST*)inputBuffer;
+    visibilityResponse = (KSWORD_ARK_SET_PROCESS_VISIBILITY_RESPONSE*)outputBuffer;
+    RtlZeroMemory(visibilityResponse, sizeof(*visibilityResponse));
+    visibilityResponse->version = KSWORD_ARK_ENUM_PROCESS_PROTOCOL_VERSION;
+    visibilityResponse->processId = visibilityRequest->processId;
+
+    status = KswordARKDriverSetProcessVisibility(
+        (ULONG)visibilityRequest->processId,
+        (ULONG)visibilityRequest->action,
+        &visibilityStatus,
+        &hiddenCount);
+
+    visibilityResponse->status = visibilityStatus;
+    visibilityResponse->hiddenCount = hiddenCount;
+    visibilityResponse->lastStatus = status;
+    *BytesReturned = sizeof(*visibilityResponse);
+
+    if (NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(
+            Device,
+            "Info",
+            "R0 process visibility updated: pid=%lu, action=%lu, status=%lu, hiddenCount=%lu.",
+            (unsigned long)visibilityRequest->processId,
+            (unsigned long)visibilityRequest->action,
+            (unsigned long)visibilityStatus,
+            (unsigned long)hiddenCount);
+    }
+    else {
+        KswordARKProcessIoctlLog(
+            Device,
+            "Error",
+            "R0 process visibility failed: pid=%lu, action=%lu, status=0x%08X.",
+            (unsigned long)visibilityRequest->processId,
+            (unsigned long)visibilityRequest->action,
+            (unsigned int)status);
+    }
+
+    return status;
+}
+
+NTSTATUS
+KswordARKProcessIoctlSetSpecialFlags(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    处理 IOCTL_KSWORD_ARK_SET_PROCESS_SPECIAL_FLAGS。中文说明：handler 负责
+    写访问、安全策略和固定包校验，具体 BreakOnTermination/APC 写入在
+    process_flags.c 中完成。
+
+Arguments:
+
+    Device - WDF 设备对象，用于日志和 safety policy。
+    Request - 当前 IOCTL 请求。
+    InputBufferLength - 输入长度；必须包含固定请求。
+    OutputBufferLength - 输出长度；必须容纳固定响应。
+    BytesReturned - 返回响应字节数。
+
+Return Value:
+
+    NTSTATUS from validation, safety policy or feature backend.
+
+--*/
+{
+    KSWORD_ARK_SET_PROCESS_SPECIAL_FLAGS_REQUEST* specialRequest = NULL;
+    KSWORD_ARK_SET_PROCESS_SPECIAL_FLAGS_RESPONSE* specialResponse = NULL;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    ULONG operationStatus = KSWORD_ARK_PROCESS_SPECIAL_STATUS_UNKNOWN;
+    ULONG appliedFlags = 0UL;
+    ULONG touchedThreadCount = 0UL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKValidateDeviceIoControlWriteAccess(Request);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Warn", "R0 process-special denied: write access required, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredInputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_SET_PROCESS_SPECIAL_FLAGS_REQUEST),
+        &inputBuffer,
+        &actualInputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Error", "R0 process-special ioctl: input invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_SET_PROCESS_SPECIAL_FLAGS_RESPONSE),
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Error", "R0 process-special ioctl: output invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    specialRequest = (KSWORD_ARK_SET_PROCESS_SPECIAL_FLAGS_REQUEST*)inputBuffer;
+    specialResponse = (KSWORD_ARK_SET_PROCESS_SPECIAL_FLAGS_RESPONSE*)outputBuffer;
+    RtlZeroMemory(specialResponse, sizeof(*specialResponse));
+    specialResponse->version = KSWORD_ARK_ENUM_PROCESS_PROTOCOL_VERSION;
+    specialResponse->processId = specialRequest->processId;
+    specialResponse->action = specialRequest->action;
+
+    status = KswordARKValidateUserPid((ULONG)specialRequest->processId);
+    if (NT_SUCCESS(status)) {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_PROCESS_SET_PROTECTION;
+        safetyContext.TargetProcessId = (ULONG)specialRequest->processId;
+        safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+    }
+
+    if (NT_SUCCESS(status)) {
+        status = KswordARKDriverSetProcessSpecialFlags(
+            (ULONG)specialRequest->processId,
+            (ULONG)specialRequest->action,
+            (ULONG)specialRequest->flags,
+            &operationStatus,
+            &appliedFlags,
+            &touchedThreadCount);
+    }
+    else {
+        operationStatus = KSWORD_ARK_PROCESS_SPECIAL_STATUS_OPERATION_FAILED;
+    }
+
+    specialResponse->status = operationStatus;
+    specialResponse->appliedFlags = appliedFlags;
+    specialResponse->touchedThreadCount = touchedThreadCount;
+    specialResponse->lastStatus = status;
+    *BytesReturned = sizeof(*specialResponse);
+
+    KswordARKProcessIoctlLog(
+        Device,
+        NT_SUCCESS(status) ? "Info" : "Error",
+        "R0 process-special result: pid=%lu, action=%lu, status=%lu, touched=%lu, nt=0x%08X.",
+        (unsigned long)specialRequest->processId,
+        (unsigned long)specialRequest->action,
+        (unsigned long)operationStatus,
+        (unsigned long)touchedThreadCount,
+        (unsigned int)status);
+    return status;
+}
+
+NTSTATUS
+KswordARKProcessIoctlDkomProcess(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    处理 IOCTL_KSWORD_ARK_DKOM_PROCESS。中文说明：当前只提供从 PspCidTable
+    删除目标 PID 对应 EPROCESS 的高危动作，地址均由 R0 自行解析。
+
+Arguments:
+
+    Device - WDF 设备对象，用于日志和 safety policy。
+    Request - 当前 IOCTL 请求。
+    InputBufferLength - 输入长度；必须包含固定请求。
+    OutputBufferLength - 输出长度；必须容纳固定响应。
+    BytesReturned - 返回响应字节数。
+
+Return Value:
+
+    NTSTATUS from validation, safety policy or feature backend.
+
+--*/
+{
+    KSWORD_ARK_DKOM_PROCESS_REQUEST* dkomRequest = NULL;
+    KSWORD_ARK_DKOM_PROCESS_RESPONSE* dkomResponse = NULL;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    ULONG operationStatus = KSWORD_ARK_PROCESS_DKOM_STATUS_UNKNOWN;
+    ULONG removedEntries = 0UL;
+    ULONG64 pspCidTableAddress = 0ULL;
+    ULONG64 processObjectAddress = 0ULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKValidateDeviceIoControlWriteAccess(Request);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Warn", "R0 process-dkom denied: write access required, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredInputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_DKOM_PROCESS_REQUEST),
+        &inputBuffer,
+        &actualInputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Error", "R0 process-dkom ioctl: input invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_DKOM_PROCESS_RESPONSE),
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKProcessIoctlLog(Device, "Error", "R0 process-dkom ioctl: output invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    dkomRequest = (KSWORD_ARK_DKOM_PROCESS_REQUEST*)inputBuffer;
+    dkomResponse = (KSWORD_ARK_DKOM_PROCESS_RESPONSE*)outputBuffer;
+    RtlZeroMemory(dkomResponse, sizeof(*dkomResponse));
+    dkomResponse->version = KSWORD_ARK_ENUM_PROCESS_PROTOCOL_VERSION;
+    dkomResponse->processId = dkomRequest->processId;
+    dkomResponse->action = dkomRequest->action;
+
+    status = KswordARKValidateUserPid((ULONG)dkomRequest->processId);
+    if (NT_SUCCESS(status)) {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_KERNEL_PATCH;
+        safetyContext.TargetProcessId = (ULONG)dkomRequest->processId;
+        safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+    }
+
+    if (NT_SUCCESS(status)) {
+        status = KswordARKDriverDkomProcess(
+            (ULONG)dkomRequest->processId,
+            (ULONG)dkomRequest->action,
+            (ULONG)dkomRequest->flags,
+            &operationStatus,
+            &removedEntries,
+            &pspCidTableAddress,
+            &processObjectAddress);
+    }
+    else {
+        operationStatus = KSWORD_ARK_PROCESS_DKOM_STATUS_OPERATION_FAILED;
+    }
+
+    dkomResponse->status = operationStatus;
+    dkomResponse->removedEntries = removedEntries;
+    dkomResponse->lastStatus = status;
+    dkomResponse->pspCidTableAddress = pspCidTableAddress;
+    dkomResponse->processObjectAddress = processObjectAddress;
+    *BytesReturned = sizeof(*dkomResponse);
+
+    KswordARKProcessIoctlLog(
+        Device,
+        NT_SUCCESS(status) ? "Info" : "Error",
+        "R0 process-dkom result: pid=%lu, action=%lu, status=%lu, removed=%lu, cid=0x%I64X, nt=0x%08X.",
+        (unsigned long)dkomRequest->processId,
+        (unsigned long)dkomRequest->action,
+        (unsigned long)operationStatus,
+        (unsigned long)removedEntries,
+        pspCidTableAddress,
+        (unsigned int)status);
+    return status;
+}

@@ -29,6 +29,7 @@ class QPoint;
 class QProgressBar;
 class QPushButton;
 class QSplitter;
+class QSpinBox;
 class QStatusBar;
 class QTableWidget;
 class QTabWidget;
@@ -170,6 +171,15 @@ private:
         QByteArray lastValueBytes;      // 上次刷新值（用于变化观察）。
     };
 
+    // DriverDiffBlock：
+    // - 作用：保存“修改后缓存”和“读取备份”比对出的连续差异块；
+    // - R3 只把这些差异块提交给 R0，避免整页重复写入。
+    struct DriverDiffBlock
+    {
+        std::uint64_t address = 0;      // 差异块目标起始地址。
+        QByteArray bytes;               // 差异块修改后的字节数据。
+    };
+
     // ParsedSearchPattern：
     // - 作用：保存扫描输入解析结果，避免线程内重复解析字符串。
     struct ParsedSearchPattern
@@ -226,6 +236,11 @@ private:
     // - 作用：构建 Tab5（断点与书签）界面。
     // - 返回：无。
     void initializeBreakpointBookmarkTab();
+
+    // initializeDriverMemoryRwTab：
+    // - 作用：构建 Tab6（驱动内存读写）界面。
+    // - 返回：无。
+    void initializeDriverMemoryRwTab();
 
     // initializeConnections：
     // - 作用：统一连接各控件交互逻辑。
@@ -429,6 +444,43 @@ private:
         std::uint64_t absoluteAddress,
         std::uint8_t value,
         QString& errorTextOut);
+
+private:
+    // ========================================================
+    // 驱动内存读写（Tab6）相关函数
+    // ========================================================
+
+    // driverReadMemoryFromUi：
+    // - 作用：按 UI 输入调用 R0 读取目标进程内存，并刷新 HexEditor 缓存。
+    // - 返回：无。
+    void driverReadMemoryFromUi();
+
+    // driverApplyMemoryDiffFromUi：
+    // - 作用：比较当前编辑缓存与原始备份，只把差异块提交给 R0。
+    // - 返回：无。
+    void driverApplyMemoryDiffFromUi();
+
+    // resetDriverMemoryRwState：
+    // - 作用：清空驱动读写页缓存和状态。
+    // - 返回：无。
+    void resetDriverMemoryRwState();
+
+    // collectDriverMemoryDiffBlocks：
+    // - 作用：生成连续差异块列表，供一次或多次 R0 写入请求使用。
+    // - 参数 diffBlocksOut：输出差异块集合。
+    // - 返回：无。
+    void collectDriverMemoryDiffBlocks(std::vector<DriverDiffBlock>& diffBlocksOut) const;
+
+    // confirmForceDriverMemoryWrite：
+    // - 作用：当 R0 对普通写入返回 force-required 时，向用户弹出强制写入确认。
+    // - 参数 blockAddress：当前差异块起始地址。
+    // - 参数 requestedBytes：当前差异块请求字节数。
+    // - 参数 failureText：R0 返回的拒绝说明。
+    // - 返回：true 表示用户选择强制继续；false 表示停止应用。
+    bool confirmForceDriverMemoryWrite(
+        std::uint64_t blockAddress,
+        std::uint32_t requestedBytes,
+        const QString& failureText);
 
 private:
     // ========================================================
@@ -636,6 +688,21 @@ private:
     QPushButton* m_refreshBookmarkButton = nullptr;  // 刷新书签值按钮。
     QPushButton* m_jumpBookmarkButton = nullptr;     // 跳转书签按钮。
 
+    // ========================================================
+    // Tab6：驱动内存读写
+    // ========================================================
+
+    QWidget* m_tabDriverMemoryRw = nullptr;   // Tab6 页面容器。
+    QLineEdit* m_driverMemoryAddressEdit = nullptr; // 驱动读写目标中心地址。
+    QSpinBox* m_driverMemoryBeforeSpin = nullptr;   // 向前读取字节数。
+    QSpinBox* m_driverMemoryAfterSpin = nullptr;    // 向后读取字节数。
+    QPushButton* m_driverMemoryReadButton = nullptr; // R0 读取按钮。
+    QPushButton* m_driverMemoryApplyButton = nullptr; // 应用差异按钮。
+    QPushButton* m_driverMemoryResetButton = nullptr; // 清空按钮。
+    QLabel* m_driverMemoryRangeLabel = nullptr;       // 当前缓存范围标签。
+    QLabel* m_driverMemoryStatusLabel = nullptr;      // R0 读写状态标签。
+    HexEditorWidget* m_driverMemoryHexEditor = nullptr; // 可编辑缓存视图。
+
 private:
     // ========================================================
     // 运行时状态与缓存
@@ -663,6 +730,11 @@ private:
 
     std::uint64_t m_currentViewerAddress = 0;          // Tab4 当前起始地址。
     QByteArray m_currentViewerPageBytes;               // Tab4 当前页原始字节缓存。
+
+    std::uint64_t m_driverMemoryBaseAddress = 0;       // Tab6 当前缓存基址。
+    QByteArray m_driverMemoryOriginalBytes;            // Tab6 读取备份。
+    QByteArray m_driverMemoryEditedBytes;              // Tab6 当前编辑缓存。
+    bool m_driverMemoryHasSnapshot = false;            // Tab6 是否存在可写快照。
 
     std::vector<BreakpointEntry> m_breakpointCache;    // 断点缓存（Tab5）。
     std::vector<BookmarkEntry> m_bookmarkCache;        // 书签缓存（Tab5）。

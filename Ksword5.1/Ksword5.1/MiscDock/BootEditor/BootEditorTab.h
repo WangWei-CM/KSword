@@ -131,10 +131,10 @@ private:
     QVBoxLayout* m_rootLayout = nullptr;        // m_rootLayout：引导页根布局。
     QWidget* m_toolbarWidget = nullptr;         // m_toolbarWidget：顶部工具栏容器。
     QHBoxLayout* m_toolbarLayout = nullptr;     // m_toolbarLayout：顶部工具栏布局。
-    QSplitter* m_mainSplitter = nullptr;        // m_mainSplitter：左右分割器。
+    QSplitter* m_mainSplitter = nullptr;        // m_mainSplitter：上方表格与下方编辑区的垂直分割器。
     QTableWidget* m_entryTable = nullptr;       // m_entryTable：BCD 条目列表表格。
-    QWidget* m_editorPane = nullptr;            // m_editorPane：右侧编辑区容器。
-    QVBoxLayout* m_editorPaneLayout = nullptr;  // m_editorPaneLayout：右侧编辑区布局。
+    QWidget* m_editorPane = nullptr;            // m_editorPane：下方三栏编辑区容器。
+    QVBoxLayout* m_editorPaneLayout = nullptr;  // m_editorPaneLayout：下方三栏编辑区根布局。
 
     // ===================== 顶部工具按钮 =====================
     QToolButton* m_refreshButton = nullptr;      // m_refreshButton：刷新 BCD 枚举按钮。

@@ -311,10 +311,9 @@ CallbackPromptManager::DecisionPopupDialog::DecisionPopupDialog(
 
 void CallbackPromptManager::DecisionPopupDialog::closeEvent(QCloseEvent* event)
 {
-    if (m_owner != nullptr)
-    {
-        m_owner->onPopupClosedByUser();
-    }
+    // 关闭事件来源：Alt+F4、系统菜单关闭或窗口管理器关闭都会进入这里。
+    // 处理逻辑：驱动回调决策必须由“允许/拒绝”按钮或超时路径完成，关闭请求不触发默认决策。
+    // 返回行为：忽略本次关闭事件，Qt 会继续保留当前待决策弹窗。
     if (event != nullptr)
     {
         event->ignore();

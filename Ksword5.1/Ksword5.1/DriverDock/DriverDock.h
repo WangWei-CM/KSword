@@ -133,6 +133,16 @@ private:
     // - 便于用户双击服务后直接查询对象。
     void fillObjectDriverNameFromSelection();
 
+    // showServiceTableContextMenu：
+    // - 在驱动服务列表右键弹出操作菜单；
+    // - 第四点“驱动强制卸载”从这里进入 R0 DriverUnload。
+    void showServiceTableContextMenu(const QPoint& localPosition);
+
+    // forceUnloadDriverFromServiceRow：
+    // - 将当前服务名规范化为 \Driver\Name 并调用 ArkDriverClient；
+    // - 后台线程执行，完成后刷新服务/模块列表。
+    void forceUnloadDriverFromServiceRow(int rowIndex);
+
     // rebuildDriverServiceTableByFilter：
     // - 作用：按过滤关键词重建驱动服务表格。
     void rebuildDriverServiceTableByFilter();

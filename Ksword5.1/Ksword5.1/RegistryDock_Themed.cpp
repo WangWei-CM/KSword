@@ -1,5 +1,7 @@
 ﻿#include "RegistryDock/RegistryDock.h"
 
+#include "ArkDriverClient/ArkDriverClient.h"
+
 // ============================================================
 // RegistryDock.cpp
 // 说明：
@@ -42,6 +44,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -1336,6 +1339,7 @@ void RegistryDock::showTreeContextMenu(const QPoint& pos)
     menu.addSeparator();
     QAction* copyPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制路径"));
     QAction* copyKernelPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制内核模式地址"));
+    QAction* r0ReadDefaultAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("R0读取默认值"));
     QAction* refreshAction = menu.addAction(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("刷新"));
     menu.addSeparator();
     QAction* exportAction = menu.addAction(QIcon(":/Icon/log_export.svg"), QStringLiteral("导出 .reg"));
@@ -1358,6 +1362,7 @@ void RegistryDock::showTreeContextMenu(const QPoint& pos)
     else if (action == deleteAction) deleteSelectedObject();
     else if (action == copyPathAction) copyCurrentPathToClipboard();
     else if (action == copyKernelPathAction) copyCurrentKernelPathToClipboard();
+    else if (action == r0ReadDefaultAction) readDefaultValueByR0();
     else if (action == refreshAction) refreshCurrentKey(true);
     else if (action == exportAction) exportCurrentKeyAsync();
     else if (action == importAction) importRegFileAsync();
@@ -1377,6 +1382,7 @@ void RegistryDock::showValueContextMenu(const QPoint& pos)
     QAction* deleteAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("删除"));
     QAction* copyPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制路径"));
     QAction* copyKernelPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制内核模式地址"));
+    QAction* r0ReadAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("R0读取该值"));
 
     QAction* action = menu.exec(m_valueTable->viewport()->mapToGlobal(pos));
     if (action == nullptr) return;
@@ -1396,6 +1402,7 @@ void RegistryDock::showValueContextMenu(const QPoint& pos)
     else if (action == deleteAction) deleteSelectedObject();
     else if (action == copyPathAction) copyCurrentPathToClipboard();
     else if (action == copyKernelPathAction) copySelectedValueKernelPathToClipboard();
+    else if (action == r0ReadAction) readSelectedValueByR0();
 }
 
 void RegistryDock::createSubKey()
@@ -1892,6 +1899,101 @@ void RegistryDock::copySelectedValueKernelPathToClipboard()
         << ", kernelPath="
         << kernelPath.toStdString()
         << eol;
+}
+
+void RegistryDock::readSelectedValueByR0()
+{
+    const int selectedRow = m_valueTable->currentRow();
+    QString valueName;
+    if (selectedRow >= 0)
+    {
+        QTableWidgetItem* valueNameItem = m_valueTable->item(selectedRow, 0);
+        if (valueNameItem != nullptr)
+        {
+            valueName = valueNameItem->data(Qt::UserRole).toString();
+        }
+    }
+
+    readRegistryValueByR0(valueName);
+}
+
+void RegistryDock::readDefaultValueByR0()
+{
+    readRegistryValueByR0(QString());
+}
+
+void RegistryDock::readRegistryValueByR0(const QString& valueName)
+{
+    // 作用：把当前 UI 路径转换为 \REGISTRY\...，然后通过 R0 只读 IOCTL 查询值。
+    // 返回：无；结果通过对话框和状态栏展示。
+    const QString kernelPath = buildKernelRegistryPath(m_currentPath);
+    if (kernelPath.isEmpty())
+    {
+        QMessageBox::warning(this, QStringLiteral("R0读取注册表"), QStringLiteral("当前注册表路径无效。"));
+        return;
+    }
+
+    const ksword::ark::DriverClient driverClient;
+    const ksword::ark::RegistryReadResult readResult = driverClient.readRegistryValue(
+        kernelPath.toStdWString(),
+        valueName.toStdWString(),
+        KSWORD_ARK_REGISTRY_DATA_MAX_BYTES);
+
+    QByteArray rawData;
+    if (!readResult.data.empty())
+    {
+        rawData = QByteArray(
+            reinterpret_cast<const char*>(readResult.data.data()),
+            static_cast<int>(readResult.data.size()));
+    }
+
+    const QString valueDisplayName = valueName.trimmed().isEmpty()
+        ? QStringLiteral("(默认)")
+        : valueName;
+    const QString formattedData = readResult.data.empty()
+        ? QStringLiteral("<空>")
+        : formatValueData(static_cast<DWORD>(readResult.valueType), rawData);
+    const QString statusText = QStringLiteral(
+        "路径：%1\n"
+        "值名：%2\n"
+        "状态：%3\n"
+        "类型：%4\n"
+        "数据长度：%5 / 需要：%6\n"
+        "NTSTATUS：0x%7\n\n"
+        "数据：\n%8")
+        .arg(kernelPath)
+        .arg(valueDisplayName)
+        .arg(readResult.io.ok ? QString::number(readResult.status) : QStringLiteral("IOCTL失败"))
+        .arg(valueTypeToText(static_cast<DWORD>(readResult.valueType)))
+        .arg(readResult.dataBytes)
+        .arg(readResult.requiredBytes)
+        .arg(static_cast<qulonglong>(static_cast<std::uint32_t>(readResult.lastStatus)), 8, 16, QChar('0'))
+        .arg(formattedData);
+
+    kLogEvent event;
+    (readResult.io.ok && readResult.status == KSWORD_ARK_REGISTRY_READ_STATUS_SUCCESS ? info : warn)
+        << event
+        << "[RegistryDock] R0读取注册表完成, path="
+        << kernelPath.toStdString()
+        << ", valueName="
+        << valueName.toStdString()
+        << ", ok="
+        << (readResult.io.ok ? "true" : "false")
+        << ", status="
+        << readResult.status
+        << ", detail="
+        << readResult.io.message
+        << eol;
+
+    updateStatusBar(QStringLiteral("R0读取注册表：%1").arg(readResult.io.ok ? QStringLiteral("完成") : QStringLiteral("失败")));
+    if (readResult.io.ok && readResult.status == KSWORD_ARK_REGISTRY_READ_STATUS_SUCCESS)
+    {
+        QMessageBox::information(this, QStringLiteral("R0读取注册表"), statusText);
+    }
+    else
+    {
+        QMessageBox::warning(this, QStringLiteral("R0读取注册表"), statusText + QStringLiteral("\n\n详情：%1").arg(QString::fromStdString(readResult.io.message)));
+    }
 }
 
 void RegistryDock::exportCurrentKeyAsync()

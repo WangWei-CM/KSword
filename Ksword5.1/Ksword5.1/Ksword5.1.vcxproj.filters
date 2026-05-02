@@ -55,6 +55,21 @@
     <ClCompile Include="MiscDock\BootEditor\BootEditorTab.Actions.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MiscDock\DiskEditor\DiskEditorBackend.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\DiskEditor\DiskRangeTools.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\DiskEditor\DiskStructureParser.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\DiskEditor\DiskEditorTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\DiskEditor\DiskMapWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DriverDock\DriverDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -100,6 +115,9 @@
     <ClCompile Include="KernelDock\KernelDock.CallbackRuleValidator.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="KernelDock\KernelDock.CallbackEnum.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KernelDock\KernelDock.CallbackRemove.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -107,6 +125,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="KernelDock\KernelDock.DynData.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDock.KernelHooks.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="KernelDock\KernelDock.Runtime.cpp">
@@ -128,6 +149,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDock.DriverMemoryRw.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MiscDock\BootEditor\BootEditorTab.cpp">
@@ -224,6 +248,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="NetworkDock\HttpsProxyService.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="OtherDock\OtherDock.DesktopCreate.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="OtherDock\OtherDock.Desktop.cpp">
@@ -343,7 +370,13 @@
     <ClCompile Include="UI\CodeEditorWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\GlobalDialogTheme.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\PerformanceNavCard.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\ThemedMessageBox.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Framework\Log.cpp">
@@ -362,9 +395,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Framework\StartupSplash.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Framework\ThemedMessageBox.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ksword\process\process.cpp">
@@ -436,7 +466,13 @@
     <ClCompile Include="ArkDriverClient\ArkDriverSection.cpp">
       <Filter>Source Files\ArkDriverClient</Filter>
     </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverMemory.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
     <ClCompile Include="ArkDriverClient\ArkDriverFile.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverRegistry.cpp">
       <Filter>Source Files\ArkDriverClient</Filter>
     </ClCompile>
     <ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp">
@@ -446,6 +482,12 @@
       <Filter>Source Files\ArkDriverClient</Filter>
     </ClCompile>
     <ClCompile Include="HardwareDock\MemoryCompositionHistoryWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="HardwareDock\DiskMonitorPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="HardwareDock\HardwareOtherDevicesPage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -475,6 +517,27 @@
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="MiscDock\BootEditor\BootEditorTab.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <ClInclude Include="MiscDock\DiskEditor\DiskAdvancedModels.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\DiskEditor\DiskEditorBackend.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\DiskEditor\DiskEditorModels.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\DiskEditor\DiskRangeTools.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\DiskEditor\DiskStructureParser.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\DiskEditor\DiskEditorTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <QtMoc Include="MiscDock\DiskEditor\DiskMapWidget.h">
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="MiscDock\MiscDock.h">
@@ -528,6 +591,12 @@
     <QtMoc Include="HardwareDock\HardwareDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <QtMoc Include="HardwareDock\DiskMonitorPage.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="HardwareDock\HardwareOtherDevicesPage.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
     <QtMoc Include="句柄\HandleDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
@@ -567,9 +636,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Framework\StartupSplash.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Framework\ThemedMessageBox.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="KernelDock\KernelDockQueryWorker.h">
@@ -663,6 +729,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\PerformanceNavCard.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\GlobalDialogTheme.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\ThemedMessageBox.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="HardwareDock\MemoryCompositionHistoryWidget.h">

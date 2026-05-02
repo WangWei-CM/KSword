@@ -24,6 +24,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QEvent;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
@@ -194,9 +195,24 @@ public:
     };
 
 private:
+    // event：
+    // - 作用：监听全局调色板/样式变化，刷新本页自定义 Collapse 的动态样式；
+    // - 处理：先交给 QWidget 基类，再按事件类型重刷折叠面板；
+    // - 返回：返回 QWidget::event 的处理结果。
+    bool event(QEvent* eventPointer) override;
+
     // ========================= UI 初始化 =========================
     void initializeUi();
     void initializeConnections();
+    // createConfigurationCollapseSection：
+    // - 作用：创建进程定向页的默认展开配置折叠段；
+    // - 入参 parentWidget/titleText/contentWidget/expanded 分别控制父控件、标题、内容页和初始状态；
+    // - 返回：可直接加入根布局的折叠段 QWidget。
+    QWidget* createConfigurationCollapseSection(
+        QWidget* parentWidget,
+        const QString& titleText,
+        QWidget* contentWidget,
+        bool expanded) const;
     void updateActionState();
     void updateStatusLabel();
 
@@ -296,6 +312,9 @@ private:
     static QString blueButtonStyle();
     static QString blueInputStyle();
     static QString blueHeaderStyle();
+    static QString collapsePanelStyle();
+    static QString collapseHeaderButtonStyle();
+    static void refreshCollapseTheme(QWidget* rootWidget);
     static QString buildStatusStyle(const QString& colorHex);
     static QString monitorInfoColorHex();
     static QString monitorSuccessColorHex();
@@ -318,6 +337,8 @@ private:
 private:
     // ========================= 顶层控件 =========================
     QVBoxLayout* m_rootLayout = nullptr;                 // m_rootLayout：根布局。
+    QWidget* m_configurationCollapseWidget = nullptr;    // m_configurationCollapseWidget：默认展开的进程定向配置折叠段。
+    QWidget* m_configurationPanel = nullptr;             // m_configurationPanel：折叠段内承载进程选择、控制栏与筛选器的内容页。
     QSplitter* m_topSplitter = nullptr;                  // m_topSplitter：顶部左右分栏。
     QWidget* m_availablePanel = nullptr;                 // m_availablePanel：可选进程面板。
     QWidget* m_targetPanel = nullptr;                    // m_targetPanel：监控目标面板。

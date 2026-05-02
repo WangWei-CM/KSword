@@ -82,6 +82,20 @@ public:
         bool isChildWindow = false;         // 是否子窗口。
     };
 
+    // CreatedDesktopRecord：
+    // - 作用：记录本进程创建并保留的桌面句柄；
+    // - 用途：私有 DACL 桌面可能无法再通过名称 OpenDesktopW，切换时需要复用创建返回的句柄；
+    // - 生命周期：OtherDock 析构时统一 CloseDesktop，避免泄漏桌面对象引用。
+    struct CreatedDesktopRecord
+    {
+        QString windowStationName;          // 创建时所在窗口站名称。
+        QString desktopName;                // 桌面对象名称。
+        void* desktopHandle = nullptr;      // HDESK 句柄，头文件内用 void* 避免传播 Windows.h。
+        std::uint32_t desiredAccess = 0;    // 创建时请求的 DESKTOP_* 访问掩码。
+        bool privateAccess = false;         // 是否使用“其他进程不可访问”的私有 DACL。
+        bool inheritableHandle = false;     // 返回句柄是否允许子进程继承。
+    };
+
 private:
     // ===================== UI 初始化 ======================
     void initializeUi();
@@ -107,6 +121,13 @@ private:
     // - 传入：无；
     // - 传出：无，状态结果通过日志与 m_desktopStatusLabel 反馈。
     void switchToSelectedDesktop();
+
+    // showCreateDesktopDialog：
+    // - 作用：弹出“新建桌面”参数窗口，收集名称/堆大小/访问掩码/安全描述符等参数；
+    // - 调用：点击桌面管理页“新建”按钮或右键菜单“新建桌面”时调用；
+    // - 传入：无；
+    // - 传出：无，创建结果通过日志、状态栏和桌面列表刷新反馈。
+    void showCreateDesktopDialog();
 
     // showDesktopContextMenu：
     // - 作用：在桌面管理表格中弹出右键菜单；
@@ -166,8 +187,10 @@ private:
     QHBoxLayout* m_desktopToolLayout = nullptr;   // 桌面管理工具栏布局。
     QPushButton* m_desktopRefreshButton = nullptr;// 刷新桌面列表按钮。
     QPushButton* m_desktopSwitchButton = nullptr; // 切换到选中桌面按钮。
+    QPushButton* m_desktopCreateButton = nullptr; // 新建桌面按钮，详细参数在弹窗中设置。
     QTableWidget* m_desktopTable = nullptr;       // 桌面列表表格（窗口站/桌面/SessionId/SID/SID详情/备注）。
     QLabel* m_desktopStatusLabel = nullptr;       // 桌面状态提示标签。
+    std::vector<CreatedDesktopRecord> m_createdDesktopHandles; // 本进程创建并保留的桌面句柄记录。
 
     // 底部状态栏。
     QStatusBar* m_statusBar = nullptr;            // 状态栏。

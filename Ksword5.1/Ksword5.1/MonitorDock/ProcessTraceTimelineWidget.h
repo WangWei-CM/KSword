@@ -33,6 +33,18 @@ struct ProcessTraceTimelineEventPoint
     QString typeText;
 };
 
+// ProcessTraceTimelineRatePoint：
+// - time100ns：折线点对应的时间轴位置，单位仍为 100ns；
+// - uploadBytesPerSecond：该秒出站/上传速率，单位 B/s；
+// - downloadBytesPerSecond：该秒入站/下载速率，单位 B/s；
+// - 该结构是可选叠加层，ETW 页面不设置时不会绘制任何速率折线。
+struct ProcessTraceTimelineRatePoint
+{
+    std::uint64_t time100ns = 0;
+    double uploadBytesPerSecond = 0.0;
+    double downloadBytesPerSecond = 0.0;
+};
+
 class ProcessTraceTimelineWidget final : public QWidget
 {
 public:
@@ -61,6 +73,12 @@ public:
     // - 替换用于绘制的轻量事件点缓存；
     // - 调用方负责事件生命周期与表格筛选，本控件只负责绘制。
     void setEventPoints(const std::vector<ProcessTraceTimelineEventPoint>& eventPointList);
+
+    // setRateOverlayPoints：
+    // - 替换用于绘制的上传/下载速率折线缓存；
+    // - 调用方负责按秒聚合，本控件只做缩放映射与叠加绘制；
+    // - 传入空列表表示关闭速率折线叠加层。
+    void setRateOverlayPoints(const std::vector<ProcessTraceTimelineRatePoint>& ratePointList);
 
     // setSelectionChangedCallback：
     // - 注册用户交互导致选区变化时的回调；
@@ -179,6 +197,7 @@ private:
 
 private:
     std::vector<ProcessTraceTimelineEventPoint> m_eventPointList; // m_eventPointList：仅用于绘制的轻量事件缓存。
+    std::vector<ProcessTraceTimelineRatePoint> m_ratePointList; // m_ratePointList：上传/下载速率折线点缓存，空时不绘制。
     std::function<void(std::uint64_t, std::uint64_t)> m_selectionChangedCallback; // m_selectionChangedCallback：宿主筛选回调。
     std::uint64_t m_rangeStart100ns = 0;             // m_rangeStart100ns：时间轴左边缘绝对时间。
     std::uint64_t m_rangeEnd100ns = 0;               // m_rangeEnd100ns：时间轴右边缘绝对时间。

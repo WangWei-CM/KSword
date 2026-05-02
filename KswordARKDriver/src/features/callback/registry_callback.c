@@ -166,7 +166,7 @@ KswordArkBuildRegistryTargetPath(
         (unsigned long)operationType);
 }
 
-static NTSTATUS
+NTSTATUS
 KswordArkRegistryCallback(
     _In_opt_ PVOID callbackContext,
     _In_opt_ PVOID argument1,

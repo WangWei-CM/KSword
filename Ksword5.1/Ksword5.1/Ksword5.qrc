@@ -16,6 +16,7 @@
         <file alias="log_track.svg">Resource/Icon/editor/list_search_line.svg</file>
         <file alias="log_cancel_track.svg">Resource/Icon/system/close_line.svg</file>
         <file alias="filter_funnel.svg">Resource/Icon/business/filter_line.svg</file>
+        <file alias="plus.svg">Resource/Icon/system/plus_line.svg</file>
         <file alias="ks_combo_arrow_light.svg">Resource/Icon/arrow/down_line.svg</file>
         <file alias="ks_combo_arrow_dark.svg">Resource/Icon/arrow/down_fill.svg</file>
 
@@ -37,6 +38,15 @@
         <file alias="process_open_folder.svg">Resource/Icon/file/folder_open_line.svg</file>
         <file alias="process_priority.svg">Resource/Icon/system/settings_2_line.svg</file>
         <file alias="process_details.svg">Resource/Icon/file/file_info_line.svg</file>
+        <file alias="disk_storage.svg">Resource/Icon/device/storage_line.svg</file>
+        <file alias="disk_save.svg">Resource/Icon/file/save_line.svg</file>
+        <file alias="disk_warning.svg">Resource/Icon/file/file_warning_line.svg</file>
+        <file alias="disk_analyze.svg">Resource/Icon/device/scan_line.svg</file>
+        <file alias="disk_volume.svg">Resource/Icon/design/layout_grid_line.svg</file>
+        <file alias="disk_health.svg">Resource/Icon/system/heartbeat_line.svg</file>
+        <file alias="disk_tools.svg">Resource/Icon/system/tool_line.svg</file>
+        <file alias="desktop_switch.svg">Resource/Icon/system/switch_line.svg</file>
+        <file alias="desktop_create.svg">Resource/Icon/system/add_square_line.svg</file>
         <file alias="window_picker_target.svg">Resource/Icon/business/target_line.svg</file>
         <file alias="titlebar_pin_line.svg">Resource/Icon/file/pin_line.svg</file>
         <file alias="titlebar_pin_fill.svg">Resource/Icon/file/pin_fill.svg</file>
