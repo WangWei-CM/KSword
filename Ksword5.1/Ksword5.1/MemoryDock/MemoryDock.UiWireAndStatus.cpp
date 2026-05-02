@@ -1,5 +1,10 @@
+﻿#include "MemoryDock.Internal.h"
+
+// 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
+using namespace ksword::memory_dock_internal;
+
 // ============================================================
-// MemoryDock.UiWireAndStatus.inc
+// MemoryDock.UiWireAndStatus.cpp
 // 作用：承载信号槽连接与状态栏/定时器初始化代码。
 // ============================================================
 
@@ -961,6 +966,17 @@ void MemoryDock::initializeConnections()
             << eol;
         driverReadMemoryFromUi();
         });
+
+    if (m_driverMemoryBaseCombo != nullptr && m_driverMemoryBaseCombo->lineEdit() != nullptr)
+    {
+        connect(m_driverMemoryBaseCombo->lineEdit(), &QLineEdit::returnPressed, this, [this]() {
+            kLogEvent driverBaseEnterEvent;
+            info << driverBaseEnterEvent
+                << "[MemoryDock] 驱动内存读写页偏移基址/进程框回车读取。"
+                << eol;
+            driverReadMemoryFromUi();
+            });
+    }
 
     connect(m_driverMemoryApplyButton, &QPushButton::clicked, this, [this]() {
         kLogEvent driverApplyClickEvent;

@@ -81,8 +81,8 @@ typedef struct _KSWORD_ARK_CALLBACK_RULE_SNAPSHOT
     ULONG RuleCount;
     ULONG ActiveRuleCount;
     ULONG StringPoolBytes;
-    ULONG BucketStart[KSWORD_ARK_CALLBACK_TYPE_MINIFILTER_RESERVED + 1];
-    ULONG BucketCount[KSWORD_ARK_CALLBACK_TYPE_MINIFILTER_RESERVED + 1];
+    ULONG BucketStart[KSWORD_ARK_CALLBACK_TYPE_MINIFILTER + 1];
+    ULONG BucketCount[KSWORD_ARK_CALLBACK_TYPE_MINIFILTER + 1];
     ULONG64 RuleVersion;
     LARGE_INTEGER AppliedAtUtc100ns;
     KSWORD_ARK_RUNTIME_RULE Rules[1];
@@ -296,6 +296,16 @@ KswordArkCallbackEnumAddUnsupportedRow(
     _In_ ULONG CallbackClass,
     _In_opt_z_ PCWSTR NameText,
     _In_opt_z_ PCWSTR DetailText
+    );
+
+VOID
+KswordArkCallbackEnumAddMinifilters(
+    _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder
+    );
+
+VOID
+KswordArkCallbackEnumAddPrivateCallbacks(
+    _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder
     );
 
 VOID

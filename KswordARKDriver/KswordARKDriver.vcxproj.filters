@@ -222,6 +222,9 @@
     <ClInclude Include="src\features\network\network_internal.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\features\kernel\hook_scan_support.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   <ClInclude Include="src\features\callback\callback_external_core.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_wfp.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_minifilter.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_safe.h"><Filter>Header Files</Filter></ClInclude></ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\features\callback\callback_runtime.c">
@@ -264,6 +267,9 @@
       <Filter>Source Files\Features\Kernel</Filter>
     </ClCompile>
     <ClCompile Include="src\features\kernel\hook_scan.c">
+      <Filter>Source Files\Features\Kernel</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\kernel\hook_scan_support.c">
       <Filter>Source Files\Features\Kernel</Filter>
     </ClCompile>
     <ClCompile Include="src\features\kernel\driver_object_query.c">

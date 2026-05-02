@@ -1,10 +1,15 @@
+﻿#include "MemoryDock.Internal.h"
+
+// 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
+using namespace ksword::memory_dock_internal;
+
 // ============================================================
-// MemoryDock.SearchParseAndFilter.inc
+// MemoryDock.SearchParseAndFilter.cpp
 // 作用：承载搜索值解析与扫描区域收集逻辑。
 // ============================================================
 
 // ============================================================
-// MemoryDock.SearchParseAndFilter.inc（由原 Search 拆分）
+// MemoryDock.SearchParseAndFilter.cpp（由原 Search 拆分）
 // 作用：
 // - 负责首次扫描、再次扫描、后台并发扫描与结果表刷新。
 // - 聚焦“扫描规则解析 + 扫描任务执行 + 扫描状态管理”。

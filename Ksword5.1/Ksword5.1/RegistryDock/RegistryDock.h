@@ -114,6 +114,59 @@ private:
     // readRegistryValueByR0：
     // - 作用：内部公共实现，输入值名后调用 R0 只读 IOCTL。
     void readRegistryValueByR0(const QString& valueName);
+    // refreshRegistryDriverModeIndicator：
+    // - 作用：刷新路径栏后的 R0 注册表读写状态标识。
+    void refreshRegistryDriverModeIndicator();
+    // shouldUseRegistryR0：
+    // - 作用：判断当前注册表页是否应优先使用驱动读写。
+    bool shouldUseRegistryR0() const;
+    // readRegistryValueAny：
+    // - 作用：R0 在线时走驱动，否则退回 Win32 读取指定值。
+    bool readRegistryValueAny(
+        const QString& keyPath,
+        const QString& valueName,
+        DWORD* typeOut,
+        QByteArray* dataOut,
+        QString* errorTextOut);
+    // writeRegistryValueAny：
+    // - 作用：R0 在线时走驱动，否则退回 Win32 写入指定值。
+    bool writeRegistryValueAny(
+        const QString& keyPath,
+        const QString& valueName,
+        DWORD valueType,
+        const QByteArray& rawData,
+        QString* errorTextOut);
+    // createRegistryKeyAny：
+    // - 作用：R0 在线时走驱动，否则退回 Win32 创建键。
+    bool createRegistryKeyAny(const QString& fullKeyPath, QString* errorTextOut);
+    // deleteRegistryKeyAny：
+    // - 作用：R0 在线时通过驱动递归删除，否则退回 Win32 删除树。
+    bool deleteRegistryKeyAny(const QString& fullKeyPath, QString* errorTextOut);
+    // deleteRegistryValueAny：
+    // - 作用：R0 在线时走驱动，否则退回 Win32 删除值。
+    bool deleteRegistryValueAny(
+        const QString& keyPath,
+        const QString& valueName,
+        QString* errorTextOut);
+    // renameRegistryValueAny：
+    // - 作用：R0 在线时走驱动，否则用 Win32 读写删除完成值重命名。
+    bool renameRegistryValueAny(
+        const QString& keyPath,
+        const QString& oldValueName,
+        const QString& newValueName,
+        QString* errorTextOut);
+    // renameRegistryKeyAny：
+    // - 作用：R0 在线时走驱动，否则调用系统 RegRenameKey。
+    bool renameRegistryKeyAny(
+        const QString& fullKeyPath,
+        const QString& newKeyName,
+        QString* newFullKeyPathOut,
+        QString* errorTextOut);
+    // deleteRegistryKeyByR0Recursive：
+    // - 作用：仅使用驱动枚举与删除，递归删除非空注册表键。
+    bool deleteRegistryKeyByR0Recursive(
+        const QString& kernelKeyPath,
+        QString* errorTextOut) const;
 
     // ===================== 导入导出 =====================
     void exportCurrentKeyAsync();
@@ -126,6 +179,15 @@ private:
     void searchRegistryRecursive(
         HKEY rootKey,
         const QString& subPath,
+        const QString& keyword,
+        const SearchOptions& options,
+        std::size_t* scannedKeyCount,
+        std::size_t* hitCount);
+    // searchRegistryRecursiveByR0：
+    // - 作用：R0 在线时用驱动枚举完成后台搜索，避免搜索路径绕回 Win32。
+    void searchRegistryRecursiveByR0(
+        const QString& kernelKeyPath,
+        const QString& displayKeyPath,
         const QString& keyword,
         const SearchOptions& options,
         std::size_t* scannedKeyCount,
@@ -172,6 +234,7 @@ private:
     QPushButton* m_searchButton = nullptr;       // 启动搜索按钮。
     QPushButton* m_stopSearchButton = nullptr;   // 停止搜索按钮。
     QLineEdit* m_pathEdit = nullptr;             // 路径输入框。
+    QLabel* m_driverRegistryModeLabel = nullptr; // R0 注册表读写状态标识。
     QLineEdit* m_searchEdit = nullptr;           // 搜索关键字输入框。
 
     // ===================== 主体区域 =====================

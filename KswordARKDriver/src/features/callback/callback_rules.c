@@ -426,7 +426,8 @@ KswordArkCallbackBuildSnapshotFromBlob(
         }
 
         if (ruleBlob->matchMode == KSWORD_ARK_MATCH_MODE_REGEX &&
-            (ruleBlob->callbackType != KSWORD_ARK_CALLBACK_TYPE_REGISTRY ||
+            ((ruleBlob->callbackType != KSWORD_ARK_CALLBACK_TYPE_REGISTRY &&
+                ruleBlob->callbackType != KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) ||
                 ruleBlob->action != KSWORD_ARK_RULE_ACTION_ASK_USER)) {
             return STATUS_NOT_SUPPORTED;
         }
@@ -586,14 +587,14 @@ KswordArkCallbackBuildSnapshotFromBlob(
 
     KswordArkCallbackSortRuntimeRules(runtimeRules, snapshot->ActiveRuleCount);
 
-    for (groupIndex = 0; groupIndex <= KSWORD_ARK_CALLBACK_TYPE_MINIFILTER_RESERVED; ++groupIndex) {
+    for (groupIndex = 0; groupIndex <= KSWORD_ARK_CALLBACK_TYPE_MINIFILTER; ++groupIndex) {
         snapshot->BucketStart[groupIndex] = 0U;
         snapshot->BucketCount[groupIndex] = 0U;
     }
 
     for (ruleIndex = 0; ruleIndex < snapshot->ActiveRuleCount; ++ruleIndex) {
         ULONG callbackType = runtimeRules[ruleIndex].CallbackType;
-        if (callbackType <= KSWORD_ARK_CALLBACK_TYPE_MINIFILTER_RESERVED) {
+        if (callbackType <= KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) {
             if (snapshot->BucketCount[callbackType] == 0U) {
                 snapshot->BucketStart[callbackType] = ruleIndex;
             }

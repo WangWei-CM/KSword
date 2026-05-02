@@ -22,6 +22,7 @@ class MemoryCompositionHistoryWidget;
 class HardwareOtherDevicesPage;
 class PerformanceNavCard;
 class QChartView;
+class QAreaSeries;
 class QGridLayout;
 class QHBoxLayout;
 class QLabel;
@@ -73,6 +74,8 @@ private:
         QLabel* titleLabel = nullptr;       // titleLabel：显示“CPU n”标题。
         QChartView* chartView = nullptr;    // chartView：折线图视图。
         QLineSeries* lineSeries = nullptr;  // lineSeries：该核心利用率曲线。
+        QLineSeries* baselineSeries = nullptr; // baselineSeries：沿 X 轴的 0% 基准线，用于填充曲线下方面积。
+        QAreaSeries* areaSeries = nullptr;   // areaSeries：折线与 X 轴围成的填充区域。
         QValueAxis* axisX = nullptr;        // axisX：时间轴（隐藏标签）。
         QValueAxis* axisY = nullptr;        // axisY：百分比轴（隐藏标签）。
     };
@@ -87,6 +90,8 @@ private:
         QLabel* titleLabel = nullptr;   // titleLabel：每个引擎小图标题标签。
         QChartView* chartView = nullptr; // chartView：每个引擎小图视图。
         QLineSeries* lineSeries = nullptr; // lineSeries：引擎利用率曲线。
+        QLineSeries* baselineSeries = nullptr; // baselineSeries：引擎图 X 轴基准线，用于面积填充闭合。
+        QAreaSeries* areaSeries = nullptr; // areaSeries：引擎利用率折线下方填充区域。
         QValueAxis* axisX = nullptr;    // axisX：引擎图 X 轴。
         QValueAxis* axisY = nullptr;    // axisY：引擎图 Y 轴。
     };
@@ -202,7 +207,11 @@ private:
         QLabel* summaryLabel = nullptr;           // summaryLabel：读写摘要。
         QChartView* chartView = nullptr;          // chartView：读写趋势图。
         QLineSeries* readLineSeries = nullptr;    // readLineSeries：读取速率折线。
+        QLineSeries* readBaselineSeries = nullptr; // readBaselineSeries：读取折线的 0 轴基准线。
+        QAreaSeries* readAreaSeries = nullptr;    // readAreaSeries：读取折线下方填充区域。
         QLineSeries* writeLineSeries = nullptr;   // writeLineSeries：写入速率折线。
+        QLineSeries* writeBaselineSeries = nullptr; // writeBaselineSeries：写入折线的 0 轴基准线。
+        QAreaSeries* writeAreaSeries = nullptr;   // writeAreaSeries：写入折线下方填充区域。
         QValueAxis* axisX = nullptr;              // axisX：趋势图 X 轴。
         QValueAxis* axisY = nullptr;              // axisY：趋势图 Y 轴。
         QLabel* detailLabel = nullptr;            // detailLabel：参数详情。
@@ -229,7 +238,11 @@ private:
         QLabel* summaryLabel = nullptr;           // summaryLabel：收发摘要。
         QChartView* chartView = nullptr;          // chartView：收发趋势图。
         QLineSeries* rxLineSeries = nullptr;      // rxLineSeries：接收速率折线。
+        QLineSeries* rxBaselineSeries = nullptr;  // rxBaselineSeries：接收折线的 0 轴基准线。
+        QAreaSeries* rxAreaSeries = nullptr;      // rxAreaSeries：接收折线下方填充区域。
         QLineSeries* txLineSeries = nullptr;      // txLineSeries：发送速率折线。
+        QLineSeries* txBaselineSeries = nullptr;  // txBaselineSeries：发送折线的 0 轴基准线。
+        QAreaSeries* txAreaSeries = nullptr;      // txAreaSeries：发送折线下方填充区域。
         QValueAxis* axisX = nullptr;              // axisX：趋势图 X 轴。
         QValueAxis* axisY = nullptr;              // axisY：趋势图 Y 轴。
         QLabel* detailLabel = nullptr;            // detailLabel：参数详情。
@@ -257,10 +270,14 @@ private:
         std::vector<GpuEngineChartEntry> engineCharts; // engineCharts：四类引擎图。
         QChartView* dedicatedMemoryChartView = nullptr; // dedicatedMemoryChartView：专用显存图。
         QLineSeries* dedicatedMemoryLineSeries = nullptr; // dedicatedMemoryLineSeries：专用显存折线。
+        QLineSeries* dedicatedMemoryBaselineSeries = nullptr; // dedicatedMemoryBaselineSeries：专用显存 0 轴基准线。
+        QAreaSeries* dedicatedMemoryAreaSeries = nullptr; // dedicatedMemoryAreaSeries：专用显存折线填充区域。
         QValueAxis* dedicatedMemoryAxisX = nullptr; // dedicatedMemoryAxisX：专用显存 X 轴。
         QValueAxis* dedicatedMemoryAxisY = nullptr; // dedicatedMemoryAxisY：专用显存 Y 轴。
         QChartView* sharedMemoryChartView = nullptr; // sharedMemoryChartView：共享显存图。
         QLineSeries* sharedMemoryLineSeries = nullptr; // sharedMemoryLineSeries：共享显存折线。
+        QLineSeries* sharedMemoryBaselineSeries = nullptr; // sharedMemoryBaselineSeries：共享显存 0 轴基准线。
+        QAreaSeries* sharedMemoryAreaSeries = nullptr; // sharedMemoryAreaSeries：共享显存折线填充区域。
         QValueAxis* sharedMemoryAxisX = nullptr;  // sharedMemoryAxisX：共享显存 X 轴。
         QValueAxis* sharedMemoryAxisY = nullptr;  // sharedMemoryAxisY：共享显存 Y 轴。
         QLabel* detailLabel = nullptr;            // detailLabel：参数详情。
@@ -364,6 +381,16 @@ private:
         QValueAxis* axisY,
         double sampleValue,
         double minAxisYValue = 0.0);
+    // appendFilledSeriesPoint 作用：
+    // - 同步追加折线采样和 0 轴基准线采样；
+    // - 保证 QAreaSeries 的填充区域能随历史窗口一起平移。
+    void appendFilledSeriesPoint(
+        QLineSeries* lineSeries,
+        QLineSeries* baselineSeries,
+        QValueAxis* axisX,
+        QValueAxis* axisY,
+        double sampleValue,
+        double minAxisYValue = 0.0);
     // updateSharedSeriesAxisRange 作用：
     // - 给共用同一坐标轴的两条折线统一计算 X/Y 可见范围；
     // - 用两条曲线的可见历史峰值同步刷新纵向比例。
@@ -447,7 +474,11 @@ private:
     QLabel* m_diskUtilSummaryLabel = nullptr;      // m_diskUtilSummaryLabel：磁盘摘要文本。
     QChartView* m_diskUtilChartView = nullptr;     // m_diskUtilChartView：磁盘趋势图视图。
     QLineSeries* m_diskReadLineSeries = nullptr;   // m_diskReadLineSeries：磁盘读速率折线。
+    QLineSeries* m_diskReadBaselineSeries = nullptr; // m_diskReadBaselineSeries：磁盘读速率 0 轴基准线。
+    QAreaSeries* m_diskReadAreaSeries = nullptr;   // m_diskReadAreaSeries：磁盘读速率填充区域。
     QLineSeries* m_diskWriteLineSeries = nullptr;  // m_diskWriteLineSeries：磁盘写速率折线。
+    QLineSeries* m_diskWriteBaselineSeries = nullptr; // m_diskWriteBaselineSeries：磁盘写速率 0 轴基准线。
+    QAreaSeries* m_diskWriteAreaSeries = nullptr;  // m_diskWriteAreaSeries：磁盘写速率填充区域。
     QValueAxis* m_diskUtilAxisX = nullptr;         // m_diskUtilAxisX：磁盘图 X 轴。
     QValueAxis* m_diskUtilAxisY = nullptr;         // m_diskUtilAxisY：磁盘图 Y 轴。
     QLabel* m_diskUtilDetailLabel = nullptr;       // m_diskUtilDetailLabel：磁盘参数文本。
@@ -457,7 +488,11 @@ private:
     QLabel* m_networkUtilSummaryLabel = nullptr;    // m_networkUtilSummaryLabel：网络摘要文本。
     QChartView* m_networkUtilChartView = nullptr;   // m_networkUtilChartView：网络趋势图视图。
     QLineSeries* m_networkRxLineSeries = nullptr;   // m_networkRxLineSeries：网络下行折线。
+    QLineSeries* m_networkRxBaselineSeries = nullptr; // m_networkRxBaselineSeries：网络下行 0 轴基准线。
+    QAreaSeries* m_networkRxAreaSeries = nullptr;   // m_networkRxAreaSeries：网络下行填充区域。
     QLineSeries* m_networkTxLineSeries = nullptr;   // m_networkTxLineSeries：网络上行折线。
+    QLineSeries* m_networkTxBaselineSeries = nullptr; // m_networkTxBaselineSeries：网络上行 0 轴基准线。
+    QAreaSeries* m_networkTxAreaSeries = nullptr;   // m_networkTxAreaSeries：网络上行填充区域。
     QValueAxis* m_networkUtilAxisX = nullptr;       // m_networkUtilAxisX：网络图 X 轴。
     QValueAxis* m_networkUtilAxisY = nullptr;       // m_networkUtilAxisY：网络图 Y 轴。
     QLabel* m_networkUtilDetailLabel = nullptr;     // m_networkUtilDetailLabel：网络参数文本。
@@ -471,10 +506,14 @@ private:
     std::vector<GpuEngineChartEntry> m_gpuEngineCharts; // m_gpuEngineCharts：GPU 引擎图列表。
     QChartView* m_gpuDedicatedMemoryChartView = nullptr; // m_gpuDedicatedMemoryChartView：专用显存曲线图。
     QLineSeries* m_gpuDedicatedMemoryLineSeries = nullptr; // m_gpuDedicatedMemoryLineSeries：专用显存使用曲线。
+    QLineSeries* m_gpuDedicatedMemoryBaselineSeries = nullptr; // m_gpuDedicatedMemoryBaselineSeries：专用显存 0 轴基准线。
+    QAreaSeries* m_gpuDedicatedMemoryAreaSeries = nullptr; // m_gpuDedicatedMemoryAreaSeries：专用显存填充区域。
     QValueAxis* m_gpuDedicatedMemoryAxisX = nullptr; // m_gpuDedicatedMemoryAxisX：专用显存图 X 轴。
     QValueAxis* m_gpuDedicatedMemoryAxisY = nullptr; // m_gpuDedicatedMemoryAxisY：专用显存图 Y 轴。
     QChartView* m_gpuSharedMemoryChartView = nullptr; // m_gpuSharedMemoryChartView：共享显存曲线图。
     QLineSeries* m_gpuSharedMemoryLineSeries = nullptr; // m_gpuSharedMemoryLineSeries：共享显存使用曲线。
+    QLineSeries* m_gpuSharedMemoryBaselineSeries = nullptr; // m_gpuSharedMemoryBaselineSeries：共享显存 0 轴基准线。
+    QAreaSeries* m_gpuSharedMemoryAreaSeries = nullptr; // m_gpuSharedMemoryAreaSeries：共享显存填充区域。
     QValueAxis* m_gpuSharedMemoryAxisX = nullptr;   // m_gpuSharedMemoryAxisX：共享显存图 X 轴。
     QValueAxis* m_gpuSharedMemoryAxisY = nullptr;   // m_gpuSharedMemoryAxisY：共享显存图 Y 轴。
     QLabel* m_gpuUtilDetailLabel = nullptr;        // m_gpuUtilDetailLabel：GPU 参数文本。

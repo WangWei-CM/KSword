@@ -9,16 +9,17 @@
 #include <QEvent>
 #include <QFileIconProvider>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QGridLayout>
-#include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
-#include <QLayoutItem>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QMargins>
 #include <QPointer>
 #include <QPixmap>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScreen>
 #include <QSize>
 #include <QSizePolicy>
@@ -28,7 +29,6 @@
 #include <QWindow>
 
 #include <algorithm>
-#include <vector>
 
 namespace
 {
@@ -53,19 +53,22 @@ namespace
     constexpr const char* kMessageBoxTitleBarObjectName = "KswordThemedMessageBoxTitleBar";
 
     // kMessageBoxTitleBarInstalledPropertyName 作用：
-    // - 标记 QMessageBox 布局已经为自绘标题栏下移过；
-    // - 避免 Palette/StyleChange 多次触发后重复移动内部布局项。
-    constexpr const char* kMessageBoxTitleBarInstalledPropertyName = "ksword_message_box_titlebar_installed";
+    // - 标记 QMessageBox 根布局已经为悬浮标题栏预留过顶部空白；
+    // - 避免 Palette/StyleChange 多次触发后重复累加顶部边距。
+    constexpr const char* kMessageBoxTitleBarInstalledPropertyName = "ksword_message_box_titlebar_margin_reserved";
+
+    // kMessageBoxOriginalMarginPropertyName 作用：
+    // - 记录 QMessageBox 原始布局边距；
+    // - 后续主题刷新时以原始值计算顶部避让距离，避免反复叠加。
+    constexpr const char* kMessageBoxOriginalMarginLeftPropertyName = "ksword_message_box_original_margin_left";
+    constexpr const char* kMessageBoxOriginalMarginTopPropertyName = "ksword_message_box_original_margin_top";
+    constexpr const char* kMessageBoxOriginalMarginRightPropertyName = "ksword_message_box_original_margin_right";
+    constexpr const char* kMessageBoxOriginalMarginBottomPropertyName = "ksword_message_box_original_margin_bottom";
 
     // kMessageBoxTitleLabelObjectName 作用：
     // - 标记自绘标题栏中的标题文本控件；
     // - 每次 polish 时同步 QMessageBox 当前 windowTitle。
     constexpr const char* kMessageBoxTitleLabelObjectName = "KswordThemedMessageBoxTitleLabel";
-
-    // kMessageBoxCloseButtonObjectName 作用：
-    // - 标记自绘标题栏中的关闭按钮；
-    // - QSS 使用该对象名设置右上角关闭按钮样式。
-    constexpr const char* kMessageBoxCloseButtonObjectName = "KswordThemedMessageBoxCloseButton";
 
     // 消息框尺寸常量：
     // - kMessageBoxMinWidth：消息框允许的最小宽度；
@@ -78,13 +81,13 @@ namespace
     constexpr int kMessageBoxHardMaxWidth = 820;
     constexpr int kMessageBoxScreenMargin = 96;
     constexpr int kMessageLabelHorizontalReserve = 148;
+    constexpr int kMessageBoxOuterBorderWidth = 1;
     constexpr int kMessageTitleBarHeight = 34;
     constexpr int kMessageLogoSize = 22;
-    constexpr int kMessageCloseButtonSize = 28;
-    // kMessageTitleBarColumnSpanToRightEdge 作用：
-    // - QGridLayout::addWidget 的 colSpan 传 -1 表示一直延伸到最右列；
-    // - 用它避免 Qt 内部布局尚未完成统计时 columnCount() 只覆盖左侧文字列。
-    constexpr int kMessageTitleBarColumnSpanToRightEdge = -1;
+    constexpr int kMessageTitleBarContentGap = 8;
+    constexpr int kMessageTitleBarLeftMargin = 10;
+    constexpr int kMessageTitleBarRightMargin = 4;
+    constexpr int kMessageTitleBarItemSpacing = 8;
 
     // computeMessageBoxMaxWidth 作用：
     // - 按当前消息框所在屏幕计算安全最大宽度；
@@ -184,13 +187,14 @@ namespace
 
     // MessageBoxTitleBar 作用：
     // - 作为 QMessageBox 的自绘标题栏；
-    // - 负责左侧 Logo/标题展示、右侧关闭按钮，以及鼠标拖动窗口。
+    // - 负责左侧 Logo/标题展示以及鼠标拖动窗口；
+    // - 不提供最小化、最大化或关闭入口，消息框只能通过业务按钮结束。
     class MessageBoxTitleBar final : public QWidget
     {
     public:
         // 构造函数：
         // - 参数 ownerMessageBox：所属 QMessageBox；
-        // - 处理逻辑：创建 Logo、标题和关闭按钮，绑定关闭动作；
+        // - 处理逻辑：创建 Logo 和标题文本，关闭/最小化/最大化入口统一禁用；
         // - 返回值：无。
         explicit MessageBoxTitleBar(QMessageBox* ownerMessageBox)
             : QWidget(ownerMessageBox),
@@ -201,39 +205,28 @@ namespace
             setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
             setAttribute(Qt::WA_StyledBackground, true);
 
-            QHBoxLayout* titleLayout = new QHBoxLayout(this);
-            titleLayout->setContentsMargins(10, 4, 4, 4);
-            titleLayout->setSpacing(8);
-
-            QLabel* logoLabel = new QLabel(this);
-            logoLabel->setFixedSize(kMessageLogoSize, kMessageLogoSize);
-            logoLabel->setAlignment(Qt::AlignCenter);
+            m_logoLabel = new QLabel(this);
+            m_logoLabel->setFixedSize(kMessageLogoSize, kMessageLogoSize);
+            m_logoLabel->setAlignment(Qt::AlignCenter);
+            m_logoLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
             const QIcon applicationIcon = resolveApplicationIcon(ownerMessageBox);
             if (!applicationIcon.isNull())
             {
                 // titlePixmap 用途：按标题栏固定尺寸取图，避免把启动页 MainLogo 当作窗口图标。
                 const QPixmap titlePixmap = applicationIcon.pixmap(QSize(kMessageLogoSize, kMessageLogoSize));
-                logoLabel->setPixmap(titlePixmap);
+                m_logoLabel->setPixmap(titlePixmap);
             }
 
             m_titleLabel = new QLabel(this);
             m_titleLabel->setObjectName(QString::fromLatin1(kMessageBoxTitleLabelObjectName));
             m_titleLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+            m_titleLabel->setMinimumWidth(0);
             m_titleLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+            m_titleLabel->setTextFormat(Qt::PlainText);
+            m_titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
 
-            QPushButton* closeButton = new QPushButton(this);
-            closeButton->setObjectName(QString::fromLatin1(kMessageBoxCloseButtonObjectName));
-            closeButton->setFixedSize(kMessageCloseButtonSize, kMessageCloseButtonSize);
-            closeButton->setCursor(Qt::PointingHandCursor);
-            closeButton->setFocusPolicy(Qt::NoFocus);
-            closeButton->setText(QStringLiteral("×"));
-            closeButton->setToolTip(QStringLiteral("关闭"));
-            QObject::connect(closeButton, &QPushButton::clicked, ownerMessageBox, &QMessageBox::reject);
-
-            titleLayout->addWidget(logoLabel, 0, Qt::AlignVCenter);
-            titleLayout->addWidget(m_titleLabel, 1);
-            titleLayout->addWidget(closeButton, 0, Qt::AlignVCenter);
             updateTitleText();
+            syncChildGeometry();
         }
 
         // updateTitleText 作用：
@@ -256,11 +249,81 @@ namespace
             }
             if (m_titleLabel != nullptr)
             {
-                m_titleLabel->setText(titleText);
+                m_fullTitleText = titleText;
+                m_titleLabel->setToolTip(titleText);
+                syncChildGeometry();
             }
         }
 
+        // syncChildGeometry 作用：
+        // - 手工计算 Logo 和标题位置；
+        // - 标题只使用当前标题栏可见宽度，避免长标题把控件布局推到窗口外；
+        // - 返回值：无。
+        void syncChildGeometry()
+        {
+            const int titleBarWidth = std::max(width(), 0);
+            const int titleBarHeight = std::max(height(), kMessageTitleBarHeight);
+
+            // logoVisible 用途：极窄异常宽度下优先保留标题栏可读性，Logo 允许隐藏。
+            const int minimumWidthForLogo =
+                kMessageTitleBarLeftMargin +
+                kMessageLogoSize +
+                kMessageTitleBarRightMargin;
+            const bool logoVisible = titleBarWidth >= minimumWidthForLogo;
+            const int logoX = kMessageTitleBarLeftMargin;
+            const int logoY = std::max((titleBarHeight - kMessageLogoSize) / 2, 0);
+            if (m_logoLabel != nullptr)
+            {
+                m_logoLabel->setVisible(logoVisible);
+                m_logoLabel->setGeometry(logoX, logoY, kMessageLogoSize, kMessageLogoSize);
+            }
+
+            // titleX/titleRight 用途：标题只吃标题栏安全区域内的剩余空间，空间不足时直接省略。
+            const int titleX = logoVisible
+                ? (kMessageTitleBarLeftMargin + kMessageLogoSize + kMessageTitleBarItemSpacing)
+                : kMessageTitleBarLeftMargin;
+            const int titleRight = std::max(titleBarWidth - kMessageTitleBarRightMargin, titleX);
+            const int titleWidth = std::max(titleRight - titleX, 0);
+            if (m_titleLabel != nullptr)
+            {
+                m_titleLabel->setGeometry(titleX, 0, titleWidth, titleBarHeight);
+
+                // elidedTitle 用途：Qt6 下 QLabel 仍可能按完整文本给出较大 sizeHint，手工省略可消除挤压来源。
+                const QFontMetrics titleFontMetrics(m_titleLabel->font());
+                const QString elidedTitle = titleWidth > 0
+                    ? titleFontMetrics.elidedText(m_fullTitleText, Qt::ElideRight, titleWidth)
+                    : QString();
+                m_titleLabel->setText(elidedTitle);
+            }
+        }
+
+        // sizeHint 作用：给 Qt6 样式系统一个稳定标题栏建议尺寸。
+        // 返回值：固定高度、最小消息框宽度的建议尺寸。
+        QSize sizeHint() const override
+        {
+            return QSize(kMessageBoxMinWidth, kMessageTitleBarHeight);
+        }
+
+        // minimumSizeHint 作用：声明能容纳 Logo 与安全边距的最小标题栏尺寸。
+        // 返回值：Logo 加左右安全边距后的最小尺寸。
+        QSize minimumSizeHint() const override
+        {
+            return QSize(
+                kMessageTitleBarLeftMargin + kMessageLogoSize + kMessageTitleBarRightMargin,
+                kMessageTitleBarHeight);
+        }
+
     protected:
+        // resizeEvent 作用：
+        // - Qt6 对话框在 adjustSize/show/高 DPI 切换时会多次更新子窗口尺寸；
+        // - 每次尺寸变化后重新截断标题，避免沿用旧布局结果；
+        // - 返回值：无。
+        void resizeEvent(QResizeEvent* resizeEventPointer) override
+        {
+            QWidget::resizeEvent(resizeEventPointer);
+            syncChildGeometry();
+        }
+
         // mousePressEvent 作用：
         // - 记录标题栏拖动起点；
         // - 返回值：无，只更新拖动状态。
@@ -326,7 +389,9 @@ namespace
 
     private:
         QPointer<QMessageBox> m_ownerMessageBox; // m_ownerMessageBox：所属消息框。
+        QLabel* m_logoLabel = nullptr;           // m_logoLabel：左侧应用图标控件。
         QLabel* m_titleLabel = nullptr;          // m_titleLabel：标题文本控件。
+        QString m_fullTitleText;                 // m_fullTitleText：未省略的完整标题文本。
         bool m_dragCandidateActive = false;      // m_dragCandidateActive：是否处于拖动候选。
         bool m_dragInProgress = false;           // m_dragInProgress：是否已经开始拖动。
         QPoint m_dragPressGlobalPos;             // m_dragPressGlobalPos：按下时全局坐标。
@@ -347,7 +412,7 @@ namespace
         return KswordTheme::SurfaceColor();
     }
 
-    // messageBoxBorderColor 作用：返回消息框边框色。
+    // messageBoxBorderColor 作用：返回消息框内部控件分隔线颜色。
     QColor messageBoxBorderColor(const bool darkModeEnabled)
     {
         Q_UNUSED(darkModeEnabled);
@@ -390,6 +455,7 @@ namespace
         const QString windowColorText = messageBoxWindowColor(darkModeEnabled).name(QColor::HexRgb);
         const QString surfaceColorText = messageBoxSurfaceColor(darkModeEnabled).name(QColor::HexRgb);
         const QString borderColorText = messageBoxBorderColor(darkModeEnabled).name(QColor::HexRgb);
+        const QString outerBorderColorText = KswordTheme::PrimaryBlueHex;
         const QString textColorText = messageBoxTextColor(darkModeEnabled).name(QColor::HexRgb);
         const QString secondaryTextColorText = messageBoxSecondaryTextColor(darkModeEnabled).name(QColor::HexRgb);
         const QString secondaryButtonColorText = messageBoxSecondaryButtonColor(darkModeEnabled).name(QColor::HexRgb);
@@ -399,7 +465,7 @@ namespace
             "QMessageBox#%1{"
             "  background-color:%2;"
             "  color:%3;"
-            "  border:1px solid %4;"
+            "  border:%13px solid %14;"
             "  border-radius:0px;"
             "}"
             "QMessageBox#%1 QWidget{"
@@ -415,27 +481,6 @@ namespace
             "  color:%3;"
             "  font-size:13px;"
             "  font-weight:700;"
-            "}"
-            "QMessageBox#%1 QPushButton#%13{"
-            "  background-color:transparent;"
-            "  color:%3;"
-            "  border:0px;"
-            "  border-radius:0px;"
-            "  font-size:18px;"
-            "  font-weight:700;"
-            "  min-width:%14px;"
-            "  max-width:%14px;"
-            "  min-height:%14px;"
-            "  max-height:%14px;"
-            "  padding:0px;"
-            "}"
-            "QMessageBox#%1 QPushButton#%13:hover{"
-            "  background-color:#E81123;"
-            "  color:#FFFFFF;"
-            "}"
-            "QMessageBox#%1 QPushButton#%13:pressed{"
-            "  background-color:#B50D1E;"
-            "  color:#FFFFFF;"
             "}"
             "QMessageBox#%1 QLabel#qt_msgbox_label{"
             "  font-size:14px;"
@@ -511,8 +556,8 @@ namespace
             .arg(QString::fromLatin1(kMessageBoxTitleBarObjectName))
             .arg(surfaceColorText)
             .arg(QString::fromLatin1(kMessageBoxTitleLabelObjectName))
-            .arg(QString::fromLatin1(kMessageBoxCloseButtonObjectName))
-            .arg(kMessageCloseButtonSize)
+            .arg(kMessageBoxOuterBorderWidth)
+            .arg(outerBorderColorText)
             .replace(QStringLiteral("__MESSAGE_SURFACE__"), surfaceColorText)
             .replace(QStringLiteral("__MESSAGE_PRIMARY_HOVER__"), KswordTheme::PrimaryBlueSolidHoverHex());
     }
@@ -590,7 +635,7 @@ namespace
 
     // findMessageBoxGridLayout 作用：
     // - QMessageBox 内部通常使用 QGridLayout；
-    // - 返回该布局后才能把原内容整体下移一行，为自绘标题栏腾出第 0 行。
+    // - 返回该布局后才能统一调整内容边距，为悬浮标题栏预留安全区域。
     QGridLayout* findMessageBoxGridLayout(QMessageBox* messageBox)
     {
         if (messageBox == nullptr)
@@ -600,72 +645,111 @@ namespace
         return qobject_cast<QGridLayout*>(messageBox->layout());
     }
 
-    // moveGridLayoutItemsDown 作用：
-    // - 把 QMessageBox 原有布局项整体下移；
-    // - 只执行一次，避免多次主题刷新导致内容不断下沉。
-    void moveGridLayoutItemsDown(QGridLayout* gridLayout)
+    // propertyIntOrFallback 作用：
+    // - 从 QObject 动态属性读取整数；
+    // - 属性不存在或不可转换时返回 fallbackValue；
+    // - 返回值：解析后的整数边距值。
+    int propertyIntOrFallback(
+        const QObject* objectPointer,
+        const char* propertyName,
+        const int fallbackValue)
     {
-        if (gridLayout == nullptr)
+        if (objectPointer == nullptr || propertyName == nullptr)
+        {
+            return fallbackValue;
+        }
+
+        bool conversionOk = false;
+        const int propertyValue = objectPointer->property(propertyName).toInt(&conversionOk);
+        if (!conversionOk)
+        {
+            return fallbackValue;
+        }
+        return propertyValue;
+    }
+
+    // reserveMessageBoxTitleBarTopMargin 作用：
+    // - 不再把标题栏作为 QGridLayout 的第 0 行布局项；
+    // - 仅给根布局顶部增加固定避让距离，确保标题栏不遮挡正文；
+    // - 参数 messageBox：需要调整的消息框；gridLayout：消息框根网格布局；
+    // - 返回值：无。
+    void reserveMessageBoxTitleBarTopMargin(QMessageBox* messageBox, QGridLayout* gridLayout)
+    {
+        if (messageBox == nullptr || gridLayout == nullptr)
         {
             return;
         }
 
-        struct GridItemSnapshot
+        if (!messageBox->property(kMessageBoxTitleBarInstalledPropertyName).toBool())
         {
-            QLayoutItem* layoutItem = nullptr; // layoutItem：原布局项对象。
-            int row = 0;                       // row：原行号。
-            int column = 0;                    // column：原列号。
-            int rowSpan = 1;                   // rowSpan：原行跨度。
-            int columnSpan = 1;                // columnSpan：原列跨度。
-            Qt::Alignment alignment;           // alignment：原对齐方式。
-        };
-
-        std::vector<GridItemSnapshot> itemList;
-        const int itemCount = gridLayout->count();
-        itemList.reserve(static_cast<std::size_t>(itemCount));
-        for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex)
-        {
-            QLayoutItem* layoutItem = gridLayout->itemAt(itemIndex);
-            if (layoutItem == nullptr)
-            {
-                continue;
-            }
-
-            int row = 0;
-            int column = 0;
-            int rowSpan = 1;
-            int columnSpan = 1;
-            gridLayout->getItemPosition(itemIndex, &row, &column, &rowSpan, &columnSpan);
-            itemList.push_back(GridItemSnapshot{
-                layoutItem,
-                row,
-                column,
-                rowSpan,
-                columnSpan,
-                layoutItem->alignment()
-            });
+            // originalMargins 用途：保存 Qt 原生 QMessageBox 内容边距，避免破坏按钮/正文布局。
+            const QMargins originalMargins = gridLayout->contentsMargins();
+            messageBox->setProperty(kMessageBoxOriginalMarginLeftPropertyName, originalMargins.left());
+            messageBox->setProperty(kMessageBoxOriginalMarginTopPropertyName, originalMargins.top());
+            messageBox->setProperty(kMessageBoxOriginalMarginRightPropertyName, originalMargins.right());
+            messageBox->setProperty(kMessageBoxOriginalMarginBottomPropertyName, originalMargins.bottom());
+            messageBox->setProperty(kMessageBoxTitleBarInstalledPropertyName, true);
         }
 
-        for (const GridItemSnapshot& itemSnapshot : itemList)
+        // currentMargins 用途：当属性缺失时提供兜底，通常只在异常热重载场景出现。
+        const QMargins currentMargins = gridLayout->contentsMargins();
+        const int originalLeft = propertyIntOrFallback(
+            messageBox,
+            kMessageBoxOriginalMarginLeftPropertyName,
+            currentMargins.left());
+        const int originalTop = propertyIntOrFallback(
+            messageBox,
+            kMessageBoxOriginalMarginTopPropertyName,
+            currentMargins.top());
+        const int originalRight = propertyIntOrFallback(
+            messageBox,
+            kMessageBoxOriginalMarginRightPropertyName,
+            currentMargins.right());
+        const int originalBottom = propertyIntOrFallback(
+            messageBox,
+            kMessageBoxOriginalMarginBottomPropertyName,
+            currentMargins.bottom());
+        const int reservedTop = originalTop + kMessageTitleBarHeight + kMessageTitleBarContentGap;
+
+        gridLayout->setContentsMargins(originalLeft, reservedTop, originalRight, originalBottom);
+    }
+
+    // syncMessageBoxTitleBarGeometry 作用：
+    // - 让自绘标题栏始终覆盖 QMessageBox 顶部边框内侧完整宽度；
+    // - 修复短标题时标题栏只按文本 sizeHint 收缩到左上角的问题；
+    // - 同时避免标题栏压住 1px 主题蓝色外描边；
+    // - 参数 messageBox：所属消息框；titleBar：自绘标题栏；
+    // - 返回值：无。
+    void syncMessageBoxTitleBarGeometry(QMessageBox* messageBox, QWidget* titleBar)
+    {
+        if (messageBox == nullptr || titleBar == nullptr)
         {
-            gridLayout->removeItem(itemSnapshot.layoutItem);
+            return;
         }
 
-        for (const GridItemSnapshot& itemSnapshot : itemList)
+        // availableWidth 用途：优先使用消息框当前宽度，显示前宽度不足时使用最小宽度兜底。
+        const int availableWidth = std::max(messageBox->width(), messageBox->minimumWidth());
+        // titleBarWidth 用途：扣掉左右外描边，避免标题栏遮住蓝色窗口边线。
+        const int titleBarWidth = std::max(availableWidth - (kMessageBoxOuterBorderWidth * 2), 0);
+        titleBar->setGeometry(
+            kMessageBoxOuterBorderWidth,
+            kMessageBoxOuterBorderWidth,
+            titleBarWidth,
+            kMessageTitleBarHeight);
+        titleBar->setMinimumWidth(0);
+        titleBar->setMaximumWidth(QWIDGETSIZE_MAX);
+        titleBar->raise();
+
+        if (MessageBoxTitleBar* typedTitleBar = dynamic_cast<MessageBoxTitleBar*>(titleBar))
         {
-            gridLayout->addItem(
-                itemSnapshot.layoutItem,
-                itemSnapshot.row + 1,
-                itemSnapshot.column,
-                itemSnapshot.rowSpan,
-                itemSnapshot.columnSpan,
-                itemSnapshot.alignment);
+            // syncChildGeometry 用途：几何同步后立即刷新标题省略，防止 Qt6 延迟 resize 期间短暂错位。
+            typedTitleBar->syncChildGeometry();
         }
     }
 
     // ensureCustomMessageBoxTitleBar 作用：
     // - 给 QMessageBox 安装自绘标题栏；
-    // - 隐藏系统标题栏，左侧显示应用 Logo，右侧提供关闭按钮。
+    // - 隐藏系统标题栏，左侧显示应用 Logo，不提供最小化/最大化/关闭按钮。
     void ensureCustomMessageBoxTitleBar(QMessageBox* messageBox)
     {
         if (messageBox == nullptr)
@@ -673,10 +757,26 @@ namespace
             return;
         }
 
-        messageBox->setWindowFlag(Qt::FramelessWindowHint, true);
-        messageBox->setWindowFlag(Qt::WindowSystemMenuHint, false);
-        messageBox->setWindowFlag(Qt::WindowMinMaxButtonsHint, false);
-        messageBox->setWindowFlag(Qt::WindowCloseButtonHint, false);
+        // windowFlags 用途：Qt6 下集中写回窗口 flags，避免单独 setWindowFlag 在 show 前后被平台样式补回按钮。
+        Qt::WindowFlags windowFlags = messageBox->windowFlags();
+        windowFlags = (windowFlags & ~Qt::WindowType_Mask) | Qt::Dialog;
+        windowFlags |= Qt::FramelessWindowHint;
+        windowFlags &= ~Qt::WindowSystemMenuHint;
+        windowFlags &= ~Qt::WindowMinimizeButtonHint;
+        windowFlags &= ~Qt::WindowMaximizeButtonHint;
+        windowFlags &= ~Qt::WindowMinMaxButtonsHint;
+        windowFlags &= ~Qt::WindowCloseButtonHint;
+        windowFlags &= ~Qt::WindowContextHelpButtonHint;
+        if (messageBox->windowFlags() != windowFlags)
+        {
+            // setWindowFlags 在 Qt6 中可能隐藏已显示窗口；仅在 flags 真实变化时写回，并恢复可见状态。
+            const bool messageBoxWasVisible = messageBox->isVisible();
+            messageBox->setWindowFlags(windowFlags);
+            if (messageBoxWasVisible)
+            {
+                messageBox->show();
+            }
+        }
 
         QGridLayout* gridLayout = findMessageBoxGridLayout(messageBox);
         if (gridLayout == nullptr)
@@ -684,11 +784,7 @@ namespace
             return;
         }
 
-        if (!messageBox->property(kMessageBoxTitleBarInstalledPropertyName).toBool())
-        {
-            moveGridLayoutItemsDown(gridLayout);
-            messageBox->setProperty(kMessageBoxTitleBarInstalledPropertyName, true);
-        }
+        reserveMessageBoxTitleBarTopMargin(messageBox, gridLayout);
 
         QWidget* titleBarWidget = messageBox->findChild<QWidget*>(
             QString::fromLatin1(kMessageBoxTitleBarObjectName),
@@ -697,9 +793,9 @@ namespace
         if (titleBar == nullptr)
         {
             titleBar = new MessageBoxTitleBar(messageBox);
-            gridLayout->addWidget(titleBar, 0, 0, 1, kMessageTitleBarColumnSpanToRightEdge);
         }
         titleBar->updateTitleText();
+        syncMessageBoxTitleBarGeometry(messageBox, titleBar);
         titleBar->show();
     }
 
@@ -725,6 +821,28 @@ namespace
             }
 
             const QEvent::Type eventType = eventObject->type();
+            if (eventType == QEvent::Close)
+            {
+                // Close 事件不能在全局主题器里拦截：
+                // - QMessageBox 的标准按钮会经由 QDialog::done()/accept()/reject() 收束；
+                // - Qt6 在收束过程中仍可能投递 Close 事件来结束本轮 exec()；
+                // - 若这里 ignore()，按钮点击已经发生，但窗口不关闭，调用方也拿不到返回值；
+                // - 标题栏关闭入口已经通过 FramelessWindowHint/WindowCloseButtonHint 移除，
+                //   全局主题器只负责外观，不再改变消息框关闭语义。
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            if (eventType == QEvent::Resize)
+            {
+                // Resize 事件只同步悬浮标题栏几何，不重新套完整样式；
+                // 这样可以避免 adjustSize 触发 Resize 后再次进入 polish 流程。
+                QWidget* titleBarWidget = messageBox->findChild<QWidget*>(
+                    QString::fromLatin1(kMessageBoxTitleBarObjectName),
+                    Qt::FindDirectChildrenOnly);
+                syncMessageBoxTitleBarGeometry(messageBox, titleBarWidget);
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
             if (eventType == QEvent::Polish ||
                 eventType == QEvent::Show ||
                 eventType == QEvent::PaletteChange ||
@@ -819,6 +937,10 @@ namespace
 
             polishButtons(messageBox);
             messageBox->adjustSize();
+            QWidget* titleBarWidget = messageBox->findChild<QWidget*>(
+                QString::fromLatin1(kMessageBoxTitleBarObjectName),
+                Qt::FindDirectChildrenOnly);
+            syncMessageBoxTitleBarGeometry(messageBox, titleBarWidget);
         }
 
     private:

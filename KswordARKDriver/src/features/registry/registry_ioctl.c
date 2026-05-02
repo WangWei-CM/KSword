@@ -61,6 +61,12 @@ Return Value:
     va_end(arguments);
 }
 
+typedef NTSTATUS (*KSWORD_ARK_REGISTRY_OPERATION_BACKEND)(
+    PVOID OutputBuffer,
+    size_t OutputBufferLength,
+    const VOID* Request,
+    size_t* BytesWrittenOut);
+
 NTSTATUS
 KswordARKRegistryIoctlReadValue(
     _In_ WDFDEVICE Device,
@@ -151,4 +157,170 @@ Return Value:
     }
 
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKRegistryIoctlEnumKey(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+{
+    KSWORD_ARK_ENUM_REGISTRY_KEY_REQUEST* enumRequest = NULL;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKRetrieveRequiredInputBuffer(Request, sizeof(KSWORD_ARK_ENUM_REGISTRY_KEY_REQUEST), &inputBuffer, &actualInputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKRegistryIoctlLog(Device, "Error", "R0 registry enum ioctl: input invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    enumRequest = (KSWORD_ARK_ENUM_REGISTRY_KEY_REQUEST*)inputBuffer;
+    if ((enumRequest->flags & ~(KSWORD_ARK_REGISTRY_ENUM_FLAG_INCLUDE_SUBKEYS | KSWORD_ARK_REGISTRY_ENUM_FLAG_INCLUDE_VALUES)) != 0UL) {
+        KswordARKRegistryIoctlLog(Device, "Warn", "R0 registry enum ioctl: flags rejected, flags=0x%08X.", (unsigned int)enumRequest->flags);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = KswordARKRetrieveRequiredOutputBuffer(Request, sizeof(KSWORD_ARK_ENUM_REGISTRY_KEY_RESPONSE), &outputBuffer, &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKRegistryIoctlLog(Device, "Error", "R0 registry enum ioctl: output invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKDriverEnumRegistryKey(outputBuffer, actualOutputLength, enumRequest, BytesReturned);
+    if (!NT_SUCCESS(status)) {
+        KswordARKRegistryIoctlLog(Device, "Error", "R0 registry enum failed before response: status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    if (*BytesReturned >= sizeof(KSWORD_ARK_ENUM_REGISTRY_KEY_RESPONSE)) {
+        KSWORD_ARK_ENUM_REGISTRY_KEY_RESPONSE* response = (KSWORD_ARK_ENUM_REGISTRY_KEY_RESPONSE*)outputBuffer;
+        KswordARKRegistryIoctlLog(
+            Device,
+            response->status == KSWORD_ARK_REGISTRY_ENUM_STATUS_SUCCESS ? "Info" : "Warn",
+            "R0 registry enum response: status=%lu, subkeys=%lu/%lu, values=%lu/%lu, last=0x%08X.",
+            (unsigned long)response->status,
+            (unsigned long)response->returnedSubKeyCount,
+            (unsigned long)response->subKeyCount,
+            (unsigned long)response->returnedValueCount,
+            (unsigned long)response->valueCount,
+            (unsigned int)response->lastStatus);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+KswordARKRegistryIoctlOperation(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputStructureBytes,
+    _In_ PCSTR OperationName,
+    _In_ KSWORD_ARK_REGISTRY_OPERATION_BACKEND Backend,
+    _Out_ size_t* BytesReturned
+    )
+{
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (BytesReturned == NULL || Backend == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKValidateDeviceIoControlWriteAccess(Request);
+    if (!NT_SUCCESS(status)) {
+        KswordARKRegistryIoctlLog(Device, "Warn", "R0 registry %s denied: write access required, status=0x%08X.", OperationName, (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredInputBuffer(Request, InputStructureBytes, &inputBuffer, &actualInputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKRegistryIoctlLog(Device, "Error", "R0 registry %s ioctl: input invalid, status=0x%08X.", OperationName, (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredOutputBuffer(Request, sizeof(KSWORD_ARK_REGISTRY_OPERATION_RESPONSE), &outputBuffer, &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKRegistryIoctlLog(Device, "Error", "R0 registry %s ioctl: output invalid, status=0x%08X.", OperationName, (unsigned int)status);
+        return status;
+    }
+
+    status = Backend(outputBuffer, actualOutputLength, inputBuffer, BytesReturned);
+    if (!NT_SUCCESS(status)) {
+        KswordARKRegistryIoctlLog(Device, "Error", "R0 registry %s failed before response: status=0x%08X.", OperationName, (unsigned int)status);
+        return status;
+    }
+
+    if (*BytesReturned >= sizeof(KSWORD_ARK_REGISTRY_OPERATION_RESPONSE)) {
+        KSWORD_ARK_REGISTRY_OPERATION_RESPONSE* response = (KSWORD_ARK_REGISTRY_OPERATION_RESPONSE*)outputBuffer;
+        KswordARKRegistryIoctlLog(
+            Device,
+            response->status == KSWORD_ARK_REGISTRY_OPERATION_STATUS_SUCCESS ? "Info" : "Warn",
+            "R0 registry %s response: status=%lu, last=0x%08X.",
+            OperationName,
+            (unsigned long)response->status,
+            (unsigned int)response->lastStatus);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS KswordARKRegistryIoctlSetValue(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned)
+{
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+    return KswordARKRegistryIoctlOperation(Device, Request, sizeof(KSWORD_ARK_SET_REGISTRY_VALUE_REQUEST), "set-value", (KSWORD_ARK_REGISTRY_OPERATION_BACKEND)KswordARKDriverSetRegistryValue, BytesReturned);
+}
+
+NTSTATUS KswordARKRegistryIoctlDeleteValue(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned)
+{
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+    return KswordARKRegistryIoctlOperation(Device, Request, sizeof(KSWORD_ARK_REGISTRY_VALUE_NAME_REQUEST), "delete-value", (KSWORD_ARK_REGISTRY_OPERATION_BACKEND)KswordARKDriverDeleteRegistryValue, BytesReturned);
+}
+
+NTSTATUS KswordARKRegistryIoctlCreateKey(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned)
+{
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+    return KswordARKRegistryIoctlOperation(Device, Request, sizeof(KSWORD_ARK_REGISTRY_KEY_PATH_REQUEST), "create-key", (KSWORD_ARK_REGISTRY_OPERATION_BACKEND)KswordARKDriverCreateRegistryKey, BytesReturned);
+}
+
+NTSTATUS KswordARKRegistryIoctlDeleteKey(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned)
+{
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+    return KswordARKRegistryIoctlOperation(Device, Request, sizeof(KSWORD_ARK_REGISTRY_KEY_PATH_REQUEST), "delete-key", (KSWORD_ARK_REGISTRY_OPERATION_BACKEND)KswordARKDriverDeleteRegistryKey, BytesReturned);
+}
+
+NTSTATUS KswordARKRegistryIoctlRenameValue(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned)
+{
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+    return KswordARKRegistryIoctlOperation(Device, Request, sizeof(KSWORD_ARK_RENAME_REGISTRY_VALUE_REQUEST), "rename-value", (KSWORD_ARK_REGISTRY_OPERATION_BACKEND)KswordARKDriverRenameRegistryValue, BytesReturned);
+}
+
+NTSTATUS KswordARKRegistryIoctlRenameKey(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned)
+{
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+    return KswordARKRegistryIoctlOperation(Device, Request, sizeof(KSWORD_ARK_RENAME_REGISTRY_KEY_REQUEST), "rename-key", (KSWORD_ARK_REGISTRY_OPERATION_BACKEND)KswordARKDriverRenameRegistryKey, BytesReturned);
 }

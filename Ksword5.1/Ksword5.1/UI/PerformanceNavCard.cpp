@@ -209,7 +209,7 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
 
     // drawSeriesPath 作用：
     // - 把采样列表映射为缩略图曲线；
-    // - 兼容单点与多点两种情况，供主/次序列复用。
+    // - 先绘制折线与 X 轴围成的透明填充，再绘制趋势线本体。
     const auto drawSeriesPath =
         [&painter, &sparkRect](const QVector<double>& sampleList, const QColor& seriesColor)
         {
@@ -220,13 +220,23 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
 
             QPen trendPen(seriesColor);
             trendPen.setWidthF(1.6);
-            painter.setPen(trendPen);
-            painter.setBrush(Qt::NoBrush);
 
             if (sampleList.size() == 1)
             {
                 const double yRatio = sampleList.at(0) / 100.0;
                 const double yValue = sparkRect.bottom() - yRatio * static_cast<double>(sparkRect.height());
+                QColor fillColor(
+                    seriesColor.red(),
+                    seriesColor.green(),
+                    seriesColor.blue(),
+                    34);
+                painter.fillRect(
+                    QRectF(
+                        QPointF(sparkRect.left(), yValue),
+                        QPointF(sparkRect.right(), sparkRect.bottom())),
+                    fillColor);
+                painter.setPen(trendPen);
+                painter.setBrush(Qt::NoBrush);
                 painter.drawLine(
                     QPointF(sparkRect.left(), yValue),
                     QPointF(sparkRect.right(), yValue));
@@ -234,6 +244,7 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
             }
 
             QPainterPath path;
+            QPainterPath fillPath;
             const int pointCount = sampleList.size();
             for (int indexValue = 0; indexValue < pointCount; ++indexValue)
             {
@@ -246,13 +257,23 @@ void PerformanceNavCard::paintEvent(QPaintEvent* paintEventPointer)
                 if (indexValue == 0)
                 {
                     path.moveTo(xValue, yValue);
+                    fillPath.moveTo(xValue, sparkRect.bottom());
+                    fillPath.lineTo(xValue, yValue);
                 }
                 else
                 {
                     path.lineTo(xValue, yValue);
+                    fillPath.lineTo(xValue, yValue);
                 }
             }
 
+            fillPath.lineTo(sparkRect.right(), sparkRect.bottom());
+            fillPath.closeSubpath();
+            painter.fillPath(
+                fillPath,
+                QColor(seriesColor.red(), seriesColor.green(), seriesColor.blue(), 34));
+            painter.setPen(trendPen);
+            painter.setBrush(Qt::NoBrush);
             painter.drawPath(path);
         };
 

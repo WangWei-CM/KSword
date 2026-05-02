@@ -5,7 +5,7 @@
 // 作用：
 // 1) 在“硬件”Dock 下提供独立的“硬盘监控”页；
 // 2) 用进程 IO 计数器实现资源监视器风格的进程勾选与磁盘活动聚合；
-// 3) 尝试启用 ETW FileIo 文件级聚合，失败时自动回退到按 PID 聚合视图。
+// 3) 启用 Microsoft-Windows-Kernel-File ETW 文件级聚合，失败时明确提示文件级采集不可用。
 // ============================================================
 
 #include "../Framework.h"
@@ -20,6 +20,7 @@
 
 #include <atomic>         // std::atomic_bool：控制后台 ETW 线程退出。
 #include <cstdint>        // std::uint32_t/std::uint64_t：PID、字节数与时间戳。
+#include <deque>          // std::deque：保存已完成文件活动的短期历史窗口。
 #include <memory>         // std::unique_ptr：托管后台 ETW 线程。
 #include <mutex>          // std::mutex：保护 ETW 聚合表。
 #include <thread>         // std::thread：后台 ETW 实时会话。
@@ -40,7 +41,7 @@ struct _EVENT_RECORD;
 
 // DiskMonitorPage 说明：
 // - 输入：Qt 父控件；
-// - 处理：周期枚举进程 IO_COUNTERS，计算读/写/总速率，按勾选 PID 刷新磁盘活动表；
+// - 处理：周期枚举进程 IO_COUNTERS，计算读/写/总速率，按勾选 PID 刷新文件级磁盘活动表；
 // - 返回：该控件无业务返回值，结果直接显示在表格中。
 class DiskMonitorPage final : public QWidget
 {
@@ -75,6 +76,7 @@ private:
         std::uint64_t rawReadOps = 0;           // rawReadOps：累计读取次数。
         std::uint64_t rawWriteOps = 0;          // rawWriteOps：累计写入次数。
         std::uint64_t rawOtherOps = 0;          // rawOtherOps：累计其它 IO 次数。
+        QString ioPriorityText;                 // ioPriorityText：进程当前 I/O 优先级，权限不足时为空。
         double readBytesPerSec = 0.0;           // readBytesPerSec：读取 B/s。
         double writeBytesPerSec = 0.0;          // writeBytesPerSec：写入 B/s。
         double totalBytesPerSec = 0.0;          // totalBytesPerSec：读写合计 B/s。
@@ -103,8 +105,8 @@ private:
     };
 
     // FileActivitySample：
-    // - 作用：保存 ETW FileIo 事件按 PID + 文件路径聚合后的 1 秒活动；
-    // - 处理：read/write 字段来自实时 ETW 字节累加，进程名由当前进程快照补齐；
+    // - 作用：保存 Kernel-File ETW 事件按 PID + 文件路径聚合后的 1 秒活动；
+    // - 处理：read/write 字段来自实时 ETW 字节累加，进程名和 I/O 优先级由采集链路补齐；
     // - 返回：结构体仅用于 UI 展示，不持有系统资源。
     struct FileActivitySample
     {
@@ -113,6 +115,7 @@ private:
         QString filePath;                  // filePath：ETW 解析到的文件路径。
         double readBytesPerSec = 0.0;      // readBytesPerSec：文件读取速率。
         double writeBytesPerSec = 0.0;     // writeBytesPerSec：文件写入速率。
+        QString ioPriorityText;            // ioPriorityText：I/O 优先级文本，未知时显示“未知”。
         double responseTimeMs = 0.0;       // responseTimeMs：ETW 可得时的平均响应时间。
         bool responseAvailable = false;    // responseAvailable：是否有真实/事件字段响应时间。
         std::uint32_t eventCount = 0;       // eventCount：本窗口内聚合的 ETW 事件数。
@@ -128,9 +131,35 @@ private:
         QString filePath;                       // filePath：文件路径。
         std::uint64_t readBytes = 0;            // readBytes：窗口内读取字节。
         std::uint64_t writeBytes = 0;           // writeBytes：窗口内写入字节。
+        QString ioPriorityText;                 // ioPriorityText：窗口内最近一次可用 I/O 优先级。
         double responseMsTotal = 0.0;           // responseMsTotal：响应时间累计。
         std::uint32_t responseCount = 0;        // responseCount：响应时间样本数。
         std::uint32_t eventCount = 0;           // eventCount：事件数。
+    };
+
+    // FileActivityHistoryEntry：
+    // - 作用：保存已完成的文件活动样本，避免每秒清空导致表格频繁闪空；
+    // - 处理：UI 线程按时间窗口裁剪，再按所选 PID 展示最近活动；
+    // - 返回：结构体只参与内存内聚合，不直接返回系统资源。
+    struct FileActivityHistoryEntry
+    {
+        std::uint64_t timestampMs = 0;          // timestampMs：样本进入 UI 历史的单调时间。
+        FileActivitySample sample;              // sample：已换算成速率/响应时间的活动行。
+    };
+
+    // PendingFileIoOperation：
+    // - 作用：保存 Read/Write 发起事件到 OperationEnd 完成事件之间的临时状态；
+    // - 处理：用 IRP 指针关联开始/结束，完成时把真实耗时写回文件活动聚合；
+    // - 返回：结构体只作为回调线程缓存，不向外返回。
+    struct PendingFileIoOperation
+    {
+        std::uint32_t pid = 0;                  // pid：发起 I/O 的进程 ID。
+        QString filePath;                       // filePath：发起 I/O 时解析到的文件路径。
+        QString ioPriorityText;                 // ioPriorityText：发起 I/O 时解析到的优先级文本。
+        std::uint64_t readBytes = 0;            // readBytes：该请求的读取字节数。
+        std::uint64_t writeBytes = 0;           // writeBytes：该请求的写入字节数。
+        std::uint32_t eventCount = 0;           // eventCount：该请求对应的开始事件数。
+        std::uint64_t startTime100ns = 0;       // startTime100ns：ETW 时间戳，ClientContext=2 时为 100ns。
     };
 
     // ===================== UI 初始化 =====================
@@ -191,6 +220,7 @@ private:
     std::unordered_set<std::uint32_t> m_selectedPidSet; // m_selectedPidSet：用户勾选 PID 集。
     std::vector<ProcessDiskSample> m_lastSampleList;    // m_lastSampleList：最近一次采样结果。
     std::vector<FileActivitySample> m_lastFileActivityList; // m_lastFileActivityList：最近一秒 ETW 文件活动。
+    std::deque<FileActivityHistoryEntry> m_fileActivityHistory; // m_fileActivityHistory：最近数秒文件级活动历史。
     bool m_updatingProcessTable = false;                // m_updatingProcessTable：防止程序刷新触发递归勾选同步。
 
     std::unique_ptr<std::thread> m_fileActivityEtwThread; // m_fileActivityEtwThread：后台 ETW 会话线程。
@@ -200,7 +230,8 @@ private:
     std::atomic<std::uint64_t> m_fileActivityEtwTraceHandle{ 0 };   // m_fileActivityEtwTraceHandle：OpenTrace 读取句柄。
     std::atomic<std::uint32_t> m_fileActivityEtwLastStatus{ 0 };    // m_fileActivityEtwLastStatus：最近一次 ETW 状态码。
     std::mutex m_fileActivityMutex;                           // m_fileActivityMutex：保护以下 ETW 聚合缓存。
-    std::unordered_map<std::uint64_t, QString> m_filePathByObject; // m_filePathByObject：FileObject 到文件路径映射。
+    std::unordered_map<std::uint64_t, QString> m_filePathByObject; // m_filePathByObject：FileObject/FileKey 到文件路径映射。
+    std::unordered_map<std::uint64_t, PendingFileIoOperation> m_pendingFileIoByIrp; // m_pendingFileIoByIrp：IRP 到未完成 I/O。
     QHash<QString, FileActivityAccumulator> m_fileActivityByKey;   // m_fileActivityByKey：PID+文件路径聚合表。
     std::uint64_t m_lastFileActivityDrainMs = 0;              // m_lastFileActivityDrainMs：上次 UI 消费 ETW 聚合时间。
 };

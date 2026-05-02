@@ -907,7 +907,10 @@ void CallbackPromptManager::enqueueEvent(const KSWORD_ARK_CALLBACK_EVENT_PACKET&
 
 bool CallbackPromptManager::shouldAutoAllowByRegex(const KSWORD_ARK_CALLBACK_EVENT_PACKET& eventPacket) const
 {
-    if (eventPacket.callbackType != KSWORD_ARK_CALLBACK_TYPE_REGISTRY ||
+    // R0 的 Regex 热路径只做粗命中，真正的正则确认在 R3 完成。
+    // 注册表和文件系统微过滤器都复用该策略：未匹配或表达式无效时自动放行。
+    if ((eventPacket.callbackType != KSWORD_ARK_CALLBACK_TYPE_REGISTRY &&
+        eventPacket.callbackType != KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) ||
         eventPacket.action != KSWORD_ARK_RULE_ACTION_ASK_USER ||
         eventPacket.matchMode != KSWORD_ARK_MATCH_MODE_REGEX)
     {

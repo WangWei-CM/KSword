@@ -195,7 +195,7 @@ QString callbackTypeToDisplayText(const quint32 callbackType)
     case KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE: return QStringLiteral("线程创建");
     case KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD: return QStringLiteral("镜像加载");
     case KSWORD_ARK_CALLBACK_TYPE_OBJECT: return QStringLiteral("对象管理器");
-    case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER_RESERVED: return QStringLiteral("文件系统微过滤器（预留）");
+    case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER: return QStringLiteral("文件系统微过滤器");
     default: return QStringLiteral("未知");
     }
 }

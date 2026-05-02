@@ -38,6 +38,7 @@
     <ClCompile Include="src\features\kernel\driver_unload.c" />
     <ClCompile Include="src\features\kernel\ssdt_query.c" />
     <ClCompile Include="src\features\kernel\hook_scan.c" />
+    <ClCompile Include="src\features\kernel\hook_scan_support.c" />
     <ClCompile Include="src\features\file\file_actions.c" />
     <ClCompile Include="src\features\file_monitor\file_monitor_operation_map.c" />
     <ClCompile Include="src\features\file_monitor\file_monitor_runtime.c" />
@@ -144,6 +145,7 @@
     <ClInclude Include="include\ark\ark_network.h" />
     <ClInclude Include="src\features\redirect\redirect_internal.h" />
     <ClInclude Include="src\features\network\network_internal.h" />
+    <ClInclude Include="src\features\kernel\hook_scan_support.h" />
   <ClInclude Include="src\features\callback\callback_external_core.h" /><ClInclude Include="src\features\callback\callback_external_wfp.h" /><ClInclude Include="src\features\callback\callback_external_minifilter.h" /><ClInclude Include="src\features\callback\callback_external_safe.h" /></ItemGroup>
   <ItemGroup>
     <Inf Include="KswordARKDriver.inf">
@@ -316,6 +318,13 @@
   <ItemGroup>
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
+  <Target Name="KswordArkCopyCleanDriverBeforeTestSign" BeforeTargets="KswordArkAutoTestSignAfterBuild" Condition="'$(ConfigurationType)'=='Driver' and Exists('$(TargetPath)')">
+    <PropertyGroup>
+      <KswordArkCleanDriverPath>$(TargetDir)KswordARK_Clean$(TargetExt)</KswordArkCleanDriverPath>
+    </PropertyGroup>
+    <Message Importance="High" Text="KswordARK: copying unsigned clean driver before test-sign: $(TargetPath) -> $(KswordArkCleanDriverPath)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(KswordArkCleanDriverPath)" SkipUnchangedFiles="false" />
+  </Target>
   <Target Name="KswordArkAutoTestSignAfterBuild" AfterTargets="Build" Condition="'$(ConfigurationType)'=='Driver' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoTestSign)'!='true'">
     <PropertyGroup>
       <KswordArkSignScript>$(MSBuildThisFileDirectory)..\scripts\Sign-KswordArkDriverTest.ps1</KswordArkSignScript>

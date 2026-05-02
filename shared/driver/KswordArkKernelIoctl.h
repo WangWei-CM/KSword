@@ -86,11 +86,15 @@
 // - CLEAR_UNLOAD_POINTER：清空 DriverObject->DriverUnload，避免重复入口被误调用。
 // - DELETE_DEVICE_OBJECTS_ON_NO_UNLOAD：目标没有 DriverUnload 时尝试删除 DeviceObject 链。
 // - MAKE_TEMPORARY_OBJECT：调用 ObMakeTemporaryObject，配合引用释放触发对象回收。
+// - TARGET_MODULE_BASE_PRESENT：请求携带模块基址，R0 先按 DriverObject->DriverStart 反查目标。
+// - REMOVE_CALLBACKS_BY_MODULE_BASE：请求携带模块基址时，先批量移除该模块登记的可移除回调。
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_ON_NO_UNLOAD      0x00000001UL
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_AFTER_UNLOAD      0x00000002UL
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_UNLOAD_POINTER             0x00000004UL
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_DELETE_DEVICE_OBJECTS_ON_NO_UNLOAD 0x00000008UL
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_MAKE_TEMPORARY_OBJECT            0x00000010UL
+#define KSWORD_ARK_DRIVER_UNLOAD_FLAG_TARGET_MODULE_BASE_PRESENT        0x00000020UL
+#define KSWORD_ARK_DRIVER_UNLOAD_FLAG_REMOVE_CALLBACKS_BY_MODULE_BASE   0x00000040UL
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_FORCE_CLEANUP \
     (KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_ON_NO_UNLOAD | \
      KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_AFTER_UNLOAD | \
@@ -383,6 +387,7 @@ typedef struct _KSWORD_ARK_FORCE_UNLOAD_DRIVER_REQUEST
     unsigned long timeoutMilliseconds;
     unsigned long reserved;
     wchar_t driverName[KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS];
+    unsigned long long targetModuleBase;
 } KSWORD_ARK_FORCE_UNLOAD_DRIVER_REQUEST;
 
 typedef struct _KSWORD_ARK_FORCE_UNLOAD_DRIVER_RESPONSE
@@ -397,5 +402,9 @@ typedef struct _KSWORD_ARK_FORCE_UNLOAD_DRIVER_RESPONSE
     unsigned long reserved2;
     unsigned long long driverObjectAddress;
     unsigned long long driverUnloadAddress;
+    unsigned long callbackCandidates;
+    unsigned long callbacksRemoved;
+    unsigned long callbackFailures;
+    long callbackLastStatus;
     wchar_t driverName[KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS];
 } KSWORD_ARK_FORCE_UNLOAD_DRIVER_RESPONSE;

@@ -11,7 +11,8 @@ namespace
             callbackType == KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE ||
             callbackType == KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE ||
             callbackType == KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD ||
-            callbackType == KSWORD_ARK_CALLBACK_TYPE_OBJECT;
+            callbackType == KSWORD_ARK_CALLBACK_TYPE_OBJECT ||
+            callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER;
     }
 
     bool isSupportedMatchMode(const quint32 matchMode)
@@ -57,6 +58,21 @@ namespace
             return actionType == KSWORD_ARK_RULE_ACTION_ALLOW ||
                 actionType == KSWORD_ARK_RULE_ACTION_STRIP_ACCESS ||
                 actionType == KSWORD_ARK_RULE_ACTION_LOG_ONLY;
+
+        case KSWORD_ARK_CALLBACK_TYPE_MINIFILTER:
+            if (actionType != KSWORD_ARK_RULE_ACTION_ALLOW &&
+                actionType != KSWORD_ARK_RULE_ACTION_DENY &&
+                actionType != KSWORD_ARK_RULE_ACTION_ASK_USER &&
+                actionType != KSWORD_ARK_RULE_ACTION_LOG_ONLY)
+            {
+                return false;
+            }
+            if (matchMode == KSWORD_ARK_MATCH_MODE_REGEX &&
+                actionType != KSWORD_ARK_RULE_ACTION_ASK_USER)
+            {
+                return false;
+            }
+            return true;
 
         default:
             return false;
@@ -147,19 +163,21 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
         }
 
         if (ruleModel.matchMode == KSWORD_ARK_MATCH_MODE_REGEX &&
-            !(ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY &&
+            !((ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY ||
+                ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) &&
                 ruleModel.action == KSWORD_ARK_RULE_ACTION_ASK_USER))
         {
             result.errorList.push_back(
-                QStringLiteral("规则 %1 使用 Regex 仅允许“注册表 + 询问用户”。")
+                QStringLiteral("规则 %1 使用 Regex 仅允许“注册表/文件系统微过滤器 + 询问用户”。")
                 .arg(ruleModel.ruleId));
         }
 
         if (ruleModel.action == KSWORD_ARK_RULE_ACTION_ASK_USER &&
-            ruleModel.callbackType != KSWORD_ARK_CALLBACK_TYPE_REGISTRY)
+            ruleModel.callbackType != KSWORD_ARK_CALLBACK_TYPE_REGISTRY &&
+            ruleModel.callbackType != KSWORD_ARK_CALLBACK_TYPE_MINIFILTER)
         {
             result.errorList.push_back(
-                QStringLiteral("规则 %1 使用“询问用户”仅允许注册表回调。")
+                QStringLiteral("规则 %1 使用“询问用户”仅允许注册表或文件系统微过滤器回调。")
                 .arg(ruleModel.ruleId));
         }
 
@@ -199,4 +217,3 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
     result.success = result.errorList.isEmpty();
     return result;
 }
-

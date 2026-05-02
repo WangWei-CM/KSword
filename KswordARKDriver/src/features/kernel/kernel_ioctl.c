@@ -467,6 +467,7 @@ Return Value:
 --*/
 {
     KSWORD_ARK_PATCH_INLINE_HOOK_REQUEST* patchRequest = NULL;
+    KSWORD_ARK_PATCH_INLINE_HOOK_REQUEST patchRequestCopy;
     PVOID outputBuffer = NULL;
     size_t actualInputLength = 0U;
     size_t actualOutputLength = 0U;
@@ -496,6 +497,11 @@ Return Value:
         return status;
     }
 
+    // 中文说明：PATCH_INLINE_HOOK 使用 METHOD_BUFFERED，WDF 的 input/output
+    // 可能是同一个 SystemBuffer；backend 会清零输出缓冲，所以必须先复制请求。
+    RtlZeroMemory(&patchRequestCopy, sizeof(patchRequestCopy));
+    RtlCopyMemory(&patchRequestCopy, patchRequest, sizeof(patchRequestCopy));
+
     status = KswordARKRetrieveRequiredOutputBuffer(
         Request,
         sizeof(KSWORD_ARK_PATCH_INLINE_HOOK_RESPONSE),
@@ -506,7 +512,7 @@ Return Value:
         return status;
     }
 
-    if ((patchRequest->flags & KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE) != 0UL) {
+    if ((patchRequestCopy.flags & KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE) != 0UL) {
         KSWORD_ARK_SAFETY_CONTEXT safetyContext;
 
         RtlZeroMemory(&safetyContext, sizeof(safetyContext));
@@ -514,7 +520,7 @@ Return Value:
         safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
         status = KswordARKSafetyEvaluate(Device, &safetyContext);
         if (!NT_SUCCESS(status)) {
-            KswordARKKernelIoctlLog(Device, "Warn", "R0 patch-inline-hook denied by safety policy: target=0x%I64X, status=0x%08X.", patchRequest->functionAddress, (unsigned int)status);
+            KswordARKKernelIoctlLog(Device, "Warn", "R0 patch-inline-hook denied by safety policy: target=0x%I64X, status=0x%08X.", patchRequestCopy.functionAddress, (unsigned int)status);
             return status;
         }
     }
@@ -522,10 +528,10 @@ Return Value:
     status = KswordARKDriverPatchInlineHook(
         outputBuffer,
         actualOutputLength,
-        patchRequest,
+        &patchRequestCopy,
         BytesReturned);
     if (!NT_SUCCESS(status)) {
-        KswordARKKernelIoctlLog(Device, "Error", "R0 patch-inline-hook failed: target=0x%I64X, status=0x%08X.", patchRequest->functionAddress, (unsigned int)status);
+        KswordARKKernelIoctlLog(Device, "Error", "R0 patch-inline-hook failed: target=0x%I64X, status=0x%08X.", patchRequestCopy.functionAddress, (unsigned int)status);
         return status;
     }
 
@@ -697,7 +703,7 @@ Return Value:
 
     status = KswordARKRetrieveRequiredInputBuffer(
         Request,
-        sizeof(KSWORD_ARK_FORCE_UNLOAD_DRIVER_REQUEST),
+        FIELD_OFFSET(KSWORD_ARK_FORCE_UNLOAD_DRIVER_REQUEST, targetModuleBase),
         (PVOID*)&unloadRequest,
         &actualInputLength);
     if (!NT_SUCCESS(status)) {
@@ -742,15 +748,25 @@ Return Value:
     if (*BytesReturned >= sizeof(KSWORD_ARK_FORCE_UNLOAD_DRIVER_RESPONSE)) {
         KSWORD_ARK_FORCE_UNLOAD_DRIVER_RESPONSE* response =
             (KSWORD_ARK_FORCE_UNLOAD_DRIVER_RESPONSE*)outputBuffer;
+        const char* logLevel =
+            (response->status == KSWORD_ARK_DRIVER_UNLOAD_STATUS_UNLOADED ||
+                response->status == KSWORD_ARK_DRIVER_UNLOAD_STATUS_FORCED_CLEANUP)
+            ? "Info"
+            : "Warn";
+
         KswordARKKernelIoctlLog(
             Device,
-            response->status == KSWORD_ARK_DRIVER_UNLOAD_STATUS_UNLOADED ? "Info" : "Warn",
-            "R0 force-unload-driver response: status=%lu, object=0x%I64X, unload=0x%I64X, last=0x%08X, wait=0x%08X.",
+            logLevel,
+            "R0 force-unload-driver response: status=%lu, object=0x%I64X, unload=0x%I64X, last=0x%08X, wait=0x%08X, callbacks=%lu/%lu, cbfail=%lu, cblast=0x%08X.",
             (unsigned long)response->status,
             response->driverObjectAddress,
             response->driverUnloadAddress,
             (unsigned int)response->lastStatus,
-            (unsigned int)response->waitStatus);
+            (unsigned int)response->waitStatus,
+            (unsigned long)response->callbacksRemoved,
+            (unsigned long)response->callbackCandidates,
+            (unsigned long)response->callbackFailures,
+            (unsigned int)response->callbackLastStatus);
     }
 
     return STATUS_SUCCESS;

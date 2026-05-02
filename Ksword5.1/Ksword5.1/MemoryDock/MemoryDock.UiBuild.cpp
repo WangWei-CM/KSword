@@ -1,10 +1,15 @@
+﻿#include "MemoryDock.Internal.h"
+
+// 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
+using namespace ksword::memory_dock_internal;
+
 // ============================================================
-// MemoryDock.UiBuild.inc
+// MemoryDock.UiBuild.cpp
 // 作用：承载构造/析构与 UI 结构初始化代码。
 // ============================================================
 
 // ============================================================
-// MemoryDock.UiBuild.inc（由原 UiLifecycle 拆分）
+// MemoryDock.UiBuild.cpp（由原 UiLifecycle 拆分）
 // 作用：
 // - 承载 MemoryDock 的构造/析构、UI 结构初始化、信号槽连接等生命周期逻辑。
 // - 聚焦“界面与交互绑定”职责，避免与扫描算法、读写工具函数混杂。
@@ -588,8 +593,21 @@ void MemoryDock::initializeDriverMemoryRwTab()
     requestLayout->setHorizontalSpacing(8);
     requestLayout->setVerticalSpacing(6);
 
+    m_driverMemoryBaseCombo = new QComboBox(requestGroup);
+    m_driverMemoryBaseCombo->setEditable(true);
+    m_driverMemoryBaseCombo->setMinimumWidth(260);
+    m_driverMemoryBaseCombo->setStyleSheet(buildBlueComboStyle());
+    m_driverMemoryBaseCombo->setToolTip(
+        "可输入 0 或 0x... 作为偏移基址；输入非 0x 文本时按进程名/PID 从下拉列表筛选目标进程。");
+    m_driverMemoryBaseCombo->addItem("0", QVariant::fromValue(static_cast<uint>(0U)));
+    m_driverMemoryBaseCombo->setItemData(0, QString(), Qt::UserRole + 1);
+    if (m_driverMemoryBaseCombo->lineEdit() != nullptr)
+    {
+        m_driverMemoryBaseCombo->lineEdit()->setPlaceholderText("0 / 0x基址 / 进程名或PID");
+    }
+
     m_driverMemoryAddressEdit = new QLineEdit(requestGroup);
-    m_driverMemoryAddressEdit->setPlaceholderText("中心地址，例如 0x00007FF700001000");
+    m_driverMemoryAddressEdit->setPlaceholderText("中心地址或偏移，例如 0x1000");
     m_driverMemoryAddressEdit->setStyleSheet(inputStyle);
 
     m_driverMemoryBeforeSpin = new QSpinBox(requestGroup);
@@ -610,15 +628,17 @@ void MemoryDock::initializeDriverMemoryRwTab()
     m_driverMemoryResetButton->setStyleSheet(buttonStyle);
     m_driverMemoryApplyButton->setEnabled(false);
 
-    requestLayout->addWidget(new QLabel("中心地址", requestGroup), 0, 0);
-    requestLayout->addWidget(m_driverMemoryAddressEdit, 0, 1, 1, 4);
-    requestLayout->addWidget(new QLabel("向前", requestGroup), 1, 0);
-    requestLayout->addWidget(m_driverMemoryBeforeSpin, 1, 1);
-    requestLayout->addWidget(new QLabel("向后", requestGroup), 1, 2);
-    requestLayout->addWidget(m_driverMemoryAfterSpin, 1, 3);
-    requestLayout->addWidget(m_driverMemoryReadButton, 1, 4);
-    requestLayout->addWidget(m_driverMemoryApplyButton, 2, 3);
-    requestLayout->addWidget(m_driverMemoryResetButton, 2, 4);
+    requestLayout->addWidget(new QLabel("偏移基址/进程", requestGroup), 0, 0);
+    requestLayout->addWidget(m_driverMemoryBaseCombo, 0, 1, 1, 4);
+    requestLayout->addWidget(new QLabel("中心地址", requestGroup), 1, 0);
+    requestLayout->addWidget(m_driverMemoryAddressEdit, 1, 1, 1, 4);
+    requestLayout->addWidget(new QLabel("向前", requestGroup), 2, 0);
+    requestLayout->addWidget(m_driverMemoryBeforeSpin, 2, 1);
+    requestLayout->addWidget(new QLabel("向后", requestGroup), 2, 2);
+    requestLayout->addWidget(m_driverMemoryAfterSpin, 2, 3);
+    requestLayout->addWidget(m_driverMemoryReadButton, 2, 4);
+    requestLayout->addWidget(m_driverMemoryApplyButton, 3, 3);
+    requestLayout->addWidget(m_driverMemoryResetButton, 3, 4);
     tabLayout->addWidget(requestGroup);
 
     m_driverMemoryRangeLabel = new QLabel("范围: 未读取", m_tabDriverMemoryRw);

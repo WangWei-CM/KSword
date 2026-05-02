@@ -138,10 +138,21 @@ private:
     // - 第四点“驱动强制卸载”从这里进入 R0 DriverUnload。
     void showServiceTableContextMenu(const QPoint& localPosition);
 
+    // showModuleTableContextMenu：
+    // - 在已加载模块列表右键弹出操作菜单；
+    // - 用模块基址反查 DriverObject，处理服务已停止但模块仍残留的场景。
+    void showModuleTableContextMenu(const QPoint& localPosition);
+
     // forceUnloadDriverFromServiceRow：
     // - 将当前服务名规范化为 \Driver\Name 并调用 ArkDriverClient；
     // - 后台线程执行，完成后刷新服务/模块列表。
     void forceUnloadDriverFromServiceRow(int rowIndex);
+
+    // forceUnloadDriverFromModuleRow：
+    // - 使用模块基址请求 R0 扫描对象目录并清理匹配 DriverObject；
+    // - removeCallbacksFirst 为 true 时，R0 先批量移除该模块可验证回调；
+    // - 不执行 PsLoadedModuleList 摘链，避免 PatchGuard/蓝屏风险。
+    void forceUnloadDriverFromModuleRow(int rowIndex, bool removeCallbacksFirst = false);
 
     // rebuildDriverServiceTableByFilter：
     // - 作用：按过滤关键词重建驱动服务表格。

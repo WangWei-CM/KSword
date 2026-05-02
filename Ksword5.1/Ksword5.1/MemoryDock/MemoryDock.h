@@ -465,6 +465,38 @@ private:
     // - 返回：无。
     void resetDriverMemoryRwState();
 
+    // updateDriverMemoryBaseComboFromProcessCache：
+    // - 作用：用当前进程缓存重建 Tab6 的“偏移基址/目标进程”下拉框。
+    // - 处理逻辑：保留用户已输入的 0x 基址或进程筛选文本，避免刷新进程列表时丢失查询条件。
+    // - 返回：无。
+    void updateDriverMemoryBaseComboFromProcessCache();
+
+    // resolveDriverMemoryRequestFromUi：
+    // - 作用：解析 Tab6 的目标进程、偏移基址和中心地址，输出最终 R0 读取地址。
+    // - 参数 targetPidOut：输出 R0 读写使用的目标 PID。
+    // - 参数 targetNameOut：输出匹配到的进程名，可能为空。
+    // - 参数 offsetBaseOut：输出可选偏移基址，默认 0。
+    // - 参数 centerAddressOut：输出“中心地址”输入框解析后的原始值。
+    // - 参数 effectiveCenterAddressOut：输出 offsetBase + centerAddress 的最终中心地址。
+    // - 参数 errorTextOut：失败时输出可展示给用户的错误文本。
+    // - 返回：true 解析成功；false 解析失败。
+    bool resolveDriverMemoryRequestFromUi(
+        std::uint32_t& targetPidOut,
+        QString& targetNameOut,
+        std::uint64_t& offsetBaseOut,
+        std::uint64_t& centerAddressOut,
+        std::uint64_t& effectiveCenterAddressOut,
+        QString& errorTextOut);
+
+    // findDriverMemoryProcessComboMatch：
+    // - 作用：按用户输入在 Tab6 进程下拉项中查找匹配项。
+    // - 参数 filterText：用户输入的进程名片段、PID 或完整下拉文本。
+    // - 参数 comboIndexOut：输出匹配到的下拉索引。
+    // - 返回：true 找到匹配；false 未找到。
+    bool findDriverMemoryProcessComboMatch(
+        const QString& filterText,
+        int& comboIndexOut) const;
+
     // collectDriverMemoryDiffBlocks：
     // - 作用：生成连续差异块列表，供一次或多次 R0 写入请求使用。
     // - 参数 diffBlocksOut：输出差异块集合。
@@ -693,6 +725,7 @@ private:
     // ========================================================
 
     QWidget* m_tabDriverMemoryRw = nullptr;   // Tab6 页面容器。
+    QComboBox* m_driverMemoryBaseCombo = nullptr; // 可选偏移基址或 R0 目标进程选择框。
     QLineEdit* m_driverMemoryAddressEdit = nullptr; // 驱动读写目标中心地址。
     QSpinBox* m_driverMemoryBeforeSpin = nullptr;   // 向前读取字节数。
     QSpinBox* m_driverMemoryAfterSpin = nullptr;    // 向后读取字节数。
@@ -732,6 +765,10 @@ private:
     QByteArray m_currentViewerPageBytes;               // Tab4 当前页原始字节缓存。
 
     std::uint64_t m_driverMemoryBaseAddress = 0;       // Tab6 当前缓存基址。
+    std::uint64_t m_driverMemoryOffsetBase = 0;        // Tab6 本次读取使用的可选偏移基址。
+    std::uint64_t m_driverMemoryCenterAddress = 0;     // Tab6 本次读取解析出的最终中心地址。
+    std::uint32_t m_driverMemorySnapshotPid = 0;       // Tab6 快照对应的目标 PID，写回时固定使用。
+    QString m_driverMemorySnapshotProcessName;         // Tab6 快照对应的进程名，仅用于展示和确认。
     QByteArray m_driverMemoryOriginalBytes;            // Tab6 读取备份。
     QByteArray m_driverMemoryEditedBytes;              // Tab6 当前编辑缓存。
     bool m_driverMemoryHasSnapshot = false;            // Tab6 是否存在可写快照。

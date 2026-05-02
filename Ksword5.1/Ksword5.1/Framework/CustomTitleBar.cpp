@@ -7,6 +7,7 @@
 #include <QDate>
 #include <QFileIconProvider>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QGuiApplication>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -34,7 +35,7 @@ namespace
     // - kControlButtonWidth：右上角控制按钮固定宽度；
     // - kControlButtonHeight：右上角控制按钮固定高度；
     // - kControlIconSize：右上角控制按钮图标尺寸；
-    // - kUserBadgeMinWidth：用户名徽标的最小宽度；
+    // - kUserBadgeHorizontalExtraWidth：用户名徽标按文本自适应时保留的左右留白和边框余量；
     // - kCommandLineMinWidth：命令输入框最小宽度；
     // - kCommandLineMaxWidth：命令输入框最大宽度；
     // - kAppIconSize：左侧应用图标绘制尺寸。
@@ -42,7 +43,7 @@ namespace
     constexpr int kControlButtonWidth = 32;
     constexpr int kControlButtonHeight = 24;
     constexpr int kControlIconSize = 16;
-    constexpr int kUserBadgeMinWidth = 82;
+    constexpr int kUserBadgeHorizontalExtraWidth = 18;
     constexpr int kCommandLineMinWidth = 210;
     constexpr int kCommandLineMaxWidth = 760;
     constexpr int kAppIconSize = 18;
@@ -114,6 +115,12 @@ namespace ks::ui
         updateVisualState();
     }
 
+    void CustomTitleBar::setCaptureProtectionState(const bool protectedState)
+    {
+        m_captureProtectionEnabled = protectedState;
+        updateVisualState();
+    }
+
     void CustomTitleBar::setMaximizedState(const bool maximizedState)
     {
         m_isMaximized = maximizedState;
@@ -177,11 +184,11 @@ namespace ks::ui
         {
             return false;
         }
-        if (widgetBelongsTo(hitWidget, m_rightWidget))
+        if (widgetBelongsTo(hitWidget, m_userBadgeButton))
         {
             return false;
         }
-        if (widgetBelongsTo(hitWidget, m_userBadgeButton))
+        if (widgetBelongsTo(hitWidget, m_rightWidget))
         {
             return false;
         }
@@ -320,8 +327,8 @@ namespace ks::ui
         m_userBadgeButton = new QPushButton(m_leftWidget);
         m_userBadgeButton->setEnabled(false);
         m_userBadgeButton->setFocusPolicy(Qt::NoFocus);
-        m_userBadgeButton->setMinimumWidth(kUserBadgeMinWidth);
         m_userBadgeButton->setFixedHeight(18);
+        m_userBadgeButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
         m_userBadgeButton->setCursor(Qt::ArrowCursor);
 
         m_leftLayout->addWidget(m_appIconLabel, 0);
@@ -334,23 +341,26 @@ namespace ks::ui
         m_commandLineEdit->setClearButtonEnabled(true);
         m_commandLineEdit->setFixedHeight(22);
 
-        // 右侧控制区：图钉 + 最小化 + 最大化/还原 + 关闭。
+        // 右侧控制区：截屏屏蔽 + 图钉 + 最小化 + 最大化/还原 + 关闭。
         m_rightWidget = new QWidget(this);
         m_rightLayout = new QHBoxLayout(m_rightWidget);
         m_rightLayout->setContentsMargins(0, 0, 2, 0);
         m_rightLayout->setSpacing(1);
 
+        m_captureProtectionButton = new QPushButton(m_rightWidget);
         m_pinButton = new QPushButton(m_rightWidget);
         m_minButton = new QPushButton(m_rightWidget);
         m_maxButton = new QPushButton(m_rightWidget);
         m_closeButton = new QPushButton(m_rightWidget);
 
+        m_captureProtectionButton->setObjectName(QStringLiteral("ksTitleCaptureProtectionButton"));
         m_pinButton->setObjectName(QStringLiteral("ksTitlePinButton"));
         m_minButton->setObjectName(QStringLiteral("ksTitleMinButton"));
         m_maxButton->setObjectName(QStringLiteral("ksTitleMaxButton"));
         m_closeButton->setObjectName(QStringLiteral("ksTitleCloseButton"));
 
-        const std::array<QPushButton*, 4> controlButtons = {
+        const std::array<QPushButton*, 5> controlButtons = {
+            m_captureProtectionButton,
             m_pinButton,
             m_minButton,
             m_maxButton,
@@ -369,6 +379,7 @@ namespace ks::ui
             m_rightLayout->addWidget(buttonObject, 0);
         }
 
+        m_captureProtectionButton->setToolTip(QStringLiteral("切换截屏屏蔽"));
         m_pinButton->setToolTip(QStringLiteral("切换窗口置顶状态"));
         m_minButton->setToolTip(QStringLiteral("最小化主窗口"));
         m_maxButton->setToolTip(QStringLiteral("最大化或还原主窗口"));
@@ -383,6 +394,9 @@ namespace ks::ui
 
     void CustomTitleBar::initializeConnections()
     {
+        connect(m_captureProtectionButton, &QPushButton::clicked, this, [this]() {
+            emit requestToggleCaptureProtection();
+        });
         connect(m_pinButton, &QPushButton::clicked, this, [this]() {
             emit requestTogglePinned();
         });
@@ -455,11 +469,13 @@ namespace ks::ui
             "  border-radius:3px;"
             "  font-size:11px;"
             "}"
+            "#ksCustomTitleBar QPushButton#ksTitleCaptureProtectionButton:hover,"
             "#ksCustomTitleBar QPushButton#ksTitlePinButton:hover,"
             "#ksCustomTitleBar QPushButton#ksTitleMinButton:hover,"
             "#ksCustomTitleBar QPushButton#ksTitleMaxButton:hover{"
             "  background:__TITLE_BUTTON_HOVER__;"
             "}"
+            "#ksCustomTitleBar QPushButton#ksTitleCaptureProtectionButton:pressed,"
             "#ksCustomTitleBar QPushButton#ksTitlePinButton:pressed,"
             "#ksCustomTitleBar QPushButton#ksTitleMinButton:pressed,"
             "#ksCustomTitleBar QPushButton#ksTitleMaxButton:pressed{"
@@ -491,9 +507,19 @@ namespace ks::ui
         setStyleSheet(titleBarStyleSheetText);
 
         // 图标与按钮文案同步：
+        // - 截屏屏蔽按钮根据保护状态切换眼睛/闭眼；
         // - 图钉根据置顶状态切换空心/实心；
         // - 最大化按钮根据窗口状态切换最大化/还原图标；
         // - 用户按钮根据“33251”特判切换显示名。
+        m_captureProtectionButton->setIcon(QIcon(
+            m_captureProtectionEnabled
+            ? QStringLiteral(":/Icon/titlebar_capture_protected.svg")
+            : QStringLiteral(":/Icon/titlebar_capture_allowed.svg")));
+        m_captureProtectionButton->setToolTip(m_captureProtectionEnabled
+            ? QStringLiteral("截屏屏蔽已开启：点击后允许截屏")
+            : QStringLiteral("截屏屏蔽已关闭：点击后在截图/录屏中隐藏或黑屏"));
+        m_captureProtectionButton->setIconSize(QSize(kControlIconSize, kControlIconSize));
+
         m_pinButton->setIcon(QIcon(
             m_isPinned
             ? QStringLiteral(":/Icon/titlebar_pin_fill.svg")
@@ -523,6 +549,7 @@ namespace ks::ui
             : m_rawUserNameText;
         m_userBadgeButton->setText(displayUserNameText);
         m_userBadgeButton->setToolTip(QStringLiteral("当前用户：%1").arg(m_rawUserNameText));
+        updateUserBadgeWidth(displayUserNameText);
 
         QIcon appIcon = resolveApplicationPreviewIcon();
         if (appIcon.isNull() && window() != nullptr)
@@ -549,6 +576,25 @@ namespace ks::ui
 
         const int commandLineWidth = std::clamp(width() / 3, kCommandLineMinWidth, kCommandLineMaxWidth);
         m_commandLineEdit->setFixedWidth(commandLineWidth);
+    }
+
+    void CustomTitleBar::updateUserBadgeWidth(const QString& displayUserNameText)
+    {
+        if (m_userBadgeButton == nullptr)
+        {
+            return;
+        }
+
+        // 宽度按实际展示用户名计算：
+        // - fontMetrics 读取当前主题样式后的按钮字体；
+        // - 额外宽度覆盖左右 padding、边框和禁用态绘制余量；
+        // - 固定宽度只固定“计算结果”，不是固定常量，用户名变化后会重新贴合。
+        m_userBadgeButton->ensurePolished();
+        const QFontMetrics badgeFontMetrics(m_userBadgeButton->font());
+        const int textWidth = badgeFontMetrics.horizontalAdvance(displayUserNameText);
+        const int badgeWidth = std::max(1, textWidth + kUserBadgeHorizontalExtraWidth);
+        m_userBadgeButton->setFixedWidth(badgeWidth);
+        m_userBadgeButton->updateGeometry();
     }
 
     bool CustomTitleBar::tryStartWindowSystemMove(const QPoint& globalPoint)

@@ -1,52 +1,6 @@
-#include "HexEditorWidget.h"
-#include "CodeEditorWidget.h"
+#include "HexEditorWidget.Internal.h"
 
-// ============================================================
-// HexEditorWidget.cpp
-// 作用：
-// - 实现统一十六进制控件的显示、编辑、查找、跳转与导出；
-// - 所有逻辑集中在该文件，外部模块仅通过公开 API 调用。
-// ============================================================
-
-#include "../theme.h"
-
-#include <QAbstractItemView>
-#include <QApplication>
-#include <QBrush>
-#include <QClipboard>
-#include <QComboBox>
-#include <QEvent>
-#include <QFile>
-#include <QFileDialog>
-#include <QFontDatabase>
-#include <QFontMetrics>
-#include <QFrame>
-#include <QGridLayout>
-#include <QHBoxLayout>
-#include <QHeaderView>
-#include <QItemSelectionModel>
-#include <QLabel>
-#include <QLineEdit>
-#include <QMenu>
-#include <QMessageBox>
-#include <QMouseEvent>
-#include <QPointer>
-#include <QRegularExpression>
-#include <QShortcut>
-#include <QStringConverter>
-#include <QTableWidget>
-#include <QTableWidgetItem>
-#include <QTabWidget>
-#include <QTextStream>
-#include <QToolButton>
-#include <QVBoxLayout>
-
-#include <algorithm>
-#include <cctype>
-#include <cstring>
-#include <thread>
-
-namespace
+namespace ksword::ui::hex_editor_internal
 {
     // kMinBytesPerRow：
     // - 每行最小字节数限制；
@@ -206,6 +160,9 @@ namespace
         return std::clamp(requestedBytesPerRow, kMinBytesPerRow, kMaxBytesPerRow);
     }
 }
+
+
+using namespace ksword::ui::hex_editor_internal;
 
 HexEditorWidget::HexEditorWidget(QWidget* parent)
     : QWidget(parent)
@@ -581,11 +538,3 @@ bool HexEditorWidget::eventFilter(QObject* watched, QEvent* event)
 
     return QWidget::eventFilter(watched, event);
 }
-
-
-// ============================================================
-// 说明：HexEditorWidget 其余实现拆分到 .inc 文件，控制单文件体积。
-// ============================================================
-
-#include "HexEditorWidget.Ui.inc"
-#include "HexEditorWidget.Tools.inc"

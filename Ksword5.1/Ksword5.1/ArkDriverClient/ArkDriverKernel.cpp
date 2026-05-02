@@ -651,6 +651,10 @@ namespace ksword::ark
         unloadResult.waitStatus = static_cast<long>(response.waitStatus);
         unloadResult.driverObjectAddress = static_cast<std::uint64_t>(response.driverObjectAddress);
         unloadResult.driverUnloadAddress = static_cast<std::uint64_t>(response.driverUnloadAddress);
+        unloadResult.callbackCandidates = static_cast<std::uint32_t>(response.callbackCandidates);
+        unloadResult.callbacksRemoved = static_cast<std::uint32_t>(response.callbacksRemoved);
+        unloadResult.callbackFailures = static_cast<std::uint32_t>(response.callbackFailures);
+        unloadResult.callbackLastStatus = static_cast<long>(response.callbackLastStatus);
         unloadResult.driverName = fixedKernelWideToString(
             response.driverName,
             KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS);
@@ -661,7 +665,84 @@ namespace ksword::ark
             << ", object=0x" << std::hex << unloadResult.driverObjectAddress
             << ", unload=0x" << unloadResult.driverUnloadAddress
             << ", lastStatus=0x" << static_cast<unsigned long>(unloadResult.lastStatus)
-            << ", waitStatus=0x" << static_cast<unsigned long>(unloadResult.waitStatus);
+            << ", waitStatus=0x" << static_cast<unsigned long>(unloadResult.waitStatus)
+            << ", callbackCandidates=" << std::dec << unloadResult.callbackCandidates
+            << ", callbacksRemoved=" << unloadResult.callbacksRemoved
+            << ", callbackFailures=" << unloadResult.callbackFailures
+            << ", callbackLast=0x" << std::hex << static_cast<unsigned long>(unloadResult.callbackLastStatus);
+        unloadResult.io.message = stream.str();
+        return unloadResult;
+    }
+
+    DriverForceUnloadResult DriverClient::forceUnloadDriverByModuleBase(
+        const std::uint64_t moduleBase,
+        const std::wstring& fallbackDriverName,
+        const unsigned long flags,
+        const unsigned long timeoutMilliseconds) const
+    {
+        // 作用：按内核模块基址请求 R0 反查 DriverObject 并执行强制清理。
+        // 返回：固定响应；如果模块基址无法匹配 DriverObject，R0 会继续按 fallbackDriverName 兜底。
+        DriverForceUnloadResult unloadResult{};
+        KSWORD_ARK_FORCE_UNLOAD_DRIVER_REQUEST request{};
+        KSWORD_ARK_FORCE_UNLOAD_DRIVER_RESPONSE response{};
+        request.version = KSWORD_ARK_FORCE_UNLOAD_DRIVER_PROTOCOL_VERSION;
+        request.flags = flags | KSWORD_ARK_DRIVER_UNLOAD_FLAG_TARGET_MODULE_BASE_PRESENT;
+        request.timeoutMilliseconds = timeoutMilliseconds;
+        request.targetModuleBase = static_cast<unsigned long long>(moduleBase);
+        copyWideToFixed(
+            request.driverName,
+            KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS,
+            fallbackDriverName);
+
+        unloadResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_FORCE_UNLOAD_DRIVER,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            &response,
+            static_cast<unsigned long>(sizeof(response)));
+        if (!unloadResult.io.ok)
+        {
+            unloadResult.io.message =
+                "DeviceIoControl(IOCTL_KSWORD_ARK_FORCE_UNLOAD_DRIVER/module-base) failed, error=" +
+                std::to_string(unloadResult.io.win32Error);
+            return unloadResult;
+        }
+        if (unloadResult.io.bytesReturned < sizeof(response))
+        {
+            unloadResult.io.ok = false;
+            unloadResult.io.message =
+                "driver-unload/module-base response too small, bytesReturned=" +
+                std::to_string(unloadResult.io.bytesReturned);
+            return unloadResult;
+        }
+
+        unloadResult.version = static_cast<std::uint32_t>(response.version);
+        unloadResult.status = static_cast<std::uint32_t>(response.status);
+        unloadResult.flags = static_cast<std::uint32_t>(response.flags);
+        unloadResult.lastStatus = static_cast<long>(response.lastStatus);
+        unloadResult.waitStatus = static_cast<long>(response.waitStatus);
+        unloadResult.driverObjectAddress = static_cast<std::uint64_t>(response.driverObjectAddress);
+        unloadResult.driverUnloadAddress = static_cast<std::uint64_t>(response.driverUnloadAddress);
+        unloadResult.callbackCandidates = static_cast<std::uint32_t>(response.callbackCandidates);
+        unloadResult.callbacksRemoved = static_cast<std::uint32_t>(response.callbacksRemoved);
+        unloadResult.callbackFailures = static_cast<std::uint32_t>(response.callbackFailures);
+        unloadResult.callbackLastStatus = static_cast<long>(response.callbackLastStatus);
+        unloadResult.driverName = fixedKernelWideToString(
+            response.driverName,
+            KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS);
+        unloadResult.io.ntStatus = unloadResult.lastStatus;
+
+        std::ostringstream stream;
+        stream << "moduleBase=0x" << std::hex << moduleBase
+            << ", status=" << unloadResult.status
+            << ", object=0x" << unloadResult.driverObjectAddress
+            << ", unload=0x" << unloadResult.driverUnloadAddress
+            << ", lastStatus=0x" << static_cast<unsigned long>(unloadResult.lastStatus)
+            << ", waitStatus=0x" << static_cast<unsigned long>(unloadResult.waitStatus)
+            << ", callbackCandidates=" << std::dec << unloadResult.callbackCandidates
+            << ", callbacksRemoved=" << unloadResult.callbacksRemoved
+            << ", callbackFailures=" << unloadResult.callbackFailures
+            << ", callbackLast=0x" << std::hex << static_cast<unsigned long>(unloadResult.callbackLastStatus);
         unloadResult.io.message = stream.str();
         return unloadResult;
     }

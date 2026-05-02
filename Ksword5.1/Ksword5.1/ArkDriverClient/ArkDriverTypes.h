@@ -14,6 +14,7 @@
 #include "../../../shared/driver/KswordArkCapabilityIoctl.h"
 #include "../../../shared/driver/KswordArkDynDataIoctl.h"
 #include "../../../shared/driver/KswordArkFileIoctl.h"
+#include "../../../shared/driver/KswordArkFileMonitorIoctl.h"
 #include "../../../shared/driver/KswordArkHandleIoctl.h"
 #include "../../../shared/driver/KswordArkKernelIoctl.h"
 #include "../../../shared/driver/KswordArkMemoryIoctl.h"
@@ -381,6 +382,24 @@ namespace ksword::ark
         std::wstring objectName;        // ObQueryNameString 文件对象名。
     };
 
+    // FileMonitorStatusResult 是 R0 文件系统 minifilter 运行状态的 R3 模型。
+    struct FileMonitorStatusResult
+    {
+        IoResult io;                    // io：DeviceIoControl 调用状态。
+        std::uint32_t version = 0;      // version：文件监控协议版本。
+        std::uint32_t size = 0;         // size：R0 返回结构大小。
+        std::uint32_t runtimeFlags = 0; // runtimeFlags：REGISTERED/STARTED/DROPPED 等标志。
+        std::uint32_t operationMask = 0;// operationMask：当前文件事件操作过滤位。
+        std::uint32_t processIdFilter = 0; // processIdFilter：0 表示不过滤 PID。
+        std::uint32_t ringCapacity = 0; // ringCapacity：R0 环形队列容量。
+        std::uint32_t queuedCount = 0;  // queuedCount：当前待取事件数。
+        std::uint32_t droppedCount = 0; // droppedCount：累计覆盖丢弃事件数。
+        std::uint64_t sequence = 0;     // sequence：R0 文件事件序列号。
+        long registerStatus = 0;        // registerStatus：FltRegisterFilter 状态。
+        long startStatus = 0;           // startStatus：FltStartFiltering 状态。
+        long lastErrorStatus = 0;       // lastErrorStatus：最近一次文件监控错误。
+    };
+
     // RegistryReadResult 是 R0 注册表值读取响应的 R3 模型。
     struct RegistryReadResult
     {
@@ -392,6 +411,46 @@ namespace ksword::ark
         std::uint32_t requiredBytes = 0; // requiredBytes：完整值数据长度。
         long lastStatus = 0;            // lastStatus：底层 Zw* 状态。
         std::vector<std::uint8_t> data; // data：原始注册表值数据。
+    };
+
+    // RegistrySubKeyEntry 是 R0 枚举出的一个子键。
+    struct RegistrySubKeyEntry
+    {
+        std::wstring name;              // name：子键名称，不含父路径。
+    };
+
+    // RegistryValueEntry 是 R0 枚举出的一个注册表值。
+    struct RegistryValueEntry
+    {
+        std::wstring name;              // name：值名，空字符串表示默认值。
+        std::uint32_t valueType = 0;    // valueType：REG_* 类型。
+        std::uint32_t dataBytes = 0;    // dataBytes：返回预览数据长度。
+        std::uint32_t requiredBytes = 0; // requiredBytes：完整数据长度。
+        std::vector<std::uint8_t> data; // data：预览数据，可能被 R0 截断。
+    };
+
+    // RegistryEnumResult 是 R0 枚举键响应的 R3 模型。
+    struct RegistryEnumResult
+    {
+        IoResult io;                    // io：DeviceIoControl 调用状态。
+        std::uint32_t version = 0;      // version：协议版本。
+        std::uint32_t status = KSWORD_ARK_REGISTRY_ENUM_STATUS_UNKNOWN; // status：R0 聚合状态。
+        std::uint32_t subKeyCount = 0;  // subKeyCount：R0 观察到的子键数。
+        std::uint32_t returnedSubKeyCount = 0; // returnedSubKeyCount：已返回子键数。
+        std::uint32_t valueCount = 0;   // valueCount：R0 观察到的值数。
+        std::uint32_t returnedValueCount = 0; // returnedValueCount：已返回值数。
+        long lastStatus = 0;            // lastStatus：底层 Zw* 状态。
+        std::vector<RegistrySubKeyEntry> subKeys; // subKeys：子键列表。
+        std::vector<RegistryValueEntry> values;   // values：值列表。
+    };
+
+    // RegistryOperationResult 是 R0 注册表写操作通用响应模型。
+    struct RegistryOperationResult
+    {
+        IoResult io;                    // io：DeviceIoControl 调用状态。
+        std::uint32_t version = 0;      // version：协议版本。
+        std::uint32_t status = KSWORD_ARK_REGISTRY_OPERATION_STATUS_UNKNOWN; // status：操作聚合状态。
+        long lastStatus = 0;            // lastStatus：底层 Zw* 状态。
     };
 
     // VirtualMemoryReadResult 是 R0 读目标进程虚拟内存的 R3 模型。
@@ -592,6 +651,10 @@ namespace ksword::ark
         long waitStatus = 0;                 // waitStatus：KeWaitForSingleObject 状态。
         std::uint64_t driverObjectAddress = 0; // driverObjectAddress：诊断地址。
         std::uint64_t driverUnloadAddress = 0; // driverUnloadAddress：DriverUnload 入口。
+        std::uint32_t callbackCandidates = 0;  // callbackCandidates：按模块基址命中的回调候选数。
+        std::uint32_t callbacksRemoved = 0;    // callbacksRemoved：R0 成功移除的回调数。
+        std::uint32_t callbackFailures = 0;    // callbackFailures：R0 移除失败或不支持的回调数。
+        long callbackLastStatus = 0;           // callbackLastStatus：最后一个回调移除失败状态。
         std::wstring driverName;             // driverName：R0 规范化对象名。
     };
 

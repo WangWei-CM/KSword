@@ -17,6 +17,7 @@
 
 #include <QAbstractScrollArea>
 #include <QAbstractItemView>
+#include <QBrush>
 #include <QDateTime>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -27,6 +28,7 @@
 #include <QListWidgetItem>
 #include <QMetaObject>
 #include <QPainter>
+#include <QPen>
 #include <QPointer>
 #include <QProcess>
 #include <QRegularExpression>
@@ -43,6 +45,7 @@
 
 #include <QtCharts/QChart>
 #include <QtCharts/QChartView>
+#include <QtCharts/QAreaSeries>
 #include <QtCharts/QLineSeries>
 #include <QtCharts/QValueAxis>
 
@@ -147,6 +150,22 @@ namespace
         chartPointer->setMargins(QMargins(0, 0, 0, 0));
     }
 
+    // configureTransparentChartViewOnly 作用：
+    // - 只清理 QChart 外层背景，不覆盖调用者已设置的 plotArea 背景和网格边框；
+    // - CPU 单核利用率图需要保留绘图区方框/填充，因此不能调用 configureTransparentChart；
+    // - 返回行为：无返回值，空指针直接忽略。
+    void configureTransparentChartViewOnly(QChart* chartPointer)
+    {
+        if (chartPointer == nullptr)
+        {
+            return;
+        }
+
+        chartPointer->setBackgroundVisible(false);
+        chartPointer->setBackgroundRoundness(0);
+        chartPointer->setMargins(QMargins(0, 0, 0, 0));
+    }
+
     // configureCompressibleWidget 作用：
     // - 清掉控件默认最小尺寸，允许 Dock 窄宽/低高时继续压缩而不是请求外层滚动条；
     // - horizontalPolicy/verticalPolicy 用于按页面角色指定横纵向分配策略；
@@ -194,6 +213,30 @@ namespace
         labelPointer->setWordWrap(false);
         labelPointer->setSizePolicy(horizontalPolicy, QSizePolicy::Fixed);
         labelPointer->setMinimumHeight(std::max(1, labelPointer->sizeHint().height()));
+    }
+
+    // lockLabelHeightToFont 作用：
+    // - 在设置大字号样式后重新按字体度量锁定 QLabel 行高；
+    // - 解决 QLabel 先计算普通字号 sizeHint、后套 46px 样式时顶部/底部被布局裁剪的问题；
+    // - 参数 extraVerticalPadding：给字体 ascent/descent 外额外预留的上下像素总量；
+    // - 返回行为：无返回值，仅更新标签最小/最大高度。
+    void lockLabelHeightToFont(QLabel* labelPointer, const int extraVerticalPadding)
+    {
+        if (labelPointer == nullptr)
+        {
+            return;
+        }
+
+        // ensurePolished 用途：让 stylesheet 的 font-size/font-weight 先生效，再读取字体度量。
+        labelPointer->ensurePolished();
+        // fontHeight 用途：读取应用样式后真实字体高度，避免依赖过期 sizeHint。
+        const int fontHeight = labelPointer->fontMetrics().height();
+        // targetHeight 用途：大标题保留上下余量，避免高 DPI 与字体 fallback 时被裁剪。
+        const int targetHeight = std::max(
+            labelPointer->sizeHint().height(),
+            fontHeight + std::max(0, extraVerticalPadding));
+        labelPointer->setMinimumHeight(targetHeight);
+        labelPointer->setMaximumHeight(targetHeight);
     }
 
     // bytesToGiBText 作用：
@@ -495,6 +538,144 @@ namespace
         configureCompressibleWidget(chartView, QSizePolicy::Expanding, QSizePolicy::Expanding);
         appendTransparentBackgroundStyle(chartView);
         return chartView;
+    }
+
+    // createPlotBackgroundChartView 作用：
+    // - 创建保留 plotArea 样式的 ChartView；
+    // - 用于所有利用率折线图，使绘图区方框、网格和面积填充不会被通用透明逻辑关闭；
+    // - 返回值：已设置无边框和透明 viewport 的 QChartView。
+    QChartView* createPlotBackgroundChartView(QChart* chart, QWidget* parentWidget)
+    {
+        configureTransparentChartViewOnly(chart);
+        QChartView* chartView = new QChartView(chart, parentWidget);
+        chartView->setRenderHint(QPainter::Antialiasing, true);
+        chartView->setFrameShape(QFrame::NoFrame);
+        // ChartView 本身仍然不显示滚动条，尺寸由外层利用率布局统一控制。
+        chartView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        chartView->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        chartView->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+        configureCompressibleWidget(chartView, QSizePolicy::Expanding, QSizePolicy::Expanding);
+        appendTransparentBackgroundStyle(chartView);
+        return chartView;
+    }
+
+    // colorWithAlpha 作用：
+    // - 基于折线主色生成不同透明度的辅助色；
+    // - 用于绘图区背景、网格、边框和面积填充保持同一色相。
+    QColor colorWithAlpha(const QColor& sourceColor, const int alphaValue)
+    {
+        return QColor(
+            sourceColor.red(),
+            sourceColor.green(),
+            sourceColor.blue(),
+            std::clamp(alphaValue, 0, 255));
+    }
+
+    // initializeLineSeriesHistory 作用：
+    // - 按固定历史长度预填充折线点；
+    // - 让界面首次显示时图表有完整 X 轴窗口，后续采样只做滑动窗口追加。
+    void initializeLineSeriesHistory(
+        QLineSeries* lineSeries,
+        const int historyLength,
+        const double sampleValue = 0.0)
+    {
+        if (lineSeries == nullptr)
+        {
+            return;
+        }
+
+        for (int indexValue = 0; indexValue < historyLength; ++indexValue)
+        {
+            lineSeries->append(indexValue, sampleValue);
+        }
+    }
+
+    // createBaselineSeries 作用：
+    // - 创建与折线点数量一致的 0 轴基准线；
+    // - QAreaSeries 依赖上下两条线闭合区域，因此每条利用率线都单独持有基准线。
+    QLineSeries* createBaselineSeries(
+        QWidget* parentWidget,
+        const int historyLength,
+        const double baselineValue = 0.0)
+    {
+        QLineSeries* baselineSeries = new QLineSeries(parentWidget);
+        initializeLineSeriesHistory(baselineSeries, historyLength, baselineValue);
+        return baselineSeries;
+    }
+
+    // addFilledAreaSeries 作用：
+    // - 把一条折线和一条基准线组合为面积图并加入 QChart；
+    // - 返回值：新建的 QAreaSeries，失败时返回 nullptr。
+    QAreaSeries* addFilledAreaSeries(
+        QChart* chartPointer,
+        QLineSeries* lineSeries,
+        QLineSeries* baselineSeries,
+        const QColor& lineColor,
+        const int fillAlpha = 46)
+    {
+        if (chartPointer == nullptr || lineSeries == nullptr || baselineSeries == nullptr)
+        {
+            return nullptr;
+        }
+
+        QAreaSeries* areaSeries = new QAreaSeries(lineSeries, baselineSeries);
+        areaSeries->setName(lineSeries->name());
+        areaSeries->setColor(colorWithAlpha(lineColor, fillAlpha));
+        areaSeries->setBorderColor(lineColor);
+        areaSeries->setPen(QPen(lineColor, 1.6));
+        chartPointer->addSeries(areaSeries);
+        return areaSeries;
+    }
+
+    // configureUtilizationPlotChart 作用：
+    // - 统一设置利用率图表的外观；
+    // - 保留透明外背景，同时给 plotArea 添加浅色背景和明确方框。
+    void configureUtilizationPlotChart(
+        QChart* chartPointer,
+        const QColor& accentColor,
+        const QString& titleText = QString(),
+        const bool legendVisible = false)
+    {
+        if (chartPointer == nullptr)
+        {
+            return;
+        }
+
+        chartPointer->legend()->setVisible(legendVisible);
+        if (legendVisible)
+        {
+            chartPointer->legend()->setAlignment(Qt::AlignBottom);
+        }
+        chartPointer->setBackgroundVisible(false);
+        chartPointer->setBackgroundRoundness(0);
+        chartPointer->setMargins(QMargins(0, 0, 0, 0));
+        chartPointer->setTitle(titleText);
+        chartPointer->setPlotAreaBackgroundVisible(true);
+        chartPointer->setPlotAreaBackgroundBrush(QBrush(colorWithAlpha(accentColor, 18)));
+        chartPointer->setPlotAreaBackgroundPen(QPen(colorWithAlpha(accentColor, 150), 1.0));
+    }
+
+    // configureUtilizationValueAxis 作用：
+    // - 统一隐藏轴标签但保留轴线与网格；
+    // - 方框和横向网格共同强化利用率趋势图边界。
+    void configureUtilizationValueAxis(
+        QValueAxis* axisPointer,
+        const QColor& accentColor,
+        const double lowerValue,
+        const double upperValue)
+    {
+        if (axisPointer == nullptr)
+        {
+            return;
+        }
+
+        axisPointer->setRange(lowerValue, upperValue);
+        axisPointer->setLabelsVisible(false);
+        axisPointer->setGridLineVisible(true);
+        axisPointer->setMinorGridLineVisible(false);
+        axisPointer->setLineVisible(true);
+        axisPointer->setLinePen(QPen(colorWithAlpha(accentColor, 140), 1.0));
+        axisPointer->setGridLinePen(QPen(colorWithAlpha(accentColor, 46), 1.0));
     }
 
     // queryPowerShellTextSync 作用：
@@ -1228,7 +1409,7 @@ HardwareDock::HardwareDock(QWidget* parent)
     m_cachedGpuStaticText = QStringLiteral("显卡信息加载中，请稍候...");
     m_cachedMemoryStaticText = QStringLiteral("内存信息加载中，请稍候...");
     m_cachedSensorText = QStringLiteral("N/A|N/A");
-    if (m_cpuModelLabel != nullptr)
+    if (m_cpuModelLabel != nullptr && !m_cpuModelText.isEmpty())
     {
         m_cpuModelLabel->setText(m_cpuModelText);
     }
@@ -1636,9 +1817,10 @@ void HardwareDock::adjustUtilizationChartHeights()
             cpuReferenceHeight = 240;
         }
 
+        const int titleHeight = 72;
         const int headerHeight = std::max(
-            m_cpuModelLabel != nullptr ? m_cpuModelLabel->sizeHint().height() : 0,
-            58);
+            m_cpuModelLabel != nullptr ? m_cpuModelLabel->height() : 0,
+            titleHeight);
         const int summaryHeight = m_utilizationSummaryLabel != nullptr
             ? m_utilizationSummaryLabel->sizeHint().height()
             : 16;
@@ -1664,7 +1846,10 @@ void HardwareDock::adjustUtilizationChartHeights()
             }
             if (chartEntry.chartView != nullptr)
             {
-                const int chartHeight = std::max(1, cellHeight - 10);
+                const int titleReserveHeight = chartEntry.titleLabel != nullptr
+                    ? std::min(18, std::max(0, chartEntry.titleLabel->sizeHint().height()))
+                    : 0;
+                const int chartHeight = std::max(1, cellHeight - titleReserveHeight - 10);
                 applyFixedHeightIfChanged(chartEntry.chartView, chartHeight);
             }
         }
@@ -1882,12 +2067,14 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
+    lockLabelHeightToFont(titleLabel, 14);
     m_cpuModelLabel = new QLabel(QStringLiteral("检测中..."), m_utilizationCpuSubPage);
     configurePersistentHeaderLabel(m_cpuModelLabel, QSizePolicy::Ignored);
     m_cpuModelLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_cpuModelLabel->setStyleSheet(
         QStringLiteral("font-size:15px;font-weight:500;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
+    lockLabelHeightToFont(m_cpuModelLabel, 6);
     headerLayout->addWidget(titleLabel, 0);
     headerLayout->addStretch(1);
     headerLayout->addWidget(m_cpuModelLabel, 0);
@@ -1953,11 +2140,13 @@ void HardwareDock::initializeUtilizationMemorySubTab()
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
+    lockLabelHeightToFont(titleLabel, 14);
     m_memoryCapacityLabel = new QLabel(QStringLiteral("读取中..."), m_utilizationMemorySubPage);
     configurePersistentHeaderLabel(m_memoryCapacityLabel, QSizePolicy::Ignored);
     m_memoryCapacityLabel->setStyleSheet(
         QStringLiteral("font-size:31px;font-weight:500;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
+    lockLabelHeightToFont(m_memoryCapacityLabel, 8);
     headerLayout->addWidget(titleLabel, 0);
     headerLayout->addStretch(1);
     headerLayout->addWidget(m_memoryCapacityLabel, 0);
@@ -2006,6 +2195,7 @@ void HardwareDock::initializeUtilizationDiskSubTab()
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
+    lockLabelHeightToFont(titleLabel, 14);
     diskSubLayout->addWidget(titleLabel, 0);
 
     m_diskUtilSummaryLabel = new QLabel(QStringLiteral("磁盘采样初始化中..."), m_utilizationDiskSubPage);
@@ -2016,44 +2206,56 @@ void HardwareDock::initializeUtilizationDiskSubTab()
 
     m_diskReadLineSeries = new QLineSeries(m_utilizationDiskSubPage);
     m_diskReadLineSeries->setName(QStringLiteral("读取"));
-    m_diskReadLineSeries->setColor(QColor(80, 170, 255));
+    const QColor diskReadColor(80, 170, 255);
+    const QColor diskWriteColor(255, 190, 105);
+    m_diskReadLineSeries->setColor(diskReadColor);
+    m_diskReadBaselineSeries = createBaselineSeries(m_utilizationDiskSubPage, m_historyLength);
     m_diskWriteLineSeries = new QLineSeries(m_utilizationDiskSubPage);
     m_diskWriteLineSeries->setName(QStringLiteral("写入"));
-    m_diskWriteLineSeries->setColor(QColor(255, 190, 105));
-    for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
-    {
-        m_diskReadLineSeries->append(indexValue, 0.0);
-        m_diskWriteLineSeries->append(indexValue, 0.0);
-    }
+    m_diskWriteLineSeries->setColor(diskWriteColor);
+    m_diskWriteBaselineSeries = createBaselineSeries(m_utilizationDiskSubPage, m_historyLength);
+    initializeLineSeriesHistory(m_diskReadLineSeries, m_historyLength);
+    initializeLineSeriesHistory(m_diskWriteLineSeries, m_historyLength);
 
     QChart* diskChart = new QChart();
-    diskChart->addSeries(m_diskReadLineSeries);
-    diskChart->addSeries(m_diskWriteLineSeries);
-    diskChart->legend()->setVisible(true);
-    diskChart->legend()->setAlignment(Qt::AlignBottom);
-    diskChart->setBackgroundVisible(false);
-    diskChart->setBackgroundRoundness(0);
-    diskChart->setMargins(QMargins(0, 0, 0, 0));
-    diskChart->setTitle(QStringLiteral("磁盘读写速率趋势"));
+    m_diskReadAreaSeries = addFilledAreaSeries(
+        diskChart,
+        m_diskReadLineSeries,
+        m_diskReadBaselineSeries,
+        diskReadColor,
+        42);
+    m_diskWriteAreaSeries = addFilledAreaSeries(
+        diskChart,
+        m_diskWriteLineSeries,
+        m_diskWriteBaselineSeries,
+        diskWriteColor,
+        34);
+    configureUtilizationPlotChart(
+        diskChart,
+        diskReadColor,
+        QStringLiteral("磁盘读写速率趋势"),
+        true);
 
     m_diskUtilAxisX = new QValueAxis(diskChart);
-    m_diskUtilAxisX->setRange(0, m_historyLength);
-    m_diskUtilAxisX->setLabelsVisible(false);
-    m_diskUtilAxisX->setGridLineVisible(false);
+    configureUtilizationValueAxis(m_diskUtilAxisX, diskReadColor, 0.0, static_cast<double>(m_historyLength));
 
     m_diskUtilAxisY = new QValueAxis(diskChart);
-    m_diskUtilAxisY->setRange(0.0, 1.0);
-    m_diskUtilAxisY->setLabelsVisible(false);
-    m_diskUtilAxisY->setGridLineVisible(false);
+    configureUtilizationValueAxis(m_diskUtilAxisY, diskReadColor, 0.0, 1.0);
 
     diskChart->addAxis(m_diskUtilAxisX, Qt::AlignBottom);
     diskChart->addAxis(m_diskUtilAxisY, Qt::AlignLeft);
-    m_diskReadLineSeries->attachAxis(m_diskUtilAxisX);
-    m_diskReadLineSeries->attachAxis(m_diskUtilAxisY);
-    m_diskWriteLineSeries->attachAxis(m_diskUtilAxisX);
-    m_diskWriteLineSeries->attachAxis(m_diskUtilAxisY);
+    if (m_diskReadAreaSeries != nullptr)
+    {
+        m_diskReadAreaSeries->attachAxis(m_diskUtilAxisX);
+        m_diskReadAreaSeries->attachAxis(m_diskUtilAxisY);
+    }
+    if (m_diskWriteAreaSeries != nullptr)
+    {
+        m_diskWriteAreaSeries->attachAxis(m_diskUtilAxisX);
+        m_diskWriteAreaSeries->attachAxis(m_diskUtilAxisY);
+    }
 
-    m_diskUtilChartView = createNoFrameChartView(diskChart, m_utilizationDiskSubPage);
+    m_diskUtilChartView = createPlotBackgroundChartView(diskChart, m_utilizationDiskSubPage);
     diskSubLayout->addWidget(m_diskUtilChartView, 1);
 
     m_diskUtilDetailLabel = new QLabel(QStringLiteral("磁盘参数采样中..."), m_utilizationDiskSubPage);
@@ -2080,6 +2282,7 @@ void HardwareDock::initializeUtilizationNetworkSubTab()
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
+    lockLabelHeightToFont(titleLabel, 14);
     networkSubLayout->addWidget(titleLabel, 0);
 
     m_networkUtilSummaryLabel = new QLabel(QStringLiteral("网络采样初始化中..."), m_utilizationNetworkSubPage);
@@ -2090,44 +2293,56 @@ void HardwareDock::initializeUtilizationNetworkSubTab()
 
     m_networkRxLineSeries = new QLineSeries(m_utilizationNetworkSubPage);
     m_networkRxLineSeries->setName(QStringLiteral("下行"));
-    m_networkRxLineSeries->setColor(QColor(92, 190, 255));
+    const QColor networkRxColor(92, 190, 255);
+    const QColor networkTxColor(153, 129, 255);
+    m_networkRxLineSeries->setColor(networkRxColor);
+    m_networkRxBaselineSeries = createBaselineSeries(m_utilizationNetworkSubPage, m_historyLength);
     m_networkTxLineSeries = new QLineSeries(m_utilizationNetworkSubPage);
     m_networkTxLineSeries->setName(QStringLiteral("上行"));
-    m_networkTxLineSeries->setColor(QColor(153, 129, 255));
-    for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
-    {
-        m_networkRxLineSeries->append(indexValue, 0.0);
-        m_networkTxLineSeries->append(indexValue, 0.0);
-    }
+    m_networkTxLineSeries->setColor(networkTxColor);
+    m_networkTxBaselineSeries = createBaselineSeries(m_utilizationNetworkSubPage, m_historyLength);
+    initializeLineSeriesHistory(m_networkRxLineSeries, m_historyLength);
+    initializeLineSeriesHistory(m_networkTxLineSeries, m_historyLength);
 
     QChart* networkChart = new QChart();
-    networkChart->addSeries(m_networkRxLineSeries);
-    networkChart->addSeries(m_networkTxLineSeries);
-    networkChart->legend()->setVisible(true);
-    networkChart->legend()->setAlignment(Qt::AlignBottom);
-    networkChart->setBackgroundVisible(false);
-    networkChart->setBackgroundRoundness(0);
-    networkChart->setMargins(QMargins(0, 0, 0, 0));
-    networkChart->setTitle(QStringLiteral("网络收发速率趋势"));
+    m_networkRxAreaSeries = addFilledAreaSeries(
+        networkChart,
+        m_networkRxLineSeries,
+        m_networkRxBaselineSeries,
+        networkRxColor,
+        42);
+    m_networkTxAreaSeries = addFilledAreaSeries(
+        networkChart,
+        m_networkTxLineSeries,
+        m_networkTxBaselineSeries,
+        networkTxColor,
+        34);
+    configureUtilizationPlotChart(
+        networkChart,
+        networkRxColor,
+        QStringLiteral("网络收发速率趋势"),
+        true);
 
     m_networkUtilAxisX = new QValueAxis(networkChart);
-    m_networkUtilAxisX->setRange(0, m_historyLength);
-    m_networkUtilAxisX->setLabelsVisible(false);
-    m_networkUtilAxisX->setGridLineVisible(false);
+    configureUtilizationValueAxis(m_networkUtilAxisX, networkRxColor, 0.0, static_cast<double>(m_historyLength));
 
     m_networkUtilAxisY = new QValueAxis(networkChart);
-    m_networkUtilAxisY->setRange(0.0, 1.0);
-    m_networkUtilAxisY->setLabelsVisible(false);
-    m_networkUtilAxisY->setGridLineVisible(false);
+    configureUtilizationValueAxis(m_networkUtilAxisY, networkRxColor, 0.0, 1.0);
 
     networkChart->addAxis(m_networkUtilAxisX, Qt::AlignBottom);
     networkChart->addAxis(m_networkUtilAxisY, Qt::AlignLeft);
-    m_networkRxLineSeries->attachAxis(m_networkUtilAxisX);
-    m_networkRxLineSeries->attachAxis(m_networkUtilAxisY);
-    m_networkTxLineSeries->attachAxis(m_networkUtilAxisX);
-    m_networkTxLineSeries->attachAxis(m_networkUtilAxisY);
+    if (m_networkRxAreaSeries != nullptr)
+    {
+        m_networkRxAreaSeries->attachAxis(m_networkUtilAxisX);
+        m_networkRxAreaSeries->attachAxis(m_networkUtilAxisY);
+    }
+    if (m_networkTxAreaSeries != nullptr)
+    {
+        m_networkTxAreaSeries->attachAxis(m_networkUtilAxisX);
+        m_networkTxAreaSeries->attachAxis(m_networkUtilAxisY);
+    }
 
-    m_networkUtilChartView = createNoFrameChartView(networkChart, m_utilizationNetworkSubPage);
+    m_networkUtilChartView = createPlotBackgroundChartView(networkChart, m_utilizationNetworkSubPage);
     networkSubLayout->addWidget(m_networkUtilChartView, 1);
 
     m_networkUtilDetailLabel = new QLabel(QStringLiteral("网络参数采样中..."), m_utilizationNetworkSubPage);
@@ -2155,12 +2370,14 @@ void HardwareDock::initializeUtilizationGpuSubTab()
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
+    lockLabelHeightToFont(titleLabel, 14);
     m_gpuAdapterTitleLabel = new QLabel(QStringLiteral("适配器读取中..."), m_utilizationGpuSubPage);
     configurePersistentHeaderLabel(m_gpuAdapterTitleLabel, QSizePolicy::Ignored);
     m_gpuAdapterTitleLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_gpuAdapterTitleLabel->setStyleSheet(
         QStringLiteral("font-size:18px;font-weight:500;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
+    lockLabelHeightToFont(m_gpuAdapterTitleLabel, 6);
     headerLayout->addWidget(titleLabel, 0);
     headerLayout->addStretch(1);
     headerLayout->addWidget(m_gpuAdapterTitleLabel, 0);
@@ -2203,36 +2420,33 @@ void HardwareDock::initializeUtilizationGpuSubTab()
 
             QLineSeries* lineSeries = new QLineSeries(cellWidget);
             lineSeries->setColor(lineColor);
-            for (int historyIndex = 0; historyIndex < m_historyLength; ++historyIndex)
-            {
-                lineSeries->append(historyIndex, 0.0);
-            }
+            QLineSeries* baselineSeries = createBaselineSeries(cellWidget, m_historyLength);
+            initializeLineSeriesHistory(lineSeries, m_historyLength);
 
             QChart* chartPointer = new QChart();
-            chartPointer->addSeries(lineSeries);
-            chartPointer->legend()->hide();
-            chartPointer->setBackgroundVisible(false);
-            chartPointer->setBackgroundRoundness(0);
-            chartPointer->setMargins(QMargins(0, 0, 0, 0));
+            QAreaSeries* areaSeries = addFilledAreaSeries(
+                chartPointer,
+                lineSeries,
+                baselineSeries,
+                lineColor,
+                44);
+            configureUtilizationPlotChart(chartPointer, lineColor);
 
             QValueAxis* axisX = new QValueAxis(chartPointer);
-            axisX->setRange(0, m_historyLength);
-            axisX->setLabelsVisible(false);
-            axisX->setGridLineVisible(true);
-            axisX->setGridLineColor(QColor(lineColor.red(), lineColor.green(), lineColor.blue(), 40));
+            configureUtilizationValueAxis(axisX, lineColor, 0.0, static_cast<double>(m_historyLength));
 
             QValueAxis* axisY = new QValueAxis(chartPointer);
-            axisY->setRange(0.0, 100.0);
-            axisY->setLabelsVisible(false);
-            axisY->setGridLineVisible(true);
-            axisY->setGridLineColor(QColor(lineColor.red(), lineColor.green(), lineColor.blue(), 40));
+            configureUtilizationValueAxis(axisY, lineColor, 0.0, 100.0);
 
             chartPointer->addAxis(axisX, Qt::AlignBottom);
             chartPointer->addAxis(axisY, Qt::AlignLeft);
-            lineSeries->attachAxis(axisX);
-            lineSeries->attachAxis(axisY);
+            if (areaSeries != nullptr)
+            {
+                areaSeries->attachAxis(axisX);
+                areaSeries->attachAxis(axisY);
+            }
 
-            QChartView* chartView = createNoFrameChartView(chartPointer, cellWidget);
+            QChartView* chartView = createPlotBackgroundChartView(chartPointer, cellWidget);
             cellLayout->addWidget(chartView, 1);
             m_gpuEngineGridLayout->addWidget(cellWidget, rowIndex, columnIndex);
 
@@ -2242,6 +2456,8 @@ void HardwareDock::initializeUtilizationGpuSubTab()
             chartEntry.titleLabel = cellTitle;
             chartEntry.chartView = chartView;
             chartEntry.lineSeries = lineSeries;
+            chartEntry.baselineSeries = baselineSeries;
+            chartEntry.areaSeries = areaSeries;
             chartEntry.axisX = axisX;
             chartEntry.axisY = axisY;
             m_gpuEngineCharts.push_back(chartEntry);
@@ -2255,48 +2471,54 @@ void HardwareDock::initializeUtilizationGpuSubTab()
 
     // 显存曲线：专用显存 + 共享显存。
     m_gpuDedicatedMemoryLineSeries = new QLineSeries(m_utilizationGpuSubPage);
-    m_gpuDedicatedMemoryLineSeries->setColor(QColor(92, 167, 255));
+    const QColor gpuDedicatedMemoryColor(92, 167, 255);
+    const QColor gpuSharedMemoryColor(113, 185, 255);
+    m_gpuDedicatedMemoryLineSeries->setColor(gpuDedicatedMemoryColor);
+    m_gpuDedicatedMemoryBaselineSeries = createBaselineSeries(m_utilizationGpuSubPage, m_historyLength);
     m_gpuSharedMemoryLineSeries = new QLineSeries(m_utilizationGpuSubPage);
-    m_gpuSharedMemoryLineSeries->setColor(QColor(113, 185, 255));
-    for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
-    {
-        m_gpuDedicatedMemoryLineSeries->append(indexValue, 0.0);
-        m_gpuSharedMemoryLineSeries->append(indexValue, 0.0);
-    }
+    m_gpuSharedMemoryLineSeries->setColor(gpuSharedMemoryColor);
+    m_gpuSharedMemoryBaselineSeries = createBaselineSeries(m_utilizationGpuSubPage, m_historyLength);
+    initializeLineSeriesHistory(m_gpuDedicatedMemoryLineSeries, m_historyLength);
+    initializeLineSeriesHistory(m_gpuSharedMemoryLineSeries, m_historyLength);
 
     auto createGpuMemoryChart =
         [this](
             const QString& titleText,
             QLineSeries* lineSeries,
+            QLineSeries* baselineSeries,
+            QAreaSeries** areaSeriesOut,
+            const QColor& lineColor,
             QValueAxis** axisXOut,
             QValueAxis** axisYOut,
             QChartView** chartViewOut)
         {
             QChart* chartPointer = new QChart();
-            chartPointer->addSeries(lineSeries);
-            chartPointer->legend()->hide();
-            chartPointer->setBackgroundVisible(false);
-            chartPointer->setBackgroundRoundness(0);
-            chartPointer->setMargins(QMargins(0, 0, 0, 0));
-            chartPointer->setTitle(titleText);
+            QAreaSeries* areaSeries = addFilledAreaSeries(
+                chartPointer,
+                lineSeries,
+                baselineSeries,
+                lineColor,
+                42);
+            configureUtilizationPlotChart(chartPointer, lineColor, titleText);
 
             QValueAxis* axisX = new QValueAxis(chartPointer);
-            axisX->setRange(0, m_historyLength);
-            axisX->setLabelsVisible(false);
-            axisX->setGridLineVisible(true);
-            axisX->setGridLineColor(QColor(92, 167, 255, 35));
+            configureUtilizationValueAxis(axisX, lineColor, 0.0, static_cast<double>(m_historyLength));
 
             QValueAxis* axisY = new QValueAxis(chartPointer);
-            axisY->setRange(0.0, 1.0);
-            axisY->setLabelsVisible(false);
-            axisY->setGridLineVisible(true);
-            axisY->setGridLineColor(QColor(92, 167, 255, 35));
+            configureUtilizationValueAxis(axisY, lineColor, 0.0, 1.0);
 
             chartPointer->addAxis(axisX, Qt::AlignBottom);
             chartPointer->addAxis(axisY, Qt::AlignLeft);
-            lineSeries->attachAxis(axisX);
-            lineSeries->attachAxis(axisY);
+            if (areaSeries != nullptr)
+            {
+                areaSeries->attachAxis(axisX);
+                areaSeries->attachAxis(axisY);
+            }
 
+            if (areaSeriesOut != nullptr)
+            {
+                *areaSeriesOut = areaSeries;
+            }
             if (axisXOut != nullptr)
             {
                 *axisXOut = axisX;
@@ -2307,19 +2529,25 @@ void HardwareDock::initializeUtilizationGpuSubTab()
             }
             if (chartViewOut != nullptr)
             {
-                *chartViewOut = createNoFrameChartView(chartPointer, m_utilizationGpuSubPage);
+                *chartViewOut = createPlotBackgroundChartView(chartPointer, m_utilizationGpuSubPage);
             }
         };
 
     createGpuMemoryChart(
         QStringLiteral("专用 GPU 内存利用率"),
         m_gpuDedicatedMemoryLineSeries,
+        m_gpuDedicatedMemoryBaselineSeries,
+        &m_gpuDedicatedMemoryAreaSeries,
+        gpuDedicatedMemoryColor,
         &m_gpuDedicatedMemoryAxisX,
         &m_gpuDedicatedMemoryAxisY,
         &m_gpuDedicatedMemoryChartView);
     createGpuMemoryChart(
         QStringLiteral("共享 GPU 内存利用率"),
         m_gpuSharedMemoryLineSeries,
+        m_gpuSharedMemoryBaselineSeries,
+        &m_gpuSharedMemoryAreaSeries,
+        gpuSharedMemoryColor,
         &m_gpuSharedMemoryAxisX,
         &m_gpuSharedMemoryAxisY,
         &m_gpuSharedMemoryChartView);
@@ -2452,36 +2680,51 @@ void HardwareDock::initializeCoreCharts()
 
         chartEntry.lineSeries = new QLineSeries(chartEntry.containerWidget);
         chartEntry.lineSeries->setColor(QColor(KswordTheme::PrimaryBlueHex));
+        chartEntry.baselineSeries = new QLineSeries(chartEntry.containerWidget);
         for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
         {
             chartEntry.lineSeries->append(indexValue, 0.0);
+            chartEntry.baselineSeries->append(indexValue, 0.0);
         }
 
         QChart* chart = new QChart();
-        chart->addSeries(chartEntry.lineSeries);
+        chartEntry.areaSeries = new QAreaSeries(chartEntry.lineSeries, chartEntry.baselineSeries);
+        chartEntry.areaSeries->setColor(QColor(45, 125, 255, 46));
+        chartEntry.areaSeries->setBorderColor(QColor(KswordTheme::PrimaryBlueHex));
+        chartEntry.areaSeries->setPen(QPen(QColor(KswordTheme::PrimaryBlueHex), 1.6));
+        chart->addSeries(chartEntry.areaSeries);
         chart->legend()->hide();
         chart->setBackgroundVisible(false);
         chart->setBackgroundRoundness(0);
         chart->setMargins(QMargins(0, 0, 0, 0));
+        chart->setPlotAreaBackgroundVisible(true);
+        chart->setPlotAreaBackgroundBrush(QBrush(QColor(45, 125, 255, 18)));
+        chart->setPlotAreaBackgroundPen(QPen(QColor(45, 125, 255, 150), 1.0));
 
         chartEntry.axisX = new QValueAxis(chart);
         chartEntry.axisX->setRange(0, m_historyLength - 1);
         chartEntry.axisX->setLabelsVisible(false);
-        chartEntry.axisX->setGridLineVisible(false);
+        chartEntry.axisX->setGridLineVisible(true);
         chartEntry.axisX->setMinorGridLineVisible(false);
+        chartEntry.axisX->setLineVisible(true);
+        chartEntry.axisX->setLinePen(QPen(QColor(45, 125, 255, 140), 1.0));
+        chartEntry.axisX->setGridLinePen(QPen(QColor(45, 125, 255, 46), 1.0));
 
         chartEntry.axisY = new QValueAxis(chart);
         chartEntry.axisY->setRange(0.0, 100.0);
         chartEntry.axisY->setLabelsVisible(false);
-        chartEntry.axisY->setGridLineVisible(false);
+        chartEntry.axisY->setGridLineVisible(true);
         chartEntry.axisY->setMinorGridLineVisible(false);
+        chartEntry.axisY->setLineVisible(true);
+        chartEntry.axisY->setLinePen(QPen(QColor(45, 125, 255, 140), 1.0));
+        chartEntry.axisY->setGridLinePen(QPen(QColor(45, 125, 255, 46), 1.0));
 
         chart->addAxis(chartEntry.axisX, Qt::AlignBottom);
         chart->addAxis(chartEntry.axisY, Qt::AlignLeft);
-        chartEntry.lineSeries->attachAxis(chartEntry.axisX);
-        chartEntry.lineSeries->attachAxis(chartEntry.axisY);
+        chartEntry.areaSeries->attachAxis(chartEntry.axisX);
+        chartEntry.areaSeries->attachAxis(chartEntry.axisY);
 
-        chartEntry.chartView = createNoFrameChartView(chart, chartEntry.containerWidget);
+        chartEntry.chartView = createPlotBackgroundChartView(chart, chartEntry.containerWidget);
         containerLayout->addWidget(chartEntry.chartView, 1);
 
         const int rowIndex = coreIndex / columnCount;
@@ -2679,6 +2922,7 @@ void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* device
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
+    lockLabelHeightToFont(titleLabel, 14);
     pageLayout->addWidget(titleLabel, 0);
 
     devicePointer->summaryLabel = new QLabel(QStringLiteral("磁盘采样初始化中..."), devicePointer->pageWidget);
@@ -2689,37 +2933,52 @@ void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* device
 
     devicePointer->readLineSeries = new QLineSeries(devicePointer->pageWidget);
     devicePointer->readLineSeries->setName(QStringLiteral("读取"));
-    devicePointer->readLineSeries->setColor(QColor(80, 170, 255));
+    const QColor readColor(80, 170, 255);
+    const QColor writeColor(255, 190, 105);
+    devicePointer->readLineSeries->setColor(readColor);
+    devicePointer->readBaselineSeries = createBaselineSeries(devicePointer->pageWidget, m_historyLength);
     devicePointer->writeLineSeries = new QLineSeries(devicePointer->pageWidget);
     devicePointer->writeLineSeries->setName(QStringLiteral("写入"));
-    devicePointer->writeLineSeries->setColor(QColor(255, 190, 105));
-    for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
-    {
-        devicePointer->readLineSeries->append(indexValue, 0.0);
-        devicePointer->writeLineSeries->append(indexValue, 0.0);
-    }
+    devicePointer->writeLineSeries->setColor(writeColor);
+    devicePointer->writeBaselineSeries = createBaselineSeries(devicePointer->pageWidget, m_historyLength);
+    initializeLineSeriesHistory(devicePointer->readLineSeries, m_historyLength);
+    initializeLineSeriesHistory(devicePointer->writeLineSeries, m_historyLength);
 
     QChart* chart = new QChart();
-    chart->addSeries(devicePointer->readLineSeries);
-    chart->addSeries(devicePointer->writeLineSeries);
-    chart->legend()->setVisible(true);
-    chart->legend()->setAlignment(Qt::AlignBottom);
-    chart->setTitle(QStringLiteral("%1 读写速率趋势").arg(devicePointer->displayNameText));
+    devicePointer->readAreaSeries = addFilledAreaSeries(
+        chart,
+        devicePointer->readLineSeries,
+        devicePointer->readBaselineSeries,
+        readColor,
+        42);
+    devicePointer->writeAreaSeries = addFilledAreaSeries(
+        chart,
+        devicePointer->writeLineSeries,
+        devicePointer->writeBaselineSeries,
+        writeColor,
+        34);
+    configureUtilizationPlotChart(
+        chart,
+        readColor,
+        QStringLiteral("%1 读写速率趋势").arg(devicePointer->displayNameText),
+        true);
     devicePointer->axisX = new QValueAxis(chart);
-    devicePointer->axisX->setRange(0, m_historyLength);
-    devicePointer->axisX->setLabelsVisible(false);
-    devicePointer->axisX->setGridLineVisible(false);
+    configureUtilizationValueAxis(devicePointer->axisX, readColor, 0.0, static_cast<double>(m_historyLength));
     devicePointer->axisY = new QValueAxis(chart);
-    devicePointer->axisY->setRange(0.0, 1.0);
-    devicePointer->axisY->setLabelsVisible(false);
-    devicePointer->axisY->setGridLineVisible(false);
+    configureUtilizationValueAxis(devicePointer->axisY, readColor, 0.0, 1.0);
     chart->addAxis(devicePointer->axisX, Qt::AlignBottom);
     chart->addAxis(devicePointer->axisY, Qt::AlignLeft);
-    devicePointer->readLineSeries->attachAxis(devicePointer->axisX);
-    devicePointer->readLineSeries->attachAxis(devicePointer->axisY);
-    devicePointer->writeLineSeries->attachAxis(devicePointer->axisX);
-    devicePointer->writeLineSeries->attachAxis(devicePointer->axisY);
-    devicePointer->chartView = createNoFrameChartView(chart, devicePointer->pageWidget);
+    if (devicePointer->readAreaSeries != nullptr)
+    {
+        devicePointer->readAreaSeries->attachAxis(devicePointer->axisX);
+        devicePointer->readAreaSeries->attachAxis(devicePointer->axisY);
+    }
+    if (devicePointer->writeAreaSeries != nullptr)
+    {
+        devicePointer->writeAreaSeries->attachAxis(devicePointer->axisX);
+        devicePointer->writeAreaSeries->attachAxis(devicePointer->axisY);
+    }
+    devicePointer->chartView = createPlotBackgroundChartView(chart, devicePointer->pageWidget);
     pageLayout->addWidget(devicePointer->chartView, 1);
 
     devicePointer->detailLabel = new QLabel(QStringLiteral("磁盘参数采样中..."), devicePointer->pageWidget);
@@ -2751,6 +3010,7 @@ void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* 
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
+    lockLabelHeightToFont(titleLabel, 14);
     pageLayout->addWidget(titleLabel, 0);
 
     devicePointer->summaryLabel = new QLabel(QStringLiteral("网络采样初始化中..."), devicePointer->pageWidget);
@@ -2761,37 +3021,52 @@ void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* 
 
     devicePointer->rxLineSeries = new QLineSeries(devicePointer->pageWidget);
     devicePointer->rxLineSeries->setName(QStringLiteral("下行"));
-    devicePointer->rxLineSeries->setColor(QColor(92, 190, 255));
+    const QColor rxColor(92, 190, 255);
+    const QColor txColor(255, 190, 105);
+    devicePointer->rxLineSeries->setColor(rxColor);
+    devicePointer->rxBaselineSeries = createBaselineSeries(devicePointer->pageWidget, m_historyLength);
     devicePointer->txLineSeries = new QLineSeries(devicePointer->pageWidget);
     devicePointer->txLineSeries->setName(QStringLiteral("上行"));
-    devicePointer->txLineSeries->setColor(QColor(255, 190, 105));
-    for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
-    {
-        devicePointer->rxLineSeries->append(indexValue, 0.0);
-        devicePointer->txLineSeries->append(indexValue, 0.0);
-    }
+    devicePointer->txLineSeries->setColor(txColor);
+    devicePointer->txBaselineSeries = createBaselineSeries(devicePointer->pageWidget, m_historyLength);
+    initializeLineSeriesHistory(devicePointer->rxLineSeries, m_historyLength);
+    initializeLineSeriesHistory(devicePointer->txLineSeries, m_historyLength);
 
     QChart* chart = new QChart();
-    chart->addSeries(devicePointer->rxLineSeries);
-    chart->addSeries(devicePointer->txLineSeries);
-    chart->legend()->setVisible(true);
-    chart->legend()->setAlignment(Qt::AlignBottom);
-    chart->setTitle(QStringLiteral("%1 收发速率趋势").arg(devicePointer->displayNameText));
+    devicePointer->rxAreaSeries = addFilledAreaSeries(
+        chart,
+        devicePointer->rxLineSeries,
+        devicePointer->rxBaselineSeries,
+        rxColor,
+        42);
+    devicePointer->txAreaSeries = addFilledAreaSeries(
+        chart,
+        devicePointer->txLineSeries,
+        devicePointer->txBaselineSeries,
+        txColor,
+        34);
+    configureUtilizationPlotChart(
+        chart,
+        rxColor,
+        QStringLiteral("%1 收发速率趋势").arg(devicePointer->displayNameText),
+        true);
     devicePointer->axisX = new QValueAxis(chart);
-    devicePointer->axisX->setRange(0, m_historyLength);
-    devicePointer->axisX->setLabelsVisible(false);
-    devicePointer->axisX->setGridLineVisible(false);
+    configureUtilizationValueAxis(devicePointer->axisX, rxColor, 0.0, static_cast<double>(m_historyLength));
     devicePointer->axisY = new QValueAxis(chart);
-    devicePointer->axisY->setRange(0.0, 1.0);
-    devicePointer->axisY->setLabelsVisible(false);
-    devicePointer->axisY->setGridLineVisible(false);
+    configureUtilizationValueAxis(devicePointer->axisY, rxColor, 0.0, 1.0);
     chart->addAxis(devicePointer->axisX, Qt::AlignBottom);
     chart->addAxis(devicePointer->axisY, Qt::AlignLeft);
-    devicePointer->rxLineSeries->attachAxis(devicePointer->axisX);
-    devicePointer->rxLineSeries->attachAxis(devicePointer->axisY);
-    devicePointer->txLineSeries->attachAxis(devicePointer->axisX);
-    devicePointer->txLineSeries->attachAxis(devicePointer->axisY);
-    devicePointer->chartView = createNoFrameChartView(chart, devicePointer->pageWidget);
+    if (devicePointer->rxAreaSeries != nullptr)
+    {
+        devicePointer->rxAreaSeries->attachAxis(devicePointer->axisX);
+        devicePointer->rxAreaSeries->attachAxis(devicePointer->axisY);
+    }
+    if (devicePointer->txAreaSeries != nullptr)
+    {
+        devicePointer->txAreaSeries->attachAxis(devicePointer->axisX);
+        devicePointer->txAreaSeries->attachAxis(devicePointer->axisY);
+    }
+    devicePointer->chartView = createPlotBackgroundChartView(chart, devicePointer->pageWidget);
     pageLayout->addWidget(devicePointer->chartView, 1);
 
     devicePointer->detailLabel = new QLabel(QStringLiteral("网络参数采样中..."), devicePointer->pageWidget);
@@ -2824,12 +3099,14 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
     titleLabel->setStyleSheet(
         QStringLiteral("font-size:46px;font-weight:700;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
+    lockLabelHeightToFont(titleLabel, 14);
     devicePointer->adapterTitleLabel = new QLabel(QStringLiteral("适配器读取中..."), devicePointer->pageWidget);
     configurePersistentHeaderLabel(devicePointer->adapterTitleLabel, QSizePolicy::Ignored);
     devicePointer->adapterTitleLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     devicePointer->adapterTitleLabel->setStyleSheet(
         QStringLiteral("font-size:15px;font-weight:500;color:%1;")
         .arg(KswordTheme::TextPrimaryHex()));
+    lockLabelHeightToFont(devicePointer->adapterTitleLabel, 6);
     headerLayout->addWidget(titleLabel, 0);
     headerLayout->addStretch(1);
     headerLayout->addWidget(devicePointer->adapterTitleLabel, 0);
@@ -2876,27 +3153,29 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
 
             chartEntry.lineSeries = new QLineSeries(cellWidget);
             chartEntry.lineSeries->setColor(lineColor);
-            for (int sampleIndex = 0; sampleIndex < m_historyLength; ++sampleIndex)
-            {
-                chartEntry.lineSeries->append(sampleIndex, 0.0);
-            }
+            chartEntry.baselineSeries = createBaselineSeries(cellWidget, m_historyLength);
+            initializeLineSeriesHistory(chartEntry.lineSeries, m_historyLength);
 
             QChart* chart = new QChart();
-            chart->addSeries(chartEntry.lineSeries);
-            chart->legend()->setVisible(false);
+            chartEntry.areaSeries = addFilledAreaSeries(
+                chart,
+                chartEntry.lineSeries,
+                chartEntry.baselineSeries,
+                lineColor,
+                44);
+            configureUtilizationPlotChart(chart, lineColor);
             chartEntry.axisX = new QValueAxis(chart);
-            chartEntry.axisX->setRange(0, m_historyLength);
-            chartEntry.axisX->setLabelsVisible(false);
-            chartEntry.axisX->setGridLineVisible(false);
+            configureUtilizationValueAxis(chartEntry.axisX, lineColor, 0.0, static_cast<double>(m_historyLength));
             chartEntry.axisY = new QValueAxis(chart);
-            chartEntry.axisY->setRange(0.0, 100.0);
-            chartEntry.axisY->setLabelsVisible(false);
-            chartEntry.axisY->setGridLineVisible(false);
+            configureUtilizationValueAxis(chartEntry.axisY, lineColor, 0.0, 100.0);
             chart->addAxis(chartEntry.axisX, Qt::AlignBottom);
             chart->addAxis(chartEntry.axisY, Qt::AlignLeft);
-            chartEntry.lineSeries->attachAxis(chartEntry.axisX);
-            chartEntry.lineSeries->attachAxis(chartEntry.axisY);
-            chartEntry.chartView = createNoFrameChartView(chart, cellWidget);
+            if (chartEntry.areaSeries != nullptr)
+            {
+                chartEntry.areaSeries->attachAxis(chartEntry.axisX);
+                chartEntry.areaSeries->attachAxis(chartEntry.axisY);
+            }
+            chartEntry.chartView = createPlotBackgroundChartView(chart, cellWidget);
             cellLayout->addWidget(chartEntry.chartView, 1);
 
             devicePointer->engineGridLayout->addWidget(cellWidget, rowIndex, columnIndex);
@@ -2913,45 +3192,55 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
         [this, devicePointer](
             const QString& titleText,
             QLineSeries** seriesOut,
+            QLineSeries** baselineSeriesOut,
+            QAreaSeries** areaSeriesOut,
+            const QColor& lineColor,
             QValueAxis** axisXOut,
             QValueAxis** axisYOut,
             QChartView** chartViewOut)
         {
             *seriesOut = new QLineSeries(devicePointer->pageWidget);
-            (*seriesOut)->setColor(QColor(92, 167, 255));
-            for (int sampleIndex = 0; sampleIndex < m_historyLength; ++sampleIndex)
-            {
-                (*seriesOut)->append(sampleIndex, 0.0);
-            }
+            (*seriesOut)->setColor(lineColor);
+            *baselineSeriesOut = createBaselineSeries(devicePointer->pageWidget, m_historyLength);
+            initializeLineSeriesHistory(*seriesOut, m_historyLength);
 
             QChart* chart = new QChart();
-            chart->addSeries(*seriesOut);
-            chart->legend()->setVisible(false);
-            chart->setTitle(titleText);
+            *areaSeriesOut = addFilledAreaSeries(
+                chart,
+                *seriesOut,
+                *baselineSeriesOut,
+                lineColor,
+                42);
+            configureUtilizationPlotChart(chart, lineColor, titleText);
             *axisXOut = new QValueAxis(chart);
-            (*axisXOut)->setRange(0, m_historyLength);
-            (*axisXOut)->setLabelsVisible(false);
-            (*axisXOut)->setGridLineVisible(false);
+            configureUtilizationValueAxis(*axisXOut, lineColor, 0.0, static_cast<double>(m_historyLength));
             *axisYOut = new QValueAxis(chart);
-            (*axisYOut)->setRange(0.0, 1.0);
-            (*axisYOut)->setLabelsVisible(false);
-            (*axisYOut)->setGridLineVisible(false);
+            configureUtilizationValueAxis(*axisYOut, lineColor, 0.0, 1.0);
             chart->addAxis(*axisXOut, Qt::AlignBottom);
             chart->addAxis(*axisYOut, Qt::AlignLeft);
-            (*seriesOut)->attachAxis(*axisXOut);
-            (*seriesOut)->attachAxis(*axisYOut);
-            *chartViewOut = createNoFrameChartView(chart, devicePointer->pageWidget);
+            if (*areaSeriesOut != nullptr)
+            {
+                (*areaSeriesOut)->attachAxis(*axisXOut);
+                (*areaSeriesOut)->attachAxis(*axisYOut);
+            }
+            *chartViewOut = createPlotBackgroundChartView(chart, devicePointer->pageWidget);
         };
 
     createMemoryChart(
         QStringLiteral("专用 GPU 内存利用率"),
         &devicePointer->dedicatedMemoryLineSeries,
+        &devicePointer->dedicatedMemoryBaselineSeries,
+        &devicePointer->dedicatedMemoryAreaSeries,
+        QColor(92, 167, 255),
         &devicePointer->dedicatedMemoryAxisX,
         &devicePointer->dedicatedMemoryAxisY,
         &devicePointer->dedicatedMemoryChartView);
     createMemoryChart(
         QStringLiteral("共享 GPU 内存利用率"),
         &devicePointer->sharedMemoryLineSeries,
+        &devicePointer->sharedMemoryBaselineSeries,
+        &devicePointer->sharedMemoryAreaSeries,
+        QColor(113, 185, 255),
         &devicePointer->sharedMemoryAxisX,
         &devicePointer->sharedMemoryAxisY,
         &devicePointer->sharedMemoryChartView);
@@ -2971,6 +3260,10 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
 void HardwareDock::refreshCpuTopologyStaticInfo()
 {
     m_cpuModelText = queryCpuBrandTextByCpuid();
+    if (m_cpuModelLabel != nullptr && !m_cpuModelText.isEmpty())
+    {
+        m_cpuModelLabel->setText(m_cpuModelText);
+    }
 
     DWORD requiredBytes = 0;
     ::GetLogicalProcessorInformationEx(RelationAll, nullptr, &requiredBytes);
@@ -4293,14 +4586,16 @@ void HardwareDock::updateUtilizationView(
             .arg(formatRateText(diskReadBytesPerSec))
             .arg(formatRateText(diskWriteBytesPerSec)));
     }
-    appendGeneralSeriesPoint(
+    appendFilledSeriesPoint(
         m_diskReadLineSeries,
+        m_diskReadBaselineSeries,
         m_diskUtilAxisX,
         m_diskUtilAxisY,
         diskReadBytesPerSec,
         0.0);
-    appendGeneralSeriesPoint(
+    appendFilledSeriesPoint(
         m_diskWriteLineSeries,
+        m_diskWriteBaselineSeries,
         m_diskUtilAxisX,
         m_diskUtilAxisY,
         diskWriteBytesPerSec,
@@ -4320,14 +4615,16 @@ void HardwareDock::updateUtilizationView(
             .arg(formatRateText(networkRxBytesPerSec))
             .arg(formatRateText(networkTxBytesPerSec)));
     }
-    appendGeneralSeriesPoint(
+    appendFilledSeriesPoint(
         m_networkRxLineSeries,
+        m_networkRxBaselineSeries,
         m_networkUtilAxisX,
         m_networkUtilAxisY,
         networkRxBytesPerSec,
         0.0);
-    appendGeneralSeriesPoint(
+    appendFilledSeriesPoint(
         m_networkTxLineSeries,
+        m_networkTxBaselineSeries,
         m_networkUtilAxisX,
         m_networkUtilAxisY,
         networkTxBytesPerSec,
@@ -4368,8 +4665,9 @@ void HardwareDock::updateUtilizationView(
         {
             usagePercent = m_gpuUsageVideoDecodePercent;
         }
-        appendGeneralSeriesPoint(
+        appendFilledSeriesPoint(
             chartEntry.lineSeries,
+            chartEntry.baselineSeries,
             chartEntry.axisX,
             chartEntry.axisY,
             usagePercent,
@@ -4383,14 +4681,16 @@ void HardwareDock::updateUtilizationView(
         }
     }
 
-    appendGeneralSeriesPoint(
+    appendFilledSeriesPoint(
         m_gpuDedicatedMemoryLineSeries,
+        m_gpuDedicatedMemoryBaselineSeries,
         m_gpuDedicatedMemoryAxisX,
         m_gpuDedicatedMemoryAxisY,
         m_gpuDedicatedUsedGiB,
         0.0);
-    appendGeneralSeriesPoint(
+    appendFilledSeriesPoint(
         m_gpuSharedMemoryLineSeries,
+        m_gpuSharedMemoryBaselineSeries,
         m_gpuSharedMemoryAxisX,
         m_gpuSharedMemoryAxisY,
         m_gpuSharedUsedGiB,
@@ -4573,14 +4873,16 @@ void HardwareDock::updateDiskUtilizationDevice(
             .arg(formatRateText(sample.writeBytesPerSec)));
     }
 
-    appendGeneralSeriesPoint(
+    appendFilledSeriesPoint(
         device.readLineSeries,
+        device.readBaselineSeries,
         device.axisX,
         device.axisY,
         sample.readBytesPerSec,
         0.0);
-    appendGeneralSeriesPoint(
+    appendFilledSeriesPoint(
         device.writeLineSeries,
+        device.writeBaselineSeries,
         device.axisX,
         device.axisY,
         sample.writeBytesPerSec,
@@ -4639,14 +4941,16 @@ void HardwareDock::updateNetworkUtilizationDevice(
             .arg(formatRateText(sample.txBytesPerSec)));
     }
 
-    appendGeneralSeriesPoint(
+    appendFilledSeriesPoint(
         device.rxLineSeries,
+        device.rxBaselineSeries,
         device.axisX,
         device.axisY,
         sample.rxBytesPerSec,
         0.0);
-    appendGeneralSeriesPoint(
+    appendFilledSeriesPoint(
         device.txLineSeries,
+        device.txBaselineSeries,
         device.axisX,
         device.axisY,
         sample.txBytesPerSec,
@@ -4725,7 +5029,13 @@ void HardwareDock::updateGpuUtilizationDevice(
         {
             usagePercent = sample.usageVideoDecodePercent;
         }
-        appendGeneralSeriesPoint(chartEntry.lineSeries, chartEntry.axisX, chartEntry.axisY, usagePercent, 0.0);
+        appendFilledSeriesPoint(
+            chartEntry.lineSeries,
+            chartEntry.baselineSeries,
+            chartEntry.axisX,
+            chartEntry.axisY,
+            usagePercent,
+            0.0);
         if (chartEntry.titleLabel != nullptr)
         {
             chartEntry.titleLabel->setText(
@@ -4735,14 +5045,16 @@ void HardwareDock::updateGpuUtilizationDevice(
         }
     }
 
-    appendGeneralSeriesPoint(
+    appendFilledSeriesPoint(
         device.dedicatedMemoryLineSeries,
+        device.dedicatedMemoryBaselineSeries,
         device.dedicatedMemoryAxisX,
         device.dedicatedMemoryAxisY,
         sample.dedicatedUsedGiB,
         0.0);
-    appendGeneralSeriesPoint(
+    appendFilledSeriesPoint(
         device.sharedMemoryLineSeries,
+        device.sharedMemoryBaselineSeries,
         device.sharedMemoryAxisX,
         device.sharedMemoryAxisY,
         sample.sharedUsedGiB,
@@ -5106,15 +5418,23 @@ void HardwareDock::updateCpuDetailTable(
 
 void HardwareDock::appendCoreSeriesPoint(CoreChartEntry& chartEntry, const double usagePercent)
 {
-    if (chartEntry.lineSeries == nullptr || chartEntry.axisX == nullptr || chartEntry.axisY == nullptr)
+    if (chartEntry.lineSeries == nullptr
+        || chartEntry.baselineSeries == nullptr
+        || chartEntry.axisX == nullptr
+        || chartEntry.axisY == nullptr)
     {
         return;
     }
 
     chartEntry.lineSeries->append(m_sampleCounter, usagePercent);
+    chartEntry.baselineSeries->append(m_sampleCounter, 0.0);
     while (chartEntry.lineSeries->count() > m_historyLength)
     {
         chartEntry.lineSeries->remove(0);
+    }
+    while (chartEntry.baselineSeries->count() > m_historyLength)
+    {
+        chartEntry.baselineSeries->remove(0);
     }
 
     const QList<QPointF> pointList = chartEntry.lineSeries->points();
@@ -5168,6 +5488,60 @@ void HardwareDock::appendGeneralSeriesPoint(
     {
         axisX->setRange(firstX, lastX);
     }
+    double maxYValue = minAxisYValue + 1.0;
+    for (const QPointF& pointValue : pointList)
+    {
+        maxYValue = std::max(maxYValue, pointValue.y());
+    }
+    axisY->setRange(minAxisYValue, maxYValue * 1.15);
+}
+
+void HardwareDock::appendFilledSeriesPoint(
+    QLineSeries* lineSeries,
+    QLineSeries* baselineSeries,
+    QValueAxis* axisX,
+    QValueAxis* axisY,
+    const double sampleValue,
+    const double minAxisYValue)
+{
+    if (lineSeries == nullptr
+        || baselineSeries == nullptr
+        || axisX == nullptr
+        || axisY == nullptr)
+    {
+        return;
+    }
+
+    // lineSeries 用途：保存真实采样曲线；baselineSeries 用途：保存同一 X 坐标上的下边界。
+    lineSeries->append(m_sampleCounter, sampleValue);
+    baselineSeries->append(m_sampleCounter, minAxisYValue);
+    while (lineSeries->count() > m_historyLength)
+    {
+        lineSeries->remove(0);
+    }
+    while (baselineSeries->count() > m_historyLength)
+    {
+        baselineSeries->remove(0);
+    }
+
+    const QList<QPointF> pointList = lineSeries->points();
+    if (pointList.isEmpty())
+    {
+        return;
+    }
+
+    const double firstX = pointList.first().x();
+    const double lastX = pointList.last().x();
+    if (qFuzzyCompare(firstX, lastX))
+    {
+        axisX->setRange(firstX - 1.0, lastX + 1.0);
+    }
+    else
+    {
+        axisX->setRange(firstX, lastX);
+    }
+
+    // maxYValue 用途：按单条曲线可见历史设置纵轴上限，共轴双线稍后由 updateSharedSeriesAxisRange 再统一。
     double maxYValue = minAxisYValue + 1.0;
     for (const QPointF& pointValue : pointList)
     {

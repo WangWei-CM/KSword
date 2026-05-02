@@ -5,7 +5,7 @@
 // 作用：
 // 1) 实现硬件 Dock 下的“硬盘监控”独立页；
 // 2) 通过 Toolhelp + GetProcessIoCounters 计算每进程读写速率；
-// 3) 尝试用 ETW FileIo 提供文件级“磁盘活动”，不可用时回退按进程聚合。
+// 3) 通过 Microsoft-Windows-Kernel-File ETW 提供真正文件级“磁盘活动”。
 // ============================================================
 
 #include "../theme.h"
@@ -30,6 +30,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <deque>
 #include <string>
 #include <utility>
 
@@ -39,15 +40,8 @@
 #include <evntcons.h>
 #include <tdh.h>
 
-// 旧版 SDK 可能没有暴露全部磁盘/文件 legacy kernel flag，按 evntrace.h 兼容值兜底。
-#ifndef EVENT_TRACE_FLAG_DISK_IO
-#define EVENT_TRACE_FLAG_DISK_IO 0x00000100
-#endif
-#ifndef EVENT_TRACE_FLAG_DISK_FILE_IO
-#define EVENT_TRACE_FLAG_DISK_FILE_IO 0x00000200
-#endif
-#ifndef EVENT_TRACE_FLAG_FILE_IO
-#define EVENT_TRACE_FLAG_FILE_IO 0x02000000
+#ifndef TRACE_LEVEL_VERBOSE
+#define TRACE_LEVEL_VERBOSE 5
 #endif
 
 #pragma comment(lib, "Advapi32.lib")
@@ -57,9 +51,32 @@ namespace
 {
     constexpr double kActiveBytesPerSecondThreshold = 1.0; // kActiveBytesPerSecondThreshold：判定“活跃 IO”的最小 B/s。
     constexpr int kRefreshIntervalMs = 1000;               // kRefreshIntervalMs：页面刷新周期。
+    constexpr std::uint64_t kFileActivityHistoryWindowMs = 5000; // kFileActivityHistoryWindowMs：下方活动表保留最近 5 秒非零文件行。
     constexpr wchar_t kDiskMonitorEtwSessionName[] = L"KswordDiskMonitorFileIo"; // kDiskMonitorEtwSessionName：ETW 会话名。
     constexpr GUID kDiskMonitorEtwSessionGuid =
         { 0x2b1f0d2a, 0x0d85, 0x4cd7, { 0xa5, 0x1e, 0xf5, 0x21, 0x5c, 0x48, 0x73, 0xe2 } };
+    constexpr GUID kKernelFileProviderGuid =
+        { 0xedd08927, 0x9cc4, 0x4e65, { 0xb9, 0x70, 0xc2, 0x56, 0x0f, 0xb5, 0xc2, 0x89 } };
+    constexpr ULONGLONG kKernelFileKeywordFileName = 0x10ULL; // kKernelFileKeywordFileName：NameCreate/NameDelete 路径事件。
+    constexpr ULONGLONG kKernelFileKeywordFileIo = 0x20ULL;   // kKernelFileKeywordFileIo：通用文件 I/O 事件。
+    constexpr ULONGLONG kKernelFileKeywordOpEnd = 0x40ULL;    // kKernelFileKeywordOpEnd：OperationEnd 完成事件。
+    constexpr ULONGLONG kKernelFileKeywordCreate = 0x80ULL;   // kKernelFileKeywordCreate：Create 事件，携带 FileObject 和路径。
+    constexpr ULONGLONG kKernelFileKeywordRead = 0x100ULL;    // kKernelFileKeywordRead：Read 事件。
+    constexpr ULONGLONG kKernelFileKeywordWrite = 0x200ULL;   // kKernelFileKeywordWrite：Write 事件。
+    constexpr ULONGLONG kKernelFileKeywordMask =
+        kKernelFileKeywordFileName
+        | kKernelFileKeywordFileIo
+        | kKernelFileKeywordOpEnd
+        | kKernelFileKeywordCreate
+        | kKernelFileKeywordRead
+        | kKernelFileKeywordWrite;
+    constexpr USHORT kKernelFileTaskNameCreate = 10;          // kKernelFileTaskNameCreate：FileKey 到路径映射。
+    constexpr USHORT kKernelFileTaskCreate = 12;              // kKernelFileTaskCreate：FileObject 到路径映射。
+    constexpr USHORT kKernelFileTaskClose = 14;               // kKernelFileTaskClose：关闭文件对象时清理映射。
+    constexpr USHORT kKernelFileTaskRead = 15;                // kKernelFileTaskRead：读请求开始。
+    constexpr USHORT kKernelFileTaskWrite = 16;               // kKernelFileTaskWrite：写请求开始。
+    constexpr USHORT kKernelFileTaskOperationEnd = 24;        // kKernelFileTaskOperationEnd：请求完成，用于响应时间。
+    constexpr int kProcessIoPriorityInformationClass = 33;    // kProcessIoPriorityInformationClass：NtQueryInformationProcess(ProcessIoPriority)。
 
     // ProcessColumn：
     // - 作用：定义进程级磁盘速率表列序；
@@ -90,8 +107,8 @@ namespace
         ActivityColumnReadRate,
         ActivityColumnWriteRate,
         ActivityColumnTotalRate,
+        ActivityColumnIoPriority,
         ActivityColumnResponse,
-        ActivityColumnDetail,
         ActivityColumnCount
     };
 
@@ -143,7 +160,7 @@ namespace
             return m_handle != nullptr && m_handle != INVALID_HANDLE_VALUE;
         }
 
-        void reset(HANDLE newHandle)
+    void reset(HANDLE newHandle)
         {
             if (m_handle != nullptr && m_handle != INVALID_HANDLE_VALUE)
             {
@@ -199,6 +216,78 @@ namespace
             return QString();
         }
         return QString::fromWCharArray(pathBuffer.data(), static_cast<int>(pathLength));
+    }
+
+    // NtQueryInformationProcessFunction：
+    // - 输入：进程句柄、信息类、输出缓冲、缓冲大小和可选返回长度；
+    // - 处理：运行时绑定 ntdll!NtQueryInformationProcess，避免和 SDK winternl 声明冲突；
+    // - 返回：NTSTATUS，非负值表示查询成功。
+    using NtQueryInformationProcessFunction = LONG(WINAPI*)(
+        HANDLE ProcessHandle,
+        ULONG ProcessInformationClass,
+        PVOID ProcessInformation,
+        ULONG ProcessInformationLength,
+        PULONG ReturnLength);
+
+    // ioPriorityHintToText：
+    // - 作用：把 Windows I/O 优先级枚举转为资源监视器风格中文文本；
+    // - 处理：0/1/2/3/4 分别映射 VeryLow/Low/Normal/High/Critical；
+    // - 返回：未知枚举返回“未知(n)”。
+    QString ioPriorityHintToText(const std::uint32_t priorityValue)
+    {
+        switch (priorityValue)
+        {
+        case 0:
+            return QStringLiteral("后台");
+        case 1:
+            return QStringLiteral("低");
+        case 2:
+            return QStringLiteral("普通");
+        case 3:
+            return QStringLiteral("高");
+        case 4:
+            return QStringLiteral("关键");
+        default:
+            return QStringLiteral("未知(%1)").arg(priorityValue);
+        }
+    }
+
+    // queryProcessIoPriorityText：
+    // - 作用：查询进程级 I/O 优先级，作为文件事件缺少优先级字段时的展示值；
+    // - 处理：动态解析 NtQueryInformationProcess，避免引入额外导入库；
+    // - 返回：成功时返回中文优先级文本，失败时返回空字符串。
+    QString queryProcessIoPriorityText(const HANDLE processHandle)
+    {
+        if (processHandle == nullptr || processHandle == INVALID_HANDLE_VALUE)
+        {
+            return QString();
+        }
+
+        HMODULE ntdllModule = ::GetModuleHandleW(L"ntdll.dll");
+        if (ntdllModule == nullptr)
+        {
+            return QString();
+        }
+
+        auto* queryFunction = reinterpret_cast<NtQueryInformationProcessFunction>(
+            ::GetProcAddress(ntdllModule, "NtQueryInformationProcess"));
+        if (queryFunction == nullptr)
+        {
+            return QString();
+        }
+
+        ULONG ioPriorityValue = 0;
+        const LONG status = queryFunction(
+            processHandle,
+            kProcessIoPriorityInformationClass,
+            &ioPriorityValue,
+            sizeof(ioPriorityValue),
+            nullptr);
+        if (status < 0)
+        {
+            return QString();
+        }
+        return ioPriorityHintToText(static_cast<std::uint32_t>(ioPriorityValue));
     }
 
     // queryProcessCreateTime：
@@ -349,6 +438,18 @@ namespace
             || normalizedName == QStringLiteral("fileobjectkey");
     }
 
+    // isIrpProperty：
+    // - 作用：识别 Kernel-File 事件中的 IRP 指针；
+    // - 处理：Read/Write 与 OperationEnd 通过同一 IRP 关联开始和完成；
+    // - 返回：true 表示该字段可作为 m_pendingFileIoByIrp 的键。
+    bool isIrpProperty(const QString& normalizedName)
+    {
+        return normalizedName == QStringLiteral("irp")
+            || normalizedName == QStringLiteral("irpptr")
+            || normalizedName == QStringLiteral("irpaddress")
+            || normalizedName == QStringLiteral("irpobject");
+    }
+
     // isTransferSizeProperty：
     // - 作用：识别读写事件中的字节数属性；
     // - 处理：兼容 IoSize/TransferSize/Size/Length 等字段名；
@@ -375,6 +476,19 @@ namespace
             || normalizedName == QStringLiteral("iotime");
     }
 
+    // isIoPriorityProperty：
+    // - 作用：识别 ETW manifest 中可能直接提供的 I/O 优先级字段；
+    // - 处理：当前 Kernel-File 常见模板没有该字段，但保留兼容其它系统版本；
+    // - 返回：true 表示 numericValue 可转为优先级文本。
+    bool isIoPriorityProperty(const QString& normalizedName)
+    {
+        return normalizedName == QStringLiteral("iopriority")
+            || normalizedName == QStringLiteral("priority")
+            || normalizedName == QStringLiteral("priorityhint")
+            || normalizedName == QStringLiteral("iopriorityhint")
+            || normalizedName == QStringLiteral("ioprio");
+    }
+
     // isFileNameProperty：
     // - 作用：识别 ETW 文件名属性；
     // - 处理：Name/FileName/OpenPath 等都可能出现；
@@ -389,24 +503,116 @@ namespace
             || normalizedName == QStringLiteral("filepathname");
     }
 
-    // etwOpcodeLooksLikeRead：
-    // - 作用：通过事件名与 opcode 判断是否是读事件；
-    // - 处理：Kernel FileIo 读事件通常 event id/opcode 名带 Read；
-    // - 返回：true 表示作为读取累计。
-    bool etwOpcodeLooksLikeRead(const QString& eventNameText, const UCHAR opcodeValue)
+    // trimNtPathPrefix：
+    // - 作用：清理 ETW 路径里的 NT namespace 前缀；
+    // - 处理：把 \??\C:\x 转成 C:\x，把 \\?\C:\x 转成 C:\x；
+    // - 返回：更接近资源监视器展示习惯的路径。
+    QString trimNtPathPrefix(const QString& pathText)
     {
-        return eventNameText.contains(QStringLiteral("Read"), Qt::CaseInsensitive)
-            || opcodeValue == 67;
+        QString normalizedPath = pathText.trimmed();
+        if (normalizedPath.startsWith(QStringLiteral("\\??\\")))
+        {
+            normalizedPath = normalizedPath.mid(4);
+        }
+        if (normalizedPath.startsWith(QStringLiteral("\\\\?\\")))
+        {
+            normalizedPath = normalizedPath.mid(4);
+        }
+        return normalizedPath;
     }
 
-    // etwOpcodeLooksLikeWrite：
-    // - 作用：通过事件名与 opcode 判断是否是写事件；
-    // - 处理：Kernel FileIo 写事件通常 event id/opcode 名带 Write；
-    // - 返回：true 表示作为写入累计。
-    bool etwOpcodeLooksLikeWrite(const QString& eventNameText, const UCHAR opcodeValue)
+    // queryDosDevicePrefixMap：
+    // - 作用：枚举 DOS 盘符到 \Device\HarddiskVolumeX 的映射；
+    // - 处理：每次转换时轻量查询当前盘符，避免缓存盘符热插拔状态；
+    // - 返回：按 NT 设备名前缀长度降序排列的映射列表。
+    std::vector<std::pair<QString, QString>> queryDosDevicePrefixMap()
     {
-        return eventNameText.contains(QStringLiteral("Write"), Qt::CaseInsensitive)
-            || opcodeValue == 68;
+        static std::mutex cacheMutex;
+        static std::vector<std::pair<QString, QString>> cachedMappingList;
+        static std::uint64_t lastRefreshMs = 0;
+
+        std::lock_guard<std::mutex> cacheLock(cacheMutex);
+        const std::uint64_t nowMs = steadyTickMs();
+        if (lastRefreshMs != 0 && nowMs >= lastRefreshMs && (nowMs - lastRefreshMs) < 30000)
+        {
+            // 路径事件频率可能很高，盘符映射 30 秒刷新一次即可覆盖常见热插拔场景。
+            return cachedMappingList;
+        }
+
+        std::vector<std::pair<QString, QString>> mappingList;
+        DWORD driveMask = ::GetLogicalDrives();
+        for (wchar_t driveLetter = L'A'; driveLetter <= L'Z'; ++driveLetter)
+        {
+            if ((driveMask & (1UL << (driveLetter - L'A'))) == 0)
+            {
+                continue;
+            }
+
+            wchar_t driveName[] = { driveLetter, L':', L'\0' };
+            std::vector<wchar_t> targetBuffer(4096, L'\0');
+            const DWORD targetLength = ::QueryDosDeviceW(
+                driveName,
+                targetBuffer.data(),
+                static_cast<DWORD>(targetBuffer.size()));
+            if (targetLength == 0)
+            {
+                continue;
+            }
+
+            const QString devicePrefix = QString::fromWCharArray(targetBuffer.data()).trimmed();
+            if (devicePrefix.isEmpty())
+            {
+                continue;
+            }
+            mappingList.emplace_back(devicePrefix, QString::fromWCharArray(driveName));
+        }
+
+        std::sort(
+            mappingList.begin(),
+            mappingList.end(),
+            [](const std::pair<QString, QString>& left, const std::pair<QString, QString>& right)
+            {
+                return left.first.size() > right.first.size();
+            });
+
+        cachedMappingList = mappingList;
+        lastRefreshMs = nowMs;
+        return cachedMappingList;
+    }
+
+    // normalizeEtwFilePath：
+    // - 作用：把 Kernel-File 事件中的路径规范化为资源监视器接近的展示形态；
+    // - 处理：优先把 \Device\HarddiskVolumeX 转换为盘符路径，无法转换则保留原 NT 路径；
+    // - 返回：清理后的文件路径，输入为空时返回空字符串。
+    QString normalizeEtwFilePath(const QString& pathText)
+    {
+        QString normalizedPath = trimNtPathPrefix(pathText);
+        if (normalizedPath.isEmpty())
+        {
+            return QString();
+        }
+        if (normalizedPath.contains(QStringLiteral(":\\")))
+        {
+            return normalizedPath;
+        }
+
+        const std::vector<std::pair<QString, QString>> mappingList = queryDosDevicePrefixMap();
+        for (const auto& mapping : mappingList)
+        {
+            const QString& devicePrefix = mapping.first;
+            if (!normalizedPath.startsWith(devicePrefix, Qt::CaseInsensitive))
+            {
+                continue;
+            }
+
+            QString suffix = normalizedPath.mid(devicePrefix.size());
+            if (!suffix.startsWith(QStringLiteral("\\")) && !suffix.isEmpty())
+            {
+                suffix.prepend(QStringLiteral("\\"));
+            }
+            return mapping.second + suffix;
+        }
+        return normalizedPath;
     }
 
     // queryEventNameFromTdh：
@@ -474,7 +680,7 @@ namespace
         {
             *eventInfoBufferOut = std::move(infoBuffer);
         }
-        // manifest 不含友好名称时保留 opcode 数字，后续仍可按已知 FileIo opcode 识别读写。
+        // manifest 不含友好名称时保留 opcode 数字，便于调试未知 provider 事件。
         if (eventNameText.isEmpty())
         {
             eventNameText = QStringLiteral("Opcode%1")
@@ -599,16 +805,17 @@ void DiskMonitorPage::initializeUi()
         QStringLiteral("PID"),
         QStringLiteral("进程"),
         QStringLiteral("文件"),
-        QStringLiteral("读字节/s"),
-        QStringLiteral("写字节/s"),
-        QStringLiteral("总字节/s"),
-        QStringLiteral("响应时间"),
-        QStringLiteral("说明")
+        QStringLiteral("读(字节/秒)"),
+        QStringLiteral("写(字节/秒)"),
+        QStringLiteral("总数(字节/秒)"),
+        QStringLiteral("I/O 优先级"),
+        QStringLiteral("响应时间(ms)")
         });
     m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnPid, QHeaderView::ResizeToContents);
     m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnProcess, QHeaderView::ResizeToContents);
     m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnFile, QHeaderView::Stretch);
-    m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnDetail, QHeaderView::Stretch);
+    m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnIoPriority, QHeaderView::ResizeToContents);
+    m_activityTable->horizontalHeader()->setSectionResizeMode(ActivityColumnResponse, QHeaderView::ResizeToContents);
     m_splitter->addWidget(m_activityTable);
     m_splitter->setStretchFactor(0, 2);
     m_splitter->setStretchFactor(1, 1);
@@ -735,15 +942,16 @@ void DiskMonitorPage::refreshNow()
         const std::uint32_t etwStatus = m_fileActivityEtwLastStatus.load();
         const QString etwStateText = m_fileActivityEtwRunning.load()
             ? QStringLiteral("ETW文件级")
-            : QStringLiteral("PID聚合");
+            : QStringLiteral("文件级ETW未运行");
+        const QString statusSuffix = (!m_fileActivityEtwRunning.load() && etwStatus != ERROR_SUCCESS)
+            ? QStringLiteral("(错误:%1)").arg(etwStatus)
+            : QString();
         m_statusLabel->setText(
             QStringLiteral("最近刷新：%1，进程数：%2，活动来源：%3%4")
             .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")))
             .arg(static_cast<int>(m_lastSampleList.size()))
             .arg(etwStateText)
-            .arg((!m_fileActivityEtwRunning.load() && etwStatus != ERROR_SUCCESS)
-                ? QStringLiteral("(%1)").arg(etwStatus)
-                : QString()));
+            .arg(statusSuffix));
     }
 }
 
@@ -787,6 +995,7 @@ std::vector<DiskMonitorPage::ProcessDiskSample> DiskMonitorPage::collectProcessD
         if (processHandle.valid())
         {
             sample.processImagePath = queryProcessPath(processHandle.get());
+            sample.ioPriorityText = queryProcessIoPriorityText(processHandle.get());
             const std::uint64_t createTime100ns = queryProcessCreateTime(processHandle.get());
 
             IO_COUNTERS ioCounters{};
@@ -895,10 +1104,16 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
     m_lastFileActivityDrainMs = nowMs;
 
     std::unordered_map<std::uint32_t, QString> processNameByPid;
+    std::unordered_map<std::uint32_t, QString> processIoPriorityByPid;
     processNameByPid.reserve(sampleList.size());
+    processIoPriorityByPid.reserve(sampleList.size());
     for (const ProcessDiskSample& sample : sampleList)
     {
         processNameByPid[sample.pid] = sample.processName;
+        if (!sample.ioPriorityText.isEmpty())
+        {
+            processIoPriorityByPid[sample.pid] = sample.ioPriorityText;
+        }
     }
 
     QHash<QString, FileActivityAccumulator> activitySnapshot;
@@ -906,6 +1121,18 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
         std::lock_guard<std::mutex> lock(m_fileActivityMutex);
         activitySnapshot = m_fileActivityByKey;
         m_fileActivityByKey.clear();
+        if (!m_fileActivityEtwRunning.load())
+        {
+            // ETW 会话退出后清理跨窗口状态，避免下次启动时把旧 IRP/路径误关联到新事件。
+            m_pendingFileIoByIrp.clear();
+            m_filePathByObject.clear();
+            m_fileActivityHistory.clear();
+        }
+        else if (m_pendingFileIoByIrp.size() > 32768)
+        {
+            // 长时间未完成的 IRP 多半已经丢失完成事件，定期裁剪保护 UI 进程内存占用。
+            m_pendingFileIoByIrp.clear();
+        }
     }
 
     std::vector<FileActivitySample> resultList;
@@ -927,6 +1154,17 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
         sample.filePath = accumulator.filePath;
         sample.readBytesPerSec = static_cast<double>(accumulator.readBytes) / deltaSeconds;
         sample.writeBytesPerSec = static_cast<double>(accumulator.writeBytes) / deltaSeconds;
+        sample.ioPriorityText = !accumulator.ioPriorityText.isEmpty()
+            ? accumulator.ioPriorityText
+            : QStringLiteral("未知");
+        if (sample.ioPriorityText == QStringLiteral("未知"))
+        {
+            const auto priorityIt = processIoPriorityByPid.find(sample.pid);
+            if (priorityIt != processIoPriorityByPid.end() && !priorityIt->second.isEmpty())
+            {
+                sample.ioPriorityText = priorityIt->second;
+            }
+        }
         sample.eventCount = accumulator.eventCount;
         if (accumulator.responseCount > 0)
         {
@@ -954,6 +1192,30 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
             }
             return left.filePath < right.filePath;
         });
+
+    for (const FileActivitySample& sample : resultList)
+    {
+        if ((sample.readBytesPerSec + sample.writeBytesPerSec) <= 0.0)
+        {
+            continue;
+        }
+
+        FileActivityHistoryEntry historyEntry;
+        historyEntry.timestampMs = nowMs;
+        historyEntry.sample = sample;
+        m_fileActivityHistory.push_back(std::move(historyEntry));
+    }
+    while (!m_fileActivityHistory.empty()
+        && nowMs >= m_fileActivityHistory.front().timestampMs
+        && (nowMs - m_fileActivityHistory.front().timestampMs) > kFileActivityHistoryWindowMs)
+    {
+        m_fileActivityHistory.pop_front();
+    }
+    while (m_fileActivityHistory.size() > 2048)
+    {
+        // 极端 I/O 压力下限制 UI 历史行数，避免硬件 Dock 长时间打开造成内存增长。
+        m_fileActivityHistory.pop_front();
+    }
 
     return resultList;
 }
@@ -1067,12 +1329,44 @@ void DiskMonitorPage::updateActivityTable(const std::vector<ProcessDiskSample>& 
     }
 
     std::vector<FileActivitySample> selectedFileActivityList;
-    selectedFileActivityList.reserve(m_lastFileActivityList.size());
+    selectedFileActivityList.reserve(m_lastFileActivityList.size() + m_fileActivityHistory.size());
     for (const FileActivitySample& fileActivity : m_lastFileActivityList)
     {
         if (m_selectedPidSet.find(fileActivity.pid) != m_selectedPidSet.end())
         {
             selectedFileActivityList.push_back(fileActivity);
+        }
+    }
+    for (const FileActivityHistoryEntry& historyEntry : m_fileActivityHistory)
+    {
+        const FileActivitySample& fileActivity = historyEntry.sample;
+        if (m_selectedPidSet.find(fileActivity.pid) != m_selectedPidSet.end())
+        {
+            selectedFileActivityList.push_back(fileActivity);
+        }
+    }
+    if (!selectedFileActivityList.empty())
+    {
+        QHash<QString, FileActivitySample> deduplicatedActivityByKey;
+        for (const FileActivitySample& sample : selectedFileActivityList)
+        {
+            const QString keyText = QStringLiteral("%1|%2").arg(sample.pid).arg(sample.filePath.toLower());
+            const double sampleTotal = sample.readBytesPerSec + sample.writeBytesPerSec;
+            const auto existingIt = deduplicatedActivityByKey.constFind(keyText);
+            if (existingIt == deduplicatedActivityByKey.constEnd()
+                || sampleTotal > (existingIt.value().readBytesPerSec + existingIt.value().writeBytesPerSec))
+            {
+                deduplicatedActivityByKey.insert(keyText, sample);
+            }
+        }
+
+        selectedFileActivityList.clear();
+        selectedFileActivityList.reserve(static_cast<std::size_t>(deduplicatedActivityByKey.size()));
+        for (auto activityIt = deduplicatedActivityByKey.constBegin();
+            activityIt != deduplicatedActivityByKey.constEnd();
+            ++activityIt)
+        {
+            selectedFileActivityList.push_back(activityIt.value());
         }
     }
 
@@ -1102,9 +1396,7 @@ void DiskMonitorPage::updateActivityTable(const std::vector<ProcessDiskSample>& 
             const double totalBytesPerSec = sample.readBytesPerSec + sample.writeBytesPerSec;
             const QString responseText = sample.responseAvailable
                 ? formatMilliseconds(sample.responseTimeMs)
-                : QStringLiteral("ETW未提供");
-            const QString detailText = QStringLiteral("ETW FileIo 文件级聚合，事件数:%1")
-                .arg(sample.eventCount);
+                : QStringLiteral("N/A");
 
             setTableItemText(
                 m_activityTable,
@@ -1131,83 +1423,42 @@ void DiskMonitorPage::updateActivityTable(const std::vector<ProcessDiskSample>& 
             setTableItemText(
                 m_activityTable,
                 rowIndex,
+                ActivityColumnIoPriority,
+                createReadOnlyItem(sample.ioPriorityText.isEmpty() ? QStringLiteral("未知") : sample.ioPriorityText));
+            setTableItemText(
+                m_activityTable,
+                rowIndex,
                 ActivityColumnResponse,
                 createNumericItem(responseText, sample.responseAvailable ? sample.responseTimeMs : 0.0));
-            setTableItemText(m_activityTable, rowIndex, ActivityColumnDetail, createReadOnlyItem(detailText));
         }
 
         m_activityTable->setSortingEnabled(true);
         return;
     }
 
-    std::vector<ProcessDiskSample> selectedSampleList;
-    selectedSampleList.reserve(m_selectedPidSet.size());
-    for (const ProcessDiskSample& sample : sampleList)
-    {
-        if (m_selectedPidSet.find(sample.pid) != m_selectedPidSet.end())
-        {
-            selectedSampleList.push_back(sample);
-        }
-    }
-
-    std::sort(
-        selectedSampleList.begin(),
-        selectedSampleList.end(),
-        [](const ProcessDiskSample& left, const ProcessDiskSample& right)
-        {
-            if (!qFuzzyCompare(left.totalBytesPerSec + 1.0, right.totalBytesPerSec + 1.0))
-            {
-                return left.totalBytesPerSec > right.totalBytesPerSec;
-            }
-            return left.pid < right.pid;
-        });
-
+    // 文件级 ETW 没有抓到活动时，不再用 exe 路径伪装成文件活动。
+    // 这样用户能明确区分“最近几秒没有文件级事件”和“只采集到进程总量”。
     m_activityTable->setSortingEnabled(false);
     m_activityTable->clearContents();
-    m_activityTable->setRowCount(static_cast<int>(selectedSampleList.size()));
-
-    for (int rowIndex = 0; rowIndex < static_cast<int>(selectedSampleList.size()); ++rowIndex)
+    if (m_selectedPidSet.empty())
     {
-        const ProcessDiskSample& sample = selectedSampleList[static_cast<std::size_t>(rowIndex)];
-        const QString fileText = sample.processImagePath.isEmpty()
-            ? QStringLiteral("<按进程聚合；文件路径需 ETW FileIo 增强>")
-            : sample.processImagePath;
-        const QString detailText = sample.rateReady
-            ? QStringLiteral("线程:%1  其它IO:%2  当前为 PID 聚合视图；物理磁盘落盘需 ETW 校准")
-                .arg(sample.threadCount)
-                .arg(formatBytesPerSecond(sample.otherBytesPerSec))
-            : QStringLiteral("等待下一轮采样建立速率基线");
-
-        setTableItemText(
-            m_activityTable,
-            rowIndex,
-            ActivityColumnPid,
-            createNumericItem(QString::number(sample.pid), static_cast<double>(sample.pid)));
-        setTableItemText(m_activityTable, rowIndex, ActivityColumnProcess, createReadOnlyItem(sample.processName));
-        setTableItemText(m_activityTable, rowIndex, ActivityColumnFile, createReadOnlyItem(fileText));
-        setTableItemText(
-            m_activityTable,
-            rowIndex,
-            ActivityColumnReadRate,
-            createNumericItem(formatBytesPerSecond(sample.readBytesPerSec), sample.readBytesPerSec));
-        setTableItemText(
-            m_activityTable,
-            rowIndex,
-            ActivityColumnWriteRate,
-            createNumericItem(formatBytesPerSecond(sample.writeBytesPerSec), sample.writeBytesPerSec));
-        setTableItemText(
-            m_activityTable,
-            rowIndex,
-            ActivityColumnTotalRate,
-            createNumericItem(formatBytesPerSecond(sample.totalBytesPerSec), sample.totalBytesPerSec));
-        setTableItemText(
-            m_activityTable,
-            rowIndex,
-            ActivityColumnResponse,
-            createNumericItem(formatMilliseconds(sample.responseTimeMs), sample.responseTimeMs));
-        setTableItemText(m_activityTable, rowIndex, ActivityColumnDetail, createReadOnlyItem(detailText));
+        m_activityTable->setRowCount(0);
+        m_activityTable->setSortingEnabled(true);
+        return;
     }
 
+    m_activityTable->setRowCount(1);
+    const QString stateText = m_fileActivityEtwRunning.load()
+        ? QStringLiteral("<最近 5 秒未捕获到所选 PID 的文件级 Read/Write 事件>")
+        : QStringLiteral("<文件级 ETW 未运行；请用管理员权限启动以捕获 PID 对应文件活动>");
+    setTableItemText(m_activityTable, 0, ActivityColumnPid, createReadOnlyItem(QStringLiteral("-")));
+    setTableItemText(m_activityTable, 0, ActivityColumnProcess, createReadOnlyItem(QStringLiteral("-")));
+    setTableItemText(m_activityTable, 0, ActivityColumnFile, createReadOnlyItem(stateText));
+    setTableItemText(m_activityTable, 0, ActivityColumnReadRate, createNumericItem(QStringLiteral("0 B/s"), 0.0));
+    setTableItemText(m_activityTable, 0, ActivityColumnWriteRate, createNumericItem(QStringLiteral("0 B/s"), 0.0));
+    setTableItemText(m_activityTable, 0, ActivityColumnTotalRate, createNumericItem(QStringLiteral("0 B/s"), 0.0));
+    setTableItemText(m_activityTable, 0, ActivityColumnIoPriority, createReadOnlyItem(QStringLiteral("未知")));
+    setTableItemText(m_activityTable, 0, ActivityColumnResponse, createNumericItem(QStringLiteral("N/A"), 0.0));
     m_activityTable->setSortingEnabled(true);
 }
 
@@ -1230,9 +1481,9 @@ void DiskMonitorPage::updateSummaryLabels(const std::vector<ProcessDiskSample>& 
     {
         const QString modeText = m_fileActivityEtwRunning.load()
             ? QStringLiteral("ETW文件级")
-            : QStringLiteral("按 PID 聚合");
+            : QStringLiteral("文件级ETW未运行");
         m_summaryLabel->setText(
-            QStringLiteral("读: %1    写: %2    活跃进程: %3    勾选进程: %4    模式: %5")
+            QStringLiteral("进程读: %1    进程写: %2    活跃进程: %3    勾选进程: %4    磁盘活动: %5")
             .arg(formatBytesPerSecond(totalReadBytesPerSec))
             .arg(formatBytesPerSecond(totalWriteBytesPerSec))
             .arg(activeProcessCount)
@@ -1296,12 +1547,10 @@ void DiskMonitorPage::startFileActivityEtw()
         properties->Wnode.BufferSize = propertyBufferSize;
         properties->Wnode.ClientContext = 2;
         properties->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-        // 使用私有 GUID + SYSTEM_LOGGER_MODE，避免和全局 SystemTraceControlGuid 会话互相抢占。
+        // 私有实时会话只作为承载容器，Kernel-File provider 通过 EnableTraceEx2 显式启用。
         properties->Wnode.Guid = kDiskMonitorEtwSessionGuid;
-        properties->LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE;
+        properties->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
         properties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
-        properties->EnableFlags =
-            EVENT_TRACE_FLAG_FILE_IO | EVENT_TRACE_FLAG_DISK_FILE_IO | EVENT_TRACE_FLAG_DISK_IO;
         properties->FlushTimer = 1;
         properties->BufferSize = 256;
         properties->MinimumBuffers = 16;
@@ -1328,6 +1577,24 @@ void DiskMonitorPage::startFileActivityEtw()
         m_fileActivityEtwSessionHandle.store(static_cast<std::uint64_t>(sessionHandle));
         m_fileActivityEtwRunning.store(true);
 
+        const ULONG enableStatus = ::EnableTraceEx2(
+            sessionHandle,
+            &kKernelFileProviderGuid,
+            EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+            TRACE_LEVEL_VERBOSE,
+            kKernelFileKeywordMask,
+            0,
+            0,
+            nullptr);
+        if (enableStatus != ERROR_SUCCESS)
+        {
+            m_fileActivityEtwLastStatus.store(enableStatus);
+            m_fileActivityEtwRunning.store(false);
+            m_fileActivityEtwSessionHandle.store(0);
+            ::ControlTraceW(sessionHandle, loggerNamePointer, properties, EVENT_TRACE_CONTROL_STOP);
+            return;
+        }
+
         EVENT_TRACE_LOGFILEW traceLogFile{};
         traceLogFile.LoggerName = loggerNamePointer;
         traceLogFile.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
@@ -1347,7 +1614,8 @@ void DiskMonitorPage::startFileActivityEtw()
 
         m_fileActivityEtwTraceHandle.store(static_cast<std::uint64_t>(traceHandle));
         const ULONG processStatus = ::ProcessTrace(&traceHandle, 1, nullptr, nullptr);
-        m_fileActivityEtwLastStatus.store(processStatus);
+        m_fileActivityEtwLastStatus.store(
+            m_fileActivityEtwStopRequested.load() ? ERROR_SUCCESS : processStatus);
 
         const std::uint64_t ownedTraceHandle = m_fileActivityEtwTraceHandle.exchange(0);
         if (ownedTraceHandle != 0)
@@ -1444,37 +1712,40 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
     }
 
     std::vector<unsigned char> eventInfoBuffer;
-    const QString eventNameText = queryEventNameFromTdh(eventRecord, &eventInfoBuffer);
+    queryEventNameFromTdh(eventRecord, &eventInfoBuffer);
     if (eventInfoBuffer.empty())
     {
         return;
     }
 
-    const bool isReadEvent = etwOpcodeLooksLikeRead(
-        eventNameText,
-        eventRecord->EventHeader.EventDescriptor.Opcode);
-    const bool isWriteEvent = etwOpcodeLooksLikeWrite(
-        eventNameText,
-        eventRecord->EventHeader.EventDescriptor.Opcode);
-    const bool isNameEvent =
-        eventNameText.contains(QStringLiteral("Name"), Qt::CaseInsensitive)
-        || eventNameText.contains(QStringLiteral("Create"), Qt::CaseInsensitive)
-        || eventNameText.contains(QStringLiteral("File"), Qt::CaseInsensitive);
-    if (!isReadEvent && !isWriteEvent && !isNameEvent)
+    const USHORT taskValue = eventRecord->EventHeader.EventDescriptor.Task;
+    const USHORT eventIdValue = eventRecord->EventHeader.EventDescriptor.Id;
+    const bool isNameEvent = taskValue == kKernelFileTaskNameCreate || eventIdValue == kKernelFileTaskNameCreate;
+    const bool isCreateEvent = taskValue == kKernelFileTaskCreate || eventIdValue == kKernelFileTaskCreate;
+    const bool isCloseEvent = taskValue == kKernelFileTaskClose || eventIdValue == kKernelFileTaskClose;
+    const bool isReadEvent = taskValue == kKernelFileTaskRead || eventIdValue == kKernelFileTaskRead;
+    const bool isWriteEvent = taskValue == kKernelFileTaskWrite || eventIdValue == kKernelFileTaskWrite;
+    const bool isOperationEndEvent =
+        taskValue == kKernelFileTaskOperationEnd || eventIdValue == kKernelFileTaskOperationEnd;
+    if (!isNameEvent && !isCreateEvent && !isCloseEvent && !isReadEvent && !isWriteEvent && !isOperationEndEvent)
     {
         return;
     }
 
     auto* eventInfo = reinterpret_cast<PTRACE_EVENT_INFO>(eventInfoBuffer.data());
     std::uint64_t fileObjectValue = 0;
+    std::uint64_t fileKeyValue = 0;
+    std::uint64_t irpValue = 0;
     std::uint64_t transferSize = 0;
     std::uint64_t durationValue = 0;
+    std::uint64_t ioPriorityValue = 0;
     QString filePathText;
+    QString ioPriorityText;
 
     for (ULONG indexValue = 0; indexValue < eventInfo->TopLevelPropertyCount; ++indexValue)
     {
         const EVENT_PROPERTY_INFO& propertyInfo = eventInfo->EventPropertyInfoArray[indexValue];
-        if ((propertyInfo.Flags & PropertyStruct) != 0)
+        if ((propertyInfo.Flags & PropertyStruct) != 0 || propertyInfo.NameOffset == 0)
         {
             continue;
         }
@@ -1498,7 +1769,7 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
             1,
             &descriptor,
             &propertySize);
-        if (status != ERROR_SUCCESS || propertySize == 0)
+        if (status != ERROR_SUCCESS || propertySize == 0 || propertySize > 65536)
         {
             continue;
         }
@@ -1525,9 +1796,11 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
                 static_cast<int>(propertyBuffer.size() / sizeof(wchar_t)));
             if (isFileNameProperty(normalizedName)
                 || stringValue.startsWith(QStringLiteral("\\"))
-                || stringValue.contains(QStringLiteral(":\\")))
+                || stringValue.contains(QStringLiteral(":\\"))
+                || stringValue.startsWith(QStringLiteral("\\\\?\\"))
+                || stringValue.startsWith(QStringLiteral("\\??\\")))
             {
-                filePathText = stringValue;
+                filePathText = normalizeEtwFilePath(stringValue);
             }
             continue;
         }
@@ -1556,13 +1829,20 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
             }
         }
 
-        if (numericValue == 0)
-        {
-            continue;
-        }
         if (isFileObjectProperty(normalizedName))
         {
-            fileObjectValue = numericValue;
+            if (normalizedName == QStringLiteral("filekey") || normalizedName == QStringLiteral("fileid"))
+            {
+                fileKeyValue = numericValue;
+            }
+            else
+            {
+                fileObjectValue = numericValue;
+            }
+        }
+        else if (isIrpProperty(normalizedName))
+        {
+            irpValue = numericValue;
         }
         else if (isTransferSizeProperty(normalizedName))
         {
@@ -1572,25 +1852,112 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
         {
             durationValue = numericValue;
         }
+        else if (isIoPriorityProperty(normalizedName))
+        {
+            ioPriorityValue = numericValue;
+            ioPriorityText = ioPriorityHintToText(static_cast<std::uint32_t>(numericValue));
+        }
     }
 
     std::lock_guard<std::mutex> lock(m_fileActivityMutex);
-    if (!filePathText.isEmpty() && fileObjectValue != 0)
+    if (isOperationEndEvent)
     {
-        m_filePathByObject[fileObjectValue] = filePathText;
+        if (irpValue == 0)
+        {
+            return;
+        }
+
+        const auto pendingIt = m_pendingFileIoByIrp.find(irpValue);
+        if (pendingIt == m_pendingFileIoByIrp.end())
+        {
+            return;
+        }
+
+        const PendingFileIoOperation pendingOperation = pendingIt->second;
+        m_pendingFileIoByIrp.erase(pendingIt);
+        if (pendingOperation.filePath.isEmpty())
+        {
+            return;
+        }
+
+        const QString keyText = QStringLiteral("%1|%2")
+            .arg(pendingOperation.pid)
+            .arg(pendingOperation.filePath.toLower());
+        FileActivityAccumulator& accumulator = m_fileActivityByKey[keyText];
+        accumulator.pid = pendingOperation.pid;
+        accumulator.filePath = pendingOperation.filePath;
+        accumulator.readBytes += pendingOperation.readBytes;
+        accumulator.writeBytes += pendingOperation.writeBytes;
+        if (!pendingOperation.ioPriorityText.isEmpty())
+        {
+            accumulator.ioPriorityText = pendingOperation.ioPriorityText;
+        }
+        if (durationValue > 0)
+        {
+            // 部分系统版本直接提供 Duration/IoTime，按 100ns 转毫秒。
+            accumulator.responseMsTotal += static_cast<double>(durationValue) / 10000.0;
+            ++accumulator.responseCount;
+        }
+        else if (pendingOperation.startTime100ns != 0
+            && eventRecord->EventHeader.TimeStamp.QuadPart > static_cast<LONGLONG>(pendingOperation.startTime100ns))
+        {
+            // Kernel-File 开始/完成事件同属当前实时会话，ClientContext=2 时 TimeStamp 为 100ns。
+            const std::uint64_t delta100ns =
+                static_cast<std::uint64_t>(eventRecord->EventHeader.TimeStamp.QuadPart)
+                - pendingOperation.startTime100ns;
+            accumulator.responseMsTotal += static_cast<double>(delta100ns) / 10000.0;
+            ++accumulator.responseCount;
+        }
+        accumulator.eventCount += pendingOperation.eventCount == 0 ? 1 : pendingOperation.eventCount;
+        return;
+    }
+
+    if (!filePathText.isEmpty())
+    {
+        if (fileObjectValue != 0)
+        {
+            m_filePathByObject[fileObjectValue] = filePathText;
+        }
+        if (fileKeyValue != 0)
+        {
+            m_filePathByObject[fileKeyValue] = filePathText;
+        }
         if (m_filePathByObject.size() > 65536)
         {
             // 文件对象映射只是辅助把后续 Read/Write 关联到路径，过大时清理可接受。
             m_filePathByObject.clear();
-            m_filePathByObject[fileObjectValue] = filePathText;
+            if (fileObjectValue != 0)
+            {
+                m_filePathByObject[fileObjectValue] = filePathText;
+            }
+            if (fileKeyValue != 0)
+            {
+                m_filePathByObject[fileKeyValue] = filePathText;
+            }
         }
     }
-    if (filePathText.isEmpty() && fileObjectValue != 0)
+    if (isCloseEvent && fileObjectValue != 0)
     {
-        const auto pathIt = m_filePathByObject.find(fileObjectValue);
-        if (pathIt != m_filePathByObject.end())
+        m_filePathByObject.erase(fileObjectValue);
+        return;
+    }
+    if (filePathText.isEmpty())
+    {
+        if (fileObjectValue != 0)
         {
-            filePathText = pathIt->second;
+            const auto objectPathIt = m_filePathByObject.find(fileObjectValue);
+            if (objectPathIt != m_filePathByObject.end())
+            {
+                filePathText = objectPathIt->second;
+            }
+        }
+        if (filePathText.isEmpty() && fileKeyValue != 0)
+        {
+            const auto keyPathIt = m_filePathByObject.find(fileKeyValue);
+            if (keyPathIt != m_filePathByObject.end())
+            {
+                filePathText = keyPathIt->second;
+            }
         }
     }
     if (filePathText.isEmpty() || (!isReadEvent && !isWriteEvent))
@@ -1599,6 +1966,28 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
     }
 
     const std::uint32_t pid = static_cast<std::uint32_t>(eventRecord->EventHeader.ProcessId);
+    if (irpValue != 0)
+    {
+        PendingFileIoOperation& pendingOperation = m_pendingFileIoByIrp[irpValue];
+        pendingOperation.pid = pid;
+        pendingOperation.filePath = filePathText;
+        pendingOperation.ioPriorityText = ioPriorityText;
+        pendingOperation.readBytes = isReadEvent ? transferSize : 0;
+        pendingOperation.writeBytes = isWriteEvent ? transferSize : 0;
+        pendingOperation.eventCount = 1;
+        pendingOperation.startTime100ns =
+            eventRecord->EventHeader.TimeStamp.QuadPart > 0
+            ? static_cast<std::uint64_t>(eventRecord->EventHeader.TimeStamp.QuadPart)
+            : 0;
+        if (m_pendingFileIoByIrp.size() > 65536)
+        {
+            // OperationEnd 丢失或系统负载很高时避免未完成 IRP 缓存无限增长。
+            m_pendingFileIoByIrp.clear();
+        }
+        return;
+    }
+
+    // 少数 provider 版本或异常事件可能没有 IRP，此时退化为开始事件即时计数。
     const QString keyText = QStringLiteral("%1|%2").arg(pid).arg(filePathText.toLower());
     FileActivityAccumulator& accumulator = m_fileActivityByKey[keyText];
     accumulator.pid = pid;
@@ -1611,11 +2000,13 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
     {
         accumulator.writeBytes += transferSize;
     }
-    if (durationValue > 0)
+    if (!ioPriorityText.isEmpty())
     {
-        // 多数内核 ETW 时间字段按 100ns 表示；若系统版本返回其它单位，仍仅作为近似展示。
-        accumulator.responseMsTotal += static_cast<double>(durationValue) / 10000.0;
-        ++accumulator.responseCount;
+        accumulator.ioPriorityText = ioPriorityText;
+    }
+    if (ioPriorityValue != 0 && accumulator.ioPriorityText.isEmpty())
+    {
+        accumulator.ioPriorityText = ioPriorityHintToText(static_cast<std::uint32_t>(ioPriorityValue));
     }
     ++accumulator.eventCount;
 }

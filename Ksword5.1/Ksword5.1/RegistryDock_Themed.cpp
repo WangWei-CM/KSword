@@ -45,6 +45,8 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -266,6 +268,120 @@ namespace
             parts << QStringLiteral("...");
         }
         return parts.join(' ');
+    }
+
+    // formatNtStatus：把 R0 返回的 NTSTATUS 格式化成固定宽度十六进制。
+    QString formatNtStatus(const long statusValue)
+    {
+        return QStringLiteral("0x%1")
+            .arg(static_cast<qulonglong>(static_cast<std::uint32_t>(statusValue)), 8, 16, QLatin1Char('0'))
+            .toUpper();
+    }
+
+    // registryDataToByteArray：
+    // - 作用：把 ArkDriverClient 的字节向量转换为 Qt 原始数据；
+    // - 返回：QByteArray，空向量返回空数组。
+    QByteArray registryDataToByteArray(const std::vector<std::uint8_t>& dataBytes)
+    {
+        if (dataBytes.empty())
+        {
+            return QByteArray();
+        }
+        return QByteArray(
+            reinterpret_cast<const char*>(dataBytes.data()),
+            static_cast<int>(dataBytes.size()));
+    }
+
+    // byteArrayToRegistryData：
+    // - 作用：把 Qt 原始数据转换为 R0 协议需要的 std::vector<uint8_t>；
+    // - 返回：逐字节复制后的向量。
+    std::vector<std::uint8_t> byteArrayToRegistryData(const QByteArray& rawData)
+    {
+        if (rawData.isEmpty())
+        {
+            return {};
+        }
+        const auto* begin = reinterpret_cast<const std::uint8_t*>(rawData.constData());
+        return std::vector<std::uint8_t>(begin, begin + rawData.size());
+    }
+
+    // registryIoFailureText：
+    // - 作用：把 DeviceIoControl 层失败转换为用户可读文本；
+    // - 返回：包含 Win32 错误、NTSTATUS 和 ArkDriverClient 详情。
+    QString registryIoFailureText(const QString& actionText, const ksword::ark::IoResult& ioResult)
+    {
+        return QStringLiteral("%1失败：驱动通信失败，Win32=%2，NTSTATUS=%3，详情=%4")
+            .arg(actionText)
+            .arg(ioResult.win32Error)
+            .arg(formatNtStatus(ioResult.ntStatus))
+            .arg(QString::fromStdString(ioResult.message));
+    }
+
+    // registryReadFailureText：
+    // - 作用：把 R0 读取失败转换为统一错误文本；
+    // - 返回：包含聚合状态和底层 Zw* 状态。
+    QString registryReadFailureText(const QString& actionText, const ksword::ark::RegistryReadResult& result)
+    {
+        if (!result.io.ok)
+        {
+            return registryIoFailureText(actionText, result.io);
+        }
+        return QStringLiteral("%1失败：R0状态=%2，NTSTATUS=%3，详情=%4")
+            .arg(actionText)
+            .arg(result.status)
+            .arg(formatNtStatus(result.lastStatus))
+            .arg(QString::fromStdString(result.io.message));
+    }
+
+    // registryEnumFailureText：
+    // - 作用：把 R0 枚举失败转换为统一错误文本；
+    // - 返回：包含聚合状态、NTSTATUS 和通信详情。
+    QString registryEnumFailureText(const QString& actionText, const ksword::ark::RegistryEnumResult& result)
+    {
+        if (!result.io.ok)
+        {
+            return registryIoFailureText(actionText, result.io);
+        }
+        return QStringLiteral("%1失败：R0状态=%2，NTSTATUS=%3，详情=%4")
+            .arg(actionText)
+            .arg(result.status)
+            .arg(formatNtStatus(result.lastStatus))
+            .arg(QString::fromStdString(result.io.message));
+    }
+
+    // registryOperationFailureText：
+    // - 作用：把 R0 写操作失败转换为统一错误文本；
+    // - 返回：包含操作状态、NTSTATUS 和通信详情。
+    QString registryOperationFailureText(const QString& actionText, const ksword::ark::RegistryOperationResult& result)
+    {
+        if (!result.io.ok)
+        {
+            return registryIoFailureText(actionText, result.io);
+        }
+        return QStringLiteral("%1失败：R0状态=%2，NTSTATUS=%3，详情=%4")
+            .arg(actionText)
+            .arg(result.status)
+            .arg(formatNtStatus(result.lastStatus))
+            .arg(QString::fromStdString(result.io.message));
+    }
+
+    // registryEnumUsable：
+    // - 作用：判断 R0 枚举响应是否可用于 UI 展示；
+    // - 返回：成功和部分成功均可展示，硬失败不可展示。
+    bool registryEnumUsable(const ksword::ark::RegistryEnumResult& result)
+    {
+        return result.io.ok &&
+            (result.status == KSWORD_ARK_REGISTRY_ENUM_STATUS_SUCCESS ||
+                result.status == KSWORD_ARK_REGISTRY_ENUM_STATUS_PARTIAL);
+    }
+
+    // registryOperationSucceeded：
+    // - 作用：判断 R0 写操作是否完成；
+    // - 返回：通信成功且聚合状态为 SUCCESS。
+    bool registryOperationSucceeded(const ksword::ark::RegistryOperationResult& result)
+    {
+        return result.io.ok &&
+            result.status == KSWORD_ARK_REGISTRY_OPERATION_STATUS_SUCCESS;
     }
 
     // NewRegistryValueInput 作用：
@@ -682,7 +798,7 @@ void RegistryDock::initializeUi()
     m_newValueButton = new QPushButton(QIcon(":/Icon/process_details.svg"), QString(), m_toolBarWidget);
     m_renameButton = new QPushButton(QIcon(":/Icon/process_priority.svg"), QString(), m_toolBarWidget);
     m_deleteButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), QString(), m_toolBarWidget);
-    m_importButton = new QPushButton(QIcon(":/Icon/process_resume.svg"), QString(), m_toolBarWidget);
+    m_importButton = new QPushButton(QIcon(":/Icon/reg_import.svg"), QString(), m_toolBarWidget);
     m_exportButton = new QPushButton(QIcon(":/Icon/log_export.svg"), QString(), m_toolBarWidget);
     m_searchButton = new QPushButton(QIcon(":/Icon/process_start.svg"), QString(), m_toolBarWidget);
     m_stopSearchButton = new QPushButton(QIcon(":/Icon/process_pause.svg"), QString(), m_toolBarWidget);
@@ -710,6 +826,11 @@ void RegistryDock::initializeUi()
     m_pathEdit->setStyleSheet(blueInputStyle());
     m_pathEdit->setPlaceholderText(QStringLiteral("输入路径后回车，例如 HKEY_LOCAL_MACHINE\\SOFTWARE"));
 
+    m_driverRegistryModeLabel = new QLabel(m_toolBarWidget);
+    m_driverRegistryModeLabel->setMinimumWidth(118);
+    m_driverRegistryModeLabel->setAlignment(Qt::AlignCenter);
+    m_driverRegistryModeLabel->setToolTip(QStringLiteral("R0 在线时，本页左侧展开、右侧读取、重命名、写入和删除均优先通过驱动完成。"));
+
     m_searchEdit = new QLineEdit(m_toolBarWidget);
     m_searchEdit->setStyleSheet(blueInputStyle());
     m_searchEdit->setPlaceholderText(QStringLiteral("搜索键/值/数据"));
@@ -725,6 +846,7 @@ void RegistryDock::initializeUi()
     m_toolBarLayout->addWidget(m_importButton);
     m_toolBarLayout->addWidget(m_exportButton);
     m_toolBarLayout->addWidget(m_pathEdit, 1);
+    m_toolBarLayout->addWidget(m_driverRegistryModeLabel, 0);
     m_toolBarLayout->addWidget(m_searchEdit, 0);
     m_toolBarLayout->addWidget(m_searchButton);
     m_toolBarLayout->addWidget(m_stopSearchButton);
@@ -791,6 +913,7 @@ void RegistryDock::initializeUi()
     m_searchFlushTimer = new QTimer(this);
     m_searchFlushTimer->setInterval(100);
     m_stopSearchButton->setEnabled(false);
+    refreshRegistryDriverModeIndicator();
 }
 
 void RegistryDock::initializeConnections()
@@ -1046,6 +1169,530 @@ bool RegistryDock::writeRegistryValue(HKEY root, const QString& subPath, const Q
     return true;
 }
 
+void RegistryDock::refreshRegistryDriverModeIndicator()
+{
+    // 作用：刷新路径输入栏旁边的 R0 注册表读写标识。
+    // 返回：无；仅更新 QLabel 文本、颜色与提示。
+    if (m_driverRegistryModeLabel == nullptr)
+    {
+        return;
+    }
+
+    const bool enabled = shouldUseRegistryR0();
+    if (enabled)
+    {
+        m_driverRegistryModeLabel->setText(QStringLiteral("R0读写: 开启"));
+        m_driverRegistryModeLabel->setStyleSheet(QStringLiteral(
+            "QLabel{border:1px solid #2E7D32;border-radius:3px;"
+            "background:rgba(46,125,50,0.16);color:#2E7D32;padding:2px 6px;font-weight:600;}"));
+        m_driverRegistryModeLabel->setToolTip(QStringLiteral("驱动设备在线：注册表浏览和编辑将优先使用 R0。"));
+        return;
+    }
+
+    m_driverRegistryModeLabel->setText(QStringLiteral("R0读写: 关闭"));
+    m_driverRegistryModeLabel->setStyleSheet(QStringLiteral(
+        "QLabel{border:1px solid #9E9E9E;border-radius:3px;"
+        "background:rgba(158,158,158,0.14);color:#757575;padding:2px 6px;font-weight:600;}"));
+    m_driverRegistryModeLabel->setToolTip(QStringLiteral("驱动设备未在线或不可打开：注册表操作回退到 Win32 API。"));
+}
+
+bool RegistryDock::shouldUseRegistryR0() const
+{
+    // 作用：通过 ArkDriverClient 打开设备来判断驱动是否在线。
+    // 返回：true 表示后续注册表操作应走 R0；false 表示使用 Win32 回退。
+    const ksword::ark::DriverClient driverClient;
+    ksword::ark::DriverHandle handle = driverClient.open(GENERIC_READ | GENERIC_WRITE);
+    return handle.isValid();
+}
+
+bool RegistryDock::readRegistryValueAny(
+    const QString& keyPath,
+    const QString& valueName,
+    DWORD* typeOut,
+    QByteArray* dataOut,
+    QString* errorTextOut)
+{
+    // 作用：封装注册表值读取策略，R0 在线时不再通过 Win32 读取。
+    // 返回：读取成功返回 true，并填写 typeOut/dataOut。
+    if (typeOut == nullptr || dataOut == nullptr)
+    {
+        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("读取参数无效。");
+        return false;
+    }
+    if (errorTextOut != nullptr) errorTextOut->clear();
+
+    if (shouldUseRegistryR0())
+    {
+        const QString kernelPath = buildKernelRegistryPath(keyPath);
+        if (kernelPath.isEmpty())
+        {
+            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("当前注册表路径无法转换为内核路径。");
+            return false;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::RegistryReadResult readResult = driverClient.readRegistryValue(
+            kernelPath.toStdWString(),
+            trimDefaultValueName(valueName).toStdWString(),
+            KSWORD_ARK_REGISTRY_DATA_MAX_BYTES);
+        if (readResult.io.ok && readResult.status == KSWORD_ARK_REGISTRY_READ_STATUS_SUCCESS)
+        {
+            *typeOut = static_cast<DWORD>(readResult.valueType);
+            *dataOut = registryDataToByteArray(readResult.data);
+            return true;
+        }
+
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = registryReadFailureText(QStringLiteral("R0读取注册表值"), readResult);
+        }
+        return false;
+    }
+
+    HKEY root = nullptr;
+    QString subPath;
+    if (!parseRegistryPath(keyPath, &root, &subPath))
+    {
+        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("注册表路径无效：%1").arg(keyPath);
+        return false;
+    }
+    return readRegistryValueRaw(root, subPath, valueName, typeOut, dataOut, errorTextOut);
+}
+
+bool RegistryDock::writeRegistryValueAny(
+    const QString& keyPath,
+    const QString& valueName,
+    DWORD valueType,
+    const QByteArray& rawData,
+    QString* errorTextOut)
+{
+    // 作用：封装注册表值写入策略，R0 在线时全部通过驱动执行。
+    // 返回：写入成功返回 true。
+    if (errorTextOut != nullptr) errorTextOut->clear();
+
+    if (shouldUseRegistryR0())
+    {
+        const QString kernelPath = buildKernelRegistryPath(keyPath);
+        if (kernelPath.isEmpty())
+        {
+            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("当前注册表路径无法转换为内核路径。");
+            return false;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::RegistryOperationResult operationResult = driverClient.setRegistryValue(
+            kernelPath.toStdWString(),
+            trimDefaultValueName(valueName).toStdWString(),
+            static_cast<std::uint32_t>(valueType),
+            byteArrayToRegistryData(rawData));
+        if (registryOperationSucceeded(operationResult))
+        {
+            return true;
+        }
+
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = registryOperationFailureText(QStringLiteral("R0写入注册表值"), operationResult);
+        }
+        return false;
+    }
+
+    HKEY root = nullptr;
+    QString subPath;
+    if (!parseRegistryPath(keyPath, &root, &subPath))
+    {
+        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("注册表路径无效：%1").arg(keyPath);
+        return false;
+    }
+    return writeRegistryValue(root, subPath, valueName, valueType, rawData, errorTextOut);
+}
+
+bool RegistryDock::createRegistryKeyAny(const QString& fullKeyPath, QString* errorTextOut)
+{
+    // 作用：创建注册表键，R0 在线时直接传完整内核键路径给驱动。
+    // 返回：创建成功或键已存在时返回 true。
+    if (errorTextOut != nullptr) errorTextOut->clear();
+
+    if (shouldUseRegistryR0())
+    {
+        const QString kernelPath = buildKernelRegistryPath(fullKeyPath);
+        if (kernelPath.isEmpty())
+        {
+            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("目标路径无法转换为内核路径。");
+            return false;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::RegistryOperationResult operationResult =
+            driverClient.createRegistryKey(kernelPath.toStdWString());
+        if (registryOperationSucceeded(operationResult) ||
+            (operationResult.io.ok && operationResult.status == KSWORD_ARK_REGISTRY_OPERATION_STATUS_ALREADY_EXISTS))
+        {
+            return true;
+        }
+
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = registryOperationFailureText(QStringLiteral("R0创建注册表键"), operationResult);
+        }
+        return false;
+    }
+
+    HKEY root = nullptr;
+    QString subPath;
+    if (!parseRegistryPath(fullKeyPath, &root, &subPath))
+    {
+        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("注册表路径无效：%1").arg(fullKeyPath);
+        return false;
+    }
+
+    HKEY created = nullptr;
+    const LONG createResult = ::RegCreateKeyExW(
+        root,
+        subPath.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(subPath.utf16()),
+        0,
+        nullptr,
+        REG_OPTION_NON_VOLATILE,
+        KEY_READ | KEY_WRITE,
+        nullptr,
+        &created,
+        nullptr);
+    if (created != nullptr)
+    {
+        ::RegCloseKey(created);
+    }
+    if (createResult != ERROR_SUCCESS)
+    {
+        if (errorTextOut != nullptr) *errorTextOut = winErrorText(createResult);
+        return false;
+    }
+    return true;
+}
+
+bool RegistryDock::deleteRegistryKeyByR0Recursive(
+    const QString& kernelKeyPath,
+    QString* errorTextOut) const
+{
+    // 作用：仅依赖 R0 枚举和删除，递归清空并删除指定键。
+    // 返回：整棵子树删除成功返回 true。
+    if (errorTextOut != nullptr) errorTextOut->clear();
+    if (kernelKeyPath.trimmed().isEmpty())
+    {
+        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("内核注册表路径为空。");
+        return false;
+    }
+
+    const ksword::ark::DriverClient driverClient;
+    const ksword::ark::RegistryEnumResult enumResult = driverClient.enumerateRegistryKey(
+        kernelKeyPath.toStdWString(),
+        KSWORD_ARK_REGISTRY_ENUM_FLAG_INCLUDE_SUBKEYS | KSWORD_ARK_REGISTRY_ENUM_FLAG_INCLUDE_VALUES);
+    if (!registryEnumUsable(enumResult))
+    {
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = registryEnumFailureText(QStringLiteral("R0枚举待删除注册表键"), enumResult);
+        }
+        return false;
+    }
+
+    for (const ksword::ark::RegistrySubKeyEntry& childEntry : enumResult.subKeys)
+    {
+        const QString childName = QString::fromStdWString(childEntry.name);
+        if (childName.trimmed().isEmpty())
+        {
+            continue;
+        }
+        const QString childKernelPath = kernelKeyPath + QStringLiteral("\\") + childName;
+        if (!deleteRegistryKeyByR0Recursive(childKernelPath, errorTextOut))
+        {
+            return false;
+        }
+    }
+
+    for (const ksword::ark::RegistryValueEntry& valueEntry : enumResult.values)
+    {
+        const QString valueName = QString::fromStdWString(valueEntry.name);
+        const ksword::ark::RegistryOperationResult deleteValueResult = driverClient.deleteRegistryValue(
+            kernelKeyPath.toStdWString(),
+            trimDefaultValueName(valueName).toStdWString());
+        if (!registryOperationSucceeded(deleteValueResult) &&
+            !(deleteValueResult.io.ok && deleteValueResult.status == KSWORD_ARK_REGISTRY_OPERATION_STATUS_NOT_FOUND))
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = registryOperationFailureText(QStringLiteral("R0删除注册表值"), deleteValueResult);
+            }
+            return false;
+        }
+    }
+
+    const ksword::ark::RegistryOperationResult deleteKeyResult =
+        driverClient.deleteRegistryKey(kernelKeyPath.toStdWString());
+    if (registryOperationSucceeded(deleteKeyResult) ||
+        (deleteKeyResult.io.ok && deleteKeyResult.status == KSWORD_ARK_REGISTRY_OPERATION_STATUS_NOT_FOUND))
+    {
+        return true;
+    }
+
+    if (errorTextOut != nullptr)
+    {
+        *errorTextOut = registryOperationFailureText(QStringLiteral("R0删除注册表键"), deleteKeyResult);
+    }
+    return false;
+}
+
+bool RegistryDock::deleteRegistryKeyAny(const QString& fullKeyPath, QString* errorTextOut)
+{
+    // 作用：删除注册表键树，R0 在线时不调用 RegDeleteTreeW。
+    // 返回：删除成功返回 true。
+    if (errorTextOut != nullptr) errorTextOut->clear();
+
+    if (shouldUseRegistryR0())
+    {
+        const QString kernelPath = buildKernelRegistryPath(fullKeyPath);
+        if (kernelPath.isEmpty())
+        {
+            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("目标路径无法转换为内核路径。");
+            return false;
+        }
+        return deleteRegistryKeyByR0Recursive(kernelPath, errorTextOut);
+    }
+
+    HKEY root = nullptr;
+    QString subPath;
+    if (!parseRegistryPath(fullKeyPath, &root, &subPath) || subPath.isEmpty())
+    {
+        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("注册表键路径无效或指向根键。");
+        return false;
+    }
+
+    const LONG deleteResult = ::RegDeleteTreeW(
+        root,
+        reinterpret_cast<const wchar_t*>(subPath.utf16()));
+    if (deleteResult != ERROR_SUCCESS)
+    {
+        if (errorTextOut != nullptr) *errorTextOut = winErrorText(deleteResult);
+        return false;
+    }
+    return true;
+}
+
+bool RegistryDock::deleteRegistryValueAny(
+    const QString& keyPath,
+    const QString& valueName,
+    QString* errorTextOut)
+{
+    // 作用：删除注册表值，R0 在线时通过驱动删除默认值或命名值。
+    // 返回：删除成功返回 true。
+    if (errorTextOut != nullptr) errorTextOut->clear();
+
+    if (shouldUseRegistryR0())
+    {
+        const QString kernelPath = buildKernelRegistryPath(keyPath);
+        if (kernelPath.isEmpty())
+        {
+            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("当前注册表路径无法转换为内核路径。");
+            return false;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::RegistryOperationResult operationResult = driverClient.deleteRegistryValue(
+            kernelPath.toStdWString(),
+            trimDefaultValueName(valueName).toStdWString());
+        if (registryOperationSucceeded(operationResult))
+        {
+            return true;
+        }
+
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = registryOperationFailureText(QStringLiteral("R0删除注册表值"), operationResult);
+        }
+        return false;
+    }
+
+    HKEY root = nullptr;
+    QString subPath;
+    if (!parseRegistryPath(keyPath, &root, &subPath))
+    {
+        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("注册表路径无效：%1").arg(keyPath);
+        return false;
+    }
+
+    HKEY key = nullptr;
+    LONG openResult = ::RegOpenKeyExW(root, subPath.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(subPath.utf16()), 0, KEY_SET_VALUE, &key);
+    if (openResult != ERROR_SUCCESS)
+    {
+        if (errorTextOut != nullptr) *errorTextOut = winErrorText(openResult);
+        return false;
+    }
+
+    const QString realName = trimDefaultValueName(valueName);
+    LONG deleteResult = ::RegDeleteValueW(key, realName.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(realName.utf16()));
+    ::RegCloseKey(key);
+    if (deleteResult != ERROR_SUCCESS)
+    {
+        if (errorTextOut != nullptr) *errorTextOut = winErrorText(deleteResult);
+        return false;
+    }
+    return true;
+}
+
+bool RegistryDock::renameRegistryValueAny(
+    const QString& keyPath,
+    const QString& oldValueName,
+    const QString& newValueName,
+    QString* errorTextOut)
+{
+    // 作用：重命名注册表值，R0 在线时由驱动完成读写删除序列。
+    // 返回：重命名成功返回 true。
+    if (errorTextOut != nullptr) errorTextOut->clear();
+
+    if (shouldUseRegistryR0())
+    {
+        const QString kernelPath = buildKernelRegistryPath(keyPath);
+        if (kernelPath.isEmpty())
+        {
+            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("当前注册表路径无法转换为内核路径。");
+            return false;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::RegistryOperationResult operationResult = driverClient.renameRegistryValue(
+            kernelPath.toStdWString(),
+            oldValueName.toStdWString(),
+            newValueName.toStdWString());
+        if (registryOperationSucceeded(operationResult))
+        {
+            return true;
+        }
+
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = registryOperationFailureText(QStringLiteral("R0重命名注册表值"), operationResult);
+        }
+        return false;
+    }
+
+    HKEY root = nullptr;
+    QString subPath;
+    if (!parseRegistryPath(keyPath, &root, &subPath))
+    {
+        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("注册表路径无效：%1").arg(keyPath);
+        return false;
+    }
+
+    DWORD type = REG_NONE;
+    QByteArray data;
+    if (!readRegistryValueRaw(root, subPath, oldValueName, &type, &data, errorTextOut))
+    {
+        return false;
+    }
+    if (!writeRegistryValue(root, subPath, newValueName, type, data, errorTextOut))
+    {
+        return false;
+    }
+
+    HKEY key = nullptr;
+    LONG openResult = ::RegOpenKeyExW(root, subPath.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(subPath.utf16()), 0, KEY_SET_VALUE, &key);
+    if (openResult != ERROR_SUCCESS)
+    {
+        if (errorTextOut != nullptr) *errorTextOut = winErrorText(openResult);
+        return false;
+    }
+    const LONG deleteResult = ::RegDeleteValueW(key, reinterpret_cast<const wchar_t*>(oldValueName.utf16()));
+    ::RegCloseKey(key);
+    if (deleteResult != ERROR_SUCCESS)
+    {
+        if (errorTextOut != nullptr) *errorTextOut = winErrorText(deleteResult);
+        return false;
+    }
+    return true;
+}
+
+bool RegistryDock::renameRegistryKeyAny(
+    const QString& fullKeyPath,
+    const QString& newKeyName,
+    QString* newFullKeyPathOut,
+    QString* errorTextOut)
+{
+    // 作用：重命名当前键；R0 在线时直接调用驱动的 ZwRenameKey 封装。
+    // 返回：重命名成功返回 true，并输出新的 UI 路径。
+    if (errorTextOut != nullptr) errorTextOut->clear();
+    if (newFullKeyPathOut != nullptr) newFullKeyPathOut->clear();
+
+    HKEY root = nullptr;
+    QString subPath;
+    if (!parseRegistryPath(fullKeyPath, &root, &subPath) || subPath.isEmpty())
+    {
+        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("根键不可重命名或路径无效。");
+        return false;
+    }
+
+    const int slashPos = subPath.lastIndexOf('\\');
+    const QString parentPath = slashPos < 0 ? QString() : subPath.left(slashPos);
+    QString newPath = rootKeyToText(root);
+    if (!parentPath.isEmpty())
+    {
+        newPath += QStringLiteral("\\") + parentPath;
+    }
+    newPath += QStringLiteral("\\") + newKeyName;
+
+    if (shouldUseRegistryR0())
+    {
+        const QString kernelPath = buildKernelRegistryPath(fullKeyPath);
+        if (kernelPath.isEmpty())
+        {
+            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("当前注册表路径无法转换为内核路径。");
+            return false;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::RegistryOperationResult operationResult = driverClient.renameRegistryKey(
+            kernelPath.toStdWString(),
+            newKeyName.toStdWString());
+        if (registryOperationSucceeded(operationResult))
+        {
+            if (newFullKeyPathOut != nullptr) *newFullKeyPathOut = newPath;
+            return true;
+        }
+
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = registryOperationFailureText(QStringLiteral("R0重命名注册表键"), operationResult);
+        }
+        return false;
+    }
+
+    HKEY parentKey = nullptr;
+    LONG openResult = ::RegOpenKeyExW(root, parentPath.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(parentPath.utf16()), 0, KEY_WRITE, &parentKey);
+    if (openResult != ERROR_SUCCESS)
+    {
+        if (errorTextOut != nullptr) *errorTextOut = winErrorText(openResult);
+        return false;
+    }
+
+    using RegRenameKeyFunc = LSTATUS(WINAPI*)(HKEY, LPCWSTR, LPCWSTR);
+    RegRenameKeyFunc renameKey = reinterpret_cast<RegRenameKeyFunc>(::GetProcAddress(::GetModuleHandleW(L"Advapi32.dll"), "RegRenameKey"));
+    if (renameKey == nullptr)
+    {
+        ::RegCloseKey(parentKey);
+        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("系统不支持 RegRenameKey。");
+        return false;
+    }
+
+    const QString oldKeyName = slashPos < 0 ? subPath : subPath.mid(slashPos + 1);
+    LONG renameResult = renameKey(parentKey, reinterpret_cast<const wchar_t*>(oldKeyName.utf16()), reinterpret_cast<const wchar_t*>(newKeyName.utf16()));
+    ::RegCloseKey(parentKey);
+    if (renameResult != ERROR_SUCCESS)
+    {
+        if (errorTextOut != nullptr) *errorTextOut = winErrorText(renameResult);
+        return false;
+    }
+    if (newFullKeyPathOut != nullptr) *newFullKeyPathOut = newPath;
+    return true;
+}
+
 void RegistryDock::updateStatusBar(const QString& message)
 {
     m_pathStatusLabel->setText(QStringLiteral("路径: %1").arg(m_currentPath));
@@ -1091,6 +1738,7 @@ void RegistryDock::navigateToPath(const QString& path, bool recordHistory)
 
     m_backButton->setEnabled(m_navigationIndex > 0);
     m_forwardButton->setEnabled(m_navigationIndex >= 0 && (m_navigationIndex + 1) < static_cast<int>(m_navigationHistory.size()));
+    refreshRegistryDriverModeIndicator();
 
     selectTreeItemByPath(normalized);
     refreshCurrentKey(true);
@@ -1163,6 +1811,70 @@ void RegistryDock::ensureTreeItemLoaded(QTreeWidgetItem* item)
         dbg << event << "[RegistryDock] 展开节点并加载子键, path=" << itemPath.toStdString() << eol;
     }
 
+    item->takeChildren();
+
+    if (shouldUseRegistryR0())
+    {
+        const QString kernelPath = buildKernelRegistryPath(itemPath);
+        if (kernelPath.isEmpty())
+        {
+            item->setData(0, kRoleLoaded, true);
+            return;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::RegistryEnumResult enumResult = driverClient.enumerateRegistryKey(
+            kernelPath.toStdWString(),
+            KSWORD_ARK_REGISTRY_ENUM_FLAG_INCLUDE_SUBKEYS);
+        if (!registryEnumUsable(enumResult))
+        {
+            kLogEvent event;
+            warn << event
+                << "[RegistryDock] R0加载子键失败, path="
+                << itemPath.toStdString()
+                << ", detail="
+                << registryEnumFailureText(QStringLiteral("R0枚举子键"), enumResult).toStdString()
+                << eol;
+            item->setData(0, kRoleLoaded, true);
+            return;
+        }
+
+        int childCount = 0;
+        for (const ksword::ark::RegistrySubKeyEntry& subKeyEntry : enumResult.subKeys)
+        {
+            const QString name = QString::fromStdWString(subKeyEntry.name);
+            if (name.trimmed().isEmpty())
+            {
+                continue;
+            }
+
+            QTreeWidgetItem* child = new QTreeWidgetItem(item);
+            child->setText(0, name);
+            child->setData(0, kRolePath, item->data(0, kRolePath).toString() + QStringLiteral("\\") + name);
+            child->setData(0, kRoleLoaded, false);
+            child->setData(0, kRolePlaceholder, false);
+
+            QTreeWidgetItem* placeholder = new QTreeWidgetItem(child);
+            placeholder->setText(0, QStringLiteral("..."));
+            placeholder->setData(0, kRolePlaceholder, true);
+            ++childCount;
+        }
+
+        item->setData(0, kRoleLoaded, true);
+        {
+            kLogEvent event;
+            info << event
+                << "[RegistryDock] R0子键加载完成, path="
+                << itemPath.toStdString()
+                << ", returned="
+                << childCount
+                << ", total="
+                << enumResult.subKeyCount
+                << eol;
+        }
+        return;
+    }
+
     HKEY root = nullptr;
     QString subPath;
     if (!parseRegistryPath(itemPath, &root, &subPath))
@@ -1174,7 +1886,6 @@ void RegistryDock::ensureTreeItemLoaded(QTreeWidgetItem* item)
     HKEY key = nullptr;
     LONG openResult = ::RegOpenKeyExW(root, subPath.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(subPath.utf16()), 0, KEY_ENUMERATE_SUB_KEYS, &key);
 
-    item->takeChildren();
     if (openResult != ERROR_SUCCESS)
     {
         kLogEvent event;
@@ -1228,6 +1939,7 @@ void RegistryDock::refreshCurrentKey(bool)
 {
     kLogEvent event;
     info << event << "[RegistryDock] 刷新当前键, path=" << m_currentPath.toStdString() << eol;
+    refreshRegistryDriverModeIndicator();
     refreshValueTable();
 }
 
@@ -1239,6 +1951,68 @@ void RegistryDock::refreshValueTable()
     }
 
     m_valueTable->setRowCount(0);
+
+    if (shouldUseRegistryR0())
+    {
+        const QString kernelPath = buildKernelRegistryPath(m_currentPath);
+        if (kernelPath.isEmpty())
+        {
+            kLogEvent event;
+            warn << event << "[RegistryDock] R0刷新失败：内核路径无效, path=" << m_currentPath.toStdString() << eol;
+            updateStatusBar(QStringLiteral("状态: 内核路径无效"));
+            return;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::RegistryEnumResult enumResult = driverClient.enumerateRegistryKey(
+            kernelPath.toStdWString(),
+            KSWORD_ARK_REGISTRY_ENUM_FLAG_INCLUDE_VALUES);
+        if (!registryEnumUsable(enumResult))
+        {
+            const QString errorText = registryEnumFailureText(QStringLiteral("R0刷新值列表"), enumResult);
+            kLogEvent event;
+            warn << event << "[RegistryDock] R0刷新值列表失败, path=" << m_currentPath.toStdString() << ", error=" << errorText.toStdString() << eol;
+            updateStatusBar(QStringLiteral("状态: R0打开失败 - %1").arg(errorText));
+            return;
+        }
+
+        for (const ksword::ark::RegistryValueEntry& valueEntry : enumResult.values)
+        {
+            const QString valueName = QString::fromStdWString(valueEntry.name);
+            const QByteArray bytes = registryDataToByteArray(valueEntry.data);
+            const int row = m_valueTable->rowCount();
+            m_valueTable->insertRow(row);
+
+            QTableWidgetItem* nameItem = new QTableWidgetItem(valueName.isEmpty() ? QStringLiteral("(默认)") : valueName);
+            nameItem->setData(Qt::UserRole, valueName);
+            m_valueTable->setItem(row, 0, nameItem);
+            m_valueTable->setItem(row, 1, new QTableWidgetItem(valueTypeToText(static_cast<DWORD>(valueEntry.valueType))));
+
+            QString dataText = formatValueData(static_cast<DWORD>(valueEntry.valueType), bytes);
+            if (valueEntry.requiredBytes > valueEntry.dataBytes)
+            {
+                dataText += QStringLiteral("  <R0预览截断 %1/%2 字节>")
+                    .arg(valueEntry.dataBytes)
+                    .arg(valueEntry.requiredBytes);
+            }
+            m_valueTable->setItem(row, 2, new QTableWidgetItem(dataText));
+        }
+
+        updateStatusBar(QStringLiteral("状态: R0已加载 %1/%2 个值")
+            .arg(enumResult.returnedValueCount)
+            .arg(enumResult.valueCount));
+
+        kLogEvent finishEvent;
+        info << finishEvent
+            << "[RegistryDock] R0值列表刷新完成, path="
+            << m_currentPath.toStdString()
+            << ", returned="
+            << enumResult.returnedValueCount
+            << ", total="
+            << enumResult.valueCount
+            << eol;
+        return;
+    }
 
     HKEY root = nullptr;
     QString subPath;
@@ -1343,7 +2117,7 @@ void RegistryDock::showTreeContextMenu(const QPoint& pos)
     QAction* refreshAction = menu.addAction(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("刷新"));
     menu.addSeparator();
     QAction* exportAction = menu.addAction(QIcon(":/Icon/log_export.svg"), QStringLiteral("导出 .reg"));
-    QAction* importAction = menu.addAction(QIcon(":/Icon/process_resume.svg"), QStringLiteral("导入 .reg"));
+    QAction* importAction = menu.addAction(QIcon(":/Icon/reg_import.svg"), QStringLiteral("导入 .reg"));
 
     QAction* action = menu.exec(m_keyTree->viewport()->mapToGlobal(pos));
     if (action == nullptr) return;
@@ -1421,36 +2195,19 @@ void RegistryDock::createSubKey()
             << eol;
     }
 
-    HKEY root = nullptr;
-    QString subPath;
-    if (!parseRegistryPath(m_currentPath, &root, &subPath)) return;
-
-    HKEY key = nullptr;
-    LONG openResult = ::RegOpenKeyExW(root, subPath.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(subPath.utf16()), 0, KEY_CREATE_SUB_KEY, &key);
-    if (openResult != ERROR_SUCCESS)
+    QString errorText;
+    const QString fullKeyPath = m_currentPath + QStringLiteral("\\") + keyName;
+    if (!createRegistryKeyAny(fullKeyPath, &errorText))
     {
         kLogEvent event;
-        warn << event << "[RegistryDock] 新建子键失败：打开父键失败, error=" << winErrorText(openResult).toStdString() << eol;
-        QMessageBox::warning(this, QStringLiteral("新建子键"), winErrorText(openResult));
-        return;
-    }
-
-    HKEY created = nullptr;
-    LONG createResult = ::RegCreateKeyExW(key, reinterpret_cast<const wchar_t*>(keyName.utf16()), 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE, nullptr, &created, nullptr);
-    if (created != nullptr) ::RegCloseKey(created);
-    ::RegCloseKey(key);
-
-    if (createResult != ERROR_SUCCESS)
-    {
-        kLogEvent event;
-        warn << event << "[RegistryDock] 新建子键失败：创建失败, error=" << winErrorText(createResult).toStdString() << eol;
-        QMessageBox::warning(this, QStringLiteral("新建子键"), winErrorText(createResult));
+        warn << event << "[RegistryDock] 新建子键失败, error=" << errorText.toStdString() << eol;
+        QMessageBox::warning(this, QStringLiteral("新建子键"), errorText);
         return;
     }
 
     kLogEvent event;
-    info << event << "[RegistryDock] 新建子键成功, fullPath=" << (m_currentPath + QStringLiteral("\\") + keyName).toStdString() << eol;
-    navigateToPath(m_currentPath + QStringLiteral("\\") + keyName, true);
+    info << event << "[RegistryDock] 新建子键成功, fullPath=" << fullKeyPath.toStdString() << eol;
+    navigateToPath(fullKeyPath, true);
 }
 
 void RegistryDock::createValue()
@@ -1485,12 +2242,8 @@ void RegistryDock::createValue()
             << eol;
     }
 
-    HKEY root = nullptr;
-    QString subPath;
-    if (!parseRegistryPath(m_currentPath, &root, &subPath)) return;
-
     QString errorText;
-    if (!writeRegistryValue(root, subPath, valueName, type, data, &errorText))
+    if (!writeRegistryValueAny(m_currentPath, valueName, type, data, &errorText))
     {
         kLogEvent event;
         warn << event << "[RegistryDock] 新建值失败, path=" << m_currentPath.toStdString() << ", error=" << errorText.toStdString() << eol;
@@ -1532,33 +2285,13 @@ void RegistryDock::renameSelectedObject()
         const QString newName = QInputDialog::getText(this, QStringLiteral("重命名值"), QStringLiteral("新名称："), QLineEdit::Normal, oldName, &ok).trimmed();
         if (!ok || newName.isEmpty() || newName.compare(oldName, Qt::CaseInsensitive) == 0) return;
 
-        HKEY root = nullptr;
-        QString subPath;
-        if (!parseRegistryPath(m_currentPath, &root, &subPath)) return;
-
-        DWORD type = REG_NONE;
-        QByteArray data;
         QString errorText;
-        if (!readRegistryValueRaw(root, subPath, oldName, &type, &data, &errorText))
-        {
-            QMessageBox::warning(this, QStringLiteral("重命名值"), errorText);
-            return;
-        }
-
-        if (!writeRegistryValue(root, subPath, newName, type, data, &errorText))
+        if (!renameRegistryValueAny(m_currentPath, oldName, newName, &errorText))
         {
             kLogEvent event;
-            warn << event << "[RegistryDock] 重命名值失败：写入新值失败, error=" << errorText.toStdString() << eol;
+            warn << event << "[RegistryDock] 重命名值失败, error=" << errorText.toStdString() << eol;
             QMessageBox::warning(this, QStringLiteral("重命名值"), errorText);
             return;
-        }
-
-        HKEY key = nullptr;
-        LONG openResult = ::RegOpenKeyExW(root, subPath.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(subPath.utf16()), 0, KEY_SET_VALUE, &key);
-        if (openResult == ERROR_SUCCESS)
-        {
-            ::RegDeleteValueW(key, reinterpret_cast<const wchar_t*>(oldName.utf16()));
-            ::RegCloseKey(key);
         }
 
         kLogEvent event;
@@ -1590,36 +2323,15 @@ void RegistryDock::renameSelectedObject()
     const QString newKeyName = QInputDialog::getText(this, QStringLiteral("重命名键"), QStringLiteral("新键名："), QLineEdit::Normal, oldKeyName, &ok).trimmed();
     if (!ok || newKeyName.isEmpty() || newKeyName.compare(oldKeyName, Qt::CaseInsensitive) == 0) return;
 
-    HKEY parentKey = nullptr;
-    LONG openResult = ::RegOpenKeyExW(root, parentPath.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(parentPath.utf16()), 0, KEY_WRITE, &parentKey);
-    if (openResult != ERROR_SUCCESS)
-    {
-        QMessageBox::warning(this, QStringLiteral("重命名键"), winErrorText(openResult));
-        return;
-    }
-
-    using RegRenameKeyFunc = LSTATUS(WINAPI*)(HKEY, LPCWSTR, LPCWSTR);
-    RegRenameKeyFunc renameKey = reinterpret_cast<RegRenameKeyFunc>(::GetProcAddress(::GetModuleHandleW(L"Advapi32.dll"), "RegRenameKey"));
-    if (renameKey == nullptr)
-    {
-        ::RegCloseKey(parentKey);
-        QMessageBox::warning(this, QStringLiteral("重命名键"), QStringLiteral("系统不支持 RegRenameKey。"));
-        return;
-    }
-
-    LONG renameResult = renameKey(parentKey, reinterpret_cast<const wchar_t*>(oldKeyName.utf16()), reinterpret_cast<const wchar_t*>(newKeyName.utf16()));
-    ::RegCloseKey(parentKey);
-    if (renameResult != ERROR_SUCCESS)
+    QString newPath;
+    QString errorText;
+    if (!renameRegistryKeyAny(m_currentPath, newKeyName, &newPath, &errorText))
     {
         kLogEvent event;
-        warn << event << "[RegistryDock] 重命名键失败, error=" << winErrorText(renameResult).toStdString() << eol;
-        QMessageBox::warning(this, QStringLiteral("重命名键"), winErrorText(renameResult));
+        warn << event << "[RegistryDock] 重命名键失败, error=" << errorText.toStdString() << eol;
+        QMessageBox::warning(this, QStringLiteral("重命名键"), errorText);
         return;
     }
-
-    QString newPath = rootKeyToText(root);
-    if (!parentPath.isEmpty()) newPath += QStringLiteral("\\") + parentPath;
-    newPath += QStringLiteral("\\") + newKeyName;
 
     kLogEvent event;
     info << event
@@ -1659,25 +2371,12 @@ void RegistryDock::deleteSelectedObject()
             QMessageBox::No);
         if (choice != QMessageBox::Yes) return;
 
-        HKEY root = nullptr;
-        QString subPath;
-        if (!parseRegistryPath(m_currentPath, &root, &subPath)) return;
-
-        HKEY key = nullptr;
-        LONG openResult = ::RegOpenKeyExW(root, subPath.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(subPath.utf16()), 0, KEY_SET_VALUE, &key);
-        if (openResult != ERROR_SUCCESS)
-        {
-            QMessageBox::warning(this, QStringLiteral("删除值"), winErrorText(openResult));
-            return;
-        }
-
-        LONG deleteResult = ::RegDeleteValueW(key, valueName.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(valueName.utf16()));
-        ::RegCloseKey(key);
-        if (deleteResult != ERROR_SUCCESS)
+        QString errorText;
+        if (!deleteRegistryValueAny(m_currentPath, valueName, &errorText))
         {
             kLogEvent event;
-            warn << event << "[RegistryDock] 删除值失败, error=" << winErrorText(deleteResult).toStdString() << eol;
-            QMessageBox::warning(this, QStringLiteral("删除值"), winErrorText(deleteResult));
+            warn << event << "[RegistryDock] 删除值失败, error=" << errorText.toStdString() << eol;
+            QMessageBox::warning(this, QStringLiteral("删除值"), errorText);
             return;
         }
 
@@ -1708,21 +2407,12 @@ void RegistryDock::deleteSelectedObject()
     const QString parentPath = slashPos < 0 ? QString() : subPath.left(slashPos);
     const QString keyName = slashPos < 0 ? subPath : subPath.mid(slashPos + 1);
 
-    HKEY parentKey = nullptr;
-    LONG openResult = ::RegOpenKeyExW(root, parentPath.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(parentPath.utf16()), 0, KEY_WRITE, &parentKey);
-    if (openResult != ERROR_SUCCESS)
-    {
-        QMessageBox::warning(this, QStringLiteral("删除键"), winErrorText(openResult));
-        return;
-    }
-
-    LONG deleteResult = ::RegDeleteTreeW(parentKey, reinterpret_cast<const wchar_t*>(keyName.utf16()));
-    ::RegCloseKey(parentKey);
-    if (deleteResult != ERROR_SUCCESS)
+    QString errorText;
+    if (!deleteRegistryKeyAny(m_currentPath, &errorText))
     {
         kLogEvent event;
-        warn << event << "[RegistryDock] 删除键失败, error=" << winErrorText(deleteResult).toStdString() << eol;
-        QMessageBox::warning(this, QStringLiteral("删除键"), winErrorText(deleteResult));
+        warn << event << "[RegistryDock] 删除键失败, error=" << errorText.toStdString() << eol;
+        QMessageBox::warning(this, QStringLiteral("删除键"), errorText);
         return;
     }
 
@@ -1747,14 +2437,10 @@ void RegistryDock::editSelectedValue()
 
     const QString valueName = nameItem->data(Qt::UserRole).toString();
 
-    HKEY root = nullptr;
-    QString subPath;
-    if (!parseRegistryPath(m_currentPath, &root, &subPath)) return;
-
     DWORD type = REG_NONE;
     QByteArray data;
     QString errorText;
-    if (!readRegistryValueRaw(root, subPath, valueName, &type, &data, &errorText))
+    if (!readRegistryValueAny(m_currentPath, valueName, &type, &data, &errorText))
     {
         kLogEvent event;
         warn << event << "[RegistryDock] 编辑值失败：读取原值失败, error=" << errorText.toStdString() << eol;
@@ -1822,7 +2508,7 @@ void RegistryDock::editSelectedValue()
         outputData = QByteArray(reinterpret_cast<const char*>(text.utf16()), text.size() * sizeof(char16_t));
     }
 
-    if (!writeRegistryValue(root, subPath, valueName, type, outputData, &errorText))
+    if (!writeRegistryValueAny(m_currentPath, valueName, type, outputData, &errorText))
     {
         kLogEvent event;
         warn << event << "[RegistryDock] 编辑值失败：写入失败, error=" << errorText.toStdString() << eol;
@@ -2107,9 +2793,24 @@ void RegistryDock::startSearchAsync()
             << eol;
     }
 
+    const bool useR0Search = shouldUseRegistryR0();
     HKEY root = nullptr;
     QString subPath;
-    if (!parseRegistryPath(m_currentPath, &root, &subPath)) return;
+    QString kernelStartPath;
+    QString displayStartPath = m_currentPath;
+    if (useR0Search)
+    {
+        kernelStartPath = buildKernelRegistryPath(m_currentPath);
+        if (kernelStartPath.isEmpty())
+        {
+            QMessageBox::warning(this, QStringLiteral("搜索"), QStringLiteral("当前路径无法转换为内核注册表路径。"));
+            return;
+        }
+    }
+    else if (!parseRegistryPath(m_currentPath, &root, &subPath))
+    {
+        return;
+    }
 
     m_searchRunning.store(true);
     m_searchStopFlag.store(false);
@@ -2131,12 +2832,19 @@ void RegistryDock::startSearchAsync()
 
     QPointer<RegistryDock> guardThis(this);
     SearchOptions options;
-    m_searchThread = std::make_unique<std::thread>([guardThis, root, subPath, keyword, options]() {
+    m_searchThread = std::make_unique<std::thread>([guardThis, root, subPath, keyword, options, useR0Search, kernelStartPath, displayStartPath]() {
         if (guardThis == nullptr) return;
 
         std::size_t scanned = 0;
         std::size_t hits = 0;
-        guardThis->searchRegistryRecursive(root, subPath, keyword, options, &scanned, &hits);
+        if (useR0Search)
+        {
+            guardThis->searchRegistryRecursiveByR0(kernelStartPath, displayStartPath, keyword, options, &scanned, &hits);
+        }
+        else
+        {
+            guardThis->searchRegistryRecursive(root, subPath, keyword, options, &scanned, &hits);
+        }
 
         QMetaObject::invokeMethod(qApp, [guardThis, scanned, hits]() {
             if (guardThis == nullptr) return;
@@ -2349,4 +3057,136 @@ void RegistryDock::searchRegistryRecursive(HKEY root, const QString& subPath, co
     ::RegCloseKey(key);
 }
 
+void RegistryDock::searchRegistryRecursiveByR0(
+    const QString& kernelKeyPath,
+    const QString& displayKeyPath,
+    const QString& keyword,
+    const SearchOptions& options,
+    std::size_t* scanned,
+    std::size_t* hit)
+{
+    // 作用：使用驱动递归枚举注册表键和值并匹配关键字。
+    // 返回：无；结果通过 m_pendingRows 异步刷入搜索表。
+    if (m_searchStopFlag.load())
+    {
+        return;
+    }
 
+    const ksword::ark::DriverClient driverClient;
+    const ksword::ark::RegistryEnumResult enumResult = driverClient.enumerateRegistryKey(
+        kernelKeyPath.toStdWString(),
+        KSWORD_ARK_REGISTRY_ENUM_FLAG_INCLUDE_SUBKEYS | KSWORD_ARK_REGISTRY_ENUM_FLAG_INCLUDE_VALUES);
+    if (!registryEnumUsable(enumResult))
+    {
+        kLogEvent event;
+        warn << event
+            << "[RegistryDock] R0搜索枚举失败, kernelPath="
+            << kernelKeyPath.toStdString()
+            << ", detail="
+            << registryEnumFailureText(QStringLiteral("R0搜索枚举"), enumResult).toStdString()
+            << eol;
+        return;
+    }
+
+    if (scanned != nullptr)
+    {
+        *scanned += 1;
+    }
+
+    auto containsText = [&keyword, &options](const QString& text) {
+        return options.caseSensitive ? text.contains(keyword) : text.contains(keyword, Qt::CaseInsensitive);
+    };
+
+    const int lastSlash = displayKeyPath.lastIndexOf('\\');
+    const QString keyName = lastSlash < 0 ? displayKeyPath : displayKeyPath.mid(lastSlash + 1);
+    if (options.searchKeyName && containsText(keyName))
+    {
+        PendingSearchRow row;
+        row.keyPathText = displayKeyPath;
+        row.valueNameText = QStringLiteral("<Key>");
+        row.valueTypeText = QStringLiteral("<Key>");
+        row.valueDataPreviewText = QStringLiteral("-");
+        row.hitSourceText = QStringLiteral("KeyName/R0");
+        std::lock_guard<std::mutex> lock(m_pendingMutex);
+        m_pendingRows.push_back(std::move(row));
+        if (hit != nullptr) *hit += 1;
+    }
+
+    for (const ksword::ark::RegistryValueEntry& valueEntry : enumResult.values)
+    {
+        if (m_searchStopFlag.load())
+        {
+            break;
+        }
+
+        const QString valueName = QString::fromStdWString(valueEntry.name);
+        const QByteArray valueData = registryDataToByteArray(valueEntry.data);
+        QString valueText = formatValueData(static_cast<DWORD>(valueEntry.valueType), valueData);
+        if (valueEntry.requiredBytes > valueEntry.dataBytes)
+        {
+            valueText += QStringLiteral(" <R0预览截断 %1/%2>").arg(valueEntry.dataBytes).arg(valueEntry.requiredBytes);
+        }
+
+        bool matched = false;
+        QString sourceText;
+        if (options.searchValueName && containsText(valueName))
+        {
+            matched = true;
+            sourceText = QStringLiteral("ValueName/R0");
+        }
+        if (!matched && options.searchValueData && containsText(valueText))
+        {
+            matched = true;
+            sourceText = QStringLiteral("ValueData/R0");
+        }
+        if (!matched)
+        {
+            continue;
+        }
+
+        PendingSearchRow row;
+        row.keyPathText = displayKeyPath;
+        row.valueNameText = valueName.isEmpty() ? QStringLiteral("(默认)") : valueName;
+        row.valueTypeText = valueTypeToText(static_cast<DWORD>(valueEntry.valueType));
+        row.valueDataPreviewText = valueText;
+        row.hitSourceText = sourceText;
+
+        std::lock_guard<std::mutex> lock(m_pendingMutex);
+        m_pendingRows.push_back(std::move(row));
+        if (hit != nullptr) *hit += 1;
+    }
+
+    if (scanned != nullptr && (*scanned % 64 == 0))
+    {
+        const std::size_t scannedSnapshot = *scanned;
+        const std::size_t hitSnapshot = (hit == nullptr) ? 0 : *hit;
+        QPointer<RegistryDock> guardThis(this);
+        QMetaObject::invokeMethod(qApp, [guardThis, scannedSnapshot, hitSnapshot]() {
+            if (guardThis == nullptr) return;
+            guardThis->updateStatusBar(QStringLiteral("状态: R0搜索中，扫描 %1 键，命中 %2 项").arg(scannedSnapshot).arg(hitSnapshot));
+            const float progress = 5.0f + static_cast<float>(std::min<std::size_t>(scannedSnapshot, 4000)) / 50.0f;
+            kPro.set(guardThis->m_progressPid, "R0搜索中", 0, std::min(progress, 95.0f));
+        }, Qt::QueuedConnection);
+    }
+
+    for (const ksword::ark::RegistrySubKeyEntry& childEntry : enumResult.subKeys)
+    {
+        if (m_searchStopFlag.load())
+        {
+            break;
+        }
+
+        const QString childName = QString::fromStdWString(childEntry.name);
+        if (childName.trimmed().isEmpty())
+        {
+            continue;
+        }
+        searchRegistryRecursiveByR0(
+            kernelKeyPath + QStringLiteral("\\") + childName,
+            displayKeyPath + QStringLiteral("\\") + childName,
+            keyword,
+            options,
+            scanned,
+            hit);
+    }
+}

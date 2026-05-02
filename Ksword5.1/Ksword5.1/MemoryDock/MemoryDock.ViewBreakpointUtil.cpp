@@ -1,5 +1,10 @@
+﻿#include "MemoryDock.Internal.h"
+
+// 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
+using namespace ksword::memory_dock_internal;
+
 // ============================================================
-// MemoryDock.ViewBreakpointUtil.inc
+// MemoryDock.ViewBreakpointUtil.cpp
 // 作用：
 // - 负责内存查看器、断点与书签、通用格式化和解析工具函数。
 // - 聚焦“可视化读写 + 调试辅助 + 文本转换”能力。
