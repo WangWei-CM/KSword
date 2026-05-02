@@ -412,6 +412,7 @@ Return Value:
     ULONG operationType = 0UL;
     FLT_PREOP_CALLBACK_STATUS callbackStatus = FLT_PREOP_SUCCESS_NO_CALLBACK;
     KSWORD_ARK_FILE_MONITOR_EVENT event;
+    BOOLEAN redirected = FALSE;
 
     if (CompletionContext != NULL) {
         *CompletionContext = NULL;
@@ -428,6 +429,14 @@ Return Value:
         operationType);
     if (callbackStatus == FLT_PREOP_COMPLETE) {
         return FLT_PREOP_COMPLETE;
+    }
+
+    if (Data->Iopb->MajorFunction == IRP_MJ_CREATE) {
+        (VOID)KswordARKRedirectTryRewriteFileCreate(
+            Data,
+            FltObjects,
+            &redirected);
+        UNREFERENCED_PARAMETER(redirected);
     }
 
     operationType = KswordARKFileMonitorMapMajorToOperation(

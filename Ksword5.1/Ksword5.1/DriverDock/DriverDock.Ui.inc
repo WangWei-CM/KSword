@@ -72,6 +72,8 @@ void DriverDock::initializeOverviewTab()
     m_serviceTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_serviceTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_serviceTable->setAlternatingRowColors(true);
+    // 缩小驱动服务表的显式最低高度，使垂直分割器可以把上表压得更低。
+    m_serviceTable->setMinimumHeight(72);
     m_serviceTable->verticalHeader()->setVisible(false);
     m_serviceTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_serviceTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);

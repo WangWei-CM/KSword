@@ -85,7 +85,20 @@
     <ClCompile Include="src\features\preflight\preflight_query.c" />
     <ClCompile Include="src\features\preflight\preflight_ioctl.c" />
     <ClCompile Include="..\third_party\systeminformer_dyn\kphdyn.c" />
-  <ClCompile Include="src\dispatch\ioctl_registry.c" /><ClCompile Include="src\dispatch\ioctl_validation.c" /><ClCompile Include="src\features\process\process_ioctl.c" /><ClCompile Include="src\features\file\file_ioctl.c" /><ClCompile Include="src\features\kernel\kernel_ioctl.c" /><ClCompile Include="src\features\callback\callback_ioctl.c" /></ItemGroup>
+    <ClCompile Include="src\dispatch\ioctl_registry.c" />
+    <ClCompile Include="src\dispatch\ioctl_validation.c" />
+    <ClCompile Include="src\features\process\process_ioctl.c" />
+    <ClCompile Include="src\features\file\file_ioctl.c" />
+    <ClCompile Include="src\features\kernel\kernel_ioctl.c" />
+    <ClCompile Include="src\features\callback\callback_ioctl.c" />
+    <ClCompile Include="src\features\redirect\redirect_runtime.c" />
+    <ClCompile Include="src\features\redirect\redirect_registry.c" />
+    <ClCompile Include="src\features\redirect\redirect_file.c" />
+    <ClCompile Include="src\features\redirect\redirect_ioctl.c" />
+    <ClCompile Include="src\features\network\network_runtime.c" />
+    <ClCompile Include="src\features\network\network_wfp.c" />
+    <ClCompile Include="src\features\network\network_ioctl.c" />
+  <ClCompile Include="src\features\callback\callback_external_wfp.c" /><ClCompile Include="src\features\callback\callback_external_minifilter.c" /><ClCompile Include="src\features\callback\callback_external_safe.c" /><ClCompile Include="src\features\memory\memory_physical.c" /><ClCompile Include="src\features\memory\memory_pagetable.c" /><ClCompile Include="src\features\memory\memory_ioctl.c" /></ItemGroup>
   <ItemGroup>
     <ClInclude Include="Device.h" />
     <ClInclude Include="Driver.h" />
@@ -125,7 +138,13 @@
     <ClInclude Include="..\third_party\systeminformer_dyn\ksw_si_dynconfig.h" />
     <ClInclude Include="..\third_party\systeminformer_dyn\kphdyn.h" />
     <ClInclude Include="Trace.h" />
-  <ClInclude Include="src\dispatch\ioctl_registry.h" /><ClInclude Include="src\dispatch\ioctl_validation.h" /></ItemGroup>
+    <ClInclude Include="src\dispatch\ioctl_registry.h" />
+    <ClInclude Include="src\dispatch\ioctl_validation.h" />
+    <ClInclude Include="include\ark\ark_redirect.h" />
+    <ClInclude Include="include\ark\ark_network.h" />
+    <ClInclude Include="src\features\redirect\redirect_internal.h" />
+    <ClInclude Include="src\features\network\network_internal.h" />
+  <ClInclude Include="src\features\callback\callback_external_core.h" /><ClInclude Include="src\features\callback\callback_external_wfp.h" /><ClInclude Include="src\features\callback\callback_external_minifilter.h" /><ClInclude Include="src\features\callback\callback_external_safe.h" /></ItemGroup>
   <ItemGroup>
     <Inf Include="KswordARKDriver.inf">
       <SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate>
@@ -236,7 +255,7 @@
     <Link>
       <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\km\$(Platform);$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\ucrt\$(Platform);$(WindowsSdkDir)Lib\wdf\kmdf\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>wdmsec.lib;wdm.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;ucrt.osmode.lib</AdditionalDependencies>
+      <AdditionalDependencies>wdmsec.lib;wdm.lib;fwpkclnt.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;ucrt.osmode.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -255,7 +274,7 @@
     <Link>
       <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\km\$(Platform);$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\ucrt\$(Platform);$(WindowsSdkDir)Lib\wdf\kmdf\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>wdmsec.lib;wdm.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;ucrt.osmode.lib</AdditionalDependencies>
+      <AdditionalDependencies>wdmsec.lib;wdm.lib;fwpkclnt.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;ucrt.osmode.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
@@ -273,7 +292,7 @@
     <Link>
       <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\km\$(Platform);$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\ucrt\$(Platform);$(WindowsSdkDir)Lib\wdf\kmdf\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>wdmsec.lib;wdm.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;ucrt.osmode.lib</AdditionalDependencies>
+      <AdditionalDependencies>wdmsec.lib;wdm.lib;fwpkclnt.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;ucrt.osmode.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
@@ -291,27 +310,20 @@
     <Link>
       <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\km\$(Platform);$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\ucrt\$(Platform);$(WindowsSdkDir)Lib\wdf\kmdf\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>wdmsec.lib;wdm.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;ucrt.osmode.lib</AdditionalDependencies>
+      <AdditionalDependencies>wdmsec.lib;wdm.lib;fwpkclnt.lib;fltMgr.lib;%(AdditionalDependencies);usbdex.lib;ntstrsafe.lib;ucrt.osmode.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
-  <Target Name="KswordArkAutoTestSignAfterBuild"
-          AfterTargets="Build"
-          Condition="'$(ConfigurationType)'=='Driver' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoTestSign)'!='true'">
+  <Target Name="KswordArkAutoTestSignAfterBuild" AfterTargets="Build" Condition="'$(ConfigurationType)'=='Driver' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoTestSign)'!='true'">
     <PropertyGroup>
       <KswordArkSignScript>$(MSBuildThisFileDirectory)..\scripts\Sign-KswordArkDriverTest.ps1</KswordArkSignScript>
       <KswordArkPowerShellExe Condition="'$(KswordArkPowerShellExe)'==''">powershell</KswordArkPowerShellExe>
     </PropertyGroup>
-    <Message Importance="High"
-             Text="KswordARK: attempting non-fatal test-sign for $(TargetPath). Set /p:KswordArkSkipAutoTestSign=true to skip." />
-    <Exec Command="&quot;$(KswordArkPowerShellExe)&quot; -ExecutionPolicy Bypass -File &quot;$(KswordArkSignScript)&quot; -DriverPath &quot;$(TargetPath)&quot; -NonFatal"
-          ContinueOnError="WarnAndContinue"
-          IgnoreStandardErrorWarningFormat="true"
-          Condition="Exists('$(KswordArkSignScript)')" />
-    <Warning Condition="!Exists('$(KswordArkSignScript)')"
-             Text="KswordARK auto test-sign skipped because script was not found: $(KswordArkSignScript)" />
+    <Message Importance="High" Text="KswordARK: attempting non-fatal test-sign for $(TargetPath). Set /p:KswordArkSkipAutoTestSign=true to skip." />
+    <Exec Command="&quot;$(KswordArkPowerShellExe)&quot; -ExecutionPolicy Bypass -File &quot;$(KswordArkSignScript)&quot; -DriverPath &quot;$(TargetPath)&quot; -NonFatal" ContinueOnError="WarnAndContinue" IgnoreStandardErrorWarningFormat="true" Condition="Exists('$(KswordArkSignScript)')" />
+    <Warning Condition="!Exists('$(KswordArkSignScript)')" Text="KswordARK auto test-sign skipped because script was not found: $(KswordArkSignScript)" />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
