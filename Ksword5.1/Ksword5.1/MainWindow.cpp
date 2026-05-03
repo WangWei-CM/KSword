@@ -6983,6 +6983,26 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             "}")
         : QString();
 
+    // finalDockAreaTransparentStyle 作用：
+    // - 作为背景图模式下的最后一道 Dock 区域透明兜底规则；
+    // - 覆盖 depthOverlayStyle 中 ads--CDockAreaWidget 的半透明面板底色；
+    // - 避免切换到某些 Dock 后共享 DockArea 被重新刷成纯色，导致背景图像“传染式”消失；
+    // - 不覆盖 ads--CDockWidgetTab 本身，保留 Dock 标签页选中态和悬停态的主题色。
+    const QString finalDockAreaTransparentStyle = enableDockTransparencyForBackgroundImage
+        ? QStringLiteral(
+            "ads--CDockManager,"
+            "ads--CDockContainerWidget,"
+            "ads--CDockAreaWidget,"
+            "ads--CDockAreaWidget > QWidget,"
+            "ads--CDockAreaTitleBar,"
+            "ads--CDockAreaTabBar,"
+            "ads--CDockWidget,"
+            "ads--CDockWidget > QWidget{"
+            "  background:transparent !important;"
+            "  background-color:transparent !important;"
+            "}")
+        : QString();
+
     if (!darkModeEnabled)
     {
         return rootStyle
@@ -7037,7 +7057,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
                 .replace(QStringLiteral("__LIGHT_MENUBAR_PRESSED__"), surfaceMutedBackgroundText)
             + sharedOverlayStyle
             + tooltipStyle
-            + dockContentTransparentStyle;
+            + dockContentTransparentStyle
+            + finalDockAreaTransparentStyle;
     }
 
     return rootStyle
@@ -7090,5 +7111,6 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             .arg(selectedTextColor)
         + sharedOverlayStyle
         + tooltipStyle
-        + dockContentTransparentStyle;
+        + dockContentTransparentStyle
+        + finalDockAreaTransparentStyle;
 }

@@ -101,6 +101,13 @@ void WinAPIDock::initializeUi()
     m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnPath, QHeaderView::Stretch);
     m_processTable->horizontalHeader()->setSectionResizeMode(ProcessColumnUser, QHeaderView::ResizeToContents);
     m_processTable->setStyleSheet(blueInputStyle());
+    m_processTable->setAutoFillBackground(false);
+    m_processTable->setAttribute(Qt::WA_StyledBackground, true);
+    if (m_processTable->viewport() != nullptr)
+    {
+        m_processTable->viewport()->setAutoFillBackground(false);
+        m_processTable->viewport()->setAttribute(Qt::WA_StyledBackground, true);
+    }
     processPanelLayout->addWidget(m_processTable, 1);
 
     m_sessionPanel = new QWidget(m_topSplitter);
@@ -286,6 +293,13 @@ void WinAPIDock::initializeUi()
     m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnPidTid, QHeaderView::ResizeToContents);
     m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnDetail, QHeaderView::Stretch);
     m_eventTable->setStyleSheet(blueInputStyle());
+    m_eventTable->setAutoFillBackground(false);
+    m_eventTable->setAttribute(Qt::WA_StyledBackground, true);
+    if (m_eventTable->viewport() != nullptr)
+    {
+        m_eventTable->viewport()->setAutoFillBackground(false);
+        m_eventTable->viewport()->setAttribute(Qt::WA_StyledBackground, true);
+    }
     m_rootLayout->addWidget(m_eventTable, 1);
 
     m_uiFlushTimer = new QTimer(this);

@@ -354,9 +354,14 @@ namespace
             "}"
             "QTableWidget{"
             "  gridline-color:%3;"
-            "  background:%4;"
-            "  alternate-background-color:%2;"
+            "  background:transparent;"
+            "  background-color:transparent;"
+            "  alternate-background-color:transparent;"
             "  color:%1;"
+            "}"
+            "QTableWidget::viewport{"
+            "  background:transparent;"
+            "  background-color:transparent;"
             "}"
             "QTableWidget::item:selected{"
             "  background:%5;"
@@ -365,7 +370,6 @@ namespace
             .arg(KswordTheme::TextPrimaryHex())
             .arg(KswordTheme::SurfaceAltHex())
             .arg(KswordTheme::BorderHex())
-            .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::PrimaryBlueHex);
     }
 
@@ -908,6 +912,14 @@ void DiskMonitorPage::configureTableWidget(QTableWidget* tableWidget) const
     tableWidget->setSelectionMode(QAbstractItemView::SingleSelection);
     tableWidget->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tableWidget->setSortingEnabled(true);
+    // 表格本体与 viewport 都保持透明，避免硬盘监控页两张表盖住 Dock 背景图。
+    tableWidget->setAutoFillBackground(false);
+    tableWidget->setAttribute(Qt::WA_StyledBackground, true);
+    if (tableWidget->viewport() != nullptr)
+    {
+        tableWidget->viewport()->setAutoFillBackground(false);
+        tableWidget->viewport()->setAttribute(Qt::WA_StyledBackground, true);
+    }
     tableWidget->verticalHeader()->setVisible(false);
     tableWidget->verticalHeader()->setDefaultSectionSize(24);
     tableWidget->horizontalHeader()->setStretchLastSection(false);
