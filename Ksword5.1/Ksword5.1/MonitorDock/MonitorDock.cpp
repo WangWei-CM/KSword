@@ -130,13 +130,15 @@ namespace
     {
         return QStringLiteral(
             "QWidget[kswordCollapsePanel=\"true\"]{"
-            "  background:%1;"
+            "  background:transparent;"
+            "  background-color:transparent;"
             "  color:%2;"
             "  border:1px solid %3;"
             "  border-radius:5px;"
             "}"
             "QWidget[kswordCollapseContent=\"true\"]{"
-            "  background:%1;"
+            "  background:transparent;"
+            "  background-color:transparent;"
             "  color:%2;"
             "  border:none;"
             "}")

@@ -96,6 +96,9 @@ QString ProcessTraceMonitorWidget::blueInputStyle()
 {
     return QStringLiteral(
         "QLineEdit,QComboBox{border:1px solid %2;border-radius:3px;background:%3;color:%4;padding:2px 6px;}"
+        "QTableWidget{border:1px solid %2;border-radius:3px;background:transparent;background-color:transparent;color:%4;padding:2px 6px;gridline-color:%2;alternate-background-color:transparent;}"
+        "QTableWidget::viewport{background:transparent;background-color:transparent;}"
+        "QTableWidget::item:selected{background:%1;color:#FFFFFF;}"
         "QLineEdit:focus,QComboBox:focus{border:1px solid %1;}")
         .arg(KswordTheme::PrimaryBlueHex)
         .arg(KswordTheme::BorderHex())
@@ -119,13 +122,15 @@ QString ProcessTraceMonitorWidget::collapsePanelStyle()
     // - 内容宿主使用 kswordCollapseContent 标记，避免嵌套区域重复描边。
     return QStringLiteral(
         "QWidget[kswordCollapsePanel=\"true\"]{"
-        "  background:%1;"
+        "  background:transparent;"
+        "  background-color:transparent;"
         "  color:%2;"
         "  border:1px solid %3;"
         "  border-radius:5px;"
         "}"
         "QWidget[kswordCollapseContent=\"true\"]{"
-        "  background:%1;"
+        "  background:transparent;"
+        "  background-color:transparent;"
         "  color:%2;"
         "  border:none;"
         "}")

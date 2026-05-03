@@ -433,6 +433,10 @@ public:
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         setMouseTracking(true);
         setFocusPolicy(Qt::NoFocus);
+        // 折线图不再自行铺底色，父级 Dock 背景图需要从图表空白区透出。
+        setAutoFillBackground(false);
+        setAttribute(Qt::WA_StyledBackground, false);
+        setAttribute(Qt::WA_OpaquePaintEvent, false);
     }
 
     // setFocusedSampleIndex：
@@ -474,9 +478,7 @@ protected:
 
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.fillRect(rect(), themeColorFromText(
-            KswordTheme::SurfaceHex(),
-            KswordTheme::IsDarkModeEnabled() ? QColor(28, 32, 38) : QColor(250, 252, 255)));
+        // 背景保持透明：只绘制网格、边框和曲线，不用 Surface 色块覆盖 Dock 背景图。
 
         const QRectF plotRect = chartRect();
         const QColor borderColor = themeColorFromText(
@@ -2328,14 +2330,15 @@ void ProcessDock::initializeProcessActivityPanel()
     // - 图表、时间轴和快照共享同一份有界样本缓存。
     m_activityPanelWidget = new QWidget(m_processListPage);
     m_activityPanelWidget->setObjectName(QStringLiteral("processActivityPanelWidget"));
+    m_activityPanelWidget->setAutoFillBackground(false);
     m_activityPanelWidget->setAttribute(Qt::WA_StyledBackground, true);
     m_activityPanelWidget->setStyleSheet(QStringLiteral(
         "QWidget#processActivityPanelWidget {"
-        "  background:%1;"
-        "  border:1px solid %2;"
+        "  background:transparent;"
+        "  background-color:transparent;"
+        "  border:1px solid %1;"
         "  border-radius:4px;"
         "}")
-        .arg(KswordTheme::SurfaceHex())
         .arg(KswordTheme::BorderHex()));
 
     QVBoxLayout* panelLayout = new QVBoxLayout(m_activityPanelWidget);
@@ -2443,13 +2446,13 @@ void ProcessDock::initializeProcessActivityPanel()
     m_activitySnapshotLabel->setStyleSheet(QStringLiteral(
         "QLabel {"
         "  color:%1;"
-        "  background:%2;"
-        "  border:1px solid %3;"
+        "  background:transparent;"
+        "  background-color:transparent;"
+        "  border:1px solid %2;"
         "  border-radius:3px;"
         "  padding:4px;"
         "}")
         .arg(KswordTheme::TextSecondaryHex())
-        .arg(KswordTheme::SurfaceAltHex())
         .arg(KswordTheme::BorderHex()));
 
     panelLayout->addLayout(toolbarLayout);

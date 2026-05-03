@@ -232,6 +232,14 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_availableTable->setSortingEnabled(false);
     m_availableTable->verticalHeader()->setVisible(false);
     m_availableTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
+    m_availableTable->setStyleSheet(blueInputStyle());
+    m_availableTable->setAutoFillBackground(false);
+    m_availableTable->setAttribute(Qt::WA_StyledBackground, true);
+    if (m_availableTable->viewport() != nullptr)
+    {
+        m_availableTable->viewport()->setAutoFillBackground(false);
+        m_availableTable->viewport()->setAttribute(Qt::WA_StyledBackground, true);
+    }
     m_availableTable->horizontalHeader()->setSectionResizeMode(AvailableProcessColumnPid, QHeaderView::ResizeToContents);
     m_availableTable->horizontalHeader()->setSectionResizeMode(AvailableProcessColumnName, QHeaderView::ResizeToContents);
     m_availableTable->horizontalHeader()->setSectionResizeMode(AvailableProcessColumnPath, QHeaderView::Stretch);
@@ -289,6 +297,14 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_targetTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_targetTable->verticalHeader()->setVisible(false);
     m_targetTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
+    m_targetTable->setStyleSheet(blueInputStyle());
+    m_targetTable->setAutoFillBackground(false);
+    m_targetTable->setAttribute(Qt::WA_StyledBackground, true);
+    if (m_targetTable->viewport() != nullptr)
+    {
+        m_targetTable->viewport()->setAutoFillBackground(false);
+        m_targetTable->viewport()->setAttribute(Qt::WA_StyledBackground, true);
+    }
     m_targetTable->horizontalHeader()->setSectionResizeMode(TargetProcessColumnState, QHeaderView::ResizeToContents);
     m_targetTable->horizontalHeader()->setSectionResizeMode(TargetProcessColumnPid, QHeaderView::ResizeToContents);
     m_targetTable->horizontalHeader()->setSectionResizeMode(TargetProcessColumnName, QHeaderView::ResizeToContents);
@@ -475,6 +491,14 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_eventTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_eventTable->verticalHeader()->setVisible(false);
     m_eventTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
+    m_eventTable->setStyleSheet(blueInputStyle());
+    m_eventTable->setAutoFillBackground(false);
+    m_eventTable->setAttribute(Qt::WA_StyledBackground, true);
+    if (m_eventTable->viewport() != nullptr)
+    {
+        m_eventTable->viewport()->setAutoFillBackground(false);
+        m_eventTable->viewport()->setAttribute(Qt::WA_StyledBackground, true);
+    }
     m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnTime100ns, QHeaderView::ResizeToContents);
     m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnType, QHeaderView::ResizeToContents);
     m_eventTable->horizontalHeader()->setSectionResizeMode(EventColumnProvider, QHeaderView::ResizeToContents);
