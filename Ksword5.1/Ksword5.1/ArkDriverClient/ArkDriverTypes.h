@@ -17,6 +17,7 @@
 #include "../../../shared/driver/KswordArkFileMonitorIoctl.h"
 #include "../../../shared/driver/KswordArkHandleIoctl.h"
 #include "../../../shared/driver/KswordArkKernelIoctl.h"
+#include "../../../shared/driver/KswordArkKeyboardIoctl.h"
 #include "../../../shared/driver/KswordArkMemoryIoctl.h"
 #include "../../../shared/driver/KswordArkProcessIoctl.h"
 #include "../../../shared/driver/KswordArkThreadIoctl.h"
@@ -703,6 +704,97 @@ namespace ksword::ark
         std::uint32_t flags = 0;
         long lastStatus = 0;
         std::vector<CallbackEnumEntry> entries;
+    };
+
+    // KeyboardHotkeyEntry 是 R0 win32k RegisterHotKey 内部表的一行 R3 模型。
+    struct KeyboardHotkeyEntry
+    {
+        std::uint32_t source = 0;
+        std::uint32_t status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_UNKNOWN;
+        std::uint32_t flags = 0;
+        std::uint32_t bucketIndex = 0;
+        std::uint32_t depth = 0;
+        std::uint32_t modifiers = 0;
+        std::uint32_t modifierFlags2 = 0;
+        std::uint32_t virtualKey = 0;
+        std::uint32_t hotkeyId = 0;
+        std::uint32_t processId = 0;
+        std::uint32_t threadId = 0;
+        long lastStatus = 0;
+        std::uint64_t hotkeyObject = 0;
+        std::uint64_t nextHotkeyObject = 0;
+        std::uint64_t sessionGlobals = 0;
+        std::uint64_t threadInfo = 0;
+        std::uint64_t threadObject = 0;
+        std::uint64_t windowObject = 0;
+        std::wstring detail;
+    };
+
+    // KeyboardHotkeyEnumResult 承载 R0 键盘热键枚举响应。
+    struct KeyboardHotkeyEnumResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_UNKNOWN;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint32_t flags = 0;
+        long lastStatus = 0;
+        std::uint64_t win32kBase = 0;
+        std::uint64_t sessionGlobals = 0;
+        std::uint32_t tableOffset = 0;
+        std::uint32_t hotkeyNextOffset = 0;
+        std::uint32_t hotkeyModifiersOffset = 0;
+        std::uint32_t hotkeyVkOffset = 0;
+        std::uint32_t hotkeyIdOffset = 0;
+        std::vector<KeyboardHotkeyEntry> entries;
+    };
+
+    // KeyboardHookEntry 是 R0 win32k WH_KEYBOARD/WH_KEYBOARD_LL 链的一行 R3 模型。
+    struct KeyboardHookEntry
+    {
+        std::uint32_t source = 0;
+        std::uint32_t status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_UNKNOWN;
+        std::uint32_t flags = 0;
+        std::uint32_t hookType = 0;
+        std::uint32_t hookScope = KSWORD_ARK_KEYBOARD_HOOK_SCOPE_UNKNOWN;
+        std::uint32_t processId = 0;
+        std::uint32_t threadId = 0;
+        std::uint32_t moduleId = 0;
+        long lastStatus = 0;
+        std::uint64_t hookObject = 0;
+        std::uint64_t chainHead = 0;
+        std::uint64_t nextHookObject = 0;
+        std::uint64_t threadInfo = 0;
+        std::uint64_t targetThreadInfo = 0;
+        std::uint64_t desktopInfo = 0;
+        std::uint64_t procedureAddress = 0;
+        std::uint64_t procedureOffset = 0;
+        std::uint64_t moduleBase = 0;
+        std::wstring detail;
+    };
+
+    // KeyboardHookEnumResult 承载 R0 键盘钩子枚举响应。
+    struct KeyboardHookEnumResult
+    {
+        IoResult io;
+        std::uint32_t version = 0;
+        std::uint32_t status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_UNKNOWN;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint32_t flags = 0;
+        long lastStatus = 0;
+        std::uint64_t win32kBase = 0;
+        std::uint32_t threadHookArrayOffset = 0;
+        std::uint32_t desktopInfoOffset = 0;
+        std::uint32_t desktopHookArrayOffset = 0;
+        std::uint32_t hookNextOffset = 0;
+        std::uint32_t hookTypeOffset = 0;
+        std::uint32_t hookProcedureOffset = 0;
+        std::uint32_t hookFlagsOffset = 0;
+        std::uint32_t hookModuleIdOffset = 0;
+        std::uint32_t hookTargetThreadInfoOffset = 0;
+        std::vector<KeyboardHookEntry> entries;
     };
 
     // ArkDynModuleIdentity 是 R3 侧模块身份展示结构。

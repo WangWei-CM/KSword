@@ -127,6 +127,53 @@ private:
         std::uint64_t elapsedMs = 0;     // 刷新耗时（毫秒）。
     };
 
+    // HotkeyInspectItem：进程热键页单行数据。
+    struct HotkeyInspectItem
+    {
+        QString objectText;              // HWND/HMENU/资源/快捷方式路径。
+        std::uint32_t hotkeyId = 0;      // 菜单命令 ID / Accelerator 命令 ID / 0。
+        std::uint32_t modifiers = 0;     // MOD_ALT/MOD_CONTROL/MOD_SHIFT/MOD_WIN 位图。
+        std::uint32_t virtualKey = 0;    // 虚拟键码，未知时为 0。
+        QString hotkeyText;              // 可读快捷键文本。
+        std::uint32_t processId = 0;     // 所属进程 ID。
+        std::uint32_t threadId = 0;      // 所属窗口线程 ID，非窗口来源为 0。
+        QString processName;             // 所属进程名。
+        QString sourceText;              // 来源：窗口热键/菜单/Accelerator/.lnk 等。
+        QString detailText;              // 额外上下文。
+    };
+
+    // HotkeyInspectRefreshResult：进程热键异步刷新结果。
+    struct HotkeyInspectRefreshResult
+    {
+        std::vector<HotkeyInspectItem> rows; // 热键行数据。
+        QString diagnosticText;              // 诊断文本。
+        std::uint64_t elapsedMs = 0;         // 刷新耗时（毫秒）。
+    };
+
+    // KeyboardHookInspectItem：键盘页钩子表单行数据。
+    struct KeyboardHookInspectItem
+    {
+        QString objectText;       // tagHOOK 对象地址。
+        QString typeText;         // WH_KEYBOARD / WH_KEYBOARD_LL。
+        QString scopeText;        // 线程链 / 全局链。
+        std::uint32_t processId = 0;
+        std::uint32_t threadId = 0;
+        QString procedureText;    // 回调地址或 R0 保存的回调偏移。
+        QString moduleText;       // 模块基址或 module id。
+        QString sourceText;       // 来源链。
+        QString flagsText;        // tagHOOK flags。
+        QString detailText;       // 链头、next、threadInfo 等诊断字段。
+    };
+
+    // KeyboardInspectRefreshResult：键盘页异步刷新结果。
+    struct KeyboardInspectRefreshResult
+    {
+        std::vector<HotkeyInspectItem> hotkeyRows;     // 热键行数据。
+        std::vector<KeyboardHookInspectItem> hookRows; // 钩子行数据。
+        QString diagnosticText;                        // 诊断文本。
+        std::uint64_t elapsedMs = 0;                   // 刷新耗时（毫秒）。
+    };
+
     // StaticDetailRefreshResult：进程静态详情后台补齐结果。
     struct StaticDetailRefreshResult
     {
@@ -167,6 +214,20 @@ private:
     // 参数：无。
     // 返回：无。
     void initializeKernelObjectTab();
+    // initializeHotkeyTab 作用：
+    // - 构建“进程热键”页面；
+    // - 覆盖窗口激活热键、菜单快捷键、PE Accelerator 资源和 .lnk 快捷方式热键。
+    // 调用方式：initializeUi 中创建 m_hotkeyTab 后调用。
+    // 参数：无。
+    // 返回：无。
+    void initializeHotkeyTab();
+    // initializeKeyboardTab 作用：
+    // - 构建“键盘”页面；
+    // - 同时展示热键检测结果和 R0 键盘钩子链枚举结果。
+    // 调用方式：initializeUi 中创建 m_keyboardTab 后调用。
+    // 参数：无。
+    // 返回：无。
+    void initializeKeyboardTab();
     // initializeTokenSwitchTab 作用：
     // - 构建“令牌开关”页面；
     // - 提供复选框批量控制 Token 开关位，并提供刷新/应用按钮。
@@ -225,6 +286,27 @@ private:
     void requestAsyncPebRefresh();
     void applyTokenRefreshResult(const TextRefreshResult& refreshResult);
     void applyPebRefreshResult(const TextRefreshResult& refreshResult);
+    // requestAsyncHotkeyRefresh 作用：
+    // - 后台扫描当前进程相关热键来源；
+    // - 不直接访问驱动，不阻塞详情窗口 UI 线程。
+    // 调用方式：热键页首刷或点击刷新按钮。
+    // 参数：无。
+    // 返回：无。
+    void requestAsyncHotkeyRefresh();
+    // applyHotkeyRefreshResult 作用：
+    // - 在主线程回填热键检测结果；
+    // - 重建表格并更新状态标签。
+    // 调用方式：requestAsyncHotkeyRefresh 后台任务完成后投递。
+    // 参数 refreshResult：后台扫描结果。
+    // 返回：无。
+    void applyHotkeyRefreshResult(const HotkeyInspectRefreshResult& refreshResult);
+    void rebuildHotkeyTable();
+    void updateHotkeyStatusLabel(const QString& statusText, bool refreshing);
+    void requestAsyncKeyboardRefresh();
+    void applyKeyboardRefreshResult(const KeyboardInspectRefreshResult& refreshResult);
+    void rebuildKeyboardHotkeyTable();
+    void rebuildKeyboardHookTable();
+    void updateKeyboardStatusLabel(const QString& statusText, bool refreshing);
     // requestAsyncSectionRefresh 作用：
     // - 通过 ArkDriverClient 异步查询 R0 SectionObject / ControlArea；
     // - 只传 PID，不把 UI 看到的内核地址传回驱动。
@@ -323,6 +405,8 @@ private:
     QWidget* m_tokenTab = nullptr;             // “令牌”页。
     QWidget* m_tokenSwitchTab = nullptr;       // “令牌开关”页。
     QWidget* m_kernelObjectTab = nullptr;      // “内核对象”页。
+    QWidget* m_hotkeyTab = nullptr;            // “进程热键”页。
+    QWidget* m_keyboardTab = nullptr;          // “键盘”页。
     QWidget* m_pebTab = nullptr;               // “PEB”页。
 
     // ======== 详细信息页控件 ========
@@ -430,6 +514,31 @@ private:
     bool m_sectionInfoInitialRefreshStarted = false; // Section 页首次查询是否已经按需启动。
     std::uint64_t m_sectionInfoRefreshTicket = 0; // Section 查询序号。
     int m_sectionInfoRefreshProgressPid = 0; // Section 查询 kPro 任务 PID。
+
+    // ======== 进程热键页控件与状态 ========
+    QVBoxLayout* m_hotkeyLayout = nullptr;       // 进程热键页总布局。
+    QPushButton* m_refreshHotkeyButton = nullptr; // 刷新热键按钮。
+    QLabel* m_hotkeyStatusLabel = nullptr;       // 热键扫描状态。
+    QTableWidget* m_hotkeyTable = nullptr;       // 热键结果表。
+    bool m_hotkeyRefreshing = false;             // 热键扫描是否进行中。
+    bool m_hotkeyInitialRefreshStarted = false;  // 热键页首次扫描是否已经按需启动。
+    std::uint64_t m_hotkeyRefreshTicket = 0;     // 热键扫描序号。
+    int m_hotkeyRefreshProgressPid = 0;          // 热键扫描 kPro 任务 PID。
+    std::vector<HotkeyInspectItem> m_hotkeyRows; // 热键结果缓存。
+
+    // ======== 键盘页控件与状态 ========
+    QVBoxLayout* m_keyboardLayout = nullptr;       // 键盘页总布局。
+    QPushButton* m_refreshKeyboardButton = nullptr; // 刷新键盘按钮。
+    QLabel* m_keyboardStatusLabel = nullptr;       // 键盘页扫描状态。
+    QTabWidget* m_keyboardInnerTabWidget = nullptr; // 键盘页内部热键/钩子分栏。
+    QTableWidget* m_keyboardHotkeyTable = nullptr; // 键盘页热键表。
+    QTableWidget* m_keyboardHookTable = nullptr;   // 键盘钩子结果表。
+    bool m_keyboardRefreshing = false;             // 键盘页扫描是否进行中。
+    bool m_keyboardInitialRefreshStarted = false;  // 键盘页首次扫描是否已启动。
+    std::uint64_t m_keyboardRefreshTicket = 0;     // 键盘页扫描序号。
+    int m_keyboardRefreshProgressPid = 0;          // 键盘页扫描 kPro 任务 PID。
+    std::vector<HotkeyInspectItem> m_keyboardHotkeyRows; // 键盘页热键缓存。
+    std::vector<KeyboardHookInspectItem> m_keyboardHookRows; // 键盘页钩子缓存。
 
     // ======== 令牌页控件与状态 ========
     QVBoxLayout* m_tokenLayout = nullptr;          // 令牌页布局。

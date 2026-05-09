@@ -99,6 +99,8 @@
     <ClCompile Include="src\features\network\network_runtime.c" />
     <ClCompile Include="src\features\network\network_wfp.c" />
     <ClCompile Include="src\features\network\network_ioctl.c" />
+    <ClCompile Include="src\features\keyboard\keyboard_query.c" />
+    <ClCompile Include="src\features\keyboard\keyboard_ioctl.c" />
   <ClCompile Include="src\features\callback\callback_external_wfp.c" /><ClCompile Include="src\features\callback\callback_external_minifilter.c" /><ClCompile Include="src\features\callback\callback_external_safe.c" /><ClCompile Include="src\features\memory\memory_physical.c" /><ClCompile Include="src\features\memory\memory_pagetable.c" /><ClCompile Include="src\features\memory\memory_ioctl.c" /></ItemGroup>
   <ItemGroup>
     <ClInclude Include="Device.h" />
@@ -143,6 +145,7 @@
     <ClInclude Include="src\dispatch\ioctl_validation.h" />
     <ClInclude Include="include\ark\ark_redirect.h" />
     <ClInclude Include="include\ark\ark_network.h" />
+    <ClInclude Include="include\ark\ark_keyboard.h" />
     <ClInclude Include="src\features\redirect\redirect_internal.h" />
     <ClInclude Include="src\features\network\network_internal.h" />
     <ClInclude Include="src\features\kernel\hook_scan_support.h" />

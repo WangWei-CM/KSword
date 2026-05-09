@@ -19,3 +19,4 @@
 #include "driver/KswordArkRegistryIoctl.h"
 #include "driver/KswordArkRedirectIoctl.h"
 #include "driver/KswordArkNetworkIoctl.h"
+#include "driver/KswordArkKeyboardIoctl.h"

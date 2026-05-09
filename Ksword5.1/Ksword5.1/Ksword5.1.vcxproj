@@ -225,6 +225,7 @@
     <ClCompile Include="ProcessDock\ProcessDetailWindow.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.BaseAndUi.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.Module.cpp" />
+    <ClCompile Include="ProcessDock\ProcessDetailWindow.Hotkey.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.ActionAndUtil.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.AdvancedInfo.cpp" />
     <ClCompile Include="ProcessDock\ProcessDock.cpp" />
@@ -293,6 +294,7 @@
     <ClCompile Include="ArkDriverClient\ArkDriverFile.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverRegistry.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverKeyboard.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp" />
   </ItemGroup>
   <ItemGroup>
