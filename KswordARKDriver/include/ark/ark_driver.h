@@ -29,6 +29,7 @@
 #include "ark_registry.h"
 #include "ark_redirect.h"
 #include "ark_network.h"
+#include "ark_keyboard.h"
 #include "Trace.h"
 
 EXTERN_C_START

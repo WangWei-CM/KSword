@@ -22,6 +22,8 @@
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
+#include <QDir>
+#include <QDirIterator>
 #include <QEvent>
 #include <QFile>
 #include <QFileDialog>
@@ -41,7 +43,9 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QRunnable>
+#include <QSet>
 #include <QStringList>
+#include <QStandardPaths>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
@@ -68,12 +72,17 @@
 #endif
 #include <Windows.h>
 #include <Psapi.h>
+#include <ShObjIdl.h>
+#include <ShlObj.h>
 #include <TlHelp32.h>
 #include <winternl.h>
 #include <sddl.h>
 
 #pragma comment(lib, "Psapi.lib")
 #pragma comment(lib, "Advapi32.lib")
+#pragma comment(lib, "Ole32.lib")
+#pragma comment(lib, "Shell32.lib")
+#pragma comment(lib, "Uuid.lib")
 
 namespace process_detail_window_internal
 {

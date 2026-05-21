@@ -80,6 +80,9 @@
     <Filter Include="Source Files\Features\Network">
       <UniqueIdentifier>{541AEFAF-60EB-42D1-91CC-8DC0CF5988B4}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\Features\Keyboard">
+      <UniqueIdentifier>{7B0CB69A-3F6D-4519-B7D7-D38809229979}</UniqueIdentifier>
+    </Filter>
   <Filter Include="Source Files\Features\Memory"><UniqueIdentifier>{8F66C0B8-48D7-45BE-8D5E-6626DD52CFC4}</UniqueIdentifier></Filter></ItemGroup>
   <ItemGroup>
     <None Include="ReadMe.txt" />
@@ -217,6 +220,9 @@
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
     <ClInclude Include="include\ark\ark_network.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ark\ark_keyboard.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
     <ClInclude Include="src\features\network\network_internal.h">
@@ -457,6 +463,12 @@
     </ClCompile>
     <ClCompile Include="src\features\network\network_wfp.c">
       <Filter>Source Files\Features\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\keyboard\keyboard_query.c">
+      <Filter>Source Files\Features\Keyboard</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\keyboard\keyboard_ioctl.c">
+      <Filter>Source Files\Features\Keyboard</Filter>
     </ClCompile>
   <ClCompile Include="src\features\callback\callback_external_wfp.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\callback\callback_external_minifilter.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\callback\callback_external_safe.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\memory\memory_physical.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_pagetable.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_ioctl.c"><Filter>Source Files\Features\Memory</Filter></ClCompile></ItemGroup>
 </Project>

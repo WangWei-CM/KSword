@@ -270,7 +270,11 @@ void ProcessDetailWindow::updateBaseRecord(const ks::process::ProcessRecord& bas
         m_tokenInitialRefreshStarted = false;
         m_tokenSwitchInitialRefreshStarted = false;
         m_sectionInfoInitialRefreshStarted = false;
+        m_hotkeyInitialRefreshStarted = false;
+        m_keyboardInitialRefreshStarted = false;
         m_pebInitialRefreshStarted = false;
+        ++m_hotkeyRefreshTicket;
+        ++m_keyboardRefreshTicket;
     }
     refreshDetailTabTexts();
     if (shouldTryStaticBackgroundRefresh || identityChanged)
@@ -374,6 +378,40 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
         }
     }
 
+    if (m_hotkeyStatusLabel != nullptr)
+    {
+        const QString statusText = m_hotkeyStatusLabel->text();
+        if (m_hotkeyRefreshing)
+        {
+            m_hotkeyStatusLabel->setStyleSheet(buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700));
+        }
+        else if (statusText.contains(QStringLiteral("无公开API")) || statusText.contains(QStringLiteral("失败")))
+        {
+            m_hotkeyStatusLabel->setStyleSheet(buildStateLabelStyle(statusWarningColor(), 700));
+        }
+        else
+        {
+            m_hotkeyStatusLabel->setStyleSheet(buildStateLabelStyle(statusIdleColor(), 600));
+        }
+    }
+
+    if (m_keyboardStatusLabel != nullptr)
+    {
+        const QString statusText = m_keyboardStatusLabel->text();
+        if (m_keyboardRefreshing)
+        {
+            m_keyboardStatusLabel->setStyleSheet(buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700));
+        }
+        else if (statusText.contains(QStringLiteral("失败")) || statusText.contains(QStringLiteral("不可用")))
+        {
+            m_keyboardStatusLabel->setStyleSheet(buildStateLabelStyle(statusWarningColor(), 700));
+        }
+        else
+        {
+            m_keyboardStatusLabel->setStyleSheet(buildStateLabelStyle(statusIdleColor(), 600));
+        }
+    }
+
     refreshKernelObjectTabTexts();
 }
 
@@ -412,6 +450,8 @@ void ProcessDetailWindow::applyThemeStyle()
         m_tokenTab,
         m_tokenSwitchTab,
         m_kernelObjectTab,
+        m_hotkeyTab,
+        m_keyboardTab,
         m_pebTab
     };
     for (QWidget* tabPage : tabPageList)
@@ -445,6 +485,18 @@ void ProcessDetailWindow::applyThemeStyle()
     if (m_moduleTable != nullptr && m_moduleTable->header() != nullptr)
     {
         m_moduleTable->header()->setStyleSheet(headerStyle);
+    }
+    if (m_hotkeyTable != nullptr && m_hotkeyTable->horizontalHeader() != nullptr)
+    {
+        m_hotkeyTable->horizontalHeader()->setStyleSheet(headerStyle);
+    }
+    if (m_keyboardHotkeyTable != nullptr && m_keyboardHotkeyTable->horizontalHeader() != nullptr)
+    {
+        m_keyboardHotkeyTable->horizontalHeader()->setStyleSheet(headerStyle);
+    }
+    if (m_keyboardHookTable != nullptr && m_keyboardHookTable->horizontalHeader() != nullptr)
+    {
+        m_keyboardHookTable->horizontalHeader()->setStyleSheet(headerStyle);
     }
 
     if (m_signatureCheckBox != nullptr)
@@ -519,7 +571,7 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget = new QTabWidget(this);
     m_rootLayout->addWidget(m_tabWidget, 1);
 
-    // 创建七个页面并分别初始化。
+    // 创建各详情页面并分别初始化。
     m_detailTab = new QWidget(m_tabWidget);
     m_threadTab = new QWidget(m_tabWidget);
     m_actionTab = new QWidget(m_tabWidget);
@@ -527,6 +579,8 @@ void ProcessDetailWindow::initializeUi()
     m_tokenTab = new QWidget(m_tabWidget);
     m_tokenSwitchTab = new QWidget(m_tabWidget);
     m_kernelObjectTab = new QWidget(m_tabWidget);
+    m_hotkeyTab = new QWidget(m_tabWidget);
+    m_keyboardTab = new QWidget(m_tabWidget);
     m_pebTab = new QWidget(m_tabWidget);
 
     m_detailTab->setObjectName(QStringLiteral("ProcessDetailTab_Detail"));
@@ -536,6 +590,8 @@ void ProcessDetailWindow::initializeUi()
     m_tokenTab->setObjectName(QStringLiteral("ProcessDetailTab_Token"));
     m_tokenSwitchTab->setObjectName(QStringLiteral("ProcessDetailTab_TokenSwitch"));
     m_kernelObjectTab->setObjectName(QStringLiteral("ProcessDetailTab_KernelObject"));
+    m_hotkeyTab->setObjectName(QStringLiteral("ProcessDetailTab_Hotkey"));
+    m_keyboardTab->setObjectName(QStringLiteral("ProcessDetailTab_Keyboard"));
     m_pebTab->setObjectName(QStringLiteral("ProcessDetailTab_Peb"));
 
     initializeDetailTab();
@@ -545,6 +601,8 @@ void ProcessDetailWindow::initializeUi()
     initializeTokenTab();
     initializeTokenSwitchTab();
     initializeKernelObjectTab();
+    initializeHotkeyTab();
+    initializeKeyboardTab();
     initializePebTab();
 
     // 为 Tab 指定图标与标题文本。
@@ -555,6 +613,8 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget->addTab(m_tokenTab, QIcon(":/Icon/process_critical.svg"), "令牌");
     m_tabWidget->addTab(m_tokenSwitchTab, QIcon(":/Icon/process_start.svg"), "令牌开关");
     m_tabWidget->addTab(m_kernelObjectTab, QIcon(":/Icon/process_critical.svg"), "内核对象");
+    m_tabWidget->addTab(m_hotkeyTab, QIcon(":/Icon/process_hotkey.svg"), "进程热键");
+    m_tabWidget->addTab(m_keyboardTab, QIcon(":/Icon/process_hotkey.svg"), "键盘");
     m_tabWidget->addTab(m_pebTab, QIcon(":/Icon/process_tree.svg"), "PEB");
     m_tabWidget->setCurrentWidget(m_detailTab);
 
@@ -622,6 +682,24 @@ void ProcessDetailWindow::requestInitialRefreshForCurrentTab()
         if (!m_sectionInfoInitialRefreshStarted)
         {
             requestAsyncSectionRefresh();
+        }
+        return;
+    }
+
+    if (currentTab == m_hotkeyTab)
+    {
+        if (!m_hotkeyInitialRefreshStarted)
+        {
+            requestAsyncHotkeyRefresh();
+        }
+        return;
+    }
+
+    if (currentTab == m_keyboardTab)
+    {
+        if (!m_keyboardInitialRefreshStarted)
+        {
+            requestAsyncKeyboardRefresh();
         }
         return;
     }
@@ -1799,6 +1877,16 @@ void ProcessDetailWindow::initializeConnections()
     // Section/ControlArea 刷新按钮：只传 PID 给 ArkDriverClient，避免 UI 回传内核地址。
     connect(m_refreshSectionInfoButton, &QPushButton::clicked, this, [this]() {
         requestAsyncSectionRefresh();
+    });
+
+    // 进程热键页刷新按钮。
+    connect(m_refreshHotkeyButton, &QPushButton::clicked, this, [this]() {
+        requestAsyncHotkeyRefresh();
+    });
+
+    // 键盘页刷新按钮：热键与键盘钩子一起刷新。
+    connect(m_refreshKeyboardButton, &QPushButton::clicked, this, [this]() {
+        requestAsyncKeyboardRefresh();
     });
 
     // Tab 首次切换时再启动对应重型刷新：
