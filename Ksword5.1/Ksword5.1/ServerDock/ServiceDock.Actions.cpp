@@ -55,52 +55,7 @@ namespace
     }
 }
 
-bool ServiceDock::waitForServiceState(
-    SC_HANDLE serviceHandle,
-    const DWORD expectedState,
-    const DWORD timeoutMs,
-    DWORD* finalStateOut) const
-{
-    if (serviceHandle == nullptr)
-    {
-        return false;
-    }
 
-    const auto startTick = std::chrono::steady_clock::now();
-    while (true)
-    {
-        SERVICE_STATUS_PROCESS statusValue{};
-        DWORD requiredBytes = 0;
-        const BOOL queryOk = ::QueryServiceStatusEx(
-            serviceHandle,
-            SC_STATUS_PROCESS_INFO,
-            reinterpret_cast<LPBYTE>(&statusValue),
-            sizeof(statusValue),
-            &requiredBytes);
-        if (queryOk == FALSE)
-        {
-            return false;
-        }
-
-        if (finalStateOut != nullptr)
-        {
-            *finalStateOut = statusValue.dwCurrentState;
-        }
-        if (statusValue.dwCurrentState == expectedState)
-        {
-            return true;
-        }
-
-        const auto elapsedMs = static_cast<DWORD>(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - startTick).count());
-        if (elapsedMs >= timeoutMs)
-        {
-            return false;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(180));
-    }
-}
 
 void ServiceDock::showServiceContextMenu(const QPoint& localPos)
 {
@@ -363,87 +318,53 @@ bool ServiceDock::controlSelectedService(
         << eol;
 
     const int progressPid = kPro.add("服务管理", actionText.toStdString() + std::string(" - ") + serviceNameText.toStdString());
-    kPro.set(progressPid, "连接服务控制管理器", 0, 15.0f);
-
-    SC_HANDLE scmHandle = ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (scmHandle == nullptr)
-    {
-        const QString errorText = winErrorText(::GetLastError());
-        err << actionEvent
-            << "[ServiceDock] OpenSCManagerW 失败, error="
-            << errorText.toStdString()
-            << eol;
-        kPro.set(progressPid, "执行失败", 0, 100.0f);
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("连接 SCM 失败：\n%1").arg(errorText));
-        return false;
-    }
-
-    SC_HANDLE serviceHandle = ::OpenServiceW(
-        scmHandle,
-        reinterpret_cast<LPCWSTR>(serviceNameText.utf16()),
-        desiredAccess | SERVICE_QUERY_STATUS);
-    if (serviceHandle == nullptr)
-    {
-        const QString errorText = winErrorText(::GetLastError());
-        ::CloseServiceHandle(scmHandle);
-        err << actionEvent
-            << "[ServiceDock] OpenServiceW 失败, service="
-            << serviceNameText.toStdString()
-            << ", error="
-            << errorText.toStdString()
-            << eol;
-        kPro.set(progressPid, "执行失败", 0, 100.0f);
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("打开服务失败：\n%1").arg(errorText));
-        return false;
-    }
-
     kPro.set(progressPid, "下发服务控制指令", 0, 55.0f);
-    bool actionOk = false;
-    if (useStartService)
-    {
-        actionOk = ::StartServiceW(serviceHandle, 0, nullptr) != FALSE;
-        if (!actionOk && ::GetLastError() == ERROR_SERVICE_ALREADY_RUNNING)
-        {
-            actionOk = true;
-        }
-    }
-    else
-    {
-        SERVICE_STATUS statusValue{};
-        actionOk = ::ControlService(serviceHandle, controlCode, &statusValue) != FALSE;
-        if (!actionOk && controlCode == SERVICE_CONTROL_STOP && ::GetLastError() == ERROR_SERVICE_NOT_ACTIVE)
-        {
-            actionOk = true;
-        }
-    }
+
+    // UI layer only selects the action; ks::service owns SCM handles and Start/ControlService calls.
+    ks::service::ServiceStatus finalStatus;
+    std::string errorText;
+    std::uint32_t errorCode = 0;
+    const bool actionOk = useStartService
+        ? ks::service::StartServiceByName(
+            serviceNameText.toStdWString(),
+            6000,
+            expectedState,
+            &finalStatus,
+            &errorText,
+            &errorCode)
+        : ks::service::ControlServiceByName(
+            serviceNameText.toStdWString(),
+            desiredAccess,
+            controlCode,
+            6000,
+            expectedState,
+            &finalStatus,
+            &errorText,
+            &errorCode);
 
     if (!actionOk)
     {
-        const QString errorText = winErrorText(::GetLastError());
-        ::CloseServiceHandle(serviceHandle);
-        ::CloseServiceHandle(scmHandle);
         err << actionEvent
             << "[ServiceDock] 服务动作执行失败, action="
             << actionText.toStdString()
             << ", service="
             << serviceNameText.toStdString()
             << ", error="
-            << errorText.toStdString()
+            << errorCode
+            << ", detail="
+            << errorText
             << eol;
         kPro.set(progressPid, "执行失败", 0, 100.0f);
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("操作失败：\n%1").arg(errorText));
+        QMessageBox::warning(
+            this,
+            QStringLiteral("服务管理"),
+            QStringLiteral("操作失败：\n%1").arg(QString::fromUtf8(errorText.c_str())));
         return false;
     }
 
     kPro.set(progressPid, "等待状态稳定", 0, 80.0f);
-    DWORD finalStateValue = 0;
-    const bool waitOk = (expectedState == 0)
-        ? true
-        : waitForServiceState(serviceHandle, expectedState, 6000, &finalStateValue);
-
-    ::CloseServiceHandle(serviceHandle);
-    ::CloseServiceHandle(scmHandle);
-
+    const DWORD finalStateValue = finalStatus.currentState;
+    const bool waitOk = (expectedState == 0) || (finalStateValue == expectedState);
     if (!waitOk)
     {
         warn << actionEvent
@@ -470,6 +391,7 @@ bool ServiceDock::controlSelectedService(
     kPro.set(progressPid, "执行完成", 0, 100.0f);
     return true;
 }
+
 
 void ServiceDock::applySelectedStartType()
 {
@@ -519,80 +441,56 @@ void ServiceDock::applySelectedStartType()
         << eol;
 
     const int progressPid = kPro.add("服务管理", "修改启动类型");
-    kPro.set(progressPid, "连接服务控制管理器", 0, 20.0f);
-
-    SC_HANDLE scmHandle = ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (scmHandle == nullptr)
-    {
-        const QString errorText = winErrorText(::GetLastError());
-        err << changeEvent << "[ServiceDock] OpenSCManagerW 失败, error=" << errorText.toStdString() << eol;
-        kPro.set(progressPid, "执行失败", 0, 100.0f);
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("连接 SCM 失败：\n%1").arg(errorText));
-        return;
-    }
-
-    SC_HANDLE serviceHandle = ::OpenServiceW(
-        scmHandle,
-        reinterpret_cast<LPCWSTR>(serviceNameText.utf16()),
-        SERVICE_CHANGE_CONFIG | SERVICE_QUERY_STATUS);
-    if (serviceHandle == nullptr)
-    {
-        const QString errorText = winErrorText(::GetLastError());
-        ::CloseServiceHandle(scmHandle);
-        err << changeEvent << "[ServiceDock] OpenServiceW 失败, error=" << errorText.toStdString() << eol;
-        kPro.set(progressPid, "执行失败", 0, 100.0f);
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("打开服务失败：\n%1").arg(errorText));
-        return;
-    }
-
     kPro.set(progressPid, "写入启动类型", 0, 60.0f);
-    const BOOL changeStartTypeOk = ::ChangeServiceConfigW(
-        serviceHandle,
-        SERVICE_NO_CHANGE,
-        targetStartType,
-        SERVICE_NO_CHANGE,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr);
-    if (changeStartTypeOk == FALSE)
+
+    ks::service::ServiceConfigUpdate update;
+    update.changeStartType = true;
+    update.startType = targetStartType;
+
+    std::string errorText;
+    std::uint32_t errorCode = 0;
+    if (!ks::service::ChangeServiceConfiguration(
+        serviceNameText.toStdWString(),
+        update,
+        &errorText,
+        &errorCode))
     {
-        const QString errorText = winErrorText(::GetLastError());
-        ::CloseServiceHandle(serviceHandle);
-        ::CloseServiceHandle(scmHandle);
-        err << changeEvent << "[ServiceDock] ChangeServiceConfigW 失败, error=" << errorText.toStdString() << eol;
+        err << changeEvent
+            << "[ServiceDock] 修改启动类型失败, error="
+            << errorCode
+            << ", detail="
+            << errorText
+            << eol;
         kPro.set(progressPid, "执行失败", 0, 100.0f);
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("修改启动类型失败：\n%1").arg(errorText));
+        QMessageBox::warning(
+            this,
+            QStringLiteral("服务管理"),
+            QStringLiteral("修改启动类型失败：\n%1").arg(QString::fromUtf8(errorText.c_str())));
         return;
     }
 
-    // 延迟自动启动配置：
-    // - 仅自动启动类型可设置 delayed=true；
-    // - 非自动启动时强制写回 false，避免脏配置残留。
-    SERVICE_DELAYED_AUTO_START_INFO delayedInfo{};
-    delayedInfo.fDelayedAutostart = (targetStartType == SERVICE_AUTO_START && targetDelayedAutoStart) ? TRUE : FALSE;
-    const BOOL delayedConfigOk = ::ChangeServiceConfig2W(
-        serviceHandle,
-        SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
-        reinterpret_cast<LPBYTE>(&delayedInfo));
-    if (delayedConfigOk == FALSE)
+    const bool delayedTarget = (targetStartType == SERVICE_AUTO_START && targetDelayedAutoStart);
+    std::string delayedErrorText;
+    std::uint32_t delayedErrorCode = 0;
+    if (!ks::service::SetDelayedAutoStart(
+        serviceNameText.toStdWString(),
+        delayedTarget,
+        &delayedErrorText,
+        &delayedErrorCode))
     {
         warn << changeEvent
-            << "[ServiceDock] ChangeServiceConfig2W(DelayedAutoStart) 失败，继续后续流程, error="
-            << winErrorText(::GetLastError()).toStdString()
+            << "[ServiceDock] 设置 DelayedAutoStart 失败，继续后续流程, error="
+            << delayedErrorCode
+            << ", detail="
+            << delayedErrorText
             << eol;
     }
-
-    ::CloseServiceHandle(serviceHandle);
-    ::CloseServiceHandle(scmHandle);
 
     kPro.set(progressPid, "刷新列表", 0, 90.0f);
     requestAsyncRefresh(true);
     kPro.set(progressPid, "修改完成", 0, 100.0f);
 }
+
 
 void ServiceDock::copySelectedServiceName()
 {

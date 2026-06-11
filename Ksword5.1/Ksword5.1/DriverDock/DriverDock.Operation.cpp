@@ -1,4 +1,4 @@
-﻿#include "DriverDock.Internal.h"
+#include "DriverDock.Internal.h"
 
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
@@ -722,57 +722,37 @@ void DriverDock::refreshSelectedServiceStateToForm()
         return;
     }
 
-    ServiceHandleGuard scmHandle(::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
-    if (!scmHandle.valid())
+    // UI adapter only: the reusable service layer owns SCM open/query/close details.
+    ks::service::ServiceStatus statusInfo;
+    std::string errorText;
+    std::uint32_t errorCode = 0;
+    if (!ks::service::QueryServiceStatus(
+        toWideString(serviceNameText),
+        &statusInfo,
+        &errorText,
+        &errorCode))
     {
-        const DWORD lastError = ::GetLastError();
-        appendOperateLogLine(QStringLiteral("查询失败：OpenSCManagerW 失败（%1）").arg(formatWin32ErrorText(lastError)));
-        warn << queryEvent << "[DriverDock] 查询状态失败：OpenSCManagerW 失败, error=" << lastError << eol;
-        return;
-    }
-
-    const std::wstring serviceNameWide = toWideString(serviceNameText);
-    ServiceHandleGuard serviceHandle(::OpenServiceW(
-        scmHandle.get(),
-        serviceNameWide.c_str(),
-        SERVICE_QUERY_STATUS));
-    if (!serviceHandle.valid())
-    {
-        const DWORD lastError = ::GetLastError();
-        appendOperateLogLine(QStringLiteral("查询失败：OpenServiceW 失败（%1）").arg(formatWin32ErrorText(lastError)));
+        appendOperateLogLine(QStringLiteral("查询失败：%1").arg(QString::fromUtf8(errorText.c_str())));
         warn << queryEvent
-            << "[DriverDock] 查询状态失败：OpenServiceW 失败, service="
+            << "[DriverDock] 查询状态失败, service="
             << serviceNameText.toStdString()
-            << ", error=" << lastError
+            << ", error=" << errorCode
+            << ", detail=" << errorText
             << eol;
-        return;
-    }
-
-    SERVICE_STATUS_PROCESS statusInfo{};
-    DWORD bytesNeeded = 0;
-    if (!::QueryServiceStatusEx(
-        serviceHandle.get(),
-        SC_STATUS_PROCESS_INFO,
-        reinterpret_cast<LPBYTE>(&statusInfo),
-        static_cast<DWORD>(sizeof(statusInfo)),
-        &bytesNeeded))
-    {
-        const DWORD lastError = ::GetLastError();
-        appendOperateLogLine(QStringLiteral("查询失败：QueryServiceStatusEx 失败（%1）").arg(formatWin32ErrorText(lastError)));
-        warn << queryEvent << "[DriverDock] 查询状态失败：QueryServiceStatusEx 失败, error=" << lastError << eol;
         return;
     }
 
     appendOperateLogLine(
         QStringLiteral("服务 %1 当前状态：%2")
         .arg(serviceNameText)
-        .arg(serviceStateToText(statusInfo.dwCurrentState)));
+        .arg(serviceStateToText(statusInfo.currentState)));
 
     info << queryEvent
         << "[DriverDock] 查询状态成功, service=" << serviceNameText.toStdString()
-        << ", state=" << statusInfo.dwCurrentState
+        << ", state=" << statusInfo.currentState
         << eol;
 }
+
 
 void DriverDock::registerOrUpdateDriverService()
 {
@@ -815,102 +795,31 @@ void DriverDock::registerOrUpdateDriverService()
         appendOperateLogLine(QStringLiteral("警告：驱动路径当前不可访问，仍将尝试注册。"));
     }
 
-    const int startTypeValue = m_startTypeCombo->currentData().toInt();
-    const int errorControlValue = m_errorControlCombo->currentData().toInt();
-    const std::wstring serviceNameWide = toWideString(serviceNameText);
-    const std::wstring displayNameWide = toWideString(displayNameText);
-    const std::wstring descriptionWide = toWideString(descriptionText);
-    const std::wstring binaryPathWide = toWideString(binaryPathText);
-
-    ServiceHandleGuard scmHandle(::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE));
-    if (!scmHandle.valid())
-    {
-        const DWORD lastError = ::GetLastError();
-        appendOperateLogLine(QStringLiteral("注册/更新失败：OpenSCManagerW 失败（%1）").arg(formatWin32ErrorText(lastError)));
-        err << operationEvent << "[DriverDock] 注册/更新失败：OpenSCManagerW 失败, error=" << lastError << eol;
-        return;
-    }
-
-    constexpr DWORD kDesiredAccess =
-        SERVICE_QUERY_STATUS |
-        SERVICE_QUERY_CONFIG |
-        SERVICE_CHANGE_CONFIG |
-        SERVICE_START |
-        SERVICE_STOP |
-        DELETE;
-
-    ServiceHandleGuard serviceHandle(::OpenServiceW(
-        scmHandle.get(),
-        serviceNameWide.c_str(),
-        kDesiredAccess));
+    ks::service::KernelDriverServiceConfig serviceConfig;
+    serviceConfig.serviceName = toWideString(serviceNameText);
+    serviceConfig.displayName = toWideString(displayNameText);
+    serviceConfig.description = toWideString(descriptionText);
+    serviceConfig.binaryPath = toWideString(binaryPathText);
+    serviceConfig.startType = static_cast<std::uint32_t>(m_startTypeCombo->currentData().toInt());
+    serviceConfig.errorControl = static_cast<std::uint32_t>(m_errorControlCombo->currentData().toInt());
 
     bool created = false;
-    if (!serviceHandle.valid())
+    std::string errorText;
+    std::uint32_t errorCode = 0;
+    if (!ks::service::CreateOrUpdateKernelDriverService(
+        serviceConfig,
+        &created,
+        &errorText,
+        &errorCode))
     {
-        const DWORD openServiceError = ::GetLastError();
-        if (openServiceError != ERROR_SERVICE_DOES_NOT_EXIST)
-        {
-            appendOperateLogLine(
-                QStringLiteral("注册/更新失败：OpenServiceW 失败（%1）")
-                .arg(formatWin32ErrorText(openServiceError)));
-            err << operationEvent
-                << "[DriverDock] 注册/更新失败：OpenServiceW 失败, error="
-                << openServiceError
-                << eol;
-            return;
-        }
-
-        SC_HANDLE createdService = ::CreateServiceW(
-            scmHandle.get(),
-            serviceNameWide.c_str(),
-            displayNameWide.empty() ? serviceNameWide.c_str() : displayNameWide.c_str(),
-            kDesiredAccess,
-            SERVICE_KERNEL_DRIVER,
-            static_cast<DWORD>(startTypeValue),
-            static_cast<DWORD>(errorControlValue),
-            binaryPathWide.c_str(),
-            nullptr,
-            nullptr,
-            nullptr,
-            nullptr,
-            nullptr);
-        if (createdService == nullptr)
-        {
-            const DWORD lastError = ::GetLastError();
-            appendOperateLogLine(QStringLiteral("注册失败：CreateServiceW 失败（%1）").arg(formatWin32ErrorText(lastError)));
-            err << operationEvent << "[DriverDock] 注册失败：CreateServiceW 失败, error=" << lastError << eol;
-            return;
-        }
-        serviceHandle.reset(createdService);
-        created = true;
-    }
-
-    if (!::ChangeServiceConfigW(
-        serviceHandle.get(),
-        SERVICE_KERNEL_DRIVER,
-        static_cast<DWORD>(startTypeValue),
-        static_cast<DWORD>(errorControlValue),
-        binaryPathWide.c_str(),
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        displayNameWide.empty() ? nullptr : displayNameWide.c_str()))
-    {
-        const DWORD lastError = ::GetLastError();
-        appendOperateLogLine(QStringLiteral("更新失败：ChangeServiceConfigW 失败（%1）").arg(formatWin32ErrorText(lastError)));
-        err << operationEvent << "[DriverDock] 更新失败：ChangeServiceConfigW 失败, error=" << lastError << eol;
+        appendOperateLogLine(QStringLiteral("注册/更新失败：%1").arg(QString::fromUtf8(errorText.c_str())));
+        err << operationEvent
+            << "[DriverDock] 注册/更新失败, service=" << serviceNameText.toStdString()
+            << ", error=" << errorCode
+            << ", detail=" << errorText
+            << eol;
         return;
     }
-
-    std::wstring mutableDescription = descriptionWide;
-    SERVICE_DESCRIPTIONW serviceDescription{};
-    serviceDescription.lpDescription = mutableDescription.empty() ? nullptr : mutableDescription.data();
-    (void)::ChangeServiceConfig2W(
-        serviceHandle.get(),
-        SERVICE_CONFIG_DESCRIPTION,
-        reinterpret_cast<LPBYTE>(&serviceDescription));
 
     appendOperateLogLine(QStringLiteral("%1成功：service=%2")
         .arg(created ? QStringLiteral("注册") : QStringLiteral("更新"))
@@ -923,6 +832,7 @@ void DriverDock::registerOrUpdateDriverService()
 
     refreshDriverServiceRecords();
 }
+
 
 void DriverDock::loadSelectedDriverService()
 {
@@ -940,81 +850,55 @@ void DriverDock::loadSelectedDriverService()
         return;
     }
 
-    ServiceHandleGuard scmHandle(::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
-    if (!scmHandle.valid())
+    ks::service::ServiceStatus finalStatus;
+    std::string errorText;
+    std::uint32_t errorCode = 0;
+    if (!ks::service::StartServiceByName(
+        toWideString(serviceNameText),
+        6000,
+        SERVICE_RUNNING,
+        &finalStatus,
+        &errorText,
+        &errorCode))
     {
-        const DWORD lastError = ::GetLastError();
-        appendOperateLogLine(
-            QStringLiteral("挂载失败：OpenSCManagerW 失败（%1）")
-            .arg(formatWin32ErrorText(lastError)));
-        err << operationEvent << "[DriverDock] 挂载失败：OpenSCManagerW 失败, error=" << lastError << eol;
-        return;
-    }
-
-    const std::wstring serviceNameWide = toWideString(serviceNameText);
-    ServiceHandleGuard serviceHandle(::OpenServiceW(
-        scmHandle.get(),
-        serviceNameWide.c_str(),
-        SERVICE_START | SERVICE_QUERY_STATUS));
-    if (!serviceHandle.valid())
-    {
-        const DWORD lastError = ::GetLastError();
-        appendOperateLogLine(QStringLiteral("挂载失败：OpenServiceW 失败（%1）").arg(formatWin32ErrorText(lastError)));
-        err << operationEvent << "[DriverDock] 挂载失败：OpenServiceW 失败, error=" << lastError << eol;
-        return;
-    }
-
-    if (!::StartServiceW(serviceHandle.get(), 0, nullptr))
-    {
-        const DWORD lastError = ::GetLastError();
-        if (lastError != ERROR_SERVICE_ALREADY_RUNNING)
+        if (isDriverSignatureLoadError(static_cast<DWORD>(errorCode)))
         {
-            // 577 等签名失败需要单独解释：
-            // - 用户可能已经开启测试模式；
-            // - 但完全未签名的 x64 驱动仍会被系统拒绝。
-            if (isDriverSignatureLoadError(lastError))
-            {
-                const QString binaryPathText =
-                    (m_binaryPathEdit == nullptr) ? QString() : m_binaryPathEdit->text().trimmed();
-                const QString adviceText =
-                    buildDriverSignatureLoadAdvice(lastError, serviceNameText, binaryPathText);
-                appendOperateLogLine(adviceText);
-                err << operationEvent
-                    << "[DriverDock] 挂载失败：驱动签名/镜像校验失败, service="
-                    << serviceNameText.toStdString()
-                    << ", error="
-                    << lastError
-                    << ", path="
-                    << binaryPathText.toStdString()
-                    << eol;
-                return;
-            }
-
-            appendOperateLogLine(QStringLiteral("挂载失败：StartServiceW 失败（%1）").arg(formatWin32ErrorText(lastError)));
-            err << operationEvent << "[DriverDock] 挂载失败：StartServiceW 失败, error=" << lastError << eol;
+            const QString binaryPathText =
+                (m_binaryPathEdit == nullptr) ? QString() : m_binaryPathEdit->text().trimmed();
+            const QString adviceText =
+                buildDriverSignatureLoadAdvice(static_cast<DWORD>(errorCode), serviceNameText, binaryPathText);
+            appendOperateLogLine(adviceText);
+            err << operationEvent
+                << "[DriverDock] 挂载失败：驱动签名/镜像校验失败, service="
+                << serviceNameText.toStdString()
+                << ", error=" << errorCode
+                << ", path=" << binaryPathText.toStdString()
+                << eol;
             return;
         }
 
-        info << operationEvent
-            << "[DriverDock] 挂载请求命中“已运行”状态, service="
-            << serviceNameText.toStdString()
+        appendOperateLogLine(QStringLiteral("挂载失败：%1").arg(QString::fromUtf8(errorText.c_str())));
+        err << operationEvent
+            << "[DriverDock] 挂载失败, service=" << serviceNameText.toStdString()
+            << ", error=" << errorCode
+            << ", detail=" << errorText
             << eol;
+        return;
     }
 
-    DWORD currentState = 0;
-    const bool started = waitServiceState(serviceHandle.get(), SERVICE_RUNNING, 6000, &currentState);
-    appendOperateLogLine(started
+    appendOperateLogLine(finalStatus.currentState == SERVICE_RUNNING
         ? QStringLiteral("挂载成功：service=%1").arg(serviceNameText)
-        : QStringLiteral("挂载结束：当前状态=%1").arg(serviceStateToText(currentState)));
+        : QStringLiteral("挂载结束：当前状态=%1").arg(serviceStateToText(finalStatus.currentState)));
 
     info << operationEvent
         << "[DriverDock] 挂载执行完成, service=" << serviceNameText.toStdString()
-        << ", finalState=" << currentState
+        << ", finalState=" << finalStatus.currentState
         << eol;
 
     refreshDriverServiceRecords();
     refreshLoadedKernelModuleRecords();
 }
+
 
 void DriverDock::unloadSelectedDriverService()
 {
@@ -1032,61 +916,39 @@ void DriverDock::unloadSelectedDriverService()
         return;
     }
 
-    ServiceHandleGuard scmHandle(::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
-    if (!scmHandle.valid())
+    ks::service::ServiceStatus finalStatus;
+    std::string errorText;
+    std::uint32_t errorCode = 0;
+    if (!ks::service::StopServiceByName(
+        toWideString(serviceNameText),
+        6000,
+        SERVICE_STOPPED,
+        &finalStatus,
+        &errorText,
+        &errorCode))
     {
-        const DWORD lastError = ::GetLastError();
-        appendOperateLogLine(
-            QStringLiteral("卸载失败：OpenSCManagerW 失败（%1）")
-            .arg(formatWin32ErrorText(lastError)));
-        err << operationEvent << "[DriverDock] 卸载失败：OpenSCManagerW 失败, error=" << lastError << eol;
-        return;
-    }
-
-    const std::wstring serviceNameWide = toWideString(serviceNameText);
-    ServiceHandleGuard serviceHandle(::OpenServiceW(
-        scmHandle.get(),
-        serviceNameWide.c_str(),
-        SERVICE_STOP | SERVICE_QUERY_STATUS));
-    if (!serviceHandle.valid())
-    {
-        const DWORD lastError = ::GetLastError();
-        appendOperateLogLine(QStringLiteral("卸载失败：OpenServiceW 失败（%1）").arg(formatWin32ErrorText(lastError)));
-        err << operationEvent << "[DriverDock] 卸载失败：OpenServiceW 失败, error=" << lastError << eol;
-        return;
-    }
-
-    SERVICE_STATUS serviceStatus{};
-    if (!::ControlService(serviceHandle.get(), SERVICE_CONTROL_STOP, &serviceStatus))
-    {
-        const DWORD lastError = ::GetLastError();
-        if (lastError != ERROR_SERVICE_NOT_ACTIVE)
-        {
-            appendOperateLogLine(QStringLiteral("卸载失败：ControlService 失败（%1）").arg(formatWin32ErrorText(lastError)));
-            err << operationEvent << "[DriverDock] 卸载失败：ControlService 失败, error=" << lastError << eol;
-            return;
-        }
-
-        info << operationEvent
-            << "[DriverDock] 卸载请求命中“未运行”状态, service="
-            << serviceNameText.toStdString()
+        appendOperateLogLine(QStringLiteral("卸载失败：%1").arg(QString::fromUtf8(errorText.c_str())));
+        err << operationEvent
+            << "[DriverDock] 卸载失败, service=" << serviceNameText.toStdString()
+            << ", error=" << errorCode
+            << ", detail=" << errorText
             << eol;
+        return;
     }
 
-    DWORD currentState = 0;
-    const bool stopped = waitServiceState(serviceHandle.get(), SERVICE_STOPPED, 6000, &currentState);
-    appendOperateLogLine(stopped
+    appendOperateLogLine(finalStatus.currentState == SERVICE_STOPPED
         ? QStringLiteral("卸载成功：service=%1").arg(serviceNameText)
-        : QStringLiteral("卸载结束：当前状态=%1").arg(serviceStateToText(currentState)));
+        : QStringLiteral("卸载结束：当前状态=%1").arg(serviceStateToText(finalStatus.currentState)));
 
     info << operationEvent
         << "[DriverDock] 卸载执行完成, service=" << serviceNameText.toStdString()
-        << ", finalState=" << currentState
+        << ", finalState=" << finalStatus.currentState
         << eol;
 
     refreshDriverServiceRecords();
     refreshLoadedKernelModuleRecords();
 }
+
 
 void DriverDock::deleteSelectedDriverService()
 {
@@ -1104,61 +966,22 @@ void DriverDock::deleteSelectedDriverService()
         return;
     }
 
-    ServiceHandleGuard scmHandle(::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
-    if (!scmHandle.valid())
+    std::string errorText;
+    std::uint32_t errorCode = 0;
+    if (!ks::service::DeleteServiceByName(
+        toWideString(serviceNameText),
+        true,
+        4000,
+        &errorText,
+        &errorCode))
     {
-        const DWORD lastError = ::GetLastError();
-        appendOperateLogLine(
-            QStringLiteral("删除失败：OpenSCManagerW 失败（%1）")
-            .arg(formatWin32ErrorText(lastError)));
-        err << operationEvent << "[DriverDock] 删除失败：OpenSCManagerW 失败, error=" << lastError << eol;
-        return;
-    }
-
-    const std::wstring serviceNameWide = toWideString(serviceNameText);
-    ServiceHandleGuard serviceHandle(::OpenServiceW(
-        scmHandle.get(),
-        serviceNameWide.c_str(),
-        DELETE | SERVICE_STOP | SERVICE_QUERY_STATUS));
-    if (!serviceHandle.valid())
-    {
-        const DWORD lastError = ::GetLastError();
-        appendOperateLogLine(QStringLiteral("删除失败：OpenServiceW 失败（%1）").arg(formatWin32ErrorText(lastError)));
-        err << operationEvent << "[DriverDock] 删除失败：OpenServiceW 失败, error=" << lastError << eol;
-        return;
-    }
-
-    SERVICE_STATUS_PROCESS statusInfo{};
-    DWORD bytesNeeded = 0;
-    if (::QueryServiceStatusEx(
-        serviceHandle.get(),
-        SC_STATUS_PROCESS_INFO,
-        reinterpret_cast<LPBYTE>(&statusInfo),
-        static_cast<DWORD>(sizeof(statusInfo)),
-        &bytesNeeded))
-    {
-        if (statusInfo.dwCurrentState != SERVICE_STOPPED)
-        {
-            SERVICE_STATUS stopStatus{};
-            (void)::ControlService(serviceHandle.get(), SERVICE_CONTROL_STOP, &stopStatus);
-            (void)waitServiceState(serviceHandle.get(), SERVICE_STOPPED, 4000, nullptr);
-        }
-    }
-
-    if (!::DeleteService(serviceHandle.get()))
-    {
-        const DWORD lastError = ::GetLastError();
-        if (lastError != ERROR_SERVICE_MARKED_FOR_DELETE)
-        {
-            appendOperateLogLine(QStringLiteral("删除失败：DeleteService 失败（%1）").arg(formatWin32ErrorText(lastError)));
-            err << operationEvent << "[DriverDock] 删除失败：DeleteService 失败, error=" << lastError << eol;
-            return;
-        }
-
-        warn << operationEvent
-            << "[DriverDock] 删除返回“已标记删除”, service="
-            << serviceNameText.toStdString()
+        appendOperateLogLine(QStringLiteral("删除失败：%1").arg(QString::fromUtf8(errorText.c_str())));
+        err << operationEvent
+            << "[DriverDock] 删除失败, service=" << serviceNameText.toStdString()
+            << ", error=" << errorCode
+            << ", detail=" << errorText
             << eol;
+        return;
     }
 
     appendOperateLogLine(QStringLiteral("删除成功（或已标记删除）：service=%1").arg(serviceNameText));
@@ -1166,4 +989,5 @@ void DriverDock::deleteSelectedDriverService()
     refreshDriverServiceRecords();
     refreshLoadedKernelModuleRecords();
 }
+
 

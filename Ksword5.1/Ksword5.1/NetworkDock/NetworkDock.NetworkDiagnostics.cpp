@@ -280,26 +280,16 @@ void NetworkDock::refreshArpCacheTable()
     for (DWORD index = 0; index < netTable->dwNumEntries; ++index)
     {
         const MIB_IPNETROW& row = netTable->table[index];
-        IN_ADDR ipAddress{};
-        ipAddress.S_un.S_addr = row.dwAddr;
-        char ipBuffer[32] = {};
-        inet_ntop(AF_INET, &ipAddress, ipBuffer, static_cast<int>(sizeof(ipBuffer)));
-
-        QStringList macParts;
-        for (DWORD macIndex = 0; macIndex < row.dwPhysAddrLen; ++macIndex)
-        {
-            macParts.push_back(QString("%1").arg(row.bPhysAddr[macIndex], 2, 16, QChar('0')).toUpper());
-        }
-
-        QString typeText = QStringLiteral("Unknown");
-        if (row.dwType == MIB_IPNET_TYPE_DYNAMIC) typeText = QStringLiteral("Dynamic");
-        else if (row.dwType == MIB_IPNET_TYPE_STATIC) typeText = QStringLiteral("Static");
-        else if (row.dwType == MIB_IPNET_TYPE_INVALID) typeText = QStringLiteral("Invalid");
+        const QString ipText = toQString(ks::network::FormatIpv4HostOrder(ntohl(row.dwAddr)));
+        const QString macText = toQString(ks::network::FormatHardwareAddress(
+            reinterpret_cast<const std::uint8_t*>(row.bPhysAddr),
+            static_cast<std::size_t>(row.dwPhysAddrLen)));
+        const QString typeText = toQString(ks::network::ArpEntryTypeToString(row.dwType));
 
         const int tableRow = m_arpTable->rowCount();
         m_arpTable->insertRow(tableRow);
-        m_arpTable->setItem(tableRow, 0, new QTableWidgetItem(QString::fromLatin1(ipBuffer)));
-        m_arpTable->setItem(tableRow, 1, new QTableWidgetItem(macParts.join('-')));
+        m_arpTable->setItem(tableRow, 0, new QTableWidgetItem(ipText));
+        m_arpTable->setItem(tableRow, 1, new QTableWidgetItem(macText));
         m_arpTable->setItem(tableRow, 2, new QTableWidgetItem(typeText));
         m_arpTable->setItem(tableRow, 3, new QTableWidgetItem(QString::number(row.dwIndex)));
     }
@@ -383,15 +373,16 @@ void NetworkDock::addArpCacheEntry()
         return;
     }
 
-    QString normalizedMacText = macText;
-    normalizedMacText.replace(':', '-');
-    const QStringList macSegments = normalizedMacText.split('-', Qt::SkipEmptyParts);
-    if (macSegments.size() != 6)
+    std::vector<std::uint8_t> macBytes;
+    std::string macParseErrorText;
+    if (!ks::network::TryParseMacAddressText(macText.toStdString(), &macBytes, &macParseErrorText))
     {
         kLogEvent event;
         warn << event
             << "[NetworkDock] 新增ARP失败：MAC格式非法, mac="
             << macText.toStdString()
+            << ", reason="
+            << macParseErrorText
             << eol;
         QMessageBox::warning(this, QStringLiteral("新增ARP"), QStringLiteral("MAC 地址格式不正确。"));
         return;
@@ -401,22 +392,10 @@ void NetworkDock::addArpCacheEntry()
     row.dwIndex = static_cast<DWORD>(interfaceIndex);
     row.dwAddr = htonl(ipHostOrder);
     row.dwType = MIB_IPNET_TYPE_STATIC;
-    row.dwPhysAddrLen = 6;
-    for (int segmentIndex = 0; segmentIndex < 6; ++segmentIndex)
+    row.dwPhysAddrLen = static_cast<DWORD>(macBytes.size());
+    for (std::size_t segmentIndex = 0; segmentIndex < macBytes.size(); ++segmentIndex)
     {
-        bool segmentOk = false;
-        const int segmentValue = macSegments[segmentIndex].toInt(&segmentOk, 16);
-        if (!segmentOk || segmentValue < 0 || segmentValue > 255)
-        {
-            kLogEvent event;
-            warn << event
-                << "[NetworkDock] 新增ARP失败：MAC段非法, mac="
-                << macText.toStdString()
-                << eol;
-            QMessageBox::warning(this, QStringLiteral("新增ARP"), QStringLiteral("MAC 地址段格式不正确。"));
-            return;
-        }
-        row.bPhysAddr[segmentIndex] = static_cast<BYTE>(segmentValue);
+        row.bPhysAddr[segmentIndex] = static_cast<BYTE>(macBytes[segmentIndex]);
     }
 
     const DWORD createResult = CreateIpNetEntry(&row);
@@ -612,7 +591,7 @@ void NetworkDock::refreshDnsCacheTable()
         const QString nameText = node->name != nullptr ? QString::fromWCharArray(node->name) : QStringLiteral("<null>");
         m_dnsTable->setItem(row, 0, new QTableWidgetItem(nameText));
         m_dnsTable->setItem(row, 1, new QTableWidgetItem(QString::number(node->type)));
-        m_dnsTable->setItem(row, 2, new QTableWidgetItem(QString("0x%1").arg(node->flags, 0, 16).toUpper()));
+        m_dnsTable->setItem(row, 2, new QTableWidgetItem(toQString(ks::network::FormatDnsFlags(node->flags))));
         ++count;
     }
 
@@ -779,13 +758,12 @@ void NetworkDock::startAliveHostScan()
         QMessageBox::warning(this, QStringLiteral("存活主机扫描"), QStringLiteral("请输入正确的起止 IPv4 地址。"));
         return;
     }
-    if (startIpHostOrder > endIpHostOrder)
-    {
-        std::swap(startIpHostOrder, endIpHostOrder);
-    }
-
-    const std::uint64_t hostCount = static_cast<std::uint64_t>(endIpHostOrder) - startIpHostOrder + 1;
-    if (hostCount > 4096)
+    const ks::network::Ipv4ScanRange scanRange =
+        ks::network::NormalizeIpv4ScanRange(startIpHostOrder, endIpHostOrder, 4096);
+    startIpHostOrder = scanRange.beginHostOrder;
+    endIpHostOrder = scanRange.endHostOrder;
+    const std::uint64_t hostCount = scanRange.hostCount;
+    if (!scanRange.withinLimit)
     {
         kLogEvent event;
         warn << event
@@ -897,16 +875,17 @@ void NetworkDock::startAliveHostScan()
                                 const auto* echoReply = reinterpret_cast<const ICMP_ECHO_REPLY*>(replyBuffer);
                                 alive = (echoReply->Status == IP_SUCCESS);
                                 rttMs = echoReply->RoundTripTime;
-                                detailText = alive
-                                    ? QString("TTL=%1").arg(echoReply->Options.Ttl)
-                                    : QString("Status=%1").arg(echoReply->Status);
+                                detailText = toQString(ks::network::FormatIcmpEchoDetail(
+                                    alive,
+                                    echoReply->Status,
+                                    echoReply->Options.Ttl));
                             }
 
                             const std::uint64_t doneCount = finishedCount.fetch_add(1) + 1;
                             const std::uint64_t aliveNow = alive
                                 ? (aliveCount.fetch_add(1) + 1)
                                 : aliveCount.load();
-                            const QString ipText = formatIpv4HostOrder(currentIpHostOrder);
+                            const QString ipText = toQString(ks::network::FormatIpv4HostOrder(currentIpHostOrder));
                             QMetaObject::invokeMethod(
                                 guardThis,
                                 [guardThis, ipText, alive, rttMs, detailText, doneCount, totalCount, aliveNow]()
@@ -920,9 +899,7 @@ void NetworkDock::startAliveHostScan()
                                     {
                                         guardThis->appendAliveHostRow(ipText, true, rttMs, detailText);
                                     }
-                                    const int progressValue = totalCount == 0
-                                        ? 0
-                                        : static_cast<int>((doneCount * 100ULL) / totalCount);
+                                    const int progressValue = ks::network::CalculateIntegerProgressPercent(doneCount, totalCount);
                                     guardThis->m_aliveScanProgressBar->setValue(progressValue);
                                     guardThis->m_aliveScanProgressBar->setFormat(QString("%1%").arg(progressValue));
                                     guardThis->m_aliveScanStatusLabel->setText(
@@ -963,9 +940,9 @@ void NetworkDock::startAliveHostScan()
                     guardThis->m_startAliveScanButton->setEnabled(true);
                     guardThis->m_stopAliveScanButton->setEnabled(false);
                     const bool canceled = guardThis->m_aliveScanCancel.load();
-                    const int progressValue = totalCount == 0
-                        ? 0
-                        : static_cast<int>((finishedCountValue * 100ULL) / totalCount);
+                    const int progressValue = ks::network::CalculateIntegerProgressPercent(
+                        finishedCountValue,
+                        totalCount);
                     guardThis->m_aliveScanProgressBar->setValue(progressValue);
                     guardThis->m_aliveScanProgressBar->setFormat(QString("%1%").arg(progressValue));
 

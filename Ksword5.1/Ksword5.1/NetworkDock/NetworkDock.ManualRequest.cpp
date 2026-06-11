@@ -131,12 +131,19 @@ void NetworkDock::executeManualRequest()
     request.payloadFormat = static_cast<ks::network::ManualPayloadFormat>(m_manualPayloadFormatCombo->currentData().toInt());
     request.payloadText = m_manualPayloadEditor->toPlainText().toStdString();
 
+    ks::network::ManualNetworkRequestValidation requestValidation;
+    if (!ks::network::ValidateManualNetworkRequest(request, &requestValidation))
+    {
+        reportInputError(QStringLiteral("请求参数无效：%1").arg(toQString(requestValidation.errorText)));
+        return;
+    }
+
     // 2) 输出请求开始日志（UI + 框架日志双通道）。
-    appendManualRequestLogLine(QStringLiteral("开始执行请求：api=%1, remote=%2:%3, payloadLength=%4")
+    appendManualRequestLogLine(QStringLiteral("开始执行请求：api=%1, remote=%2:%3, payloadBytes=%4")
         .arg(toQString(ks::network::ManualNetworkApiKindToString(request.apiKind)))
         .arg(toQString(request.remoteAddress))
         .arg(request.remotePort)
-        .arg(static_cast<qulonglong>(request.payloadText.size())));
+        .arg(static_cast<qulonglong>(requestValidation.payloadByteCount)));
     appendManualRequestLogLine(QStringLiteral("请求已投递到后台线程，UI 保持可响应。"));
 
     kLogEvent requestStartEvent;
@@ -145,6 +152,7 @@ void NetworkDock::executeManualRequest()
         << ", remote=" << request.remoteAddress << ":" << request.remotePort
         << ", connectBeforeSend=" << (request.connectBeforeSend ? "true" : "false")
         << ", payloadFormat=" << ks::network::ManualPayloadFormatToString(request.payloadFormat)
+        << ", payloadBytes=" << requestValidation.payloadByteCount
         << eol;
 
     // UI 反馈：后台执行期间禁用按钮，避免重复触发同一请求。

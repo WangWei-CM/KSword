@@ -229,26 +229,11 @@ void StartupDock::requestAsyncRefresh(const bool forceRefresh)
             std::vector<StartupEntry> entryList;
             entryList.reserve(256);
 
-            kPro.set(safeThis->m_progressPid, "枚举登录项", 0, 15.0f);
-            safeThis->appendLogonEntries(&entryList);
-
-            kPro.set(safeThis->m_progressPid, "枚举服务", 0, 35.0f);
-            safeThis->appendServiceEntries(&entryList);
-
-            kPro.set(safeThis->m_progressPid, "枚举驱动", 0, 55.0f);
-            safeThis->appendDriverEntries(&entryList);
-
-            kPro.set(safeThis->m_progressPid, "枚举计划任务", 0, 75.0f);
-            safeThis->appendTaskEntries(&entryList);
-
-            kPro.set(safeThis->m_progressPid, "枚举高级注册表项", 0, 84.0f);
-            safeThis->appendAdvancedRegistryEntries(&entryList);
-
-            kPro.set(safeThis->m_progressPid, "枚举Winsock持久化项", 0, 90.0f);
-            safeThis->appendWinsockEntries(&entryList);
-
-            kPro.set(safeThis->m_progressPid, "枚举WMI持久化项", 0, 96.0f);
-            safeThis->appendWmiEntries(&entryList);
+            kPro.set(safeThis->m_progressPid, "调用 ks::startup 后端枚举启动项", 0, 15.0f);
+            appendBackendStartupEntries(
+                &entryList,
+                ks::startup::EnumerateAllStartupEntries());
+            kPro.set(safeThis->m_progressPid, "ks::startup 后端枚举完成", 0, 96.0f);
 
             if (safeThis.isNull())
             {

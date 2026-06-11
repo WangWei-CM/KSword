@@ -29,83 +29,30 @@ namespace
         return resultList;
     }
 
-    // queryServiceConfigBufferByHandle 作用：读取 QueryServiceConfigW 配置缓冲区。
-    bool queryServiceConfigBufferByHandle(
-        SC_HANDLE serviceHandle,
-        std::vector<std::uint8_t>* configBufferOut,
-        QUERY_SERVICE_CONFIGW** configOut)
-    {
-        if (serviceHandle == nullptr || configBufferOut == nullptr || configOut == nullptr)
-        {
-            return false;
-        }
-
-        DWORD requiredBytes = 0;
-        ::QueryServiceConfigW(serviceHandle, nullptr, 0, &requiredBytes);
-        if (requiredBytes == 0)
-        {
-            return false;
-        }
-
-        configBufferOut->assign(requiredBytes, 0);
-        QUERY_SERVICE_CONFIGW* configPointer = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(configBufferOut->data());
-        const BOOL queryOk = ::QueryServiceConfigW(
-            serviceHandle,
-            configPointer,
-            requiredBytes,
-            &requiredBytes);
-        if (queryOk == FALSE)
-        {
-            return false;
-        }
-
-        *configOut = configPointer;
-        return true;
-    }
-
-    // queryConfig2BufferByHandle 作用：读取 QueryServiceConfig2W 可变长度结构缓冲区。
-    bool queryConfig2BufferByHandle(
-        SC_HANDLE serviceHandle,
+    // queryConfig2BufferByName reads a variable-size SERVICE_CONFIG_* block via ks::service.
+    bool queryConfig2BufferByName(
+        const QString& serviceNameText,
         const DWORD infoLevel,
         std::vector<std::uint8_t>* dataBufferOut)
     {
-        if (serviceHandle == nullptr || dataBufferOut == nullptr)
+        if (dataBufferOut == nullptr || serviceNameText.trimmed().isEmpty())
         {
             return false;
         }
 
-        DWORD requiredBytes = 0;
-        ::QueryServiceConfig2W(serviceHandle, infoLevel, nullptr, 0, &requiredBytes);
-        if (requiredBytes == 0)
-        {
-            return false;
-        }
-
-        dataBufferOut->assign(requiredBytes, 0);
-        const BOOL queryOk = ::QueryServiceConfig2W(
-            serviceHandle,
-            infoLevel,
-            dataBufferOut->data(),
-            requiredBytes,
-            &requiredBytes);
-        return queryOk != FALSE;
+        // UI passes only the service name and requested info level; ks::service owns SCM handles.
+        return ks::service::QueryServiceConfig2Raw(
+            serviceNameText.trimmed().toStdWString(),
+            static_cast<std::uint32_t>(infoLevel),
+            dataBufferOut);
     }
 
-    // openServiceForRead 作用：打开服务句柄用于读取高级属性。
-    SC_HANDLE openServiceForRead(const QString& serviceNameText)
+    // queryServicePermissionVisible checks OpenService access through ks::service.
+    bool queryServicePermissionVisible(const QString& serviceNameText, const DWORD desiredAccess)
     {
-        SC_HANDLE scmHandle = ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-        if (scmHandle == nullptr)
-        {
-            return nullptr;
-        }
-
-        SC_HANDLE serviceHandle = ::OpenServiceW(
-            scmHandle,
-            reinterpret_cast<LPCWSTR>(serviceNameText.utf16()),
-            SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | READ_CONTROL);
-        ::CloseServiceHandle(scmHandle);
-        return serviceHandle;
+        return ks::service::CanOpenServiceWithAccess(
+            serviceNameText.trimmed().toStdWString(),
+            static_cast<std::uint32_t>(desiredAccess));
     }
 
     // scActionTypeToText 作用：把失败动作类型值转成可读文本。
@@ -170,36 +117,14 @@ namespace
     QString guidToText(const GUID& guidValue)
     {
         wchar_t guidBuffer[64] = {};
-        if (::StringFromGUID2(guidValue, guidBuffer, static_cast<int>(std::size(guidBuffer))) <= 0)
+        const int guidBufferCount = static_cast<int>(sizeof(guidBuffer) / sizeof(guidBuffer[0]));
+        if (::StringFromGUID2(guidValue, guidBuffer, guidBufferCount) <= 0)
         {
             return QStringLiteral("<invalid-guid>");
         }
         return QString::fromWCharArray(guidBuffer);
     }
 
-    // queryServicePermissionVisible 作用：判断当前令牌是否具备指定服务访问权限。
-    bool queryServicePermissionVisible(const QString& serviceNameText, const DWORD desiredAccess)
-    {
-        SC_HANDLE scmHandle = ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-        if (scmHandle == nullptr)
-        {
-            return false;
-        }
-
-        SC_HANDLE serviceHandle = ::OpenServiceW(
-            scmHandle,
-            reinterpret_cast<LPCWSTR>(serviceNameText.utf16()),
-            desiredAccess);
-        if (serviceHandle == nullptr)
-        {
-            ::CloseServiceHandle(scmHandle);
-            return false;
-        }
-
-        ::CloseServiceHandle(serviceHandle);
-        ::CloseServiceHandle(scmHandle);
-        return true;
-    }
 }
 
 QString ServiceDock::queryServiceDllPathByName(const QString& serviceNameText) const
@@ -254,11 +179,13 @@ QString ServiceDock::queryServiceDllPathByName(const QString& serviceNameText) c
     }
 
     wchar_t expandedPathBuffer[MAX_PATH * 4] = {};
+    const DWORD expandedPathBufferCount =
+        static_cast<DWORD>(sizeof(expandedPathBuffer) / sizeof(expandedPathBuffer[0]));
     const DWORD expandedLength = ::ExpandEnvironmentStringsW(
         reinterpret_cast<LPCWSTR>(rawPathText.utf16()),
         expandedPathBuffer,
-        static_cast<DWORD>(std::size(expandedPathBuffer)));
-    if (expandedLength > 0 && expandedLength < std::size(expandedPathBuffer))
+        expandedPathBufferCount);
+    if (expandedLength > 0 && expandedLength < expandedPathBufferCount)
     {
         rawPathText = QString::fromWCharArray(expandedPathBuffer).trimmed();
     }
@@ -328,19 +255,14 @@ QString ServiceDock::buildRegistryFileDetailText(const ServiceEntry& entry) cons
 
 QString ServiceDock::buildDependencyDetailText(const ServiceEntry& entry) const
 {
-    SC_HANDLE serviceHandle = openServiceForRead(entry.serviceNameText);
-    if (serviceHandle == nullptr)
-    {
-        return QStringLiteral("读取依赖失败：无法打开服务句柄。");
-    }
-
     QStringList forwardServiceList;
     QStringList forwardGroupList;
-    std::vector<std::uint8_t> configBuffer;
-    QUERY_SERVICE_CONFIGW* configPointer = nullptr;
-    if (queryServiceConfigBufferByHandle(serviceHandle, &configBuffer, &configPointer))
+
+    ks::service::ServiceConfig config;
+    if (ks::service::QueryServiceConfig(entry.serviceNameText.toStdWString(), &config) &&
+        !config.dependenciesMultiSz.empty())
     {
-        const QStringList rawDependencyList = parseMultiSzText(configPointer->lpDependencies);
+        const QStringList rawDependencyList = parseMultiSzText(config.dependenciesMultiSz.c_str());
         for (const QString& dependencyText : rawDependencyList)
         {
             if (dependencyText.startsWith('+'))
@@ -355,30 +277,17 @@ QString ServiceDock::buildDependencyDetailText(const ServiceEntry& entry) const
     }
 
     QStringList reverseServiceList;
-    DWORD requiredBytes = 0;
-    DWORD dependentCount = 0;
-    ::EnumDependentServicesW(serviceHandle, SERVICE_STATE_ALL, nullptr, 0, &requiredBytes, &dependentCount);
-    if (requiredBytes > 0)
+    std::vector<std::wstring> reverseNames;
+    if (ks::service::QueryDependentServiceNames(
+        entry.serviceNameText.toStdWString(),
+        SERVICE_STATE_ALL,
+        &reverseNames))
     {
-        std::vector<std::uint8_t> dependentBuffer(requiredBytes);
-        const BOOL enumOk = ::EnumDependentServicesW(
-            serviceHandle,
-            SERVICE_STATE_ALL,
-            reinterpret_cast<LPENUM_SERVICE_STATUSW>(dependentBuffer.data()),
-            requiredBytes,
-            &requiredBytes,
-            &dependentCount);
-        if (enumOk != FALSE)
+        for (const std::wstring& reverseName : reverseNames)
         {
-            const ENUM_SERVICE_STATUSW* dependentArray =
-                reinterpret_cast<const ENUM_SERVICE_STATUSW*>(dependentBuffer.data());
-            for (DWORD dependentIndex = 0; dependentIndex < dependentCount; ++dependentIndex)
-            {
-                reverseServiceList.push_back(QString::fromWCharArray(dependentArray[dependentIndex].lpServiceName));
-            }
+            reverseServiceList.push_back(QString::fromStdWString(reverseName));
         }
     }
-    ::CloseServiceHandle(serviceHandle);
 
     QStringList detailLineList;
     detailLineList.push_back(QStringLiteral("依赖树（文本）"));
@@ -419,17 +328,12 @@ QString ServiceDock::buildDependencyDetailText(const ServiceEntry& entry) const
     return detailLineList.join(QStringLiteral("\n"));
 }
 
+
 QString ServiceDock::buildFailureActionDetailText(const ServiceEntry& entry) const
 {
-    SC_HANDLE serviceHandle = openServiceForRead(entry.serviceNameText);
-    if (serviceHandle == nullptr)
-    {
-        return QStringLiteral("读取失败动作失败：无法打开服务句柄。");
-    }
-
     QStringList detailLineList;
     std::vector<std::uint8_t> failureBuffer;
-    if (queryConfig2BufferByHandle(serviceHandle, SERVICE_CONFIG_FAILURE_ACTIONS, &failureBuffer))
+    if (queryConfig2BufferByName(entry.serviceNameText, SERVICE_CONFIG_FAILURE_ACTIONS, &failureBuffer))
     {
         const SERVICE_FAILURE_ACTIONSW* failurePointer =
             reinterpret_cast<const SERVICE_FAILURE_ACTIONSW*>(failureBuffer.data());
@@ -462,30 +366,23 @@ QString ServiceDock::buildFailureActionDetailText(const ServiceEntry& entry) con
     }
 
     std::vector<std::uint8_t> failureFlagBuffer;
-    if (queryConfig2BufferByHandle(serviceHandle, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &failureFlagBuffer))
+    if (queryConfig2BufferByName(entry.serviceNameText, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &failureFlagBuffer))
     {
         const SERVICE_FAILURE_ACTIONS_FLAG* flagPointer =
             reinterpret_cast<const SERVICE_FAILURE_ACTIONS_FLAG*>(failureFlagBuffer.data());
         detailLineList.push_back(QStringLiteral("FailureActionsFlag：%1").arg(flagPointer->fFailureActionsOnNonCrashFailures ? QStringLiteral("启用") : QStringLiteral("禁用")));
     }
 
-    ::CloseServiceHandle(serviceHandle);
     return detailLineList.join(QStringLiteral("\n"));
 }
 
+
 QString ServiceDock::buildTriggerDetailText(const ServiceEntry& entry) const
 {
-    SC_HANDLE serviceHandle = openServiceForRead(entry.serviceNameText);
-    if (serviceHandle == nullptr)
-    {
-        return QStringLiteral("读取触发器失败：无法打开服务句柄。");
-    }
-
     QStringList detailLineList;
     std::vector<std::uint8_t> triggerBuffer;
-    if (!queryConfig2BufferByHandle(serviceHandle, SERVICE_CONFIG_TRIGGER_INFO, &triggerBuffer))
+    if (!queryConfig2BufferByName(entry.serviceNameText, SERVICE_CONFIG_TRIGGER_INFO, &triggerBuffer))
     {
-        ::CloseServiceHandle(serviceHandle);
         return QStringLiteral("触发器：未配置或当前系统不支持读取");
     }
 
@@ -537,29 +434,23 @@ QString ServiceDock::buildTriggerDetailText(const ServiceEntry& entry) const
         }
     }
 
-    ::CloseServiceHandle(serviceHandle);
     return detailLineList.join(QStringLiteral("\n"));
 }
 
+
 QString ServiceDock::buildSecurityDetailText(const ServiceEntry& entry) const
 {
-    SC_HANDLE serviceHandle = openServiceForRead(entry.serviceNameText);
-    if (serviceHandle == nullptr)
-    {
-        return QStringLiteral("读取安全信息失败：无法打开服务句柄。");
-    }
-
     QStringList detailLineList;
 
     std::vector<std::uint8_t> sidTypeBuffer;
-    if (queryConfig2BufferByHandle(serviceHandle, SERVICE_CONFIG_SERVICE_SID_INFO, &sidTypeBuffer))
+    if (queryConfig2BufferByName(entry.serviceNameText, SERVICE_CONFIG_SERVICE_SID_INFO, &sidTypeBuffer))
     {
         const SERVICE_SID_INFO* sidInfoPointer = reinterpret_cast<const SERVICE_SID_INFO*>(sidTypeBuffer.data());
         detailLineList.push_back(QStringLiteral("ServiceSidType：%1").arg(sidInfoPointer->dwServiceSidType));
     }
 
     std::vector<std::uint8_t> privilegeBuffer;
-    if (queryConfig2BufferByHandle(serviceHandle, SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, &privilegeBuffer))
+    if (queryConfig2BufferByName(entry.serviceNameText, SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, &privilegeBuffer))
     {
         const SERVICE_REQUIRED_PRIVILEGES_INFOW* privilegeInfoPointer =
             reinterpret_cast<const SERVICE_REQUIRED_PRIVILEGES_INFOW*>(privilegeBuffer.data());
@@ -569,41 +460,21 @@ QString ServiceDock::buildSecurityDetailText(const ServiceEntry& entry) const
     }
 
     std::vector<std::uint8_t> launchProtectedBuffer;
-    if (queryConfig2BufferByHandle(serviceHandle, SERVICE_CONFIG_LAUNCH_PROTECTED, &launchProtectedBuffer))
+    if (queryConfig2BufferByName(entry.serviceNameText, SERVICE_CONFIG_LAUNCH_PROTECTED, &launchProtectedBuffer))
     {
         const SERVICE_LAUNCH_PROTECTED_INFO* launchProtectedPointer =
             reinterpret_cast<const SERVICE_LAUNCH_PROTECTED_INFO*>(launchProtectedBuffer.data());
         detailLineList.push_back(QStringLiteral("LaunchProtected：%1").arg(launchProtectedPointer->dwLaunchProtected));
     }
 
-    DWORD securityDescriptorBytes = 0;
-    ::QueryServiceObjectSecurity(serviceHandle, DACL_SECURITY_INFORMATION, nullptr, 0, &securityDescriptorBytes);
-    if (securityDescriptorBytes > 0)
+    std::wstring sddlText;
+    if (ks::service::QueryServiceSecuritySddl(
+        entry.serviceNameText.toStdWString(),
+        DACL_SECURITY_INFORMATION,
+        &sddlText))
     {
-        std::vector<std::uint8_t> securityDescriptorBuffer(securityDescriptorBytes);
-        if (::QueryServiceObjectSecurity(
-            serviceHandle,
-            DACL_SECURITY_INFORMATION,
-            reinterpret_cast<PSECURITY_DESCRIPTOR>(securityDescriptorBuffer.data()),
-            securityDescriptorBytes,
-            &securityDescriptorBytes) != FALSE)
-        {
-            LPWSTR sddlPointer = nullptr;
-            if (::ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                reinterpret_cast<PSECURITY_DESCRIPTOR>(securityDescriptorBuffer.data()),
-                SDDL_REVISION_1,
-                DACL_SECURITY_INFORMATION,
-                &sddlPointer,
-                nullptr) != FALSE
-                && sddlPointer != nullptr)
-            {
-                detailLineList.push_back(QStringLiteral("SDDL：%1").arg(QString::fromWCharArray(sddlPointer)));
-                ::LocalFree(sddlPointer);
-            }
-        }
+        detailLineList.push_back(QStringLiteral("SDDL：%1").arg(QString::fromStdWString(sddlText)));
     }
-
-    ::CloseServiceHandle(serviceHandle);
 
     detailLineList.push_back(QStringLiteral("权限可见化："));
     detailLineList.push_back(QStringLiteral("  Start：%1").arg(queryServicePermissionVisible(entry.serviceNameText, SERVICE_START) ? QStringLiteral("可用") : QStringLiteral("不可用")));
@@ -612,6 +483,7 @@ QString ServiceDock::buildSecurityDetailText(const ServiceEntry& entry) const
     detailLineList.push_back(QStringLiteral("  Delete：%1").arg(queryServicePermissionVisible(entry.serviceNameText, DELETE) ? QStringLiteral("可用") : QStringLiteral("不可用")));
     return detailLineList.join(QStringLiteral("\n"));
 }
+
 
 QString ServiceDock::buildRiskDetailText(const ServiceEntry& entry) const
 {

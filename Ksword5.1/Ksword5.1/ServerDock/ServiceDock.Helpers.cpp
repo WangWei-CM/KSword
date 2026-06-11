@@ -39,23 +39,11 @@ namespace service_dock_detail
 
     QString winErrorText(const DWORD errorCode)
     {
-        LPWSTR bufferPointer = nullptr;
-        const DWORD charCount = ::FormatMessageW(
-            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            nullptr,
-            errorCode,
-            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-            reinterpret_cast<LPWSTR>(&bufferPointer),
-            0,
-            nullptr);
-        if (charCount == 0 || bufferPointer == nullptr)
-        {
-            return QStringLiteral("Win32Error=%1").arg(errorCode);
-        }
-
-        const QString messageText = QString::fromWCharArray(bufferPointer).trimmed();
-        ::LocalFree(bufferPointer);
-        return QStringLiteral("%1 (code=%2)").arg(messageText).arg(errorCode);
+        // ServiceDock keeps only QString presentation here:
+        // - input: raw Win32 error code from UI-adjacent callers;
+        // - processing: ks::service owns FormatMessageW and UTF-8 conversion;
+        // - return: localized QString text for message boxes and logs.
+        return QString::fromUtf8(ks::service::FormatWin32ErrorText(errorCode).c_str());
     }
 
     QString serviceStateToText(const DWORD stateValue)

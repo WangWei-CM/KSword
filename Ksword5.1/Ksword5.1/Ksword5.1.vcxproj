@@ -15,7 +15,9 @@
     <Keyword>QtVS_v304</Keyword>
     <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">10.0</WindowsTargetPlatformVersion>
     <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">10.0</WindowsTargetPlatformVersion>
-    <QtMsBuild Condition="'$(QtMsBuild)'=='' OR !Exists('$(QtMsBuild)\qt.targets')">$(MSBuildProjectDirectory)\QtMsBuild</QtMsBuild>
+    <QtMsBuild Condition="'$(QtMsBuild)' == '' and '$(KSWORD_QT_MSBUILD)' != '' and Exists('$(KSWORD_QT_MSBUILD)\qt.targets')">$(KSWORD_QT_MSBUILD)</QtMsBuild>
+    <QtMsBuild Condition="'$(QtMsBuild)' == '' and Exists('$(MSBuildThisFileDirectory)..\..\.deps\QtVsTools\msbuild\qt.targets')">$(MSBuildThisFileDirectory)..\..\.deps\QtVsTools\msbuild</QtMsBuild>
+    <QtMsBuild Condition="'$(QtMsBuild)' == '' or !Exists('$(QtMsBuild)\qt.targets')">$(MSBuildProjectDirectory)\QtMsBuild</QtMsBuild>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
@@ -56,11 +58,11 @@
   <ImportGroup Label="Shared" />
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-    <Import Project="$(QtMsBuild)\Qt.props" />
+    <Import Project="$(QtMsBuild)\Qt.props" Condition="Exists('$(QtMsBuild)\Qt.props')" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-    <Import Project="$(QtMsBuild)\Qt.props" />
+    <Import Project="$(QtMsBuild)\Qt.props" Condition="Exists('$(QtMsBuild)\Qt.props')" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
@@ -156,6 +158,8 @@
     <ClCompile Include="Framework\ProgressDockWidget.cpp" />
     <ClCompile Include="Framework\CustomTitleBar.cpp" />
     <ClCompile Include="Framework\StartupSplash.cpp" />
+    <ClCompile Include="ksword\file\file_handle_tools.cpp" />
+    <ClCompile Include="ksword\file\pe_analyzer.cpp" />
     <ClCompile Include="KernelDock\KernelDock.cpp" />
     <ClCompile Include="KernelDock\KernelDock.CallbackIntercept.cpp" />
     <ClCompile Include="KernelDock\KernelDock.CallbackPromptManager.cpp" />
@@ -268,7 +272,13 @@
     <ClCompile Include="MonitorDock\WinAPIDock.Pipe.cpp" />
     <ClCompile Include="MonitorDock\WinAPIDock.Ui.cpp" />
     <ClCompile Include="WindowDock\WindowDock.cpp" />
+    <ClCompile Include="ksword\log\log.cpp" />
+    <ClCompile Include="ksword\network\network_diagnostics_tools.cpp" />
+    <ClCompile Include="ksword\network\network_download_tools.cpp" />
+    <ClCompile Include="ksword\network\network_format_tools.cpp" />
     <ClCompile Include="ksword\process\process.cpp" />
+    <ClCompile Include="ksword\service\service.cpp" />
+    <ClCompile Include="ksword\startup\startup.cpp" />
     <ClCompile Include="ksword\string\string.cpp" />
     <QtRcc Include="Ksword5.qrc" />
     <QtUic Include="Ksword5.ui" />
@@ -319,7 +329,19 @@
     <ClInclude Include="KernelDock\KernelDockQueryWorker.h" />
     <ClInclude Include="KernelDock\KernelDockSsdtWorker.h" />
     <ClInclude Include="ksword\ksword.h" />
+    <ClInclude Include="ksword\file\file.h" />
+    <ClInclude Include="ksword\file\file_handle_tools.h" />
+    <ClInclude Include="ksword\file\pe_analyzer.h" />
+    <ClInclude Include="ksword\log\log.h" />
+    <ClInclude Include="ksword\network\network.h" />
+    <ClInclude Include="ksword\network\network_connection_tools.h" />
+    <ClInclude Include="ksword\network\network_diagnostics_tools.h" />
+    <ClInclude Include="ksword\network\network_download_tools.h" />
+    <ClInclude Include="ksword\network\network_format_tools.h" />
+    <ClInclude Include="ksword\network\network_request_tools.h" />
     <ClInclude Include="ksword\process\process.h" />
+    <ClInclude Include="ksword\service\service.h" />
+    <ClInclude Include="ksword\startup\startup.h" />
     <ClInclude Include="ksword\string\string.h" />
     <ClInclude Include="theme.h" />
     <ClInclude Include="UI\UI_All.h" />
@@ -394,6 +416,7 @@
     </PropertyGroup>
     <Copy SourceFiles="$(TaskmgrHijackScriptSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(TaskmgrHijackScriptSource)')" />
   </Target>
+
   <!-- 把公钥证书复制到主程序输出目录，UIAccess 按钮只导入 .cer，不接触本地 .pfx 私钥。 -->
   <Target Name="CopyKswordTestSigningCertificate" AfterTargets="Build">
     <PropertyGroup>
@@ -401,6 +424,7 @@
     </PropertyGroup>
     <Copy SourceFiles="$(KswordTestSigningCertificateSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(KswordTestSigningCertificateSource)')" />
   </Target>
+
   <!-- Release 主程序构建完成后复用驱动测试签名证书，签名失败只告警，避免阻断普通编译。 -->
   <Target Name="KswordMainAutoTestSignAfterBuild" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='Release|x64' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoTestSign)'!='true'">
     <PropertyGroup>
@@ -413,7 +437,7 @@
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">
-    <Import Project="$(QtMsBuild)\qt.targets" />
+    <Import Project="$(QtMsBuild)\qt.targets" Condition="Exists('$(QtMsBuild)\qt.targets')" />
   </ImportGroup>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

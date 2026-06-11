@@ -101,6 +101,16 @@ namespace ks::network
         std::vector<std::uint8_t> responseBytes; // 接收响应原始字节。
     };
 
+    // ManualNetworkRequestValidation：
+    // - 供 UI 在投递后台线程前做纯参数校验；
+    // - payloadByteCount 表示按 payloadFormat 构造后的真实发送字节数。
+    struct ManualNetworkRequestValidation
+    {
+        bool valid = false;                  // true 表示参数可交给执行器。
+        std::string errorText;               // 校验失败原因，空字符串表示无错误。
+        std::size_t payloadByteCount = 0;    // 解析后的 payload 字节数。
+    };
+
     namespace request_detail
     {
         // MakeWsaErrorText：把 WSA 错误码组装成可读文本。
@@ -294,6 +304,141 @@ namespace ks::network
         }
     }
 
+    // BuildManualRequestPayloadBytes：
+    // - 按 ManualPayloadFormat 构造发送字节；
+    // - ASCII 模式直接复制 payloadText 字节；
+    // - HEX 模式复用 request_detail::ParseHexPayloadText。
+    inline bool BuildManualRequestPayloadBytes(
+        const ManualNetworkRequest& request,
+        std::vector<std::uint8_t>& payloadBytesOut,
+        std::string* errorTextOut = nullptr)
+    {
+        payloadBytesOut.clear();
+        if (errorTextOut != nullptr)
+        {
+            errorTextOut->clear();
+        }
+
+        if (request.payloadFormat == ManualPayloadFormat::AsciiText)
+        {
+            payloadBytesOut.assign(request.payloadText.begin(), request.payloadText.end());
+            return true;
+        }
+
+        if (request.payloadFormat == ManualPayloadFormat::HexBytes)
+        {
+            return request_detail::ParseHexPayloadText(request.payloadText, payloadBytesOut, errorTextOut);
+        }
+
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = "unknown payload format.";
+        }
+        return false;
+    }
+
+    // ValidateManualNetworkRequest：
+    // - 校验执行器当前支持的 IPv4/TCP/UDP 参数组合；
+    // - 不创建 socket、不发送网络请求，只做可复用纯参数检查；
+    // - 返回 false 时 resultOut->errorText 可直接给 UI 展示。
+    inline bool ValidateManualNetworkRequest(
+        const ManualNetworkRequest& request,
+        ManualNetworkRequestValidation* const resultOut)
+    {
+        ManualNetworkRequestValidation validationResult{};
+
+        if (request.apiKind != ManualNetworkApiKind::WinSockTcp &&
+            request.apiKind != ManualNetworkApiKind::WinSockUdp)
+        {
+            validationResult.errorText = "unknown manual request API kind.";
+            if (resultOut != nullptr)
+            {
+                *resultOut = validationResult;
+            }
+            return false;
+        }
+
+        int effectiveAddressFamily = request.addressFamily;
+        if (!request.overrideSocketParameters)
+        {
+            effectiveAddressFamily = AF_INET;
+        }
+        if (effectiveAddressFamily != AF_INET)
+        {
+            validationResult.errorText = "Only AF_INET is supported in current manual request tool.";
+            if (resultOut != nullptr)
+            {
+                *resultOut = validationResult;
+            }
+            return false;
+        }
+
+        if (request.remoteAddress.empty() || request.remotePort == 0)
+        {
+            validationResult.errorText = "remote endpoint is empty or port is zero.";
+            if (resultOut != nullptr)
+            {
+                *resultOut = validationResult;
+            }
+            return false;
+        }
+
+        sockaddr_in remoteEndpoint{};
+        if (!request_detail::ResolveIpv4Endpoint(request.remoteAddress, request.remotePort, remoteEndpoint))
+        {
+            validationResult.errorText = "remote endpoint parse failed (IPv4 only).";
+            if (resultOut != nullptr)
+            {
+                *resultOut = validationResult;
+            }
+            return false;
+        }
+
+        if (request.enableLocalBind)
+        {
+            if (request.localAddress.empty())
+            {
+                validationResult.errorText = "local bind address is empty.";
+                if (resultOut != nullptr)
+                {
+                    *resultOut = validationResult;
+                }
+                return false;
+            }
+
+            sockaddr_in localEndpoint{};
+            if (!request_detail::ResolveIpv4Endpoint(request.localAddress, request.localPort, localEndpoint))
+            {
+                validationResult.errorText = "local bind endpoint parse failed (IPv4 only).";
+                if (resultOut != nullptr)
+                {
+                    *resultOut = validationResult;
+                }
+                return false;
+            }
+        }
+
+        std::vector<std::uint8_t> payloadBytes;
+        std::string payloadErrorText;
+        if (!BuildManualRequestPayloadBytes(request, payloadBytes, &payloadErrorText))
+        {
+            validationResult.errorText = "payload parse failed: " + payloadErrorText;
+            if (resultOut != nullptr)
+            {
+                *resultOut = validationResult;
+            }
+            return false;
+        }
+
+        validationResult.valid = true;
+        validationResult.payloadByteCount = payloadBytes.size();
+        if (resultOut != nullptr)
+        {
+            *resultOut = validationResult;
+        }
+        return true;
+    }
+
     // ExecuteManualNetworkRequest：
     // - 按 request 参数执行一次网络请求；
     // - 支持 TCP/UDP、可选 bind/connect、可选接收响应；
@@ -461,22 +606,17 @@ namespace ks::network
             }
         }
 
-        // 构造发送载荷字节。
+        // 构造发送载荷字节：
+        // - 与 UI 投递前校验共用 BuildManualRequestPayloadBytes；
+        // - 避免 HEX 解析规则在校验路径和执行路径发生分歧。
         std::vector<std::uint8_t> payloadBytes;
-        if (request.payloadFormat == ManualPayloadFormat::AsciiText)
+        std::string parseHexErrorText;
+        if (!BuildManualRequestPayloadBytes(request, payloadBytes, &parseHexErrorText))
         {
-            payloadBytes.assign(request.payloadText.begin(), request.payloadText.end());
-        }
-        else
-        {
-            std::string parseHexErrorText;
-            if (!request_detail::ParseHexPayloadText(request.payloadText, payloadBytes, &parseHexErrorText))
-            {
-                localResult.succeeded = false;
-                localResult.detailText = "payload parse failed: " + parseHexErrorText;
-                *resultOut = std::move(localResult);
-                return false;
-            }
+            localResult.succeeded = false;
+            localResult.detailText = "payload parse failed: " + parseHexErrorText;
+            *resultOut = std::move(localResult);
+            return false;
         }
 
         // 执行发送：

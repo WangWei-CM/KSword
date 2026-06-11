@@ -25,15 +25,17 @@ void NetworkDock::applyOrUpdateRateLimitRule()
     m_trafficService->UpsertRateLimitRule(limitRule);
     refreshRateLimitTable();
 
-    appendRateLimitActionLogLine(QStringLiteral("更新限速规则：PID=%1, %2 KB/s, suspend=%3 ms")
+    const QString formattedRateText = toQString(ks::network::FormatBytesPerSecond(limitRule.bytesPerSecond));
+    appendRateLimitActionLogLine(QStringLiteral("更新限速规则：PID=%1, %2, suspend=%3 ms")
         .arg(targetPid)
-        .arg(m_rateLimitKBpsSpin->value())
+        .arg(formattedRateText)
         .arg(m_rateLimitSuspendMsSpin->value()));
 
     kLogEvent limitEvent;
     info << limitEvent
         << "[NetworkDock] 设置限速规则, pid=" << targetPid
         << ", bytesPerSecond=" << limitRule.bytesPerSecond
+        << ", rateText=" << formattedRateText.toStdString()
         << ", suspendMs=" << limitRule.suspendDurationMs
         << eol;
 }
@@ -135,7 +137,7 @@ void NetworkDock::refreshRateLimitTable()
         m_rateLimitTable->setItem(rowIndex, toRateLimitColumn(RateLimitTableColumn::TriggerCount),
             createPacketCell(QString::number(snapshot.triggerCount)));
         m_rateLimitTable->setItem(rowIndex, toRateLimitColumn(RateLimitTableColumn::CurrentWindowBytes),
-            createPacketCell(QString::number(snapshot.currentWindowBytes)));
+            createPacketCell(toQString(ks::network::FormatByteCount(snapshot.currentWindowBytes))));
         m_rateLimitTable->setItem(rowIndex, toRateLimitColumn(RateLimitTableColumn::State),
             createPacketCell(stateText));
         ++rowIndex;

@@ -70,46 +70,6 @@
 
 namespace ksword::driver_dock_internal
 {
-    // ServiceHandleGuard：输入 SC_HANDLE，析构时自动释放；无返回值。
-    class ServiceHandleGuard
-    {
-    public:
-        explicit ServiceHandleGuard(SC_HANDLE handleValue = nullptr)
-            : m_handle(handleValue)
-        {
-        }
-
-        ~ServiceHandleGuard()
-        {
-            reset(nullptr);
-        }
-
-        ServiceHandleGuard(const ServiceHandleGuard&) = delete;
-        ServiceHandleGuard& operator=(const ServiceHandleGuard&) = delete;
-
-        SC_HANDLE get() const
-        {
-            return m_handle;
-        }
-
-        bool valid() const
-        {
-            return m_handle != nullptr;
-        }
-
-        void reset(SC_HANDLE newHandle)
-        {
-            if (m_handle != nullptr)
-            {
-                ::CloseServiceHandle(m_handle);
-            }
-            m_handle = newHandle;
-        }
-
-    private:
-        SC_HANDLE m_handle = nullptr;
-    };
-
     // DbwinBufferPacket：DBWIN 共享内存中的固定布局。
     struct DbwinBufferPacket
     {
@@ -132,5 +92,4 @@ namespace ksword::driver_dock_internal
     QString driverMajorFunctionName(std::uint32_t majorFunction);
     QString driverDeviceTypeText(std::uint32_t deviceType);
     QString driverDispatchLocationText(std::uint32_t flags);
-    bool waitServiceState(SC_HANDLE serviceHandle, DWORD targetState, DWORD timeoutMs, DWORD* currentStateOut);
 }

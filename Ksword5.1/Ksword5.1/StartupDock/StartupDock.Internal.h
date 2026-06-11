@@ -10,6 +10,7 @@
 
 #include "StartupDock.h"
 #include "../theme.h"
+#include "../ksword/startup/startup.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -84,14 +85,6 @@ namespace startup_dock_detail
     // - 把 Win32 错误码转换为可读文本。
     QString winErrorText(DWORD errorCode);
 
-    // normalizeFilePathText 作用：
-    // - 从命令行文本中尽量提取可执行文件路径。
-    QString normalizeFilePathText(const QString& commandText);
-
-    // queryPublisherTextByPath 作用：
-    // - 读取文件签名/公司名，返回发布者显示文本；
-    // - 失败时返回空串。
-    QString queryPublisherTextByPath(const QString& filePathText);
 
     // buildStatusText 作用：
     // - 把启用状态转成统一文本。
@@ -106,4 +99,13 @@ namespace startup_dock_detail
     // - 返回注册表树应展示的已知 Autoruns 风格位置列表；
     // - 注册表树会按该顺序创建默认展开的一级节点。
     QStringList buildKnownStartupRegistryLocationList();
+
+    // appendBackendStartupEntries 作用：
+    // - 把 ks::startup 后端的 UTF-8 记录转换为 StartupDock 的 Qt UI 记录；
+    // - 传入 entryListOut：追加目标，允许为空指针并直接返回；
+    // - 传入 backendEntryList：后端枚举结果，按移动语义消费；
+    // - 返回值：无，直接向 entryListOut 追加转换后的记录。
+    void appendBackendStartupEntries(
+        std::vector<StartupDock::StartupEntry>* entryListOut,
+        std::vector<ks::startup::StartupEntry> backendEntryList);
 }
