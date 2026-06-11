@@ -10,6 +10,8 @@ x86/
 build_*.txt
 build_*.json
 *.log
+dist/
+.codex-build-logs/
 package_stage/
 tmp-qmake-mm*/
 windeployqt_raw.txt
