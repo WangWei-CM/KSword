@@ -45,7 +45,7 @@
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
-    <QtInstall Condition="'$(KSWORD_QT_DIR)' != ''">$(KSWORD_QT_DIR)</QtInstall>
+    <QtInstall Condition="'$(KSWORD_QT_DIR)' != ''">6.9.3_msvc2022_64</QtInstall>
     <QtInstall Condition="'$(QtInstall)' == '' and '$(QTDIR)' != ''">$(QTDIR)</QtInstall>
     <QtInstall Condition="'$(QtInstall)' == ''">Qt</QtInstall>
     <QtModules>core;gui;network;widgets;charts;svg</QtModules>
@@ -416,7 +416,6 @@
     </PropertyGroup>
     <Copy SourceFiles="$(TaskmgrHijackScriptSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(TaskmgrHijackScriptSource)')" />
   </Target>
-
   <!-- 把公钥证书复制到主程序输出目录，UIAccess 按钮只导入 .cer，不接触本地 .pfx 私钥。 -->
   <Target Name="CopyKswordTestSigningCertificate" AfterTargets="Build">
     <PropertyGroup>
@@ -424,7 +423,6 @@
     </PropertyGroup>
     <Copy SourceFiles="$(KswordTestSigningCertificateSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(KswordTestSigningCertificateSource)')" />
   </Target>
-
   <!-- Release 主程序构建完成后复用驱动测试签名证书，签名失败只告警，避免阻断普通编译。 -->
   <Target Name="KswordMainAutoTestSignAfterBuild" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='Release|x64' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoTestSign)'!='true'">
     <PropertyGroup>
