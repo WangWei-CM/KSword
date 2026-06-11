@@ -25,3 +25,6 @@ aqtinstall.log
 .cert/*
 !.cert/
 !.cert/KswordARK-TestSigning.cer
+
+# 本机 Qt/MSBuild 自动探测脚本生成的本地路径配置。
+Directory.Build.props

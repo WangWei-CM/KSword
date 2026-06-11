@@ -129,138 +129,71 @@ bool ServiceDock::queryServiceFailureSettings(
 
     *settingsOut = ServiceRecoverySettings{};
 
-    SC_HANDLE scmHandle = ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (scmHandle == nullptr)
+    ks::service::FailureSettings failureSettings;
+    std::string errorText;
+    if (!ks::service::QueryServiceFailureSettings(
+        serviceNameText.trimmed().toStdWString(),
+        &failureSettings,
+        &errorText))
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = winErrorText(::GetLastError());
+            *errorTextOut = QString::fromUtf8(errorText.c_str());
         }
         return false;
     }
 
-    SC_HANDLE serviceHandle = ::OpenServiceW(
-        scmHandle,
-        reinterpret_cast<LPCWSTR>(serviceNameText.utf16()),
-        SERVICE_QUERY_CONFIG);
-    if (serviceHandle == nullptr)
+    settingsOut->resetPeriodDays = static_cast<int>(failureSettings.resetPeriodSeconds / (24u * 60u * 60u));
+    settingsOut->rebootMessageText = QString::fromStdWString(failureSettings.rebootMessage).trimmed();
+
+    const QString commandText = QString::fromStdWString(failureSettings.command).trimmed();
+    splitRecoveryCommandText(
+        commandText,
+        &settingsOut->programPathText,
+        &settingsOut->programArgumentsText,
+        &settingsOut->appendFailureCount);
+
+
+    if (!failureSettings.actions.empty())
     {
-        if (errorTextOut != nullptr)
+        settingsOut->firstActionType = static_cast<SC_ACTION_TYPE>(failureSettings.actions[0].type);
+        if (settingsOut->firstActionType == SC_ACTION_RESTART)
         {
-            *errorTextOut = winErrorText(::GetLastError());
-        }
-        ::CloseServiceHandle(scmHandle);
-        return false;
-    }
-
-    DWORD requiredBytes = 0;
-    ::QueryServiceConfig2W(serviceHandle, SERVICE_CONFIG_FAILURE_ACTIONS, nullptr, 0, &requiredBytes);
-    if (requiredBytes > 0)
-    {
-        std::vector<std::uint8_t> failureBuffer(requiredBytes);
-        const BOOL queryOk = ::QueryServiceConfig2W(
-            serviceHandle,
-            SERVICE_CONFIG_FAILURE_ACTIONS,
-            failureBuffer.data(),
-            requiredBytes,
-            &requiredBytes);
-        if (queryOk != FALSE)
-        {
-            const SERVICE_FAILURE_ACTIONSW* failurePointer =
-                reinterpret_cast<const SERVICE_FAILURE_ACTIONSW*>(failureBuffer.data());
-            settingsOut->resetPeriodDays = static_cast<int>(failurePointer->dwResetPeriod / (24u * 60u * 60u));
-            settingsOut->rebootMessageText = (failurePointer->lpRebootMsg != nullptr)
-                ? QString::fromWCharArray(failurePointer->lpRebootMsg).trimmed()
-                : QString();
-
-            const QString commandText = (failurePointer->lpCommand != nullptr)
-                ? QString::fromWCharArray(failurePointer->lpCommand).trimmed()
-                : QString();
-            splitRecoveryCommandText(
-                commandText,
-                &settingsOut->programPathText,
-                &settingsOut->programArgumentsText,
-                &settingsOut->appendFailureCount);
-
-            if (failurePointer->cActions > 0)
-            {
-                settingsOut->firstActionType = failurePointer->lpsaActions[0].Type;
-                if (failurePointer->lpsaActions[0].Type == SC_ACTION_RESTART)
-                {
-                    settingsOut->restartDelayMinutes =
-                        static_cast<int>(failurePointer->lpsaActions[0].Delay / (60u * 1000u));
-                }
-            }
-            if (failurePointer->cActions > 1)
-            {
-                settingsOut->secondActionType = failurePointer->lpsaActions[1].Type;
-                if (failurePointer->lpsaActions[1].Type == SC_ACTION_RESTART)
-                {
-                    settingsOut->restartDelayMinutes =
-                        static_cast<int>(failurePointer->lpsaActions[1].Delay / (60u * 1000u));
-                }
-            }
-            if (failurePointer->cActions > 2)
-            {
-                settingsOut->subsequentActionType = failurePointer->lpsaActions[2].Type;
-                if (failurePointer->lpsaActions[2].Type == SC_ACTION_RESTART)
-                {
-                    settingsOut->restartDelayMinutes =
-                        static_cast<int>(failurePointer->lpsaActions[2].Delay / (60u * 1000u));
-                }
-            }
+            settingsOut->restartDelayMinutes = static_cast<int>(failureSettings.actions[0].delayMs / (60u * 1000u));
         }
     }
-
-    requiredBytes = 0;
-    ::QueryServiceConfig2W(serviceHandle, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, nullptr, 0, &requiredBytes);
-    if (requiredBytes > 0)
+    if (failureSettings.actions.size() > 1)
     {
-        std::vector<std::uint8_t> flagBuffer(requiredBytes);
-        if (::QueryServiceConfig2W(
-            serviceHandle,
-            SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
-            flagBuffer.data(),
-            requiredBytes,
-            &requiredBytes) != FALSE)
+        settingsOut->secondActionType = static_cast<SC_ACTION_TYPE>(failureSettings.actions[1].type);
+        if (settingsOut->secondActionType == SC_ACTION_RESTART)
         {
-            const SERVICE_FAILURE_ACTIONS_FLAG* flagPointer =
-                reinterpret_cast<const SERVICE_FAILURE_ACTIONS_FLAG*>(flagBuffer.data());
-            settingsOut->failureActionsFlag = flagPointer->fFailureActionsOnNonCrashFailures != FALSE;
+            settingsOut->restartDelayMinutes = static_cast<int>(failureSettings.actions[1].delayMs / (60u * 1000u));
         }
     }
-
-    ::CloseServiceHandle(serviceHandle);
-    ::CloseServiceHandle(scmHandle);
+    if (failureSettings.actions.size() > 2)
+    {
+        settingsOut->subsequentActionType = static_cast<SC_ACTION_TYPE>(failureSettings.actions[2].type);
+        if (settingsOut->subsequentActionType == SC_ACTION_RESTART)
+        {
+            settingsOut->restartDelayMinutes = static_cast<int>(failureSettings.actions[2].delayMs / (60u * 1000u));
+        }
+    }
+    settingsOut->failureActionsFlag = failureSettings.failureActionsOnNonCrash;
     return true;
 }
+
 
 bool ServiceDock::applyServiceFailureSettings(
     const QString& serviceNameText,
     const ServiceRecoverySettings& settings,
     QString* errorTextOut) const
 {
-    SC_HANDLE scmHandle = ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (scmHandle == nullptr)
+    if (serviceNameText.trimmed().isEmpty())
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = winErrorText(::GetLastError());
+            *errorTextOut = QStringLiteral("恢复配置写入参数无效");
         }
-        return false;
-    }
-
-    SC_HANDLE serviceHandle = ::OpenServiceW(
-        scmHandle,
-        reinterpret_cast<LPCWSTR>(serviceNameText.utf16()),
-        SERVICE_CHANGE_CONFIG);
-    if (serviceHandle == nullptr)
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = winErrorText(::GetLastError());
-        }
-        ::CloseServiceHandle(scmHandle);
         return false;
     }
 
@@ -269,64 +202,41 @@ bool ServiceDock::applyServiceFailureSettings(
         settings.programArgumentsText,
         settings.appendFailureCount);
     const DWORD restartDelayMs = static_cast<DWORD>(settings.restartDelayMinutes * 60 * 1000);
-    SC_ACTION actionArray[3]{};
     const SC_ACTION_TYPE actionTypeArray[3]{
         settings.firstActionType,
         settings.secondActionType,
         settings.subsequentActionType
     };
 
+    ks::service::FailureSettings failureSettings;
+    failureSettings.resetPeriodSeconds = static_cast<std::uint32_t>(settings.resetPeriodDays * 24 * 60 * 60);
+    failureSettings.rebootMessage = settings.rebootMessageText.toStdWString();
+    failureSettings.command = commandText.toStdWString();
+    failureSettings.failureActionsOnNonCrash = settings.failureActionsFlag;
+    failureSettings.actions.reserve(3);
     for (int actionIndex = 0; actionIndex < 3; ++actionIndex)
     {
-        actionArray[actionIndex].Type = actionTypeArray[actionIndex];
-        actionArray[actionIndex].Delay =
-            (actionTypeArray[actionIndex] == SC_ACTION_RESTART) ? restartDelayMs : 0u;
+        ks::service::FailureAction action;
+        action.type = static_cast<std::uint32_t>(actionTypeArray[actionIndex]);
+        action.delayMs = (actionTypeArray[actionIndex] == SC_ACTION_RESTART) ? restartDelayMs : 0u;
+        failureSettings.actions.push_back(action);
     }
 
-    std::wstring rebootMessageText = settings.rebootMessageText.toStdWString();
-    std::wstring commandWideText = commandText.toStdWString();
-
-    SERVICE_FAILURE_ACTIONSW failureSettings{};
-    failureSettings.dwResetPeriod = static_cast<DWORD>(settings.resetPeriodDays * 24 * 60 * 60);
-    failureSettings.lpRebootMsg = rebootMessageText.empty() ? nullptr : rebootMessageText.data();
-    failureSettings.lpCommand = commandWideText.empty() ? nullptr : commandWideText.data();
-    failureSettings.cActions = 3;
-    failureSettings.lpsaActions = actionArray;
-
-    if (::ChangeServiceConfig2W(
-        serviceHandle,
-        SERVICE_CONFIG_FAILURE_ACTIONS,
-        reinterpret_cast<LPBYTE>(&failureSettings)) == FALSE)
+    std::string errorText;
+    if (!ks::service::ApplyServiceFailureSettings(
+        serviceNameText.trimmed().toStdWString(),
+        failureSettings,
+        &errorText))
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = winErrorText(::GetLastError());
+            *errorTextOut = QString::fromUtf8(errorText.c_str());
         }
-        ::CloseServiceHandle(serviceHandle);
-        ::CloseServiceHandle(scmHandle);
         return false;
     }
-
-    SERVICE_FAILURE_ACTIONS_FLAG failureFlag{};
-    failureFlag.fFailureActionsOnNonCrashFailures = settings.failureActionsFlag ? TRUE : FALSE;
-    if (::ChangeServiceConfig2W(
-        serviceHandle,
-        SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
-        reinterpret_cast<LPBYTE>(&failureFlag)) == FALSE)
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = winErrorText(::GetLastError());
-        }
-        ::CloseServiceHandle(serviceHandle);
-        ::CloseServiceHandle(scmHandle);
-        return false;
-    }
-
-    ::CloseServiceHandle(serviceHandle);
-    ::CloseServiceHandle(scmHandle);
     return true;
 }
+
 
 void ServiceDock::applyGeneralTabChanges()
 {
@@ -361,62 +271,34 @@ void ServiceDock::applyGeneralTabChanges()
         }
     }
 
-    SC_HANDLE scmHandle = ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (scmHandle == nullptr)
+    ks::service::ServiceConfigUpdate update;
+    update.changeStartType = true;
+    update.startType = targetStartType;
+    update.changeDisplayName = true;
+    update.displayName = displayNameText.toStdWString();
+
+    std::string errorText;
+    if (!ks::service::ChangeServiceConfiguration(
+        serviceNameText.toStdWString(),
+        update,
+        &errorText))
     {
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("打开 SCM 失败：\n%1").arg(winErrorText(::GetLastError())));
+        QMessageBox::warning(
+            this,
+            QStringLiteral("服务管理"),
+            QStringLiteral("修改常规属性失败：\n%1").arg(QString::fromUtf8(errorText.c_str())));
         return;
     }
 
-    SC_HANDLE serviceHandle = ::OpenServiceW(
-        scmHandle,
-        reinterpret_cast<LPCWSTR>(serviceNameText.utf16()),
-        SERVICE_CHANGE_CONFIG);
-    if (serviceHandle == nullptr)
-    {
-        const QString errorText = winErrorText(::GetLastError());
-        ::CloseServiceHandle(scmHandle);
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("打开服务失败：\n%1").arg(errorText));
-        return;
-    }
+    // Description and delayed-auto writes remain best-effort to preserve prior UI behavior.
+    (void)ks::service::SetServiceDescription(serviceNameText.toStdWString(), descriptionText.toStdWString());
+    (void)ks::service::SetDelayedAutoStart(
+        serviceNameText.toStdWString(),
+        targetStartType == SERVICE_AUTO_START && targetDelayedAutoStart);
 
-    const BOOL changeConfigOk = ::ChangeServiceConfigW(
-        serviceHandle,
-        SERVICE_NO_CHANGE,
-        targetStartType,
-        SERVICE_NO_CHANGE,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        reinterpret_cast<LPCWSTR>(displayNameText.utf16()));
-    if (changeConfigOk == FALSE)
-    {
-        const QString errorText = winErrorText(::GetLastError());
-        ::CloseServiceHandle(serviceHandle);
-        ::CloseServiceHandle(scmHandle);
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("修改常规属性失败：\n%1").arg(errorText));
-        return;
-    }
-
-    SERVICE_DESCRIPTIONW descriptionInfo{};
-    std::wstring descriptionWideText = descriptionText.toStdWString();
-    descriptionInfo.lpDescription = descriptionWideText.empty() ? nullptr : descriptionWideText.data();
-    ::ChangeServiceConfig2W(serviceHandle, SERVICE_CONFIG_DESCRIPTION, reinterpret_cast<LPBYTE>(&descriptionInfo));
-
-    SERVICE_DELAYED_AUTO_START_INFO delayedInfo{};
-    delayedInfo.fDelayedAutostart = (targetStartType == SERVICE_AUTO_START && targetDelayedAutoStart) ? TRUE : FALSE;
-    ::ChangeServiceConfig2W(
-        serviceHandle,
-        SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
-        reinterpret_cast<LPBYTE>(&delayedInfo));
-
-    ::CloseServiceHandle(serviceHandle);
-    ::CloseServiceHandle(scmHandle);
     refreshSelectedService();
 }
+
 
 void ServiceDock::applyLogonTabChanges()
 {
@@ -449,64 +331,33 @@ void ServiceDock::applyLogonTabChanges()
         ? (baseServiceType | SERVICE_INTERACTIVE_PROCESS)
         : baseServiceType;
 
-    SC_HANDLE scmHandle = ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (scmHandle == nullptr)
+    ks::service::ServiceConfigUpdate update;
+    update.changeServiceType = true;
+    update.serviceType = targetServiceType;
+    update.changeAccount = true;
+    update.accountName = useLocalSystem ? std::wstring(L"LocalSystem") : accountText.toStdWString();
+    if (!useLocalSystem && (!passwordText.isEmpty() || QString::compare(accountText, selectedEntry.accountText, Qt::CaseInsensitive) != 0))
     {
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("打开 SCM 失败：\n%1").arg(winErrorText(::GetLastError())));
+        update.changePassword = true;
+        update.password = passwordText.toStdWString();
+    }
+
+    std::string errorText;
+    if (!ks::service::ChangeServiceConfiguration(
+        serviceNameText.toStdWString(),
+        update,
+        &errorText))
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("服务管理"),
+            QStringLiteral("修改登录属性失败：\n%1").arg(QString::fromUtf8(errorText.c_str())));
         return;
     }
 
-    SC_HANDLE serviceHandle = ::OpenServiceW(
-        scmHandle,
-        reinterpret_cast<LPCWSTR>(serviceNameText.utf16()),
-        SERVICE_CHANGE_CONFIG);
-    if (serviceHandle == nullptr)
-    {
-        const QString errorText = winErrorText(::GetLastError());
-        ::CloseServiceHandle(scmHandle);
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("打开服务失败：\n%1").arg(errorText));
-        return;
-    }
-
-    LPCWSTR startNamePointer = useLocalSystem
-        ? L"LocalSystem"
-        : reinterpret_cast<LPCWSTR>(accountText.utf16());
-    LPCWSTR passwordPointer = nullptr;
-    std::wstring passwordWideText;
-    if (!useLocalSystem)
-    {
-        if (!passwordText.isEmpty() || QString::compare(accountText, selectedEntry.accountText, Qt::CaseInsensitive) != 0)
-        {
-            passwordWideText = passwordText.toStdWString();
-            passwordPointer = passwordWideText.c_str();
-        }
-    }
-
-    const BOOL changeConfigOk = ::ChangeServiceConfigW(
-        serviceHandle,
-        targetServiceType,
-        SERVICE_NO_CHANGE,
-        SERVICE_NO_CHANGE,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        startNamePointer,
-        passwordPointer,
-        nullptr);
-    if (changeConfigOk == FALSE)
-    {
-        const QString errorText = winErrorText(::GetLastError());
-        ::CloseServiceHandle(serviceHandle);
-        ::CloseServiceHandle(scmHandle);
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("修改登录属性失败：\n%1").arg(errorText));
-        return;
-    }
-
-    ::CloseServiceHandle(serviceHandle);
-    ::CloseServiceHandle(scmHandle);
     refreshSelectedService();
 }
+
 
 void ServiceDock::applyRecoveryTabChanges()
 {

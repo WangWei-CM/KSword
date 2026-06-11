@@ -19,7 +19,7 @@
 #include <thread>   // std::thread：服务枚举后台线程。
 #include <vector>   // std::vector：服务缓存容器。
 
-#include <winsvc.h> // DWORD/SC_HANDLE/SERVICE_* 常量与结构。
+#include <winsvc.h> // DWORD/SERVICE_*/SC_ACTION_* 常量与结构。
 
 class QComboBox;
 class QCheckBox;
@@ -218,11 +218,6 @@ private:
         bool useStartService,
         DWORD expectedState,
         bool highRiskAction);
-    bool waitForServiceState(
-        SC_HANDLE serviceHandle,
-        DWORD expectedState,
-        DWORD timeoutMs,
-        DWORD* finalStateOut) const;
 
     // ===================== 工具 =====================
     QString selectedServiceName() const;

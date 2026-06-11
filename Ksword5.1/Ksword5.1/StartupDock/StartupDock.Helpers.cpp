@@ -6,122 +6,9 @@
 #include <QPixmap>
 #include <QSvgRenderer>
 
-#include <wintrust.h>
-#include <Softpub.h>
-#include <winver.h>
-
-#pragma comment(lib, "Wintrust.lib")
-#pragma comment(lib, "Version.lib")
 
 namespace startup_dock_detail
 {
-    namespace
-    {
-        // queryCompanyNameByVersion 作用：
-        // - 从文件版本信息读取 CompanyName；
-        // - 作为发布者显示的快速兜底来源。
-        QString queryCompanyNameByVersion(const QString& filePathText)
-        {
-            if (filePathText.trimmed().isEmpty())
-            {
-                return QString();
-            }
-
-            const std::wstring utf16Path = filePathText.toStdWString();
-            DWORD handleValue = 0;
-            const DWORD versionInfoBytes = ::GetFileVersionInfoSizeW(utf16Path.c_str(), &handleValue);
-            if (versionInfoBytes == 0)
-            {
-                return QString();
-            }
-
-            std::vector<std::uint8_t> versionBuffer(versionInfoBytes);
-            if (::GetFileVersionInfoW(
-                utf16Path.c_str(),
-                0,
-                versionInfoBytes,
-                versionBuffer.data()) == FALSE)
-            {
-                return QString();
-            }
-
-            struct LangAndCodePage
-            {
-                WORD language = 0;
-                WORD codePage = 0;
-            };
-
-            LangAndCodePage* translationPointer = nullptr;
-            UINT translationBytes = 0;
-            if (::VerQueryValueW(
-                versionBuffer.data(),
-                L"\\VarFileInfo\\Translation",
-                reinterpret_cast<LPVOID*>(&translationPointer),
-                &translationBytes) == FALSE
-                || translationPointer == nullptr
-                || translationBytes < sizeof(LangAndCodePage))
-            {
-                return QString();
-            }
-
-            wchar_t queryPathBuffer[64] = {};
-            _snwprintf_s(
-                queryPathBuffer,
-                _countof(queryPathBuffer),
-                _TRUNCATE,
-                L"\\StringFileInfo\\%04x%04x\\CompanyName",
-                translationPointer[0].language,
-                translationPointer[0].codePage);
-
-            wchar_t* companyNamePointer = nullptr;
-            UINT companyNameChars = 0;
-            if (::VerQueryValueW(
-                versionBuffer.data(),
-                queryPathBuffer,
-                reinterpret_cast<LPVOID*>(&companyNamePointer),
-                &companyNameChars) == FALSE
-                || companyNamePointer == nullptr
-                || companyNameChars <= 1)
-            {
-                return QString();
-            }
-
-            return QString::fromWCharArray(companyNamePointer).trimmed();
-        }
-
-        // isFileTrustedByWindows 作用：
-        // - 使用 WinVerifyTrust 判断文件是否被 Windows 信任。
-        bool isFileTrustedByWindows(const QString& filePathText)
-        {
-            if (filePathText.trimmed().isEmpty())
-            {
-                return false;
-            }
-
-            const std::wstring utf16Path = filePathText.toStdWString();
-            WINTRUST_FILE_INFO fileInfo{};
-            fileInfo.cbStruct = sizeof(fileInfo);
-            fileInfo.pcwszFilePath = utf16Path.c_str();
-
-            WINTRUST_DATA trustData{};
-            trustData.cbStruct = sizeof(trustData);
-            trustData.dwUIChoice = WTD_UI_NONE;
-            trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
-            trustData.dwUnionChoice = WTD_CHOICE_FILE;
-            trustData.dwStateAction = WTD_STATEACTION_VERIFY;
-            trustData.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
-            trustData.pFile = &fileInfo;
-
-            GUID policyGuid = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-            const LONG verifyResult = ::WinVerifyTrust(nullptr, &policyGuid, &trustData);
-
-            trustData.dwStateAction = WTD_STATEACTION_CLOSE;
-            ::WinVerifyTrust(nullptr, &policyGuid, &trustData);
-
-            return verifyResult == ERROR_SUCCESS;
-        }
-    }
-
     QIcon createBlueIcon(const char* resourcePath, const QSize& iconSize)
     {
         const QString iconPath = QString::fromUtf8(resourcePath);
@@ -173,72 +60,6 @@ namespace startup_dock_detail
         return QStringLiteral("%1 (code=%2)").arg(messageText).arg(errorCode);
     }
 
-    QString normalizeFilePathText(const QString& commandText)
-    {
-        const QString trimmedText = commandText.trimmed();
-        if (trimmedText.isEmpty())
-        {
-            return QString();
-        }
-
-        if (trimmedText.startsWith('"'))
-        {
-            const int endQuoteIndex = trimmedText.indexOf('"', 1);
-            if (endQuoteIndex > 1)
-            {
-                return QDir::toNativeSeparators(trimmedText.mid(1, endQuoteIndex - 1));
-            }
-        }
-
-        const int exeIndex = trimmedText.indexOf(QStringLiteral(".exe"), 0, Qt::CaseInsensitive);
-        if (exeIndex > 0)
-        {
-            return QDir::toNativeSeparators(trimmedText.left(exeIndex + 4));
-        }
-
-        const int dllIndex = trimmedText.indexOf(QStringLiteral(".dll"), 0, Qt::CaseInsensitive);
-        if (dllIndex > 0)
-        {
-            return QDir::toNativeSeparators(trimmedText.left(dllIndex + 4));
-        }
-
-        const int sysIndex = trimmedText.indexOf(QStringLiteral(".sys"), 0, Qt::CaseInsensitive);
-        if (sysIndex > 0)
-        {
-            return QDir::toNativeSeparators(trimmedText.left(sysIndex + 4));
-        }
-
-        const int spaceIndex = trimmedText.indexOf(' ');
-        if (spaceIndex > 0)
-        {
-            return QDir::toNativeSeparators(trimmedText.left(spaceIndex));
-        }
-        return QDir::toNativeSeparators(trimmedText);
-    }
-
-    QString queryPublisherTextByPath(const QString& filePathText)
-    {
-        const QFileInfo fileInfo(filePathText);
-        if (!fileInfo.exists() || !fileInfo.isFile())
-        {
-            return QString();
-        }
-
-        const QString companyNameText = queryCompanyNameByVersion(fileInfo.absoluteFilePath());
-        if (!companyNameText.isEmpty())
-        {
-            return companyNameText + (isFileTrustedByWindows(fileInfo.absoluteFilePath())
-                ? QStringLiteral(" (Trusted)")
-                : QStringLiteral(" (Untrusted)"));
-        }
-
-        if (isFileTrustedByWindows(fileInfo.absoluteFilePath()))
-        {
-            return QStringLiteral("Signed (Trusted)");
-        }
-        return QString();
-    }
-
     QString buildStatusText(const bool enabled)
     {
         return enabled ? QStringLiteral("启用") : QStringLiteral("禁用");
@@ -280,5 +101,81 @@ namespace startup_dock_detail
         fieldList.push_back(currentFieldText);
         return fieldList;
     }
-}
 
+    namespace
+    {
+        // fromBackendText 作用：
+        // - 把 ks::startup 使用的 UTF-8 std::string 转回 Qt UI 字符串；
+        // - 输入 textValue：后端文本字段；
+        // - 输出 QString：供表格/树/菜单展示使用。
+        QString fromBackendText(const std::string& textValue)
+        {
+            return QString::fromUtf8(textValue.c_str(), static_cast<int>(textValue.size()));
+        }
+
+        // fromBackendCategory 作用：
+        // - 把 ks::startup::StartupCategory 映射为 StartupDock::StartupCategory；
+        // - 输入 category：后端枚举分类；
+        // - 输出 UI 层分类枚举，未知值回退到 All。
+        StartupDock::StartupCategory fromBackendCategory(const ks::startup::StartupCategory category)
+        {
+            switch (category)
+            {
+            case ks::startup::StartupCategory::All:
+                return StartupDock::StartupCategory::All;
+            case ks::startup::StartupCategory::Logon:
+                return StartupDock::StartupCategory::Logon;
+            case ks::startup::StartupCategory::Services:
+                return StartupDock::StartupCategory::Services;
+            case ks::startup::StartupCategory::Drivers:
+                return StartupDock::StartupCategory::Drivers;
+            case ks::startup::StartupCategory::Tasks:
+                return StartupDock::StartupCategory::Tasks;
+            case ks::startup::StartupCategory::Registry:
+                return StartupDock::StartupCategory::Registry;
+            case ks::startup::StartupCategory::Wmi:
+                return StartupDock::StartupCategory::Wmi;
+            default:
+                return StartupDock::StartupCategory::All;
+            }
+        }
+    }
+
+    void appendBackendStartupEntries(
+        std::vector<StartupDock::StartupEntry>* entryListOut,
+        std::vector<ks::startup::StartupEntry> backendEntryList)
+    {
+        if (entryListOut == nullptr)
+        {
+            return;
+        }
+
+        entryListOut->reserve(entryListOut->size() + backendEntryList.size());
+        for (const ks::startup::StartupEntry& backendEntry : backendEntryList)
+        {
+            // 转换原则：
+            // - 后端只负责枚举与文本/布尔字段；
+            // - QIcon 留空，后续仍由 StartupDock::resolveEntryIcon 在 UI 线程解析。
+            StartupDock::StartupEntry entry;
+            entry.uniqueIdText = fromBackendText(backendEntry.uniqueIdText);
+            entry.category = fromBackendCategory(backendEntry.category);
+            entry.categoryText = fromBackendText(backendEntry.categoryText);
+            entry.itemNameText = fromBackendText(backendEntry.itemNameText);
+            entry.publisherText = fromBackendText(backendEntry.publisherText);
+            entry.imagePathText = QDir::toNativeSeparators(fromBackendText(backendEntry.imagePathText));
+            entry.commandText = fromBackendText(backendEntry.commandText);
+            entry.locationText = QDir::toNativeSeparators(fromBackendText(backendEntry.locationText));
+            entry.locationGroupText = QDir::toNativeSeparators(fromBackendText(backendEntry.locationGroupText));
+            entry.registryValueNameText = fromBackendText(backendEntry.registryValueNameText);
+            entry.userText = fromBackendText(backendEntry.userText);
+            entry.detailText = fromBackendText(backendEntry.detailText);
+            entry.sourceTypeText = fromBackendText(backendEntry.sourceTypeText);
+            entry.enabled = backendEntry.enabled;
+            entry.canOpenFileLocation = backendEntry.canOpenFileLocation;
+            entry.canOpenRegistryLocation = backendEntry.canOpenRegistryLocation;
+            entry.canDelete = backendEntry.canDelete;
+            entry.deleteRegistryTree = backendEntry.deleteRegistryTree;
+            entryListOut->push_back(std::move(entry));
+        }
+    }
+}

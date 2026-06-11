@@ -9,7 +9,10 @@ using namespace service_dock_detail;
 
 namespace
 {
-    // isFileTrustedByWindows 作用：判断文件签名是否被系统信任。
+    // isFileTrustedByWindows checks a file signature with WinVerifyTrust.
+    // Input: filePathText is a UI QString path.
+    // Processing: converts only at the WinTrust boundary and keeps UI policy local.
+    // Return: true when Windows trusts the file, otherwise false.
     bool isFileTrustedByWindows(const QString& filePathText)
     {
         if (filePathText.trimmed().isEmpty())
@@ -39,60 +42,24 @@ namespace
         return verifyResult == ERROR_SUCCESS;
     }
 
-    // queryFailureCommandTextByServiceName 作用：读取 FailureActions 配置中的命令文本。
+    // queryFailureCommandTextByServiceName reads failure-action command via ks::service.
+    // Input: serviceNameText is the SCM short name from the UI cache.
+    // Processing: the reusable layer owns QueryServiceConfig2W and string ownership.
+    // Return: command text, or empty when missing/unreadable.
     QString queryFailureCommandTextByServiceName(const QString& serviceNameText)
     {
-        SC_HANDLE scmHandle = ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-        if (scmHandle == nullptr)
+        ks::service::FailureSettings settings;
+        if (!ks::service::QueryServiceFailureSettings(serviceNameText.toStdWString(), &settings))
         {
             return QString();
         }
-
-        SC_HANDLE serviceHandle = ::OpenServiceW(
-            scmHandle,
-            reinterpret_cast<LPCWSTR>(serviceNameText.utf16()),
-            SERVICE_QUERY_CONFIG);
-        if (serviceHandle == nullptr)
-        {
-            ::CloseServiceHandle(scmHandle);
-            return QString();
-        }
-
-        DWORD requiredBytes = 0;
-        ::QueryServiceConfig2W(serviceHandle, SERVICE_CONFIG_FAILURE_ACTIONS, nullptr, 0, &requiredBytes);
-        if (requiredBytes == 0)
-        {
-            ::CloseServiceHandle(serviceHandle);
-            ::CloseServiceHandle(scmHandle);
-            return QString();
-        }
-
-        std::vector<std::uint8_t> failureBuffer(requiredBytes);
-        const BOOL queryOk = ::QueryServiceConfig2W(
-            serviceHandle,
-            SERVICE_CONFIG_FAILURE_ACTIONS,
-            failureBuffer.data(),
-            requiredBytes,
-            &requiredBytes);
-        if (queryOk == FALSE)
-        {
-            ::CloseServiceHandle(serviceHandle);
-            ::CloseServiceHandle(scmHandle);
-            return QString();
-        }
-
-        const SERVICE_FAILURE_ACTIONSW* failurePointer =
-            reinterpret_cast<const SERVICE_FAILURE_ACTIONSW*>(failureBuffer.data());
-        const QString commandText = (failurePointer->lpCommand != nullptr)
-            ? QString::fromWCharArray(failurePointer->lpCommand).trimmed()
-            : QString();
-
-        ::CloseServiceHandle(serviceHandle);
-        ::CloseServiceHandle(scmHandle);
-        return commandText;
+        return QString::fromStdWString(settings.command).trimmed();
     }
 
-    // queryServiceDllPathFromRegistry 作用：读取服务 Parameters\ServiceDll 路径。
+    // queryServiceDllPathFromRegistry reads Parameters\ServiceDll.
+    // Input: serviceNameText is the SCM short name.
+    // Processing: this remains registry access, not SCM access, so it stays in UI helper scope.
+    // Return: expanded native path or an empty string when absent.
     QString queryServiceDllPathFromRegistry(const QString& serviceNameText)
     {
         const QString registryPathText = QStringLiteral(
@@ -139,11 +106,13 @@ namespace
         }
 
         wchar_t expandedPathBuffer[MAX_PATH * 4] = {};
+        const DWORD expandedPathBufferCount =
+            static_cast<DWORD>(sizeof(expandedPathBuffer) / sizeof(expandedPathBuffer[0]));
         const DWORD expandedLength = ::ExpandEnvironmentStringsW(
             reinterpret_cast<LPCWSTR>(rawPathText.utf16()),
             expandedPathBuffer,
-            static_cast<DWORD>(std::size(expandedPathBuffer)));
-        if (expandedLength > 0 && expandedLength < std::size(expandedPathBuffer))
+            expandedPathBufferCount);
+        if (expandedLength > 0 && expandedLength < expandedPathBufferCount)
         {
             rawPathText = QString::fromWCharArray(expandedPathBuffer).trimmed();
         }
@@ -151,7 +120,10 @@ namespace
         return QDir::toNativeSeparators(rawPathText);
     }
 
-    // evaluateRiskTagList 作用：生成服务风险标签列表，供主表风险列与过滤复用。
+    // evaluateRiskTagList generates UI risk tags from an already-built ServiceEntry.
+    // Input: entry contains normalized path/account/config fields.
+    // Processing: combines file signature, ServiceDll, account, autostart, description and failure command checks.
+    // Return: de-duplicated risk labels for the table and detail panes.
     QStringList evaluateRiskTagList(const ServiceDock::ServiceEntry& entry)
     {
         QStringList riskTagList;
@@ -222,245 +194,88 @@ namespace
         return riskTagList;
     }
 
-    // queryServiceStatusProcess 作用：读取服务实时状态（含 PID/控制位）。
-    bool queryServiceStatusProcess(
-        SC_HANDLE serviceHandle,
-        SERVICE_STATUS_PROCESS* statusOut,
-        QString* errorTextOut)
-    {
-        if (serviceHandle == nullptr || statusOut == nullptr)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = QStringLiteral("queryServiceStatusProcess 参数无效");
-            }
-            return false;
-        }
-
-        DWORD requiredBytes = 0;
-        SERVICE_STATUS_PROCESS statusValue{};
-        const BOOL queryOk = ::QueryServiceStatusEx(
-            serviceHandle,
-            SC_STATUS_PROCESS_INFO,
-            reinterpret_cast<LPBYTE>(&statusValue),
-            sizeof(statusValue),
-            &requiredBytes);
-        if (queryOk == FALSE)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = winErrorText(::GetLastError());
-            }
-            return false;
-        }
-
-        *statusOut = statusValue;
-        return true;
-    }
-
-    // queryServiceConfigBuffer 作用：查询 QueryServiceConfigW 并返回配置缓冲区。
-    bool queryServiceConfigBuffer(
-        SC_HANDLE serviceHandle,
-        std::vector<std::uint8_t>* configBufferOut,
-        QUERY_SERVICE_CONFIGW** configOut,
-        QString* errorTextOut)
-    {
-        if (serviceHandle == nullptr || configBufferOut == nullptr || configOut == nullptr)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = QStringLiteral("queryServiceConfigBuffer 参数无效");
-            }
-            return false;
-        }
-
-        DWORD requiredBytes = 0;
-        ::QueryServiceConfigW(serviceHandle, nullptr, 0, &requiredBytes);
-        if (requiredBytes == 0)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = winErrorText(::GetLastError());
-            }
-            return false;
-        }
-
-        configBufferOut->assign(requiredBytes, 0);
-        QUERY_SERVICE_CONFIGW* configPointer =
-            reinterpret_cast<QUERY_SERVICE_CONFIGW*>(configBufferOut->data());
-        const BOOL queryOk = ::QueryServiceConfigW(
-            serviceHandle,
-            configPointer,
-            requiredBytes,
-            &requiredBytes);
-        if (queryOk == FALSE)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = winErrorText(::GetLastError());
-            }
-            return false;
-        }
-
-        *configOut = configPointer;
-        return true;
-    }
-
-    // queryServiceDescriptionText 作用：读取服务描述字符串。
-    QString queryServiceDescriptionText(SC_HANDLE serviceHandle)
-    {
-        if (serviceHandle == nullptr)
-        {
-            return QString();
-        }
-
-        DWORD requiredBytes = 0;
-        ::QueryServiceConfig2W(serviceHandle, SERVICE_CONFIG_DESCRIPTION, nullptr, 0, &requiredBytes);
-        if (requiredBytes == 0)
-        {
-            return QString();
-        }
-
-        std::vector<std::uint8_t> descriptionBuffer(requiredBytes);
-        const BOOL queryOk = ::QueryServiceConfig2W(
-            serviceHandle,
-            SERVICE_CONFIG_DESCRIPTION,
-            descriptionBuffer.data(),
-            requiredBytes,
-            &requiredBytes);
-        if (queryOk == FALSE)
-        {
-            return QString();
-        }
-
-        SERVICE_DESCRIPTIONW* descriptionPointer =
-            reinterpret_cast<SERVICE_DESCRIPTIONW*>(descriptionBuffer.data());
-        if (descriptionPointer->lpDescription == nullptr)
-        {
-            return QString();
-        }
-        return QString::fromWCharArray(descriptionPointer->lpDescription).trimmed();
-    }
-
-    // queryDelayedAutoStartFlag 作用：读取延迟自动启动开关值。
-    bool queryDelayedAutoStartFlag(SC_HANDLE serviceHandle)
-    {
-        if (serviceHandle == nullptr)
-        {
-            return false;
-        }
-
-        SERVICE_DELAYED_AUTO_START_INFO delayedInfo{};
-        DWORD requiredBytes = 0;
-        const BOOL queryOk = ::QueryServiceConfig2W(
-            serviceHandle,
-            SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
-            reinterpret_cast<LPBYTE>(&delayedInfo),
-            sizeof(delayedInfo),
-            &requiredBytes);
-        if (queryOk == FALSE)
-        {
-            return false;
-        }
-        return delayedInfo.fDelayedAutostart != FALSE;
-    }
-
-    // buildServiceEntryByName 作用：按服务名构建完整 ServiceEntry 结构。
-    bool buildServiceEntryByName(
-        SC_HANDLE scmHandle,
-        const QString& serviceNameText,
-        const QString& displayNameHintText,
-        const SERVICE_STATUS_PROCESS* statusHint,
+    // buildServiceEntryFromRecord converts a Qt-free ks::service record into the UI cache row.
+    // Input: serviceRecord is produced by ks::service enumeration/query.
+    // Processing: this function only formats text and derives UI-only risk fields.
+    // Return: true when a usable row is produced; strict mode fails if config is missing.
+    bool buildServiceEntryFromRecord(
+        const ks::service::ServiceRecord& serviceRecord,
         ServiceDock::ServiceEntry* entryOut,
-        QString* errorTextOut)
+        QString* errorTextOut,
+        const bool strictConfig)
     {
-        if (scmHandle == nullptr || entryOut == nullptr || serviceNameText.trimmed().isEmpty())
+        if (entryOut == nullptr || serviceRecord.serviceName.empty())
         {
             if (errorTextOut != nullptr)
             {
-                *errorTextOut = QStringLiteral("buildServiceEntryByName 参数无效");
+                *errorTextOut = QStringLiteral("服务记录参数无效");
             }
             return false;
         }
 
-        SC_HANDLE serviceHandle = ::OpenServiceW(
-            scmHandle,
-            reinterpret_cast<LPCWSTR>(serviceNameText.utf16()),
-            SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS);
-        if (serviceHandle == nullptr)
+        ServiceDock::ServiceEntry entry;
+        entry.serviceNameText = QString::fromStdWString(serviceRecord.serviceName).trimmed();
+        entry.displayNameText = QString::fromStdWString(serviceRecord.displayName).trimmed();
+        if (entry.displayNameText.isEmpty())
         {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = winErrorText(::GetLastError());
-            }
-            return false;
+            entry.displayNameText = entry.serviceNameText;
         }
 
-        SERVICE_STATUS_PROCESS statusValue{};
-        if (statusHint != nullptr)
+        entry.currentState = serviceRecord.status.currentState;
+        entry.stateText = serviceStateToText(entry.currentState);
+        entry.controlsAccepted = serviceRecord.status.controlsAccepted;
+        entry.processId = serviceRecord.status.processId;
+        entry.serviceTypeValue = serviceRecord.status.serviceType;
+        entry.serviceTypeText = serviceTypeToText(entry.serviceTypeValue);
+        entry.accountText = QStringLiteral("N/A");
+        entry.errorControlText = QStringLiteral("未知");
+        entry.startTypeText = QStringLiteral("未知");
+
+        if (!serviceRecord.hasConfig)
         {
-            statusValue = *statusHint;
-        }
-        else
-        {
-            QString statusErrorText;
-            if (!queryServiceStatusProcess(serviceHandle, &statusValue, &statusErrorText))
+            const QString errorText = QString::fromUtf8(serviceRecord.configErrorText.c_str());
+            if (strictConfig)
             {
-                ::CloseServiceHandle(serviceHandle);
                 if (errorTextOut != nullptr)
                 {
-                    *errorTextOut = statusErrorText;
+                    *errorTextOut = errorText.isEmpty() ? QStringLiteral("读取服务配置失败") : errorText;
                 }
                 return false;
             }
+
+            entry.descriptionText = QStringLiteral("读取服务配置失败：%1")
+                .arg(errorText.isEmpty() ? QStringLiteral("未知错误") : errorText);
+            entry.serviceDllPathText = queryServiceDllPathFromRegistry(entry.serviceNameText);
+            entry.riskTagList = evaluateRiskTagList(entry);
+            entry.riskSummaryText = entry.riskTagList.isEmpty()
+                ? QStringLiteral("低")
+                : entry.riskTagList.join(QStringLiteral(" | "));
+            entry.hasRisk = !entry.riskTagList.isEmpty();
+            *entryOut = std::move(entry);
+            return true;
         }
 
-        std::vector<std::uint8_t> configBuffer;
-        QUERY_SERVICE_CONFIGW* configPointer = nullptr;
-        QString configErrorText;
-        if (!queryServiceConfigBuffer(serviceHandle, &configBuffer, &configPointer, &configErrorText))
-        {
-            ::CloseServiceHandle(serviceHandle);
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = configErrorText;
-            }
-            return false;
-        }
-
-        entryOut->serviceNameText = serviceNameText;
-        entryOut->displayNameText = displayNameHintText.trimmed().isEmpty()
-            ? serviceNameText
-            : displayNameHintText;
-        entryOut->descriptionText = queryServiceDescriptionText(serviceHandle);
-        entryOut->commandLineText = (configPointer->lpBinaryPathName != nullptr)
-            ? QString::fromWCharArray(configPointer->lpBinaryPathName).trimmed()
-            : QString();
-        entryOut->imagePathText = normalizeServiceImagePath(entryOut->commandLineText);
-        entryOut->accountText = (configPointer->lpServiceStartName != nullptr)
-            ? QString::fromWCharArray(configPointer->lpServiceStartName).trimmed()
-            : QStringLiteral("N/A");
-        entryOut->currentState = statusValue.dwCurrentState;
-        entryOut->stateText = serviceStateToText(statusValue.dwCurrentState);
-        entryOut->controlsAccepted = statusValue.dwControlsAccepted;
-        entryOut->processId = statusValue.dwProcessId;
-        entryOut->startTypeValue = configPointer->dwStartType;
-        entryOut->serviceTypeValue = configPointer->dwServiceType;
-        entryOut->errorControlValue = configPointer->dwErrorControl;
-        entryOut->serviceDllPathText = queryServiceDllPathFromRegistry(serviceNameText);
-        entryOut->delayedAutoStart = (configPointer->dwStartType == SERVICE_AUTO_START)
-            ? queryDelayedAutoStartFlag(serviceHandle)
-            : false;
-        entryOut->startTypeText = startTypeToText(entryOut->startTypeValue, entryOut->delayedAutoStart);
-        entryOut->serviceTypeText = serviceTypeToText(entryOut->serviceTypeValue);
-        entryOut->errorControlText = errorControlToText(entryOut->errorControlValue);
-        entryOut->riskTagList = evaluateRiskTagList(*entryOut);
-        entryOut->riskSummaryText = entryOut->riskTagList.isEmpty()
+        entry.descriptionText = QString::fromStdWString(serviceRecord.description).trimmed();
+        entry.commandLineText = QString::fromStdWString(serviceRecord.config.binaryPath).trimmed();
+        entry.imagePathText = normalizeServiceImagePath(entry.commandLineText);
+        entry.accountText = serviceRecord.config.accountName.empty()
+            ? QStringLiteral("N/A")
+            : QString::fromStdWString(serviceRecord.config.accountName).trimmed();
+        entry.startTypeValue = serviceRecord.config.startType;
+        entry.serviceTypeValue = serviceRecord.config.serviceType;
+        entry.errorControlValue = serviceRecord.config.errorControl;
+        entry.serviceTypeText = serviceTypeToText(entry.serviceTypeValue);
+        entry.errorControlText = errorControlToText(entry.errorControlValue);
+        entry.serviceDllPathText = queryServiceDllPathFromRegistry(entry.serviceNameText);
+        entry.delayedAutoStart = (entry.startTypeValue == SERVICE_AUTO_START) && serviceRecord.config.delayedAutoStart;
+        entry.startTypeText = startTypeToText(entry.startTypeValue, entry.delayedAutoStart);
+        entry.riskTagList = evaluateRiskTagList(entry);
+        entry.riskSummaryText = entry.riskTagList.isEmpty()
             ? QStringLiteral("低")
-            : entryOut->riskTagList.join(QStringLiteral(" | "));
-        entryOut->hasRisk = !entryOut->riskTagList.isEmpty();
+            : entry.riskTagList.join(QStringLiteral(" | "));
+        entry.hasRisk = !entry.riskTagList.isEmpty();
 
-        ::CloseServiceHandle(serviceHandle);
+        *entryOut = std::move(entry);
         return true;
     }
 }
@@ -480,124 +295,31 @@ void ServiceDock::enumerateServiceList(
 
     serviceListOut->clear();
 
-    SC_HANDLE scmHandle = ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ENUMERATE_SERVICE | SC_MANAGER_CONNECT);
-    if (scmHandle == nullptr)
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("OpenSCManagerW 失败：%1").arg(winErrorText(::GetLastError()));
-        }
-        return;
-    }
-
-    DWORD bytesNeeded = 0;
-    DWORD servicesReturned = 0;
-    DWORD resumeHandle = 0;
-    ::EnumServicesStatusExW(
-        scmHandle,
-        SC_ENUM_PROCESS_INFO,
+    std::vector<ks::service::ServiceRecord> serviceRecordList;
+    std::string errorText;
+    if (!ks::service::EnumerateServiceRecords(
         SERVICE_WIN32_OWN_PROCESS | SERVICE_WIN32_SHARE_PROCESS,
         SERVICE_STATE_ALL,
-        nullptr,
-        0,
-        &bytesNeeded,
-        &servicesReturned,
-        &resumeHandle,
-        nullptr);
-
-    DWORD lastErrorValue = ::GetLastError();
-    if (bytesNeeded == 0 && lastErrorValue != ERROR_SUCCESS)
+        &serviceRecordList,
+        &errorText))
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("EnumServicesStatusExW 初始化失败：%1").arg(winErrorText(lastErrorValue));
+            *errorTextOut = QStringLiteral("枚举服务失败：%1").arg(QString::fromUtf8(errorText.c_str()));
         }
-        ::CloseServiceHandle(scmHandle);
         return;
     }
 
-    std::vector<std::uint8_t> enumBuffer(bytesNeeded > 0 ? bytesNeeded : 64 * 1024);
-    resumeHandle = 0;
-    do
+    serviceListOut->reserve(serviceRecordList.size());
+    for (const ks::service::ServiceRecord& serviceRecord : serviceRecordList)
     {
-        const BOOL enumOk = ::EnumServicesStatusExW(
-            scmHandle,
-            SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32_OWN_PROCESS | SERVICE_WIN32_SHARE_PROCESS,
-            SERVICE_STATE_ALL,
-            enumBuffer.data(),
-            static_cast<DWORD>(enumBuffer.size()),
-            &bytesNeeded,
-            &servicesReturned,
-            &resumeHandle,
-            nullptr);
-        if (enumOk == FALSE)
+        ServiceEntry serviceEntry;
+        QString buildErrorText;
+        if (buildServiceEntryFromRecord(serviceRecord, &serviceEntry, &buildErrorText, false))
         {
-            const DWORD enumError = ::GetLastError();
-            if (enumError == ERROR_MORE_DATA && bytesNeeded > enumBuffer.size())
-            {
-                enumBuffer.resize(bytesNeeded);
-                continue;
-            }
-
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = QStringLiteral("EnumServicesStatusExW 失败：%1").arg(winErrorText(enumError));
-            }
-            ::CloseServiceHandle(scmHandle);
-            return;
-        }
-
-        const ENUM_SERVICE_STATUS_PROCESSW* serviceArray =
-            reinterpret_cast<const ENUM_SERVICE_STATUS_PROCESSW*>(enumBuffer.data());
-        for (DWORD serviceIndex = 0; serviceIndex < servicesReturned; ++serviceIndex)
-        {
-            const ENUM_SERVICE_STATUS_PROCESSW& serviceItem = serviceArray[serviceIndex];
-            const QString serviceNameText = QString::fromWCharArray(serviceItem.lpServiceName).trimmed();
-            const QString displayNameText = QString::fromWCharArray(serviceItem.lpDisplayName).trimmed();
-
-            ServiceEntry serviceEntry;
-            QString queryErrorText;
-            const bool queryOk = buildServiceEntryByName(
-                scmHandle,
-                serviceNameText,
-                displayNameText,
-                &serviceItem.ServiceStatusProcess,
-                &serviceEntry,
-                &queryErrorText);
-            if (!queryOk)
-            {
-                // 兜底策略：
-                // - 即使读取详细配置失败，也保留主列表可见性；
-                // - 把错误塞到描述字段便于用户定位权限问题。
-                serviceEntry.serviceNameText = serviceNameText;
-                serviceEntry.displayNameText = displayNameText.isEmpty() ? serviceNameText : displayNameText;
-                serviceEntry.descriptionText = QStringLiteral("读取服务配置失败：%1").arg(queryErrorText);
-                serviceEntry.currentState = serviceItem.ServiceStatusProcess.dwCurrentState;
-                serviceEntry.stateText = serviceStateToText(serviceItem.ServiceStatusProcess.dwCurrentState);
-                serviceEntry.controlsAccepted = serviceItem.ServiceStatusProcess.dwControlsAccepted;
-                serviceEntry.processId = serviceItem.ServiceStatusProcess.dwProcessId;
-                serviceEntry.startTypeValue = 0;
-                serviceEntry.serviceTypeValue = serviceItem.ServiceStatusProcess.dwServiceType;
-                serviceEntry.errorControlValue = 0;
-                serviceEntry.delayedAutoStart = false;
-                serviceEntry.startTypeText = QStringLiteral("未知");
-                serviceEntry.serviceTypeText = serviceTypeToText(serviceEntry.serviceTypeValue);
-                serviceEntry.errorControlText = QStringLiteral("未知");
-                serviceEntry.accountText = QStringLiteral("N/A");
-                serviceEntry.serviceDllPathText = queryServiceDllPathFromRegistry(serviceNameText);
-                serviceEntry.riskTagList = evaluateRiskTagList(serviceEntry);
-                serviceEntry.riskSummaryText = serviceEntry.riskTagList.isEmpty()
-                    ? QStringLiteral("低")
-                    : serviceEntry.riskTagList.join(QStringLiteral(" | "));
-                serviceEntry.hasRisk = !serviceEntry.riskTagList.isEmpty();
-            }
-
             serviceListOut->push_back(std::move(serviceEntry));
         }
-    } while (resumeHandle != 0);
-
-    ::CloseServiceHandle(scmHandle);
+    }
 }
 
 bool ServiceDock::querySingleServiceByName(
@@ -614,23 +336,19 @@ bool ServiceDock::querySingleServiceByName(
         return false;
     }
 
-    SC_HANDLE scmHandle = ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (scmHandle == nullptr)
+    ks::service::ServiceRecord serviceRecord;
+    std::string errorText;
+    if (!ks::service::QueryServiceRecord(
+        serviceNameText.trimmed().toStdWString(),
+        &serviceRecord,
+        &errorText))
     {
         if (errorTextOut != nullptr)
         {
-            *errorTextOut = QStringLiteral("OpenSCManagerW 失败：%1").arg(winErrorText(::GetLastError()));
+            *errorTextOut = QStringLiteral("查询服务失败：%1").arg(QString::fromUtf8(errorText.c_str()));
         }
         return false;
     }
 
-    const bool queryOk = buildServiceEntryByName(
-        scmHandle,
-        serviceNameText.trimmed(),
-        QString(),
-        nullptr,
-        entryOut,
-        errorTextOut);
-    ::CloseServiceHandle(scmHandle);
-    return queryOk;
+    return buildServiceEntryFromRecord(serviceRecord, entryOut, errorTextOut, true);
 }

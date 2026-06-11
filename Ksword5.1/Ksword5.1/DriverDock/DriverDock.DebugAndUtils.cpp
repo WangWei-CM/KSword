@@ -1,4 +1,4 @@
-﻿#include "DriverDock.Internal.h"
+#include "DriverDock.Internal.h"
 
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
@@ -322,155 +322,46 @@ bool DriverDock::queryDriverServiceRecords(
     std::vector<DriverServiceRecord>& recordListOut,
     std::string* errorTextOut)
 {
+    // DriverDock now delegates raw SCM enumeration/config reads to ks::service:
+    // - input: no UI widgets are passed into the reusable layer;
+    // - processing: this wrapper only converts std::wstring records into QString rows;
+    // - return: true when SCM enumeration completed, false with UTF-8 error text.
     recordListOut.clear();
     if (errorTextOut != nullptr)
     {
         errorTextOut->clear();
     }
 
-    ServiceHandleGuard scmHandle(::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ENUMERATE_SERVICE | SC_MANAGER_CONNECT));
-    if (!scmHandle.valid())
+    std::vector<ks::service::ServiceRecord> serviceRecordList;
+    if (!ks::service::EnumerateServiceRecords(
+        SERVICE_DRIVER,
+        SERVICE_STATE_ALL,
+        &serviceRecordList,
+        errorTextOut))
     {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("OpenSCManagerW failed: %1")
-                .arg(formatWin32ErrorText(::GetLastError()))
-                .toStdString();
-        }
         return false;
     }
 
-    // 分页枚举所有驱动服务，避免单次缓冲不足导致漏项。
-    DWORD resumeHandle = 0;
-    while (true)
+    recordListOut.reserve(serviceRecordList.size());
+    for (const ks::service::ServiceRecord& serviceRecord : serviceRecordList)
     {
-        DWORD bytesNeeded = 0;
-        DWORD serviceCount = 0;
-        const BOOL probeResult = ::EnumServicesStatusExW(
-            scmHandle.get(),
-            SC_ENUM_PROCESS_INFO,
-            SERVICE_DRIVER,
-            SERVICE_STATE_ALL,
-            nullptr,
-            0,
-            &bytesNeeded,
-            &serviceCount,
-            &resumeHandle,
-            nullptr);
-        if (probeResult != FALSE)
+        DriverServiceRecord driverRecord;
+        driverRecord.serviceName = QString::fromStdWString(serviceRecord.serviceName);
+        driverRecord.displayName = QString::fromStdWString(serviceRecord.displayName);
+        driverRecord.currentState = serviceRecord.status.currentState;
+        driverRecord.serviceType = serviceRecord.status.serviceType;
+        if (serviceRecord.hasConfig)
         {
-            // 没有可枚举项时会直接成功并返回空结果。
-            break;
-        }
-
-        const DWORD probeError = ::GetLastError();
-        if (probeError != ERROR_MORE_DATA)
-        {
-            if (errorTextOut != nullptr)
+            driverRecord.startType = serviceRecord.config.startType;
+            driverRecord.errorControl = serviceRecord.config.errorControl;
+            driverRecord.binaryPath = QString::fromStdWString(serviceRecord.config.binaryPath);
+            if (driverRecord.displayName.trimmed().isEmpty())
             {
-                *errorTextOut = QStringLiteral("EnumServicesStatusExW probe failed: %1")
-                    .arg(formatWin32ErrorText(probeError))
-                    .toStdString();
+                driverRecord.displayName = QString::fromStdWString(serviceRecord.config.displayName);
             }
-            return false;
         }
-        if (bytesNeeded == 0)
-        {
-            break;
-        }
-
-        std::vector<std::uint8_t> buffer(bytesNeeded, 0);
-        serviceCount = 0;
-        if (!::EnumServicesStatusExW(
-            scmHandle.get(),
-            SC_ENUM_PROCESS_INFO,
-            SERVICE_DRIVER,
-            SERVICE_STATE_ALL,
-            buffer.data(),
-            static_cast<DWORD>(buffer.size()),
-            &bytesNeeded,
-            &serviceCount,
-            &resumeHandle,
-            nullptr))
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = QStringLiteral("EnumServicesStatusExW failed: %1")
-                    .arg(formatWin32ErrorText(::GetLastError()))
-                    .toStdString();
-            }
-            return false;
-        }
-
-        auto* serviceArray = reinterpret_cast<ENUM_SERVICE_STATUS_PROCESSW*>(buffer.data());
-        for (DWORD index = 0; index < serviceCount; ++index)
-        {
-            const ENUM_SERVICE_STATUS_PROCESSW& serviceEntry = serviceArray[index];
-            DriverServiceRecord serviceRecord;
-            serviceRecord.serviceName = QString::fromWCharArray(
-                serviceEntry.lpServiceName == nullptr ? L"" : serviceEntry.lpServiceName);
-            serviceRecord.displayName = QString::fromWCharArray(
-                serviceEntry.lpDisplayName == nullptr ? L"" : serviceEntry.lpDisplayName);
-            serviceRecord.currentState = serviceEntry.ServiceStatusProcess.dwCurrentState;
-            serviceRecord.serviceType = serviceEntry.ServiceStatusProcess.dwServiceType;
-
-            ServiceHandleGuard serviceHandle(::OpenServiceW(
-                scmHandle.get(),
-                serviceEntry.lpServiceName,
-                SERVICE_QUERY_CONFIG));
-            if (serviceHandle.valid())
-            {
-                DWORD configBytes = 0;
-                (void)::QueryServiceConfigW(serviceHandle.get(), nullptr, 0, &configBytes);
-                if (::GetLastError() == ERROR_INSUFFICIENT_BUFFER && configBytes > 0)
-                {
-                    std::vector<std::uint8_t> configBuffer(configBytes, 0);
-                    QUERY_SERVICE_CONFIGW* configPtr =
-                        reinterpret_cast<QUERY_SERVICE_CONFIGW*>(configBuffer.data());
-                    if (::QueryServiceConfigW(serviceHandle.get(), configPtr, configBytes, &configBytes))
-                    {
-                        serviceRecord.startType = configPtr->dwStartType;
-                        serviceRecord.errorControl = configPtr->dwErrorControl;
-                        serviceRecord.binaryPath = QString::fromWCharArray(
-                            configPtr->lpBinaryPathName == nullptr ? L"" : configPtr->lpBinaryPathName);
-                    }
-                }
-
-                // 读取服务描述（可选字段），用于概览表的“描述”列展示。
-                DWORD descriptionBytes = 0;
-                (void)::QueryServiceConfig2W(
-                    serviceHandle.get(),
-                    SERVICE_CONFIG_DESCRIPTION,
-                    nullptr,
-                    0,
-                    &descriptionBytes);
-                if (::GetLastError() == ERROR_INSUFFICIENT_BUFFER && descriptionBytes > 0)
-                {
-                    std::vector<std::uint8_t> descriptionBuffer(descriptionBytes, 0);
-                    if (::QueryServiceConfig2W(
-                        serviceHandle.get(),
-                        SERVICE_CONFIG_DESCRIPTION,
-                        descriptionBuffer.data(),
-                        static_cast<DWORD>(descriptionBuffer.size()),
-                        &descriptionBytes))
-                    {
-                        auto* descriptionPtr =
-                            reinterpret_cast<SERVICE_DESCRIPTIONW*>(descriptionBuffer.data());
-                        if (descriptionPtr->lpDescription != nullptr)
-                        {
-                            serviceRecord.description = QString::fromWCharArray(descriptionPtr->lpDescription);
-                        }
-                    }
-                }
-            }
-
-            recordListOut.push_back(std::move(serviceRecord));
-        }
-
-        if (resumeHandle == 0)
-        {
-            break;
-        }
+        driverRecord.description = QString::fromStdWString(serviceRecord.description);
+        recordListOut.push_back(std::move(driverRecord));
     }
 
     std::sort(
@@ -607,29 +498,11 @@ QString DriverDock::errorControlToText(const std::uint32_t errorControlValue)
 
 QString DriverDock::formatWin32ErrorText(const std::uint32_t win32ErrorCode)
 {
-    LPWSTR messageBuffer = nullptr;
-    const DWORD messageLength = ::FormatMessageW(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER |
-        FORMAT_MESSAGE_FROM_SYSTEM |
-        FORMAT_MESSAGE_IGNORE_INSERTS,
-        nullptr,
-        win32ErrorCode,
-        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        reinterpret_cast<LPWSTR>(&messageBuffer),
-        0,
-        nullptr);
-
-    QString messageText;
-    if (messageLength > 0 && messageBuffer != nullptr)
-    {
-        messageText = QString::fromWCharArray(messageBuffer).trimmed();
-        ::LocalFree(messageBuffer);
-    }
-    else
-    {
-        messageText = QStringLiteral("unknown error");
-    }
-    return QStringLiteral("%1: %2").arg(win32ErrorCode).arg(messageText);
+    // Keep DriverDock formatting as a UI adapter only:
+    // - input: raw Win32 error code;
+    // - processing: ks::service owns FormatMessageW and UTF-8 formatting;
+    // - return: QString text suitable for existing log lines.
+    return QString::fromUtf8(ks::service::FormatWin32ErrorText(win32ErrorCode).c_str());
 }
 
 QString DriverDock::trimQuotedText(const QString& textValue)

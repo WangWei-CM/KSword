@@ -96,22 +96,7 @@ namespace
 
     QString formatBytesText(const std::uint64_t bytesValue)
     {
-        static const char* kUnitList[] = { "B", "KB", "MB", "GB", "TB" };
-        double normalizedValue = static_cast<double>(bytesValue);
-        int unitIndex = 0;
-        while (normalizedValue >= 1024.0 && unitIndex < 4)
-        {
-            normalizedValue /= 1024.0;
-            ++unitIndex;
-        }
-
-        if (unitIndex == 0)
-        {
-            return QStringLiteral("%1 B").arg(static_cast<qulonglong>(bytesValue));
-        }
-        return QStringLiteral("%1 %2")
-            .arg(normalizedValue, 0, 'f', 2)
-            .arg(QString::fromLatin1(kUnitList[unitIndex]));
+        return QString::fromStdString(ks::network::FormatByteCount(bytesValue));
     }
 
     std::wstring queryHeaderWideText(HINTERNET requestHandle, const DWORD headerFlag)
@@ -510,10 +495,8 @@ namespace
 
         if (enableRange)
         {
-            const std::wstring rangeHeaderText = QStringLiteral("Range: bytes=%1-%2")
-                .arg(static_cast<qulonglong>(beginByte))
-                .arg(static_cast<qulonglong>(endByte))
-                .toStdWString();
+            const std::wstring rangeHeaderText = QString::fromStdString(
+                ks::network::BuildHttpRangeHeader(beginByte, endByte)).toStdWString();
             if (::WinHttpAddRequestHeaders(
                 requestHandle.get(),
                 rangeHeaderText.c_str(),
@@ -586,7 +569,8 @@ namespace
             return false;
         }
 
-        const std::uint64_t expectedBytes = (endByte >= beginByte) ? (endByte - beginByte + 1ULL) : 0ULL;
+        // expectedBytes 复用 ks::network 纯逻辑，避免下载线程和 UI 进度表各自维护范围长度算法。
+        const std::uint64_t expectedBytes = ks::network::CalculateSegmentByteCount(beginByte, endByte);
         std::uint64_t writtenBytes = 0;
         std::vector<std::uint8_t> buffer(kReadBufferBytes);
 
@@ -990,26 +974,17 @@ void NetworkDock::startMultiThreadDownloadTask()
     taskState->totalBytes = totalBytes;
     taskState->statusText = QStringLiteral("下载中");
 
-    int actualThreadCount = taskState->requestedThreadCount;
-    if (!taskState->supportsRange)
-    {
-        actualThreadCount = 1;
-    }
-    if (totalBytes > 0)
-    {
-        actualThreadCount = std::max(1, std::min<int>(actualThreadCount, static_cast<int>(std::min<std::uint64_t>(64ULL, totalBytes))));
-    }
-    else
-    {
-        actualThreadCount = 1;
-    }
-    taskState->actualThreadCount = actualThreadCount;
+    const ks::network::DownloadPlan downloadPlan = ks::network::BuildDownloadSegmentPlan(
+        totalBytes,
+        taskState->requestedThreadCount,
+        taskState->supportsRange);
+    taskState->actualThreadCount = downloadPlan.actualThreadCount;
 
-    if (totalBytes == 0)
+    if (downloadPlan.emptyFile)
     {
         std::shared_ptr<MultiThreadDownloadSegmentState> segmentState = std::make_shared<MultiThreadDownloadSegmentState>();
-        segmentState->rangeBeginByte = 0;
-        segmentState->rangeEndByte = 0;
+        segmentState->rangeBeginByte = downloadPlan.segments.front().beginByte;
+        segmentState->rangeEndByte = downloadPlan.segments.front().endByte;
         segmentState->finished.store(true);
         segmentState->statusText = QStringLiteral("空文件");
         taskState->segmentStateList.push_back(segmentState);
@@ -1018,23 +993,17 @@ void NetworkDock::startMultiThreadDownloadTask()
     }
     else
     {
-        const std::uint64_t averageSegmentBytes = totalBytes / static_cast<std::uint64_t>(actualThreadCount);
-        const std::uint64_t remainSegmentBytes = totalBytes % static_cast<std::uint64_t>(actualThreadCount);
-        std::uint64_t beginByte = 0;
-        for (int index = 0; index < actualThreadCount; ++index)
+        for (const ks::network::DownloadSegmentPlan& segmentPlan : downloadPlan.segments)
         {
-            const std::uint64_t segmentBytes = averageSegmentBytes + (index < static_cast<int>(remainSegmentBytes) ? 1ULL : 0ULL);
-            const std::uint64_t endByte = beginByte + segmentBytes - 1ULL;
             std::shared_ptr<MultiThreadDownloadSegmentState> segmentState = std::make_shared<MultiThreadDownloadSegmentState>();
-            segmentState->rangeBeginByte = beginByte;
-            segmentState->rangeEndByte = endByte;
+            segmentState->rangeBeginByte = segmentPlan.beginByte;
+            segmentState->rangeEndByte = segmentPlan.endByte;
             segmentState->statusText = QStringLiteral("等待中");
             taskState->segmentStateList.push_back(segmentState);
-            beginByte = endByte + 1ULL;
         }
 
-        taskState->runningWorkerCount.store(actualThreadCount);
-        const bool useRange = taskState->supportsRange && actualThreadCount > 1;
+        taskState->runningWorkerCount.store(downloadPlan.actualThreadCount);
+        const bool useRange = downloadPlan.useRange;
         for (const std::shared_ptr<MultiThreadDownloadSegmentState>& segmentState : taskState->segmentStateList)
         {
             std::thread([taskState, segmentState, urlParts, useRange]()
@@ -1210,8 +1179,7 @@ void NetworkDock::refreshMultiThreadDownloadUi()
 
         const std::uint64_t downloaded = taskState->downloadedBytes.load();
         const std::uint64_t total = taskState->totalBytes;
-        const double ratio = total > 0 ? static_cast<double>(downloaded) / static_cast<double>(total) : 1.0;
-        const double percent = std::clamp(ratio * 100.0, 0.0, 100.0);
+        const double percent = ks::network::CalculateProgressPercent(downloaded, total);
 
         QString statusText;
         {
@@ -1307,15 +1275,12 @@ void NetworkDock::refreshMultiThreadDownloadUi()
             continue;
         }
 
-        const std::uint64_t rangeBytes =
-            segmentState->rangeEndByte >= segmentState->rangeBeginByte
-            ? (segmentState->rangeEndByte - segmentState->rangeBeginByte + 1ULL)
-            : 0ULL;
+        const std::uint64_t rangeBytes = ks::network::CalculateSegmentByteCount(
+            segmentState->rangeBeginByte,
+            segmentState->rangeEndByte);
         const std::uint64_t downloaded = segmentState->downloadedBytes.load();
-        const double ratio = rangeBytes > 0
-            ? static_cast<double>(std::min<std::uint64_t>(downloaded, rangeBytes)) / static_cast<double>(rangeBytes)
-            : 1.0;
-        const double percent = std::clamp(ratio * 100.0, 0.0, 100.0);
+        const double ratio = ks::network::CalculateProgressRatio(downloaded, rangeBytes);
+        const double percent = ks::network::CalculateProgressPercent(downloaded, rangeBytes);
 
         QString segmentStatus;
         {
@@ -1348,10 +1313,8 @@ void NetworkDock::refreshMultiThreadDownloadUi()
 
     const std::uint64_t selectedDownloaded = selectedTask->downloadedBytes.load();
     const std::uint64_t selectedTotal = selectedTask->totalBytes;
-    const double selectedRatio = selectedTotal > 0
-        ? static_cast<double>(std::min<std::uint64_t>(selectedDownloaded, selectedTotal)) / static_cast<double>(selectedTotal)
-        : 1.0;
-    const double selectedPercent = std::clamp(selectedRatio * 100.0, 0.0, 100.0);
+    const double selectedRatio = ks::network::CalculateProgressRatio(selectedDownloaded, selectedTotal);
+    const double selectedPercent = ks::network::CalculateProgressPercent(selectedDownloaded, selectedTotal);
 
     m_multiDownloadSegmentBar->setSegmentRatios(
         segmentRatios,

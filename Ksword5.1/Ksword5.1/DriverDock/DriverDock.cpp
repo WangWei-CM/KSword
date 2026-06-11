@@ -259,62 +259,6 @@ namespace ksword::driver_dock_internal
         return QStringLiteral("未解析模块");
     }
 
-    // waitServiceState：
-    // - 作用：轮询等待服务达到目标状态；
-    // - 参数 serviceHandle：服务句柄；
-    // - 参数 targetState：目标状态值；
-    // - 参数 timeoutMs：超时时间；
-    // - 参数 currentStateOut：输出最终状态。
-    bool waitServiceState(
-        SC_HANDLE serviceHandle,
-        const DWORD targetState,
-        const DWORD timeoutMs,
-        DWORD* currentStateOut)
-    {
-        if (serviceHandle == nullptr)
-        {
-            return false;
-        }
-
-        const auto startTick = std::chrono::steady_clock::now();
-        while (true)
-        {
-            SERVICE_STATUS_PROCESS statusInfo{};
-            DWORD bytesNeeded = 0;
-            if (!::QueryServiceStatusEx(
-                serviceHandle,
-                SC_STATUS_PROCESS_INFO,
-                reinterpret_cast<LPBYTE>(&statusInfo),
-                static_cast<DWORD>(sizeof(statusInfo)),
-                &bytesNeeded))
-            {
-                if (currentStateOut != nullptr)
-                {
-                    *currentStateOut = 0;
-                }
-                return false;
-            }
-
-            if (currentStateOut != nullptr)
-            {
-                *currentStateOut = statusInfo.dwCurrentState;
-            }
-
-            if (statusInfo.dwCurrentState == targetState)
-            {
-                return true;
-            }
-
-            const auto nowTick = std::chrono::steady_clock::now();
-            const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(nowTick - startTick);
-            if (elapsedMs.count() >= static_cast<long long>(timeoutMs))
-            {
-                return false;
-            }
-
-            ::Sleep(120);
-        }
-    }
 }
 
 

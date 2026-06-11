@@ -13,6 +13,9 @@
 
 #include "../ProcessDock/ProcessDetailWindow.h"
 #include "../UI/HexEditorWidget.h"
+#include "../ksword/network/network_diagnostics_tools.h"
+#include "../ksword/network/network_download_tools.h"
+#include "../ksword/network/network_format_tools.h"
 
 #include <QAction>
 #include <QAbstractItemView>
@@ -71,4 +74,3 @@
 #pragma comment(lib, "Iphlpapi.lib")
 #pragma comment(lib, "Dnsapi.lib")
 #pragma comment(lib, "Ws2_32.lib")
-
