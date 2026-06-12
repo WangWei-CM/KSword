@@ -300,6 +300,24 @@ private:
     void initializeMemoryTab();
     void initializeDiskMonitorTab();
     void initializeOtherDevicesTab();
+
+    // ensureDiskMonitorTabInitialized 作用：
+    // - 输入：无，读取 m_diskMonitorHostPage 和 m_diskMonitorPage；
+    // - 处理：首次进入“硬盘监控”子 Tab 时创建 DiskMonitorPage，并替换占位内容；
+    // - 返回：无返回值，真实页面挂入 Qt 父子树自动释放。
+    void ensureDiskMonitorTabInitialized();
+
+    // ensureOtherDevicesTabInitialized 作用：
+    // - 输入：无，读取 m_otherDevicesHostPage 和 m_otherDevicesPage；
+    // - 处理：首次进入“其他设备”子 Tab 时创建 HardwareOtherDevicesPage；
+    // - 返回：无返回值，页面内容直接显示在宿主布局中。
+    void ensureOtherDevicesTabInitialized();
+
+    // startInitialSamplingAfterFirstPaint 作用：
+    // - 输入：无，依赖 showEvent 首次显示后调用；
+    // - 处理：把 PDH/设备采样推迟到首帧绘制后，避免点击硬件 Dock 时阻塞 UI；
+    // - 返回：无返回值，完成后启动周期刷新定时器。
+    void startInitialSamplingAfterFirstPaint();
     void initializeCoreCharts();
     void initializeConnections();
     void scheduleUtilizationLayoutRefresh();
@@ -536,8 +554,10 @@ private:
     QWidget* m_memoryPage = nullptr;            // m_memoryPage：内存 Tab。
     QVBoxLayout* m_memoryLayout = nullptr;      // m_memoryLayout：内存布局。
     CodeEditorWidget* m_memoryEditor = nullptr; // m_memoryEditor：内存详情文本。
-    DiskMonitorPage* m_diskMonitorPage = nullptr; // m_diskMonitorPage：硬盘监控 Tab。
-    HardwareOtherDevicesPage* m_otherDevicesPage = nullptr; // m_otherDevicesPage：其他硬件设备内侧边 Tab。
+    QWidget* m_diskMonitorHostPage = nullptr;      // m_diskMonitorHostPage：硬盘监控延迟加载宿主页。
+    QWidget* m_otherDevicesHostPage = nullptr;     // m_otherDevicesHostPage：其他设备延迟加载宿主页。
+    DiskMonitorPage* m_diskMonitorPage = nullptr;  // m_diskMonitorPage：硬盘监控真实页面，首次进入子 Tab 后创建。
+    HardwareOtherDevicesPage* m_otherDevicesPage = nullptr; // m_otherDevicesPage：其他硬件设备真实页面，首次进入子 Tab 后创建。
 
     // 运行状态缓存。
     int m_historyLength = 60;                 // m_historyLength：曲线保留点数。

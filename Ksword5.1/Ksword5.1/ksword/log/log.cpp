@@ -11,7 +11,7 @@
 #include <algorithm>     // std::replace: TSV field sanitization.
 #include <cstdio>        // std::snprintf: GUID formatting.
 #include <cstring>       // std::memcmp: GUID comparison.
-#include <filesystem>    // std::filesystem::u8path: UTF-8 output path.
+#include <filesystem>    // std::filesystem::path: UTF-8 output path.
 #include <fstream>       // std::ofstream: TSV export writer.
 #include <iomanip>       // std::put_time: timestamp formatting.
 #include <iostream>      // std::cout: console log output.
@@ -264,7 +264,9 @@ namespace ks::log
             eventsSnapshot = m_events;
         }
 
-        const std::filesystem::path outputFilePath = std::filesystem::u8path(outputPath);
+        // outputPathUtf8 用途：按 C++20/23 推荐形式把 UTF-8 字节串转换为 filesystem::path，避免 u8path 弃用错误。
+        const std::u8string outputPathUtf8(outputPath.begin(), outputPath.end());
+        const std::filesystem::path outputFilePath(outputPathUtf8);
         std::ofstream outputFile(outputFilePath, std::ios::out | std::ios::trunc);
         if (!outputFile.is_open())
         {
@@ -276,7 +278,7 @@ namespace ks::log
             outputFile
                 << LevelToString(singleEvent.level) << '\t'
                 << FormatTimeToString(singleEvent.timestamp) << '\t'
-                << GuidToString(singleEvent.guid) << '\t'
+                << ::ks::log::GuidToString(singleEvent.guid) << '\t'
                 << SanitizeFieldForTsv(singleEvent.content) << '\t'
                 << SanitizeFieldForTsv(singleEvent.fileLocation) << '\t'
                 << SanitizeFieldForTsv(singleEvent.functionName) << '\n';
@@ -291,7 +293,7 @@ namespace ks::log
         std::lock_guard<std::mutex> lockGuard(m_mutex);
         for (const Event& singleEvent : m_events)
         {
-            if (IsSameGuid(singleEvent.guid, targetGuid))
+            if (::ks::log::IsSameGuid(singleEvent.guid, targetGuid))
             {
                 trackedEvents.push_back(singleEvent);
             }

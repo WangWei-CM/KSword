@@ -27,6 +27,7 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLayoutItem>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QJsonArray>
@@ -111,6 +112,42 @@ namespace
             .arg(KswordTheme::BorderHex())
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::TextPrimaryHex());
+    }
+
+    // createMonitorDeferredPlaceholder 作用：
+    // - 输入：父控件、标题文本和提示文本；
+    // - 处理：创建轻量占位页，避免重监控子页压在 MonitorDock 首次点击路径上；
+    // - 返回：占位 QWidget 指针，调用方加入对应宿主布局。
+    QWidget* createMonitorDeferredPlaceholder(
+        QWidget* parentWidget,
+        const QString& titleText,
+        const QString& hintText)
+    {
+        QWidget* placeholderWidget = new QWidget(parentWidget);
+        placeholderWidget->setAutoFillBackground(false);
+        placeholderWidget->setAttribute(Qt::WA_StyledBackground, false);
+
+        QVBoxLayout* placeholderLayout = new QVBoxLayout(placeholderWidget);
+        placeholderLayout->setContentsMargins(24, 24, 24, 24);
+        placeholderLayout->setSpacing(8);
+        placeholderLayout->addStretch(1);
+
+        QLabel* titleLabel = new QLabel(titleText, placeholderWidget);
+        titleLabel->setAlignment(Qt::AlignCenter);
+        titleLabel->setStyleSheet(
+            QStringLiteral("font-size:16px;font-weight:700;color:%1;")
+            .arg(KswordTheme::TextPrimaryHex()));
+        placeholderLayout->addWidget(titleLabel, 0);
+
+        QLabel* hintLabel = new QLabel(hintText, placeholderWidget);
+        hintLabel->setAlignment(Qt::AlignCenter);
+        hintLabel->setWordWrap(true);
+        hintLabel->setStyleSheet(
+            QStringLiteral("font-size:12px;color:%1;")
+            .arg(KswordTheme::TextSecondaryHex()));
+        placeholderLayout->addWidget(hintLabel, 0);
+        placeholderLayout->addStretch(1);
+        return placeholderWidget;
     }
 
     // 表头统一样式。
@@ -3871,19 +3908,13 @@ void MonitorDock::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
 
-    if (m_initialDiscoveryDone)
+    // 首次显示只触发当前子页所需的发现任务：
+    // - 默认停留在“进程定向”时不拉起 WMI/ETW 枚举；
+    // - 用户切到 WMI/ETW 页时再后台刷新，避免首次点击 MonitorDock 后并发启动四路发现。
+    QTimer::singleShot(80, this, [this]()
     {
-        return;
-    }
-
-    m_initialDiscoveryDone = true;
-    QTimer::singleShot(0, this, [this]()
-        {
-            refreshWmiProvidersAsync();
-            refreshWmiEventClassesAsync();
-            refreshEtwProvidersAsync();
-            refreshEtwSessionsAsync();
-        });
+        triggerDeferredDiscoveryForCurrentTab();
+    });
 }
 
 bool MonitorDock::event(QEvent* eventPointer)
@@ -3900,6 +3931,36 @@ bool MonitorDock::event(QEvent* eventPointer)
         updateEtwCollapseHeight();
     }
     return handled;
+}
+
+void MonitorDock::ensureDirectKernelCallTabInitialized()
+{
+    if (m_directKernelCallWidget != nullptr || m_directKernelCallHostPage == nullptr)
+    {
+        return;
+    }
+
+    QVBoxLayout* hostLayout = qobject_cast<QVBoxLayout*>(m_directKernelCallHostPage->layout());
+    if (hostLayout == nullptr)
+    {
+        hostLayout = new QVBoxLayout(m_directKernelCallHostPage);
+        hostLayout->setContentsMargins(0, 0, 0, 0);
+        hostLayout->setSpacing(0);
+    }
+
+    // 清理占位控件：直接内核调用页会在构造时解析 syscall 映射，按需创建可避开 MonitorDock 首次点击。
+    while (QLayoutItem* itemPointer = hostLayout->takeAt(0))
+    {
+        QWidget* itemWidget = itemPointer->widget();
+        if (itemWidget != nullptr)
+        {
+            itemWidget->deleteLater();
+        }
+        delete itemPointer;
+    }
+
+    m_directKernelCallWidget = new DirectKernelCallMonitorWidget(m_directKernelCallHostPage);
+    hostLayout->addWidget(m_directKernelCallWidget, 1);
 }
 
 void MonitorDock::ensureWinApiTabInitialized()
@@ -3926,6 +3987,30 @@ void MonitorDock::ensureWinApiTabInitialized()
     m_winApiWidget->notifyPageActivated();
 }
 
+void MonitorDock::triggerDeferredDiscoveryForCurrentTab()
+{
+    if (m_sideTabWidget == nullptr)
+    {
+        return;
+    }
+
+    QWidget* currentPage = m_sideTabWidget->currentWidget();
+    if (currentPage == m_wmiPage && !m_wmiInitialDiscoveryDone)
+    {
+        m_wmiInitialDiscoveryDone = true;
+        refreshWmiProvidersAsync();
+        refreshWmiEventClassesAsync();
+        return;
+    }
+
+    if (currentPage == m_etwPage && !m_etwInitialDiscoveryDone)
+    {
+        m_etwInitialDiscoveryDone = true;
+        refreshEtwProvidersAsync();
+        refreshEtwSessionsAsync();
+    }
+}
+
 void MonitorDock::activateMonitorTab(const QString& tabKey)
 {
     if (m_sideTabWidget == nullptr)
@@ -3938,9 +4023,14 @@ void MonitorDock::activateMonitorTab(const QString& tabKey)
         || normalizedKey == QStringLiteral("directkernelcall")
         || normalizedKey == QStringLiteral("syscall"))
     {
-        if (m_directKernelCallWidget != nullptr)
+        if (m_directKernelCallHostPage != nullptr)
         {
-            m_sideTabWidget->setCurrentWidget(m_directKernelCallWidget);
+            m_sideTabWidget->setCurrentWidget(m_directKernelCallHostPage);
+            // 程序化跳转也保持“先切页、后加载”，避免启动默认页配置为 syscall 时阻塞主窗口。
+            QTimer::singleShot(0, this, [this]()
+            {
+                ensureDirectKernelCallTabInitialized();
+            });
         }
         return;
     }
@@ -4025,9 +4115,18 @@ void MonitorDock::initializeUi()
         QIcon(QStringLiteral(":/Icon/process_main.svg")),
         QStringLiteral("进程定向"));
 
-    m_directKernelCallWidget = new DirectKernelCallMonitorWidget(m_sideTabWidget);
+    m_directKernelCallHostPage = new QWidget(m_sideTabWidget);
+    QVBoxLayout* directKernelCallHostLayout = new QVBoxLayout(m_directKernelCallHostPage);
+    directKernelCallHostLayout->setContentsMargins(0, 0, 0, 0);
+    directKernelCallHostLayout->setSpacing(0);
+    directKernelCallHostLayout->addWidget(
+        createMonitorDeferredPlaceholder(
+            m_directKernelCallHostPage,
+            QStringLiteral("直接内核调用待加载"),
+            QStringLiteral("切换到本页后再解析 syscall 映射并创建 ETW 采集界面。")),
+        1);
     m_sideTabWidget->addTab(
-        m_directKernelCallWidget,
+        m_directKernelCallHostPage,
         QIcon(QStringLiteral(":/Icon/process_threads.svg")),
         QStringLiteral("直接内核调用"));
 
@@ -5390,10 +5489,20 @@ void MonitorDock::initializeConnections()
         }
 
         QWidget* currentPage = m_sideTabWidget->widget(index);
+        if (currentPage == m_directKernelCallHostPage)
+        {
+            // 直接内核调用页按需创建，避免 syscall 映射解析拖慢 MonitorDock 首次打开。
+            QTimer::singleShot(0, this, [this]()
+            {
+                ensureDirectKernelCallTabInitialized();
+            });
+        }
         if (currentPage == m_winApiPage)
         {
             ensureWinApiTabInitialized();
         }
+
+        triggerDeferredDiscoveryForCurrentTab();
     });
     if (m_etwTimelineWidget != nullptr)
     {

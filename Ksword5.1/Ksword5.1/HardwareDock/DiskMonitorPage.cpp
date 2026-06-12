@@ -697,11 +697,9 @@ namespace
 DiskMonitorPage::DiskMonitorPage(QWidget* parent)
     : QWidget(parent)
 {
-    // 构造顺序：先搭建 UI，再连接事件，最后做一次初始采样并启动定时器。
+    // 构造顺序：先搭建 UI 和连接事件；ETW/进程枚举延迟到首帧后启动。
     initializeUi();
     initializeConnections();
-    startFileActivityEtw();
-    refreshNow();
 
     m_refreshTimer = new QTimer(this);
     m_refreshTimer->setInterval(kRefreshIntervalMs);
@@ -709,7 +707,12 @@ DiskMonitorPage::DiskMonitorPage(QWidget* parent)
     {
         refreshNow();
     });
-    m_refreshTimer->start();
+
+    // 首轮采样放到事件循环后执行，让父级 Tab 切换先完成绘制，避免构造函数阻塞用户点击。
+    QTimer::singleShot(120, this, [this]()
+    {
+        startInitialSampling();
+    });
 }
 
 DiskMonitorPage::~DiskMonitorPage()
@@ -824,6 +827,23 @@ void DiskMonitorPage::initializeUi()
     m_splitter->setStretchFactor(0, 2);
     m_splitter->setStretchFactor(1, 1);
     m_splitter->setSizes({ 420, 260 });
+}
+
+void DiskMonitorPage::startInitialSampling()
+{
+    if (m_initialSamplingStarted)
+    {
+        return;
+    }
+
+    m_initialSamplingStarted = true;
+    startFileActivityEtw();
+    refreshNow();
+
+    if (m_refreshTimer != nullptr)
+    {
+        m_refreshTimer->start();
+    }
 }
 
 void DiskMonitorPage::initializeConnections()

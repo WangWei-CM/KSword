@@ -394,7 +394,19 @@ private:
     void initializePerformancePanel();
     void initializeWmiTab();
     void initializeEtwTab();
+
+    // ensureDirectKernelCallTabInitialized 作用：
+    // - 输入：无，读取 m_directKernelCallHostPage 与 m_directKernelCallWidget；
+    // - 处理：首次进入“直接内核调用”页时再创建真实控件和 syscall 映射；
+    // - 返回：无返回值，控件挂入宿主布局后由 Qt 父子树释放。
+    void ensureDirectKernelCallTabInitialized();
     void ensureWinApiTabInitialized();
+
+    // triggerDeferredDiscoveryForCurrentTab 作用：
+    // - 输入：无，读取当前内部 Tab；
+    // - 处理：仅在用户进入 WMI/ETW 页时触发对应首轮 Provider/会话发现；
+    // - 返回：无返回值，实际枚举仍走后台线程。
+    void triggerDeferredDiscoveryForCurrentTab();
     void initializeConnections();
     void refreshPerformanceCharts();
     bool sampleCpuUsage(double* cpuUsageOut);
@@ -536,6 +548,7 @@ private:
     QTimer* m_perfUpdateTimer = nullptr;    // 性能图刷新定时器（默认1秒）。
     QTabWidget* m_sideTabWidget = nullptr;  // 侧边栏 Tab 容器。
     ProcessTraceMonitorWidget* m_processTraceWidget = nullptr; // m_processTraceWidget：进程定向监控子页。
+    QWidget* m_directKernelCallHostPage = nullptr; // m_directKernelCallHostPage：直接内核调用延迟加载宿主页。
     DirectKernelCallMonitorWidget* m_directKernelCallWidget = nullptr; // m_directKernelCallWidget：直接内核调用监控子页。
     QWidget* m_winApiPage = nullptr;        // m_winApiPage：WinAPI 子页宿主容器。
     WinAPIDock* m_winApiWidget = nullptr;   // m_winApiWidget：真正的 WinAPI 监控控件。
@@ -713,5 +726,6 @@ private:
     std::uint64_t m_etwTimelineSelectionStart100ns = 0; // ETW 有效时间轴框选起点。
     std::uint64_t m_etwTimelineSelectionEnd100ns = 0;   // ETW 有效时间轴框选终点。
     bool m_etwTimelineUserSelectionActive = false;    // 用户是否已启用 ETW 时间框选。
-    bool m_initialDiscoveryDone = false;             // 首次显示时是否已触发 WMI/ETW Provider 枚举。
+    bool m_wmiInitialDiscoveryDone = false;          // m_wmiInitialDiscoveryDone：WMI 页是否已触发首轮发现。
+    bool m_etwInitialDiscoveryDone = false;          // m_etwInitialDiscoveryDone：ETW 页是否已触发首轮发现。
 };
