@@ -167,6 +167,12 @@ private:
     void initializeConnections();
     void configureTableWidget(QTableWidget* tableWidget) const;
 
+    // startInitialSampling 作用：
+    // - 输入：无，构造后由 QTimer 延迟调用；
+    // - 处理：启动文件 ETW、执行首轮进程 IO 采样并启动周期定时器；
+    // - 返回：无返回值，重复调用会被 m_initialSamplingStarted 拦截。
+    void startInitialSampling();
+
     // ===================== 采样与刷新 =====================
     void refreshNow();
     std::vector<ProcessDiskSample> collectProcessDiskSamples();
@@ -215,6 +221,7 @@ private:
     QTableWidget* m_processTable = nullptr;        // m_processTable：进程级磁盘速率表。
     QTableWidget* m_activityTable = nullptr;       // m_activityTable：勾选进程磁盘活动表。
     QTimer* m_refreshTimer = nullptr;              // m_refreshTimer：周期刷新定时器。
+    bool m_initialSamplingStarted = false;         // m_initialSamplingStarted：是否已经启动 ETW 与首轮采样。
 
     std::unordered_map<std::uint32_t, ProcessDiskBaseline> m_baselineByPid; // m_baselineByPid：PID 到历史基线。
     std::unordered_set<std::uint32_t> m_selectedPidSet; // m_selectedPidSet：用户勾选 PID 集。

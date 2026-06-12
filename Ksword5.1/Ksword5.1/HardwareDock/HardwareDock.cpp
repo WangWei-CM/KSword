@@ -91,6 +91,42 @@ namespace
             : QColor(55, 80, 105);
     }
 
+    // createHardwareDeferredPlaceholder 作用：
+    // - 输入：父控件、标题文本和说明文本；
+    // - 处理：创建轻量占位页，让重页面在用户真正进入子 Tab 后再加载；
+    // - 返回：占位 QWidget 指针，调用方负责把它加入目标布局。
+    QWidget* createHardwareDeferredPlaceholder(
+        QWidget* parentWidget,
+        const QString& titleText,
+        const QString& hintText)
+    {
+        QWidget* placeholderWidget = new QWidget(parentWidget);
+        placeholderWidget->setAutoFillBackground(false);
+        placeholderWidget->setAttribute(Qt::WA_StyledBackground, false);
+
+        QVBoxLayout* placeholderLayout = new QVBoxLayout(placeholderWidget);
+        placeholderLayout->setContentsMargins(24, 24, 24, 24);
+        placeholderLayout->setSpacing(8);
+        placeholderLayout->addStretch(1);
+
+        QLabel* titleLabel = new QLabel(titleText, placeholderWidget);
+        titleLabel->setAlignment(Qt::AlignCenter);
+        titleLabel->setStyleSheet(
+            QStringLiteral("font-size:16px;font-weight:700;color:%1;")
+            .arg(KswordTheme::TextPrimaryHex()));
+        placeholderLayout->addWidget(titleLabel, 0);
+
+        QLabel* hintLabel = new QLabel(hintText, placeholderWidget);
+        hintLabel->setAlignment(Qt::AlignCenter);
+        hintLabel->setWordWrap(true);
+        hintLabel->setStyleSheet(
+            QStringLiteral("font-size:12px;color:%1;")
+            .arg(KswordTheme::TextSecondaryHex()));
+        placeholderLayout->addWidget(hintLabel, 0);
+        placeholderLayout->addStretch(1);
+        return placeholderWidget;
+    }
+
     // appendTransparentBackgroundStyle 作用：
     // - 给“硬件 -> 计数器/利用率”页控件补充透明背景样式；
     // - 若控件属于滚动区域，还会同步把 viewport 设为透明，避免残留底色。
@@ -1466,21 +1502,46 @@ void HardwareDock::showEvent(QShowEvent* showEventPointer)
     if (!m_initialSamplingStarted)
     {
         m_initialSamplingStarted = true;
-        initializePerformanceCounters();
-        refreshCpuTopologyStaticInfo();
-        refreshSystemVolumeInfo();
-        refreshStaticHardwareTexts(false);
-        refreshAllViews();
-        requestAsyncStaticInfoRefresh();
-        requestAsyncSensorRefresh();
-        if (m_refreshTimer != nullptr)
-        {
-            m_refreshTimer->start();
-        }
+        startInitialSamplingAfterFirstPaint();
     }
 
     // 首次显示阶段分阶段重排，确保滚动区 viewport 高度已经稳定。
     scheduleUtilizationLayoutRefresh();
+}
+
+void HardwareDock::startInitialSamplingAfterFirstPaint()
+{
+    // safeThis 用途：延迟任务触发前 Dock 可能已被销毁，QPointer 可避免悬空访问。
+    QPointer<HardwareDock> safeThis(this);
+
+    // 首轮采样延迟 80ms：
+    // - 让 ADS Dock 切换和占位 UI 先完成绘制；
+    // - 避免 PDH/DXGI/Power API 首次初始化耗时直接压在点击响应链路上。
+    QTimer::singleShot(80, this, [safeThis]()
+    {
+        if (safeThis.isNull())
+        {
+            return;
+        }
+
+        HardwareDock* dockPointer = safeThis.data();
+        if (dockPointer->m_coreChartEntries.empty())
+        {
+            dockPointer->initializeCoreCharts();
+        }
+        dockPointer->initializePerformanceCounters();
+        dockPointer->refreshCpuTopologyStaticInfo();
+        dockPointer->refreshSystemVolumeInfo();
+        dockPointer->refreshStaticHardwareTexts(false);
+        dockPointer->refreshAllViews();
+        dockPointer->requestAsyncStaticInfoRefresh();
+        dockPointer->requestAsyncSensorRefresh();
+
+        if (dockPointer->m_refreshTimer != nullptr)
+        {
+            dockPointer->m_refreshTimer->start();
+        }
+    });
 }
 
 void HardwareDock::initializeUi()
@@ -1516,6 +1577,27 @@ void HardwareDock::initializeUi()
                 {
                     return;
                 }
+
+                QWidget* currentTabWidget = m_sideTabWidget->currentWidget();
+                if (currentTabWidget == m_diskMonitorHostPage)
+                {
+                    // 硬盘监控会启动 ETW 与进程 IO 扫描，必须等用户真正进入该子页再创建。
+                    QTimer::singleShot(0, this, [this]()
+                    {
+                        ensureDiskMonitorTabInitialized();
+                    });
+                    return;
+                }
+                if (currentTabWidget == m_otherDevicesHostPage)
+                {
+                    // 其他设备页会枚举 PNP/驱动/硬件清单，延迟到子页首次激活时执行。
+                    QTimer::singleShot(0, this, [this]()
+                    {
+                        ensureOtherDevicesTabInitialized();
+                    });
+                    return;
+                }
+
                 if (m_sideTabWidget->currentWidget() != m_utilizationPage)
                 {
                     return;
@@ -2102,6 +2184,13 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     m_coreChartGridLayout->setContentsMargins(0, 0, 0, 0);
     m_coreChartGridLayout->setHorizontalSpacing(6);
     m_coreChartGridLayout->setVerticalSpacing(6);
+    // coreChartPlaceholderLabel 用途：首帧前暂时代替大量 QChartView，避免构造硬件页时一次性创建每核心图表。
+    QLabel* coreChartPlaceholderLabel = new QLabel(QStringLiteral("CPU 核心图将在首帧后加载..."), m_coreChartHostWidget);
+    coreChartPlaceholderLabel->setAlignment(Qt::AlignCenter);
+    coreChartPlaceholderLabel->setStyleSheet(
+        QStringLiteral("font-size:13px;color:%1;")
+        .arg(KswordTheme::TextSecondaryHex()));
+    m_coreChartGridLayout->addWidget(coreChartPlaceholderLabel, 0, 0, 1, 1);
     m_coreChartScrollArea->setWidget(m_coreChartHostWidget);
     cpuSubLayout->addWidget(m_coreChartScrollArea, 1);
 
@@ -2121,7 +2210,6 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     detailLayout->addWidget(m_cpuUtilSecondaryDetailLabel, 1);
     cpuSubLayout->addLayout(detailLayout, 0);
 
-    initializeCoreCharts();
     m_utilizationDetailStack->addWidget(m_utilizationCpuSubPage);
 }
 
@@ -2634,20 +2722,114 @@ void HardwareDock::initializeMemoryTab()
 
 void HardwareDock::initializeDiskMonitorTab()
 {
-    // 硬盘监控页独立承载资源监视器式进程 IO 表，避免塞进“利用率”详情页造成导航混乱。
-    m_diskMonitorPage = new DiskMonitorPage(m_sideTabWidget);
-    m_sideTabWidget->addTab(m_diskMonitorPage, QStringLiteral("硬盘监控"));
+    // 硬盘监控页包含 ETW 会话与全进程 IO 枚举，首次打开硬件 Dock 时只创建轻量宿主。
+    m_diskMonitorHostPage = new QWidget(m_sideTabWidget);
+    QVBoxLayout* hostLayout = new QVBoxLayout(m_diskMonitorHostPage);
+    hostLayout->setContentsMargins(0, 0, 0, 0);
+    hostLayout->setSpacing(0);
+    hostLayout->addWidget(
+        createHardwareDeferredPlaceholder(
+            m_diskMonitorHostPage,
+            QStringLiteral("硬盘监控待加载"),
+            QStringLiteral("切换到本页后再启动文件 ETW 与进程 IO 采样，避免拖慢硬件页首次打开。")),
+        1);
+    m_sideTabWidget->addTab(m_diskMonitorHostPage, QStringLiteral("硬盘监控"));
 }
 
 void HardwareDock::initializeOtherDevicesTab()
 {
-    // 其他设备页必须挂在 HardwareDock 内部侧边 Tab，不创建新的主窗口 ADS Dock。
-    m_otherDevicesPage = new HardwareOtherDevicesPage(m_sideTabWidget);
-    m_sideTabWidget->addTab(m_otherDevicesPage, QStringLiteral("其他设备"));
+    // 其他设备页会拉取硬件/PNP/驱动清单，首次打开硬件 Dock 时先用占位页占住 Tab。
+    m_otherDevicesHostPage = new QWidget(m_sideTabWidget);
+    QVBoxLayout* hostLayout = new QVBoxLayout(m_otherDevicesHostPage);
+    hostLayout->setContentsMargins(0, 0, 0, 0);
+    hostLayout->setSpacing(0);
+    hostLayout->addWidget(
+        createHardwareDeferredPlaceholder(
+            m_otherDevicesHostPage,
+            QStringLiteral("其他设备待加载"),
+            QStringLiteral("切换到本页后再异步枚举设备清单，减少硬件 Dock 初次点击耗时。")),
+        1);
+    m_sideTabWidget->addTab(m_otherDevicesHostPage, QStringLiteral("其他设备"));
+}
+
+void HardwareDock::ensureDiskMonitorTabInitialized()
+{
+    if (m_diskMonitorPage != nullptr || m_diskMonitorHostPage == nullptr)
+    {
+        return;
+    }
+
+    QVBoxLayout* hostLayout = qobject_cast<QVBoxLayout*>(m_diskMonitorHostPage->layout());
+    if (hostLayout == nullptr)
+    {
+        hostLayout = new QVBoxLayout(m_diskMonitorHostPage);
+        hostLayout->setContentsMargins(0, 0, 0, 0);
+        hostLayout->setSpacing(0);
+    }
+
+    // 清理占位控件：真实页面会接管整个宿主区域，旧 QWidget 交给事件循环释放。
+    while (QLayoutItem* itemPointer = hostLayout->takeAt(0))
+    {
+        QWidget* itemWidget = itemPointer->widget();
+        if (itemWidget != nullptr)
+        {
+            itemWidget->deleteLater();
+        }
+        delete itemPointer;
+    }
+
+    m_diskMonitorPage = new DiskMonitorPage(m_diskMonitorHostPage);
+    hostLayout->addWidget(m_diskMonitorPage, 1);
+}
+
+void HardwareDock::ensureOtherDevicesTabInitialized()
+{
+    if (m_otherDevicesPage != nullptr || m_otherDevicesHostPage == nullptr)
+    {
+        return;
+    }
+
+    QVBoxLayout* hostLayout = qobject_cast<QVBoxLayout*>(m_otherDevicesHostPage->layout());
+    if (hostLayout == nullptr)
+    {
+        hostLayout = new QVBoxLayout(m_otherDevicesHostPage);
+        hostLayout->setContentsMargins(0, 0, 0, 0);
+        hostLayout->setSpacing(0);
+    }
+
+    // 清理占位控件：设备清单页内部会自行异步刷新，宿主只负责承载真实页面。
+    while (QLayoutItem* itemPointer = hostLayout->takeAt(0))
+    {
+        QWidget* itemWidget = itemPointer->widget();
+        if (itemWidget != nullptr)
+        {
+            itemWidget->deleteLater();
+        }
+        delete itemPointer;
+    }
+
+    m_otherDevicesPage = new HardwareOtherDevicesPage(m_otherDevicesHostPage);
+    hostLayout->addWidget(m_otherDevicesPage, 1);
 }
 
 void HardwareDock::initializeCoreCharts()
 {
+    if (m_coreChartGridLayout == nullptr || m_coreChartHostWidget == nullptr)
+    {
+        return;
+    }
+
+    // 清空首帧占位或旧核心图：本函数负责把 CPU 核心图区域替换为真实 QChartView 网格。
+    while (QLayoutItem* itemPointer = m_coreChartGridLayout->takeAt(0))
+    {
+        QWidget* itemWidget = itemPointer->widget();
+        if (itemWidget != nullptr)
+        {
+            itemWidget->deleteLater();
+        }
+        delete itemPointer;
+    }
+
     const DWORD logicalProcessorCount = std::max<DWORD>(1, ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
     const int coreCount = static_cast<int>(logicalProcessorCount);
     const int columnCount = std::max(1, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(coreCount)))));
