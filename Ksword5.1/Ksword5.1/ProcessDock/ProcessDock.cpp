@@ -37,6 +37,7 @@
 #include <QPainterPath>
 #include <QPlainTextEdit>
 #include <QPointF>
+#include <QPersistentModelIndex>
 #include <QPointer>
 #include <QPushButton>
 #include <QPixmap>
@@ -1068,67 +1069,260 @@ private:
 
 namespace
 {
-    // ProcessNameDelegate 作用：在“进程名”列右侧绘制效率模式绿叶，不新增表格列。
-    class ProcessNameDelegate final : public QStyledItemDelegate
+    // ProcessRowHighlightDelegate 作用：
+    // - 接管进程表每个单元格的默认绘制；
+    // - 保留新增/退出/内核差异行的原始底色；
+    // - 把鼠标悬停和选中态从“整行填充”改成“整行描边”；
+    // - 在“进程名”列右侧继续绘制效率模式绿叶，不新增表格列。
+    class ProcessRowHighlightDelegate final : public QStyledItemDelegate
     {
     public:
-        explicit ProcessNameDelegate(QObject* parent = nullptr)
-            : QStyledItemDelegate(parent)
+        // 构造函数：
+        // - treeWidget：被代理绘制的进程树表；
+        // - 处理：启用 viewport 鼠标追踪，记录当前悬停行；
+        // - 返回：无返回值。
+        explicit ProcessRowHighlightDelegate(QTreeWidget* treeWidget)
+            : QStyledItemDelegate(treeWidget)
+            , m_treeWidget(treeWidget)
         {
+            if (m_treeWidget != nullptr && m_treeWidget->viewport() != nullptr)
+            {
+                m_treeWidget->setMouseTracking(true);
+                m_treeWidget->viewport()->setMouseTracking(true);
+                m_treeWidget->viewport()->installEventFilter(this);
+            }
         }
 
+        // eventFilter：
+        // - 输入：进程表 viewport 的鼠标移动/离开事件；
+        // - 处理：把鼠标所在单元格归一到行首索引，并触发表格重绘；
+        // - 返回：false 表示不截断 Qt 原有表格交互。
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (m_treeWidget != nullptr &&
+                watched == m_treeWidget->viewport() &&
+                event != nullptr)
+            {
+                if (event->type() == QEvent::MouseMove)
+                {
+                    const QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
+                    updateHoveredRowIndex(m_treeWidget->indexAt(activityMousePosition(mouseEvent)));
+                }
+                else if (event->type() == QEvent::Leave)
+                {
+                    updateHoveredRowIndex(QModelIndex());
+                }
+            }
+            return QStyledItemDelegate::eventFilter(watched, event);
+        }
+
+        // paint：
+        // - 输入：Qt 提供的绘图对象、单元格样式和模型索引；
+        // - 处理：清除默认选中/悬停填充后绘制内容，再叠加行级边框；
+        // - 返回：无返回值。
         void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
         {
             QStyleOptionViewItem itemOption(option);
-            if (index.column() == 0 && index.data(ProcessEfficiencyModeRole).toBool())
+            const bool rowSelected = (option.state & QStyle::State_Selected) != 0;
+            const bool rowHovered = isHoveredRow(index);
+
+            // 默认样式会用选中/悬停色整行填充，导致“退出进程灰色行”被覆盖；
+            // 这里只取消交互态填充，保留 item background、前景色和图标绘制。
+            itemOption.state &= ~QStyle::State_Selected;
+            itemOption.state &= ~QStyle::State_MouseOver;
+            itemOption.state &= ~QStyle::State_HasFocus;
+
+            const bool drawEfficiencyLeaf =
+                index.column() == 0 &&
+                index.data(ProcessEfficiencyModeRole).toBool();
+            if (drawEfficiencyLeaf)
             {
                 itemOption.rect.adjust(0, 0, -22, 0);
             }
             QStyledItemDelegate::paint(painter, itemOption, index);
 
-            if (index.column() != 0 || !index.data(ProcessEfficiencyModeRole).toBool())
-            {
-                return;
-            }
             if (painter == nullptr)
             {
                 return;
             }
 
+            if (drawEfficiencyLeaf)
+            {
+                painter->save();
+                painter->setRenderHint(QPainter::Antialiasing, true);
+                const int iconSize = std::min(16, std::max(10, option.rect.height() - 6));
+                const QRect leafRect(
+                    option.rect.right() - iconSize - 5,
+                    option.rect.center().y() - iconSize / 2,
+                    iconSize,
+                    iconSize);
+                const QColor leafColor = KswordTheme::IsDarkModeEnabled()
+                    ? QColor(101, 216, 120)
+                    : QColor(32, 166, 72);
+                QPainterPath leafPath;
+                leafPath.moveTo(leafRect.left() + leafRect.width() * 0.18, leafRect.center().y());
+                leafPath.cubicTo(
+                    leafRect.left() + leafRect.width() * 0.32,
+                    leafRect.top() + leafRect.height() * 0.08,
+                    leafRect.right() - leafRect.width() * 0.10,
+                    leafRect.top() + leafRect.height() * 0.06,
+                    leafRect.right() - leafRect.width() * 0.08,
+                    leafRect.center().y());
+                leafPath.cubicTo(
+                    leafRect.right() - leafRect.width() * 0.10,
+                    leafRect.bottom() - leafRect.height() * 0.08,
+                    leafRect.left() + leafRect.width() * 0.30,
+                    leafRect.bottom() - leafRect.height() * 0.05,
+                    leafRect.left() + leafRect.width() * 0.18,
+                    leafRect.center().y());
+                painter->fillPath(leafPath, leafColor);
+                painter->setPen(QPen(QColor(255, 255, 255, 210), 1.2));
+                painter->drawLine(
+                    QPointF(leafRect.left() + leafRect.width() * 0.28, leafRect.bottom() - leafRect.height() * 0.25),
+                    QPointF(leafRect.right() - leafRect.width() * 0.20, leafRect.top() + leafRect.height() * 0.22));
+                painter->restore();
+            }
+
+            if (rowSelected || rowHovered)
+            {
+                drawRowInteractionBorder(painter, option, index, rowSelected);
+            }
+        }
+
+    private:
+        // sameModelRow：
+        // - 输入：两个持久模型索引；
+        // - 处理：只比较 model/parent/row，不比较列；
+        // - 返回：true 表示二者指向同一逻辑行。
+        static bool sameModelRow(
+            const QPersistentModelIndex& leftIndex,
+            const QPersistentModelIndex& rightIndex)
+        {
+            if (!leftIndex.isValid() || !rightIndex.isValid())
+            {
+                return !leftIndex.isValid() && !rightIndex.isValid();
+            }
+            return leftIndex.model() == rightIndex.model() &&
+                leftIndex.parent() == rightIndex.parent() &&
+                leftIndex.row() == rightIndex.row();
+        }
+
+        // updateHoveredRowIndex：
+        // - 输入：鼠标命中的任意列索引，空索引表示鼠标离开；
+        // - 处理：归一到第 0 列后保存，确保整行所有列都能绘制边框；
+        // - 返回：无返回值。
+        void updateHoveredRowIndex(const QModelIndex& sourceIndex)
+        {
+            QPersistentModelIndex nextRowIndex;
+            if (sourceIndex.isValid())
+            {
+                nextRowIndex = QPersistentModelIndex(sourceIndex.sibling(sourceIndex.row(), 0));
+            }
+
+            if (sameModelRow(m_hoveredRowIndex, nextRowIndex))
+            {
+                return;
+            }
+            m_hoveredRowIndex = nextRowIndex;
+
+            // 行边框横跨多个列，简单重绘整个 viewport 可避免列宽/列顺序变化时残留边线。
+            if (m_treeWidget != nullptr && m_treeWidget->viewport() != nullptr)
+            {
+                m_treeWidget->viewport()->update();
+            }
+        }
+
+        // isHoveredRow：
+        // - 输入：当前正在绘制的模型索引；
+        // - 处理：与记录的悬停行按 model/parent/row 比较；
+        // - 返回：true 表示当前单元格属于悬停行。
+        bool isHoveredRow(const QModelIndex& index) const
+        {
+            if (!index.isValid() || !m_hoveredRowIndex.isValid())
+            {
+                return false;
+            }
+            return index.model() == m_hoveredRowIndex.model() &&
+                index.parent() == m_hoveredRowIndex.parent() &&
+                index.row() == m_hoveredRowIndex.row();
+        }
+
+        // drawRowInteractionBorder：
+        // - 输入：当前单元格绘图上下文、样式选项、索引和是否选中；
+        // - 处理：每个可见单元格绘制上下边线，首/末可见列补左右边线；
+        // - 返回：无返回值。
+        void drawRowInteractionBorder(
+            QPainter* painter,
+            const QStyleOptionViewItem& option,
+            const QModelIndex& index,
+            const bool rowSelected) const
+        {
+            if (painter == nullptr || m_treeWidget == nullptr || !index.isValid())
+            {
+                return;
+            }
+
+            QHeaderView* headerView = m_treeWidget->header();
+            if (headerView == nullptr)
+            {
+                return;
+            }
+
+            int firstVisibleVisualIndex = std::numeric_limits<int>::max();
+            int lastVisibleVisualIndex = std::numeric_limits<int>::min();
+            const int columnCount = index.model() != nullptr
+                ? index.model()->columnCount(index.parent())
+                : m_treeWidget->columnCount();
+            for (int columnIndex = 0; columnIndex < columnCount; ++columnIndex)
+            {
+                if (m_treeWidget->isColumnHidden(columnIndex))
+                {
+                    continue;
+                }
+                const int visualIndex = headerView->visualIndex(columnIndex);
+                if (visualIndex < 0)
+                {
+                    continue;
+                }
+                firstVisibleVisualIndex = std::min(firstVisibleVisualIndex, visualIndex);
+                lastVisibleVisualIndex = std::max(lastVisibleVisualIndex, visualIndex);
+            }
+
+            const int currentVisualIndex = headerView->visualIndex(index.column());
+            if (currentVisualIndex < 0 ||
+                firstVisibleVisualIndex == std::numeric_limits<int>::max() ||
+                lastVisibleVisualIndex == std::numeric_limits<int>::min())
+            {
+                return;
+            }
+
+            QColor borderColor = KswordTheme::PrimaryBlueColor;
+            borderColor.setAlpha(rowSelected ? 245 : 165);
+            const QRect borderRect = option.rect.adjusted(0, 1, -1, -2);
+            if (!borderRect.isValid())
+            {
+                return;
+            }
+
             painter->save();
-            painter->setRenderHint(QPainter::Antialiasing, true);
-            const int iconSize = std::min(16, std::max(10, option.rect.height() - 6));
-            const QRect leafRect(
-                option.rect.right() - iconSize - 5,
-                option.rect.center().y() - iconSize / 2,
-                iconSize,
-                iconSize);
-            const QColor leafColor = KswordTheme::IsDarkModeEnabled()
-                ? QColor(101, 216, 120)
-                : QColor(32, 166, 72);
-            QPainterPath leafPath;
-            leafPath.moveTo(leafRect.left() + leafRect.width() * 0.18, leafRect.center().y());
-            leafPath.cubicTo(
-                leafRect.left() + leafRect.width() * 0.32,
-                leafRect.top() + leafRect.height() * 0.08,
-                leafRect.right() - leafRect.width() * 0.10,
-                leafRect.top() + leafRect.height() * 0.06,
-                leafRect.right() - leafRect.width() * 0.08,
-                leafRect.center().y());
-            leafPath.cubicTo(
-                leafRect.right() - leafRect.width() * 0.10,
-                leafRect.bottom() - leafRect.height() * 0.08,
-                leafRect.left() + leafRect.width() * 0.30,
-                leafRect.bottom() - leafRect.height() * 0.05,
-                leafRect.left() + leafRect.width() * 0.18,
-                leafRect.center().y());
-            painter->fillPath(leafPath, leafColor);
-            painter->setPen(QPen(QColor(255, 255, 255, 210), 1.2));
-            painter->drawLine(
-                QPointF(leafRect.left() + leafRect.width() * 0.28, leafRect.bottom() - leafRect.height() * 0.25),
-                QPointF(leafRect.right() - leafRect.width() * 0.20, leafRect.top() + leafRect.height() * 0.22));
+            painter->setRenderHint(QPainter::Antialiasing, false);
+            painter->setBrush(Qt::NoBrush);
+            painter->setPen(QPen(borderColor, rowSelected ? 2.0 : 1.4));
+            painter->drawLine(borderRect.topLeft(), borderRect.topRight());
+            painter->drawLine(borderRect.bottomLeft(), borderRect.bottomRight());
+            if (currentVisualIndex == firstVisibleVisualIndex)
+            {
+                painter->drawLine(borderRect.topLeft(), borderRect.bottomLeft());
+            }
+            if (currentVisualIndex == lastVisibleVisualIndex)
+            {
+                painter->drawLine(borderRect.topRight(), borderRect.bottomRight());
+            }
             painter->restore();
         }
+
+        QPointer<QTreeWidget> m_treeWidget;       // m_treeWidget：被代理的进程表，不拥有。
+        QPersistentModelIndex m_hoveredRowIndex; // m_hoveredRowIndex：当前鼠标悬停行的第 0 列索引。
     };
 
     // 当前 steady_clock 时间转 100ns（与 ks::process 差值计算规则保持一致）。
@@ -2074,7 +2268,81 @@ ProcessDock::ProcessDock(QWidget* parent)
     initializeUi();
     initializeConnections();
     initializeTimer();
+    if (QApplication::instance() != nullptr)
+    {
+        QApplication::instance()->installEventFilter(this);
+    }
     m_monitoringEnabled = false;
+}
+
+ProcessDock::~ProcessDock()
+{
+    // 析构阶段主动解除全局事件过滤器，避免 QApplication 后续点击事件访问已销毁 Dock。
+    if (QApplication::instance() != nullptr)
+    {
+        QApplication::instance()->removeEventFilter(this);
+    }
+}
+
+bool ProcessDock::eventFilter(QObject* watched, QEvent* event)
+{
+    // 只处理左键按下：
+    // - 鼠标释放/移动不改变选择；
+    // - 右键仍保留上下文菜单的冻结选择语义。
+    if (event == nullptr || event->type() != QEvent::MouseButtonPress)
+    {
+        return QWidget::eventFilter(watched, event);
+    }
+
+    const QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
+    if (mouseEvent == nullptr || mouseEvent->button() != Qt::LeftButton)
+    {
+        return QWidget::eventFilter(watched, event);
+    }
+
+    if (m_processTable == nullptr ||
+        m_sideTabWidget == nullptr ||
+        m_sideTabWidget->currentWidget() != m_processListPage ||
+        m_contextMenuVisible ||
+        !isVisible())
+    {
+        return QWidget::eventFilter(watched, event);
+    }
+
+    QWidget* watchedWidget = qobject_cast<QWidget*>(watched);
+    if (watchedWidget == nullptr)
+    {
+        return QWidget::eventFilter(watched, event);
+    }
+
+    // 只响应当前 ProcessDock 内部点击，避免影响其它 Dock 或独立详情窗口。
+    const bool clickedInsideThisDock = (watchedWidget == this) || isAncestorOf(watchedWidget);
+    if (!clickedInsideThisDock)
+    {
+        return QWidget::eventFilter(watched, event);
+    }
+
+    // 表格空白区没有 item，点击这里也应视为“取消当前进程选择”。
+    if (watchedWidget == m_processTable->viewport())
+    {
+        const QPoint viewportPosition = activityMousePosition(mouseEvent);
+        if (m_processTable->itemAt(viewportPosition) == nullptr)
+        {
+            clearProcessTableSelection();
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
+    // 表头、滚动条和真实单元格仍属于表格，不清空选择；其它控件/空白区域清空。
+    const bool clickedInsideProcessTable =
+        (watchedWidget == m_processTable) ||
+        m_processTable->isAncestorOf(watchedWidget);
+    if (!clickedInsideProcessTable)
+    {
+        clearProcessTableSelection();
+    }
+
+    return QWidget::eventFilter(watched, event);
 }
 
 void ProcessDock::showEvent(QShowEvent* event)
@@ -2587,9 +2855,7 @@ void ProcessDock::initializeProcessTable()
     m_processTable->setSortingEnabled(true);
     m_processTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_processTable->setAlternatingRowColors(true);
-    m_processTable->setItemDelegateForColumn(
-        toColumnIndex(TableColumn::Name),
-        new ProcessNameDelegate(m_processTable));
+    m_processTable->setItemDelegate(new ProcessRowHighlightDelegate(m_processTable));
     // 列宽由自适应逻辑统一控制，强制关闭内部横向滚动条。
     m_processTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
@@ -5022,20 +5288,43 @@ void ProcessDock::rebuildTable()
     }
 
     // 按 identityKey 恢复用户之前选中的进程：
-    // - 左键点中的那一行在刷新后继续保持高亮；
+    // - Ctrl 多选集合逐行用 Select|Rows 写回，避免刷新后丢失批量选择；
+    // - 当前焦点只通过 NoUpdate 更新，不允许 setCurrentItem 把多选压成单选；
     // - 若该进程已不存在，则清空追踪状态，避免错误高亮。
     if (!trackedRowItemsToRestore.empty())
     {
-        for (QTreeWidgetItem* rowItem : trackedRowItemsToRestore)
+        QItemSelectionModel* selectionModel = m_processTable->selectionModel();
+        if (selectionModel != nullptr)
         {
-            if (rowItem != nullptr)
+            selectionModel->clearSelection();
+            for (QTreeWidgetItem* rowItem : trackedRowItemsToRestore)
             {
-                rowItem->setSelected(true);
+                if (rowItem == nullptr)
+                {
+                    continue;
+                }
+
+                const QModelIndex rowIndex = m_processTable->indexFromItem(rowItem, 0);
+                if (rowIndex.isValid())
+                {
+                    selectionModel->select(
+                        rowIndex,
+                        QItemSelectionModel::Select | QItemSelectionModel::Rows);
+                }
             }
         }
         QTreeWidgetItem* currentRowItemToRestore =
             trackedRowItemToRestore != nullptr ? trackedRowItemToRestore : trackedRowItemsToRestore.front();
-        m_processTable->setCurrentItem(currentRowItemToRestore, trackedColumnBeforeRebuild);
+        if (selectionModel != nullptr && currentRowItemToRestore != nullptr)
+        {
+            const QModelIndex currentIndex = m_processTable->indexFromItem(
+                currentRowItemToRestore,
+                trackedColumnBeforeRebuild);
+            if (currentIndex.isValid())
+            {
+                selectionModel->setCurrentIndex(currentIndex, QItemSelectionModel::NoUpdate);
+            }
+        }
         syncTrackedSelectionFromTable();
         m_trackedSelectedColumn = trackedColumnBeforeRebuild;
     }
@@ -6700,6 +6989,58 @@ std::vector<ProcessDock::ProcessActionTarget> ProcessDock::selectedActionTargets
     }
 
     return actionTargets;
+}
+
+void ProcessDock::clearProcessTableSelection()
+{
+    if (m_processTable == nullptr || m_contextMenuVisible)
+    {
+        return;
+    }
+
+    // hadSelectionState：
+    // - 既检查 Qt 当前选择，也检查跨刷新追踪 key；
+    // - 避免没有选择时反复刷新图表和 viewport。
+    const bool hadSelectionState =
+        !m_processTable->selectedItems().isEmpty() ||
+        m_processTable->currentItem() != nullptr ||
+        !m_trackedSelectedIdentityKey.empty() ||
+        !m_trackedSelectedIdentityKeys.empty();
+    if (!hadSelectionState)
+    {
+        return;
+    }
+
+    // 清空 Qt 选择模型：
+    // - 阻断中间信号，防止 itemSelectionChanged 在 currentItem 尚未清空时重新写回追踪 key；
+    // - 后续手动刷新活动图，保证 UI 状态只更新一次。
+    {
+        QSignalBlocker tableSignalBlocker(m_processTable);
+        if (QItemSelectionModel* selectionModel = m_processTable->selectionModel())
+        {
+            QSignalBlocker selectionSignalBlocker(selectionModel);
+            selectionModel->clear();
+        }
+        m_processTable->setCurrentIndex(QModelIndex());
+    }
+
+    // 清空 ProcessDock 自己的跨刷新选择缓存，让活动图 selectionKeys 为空并回到整体曲线。
+    m_trackedSelectedIdentityKey.clear();
+    m_trackedSelectedIdentityKeys.clear();
+    m_trackedSelectedColumn = 0;
+    clearContextActionBinding();
+
+    refreshProcessActivityChart();
+    if (m_activityTimelineSlider != nullptr && !m_activitySamples.empty())
+    {
+        previewProcessActivitySnapshotForIndex(m_activityTimelineSlider->value());
+    }
+    m_processTable->viewport()->update();
+
+    kLogEvent logEvent;
+    dbg << logEvent
+        << "[ProcessDock] 已清空进程表选择，活动图切换为整体视图。"
+        << eol;
 }
 
 void ProcessDock::syncTrackedSelectionFromTable()
