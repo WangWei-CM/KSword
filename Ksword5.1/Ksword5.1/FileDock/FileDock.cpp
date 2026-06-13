@@ -70,6 +70,7 @@
 #include <QUrl>
 #include <QVector>
 #include <QVBoxLayout>
+#include <QWindow>
 
 #include <array>
 #include <algorithm>
@@ -94,10 +95,11 @@ namespace
         bool isDirectory = false;
     };
 
-    enum class UnlockTerminateMode
+    enum class UnlockOperationMode
     {
-        R3 = 0,
-        R0
+        CloseHandleR3 = 0,
+        TerminateProcessR3,
+        TerminateProcessR0
     };
 
     struct UnlockProcessCandidate
@@ -112,11 +114,27 @@ namespace
         bool isCriticalProcess = false;
     };
 
+    struct UnlockHandleCandidate
+    {
+        std::uint32_t processId = 0U;
+        QString processName;
+        QString processImagePath;
+        std::uint64_t handleValue = 0U;
+        std::uint32_t grantedAccess = 0U;
+        QString matchedTargetPath;
+        QString matchRuleText;
+        QString objectName;
+        QString enumerationSource;
+        bool isCurrentProcess = false;
+        bool isCriticalProcess = false;
+    };
+
     struct UnlockSelectionResult
     {
         bool accepted = false;
-        UnlockTerminateMode terminateMode = UnlockTerminateMode::R3;
+        UnlockOperationMode operationMode = UnlockOperationMode::CloseHandleR3;
         std::vector<std::uint32_t> selectedProcessIdList;
+        std::vector<UnlockHandleCandidate> selectedHandleList;
     };
 
     // UnlockSelectionSharedState：
@@ -127,14 +145,67 @@ namespace
         std::mutex mutex;                         // mutex：保护 completed 与 result 的互斥锁。
         std::condition_variable condition;        // condition：通知后台线程 UI 选择已完成。
         bool completed = false;                   // completed：标记 UI 选择流程是否已经写入结果。
-        UnlockSelectionResult result;             // result：保存用户选择的结束方式和 PID 列表。
+        UnlockSelectionResult result;             // result：保存用户选择的操作方式及句柄/PID 目标。
     };
 
-    QString unlockTerminateModeToText(const UnlockTerminateMode mode)
+    // resolveVisibleDialogParent 作用：
+    // - 为文件解锁器选择一个可见父窗口；
+    // - Shell 右键会使用隐藏 FileDock 宿主，不能直接把弹窗挂在隐藏控件上。
+    QWidget* resolveVisibleDialogParent(QWidget* const preferredParent)
     {
-        return mode == UnlockTerminateMode::R0
-            ? QStringLiteral("R0")
-            : QStringLiteral("R3");
+        QWidget* candidate = preferredParent;
+        if (candidate != nullptr)
+        {
+            QWidget* const topLevel = candidate->window();
+            if (topLevel != nullptr)
+            {
+                candidate = topLevel;
+            }
+        }
+        if (candidate != nullptr && candidate->isVisible())
+        {
+            return candidate;
+        }
+        if (QWidget* const activeWindow = QApplication::activeWindow(); activeWindow != nullptr)
+        {
+            return activeWindow;
+        }
+        const QWidgetList topLevelWidgetList = QApplication::topLevelWidgets();
+        for (QWidget* const widget : topLevelWidgetList)
+        {
+            if (widget != nullptr && widget->isVisible())
+            {
+                return widget;
+            }
+        }
+        return preferredParent;
+    }
+
+    // buildOpaqueStandaloneDialogStyle 作用：
+    // - 生成独立弹窗不透明样式；
+    // - 前置声明用于供解锁器选择对话框在 helper 正式定义前调用。
+    QString buildOpaqueStandaloneDialogStyle(const QString& dialogObjectName);
+
+    QString unlockOperationModeToText(const UnlockOperationMode mode)
+    {
+        if (mode == UnlockOperationMode::CloseHandleR3)
+        {
+            return QStringLiteral("R3 关闭句柄");
+        }
+        return mode == UnlockOperationMode::TerminateProcessR0
+            ? QStringLiteral("R0 结束进程")
+            : QStringLiteral("R3 结束进程");
+    }
+
+    QString formatHandleValueText(const std::uint64_t handleValue)
+    {
+        if (handleValue == 0U)
+        {
+            return QStringLiteral("-");
+        }
+        return QStringLiteral("0x%1")
+            .arg(static_cast<qulonglong>(handleValue), 0, 16)
+            .toUpper();
     }
 
     void appendUniqueText(QStringList& list, const QString& text)
@@ -424,37 +495,76 @@ namespace
         return terminateOk;
     }
 
-    UnlockSelectionResult showUnlockProcessSelectionDialog(
+    // showUnlockSelectionDialog：
+    // - 作用：展示文件解锁器扫描结果，并让用户选择关闭句柄或结束进程；
+    // - 参数 parent：父窗口，用于模态弹窗归属；
+    // - 参数 processCandidateList：按 PID 聚合后的占用进程列表；
+    // - 参数 handleCandidateList：按 PID+Handle 展开的可关闭句柄列表；
+    // - 返回：用户确认的操作模式与选中目标；取消时 accepted=false。
+    UnlockSelectionResult showUnlockSelectionDialog(
         QWidget* const parent,
-        const std::vector<UnlockProcessCandidate>& candidateList)
+        const std::vector<UnlockProcessCandidate>& processCandidateList,
+        const std::vector<UnlockHandleCandidate>& handleCandidateList)
     {
         UnlockSelectionResult result;
-        if (candidateList.empty())
+        if (processCandidateList.empty() && handleCandidateList.empty())
         {
             return result;
         }
 
         QDialog dialog(parent);
-        dialog.setWindowTitle(QStringLiteral("文件解锁器 - 选择占用进程"));
-        dialog.resize(900, 520);
+        dialog.setObjectName(QStringLiteral("FileUnlockerSelectionDialog"));
+        dialog.setStyleSheet(buildOpaqueStandaloneDialogStyle(dialog.objectName()));
+        dialog.setWindowTitle(QStringLiteral("文件解锁器 - 选择操作目标"));
+        dialog.resize(1080, 620);
 
         QVBoxLayout* const rootLayout = new QVBoxLayout(&dialog);
         QLabel* const tipLabel = new QLabel(
-            QStringLiteral("已扫描到以下占用进程。请选择要结束的进程（支持多选），并选择结束方式。未勾选的进程不会处理。"),
+            QStringLiteral("已扫描到以下占用来源。建议先关闭选中句柄；若仍无法删除/重命名，再改用结束进程兜底。未勾选的目标不会处理。"),
             &dialog);
         tipLabel->setWordWrap(true);
         rootLayout->addWidget(tipLabel);
 
         QHBoxLayout* const modeLayout = new QHBoxLayout();
-        QLabel* const modeLabel = new QLabel(QStringLiteral("结束方式："), &dialog);
+        QLabel* const modeLabel = new QLabel(QStringLiteral("操作方式："), &dialog);
         QComboBox* const modeComboBox = new QComboBox(&dialog);
-        modeComboBox->addItem(QStringLiteral("R3 用户态 TerminateProcess（推荐先尝试）"));
-        modeComboBox->addItem(QStringLiteral("R0 驱动结束进程（更强力）"));
+        const bool hasClosableHandle = std::any_of(
+            handleCandidateList.begin(),
+            handleCandidateList.end(),
+            [](const UnlockHandleCandidate& candidate) {
+                return candidate.handleValue != 0U
+                    && candidate.processId > 4U
+                    && !candidate.isCurrentProcess
+                    && !candidate.isCriticalProcess;
+            });
+        modeComboBox->addItem(QStringLiteral("关闭选中句柄(R3，推荐先尝试)"));
+        modeComboBox->addItem(QStringLiteral("结束选中进程(R3)"));
+        modeComboBox->addItem(QStringLiteral("结束选中进程(R0，更强力)"));
+        if (!hasClosableHandle)
+        {
+            modeComboBox->setCurrentIndex(1);
+        }
         modeLayout->addWidget(modeLabel);
         modeLayout->addWidget(modeComboBox, 1);
         rootLayout->addLayout(modeLayout);
 
-        QTableWidget* const processTable = new QTableWidget(static_cast<int>(candidateList.size()), 6, &dialog);
+        QStackedWidget* const tableStack = new QStackedWidget(&dialog);
+        QTableWidget* const handleTable = new QTableWidget(static_cast<int>(handleCandidateList.size()), 7, &dialog);
+        handleTable->setHorizontalHeaderLabels(QStringList{
+            QStringLiteral("选择"),
+            QStringLiteral("PID"),
+            QStringLiteral("进程名"),
+            QStringLiteral("Handle"),
+            QStringLiteral("GrantedAccess"),
+            QStringLiteral("命中路径"),
+            QStringLiteral("说明") });
+        handleTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        handleTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        handleTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        handleTable->verticalHeader()->setVisible(false);
+        handleTable->horizontalHeader()->setStretchLastSection(true);
+
+        QTableWidget* const processTable = new QTableWidget(static_cast<int>(processCandidateList.size()), 6, &dialog);
         processTable->setHorizontalHeaderLabels(QStringList{
             QStringLiteral("选择"),
             QStringLiteral("PID"),
@@ -468,9 +578,59 @@ namespace
         processTable->verticalHeader()->setVisible(false);
         processTable->horizontalHeader()->setStretchLastSection(true);
 
-        for (int row = 0; row < static_cast<int>(candidateList.size()); ++row)
+        auto makeTableItem = [](const QString& text, const bool enabled) {
+            QTableWidgetItem* const item = new QTableWidgetItem(text);
+            item->setFlags(enabled
+                ? (Qt::ItemIsSelectable | Qt::ItemIsEnabled)
+                : Qt::ItemIsSelectable);
+            return item;
+            };
+
+        for (int row = 0; row < static_cast<int>(handleCandidateList.size()); ++row)
         {
-            const UnlockProcessCandidate& candidate = candidateList[static_cast<std::size_t>(row)];
+            const UnlockHandleCandidate& candidate = handleCandidateList[static_cast<std::size_t>(row)];
+            const bool canCloseHandle = candidate.handleValue != 0U
+                && !candidate.isCurrentProcess
+                && !candidate.isCriticalProcess
+                && candidate.processId > 4U;
+
+            QTableWidgetItem* const checkItem = new QTableWidgetItem();
+            checkItem->setCheckState(Qt::Unchecked);
+            checkItem->setData(Qt::UserRole, row);
+            checkItem->setFlags(canCloseHandle
+                ? (Qt::ItemIsUserCheckable | Qt::ItemIsSelectable | Qt::ItemIsEnabled)
+                : (Qt::ItemIsUserCheckable | Qt::ItemIsSelectable));
+            handleTable->setItem(row, 0, checkItem);
+
+            QStringList noteList;
+            appendUniqueText(noteList, candidate.objectName);
+            appendUniqueText(noteList, candidate.processImagePath);
+            appendUniqueText(noteList, candidate.matchRuleText);
+            appendUniqueText(noteList, candidate.enumerationSource);
+            if (candidate.handleValue == 0U)
+            {
+                noteList.push_back(QStringLiteral("无句柄值：该来源可能是进程映像/模块映射，不能用 R3 关闭句柄处理"));
+            }
+            if (candidate.isCurrentProcess)
+            {
+                noteList.push_back(QStringLiteral("已保护：当前 Ksword 进程，不可关闭句柄"));
+            }
+            if (candidate.isCriticalProcess)
+            {
+                noteList.push_back(QStringLiteral("已保护：关键系统进程，不可关闭句柄"));
+            }
+
+            handleTable->setItem(row, 1, makeTableItem(QString::number(candidate.processId), canCloseHandle));
+            handleTable->setItem(row, 2, makeTableItem(candidate.processName.isEmpty() ? QStringLiteral("Unknown") : candidate.processName, canCloseHandle));
+            handleTable->setItem(row, 3, makeTableItem(formatHandleValueText(candidate.handleValue), canCloseHandle));
+            handleTable->setItem(row, 4, makeTableItem(formatHandleValueText(candidate.grantedAccess), canCloseHandle));
+            handleTable->setItem(row, 5, makeTableItem(candidate.matchedTargetPath, canCloseHandle));
+            handleTable->setItem(row, 6, makeTableItem(noteList.join(QStringLiteral("\n")), canCloseHandle));
+        }
+
+        for (int row = 0; row < static_cast<int>(processCandidateList.size()); ++row)
+        {
+            const UnlockProcessCandidate& candidate = processCandidateList[static_cast<std::size_t>(row)];
             const bool protectedProcess = candidate.isCurrentProcess || candidate.isCriticalProcess;
 
             QTableWidgetItem* const checkItem = new QTableWidgetItem();
@@ -510,17 +670,40 @@ namespace
             processTable->setItem(row, 4, makeTextItem(candidate.matchedTargetList.join(QStringLiteral("\n"))));
             processTable->setItem(row, 5, makeTextItem(noteList.join(QStringLiteral("\n"))));
         }
+
+        handleTable->resizeColumnsToContents();
         processTable->resizeColumnsToContents();
-        rootLayout->addWidget(processTable, 1);
+        tableStack->addWidget(handleTable);
+        tableStack->addWidget(processTable);
+        tableStack->setCurrentIndex(modeComboBox->currentIndex() == 0 ? 0 : 1);
+        rootLayout->addWidget(tableStack, 1);
 
         QDialogButtonBox* const buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-        QPushButton* const selectAllButton = buttonBox->addButton(QStringLiteral("全选可结束进程"), QDialogButtonBox::ActionRole);
+        QPushButton* const selectAllButton = buttonBox->addButton(QStringLiteral("全选当前可操作项"), QDialogButtonBox::ActionRole);
         QPushButton* const clearButton = buttonBox->addButton(QStringLiteral("清空选择"), QDialogButtonBox::ActionRole);
-        buttonBox->button(QDialogButtonBox::Ok)->setText(QStringLiteral("结束选中进程"));
+        buttonBox->button(QDialogButtonBox::Ok)->setText(modeComboBox->currentIndex() == 0
+            ? QStringLiteral("关闭选中句柄")
+            : QStringLiteral("执行选中操作"));
         buttonBox->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
         rootLayout->addWidget(buttonBox);
 
-        auto collectSelectedIds = [&processTable, &candidateList]() {
+        auto collectSelectedHandles = [&handleTable, &handleCandidateList]() {
+            std::vector<UnlockHandleCandidate> selectedHandleList;
+            for (int row = 0; row < handleTable->rowCount(); ++row)
+            {
+                QTableWidgetItem* const item = handleTable->item(row, 0);
+                if (item == nullptr
+                    || !(item->flags() & Qt::ItemIsEnabled)
+                    || item->checkState() != Qt::Checked)
+                {
+                    continue;
+                }
+                selectedHandleList.push_back(handleCandidateList[static_cast<std::size_t>(row)]);
+            }
+            return selectedHandleList;
+            };
+
+        auto collectSelectedIds = [&processTable, &processCandidateList]() {
             std::vector<std::uint32_t> selectedProcessIdList;
             for (int row = 0; row < processTable->rowCount(); ++row)
             {
@@ -531,34 +714,45 @@ namespace
                 {
                     continue;
                 }
-                selectedProcessIdList.push_back(candidateList[static_cast<std::size_t>(row)].processId);
+                selectedProcessIdList.push_back(processCandidateList[static_cast<std::size_t>(row)].processId);
             }
             return selectedProcessIdList;
             };
 
-        QObject::connect(selectAllButton, &QPushButton::clicked, [&processTable]() {
-            for (int row = 0; row < processTable->rowCount(); ++row)
+        auto setCheckedForTable = [](QTableWidget* const targetTable, const Qt::CheckState checkState) {
+            for (int row = 0; row < targetTable->rowCount(); ++row)
             {
-                QTableWidgetItem* const item = processTable->item(row, 0);
+                QTableWidgetItem* const item = targetTable->item(row, 0);
                 if (item != nullptr && (item->flags() & Qt::ItemIsEnabled))
                 {
-                    item->setCheckState(Qt::Checked);
+                    item->setCheckState(checkState);
                 }
             }
+            };
+        QObject::connect(selectAllButton, &QPushButton::clicked, [&modeComboBox, &handleTable, &processTable, &setCheckedForTable]() {
+            setCheckedForTable(modeComboBox->currentIndex() == 0 ? handleTable : processTable, Qt::Checked);
             });
-        QObject::connect(clearButton, &QPushButton::clicked, [&processTable]() {
-            for (int row = 0; row < processTable->rowCount(); ++row)
-            {
-                QTableWidgetItem* const item = processTable->item(row, 0);
-                if (item != nullptr && (item->flags() & Qt::ItemIsEnabled))
-                {
-                    item->setCheckState(Qt::Unchecked);
-                }
-            }
+        QObject::connect(clearButton, &QPushButton::clicked, [&modeComboBox, &handleTable, &processTable, &setCheckedForTable]() {
+            setCheckedForTable(modeComboBox->currentIndex() == 0 ? handleTable : processTable, Qt::Unchecked);
+            });
+        QObject::connect(modeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            [&tableStack, &buttonBox](const int modeIndex) {
+                tableStack->setCurrentIndex(modeIndex == 0 ? 0 : 1);
+                buttonBox->button(QDialogButtonBox::Ok)->setText(modeIndex == 0
+                    ? QStringLiteral("关闭选中句柄")
+                    : QStringLiteral("执行选中操作"));
             });
         QObject::connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-        QObject::connect(buttonBox, &QDialogButtonBox::accepted, [&dialog, &collectSelectedIds]() {
-            if (collectSelectedIds().empty())
+        QObject::connect(buttonBox, &QDialogButtonBox::accepted, [&dialog, &modeComboBox, &collectSelectedHandles, &collectSelectedIds]() {
+            if (modeComboBox->currentIndex() == 0 && collectSelectedHandles().empty())
+            {
+                QMessageBox::information(
+                    &dialog,
+                    QStringLiteral("文件解锁器"),
+                    QStringLiteral("请至少选择一个要关闭的句柄。"));
+                return;
+            }
+            if (modeComboBox->currentIndex() != 0 && collectSelectedIds().empty())
             {
                 QMessageBox::information(
                     &dialog,
@@ -575,10 +769,19 @@ namespace
         }
 
         result.accepted = true;
-        result.terminateMode = modeComboBox->currentIndex() == 1
-            ? UnlockTerminateMode::R0
-            : UnlockTerminateMode::R3;
-        result.selectedProcessIdList = collectSelectedIds();
+        result.operationMode = modeComboBox->currentIndex() == 0
+            ? UnlockOperationMode::CloseHandleR3
+            : (modeComboBox->currentIndex() == 2
+                ? UnlockOperationMode::TerminateProcessR0
+                : UnlockOperationMode::TerminateProcessR3);
+        if (result.operationMode == UnlockOperationMode::CloseHandleR3)
+        {
+            result.selectedHandleList = collectSelectedHandles();
+        }
+        else
+        {
+            result.selectedProcessIdList = collectSelectedIds();
+        }
         return result;
     }
 
@@ -4216,7 +4419,6 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* entropyAction = menu.addAction(QIcon(":/Icon/process_uncritical.svg"), QStringLiteral("计算熵值"));
     QAction* hexAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("十六进制查看"));
     QAction* peAction = menu.addAction(QIcon(":/Icon/process_list.svg"), QStringLiteral("在PE查看器中打开"));
-    QAction* handleScanAction = menu.addAction(QIcon(":/Icon/handle_refresh.svg"), QStringLiteral("扫描占用句柄"));
     QAction* mappedProcessScanAction = menu.addAction(QIcon(":/Icon/process_tree.svg"), QStringLiteral("扫描映射进程(R0)"));
 
     // 结合选中集合动态启用菜单项，保证“多选”和“右键动作”行为一致。
@@ -4240,7 +4442,6 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     entropyAction->setEnabled(hasAnyFile);
     hexAction->setEnabled(singleFileOnly);
     peAction->setEnabled(singleFileOnly);
-    handleScanAction->setEnabled(hasSelection);
     mappedProcessScanAction->setEnabled(hasAnyFile);
 
     QAction* selectedAction = menu.exec(panel.fileView->viewport()->mapToGlobal(localPos));
@@ -4698,11 +4899,6 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
         {
             showFileDetailDialog(firstPath);
         }
-        return;
-    }
-    if (selectedAction == handleScanAction)
-    {
-        openHandleUsageScanWindow(menuPaths);
         return;
     }
     if (selectedAction == mappedProcessScanAction)
@@ -5490,10 +5686,11 @@ void FileDock::unlockPathsByDriver(
         (panelForRefresh == &m_rightPanel) ? RefreshTarget::Right :
         RefreshTarget::Both;
 
+    QWidget* const dialogParent = resolveVisibleDialogParent(this);
     const QMessageBox::StandardButton scanChoice = QMessageBox::question(
-        this,
+        dialogParent,
         QStringLiteral("文件解锁器扫描确认"),
-        QStringLiteral("将扫描选中路径的占用进程。扫描完成后会列出进程列表，由你选择要结束的进程和 R3/R0 结束方式。\n是否开始扫描？"),
+        QStringLiteral("将扫描选中路径的占用来源。扫描完成后可选择关闭句柄，或改用 R3/R0 结束进程兜底。\n是否开始扫描？"),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
     if (scanChoice != QMessageBox::Yes)
@@ -5506,11 +5703,14 @@ void FileDock::unlockPathsByDriver(
         bool scanCompleted = false;
         QStringList scanDetailList;
         std::vector<UnlockProcessCandidate> processCandidateList;
-        UnlockTerminateMode terminateMode = UnlockTerminateMode::R3;
+        std::vector<UnlockHandleCandidate> handleCandidateList;
+        UnlockOperationMode operationMode = UnlockOperationMode::CloseHandleR3;
         std::vector<std::uint32_t> selectedProcessIdList;
+        std::vector<UnlockHandleCandidate> selectedHandleList;
+        std::size_t closeHandleSuccessCount = 0U;
         std::size_t terminateSuccessCount = 0U;
-        QStringList terminateFailList;
-        QStringList skippedProcessList;
+        QStringList operationFailList;
+        QStringList skippedTargetList;
         QString driverErrorText;
     };
 
@@ -5518,7 +5718,7 @@ void FileDock::unlockPathsByDriver(
         std::lock_guard<std::mutex> lock(m_unlockerWorkerMutex);
         if (m_unlockerWorkerRunning.load())
         {
-            QMessageBox::information(this, QStringLiteral("文件解锁器"), QStringLiteral("已有解锁任务正在执行，请稍候。"));
+            QMessageBox::information(dialogParent, QStringLiteral("文件解锁器"), QStringLiteral("已有解锁任务正在执行，请稍候。"));
             return;
         }
         if (m_unlockerWorkerThread.joinable())
@@ -5530,7 +5730,7 @@ void FileDock::unlockPathsByDriver(
     }
 
     const int progressPid = kPro.add("文件", "文件解锁器");
-    kPro.set(progressPid, "准备扫描占用进程", 0, 5.0f);
+    kPro.set(progressPid, "准备扫描占用来源", 0, 5.0f);
 
     QPointer<FileDock> safeThis(this);
     {
@@ -5541,7 +5741,7 @@ void FileDock::unlockPathsByDriver(
             this->m_unlockerWorkerRunning.store(false);
             };
 
-        kPro.set(progressPid, "扫描占用进程", 0, 35.0f);
+        kPro.set(progressPid, "扫描占用来源", 0, 35.0f);
         const filedock::handleusage::HandleUsageScanResult scanResult =
             filedock::handleusage::scanHandleUsageByPaths(paths, progressPid);
         jobResult.scanCompleted = true;
@@ -5562,21 +5762,35 @@ void FileDock::unlockPathsByDriver(
                 continue;
             }
 
-            UnlockProcessCandidate& candidate = candidateByPid[entry.processId];
-            candidate.processId = entry.processId;
-            if (candidate.processName.isEmpty() && !entry.processName.trimmed().isEmpty())
+            UnlockProcessCandidate& processCandidate = candidateByPid[entry.processId];
+            processCandidate.processId = entry.processId;
+            if (processCandidate.processName.isEmpty() && !entry.processName.trimmed().isEmpty())
             {
-                candidate.processName = entry.processName.trimmed();
+                processCandidate.processName = entry.processName.trimmed();
             }
-            if (candidate.processImagePath.isEmpty() && !entry.processImagePath.trimmed().isEmpty())
+            if (processCandidate.processImagePath.isEmpty() && !entry.processImagePath.trimmed().isEmpty())
             {
-                candidate.processImagePath = entry.processImagePath.trimmed();
+                processCandidate.processImagePath = entry.processImagePath.trimmed();
             }
-            appendUniqueText(candidate.matchedTargetList, entry.matchedTargetPath);
-            appendUniqueText(candidate.matchRuleList, entry.matchRuleText);
-            candidate.matchCount += 1U;
-            candidate.isCurrentProcess = entry.processId == currentProcessId;
-            candidate.isCriticalProcess = entry.processId <= 4U || isCriticalProcessName(candidate.processName);
+            appendUniqueText(processCandidate.matchedTargetList, entry.matchedTargetPath);
+            appendUniqueText(processCandidate.matchRuleList, entry.matchRuleText);
+            processCandidate.matchCount += 1U;
+            processCandidate.isCurrentProcess = entry.processId == currentProcessId;
+            processCandidate.isCriticalProcess = entry.processId <= 4U || isCriticalProcessName(processCandidate.processName);
+
+            UnlockHandleCandidate handleCandidate{};
+            handleCandidate.processId = entry.processId;
+            handleCandidate.processName = entry.processName.trimmed();
+            handleCandidate.processImagePath = entry.processImagePath.trimmed();
+            handleCandidate.handleValue = entry.handleValue;
+            handleCandidate.grantedAccess = entry.grantedAccess;
+            handleCandidate.matchedTargetPath = entry.matchedTargetPath;
+            handleCandidate.matchRuleText = entry.matchRuleText;
+            handleCandidate.objectName = entry.objectName;
+            handleCandidate.enumerationSource = entry.enumerationSource;
+            handleCandidate.isCurrentProcess = processCandidate.isCurrentProcess;
+            handleCandidate.isCriticalProcess = processCandidate.isCriticalProcess;
+            jobResult.handleCandidateList.push_back(handleCandidate);
         }
 
         jobResult.processCandidateList.reserve(candidateByPid.size());
@@ -5598,24 +5812,26 @@ void FileDock::unlockPathsByDriver(
         const bool selectionInvokeOk = QMetaObject::invokeMethod(
             safeThis.data(),
             [selectionState, safeThis, progressPid, jobResult]() {
+                QWidget* const unlockerDialogParent = resolveVisibleDialogParent(safeThis.data());
                 UnlockSelectionResult uiSelectionResult;
                 if (safeThis.isNull())
                 {
                     kPro.set(progressPid, "界面已关闭", 0, 100.0f);
                 }
-                else if (jobResult.processCandidateList.empty())
+                else if (jobResult.processCandidateList.empty() && jobResult.handleCandidateList.empty())
                 {
                     QMessageBox::information(
-                        safeThis.data(),
+                        unlockerDialogParent,
                         QStringLiteral("文件解锁器"),
-                        QStringLiteral("未发现占用进程，无需解锁。"));
-                    kPro.set(progressPid, "未发现占用进程", 0, 100.0f);
+                        QStringLiteral("未发现占用来源，无需解锁。"));
+                    kPro.set(progressPid, "未发现占用来源", 0, 100.0f);
                 }
                 else
                 {
-                    uiSelectionResult = showUnlockProcessSelectionDialog(
-                        safeThis.data(),
-                        jobResult.processCandidateList);
+                    uiSelectionResult = showUnlockSelectionDialog(
+                        unlockerDialogParent,
+                        jobResult.processCandidateList,
+                        jobResult.handleCandidateList);
                 }
 
                 {
@@ -5651,95 +5867,147 @@ void FileDock::unlockPathsByDriver(
             selectionResult = selectionState->result;
         }
 
-        if (!selectionResult.accepted || selectionResult.selectedProcessIdList.empty())
+        const bool noSelectedHandle = selectionResult.selectedHandleList.empty();
+        const bool noSelectedProcess = selectionResult.selectedProcessIdList.empty();
+        if (!selectionResult.accepted
+            || (selectionResult.operationMode == UnlockOperationMode::CloseHandleR3 && noSelectedHandle)
+            || (selectionResult.operationMode != UnlockOperationMode::CloseHandleR3 && noSelectedProcess))
         {
             kPro.set(progressPid, "用户取消", 0, 100.0f);
             markWorkerStopped();
             return;
         }
 
-        jobResult.terminateMode = selectionResult.terminateMode;
+        jobResult.operationMode = selectionResult.operationMode;
+        jobResult.selectedHandleList = selectionResult.selectedHandleList;
         jobResult.selectedProcessIdList = selectionResult.selectedProcessIdList;
-        kPro.set(
-            progressPid,
-            (jobResult.terminateMode == UnlockTerminateMode::R0) ? "R0 结束选中进程" : "R3 结束选中进程",
-            0,
-            55.0f);
+        kPro.set(progressPid, unlockOperationModeToText(jobResult.operationMode).toStdString(), 0, 55.0f);
 
-        ksword::ark::DriverHandle driverHandle;
-        if (jobResult.terminateMode == UnlockTerminateMode::R0)
+        if (jobResult.operationMode == UnlockOperationMode::CloseHandleR3)
         {
-            std::string openDriverDetailText;
-            driverHandle = openKswordArkDriverHandle(&openDriverDetailText);
-            if (!driverHandle.isValid())
-            {
-                jobResult.driverErrorText = QString::fromStdString(openDriverDetailText);
-            }
-        }
-
-        std::map<std::uint32_t, UnlockProcessCandidate> candidateBySelectedPid;
-        for (const UnlockProcessCandidate& candidate : jobResult.processCandidateList)
-        {
-            candidateBySelectedPid[candidate.processId] = candidate;
-        }
-
-        if (jobResult.terminateMode == UnlockTerminateMode::R0
-            && !driverHandle.isValid())
-        {
-            jobResult.terminateFailList.push_back(
-                QStringLiteral("R0 驱动连接失败：%1")
-                .arg(jobResult.driverErrorText));
-        }
-        else
-        {
-            const std::size_t totalProcessCount = jobResult.selectedProcessIdList.size();
-            for (std::size_t index = 0; index < totalProcessCount; ++index)
+            const std::size_t totalHandleCount = jobResult.selectedHandleList.size();
+            for (std::size_t index = 0; index < totalHandleCount; ++index)
             {
                 if (safeThis.isNull() || this->m_unlockerWorkerStopRequested.load())
                 {
                     break;
                 }
 
-                const std::uint32_t processId = jobResult.selectedProcessIdList[index];
-                const auto candidateIter = candidateBySelectedPid.find(processId);
-                const QString processName = (candidateIter != candidateBySelectedPid.end())
-                    ? candidateIter->second.processName
-                    : QString();
-                const bool protectedProcess = candidateIter != candidateBySelectedPid.end()
-                    && (candidateIter->second.isCurrentProcess || candidateIter->second.isCriticalProcess);
-                if (processId <= 4U || processId == static_cast<std::uint32_t>(::GetCurrentProcessId()) || protectedProcess)
+                const UnlockHandleCandidate& handleCandidate = jobResult.selectedHandleList[index];
+                if (handleCandidate.processId <= 4U
+                    || handleCandidate.handleValue == 0U
+                    || handleCandidate.isCurrentProcess
+                    || handleCandidate.isCriticalProcess)
                 {
-                    jobResult.skippedProcessList.push_back(
-                        QStringLiteral("pid=%1 | %2 | 已保护，未结束")
-                        .arg(processId)
-                        .arg(processName.isEmpty() ? QStringLiteral("Unknown") : processName));
+                    jobResult.skippedTargetList.push_back(
+                        QStringLiteral("pid=%1 | handle=%2 | %3 | 已保护或无效，未关闭")
+                        .arg(handleCandidate.processId)
+                        .arg(formatHandleValueText(handleCandidate.handleValue))
+                        .arg(handleCandidate.processName.isEmpty() ? QStringLiteral("Unknown") : handleCandidate.processName));
                     continue;
                 }
 
                 std::string detailText;
-                const bool terminateOk = (jobResult.terminateMode == UnlockTerminateMode::R0)
-                    ? terminateProcessByR0Driver(driverHandle, processId, &detailText)
-                    : terminateProcessByR3(processId, &detailText);
-                if (terminateOk)
+                const bool closeOk = ks::file::CloseRemoteHandle(
+                    handleCandidate.processId,
+                    handleCandidate.handleValue,
+                    detailText);
+                if (closeOk)
                 {
-                    jobResult.terminateSuccessCount += 1U;
+                    jobResult.closeHandleSuccessCount += 1U;
                 }
                 else
                 {
-                    jobResult.terminateFailList.push_back(
-                        QStringLiteral("pid=%1 | %2 | %3")
-                        .arg(processId)
-                        .arg(processName.isEmpty() ? QStringLiteral("Unknown") : processName)
+                    jobResult.operationFailList.push_back(
+                        QStringLiteral("pid=%1 | handle=%2 | %3 | %4")
+                        .arg(handleCandidate.processId)
+                        .arg(formatHandleValueText(handleCandidate.handleValue))
+                        .arg(handleCandidate.processName.isEmpty() ? QStringLiteral("Unknown") : handleCandidate.processName)
                         .arg(QString::fromStdString(detailText)));
                 }
 
                 const float progress =
-                    55.0f + (static_cast<float>(index + 1) / static_cast<float>(totalProcessCount)) * 40.0f;
-                kPro.set(progressPid, "结束选中进程", 0, progress);
+                    55.0f + (static_cast<float>(index + 1) / static_cast<float>(totalHandleCount)) * 40.0f;
+                kPro.set(progressPid, "关闭选中句柄", 0, progress);
             }
         }
+        else
+        {
+            ksword::ark::DriverHandle driverHandle;
+            if (jobResult.operationMode == UnlockOperationMode::TerminateProcessR0)
+            {
+                std::string openDriverDetailText;
+                driverHandle = openKswordArkDriverHandle(&openDriverDetailText);
+                if (!driverHandle.isValid())
+                {
+                    jobResult.driverErrorText = QString::fromStdString(openDriverDetailText);
+                }
+            }
 
-        driverHandle.reset();
+            std::map<std::uint32_t, UnlockProcessCandidate> candidateBySelectedPid;
+            for (const UnlockProcessCandidate& candidate : jobResult.processCandidateList)
+            {
+                candidateBySelectedPid[candidate.processId] = candidate;
+            }
+
+            if (jobResult.operationMode == UnlockOperationMode::TerminateProcessR0
+                && !driverHandle.isValid())
+            {
+                jobResult.operationFailList.push_back(
+                    QStringLiteral("R0 驱动连接失败：%1")
+                    .arg(jobResult.driverErrorText));
+            }
+            else
+            {
+                const std::size_t totalProcessCount = jobResult.selectedProcessIdList.size();
+                for (std::size_t index = 0; index < totalProcessCount; ++index)
+                {
+                    if (safeThis.isNull() || this->m_unlockerWorkerStopRequested.load())
+                    {
+                        break;
+                    }
+
+                    const std::uint32_t processId = jobResult.selectedProcessIdList[index];
+                    const auto candidateIter = candidateBySelectedPid.find(processId);
+                    const QString processName = (candidateIter != candidateBySelectedPid.end())
+                        ? candidateIter->second.processName
+                        : QString();
+                    const bool protectedProcess = candidateIter != candidateBySelectedPid.end()
+                        && (candidateIter->second.isCurrentProcess || candidateIter->second.isCriticalProcess);
+                    if (processId <= 4U || processId == static_cast<std::uint32_t>(::GetCurrentProcessId()) || protectedProcess)
+                    {
+                        jobResult.skippedTargetList.push_back(
+                            QStringLiteral("pid=%1 | %2 | 已保护，未结束")
+                            .arg(processId)
+                            .arg(processName.isEmpty() ? QStringLiteral("Unknown") : processName));
+                        continue;
+                    }
+
+                    std::string detailText;
+                    const bool terminateOk = (jobResult.operationMode == UnlockOperationMode::TerminateProcessR0)
+                        ? terminateProcessByR0Driver(driverHandle, processId, &detailText)
+                        : terminateProcessByR3(processId, &detailText);
+                    if (terminateOk)
+                    {
+                        jobResult.terminateSuccessCount += 1U;
+                    }
+                    else
+                    {
+                        jobResult.operationFailList.push_back(
+                            QStringLiteral("pid=%1 | %2 | %3")
+                            .arg(processId)
+                            .arg(processName.isEmpty() ? QStringLiteral("Unknown") : processName)
+                            .arg(QString::fromStdString(detailText)));
+                    }
+
+                    const float progress =
+                        55.0f + (static_cast<float>(index + 1) / static_cast<float>(totalProcessCount)) * 40.0f;
+                    kPro.set(progressPid, "结束选中进程", 0, progress);
+                }
+            }
+
+            driverHandle.reset();
+        }
 
         if (safeThis.isNull())
         {
@@ -5756,6 +6024,7 @@ void FileDock::unlockPathsByDriver(
                     kPro.set(progressPid, "界面已关闭", 0, 100.0f);
                     return;
                 }
+                QWidget* const unlockerDialogParent = resolveVisibleDialogParent(safeThis.data());
 
                 if (refreshTarget == RefreshTarget::Left)
                 {
@@ -5771,31 +6040,38 @@ void FileDock::unlockPathsByDriver(
                     safeThis->refreshPanel(safeThis->m_rightPanel);
                 }
 
-                const QString modeText = unlockTerminateModeToText(jobResult.terminateMode);
-                const QString summaryText = QStringLiteral("结束方式：%1\n扫描到占用进程：%2\n选中结束：%3\n成功结束：%4\n失败/跳过：%5")
+                const QString modeText = unlockOperationModeToText(jobResult.operationMode);
+                const std::size_t selectedCount = (jobResult.operationMode == UnlockOperationMode::CloseHandleR3)
+                    ? jobResult.selectedHandleList.size()
+                    : jobResult.selectedProcessIdList.size();
+                const std::size_t successCount = (jobResult.operationMode == UnlockOperationMode::CloseHandleR3)
+                    ? jobResult.closeHandleSuccessCount
+                    : jobResult.terminateSuccessCount;
+                const QString summaryText = QStringLiteral("操作方式：%1\n扫描到占用进程：%2\n扫描到句柄记录：%3\n选中目标：%4\n成功处理：%5\n失败/跳过：%6")
                     .arg(modeText)
                     .arg(jobResult.processCandidateList.size())
-                    .arg(jobResult.selectedProcessIdList.size())
-                    .arg(jobResult.terminateSuccessCount)
-                    .arg(jobResult.terminateFailList.size() + jobResult.skippedProcessList.size());
-                if (jobResult.terminateFailList.isEmpty() && jobResult.skippedProcessList.isEmpty())
+                    .arg(jobResult.handleCandidateList.size())
+                    .arg(selectedCount)
+                    .arg(successCount)
+                    .arg(jobResult.operationFailList.size() + jobResult.skippedTargetList.size());
+                if (jobResult.operationFailList.isEmpty() && jobResult.skippedTargetList.isEmpty())
                 {
                     QMessageBox::information(
-                        safeThis.data(),
+                        unlockerDialogParent,
                         QStringLiteral("文件解锁器"),
                         summaryText);
                 }
                 else
                 {
                     QMessageBox::warning(
-                        safeThis.data(),
+                        unlockerDialogParent,
                         QStringLiteral("文件解锁器"),
                         summaryText + QStringLiteral("\n\n明细（节选）：\n%1")
-                        .arg(buildLogPreviewText(jobResult.terminateFailList + jobResult.skippedProcessList, 8)));
+                        .arg(buildLogPreviewText(jobResult.operationFailList + jobResult.skippedTargetList, 8)));
                 }
 
                 kLogEvent event;
-                if (!jobResult.terminateFailList.isEmpty() || !jobResult.skippedProcessList.isEmpty())
+                if (!jobResult.operationFailList.isEmpty() || !jobResult.skippedTargetList.isEmpty())
                 {
                     warn << event
                         << "[FileDock] 文件解锁器部分失败, panel="
@@ -5806,16 +6082,18 @@ void FileDock::unlockPathsByDriver(
                         << paths.size()
                         << ", occupyProcessCount="
                         << jobResult.processCandidateList.size()
+                        << ", handleRecordCount="
+                        << jobResult.handleCandidateList.size()
                         << ", selectedCount="
-                        << jobResult.selectedProcessIdList.size()
+                        << selectedCount
                         << ", successCount="
-                        << jobResult.terminateSuccessCount
+                        << successCount
                         << ", failCount="
-                        << (jobResult.terminateFailList.size() + jobResult.skippedProcessList.size())
+                        << (jobResult.operationFailList.size() + jobResult.skippedTargetList.size())
                         << ", scanPreview=\n"
                         << buildLogPreviewText(jobResult.scanDetailList).toStdString()
                         << ", failPreview=\n"
-                        << buildLogPreviewText(jobResult.terminateFailList + jobResult.skippedProcessList).toStdString()
+                        << buildLogPreviewText(jobResult.operationFailList + jobResult.skippedTargetList).toStdString()
                         << eol;
                 }
                 else
@@ -5829,10 +6107,12 @@ void FileDock::unlockPathsByDriver(
                         << paths.size()
                         << ", occupyProcessCount="
                         << jobResult.processCandidateList.size()
+                        << ", handleRecordCount="
+                        << jobResult.handleCandidateList.size()
                         << ", selectedCount="
-                        << jobResult.selectedProcessIdList.size()
+                        << selectedCount
                         << ", successCount="
-                        << jobResult.terminateSuccessCount
+                        << successCount
                         << eol;
                 }
 

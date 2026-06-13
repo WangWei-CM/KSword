@@ -46,10 +46,16 @@
     <ClCompile Include="Function.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DisplayRestartMonitor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="AudioAnalyze.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SpectrumWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="TaskbarSharedState.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -57,10 +63,16 @@
     <QtMoc Include="Override.h">
       <Filter>Source Files</Filter>
     </QtMoc>
+    <QtMoc Include="DisplayRestartMonitor.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
     <QtMoc Include="AudioAnalyze.h">
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="SpectrumWidget.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="TaskbarSharedState.h">
       <Filter>Header Files</Filter>
     </QtMoc>
   </ItemGroup>

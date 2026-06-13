@@ -17,10 +17,6 @@
 #include <QCoreApplication>
 #include <QSizePolicy>
 #include <Qscreen.h>
-#include <thread>
-#include <chrono>
-
-extern std::vector<int> cpuUsage;
 
 #pragma comment(lib, "shell32.lib")
 
@@ -40,12 +36,12 @@ bool Taskbar::nativeEvent(const QByteArray& eventType, void* message, qintptr* r
     return QMainWindow::nativeEvent(eventType, message, result);
 }
 
-Taskbar::Taskbar(QWidget* parent)
+Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState, QWidget* parent)
     : QMainWindow(parent),
       m_leftSpectrum(nullptr),
       m_rightSpectrum(nullptr),
-      m_analyzer(nullptr),
-      m_spectrumWidget(nullptr),
+      m_sharedState(sharedState),
+      m_targetScreenGeometry(targetScreen ? targetScreen->geometry() : QRect()),
       cpuBarContainer(nullptr),
       timer(nullptr),
       timeLabel(nullptr),
@@ -53,16 +49,12 @@ Taskbar::Taskbar(QWidget* parent)
       uploadSpeedLabel(nullptr),
       downloadSpeedLabel(nullptr),
       networkUiTimer(nullptr),
-      cpuWorkerRunning(false),
-      networkWorkerRunning(false),
-      uploadBytesPerSecond(0),
-      downloadBytesPerSecond(0),
+      isAppBarRegistered(false),
       centralWidget(nullptr),
       rightBtnContainer(nullptr),
       rightBtnLayout(nullptr),
       exitBtn(nullptr),
       appBarMessageId(0),
-      hWnd(nullptr),
       cpuUpdateTimer(nullptr)
 {
     // 1. 窗口基本属性设置。
@@ -129,38 +121,15 @@ Taskbar::Taskbar(QWidget* parent)
     m_rightSpectrum->setFixedHeight(32);
     m_rightSpectrum->setMinimumWidth(450);
 
-    // -------------------------- 初始化音频分析器 --------------------------
-    m_analyzer = new AudioSpectrumAnalyzer(this);
-    if (m_analyzer->initialize()) {
-        bool connected1 = connect(
-            m_analyzer,
-            &AudioSpectrumAnalyzer::spectrumDataReady,
-            m_leftSpectrum,
-            &SpectrumWidget::setSpectrumData
+    // -------------------------- 连接共享频谱数据 --------------------------
+    if (m_sharedState) {
+        connect(
+            m_sharedState,
+            &TaskbarSharedState::spectrumDataReady,
+            this,
+            &Taskbar::onSpectrumDataReady,
+            Qt::QueuedConnection
         );
-        bool connected2 = connect(
-            m_analyzer,
-            &AudioSpectrumAnalyzer::spectrumDataReady,
-            m_rightSpectrum,
-            &SpectrumWidget::setSpectrumData
-        );
-
-        qDebug() << "Left spectrum connection status:" << connected1;
-        qDebug() << "Right spectrum connection status:" << connected2;
-        qDebug() << "Analyzer object:" << m_analyzer;
-
-        if (!connected1 || !connected2) {
-            qWarning() << "FAILED to connect spectrumDataReady signal to one or both spectrum widgets!";
-
-            connect(m_analyzer, &AudioSpectrumAnalyzer::spectrumDataReady,
-                this, [this](const QVector<float>& data) {
-                    qDebug() << "Lambda received spectrum data, size:" << data.size();
-                    m_leftSpectrum->setSpectrumData(data);
-                    m_rightSpectrum->setSpectrumData(data);
-                });
-        }
-
-        m_analyzer->startCapture();
     }
 
     // -------------------------- 时间标签 --------------------------
@@ -215,7 +184,7 @@ Taskbar::Taskbar(QWidget* parent)
 
     for (int i = 0; i < coreCount; ++i) {
         QLabel* bar = new QLabel(cpuBarContainer);
-        bar->setStyleSheet("background-color: #43A0FF;");
+        bar->setStyleSheet("background-color: #00FFFF;");
         bar->setAlignment(Qt::AlignBottom);
 
         cpuBars[i] = bar;
@@ -311,7 +280,6 @@ Taskbar::Taskbar(QWidget* parent)
     cpuUpdateTimer->setInterval(200);
     connect(cpuUpdateTimer, &QTimer::timeout, this, &Taskbar::updateCPUUsage);
     cpuUpdateTimer->start();
-    startCpuWorker();
     updateCPUUsage();
 
     // -------------------------- 启动网络采样线程与文本刷新 --------------------------
@@ -320,7 +288,6 @@ Taskbar::Taskbar(QWidget* parent)
     connect(networkUiTimer, &QTimer::timeout, this, &Taskbar::updateNetworkSpeedLabels);
     networkUiTimer->start();
 
-    startNetworkWorker();
     updateNetworkSpeedLabels();
 }
 
@@ -330,48 +297,50 @@ void Taskbar::RegisterAsAppBar()
     abd.cbSize = sizeof(APPBARDATA);
     abd.hWnd = (HWND)winId();
 
-    abd.uCallbackMessage = RegisterWindowMessageA("AppBarMessage");
-    SHAppBarMessage(ABM_NEW, &abd);
+    if (appBarMessageId == 0) {
+        appBarMessageId = RegisterWindowMessageA("KswordTaskbarAppBarMessage");
+    }
+    abd.uCallbackMessage = appBarMessageId;
+
+    if (!isAppBarRegistered) {
+        SHAppBarMessage(ABM_NEW, &abd);
+        isAppBarRegistered = true;
+    }
 
     abd.uEdge = ABE_TOP;
-    SHAppBarMessage(ABM_SETAUTOHIDEBAR, &abd);
 
-    RECT rc;
-    SystemParametersInfo(SPI_GETWORKAREA, 0, &rc, 0);
-    abd.rc = rc;
-    abd.rc.bottom = abd.rc.top + 40;
+    QRect screenGeometry;
+    if (m_targetScreenGeometry.isValid()) {
+        screenGeometry = m_targetScreenGeometry;
+    }
+    else if (screen()) {
+        screenGeometry = screen()->geometry();
+    }
+    else {
+        screenGeometry = QRect(0, 0, 1920, height());
+    }
+
+    abd.rc.left = screenGeometry.left();
+    abd.rc.top = screenGeometry.top();
+    abd.rc.right = screenGeometry.right() + 1;
+    abd.rc.bottom = screenGeometry.top() + height();
 
     SHAppBarMessage(ABM_QUERYPOS, &abd);
+    abd.rc.bottom = abd.rc.top + height();
     SHAppBarMessage(ABM_SETPOS, &abd);
 
-    move(abd.rc.left, abd.rc.top);
-
-    auto GetWindowWeight = [=]()->QRect {
-        QScreen* screen = this->screen();
-        if (!screen) {
-            return QRect(0, 0, 1920, 1080);
-        }
-        QRect workArea = screen->availableGeometry();
-        return workArea;
-    };
-
-    setFixedWidth(GetWindowWeight().width());
+    setGeometry(
+        abd.rc.left,
+        abd.rc.top,
+        abd.rc.right - abd.rc.left,
+        abd.rc.bottom - abd.rc.top
+    );
 }
 
 Taskbar::~Taskbar()
 {
-    // 析构前先停止后台线程，避免线程继续运行导致进程无法退出。
-    stopCpuWorker();
-    stopNetworkWorker();
-
-    if (m_analyzer) {
-        m_analyzer->stopCapture();
-    }
-
-    APPBARDATA abd = { 0 };
-    abd.cbSize = sizeof(APPBARDATA);
-    abd.hWnd = (HWND)winId();
-    SHAppBarMessage(ABM_REMOVE, &abd);
+    // 析构只注销本窗口的 AppBar；共享采样由 TaskbarSharedState 管理。
+    RemoveAppBar();
 }
 
 void Taskbar::onExitClicked()
@@ -383,17 +352,25 @@ void Taskbar::onExitClicked()
 
 void Taskbar::closeEvent(QCloseEvent* event)
 {
-    // 关闭窗口时先停止后台线程，确保析构阶段无并发访问。
-    stopCpuWorker();
-    stopNetworkWorker();
+    // 关闭窗口只注销本窗口 AppBar，避免影响其它显示器上的窗口。
+    RemoveAppBar();
+
+    event->accept();
+    QMainWindow::closeEvent(event);
+}
+
+void Taskbar::RemoveAppBar()
+{
+    // 输入无；处理当前窗口 AppBar 注销；没有返回值。
+    if (!isAppBarRegistered) {
+        return;
+    }
 
     APPBARDATA abd = { 0 };
     abd.cbSize = sizeof(APPBARDATA);
     abd.hWnd = (HWND)winId();
     SHAppBarMessage(ABM_REMOVE, &abd);
-
-    event->accept();
-    QMainWindow::closeEvent(event);
+    isAppBarRegistered = false;
 }
 
 void Taskbar::updateTime()
@@ -405,7 +382,12 @@ void Taskbar::updateTime()
 
 void Taskbar::updateCPUUsage()
 {
-    if (cpuUsage.size() != cpuBars.size()) {
+    if (!m_sharedState) {
+        return;
+    }
+
+    const QVector<int> currentCpuUsage = m_sharedState->cpuUsageSnapshot();
+    if (currentCpuUsage.size() != cpuBars.size()) {
         return;
     }
 
@@ -415,33 +397,9 @@ void Taskbar::updateCPUUsage()
     }
 
     for (int i = 0; i < cpuBars.size(); ++i) {
-        int barHeight = (cpuUsage[i] * maxBarHeight) / 100;
+        int barHeight = (currentCpuUsage[i] * maxBarHeight) / 100;
         barHeight = qBound(0, barHeight, maxBarHeight);
         cpuBars[i]->setFixedSize(4, barHeight);
-    }
-}
-
-void Taskbar::startCpuWorker()
-{
-    // 防止重复启动线程。
-    if (cpuWorkerRunning.exchange(true, std::memory_order_acq_rel)) {
-        return;
-    }
-
-    cpuWorkerThread = std::thread([this]() {
-        while (cpuWorkerRunning.load(std::memory_order_acquire)) {
-            getCPUCoreUsage();
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        }
-    });
-}
-
-void Taskbar::stopCpuWorker()
-{
-    // 先发停止信号，再在主线程 join，保证线程安全退出。
-    cpuWorkerRunning.store(false, std::memory_order_release);
-    if (cpuWorkerThread.joinable()) {
-        cpuWorkerThread.join();
     }
 }
 
@@ -466,43 +424,15 @@ QString Taskbar::formatNetworkSpeed(std::uint64_t bytesPerSecond) const
     return QString("%1%2").arg(QString::number(speed, 'f', precision), units[unitIndex]);
 }
 
-void Taskbar::startNetworkWorker()
-{
-    // 防止重复启动线程。
-    if (networkWorkerRunning.exchange(true, std::memory_order_acq_rel)) {
-        return;
-    }
-
-    networkWorkerThread = std::thread([this]() {
-        while (networkWorkerRunning.load(std::memory_order_acquire)) {
-            const NetworkSpeedRate rate = getNetworkSpeedRate();
-
-            uploadBytesPerSecond.store(rate.uploadBytesPerSecond, std::memory_order_release);
-            downloadBytesPerSecond.store(rate.downloadBytesPerSecond, std::memory_order_release);
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        }
-    });
-}
-
-void Taskbar::stopNetworkWorker()
-{
-    // 先发停止信号，再在主线程 join，保证线程安全退出。
-    networkWorkerRunning.store(false, std::memory_order_release);
-    if (networkWorkerThread.joinable()) {
-        networkWorkerThread.join();
-    }
-}
-
 void Taskbar::updateNetworkSpeedLabels()
 {
     // 仅做 UI 文本刷新，不包含任何系统采样逻辑。
-    if (!uploadSpeedLabel || !downloadSpeedLabel) {
+    if (!uploadSpeedLabel || !downloadSpeedLabel || !m_sharedState) {
         return;
     }
 
-    const std::uint64_t up = uploadBytesPerSecond.load(std::memory_order_acquire);
-    const std::uint64_t down = downloadBytesPerSecond.load(std::memory_order_acquire);
+    const std::uint64_t up = m_sharedState->uploadSpeedBytesPerSecond();
+    const std::uint64_t down = m_sharedState->downloadSpeedBytesPerSecond();
 
     uploadSpeedLabel->setText(QStringLiteral("\u2191%1").arg(formatNetworkSpeed(up)));
     downloadSpeedLabel->setText(QStringLiteral("\u2193%1").arg(formatNetworkSpeed(down)));
@@ -510,6 +440,11 @@ void Taskbar::updateNetworkSpeedLabels()
 
 void Taskbar::onSpectrumDataReady(const QVector<float>& spectrumData)
 {
-    // 直接将频谱数据传递给显示组件。
-    m_spectrumWidget->setSpectrumData(spectrumData);
+    // 每个显示器窗口共享同一份数据，但各自刷新本窗口内的左右频谱组件。
+    if (m_leftSpectrum) {
+        m_leftSpectrum->setSpectrumData(spectrumData);
+    }
+    if (m_rightSpectrum) {
+        m_rightSpectrum->setSpectrumData(spectrumData);
+    }
 }

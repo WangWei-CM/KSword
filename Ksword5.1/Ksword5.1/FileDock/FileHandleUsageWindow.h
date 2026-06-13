@@ -102,6 +102,11 @@ private:
     // openCurrentProcessDetail 作用：按当前行 PID 请求打开进程详情。
     void openCurrentProcessDetail();
 
+    // closeCurrentRemoteHandle 作用：
+    // - 对当前选中记录执行 R3 DuplicateHandle(DUPLICATE_CLOSE_SOURCE)；
+    // - 成功后刷新扫描结果，失败则弹出错误原因。
+    void closeCurrentRemoteHandle();
+
     // showTableContextMenu 作用：弹出右键菜单（复制/转到进程详情）。
     void showTableContextMenu(const QPoint& localPosition);
 

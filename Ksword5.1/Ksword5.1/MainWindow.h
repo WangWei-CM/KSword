@@ -115,7 +115,8 @@ public slots:
     void openFileDetailDockByPath(const QString& filePath);
 
     // openFileUnlockerDockByPath 作用：
-    // - 置顶“文件”Dock 并触发“文件解锁器”处理指定路径；
+    // - 由 Shell 右键入口复用 FileDock 内部“文件解锁器(R3/R0)”流程；
+    // - 不初始化或切换文件 Dock 页面，避免启动期懒加载文件页影响弹窗显示。
     // - 供系统右键菜单命令启动后的自动联动调用。
     // 入参 filePath：目标文件或目录路径。
     void openFileUnlockerDockByPath(const QString& filePath);
@@ -418,6 +419,7 @@ private:
     NetworkDock* m_networkWidget = nullptr; // m_networkWidget：网络页内容控件。
     MemoryDock* m_memoryWidget = nullptr; // m_memoryWidget：内存页内容控件。
     FileDock* m_fileWidget = nullptr; // m_fileWidget：文件页内容控件。
+    FileDock* m_shellUnlockerFileDock = nullptr; // m_shellUnlockerFileDock：Shell 右键文件解锁器隐藏宿主。
     DriverDock* m_driverWidget = nullptr; // m_driverWidget：驱动页内容控件。
     KernelDock* m_kernelWidget = nullptr; // m_kernelWidget：内核页内容控件。
     MonitorDock* m_monitorWidget = nullptr; // m_monitorWidget：监控页内容控件。

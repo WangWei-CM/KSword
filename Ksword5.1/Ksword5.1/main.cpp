@@ -1191,13 +1191,20 @@ int main(int argc, char* argv[])
 
     if (!unlockPathList.isEmpty())
     {
-        for (const QString& targetPath : unlockPathList)
-        {
-            QTimer::singleShot(0, &window, [&window, targetPath]()
+        const QStringList pendingUnlockPathList = unlockPathList;
+        QTimer::singleShot(1600, &window, [&window, pendingUnlockPathList]()
+            {
+                kSplash.hide();
+                window.raise();
+                window.activateWindow();
+                for (const QString& targetPath : pendingUnlockPathList)
                 {
-                    window.openFileUnlockerDockByPath(targetPath);
-                });
-        }
+                    QTimer::singleShot(0, &window, [&window, targetPath]()
+                        {
+                            window.openFileUnlockerDockByPath(targetPath);
+                        });
+                }
+            });
     }
 
     if (splashReady)
