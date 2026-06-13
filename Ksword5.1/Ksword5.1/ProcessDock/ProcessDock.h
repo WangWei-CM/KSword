@@ -72,6 +72,11 @@ public:
     // - 启动默认监视（性能计数器视图）。
     explicit ProcessDock(QWidget* parent = nullptr);
 
+    // 析构函数作用：
+    // - 移除构造阶段安装到 QApplication 的鼠标事件过滤器；
+    // - 不返回值，避免 Dock 销毁后仍收到全局点击事件。
+    ~ProcessDock() override;
+
     // refreshThemeVisuals 作用：
     // - 在深浅色切换后，重绘当前列表行着色；
     // - 修复“新增进程高亮色在主题切换后残留”的问题。
@@ -89,6 +94,13 @@ public:
     void requestOpenProcessDetailByPid(std::uint32_t pid);
 
 protected:
+    // eventFilter 作用：
+    // - 捕获进程页内的鼠标点击；
+    // - 点击进程表外部或表格空白区时清空当前进程选择，让活动图回到整体视图。
+    // 参数 watched：事件接收对象；event：Qt 原始事件。
+    // 返回值：true 表示事件已完全处理；false 表示继续交给 Qt 默认流程。
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
     // showEvent 作用：
     // - 在 Dock 首次真正显示时再启动首轮刷新与周期监视；
     // - 避免主窗口启动阶段被进程枚举拖慢。
@@ -418,6 +430,7 @@ private:
     std::string selectedIdentityKey() const;
     ks::process::ProcessRecord* selectedRecord();
     std::vector<ProcessActionTarget> selectedActionTargets() const;
+    void clearProcessTableSelection();
     void syncTrackedSelectionFromTable();
     void dispatchProcessActionTargetsInParallel(
         const QString& actionTitle,
