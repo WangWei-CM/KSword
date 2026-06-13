@@ -99,7 +99,7 @@ Taskbar::Taskbar(QWidget* parent)
         logoLabel->setPixmap(scaledPix);
         logoLabel->setAlignment(Qt::AlignCenter);
         logoLabel->setScaledContents(false);
-        logoLabel->setStyleSheet("color: #43A0FF;");
+        logoLabel->setStyleSheet("color: #00FFFF;");
     }
     hLayout->addWidget(logoLabel);
 
@@ -112,7 +112,7 @@ Taskbar::Taskbar(QWidget* parent)
             border: none;
             background: transparent;
             padding: 5px 0;
-            color: #43A0FF;
+            color: #00FFFF;
             font-size: 12px;
         }
         )");
@@ -169,7 +169,7 @@ Taskbar::Taskbar(QWidget* parent)
         QLabel {
             border: none;
             background: transparent;
-            color: #43A0FF;
+            color: #00FFFF;
             font-size: 12px;
             padding: 0px 0px;
         }
@@ -241,14 +241,14 @@ Taskbar::Taskbar(QWidget* parent)
     uploadSpeedLabel = new QLabel(networkSpeedContainer);
     uploadSpeedLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     uploadSpeedLabel->setStyleSheet(
-        "border: none; background: transparent; color: #ffd54a; font-size: 10px;"
+        "border: none; background: transparent; color: #00FFFF; font-size: 10px;"
     );
     uploadSpeedLabel->setText(QStringLiteral("\u21910B/s"));
 
     downloadSpeedLabel = new QLabel(networkSpeedContainer);
     downloadSpeedLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     downloadSpeedLabel->setStyleSheet(
-        "border: none; background: transparent; color: #61d969; font-size: 10px;"
+        "border: none; background: transparent; color: #00FFFF; font-size: 10px;"
     );
     downloadSpeedLabel->setText(QStringLiteral("\u21930B/s"));
 
