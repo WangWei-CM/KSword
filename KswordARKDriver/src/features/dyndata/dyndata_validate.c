@@ -110,6 +110,126 @@ Return Value:
     return *(const ULONG*)(stateBytes + Binding->OffsetInState);
 }
 
+static ULONG
+KswordARKDynDataReadBoundSource(
+    _In_ const KSW_DYN_STATE* State,
+    _In_ const KSW_DYN_FIELD_BINDING* Binding
+    )
+/*++
+
+Routine Description:
+
+    Read the runtime provenance for one bound offset. Offset descriptors keep
+    static metadata, while the source lives in KSW_DYN_STATE so PDB profile
+    merges can override System Informer or runtime-pattern provenance precisely.
+
+Arguments:
+
+    State - State snapshot that owns all source fields.
+    Binding - Field binding row whose FieldId selects a source field.
+
+Return Value:
+
+    KSW_DYN_FIELD_SOURCE_* value. Unknown bindings return UNAVAILABLE.
+
+--*/
+{
+    if (State == NULL || Binding == NULL) {
+        return KSW_DYN_FIELD_SOURCE_UNAVAILABLE;
+    }
+
+    switch (Binding->FieldId) {
+    case KSW_DYN_FIELD_ID_EP_OBJECT_TABLE:
+        return State->KernelSources.EpObjectTable;
+    case KSW_DYN_FIELD_ID_EP_SECTION_OBJECT:
+        return State->KernelSources.EpSectionObject;
+    case KSW_DYN_FIELD_ID_HT_HANDLE_CONTENTION_EVENT:
+        return State->KernelSources.HtHandleContentionEvent;
+    case KSW_DYN_FIELD_ID_OT_NAME:
+        return State->KernelSources.OtName;
+    case KSW_DYN_FIELD_ID_OT_INDEX:
+        return State->KernelSources.OtIndex;
+    case KSW_DYN_FIELD_ID_OB_DECODE_SHIFT:
+        return State->KernelSources.ObDecodeShift;
+    case KSW_DYN_FIELD_ID_OB_ATTRIBUTES_SHIFT:
+        return State->KernelSources.ObAttributesShift;
+    case KSW_DYN_FIELD_ID_EGE_GUID:
+        return State->KernelSources.EgeGuid;
+    case KSW_DYN_FIELD_ID_ERE_GUID_ENTRY:
+        return State->KernelSources.EreGuidEntry;
+    case KSW_DYN_FIELD_ID_KT_INITIAL_STACK:
+        return State->KernelSources.KtInitialStack;
+    case KSW_DYN_FIELD_ID_KT_STACK_LIMIT:
+        return State->KernelSources.KtStackLimit;
+    case KSW_DYN_FIELD_ID_KT_STACK_BASE:
+        return State->KernelSources.KtStackBase;
+    case KSW_DYN_FIELD_ID_KT_KERNEL_STACK:
+        return State->KernelSources.KtKernelStack;
+    case KSW_DYN_FIELD_ID_KT_READ_OPERATION_COUNT:
+        return State->KernelSources.KtReadOperationCount;
+    case KSW_DYN_FIELD_ID_KT_WRITE_OPERATION_COUNT:
+        return State->KernelSources.KtWriteOperationCount;
+    case KSW_DYN_FIELD_ID_KT_OTHER_OPERATION_COUNT:
+        return State->KernelSources.KtOtherOperationCount;
+    case KSW_DYN_FIELD_ID_KT_READ_TRANSFER_COUNT:
+        return State->KernelSources.KtReadTransferCount;
+    case KSW_DYN_FIELD_ID_KT_WRITE_TRANSFER_COUNT:
+        return State->KernelSources.KtWriteTransferCount;
+    case KSW_DYN_FIELD_ID_KT_OTHER_TRANSFER_COUNT:
+        return State->KernelSources.KtOtherTransferCount;
+    case KSW_DYN_FIELD_ID_MM_SECTION_CONTROL_AREA:
+        return State->KernelSources.MmSectionControlArea;
+    case KSW_DYN_FIELD_ID_MM_CONTROL_AREA_LIST_HEAD:
+        return State->KernelSources.MmControlAreaListHead;
+    case KSW_DYN_FIELD_ID_MM_CONTROL_AREA_LOCK:
+        return State->KernelSources.MmControlAreaLock;
+    case KSW_DYN_FIELD_ID_ALPC_COMMUNICATION_INFO:
+        return State->KernelSources.AlpcCommunicationInfo;
+    case KSW_DYN_FIELD_ID_ALPC_OWNER_PROCESS:
+        return State->KernelSources.AlpcOwnerProcess;
+    case KSW_DYN_FIELD_ID_ALPC_CONNECTION_PORT:
+        return State->KernelSources.AlpcConnectionPort;
+    case KSW_DYN_FIELD_ID_ALPC_SERVER_COMMUNICATION_PORT:
+        return State->KernelSources.AlpcServerCommunicationPort;
+    case KSW_DYN_FIELD_ID_ALPC_CLIENT_COMMUNICATION_PORT:
+        return State->KernelSources.AlpcClientCommunicationPort;
+    case KSW_DYN_FIELD_ID_ALPC_HANDLE_TABLE:
+        return State->KernelSources.AlpcHandleTable;
+    case KSW_DYN_FIELD_ID_ALPC_HANDLE_TABLE_LOCK:
+        return State->KernelSources.AlpcHandleTableLock;
+    case KSW_DYN_FIELD_ID_ALPC_ATTRIBUTES:
+        return State->KernelSources.AlpcAttributes;
+    case KSW_DYN_FIELD_ID_ALPC_ATTRIBUTES_FLAGS:
+        return State->KernelSources.AlpcAttributesFlags;
+    case KSW_DYN_FIELD_ID_ALPC_PORT_CONTEXT:
+        return State->KernelSources.AlpcPortContext;
+    case KSW_DYN_FIELD_ID_ALPC_PORT_OBJECT_LOCK:
+        return State->KernelSources.AlpcPortObjectLock;
+    case KSW_DYN_FIELD_ID_ALPC_SEQUENCE_NO:
+        return State->KernelSources.AlpcSequenceNo;
+    case KSW_DYN_FIELD_ID_ALPC_STATE:
+        return State->KernelSources.AlpcState;
+    case KSW_DYN_FIELD_ID_LX_PICO_PROC:
+        return State->LxcoreSources.LxPicoProc;
+    case KSW_DYN_FIELD_ID_LX_PICO_PROC_INFO:
+        return State->LxcoreSources.LxPicoProcInfo;
+    case KSW_DYN_FIELD_ID_LX_PICO_PROC_INFO_PID:
+        return State->LxcoreSources.LxPicoProcInfoPID;
+    case KSW_DYN_FIELD_ID_LX_PICO_THRD_INFO:
+        return State->LxcoreSources.LxPicoThrdInfo;
+    case KSW_DYN_FIELD_ID_LX_PICO_THRD_INFO_TID:
+        return State->LxcoreSources.LxPicoThrdInfoTID;
+    case KSW_DYN_FIELD_ID_EP_PROTECTION:
+        return State->KernelSources.EpProtection;
+    case KSW_DYN_FIELD_ID_EP_SIGNATURE_LEVEL:
+        return State->KernelSources.EpSignatureLevel;
+    case KSW_DYN_FIELD_ID_EP_SECTION_SIGNATURE_LEVEL:
+        return State->KernelSources.EpSectionSignatureLevel;
+    default:
+        return KSW_DYN_FIELD_SOURCE_UNAVAILABLE;
+    }
+}
+
 static VOID
 KswordARKDynDataCopyAnsi(
     _Out_writes_bytes_(DestinationBytes) CHAR* Destination,
@@ -175,6 +295,8 @@ Return Value:
         return "Runtime pattern";
     case KSW_DYN_FIELD_SOURCE_KSWORD_EXTRA_TABLE:
         return "Ksword extra";
+    case KSW_DYN_FIELD_SOURCE_PDB_PROFILE:
+        return "PDB profile";
     default:
         return "Unavailable";
     }
@@ -263,12 +385,13 @@ Return Value:
     for (index = 0; index < totalCount && copied < EntryCapacity; ++index) {
         const KSW_DYN_FIELD_BINDING* binding = &g_KswordDynFieldBindings[index];
         const ULONG offset = KswordARKDynDataReadBoundOffset(State, binding);
+        const ULONG source = KswordARKDynDataReadBoundSource(State, binding);
         KSW_DYN_FIELD_ENTRY* entry = &Entries[copied];
 
         RtlZeroMemory(entry, sizeof(*entry));
         entry->fieldId = binding->FieldId;
         entry->offset = offset;
-        entry->source = KswordARKDynDataIsOffsetPresent(offset) ? binding->Source : KSW_DYN_FIELD_SOURCE_UNAVAILABLE;
+        entry->source = KswordARKDynDataIsOffsetPresent(offset) ? source : KSW_DYN_FIELD_SOURCE_UNAVAILABLE;
         entry->capabilityMask = binding->CapabilityMask;
         entry->flags = binding->Required ? KSW_DYN_FIELD_FLAG_REQUIRED : KSW_DYN_FIELD_FLAG_OPTIONAL;
         if (KswordARKDynDataIsOffsetPresent(offset)) {

@@ -329,6 +329,9 @@ Return Value:
     if (dynState.ExtraActive) {
         response->dynDataStatusFlags |= KSW_DYN_STATUS_FLAG_EXTRA_ACTIVE;
     }
+    if (dynState.PdbProfileActive) {
+        response->dynDataStatusFlags |= KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE;
+    }
     response->fieldFlags |= KSWORD_ARK_PREFLIGHT_FIELD_DYNDATA_PRESENT;
     KswordARKPreflightAddCheck(
         &builder,
