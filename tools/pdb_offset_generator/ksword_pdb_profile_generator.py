@@ -36,6 +36,7 @@ import pefile
 import requests
 
 DEFAULT_SYMBOL_SERVER = "https://msdl.microsoft.com/download/symbols"
+DEFAULT_SYMBOL_ROOT = r"D:\PDB"
 DEFAULT_LLVM_PDBUTIL = r"D:\Software\VS\VC\Tools\Llvm\x64\bin\llvm-pdbutil.exe"
 HTTP_TIMEOUT_SECONDS = 600
 PDBUTIL_TIMEOUT_SECONDS = 600
@@ -103,7 +104,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI options and return argparse namespace."""
     parser = argparse.ArgumentParser(description="Generate KswordARK PDB offset profiles")
     parser.add_argument("--kphdyn", default="third_party/systeminformer_dyn/kphdyn.xml", help="Path to kphdyn.xml")
-    parser.add_argument("--symbol-root", default=r"D:\KswordKernelCorpus", help="Corpus/cache root")
+    parser.add_argument("--symbol-root", default=DEFAULT_SYMBOL_ROOT, help="Corpus/cache root")
     parser.add_argument("--symbol-server", default=DEFAULT_SYMBOL_SERVER, help="Microsoft symbol server base URL")
     parser.add_argument("--llvm-pdbutil", default=DEFAULT_LLVM_PDBUTIL, help="Path to llvm-pdbutil.exe")
     parser.add_argument("--arch", default="amd64", help="kphdyn arch filter")

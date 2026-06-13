@@ -127,6 +127,29 @@ namespace
         }
     }
 
+    // threadDynFieldSourceText 作用：
+    // - 输入 sourceValue：KSW_DYN_FIELD_SOURCE_* 字段来源枚举；
+    // - 处理：把 R0 返回的来源值转换为 tooltip 可读文本；
+    // - 返回：稳定 UI 文本，未知值保留原始数字以便诊断协议漂移。
+    QString threadDynFieldSourceText(const std::uint32_t sourceValue)
+    {
+        switch (sourceValue)
+        {
+        case KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER:
+            return QStringLiteral("System Informer DynData");
+        case KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN:
+            return QStringLiteral("Runtime pattern");
+        case KSW_DYN_FIELD_SOURCE_KSWORD_EXTRA_TABLE:
+            return QStringLiteral("Ksword extra table");
+        case KSW_DYN_FIELD_SOURCE_PDB_PROFILE:
+            return QStringLiteral("PDB profile");
+        case KSW_DYN_FIELD_SOURCE_UNAVAILABLE:
+            return QStringLiteral("Unavailable");
+        default:
+            return QStringLiteral("Unknown(%1)").arg(sourceValue);
+        }
+    }
+
     // threadR0DiagnosticText 作用：
     // - 选中线程或悬停 R0 状态列时展示字段来源与原始偏移；
     // - Phase 3 暂不新增详情页，先用状态栏/tooltip 暴露诊断信息。
@@ -155,8 +178,8 @@ namespace
 
         return QStringLiteral("R0=%1 | StackSource=%2 | IoSource=%3 | Cap=0x%4 | Offsets: %5")
             .arg(threadR0StatusText(threadRecord.r0ThreadStatus))
-            .arg(threadRecord.r0StackFieldSource)
-            .arg(threadRecord.r0IoFieldSource)
+            .arg(threadDynFieldSourceText(threadRecord.r0StackFieldSource))
+            .arg(threadDynFieldSourceText(threadRecord.r0IoFieldSource))
             .arg(static_cast<qulonglong>(threadRecord.r0ThreadDynDataCapabilityMask), 0, 16)
             .arg(offsetParts.join(QStringLiteral(", ")));
     }

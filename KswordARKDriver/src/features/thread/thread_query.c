@@ -284,7 +284,7 @@ Return Value:
         return;
     }
 
-    Entry->stackFieldSource = KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER;
+    Entry->stackFieldSource = DynState->KernelSources.KtInitialStack;
     status = KswordARKThreadReadPointerField(ThreadObject, DynState->Kernel.KtInitialStack, &Entry->initialStack);
     if (NT_SUCCESS(status)) {
         Entry->fieldFlags |= KSWORD_ARK_THREAD_FIELD_INITIAL_STACK_PRESENT;
@@ -344,7 +344,7 @@ Return Value:
         return;
     }
 
-    Entry->ioFieldSource = KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER;
+    Entry->ioFieldSource = DynState->KernelSources.KtReadOperationCount;
     status = KswordARKThreadReadUlong64Field(ThreadObject, DynState->Kernel.KtReadOperationCount, &Entry->readOperationCount);
     if (NT_SUCCESS(status)) {
         Entry->fieldFlags |= KSWORD_ARK_THREAD_FIELD_READ_OPERATION_COUNT_PRESENT;

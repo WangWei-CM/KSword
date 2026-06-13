@@ -8,9 +8,16 @@
 #include <QApplication>
 #include <QBrush>
 #include <QClipboard>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMetaObject>
@@ -26,7 +33,9 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 namespace
@@ -63,6 +72,20 @@ namespace
         std::uint64_t mask = 0;      // mask：KSW_CAP_* 单 bit。
         const char* name = nullptr;  // name：英文稳定名称。
         const wchar_t* title = nullptr; // title：中文功能说明。
+    };
+
+    // LocalPdbProfile：
+    // - 作用：保存一个本地 JSON profile 解析结果；
+    // - 输入来源：profiles/ark_dyndata/*.json；
+    // - 返回行为：作为 DriverClient::applyDynDataProfile 的输入，不持有 PDB 文件。
+    struct LocalPdbProfile
+    {
+        bool valid = false;                              // valid：R3 语法和范围校验是否通过。
+        bool matched = false;                            // matched：module identity 是否精确匹配当前 ntoskrnl。
+        std::uint32_t ignoredUnknownFields = 0;          // ignoredUnknownFields：JSON 中 R3 不认识的字段数。
+        QString pathText;                                // pathText：profile 文件路径。
+        QString diagnosticsText;                         // diagnosticsText：解析/校验诊断。
+        ksword::ark::DynDataProfileApplyInput applyInput; // applyInput：可直接打包给 R0 的 profile。
     };
 
     // kCapabilities：
@@ -268,9 +291,333 @@ namespace
             return QStringLiteral("Ksword runtime pattern");
         case KSW_DYN_FIELD_SOURCE_KSWORD_EXTRA_TABLE:
             return QStringLiteral("Ksword extra table");
+        case KSW_DYN_FIELD_SOURCE_PDB_PROFILE:
+            return QStringLiteral("PDB profile");
         default:
             return QStringLiteral("Unavailable");
         }
+    }
+
+    // fieldIdForProfileName：
+    // - 输入 fieldName：JSON profile 中的字段名；
+    // - 处理：映射到 shared/driver/KswordArkDynDataIoctl.h 中的字段 ID；
+    // - 返回：命中返回 true，否则 false，由调用方记录未知字段诊断。
+    bool fieldIdForProfileName(const QString& fieldName, std::uint32_t& fieldIdOut)
+    {
+        static const std::unordered_map<std::string, std::uint32_t> kFieldIds = {
+            { "EpObjectTable", KSW_DYN_FIELD_ID_EP_OBJECT_TABLE },
+            { "EpSectionObject", KSW_DYN_FIELD_ID_EP_SECTION_OBJECT },
+            { "HtHandleContentionEvent", KSW_DYN_FIELD_ID_HT_HANDLE_CONTENTION_EVENT },
+            { "OtName", KSW_DYN_FIELD_ID_OT_NAME },
+            { "OtIndex", KSW_DYN_FIELD_ID_OT_INDEX },
+            { "ObDecodeShift", KSW_DYN_FIELD_ID_OB_DECODE_SHIFT },
+            { "ObAttributesShift", KSW_DYN_FIELD_ID_OB_ATTRIBUTES_SHIFT },
+            { "KtInitialStack", KSW_DYN_FIELD_ID_KT_INITIAL_STACK },
+            { "KtStackLimit", KSW_DYN_FIELD_ID_KT_STACK_LIMIT },
+            { "KtStackBase", KSW_DYN_FIELD_ID_KT_STACK_BASE },
+            { "KtKernelStack", KSW_DYN_FIELD_ID_KT_KERNEL_STACK },
+            { "KtReadOperationCount", KSW_DYN_FIELD_ID_KT_READ_OPERATION_COUNT },
+            { "KtWriteOperationCount", KSW_DYN_FIELD_ID_KT_WRITE_OPERATION_COUNT },
+            { "KtOtherOperationCount", KSW_DYN_FIELD_ID_KT_OTHER_OPERATION_COUNT },
+            { "KtReadTransferCount", KSW_DYN_FIELD_ID_KT_READ_TRANSFER_COUNT },
+            { "KtWriteTransferCount", KSW_DYN_FIELD_ID_KT_WRITE_TRANSFER_COUNT },
+            { "KtOtherTransferCount", KSW_DYN_FIELD_ID_KT_OTHER_TRANSFER_COUNT },
+            { "MmSectionControlArea", KSW_DYN_FIELD_ID_MM_SECTION_CONTROL_AREA },
+            { "MmControlAreaListHead", KSW_DYN_FIELD_ID_MM_CONTROL_AREA_LIST_HEAD },
+            { "MmControlAreaLock", KSW_DYN_FIELD_ID_MM_CONTROL_AREA_LOCK },
+            { "AlpcCommunicationInfo", KSW_DYN_FIELD_ID_ALPC_COMMUNICATION_INFO },
+            { "AlpcOwnerProcess", KSW_DYN_FIELD_ID_ALPC_OWNER_PROCESS },
+            { "AlpcConnectionPort", KSW_DYN_FIELD_ID_ALPC_CONNECTION_PORT },
+            { "AlpcServerCommunicationPort", KSW_DYN_FIELD_ID_ALPC_SERVER_COMMUNICATION_PORT },
+            { "AlpcClientCommunicationPort", KSW_DYN_FIELD_ID_ALPC_CLIENT_COMMUNICATION_PORT },
+            { "AlpcHandleTable", KSW_DYN_FIELD_ID_ALPC_HANDLE_TABLE },
+            { "AlpcHandleTableLock", KSW_DYN_FIELD_ID_ALPC_HANDLE_TABLE_LOCK },
+            { "AlpcAttributes", KSW_DYN_FIELD_ID_ALPC_ATTRIBUTES },
+            { "AlpcAttributesFlags", KSW_DYN_FIELD_ID_ALPC_ATTRIBUTES_FLAGS },
+            { "AlpcPortContext", KSW_DYN_FIELD_ID_ALPC_PORT_CONTEXT },
+            { "AlpcPortObjectLock", KSW_DYN_FIELD_ID_ALPC_PORT_OBJECT_LOCK },
+            { "AlpcSequenceNo", KSW_DYN_FIELD_ID_ALPC_SEQUENCE_NO },
+            { "AlpcState", KSW_DYN_FIELD_ID_ALPC_STATE },
+            { "LxPicoProc", KSW_DYN_FIELD_ID_LX_PICO_PROC },
+            { "LxPicoProcInfo", KSW_DYN_FIELD_ID_LX_PICO_PROC_INFO },
+            { "LxPicoProcInfoPID", KSW_DYN_FIELD_ID_LX_PICO_PROC_INFO_PID },
+            { "LxPicoThrdInfo", KSW_DYN_FIELD_ID_LX_PICO_THRD_INFO },
+            { "LxPicoThrdInfoTID", KSW_DYN_FIELD_ID_LX_PICO_THRD_INFO_TID },
+            { "EpProtection", KSW_DYN_FIELD_ID_EP_PROTECTION },
+            { "EpSignatureLevel", KSW_DYN_FIELD_ID_EP_SIGNATURE_LEVEL },
+            { "EpSectionSignatureLevel", KSW_DYN_FIELD_ID_EP_SECTION_SIGNATURE_LEVEL },
+            { "EgeGuid", KSW_DYN_FIELD_ID_EGE_GUID },
+            { "EreGuidEntry", KSW_DYN_FIELD_ID_ERE_GUID_ENTRY }
+        };
+
+        const auto iterator = kFieldIds.find(fieldName.toStdString());
+        if (iterator == kFieldIds.end())
+        {
+            fieldIdOut = 0U;
+            return false;
+        }
+
+        fieldIdOut = iterator->second;
+        return true;
+    }
+
+    // parseProfileUInt32：
+    // - 输入 value：JSON 数值或 0x 前缀字符串；
+    // - 处理：进行 32-bit 无符号范围校验；
+    // - 返回：成功解析 true，失败 false。
+    bool parseProfileUInt32(const QJsonValue& value, std::uint32_t& valueOut)
+    {
+        bool ok = false;
+        qulonglong parsedValue = 0ULL;
+
+        valueOut = 0U;
+        if (value.isString())
+        {
+            QString text = value.toString().trimmed();
+            int base = 10;
+            if (text.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+            {
+                text = text.mid(2);
+                base = 16;
+            }
+            parsedValue = text.toULongLong(&ok, base);
+        }
+        else if (value.isDouble())
+        {
+            const double numericValue = value.toDouble();
+            if (numericValue >= 0.0 && numericValue <= static_cast<double>(std::numeric_limits<std::uint32_t>::max()))
+            {
+                parsedValue = static_cast<qulonglong>(numericValue);
+                ok = true;
+            }
+        }
+
+        if (!ok || parsedValue > static_cast<qulonglong>(std::numeric_limits<std::uint32_t>::max()))
+        {
+            return false;
+        }
+
+        valueOut = static_cast<std::uint32_t>(parsedValue);
+        return true;
+    }
+
+    // profileClassIdFromText：
+    // - 输入 classText：JSON module.class；
+    // - 处理：转换到 R0 profile class id；
+    // - 返回：成功 true，未知 class false。
+    bool profileClassIdFromText(const QString& classText, std::uint32_t& classIdOut)
+    {
+        const QString normalized = classText.trimmed().toLower();
+        if (normalized == QStringLiteral("ntoskrnl") ||
+            normalized == QStringLiteral("ntoskrnl.exe") ||
+            normalized == QStringLiteral("ntkrnlmp") ||
+            normalized == QStringLiteral("ntkrnlmp.exe"))
+        {
+            classIdOut = KSW_DYN_PROFILE_CLASS_NTOSKRNL;
+            return true;
+        }
+        if (normalized == QStringLiteral("ntkrla57") || normalized == QStringLiteral("ntkrla57.exe"))
+        {
+            classIdOut = KSW_DYN_PROFILE_CLASS_NTKRLA57;
+            return true;
+        }
+
+        classIdOut = 0U;
+        return false;
+    }
+
+    // profileSearchDirectories：
+    // - 输入：无；
+    // - 处理：优先使用程序目录 profiles/ark_dyndata，并允许环境变量覆盖调试目录；
+    // - 返回：候选目录列表，不保证目录存在。
+    QStringList profileSearchDirectories()
+    {
+        QStringList directories;
+        auto appendUnique = [&directories](const QString& pathText) {
+            const QString cleaned = QDir::cleanPath(pathText.trimmed());
+            if (!cleaned.isEmpty() && !directories.contains(cleaned, Qt::CaseInsensitive))
+            {
+                directories << cleaned;
+            }
+        };
+
+        appendUnique(QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata")));
+        appendUnique(qEnvironmentVariable("KSWORD_ARK_PROFILE_DIR"));
+        appendUnique(QDir::current().filePath(QStringLiteral("profiles/ark_dyndata")));
+        return directories;
+    }
+
+    // loadPdbProfileFile：
+    // - 输入 filePath/currentIdentity：候选 JSON 文件和当前 R0 ntoskrnl identity；
+    // - 处理：解析 module identity、字段表和 offset 范围；
+    // - 返回：LocalPdbProfile；matched=false 表示不是当前内核 profile。
+    LocalPdbProfile loadPdbProfileFile(const QString& filePath, const ksword::ark::ArkDynModuleIdentity& currentIdentity)
+    {
+        LocalPdbProfile profile;
+        profile.pathText = QDir::toNativeSeparators(filePath);
+
+        QFile file(filePath);
+        if (!file.open(QIODevice::ReadOnly))
+        {
+            profile.diagnosticsText = QStringLiteral("无法打开 profile: %1").arg(file.errorString());
+            return profile;
+        }
+
+        QJsonParseError parseError{};
+        const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+        if (parseError.error != QJsonParseError::NoError || !document.isObject())
+        {
+            profile.diagnosticsText = QStringLiteral("JSON 解析失败: %1").arg(parseError.errorString());
+            return profile;
+        }
+
+        const QJsonObject rootObject = document.object();
+        const QJsonObject moduleObject = rootObject.value(QStringLiteral("module")).toObject();
+        std::uint32_t profileClass = 0U;
+        std::uint32_t machine = 0U;
+        std::uint32_t timeDateStamp = 0U;
+        std::uint32_t sizeOfImage = 0U;
+        if (!profileClassIdFromText(moduleObject.value(QStringLiteral("class")).toString(), profileClass) ||
+            !parseProfileUInt32(moduleObject.value(QStringLiteral("machine")), machine) ||
+            !parseProfileUInt32(moduleObject.value(QStringLiteral("timeDateStamp")), timeDateStamp) ||
+            !parseProfileUInt32(moduleObject.value(QStringLiteral("sizeOfImage")), sizeOfImage))
+        {
+            profile.diagnosticsText = QStringLiteral("profile module identity 字段缺失或格式无效。");
+            return profile;
+        }
+
+        profile.matched = currentIdentity.present &&
+            currentIdentity.classId == profileClass &&
+            currentIdentity.machine == machine &&
+            currentIdentity.timeDateStamp == timeDateStamp &&
+            currentIdentity.sizeOfImage == sizeOfImage;
+        if (!profile.matched)
+        {
+            profile.diagnosticsText = QStringLiteral("profile identity 不匹配当前内核。");
+            return profile;
+        }
+
+        const QJsonObject fieldsObject = rootObject.value(QStringLiteral("fields")).toObject();
+        if (fieldsObject.isEmpty())
+        {
+            profile.diagnosticsText = QStringLiteral("profile fields 为空。");
+            return profile;
+        }
+
+        profile.applyInput.profileName = rootObject.value(QStringLiteral("profileName")).toString(QFileInfo(filePath).baseName()).toStdString();
+        profile.applyInput.pdbName = moduleObject.value(QStringLiteral("pdbName")).toString().toStdString();
+        profile.applyInput.pdbGuid = moduleObject.value(QStringLiteral("pdbGuid")).toString().toStdString();
+        std::uint32_t pdbAge = 0U;
+        if (parseProfileUInt32(moduleObject.value(QStringLiteral("pdbAge")), pdbAge))
+        {
+            profile.applyInput.pdbAge = pdbAge;
+        }
+        profile.applyInput.ntoskrnl = currentIdentity;
+
+        std::uint32_t invalidOffsetCount = 0U;
+        for (auto iterator = fieldsObject.constBegin(); iterator != fieldsObject.constEnd(); ++iterator)
+        {
+            std::uint32_t fieldId = 0U;
+            std::uint32_t offset = 0U;
+            if (!fieldIdForProfileName(iterator.key(), fieldId))
+            {
+                profile.ignoredUnknownFields += 1U;
+                continue;
+            }
+            if (!parseProfileUInt32(iterator.value(), offset) ||
+                offset == 0xFFFFFFFFU ||
+                offset > KSW_DYN_PROFILE_OFFSET_MAX)
+            {
+                invalidOffsetCount += 1U;
+                continue;
+            }
+
+            ksword::ark::DynDataProfileField field{};
+            field.fieldId = fieldId;
+            field.offset = offset;
+            profile.applyInput.fields.push_back(field);
+        }
+
+        if (invalidOffsetCount != 0U)
+        {
+            profile.diagnosticsText = QStringLiteral("profile 含 %1 个越界或无效 offset，R3 已拒绝应用。").arg(invalidOffsetCount);
+            return profile;
+        }
+        if (profile.applyInput.fields.empty() || profile.applyInput.fields.size() > KSW_DYN_PROFILE_MAX_FIELDS)
+        {
+            profile.diagnosticsText = QStringLiteral("profile 有效字段数量异常: %1。")
+                .arg(static_cast<qulonglong>(profile.applyInput.fields.size()));
+            return profile;
+        }
+
+        profile.valid = true;
+        profile.diagnosticsText = QStringLiteral("profile 匹配，字段 %1 个，忽略未知字段 %2 个。")
+            .arg(static_cast<qulonglong>(profile.applyInput.fields.size()))
+            .arg(profile.ignoredUnknownFields);
+        return profile;
+    }
+
+    // findMatchingPdbProfile：
+    // - 输入 currentIdentity/diagnosticsOut：当前 ntoskrnl identity 和诊断输出；
+    // - 处理：扫描默认 profile 目录并寻找第一条精确匹配 JSON；
+    // - 返回：匹配 profile；未命中时 valid=false/matched=false。
+    LocalPdbProfile findMatchingPdbProfile(const ksword::ark::ArkDynModuleIdentity& currentIdentity, QString& diagnosticsOut)
+    {
+        LocalPdbProfile bestProfile;
+        QStringList diagnostics;
+        std::uint32_t scannedCount = 0U;
+        std::uint32_t parseErrorCount = 0U;
+
+        if (!currentIdentity.present)
+        {
+            diagnosticsOut = QStringLiteral("当前 ntoskrnl identity 不可用，跳过 PDB profile 扫描。");
+            return bestProfile;
+        }
+
+        for (const QString& directoryPath : profileSearchDirectories())
+        {
+            QDir directory(directoryPath);
+            if (!directory.exists())
+            {
+                diagnostics << QStringLiteral("目录不存在: %1").arg(QDir::toNativeSeparators(directoryPath));
+                continue;
+            }
+
+            const QFileInfoList files = directory.entryInfoList(
+                QStringList{ QStringLiteral("*.json") },
+                QDir::Files | QDir::Readable,
+                QDir::Name);
+            for (const QFileInfo& fileInfo : files)
+            {
+                scannedCount += 1U;
+                LocalPdbProfile profile = loadPdbProfileFile(fileInfo.absoluteFilePath(), currentIdentity);
+                if (profile.matched)
+                {
+                    diagnostics << profile.diagnosticsText;
+                    if (profile.valid)
+                    {
+                        diagnosticsOut = QStringLiteral("扫描 %1 个 profile。%2").arg(scannedCount).arg(diagnostics.join(QStringLiteral(" | ")));
+                        return profile;
+                    }
+                    if (!bestProfile.matched)
+                    {
+                        bestProfile = profile;
+                    }
+                    parseErrorCount += 1U;
+                    continue;
+                }
+                if (!profile.diagnosticsText.isEmpty() && !profile.diagnosticsText.contains(QStringLiteral("identity 不匹配")))
+                {
+                    parseErrorCount += 1U;
+                }
+            }
+        }
+
+        diagnosticsOut = QStringLiteral("未找到匹配 PDB profile；扫描 %1 个 JSON，解析/格式异常 %2 个。%3")
+            .arg(scannedCount)
+            .arg(parseErrorCount)
+            .arg(diagnostics.join(QStringLiteral(" | ")));
+        return bestProfile;
     }
 
     // capabilityNames：
@@ -462,6 +809,19 @@ namespace
         lines << QStringLiteral("MatchedProfileOffset: %1").arg(formatHex32(summary.matchedProfileOffset));
         lines << QStringLiteral("MatchedFieldsId: %1").arg(summary.matchedFieldsId);
         lines << QStringLiteral("UnavailableReason: %1").arg(safeText(summary.unavailableReasonText));
+        lines << QStringLiteral("PdbProfileActive: %1").arg(boolText(statusFlagEnabled(summary.statusFlags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE)));
+        lines << QStringLiteral("PdbProfileScanAttempted: %1").arg(boolText(summary.pdbProfileScanAttempted));
+        lines << QStringLiteral("PdbProfileFound: %1").arg(boolText(summary.pdbProfileFound));
+        lines << QStringLiteral("PdbProfileAppliedThisRefresh: %1").arg(boolText(summary.pdbProfileApplied));
+        lines << QStringLiteral("PdbProfileName: %1").arg(safeText(summary.pdbProfileNameText));
+        lines << QStringLiteral("PdbProfilePath: %1").arg(safeText(summary.pdbProfilePathText));
+        lines << QStringLiteral("PdbProfileStatus: %1").arg(formatNtStatus(summary.pdbProfileStatus));
+        lines << QStringLiteral("PdbProfileAppliedFields: %1").arg(summary.pdbProfileAppliedFields);
+        lines << QStringLiteral("PdbProfileRejectedFields: %1").arg(summary.pdbProfileRejectedFields);
+        lines << QStringLiteral("PdbProfileUnknownFields: %1").arg(summary.pdbProfileUnknownFields);
+        lines << QStringLiteral("PdbProfileIgnoredJsonFields: %1").arg(summary.pdbProfileIgnoredJsonFields);
+        lines << QStringLiteral("PdbProfileMessage: %1").arg(safeText(summary.pdbProfileMessageText));
+        lines << QStringLiteral("PdbProfileIo: %1").arg(safeText(summary.pdbProfileIoMessageText));
         lines << moduleDetailText(QStringLiteral("ntoskrnl"), summary.ntoskrnl);
         lines << moduleDetailText(QStringLiteral("lxcore"), summary.lxcore);
         lines << QStringLiteral("");
@@ -499,6 +859,20 @@ namespace
         appendSummaryRow(table, QStringLiteral("ntoskrnl profile"), boolText(statusFlagEnabled(summary.statusFlags, KSW_DYN_STATUS_FLAG_NTOS_ACTIVE)));
         appendSummaryRow(table, QStringLiteral("lxcore profile"), boolText(statusFlagEnabled(summary.statusFlags, KSW_DYN_STATUS_FLAG_LXCORE_ACTIVE)));
         appendSummaryRow(table, QStringLiteral("Ksword runtime offset"), boolText(statusFlagEnabled(summary.statusFlags, KSW_DYN_STATUS_FLAG_EXTRA_ACTIVE)));
+        appendSummaryRow(table, QStringLiteral("PDB profile active"), boolText(statusFlagEnabled(summary.statusFlags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE)));
+        appendSummaryRow(table, QStringLiteral("PDB profile 扫描"), boolText(summary.pdbProfileScanAttempted));
+        appendSummaryRow(table, QStringLiteral("PDB profile 命中"), boolText(summary.pdbProfileFound));
+        appendSummaryRow(table, QStringLiteral("PDB profile 本次应用"), boolText(summary.pdbProfileApplied));
+        appendSummaryRow(table, QStringLiteral("PDB profile 名称"), safeText(summary.pdbProfileNameText));
+        appendSummaryRow(table, QStringLiteral("PDB profile 路径"), safeText(summary.pdbProfilePathText));
+        appendSummaryRow(table, QStringLiteral("PDB profile 状态"), formatNtStatus(summary.pdbProfileStatus));
+        appendSummaryRow(table, QStringLiteral("PDB profile 字段"), QStringLiteral("applied=%1 rejected=%2 unknown=%3 ignoredJson=%4")
+            .arg(summary.pdbProfileAppliedFields)
+            .arg(summary.pdbProfileRejectedFields)
+            .arg(summary.pdbProfileUnknownFields)
+            .arg(summary.pdbProfileIgnoredJsonFields));
+        appendSummaryRow(table, QStringLiteral("PDB profile 消息"), safeText(summary.pdbProfileMessageText));
+        appendSummaryRow(table, QStringLiteral("PDB profile IO"), safeText(summary.pdbProfileIoMessageText));
         appendSummaryRow(table, QStringLiteral("System Informer 版本"), QString::number(summary.systemInformerDataVersion));
         appendSummaryRow(table, QStringLiteral("System Informer 数据长度"), QString::number(summary.systemInformerDataLength));
         appendSummaryRow(table, QStringLiteral("LastStatus"), formatNtStatus(summary.lastStatus));
@@ -506,7 +880,9 @@ namespace
         appendSummaryRow(table, QStringLiteral("MatchedProfileOffset"), formatHex32(summary.matchedProfileOffset));
         appendSummaryRow(table, QStringLiteral("MatchedFieldsId"), QString::number(summary.matchedFieldsId));
         appendSummaryRow(table, QStringLiteral("CapabilityMask"), formatHex64(summary.capabilityMask));
-        appendSummaryRow(table, QStringLiteral("字段总数/当前返回"), QStringLiteral("%1 / %2").arg(summary.fieldCount).arg(visibleRows));
+        appendSummaryRow(table, QStringLiteral("字段总数/当前返回"), QStringLiteral("%1 / %2")
+            .arg(summary.fieldCount)
+            .arg(static_cast<qulonglong>(visibleRows)));
         appendSummaryRow(table, QStringLiteral("禁用能力"), disabledCapabilitySummary(summary.capabilityMask));
         appendSummaryRow(table, QStringLiteral("不可用原因"), safeText(summary.unavailableReasonText));
         appendSummaryRow(table, QStringLiteral("Status IO"), safeText(summary.statusIoMessageText));
@@ -542,7 +918,86 @@ namespace
     bool queryDynDataSnapshot(KernelDynDataSummary& summaryOut, std::vector<KernelDynDataFieldEntry>& rowsOut)
     {
         ksword::ark::DriverClient client;
-        const ksword::ark::DynDataStatusResult statusResult = client.queryDynDataStatus();
+        const ksword::ark::DynDataStatusResult initialStatusResult = client.queryDynDataStatus();
+
+        bool pdbProfileScanAttempted = false;
+        bool pdbProfileFound = false;
+        bool pdbProfileApplied = false;
+        bool requeryAfterProfileApply = false;
+        long pdbProfileStatus = 0;
+        std::uint32_t pdbProfileAppliedFields = 0U;
+        std::uint32_t pdbProfileRejectedFields = 0U;
+        std::uint32_t pdbProfileUnknownFields = 0U;
+        std::uint32_t pdbProfileIgnoredJsonFields = 0U;
+        QString pdbProfileNameText;
+        QString pdbProfilePathText;
+        QString pdbProfileMessageText;
+        QString pdbProfileIoMessageText;
+
+        if (initialStatusResult.io.ok)
+        {
+            const bool pdbProfileAlreadyActive =
+                statusFlagEnabled(initialStatusResult.statusFlags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE);
+            if (pdbProfileAlreadyActive)
+            {
+                pdbProfileMessageText = QStringLiteral("R0 已经启用 PDB profile，本次刷新跳过重复 apply。");
+            }
+            else
+            {
+                pdbProfileScanAttempted = true;
+                QString scanDiagnostics;
+                const LocalPdbProfile profile = findMatchingPdbProfile(initialStatusResult.ntoskrnl, scanDiagnostics);
+                pdbProfileMessageText = scanDiagnostics;
+                if (profile.matched)
+                {
+                    pdbProfileFound = true;
+                    pdbProfileNameText = stringToQString(profile.applyInput.profileName);
+                    pdbProfilePathText = profile.pathText;
+                    pdbProfileIgnoredJsonFields = profile.ignoredUnknownFields;
+
+                    if (!profile.valid)
+                    {
+                        pdbProfileMessageText = profile.diagnosticsText;
+                    }
+                    else
+                    {
+                        const ksword::ark::DynDataProfileApplyResult applyResult =
+                            client.applyDynDataProfile(profile.applyInput);
+                        pdbProfileIoMessageText = QString::fromStdString(applyResult.io.message);
+                        pdbProfileStatus = applyResult.status;
+                        pdbProfileAppliedFields = applyResult.appliedFieldCount;
+                        pdbProfileRejectedFields = applyResult.rejectedFieldCount;
+                        pdbProfileUnknownFields = applyResult.unknownFieldCount;
+                        if (!applyResult.message.empty())
+                        {
+                            pdbProfileMessageText = wideStringToQString(applyResult.message);
+                        }
+                        pdbProfileApplied = applyResult.io.ok && applyResult.status == 0;
+                        requeryAfterProfileApply = pdbProfileApplied;
+                    }
+                }
+            }
+        }
+        else
+        {
+            pdbProfileMessageText = QStringLiteral("DynData status 查询失败，无法确认 ntoskrnl identity，跳过 PDB profile 扫描。");
+            pdbProfileIoMessageText = QString::fromStdString(initialStatusResult.io.message);
+        }
+
+        ksword::ark::DynDataStatusResult statusResult = initialStatusResult;
+        if (requeryAfterProfileApply)
+        {
+            const ksword::ark::DynDataStatusResult refreshedStatusResult = client.queryDynDataStatus();
+            if (refreshedStatusResult.io.ok)
+            {
+                statusResult = refreshedStatusResult;
+            }
+            else if (pdbProfileIoMessageText.isEmpty())
+            {
+                pdbProfileIoMessageText = QString::fromStdString(refreshedStatusResult.io.message);
+            }
+        }
+
         const ksword::ark::DynDataFieldsResult fieldsResult = client.queryDynDataFields();
         const ksword::ark::DynDataCapabilitiesResult capabilitiesResult = client.queryDynDataCapabilities();
 
@@ -553,6 +1008,18 @@ namespace
         summaryOut.fieldsQueryOk = fieldsResult.io.ok;
         summaryOut.statusIoMessageText = QString::fromStdString(statusResult.io.message);
         summaryOut.fieldsIoMessageText = QString::fromStdString(fieldsResult.io.message);
+        summaryOut.pdbProfileScanAttempted = pdbProfileScanAttempted;
+        summaryOut.pdbProfileFound = pdbProfileFound;
+        summaryOut.pdbProfileApplied = pdbProfileApplied;
+        summaryOut.pdbProfileStatus = pdbProfileStatus;
+        summaryOut.pdbProfileAppliedFields = pdbProfileAppliedFields;
+        summaryOut.pdbProfileRejectedFields = pdbProfileRejectedFields;
+        summaryOut.pdbProfileUnknownFields = pdbProfileUnknownFields;
+        summaryOut.pdbProfileIgnoredJsonFields = pdbProfileIgnoredJsonFields;
+        summaryOut.pdbProfileNameText = pdbProfileNameText;
+        summaryOut.pdbProfilePathText = pdbProfilePathText;
+        summaryOut.pdbProfileMessageText = pdbProfileMessageText;
+        summaryOut.pdbProfileIoMessageText = pdbProfileIoMessageText;
 
         if (statusResult.io.ok)
         {
@@ -781,13 +1248,15 @@ void KernelDock::refreshDynDataAsync()
             else
             {
                 const bool ntosActive = statusFlagEnabled(guardThis->m_dynDataSummary.statusFlags, KSW_DYN_STATUS_FLAG_NTOS_ACTIVE);
+                const bool pdbProfileActive = statusFlagEnabled(guardThis->m_dynDataSummary.statusFlags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE);
                 guardThis->m_dynDataStatusLabel->setText(
-                    QStringLiteral("状态：%1，字段 %2 项，缺失必需 %3 项")
+                    QStringLiteral("状态：%1%2，字段 %3 项，缺失必需 %4 项")
                     .arg(ntosActive ? QStringLiteral("ntos profile 已命中") : QStringLiteral("ntos profile 未命中"))
-                    .arg(guardThis->m_dynDataRows.size())
-                    .arg(missingRequiredCount));
+                    .arg(pdbProfileActive ? QStringLiteral("，PDB profile 已启用") : QString())
+                    .arg(static_cast<qulonglong>(guardThis->m_dynDataRows.size()))
+                    .arg(static_cast<qulonglong>(missingRequiredCount)));
                 guardThis->m_dynDataStatusLabel->setStyleSheet(
-                    statusLabelStyle(ntosActive && missingRequiredCount == 0U ? QStringLiteral("#3A8F3A") : QStringLiteral("#D77A00")));
+                    statusLabelStyle(ntosActive && pdbProfileActive && missingRequiredCount == 0U ? QStringLiteral("#3A8F3A") : QStringLiteral("#D77A00")));
 
                 if (guardThis->m_dynDataFieldTable->rowCount() > 0)
                 {

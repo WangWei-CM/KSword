@@ -162,6 +162,9 @@ Return Value:
     if (State->ExtraActive) {
         flags |= KSW_DYN_STATUS_FLAG_EXTRA_ACTIVE;
     }
+    if (State->PdbProfileActive) {
+        flags |= KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE;
+    }
 
     return flags;
 }
