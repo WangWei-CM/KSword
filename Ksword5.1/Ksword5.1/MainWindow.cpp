@@ -6100,16 +6100,42 @@ void MainWindow::openFileUnlockerDockByPath(const QString& filePath)
         << normalizedFilePath.toStdString()
         << eol;
 
-    if (m_dockFile != nullptr)
+    const QFileInfo targetFileInfo(normalizedFilePath);
+    if (!targetFileInfo.exists() || (!targetFileInfo.isFile() && !targetFileInfo.isDir()))
     {
-        ensureDockContentInitialized(m_dockFile);
-        m_dockFile->raise();
-        m_dockFile->setVisible(true);
+        warn << unlockFileEvent
+            << "[MainWindow] openFileUnlockerDockByPath canceled: invalid path="
+            << normalizedFilePath.toStdString()
+            << eol;
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Ksword 文件解锁器"),
+            QStringLiteral("目标路径不存在或不是文件/目录：\n%1").arg(normalizedFilePath));
+        return;
     }
-    if (m_fileWidget != nullptr)
+
+    // Shell 右键入口必须复用 FileDock 内部“文件解锁器(R3/R0)”同一套流程。
+    // 已打开文件页时直接复用真实 FileDock；否则使用隐藏宿主，避免启动期切换文件页造成黑屏。
+    FileDock* unlockerHost = m_fileWidget;
+    if (unlockerHost == nullptr)
     {
-        m_fileWidget->unlockFileByPath(normalizedFilePath);
+        if (m_shellUnlockerFileDock == nullptr)
+        {
+            m_shellUnlockerFileDock = new FileDock(this);
+            m_shellUnlockerFileDock->setObjectName(QStringLiteral("ShellUnlockerFileDockHost"));
+            m_shellUnlockerFileDock->setAttribute(Qt::WA_DontShowOnScreen, true);
+            m_shellUnlockerFileDock->hide();
+        }
+        unlockerHost = m_shellUnlockerFileDock;
     }
+
+    this->raise();
+    this->activateWindow();
+    unlockerHost->unlockFileByPath(targetFileInfo.absoluteFilePath());
+
+    info << unlockFileEvent
+        << "[MainWindow] openFileUnlockerDockByPath delegated to FileDock unlocker."
+        << eol;
 }
 
 void MainWindow::initAppearanceSettings()

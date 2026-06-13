@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../theme.h"
+#include "../ksword/file/file_handle_tools.h"
 
 #include <QAbstractItemView>
 #include <QApplication>
@@ -469,6 +470,78 @@ void FileHandleUsageWindow::openCurrentProcessDetail()
     m_openProcessDetailCallback(entry->processId);
 }
 
+void FileHandleUsageWindow::closeCurrentRemoteHandle()
+{
+    // 第一步：读取当前选中句柄记录，并拒绝没有真实句柄值的合成来源。
+    const filedock::handleusage::HandleUsageEntry* entry = selectedEntry();
+    if (entry == nullptr)
+    {
+        QMessageBox::information(this, QStringLiteral("关闭句柄"), QStringLiteral("请先选择一条句柄记录。"));
+        return;
+    }
+    const filedock::handleusage::HandleUsageEntry selectedHandleEntry = *entry;
+    if (selectedHandleEntry.handleValue == 0U
+        || selectedHandleEntry.processId == 0U
+        || selectedHandleEntry.processId <= 4U)
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("关闭句柄"),
+            QStringLiteral("当前记录没有可关闭的远程句柄，或目标 PID 受保护。"));
+        return;
+    }
+
+    // 第二步：让用户确认，避免误关正在写入数据的文件句柄。
+    const QMessageBox::StandardButton userChoice = QMessageBox::question(
+        this,
+        QStringLiteral("关闭句柄确认"),
+        QStringLiteral("将尝试关闭 %1(%2) 中的句柄 %3。\n该操作可能导致目标进程读写失败，是否继续？")
+        .arg(selectedHandleEntry.processName.trimmed().isEmpty()
+            ? QStringLiteral("Unknown")
+            : selectedHandleEntry.processName)
+        .arg(selectedHandleEntry.processId)
+        .arg(formatHex(selectedHandleEntry.handleValue, 0)),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (userChoice != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    // 第三步：复用 ks::file 后端关闭远程句柄；成功后立即刷新扫描结果。
+    std::string detailText;
+    const bool closeOk = ks::file::CloseRemoteHandle(
+        selectedHandleEntry.processId,
+        selectedHandleEntry.handleValue,
+        detailText);
+    kLogEvent closeEvent;
+    if (closeOk)
+    {
+        info << closeEvent
+            << "[FileHandleUsageWindow] closeCurrentRemoteHandle success: pid="
+            << selectedHandleEntry.processId
+            << ", handle=0x"
+            << QString::number(static_cast<qulonglong>(selectedHandleEntry.handleValue), 16).toUpper().toStdString()
+            << eol;
+        QMessageBox::information(this, QStringLiteral("关闭句柄"), QStringLiteral("句柄关闭成功，将重新扫描占用状态。"));
+        requestRefresh(true);
+        return;
+    }
+
+    warn << closeEvent
+        << "[FileHandleUsageWindow] closeCurrentRemoteHandle failed: pid="
+        << selectedHandleEntry.processId
+        << ", handle=0x"
+        << QString::number(static_cast<qulonglong>(selectedHandleEntry.handleValue), 16).toUpper().toStdString()
+        << ", detail="
+        << detailText
+        << eol;
+    QMessageBox::warning(
+        this,
+        QStringLiteral("关闭句柄"),
+        QStringLiteral("关闭句柄失败：%1").arg(QString::fromStdString(detailText)));
+}
+
 void FileHandleUsageWindow::showTableContextMenu(const QPoint& localPosition)
 {
     if (m_resultTable == nullptr)
@@ -484,7 +557,9 @@ void FileHandleUsageWindow::showTableContextMenu(const QPoint& localPosition)
     m_resultTable->setCurrentItem(clickedItem);
 
     QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* openProcessAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
+    QAction* closeHandleAction = menu.addAction(QIcon(":/Icon/handle_refresh.svg"), QStringLiteral("关闭当前句柄(R3)"));
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/handle_copy_row.svg"), QStringLiteral("复制整行"));
 
     QAction* selectedAction = menu.exec(m_resultTable->viewport()->mapToGlobal(localPosition));
@@ -495,6 +570,11 @@ void FileHandleUsageWindow::showTableContextMenu(const QPoint& localPosition)
     if (selectedAction == openProcessAction)
     {
         openCurrentProcessDetail();
+        return;
+    }
+    if (selectedAction == closeHandleAction)
+    {
+        closeCurrentRemoteHandle();
         return;
     }
     if (selectedAction == copyRowAction)

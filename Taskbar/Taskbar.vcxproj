@@ -121,12 +121,14 @@
     </ClCompile>
     <ClCompile Include="Function.cpp" />
     <ClCompile Include="Override.cpp" />
+    <ClCompile Include="DisplayRestartMonitor.cpp" />
     <ClCompile Include="SpectrumWidget.cpp">
       <DynamicSource Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">input</DynamicSource>
       <QtMocFileName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">%(Filename).moc</QtMocFileName>
       <DynamicSource Condition="'$(Configuration)|$(Platform)'=='Release|x64'">input</DynamicSource>
       <QtMocFileName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">%(Filename).moc</QtMocFileName>
     </ClCompile>
+    <ClCompile Include="TaskbarSharedState.cpp" />
     <ClCompile Include="Taskbar.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
@@ -134,7 +136,9 @@
     <QtMoc Include="Override.h" />
   </ItemGroup>
   <ItemGroup>
+    <QtMoc Include="DisplayRestartMonitor.h" />
     <QtMoc Include="SpectrumWidget.h" />
+    <QtMoc Include="TaskbarSharedState.h" />
     <QtMoc Include="AudioAnalyze.h" />
     <ClInclude Include="Function.h" />
   </ItemGroup>

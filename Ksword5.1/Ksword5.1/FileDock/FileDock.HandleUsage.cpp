@@ -50,7 +50,10 @@ void FileDock::openHandleUsageScanWindow(const std::vector<QString>& scanPaths)
     }
 
     // 第二步：创建独立结果窗口，并配置“打开进程详情”的桥接回调。
-    auto* scanWindow = new FileHandleUsageWindow(validPaths, this);
+    // 说明：Shell 右键启动时 FileDock 可能刚被懒加载，使用顶层窗口做父级可避免
+    // Dock 页面尚未完成绘制时把弹窗也拖进黑屏/透明继承状态。
+    QWidget* const dialogParent = (this->window() != nullptr) ? this->window() : this;
+    auto* scanWindow = new FileHandleUsageWindow(validPaths, dialogParent);
     scanWindow->setAttribute(Qt::WA_DeleteOnClose, true);
     scanWindow->setOpenProcessDetailCallback([this](const std::uint32_t processId)
         {
