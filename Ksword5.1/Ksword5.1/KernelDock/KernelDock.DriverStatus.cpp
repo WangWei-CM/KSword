@@ -71,6 +71,7 @@ namespace
         std::uint32_t profileCount = 0;       // profileCount：pack 内 profile 总数。
         std::uint32_t scannedProfileCount = 0; // scannedProfileCount：本次扫描过的 profile 数。
         std::uint32_t fieldCount = 0;         // fieldCount：命中 profile 声明字段数。
+        std::uint32_t callbackItemCount = 0;  // callbackItemCount：命中 profile 声明 callbackItems 数。
         QString profileNameText;              // profileNameText：命中 profileName。
         QString versionText;                  // versionText：从 profileName 提取的 Windows 版本号。
         QString pathText;                     // pathText：命中或最后诊断的 pack 路径。
@@ -80,7 +81,7 @@ namespace
     // kDynCapabilities：
     // - 作用：列出所有可由 R0 DynData 暴露的 capability bit；
     // - 处理逻辑：驱动状态页、能力详情和筛选都复用该表。
-    constexpr std::array<CapabilityDisplay, 12> kDynCapabilities{ {
+    constexpr std::array<CapabilityDisplay, 15> kDynCapabilities{ {
         { KSW_CAP_DYN_NTOS_ACTIVE, "KSW_CAP_DYN_NTOS_ACTIVE", L"ntoskrnl profile 已激活" },
         { KSW_CAP_DYN_LXCORE_ACTIVE, "KSW_CAP_DYN_LXCORE_ACTIVE", L"lxcore profile 已激活" },
         { KSW_CAP_OBJECT_TYPE_FIELDS, "KSW_CAP_OBJECT_TYPE_FIELDS", L"对象类型字段" },
@@ -92,7 +93,10 @@ namespace
         { KSW_CAP_SECTION_CONTROL_AREA, "KSW_CAP_SECTION_CONTROL_AREA", L"Section/ControlArea" },
         { KSW_CAP_PROCESS_PROTECTION_PATCH, "KSW_CAP_PROCESS_PROTECTION_PATCH", L"进程保护修改" },
         { KSW_CAP_WSL_LXCORE_FIELDS, "KSW_CAP_WSL_LXCORE_FIELDS", L"WSL/lxcore 字段" },
-        { KSW_CAP_ETW_GUID_FIELDS, "KSW_CAP_ETW_GUID_FIELDS", L"ETW GUID/Registration 字段" }
+        { KSW_CAP_ETW_GUID_FIELDS, "KSW_CAP_ETW_GUID_FIELDS", L"ETW GUID/Registration 字段" },
+        { KSW_CAP_CALLBACK_NOTIFY_GLOBALS, "KSW_CAP_CALLBACK_NOTIFY_GLOBALS", L"Callback Notify 全局 RVA" },
+        { KSW_CAP_CALLBACK_REGISTRY_GLOBALS, "KSW_CAP_CALLBACK_REGISTRY_GLOBALS", L"Registry Callback 全局 RVA" },
+        { KSW_CAP_CALLBACK_OBJECT_FIELDS, "KSW_CAP_CALLBACK_OBJECT_FIELDS", L"Object Callback 结构偏移" }
     } };
 
     // kSecurityPolicies lists every policy bit currently surfaced by Phase 1.
@@ -238,8 +242,10 @@ namespace
     QStringList profilePackSearchPaths()
     {
         QStringList paths;
-        appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
         appendUniquePath(paths, qEnvironmentVariable("KSWORD_ARK_PROFILE_PACK"));
+        appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v2.json")));
+        appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
+        appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v2.json")));
         appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
         return paths;
     }
@@ -323,7 +329,7 @@ namespace
             if (!parseProfileUInt32(rootObject.value(QStringLiteral("schemaVersion")), schemaVersion) ||
                 !parseProfileUInt32(rootObject.value(QStringLiteral("packVersion")), packVersion) ||
                 schemaVersion != 1U ||
-                packVersion != 1U)
+                (packVersion != 1U && packVersion != 2U))
             {
                 diagnostics << QStringLiteral("pack schemaVersion/packVersion 不支持: %1").arg(result.pathText);
                 continue;
@@ -367,16 +373,19 @@ namespace
                 }
 
                 const QJsonArray fieldsArray = profileObject.value(QStringLiteral("fields")).toArray();
+                const QJsonArray callbackItemsArray = profileObject.value(QStringLiteral("callbackItems")).toArray();
                 result.matched = true;
                 result.valid = !fieldsArray.isEmpty();
                 result.fieldCount = static_cast<std::uint32_t>(fieldsArray.size());
+                result.callbackItemCount = static_cast<std::uint32_t>(callbackItemsArray.size());
                 result.profileNameText = profileObject.value(QStringLiteral("profileName")).toString(QStringLiteral("pack-profile"));
                 result.versionText = extractVersionFromProfileName(result.profileNameText);
                 result.messageText = result.valid
-                    ? QStringLiteral("本地 PDB profile pack 命中；profiles=%1，扫描=%2，字段=%3。")
+                    ? QStringLiteral("本地 PDB profile pack 命中；profiles=%1，扫描=%2，字段=%3，callbackItems=%4。")
                         .arg(result.profileCount)
                         .arg(result.scannedProfileCount)
                         .arg(result.fieldCount)
+                        .arg(result.callbackItemCount)
                     : QStringLiteral("本地 PDB profile pack 命中 identity，但字段数组为空，已视为无效。");
                 return result;
             }
@@ -487,15 +496,30 @@ namespace
     {
         if (summary.localPdbProfileMatched)
         {
-            return QStringLiteral("命中：%1，版本=%2，字段=%3，packProfiles=%4，路径=%5")
+            return QStringLiteral("命中：%1，版本=%2，字段=%3，callbackItems=%4，packProfiles=%5，路径=%6")
                 .arg(safeText(summary.localPdbProfileNameText))
                 .arg(safeText(summary.localPdbProfileVersionText, QStringLiteral("<未提取>")))
                 .arg(summary.localPdbProfileFieldCount)
+                .arg(summary.localPdbProfileCallbackItemCount)
                 .arg(summary.localPdbProfilePackProfileCount)
                 .arg(safeText(summary.localPdbProfilePathText));
         }
 
         return safeText(summary.localPdbProfileMessageText, QStringLiteral("未命中或未扫描。"));
+    }
+
+    // callbackProfileCoverageText：
+    // - 输入 summary：驱动状态摘要；
+    // - 处理：把 callback profile active 标志和三类 callback capability 合成一行；
+    // - 返回：用户可直接判断 notify/registry/object 是否走可信 PDB 数据的文本。
+    QString callbackProfileCoverageText(const KernelDriverStatusSummary& summary)
+    {
+        return QStringLiteral("Active=%1，Notify=%2，Registry=%3，Object=%4，packCallbackItems=%5")
+            .arg(boolText(summary.callbackProfileActive))
+            .arg(boolText(summary.callbackNotifyTrusted))
+            .arg(boolText(summary.callbackRegistryTrusted))
+            .arg(boolText(summary.callbackObjectTrusted))
+            .arg(summary.localPdbProfileCallbackItemCount);
     }
 
     // trustedOffsetText：
@@ -506,10 +530,11 @@ namespace
     {
         if (summary.trustedPdbOffsetsActive)
         {
-            return QStringLiteral("已启用可信 PDB 偏移；PDB字段 %1 / 可用字段 %2，pack=%3。")
+            return QStringLiteral("已启用可信 PDB 偏移；PDB字段 %1 / 可用字段 %2，pack=%3，callback=%4。")
                 .arg(summary.dynDataPdbProfileFieldCount)
                 .arg(summary.dynDataPresentFieldCount)
-                .arg(summary.localPdbProfileMatched ? QStringLiteral("命中") : QStringLiteral("未确认"));
+                .arg(summary.localPdbProfileMatched ? QStringLiteral("命中") : QStringLiteral("未确认"))
+                .arg(callbackProfileCoverageText(summary));
         }
         if (summary.localPdbProfileMatched)
         {
@@ -543,8 +568,10 @@ namespace
         if (!summary.protocolOk) { badges << QStringLiteral("Protocol Mismatch"); }
         if (summary.dynDataMissing) { badges << QStringLiteral("DynData Missing"); }
         if (summary.pdbProfileActive) { badges << QStringLiteral("PDB Profile Active"); }
+        if (summary.callbackProfileActive) { badges << QStringLiteral("Callback Profile Active"); }
         if (summary.localPdbProfileMatched) { badges << QStringLiteral("Pack Matched"); }
         if (summary.trustedPdbOffsetsActive) { badges << QStringLiteral("Trusted Offsets"); }
+        if (summary.callbackNotifyTrusted || summary.callbackRegistryTrusted || summary.callbackObjectTrusted) { badges << QStringLiteral("Trusted Callback Data"); }
         if (summary.dynDataRequiredMissingCount != 0U) { badges << QStringLiteral("Required Offsets Missing"); }
         if (summary.limited) { badges << QStringLiteral("Limited"); }
         return badges.join(QStringLiteral(", "));
@@ -558,6 +585,7 @@ namespace
         if (flagEnabled(flags, KSW_DYN_STATUS_FLAG_LXCORE_ACTIVE)) { parts << QStringLiteral("LxcoreActive"); }
         if (flagEnabled(flags, KSW_DYN_STATUS_FLAG_EXTRA_ACTIVE)) { parts << QStringLiteral("ExtraActive"); }
         if (flagEnabled(flags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE)) { parts << QStringLiteral("PdbProfileActive"); }
+        if (flagEnabled(flags, KSW_DYN_STATUS_FLAG_CALLBACK_PROFILE_ACTIVE)) { parts << QStringLiteral("CallbackProfileActive"); }
         return parts.isEmpty() ? QStringLiteral("None") : parts.join(QStringLiteral(", "));
     }
 
@@ -666,7 +694,9 @@ namespace
         lines << QStringLiteral("LocalPdbProfileName: %1").arg(safeText(summary.localPdbProfileNameText, QStringLiteral("None")));
         lines << QStringLiteral("LocalPdbProfilePath: %1").arg(safeText(summary.localPdbProfilePathText, QStringLiteral("None")));
         lines << QStringLiteral("LocalPdbProfileMessage: %1").arg(safeText(summary.localPdbProfileMessageText, QStringLiteral("None")));
+        lines << QStringLiteral("CallbackProfileCoverage: %1").arg(callbackProfileCoverageText(summary));
         lines << QStringLiteral("PdbProfileActive: %1").arg(boolText(summary.pdbProfileActive));
+        lines << QStringLiteral("CallbackProfileActive: %1").arg(boolText(summary.callbackProfileActive));
         lines << QStringLiteral("TrustedPdbOffsetsActive: %1").arg(boolText(summary.trustedPdbOffsetsActive));
         lines << QStringLiteral("TrustedOffsetSummary: %1").arg(trustedOffsetText(summary));
         lines << QStringLiteral("FieldCoverage: %1").arg(fieldCoverageText(summary));
@@ -708,6 +738,7 @@ namespace
         appendSummaryRow(table, QStringLiteral("当前内核"), kernelIdentityText(summary));
         appendSummaryRow(table, QStringLiteral("识别版本"), kernelVersionText(summary));
         appendSummaryRow(table, QStringLiteral("本地 PDB profile"), localPdbProfileText(summary));
+        appendSummaryRow(table, QStringLiteral("Callback profile 覆盖"), callbackProfileCoverageText(summary));
         appendSummaryRow(table, QStringLiteral("可信偏移"), trustedOffsetText(summary));
         appendSummaryRow(table, QStringLiteral("字段覆盖"), fieldCoverageText(summary));
         appendSummaryRow(table, QStringLiteral("字段来源"), fieldSourceSummaryText(summary));
@@ -727,6 +758,7 @@ namespace
             .arg(summary.dynDataMatchedProfileClass)
             .arg(formatHex32(summary.dynDataMatchedProfileOffset))
             .arg(summary.dynDataMatchedFieldsId));
+        appendSummaryRow(table, QStringLiteral("Callback profile 可信覆盖"), callbackProfileCoverageText(summary));
         appendSummaryRow(table, QStringLiteral("DynData R3 IO"), dynDataIoText(summary));
         appendSummaryRow(table, QStringLiteral("DynData 不可用原因"), safeText(summary.dynDataUnavailableReasonText, QStringLiteral("None")));
         appendSummaryRow(table, QStringLiteral("功能数"), QStringLiteral("显示 %1 / 返回 %2 / 总计 %3").arg(visibleRows).arg(summary.returnedFeatureCount).arg(summary.totalFeatureCount));
@@ -891,10 +923,17 @@ namespace
             summaryOut.localPdbProfileVersionText = packMatch.versionText;
             summaryOut.localPdbProfilePathText = packMatch.pathText;
             summaryOut.localPdbProfileMessageText = packMatch.messageText;
+            summaryOut.localPdbProfileCallbackItemCount = packMatch.callbackItemCount;
         }
 
         summaryOut.pdbProfileActive = flagEnabled(summaryOut.dynDataStatusFlags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE);
-        summaryOut.trustedPdbOffsetsActive = summaryOut.pdbProfileActive || summaryOut.dynDataPdbProfileFieldCount > 0U;
+        summaryOut.callbackProfileActive = flagEnabled(summaryOut.dynDataStatusFlags, KSW_DYN_STATUS_FLAG_CALLBACK_PROFILE_ACTIVE);
+        summaryOut.callbackNotifyTrusted = (summaryOut.dynDataCapabilityMask & KSW_CAP_CALLBACK_NOTIFY_GLOBALS) != 0ULL;
+        summaryOut.callbackRegistryTrusted = (summaryOut.dynDataCapabilityMask & KSW_CAP_CALLBACK_REGISTRY_GLOBALS) != 0ULL;
+        summaryOut.callbackObjectTrusted = (summaryOut.dynDataCapabilityMask & KSW_CAP_CALLBACK_OBJECT_FIELDS) != 0ULL;
+        summaryOut.trustedPdbOffsetsActive = summaryOut.pdbProfileActive ||
+            summaryOut.callbackProfileActive ||
+            summaryOut.dynDataPdbProfileFieldCount > 0U;
         summaryOut.dynDataMissing = !summaryOut.dynDataStatusQueryOk ||
             !flagEnabled(summaryOut.dynDataStatusFlags, KSW_DYN_STATUS_FLAG_NTOS_ACTIVE);
         summaryOut.limited = !summaryOut.protocolOk ||

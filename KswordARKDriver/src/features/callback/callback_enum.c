@@ -29,6 +29,7 @@ Environment:
 #define KSWORD_ARK_CALLBACK_ENUM_POINTER_SCAN_BACK_BYTES 0x80L
 #define KSWORD_ARK_CALLBACK_ENUM_POINTER_SCAN_FORWARD_BYTES 0x180L
 #define KSWORD_ARK_CALLBACK_ENUM_FAST_REF_MASK (~(ULONG_PTR)0x0FULL)
+#define KSWORD_ARK_CALLBACK_ENUM_MAX_PDB_STRUCT_OFFSET 0x1000UL
 #define SystemModuleInformation 11UL
 
 NTSYSAPI
@@ -53,7 +54,58 @@ typedef struct _KSWORD_ARK_CALLBACK_ENUM_OBJECT_SCAN_RESULT
     ULONG64 PostOperation;
     ULONG OperationMask;
     ULONG64 RegistrationBlock;
+    BOOLEAN UsedPdbOffsets;
 } KSWORD_ARK_CALLBACK_ENUM_OBJECT_SCAN_RESULT;
+
+typedef struct _KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT
+{
+    ULONG Source;
+    ULONG TrustFlags;
+    ULONG RemoveBehavior;
+    ULONG ExtraFieldFlags;
+    PCWSTR DetailPrefix;
+} KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT;
+
+typedef struct _KSWORD_ARK_CALLBACK_ENUM_DYNDATA_PROFILE
+{
+    KSW_DYN_STATE State;
+    BOOLEAN Active;
+    ULONG64 NtosImageBase;
+    ULONG NtosImageSize;
+} KSWORD_ARK_CALLBACK_ENUM_DYNDATA_PROFILE;
+
+typedef enum _KSWORD_ARK_CALLBACK_ENUM_OBJECT_LIST_STATE
+{
+    KswordArkCallbackEnumObjectListInvalid = 0,
+    KswordArkCallbackEnumObjectListEmpty = 1,
+    KswordArkCallbackEnumObjectListNonEmpty = 2
+} KSWORD_ARK_CALLBACK_ENUM_OBJECT_LIST_STATE;
+
+static const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT g_KswordArkCallbackEnumPdbNotifySourceContext = {
+    KSWORD_ARK_CALLBACK_ENUM_SOURCE_PDB_PROFILE,
+    KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE,
+    KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_PUBLIC_API | KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_REQUIRE_REVALIDATION,
+    KSWORD_ARK_CALLBACK_ENUM_FIELD_TRUSTED |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_VERIFIED_REMOVE |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_RAW_STORAGE_VALUE,
+    L"PDB callback profile trusted notify array"
+};
+
+static const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT g_KswordArkCallbackEnumPdbRegistrySourceContext = {
+    KSWORD_ARK_CALLBACK_ENUM_SOURCE_PDB_PROFILE,
+    KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE,
+    KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_NONE,
+    KSWORD_ARK_CALLBACK_ENUM_FIELD_TRUSTED,
+    L"PDB callback profile trusted registry list"
+};
+
+static const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT g_KswordArkCallbackEnumPdbObjectSourceContext = {
+    KSWORD_ARK_CALLBACK_ENUM_SOURCE_PDB_PROFILE,
+    KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE,
+    KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_NONE,
+    KSWORD_ARK_CALLBACK_ENUM_FIELD_TRUSTED,
+    L"PDB callback profile trusted object list"
+};
 
 static const ULONG g_KswordArkCallbackEnumHeaderBytes =
     (ULONG)(sizeof(KSWORD_ARK_ENUM_CALLBACKS_RESPONSE) - sizeof(KSWORD_ARK_CALLBACK_ENUM_ENTRY));
@@ -693,6 +745,234 @@ Return Value:
         return FALSE;
     }
     return TRUE;
+}
+
+static BOOLEAN
+KswordArkCallbackEnumPdbSourceIsProfile(
+    _In_ ULONG Source
+    )
+/*++
+
+Routine Description:
+
+    Checks whether one DynData field was supplied by the applied PDB callback
+    profile. This keeps trusted callback rows tied to PDB sourced fields only,
+    instead of treating unavailable or runtime-pattern values as trusted.
+
+Arguments:
+
+    Source - DynData source identifier stored next to one callback RVA/offset.
+
+Return Value:
+
+    TRUE when Source is KSW_DYN_FIELD_SOURCE_PDB_PROFILE; otherwise FALSE.
+
+--*/
+{
+    return Source == KSW_DYN_FIELD_SOURCE_PDB_PROFILE;
+}
+
+static BOOLEAN
+KswordArkCallbackEnumPdbOffsetAvailable(
+    _In_ ULONG Offset,
+    _In_ ULONG Source
+    )
+/*++
+
+Routine Description:
+
+    Validates a PDB callback structure offset before it is used to index into a
+    private kernel structure. Processing rejects unavailable, non-PDB sourced,
+    or excessively large offsets so the caller can fall back to existing
+    heuristic scanning.
+
+Arguments:
+
+    Offset - Structure offset captured in KSW_DYN_STATE.CallbackOffsets.
+    Source - Source tag captured in KSW_DYN_STATE.CallbackOffsetSources.
+
+Return Value:
+
+    TRUE when the offset is PDB-sourced and within the callback enum safety
+    window; otherwise FALSE.
+
+--*/
+{
+    if (!KswordArkCallbackEnumPdbSourceIsProfile(Source)) {
+        return FALSE;
+    }
+    if (Offset == KSW_DYN_OFFSET_UNAVAILABLE) {
+        return FALSE;
+    }
+    if (Offset > KSWORD_ARK_CALLBACK_ENUM_MAX_PDB_STRUCT_OFFSET) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static NTSTATUS
+KswordArkCallbackEnumCaptureDynDataProfile(
+    _Out_ KSWORD_ARK_CALLBACK_ENUM_DYNDATA_PROFILE* ProfileOut
+    )
+/*++
+
+Routine Description:
+
+    Captures the current DynData snapshot and extracts the callback PDB profile
+    identity gate used by this file. Processing requires CallbackProfileActive,
+    a present ntoskrnl identity, a non-zero image base, and a non-zero
+    SizeOfImage before any RVA is allowed to become a VA.
+
+Arguments:
+
+    ProfileOut - Receives a zeroed profile wrapper and the copied DynData state.
+
+Return Value:
+
+    STATUS_SUCCESS when the callback profile identity is usable. A failure
+    status means callers must keep the legacy pattern fallback behavior.
+
+--*/
+{
+    KSWORD_ARK_CALLBACK_ENUM_DYNDATA_PROFILE profile;
+
+    if (ProfileOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(&profile, sizeof(profile));
+    KswordARKDynDataSnapshot(&profile.State);
+
+    if (!profile.State.CallbackProfileActive) {
+        *ProfileOut = profile;
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (profile.State.Ntoskrnl.present == 0UL ||
+        profile.State.Ntoskrnl.imageBase == 0ULL ||
+        profile.State.Ntoskrnl.sizeOfImage == 0UL) {
+        *ProfileOut = profile;
+        return STATUS_NOT_FOUND;
+    }
+    if (!KswordArkCallbackEnumLooksLikeKernelPointer(profile.State.Ntoskrnl.imageBase)) {
+        *ProfileOut = profile;
+        return STATUS_ACCESS_VIOLATION;
+    }
+
+    profile.Active = TRUE;
+    profile.NtosImageBase = profile.State.Ntoskrnl.imageBase;
+    profile.NtosImageSize = profile.State.Ntoskrnl.sizeOfImage;
+    *ProfileOut = profile;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+KswordArkCallbackEnumPdbRvaToVa(
+    _In_ const KSWORD_ARK_CALLBACK_ENUM_DYNDATA_PROFILE* Profile,
+    _In_ ULONG GlobalRva,
+    _In_ ULONG GlobalSource,
+    _In_ SIZE_T ProbeBytes,
+    _Out_ ULONG64* AddressOut
+    )
+/*++
+
+Routine Description:
+
+    Converts one PDB callback global RVA to a kernel VA. Processing enforces
+    the callback profile identity gate, PDB field source, rva < SizeOfImage,
+    integer-overflow safety, kernel-address shape, and a small readable probe.
+
+Arguments:
+
+    Profile - Captured callback DynData profile wrapper.
+    GlobalRva - RVA from KSW_DYN_STATE.CallbackGlobals.
+    GlobalSource - Source tag from KSW_DYN_STATE.CallbackGlobalSources.
+    ProbeBytes - Number of bytes to read as a basic VA readability check.
+    AddressOut - Receives imageBase + GlobalRva on success.
+
+Return Value:
+
+    STATUS_SUCCESS when the RVA was converted and probed successfully. Any
+    failure status tells the caller to use the existing private pattern path.
+
+--*/
+{
+    UCHAR probeBuffer[sizeof(LIST_ENTRY)];
+    ULONG64 address = 0ULL;
+
+    if (AddressOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *AddressOut = 0ULL;
+    if (Profile == NULL || !Profile->Active || !Profile->State.CallbackProfileActive) {
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (!KswordArkCallbackEnumPdbSourceIsProfile(GlobalSource)) {
+        return STATUS_NOT_FOUND;
+    }
+    if (GlobalRva == 0UL || GlobalRva == KSW_DYN_OFFSET_UNAVAILABLE) {
+        return STATUS_NOT_FOUND;
+    }
+    if (GlobalRva >= Profile->NtosImageSize) {
+        return STATUS_NOT_FOUND;
+    }
+    if (ProbeBytes > sizeof(probeBuffer)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (ProbeBytes != 0U && ((ULONG64)GlobalRva + (ULONG64)ProbeBytes) > (ULONG64)Profile->NtosImageSize) {
+        return STATUS_NOT_FOUND;
+    }
+    if (Profile->NtosImageBase > (((ULONG64)~0ULL) - (ULONG64)GlobalRva)) {
+        return STATUS_INTEGER_OVERFLOW;
+    }
+
+    address = Profile->NtosImageBase + (ULONG64)GlobalRva;
+    if (!KswordArkCallbackEnumLooksLikeKernelPointer(address)) {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    if (ProbeBytes != 0U) {
+        RtlZeroMemory(probeBuffer, sizeof(probeBuffer));
+        if (!KswordArkCallbackEnumReadMemory((PVOID)(ULONG_PTR)address, probeBuffer, ProbeBytes)) {
+            return STATUS_ACCESS_VIOLATION;
+        }
+    }
+
+    *AddressOut = address;
+    return STATUS_SUCCESS;
+}
+
+static VOID
+KswordArkCallbackEnumApplySourceContext(
+    _Inout_ KSWORD_ARK_CALLBACK_ENUM_ENTRY* Entry,
+    _In_opt_ const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT* SourceContext
+    )
+/*++
+
+Routine Description:
+
+    Applies source, trust, removal-behavior, and extra field flags to one
+    callback enumeration row. Processing is intentionally additive for
+    fieldFlags so existing row-specific fields remain intact.
+
+Arguments:
+
+    Entry - Callback enumeration row being populated.
+    SourceContext - Optional traversal source metadata. NULL leaves the row as
+        already initialized by the caller.
+
+Return Value:
+
+    No return value.
+
+--*/
+{
+    if (Entry == NULL || SourceContext == NULL) {
+        return;
+    }
+
+    Entry->source = SourceContext->Source;
+    Entry->trustFlags = SourceContext->TrustFlags;
+    Entry->removeBehavior = SourceContext->RemoveBehavior;
+    Entry->fieldFlags |= SourceContext->ExtraFieldFlags;
 }
 
 static ULONG64
@@ -1924,7 +2204,9 @@ KswordArkCallbackEnumAddNotifyArrayEntry(
     _In_ ULONG64 RoutineBlock,
     _In_ ULONG64 FunctionAddress,
     _In_ ULONG64 ContextAddress,
-    _In_opt_z_ PCWSTR NamePrefix
+    _In_opt_z_ PCWSTR NamePrefix,
+    _In_opt_ const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT* SourceContext,
+    _In_ ULONG SourceRva
     )
 /*++
 
@@ -1946,6 +2228,8 @@ Arguments:
     FunctionAddress - 回调函数地址。
     ContextAddress - 回调上下文地址。
     NamePrefix - 行名称前缀。
+    SourceContext - 可选来源元数据；PDB 路径用它标记 trusted/source/remove。
+    SourceRva - PDB 全局 RVA；非 PDB 路径传 0，仅用于 detail 诊断。
 
 Return Value:
 
@@ -1973,6 +2257,11 @@ Return Value:
     entry->callbackAddress = FunctionAddress;
     entry->contextAddress = ContextAddress;
     entry->registrationAddress = SlotAddress;
+    KswordArkCallbackEnumApplySourceContext(entry, SourceContext);
+    if (SourceContext != NULL &&
+        (SourceContext->ExtraFieldFlags & KSWORD_ARK_CALLBACK_ENUM_FIELD_RAW_STORAGE_VALUE) != 0UL) {
+        entry->rawStorageValue = FastRefValue;
+    }
 
     (VOID)RtlStringCbPrintfW(
         entry->name,
@@ -1980,15 +2269,30 @@ Return Value:
         L"%ws[%lu]",
         (NamePrefix != NULL) ? NamePrefix : L"PspNotify",
         (unsigned long)SlotIndex);
-    (VOID)RtlStringCbPrintfW(
-        entry->detail,
-        sizeof(entry->detail),
-        L"Psp notify 私有数组项；slot=0x%p，EX_FAST_REF=0x%llX，RoutineBlock=0x%p，Function=0x%p，Context=0x%p。",
-        (PVOID)(ULONG_PTR)SlotAddress,
-        FastRefValue,
-        (PVOID)(ULONG_PTR)RoutineBlock,
-        (PVOID)(ULONG_PTR)FunctionAddress,
-        (PVOID)(ULONG_PTR)ContextAddress);
+    if (SourceContext != NULL && SourceContext->Source == KSWORD_ARK_CALLBACK_ENUM_SOURCE_PDB_PROFILE) {
+        (VOID)RtlStringCbPrintfW(
+            entry->detail,
+            sizeof(entry->detail),
+            L"%ws；RVA=0x%08lX，slot=0x%p，EX_FAST_REF=0x%llX，RoutineBlock=0x%p，Function=0x%p，Context=0x%p。",
+            (SourceContext->DetailPrefix != NULL) ? SourceContext->DetailPrefix : L"PDB callback profile trusted notify array",
+            (unsigned long)SourceRva,
+            (PVOID)(ULONG_PTR)SlotAddress,
+            FastRefValue,
+            (PVOID)(ULONG_PTR)RoutineBlock,
+            (PVOID)(ULONG_PTR)FunctionAddress,
+            (PVOID)(ULONG_PTR)ContextAddress);
+    }
+    else {
+        (VOID)RtlStringCbPrintfW(
+            entry->detail,
+            sizeof(entry->detail),
+            L"Psp notify 私有数组项；fallback=pattern scan，slot=0x%p，EX_FAST_REF=0x%llX，RoutineBlock=0x%p，Function=0x%p，Context=0x%p。",
+            (PVOID)(ULONG_PTR)SlotAddress,
+            FastRefValue,
+            (PVOID)(ULONG_PTR)RoutineBlock,
+            (PVOID)(ULONG_PTR)FunctionAddress,
+            (PVOID)(ULONG_PTR)ContextAddress);
+    }
     KswordArkCallbackEnumFinalizeModuleCached(ModuleCache, entry);
 }
 
@@ -1999,7 +2303,9 @@ KswordArkCallbackEnumAddNotifyArray(
     _In_ ULONG CallbackClass,
     _In_ ULONG OperationMask,
     _In_ ULONG64 ArrayAddress,
-    _In_opt_z_ PCWSTR NamePrefix
+    _In_opt_z_ PCWSTR NamePrefix,
+    _In_opt_ const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT* SourceContext,
+    _In_ ULONG SourceRva
     )
 /*++
 
@@ -2016,6 +2322,8 @@ Arguments:
     OperationMask - 操作掩码。
     ArrayAddress - 私有数组地址。
     NamePrefix - 行名称前缀。
+    SourceContext - 可选来源元数据；NULL 表示保留旧 pattern fallback 标记。
+    SourceRva - PDB 全局 RVA；非 PDB 路径传 0，仅用于 detail 诊断。
 
 Return Value:
 
@@ -2072,7 +2380,9 @@ Return Value:
             routineBlock,
             functionAddress,
             contextAddress,
-            NamePrefix);
+            NamePrefix,
+            SourceContext,
+            SourceRva);
         addedCount += 1UL;
     }
 
@@ -2087,7 +2397,9 @@ KswordArkCallbackEnumAddRegistryEntry(
     _In_ ULONG64 EntryAddress,
     _In_ ULONG64 FunctionAddress,
     _In_ ULONG64 ContextAddress,
-    _In_ const UNICODE_STRING* AltitudeString
+    _In_ const UNICODE_STRING* AltitudeString,
+    _In_opt_ const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT* SourceContext,
+    _In_ ULONG SourceRva
     )
 /*++
 
@@ -2105,6 +2417,8 @@ Arguments:
     FunctionAddress - 回调函数地址。
     ContextAddress - 回调上下文地址。
     AltitudeString - 可选 altitude 描述符。
+    SourceContext - 可选来源元数据；PDB 路径用它标记 trusted/source。
+    SourceRva - CmCallbackListHead PDB RVA；非 PDB 路径传 0，仅用于 detail 诊断。
 
 Return Value:
 
@@ -2132,6 +2446,7 @@ Return Value:
     entry->callbackAddress = FunctionAddress;
     entry->contextAddress = ContextAddress;
     entry->registrationAddress = EntryAddress;
+    KswordArkCallbackEnumApplySourceContext(entry, SourceContext);
 
     (VOID)RtlStringCbPrintfW(
         entry->name,
@@ -2147,13 +2462,26 @@ Return Value:
             entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_ALTITUDE;
         }
     }
-    (VOID)RtlStringCbPrintfW(
-        entry->detail,
-        sizeof(entry->detail),
-        L"CmCallbackListHead 私有链表项；Entry=0x%p，Function=0x%p，Context=0x%p。",
-        (PVOID)(ULONG_PTR)EntryAddress,
-        (PVOID)(ULONG_PTR)FunctionAddress,
-        (PVOID)(ULONG_PTR)ContextAddress);
+    if (SourceContext != NULL && SourceContext->Source == KSWORD_ARK_CALLBACK_ENUM_SOURCE_PDB_PROFILE) {
+        (VOID)RtlStringCbPrintfW(
+            entry->detail,
+            sizeof(entry->detail),
+            L"%ws；CmCallbackListHead RVA=0x%08lX，Entry=0x%p，Function=0x%p，Context=0x%p；cookie/字段恢复未标记 verified remove。",
+            (SourceContext->DetailPrefix != NULL) ? SourceContext->DetailPrefix : L"PDB callback profile trusted registry list",
+            (unsigned long)SourceRva,
+            (PVOID)(ULONG_PTR)EntryAddress,
+            (PVOID)(ULONG_PTR)FunctionAddress,
+            (PVOID)(ULONG_PTR)ContextAddress);
+    }
+    else {
+        (VOID)RtlStringCbPrintfW(
+            entry->detail,
+            sizeof(entry->detail),
+            L"CmCallbackListHead 私有链表项；fallback=pattern scan，Entry=0x%p，Function=0x%p，Context=0x%p。",
+            (PVOID)(ULONG_PTR)EntryAddress,
+            (PVOID)(ULONG_PTR)FunctionAddress,
+            (PVOID)(ULONG_PTR)ContextAddress);
+    }
     KswordArkCallbackEnumFinalizeModuleCached(ModuleCache, entry);
 }
 
@@ -2261,7 +2589,9 @@ static ULONG
 KswordArkCallbackEnumAddRegistryList(
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder,
     _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
-    _In_ ULONG64 ListHeadAddress
+    _In_ ULONG64 ListHeadAddress,
+    _In_opt_ const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT* SourceContext,
+    _In_ ULONG SourceRva
     )
 /*++
 
@@ -2275,6 +2605,8 @@ Arguments:
     Builder - 枚举响应构建器。
     ModuleCache - 模块缓存。
     ListHeadAddress - 链表头地址。
+    SourceContext - 可选来源元数据；NULL 表示保留旧 pattern fallback 标记。
+    SourceRva - CmCallbackListHead PDB RVA；非 PDB 路径传 0，仅用于 detail 诊断。
 
 Return Value:
 
@@ -2324,7 +2656,9 @@ Return Value:
                 currentAddress,
                 functionAddress,
                 contextAddress,
-                &altitudeString);
+                &altitudeString,
+                SourceContext,
+                SourceRva);
             addedCount += 1UL;
         }
 
@@ -2440,6 +2774,208 @@ Return Value:
     }
 
     return FALSE;
+}
+
+static KSWORD_ARK_CALLBACK_ENUM_OBJECT_LIST_STATE
+KswordArkCallbackEnumFindObjectTypeCallbackListHeadPdb(
+    _In_ POBJECT_TYPE ObjectType,
+    _In_ ULONG CallbackListOffset,
+    _Out_ ULONG64* ListHeadAddressOut
+    )
+/*++
+
+Routine Description:
+
+    Locates OBJECT_TYPE.CallbackList from a PDB supplied structure offset.
+    Processing computes ObjectType + CallbackListOffset, reads the LIST_ENTRY
+    head, and accepts either an empty self-referential list or a non-empty list
+    whose first node links back to the computed head.
+
+Arguments:
+
+    ObjectType - Input OBJECT_TYPE pointer.
+    CallbackListOffset - PDB offset of _OBJECT_TYPE.CallbackList.
+    ListHeadAddressOut - Receives the computed list head VA on success.
+
+Return Value:
+
+    Returns KswordArkCallbackEnumObjectListNonEmpty when the PDB offset
+    produced a readable/reasonable non-empty list head, KswordArkCallbackEnumObjectListEmpty
+    when the head is readable but empty/self-referential, and
+    KswordArkCallbackEnumObjectListInvalid when the offset is unusable and the
+    caller must fall back to the existing object-type heuristic scan.
+
+--*/
+{
+    ULONG64 objectTypeAddress = (ULONG64)(ULONG_PTR)ObjectType;
+    ULONG64 headAddress = 0ULL;
+    LIST_ENTRY headEntry;
+    ULONG64 flinkAddress = 0ULL;
+    ULONG64 blinkAddress = 0ULL;
+
+    if (ListHeadAddressOut == NULL) {
+        return KswordArkCallbackEnumObjectListInvalid;
+    }
+    *ListHeadAddressOut = 0ULL;
+    if (ObjectType == NULL || objectTypeAddress == 0ULL) {
+        return KswordArkCallbackEnumObjectListInvalid;
+    }
+    if (objectTypeAddress > (((ULONG64)~0ULL) - (ULONG64)CallbackListOffset)) {
+        return KswordArkCallbackEnumObjectListInvalid;
+    }
+
+    headAddress = objectTypeAddress + (ULONG64)CallbackListOffset;
+    RtlZeroMemory(&headEntry, sizeof(headEntry));
+    if (!KswordArkCallbackEnumReadListEntry(headAddress, &headEntry)) {
+        return KswordArkCallbackEnumObjectListInvalid;
+    }
+
+    flinkAddress = (ULONG64)(ULONG_PTR)headEntry.Flink;
+    blinkAddress = (ULONG64)(ULONG_PTR)headEntry.Blink;
+    if (flinkAddress == headAddress && blinkAddress == headAddress) {
+        *ListHeadAddressOut = headAddress;
+        return KswordArkCallbackEnumObjectListEmpty;
+    }
+    if (flinkAddress == 0ULL || blinkAddress == 0ULL) {
+        return KswordArkCallbackEnumObjectListInvalid;
+    }
+    if (!KswordArkCallbackEnumObjectNodeLooksValid(flinkAddress)) {
+        return KswordArkCallbackEnumObjectListInvalid;
+    }
+    if (blinkAddress < (ULONG64)(ULONG_PTR)MmUserProbeAddress) {
+        return KswordArkCallbackEnumObjectListInvalid;
+    }
+
+    {
+        LIST_ENTRY firstEntry;
+        RtlZeroMemory(&firstEntry, sizeof(firstEntry));
+        if (!KswordArkCallbackEnumReadListEntry(flinkAddress, &firstEntry)) {
+            return KswordArkCallbackEnumObjectListInvalid;
+        }
+        if ((ULONG64)(ULONG_PTR)firstEntry.Blink != headAddress) {
+            return KswordArkCallbackEnumObjectListInvalid;
+        }
+    }
+
+    *ListHeadAddressOut = headAddress;
+    return KswordArkCallbackEnumObjectListNonEmpty;
+}
+
+static BOOLEAN
+KswordArkCallbackEnumFindObjectCallbackFieldsPdb(
+    _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
+    _In_ const KSWORD_ARK_CALLBACK_ENUM_DYNDATA_PROFILE* Profile,
+    _In_ ULONG64 NodeAddress,
+    _Out_ KSWORD_ARK_CALLBACK_ENUM_OBJECT_SCAN_RESULT* ResultOut
+    )
+/*++
+
+Routine Description:
+
+    Reads _CALLBACK_ENTRY_ITEM fields using PDB supplied offsets. Processing
+    derives the entry-item base from EntryItemList when available, then reads
+    PreOperation, PostOperation, Operations, and CallbackEntry directly. Function
+    pointers must resolve to a loaded kernel module before the result is trusted.
+
+Arguments:
+
+    ModuleCache - Module cache used to validate callback function pointers.
+    Profile - Captured callback DynData profile containing PDB offsets/sources.
+    NodeAddress - Current LIST_ENTRY node address from OBJECT_TYPE.CallbackList.
+    ResultOut - Receives parsed callback fields.
+
+Return Value:
+
+    TRUE when direct PDB-offset parsing finds at least one valid callback
+    function. FALSE means the caller should use the existing heuristic parser.
+
+--*/
+{
+    const KSW_DYN_CALLBACK_OFFSETS* offsets = NULL;
+    const KSW_DYN_CALLBACK_OFFSETS* sources = NULL;
+    ULONG64 entryItemBase = NodeAddress;
+    ULONG64 preOperation = 0ULL;
+    ULONG64 postOperation = 0ULL;
+    ULONG64 callbackEntry = 0ULL;
+    ULONG operationMask = 0UL;
+    KSWORD_ARK_CALLBACK_ENUM_OBJECT_SCAN_RESULT result;
+
+    if (Profile == NULL || !Profile->Active || ResultOut == NULL) {
+        return FALSE;
+    }
+    RtlZeroMemory(ResultOut, sizeof(*ResultOut));
+    RtlZeroMemory(&result, sizeof(result));
+
+    offsets = &Profile->State.CallbackOffsets;
+    sources = &Profile->State.CallbackOffsetSources;
+    if (!KswordArkCallbackEnumPdbOffsetAvailable(
+            offsets->CallbackEntryItemEntryList,
+            sources->CallbackEntryItemEntryList) ||
+        !KswordArkCallbackEnumPdbOffsetAvailable(
+            offsets->CallbackEntryItemPreOperation,
+            sources->CallbackEntryItemPreOperation) ||
+        !KswordArkCallbackEnumPdbOffsetAvailable(
+            offsets->CallbackEntryItemPostOperation,
+            sources->CallbackEntryItemPostOperation) ||
+        !KswordArkCallbackEnumPdbOffsetAvailable(
+            offsets->CallbackEntryItemOperations,
+            sources->CallbackEntryItemOperations) ||
+        !KswordArkCallbackEnumPdbOffsetAvailable(
+            offsets->CallbackEntryItemCallbackEntry,
+            sources->CallbackEntryItemCallbackEntry)) {
+        return FALSE;
+    }
+
+    if (NodeAddress < (ULONG64)offsets->CallbackEntryItemEntryList) {
+        return FALSE;
+    }
+    entryItemBase = NodeAddress - (ULONG64)offsets->CallbackEntryItemEntryList;
+
+    if (!KswordArkCallbackEnumReadPointer(
+            entryItemBase + (ULONG64)offsets->CallbackEntryItemPreOperation,
+            &preOperation) ||
+        !KswordArkCallbackEnumReadPointer(
+            entryItemBase + (ULONG64)offsets->CallbackEntryItemPostOperation,
+            &postOperation) ||
+        !KswordArkCallbackEnumReadUlong(
+            entryItemBase + (ULONG64)offsets->CallbackEntryItemOperations,
+            &operationMask) ||
+        !KswordArkCallbackEnumReadPointer(
+            entryItemBase + (ULONG64)offsets->CallbackEntryItemCallbackEntry,
+            &callbackEntry)) {
+        return FALSE;
+    }
+
+    if (preOperation != 0ULL) {
+        if (!KswordArkCallbackEnumLooksLikeKernelPointer(preOperation) ||
+            !KswordArkCallbackEnumIsKernelModuleAddress(ModuleCache, preOperation)) {
+            return FALSE;
+        }
+        result.PreOperation = preOperation;
+    }
+    if (postOperation != 0ULL) {
+        if (!KswordArkCallbackEnumLooksLikeKernelPointer(postOperation) ||
+            !KswordArkCallbackEnumIsKernelModuleAddress(ModuleCache, postOperation)) {
+            return FALSE;
+        }
+        result.PostOperation = postOperation;
+    }
+    if (result.PreOperation == 0ULL && result.PostOperation == 0ULL) {
+        return FALSE;
+    }
+    if ((operationMask & (OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE)) == 0UL ||
+        (operationMask & ~(OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE | 0xFFFF0000UL)) != 0UL) {
+        return FALSE;
+    }
+    if (callbackEntry == 0ULL || !KswordArkCallbackEnumLooksLikeKernelPointer(callbackEntry)) {
+        return FALSE;
+    }
+
+    result.OperationMask = operationMask & (OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE);
+    result.RegistrationBlock = callbackEntry;
+    result.UsedPdbOffsets = TRUE;
+    *ResultOut = result;
+    return TRUE;
 }
 
 static BOOLEAN
@@ -2574,7 +3110,10 @@ KswordArkCallbackEnumAddObjectCallbackEntry(
     _In_ ULONG64 CallbackAddress,
     _In_ ULONG OperationMask,
     _In_ ULONG64 RegistrationBlock,
-    _In_ BOOLEAN IsPostOperation
+    _In_ BOOLEAN IsPostOperation,
+    _In_opt_ const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT* SourceContext,
+    _In_ BOOLEAN UsedPdbOffsets,
+    _In_opt_ const KSW_DYN_CALLBACK_OFFSETS* PdbOffsets
     )
 /*++
 
@@ -2595,6 +3134,9 @@ Arguments:
     OperationMask - Ob operation 掩码。
     RegistrationBlock - 注册块候选地址。
     IsPostOperation - TRUE 表示 PostOperation；FALSE 表示 PreOperation。
+    SourceContext - 可选来源元数据；PDB 路径用它标记 trusted/source。
+    UsedPdbOffsets - TRUE 表示字段来自 PDB offset；FALSE 表示启发式字段恢复。
+    PdbOffsets - 可选 PDB offset 结构；仅在 trusted path 详情里打印实际偏移值。
 
 Return Value:
 
@@ -2626,6 +3168,7 @@ Return Value:
     if (RegistrationBlock != 0ULL) {
         entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_CONTEXT_ADDRESS;
     }
+    KswordArkCallbackEnumApplySourceContext(entry, SourceContext);
 
     (VOID)RtlStringCbPrintfW(
         entry->name,
@@ -2634,33 +3177,57 @@ Return Value:
         IsPostOperation ? L"Post" : L"Pre",
         ObjectTypeName,
         (unsigned long)EntryIndex);
-    (VOID)RtlStringCbPrintfW(
-        entry->detail,
-        sizeof(entry->detail),
-        L"OBJECT_TYPE CallbackList 私有链表候选；ObjectType=%ws，Node=0x%p，%wsOperation=0x%p，Operations=0x%lX，RegistrationBlock=0x%p。",
-        ObjectTypeName,
-        (PVOID)(ULONG_PTR)NodeAddress,
-        IsPostOperation ? L"Post" : L"Pre",
-        (PVOID)(ULONG_PTR)CallbackAddress,
-        (unsigned long)OperationMask,
-        (PVOID)(ULONG_PTR)RegistrationBlock);
+    if (SourceContext != NULL && SourceContext->Source == KSWORD_ARK_CALLBACK_ENUM_SOURCE_PDB_PROFILE) {
+        (VOID)RtlStringCbPrintfW(
+            entry->detail,
+            sizeof(entry->detail),
+            L"%ws；fieldPath=%ws，ObjectType=%ws，Node=0x%p，%wsOperation=0x%p，Operations=0x%lX，%ws=0x%p，offsets[EntryList=0x%lX,Pre=0x%lX,Post=0x%lX,Ops=0x%lX,CallbackEntry=0x%lX]。",
+            (SourceContext->DetailPrefix != NULL) ? SourceContext->DetailPrefix : L"PDB callback profile trusted object list",
+            UsedPdbOffsets ? L"PDB offsets" : L"heuristic fallback",
+            ObjectTypeName,
+            (PVOID)(ULONG_PTR)NodeAddress,
+            IsPostOperation ? L"Post" : L"Pre",
+            (PVOID)(ULONG_PTR)CallbackAddress,
+            (unsigned long)OperationMask,
+            UsedPdbOffsets ? L"CallbackEntry" : L"RegistrationBlock",
+            (PVOID)(ULONG_PTR)RegistrationBlock,
+            (unsigned long)((PdbOffsets != NULL) ? PdbOffsets->CallbackEntryItemEntryList : 0UL),
+            (unsigned long)((PdbOffsets != NULL) ? PdbOffsets->CallbackEntryItemPreOperation : 0UL),
+            (unsigned long)((PdbOffsets != NULL) ? PdbOffsets->CallbackEntryItemPostOperation : 0UL),
+            (unsigned long)((PdbOffsets != NULL) ? PdbOffsets->CallbackEntryItemOperations : 0UL),
+            (unsigned long)((PdbOffsets != NULL) ? PdbOffsets->CallbackEntryItemCallbackEntry : 0UL));
+    }
+    else {
+        (VOID)RtlStringCbPrintfW(
+            entry->detail,
+            sizeof(entry->detail),
+            L"OBJECT_TYPE CallbackList 私有链表候选；fallback=heuristic scan，ObjectType=%ws，Node=0x%p，%wsOperation=0x%p，Operations=0x%lX，RegistrationBlock=0x%p。",
+            ObjectTypeName,
+            (PVOID)(ULONG_PTR)NodeAddress,
+            IsPostOperation ? L"Post" : L"Pre",
+            (PVOID)(ULONG_PTR)CallbackAddress,
+            (unsigned long)OperationMask,
+            (PVOID)(ULONG_PTR)RegistrationBlock);
+    }
     KswordArkCallbackEnumFinalizeModuleCached(ModuleCache, entry);
 }
-
 static ULONG
 KswordArkCallbackEnumAddObjectTypeCallbackList(
     _Inout_ KSWORD_ARK_CALLBACK_ENUM_BUILDER* Builder,
     _Inout_ KSWORD_ARK_CALLBACK_MODULE_CACHE* ModuleCache,
     _In_ POBJECT_TYPE ObjectType,
     _In_ ULONG ObjectTypeMask,
-    _In_z_ PCWSTR ObjectTypeName
+    _In_z_ PCWSTR ObjectTypeName,
+    _In_opt_ const KSWORD_ARK_CALLBACK_ENUM_DYNDATA_PROFILE* Profile,
+    _In_opt_ const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT* SourceContext
     )
 /*++
 
 Routine Description:
 
-    枚举一个对象类型的 Ob callback 私有链表。中文说明：优先从 OBJECT_TYPE 中
-    启发式找到 CallbackList 头，再遍历有限节点并解析 Pre/Post 回调函数。
+    枚举一个对象类型的 Ob callback 私有链表。中文说明：PDB profile 可用时先
+    使用 _OBJECT_TYPE.CallbackList 和 _CALLBACK_ENTRY_ITEM 字段 offset；字段
+    不全或读取失败时保留原有启发式扫描。
 
 Arguments:
 
@@ -2669,6 +3236,8 @@ Arguments:
     ObjectType - 目标对象类型。
     ObjectTypeMask - 对象类型掩码。
     ObjectTypeName - 对象类型文本。
+    Profile - 可选 PDB callback profile；NULL 表示只走旧启发式。
+    SourceContext - 可选来源元数据；PDB 路径用它标记 trusted/source。
 
 Return Value:
 
@@ -2681,15 +3250,31 @@ Return Value:
     ULONG index = 0UL;
     ULONG addedCount = 0UL;
     ULONG64 currentAddress = 0ULL;
+    KSWORD_ARK_CALLBACK_ENUM_OBJECT_LIST_STATE listHeadState = KswordArkCallbackEnumObjectListInvalid;
+    BOOLEAN usingPdbListHead = FALSE;
 
     RtlZeroMemory(&listHead, sizeof(listHead));
-    if (!KswordArkCallbackEnumFindObjectTypeCallbackListHead(ObjectType, &listHeadAddress)) {
-        return 0UL;
+    if (Profile != NULL &&
+        Profile->Active &&
+        KswordArkCallbackEnumPdbOffsetAvailable(
+            Profile->State.CallbackOffsets.ObjectTypeCallbackList,
+            Profile->State.CallbackOffsetSources.ObjectTypeCallbackList) &&
+        (listHeadState = KswordArkCallbackEnumFindObjectTypeCallbackListHeadPdb(
+            ObjectType,
+            Profile->State.CallbackOffsets.ObjectTypeCallbackList,
+            &listHeadAddress)) != KswordArkCallbackEnumObjectListInvalid) {
+        usingPdbListHead = TRUE;
+    }
+    if (!usingPdbListHead) {
+        if (!KswordArkCallbackEnumFindObjectTypeCallbackListHead(ObjectType, &listHeadAddress)) {
+            return 0UL;
+        }
+        Profile = NULL;
+        SourceContext = NULL;
     }
     if (!KswordArkCallbackEnumReadListEntry(listHeadAddress, &listHead)) {
         return 0UL;
     }
-
     currentAddress = (ULONG64)(ULONG_PTR)listHead.Flink;
     while (currentAddress != 0ULL &&
         currentAddress != listHeadAddress &&
@@ -2702,13 +3287,19 @@ Return Value:
         if (!KswordArkCallbackEnumReadListEntry(currentAddress, &currentEntry)) {
             break;
         }
-        if (!KswordArkCallbackEnumFindObjectCallbackFields(ModuleCache, currentAddress, &scanResult)) {
+        if (!KswordArkCallbackEnumFindObjectCallbackFieldsPdb(
+                ModuleCache,
+                Profile,
+                currentAddress,
+                &scanResult) &&
+            !KswordArkCallbackEnumFindObjectCallbackFields(ModuleCache, currentAddress, &scanResult)) {
             currentAddress = (ULONG64)(ULONG_PTR)currentEntry.Flink;
             index += 1UL;
             continue;
         }
-
         if (scanResult.PreOperation != 0ULL) {
+            const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT* rowSourceContext =
+                (scanResult.UsedPdbOffsets && SourceContext != NULL) ? SourceContext : NULL;
             KswordArkCallbackEnumAddObjectCallbackEntry(
                 Builder,
                 ModuleCache,
@@ -2719,10 +3310,15 @@ Return Value:
                 scanResult.PreOperation,
                 scanResult.OperationMask,
                 scanResult.RegistrationBlock,
-                FALSE);
+                FALSE,
+                rowSourceContext,
+                scanResult.UsedPdbOffsets,
+                (Profile != NULL) ? &Profile->State.CallbackOffsets : NULL);
             addedCount += 1UL;
         }
         if (scanResult.PostOperation != 0ULL) {
+            const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT* rowSourceContext =
+                (scanResult.UsedPdbOffsets && SourceContext != NULL) ? SourceContext : NULL;
             KswordArkCallbackEnumAddObjectCallbackEntry(
                 Builder,
                 ModuleCache,
@@ -2733,12 +3329,20 @@ Return Value:
                 scanResult.PostOperation,
                 scanResult.OperationMask,
                 scanResult.RegistrationBlock,
-                TRUE);
+                TRUE,
+                rowSourceContext,
+                scanResult.UsedPdbOffsets,
+                (Profile != NULL) ? &Profile->State.CallbackOffsets : NULL);
             addedCount += 1UL;
         }
 
         currentAddress = (ULONG64)(ULONG_PTR)currentEntry.Flink;
         index += 1UL;
+    }
+
+    if (usingPdbListHead &&
+        listHeadState == KswordArkCallbackEnumObjectListEmpty) {
+        return addedCount;
     }
 
     return addedCount;
@@ -2766,6 +3370,7 @@ Return Value:
 --*/
 {
     KSWORD_ARK_CALLBACK_MODULE_CACHE moduleCache;
+    KSWORD_ARK_CALLBACK_ENUM_DYNDATA_PROFILE pdbProfile;
     NTSTATUS status = STATUS_SUCCESS;
     ULONG64 processArray = 0ULL;
     ULONG64 threadArray = 0ULL;
@@ -2775,8 +3380,11 @@ Return Value:
     ULONG64 obpCallPreOperationCallbacks = 0ULL;
     ULONG addedCount = 0UL;
     ULONG notifyMaskValue = 0UL;
+    WCHAR detailText[KSWORD_ARK_CALLBACK_ENUM_DETAIL_CHARS];
 
     KswordArkCallbackEnumInitModuleCache(&moduleCache);
+    RtlZeroMemory(&pdbProfile, sizeof(pdbProfile));
+    (VOID)KswordArkCallbackEnumCaptureDynDataProfile(&pdbProfile);
 
     status = KswordArkCallbackEnumLocatePspNotifyEnableMask(&notifyEnableMask);
     if (NT_SUCCESS(status)) {
@@ -2792,105 +3400,241 @@ Return Value:
             ? L"已定位 PspNotifyEnableMask；用于诊断进程/线程/镜像 notify 全局启用状态。"
             : L"未能定位 PspNotifyEnableMask；不影响后续数组特征扫描。");
 
-    status = KswordArkCallbackEnumLocatePspCreateProcessNotifyRoutine(&processArray);
-    KswordArkCallbackEnumAddLocateRow(
-        Builder,
-        KSWORD_ARK_CALLBACK_ENUM_CLASS_PROCESS,
-        L"PspCreateProcessNotifyRoutine",
-        processArray,
-        status,
-        NT_SUCCESS(status)
-            ? L"已定位 PspCreateProcessNotifyRoutine 私有数组，开始遍历 EX_FAST_REF 槽。"
-            : L"未能通过 PsSetCreateProcessNotifyRoutine 特征定位进程 notify 数组。");
-    if (NT_SUCCESS(status)) {
+    if (NT_SUCCESS(KswordArkCallbackEnumPdbRvaToVa(
+            &pdbProfile,
+            pdbProfile.State.CallbackGlobals.PspCreateProcessNotifyRoutine,
+            pdbProfile.State.CallbackGlobalSources.PspCreateProcessNotifyRoutine,
+            sizeof(ULONG_PTR),
+            &processArray))) {
         addedCount = KswordArkCallbackEnumAddNotifyArray(
             Builder,
             &moduleCache,
             KSWORD_ARK_CALLBACK_ENUM_CLASS_PROCESS,
             KSWORD_ARK_PROCESS_OP_CREATE,
             processArray,
-            L"PspCreateProcessNotifyRoutine");
+            L"PspCreateProcessNotifyRoutine",
+            &g_KswordArkCallbackEnumPdbNotifySourceContext,
+            pdbProfile.State.CallbackGlobals.PspCreateProcessNotifyRoutine);
         if (addedCount == 0UL) {
+            RtlZeroMemory(detailText, sizeof(detailText));
+            (VOID)RtlStringCbPrintfW(
+                detailText,
+                sizeof(detailText),
+                L"已使用 PDB RVA 0x%08lX 转换出 PspCreateProcessNotifyRoutine VA 0x%p，但未找到可验证的 EX_FAST_REF 槽。",
+                (unsigned long)pdbProfile.State.CallbackGlobals.PspCreateProcessNotifyRoutine,
+                (PVOID)(ULONG_PTR)processArray);
             KswordArkCallbackEnumAddUnsupportedRow(
                 Builder,
                 KSWORD_ARK_CALLBACK_ENUM_CLASS_PROCESS,
                 L"PspCreateProcessNotifyRoutine empty",
-                L"已定位进程 notify 数组，但未找到能解析到模块的有效 EX_CALLBACK_ROUTINE_BLOCK。");
+                detailText);
+        }
+    }
+    else {
+        status = KswordArkCallbackEnumLocatePspCreateProcessNotifyRoutine(&processArray);
+        KswordArkCallbackEnumAddLocateRow(
+            Builder,
+            KSWORD_ARK_CALLBACK_ENUM_CLASS_PROCESS,
+            L"PspCreateProcessNotifyRoutine",
+            processArray,
+            status,
+            NT_SUCCESS(status)
+                ? L"已定位 PspCreateProcessNotifyRoutine 私有数组，开始遍历 EX_FAST_REF 槽。"
+                : L"未能通过 PsSetCreateProcessNotifyRoutine 特征定位进程 notify 数组。");
+        if (NT_SUCCESS(status)) {
+            addedCount = KswordArkCallbackEnumAddNotifyArray(
+                Builder,
+                &moduleCache,
+                KSWORD_ARK_CALLBACK_ENUM_CLASS_PROCESS,
+                KSWORD_ARK_PROCESS_OP_CREATE,
+                processArray,
+                L"PspCreateProcessNotifyRoutine",
+                NULL,
+                0UL);
+            if (addedCount == 0UL) {
+                KswordArkCallbackEnumAddUnsupportedRow(
+                    Builder,
+                    KSWORD_ARK_CALLBACK_ENUM_CLASS_PROCESS,
+                    L"PspCreateProcessNotifyRoutine empty",
+                    L"已定位进程 notify 数组，但未找到能解析到模块的有效 EX_CALLBACK_ROUTINE_BLOCK。");
+            }
         }
     }
 
-    status = KswordArkCallbackEnumLocatePspCreateThreadNotifyRoutine(&threadArray);
-    KswordArkCallbackEnumAddLocateRow(
-        Builder,
-        KSWORD_ARK_CALLBACK_ENUM_CLASS_THREAD,
-        L"PspCreateThreadNotifyRoutine",
-        threadArray,
-        status,
-        NT_SUCCESS(status)
-            ? L"已定位 PspCreateThreadNotifyRoutine 私有数组，开始遍历 EX_FAST_REF 槽。"
-            : L"未能通过 PsRemoveCreateThreadNotifyRoutine 特征定位线程 notify 数组。");
-    if (NT_SUCCESS(status)) {
+    if (NT_SUCCESS(KswordArkCallbackEnumPdbRvaToVa(
+            &pdbProfile,
+            pdbProfile.State.CallbackGlobals.PspCreateThreadNotifyRoutine,
+            pdbProfile.State.CallbackGlobalSources.PspCreateThreadNotifyRoutine,
+            sizeof(ULONG_PTR),
+            &threadArray))) {
         addedCount = KswordArkCallbackEnumAddNotifyArray(
             Builder,
             &moduleCache,
             KSWORD_ARK_CALLBACK_ENUM_CLASS_THREAD,
             KSWORD_ARK_THREAD_OP_CREATE | KSWORD_ARK_THREAD_OP_EXIT,
             threadArray,
-            L"PspCreateThreadNotifyRoutine");
+            L"PspCreateThreadNotifyRoutine",
+            &g_KswordArkCallbackEnumPdbNotifySourceContext,
+            pdbProfile.State.CallbackGlobals.PspCreateThreadNotifyRoutine);
         if (addedCount == 0UL) {
+            RtlZeroMemory(detailText, sizeof(detailText));
+            (VOID)RtlStringCbPrintfW(
+                detailText,
+                sizeof(detailText),
+                L"已使用 PDB RVA 0x%08lX 转换出 PspCreateThreadNotifyRoutine VA 0x%p，但未找到可验证的 EX_FAST_REF 槽。",
+                (unsigned long)pdbProfile.State.CallbackGlobals.PspCreateThreadNotifyRoutine,
+                (PVOID)(ULONG_PTR)threadArray);
             KswordArkCallbackEnumAddUnsupportedRow(
                 Builder,
                 KSWORD_ARK_CALLBACK_ENUM_CLASS_THREAD,
                 L"PspCreateThreadNotifyRoutine empty",
-                L"已定位线程 notify 数组，但未找到能解析到模块的有效 EX_CALLBACK_ROUTINE_BLOCK。");
+                detailText);
+        }
+    }
+    else {
+        status = KswordArkCallbackEnumLocatePspCreateThreadNotifyRoutine(&threadArray);
+        KswordArkCallbackEnumAddLocateRow(
+            Builder,
+            KSWORD_ARK_CALLBACK_ENUM_CLASS_THREAD,
+            L"PspCreateThreadNotifyRoutine",
+            threadArray,
+            status,
+            NT_SUCCESS(status)
+                ? L"已定位 PspCreateThreadNotifyRoutine 私有数组，开始遍历 EX_FAST_REF 槽。"
+                : L"未能通过 PsRemoveCreateThreadNotifyRoutine 特征定位线程 notify 数组。");
+        if (NT_SUCCESS(status)) {
+            addedCount = KswordArkCallbackEnumAddNotifyArray(
+                Builder,
+                &moduleCache,
+                KSWORD_ARK_CALLBACK_ENUM_CLASS_THREAD,
+                KSWORD_ARK_THREAD_OP_CREATE | KSWORD_ARK_THREAD_OP_EXIT,
+                threadArray,
+                L"PspCreateThreadNotifyRoutine",
+                NULL,
+                0UL);
+            if (addedCount == 0UL) {
+                KswordArkCallbackEnumAddUnsupportedRow(
+                    Builder,
+                    KSWORD_ARK_CALLBACK_ENUM_CLASS_THREAD,
+                    L"PspCreateThreadNotifyRoutine empty",
+                    L"已定位线程 notify 数组，但未找到能解析到模块的有效 EX_CALLBACK_ROUTINE_BLOCK。");
+            }
         }
     }
 
-    status = KswordArkCallbackEnumLocatePspLoadImageNotifyRoutine(&imageArray);
-    KswordArkCallbackEnumAddLocateRow(
-        Builder,
-        KSWORD_ARK_CALLBACK_ENUM_CLASS_IMAGE,
-        L"PspLoadImageNotifyRoutine",
-        imageArray,
-        status,
-        NT_SUCCESS(status)
-            ? L"已定位 PspLoadImageNotifyRoutine 私有数组，开始遍历 EX_FAST_REF 槽。"
-            : L"未能通过 PsSetLoadImageNotifyRoutineEx 特征定位镜像 notify 数组。");
-    if (NT_SUCCESS(status)) {
+    if (NT_SUCCESS(KswordArkCallbackEnumPdbRvaToVa(
+            &pdbProfile,
+            pdbProfile.State.CallbackGlobals.PspLoadImageNotifyRoutine,
+            pdbProfile.State.CallbackGlobalSources.PspLoadImageNotifyRoutine,
+            sizeof(ULONG_PTR),
+            &imageArray))) {
         addedCount = KswordArkCallbackEnumAddNotifyArray(
             Builder,
             &moduleCache,
             KSWORD_ARK_CALLBACK_ENUM_CLASS_IMAGE,
             KSWORD_ARK_IMAGE_OP_LOAD,
             imageArray,
-            L"PspLoadImageNotifyRoutine");
+            L"PspLoadImageNotifyRoutine",
+            &g_KswordArkCallbackEnumPdbNotifySourceContext,
+            pdbProfile.State.CallbackGlobals.PspLoadImageNotifyRoutine);
         if (addedCount == 0UL) {
+            RtlZeroMemory(detailText, sizeof(detailText));
+            (VOID)RtlStringCbPrintfW(
+                detailText,
+                sizeof(detailText),
+                L"已使用 PDB RVA 0x%08lX 转换出 PspLoadImageNotifyRoutine VA 0x%p，但未找到可验证的 EX_FAST_REF 槽。",
+                (unsigned long)pdbProfile.State.CallbackGlobals.PspLoadImageNotifyRoutine,
+                (PVOID)(ULONG_PTR)imageArray);
             KswordArkCallbackEnumAddUnsupportedRow(
                 Builder,
                 KSWORD_ARK_CALLBACK_ENUM_CLASS_IMAGE,
                 L"PspLoadImageNotifyRoutine empty",
-                L"已定位镜像 notify 数组，但未找到能解析到模块的有效 EX_CALLBACK_ROUTINE_BLOCK。");
+                detailText);
+        }
+    }
+    else {
+        status = KswordArkCallbackEnumLocatePspLoadImageNotifyRoutine(&imageArray);
+        KswordArkCallbackEnumAddLocateRow(
+            Builder,
+            KSWORD_ARK_CALLBACK_ENUM_CLASS_IMAGE,
+            L"PspLoadImageNotifyRoutine",
+            imageArray,
+            status,
+            NT_SUCCESS(status)
+                ? L"已定位 PspLoadImageNotifyRoutine 私有数组，开始遍历 EX_FAST_REF 槽。"
+                : L"未能通过 PsSetLoadImageNotifyRoutineEx 特征定位镜像 notify 数组。");
+        if (NT_SUCCESS(status)) {
+            addedCount = KswordArkCallbackEnumAddNotifyArray(
+                Builder,
+                &moduleCache,
+                KSWORD_ARK_CALLBACK_ENUM_CLASS_IMAGE,
+                KSWORD_ARK_IMAGE_OP_LOAD,
+                imageArray,
+                L"PspLoadImageNotifyRoutine",
+                NULL,
+                0UL);
+            if (addedCount == 0UL) {
+                KswordArkCallbackEnumAddUnsupportedRow(
+                    Builder,
+                    KSWORD_ARK_CALLBACK_ENUM_CLASS_IMAGE,
+                    L"PspLoadImageNotifyRoutine empty",
+                    L"已定位镜像 notify 数组，但未找到能解析到模块的有效 EX_CALLBACK_ROUTINE_BLOCK。");
+            }
         }
     }
 
-    status = KswordArkCallbackEnumLocateCmCallbackListHead(&cmListHead);
-    KswordArkCallbackEnumAddLocateRow(
-        Builder,
-        KSWORD_ARK_CALLBACK_ENUM_CLASS_REGISTRY,
-        L"CmCallbackListHead",
-        cmListHead,
-        status,
-        NT_SUCCESS(status)
-            ? L"已定位 CmCallbackListHead 私有链表，开始保守遍历并识别 Function/Altitude。"
-            : L"未能通过 CmUnRegisterCallback 特征定位注册表回调链表头。");
-    if (NT_SUCCESS(status)) {
-        addedCount = KswordArkCallbackEnumAddRegistryList(Builder, &moduleCache, cmListHead);
+    if (NT_SUCCESS(KswordArkCallbackEnumPdbRvaToVa(
+            &pdbProfile,
+            pdbProfile.State.CallbackGlobals.CmCallbackListHead,
+            pdbProfile.State.CallbackGlobalSources.CmCallbackListHead,
+            sizeof(LIST_ENTRY),
+            &cmListHead))) {
+        addedCount = KswordArkCallbackEnumAddRegistryList(
+            Builder,
+            &moduleCache,
+            cmListHead,
+            &g_KswordArkCallbackEnumPdbRegistrySourceContext,
+            pdbProfile.State.CallbackGlobals.CmCallbackListHead);
         if (addedCount == 0UL) {
+            RtlZeroMemory(detailText, sizeof(detailText));
+            (VOID)RtlStringCbPrintfW(
+                detailText,
+                sizeof(detailText),
+                L"已使用 PDB RVA 0x%08lX 转换出 CmCallbackListHead VA 0x%p，但链表为空或字段恢复未稳定。",
+                (unsigned long)pdbProfile.State.CallbackGlobals.CmCallbackListHead,
+                (PVOID)(ULONG_PTR)cmListHead);
             KswordArkCallbackEnumAddUnsupportedRow(
                 Builder,
                 KSWORD_ARK_CALLBACK_ENUM_CLASS_REGISTRY,
                 L"CmCallbackListHead empty",
-                L"已定位注册表回调链表头，但未找到能解析到模块的 Function 字段。");
+                detailText);
+        }
+    }
+    else {
+        status = KswordArkCallbackEnumLocateCmCallbackListHead(&cmListHead);
+        KswordArkCallbackEnumAddLocateRow(
+            Builder,
+            KSWORD_ARK_CALLBACK_ENUM_CLASS_REGISTRY,
+            L"CmCallbackListHead",
+            cmListHead,
+            status,
+            NT_SUCCESS(status)
+                ? L"已定位 CmCallbackListHead 私有链表，开始保守遍历并识别 Function/Altitude。"
+                : L"未能通过 CmUnRegisterCallback 特征定位注册表回调链表头。");
+        if (NT_SUCCESS(status)) {
+            addedCount = KswordArkCallbackEnumAddRegistryList(
+                Builder,
+                &moduleCache,
+                cmListHead,
+                NULL,
+                0UL);
+            if (addedCount == 0UL) {
+                KswordArkCallbackEnumAddUnsupportedRow(
+                    Builder,
+                    KSWORD_ARK_CALLBACK_ENUM_CLASS_REGISTRY,
+                    L"CmCallbackListHead empty",
+                    L"已定位注册表回调链表头，但未找到能解析到模块的 Function 字段。");
+            }
         }
     }
 
@@ -2912,7 +3656,9 @@ Return Value:
             &moduleCache,
             *PsProcessType,
             KSWORD_ARK_OBJECT_OP_TYPE_PROCESS,
-            L"Process");
+            L"Process",
+            &pdbProfile,
+            pdbProfile.Active ? &g_KswordArkCallbackEnumPdbObjectSourceContext : NULL);
     }
     if (PsThreadType != NULL && *PsThreadType != NULL) {
         addedCount += KswordArkCallbackEnumAddObjectTypeCallbackList(
@@ -2920,14 +3666,39 @@ Return Value:
             &moduleCache,
             *PsThreadType,
             KSWORD_ARK_OBJECT_OP_TYPE_THREAD,
-            L"Thread");
+            L"Thread",
+            &pdbProfile,
+            pdbProfile.Active ? &g_KswordArkCallbackEnumPdbObjectSourceContext : NULL);
     }
     if (addedCount == 0UL) {
-        KswordArkCallbackEnumAddUnsupportedRow(
-            Builder,
-            KSWORD_ARK_CALLBACK_ENUM_CLASS_OBJECT,
-            L"OBJECT_TYPE CallbackList empty",
-            L"未能在 Process/Thread OBJECT_TYPE 私有区域识别非空 CallbackList；对象回调结构随版本变化较大。");
+        if (pdbProfile.Active &&
+            KswordArkCallbackEnumPdbOffsetAvailable(
+                pdbProfile.State.CallbackOffsets.ObjectTypeCallbackList,
+                pdbProfile.State.CallbackOffsetSources.ObjectTypeCallbackList)) {
+            RtlZeroMemory(detailText, sizeof(detailText));
+            (VOID)RtlStringCbPrintfW(
+                detailText,
+                sizeof(detailText),
+                L"已尝试 PDB _OBJECT_TYPE.CallbackList offset 0x%08lX 及 _CALLBACK_ENTRY_ITEM offsets [EntryList=0x%08lX,Pre=0x%08lX,Post=0x%08lX,Ops=0x%08lX,CallbackEntry=0x%08lX]；未能识别非空对象回调链表。",
+                (unsigned long)pdbProfile.State.CallbackOffsets.ObjectTypeCallbackList,
+                (unsigned long)pdbProfile.State.CallbackOffsets.CallbackEntryItemEntryList,
+                (unsigned long)pdbProfile.State.CallbackOffsets.CallbackEntryItemPreOperation,
+                (unsigned long)pdbProfile.State.CallbackOffsets.CallbackEntryItemPostOperation,
+                (unsigned long)pdbProfile.State.CallbackOffsets.CallbackEntryItemOperations,
+                (unsigned long)pdbProfile.State.CallbackOffsets.CallbackEntryItemCallbackEntry);
+            KswordArkCallbackEnumAddUnsupportedRow(
+                Builder,
+                KSWORD_ARK_CALLBACK_ENUM_CLASS_OBJECT,
+                L"OBJECT_TYPE CallbackList empty",
+                detailText);
+        }
+        else {
+            KswordArkCallbackEnumAddUnsupportedRow(
+                Builder,
+                KSWORD_ARK_CALLBACK_ENUM_CLASS_OBJECT,
+                L"OBJECT_TYPE CallbackList empty",
+                L"未能在 Process/Thread OBJECT_TYPE 私有区域识别非空 CallbackList；对象回调结构随版本变化较大。");
+        }
     }
 
     if (notifyMaskValue != 0UL) {

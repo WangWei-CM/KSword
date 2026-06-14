@@ -133,6 +133,26 @@ namespace ksword::ark
         return result;
     }
 
+    CallbackRemoveExResult DriverClient::removeExternalCallbackEx(const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST& request) const
+    {
+        // Input: a validated EX remove packet built from one enumeration row.
+        // Processing: sends only through the central DriverClient DeviceIoControl path.
+        // Return: transport status plus the fixed R0 response packet for diagnostics.
+        CallbackRemoveExResult result{};
+        KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST mutableRequest = request;
+        result.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX,
+            &mutableRequest,
+            static_cast<unsigned long>(sizeof(mutableRequest)),
+            &result.response,
+            static_cast<unsigned long>(sizeof(result.response)));
+        if (result.io.ok)
+        {
+            result.io.ntStatus = result.response.ntstatus;
+        }
+        return result;
+    }
+
     bool DriverClient::supportsExternalCallbackExperimentalUnlink() const
     {
         // Input: none.
@@ -211,31 +231,26 @@ namespace ksword::ark
         {
             const std::size_t entryOffset =
                 headerSize + (index * static_cast<std::size_t>(responseHeader->entrySize));
-            const bool hasCurrentEntryLayout =
-                responseHeader->entrySize >= sizeof(KSWORD_ARK_CALLBACK_ENUM_ENTRY);
-            const std::size_t requiredEntrySize = hasCurrentEntryLayout
-                ? sizeof(KSWORD_ARK_CALLBACK_ENUM_ENTRY)
-                : legacyEntrySize;
-            if (entryOffset + requiredEntrySize > enumResult.io.bytesReturned)
+            if (entryOffset + legacyEntrySize > enumResult.io.bytesReturned)
             {
                 break;
             }
 
             CallbackEnumEntry row{};
-            if (hasCurrentEntryLayout)
+            if (responseHeader->entrySize >= sizeof(KSWORD_ARK_CALLBACK_ENUM_ENTRY))
             {
-            const auto* sourceEntry =
-                reinterpret_cast<const KSWORD_ARK_CALLBACK_ENUM_ENTRY*>(responseBuffer.data() + entryOffset);
-            row.callbackClass = static_cast<std::uint32_t>(sourceEntry->callbackClass);
-            row.source = static_cast<std::uint32_t>(sourceEntry->source);
-            row.status = static_cast<std::uint32_t>(sourceEntry->status);
-            row.fieldFlags = static_cast<std::uint32_t>(sourceEntry->fieldFlags);
-            row.operationMask = static_cast<std::uint32_t>(sourceEntry->operationMask);
-            row.objectTypeMask = static_cast<std::uint32_t>(sourceEntry->objectTypeMask);
-            row.lastStatus = static_cast<long>(sourceEntry->lastStatus);
-            row.callbackAddress = static_cast<std::uint64_t>(sourceEntry->callbackAddress);
-            row.contextAddress = static_cast<std::uint64_t>(sourceEntry->contextAddress);
-            row.registrationAddress = static_cast<std::uint64_t>(sourceEntry->registrationAddress);
+                const auto* sourceEntry =
+                    reinterpret_cast<const KSWORD_ARK_CALLBACK_ENUM_ENTRY*>(responseBuffer.data() + entryOffset);
+                row.callbackClass = static_cast<std::uint32_t>(sourceEntry->callbackClass);
+                row.source = static_cast<std::uint32_t>(sourceEntry->source);
+                row.status = static_cast<std::uint32_t>(sourceEntry->status);
+                row.fieldFlags = static_cast<std::uint32_t>(sourceEntry->fieldFlags);
+                row.operationMask = static_cast<std::uint32_t>(sourceEntry->operationMask);
+                row.objectTypeMask = static_cast<std::uint32_t>(sourceEntry->objectTypeMask);
+                row.lastStatus = static_cast<long>(sourceEntry->lastStatus);
+                row.callbackAddress = static_cast<std::uint64_t>(sourceEntry->callbackAddress);
+                row.contextAddress = static_cast<std::uint64_t>(sourceEntry->contextAddress);
+                row.registrationAddress = static_cast<std::uint64_t>(sourceEntry->registrationAddress);
 #if defined(KSWORD_ARK_CALLBACK_ENUM_FIELD_RAW_STORAGE_VALUE)
                 row.rawStorageValue = static_cast<std::uint64_t>(sourceEntry->rawStorageValue);
                 row.generation = static_cast<std::uint64_t>(sourceEntry->enumerationGeneration);
@@ -244,12 +259,12 @@ namespace ksword::ark
                 row.removeBehavior = static_cast<std::uint32_t>(sourceEntry->removeBehavior);
                 row.removeFlags = row.removeBehavior;
 #endif
-            row.moduleBase = static_cast<std::uint64_t>(sourceEntry->moduleBase);
-            row.moduleSize = static_cast<std::uint32_t>(sourceEntry->moduleSize);
-            row.name = fixedCallbackWideToString(sourceEntry->name, KSWORD_ARK_CALLBACK_ENUM_NAME_CHARS);
-            row.altitude = fixedCallbackWideToString(sourceEntry->altitude, KSWORD_ARK_CALLBACK_ENUM_ALTITUDE_CHARS);
-            row.modulePath = fixedCallbackWideToString(sourceEntry->modulePath, KSWORD_ARK_CALLBACK_ENUM_MODULE_PATH_CHARS);
-            row.detail = fixedCallbackWideToString(sourceEntry->detail, KSWORD_ARK_CALLBACK_ENUM_DETAIL_CHARS);
+                row.moduleBase = static_cast<std::uint64_t>(sourceEntry->moduleBase);
+                row.moduleSize = static_cast<std::uint32_t>(sourceEntry->moduleSize);
+                row.name = fixedCallbackWideToString(sourceEntry->name, KSWORD_ARK_CALLBACK_ENUM_NAME_CHARS);
+                row.altitude = fixedCallbackWideToString(sourceEntry->altitude, KSWORD_ARK_CALLBACK_ENUM_ALTITUDE_CHARS);
+                row.modulePath = fixedCallbackWideToString(sourceEntry->modulePath, KSWORD_ARK_CALLBACK_ENUM_MODULE_PATH_CHARS);
+                row.detail = fixedCallbackWideToString(sourceEntry->detail, KSWORD_ARK_CALLBACK_ENUM_DETAIL_CHARS);
             }
             else
             {

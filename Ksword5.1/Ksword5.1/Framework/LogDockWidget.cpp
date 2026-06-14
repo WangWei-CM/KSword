@@ -1,12 +1,17 @@
 #include "LogDockWidget.h"
 #include "../theme.h"
+#include "../UI/FlatTableModel.h"
 
 #include <algorithm>
+#include <utility>
 
 #include <QAction>
+#include <QAbstractItemView>
 #include <QApplication>
+#include <QBrush>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QHash>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -20,8 +25,7 @@
 #include <QScrollBar>
 #include <QSize>
 #include <QStringList>
-#include <QTableWidget>
-#include <QTableWidgetItem>
+#include <QTableView>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QSvgRenderer>
@@ -38,6 +42,8 @@
 
 namespace
 {
+    using LogTableModel = ks::ui::FlatTableModel<kEvent>;
+
     // 表格列常量：确保同一语义在代码中统一引用。
     constexpr int LevelColumn = 0;      // 等级列（仅彩色方块，标题留空）。
     constexpr int TimeColumn = 1;       // 时间列。
@@ -258,14 +264,35 @@ void LogDockWidget::initializeUi()
     // - SelectRows 让单击任意单元格时选中整行；
     // - ExtendedSelection 支持 Ctrl+单击叠加多行选择；
     // - 后续右键菜单会根据多选状态限制为“复制”动作。
-    m_logTable = new QTableWidget(this);
-    m_logTable->setColumnCount(TotalColumns);
-    m_logTable->setHorizontalHeaderLabels(QStringList() << "" << "时间" << "内容" << "文件" << "函数");
+    // 性能策略：
+    // - QTableView 只负责可视化；
+    // - FlatTableModel 保存当前可见 kEvent 快照，并按需返回单元格数据；
+    // - 避免每次刷新为 rows * columns 创建/销毁 QTableWidgetItem。
+    std::vector<LogTableModel::ColumnSpec> logColumns;
+    logColumns.reserve(TotalColumns);
+    logColumns.push_back({ QString(), Qt::AlignCenter });
+    logColumns.push_back({ QStringLiteral("时间"), Qt::AlignCenter });
+    logColumns.push_back({ QStringLiteral("内容"), Qt::AlignLeft | Qt::AlignVCenter });
+    logColumns.push_back({ QStringLiteral("文件"), Qt::AlignLeft | Qt::AlignVCenter });
+    logColumns.push_back({ QStringLiteral("函数"), Qt::AlignLeft | Qt::AlignVCenter });
+
+    m_logModel = new LogTableModel(
+        std::move(logColumns),
+        [this](const kEvent& logItem, const int column, const int role) {
+            return resolveLogTableData(logItem, column, role);
+        },
+        this);
+
+    m_logTable = new QTableView(this);
+    m_logTable->setModel(m_logModel);
     m_logTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_logTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_logTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_logTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_logTable->setWordWrap(false);
+    m_logTable->setShowGrid(true);
+    m_logTable->setAlternatingRowColors(false);
+    m_logTable->setSortingEnabled(false);
 
     // 表格头部策略：等级列固定宽度，其余列可交互拖动。
     QHeaderView* horizontalHeader = m_logTable->horizontalHeader();
@@ -285,6 +312,8 @@ void LogDockWidget::initializeUi()
     m_logTable->setColumnWidth(FileColumn, 240);
     m_logTable->setColumnWidth(FunctionColumn, 320);
     m_logTable->verticalHeader()->setVisible(false);
+    m_logTable->verticalHeader()->setDefaultSectionSize(22);
+    m_logTable->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
 
     // 默认关闭详细信息模式，仅显示等级/时间/内容。
     applyDetailColumnVisibility();
@@ -312,7 +341,7 @@ void LogDockWidget::initializeConnections()
     connect(m_fatalCheck, &QCheckBox::toggled, this, [this]() { refreshTableFromManager(true); });
 
     // 右键菜单连接。
-    connect(m_logTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+    connect(m_logTable, &QWidget::customContextMenuRequested, this, [this](const QPoint& position) {
         showTableContextMenu(position);
     });
 }
@@ -374,53 +403,23 @@ void LogDockWidget::refreshTableFromManager(const bool forceRefresh)
         filteredEvents.push_back(singleEvent);
     }
 
-    // 记录当前可见事件列表，供复制与追踪逻辑复用。
-    m_visibleEvents = filteredEvents;
-    rebuildTable(filteredEvents);
+    // filteredEvents 之后交给模型持有；复制与追踪逻辑通过 visibleEvents()/visibleEventAt() 读取模型快照。
+    rebuildTable(std::move(filteredEvents));
 }
 
-void LogDockWidget::rebuildTable(const std::vector<kEvent>& filteredEvents)
+void LogDockWidget::rebuildTable(std::vector<kEvent> filteredEvents)
 {
+    if (m_logTable == nullptr || m_logModel == nullptr)
+    {
+        return;
+    }
+
     // 若未开启自动滚动，先记住滚动条位置，刷新后恢复。
     const int previousScrollValue = m_logTable->verticalScrollBar()->value();
 
-    m_logTable->setRowCount(static_cast<int>(filteredEvents.size()));
-
-    for (int row = 0; row < static_cast<int>(filteredEvents.size()); ++row)
-    {
-        const kEvent& logItem = filteredEvents[static_cast<std::size_t>(row)];
-
-        // 等级列：仅放置彩色方块，不放文字，列标题也为空。
-        auto* levelItem = new QTableWidgetItem();
-        levelItem->setIcon(makeLevelSquareIcon(getLevelColor(logItem.level)));
-        levelItem->setTextAlignment(Qt::AlignCenter);
-        levelItem->setToolTip(getLevelText(logItem.level));
-        m_logTable->setItem(row, LevelColumn, levelItem);
-
-        // 时间列：显示“YYYY-MM-DD HH:MM:SS”。
-        auto* timeItem = new QTableWidgetItem(QString::fromStdString(FormatTimeToString(logItem.timestamp)));
-        timeItem->setTextAlignment(Qt::AlignCenter);
-        m_logTable->setItem(row, TimeColumn, timeItem);
-
-        // 内容列：显示日志正文。
-        auto* contentItem = new QTableWidgetItem(QString::fromStdString(logItem.content));
-        contentItem->setToolTip(QString::fromStdString(logItem.content));
-        m_logTable->setItem(row, ContentColumn, contentItem);
-
-        // 文件列：显示文件路径 + 行号。
-        auto* fileItem = new QTableWidgetItem(QString::fromStdString(logItem.fileLocation));
-        fileItem->setToolTip(QString::fromStdString(logItem.fileLocation));
-        m_logTable->setItem(row, FileColumn, fileItem);
-
-        // 函数列：显示函数签名。
-        auto* functionItem = new QTableWidgetItem(QString::fromStdString(logItem.functionName));
-        functionItem->setToolTip(QString::fromStdString(logItem.functionName));
-        m_logTable->setItem(row, FunctionColumn, functionItem);
-
-        // 按等级着色整行（Error/Fatal 有特殊底色要求）。
-        applyRowStyle(row, logItem);
-        m_logTable->setRowHeight(row, 22);
-    }
+    // setRows 内部使用 beginResetModel/endResetModel。
+    // 对日志这种周期性整体刷新场景，模型 reset 比逐单元格 item 更新更稳定且更少堆分配。
+    m_logModel->setRows(std::move(filteredEvents));
 
     // 根据“保持滚动到底端”开关决定刷新后的滚动行为。
     if (m_autoScrollCheck->isChecked())
@@ -433,47 +432,101 @@ void LogDockWidget::rebuildTable(const std::vector<kEvent>& filteredEvents)
     }
 }
 
-void LogDockWidget::applyRowStyle(const int row, const kEvent& logItem)
+QVariant LogDockWidget::resolveLogTableData(const kEvent& logItem, const int column, const int role) const
 {
-    // 默认情况下不改变行配色，仅 Error/Fatal 特殊着色。
-    QColor rowBackground;
-    QColor rowForeground;
-    bool shouldApply = false;
-
-    if (logItem.level == kLogLevel::Fatal)
+    // DecorationRole 只用于等级列：界面保持原来的“彩色小方块”风格。
+    if (role == Qt::DecorationRole && column == LevelColumn)
     {
-        rowBackground = QColor(0, 0, 0);         // Fatal 整行黑底
-        rowForeground = QColor(255, 255, 255);   // Fatal 整行白字
-        shouldApply = true;
-    }
-    else if (logItem.level == kLogLevel::Error)
-    {
-        rowBackground = KswordTheme::IsDarkModeEnabled()
-            ? QColor(138, 48, 48)
-            : QColor(220, 72, 72);     // Error 深浅色分支红底
-        rowForeground = QColor(255, 255, 255);   // Error 统一白字保证可读
-        shouldApply = true;
+        return makeLevelSquareIcon(getLevelColor(logItem.level));
     }
 
-    if (!shouldApply)
+    // Error/Fatal 的整行着色从 QTableWidgetItem 属性迁移为模型 role。
+    if (role == Qt::BackgroundRole || role == Qt::ForegroundRole)
     {
-        return;
+        return getRowHighlightBrush(logItem, role);
     }
 
-    // 对本行每个单元格统一应用前景与背景色。
-    for (int column = 0; column < TotalColumns; ++column)
+    // ToolTipRole 保留原行为：等级列给文字说明，长文本列给完整内容提示。
+    if (role == Qt::ToolTipRole)
     {
-        QTableWidgetItem* item = m_logTable->item(row, column);
-        if (item != nullptr)
+        switch (column)
         {
-            item->setBackground(rowBackground);
-            item->setForeground(rowForeground);
+        case LevelColumn:
+            return getLevelText(logItem.level);
+        case ContentColumn:
+            return QString::fromStdString(logItem.content);
+        case FileColumn:
+            return QString::fromStdString(logItem.fileLocation);
+        case FunctionColumn:
+            return QString::fromStdString(logItem.functionName);
+        default:
+            return {};
         }
     }
+
+    if (role != Qt::DisplayRole)
+    {
+        return {};
+    }
+
+    // DisplayRole 只返回界面真正显示的文字；等级列视觉上保持为空。
+    switch (column)
+    {
+    case LevelColumn:
+        return QString();
+    case TimeColumn:
+        return QString::fromStdString(FormatTimeToString(logItem.timestamp));
+    case ContentColumn:
+        return QString::fromStdString(logItem.content);
+    case FileColumn:
+        return QString::fromStdString(logItem.fileLocation);
+    case FunctionColumn:
+        return QString::fromStdString(logItem.functionName);
+    default:
+        return {};
+    }
+}
+
+QVariant LogDockWidget::getRowHighlightBrush(const kEvent& logItem, const int role) const
+{
+    if (role != Qt::BackgroundRole && role != Qt::ForegroundRole)
+    {
+        return {};
+    }
+
+    // 默认情况下不改变行配色，仅 Error/Fatal 特殊着色。
+    if (logItem.level == kLogLevel::Fatal)
+    {
+        return role == Qt::BackgroundRole
+            ? QVariant(QBrush(QColor(0, 0, 0)))          // Fatal 整行黑底。
+            : QVariant(QBrush(QColor(255, 255, 255)));  // Fatal 整行白字。
+    }
+
+    if (logItem.level == kLogLevel::Error)
+    {
+        const QColor rowBackground = KswordTheme::IsDarkModeEnabled()
+            ? QColor(138, 48, 48)
+            : QColor(220, 72, 72);                      // Error 深浅色分支红底。
+        return role == Qt::BackgroundRole
+            ? QVariant(QBrush(rowBackground))
+            : QVariant(QBrush(QColor(255, 255, 255)));  // Error 统一白字保证可读。
+    }
+
+    return {};
 }
 
 QIcon LogDockWidget::makeLevelSquareIcon(const QColor& color) const
 {
+    // Model/View 绘制时 DecorationRole 可能被重复请求。
+    // 以最终 RGBA 颜色为 key 缓存小图标，避免每次 paint 都重新分配 QPixmap 并跑 QPainter。
+    static QHash<QRgb, QIcon> levelIconCache;
+    const QRgb cacheKey = color.rgba();
+    const auto cachedIcon = levelIconCache.constFind(cacheKey);
+    if (cachedIcon != levelIconCache.constEnd())
+    {
+        return cachedIcon.value();
+    }
+
     // 使用 QPainter 在透明底图上绘制纯色小方块。
     QPixmap squarePixmap(12, 12);
     squarePixmap.fill(Qt::transparent);
@@ -484,7 +537,9 @@ QIcon LogDockWidget::makeLevelSquareIcon(const QColor& color) const
     painter.setBrush(color);
     painter.drawRect(1, 1, 10, 10);
 
-    return QIcon(squarePixmap);
+    const QIcon squareIcon(squarePixmap);
+    levelIconCache.insert(cacheKey, squareIcon);
+    return squareIcon;
 }
 
 QColor LogDockWidget::getLevelColor(const kLogLevel level) const
@@ -532,13 +587,19 @@ bool LogDockWidget::isLevelEnabledByCheckbox(const kLogLevel level) const
 
 void LogDockWidget::showTableContextMenu(const QPoint& position)
 {
+    if (m_logTable == nullptr)
+    {
+        return;
+    }
+
     // 通过右键位置定位行列，若点在空白区域 row/column 为 -1。
     int row = -1;
     int column = -1;
-    if (QTableWidgetItem* clickedItem = m_logTable->itemAt(position))
+    const QModelIndex clickedIndex = m_logTable->indexAt(position);
+    if (clickedIndex.isValid())
     {
-        row = clickedItem->row();
-        column = clickedItem->column();
+        row = clickedIndex.row();
+        column = clickedIndex.column();
     }
 
     // selectedRowIndexes 用途：记录右键弹出前表格已有选中行。
@@ -549,7 +610,7 @@ void LogDockWidget::showTableContextMenu(const QPoint& position)
 
     // 右键点到未选中行时，按常见表格行为切换到该单行。
     // 这样普通右键不会误操作之前 Ctrl 多选留下的行集合。
-    const bool hasValidCell = row >= 0 && column >= 0 && row < static_cast<int>(m_visibleEvents.size());
+    const bool hasValidCell = row >= 0 && column >= 0 && visibleEventAt(row) != nullptr;
     if (hasValidCell && !clickedRowIsSelected)
     {
         m_logTable->clearSelection();
@@ -627,7 +688,8 @@ void LogDockWidget::showTableContextMenu(const QPoint& position)
 
 void LogDockWidget::copySingleCell(const int row, const int column)
 {
-    if (row < 0 || column < 0 || row >= static_cast<int>(m_visibleEvents.size()))
+    const kEvent* logItem = visibleEventAt(row);
+    if (logItem == nullptr || column < 0)
     {
         return;
     }
@@ -636,11 +698,27 @@ void LogDockWidget::copySingleCell(const int row, const int column)
     if (column == LevelColumn)
     {
         // 等级列视觉上只有彩色方块，复制时补充等级文本。
-        textToCopy = getLevelText(m_visibleEvents[static_cast<std::size_t>(row)].level);
+        textToCopy = getLevelText(logItem->level);
     }
-    else if (QTableWidgetItem* item = m_logTable->item(row, column))
+    else
     {
-        textToCopy = item->text();
+        switch (column)
+        {
+        case TimeColumn:
+            textToCopy = QString::fromStdString(FormatTimeToString(logItem->timestamp));
+            break;
+        case ContentColumn:
+            textToCopy = QString::fromStdString(logItem->content);
+            break;
+        case FileColumn:
+            textToCopy = QString::fromStdString(logItem->fileLocation);
+            break;
+        case FunctionColumn:
+            textToCopy = QString::fromStdString(logItem->functionName);
+            break;
+        default:
+            break;
+        }
     }
 
     QApplication::clipboard()->setText(textToCopy);
@@ -648,14 +726,14 @@ void LogDockWidget::copySingleCell(const int row, const int column)
 
 void LogDockWidget::copySingleRow(const int row)
 {
-    if (row < 0 || row >= static_cast<int>(m_visibleEvents.size()))
+    const kEvent* logItem = visibleEventAt(row);
+    if (logItem == nullptr)
     {
         return;
     }
 
     // 行复制按当前可见列输出，避免隐藏列仍被复制。
-    const kEvent& logItem = m_visibleEvents[static_cast<std::size_t>(row)];
-    QApplication::clipboard()->setText(buildVisibleRowText(logItem));
+    QApplication::clipboard()->setText(buildVisibleRowText(*logItem));
 }
 
 void LogDockWidget::copySelectedRows()
@@ -672,14 +750,14 @@ void LogDockWidget::copySelectedRows()
     // selectedRowIndexes 已按界面行号升序排列，这里直接按视觉顺序输出。
     for (const int row : selectedRowIndexes)
     {
-        if (row < 0 || row >= static_cast<int>(m_visibleEvents.size()))
+        const kEvent* logItem = visibleEventAt(row);
+        if (logItem == nullptr)
         {
             continue;
         }
 
         // 每一行仍复用 buildVisibleRowText，保证隐藏详细列时复制结果也不包含隐藏列。
-        const kEvent& logItem = m_visibleEvents[static_cast<std::size_t>(row)];
-        lines.push_back(buildVisibleRowText(logItem));
+        lines.push_back(buildVisibleRowText(*logItem));
     }
 
     if (!lines.isEmpty())
@@ -690,11 +768,12 @@ void LogDockWidget::copySelectedRows()
 
 void LogDockWidget::copyVisibleRows()
 {
+    const std::vector<kEvent>& currentVisibleEvents = visibleEvents();
     QStringList lines;
-    lines.reserve(static_cast<int>(m_visibleEvents.size()));
+    lines.reserve(static_cast<int>(currentVisibleEvents.size()));
 
     // 遍历当前可见事件列表，保证与屏幕展示一致（含追踪/筛选状态）。
-    for (const kEvent& logItem : m_visibleEvents)
+    for (const kEvent& logItem : currentVisibleEvents)
     {
         lines.push_back(buildVisibleRowText(logItem));
     }
@@ -710,15 +789,18 @@ std::vector<int> LogDockWidget::collectSelectedRowIndexes() const
         return selectedRows;
     }
 
-    // selectedIndexes 用途：兼容 SelectRows 下的整行选择，也兼容未来可能出现的单元格选择。
-    // 同一行会出现多个列索引，因此后续必须排序去重。
-    const QModelIndexList selectedIndexes = m_logTable->selectionModel()->selectedIndexes();
+    // selectedRows() 在 SelectRows 模式下只返回每行一个索引，比 selectedIndexes() 少遍历列数。
+    // 若未来改成单元格选择导致 selectedRows() 为空，再回退到 selectedIndexes() 兼容旧逻辑。
+    const QModelIndexList selectedRowIndexes = m_logTable->selectionModel()->selectedRows();
+    const QModelIndexList selectedIndexes = selectedRowIndexes.isEmpty()
+        ? m_logTable->selectionModel()->selectedIndexes()
+        : selectedRowIndexes;
     selectedRows.reserve(static_cast<std::size_t>(selectedIndexes.size()));
 
     for (const QModelIndex& selectedIndex : selectedIndexes)
     {
         const int row = selectedIndex.row();
-        if (row >= 0 && row < static_cast<int>(m_visibleEvents.size()))
+        if (visibleEventAt(row) != nullptr)
         {
             selectedRows.push_back(row);
         }
@@ -727,6 +809,29 @@ std::vector<int> LogDockWidget::collectSelectedRowIndexes() const
     std::sort(selectedRows.begin(), selectedRows.end());
     selectedRows.erase(std::unique(selectedRows.begin(), selectedRows.end()), selectedRows.end());
     return selectedRows;
+}
+
+const std::vector<kEvent>& LogDockWidget::visibleEvents() const
+{
+    // emptyEvents 是模型未创建时的安全只读返回值。
+    // 它避免每个调用点都做空指针分支，同时不产生额外临时 vector。
+    static const std::vector<kEvent> emptyEvents;
+    if (m_logModel == nullptr)
+    {
+        return emptyEvents;
+    }
+
+    return m_logModel->rows();
+}
+
+const kEvent* LogDockWidget::visibleEventAt(const int row) const
+{
+    if (m_logModel == nullptr)
+    {
+        return nullptr;
+    }
+
+    return m_logModel->rowAt(row);
 }
 
 QString LogDockWidget::buildVisibleRowText(const kEvent& logItem) const
@@ -752,13 +857,14 @@ QString LogDockWidget::buildVisibleRowText(const kEvent& logItem) const
 
 void LogDockWidget::startTrackingByRow(const int row)
 {
-    if (row < 0 || row >= static_cast<int>(m_visibleEvents.size()))
+    const kEvent* logItem = visibleEventAt(row);
+    if (logItem == nullptr)
     {
         return;
     }
 
     // 读取目标行 GUID 并进入追踪状态。
-    m_trackingGuid = m_visibleEvents[static_cast<std::size_t>(row)].guid;
+    m_trackingGuid = logItem->guid;
     m_isTracking = true;
     refreshTableFromManager(true);
 }

@@ -20,6 +20,7 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_CANCEL_ALL_PENDING_DECISIONS 0x884
 #define KSWORD_ARK_IOCTL_FUNCTION_REMOVE_EXTERNAL_CALLBACK 0x885
 #define KSWORD_ARK_IOCTL_FUNCTION_ENUM_CALLBACKS 0x886
+#define KSWORD_ARK_IOCTL_FUNCTION_REMOVE_EXTERNAL_CALLBACK_EX 0x887
 
 #define IOCTL_KSWORD_ARK_SET_CALLBACK_RULES \
     CTL_CODE( \
@@ -69,6 +70,13 @@
         KSWORD_ARK_IOCTL_FUNCTION_ENUM_CALLBACKS, \
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_REMOVE_EXTERNAL_CALLBACK_EX, \
+        METHOD_BUFFERED, \
+        FILE_WRITE_ACCESS)
 
 // Callback type.
 #define KSWORD_ARK_CALLBACK_TYPE_NONE 0UL
@@ -131,6 +139,8 @@
 #define KSWORD_ARK_CALLBACK_ENUM_SOURCE_PRIVATE_OBJECT_TYPE_LIST 7UL
 #define KSWORD_ARK_CALLBACK_ENUM_SOURCE_WFP_MGMT_API 8UL
 #define KSWORD_ARK_CALLBACK_ENUM_SOURCE_ETW_DYNDATA 9UL
+#define KSWORD_ARK_CALLBACK_ENUM_SOURCE_PDB_PROFILE 10UL
+#define KSWORD_ARK_CALLBACK_ENUM_SOURCE_PUBLIC_API 11UL
 
 // Callback enumeration row status.
 #define KSWORD_ARK_CALLBACK_ENUM_STATUS_OK 1UL
@@ -152,6 +162,24 @@
 #define KSWORD_ARK_CALLBACK_ENUM_FIELD_OBJECT_TYPE_MASK 0x00000200UL
 #define KSWORD_ARK_CALLBACK_ENUM_FIELD_IDENTIFIER 0x00000400UL
 #define KSWORD_ARK_CALLBACK_ENUM_FIELD_HANDLE 0x00000800UL
+#define KSWORD_ARK_CALLBACK_ENUM_FIELD_TRUSTED 0x00001000UL
+#define KSWORD_ARK_CALLBACK_ENUM_FIELD_VERIFIED_REMOVE 0x00002000UL
+#define KSWORD_ARK_CALLBACK_ENUM_FIELD_EXPERIMENTAL_REMOVE 0x00004000UL
+#define KSWORD_ARK_CALLBACK_ENUM_FIELD_RAW_STORAGE_VALUE 0x00008000UL
+
+// Callback enumeration trust flags.
+#define KSWORD_ARK_CALLBACK_TRUST_NONE 0x00000000UL
+#define KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE 0x00000001UL
+#define KSWORD_ARK_CALLBACK_TRUST_PUBLIC_API 0x00000002UL
+#define KSWORD_ARK_CALLBACK_TRUST_FALLBACK_PATTERN 0x00000004UL
+#define KSWORD_ARK_CALLBACK_TRUST_REVALIDATED 0x00000008UL
+
+// Callback removal behavior flags.
+#define KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_NONE 0x00000000UL
+#define KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_PUBLIC_API 0x00000001UL
+#define KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_EXPERIMENTAL_UNLINK 0x00000002UL
+#define KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_REQUIRE_REVALIDATION 0x00000004UL
+#define KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_FORCE_AFTER_PUBLIC_FAILURE 0x00000008UL
 
 // Callback enumeration fixed text bounds.
 #define KSWORD_ARK_CALLBACK_ENUM_NAME_CHARS 128U
@@ -165,11 +193,15 @@
 
 // External callback remove flags.
 #define KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_FLAG_NONE 0UL
+#define KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_FLAG_EXPERIMENTAL_UNLINK 0x00000001UL
+#define KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_FLAG_REQUIRE_REVALIDATION 0x00000002UL
 
 // External callback remove mapping flags.
 #define KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_MODULE 0x00000001UL
 #define KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_ENUMERATED 0x00000002UL
 #define KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_PUBLIC_API 0x00000004UL
+#define KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_PDB_TRUSTED 0x00000008UL
+#define KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_EXPERIMENTAL 0x00000010UL
 
 // Match mode.
 #define KSWORD_ARK_MATCH_MODE_NONE 0UL
@@ -411,6 +443,48 @@ typedef struct _KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE
     wchar_t serviceName[KSWORD_ARK_EXTERNAL_CALLBACK_SERVICE_NAME_MAX_CHARS];
 } KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE;
 
+typedef struct _KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long callbackClass;
+    unsigned long flags;
+    unsigned long long callbackAddress;
+    unsigned long long registrationAddress;
+    unsigned long long rawStorageValue;
+    unsigned long long enumerationGeneration;
+    unsigned long long identityHash;
+    unsigned long source;
+    unsigned long operationMask;
+    unsigned long objectTypeMask;
+    unsigned long trustFlags;
+    unsigned long removeBehavior;
+} KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST;
+
+typedef struct _KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_RESPONSE
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long callbackClass;
+    unsigned long source;
+    unsigned long long callbackAddress;
+    unsigned long long registrationAddress;
+    unsigned long long rawStorageValue;
+    unsigned long long enumerationGeneration;
+    unsigned long long identityHash;
+    long ntstatus;
+    long revalidationStatus;
+    unsigned long trustFlags;
+    unsigned long removeBehavior;
+    unsigned long mappingFlags;
+    unsigned long long moduleBase;
+    unsigned long moduleSize;
+    unsigned long reserved;
+    wchar_t modulePath[KSWORD_ARK_EXTERNAL_CALLBACK_MODULE_NAME_MAX_CHARS];
+    wchar_t serviceName[KSWORD_ARK_EXTERNAL_CALLBACK_SERVICE_NAME_MAX_CHARS];
+    wchar_t message[KSWORD_ARK_CALLBACK_ENUM_DETAIL_CHARS];
+} KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_RESPONSE;
+
 typedef struct _KSWORD_ARK_ENUM_CALLBACKS_REQUEST
 {
     unsigned long size;
@@ -434,6 +508,11 @@ typedef struct _KSWORD_ARK_CALLBACK_ENUM_ENTRY
     unsigned long long callbackAddress;
     unsigned long long contextAddress;
     unsigned long long registrationAddress;
+    unsigned long long rawStorageValue;
+    unsigned long long enumerationGeneration;
+    unsigned long long identityHash;
+    unsigned long trustFlags;
+    unsigned long removeBehavior;
     unsigned long long moduleBase;
     unsigned long moduleSize;
     unsigned long reserved;

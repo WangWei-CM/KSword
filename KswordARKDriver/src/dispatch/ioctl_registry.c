@@ -50,11 +50,13 @@ NTSTATUS KswordARKCallbackIoctlWaitEventHandler(_In_ WDFDEVICE Device, _In_ WDFR
 NTSTATUS KswordARKCallbackIoctlAnswerEventHandler(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKCallbackIoctlCancelAllPendingHandler(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKCallbackIoctlRemoveExternalCallbackHandler(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
+NTSTATUS KswordARKCallbackIoctlRemoveExternalCallbackExHandler(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKCallbackIoctlEnumCallbacksHandler(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKDynDataIoctlQueryStatus(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKDynDataIoctlQueryFields(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKDynDataIoctlQueryCapabilities(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKDynDataIoctlApplyProfile(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
+NTSTATUS KswordARKDynDataIoctlApplyProfileEx(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKCapabilityIoctlQueryDriverCapabilities(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKThreadIoctlEnumThread(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKHandleIoctlEnumProcessHandles(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
@@ -115,11 +117,13 @@ static const KSWORD_ARK_IOCTL_ENTRY g_KswordArkIoctlTable[] = {
     { IOCTL_KSWORD_ARK_ANSWER_CALLBACK_EVENT, KswordARKCallbackIoctlAnswerEventHandler, "IOCTL_KSWORD_ARK_ANSWER_CALLBACK_EVENT", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_CANCEL_ALL_PENDING_DECISIONS, KswordARKCallbackIoctlCancelAllPendingHandler, "IOCTL_KSWORD_ARK_CANCEL_ALL_PENDING_DECISIONS", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK, KswordARKCallbackIoctlRemoveExternalCallbackHandler, "IOCTL_KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
+    { IOCTL_KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX, KswordARKCallbackIoctlRemoveExternalCallbackExHandler, "IOCTL_KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_ENUM_CALLBACKS, KswordARKCallbackIoctlEnumCallbacksHandler, "IOCTL_KSWORD_ARK_ENUM_CALLBACKS", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_QUERY_DYN_STATUS, KswordARKDynDataIoctlQueryStatus, "IOCTL_KSWORD_ARK_QUERY_DYN_STATUS", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_QUERY_DYN_FIELDS, KswordARKDynDataIoctlQueryFields, "IOCTL_KSWORD_ARK_QUERY_DYN_FIELDS", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_QUERY_CAPABILITIES, KswordARKDynDataIoctlQueryCapabilities, "IOCTL_KSWORD_ARK_QUERY_CAPABILITIES", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_APPLY_DYN_PROFILE, KswordARKDynDataIoctlApplyProfile, "IOCTL_KSWORD_ARK_APPLY_DYN_PROFILE", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
+    { IOCTL_KSWORD_ARK_APPLY_DYN_PROFILE_EX, KswordARKDynDataIoctlApplyProfileEx, "IOCTL_KSWORD_ARK_APPLY_DYN_PROFILE_EX", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_QUERY_DRIVER_CAPABILITIES, KswordARKCapabilityIoctlQueryDriverCapabilities, "IOCTL_KSWORD_ARK_QUERY_DRIVER_CAPABILITIES", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_ENUM_THREAD, KswordARKThreadIoctlEnumThread, "IOCTL_KSWORD_ARK_ENUM_THREAD", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_ENUM_PROCESS_HANDLES, KswordARKHandleIoctlEnumProcessHandles, "IOCTL_KSWORD_ARK_ENUM_PROCESS_HANDLES", KSW_CAP_PROCESS_OBJECT_TABLE | KSW_CAP_HANDLE_TABLE_DECODE, KSWORD_ARK_IOCTL_FLAG_NONE },

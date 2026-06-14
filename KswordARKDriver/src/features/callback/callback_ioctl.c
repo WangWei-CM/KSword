@@ -357,6 +357,69 @@ Return Value:
 }
 
 NTSTATUS
+KswordARKCallbackIoctlRemoveExternalCallbackExHandler(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle IOCTL_KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX. The EX protocol carries
+    enumeration identity, trust flags and the requested remove behavior. This
+    dispatch layer still enforces the same write-access and safety-policy gates
+    as the legacy mutating remove IOCTL.
+
+Arguments:
+
+    Device - WDF device used for audit logging.
+    Request - Current IOCTL request.
+    InputBufferLength - EX remove request length.
+    OutputBufferLength - EX remove response buffer length.
+    BytesReturned - Receives response byte count.
+
+Return Value:
+
+    NTSTATUS from access validation or KswordARKCallbackIoctlRemoveExternalCallbackEx.
+
+--*/
+{
+    NTSTATUS status;
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0;
+    {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_CALLBACK_REMOVE_EXTERNAL;
+        safetyContext.TargetProcessId = 0UL;
+        safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+        if (!NT_SUCCESS(status)) {
+            KswordARKCallbackIoctlLog(Device, "Warn", "Remove external callback EX denied by safety policy, status=0x%08X.", (unsigned int)status);
+            return status;
+        }
+    }
+
+    status = KswordARKValidateDeviceIoControlWriteAccess(Request);
+    if (!NT_SUCCESS(status)) {
+        KswordARKCallbackIoctlLog(Device, "Warn", "Remove external callback EX denied: write access required, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKCallbackIoctlRemoveExternalCallbackEx(Request, InputBufferLength, OutputBufferLength, BytesReturned);
+    if (!NT_SUCCESS(status)) {
+        KswordARKCallbackIoctlLog(Device, "Warn", "Remove external callback EX failed, status=0x%08X.", (unsigned int)status);
+    }
+    return status;
+}
+
+NTSTATUS
 KswordARKCallbackIoctlEnumCallbacksHandler(
     _In_ WDFDEVICE Device,
     _In_ WDFREQUEST Request,

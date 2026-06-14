@@ -673,6 +673,17 @@ namespace ksword::ark
         KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE response{};
     };
 
+    // CallbackRemoveExResult wraps the extended removal response.
+    // Input: none; it is returned by DriverClient::removeExternalCallbackEx.
+    // Processing: keeps public-API and experimental-unlink diagnostics together.
+    // Return behavior: io.ok reports transport/protocol success; response.ntstatus
+    // reports the kernel operation result.
+    struct CallbackRemoveExResult
+    {
+        IoResult io;
+        KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_RESPONSE response{};
+    };
+
     // CallbackEnumEntry 是 R0 回调遍历的一行 R3 模型。
     struct CallbackEnumEntry
     {
@@ -873,6 +884,18 @@ namespace ksword::ark
         std::uint32_t offset = 0;
     };
 
+    // DynDataProfileExItem 是 v2 profile pack 展开后的 typed item。
+    // 输入：itemId/itemKind/value/flags 来自 R3 JSON pack 校验结果。
+    // 处理：ArkDriverClient 只做 packed IOCTL 传输；语义校验由 R3/R0 双层完成。
+    // 返回行为：结构本身无返回值，只作为 applyDynDataProfileEx 的输入元素。
+    struct DynDataProfileExItem
+    {
+        std::uint32_t itemId = 0;
+        std::uint32_t itemKind = 0;
+        std::uint32_t value = 0;
+        std::uint32_t flags = 0;
+    };
+
     // DynDataProfileApplyInput 是驱动 apply IOCTL 的 R3 输入模型。
     // 输入：profile 元数据、当前 ntoskrnl identity 和字段列表。
     // 处理：客户端只负责协议打包，不解析 JSON 语义。
@@ -898,6 +921,36 @@ namespace ksword::ark
         std::uint32_t appliedFieldCount = 0;
         std::uint32_t rejectedFieldCount = 0;
         std::uint32_t unknownFieldCount = 0;
+        std::uint32_t statusFlags = 0;
+        std::uint64_t capabilityMask = 0;
+        std::wstring message;
+    };
+
+    // DynDataProfileApplyExInput 是 v2 typed item apply 的 R3 输入模型。
+    // 输入：profile 元数据、当前 ntoskrnl identity 和 v2 items。
+    // 处理：客户端打包成 KSW_APPLY_DYN_PROFILE_EX_REQUEST。
+    // 返回行为：传入 applyDynDataProfileEx 后得到 DynDataProfileApplyExResult。
+    struct DynDataProfileApplyExInput
+    {
+        std::string profileName;
+        std::string pdbName;
+        std::string pdbGuid;
+        std::uint32_t pdbAge = 0;
+        ArkDynModuleIdentity ntoskrnl;
+        std::vector<DynDataProfileExItem> items;
+    };
+
+    // DynDataProfileApplyExResult 承载 R0 合并 v2 typed item 后的响应。
+    // 输入：无，由 DriverClient::applyDynDataProfileEx 返回。
+    // 处理：保存 item 级应用/拒绝/未知计数、状态位和 capability。
+    // 返回行为：io.ok 表示 IOCTL 调用和协议响应可用；status 表示 R0 语义结果。
+    struct DynDataProfileApplyExResult
+    {
+        IoResult io;
+        long status = 0;
+        std::uint32_t appliedItemCount = 0;
+        std::uint32_t rejectedItemCount = 0;
+        std::uint32_t unknownItemCount = 0;
         std::uint32_t statusFlags = 0;
         std::uint64_t capabilityMask = 0;
         std::wstring message;

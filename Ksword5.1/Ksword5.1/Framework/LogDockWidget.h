@@ -12,15 +12,24 @@
 #include <QIcon>
 #include <QPoint>
 #include <QString>
+#include <QVariant>
 #include <QWidget>
+
+#include <vector>
 
 // 前置声明：减少头文件依赖体积，提升编译速度。
 class QCheckBox;
 class QHBoxLayout;
 class QPushButton;
-class QTableWidget;
+class QTableView;
 class QTimer;
 class QVBoxLayout;
+
+namespace ks::ui
+{
+    template<typename RowT>
+    class FlatTableModel;
+}
 
 class LogDockWidget final : public QWidget
 {
@@ -57,20 +66,29 @@ private:
     void refreshTableFromManager(bool forceRefresh);
 
     // rebuildTable 作用：
-    // - 用 filteredEvents 重建全部表格行；
-    // - 应用行样式（Error/Fatal 整行着色）。
+    // - 用 filteredEvents 一次性替换轻量表格模型的数据快照；
+    // - 不再为每个单元格创建 QTableWidgetItem，减少刷新时的堆分配与析构压力。
     // 参数 filteredEvents：已筛选后的可见日志集合。
-    void rebuildTable(const std::vector<kEvent>& filteredEvents);
+    void rebuildTable(std::vector<kEvent> filteredEvents);
 
     // applyDetailColumnVisibility 作用：
     // - 根据“详细信息”复选框状态切换文件列与函数列；
     // - 让日志表格在简洁模式和详细模式之间切换。
     void applyDetailColumnVisibility();
 
-    // applyRowStyle 作用：
-    // - 按日志等级为一行设置背景色与前景色。
-    // 参数 row：目标行；logItem：该行对应日志对象。
-    void applyRowStyle(int row, const kEvent& logItem);
+    // resolveLogTableData 作用：
+    // - 为 FlatTableModel 统一解析 Display/Decoration/ToolTip/Foreground/Background 等 role；
+    // - 把原先分散在 QTableWidgetItem 上的文本、图标和行着色逻辑集中到模型层。
+    // 参数 logItem：目标行日志对象；column：目标列；role：Qt 数据角色。
+    // 返回值：对应 role 的 QVariant；不支持或越界时返回空 QVariant。
+    QVariant resolveLogTableData(const kEvent& logItem, int column, int role) const;
+
+    // getRowHighlightBrush 作用：
+    // - 根据日志等级返回整行背景/前景高亮色；
+    // - 只对 Error/Fatal 返回有效颜色，其它等级保持当前主题默认表格配色。
+    // 参数 logItem：目标日志对象；role：Qt::BackgroundRole 或 Qt::ForegroundRole。
+    // 返回值：有效 QBrush 包装在 QVariant 中；无特殊样式时返回空 QVariant。
+    QVariant getRowHighlightBrush(const kEvent& logItem, int role) const;
 
     // makeLevelSquareIcon 作用：
     // - 生成一个纯色小方块图标，放在“等级”列。
@@ -114,8 +132,22 @@ private:
     // - 适配事件追踪过滤后的可见子集。
     void copyVisibleRows();
 
+    // visibleEvents 作用：
+    // - 返回轻量模型当前保存的可见日志快照；
+    // - 复制、追踪、右键菜单统一读取该快照，避免 Dock 再维护第二份平行缓存。
+    // 参数：无。
+    // 返回值：模型内行数组的只读引用；模型未创建时返回空数组引用。
+    const std::vector<kEvent>& visibleEvents() const;
+
+    // visibleEventAt 作用：
+    // - 按表格行号安全读取当前可见日志；
+    // - 集中处理模型未创建和行号越界场景。
+    // 参数 row：表格行号。
+    // 返回值：有效时返回日志对象指针；无效时返回 nullptr。
+    const kEvent* visibleEventAt(int row) const;
+
     // collectSelectedRowIndexes 作用：
-    // - 从 QTableWidget 的选择模型中收集当前被选中的行号；
+    // - 从 QTableView 的选择模型中收集当前被选中的行号；
     // - 自动排序并去重，避免同一行被多个单元格重复计入。
     // 参数：无。
     // 返回值：合法行号列表，顺序与界面从上到下保持一致。
@@ -171,12 +203,12 @@ private:
     QPushButton* m_clearButton = nullptr;        // 清空日志按钮。
     QPushButton* m_copyVisibleButton = nullptr;  // 复制可见按钮。
 
-    QTableWidget* m_logTable = nullptr;       // 核心日志表格控件。
-    QTimer* m_refreshTimer = nullptr;         // 定时刷新器。
+    QTableView* m_logTable = nullptr;                         // 核心日志表格视图。
+    ks::ui::FlatTableModel<kEvent>* m_logModel = nullptr;     // 核心日志表格轻量数据模型。
+    QTimer* m_refreshTimer = nullptr;                         // 定时刷新器。
 
     // ======== 刷新与过滤状态 ========
     std::size_t m_lastRevision = 0;           // 上次渲染时的日志 revision。
-    std::vector<kEvent> m_visibleEvents;      // 当前可见事件集合（行号与该数组一一对应）。
 
     bool m_isTracking = false;                // 当前是否处于“按 GUID 追踪”模式。
     GUID m_trackingGuid{};                    // 追踪模式下使用的目标 GUID。

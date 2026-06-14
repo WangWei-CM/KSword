@@ -12,13 +12,17 @@ Processing:
   R3 KernelDock loader and R0 packed profile apply protocol.
 - Reject profiles with missing module identity, empty fields, unknown fields, or
   offsets outside the v1 protocol range.
+- Validate optional callbackItems without requiring them; when present, callback
+  items must use shared callback field names, allowed item kinds, and safe
+  uint32 payload ranges.
 - Deduplicate profiles by the R0 identity tuple used for safe apply:
   module class, machine, TimeDateStamp, and SizeOfImage.
 - Copy only accepted profile JSON files into Release\\profiles\\ark_dyndata
   when scattered JSON publishing is requested.
-- Optionally emit a compact Release\\profiles\\ark_dyndata_pack_v1.json pack
-  that stores the field-name dictionary once and keeps each profile as a small
-  identity + PDB metadata + [fieldIndex, offset] list.
+- Optionally emit a compact Release\\profiles\\ark_dyndata_pack_v1.json or
+  Release\\profiles\\ark_dyndata_pack_v2.json pack. v1 stores only fields for
+  legacy compatibility. v2 keeps the same compact fields layout and adds each
+  profile's validated callbackItems array with name/kind/value payloads.
 - Write a manifest outside the scanned JSON directory so KernelDock does not
   attempt to parse the manifest as a scattered runtime profile.
 
@@ -42,10 +46,74 @@ from typing import Any
 
 DEFAULT_SOURCE_DIR = Path(r"D:\PDB\profiles\ark_dyndata")
 DEFAULT_LOCAL_KERNEL = Path(r"C:\Windows\System32\ntoskrnl.exe")
-DEFAULT_PACK_FILE_NAME = "ark_dyndata_pack_v1.json"
+KSW_PACK_VERSION_V1 = 1
+KSW_PACK_VERSION_V2 = 2
+KSW_DEFAULT_PACK_VERSION = KSW_PACK_VERSION_V1
+KSW_SUPPORTED_PACK_VERSIONS = (KSW_PACK_VERSION_V1, KSW_PACK_VERSION_V2)
+DEFAULT_PACK_FILE_NAMES = {
+    KSW_PACK_VERSION_V1: "ark_dyndata_pack_v1.json",
+    KSW_PACK_VERSION_V2: "ark_dyndata_pack_v2.json",
+}
+# Kept for compatibility with callers and docs that referenced the original
+# single-pack default name before v2 publishing was added.
+DEFAULT_PACK_FILE_NAME = DEFAULT_PACK_FILE_NAMES[KSW_DEFAULT_PACK_VERSION]
 KSW_DYN_PROFILE_OFFSET_MAX = 0x0000FFFF
+KSW_DYN_PROFILE_GLOBAL_RVA_MAX = 0x7FFFFFFF
 KSW_SCHEMA_VERSION = 1
-KSW_PACK_VERSION = 1
+KSW_PACK_VERSION = KSW_DEFAULT_PACK_VERSION
+
+CALLBACK_ITEM_KIND_GLOBAL_RVA = "GlobalRva"
+CALLBACK_ITEM_KIND_STRUCT_OFFSET = "StructOffset"
+CALLBACK_ITEM_KINDS = {CALLBACK_ITEM_KIND_GLOBAL_RVA, CALLBACK_ITEM_KIND_STRUCT_OFFSET}
+
+# These names mirror the KSW_DYN_FIELD_ID_CB_* field-id additions in
+# shared/driver/KswordArkDynDataIoctl.h. The numeric values are kept here as
+# validation evidence and to catch duplicate aliases that target the same shared
+# callback field ID before a bad v2 pack reaches R3/R0.
+CALLBACK_GLOBAL_RVA_FIELD_IDS = {
+    "PspCreateProcessNotifyRoutine": 44,
+    "PspCreateThreadNotifyRoutine": 45,
+    "PspLoadImageNotifyRoutine": 46,
+    "PspNotifyEnableMask": 47,
+    "CmCallbackListHead": 48,
+}
+
+CALLBACK_STRUCT_OFFSET_FIELD_IDS = {
+    "_OBJECT_TYPE.CallbackList": 49,
+    "_CALLBACK_ENTRY_ITEM.EntryList": 50,
+    "_CALLBACK_ENTRY_ITEM.PreOperation": 51,
+    "_CALLBACK_ENTRY_ITEM.PostOperation": 52,
+    "_CALLBACK_ENTRY_ITEM.Operations": 53,
+    "_CALLBACK_ENTRY_ITEM.CallbackEntry": 54,
+    "_CALLBACK_ENTRY.Altitude": 55,
+    "_CALLBACK_ENTRY.RegistrationContext": 56,
+}
+
+# The generator historically emitted the concrete PDB member spelling
+# EntryItemList. The shared protocol field name is EntryList, so release sync
+# accepts the generator spelling as an input alias and writes the canonical name
+# to v2 packs.
+CALLBACK_NAME_ALIASES = {
+    "_CALLBACK_ENTRY_ITEM.EntryItemList": "_CALLBACK_ENTRY_ITEM.EntryList",
+}
+
+CALLBACK_FIELD_IDS = {
+    **CALLBACK_GLOBAL_RVA_FIELD_IDS,
+    **CALLBACK_STRUCT_OFFSET_FIELD_IDS,
+    **{alias: CALLBACK_STRUCT_OFFSET_FIELD_IDS[canonical] for alias, canonical in CALLBACK_NAME_ALIASES.items()},
+}
+
+CALLBACK_KIND_BY_NAME = {
+    **{name: CALLBACK_ITEM_KIND_GLOBAL_RVA for name in CALLBACK_GLOBAL_RVA_FIELD_IDS},
+    **{name: CALLBACK_ITEM_KIND_STRUCT_OFFSET for name in CALLBACK_STRUCT_OFFSET_FIELD_IDS},
+    **{alias: CALLBACK_ITEM_KIND_STRUCT_OFFSET for alias in CALLBACK_NAME_ALIASES},
+}
+
+CALLBACK_CANONICAL_NAME_BY_NAME = {
+    **{name: name for name in CALLBACK_GLOBAL_RVA_FIELD_IDS},
+    **{name: name for name in CALLBACK_STRUCT_OFFSET_FIELD_IDS},
+    **CALLBACK_NAME_ALIASES,
+}
 
 KNOWN_FIELD_NAMES = {
     "EpObjectTable",
@@ -124,9 +192,11 @@ class ProfileRecord:
     - data: Parsed JSON dictionary.
     - identity: R0-safe identity tuple.
     - field_count: Number of accepted fields.
+    - callback_items: Validated callback v2 items normalized for pack output.
 
     Processing:
-    - The record keeps enough metadata for deduplication and manifest output.
+    - The record keeps enough metadata for deduplication, pack generation, and
+      manifest output.
 
     Return behavior:
     - Instances are plain data containers and do not copy files by themselves.
@@ -136,6 +206,7 @@ class ProfileRecord:
     data: dict[str, Any]
     identity: ProfileIdentity
     field_count: int
+    callback_items: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def profile_name(self) -> str:
@@ -182,7 +253,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--report", default=str(Path(r"D:\PDB") / "logs" / "ark_dyndata_publish_report.json"), help="Detailed report JSON path.")
     parser.add_argument("--emit-pack", action="store_true", help="Write compact profile pack JSON into the release profiles directory.")
     parser.add_argument("--pack-only", action="store_true", help="Publish only the compact pack and skip scattered JSON copies.")
-    parser.add_argument("--pack-output", default="", help=f"Pack output path; defaults to <release-root>\\profiles\\{DEFAULT_PACK_FILE_NAME}.")
+    parser.add_argument(
+        "--pack-version",
+        type=int,
+        choices=KSW_SUPPORTED_PACK_VERSIONS,
+        default=KSW_DEFAULT_PACK_VERSION,
+        help=(
+            "Compact pack format version to emit when --emit-pack/--pack-only is used; "
+            "1 keeps legacy fields-only output, 2 adds callbackItems. Default: 1."
+        ),
+    )
+    parser.add_argument(
+        "--pack-output",
+        default="",
+        help="Pack output path; defaults to <release-root>\\profiles\\ark_dyndata_pack_v<pack-version>.json.",
+    )
     return parser.parse_args(argv)
 
 
@@ -237,6 +322,141 @@ def require_uint32(value: Any, context: str) -> int:
     if parsed is None:
         raise ValueError(f"required uint32 is invalid: {context}")
     return parsed
+
+
+def pack_file_name_for_version(pack_version: int) -> str:
+    """Return the default compact pack file name for one supported version.
+
+    Inputs:
+    - pack_version: Integer selected by --pack-version.
+
+    Processing:
+    - Looks up the version-specific file name so v1 remains the default legacy
+      artifact and v2 gets its own release-side file.
+
+    Return behavior:
+    - Returns the default file name on success; raises ValueError for an
+      unsupported version before any release file is written.
+    """
+    try:
+        return DEFAULT_PACK_FILE_NAMES[pack_version]
+    except KeyError as exc:
+        raise ValueError(f"unsupported pack version: {pack_version}") from exc
+
+
+def normalize_callback_item_name(name: str) -> str | None:
+    """Normalize a callback item name to the shared protocol spelling.
+
+    Inputs:
+    - name: JSON callbackItems[].name value after whitespace trimming.
+
+    Processing:
+    - Accepts only names that correspond to KSW_DYN_FIELD_ID_CB_* shared field
+      IDs.
+    - Converts known generator aliases to the canonical shared field-name text
+      used by R3/R0.
+
+    Return behavior:
+    - Returns the canonical callback name on success; returns None for unknown
+      names.
+    """
+    if name not in CALLBACK_FIELD_IDS:
+        return None
+    return CALLBACK_CANONICAL_NAME_BY_NAME[name]
+
+
+def validate_callback_items(path: Path, data: dict[str, Any], state: ValidationState) -> list[dict[str, Any]] | None:
+    """Validate optional callbackItems and return a compact normalized list.
+
+    Inputs:
+    - path: Source JSON profile path used in diagnostics.
+    - data: Parsed profile root dictionary.
+    - state: Validation accumulator used for precise rejection reasons.
+
+    Processing:
+    - Treats a missing callbackItems key as a valid empty callback set, which
+      keeps legacy profiles publishable.
+    - Requires every present item to be an object with a supported name, kind,
+      and uint32 value.
+    - Enforces name/kind semantics: callback global names must use GlobalRva,
+      and callback struct/member names must use StructOffset.
+    - Validates values with the same upper bound used by R3/R0 struct offsets;
+      GlobalRva values must be non-zero and remain within the shared
+      KSW_DYN_PROFILE_GLOBAL_RVA_MAX range.
+    - Rejects duplicate shared callback field IDs so aliases cannot create two
+      entries for the same R0 item.
+
+    Return behavior:
+    - Returns a list of JSON-ready objects containing only name/kind/value when
+      validation succeeds.
+    - Returns None and records a profile rejection when validation fails.
+    """
+    if "callbackItems" not in data:
+        return []
+
+    callback_items = data.get("callbackItems")
+    if callback_items is None:
+        return []
+    if not isinstance(callback_items, list):
+        reject(state, path, "callback_items_not_array")
+        return None
+
+    normalized_items: list[dict[str, Any]] = []
+    seen_field_ids: set[int] = set()
+    for index, item in enumerate(callback_items):
+        context = f"callbackItems[{index}]"
+        if not isinstance(item, dict):
+            reject(state, path, f"callback_item_not_object:{context}")
+            return None
+
+        raw_name = item.get("name")
+        if not isinstance(raw_name, str):
+            reject(state, path, f"callback_name_invalid:{context}")
+            return None
+        name = raw_name.strip()
+        canonical_name = normalize_callback_item_name(name)
+        if canonical_name is None:
+            reject(state, path, f"callback_name_unknown:{name}")
+            return None
+
+        raw_kind = item.get("kind")
+        if not isinstance(raw_kind, str):
+            reject(state, path, f"callback_kind_invalid:{canonical_name}")
+            return None
+        kind = raw_kind.strip()
+        if kind not in CALLBACK_ITEM_KINDS:
+            reject(state, path, f"callback_kind_unsupported:{canonical_name}:{kind}")
+            return None
+
+        expected_kind = CALLBACK_KIND_BY_NAME[name]
+        if kind != expected_kind:
+            reject(state, path, f"callback_kind_mismatch:{canonical_name}:{kind}:expected_{expected_kind}")
+            return None
+
+        value = parse_uint32(item.get("value"))
+        if value is None:
+            reject(state, path, f"callback_value_invalid:{canonical_name}")
+            return None
+        if kind == CALLBACK_ITEM_KIND_GLOBAL_RVA:
+            if value == 0:
+                reject(state, path, f"callback_global_rva_zero:{canonical_name}")
+                return None
+            if value > KSW_DYN_PROFILE_GLOBAL_RVA_MAX:
+                reject(state, path, f"callback_global_rva_out_of_range:{canonical_name}")
+                return None
+        if kind == CALLBACK_ITEM_KIND_STRUCT_OFFSET and (value == 0xFFFFFFFF or value > KSW_DYN_PROFILE_OFFSET_MAX):
+            reject(state, path, f"callback_struct_offset_invalid:{canonical_name}")
+            return None
+
+        field_id = CALLBACK_FIELD_IDS[name]
+        if field_id in seen_field_ids:
+            reject(state, path, f"callback_duplicate:{canonical_name}")
+            return None
+        seen_field_ids.add(field_id)
+
+        normalized_items.append({"name": canonical_name, "kind": kind, "value": value})
+
+    return normalized_items
 
 
 def reject(state: ValidationState, path: Path, reason: str) -> None:
@@ -313,8 +533,12 @@ def validate_profile(path: Path, state: ValidationState) -> ProfileRecord | None
             reject(state, path, f"offset_invalid:{field_name}")
             return None
 
+    callback_items = validate_callback_items(path, data, state)
+    if callback_items is None:
+        return None
+
     identity = ProfileIdentity(module_class, machine, time_date_stamp, size_of_image)
-    return ProfileRecord(path=path, data=data, identity=identity, field_count=len(fields))
+    return ProfileRecord(path=path, data=data, identity=identity, field_count=len(fields), callback_items=callback_items)
 
 
 def choose_duplicate_winner(records: list[ProfileRecord]) -> ProfileRecord:
@@ -325,12 +549,14 @@ def choose_duplicate_winner(records: list[ProfileRecord]) -> ProfileRecord:
 
     Processing:
     - Prefers the record with more fields.
+    - For equal field coverage, prefers the record with more callbackItems so
+      v2 publishing does not discard newer callback metadata.
     - Uses profileName and path as stable tie-breakers to avoid nondeterminism.
 
     Return behavior:
     - Returns the selected ProfileRecord; does not mutate input records.
     """
-    return sorted(records, key=lambda item: (-item.field_count, item.profile_name, str(item.path)))[0]
+    return sorted(records, key=lambda item: (-item.field_count, -len(item.callback_items), item.profile_name, str(item.path)))[0]
 
 
 def deduplicate_profiles(state: ValidationState) -> list[ProfileRecord]:
@@ -409,17 +635,20 @@ def build_pack_field_dictionary(records: list[ProfileRecord]) -> tuple[list[str]
     return field_names, field_index
 
 
-def build_pack_profile_entry(record: ProfileRecord, field_index: dict[str, int]) -> dict[str, Any]:
+def build_pack_profile_entry(record: ProfileRecord, field_index: dict[str, int], pack_version: int) -> dict[str, Any]:
     """Convert one validated profile record into a compact pack entry.
 
     Inputs:
     - record: Deduplicated profile record.
     - field_index: Field dictionary lookup table.
+    - pack_version: Selected compact pack schema version.
 
     Processing:
     - Normalizes module identity and PDB metadata to compact numeric/string
       values.
     - Stores field payload as [fieldIndex, offset] pairs sorted by field index.
+    - For v2 packs, appends the already validated callbackItems payload using
+      canonical shared protocol names and compact integer values.
 
     Return behavior:
     - Returns a JSON-serializable dictionary for the pack file.
@@ -442,7 +671,7 @@ def build_pack_profile_entry(record: ProfileRecord, field_index: dict[str, int])
 
     pdb_age = parse_uint32(module.get("pdbAge")) or 0
 
-    return {
+    profile_entry = {
         "moduleClassId": module_class,
         "machine": require_uint32(module.get("machine"), f"{record.path}:machine"),
         "timeDateStamp": require_uint32(module.get("timeDateStamp"), f"{record.path}:timeDateStamp"),
@@ -453,28 +682,36 @@ def build_pack_profile_entry(record: ProfileRecord, field_index: dict[str, int])
         "pdbAge": pdb_age,
         "fields": packed_fields,
     }
+    if pack_version == KSW_PACK_VERSION_V2:
+        profile_entry["callbackItems"] = record.callback_items
+    return profile_entry
 
 
-def build_profile_pack(records: list[ProfileRecord]) -> dict[str, Any]:
-    """Build the compact v1 profile pack from validated records.
+def build_profile_pack(records: list[ProfileRecord], pack_version: int) -> dict[str, Any]:
+    """Build the selected compact profile pack from validated records.
 
     Inputs:
     - records: Final deduplicated publish list.
+    - pack_version: Compact pack schema version selected by the caller.
 
     Processing:
     - Creates a once-per-pack field dictionary.
     - Converts each profile into a compact numeric identity plus field-index
       tuples.
+    - Preserves v1 fields-only behavior by omitting callbackItems unless v2 is
+      explicitly requested.
 
     Return behavior:
     - Returns a JSON-serializable pack dictionary.
     """
+    if pack_version not in KSW_SUPPORTED_PACK_VERSIONS:
+        raise ValueError(f"unsupported pack version: {pack_version}")
     field_dictionary, field_index = build_pack_field_dictionary(records)
     return {
         "schemaVersion": KSW_SCHEMA_VERSION,
-        "packVersion": KSW_PACK_VERSION,
+        "packVersion": pack_version,
         "fieldDictionary": field_dictionary,
-        "profiles": [build_pack_profile_entry(record, field_index) for record in records],
+        "profiles": [build_pack_profile_entry(record, field_index, pack_version) for record in records],
     }
 
 
@@ -612,30 +849,44 @@ def build_manifest(
     """
     class_counts: dict[str, int] = {}
     local_match: dict[str, Any] | None = None
+    callback_item_count = 0
     for record in records:
         class_counts[record.identity.module_class] = class_counts.get(record.identity.module_class, 0) + 1
+        callback_item_count += len(record.callback_items)
         if local_identity is not None and record.identity == local_identity:
             local_match = {"profile": str(record.path), "profileName": record.profile_name}
 
     pack_summary = None
+    manifest_pack_version = KSW_DEFAULT_PACK_VERSION
     if pack is not None:
         pack_profiles = pack.get("profiles", [])
         pack_fields = pack.get("fieldDictionary", [])
+        pack_callback_item_count = 0
+        if isinstance(pack_profiles, list):
+            for profile in pack_profiles:
+                if not isinstance(profile, dict):
+                    continue
+                callback_items = profile.get("callbackItems", [])
+                if isinstance(callback_items, list):
+                    pack_callback_item_count += len(callback_items)
+        manifest_pack_version = parse_uint32(pack.get("packVersion")) or KSW_DEFAULT_PACK_VERSION
         pack_summary = {
             "path": str(pack_path) if pack_path is not None else None,
             "schemaVersion": pack.get("schemaVersion"),
             "packVersion": pack.get("packVersion"),
             "profileCount": len(pack_profiles) if isinstance(pack_profiles, list) else 0,
             "fieldDictionaryCount": len(pack_fields) if isinstance(pack_fields, list) else 0,
+            "callbackItemCount": pack_callback_item_count,
         }
 
     manifest = {
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "schemaVersion": KSW_SCHEMA_VERSION,
-        "packVersion": KSW_PACK_VERSION,
+        "packVersion": manifest_pack_version,
         "publishMode": "pack-only" if pack_only else ("pack-and-json" if pack is not None else "json"),
         "acceptedBeforeDedup": len(state.accepted),
         "publishedProfiles": len(records),
+        "callbackItemCount": callback_item_count,
         "copiedProfiles": len(copied),
         "removedScatteredProfiles": removed_scattered_profiles,
         "rejectedProfiles": len(state.rejected),
@@ -654,6 +905,7 @@ def build_manifest(
                 "profileName": record.profile_name,
                 "identity": record.identity.__dict__,
                 "fieldCount": record.field_count,
+                "callbackItemCount": len(record.callback_items),
             }
             for record in records
         ]
@@ -693,7 +945,9 @@ def main(argv: list[str] | None = None) -> int:
     release_root = Path(args.release_root)
     target_dir = release_root / "profiles" / "ark_dyndata"
     manifest_path = Path(args.manifest) if args.manifest else release_root / "profiles" / "ark_dyndata_manifest.json"
-    pack_path = Path(args.pack_output) if args.pack_output else release_root / "profiles" / DEFAULT_PACK_FILE_NAME
+    pack_version = int(args.pack_version)
+    pack_file_name = pack_file_name_for_version(pack_version)
+    pack_path = Path(args.pack_output) if args.pack_output else release_root / "profiles" / pack_file_name
     report_path = Path(args.report)
     emit_pack = bool(args.emit_pack or args.pack_only)
 
@@ -722,10 +976,10 @@ def main(argv: list[str] | None = None) -> int:
         if not args.pack_only:
             copied = copy_profiles(final_records, target_dir, args.clean_target, args.max_copy)
         if emit_pack:
-            pack = build_profile_pack(final_records)
+            pack = build_profile_pack(final_records, pack_version)
             write_compact_json(pack_path, pack)
     elif emit_pack:
-        pack = build_profile_pack(final_records)
+        pack = build_profile_pack(final_records, pack_version)
 
     report_manifest = build_manifest(
         state=state,
@@ -756,6 +1010,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"sourceProfiles={len(list(source_dir.glob('*.json')))}")
     print(f"acceptedBeforeDedup={len(state.accepted)}")
     print(f"publishedProfiles={len(final_records)}")
+    print(f"callbackItems={report_manifest['callbackItemCount']}")
     print(f"rejectedProfiles={len(state.rejected)}")
     print(f"duplicateGroups={len(state.duplicate_groups)}")
     print(f"copiedProfiles={len(copied)}")

@@ -149,6 +149,142 @@ KswordArkCallbackResolveModuleByAddress( // 按回调地址解析所属模块。
     return STATUS_NOT_FOUND; // 返回未找到模块状态。
 } // 结束按地址解析模块函数。
 
+static VOID
+KswordArkCallbackRemoveExSetMessage(
+    _Out_writes_(MessageChars) PWCHAR MessageBuffer,
+    _In_ size_t MessageChars,
+    _In_opt_z_ PCWSTR MessageText
+    )
+/*++
+
+Routine Description:
+
+    Copy a short EX-remove diagnostic message into the fixed shared response.
+    The helper always NUL-terminates the destination and accepts NULL text.
+
+Arguments:
+
+    MessageBuffer - Output response message buffer.
+    MessageChars - Destination capacity in WCHARs.
+    MessageText - Optional message text.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    if (MessageBuffer == NULL || MessageChars == 0U) {
+        return;
+    }
+
+    MessageBuffer[0] = L'\0';
+    if (MessageText == NULL) {
+        return;
+    }
+
+    (VOID)RtlStringCchCopyNW(MessageBuffer, MessageChars, MessageText, MessageChars - 1U);
+    MessageBuffer[MessageChars - 1U] = L'\0';
+}
+
+static BOOLEAN
+KswordArkCallbackRemoveExClassRequiresCodeModule(
+    _In_ ULONG CallbackClass
+    )
+/*++
+
+Routine Description:
+
+    Decide whether callbackAddress must resolve to a loaded kernel module before
+    a public remove attempt is allowed. WFP and minifilter rows carry identifiers
+    or filter objects, so they intentionally bypass this code-address gate.
+
+Arguments:
+
+    CallbackClass - KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_* value.
+
+Return Value:
+
+    TRUE when callbackAddress is expected to be a kernel code pointer.
+
+--*/
+{
+    return CallbackClass == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_PROCESS ||
+        CallbackClass == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_THREAD ||
+        CallbackClass == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_IMAGE ||
+        CallbackClass == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_OBJECT ||
+        CallbackClass == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_REGISTRY ||
+        CallbackClass == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_ETW_PROVIDER;
+}
+
+static NTSTATUS
+KswordArkCallbackRemovePublicApiByPacket(
+    _In_ const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_REQUEST* RequestPacket,
+    _Inout_ KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE* ResponsePacket
+    )
+/*++
+
+Routine Description:
+
+    Execute the same documented/safe remove backend that the legacy IOCTL uses,
+    but from an already-copied request packet. This keeps EX transport separate
+    from METHOD_BUFFERED request parsing and avoids any experimental unlink path.
+
+Arguments:
+
+    RequestPacket - Validated legacy-shaped remove request.
+    ResponsePacket - Legacy-shaped response packet used by existing helpers.
+
+Return Value:
+
+    Operation NTSTATUS. Unsupported classes return STATUS_NOT_SUPPORTED or
+    STATUS_INVALID_PARAMETER without modifying private kernel lists.
+
+--*/
+{
+    if (RequestPacket == NULL || ResponsePacket == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    switch (RequestPacket->callbackClass) {
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_PROCESS:
+    {
+        NTSTATUS status = PsSetCreateProcessNotifyRoutineEx(
+            (KSWORD_ARK_PROCESS_NOTIFY_EX)(ULONG_PTR)RequestPacket->callbackAddress,
+            TRUE);
+        if (status == STATUS_PROCEDURE_NOT_FOUND || status == STATUS_INVALID_PARAMETER) {
+            status = PsSetCreateProcessNotifyRoutine(
+                (PCREATE_PROCESS_NOTIFY_ROUTINE)(ULONG_PTR)RequestPacket->callbackAddress,
+                TRUE);
+        }
+        ResponsePacket->mappingFlags |= KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_PUBLIC_API;
+        return status;
+    }
+
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_THREAD:
+        ResponsePacket->mappingFlags |= KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_PUBLIC_API;
+        return PsRemoveCreateThreadNotifyRoutine(
+            (KSWORD_ARK_THREAD_NOTIFY)(ULONG_PTR)RequestPacket->callbackAddress);
+
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_IMAGE:
+        ResponsePacket->mappingFlags |= KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_PUBLIC_API;
+        return PsRemoveLoadImageNotifyRoutine(
+            (KSWORD_ARK_IMAGE_NOTIFY)(ULONG_PTR)RequestPacket->callbackAddress);
+
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_MINIFILTER:
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_WFP_CALLOUT:
+        return KswordArkCallbackExternalRemoveByRequest(RequestPacket, ResponsePacket);
+
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_OBJECT:
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_REGISTRY:
+    case KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_ETW_PROVIDER:
+        return STATUS_NOT_SUPPORTED;
+
+    default:
+        return STATUS_INVALID_PARAMETER;
+    }
+}
+
 NTSTATUS // 声明 IOCTL 处理函数返回类型。
 KswordARKCallbackIoctlRemoveExternalCallback( // 实现外部回调移除 IOCTL 入口。
     _In_ WDFREQUEST Request, // 输入 WDF 请求对象。
@@ -298,3 +434,224 @@ CompleteRemoveExternalCallback: // 统一完成响应和日志路径。
 
     return STATUS_SUCCESS; // 返回 IOCTL 分发执行成功状态。
 } // 结束外部回调移除 IOCTL 处理函数。
+
+NTSTATUS
+KswordARKCallbackIoctlRemoveExternalCallbackEx(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* CompleteBytesOut
+    )
+/*++
+
+Routine Description:
+
+    Handle the extended callback-remove protocol. EX requests carry the enum
+    source, trust bits, generation, identity hash and explicit remove behavior.
+    This first implementation intentionally supports only the documented public
+    API path; experimental unlink is rejected in-band and never executed as a
+    fallback.
+
+Arguments:
+
+    Request - Current WDF request.
+    InputBufferLength - Input request size from dispatch.
+    OutputBufferLength - Output response size from dispatch.
+    CompleteBytesOut - Receives sizeof(KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_RESPONSE).
+
+Return Value:
+
+    STATUS_SUCCESS when the IOCTL request was handled and a semantic NTSTATUS is
+    present in response.ntstatus. Buffer/packet validation errors are returned
+    directly before a response is produced.
+
+--*/
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS operationStatus = STATUS_SUCCESS;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t inputBufferLength = 0U;
+    size_t outputBufferLength = 0U;
+    KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST* requestPacket = NULL;
+    KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_RESPONSE* responsePacket = NULL;
+    KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST requestCopy;
+    KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_REQUEST legacyRequest;
+    KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE legacyResponse;
+    ULONG64 moduleBase = 0ULL;
+    ULONG moduleSize = 0UL;
+
+    RtlZeroMemory(&requestCopy, sizeof(requestCopy));
+    RtlZeroMemory(&legacyRequest, sizeof(legacyRequest));
+    RtlZeroMemory(&legacyResponse, sizeof(legacyResponse));
+
+    if (CompleteBytesOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *CompleteBytesOut = 0U;
+
+    if (InputBufferLength < sizeof(KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST) ||
+        OutputBufferLength < sizeof(KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_RESPONSE)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    status = WdfRequestRetrieveInputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST),
+        &inputBuffer,
+        &inputBufferLength);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = WdfRequestRetrieveOutputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_RESPONSE),
+        &outputBuffer,
+        &outputBufferLength);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    requestPacket = (KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST*)inputBuffer;
+    if (requestPacket->size < sizeof(KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST) ||
+        requestPacket->version != KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_PROTOCOL_VERSION ||
+        requestPacket->callbackClass == 0UL ||
+        requestPacket->callbackAddress == 0ULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    requestCopy = *requestPacket;
+    responsePacket = (KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_RESPONSE*)outputBuffer;
+    RtlZeroMemory(responsePacket, sizeof(*responsePacket));
+    responsePacket->size = sizeof(*responsePacket);
+    responsePacket->version = requestCopy.version;
+    responsePacket->callbackClass = requestCopy.callbackClass;
+    responsePacket->source = requestCopy.source;
+    responsePacket->callbackAddress = requestCopy.callbackAddress;
+    responsePacket->registrationAddress = requestCopy.registrationAddress;
+    responsePacket->rawStorageValue = requestCopy.rawStorageValue;
+    responsePacket->enumerationGeneration = requestCopy.enumerationGeneration;
+    responsePacket->identityHash = requestCopy.identityHash;
+    responsePacket->trustFlags = requestCopy.trustFlags;
+    responsePacket->removeBehavior = requestCopy.removeBehavior;
+    responsePacket->ntstatus = STATUS_UNSUCCESSFUL;
+    responsePacket->revalidationStatus = STATUS_NOT_SUPPORTED;
+    responsePacket->mappingFlags = 0UL;
+    *CompleteBytesOut = sizeof(*responsePacket);
+
+    if ((requestCopy.trustFlags & KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE) != 0UL) {
+        responsePacket->mappingFlags |= KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_PDB_TRUSTED;
+    }
+    if ((requestCopy.flags & KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_FLAG_EXPERIMENTAL_UNLINK) != 0UL ||
+        (requestCopy.removeBehavior & KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_EXPERIMENTAL_UNLINK) != 0UL) {
+        responsePacket->mappingFlags |= KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_EXPERIMENTAL;
+        operationStatus = STATUS_NOT_SUPPORTED;
+        KswordArkCallbackRemoveExSetMessage(
+            responsePacket->message,
+            RTL_NUMBER_OF(responsePacket->message),
+            L"Experimental unlink is intentionally not implemented in R0; no private list or array was modified.");
+        goto CompleteRemoveExternalCallbackEx;
+    }
+
+    if ((requestCopy.removeBehavior & KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_PUBLIC_API) == 0UL) {
+        operationStatus = STATUS_NOT_SUPPORTED;
+        KswordArkCallbackRemoveExSetMessage(
+            responsePacket->message,
+            RTL_NUMBER_OF(responsePacket->message),
+            L"REMOVE_EXTERNAL_CALLBACK_EX request did not ask for a supported public API remove path.");
+        goto CompleteRemoveExternalCallbackEx;
+    }
+
+    if (KswordArkCallbackRemoveExClassRequiresCodeModule(requestCopy.callbackClass)) {
+        status = KswordArkCallbackResolveModuleByAddress(
+            requestCopy.callbackAddress,
+            responsePacket->modulePath,
+            RTL_NUMBER_OF(responsePacket->modulePath),
+            &moduleBase,
+            &moduleSize);
+        if (!NT_SUCCESS(status)) {
+            operationStatus = STATUS_INVALID_PARAMETER;
+            responsePacket->revalidationStatus = status;
+            KswordArkCallbackRemoveExSetMessage(
+                responsePacket->message,
+                RTL_NUMBER_OF(responsePacket->message),
+                L"Callback address did not resolve to a loaded kernel module; public remove was refused.");
+            goto CompleteRemoveExternalCallbackEx;
+        }
+
+        responsePacket->moduleBase = moduleBase;
+        responsePacket->moduleSize = moduleSize;
+        responsePacket->mappingFlags |= KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_MODULE;
+        responsePacket->revalidationStatus = STATUS_SUCCESS;
+    }
+    else {
+        responsePacket->revalidationStatus = STATUS_SUCCESS;
+    }
+
+    legacyRequest.size = sizeof(legacyRequest);
+    legacyRequest.version = KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_PROTOCOL_VERSION;
+    legacyRequest.callbackClass = requestCopy.callbackClass;
+    legacyRequest.flags = KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_FLAG_NONE;
+    legacyRequest.callbackAddress = requestCopy.callbackAddress;
+
+    legacyResponse.size = sizeof(legacyResponse);
+    legacyResponse.version = KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_PROTOCOL_VERSION;
+    legacyResponse.callbackClass = requestCopy.callbackClass;
+    legacyResponse.callbackAddress = requestCopy.callbackAddress;
+    legacyResponse.moduleBase = responsePacket->moduleBase;
+    legacyResponse.moduleSize = responsePacket->moduleSize;
+    legacyResponse.mappingFlags = responsePacket->mappingFlags;
+    KswordArkCallbackEnumCopyWide(
+        legacyResponse.modulePath,
+        RTL_NUMBER_OF(legacyResponse.modulePath),
+        responsePacket->modulePath);
+
+    operationStatus = KswordArkCallbackRemovePublicApiByPacket(&legacyRequest, &legacyResponse);
+    responsePacket->moduleBase = legacyResponse.moduleBase;
+    responsePacket->moduleSize = legacyResponse.moduleSize;
+    responsePacket->mappingFlags = legacyResponse.mappingFlags |
+        KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_PUBLIC_API |
+        (responsePacket->mappingFlags & KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_PDB_TRUSTED);
+    KswordArkCallbackEnumCopyWide(
+        responsePacket->modulePath,
+        RTL_NUMBER_OF(responsePacket->modulePath),
+        legacyResponse.modulePath);
+    KswordArkCallbackEnumCopyWide(
+        responsePacket->serviceName,
+        RTL_NUMBER_OF(responsePacket->serviceName),
+        legacyResponse.serviceName);
+    if (NT_SUCCESS(operationStatus)) {
+        KswordArkCallbackRemoveExSetMessage(
+            responsePacket->message,
+            RTL_NUMBER_OF(responsePacket->message),
+            L"Public API remove path completed. Experimental unlink was not used.");
+    }
+    else if (operationStatus == STATUS_NOT_SUPPORTED) {
+        KswordArkCallbackRemoveExSetMessage(
+            responsePacket->message,
+            RTL_NUMBER_OF(responsePacket->message),
+            L"Public API remove path is not yet supported for this callback class; no unlink fallback was executed.");
+    }
+    else {
+        KswordArkCallbackRemoveExSetMessage(
+            responsePacket->message,
+            RTL_NUMBER_OF(responsePacket->message),
+            L"Public API remove path returned a failure NTSTATUS; no unlink fallback was executed.");
+    }
+
+CompleteRemoveExternalCallbackEx:
+    responsePacket->ntstatus = operationStatus;
+
+    KswordArkCallbackLogFormat(
+        NT_SUCCESS(operationStatus) ? "Info" : "Warn",
+        "External callback remove EX request: class=%lu, source=%lu, callback=0x%llX, registration=0x%llX, behavior=0x%lX, status=0x%08lX.",
+        (unsigned long)requestCopy.callbackClass,
+        (unsigned long)requestCopy.source,
+        requestCopy.callbackAddress,
+        requestCopy.registrationAddress,
+        (unsigned long)requestCopy.removeBehavior,
+        (unsigned long)operationStatus);
+
+    return STATUS_SUCCESS;
+}

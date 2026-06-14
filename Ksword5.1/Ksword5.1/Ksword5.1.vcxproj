@@ -352,6 +352,7 @@
     <ClInclude Include="ksword\startup\startup.h" />
     <ClInclude Include="ksword\string\string.h" />
     <ClInclude Include="theme.h" />
+    <ClInclude Include="UI\FlatTableModel.h" />
     <ClInclude Include="UI\UI_All.h" />
     <QtMoc Include="DriverDock\DriverDock.h" />
     <ClInclude Include="DriverDock\DriverDock.Internal.h" />
@@ -417,15 +418,17 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="qtvars.pro" />
-    <None Include="profiles\ark_dyndata_pack_v1.json" />
+    <None Include="profiles\ark_dyndata_pack_v2.json" />
   </ItemGroup>
   <Target Name="CopyKswordArkDynDataProfilePack" AfterTargets="Build">
     <PropertyGroup>
-      <KswordArkDynDataProfilePackSource>$(MSBuildProjectDirectory)\profiles\ark_dyndata_pack_v1.json</KswordArkDynDataProfilePackSource>
+      <KswordArkDynDataProfilePackSource>$(MSBuildProjectDirectory)\profiles\ark_dyndata_pack_v2.json</KswordArkDynDataProfilePackSource>
       <KswordArkDynDataProfilePackTargetDir>$(TargetDir)profiles\</KswordArkDynDataProfilePackTargetDir>
+      <KswordArkDynDataLegacyPack>$(KswordArkDynDataProfilePackTargetDir)ark_dyndata_pack_v1.json</KswordArkDynDataLegacyPack>
     </PropertyGroup>
     <MakeDir Directories="$(KswordArkDynDataProfilePackTargetDir)" Condition="Exists('$(KswordArkDynDataProfilePackSource)')" />
     <Copy SourceFiles="$(KswordArkDynDataProfilePackSource)" DestinationFolder="$(KswordArkDynDataProfilePackTargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(KswordArkDynDataProfilePackSource)')" />
+    <Delete Files="$(KswordArkDynDataLegacyPack)" Condition="Exists('$(KswordArkDynDataLegacyPack)')" />
     <Warning Condition="!Exists('$(KswordArkDynDataProfilePackSource)')" Text="KswordARK DynData profile pack was not found: $(KswordArkDynDataProfilePackSource)" />
   </Target>
   <Target Name="CopyTaskmgrHijackScript" AfterTargets="Build">

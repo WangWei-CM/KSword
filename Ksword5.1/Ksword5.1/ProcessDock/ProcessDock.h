@@ -13,8 +13,10 @@
 #include <QColor>
 #include <QHash>
 #include <QIcon>
+#include <QModelIndex>
 #include <QPointer>
 #include <QSize>
+#include <QVariant>
 #include <QWidget>
 
 #include <chrono>
@@ -38,7 +40,9 @@ class QPushButton;
 class QResizeEvent;
 class QShowEvent;
 class QSlider;
+class QSortFilterProxyModel;
 class QTableWidget;
+class QTableView;
 class QTabWidget;
 class QTextEdit;
 class QTimer;
@@ -57,6 +61,12 @@ namespace ks::process
     struct CounterSample;
     struct ProcessRecord;
     struct SystemThreadRecord;
+}
+
+namespace ks::ui
+{
+    template<typename RowT>
+    class FlatTableModel;
 }
 
 class ProcessDock final : public QWidget
@@ -194,6 +204,29 @@ private:
         bool isExited = false;                        // 本轮退出但保留一轮（灰色高亮）。
         bool isKernelOnly = false;                    // 仅内核枚举可见（疑似隐藏进程，红色高亮）。
     };
+
+    // ProcessTableRow：
+    // - 作用：QTableView 模型持有的轻量行对象；
+    // - 输入来源：rebuildTable 根据 DisplayRow 和本轮最大占用值生成；
+    // - 返回行为：本结构只承载数据，不主动返回 UI 对象。
+    struct ProcessTableRow
+    {
+        ks::process::ProcessRecord record;            // record：表格行持有的进程快照，避免后台刷新替换缓存后悬空。
+        std::string identityKey;                      // identityKey：PID+创建时间，用于选择恢复和动作绑定。
+        int depth = 0;                                // depth：树状显示时的缩进层级。
+        bool isNew = false;                           // isNew：新增行高亮标记。
+        bool isExited = false;                        // isExited：退出保留行高亮标记。
+        bool isKernelOnly = false;                    // isKernelOnly：仅内核可见进程高亮标记。
+        bool activitySnapshotActive = false;          // activitySnapshotActive：该行是否来自历史时间轴快照。
+        double cpuUsageRatio = 0.0;                   // cpuUsageRatio：CPU 单元格蓝色占比高亮比例。
+        double ramUsageRatio = 0.0;                   // ramUsageRatio：RAM 单元格蓝色占比高亮比例。
+        double diskUsageRatio = 0.0;                  // diskUsageRatio：DISK 单元格蓝色占比高亮比例。
+        double gpuUsageRatio = 0.0;                   // gpuUsageRatio：GPU 单元格蓝色占比高亮比例。
+        double netUsageRatio = 0.0;                   // netUsageRatio：Net 单元格蓝色占比高亮比例。
+        double handleUsageRatio = 0.0;                // handleUsageRatio：句柄数单元格蓝色占比高亮比例。
+    };
+
+    using ProcessTableModel = ks::ui::FlatTableModel<ProcessTableRow>;
 
     // CacheEntry：进程缓存条目（用于复用静态信息和退出保留）。
     struct CacheEntry
@@ -432,13 +465,18 @@ private:
     std::vector<ProcessActionTarget> selectedActionTargets() const;
     void clearProcessTableSelection();
     void syncTrackedSelectionFromTable();
+    QVariant processTableData(const ProcessTableRow& tableRow, int column, int role);
+    const ProcessTableRow* processTableRowForViewIndex(const QModelIndex& viewIndex) const;
+    QModelIndex processTableViewIndexForIdentityKey(const std::string& identityKey, int column) const;
+    std::vector<QModelIndex> selectedProcessTableRowIndexes(bool includeCurrentFallback) const;
+    ProcessActionTarget processActionTargetFromTableRow(const ProcessTableRow& tableRow) const;
     void dispatchProcessActionTargetsInParallel(
         const QString& actionTitle,
         const std::vector<ProcessActionTarget>& actionTargets,
         const std::function<bool(const ProcessActionTarget&, std::string*)>& actionInvoker,
         bool refreshWhenAnySucceeded);
     const ks::process::SystemThreadRecord* selectedThreadRecord() const;
-    void bindContextActionToItem(QTreeWidgetItem* clickedItem);
+    void bindContextActionToIndex(const QModelIndex& clickedIndex);
     void clearContextActionBinding();
     void bindThreadContextActionToItem(QTreeWidgetItem* clickedItem);
     void clearThreadContextActionBinding();
@@ -542,7 +580,9 @@ private:
     std::vector<ks::process::ProcessRecord> m_activityTableSnapshotRecords; // 历史样本映射出的进程表记录。
 
     // ======== 进程表格 ========
-    QTreeWidget* m_processTable = nullptr;    // 进程列表表格（支持列拖动/排序/右键）。
+    QTableView* m_processTable = nullptr;     // 进程列表表格视图（支持列拖动/排序/右键）。
+    ProcessTableModel* m_processTableModel = nullptr; // 进程列表轻量模型，避免刷新时重建 item。
+    QSortFilterProxyModel* m_processSortProxy = nullptr; // 进程列表排序代理，保持数值列排序行为。
 
     // ======== 线程页控件 ========
     QHBoxLayout* m_threadTopLayout = nullptr; // 线程页顶部操作栏。

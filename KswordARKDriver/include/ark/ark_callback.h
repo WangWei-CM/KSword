@@ -59,6 +59,14 @@ KswordARKCallbackIoctlRemoveExternalCallback(
     );
 
 NTSTATUS
+KswordARKCallbackIoctlRemoveExternalCallbackEx(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* CompleteBytesOut
+    );
+
+NTSTATUS
 KswordARKCallbackIoctlEnumCallbacks(
     _In_ WDFREQUEST Request,
     _In_ size_t InputBufferLength,
