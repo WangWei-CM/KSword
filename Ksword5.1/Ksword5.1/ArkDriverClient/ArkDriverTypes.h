@@ -666,7 +666,7 @@ namespace ksword::ark
         KSWORD_ARK_CALLBACK_RUNTIME_STATE state{};
     };
 
-    // CallbackRemoveResult wraps the external-callback removal response packet.
+    // CallbackRemoveResult wraps the legacy external-callback removal response packet.
     struct CallbackRemoveResult
     {
         IoResult io;
@@ -680,12 +680,18 @@ namespace ksword::ark
         std::uint32_t source = 0;
         std::uint32_t status = 0;
         std::uint32_t fieldFlags = 0;
+        std::uint32_t trustFlags = 0;        // trustFlags：PDB/public/fallback/revalidated 可信位。
+        std::uint32_t removeBehavior = 0;    // removeBehavior：R0 推荐的公开 API/实验 unlink 行为。
+        std::uint32_t removeFlags = 0;       // removeFlags：兼容旧 UI 命名，始终镜像 removeBehavior。
         std::uint32_t operationMask = 0;
         std::uint32_t objectTypeMask = 0;
+        std::uint64_t generation = 0;        // generation：R0 枚举代次，用于 EX 移除前重验证。
         long lastStatus = 0;
         std::uint64_t callbackAddress = 0;
         std::uint64_t contextAddress = 0;
         std::uint64_t registrationAddress = 0;
+        std::uint64_t identityHash = 0;      // Reserved identity hash; v1 protocol leaves it empty/zero.
+        std::uint64_t rawStorageValue = 0;   // Reserved raw storage value; v1 protocol leaves it zero.
         std::uint64_t moduleBase = 0;
         std::uint32_t moduleSize = 0;
         std::wstring name;

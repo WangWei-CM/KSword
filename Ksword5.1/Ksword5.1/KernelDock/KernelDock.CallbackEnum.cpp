@@ -25,6 +25,7 @@
 #include <QList>
 #include <QMenu>
 #include <QMetaObject>
+#include <QMessageBox>
 #include <QPoint>
 #include <QPointer>
 #include <QProcess>
@@ -310,9 +311,651 @@ namespace
             return QStringLiteral("Cm 回调链表");
         case KSWORD_ARK_CALLBACK_ENUM_SOURCE_PRIVATE_OBJECT_TYPE_LIST:
             return QStringLiteral("Ob 对象类型链表");
+        case KSWORD_ARK_CALLBACK_ENUM_SOURCE_WFP_MGMT_API:
+            return QStringLiteral("WFP 管理 API");
+        case KSWORD_ARK_CALLBACK_ENUM_SOURCE_ETW_DYNDATA:
+            return QStringLiteral("ETW DynData");
         default:
             return QStringLiteral("未知(%1)").arg(source);
         }
+    }
+
+    enum class CallbackEnumRemovePolicyKind : int
+    {
+        NotRemovable = 0,
+        RemovableVerified,
+        RemovableCandidate,
+        ExperimentalOnly
+    };
+
+    bool callbackEnumHasField(const KernelCallbackEnumEntry& entry, const std::uint32_t fieldFlag)
+    {
+        // Input: one cached callback row and one KSWORD_ARK_CALLBACK_ENUM_FIELD_* bit.
+        // Processing: masks the legacy fieldFlags value without looking at future protocol bytes.
+        // Return: true only when the existing protocol explicitly marks the field as present.
+        return (entry.fieldFlags & fieldFlag) != 0U;
+    }
+
+    bool callbackEnumFieldIndicatesTrusted(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: checks the optional trusted field bit only when the shared header has it.
+        // Return: true when R0 explicitly marked this row as trusted; false on old headers.
+#if defined(KSWORD_ARK_CALLBACK_ENUM_FIELD_TRUSTED)
+        return callbackEnumHasField(entry, KSWORD_ARK_CALLBACK_ENUM_FIELD_TRUSTED);
+#else
+        return false;
+#endif
+    }
+
+    bool callbackEnumFieldIndicatesVerifiedRemove(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: checks the optional verified-remove field bit when available.
+        // Return: true when R0 says the safe remove path is verified; false on old headers.
+#if defined(KSWORD_ARK_CALLBACK_ENUM_FIELD_VERIFIED_REMOVE)
+        return callbackEnumHasField(entry, KSWORD_ARK_CALLBACK_ENUM_FIELD_VERIFIED_REMOVE);
+#else
+        return false;
+#endif
+    }
+
+    bool callbackEnumFieldIndicatesExperimentalRemove(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: checks the optional experimental-remove field bit when available.
+        // Return: true when R0 says this row only has an experimental unlink path; false otherwise.
+#if defined(KSWORD_ARK_CALLBACK_ENUM_FIELD_EXPERIMENTAL_REMOVE)
+        return callbackEnumHasField(entry, KSWORD_ARK_CALLBACK_ENUM_FIELD_EXPERIMENTAL_REMOVE);
+#else
+        return false;
+#endif
+    }
+
+    bool callbackEnumTrustFlagsIndicateTrusted(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: reads optional trust flags without making old shared headers incompatible.
+        // Return: true for PDB/revalidated trust; false when the flags are absent or unrelated.
+#if defined(KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE) && defined(KSWORD_ARK_CALLBACK_TRUST_REVALIDATED)
+        return (entry.trustFlags & (KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE | KSWORD_ARK_CALLBACK_TRUST_REVALIDATED)) != 0U;
+#else
+        return entry.trustFlags != 0U;
+#endif
+    }
+
+    bool callbackEnumTrustFlagsIndicatePublicApi(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: checks optional trust flags for public API provenance.
+        // Return: true when R0 explicitly reports public API trust; false on old headers.
+#if defined(KSWORD_ARK_CALLBACK_TRUST_PUBLIC_API)
+        return (entry.trustFlags & KSWORD_ARK_CALLBACK_TRUST_PUBLIC_API) != 0U;
+#else
+        return false;
+#endif
+    }
+
+    bool callbackEnumTrustFlagsIndicateFallbackPattern(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: checks optional trust flags for fallback/pattern provenance.
+        // Return: true when R0 explicitly reports fallback evidence; false on old headers.
+#if defined(KSWORD_ARK_CALLBACK_TRUST_FALLBACK_PATTERN)
+        return (entry.trustFlags & KSWORD_ARK_CALLBACK_TRUST_FALLBACK_PATTERN) != 0U;
+#else
+        return false;
+#endif
+    }
+
+    bool callbackEnumRemoveBehaviorIndicatesPublicApi(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: reads optional remove-behavior flags for the safe public API path.
+        // Return: true when the future protocol marks public API removal; false on old headers.
+#if defined(KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_PUBLIC_API)
+        return (entry.removeFlags & KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_PUBLIC_API) != 0U;
+#else
+        return false;
+#endif
+    }
+
+    bool callbackEnumRemoveBehaviorIndicatesExperimentalUnlink(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: reads optional remove-behavior flags for experimental unlink.
+        // Return: true when the future protocol marks unlink-only behavior; false on old headers.
+#if defined(KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_EXPERIMENTAL_UNLINK)
+        return (entry.removeFlags & KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_EXPERIMENTAL_UNLINK) != 0U;
+#else
+        return false;
+#endif
+    }
+
+    bool callbackEnumIsPublicApiSource(const std::uint32_t source)
+    {
+        // Input: the shared callback enumeration source id.
+        // Processing: maps sources that came from documented management/enumeration APIs.
+        // Return: true for public API backed sources; false for private/fallback diagnostics.
+        return source == KSWORD_ARK_CALLBACK_ENUM_SOURCE_FLTMGR_ENUMERATION
+            || source == KSWORD_ARK_CALLBACK_ENUM_SOURCE_WFP_MGMT_API;
+    }
+
+    bool callbackEnumIsFallbackPatternSource(const std::uint32_t source)
+    {
+        // Input: the shared callback enumeration source id.
+        // Processing: groups private arrays/lists/pattern probes as fallback-style evidence.
+        // Return: true when the source should be presented as fallback/pattern only.
+        switch (source)
+        {
+        case KSWORD_ARK_CALLBACK_ENUM_SOURCE_PRIVATE_PATTERN_SCAN:
+        case KSWORD_ARK_CALLBACK_ENUM_SOURCE_PRIVATE_NOTIFY_ARRAY:
+        case KSWORD_ARK_CALLBACK_ENUM_SOURCE_PRIVATE_REGISTRY_LIST:
+        case KSWORD_ARK_CALLBACK_ENUM_SOURCE_PRIVATE_OBJECT_TYPE_LIST:
+        case KSWORD_ARK_CALLBACK_ENUM_SOURCE_ETW_DYNDATA:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool callbackEnumIsUnsupportedSource(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: combines the explicit unsupported source with unsupported row status.
+        // Return: true when UI should show unsupported instead of trusted/public/fallback.
+        return entry.source == KSWORD_ARK_CALLBACK_ENUM_SOURCE_PRIVATE_UNSUPPORTED
+            || entry.status == KSWORD_ARK_CALLBACK_ENUM_STATUS_UNSUPPORTED;
+    }
+
+    bool callbackEnumIsTrustedSource(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row with legacy and reserved trust metadata.
+        // Processing: treats Ksword-owned rows as trusted today and leaves PDB trust flags
+        //             reserved for future protocol parsing.
+        // Return: true for rows that are trusted without requiring private fallback evidence.
+        return entry.source == KSWORD_ARK_CALLBACK_ENUM_SOURCE_KSWORD_SELF
+            || callbackEnumHasField(entry, KSWORD_ARK_CALLBACK_ENUM_FIELD_OWNED_BY_KSWORD)
+            || callbackEnumFieldIndicatesTrusted(entry)
+            || callbackEnumTrustFlagsIndicateTrusted(entry);
+    }
+
+    QString callbackEnumSourceTrustText(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: collapses current source ids plus reserved trust flags into the four
+        //             UX buckets requested for PDB trusted callback readiness.
+        // Return: display text that includes trusted/fallback/public api/unsupported keywords.
+        if (callbackEnumIsUnsupportedSource(entry))
+        {
+            return QStringLiteral("unsupported（当前协议/平台未支持）");
+        }
+        if (callbackEnumIsTrustedSource(entry))
+        {
+            return QStringLiteral("trusted（可信/自有或预留 PDB）");
+        }
+        if (callbackEnumIsPublicApiSource(entry.source)
+            || callbackEnumTrustFlagsIndicatePublicApi(entry)
+            || callbackEnumRemoveBehaviorIndicatesPublicApi(entry))
+        {
+            return QStringLiteral("public api（公开 API）");
+        }
+        if (callbackEnumIsFallbackPatternSource(entry.source)
+            || callbackEnumTrustFlagsIndicateFallbackPattern(entry))
+        {
+            return QStringLiteral("fallback/pattern（私有结构诊断）");
+        }
+        return QStringLiteral("fallback（未知来源保守展示）");
+    }
+
+    std::uint32_t callbackEnumRemoveTypeForClass(const std::uint32_t callbackClass)
+    {
+        // Input: callback enum class from the shared enum protocol.
+        // Processing: maps enum classes to the old REMOVE_EXTERNAL_CALLBACK request classes.
+        // Return: external remove class id; 0 means no compatible old remove request exists.
+        switch (callbackClass)
+        {
+        case KSWORD_ARK_CALLBACK_ENUM_CLASS_REGISTRY:
+            return KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_REGISTRY;
+        case KSWORD_ARK_CALLBACK_ENUM_CLASS_PROCESS:
+            return KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_PROCESS;
+        case KSWORD_ARK_CALLBACK_ENUM_CLASS_THREAD:
+            return KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_THREAD;
+        case KSWORD_ARK_CALLBACK_ENUM_CLASS_IMAGE:
+            return KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_IMAGE;
+        case KSWORD_ARK_CALLBACK_ENUM_CLASS_OBJECT:
+            return KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_OBJECT;
+        case KSWORD_ARK_CALLBACK_ENUM_CLASS_MINIFILTER:
+            return KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_MINIFILTER;
+        case KSWORD_ARK_CALLBACK_ENUM_CLASS_WFP_CALLOUT:
+            return KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_WFP_CALLOUT;
+        case KSWORD_ARK_CALLBACK_ENUM_CLASS_ETW_PROVIDER:
+            return KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_ETW_PROVIDER;
+        default:
+            return 0U;
+        }
+    }
+
+    std::uint64_t callbackEnumRemoveRequestValue(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: chooses the value accepted by the legacy remove protocol. The field is
+        //             named callbackAddress, but WFP currently carries calloutId there.
+        // Return: non-zero request value for removeExternalCallback, or 0 when unavailable.
+        if (entry.callbackAddress != 0U
+            && (callbackEnumHasField(entry, KSWORD_ARK_CALLBACK_ENUM_FIELD_CALLBACK_ADDRESS)
+                || callbackEnumHasField(entry, KSWORD_ARK_CALLBACK_ENUM_FIELD_IDENTIFIER)
+                || callbackEnumHasField(entry, KSWORD_ARK_CALLBACK_ENUM_FIELD_HANDLE)
+                || (entry.fieldFlags & KSWORD_ARK_CALLBACK_ENUM_FIELD_REMOVABLE_CANDIDATE) != 0U))
+        {
+            return entry.callbackAddress;
+        }
+        if (entry.registrationAddress != 0U
+            && callbackEnumHasField(entry, KSWORD_ARK_CALLBACK_ENUM_FIELD_IDENTIFIER))
+        {
+            return entry.registrationAddress;
+        }
+        return 0U;
+    }
+
+    bool callbackEnumHasExperimentalStorageValue(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: checks legacy diagnostic addresses and reserved raw storage metadata.
+        // Return: true when UI can describe an unlink-only candidate without sending IOCTLs.
+        return entry.rawStorageValue != 0U
+            || entry.callbackAddress != 0U
+            || entry.registrationAddress != 0U
+            || entry.contextAddress != 0U;
+    }
+
+    CallbackEnumRemovePolicyKind callbackEnumRemovePolicyKind(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: derives a conservative UI policy from legacy removable-candidate bits,
+        //             source trust class, and the presence of a legacy remove request value.
+        // Return: the display policy; this does not create any new driver protocol.
+        if (callbackEnumIsUnsupportedSource(entry)
+            || entry.status != KSWORD_ARK_CALLBACK_ENUM_STATUS_OK
+            || callbackEnumRemoveTypeForClass(entry.callbackClass) == 0U)
+        {
+            return CallbackEnumRemovePolicyKind::NotRemovable;
+        }
+
+        const bool removableCandidate =
+            callbackEnumHasField(entry, KSWORD_ARK_CALLBACK_ENUM_FIELD_REMOVABLE_CANDIDATE);
+        const bool hasLegacyRemoveValue = callbackEnumRemoveRequestValue(entry) != 0U;
+        const bool verifiedRemove =
+            callbackEnumFieldIndicatesVerifiedRemove(entry)
+            || callbackEnumRemoveBehaviorIndicatesPublicApi(entry);
+        const bool experimentalRemove =
+            callbackEnumFieldIndicatesExperimentalRemove(entry)
+            || callbackEnumRemoveBehaviorIndicatesExperimentalUnlink(entry);
+        if (hasLegacyRemoveValue
+            && (verifiedRemove || (removableCandidate && callbackEnumIsPublicApiSource(entry.source))))
+        {
+            return CallbackEnumRemovePolicyKind::RemovableVerified;
+        }
+        if (removableCandidate && hasLegacyRemoveValue)
+        {
+            return CallbackEnumRemovePolicyKind::RemovableCandidate;
+        }
+        if ((experimentalRemove
+            || callbackEnumIsFallbackPatternSource(entry.source)
+            || callbackEnumTrustFlagsIndicateFallbackPattern(entry))
+            && callbackEnumHasExperimentalStorageValue(entry))
+        {
+            return CallbackEnumRemovePolicyKind::ExperimentalOnly;
+        }
+        return CallbackEnumRemovePolicyKind::NotRemovable;
+    }
+
+    QString callbackEnumRemovePolicyText(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: converts the derived policy to stable UX wording.
+        // Return: display text containing the requested removable policy keywords.
+        switch (callbackEnumRemovePolicyKind(entry))
+        {
+        case CallbackEnumRemovePolicyKind::RemovableVerified:
+            return QStringLiteral("removable verified（公开 API 可验证）");
+        case CallbackEnumRemovePolicyKind::RemovableCandidate:
+            return QStringLiteral("removable candidate（旧协议候选）");
+        case CallbackEnumRemovePolicyKind::ExperimentalOnly:
+            return QStringLiteral("experimental only（仅预留 unlink）");
+        case CallbackEnumRemovePolicyKind::NotRemovable:
+        default:
+            return QStringLiteral("not removable（不可移除）");
+        }
+    }
+
+    bool callbackEnumCanUseLegacySafeRemove(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: allows only verified/candidate policies to call old removeExternalCallback.
+        // Return: true when the context menu may invoke ArkDriverClient::removeExternalCallback.
+        const CallbackEnumRemovePolicyKind policy = callbackEnumRemovePolicyKind(entry);
+        return policy == CallbackEnumRemovePolicyKind::RemovableVerified
+            || policy == CallbackEnumRemovePolicyKind::RemovableCandidate;
+    }
+
+    bool callbackEnumRequiresSecondConfirmation(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one cached callback row.
+        // Processing: requires confirmation for every row that can change kernel callback
+        //             state, and especially for fallback/pattern or unlink-only rows.
+        // Return: true when the detail pane/menu should require a QMessageBox confirmation.
+        return callbackEnumRemovePolicyKind(entry) != CallbackEnumRemovePolicyKind::NotRemovable;
+    }
+
+    QString callbackEnumYesNoText(const bool value)
+    {
+        // Input: boolean UI state.
+        // Processing: maps it to localized yes/no text.
+        // Return: "是" for true, "否" for false.
+        return value ? QStringLiteral("是") : QStringLiteral("否");
+    }
+
+    QString callbackEnumIdentityHashText(const std::uint64_t identityHash)
+    {
+        // Input: reserved identity hash from ArkDriverClient.
+        // Processing: keeps the current v1 protocol compatible by showing an empty value for 0.
+        // Return: hex hash text or an explicit empty placeholder.
+        if (identityHash == 0U)
+        {
+            return QStringLiteral("<空>");
+        }
+        return callbackEnumFormatAddress(identityHash);
+    }
+
+    QString callbackEnumNtStatusText(const long ntstatus)
+    {
+        // Input: NTSTATUS value returned by the driver response.
+        // Processing: formats the signed status as the conventional 8-digit hex value.
+        // Return: uppercase NTSTATUS text suitable for labels and detail panes.
+        return QStringLiteral("0x%1")
+            .arg(static_cast<qulonglong>(static_cast<std::uint32_t>(ntstatus)), 8, 16, QChar('0'))
+            .toUpper();
+    }
+
+    QString callbackEnumRemoveMappingText(const std::uint32_t mappingFlags)
+    {
+        // Input: KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_* bits from the old remove response.
+        // Processing: expands known bits while keeping unknown future bits visible.
+        // Return: human-readable mapping flag summary.
+        QStringList flagList;
+        if ((mappingFlags & KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_MODULE) != 0U)
+        {
+            flagList.push_back(QStringLiteral("module"));
+        }
+        if ((mappingFlags & KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_ENUMERATED) != 0U)
+        {
+            flagList.push_back(QStringLiteral("enumerated"));
+        }
+        if ((mappingFlags & KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_PUBLIC_API) != 0U)
+        {
+            flagList.push_back(QStringLiteral("public api"));
+        }
+        const std::uint32_t knownFlags =
+            KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_MODULE |
+            KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_ENUMERATED |
+            KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_PUBLIC_API;
+        const std::uint32_t unknownFlags = mappingFlags & ~knownFlags;
+        if (unknownFlags != 0U)
+        {
+            flagList.push_back(QStringLiteral("unknown=0x%1")
+                .arg(static_cast<qulonglong>(unknownFlags), 8, 16, QChar('0'))
+                .toUpper());
+        }
+        return flagList.isEmpty() ? QStringLiteral("<无>") : flagList.join(QStringLiteral(", "));
+    }
+
+    KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_REQUEST callbackEnumBuildLegacyRemoveRequest(const KernelCallbackEnumEntry& entry)
+    {
+        // Input: one selected callback enumeration row.
+        // Processing: maps enum metadata to the existing v1 removeExternalCallback request.
+        // Return: initialized request packet; callbackClass/address are zero when not compatible.
+        KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_REQUEST requestPacket{};
+        requestPacket.size = sizeof(requestPacket);
+        requestPacket.version = KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_PROTOCOL_VERSION;
+        requestPacket.callbackClass = callbackEnumRemoveTypeForClass(entry.callbackClass);
+        requestPacket.flags = KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_FLAG_NONE;
+        requestPacket.callbackAddress = callbackEnumRemoveRequestValue(entry);
+        return requestPacket;
+    }
+
+    QString callbackEnumLegacyRemoveDetailText(
+        const KernelCallbackEnumEntry& entry,
+        const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_REQUEST& requestPacket,
+        const ksword::ark::CallbackRemoveResult& removeResult)
+    {
+        // Input: selected row, request packet, and ArkDriverClient remove result.
+        // Processing: renders both transport and R0 semantic fields without assuming success.
+        // Return: full detail text for the callback enum detail pane.
+        const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE& responsePacket = removeResult.response;
+        const QString modulePath = QString::fromWCharArray(responsePacket.modulePath);
+        const QString serviceName = QString::fromWCharArray(responsePacket.serviceName);
+        return QStringLiteral(
+            "安全移除（公开 API）请求已执行。\n"
+            "- 类型：%1\n"
+            "- 来源：%2\n"
+            "- 可信状态：%3\n"
+            "- 移除策略：%4\n"
+            "- 请求类：%5\n"
+            "- 请求值：%6\n"
+            "- Win32：%7\n"
+            "- 返回字节：%8\n"
+            "- NTSTATUS：%9\n"
+            "- 映射标志：%10\n"
+            "- 模块路径：%11\n"
+            "- 模块基址：%12\n"
+            "- 模块大小：0x%13\n"
+            "- 服务名：%14\n"
+            "- ArkDriverClient：%15")
+            .arg(entry.classText)
+            .arg(entry.sourceText)
+            .arg(entry.sourceTrustText)
+            .arg(entry.removePolicyText)
+            .arg(static_cast<qulonglong>(requestPacket.callbackClass))
+            .arg(callbackEnumFormatAddress(requestPacket.callbackAddress))
+            .arg(static_cast<qulonglong>(removeResult.io.win32Error))
+            .arg(static_cast<qulonglong>(removeResult.io.bytesReturned))
+            .arg(callbackEnumNtStatusText(responsePacket.ntstatus))
+            .arg(callbackEnumRemoveMappingText(responsePacket.mappingFlags))
+            .arg(modulePath.isEmpty() ? QStringLiteral("<未解析>") : modulePath)
+            .arg(callbackEnumFormatAddress(responsePacket.moduleBase))
+            .arg(QString::number(static_cast<qulonglong>(responsePacket.moduleSize), 16).toUpper())
+            .arg(serviceName.isEmpty() ? QStringLiteral("<未匹配>") : serviceName)
+            .arg(QString::fromStdString(removeResult.io.message));
+    }
+
+    bool callbackEnumConfirmSafeRemove(QWidget* parentWidget, const KernelCallbackEnumEntry& entry)
+    {
+        // Input: parent widget and selected row.
+        // Processing: shows a second confirmation before any legacy remove IOCTL is sent.
+        // Return: true when the user explicitly confirms the safe public/API remove action.
+        const QString warningText = QStringLiteral(
+            "即将执行“安全移除（公开 API）”。\n\n"
+            "类别：%1\n"
+            "名称：%2\n"
+            "来源：%3\n"
+            "可信状态：%4\n"
+            "移除策略：%5\n"
+            "请求值：%6\n\n"
+            "该操作会通过 ArkDriverClient 调用旧版 removeExternalCallback；不会使用实验性 unlink。是否继续？")
+            .arg(entry.classText)
+            .arg(callbackEnumSafeText(entry.nameText))
+            .arg(entry.sourceText)
+            .arg(entry.sourceTrustText)
+            .arg(entry.removePolicyText)
+            .arg(callbackEnumFormatAddress(callbackEnumRemoveRequestValue(entry)));
+        return QMessageBox::question(
+            parentWidget,
+            QStringLiteral("安全移除（公开 API）"),
+            warningText,
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No) == QMessageBox::Yes;
+    }
+
+    void callbackEnumExecuteLegacySafeRemove(
+        QWidget* parentWidget,
+        QLabel* statusLabel,
+        CodeEditorWidget* detailEditor,
+        const KernelCallbackEnumEntry& entry)
+    {
+        // Input: UI sinks plus the selected callback row.
+        // Processing: validates the v1 packet, asks for confirmation, then calls ArkDriverClient.
+        // Return: no return value; status/detail widgets and QMessageBox carry the outcome.
+        if (!callbackEnumCanUseLegacySafeRemove(entry))
+        {
+            QMessageBox::information(
+                parentWidget,
+                QStringLiteral("安全移除（公开 API）"),
+                QStringLiteral("当前记录不是 removable verified/candidate，旧协议安全移除不可用。"));
+            return;
+        }
+
+        const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_REQUEST requestPacket =
+            callbackEnumBuildLegacyRemoveRequest(entry);
+        if (requestPacket.callbackClass == 0U || requestPacket.callbackAddress == 0U)
+        {
+            QMessageBox::warning(
+                parentWidget,
+                QStringLiteral("安全移除（公开 API）"),
+                QStringLiteral("当前记录缺少旧 removeExternalCallback 所需的类型或地址/标识值。"));
+            return;
+        }
+
+        if (!callbackEnumConfirmSafeRemove(parentWidget, entry))
+        {
+            if (statusLabel != nullptr)
+            {
+                statusLabel->setText(QStringLiteral("状态：已取消安全移除"));
+            }
+            return;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::CallbackRemoveResult removeResult =
+            driverClient.removeExternalCallback(requestPacket);
+        if (detailEditor != nullptr)
+        {
+            detailEditor->setText(callbackEnumLegacyRemoveDetailText(entry, requestPacket, removeResult));
+        }
+
+        if (!removeResult.io.ok)
+        {
+            if (statusLabel != nullptr)
+            {
+                statusLabel->setText(QStringLiteral("状态：安全移除失败，Win32=%1")
+                    .arg(static_cast<qulonglong>(removeResult.io.win32Error)));
+            }
+            QMessageBox::warning(
+                parentWidget,
+                QStringLiteral("安全移除（公开 API）"),
+                QStringLiteral("ArkDriverClient 调用失败，Win32=%1。")
+                    .arg(static_cast<qulonglong>(removeResult.io.win32Error)));
+            return;
+        }
+
+        if (removeResult.response.ntstatus >= 0)
+        {
+            if (statusLabel != nullptr)
+            {
+                statusLabel->setText(QStringLiteral("状态：安全移除完成"));
+            }
+        }
+        else
+        {
+            if (statusLabel != nullptr)
+            {
+                statusLabel->setText(QStringLiteral("状态：驱动返回失败，NTSTATUS=%1")
+                    .arg(callbackEnumNtStatusText(removeResult.response.ntstatus)));
+            }
+            QMessageBox::warning(
+                parentWidget,
+                QStringLiteral("安全移除（公开 API）"),
+                QStringLiteral("驱动返回失败，NTSTATUS=%1。")
+                    .arg(callbackEnumNtStatusText(removeResult.response.ntstatus)));
+        }
+    }
+
+    void callbackEnumShowExperimentalUnlinkNotice(
+        QWidget* parentWidget,
+        QLabel* statusLabel,
+        CodeEditorWidget* detailEditor,
+        const KernelCallbackEnumEntry& entry)
+    {
+        // Input: UI sinks plus the selected callback row.
+        // Processing: presents a strong confirmation and then stops because this UI skeleton
+        //             has no ArkDriverClient unlink execution method.
+        // Return: no return value; no driver IOCTL is sent from this UI skeleton.
+        const QString confirmText = QStringLiteral(
+            "实验性强制移除（unlink）不是默认路径，可能破坏内核链表/数组一致性，导致系统不稳定、蓝屏或安全产品状态失真。\n\n"
+            "类别：%1\n"
+            "名称：%2\n"
+            "来源：%3\n"
+            "可信状态：%4\n"
+            "移除策略：%5\n"
+            "RawStorageValue：%6\n\n"
+            "当前 UI 只做交互骨架。若继续确认，也只会检查协议启用状态，不会绕过 ArkDriverClient 直接发送 DeviceIoControl。")
+            .arg(entry.classText)
+            .arg(callbackEnumSafeText(entry.nameText))
+            .arg(entry.sourceText)
+            .arg(entry.sourceTrustText)
+            .arg(entry.removePolicyText)
+            .arg(callbackEnumFormatAddress(entry.rawStorageValue));
+        const QMessageBox::StandardButton reply = QMessageBox::warning(
+            parentWidget,
+            QStringLiteral("实验性强制移除（unlink）"),
+            confirmText,
+            QMessageBox::Yes | QMessageBox::Cancel,
+            QMessageBox::Cancel);
+        if (reply != QMessageBox::Yes)
+        {
+            if (statusLabel != nullptr)
+            {
+                statusLabel->setText(QStringLiteral("状态：已取消实验性 unlink"));
+            }
+            return;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const bool protocolEnabled = driverClient.supportsExternalCallbackExperimentalUnlink();
+        const QString protocolText = protocolEnabled
+            ? QStringLiteral("检测到扩展协议宏，但 ArkDriverClient 尚未暴露 unlink 执行方法；UI 不直接 DeviceIoControl。")
+            : QStringLiteral("当前驱动协议未启用 REMOVE_EXTERNAL_CALLBACK_EX；实验性 unlink 仅显示骨架，不发送 IOCTL。");
+        if (detailEditor != nullptr)
+        {
+            detailEditor->setText(QStringLiteral(
+                "实验性强制移除（unlink）未执行。\n"
+                "- 类型：%1\n"
+                "- 来源：%2\n"
+                "- 可信状态：%3\n"
+                "- 移除策略：%4\n"
+                "- Generation：%5\n"
+                "- IdentityHash：%6\n"
+                "- RawStorageValue：%7\n"
+                "- 协议状态：%8")
+                .arg(entry.classText)
+                .arg(entry.sourceText)
+                .arg(entry.sourceTrustText)
+                .arg(entry.removePolicyText)
+                .arg(static_cast<qulonglong>(entry.generation))
+                .arg(callbackEnumIdentityHashText(entry.identityHash))
+                .arg(callbackEnumFormatAddress(entry.rawStorageValue))
+                .arg(protocolText));
+        }
+        if (statusLabel != nullptr)
+        {
+            statusLabel->setText(protocolEnabled
+                ? QStringLiteral("状态：实验性 unlink 未执行，ArkDriverClient 未暴露执行方法")
+                : QStringLiteral("状态：实验性 unlink 未执行，当前协议未启用"));
+        }
+        QMessageBox::information(
+            parentWidget,
+            QStringLiteral("实验性强制移除（unlink）"),
+            protocolText);
     }
 
     QString callbackEnumPrimaryAddressText(const KernelCallbackEnumEntry& entry)
@@ -323,6 +966,16 @@ namespace
             && entry.callbackAddress != 0U)
         {
             return callbackEnumFormatAddress(entry.callbackAddress);
+        }
+        if ((entry.fieldFlags & KSWORD_ARK_CALLBACK_ENUM_FIELD_IDENTIFIER) != 0U
+            && entry.callbackAddress != 0U)
+        {
+            return QStringLiteral("标识 %1").arg(callbackEnumFormatAddress(entry.callbackAddress));
+        }
+        if ((entry.fieldFlags & KSWORD_ARK_CALLBACK_ENUM_FIELD_HANDLE) != 0U
+            && entry.callbackAddress != 0U)
+        {
+            return QStringLiteral("句柄 %1").arg(callbackEnumFormatAddress(entry.callbackAddress));
         }
         if ((entry.fieldFlags & KSWORD_ARK_CALLBACK_ENUM_FIELD_REGISTRATION_ADDRESS) != 0U
             && entry.registrationAddress != 0U)
@@ -367,21 +1020,30 @@ namespace
         row.source = source.source;
         row.status = source.status;
         row.fieldFlags = source.fieldFlags;
+        row.trustFlags = source.trustFlags;
+        row.removeFlags = source.removeFlags;
         row.operationMask = source.operationMask;
         row.objectTypeMask = source.objectTypeMask;
+        row.generation = source.generation;
         row.lastStatus = source.lastStatus;
         row.callbackAddress = source.callbackAddress;
         row.contextAddress = source.contextAddress;
         row.registrationAddress = source.registrationAddress;
+        row.identityHash = source.identityHash;
+        row.rawStorageValue = source.rawStorageValue;
         row.moduleBase = source.moduleBase;
         row.moduleSize = source.moduleSize;
         row.classText = callbackEnumClassText(source.callbackClass);
         row.sourceText = callbackEnumSourceText(source.source);
+        row.sourceTrustText = callbackEnumSourceTrustText(row);
+        row.removePolicyText = callbackEnumRemovePolicyText(row);
         row.statusText = callbackEnumRowStatusText(source.status, source.lastStatus);
         row.nameText = QString::fromStdWString(source.name);
         row.altitudeText = QString::fromStdWString(source.altitude);
         row.modulePathText = QString::fromStdWString(source.modulePath);
         row.detailText = QString::fromStdWString(source.detail);
+        row.requiresSecondConfirmation = callbackEnumRequiresSecondConfirmation(row);
+        row.fallbackPatternOnly = callbackEnumIsFallbackPatternSource(row.source);
         return row;
     }
 
@@ -389,7 +1051,9 @@ namespace
     {
         Class = 0,
         Source,
+        Trust,
         Status,
+        RemovePolicy,
         Name,
         CallbackAddress,
         Module,
@@ -407,8 +1071,12 @@ namespace
             return QStringLiteral("类别");
         case CallbackEnumColumn::Source:
             return QStringLiteral("来源");
+        case CallbackEnumColumn::Trust:
+            return QStringLiteral("可信状态");
         case CallbackEnumColumn::Status:
             return QStringLiteral("状态");
+        case CallbackEnumColumn::RemovePolicy:
+            return QStringLiteral("移除策略");
         case CallbackEnumColumn::Name:
             return QStringLiteral("名称");
         case CallbackEnumColumn::CallbackAddress:
@@ -434,8 +1102,12 @@ namespace
             return entry.classText;
         case CallbackEnumColumn::Source:
             return entry.sourceText;
+        case CallbackEnumColumn::Trust:
+            return entry.sourceTrustText;
         case CallbackEnumColumn::Status:
             return entry.statusText;
+        case CallbackEnumColumn::RemovePolicy:
+            return entry.removePolicyText;
         case CallbackEnumColumn::Name:
             return callbackEnumSafeText(entry.nameText);
         case CallbackEnumColumn::CallbackAddress:
@@ -577,7 +1249,7 @@ void KernelDock::initializeCallbackEnumTab()
     m_refreshCallbackEnumButton->setFixedWidth(34);
 
     m_callbackEnumFilterEdit = new QLineEdit(m_callbackEnumPage);
-    m_callbackEnumFilterEdit->setPlaceholderText(QStringLiteral("按类别/来源/状态/名称/地址/模块/Altitude筛选"));
+    m_callbackEnumFilterEdit->setPlaceholderText(QStringLiteral("按类别/来源/可信状态/移除策略/名称/地址/模块/Altitude筛选"));
     m_callbackEnumFilterEdit->setToolTip(QStringLiteral("输入关键字后实时过滤回调遍历结果"));
     m_callbackEnumFilterEdit->setClearButtonEnabled(true);
     m_callbackEnumFilterEdit->setStyleSheet(callbackEnumInputStyle());
@@ -598,7 +1270,9 @@ void KernelDock::initializeCallbackEnumTab()
     m_callbackEnumTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("类别"),
         QStringLiteral("来源"),
+        QStringLiteral("可信状态"),
         QStringLiteral("状态"),
+        QStringLiteral("移除策略"),
         QStringLiteral("名称"),
         QStringLiteral("回调/对象地址"),
         QStringLiteral("模块"),
@@ -615,6 +1289,8 @@ void KernelDock::initializeCallbackEnumTab()
     m_callbackEnumTable->horizontalHeader()->setStyleSheet(callbackEnumHeaderStyle());
     m_callbackEnumTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_callbackEnumTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(CallbackEnumColumn::Name), QHeaderView::Stretch);
+    m_callbackEnumTable->setColumnWidth(static_cast<int>(CallbackEnumColumn::Trust), 170);
+    m_callbackEnumTable->setColumnWidth(static_cast<int>(CallbackEnumColumn::RemovePolicy), 200);
     m_callbackEnumTable->setColumnWidth(static_cast<int>(CallbackEnumColumn::CallbackAddress), 180);
     m_callbackEnumTable->setColumnWidth(static_cast<int>(CallbackEnumColumn::Module), 220);
 
@@ -747,12 +1423,14 @@ void KernelDock::rebuildCallbackEnumTable(const QString& filterKeyword)
     for (std::size_t sourceIndex = 0; sourceIndex < m_callbackEnumRows.size(); ++sourceIndex)
     {
         const KernelCallbackEnumEntry& entry = m_callbackEnumRows[sourceIndex];
-        const QString addressText = callbackEnumFormatAddress(entry.callbackAddress);
+        const QString addressText = callbackEnumPrimaryAddressText(entry);
         const QString moduleText = entry.modulePathText.isEmpty() ? QStringLiteral("<未解析>") : entry.modulePathText;
         const bool matched = filterKeyword.isEmpty()
             || entry.classText.contains(filterKeyword, Qt::CaseInsensitive)
             || entry.sourceText.contains(filterKeyword, Qt::CaseInsensitive)
+            || entry.sourceTrustText.contains(filterKeyword, Qt::CaseInsensitive)
             || entry.statusText.contains(filterKeyword, Qt::CaseInsensitive)
+            || entry.removePolicyText.contains(filterKeyword, Qt::CaseInsensitive)
             || entry.nameText.contains(filterKeyword, Qt::CaseInsensitive)
             || addressText.contains(filterKeyword, Qt::CaseInsensitive)
             || moduleText.contains(filterKeyword, Qt::CaseInsensitive)
@@ -769,11 +1447,26 @@ void KernelDock::rebuildCallbackEnumTable(const QString& filterKeyword)
         auto* classItem = new QTableWidgetItem(entry.classText);
         classItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
         auto* sourceItem = new QTableWidgetItem(entry.sourceText);
+        auto* trustItem = new QTableWidgetItem(entry.sourceTrustText);
         auto* statusItem = new QTableWidgetItem(entry.statusText);
+        auto* removePolicyItem = new QTableWidgetItem(entry.removePolicyText);
         auto* nameItem = new QTableWidgetItem(callbackEnumSafeText(entry.nameText));
         auto* addressItem = new QTableWidgetItem(addressText);
         auto* moduleItem = new QTableWidgetItem(moduleText);
         auto* altitudeItem = new QTableWidgetItem(callbackEnumSafeText(entry.altitudeText));
+
+        if (callbackEnumIsTrustedSource(entry))
+        {
+            trustItem->setForeground(QBrush(QColor(QStringLiteral("#3A8F3A"))));
+        }
+        else if (entry.fallbackPatternOnly)
+        {
+            trustItem->setForeground(QBrush(QColor(QStringLiteral("#D77A00"))));
+        }
+        else if (callbackEnumIsUnsupportedSource(entry))
+        {
+            trustItem->setForeground(QBrush(QColor(QStringLiteral("#8A8A8A"))));
+        }
 
         if (entry.status == KSWORD_ARK_CALLBACK_ENUM_STATUS_UNSUPPORTED)
         {
@@ -784,9 +1477,26 @@ void KernelDock::rebuildCallbackEnumTable(const QString& filterKeyword)
             statusItem->setForeground(QBrush(QColor(QStringLiteral("#B23A3A"))));
         }
 
+        switch (callbackEnumRemovePolicyKind(entry))
+        {
+        case CallbackEnumRemovePolicyKind::RemovableVerified:
+            removePolicyItem->setForeground(QBrush(QColor(QStringLiteral("#3A8F3A"))));
+            break;
+        case CallbackEnumRemovePolicyKind::RemovableCandidate:
+        case CallbackEnumRemovePolicyKind::ExperimentalOnly:
+            removePolicyItem->setForeground(QBrush(QColor(QStringLiteral("#D77A00"))));
+            break;
+        case CallbackEnumRemovePolicyKind::NotRemovable:
+        default:
+            removePolicyItem->setForeground(QBrush(QColor(QStringLiteral("#8A8A8A"))));
+            break;
+        }
+
         m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Class), classItem);
         m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Source), sourceItem);
+        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Trust), trustItem);
         m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Status), statusItem);
+        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::RemovePolicy), removePolicyItem);
         m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Name), nameItem);
         m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::CallbackAddress), addressItem);
         m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Module), moduleItem);
@@ -848,25 +1558,39 @@ void KernelDock::showCallbackEnumDetailByCurrentRow()
     const QString detailText = QStringLiteral(
         "类别: %1\n"
         "来源: %2\n"
-        "状态: %3\n"
-        "名称: %4\n"
-        "Altitude: %5\n"
-        "主地址显示: %6\n"
-        "真实回调地址: %7\n"
-        "上下文/诊断值: %8\n"
-        "注册句柄/Cookie/全局节点: %9\n"
-        "模块路径: %10\n"
-        "Win32模块路径: %11\n"
-        "模块基址: %12\n"
-        "模块大小: 0x%13\n"
-        "操作掩码: 0x%14\n"
-        "对象类型掩码: 0x%15\n"
-        "字段标志: 0x%16\n"
-        "LastStatus: 0x%17\n\n"
-        "说明: 主地址显示会优先显示真实回调函数；定位/诊断行没有真实回调函数时显示全局数组、链表节点或诊断值，所以不再把这些行误判为 0 地址。\n\n"
-        "详情:\n%18")
+        "可信状态: %3\n"
+        "移除策略: %4\n"
+        "是否需要二次确认: %5\n"
+        "当前来源是否只是 fallback/pattern: %6\n"
+        "状态: %7\n"
+        "名称: %8\n"
+        "Altitude: %9\n"
+        "主地址显示: %10\n"
+        "真实回调地址: %11\n"
+        "上下文/诊断值: %12\n"
+        "注册句柄/Cookie/全局节点: %13\n"
+        "模块路径: %14\n"
+        "Win32模块路径: %15\n"
+        "模块基址: %16\n"
+        "模块大小: 0x%17\n"
+        "操作掩码: 0x%18\n"
+        "对象类型掩码: 0x%19\n"
+        "字段标志: 0x%20\n"
+        "可信标志(预留): 0x%21\n"
+        "移除标志(预留): 0x%22\n"
+        "Generation(预留): %23\n"
+        "IdentityHash(预留): %24\n"
+        "RawStorageValue(预留): %25\n"
+        "LastStatus: 0x%26\n\n"
+        "说明: 主地址显示会优先显示真实回调函数；定位/诊断行没有真实回调函数时显示全局数组、链表节点、标识符或诊断值。"
+        "旧协议尚未返回 generation/identity hash/raw storage value 时保持 0 或空值；实验 unlink 仅为 UI 预留，不作为默认路径。\n\n"
+        "详情:\n%27")
         .arg(entry->classText)
         .arg(entry->sourceText)
+        .arg(entry->sourceTrustText)
+        .arg(entry->removePolicyText)
+        .arg(callbackEnumYesNoText(entry->requiresSecondConfirmation))
+        .arg(callbackEnumYesNoText(entry->fallbackPatternOnly))
         .arg(entry->statusText)
         .arg(callbackEnumSafeText(entry->nameText))
         .arg(callbackEnumSafeText(entry->altitudeText))
@@ -881,6 +1605,11 @@ void KernelDock::showCallbackEnumDetailByCurrentRow()
         .arg(static_cast<qulonglong>(entry->operationMask), 8, 16, QChar('0'))
         .arg(static_cast<qulonglong>(entry->objectTypeMask), 8, 16, QChar('0'))
         .arg(static_cast<qulonglong>(entry->fieldFlags), 8, 16, QChar('0'))
+        .arg(static_cast<qulonglong>(entry->trustFlags), 8, 16, QChar('0'))
+        .arg(static_cast<qulonglong>(entry->removeFlags), 8, 16, QChar('0'))
+        .arg(static_cast<qulonglong>(entry->generation))
+        .arg(callbackEnumIdentityHashText(entry->identityHash))
+        .arg(callbackEnumFormatAddress(entry->rawStorageValue))
         .arg(static_cast<qulonglong>(static_cast<std::uint32_t>(entry->lastStatus)), 8, 16, QChar('0'))
         .arg(callbackEnumSafeText(entry->detailText, QStringLiteral("<无详情>")));
 
@@ -942,6 +1671,14 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
             m_callbackEnumRows[selectedSourceIndices.front()].modulePathText);
     }
     const bool hasModuleFile = !clickedModulePath.isEmpty() && QFileInfo(clickedModulePath).exists();
+    const KernelCallbackEnumEntry* actionEntry = nullptr;
+    if (selectedSourceIndices.size() == 1U && selectedSourceIndices.front() < m_callbackEnumRows.size())
+    {
+        actionEntry = &m_callbackEnumRows[selectedSourceIndices.front()];
+    }
+    const bool hasSingleActionEntry = actionEntry != nullptr;
+    const bool canUseLegacySafeRemove =
+        hasSingleActionEntry && callbackEnumCanUseLegacySafeRemove(*actionEntry);
 
     QMenu contextMenu(this);
     contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
@@ -957,6 +1694,14 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
         QStringLiteral("模块文件详细信息"));
     openModuleFolderAction->setEnabled(hasModuleFile);
     moduleFileDetailAction->setEnabled(hasModuleFile);
+    contextMenu.addSeparator();
+
+    QAction* safeRemoveAction = contextMenu.addAction(QStringLiteral("安全移除（公开 API）"));
+    safeRemoveAction->setToolTip(QStringLiteral("通过 ArkDriverClient::removeExternalCallback 调用旧协议安全移除路径"));
+    safeRemoveAction->setEnabled(canUseLegacySafeRemove);
+    QAction* experimentalUnlinkAction = contextMenu.addAction(QStringLiteral("实验性强制移除（unlink）"));
+    experimentalUnlinkAction->setToolTip(QStringLiteral("UI 骨架：需要强确认；当前协议未启用时不会发送 IOCTL"));
+    experimentalUnlinkAction->setEnabled(hasSingleActionEntry);
     contextMenu.addSeparator();
 
     QMenu* copyMenu = contextMenu.addMenu(
@@ -1018,6 +1763,32 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
         if (m_callbackEnumStatusLabel != nullptr)
         {
             m_callbackEnumStatusLabel->setText(QStringLiteral("状态：已打开模块文件详细信息"));
+        }
+        return;
+    }
+
+    if (selectedAction == safeRemoveAction)
+    {
+        if (actionEntry != nullptr)
+        {
+            callbackEnumExecuteLegacySafeRemove(
+                this,
+                m_callbackEnumStatusLabel,
+                m_callbackEnumDetailEditor,
+                *actionEntry);
+        }
+        return;
+    }
+
+    if (selectedAction == experimentalUnlinkAction)
+    {
+        if (actionEntry != nullptr)
+        {
+            callbackEnumShowExperimentalUnlinkNotice(
+                this,
+                m_callbackEnumStatusLabel,
+                m_callbackEnumDetailEditor,
+                *actionEntry);
         }
         return;
     }

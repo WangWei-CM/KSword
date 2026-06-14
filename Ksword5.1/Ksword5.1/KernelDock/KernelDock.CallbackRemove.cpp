@@ -11,6 +11,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QStringList>
 #include <QVBoxLayout>
 
 namespace
@@ -142,6 +143,39 @@ namespace
         return mappedServiceName;
     }
 
+    // callbackRemoveMappingText：
+    // - Input：旧 removeExternalCallback 响应中的 mappingFlags。
+    // - Processing：展开当前 shared 协议已定义的映射来源位，并保留未知位。
+    // - Return：用于详情面板展示的映射来源文本。
+    QString callbackRemoveMappingText(const unsigned long mappingFlags)
+    {
+        QStringList flagList;
+        if ((mappingFlags & KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_MODULE) != 0UL)
+        {
+            flagList.push_back(QStringLiteral("module"));
+        }
+        if ((mappingFlags & KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_ENUMERATED) != 0UL)
+        {
+            flagList.push_back(QStringLiteral("enumerated"));
+        }
+        if ((mappingFlags & KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_PUBLIC_API) != 0UL)
+        {
+            flagList.push_back(QStringLiteral("public api"));
+        }
+
+        const unsigned long knownFlags =
+            KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_MODULE |
+            KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_ENUMERATED |
+            KSWORD_ARK_EXTERNAL_CALLBACK_MAPPING_FLAG_PUBLIC_API;
+        const unsigned long unknownFlags = mappingFlags & ~knownFlags;
+        if (unknownFlags != 0UL)
+        {
+            flagList.push_back(QStringLiteral("unknown=0x%1")
+                .arg(static_cast<qulonglong>(unknownFlags), 8, 16, QChar('0'))
+                .toUpper());
+        }
+        return flagList.isEmpty() ? QStringLiteral("<无>") : flagList.join(QStringLiteral(", "));
+    }
 
 }
 
@@ -178,10 +212,10 @@ void KernelDock::initializeCallbackRemoveTab()
     m_callbackRemoveAddressEdit->setPlaceholderText(QStringLiteral("输入回调地址（例如 0xFFFFF80012345678）"));
     m_callbackRemoveAddressEdit->setClearButtonEnabled(true);
 
-    m_callbackRemoveButton = new QPushButton(QStringLiteral("移除回调"), m_callbackRemoveContentWidget);
+    m_callbackRemoveButton = new QPushButton(QStringLiteral("安全移除（公开 API）"), m_callbackRemoveContentWidget);
     m_callbackRemoveButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
 
-    m_callbackRemoveStatusLabel = new QLabel(QStringLiteral("状态：等待操作（当前仅前三类支持直接移除）"), m_callbackRemoveContentWidget);
+    m_callbackRemoveStatusLabel = new QLabel(QStringLiteral("状态：等待操作（旧协议安全移除；实验 unlink 不作为默认路径）"), m_callbackRemoveContentWidget);
     m_callbackRemoveStatusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
 
     m_callbackRemoveToolLayout->addWidget(new QLabel(QStringLiteral("类型："), m_callbackRemoveContentWidget));
@@ -193,7 +227,9 @@ void KernelDock::initializeCallbackRemoveTab()
 
     m_callbackRemoveDetailEditor = new CodeEditorWidget(m_callbackRemoveContentWidget);
     m_callbackRemoveDetailEditor->setReadOnly(true);
-    m_callbackRemoveDetailEditor->setText(QStringLiteral("提示：该页面通过 KswordARK 驱动调用内核接口移除指定地址的回调，并尝试映射对应模块/服务。"));
+    m_callbackRemoveDetailEditor->setText(QStringLiteral(
+        "提示：该页面继续通过 ArkDriverClient::removeExternalCallback 调用旧版安全移除路径。"
+        "实验性强制移除（unlink）只在回调遍历右键菜单做 UI 骨架；shared 协议未启用 REMOVE_EXTERNAL_CALLBACK_EX 时不会发送 unlink IOCTL。"));
     m_callbackRemoveLayout->addWidget(m_callbackRemoveDetailEditor, 1);
 
     connect(m_callbackRemoveButton, &QPushButton::clicked, this, [this]() {
@@ -212,6 +248,7 @@ void KernelDock::initializeCallbackRemoveTab()
         requestPacket.callbackAddress = callbackAddress;
 
         const ksword::ark::DriverClient driverClient;
+        const bool experimentalUnlinkEnabled = driverClient.supportsExternalCallbackExperimentalUnlink();
         const ksword::ark::CallbackRemoveResult removeResult = driverClient.removeExternalCallback(requestPacket);
         const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE& responsePacket = removeResult.response;
         const DWORD bytesReturned = removeResult.io.bytesReturned;
@@ -228,25 +265,34 @@ void KernelDock::initializeCallbackRemoveTab()
         }
 
         const QString modulePath = QString::fromWCharArray(responsePacket.modulePath);
+        const QString responseServiceName = QString::fromWCharArray(responsePacket.serviceName);
         const QString serviceName = callbackRemoveResolveServiceByModule(modulePath);
         const QString detailText = QStringLiteral(
-            "移除请求已执行。\n"
+            "安全移除（公开 API）请求已执行。\n"
             "- 类型：%1\n"
             "- 地址：0x%2\n"
             "- 返回字节：%3\n"
             "- NTSTATUS：0x%4\n"
-            "- 模块路径：%5\n"
-            "- 模块基址：0x%6\n"
-            "- 模块大小：0x%7\n"
-            "- 服务映射：%8")
+            "- 映射标志：%5\n"
+            "- 模块路径：%6\n"
+            "- 模块基址：0x%7\n"
+            "- 模块大小：0x%8\n"
+            "- 驱动返回服务名：%9\n"
+            "- 本地服务映射：%10\n"
+            "- 实验 unlink 协议：%11")
             .arg(m_callbackRemoveTypeCombo->currentText())
             .arg(QString::number(callbackAddress, 16).toUpper())
             .arg(bytesReturned)
             .arg(QString::number(static_cast<quint32>(responsePacket.ntstatus), 16).rightJustified(8, QLatin1Char('0')).toUpper())
+            .arg(callbackRemoveMappingText(responsePacket.mappingFlags))
             .arg(modulePath.isEmpty() ? QStringLiteral("未解析") : modulePath)
             .arg(QString::number(responsePacket.moduleBase, 16).toUpper())
             .arg(QString::number(responsePacket.moduleSize, 16).toUpper())
-            .arg(serviceName.isEmpty() ? QStringLiteral("未匹配") : serviceName);
+            .arg(responseServiceName.isEmpty() ? QStringLiteral("未返回") : responseServiceName)
+            .arg(serviceName.isEmpty() ? QStringLiteral("未匹配") : serviceName)
+            .arg(experimentalUnlinkEnabled
+                ? QStringLiteral("已编译扩展宏，但本页不执行 unlink")
+                : QStringLiteral("当前 shared 协议未启用 REMOVE_EXTERNAL_CALLBACK_EX"));
         m_callbackRemoveDetailEditor->setText(detailText);
 
         if (responsePacket.ntstatus >= 0)
