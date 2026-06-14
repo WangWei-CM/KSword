@@ -259,6 +259,18 @@ struct KernelDynDataSummary
     QString unavailableReasonText;       // unavailableReasonText：R0 不可用原因。
     QString statusIoMessageText;         // statusIoMessageText：R3 状态查询诊断文本。
     QString fieldsIoMessageText;         // fieldsIoMessageText：R3 字段查询诊断文本。
+    bool pdbProfileScanAttempted = false; // pdbProfileScanAttempted：是否扫描过本地 JSON profile。
+    bool pdbProfileFound = false;         // pdbProfileFound：是否找到与当前 ntoskrnl identity 精确匹配的 profile。
+    bool pdbProfileApplied = false;       // pdbProfileApplied：R0 是否接受并应用了 PDB profile。
+    long pdbProfileStatus = 0;            // pdbProfileStatus：R0 apply 返回的 NTSTATUS。
+    std::uint32_t pdbProfileAppliedFields = 0; // pdbProfileAppliedFields：R0 应用字段数。
+    std::uint32_t pdbProfileRejectedFields = 0; // pdbProfileRejectedFields：R0 拒绝字段数。
+    std::uint32_t pdbProfileUnknownFields = 0;  // pdbProfileUnknownFields：R0 不支持字段数。
+    std::uint32_t pdbProfileIgnoredJsonFields = 0; // pdbProfileIgnoredJsonFields：R3 忽略的 JSON 未知字段数。
+    QString pdbProfileNameText;           // pdbProfileNameText：匹配 profile 名称。
+    QString pdbProfilePathText;           // pdbProfilePathText：匹配 profile 文件路径。
+    QString pdbProfileMessageText;        // pdbProfileMessageText：R0/R3 profile 诊断消息。
+    QString pdbProfileIoMessageText;      // pdbProfileIoMessageText：apply IOCTL 传输诊断。
 };
 
 // ============================================================

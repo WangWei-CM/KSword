@@ -77,6 +77,7 @@ typedef struct _KSW_DYN_STATE
     BOOLEAN NtosActive;
     BOOLEAN LxcoreActive;
     BOOLEAN ExtraActive;
+    BOOLEAN PdbProfileActive;
     NTSTATUS LastStatus;
     ULONG64 CapabilityMask;
     ULONG SystemInformerDataVersion;
@@ -87,7 +88,9 @@ typedef struct _KSW_DYN_STATE
     KSW_DYN_MODULE_IDENTITY_PACKET Ntoskrnl;
     KSW_DYN_MODULE_IDENTITY_PACKET Lxcore;
     KSW_DYN_KERNEL_OFFSETS Kernel;
+    KSW_DYN_KERNEL_OFFSETS KernelSources;
     KSW_DYN_LXCORE_OFFSETS LxcoreOffsets;
+    KSW_DYN_LXCORE_OFFSETS LxcoreSources;
     WCHAR UnavailableReason[KSW_DYN_REASON_CHARS];
 } KSW_DYN_STATE, *PKSW_DYN_STATE;
 
@@ -129,6 +132,15 @@ KswordARKDynDataQueryFields(
 NTSTATUS
 KswordARKDynDataQueryCapabilities(
     _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
+KswordARKDynDataApplyProfile(
+    _In_reads_bytes_(InputBufferLength) const KSW_APPLY_DYN_PROFILE_REQUEST* Request,
+    _In_ size_t InputBufferLength,
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) KSW_APPLY_DYN_PROFILE_RESPONSE* Response,
     _In_ size_t OutputBufferLength,
     _Out_ size_t* BytesWrittenOut
     );

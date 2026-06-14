@@ -857,6 +857,46 @@ namespace ksword::ark
         std::uint64_t capabilityMask = 0;
     };
 
+    // DynDataProfileField 是 R3 JSON profile 解析后的单个字段包。
+    // 输入：fieldId/offset 来自 profiles/ark_dyndata JSON。
+    // 处理：ArkDriverClient 将该数组打包为 KSW_APPLY_DYN_PROFILE_REQUEST。
+    // 返回行为：结构本身无返回值，只作为 applyDynDataProfile 的输入。
+    struct DynDataProfileField
+    {
+        std::uint32_t fieldId = 0;
+        std::uint32_t offset = 0;
+    };
+
+    // DynDataProfileApplyInput 是驱动 apply IOCTL 的 R3 输入模型。
+    // 输入：profile 元数据、当前 ntoskrnl identity 和字段列表。
+    // 处理：客户端只负责协议打包，不解析 JSON 语义。
+    // 返回行为：传入 applyDynDataProfile 后得到 DynDataProfileApplyResult。
+    struct DynDataProfileApplyInput
+    {
+        std::string profileName;
+        std::string pdbName;
+        std::string pdbGuid;
+        std::uint32_t pdbAge = 0;
+        ArkDynModuleIdentity ntoskrnl;
+        std::vector<DynDataProfileField> fields;
+    };
+
+    // DynDataProfileApplyResult 承载 R0 合并 PDB profile 后的固定响应。
+    // 输入：无，由 DriverClient::applyDynDataProfile 返回。
+    // 处理：保存 R0 校验结果、应用字段数、状态位和消息。
+    // 返回行为：io.ok 表示 IOCTL 调用和协议响应可用；status 表示 R0 语义结果。
+    struct DynDataProfileApplyResult
+    {
+        IoResult io;
+        long status = 0;
+        std::uint32_t appliedFieldCount = 0;
+        std::uint32_t rejectedFieldCount = 0;
+        std::uint32_t unknownFieldCount = 0;
+        std::uint32_t statusFlags = 0;
+        std::uint64_t capabilityMask = 0;
+        std::wstring message;
+    };
+
     // DriverFeatureCapabilityEntry 是统一能力矩阵的一行 R3 模型。
     struct DriverFeatureCapabilityEntry
     {
