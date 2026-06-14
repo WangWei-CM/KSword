@@ -278,7 +278,9 @@
     <ClCompile Include="MonitorDock\WinAPIDock.Pipe.cpp" />
     <ClCompile Include="MonitorDock\WinAPIDock.Ui.cpp" />
     <ClCompile Include="WindowDock\WindowDock.cpp" />
-    <ClCompile Include="ksword\log\log.cpp" />
+    <ClCompile Include="ksword\log\log.cpp">
+      <ObjectFileName>$(IntDir)ksword_log.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="ksword\network\network_diagnostics_tools.cpp" />
     <ClCompile Include="ksword\network\network_download_tools.cpp" />
     <ClCompile Include="ksword\network\network_format_tools.cpp" />
