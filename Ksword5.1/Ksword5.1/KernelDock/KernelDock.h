@@ -316,6 +316,41 @@ struct KernelDriverStatusSummary
     std::uint32_t totalFeatureCount = 0;     // totalFeatureCount：R0 声明的功能总数。
     std::uint32_t returnedFeatureCount = 0;  // returnedFeatureCount：本次响应返回的功能行数。
     std::uint64_t dynDataCapabilityMask = 0; // dynDataCapabilityMask：当前 DynData capability 位图。
+    bool dynDataStatusQueryOk = false;       // dynDataStatusQueryOk：QUERY_DYN_STATUS 是否成功。
+    bool dynDataFieldsQueryOk = false;       // dynDataFieldsQueryOk：QUERY_DYN_FIELDS 是否成功。
+    bool ntoskrnlIdentityPresent = false;    // ntoskrnlIdentityPresent：R0 是否识别到当前 ntoskrnl 身份。
+    bool localPdbProfileMatched = false;     // localPdbProfileMatched：本地 pack 是否精确匹配当前 ntoskrnl。
+    bool pdbProfileActive = false;           // pdbProfileActive：R0 当前是否已应用 PDB profile。
+    bool trustedPdbOffsetsActive = false;    // trustedPdbOffsetsActive：是否已有可信 PDB 偏移参与当前 DynData。
+    std::uint32_t dynDataSystemInformerDataVersion = 0; // dynDataSystemInformerDataVersion：内置 System Informer DynData 版本。
+    std::uint32_t dynDataSystemInformerDataLength = 0;  // dynDataSystemInformerDataLength：内置 DynData 配置字节数。
+    std::uint32_t dynDataMatchedProfileClass = 0; // dynDataMatchedProfileClass：R0 匹配到的 profile class。
+    std::uint32_t dynDataMatchedProfileOffset = 0; // dynDataMatchedProfileOffset：R0 匹配字段 payload 偏移。
+    std::uint32_t dynDataMatchedFieldsId = 0; // dynDataMatchedFieldsId：R0 匹配字段集标识。
+    std::uint32_t dynDataFieldCount = 0;      // dynDataFieldCount：R0 声明的 DynData 字段总数。
+    std::uint32_t dynDataReturnedFieldCount = 0; // dynDataReturnedFieldCount：字段列表本次返回行数。
+    std::uint32_t dynDataPresentFieldCount = 0; // dynDataPresentFieldCount：当前可用字段数。
+    std::uint32_t dynDataRequiredMissingCount = 0; // dynDataRequiredMissingCount：必需字段缺失数。
+    std::uint32_t dynDataPdbProfileFieldCount = 0; // dynDataPdbProfileFieldCount：来源为 PDB profile 的可用字段数。
+    std::uint32_t dynDataRuntimePatternFieldCount = 0; // dynDataRuntimePatternFieldCount：来源为 runtime pattern 的可用字段数。
+    std::uint32_t dynDataSystemInformerFieldCount = 0; // dynDataSystemInformerFieldCount：来源为 System Informer 的可用字段数。
+    std::uint32_t dynDataExtraTableFieldCount = 0; // dynDataExtraTableFieldCount：来源为 Ksword extra table 的可用字段数。
+    std::uint32_t dynDataUnavailableFieldCount = 0; // dynDataUnavailableFieldCount：当前不可用字段数。
+    std::uint32_t ntoskrnlClassId = 0;       // ntoskrnlClassId：当前 ntoskrnl profile class。
+    std::uint32_t ntoskrnlMachine = 0;       // ntoskrnlMachine：当前 ntoskrnl PE Machine。
+    std::uint32_t ntoskrnlTimeDateStamp = 0; // ntoskrnlTimeDateStamp：当前 ntoskrnl PE TimeDateStamp。
+    std::uint32_t ntoskrnlSizeOfImage = 0;   // ntoskrnlSizeOfImage：当前 ntoskrnl PE SizeOfImage。
+    std::uint64_t ntoskrnlImageBase = 0;     // ntoskrnlImageBase：当前 ntoskrnl 加载基址。
+    QString ntoskrnlModuleNameText;          // ntoskrnlModuleNameText：当前 ntoskrnl 模块名。
+    std::uint32_t localPdbProfilePackProfileCount = 0; // localPdbProfilePackProfileCount：命中 pack 声明的 profile 总数。
+    std::uint32_t localPdbProfileFieldCount = 0; // localPdbProfileFieldCount：命中 profile 声明字段数。
+    QString localPdbProfileNameText;         // localPdbProfileNameText：本地 pack 命中的 profile 名。
+    QString localPdbProfileVersionText;      // localPdbProfileVersionText：从 profile 名提取的 Windows 版本号。
+    QString localPdbProfilePathText;         // localPdbProfilePathText：命中 pack 文件路径。
+    QString dynDataUnavailableReasonText;    // dynDataUnavailableReasonText：R0 DynData 不可用原因。
+    QString dynDataStatusIoMessageText;      // dynDataStatusIoMessageText：DynData 状态 IO 诊断。
+    QString dynDataFieldsIoMessageText;      // dynDataFieldsIoMessageText：DynData 字段 IO 诊断。
+    QString localPdbProfileMessageText;      // localPdbProfileMessageText：本地 pack 匹配诊断。
     QString lastErrorSourceText;             // lastErrorSourceText：最近错误来源。
     QString lastErrorSummaryText;            // lastErrorSummaryText：最近错误摘要。
     QString ioMessageText;                   // ioMessageText：R3 IO 诊断文本。
