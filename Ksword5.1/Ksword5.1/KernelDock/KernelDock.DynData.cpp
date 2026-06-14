@@ -684,6 +684,7 @@ namespace
         profile.applyInput.ntoskrnl = currentIdentity;
 
         std::uint32_t invalidFieldCount = 0U;
+        std::array<bool, KSW_DYN_PROFILE_MAX_FIELDS + 1U> seenFieldIds{};
         for (const QJsonValue& entryValue : fieldsArray)
         {
             const QJsonArray pairArray = entryValue.toArray();
@@ -715,6 +716,12 @@ namespace
                 invalidFieldCount += 1U;
                 continue;
             }
+            if (fieldId >= seenFieldIds.size() || seenFieldIds[fieldId])
+            {
+                invalidFieldCount += 1U;
+                continue;
+            }
+            seenFieldIds[fieldId] = true;
 
             ksword::ark::DynDataProfileField field{};
             field.fieldId = fieldId;
@@ -787,13 +794,21 @@ namespace
         }
 
         std::uint32_t invalidDictionaryFields = 0U;
+        std::array<bool, KSW_DYN_PROFILE_MAX_FIELDS + 1U> seenDictionaryFieldIds{};
         for (const QJsonValue& fieldNameValue : fieldDictionary)
         {
             std::uint32_t ignoredFieldId = 0U;
             if (!fieldNameValue.isString() || !fieldIdForProfileName(fieldNameValue.toString(), ignoredFieldId))
             {
                 invalidDictionaryFields += 1U;
+                continue;
             }
+            if (ignoredFieldId >= seenDictionaryFieldIds.size() || seenDictionaryFieldIds[ignoredFieldId])
+            {
+                invalidDictionaryFields += 1U;
+                continue;
+            }
+            seenDictionaryFieldIds[ignoredFieldId] = true;
         }
         if (invalidDictionaryFields != 0U)
         {
