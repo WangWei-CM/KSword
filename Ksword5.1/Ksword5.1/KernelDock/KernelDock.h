@@ -144,7 +144,7 @@ struct KernelInlineHookEntry
     std::uint32_t status = 0;               // status：R0 行状态。
     std::uint32_t hookType = 0;             // hookType：Inline Hook 指令形态。
     std::uint32_t flags = 0;                // flags：R0 诊断标志。
-    std::uint32_t originalByteCount = 0;    // originalByteCount：基准字节数。
+    std::uint32_t originalByteCount = 0;    // originalByteCount：R0 观察基线字节数，不代表磁盘原始字节。
     std::uint32_t currentByteCount = 0;     // currentByteCount：当前字节数。
     std::uint64_t functionAddress = 0;      // functionAddress：函数入口地址。
     std::uint64_t targetAddress = 0;        // targetAddress：解析出的跳转目标。
@@ -155,11 +155,18 @@ struct KernelInlineHookEntry
     QString targetModuleNameText;           // targetModuleNameText：目标模块名。
     QString hookTypeText;                   // hookTypeText：Hook 类型文本。
     QString statusText;                     // statusText：状态文本。
+    QString diskBaselineStatusText;         // diskBaselineStatusText：磁盘基线与内存字节的差异状态。
+    QString diskBaselinePathText;           // diskBaselinePathText：磁盘基线来源文件路径。
     QString currentBytesText;               // currentBytesText：当前字节十六进制文本。
-    QString expectedBytesText;              // expectedBytesText：基准字节十六进制文本。
+    QString observedBytesText;              // observedBytesText：R0 观察基线十六进制文本，不代表磁盘原始字节。
+    QString diskBytesText;                  // diskBytesText：R3 从磁盘同 RVA 读取的基线字节文本。
     QString detailText;                     // detailText：详情文本。
     std::vector<std::uint8_t> currentBytes; // currentBytes：当前字节缓存。
-    std::vector<std::uint8_t> expectedBytes; // expectedBytes：基准字节缓存。
+    std::vector<std::uint8_t> observedBytes; // observedBytes：R0 返回的观察基线字节缓存。
+    std::vector<std::uint8_t> diskBytes;    // diskBytes：R3 磁盘基线字节缓存。
+    std::uint64_t diskBaselineRva = 0;      // diskBaselineRva：函数地址相对模块基址的 RVA。
+    bool diskBaselineAvailable = false;     // diskBaselineAvailable：是否成功取得磁盘基线。
+    bool diskBaselineDiffers = false;       // diskBaselineDiffers：内存字节是否不同于磁盘基线。
 };
 
 // ============================================================

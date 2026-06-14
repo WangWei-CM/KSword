@@ -23,6 +23,8 @@
 
 // Qt 前置声明：减少头文件编译耦合。
 class QComboBox;
+class CodeEditorWidget;
+class QColor;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
@@ -82,6 +84,35 @@ private:
         std::uint64_t baseAddress = 0; // 基址（十六进制展示）。
     };
 
+    // LoadedModuleEvidenceRecord：
+    // - 作用：保存单个已加载模块的 R0 证据聚合结果；
+    // - 数据只用于 DriverDock 展示，不触发卸载、移除或修复动作。
+    struct LoadedModuleEvidenceRecord
+    {
+        QString moduleName;            // moduleName：被聚合的模块名。
+        QString driverObjectName;      // driverObjectName：成功解析到的 DriverObject 名称。
+        QString driverObjectStatusText;// driverObjectStatusText：DriverObject 查询状态展示文本。
+        QString driverStartMatchText;  // driverStartMatchText：DriverStart 与模块基址比对文本。
+        QString majorFunctionStatusText;// majorFunctionStatusText：MajorFunction 外跳摘要。
+        QString iatEatStatusText;      // iatEatStatusText：IAT/EAT 可疑项摘要。
+        QString inlineHookStatusText;  // inlineHookStatusText：Inline Hook 可疑项摘要。
+        QString callbackStatusText;    // callbackStatusText：Callback 引用摘要。
+        QString detailText;            // detailText：详情区可复制的证据明细。
+        bool queryAttempted = false;   // queryAttempted：是否已经尝试聚合。
+        bool driverObjectResolved = false; // driverObjectResolved：DriverObject 是否解析成功。
+        bool driverStartKnown = false; // driverStartKnown：DriverStart 是否有有效值。
+        bool driverStartMatchesBase = false; // driverStartMatchesBase：DriverStart 是否等于模块基址。
+        bool hasMajorFunctionExternalJump = false; // hasMajorFunctionExternalJump：是否存在 MajorFunction 外跳。
+        bool hasIatEatSuspicious = false; // hasIatEatSuspicious：是否存在 IAT/EAT 可疑项。
+        bool hasInlineHookSuspicious = false; // hasInlineHookSuspicious：是否存在 Inline Hook 可疑项。
+        bool hasCallbackReference = false; // hasCallbackReference：是否存在回调引用该模块。
+        bool hasScanError = false;     // hasScanError：是否存在 IO/协议/解析错误。
+        std::uint32_t majorFunctionExternalCount = 0; // majorFunctionExternalCount：外跳 MajorFunction 数量。
+        std::uint32_t iatEatSuspiciousCount = 0; // iatEatSuspiciousCount：IAT/EAT 可疑项数量。
+        std::uint32_t inlineHookSuspiciousCount = 0; // inlineHookSuspiciousCount：Inline Hook 可疑项数量。
+        std::uint32_t callbackReferenceCount = 0; // callbackReferenceCount：引用该模块的回调数量。
+    };
+
 private:
     // ========================= UI 初始化 =========================
     // initializeUi：
@@ -118,6 +149,24 @@ private:
     // - 作用：刷新已加载内核模块缓存并重建模块表格。
     void refreshLoadedKernelModuleRecords();
 
+    // refreshLoadedModuleEvidenceAsync：
+    // - 作用：使用现有 ArkDriverClient R0 查询能力聚合模块证据；
+    // - 处理逻辑：后台线程查询 DriverObject/Hook/Callback，再回投 UI；
+    // - 返回：无；结果写入 m_loadedModuleEvidenceCache。
+    void refreshLoadedModuleEvidenceAsync();
+
+    // rebuildLoadedModuleEvidenceViews：
+    // - 作用：把当前证据缓存回填到模块表格和详情区；
+    // - 处理逻辑：逐行按源索引更新证据列，并刷新当前选中模块详情；
+    // - 返回：无。
+    void rebuildLoadedModuleEvidenceViews();
+
+    // showSelectedModuleEvidenceDetail：
+    // - 作用：展示当前选中模块的证据明细；
+    // - 处理逻辑：从表格行映射到证据缓存，填充 CodeEditorWidget；
+    // - 返回：无。
+    void showSelectedModuleEvidenceDetail();
+
     // querySelectedDriverObjectInfo：
     // - 根据对象页输入的 \Driver\Name 查询 R0 DriverObject；
     // - 后台执行，完成后回填基础字段、MajorFunction 表和 DeviceObject 表。
@@ -153,6 +202,35 @@ private:
     // - removeCallbacksFirst 为 true 时，R0 先批量移除该模块可验证回调；
     // - 不执行 PsLoadedModuleList 摘链，避免 PatchGuard/蓝屏风险。
     void forceUnloadDriverFromModuleRow(int rowIndex, bool removeCallbacksFirst = false);
+
+    // queryDriverObjectForModuleEvidence：
+    // - 作用：按模块名推导 DriverObject 名称并查询 R0 对象诊断；
+    // - 处理逻辑：依次尝试 \Driver、\FileSystem、\FileSystem\Filters 候选；
+    // - 返回：true 表示解析到 DriverObject，false 表示无可用对象。
+    static bool queryDriverObjectForModuleEvidence(
+        const LoadedKernelModuleRecord& moduleRecord,
+        ksword::ark::DriverObjectQueryResult& resultOut,
+        QString& attemptedNamesTextOut);
+
+    // collectEvidenceForLoadedModules：
+    // - 作用：批量收集一轮模块证据；
+    // - 处理逻辑：复用 ArkDriverClient 现有接口，不新增 R0 协议；
+    // - 返回：每个模块对应一个 LoadedModuleEvidenceRecord。
+    static std::vector<LoadedModuleEvidenceRecord> collectEvidenceForLoadedModules(
+        const std::vector<LoadedKernelModuleRecord>& moduleRecords);
+
+    // buildPendingModuleEvidenceRecord：
+    // - 作用：构造尚未聚合证据时的占位记录；
+    // - 处理逻辑：所有证据列填入“待扫描”，详情区说明后台查询方式；
+    // - 返回：LoadedModuleEvidenceRecord 占位对象。
+    static LoadedModuleEvidenceRecord buildPendingModuleEvidenceRecord(
+        const LoadedKernelModuleRecord& moduleRecord);
+
+    // moduleEvidenceStatusColor：
+    // - 作用：按证据状态选择表格前景色；
+    // - 处理逻辑：可疑为红色，解析失败/引用为橙色，正常为绿色；
+    // - 返回：可直接设置到 QBrush 的 QColor。
+    static QColor moduleEvidenceStatusColor(const LoadedModuleEvidenceRecord& evidence);
 
     // rebuildDriverServiceTableByFilter：
     // - 作用：按过滤关键词重建驱动服务表格。
@@ -270,10 +348,15 @@ private:
     QLineEdit* m_serviceFilterEdit = nullptr;     // 服务列表过滤输入框。
     QPushButton* m_refreshServiceButton = nullptr;// 刷新服务按钮。
     QPushButton* m_refreshModuleButton = nullptr; // 刷新模块按钮。
+    QPushButton* m_refreshModuleEvidenceButton = nullptr; // 刷新模块证据按钮。
     QLabel* m_overviewStatusLabel = nullptr;      // 概览页状态标签。
     QSplitter* m_overviewSplitter = nullptr;      // 服务/模块分割器。
     QTableWidget* m_serviceTable = nullptr;       // 驱动服务表格。
     QTableWidget* m_moduleTable = nullptr;        // 已加载模块表格。
+    CodeEditorWidget* m_moduleEvidenceDetailEditor = nullptr; // 模块证据详情编辑器。
+    QLabel* m_moduleEvidenceStatusLabel = nullptr; // 模块证据聚合状态标签。
+    bool m_moduleEvidenceQuerying = false;         // 模块证据后台查询中标记。
+    std::uint64_t m_moduleEvidenceQueryTicket = 0; // 模块证据查询序号。
 
     // ========================= 页签2：驱动操作 =========================
     QWidget* m_operatePage = nullptr;                 // 操作页容器。
@@ -319,6 +402,7 @@ private:
     // ========================= 数据缓存 =========================
     std::vector<DriverServiceRecord> m_driverServiceCache;      // 驱动服务缓存。
     std::vector<LoadedKernelModuleRecord> m_loadedModuleCache;  // 已加载模块缓存。
+    std::vector<LoadedModuleEvidenceRecord> m_loadedModuleEvidenceCache; // 模块证据缓存。
     bool m_initialRefreshDone = false;                          // 首次显示时是否已完成首轮刷新。
 
     // ========================= 调试捕获线程状态 =========================

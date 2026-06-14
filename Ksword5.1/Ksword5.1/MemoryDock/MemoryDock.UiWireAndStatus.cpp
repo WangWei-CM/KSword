@@ -62,6 +62,11 @@ void MemoryDock::initializeConnections()
         if (tabIndex == 5)
         {
             driverReadMemoryFromUi();
+            return;
+        }
+        if (tabIndex == 6)
+        {
+            refreshKernelExecutableMemoryScanAsync();
         }
         });
 
@@ -1018,6 +1023,32 @@ void MemoryDock::initializeConnections()
                     QString("缓存已修改：差异块=%1，点击“应用差异到真实内存”后才会写入。")
                     .arg(diffBlocks.size()));
             }
+        });
+
+    // ========================================================
+    // Tab7：内核可执行页扫描
+    // ========================================================
+
+    connect(m_kernelExecutableRefreshButton, &QPushButton::clicked, this, [this]() {
+        kLogEvent refreshKernelExecutableEvent;
+        info << refreshKernelExecutableEvent
+            << "[MemoryDock] 内核可执行页扫描点击刷新。"
+            << eol;
+        refreshKernelExecutableMemoryScanAsync();
+        });
+
+    connect(m_kernelExecutableRiskOnlyCheck, &QCheckBox::toggled, this, [this]() {
+        rebuildKernelExecutableMemoryScanTable();
+        showKernelExecutableMemoryDetailByCurrentRow();
+        });
+
+    connect(m_kernelExecutableModuleFilterEdit, &QLineEdit::textChanged, this, [this]() {
+        rebuildKernelExecutableMemoryScanTable();
+        showKernelExecutableMemoryDetailByCurrentRow();
+        });
+
+    connect(m_kernelExecutableTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+        showKernelExecutableMemoryDetailByCurrentRow();
         });
 }
 

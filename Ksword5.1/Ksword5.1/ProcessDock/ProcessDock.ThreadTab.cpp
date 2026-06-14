@@ -8,6 +8,7 @@
 #include <QApplication>
 #include <QBrush>
 #include <QClipboard>
+#include <QColor>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -28,6 +29,7 @@
 #include <limits>
 #include <sstream>
 #include <unordered_map>
+#include <utility>
 
 namespace
 {
@@ -127,6 +129,30 @@ namespace
         }
     }
 
+    // threadR0CrossViewStatusText 作用：
+    // - 输入 threadRecord：R3 基础线程与 R0 线程扩展合并后的记录；
+    // - 处理：优先呈现 cross-view 可疑状态，再回退普通 R0 字段读取状态；
+    // - 返回：线程表“R0状态”列文本，R0-only 行明确标注 hidden suspect。
+    QString threadR0CrossViewStatusText(const ks::process::SystemThreadRecord& threadRecord)
+    {
+        const bool hiddenFromActiveThreadList =
+            (threadRecord.r0ThreadFlags & KSWORD_ARK_THREAD_FLAG_HIDDEN_FROM_ACTIVE_THREAD_LIST) != 0U;
+        const bool ownerProcessHidden =
+            (threadRecord.r0ThreadFlags & KSWORD_ARK_THREAD_FLAG_OWNER_PROCESS_HIDDEN) != 0U;
+
+        if (threadRecord.isR0OnlyThread || hiddenFromActiveThreadList)
+        {
+            return ownerProcessHidden
+                ? QStringLiteral("R0-only / hidden suspect / owner hidden")
+                : QStringLiteral("R0-only / hidden suspect");
+        }
+        if (ownerProcessHidden)
+        {
+            return QStringLiteral("Owner process hidden");
+        }
+        return threadR0StatusText(threadRecord.r0ThreadStatus);
+    }
+
     // threadDynFieldSourceText 作用：
     // - 输入 sourceValue：KSW_DYN_FIELD_SOURCE_* 字段来源枚举；
     // - 处理：把 R0 返回的来源值转换为 tooltip 可读文本；
@@ -176,8 +202,9 @@ namespace
             << QStringLiteral("WriteBytes=%1").arg(offsetText(threadRecord.r0KtWriteTransferCountOffset))
             << QStringLiteral("OtherBytes=%1").arg(offsetText(threadRecord.r0KtOtherTransferCountOffset));
 
-        return QStringLiteral("R0=%1 | StackSource=%2 | IoSource=%3 | Cap=0x%4 | Offsets: %5")
-            .arg(threadR0StatusText(threadRecord.r0ThreadStatus))
+        return QStringLiteral("R0=%1 | Flags=0x%2 | StackSource=%3 | IoSource=%4 | Cap=0x%5 | Offsets: %6")
+            .arg(threadR0CrossViewStatusText(threadRecord))
+            .arg(static_cast<qulonglong>(threadRecord.r0ThreadFlags), 0, 16)
             .arg(threadDynFieldSourceText(threadRecord.r0StackFieldSource))
             .arg(threadDynFieldSourceText(threadRecord.r0IoFieldSource))
             .arg(static_cast<qulonglong>(threadRecord.r0ThreadDynDataCapabilityMask), 0, 16)
@@ -189,6 +216,7 @@ namespace
         ks::process::SystemThreadRecord& threadRecord,
         const ksword::ark::ThreadEntry& r0Entry)
     {
+        threadRecord.r0ThreadFlags = r0Entry.flags;
         threadRecord.r0ThreadFieldFlags = r0Entry.fieldFlags;
         threadRecord.r0ThreadStatus = r0Entry.r0Status;
         threadRecord.r0StackFieldSource = r0Entry.stackFieldSource;
@@ -226,7 +254,8 @@ namespace
     {
         const ksword::ark::DriverClient driverClient;
         const ksword::ark::ThreadEnumResult r0Result =
-            driverClient.enumerateThreads(KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_ALL);
+            driverClient.enumerateThreads(
+                KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_ALL | KSWORD_ARK_ENUM_THREAD_FLAG_SCAN_CID_TABLE);
         if (!r0Result.io.ok)
         {
             if (diagnosticTextOut != nullptr)
@@ -242,6 +271,7 @@ namespace
 
         std::unordered_map<ThreadIdentityKey, const ksword::ark::ThreadEntry*, ThreadIdentityKeyHash> r0ByThread;
         r0ByThread.reserve(r0Result.entries.size());
+        std::unordered_map<std::uint32_t, const ksword::ark::ThreadEntry*> r0OnlyByTid;
         for (const ksword::ark::ThreadEntry& r0Entry : r0Result.entries)
         {
             if (r0Entry.threadId == 0U)
@@ -251,8 +281,13 @@ namespace
             r0ByThread.insert_or_assign(
                 ThreadIdentityKey{ r0Entry.processId, r0Entry.threadId },
                 &r0Entry);
+            if ((r0Entry.flags & KSWORD_ARK_THREAD_FLAG_HIDDEN_FROM_ACTIVE_THREAD_LIST) != 0U)
+            {
+                r0OnlyByTid.insert_or_assign(r0Entry.threadId, &r0Entry);
+            }
         }
 
+        const std::size_t r3BaseThreadCount = threadList.size();
         std::size_t mergedCount = 0;
         for (ks::process::SystemThreadRecord& threadRecord : threadList)
         {
@@ -265,6 +300,43 @@ namespace
             ++mergedCount;
         }
 
+        std::size_t appendedR0OnlyCount = 0;
+        for (const auto& r0OnlyPair : r0OnlyByTid)
+        {
+            const ksword::ark::ThreadEntry* r0OnlyEntry = r0OnlyPair.second;
+            if (r0OnlyEntry == nullptr)
+            {
+                continue;
+            }
+
+            const bool alreadyPresent = std::any_of(
+                threadList.begin(),
+                threadList.end(),
+                [r0OnlyEntry](const ks::process::SystemThreadRecord& threadRecord)
+                {
+                    return threadRecord.threadId == r0OnlyEntry->threadId &&
+                        threadRecord.ownerPid == r0OnlyEntry->processId;
+                });
+            if (alreadyPresent)
+            {
+                continue;
+            }
+
+            ks::process::SystemThreadRecord threadRecord{};
+            threadRecord.threadId = r0OnlyEntry->threadId;
+            threadRecord.ownerPid = r0OnlyEntry->processId;
+            threadRecord.ownerProcessName = "Unknown";
+            threadRecord.priority = std::numeric_limits<int>::min();
+            threadRecord.basePriority = std::numeric_limits<int>::min();
+            threadRecord.threadState = std::numeric_limits<std::uint32_t>::max();
+            threadRecord.waitReason = std::numeric_limits<std::uint32_t>::max();
+            threadRecord.r0ThreadFlags = r0OnlyEntry->flags;
+            threadRecord.isR0OnlyThread = true;
+            mergeThreadR0Entry(threadRecord, *r0OnlyEntry);
+            threadList.push_back(std::move(threadRecord));
+            ++appendedR0OnlyCount;
+        }
+
         if (diagnosticTextOut != nullptr)
         {
             if (!diagnosticTextOut->empty())
@@ -273,7 +345,8 @@ namespace
             }
             std::ostringstream stream;
             stream << "R0 thread extension merged: " << mergedCount
-                << "/" << threadList.size()
+                << "/" << r3BaseThreadCount
+                << ", r0OnlyAppended=" << appendedR0OnlyCount
                 << ", " << r0Result.io.message;
             *diagnosticTextOut += stream.str();
         }
@@ -618,7 +691,7 @@ bool ProcessDock::threadRecordMatchesSearch(const ks::process::SystemThreadRecor
         QString("0x%1").arg(static_cast<qulonglong>(threadRecord.r0KernelStack), 0, 16).toUpper(),
         threadStateText(threadRecord.threadState),
         threadWaitReasonText(threadRecord.waitReason),
-        threadR0StatusText(threadRecord.r0ThreadStatus)
+        threadR0CrossViewStatusText(threadRecord)
     };
     for (const QString& fieldText : searchableFields)
     {
@@ -675,6 +748,8 @@ void ProcessDock::rebuildThreadTable()
             continue;
         }
 
+        const auto processIt = processRecordByPid.find(threadRecord.ownerPid);
+
         QTreeWidgetItem* rowItem = new QTreeWidgetItem();
         for (int columnIndex = 0; columnIndex < static_cast<int>(ThreadTableColumn::Count); ++columnIndex)
         {
@@ -684,10 +759,15 @@ void ProcessDock::rebuildThreadTable()
 
         // 进程列图标：优先使用进程缓存中的 imagePath，保证同进程图标可复用缓存。
         ks::process::ProcessRecord iconSourceRecord{};
-        const auto processIt = processRecordByPid.find(threadRecord.ownerPid);
         if (processIt != processRecordByPid.end() && processIt->second != nullptr)
         {
             iconSourceRecord = *(processIt->second);
+            if (threadRecord.ownerProcessName.empty() || threadRecord.ownerProcessName == "Unknown")
+            {
+                rowItem->setText(
+                    toThreadColumnIndex(ThreadTableColumn::ProcessName),
+                    QString::fromStdString(iconSourceRecord.processName.empty() ? "Unknown" : iconSourceRecord.processName));
+            }
         }
         else
         {
@@ -708,8 +788,23 @@ void ProcessDock::rebuildThreadTable()
             toThreadColumnIndex(ThreadTableColumn::ThreadR0Status),
             threadR0DiagnosticText(threadRecord));
 
-        // 已终止线程统一灰色提示，便于快速识别不可操作项。
-        if (threadRecord.threadState == 4)
+        // R0-only 线程使用红色高亮，已终止线程使用灰色高亮；两者都只影响展示。
+        if (threadRecord.isR0OnlyThread ||
+            (threadRecord.r0ThreadFlags & KSWORD_ARK_THREAD_FLAG_HIDDEN_FROM_ACTIVE_THREAD_LIST) != 0U)
+        {
+            const QColor suspectForeground = KswordTheme::IsDarkModeEnabled()
+                ? QColor(255, 140, 140)
+                : QColor(200, 32, 32);
+            const QColor suspectBackground = KswordTheme::IsDarkModeEnabled()
+                ? QColor(110, 28, 28, 140)
+                : QColor(255, 224, 224);
+            for (int columnIndex = 0; columnIndex < static_cast<int>(ThreadTableColumn::Count); ++columnIndex)
+            {
+                rowItem->setForeground(columnIndex, QBrush(suspectForeground));
+                rowItem->setBackground(columnIndex, QBrush(suspectBackground));
+            }
+        }
+        else if (threadRecord.threadState == 4)
         {
             for (int columnIndex = 0; columnIndex < static_cast<int>(ThreadTableColumn::Count); ++columnIndex)
             {
@@ -807,10 +902,18 @@ QString ProcessDock::formatThreadColumnText(
         }
         return QString::number(static_cast<qulonglong>(threadRecord.r0OtherTransferCount));
     case ThreadTableColumn::ThreadR0Status:
-        return threadR0StatusText(threadRecord.r0ThreadStatus);
+        return threadR0CrossViewStatusText(threadRecord);
     case ThreadTableColumn::Priority:
+        if (threadRecord.priority == std::numeric_limits<int>::min())
+        {
+            return QStringLiteral("N/A");
+        }
         return QString::number(threadRecord.priority);
     case ThreadTableColumn::BasePriority:
+        if (threadRecord.basePriority == std::numeric_limits<int>::min())
+        {
+            return QStringLiteral("N/A");
+        }
         return QString::number(threadRecord.basePriority);
     case ThreadTableColumn::ThreadState:
         return threadStateText(threadRecord.threadState);
@@ -1078,6 +1181,24 @@ void ProcessDock::showThreadTableContextMenu(const QPoint& localPosition)
     QAction* terminateAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_terminate.svg"),
         "结束线程");
+
+    const ks::process::SystemThreadRecord* clickedThreadRecord = selectedThreadRecord();
+    const bool clickedThreadIsR0Only =
+        clickedThreadRecord != nullptr &&
+        (clickedThreadRecord->isR0OnlyThread ||
+            ((clickedThreadRecord->r0ThreadFlags & KSWORD_ARK_THREAD_FLAG_HIDDEN_FROM_ACTIVE_THREAD_LIST) != 0U));
+    if (clickedThreadIsR0Only)
+    {
+        // R0-only/CID-only 行只做检测展示：不把 suspect TID 交给现有 R3 操作动作。
+        stackAction->setEnabled(false);
+        suspendAction->setEnabled(false);
+        resumeAction->setEnabled(false);
+        terminateAction->setEnabled(false);
+        stackAction->setToolTip(QStringLiteral("R0-only / hidden suspect 行只读展示，不执行线程操作。"));
+        suspendAction->setToolTip(QStringLiteral("R0-only / hidden suspect 行只读展示，不执行线程操作。"));
+        resumeAction->setToolTip(QStringLiteral("R0-only / hidden suspect 行只读展示，不执行线程操作。"));
+        terminateAction->setToolTip(QStringLiteral("R0-only / hidden suspect 行只读展示，不执行线程操作。"));
+    }
 
     m_threadContextMenuVisible = true;
     QAction* selectedAction = contextMenu.exec(m_threadTable->viewport()->mapToGlobal(localPosition));

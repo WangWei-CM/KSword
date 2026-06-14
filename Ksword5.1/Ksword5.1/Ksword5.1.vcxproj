@@ -137,6 +137,7 @@
     <ClCompile Include="DriverDock\DriverDock.Ui.cpp" />
     <ClCompile Include="DriverDock\DriverDock.Operation.cpp" />
     <ClCompile Include="DriverDock\DriverDock.DebugAndUtils.cpp" />
+    <ClCompile Include="DriverDock\DriverDock.Evidence.cpp" />
     <ClCompile Include="FileDock\FileDock.cpp" />
     <ClCompile Include="FileDock\FileDock.HandleUsage.cpp" />
     <ClCompile Include="FileDock\FileHandleUsageScanner.cpp" />
@@ -192,6 +193,7 @@
     <ClCompile Include="MiscDock\DiskEditor\DiskMapWidget.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.DriverMemoryRw.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDock.KernelExecutableMemory.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.UiBuild.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.UiWireAndStatus.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.ProcessRegion.cpp" />
@@ -270,6 +272,7 @@
     <ClCompile Include="UI\HexEditorWidget.Ui.cpp" />
     <ClCompile Include="UI\HexEditorWidget.Tools.cpp" />
     <ClCompile Include="UI\PerformanceNavCard.cpp" />
+    <ClCompile Include="UI\TableColumnAutoFit.cpp" />
     <ClCompile Include="UI\ThemedMessageBox.cpp" />
     <ClCompile Include="UI\UIBaseFunction.cpp" />
     <ClCompile Include="WelcomeDock\WelcomeDock.cpp" />
@@ -353,6 +356,7 @@
     <ClInclude Include="ksword\string\string.h" />
     <ClInclude Include="theme.h" />
     <ClInclude Include="UI\FlatTableModel.h" />
+    <ClInclude Include="UI\TableColumnAutoFit.h" />
     <ClInclude Include="UI\UI_All.h" />
     <QtMoc Include="DriverDock\DriverDock.h" />
     <ClInclude Include="DriverDock\DriverDock.Internal.h" />

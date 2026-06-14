@@ -13,6 +13,7 @@
 #include "Framework.h"
 #include "UI/ThemedMessageBox.h"
 #include "UI/GlobalDialogTheme.h"
+#include "UI/TableColumnAutoFit.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -991,6 +992,8 @@ int main(int argc, char* argv[])
     startupTraceRaw("InstallGlobalMessageBoxTheme finished");
     ks::ui::InstallGlobalDialogTheme(&app);
     startupTraceRaw("InstallGlobalDialogTheme finished");
+    ks::ui::InstallGlobalTableColumnAutoFit(&app);
+    startupTraceRaw("InstallGlobalTableColumnAutoFit finished");
     const QStringList argumentList = QCoreApplication::arguments();
     startupTraceRaw(
         std::string("QCoreApplication::arguments fetched, count=")

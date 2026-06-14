@@ -229,7 +229,7 @@ Arguments:
     ModuleEntry - 当前模块。
     FunctionName - 函数名。
     FunctionAddress - 函数地址。
-    ExpectedBytes - 当前导出地址处的基准字节。
+    ExpectedBytes - 协议兼容字段；当前实现填入运行时观察基线，不代表磁盘原始字节。
     CurrentBytes - 当前读取字节。
     HookType - 识别到的 Hook 类型。
     TargetAddress - 跳转目标。
@@ -436,6 +436,12 @@ Return Value:
                 continue;
             }
 
+            /*
+             * 中文说明：
+             * expectedBytes 是旧协议兼容字段。当前 R0 只能安全读取已加载映像内存，
+             * 因此这里写入的是运行时观察基线，不是磁盘干净基线。
+             * R3 UI 会从磁盘模块同 RVA 补充基线字节并在详情里明确标注二者差异。
+             */
             RtlCopyMemory(expectedBytes, currentBytes, sizeof(expectedBytes));
             hookType = KswordARKHookClassifyInlineBytes(
                 functionAddressValue,

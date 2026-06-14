@@ -233,6 +233,12 @@ typedef struct _KSWORD_ARK_SCAN_KERNEL_HOOKS_REQUEST
     wchar_t moduleName[KSWORD_ARK_KERNEL_HOOK_MODULE_CHARS];
 } KSWORD_ARK_SCAN_KERNEL_HOOKS_REQUEST;
 
+/*
+ * Inline Hook 行兼容说明：
+ * expectedBytes 是旧协议字段名，当前 R0 填入运行时观察基线，
+ * 不代表磁盘干净/原始字节。R3 如需干净基线，应按 moduleBase
+ * 与 functionAddress 计算 RVA 后从磁盘模块文件读取并自行比较。
+ */
 typedef struct _KSWORD_ARK_INLINE_HOOK_ENTRY
 {
     unsigned long status;

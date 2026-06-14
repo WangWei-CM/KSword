@@ -186,10 +186,9 @@ void NetworkDock::initializeTrafficMonitorTab()
     m_packetTable->verticalHeader()->setVisible(false);
     // 性能与自适应说明：
     // 1) 改为 Stretch，避免 ResizeToContents 在高频插入时反复全表测量导致卡顿；
-    // 2) 同时关闭横向滚动条，保证窄窗口下也保持“自适应压缩显示”。
+    // 2) 不强制隐藏横向滚动条，后续由全局列宽自适应器压缩默认列宽。
     m_packetTable->horizontalHeader()->setStretchLastSection(true);
     m_packetTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    m_packetTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     m_trafficMonitorLayout->addWidget(m_packetTable, 1);
     m_sideTabWidget->addTab(m_trafficMonitorPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("流量监控"));
@@ -268,7 +267,6 @@ void NetworkDock::initializeRateLimitTab()
     // 限速表也使用 Stretch，降低定时刷新时的 UI 重排开销。
     m_rateLimitTable->horizontalHeader()->setStretchLastSection(true);
     m_rateLimitTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    m_rateLimitTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_rateLimitLayout->addWidget(m_rateLimitTable, 1);
 
     // 限速动作日志：便于查看挂起/恢复执行结果。
@@ -346,7 +344,6 @@ void NetworkDock::initializeConnectionManageTab()
     m_tcpConnectionTable->verticalHeader()->setVisible(false);
     m_tcpConnectionTable->horizontalHeader()->setStretchLastSection(true);
     m_tcpConnectionTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    m_tcpConnectionTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_connectionSubTabWidget->addTab(m_tcpConnectionTable, QIcon(":/Icon/process_main.svg"), QStringLiteral("TCP"));
 
     // UDP 表：PID、进程、本地端点。
@@ -364,7 +361,6 @@ void NetworkDock::initializeConnectionManageTab()
     m_udpEndpointTable->verticalHeader()->setVisible(false);
     m_udpEndpointTable->horizontalHeader()->setStretchLastSection(true);
     m_udpEndpointTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    m_udpEndpointTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_connectionSubTabWidget->addTab(m_udpEndpointTable, QIcon(":/Icon/process_main.svg"), QStringLiteral("UDP"));
 
     m_sideTabWidget->addTab(m_connectionManagePage, QIcon(":/Icon/process_details.svg"), QStringLiteral("连接管理"));

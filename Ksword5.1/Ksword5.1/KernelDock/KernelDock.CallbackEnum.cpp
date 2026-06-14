@@ -1003,6 +1003,20 @@ namespace
         // Processing: presents a strong confirmation and then sends the EX request
         //             with experimental-unlink flags. R0 currently rejects the path.
         // Return: no return value; result details are shown in UI.
+        if (callbackEnumRemovePolicyKind(entry) == CallbackEnumRemovePolicyKind::NotRemovable
+            || callbackEnumRemoveRequestValue(entry) == 0U)
+        {
+            if (statusLabel != nullptr)
+            {
+                statusLabel->setText(QStringLiteral("状态：当前行不是可移除目标，未发送实验性 unlink 请求"));
+            }
+            QMessageBox::information(
+                parentWidget,
+                QStringLiteral("实验性强制移除（unlink）"),
+                QStringLiteral("当前行没有可用的回调地址/标识值，属于诊断或不可移除条目；不会发送 IOCTL。"));
+            return;
+        }
+
         const QString confirmText = QStringLiteral(
             "实验性强制移除（unlink）不是默认路径，可能破坏内核链表/数组一致性，导致系统不稳定、蓝屏或安全产品状态失真。\n\n"
             "类别：%1\n"
@@ -1785,8 +1799,12 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
         actionEntry = &m_callbackEnumRows[selectedSourceIndices.front()];
     }
     const bool hasSingleActionEntry = actionEntry != nullptr;
+    const CallbackEnumRemovePolicyKind selectedRemovePolicy =
+        hasSingleActionEntry ? callbackEnumRemovePolicyKind(*actionEntry) : CallbackEnumRemovePolicyKind::NotRemovable;
     const bool canUseLegacySafeRemove =
         hasSingleActionEntry && callbackEnumCanUseLegacySafeRemove(*actionEntry);
+    const bool canUseExperimentalUnlink =
+        hasSingleActionEntry && selectedRemovePolicy != CallbackEnumRemovePolicyKind::NotRemovable;
 
     QMenu contextMenu(this);
     contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
@@ -1808,8 +1826,8 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
     safeRemoveAction->setToolTip(QStringLiteral("通过 ArkDriverClient::removeExternalCallbackEx 发送公开 API 路径"));
     safeRemoveAction->setEnabled(canUseLegacySafeRemove);
     QAction* experimentalUnlinkAction = contextMenu.addAction(QStringLiteral("实验性强制移除（unlink）"));
-    experimentalUnlinkAction->setToolTip(QStringLiteral("需要强确认；会发送 removeExternalCallbackEx 的 experimental 请求，R0 目前可返回 STATUS_NOT_SUPPORTED。"));
-    experimentalUnlinkAction->setEnabled(hasSingleActionEntry);
+    experimentalUnlinkAction->setToolTip(QStringLiteral("需要强确认；仅对可验证/候选/实验性行开放，诊断行不会发送 IOCTL。"));
+    experimentalUnlinkAction->setEnabled(canUseExperimentalUnlink);
     contextMenu.addSeparator();
 
     QMenu* copyMenu = contextMenu.addMenu(

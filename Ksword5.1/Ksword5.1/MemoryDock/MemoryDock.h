@@ -5,10 +5,11 @@
 // 作用：
 // 1) 构建“内存”页面的完整多 Tab 交互界面；
 // 2) 提供进程附加、模块查看、内存区域浏览、扫描、十六进制查看；
-// 3) 提供断点与书签管理的基础能力。
+// 3) 提供断点、书签、R0 内存读写与内核可执行页扫描的基础能力。
 // ============================================================
 
 #include "../Framework.h"
+#include "../ArkDriverClient/ArkDriverTypes.h"
 
 #include <QWidget>
 
@@ -37,6 +38,7 @@ class QTextEdit;
 class QTimer;
 class QTreeWidget;
 class QVBoxLayout;
+class CodeEditorWidget;
 class HexEditorWidget;
 
 // Windows 句柄类型前置声明。
@@ -208,7 +210,7 @@ private:
     void initializeToolbar();
 
     // initializeTabs：
-    // - 作用：初始化五个 Tab 页。
+    // - 作用：初始化全部 MemoryDock Tab 页。
     // - 返回：无。
     void initializeTabs();
 
@@ -241,6 +243,11 @@ private:
     // - 作用：构建 Tab6（驱动内存读写）界面。
     // - 返回：无。
     void initializeDriverMemoryRwTab();
+
+    // initializeKernelExecutableMemoryScanTab：
+    // - 作用：构建 Tab7（内核可执行页扫描）界面。
+    // - 返回：无。
+    void initializeKernelExecutableMemoryScanTab();
 
     // initializeConnections：
     // - 作用：统一连接各控件交互逻辑。
@@ -464,6 +471,21 @@ private:
     // - 作用：清空驱动读写页缓存和状态。
     // - 返回：无。
     void resetDriverMemoryRwState();
+
+    // refreshKernelExecutableMemoryScanAsync：
+    // - 作用：异步刷新内核可执行页扫描结果。
+    // - 返回：无。
+    void refreshKernelExecutableMemoryScanAsync();
+
+    // rebuildKernelExecutableMemoryScanTable：
+    // - 作用：按当前过滤条件重建可执行页扫描表。
+    // - 返回：无。
+    void rebuildKernelExecutableMemoryScanTable();
+
+    // showKernelExecutableMemoryDetailByCurrentRow：
+    // - 作用：把当前选中行写入详情 CodeEditorWidget。
+    // - 返回：无。
+    void showKernelExecutableMemoryDetailByCurrentRow();
 
     // updateDriverMemoryBaseComboFromProcessCache：
     // - 作用：用当前进程缓存重建 Tab6 的“偏移基址/目标进程”下拉框。
@@ -736,6 +758,19 @@ private:
     QLabel* m_driverMemoryStatusLabel = nullptr;      // R0 读写状态标签。
     HexEditorWidget* m_driverMemoryHexEditor = nullptr; // 可编辑缓存视图。
 
+    // ========================================================
+    // Tab7：内核可执行页扫描
+    // ========================================================
+
+    QWidget* m_tabKernelExecutableMemory = nullptr;    // Tab7 页面容器。
+    QPushButton* m_kernelExecutableRefreshButton = nullptr; // 刷新按钮。
+    QCheckBox* m_kernelExecutableRiskOnlyCheck = nullptr;   // 仅风险项过滤。
+    QLineEdit* m_kernelExecutableModuleFilterEdit = nullptr; // 模块路径过滤输入框。
+    QLabel* m_kernelExecutableStatusLabel = nullptr;         // 刷新状态标签。
+    QTableWidget* m_kernelExecutableTable = nullptr;         // 可执行页扫描表。
+    CodeEditorWidget* m_kernelExecutableDetailEditor = nullptr; // 详情编辑器。
+    QLabel* m_kernelExecutableBadgeLabel = nullptr;          // 右下角 Kernel.png 标识。
+
 private:
     // ========================================================
     // 运行时状态与缓存
@@ -772,6 +807,11 @@ private:
     QByteArray m_driverMemoryOriginalBytes;            // Tab6 读取备份。
     QByteArray m_driverMemoryEditedBytes;              // Tab6 当前编辑缓存。
     bool m_driverMemoryHasSnapshot = false;            // Tab6 是否存在可写快照。
+
+    std::vector<ksword::ark::KernelExecutableMemoryPageEntry> m_kernelExecutableCache; // Tab7 扫描缓存。
+    std::atomic<bool> m_kernelExecutableRefreshInProgress{ false }; // Tab7 是否正在刷新。
+    std::atomic<std::uint64_t> m_kernelExecutableRefreshTicket{ 0 }; // Tab7 刷新票据。
+    std::size_t m_kernelExecutableVisibleCount = 0; // Tab7 当前可见行数。
 
     std::vector<BreakpointEntry> m_breakpointCache;    // 断点缓存（Tab5）。
     std::vector<BookmarkEntry> m_bookmarkCache;        // 书签缓存（Tab5）。

@@ -10,9 +10,11 @@
 
 #include "DriverDock.h"
 #include "../theme.h"
+#include "../UI/CodeEditorWidget.h"
 
 #include <QAbstractItemView>
 #include <QAction>
+#include <QBrush>
 #include <QChar>
 #include <QClipboard>
 #include <QColor>
@@ -35,6 +37,7 @@
 #include <QPlainTextEdit>
 #include <QPoint>
 #include <QPointer>
+#include <QPixmap>
 #include <QPushButton>
 #include <QRunnable>
 #include <QShowEvent>
@@ -70,6 +73,12 @@
 
 namespace ksword::driver_dock_internal
 {
+    // ModuleRecordIndexRole：
+    // - 输入：写入已加载模块表格的第一列单元格；
+    // - 处理：保存该行对应 m_loadedModuleCache/m_loadedModuleEvidenceCache 的源索引；
+    // - 返回：常量本身无返回值，读取时用于从 UI 行反查缓存。
+    constexpr int ModuleRecordIndexRole = Qt::UserRole + 41;
+
     // DbwinBufferPacket：DBWIN 共享内存中的固定布局。
     struct DbwinBufferPacket
     {

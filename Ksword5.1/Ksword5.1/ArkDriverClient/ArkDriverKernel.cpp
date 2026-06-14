@@ -20,6 +20,12 @@ namespace ksword::ark
         constexpr std::size_t kIatEatHookResponseHeaderSize =
             sizeof(KSWORD_ARK_ENUM_IAT_EAT_HOOKS_RESPONSE) - sizeof(KSWORD_ARK_IAT_EAT_HOOK_ENTRY);
 
+        inline constexpr unsigned long kScanKernelExecutableMemoryDefaultMaxEntries = 4096UL;
+
+        constexpr std::size_t kKernelExecutableMemoryResponseHeaderSize =
+            sizeof(KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE) -
+            sizeof(KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY);
+
         std::string fixedKernelAnsiToString(const char* textBuffer, const std::size_t maxBytes)
         {
             if (textBuffer == nullptr || maxBytes == 0U)
@@ -64,6 +70,15 @@ namespace ksword::ark
                 std::copy(source.data(), source.data() + copyChars, destination);
             }
             destination[copyChars] = L'\0';
+        }
+
+        bool isUnsupportedIoctlError(const unsigned long win32Error)
+        {
+            // 作用：判断旧驱动未注册新 IOCTL 的典型 Win32 错误码。
+            // 返回：true 表示 UI 应显示“不支持/驱动版本过旧”。
+            return win32Error == ERROR_INVALID_FUNCTION ||
+                win32Error == ERROR_NOT_SUPPORTED ||
+                win32Error == ERROR_INVALID_PARAMETER;
         }
 
         void copyVectorToFixedBytes(
@@ -370,6 +385,134 @@ namespace ksword::ark
             << ", lastStatus=0x" << std::hex << static_cast<unsigned long>(patchResult.lastStatus);
         patchResult.io.message = stream.str();
         return patchResult;
+    }
+
+    KernelExecutableMemoryScanResult DriverClient::scanKernelExecutableMemory(
+        const unsigned long flags,
+        const unsigned long maxEntries,
+        const std::wstring& modulePathFilter) const
+    {
+        // 作用：消费 Prompt-1 的内核可执行页扫描 IOCTL，并把变长响应解析为 R3 model。
+        // 处理：R3 只做只读扫描请求；旧驱动未注册该 IOCTL 时返回 unsupported=true。
+        // 返回：KernelExecutableMemoryScanResult，io.ok 表示传输和协议解析成功。
+        KernelExecutableMemoryScanResult scanResult{};
+        KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST request{};
+        request.flags = flags;
+        request.maxEntries = (maxEntries == 0UL)
+            ? kScanKernelExecutableMemoryDefaultMaxEntries
+            : maxEntries;
+        request.startAddress = 0ULL;
+        request.endAddress = 0ULL;
+        (void)modulePathFilter;
+
+        std::vector<std::uint8_t> responseBuffer(4U * 1024U * 1024U, 0U);
+        scanResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            responseBuffer.data(),
+            static_cast<unsigned long>(responseBuffer.size()));
+        if (!scanResult.io.ok)
+        {
+            scanResult.unsupported = isUnsupportedIoctlError(scanResult.io.win32Error);
+            scanResult.io.message = scanResult.unsupported
+                ? "IOCTL_KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY unsupported or driver version is too old"
+                : "DeviceIoControl(IOCTL_KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY) failed, error=" +
+                    std::to_string(scanResult.io.win32Error);
+            return scanResult;
+        }
+
+        if (scanResult.io.bytesReturned < kKernelExecutableMemoryResponseHeaderSize)
+        {
+            scanResult.io.ok = false;
+            scanResult.io.message =
+                "kernel executable-memory response too small, bytesReturned=" +
+                std::to_string(scanResult.io.bytesReturned);
+            return scanResult;
+        }
+
+        const auto* responseHeader =
+            reinterpret_cast<const KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE*>(responseBuffer.data());
+        if (responseHeader->entrySize < sizeof(KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY))
+        {
+            scanResult.io.ok = false;
+            scanResult.io.message =
+                "kernel executable-memory entrySize invalid, entrySize=" +
+                std::to_string(responseHeader->entrySize);
+            return scanResult;
+        }
+
+        scanResult.version = static_cast<std::uint32_t>(responseHeader->version);
+        scanResult.status = static_cast<std::uint32_t>(responseHeader->status);
+        scanResult.totalCount = static_cast<std::uint32_t>(responseHeader->totalCount);
+        scanResult.returnedCount = static_cast<std::uint32_t>(responseHeader->returnedCount);
+        scanResult.moduleCount = static_cast<std::uint32_t>(responseHeader->moduleCount);
+        scanResult.lastStatus = static_cast<long>(responseHeader->lastStatus);
+        scanResult.io.ntStatus = scanResult.lastStatus;
+        if (static_cast<unsigned long>(scanResult.lastStatus) == 0xC00000BBUL ||
+            static_cast<unsigned long>(scanResult.lastStatus) == 0xC0000010UL)
+        {
+            scanResult.unsupported = true;
+            scanResult.io.ok = false;
+            scanResult.io.message =
+                "IOCTL_KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY unsupported by current driver response";
+            return scanResult;
+        }
+
+        const std::size_t availableCount =
+            (static_cast<std::size_t>(scanResult.io.bytesReturned) - kKernelExecutableMemoryResponseHeaderSize) /
+            static_cast<std::size_t>(responseHeader->entrySize);
+        const std::size_t parsedCount = std::min<std::size_t>(
+            static_cast<std::size_t>(responseHeader->returnedCount),
+            availableCount);
+        scanResult.entries.reserve(parsedCount);
+        for (std::size_t index = 0U; index < parsedCount; ++index)
+        {
+            const std::size_t entryOffset =
+                kKernelExecutableMemoryResponseHeaderSize +
+                (index * static_cast<std::size_t>(responseHeader->entrySize));
+            if (entryOffset + sizeof(KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY) > responseBuffer.size())
+            {
+                break;
+            }
+
+            const auto* sourceEntry =
+                reinterpret_cast<const KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY*>(
+                    responseBuffer.data() + entryOffset);
+            KernelExecutableMemoryPageEntry row{};
+            row.status = scanResult.status;
+            row.lastStatus = scanResult.lastStatus;
+            row.riskFlags = static_cast<std::uint32_t>(sourceEntry->riskFlags);
+            row.permissionFlags = static_cast<std::uint32_t>(sourceEntry->effectiveFlags);
+            row.ownerKind = static_cast<std::uint32_t>(sourceEntry->ownerKind);
+            row.pageCount = static_cast<std::uint32_t>(sourceEntry->pageCount);
+            row.pageSize = static_cast<std::uint32_t>(sourceEntry->pageSize);
+            row.virtualAddress = static_cast<std::uint64_t>(sourceEntry->virtualAddress);
+            row.ownerAddress = static_cast<std::uint64_t>(sourceEntry->moduleBase);
+            row.moduleBase = static_cast<std::uint64_t>(sourceEntry->moduleBase);
+            row.moduleSize = static_cast<std::uint32_t>(sourceEntry->moduleSize);
+            row.regionSize =
+                static_cast<std::uint64_t>(sourceEntry->pageCount) *
+                static_cast<std::uint64_t>(sourceEntry->pageSize);
+            row.owner = fixedKernelWideToString(
+                sourceEntry->modulePath,
+                KSWORD_ARK_KERNEL_EXEC_MODULE_PATH_CHARS);
+            row.modulePath = fixedKernelWideToString(
+                sourceEntry->modulePath,
+                KSWORD_ARK_KERNEL_EXEC_MODULE_PATH_CHARS);
+            scanResult.entries.push_back(std::move(row));
+        }
+
+        std::ostringstream stream;
+        stream << "version=" << scanResult.version
+            << ", status=" << scanResult.status
+            << ", total=" << scanResult.totalCount
+            << ", returned=" << scanResult.returnedCount
+            << ", parsed=" << scanResult.entries.size()
+            << ", modules=" << scanResult.moduleCount
+            << ", lastStatus=0x" << std::hex << static_cast<unsigned long>(scanResult.lastStatus);
+        scanResult.io.message = stream.str();
+        return scanResult;
     }
 
     KernelIatEatHookScanResult DriverClient::enumerateIatEatHooks(

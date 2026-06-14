@@ -7,6 +7,7 @@
 // 作用：
 // - 定义 Phase-11 进程虚拟内存查询、读取和差异写入协议；
 // - 定义 R0 物理内存读取、受控写入和 x64 页表解析协议；
+// - 定义 R0 内核可执行页只读扫描协议，v1 仅承诺保守扫描已加载模块映像；
 // - R3/R0 共享本文件中的结构，不在 UI 或 Client 侧重复定义；
 // - 写入协议只承载已编辑的差异块，不提供分配、释放或保护修改；
 // - 页表协议只做只读解析，不默认提供 PTE/PDE 修改能力。
@@ -21,6 +22,7 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_WRITE_PHYSICAL_MEMORY 0x82CUL
 #define KSWORD_ARK_IOCTL_FUNCTION_TRANSLATE_VIRTUAL_ADDRESS 0x82DUL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PAGE_TABLE_ENTRY 0x82EUL
+#define KSWORD_ARK_IOCTL_FUNCTION_SCAN_KERNEL_EXECUTABLE_MEMORY 0x831UL
 
 #define IOCTL_KSWORD_ARK_QUERY_VIRTUAL_MEMORY \
     CTL_CODE( \
@@ -68,6 +70,13 @@
     CTL_CODE( \
         KSWORD_ARK_IOCTL_DEVICE_TYPE, \
         KSWORD_ARK_IOCTL_FUNCTION_QUERY_PAGE_TABLE_ENTRY, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_SCAN_KERNEL_EXECUTABLE_MEMORY, \
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
 
@@ -188,6 +197,42 @@
 #define KSWORD_ARK_PAGE_TABLE_PAGE_SIZE_4KB (4UL * 1024UL)
 #define KSWORD_ARK_PAGE_TABLE_PAGE_SIZE_2MB (2UL * 1024UL * 1024UL)
 #define KSWORD_ARK_PAGE_TABLE_PAGE_SIZE_1GB (1024UL * 1024UL * 1024UL)
+
+// 内核可执行页扫描请求 flags。中文说明：flags 为 0 时返回所有已识别的模块
+// executable 页；设置过滤位时仅返回对应分类，未知位由 R0 handler 拒绝。
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_MODULE_TEXT 0x00000001UL
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_MODULE_NON_TEXT 0x00000002UL
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_WRITABLE_EXECUTABLE 0x00000004UL
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_ALL \
+    (KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_MODULE_TEXT | \
+     KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_MODULE_NON_TEXT | \
+     KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_WRITABLE_EXECUTABLE)
+
+// 内核可执行页扫描响应状态。中文说明：v1 不做全内核地址空间枚举，成功扫描
+// 也返回 CONSERVATIVE/PARTIAL_CONSERVATIVE，避免 R3 误解为完整内核覆盖。
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_STATUS_UNAVAILABLE 0UL
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_STATUS_CONSERVATIVE 1UL
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_STATUS_PARTIAL_CONSERVATIVE 2UL
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_STATUS_QUERY_FAILED 3UL
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_STATUS_INVALID_RANGE 4UL
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_STATUS_IRQL_REJECTED 5UL
+
+// 内核可执行页 ownerKind。中文说明：ownerKind 表示 R0 对该页所在模块区域的
+// 保守归类；WRITABLE_EXECUTABLE 优先级最高，随后才区分 text/non-text。
+#define KSWORD_ARK_KERNEL_EXEC_OWNER_UNKNOWN 0UL
+#define KSWORD_ARK_KERNEL_EXEC_OWNER_MODULE_TEXT 1UL
+#define KSWORD_ARK_KERNEL_EXEC_OWNER_MODULE_NON_TEXT 2UL
+#define KSWORD_ARK_KERNEL_EXEC_OWNER_MODULE_WRITABLE_EXECUTABLE 3UL
+
+// 内核可执行页 riskFlags。中文说明：这些位只描述扫描观察到的风险信号，
+// 不表示 R0 已经修改页面属性或尝试修复。
+#define KSWORD_ARK_KERNEL_EXEC_RISK_NONE 0x00000000UL
+#define KSWORD_ARK_KERNEL_EXEC_RISK_WRITABLE_EXECUTABLE 0x00000001UL
+#define KSWORD_ARK_KERNEL_EXEC_RISK_MODULE_NON_TEXT_EXECUTABLE 0x00000002UL
+#define KSWORD_ARK_KERNEL_EXEC_RISK_SECTION_WRITABLE 0x00000004UL
+#define KSWORD_ARK_KERNEL_EXEC_RISK_LARGE_PAGE 0x00000008UL
+
+#define KSWORD_ARK_KERNEL_EXEC_MODULE_PATH_CHARS 260U
 
 typedef struct _KSWORD_ARK_QUERY_VIRTUAL_MEMORY_REQUEST
 {
@@ -385,3 +430,43 @@ typedef struct _KSWORD_ARK_QUERY_PAGE_TABLE_ENTRY_RESPONSE
 {
     KSWORD_ARK_PAGE_TABLE_ENTRY_INFO info;
 } KSWORD_ARK_QUERY_PAGE_TABLE_ENTRY_RESPONSE;
+
+// 内核可执行页扫描请求。中文说明：flags 控制返回分类，maxEntries 限制 entries
+// 写回数量，startAddress/endAddress 提供可选半开地址过滤区间；该请求不携带
+// 写入、修复或页表修改参数。
+typedef struct _KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST
+{
+    unsigned long flags;
+    unsigned long maxEntries;
+    unsigned long long startAddress;
+    unsigned long long endAddress;
+} KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST;
+
+// 单条内核可执行页扫描结果。中文说明：pageCount 表示连续合并后的页数量，
+// modulePath 保存该条目所属已加载模块路径或文件名，R3 仅用于展示与过滤。
+typedef struct _KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY
+{
+    unsigned long long virtualAddress;
+    unsigned long pageCount;
+    unsigned long pageSize;
+    unsigned long effectiveFlags;
+    unsigned long long moduleBase;
+    unsigned long moduleSize;
+    unsigned long riskFlags;
+    unsigned long ownerKind;
+    wchar_t modulePath[KSWORD_ARK_KERNEL_EXEC_MODULE_PATH_CHARS];
+} KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY;
+
+// 内核可执行页扫描响应头。中文说明：status 汇总本次扫描是保守成功、部分成功
+// 还是失败；lastStatus 保留最近一次底层 NTSTATUS，entries[] 为变长结果区。
+typedef struct _KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE
+{
+    unsigned long version;
+    unsigned long status;
+    unsigned long totalCount;
+    unsigned long returnedCount;
+    unsigned long moduleCount;
+    unsigned long entrySize;
+    long lastStatus;
+    KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY entries[1];
+} KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE;

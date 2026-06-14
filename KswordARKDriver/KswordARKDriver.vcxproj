@@ -101,7 +101,7 @@
     <ClCompile Include="src\features\network\network_ioctl.c" />
     <ClCompile Include="src\features\keyboard\keyboard_query.c" />
     <ClCompile Include="src\features\keyboard\keyboard_ioctl.c" />
-  <ClCompile Include="src\features\callback\callback_external_wfp.c" /><ClCompile Include="src\features\callback\callback_external_minifilter.c" /><ClCompile Include="src\features\callback\callback_external_safe.c" /><ClCompile Include="src\features\memory\memory_physical.c" /><ClCompile Include="src\features\memory\memory_pagetable.c" /><ClCompile Include="src\features\memory\memory_ioctl.c" /></ItemGroup>
+  <ClCompile Include="src\features\callback\callback_external_wfp.c" /><ClCompile Include="src\features\callback\callback_external_minifilter.c" /><ClCompile Include="src\features\callback\callback_external_safe.c" /><ClCompile Include="src\features\memory\memory_physical.c" /><ClCompile Include="src\features\memory\memory_pagetable.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan_helpers.c" /><ClCompile Include="src\features\memory\memory_ioctl.c" /></ItemGroup>
   <ItemGroup>
     <ClInclude Include="Device.h" />
     <ClInclude Include="Driver.h" />
@@ -131,6 +131,7 @@
     <ClInclude Include="include\ark\ark_section.h" />
     <ClInclude Include="src\features\section\section_support.h" />
     <ClInclude Include="include\ark\ark_memory.h" />
+    <ClInclude Include="src\features\memory\memory_kernel_exec_scan_internal.h" />
     <ClInclude Include="include\ark\ark_file_monitor.h" />
     <ClInclude Include="src\features\file_monitor\file_monitor_internal.h" />
     <ClInclude Include="include\ark\ark_wsl_silo.h" />

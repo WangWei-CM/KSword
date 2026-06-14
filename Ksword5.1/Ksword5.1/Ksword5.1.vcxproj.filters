@@ -86,6 +86,9 @@
     <ClCompile Include="DriverDock\DriverDock.DebugAndUtils.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DriverDock\DriverDock.Evidence.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="FileDock\FileDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -165,6 +168,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDock.DriverMemoryRw.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDock.KernelExecutableMemory.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDock.UiBuild.cpp">
@@ -414,6 +420,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UI\PerformanceNavCard.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\TableColumnAutoFit.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UI\ThemedMessageBox.cpp">
@@ -700,6 +709,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\FlatTableModel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\TableColumnAutoFit.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ProcessDock\Process_Tool.h">

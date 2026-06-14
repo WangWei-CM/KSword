@@ -117,8 +117,8 @@ protected:
     void showEvent(QShowEvent* event) override;
 
     // resizeEvent 作用：
-    // - 在 Dock 尺寸变化时重新分配可见列宽；
-    // - 避免出现内部横向滚动条，保持“自适应宽度”体验。
+    // - 在 Dock 尺寸变化时请求一次进程表默认列宽自适应；
+    // - 不强制隐藏横向滚动条，用户手动拖宽列后允许滚动条按需出现。
     // 调用方式：Qt 在窗口尺寸变化时自动触发。
     // 参数 event：Qt 提供的尺寸变化事件对象（只读使用）。
     // 返回值：无。
@@ -328,6 +328,10 @@ private:
     void initializeThreadPageConnections();
     void initializeTimer();
     void updateRefreshStateUi(bool refreshing, const QString& stateText);
+    // applyAdaptiveColumnWidths 作用：
+    // - 将进程表列设置为可交互宽度模式；
+    // - 请求全局表格列宽自适应器按 viewport 压缩默认列宽；
+    // - 不返回值，也不修改横向/纵向滚动条策略。
     void applyAdaptiveColumnWidths();
     int refreshIntervalMillisecondsFromInput() const;
     void applyRefreshIntervalInput();

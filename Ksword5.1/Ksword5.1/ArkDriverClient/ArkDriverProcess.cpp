@@ -73,6 +73,9 @@ namespace ksword::ark
                 reinterpret_cast<const KSWORD_ARK_THREAD_ENTRY*>(responseBuffer.data() + entryOffset);
             ThreadEntry parsedEntry{};
 
+            // 复制线程身份和 cross-view flags：
+            // - threadId/processId 用于 R3 线程页按 PID/TID 合并；
+            // - flags 保留 R0 active-thread walk 与 CID scan 的差异标记。
             parsedEntry.threadId = static_cast<std::uint32_t>(entry->threadId);
             parsedEntry.processId = static_cast<std::uint32_t>(entry->processId);
             parsedEntry.flags = static_cast<std::uint32_t>(entry->flags);

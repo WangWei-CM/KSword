@@ -493,9 +493,10 @@ void KernelDock::initializeObjectNamespaceTab()
     m_objectNamespaceTree->setUniformRowHeights(true);
     m_objectNamespaceTree->setRootIsDecorated(true);
     m_objectNamespaceTree->header()->setStyleSheet(headerStyle());
-    // 列宽策略：始终按可用宽度自适应，避免出现横向滚动条。
+    // 列宽策略：
+    // - 初始布局仍交给全局 TableColumnAutoFit 压入可见宽度；
+    // - 不强制隐藏横向滚动条，用户拖宽列后允许 Qt 按需显示。
     m_objectNamespaceTree->header()->setSectionResizeMode(QHeaderView::Stretch);
-    m_objectNamespaceTree->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_objectNamespaceTree->setToolTip(QStringLiteral("文件管理器式对象命名空间树，支持逐级展开与右键操作"));
 
     m_objectNamespacePropertyTable = new QTableWidget(horizontalSplitter);
