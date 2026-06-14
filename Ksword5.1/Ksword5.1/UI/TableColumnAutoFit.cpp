@@ -6,9 +6,12 @@
 #include <vector>
 
 #include <QAbstractItemView>
+#include <QAbstractItemModel>
 #include <QApplication>
 #include <QEvent>
+#include <QFontMetrics>
 #include <QHeaderView>
+#include <QModelIndex>
 #include <QMouseEvent>
 #include <QPointer>
 #include <QSignalBlocker>
@@ -39,6 +42,27 @@ namespace
     constexpr int kPreferredMinimumSectionWidth = 24;
     constexpr int kAbsoluteMinimumSectionWidth = 8;
 
+    // kHeaderHorizontalPadding/kCellHorizontalPadding 作用：
+    // - 用字体度量估算列宽时补偿 item margin、网格线、排序箭头和图标留白；
+    // - 只影响自动计算的默认宽度，不改变实际绘制样式。
+    constexpr int kHeaderHorizontalPadding = 30;
+    constexpr int kCellHorizontalPadding = 22;
+
+    // kContentSampleRowLimit 作用：
+    // - 自动列宽只抽样少量行，避免大表在 UI 线程做完整 resizeToContents 扫描；
+    // - 表头和前若干可见/根行通常足以识别“PID/CPU/状态”等短列和“路径/命令行”等长列。
+    constexpr int kContentSampleRowLimit = 48;
+
+    // kMeasuredTextCharacterLimit 作用：
+    // - 极长路径/命令行只取前一段估算，避免单列权重无限放大；
+    // - 列仍会被识别为长列，并在压缩/分配剩余空间时获得更高权重。
+    constexpr int kMeasuredTextCharacterLimit = 180;
+
+    // kLongColumnExpansionThreshold 作用：
+    // - 首选宽度达到该阈值的列才参与“填满剩余宽度”；
+    // - 短文本列即使表格很宽，也不会被均分成很宽的一列。
+    constexpr int kLongColumnExpansionThreshold = 120;
+
     // kResizeGripMargin 作用：
     // - 识别用户是否在表头列边界附近按下鼠标；
     // - 只有这类动作会被视作手动调列宽，普通点击排序不禁用自动 fit。
@@ -47,7 +71,8 @@ namespace
     struct VisibleSection
     {
         int logicalIndex = -1;  // logicalIndex：QHeaderView 逻辑列号。
-        int currentWidth = 0;   // currentWidth：自动 fit 前的当前列宽，用作比例权重。
+        int currentWidth = 0;   // currentWidth：自动 fit 前的当前列宽快照，保留给调试与后续扩展。
+        int preferredWidth = 0; // preferredWidth：根据表头和抽样内容估算出的首选列宽。
         int fittedWidth = 0;    // fittedWidth：压缩/扩展后的目标列宽。
     };
 
@@ -131,13 +156,172 @@ namespace
         return qobject_cast<QTableView*>(view) != nullptr || qobject_cast<QTreeView*>(view) != nullptr;
     }
 
+    // measuredTextWidth 作用：
+    // - 用指定字体度量一段显示文本所需宽度；
+    // - 对换行文本取单行化后的前缀，避免超长内容把某列权重无限放大；
+    // - 返回值只包含文字像素宽度，不包含 item/header padding。
+    int measuredTextWidth(const QFontMetrics& fontMetrics, const QString& sourceText)
+    {
+        QString measuredText = sourceText.simplified();
+        if (measuredText.isEmpty())
+        {
+            return 0;
+        }
+
+        if (measuredText.size() > kMeasuredTextCharacterLimit)
+        {
+            measuredText = measuredText.left(kMeasuredTextCharacterLimit);
+        }
+
+        return std::max(0, fontMetrics.horizontalAdvance(measuredText));
+    }
+
+    // headerPreferredWidth 作用：
+    // - 根据模型横向表头文本估算某列表头所需宽度；
+    // - 若该列显示排序箭头，则额外补偿箭头占位；
+    // - 返回值包含表头 padding，可直接参与列宽首选值计算。
+    int headerPreferredWidth(
+        QAbstractItemView* view,
+        QHeaderView* header,
+        const int logicalIndex)
+    {
+        if (view == nullptr || header == nullptr || logicalIndex < 0)
+        {
+            return 0;
+        }
+
+        QAbstractItemModel* model = view->model();
+        const QVariant headerValue = model != nullptr
+            ? model->headerData(logicalIndex, Qt::Horizontal, Qt::DisplayRole)
+            : QVariant();
+        const int textWidth = measuredTextWidth(header->fontMetrics(), headerValue.toString());
+        const int sortIndicatorReserve = header->isSortIndicatorShown()
+            && header->sortIndicatorSection() == logicalIndex
+            ? 18
+            : 0;
+        return textWidth + kHeaderHorizontalPadding + sortIndicatorReserve;
+    }
+
+    // sampleIndexPreferredWidth 作用：
+    // - 估算单个模型索引的显示内容所需宽度；
+    // - DisplayRole 负责文字，DecorationRole/CheckStateRole 只按固定占位补偿；
+    // - treeIndentWidth 用于 QTreeView 第 0 列，补偿展开层级缩进。
+    int sampleIndexPreferredWidth(
+        const QModelIndex& index,
+        const QFontMetrics& fontMetrics,
+        const int treeIndentWidth)
+    {
+        if (!index.isValid())
+        {
+            return 0;
+        }
+
+        int widthValue = measuredTextWidth(fontMetrics, index.data(Qt::DisplayRole).toString());
+        if (index.data(Qt::DecorationRole).isValid())
+        {
+            widthValue += 20;
+        }
+        if (index.data(Qt::CheckStateRole).isValid())
+        {
+            widthValue += 18;
+        }
+
+        return widthValue + treeIndentWidth + kCellHorizontalPadding;
+    }
+
+    // contentPreferredWidth 作用：
+    // - 抽样模型前若干行，估算某列内容首选宽度；
+    // - QTreeView 会在已展开节点内继续浅层采样，避免树表子项内容完全被忽略；
+    // - 返回值包含单元格 padding，可直接参与列宽首选值计算。
+    int contentPreferredWidth(
+        QAbstractItemView* view,
+        const int logicalIndex)
+    {
+        if (view == nullptr || logicalIndex < 0 || view->model() == nullptr)
+        {
+            return 0;
+        }
+
+        QAbstractItemModel* model = view->model();
+        QTreeView* treeView = qobject_cast<QTreeView*>(view);
+        const QFontMetrics cellFontMetrics(view->font());
+        const QModelIndex rootIndex = view->rootIndex();
+        int sampledRowCount = 0;
+        int preferredWidth = 0;
+
+        // sampleParent 作用：
+        // - 从 parentIndex 下按顺序采样若干行；
+        // - 对展开的树节点递归采样，直到达到全局抽样上限；
+        // - 返回行为：无返回值，通过 sampledRowCount/preferredWidth 累积结果。
+        auto sampleParent =
+            [&](const QModelIndex& parentIndex, const int depthValue, auto&& sampleParentRef) -> void
+            {
+                if (sampledRowCount >= kContentSampleRowLimit)
+                {
+                    return;
+                }
+
+                const int rowCount = model->rowCount(parentIndex);
+                for (int rowIndex = 0;
+                    rowIndex < rowCount && sampledRowCount < kContentSampleRowLimit;
+                    ++rowIndex)
+                {
+                    const QModelIndex cellIndex = model->index(rowIndex, logicalIndex, parentIndex);
+                    if (cellIndex.isValid())
+                    {
+                        const int treeIndentWidth =
+                            treeView != nullptr && logicalIndex == 0
+                            ? std::max(0, depthValue) * treeView->indentation()
+                            : 0;
+                        preferredWidth = std::max(
+                            preferredWidth,
+                            sampleIndexPreferredWidth(cellIndex, cellFontMetrics, treeIndentWidth));
+                        ++sampledRowCount;
+                    }
+
+                    if (treeView == nullptr || sampledRowCount >= kContentSampleRowLimit)
+                    {
+                        continue;
+                    }
+
+                    const QModelIndex treeIndex = model->index(rowIndex, 0, parentIndex);
+                    if (treeIndex.isValid() && treeView->isExpanded(treeIndex))
+                    {
+                        sampleParentRef(treeIndex, depthValue + 1, sampleParentRef);
+                    }
+                }
+            };
+
+        sampleParent(rootIndex, 0, sampleParent);
+        return preferredWidth;
+    }
+
+    // sectionPreferredWidth 作用：
+    // - 综合表头、抽样内容、当前最小列宽，得到某列的内容感知首选宽度；
+    // - 返回值不会低于 minimumWidth，但可能高于 viewport，后续 fit 阶段会统一压缩。
+    int sectionPreferredWidth(
+        QAbstractItemView* view,
+        QHeaderView* header,
+        const int logicalIndex,
+        const int minimumWidth)
+    {
+        const int preferredWidth = std::max(
+            headerPreferredWidth(view, header, logicalIndex),
+            contentPreferredWidth(view, logicalIndex));
+        return std::max(minimumWidth, preferredWidth);
+    }
+
     // collectVisibleSections 作用：
     // - 按当前视觉顺序收集没有隐藏的列；
-    // - 同时读取当前列宽作为后续缩放权重。
+    // - 同时读取当前列宽与内容感知首选宽度，后续再整体压入 viewport。
+    // 参数 view：目标表格/树表视图。
     // 参数 header：目标横向表头。
     // 参数 minimumWidth：本轮 fit 使用的最小列宽。
     // 返回值：可见列集合；无列时返回空数组。
-    std::vector<VisibleSection> collectVisibleSections(QHeaderView* header, const int minimumWidth)
+    std::vector<VisibleSection> collectVisibleSections(
+        QAbstractItemView* view,
+        QHeaderView* header,
+        const int minimumWidth)
     {
         std::vector<VisibleSection> visibleSections;
         if (header == nullptr)
@@ -156,23 +340,19 @@ namespace
             }
 
             const int sectionWidth = std::max(header->sectionSize(logicalIndex), minimumWidth);
-            visibleSections.push_back({ logicalIndex, sectionWidth, sectionWidth });
+            const int preferredWidth = sectionPreferredWidth(
+                view,
+                header,
+                logicalIndex,
+                minimumWidth);
+            visibleSections.push_back({
+                logicalIndex,
+                sectionWidth,
+                preferredWidth,
+                preferredWidth });
         }
 
         return visibleSections;
-    }
-
-    // sumFittedWidths 作用：统计当前计算出的目标列宽总和。
-    // 参数 sections：可见列集合。
-    // 返回值：所有 fittedWidth 的和。
-    int sumFittedWidths(const std::vector<VisibleSection>& sections)
-    {
-        int totalWidth = 0;
-        for (const VisibleSection& section : sections)
-        {
-            totalWidth += section.fittedWidth;
-        }
-        return totalWidth;
     }
 
     // countVisibleSections 作用：
@@ -200,34 +380,11 @@ namespace
         return visibleSectionCount;
     }
 
-    // widestSectionIndex 作用：
-    // - 找到当前最宽的列；
-    // - 多余宽度优先给最宽列，减少大量窄列同时变化带来的视觉抖动。
-    // 参数 sections：可见列集合。
-    // 返回值：sections 下标；空数组时返回 -1。
-    int widestSectionIndex(const std::vector<VisibleSection>& sections)
-    {
-        if (sections.empty())
-        {
-            return -1;
-        }
-
-        int widestIndex = 0;
-        for (int index = 1; index < static_cast<int>(sections.size()); ++index)
-        {
-            if (sections[static_cast<std::size_t>(index)].fittedWidth >
-                sections[static_cast<std::size_t>(widestIndex)].fittedWidth)
-            {
-                widestIndex = index;
-            }
-        }
-        return widestIndex;
-    }
-
     // fitWidthsToAvailableSpace 作用：
-    // - 根据当前列宽比例，把总宽度压缩/扩展到 availableWidth；
-    // - 不隐藏列，不改变滚动条策略；
-    // - 当列数极多时允许列宽低于常规最小值，尽量避免默认横向滚动条。
+    // - 先按内容感知 preferredWidth 排列列宽；
+    // - 若总宽超过 viewport，则按“首选宽度 - 最小宽度”的权重压缩到 availableWidth 内；
+    // - 若总宽小于 viewport，则只把剩余空间分给长内容列，短字段列不会被强行均分放大；
+    // - 不隐藏列，不改变滚动条策略。
     // 参数 sections：可见列集合，会原地写入 fittedWidth。
     // 参数 availableWidth：当前 viewport 可用宽度。
     // 参数 minimumWidth：本轮 fit 使用的最小列宽。
@@ -242,57 +399,166 @@ namespace
             return;
         }
 
-        int currentTotalWidth = 0;
-        for (const VisibleSection& section : sections)
+        const int sectionCount = static_cast<int>(sections.size());
+        for (VisibleSection& section : sections)
         {
-            currentTotalWidth += section.currentWidth;
-        }
-        if (currentTotalWidth <= 0)
-        {
-            currentTotalWidth = static_cast<int>(sections.size()) * minimumWidth;
+            section.fittedWidth = std::max(minimumWidth, section.preferredWidth);
         }
 
-        if (currentTotalWidth > availableWidth)
+        const auto totalFittedWidth =
+            [&sections]() -> int
+            {
+                int totalWidth = 0;
+                for (const VisibleSection& section : sections)
+                {
+                    totalWidth += section.fittedWidth;
+                }
+                return totalWidth;
+            };
+
+        int fittedTotalWidth = totalFittedWidth();
+        if (fittedTotalWidth == availableWidth)
         {
-            const double scaleRatio = static_cast<double>(availableWidth) /
-                static_cast<double>(currentTotalWidth);
+            return;
+        }
+
+        if (fittedTotalWidth < availableWidth)
+        {
+            int remainingWidth = availableWidth - fittedTotalWidth;
+            int totalExpansionWeight = 0;
+            for (const VisibleSection& section : sections)
+            {
+                if (section.preferredWidth >= kLongColumnExpansionThreshold)
+                {
+                    totalExpansionWeight += std::max(
+                        1,
+                        section.preferredWidth - kLongColumnExpansionThreshold);
+                }
+            }
+
+            // 没有明显长内容列时保留右侧空白，而不是把所有短列平均拉宽。
+            if (totalExpansionWeight <= 0)
+            {
+                return;
+            }
+
             for (VisibleSection& section : sections)
             {
-                section.fittedWidth = std::max(
-                    minimumWidth,
-                    static_cast<int>(static_cast<double>(section.currentWidth) * scaleRatio));
+                if (section.preferredWidth < kLongColumnExpansionThreshold)
+                {
+                    continue;
+                }
+
+                const int expansionWeight = std::max(
+                    1,
+                    section.preferredWidth - kLongColumnExpansionThreshold);
+                const int extraWidth =
+                    remainingWidth * expansionWeight / totalExpansionWeight;
+                section.fittedWidth += extraWidth;
             }
+
+            int finalTotalWidth = totalFittedWidth();
+            for (VisibleSection& section : sections)
+            {
+                if (finalTotalWidth >= availableWidth)
+                {
+                    break;
+                }
+                if (section.preferredWidth < kLongColumnExpansionThreshold)
+                {
+                    continue;
+                }
+                ++section.fittedWidth;
+                ++finalTotalWidth;
+            }
+            return;
         }
 
-        int fittedTotalWidth = sumFittedWidths(sections);
-        while (fittedTotalWidth > availableWidth)
+        const int minimumTotalWidth = sectionCount * minimumWidth;
+        if (minimumTotalWidth >= availableWidth)
         {
-            const int widestIndex = widestSectionIndex(sections);
-            if (widestIndex < 0)
+            const int baseWidth = std::max(1, availableWidth / sectionCount);
+            int remainingWidth = availableWidth - baseWidth * sectionCount;
+            for (VisibleSection& section : sections)
+            {
+                section.fittedWidth = baseWidth;
+                if (remainingWidth > 0)
+                {
+                    ++section.fittedWidth;
+                    --remainingWidth;
+                }
+            }
+            return;
+        }
+
+        int remainingAssignableWidth = availableWidth - minimumTotalWidth;
+        int totalContentWeight = 0;
+        for (const VisibleSection& section : sections)
+        {
+            totalContentWeight += std::max(0, section.preferredWidth - minimumWidth);
+        }
+
+        for (VisibleSection& section : sections)
+        {
+            section.fittedWidth = minimumWidth;
+        }
+
+        if (totalContentWeight <= 0)
+        {
+            for (VisibleSection& section : sections)
+            {
+                if (remainingAssignableWidth <= 0)
+                {
+                    break;
+                }
+                ++section.fittedWidth;
+                --remainingAssignableWidth;
+            }
+            return;
+        }
+
+        for (VisibleSection& section : sections)
+        {
+            const int contentWeight = std::max(0, section.preferredWidth - minimumWidth);
+            const int extraWidth =
+                remainingAssignableWidth * contentWeight / totalContentWeight;
+            section.fittedWidth += extraWidth;
+        }
+
+        int finalTotalWidth = totalFittedWidth();
+        while (finalTotalWidth < availableWidth)
+        {
+            auto targetIt = std::max_element(
+                sections.begin(),
+                sections.end(),
+                [](const VisibleSection& leftSection, const VisibleSection& rightSection)
+                {
+                    return (leftSection.preferredWidth - leftSection.fittedWidth)
+                        < (rightSection.preferredWidth - rightSection.fittedWidth);
+                });
+            if (targetIt == sections.end())
             {
                 break;
             }
+            ++targetIt->fittedWidth;
+            ++finalTotalWidth;
+        }
 
-            VisibleSection& widestSection = sections[static_cast<std::size_t>(widestIndex)];
-            const int reducibleWidth = widestSection.fittedWidth - minimumWidth;
-            if (reducibleWidth <= 0)
+        while (finalTotalWidth > availableWidth)
+        {
+            auto targetIt = std::max_element(
+                sections.begin(),
+                sections.end(),
+                [](const VisibleSection& leftSection, const VisibleSection& rightSection)
+                {
+                    return leftSection.fittedWidth < rightSection.fittedWidth;
+                });
+            if (targetIt == sections.end() || targetIt->fittedWidth <= minimumWidth)
             {
                 break;
             }
-
-            const int reduceBy = std::min(reducibleWidth, fittedTotalWidth - availableWidth);
-            widestSection.fittedWidth -= reduceBy;
-            fittedTotalWidth -= reduceBy;
-        }
-
-        const int remainingWidth = availableWidth - fittedTotalWidth;
-        if (remainingWidth > 0)
-        {
-            const int widestIndex = widestSectionIndex(sections);
-            if (widestIndex >= 0)
-            {
-                sections[static_cast<std::size_t>(widestIndex)].fittedWidth += remainingWidth;
-            }
+            --targetIt->fittedWidth;
+            --finalTotalWidth;
         }
     }
 
@@ -337,7 +603,7 @@ namespace
         }
 
         std::vector<VisibleSection> visibleSections =
-            collectVisibleSections(header, dynamicMinimumWidth);
+            collectVisibleSections(view, header, dynamicMinimumWidth);
         if (visibleSections.empty())
         {
             return false;
