@@ -27,3 +27,23 @@ Output profiles are written to:
 ```text
 D:\KswordKernelCorpus\profiles\ark_dyndata\*.json
 ```
+
+## Callback item dry-run
+
+Use `--dry-run` with one local PE/PDB pair to validate callback item parsing without
+running the full corpus generator, building KswordARK, writing `Release`, or
+refreshing pack files:
+
+```powershell
+python tools\pdb_offset_generator\ksword_pdb_profile_generator.py `
+  --dry-run `
+  --local-pe D:\PDB\pe-store\amd64\ntoskrnl.exe.10.0.26100.961\<sha256>\ntoskrnl.exe `
+  --local-pdb D:\PDB\pdb-cache\amd64\ntkrnlmp.pdb\<pdb-guid+age>\ntkrnlmp.pdb `
+  --llvm-pdbutil D:\Software\VS\VC\Tools\Llvm\x64\bin\llvm-pdbutil.exe `
+  --output D:\PDB\scratch\callback_profile_dryrun.json
+```
+
+The generated JSON keeps the legacy `fields` and `missingFields` keys. Callback
+PDB items are written under `callbackItems` with `kind` set to `GlobalRva` or
+`StructOffset`. Missing callback candidates are non-fatal and are reported under
+`diagnostics.missingItems`.
