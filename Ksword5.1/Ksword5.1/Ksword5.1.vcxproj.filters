@@ -21,6 +21,10 @@
       <UniqueIdentifier>{639EADAA-A684-42e4-A9AD-28FC9BCB8F7C}</UniqueIdentifier>
       <Extensions>ts</Extensions>
     </Filter>
+    <Filter Include="Profile Files">
+      <UniqueIdentifier>{AC0EBCB6-5DE6-4CB8-9B7B-5C2CF590D7F9}</UniqueIdentifier>
+      <Extensions>json</Extensions>
+    </Filter>
     <Filter Include="Source Files\NewFilter1">
       <UniqueIdentifier>{bc5f3e62-aac4-4ec6-94a8-3b5dc6d07a02}</UniqueIdentifier>
     </Filter>
@@ -851,6 +855,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="qtvars.pro" />
+    <None Include="profiles\ark_dyndata_pack_v1.json">
+      <Filter>Profile Files</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <QtUic Include="WelcomeDock\Welcome.ui">
