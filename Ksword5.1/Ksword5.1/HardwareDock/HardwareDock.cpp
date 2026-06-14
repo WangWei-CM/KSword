@@ -1844,6 +1844,26 @@ void HardwareDock::adjustUtilizationChartHeights()
             widgetPointer->setMaximumHeight(maxHeightValue);
         };
 
+    // applyFixedWidthIfChanged 作用：
+    // - 仅在目标宽度变化时写入最小/最大宽度，避免 CPU 核心网格因子控件 sizeHint 重新抢占列宽；
+    // - widgetPointer：待设置控件；widthValue：目标固定宽度（像素）；
+    // - 返回行为：无返回值，非法宽度直接忽略。
+    auto applyFixedWidthIfChanged =
+        [](QWidget* widgetPointer, const int widthValue)
+        {
+            if (widgetPointer == nullptr || widthValue <= 0)
+            {
+                return;
+            }
+            if (widgetPointer->minimumWidth() == widthValue
+                && widgetPointer->maximumWidth() == widthValue)
+            {
+                return;
+            }
+            widgetPointer->setMinimumWidth(widthValue);
+            widgetPointer->setMaximumWidth(widthValue);
+        };
+
     // ===================== 左侧设备列表：按宽度收缩，按高度滚动 =====================
     if (m_utilizationPage != nullptr && m_utilizationSidebarList != nullptr)
     {
@@ -1878,7 +1898,7 @@ void HardwareDock::adjustUtilizationChartHeights()
         }
     }
 
-    // ===================== CPU 页：按核心网格动态压缩高度 =====================
+    // ===================== CPU 页：按核心网格动态压缩宽高 =====================
     if (m_utilizationCpuSubPage != nullptr
         && m_coreChartHostWidget != nullptr
         && m_coreChartGridLayout != nullptr
@@ -1920,10 +1940,48 @@ void HardwareDock::adjustUtilizationChartHeights()
             1,
             (availableChartAreaHeight - gridSpacing * (gridRows - 1)) / gridRows);
 
+        // cpuReferenceWidth 用途：
+        // - 以滚动区 viewport 当前宽度为准，避免 QGridLayout 按 QChartView/标题 sizeHint 把第一列撑大；
+        // - 当前页面的 CPU 核心图不希望横向滚动，所有列在首帧和 resize 后都按同一宽度重排。
+        int cpuReferenceWidth = 0;
+        if (m_coreChartScrollArea != nullptr && m_coreChartScrollArea->viewport() != nullptr)
+        {
+            cpuReferenceWidth = m_coreChartScrollArea->viewport()->contentsRect().width();
+        }
+        if (cpuReferenceWidth <= 0 && m_coreChartScrollArea != nullptr)
+        {
+            cpuReferenceWidth = m_coreChartScrollArea->contentsRect().width();
+        }
+        if (cpuReferenceWidth <= 0)
+        {
+            cpuReferenceWidth = m_utilizationCpuSubPage->contentsRect().width();
+        }
+
+        const int gridColumns = std::max(1, m_cpuCoreGridColumnCount);
+        const int horizontalGridSpacing = std::max(0, m_coreChartGridLayout->horizontalSpacing());
+        const int availableChartAreaWidth = std::max(1, cpuReferenceWidth);
+        const int cellWidth = std::max(
+            1,
+            (availableChartAreaWidth - horizontalGridSpacing * (gridColumns - 1)) / gridColumns);
+        const int hostWidth = gridColumns * cellWidth + horizontalGridSpacing * (gridColumns - 1);
+
+        // 列宽策略说明：
+        // - QGridLayout 默认会参考每个子控件的 sizeHint，QChartView 在首帧/数据刷新后可能让第 0 列迅速变宽；
+        // - 这里同时设置列 stretch、列最小宽和单元格固定宽，确保 6 列等场景始终均分 viewport；
+        // - 多余的历史列（若核心数变化后残留）重置为 0，避免旧 stretch 继续参与分配。
+        const int layoutColumnCount = std::max(gridColumns, m_coreChartGridLayout->columnCount());
+        for (int columnIndex = 0; columnIndex < layoutColumnCount; ++columnIndex)
+        {
+            const bool activeColumn = columnIndex < gridColumns;
+            m_coreChartGridLayout->setColumnStretch(columnIndex, activeColumn ? 1 : 0);
+            m_coreChartGridLayout->setColumnMinimumWidth(columnIndex, activeColumn ? cellWidth : 0);
+        }
+
         for (CoreChartEntry& chartEntry : m_coreChartEntries)
         {
             if (chartEntry.containerWidget != nullptr)
             {
+                applyFixedWidthIfChanged(chartEntry.containerWidget, cellWidth);
                 applyFixedHeightIfChanged(chartEntry.containerWidget, cellHeight);
             }
             if (chartEntry.chartView != nullptr)
@@ -1937,6 +1995,7 @@ void HardwareDock::adjustUtilizationChartHeights()
         }
 
         const int hostHeight = gridRows * cellHeight + gridSpacing * (gridRows - 1);
+        applyFixedWidthIfChanged(m_coreChartHostWidget, hostWidth);
         applyFixedHeightIfChanged(m_coreChartHostWidget, hostHeight);
         if (m_coreChartScrollArea != nullptr)
         {
