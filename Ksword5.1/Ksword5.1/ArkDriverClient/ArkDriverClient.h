@@ -95,5 +95,6 @@ namespace ksword::ark
         DynDataStatusResult queryDynDataStatus() const;
         DynDataFieldsResult queryDynDataFields() const;
         DynDataCapabilitiesResult queryDynDataCapabilities() const;
+        DynDataProfileApplyResult applyDynDataProfile(const DynDataProfileApplyInput& profile) const;
     };
 }

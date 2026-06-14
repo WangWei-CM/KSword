@@ -1619,6 +1619,8 @@ namespace
             return QStringLiteral("System Informer DynData");
         case KSWORD_ARK_PROCESS_FIELD_SOURCE_RUNTIME_PATTERN:
             return QStringLiteral("Runtime pattern");
+        case KSWORD_ARK_PROCESS_FIELD_SOURCE_PDB_PROFILE:
+            return QStringLiteral("PDB profile");
         default:
             return QStringLiteral("Unavailable");
         }

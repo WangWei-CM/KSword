@@ -28,6 +28,7 @@ Environment:
 #define STATUS_SI_DYNDATA_INVALID_LENGTH     ((NTSTATUS)0xE0020003L)
 
 static KSW_DYN_STATE g_KswordDynDataState;
+static EX_PUSH_LOCK g_KswordDynDataStateLock;
 
 static const KSW_KERNEL_MODULE_NAME_MATCH g_KswordDynNtosNames[] = {
     { "ntoskrnl.exe", KSW_DYN_PROFILE_CLASS_NTOSKRNL },
@@ -197,6 +198,99 @@ Return Value:
     }
 
     return (ULONG)SourceOffset;
+}
+
+static BOOLEAN
+KswordARKDynDataOffsetPresent(
+    _In_ ULONG Offset
+    )
+/*++
+
+Routine Description:
+
+    Test whether one normalized DynData offset is usable. The helper is kept in
+    the loader because profile application and System Informer conversion both
+    need the same sentinel handling before they assign provenance.
+
+Arguments:
+
+    Offset - Normalized ULONG offset value.
+
+Return Value:
+
+    TRUE when the offset can be used; otherwise FALSE.
+
+--*/
+{
+    return (Offset != KSW_DYN_OFFSET_UNAVAILABLE && Offset != 0x0000FFFFUL) ? TRUE : FALSE;
+}
+
+static VOID
+KswordARKDynDataStoreSourcedOffset(
+    _In_ ULONG Offset,
+    _In_ ULONG Source,
+    _Out_ ULONG* DestinationOffset,
+    _Out_ ULONG* DestinationSource
+    )
+/*++
+
+Routine Description:
+
+    Store a normalized offset and its provenance together. Missing offsets always
+    clear the source to UNAVAILABLE so later query paths do not guess from static
+    descriptor defaults.
+
+Arguments:
+
+    Offset - Normalized offset value.
+    Source - KSW_DYN_FIELD_SOURCE_* value for a present offset.
+    DestinationOffset - Mutable offset field.
+    DestinationSource - Mutable source field parallel to DestinationOffset.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    if (DestinationOffset == NULL || DestinationSource == NULL) {
+        return;
+    }
+
+    *DestinationOffset = Offset;
+    *DestinationSource = KswordARKDynDataOffsetPresent(Offset) ? Source : KSW_DYN_FIELD_SOURCE_UNAVAILABLE;
+}
+
+static VOID
+KswordARKDynDataStoreSystemInformerOffset(
+    _In_ USHORT SourceOffset,
+    _Out_ ULONG* DestinationOffset,
+    _Out_ ULONG* DestinationSource
+    )
+/*++
+
+Routine Description:
+
+    Convert one System Informer USHORT offset and tag it with System Informer
+    provenance when it is present.
+
+Arguments:
+
+    SourceOffset - Raw System Informer offset or 0xffff sentinel.
+    DestinationOffset - Mutable normalized offset field.
+    DestinationSource - Mutable source field parallel to DestinationOffset.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    KswordARKDynDataStoreSourcedOffset(
+        KswordARKDynDataConvertOffset(SourceOffset),
+        KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER,
+        DestinationOffset,
+        DestinationSource);
 }
 
 static BOOLEAN
@@ -443,41 +537,41 @@ Return Value:
     State->MatchedProfileClass = (ULONG)dynData.Class;
     State->MatchedProfileOffset = dynData.Offset;
     State->MatchedFieldsId = 0UL;
-    State->Kernel.EpObjectTable = KswordARKDynDataConvertOffset(fields.EpObjectTable);
-    State->Kernel.EpSectionObject = KswordARKDynDataConvertOffset(fields.EpSectionObject);
-    State->Kernel.HtHandleContentionEvent = KswordARKDynDataConvertOffset(fields.HtHandleContentionEvent);
-    State->Kernel.OtName = KswordARKDynDataConvertOffset(fields.OtName);
-    State->Kernel.OtIndex = KswordARKDynDataConvertOffset(fields.OtIndex);
-    State->Kernel.ObDecodeShift = KswordARKDynDataConvertOffset(fields.ObDecodeShift);
-    State->Kernel.ObAttributesShift = KswordARKDynDataConvertOffset(fields.ObAttributesShift);
-    State->Kernel.EgeGuid = KswordARKDynDataConvertOffset(fields.EgeGuid);
-    State->Kernel.EreGuidEntry = KswordARKDynDataConvertOffset(fields.EreGuidEntry);
-    State->Kernel.KtInitialStack = KswordARKDynDataConvertOffset(fields.KtInitialStack);
-    State->Kernel.KtStackLimit = KswordARKDynDataConvertOffset(fields.KtStackLimit);
-    State->Kernel.KtStackBase = KswordARKDynDataConvertOffset(fields.KtStackBase);
-    State->Kernel.KtKernelStack = KswordARKDynDataConvertOffset(fields.KtKernelStack);
-    State->Kernel.KtReadOperationCount = KswordARKDynDataConvertOffset(fields.KtReadOperationCount);
-    State->Kernel.KtWriteOperationCount = KswordARKDynDataConvertOffset(fields.KtWriteOperationCount);
-    State->Kernel.KtOtherOperationCount = KswordARKDynDataConvertOffset(fields.KtOtherOperationCount);
-    State->Kernel.KtReadTransferCount = KswordARKDynDataConvertOffset(fields.KtReadTransferCount);
-    State->Kernel.KtWriteTransferCount = KswordARKDynDataConvertOffset(fields.KtWriteTransferCount);
-    State->Kernel.KtOtherTransferCount = KswordARKDynDataConvertOffset(fields.KtOtherTransferCount);
-    State->Kernel.MmSectionControlArea = KswordARKDynDataConvertOffset(fields.MmSectionControlArea);
-    State->Kernel.MmControlAreaListHead = KswordARKDynDataConvertOffset(fields.MmControlAreaListHead);
-    State->Kernel.MmControlAreaLock = KswordARKDynDataConvertOffset(fields.MmControlAreaLock);
-    State->Kernel.AlpcCommunicationInfo = KswordARKDynDataConvertOffset(fields.AlpcCommunicationInfo);
-    State->Kernel.AlpcOwnerProcess = KswordARKDynDataConvertOffset(fields.AlpcOwnerProcess);
-    State->Kernel.AlpcConnectionPort = KswordARKDynDataConvertOffset(fields.AlpcConnectionPort);
-    State->Kernel.AlpcServerCommunicationPort = KswordARKDynDataConvertOffset(fields.AlpcServerCommunicationPort);
-    State->Kernel.AlpcClientCommunicationPort = KswordARKDynDataConvertOffset(fields.AlpcClientCommunicationPort);
-    State->Kernel.AlpcHandleTable = KswordARKDynDataConvertOffset(fields.AlpcHandleTable);
-    State->Kernel.AlpcHandleTableLock = KswordARKDynDataConvertOffset(fields.AlpcHandleTableLock);
-    State->Kernel.AlpcAttributes = KswordARKDynDataConvertOffset(fields.AlpcAttributes);
-    State->Kernel.AlpcAttributesFlags = KswordARKDynDataConvertOffset(fields.AlpcAttributesFlags);
-    State->Kernel.AlpcPortContext = KswordARKDynDataConvertOffset(fields.AlpcPortContext);
-    State->Kernel.AlpcPortObjectLock = KswordARKDynDataConvertOffset(fields.AlpcPortObjectLock);
-    State->Kernel.AlpcSequenceNo = KswordARKDynDataConvertOffset(fields.AlpcSequenceNo);
-    State->Kernel.AlpcState = KswordARKDynDataConvertOffset(fields.AlpcState);
+    KswordARKDynDataStoreSystemInformerOffset(fields.EpObjectTable, &State->Kernel.EpObjectTable, &State->KernelSources.EpObjectTable);
+    KswordARKDynDataStoreSystemInformerOffset(fields.EpSectionObject, &State->Kernel.EpSectionObject, &State->KernelSources.EpSectionObject);
+    KswordARKDynDataStoreSystemInformerOffset(fields.HtHandleContentionEvent, &State->Kernel.HtHandleContentionEvent, &State->KernelSources.HtHandleContentionEvent);
+    KswordARKDynDataStoreSystemInformerOffset(fields.OtName, &State->Kernel.OtName, &State->KernelSources.OtName);
+    KswordARKDynDataStoreSystemInformerOffset(fields.OtIndex, &State->Kernel.OtIndex, &State->KernelSources.OtIndex);
+    KswordARKDynDataStoreSystemInformerOffset(fields.ObDecodeShift, &State->Kernel.ObDecodeShift, &State->KernelSources.ObDecodeShift);
+    KswordARKDynDataStoreSystemInformerOffset(fields.ObAttributesShift, &State->Kernel.ObAttributesShift, &State->KernelSources.ObAttributesShift);
+    KswordARKDynDataStoreSystemInformerOffset(fields.EgeGuid, &State->Kernel.EgeGuid, &State->KernelSources.EgeGuid);
+    KswordARKDynDataStoreSystemInformerOffset(fields.EreGuidEntry, &State->Kernel.EreGuidEntry, &State->KernelSources.EreGuidEntry);
+    KswordARKDynDataStoreSystemInformerOffset(fields.KtInitialStack, &State->Kernel.KtInitialStack, &State->KernelSources.KtInitialStack);
+    KswordARKDynDataStoreSystemInformerOffset(fields.KtStackLimit, &State->Kernel.KtStackLimit, &State->KernelSources.KtStackLimit);
+    KswordARKDynDataStoreSystemInformerOffset(fields.KtStackBase, &State->Kernel.KtStackBase, &State->KernelSources.KtStackBase);
+    KswordARKDynDataStoreSystemInformerOffset(fields.KtKernelStack, &State->Kernel.KtKernelStack, &State->KernelSources.KtKernelStack);
+    KswordARKDynDataStoreSystemInformerOffset(fields.KtReadOperationCount, &State->Kernel.KtReadOperationCount, &State->KernelSources.KtReadOperationCount);
+    KswordARKDynDataStoreSystemInformerOffset(fields.KtWriteOperationCount, &State->Kernel.KtWriteOperationCount, &State->KernelSources.KtWriteOperationCount);
+    KswordARKDynDataStoreSystemInformerOffset(fields.KtOtherOperationCount, &State->Kernel.KtOtherOperationCount, &State->KernelSources.KtOtherOperationCount);
+    KswordARKDynDataStoreSystemInformerOffset(fields.KtReadTransferCount, &State->Kernel.KtReadTransferCount, &State->KernelSources.KtReadTransferCount);
+    KswordARKDynDataStoreSystemInformerOffset(fields.KtWriteTransferCount, &State->Kernel.KtWriteTransferCount, &State->KernelSources.KtWriteTransferCount);
+    KswordARKDynDataStoreSystemInformerOffset(fields.KtOtherTransferCount, &State->Kernel.KtOtherTransferCount, &State->KernelSources.KtOtherTransferCount);
+    KswordARKDynDataStoreSystemInformerOffset(fields.MmSectionControlArea, &State->Kernel.MmSectionControlArea, &State->KernelSources.MmSectionControlArea);
+    KswordARKDynDataStoreSystemInformerOffset(fields.MmControlAreaListHead, &State->Kernel.MmControlAreaListHead, &State->KernelSources.MmControlAreaListHead);
+    KswordARKDynDataStoreSystemInformerOffset(fields.MmControlAreaLock, &State->Kernel.MmControlAreaLock, &State->KernelSources.MmControlAreaLock);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcCommunicationInfo, &State->Kernel.AlpcCommunicationInfo, &State->KernelSources.AlpcCommunicationInfo);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcOwnerProcess, &State->Kernel.AlpcOwnerProcess, &State->KernelSources.AlpcOwnerProcess);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcConnectionPort, &State->Kernel.AlpcConnectionPort, &State->KernelSources.AlpcConnectionPort);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcServerCommunicationPort, &State->Kernel.AlpcServerCommunicationPort, &State->KernelSources.AlpcServerCommunicationPort);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcClientCommunicationPort, &State->Kernel.AlpcClientCommunicationPort, &State->KernelSources.AlpcClientCommunicationPort);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcHandleTable, &State->Kernel.AlpcHandleTable, &State->KernelSources.AlpcHandleTable);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcHandleTableLock, &State->Kernel.AlpcHandleTableLock, &State->KernelSources.AlpcHandleTableLock);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcAttributes, &State->Kernel.AlpcAttributes, &State->KernelSources.AlpcAttributes);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcAttributesFlags, &State->Kernel.AlpcAttributesFlags, &State->KernelSources.AlpcAttributesFlags);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcPortContext, &State->Kernel.AlpcPortContext, &State->KernelSources.AlpcPortContext);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcPortObjectLock, &State->Kernel.AlpcPortObjectLock, &State->KernelSources.AlpcPortObjectLock);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcSequenceNo, &State->Kernel.AlpcSequenceNo, &State->KernelSources.AlpcSequenceNo);
+    KswordARKDynDataStoreSystemInformerOffset(fields.AlpcState, &State->Kernel.AlpcState, &State->KernelSources.AlpcState);
     return STATUS_SUCCESS;
 }
 
@@ -529,11 +623,11 @@ Return Value:
     }
 
     State->LxcoreActive = TRUE;
-    State->LxcoreOffsets.LxPicoProc = KswordARKDynDataConvertOffset(fields.LxPicoProc);
-    State->LxcoreOffsets.LxPicoProcInfo = KswordARKDynDataConvertOffset(fields.LxPicoProcInfo);
-    State->LxcoreOffsets.LxPicoProcInfoPID = KswordARKDynDataConvertOffset(fields.LxPicoProcInfoPID);
-    State->LxcoreOffsets.LxPicoThrdInfo = KswordARKDynDataConvertOffset(fields.LxPicoThrdInfo);
-    State->LxcoreOffsets.LxPicoThrdInfoTID = KswordARKDynDataConvertOffset(fields.LxPicoThrdInfoTID);
+    KswordARKDynDataStoreSystemInformerOffset(fields.LxPicoProc, &State->LxcoreOffsets.LxPicoProc, &State->LxcoreSources.LxPicoProc);
+    KswordARKDynDataStoreSystemInformerOffset(fields.LxPicoProcInfo, &State->LxcoreOffsets.LxPicoProcInfo, &State->LxcoreSources.LxPicoProcInfo);
+    KswordARKDynDataStoreSystemInformerOffset(fields.LxPicoProcInfoPID, &State->LxcoreOffsets.LxPicoProcInfoPID, &State->LxcoreSources.LxPicoProcInfoPID);
+    KswordARKDynDataStoreSystemInformerOffset(fields.LxPicoThrdInfo, &State->LxcoreOffsets.LxPicoThrdInfo, &State->LxcoreSources.LxPicoThrdInfo);
+    KswordARKDynDataStoreSystemInformerOffset(fields.LxPicoThrdInfoTID, &State->LxcoreOffsets.LxPicoThrdInfoTID, &State->LxcoreSources.LxPicoThrdInfoTID);
     UNREFERENCED_PARAMETER(dynData);
     return STATUS_SUCCESS;
 }
@@ -541,18 +635,21 @@ Return Value:
 static BOOLEAN
 KswordARKDynDataStoreRuntimeOffset(
     _In_ LONG ResolvedOffset,
-    _Out_ ULONG* DestinationOffset
+    _Out_ ULONG* DestinationOffset,
+    _Out_ ULONG* DestinationSource
     )
 /*++
 
 Routine Description:
 
-    Store one runtime-pattern offset if the resolver produced a positive value.
+    Store one runtime-pattern offset and tag it with runtime provenance if the
+    resolver produced a positive value.
 
 Arguments:
 
     ResolvedOffset - Signed resolver result; negative values mean unavailable.
     DestinationOffset - Offset field to update.
+    DestinationSource - Source field parallel to DestinationOffset.
 
 Return Value:
 
@@ -560,11 +657,15 @@ Return Value:
 
 --*/
 {
-    if (DestinationOffset == NULL || ResolvedOffset <= 0) {
+    if (DestinationOffset == NULL || DestinationSource == NULL || ResolvedOffset <= 0) {
         return FALSE;
     }
 
-    *DestinationOffset = (ULONG)ResolvedOffset;
+    KswordARKDynDataStoreSourcedOffset(
+        (ULONG)ResolvedOffset,
+        KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN,
+        DestinationOffset,
+        DestinationSource);
     return TRUE;
 }
 
@@ -599,13 +700,16 @@ Return Value:
 
     protectionPresent = KswordARKDynDataStoreRuntimeOffset(
         KswordARKDriverResolveProcessProtectionOffset(),
-        &State->Kernel.EpProtection);
+        &State->Kernel.EpProtection,
+        &State->KernelSources.EpProtection);
     signaturePresent = KswordARKDynDataStoreRuntimeOffset(
         KswordARKDriverResolveProcessSignatureLevelOffset(),
-        &State->Kernel.EpSignatureLevel);
+        &State->Kernel.EpSignatureLevel,
+        &State->KernelSources.EpSignatureLevel);
     sectionSignaturePresent = KswordARKDynDataStoreRuntimeOffset(
         KswordARKDriverResolveProcessSectionSignatureLevelOffset(),
-        &State->Kernel.EpSectionSignatureLevel);
+        &State->Kernel.EpSectionSignatureLevel,
+        &State->KernelSources.EpSectionSignatureLevel);
 
     State->ExtraActive = (protectionPresent && signaturePresent && sectionSignaturePresent) ? TRUE : FALSE;
 }
@@ -738,8 +842,11 @@ Return Value:
     NTSTATUS stateStatus = STATUS_SUCCESS;
     CHAR logMessage[KSWORD_ARK_LOG_ENTRY_MAX_BYTES] = { 0 };
 
+    ExInitializePushLock(&g_KswordDynDataStateLock);
     stateStatus = KswordARKDynDataBuildState(&newState);
+    ExAcquirePushLockExclusive(&g_KswordDynDataStateLock);
     RtlCopyMemory(&g_KswordDynDataState, &newState, sizeof(g_KswordDynDataState));
+    ExReleasePushLockExclusive(&g_KswordDynDataStateLock);
 
     if (Device != NULL) {
         (VOID)RtlStringCbPrintfA(
@@ -780,7 +887,9 @@ Return Value:
 
 --*/
 {
+    ExAcquirePushLockExclusive(&g_KswordDynDataStateLock);
     RtlZeroMemory(&g_KswordDynDataState, sizeof(g_KswordDynDataState));
+    ExReleasePushLockExclusive(&g_KswordDynDataStateLock);
 }
 
 VOID
@@ -807,5 +916,502 @@ Return Value:
         return;
     }
 
+    ExAcquirePushLockShared(&g_KswordDynDataStateLock);
     RtlCopyMemory(StateOut, &g_KswordDynDataState, sizeof(*StateOut));
+    ExReleasePushLockShared(&g_KswordDynDataStateLock);
+}
+
+static ULONG
+KswordARKDynDataPublicStatusFlags(
+    _In_ const KSW_DYN_STATE* State
+    )
+/*++
+
+Routine Description:
+
+    Convert one internal DynData state into public status bits. The loader keeps
+    this private copy so profile-apply responses can be produced without
+    reaching into dyndata_query.c static helpers.
+
+Arguments:
+
+    State - DynData state to summarize.
+
+Return Value:
+
+    KSW_DYN_STATUS_FLAG_* bit mask.
+
+--*/
+{
+    ULONG flags = 0UL;
+
+    if (State == NULL) {
+        return 0UL;
+    }
+    if (State->Initialized) {
+        flags |= KSW_DYN_STATUS_FLAG_INITIALIZED;
+    }
+    if (State->NtosActive) {
+        flags |= KSW_DYN_STATUS_FLAG_NTOS_ACTIVE;
+    }
+    if (State->LxcoreActive) {
+        flags |= KSW_DYN_STATUS_FLAG_LXCORE_ACTIVE;
+    }
+    if (State->ExtraActive) {
+        flags |= KSW_DYN_STATUS_FLAG_EXTRA_ACTIVE;
+    }
+    if (State->PdbProfileActive) {
+        flags |= KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE;
+    }
+
+    return flags;
+}
+
+static VOID
+KswordARKDynDataApplySetMessage(
+    _Out_writes_(KSW_DYN_REASON_CHARS) WCHAR* Destination,
+    _In_z_ PCWSTR Message
+    )
+/*++
+
+Routine Description:
+
+    Store a bounded profile-apply message for R3 diagnostics.
+
+Arguments:
+
+    Destination - Fixed response message buffer.
+    Message - NUL-terminated message text.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    if (Destination == NULL) {
+        return;
+    }
+
+    Destination[0] = L'\0';
+    if (Message == NULL) {
+        return;
+    }
+
+    (VOID)RtlStringCchCopyW(Destination, KSW_DYN_REASON_CHARS, Message);
+    Destination[KSW_DYN_REASON_CHARS - 1U] = L'\0';
+}
+
+static BOOLEAN
+KswordARKDynDataIdentityMatches(
+    _In_ const KSW_DYN_MODULE_IDENTITY_PACKET* CurrentIdentity,
+    _In_ const KSW_DYN_MODULE_IDENTITY_PACKET* RequestedIdentity
+    )
+/*++
+
+Routine Description:
+
+    Compare the identity tuple that makes a PDB profile safe to apply. Image
+    base and module name are diagnostic only; class, machine, timestamp, and
+    image size are the exact-match key.
+
+Arguments:
+
+    CurrentIdentity - Module identity captured by R0.
+    RequestedIdentity - Module identity supplied by the R3 JSON profile manager.
+
+Return Value:
+
+    TRUE when the request targets the currently loaded kernel image.
+
+--*/
+{
+    if (CurrentIdentity == NULL || RequestedIdentity == NULL) {
+        return FALSE;
+    }
+    if (CurrentIdentity->present == 0UL || RequestedIdentity->present == 0UL) {
+        return FALSE;
+    }
+    if (RequestedIdentity->classId != KSW_DYN_PROFILE_CLASS_NTOSKRNL &&
+        RequestedIdentity->classId != KSW_DYN_PROFILE_CLASS_NTKRLA57) {
+        return FALSE;
+    }
+
+    return CurrentIdentity->classId == RequestedIdentity->classId &&
+        CurrentIdentity->machine == RequestedIdentity->machine &&
+        CurrentIdentity->timeDateStamp == RequestedIdentity->timeDateStamp &&
+        CurrentIdentity->sizeOfImage == RequestedIdentity->sizeOfImage;
+}
+
+static BOOLEAN
+KswordARKDynDataKernelFieldPointers(
+    _In_ ULONG FieldId,
+    _Inout_ KSW_DYN_STATE* State,
+    _Outptr_ ULONG** OffsetOut,
+    _Outptr_ ULONG** SourceOut
+    )
+/*++
+
+Routine Description:
+
+    Resolve one public ntoskrnl DynData field ID into the internal offset and
+    source slots. v1 profile application intentionally handles only kernel
+    fields; lxcore remains System Informer sourced until a separate profile class
+    is added.
+
+Arguments:
+
+    FieldId - KSW_DYN_FIELD_ID_* value supplied by R3.
+    State - Mutable state snapshot that owns destination fields.
+    OffsetOut - Receives a pointer to the target offset slot.
+    SourceOut - Receives a pointer to the target source slot.
+
+Return Value:
+
+    TRUE when FieldId is known and belongs to the ntoskrnl field set.
+
+--*/
+{
+    if (State == NULL || OffsetOut == NULL || SourceOut == NULL) {
+        return FALSE;
+    }
+
+    *OffsetOut = NULL;
+    *SourceOut = NULL;
+
+    switch (FieldId) {
+    case KSW_DYN_FIELD_ID_EP_OBJECT_TABLE:
+        *OffsetOut = &State->Kernel.EpObjectTable;
+        *SourceOut = &State->KernelSources.EpObjectTable;
+        break;
+    case KSW_DYN_FIELD_ID_EP_SECTION_OBJECT:
+        *OffsetOut = &State->Kernel.EpSectionObject;
+        *SourceOut = &State->KernelSources.EpSectionObject;
+        break;
+    case KSW_DYN_FIELD_ID_HT_HANDLE_CONTENTION_EVENT:
+        *OffsetOut = &State->Kernel.HtHandleContentionEvent;
+        *SourceOut = &State->KernelSources.HtHandleContentionEvent;
+        break;
+    case KSW_DYN_FIELD_ID_OT_NAME:
+        *OffsetOut = &State->Kernel.OtName;
+        *SourceOut = &State->KernelSources.OtName;
+        break;
+    case KSW_DYN_FIELD_ID_OT_INDEX:
+        *OffsetOut = &State->Kernel.OtIndex;
+        *SourceOut = &State->KernelSources.OtIndex;
+        break;
+    case KSW_DYN_FIELD_ID_OB_DECODE_SHIFT:
+        *OffsetOut = &State->Kernel.ObDecodeShift;
+        *SourceOut = &State->KernelSources.ObDecodeShift;
+        break;
+    case KSW_DYN_FIELD_ID_OB_ATTRIBUTES_SHIFT:
+        *OffsetOut = &State->Kernel.ObAttributesShift;
+        *SourceOut = &State->KernelSources.ObAttributesShift;
+        break;
+    case KSW_DYN_FIELD_ID_KT_INITIAL_STACK:
+        *OffsetOut = &State->Kernel.KtInitialStack;
+        *SourceOut = &State->KernelSources.KtInitialStack;
+        break;
+    case KSW_DYN_FIELD_ID_KT_STACK_LIMIT:
+        *OffsetOut = &State->Kernel.KtStackLimit;
+        *SourceOut = &State->KernelSources.KtStackLimit;
+        break;
+    case KSW_DYN_FIELD_ID_KT_STACK_BASE:
+        *OffsetOut = &State->Kernel.KtStackBase;
+        *SourceOut = &State->KernelSources.KtStackBase;
+        break;
+    case KSW_DYN_FIELD_ID_KT_KERNEL_STACK:
+        *OffsetOut = &State->Kernel.KtKernelStack;
+        *SourceOut = &State->KernelSources.KtKernelStack;
+        break;
+    case KSW_DYN_FIELD_ID_KT_READ_OPERATION_COUNT:
+        *OffsetOut = &State->Kernel.KtReadOperationCount;
+        *SourceOut = &State->KernelSources.KtReadOperationCount;
+        break;
+    case KSW_DYN_FIELD_ID_KT_WRITE_OPERATION_COUNT:
+        *OffsetOut = &State->Kernel.KtWriteOperationCount;
+        *SourceOut = &State->KernelSources.KtWriteOperationCount;
+        break;
+    case KSW_DYN_FIELD_ID_KT_OTHER_OPERATION_COUNT:
+        *OffsetOut = &State->Kernel.KtOtherOperationCount;
+        *SourceOut = &State->KernelSources.KtOtherOperationCount;
+        break;
+    case KSW_DYN_FIELD_ID_KT_READ_TRANSFER_COUNT:
+        *OffsetOut = &State->Kernel.KtReadTransferCount;
+        *SourceOut = &State->KernelSources.KtReadTransferCount;
+        break;
+    case KSW_DYN_FIELD_ID_KT_WRITE_TRANSFER_COUNT:
+        *OffsetOut = &State->Kernel.KtWriteTransferCount;
+        *SourceOut = &State->KernelSources.KtWriteTransferCount;
+        break;
+    case KSW_DYN_FIELD_ID_KT_OTHER_TRANSFER_COUNT:
+        *OffsetOut = &State->Kernel.KtOtherTransferCount;
+        *SourceOut = &State->KernelSources.KtOtherTransferCount;
+        break;
+    case KSW_DYN_FIELD_ID_MM_SECTION_CONTROL_AREA:
+        *OffsetOut = &State->Kernel.MmSectionControlArea;
+        *SourceOut = &State->KernelSources.MmSectionControlArea;
+        break;
+    case KSW_DYN_FIELD_ID_MM_CONTROL_AREA_LIST_HEAD:
+        *OffsetOut = &State->Kernel.MmControlAreaListHead;
+        *SourceOut = &State->KernelSources.MmControlAreaListHead;
+        break;
+    case KSW_DYN_FIELD_ID_MM_CONTROL_AREA_LOCK:
+        *OffsetOut = &State->Kernel.MmControlAreaLock;
+        *SourceOut = &State->KernelSources.MmControlAreaLock;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_COMMUNICATION_INFO:
+        *OffsetOut = &State->Kernel.AlpcCommunicationInfo;
+        *SourceOut = &State->KernelSources.AlpcCommunicationInfo;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_OWNER_PROCESS:
+        *OffsetOut = &State->Kernel.AlpcOwnerProcess;
+        *SourceOut = &State->KernelSources.AlpcOwnerProcess;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_CONNECTION_PORT:
+        *OffsetOut = &State->Kernel.AlpcConnectionPort;
+        *SourceOut = &State->KernelSources.AlpcConnectionPort;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_SERVER_COMMUNICATION_PORT:
+        *OffsetOut = &State->Kernel.AlpcServerCommunicationPort;
+        *SourceOut = &State->KernelSources.AlpcServerCommunicationPort;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_CLIENT_COMMUNICATION_PORT:
+        *OffsetOut = &State->Kernel.AlpcClientCommunicationPort;
+        *SourceOut = &State->KernelSources.AlpcClientCommunicationPort;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_HANDLE_TABLE:
+        *OffsetOut = &State->Kernel.AlpcHandleTable;
+        *SourceOut = &State->KernelSources.AlpcHandleTable;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_HANDLE_TABLE_LOCK:
+        *OffsetOut = &State->Kernel.AlpcHandleTableLock;
+        *SourceOut = &State->KernelSources.AlpcHandleTableLock;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_ATTRIBUTES:
+        *OffsetOut = &State->Kernel.AlpcAttributes;
+        *SourceOut = &State->KernelSources.AlpcAttributes;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_ATTRIBUTES_FLAGS:
+        *OffsetOut = &State->Kernel.AlpcAttributesFlags;
+        *SourceOut = &State->KernelSources.AlpcAttributesFlags;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_PORT_CONTEXT:
+        *OffsetOut = &State->Kernel.AlpcPortContext;
+        *SourceOut = &State->KernelSources.AlpcPortContext;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_PORT_OBJECT_LOCK:
+        *OffsetOut = &State->Kernel.AlpcPortObjectLock;
+        *SourceOut = &State->KernelSources.AlpcPortObjectLock;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_SEQUENCE_NO:
+        *OffsetOut = &State->Kernel.AlpcSequenceNo;
+        *SourceOut = &State->KernelSources.AlpcSequenceNo;
+        break;
+    case KSW_DYN_FIELD_ID_ALPC_STATE:
+        *OffsetOut = &State->Kernel.AlpcState;
+        *SourceOut = &State->KernelSources.AlpcState;
+        break;
+    case KSW_DYN_FIELD_ID_EP_PROTECTION:
+        *OffsetOut = &State->Kernel.EpProtection;
+        *SourceOut = &State->KernelSources.EpProtection;
+        break;
+    case KSW_DYN_FIELD_ID_EP_SIGNATURE_LEVEL:
+        *OffsetOut = &State->Kernel.EpSignatureLevel;
+        *SourceOut = &State->KernelSources.EpSignatureLevel;
+        break;
+    case KSW_DYN_FIELD_ID_EP_SECTION_SIGNATURE_LEVEL:
+        *OffsetOut = &State->Kernel.EpSectionSignatureLevel;
+        *SourceOut = &State->KernelSources.EpSectionSignatureLevel;
+        break;
+    case KSW_DYN_FIELD_ID_EGE_GUID:
+        *OffsetOut = &State->Kernel.EgeGuid;
+        *SourceOut = &State->KernelSources.EgeGuid;
+        break;
+    case KSW_DYN_FIELD_ID_ERE_GUID_ENTRY:
+        *OffsetOut = &State->Kernel.EreGuidEntry;
+        *SourceOut = &State->KernelSources.EreGuidEntry;
+        break;
+    default:
+        return FALSE;
+    }
+
+    return (*OffsetOut != NULL && *SourceOut != NULL) ? TRUE : FALSE;
+}
+
+NTSTATUS
+KswordARKDynDataApplyProfile(
+    _In_reads_bytes_(InputBufferLength) const KSW_APPLY_DYN_PROFILE_REQUEST* Request,
+    _In_ size_t InputBufferLength,
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) KSW_APPLY_DYN_PROFILE_RESPONSE* Response,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    )
+/*++
+
+Routine Description:
+
+    Validate and merge one R3-supplied PDB profile into the global DynData state.
+    The driver accepts only packed field IDs and offsets; it never parses JSON or
+    PDB data. The merge is copy-on-success: all request checks and all field
+    checks complete against a local state copy before the global state is
+    replaced, so invalid profiles cannot corrupt the active DynData snapshot.
+
+Arguments:
+
+    Request - Packed profile request from R3.
+    InputBufferLength - Total request bytes available.
+    Response - Fixed response packet.
+    OutputBufferLength - Writable response bytes.
+    BytesWrittenOut - Receives sizeof(KSW_APPLY_DYN_PROFILE_RESPONSE) on success
+        and on handled validation failure.
+
+Return Value:
+
+    STATUS_SUCCESS when a profile was applied; validation status on rejected
+    requests. Response->status mirrors the same result for R3 diagnostics.
+
+--*/
+{
+    KSW_DYN_STATE candidateState;
+    NTSTATUS status = STATUS_SUCCESS;
+    size_t requiredBytes = 0U;
+    ULONG index = 0UL;
+    ULONG appliedCount = 0UL;
+    ULONG rejectedCount = 0UL;
+    ULONG unknownCount = 0UL;
+
+    if (BytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+
+    if (Response == NULL || OutputBufferLength < sizeof(KSW_APPLY_DYN_PROFILE_RESPONSE)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlZeroMemory(Response, OutputBufferLength);
+    Response->size = sizeof(*Response);
+    Response->version = KSWORD_ARK_DYNDATA_PROTOCOL_VERSION;
+    Response->status = STATUS_UNSUCCESSFUL;
+    KswordARKDynDataApplySetMessage(Response->message, L"PDB profile apply did not run.");
+    *BytesWrittenOut = sizeof(*Response);
+
+    if (Request == NULL) {
+        status = STATUS_INVALID_PARAMETER;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile request is null.");
+        Response->status = status;
+        return status;
+    }
+    if (InputBufferLength < KSW_APPLY_DYN_PROFILE_REQUEST_HEADER_SIZE) {
+        status = STATUS_BUFFER_TOO_SMALL;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile request header is too small.");
+        Response->status = status;
+        return status;
+    }
+    if (Request->version != KSWORD_ARK_DYNDATA_PROTOCOL_VERSION) {
+        status = STATUS_REVISION_MISMATCH;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile protocol version mismatch.");
+        Response->status = status;
+        return status;
+    }
+    if (Request->fieldCount == 0UL || Request->fieldCount > KSW_DYN_PROFILE_MAX_FIELDS) {
+        status = STATUS_INVALID_PARAMETER;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile field count is invalid.");
+        Response->status = status;
+        return status;
+    }
+    if (Request->size < KSW_APPLY_DYN_PROFILE_REQUEST_HEADER_SIZE) {
+        status = STATUS_INVALID_PARAMETER;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile request size is invalid.");
+        Response->status = status;
+        return status;
+    }
+    if ((Request->fieldCount - 1UL) >
+        ((MAXSIZE_T - KSW_APPLY_DYN_PROFILE_REQUEST_HEADER_SIZE) / sizeof(KSW_DYN_PROFILE_FIELD_PACKET))) {
+        status = STATUS_INTEGER_OVERFLOW;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile request size overflow.");
+        Response->status = status;
+        return status;
+    }
+
+    requiredBytes = KSW_APPLY_DYN_PROFILE_REQUEST_HEADER_SIZE +
+        ((size_t)Request->fieldCount * sizeof(KSW_DYN_PROFILE_FIELD_PACKET));
+    if ((size_t)Request->size < requiredBytes || InputBufferLength < requiredBytes) {
+        status = STATUS_BUFFER_TOO_SMALL;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile request does not contain all fields.");
+        Response->status = status;
+        return status;
+    }
+
+    ExAcquirePushLockShared(&g_KswordDynDataStateLock);
+    RtlCopyMemory(&candidateState, &g_KswordDynDataState, sizeof(candidateState));
+    ExReleasePushLockShared(&g_KswordDynDataStateLock);
+
+    if (!KswordARKDynDataIdentityMatches(&candidateState.Ntoskrnl, &Request->ntoskrnl)) {
+        status = STATUS_NOT_SUPPORTED;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile does not match the current ntoskrnl identity.");
+        Response->status = status;
+        Response->statusFlags = KswordARKDynDataPublicStatusFlags(&candidateState);
+        Response->capabilityMask = candidateState.CapabilityMask;
+        return status;
+    }
+
+    for (index = 0UL; index < Request->fieldCount; ++index) {
+        const KSW_DYN_PROFILE_FIELD_PACKET* field = &Request->fields[index];
+        ULONG* destinationOffset = NULL;
+        ULONG* destinationSource = NULL;
+
+        if (field->fieldId == 0UL || field->fieldId > KSW_DYN_FIELD_ID_MAX ||
+            field->offset == KSW_DYN_OFFSET_UNAVAILABLE ||
+            field->offset > KSW_DYN_PROFILE_OFFSET_MAX) {
+            rejectedCount += 1UL;
+            continue;
+        }
+
+        if (!KswordARKDynDataKernelFieldPointers(
+            field->fieldId,
+            &candidateState,
+            &destinationOffset,
+            &destinationSource)) {
+            unknownCount += 1UL;
+            continue;
+        }
+
+        KswordARKDynDataStoreSourcedOffset(
+            field->offset,
+            KSW_DYN_FIELD_SOURCE_PDB_PROFILE,
+            destinationOffset,
+            destinationSource);
+        appliedCount += 1UL;
+    }
+
+    Response->appliedFieldCount = appliedCount;
+    Response->rejectedFieldCount = rejectedCount;
+    Response->unknownFieldCount = unknownCount;
+
+    if (appliedCount == 0UL || rejectedCount != 0UL || unknownCount != 0UL) {
+        status = STATUS_INVALID_PARAMETER;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile contained invalid or unsupported fields; active state was left unchanged.");
+        Response->status = status;
+        Response->statusFlags = KswordARKDynDataPublicStatusFlags(&candidateState);
+        Response->capabilityMask = candidateState.CapabilityMask;
+        return status;
+    }
+
+    candidateState.PdbProfileActive = TRUE;
+    candidateState.NtosActive = TRUE;
+    candidateState.CapabilityMask = KswordARKDynDataComputeCapabilities(&candidateState);
+    candidateState.LastStatus = STATUS_SUCCESS;
+    KswordARKDynDataSetReason(&candidateState, L"PDB profile applied and merged with runtime DynData.");
+
+    ExAcquirePushLockExclusive(&g_KswordDynDataStateLock);
+    RtlCopyMemory(&g_KswordDynDataState, &candidateState, sizeof(g_KswordDynDataState));
+    ExReleasePushLockExclusive(&g_KswordDynDataStateLock);
+
+    Response->status = STATUS_SUCCESS;
+    Response->statusFlags = KswordARKDynDataPublicStatusFlags(&candidateState);
+    Response->capabilityMask = candidateState.CapabilityMask;
+    KswordARKDynDataApplySetMessage(Response->message, L"PDB profile applied successfully.");
+    return STATUS_SUCCESS;
 }

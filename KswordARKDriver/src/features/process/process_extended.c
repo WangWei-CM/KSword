@@ -126,6 +126,9 @@ Return Value:
     if (DynDataSource == KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER) {
         return KSWORD_ARK_PROCESS_FIELD_SOURCE_SYSTEM_INFORMER_DYNDATA;
     }
+    if (DynDataSource == KSW_DYN_FIELD_SOURCE_PDB_PROFILE) {
+        return KSWORD_ARK_PROCESS_FIELD_SOURCE_PDB_PROFILE;
+    }
     return KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
 }
 
@@ -548,19 +551,19 @@ Return Value:
 
     Entry->protectionSource = KswordARKProcessSourceForOffset(
         dynState.Kernel.EpProtection,
-        KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN);
+        dynState.KernelSources.EpProtection);
     Entry->signatureLevelSource = KswordARKProcessSourceForOffset(
         dynState.Kernel.EpSignatureLevel,
-        KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN);
+        dynState.KernelSources.EpSignatureLevel);
     Entry->sectionSignatureLevelSource = KswordARKProcessSourceForOffset(
         dynState.Kernel.EpSectionSignatureLevel,
-        KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN);
+        dynState.KernelSources.EpSectionSignatureLevel);
     Entry->objectTableSource = KswordARKProcessSourceForOffset(
         dynState.Kernel.EpObjectTable,
-        KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER);
+        dynState.KernelSources.EpObjectTable);
     Entry->sectionObjectSource = KswordARKProcessSourceForOffset(
         dynState.Kernel.EpSectionObject,
-        KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER);
+        dynState.KernelSources.EpSectionObject);
 
     if ((dynState.CapabilityMask & KSW_CAP_PROCESS_PROTECTION_PATCH) ==
         KSW_CAP_PROCESS_PROTECTION_PATCH) {

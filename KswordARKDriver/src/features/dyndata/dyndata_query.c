@@ -25,6 +25,61 @@ Environment:
 #define KSW_DYN_FIELDS_RESPONSE_HEADER_SIZE \
     (sizeof(KSW_QUERY_DYN_FIELDS_RESPONSE) - sizeof(KSW_DYN_FIELD_ENTRY))
 
+#define KSW_DYN_PROFILE_IOCTL_POOL_TAG 'pDsK'
+
+typedef PVOID
+(NTAPI* KSW_DYN_EX_ALLOCATE_POOL2_FN)(
+    _In_ POOL_FLAGS Flags,
+    _In_ SIZE_T NumberOfBytes,
+    _In_ ULONG Tag
+    );
+
+static PVOID
+KswordARKDynDataAllocateProfileCopy(
+    _In_ SIZE_T BufferBytes
+    )
+/*++
+
+Routine Description:
+
+    Allocate the METHOD_BUFFERED input copy used by the PDB profile apply IOCTL.
+    The helper prefers ExAllocatePool2 when the running kernel exports it, while
+    preserving the existing old-kernel fallback style used by other feature
+    modules in this driver.
+
+Arguments:
+
+    BufferBytes - Number of nonpaged bytes required for the copied request.
+
+Return Value:
+
+    A nonpaged allocation on success; NULL on invalid size or allocation failure.
+
+--*/
+{
+    static volatile LONG allocatorResolved = 0;
+    static KSW_DYN_EX_ALLOCATE_POOL2_FN exAllocatePool2Fn = NULL;
+
+    if (BufferBytes == 0U) {
+        return NULL;
+    }
+
+    if (InterlockedCompareExchange(&allocatorResolved, 1L, 0L) == 0L) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"ExAllocatePool2");
+        exAllocatePool2Fn = (KSW_DYN_EX_ALLOCATE_POOL2_FN)MmGetSystemRoutineAddress(&routineName);
+    }
+
+    if (exAllocatePool2Fn != NULL) {
+        return exAllocatePool2Fn(POOL_FLAG_NON_PAGED, BufferBytes, KSW_DYN_PROFILE_IOCTL_POOL_TAG);
+    }
+
+#pragma warning(push)
+#pragma warning(disable:4996)
+    return ExAllocatePoolWithTag(NonPagedPoolNx, BufferBytes, KSW_DYN_PROFILE_IOCTL_POOL_TAG);
+#pragma warning(pop)
+}
+
 static ULONG
 KswordARKDynDataStatusFlagsFromState(
     _In_ const KSW_DYN_STATE* State
@@ -61,6 +116,9 @@ Return Value:
     }
     if (State->ExtraActive) {
         flags |= KSW_DYN_STATUS_FLAG_EXTRA_ACTIVE;
+    }
+    if (State->PdbProfileActive) {
+        flags |= KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE;
     }
 
     return flags;
@@ -467,5 +525,115 @@ Return Value:
 
     status = KswordARKDynDataQueryCapabilities(outputBuffer, actualOutputLength, BytesReturned);
     KswordARKDynDataIoctlLog(Device, NT_SUCCESS(status) ? "Info" : "Error", "DynData capability query completed: status=0x%08X, bytes=%Iu.", (unsigned int)status, *BytesReturned);
+    return status;
+}
+
+NTSTATUS
+KswordARKDynDataIoctlApplyProfile(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle IOCTL_KSWORD_ARK_APPLY_DYN_PROFILE. The handler performs only WDF
+    buffer/access validation and leaves semantic validation to the DynData owner
+    so the global state update remains centralized.
+
+Arguments:
+
+    Device - WDF device used for log emission.
+    Request - Current IOCTL request.
+    InputBufferLength - Supplied input bytes.
+    OutputBufferLength - Supplied output bytes.
+    BytesReturned - Receives fixed response byte count when a response is built.
+
+Return Value:
+
+    NTSTATUS from access validation, buffer retrieval, or profile application.
+
+--*/
+{
+    KSW_APPLY_DYN_PROFILE_REQUEST* inputBuffer = NULL;
+    KSW_APPLY_DYN_PROFILE_REQUEST* inputCopy = NULL;
+    KSW_APPLY_DYN_PROFILE_RESPONSE* outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    size_t copyLength = 0U;
+    const size_t maxProfileRequestBytes =
+        KSW_APPLY_DYN_PROFILE_REQUEST_HEADER_SIZE +
+        ((size_t)KSW_DYN_PROFILE_MAX_FIELDS * sizeof(KSW_DYN_PROFILE_FIELD_PACKET));
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKValidateDeviceIoControlWriteAccess(Request);
+    if (!NT_SUCCESS(status)) {
+        KswordARKDynDataIoctlLog(Device, "Warn", "DynData apply profile denied: write access required, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredInputBuffer(
+        Request,
+        KSW_APPLY_DYN_PROFILE_REQUEST_HEADER_SIZE,
+        (PVOID*)&inputBuffer,
+        &actualInputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKDynDataIoctlLog(Device, "Error", "DynData apply profile input invalid: 0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    copyLength = actualInputLength;
+    if (copyLength > maxProfileRequestBytes) {
+        copyLength = maxProfileRequestBytes;
+    }
+    inputCopy = (KSW_APPLY_DYN_PROFILE_REQUEST*)KswordARKDynDataAllocateProfileCopy(copyLength);
+    if (inputCopy == NULL) {
+        KswordARKDynDataIoctlLog(Device, "Error", "DynData apply profile input copy allocation failed, bytes=%Iu.", copyLength);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(inputCopy, inputBuffer, copyLength);
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        sizeof(KSW_APPLY_DYN_PROFILE_RESPONSE),
+        (PVOID*)&outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        ExFreePoolWithTag(inputCopy, KSW_DYN_PROFILE_IOCTL_POOL_TAG);
+        KswordARKDynDataIoctlLog(Device, "Error", "DynData apply profile output invalid: 0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKDynDataApplyProfile(
+        inputCopy,
+        copyLength,
+        outputBuffer,
+        actualOutputLength,
+        BytesReturned);
+    ExFreePoolWithTag(inputCopy, KSW_DYN_PROFILE_IOCTL_POOL_TAG);
+    KswordARKDynDataIoctlLog(
+        Device,
+        NT_SUCCESS(status) ? "Info" : "Warn",
+        "DynData apply profile completed: status=0x%08X, applied=%lu, rejected=%lu, unknown=%lu, caps=0x%I64X.",
+        (unsigned int)status,
+        (unsigned long)outputBuffer->appliedFieldCount,
+        (unsigned long)outputBuffer->rejectedFieldCount,
+        (unsigned long)outputBuffer->unknownFieldCount,
+        outputBuffer->capabilityMask);
+    if (*BytesReturned >= sizeof(KSW_APPLY_DYN_PROFILE_RESPONSE)) {
+        return STATUS_SUCCESS;
+    }
+
     return status;
 }

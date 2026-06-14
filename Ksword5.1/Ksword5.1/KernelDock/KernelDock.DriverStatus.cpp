@@ -165,6 +165,7 @@ namespace
         if (flagEnabled(flags, KSW_DYN_STATUS_FLAG_NTOS_ACTIVE)) { parts << QStringLiteral("NtosActive"); }
         if (flagEnabled(flags, KSW_DYN_STATUS_FLAG_LXCORE_ACTIVE)) { parts << QStringLiteral("LxcoreActive"); }
         if (flagEnabled(flags, KSW_DYN_STATUS_FLAG_EXTRA_ACTIVE)) { parts << QStringLiteral("ExtraActive"); }
+        if (flagEnabled(flags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE)) { parts << QStringLiteral("PdbProfileActive"); }
         return parts.isEmpty() ? QStringLiteral("None") : parts.join(QStringLiteral(", "));
     }
 
