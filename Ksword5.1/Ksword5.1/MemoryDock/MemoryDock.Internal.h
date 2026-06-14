@@ -11,6 +11,7 @@
 #include "MemoryDock.h"
 #include "../theme.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../UI/CodeEditorWidget.h"
 #include "../UI/HexEditorWidget.h"
 
 #include <QAbstractItemView>

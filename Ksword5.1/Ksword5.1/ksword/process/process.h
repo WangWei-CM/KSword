@@ -275,6 +275,8 @@ namespace ks::process
         std::uint64_t stackLimit = 0;          // R3 SystemExtendedProcessInformation 返回的用户栈边界。
         std::uint64_t win32StartAddress = 0;   // R3 SystemExtendedProcessInformation 返回的 Win32StartAddress。
         std::uint64_t tebBaseAddress = 0;      // R3 SystemExtendedProcessInformation 返回的 TEB 基址。
+        std::uint32_t r0ThreadFlags = 0;        // KSWORD_ARK_THREAD_FLAG_* cross-view 标记。
+        bool isR0OnlyThread = false;            // true 表示 R3 线程快照缺失但 R0/CID 视图可见。
         std::uint32_t r0ThreadFieldFlags = 0;  // KSWORD_ARK_THREAD_FIELD_* 可用性位图。
         std::uint32_t r0ThreadStatus = KSWORD_ARK_THREAD_R0_STATUS_UNAVAILABLE; // R0 KTHREAD 扩展状态。
         std::uint32_t r0StackFieldSource = KSW_DYN_FIELD_SOURCE_UNAVAILABLE; // KTHREAD 栈字段来源。

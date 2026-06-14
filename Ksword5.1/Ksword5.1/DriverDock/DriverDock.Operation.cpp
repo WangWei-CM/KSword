@@ -47,7 +47,14 @@ void DriverDock::refreshLoadedKernelModuleRecords()
     std::string errorText;
     if (!queryLoadedKernelModuleRecords(moduleRecordList, &errorText))
     {
+        ++m_moduleEvidenceQueryTicket;
+        m_moduleEvidenceQuerying = false;
+        if (m_refreshModuleEvidenceButton != nullptr)
+        {
+            m_refreshModuleEvidenceButton->setEnabled(true);
+        }
         m_loadedModuleCache.clear();
+        m_loadedModuleEvidenceCache.clear();
         rebuildLoadedModuleTable();
         appendOperateLogLine(QStringLiteral("刷新模块失败：%1").arg(QString::fromUtf8(errorText.c_str())));
         if (m_overviewStatusLabel != nullptr)
@@ -59,7 +66,20 @@ void DriverDock::refreshLoadedKernelModuleRecords()
         return;
     }
 
+    ++m_moduleEvidenceQueryTicket;
+    m_moduleEvidenceQuerying = false;
+    if (m_refreshModuleEvidenceButton != nullptr)
+    {
+        m_refreshModuleEvidenceButton->setEnabled(true);
+    }
+
     m_loadedModuleCache = std::move(moduleRecordList);
+    m_loadedModuleEvidenceCache.clear();
+    m_loadedModuleEvidenceCache.reserve(m_loadedModuleCache.size());
+    for (const LoadedKernelModuleRecord& moduleRecord : m_loadedModuleCache)
+    {
+        m_loadedModuleEvidenceCache.push_back(buildPendingModuleEvidenceRecord(moduleRecord));
+    }
     rebuildLoadedModuleTable();
 
     if (m_overviewStatusLabel != nullptr)
@@ -68,6 +88,22 @@ void DriverDock::refreshLoadedKernelModuleRecords()
             QStringLiteral("状态：驱动服务 %1 条，模块 %2 条")
             .arg(m_driverServiceCache.size())
             .arg(m_loadedModuleCache.size()));
+    }
+    if (m_moduleEvidenceStatusLabel != nullptr)
+    {
+        m_moduleEvidenceStatusLabel->setText(QStringLiteral("证据：模块已刷新，等待后台聚合。"));
+    }
+    if (!m_loadedModuleCache.empty())
+    {
+        // 模块证据聚合只在已有模块快照时启动：
+        // - 输入：当前 EnumDeviceDrivers 枚举出的模块缓存；
+        // - 处理：交给后台线程调用现有 ArkDriverClient 只读接口；
+        // - 返回：无；空列表直接停留在提示状态，避免刷新函数互相递归。
+        refreshLoadedModuleEvidenceAsync();
+    }
+    else if (m_moduleEvidenceStatusLabel != nullptr)
+    {
+        m_moduleEvidenceStatusLabel->setText(QStringLiteral("证据：没有可聚合的模块。"));
     }
 
     info << refreshEvent << "[DriverDock] 刷新模块完成, count=" << m_loadedModuleCache.size() << eol;
@@ -267,6 +303,13 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
 
     QMenu contextMenu(this);
     contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+    QAction* refreshEvidenceAction = contextMenu.addAction(
+        QIcon(":/Icon/process_refresh.svg"),
+        QStringLiteral("刷新模块证据聚合"));
+    QAction* copyEvidenceAction = contextMenu.addAction(
+        QIcon(":/Icon/process_copy_row.svg"),
+        QStringLiteral("复制当前模块证据详情"));
+    contextMenu.addSeparator();
     QAction* forceCleanupByBaseAction = contextMenu.addAction(
         QIcon(":/Icon/process_uncritical.svg"),
         QStringLiteral("R0 按模块基址强制清理 DriverObject"));
@@ -279,6 +322,20 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
         QStringLiteral("先按模块基址移除可验证回调，再清理 DriverObject；仍不摘 PsLoadedModuleList。"));
 
     QAction* selectedAction = contextMenu.exec(m_moduleTable->viewport()->mapToGlobal(localPosition));
+    if (selectedAction == refreshEvidenceAction)
+    {
+        refreshLoadedModuleEvidenceAsync();
+        return;
+    }
+    if (selectedAction == copyEvidenceAction)
+    {
+        showSelectedModuleEvidenceDetail();
+        if (m_moduleEvidenceDetailEditor != nullptr && QGuiApplication::clipboard() != nullptr)
+        {
+            QGuiApplication::clipboard()->setText(m_moduleEvidenceDetailEditor->text());
+        }
+        return;
+    }
     if (selectedAction == forceCleanupByBaseAction)
     {
         // 普通模块基址清理不需要二次确认，直接复用当前选中行。
@@ -623,19 +680,33 @@ void DriverDock::rebuildLoadedModuleTable()
     }
 
     m_moduleTable->setRowCount(0);
-    for (const LoadedKernelModuleRecord& moduleRecord : m_loadedModuleCache)
+    for (std::size_t sourceIndex = 0U; sourceIndex < m_loadedModuleCache.size(); ++sourceIndex)
     {
+        const LoadedKernelModuleRecord& moduleRecord = m_loadedModuleCache[sourceIndex];
         const int rowIndex = m_moduleTable->rowCount();
         m_moduleTable->insertRow(rowIndex);
-        m_moduleTable->setItem(rowIndex, 0, createReadOnlyItem(moduleRecord.moduleName));
+        QTableWidgetItem* moduleNameItem = createReadOnlyItem(moduleRecord.moduleName);
+        moduleNameItem->setData(
+            ModuleRecordIndexRole,
+            QVariant::fromValue<qulonglong>(static_cast<qulonglong>(sourceIndex)));
+        m_moduleTable->setItem(rowIndex, 0, moduleNameItem);
         QTableWidgetItem* baseItem = createReadOnlyItem(formatAddress(moduleRecord.baseAddress));
         baseItem->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(
             static_cast<qulonglong>(moduleRecord.baseAddress)));
         m_moduleTable->setItem(rowIndex, 1, baseItem);
+        for (int evidenceColumn = 2; evidenceColumn <= 7; ++evidenceColumn)
+        {
+            m_moduleTable->setItem(rowIndex, evidenceColumn, createReadOnlyItem(QStringLiteral("待扫描")));
+        }
         QTableWidgetItem* pathItem = createReadOnlyItem(moduleRecord.imagePath);
         pathItem->setToolTip(moduleRecord.imagePath);
-        m_moduleTable->setItem(rowIndex, 2, pathItem);
+        m_moduleTable->setItem(rowIndex, 8, pathItem);
     }
+    if (m_moduleTable->rowCount() > 0)
+    {
+        m_moduleTable->setCurrentCell(0, 0);
+    }
+    rebuildLoadedModuleEvidenceViews();
 }
 
 void DriverDock::syncOperateFormBySelectedService()
@@ -989,5 +1060,3 @@ void DriverDock::deleteSelectedDriverService()
     refreshDriverServiceRecords();
     refreshLoadedKernelModuleRecords();
 }
-
-

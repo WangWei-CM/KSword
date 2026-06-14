@@ -142,11 +142,14 @@ namespace ksword::ark
     };
 
     // ThreadEntry 是 R0 KTHREAD 扩展字段的 R3 侧模型。
+    // 输入：ArkDriverProcess.cpp 从 KSWORD_ARK_THREAD_ENTRY 逐字段复制。
+    // 处理：flags 保留 KSWORD_ARK_THREAD_FLAG_* cross-view 结果，fieldFlags 保留字段可用性。
+    // 返回：纯数据结构，无成员函数返回值。
     struct ThreadEntry
     {
         std::uint32_t threadId = 0;
         std::uint32_t processId = 0;
-        std::uint32_t flags = 0;
+        std::uint32_t flags = 0;      // KSWORD_ARK_THREAD_FLAG_*：R0 active walk / CID scan 交叉视图标记。
         std::uint32_t fieldFlags = 0;
         std::uint32_t r0Status = KSWORD_ARK_THREAD_R0_STATUS_UNAVAILABLE;
         std::uint32_t stackFieldSource = KSW_DYN_FIELD_SOURCE_UNAVAILABLE;
@@ -489,6 +492,67 @@ namespace ksword::ark
         std::uint32_t maxBytesPerRequest = 0;   // maxBytesPerRequest：驱动限制。
     };
 
+    // Kernel executable-memory permission bits used by the R3 display model.
+    // Input: values parsed from the kernel executable page scan response.
+    // Processing: MemoryDock maps these bits to readable R/W/X/NX/Large labels.
+    // Return behavior: constants are consumed directly and do not return data.
+    inline constexpr std::uint32_t KernelExecutableMemoryPermissionPresent = KSWORD_ARK_PAGE_TABLE_FLAG_PRESENT;
+    inline constexpr std::uint32_t KernelExecutableMemoryPermissionWritable = KSWORD_ARK_PAGE_TABLE_FLAG_WRITABLE;
+    inline constexpr std::uint32_t KernelExecutableMemoryPermissionUser = KSWORD_ARK_PAGE_TABLE_FLAG_USER;
+    inline constexpr std::uint32_t KernelExecutableMemoryPermissionNoExecute = KSWORD_ARK_PAGE_TABLE_FLAG_NX;
+    inline constexpr std::uint32_t KernelExecutableMemoryPermissionLargePage = KSWORD_ARK_PAGE_TABLE_FLAG_LARGE_PAGE;
+    inline constexpr std::uint32_t KernelExecutableMemoryPermissionGlobal = KSWORD_ARK_PAGE_TABLE_FLAG_GLOBAL;
+
+    // Kernel executable-memory risk bits used by the R3 display model.
+    // Input: values parsed from R0 scan entries.
+    // Processing: UI uses these stable bits for filtering and risk text.
+    // Return behavior: constants are values only; no function return is involved.
+    inline constexpr std::uint32_t KernelExecutableMemoryRiskWritableExecutable = KSWORD_ARK_KERNEL_EXEC_RISK_WRITABLE_EXECUTABLE;
+    inline constexpr std::uint32_t KernelExecutableMemoryRiskModuleNonTextExecutable = KSWORD_ARK_KERNEL_EXEC_RISK_MODULE_NON_TEXT_EXECUTABLE;
+    inline constexpr std::uint32_t KernelExecutableMemoryRiskSectionWritable = KSWORD_ARK_KERNEL_EXEC_RISK_SECTION_WRITABLE;
+    inline constexpr std::uint32_t KernelExecutableMemoryRiskLargePage = KSWORD_ARK_KERNEL_EXEC_RISK_LARGE_PAGE;
+
+    // KernelExecutableMemoryPageEntry is the R3 model for one executable kernel
+    // memory range. Input fields are copied from the Prompt-1 scan response.
+    // Processing keeps kernel addresses diagnostic-only and stores owner/path
+    // strings for filtering and details. Return behavior: plain data object.
+    struct KernelExecutableMemoryPageEntry
+    {
+        std::uint32_t status = 0;              // status：R0 row status.
+        std::uint32_t riskFlags = 0;           // riskFlags：KernelExecutableMemoryRisk* bits.
+        std::uint32_t permissionFlags = 0;     // permissionFlags：KernelExecutableMemoryPermission* bits.
+        std::uint32_t ownerKind = 0;           // ownerKind：R0 owner classifier, shown diagnostically.
+        std::uint32_t pageCount = 0;           // pageCount：contiguous executable pages.
+        std::uint32_t pageSize = 0;            // pageSize：4KB/2MB/1GB or R0 effective size.
+        long lastStatus = 0;                   // lastStatus：row-level backend status.
+        std::uint64_t virtualAddress = 0;      // virtualAddress：range start VA, display only.
+        std::uint64_t ownerAddress = 0;        // ownerAddress：diagnostic owner object/address.
+        std::uint64_t moduleBase = 0;          // moduleBase：matched module base when available.
+        std::uint32_t moduleSize = 0;          // moduleSize：matched module image size when available.
+        std::uint64_t regionSize = 0;          // regionSize：pageCount * pageSize or R0 range size.
+        std::wstring owner;                    // owner：R0 owner text.
+        std::wstring modulePath;               // modulePath：matched module image path.
+        std::wstring detail;                   // detail：R0 diagnostic detail for CodeEditorWidget.
+    };
+
+    // KernelExecutableMemoryScanResult carries the parsed Prompt-1 response.
+    // Input: returned by DriverClient::scanKernelExecutableMemory.
+    // Processing: io.ok indicates transport/protocol success; unsupported tells
+    // UI to show "not supported / driver too old" instead of crashing.
+    // Return behavior: returned by value from DriverClient.
+    struct KernelExecutableMemoryScanResult
+    {
+        IoResult io;                           // io：DeviceIoControl and parse status.
+        bool unsupported = false;              // unsupported：true when IOCTL is absent/old.
+        std::uint32_t version = 0;             // version：scan protocol version.
+        std::uint32_t status = 0;              // status：R0 aggregate status.
+        std::uint32_t totalCount = 0;          // totalCount：R0 observed ranges.
+        std::uint32_t returnedCount = 0;       // returnedCount：R0 returned ranges.
+        std::uint32_t moduleCount = 0;         // moduleCount：R0 module owner set size.
+        long lastStatus = 0;                   // lastStatus：R0 aggregate backend status.
+        std::vector<KernelExecutableMemoryPageEntry> entries; // entries：parsed scan rows.
+    };
+
     // SsdtEntry is the R3 model of one kernel SSDT response row.
     struct SsdtEntry
     {
@@ -518,7 +582,7 @@ namespace ksword::ark
         std::uint32_t status = KSWORD_ARK_KERNEL_HOOK_STATUS_UNKNOWN; // 行状态。
         std::uint32_t hookType = KSWORD_ARK_INLINE_HOOK_TYPE_NONE;    // 命中的补丁形态。
         std::uint32_t flags = 0;                                      // R0 诊断标志。
-        std::uint32_t originalByteCount = 0;                          // 基准字节长度。
+        std::uint32_t originalByteCount = 0;                          // R0 观察基线字节长度；不是磁盘原始字节长度。
         std::uint32_t currentByteCount = 0;                           // 当前字节长度。
         std::uint64_t functionAddress = 0;                            // 函数入口地址。
         std::uint64_t targetAddress = 0;                              // 跳转/补丁目标。
@@ -528,7 +592,7 @@ namespace ksword::ark
         std::wstring moduleName;                                      // 所属模块名。
         std::wstring targetModuleName;                                // 目标模块名。
         std::vector<std::uint8_t> currentBytes;                       // 当前函数头字节。
-        std::vector<std::uint8_t> expectedBytes;                      // 基准字节。
+        std::vector<std::uint8_t> expectedBytes;                      // 协议兼容字段：R0 观察基线，不代表磁盘原始字节。
     };
 
     // KernelInlineHookScanResult 承载 R0 Inline Hook 扫描响应。

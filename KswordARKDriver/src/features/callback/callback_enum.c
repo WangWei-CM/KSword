@@ -3400,12 +3400,13 @@ Return Value:
             ? L"已定位 PspNotifyEnableMask；用于诊断进程/线程/镜像 notify 全局启用状态。"
             : L"未能定位 PspNotifyEnableMask；不影响后续数组特征扫描。");
 
-    if (NT_SUCCESS(KswordArkCallbackEnumPdbRvaToVa(
+    status = KswordArkCallbackEnumPdbRvaToVa(
             &pdbProfile,
             pdbProfile.State.CallbackGlobals.PspCreateProcessNotifyRoutine,
             pdbProfile.State.CallbackGlobalSources.PspCreateProcessNotifyRoutine,
             sizeof(ULONG_PTR),
-            &processArray))) {
+            &processArray);
+    if (NT_SUCCESS(status)) {
         addedCount = KswordArkCallbackEnumAddNotifyArray(
             Builder,
             &moduleCache,
@@ -3431,7 +3432,19 @@ Return Value:
         }
     }
     else {
+        const NTSTATUS pdbStatus = status;
         status = KswordArkCallbackEnumLocatePspCreateProcessNotifyRoutine(&processArray);
+        RtlZeroMemory(detailText, sizeof(detailText));
+        if (!NT_SUCCESS(status)) {
+            (VOID)RtlStringCbPrintfW(
+                detailText,
+                sizeof(detailText),
+                L"未能通过 PsSetCreateProcessNotifyRoutine 特征定位进程 notify 数组。PDB path status=0x%08lX, CallbackProfileActive=%lu, RVA=0x%08lX, Source=%lu。",
+                (unsigned long)pdbStatus,
+                (unsigned long)pdbProfile.State.CallbackProfileActive,
+                (unsigned long)pdbProfile.State.CallbackGlobals.PspCreateProcessNotifyRoutine,
+                (unsigned long)pdbProfile.State.CallbackGlobalSources.PspCreateProcessNotifyRoutine);
+        }
         KswordArkCallbackEnumAddLocateRow(
             Builder,
             KSWORD_ARK_CALLBACK_ENUM_CLASS_PROCESS,
@@ -3440,7 +3453,7 @@ Return Value:
             status,
             NT_SUCCESS(status)
                 ? L"已定位 PspCreateProcessNotifyRoutine 私有数组，开始遍历 EX_FAST_REF 槽。"
-                : L"未能通过 PsSetCreateProcessNotifyRoutine 特征定位进程 notify 数组。");
+                : detailText);
         if (NT_SUCCESS(status)) {
             addedCount = KswordArkCallbackEnumAddNotifyArray(
                 Builder,
@@ -3461,12 +3474,13 @@ Return Value:
         }
     }
 
-    if (NT_SUCCESS(KswordArkCallbackEnumPdbRvaToVa(
+    status = KswordArkCallbackEnumPdbRvaToVa(
             &pdbProfile,
             pdbProfile.State.CallbackGlobals.PspCreateThreadNotifyRoutine,
             pdbProfile.State.CallbackGlobalSources.PspCreateThreadNotifyRoutine,
             sizeof(ULONG_PTR),
-            &threadArray))) {
+            &threadArray);
+    if (NT_SUCCESS(status)) {
         addedCount = KswordArkCallbackEnumAddNotifyArray(
             Builder,
             &moduleCache,
@@ -3492,7 +3506,19 @@ Return Value:
         }
     }
     else {
+        const NTSTATUS pdbStatus = status;
         status = KswordArkCallbackEnumLocatePspCreateThreadNotifyRoutine(&threadArray);
+        RtlZeroMemory(detailText, sizeof(detailText));
+        if (!NT_SUCCESS(status)) {
+            (VOID)RtlStringCbPrintfW(
+                detailText,
+                sizeof(detailText),
+                L"未能通过 PsRemoveCreateThreadNotifyRoutine 特征定位线程 notify 数组。PDB path status=0x%08lX, CallbackProfileActive=%lu, RVA=0x%08lX, Source=%lu。",
+                (unsigned long)pdbStatus,
+                (unsigned long)pdbProfile.State.CallbackProfileActive,
+                (unsigned long)pdbProfile.State.CallbackGlobals.PspCreateThreadNotifyRoutine,
+                (unsigned long)pdbProfile.State.CallbackGlobalSources.PspCreateThreadNotifyRoutine);
+        }
         KswordArkCallbackEnumAddLocateRow(
             Builder,
             KSWORD_ARK_CALLBACK_ENUM_CLASS_THREAD,
@@ -3501,7 +3527,7 @@ Return Value:
             status,
             NT_SUCCESS(status)
                 ? L"已定位 PspCreateThreadNotifyRoutine 私有数组，开始遍历 EX_FAST_REF 槽。"
-                : L"未能通过 PsRemoveCreateThreadNotifyRoutine 特征定位线程 notify 数组。");
+                : detailText);
         if (NT_SUCCESS(status)) {
             addedCount = KswordArkCallbackEnumAddNotifyArray(
                 Builder,
@@ -3522,12 +3548,13 @@ Return Value:
         }
     }
 
-    if (NT_SUCCESS(KswordArkCallbackEnumPdbRvaToVa(
+    status = KswordArkCallbackEnumPdbRvaToVa(
             &pdbProfile,
             pdbProfile.State.CallbackGlobals.PspLoadImageNotifyRoutine,
             pdbProfile.State.CallbackGlobalSources.PspLoadImageNotifyRoutine,
             sizeof(ULONG_PTR),
-            &imageArray))) {
+            &imageArray);
+    if (NT_SUCCESS(status)) {
         addedCount = KswordArkCallbackEnumAddNotifyArray(
             Builder,
             &moduleCache,
@@ -3553,7 +3580,19 @@ Return Value:
         }
     }
     else {
+        const NTSTATUS pdbStatus = status;
         status = KswordArkCallbackEnumLocatePspLoadImageNotifyRoutine(&imageArray);
+        RtlZeroMemory(detailText, sizeof(detailText));
+        if (!NT_SUCCESS(status)) {
+            (VOID)RtlStringCbPrintfW(
+                detailText,
+                sizeof(detailText),
+                L"未能通过 PsSetLoadImageNotifyRoutineEx 特征定位镜像 notify 数组。PDB path status=0x%08lX, CallbackProfileActive=%lu, RVA=0x%08lX, Source=%lu。",
+                (unsigned long)pdbStatus,
+                (unsigned long)pdbProfile.State.CallbackProfileActive,
+                (unsigned long)pdbProfile.State.CallbackGlobals.PspLoadImageNotifyRoutine,
+                (unsigned long)pdbProfile.State.CallbackGlobalSources.PspLoadImageNotifyRoutine);
+        }
         KswordArkCallbackEnumAddLocateRow(
             Builder,
             KSWORD_ARK_CALLBACK_ENUM_CLASS_IMAGE,
@@ -3562,7 +3601,7 @@ Return Value:
             status,
             NT_SUCCESS(status)
                 ? L"已定位 PspLoadImageNotifyRoutine 私有数组，开始遍历 EX_FAST_REF 槽。"
-                : L"未能通过 PsSetLoadImageNotifyRoutineEx 特征定位镜像 notify 数组。");
+                : detailText);
         if (NT_SUCCESS(status)) {
             addedCount = KswordArkCallbackEnumAddNotifyArray(
                 Builder,

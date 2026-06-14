@@ -20,6 +20,9 @@ Environment:
 
 #define KSWORD_ARK_THREAD_ENUM_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_ENUM_THREAD_RESPONSE) - sizeof(KSWORD_ARK_THREAD_ENTRY))
+#define KSWORD_ARK_THREAD_ID_STEP 4UL
+#define KSWORD_ARK_THREAD_SCAN_MIN_ID KSWORD_ARK_THREAD_ID_STEP
+#define KSWORD_ARK_THREAD_SCAN_MAX_ID 0x00100000UL
 
 typedef PEPROCESS(NTAPI* KSWORD_PS_GET_NEXT_PROCESS_FN)(
     _In_opt_ PEPROCESS Process
@@ -28,6 +31,14 @@ typedef PEPROCESS(NTAPI* KSWORD_PS_GET_NEXT_PROCESS_FN)(
 typedef PETHREAD(NTAPI* KSWORD_PS_GET_NEXT_PROCESS_THREAD_FN)(
     _In_ PEPROCESS Process,
     _In_opt_ PETHREAD Thread
+    );
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+PsLookupThreadByThreadId(
+    _In_ HANDLE ThreadId,
+    _Outptr_ PETHREAD* Thread
     );
 
 static BOOLEAN
@@ -131,6 +142,131 @@ Return Value:
 
     RtlInitUnicodeString(&routineName, L"PsGetNextProcessThread");
     return (KSWORD_PS_GET_NEXT_PROCESS_THREAD_FN)MmGetSystemRoutineAddress(&routineName);
+}
+
+static ULONG
+KswordARKThreadAlignIdToStep(
+    _In_ ULONG ThreadId
+    )
+/*++
+
+Routine Description:
+
+    Align a thread ID to the system CID stride used by the bounded scan view.
+
+Arguments:
+
+    ThreadId - Raw thread ID boundary.
+
+Return Value:
+
+    Thread ID rounded down to the nearest scan stride.
+
+--*/
+{
+    return ThreadId - (ThreadId % KSWORD_ARK_THREAD_ID_STEP);
+}
+
+static VOID
+KswordARKThreadBitmapSet(
+    _Inout_updates_bytes_(BitmapBytes) UCHAR* Bitmap,
+    _In_ size_t BitmapBytes,
+    _In_ ULONG ThreadId
+    )
+/*++
+
+Routine Description:
+
+    Mark one active-list TID in the compact scan bitmap.
+
+Arguments:
+
+    Bitmap - Mutable bitmap storage.
+    BitmapBytes - Size of Bitmap in bytes.
+    ThreadId - Thread ID to mark.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    const size_t bitIndex = (size_t)(ThreadId / KSWORD_ARK_THREAD_ID_STEP);
+    const size_t byteIndex = bitIndex >> 3;
+    const UCHAR bitMask = (UCHAR)(1U << (bitIndex & 7U));
+
+    if (Bitmap == NULL || byteIndex >= BitmapBytes) {
+        return;
+    }
+
+    Bitmap[byteIndex] |= bitMask;
+}
+
+static BOOLEAN
+KswordARKThreadBitmapHas(
+    _In_reads_bytes_(BitmapBytes) const UCHAR* Bitmap,
+    _In_ size_t BitmapBytes,
+    _In_ ULONG ThreadId
+    )
+/*++
+
+Routine Description:
+
+    Test whether one TID was observed by the active process/thread walk.
+
+Arguments:
+
+    Bitmap - Immutable bitmap storage.
+    BitmapBytes - Size of Bitmap in bytes.
+    ThreadId - Thread ID to test.
+
+Return Value:
+
+    TRUE when the TID was marked by the active-list view.
+
+--*/
+{
+    const size_t bitIndex = (size_t)(ThreadId / KSWORD_ARK_THREAD_ID_STEP);
+    const size_t byteIndex = bitIndex >> 3;
+    const UCHAR bitMask = (UCHAR)(1U << (bitIndex & 7U));
+
+    if (Bitmap == NULL || byteIndex >= BitmapBytes) {
+        return FALSE;
+    }
+
+    return ((Bitmap[byteIndex] & bitMask) != 0U) ? TRUE : FALSE;
+}
+
+static BOOLEAN
+KswordARKThreadBitmapCanRepresent(
+    _In_ size_t BitmapBytes,
+    _In_ ULONG IdValue
+    )
+/*++
+
+Routine Description:
+
+    Check whether a PID/TID can be safely represented by the bounded CID bitmap.
+
+Arguments:
+
+    BitmapBytes - Size of the active-view bitmap.
+    IdValue - PID or TID to test.
+
+Return Value:
+
+    TRUE when IdValue maps into BitmapBytes; otherwise FALSE.
+
+--*/
+{
+    const size_t bitIndex = (size_t)(IdValue / KSWORD_ARK_THREAD_ID_STEP);
+    const size_t byteIndex = bitIndex >> 3;
+
+    if ((IdValue % KSWORD_ARK_THREAD_ID_STEP) != 0UL) {
+        return FALSE;
+    }
+
+    return (byteIndex < BitmapBytes) ? TRUE : FALSE;
 }
 
 static NTSTATUS
@@ -427,6 +563,7 @@ KswordARKThreadAppendEntry(
     _In_ size_t EntryCapacity,
     _In_ PETHREAD ThreadObject,
     _In_ ULONG ProcessId,
+    _In_ ULONG ThreadFlags,
     _In_ ULONG RequestFlags,
     _In_ const KSW_DYN_STATE* DynState
     )
@@ -442,6 +579,7 @@ Arguments:
     EntryCapacity - Number of entries that fit in the output buffer.
     ThreadObject - Referenced thread object owned by the caller.
     ProcessId - Owner process ID.
+    ThreadFlags - KSWORD_ARK_THREAD_FLAG_* cross-view flags.
     RequestFlags - Request flags controlling optional field groups.
     DynState - DynData snapshot.
 
@@ -469,6 +607,7 @@ Return Value:
     RtlZeroMemory(entry, sizeof(*entry));
     entry->threadId = HandleToULong(PsGetThreadId(ThreadObject));
     entry->processId = ProcessId;
+    entry->flags = ThreadFlags;
     entry->r0Status = KSWORD_ARK_THREAD_R0_STATUS_DYNDATA_MISSING;
     entry->stackFieldSource = KSW_DYN_FIELD_SOURCE_UNAVAILABLE;
     entry->ioFieldSource = KSW_DYN_FIELD_SOURCE_UNAVAILABLE;
@@ -501,7 +640,11 @@ KswordARKThreadWalkProcessThreads(
     _In_ ULONG RequestProcessId,
     _In_ ULONG RequestFlags,
     _In_ const KSW_DYN_STATE* DynState,
-    _In_ KSWORD_PS_GET_NEXT_PROCESS_THREAD_FN PsGetNextProcessThread
+    _In_ KSWORD_PS_GET_NEXT_PROCESS_THREAD_FN PsGetNextProcessThread,
+    _In_opt_ UCHAR* ActiveProcessBitmap,
+    _In_ size_t ActiveProcessBitmapBytes,
+    _In_opt_ UCHAR* ActiveThreadBitmap,
+    _In_ size_t ActiveThreadBitmapBytes
     )
 /*++
 
@@ -518,6 +661,10 @@ Arguments:
     RequestFlags - Optional field group flags.
     DynState - DynData snapshot.
     PsGetNextProcessThread - Resolved thread iterator.
+    ActiveProcessBitmap - Optional active-list PID bitmap for cross-view scans.
+    ActiveProcessBitmapBytes - PID bitmap size in bytes.
+    ActiveThreadBitmap - Optional active-list TID bitmap for cross-view scans.
+    ActiveThreadBitmapBytes - Bitmap size in bytes.
 
 Return Value:
 
@@ -533,6 +680,10 @@ Return Value:
     }
 
     processId = HandleToULong(PsGetProcessId(ProcessObject));
+    if (ActiveProcessBitmap != NULL) {
+        KswordARKThreadBitmapSet(ActiveProcessBitmap, ActiveProcessBitmapBytes, processId);
+    }
+
     if (RequestProcessId != 0UL && processId != RequestProcessId) {
         return;
     }
@@ -540,9 +691,118 @@ Return Value:
     threadCursor = PsGetNextProcessThread(ProcessObject, NULL);
     while (threadCursor != NULL) {
         PETHREAD nextThread = PsGetNextProcessThread(ProcessObject, threadCursor);
-        KswordARKThreadAppendEntry(Response, EntryCapacity, threadCursor, processId, RequestFlags, DynState);
+        if (ActiveThreadBitmap != NULL) {
+            KswordARKThreadBitmapSet(
+                ActiveThreadBitmap,
+                ActiveThreadBitmapBytes,
+                HandleToULong(PsGetThreadId(threadCursor)));
+        }
+        KswordARKThreadAppendEntry(
+            Response,
+            EntryCapacity,
+            threadCursor,
+            processId,
+            KSWORD_ARK_THREAD_FLAG_KERNEL_ENUMERATED,
+            RequestFlags,
+            DynState);
         ObDereferenceObject(threadCursor);
         threadCursor = nextThread;
+    }
+}
+
+static VOID
+KswordARKThreadScanCidTable(
+    _Inout_ KSWORD_ARK_ENUM_THREAD_RESPONSE* Response,
+    _In_ size_t EntryCapacity,
+    _In_ ULONG RequestProcessId,
+    _In_ ULONG RequestFlags,
+    _In_ const KSW_DYN_STATE* DynState,
+    _In_reads_bytes_(ActiveProcessBitmapBytes) const UCHAR* ActiveProcessBitmap,
+    _In_ size_t ActiveProcessBitmapBytes,
+    _In_reads_bytes_(ActiveThreadBitmapBytes) const UCHAR* ActiveThreadBitmap,
+    _In_ size_t ActiveThreadBitmapBytes
+    )
+/*++
+
+Routine Description:
+
+    Scan a bounded CID range and append only threads absent from the active
+    process/thread walk. This is the optional cross-view path that can surface
+    R0-only / CID-only threads.
+
+Arguments:
+
+    Response - Mutable response packet.
+    EntryCapacity - Output entry capacity.
+    RequestProcessId - Optional PID filter.
+    RequestFlags - Optional field group flags.
+    DynState - DynData snapshot.
+    ActiveProcessBitmap - Bitmap of active PIDs.
+    ActiveProcessBitmapBytes - Bitmap size in bytes.
+    ActiveThreadBitmap - Bitmap of active TIDs.
+    ActiveThreadBitmapBytes - Bitmap size in bytes.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    ULONG scanThreadId = KSWORD_ARK_THREAD_SCAN_MIN_ID;
+    ULONG scanEndThreadId = KSWORD_ARK_THREAD_SCAN_MAX_ID;
+
+    if (Response == NULL || DynState == NULL) {
+        return;
+    }
+
+    scanThreadId = KswordARKThreadAlignIdToStep(scanThreadId);
+    if (scanThreadId < KSWORD_ARK_THREAD_SCAN_MIN_ID) {
+        scanThreadId = KSWORD_ARK_THREAD_SCAN_MIN_ID;
+    }
+    scanEndThreadId = KswordARKThreadAlignIdToStep(scanEndThreadId);
+    if (scanEndThreadId < scanThreadId) {
+        scanEndThreadId = scanThreadId;
+    }
+
+    for (;;) {
+        PETHREAD threadObject = NULL;
+        NTSTATUS lookupStatus = PsLookupThreadByThreadId(ULongToHandle(scanThreadId), &threadObject);
+        if (NT_SUCCESS(lookupStatus)) {
+            const ULONG ownerProcessId = HandleToULong(PsGetThreadProcessId(threadObject));
+            ULONG threadFlags = KSWORD_ARK_THREAD_FLAG_KERNEL_ENUMERATED;
+            const BOOLEAN activeThreadSeen =
+                KswordARKThreadBitmapHas(ActiveThreadBitmap, ActiveThreadBitmapBytes, scanThreadId);
+            const BOOLEAN ownerProcessRepresented =
+                KswordARKThreadBitmapCanRepresent(ActiveProcessBitmapBytes, ownerProcessId);
+            const BOOLEAN activeProcessSeen =
+                ownerProcessRepresented
+                ? KswordARKThreadBitmapHas(ActiveProcessBitmap, ActiveProcessBitmapBytes, ownerProcessId)
+                : TRUE;
+
+            if (!activeThreadSeen) {
+                threadFlags |= KSWORD_ARK_THREAD_FLAG_HIDDEN_FROM_ACTIVE_THREAD_LIST;
+            }
+            if (ownerProcessRepresented && !activeProcessSeen) {
+                threadFlags |= KSWORD_ARK_THREAD_FLAG_OWNER_PROCESS_HIDDEN;
+            }
+
+            if (!activeThreadSeen && (RequestProcessId == 0UL || ownerProcessId == RequestProcessId)) {
+                KswordARKThreadAppendEntry(
+                    Response,
+                    EntryCapacity,
+                    threadObject,
+                    ownerProcessId,
+                    threadFlags,
+                    RequestFlags,
+                    DynState);
+            }
+            ObDereferenceObject(threadObject);
+        }
+
+        if ((scanEndThreadId - scanThreadId) < KSWORD_ARK_THREAD_ID_STEP) {
+            break;
+        }
+        scanThreadId += KSWORD_ARK_THREAD_ID_STEP;
     }
 }
 
@@ -581,6 +841,10 @@ Return Value:
     ULONG requestFlags = KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_ALL;
     ULONG requestProcessId = 0UL;
     PEPROCESS processCursor = NULL;
+    BOOLEAN scanCidTable = FALSE;
+    UCHAR* activeProcessBitmap = NULL;
+    UCHAR* activeThreadBitmap = NULL;
+    size_t activeBitmapBytes = 0U;
 
     if (OutputBuffer == NULL || BytesWrittenOut == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -602,8 +866,9 @@ Return Value:
         requestProcessId = Request->processId;
     }
     if ((requestFlags & KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_ALL) == 0UL) {
-        requestFlags = KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_ALL;
+        requestFlags |= KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_ALL;
     }
+    scanCidTable = ((requestFlags & KSWORD_ARK_ENUM_THREAD_FLAG_SCAN_CID_TABLE) != 0UL) ? TRUE : FALSE;
 
     RtlZeroMemory(&dynState, sizeof(dynState));
     KswordARKDynDataSnapshot(&dynState);
@@ -616,6 +881,32 @@ Return Value:
         (OutputBufferLength - KSWORD_ARK_THREAD_ENUM_RESPONSE_HEADER_SIZE) /
         sizeof(KSWORD_ARK_THREAD_ENTRY);
 
+    if (scanCidTable) {
+        const size_t bitmapBitCount = (size_t)(KSWORD_ARK_THREAD_SCAN_MAX_ID / KSWORD_ARK_THREAD_ID_STEP) + 1U;
+        activeBitmapBytes = (bitmapBitCount + 7U) >> 3;
+#pragma warning(push)
+#pragma warning(disable:4996)
+        activeProcessBitmap = (UCHAR*)ExAllocatePoolWithTag(NonPagedPoolNx, activeBitmapBytes, 'tKsK');
+        activeThreadBitmap = (UCHAR*)ExAllocatePoolWithTag(NonPagedPoolNx, activeBitmapBytes, 'tKsK');
+#pragma warning(pop)
+        if (activeProcessBitmap == NULL || activeThreadBitmap == NULL) {
+            if (activeProcessBitmap != NULL) {
+                ExFreePoolWithTag(activeProcessBitmap, 'tKsK');
+                activeProcessBitmap = NULL;
+            }
+            if (activeThreadBitmap != NULL) {
+                ExFreePoolWithTag(activeThreadBitmap, 'tKsK');
+                activeThreadBitmap = NULL;
+            }
+            activeBitmapBytes = 0U;
+            scanCidTable = FALSE;
+        }
+        else {
+            RtlZeroMemory(activeProcessBitmap, activeBitmapBytes);
+            RtlZeroMemory(activeThreadBitmap, activeBitmapBytes);
+        }
+    }
+
     processCursor = psGetNextProcess(NULL);
     while (processCursor != NULL) {
         PEPROCESS nextProcess = psGetNextProcess(processCursor);
@@ -626,9 +917,35 @@ Return Value:
             requestProcessId,
             requestFlags,
             &dynState,
-            psGetNextProcessThread);
+            psGetNextProcessThread,
+            activeProcessBitmap,
+            activeBitmapBytes,
+            activeThreadBitmap,
+            activeBitmapBytes);
         ObDereferenceObject(processCursor);
         processCursor = nextProcess;
+    }
+
+    if (scanCidTable) {
+        KswordARKThreadScanCidTable(
+            response,
+            entryCapacity,
+            requestProcessId,
+            requestFlags,
+            &dynState,
+            activeProcessBitmap,
+            activeBitmapBytes,
+            activeThreadBitmap,
+            activeBitmapBytes);
+    }
+
+    if (activeProcessBitmap != NULL) {
+        ExFreePoolWithTag(activeProcessBitmap, 'tKsK');
+        activeProcessBitmap = NULL;
+    }
+    if (activeThreadBitmap != NULL) {
+        ExFreePoolWithTag(activeThreadBitmap, 'tKsK');
+        activeThreadBitmap = NULL;
     }
 
     totalBytesWritten =

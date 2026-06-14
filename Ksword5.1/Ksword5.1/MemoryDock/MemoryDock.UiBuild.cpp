@@ -122,10 +122,10 @@ void MemoryDock::initializeTabs()
     // 记录 Tab 初始化日志：便于排查某个页面未创建的问题。
     kLogEvent tabInitEvent;
     info << tabInitEvent
-        << "[MemoryDock] initializeTabs: 开始创建 6 个功能页。"
+        << "[MemoryDock] initializeTabs: 开始创建 7 个功能页。"
         << eol;
 
-    // 五个子页面统一由 QTabWidget 承载。
+    // 全部子页面统一由 QTabWidget 承载。
     m_tabWidget = new QTabWidget(this);
     m_tabWidget->setDocumentMode(true);
     m_rootLayout->addWidget(m_tabWidget, 1);
@@ -136,6 +136,7 @@ void MemoryDock::initializeTabs()
     initializeMemoryViewerTab();
     initializeBreakpointBookmarkTab();
     initializeDriverMemoryRwTab();
+    initializeKernelExecutableMemoryScanTab();
 }
 
 void MemoryDock::initializeProcessModuleTab()

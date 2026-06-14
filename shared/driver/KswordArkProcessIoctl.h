@@ -7,6 +7,10 @@
 // - This file must be included by both user mode and kernel mode.
 // ============================================================
 
+#if defined(_WIN32) && !defined(_KERNEL_MODE) && !defined(_NTDDK_) && !defined(_NTIFS_)
+#include <windows.h>
+#endif
+
 #ifndef FILE_DEVICE_UNKNOWN
 #define FILE_DEVICE_UNKNOWN 0x00000022
 #endif

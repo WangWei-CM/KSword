@@ -32,6 +32,10 @@ Environment:
 #define KSWORD_ARK_PHYSICAL_WRITE_REQUEST_HEADER_SIZE \
     (sizeof(KSWORD_ARK_WRITE_PHYSICAL_MEMORY_REQUEST) - sizeof(((KSWORD_ARK_WRITE_PHYSICAL_MEMORY_REQUEST*)0)->data))
 
+// 内核 executable page 扫描响应头不包含尾随 entries[1]。
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_RESPONSE_HEADER_SIZE \
+    (sizeof(KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE) - sizeof(KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY))
+
 static VOID
 KswordARKMemoryToolIoctlLog(
     _In_ WDFDEVICE Device,
@@ -164,6 +168,128 @@ Return Value:
             (unsigned long)response->readStatus,
             (unsigned long)response->requestedBytes,
             (unsigned long)response->bytesRead);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKMemoryIoctlScanKernelExecutableMemory(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    处理 IOCTL_KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY。中文说明：handler 只做
+    METHOD_BUFFERED 缓冲获取、flags/range 初筛和日志；实际扫描为只读后端，
+    不写 PTE，不改 CR0，也不承诺全内核地址空间覆盖。
+
+Arguments:
+
+    Device - WDF 设备对象，用于日志。
+    Request - 当前 IOCTL 请求。
+    InputBufferLength - 输入长度；缺省时使用默认全模块保守扫描。
+    OutputBufferLength - 输出长度；WDF 再确认。
+    BytesReturned - 接收响应字节数。
+
+Return Value:
+
+    NTSTATUS from buffer validation or KswordARKDriverScanKernelExecutableMemory.
+
+--*/
+{
+    KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST* scanRequest = NULL;
+    KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST defaultRequest;
+    KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST scanRequestCopy;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    BOOLEAN hasInput = FALSE;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    RtlZeroMemory(&defaultRequest, sizeof(defaultRequest));
+    RtlZeroMemory(&scanRequestCopy, sizeof(scanRequestCopy));
+    defaultRequest.flags = KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_ALL;
+
+    status = KswordARKRetrieveOptionalInputBuffer(
+        Request,
+        InputBufferLength,
+        sizeof(KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST),
+        &inputBuffer,
+        &actualInputLength,
+        &hasInput);
+    if (!NT_SUCCESS(status)) {
+        KswordARKMemoryToolIoctlLog(Device, "Error", "R0 scan-kernel-exec ioctl: input invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    scanRequest = hasInput ?
+        (KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST*)inputBuffer :
+        &defaultRequest;
+    if ((scanRequest->flags & ~KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_ALL) != 0UL ||
+        (scanRequest->startAddress != 0ULL &&
+            scanRequest->endAddress != 0ULL &&
+            scanRequest->endAddress <= scanRequest->startAddress)) {
+        KswordARKMemoryToolIoctlLog(
+            Device,
+            "Warn",
+            "R0 scan-kernel-exec ioctl: flags/range rejected, flags=0x%08X, start=0x%I64X, end=0x%I64X.",
+            (unsigned int)scanRequest->flags,
+            scanRequest->startAddress,
+            scanRequest->endAddress);
+        return STATUS_INVALID_PARAMETER;
+    }
+    /*
+     * 中文说明：该 IOCTL 使用 METHOD_BUFFERED，输入和输出可能是同一个
+     * SystemBuffer；backend 会清零响应缓冲，所以在获取输出缓冲前固定复制请求。
+     */
+    RtlCopyMemory(&scanRequestCopy, scanRequest, sizeof(scanRequestCopy));
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        KSWORD_ARK_KERNEL_EXEC_SCAN_RESPONSE_HEADER_SIZE,
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKMemoryToolIoctlLog(Device, "Error", "R0 scan-kernel-exec ioctl: output invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKDriverScanKernelExecutableMemory(
+        outputBuffer,
+        actualOutputLength,
+        &scanRequestCopy,
+        BytesReturned);
+    if (!NT_SUCCESS(status)) {
+        KswordARKMemoryToolIoctlLog(Device, "Error", "R0 scan-kernel-exec failed: status=0x%08X, outBytes=%Iu.", (unsigned int)status, *BytesReturned);
+        return status;
+    }
+
+    if (*BytesReturned >= KSWORD_ARK_KERNEL_EXEC_SCAN_RESPONSE_HEADER_SIZE) {
+        KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE* response =
+            (KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE*)outputBuffer;
+        KswordARKMemoryToolIoctlLog(
+            Device,
+            "Info",
+            "R0 scan-kernel-exec response: status=%lu, total=%lu, returned=%lu, modules=%lu, last=0x%08X.",
+            (unsigned long)response->status,
+            (unsigned long)response->totalCount,
+            (unsigned long)response->returnedCount,
+            (unsigned long)response->moduleCount,
+            (unsigned int)response->lastStatus);
     }
 
     return STATUS_SUCCESS;

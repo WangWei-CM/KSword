@@ -4,6 +4,7 @@
 #include "ProcessDetailWindow.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/FlatTableModel.h"
+#include "../UI/TableColumnAutoFit.h"
 
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
@@ -2966,8 +2967,9 @@ void ProcessDock::initializeProcessTable()
     m_processTable->setShowGrid(false);
     m_processTable->setWordWrap(false);
     m_processTable->setCornerButtonEnabled(false);
-    // 列宽由自适应逻辑统一控制，强制关闭内部横向滚动条。
-    m_processTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // 横向滚动条策略保持 Qt 默认值：
+    // - 全局 TableColumnAutoFit 会在首次显示/尺寸变化时把列宽压入 viewport；
+    // - 不强制隐藏横向滚动条，用户手动拖宽列后允许滚动条自然出现。
     if (QScrollBar* verticalScrollBar = m_processTable->verticalScrollBar())
     {
         verticalScrollBar->setProperty("ksword_disable_smooth_scroll", true);
@@ -4237,7 +4239,10 @@ void ProcessDock::applyViewMode(const ViewMode viewMode)
 
 void ProcessDock::applyAdaptiveColumnWidths()
 {
-    // 该函数作用：按当前可见列数量，均分可用宽度，彻底避免横向滚动条出现。
+    // 该函数作用：
+    // - 只把进程表列切到可交互模式，并请求全局列宽自适应器按 viewport 压缩默认宽度；
+    // - 不再强制 Stretch，也不修改滚动条策略，用户拖宽列后允许横向滚动条自然出现；
+    // - 若用户已经手动调整过列宽，全局自适应器会跳过本次请求以保留用户宽度。
     if (m_processTable == nullptr)
     {
         return;
@@ -4249,35 +4254,22 @@ void ProcessDock::applyAdaptiveColumnWidths()
         return;
     }
 
-    // 先统计可见列，隐藏列保留 ResizeToContents，防止切换视图时状态错乱。
-    int visibleColumnCount = 0;
+    headerView->setStretchLastSection(false);
     for (int column = 0; column < static_cast<int>(TableColumn::Count); ++column)
     {
-        if (!m_processTable->isColumnHidden(column))
-        {
-            ++visibleColumnCount;
-            headerView->setSectionResizeMode(column, QHeaderView::Stretch);
-        }
-        else
-        {
-            headerView->setSectionResizeMode(column, QHeaderView::ResizeToContents);
-        }
+        headerView->setSectionResizeMode(column, QHeaderView::Interactive);
     }
 
-    if (visibleColumnCount <= 0)
-    {
-        return;
-    }
-
-    // 兜底：宽度分配有时会因延迟布局未立刻生效，主动触发一次 viewport 更新。
-    m_processTable->viewport()->update();
+    ks::ui::RequestTableColumnAutoFit(m_processTable);
 }
 
 void ProcessDock::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
 
-    // Dock 尺寸变化后立即重新分配列宽，保证任何宽度下都不出现内部横向滚动条。
+    // Dock 尺寸变化后只请求一次默认自适应：
+    // - 未手动调列宽时压入 viewport；
+    // - 已手动调列宽时保留用户宽度，横向滚动条按需出现。
     applyAdaptiveColumnWidths();
 }
 

@@ -32,6 +32,7 @@ NTSTATUS KswordARKMemoryIoctlReadPhysicalMemory(_In_ WDFDEVICE Device, _In_ WDFR
 NTSTATUS KswordARKMemoryIoctlWritePhysicalMemory(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKMemoryIoctlTranslateVirtualAddress(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKMemoryIoctlQueryPageTableEntry(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
+NTSTATUS KswordARKMemoryIoctlScanKernelExecutableMemory(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKFileIoctlDeletePath(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKFileIoctlQueryFileInfo(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
 NTSTATUS KswordARKFileMonitorIoctlControl(_In_ WDFDEVICE Device, _In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ size_t OutputBufferLength, _Out_ size_t* BytesReturned);
@@ -99,6 +100,7 @@ static const KSWORD_ARK_IOCTL_ENTRY g_KswordArkIoctlTable[] = {
     { IOCTL_KSWORD_ARK_WRITE_PHYSICAL_MEMORY, KswordARKMemoryIoctlWritePhysicalMemory, "IOCTL_KSWORD_ARK_WRITE_PHYSICAL_MEMORY", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_TRANSLATE_VIRTUAL_ADDRESS, KswordARKMemoryIoctlTranslateVirtualAddress, "IOCTL_KSWORD_ARK_TRANSLATE_VIRTUAL_ADDRESS", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_QUERY_PAGE_TABLE_ENTRY, KswordARKMemoryIoctlQueryPageTableEntry, "IOCTL_KSWORD_ARK_QUERY_PAGE_TABLE_ENTRY", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
+    { IOCTL_KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY, KswordARKMemoryIoctlScanKernelExecutableMemory, "IOCTL_KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_DELETE_PATH, KswordARKFileIoctlDeletePath, "IOCTL_KSWORD_ARK_DELETE_PATH", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_QUERY_FILE_INFO, KswordARKFileIoctlQueryFileInfo, "IOCTL_KSWORD_ARK_QUERY_FILE_INFO", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },
     { IOCTL_KSWORD_ARK_FILE_MONITOR_CONTROL, KswordARKFileMonitorIoctlControl, "IOCTL_KSWORD_ARK_FILE_MONITOR_CONTROL", KSWORD_ARK_IOCTL_CAPABILITY_NONE, KSWORD_ARK_IOCTL_FLAG_NONE },

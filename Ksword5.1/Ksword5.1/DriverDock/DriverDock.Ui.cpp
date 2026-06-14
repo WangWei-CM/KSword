@@ -39,6 +39,11 @@ void DriverDock::initializeOverviewTab()
     m_refreshModuleButton->setToolTip(QStringLiteral("刷新已加载内核模块"));
     m_refreshModuleButton->setFixedWidth(34);
 
+    m_refreshModuleEvidenceButton = new QPushButton(m_overviewPage);
+    m_refreshModuleEvidenceButton->setIcon(QIcon(":/Icon/process_refresh.svg"));
+    m_refreshModuleEvidenceButton->setToolTip(QStringLiteral("后台聚合 DriverObject / Hook / Callback 证据"));
+    m_refreshModuleEvidenceButton->setFixedWidth(34);
+
     m_serviceFilterEdit = new QLineEdit(m_overviewPage);
     m_serviceFilterEdit->setPlaceholderText(QStringLiteral("输入服务名/显示名/路径过滤"));
     m_serviceFilterEdit->setToolTip(QStringLiteral("支持按服务名、显示名、路径、描述模糊过滤"));
@@ -48,6 +53,7 @@ void DriverDock::initializeOverviewTab()
 
     m_overviewToolLayout->addWidget(m_refreshServiceButton);
     m_overviewToolLayout->addWidget(m_refreshModuleButton);
+    m_overviewToolLayout->addWidget(m_refreshModuleEvidenceButton);
     m_overviewToolLayout->addWidget(m_serviceFilterEdit, 1);
     m_overviewToolLayout->addWidget(m_overviewStatusLabel, 0);
     m_overviewLayout->addLayout(m_overviewToolLayout);
@@ -89,13 +95,19 @@ void DriverDock::initializeOverviewTab()
     QVBoxLayout* moduleLayout = new QVBoxLayout(moduleContainer);
     moduleLayout->setContentsMargins(0, 0, 0, 0);
     moduleLayout->setSpacing(4);
-    moduleLayout->addWidget(new QLabel(QStringLiteral("已加载内核模块（EnumDeviceDrivers）"), moduleContainer));
+    moduleLayout->addWidget(new QLabel(QStringLiteral("已加载内核模块（EnumDeviceDrivers + R0 证据聚合）"), moduleContainer));
 
     m_moduleTable = new QTableWidget(moduleContainer);
-    m_moduleTable->setColumnCount(3);
+    m_moduleTable->setColumnCount(9);
     m_moduleTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("模块名"),
         QStringLiteral("基址"),
+        QStringLiteral("DriverObject"),
+        QStringLiteral("DriverStart"),
+        QStringLiteral("MajorFunction"),
+        QStringLiteral("IAT/EAT"),
+        QStringLiteral("Inline Hook"),
+        QStringLiteral("Callback"),
         QStringLiteral("映像路径")
         });
     m_moduleTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -105,8 +117,31 @@ void DriverDock::initializeOverviewTab()
     m_moduleTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_moduleTable->verticalHeader()->setVisible(false);
     m_moduleTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    m_moduleTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
-    moduleLayout->addWidget(m_moduleTable, 1);
+    m_moduleTable->horizontalHeader()->setSectionResizeMode(8, QHeaderView::Stretch);
+    moduleLayout->addWidget(m_moduleTable, 3);
+
+    m_moduleEvidenceStatusLabel = new QLabel(QStringLiteral("证据：等待后台聚合"), moduleContainer);
+    m_moduleEvidenceStatusLabel->setWordWrap(true);
+    moduleLayout->addWidget(m_moduleEvidenceStatusLabel);
+
+    m_moduleEvidenceDetailEditor = new CodeEditorWidget(moduleContainer);
+    m_moduleEvidenceDetailEditor->setReadOnly(true);
+    m_moduleEvidenceDetailEditor->setText(QStringLiteral("请选择一条已加载模块，或点击证据刷新按钮开始后台聚合。"));
+    moduleLayout->addWidget(m_moduleEvidenceDetailEditor, 2);
+
+    QLabel* r0KernelBadgeLabel = new QLabel(moduleContainer);
+    r0KernelBadgeLabel->setObjectName(QStringLiteral("driverDockR0KernelBadgeLabel"));
+    r0KernelBadgeLabel->setToolTip(QStringLiteral("R0 功能标识：本区证据来自 KswordARK 驱动只读查询"));
+    const QPixmap kernelBadgePixmap(QStringLiteral(":/Image/kernel_badge.png"));
+    if (!kernelBadgePixmap.isNull())
+    {
+        r0KernelBadgeLabel->setPixmap(kernelBadgePixmap.scaled(
+            42,
+            42,
+            Qt::KeepAspectRatio,
+            Qt::SmoothTransformation));
+    }
+    moduleLayout->addWidget(r0KernelBadgeLabel, 0, Qt::AlignRight | Qt::AlignBottom);
 
     m_overviewSplitter->addWidget(serviceContainer);
     m_overviewSplitter->addWidget(moduleContainer);
@@ -391,6 +426,10 @@ void DriverDock::initializeConnections()
         {
             refreshLoadedKernelModuleRecords();
         });
+    connect(m_refreshModuleEvidenceButton, &QPushButton::clicked, this, [this]()
+        {
+            refreshLoadedModuleEvidenceAsync();
+        });
     connect(m_serviceFilterEdit, &QLineEdit::textChanged, this, [this](const QString&)
         {
             rebuildDriverServiceTableByFilter();
@@ -416,6 +455,10 @@ void DriverDock::initializeConnections()
     connect(m_moduleTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
         {
             showModuleTableContextMenu(localPosition);
+        });
+    connect(m_moduleTable, &QTableWidget::itemSelectionChanged, this, [this]()
+        {
+            showSelectedModuleEvidenceDetail();
         });
 
     // 操作页：浏览路径、注册更新、挂载卸载、删除、状态查询。

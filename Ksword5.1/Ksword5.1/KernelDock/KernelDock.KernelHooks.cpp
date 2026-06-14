@@ -11,10 +11,16 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QColor>
+#include <QByteArray>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QHash>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QItemSelectionModel>
+#include <QIODevice>
 #include <QLabel>
 #include <QLineEdit>
 #include <QList>
@@ -32,9 +38,17 @@
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
 #include <algorithm>
+#include <cstddef>
+#include <cstring>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -112,6 +126,621 @@ namespace
         return byteTextList.isEmpty() ? QStringLiteral("<无字节>") : byteTextList.join(' ');
     }
 
+    struct KernelHookLoadedModuleInfo
+    {
+        // 输入：来自 NtQuerySystemInformation(SystemModuleInformation) 的单个内核模块条目。
+        // 处理：缓存加载基址、映像大小、NT 路径和文件名，供 Inline Hook 结果按基址反查磁盘文件。
+        // 返回：结构体只保存数据，不提供成员函数返回值。
+        std::uint64_t imageBase = 0;  // imageBase：内核模块加载基址。
+        std::uint32_t imageSize = 0;  // imageSize：内核模块映像大小。
+        QString ntPathText;           // ntPathText：R0/SystemModuleInformation 返回的 NT 风格路径。
+        QString fileNameText;         // fileNameText：模块文件名，作为路径回退匹配依据。
+    };
+
+    struct KernelHookDiskBaselineResult
+    {
+        // 输入：由 Inline Hook 行的 moduleBase/functionAddress/currentByteCount 派生。
+        // 处理：记录 R3 从磁盘 PE 同 RVA 读取基线字节的结果以及和内存字节的对比状态。
+        // 返回：结构体只保存数据，不提供成员函数返回值。
+        bool available = false;              // available：是否成功读取磁盘基线。
+        bool differsFromMemory = false;      // differsFromMemory：磁盘基线是否与内存 currentBytes 不同。
+        std::uint32_t byteCount = 0;         // byteCount：实际参与比较的字节数。
+        std::uint64_t rva = 0;               // rva：函数入口相对模块基址的 RVA。
+        QString filePathText;                // filePathText：R3 实际打开的磁盘文件路径。
+        QString statusText;                  // statusText：中文差异状态或失败原因。
+        std::vector<std::uint8_t> bytes;     // bytes：磁盘文件同 RVA 读出的字节。
+    };
+
+    using KernelHookModulePathMap = QHash<qulonglong, KernelHookLoadedModuleInfo>;
+    using KernelHookDiskFileCache = QHash<QString, QByteArray>;
+
+    struct KernelHookSystemModuleEntry
+    {
+        // 输入：布局对齐 Windows SystemModuleInformation 的 RTL_PROCESS_MODULE_INFORMATION。
+        // 处理：本结构仅用于 R3 解析内核模块快照，不写入系统状态。
+        // 返回：结构体无成员函数返回值。
+        void* section;
+        void* mappedBase;
+        void* imageBase;
+        unsigned long imageSize;
+        unsigned long flags;
+        unsigned short loadOrderIndex;
+        unsigned short initOrderIndex;
+        unsigned short loadCount;
+        unsigned short offsetToFileName;
+        unsigned char fullPathName[256];
+    };
+
+    struct KernelHookSystemModuleInformation
+    {
+        // 输入：NtQuerySystemInformation(SystemModuleInformation) 输出缓冲头。
+        // 处理：numberOfModules 后跟随变长模块数组，调用方负责边界检查。
+        // 返回：结构体无成员函数返回值。
+        unsigned long numberOfModules;
+        KernelHookSystemModuleEntry modules[1];
+    };
+
+    QString kernelHookBoundedAnsiPathToText(const unsigned char* textBuffer, const std::size_t maxBytes)
+    {
+        // 输入：SystemModuleInformation 中固定长度 ANSI 路径缓冲。
+        // 处理：在 maxBytes 内查找 NUL，避免对未终止内核路径执行越界 strlen。
+        // 返回：本地 8-bit 解码后的 QString；输入为空或长度为 0 时返回空字符串。
+        if (textBuffer == nullptr || maxBytes == 0U)
+        {
+            return QString();
+        }
+
+        std::size_t textBytes = 0U;
+        while (textBytes < maxBytes && textBuffer[textBytes] != '\0')
+        {
+            ++textBytes;
+        }
+        return QString::fromLocal8Bit(reinterpret_cast<const char*>(textBuffer), static_cast<int>(textBytes));
+    }
+
+    QString kernelHookWindowsDirectoryPath()
+    {
+        // 输入：无，读取当前系统 Windows 目录。
+        // 处理：优先调用 GetWindowsDirectoryW，失败时回退 SystemRoot 环境变量。
+        // 返回：规范化后的 Windows 目录；仍失败时返回 C:\Windows。
+        wchar_t windowsPathBuffer[MAX_PATH] = {};
+        const UINT copiedChars = ::GetWindowsDirectoryW(windowsPathBuffer, MAX_PATH);
+        if (copiedChars > 0U && copiedChars < MAX_PATH)
+        {
+            return QDir::toNativeSeparators(QString::fromWCharArray(windowsPathBuffer));
+        }
+
+        const QString envPath = qEnvironmentVariable("SystemRoot");
+        return envPath.isEmpty()
+            ? QStringLiteral("C:\\Windows")
+            : QDir::toNativeSeparators(envPath);
+    }
+
+    QString kernelHookSystemDrivePrefix()
+    {
+        // 输入：无，依赖 Windows 目录所在盘符。
+        // 处理：从 C:\Windows 这类路径抽取盘符，用于解析 \Windows\... 内核路径。
+        // 返回：形如 C: 的盘符；无法判断时保守返回 C:。
+        const QString windowsPath = kernelHookWindowsDirectoryPath();
+        if (windowsPath.size() >= 2 && windowsPath.at(1) == QLatin1Char(':'))
+        {
+            return windowsPath.left(2);
+        }
+        return QStringLiteral("C:");
+    }
+
+    QString kernelHookMapNtDevicePathToDosPath(const QString& ntPathText)
+    {
+        // 输入：\Device\HarddiskVolumeX\... 形式的 NT 路径。
+        // 处理：枚举 A: 到 Z: 的 QueryDosDeviceW 映射，找到匹配前缀后替换为盘符路径。
+        // 返回：可供 QFile 打开的 Win32 路径；无法映射时返回空字符串。
+        const QString normalizedNtPath = QDir::toNativeSeparators(ntPathText.trimmed());
+        if (!normalizedNtPath.startsWith(QStringLiteral("\\Device\\"), Qt::CaseInsensitive))
+        {
+            return QString();
+        }
+
+        for (wchar_t driveLetter = L'A'; driveLetter <= L'Z'; ++driveLetter)
+        {
+            const QString driveName = QStringLiteral("%1:").arg(QChar(driveLetter));
+            wchar_t deviceNameBuffer[1024] = {};
+            const DWORD copiedChars = ::QueryDosDeviceW(
+                reinterpret_cast<LPCWSTR>(driveName.utf16()),
+                deviceNameBuffer,
+                static_cast<DWORD>(sizeof(deviceNameBuffer) / sizeof(deviceNameBuffer[0])));
+            if (copiedChars == 0U)
+            {
+                continue;
+            }
+
+            const QString deviceName = QDir::toNativeSeparators(QString::fromWCharArray(deviceNameBuffer));
+            if (deviceName.isEmpty() || !normalizedNtPath.startsWith(deviceName, Qt::CaseInsensitive))
+            {
+                continue;
+            }
+
+            const QString suffixText = normalizedNtPath.mid(deviceName.size());
+            return QDir::toNativeSeparators(driveName + suffixText);
+        }
+
+        return QString();
+    }
+
+    QString kernelHookNormalizeKernelModulePath(const QString& rawPathText)
+    {
+        // 输入：R0/SystemModuleInformation 可能返回的 NT、SystemRoot 或 Win32 模块路径。
+        // 处理：把常见内核路径转换成 R3 可访问的 Win32 文件路径，并保留已有盘符路径。
+        // 返回：可尝试打开的本地路径；无法转换时返回空字符串。
+        QString pathText = QDir::toNativeSeparators(rawPathText.trimmed());
+        if (pathText.isEmpty() || pathText == QStringLiteral("<未解析>"))
+        {
+            return QString();
+        }
+
+        if (pathText.startsWith(QStringLiteral("\\??\\"), Qt::CaseInsensitive))
+        {
+            pathText = pathText.mid(4);
+        }
+        if (pathText.startsWith(QStringLiteral("\\SystemRoot\\"), Qt::CaseInsensitive))
+        {
+            pathText = kernelHookWindowsDirectoryPath() + pathText.mid(QStringLiteral("\\SystemRoot").size());
+        }
+        else if (pathText.startsWith(QStringLiteral("SystemRoot\\"), Qt::CaseInsensitive))
+        {
+            pathText = kernelHookWindowsDirectoryPath() + QStringLiteral("\\") + pathText.mid(QStringLiteral("SystemRoot\\").size());
+        }
+        else if (pathText.startsWith(QStringLiteral("\\Windows\\"), Qt::CaseInsensitive))
+        {
+            pathText = kernelHookSystemDrivePrefix() + pathText;
+        }
+        else if (pathText.startsWith(QStringLiteral("\\Device\\"), Qt::CaseInsensitive))
+        {
+            pathText = kernelHookMapNtDevicePathToDosPath(pathText);
+        }
+
+        if (pathText.size() >= 2 && pathText.at(1) == QLatin1Char(':'))
+        {
+            return QDir::toNativeSeparators(QFileInfo(pathText).absoluteFilePath());
+        }
+        return QString();
+    }
+
+    KernelHookModulePathMap kernelHookQueryLoadedModulePathMap()
+    {
+        // 输入：无，调用当前系统 ntdll!NtQuerySystemInformation(SystemModuleInformation)。
+        // 处理：读取已加载内核模块快照，把模块加载基址映射到 NT 路径、文件名和映像大小。
+        // 返回：以 imageBase 为 key 的模块路径表；查询失败时返回空表，调用方继续使用 R0 观察基线。
+        using NtQuerySystemInformationFn = long (NTAPI*)(unsigned long, void*, unsigned long, unsigned long*);
+        constexpr unsigned long kSystemModuleInformationClass = 11UL;
+        constexpr long kStatusInfoLengthMismatch = static_cast<long>(0xC0000004L);
+
+        KernelHookModulePathMap modulePathMap;
+        HMODULE ntdllModule = ::GetModuleHandleW(L"ntdll.dll");
+        if (ntdllModule == nullptr)
+        {
+            return modulePathMap;
+        }
+
+        const auto querySystemInformation = reinterpret_cast<NtQuerySystemInformationFn>(
+            ::GetProcAddress(ntdllModule, "NtQuerySystemInformation"));
+        if (querySystemInformation == nullptr)
+        {
+            return modulePathMap;
+        }
+
+        unsigned long requiredBytes = 0UL;
+        long status = querySystemInformation(kSystemModuleInformationClass, nullptr, 0UL, &requiredBytes);
+        if (requiredBytes == 0UL)
+        {
+            requiredBytes = 1024UL * 1024UL;
+        }
+
+        std::vector<std::uint8_t> snapshotBuffer(static_cast<std::size_t>(requiredBytes) + (64U * 1024U));
+        for (int attemptIndex = 0; attemptIndex < 4; ++attemptIndex)
+        {
+            status = querySystemInformation(
+                kSystemModuleInformationClass,
+                snapshotBuffer.data(),
+                static_cast<unsigned long>(snapshotBuffer.size()),
+                &requiredBytes);
+            if (status == 0)
+            {
+                break;
+            }
+
+            if (requiredBytes > snapshotBuffer.size())
+            {
+                snapshotBuffer.resize(static_cast<std::size_t>(requiredBytes) + (64U * 1024U));
+                continue;
+            }
+            if (status == kStatusInfoLengthMismatch)
+            {
+                snapshotBuffer.resize(snapshotBuffer.size() * 2U);
+                continue;
+            }
+            return modulePathMap;
+        }
+        if (status != 0 || snapshotBuffer.size() < offsetof(KernelHookSystemModuleInformation, modules))
+        {
+            return modulePathMap;
+        }
+
+        const auto* moduleInfo = reinterpret_cast<const KernelHookSystemModuleInformation*>(snapshotBuffer.data());
+        const std::size_t moduleArrayOffset = offsetof(KernelHookSystemModuleInformation, modules);
+        const std::size_t availableModuleBytes = snapshotBuffer.size() - moduleArrayOffset;
+        const std::size_t maxModuleCount = availableModuleBytes / sizeof(KernelHookSystemModuleEntry);
+        const std::size_t moduleCount = std::min<std::size_t>(
+            static_cast<std::size_t>(moduleInfo->numberOfModules),
+            maxModuleCount);
+
+        modulePathMap.reserve(static_cast<int>(moduleCount));
+        for (std::size_t moduleIndex = 0U; moduleIndex < moduleCount; ++moduleIndex)
+        {
+            const KernelHookSystemModuleEntry& moduleEntry = moduleInfo->modules[moduleIndex];
+            const auto imageBase = static_cast<qulonglong>(
+                reinterpret_cast<std::uintptr_t>(moduleEntry.imageBase));
+            if (imageBase == 0ULL)
+            {
+                continue;
+            }
+
+            const QString ntPathText = QDir::toNativeSeparators(
+                kernelHookBoundedAnsiPathToText(moduleEntry.fullPathName, sizeof(moduleEntry.fullPathName)));
+            const std::size_t fileNameOffset = moduleEntry.offsetToFileName < sizeof(moduleEntry.fullPathName)
+                ? static_cast<std::size_t>(moduleEntry.offsetToFileName)
+                : 0U;
+            const QString fileNameText = kernelHookBoundedAnsiPathToText(
+                moduleEntry.fullPathName + fileNameOffset,
+                sizeof(moduleEntry.fullPathName) - fileNameOffset);
+
+            KernelHookLoadedModuleInfo loadedModule{};
+            loadedModule.imageBase = static_cast<std::uint64_t>(imageBase);
+            loadedModule.imageSize = static_cast<std::uint32_t>(moduleEntry.imageSize);
+            loadedModule.ntPathText = ntPathText;
+            loadedModule.fileNameText = fileNameText;
+            modulePathMap.insert(imageBase, loadedModule);
+        }
+
+        return modulePathMap;
+    }
+
+    template <typename PodType>
+    bool kernelHookReadPodAtOffset(const QByteArray& fileBytes, const std::uint64_t fileOffset, PodType* valueOut)
+    {
+        // 输入：文件字节、文件偏移和 POD 输出对象。
+        // 处理：检查偏移范围后用 memcpy 复制，避免对未对齐 PE 结构直接解引用。
+        // 返回：读取成功返回 true；参数无效或越界返回 false。
+        if (valueOut == nullptr)
+        {
+            return false;
+        }
+        if (fileOffset > static_cast<std::uint64_t>(fileBytes.size()) ||
+            sizeof(PodType) > static_cast<std::uint64_t>(fileBytes.size()) - fileOffset)
+        {
+            return false;
+        }
+
+        std::memcpy(
+            valueOut,
+            fileBytes.constData() + static_cast<qsizetype>(fileOffset),
+            sizeof(PodType));
+        return true;
+    }
+
+    bool kernelHookRvaToFileOffset(
+        const QByteArray& fileBytes,
+        const std::uint32_t rva,
+        const std::uint32_t bytesToRead,
+        std::uint64_t* fileOffsetOut,
+        QString* errorTextOut)
+    {
+        // 输入：磁盘 PE 文件字节、目标 RVA 和期望读取长度。
+        // 处理：解析 DOS/NT/Optional Header 与节表，把内存 RVA 映射到文件 raw offset，并校验读取区间。
+        // 返回：映射成功返回 true，同时写出文件偏移；失败返回 false 并填充中文原因。
+        auto fail = [errorTextOut](const QString& messageText) -> bool
+            {
+                if (errorTextOut != nullptr)
+                {
+                    *errorTextOut = messageText;
+                }
+                return false;
+            };
+
+        if (fileOffsetOut == nullptr)
+        {
+            return fail(QStringLiteral("内部错误：文件偏移输出为空。"));
+        }
+        *fileOffsetOut = 0ULL;
+        if (bytesToRead == 0U)
+        {
+            return fail(QStringLiteral("读取长度为 0。"));
+        }
+        if (fileBytes.size() < static_cast<qsizetype>(sizeof(IMAGE_DOS_HEADER)))
+        {
+            return fail(QStringLiteral("磁盘文件过小，无法读取 DOS 头。"));
+        }
+
+        IMAGE_DOS_HEADER dosHeader{};
+        if (!kernelHookReadPodAtOffset(fileBytes, 0ULL, &dosHeader) ||
+            dosHeader.e_magic != IMAGE_DOS_SIGNATURE ||
+            dosHeader.e_lfanew < 0)
+        {
+            return fail(QStringLiteral("磁盘文件不是有效 MZ/PE 文件。"));
+        }
+
+        const std::uint64_t ntHeaderOffset = static_cast<std::uint64_t>(dosHeader.e_lfanew);
+        std::uint32_t peSignature = 0U;
+        if (!kernelHookReadPodAtOffset(fileBytes, ntHeaderOffset, &peSignature) ||
+            peSignature != IMAGE_NT_SIGNATURE)
+        {
+            return fail(QStringLiteral("磁盘文件 PE 签名无效。"));
+        }
+
+        IMAGE_FILE_HEADER fileHeader{};
+        const std::uint64_t fileHeaderOffset = ntHeaderOffset + sizeof(std::uint32_t);
+        if (!kernelHookReadPodAtOffset(fileBytes, fileHeaderOffset, &fileHeader))
+        {
+            return fail(QStringLiteral("读取 COFF 文件头失败。"));
+        }
+        if (fileHeader.NumberOfSections == 0U || fileHeader.NumberOfSections > 96U)
+        {
+            return fail(QStringLiteral("PE 区段数量异常：%1。").arg(fileHeader.NumberOfSections));
+        }
+
+        const std::uint64_t optionalHeaderOffset = fileHeaderOffset + sizeof(IMAGE_FILE_HEADER);
+        std::uint16_t optionalMagic = 0U;
+        if (!kernelHookReadPodAtOffset(fileBytes, optionalHeaderOffset, &optionalMagic))
+        {
+            return fail(QStringLiteral("读取 Optional Header 魔数失败。"));
+        }
+
+        std::uint32_t sizeOfHeaders = 0U;
+        if (optionalMagic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+        {
+            IMAGE_OPTIONAL_HEADER64 optionalHeader{};
+            if (!kernelHookReadPodAtOffset(fileBytes, optionalHeaderOffset, &optionalHeader))
+            {
+                return fail(QStringLiteral("读取 PE32+ Optional Header 失败。"));
+            }
+            sizeOfHeaders = optionalHeader.SizeOfHeaders;
+        }
+        else if (optionalMagic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+        {
+            IMAGE_OPTIONAL_HEADER32 optionalHeader{};
+            if (!kernelHookReadPodAtOffset(fileBytes, optionalHeaderOffset, &optionalHeader))
+            {
+                return fail(QStringLiteral("读取 PE32 Optional Header 失败。"));
+            }
+            sizeOfHeaders = optionalHeader.SizeOfHeaders;
+        }
+        else
+        {
+            return fail(QStringLiteral("未知 Optional Header 魔数：0x%1。")
+                .arg(optionalMagic, 4, 16, QChar('0')).toUpper());
+        }
+
+        if (rva < sizeOfHeaders)
+        {
+            const std::uint64_t headerOffset = static_cast<std::uint64_t>(rva);
+            if (headerOffset <= static_cast<std::uint64_t>(fileBytes.size()) &&
+                bytesToRead <= static_cast<std::uint64_t>(fileBytes.size()) - headerOffset)
+            {
+                *fileOffsetOut = headerOffset;
+                return true;
+            }
+            return fail(QStringLiteral("RVA 位于 PE 头部，但读取范围超出磁盘文件。"));
+        }
+
+        const std::uint64_t sectionTableOffset = optionalHeaderOffset + fileHeader.SizeOfOptionalHeader;
+        for (std::uint16_t sectionIndex = 0U; sectionIndex < fileHeader.NumberOfSections; ++sectionIndex)
+        {
+            IMAGE_SECTION_HEADER sectionHeader{};
+            const std::uint64_t currentSectionOffset =
+                sectionTableOffset + (static_cast<std::uint64_t>(sectionIndex) * sizeof(IMAGE_SECTION_HEADER));
+            if (!kernelHookReadPodAtOffset(fileBytes, currentSectionOffset, &sectionHeader))
+            {
+                return fail(QStringLiteral("读取 PE 区段表失败，索引=%1。").arg(sectionIndex));
+            }
+
+            const std::uint32_t virtualAddress = sectionHeader.VirtualAddress;
+            const std::uint32_t virtualSize = sectionHeader.Misc.VirtualSize;
+            const std::uint32_t rawSize = sectionHeader.SizeOfRawData;
+            const std::uint32_t mappedSize = std::max(virtualSize, rawSize);
+            const std::uint64_t sectionStart = static_cast<std::uint64_t>(virtualAddress);
+            const std::uint64_t sectionEnd = sectionStart + static_cast<std::uint64_t>(mappedSize);
+            const std::uint64_t targetRva = static_cast<std::uint64_t>(rva);
+            if (mappedSize == 0U || targetRva < sectionStart || targetRva >= sectionEnd)
+            {
+                continue;
+            }
+
+            const std::uint32_t delta = rva - virtualAddress;
+            if (delta >= rawSize || bytesToRead > rawSize - delta)
+            {
+                return fail(QStringLiteral("RVA 落在区段虚拟范围内，但磁盘 raw 数据不足。"));
+            }
+
+            const std::uint64_t rawOffset =
+                static_cast<std::uint64_t>(sectionHeader.PointerToRawData) + static_cast<std::uint64_t>(delta);
+            if (rawOffset > static_cast<std::uint64_t>(fileBytes.size()) ||
+                bytesToRead > static_cast<std::uint64_t>(fileBytes.size()) - rawOffset)
+            {
+                return fail(QStringLiteral("映射到的磁盘偏移超出文件大小。"));
+            }
+
+            *fileOffsetOut = rawOffset;
+            return true;
+        }
+
+        return fail(QStringLiteral("未找到覆盖目标 RVA 的 PE 区段。"));
+    }
+
+    bool kernelHookReadPeBytesAtRva(
+        const QString& filePath,
+        const std::uint32_t rva,
+        const std::uint32_t bytesToRead,
+        KernelHookDiskFileCache* fileCache,
+        std::vector<std::uint8_t>* bytesOut,
+        QString* errorTextOut)
+    {
+        // 输入：磁盘 PE 路径、目标 RVA 和读取长度。
+        // 处理：读取或复用线程内缓存的文件字节，把 RVA 转换为 raw offset，再复制指定长度的磁盘字节。
+        // 返回：成功返回 true 并填充 bytesOut；失败返回 false 并填充中文错误。
+        auto fail = [errorTextOut](const QString& messageText) -> bool
+            {
+                if (errorTextOut != nullptr)
+                {
+                    *errorTextOut = messageText;
+                }
+                return false;
+            };
+
+        if (bytesOut == nullptr)
+        {
+            return fail(QStringLiteral("内部错误：磁盘字节输出为空。"));
+        }
+        bytesOut->clear();
+
+        QByteArray localFileBytes;
+        const QByteArray* fileBytes = nullptr;
+        if (fileCache != nullptr)
+        {
+            auto cacheIterator = fileCache->constFind(filePath);
+            if (cacheIterator == fileCache->constEnd())
+            {
+                QFile fileObject(filePath);
+                if (!fileObject.open(QIODevice::ReadOnly))
+                {
+                    return fail(QStringLiteral("打开磁盘模块文件失败：%1。").arg(fileObject.errorString()));
+                }
+
+                localFileBytes = fileObject.readAll();
+                if (localFileBytes.isEmpty())
+                {
+                    return fail(QStringLiteral("磁盘模块文件为空或读取失败。"));
+                }
+
+                fileCache->insert(filePath, localFileBytes);
+                cacheIterator = fileCache->constFind(filePath);
+            }
+
+            if (cacheIterator != fileCache->constEnd())
+            {
+                fileBytes = &cacheIterator.value();
+            }
+        }
+        else
+        {
+            QFile fileObject(filePath);
+            if (!fileObject.open(QIODevice::ReadOnly))
+            {
+                return fail(QStringLiteral("打开磁盘模块文件失败：%1。").arg(fileObject.errorString()));
+            }
+
+            localFileBytes = fileObject.readAll();
+            fileBytes = &localFileBytes;
+        }
+
+        if (fileBytes == nullptr || fileBytes->isEmpty())
+        {
+            return fail(QStringLiteral("磁盘模块文件为空或读取失败。"));
+        }
+
+        std::uint64_t fileOffset = 0ULL;
+        QString mapErrorText;
+        if (!kernelHookRvaToFileOffset(*fileBytes, rva, bytesToRead, &fileOffset, &mapErrorText))
+        {
+            return fail(mapErrorText);
+        }
+
+        bytesOut->resize(bytesToRead);
+        std::memcpy(
+            bytesOut->data(),
+            fileBytes->constData() + static_cast<qsizetype>(fileOffset),
+            bytesToRead);
+        return true;
+    }
+
+    KernelHookDiskBaselineResult kernelHookReadDiskBaselineForInlineHook(
+        const KernelInlineHookEntry& row,
+        const KernelHookModulePathMap& modulePathMap,
+        KernelHookDiskFileCache* fileCache)
+    {
+        // 输入：Inline Hook UI 行与当前系统模块路径映射。
+        // 处理：用 functionAddress-moduleBase 计算 RVA，从磁盘模块文件读取同 RVA 字节并与内存字节比较。
+        // 返回：包含可用性、磁盘字节、差异状态和中文诊断原因的磁盘基线结果。
+        KernelHookDiskBaselineResult baselineResult{};
+        const std::size_t availableCurrentBytes = std::min<std::size_t>(
+            row.currentBytes.size(),
+            static_cast<std::size_t>(row.currentByteCount));
+        baselineResult.byteCount = static_cast<std::uint32_t>(std::min<std::size_t>(
+            availableCurrentBytes,
+            static_cast<std::size_t>(KSWORD_ARK_KERNEL_HOOK_BYTES)));
+
+        if (baselineResult.byteCount == 0U)
+        {
+            baselineResult.statusText = QStringLiteral("不可用：R0 未返回内存字节。");
+            return baselineResult;
+        }
+        if (row.moduleBase == 0U || row.functionAddress < row.moduleBase)
+        {
+            baselineResult.statusText = QStringLiteral("不可用：函数地址或模块基址无效。");
+            return baselineResult;
+        }
+
+        const std::uint64_t rva64 = row.functionAddress - row.moduleBase;
+        baselineResult.rva = rva64;
+        if (rva64 > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+        {
+            baselineResult.statusText = QStringLiteral("不可用：函数 RVA 超出 32 位 PE 范围。");
+            return baselineResult;
+        }
+
+        const auto moduleIterator = modulePathMap.constFind(static_cast<qulonglong>(row.moduleBase));
+        if (moduleIterator == modulePathMap.constEnd())
+        {
+            baselineResult.statusText = QStringLiteral("不可用：R3 未能反查模块磁盘路径。");
+            return baselineResult;
+        }
+
+        baselineResult.filePathText = kernelHookNormalizeKernelModulePath(moduleIterator->ntPathText);
+        if (baselineResult.filePathText.isEmpty())
+        {
+            baselineResult.statusText = QStringLiteral("不可用：模块路径无法转换为 Win32 路径（%1）。")
+                .arg(kernelHookSafeText(moduleIterator->ntPathText, QStringLiteral("<空路径>")));
+            return baselineResult;
+        }
+        if (!QFileInfo::exists(baselineResult.filePathText))
+        {
+            baselineResult.statusText = QStringLiteral("不可用：磁盘模块文件不存在（%1）。")
+                .arg(QDir::toNativeSeparators(baselineResult.filePathText));
+            return baselineResult;
+        }
+
+        QString readErrorText;
+        if (!kernelHookReadPeBytesAtRva(
+            baselineResult.filePathText,
+            static_cast<std::uint32_t>(rva64),
+            baselineResult.byteCount,
+            fileCache,
+            &baselineResult.bytes,
+            &readErrorText))
+        {
+            baselineResult.statusText = QStringLiteral("不可用：%1").arg(readErrorText);
+            return baselineResult;
+        }
+
+        baselineResult.available = true;
+        baselineResult.differsFromMemory = !std::equal(
+            baselineResult.bytes.begin(),
+            baselineResult.bytes.end(),
+            row.currentBytes.begin());
+        baselineResult.statusText = baselineResult.differsFromMemory
+            ? QStringLiteral("不同：内存字节与磁盘基线不一致")
+            : QStringLiteral("一致：内存字节与磁盘基线相同");
+        return baselineResult;
+    }
+
     void kernelHookCopyTextToClipboard(const QString& text)
     {
         if (QApplication::clipboard() != nullptr)
@@ -141,7 +770,8 @@ namespace
         TargetModule,
         Status,
         CurrentBytes,
-        ExpectedBytes,
+        DiskBytes,
+        DiskDiff,
         Count
     };
 
@@ -340,9 +970,11 @@ namespace
         case InlineHookColumn::Status:
             return QStringLiteral("状态");
         case InlineHookColumn::CurrentBytes:
-            return QStringLiteral("当前字节");
-        case InlineHookColumn::ExpectedBytes:
-            return QStringLiteral("基准字节");
+            return QStringLiteral("内存字节");
+        case InlineHookColumn::DiskBytes:
+            return QStringLiteral("磁盘字节");
+        case InlineHookColumn::DiskDiff:
+            return QStringLiteral("差异状态");
         default:
             return QStringLiteral("未知列");
         }
@@ -416,8 +1048,10 @@ namespace
             return entry.statusText;
         case InlineHookColumn::CurrentBytes:
             return entry.currentBytesText;
-        case InlineHookColumn::ExpectedBytes:
-            return entry.expectedBytesText;
+        case InlineHookColumn::DiskBytes:
+            return entry.diskBytesText;
+        case InlineHookColumn::DiskDiff:
+            return entry.diskBaselineStatusText;
         default:
             return QString();
         }
@@ -545,6 +1179,99 @@ namespace
         return result;
     }
 
+    QString buildInlineHookDetailText(const KernelInlineHookEntry& row)
+    {
+        // 输入：已转换并可能已补充磁盘基线的 Inline Hook 行。
+        // 处理：统一生成 CodeEditorWidget 详情文本，明确区分内存字节、R0 观察基线和 R3 磁盘基线。
+        // 返回：中文多行详情文本；不执行任何内核写入或自动修复。
+        const QString diskBytesText = row.diskBaselineAvailable
+            ? row.diskBytesText
+            : QStringLiteral("<不可用>");
+        const QString diskByteCountText = row.diskBaselineAvailable
+            ? QString::number(std::min<std::size_t>(row.diskBytes.size(), static_cast<std::size_t>(row.currentByteCount)))
+            : QStringLiteral("0");
+        const QString diskPathText = row.diskBaselinePathText.trimmed().isEmpty()
+            ? QStringLiteral("<不可用>")
+            : QDir::toNativeSeparators(row.diskBaselinePathText);
+        const QString rvaText = (row.moduleBase != 0U && row.functionAddress >= row.moduleBase)
+            ? kernelHookFormatAddress(row.functionAddress - row.moduleBase)
+            : QStringLiteral("<未解析>");
+
+        return QStringLiteral(
+            "Inline Hook 检测详情\n"
+            "模块: %1\n"
+            "函数: %2\n"
+            "函数地址: %3\n"
+            "Hook类型: %4\n"
+            "目标地址: %5\n"
+            "目标模块: %6\n"
+            "状态: %7\n"
+            "模块基址: %8\n"
+            "目标模块基址: %9\n"
+            "当前内存字节(%10): %11\n"
+            "R0 观察基线(%12): %13\n"
+            "磁盘基线字节(%14): %15\n"
+            "差异状态: %16\n"
+            "磁盘路径: %17\n"
+            "RVA: %18\n"
+            "标志: 0x%19\n\n"
+            "说明: 当前协议字段 expectedBytes 在 R0 中来自内存观察，通常是 currentBytes 的同源快照，不代表磁盘原始字节。"
+            "本页额外由 R3 按模块基址和 RVA 从磁盘模块文件读取基线字节并与当前内存字节比较；"
+            "如果磁盘基线不可用，请只把 R0 观察基线当作诊断快照，不要把它理解为干净基线。"
+            "磁盘基线是文件同 RVA 的 raw 字节，未应用重定位、热补丁或厂商运行时改写校正，差异仍需结合 Hook 类型和目标地址判断。"
+            "摘除操作保持原有 NOP 流程，不新增自动修复能力。")
+            .arg(kernelHookSafeText(row.moduleNameText))
+            .arg(kernelHookSafeText(row.functionNameText))
+            .arg(kernelHookFormatAddress(row.functionAddress))
+            .arg(row.hookTypeText)
+            .arg(kernelHookFormatAddress(row.targetAddress))
+            .arg(kernelHookSafeText(row.targetModuleNameText, QStringLiteral("<未解析>")))
+            .arg(row.statusText)
+            .arg(kernelHookFormatAddress(row.moduleBase))
+            .arg(kernelHookFormatAddress(row.targetModuleBase))
+            .arg(row.currentByteCount)
+            .arg(row.currentBytesText)
+            .arg(row.originalByteCount)
+            .arg(row.observedBytesText)
+            .arg(diskByteCountText)
+            .arg(diskBytesText)
+            .arg(row.diskBaselineStatusText)
+            .arg(diskPathText)
+            .arg(rvaText)
+            .arg(static_cast<qulonglong>(row.flags), 8, 16, QChar('0'));
+    }
+
+    void applyDiskBaselineToInlineHookEntry(
+        KernelInlineHookEntry* row,
+        const KernelHookModulePathMap& modulePathMap,
+        KernelHookDiskFileCache* fileCache)
+    {
+        // 输入：待补充的 Inline Hook 行和 R3 查询到的模块基址/路径映射。
+        // 处理：读取磁盘同 RVA 基线，写入磁盘字节、差异状态、路径和详情文本。
+        // 返回：无返回值；读取失败时仅记录中文原因，不影响扫描结果展示。
+        if (row == nullptr)
+        {
+            return;
+        }
+
+        const KernelHookDiskBaselineResult baselineResult =
+            kernelHookReadDiskBaselineForInlineHook(*row, modulePathMap, fileCache);
+        row->diskBaselineAvailable = baselineResult.available;
+        row->diskBaselineDiffers = baselineResult.differsFromMemory;
+        row->diskBaselineRva = baselineResult.rva;
+        row->diskBaselineStatusText = baselineResult.statusText.trimmed().isEmpty()
+            ? QStringLiteral("磁盘基线：未校验")
+            : baselineResult.statusText;
+        row->diskBaselinePathText = baselineResult.filePathText.trimmed().isEmpty()
+            ? QStringLiteral("<不可用>")
+            : QDir::toNativeSeparators(baselineResult.filePathText);
+        row->diskBytes = baselineResult.bytes;
+        row->diskBytesText = row->diskBaselineAvailable
+            ? kernelHookBytesToText(row->diskBytes, baselineResult.byteCount)
+            : QStringLiteral("<不可用>");
+        row->detailText = buildInlineHookDetailText(*row);
+    }
+
     KernelSsdtEntry convertShadowSsdtEntry(
         const ksword::ark::SsdtEntry& source,
         const ksword::ark::SsdtEnumResult& enumResult)
@@ -615,39 +1342,16 @@ namespace
         row.hookTypeText = inlineHookTypeText(row.hookType);
         row.statusText = kernelHookStatusText(row.status);
         row.currentBytes = source.currentBytes;
-        row.expectedBytes = source.expectedBytes;
         row.currentBytesText = kernelHookBytesToText(row.currentBytes, row.currentByteCount);
-        row.expectedBytesText = kernelHookBytesToText(row.expectedBytes, row.originalByteCount);
-        row.detailText = QStringLiteral(
-            "Inline Hook 检测详情\n"
-            "模块: %1\n"
-            "函数: %2\n"
-            "函数地址: %3\n"
-            "Hook类型: %4\n"
-            "目标地址: %5\n"
-            "目标模块: %6\n"
-            "状态: %7\n"
-            "模块基址: %8\n"
-            "目标模块基址: %9\n"
-            "当前字节(%10): %11\n"
-            "基准字节(%12): %13\n"
-            "标志: 0x%14\n\n"
-            "说明: R0 当前执行保守指令形态检测，重点识别 E9/EB/FF25/MOV+JMP/RET/INT3。"
-            "摘除操作会先让驱动返回 force-required，再经 UI 二次确认后只对选中字节写入 NOP，驱动会比较 expectedCurrentBytes 防止竞态误写。")
-            .arg(kernelHookSafeText(row.moduleNameText))
-            .arg(kernelHookSafeText(row.functionNameText))
-            .arg(kernelHookFormatAddress(row.functionAddress))
-            .arg(row.hookTypeText)
-            .arg(kernelHookFormatAddress(row.targetAddress))
-            .arg(kernelHookSafeText(row.targetModuleNameText, QStringLiteral("<未解析>")))
-            .arg(row.statusText)
-            .arg(kernelHookFormatAddress(row.moduleBase))
-            .arg(kernelHookFormatAddress(row.targetModuleBase))
-            .arg(row.currentByteCount)
-            .arg(row.currentBytesText)
-            .arg(row.originalByteCount)
-            .arg(row.expectedBytesText)
-            .arg(static_cast<qulonglong>(row.flags), 8, 16, QChar('0'));
+        row.observedBytes = source.expectedBytes;
+        row.observedBytesText = kernelHookBytesToText(row.observedBytes, row.originalByteCount);
+        row.diskBaselineAvailable = false;
+        row.diskBaselineDiffers = false;
+        row.diskBaselineRva = 0U;
+        row.diskBaselineStatusText = QStringLiteral("磁盘基线：未校验");
+        row.diskBaselinePathText = QStringLiteral("<未解析>");
+        row.diskBytesText = QStringLiteral("<未获取>");
+        row.detailText = buildInlineHookDetailText(row);
         return row;
     }
 
@@ -849,7 +1553,8 @@ void KernelDock::initializeInlineHookTab()
         inlineHookColumnHeader(InlineHookColumn::TargetModule),
         inlineHookColumnHeader(InlineHookColumn::Status),
         inlineHookColumnHeader(InlineHookColumn::CurrentBytes),
-        inlineHookColumnHeader(InlineHookColumn::ExpectedBytes)
+        inlineHookColumnHeader(InlineHookColumn::DiskBytes),
+        inlineHookColumnHeader(InlineHookColumn::DiskDiff)
         });
     prepareTable(m_inlineHookTable);
     m_inlineHookTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(InlineHookColumn::Function), QHeaderView::Stretch);
@@ -1104,13 +1809,17 @@ void KernelDock::refreshInlineHooksAsync()
         success = scanResult.io.ok;
         if (success)
         {
+            const KernelHookModulePathMap modulePathMap = kernelHookQueryLoadedModulePathMap();
+            KernelHookDiskFileCache diskFileCache;
             totalCount = scanResult.totalCount;
             moduleCount = scanResult.moduleCount;
             lastStatus = scanResult.lastStatus;
             resultRows.reserve(scanResult.entries.size());
             for (const ksword::ark::KernelInlineHookEntry& sourceEntry : scanResult.entries)
             {
-                resultRows.push_back(convertInlineHookEntry(sourceEntry));
+                KernelInlineHookEntry row = convertInlineHookEntry(sourceEntry);
+                applyDiskBaselineToInlineHookEntry(&row, modulePathMap, &diskFileCache);
+                resultRows.push_back(std::move(row));
             }
         }
         else
@@ -1369,6 +2078,19 @@ void KernelDock::rebuildInlineHookTable(const QString& filterKeyword)
             if (column == static_cast<int>(InlineHookColumn::Status))
             {
                 item->setForeground(QBrush(statusColor(entry.status)));
+            }
+            if (column == static_cast<int>(InlineHookColumn::DiskDiff))
+            {
+                if (!entry.diskBaselineAvailable)
+                {
+                    item->setForeground(QBrush(QColor(QStringLiteral("#D77A00"))));
+                }
+                else
+                {
+                    item->setForeground(QBrush(entry.diskBaselineDiffers
+                        ? QColor(QStringLiteral("#B23A3A"))
+                        : QColor(QStringLiteral("#3A8F3A"))));
+                }
             }
             setTableItem(m_inlineHookTable, rowIndex, column, item);
         }
