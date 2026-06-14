@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // ============================================================
 // KernelDock.h
@@ -202,6 +202,7 @@ struct KernelCallbackEnumEntry
     std::uint32_t status = 0;              // status：R0 行状态。
     std::uint32_t fieldFlags = 0;          // fieldFlags：有效字段位图。
     std::uint32_t trustFlags = 0;          // trustFlags：预留的可信来源标志；旧协议未返回时保持 0。
+    std::uint32_t removeBehavior = 0;      // removeBehavior：预留的移除行为标志；旧协议未返回时保持 0。
     std::uint32_t removeFlags = 0;         // removeFlags：预留的移除能力标志；旧协议未返回时保持 0。
     std::uint32_t operationMask = 0;       // operationMask：操作掩码。
     std::uint32_t objectTypeMask = 0;      // objectTypeMask：对象类型掩码。
@@ -330,7 +331,11 @@ struct KernelDriverStatusSummary
     bool ntoskrnlIdentityPresent = false;    // ntoskrnlIdentityPresent：R0 是否识别到当前 ntoskrnl 身份。
     bool localPdbProfileMatched = false;     // localPdbProfileMatched：本地 pack 是否精确匹配当前 ntoskrnl。
     bool pdbProfileActive = false;           // pdbProfileActive：R0 当前是否已应用 PDB profile。
+    bool callbackProfileActive = false;      // callbackProfileActive：R0 当前是否已应用 callback PDB profile。
     bool trustedPdbOffsetsActive = false;    // trustedPdbOffsetsActive：是否已有可信 PDB 偏移参与当前 DynData。
+    bool callbackNotifyTrusted = false;      // callbackNotifyTrusted：notify 数组全局 RVA 是否由 profile 覆盖。
+    bool callbackRegistryTrusted = false;    // callbackRegistryTrusted：registry 回调全局 RVA 是否由 profile 覆盖。
+    bool callbackObjectTrusted = false;      // callbackObjectTrusted：object callback 结构偏移是否由 profile 覆盖。
     std::uint32_t dynDataSystemInformerDataVersion = 0; // dynDataSystemInformerDataVersion：内置 System Informer DynData 版本。
     std::uint32_t dynDataSystemInformerDataLength = 0;  // dynDataSystemInformerDataLength：内置 DynData 配置字节数。
     std::uint32_t dynDataMatchedProfileClass = 0; // dynDataMatchedProfileClass：R0 匹配到的 profile class。
@@ -353,6 +358,7 @@ struct KernelDriverStatusSummary
     QString ntoskrnlModuleNameText;          // ntoskrnlModuleNameText：当前 ntoskrnl 模块名。
     std::uint32_t localPdbProfilePackProfileCount = 0; // localPdbProfilePackProfileCount：命中 pack 声明的 profile 总数。
     std::uint32_t localPdbProfileFieldCount = 0; // localPdbProfileFieldCount：命中 profile 声明字段数。
+    std::uint32_t localPdbProfileCallbackItemCount = 0; // localPdbProfileCallbackItemCount：命中 profile 声明 callbackItems 数。
     QString localPdbProfileNameText;         // localPdbProfileNameText：本地 pack 命中的 profile 名。
     QString localPdbProfileVersionText;      // localPdbProfileVersionText：从 profile 名提取的 Windows 版本号。
     QString localPdbProfilePathText;         // localPdbProfilePathText：命中 pack 文件路径。

@@ -75,7 +75,20 @@ static const KSW_DYN_FIELD_BINDING g_KswordDynFieldBindings[] = {
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_LX_PICO_THRD_INFO_TID, "LxPicoThrdInfoTID", "WSL/Lxcore", KSW_CAP_WSL_LXCORE_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, LxcoreOffsets.LxPicoThrdInfoTID),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_PROTECTION, "EpProtection", "Process Protection Patch", KSW_CAP_PROCESS_PROTECTION_PATCH, TRUE, KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN, Kernel.EpProtection),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_SIGNATURE_LEVEL, "EpSignatureLevel", "Process Protection Patch", KSW_CAP_PROCESS_PROTECTION_PATCH, TRUE, KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN, Kernel.EpSignatureLevel),
-    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_SECTION_SIGNATURE_LEVEL, "EpSectionSignatureLevel", "Process Protection Patch", KSW_CAP_PROCESS_PROTECTION_PATCH, TRUE, KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN, Kernel.EpSectionSignatureLevel)
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_SECTION_SIGNATURE_LEVEL, "EpSectionSignatureLevel", "Process Protection Patch", KSW_CAP_PROCESS_PROTECTION_PATCH, TRUE, KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN, Kernel.EpSectionSignatureLevel),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_PSP_CREATE_PROCESS_NOTIFY_ROUTINE, "PspCreateProcessNotifyRoutine", "Callback Notify Globals", KSW_CAP_CALLBACK_NOTIFY_GLOBALS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackGlobals.PspCreateProcessNotifyRoutine),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_PSP_CREATE_THREAD_NOTIFY_ROUTINE, "PspCreateThreadNotifyRoutine", "Callback Notify Globals", KSW_CAP_CALLBACK_NOTIFY_GLOBALS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackGlobals.PspCreateThreadNotifyRoutine),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_PSP_LOAD_IMAGE_NOTIFY_ROUTINE, "PspLoadImageNotifyRoutine", "Callback Notify Globals", KSW_CAP_CALLBACK_NOTIFY_GLOBALS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackGlobals.PspLoadImageNotifyRoutine),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_PSP_NOTIFY_ENABLE_MASK, "PspNotifyEnableMask", "Callback Notify Globals", KSW_CAP_CALLBACK_NOTIFY_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackGlobals.PspNotifyEnableMask),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_CM_CALLBACK_LIST_HEAD, "CmCallbackListHead", "Callback Registry Globals", KSW_CAP_CALLBACK_REGISTRY_GLOBALS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackGlobals.CmCallbackListHead),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_OBJECT_TYPE_CALLBACK_LIST, "_OBJECT_TYPE.CallbackList", "Callback Object Fields", KSW_CAP_CALLBACK_OBJECT_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackOffsets.ObjectTypeCallbackList),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_ENTRY_LIST, "_CALLBACK_ENTRY_ITEM.EntryList", "Callback Object Fields", KSW_CAP_CALLBACK_OBJECT_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackOffsets.CallbackEntryItemEntryList),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_PRE_OPERATION, "_CALLBACK_ENTRY_ITEM.PreOperation", "Callback Object Fields", KSW_CAP_CALLBACK_OBJECT_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackOffsets.CallbackEntryItemPreOperation),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_POST_OPERATION, "_CALLBACK_ENTRY_ITEM.PostOperation", "Callback Object Fields", KSW_CAP_CALLBACK_OBJECT_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackOffsets.CallbackEntryItemPostOperation),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_OPERATIONS, "_CALLBACK_ENTRY_ITEM.Operations", "Callback Object Fields", KSW_CAP_CALLBACK_OBJECT_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackOffsets.CallbackEntryItemOperations),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_CALLBACK_ENTRY, "_CALLBACK_ENTRY_ITEM.CallbackEntry", "Callback Object Fields", KSW_CAP_CALLBACK_OBJECT_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackOffsets.CallbackEntryItemCallbackEntry),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ALTITUDE, "_CALLBACK_ENTRY.Altitude", "Callback Object Fields", KSW_CAP_CALLBACK_OBJECT_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackOffsets.CallbackEntryAltitude),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_REGISTRATION_CONTEXT, "_CALLBACK_ENTRY.RegistrationContext", "Callback Object Fields", KSW_CAP_CALLBACK_OBJECT_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackOffsets.CallbackEntryRegistrationContext)
 };
 
 static ULONG
@@ -225,6 +238,32 @@ Return Value:
         return State->KernelSources.EpSignatureLevel;
     case KSW_DYN_FIELD_ID_EP_SECTION_SIGNATURE_LEVEL:
         return State->KernelSources.EpSectionSignatureLevel;
+    case KSW_DYN_FIELD_ID_CB_PSP_CREATE_PROCESS_NOTIFY_ROUTINE:
+        return State->CallbackGlobalSources.PspCreateProcessNotifyRoutine;
+    case KSW_DYN_FIELD_ID_CB_PSP_CREATE_THREAD_NOTIFY_ROUTINE:
+        return State->CallbackGlobalSources.PspCreateThreadNotifyRoutine;
+    case KSW_DYN_FIELD_ID_CB_PSP_LOAD_IMAGE_NOTIFY_ROUTINE:
+        return State->CallbackGlobalSources.PspLoadImageNotifyRoutine;
+    case KSW_DYN_FIELD_ID_CB_PSP_NOTIFY_ENABLE_MASK:
+        return State->CallbackGlobalSources.PspNotifyEnableMask;
+    case KSW_DYN_FIELD_ID_CB_CM_CALLBACK_LIST_HEAD:
+        return State->CallbackGlobalSources.CmCallbackListHead;
+    case KSW_DYN_FIELD_ID_CB_OBJECT_TYPE_CALLBACK_LIST:
+        return State->CallbackOffsetSources.ObjectTypeCallbackList;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_ENTRY_LIST:
+        return State->CallbackOffsetSources.CallbackEntryItemEntryList;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_PRE_OPERATION:
+        return State->CallbackOffsetSources.CallbackEntryItemPreOperation;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_POST_OPERATION:
+        return State->CallbackOffsetSources.CallbackEntryItemPostOperation;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_OPERATIONS:
+        return State->CallbackOffsetSources.CallbackEntryItemOperations;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_CALLBACK_ENTRY:
+        return State->CallbackOffsetSources.CallbackEntryItemCallbackEntry;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ALTITUDE:
+        return State->CallbackOffsetSources.CallbackEntryAltitude;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_REGISTRATION_CONTEXT:
+        return State->CallbackOffsetSources.CallbackEntryRegistrationContext;
     default:
         return KSW_DYN_FIELD_SOURCE_UNAVAILABLE;
     }
@@ -480,6 +519,9 @@ Return Value:
     const ULONG protectionFields[] = { State->Kernel.EpProtection, State->Kernel.EpSignatureLevel, State->Kernel.EpSectionSignatureLevel };
     const ULONG etwFields[] = { State->Kernel.EgeGuid, State->Kernel.EreGuidEntry };
     const ULONG lxcoreFields[] = { State->LxcoreOffsets.LxPicoProc, State->LxcoreOffsets.LxPicoProcInfo, State->LxcoreOffsets.LxPicoProcInfoPID, State->LxcoreOffsets.LxPicoThrdInfo, State->LxcoreOffsets.LxPicoThrdInfoTID };
+    const ULONG callbackNotifyGlobals[] = { State->CallbackGlobals.PspCreateProcessNotifyRoutine, State->CallbackGlobals.PspCreateThreadNotifyRoutine, State->CallbackGlobals.PspLoadImageNotifyRoutine };
+    const ULONG callbackRegistryGlobals[] = { State->CallbackGlobals.CmCallbackListHead };
+    const ULONG callbackObjectFields[] = { State->CallbackOffsets.ObjectTypeCallbackList, State->CallbackOffsets.CallbackEntryItemPreOperation, State->CallbackOffsets.CallbackEntryItemPostOperation, State->CallbackOffsets.CallbackEntryItemOperations, State->CallbackOffsets.CallbackEntryItemCallbackEntry };
 
     if (State->NtosActive) {
         capabilities |= KSW_CAP_DYN_NTOS_ACTIVE;
@@ -513,6 +555,15 @@ Return Value:
     }
     if (State->LxcoreActive && KswordARKDynDataHasAll(lxcoreFields, RTL_NUMBER_OF(lxcoreFields))) {
         capabilities |= KSW_CAP_WSL_LXCORE_FIELDS;
+    }
+    if (State->CallbackProfileActive && KswordARKDynDataHasAll(callbackNotifyGlobals, RTL_NUMBER_OF(callbackNotifyGlobals))) {
+        capabilities |= KSW_CAP_CALLBACK_NOTIFY_GLOBALS;
+    }
+    if (State->CallbackProfileActive && KswordARKDynDataHasAll(callbackRegistryGlobals, RTL_NUMBER_OF(callbackRegistryGlobals))) {
+        capabilities |= KSW_CAP_CALLBACK_REGISTRY_GLOBALS;
+    }
+    if (State->CallbackProfileActive && KswordARKDynDataHasAll(callbackObjectFields, RTL_NUMBER_OF(callbackObjectFields))) {
+        capabilities |= KSW_CAP_CALLBACK_OBJECT_FIELDS;
     }
 
     return capabilities;

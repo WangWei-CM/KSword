@@ -1,4 +1,4 @@
-#include "ArkDriverClient.h"
+﻿#include "ArkDriverClient.h"
 
 #include <algorithm>
 #include <cstring>
@@ -338,6 +338,89 @@ namespace ksword::ark
             << std::dec << ", applied=" << result.appliedFieldCount
             << ", rejected=" << result.rejectedFieldCount
             << ", unknown=" << result.unknownFieldCount;
+        result.io.message = stream.str();
+        return result;
+    }
+
+    // applyDynDataProfileEx 作用：
+    // - 将 R3 v2 profile pack 中的 typed items 打包成 EX IOCTL 请求并发送给 R0；
+    // - 入参 profile：profile 元数据、ntoskrnl identity 和 GlobalRva/StructOffset item；
+    // - 返回：R0 EX apply 响应；io.ok 表示传输/协议可用，status 表示语义应用结果。
+    DynDataProfileApplyExResult DriverClient::applyDynDataProfileEx(const DynDataProfileApplyExInput& profile) const
+    {
+        DynDataProfileApplyExResult result{};
+        if (profile.items.empty() || profile.items.size() > KSW_DYN_PROFILE_EX_MAX_ITEMS)
+        {
+            result.io.ok = false;
+            result.io.win32Error = ERROR_INVALID_PARAMETER;
+            result.io.message = "DynData profile EX item count invalid.";
+            return result;
+        }
+
+        const std::size_t requestBytes =
+            KSW_APPLY_DYN_PROFILE_EX_REQUEST_HEADER_SIZE +
+            (profile.items.size() * sizeof(KSW_DYN_PROFILE_EX_ITEM_PACKET));
+        if (requestBytes > static_cast<std::size_t>(std::numeric_limits<unsigned long>::max()))
+        {
+            result.io.ok = false;
+            result.io.win32Error = ERROR_INVALID_PARAMETER;
+            result.io.message = "DynData profile EX request too large.";
+            return result;
+        }
+
+        std::vector<std::uint8_t> requestBuffer(requestBytes, 0U);
+        auto* request = reinterpret_cast<KSW_APPLY_DYN_PROFILE_EX_REQUEST*>(requestBuffer.data());
+        request->size = static_cast<unsigned long>(requestBytes);
+        request->version = KSWORD_ARK_DYNDATA_PROTOCOL_VERSION;
+        request->flags = KSW_DYN_PROFILE_FLAG_TRANSPORT_IOCTL;
+        request->itemCount = static_cast<unsigned long>(profile.items.size());
+        request->ntoskrnl = buildIdentityPacket(profile.ntoskrnl);
+        copyDynAnsi(request->profileName, sizeof(request->profileName), profile.profileName);
+        copyDynAnsi(request->pdbName, sizeof(request->pdbName), profile.pdbName);
+        copyDynAnsi(request->pdbGuid, sizeof(request->pdbGuid), profile.pdbGuid);
+        request->pdbAge = static_cast<unsigned long>(profile.pdbAge);
+
+        for (std::size_t index = 0U; index < profile.items.size(); ++index)
+        {
+            request->items[index].itemId = static_cast<unsigned long>(profile.items[index].itemId);
+            request->items[index].itemKind = static_cast<unsigned long>(profile.items[index].itemKind);
+            request->items[index].value = static_cast<unsigned long>(profile.items[index].value);
+            request->items[index].flags = static_cast<unsigned long>(profile.items[index].flags);
+        }
+
+        KSW_APPLY_DYN_PROFILE_EX_RESPONSE response{};
+        result.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_APPLY_DYN_PROFILE_EX,
+            requestBuffer.data(),
+            static_cast<unsigned long>(requestBuffer.size()),
+            &response,
+            static_cast<unsigned long>(sizeof(response)));
+        if (!result.io.ok)
+        {
+            result.io.message = "DeviceIoControl(IOCTL_KSWORD_ARK_APPLY_DYN_PROFILE_EX) failed, error=" + std::to_string(result.io.win32Error);
+            return result;
+        }
+        if (result.io.bytesReturned < sizeof(response) || response.version != KSWORD_ARK_DYNDATA_PROTOCOL_VERSION)
+        {
+            result.io.ok = false;
+            result.io.message = "DynData profile EX apply response invalid, bytesReturned=" + std::to_string(result.io.bytesReturned);
+            return result;
+        }
+
+        result.status = static_cast<long>(response.status);
+        result.appliedItemCount = static_cast<std::uint32_t>(response.appliedItemCount);
+        result.rejectedItemCount = static_cast<std::uint32_t>(response.rejectedItemCount);
+        result.unknownItemCount = static_cast<std::uint32_t>(response.unknownItemCount);
+        result.statusFlags = static_cast<std::uint32_t>(response.statusFlags);
+        result.capabilityMask = static_cast<std::uint64_t>(response.capabilityMask);
+        result.message = fixedDynWideToString(response.message, KSW_DYN_REASON_CHARS);
+        result.io.ntStatus = result.status;
+
+        std::ostringstream stream;
+        stream << "DynData PDB profile EX apply status=0x" << std::hex << static_cast<unsigned long>(result.status)
+            << std::dec << ", applied=" << result.appliedItemCount
+            << ", rejected=" << result.rejectedItemCount
+            << ", unknown=" << result.unknownItemCount;
         result.io.message = stream.str();
         return result;
     }

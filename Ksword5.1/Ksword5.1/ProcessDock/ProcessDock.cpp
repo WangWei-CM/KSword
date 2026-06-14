@@ -3,10 +3,13 @@
 #include "../theme.h"
 #include "ProcessDetailWindow.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../UI/FlatTableModel.h"
 
+#include <QAbstractItemModel>
 #include <QAbstractItemView>
 #include <QAbstractScrollArea>
 #include <QApplication>
+#include <QBrush>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
@@ -24,6 +27,7 @@
 #include <QHeaderView>
 #include <QHelpEvent>
 #include <QHBoxLayout>
+#include <QItemSelection>
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
@@ -48,6 +52,7 @@
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSizePolicy>
+#include <QSortFilterProxyModel>
 #include <QStyle>
 #include <QStyleOptionSlider>
 #include <QStyledItemDelegate>
@@ -55,6 +60,7 @@
 #include <QScrollBar>
 #include <QSvgRenderer>
 #include <QTabBar>
+#include <QTableView>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
@@ -64,7 +70,6 @@
 #include <QToolTip>
 #include <QStringList>
 #include <QTreeWidget>
-#include <QTreeWidgetItem>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -278,28 +283,96 @@ namespace
         return parsedColor.isValid() ? parsedColor : fallbackColor;
     }
 
-    class ProcessSortTreeWidgetItem final : public QTreeWidgetItem
+    class ProcessTableSortProxy final : public QSortFilterProxyModel
     {
     public:
-        // operator< 作用：让进程表按隐藏数值键排序，而不是按展示字符串排序。
-        bool operator<(const QTreeWidgetItem& otherItem) const override
+        // 构造函数作用：
+        // - 初始化进程列表专用排序代理；
+        // - 默认动态排序关闭，避免每次 setRows 时逐行插入触发排序抖动。
+        // 参数 parent：Qt 父对象。
+        // 返回：无返回值。
+        explicit ProcessTableSortProxy(QObject* parent = nullptr)
+            : QSortFilterProxyModel(parent)
         {
-            const QTreeWidget* ownerTree = treeWidget();
-            const int sortColumn = ownerTree != nullptr ? ownerTree->sortColumn() : 0;
+            setDynamicSortFilter(false);
+        }
+
+        // setPreserveSourceOrder 作用：
+        // - 树状显示时让代理按源模型行号排序，保留 buildDisplayOrder 生成的父子顺序；
+        // - 列表/历史快照模式关闭该开关，继续使用数值排序键。
+        // 参数 preserveSourceOrder：true=保留源顺序；false=按列排序。
+        // 返回：无返回值。
+        void setPreserveSourceOrder(const bool preserveSourceOrder)
+        {
+            m_preserveSourceOrder = preserveSourceOrder;
+        }
+
+        // setHeaderTexts 作用：
+        // - 接收 ProcessDock 按当前可见行计算出的动态表头；
+        // - 仅刷新横向表头，避免为“CPU 总和”等文本变化重置整张表；
+        // - 返回：无返回值。
+        void setHeaderTexts(QStringList headerTexts)
+        {
+            m_headerTexts = std::move(headerTexts);
+            if (!m_headerTexts.isEmpty())
+            {
+                emit headerDataChanged(Qt::Horizontal, 0, m_headerTexts.size() - 1);
+            }
+        }
+
+        // headerData 作用：
+        // - 横向 DisplayRole 返回动态表头文本；
+        // - 其它 role/orientation 保持 QSortFilterProxyModel 默认行为。
+        QVariant headerData(const int section, const Qt::Orientation orientation, const int role) const override
+        {
+            if (orientation == Qt::Horizontal &&
+                role == Qt::DisplayRole &&
+                section >= 0 &&
+                section < m_headerTexts.size())
+            {
+                return m_headerTexts.at(section);
+            }
+            return QSortFilterProxyModel::headerData(section, orientation, role);
+        }
+
+    protected:
+        // lessThan 作用：
+        // - 优先读取 ProcessNumericSortRole 的原始数值排序键；
+        // - 数值相等或列没有数值键时，回退到展示文本的本地化比较；
+        // - 返回 true 表示 left 应排在 right 前。
+        bool lessThan(const QModelIndex& leftIndex, const QModelIndex& rightIndex) const override
+        {
+            if (!leftIndex.isValid() || !rightIndex.isValid())
+            {
+                return QSortFilterProxyModel::lessThan(leftIndex, rightIndex);
+            }
+
+            if (m_preserveSourceOrder)
+            {
+                return leftIndex.row() < rightIndex.row();
+            }
+
             bool leftOk = false;
             bool rightOk = false;
-            const double leftValue = data(sortColumn, ProcessNumericSortRole).toDouble(&leftOk);
-            const double rightValue = otherItem.data(sortColumn, ProcessNumericSortRole).toDouble(&rightOk);
+            const double leftValue = sourceModel()->data(leftIndex, ProcessNumericSortRole).toDouble(&leftOk);
+            const double rightValue = sourceModel()->data(rightIndex, ProcessNumericSortRole).toDouble(&rightOk);
             if (leftOk && rightOk && leftValue != rightValue)
             {
                 return leftValue < rightValue;
             }
             if (leftOk && rightOk)
             {
-                return text(sortColumn).localeAwareCompare(otherItem.text(sortColumn)) < 0;
+                return sourceModel()
+                    ->data(leftIndex, Qt::DisplayRole)
+                    .toString()
+                    .localeAwareCompare(sourceModel()->data(rightIndex, Qt::DisplayRole).toString()) < 0;
             }
-            return QTreeWidgetItem::operator<(otherItem);
+            return QSortFilterProxyModel::lessThan(leftIndex, rightIndex);
         }
+
+    private:
+        QStringList m_headerTexts; // m_headerTexts：进程表当前横向表头文本快照。
+        bool m_preserveSourceOrder = false; // m_preserveSourceOrder：树状模式下按源模型顺序返回。
     };
 
     // ProcessWindowPickerDragButton：
@@ -1078,18 +1151,18 @@ namespace
     {
     public:
         // 构造函数：
-        // - treeWidget：被代理绘制的进程树表；
+        // - tableView：被代理绘制的进程表视图；
         // - 处理：启用 viewport 鼠标追踪，记录当前悬停行；
         // - 返回：无返回值。
-        explicit ProcessRowHighlightDelegate(QTreeWidget* treeWidget)
-            : QStyledItemDelegate(treeWidget)
-            , m_treeWidget(treeWidget)
+        explicit ProcessRowHighlightDelegate(QTableView* tableView)
+            : QStyledItemDelegate(tableView)
+            , m_tableView(tableView)
         {
-            if (m_treeWidget != nullptr && m_treeWidget->viewport() != nullptr)
+            if (m_tableView != nullptr && m_tableView->viewport() != nullptr)
             {
-                m_treeWidget->setMouseTracking(true);
-                m_treeWidget->viewport()->setMouseTracking(true);
-                m_treeWidget->viewport()->installEventFilter(this);
+                m_tableView->setMouseTracking(true);
+                m_tableView->viewport()->setMouseTracking(true);
+                m_tableView->viewport()->installEventFilter(this);
             }
         }
 
@@ -1099,14 +1172,14 @@ namespace
         // - 返回：false 表示不截断 Qt 原有表格交互。
         bool eventFilter(QObject* watched, QEvent* event) override
         {
-            if (m_treeWidget != nullptr &&
-                watched == m_treeWidget->viewport() &&
+            if (m_tableView != nullptr &&
+                watched == m_tableView->viewport() &&
                 event != nullptr)
             {
                 if (event->type() == QEvent::MouseMove)
                 {
                     const QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
-                    updateHoveredRowIndex(m_treeWidget->indexAt(activityMousePosition(mouseEvent)));
+                    updateHoveredRowIndex(m_tableView->indexAt(activityMousePosition(mouseEvent)));
                 }
                 else if (event->type() == QEvent::Leave)
                 {
@@ -1226,9 +1299,9 @@ namespace
             m_hoveredRowIndex = nextRowIndex;
 
             // 行边框横跨多个列，简单重绘整个 viewport 可避免列宽/列顺序变化时残留边线。
-            if (m_treeWidget != nullptr && m_treeWidget->viewport() != nullptr)
+            if (m_tableView != nullptr && m_tableView->viewport() != nullptr)
             {
-                m_treeWidget->viewport()->update();
+                m_tableView->viewport()->update();
             }
         }
 
@@ -1257,12 +1330,12 @@ namespace
             const QModelIndex& index,
             const bool rowSelected) const
         {
-            if (painter == nullptr || m_treeWidget == nullptr || !index.isValid())
+            if (painter == nullptr || m_tableView == nullptr || !index.isValid())
             {
                 return;
             }
 
-            QHeaderView* headerView = m_treeWidget->header();
+            QHeaderView* headerView = m_tableView->horizontalHeader();
             if (headerView == nullptr)
             {
                 return;
@@ -1272,10 +1345,10 @@ namespace
             int lastVisibleVisualIndex = std::numeric_limits<int>::min();
             const int columnCount = index.model() != nullptr
                 ? index.model()->columnCount(index.parent())
-                : m_treeWidget->columnCount();
+                : 0;
             for (int columnIndex = 0; columnIndex < columnCount; ++columnIndex)
             {
-                if (m_treeWidget->isColumnHidden(columnIndex))
+                if (m_tableView->isColumnHidden(columnIndex))
                 {
                     continue;
                 }
@@ -1321,7 +1394,7 @@ namespace
             painter->restore();
         }
 
-        QPointer<QTreeWidget> m_treeWidget;       // m_treeWidget：被代理的进程表，不拥有。
+        QPointer<QTableView> m_tableView;         // m_tableView：被代理的进程表，不拥有。
         QPersistentModelIndex m_hoveredRowIndex; // m_hoveredRowIndex：当前鼠标悬停行的第 0 列索引。
     };
 
@@ -2328,7 +2401,7 @@ bool ProcessDock::eventFilter(QObject* watched, QEvent* event)
     if (watchedWidget == m_processTable->viewport())
     {
         const QPoint viewportPosition = activityMousePosition(mouseEvent);
-        if (m_processTable->itemAt(viewportPosition) == nullptr)
+        if (!m_processTable->indexAt(viewportPosition).isValid())
         {
             clearProcessTableSelection();
         }
@@ -2841,11 +2914,44 @@ void ProcessDock::handleProcessWindowPickerRelease(const QPoint& globalPos)
 
 void ProcessDock::initializeProcessTable()
 {
-    m_processTable = new QTreeWidget(this);
-    m_processTable->setColumnCount(static_cast<int>(TableColumn::Count));
-    m_processTable->setHeaderLabels(ProcessTableHeaders);
-    m_processTable->setRootIsDecorated(false);
-    m_processTable->setItemsExpandable(false);
+    // 进程列表迁移到 QTableView + FlatTableModel：
+    // - 行数据只保存在模型的轻量 ProcessTableRow 中；
+    // - 每轮刷新通过 setRows 批量替换快照，避免大量旧 item 创建/销毁；
+    // - 树状视图仍通过 Name 列缩进文本模拟，保持旧外观和交互语义。
+    m_processTable = new QTableView(this);
+    // 进程表刷新频率和行数都较高：
+    // - 禁用 MainWindow 全局 smooth-scroll 接管，避免滚轮事件被 QPropertyAnimation 重写；
+    // - 保持 QTableView/滚动条默认滚动手感，不额外添加惯性或延迟；
+    // - 返回行为：仅设置 Qt 动态属性，无其它副作用。
+    m_processTable->setProperty("ksword_disable_smooth_scroll", true);
+    if (m_processTable->viewport() != nullptr)
+    {
+        m_processTable->viewport()->setProperty("ksword_disable_smooth_scroll", true);
+    }
+
+    std::vector<ProcessTableModel::ColumnSpec> columnSpecs;
+    columnSpecs.reserve(static_cast<std::size_t>(TableColumn::Count));
+    for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
+    {
+        ProcessTableModel::ColumnSpec columnSpec{};
+        columnSpec.headerText = ProcessTableHeaders.at(columnIndex);
+        columnSpec.alignment = (columnIndex == toColumnIndex(TableColumn::IsAdmin))
+            ? (Qt::AlignCenter | Qt::AlignVCenter)
+            : (Qt::AlignLeft | Qt::AlignVCenter);
+        columnSpecs.push_back(std::move(columnSpec));
+    }
+    m_processTableModel = new ProcessTableModel(
+        std::move(columnSpecs),
+        [this](const ProcessTableRow& tableRow, const int column, const int role) -> QVariant
+        {
+            return processTableData(tableRow, column, role);
+        },
+        this);
+    m_processSortProxy = new ProcessTableSortProxy(this);
+    m_processSortProxy->setSourceModel(m_processTableModel);
+    static_cast<ProcessTableSortProxy*>(m_processSortProxy)->setHeaderTexts(ProcessTableHeaders);
+    m_processTable->setModel(m_processSortProxy);
+
     m_processTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     // 选择模式：
     // - 普通左键仍保持单行焦点；
@@ -2853,16 +2959,32 @@ void ProcessDock::initializeProcessTable()
     // - 右键菜单会读取所有已选行并批量执行动作。
     m_processTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_processTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_processTable->setUniformRowHeights(true);
     m_processTable->setSortingEnabled(true);
     m_processTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_processTable->setAlternatingRowColors(true);
     m_processTable->setItemDelegate(new ProcessRowHighlightDelegate(m_processTable));
+    m_processTable->setShowGrid(false);
+    m_processTable->setWordWrap(false);
+    m_processTable->setCornerButtonEnabled(false);
     // 列宽由自适应逻辑统一控制，强制关闭内部横向滚动条。
     m_processTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    if (QScrollBar* verticalScrollBar = m_processTable->verticalScrollBar())
+    {
+        verticalScrollBar->setProperty("ksword_disable_smooth_scroll", true);
+    }
+    if (QScrollBar* horizontalScrollBar = m_processTable->horizontalScrollBar())
+    {
+        horizontalScrollBar->setProperty("ksword_disable_smooth_scroll", true);
+    }
 
     // 表头支持拖动、右键显示/隐藏列。
-    QHeaderView* headerView = m_processTable->header();
+    if (QHeaderView* verticalHeader = m_processTable->verticalHeader())
+    {
+        verticalHeader->setVisible(false);
+        verticalHeader->setSectionResizeMode(QHeaderView::Fixed);
+        verticalHeader->setDefaultSectionSize(24);
+    }
+    QHeaderView* headerView = m_processTable->horizontalHeader();
     headerView->setSectionsMovable(true);
     headerView->setStretchLastSection(false);
     headerView->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -3562,12 +3684,12 @@ void ProcessDock::initializeConnections()
     });
 
     // 表格右键菜单。
-    connect(m_processTable, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+    connect(m_processTable, &QWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showTableContextMenu(localPosition);
     });
 
     // 表头右键菜单（列显示/隐藏）。
-    connect(m_processTable->header(), &QHeaderView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+    connect(m_processTable->horizontalHeader(), &QHeaderView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showHeaderContextMenu(localPosition);
     });
 
@@ -3620,54 +3742,61 @@ void ProcessDock::initializeConnections()
         updateProcessActivityStatusLabel();
     });
 
-    // currentItemChanged 作用：
+    // currentChanged 作用：
     // - 记录当前被用户选中的进程 identityKey；
     // - 周期刷新后 rebuildTable 会按这个 key 恢复高亮。
-    connect(m_processTable, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* currentItem, QTreeWidgetItem*) {
-        if (currentItem == nullptr)
-        {
-            if (!m_contextMenuVisible)
+    if (QItemSelectionModel* selectionModel = m_processTable->selectionModel())
+    {
+        connect(selectionModel, &QItemSelectionModel::currentChanged, this, [this](const QModelIndex& currentIndex, const QModelIndex&) {
+            if (!currentIndex.isValid())
             {
-                m_trackedSelectedIdentityKey.clear();
-                m_trackedSelectedIdentityKeys.clear();
-                m_trackedSelectedColumn = 0;
+                if (!m_contextMenuVisible)
+                {
+                    m_trackedSelectedIdentityKey.clear();
+                    m_trackedSelectedIdentityKeys.clear();
+                    m_trackedSelectedColumn = 0;
+                }
+                return;
             }
-            return;
-        }
 
-        const int currentColumn = m_processTable->currentColumn();
-        if (currentColumn >= 0 && currentColumn < static_cast<int>(TableColumn::Count))
-        {
-            m_trackedSelectedColumn = currentColumn;
-        }
-        syncTrackedSelectionFromTable();
-    });
+            const int currentColumn = currentIndex.column();
+            if (currentColumn >= 0 && currentColumn < static_cast<int>(TableColumn::Count))
+            {
+                m_trackedSelectedColumn = currentColumn;
+            }
+            syncTrackedSelectionFromTable();
+        });
 
-    // itemSelectionChanged 作用：
-    // - 记录 Ctrl 复选后的完整行集合；
-    // - 周期刷新 rebuildTable 后按 identityKey 恢复多选状态。
-    connect(m_processTable, &QTreeWidget::itemSelectionChanged, this, [this]() {
-        syncTrackedSelectionFromTable();
-        refreshProcessActivityChart();
-        if (m_activityTimelineSlider != nullptr && !m_activitySamples.empty())
-        {
-            previewProcessActivitySnapshotForIndex(m_activityTimelineSlider->value());
-        }
-    });
+        // selectionChanged 作用：
+        // - 记录 Ctrl 复选后的完整行集合；
+        // - 周期刷新 rebuildTable 后按 identityKey 恢复多选状态。
+        connect(selectionModel, &QItemSelectionModel::selectionChanged, this, [this](const QItemSelection&, const QItemSelection&) {
+            syncTrackedSelectionFromTable();
+            refreshProcessActivityChart();
+            if (m_activityTimelineSlider != nullptr && !m_activitySamples.empty())
+            {
+                previewProcessActivitySnapshotForIndex(m_activityTimelineSlider->value());
+            }
+        });
+    }
 
-    // itemPressed 作用：
+    // pressed 作用：
     // - 左键点选某一行时同步记录点击列；
     // - 刷新恢复时尽量回到用户原来的焦点列。
-    connect(m_processTable, &QTreeWidget::itemPressed, this, [this](QTreeWidgetItem* item, const int column) {
-        if (item == nullptr)
+    connect(m_processTable, &QAbstractItemView::pressed, this, [this](const QModelIndex& index) {
+        if (!index.isValid())
         {
             return;
         }
 
-        m_trackedSelectedIdentityKey = item->data(0, Qt::UserRole).toString().toStdString();
-        if (column >= 0 && column < static_cast<int>(TableColumn::Count))
+        const ProcessTableRow* tableRow = processTableRowForViewIndex(index);
+        if (tableRow != nullptr)
         {
-            m_trackedSelectedColumn = column;
+            m_trackedSelectedIdentityKey = tableRow->identityKey;
+        }
+        if (index.column() >= 0 && index.column() < static_cast<int>(TableColumn::Count))
+        {
+            m_trackedSelectedColumn = index.column();
         }
         QTimer::singleShot(0, this, [this]()
         {
@@ -4114,7 +4243,7 @@ void ProcessDock::applyAdaptiveColumnWidths()
         return;
     }
 
-    QHeaderView* headerView = m_processTable->header();
+    QHeaderView* headerView = m_processTable->horizontalHeader();
     if (headerView == nullptr)
     {
         return;
@@ -5022,7 +5151,7 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
 
 void ProcessDock::rebuildTable()
 {
-    if (m_processTable == nullptr)
+    if (m_processTable == nullptr || m_processTableModel == nullptr || m_processSortProxy == nullptr)
     {
         return;
     }
@@ -5033,8 +5162,13 @@ void ProcessDock::rebuildTable()
     }
 
     // 记录用户当前排序列与顺序，解决“刷新后被重置为 PID 排序”的问题。
-    const int previousSortColumn = m_processTable->header()->sortIndicatorSection();
-    const Qt::SortOrder previousSortOrder = m_processTable->header()->sortIndicatorOrder();
+    QHeaderView* headerView = m_processTable->horizontalHeader();
+    const int previousSortColumn = headerView != nullptr
+        ? headerView->sortIndicatorSection()
+        : toColumnIndex(TableColumn::Pid);
+    const Qt::SortOrder previousSortOrder = headerView != nullptr
+        ? headerView->sortIndicatorOrder()
+        : Qt::AscendingOrder;
     const std::string trackedIdentityKeyBeforeRebuild =
         !m_trackedSelectedIdentityKey.empty()
         ? m_trackedSelectedIdentityKey
@@ -5055,23 +5189,22 @@ void ProcessDock::rebuildTable()
         m_trackedSelectedColumn,
         0,
         static_cast<int>(TableColumn::Count) - 1);
+
     // 滚动位置快照：
     // - 保存刷新前用户视口位置；
-    // - 刷新后恢复，避免每轮重建跳回顶部。
+    // - 刷新后恢复，避免每轮数据替换跳回顶部。
     QScrollBar* verticalScrollBar = m_processTable->verticalScrollBar();
     QScrollBar* horizontalScrollBar = m_processTable->horizontalScrollBar();
     const int verticalScrollValueBeforeRebuild = (verticalScrollBar != nullptr) ? verticalScrollBar->value() : 0;
     const int horizontalScrollValueBeforeRebuild = (horizontalScrollBar != nullptr) ? horizontalScrollBar->value() : 0;
 
-    // 刷新期间临时冻结视图更新，减少大量 addTopLevelItem 时的重绘抖动。
-    QSignalBlocker tableSignalBlocker(m_processTable);
-    m_processTable->setUpdatesEnabled(false);
-    m_processTable->clear();
-
-    // 树状模式下保持父子顺序，禁用自动排序。
     const bool activitySnapshotActive = isProcessActivityTableSnapshotActive();
     const bool enableSorting = activitySnapshotActive || !isTreeModeEnabled();
-    m_processTable->setSortingEnabled(false);
+    if (m_processSortProxy != nullptr)
+    {
+        auto* processSortProxy = static_cast<ProcessTableSortProxy*>(m_processSortProxy);
+        processSortProxy->setPreserveSourceOrder(!enableSorting);
+    }
 
     const std::vector<DisplayRow> displayRows = buildDisplayOrder();
 
@@ -5092,33 +5225,12 @@ void ProcessDock::rebuildTable()
         maxHandleCount = std::max(maxHandleCount, displayRow.record->handleCount);
     }
 
-    // applyUsageHighlight 作用：
-    // - 对目标单元格按占用比例绘制主题蓝背景；
-    // - 占用越高，背景越明显。
-    const auto applyUsageHighlight = [this](QTreeWidgetItem* item, const int columnIndex, double usageRatio)
-        {
-            if (item == nullptr)
-            {
-                return;
-            }
-            usageRatio = std::clamp(usageRatio, 0.0, 1.0);
-            const QColor usageColor = usageRatioToHighlightColor(usageRatio);
-            item->setBackground(columnIndex, usageColor);
-
-            // 高占用时将文本置白，保证可读性。
-            if (usageRatio >= 0.70)
-            {
-                item->setForeground(columnIndex, QColor(255, 255, 255));
-            }
-        };
-
-    // trackedRowItemToRestore 作用：
-    // - 记录当前这轮重建中是否找到了“用户之前选中的进程行”；
-    // - 这样刷新完成后可以按 identityKey 恢复选中高亮。
-    QTreeWidgetItem* trackedRowItemToRestore = nullptr;
-    std::vector<QTreeWidgetItem*> trackedRowItemsToRestore;
-    trackedRowItemsToRestore.reserve(trackedIdentityKeysBeforeRebuild.size());
-
+    // tableRows 作用：
+    // - 把 DisplayRow 转成 FlatTableModel 可直接持有的轻量行快照；
+    // - 所有颜色、排序键、图标都由 processTableData 按 role 懒解析；
+    // - 这样每轮刷新只替换 vector，不再创建/销毁旧 item。
+    std::vector<ProcessTableRow> tableRows;
+    tableRows.reserve(displayRows.size());
     for (const DisplayRow& displayRow : displayRows)
     {
         if (displayRow.record == nullptr)
@@ -5126,156 +5238,47 @@ void ProcessDock::rebuildTable()
             continue;
         }
 
-        QTreeWidgetItem* rowItem = new ProcessSortTreeWidgetItem();
         const ks::process::ProcessRecord& processRecord = *displayRow.record;
-        const std::string identityKey = ks::process::BuildProcessIdentityKey(
+        ProcessTableRow tableRow{};
+        tableRow.record = processRecord;
+        tableRow.identityKey = ks::process::BuildProcessIdentityKey(
             processRecord.pid,
             processRecord.creationTime100ns);
-        rowItem->setData(0, Qt::UserRole, QString::fromStdString(identityKey));
-        rowItem->setToolTip(
-            toColumnIndex(TableColumn::Name),
-            activitySnapshotActive
-                ? QStringLiteral("历史快照行：该行来自时间轴样本，不代表当前实时进程状态。")
-                : QString::fromStdString(processRecord.processName));
-
-        // 每一列文本填充，Name 列附加图标。
-        for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
-        {
-            const TableColumn column = static_cast<TableColumn>(columnIndex);
-            rowItem->setText(columnIndex, formatColumnText(processRecord, column, displayRow.depth));
-        }
-
-        // 排序键使用原始数值：展示文本可以带单位，但排序必须按真实大小比较。
-        rowItem->setData(toColumnIndex(TableColumn::Pid), ProcessNumericSortRole, static_cast<double>(processRecord.pid));
-        rowItem->setData(toColumnIndex(TableColumn::Cpu), ProcessNumericSortRole, processRecord.cpuPercent);
-        rowItem->setData(toColumnIndex(TableColumn::Ram), ProcessNumericSortRole, processRecord.workingSetMB);
-        rowItem->setData(toColumnIndex(TableColumn::Disk), ProcessNumericSortRole, processRecord.diskMBps);
-        rowItem->setData(toColumnIndex(TableColumn::Gpu), ProcessNumericSortRole, processRecord.gpuPercent);
-        rowItem->setData(toColumnIndex(TableColumn::Net), ProcessNumericSortRole, processRecord.netKBps);
-        rowItem->setData(toColumnIndex(TableColumn::ParentPid), ProcessNumericSortRole, static_cast<double>(processRecord.parentPid));
-        rowItem->setData(toColumnIndex(TableColumn::StartTime), ProcessNumericSortRole, static_cast<double>(processRecord.creationTime100ns));
-        rowItem->setData(toColumnIndex(TableColumn::IsAdmin), ProcessNumericSortRole, processRecord.isAdmin ? 1.0 : 0.0);
-        rowItem->setData(
-            toColumnIndex(TableColumn::PplLevel),
-            ProcessNumericSortRole,
-            processRecord.protectionLevelKnown ? static_cast<double>(processRecord.protectionLevel) : -1.0);
-        rowItem->setData(toColumnIndex(TableColumn::Protection), ProcessNumericSortRole, static_cast<double>(processRecord.r0Protection));
-        rowItem->setData(toColumnIndex(TableColumn::Ppl), ProcessNumericSortRole, static_cast<double>(processRecord.r0Protection));
-        rowItem->setData(toColumnIndex(TableColumn::HandleCount), ProcessNumericSortRole, static_cast<double>(processRecord.handleCount));
-        rowItem->setData(
-            toColumnIndex(TableColumn::HandleTable),
-            ProcessNumericSortRole,
-            ((processRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_OBJECT_TABLE_AVAILABLE) != 0U) ? 1.0 : 0.0);
-        rowItem->setData(
-            toColumnIndex(TableColumn::SectionObject),
-            ProcessNumericSortRole,
-            ((processRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_SECTION_OBJECT_AVAILABLE) != 0U) ? 1.0 : 0.0);
-        rowItem->setData(toColumnIndex(TableColumn::R0Status), ProcessNumericSortRole, static_cast<double>(processRecord.r0Status));
-        rowItem->setData(toColumnIndex(TableColumn::Name), ProcessEfficiencyModeKnownRole, processRecord.efficiencyModeSupported);
-        rowItem->setData(toColumnIndex(TableColumn::Name), ProcessEfficiencyModeRole, processRecord.efficiencyModeEnabled);
-        if (processRecord.efficiencyModeEnabled)
-        {
-            rowItem->setToolTip(
-                toColumnIndex(TableColumn::Name),
-                QStringLiteral("%1\n效率模式已启用")
-                    .arg(QString::fromStdString(processRecord.processName)));
-        }
-
-        // 进程名列固定显示目标 EXE 图标（命中缓存后开销可控）。
-        rowItem->setIcon(toColumnIndex(TableColumn::Name), resolveProcessIcon(processRecord));
-
-        // 管理员列：按要求使用“绿色/红色方块”直观显示状态。
-        rowItem->setTextAlignment(toColumnIndex(TableColumn::IsAdmin), Qt::AlignCenter);
-        const QColor adminYesColor = KswordTheme::IsDarkModeEnabled()
-            ? QColor(130, 210, 140)
-            : QColor(34, 139, 34);
-        const QColor adminNoColor = KswordTheme::IsDarkModeEnabled()
-            ? QColor(255, 140, 140)
-            : QColor(220, 50, 47);
-        rowItem->setForeground(
-            toColumnIndex(TableColumn::IsAdmin),
-            processRecord.isAdmin ? adminYesColor : adminNoColor);
-
-        // 数字签名列：非受信任时标红，方便快速识别风险进程。
-        if (!processRecord.signatureTrusted && processRecord.signatureState != "Pending")
-        {
-            rowItem->setForeground(toColumnIndex(TableColumn::Signature), adminNoColor);
-        }
-        else if (processRecord.signatureTrusted)
-        {
-            rowItem->setForeground(toColumnIndex(TableColumn::Signature), adminYesColor);
-        }
-
-        // 退出保留进程灰色高亮；仅内核可见进程红色高亮；普通新增进程绿色高亮。
-        if (displayRow.isExited)
-        {
-            for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
-            {
-                rowItem->setBackground(columnIndex, KswordTheme::ExitedRowBackgroundColor());
-                rowItem->setForeground(columnIndex, KswordTheme::ExitedRowForegroundColor());
-            }
-        }
-        else if (displayRow.isKernelOnly)
-        {
-            const QColor kernelOnlyForeground = KswordTheme::IsDarkModeEnabled()
-                ? QColor(255, 140, 140)
-                : QColor(200, 32, 32);
-            const QColor kernelOnlyBackground = KswordTheme::IsDarkModeEnabled()
-                ? QColor(110, 28, 28, 140)
-                : QColor(255, 224, 224);
-            for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
-            {
-                rowItem->setBackground(columnIndex, kernelOnlyBackground);
-                rowItem->setForeground(columnIndex, kernelOnlyForeground);
-            }
-        }
-        else if (displayRow.isNew)
-        {
-            for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
-            {
-                rowItem->setBackground(columnIndex, KswordTheme::NewRowBackgroundColor());
-            }
-        }
-        else
-        {
-            // 常规行按占用比例做主题色高亮（CPU/RAM/DISK/GPU/NET）。
-            const double cpuUsageRatio = std::clamp(processRecord.cpuPercent / 100.0, 0.0, 1.0);
-            const double ramUsageRatio = (maxRamMB > 0.0)
-                ? std::clamp(processRecord.workingSetMB / maxRamMB, 0.0, 1.0)
-                : 0.0;
-            const double diskUsageRatio = (maxDiskMBps > 0.0)
-                ? std::clamp(processRecord.diskMBps / maxDiskMBps, 0.0, 1.0)
-                : 0.0;
-            const double gpuUsageRatio = std::clamp(processRecord.gpuPercent / 100.0, 0.0, 1.0);
-            const double netUsageRatio = (maxNetKBps > 0.0)
-                ? std::clamp(processRecord.netKBps / maxNetKBps, 0.0, 1.0)
-                : 0.0;
-            const double handleUsageRatio = (maxHandleCount > 0U)
-                ? std::clamp(
-                    static_cast<double>(processRecord.handleCount) / static_cast<double>(maxHandleCount),
-                    0.0,
-                    1.0)
-                : 0.0;
-
-            applyUsageHighlight(rowItem, toColumnIndex(TableColumn::Cpu), cpuUsageRatio);
-            applyUsageHighlight(rowItem, toColumnIndex(TableColumn::Ram), ramUsageRatio);
-            applyUsageHighlight(rowItem, toColumnIndex(TableColumn::Disk), diskUsageRatio);
-            applyUsageHighlight(rowItem, toColumnIndex(TableColumn::Gpu), gpuUsageRatio);
-            applyUsageHighlight(rowItem, toColumnIndex(TableColumn::Net), netUsageRatio);
-            applyUsageHighlight(rowItem, toColumnIndex(TableColumn::HandleCount), handleUsageRatio);
-        }
-
-        if (!trackedIdentityKeyBeforeRebuild.empty() && identityKey == trackedIdentityKeyBeforeRebuild)
-        {
-            trackedRowItemToRestore = rowItem;
-        }
-        if (trackedIdentityKeysBeforeRebuild.find(identityKey) != trackedIdentityKeysBeforeRebuild.end())
-        {
-            trackedRowItemsToRestore.push_back(rowItem);
-        }
-
-        m_processTable->addTopLevelItem(rowItem);
+        tableRow.depth = displayRow.depth;
+        tableRow.isNew = displayRow.isNew;
+        tableRow.isExited = displayRow.isExited;
+        tableRow.isKernelOnly = displayRow.isKernelOnly;
+        tableRow.activitySnapshotActive = activitySnapshotActive;
+        tableRow.cpuUsageRatio = std::clamp(processRecord.cpuPercent / 100.0, 0.0, 1.0);
+        tableRow.ramUsageRatio = (maxRamMB > 0.0)
+            ? std::clamp(processRecord.workingSetMB / maxRamMB, 0.0, 1.0)
+            : 0.0;
+        tableRow.diskUsageRatio = (maxDiskMBps > 0.0)
+            ? std::clamp(processRecord.diskMBps / maxDiskMBps, 0.0, 1.0)
+            : 0.0;
+        tableRow.gpuUsageRatio = std::clamp(processRecord.gpuPercent / 100.0, 0.0, 1.0);
+        tableRow.netUsageRatio = (maxNetKBps > 0.0)
+            ? std::clamp(processRecord.netKBps / maxNetKBps, 0.0, 1.0)
+            : 0.0;
+        tableRow.handleUsageRatio = (maxHandleCount > 0U)
+            ? std::clamp(
+                static_cast<double>(processRecord.handleCount) / static_cast<double>(maxHandleCount),
+                0.0,
+                1.0)
+            : 0.0;
+        tableRows.push_back(std::move(tableRow));
     }
+
+    // 刷新期间临时冻结视图和选择信号，减少 setRows/resetModel 的中间态重绘。
+    QSignalBlocker tableSignalBlocker(m_processTable);
+    std::unique_ptr<QSignalBlocker> selectionSignalBlocker;
+    if (QItemSelectionModel* selectionModel = m_processTable->selectionModel())
+    {
+        selectionSignalBlocker = std::make_unique<QSignalBlocker>(selectionModel);
+    }
+    m_processTable->setUpdatesEnabled(false);
+
+    m_processTableModel->setRows(std::move(tableRows));
 
     m_processTable->setSortingEnabled(enableSorting);
     if (enableSorting)
@@ -5285,48 +5288,53 @@ void ProcessDock::rebuildTable()
             (previousSortColumn >= 0 && previousSortColumn < static_cast<int>(TableColumn::Count))
             ? previousSortColumn
             : toColumnIndex(TableColumn::Pid);
-        m_processTable->header()->setSortIndicator(safeSortColumn, previousSortOrder);
-        m_processTable->sortItems(safeSortColumn, previousSortOrder);
+        m_processTable->sortByColumn(safeSortColumn, previousSortOrder);
+    }
+    else
+    {
+        // 树状模式由 buildTreeDisplayOrder 决定顺序；代理用第 0 列触发一次源顺序排序。
+        m_processSortProxy->sort(toColumnIndex(TableColumn::Name), Qt::AscendingOrder);
     }
 
     // 按 identityKey 恢复用户之前选中的进程：
     // - Ctrl 多选集合逐行用 Select|Rows 写回，避免刷新后丢失批量选择；
-    // - 当前焦点只通过 NoUpdate 更新，不允许 setCurrentItem 把多选压成单选；
+    // - 当前焦点只通过 NoUpdate 更新，不允许 currentIndex 把多选压成单选；
     // - 若该进程已不存在，则清空追踪状态，避免错误高亮。
-    if (!trackedRowItemsToRestore.empty())
+    bool restoredAnySelection = false;
+    QItemSelectionModel* selectionModel = m_processTable->selectionModel();
+    if (selectionModel != nullptr)
     {
-        QItemSelectionModel* selectionModel = m_processTable->selectionModel();
-        if (selectionModel != nullptr)
+        selectionModel->clearSelection();
+        for (const std::string& identityKey : trackedIdentityKeysBeforeRebuild)
         {
-            selectionModel->clearSelection();
-            for (QTreeWidgetItem* rowItem : trackedRowItemsToRestore)
+            const QModelIndex rowIndex = processTableViewIndexForIdentityKey(identityKey, 0);
+            if (rowIndex.isValid())
             {
-                if (rowItem == nullptr)
-                {
-                    continue;
-                }
+                selectionModel->select(
+                    rowIndex,
+                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
+                restoredAnySelection = true;
+            }
+        }
 
-                const QModelIndex rowIndex = m_processTable->indexFromItem(rowItem, 0);
-                if (rowIndex.isValid())
-                {
-                    selectionModel->select(
-                        rowIndex,
-                        QItemSelectionModel::Select | QItemSelectionModel::Rows);
-                }
-            }
-        }
-        QTreeWidgetItem* currentRowItemToRestore =
-            trackedRowItemToRestore != nullptr ? trackedRowItemToRestore : trackedRowItemsToRestore.front();
-        if (selectionModel != nullptr && currentRowItemToRestore != nullptr)
+        QModelIndex currentIndexToRestore = processTableViewIndexForIdentityKey(
+            trackedIdentityKeyBeforeRebuild,
+            trackedColumnBeforeRebuild);
+        if (!currentIndexToRestore.isValid() && !trackedIdentityKeysBeforeRebuild.empty())
         {
-            const QModelIndex currentIndex = m_processTable->indexFromItem(
-                currentRowItemToRestore,
+            currentIndexToRestore = processTableViewIndexForIdentityKey(
+                *trackedIdentityKeysBeforeRebuild.begin(),
                 trackedColumnBeforeRebuild);
-            if (currentIndex.isValid())
-            {
-                selectionModel->setCurrentIndex(currentIndex, QItemSelectionModel::NoUpdate);
-            }
         }
+        if (currentIndexToRestore.isValid())
+        {
+            selectionModel->setCurrentIndex(currentIndexToRestore, QItemSelectionModel::NoUpdate);
+            restoredAnySelection = true;
+        }
+    }
+
+    if (restoredAnySelection)
+    {
         syncTrackedSelectionFromTable();
         m_trackedSelectedColumn = trackedColumnBeforeRebuild;
     }
@@ -5367,14 +5375,16 @@ void ProcessDock::rebuildTable()
         << "[ProcessDock] rebuildTable 完成, rows=" << displayRows.size()
         << ", treeMode=" << (isTreeModeEnabled() ? "true" : "false")
         << ", sortingEnabled=" << (enableSorting ? "true" : "false")
-        << ", sortColumn=" << (enableSorting ? m_processTable->header()->sortIndicatorSection() : -1)
+        << ", sortColumn=" << (enableSorting && headerView != nullptr ? headerView->sortIndicatorSection() : -1)
         << eol;
 }
 
 void ProcessDock::updateUsageSummaryInHeader(const std::vector<DisplayRow>& displayRows)
 {
-    // 标题栏展示占用总和：对当前可见数据（排除退出保留行）做聚合。
-    if (m_processTable == nullptr || m_processTable->headerItem() == nullptr)
+    // 标题栏展示占用总和：
+    // - QTableView 没有 headerItem，动态标题由 ProcessTableSortProxy::headerData 提供；
+    // - 本函数只计算当前可见行聚合值并更新代理表头，不触碰模型行数据。
+    if (m_processSortProxy == nullptr)
     {
         return;
     }
@@ -5408,41 +5418,16 @@ void ProcessDock::updateUsageSummaryInHeader(const std::vector<DisplayRow>& disp
         totalHandleCount += displayRow.record->handleCount;
     }
 
-    // 非占用列保持原始列名；占用列追加“总和”文本（不使用 Σ 符号）。
-    QTreeWidgetItem* headerItem = m_processTable->headerItem();
-    headerItem->setText(toColumnIndex(TableColumn::Name), ProcessTableHeaders.at(toColumnIndex(TableColumn::Name)));
-    headerItem->setText(toColumnIndex(TableColumn::Pid), ProcessTableHeaders.at(toColumnIndex(TableColumn::Pid)));
-    headerItem->setText(
-        toColumnIndex(TableColumn::Cpu),
-        QString("CPU %1%").arg(totalCpuPercent, 0, 'f', 2));
-    headerItem->setText(
-        toColumnIndex(TableColumn::Ram),
-        QString("RAM %1 MB").arg(totalRamMB, 0, 'f', 1));
-    headerItem->setText(
-        toColumnIndex(TableColumn::Disk),
-        QString("DISK %1 MB/s").arg(totalDiskMBps, 0, 'f', 2));
-    headerItem->setText(
-        toColumnIndex(TableColumn::Gpu),
-        QString("GPU %1%").arg(totalGpuPercent, 0, 'f', 1));
-    headerItem->setText(
-        toColumnIndex(TableColumn::Net),
-        QString("Net %1 KB/s").arg(totalNetKBps, 0, 'f', 2));
-    headerItem->setText(toColumnIndex(TableColumn::Signature), ProcessTableHeaders.at(toColumnIndex(TableColumn::Signature)));
-    headerItem->setText(toColumnIndex(TableColumn::Path), ProcessTableHeaders.at(toColumnIndex(TableColumn::Path)));
-    headerItem->setText(toColumnIndex(TableColumn::ParentPid), ProcessTableHeaders.at(toColumnIndex(TableColumn::ParentPid)));
-    headerItem->setText(toColumnIndex(TableColumn::CommandLine), ProcessTableHeaders.at(toColumnIndex(TableColumn::CommandLine)));
-    headerItem->setText(toColumnIndex(TableColumn::User), ProcessTableHeaders.at(toColumnIndex(TableColumn::User)));
-    headerItem->setText(toColumnIndex(TableColumn::StartTime), ProcessTableHeaders.at(toColumnIndex(TableColumn::StartTime)));
-    headerItem->setText(toColumnIndex(TableColumn::IsAdmin), ProcessTableHeaders.at(toColumnIndex(TableColumn::IsAdmin)));
-    headerItem->setText(toColumnIndex(TableColumn::PplLevel), ProcessTableHeaders.at(toColumnIndex(TableColumn::PplLevel)));
-    headerItem->setText(toColumnIndex(TableColumn::Protection), ProcessTableHeaders.at(toColumnIndex(TableColumn::Protection)));
-    headerItem->setText(toColumnIndex(TableColumn::Ppl), ProcessTableHeaders.at(toColumnIndex(TableColumn::Ppl)));
-    headerItem->setText(
-        toColumnIndex(TableColumn::HandleCount),
-        QString("句柄数 %1").arg(static_cast<qulonglong>(totalHandleCount)));
-    headerItem->setText(toColumnIndex(TableColumn::HandleTable), ProcessTableHeaders.at(toColumnIndex(TableColumn::HandleTable)));
-    headerItem->setText(toColumnIndex(TableColumn::SectionObject), ProcessTableHeaders.at(toColumnIndex(TableColumn::SectionObject)));
-    headerItem->setText(toColumnIndex(TableColumn::R0Status), ProcessTableHeaders.at(toColumnIndex(TableColumn::R0Status)));
+    QStringList headerTexts = ProcessTableHeaders;
+    headerTexts[toColumnIndex(TableColumn::Cpu)] = QString("CPU %1%").arg(totalCpuPercent, 0, 'f', 2);
+    headerTexts[toColumnIndex(TableColumn::Ram)] = QString("RAM %1 MB").arg(totalRamMB, 0, 'f', 1);
+    headerTexts[toColumnIndex(TableColumn::Disk)] = QString("DISK %1 MB/s").arg(totalDiskMBps, 0, 'f', 2);
+    headerTexts[toColumnIndex(TableColumn::Gpu)] = QString("GPU %1%").arg(totalGpuPercent, 0, 'f', 1);
+    headerTexts[toColumnIndex(TableColumn::Net)] = QString("Net %1 KB/s").arg(totalNetKBps, 0, 'f', 2);
+    headerTexts[toColumnIndex(TableColumn::HandleCount)] = QString("句柄数 %1").arg(static_cast<qulonglong>(totalHandleCount));
+
+    auto* processSortProxy = static_cast<ProcessTableSortProxy*>(m_processSortProxy);
+    processSortProxy->setHeaderTexts(std::move(headerTexts));
 }
 
 void ProcessDock::applyR0ColumnAvailability(const std::vector<DisplayRow>& displayRows)
@@ -6108,18 +6093,18 @@ std::vector<std::string> ProcessDock::currentProcessActivitySelectionKeys() cons
     std::unordered_set<std::string> visitedSet;
     if (m_processTable != nullptr)
     {
-        const QList<QTreeWidgetItem*> selectedItems = m_processTable->selectedItems();
-        selectionKeys.reserve(static_cast<std::size_t>(selectedItems.size()));
-        for (QTreeWidgetItem* itemPointer : selectedItems)
+        const std::vector<QModelIndex> selectedRows = selectedProcessTableRowIndexes(false);
+        selectionKeys.reserve(selectedRows.size());
+        for (const QModelIndex& rowIndex : selectedRows)
         {
-            if (itemPointer == nullptr)
+            const ProcessTableRow* tableRow = processTableRowForViewIndex(rowIndex);
+            if (tableRow == nullptr)
             {
                 continue;
             }
-            const std::string identityKey = itemPointer->data(0, Qt::UserRole).toString().toStdString();
-            if (!identityKey.empty() && visitedSet.insert(identityKey).second)
+            if (!tableRow->identityKey.empty() && visitedSet.insert(tableRow->identityKey).second)
             {
-                selectionKeys.push_back(identityKey);
+                selectionKeys.push_back(tableRow->identityKey);
             }
         }
     }
@@ -6140,6 +6125,293 @@ std::vector<std::string> ProcessDock::currentProcessActivitySelectionKeys() cons
         }
     }
     return selectionKeys;
+}
+
+
+QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const int column, const int role)
+{
+    // 参数和记录检查：模型可能在 reset 期间请求旧索引数据，空记录直接返回空值。
+    if (column < 0 || column >= static_cast<int>(TableColumn::Count))
+    {
+        return {};
+    }
+
+    const ks::process::ProcessRecord& processRecord = tableRow.record;
+    const TableColumn tableColumn = static_cast<TableColumn>(column);
+    if (role == Qt::UserRole)
+    {
+        // UserRole 作用：
+        // - 保留旧表格第 0 列保存 identityKey 的数据契约；
+        // - 便于后续复制、右键动作或外部调试直接从模型索引读取稳定行标识；
+        // - 返回该行 PID+创建时间组成的 identityKey 文本。
+        return QString::fromStdString(tableRow.identityKey);
+    }
+    if (role == Qt::DisplayRole)
+    {
+        // DisplayRole 只负责文本；树状缩进前缀仍由 formatColumnText(depth) 保持旧显示。
+        return formatColumnText(processRecord, tableColumn, tableRow.depth);
+    }
+    if (role == Qt::DecorationRole && tableColumn == TableColumn::Name)
+    {
+        // Name 列固定显示目标 EXE 图标（命中缓存后开销可控）。
+        return resolveProcessIcon(processRecord);
+    }
+    if (role == Qt::ToolTipRole && tableColumn == TableColumn::Name)
+    {
+        if (tableRow.activitySnapshotActive)
+        {
+            return QStringLiteral("历史快照行：该行来自时间轴样本，不代表当前实时进程状态。");
+        }
+        if (processRecord.efficiencyModeEnabled)
+        {
+            return QStringLiteral("%1\n效率模式已启用")
+                .arg(QString::fromStdString(processRecord.processName));
+        }
+        return QString::fromStdString(processRecord.processName);
+    }
+    if (role == ProcessEfficiencyModeKnownRole && tableColumn == TableColumn::Name)
+    {
+        return processRecord.efficiencyModeSupported;
+    }
+    if (role == ProcessEfficiencyModeRole && tableColumn == TableColumn::Name)
+    {
+        return processRecord.efficiencyModeEnabled;
+    }
+    if (role == ProcessNumericSortRole)
+    {
+        // 排序键使用原始数值：展示文本可以带单位，但排序必须按真实大小比较。
+        switch (tableColumn)
+        {
+        case TableColumn::Pid:
+            return static_cast<double>(processRecord.pid);
+        case TableColumn::Cpu:
+            return processRecord.cpuPercent;
+        case TableColumn::Ram:
+            return processRecord.workingSetMB;
+        case TableColumn::Disk:
+            return processRecord.diskMBps;
+        case TableColumn::Gpu:
+            return processRecord.gpuPercent;
+        case TableColumn::Net:
+            return processRecord.netKBps;
+        case TableColumn::ParentPid:
+            return static_cast<double>(processRecord.parentPid);
+        case TableColumn::StartTime:
+            return static_cast<double>(processRecord.creationTime100ns);
+        case TableColumn::IsAdmin:
+            return processRecord.isAdmin ? 1.0 : 0.0;
+        case TableColumn::PplLevel:
+            return processRecord.protectionLevelKnown ? static_cast<double>(processRecord.protectionLevel) : -1.0;
+        case TableColumn::Protection:
+        case TableColumn::Ppl:
+            return static_cast<double>(processRecord.r0Protection);
+        case TableColumn::HandleCount:
+            return static_cast<double>(processRecord.handleCount);
+        case TableColumn::HandleTable:
+            return ((processRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_OBJECT_TABLE_AVAILABLE) != 0U) ? 1.0 : 0.0;
+        case TableColumn::SectionObject:
+            return ((processRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_SECTION_OBJECT_AVAILABLE) != 0U) ? 1.0 : 0.0;
+        case TableColumn::R0Status:
+            return static_cast<double>(processRecord.r0Status);
+        default:
+            return {};
+        }
+    }
+    if (role != Qt::BackgroundRole && role != Qt::ForegroundRole)
+    {
+        return {};
+    }
+
+    const QColor adminYesColor = KswordTheme::IsDarkModeEnabled()
+        ? QColor(130, 210, 140)
+        : QColor(34, 139, 34);
+    const QColor adminNoColor = KswordTheme::IsDarkModeEnabled()
+        ? QColor(255, 140, 140)
+        : QColor(220, 50, 47);
+
+    // 退出保留进程灰色高亮；仅内核可见进程红色高亮；普通新增进程绿色高亮。
+    if (tableRow.isExited)
+    {
+        return role == Qt::BackgroundRole
+            ? QVariant(QBrush(KswordTheme::ExitedRowBackgroundColor()))
+            : QVariant(QBrush(KswordTheme::ExitedRowForegroundColor()));
+    }
+    if (tableRow.isKernelOnly)
+    {
+        const QColor kernelOnlyForeground = KswordTheme::IsDarkModeEnabled()
+            ? QColor(255, 140, 140)
+            : QColor(200, 32, 32);
+        const QColor kernelOnlyBackground = KswordTheme::IsDarkModeEnabled()
+            ? QColor(110, 28, 28, 140)
+            : QColor(255, 224, 224);
+        return role == Qt::BackgroundRole
+            ? QVariant(QBrush(kernelOnlyBackground))
+            : QVariant(QBrush(kernelOnlyForeground));
+    }
+    if (tableRow.isNew && role == Qt::BackgroundRole)
+    {
+        return QBrush(KswordTheme::NewRowBackgroundColor());
+    }
+
+    if (role == Qt::ForegroundRole)
+    {
+        // 管理员列：按要求使用“绿色/红色方块”直观显示状态。
+        if (tableColumn == TableColumn::IsAdmin)
+        {
+            return QBrush(processRecord.isAdmin ? adminYesColor : adminNoColor);
+        }
+        // 数字签名列：非受信任时标红，方便快速识别风险进程。
+        if (tableColumn == TableColumn::Signature)
+        {
+            if (!processRecord.signatureTrusted && processRecord.signatureState != "Pending")
+            {
+                return QBrush(adminNoColor);
+            }
+            if (processRecord.signatureTrusted)
+            {
+                return QBrush(adminYesColor);
+            }
+        }
+
+        const auto highUsageForeground = [](const double usageRatio) -> QVariant
+        {
+            return usageRatio >= 0.70 ? QVariant(QBrush(QColor(255, 255, 255))) : QVariant();
+        };
+        switch (tableColumn)
+        {
+        case TableColumn::Cpu:
+            return highUsageForeground(tableRow.cpuUsageRatio);
+        case TableColumn::Ram:
+            return highUsageForeground(tableRow.ramUsageRatio);
+        case TableColumn::Disk:
+            return highUsageForeground(tableRow.diskUsageRatio);
+        case TableColumn::Gpu:
+            return highUsageForeground(tableRow.gpuUsageRatio);
+        case TableColumn::Net:
+            return highUsageForeground(tableRow.netUsageRatio);
+        case TableColumn::HandleCount:
+            return highUsageForeground(tableRow.handleUsageRatio);
+        default:
+            return {};
+        }
+    }
+
+    const auto usageBackground = [](const double usageRatio) -> QVariant
+    {
+        return QBrush(usageRatioToHighlightColor(usageRatio));
+    };
+    switch (tableColumn)
+    {
+    case TableColumn::Cpu:
+        return usageBackground(tableRow.cpuUsageRatio);
+    case TableColumn::Ram:
+        return usageBackground(tableRow.ramUsageRatio);
+    case TableColumn::Disk:
+        return usageBackground(tableRow.diskUsageRatio);
+    case TableColumn::Gpu:
+        return usageBackground(tableRow.gpuUsageRatio);
+    case TableColumn::Net:
+        return usageBackground(tableRow.netUsageRatio);
+    case TableColumn::HandleCount:
+        return usageBackground(tableRow.handleUsageRatio);
+    default:
+        return {};
+    }
+}
+
+const ProcessDock::ProcessTableRow* ProcessDock::processTableRowForViewIndex(const QModelIndex& viewIndex) const
+{
+    // 输入：QTableView/代理模型索引；处理：映射回 FlatTableModel 源行；返回：行指针或 nullptr。
+    if (!viewIndex.isValid() || m_processSortProxy == nullptr || m_processTableModel == nullptr)
+    {
+        return nullptr;
+    }
+
+    const QModelIndex sourceIndex = m_processSortProxy->mapToSource(viewIndex);
+    if (!sourceIndex.isValid())
+    {
+        return nullptr;
+    }
+    return m_processTableModel->rowAt(sourceIndex.row());
+}
+
+QModelIndex ProcessDock::processTableViewIndexForIdentityKey(const std::string& identityKey, const int column) const
+{
+    // 输入：稳定 identityKey 和目标列；处理：扫描模型行并映射到当前代理视图；返回：有效视图索引或空索引。
+    if (identityKey.empty() || m_processSortProxy == nullptr || m_processTableModel == nullptr)
+    {
+        return QModelIndex();
+    }
+
+    const int safeColumn = std::clamp(column, 0, static_cast<int>(TableColumn::Count) - 1);
+    const std::vector<ProcessTableRow>& rows = m_processTableModel->rows();
+    for (int rowIndex = 0; rowIndex < static_cast<int>(rows.size()); ++rowIndex)
+    {
+        if (rows[static_cast<std::size_t>(rowIndex)].identityKey != identityKey)
+        {
+            continue;
+        }
+
+        const QModelIndex sourceIndex = m_processTableModel->index(rowIndex, safeColumn);
+        return m_processSortProxy->mapFromSource(sourceIndex);
+    }
+    return QModelIndex();
+}
+
+std::vector<QModelIndex> ProcessDock::selectedProcessTableRowIndexes(const bool includeCurrentFallback) const
+{
+    // 输入：是否允许 currentIndex 兜底；处理：按行去重选中项；返回：每行第 0 列视图索引集合。
+    std::vector<QModelIndex> rowIndexes;
+    if (m_processTable == nullptr)
+    {
+        return rowIndexes;
+    }
+
+    std::set<int> visitedRows;
+    if (QItemSelectionModel* selectionModel = m_processTable->selectionModel())
+    {
+        const QModelIndexList selectedRows = selectionModel->selectedRows(0);
+        rowIndexes.reserve(static_cast<std::size_t>(selectedRows.size()));
+        for (const QModelIndex& selectedIndex : selectedRows)
+        {
+            if (!selectedIndex.isValid() || !visitedRows.insert(selectedIndex.row()).second)
+            {
+                continue;
+            }
+            rowIndexes.push_back(selectedIndex);
+        }
+
+        const QModelIndex currentIndex = selectionModel->currentIndex();
+        if (includeCurrentFallback && rowIndexes.empty() && currentIndex.isValid())
+        {
+            const QModelIndex rowIndex = currentIndex.sibling(currentIndex.row(), 0);
+            if (rowIndex.isValid() && visitedRows.insert(rowIndex.row()).second)
+            {
+                rowIndexes.push_back(rowIndex);
+            }
+        }
+    }
+    return rowIndexes;
+}
+
+ProcessDock::ProcessActionTarget ProcessDock::processActionTargetFromTableRow(const ProcessTableRow& tableRow) const
+{
+    // 输入：模型行；处理：优先从实时缓存取完整记录，缓存缺失时用模型行 record 兜底；返回：动作目标副本。
+    ProcessActionTarget actionTarget{};
+    actionTarget.identityKey = tableRow.identityKey;
+    if (actionTarget.identityKey.empty())
+    {
+        return actionTarget;
+    }
+
+    const auto cacheIt = m_cacheByIdentity.find(actionTarget.identityKey);
+    if (cacheIt != m_cacheByIdentity.end())
+    {
+        actionTarget.record = cacheIt->second.record;
+        return actionTarget;
+    }
+    actionTarget.record = tableRow.record;
+    return actionTarget;
 }
 
 std::vector<ProcessDock::DisplayRow> ProcessDock::buildDisplayOrder() const
@@ -6359,49 +6631,28 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildTreeDisplayOrder() const
 
 void ProcessDock::showTableContextMenu(const QPoint& localPosition)
 {
-    QTreeWidgetItem* clickedItem = m_processTable->itemAt(localPosition);
-    if (clickedItem == nullptr)
+    const QModelIndex clickedIndex = m_processTable->indexAt(localPosition);
+    if (!clickedIndex.isValid())
     {
         clearContextActionBinding();
         return;
     }
-    const int clickedColumn = m_processTable->columnAt(localPosition.x());
 
     // 右键行为：
     // - 若右键点在已有多选集合内，则保持集合不变，菜单动作对所有选中行生效；
     // - 若右键点在未选中行上，则切换为该单行，保持传统右键体验。
-    if (!clickedItem->isSelected())
+    if (QItemSelectionModel* selectionModel = m_processTable->selectionModel())
     {
-        m_processTable->clearSelection();
-        if (clickedColumn >= 0)
+        const bool clickedRowAlreadySelected = selectionModel->isRowSelected(clickedIndex.row(), clickedIndex.parent());
+        if (!clickedRowAlreadySelected)
         {
-            m_processTable->setCurrentItem(clickedItem, clickedColumn);
+            selectionModel->clearSelection();
+            selectionModel->select(clickedIndex, QItemSelectionModel::Select | QItemSelectionModel::Rows);
         }
-        else
-        {
-            m_processTable->setCurrentItem(clickedItem);
-        }
-        clickedItem->setSelected(true);
+        selectionModel->setCurrentIndex(clickedIndex, QItemSelectionModel::NoUpdate);
     }
-    else if (clickedColumn >= 0)
-    {
-        if (QItemSelectionModel* selectionModel = m_processTable->selectionModel())
-        {
-            selectionModel->setCurrentIndex(
-                m_processTable->indexFromItem(clickedItem, clickedColumn),
-                QItemSelectionModel::NoUpdate);
-        }
-    }
-    else
-    {
-        if (QItemSelectionModel* selectionModel = m_processTable->selectionModel())
-        {
-            selectionModel->setCurrentIndex(
-                m_processTable->indexFromItem(clickedItem, 0),
-                QItemSelectionModel::NoUpdate);
-        }
-    }
-    bindContextActionToItem(clickedItem);
+
+    bindContextActionToIndex(clickedIndex);
     const std::vector<ProcessActionTarget> contextActionTargets = selectedActionTargets();
     const bool hasBatchSelection = contextActionTargets.size() > 1;
     const ks::process::ProcessRecord* contextProcessRecord =
@@ -6724,38 +6975,35 @@ void ProcessDock::copyCurrentCell()
         return;
     }
 
-    const int currentColumn = m_processTable->currentColumn();
-    if (currentColumn < 0)
+    int currentColumn = 0;
+    if (QItemSelectionModel* selectionModel = m_processTable->selectionModel())
     {
-        return;
+        currentColumn = selectionModel->currentIndex().column();
     }
+    currentColumn = std::clamp(currentColumn, 0, static_cast<int>(TableColumn::Count) - 1);
 
-    QList<QTreeWidgetItem*> selectedItemList = m_processTable->selectedItems();
-    if (selectedItemList.isEmpty() && m_processTable->currentItem() != nullptr)
-    {
-        selectedItemList.push_back(m_processTable->currentItem());
-    }
-
+    const std::vector<QModelIndex> selectedRows = selectedProcessTableRowIndexes(true);
     QStringList cellTexts;
-    cellTexts.reserve(selectedItemList.size());
+    cellTexts.reserve(static_cast<int>(selectedRows.size()));
     std::unordered_set<std::string> visitedIdentitySet;
-    for (QTreeWidgetItem* itemPointer : selectedItemList)
+    for (const QModelIndex& rowIndex : selectedRows)
     {
-        if (itemPointer == nullptr)
+        const ProcessTableRow* tableRow = processTableRowForViewIndex(rowIndex);
+        if (tableRow == nullptr)
         {
             continue;
+        }
+        if (!tableRow->identityKey.empty() && visitedIdentitySet.find(tableRow->identityKey) != visitedIdentitySet.end())
+        {
+            continue;
+        }
+        if (!tableRow->identityKey.empty())
+        {
+            visitedIdentitySet.insert(tableRow->identityKey);
         }
 
-        const std::string identityKey = itemPointer->data(0, Qt::UserRole).toString().toStdString();
-        if (!identityKey.empty() && visitedIdentitySet.find(identityKey) != visitedIdentitySet.end())
-        {
-            continue;
-        }
-        if (!identityKey.empty())
-        {
-            visitedIdentitySet.insert(identityKey);
-        }
-        cellTexts.push_back(itemPointer->text(currentColumn));
+        const QModelIndex cellIndex = rowIndex.sibling(rowIndex.row(), currentColumn);
+        cellTexts.push_back(cellIndex.data(Qt::DisplayRole).toString());
     }
 
     QApplication::clipboard()->setText(cellTexts.join("\n"));
@@ -6775,37 +7023,32 @@ void ProcessDock::copyCurrentRow()
         return;
     }
 
-    QList<QTreeWidgetItem*> selectedItemList = m_processTable->selectedItems();
-    if (selectedItemList.isEmpty() && m_processTable->currentItem() != nullptr)
-    {
-        selectedItemList.push_back(m_processTable->currentItem());
-    }
-
+    const std::vector<QModelIndex> selectedRows = selectedProcessTableRowIndexes(true);
     QStringList rowTexts;
-    rowTexts.reserve(selectedItemList.size());
+    rowTexts.reserve(static_cast<int>(selectedRows.size()));
     std::unordered_set<std::string> visitedIdentitySet;
-    for (QTreeWidgetItem* itemPointer : selectedItemList)
+    for (const QModelIndex& rowIndex : selectedRows)
     {
-        if (itemPointer == nullptr)
+        const ProcessTableRow* tableRow = processTableRowForViewIndex(rowIndex);
+        if (tableRow == nullptr)
         {
             continue;
         }
-
-        const std::string identityKey = itemPointer->data(0, Qt::UserRole).toString().toStdString();
-        if (!identityKey.empty() && visitedIdentitySet.find(identityKey) != visitedIdentitySet.end())
+        if (!tableRow->identityKey.empty() && visitedIdentitySet.find(tableRow->identityKey) != visitedIdentitySet.end())
         {
             continue;
         }
-        if (!identityKey.empty())
+        if (!tableRow->identityKey.empty())
         {
-            visitedIdentitySet.insert(identityKey);
+            visitedIdentitySet.insert(tableRow->identityKey);
         }
 
         QStringList rowFields;
         rowFields.reserve(static_cast<int>(TableColumn::Count));
         for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
         {
-            rowFields.push_back(itemPointer->text(columnIndex));
+            const QModelIndex cellIndex = rowIndex.sibling(rowIndex.row(), columnIndex);
+            rowFields.push_back(cellIndex.data(Qt::DisplayRole).toString());
         }
         rowTexts.push_back(rowFields.join("\t"));
     }
@@ -6818,7 +7061,8 @@ void ProcessDock::copyCurrentRow()
         << eol;
 }
 
-void ProcessDock::bindContextActionToItem(QTreeWidgetItem* clickedItem)
+
+void ProcessDock::bindContextActionToIndex(const QModelIndex& clickedIndex)
 {
     clearContextActionBinding();
     if (m_processTable == nullptr)
@@ -6829,46 +7073,29 @@ void ProcessDock::bindContextActionToItem(QTreeWidgetItem* clickedItem)
     // 右键动作绑定：
     // - 优先绑定当前所有选中行，让菜单动作天然支持 Ctrl 复选批量操作；
     // - 如果当前没有选中行，则退化为右键点中的单行。
-    QList<QTreeWidgetItem*> selectedItemList = m_processTable->selectedItems();
-    if (selectedItemList.isEmpty() && clickedItem != nullptr)
+    const std::vector<QModelIndex> selectedRows = selectedProcessTableRowIndexes(true);
+    std::vector<QModelIndex> effectiveRows = selectedRows;
+    if (effectiveRows.empty() && clickedIndex.isValid())
     {
-        selectedItemList.push_back(clickedItem);
+        effectiveRows.push_back(clickedIndex.sibling(clickedIndex.row(), 0));
     }
 
     std::unordered_set<std::string> visitedIdentitySet;
-    for (QTreeWidgetItem* itemPointer : selectedItemList)
+    for (const QModelIndex& rowIndex : effectiveRows)
     {
-        if (itemPointer == nullptr)
+        const ProcessTableRow* tableRow = processTableRowForViewIndex(rowIndex);
+        if (tableRow == nullptr || tableRow->identityKey.empty())
+        {
+            continue;
+        }
+        if (!visitedIdentitySet.insert(tableRow->identityKey).second)
         {
             continue;
         }
 
-        const std::string identityKey = itemPointer->data(0, Qt::UserRole).toString().toStdString();
-        if (identityKey.empty() || visitedIdentitySet.find(identityKey) != visitedIdentitySet.end())
+        ProcessActionTarget actionTarget = processActionTargetFromTableRow(*tableRow);
+        if (!actionTarget.identityKey.empty())
         {
-            continue;
-        }
-        visitedIdentitySet.insert(identityKey);
-
-        ProcessActionTarget actionTarget{};
-        actionTarget.identityKey = identityKey;
-
-        const auto cacheIt = m_cacheByIdentity.find(identityKey);
-        if (cacheIt != m_cacheByIdentity.end())
-        {
-            actionTarget.record = cacheIt->second.record;
-            m_contextActionRecords.push_back(std::move(actionTarget));
-            continue;
-        }
-
-        // 若刷新刚好重建导致 identity 缓存缺失，尝试用当前行 PID 兜底。
-        bool pidParseOk = false;
-        const std::uint32_t pidValue = itemPointer->text(toColumnIndex(TableColumn::Pid)).toUInt(&pidParseOk);
-        if (pidParseOk)
-        {
-            actionTarget.record = {};
-            actionTarget.record.pid = pidValue;
-            actionTarget.record.processName = itemPointer->text(toColumnIndex(TableColumn::Name)).toStdString();
             m_contextActionRecords.push_back(std::move(actionTarget));
         }
     }
@@ -6898,12 +7125,21 @@ std::string ProcessDock::selectedIdentityKey() const
         return m_contextActionIdentityKey;
     }
 
-    QTreeWidgetItem* currentItem = m_processTable->currentItem();
-    if (currentItem == nullptr)
+    if (m_processTable == nullptr)
     {
         return std::string();
     }
-    return currentItem->data(0, Qt::UserRole).toString().toStdString();
+
+    if (QItemSelectionModel* selectionModel = m_processTable->selectionModel())
+    {
+        const QModelIndex currentIndex = selectionModel->currentIndex();
+        const ProcessTableRow* tableRow = processTableRowForViewIndex(currentIndex);
+        if (tableRow != nullptr)
+        {
+            return tableRow->identityKey;
+        }
+    }
+    return std::string();
 }
 
 ks::process::ProcessRecord* ProcessDock::selectedRecord()
@@ -6937,56 +7173,26 @@ std::vector<ProcessDock::ProcessActionTarget> ProcessDock::selectedActionTargets
     std::vector<ProcessActionTarget> actionTargets;
     std::unordered_set<std::string> visitedIdentitySet;
 
-    // collectItemTarget 作用：
-    // - 从表格行解析 identityKey；
-    // - 优先从缓存取完整记录，缓存缺失时用行文本中的 PID 构造兜底记录。
-    const auto collectItemTarget =
-        [this, &actionTargets, &visitedIdentitySet](QTreeWidgetItem* itemPointer)
-        {
-            if (itemPointer == nullptr)
-            {
-                return;
-            }
-
-            const std::string identityKey = itemPointer->data(0, Qt::UserRole).toString().toStdString();
-            if (identityKey.empty() || visitedIdentitySet.find(identityKey) != visitedIdentitySet.end())
-            {
-                return;
-            }
-            visitedIdentitySet.insert(identityKey);
-
-            ProcessActionTarget actionTarget{};
-            actionTarget.identityKey = identityKey;
-
-            const auto cacheIt = m_cacheByIdentity.find(identityKey);
-            if (cacheIt != m_cacheByIdentity.end())
-            {
-                actionTarget.record = cacheIt->second.record;
-                actionTargets.push_back(std::move(actionTarget));
-                return;
-            }
-
-            bool pidParseOk = false;
-            const std::uint32_t pidValue = itemPointer->text(toColumnIndex(TableColumn::Pid)).toUInt(&pidParseOk);
-            if (pidParseOk)
-            {
-                actionTarget.record = {};
-                actionTarget.record.pid = pidValue;
-                actionTarget.record.processName = itemPointer->text(toColumnIndex(TableColumn::Name)).toStdString();
-                actionTargets.push_back(std::move(actionTarget));
-            }
-        };
-
     if (m_processTable != nullptr)
     {
-        const QList<QTreeWidgetItem*> selectedItemList = m_processTable->selectedItems();
-        for (QTreeWidgetItem* itemPointer : selectedItemList)
+        const std::vector<QModelIndex> selectedRows = selectedProcessTableRowIndexes(true);
+        for (const QModelIndex& rowIndex : selectedRows)
         {
-            collectItemTarget(itemPointer);
-        }
-        if (actionTargets.empty())
-        {
-            collectItemTarget(m_processTable->currentItem());
+            const ProcessTableRow* tableRow = processTableRowForViewIndex(rowIndex);
+            if (tableRow == nullptr || tableRow->identityKey.empty())
+            {
+                continue;
+            }
+            if (!visitedIdentitySet.insert(tableRow->identityKey).second)
+            {
+                continue;
+            }
+
+            ProcessActionTarget actionTarget = processActionTargetFromTableRow(*tableRow);
+            if (!actionTarget.identityKey.empty())
+            {
+                actionTargets.push_back(std::move(actionTarget));
+            }
         }
     }
 
@@ -7004,8 +7210,7 @@ void ProcessDock::clearProcessTableSelection()
     // - 既检查 Qt 当前选择，也检查跨刷新追踪 key；
     // - 避免没有选择时反复刷新图表和 viewport。
     const bool hadSelectionState =
-        !m_processTable->selectedItems().isEmpty() ||
-        m_processTable->currentItem() != nullptr ||
+        !selectedProcessTableRowIndexes(true).empty() ||
         !m_trackedSelectedIdentityKey.empty() ||
         !m_trackedSelectedIdentityKeys.empty();
     if (!hadSelectionState)
@@ -7014,7 +7219,7 @@ void ProcessDock::clearProcessTableSelection()
     }
 
     // 清空 Qt 选择模型：
-    // - 阻断中间信号，防止 itemSelectionChanged 在 currentItem 尚未清空时重新写回追踪 key；
+    // - 阻断中间信号，防止 selectionChanged 在 currentIndex 尚未清空时重新写回追踪 key；
     // - 后续手动刷新活动图，保证 UI 状态只更新一次。
     {
         QSignalBlocker tableSignalBlocker(m_processTable);
@@ -7054,36 +7259,33 @@ void ProcessDock::syncTrackedSelectionFromTable()
 
     std::vector<std::string> selectedIdentityKeys;
     std::unordered_set<std::string> visitedIdentitySet;
-    const QList<QTreeWidgetItem*> selectedItemList = m_processTable->selectedItems();
-    selectedIdentityKeys.reserve(static_cast<std::size_t>(selectedItemList.size()));
+    const std::vector<QModelIndex> selectedRows = selectedProcessTableRowIndexes(false);
+    selectedIdentityKeys.reserve(selectedRows.size());
 
-    for (QTreeWidgetItem* itemPointer : selectedItemList)
+    for (const QModelIndex& rowIndex : selectedRows)
     {
-        if (itemPointer == nullptr)
+        const ProcessTableRow* tableRow = processTableRowForViewIndex(rowIndex);
+        if (tableRow == nullptr || tableRow->identityKey.empty())
         {
             continue;
         }
-
-        const std::string identityKey = itemPointer->data(0, Qt::UserRole).toString().toStdString();
-        if (identityKey.empty() || visitedIdentitySet.find(identityKey) != visitedIdentitySet.end())
+        if (!visitedIdentitySet.insert(tableRow->identityKey).second)
         {
             continue;
         }
-        visitedIdentitySet.insert(identityKey);
-        selectedIdentityKeys.push_back(identityKey);
+        selectedIdentityKeys.push_back(tableRow->identityKey);
     }
 
-    QTreeWidgetItem* currentItem = m_processTable->currentItem();
-    if (currentItem != nullptr)
+    const QModelIndex currentIndex = m_processTable->selectionModel() != nullptr
+        ? m_processTable->selectionModel()->currentIndex()
+        : QModelIndex();
+    const ProcessTableRow* currentRow = processTableRowForViewIndex(currentIndex);
+    if (currentRow != nullptr && !currentRow->identityKey.empty())
     {
-        const std::string currentIdentityKey = currentItem->data(0, Qt::UserRole).toString().toStdString();
-        if (!currentIdentityKey.empty())
+        m_trackedSelectedIdentityKey = currentRow->identityKey;
+        if (visitedIdentitySet.find(currentRow->identityKey) == visitedIdentitySet.end())
         {
-            m_trackedSelectedIdentityKey = currentIdentityKey;
-            if (visitedIdentitySet.find(currentIdentityKey) == visitedIdentitySet.end())
-            {
-                selectedIdentityKeys.push_back(currentIdentityKey);
-            }
+            selectedIdentityKeys.push_back(currentRow->identityKey);
         }
     }
     else

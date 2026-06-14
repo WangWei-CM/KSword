@@ -87,13 +87,16 @@ namespace
         QString sourceText;                              // sourceText：profile 来源，区分 pack 与散落 JSON。
         QString pathText;                                // pathText：profile 文件路径。
         QString diagnosticsText;                         // diagnosticsText：解析/校验诊断。
-        ksword::ark::DynDataProfileApplyInput applyInput; // applyInput：可直接打包给 R0 的 profile。
+        ksword::ark::DynDataProfileApplyInput applyInput; // applyInput：可直接打包给 R0 的 v1 profile。
+        ksword::ark::DynDataProfileApplyExInput applyExInput; // applyExInput：可直接打包给 R0 的 v2 typed-item profile。
+        std::uint32_t exAppliedCount = 0;               // exAppliedCount：v2 typed items 数量。
+        std::uint32_t callbackItemCount = 0;            // callbackItemCount：原始 callbackItems 条目数。
     };
 
     // kCapabilities：
     // - 作用：枚举 Phase 0 暴露的全部 capability；
     // - 返回行为：由 helper 函数格式化为摘要、详情或缺失列表。
-    constexpr std::array<CapabilityDisplay, 12> kCapabilities{ {
+    constexpr std::array<CapabilityDisplay, 15> kCapabilities{ {
         { KSW_CAP_DYN_NTOS_ACTIVE, "KSW_CAP_DYN_NTOS_ACTIVE", L"ntoskrnl profile 已激活" },
         { KSW_CAP_DYN_LXCORE_ACTIVE, "KSW_CAP_DYN_LXCORE_ACTIVE", L"lxcore profile 已激活" },
         { KSW_CAP_OBJECT_TYPE_FIELDS, "KSW_CAP_OBJECT_TYPE_FIELDS", L"对象类型字段" },
@@ -105,7 +108,10 @@ namespace
         { KSW_CAP_SECTION_CONTROL_AREA, "KSW_CAP_SECTION_CONTROL_AREA", L"Section/ControlArea" },
         { KSW_CAP_PROCESS_PROTECTION_PATCH, "KSW_CAP_PROCESS_PROTECTION_PATCH", L"进程保护修改" },
         { KSW_CAP_WSL_LXCORE_FIELDS, "KSW_CAP_WSL_LXCORE_FIELDS", L"WSL/lxcore 字段" },
-        { KSW_CAP_ETW_GUID_FIELDS, "KSW_CAP_ETW_GUID_FIELDS", L"ETW GUID/Registration 字段" }
+        { KSW_CAP_ETW_GUID_FIELDS, "KSW_CAP_ETW_GUID_FIELDS", L"ETW GUID/Registration 字段" },
+        { KSW_CAP_CALLBACK_NOTIFY_GLOBALS, "KSW_CAP_CALLBACK_NOTIFY_GLOBALS", L"Callback Notify 全局 RVA" },
+        { KSW_CAP_CALLBACK_REGISTRY_GLOBALS, "KSW_CAP_CALLBACK_REGISTRY_GLOBALS", L"Registry Callback 全局 RVA" },
+        { KSW_CAP_CALLBACK_OBJECT_FIELDS, "KSW_CAP_CALLBACK_OBJECT_FIELDS", L"Object Callback 结构偏移" }
     } };
 
     // blueButtonStyle：
@@ -366,7 +372,21 @@ namespace
             { "EpSignatureLevel", KSW_DYN_FIELD_ID_EP_SIGNATURE_LEVEL },
             { "EpSectionSignatureLevel", KSW_DYN_FIELD_ID_EP_SECTION_SIGNATURE_LEVEL },
             { "EgeGuid", KSW_DYN_FIELD_ID_EGE_GUID },
-            { "EreGuidEntry", KSW_DYN_FIELD_ID_ERE_GUID_ENTRY }
+            { "EreGuidEntry", KSW_DYN_FIELD_ID_ERE_GUID_ENTRY },
+            { "PspCreateProcessNotifyRoutine", KSW_DYN_FIELD_ID_CB_PSP_CREATE_PROCESS_NOTIFY_ROUTINE },
+            { "PspCreateThreadNotifyRoutine", KSW_DYN_FIELD_ID_CB_PSP_CREATE_THREAD_NOTIFY_ROUTINE },
+            { "PspLoadImageNotifyRoutine", KSW_DYN_FIELD_ID_CB_PSP_LOAD_IMAGE_NOTIFY_ROUTINE },
+            { "PspNotifyEnableMask", KSW_DYN_FIELD_ID_CB_PSP_NOTIFY_ENABLE_MASK },
+            { "CmCallbackListHead", KSW_DYN_FIELD_ID_CB_CM_CALLBACK_LIST_HEAD },
+            { "_OBJECT_TYPE.CallbackList", KSW_DYN_FIELD_ID_CB_OBJECT_TYPE_CALLBACK_LIST },
+            { "_CALLBACK_ENTRY_ITEM.EntryList", KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_ENTRY_LIST },
+            { "_CALLBACK_ENTRY_ITEM.EntryItemList", KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_ENTRY_LIST },
+            { "_CALLBACK_ENTRY_ITEM.PreOperation", KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_PRE_OPERATION },
+            { "_CALLBACK_ENTRY_ITEM.PostOperation", KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_POST_OPERATION },
+            { "_CALLBACK_ENTRY_ITEM.Operations", KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_OPERATIONS },
+            { "_CALLBACK_ENTRY_ITEM.CallbackEntry", KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_CALLBACK_ENTRY },
+            { "_CALLBACK_ENTRY.Altitude", KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ALTITUDE },
+            { "_CALLBACK_ENTRY.RegistrationContext", KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_REGISTRATION_CONTEXT }
         };
 
         const auto iterator = kFieldIds.find(fieldName.toStdString());
@@ -377,6 +397,151 @@ namespace
         }
 
         fieldIdOut = iterator->second;
+        return true;
+    }
+
+
+    bool fieldIdIsCallbackGlobal(const std::uint32_t fieldId)
+    {
+        switch (fieldId)
+        {
+        case KSW_DYN_FIELD_ID_CB_PSP_CREATE_PROCESS_NOTIFY_ROUTINE:
+        case KSW_DYN_FIELD_ID_CB_PSP_CREATE_THREAD_NOTIFY_ROUTINE:
+        case KSW_DYN_FIELD_ID_CB_PSP_LOAD_IMAGE_NOTIFY_ROUTINE:
+        case KSW_DYN_FIELD_ID_CB_PSP_NOTIFY_ENABLE_MASK:
+        case KSW_DYN_FIELD_ID_CB_CM_CALLBACK_LIST_HEAD:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool fieldIdIsCallbackOffset(const std::uint32_t fieldId)
+    {
+        switch (fieldId)
+        {
+        case KSW_DYN_FIELD_ID_CB_OBJECT_TYPE_CALLBACK_LIST:
+        case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_ENTRY_LIST:
+        case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_PRE_OPERATION:
+        case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_POST_OPERATION:
+        case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_OPERATIONS:
+        case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_CALLBACK_ENTRY:
+        case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ALTITUDE:
+        case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_REGISTRATION_CONTEXT:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    QString callbackItemKindText(const QString& kindText)
+    {
+        const QString normalized = kindText.trimmed();
+        if (normalized.compare(QStringLiteral("GlobalRva"), Qt::CaseInsensitive) == 0)
+        {
+            return QStringLiteral("GlobalRva");
+        }
+        if (normalized.compare(QStringLiteral("StructOffset"), Qt::CaseInsensitive) == 0)
+        {
+            return QStringLiteral("StructOffset");
+        }
+        return normalized;
+    }
+
+    // parseProfileUInt32 前置声明：
+    // - 输入 value：JSON 数值或字符串；
+    // - 处理/返回：实际解析逻辑位于下方定义，此处只允许 callbackItems 解析 helper 提前调用。
+    bool parseProfileUInt32(const QJsonValue& value, std::uint32_t& valueOut);
+
+    bool loadCallbackItemsFromJson(
+        const QJsonArray& callbackItemsArray,
+        LocalPdbProfile& profile,
+        QStringList& diagnostics,
+        bool& hasCallbackItemsOut)
+    {
+        hasCallbackItemsOut = false;
+        if (callbackItemsArray.isEmpty())
+        {
+            return true;
+        }
+
+        hasCallbackItemsOut = true;
+        std::array<bool, KSW_DYN_FIELD_ID_MAX + 1U> seenFieldIds{};
+        for (const QJsonValue& itemValue : callbackItemsArray)
+        {
+            if (!itemValue.isObject())
+            {
+                diagnostics << QStringLiteral("callbackItems 包含非对象项，已忽略。");
+                continue;
+            }
+
+            const QJsonObject itemObject = itemValue.toObject();
+            const QString itemName = itemObject.value(QStringLiteral("name")).toString().trimmed();
+            const QString itemKind = callbackItemKindText(itemObject.value(QStringLiteral("kind")).toString());
+            std::uint32_t fieldId = 0U;
+            if (!fieldIdForProfileName(itemName, fieldId))
+            {
+                profile.ignoredUnknownFields += 1U;
+                continue;
+            }
+
+            std::uint32_t value = 0U;
+            if (!parseProfileUInt32(itemObject.value(QStringLiteral("value")), value))
+            {
+                diagnostics << QStringLiteral("callbackItems 解析失败: %1").arg(itemName);
+                return false;
+            }
+
+            if (fieldId >= seenFieldIds.size() || seenFieldIds[fieldId])
+            {
+                diagnostics << QStringLiteral("callbackItems 含重复字段: %1").arg(itemName);
+                return false;
+            }
+            seenFieldIds[fieldId] = true;
+
+            if (itemKind == QStringLiteral("GlobalRva"))
+            {
+                if (!fieldIdIsCallbackGlobal(fieldId))
+                {
+                    diagnostics << QStringLiteral("callbackItems 语义不匹配: %1 不是 global").arg(itemName);
+                    return false;
+                }
+                if (value == 0U || value > KSW_DYN_PROFILE_GLOBAL_RVA_MAX)
+                {
+                    diagnostics << QStringLiteral("callbackItems global RVA 越界: %1").arg(itemName);
+                    return false;
+                }
+                ksword::ark::DynDataProfileExItem exItem{};
+                exItem.itemId = fieldId;
+                exItem.itemKind = KSW_DYN_PROFILE_EX_ITEM_KIND_GLOBAL_RVA;
+                exItem.value = value;
+                exItem.flags = KSW_DYN_PROFILE_EX_ITEM_FLAG_REQUIRED | KSW_DYN_PROFILE_EX_ITEM_FLAG_CALLBACK;
+                profile.applyExInput.items.push_back(exItem);
+            }
+            else if (itemKind == QStringLiteral("StructOffset"))
+            {
+                if (!fieldIdIsCallbackOffset(fieldId))
+                {
+                    diagnostics << QStringLiteral("callbackItems 语义不匹配: %1 不是 struct offset").arg(itemName);
+                    return false;
+                }
+                ksword::ark::DynDataProfileExItem exItem{};
+                exItem.itemId = fieldId;
+                exItem.itemKind = KSW_DYN_PROFILE_EX_ITEM_KIND_STRUCT_OFFSET;
+                exItem.value = value;
+                exItem.flags = KSW_DYN_PROFILE_EX_ITEM_FLAG_REQUIRED | KSW_DYN_PROFILE_EX_ITEM_FLAG_CALLBACK;
+                profile.applyExInput.items.push_back(exItem);
+            }
+            else
+            {
+                diagnostics << QStringLiteral("callbackItems kind 不支持: %1").arg(itemName);
+                return false;
+            }
+
+            profile.callbackItemCount += 1U;
+        }
+
+        profile.exAppliedCount = static_cast<std::uint32_t>(profile.applyExInput.items.size());
         return true;
     }
 
@@ -497,8 +662,10 @@ namespace
     QStringList profilePackSearchPaths()
     {
         QStringList paths;
-        appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
         appendUniquePath(paths, qEnvironmentVariable("KSWORD_ARK_PROFILE_PACK"));
+        appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v2.json")));
+        appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
+        appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v2.json")));
         appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
         return paths;
     }
@@ -606,6 +773,23 @@ namespace
             profile.applyInput.fields.push_back(field);
         }
 
+        const QJsonArray callbackItemsArray = rootObject.value(QStringLiteral("callbackItems")).toArray();
+        QStringList callbackDiagnostics;
+        bool hasCallbackItems = false;
+        if (!loadCallbackItemsFromJson(callbackItemsArray, profile, callbackDiagnostics, hasCallbackItems))
+        {
+            profile.diagnosticsText = callbackDiagnostics.join(QStringLiteral(" | "));
+            return profile;
+        }
+        if (hasCallbackItems)
+        {
+            profile.applyExInput.profileName = profile.applyInput.profileName;
+            profile.applyExInput.pdbName = profile.applyInput.pdbName;
+            profile.applyExInput.pdbGuid = profile.applyInput.pdbGuid;
+            profile.applyExInput.pdbAge = profile.applyInput.pdbAge;
+            profile.applyExInput.ntoskrnl = currentIdentity;
+        }
+
         if (invalidOffsetCount != 0U)
         {
             profile.diagnosticsText = QStringLiteral("profile 含 %1 个越界或无效 offset，R3 已拒绝应用。").arg(invalidOffsetCount);
@@ -619,8 +803,9 @@ namespace
         }
 
         profile.valid = true;
-        profile.diagnosticsText = QStringLiteral("profile 匹配，字段 %1 个，忽略未知字段 %2 个。")
+        profile.diagnosticsText = QStringLiteral("profile 匹配，字段 %1 个，callback 项 %2 个，忽略未知字段 %3 个。")
             .arg(static_cast<qulonglong>(profile.applyInput.fields.size()))
+            .arg(static_cast<qulonglong>(profile.callbackItemCount))
             .arg(profile.ignoredUnknownFields);
         return profile;
     }
@@ -729,6 +914,23 @@ namespace
             profile.applyInput.fields.push_back(field);
         }
 
+        const QJsonArray callbackItemsArray = packEntry.value(QStringLiteral("callbackItems")).toArray();
+        QStringList callbackDiagnostics;
+        bool hasCallbackItems = false;
+        if (!loadCallbackItemsFromJson(callbackItemsArray, profile, callbackDiagnostics, hasCallbackItems))
+        {
+            profile.diagnosticsText = callbackDiagnostics.join(QStringLiteral(" | "));
+            return profile;
+        }
+        if (hasCallbackItems)
+        {
+            profile.applyExInput.profileName = profile.applyInput.profileName;
+            profile.applyExInput.pdbName = profile.applyInput.pdbName;
+            profile.applyExInput.pdbGuid = profile.applyInput.pdbGuid;
+            profile.applyExInput.pdbAge = profile.applyInput.pdbAge;
+            profile.applyExInput.ntoskrnl = currentIdentity;
+        }
+
         if (invalidFieldCount != 0U)
         {
             profile.diagnosticsText = QStringLiteral("pack profile 含 %1 个越界或无效字段，R3 已拒绝应用。").arg(invalidFieldCount);
@@ -742,8 +944,9 @@ namespace
         }
 
         profile.valid = true;
-        profile.diagnosticsText = QStringLiteral("pack profile 匹配，字段 %1 个，忽略未知字段 %2 个。")
+        profile.diagnosticsText = QStringLiteral("pack profile 匹配，字段 %1 个，callback 项 %2 个，忽略未知字段 %3 个。")
             .arg(static_cast<qulonglong>(profile.applyInput.fields.size()))
+            .arg(static_cast<qulonglong>(profile.callbackItemCount))
             .arg(profile.ignoredUnknownFields);
         return profile;
     }
@@ -779,7 +982,7 @@ namespace
         if (!parseProfileUInt32(rootObject.value(QStringLiteral("schemaVersion")), schemaVersion) ||
             !parseProfileUInt32(rootObject.value(QStringLiteral("packVersion")), packVersion) ||
             schemaVersion != 1U ||
-            packVersion != 1U)
+            (packVersion != 1U && packVersion != 2U))
         {
             diagnosticsOut = QStringLiteral("PDB profile pack schemaVersion/packVersion 不支持。");
             return bestProfile;
@@ -1297,9 +1500,11 @@ namespace
         {
             const bool pdbProfileAlreadyActive =
                 statusFlagEnabled(initialStatusResult.statusFlags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE);
-            if (pdbProfileAlreadyActive)
+            const bool callbackProfileAlreadyActive =
+                statusFlagEnabled(initialStatusResult.statusFlags, KSW_DYN_STATUS_FLAG_CALLBACK_PROFILE_ACTIVE);
+            if (pdbProfileAlreadyActive && callbackProfileAlreadyActive)
             {
-                pdbProfileMessageText = QStringLiteral("R0 已经启用 PDB profile，本次刷新跳过重复 apply。");
+                pdbProfileMessageText = QStringLiteral("R0 已经启用 PDB profile 和 callback profile，本次刷新跳过重复 apply。");
             }
             else
             {
@@ -1321,19 +1526,51 @@ namespace
                     }
                     else
                     {
-                        const ksword::ark::DynDataProfileApplyResult applyResult =
-                            client.applyDynDataProfile(profile.applyInput);
-                        pdbProfileIoMessageText = QString::fromStdString(applyResult.io.message);
-                        pdbProfileStatus = applyResult.status;
-                        pdbProfileAppliedFields = applyResult.appliedFieldCount;
-                        pdbProfileRejectedFields = applyResult.rejectedFieldCount;
-                        pdbProfileUnknownFields = applyResult.unknownFieldCount;
-                        if (!applyResult.message.empty())
+                        QStringList applyMessages;
+                        bool anyApplySucceeded = false;
+
+                        if (!profile.applyInput.fields.empty())
                         {
-                            pdbProfileMessageText = wideStringToQString(applyResult.message);
+                            const ksword::ark::DynDataProfileApplyResult applyResult =
+                                client.applyDynDataProfile(profile.applyInput);
+                            pdbProfileIoMessageText = QString::fromStdString(applyResult.io.message);
+                            pdbProfileStatus = applyResult.status;
+                            pdbProfileAppliedFields = applyResult.appliedFieldCount;
+                            pdbProfileRejectedFields = applyResult.rejectedFieldCount;
+                            pdbProfileUnknownFields = applyResult.unknownFieldCount;
+                            if (!applyResult.message.empty())
+                            {
+                                applyMessages << wideStringToQString(applyResult.message);
+                            }
+                            anyApplySucceeded = applyResult.io.ok && applyResult.status == 0;
                         }
-                        pdbProfileApplied = applyResult.io.ok && applyResult.status == 0;
-                        requeryAfterProfileApply = pdbProfileApplied;
+
+                        if (!profile.applyExInput.items.empty())
+                        {
+                            const ksword::ark::DynDataProfileApplyExResult applyExResult =
+                                client.applyDynDataProfileEx(profile.applyExInput);
+                            if (!pdbProfileIoMessageText.isEmpty())
+                            {
+                                pdbProfileIoMessageText += QStringLiteral(" | ");
+                            }
+                            pdbProfileIoMessageText += QString::fromStdString(applyExResult.io.message);
+                            pdbProfileStatus = applyExResult.status;
+                            pdbProfileAppliedFields += applyExResult.appliedItemCount;
+                            pdbProfileRejectedFields += applyExResult.rejectedItemCount;
+                            pdbProfileUnknownFields += applyExResult.unknownItemCount;
+                            if (!applyExResult.message.empty())
+                            {
+                                applyMessages << wideStringToQString(applyExResult.message);
+                            }
+                            anyApplySucceeded = anyApplySucceeded || (applyExResult.io.ok && applyExResult.status == 0);
+                        }
+
+                        if (!applyMessages.isEmpty())
+                        {
+                            pdbProfileMessageText = applyMessages.join(QStringLiteral(" | "));
+                        }
+                        pdbProfileApplied = anyApplySucceeded;
+                        requeryAfterProfileApply = anyApplySucceeded;
                     }
                 }
             }

@@ -60,6 +60,27 @@ typedef struct _KSW_DYN_LXCORE_OFFSETS
     ULONG LxPicoThrdInfoTID;
 } KSW_DYN_LXCORE_OFFSETS, *PKSW_DYN_LXCORE_OFFSETS;
 
+typedef struct _KSW_DYN_CALLBACK_GLOBALS
+{
+    ULONG PspCreateProcessNotifyRoutine;
+    ULONG PspCreateThreadNotifyRoutine;
+    ULONG PspLoadImageNotifyRoutine;
+    ULONG PspNotifyEnableMask;
+    ULONG CmCallbackListHead;
+} KSW_DYN_CALLBACK_GLOBALS, *PKSW_DYN_CALLBACK_GLOBALS;
+
+typedef struct _KSW_DYN_CALLBACK_OFFSETS
+{
+    ULONG ObjectTypeCallbackList;
+    ULONG CallbackEntryItemEntryList;
+    ULONG CallbackEntryItemPreOperation;
+    ULONG CallbackEntryItemPostOperation;
+    ULONG CallbackEntryItemOperations;
+    ULONG CallbackEntryItemCallbackEntry;
+    ULONG CallbackEntryAltitude;
+    ULONG CallbackEntryRegistrationContext;
+} KSW_DYN_CALLBACK_OFFSETS, *PKSW_DYN_CALLBACK_OFFSETS;
+
 typedef struct _KSW_DYN_FIELD_DESCRIPTOR
 {
     ULONG FieldId;
@@ -78,6 +99,7 @@ typedef struct _KSW_DYN_STATE
     BOOLEAN LxcoreActive;
     BOOLEAN ExtraActive;
     BOOLEAN PdbProfileActive;
+    BOOLEAN CallbackProfileActive;
     NTSTATUS LastStatus;
     ULONG64 CapabilityMask;
     ULONG SystemInformerDataVersion;
@@ -91,6 +113,10 @@ typedef struct _KSW_DYN_STATE
     KSW_DYN_KERNEL_OFFSETS KernelSources;
     KSW_DYN_LXCORE_OFFSETS LxcoreOffsets;
     KSW_DYN_LXCORE_OFFSETS LxcoreSources;
+    KSW_DYN_CALLBACK_GLOBALS CallbackGlobals;
+    KSW_DYN_CALLBACK_GLOBALS CallbackGlobalSources;
+    KSW_DYN_CALLBACK_OFFSETS CallbackOffsets;
+    KSW_DYN_CALLBACK_OFFSETS CallbackOffsetSources;
     WCHAR UnavailableReason[KSW_DYN_REASON_CHARS];
 } KSW_DYN_STATE, *PKSW_DYN_STATE;
 
@@ -141,6 +167,15 @@ KswordARKDynDataApplyProfile(
     _In_reads_bytes_(InputBufferLength) const KSW_APPLY_DYN_PROFILE_REQUEST* Request,
     _In_ size_t InputBufferLength,
     _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) KSW_APPLY_DYN_PROFILE_RESPONSE* Response,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
+KswordARKDynDataApplyProfileEx(
+    _In_reads_bytes_(InputBufferLength) const KSW_APPLY_DYN_PROFILE_EX_REQUEST* Request,
+    _In_ size_t InputBufferLength,
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) KSW_APPLY_DYN_PROFILE_EX_RESPONSE* Response,
     _In_ size_t OutputBufferLength,
     _Out_ size_t* BytesWrittenOut
     );

@@ -120,6 +120,9 @@ Return Value:
     if (State->PdbProfileActive) {
         flags |= KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE;
     }
+    if (State->CallbackProfileActive) {
+        flags |= KSW_DYN_STATUS_FLAG_CALLBACK_PROFILE_ACTIVE;
+    }
 
     return flags;
 }
@@ -632,6 +635,118 @@ Return Value:
         (unsigned long)outputBuffer->unknownFieldCount,
         outputBuffer->capabilityMask);
     if (*BytesReturned >= sizeof(KSW_APPLY_DYN_PROFILE_RESPONSE)) {
+        return STATUS_SUCCESS;
+    }
+
+    return status;
+}
+
+NTSTATUS
+KswordARKDynDataIoctlApplyProfileEx(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle IOCTL_KSWORD_ARK_APPLY_DYN_PROFILE_EX. The handler performs WDF
+    access and buffer validation only; semantic validation and copy-on-success
+    state updates remain centralized in the DynData loader.
+
+Arguments:
+
+    Device - WDF device used for log emission.
+    Request - Current IOCTL request.
+    InputBufferLength - Supplied input bytes.
+    OutputBufferLength - Supplied output bytes.
+    BytesReturned - Receives fixed EX response byte count when a response is
+        built.
+
+Return Value:
+
+    NTSTATUS from access validation, buffer retrieval, or EX profile
+    application.
+
+--*/
+{
+    KSW_APPLY_DYN_PROFILE_EX_REQUEST* inputBuffer = NULL;
+    KSW_APPLY_DYN_PROFILE_EX_REQUEST* inputCopy = NULL;
+    KSW_APPLY_DYN_PROFILE_EX_RESPONSE* outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    size_t copyLength = 0U;
+    const size_t maxProfileRequestBytes =
+        KSW_APPLY_DYN_PROFILE_EX_REQUEST_HEADER_SIZE +
+        ((size_t)KSW_DYN_PROFILE_EX_MAX_ITEMS * sizeof(KSW_DYN_PROFILE_EX_ITEM_PACKET));
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKValidateDeviceIoControlWriteAccess(Request);
+    if (!NT_SUCCESS(status)) {
+        KswordARKDynDataIoctlLog(Device, "Warn", "DynData apply profile EX denied: write access required, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKRetrieveRequiredInputBuffer(
+        Request,
+        KSW_APPLY_DYN_PROFILE_EX_REQUEST_HEADER_SIZE,
+        (PVOID*)&inputBuffer,
+        &actualInputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKDynDataIoctlLog(Device, "Error", "DynData apply profile EX input invalid: 0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    copyLength = actualInputLength;
+    if (copyLength > maxProfileRequestBytes) {
+        copyLength = maxProfileRequestBytes;
+    }
+    inputCopy = (KSW_APPLY_DYN_PROFILE_EX_REQUEST*)KswordARKDynDataAllocateProfileCopy(copyLength);
+    if (inputCopy == NULL) {
+        KswordARKDynDataIoctlLog(Device, "Error", "DynData apply profile EX input copy allocation failed, bytes=%Iu.", copyLength);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(inputCopy, inputBuffer, copyLength);
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        sizeof(KSW_APPLY_DYN_PROFILE_EX_RESPONSE),
+        (PVOID*)&outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        ExFreePoolWithTag(inputCopy, KSW_DYN_PROFILE_IOCTL_POOL_TAG);
+        KswordARKDynDataIoctlLog(Device, "Error", "DynData apply profile EX output invalid: 0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKDynDataApplyProfileEx(
+        inputCopy,
+        copyLength,
+        outputBuffer,
+        actualOutputLength,
+        BytesReturned);
+    ExFreePoolWithTag(inputCopy, KSW_DYN_PROFILE_IOCTL_POOL_TAG);
+    KswordARKDynDataIoctlLog(
+        Device,
+        NT_SUCCESS(status) ? "Info" : "Warn",
+        "DynData apply profile EX completed: status=0x%08X, applied=%lu, rejected=%lu, unknown=%lu, caps=0x%I64X.",
+        (unsigned int)status,
+        (unsigned long)outputBuffer->appliedItemCount,
+        (unsigned long)outputBuffer->rejectedItemCount,
+        (unsigned long)outputBuffer->unknownItemCount,
+        outputBuffer->capabilityMask);
+    if (*BytesReturned >= sizeof(KSW_APPLY_DYN_PROFILE_EX_RESPONSE)) {
         return STATUS_SUCCESS;
     }
 

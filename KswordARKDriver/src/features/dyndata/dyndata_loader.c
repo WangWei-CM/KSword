@@ -173,6 +173,75 @@ Return Value:
     Offsets->LxPicoThrdInfoTID = KSW_DYN_OFFSET_UNAVAILABLE;
 }
 
+static VOID
+KswordARKDynDataInitializeCallbackGlobals(
+    _Out_ KSW_DYN_CALLBACK_GLOBALS* Globals
+    )
+/*++
+
+Routine Description:
+
+    Initialize every callback global RVA slot to the explicit unavailable
+    sentinel. PDB profile v2 stores RVAs rather than kernel virtual addresses so
+    identity checks stay tied to the loaded ntoskrnl image.
+
+Arguments:
+
+    Globals - Callback global RVA block to initialize.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    if (Globals == NULL) {
+        return;
+    }
+
+    Globals->PspCreateProcessNotifyRoutine = KSW_DYN_OFFSET_UNAVAILABLE;
+    Globals->PspCreateThreadNotifyRoutine = KSW_DYN_OFFSET_UNAVAILABLE;
+    Globals->PspLoadImageNotifyRoutine = KSW_DYN_OFFSET_UNAVAILABLE;
+    Globals->PspNotifyEnableMask = KSW_DYN_OFFSET_UNAVAILABLE;
+    Globals->CmCallbackListHead = KSW_DYN_OFFSET_UNAVAILABLE;
+}
+
+static VOID
+KswordARKDynDataInitializeCallbackOffsets(
+    _Out_ KSW_DYN_CALLBACK_OFFSETS* Offsets
+    )
+/*++
+
+Routine Description:
+
+    Initialize every callback structure offset to the explicit unavailable
+    sentinel. These offsets are consumed only by callback enumeration/removal
+    code after the matching ntoskrnl PDB profile has been applied.
+
+Arguments:
+
+    Offsets - Callback structure offset block to initialize.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    if (Offsets == NULL) {
+        return;
+    }
+
+    Offsets->ObjectTypeCallbackList = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->CallbackEntryItemEntryList = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->CallbackEntryItemPreOperation = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->CallbackEntryItemPostOperation = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->CallbackEntryItemOperations = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->CallbackEntryItemCallbackEntry = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->CallbackEntryAltitude = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->CallbackEntryRegistrationContext = KSW_DYN_OFFSET_UNAVAILABLE;
+}
+
 static ULONG
 KswordARKDynDataConvertOffset(
     _In_ USHORT SourceOffset
@@ -754,6 +823,8 @@ Return Value:
     State->LastStatus = STATUS_UNSUCCESSFUL;
     KswordARKDynDataInitializeKernelOffsets(&State->Kernel);
     KswordARKDynDataInitializeLxcoreOffsets(&State->LxcoreOffsets);
+    KswordARKDynDataInitializeCallbackGlobals(&State->CallbackGlobals);
+    KswordARKDynDataInitializeCallbackOffsets(&State->CallbackOffsets);
     KswordARKDynDataSetReason(State, L"DynData initialization has not completed.");
 
     status = KswordARKDynDataReadConfigHeader(
@@ -962,6 +1033,9 @@ Return Value:
     }
     if (State->PdbProfileActive) {
         flags |= KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE;
+    }
+    if (State->CallbackProfileActive) {
+        flags |= KSW_DYN_STATUS_FLAG_CALLBACK_PROFILE_ACTIVE;
     }
 
     return flags;
@@ -1239,6 +1313,145 @@ Return Value:
     return (*OffsetOut != NULL && *SourceOut != NULL) ? TRUE : FALSE;
 }
 
+static BOOLEAN
+KswordARKDynDataCallbackGlobalPointers(
+    _In_ ULONG FieldId,
+    _Inout_ KSW_DYN_STATE* State,
+    _Outptr_ ULONG** RvaOut,
+    _Outptr_ ULONG** SourceOut
+    )
+/*++
+
+Routine Description:
+
+    Resolve one callback global item ID into the internal RVA/source slots. EX
+    profile requests carry global addresses as RVAs so the driver can validate
+    them against SizeOfImage before callback code converts them to VAs.
+
+Arguments:
+
+    FieldId - KSW_DYN_FIELD_ID_CB_* global item ID supplied by R3.
+    State - Mutable state snapshot that owns destination fields.
+    RvaOut - Receives a pointer to the target RVA slot.
+    SourceOut - Receives a pointer to the target source slot.
+
+Return Value:
+
+    TRUE when the item ID is a supported callback global; otherwise FALSE.
+
+--*/
+{
+    if (State == NULL || RvaOut == NULL || SourceOut == NULL) {
+        return FALSE;
+    }
+
+    *RvaOut = NULL;
+    *SourceOut = NULL;
+
+    switch (FieldId) {
+    case KSW_DYN_FIELD_ID_CB_PSP_CREATE_PROCESS_NOTIFY_ROUTINE:
+        *RvaOut = &State->CallbackGlobals.PspCreateProcessNotifyRoutine;
+        *SourceOut = &State->CallbackGlobalSources.PspCreateProcessNotifyRoutine;
+        break;
+    case KSW_DYN_FIELD_ID_CB_PSP_CREATE_THREAD_NOTIFY_ROUTINE:
+        *RvaOut = &State->CallbackGlobals.PspCreateThreadNotifyRoutine;
+        *SourceOut = &State->CallbackGlobalSources.PspCreateThreadNotifyRoutine;
+        break;
+    case KSW_DYN_FIELD_ID_CB_PSP_LOAD_IMAGE_NOTIFY_ROUTINE:
+        *RvaOut = &State->CallbackGlobals.PspLoadImageNotifyRoutine;
+        *SourceOut = &State->CallbackGlobalSources.PspLoadImageNotifyRoutine;
+        break;
+    case KSW_DYN_FIELD_ID_CB_PSP_NOTIFY_ENABLE_MASK:
+        *RvaOut = &State->CallbackGlobals.PspNotifyEnableMask;
+        *SourceOut = &State->CallbackGlobalSources.PspNotifyEnableMask;
+        break;
+    case KSW_DYN_FIELD_ID_CB_CM_CALLBACK_LIST_HEAD:
+        *RvaOut = &State->CallbackGlobals.CmCallbackListHead;
+        *SourceOut = &State->CallbackGlobalSources.CmCallbackListHead;
+        break;
+    default:
+        return FALSE;
+    }
+
+    return (*RvaOut != NULL && *SourceOut != NULL) ? TRUE : FALSE;
+}
+
+static BOOLEAN
+KswordARKDynDataCallbackOffsetPointers(
+    _In_ ULONG FieldId,
+    _Inout_ KSW_DYN_STATE* State,
+    _Outptr_ ULONG** OffsetOut,
+    _Outptr_ ULONG** SourceOut
+    )
+/*++
+
+Routine Description:
+
+    Resolve one callback structure item ID into the internal offset/source
+    slots. These fields describe private callback-related structures and are
+    applied only after the ntoskrnl identity has matched exactly.
+
+Arguments:
+
+    FieldId - KSW_DYN_FIELD_ID_CB_* structure item ID supplied by R3.
+    State - Mutable state snapshot that owns destination fields.
+    OffsetOut - Receives a pointer to the target offset slot.
+    SourceOut - Receives a pointer to the target source slot.
+
+Return Value:
+
+    TRUE when the item ID is a supported callback structure offset; otherwise
+    FALSE.
+
+--*/
+{
+    if (State == NULL || OffsetOut == NULL || SourceOut == NULL) {
+        return FALSE;
+    }
+
+    *OffsetOut = NULL;
+    *SourceOut = NULL;
+
+    switch (FieldId) {
+    case KSW_DYN_FIELD_ID_CB_OBJECT_TYPE_CALLBACK_LIST:
+        *OffsetOut = &State->CallbackOffsets.ObjectTypeCallbackList;
+        *SourceOut = &State->CallbackOffsetSources.ObjectTypeCallbackList;
+        break;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_ENTRY_LIST:
+        *OffsetOut = &State->CallbackOffsets.CallbackEntryItemEntryList;
+        *SourceOut = &State->CallbackOffsetSources.CallbackEntryItemEntryList;
+        break;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_PRE_OPERATION:
+        *OffsetOut = &State->CallbackOffsets.CallbackEntryItemPreOperation;
+        *SourceOut = &State->CallbackOffsetSources.CallbackEntryItemPreOperation;
+        break;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_POST_OPERATION:
+        *OffsetOut = &State->CallbackOffsets.CallbackEntryItemPostOperation;
+        *SourceOut = &State->CallbackOffsetSources.CallbackEntryItemPostOperation;
+        break;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_OPERATIONS:
+        *OffsetOut = &State->CallbackOffsets.CallbackEntryItemOperations;
+        *SourceOut = &State->CallbackOffsetSources.CallbackEntryItemOperations;
+        break;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ITEM_CALLBACK_ENTRY:
+        *OffsetOut = &State->CallbackOffsets.CallbackEntryItemCallbackEntry;
+        *SourceOut = &State->CallbackOffsetSources.CallbackEntryItemCallbackEntry;
+        break;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_ALTITUDE:
+        *OffsetOut = &State->CallbackOffsets.CallbackEntryAltitude;
+        *SourceOut = &State->CallbackOffsetSources.CallbackEntryAltitude;
+        break;
+    case KSW_DYN_FIELD_ID_CB_CALLBACK_ENTRY_REGISTRATION_CONTEXT:
+        *OffsetOut = &State->CallbackOffsets.CallbackEntryRegistrationContext;
+        *SourceOut = &State->CallbackOffsetSources.CallbackEntryRegistrationContext;
+        break;
+    default:
+        return FALSE;
+    }
+
+    return (*OffsetOut != NULL && *SourceOut != NULL) ? TRUE : FALSE;
+}
+
 NTSTATUS
 KswordARKDynDataApplyProfile(
     _In_reads_bytes_(InputBufferLength) const KSW_APPLY_DYN_PROFILE_REQUEST* Request,
@@ -1413,5 +1626,214 @@ Return Value:
     Response->statusFlags = KswordARKDynDataPublicStatusFlags(&candidateState);
     Response->capabilityMask = candidateState.CapabilityMask;
     KswordARKDynDataApplySetMessage(Response->message, L"PDB profile applied successfully.");
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKDynDataApplyProfileEx(
+    _In_reads_bytes_(InputBufferLength) const KSW_APPLY_DYN_PROFILE_EX_REQUEST* Request,
+    _In_ size_t InputBufferLength,
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) KSW_APPLY_DYN_PROFILE_EX_RESPONSE* Response,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    )
+/*++
+
+Routine Description:
+
+    Validate and merge one extended R3-supplied PDB profile into the callback
+    DynData portion of the global state. This v2 path accepts only typed items:
+    structure offsets and ntoskrnl global RVAs. The driver still never parses
+    JSON/PDB/pack content; R3 must send compact numeric IDs after local schema
+    validation. The merge is copy-on-success so malformed callback items never
+    poison the active DynData snapshot.
+
+Arguments:
+
+    Request - Packed extended profile request from R3.
+    InputBufferLength - Total request bytes available.
+    Response - Fixed extended response packet.
+    OutputBufferLength - Writable response bytes.
+    BytesWrittenOut - Receives sizeof(KSW_APPLY_DYN_PROFILE_EX_RESPONSE) on
+        success and on handled validation failure.
+
+Return Value:
+
+    STATUS_SUCCESS when at least one extended item was applied; validation
+    status on rejected requests. Response->status mirrors the semantic result.
+
+--*/
+{
+    KSW_DYN_STATE candidateState;
+    NTSTATUS status = STATUS_SUCCESS;
+    size_t requiredBytes = 0U;
+    ULONG index = 0UL;
+    ULONG appliedCount = 0UL;
+    ULONG rejectedCount = 0UL;
+    ULONG unknownCount = 0UL;
+    BOOLEAN callbackItemApplied = FALSE;
+
+    if (BytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+
+    if (Response == NULL || OutputBufferLength < sizeof(KSW_APPLY_DYN_PROFILE_EX_RESPONSE)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlZeroMemory(Response, OutputBufferLength);
+    Response->size = sizeof(*Response);
+    Response->version = KSWORD_ARK_DYNDATA_PROTOCOL_VERSION;
+    Response->status = STATUS_UNSUCCESSFUL;
+    KswordARKDynDataApplySetMessage(Response->message, L"PDB profile EX apply did not run.");
+    *BytesWrittenOut = sizeof(*Response);
+
+    if (Request == NULL) {
+        status = STATUS_INVALID_PARAMETER;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile EX request is null.");
+        Response->status = status;
+        return status;
+    }
+    if (InputBufferLength < KSW_APPLY_DYN_PROFILE_EX_REQUEST_HEADER_SIZE) {
+        status = STATUS_BUFFER_TOO_SMALL;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile EX request header is too small.");
+        Response->status = status;
+        return status;
+    }
+    if (Request->version != KSWORD_ARK_DYNDATA_PROTOCOL_VERSION) {
+        status = STATUS_REVISION_MISMATCH;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile EX protocol version mismatch.");
+        Response->status = status;
+        return status;
+    }
+    if (Request->itemCount == 0UL || Request->itemCount > KSW_DYN_PROFILE_EX_MAX_ITEMS) {
+        status = STATUS_INVALID_PARAMETER;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile EX item count is invalid.");
+        Response->status = status;
+        return status;
+    }
+    if (Request->size < KSW_APPLY_DYN_PROFILE_EX_REQUEST_HEADER_SIZE) {
+        status = STATUS_INVALID_PARAMETER;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile EX request size is invalid.");
+        Response->status = status;
+        return status;
+    }
+    if ((Request->itemCount - 1UL) >
+        ((MAXSIZE_T - KSW_APPLY_DYN_PROFILE_EX_REQUEST_HEADER_SIZE) / sizeof(KSW_DYN_PROFILE_EX_ITEM_PACKET))) {
+        status = STATUS_INTEGER_OVERFLOW;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile EX request size overflow.");
+        Response->status = status;
+        return status;
+    }
+
+    requiredBytes = KSW_APPLY_DYN_PROFILE_EX_REQUEST_HEADER_SIZE +
+        ((size_t)Request->itemCount * sizeof(KSW_DYN_PROFILE_EX_ITEM_PACKET));
+    if ((size_t)Request->size < requiredBytes || InputBufferLength < requiredBytes) {
+        status = STATUS_BUFFER_TOO_SMALL;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile EX request does not contain all items.");
+        Response->status = status;
+        return status;
+    }
+
+    ExAcquirePushLockShared(&g_KswordDynDataStateLock);
+    RtlCopyMemory(&candidateState, &g_KswordDynDataState, sizeof(candidateState));
+    ExReleasePushLockShared(&g_KswordDynDataStateLock);
+
+    if (!KswordARKDynDataIdentityMatches(&candidateState.Ntoskrnl, &Request->ntoskrnl)) {
+        status = STATUS_NOT_SUPPORTED;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile EX does not match the current ntoskrnl identity.");
+        Response->status = status;
+        Response->statusFlags = KswordARKDynDataPublicStatusFlags(&candidateState);
+        Response->capabilityMask = candidateState.CapabilityMask;
+        return status;
+    }
+
+    for (index = 0UL; index < Request->itemCount; ++index) {
+        const KSW_DYN_PROFILE_EX_ITEM_PACKET* item = &Request->items[index];
+        ULONG* destinationValue = NULL;
+        ULONG* destinationSource = NULL;
+
+        if (item->itemId == 0UL || item->itemId > KSW_DYN_FIELD_ID_MAX ||
+            (item->flags & ~(KSW_DYN_PROFILE_EX_ITEM_FLAG_REQUIRED | KSW_DYN_PROFILE_EX_ITEM_FLAG_CALLBACK)) != 0UL) {
+            rejectedCount += 1UL;
+            continue;
+        }
+
+        if (item->itemKind == KSW_DYN_PROFILE_EX_ITEM_KIND_GLOBAL_RVA) {
+            if (item->value == 0UL ||
+                item->value >= candidateState.Ntoskrnl.sizeOfImage ||
+                item->value > KSW_DYN_PROFILE_GLOBAL_RVA_MAX) {
+                rejectedCount += 1UL;
+                continue;
+            }
+            if (!KswordARKDynDataCallbackGlobalPointers(
+                item->itemId,
+                &candidateState,
+                &destinationValue,
+                &destinationSource)) {
+                unknownCount += 1UL;
+                continue;
+            }
+        }
+        else if (item->itemKind == KSW_DYN_PROFILE_EX_ITEM_KIND_STRUCT_OFFSET) {
+            if (item->value == KSW_DYN_OFFSET_UNAVAILABLE ||
+                item->value > KSW_DYN_PROFILE_OFFSET_MAX) {
+                rejectedCount += 1UL;
+                continue;
+            }
+            if (!KswordARKDynDataCallbackOffsetPointers(
+                item->itemId,
+                &candidateState,
+                &destinationValue,
+                &destinationSource)) {
+                unknownCount += 1UL;
+                continue;
+            }
+        }
+        else {
+            rejectedCount += 1UL;
+            continue;
+        }
+
+        KswordARKDynDataStoreSourcedOffset(
+            item->value,
+            KSW_DYN_FIELD_SOURCE_PDB_PROFILE,
+            destinationValue,
+            destinationSource);
+        if ((item->flags & KSW_DYN_PROFILE_EX_ITEM_FLAG_CALLBACK) != 0UL) {
+            callbackItemApplied = TRUE;
+        }
+        appliedCount += 1UL;
+    }
+
+    Response->appliedItemCount = appliedCount;
+    Response->rejectedItemCount = rejectedCount;
+    Response->unknownItemCount = unknownCount;
+
+    if (appliedCount == 0UL || rejectedCount != 0UL || unknownCount != 0UL) {
+        status = STATUS_INVALID_PARAMETER;
+        KswordARKDynDataApplySetMessage(Response->message, L"PDB profile EX contained invalid or unsupported items; active state was left unchanged.");
+        Response->status = status;
+        Response->statusFlags = KswordARKDynDataPublicStatusFlags(&candidateState);
+        Response->capabilityMask = candidateState.CapabilityMask;
+        return status;
+    }
+
+    candidateState.PdbProfileActive = TRUE;
+    candidateState.CallbackProfileActive = callbackItemApplied ? TRUE : candidateState.CallbackProfileActive;
+    candidateState.NtosActive = TRUE;
+    candidateState.CapabilityMask = KswordARKDynDataComputeCapabilities(&candidateState);
+    candidateState.LastStatus = STATUS_SUCCESS;
+    KswordARKDynDataSetReason(&candidateState, L"PDB profile EX applied and merged with callback DynData.");
+
+    ExAcquirePushLockExclusive(&g_KswordDynDataStateLock);
+    RtlCopyMemory(&g_KswordDynDataState, &candidateState, sizeof(g_KswordDynDataState));
+    ExReleasePushLockExclusive(&g_KswordDynDataStateLock);
+
+    Response->status = STATUS_SUCCESS;
+    Response->statusFlags = KswordARKDynDataPublicStatusFlags(&candidateState);
+    Response->capabilityMask = candidateState.CapabilityMask;
+    KswordARKDynDataApplySetMessage(Response->message, L"PDB profile EX applied successfully.");
     return STATUS_SUCCESS;
 }

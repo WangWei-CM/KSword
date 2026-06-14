@@ -229,7 +229,7 @@ void KernelDock::initializeCallbackRemoveTab()
     m_callbackRemoveDetailEditor->setReadOnly(true);
     m_callbackRemoveDetailEditor->setText(QStringLiteral(
         "提示：该页面继续通过 ArkDriverClient::removeExternalCallback 调用旧版安全移除路径。"
-        "实验性强制移除（unlink）只在回调遍历右键菜单做 UI 骨架；shared 协议未启用 REMOVE_EXTERNAL_CALLBACK_EX 时不会发送 unlink IOCTL。"));
+        "实验性强制移除（unlink）已经切到 removeExternalCallbackEx 的独立路径；若驱动未支持会返回不支持，不作为默认移除方式。"));
     m_callbackRemoveLayout->addWidget(m_callbackRemoveDetailEditor, 1);
 
     connect(m_callbackRemoveButton, &QPushButton::clicked, this, [this]() {

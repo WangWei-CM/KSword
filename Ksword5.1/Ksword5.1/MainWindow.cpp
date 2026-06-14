@@ -375,6 +375,11 @@ namespace
                 return false;
             }
 
+            if (isSmoothScrollDisabled(watchedObject))
+            {
+                return false;
+            }
+
             QScrollBar* targetScrollBar = findTargetScrollBar(watchedObject, wheelEvent);
             if (targetScrollBar == nullptr || targetScrollBar->minimum() == targetScrollBar->maximum())
             {
@@ -398,6 +403,29 @@ namespace
             animateScrollBar(targetScrollBar, targetValue);
             wheelEvent->accept();
             return true;
+        }
+
+        bool isSmoothScrollDisabled(QObject* watchedObject) const
+        {
+            // isSmoothScrollDisabled 作用：
+            // - 允许高频表格局部关闭全局滚轮动画，恢复 Qt 默认滚动；
+            // - 输入为 QApplication 事件过滤器收到的 watchedObject；
+            // - 处理时沿 QWidget 父链查找属性，兼容 viewport、表格本体和滚动条三类命中点；
+            // - 返回 true 表示不接管滚轮事件，不创建 QPropertyAnimation。
+            QObject* currentObject = watchedObject;
+            while (currentObject != nullptr)
+            {
+                if (currentObject->property("ksword_disable_smooth_scroll").toBool())
+                {
+                    return true;
+                }
+
+                QWidget* currentWidget = qobject_cast<QWidget*>(currentObject);
+                currentObject = currentWidget != nullptr
+                    ? currentWidget->parentWidget()
+                    : currentObject->parent();
+            }
+            return false;
         }
 
         QScrollBar* findTargetScrollBar(QObject* watchedObject, QWheelEvent* wheelEvent) const

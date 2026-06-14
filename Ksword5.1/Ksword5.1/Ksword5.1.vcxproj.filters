@@ -699,6 +699,9 @@
     <ClInclude Include="UI\UI_All.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\FlatTableModel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ProcessDock\Process_Tool.h">
       <Filter>Header Files</Filter>
     </ClInclude>
