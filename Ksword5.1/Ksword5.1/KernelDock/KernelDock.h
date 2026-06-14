@@ -267,6 +267,7 @@ struct KernelDynDataSummary
     std::uint32_t pdbProfileRejectedFields = 0; // pdbProfileRejectedFields：R0 拒绝字段数。
     std::uint32_t pdbProfileUnknownFields = 0;  // pdbProfileUnknownFields：R0 不支持字段数。
     std::uint32_t pdbProfileIgnoredJsonFields = 0; // pdbProfileIgnoredJsonFields：R3 忽略的 JSON 未知字段数。
+    QString pdbProfileSourceText;         // pdbProfileSourceText：profile 来源，区分 compact pack 与散落 JSON。
     QString pdbProfileNameText;           // pdbProfileNameText：匹配 profile 名称。
     QString pdbProfilePathText;           // pdbProfilePathText：匹配 profile 文件路径。
     QString pdbProfileMessageText;        // pdbProfileMessageText：R0/R3 profile 诊断消息。

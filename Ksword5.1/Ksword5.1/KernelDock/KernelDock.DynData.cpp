@@ -15,6 +15,7 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -83,6 +84,7 @@ namespace
         bool valid = false;                              // valid：R3 语法和范围校验是否通过。
         bool matched = false;                            // matched：module identity 是否精确匹配当前 ntoskrnl。
         std::uint32_t ignoredUnknownFields = 0;          // ignoredUnknownFields：JSON 中 R3 不认识的字段数。
+        QString sourceText;                              // sourceText：profile 来源，区分 pack 与散落 JSON。
         QString pathText;                                // pathText：profile 文件路径。
         QString diagnosticsText;                         // diagnosticsText：解析/校验诊断。
         ksword::ark::DynDataProfileApplyInput applyInput; // applyInput：可直接打包给 R0 的 profile。
@@ -298,6 +300,23 @@ namespace
         }
     }
 
+    // profileSourceDisplayText：
+    // - 输入 sourceTextValue：LocalPdbProfile 记录的来源标识；
+    // - 处理：把内部来源标识转换为 DynData 摘要页可读文本；
+    // - 返回：PDB profile pack、scattered JSON 或兜底来源文本。
+    QString profileSourceDisplayText(const QString& sourceTextValue)
+    {
+        if (sourceTextValue == QStringLiteral("pack"))
+        {
+            return QStringLiteral("PDB profile pack");
+        }
+        if (sourceTextValue == QStringLiteral("scattered-json"))
+        {
+            return QStringLiteral("PDB profile scattered JSON");
+        }
+        return sourceTextValue.trimmed().isEmpty() ? QStringLiteral("<空>") : sourceTextValue;
+    }
+
     // fieldIdForProfileName：
     // - 输入 fieldName：JSON profile 中的字段名；
     // - 处理：映射到 shared/driver/KswordArkDynDataIoctl.h 中的字段 ID；
@@ -426,24 +445,72 @@ namespace
         return false;
     }
 
+    // profileClassIdFromJsonValue：
+    // - 输入 value：pack profile 中的 moduleClassId；
+    // - 处理：解析 uint32 并限制到已知 class；
+    // - 返回：成功 true，失败 false。
+    bool profileClassIdFromJsonValue(const QJsonValue& value, std::uint32_t& classIdOut)
+    {
+        std::uint32_t parsedValue = 0U;
+        if (!parseProfileUInt32(value, parsedValue))
+        {
+            classIdOut = 0U;
+            return false;
+        }
+
+        switch (parsedValue)
+        {
+        case KSW_DYN_PROFILE_CLASS_NTOSKRNL:
+        case KSW_DYN_PROFILE_CLASS_NTKRLA57:
+        case KSW_DYN_PROFILE_CLASS_LXCORE:
+            classIdOut = parsedValue;
+            return true;
+        default:
+            classIdOut = 0U;
+            return false;
+        }
+    }
+
+    // appendUniquePath：
+    // - 输入 paths/pathText：待维护列表和候选路径；
+    // - 处理：清理路径并进行大小写不敏感去重；
+    // - 返回：无，paths 按需追加。
+    void appendUniquePath(QStringList& paths, const QString& pathText)
+    {
+        const QString trimmed = pathText.trimmed();
+        if (trimmed.isEmpty())
+        {
+            return;
+        }
+
+        const QString cleaned = QDir::cleanPath(trimmed);
+        if (!cleaned.isEmpty() && !paths.contains(cleaned, Qt::CaseInsensitive))
+        {
+            paths << cleaned;
+        }
+    }
+
+    // profilePackSearchPaths：
+    // - 输入：无；
+    // - 处理：优先读取程序目录 pack，并允许环境变量指定调试 pack；
+    // - 返回：候选 pack 文件路径列表，不保证存在。
+    QStringList profilePackSearchPaths()
+    {
+        QStringList paths;
+        appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
+        appendUniquePath(paths, qEnvironmentVariable("KSWORD_ARK_PROFILE_PACK"));
+        appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
+        return paths;
+    }
+
     // profileSearchDirectories：
     // - 输入：无；
-    // - 处理：优先使用程序目录 profiles/ark_dyndata，并允许环境变量覆盖调试目录；
+    // - 处理：仅当 KSWORD_ARK_PROFILE_DIR 显式设置时启用散落 JSON 调试 fallback；
     // - 返回：候选目录列表，不保证目录存在。
     QStringList profileSearchDirectories()
     {
         QStringList directories;
-        auto appendUnique = [&directories](const QString& pathText) {
-            const QString cleaned = QDir::cleanPath(pathText.trimmed());
-            if (!cleaned.isEmpty() && !directories.contains(cleaned, Qt::CaseInsensitive))
-            {
-                directories << cleaned;
-            }
-        };
-
-        appendUnique(QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata")));
-        appendUnique(qEnvironmentVariable("KSWORD_ARK_PROFILE_DIR"));
-        appendUnique(QDir::current().filePath(QStringLiteral("profiles/ark_dyndata")));
+        appendUniquePath(directories, qEnvironmentVariable("KSWORD_ARK_PROFILE_DIR"));
         return directories;
     }
 
@@ -454,6 +521,7 @@ namespace
     LocalPdbProfile loadPdbProfileFile(const QString& filePath, const ksword::ark::ArkDynModuleIdentity& currentIdentity)
     {
         LocalPdbProfile profile;
+        profile.sourceText = QStringLiteral("scattered-json");
         profile.pathText = QDir::toNativeSeparators(filePath);
 
         QFile file(filePath);
@@ -557,9 +625,269 @@ namespace
         return profile;
     }
 
+    // loadPdbProfilePackEntry：
+    // - 输入 pack 记录/currentIdentity/fieldDictionary：pack profile 条目、当前内核身份和字段字典；
+    // - 处理：把紧凑 profile 展开为现有 DynDataProfileApplyInput；
+    // - 返回：LocalPdbProfile；matched=false 表示不是当前内核 profile。
+    LocalPdbProfile loadPdbProfilePackEntry(const QJsonObject& packEntry, const QJsonArray& fieldDictionary, const ksword::ark::ArkDynModuleIdentity& currentIdentity)
+    {
+        LocalPdbProfile profile;
+        profile.sourceText = QStringLiteral("pack");
+
+        std::uint32_t profileClass = 0U;
+        std::uint32_t machine = 0U;
+        std::uint32_t timeDateStamp = 0U;
+        std::uint32_t sizeOfImage = 0U;
+        if (!profileClassIdFromJsonValue(packEntry.value(QStringLiteral("moduleClassId")), profileClass) ||
+            !parseProfileUInt32(packEntry.value(QStringLiteral("machine")), machine) ||
+            !parseProfileUInt32(packEntry.value(QStringLiteral("timeDateStamp")), timeDateStamp) ||
+            !parseProfileUInt32(packEntry.value(QStringLiteral("sizeOfImage")), sizeOfImage))
+        {
+            profile.diagnosticsText = QStringLiteral("pack profile identity 字段缺失或格式无效。");
+            return profile;
+        }
+
+        profile.matched = currentIdentity.present &&
+            currentIdentity.classId == profileClass &&
+            currentIdentity.machine == machine &&
+            currentIdentity.timeDateStamp == timeDateStamp &&
+            currentIdentity.sizeOfImage == sizeOfImage;
+        if (!profile.matched)
+        {
+            profile.diagnosticsText = QStringLiteral("pack profile identity 不匹配当前内核。");
+            return profile;
+        }
+
+        const QJsonArray fieldsArray = packEntry.value(QStringLiteral("fields")).toArray();
+        if (fieldsArray.isEmpty())
+        {
+            profile.diagnosticsText = QStringLiteral("pack profile fields 为空。");
+            return profile;
+        }
+
+        const QJsonValue profileNameValue = packEntry.value(QStringLiteral("profileName"));
+        const QJsonValue pdbNameValue = packEntry.value(QStringLiteral("pdbName"));
+        const QJsonValue pdbGuidValue = packEntry.value(QStringLiteral("pdbGuid"));
+        QString profileNameText = profileNameValue.toString().trimmed();
+        if (profileNameText.isEmpty())
+        {
+            profileNameText = QStringLiteral("pack-profile");
+        }
+        profile.applyInput.profileName = profileNameText.toStdString();
+        profile.applyInput.pdbName = pdbNameValue.toString().toStdString();
+        profile.applyInput.pdbGuid = pdbGuidValue.toString().toStdString();
+        std::uint32_t pdbAge = 0U;
+        if (parseProfileUInt32(packEntry.value(QStringLiteral("pdbAge")), pdbAge))
+        {
+            profile.applyInput.pdbAge = pdbAge;
+        }
+        profile.applyInput.ntoskrnl = currentIdentity;
+
+        std::uint32_t invalidFieldCount = 0U;
+        for (const QJsonValue& entryValue : fieldsArray)
+        {
+            const QJsonArray pairArray = entryValue.toArray();
+            if (pairArray.size() != 2)
+            {
+                invalidFieldCount += 1U;
+                continue;
+            }
+
+            std::uint32_t fieldIndex = 0U;
+            std::uint32_t offset = 0U;
+            if (!parseProfileUInt32(pairArray.at(0), fieldIndex) ||
+                !parseProfileUInt32(pairArray.at(1), offset) ||
+                fieldIndex >= static_cast<std::uint32_t>(fieldDictionary.size()))
+            {
+                invalidFieldCount += 1U;
+                continue;
+            }
+
+            const QString fieldName = fieldDictionary.at(static_cast<int>(fieldIndex)).toString();
+            std::uint32_t fieldId = 0U;
+            if (!fieldIdForProfileName(fieldName, fieldId))
+            {
+                profile.ignoredUnknownFields += 1U;
+                continue;
+            }
+            if (offset == 0xFFFFFFFFU || offset > KSW_DYN_PROFILE_OFFSET_MAX)
+            {
+                invalidFieldCount += 1U;
+                continue;
+            }
+
+            ksword::ark::DynDataProfileField field{};
+            field.fieldId = fieldId;
+            field.offset = offset;
+            profile.applyInput.fields.push_back(field);
+        }
+
+        if (invalidFieldCount != 0U)
+        {
+            profile.diagnosticsText = QStringLiteral("pack profile 含 %1 个越界或无效字段，R3 已拒绝应用。").arg(invalidFieldCount);
+            return profile;
+        }
+        if (profile.applyInput.fields.empty() || profile.applyInput.fields.size() > KSW_DYN_PROFILE_MAX_FIELDS)
+        {
+            profile.diagnosticsText = QStringLiteral("pack profile 有效字段数量异常: %1。")
+                .arg(static_cast<qulonglong>(profile.applyInput.fields.size()));
+            return profile;
+        }
+
+        profile.valid = true;
+        profile.diagnosticsText = QStringLiteral("pack profile 匹配，字段 %1 个，忽略未知字段 %2 个。")
+            .arg(static_cast<qulonglong>(profile.applyInput.fields.size()))
+            .arg(profile.ignoredUnknownFields);
+        return profile;
+    }
+
+    // loadPdbProfilePackFile：
+    // - 输入 filePath/currentIdentity/diagnosticsOut：候选 pack、当前内核身份和诊断输出；
+    // - 处理：校验 pack schema、字段字典和 profiles 数组，寻找精确匹配条目；
+    // - 返回：匹配 profile；未命中或 pack 无效时 valid=false/matched=false。
+    LocalPdbProfile loadPdbProfilePackFile(const QString& filePath, const ksword::ark::ArkDynModuleIdentity& currentIdentity, QString& diagnosticsOut)
+    {
+        LocalPdbProfile bestProfile;
+        bestProfile.sourceText = QStringLiteral("pack");
+        bestProfile.pathText = QDir::toNativeSeparators(filePath);
+
+        QFile file(filePath);
+        if (!file.open(QIODevice::ReadOnly))
+        {
+            diagnosticsOut = QStringLiteral("无法打开 PDB profile pack: %1").arg(file.errorString());
+            return bestProfile;
+        }
+
+        QJsonParseError parseError{};
+        const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+        if (parseError.error != QJsonParseError::NoError || !document.isObject())
+        {
+            diagnosticsOut = QStringLiteral("PDB profile pack JSON 解析失败: %1").arg(parseError.errorString());
+            return bestProfile;
+        }
+
+        const QJsonObject rootObject = document.object();
+        std::uint32_t schemaVersion = 0U;
+        std::uint32_t packVersion = 0U;
+        if (!parseProfileUInt32(rootObject.value(QStringLiteral("schemaVersion")), schemaVersion) ||
+            !parseProfileUInt32(rootObject.value(QStringLiteral("packVersion")), packVersion) ||
+            schemaVersion != 1U ||
+            packVersion != 1U)
+        {
+            diagnosticsOut = QStringLiteral("PDB profile pack schemaVersion/packVersion 不支持。");
+            return bestProfile;
+        }
+
+        const QJsonArray fieldDictionary = rootObject.value(QStringLiteral("fieldDictionary")).toArray();
+        const QJsonArray profilesArray = rootObject.value(QStringLiteral("profiles")).toArray();
+        if (fieldDictionary.isEmpty() || profilesArray.isEmpty())
+        {
+            diagnosticsOut = QStringLiteral("PDB profile pack 字段字典或 profile 列表为空。");
+            return bestProfile;
+        }
+
+        std::uint32_t invalidDictionaryFields = 0U;
+        for (const QJsonValue& fieldNameValue : fieldDictionary)
+        {
+            std::uint32_t ignoredFieldId = 0U;
+            if (!fieldNameValue.isString() || !fieldIdForProfileName(fieldNameValue.toString(), ignoredFieldId))
+            {
+                invalidDictionaryFields += 1U;
+            }
+        }
+        if (invalidDictionaryFields != 0U)
+        {
+            diagnosticsOut = QStringLiteral("PDB profile pack 字段字典包含 %1 个未知字段，已拒绝。").arg(invalidDictionaryFields);
+            return bestProfile;
+        }
+
+        std::uint32_t scannedCount = 0U;
+        std::uint32_t invalidMatchedCount = 0U;
+        for (const QJsonValue& profileValue : profilesArray)
+        {
+            if (!profileValue.isObject())
+            {
+                continue;
+            }
+
+            scannedCount += 1U;
+            LocalPdbProfile profile = loadPdbProfilePackEntry(profileValue.toObject(), fieldDictionary, currentIdentity);
+            profile.pathText = QDir::toNativeSeparators(filePath);
+            if (profile.matched)
+            {
+                if (profile.valid)
+                {
+                    diagnosticsOut = QStringLiteral("PDB profile pack 命中；路径=%1，profiles=%2，扫描=%3，%4")
+                        .arg(QDir::toNativeSeparators(filePath))
+                        .arg(static_cast<qulonglong>(profilesArray.size()))
+                        .arg(scannedCount)
+                        .arg(profile.diagnosticsText);
+                    return profile;
+                }
+
+                invalidMatchedCount += 1U;
+                if (!bestProfile.matched)
+                {
+                    bestProfile = profile;
+                    bestProfile.pathText = QDir::toNativeSeparators(filePath);
+                }
+            }
+        }
+
+        diagnosticsOut = QStringLiteral("PDB profile pack 未命中；路径=%1，profiles=%2，扫描=%3，无效命中=%4。")
+            .arg(QDir::toNativeSeparators(filePath))
+            .arg(static_cast<qulonglong>(profilesArray.size()))
+            .arg(scannedCount)
+            .arg(invalidMatchedCount);
+        return bestProfile;
+    }
+
+    // findMatchingPdbProfilePack：
+    // - 输入 currentIdentity/diagnosticsOut：当前内核身份和诊断输出；
+    // - 处理：按默认 pack 路径和环境变量路径查找，返回第一条有效命中；
+    // - 返回：匹配 profile；未命中时 valid=false/matched=false。
+    LocalPdbProfile findMatchingPdbProfilePack(const ksword::ark::ArkDynModuleIdentity& currentIdentity, QString& diagnosticsOut)
+    {
+        LocalPdbProfile bestProfile;
+        QStringList diagnostics;
+        std::uint32_t existingPackCount = 0U;
+
+        for (const QString& packPath : profilePackSearchPaths())
+        {
+            QFileInfo fileInfo(packPath);
+            if (!fileInfo.exists() || !fileInfo.isFile())
+            {
+                diagnostics << QStringLiteral("pack 不存在: %1").arg(QDir::toNativeSeparators(packPath));
+                continue;
+            }
+
+            existingPackCount += 1U;
+            QString packDiagnostics;
+            LocalPdbProfile profile = loadPdbProfilePackFile(fileInfo.absoluteFilePath(), currentIdentity, packDiagnostics);
+            diagnostics << packDiagnostics;
+            if (profile.matched)
+            {
+                if (profile.valid)
+                {
+                    diagnosticsOut = diagnostics.join(QStringLiteral(" | "));
+                    return profile;
+                }
+                if (!bestProfile.matched)
+                {
+                    bestProfile = profile;
+                }
+            }
+        }
+
+        diagnosticsOut = QStringLiteral("未找到匹配 PDB profile pack；检查 %1 个存在的 pack。%2")
+            .arg(existingPackCount)
+            .arg(diagnostics.join(QStringLiteral(" | ")));
+        return bestProfile;
+    }
+
     // findMatchingPdbProfile：
     // - 输入 currentIdentity/diagnosticsOut：当前 ntoskrnl identity 和诊断输出；
-    // - 处理：扫描默认 profile 目录并寻找第一条精确匹配 JSON；
+    // - 处理：优先扫描 compact pack；仅当 KSWORD_ARK_PROFILE_DIR 显式设置时扫描散落 JSON；
     // - 返回：匹配 profile；未命中时 valid=false/matched=false。
     LocalPdbProfile findMatchingPdbProfile(const ksword::ark::ArkDynModuleIdentity& currentIdentity, QString& diagnosticsOut)
     {
@@ -572,6 +900,19 @@ namespace
         {
             diagnosticsOut = QStringLiteral("当前 ntoskrnl identity 不可用，跳过 PDB profile 扫描。");
             return bestProfile;
+        }
+
+        QString packDiagnostics;
+        LocalPdbProfile packProfile = findMatchingPdbProfilePack(currentIdentity, packDiagnostics);
+        diagnostics << packDiagnostics;
+        if (packProfile.valid)
+        {
+            diagnosticsOut = packDiagnostics;
+            return packProfile;
+        }
+        if (packProfile.matched)
+        {
+            bestProfile = packProfile;
         }
 
         for (const QString& directoryPath : profileSearchDirectories())
@@ -596,7 +937,7 @@ namespace
                     diagnostics << profile.diagnosticsText;
                     if (profile.valid)
                     {
-                        diagnosticsOut = QStringLiteral("扫描 %1 个 profile。%2").arg(scannedCount).arg(diagnostics.join(QStringLiteral(" | ")));
+                        diagnosticsOut = QStringLiteral("散落 JSON fallback 扫描 %1 个 profile。%2").arg(scannedCount).arg(diagnostics.join(QStringLiteral(" | ")));
                         return profile;
                     }
                     if (!bestProfile.matched)
@@ -613,7 +954,7 @@ namespace
             }
         }
 
-        diagnosticsOut = QStringLiteral("未找到匹配 PDB profile；扫描 %1 个 JSON，解析/格式异常 %2 个。%3")
+        diagnosticsOut = QStringLiteral("未找到匹配 PDB profile；散落 JSON fallback 扫描 %1 个 JSON，解析/格式异常 %2 个。%3")
             .arg(scannedCount)
             .arg(parseErrorCount)
             .arg(diagnostics.join(QStringLiteral(" | ")));
@@ -813,6 +1154,7 @@ namespace
         lines << QStringLiteral("PdbProfileScanAttempted: %1").arg(boolText(summary.pdbProfileScanAttempted));
         lines << QStringLiteral("PdbProfileFound: %1").arg(boolText(summary.pdbProfileFound));
         lines << QStringLiteral("PdbProfileAppliedThisRefresh: %1").arg(boolText(summary.pdbProfileApplied));
+        lines << QStringLiteral("PdbProfileSource: %1").arg(safeText(summary.pdbProfileSourceText));
         lines << QStringLiteral("PdbProfileName: %1").arg(safeText(summary.pdbProfileNameText));
         lines << QStringLiteral("PdbProfilePath: %1").arg(safeText(summary.pdbProfilePathText));
         lines << QStringLiteral("PdbProfileStatus: %1").arg(formatNtStatus(summary.pdbProfileStatus));
@@ -863,6 +1205,7 @@ namespace
         appendSummaryRow(table, QStringLiteral("PDB profile 扫描"), boolText(summary.pdbProfileScanAttempted));
         appendSummaryRow(table, QStringLiteral("PDB profile 命中"), boolText(summary.pdbProfileFound));
         appendSummaryRow(table, QStringLiteral("PDB profile 本次应用"), boolText(summary.pdbProfileApplied));
+        appendSummaryRow(table, QStringLiteral("PDB profile 来源"), safeText(summary.pdbProfileSourceText));
         appendSummaryRow(table, QStringLiteral("PDB profile 名称"), safeText(summary.pdbProfileNameText));
         appendSummaryRow(table, QStringLiteral("PDB profile 路径"), safeText(summary.pdbProfilePathText));
         appendSummaryRow(table, QStringLiteral("PDB profile 状态"), formatNtStatus(summary.pdbProfileStatus));
@@ -931,6 +1274,7 @@ namespace
         std::uint32_t pdbProfileIgnoredJsonFields = 0U;
         QString pdbProfileNameText;
         QString pdbProfilePathText;
+        QString pdbProfileSourceText;
         QString pdbProfileMessageText;
         QString pdbProfileIoMessageText;
 
@@ -951,6 +1295,7 @@ namespace
                 if (profile.matched)
                 {
                     pdbProfileFound = true;
+                    pdbProfileSourceText = profileSourceDisplayText(profile.sourceText);
                     pdbProfileNameText = stringToQString(profile.applyInput.profileName);
                     pdbProfilePathText = profile.pathText;
                     pdbProfileIgnoredJsonFields = profile.ignoredUnknownFields;
@@ -1016,6 +1361,7 @@ namespace
         summaryOut.pdbProfileRejectedFields = pdbProfileRejectedFields;
         summaryOut.pdbProfileUnknownFields = pdbProfileUnknownFields;
         summaryOut.pdbProfileIgnoredJsonFields = pdbProfileIgnoredJsonFields;
+        summaryOut.pdbProfileSourceText = pdbProfileSourceText;
         summaryOut.pdbProfileNameText = pdbProfileNameText;
         summaryOut.pdbProfilePathText = pdbProfilePathText;
         summaryOut.pdbProfileMessageText = pdbProfileMessageText;
