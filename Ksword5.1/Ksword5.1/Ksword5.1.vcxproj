@@ -417,7 +417,17 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="qtvars.pro" />
+    <None Include="profiles\ark_dyndata_pack_v1.json" />
   </ItemGroup>
+  <Target Name="CopyKswordArkDynDataProfilePack" AfterTargets="Build">
+    <PropertyGroup>
+      <KswordArkDynDataProfilePackSource>$(MSBuildProjectDirectory)\profiles\ark_dyndata_pack_v1.json</KswordArkDynDataProfilePackSource>
+      <KswordArkDynDataProfilePackTargetDir>$(TargetDir)profiles\</KswordArkDynDataProfilePackTargetDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(KswordArkDynDataProfilePackTargetDir)" Condition="Exists('$(KswordArkDynDataProfilePackSource)')" />
+    <Copy SourceFiles="$(KswordArkDynDataProfilePackSource)" DestinationFolder="$(KswordArkDynDataProfilePackTargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(KswordArkDynDataProfilePackSource)')" />
+    <Warning Condition="!Exists('$(KswordArkDynDataProfilePackSource)')" Text="KswordARK DynData profile pack was not found: $(KswordArkDynDataProfilePackSource)" />
+  </Target>
   <Target Name="CopyTaskmgrHijackScript" AfterTargets="Build">
     <PropertyGroup>
       <TaskmgrHijackScriptSource>$(MSBuildProjectDirectory)\..\..\TaskmgrHijack.ps1</TaskmgrHijackScriptSource>
