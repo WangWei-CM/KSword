@@ -201,21 +201,30 @@ struct KernelCallbackEnumEntry
     std::uint32_t source = 0;              // source：枚举来源。
     std::uint32_t status = 0;              // status：R0 行状态。
     std::uint32_t fieldFlags = 0;          // fieldFlags：有效字段位图。
+    std::uint32_t trustFlags = 0;          // trustFlags：预留的可信来源标志；旧协议未返回时保持 0。
+    std::uint32_t removeFlags = 0;         // removeFlags：预留的移除能力标志；旧协议未返回时保持 0。
     std::uint32_t operationMask = 0;       // operationMask：操作掩码。
     std::uint32_t objectTypeMask = 0;      // objectTypeMask：对象类型掩码。
+    std::uint64_t generation = 0;          // generation：预留的枚举代次；旧协议未返回时保持 0。
     long lastStatus = 0;                   // lastStatus：底层 NTSTATUS。
     std::uint64_t callbackAddress = 0;     // callbackAddress：回调函数或对象地址。
     std::uint64_t contextAddress = 0;      // contextAddress：上下文或扩展诊断值。
     std::uint64_t registrationAddress = 0; // registrationAddress：注册句柄/cookie。
+    std::uint64_t identityHash = 0;        // identityHash：预留的回调身份哈希；旧协议未返回时保持 0/空。
+    std::uint64_t rawStorageValue = 0;     // rawStorageValue：预留的原始存储值；旧协议未返回时保持 0。
     std::uint64_t moduleBase = 0;          // moduleBase：所属模块基址。
     std::uint32_t moduleSize = 0;          // moduleSize：所属模块大小。
     QString classText;                     // classText：类别文本。
     QString sourceText;                    // sourceText：来源文本。
+    QString sourceTrustText;               // sourceTrustText：可信/公开 API/fallback/unsupported 来源展示文本。
+    QString removePolicyText;              // removePolicyText：安全移除、候选、实验或不可移除策略文本。
     QString statusText;                    // statusText：状态文本。
     QString nameText;                      // nameText：回调/过滤器名称。
     QString altitudeText;                  // altitudeText：Altitude。
     QString modulePathText;                // modulePathText：模块路径。
     QString detailText;                    // detailText：详情文本。
+    bool requiresSecondConfirmation = false; // requiresSecondConfirmation：移除动作是否需要二次确认。
+    bool fallbackPatternOnly = false;      // fallbackPatternOnly：当前来源是否仅为 fallback/pattern 诊断。
 };
 
 // ============================================================
