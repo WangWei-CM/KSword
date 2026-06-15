@@ -1,4 +1,4 @@
-﻿#include "ProcessTraceMonitorWidget.h"
+#include "ProcessTraceMonitorWidget.h"
 
 // ============================================================
 // ProcessTraceMonitorWidget.cpp
@@ -26,6 +26,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <Objbase.h>
 #include <evntcons.h>
 #include <tdh.h>
 

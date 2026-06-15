@@ -67,13 +67,16 @@ void NetworkDock::refreshTcpConnectionTable()
     int rowIndex = 0;
     for (const ks::network::TcpConnectionRecord& connectionRecord : m_tcpConnectionCache)
     {
+        const int cacheIndex = rowIndex;
         const QString stateText = toQString(connectionRecord.tcpStateText);
         const QString pidText = QString::number(connectionRecord.processId);
         const QString processNameText = toQString(connectionRecord.processName);
         const QString localEndpointText = formatEndpointText(connectionRecord.localAddressText, connectionRecord.localPort);
         const QString remoteEndpointText = formatEndpointText(connectionRecord.remoteAddressText, connectionRecord.remotePort);
 
-        m_tcpConnectionTable->setItem(rowIndex, toTcpConnectionColumn(TcpConnectionTableColumn::State), createPacketCell(stateText));
+        QTableWidgetItem* stateItem = createPacketCell(stateText);
+        stateItem->setData(Qt::UserRole, cacheIndex);
+        m_tcpConnectionTable->setItem(rowIndex, toTcpConnectionColumn(TcpConnectionTableColumn::State), stateItem);
         m_tcpConnectionTable->setItem(rowIndex, toTcpConnectionColumn(TcpConnectionTableColumn::Pid), createPacketCell(pidText));
         QTableWidgetItem* processItem = createPacketCell(processNameText);
         processItem->setIcon(resolveProcessIconByPid(connectionRecord.processId, connectionRecord.processName));
@@ -141,14 +144,39 @@ void NetworkDock::terminateSelectedTcpConnection()
         return;
     }
 
+    // 表格行与缓存索引显式绑定：
+    // - 当前未启用排序时 row == cacheIndex；
+    // - 后续若增加表头排序，也不会因为显示行变化而关闭错误连接。
     const int selectedRow = m_tcpConnectionTable->currentRow();
-    if (selectedRow < 0 || selectedRow >= static_cast<int>(m_tcpConnectionCache.size()))
+    int cacheIndex = selectedRow;
+    if (selectedRow >= 0)
+    {
+        QTableWidgetItem* stateItem = m_tcpConnectionTable->item(
+            selectedRow,
+            toTcpConnectionColumn(TcpConnectionTableColumn::State));
+        if (stateItem != nullptr)
+        {
+            const QVariant cacheIndexVariant = stateItem->data(Qt::UserRole);
+            bool parseOk = false;
+            const int parsedCacheIndex = cacheIndexVariant.toInt(&parseOk);
+            if (parseOk)
+            {
+                cacheIndex = parsedCacheIndex;
+            }
+        }
+    }
+
+    if (cacheIndex < 0 || cacheIndex >= static_cast<int>(m_tcpConnectionCache.size()))
     {
         QMessageBox::information(this, QStringLiteral("连接管理"), QStringLiteral("请先选中一条 TCP 连接。"));
         return;
     }
 
-    const ks::network::TcpConnectionRecord& targetConnection = m_tcpConnectionCache[static_cast<std::size_t>(selectedRow)];
+    // 复制目标记录而不是持有缓存引用：
+    // - QMessageBox::question 会进入嵌套事件循环；
+    // - 自动刷新定时器可能在确认框打开期间重建 m_tcpConnectionCache；
+    // - 若继续使用引用，用户点击确认后可能访问悬空对象并导致关闭请求参数错误。
+    const ks::network::TcpConnectionRecord targetConnection = m_tcpConnectionCache[static_cast<std::size_t>(cacheIndex)];
     const int userChoice = QMessageBox::question(
         this,
         QStringLiteral("终止 TCP 连接"),

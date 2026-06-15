@@ -7,8 +7,9 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
-#include <gdiplus.h>
 #include <objidl.h>
+#include <propidl.h>
+#include <gdiplus.h>
 
 #include <algorithm>
 #include <cmath>

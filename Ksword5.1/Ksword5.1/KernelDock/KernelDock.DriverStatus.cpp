@@ -71,7 +71,9 @@ namespace
         std::uint32_t profileCount = 0;       // profileCount：pack 内 profile 总数。
         std::uint32_t scannedProfileCount = 0; // scannedProfileCount：本次扫描过的 profile 数。
         std::uint32_t fieldCount = 0;         // fieldCount：命中 profile 声明字段数。
+        std::uint32_t typedItemCount = 0;     // typedItemCount：命中 profile 声明 v3 items 数。
         std::uint32_t callbackItemCount = 0;  // callbackItemCount：命中 profile 声明 callbackItems 数。
+        double coveragePercent = -1.0;        // coveragePercent：release_sync 计算的 profile 覆盖率，负数表示未知。
         QString profileNameText;              // profileNameText：命中 profileName。
         QString versionText;                  // versionText：从 profileName 提取的 Windows 版本号。
         QString pathText;                     // pathText：命中或最后诊断的 pack 路径。
@@ -81,7 +83,7 @@ namespace
     // kDynCapabilities：
     // - 作用：列出所有可由 R0 DynData 暴露的 capability bit；
     // - 处理逻辑：驱动状态页、能力详情和筛选都复用该表。
-    constexpr std::array<CapabilityDisplay, 15> kDynCapabilities{ {
+    constexpr std::array<CapabilityDisplay, 21> kDynCapabilities{ {
         { KSW_CAP_DYN_NTOS_ACTIVE, "KSW_CAP_DYN_NTOS_ACTIVE", L"ntoskrnl profile 已激活" },
         { KSW_CAP_DYN_LXCORE_ACTIVE, "KSW_CAP_DYN_LXCORE_ACTIVE", L"lxcore profile 已激活" },
         { KSW_CAP_OBJECT_TYPE_FIELDS, "KSW_CAP_OBJECT_TYPE_FIELDS", L"对象类型字段" },
@@ -96,7 +98,13 @@ namespace
         { KSW_CAP_ETW_GUID_FIELDS, "KSW_CAP_ETW_GUID_FIELDS", L"ETW GUID/Registration 字段" },
         { KSW_CAP_CALLBACK_NOTIFY_GLOBALS, "KSW_CAP_CALLBACK_NOTIFY_GLOBALS", L"Callback Notify 全局 RVA" },
         { KSW_CAP_CALLBACK_REGISTRY_GLOBALS, "KSW_CAP_CALLBACK_REGISTRY_GLOBALS", L"Registry Callback 全局 RVA" },
-        { KSW_CAP_CALLBACK_OBJECT_FIELDS, "KSW_CAP_CALLBACK_OBJECT_FIELDS", L"Object Callback 结构偏移" }
+        { KSW_CAP_CALLBACK_OBJECT_FIELDS, "KSW_CAP_CALLBACK_OBJECT_FIELDS", L"Object Callback 结构偏移" },
+        { KSW_CAP_PROCESS_LIST_FIELDS, "KSW_CAP_PROCESS_LIST_FIELDS", L"进程链表字段" },
+        { KSW_CAP_THREAD_LIST_FIELDS, "KSW_CAP_THREAD_LIST_FIELDS", L"线程链表字段" },
+        { KSW_CAP_CID_TABLE_WALK, "KSW_CAP_CID_TABLE_WALK", L"CID 表遍历" },
+        { KSW_CAP_KERNEL_MODULE_LIST_FIELDS, "KSW_CAP_KERNEL_MODULE_LIST_FIELDS", L"内核模块链表字段" },
+        { KSW_CAP_DRIVER_OBJECT_FIELDS, "KSW_CAP_DRIVER_OBJECT_FIELDS", L"驱动对象字段" },
+        { KSW_CAP_KERNEL_GLOBALS, "KSW_CAP_KERNEL_GLOBALS", L"内核全局 RVA" }
     } };
 
     // kSecurityPolicies lists every policy bit currently surfaced by Phase 1.
@@ -243,8 +251,10 @@ namespace
     {
         QStringList paths;
         appendUniquePath(paths, qEnvironmentVariable("KSWORD_ARK_PROFILE_PACK"));
+        appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v3.json")));
         appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v2.json")));
         appendUniquePath(paths, QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
+        appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v3.json")));
         appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v2.json")));
         appendUniquePath(paths, QDir::current().filePath(QStringLiteral("profiles/ark_dyndata_pack_v1.json")));
         return paths;
@@ -329,7 +339,7 @@ namespace
             if (!parseProfileUInt32(rootObject.value(QStringLiteral("schemaVersion")), schemaVersion) ||
                 !parseProfileUInt32(rootObject.value(QStringLiteral("packVersion")), packVersion) ||
                 schemaVersion != 1U ||
-                (packVersion != 1U && packVersion != 2U))
+                (packVersion != 1U && packVersion != 2U && packVersion != 3U))
             {
                 diagnostics << QStringLiteral("pack schemaVersion/packVersion 不支持: %1").arg(result.pathText);
                 continue;
@@ -373,20 +383,30 @@ namespace
                 }
 
                 const QJsonArray fieldsArray = profileObject.value(QStringLiteral("fields")).toArray();
+                QJsonArray typedItemsArray = profileObject.value(QStringLiteral("items")).toArray();
+                if (typedItemsArray.isEmpty())
+                {
+                    typedItemsArray = profileObject.value(QStringLiteral("typedItems")).toArray();
+                }
                 const QJsonArray callbackItemsArray = profileObject.value(QStringLiteral("callbackItems")).toArray();
                 result.matched = true;
-                result.valid = !fieldsArray.isEmpty();
+                result.valid = !fieldsArray.isEmpty() || !typedItemsArray.isEmpty();
                 result.fieldCount = static_cast<std::uint32_t>(fieldsArray.size());
+                result.typedItemCount = static_cast<std::uint32_t>(typedItemsArray.size());
                 result.callbackItemCount = static_cast<std::uint32_t>(callbackItemsArray.size());
+                const double coveragePercent = profileObject.value(QStringLiteral("coveragePercent")).toDouble(-1.0);
+                result.coveragePercent = coveragePercent >= 0.0 ? coveragePercent : -1.0;
                 result.profileNameText = profileObject.value(QStringLiteral("profileName")).toString(QStringLiteral("pack-profile"));
                 result.versionText = extractVersionFromProfileName(result.profileNameText);
                 result.messageText = result.valid
-                    ? QStringLiteral("本地 PDB profile pack 命中；profiles=%1，扫描=%2，字段=%3，callbackItems=%4。")
+                    ? QStringLiteral("本地 PDB profile pack 命中；profiles=%1，扫描=%2，字段=%3，typedItems=%4，callbackItems=%5，覆盖率=%6。")
                         .arg(result.profileCount)
                         .arg(result.scannedProfileCount)
                         .arg(result.fieldCount)
+                        .arg(result.typedItemCount)
                         .arg(result.callbackItemCount)
-                    : QStringLiteral("本地 PDB profile pack 命中 identity，但字段数组为空，已视为无效。");
+                        .arg(result.coveragePercent >= 0.0 ? QStringLiteral("%1%").arg(result.coveragePercent, 0, 'f', 1) : QStringLiteral("<未知>"))
+                    : QStringLiteral("本地 PDB profile pack 命中 identity，但 fields/items 均为空，已视为无效。");
                 return result;
             }
 
@@ -467,11 +487,17 @@ namespace
     // - 返回：用户可读字段覆盖率文本。
     QString fieldCoverageText(const KernelDriverStatusSummary& summary)
     {
-        return QStringLiteral("可用 %1 / 返回 %2 / R0声明 %3，必需缺失 %4")
+        QString coverageText = QStringLiteral("可用 %1 / 返回 %2 / R0声明 %3，必需缺失 %4")
             .arg(summary.dynDataPresentFieldCount)
             .arg(summary.dynDataReturnedFieldCount)
             .arg(summary.dynDataFieldCount)
             .arg(summary.dynDataRequiredMissingCount);
+        if (summary.localPdbProfileCoveragePercent >= 0.0)
+        {
+            coverageText += QStringLiteral("，pack覆盖率 %1%")
+                .arg(summary.localPdbProfileCoveragePercent, 0, 'f', 1);
+        }
+        return coverageText;
     }
 
     // fieldSourceSummaryText：
@@ -496,11 +522,13 @@ namespace
     {
         if (summary.localPdbProfileMatched)
         {
-            return QStringLiteral("命中：%1，版本=%2，字段=%3，callbackItems=%4，packProfiles=%5，路径=%6")
+            return QStringLiteral("命中：%1，版本=%2，字段=%3，typedItems=%4，callbackItems=%5，coverage=%6，packProfiles=%7，路径=%8")
                 .arg(safeText(summary.localPdbProfileNameText))
                 .arg(safeText(summary.localPdbProfileVersionText, QStringLiteral("<未提取>")))
                 .arg(summary.localPdbProfileFieldCount)
+                .arg(summary.localPdbProfileTypedItemCount)
                 .arg(summary.localPdbProfileCallbackItemCount)
+                .arg(summary.localPdbProfileCoveragePercent >= 0.0 ? QStringLiteral("%1%").arg(summary.localPdbProfileCoveragePercent, 0, 'f', 1) : QStringLiteral("<未知>"))
                 .arg(summary.localPdbProfilePackProfileCount)
                 .arg(safeText(summary.localPdbProfilePathText));
         }
@@ -514,12 +542,13 @@ namespace
     // - 返回：用户可直接判断 notify/registry/object 是否走可信 PDB 数据的文本。
     QString callbackProfileCoverageText(const KernelDriverStatusSummary& summary)
     {
-        return QStringLiteral("Active=%1，Notify=%2，Registry=%3，Object=%4，packCallbackItems=%5")
+        return QStringLiteral("Active=%1，Notify=%2，Registry=%3，Object=%4，packCallbackItems=%5，packTypedItems=%6")
             .arg(boolText(summary.callbackProfileActive))
             .arg(boolText(summary.callbackNotifyTrusted))
             .arg(boolText(summary.callbackRegistryTrusted))
             .arg(boolText(summary.callbackObjectTrusted))
-            .arg(summary.localPdbProfileCallbackItemCount);
+            .arg(summary.localPdbProfileCallbackItemCount)
+            .arg(summary.localPdbProfileTypedItemCount);
     }
 
     // trustedOffsetText：
@@ -919,11 +948,13 @@ namespace
             summaryOut.localPdbProfileMatched = packMatch.matched && packMatch.valid;
             summaryOut.localPdbProfilePackProfileCount = packMatch.profileCount;
             summaryOut.localPdbProfileFieldCount = packMatch.fieldCount;
+            summaryOut.localPdbProfileTypedItemCount = packMatch.typedItemCount;
             summaryOut.localPdbProfileNameText = packMatch.profileNameText;
             summaryOut.localPdbProfileVersionText = packMatch.versionText;
             summaryOut.localPdbProfilePathText = packMatch.pathText;
             summaryOut.localPdbProfileMessageText = packMatch.messageText;
             summaryOut.localPdbProfileCallbackItemCount = packMatch.callbackItemCount;
+            summaryOut.localPdbProfileCoveragePercent = packMatch.coveragePercent;
         }
 
         summaryOut.pdbProfileActive = flagEnabled(summaryOut.dynDataStatusFlags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE);

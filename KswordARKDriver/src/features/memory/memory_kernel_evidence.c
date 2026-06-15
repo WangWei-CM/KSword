@@ -42,13 +42,13 @@ typedef struct _KSW_MEMORY_EVIDENCE_BIGPOOL_ENTRY
     {
         PVOID VirtualAddress;
         ULONG_PTR NonPaged;
-    };
+    } Address;
     SIZE_T SizeInBytes;
     union
     {
         UCHAR TagChars[4];
         ULONG TagUlong;
-    };
+    } Tag;
 } KSW_MEMORY_EVIDENCE_BIGPOOL_ENTRY, *PKSW_MEMORY_EVIDENCE_BIGPOOL_ENTRY;
 
 typedef struct _KSW_MEMORY_EVIDENCE_BIGPOOL_INFORMATION
@@ -1624,7 +1624,7 @@ Return Value:
         entry = &((KSW_MEMORY_EVIDENCE_BIGPOOL_INFORMATION*)buffer)->AllocatedInfo[rowIndex];
         State->Response->bigPoolRowsSeen += 1UL;
 
-        rawAddress = (ULONG64)entry->NonPaged;
+        rawAddress = (ULONG64)entry->Address.NonPaged;
         address = rawAddress & ~(ULONG64)1ULL;
         size = (ULONG64)entry->SizeInBytes;
         if ((rawAddress & 1ULL) != 0ULL) {
@@ -1634,11 +1634,11 @@ Return Value:
             continue;
         }
 
-        if (KswordARKMemoryEvidenceTagContains3(entry->TagChars, 'P', 'T', 'E')) {
+        if (KswordARKMemoryEvidenceTagContains3(entry->Tag.TagChars, 'P', 'T', 'E')) {
             ownerKind = KSWORD_ARK_MEMORY_EVIDENCE_OWNER_SYSTEM_PTE;
             bigPoolFlags |= KSWORD_ARK_MEMORY_EVIDENCE_BIGPOOL_FLAG_TAG_SYSTEM_PTE_LIKE;
         }
-        if (KswordARKMemoryEvidenceTagContains3(entry->TagChars, 'M', 'D', 'L')) {
+        if (KswordARKMemoryEvidenceTagContains3(entry->Tag.TagChars, 'M', 'D', 'L')) {
             ownerKind = KSWORD_ARK_MEMORY_EVIDENCE_OWNER_MDL_LIKE;
             bigPoolFlags |= KSWORD_ARK_MEMORY_EVIDENCE_BIGPOOL_FLAG_TAG_MDL_LIKE;
         }
@@ -1685,11 +1685,11 @@ Return Value:
         row.confidence = confidence;
         row.ownerAddress = address;
         row.lastStatus = NT_SUCCESS(status) ? pageInfo.walkStatus : status;
-        row.bigPoolTag = entry->TagUlong;
+        row.bigPoolTag = entry->Tag.TagUlong;
         row.bigPoolFlags = bigPoolFlags;
         KswordARKMemoryEvidenceCopyWideLiteral(row.ownerName, KSWORD_ARK_MEMORY_EVIDENCE_OWNER_NAME_CHARS, L"BigPool");
         KswordARKMemoryEvidenceFillSample(&row, address, Limits->SampleBytes);
-        KswordARKMemoryEvidenceFillTagWide(entry->TagChars, tagText);
+        KswordARKMemoryEvidenceFillTagWide(entry->Tag.TagChars, tagText);
         (VOID)RtlStringCchPrintfW(
             row.detail,
             KSWORD_ARK_MEMORY_EVIDENCE_DETAIL_CHARS,

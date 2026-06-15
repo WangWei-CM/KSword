@@ -1,6 +1,7 @@
 #include "MiscDock.h"
 
 #include "BootEditor/BootEditorTab.h"
+#include "ContextMenuCleaner/ContextMenuCleanerTab.h"
 #include "DiskEditor/DiskEditorTab.h"
 
 #include <QIcon>
@@ -30,6 +31,15 @@ void MiscDock::initializeUi()
 
     m_bootEditorTab = new BootEditorTab(m_mainTabWidget);
     m_mainTabWidget->addTab(m_bootEditorTab, QStringLiteral("引导"));
+
+    // 右键菜单清理页：
+    // - 分为 IE / 桌面 / 文件三个子 Tab；
+    // - 仅做注册表枚举与显式删除，不自动动任何系统项。
+    m_contextMenuCleanerTab = new ks::misc::ContextMenuCleanerTab(m_mainTabWidget);
+    m_mainTabWidget->addTab(
+        m_contextMenuCleanerTab,
+        QIcon(QStringLiteral(":/Icon/process_terminate.svg")),
+        QStringLiteral("右键菜单清理"));
 
     // 磁盘编辑页：
     // - 参考 DiskGenius 类工具布局，提供横向柱形分区图；
