@@ -201,6 +201,16 @@ private:
     bool queryR0DriverServiceRunning(bool& runningOut, bool fatalOnError);
     bool startR0DriverService();
     bool stopR0DriverService(bool suppressErrorDialog = false);
+    // stopR0RuntimeConsumersBeforeServiceStop 作用：
+    // - 输入：无；
+    // - 处理：在停止 KswordARK 服务前关闭本进程长期持有的 R0 日志/回调等待句柄；
+    // - 返回：无返回值，底层 stop 调用按 best-effort 释放资源。
+    void stopR0RuntimeConsumersBeforeServiceStop();
+    // startR0RuntimeConsumersAfterServiceStart 作用：
+    // - 输入：无；
+    // - 处理：在 KswordARK 服务启动或确认运行后恢复日志轮询和回调等待管理器；
+    // - 返回：无返回值，重复调用会被各子模块幂等忽略。
+    void startR0RuntimeConsumersAfterServiceStart();
     void startR0DriverLogPoller();
     void stopR0DriverLogPoller();
     void runR0DriverLogPollerLoop();
