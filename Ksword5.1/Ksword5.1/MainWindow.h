@@ -201,6 +201,11 @@ private:
     bool queryR0DriverServiceRunning(bool& runningOut, bool fatalOnError);
     bool startR0DriverService();
     bool stopR0DriverService(bool suppressErrorDialog = false);
+    // prepareR0DriverServiceStop 作用：
+    // - 输入：无；
+    // - 处理：在 SCM 停止 KswordARK 前统一收敛 R3 长连接和 R0 运行时状态；
+    // - 返回：无返回值；所有清理均为 best-effort，失败只写日志，不阻断真正的停驱请求。
+    void prepareR0DriverServiceStop();
     // stopR0RuntimeConsumersBeforeServiceStop 作用：
     // - 输入：无；
     // - 处理：在停止 KswordARK 服务前关闭本进程长期持有的 R0 日志/回调等待句柄；

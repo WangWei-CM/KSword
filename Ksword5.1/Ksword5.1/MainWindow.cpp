@@ -53,6 +53,7 @@
 #include "Framework/ProgressDockWidget.h"
 #include "Framework/CustomTitleBar.h"
 #include "include/ads/DockWidgetTab.h"
+#include "ArkDriverClient/ArkDriverClient.h"
 #include "KernelDock/KernelDock.CallbackPromptManager.h"
 #include "UI/CodeEditorWidget.h"
 #include "UI/GlobalDialogTheme.h"
@@ -2221,7 +2222,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     {
         m_privilegeStatusTimer->stop();
     }
-    stopR0RuntimeConsumersBeforeServiceStop();
+    prepareR0DriverServiceStop();
     CallbackPromptManager::shutdownGlobalManager();
 
     // 关闭窗口时自动停止 R0 驱动：
@@ -4383,6 +4384,72 @@ void MainWindow::startR0DriverLogPoller()
     }
 }
 
+void MainWindow::prepareR0DriverServiceStop()
+{
+    // 停驱前统一清理入口：
+    // 输入：无。
+    // 处理：
+    // - 先关闭本进程长期持有的日志/回调等待句柄；
+    // - 再尽力通知驱动取消待决策回调、停止并清空文件监控运行态；
+    // - 这些 IOCTL 失败不阻断 SCM stop，因为服务可能已经在停止或旧驱动不支持对应能力。
+    // 返回：无返回值；清理结果只进入日志，真正的停驱结果仍由 stopR0DriverService 返回。
+    stopR0RuntimeConsumersBeforeServiceStop();
+
+    const auto logBestEffortCleanupResult =
+        [](const char* operationName, const ksword::ark::IoResult& ioResult)
+        {
+            kLogEvent cleanupEvent;
+            if (ioResult.ok)
+            {
+                info << cleanupEvent
+                    << "[MainWindow][R0] 停驱前清理完成: "
+                    << operationName
+                    << ", "
+                    << ioResult.message
+                    << eol;
+                return;
+            }
+
+            const DWORD win32Error = static_cast<DWORD>(ioResult.win32Error);
+            if (win32Error == ERROR_FILE_NOT_FOUND ||
+                win32Error == ERROR_PATH_NOT_FOUND ||
+                win32Error == ERROR_INVALID_HANDLE ||
+                win32Error == ERROR_DEVICE_NOT_CONNECTED ||
+                win32Error == ERROR_SERVICE_NOT_ACTIVE)
+            {
+                dbg << cleanupEvent
+                    << "[MainWindow][R0] 停驱前清理跳过: "
+                    << operationName
+                    << ", error="
+                    << win32Error
+                    << ", message="
+                    << ioResult.message
+                    << eol;
+                return;
+            }
+
+            warn << cleanupEvent
+                << "[MainWindow][R0] 停驱前清理失败但继续停驱: "
+                << operationName
+                << ", error="
+                << win32Error
+                << ", message="
+                << ioResult.message
+                << eol;
+        };
+
+    const ksword::ark::DriverClient driverClient;
+    logBestEffortCleanupResult(
+        "cancel-pending-callback-decisions",
+        driverClient.cancelAllPendingCallbackDecisions());
+    logBestEffortCleanupResult(
+        "file-monitor-stop",
+        driverClient.controlFileMonitor(KSWORD_ARK_FILE_MONITOR_ACTION_STOP));
+    logBestEffortCleanupResult(
+        "file-monitor-clear",
+        driverClient.controlFileMonitor(KSWORD_ARK_FILE_MONITOR_ACTION_CLEAR));
+}
+
 void MainWindow::stopR0RuntimeConsumersBeforeServiceStop()
 {
     // 手动 R0 卸载前必须先收敛本进程持有的驱动设备句柄：
@@ -4719,7 +4786,7 @@ bool MainWindow::stopR0DriverService(const bool suppressErrorDialog)
 
     if (status.dwCurrentState != SERVICE_STOPPED)
     {
-        stopR0RuntimeConsumersBeforeServiceStop();
+        prepareR0DriverServiceStop();
 
         if (status.dwCurrentState != SERVICE_STOP_PENDING)
         {

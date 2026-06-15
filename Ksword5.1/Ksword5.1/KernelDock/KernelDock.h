@@ -27,7 +27,6 @@ class QLineEdit;
 class QPushButton;
 class QComboBox;
 class QProgressBar;
-class QScrollArea;
 class QTableWidget;
 class QTabWidget;
 class QTreeWidget;
@@ -457,9 +456,11 @@ private:
     // - 作用：创建“驱动回调”页签（规则组/规则编辑/导入导出/应用/状态）。
     void initializeCallbackInterceptTab();
 
-    // initializeCallbackRemoveTab：
-    // - 作用：创建“回调移除”页签（移除其他驱动注册的 notify 回调）。
-    void initializeCallbackRemoveTab();
+    // initializeCallbackRemovePanel：
+    // - 输入：无，依赖已经创建的“回调遍历”页布局作为宿主。
+    // - 处理：在“回调遍历”页底部创建手动回调移除面板，复用旧版类型/地址/结果详情控件。
+    // - 返回：无；函数内部通过成员指针记录控件，重复调用会直接返回。
+    void initializeCallbackRemovePanel();
 
     // initializeCallbackEnumTab：
     // - 作用：创建“回调遍历”页签，展示 R0 枚举到的回调记录。
@@ -555,12 +556,6 @@ private:
     // - 作用：页签惰性初始化前显示顶部不确定进度条，减少空白等待感。
     // - 参数 tabIndex：目标页签索引；参数 titleText：页签中文名称。
     void showTabInitializingProgress(int tabIndex, const QString& titleText);
-
-    // wrapPageInScrollArea：
-    // - 作用：创建页面滚动区域，让页面空白处也能响应滚轮滚动。
-    // - 参数 pageWidget：页签页面；参数 contentWidgetOut：输出真实内容容器。
-    // - 返回：真实内容容器的垂直布局。
-    QVBoxLayout* wrapPageInScrollArea(QWidget* pageWidget, QWidget** contentWidgetOut);
 
     // hideTabInitializingProgress：
     // - 作用：页签内容构建完成后隐藏初始化进度条。
@@ -807,7 +802,6 @@ private:
     int m_ntQueryTabIndex = -1;          // m_ntQueryTabIndex：历史 NtQuery 页签索引。
     int m_callbackTabIndex = -1;         // m_callbackTabIndex：驱动回调页签索引。
     int m_callbackEnumTabIndex = -1;     // m_callbackEnumTabIndex：回调遍历页签索引。
-    int m_callbackRemoveTabIndex = -1;   // m_callbackRemoveTabIndex：回调移除页签索引。
     int m_shadowSsdtTabIndex = -1;       // m_shadowSsdtTabIndex：SSSDT 解析页签索引。
     int m_inlineHookTabIndex = -1;       // m_inlineHookTabIndex：Inline Hook 页签索引。
     int m_iatEatHookTabIndex = -1;       // m_iatEatHookTabIndex：IAT/EAT Hook 页签索引。
@@ -819,7 +813,6 @@ private:
     bool m_ntQueryTabInitialized = false;         // m_ntQueryTabInitialized：历史 NtQuery 页是否已初始化。
     bool m_callbackTabInitialized = false;        // m_callbackTabInitialized：驱动回调页是否已初始化。
     bool m_callbackEnumTabInitialized = false;    // m_callbackEnumTabInitialized：回调遍历页是否已初始化。
-    bool m_callbackRemoveTabInitialized = false;  // m_callbackRemoveTabInitialized：回调移除页是否已初始化。
     bool m_shadowSsdtTabInitialized = false;      // m_shadowSsdtTabInitialized：SSSDT 页是否已初始化。
     bool m_inlineHookTabInitialized = false;      // m_inlineHookTabInitialized：Inline Hook 页是否已初始化。
     bool m_iatEatHookTabInitialized = false;      // m_iatEatHookTabInitialized：IAT/EAT 页是否已初始化。
@@ -935,10 +928,8 @@ private:
     QLabel* m_callbackEnumStatusLabel = nullptr;                    // m_callbackEnumStatusLabel：回调遍历状态文本。
     QTableWidget* m_callbackEnumTable = nullptr;                    // m_callbackEnumTable：回调遍历表。
     CodeEditorWidget* m_callbackEnumDetailEditor = nullptr;         // m_callbackEnumDetailEditor：回调遍历详情文本框。
-    QWidget* m_callbackRemovePage = nullptr;                        // m_callbackRemovePage：回调移除页容器。
-    QVBoxLayout* m_callbackRemoveLayout = nullptr;                  // m_callbackRemoveLayout：回调移除页布局。
-    QWidget* m_callbackRemoveContentWidget = nullptr;               // m_callbackRemoveContentWidget：回调移除页滚动内容容器。
-    QScrollArea* m_callbackRemoveScrollArea = nullptr;              // m_callbackRemoveScrollArea：回调移除页滚动区域。
+    QWidget* m_callbackRemoveContentWidget = nullptr;               // m_callbackRemoveContentWidget：嵌入在回调遍历页底部的移除面板容器。
+    QVBoxLayout* m_callbackRemoveLayout = nullptr;                  // m_callbackRemoveLayout：回调移除面板内部布局。
     QHBoxLayout* m_callbackRemoveToolLayout = nullptr;              // m_callbackRemoveToolLayout：回调移除工具栏布局。
     QComboBox* m_callbackRemoveTypeCombo = nullptr;                 // m_callbackRemoveTypeCombo：回调类型下拉框。
     QLineEdit* m_callbackRemoveAddressEdit = nullptr;               // m_callbackRemoveAddressEdit：回调地址输入框。

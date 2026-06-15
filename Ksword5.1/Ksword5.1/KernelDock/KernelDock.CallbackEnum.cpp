@@ -1421,6 +1421,8 @@ void KernelDock::initializeCallbackEnumTab()
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
 
+    initializeCallbackRemovePanel();
+
     connect(m_refreshCallbackEnumButton, &QPushButton::clicked, this, [this]() {
         refreshCallbackEnumAsync();
     });
