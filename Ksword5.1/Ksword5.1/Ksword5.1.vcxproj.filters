@@ -74,6 +74,15 @@
     <ClCompile Include="MiscDock\DiskEditor\DiskMapWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MiscDock\ContextMenuCleaner\ContextMenuCleanerTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\ContextMenuCleaner\ContextMenuCleanerTab.Helpers.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MiscDock\ContextMenuCleaner\ContextMenuCleanerTab.Registry.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DriverDock\DriverDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -616,6 +625,12 @@
     <QtMoc Include="MiscDock\BootEditor\BootEditorTab.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="MiscDock\ContextMenuCleaner\ContextMenuCleanerTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MiscDock\ContextMenuCleaner\ContextMenuCleanerTab.Internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="MiscDock\DiskEditor\DiskAdvancedModels.h">
       <Filter>Header Files</Filter>
     </ClInclude>

@@ -8,6 +8,12 @@
 // - 仅供 DriverDock 内部实现使用，不改变 DriverDock 对外接口。
 // ============================================================
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#include <winioctl.h>
+
 #include "DriverDock.h"
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
@@ -16,6 +22,7 @@
 #include <QAction>
 #include <QBrush>
 #include <QChar>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
@@ -42,6 +49,7 @@
 #include <QRunnable>
 #include <QShowEvent>
 #include <QSplitter>
+#include <QSpinBox>
 #include <QStringList>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -61,10 +69,6 @@
 #include <thread>
 #include <vector>
 
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
 #include <Psapi.h>
 #include <winsvc.h>
 

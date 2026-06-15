@@ -45,6 +45,7 @@
 #include <QVBoxLayout>
 
 #include <Windows.h>
+#include <Objbase.h>
 
 #include <algorithm>  // std::sort：过滤后排序。
 #include <cstdint>    // std::uint8_t：Win32 缓冲区字节容器。

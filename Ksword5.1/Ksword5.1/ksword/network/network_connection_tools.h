@@ -19,6 +19,7 @@
 #include <cstddef>      // std::size_t：容器索引与长度。
 #include <cstdint>      // 固定宽度整数：PID/IP/Port 等字段。
 #include <cstring>      // std::memset：结构体清零保护。
+#include <sstream>      // std::ostringstream：错误详情与四元组诊断文本。
 #include <string>       // std::string：跨层文本表达。
 #include <unordered_map>// PID -> 进程名缓存，避免重复查询。
 #include <utility>      // std::move：记录对象移动进容器。
@@ -51,11 +52,15 @@ namespace ks::network
         bool isIpv6 = false;                   // 地址族标识：false=IPv4，true=IPv6。
 
         std::uint32_t localIpv4HostOrder = 0;  // 本地 IPv4（主机序，终止连接时使用）。
+        std::uint32_t localIpv4NetworkOrder = 0; // 本地 IPv4（网络序原始值，提交 SetTcpEntry 时优先使用）。
         std::uint16_t localPort = 0;           // 本地端口（主机序）。
+        std::uint32_t localPortNetworkOrder = 0; // 本地端口（IP Helper 原始 DWORD，保留高位兼容 Windows 表项布局）。
         std::string localAddressText;          // 本地地址文本（IPv4/IPv6）。
 
         std::uint32_t remoteIpv4HostOrder = 0; // 远端 IPv4（主机序，终止连接时使用）。
+        std::uint32_t remoteIpv4NetworkOrder = 0; // 远端 IPv4（网络序原始值，提交 SetTcpEntry 时优先使用）。
         std::uint16_t remotePort = 0;          // 远端端口（主机序）。
+        std::uint32_t remotePortNetworkOrder = 0; // 远端端口（IP Helper 原始 DWORD，保留高位兼容 Windows 表项布局）。
         std::string remoteAddressText;         // 远端地址文本（IPv4/IPv6）。
 
         std::uint32_t tcpStateCode = 0;        // MIB_TCP_STATE_* 原始值。
@@ -160,6 +165,120 @@ namespace ks::network
             const auto insertResult = processNameCache.insert({ processId, processName });
             return insertResult.first->second;
         }
+
+        // IsIpv4TcpEndpointEqual：
+        // - 输入：一个当前系统 TCP 行和一个 UI 缓存连接记录；
+        // - 处理：逐项比较 IPv4 四元组，并可选比较 PID；
+        // - 返回：完全匹配时返回 true，否则返回 false。
+        inline bool IsIpv4TcpEndpointEqual(
+            const MIB_TCPROW_OWNER_PID& row,
+            const TcpConnectionRecord& connectionRecord,
+            const bool compareProcessId)
+        {
+            if (connectionRecord.isIpv6)
+            {
+                return false;
+            }
+            if (compareProcessId &&
+                static_cast<std::uint32_t>(row.dwOwningPid) != connectionRecord.processId)
+            {
+                return false;
+            }
+            const std::uint32_t rowLocalPort = row.dwLocalPort & 0xFFFFU;
+            const std::uint32_t rowRemotePort = row.dwRemotePort & 0xFFFFU;
+            const std::uint32_t recordLocalPort = connectionRecord.localPortNetworkOrder & 0xFFFFU;
+            const std::uint32_t recordRemotePort = connectionRecord.remotePortNetworkOrder & 0xFFFFU;
+            return row.dwLocalAddr == connectionRecord.localIpv4NetworkOrder &&
+                row.dwRemoteAddr == connectionRecord.remoteIpv4NetworkOrder &&
+                rowLocalPort == recordLocalPort &&
+                rowRemotePort == recordRemotePort;
+        }
+
+        // BuildDeleteTcpRowFromOwnerPidRow：
+        // - 输入：GetExtendedTcpTable 返回的 IPv4 TCP 原始行；
+        // - 处理：保留原始地址/端口 DWORD，仅把状态改成 DELETE_TCB；
+        // - 返回：可直接传给 SetTcpEntry 的 MIB_TCPROW。
+        inline MIB_TCPROW BuildDeleteTcpRowFromOwnerPidRow(const MIB_TCPROW_OWNER_PID& sourceRow)
+        {
+            MIB_TCPROW tcpRow{};
+            std::memset(&tcpRow, 0, sizeof(tcpRow));
+            tcpRow.dwState = MIB_TCP_STATE_DELETE_TCB;
+            tcpRow.dwLocalAddr = sourceRow.dwLocalAddr;
+            tcpRow.dwLocalPort = sourceRow.dwLocalPort;
+            tcpRow.dwRemoteAddr = sourceRow.dwRemoteAddr;
+            tcpRow.dwRemotePort = sourceRow.dwRemotePort;
+            return tcpRow;
+        }
+
+        // BuildDeleteTcpRowFromRecord：
+        // - 输入：UI 缓存的 IPv4 TCP 记录；
+        // - 处理：优先使用枚举时保存的原始网络序地址/端口，缺失时才回退主机序转换；
+        // - 返回：可直接传给 SetTcpEntry 的 MIB_TCPROW。
+        inline MIB_TCPROW BuildDeleteTcpRowFromRecord(const TcpConnectionRecord& connectionRecord)
+        {
+            MIB_TCPROW tcpRow{};
+            std::memset(&tcpRow, 0, sizeof(tcpRow));
+            tcpRow.dwState = MIB_TCP_STATE_DELETE_TCB;
+            tcpRow.dwLocalAddr = connectionRecord.localIpv4NetworkOrder != 0
+                ? connectionRecord.localIpv4NetworkOrder
+                : htonl(connectionRecord.localIpv4HostOrder);
+            tcpRow.dwRemoteAddr = connectionRecord.remoteIpv4NetworkOrder != 0
+                ? connectionRecord.remoteIpv4NetworkOrder
+                : htonl(connectionRecord.remoteIpv4HostOrder);
+            tcpRow.dwLocalPort = connectionRecord.localPortNetworkOrder != 0
+                ? static_cast<DWORD>(connectionRecord.localPortNetworkOrder & 0xFFFFU)
+                : static_cast<DWORD>(htons(connectionRecord.localPort));
+            tcpRow.dwRemotePort = connectionRecord.remotePortNetworkOrder != 0
+                ? static_cast<DWORD>(connectionRecord.remotePortNetworkOrder & 0xFFFFU)
+                : static_cast<DWORD>(htons(connectionRecord.remotePort));
+            return tcpRow;
+        }
+
+        // FormatSetTcpEntryFailure：
+        // - 输入：SetTcpEntry 返回码；
+        // - 处理：把常见错误码补充成 UI 可读诊断，尤其区分权限、参数和连接已变化；
+        // - 返回：可直接展示/记录的 UTF-8 文本。
+        inline std::string FormatSetTcpEntryFailure(const DWORD setResult)
+        {
+            std::ostringstream stream;
+            stream << "SetTcpEntry failed, code=" << setResult;
+            if (setResult == ERROR_ACCESS_DENIED)
+            {
+                stream << " (需要以管理员权限运行，或目标连接受系统策略保护)";
+            }
+            else if (setResult == 317)
+            {
+                stream << " (当前进程可能未提升权限运行，请以管理员权限启动后重试)";
+            }
+            else if (setResult == ERROR_INVALID_PARAMETER)
+            {
+                stream << " (连接四元组无效、连接状态已变化，或该行不是可删除的 IPv4 TCP 连接)";
+            }
+            else if (setResult == ERROR_NOT_SUPPORTED)
+            {
+                stream << " (本机 IPv4 传输未配置或系统不支持该操作)";
+            }
+            else if (setResult == ERROR_NOT_FOUND)
+            {
+                stream << " (连接已不存在或快照已过期)";
+            }
+            return stream.str();
+        }
+
+        // AppendTcpEndpointText：
+        // - 输入：连接记录；
+        // - 处理：把 PID、状态、本地/远端端点追加到已有诊断流；
+        // - 返回：无。
+        inline void AppendTcpEndpointText(
+            std::ostringstream& stream,
+            const TcpConnectionRecord& connectionRecord)
+        {
+            stream
+                << " pid=" << connectionRecord.processId
+                << " state=" << connectionRecord.tcpStateText
+                << " local=" << connectionRecord.localAddressText << ":" << connectionRecord.localPort
+                << " remote=" << connectionRecord.remoteAddressText << ":" << connectionRecord.remotePort;
+        }
     } // namespace connection_detail
 
     // EnumerateTcpConnectionRecords：
@@ -227,9 +346,13 @@ namespace ks::network
                     record.processId = static_cast<std::uint32_t>(row.dwOwningPid);
                     record.processName = connection_detail::FillProcessNameCacheIfNeeded(record.processId, processNameCache);
                     record.localIpv4HostOrder = ntohl(row.dwLocalAddr);
+                    record.localIpv4NetworkOrder = row.dwLocalAddr;
                     record.remoteIpv4HostOrder = ntohl(row.dwRemoteAddr);
+                    record.remoteIpv4NetworkOrder = row.dwRemoteAddr;
                     record.localPort = ntohs(static_cast<u_short>(row.dwLocalPort));
+                    record.localPortNetworkOrder = row.dwLocalPort;
                     record.remotePort = ntohs(static_cast<u_short>(row.dwRemotePort));
+                    record.remotePortNetworkOrder = row.dwRemotePort;
                     record.localAddressText = connection_detail::Ipv4NetworkOrderToText(row.dwLocalAddr);
                     record.remoteAddressText = connection_detail::Ipv4NetworkOrderToText(row.dwRemoteAddr);
                     record.tcpStateCode = static_cast<std::uint32_t>(row.dwState);
@@ -287,9 +410,13 @@ namespace ks::network
                     record.processId = static_cast<std::uint32_t>(row.dwOwningPid);
                     record.processName = connection_detail::FillProcessNameCacheIfNeeded(record.processId, processNameCache);
                     record.localIpv4HostOrder = 0;
+                    record.localIpv4NetworkOrder = 0;
                     record.remoteIpv4HostOrder = 0;
+                    record.remoteIpv4NetworkOrder = 0;
                     record.localPort = ntohs(static_cast<u_short>(row.dwLocalPort));
+                    record.localPortNetworkOrder = row.dwLocalPort;
                     record.remotePort = ntohs(static_cast<u_short>(row.dwRemotePort));
+                    record.remotePortNetworkOrder = row.dwRemotePort;
                     record.localAddressText = connection_detail::Ipv6BytesToText(row.ucLocalAddr);
                     record.remoteAddressText = connection_detail::Ipv6BytesToText(row.ucRemoteAddr);
                     record.tcpStateCode = static_cast<std::uint32_t>(row.dwState);
@@ -551,29 +678,103 @@ namespace ks::network
             return false;
         }
 
-        // 按 Win32 要求组装 MIB_TCPROW，地址/端口都需转换为网络序。
-        MIB_TCPROW tcpRow{};
-        std::memset(&tcpRow, 0, sizeof(tcpRow));
-        tcpRow.dwState = MIB_TCP_STATE_DELETE_TCB;
-        tcpRow.dwLocalAddr = htonl(connectionRecord.localIpv4HostOrder);
-        tcpRow.dwRemoteAddr = htonl(connectionRecord.remoteIpv4HostOrder);
-        tcpRow.dwLocalPort = static_cast<DWORD>(htons(connectionRecord.localPort));
-        tcpRow.dwRemotePort = static_cast<DWORD>(htons(connectionRecord.remotePort));
+        // Windows 公开的 SetTcpEntry 仅接受 IPv4 MIB_TCPROW：
+        // - 文档/SDK 头说明只能把状态设置为 MIB_TCP_STATE_DELETE_TCB；
+        // - 必须提交完整的 MIB_TCPROW；
+        // - 因此关闭前重新读取当前 TCP 表，尽量用系统返回的原始 DWORD 行提交，
+        //   避免 UI 快照过期或端口 DWORD 重组差异导致 ERROR_INVALID_PARAMETER。
+        ULONG requiredBufferLength = 0;
+        DWORD queryResult = ::GetExtendedTcpTable(
+            nullptr,
+            &requiredBufferLength,
+            TRUE,
+            AF_INET,
+            TCP_TABLE_OWNER_PID_ALL,
+            0);
+
+        MIB_TCPROW deleteRow = connection_detail::BuildDeleteTcpRowFromRecord(connectionRecord);
+        bool matchedCurrentRow = false;
+        bool matchedWithoutPid = false;
+        if (queryResult == ERROR_INSUFFICIENT_BUFFER && requiredBufferLength > 0)
+        {
+            std::vector<std::uint8_t> tableBuffer(requiredBufferLength, 0);
+            auto* tcpTable = reinterpret_cast<PMIB_TCPTABLE_OWNER_PID>(tableBuffer.data());
+            queryResult = ::GetExtendedTcpTable(
+                tcpTable,
+                &requiredBufferLength,
+                TRUE,
+                AF_INET,
+                TCP_TABLE_OWNER_PID_ALL,
+                0);
+            if (queryResult == NO_ERROR)
+            {
+                for (DWORD rowIndex = 0; rowIndex < tcpTable->dwNumEntries; ++rowIndex)
+                {
+                    const MIB_TCPROW_OWNER_PID& row = tcpTable->table[rowIndex];
+                    if (connection_detail::IsIpv4TcpEndpointEqual(row, connectionRecord, true))
+                    {
+                        deleteRow = connection_detail::BuildDeleteTcpRowFromOwnerPidRow(row);
+                        matchedCurrentRow = true;
+                        break;
+                    }
+                    if (!matchedWithoutPid &&
+                        connection_detail::IsIpv4TcpEndpointEqual(row, connectionRecord, false))
+                    {
+                        matchedWithoutPid = true;
+                    }
+                }
+
+                if (!matchedCurrentRow)
+                {
+                    std::ostringstream staleStream;
+                    staleStream << "当前 TCP 表未找到完全匹配连接";
+                    if (matchedWithoutPid)
+                    {
+                        staleStream << "（四元组仍存在，但 PID 已变化）";
+                    }
+                    else
+                    {
+                        staleStream << "（连接可能已关闭或快照已过期）";
+                    }
+                    connection_detail::AppendTcpEndpointText(staleStream, connectionRecord);
+                    if (detailTextOut != nullptr)
+                    {
+                        *detailTextOut = staleStream.str();
+                    }
+                    return false;
+                }
+            }
+        }
 
         // SetTcpEntry 返回 NO_ERROR 表示成功，其它值均视为失败。
-        const DWORD setResult = ::SetTcpEntry(&tcpRow);
+        const DWORD setResult = ::SetTcpEntry(&deleteRow);
         if (setResult != NO_ERROR)
         {
             if (detailTextOut != nullptr)
             {
-                *detailTextOut = "SetTcpEntry failed, code=" + std::to_string(setResult);
+                std::ostringstream failStream;
+                failStream << connection_detail::FormatSetTcpEntryFailure(setResult);
+                connection_detail::AppendTcpEndpointText(failStream, connectionRecord);
+                if (!matchedCurrentRow)
+                {
+                    failStream << " (使用缓存行回退提交";
+                    if (queryResult != ERROR_INSUFFICIENT_BUFFER && queryResult != NO_ERROR)
+                    {
+                        failStream << ", GetExtendedTcpTable code=" << queryResult;
+                    }
+                    failStream << ")";
+                }
+                *detailTextOut = failStream.str();
             }
             return false;
         }
 
         if (detailTextOut != nullptr)
         {
-            *detailTextOut = "SetTcpEntry succeeded.";
+            std::ostringstream successStream;
+            successStream << "SetTcpEntry DELETE_TCB succeeded";
+            connection_detail::AppendTcpEndpointText(successStream, connectionRecord);
+            *detailTextOut = successStream.str();
         }
         return true;
     }

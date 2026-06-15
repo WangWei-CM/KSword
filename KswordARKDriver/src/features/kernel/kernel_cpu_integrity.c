@@ -23,6 +23,13 @@ Environment:
 #ifndef ALL_PROCESSOR_GROUPS
 #define ALL_PROCESSOR_GROUPS 0xFFFFU
 #endif
+#if defined(_M_AMD64) || defined(_M_X64)
+extern void _sgdt(void*);
+#pragma intrinsic(_sgdt)
+#define KswordARKCpuStoreGdtr _sgdt
+#else
+#define KswordARKCpuStoreGdtr(_Destination) UNREFERENCED_PARAMETER(_Destination)
+#endif
 #pragma pack(push, 1)
 typedef struct _KSW_CPU_INTEGRITY_DESCRIPTOR_REGISTER
 {
@@ -462,7 +469,7 @@ Return Value:
     Sample->Lstar = __readmsr(KSW_CPU_INTEGRITY_MSR_LSTAR);
     Sample->SysenterEip = __readmsr(KSW_CPU_INTEGRITY_MSR_SYSENTER_EIP);
     __sidt(&Sample->Idtr);
-    __sgdt(&Sample->Gdtr);
+    KswordARKCpuStoreGdtr(&Sample->Gdtr);
     Sample->Captured = 1UL;
 #else
     UNREFERENCED_PARAMETER(Sample);

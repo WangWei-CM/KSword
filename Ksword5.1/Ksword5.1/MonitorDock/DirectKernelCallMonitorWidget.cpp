@@ -1,4 +1,4 @@
-﻿#include "DirectKernelCallMonitorWidget.h"
+#include "DirectKernelCallMonitorWidget.h"
 
 // ============================================================
 // DirectKernelCallMonitorWidget.cpp
@@ -49,6 +49,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <Objbase.h>
 #include <TlHelp32.h>
 #include <evntrace.h>
 #include <evntcons.h>

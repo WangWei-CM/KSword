@@ -5,7 +5,7 @@
 // 作用：
 // 1) 提供“杂项”总入口页；
 // 2) 通过内部 Tab 承载子功能模块；
-// 3) 当前首个子模块为“引导（Windows Boot Editor）”。
+// 3) 当前包含“引导”“右键菜单清理”“磁盘编辑”等子模块。
 // ============================================================
 
 #include "../Framework.h"
@@ -18,6 +18,7 @@ class BootEditorTab;
 namespace ks::misc
 {
     class DiskEditorTab;
+    class ContextMenuCleanerTab;
 }
 
 class MiscDock final : public QWidget
@@ -42,4 +43,5 @@ private:
     QTabWidget* m_mainTabWidget = nullptr;    // m_mainTabWidget：杂项页内部 Tab 容器。
     BootEditorTab* m_bootEditorTab = nullptr; // m_bootEditorTab：引导编辑器页组件。
     ks::misc::DiskEditorTab* m_diskEditorTab = nullptr; // m_diskEditorTab：磁盘编辑器页组件。
+    ks::misc::ContextMenuCleanerTab* m_contextMenuCleanerTab = nullptr; // m_contextMenuCleanerTab：右键菜单清理页组件。
 };

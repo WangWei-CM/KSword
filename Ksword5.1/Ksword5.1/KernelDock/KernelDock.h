@@ -365,7 +365,9 @@ struct KernelDriverStatusSummary
     QString ntoskrnlModuleNameText;          // ntoskrnlModuleNameText：当前 ntoskrnl 模块名。
     std::uint32_t localPdbProfilePackProfileCount = 0; // localPdbProfilePackProfileCount：命中 pack 声明的 profile 总数。
     std::uint32_t localPdbProfileFieldCount = 0; // localPdbProfileFieldCount：命中 profile 声明字段数。
+    std::uint32_t localPdbProfileTypedItemCount = 0; // localPdbProfileTypedItemCount：命中 profile 声明 v3 typed items 数。
     std::uint32_t localPdbProfileCallbackItemCount = 0; // localPdbProfileCallbackItemCount：命中 profile 声明 callbackItems 数。
+    double localPdbProfileCoveragePercent = -1.0; // localPdbProfileCoveragePercent：release_sync 写入的 profile 覆盖率，负数表示未知。
     QString localPdbProfileNameText;         // localPdbProfileNameText：本地 pack 命中的 profile 名。
     QString localPdbProfileVersionText;      // localPdbProfileVersionText：从 profile 名提取的 Windows 版本号。
     QString localPdbProfilePathText;         // localPdbProfilePathText：命中 pack 文件路径。

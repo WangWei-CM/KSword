@@ -82,7 +82,7 @@ KswordARKMutationEnsureInitialized(VOID)
         return;
     }
     while (InterlockedCompareExchange((volatile LONG*)&g_KswordArkMutationInitState, KSWORD_ARK_MUTATION_READY, KSWORD_ARK_MUTATION_READY) != KSWORD_ARK_MUTATION_READY) {
-        KeYieldProcessor();
+        YieldProcessor();
     }
 }
 

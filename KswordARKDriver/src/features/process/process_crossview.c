@@ -113,7 +113,7 @@ ObGetObjectType(
     _In_ PVOID Object
     );
 
-extern PEPROCESS PsInitialSystemProcess;
+extern NTKERNELAPI PEPROCESS PsInitialSystemProcess;
 extern POBJECT_TYPE* PsProcessType;
 
 static PVOID
