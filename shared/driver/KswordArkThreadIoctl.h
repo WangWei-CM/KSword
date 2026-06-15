@@ -13,6 +13,7 @@
 #define KSWORD_ARK_THREAD_PROTOCOL_VERSION 1UL
 
 #define KSWORD_ARK_IOCTL_FUNCTION_ENUM_THREAD 0x80B
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_THREAD_CROSSVIEW 0x837UL
 
 #define IOCTL_KSWORD_ARK_ENUM_THREAD \
     CTL_CODE( \
@@ -21,11 +22,28 @@
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
 
+#define IOCTL_KSWORD_ARK_QUERY_THREAD_CROSSVIEW \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_THREAD_CROSSVIEW, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
 #define KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_STACK    0x00000001UL
 #define KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_IO       0x00000002UL
 #define KSWORD_ARK_ENUM_THREAD_FLAG_SCAN_CID_TABLE   0x00000004UL
 #define KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_ALL \
     (KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_STACK | KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_IO)
+
+#define KSWORD_ARK_THREAD_CROSSVIEW_FLAG_INCLUDE_PUBLIC_WALK 0x00000001UL
+#define KSWORD_ARK_THREAD_CROSSVIEW_FLAG_INCLUDE_THREAD_LIST 0x00000002UL
+#define KSWORD_ARK_THREAD_CROSSVIEW_FLAG_INCLUDE_CID_TABLE   0x00000004UL
+#define KSWORD_ARK_THREAD_CROSSVIEW_FLAG_VALIDATE_START      0x00000008UL
+#define KSWORD_ARK_THREAD_CROSSVIEW_FLAG_INCLUDE_ALL \
+    (KSWORD_ARK_THREAD_CROSSVIEW_FLAG_INCLUDE_PUBLIC_WALK | \
+     KSWORD_ARK_THREAD_CROSSVIEW_FLAG_INCLUDE_THREAD_LIST | \
+     KSWORD_ARK_THREAD_CROSSVIEW_FLAG_INCLUDE_CID_TABLE | \
+     KSWORD_ARK_THREAD_CROSSVIEW_FLAG_VALIDATE_START)
 
 #define KSWORD_ARK_THREAD_FLAG_KERNEL_ENUMERATED                0x00000001UL
 #define KSWORD_ARK_THREAD_FLAG_HIDDEN_FROM_ACTIVE_THREAD_LIST   0x00000002UL
@@ -97,3 +115,48 @@ typedef struct _KSWORD_ARK_ENUM_THREAD_RESPONSE
     unsigned long entrySize;
     KSWORD_ARK_THREAD_ENTRY entries[1];
 } KSWORD_ARK_ENUM_THREAD_RESPONSE;
+
+typedef struct _KSWORD_ARK_THREAD_CROSSVIEW_REQUEST
+{
+    unsigned long version;
+    unsigned long flags;
+    unsigned long processId;
+    unsigned long startTid;
+    unsigned long endTid;
+    unsigned long maxNodes;
+    unsigned long reserved0;
+    unsigned long reserved1;
+} KSWORD_ARK_THREAD_CROSSVIEW_REQUEST;
+
+typedef struct _KSWORD_ARK_THREAD_CROSSVIEW_ROW
+{
+    unsigned long long objectAddress;
+    unsigned long long processObjectAddress;
+    unsigned long long startAddress;
+    unsigned long processId;
+    unsigned long threadId;
+    unsigned long sourceMask;
+    unsigned long anomalyFlags;
+    unsigned long long dynDataCapabilityMask;
+    KSWORD_ARK_CROSSVIEW_FIELD_OFFSETS fieldOffsets;
+    long lastStatus;
+    unsigned long confidence;
+    char imageName[16];
+    char detail[KSWORD_ARK_CROSSVIEW_DETAIL_CHARS];
+} KSWORD_ARK_THREAD_CROSSVIEW_ROW;
+
+typedef struct _KSWORD_ARK_THREAD_CROSSVIEW_RESPONSE
+{
+    unsigned long version;
+    unsigned long status;
+    unsigned long totalCount;
+    unsigned long returnedCount;
+    unsigned long entrySize;
+    unsigned long reserved;
+    unsigned long long dynDataCapabilityMask;
+    unsigned long long missingCapabilityMask;
+    long lastStatus;
+    unsigned long reserved2;
+    KSWORD_ARK_CROSSVIEW_FIELD_OFFSETS fieldOffsets;
+    KSWORD_ARK_THREAD_CROSSVIEW_ROW entries[1];
+} KSWORD_ARK_THREAD_CROSSVIEW_RESPONSE;

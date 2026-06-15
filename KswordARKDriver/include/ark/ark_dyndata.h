@@ -13,7 +13,20 @@ typedef struct _KSW_DYN_KERNEL_OFFSETS
 {
     ULONG EpObjectTable;
     ULONG EpSectionObject;
+    ULONG EpUniqueProcessId;
+    ULONG EpActiveProcessLinks;
+    ULONG EpThreadListHead;
+    ULONG EpImageFileName;
+    ULONG EpToken;
+    ULONG EtCid;
+    ULONG EtThreadListEntry;
+    ULONG EtStartAddress;
+    ULONG EtWin32StartAddress;
+    ULONG KtProcess;
     ULONG HtHandleContentionEvent;
+    ULONG HtTableCode;
+    ULONG HtHandleCount;
+    ULONG HteLowValue;
     ULONG OtName;
     ULONG OtIndex;
     ULONG ObDecodeShift;
@@ -49,6 +62,18 @@ typedef struct _KSW_DYN_KERNEL_OFFSETS
     ULONG EpProtection;
     ULONG EpSignatureLevel;
     ULONG EpSectionSignatureLevel;
+    ULONG KldrInLoadOrderLinks;
+    ULONG KldrDllBase;
+    ULONG KldrSizeOfImage;
+    ULONG KldrFullDllName;
+    ULONG KldrBaseDllName;
+    ULONG KldrFlags;
+    ULONG DoDriverStart;
+    ULONG DoDriverSize;
+    ULONG DoDriverSection;
+    ULONG DoMajorFunction;
+    ULONG DoFastIoDispatch;
+    ULONG DoDriverUnload;
 } KSW_DYN_KERNEL_OFFSETS, *PKSW_DYN_KERNEL_OFFSETS;
 
 typedef struct _KSW_DYN_LXCORE_OFFSETS
@@ -59,6 +84,25 @@ typedef struct _KSW_DYN_LXCORE_OFFSETS
     ULONG LxPicoThrdInfo;
     ULONG LxPicoThrdInfoTID;
 } KSW_DYN_LXCORE_OFFSETS, *PKSW_DYN_LXCORE_OFFSETS;
+
+/*
+ * KSW_DYN_KERNEL_GLOBALS
+ * Inputs:
+ * - Populated from R3 PDB profile EX GlobalRva items after ntoskrnl identity
+ *   matching.
+ * Processing:
+ * - Stores RVAs, not kernel virtual addresses, so consumers can validate them
+ *   against the active image and derive addresses from the current image base.
+ * Return behavior:
+ * - Plain state container; no function-like return value.
+ */
+typedef struct _KSW_DYN_KERNEL_GLOBALS
+{
+    ULONG PspCidTable;
+    ULONG PsLoadedModuleList;
+    ULONG MmUnloadedDrivers;
+    ULONG PiDDBCacheTable;
+} KSW_DYN_KERNEL_GLOBALS, *PKSW_DYN_KERNEL_GLOBALS;
 
 typedef struct _KSW_DYN_CALLBACK_GLOBALS
 {
@@ -113,6 +157,8 @@ typedef struct _KSW_DYN_STATE
     KSW_DYN_KERNEL_OFFSETS KernelSources;
     KSW_DYN_LXCORE_OFFSETS LxcoreOffsets;
     KSW_DYN_LXCORE_OFFSETS LxcoreSources;
+    KSW_DYN_KERNEL_GLOBALS KernelGlobals;
+    KSW_DYN_KERNEL_GLOBALS KernelGlobalSources;
     KSW_DYN_CALLBACK_GLOBALS CallbackGlobals;
     KSW_DYN_CALLBACK_GLOBALS CallbackGlobalSources;
     KSW_DYN_CALLBACK_OFFSETS CallbackOffsets;

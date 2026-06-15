@@ -35,7 +35,15 @@ typedef struct _KSW_DYN_FIELD_BINDING
 static const KSW_DYN_FIELD_BINDING g_KswordDynFieldBindings[] = {
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_OBJECT_TABLE, "EpObjectTable", "Process HandleTable", KSW_CAP_PROCESS_OBJECT_TABLE | KSW_CAP_HANDLE_TABLE_DECODE, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.EpObjectTable),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_SECTION_OBJECT, "EpSectionObject", "Section/ControlArea", KSW_CAP_SECTION_CONTROL_AREA, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.EpSectionObject),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_UNIQUE_PROCESS_ID, "_EPROCESS.UniqueProcessId", "Process List Fields", KSW_CAP_PROCESS_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpUniqueProcessId),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_ACTIVE_PROCESS_LINKS, "_EPROCESS.ActiveProcessLinks", "Process List Fields", KSW_CAP_PROCESS_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpActiveProcessLinks),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_THREAD_LIST_HEAD, "_EPROCESS.ThreadListHead", "Process List Fields", KSW_CAP_PROCESS_LIST_FIELDS | KSW_CAP_THREAD_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpThreadListHead),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_IMAGE_FILE_NAME, "_EPROCESS.ImageFileName", "Process List Fields", KSW_CAP_PROCESS_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpImageFileName),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_TOKEN, "_EPROCESS.Token", "Process List Fields", KSW_CAP_PROCESS_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpToken),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_HT_HANDLE_CONTENTION_EVENT, "HtHandleContentionEvent", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE, FALSE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.HtHandleContentionEvent),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_HT_TABLE_CODE, "_HANDLE_TABLE.TableCode", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE | KSW_CAP_CID_TABLE_WALK, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.HtTableCode),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_HT_HANDLE_COUNT, "_HANDLE_TABLE.HandleCount", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.HtHandleCount),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_HTE_LOW_VALUE, "_HANDLE_TABLE_ENTRY.LowValue", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE | KSW_CAP_CID_TABLE_WALK, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.HteLowValue),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_OT_NAME, "OtName", "Object Type", KSW_CAP_OBJECT_TYPE_FIELDS | KSW_CAP_HANDLE_TABLE_DECODE, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.OtName),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_OT_INDEX, "OtIndex", "Object Type", KSW_CAP_OBJECT_TYPE_FIELDS | KSW_CAP_HANDLE_TABLE_DECODE, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.OtIndex),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_OB_DECODE_SHIFT, "ObDecodeShift", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.ObDecodeShift),
@@ -46,6 +54,11 @@ static const KSW_DYN_FIELD_BINDING g_KswordDynFieldBindings[] = {
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KT_STACK_LIMIT, "KtStackLimit", "Thread Stack", KSW_CAP_THREAD_STACK_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.KtStackLimit),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KT_STACK_BASE, "KtStackBase", "Thread Stack", KSW_CAP_THREAD_STACK_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.KtStackBase),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KT_KERNEL_STACK, "KtKernelStack", "Thread Stack", KSW_CAP_THREAD_STACK_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.KtKernelStack),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KT_PROCESS, "_KTHREAD.Process", "Thread List Fields", KSW_CAP_THREAD_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.KtProcess),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_ET_CID, "_ETHREAD.Cid", "Thread List Fields", KSW_CAP_THREAD_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EtCid),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_ET_THREAD_LIST_ENTRY, "_ETHREAD.ThreadListEntry", "Thread List Fields", KSW_CAP_THREAD_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EtThreadListEntry),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_ET_START_ADDRESS, "_ETHREAD.StartAddress", "Thread List Fields", KSW_CAP_THREAD_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EtStartAddress),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_ET_WIN32_START_ADDRESS, "_ETHREAD.Win32StartAddress", "Thread List Fields", KSW_CAP_THREAD_LIST_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EtWin32StartAddress),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KT_READ_OPERATION_COUNT, "KtReadOperationCount", "Thread I/O Counters", KSW_CAP_THREAD_IO_COUNTERS, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.KtReadOperationCount),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KT_WRITE_OPERATION_COUNT, "KtWriteOperationCount", "Thread I/O Counters", KSW_CAP_THREAD_IO_COUNTERS, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.KtWriteOperationCount),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KT_OTHER_OPERATION_COUNT, "KtOtherOperationCount", "Thread I/O Counters", KSW_CAP_THREAD_IO_COUNTERS, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.KtOtherOperationCount),
@@ -76,6 +89,22 @@ static const KSW_DYN_FIELD_BINDING g_KswordDynFieldBindings[] = {
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_PROTECTION, "EpProtection", "Process Protection Patch", KSW_CAP_PROCESS_PROTECTION_PATCH, TRUE, KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN, Kernel.EpProtection),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_SIGNATURE_LEVEL, "EpSignatureLevel", "Process Protection Patch", KSW_CAP_PROCESS_PROTECTION_PATCH, TRUE, KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN, Kernel.EpSignatureLevel),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_SECTION_SIGNATURE_LEVEL, "EpSectionSignatureLevel", "Process Protection Patch", KSW_CAP_PROCESS_PROTECTION_PATCH, TRUE, KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN, Kernel.EpSectionSignatureLevel),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KLDR_IN_LOAD_ORDER_LINKS, "_KLDR_DATA_TABLE_ENTRY.InLoadOrderLinks", "Kernel Module List Fields", KSW_CAP_KERNEL_MODULE_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.KldrInLoadOrderLinks),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KLDR_DLL_BASE, "_KLDR_DATA_TABLE_ENTRY.DllBase", "Kernel Module List Fields", KSW_CAP_KERNEL_MODULE_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.KldrDllBase),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KLDR_SIZE_OF_IMAGE, "_KLDR_DATA_TABLE_ENTRY.SizeOfImage", "Kernel Module List Fields", KSW_CAP_KERNEL_MODULE_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.KldrSizeOfImage),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KLDR_FULL_DLL_NAME, "_KLDR_DATA_TABLE_ENTRY.FullDllName", "Kernel Module List Fields", KSW_CAP_KERNEL_MODULE_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.KldrFullDllName),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KLDR_BASE_DLL_NAME, "_KLDR_DATA_TABLE_ENTRY.BaseDllName", "Kernel Module List Fields", KSW_CAP_KERNEL_MODULE_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.KldrBaseDllName),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KLDR_FLAGS, "_KLDR_DATA_TABLE_ENTRY.Flags", "Kernel Module List Fields", KSW_CAP_KERNEL_MODULE_LIST_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.KldrFlags),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_DO_DRIVER_START, "_DRIVER_OBJECT.DriverStart", "Driver Object Fields", KSW_CAP_DRIVER_OBJECT_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.DoDriverStart),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_DO_DRIVER_SIZE, "_DRIVER_OBJECT.DriverSize", "Driver Object Fields", KSW_CAP_DRIVER_OBJECT_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.DoDriverSize),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_DO_DRIVER_SECTION, "_DRIVER_OBJECT.DriverSection", "Driver Object Fields", KSW_CAP_DRIVER_OBJECT_FIELDS | KSW_CAP_KERNEL_MODULE_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.DoDriverSection),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_DO_MAJOR_FUNCTION, "_DRIVER_OBJECT.MajorFunction", "Driver Object Fields", KSW_CAP_DRIVER_OBJECT_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.DoMajorFunction),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_DO_FAST_IO_DISPATCH, "_DRIVER_OBJECT.FastIoDispatch", "Driver Object Fields", KSW_CAP_DRIVER_OBJECT_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.DoFastIoDispatch),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_DO_DRIVER_UNLOAD, "_DRIVER_OBJECT.DriverUnload", "Driver Object Fields", KSW_CAP_DRIVER_OBJECT_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.DoDriverUnload),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KG_PSP_CID_TABLE, "PspCidTable", "Kernel Globals", KSW_CAP_KERNEL_GLOBALS | KSW_CAP_CID_TABLE_WALK, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, KernelGlobals.PspCidTable),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KG_PS_LOADED_MODULE_LIST, "PsLoadedModuleList", "Kernel Globals", KSW_CAP_KERNEL_GLOBALS | KSW_CAP_KERNEL_MODULE_LIST_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, KernelGlobals.PsLoadedModuleList),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KG_MM_UNLOADED_DRIVERS, "MmUnloadedDrivers", "Kernel Globals", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, KernelGlobals.MmUnloadedDrivers),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KG_PIDDB_CACHE_TABLE, "PiDDBCacheTable", "Kernel Globals", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, KernelGlobals.PiDDBCacheTable),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_PSP_CREATE_PROCESS_NOTIFY_ROUTINE, "PspCreateProcessNotifyRoutine", "Callback Notify Globals", KSW_CAP_CALLBACK_NOTIFY_GLOBALS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackGlobals.PspCreateProcessNotifyRoutine),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_PSP_CREATE_THREAD_NOTIFY_ROUTINE, "PspCreateThreadNotifyRoutine", "Callback Notify Globals", KSW_CAP_CALLBACK_NOTIFY_GLOBALS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackGlobals.PspCreateThreadNotifyRoutine),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_PSP_LOAD_IMAGE_NOTIFY_ROUTINE, "PspLoadImageNotifyRoutine", "Callback Notify Globals", KSW_CAP_CALLBACK_NOTIFY_GLOBALS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackGlobals.PspLoadImageNotifyRoutine),
@@ -156,8 +185,24 @@ Return Value:
         return State->KernelSources.EpObjectTable;
     case KSW_DYN_FIELD_ID_EP_SECTION_OBJECT:
         return State->KernelSources.EpSectionObject;
+    case KSW_DYN_FIELD_ID_EP_UNIQUE_PROCESS_ID:
+        return State->KernelSources.EpUniqueProcessId;
+    case KSW_DYN_FIELD_ID_EP_ACTIVE_PROCESS_LINKS:
+        return State->KernelSources.EpActiveProcessLinks;
+    case KSW_DYN_FIELD_ID_EP_THREAD_LIST_HEAD:
+        return State->KernelSources.EpThreadListHead;
+    case KSW_DYN_FIELD_ID_EP_IMAGE_FILE_NAME:
+        return State->KernelSources.EpImageFileName;
+    case KSW_DYN_FIELD_ID_EP_TOKEN:
+        return State->KernelSources.EpToken;
     case KSW_DYN_FIELD_ID_HT_HANDLE_CONTENTION_EVENT:
         return State->KernelSources.HtHandleContentionEvent;
+    case KSW_DYN_FIELD_ID_HT_TABLE_CODE:
+        return State->KernelSources.HtTableCode;
+    case KSW_DYN_FIELD_ID_HT_HANDLE_COUNT:
+        return State->KernelSources.HtHandleCount;
+    case KSW_DYN_FIELD_ID_HTE_LOW_VALUE:
+        return State->KernelSources.HteLowValue;
     case KSW_DYN_FIELD_ID_OT_NAME:
         return State->KernelSources.OtName;
     case KSW_DYN_FIELD_ID_OT_INDEX:
@@ -178,6 +223,16 @@ Return Value:
         return State->KernelSources.KtStackBase;
     case KSW_DYN_FIELD_ID_KT_KERNEL_STACK:
         return State->KernelSources.KtKernelStack;
+    case KSW_DYN_FIELD_ID_KT_PROCESS:
+        return State->KernelSources.KtProcess;
+    case KSW_DYN_FIELD_ID_ET_CID:
+        return State->KernelSources.EtCid;
+    case KSW_DYN_FIELD_ID_ET_THREAD_LIST_ENTRY:
+        return State->KernelSources.EtThreadListEntry;
+    case KSW_DYN_FIELD_ID_ET_START_ADDRESS:
+        return State->KernelSources.EtStartAddress;
+    case KSW_DYN_FIELD_ID_ET_WIN32_START_ADDRESS:
+        return State->KernelSources.EtWin32StartAddress;
     case KSW_DYN_FIELD_ID_KT_READ_OPERATION_COUNT:
         return State->KernelSources.KtReadOperationCount;
     case KSW_DYN_FIELD_ID_KT_WRITE_OPERATION_COUNT:
@@ -238,6 +293,38 @@ Return Value:
         return State->KernelSources.EpSignatureLevel;
     case KSW_DYN_FIELD_ID_EP_SECTION_SIGNATURE_LEVEL:
         return State->KernelSources.EpSectionSignatureLevel;
+    case KSW_DYN_FIELD_ID_KLDR_IN_LOAD_ORDER_LINKS:
+        return State->KernelSources.KldrInLoadOrderLinks;
+    case KSW_DYN_FIELD_ID_KLDR_DLL_BASE:
+        return State->KernelSources.KldrDllBase;
+    case KSW_DYN_FIELD_ID_KLDR_SIZE_OF_IMAGE:
+        return State->KernelSources.KldrSizeOfImage;
+    case KSW_DYN_FIELD_ID_KLDR_FULL_DLL_NAME:
+        return State->KernelSources.KldrFullDllName;
+    case KSW_DYN_FIELD_ID_KLDR_BASE_DLL_NAME:
+        return State->KernelSources.KldrBaseDllName;
+    case KSW_DYN_FIELD_ID_KLDR_FLAGS:
+        return State->KernelSources.KldrFlags;
+    case KSW_DYN_FIELD_ID_DO_DRIVER_START:
+        return State->KernelSources.DoDriverStart;
+    case KSW_DYN_FIELD_ID_DO_DRIVER_SIZE:
+        return State->KernelSources.DoDriverSize;
+    case KSW_DYN_FIELD_ID_DO_DRIVER_SECTION:
+        return State->KernelSources.DoDriverSection;
+    case KSW_DYN_FIELD_ID_DO_MAJOR_FUNCTION:
+        return State->KernelSources.DoMajorFunction;
+    case KSW_DYN_FIELD_ID_DO_FAST_IO_DISPATCH:
+        return State->KernelSources.DoFastIoDispatch;
+    case KSW_DYN_FIELD_ID_DO_DRIVER_UNLOAD:
+        return State->KernelSources.DoDriverUnload;
+    case KSW_DYN_FIELD_ID_KG_PSP_CID_TABLE:
+        return State->KernelGlobalSources.PspCidTable;
+    case KSW_DYN_FIELD_ID_KG_PS_LOADED_MODULE_LIST:
+        return State->KernelGlobalSources.PsLoadedModuleList;
+    case KSW_DYN_FIELD_ID_KG_MM_UNLOADED_DRIVERS:
+        return State->KernelGlobalSources.MmUnloadedDrivers;
+    case KSW_DYN_FIELD_ID_KG_PIDDB_CACHE_TABLE:
+        return State->KernelGlobalSources.PiDDBCacheTable;
     case KSW_DYN_FIELD_ID_CB_PSP_CREATE_PROCESS_NOTIFY_ROUTINE:
         return State->CallbackGlobalSources.PspCreateProcessNotifyRoutine;
     case KSW_DYN_FIELD_ID_CB_PSP_CREATE_THREAD_NOTIFY_ROUTINE:
@@ -483,6 +570,44 @@ Return Value:
     return TRUE;
 }
 
+static BOOLEAN
+KswordARKDynDataHasAny(
+    _In_ const ULONG* Offsets,
+    _In_ ULONG Count
+    )
+/*++
+
+Routine Description:
+
+    Test whether at least one offset in a small optional dependency list is
+    present.
+
+Arguments:
+
+    Offsets - Optional dependency offset array.
+    Count - Number of offsets in the array.
+
+Return Value:
+
+    TRUE when one or more offsets are present; otherwise FALSE.
+
+--*/
+{
+    ULONG index = 0;
+
+    if (Offsets == NULL || Count == 0U) {
+        return FALSE;
+    }
+
+    for (index = 0; index < Count; ++index) {
+        if (KswordARKDynDataIsOffsetPresent(Offsets[index])) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
 ULONG64
 KswordARKDynDataComputeCapabilities(
     _In_ const KSW_DYN_STATE* State
@@ -511,14 +636,20 @@ Return Value:
     }
 
     const ULONG objectTypeFields[] = { State->Kernel.OtName, State->Kernel.OtIndex };
+    const ULONG processListFields[] = { State->Kernel.EpUniqueProcessId, State->Kernel.EpActiveProcessLinks, State->Kernel.EpThreadListHead, State->Kernel.EpImageFileName, State->Kernel.EpToken };
     const ULONG handleTableFields[] = { State->Kernel.EpObjectTable, State->Kernel.ObDecodeShift, State->Kernel.ObAttributesShift, State->Kernel.OtName, State->Kernel.OtIndex };
+    const ULONG cidTableFields[] = { State->KernelGlobals.PspCidTable, State->Kernel.HtTableCode, State->Kernel.HteLowValue };
     const ULONG threadStackFields[] = { State->Kernel.KtInitialStack, State->Kernel.KtStackLimit, State->Kernel.KtStackBase, State->Kernel.KtKernelStack };
+    const ULONG threadListFields[] = { State->Kernel.EpThreadListHead, State->Kernel.KtProcess, State->Kernel.EtCid, State->Kernel.EtThreadListEntry, State->Kernel.EtStartAddress };
     const ULONG threadIoFields[] = { State->Kernel.KtReadOperationCount, State->Kernel.KtWriteOperationCount, State->Kernel.KtOtherOperationCount, State->Kernel.KtReadTransferCount, State->Kernel.KtWriteTransferCount, State->Kernel.KtOtherTransferCount };
     const ULONG alpcFields[] = { State->Kernel.AlpcCommunicationInfo, State->Kernel.AlpcOwnerProcess, State->Kernel.AlpcConnectionPort, State->Kernel.AlpcServerCommunicationPort, State->Kernel.AlpcClientCommunicationPort, State->Kernel.AlpcHandleTable, State->Kernel.AlpcHandleTableLock, State->Kernel.AlpcAttributes, State->Kernel.AlpcAttributesFlags, State->Kernel.AlpcPortContext, State->Kernel.AlpcPortObjectLock, State->Kernel.AlpcSequenceNo, State->Kernel.AlpcState };
     const ULONG sectionFields[] = { State->Kernel.EpSectionObject, State->Kernel.MmSectionControlArea, State->Kernel.MmControlAreaListHead, State->Kernel.MmControlAreaLock };
+    const ULONG kernelModuleListFields[] = { State->Kernel.KldrInLoadOrderLinks, State->Kernel.KldrDllBase, State->Kernel.KldrSizeOfImage, State->Kernel.KldrFullDllName, State->Kernel.KldrBaseDllName };
+    const ULONG driverObjectFields[] = { State->Kernel.DoDriverStart, State->Kernel.DoDriverSize, State->Kernel.DoDriverSection, State->Kernel.DoMajorFunction, State->Kernel.DoDriverUnload };
     const ULONG protectionFields[] = { State->Kernel.EpProtection, State->Kernel.EpSignatureLevel, State->Kernel.EpSectionSignatureLevel };
     const ULONG etwFields[] = { State->Kernel.EgeGuid, State->Kernel.EreGuidEntry };
     const ULONG lxcoreFields[] = { State->LxcoreOffsets.LxPicoProc, State->LxcoreOffsets.LxPicoProcInfo, State->LxcoreOffsets.LxPicoProcInfoPID, State->LxcoreOffsets.LxPicoThrdInfo, State->LxcoreOffsets.LxPicoThrdInfoTID };
+    const ULONG kernelGlobalFields[] = { State->KernelGlobals.PspCidTable, State->KernelGlobals.PsLoadedModuleList, State->KernelGlobals.MmUnloadedDrivers, State->KernelGlobals.PiDDBCacheTable };
     const ULONG callbackNotifyGlobals[] = { State->CallbackGlobals.PspCreateProcessNotifyRoutine, State->CallbackGlobals.PspCreateThreadNotifyRoutine, State->CallbackGlobals.PspLoadImageNotifyRoutine };
     const ULONG callbackRegistryGlobals[] = { State->CallbackGlobals.CmCallbackListHead };
     const ULONG callbackObjectFields[] = { State->CallbackOffsets.ObjectTypeCallbackList, State->CallbackOffsets.CallbackEntryItemPreOperation, State->CallbackOffsets.CallbackEntryItemPostOperation, State->CallbackOffsets.CallbackEntryItemOperations, State->CallbackOffsets.CallbackEntryItemCallbackEntry };
@@ -532,11 +663,20 @@ Return Value:
     if (KswordARKDynDataHasAll(objectTypeFields, RTL_NUMBER_OF(objectTypeFields))) {
         capabilities |= KSW_CAP_OBJECT_TYPE_FIELDS;
     }
+    if (KswordARKDynDataHasAll(processListFields, RTL_NUMBER_OF(processListFields))) {
+        capabilities |= KSW_CAP_PROCESS_LIST_FIELDS;
+    }
     if (KswordARKDynDataHasAll(handleTableFields, RTL_NUMBER_OF(handleTableFields))) {
         capabilities |= KSW_CAP_HANDLE_TABLE_DECODE | KSW_CAP_PROCESS_OBJECT_TABLE;
     }
+    if (KswordARKDynDataHasAll(cidTableFields, RTL_NUMBER_OF(cidTableFields))) {
+        capabilities |= KSW_CAP_CID_TABLE_WALK;
+    }
     if (KswordARKDynDataHasAll(threadStackFields, RTL_NUMBER_OF(threadStackFields))) {
         capabilities |= KSW_CAP_THREAD_STACK_FIELDS;
+    }
+    if (KswordARKDynDataHasAll(threadListFields, RTL_NUMBER_OF(threadListFields))) {
+        capabilities |= KSW_CAP_THREAD_LIST_FIELDS;
     }
     if (KswordARKDynDataHasAll(threadIoFields, RTL_NUMBER_OF(threadIoFields))) {
         capabilities |= KSW_CAP_THREAD_IO_COUNTERS;
@@ -546,6 +686,12 @@ Return Value:
     }
     if (KswordARKDynDataHasAll(sectionFields, RTL_NUMBER_OF(sectionFields))) {
         capabilities |= KSW_CAP_SECTION_CONTROL_AREA;
+    }
+    if (KswordARKDynDataHasAll(kernelModuleListFields, RTL_NUMBER_OF(kernelModuleListFields))) {
+        capabilities |= KSW_CAP_KERNEL_MODULE_LIST_FIELDS;
+    }
+    if (KswordARKDynDataHasAll(driverObjectFields, RTL_NUMBER_OF(driverObjectFields))) {
+        capabilities |= KSW_CAP_DRIVER_OBJECT_FIELDS;
     }
     if (KswordARKDynDataHasAll(protectionFields, RTL_NUMBER_OF(protectionFields))) {
         capabilities |= KSW_CAP_PROCESS_PROTECTION_PATCH;
@@ -564,6 +710,9 @@ Return Value:
     }
     if (State->CallbackProfileActive && KswordARKDynDataHasAll(callbackObjectFields, RTL_NUMBER_OF(callbackObjectFields))) {
         capabilities |= KSW_CAP_CALLBACK_OBJECT_FIELDS;
+    }
+    if (KswordARKDynDataHasAny(kernelGlobalFields, RTL_NUMBER_OF(kernelGlobalFields))) {
+        capabilities |= KSW_CAP_KERNEL_GLOBALS;
     }
 
     return capabilities;

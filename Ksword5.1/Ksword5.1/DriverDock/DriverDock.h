@@ -22,6 +22,7 @@
 #include <vector>   // std::vector：驱动服务与模块快照容器。
 
 // Qt 前置声明：减少头文件编译耦合。
+class QCheckBox;
 class QComboBox;
 class CodeEditorWidget;
 class QColor;
@@ -32,6 +33,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QShowEvent;
 class QSplitter;
+class QSpinBox;
 class QTableWidget;
 class QTabWidget;
 class QVBoxLayout;
@@ -136,6 +138,12 @@ private:
     // - 通过 ArkDriverClient 查询 DriverObject、MajorFunction 和 DeviceObject 链。
     void initializeObjectInfoTab();
 
+    // initializeIntegrityTab：
+    // - 构建“驱动完整性”页；
+    // - 展示 DriverObject、MajorFunction、FastIo、LDR 和 CPU entry evidence；
+    // - 不提供卸载、修复或任意写操作。
+    void initializeIntegrityTab();
+
     // initializeConnections：
     // - 作用：连接全部控件信号与业务槽函数。
     void initializeConnections();
@@ -181,6 +189,24 @@ private:
     // - 从概览页当前选中服务名推导 \Driver\Name；
     // - 便于用户双击服务后直接查询对象。
     void fillObjectDriverNameFromSelection();
+
+    // refreshDriverIntegrityAsync：
+    // - 异步调用 ArkDriverClient::queryDriverIntegrity / queryKernelCpuIntegrity；
+    // - 参数 cpuOnly 为 true 时只请求 CPU/IDT/MSR 证据；
+    // - 返回：无，结果回填 m_driverIntegrityCache。
+    void refreshDriverIntegrityAsync(bool cpuOnly);
+
+    // rebuildDriverIntegrityTable：
+    // - 按当前缓存和风险过滤重绘完整性证据表；
+    // - 不重新访问驱动；
+    // - 返回：无。
+    void rebuildDriverIntegrityTable();
+
+    // showSelectedDriverIntegrityDetail：
+    // - 展示当前选中完整性证据行的详情文本；
+    // - 处理逻辑：通过表格 UserRole 中的缓存索引读取 m_driverIntegrityCache；
+    // - 返回：无。
+    void showSelectedDriverIntegrityDetail();
 
     // showServiceTableContextMenu：
     // - 在驱动服务列表右键弹出操作菜单；
@@ -399,10 +425,28 @@ private:
     bool m_objectInfoQuerying = false;                // 查询中标记。
     std::uint64_t m_objectInfoQueryTicket = 0;        // 查询序号。
 
+    // ========================= 页签5：驱动完整性 =========================
+    QWidget* m_integrityPage = nullptr;               // 驱动完整性页容器。
+    QVBoxLayout* m_integrityLayout = nullptr;         // 完整性页主布局。
+    QLineEdit* m_integrityDriverNameEdit = nullptr;   // 可选 \Driver\Name 输入框。
+    QLineEdit* m_integrityModuleBaseEdit = nullptr;   // 可选模块基址输入框。
+    QPushButton* m_integrityFillFromSelectionButton = nullptr; // 从当前选择填充 DriverObject 名称。
+    QPushButton* m_integrityRefreshButton = nullptr;  // 查询 DriverObject/LDR/FastIo/CPU 证据。
+    QPushButton* m_integrityCpuOnlyButton = nullptr;  // 查询 CPU entry evidence。
+    QCheckBox* m_integrityRiskOnlyCheck = nullptr;    // 仅显示风险项。
+    QSpinBox* m_integrityMaxRowsSpin = nullptr;       // 最大返回行数。
+    QLabel* m_integrityStatusLabel = nullptr;         // 查询状态标签。
+    QTableWidget* m_integrityTable = nullptr;         // 完整性证据表。
+    QPlainTextEdit* m_integrityDetailEdit = nullptr;  // 完整性详情文本。
+    bool m_integrityQuerying = false;                 // 完整性查询中标记。
+    std::uint64_t m_integrityQueryTicket = 0;         // 完整性查询序号。
+
     // ========================= 数据缓存 =========================
     std::vector<DriverServiceRecord> m_driverServiceCache;      // 驱动服务缓存。
     std::vector<LoadedKernelModuleRecord> m_loadedModuleCache;  // 已加载模块缓存。
     std::vector<LoadedModuleEvidenceRecord> m_loadedModuleEvidenceCache; // 模块证据缓存。
+    std::vector<ksword::ark::DriverIntegrityEvidenceEntry> m_driverIntegrityCache; // 驱动完整性证据缓存。
+    ksword::ark::DriverIntegrityResult m_lastDriverIntegrityResult; // 最近一次完整性查询元信息。
     bool m_initialRefreshDone = false;                          // 首次显示时是否已完成首轮刷新。
 
     // ========================= 调试捕获线程状态 =========================

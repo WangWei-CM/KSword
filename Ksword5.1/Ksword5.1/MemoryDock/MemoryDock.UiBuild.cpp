@@ -137,6 +137,7 @@ void MemoryDock::initializeTabs()
     initializeBreakpointBookmarkTab();
     initializeDriverMemoryRwTab();
     initializeKernelExecutableMemoryScanTab();
+    initializeKernelMemoryEvidenceTab();
 }
 
 void MemoryDock::initializeProcessModuleTab()

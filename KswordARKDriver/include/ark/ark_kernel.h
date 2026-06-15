@@ -23,6 +23,14 @@ KswordARKDriverQueryDriverObject(
     );
 
 NTSTATUS
+KswordARKDriverQueryDriverIntegrity(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _In_opt_ const KSWORD_ARK_QUERY_DRIVER_INTEGRITY_REQUEST* Request,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
 KswordARKDriverEnumerateShadowSsdt(
     _Out_writes_bytes_to_(outputBufferLength, *bytesWrittenOut) PVOID outputBuffer,
     _In_ size_t outputBufferLength,

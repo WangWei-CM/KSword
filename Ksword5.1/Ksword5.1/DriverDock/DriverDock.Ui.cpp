@@ -16,6 +16,7 @@ void DriverDock::initializeUi()
     initializeOperateTab();
     initializeDebugOutputTab();
     initializeObjectInfoTab();
+    initializeIntegrityTab();
 }
 
 void DriverDock::initializeOverviewTab()
@@ -532,5 +533,32 @@ void DriverDock::initializeConnections()
     connect(m_objectDriverNameEdit, &QLineEdit::returnPressed, this, [this]()
         {
             querySelectedDriverObjectInfo();
+        });
+
+    // 驱动完整性页：所有动作均为只读查询或本地过滤，不提供修复/写入按钮。
+    connect(m_integrityRefreshButton, &QPushButton::clicked, this, [this]()
+        {
+            refreshDriverIntegrityAsync(false);
+        });
+    connect(m_integrityCpuOnlyButton, &QPushButton::clicked, this, [this]()
+        {
+            refreshDriverIntegrityAsync(true);
+        });
+    connect(m_integrityRiskOnlyCheck, &QCheckBox::toggled, this, [this]()
+        {
+            rebuildDriverIntegrityTable();
+            showSelectedDriverIntegrityDetail();
+        });
+    connect(m_integrityFillFromSelectionButton, &QPushButton::clicked, this, [this]()
+        {
+            fillObjectDriverNameFromSelection();
+            if (m_integrityDriverNameEdit != nullptr && m_objectDriverNameEdit != nullptr)
+            {
+                m_integrityDriverNameEdit->setText(m_objectDriverNameEdit->text());
+            }
+        });
+    connect(m_integrityTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int)
+        {
+            showSelectedDriverIntegrityDetail();
         });
 }

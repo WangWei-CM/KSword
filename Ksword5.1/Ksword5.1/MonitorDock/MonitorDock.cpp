@@ -4008,6 +4008,13 @@ void MonitorDock::triggerDeferredDiscoveryForCurrentTab()
         m_etwInitialDiscoveryDone = true;
         refreshEtwProvidersAsync();
         refreshEtwSessionsAsync();
+        return;
+    }
+
+    if (currentPage == m_arkRiskCenterPage && !m_arkRiskCenterInitialDiscoveryDone)
+    {
+        m_arkRiskCenterInitialDiscoveryDone = true;
+        refreshArkRiskCenterAsync();
     }
 }
 
@@ -4056,6 +4063,16 @@ void MonitorDock::activateMonitorTab(const QString& tabKey)
         if (m_etwPage != nullptr)
         {
             m_sideTabWidget->setCurrentWidget(m_etwPage);
+        }
+        return;
+    }
+    if (normalizedKey == QStringLiteral("ark-risk") ||
+        normalizedKey == QStringLiteral("risk") ||
+        normalizedKey == QStringLiteral("ark-risk-center"))
+    {
+        if (m_arkRiskCenterPage != nullptr)
+        {
+            m_sideTabWidget->setCurrentWidget(m_arkRiskCenterPage);
         }
         return;
     }
@@ -4141,6 +4158,7 @@ void MonitorDock::initializeUi()
 
     initializeWmiTab();
     initializeEtwTab();
+    initializeArkRiskCenterTab();
 }
 
 void MonitorDock::initializePerformancePanel()

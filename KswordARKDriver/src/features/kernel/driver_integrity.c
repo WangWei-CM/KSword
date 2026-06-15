@@ -1,0 +1,861 @@
+/*++
+Module Name:
+    driver_integrity.c
+Abstract:
+    Read-only DriverObject, module-view, service-key, and optional kernel-global
+    evidence collection for DriverDock integrity diagnostics.
+Environment:
+    Kernel-mode Driver Framework
+--*/
+#include "driver_integrity.h"
+#include "kernel_cpu_integrity.h"
+#include <ntstrsafe.h>
+#include <stdarg.h>
+#define KSW_DRIVER_INTEGRITY_TAG 'iDsK'
+#define KSW_DRIVER_INTEGRITY_RESPONSE_HEADER_SIZE \
+    (sizeof(KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE) - sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE))
+#define KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FieldName) \
+    { FIELD_OFFSET(FAST_IO_DISPATCH, FieldName), #FieldName }
+#define KSW_DRIVER_INTEGRITY_DEVICE_VISIT_LIMIT 128UL
+#define KSW_DRIVER_INTEGRITY_ATTACH_VISIT_LIMIT 32UL
+#ifndef STATUS_INFO_LENGTH_MISMATCH
+#define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
+#endif
+#ifndef STATUS_BUFFER_TOO_SMALL
+#define STATUS_BUFFER_TOO_SMALL ((NTSTATUS)0xC0000023L)
+#endif
+typedef PVOID
+(NTAPI* KSW_DRIVER_INTEGRITY_EX_ALLOCATE_POOL2_FN)(
+    _In_ POOL_FLAGS Flags,
+    _In_ SIZE_T NumberOfBytes,
+    _In_ ULONG Tag
+    );
+typedef NTSTATUS
+(NTAPI* KSW_DRIVER_INTEGRITY_AUX_INITIALIZE_FN)(
+    VOID
+    );
+typedef NTSTATUS
+(NTAPI* KSW_DRIVER_INTEGRITY_AUX_QUERY_MODULES_FN)(
+    _Inout_ PULONG BufferSize,
+    _In_ ULONG ElementSize,
+    _Out_writes_bytes_opt_(*BufferSize) PVOID QueryInfo
+    );
+typedef struct _KSW_DRIVER_INTEGRITY_AUX_MODULE_BASIC_INFO
+{
+    PVOID ImageBase;
+} KSW_DRIVER_INTEGRITY_AUX_MODULE_BASIC_INFO, *PKSW_DRIVER_INTEGRITY_AUX_MODULE_BASIC_INFO;
+typedef struct _KSW_DRIVER_INTEGRITY_AUX_MODULE_EXTENDED_INFO
+{
+    KSW_DRIVER_INTEGRITY_AUX_MODULE_BASIC_INFO BasicInfo;
+    ULONG ImageSize;
+    USHORT FileNameOffset;
+    UCHAR FullPathName[256];
+} KSW_DRIVER_INTEGRITY_AUX_MODULE_EXTENDED_INFO, *PKSW_DRIVER_INTEGRITY_AUX_MODULE_EXTENDED_INFO;
+typedef struct _KSW_DRIVER_INTEGRITY_FAST_IO_FIELD
+{
+    ULONG Offset;
+    PCSTR Name;
+} KSW_DRIVER_INTEGRITY_FAST_IO_FIELD, *PKSW_DRIVER_INTEGRITY_FAST_IO_FIELD;
+typedef struct _KSW_DRIVER_INTEGRITY_DEVICE_SNAPSHOT
+{
+    PDEVICE_OBJECT NextDevice;
+    PDEVICE_OBJECT AttachedDevice;
+    PDRIVER_OBJECT DriverObject;
+    ULONG DeviceType;
+    ULONG Flags;
+} KSW_DRIVER_INTEGRITY_DEVICE_SNAPSHOT, *PKSW_DRIVER_INTEGRITY_DEVICE_SNAPSHOT;
+NTSYSAPI
+NTSTATUS
+NTAPI
+ObReferenceObjectByName(
+    _In_ PUNICODE_STRING ObjectName,
+    _In_ ULONG Attributes,
+    _In_opt_ PACCESS_STATE PassedAccessState,
+    _In_opt_ ACCESS_MASK DesiredAccess,
+    _In_ POBJECT_TYPE ObjectType,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _Inout_opt_ PVOID ParseContext,
+    _Out_ PVOID* Object
+    );
+extern POBJECT_TYPE* IoDriverObjectType;
+static const KSW_DRIVER_INTEGRITY_FAST_IO_FIELD g_KswordArkFastIoFields[] = {
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoCheckIfPossible),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoRead),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoWrite),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoQueryBasicInfo),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoQueryStandardInfo),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoLock),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoUnlockSingle),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoUnlockAll),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoUnlockAllByKey),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoDeviceControl),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(AcquireFileForNtCreateSection),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(ReleaseFileForNtCreateSection),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoDetachDevice),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoQueryNetworkOpenInfo),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(AcquireForModWrite),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(MdlRead),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(MdlReadComplete),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(PrepareMdlWrite),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(MdlWriteComplete),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoReadCompressed),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoWriteCompressed),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(MdlReadCompleteCompressed),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(MdlWriteCompleteCompressed),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(FastIoQueryOpen),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(ReleaseForModWrite),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(AcquireForCcFlush),
+    KSW_DRIVER_INTEGRITY_FAST_IO_FIELD(ReleaseForCcFlush)
+};
+static PVOID
+KswordARKDriverIntegrityAllocate(
+    _In_ SIZE_T BufferBytes
+    )
+
+/* Read-only helper; arguments and return behavior follow the SAL contract. */
+{
+    static volatile LONG allocatorResolved = 0;
+    static KSW_DRIVER_INTEGRITY_EX_ALLOCATE_POOL2_FN allocatePool2 = NULL;
+    if (BufferBytes == 0U) {
+        return NULL;
+    }
+    if (InterlockedCompareExchange(&allocatorResolved, 1L, 0L) == 0L) {
+        UNICODE_STRING routineName;
+        RtlInitUnicodeString(&routineName, L"ExAllocatePool2");
+        allocatePool2 = (KSW_DRIVER_INTEGRITY_EX_ALLOCATE_POOL2_FN)MmGetSystemRoutineAddress(&routineName);
+    }
+    if (allocatePool2 != NULL) {
+        return allocatePool2(POOL_FLAG_NON_PAGED, BufferBytes, KSW_DRIVER_INTEGRITY_TAG);
+    }
+#pragma warning(push)
+#pragma warning(disable:4996)
+    return ExAllocatePoolWithTag(NonPagedPoolNx, BufferBytes, KSW_DRIVER_INTEGRITY_TAG);
+#pragma warning(pop)
+}
+static VOID
+KswordARKDriverIntegrityFormatDetail(
+    _Out_writes_(DestinationChars) PWCHAR Destination,
+    _In_ ULONG DestinationChars,
+    _In_z_ PCWSTR FormatText,
+    ...
+    )
+
+/* Read-only helper; arguments and return behavior follow the SAL contract. */
+{
+    va_list arguments;
+    if (Destination == NULL || DestinationChars == 0UL || FormatText == NULL) {
+        return;
+    }
+    Destination[0] = L'\0';
+    va_start(arguments, FormatText);
+    (VOID)RtlStringCbVPrintfW(Destination, (SIZE_T)DestinationChars * sizeof(WCHAR), FormatText, arguments);
+    va_end(arguments);
+    Destination[DestinationChars - 1UL] = L'\0';
+}
+static VOID
+KswordARKDriverIntegrityCopyUnicode(
+    _In_opt_ PCUNICODE_STRING Source,
+    _Out_writes_(DestinationChars) PWCHAR Destination,
+    _In_ ULONG DestinationChars
+    )
+
+/* Read-only helper; arguments and return behavior follow the SAL contract. */
+{
+    ULONG charsToCopy = 0UL;
+    if (Destination == NULL || DestinationChars == 0UL) {
+        return;
+    }
+    Destination[0] = L'\0';
+    if (Source == NULL || Source->Buffer == NULL || Source->Length == 0U) {
+        return;
+    }
+    charsToCopy = (ULONG)(Source->Length / sizeof(WCHAR));
+    if (charsToCopy >= DestinationChars) {
+        charsToCopy = DestinationChars - 1UL;
+    }
+    RtlCopyMemory(Destination, Source->Buffer, (SIZE_T)charsToCopy * sizeof(WCHAR));
+    Destination[charsToCopy] = L'\0';
+}
+static NTSTATUS
+KswordARKDriverIntegrityBuildDriverObjectName(
+    _In_reads_(KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS) const WCHAR* SourceName,
+    _Out_writes_(DestinationChars) PWCHAR DestinationName,
+    _In_ ULONG DestinationChars
+    )
+
+/* Read-only helper; arguments and return behavior follow the SAL contract. */
+{
+    ULONG inputChars = 0UL;
+    if (SourceName == NULL || DestinationName == NULL || DestinationChars == 0UL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    DestinationName[0] = L'\0';
+    while (inputChars < KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS && SourceName[inputChars] != L'\0') {
+        ++inputChars;
+    }
+    if (inputChars == 0UL || inputChars >= KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (SourceName[0] == L'\\') {
+        return RtlStringCchCopyNW(DestinationName, DestinationChars, SourceName, inputChars);
+    }
+    return RtlStringCchPrintfW(DestinationName, DestinationChars, L"\\Driver\\%ws", SourceName);
+}
+static NTSTATUS
+KswordARKDriverIntegrityExtractLeafName(
+    _In_reads_(KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS) const WCHAR* ObjectName,
+    _Out_writes_(LeafChars) PWCHAR LeafName,
+    _In_ ULONG LeafChars
+    )
+
+/* Read-only helper; arguments and return behavior follow the SAL contract. */
+{
+    ULONG index = 0UL;
+    ULONG leafStart = 0UL;
+    if (ObjectName == NULL || LeafName == NULL || LeafChars == 0UL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    LeafName[0] = L'\0';
+    while (index < KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS && ObjectName[index] != L'\0') {
+        if (ObjectName[index] == L'\\') {
+            leafStart = index + 1UL;
+        }
+        ++index;
+    }
+    if (index == 0UL || leafStart >= index) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    return RtlStringCchCopyW(LeafName, LeafChars, ObjectName + leafStart);
+}
+static BOOLEAN
+KswordARKDriverIntegrityNameHasPrefix(
+    _In_reads_(KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS) const WCHAR* ObjectName,
+    _In_z_ const WCHAR* Prefix
+    )
+
+/* Read-only helper; arguments and return behavior follow the SAL contract. */
+{
+    ULONG index = 0UL;
+    if (ObjectName == NULL || Prefix == NULL) {
+        return FALSE;
+    }
+    while (Prefix[index] != L'\0') {
+        WCHAR left = ObjectName[index];
+        WCHAR right = Prefix[index];
+        if (left >= L'a' && left <= L'z') {
+            left = (WCHAR)(left - L'a' + L'A');
+        }
+        if (right >= L'a' && right <= L'z') {
+            right = (WCHAR)(right - L'a' + L'A');
+        }
+        if (left != right) {
+            return FALSE;
+        }
+        ++index;
+    }
+    return TRUE;
+}
+static NTSTATUS
+KswordARKDriverIntegrityReferenceCandidateName(
+    _In_z_ const WCHAR* CandidateName,
+    _Outptr_ PDRIVER_OBJECT* DriverObjectOut
+    )
+
+/* Read-only helper; arguments and return behavior follow the SAL contract. */
+{
+    UNICODE_STRING objectName;
+    NTSTATUS status = STATUS_SUCCESS;
+    if (CandidateName == NULL || DriverObjectOut == NULL || IoDriverObjectType == NULL || *IoDriverObjectType == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *DriverObjectOut = NULL;
+    RtlInitUnicodeString(&objectName, CandidateName);
+    status = ObReferenceObjectByName(&objectName, OBJ_CASE_INSENSITIVE, NULL, 0, *IoDriverObjectType, KernelMode, NULL, (PVOID*)DriverObjectOut);
+    if (!NT_SUCCESS(status)) {
+        *DriverObjectOut = NULL;
+    }
+    return status;
+}
+static NTSTATUS
+KswordARKDriverIntegrityReferenceDriverObject(
+    _In_ const KSWORD_ARK_QUERY_DRIVER_INTEGRITY_REQUEST* Request,
+    _Outptr_ PDRIVER_OBJECT* DriverObjectOut
+    )
+
+/* Read-only helper; arguments and return behavior follow the SAL contract. */
+{
+    WCHAR firstCandidate[KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS] = { 0 };
+    WCHAR leafName[KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS] = { 0 };
+    WCHAR alternateName[KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS] = { 0 };
+    NTSTATUS status = STATUS_SUCCESS;
+    if (Request == NULL || DriverObjectOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *DriverObjectOut = NULL;
+    status = KswordARKDriverIntegrityBuildDriverObjectName(Request->driverName, firstCandidate, RTL_NUMBER_OF(firstCandidate));
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    status = KswordARKDriverIntegrityReferenceCandidateName(firstCandidate, DriverObjectOut);
+    if (NT_SUCCESS(status) || (status != STATUS_OBJECT_NAME_NOT_FOUND && status != STATUS_OBJECT_PATH_NOT_FOUND && status != STATUS_NOT_FOUND)) {
+        return status;
+    }
+    if (!NT_SUCCESS(KswordARKDriverIntegrityExtractLeafName(firstCandidate, leafName, RTL_NUMBER_OF(leafName)))) {
+        return status;
+    }
+    if (!KswordARKDriverIntegrityNameHasPrefix(firstCandidate, L"\\FileSystem\\")) {
+        NTSTATUS alternateStatus = RtlStringCchPrintfW(alternateName, RTL_NUMBER_OF(alternateName), L"\\FileSystem\\%ws", leafName);
+        if (NT_SUCCESS(alternateStatus)) {
+            alternateStatus = KswordARKDriverIntegrityReferenceCandidateName(alternateName, DriverObjectOut);
+            if (NT_SUCCESS(alternateStatus)) {
+                return alternateStatus;
+            }
+            status = alternateStatus;
+        }
+    }
+    if (!KswordARKDriverIntegrityNameHasPrefix(firstCandidate, L"\\FileSystem\\Filters\\")) {
+        NTSTATUS alternateStatus = RtlStringCchPrintfW(alternateName, RTL_NUMBER_OF(alternateName), L"\\FileSystem\\Filters\\%ws", leafName);
+        if (NT_SUCCESS(alternateStatus)) {
+            alternateStatus = KswordARKDriverIntegrityReferenceCandidateName(alternateName, DriverObjectOut);
+            if (NT_SUCCESS(alternateStatus)) {
+                return alternateStatus;
+            }
+            status = alternateStatus;
+        }
+    }
+    return status;
+}
+static ULONG
+KswordARKDriverIntegrityPointerRisk(
+    _In_opt_ const KSW_HOOK_SYSTEM_MODULE_INFORMATION* ModuleInfo,
+    _In_opt_ const KSW_HOOK_SYSTEM_MODULE_ENTRY* DriverModule,
+    _In_ ULONGLONG PointerValue
+    )
+
+/* Read-only helper; arguments and return behavior follow the SAL contract. */
+{
+    const KSW_HOOK_SYSTEM_MODULE_ENTRY* ownerModule = NULL;
+    ULONG riskFlags = KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE;
+    if (PointerValue == 0ULL) {
+        return KSWORD_ARK_DRIVER_INTEGRITY_RISK_NULL_POINTER;
+    }
+    ownerModule = KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, PointerValue);
+    if (ownerModule == NULL) {
+        return KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED;
+    }
+    if (DriverModule != NULL && ownerModule->ImageBase != DriverModule->ImageBase) {
+        riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_OWNER_MISMATCH;
+    }
+    return riskFlags;
+}
+static VOID
+KswordARKDriverIntegrityAddSystemModuleRow(
+    _Inout_ KSW_DRIVER_INTEGRITY_BUILDER* Builder,
+    _In_opt_ const KSW_HOOK_SYSTEM_MODULE_INFORMATION* ModuleInfo,
+    _In_ NTSTATUS ModuleStatus,
+    _In_ ULONGLONG DriverStart
+    )
+
+/* Read-only evidence collector; inputs, processing, and output are bounded by SAL and protocol fields. */
+{
+    const KSW_HOOK_SYSTEM_MODULE_ENTRY* ownerModule = NULL;
+    WCHAR detail[KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS] = { 0 };
+    ULONG riskFlags = KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE;
+    if (!NT_SUCCESS(ModuleStatus) || ModuleInfo == NULL) {
+        KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"SystemModuleInformation unavailable, status=0x%08lX.", (ULONG)ModuleStatus);
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MODULE_VIEW, 0ULL, DriverStart,
+            KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE | KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED,
+            KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE, 20UL, ~0UL, ~0UL, ~0UL, NULL, detail);
+        return;
+    }
+    ownerModule = KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, DriverStart);
+    if (ownerModule == NULL && DriverStart != 0ULL) {
+        riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED;
+    }
+    KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"SystemModuleInformation modules=%lu, target=0x%llX.", ModuleInfo->NumberOfModules, DriverStart);
+    KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MODULE_VIEW, 0ULL, DriverStart, riskFlags,
+        KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE, (ownerModule != NULL) ? 95UL : 60UL, ~0UL, ~0UL, ~0UL, ownerModule, detail);
+}
+static VOID
+KswordARKDriverIntegrityAddAuxKlibRow(
+    _Inout_ KSW_DRIVER_INTEGRITY_BUILDER* Builder,
+    _In_ ULONGLONG DriverStart
+    )
+
+/* Read-only evidence collector; inputs, processing, and output are bounded by SAL and protocol fields. */
+{
+    UNICODE_STRING initName;
+    UNICODE_STRING queryName;
+    KSW_DRIVER_INTEGRITY_AUX_INITIALIZE_FN auxInitialize = NULL;
+    KSW_DRIVER_INTEGRITY_AUX_QUERY_MODULES_FN auxQueryModules = NULL;
+    KSW_DRIVER_INTEGRITY_AUX_MODULE_EXTENDED_INFO* modules = NULL;
+    ULONG bufferBytes = 0UL;
+    ULONG moduleCount = 0UL;
+    ULONG index = 0UL;
+    NTSTATUS status = STATUS_SUCCESS;
+    WCHAR detail[KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS] = { 0 };
+    RtlInitUnicodeString(&initName, L"AuxKlibInitialize");
+    RtlInitUnicodeString(&queryName, L"AuxKlibQueryModuleInformation");
+    auxInitialize = (KSW_DRIVER_INTEGRITY_AUX_INITIALIZE_FN)MmGetSystemRoutineAddress(&initName);
+    auxQueryModules = (KSW_DRIVER_INTEGRITY_AUX_QUERY_MODULES_FN)MmGetSystemRoutineAddress(&queryName);
+    if (auxInitialize == NULL || auxQueryModules == NULL) {
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MODULE_VIEW, 0ULL, DriverStart,
+            KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_AUXKLIB, 20UL,
+            ~0UL, ~0UL, ~0UL, NULL, L"AuxKlib exports unavailable; SystemModuleInformation remains primary.");
+        return;
+    }
+    status = auxInitialize();
+    if (NT_SUCCESS(status)) {
+        status = auxQueryModules(&bufferBytes, sizeof(KSW_DRIVER_INTEGRITY_AUX_MODULE_EXTENDED_INFO), NULL);
+    }
+    if (!(NT_SUCCESS(status) || status == STATUS_BUFFER_TOO_SMALL || status == STATUS_INFO_LENGTH_MISMATCH) || bufferBytes == 0UL) {
+        KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"AuxKlib size query failed, status=0x%08lX.", (ULONG)status);
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MODULE_VIEW, 0ULL, DriverStart,
+            KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_AUXKLIB, 30UL,
+            ~0UL, ~0UL, ~0UL, NULL, detail);
+        return;
+    }
+    modules = (KSW_DRIVER_INTEGRITY_AUX_MODULE_EXTENDED_INFO*)KswordARKDriverIntegrityAllocate(bufferBytes);
+    if (modules == NULL) {
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MODULE_VIEW, 0ULL, DriverStart,
+            KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_AUXKLIB, 30UL,
+            ~0UL, ~0UL, ~0UL, NULL, L"AuxKlib buffer allocation failed.");
+        return;
+    }
+    status = auxQueryModules(&bufferBytes, sizeof(KSW_DRIVER_INTEGRITY_AUX_MODULE_EXTENDED_INFO), modules);
+    moduleCount = NT_SUCCESS(status) ? (bufferBytes / (ULONG)sizeof(KSW_DRIVER_INTEGRITY_AUX_MODULE_EXTENDED_INFO)) : 0UL;
+    for (index = 0UL; index < moduleCount; ++index) {
+        const ULONGLONG base = (ULONGLONG)(ULONG_PTR)modules[index].BasicInfo.ImageBase;
+        const ULONGLONG end = base + (ULONGLONG)modules[index].ImageSize;
+        if (DriverStart >= base && DriverStart < end) {
+            KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"AuxKlib modules=%lu, matched base=0x%llX size=0x%lX.", moduleCount, base, modules[index].ImageSize);
+            KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MODULE_VIEW, 0ULL, DriverStart,
+                KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_AUXKLIB, 90UL,
+                ~0UL, ~0UL, ~0UL, NULL, detail);
+            ExFreePoolWithTag(modules, KSW_DRIVER_INTEGRITY_TAG);
+            return;
+        }
+    }
+    KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"AuxKlib status=0x%08lX, modules=%lu, target not matched.", (ULONG)status, moduleCount);
+    KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MODULE_VIEW, 0ULL, DriverStart,
+        NT_SUCCESS(status) ? KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED : KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED,
+        KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_AUXKLIB, NT_SUCCESS(status) ? 60UL : 30UL, ~0UL, ~0UL, ~0UL, NULL, detail);
+    ExFreePoolWithTag(modules, KSW_DRIVER_INTEGRITY_TAG);
+}
+static VOID
+KswordARKDriverIntegrityAddDynRows(
+    _Inout_ KSW_DRIVER_INTEGRITY_BUILDER* Builder,
+    _In_ const KSW_DYN_STATE* DynState,
+    _In_opt_ const KSW_HOOK_SYSTEM_MODULE_INFORMATION* ModuleInfo,
+    _In_ ULONGLONG DriverSection,
+    _In_ ULONGLONG DriverSize,
+    _In_ ULONGLONG DriverStart,
+    _In_ BOOLEAN IncludeOptionalGlobals
+    )
+
+/* Read-only evidence collector; inputs, processing, and output are bounded by SAL and protocol fields. */
+{
+    KSW_DRIVER_INTEGRITY_LDR_TARGET target;
+    NTSTATUS ldrStatus = STATUS_SUCCESS;
+    WCHAR detail[KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS] = { 0 };
+    RtlZeroMemory(&target, sizeof(target));
+    ldrStatus = KswordARKDriverIntegrityFindLoadedModule(DynState, DriverStart, &target);
+    if (NT_SUCCESS(ldrStatus) && target.Found) {
+        const KSW_HOOK_SYSTEM_MODULE_ENTRY* ownerModule = KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, target.DllBase);
+        ULONG riskFlags = KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE;
+        if (DriverSection != 0ULL && DriverSection != target.EntryAddress) {
+            riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_SECTION_MISMATCH;
+        }
+        if (DriverStart != target.DllBase || DriverSize != (ULONGLONG)target.SizeOfImage || target.SizeOfImage == 0UL) {
+            riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_OWNER_MISMATCH;
+        }
+        if (ModuleInfo != NULL && ownerModule == NULL) {
+            riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED;
+        }
+        KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail),
+            L"PsLoadedModuleList=0x%llX KLDR=0x%llX DllBase=0x%llX Size=0x%lX DriverSize=0x%llX BaseName=%ws.",
+            target.ListHeadAddress, target.EntryAddress, target.DllBase, target.SizeOfImage, DriverSize,
+            target.BaseDllName[0] != L'\0' ? target.BaseDllName : L"<unread>");
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_PS_LOADED_MODULES,
+            DriverSection, target.DllBase, riskFlags,
+            KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_PS_LOADED_MODULES | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DYNDATA | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE,
+            90UL, ~0UL, ~0UL, ~0UL, ownerModule, detail);
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_SECTION,
+            DriverSection, target.EntryAddress, riskFlags,
+            KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_SECTION | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DYNDATA | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE,
+            90UL, ~0UL, ~0UL, ~0UL, ownerModule, detail);
+    }
+    else {
+        KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail),
+            L"PsLoadedModuleList unavailable or target not found, status=0x%08lX, listHead=0x%llX.",
+            (ULONG)ldrStatus, target.ListHeadAddress);
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_PS_LOADED_MODULES, DriverSection, DriverStart,
+            KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE | KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE,
+            KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_PS_LOADED_MODULES | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DYNDATA, 25UL,
+            ~0UL, ~0UL, ~0UL, NULL, detail);
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_SECTION, DriverSection, DriverStart,
+            KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE | KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE,
+            KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_SECTION | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DYNDATA, 25UL,
+            ~0UL, ~0UL, ~0UL, NULL, L"DriverSection captured; KLDR alignment unavailable or target not found through DynData.");
+    }
+    if (IncludeOptionalGlobals) {
+        ULONGLONG mmUnloaded = KswordARKDriverIntegrityNtosAddressFromRva(DynState, DynState != NULL ? DynState->KernelGlobals.MmUnloadedDrivers : 0UL, sizeof(PVOID));
+        ULONGLONG piDdb = KswordARKDriverIntegrityNtosAddressFromRva(DynState, DynState != NULL ? DynState->KernelGlobals.PiDDBCacheTable : 0UL, sizeof(PVOID));
+        const KSW_HOOK_SYSTEM_MODULE_ENTRY* mmOwner = KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, mmUnloaded);
+        const KSW_HOOK_SYSTEM_MODULE_ENTRY* piOwner = KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, piDdb);
+        ULONG mmSource = KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DYNDATA;
+        ULONG piSource = KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DYNDATA;
+        if (mmUnloaded != 0ULL) {
+            mmSource |= KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE;
+        }
+        if (piDdb != 0ULL) {
+            piSource |= KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE;
+        }
+        KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"MmUnloadedDrivers global address=0x%llX; entry schema not walked.", mmUnloaded);
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL, mmUnloaded, 0ULL,
+            (mmUnloaded == 0ULL) ? (KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE | KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE) : KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE,
+            mmSource, (mmUnloaded == 0ULL) ? 15UL : 45UL, ~0UL, ~0UL, ~0UL, mmOwner, detail);
+        KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"PiDDBCacheTable global address=0x%llX; table schema not walked.", piDdb);
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL, piDdb, 0ULL,
+            (piDdb == 0ULL) ? (KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE | KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE) : KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE,
+            piSource, (piDdb == 0ULL) ? 15UL : 45UL, ~0UL, ~0UL, ~0UL, piOwner, detail);
+    }
+}
+static VOID
+KswordARKDriverIntegrityAddDriverObjectRows(
+    _Inout_ KSW_DRIVER_INTEGRITY_BUILDER* Builder,
+    _In_ PDRIVER_OBJECT DriverObject,
+    _In_opt_ const KSW_HOOK_SYSTEM_MODULE_INFORMATION* ModuleInfo
+    )
+
+/* Read-only evidence collector; inputs, processing, and output are bounded by SAL and protocol fields. */
+{
+    const ULONGLONG driverStart = (ULONGLONG)(ULONG_PTR)DriverObject->DriverStart;
+    const ULONGLONG driverSize = (ULONGLONG)DriverObject->DriverSize;
+    const KSW_HOOK_SYSTEM_MODULE_ENTRY* driverModule = KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, driverStart);
+    WCHAR detail[KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS] = { 0 };
+    ULONG riskFlags = KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE;
+    ULONG index = 0UL;
+    if (driverStart == 0ULL || driverSize == 0ULL) {
+        riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_NULL_POINTER;
+    }
+    if (driverModule == NULL && driverStart != 0ULL) {
+        riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED;
+    }
+    if (driverModule != NULL) {
+        const ULONGLONG moduleBase = (ULONGLONG)(ULONG_PTR)driverModule->ImageBase;
+        const ULONGLONG moduleEnd = moduleBase + (ULONGLONG)driverModule->ImageSize;
+        if (driverStart != moduleBase || driverStart + driverSize > moduleEnd || driverSize != (ULONGLONG)driverModule->ImageSize) {
+            riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_OWNER_MISMATCH;
+        }
+    }
+    KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"DriverObject=0x%p DriverStart=0x%llX DriverSize=0x%llX DriverSection=0x%p DriverUnload=0x%p.",
+        DriverObject, driverStart, driverSize, DriverObject->DriverSection, DriverObject->DriverUnload);
+    KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_OBJECT, (ULONGLONG)(ULONG_PTR)DriverObject, driverStart, riskFlags,
+        KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE, (driverModule != NULL) ? 90UL : 55UL,
+        ~0UL, ~0UL, ~0UL, driverModule, detail);
+    KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_SECTION, (ULONGLONG)(ULONG_PTR)DriverObject->DriverSection, driverStart,
+        KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_SECTION,
+        70UL, ~0UL, ~0UL, ~0UL, driverModule, L"DriverSection captured read-only; KLDR alignment row follows when DynData is available.");
+    if (DriverObject->DriverUnload == NULL) {
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_OBJECT, (ULONGLONG)(ULONG_PTR)DriverObject, 0ULL,
+            KSWORD_ARK_DRIVER_INTEGRITY_RISK_EMPTY_UNLOAD, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT, 75UL,
+            ~0UL, ~0UL, ~0UL, NULL, L"DriverObject->DriverUnload is NULL; no unload or repair attempted.");
+    }
+    for (index = 0UL; index < KSWORD_ARK_DRIVER_MAJOR_FUNCTION_COUNT; ++index) {
+        const ULONGLONG address = (ULONGLONG)(ULONG_PTR)DriverObject->MajorFunction[index];
+        KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"MajorFunction[%lu]=0x%llX.", index, address);
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MAJOR_FUNCTION, (ULONGLONG)(ULONG_PTR)&DriverObject->MajorFunction[index], address,
+            KswordARKDriverIntegrityPointerRisk(ModuleInfo, driverModule, address), KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE,
+            85UL, ~0UL, ~0UL, ~0UL, KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, address), detail);
+    }
+    if (DriverObject->FastIoDispatch != NULL) {
+        for (index = 0UL; index < RTL_NUMBER_OF(g_KswordArkFastIoFields); ++index) {
+            const UCHAR* fieldAddress = (const UCHAR*)DriverObject->FastIoDispatch + g_KswordArkFastIoFields[index].Offset;
+            PVOID routine = NULL;
+            if (!KswordARKHookReadMemorySafe(fieldAddress, &routine, sizeof(routine)) || routine == NULL) {
+                continue;
+            }
+            KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"FastIoDispatch.%S=0x%p.", g_KswordArkFastIoFields[index].Name, routine);
+            KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_FAST_IO, (ULONGLONG)(ULONG_PTR)fieldAddress, (ULONGLONG)(ULONG_PTR)routine,
+                KswordARKDriverIntegrityPointerRisk(ModuleInfo, driverModule, (ULONGLONG)(ULONG_PTR)routine),
+                KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE,
+                80UL, ~0UL, ~0UL, ~0UL, KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, (ULONGLONG)(ULONG_PTR)routine), detail);
+        }
+    }
+}
+static BOOLEAN
+KswordARKDriverIntegrityReadDeviceSnapshot(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Out_ KSW_DRIVER_INTEGRITY_DEVICE_SNAPSHOT* Snapshot
+    )
+
+/* Read-only evidence collector; inputs, processing, and output are bounded by SAL and protocol fields. */
+{
+    if (DeviceObject == NULL || Snapshot == NULL) {
+        return FALSE;
+    }
+    RtlZeroMemory(Snapshot, sizeof(*Snapshot));
+    return KswordARKHookReadMemorySafe(&DeviceObject->NextDevice, &Snapshot->NextDevice, sizeof(Snapshot->NextDevice)) &&
+        KswordARKHookReadMemorySafe(&DeviceObject->AttachedDevice, &Snapshot->AttachedDevice, sizeof(Snapshot->AttachedDevice)) &&
+        KswordARKHookReadMemorySafe(&DeviceObject->DriverObject, &Snapshot->DriverObject, sizeof(Snapshot->DriverObject)) &&
+        KswordARKHookReadMemorySafe(&DeviceObject->DeviceType, &Snapshot->DeviceType, sizeof(Snapshot->DeviceType)) &&
+        KswordARKHookReadMemorySafe(&DeviceObject->Flags, &Snapshot->Flags, sizeof(Snapshot->Flags));
+}
+static BOOLEAN
+KswordARKDriverIntegrityPointerVisited(
+    _In_reads_(VisitedCount) PDEVICE_OBJECT const* Visited,
+    _In_ ULONG VisitedCount,
+    _In_opt_ PDEVICE_OBJECT Candidate
+    )
+
+/* Read-only evidence collector; inputs, processing, and output are bounded by SAL and protocol fields. */
+{
+    ULONG index = 0UL;
+    if (Candidate == NULL) {
+        return FALSE;
+    }
+    for (index = 0UL; index < VisitedCount; ++index) {
+        if (Visited[index] == Candidate) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+static VOID
+KswordARKDriverIntegrityAddDeviceRows(
+    _Inout_ KSW_DRIVER_INTEGRITY_BUILDER* Builder,
+    _In_ PDRIVER_OBJECT DriverObject,
+    _In_ ULONG MaxDevices,
+    _In_ ULONG MaxAttachedDevices
+    )
+
+/* Read-only evidence collector; inputs, processing, and output are bounded by SAL and protocol fields. */
+{
+    PDEVICE_OBJECT visitedRoots[KSW_DRIVER_INTEGRITY_DEVICE_VISIT_LIMIT] = { 0 };
+    PDEVICE_OBJECT rootDevice = DriverObject->DeviceObject;
+    ULONG rootCount = 0UL;
+    if (MaxDevices == 0UL || MaxDevices > KSW_DRIVER_INTEGRITY_DEVICE_VISIT_LIMIT) {
+        MaxDevices = KSW_DRIVER_INTEGRITY_DEVICE_VISIT_LIMIT;
+    }
+    if (MaxAttachedDevices == 0UL || MaxAttachedDevices > KSW_DRIVER_INTEGRITY_ATTACH_VISIT_LIMIT) {
+        MaxAttachedDevices = KSW_DRIVER_INTEGRITY_ATTACH_VISIT_LIMIT;
+    }
+    while (rootDevice != NULL && rootCount < MaxDevices) {
+        KSW_DRIVER_INTEGRITY_DEVICE_SNAPSHOT rootSnapshot;
+        PDEVICE_OBJECT visitedAttached[KSW_DRIVER_INTEGRITY_ATTACH_VISIT_LIMIT] = { 0 };
+        PDEVICE_OBJECT attachedDevice = NULL;
+        ULONG attachedCount = 0UL;
+        ULONG riskFlags = KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE;
+        WCHAR detail[KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS] = { 0 };
+        if (KswordARKDriverIntegrityPointerVisited(visitedRoots, rootCount, rootDevice)) {
+            KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DEVICE_CHAIN, (ULONGLONG)(ULONG_PTR)rootDevice, 0ULL,
+                KSWORD_ARK_DRIVER_INTEGRITY_RISK_DEVICE_LOOP, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT, 90UL, ~0UL, ~0UL, ~0UL, NULL,
+                L"DriverObject->DeviceObject/NextDevice chain loop detected.");
+            break;
+        }
+        visitedRoots[rootCount++] = rootDevice;
+        if (!KswordARKDriverIntegrityReadDeviceSnapshot(rootDevice, &rootSnapshot)) {
+            KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DEVICE_CHAIN, (ULONGLONG)(ULONG_PTR)rootDevice, 0ULL,
+                KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT, 40UL, ~0UL, ~0UL, ~0UL, NULL,
+                L"Failed to safely read root DeviceObject fields.");
+            break;
+        }
+        if (rootSnapshot.DriverObject != DriverObject) {
+            riskFlags |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_OWNER_MISMATCH;
+        }
+        KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"DeviceObject=0x%p Next=0x%p Attached=0x%p Type=0x%lX Flags=0x%lX.",
+            rootDevice, rootSnapshot.NextDevice, rootSnapshot.AttachedDevice, rootSnapshot.DeviceType, rootSnapshot.Flags);
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DEVICE_CHAIN, (ULONGLONG)(ULONG_PTR)rootDevice,
+            (ULONGLONG)(ULONG_PTR)rootSnapshot.AttachedDevice, riskFlags, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT, 80UL,
+            ~0UL, ~0UL, ~0UL, NULL, detail);
+        attachedDevice = rootSnapshot.AttachedDevice;
+        while (attachedDevice != NULL && attachedCount < MaxAttachedDevices) {
+            KSW_DRIVER_INTEGRITY_DEVICE_SNAPSHOT attachedSnapshot;
+            ULONG attachedRisk = KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE;
+            if (KswordARKDriverIntegrityPointerVisited(visitedAttached, attachedCount, attachedDevice)) {
+                KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DEVICE_CHAIN, (ULONGLONG)(ULONG_PTR)rootDevice, (ULONGLONG)(ULONG_PTR)attachedDevice,
+                    KSWORD_ARK_DRIVER_INTEGRITY_RISK_ATTACHED_LOOP, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT, 90UL, ~0UL, ~0UL, ~0UL, NULL,
+                    L"AttachedDevice chain loop detected.");
+                break;
+            }
+            visitedAttached[attachedCount++] = attachedDevice;
+            if (!KswordARKDriverIntegrityReadDeviceSnapshot(attachedDevice, &attachedSnapshot)) {
+                break;
+            }
+            if (attachedSnapshot.DriverObject != DriverObject) {
+                attachedRisk |= KSWORD_ARK_DRIVER_INTEGRITY_RISK_CROSS_DRIVER_ATTACH;
+            }
+            KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"AttachedDevice=0x%p OwnerDriver=0x%p NextAttached=0x%p.",
+                attachedDevice, attachedSnapshot.DriverObject, attachedSnapshot.AttachedDevice);
+            KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DEVICE_CHAIN, (ULONGLONG)(ULONG_PTR)rootDevice,
+                (ULONGLONG)(ULONG_PTR)attachedDevice, attachedRisk, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT, 75UL,
+                ~0UL, ~0UL, ~0UL, NULL, detail);
+            attachedDevice = attachedSnapshot.AttachedDevice;
+        }
+        rootDevice = rootSnapshot.NextDevice;
+    }
+}
+static VOID
+KswordARKDriverIntegrityAddServiceRow(
+    _Inout_ KSW_DRIVER_INTEGRITY_BUILDER* Builder,
+    _In_opt_ PDRIVER_OBJECT DriverObject,
+    _In_ const KSWORD_ARK_QUERY_DRIVER_INTEGRITY_REQUEST* Request
+    )
+
+/* Read-only evidence collector; inputs, processing, and output are bounded by SAL and protocol fields. */
+{
+    WCHAR serviceName[KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS] = { 0 };
+    WCHAR keyPath[KSWORD_ARK_DRIVER_IMAGE_PATH_CHARS] = { 0 };
+    UNICODE_STRING keyName;
+    OBJECT_ATTRIBUTES attributes;
+    HANDLE keyHandle = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+    WCHAR detail[KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS] = { 0 };
+    if (DriverObject != NULL && DriverObject->DriverExtension != NULL) {
+        KswordARKDriverIntegrityCopyUnicode(&DriverObject->DriverExtension->ServiceKeyName, serviceName, RTL_NUMBER_OF(serviceName));
+    }
+    if (serviceName[0] == L'\0') {
+        WCHAR objectName[KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS] = { 0 };
+        if (NT_SUCCESS(KswordARKDriverIntegrityBuildDriverObjectName(Request->driverName, objectName, RTL_NUMBER_OF(objectName)))) {
+            (VOID)KswordARKDriverIntegrityExtractLeafName(objectName, serviceName, RTL_NUMBER_OF(serviceName));
+        }
+    }
+    if (serviceName[0] == L'\0') {
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_SERVICE, 0ULL, 0ULL,
+            KSWORD_ARK_DRIVER_INTEGRITY_RISK_SERVICE_MISSING, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SERVICE_REGISTRY, 30UL,
+            ~0UL, ~0UL, ~0UL, NULL, L"No service key name could be derived.");
+        return;
+    }
+    status = RtlStringCchPrintfW(keyPath, RTL_NUMBER_OF(keyPath), L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\%ws", serviceName);
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+    RtlInitUnicodeString(&keyName, keyPath);
+    InitializeObjectAttributes(&attributes, &keyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    status = ZwOpenKey(&keyHandle, KEY_READ, &attributes);
+    if (!NT_SUCCESS(status)) {
+        KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"Service key %ws open failed, status=0x%08lX.", serviceName, (ULONG)status);
+        KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_SERVICE, 0ULL, 0ULL,
+            KSWORD_ARK_DRIVER_INTEGRITY_RISK_SERVICE_MISSING, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SERVICE_REGISTRY, 45UL,
+            ~0UL, ~0UL, ~0UL, NULL, detail);
+        return;
+    }
+    KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"Service key %ws opened read-only.", serviceName);
+    KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_SERVICE, 0ULL, 0ULL,
+        KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SERVICE_REGISTRY, 80UL,
+        ~0UL, ~0UL, ~0UL, NULL, detail);
+    ZwClose(keyHandle);
+}
+NTSTATUS
+KswordARKDriverQueryDriverIntegrity(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _In_opt_ const KSWORD_ARK_QUERY_DRIVER_INTEGRITY_REQUEST* Request,
+    _Out_ size_t* BytesWrittenOut
+    )
+
+/* Read-only evidence collector; inputs, processing, and output are bounded by SAL and protocol fields. */
+{
+    KSWORD_ARK_QUERY_DRIVER_INTEGRITY_REQUEST requestSnapshot;
+    KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE* response = NULL;
+    KSW_DRIVER_INTEGRITY_BUILDER builder;
+    KSW_HOOK_SYSTEM_MODULE_INFORMATION* moduleInfo = NULL;
+    PDRIVER_OBJECT driverObject = NULL;
+    KSW_DYN_STATE dynState;
+    ULONG moduleInfoBytes = 0UL;
+    ULONG capacity = 0UL;
+    ULONG flags = 0UL;
+    ULONG cpuCount = 0UL;
+    ULONGLONG targetBase = 0ULL;
+    NTSTATUS moduleStatus = STATUS_SUCCESS;
+    NTSTATUS status = STATUS_SUCCESS;
+    if (OutputBuffer == NULL || BytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+    if (OutputBufferLength < KSW_DRIVER_INTEGRITY_RESPONSE_HEADER_SIZE) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    RtlZeroMemory(&requestSnapshot, sizeof(requestSnapshot));
+    if (Request != NULL) {
+        RtlCopyMemory(&requestSnapshot, Request, sizeof(requestSnapshot));
+    }
+    flags = (requestSnapshot.flags == 0UL) ? KSWORD_ARK_DRIVER_INTEGRITY_FLAG_DEFAULT : requestSnapshot.flags;
+    if (requestSnapshot.maxRows == 0UL || requestSnapshot.maxRows > KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_MAX_ROWS) {
+        requestSnapshot.maxRows = KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_MAX_ROWS;
+    }
+    capacity = (ULONG)((OutputBufferLength - KSW_DRIVER_INTEGRITY_RESPONSE_HEADER_SIZE) / sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE));
+    RtlZeroMemory(OutputBuffer, OutputBufferLength);
+    response = (KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE*)OutputBuffer;
+    response->version = KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION;
+    response->queryStatus = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_OK;
+    response->entrySize = sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE);
+    response->lastStatus = STATUS_SUCCESS;
+    RtlZeroMemory(&builder, sizeof(builder));
+    RtlZeroMemory(&dynState, sizeof(dynState));
+    builder.Response = response;
+    builder.Capacity = capacity;
+    builder.RowLimit = requestSnapshot.maxRows;
+    moduleStatus = KswordARKHookBuildModuleSnapshot(&moduleInfo, &moduleInfoBytes);
+    KswordARKDynDataSnapshot(&dynState);
+    targetBase = requestSnapshot.targetModuleBase;
+    if ((flags & KSWORD_ARK_DRIVER_INTEGRITY_FLAG_DRIVER_OBJECT) != 0UL) {
+        status = KswordARKDriverIntegrityReferenceDriverObject(&requestSnapshot, &driverObject);
+        response->lastStatus = status;
+        if (NT_SUCCESS(status)) {
+            targetBase = (ULONGLONG)(ULONG_PTR)driverObject->DriverStart;
+        }
+        else {
+            response->queryStatus = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_PARTIAL;
+            KswordARKDriverIntegrityAddEvidence(&builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_OBJECT, 0ULL, targetBase,
+                KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE | KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED,
+                KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT, 30UL, ~0UL, ~0UL, ~0UL, NULL,
+                L"DriverObject reference failed; module and CPU evidence still collected.");
+        }
+    }
+    KswordARKDriverIntegrityAddSystemModuleRow(&builder, moduleInfo, moduleStatus, targetBase);
+    KswordARKDriverIntegrityAddAuxKlibRow(&builder, targetBase);
+    if (driverObject != NULL) {
+        KswordARKDriverIntegrityAddDriverObjectRows(&builder, driverObject, moduleInfo);
+        KswordARKDriverIntegrityAddDeviceRows(&builder, driverObject, requestSnapshot.maxDevices, requestSnapshot.maxAttachedDevices);
+    }
+    if ((flags & KSWORD_ARK_DRIVER_INTEGRITY_FLAG_SERVICE) != 0UL) {
+        KswordARKDriverIntegrityAddServiceRow(&builder, driverObject, &requestSnapshot);
+    }
+    if (driverObject != NULL) {
+        KswordARKDriverIntegrityAddDynRows(
+            &builder,
+            &dynState,
+            moduleInfo,
+            (ULONGLONG)(ULONG_PTR)driverObject->DriverSection,
+            (ULONGLONG)driverObject->DriverSize,
+            (ULONGLONG)(ULONG_PTR)driverObject->DriverStart,
+            ((flags & KSWORD_ARK_DRIVER_INTEGRITY_FLAG_OPTIONAL_GLOBALS) != 0UL) ? TRUE : FALSE);
+    }
+    else {
+        KswordARKDriverIntegrityAddDynRows(&builder, &dynState, moduleInfo, 0ULL, 0ULL, targetBase,
+            ((flags & KSWORD_ARK_DRIVER_INTEGRITY_FLAG_OPTIONAL_GLOBALS) != 0UL) ? TRUE : FALSE);
+    }
+    if ((flags & KSWORD_ARK_DRIVER_INTEGRITY_FLAG_CPU) != 0UL) {
+        status = KswordARKCpuIntegrityCollect(&builder, moduleInfo, flags, requestSnapshot.maxIdtVectorsPerCpu, &cpuCount);
+        response->cpuCount = cpuCount;
+        if (!NT_SUCCESS(status) && response->queryStatus == KSWORD_ARK_DRIVER_INTEGRITY_STATUS_OK) {
+            response->queryStatus = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_PARTIAL;
+            response->lastStatus = status;
+        }
+    }
+    response->moduleCount = (moduleInfo != NULL) ? moduleInfo->NumberOfModules : 0UL;
+    if ((response->flags & (KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED | KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED | KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE)) != 0UL &&
+        response->queryStatus == KSWORD_ARK_DRIVER_INTEGRITY_STATUS_OK) {
+        response->queryStatus = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_PARTIAL;
+    }
+    *BytesWrittenOut = KSW_DRIVER_INTEGRITY_RESPONSE_HEADER_SIZE + ((size_t)response->returnedCount * sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE));
+    if (driverObject != NULL) {
+        ObDereferenceObject(driverObject);
+    }
+    if (moduleInfo != NULL) {
+        ExFreePoolWithTag(moduleInfo, KSW_HOOK_SCAN_TAG);
+    }
+    return STATUS_SUCCESS;
+}

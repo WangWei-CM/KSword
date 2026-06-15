@@ -104,7 +104,20 @@ Return Value:
 
     Offsets->EpObjectTable = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EpSectionObject = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpUniqueProcessId = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpActiveProcessLinks = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpThreadListHead = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpImageFileName = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpToken = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EtCid = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EtThreadListEntry = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EtStartAddress = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EtWin32StartAddress = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->KtProcess = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->HtHandleContentionEvent = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->HtTableCode = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->HtHandleCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->HteLowValue = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->OtName = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->OtIndex = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->ObDecodeShift = KSW_DYN_OFFSET_UNAVAILABLE;
@@ -140,6 +153,18 @@ Return Value:
     Offsets->EpProtection = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EpSignatureLevel = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EpSectionSignatureLevel = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->KldrInLoadOrderLinks = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->KldrDllBase = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->KldrSizeOfImage = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->KldrFullDllName = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->KldrBaseDllName = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->KldrFlags = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->DoDriverStart = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->DoDriverSize = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->DoDriverSection = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->DoMajorFunction = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->DoFastIoDispatch = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->DoDriverUnload = KSW_DYN_OFFSET_UNAVAILABLE;
 }
 
 static VOID
@@ -171,6 +196,38 @@ Return Value:
     Offsets->LxPicoProcInfoPID = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->LxPicoThrdInfo = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->LxPicoThrdInfoTID = KSW_DYN_OFFSET_UNAVAILABLE;
+}
+
+static VOID
+KswordARKDynDataInitializeKernelGlobals(
+    _Out_ KSW_DYN_KERNEL_GLOBALS* Globals
+    )
+/*++
+
+Routine Description:
+
+    Initialize every non-callback kernel global RVA slot to the unavailable
+    sentinel. These entries are optional PDB profile data for future cross-view,
+    driver integrity, and kernel-memory attribution features.
+
+Arguments:
+
+    Globals - Kernel global RVA block to initialize.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    if (Globals == NULL) {
+        return;
+    }
+
+    Globals->PspCidTable = KSW_DYN_OFFSET_UNAVAILABLE;
+    Globals->PsLoadedModuleList = KSW_DYN_OFFSET_UNAVAILABLE;
+    Globals->MmUnloadedDrivers = KSW_DYN_OFFSET_UNAVAILABLE;
+    Globals->PiDDBCacheTable = KSW_DYN_OFFSET_UNAVAILABLE;
 }
 
 static VOID
@@ -823,6 +880,7 @@ Return Value:
     State->LastStatus = STATUS_UNSUCCESSFUL;
     KswordARKDynDataInitializeKernelOffsets(&State->Kernel);
     KswordARKDynDataInitializeLxcoreOffsets(&State->LxcoreOffsets);
+    KswordARKDynDataInitializeKernelGlobals(&State->KernelGlobals);
     KswordARKDynDataInitializeCallbackGlobals(&State->CallbackGlobals);
     KswordARKDynDataInitializeCallbackOffsets(&State->CallbackOffsets);
     KswordARKDynDataSetReason(State, L"DynData initialization has not completed.");
@@ -1162,9 +1220,61 @@ Return Value:
         *OffsetOut = &State->Kernel.EpSectionObject;
         *SourceOut = &State->KernelSources.EpSectionObject;
         break;
+    case KSW_DYN_FIELD_ID_EP_UNIQUE_PROCESS_ID:
+        *OffsetOut = &State->Kernel.EpUniqueProcessId;
+        *SourceOut = &State->KernelSources.EpUniqueProcessId;
+        break;
+    case KSW_DYN_FIELD_ID_EP_ACTIVE_PROCESS_LINKS:
+        *OffsetOut = &State->Kernel.EpActiveProcessLinks;
+        *SourceOut = &State->KernelSources.EpActiveProcessLinks;
+        break;
+    case KSW_DYN_FIELD_ID_EP_THREAD_LIST_HEAD:
+        *OffsetOut = &State->Kernel.EpThreadListHead;
+        *SourceOut = &State->KernelSources.EpThreadListHead;
+        break;
+    case KSW_DYN_FIELD_ID_EP_IMAGE_FILE_NAME:
+        *OffsetOut = &State->Kernel.EpImageFileName;
+        *SourceOut = &State->KernelSources.EpImageFileName;
+        break;
+    case KSW_DYN_FIELD_ID_EP_TOKEN:
+        *OffsetOut = &State->Kernel.EpToken;
+        *SourceOut = &State->KernelSources.EpToken;
+        break;
+    case KSW_DYN_FIELD_ID_ET_CID:
+        *OffsetOut = &State->Kernel.EtCid;
+        *SourceOut = &State->KernelSources.EtCid;
+        break;
+    case KSW_DYN_FIELD_ID_ET_THREAD_LIST_ENTRY:
+        *OffsetOut = &State->Kernel.EtThreadListEntry;
+        *SourceOut = &State->KernelSources.EtThreadListEntry;
+        break;
+    case KSW_DYN_FIELD_ID_ET_START_ADDRESS:
+        *OffsetOut = &State->Kernel.EtStartAddress;
+        *SourceOut = &State->KernelSources.EtStartAddress;
+        break;
+    case KSW_DYN_FIELD_ID_ET_WIN32_START_ADDRESS:
+        *OffsetOut = &State->Kernel.EtWin32StartAddress;
+        *SourceOut = &State->KernelSources.EtWin32StartAddress;
+        break;
+    case KSW_DYN_FIELD_ID_KT_PROCESS:
+        *OffsetOut = &State->Kernel.KtProcess;
+        *SourceOut = &State->KernelSources.KtProcess;
+        break;
     case KSW_DYN_FIELD_ID_HT_HANDLE_CONTENTION_EVENT:
         *OffsetOut = &State->Kernel.HtHandleContentionEvent;
         *SourceOut = &State->KernelSources.HtHandleContentionEvent;
+        break;
+    case KSW_DYN_FIELD_ID_HT_TABLE_CODE:
+        *OffsetOut = &State->Kernel.HtTableCode;
+        *SourceOut = &State->KernelSources.HtTableCode;
+        break;
+    case KSW_DYN_FIELD_ID_HT_HANDLE_COUNT:
+        *OffsetOut = &State->Kernel.HtHandleCount;
+        *SourceOut = &State->KernelSources.HtHandleCount;
+        break;
+    case KSW_DYN_FIELD_ID_HTE_LOW_VALUE:
+        *OffsetOut = &State->Kernel.HteLowValue;
+        *SourceOut = &State->KernelSources.HteLowValue;
         break;
     case KSW_DYN_FIELD_ID_OT_NAME:
         *OffsetOut = &State->Kernel.OtName;
@@ -1306,11 +1416,119 @@ Return Value:
         *OffsetOut = &State->Kernel.EreGuidEntry;
         *SourceOut = &State->KernelSources.EreGuidEntry;
         break;
+    case KSW_DYN_FIELD_ID_KLDR_IN_LOAD_ORDER_LINKS:
+        *OffsetOut = &State->Kernel.KldrInLoadOrderLinks;
+        *SourceOut = &State->KernelSources.KldrInLoadOrderLinks;
+        break;
+    case KSW_DYN_FIELD_ID_KLDR_DLL_BASE:
+        *OffsetOut = &State->Kernel.KldrDllBase;
+        *SourceOut = &State->KernelSources.KldrDllBase;
+        break;
+    case KSW_DYN_FIELD_ID_KLDR_SIZE_OF_IMAGE:
+        *OffsetOut = &State->Kernel.KldrSizeOfImage;
+        *SourceOut = &State->KernelSources.KldrSizeOfImage;
+        break;
+    case KSW_DYN_FIELD_ID_KLDR_FULL_DLL_NAME:
+        *OffsetOut = &State->Kernel.KldrFullDllName;
+        *SourceOut = &State->KernelSources.KldrFullDllName;
+        break;
+    case KSW_DYN_FIELD_ID_KLDR_BASE_DLL_NAME:
+        *OffsetOut = &State->Kernel.KldrBaseDllName;
+        *SourceOut = &State->KernelSources.KldrBaseDllName;
+        break;
+    case KSW_DYN_FIELD_ID_KLDR_FLAGS:
+        *OffsetOut = &State->Kernel.KldrFlags;
+        *SourceOut = &State->KernelSources.KldrFlags;
+        break;
+    case KSW_DYN_FIELD_ID_DO_DRIVER_START:
+        *OffsetOut = &State->Kernel.DoDriverStart;
+        *SourceOut = &State->KernelSources.DoDriverStart;
+        break;
+    case KSW_DYN_FIELD_ID_DO_DRIVER_SIZE:
+        *OffsetOut = &State->Kernel.DoDriverSize;
+        *SourceOut = &State->KernelSources.DoDriverSize;
+        break;
+    case KSW_DYN_FIELD_ID_DO_DRIVER_SECTION:
+        *OffsetOut = &State->Kernel.DoDriverSection;
+        *SourceOut = &State->KernelSources.DoDriverSection;
+        break;
+    case KSW_DYN_FIELD_ID_DO_MAJOR_FUNCTION:
+        *OffsetOut = &State->Kernel.DoMajorFunction;
+        *SourceOut = &State->KernelSources.DoMajorFunction;
+        break;
+    case KSW_DYN_FIELD_ID_DO_FAST_IO_DISPATCH:
+        *OffsetOut = &State->Kernel.DoFastIoDispatch;
+        *SourceOut = &State->KernelSources.DoFastIoDispatch;
+        break;
+    case KSW_DYN_FIELD_ID_DO_DRIVER_UNLOAD:
+        *OffsetOut = &State->Kernel.DoDriverUnload;
+        *SourceOut = &State->KernelSources.DoDriverUnload;
+        break;
     default:
         return FALSE;
     }
 
     return (*OffsetOut != NULL && *SourceOut != NULL) ? TRUE : FALSE;
+}
+
+static BOOLEAN
+KswordARKDynDataKernelGlobalRvaPointers(
+    _In_ ULONG FieldId,
+    _Inout_ KSW_DYN_STATE* State,
+    _Outptr_ ULONG** RvaOut,
+    _Outptr_ ULONG** SourceOut
+    )
+/*++
+
+Routine Description:
+
+    Resolve one non-callback ntoskrnl global item ID into the internal
+    RVA/source slots. These optional globals support future process/thread
+    cross-view walks, module list validation, unloaded-driver attribution, and
+    PiDDB cache checks.
+
+Arguments:
+
+    FieldId - KSW_DYN_FIELD_ID_KG_* global item ID supplied by R3.
+    State - Mutable state snapshot that owns destination fields.
+    RvaOut - Receives a pointer to the target RVA slot.
+    SourceOut - Receives a pointer to the target source slot.
+
+Return Value:
+
+    TRUE when the item ID is a supported kernel global RVA; otherwise FALSE.
+
+--*/
+{
+    if (State == NULL || RvaOut == NULL || SourceOut == NULL) {
+        return FALSE;
+    }
+
+    *RvaOut = NULL;
+    *SourceOut = NULL;
+
+    switch (FieldId) {
+    case KSW_DYN_FIELD_ID_KG_PSP_CID_TABLE:
+        *RvaOut = &State->KernelGlobals.PspCidTable;
+        *SourceOut = &State->KernelGlobalSources.PspCidTable;
+        break;
+    case KSW_DYN_FIELD_ID_KG_PS_LOADED_MODULE_LIST:
+        *RvaOut = &State->KernelGlobals.PsLoadedModuleList;
+        *SourceOut = &State->KernelGlobalSources.PsLoadedModuleList;
+        break;
+    case KSW_DYN_FIELD_ID_KG_MM_UNLOADED_DRIVERS:
+        *RvaOut = &State->KernelGlobals.MmUnloadedDrivers;
+        *SourceOut = &State->KernelGlobalSources.MmUnloadedDrivers;
+        break;
+    case KSW_DYN_FIELD_ID_KG_PIDDB_CACHE_TABLE:
+        *RvaOut = &State->KernelGlobals.PiDDBCacheTable;
+        *SourceOut = &State->KernelGlobalSources.PiDDBCacheTable;
+        break;
+    default:
+        return FALSE;
+    }
+
+    return (*RvaOut != NULL && *SourceOut != NULL) ? TRUE : FALSE;
 }
 
 static BOOLEAN
@@ -1641,11 +1859,11 @@ KswordARKDynDataApplyProfileEx(
 
 Routine Description:
 
-    Validate and merge one extended R3-supplied PDB profile into the callback
-    DynData portion of the global state. This v2 path accepts only typed items:
-    structure offsets and ntoskrnl global RVAs. The driver still never parses
-    JSON/PDB/pack content; R3 must send compact numeric IDs after local schema
-    validation. The merge is copy-on-success so malformed callback items never
+    Validate and merge one extended R3-supplied PDB profile into the typed
+    DynData portion of the global state. This v2/v3 path accepts only typed
+    items: structure offsets and ntoskrnl global RVAs. The driver still never
+    parses JSON/PDB/pack content; R3 must send compact numeric IDs after local
+    schema validation. The merge is copy-on-success so malformed items never
     poison the active DynData snapshot.
 
 Arguments:
@@ -1768,10 +1986,15 @@ Return Value:
                 continue;
             }
             if (!KswordARKDynDataCallbackGlobalPointers(
-                item->itemId,
-                &candidateState,
-                &destinationValue,
-                &destinationSource)) {
+                    item->itemId,
+                    &candidateState,
+                    &destinationValue,
+                    &destinationSource) &&
+                !KswordARKDynDataKernelGlobalRvaPointers(
+                    item->itemId,
+                    &candidateState,
+                    &destinationValue,
+                    &destinationSource)) {
                 unknownCount += 1UL;
                 continue;
             }
@@ -1783,10 +2006,15 @@ Return Value:
                 continue;
             }
             if (!KswordARKDynDataCallbackOffsetPointers(
-                item->itemId,
-                &candidateState,
-                &destinationValue,
-                &destinationSource)) {
+                    item->itemId,
+                    &candidateState,
+                    &destinationValue,
+                    &destinationSource) &&
+                !KswordARKDynDataKernelFieldPointers(
+                    item->itemId,
+                    &candidateState,
+                    &destinationValue,
+                    &destinationSource)) {
                 unknownCount += 1UL;
                 continue;
             }

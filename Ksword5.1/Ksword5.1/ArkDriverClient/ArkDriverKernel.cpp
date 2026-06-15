@@ -747,6 +747,158 @@ namespace ksword::ark
         return queryResult;
     }
 
+    DriverIntegrityResult DriverClient::queryDriverIntegrity(
+        const std::wstring& driverName,
+        const std::uint64_t targetModuleBase,
+        const unsigned long flags,
+        const unsigned long maxRows,
+        const unsigned long maxIdtVectorsPerCpu) const
+    {
+        // 输入：可选 DriverObject 名称、目标模块基址、采集 flags 和预算。
+        // 处理：调用只读 Driver Integrity IOCTL，解析 DriverObject/LDR/FastIo/CPU/IDT evidence rows。
+        // 返回：DriverIntegrityResult；旧驱动或未注册 IOCTL 时 unsupported=true。
+        DriverIntegrityResult integrityResult{};
+        KSWORD_ARK_QUERY_DRIVER_INTEGRITY_REQUEST request{};
+        request.version = KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION;
+        request.flags = flags;
+        request.maxRows = maxRows;
+        request.maxIdtVectorsPerCpu = maxIdtVectorsPerCpu;
+        request.maxDevices = KSWORD_ARK_DRIVER_DEVICE_LIMIT_DEFAULT;
+        request.maxAttachedDevices = KSWORD_ARK_DRIVER_ATTACHED_LIMIT_DEFAULT;
+        request.targetModuleBase = static_cast<unsigned long long>(targetModuleBase);
+        copyWideToFixed(
+            request.driverName,
+            KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS,
+            driverName);
+
+        constexpr std::size_t headerSize =
+            sizeof(KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE) -
+            sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE);
+        std::vector<std::uint8_t> responseBuffer(4U * 1024U * 1024U, 0U);
+        integrityResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            responseBuffer.data(),
+            static_cast<unsigned long>(responseBuffer.size()));
+        if (!integrityResult.io.ok)
+        {
+            integrityResult.unsupported = isUnsupportedIoctlError(integrityResult.io.win32Error);
+            integrityResult.io.message = integrityResult.unsupported
+                ? "IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY unsupported or driver version is too old"
+                : "DeviceIoControl(IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY) failed, error=" +
+                    std::to_string(integrityResult.io.win32Error);
+            return integrityResult;
+        }
+        if (integrityResult.io.bytesReturned < headerSize)
+        {
+            integrityResult.io.ok = false;
+            integrityResult.io.message =
+                "driver integrity response too small, bytesReturned=" +
+                std::to_string(integrityResult.io.bytesReturned);
+            return integrityResult;
+        }
+
+        const auto* responseHeader =
+            reinterpret_cast<const KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE*>(responseBuffer.data());
+        if (responseHeader->entrySize < sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE))
+        {
+            integrityResult.io.ok = false;
+            integrityResult.io.message =
+                "driver integrity entrySize invalid, entrySize=" +
+                std::to_string(responseHeader->entrySize);
+            return integrityResult;
+        }
+
+        integrityResult.version = static_cast<std::uint32_t>(responseHeader->version);
+        integrityResult.queryStatus = static_cast<std::uint32_t>(responseHeader->queryStatus);
+        integrityResult.flags = static_cast<std::uint32_t>(responseHeader->flags);
+        integrityResult.sourceMask = static_cast<std::uint32_t>(responseHeader->sourceMask);
+        integrityResult.totalCount = static_cast<std::uint32_t>(responseHeader->totalCount);
+        integrityResult.returnedCount = static_cast<std::uint32_t>(responseHeader->returnedCount);
+        integrityResult.cpuCount = static_cast<std::uint32_t>(responseHeader->cpuCount);
+        integrityResult.moduleCount = static_cast<std::uint32_t>(responseHeader->moduleCount);
+        integrityResult.lastStatus = static_cast<long>(responseHeader->lastStatus);
+        integrityResult.io.ntStatus = integrityResult.lastStatus;
+        if (static_cast<unsigned long>(integrityResult.lastStatus) == 0xC00000BBUL ||
+            static_cast<unsigned long>(integrityResult.lastStatus) == 0xC0000010UL)
+        {
+            integrityResult.unsupported = true;
+            integrityResult.io.ok = false;
+            integrityResult.io.message =
+                "IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY unsupported by current driver response";
+            return integrityResult;
+        }
+
+        const std::size_t availableCount =
+            (static_cast<std::size_t>(integrityResult.io.bytesReturned) - headerSize) /
+            static_cast<std::size_t>(responseHeader->entrySize);
+        const std::size_t parsedCount = std::min<std::size_t>(
+            static_cast<std::size_t>(responseHeader->returnedCount),
+            availableCount);
+        integrityResult.entries.reserve(parsedCount);
+        for (std::size_t index = 0U; index < parsedCount; ++index)
+        {
+            const std::size_t entryOffset =
+                headerSize + (index * static_cast<std::size_t>(responseHeader->entrySize));
+            if (entryOffset + sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE) > responseBuffer.size())
+            {
+                break;
+            }
+
+            const auto* sourceEntry =
+                reinterpret_cast<const KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE*>(
+                    responseBuffer.data() + entryOffset);
+            DriverIntegrityEvidenceEntry row{};
+            row.evidenceClass = static_cast<std::uint32_t>(sourceEntry->evidenceClass);
+            row.riskFlags = static_cast<std::uint32_t>(sourceEntry->riskFlags);
+            row.sourceMask = static_cast<std::uint32_t>(sourceEntry->sourceMask);
+            row.confidence = static_cast<std::uint32_t>(sourceEntry->confidence);
+            row.processorGroup = static_cast<std::uint32_t>(sourceEntry->processorGroup);
+            row.processorNumber = static_cast<std::uint32_t>(sourceEntry->processorNumber);
+            row.vector = static_cast<std::uint32_t>(sourceEntry->vector);
+            row.ownerModuleSize = static_cast<std::uint32_t>(sourceEntry->ownerModuleSize);
+            row.objectAddress = static_cast<std::uint64_t>(sourceEntry->objectAddress);
+            row.targetAddress = static_cast<std::uint64_t>(sourceEntry->targetAddress);
+            row.ownerModuleBase = static_cast<std::uint64_t>(sourceEntry->ownerModuleBase);
+            row.ownerModule = fixedKernelWideToString(
+                sourceEntry->ownerModule,
+                KSWORD_ARK_DRIVER_INTEGRITY_OWNER_CHARS);
+            row.detail = fixedKernelWideToString(
+                sourceEntry->detail,
+                KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS);
+            integrityResult.entries.push_back(std::move(row));
+        }
+
+        std::ostringstream stream;
+        stream << "version=" << integrityResult.version
+            << ", status=" << integrityResult.queryStatus
+            << ", total=" << integrityResult.totalCount
+            << ", returned=" << integrityResult.returnedCount
+            << ", parsed=" << integrityResult.entries.size()
+            << ", cpu=" << integrityResult.cpuCount
+            << ", modules=" << integrityResult.moduleCount
+            << ", lastStatus=0x" << std::hex << static_cast<unsigned long>(integrityResult.lastStatus);
+        integrityResult.io.message = stream.str();
+        return integrityResult;
+    }
+
+    DriverIntegrityResult DriverClient::queryKernelCpuIntegrity(
+        const unsigned long flags,
+        const unsigned long maxRows,
+        const unsigned long maxIdtVectorsPerCpu) const
+    {
+        // 输入：CPU/IDT evidence flags 与预算。
+        // 处理：复用 Driver Integrity 协议，不传 DriverObject 名称或模块基址。
+        // 返回：DriverIntegrityResult，只读展示 CPU entry evidence。
+        return queryDriverIntegrity(
+            std::wstring(),
+            0ULL,
+            flags,
+            maxRows,
+            maxIdtVectorsPerCpu);
+    }
+
     DriverForceUnloadResult DriverClient::forceUnloadDriver(
         const std::wstring& driverName,
         const unsigned long flags,

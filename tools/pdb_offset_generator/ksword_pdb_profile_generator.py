@@ -11,13 +11,14 @@ Processing:
 - Verify SHA256 before trusting the image.
 - Parse CodeView RSDS data from the PE to obtain PDB name, GUID, and age.
 - Download the exact PDB by GUID+age.
-- Use llvm-pdbutil to resolve selected private structure member offsets and
-  callback v2 PDB items.
+- Use llvm-pdbutil to resolve selected private structure member offsets,
+  callback v2 PDB items, and optional v3 kernel global RVAs.
 
 Returns:
 - One JSON profile per PE/PDB identity, suitable for KswordARK R3 parsing.
-- Optional callback item diagnostics are included without making missing private
-  symbols fatal, because Microsoft public PDB coverage varies by build.
+- Optional callback/kernel-global diagnostics are included without making
+  missing private symbols fatal, because Microsoft public PDB coverage varies by
+  build.
 """
 
 from __future__ import annotations
@@ -45,23 +46,49 @@ HTTP_TIMEOUT_SECONDS = 600
 PDBUTIL_TIMEOUT_SECONDS = 600
 KSW_SCHEMA_VERSION = 1
 CALLBACK_ITEM_SCHEMA_VERSION = 2
+TYPED_ITEM_SCHEMA_VERSION = 3
 
 FIELD_MAP: dict[str, tuple[str, str]] = {
     "EpObjectTable": ("_EPROCESS", "ObjectTable"),
     "EpSectionObject": ("_EPROCESS", "SectionObject"),
+    "EpUniqueProcessId": ("_EPROCESS", "UniqueProcessId"),
+    "EpActiveProcessLinks": ("_EPROCESS", "ActiveProcessLinks"),
+    "EpThreadListHead": ("_EPROCESS", "ThreadListHead"),
+    "EpImageFileName": ("_EPROCESS", "ImageFileName"),
+    "EpToken": ("_EPROCESS", "Token"),
     "EpProtection": ("_EPROCESS", "Protection"),
     "EpSignatureLevel": ("_EPROCESS", "SignatureLevel"),
     "EpSectionSignatureLevel": ("_EPROCESS", "SectionSignatureLevel"),
+    "EtCid": ("_ETHREAD", "Cid"),
+    "EtThreadListEntry": ("_ETHREAD", "ThreadListEntry"),
+    "EtStartAddress": ("_ETHREAD", "StartAddress"),
+    "EtWin32StartAddress": ("_ETHREAD", "Win32StartAddress"),
     "KtInitialStack": ("_KTHREAD", "InitialStack"),
     "KtStackLimit": ("_KTHREAD", "StackLimit"),
     "KtStackBase": ("_KTHREAD", "StackBase"),
     "KtKernelStack": ("_KTHREAD", "KernelStack"),
+    "KtProcess": ("_KTHREAD", "Process"),
     "KtReadOperationCount": ("_KTHREAD", "ReadOperationCount"),
     "KtWriteOperationCount": ("_KTHREAD", "WriteOperationCount"),
     "KtOtherOperationCount": ("_KTHREAD", "OtherOperationCount"),
     "KtReadTransferCount": ("_KTHREAD", "ReadTransferCount"),
     "KtWriteTransferCount": ("_KTHREAD", "WriteTransferCount"),
     "KtOtherTransferCount": ("_KTHREAD", "OtherTransferCount"),
+    "HtTableCode": ("_HANDLE_TABLE", "TableCode"),
+    "HtHandleCount": ("_HANDLE_TABLE", "HandleCount"),
+    "HteLowValue": ("_HANDLE_TABLE_ENTRY", "LowValue"),
+    "KldrInLoadOrderLinks": ("_KLDR_DATA_TABLE_ENTRY", "InLoadOrderLinks"),
+    "KldrDllBase": ("_KLDR_DATA_TABLE_ENTRY", "DllBase"),
+    "KldrSizeOfImage": ("_KLDR_DATA_TABLE_ENTRY", "SizeOfImage"),
+    "KldrFullDllName": ("_KLDR_DATA_TABLE_ENTRY", "FullDllName"),
+    "KldrBaseDllName": ("_KLDR_DATA_TABLE_ENTRY", "BaseDllName"),
+    "KldrFlags": ("_KLDR_DATA_TABLE_ENTRY", "Flags"),
+    "DoDriverStart": ("_DRIVER_OBJECT", "DriverStart"),
+    "DoDriverSize": ("_DRIVER_OBJECT", "DriverSize"),
+    "DoDriverSection": ("_DRIVER_OBJECT", "DriverSection"),
+    "DoMajorFunction": ("_DRIVER_OBJECT", "MajorFunction"),
+    "DoFastIoDispatch": ("_DRIVER_OBJECT", "FastIoDispatch"),
+    "DoDriverUnload": ("_DRIVER_OBJECT", "DriverUnload"),
 }
 
 CALLBACK_GLOBAL_RVA_NAMES: tuple[str, ...] = (
@@ -70,6 +97,13 @@ CALLBACK_GLOBAL_RVA_NAMES: tuple[str, ...] = (
     "PspLoadImageNotifyRoutine",
     "PspNotifyEnableMask",
     "CmCallbackListHead",
+)
+
+KERNEL_GLOBAL_RVA_NAMES: tuple[str, ...] = (
+    "PspCidTable",
+    "PsLoadedModuleList",
+    "MmUnloadedDrivers",
+    "PiDDBCacheTable",
 )
 
 CALLBACK_STRUCT_FIELD_MAP: dict[str, tuple[str, str]] = {
@@ -689,6 +723,67 @@ def choose_symbol_address(addresses: list[SymbolAddress]) -> SymbolAddress:
     return sorted(addresses, key=lambda item: (source_rank.get(item.source, 9), item.section, item.offset))[0]
 
 
+def build_global_rva_items(
+    pe_path: Path,
+    symbol_addresses: dict[str, list[SymbolAddress]],
+    symbol_names: Iterable[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Resolve optional global symbols into JSON GlobalRva items.
+
+    Inputs:
+    - pe_path: PE image used to convert CodeView section:offset addresses to
+      RVAs.
+    - symbol_addresses: Exact-name symbol address map from globals/publics.
+    - symbol_names: Candidate global symbol names to resolve.
+
+    Processing:
+    - Looks up each requested symbol by exact name.
+    - Chooses a deterministic address when both globals and publics expose a
+      symbol.
+    - Converts the chosen section-relative address to an RVA with the PE section
+      table.
+
+    Return behavior:
+    - Returns (items, missing_globals). items are JSON-ready GlobalRva records;
+      missing_globals contains JSON-ready diagnostics and does not make profile
+      generation fail.
+    """
+    items: list[dict[str, Any]] = []
+    missing_globals: list[dict[str, str]] = []
+
+    for symbol_name in symbol_names:
+        matches = symbol_addresses.get(symbol_name, [])
+        if not matches:
+            missing_globals.append({"kind": "GlobalRva", "name": symbol_name, "reason": "symbol_not_found"})
+            continue
+        address = choose_symbol_address(matches)
+        rva = rva_from_section_offset(pe_path, address.section, address.offset)
+        if rva is None:
+            missing_globals.append(
+                {
+                    "kind": "GlobalRva",
+                    "name": symbol_name,
+                    "reason": "section_offset_unmapped",
+                    "section": f"0x{address.section:04X}",
+                    "sectionOffset": f"0x{address.offset:X}",
+                }
+            )
+            continue
+        items.append(
+            {
+                "kind": "GlobalRva",
+                "name": symbol_name,
+                "value": f"0x{rva:08X}",
+                "source": address.source,
+                "symbolKind": address.kind,
+                "section": f"0x{address.section:04X}",
+                "sectionOffset": f"0x{address.offset:X}",
+            }
+        )
+
+    return items, missing_globals
+
+
 def build_callback_items(
     types_text: str,
     pe_path: Path,
@@ -715,38 +810,11 @@ def build_callback_items(
     - Returns (callback_items, diagnostics). callback_items is JSON-ready and
       diagnostics contains missingItems plus optional symbolDumpFailures.
     """
-    callback_items: list[dict[str, Any]] = []
-    missing_items: list[dict[str, str]] = []
-
-    for symbol_name in CALLBACK_GLOBAL_RVA_NAMES:
-        matches = symbol_addresses.get(symbol_name, [])
-        if not matches:
-            missing_items.append({"kind": "GlobalRva", "name": symbol_name, "reason": "symbol_not_found"})
-            continue
-        address = choose_symbol_address(matches)
-        rva = rva_from_section_offset(pe_path, address.section, address.offset)
-        if rva is None:
-            missing_items.append(
-                {
-                    "kind": "GlobalRva",
-                    "name": symbol_name,
-                    "reason": "section_offset_unmapped",
-                    "section": f"0x{address.section:04X}",
-                    "sectionOffset": f"0x{address.offset:X}",
-                }
-            )
-            continue
-        callback_items.append(
-            {
-                "kind": "GlobalRva",
-                "name": symbol_name,
-                "value": f"0x{rva:08X}",
-                "source": address.source,
-                "symbolKind": address.kind,
-                "section": f"0x{address.section:04X}",
-                "sectionOffset": f"0x{address.offset:X}",
-            }
-        )
+    callback_items, missing_items = build_global_rva_items(
+        pe_path=pe_path,
+        symbol_addresses=symbol_addresses,
+        symbol_names=CALLBACK_GLOBAL_RVA_NAMES,
+    )
 
     for item_name, (struct_name, member_name) in CALLBACK_STRUCT_FIELD_MAP.items():
         offset = resolve_member_offset(types_text, struct_name, member_name)
@@ -819,11 +887,31 @@ def build_profile(
         symbol_addresses=symbol_addresses or {},
         symbol_dump_failures=symbol_dump_failures or [],
     )
+    kernel_global_items, missing_global_details = build_global_rva_items(
+        pe_path=pe_path,
+        symbol_addresses=symbol_addresses or {},
+        symbol_names=KERNEL_GLOBAL_RVA_NAMES,
+    )
+    missing_globals = [str(item.get("name", "")) for item in missing_global_details if str(item.get("name", "")).strip()]
+    typed_items: list[dict[str, Any]] = []
+    for field_name, offset_text in sorted(resolved_fields.items()):
+        typed_items.append({"kind": "StructOffset", "name": field_name, "value": offset_text})
+    typed_items.extend(callback_items)
+    typed_items.extend(kernel_global_items)
+
+    total_candidates = (
+        len(FIELD_MAP) +
+        len(CALLBACK_GLOBAL_RVA_NAMES) +
+        len(CALLBACK_STRUCT_FIELD_MAP) +
+        len(KERNEL_GLOBAL_RVA_NAMES)
+    )
+    coverage_percent = 0.0 if total_candidates == 0 else (len(typed_items) / float(total_candidates)) * 100.0
 
     profile_name = f"{entry.class_name}_{entry.arch}_{entry.version}_{pdb_identity.symbol_key.lower()}"
     return {
         "schemaVersion": KSW_SCHEMA_VERSION,
         "callbackItemSchemaVersion": CALLBACK_ITEM_SCHEMA_VERSION,
+        "typedItemSchemaVersion": TYPED_ITEM_SCHEMA_VERSION,
         "profileName": profile_name,
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "generator": "tools/pdb_offset_generator/ksword_pdb_profile_generator.py",
@@ -844,7 +932,14 @@ def build_profile(
         "fields": resolved_fields,
         "missingFields": missing_fields,
         "callbackItems": callback_items,
-        "diagnostics": diagnostics,
+        "typedItems": typed_items,
+        "missingGlobals": missing_globals,
+        "coveragePercent": round(coverage_percent, 1),
+        "diagnostics": {
+            **diagnostics,
+            "missingFields": missing_fields,
+            "missingGlobals": missing_global_details,
+        },
     }
 
 
@@ -959,6 +1054,9 @@ def run_local_dry_run(args: argparse.Namespace) -> int:
     output_path.write_text(json.dumps(profile, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"[OK] {output_path}")
     print(f"callbackItems={len(profile.get('callbackItems', []))}")
+    print(f"typedItems={len(profile.get('typedItems', []))}")
+    print(f"missingGlobals={len(profile.get('missingGlobals', []))}")
+    print(f"coveragePercent={profile.get('coveragePercent', 0.0)}")
     diagnostics = profile.get("diagnostics", {})
     missing_items = diagnostics.get("missingItems", []) if isinstance(diagnostics, dict) else []
     print(f"missingItems={len(missing_items) if isinstance(missing_items, list) else 0}")

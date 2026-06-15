@@ -192,4 +192,175 @@ namespace ksword::ark
         writeResult.io.message = stream.str();
         return writeResult;
     }
+
+    KernelMemoryEvidenceResult DriverClient::queryKernelMemoryEvidence(
+        const unsigned long flags,
+        const unsigned long maxRows,
+        const std::uint64_t startAddress,
+        const std::uint64_t endAddress,
+        const std::uint64_t maxBytes,
+        const unsigned long maxBigPoolRows,
+        const unsigned long sampleBytes) const
+    {
+        // 输入：只读内核内存证据采集参数，包含来源 flags、地址范围和预算。
+        // 处理：构造固定请求，调用 R0 证据 IOCTL，并按 rowSize 解析变长 rows[]。
+        // 返回：KernelMemoryEvidenceResult；旧驱动或未注册 IOCTL 时 unsupported=true。
+        KernelMemoryEvidenceResult evidenceResult{};
+        KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_REQUEST request{};
+        request.flags = flags;
+        request.maxRows = maxRows;
+        request.startAddress = startAddress;
+        request.endAddress = endAddress;
+        request.maxBytes = maxBytes;
+        request.maxBigPoolRows = maxBigPoolRows;
+        request.sampleBytes = sampleBytes;
+
+        constexpr std::size_t headerSize =
+            sizeof(KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_RESPONSE) -
+            sizeof(KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW);
+        std::vector<std::uint8_t> responseBuffer(4U * 1024U * 1024U, 0U);
+        evidenceResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            responseBuffer.data(),
+            static_cast<unsigned long>(responseBuffer.size()));
+        if (!evidenceResult.io.ok)
+        {
+            evidenceResult.unsupported =
+                evidenceResult.io.win32Error == ERROR_INVALID_FUNCTION ||
+                evidenceResult.io.win32Error == ERROR_NOT_SUPPORTED ||
+                evidenceResult.io.win32Error == ERROR_INVALID_PARAMETER;
+            evidenceResult.io.message = evidenceResult.unsupported
+                ? "IOCTL_KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE unsupported or driver version is too old"
+                : "DeviceIoControl(IOCTL_KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE) failed, error=" +
+                    std::to_string(evidenceResult.io.win32Error);
+            return evidenceResult;
+        }
+        if (evidenceResult.io.bytesReturned < headerSize)
+        {
+            evidenceResult.io.ok = false;
+            evidenceResult.io.message =
+                "kernel memory evidence response too small, bytesReturned=" +
+                std::to_string(evidenceResult.io.bytesReturned);
+            return evidenceResult;
+        }
+
+        const auto* responseHeader =
+            reinterpret_cast<const KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_RESPONSE*>(responseBuffer.data());
+        if (responseHeader->rowSize < sizeof(KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW))
+        {
+            evidenceResult.io.ok = false;
+            evidenceResult.io.message =
+                "kernel memory evidence rowSize invalid, rowSize=" +
+                std::to_string(responseHeader->rowSize);
+            return evidenceResult;
+        }
+
+        evidenceResult.version = static_cast<std::uint32_t>(responseHeader->version);
+        evidenceResult.status = static_cast<std::uint32_t>(responseHeader->status);
+        evidenceResult.responseFlags = static_cast<std::uint32_t>(responseHeader->responseFlags);
+        evidenceResult.sourceFlags = static_cast<std::uint32_t>(responseHeader->sourceFlags);
+        evidenceResult.totalRows = static_cast<std::uint32_t>(responseHeader->totalRows);
+        evidenceResult.returnedRows = static_cast<std::uint32_t>(responseHeader->returnedRows);
+        evidenceResult.maxRows = static_cast<std::uint32_t>(responseHeader->maxRows);
+        evidenceResult.maxBytes = static_cast<std::uint64_t>(responseHeader->maxBytes);
+        evidenceResult.bytesScanned = static_cast<std::uint64_t>(responseHeader->bytesScanned);
+        evidenceResult.moduleCount = static_cast<std::uint32_t>(responseHeader->moduleCount);
+        evidenceResult.bigPoolRowsSeen = static_cast<std::uint32_t>(responseHeader->bigPoolRowsSeen);
+        evidenceResult.lastStatus = static_cast<long>(responseHeader->lastStatus);
+        evidenceResult.io.ntStatus = evidenceResult.lastStatus;
+        if (static_cast<unsigned long>(evidenceResult.lastStatus) == 0xC00000BBUL ||
+            static_cast<unsigned long>(evidenceResult.lastStatus) == 0xC0000010UL)
+        {
+            evidenceResult.unsupported = true;
+            evidenceResult.io.ok = false;
+            evidenceResult.io.message =
+                "IOCTL_KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE unsupported by current driver response";
+            return evidenceResult;
+        }
+
+        const std::size_t availableCount =
+            (static_cast<std::size_t>(evidenceResult.io.bytesReturned) - headerSize) /
+            static_cast<std::size_t>(responseHeader->rowSize);
+        const std::size_t parsedCount = std::min<std::size_t>(
+            static_cast<std::size_t>(responseHeader->returnedRows),
+            availableCount);
+        evidenceResult.entries.reserve(parsedCount);
+        for (std::size_t index = 0U; index < parsedCount; ++index)
+        {
+            const std::size_t entryOffset =
+                headerSize + (index * static_cast<std::size_t>(responseHeader->rowSize));
+            if (entryOffset + sizeof(KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW) > responseBuffer.size())
+            {
+                break;
+            }
+
+            const auto* sourceRow =
+                reinterpret_cast<const KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW*>(
+                    responseBuffer.data() + entryOffset);
+            KernelMemoryEvidenceEntry row{};
+            row.evidenceKind = static_cast<std::uint32_t>(sourceRow->evidenceKind);
+            row.pageSize = static_cast<std::uint32_t>(sourceRow->pageSize);
+            row.permissionFlags = static_cast<std::uint32_t>(sourceRow->permissionFlags);
+            row.ownerKind = static_cast<std::uint32_t>(sourceRow->ownerKind);
+            row.riskFlags = static_cast<std::uint32_t>(sourceRow->riskFlags);
+            row.moduleSize = static_cast<std::uint32_t>(sourceRow->moduleSize);
+            row.confidence = static_cast<std::uint32_t>(sourceRow->confidence);
+            row.bigPoolTag = static_cast<std::uint32_t>(sourceRow->bigPoolTag);
+            row.bigPoolFlags = static_cast<std::uint32_t>(sourceRow->bigPoolFlags);
+            row.sectionRva = static_cast<std::uint32_t>(sourceRow->sectionRva);
+            row.sectionSize = static_cast<std::uint32_t>(sourceRow->sectionSize);
+            row.hashAlgorithm = static_cast<std::uint32_t>(sourceRow->hashAlgorithm);
+            row.sampleSize = static_cast<std::uint32_t>(sourceRow->sampleSize);
+            row.lastStatus = static_cast<long>(sourceRow->lastStatus);
+            row.virtualAddress = static_cast<std::uint64_t>(sourceRow->virtualAddress);
+            row.regionSize = static_cast<std::uint64_t>(sourceRow->regionSize);
+            row.moduleBase = static_cast<std::uint64_t>(sourceRow->moduleBase);
+            row.ownerAddress = static_cast<std::uint64_t>(sourceRow->ownerAddress);
+            row.contentHash = static_cast<std::uint64_t>(sourceRow->contentHash);
+
+            const std::size_t sectionNameLength = std::find(
+                sourceRow->sectionName,
+                sourceRow->sectionName + KSWORD_ARK_MEMORY_EVIDENCE_SECTION_NAME_BYTES,
+                '\0') - sourceRow->sectionName;
+            row.sectionName.assign(
+                reinterpret_cast<const char*>(sourceRow->sectionName),
+                reinterpret_cast<const char*>(sourceRow->sectionName + sectionNameLength));
+
+            const std::size_t boundedSampleBytes = std::min<std::size_t>(
+                static_cast<std::size_t>(sourceRow->sampleSize),
+                KSWORD_ARK_MEMORY_EVIDENCE_SECTION_SAMPLE_BYTES);
+            row.sample.assign(sourceRow->sample, sourceRow->sample + boundedSampleBytes);
+
+            std::size_t ownerChars = 0U;
+            while (ownerChars < KSWORD_ARK_MEMORY_EVIDENCE_OWNER_NAME_CHARS &&
+                sourceRow->ownerName[ownerChars] != L'\0')
+            {
+                ++ownerChars;
+            }
+            row.ownerName.assign(sourceRow->ownerName, sourceRow->ownerName + ownerChars);
+
+            std::size_t detailChars = 0U;
+            while (detailChars < KSWORD_ARK_MEMORY_EVIDENCE_DETAIL_CHARS &&
+                sourceRow->detail[detailChars] != L'\0')
+            {
+                ++detailChars;
+            }
+            row.detail.assign(sourceRow->detail, sourceRow->detail + detailChars);
+            evidenceResult.entries.push_back(std::move(row));
+        }
+
+        std::ostringstream stream;
+        stream << "version=" << evidenceResult.version
+            << ", status=" << evidenceResult.status
+            << ", total=" << evidenceResult.totalRows
+            << ", returned=" << evidenceResult.returnedRows
+            << ", parsed=" << evidenceResult.entries.size()
+            << ", bytesScanned=" << evidenceResult.bytesScanned
+            << ", flags=0x" << std::hex << std::uppercase << evidenceResult.responseFlags
+            << ", lastStatus=0x" << static_cast<unsigned long>(evidenceResult.lastStatus);
+        evidenceResult.io.message = stream.str();
+        return evidenceResult;
+    }
 }

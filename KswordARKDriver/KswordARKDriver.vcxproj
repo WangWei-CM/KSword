@@ -35,6 +35,8 @@
     <ClCompile Include="src\features\callback\image_callback.c" />
     <ClCompile Include="src\features\callback\object_callback.c" />
     <ClCompile Include="src\features\kernel\driver_object_query.c" />
+    <ClCompile Include="src\features\kernel\driver_integrity.c" />
+    <ClCompile Include="src\features\kernel\kernel_cpu_integrity.c" />
     <ClCompile Include="src\features\kernel\driver_unload.c" />
     <ClCompile Include="src\features\kernel\ssdt_query.c" />
     <ClCompile Include="src\features\kernel\hook_scan.c" />
@@ -46,6 +48,7 @@
     <ClCompile Include="src\dispatch\ioctl_dispatch.c" />
     <ClCompile Include="src\features\log\log_channel.c" />
     <ClCompile Include="src\features\process\process_actions.c" />
+    <ClCompile Include="src\features\process\process_crossview.c" />
     <ClCompile Include="src\features\process\process_dkom.c" />
     <ClCompile Include="src\features\process\process_flags.c" />
     <ClCompile Include="src\features\process\process_terminate.c" />
@@ -66,6 +69,7 @@
     <ClCompile Include="src\features\capability\capability_query.c" />
     <ClCompile Include="src\features\capability\capability_ioctl.c" />
     <ClCompile Include="src\features\thread\thread_query.c" />
+    <ClCompile Include="src\features\thread\thread_crossview.c" />
     <ClCompile Include="src\features\thread\thread_ioctl.c" />
     <ClCompile Include="src\features\handle\handle_support.c" />
     <ClCompile Include="src\features\handle\handle_object_query.c" />
@@ -101,7 +105,9 @@
     <ClCompile Include="src\features\network\network_ioctl.c" />
     <ClCompile Include="src\features\keyboard\keyboard_query.c" />
     <ClCompile Include="src\features\keyboard\keyboard_ioctl.c" />
-  <ClCompile Include="src\features\callback\callback_external_wfp.c" /><ClCompile Include="src\features\callback\callback_external_minifilter.c" /><ClCompile Include="src\features\callback\callback_external_safe.c" /><ClCompile Include="src\features\memory\memory_physical.c" /><ClCompile Include="src\features\memory\memory_pagetable.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan_helpers.c" /><ClCompile Include="src\features\memory\memory_ioctl.c" /></ItemGroup>
+    <ClCompile Include="src\features\mutation\mutation_transaction.c" />
+    <ClCompile Include="src\features\mutation\mutation_ioctl.c" />
+  <ClCompile Include="src\features\callback\callback_external_wfp.c" /><ClCompile Include="src\features\callback\callback_external_minifilter.c" /><ClCompile Include="src\features\callback\callback_external_safe.c" /><ClCompile Include="src\features\memory\memory_physical.c" /><ClCompile Include="src\features\memory\memory_pagetable.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan_helpers.c" /><ClCompile Include="src\features\memory\memory_kernel_evidence.c" /><ClCompile Include="src\features\memory\memory_ioctl.c" /></ItemGroup>
   <ItemGroup>
     <ClInclude Include="Device.h" />
     <ClInclude Include="Driver.h" />
@@ -115,6 +121,7 @@
     <ClInclude Include="include\ark\ark_callback.h" />
     <ClInclude Include="include\ark\ark_kernel.h" />
     <ClInclude Include="src\features\process\process_extended.h" />
+    <ClInclude Include="src\features\process\process_crossview.h" />
     <ClInclude Include="src\features\callback\callback_internal.h" />
     <ClInclude Include="Public.h" />
     <ClInclude Include="Queue.h" />
@@ -124,6 +131,7 @@
     <ClInclude Include="include\ark\ark_dyndata_fields.h" />
     <ClInclude Include="include\ark\ark_capability.h" />
     <ClInclude Include="include\ark\ark_thread.h" />
+    <ClInclude Include="include\ark\ark_thread_crossview.h" />
     <ClInclude Include="include\ark\ark_handle.h" />
     <ClInclude Include="src\features\handle\handle_support.h" />
     <ClInclude Include="include\ark\ark_alpc.h" />
@@ -131,7 +139,9 @@
     <ClInclude Include="include\ark\ark_section.h" />
     <ClInclude Include="src\features\section\section_support.h" />
     <ClInclude Include="include\ark\ark_memory.h" />
+    <ClInclude Include="include\ark\ark_memory_evidence.h" />
     <ClInclude Include="src\features\memory\memory_kernel_exec_scan_internal.h" />
+    <ClInclude Include="src\features\thread\thread_crossview.h" />
     <ClInclude Include="include\ark\ark_file_monitor.h" />
     <ClInclude Include="src\features\file_monitor\file_monitor_internal.h" />
     <ClInclude Include="include\ark\ark_wsl_silo.h" />
@@ -147,9 +157,13 @@
     <ClInclude Include="include\ark\ark_redirect.h" />
     <ClInclude Include="include\ark\ark_network.h" />
     <ClInclude Include="include\ark\ark_keyboard.h" />
+    <ClInclude Include="include\ark\ark_mutation.h" />
     <ClInclude Include="src\features\redirect\redirect_internal.h" />
     <ClInclude Include="src\features\network\network_internal.h" />
     <ClInclude Include="src\features\kernel\hook_scan_support.h" />
+    <ClInclude Include="src\features\kernel\driver_integrity.h" />
+    <ClInclude Include="src\features\kernel\kernel_cpu_integrity.h" />
+    <ClInclude Include="src\features\mutation\mutation_transaction.h" />
   <ClInclude Include="src\features\callback\callback_external_core.h" /><ClInclude Include="src\features\callback\callback_external_wfp.h" /><ClInclude Include="src\features\callback\callback_external_minifilter.h" /><ClInclude Include="src\features\callback\callback_external_safe.h" /></ItemGroup>
   <ItemGroup>
     <Inf Include="KswordARKDriver.inf">
