@@ -575,7 +575,8 @@ namespace
     constexpr DWORD kWindowDisplayAffinityExcludeFromCapture = 0x00000011;
     constexpr wchar_t kR0DriverServiceName[] = L"KswordARK";
     constexpr wchar_t kR0DriverDisplayName[] = L"KswordARK Driver Service";
-    constexpr DWORD kR0ServiceWaitTimeoutMs = 9000;
+    constexpr DWORD kR0ServiceStartWaitTimeoutMs = 9000;
+    constexpr DWORD kR0ServiceStopWaitTimeoutMs = 30000;
     constexpr int kR0LogConnectRetrySleepMs = 260;
     constexpr int kR0LogIdlePollSleepMs = 120;
     constexpr char kR0LogPrefixDebug[] = "[Debug]";
@@ -611,6 +612,12 @@ namespace
         }
         return text.compare(0, prefixLength, prefixText) == 0;
     }
+
+    // serviceStateToText 作用：
+    // - 输入：Win32 服务状态枚举值；
+    // - 处理：把原始状态码映射为稳定的调试文本；
+    // - 返回：用于 UI 和日志展示的状态名。
+    QString serviceStateToText(const DWORD serviceState);
 
     class ScopedServiceHandle final
     {
@@ -1579,6 +1586,23 @@ namespace
         }
     }
 
+    // buildServiceWaitDetailText 作用：
+    // - 输入：SCM 返回的 SERVICE_STATUS_PROCESS 与等待总时长；
+    // - 处理：把 STOP_PENDING/START_PENDING 排障所需字段聚合成稳定中文文本；
+    // - 返回：可直接放入 R0 错误弹窗“详细信息”的 QString。
+    QString buildServiceWaitDetailText(
+        const SERVICE_STATUS_PROCESS& status,
+        const DWORD timeoutMs)
+    {
+        return QStringLiteral("当前状态：%1\nCheckPoint：%2\nWaitHint：%3 ms\n等待上限：%4 ms\nWin32ExitCode：%5\nServiceSpecificExitCode：%6")
+            .arg(serviceStateToText(status.dwCurrentState))
+            .arg(status.dwCheckPoint)
+            .arg(status.dwWaitHint)
+            .arg(timeoutMs)
+            .arg(status.dwWin32ExitCode)
+            .arg(status.dwServiceSpecificExitCode);
+    }
+
     bool isRunningLikeServiceState(const DWORD serviceState)
     {
         return serviceState == SERVICE_RUNNING ||
@@ -2137,13 +2161,7 @@ MainWindow::MainWindow(
     // - 挂载到自绘标题栏右侧，不再依赖原生菜单栏。
     reportStartupProgress(46, QStringLiteral("正在初始化权限状态按钮..."));
     initPrivilegeStatusButtons();
-    startR0DriverLogPoller();
-
-    if (CallbackPromptManager* callbackPromptManager = CallbackPromptManager::ensureGlobalManager(this))
-    {
-        callbackPromptManager->setHostWindow(this);
-        callbackPromptManager->start();
-    }
+    startR0RuntimeConsumersAfterServiceStart();
 
     // 初始化Dock Widgets
     reportStartupProgress(48, QStringLiteral("正在创建页面组件..."));
@@ -2203,7 +2221,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     {
         m_privilegeStatusTimer->stop();
     }
-    stopR0DriverLogPoller();
+    stopR0RuntimeConsumersBeforeServiceStop();
     CallbackPromptManager::shutdownGlobalManager();
 
     // 关闭窗口时自动停止 R0 驱动：
@@ -4365,6 +4383,40 @@ void MainWindow::startR0DriverLogPoller()
     }
 }
 
+void MainWindow::stopR0RuntimeConsumersBeforeServiceStop()
+{
+    // 手动 R0 卸载前必须先收敛本进程持有的驱动设备句柄：
+    // - 日志轮询线程长期打开 \\.\KswordARKLog；
+    // - 回调弹窗管理器的 worker 长期持有 overlapped 等待句柄；
+    // - 如果这些句柄不先关闭，SCM 停止内核驱动时可能长期卡在 STOP_PENDING。
+    // 输入：无。
+    // 处理：按关闭窗口路径的资源释放顺序停止 R0 消费者，但不删除全局管理器对象。
+    // 返回：无返回值；各子模块 stop 函数均为幂等 best-effort。
+    stopR0DriverLogPoller();
+
+    if (CallbackPromptManager* callbackPromptManager = CallbackPromptManager::globalManager())
+    {
+        callbackPromptManager->stop();
+    }
+}
+
+void MainWindow::startR0RuntimeConsumersAfterServiceStart()
+{
+    // R0 启动或确认运行后恢复本进程运行时消费者：
+    // - 日志轮询线程负责把 R0 日志转发到应用日志；
+    // - 回调弹窗管理器负责长期等待 R0 callback decision 事件。
+    // 输入：无。
+    // 处理：复用各模块幂等 start 语义，避免重复启动线程。
+    // 返回：无返回值；启动失败只写日志，不影响主流程状态查询。
+    startR0DriverLogPoller();
+
+    if (CallbackPromptManager* callbackPromptManager = CallbackPromptManager::ensureGlobalManager(this))
+    {
+        callbackPromptManager->setHostWindow(this);
+        callbackPromptManager->start();
+    }
+}
+
 void MainWindow::stopR0DriverLogPoller()
 {
     m_r0DriverLogPollerRunning.store(false);
@@ -4667,6 +4719,8 @@ bool MainWindow::stopR0DriverService(const bool suppressErrorDialog)
 
     if (status.dwCurrentState != SERVICE_STOPPED)
     {
+        stopR0RuntimeConsumersBeforeServiceStop();
+
         if (status.dwCurrentState != SERVICE_STOP_PENDING)
         {
             SERVICE_STATUS ignoredStatus{};
@@ -4719,7 +4773,7 @@ bool MainWindow::stopR0DriverService(const bool suppressErrorDialog)
             if (!waitServiceState(
                 serviceHandle.get(),
                 SERVICE_STOPPED,
-                kR0ServiceWaitTimeoutMs,
+                kR0ServiceStopWaitTimeoutMs,
                 latestStatus,
                 waitError))
             {
@@ -4734,7 +4788,7 @@ bool MainWindow::stopR0DriverService(const bool suppressErrorDialog)
                     reportStopFailure(
                         QStringLiteral("R0 卸载失败：等待服务停止超时。"),
                         ERROR_TIMEOUT,
-                        QStringLiteral("当前状态：%1").arg(serviceStateToText(latestStatus.dwCurrentState)));
+                        buildServiceWaitDetailText(latestStatus, kR0ServiceStopWaitTimeoutMs));
                 }
                 return false;
             }
@@ -5070,6 +5124,7 @@ bool MainWindow::startR0DriverService()
     if (isRunningLikeServiceState(status.dwCurrentState))
     {
         m_r0DriverServiceRunning = true;
+        startR0RuntimeConsumersAfterServiceStart();
         return true;
     }
 
@@ -5079,6 +5134,7 @@ bool MainWindow::startR0DriverService()
         if (startError == ERROR_SERVICE_ALREADY_RUNNING)
         {
             m_r0DriverServiceRunning = true;
+            startR0RuntimeConsumersAfterServiceStart();
             return true;
         }
 
@@ -5107,7 +5163,7 @@ bool MainWindow::startR0DriverService()
     if (!waitServiceState(
         serviceHandle.get(),
         SERVICE_RUNNING,
-        kR0ServiceWaitTimeoutMs,
+        kR0ServiceStartWaitTimeoutMs,
         latestStatus,
         waitError))
     {
@@ -5128,6 +5184,7 @@ bool MainWindow::startR0DriverService()
     }
 
     m_r0DriverServiceRunning = true;
+    startR0RuntimeConsumersAfterServiceStart();
     kLogEvent logEvent;
     info << logEvent << "[MainWindow][R0] 已创建并启动 KswordARK 驱动服务。" << eol;
     return true;
