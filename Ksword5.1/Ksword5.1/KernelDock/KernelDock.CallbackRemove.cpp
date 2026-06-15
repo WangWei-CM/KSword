@@ -179,20 +179,29 @@ namespace
 
 }
 
-void KernelDock::initializeCallbackRemoveTab()
+void KernelDock::initializeCallbackRemovePanel()
 {
-    if (m_callbackRemovePage == nullptr || m_callbackRemoveLayout != nullptr)
+    if (m_callbackEnumPage == nullptr || m_callbackEnumLayout == nullptr || m_callbackRemoveLayout != nullptr)
     {
         return;
     }
 
-    m_callbackRemoveLayout = wrapPageInScrollArea(m_callbackRemovePage, &m_callbackRemoveContentWidget);
-    if (m_callbackRemoveLayout == nullptr || m_callbackRemoveContentWidget == nullptr)
-    {
-        return;
-    }
+    // 该面板随“回调遍历”页一起创建，避免继续占用一个独立顶层 Tab。
+    // 输入：无用户数据；处理：创建手动类型/地址移除表单；返回：无，控件归属 Qt 父子树。
+    m_callbackRemoveContentWidget = new QWidget(m_callbackEnumPage);
+    m_callbackRemoveContentWidget->setObjectName(QStringLiteral("ksCallbackRemoveEmbeddedPanel"));
+    m_callbackRemoveContentWidget->setStyleSheet(QStringLiteral(
+        "#ksCallbackRemoveEmbeddedPanel{border:1px solid %1;border-radius:3px;background:%2;}")
+        .arg(KswordTheme::BorderHex())
+        .arg(KswordTheme::SurfaceHex()));
+
+    m_callbackRemoveLayout = new QVBoxLayout(m_callbackRemoveContentWidget);
     m_callbackRemoveLayout->setContentsMargins(6, 6, 6, 6);
     m_callbackRemoveLayout->setSpacing(6);
+
+    QLabel* titleLabel = new QLabel(QStringLiteral("手动回调移除（兼容旧协议）"), m_callbackRemoveContentWidget);
+    titleLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::PrimaryBlueHex));
+    m_callbackRemoveLayout->addWidget(titleLabel, 0);
 
     m_callbackRemoveToolLayout = new QHBoxLayout();
     m_callbackRemoveToolLayout->setContentsMargins(0, 0, 0, 0);
@@ -227,10 +236,14 @@ void KernelDock::initializeCallbackRemoveTab()
 
     m_callbackRemoveDetailEditor = new CodeEditorWidget(m_callbackRemoveContentWidget);
     m_callbackRemoveDetailEditor->setReadOnly(true);
+    m_callbackRemoveDetailEditor->setMinimumHeight(72);
+    m_callbackRemoveDetailEditor->setMaximumHeight(120);
     m_callbackRemoveDetailEditor->setText(QStringLiteral(
-        "提示：该页面继续通过 ArkDriverClient::removeExternalCallback 调用旧版安全移除路径。"
+        "提示：该面板继续通过 ArkDriverClient::removeExternalCallback 调用旧版安全移除路径。"
         "实验性强制移除（unlink）已经切到 removeExternalCallbackEx 的独立路径；若驱动未支持会返回不支持，不作为默认移除方式。"));
-    m_callbackRemoveLayout->addWidget(m_callbackRemoveDetailEditor, 1);
+    m_callbackRemoveLayout->addWidget(m_callbackRemoveDetailEditor, 0);
+
+    m_callbackEnumLayout->addWidget(m_callbackRemoveContentWidget, 0);
 
     connect(m_callbackRemoveButton, &QPushButton::clicked, this, [this]() {
         quint64 callbackAddress = 0;

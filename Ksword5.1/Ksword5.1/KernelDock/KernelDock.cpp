@@ -23,10 +23,8 @@
 #include <QLineEdit>
 #include <QPainter>
 #include <QPixmap>
-#include <QFrame>
 #include <QProgressBar>
 #include <QPushButton>
-#include <QScrollArea>
 #include <QSplitter>
 #include <QSvgRenderer>
 #include <QTableWidget>
@@ -211,7 +209,6 @@ void KernelDock::initializeUi()
     m_ntQueryPage = new QWidget(m_tabWidget);
     m_callbackInterceptPage = new QWidget(m_tabWidget);
     m_callbackEnumPage = new QWidget(m_tabWidget);
-    m_callbackRemovePage = new QWidget(m_tabWidget);
     m_shadowSsdtPage = new QWidget(m_tabWidget);
     m_inlineHookPage = new QWidget(m_tabWidget);
     m_iatEatHookPage = new QWidget(m_tabWidget);
@@ -282,12 +279,6 @@ void KernelDock::initializeUi()
         QStringLiteral("回调遍历"));
     m_tabWidget->setTabToolTip(m_callbackEnumTabIndex, QStringLiteral("遍历 KswordARK 可见的系统回调、minifilter 和 System Informer DynData 诊断项"));
 
-    m_callbackRemoveTabIndex = m_tabWidget->addTab(
-        m_callbackRemovePage,
-        tabIcon(QStringLiteral(":/Icon/process_terminate.svg")),
-        QStringLiteral("回调移除"));
-    m_tabWidget->setTabToolTip(m_callbackRemoveTabIndex, QStringLiteral("通过 Ksword 内核驱动移除其他驱动注册的回调"));
-
     m_tabWidget->setCurrentIndex(m_objectNamespaceTabIndex);
     updateTabIconContrast();
 }
@@ -323,49 +314,6 @@ void KernelDock::hideTabInitializingProgress()
     }
 }
 
-QVBoxLayout* KernelDock::wrapPageInScrollArea(QWidget* pageWidget, QWidget** contentWidgetOut)
-{
-    if (pageWidget == nullptr)
-    {
-        return nullptr;
-    }
-
-    // 外层只保留一个 QScrollArea，真实控件放入 contentWidget，保证页面空白处滚轮也能滚动。
-    auto* outerLayout = new QVBoxLayout(pageWidget);
-    outerLayout->setContentsMargins(0, 0, 0, 0);
-    outerLayout->setSpacing(0);
-
-    auto* scrollArea = new QScrollArea(pageWidget);
-    scrollArea->setWidgetResizable(true);
-    scrollArea->setFrameShape(QFrame::NoFrame);
-    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    scrollArea->viewport()->setAttribute(Qt::WA_Hover, true);
-
-    auto* contentWidget = new QWidget(scrollArea);
-    contentWidget->setObjectName(QStringLiteral("ksKernelScrollableContent"));
-    contentWidget->setAutoFillBackground(false);
-    contentWidget->setAttribute(Qt::WA_StyledBackground, false);
-
-    auto* contentLayout = new QVBoxLayout(contentWidget);
-    contentLayout->setContentsMargins(4, 4, 4, 4);
-    contentLayout->setSpacing(6);
-
-    scrollArea->setWidget(contentWidget);
-    outerLayout->addWidget(scrollArea, 1);
-
-    if (contentWidgetOut != nullptr)
-    {
-        *contentWidgetOut = contentWidget;
-    }
-
-    if (pageWidget == m_callbackRemovePage)
-    {
-        m_callbackRemoveScrollArea = scrollArea;
-    }
-    return contentLayout;
-}
-
 void KernelDock::updateTabIconContrast()
 {
     if (m_tabWidget == nullptr)
@@ -386,7 +334,6 @@ void KernelDock::updateTabIconContrast()
     m_tabWidget->setTabIcon(m_driverStatusTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
     m_tabWidget->setTabIcon(m_callbackTabIndex, tabIcon(QStringLiteral(":/Icon/process_critical.svg")));
     m_tabWidget->setTabIcon(m_callbackEnumTabIndex, tabIcon(QStringLiteral(":/Icon/process_list.svg")));
-    m_tabWidget->setTabIcon(m_callbackRemoveTabIndex, tabIcon(QStringLiteral(":/Icon/process_terminate.svg")));
 
     if (currentIndex == m_objectNamespaceTabIndex)
     {
@@ -431,10 +378,6 @@ void KernelDock::updateTabIconContrast()
     else if (currentIndex == m_callbackEnumTabIndex)
     {
         m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_list.svg")));
-    }
-    else if (currentIndex == m_callbackRemoveTabIndex)
-    {
-        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_terminate.svg")));
     }
 }
 
@@ -811,11 +754,4 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         return;
     }
 
-    if (tabIndex == m_callbackRemoveTabIndex && !m_callbackRemoveTabInitialized)
-    {
-        showTabInitializingProgress(tabIndex, QStringLiteral("回调移除"));
-        initializeCallbackRemoveTab();
-        m_callbackRemoveTabInitialized = true;
-        hideTabInitializingProgress();
-    }
 }
