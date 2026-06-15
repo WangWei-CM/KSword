@@ -40,6 +40,7 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_SET_PROCESS_VISIBILITY 0x822UL
 #define KSWORD_ARK_IOCTL_FUNCTION_SET_PROCESS_SPECIAL_FLAGS 0x824UL
 #define KSWORD_ARK_IOCTL_FUNCTION_DKOM_PROCESS 0x825UL
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_CROSSVIEW 0x836UL
 
 #define IOCTL_KSWORD_ARK_TERMINATE_PROCESS \
     CTL_CODE( \
@@ -136,6 +137,112 @@ typedef struct _KSWORD_ARK_SET_PPL_LEVEL_REQUEST
 #define KSWORD_ARK_PROCESS_R0_STATUS_READ_FAILED     4UL
 
 #define KSWORD_ARK_PROCESS_IMAGE_PATH_CHARS 260U
+
+// Cross-view source bits are shared by the process and thread protocols so R3
+// can render one evidence column regardless of row type.
+#define KSWORD_ARK_CROSSVIEW_SOURCE_PUBLIC_WALK 0x00000001UL
+#define KSWORD_ARK_CROSSVIEW_SOURCE_ACTIVE_LIST 0x00000002UL
+#define KSWORD_ARK_CROSSVIEW_SOURCE_CID_TABLE   0x00000004UL
+#define KSWORD_ARK_CROSSVIEW_SOURCE_THREAD_LIST 0x00000008UL
+
+// Cross-view anomaly bits are intentionally evidence-only. The R0 collectors
+// never repair, hide, unlink, clear, kill, or otherwise mutate target objects.
+#define KSWORD_ARK_CROSSVIEW_ANOMALY_CID_ONLY                     0x00000001UL
+#define KSWORD_ARK_CROSSVIEW_ANOMALY_ACTIVE_ONLY                  0x00000002UL
+#define KSWORD_ARK_CROSSVIEW_ANOMALY_MISSING_FROM_ACTIVE_LIST     0x00000004UL
+#define KSWORD_ARK_CROSSVIEW_ANOMALY_MISSING_FROM_CID_TABLE       0x00000008UL
+#define KSWORD_ARK_CROSSVIEW_ANOMALY_THREAD_ORPHAN                0x00000010UL
+#define KSWORD_ARK_CROSSVIEW_ANOMALY_THREAD_NOT_IN_PROCESS_LIST   0x00000020UL
+#define KSWORD_ARK_CROSSVIEW_ANOMALY_START_ADDRESS_OUTSIDE_MODULE 0x00000040UL
+#define KSWORD_ARK_CROSSVIEW_ANOMALY_DANGLING_OBJECT              0x00000080UL
+
+#define KSWORD_ARK_CROSSVIEW_STATUS_UNKNOWN            0UL
+#define KSWORD_ARK_CROSSVIEW_STATUS_OK                 1UL
+#define KSWORD_ARK_CROSSVIEW_STATUS_PARTIAL            2UL
+#define KSWORD_ARK_CROSSVIEW_STATUS_CAPABILITY_MISSING 3UL
+#define KSWORD_ARK_CROSSVIEW_STATUS_READ_FAILED        4UL
+
+#define KSWORD_ARK_CROSSVIEW_PROTOCOL_VERSION 1UL
+#define KSWORD_ARK_CROSSVIEW_DETAIL_CHARS 96U
+#define KSWORD_ARK_CROSSVIEW_DEFAULT_MAX_NODES 8192UL
+#define KSWORD_ARK_CROSSVIEW_HARD_MAX_NODES 16384UL
+
+#define KSWORD_ARK_PROCESS_CROSSVIEW_FLAG_INCLUDE_PUBLIC_WALK 0x00000001UL
+#define KSWORD_ARK_PROCESS_CROSSVIEW_FLAG_INCLUDE_ACTIVE_LIST 0x00000002UL
+#define KSWORD_ARK_PROCESS_CROSSVIEW_FLAG_INCLUDE_CID_TABLE   0x00000004UL
+#define KSWORD_ARK_PROCESS_CROSSVIEW_FLAG_INCLUDE_ALL \
+    (KSWORD_ARK_PROCESS_CROSSVIEW_FLAG_INCLUDE_PUBLIC_WALK | \
+     KSWORD_ARK_PROCESS_CROSSVIEW_FLAG_INCLUDE_ACTIVE_LIST | \
+     KSWORD_ARK_PROCESS_CROSSVIEW_FLAG_INCLUDE_CID_TABLE)
+
+typedef struct _KSWORD_ARK_CROSSVIEW_FIELD_OFFSETS
+{
+    unsigned long epUniqueProcessId;
+    unsigned long epActiveProcessLinks;
+    unsigned long epThreadListHead;
+    unsigned long epImageFileName;
+    unsigned long etCid;
+    unsigned long etThreadListEntry;
+    unsigned long etStartAddress;
+    unsigned long etWin32StartAddress;
+    unsigned long ktProcess;
+    unsigned long htTableCode;
+    unsigned long hteLowValue;
+    unsigned long pspCidTableRva;
+    unsigned long long pspCidTableAddress;
+    unsigned long reserved;
+} KSWORD_ARK_CROSSVIEW_FIELD_OFFSETS;
+
+typedef struct _KSWORD_ARK_PROCESS_CROSSVIEW_REQUEST
+{
+    unsigned long version;
+    unsigned long flags;
+    unsigned long startPid;
+    unsigned long endPid;
+    unsigned long maxNodes;
+    unsigned long reserved0;
+    unsigned long reserved1;
+    unsigned long reserved2;
+} KSWORD_ARK_PROCESS_CROSSVIEW_REQUEST;
+
+typedef struct _KSWORD_ARK_PROCESS_CROSSVIEW_ROW
+{
+    unsigned long long objectAddress;
+    unsigned long long startAddress;
+    unsigned long processId;
+    unsigned long parentProcessId;
+    unsigned long sourceMask;
+    unsigned long anomalyFlags;
+    unsigned long long dynDataCapabilityMask;
+    KSWORD_ARK_CROSSVIEW_FIELD_OFFSETS fieldOffsets;
+    long lastStatus;
+    unsigned long confidence;
+    char imageName[16];
+    char detail[KSWORD_ARK_CROSSVIEW_DETAIL_CHARS];
+} KSWORD_ARK_PROCESS_CROSSVIEW_ROW;
+
+typedef struct _KSWORD_ARK_PROCESS_CROSSVIEW_RESPONSE
+{
+    unsigned long version;
+    unsigned long status;
+    unsigned long totalCount;
+    unsigned long returnedCount;
+    unsigned long entrySize;
+    unsigned long reserved;
+    unsigned long long dynDataCapabilityMask;
+    unsigned long long missingCapabilityMask;
+    long lastStatus;
+    unsigned long reserved2;
+    KSWORD_ARK_CROSSVIEW_FIELD_OFFSETS fieldOffsets;
+    KSWORD_ARK_PROCESS_CROSSVIEW_ROW entries[1];
+} KSWORD_ARK_PROCESS_CROSSVIEW_RESPONSE;
+
+#define IOCTL_KSWORD_ARK_QUERY_PROCESS_CROSSVIEW \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_CROSSVIEW, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
 
 typedef struct _KSWORD_ARK_ENUM_PROCESS_REQUEST
 {

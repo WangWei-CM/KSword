@@ -83,7 +83,8 @@
     <Filter Include="Source Files\Features\Keyboard">
       <UniqueIdentifier>{7B0CB69A-3F6D-4519-B7D7-D38809229979}</UniqueIdentifier>
     </Filter>
-  <Filter Include="Source Files\Features\Memory"><UniqueIdentifier>{8F66C0B8-48D7-45BE-8D5E-6626DD52CFC4}</UniqueIdentifier></Filter></ItemGroup>
+  <Filter Include="Source Files\Features\Memory"><UniqueIdentifier>{8F66C0B8-48D7-45BE-8D5E-6626DD52CFC4}</UniqueIdentifier></Filter>
+  <Filter Include="Source Files\Features\Mutation"><UniqueIdentifier>{4A154CC7-EEB6-4B74-BA9D-3EB757F43024}</UniqueIdentifier></Filter></ItemGroup>
   <ItemGroup>
     <None Include="ReadMe.txt" />
   </ItemGroup>
@@ -231,7 +232,15 @@
     <ClInclude Include="src\features\kernel\hook_scan_support.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-  <ClInclude Include="src\features\callback\callback_external_core.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_wfp.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_minifilter.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_safe.h"><Filter>Header Files</Filter></ClInclude></ItemGroup>
+  <ClInclude Include="src\features\callback\callback_external_core.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_wfp.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_minifilter.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_safe.h"><Filter>Header Files</Filter></ClInclude>    <ClInclude Include="include\ark\ark_memory_evidence.h"><Filter>Header Files\Ark</Filter></ClInclude>
+    <ClInclude Include="include\ark\ark_mutation.h"><Filter>Header Files\Ark</Filter></ClInclude>
+    <ClInclude Include="include\ark\ark_thread_crossview.h"><Filter>Header Files\Ark</Filter></ClInclude>
+    <ClInclude Include="src\features\process\process_crossview.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\features\thread\thread_crossview.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\features\kernel\driver_integrity.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\features\kernel\kernel_cpu_integrity.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\features\mutation\mutation_transaction.h"><Filter>Header Files</Filter></ClInclude>
+  </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\features\callback\callback_runtime.c">
       <Filter>Source Files\Features\Callback</Filter>
@@ -281,6 +290,12 @@
     <ClCompile Include="src\features\kernel\driver_object_query.c">
       <Filter>Source Files\Features\Kernel</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\kernel\driver_integrity.c">
+      <Filter>Source Files\Features\Kernel</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\kernel\kernel_cpu_integrity.c">
+      <Filter>Source Files\Features\Kernel</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\kernel\driver_unload.c">
       <Filter>Source Files\Features\Kernel</Filter>
     </ClCompile>
@@ -312,6 +327,9 @@
       <Filter>Source Files\Features</Filter>
     </ClCompile>
     <ClCompile Include="src\features\process\process_actions.c">
+      <Filter>Source Files\Features</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\process\process_crossview.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>
     <ClCompile Include="src\features\process\process_dkom.c">
@@ -363,6 +381,9 @@
       <Filter>Source Files\Features</Filter>
     </ClCompile>
     <ClCompile Include="src\features\thread\thread_query.c">
+      <Filter>Source Files\Features\Thread</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\thread\thread_crossview.c">
       <Filter>Source Files\Features\Thread</Filter>
     </ClCompile>
     <ClCompile Include="src\features\thread\thread_ioctl.c">
@@ -470,5 +491,5 @@
     <ClCompile Include="src\features\keyboard\keyboard_ioctl.c">
       <Filter>Source Files\Features\Keyboard</Filter>
     </ClCompile>
-  <ClCompile Include="src\features\callback\callback_external_wfp.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\callback\callback_external_minifilter.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\callback\callback_external_safe.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\memory\memory_physical.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_pagetable.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_kernel_exec_scan.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_kernel_exec_scan_helpers.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_ioctl.c"><Filter>Source Files\Features\Memory</Filter></ClCompile></ItemGroup>
+  <ClCompile Include="src\features\callback\callback_external_wfp.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\callback\callback_external_minifilter.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\callback\callback_external_safe.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\memory\memory_physical.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_pagetable.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_kernel_exec_scan.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_kernel_exec_scan_helpers.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_ioctl.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_kernel_evidence.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\mutation\mutation_transaction.c"><Filter>Source Files\Features\Mutation</Filter></ClCompile><ClCompile Include="src\features\mutation\mutation_ioctl.c"><Filter>Source Files\Features\Mutation</Filter></ClCompile></ItemGroup>
 </Project>

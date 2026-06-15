@@ -67,6 +67,11 @@ void MemoryDock::initializeConnections()
         if (tabIndex == 6)
         {
             refreshKernelExecutableMemoryScanAsync();
+            return;
+        }
+        if (tabIndex == 7)
+        {
+            refreshKernelMemoryEvidenceAsync();
         }
         });
 
@@ -1049,6 +1054,40 @@ void MemoryDock::initializeConnections()
 
     connect(m_kernelExecutableTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showKernelExecutableMemoryDetailByCurrentRow();
+        });
+
+    // ========================================================
+    // Tab8：内核内存证据
+    // ========================================================
+
+    connect(m_kernelMemoryEvidenceRefreshButton, &QPushButton::clicked, this, [this]() {
+        kLogEvent refreshKernelMemoryEvidenceEvent;
+        info << refreshKernelMemoryEvidenceEvent
+            << "[MemoryDock] 内核内存证据点击刷新。"
+            << eol;
+        refreshKernelMemoryEvidenceAsync();
+        });
+
+    connect(m_kernelMemoryEvidenceRiskOnlyCheck, &QCheckBox::toggled, this, [this]() {
+        rebuildKernelMemoryEvidenceTable();
+        showKernelMemoryEvidenceDetailByCurrentRow();
+        });
+
+    connect(m_kernelMemoryEvidenceIncludeNonModuleCheck, &QCheckBox::toggled, this, [this]() {
+        if (m_kernelMemoryEvidenceStatusLabel != nullptr)
+        {
+            m_kernelMemoryEvidenceStatusLabel->setText(QStringLiteral(
+                "状态：非模块执行范围仅在填写起止地址后参与下一次刷新。"));
+        }
+        });
+
+    connect(m_kernelMemoryEvidenceFilterEdit, &QLineEdit::textChanged, this, [this]() {
+        rebuildKernelMemoryEvidenceTable();
+        showKernelMemoryEvidenceDetailByCurrentRow();
+        });
+
+    connect(m_kernelMemoryEvidenceTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+        showKernelMemoryEvidenceDetailByCurrentRow();
         });
 }
 

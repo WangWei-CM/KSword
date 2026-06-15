@@ -23,6 +23,7 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_TRANSLATE_VIRTUAL_ADDRESS 0x82DUL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PAGE_TABLE_ENTRY 0x82EUL
 #define KSWORD_ARK_IOCTL_FUNCTION_SCAN_KERNEL_EXECUTABLE_MEMORY 0x831UL
+#define KSWORD_ARK_IOCTL_FUNCTION_SCAN_KERNEL_MEMORY_EVIDENCE 0x832UL
 
 #define IOCTL_KSWORD_ARK_QUERY_VIRTUAL_MEMORY \
     CTL_CODE( \
@@ -77,6 +78,13 @@
     CTL_CODE( \
         KSWORD_ARK_IOCTL_DEVICE_TYPE, \
         KSWORD_ARK_IOCTL_FUNCTION_SCAN_KERNEL_EXECUTABLE_MEMORY, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_SCAN_KERNEL_MEMORY_EVIDENCE, \
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
 
@@ -233,6 +241,105 @@
 #define KSWORD_ARK_KERNEL_EXEC_RISK_LARGE_PAGE 0x00000008UL
 
 #define KSWORD_ARK_KERNEL_EXEC_MODULE_PATH_CHARS 260U
+
+// Kernel memory evidence scan request flags. The R0 side is read-only and every
+// enabled source is still constrained by maxRows and maxBytes. flags==0 uses a
+// conservative default that excludes NONMODULE_EXECUTABLE_RANGES; callers must
+// explicitly set that flag with a bounded startAddress/endAddress range.
+#define KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_LOADED_MODULE_EXECUTABLE 0x00000001UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_NONMODULE_EXECUTABLE_RANGES 0x00000002UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_BIGPOOL 0x00000004UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_TEXT_SECTION_SAMPLES 0x00000008UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_SUSPECTED_BIGPOOL 0x00000010UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_ALL \
+    (KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_LOADED_MODULE_EXECUTABLE | \
+     KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_NONMODULE_EXECUTABLE_RANGES | \
+     KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_BIGPOOL | \
+     KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_TEXT_SECTION_SAMPLES | \
+     KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_SUSPECTED_BIGPOOL)
+
+// Kernel memory evidence response status values. Partial means at least one
+// source, row capacity, or scan-cost budget prevented full coverage.
+#define KSWORD_ARK_MEMORY_EVIDENCE_STATUS_UNAVAILABLE 0UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_STATUS_OK 1UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_STATUS_PARTIAL 2UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_STATUS_QUERY_FAILED 3UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_STATUS_INVALID_REQUEST 4UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_STATUS_IRQL_REJECTED 5UL
+
+// Response-level flags summarize truncation and cost-limit decisions.
+#define KSWORD_ARK_MEMORY_EVIDENCE_RESPONSE_FLAG_TRUNCATED 0x00000001UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_RESPONSE_FLAG_BUDGET_EXHAUSTED 0x00000002UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_RESPONSE_FLAG_BIGPOOL_TRUNCATED 0x00000004UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_RESPONSE_FLAG_RANGE_REQUIRED 0x00000008UL
+
+// Unified evidence row kinds. R3 can use these as rendering groups while still
+// relying on ownerKind/riskFlags for risk scoring.
+#define KSWORD_ARK_MEMORY_EVIDENCE_KIND_UNKNOWN 0UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_KIND_EXECUTABLE_RANGE 1UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_KIND_BIGPOOL 2UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_KIND_TEXT_SECTION_MEMORY 3UL
+
+// Unified permission flags derived from read-only page-table observations.
+#define KSWORD_ARK_MEMORY_EVIDENCE_PERMISSION_PRESENT 0x00000001UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_PERMISSION_READ 0x00000002UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_PERMISSION_WRITE 0x00000004UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_PERMISSION_EXECUTE 0x00000008UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_PERMISSION_NX 0x00000010UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_PERMISSION_LARGE 0x00000020UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_PERMISSION_GLOBAL 0x00000040UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_PERMISSION_USER 0x00000080UL
+
+// Unified owner classes. SystemPte and MdlLike are conservative heuristics for
+// BigPool rows and never imply that R0 has modified those allocations.
+#define KSWORD_ARK_MEMORY_EVIDENCE_OWNER_UNKNOWN 0UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_OWNER_LOADED_MODULE 1UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_OWNER_NONMODULE 2UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_OWNER_BIGPOOL 3UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_OWNER_SYSTEM_PTE 4UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_OWNER_MDL_LIKE 5UL
+
+// Unified risk flags. These bits describe observations only; they never request
+// repair, quarantine, PTE writes, CR0 writes, or kernel memory writes.
+#define KSWORD_ARK_MEMORY_EVIDENCE_RISK_RWX 0x00000001UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_RISK_NONMODULE_EXECUTABLE 0x00000002UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_RISK_MODULE_NON_TEXT_EXECUTABLE 0x00000004UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_RISK_EXECUTABLE_POOL 0x00000008UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_RISK_LARGE_EXECUTABLE 0x00000010UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_RISK_OWNER_MISSING 0x00000020UL
+
+// BigPool row flags. The executable/suspected bits are separated so R3 can keep
+// hard page-table evidence distinct from conservative NonPaged pool suspicion.
+#define KSWORD_ARK_MEMORY_EVIDENCE_BIGPOOL_FLAG_NON_PAGED 0x00000001UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_BIGPOOL_FLAG_EXECUTABLE 0x00000002UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_BIGPOOL_FLAG_EXECUTABLE_SUSPECTED 0x00000004UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_BIGPOOL_FLAG_SCAN_TRUNCATED 0x00000008UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_BIGPOOL_FLAG_TAG_SYSTEM_PTE_LIKE 0x00000010UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_BIGPOOL_FLAG_TAG_MDL_LIKE 0x00000020UL
+
+// Hash metadata for text diff support. R0 hashes memory only; R3 owns disk
+// lookup and disk-vs-memory comparison.
+#define KSWORD_ARK_MEMORY_EVIDENCE_HASH_NONE 0UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_HASH_FNV1A64 1UL
+
+#define KSWORD_ARK_MEMORY_EVIDENCE_CONFIDENCE_UNKNOWN 0UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_CONFIDENCE_LOW 35UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_CONFIDENCE_MEDIUM 65UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_CONFIDENCE_HIGH 90UL
+
+#define KSWORD_ARK_MEMORY_EVIDENCE_OWNER_NAME_CHARS 260U
+#define KSWORD_ARK_MEMORY_EVIDENCE_DETAIL_CHARS 160U
+#define KSWORD_ARK_MEMORY_EVIDENCE_SECTION_NAME_BYTES 8U
+#define KSWORD_ARK_MEMORY_EVIDENCE_SECTION_SAMPLE_BYTES 64U
+#define KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_MAX_ROWS 256UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_HARD_MAX_ROWS 4096UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_MAX_BYTES (16ULL * 1024ULL * 1024ULL)
+#define KSWORD_ARK_MEMORY_EVIDENCE_HARD_MAX_BYTES (64ULL * 1024ULL * 1024ULL)
+#define KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_BIGPOOL_ROWS 256UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_HARD_MAX_BIGPOOL_ROWS 1024UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_SAMPLE_BYTES 32UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_HARD_MAX_SAMPLE_BYTES \
+    KSWORD_ARK_MEMORY_EVIDENCE_SECTION_SAMPLE_BYTES
 
 typedef struct _KSWORD_ARK_QUERY_VIRTUAL_MEMORY_REQUEST
 {
@@ -470,3 +577,72 @@ typedef struct _KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE
     long lastStatus;
     KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY entries[1];
 } KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE;
+
+// Kernel memory evidence request. flags selects read-only sources, maxRows caps
+// rows returned, maxBytes caps page/section bytes inspected, and maxBigPoolRows
+// caps SystemBigPoolInformation rows visited. startAddress/endAddress are a
+// half-open filter; non-module executable range scanning requires an explicit
+// bounded range to avoid walking the whole kernel address space.
+typedef struct _KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_REQUEST
+{
+    unsigned long flags;
+    unsigned long maxRows;
+    unsigned long long startAddress;
+    unsigned long long endAddress;
+    unsigned long long maxBytes;
+    unsigned long maxBigPoolRows;
+    unsigned long sampleBytes;
+    unsigned long reserved0;
+    unsigned long reserved1;
+} KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_REQUEST;
+
+// Unified evidence row. The fixed row keeps executable range, BigPool, PTE, MDL
+// heuristic, and text-section memory sample data in one R3-friendly format.
+typedef struct _KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW
+{
+    unsigned long rowSize;
+    unsigned long evidenceKind;
+    unsigned long long virtualAddress;
+    unsigned long long regionSize;
+    unsigned long pageSize;
+    unsigned long permissionFlags;
+    unsigned long ownerKind;
+    unsigned long riskFlags;
+    unsigned long long moduleBase;
+    unsigned long moduleSize;
+    unsigned long confidence;
+    unsigned long long ownerAddress;
+    long lastStatus;
+    unsigned long bigPoolTag;
+    unsigned long bigPoolFlags;
+    unsigned long sectionRva;
+    unsigned long sectionSize;
+    unsigned char sectionName[KSWORD_ARK_MEMORY_EVIDENCE_SECTION_NAME_BYTES];
+    unsigned long hashAlgorithm;
+    unsigned long sampleSize;
+    unsigned long long contentHash;
+    unsigned char sample[KSWORD_ARK_MEMORY_EVIDENCE_SECTION_SAMPLE_BYTES];
+    wchar_t ownerName[KSWORD_ARK_MEMORY_EVIDENCE_OWNER_NAME_CHARS];
+    wchar_t detail[KSWORD_ARK_MEMORY_EVIDENCE_DETAIL_CHARS];
+} KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW;
+
+// Kernel memory evidence response. status/responseFlags describe scan
+// completeness; rows[] is a variable-length array of rowSize entries.
+typedef struct _KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_RESPONSE
+{
+    unsigned long version;
+    unsigned long status;
+    unsigned long responseFlags;
+    unsigned long sourceFlags;
+    unsigned long totalRows;
+    unsigned long returnedRows;
+    unsigned long rowSize;
+    unsigned long maxRows;
+    unsigned long long maxBytes;
+    unsigned long long bytesScanned;
+    unsigned long moduleCount;
+    unsigned long bigPoolRowsSeen;
+    long lastStatus;
+    unsigned long reserved;
+    KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW rows[1];
+} KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_RESPONSE;

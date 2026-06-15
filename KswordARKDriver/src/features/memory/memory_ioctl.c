@@ -15,6 +15,7 @@ Environment:
 --*/
 
 #include "ark/ark_driver.h"
+#include "ark/ark_memory_evidence.h"
 #include "../../dispatch/ioctl_validation.h"
 
 #include <ntstrsafe.h>
@@ -35,6 +36,10 @@ Environment:
 // 内核 executable page 扫描响应头不包含尾随 entries[1]。
 #define KSWORD_ARK_KERNEL_EXEC_SCAN_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE) - sizeof(KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY))
+
+// 内核 memory evidence 扫描响应头不包含尾随 rows[1]。
+#define KSWORD_ARK_MEMORY_EVIDENCE_RESPONSE_HEADER_SIZE \
+    (sizeof(KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_RESPONSE) - sizeof(KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW))
 
 static VOID
 KswordARKMemoryToolIoctlLog(
@@ -449,6 +454,151 @@ Return Value:
             (unsigned long)response->writeStatus,
             (unsigned long)response->requestedBytes,
             (unsigned long)response->bytesWritten);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKMemoryIoctlScanKernelMemoryEvidence(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    处理未注册的 IOCTL_KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE。中文说明：第 6
+    会话统一在 ioctl_registry.c 接入；当前 handler 只做 METHOD_BUFFERED 输入
+    复制、flags/range/cost 上限初筛、PASSIVE_LEVEL 约束和日志。后端只读采集
+    PTE、BigPool、模块 section 样本，不写 PTE、不改 CR0、不写内核内存。
+
+Arguments:
+
+    Device - WDF 设备对象，用于日志。
+    Request - 当前 IOCTL 请求。
+    InputBufferLength - 输入长度；缺省时使用默认只读全源扫描请求。
+    OutputBufferLength - 输出长度；WDF 再确认。
+    BytesReturned - 接收响应字节数。
+
+Return Value:
+
+    NTSTATUS from buffer validation or KswordARKDriverScanKernelMemoryEvidence.
+
+--*/
+{
+    KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_REQUEST* evidenceRequest = NULL;
+    KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_REQUEST defaultRequest;
+    KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_REQUEST requestCopy;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    BOOLEAN hasInput = FALSE;
+    const ULONG allowedFlags = KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_ALL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        KswordARKMemoryToolIoctlLog(Device, "Warn", "R0 memory-evidence ioctl rejected: non-passive IRQL.");
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    RtlZeroMemory(&defaultRequest, sizeof(defaultRequest));
+    RtlZeroMemory(&requestCopy, sizeof(requestCopy));
+    defaultRequest.flags =
+        KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_LOADED_MODULE_EXECUTABLE |
+        KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_BIGPOOL |
+        KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_TEXT_SECTION_SAMPLES |
+        KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_SUSPECTED_BIGPOOL;
+    defaultRequest.maxRows = KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_MAX_ROWS;
+    defaultRequest.maxBytes = KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_MAX_BYTES;
+    defaultRequest.maxBigPoolRows = KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_BIGPOOL_ROWS;
+    defaultRequest.sampleBytes = KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_SAMPLE_BYTES;
+
+    status = KswordARKRetrieveOptionalInputBuffer(
+        Request,
+        InputBufferLength,
+        sizeof(KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_REQUEST),
+        &inputBuffer,
+        &actualInputLength,
+        &hasInput);
+    if (!NT_SUCCESS(status)) {
+        KswordARKMemoryToolIoctlLog(Device, "Error", "R0 memory-evidence ioctl: input invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    evidenceRequest = hasInput ?
+        (KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_REQUEST*)inputBuffer :
+        &defaultRequest;
+    if ((evidenceRequest->flags & ~allowedFlags) != 0UL ||
+        evidenceRequest->reserved0 != 0UL ||
+        evidenceRequest->reserved1 != 0UL ||
+        (evidenceRequest->startAddress != 0ULL &&
+            evidenceRequest->endAddress != 0ULL &&
+            evidenceRequest->endAddress <= evidenceRequest->startAddress) ||
+        (evidenceRequest->maxRows > KSWORD_ARK_MEMORY_EVIDENCE_HARD_MAX_ROWS) ||
+        (evidenceRequest->maxBytes > KSWORD_ARK_MEMORY_EVIDENCE_HARD_MAX_BYTES) ||
+        (evidenceRequest->maxBigPoolRows > KSWORD_ARK_MEMORY_EVIDENCE_HARD_MAX_BIGPOOL_ROWS) ||
+        (evidenceRequest->sampleBytes > KSWORD_ARK_MEMORY_EVIDENCE_HARD_MAX_SAMPLE_BYTES) ||
+        ((evidenceRequest->flags & KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_NONMODULE_EXECUTABLE_RANGES) != 0UL &&
+            (evidenceRequest->startAddress == 0ULL ||
+                evidenceRequest->endAddress == 0ULL ||
+                evidenceRequest->endAddress <= evidenceRequest->startAddress))) {
+        KswordARKMemoryToolIoctlLog(
+            Device,
+            "Warn",
+            "R0 memory-evidence ioctl rejected: flags=0x%08X, start=0x%I64X, end=0x%I64X.",
+            (unsigned int)evidenceRequest->flags,
+            evidenceRequest->startAddress,
+            evidenceRequest->endAddress);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlCopyMemory(&requestCopy, evidenceRequest, sizeof(requestCopy));
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        KSWORD_ARK_MEMORY_EVIDENCE_RESPONSE_HEADER_SIZE,
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKMemoryToolIoctlLog(Device, "Error", "R0 memory-evidence ioctl: output invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKDriverScanKernelMemoryEvidence(
+        outputBuffer,
+        actualOutputLength,
+        &requestCopy,
+        BytesReturned);
+    if (!NT_SUCCESS(status)) {
+        KswordARKMemoryToolIoctlLog(Device, "Error", "R0 memory-evidence failed: status=0x%08X, outBytes=%Iu.", (unsigned int)status, *BytesReturned);
+        return status;
+    }
+
+    if (*BytesReturned >= KSWORD_ARK_MEMORY_EVIDENCE_RESPONSE_HEADER_SIZE) {
+        KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_RESPONSE* response =
+            (KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_RESPONSE*)outputBuffer;
+        KswordARKMemoryToolIoctlLog(
+            Device,
+            "Info",
+            "R0 memory-evidence response: status=%lu, total=%lu, returned=%lu, modules=%lu, bigpool=%lu, last=0x%08X.",
+            (unsigned long)response->status,
+            (unsigned long)response->totalRows,
+            (unsigned long)response->returnedRows,
+            (unsigned long)response->moduleCount,
+            (unsigned long)response->bigPoolRowsSeen,
+            (unsigned int)response->lastStatus);
     }
 
     return STATUS_SUCCESS;

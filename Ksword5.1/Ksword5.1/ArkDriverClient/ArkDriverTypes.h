@@ -19,6 +19,7 @@
 #include "../../../shared/driver/KswordArkKernelIoctl.h"
 #include "../../../shared/driver/KswordArkKeyboardIoctl.h"
 #include "../../../shared/driver/KswordArkMemoryIoctl.h"
+#include "../../../shared/driver/KswordArkMutationIoctl.h"
 #include "../../../shared/driver/KswordArkProcessIoctl.h"
 #include "../../../shared/driver/KswordArkThreadIoctl.h"
 #include "../../../shared/driver/KswordArkAlpcIoctl.h"
@@ -551,6 +552,288 @@ namespace ksword::ark
         std::uint32_t moduleCount = 0;         // moduleCount：R0 module owner set size.
         long lastStatus = 0;                   // lastStatus：R0 aggregate backend status.
         std::vector<KernelExecutableMemoryPageEntry> entries; // entries：parsed scan rows.
+    };
+
+
+    // KernelMemoryEvidenceEntry is the unified R3 model for memory evidence rows.
+    // Input: fields are copied from KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW.
+    // Processing: keeps addresses and samples diagnostic-only; UI scoring uses
+    // riskFlags/permissionFlags without issuing write or repair actions.
+    // Return behavior: plain data carrier returned inside KernelMemoryEvidenceResult.
+    struct KernelMemoryEvidenceEntry
+    {
+        std::uint32_t evidenceKind = KSWORD_ARK_MEMORY_EVIDENCE_KIND_UNKNOWN;
+        std::uint32_t pageSize = 0;
+        std::uint32_t permissionFlags = 0;
+        std::uint32_t ownerKind = KSWORD_ARK_MEMORY_EVIDENCE_OWNER_UNKNOWN;
+        std::uint32_t riskFlags = 0;
+        std::uint32_t moduleSize = 0;
+        std::uint32_t confidence = 0;
+        std::uint32_t bigPoolTag = 0;
+        std::uint32_t bigPoolFlags = 0;
+        std::uint32_t sectionRva = 0;
+        std::uint32_t sectionSize = 0;
+        std::uint32_t hashAlgorithm = KSWORD_ARK_MEMORY_EVIDENCE_HASH_NONE;
+        std::uint32_t sampleSize = 0;
+        long lastStatus = 0;
+        std::uint64_t virtualAddress = 0;
+        std::uint64_t regionSize = 0;
+        std::uint64_t moduleBase = 0;
+        std::uint64_t ownerAddress = 0;
+        std::uint64_t contentHash = 0;
+        std::string sectionName;
+        std::vector<std::uint8_t> sample;
+        std::wstring ownerName;
+        std::wstring detail;
+    };
+
+    // KernelMemoryEvidenceResult carries the variable-length memory evidence response.
+    // Input: produced by DriverClient::queryKernelMemoryEvidence.
+    // Processing: unsupported distinguishes old drivers from parse failures so UI can
+    // render a graceful capability message.
+    // Return behavior: returned by value; io.ok reports transport/protocol success.
+    struct KernelMemoryEvidenceResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        std::uint32_t version = 0;
+        std::uint32_t status = KSWORD_ARK_MEMORY_EVIDENCE_STATUS_UNAVAILABLE;
+        std::uint32_t responseFlags = 0;
+        std::uint32_t sourceFlags = 0;
+        std::uint32_t totalRows = 0;
+        std::uint32_t returnedRows = 0;
+        std::uint32_t maxRows = 0;
+        std::uint64_t maxBytes = 0;
+        std::uint64_t bytesScanned = 0;
+        std::uint32_t moduleCount = 0;
+        std::uint32_t bigPoolRowsSeen = 0;
+        long lastStatus = 0;
+        std::vector<KernelMemoryEvidenceEntry> entries;
+    };
+
+    // CrossViewFieldOffsets mirrors the shared R0 offset packet.
+    // Input: copied from process/thread cross-view response headers or rows.
+    // Processing: UI uses it only for diagnostics and capability explanations.
+    // Return behavior: plain data object with no member function return.
+    struct CrossViewFieldOffsets
+    {
+        std::uint32_t epUniqueProcessId = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t epActiveProcessLinks = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t epThreadListHead = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t epImageFileName = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t etCid = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t etThreadListEntry = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t etStartAddress = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t etWin32StartAddress = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t ktProcess = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t htTableCode = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t hteLowValue = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint32_t pspCidTableRva = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+        std::uint64_t pspCidTableAddress = 0;
+    };
+
+    // ProcessCrossViewEntry is one EPROCESS cross-view evidence row.
+    // Input: copied from KSWORD_ARK_PROCESS_CROSSVIEW_ROW.
+    // Processing: sourceMask and anomalyFlags remain raw protocol bits so multiple
+    // Dock pages can render consistent DKOM diagnostics.
+    // Return behavior: data only; no return value.
+    struct ProcessCrossViewEntry
+    {
+        std::uint64_t objectAddress = 0;
+        std::uint64_t startAddress = 0;
+        std::uint32_t processId = 0;
+        std::uint32_t parentProcessId = 0;
+        std::uint32_t sourceMask = 0;
+        std::uint32_t anomalyFlags = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
+        CrossViewFieldOffsets fieldOffsets;
+        long lastStatus = 0;
+        std::uint32_t confidence = 0;
+        std::string imageName;
+        std::string detail;
+    };
+
+    // ProcessCrossViewResult carries a complete process cross-view query.
+    // Input: produced by DriverClient::queryProcessCrossView.
+    // Processing: missingCapabilityMask explains DynData gaps without hiding rows.
+    // Return behavior: returned by value; unsupported flags old drivers.
+    struct ProcessCrossViewResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        std::uint32_t version = 0;
+        std::uint32_t status = KSWORD_ARK_CROSSVIEW_STATUS_UNKNOWN;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
+        std::uint64_t missingCapabilityMask = 0;
+        long lastStatus = 0;
+        CrossViewFieldOffsets fieldOffsets;
+        std::vector<ProcessCrossViewEntry> entries;
+    };
+
+    // ThreadCrossViewEntry is one ETHREAD/KTHREAD cross-view evidence row.
+    // Input: copied from KSWORD_ARK_THREAD_CROSSVIEW_ROW.
+    // Processing: target addresses are diagnostic-only and never used as operation credentials.
+    // Return behavior: data-only row.
+    struct ThreadCrossViewEntry
+    {
+        std::uint64_t objectAddress = 0;
+        std::uint64_t processObjectAddress = 0;
+        std::uint64_t startAddress = 0;
+        std::uint32_t processId = 0;
+        std::uint32_t threadId = 0;
+        std::uint32_t sourceMask = 0;
+        std::uint32_t anomalyFlags = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
+        CrossViewFieldOffsets fieldOffsets;
+        long lastStatus = 0;
+        std::uint32_t confidence = 0;
+        std::string imageName;
+        std::string detail;
+    };
+
+    // ThreadCrossViewResult carries a complete thread cross-view query.
+    // Input: produced by DriverClient::queryThreadCrossView.
+    // Processing: rows may include orphan/CID-only evidence and remain read-only in UI.
+    // Return behavior: returned by value; io.ok indicates parseable response.
+    struct ThreadCrossViewResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        std::uint32_t version = 0;
+        std::uint32_t status = KSWORD_ARK_CROSSVIEW_STATUS_UNKNOWN;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
+        std::uint64_t missingCapabilityMask = 0;
+        long lastStatus = 0;
+        CrossViewFieldOffsets fieldOffsets;
+        std::vector<ThreadCrossViewEntry> entries;
+    };
+
+    // DriverIntegrityEvidenceEntry is one driver/kernel integrity evidence row.
+    // Input: copied from KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE.
+    // Processing: evidenceClass groups DriverObject, LDR, FastIo, MajorFunction, CPU,
+    // descriptor-table and MSR rows while riskFlags keeps raw R0 findings.
+    // Return behavior: plain data object.
+    struct DriverIntegrityEvidenceEntry
+    {
+        std::uint32_t evidenceClass = 0;
+        std::uint32_t riskFlags = 0;
+        std::uint32_t sourceMask = 0;
+        std::uint32_t confidence = 0;
+        std::uint32_t processorGroup = 0;
+        std::uint32_t processorNumber = 0;
+        std::uint32_t vector = 0;
+        std::uint32_t ownerModuleSize = 0;
+        std::uint64_t objectAddress = 0;
+        std::uint64_t targetAddress = 0;
+        std::uint64_t ownerModuleBase = 0;
+        std::wstring ownerModule;
+        std::wstring detail;
+    };
+
+    // DriverIntegrityResult carries DriverObject/LDR/CPU integrity evidence.
+    // Input: produced by queryDriverIntegrity or queryKernelCpuIntegrity.
+    // Processing: unsupported provides graceful UI fallback for older R0 drivers.
+    // Return behavior: returned by value with parsed evidence entries.
+    struct DriverIntegrityResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        std::uint32_t version = 0;
+        std::uint32_t queryStatus = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_UNAVAILABLE;
+        std::uint32_t flags = 0;
+        std::uint32_t sourceMask = 0;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint32_t cpuCount = 0;
+        std::uint32_t moduleCount = 0;
+        long lastStatus = 0;
+        std::vector<DriverIntegrityEvidenceEntry> entries;
+    };
+
+    // MutationPrepareInput is the safe R3-side representation of a mutation prepare request.
+    // Input: UI/future repair paths populate target kind, address, bytes and expected-before bytes.
+    // Processing: DriverClient packs the fields into KSWORD_ARK_MUTATION_PREPARE_REQUEST.
+    // Return behavior: used as input to prepareMutation; no member function return.
+    struct MutationPrepareInput
+    {
+        std::uint32_t flags = KSWORD_ARK_MUTATION_FLAG_DRY_RUN;
+        std::uint32_t targetKind = KSWORD_ARK_MUTATION_TARGET_UNKNOWN;
+        std::uint32_t processId = 0;
+        std::uint32_t bytes = 0;
+        std::uint64_t targetAddress = 0;
+        std::uint64_t targetContext = 0;
+        std::vector<std::uint8_t> afterBytes;
+        std::vector<std::uint8_t> expectedBeforeBytes;
+    };
+
+    // MutationResponseResult carries PREPARE/COMMIT/ROLLBACK response metadata.
+    // Input: returned by mutation DriverClient methods.
+    // Processing: before/after byte arrays are bounded by the shared protocol max.
+    // Return behavior: io.ok reports transport and fixed-response parse success.
+    struct MutationResponseResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        std::uint32_t version = 0;
+        std::uint32_t status = KSWORD_ARK_MUTATION_STATUS_UNKNOWN;
+        std::uint32_t targetKind = KSWORD_ARK_MUTATION_TARGET_UNKNOWN;
+        std::uint32_t processId = 0;
+        std::uint32_t bytes = 0;
+        std::uint32_t riskFlags = 0;
+        long lastStatus = 0;
+        std::uint64_t transactionId = 0;
+        std::uint64_t targetAddress = 0;
+        std::uint64_t targetContext = 0;
+        std::uint64_t beforeHash = 0;
+        std::uint64_t afterHash = 0;
+        std::uint64_t timestampTick = 0;
+        std::vector<std::uint8_t> beforeBytes;
+        std::vector<std::uint8_t> afterBytes;
+    };
+
+    // MutationAuditEntry is one read-only transaction audit row.
+    // Input: copied from KSWORD_ARK_MUTATION_AUDIT_ENTRY.
+    // Processing: UI displays audit/dry-run/rollback status only; no arbitrary-write button is exposed.
+    // Return behavior: data-only row.
+    struct MutationAuditEntry
+    {
+        std::uint32_t operation = KSWORD_ARK_MUTATION_OPERATION_UNKNOWN;
+        std::uint32_t status = KSWORD_ARK_MUTATION_STATUS_UNKNOWN;
+        long lastStatus = 0;
+        std::uint32_t targetKind = KSWORD_ARK_MUTATION_TARGET_UNKNOWN;
+        std::uint32_t riskFlags = 0;
+        std::uint32_t flags = 0;
+        std::uint32_t processId = 0;
+        std::uint32_t bytes = 0;
+        std::uint64_t transactionId = 0;
+        std::uint64_t sequence = 0;
+        std::uint64_t targetAddress = 0;
+        std::uint64_t targetContext = 0;
+        std::uint64_t beforeHash = 0;
+        std::uint64_t afterHash = 0;
+        std::uint64_t timestampTick = 0;
+        std::vector<std::uint8_t> byteData;
+    };
+
+    // MutationAuditResult carries the bounded R0 audit ring snapshot.
+    // Input: produced by DriverClient::queryMutationAudit.
+    // Processing: unsupported distinguishes missing transaction IOCTL from empty audit rings.
+    // Return behavior: returned by value; entries contains parsed audit rows.
+    struct MutationAuditResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        std::uint32_t version = 0;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint32_t lostCount = 0;
+        std::uint64_t oldestSequence = 0;
+        std::uint64_t nextSequence = 0;
+        std::vector<MutationAuditEntry> entries;
     };
 
     // SsdtEntry is the R3 model of one kernel SSDT response row.

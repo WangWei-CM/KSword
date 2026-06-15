@@ -2516,6 +2516,7 @@ void ProcessDock::initializeUi()
     initializeProcessActivityPanel();
     initializeProcessTable();
     initializeThreadPage();
+    initializeCrossViewPage();
     initializeCreateProcessPage();
 
     m_rootLayout->addWidget(m_sideTabWidget);
@@ -3835,6 +3836,7 @@ void ProcessDock::initializeConnections()
 
     // 线程页专属连接：集中在独立函数中，避免主连接函数继续膨胀。
     initializeThreadPageConnections();
+    initializeCrossViewConnections();
 }
 
 void ProcessDock::initializeCreateProcessConnections()

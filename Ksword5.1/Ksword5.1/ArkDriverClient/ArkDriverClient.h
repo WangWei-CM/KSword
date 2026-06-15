@@ -55,6 +55,18 @@ namespace ksword::ark
         FileSectionMappingsQueryResult queryFileSectionMappings(const std::wstring& ntPath, unsigned long flags = KSWORD_ARK_FILE_SECTION_QUERY_FLAG_INCLUDE_ALL, unsigned long maxMappings = KSWORD_ARK_SECTION_MAPPING_LIMIT_DEFAULT) const;
         VirtualMemoryReadResult readVirtualMemory(std::uint32_t processId, std::uint64_t baseAddress, std::uint32_t bytesToRead, unsigned long flags = KSWORD_ARK_MEMORY_READ_FLAG_ZERO_FILL_UNREADABLE) const;
         VirtualMemoryWriteResult writeVirtualMemory(std::uint32_t processId, std::uint64_t baseAddress, const std::vector<std::uint8_t>& bytes, unsigned long flags = 0UL) const;
+        // queryKernelMemoryEvidence：
+        // - 输入：只读采集 flags、行数/字节预算和可选地址半开区间。
+        // - 处理：封装 IOCTL_KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE，解析变长 evidence rows。
+        // - 返回：KernelMemoryEvidenceResult；旧驱动/能力缺失时 unsupported=true，调用方显示 graceful message。
+        KernelMemoryEvidenceResult queryKernelMemoryEvidence(
+            unsigned long flags = KSWORD_ARK_MEMORY_EVIDENCE_FLAG_INCLUDE_ALL,
+            unsigned long maxRows = KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_MAX_ROWS,
+            std::uint64_t startAddress = 0,
+            std::uint64_t endAddress = 0,
+            std::uint64_t maxBytes = KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_MAX_BYTES,
+            unsigned long maxBigPoolRows = KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_BIGPOOL_ROWS,
+            unsigned long sampleBytes = KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_SAMPLE_BYTES) const;
         FileInfoQueryResult queryFileInfo(const std::wstring& ntPath, unsigned long flags = KSWORD_ARK_QUERY_FILE_INFO_FLAG_INCLUDE_ALL) const;
         FileInfoQueryResult queryFileInfo(DriverHandle& handle, const std::wstring& ntPath, unsigned long flags = KSWORD_ARK_QUERY_FILE_INFO_FLAG_INCLUDE_ALL) const;
         IoResult controlFileMonitor(unsigned long action, unsigned long operationMask = KSWORD_ARK_FILE_MONITOR_OPERATION_ALL, unsigned long processId = 0UL, unsigned long flags = 0UL) const;
@@ -72,6 +84,25 @@ namespace ksword::ark
 
         SsdtEnumResult enumerateSsdt(unsigned long flags) const;
         SsdtEnumResult enumerateShadowSsdt(unsigned long flags = KSWORD_ARK_ENUM_SSDT_FLAG_INCLUDE_UNRESOLVED) const;
+        // queryProcessCrossView：
+        // - 输入：进程 cross-view 采集 flags、PID 半开/闭合过滤和节点预算。
+        // - 处理：只通过 ArkDriverClient 调用 R0，不让 Dock 直接 DeviceIoControl。
+        // - 返回：ProcessCrossViewResult，包含 source matrix、anomaly flags 和 DynData 缺口。
+        ProcessCrossViewResult queryProcessCrossView(
+            unsigned long flags = KSWORD_ARK_PROCESS_CROSSVIEW_FLAG_INCLUDE_ALL,
+            std::uint32_t startPid = 0,
+            std::uint32_t endPid = 0,
+            unsigned long maxNodes = KSWORD_ARK_CROSSVIEW_DEFAULT_MAX_NODES) const;
+        // queryThreadCrossView：
+        // - 输入：线程 cross-view 采集 flags、可选 PID/TID 过滤和节点预算。
+        // - 处理：解析 ETHREAD/KTHREAD 来源矩阵，只读展示线程 DKOM 证据。
+        // - 返回：ThreadCrossViewResult；不返回可用于写操作的对象凭据。
+        ThreadCrossViewResult queryThreadCrossView(
+            unsigned long flags = KSWORD_ARK_THREAD_CROSSVIEW_FLAG_INCLUDE_ALL,
+            std::uint32_t processId = 0,
+            std::uint32_t startTid = 0,
+            std::uint32_t endTid = 0,
+            unsigned long maxNodes = KSWORD_ARK_CROSSVIEW_DEFAULT_MAX_NODES) const;
         KernelInlineHookScanResult scanInlineHooks(unsigned long flags = 0UL, unsigned long maxEntries = KSWORD_ARK_KERNEL_HOOK_DEFAULT_MAX_ENTRIES, const std::wstring& moduleName = std::wstring()) const;
         // scanKernelExecutableMemory：
         // - 作用：调用 Prompt 1 定义的内核可执行页扫描 IOCTL，并解析变长响应为 R3 模型。
@@ -83,8 +114,34 @@ namespace ksword::ark
         KernelInlinePatchResult patchInlineHook(std::uint64_t functionAddress, unsigned long mode, unsigned long patchBytes, const std::vector<std::uint8_t>& expectedCurrentBytes, const std::vector<std::uint8_t>& restoreBytes = std::vector<std::uint8_t>(), unsigned long flags = 0UL) const;
         KernelIatEatHookScanResult enumerateIatEatHooks(unsigned long flags = KSWORD_ARK_KERNEL_SCAN_FLAG_INCLUDE_IMPORTS | KSWORD_ARK_KERNEL_SCAN_FLAG_INCLUDE_EXPORTS, unsigned long maxEntries = KSWORD_ARK_KERNEL_HOOK_DEFAULT_MAX_ENTRIES, const std::wstring& moduleName = std::wstring()) const;
         DriverObjectQueryResult queryDriverObject(const std::wstring& driverName, unsigned long flags = KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_ALL, unsigned long maxDevices = KSWORD_ARK_DRIVER_DEVICE_LIMIT_DEFAULT, unsigned long maxAttachedDevices = KSWORD_ARK_DRIVER_ATTACHED_LIMIT_DEFAULT) const;
+        // queryDriverIntegrity：
+        // - 输入：可选 DriverObject 名称、模块基址和采集预算。
+        // - 处理：调用统一驱动完整性 IOCTL，聚合 DriverObject/LDR/FastIo/CPU/IDT 证据。
+        // - 返回：DriverIntegrityResult；unsupported=true 表示 R0 尚未集成或驱动过旧。
+        DriverIntegrityResult queryDriverIntegrity(
+            const std::wstring& driverName = std::wstring(),
+            std::uint64_t targetModuleBase = 0,
+            unsigned long flags = KSWORD_ARK_DRIVER_INTEGRITY_FLAG_DEFAULT,
+            unsigned long maxRows = KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_MAX_ROWS,
+            unsigned long maxIdtVectorsPerCpu = KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_IDT_VECTORS) const;
+        // queryKernelCpuIntegrity：
+        // - 输入：CPU/IDT 采集 flags 与预算。
+        // - 处理：复用 queryDriverIntegrity 的协议，只请求 CPU entry evidence。
+        // - 返回：DriverIntegrityResult；不执行任何 MSR/IDT/GDT 写操作。
+        DriverIntegrityResult queryKernelCpuIntegrity(
+            unsigned long flags = KSWORD_ARK_DRIVER_INTEGRITY_FLAG_CPU | KSWORD_ARK_DRIVER_INTEGRITY_FLAG_IDT_ENTRIES,
+            unsigned long maxRows = KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_MAX_ROWS,
+            unsigned long maxIdtVectorsPerCpu = KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_IDT_VECTORS) const;
         DriverForceUnloadResult forceUnloadDriver(const std::wstring& driverName, unsigned long flags = 0UL, unsigned long timeoutMilliseconds = 3000UL) const;
         DriverForceUnloadResult forceUnloadDriverByModuleBase(std::uint64_t moduleBase, const std::wstring& fallbackDriverName = std::wstring(), unsigned long flags = KSWORD_ARK_DRIVER_UNLOAD_FLAG_FORCE_CLEANUP, unsigned long timeoutMilliseconds = 3000UL) const;
+        // prepareMutation / commitMutation / rollbackMutation / queryMutationAudit：
+        // - 输入：受控 transaction 参数或只读 audit 查询参数。
+        // - 处理：仅在 ArkDriverClient 内封装 mutation IOCTL；Dock UI 不直接调用 DeviceIoControl。
+        // - 返回：固定响应或 audit rows；UI 只能展示 dry-run/audit/rollback，不暴露任意写按钮。
+        MutationResponseResult prepareMutation(const MutationPrepareInput& input) const;
+        MutationResponseResult commitMutation(std::uint64_t transactionId, unsigned long flags = KSWORD_ARK_MUTATION_FLAG_DRY_RUN) const;
+        MutationResponseResult rollbackMutation(std::uint64_t transactionId, unsigned long flags = KSWORD_ARK_MUTATION_FLAG_DRY_RUN) const;
+        MutationAuditResult queryMutationAudit(unsigned long flags = 0, unsigned long maxEntries = KSWORD_ARK_MUTATION_AUDIT_RING_CAPACITY, std::uint64_t startSequence = 0) const;
         IoResult setCallbackRules(const void* blobBytes, unsigned long blobSize) const;
         AsyncIoResult waitCallbackEventAsync(
             DriverHandle& handle,

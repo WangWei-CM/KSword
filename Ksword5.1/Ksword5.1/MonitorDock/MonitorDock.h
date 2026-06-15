@@ -11,6 +11,7 @@
 #include "ProcessTraceTimelineWidget.h"
 #include "../Framework.h"
 
+#include <QJsonObject>
 #include <QRegularExpression>
 #include <QWidget>
 
@@ -388,12 +389,33 @@ public:
         QString wmiNamespaceText;
     };
 
+public:
+    // ArkRiskCenterEntry：
+    // - 作用：保存 ARK 风险中心的一行聚合结果；
+    // - 输入：由 MonitorDock 的只读查询聚合生成；
+    // - 返回行为：纯数据对象，供表格、详情和 JSON/CSV 导出复用。
+    struct ArkRiskCenterEntry
+    {
+        QString sourceName;
+        QString category;
+        QString title;
+        QString detail;
+        QString riskScoreText;
+        double riskScore = 0.0;
+        QJsonObject payload;
+    };
+
 private:
     // ========================= UI 初始化 =========================
     void initializeUi();
     void initializePerformancePanel();
     void initializeWmiTab();
     void initializeEtwTab();
+    // initializeArkRiskCenterTab 作用：
+    // - 构建只读 ARK 风险中心页，聚合 Memory/Process/Driver/Callback/Hook 发现；
+    // - 提供 JSON/CSV 导出入口；
+    // - 不新增 KernelDock 页面，也不提供危险写按钮。
+    void initializeArkRiskCenterTab();
 
     // ensureDirectKernelCallTabInitialized 作用：
     // - 输入：无，读取 m_directKernelCallHostPage 与 m_directKernelCallWidget；
@@ -408,6 +430,27 @@ private:
     // - 返回：无返回值，实际枚举仍走后台线程。
     void triggerDeferredDiscoveryForCurrentTab();
     void initializeConnections();
+    // refreshArkRiskCenterAsync 作用：
+    // - 异步汇总多个 ArkDriverClient 只读查询的风险发现；
+    // - 按 riskScore 排序并回填表格；
+    // - 返回值：无。
+    void refreshArkRiskCenterAsync();
+    // rebuildArkRiskCenterTable 作用：
+    // - 按当前过滤条件重建 ARK 风险中心表格；
+    // - 只做缓存投影，不再次发起 R0 调用；
+    // - 返回值：无。
+    void rebuildArkRiskCenterTable();
+    // showArkRiskCenterDetailForCurrentRow 作用：
+    // - 展示风险中心当前选中行的结构化 JSON 与摘要；
+    // - 只读取本地缓存，不访问驱动；
+    // - 返回值：无。
+    void showArkRiskCenterDetailForCurrentRow() const;
+    // exportArkRiskCenterAsJson / exportArkRiskCenterAsCsv 作用：
+    // - 将当前风险中心缓存导出为 JSON 或 CSV；
+    // - 若缓存为空则提示未集成或无结果；
+    // - 返回值：无。
+    void exportArkRiskCenterAsJson() const;
+    void exportArkRiskCenterAsCsv() const;
     void refreshPerformanceCharts();
     bool sampleCpuUsage(double* cpuUsageOut);
     bool sampleDiskRate(double* readBytesPerSecOut, double* writeBytesPerSecOut);
@@ -552,6 +595,15 @@ private:
     DirectKernelCallMonitorWidget* m_directKernelCallWidget = nullptr; // m_directKernelCallWidget：直接内核调用监控子页。
     QWidget* m_winApiPage = nullptr;        // m_winApiPage：WinAPI 子页宿主容器。
     WinAPIDock* m_winApiWidget = nullptr;   // m_winApiWidget：真正的 WinAPI 监控控件。
+    QWidget* m_arkRiskCenterPage = nullptr;  // m_arkRiskCenterPage：ARK 风险中心页宿主。
+    QPushButton* m_arkRiskRefreshButton = nullptr; // 风险中心刷新按钮。
+    QPushButton* m_arkRiskExportJsonButton = nullptr; // 风险中心 JSON 导出按钮。
+    QPushButton* m_arkRiskExportCsvButton = nullptr; // 风险中心 CSV 导出按钮。
+    QLineEdit* m_arkRiskFilterEdit = nullptr; // 风险中心全字段过滤框。
+    QCheckBox* m_arkRiskHighOnlyCheck = nullptr; // 仅显示高风险记录。
+    QLabel* m_arkRiskStatusLabel = nullptr; // 风险中心状态标签。
+    QTableWidget* m_arkRiskTable = nullptr; // 风险中心结果表。
+    QPlainTextEdit* m_arkRiskDetailEdit = nullptr; // 风险中心详情文本。
 
     QChartView* m_cpuChartView = nullptr;      // CPU 条形图视图。
     QChartView* m_memoryChartView = nullptr;   // 内存条形图视图。
@@ -728,4 +780,8 @@ private:
     bool m_etwTimelineUserSelectionActive = false;    // 用户是否已启用 ETW 时间框选。
     bool m_wmiInitialDiscoveryDone = false;          // m_wmiInitialDiscoveryDone：WMI 页是否已触发首轮发现。
     bool m_etwInitialDiscoveryDone = false;          // m_etwInitialDiscoveryDone：ETW 页是否已触发首轮发现。
+    bool m_arkRiskCenterInitialDiscoveryDone = false; // 风险中心是否已完成首轮汇总。
+    bool m_arkRiskRefreshInProgress = false;         // 风险中心后台刷新互斥标记。
+    std::uint64_t m_arkRiskRefreshTicket = 0;        // 风险中心刷新票据。
+    std::vector<ArkRiskCenterEntry> m_arkRiskCenterEntries; // 风险中心缓存。
 };

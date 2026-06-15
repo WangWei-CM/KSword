@@ -45,8 +45,10 @@ python tools\pdb_offset_generator\ksword_pdb_profile_generator.py `
 
 The generated JSON keeps the legacy `fields` and `missingFields` keys. Callback
 PDB items are written under `callbackItems` with `kind` set to `GlobalRva` or
-`StructOffset`. Missing callback candidates are non-fatal and are reported under
-`diagnostics.missingItems`.
+`StructOffset`. v3 typed items are written under `typedItems`; this array carries
+all resolved `StructOffset` fields plus callback/kernel `GlobalRva` values.
+Missing callback and kernel-global candidates are non-fatal and are reported
+under `diagnostics.missingItems`, `missingGlobals`, and `diagnostics.missingGlobals`.
 
 ## Release sync packs
 
@@ -72,10 +74,11 @@ The default output path is version-specific:
 
 - v1: `<release-root>\profiles\ark_dyndata_pack_v1.json`
 - v2: `<release-root>\profiles\ark_dyndata_pack_v2.json`
+- v3: `<release-root>\profiles\ark_dyndata_pack_v3.json`
 
 `--pack-only` keeps its existing behavior and can also be combined with
-`--pack-version 2`. `--pack-output` overrides the computed v1/v2 path when a
-specific destination is required.
+`--pack-version 2` or `--pack-version 3`. `--pack-output` overrides the computed
+v1/v2/v3 path when a specific destination is required.
 
 For a release-side v2 pack that lands at `Release\profiles\ark_dyndata_pack_v2.json`
 and does not publish scattered JSON, use pack-only together with `--clean-target`:
@@ -129,6 +132,43 @@ compact object containing at least `name`, `kind`, and numeric `value`.
 Source-only diagnostics such as symbol source, section, and member metadata are
 not copied into the pack.
 
+Pack v3 remains compatible with the v1/v2 identity and `fields` layout, but it
+adds a typed `items` array for every profile. R3 loaders accept packVersion 1,
+2, or 3; v3 is preferred for next-phase features because `items` can carry both
+`StructOffset` and optional `GlobalRva` entries:
+
+```json
+{
+  "schemaVersion": 1,
+  "packVersion": 3,
+  "fieldDictionary": ["EpUniqueProcessId"],
+  "profiles": [
+    {
+      "moduleClassId": 0,
+      "machine": 34404,
+      "timeDateStamp": 305419896,
+      "sizeOfImage": 21299200,
+      "profileName": "example",
+      "pdbName": "ntkrnlmp.pdb",
+      "pdbGuid": "",
+      "pdbAge": 1,
+      "fields": [[0, 768]],
+      "items": [
+        { "name": "EpUniqueProcessId", "kind": "StructOffset", "value": 1088 },
+        { "name": "PspCidTable", "kind": "GlobalRva", "value": 1193046 }
+      ],
+      "missingFields": [],
+      "missingGlobals": ["PiDDBCacheTable"],
+      "coveragePercent": 96.3
+    }
+  ]
+}
+```
+
+Release reports now include per-profile `missingFields`, `missingGlobals`, and
+`coveragePercent` so the pack can be audited without opening every scattered
+profile.
+
 ## callbackItems release validation
 
 Release sync accepts profiles with missing or empty `callbackItems`; those
@@ -168,3 +208,18 @@ input alias `_CALLBACK_ENTRY_ITEM.EntryItemList` and writes it into v2 packs as
 the canonical `_CALLBACK_ENTRY_ITEM.EntryList` name.
 Manifest and report JSON include total `callbackItemCount`, and the per-profile
 report entries also keep individual callback item counts for audit purposes.
+
+## v3 typed item validation
+
+Release sync accepts source `typedItems` and pack-side `items` arrays. Each item
+must use `kind` `StructOffset` or `GlobalRva`. `GlobalRva` accepts the callback
+names above plus optional kernel globals:
+
+- `PspCidTable`
+- `PsLoadedModuleList`
+- `MmUnloadedDrivers`
+- `PiDDBCacheTable`
+
+`StructOffset` accepts the legacy field dictionary names plus the new process,
+thread, handle table, KLDR, and DRIVER_OBJECT field names documented in
+`docs/next_phase_manifests/dyndata_v3.md`.

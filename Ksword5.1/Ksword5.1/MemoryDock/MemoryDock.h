@@ -249,6 +249,12 @@ private:
     // - 返回：无。
     void initializeKernelExecutableMemoryScanTab();
 
+    // initializeKernelMemoryEvidenceTab：
+    // - 作用：构建 Tab8（内核内存证据）界面。
+    // - 处理逻辑：只创建只读查询入口、结果表和详情区，所有 R0 访问交给 ArkDriverClient。
+    // - 返回：无。
+    void initializeKernelMemoryEvidenceTab();
+
     // initializeConnections：
     // - 作用：统一连接各控件交互逻辑。
     // - 返回：无。
@@ -486,6 +492,24 @@ private:
     // - 作用：把当前选中行写入详情 CodeEditorWidget。
     // - 返回：无。
     void showKernelExecutableMemoryDetailByCurrentRow();
+
+    // refreshKernelMemoryEvidenceAsync：
+    // - 作用：异步查询内核内存证据，包括非模块执行页、BigPool、PTE 权限和 text hash 状态。
+    // - 处理逻辑：后台线程调用 ArkDriverClient::queryKernelMemoryEvidence，主线程回填 UI。
+    // - 返回：无。
+    void refreshKernelMemoryEvidenceAsync();
+
+    // rebuildKernelMemoryEvidenceTable：
+    // - 作用：按当前缓存和过滤选项重建内核内存证据表格。
+    // - 处理逻辑：只做缓存到 UI 的投影，不执行新的驱动 IOCTL。
+    // - 返回：无。
+    void rebuildKernelMemoryEvidenceTable();
+
+    // showKernelMemoryEvidenceDetailByCurrentRow：
+    // - 作用：把当前选中证据行展开到详情编辑器。
+    // - 处理逻辑：通过表格 UserRole 中的虚拟地址反查缓存。
+    // - 返回：无。
+    void showKernelMemoryEvidenceDetailByCurrentRow();
 
     // updateDriverMemoryBaseComboFromProcessCache：
     // - 作用：用当前进程缓存重建 Tab6 的“偏移基址/目标进程”下拉框。
@@ -771,6 +795,22 @@ private:
     CodeEditorWidget* m_kernelExecutableDetailEditor = nullptr; // 详情编辑器。
     QLabel* m_kernelExecutableBadgeLabel = nullptr;          // 右下角 Kernel.png 标识。
 
+    // ========================================================
+    // Tab8：内核内存证据
+    // ========================================================
+
+    QWidget* m_tabKernelMemoryEvidence = nullptr;            // Tab8 页面容器。
+    QPushButton* m_kernelMemoryEvidenceRefreshButton = nullptr; // 内核内存证据刷新按钮。
+    QCheckBox* m_kernelMemoryEvidenceRiskOnlyCheck = nullptr; // 仅显示 riskFlags 非零记录。
+    QCheckBox* m_kernelMemoryEvidenceIncludeNonModuleCheck = nullptr; // 是否显式包含非模块执行范围扫描。
+    QLineEdit* m_kernelMemoryEvidenceFilterEdit = nullptr;   // Owner/detail 本地过滤框。
+    QLineEdit* m_kernelMemoryEvidenceStartEdit = nullptr;    // 非模块扫描起始地址。
+    QLineEdit* m_kernelMemoryEvidenceEndEdit = nullptr;      // 非模块扫描结束地址。
+    QSpinBox* m_kernelMemoryEvidenceMaxRowsSpin = nullptr;   // 单次最大返回行数。
+    QLabel* m_kernelMemoryEvidenceStatusLabel = nullptr;     // 查询状态标签。
+    QTableWidget* m_kernelMemoryEvidenceTable = nullptr;     // 证据结果表格。
+    CodeEditorWidget* m_kernelMemoryEvidenceDetailEditor = nullptr; // 证据详情编辑器。
+
 private:
     // ========================================================
     // 运行时状态与缓存
@@ -812,6 +852,11 @@ private:
     std::atomic<bool> m_kernelExecutableRefreshInProgress{ false }; // Tab7 是否正在刷新。
     std::atomic<std::uint64_t> m_kernelExecutableRefreshTicket{ 0 }; // Tab7 刷新票据。
     std::size_t m_kernelExecutableVisibleCount = 0; // Tab7 当前可见行数。
+
+    std::vector<ksword::ark::KernelMemoryEvidenceEntry> m_kernelMemoryEvidenceCache; // Tab8 证据缓存。
+    std::atomic<bool> m_kernelMemoryEvidenceRefreshInProgress{ false }; // Tab8 是否正在刷新。
+    std::atomic<std::uint64_t> m_kernelMemoryEvidenceRefreshTicket{ 0 }; // Tab8 刷新票据。
+    std::size_t m_kernelMemoryEvidenceVisibleCount = 0; // Tab8 当前可见行数。
 
     std::vector<BreakpointEntry> m_breakpointCache;    // 断点缓存（Tab5）。
     std::vector<BookmarkEntry> m_bookmarkCache;        // 书签缓存（Tab5）。

@@ -89,6 +89,9 @@
     <ClCompile Include="DriverDock\DriverDock.Evidence.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DriverDock\DriverDock.Integrity.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="FileDock\FileDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -173,6 +176,9 @@
     <ClCompile Include="MemoryDock\MemoryDock.KernelExecutableMemory.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDock.KernelMemoryEvidence.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDock.UiBuild.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -228,6 +234,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MonitorDock\ProcessTraceTimelineWidget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MonitorDock\MonitorDock.ArkRiskCenter.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MonitorDock\WinAPIDock.cpp">
@@ -321,6 +330,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ProcessDock\ProcessDock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ProcessDock\ProcessDock.CrossView.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ProcessDock\ProcessDock.ThreadTab.cpp">
@@ -555,6 +567,9 @@
       <Filter>Source Files\ArkDriverClient</Filter>
     </ClCompile>
     <ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverMutation.cpp">
       <Filter>Source Files\ArkDriverClient</Filter>
     </ClCompile>
     <ClCompile Include="HardwareDock\MemoryCompositionHistoryWidget.cpp">

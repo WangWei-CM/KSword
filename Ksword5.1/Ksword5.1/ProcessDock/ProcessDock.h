@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../ArkDriverClient/ArkDriverTypes.h"
 
 #include <QColor>
 #include <QHash>
@@ -324,8 +325,18 @@ private:
     void initializeProcessTable();
     void initializeCreateProcessPage();
     void initializeThreadPage();
+    // initializeCrossViewPage 作用：
+    // - 创建 ProcessDock 的 R0 Cross-View 证据页；
+    // - 页面展示进程/线程来源矩阵和异常 flags；
+    // - 不提供 DKOM 修复、结束进程或任意写按钮。
+    void initializeCrossViewPage();
     void initializeConnections();
     void initializeThreadPageConnections();
+    // initializeCrossViewConnections 作用：
+    // - 连接 Cross-View 刷新、过滤和表格选择事件；
+    // - 所有 R0 查询都通过 ArkDriverClient；
+    // - 返回值：无。
+    void initializeCrossViewConnections();
     void initializeTimer();
     void updateRefreshStateUi(bool refreshing, const QString& stateText);
     // applyAdaptiveColumnWidths 作用：
@@ -349,6 +360,21 @@ private:
     bool shouldRebuildProcessTableForRefresh(bool forceUiRefresh) const;
     void requestAsyncThreadRefresh(bool forceRefresh);
     void rebuildThreadTable();
+    // refreshCrossViewAsync 作用：
+    // - 异步查询 R0 process/thread cross-view 证据；
+    // - 结果回填到 m_processCrossViewCache / m_threadCrossViewCache；
+    // - 返回值：无。
+    void refreshCrossViewAsync();
+    // rebuildCrossViewTables 作用：
+    // - 按当前搜索框和缓存重绘 PID/TID 来源矩阵；
+    // - 只做 UI 投影，不再次查询驱动；
+    // - 返回值：无。
+    void rebuildCrossViewTables();
+    // showCrossViewDetailForCurrentRow 作用：
+    // - 展示当前选中的进程或线程 cross-view 详情；
+    // - 参数 preferThreadTable 为 true 时优先读取线程表；
+    // - 返回值：无。
+    void showCrossViewDetailForCurrentRow(bool preferThreadTable);
     void applyThreadStatusUi(bool refreshing, const QString& stateText);
     std::vector<DisplayRow> buildDisplayOrder() const;
     std::vector<DisplayRow> buildTreeDisplayOrder() const;
@@ -540,6 +566,8 @@ private:
     QVBoxLayout* m_createProcessPageLayout = nullptr; // 创建页主布局。
     QWidget* m_threadPage = nullptr;          // “线程列表”页容器。
     QVBoxLayout* m_threadPageLayout = nullptr; // 线程页主布局。
+    QWidget* m_crossViewPage = nullptr;       // “Cross-View”页容器。
+    QVBoxLayout* m_crossViewPageLayout = nullptr; // Cross-View 页主布局。
 
     // ======== 控制栏 ========
     QHBoxLayout* m_controlLayout = nullptr;   // 上方“操作按钮”行布局。
@@ -594,6 +622,16 @@ private:
     QLineEdit* m_threadSearchLineEdit = nullptr; // 线程页搜索框（按 TID/PID/名称过滤）。
     QLabel* m_threadStatusLabel = nullptr;    // 线程页刷新状态标签。
     QTreeWidget* m_threadTable = nullptr;     // 线程列表表格（支持右键动作）。
+
+    // ======== Cross-View 页控件 ========
+    QHBoxLayout* m_crossViewTopLayout = nullptr; // Cross-View 顶部操作栏。
+    QPushButton* m_crossViewRefreshButton = nullptr; // Cross-View 刷新按钮。
+    QLineEdit* m_crossViewSearchEdit = nullptr; // Cross-View 全字段过滤框。
+    QCheckBox* m_crossViewAnomalyOnlyCheck = nullptr; // 仅显示异常记录。
+    QLabel* m_crossViewStatusLabel = nullptr; // Cross-View 查询状态。
+    QTableWidget* m_processCrossViewTable = nullptr; // 进程来源矩阵表。
+    QTableWidget* m_threadCrossViewTable = nullptr; // 线程来源矩阵表。
+    QPlainTextEdit* m_crossViewDetailEdit = nullptr; // 详情文本，只读。
 
     // ======== 创建进程页 - 通用参数 ========
     QComboBox* m_createMethodCombo = nullptr; // CreateProcessW / Token 路径。
@@ -690,6 +728,12 @@ private:
     std::vector<ks::process::SystemThreadRecord> m_threadRecordList; // 线程页最近一次刷新结果缓存。
     std::string m_threadDiagnosticText;       // 线程页最近一次刷新诊断文本。
     std::unordered_set<std::uint32_t> m_hiddenProcessPidSet; // 本会话已通过 R0 标记隐藏的 PID 集合。
+    std::vector<ksword::ark::ProcessCrossViewEntry> m_processCrossViewCache; // R0 进程 cross-view 缓存。
+    std::vector<ksword::ark::ThreadCrossViewEntry> m_threadCrossViewCache; // R0 线程 cross-view 缓存。
+    ksword::ark::ProcessCrossViewResult m_lastProcessCrossViewResult; // 最近一次进程 cross-view 元信息。
+    ksword::ark::ThreadCrossViewResult m_lastThreadCrossViewResult; // 最近一次线程 cross-view 元信息。
+    bool m_crossViewRefreshInProgress = false; // Cross-View 后台查询互斥标记。
+    std::uint64_t m_crossViewRefreshTicket = 0; // Cross-View 查询序号。
 
     // ======== 右键菜单绑定状态 ========
     std::string m_contextActionIdentityKey;      // 当前菜单动作绑定的 identityKey。

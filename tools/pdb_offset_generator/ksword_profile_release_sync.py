@@ -10,19 +10,20 @@ Inputs:
 Processing:
 - Parse every JSON profile and enforce the same schema assumptions used by the
   R3 KernelDock loader and R0 packed profile apply protocol.
-- Reject profiles with missing module identity, empty fields, unknown fields, or
-  offsets outside the v1 protocol range.
-- Validate optional callbackItems without requiring them; when present, callback
-  items must use shared callback field names, allowed item kinds, and safe
+- Reject profiles with missing module identity, no usable fields/items, unknown
+  fields, or offsets outside the shared protocol range.
+- Validate optional callbackItems and v3 typed items without requiring them;
+  when present, items must use shared field names, allowed item kinds, and safe
   uint32 payload ranges.
 - Deduplicate profiles by the R0 identity tuple used for safe apply:
   module class, machine, TimeDateStamp, and SizeOfImage.
 - Copy only accepted profile JSON files into Release\\profiles\\ark_dyndata
   when scattered JSON publishing is requested.
-- Optionally emit a compact Release\\profiles\\ark_dyndata_pack_v1.json or
-  Release\\profiles\\ark_dyndata_pack_v2.json pack. v1 stores only fields for
-  legacy compatibility. v2 keeps the same compact fields layout and adds each
-  profile's validated callbackItems array with name/kind/value payloads.
+- Optionally emit a compact Release\\profiles\\ark_dyndata_pack_v1.json,
+  Release\\profiles\\ark_dyndata_pack_v2.json, or
+  Release\\profiles\\ark_dyndata_pack_v3.json pack. v1 stores only fields for
+  legacy compatibility. v2 adds callbackItems. v3 adds typed StructOffset and
+  GlobalRva items plus coverage metadata.
 - Write a manifest outside the scanned JSON directory so KernelDock does not
   attempt to parse the manifest as a scattered runtime profile.
 
@@ -48,11 +49,13 @@ DEFAULT_SOURCE_DIR = Path(r"D:\PDB\profiles\ark_dyndata")
 DEFAULT_LOCAL_KERNEL = Path(r"C:\Windows\System32\ntoskrnl.exe")
 KSW_PACK_VERSION_V1 = 1
 KSW_PACK_VERSION_V2 = 2
+KSW_PACK_VERSION_V3 = 3
 KSW_DEFAULT_PACK_VERSION = KSW_PACK_VERSION_V1
-KSW_SUPPORTED_PACK_VERSIONS = (KSW_PACK_VERSION_V1, KSW_PACK_VERSION_V2)
+KSW_SUPPORTED_PACK_VERSIONS = (KSW_PACK_VERSION_V1, KSW_PACK_VERSION_V2, KSW_PACK_VERSION_V3)
 DEFAULT_PACK_FILE_NAMES = {
     KSW_PACK_VERSION_V1: "ark_dyndata_pack_v1.json",
     KSW_PACK_VERSION_V2: "ark_dyndata_pack_v2.json",
+    KSW_PACK_VERSION_V3: "ark_dyndata_pack_v3.json",
 }
 # Kept for compatibility with callers and docs that referenced the original
 # single-pack default name before v2 publishing was added.
@@ -78,6 +81,13 @@ CALLBACK_GLOBAL_RVA_FIELD_IDS = {
     "CmCallbackListHead": 48,
 }
 
+KERNEL_GLOBAL_RVA_FIELD_IDS = {
+    "PspCidTable": 82,
+    "PsLoadedModuleList": 83,
+    "MmUnloadedDrivers": 84,
+    "PiDDBCacheTable": 85,
+}
+
 CALLBACK_STRUCT_OFFSET_FIELD_IDS = {
     "_OBJECT_TYPE.CallbackList": 49,
     "_CALLBACK_ENTRY_ITEM.EntryList": 50,
@@ -87,6 +97,89 @@ CALLBACK_STRUCT_OFFSET_FIELD_IDS = {
     "_CALLBACK_ENTRY_ITEM.CallbackEntry": 54,
     "_CALLBACK_ENTRY.Altitude": 55,
     "_CALLBACK_ENTRY.RegistrationContext": 56,
+}
+
+KNOWN_FIELD_IDS = {
+    "EpObjectTable": 1,
+    "EpSectionObject": 2,
+    "HtHandleContentionEvent": 3,
+    "OtName": 4,
+    "OtIndex": 5,
+    "ObDecodeShift": 6,
+    "ObAttributesShift": 7,
+    "KtInitialStack": 8,
+    "KtStackLimit": 9,
+    "KtStackBase": 10,
+    "KtKernelStack": 11,
+    "KtReadOperationCount": 12,
+    "KtWriteOperationCount": 13,
+    "KtOtherOperationCount": 14,
+    "KtReadTransferCount": 15,
+    "KtWriteTransferCount": 16,
+    "KtOtherTransferCount": 17,
+    "MmSectionControlArea": 18,
+    "MmControlAreaListHead": 19,
+    "MmControlAreaLock": 20,
+    "AlpcCommunicationInfo": 21,
+    "AlpcOwnerProcess": 22,
+    "AlpcConnectionPort": 23,
+    "AlpcServerCommunicationPort": 24,
+    "AlpcClientCommunicationPort": 25,
+    "AlpcHandleTable": 26,
+    "AlpcHandleTableLock": 27,
+    "AlpcAttributes": 28,
+    "AlpcAttributesFlags": 29,
+    "AlpcPortContext": 30,
+    "AlpcPortObjectLock": 31,
+    "AlpcSequenceNo": 32,
+    "AlpcState": 33,
+    "LxPicoProc": 34,
+    "LxPicoProcInfo": 35,
+    "LxPicoProcInfoPID": 36,
+    "LxPicoThrdInfo": 37,
+    "LxPicoThrdInfoTID": 38,
+    "EpProtection": 39,
+    "EpSignatureLevel": 40,
+    "EpSectionSignatureLevel": 41,
+    "EgeGuid": 42,
+    "EreGuidEntry": 43,
+    "EpUniqueProcessId": 57,
+    "EpActiveProcessLinks": 58,
+    "EpThreadListHead": 59,
+    "EpImageFileName": 60,
+    "EpToken": 61,
+    "EtCid": 62,
+    "EtThreadListEntry": 63,
+    "EtStartAddress": 64,
+    "EtWin32StartAddress": 65,
+    "KtProcess": 66,
+    "HtTableCode": 67,
+    "HtHandleCount": 68,
+    "HteLowValue": 69,
+    "KldrInLoadOrderLinks": 70,
+    "KldrDllBase": 71,
+    "KldrSizeOfImage": 72,
+    "KldrFullDllName": 73,
+    "KldrBaseDllName": 74,
+    "KldrFlags": 75,
+    "DoDriverStart": 76,
+    "DoDriverSize": 77,
+    "DoDriverSection": 78,
+    "DoMajorFunction": 79,
+    "DoFastIoDispatch": 80,
+    "DoDriverUnload": 81,
+}
+
+LXCORE_FIELD_NAMES = {
+    "LxPicoProc",
+    "LxPicoProcInfo",
+    "LxPicoProcInfoPID",
+    "LxPicoThrdInfo",
+    "LxPicoThrdInfoTID",
+}
+
+TYPED_KERNEL_STRUCT_OFFSET_FIELD_IDS = {
+    name: field_id for name, field_id in KNOWN_FIELD_IDS.items() if name not in LXCORE_FIELD_NAMES
 }
 
 # The generator historically emitted the concrete PDB member spelling
@@ -103,6 +196,17 @@ CALLBACK_FIELD_IDS = {
     **{alias: CALLBACK_STRUCT_OFFSET_FIELD_IDS[canonical] for alias, canonical in CALLBACK_NAME_ALIASES.items()},
 }
 
+GLOBAL_RVA_FIELD_IDS = {
+    **CALLBACK_GLOBAL_RVA_FIELD_IDS,
+    **KERNEL_GLOBAL_RVA_FIELD_IDS,
+}
+
+TYPED_STRUCT_OFFSET_FIELD_IDS = {
+    **TYPED_KERNEL_STRUCT_OFFSET_FIELD_IDS,
+    **CALLBACK_STRUCT_OFFSET_FIELD_IDS,
+    **{alias: CALLBACK_STRUCT_OFFSET_FIELD_IDS[canonical] for alias, canonical in CALLBACK_NAME_ALIASES.items()},
+}
+
 CALLBACK_KIND_BY_NAME = {
     **{name: CALLBACK_ITEM_KIND_GLOBAL_RVA for name in CALLBACK_GLOBAL_RVA_FIELD_IDS},
     **{name: CALLBACK_ITEM_KIND_STRUCT_OFFSET for name in CALLBACK_STRUCT_OFFSET_FIELD_IDS},
@@ -115,51 +219,7 @@ CALLBACK_CANONICAL_NAME_BY_NAME = {
     **CALLBACK_NAME_ALIASES,
 }
 
-KNOWN_FIELD_NAMES = {
-    "EpObjectTable",
-    "EpSectionObject",
-    "HtHandleContentionEvent",
-    "OtName",
-    "OtIndex",
-    "ObDecodeShift",
-    "ObAttributesShift",
-    "KtInitialStack",
-    "KtStackLimit",
-    "KtStackBase",
-    "KtKernelStack",
-    "KtReadOperationCount",
-    "KtWriteOperationCount",
-    "KtOtherOperationCount",
-    "KtReadTransferCount",
-    "KtWriteTransferCount",
-    "KtOtherTransferCount",
-    "MmSectionControlArea",
-    "MmControlAreaListHead",
-    "MmControlAreaLock",
-    "AlpcCommunicationInfo",
-    "AlpcOwnerProcess",
-    "AlpcConnectionPort",
-    "AlpcServerCommunicationPort",
-    "AlpcClientCommunicationPort",
-    "AlpcHandleTable",
-    "AlpcHandleTableLock",
-    "AlpcAttributes",
-    "AlpcAttributesFlags",
-    "AlpcPortContext",
-    "AlpcPortObjectLock",
-    "AlpcSequenceNo",
-    "AlpcState",
-    "LxPicoProc",
-    "LxPicoProcInfo",
-    "LxPicoProcInfoPID",
-    "LxPicoThrdInfo",
-    "LxPicoThrdInfoTID",
-    "EpProtection",
-    "EpSignatureLevel",
-    "EpSectionSignatureLevel",
-    "EgeGuid",
-    "EreGuidEntry",
-}
+KNOWN_FIELD_NAMES = set(KNOWN_FIELD_IDS)
 
 
 @dataclass(frozen=True)
@@ -193,6 +253,9 @@ class ProfileRecord:
     - identity: R0-safe identity tuple.
     - field_count: Number of accepted fields.
     - callback_items: Validated callback v2 items normalized for pack output.
+    - typed_items: Validated v3 typed items normalized for pack output.
+    - missing_fields/missing_globals/coverage_percent: Coverage report values
+      propagated from the generator or computed from the accepted payload.
 
     Processing:
     - The record keeps enough metadata for deduplication, pack generation, and
@@ -207,6 +270,10 @@ class ProfileRecord:
     identity: ProfileIdentity
     field_count: int
     callback_items: list[dict[str, Any]] = field(default_factory=list)
+    typed_items: list[dict[str, Any]] = field(default_factory=list)
+    missing_fields: list[str] = field(default_factory=list)
+    missing_globals: list[str] = field(default_factory=list)
+    coverage_percent: float = 0.0
 
     @property
     def profile_name(self) -> str:
@@ -260,7 +327,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=KSW_DEFAULT_PACK_VERSION,
         help=(
             "Compact pack format version to emit when --emit-pack/--pack-only is used; "
-            "1 keeps legacy fields-only output, 2 adds callbackItems. Default: 1."
+            "1 keeps legacy fields-only output, 2 adds callbackItems, 3 adds typed items. Default: 1."
         ),
     )
     parser.add_argument(
@@ -302,6 +369,63 @@ def parse_uint32(value: Any) -> int | None:
     if parsed < 0 or parsed > 0xFFFFFFFF:
         return None
     return parsed
+
+
+def parse_float_percent(value: Any) -> float | None:
+    """Parse a JSON value into a bounded percentage.
+
+    Inputs:
+    - value: JSON number or decimal string from profile coverage metadata.
+
+    Processing:
+    - Accepts values in the inclusive 0.0 to 100.0 range.
+    - Rejects booleans and malformed strings so report data remains numeric.
+
+    Return behavior:
+    - Returns a float on success; returns None when the value is absent or
+      invalid.
+    """
+    try:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            parsed = float(value)
+        elif isinstance(value, str):
+            parsed = float(value.strip())
+        else:
+            return None
+    except ValueError:
+        return None
+    if parsed < 0.0 or parsed > 100.0:
+        return None
+    return parsed
+
+
+def normalize_string_list(value: Any) -> list[str]:
+    """Normalize an optional JSON string array for coverage reporting.
+
+    Inputs:
+    - value: Candidate JSON array, usually missingFields or missingGlobals.
+
+    Processing:
+    - Keeps only non-empty string entries after trimming whitespace.
+    - Ignores malformed entries instead of rejecting the profile because
+      coverage reporting should not block publishable offsets.
+
+    Return behavior:
+    - Returns a list of normalized strings; returns an empty list for invalid
+      or absent input.
+    """
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            result.append(text)
+    return result
 
 
 def require_uint32(value: Any, context: str) -> int:
@@ -363,6 +487,34 @@ def normalize_callback_item_name(name: str) -> str | None:
     if name not in CALLBACK_FIELD_IDS:
         return None
     return CALLBACK_CANONICAL_NAME_BY_NAME[name]
+
+
+def normalize_typed_item_name(name: str, kind: str) -> tuple[str, int] | None:
+    """Normalize a v3 typed item name and return its shared field ID.
+
+    Inputs:
+    - name: JSON items[].name value after whitespace trimming.
+    - kind: JSON items[].kind value, either StructOffset or GlobalRva.
+
+    Processing:
+    - Routes GlobalRva names through callback and kernel-global maps.
+    - Routes StructOffset names through known kernel fields plus callback
+      structure offsets, accepting the historical EntryItemList alias.
+
+    Return behavior:
+    - Returns (canonicalName, fieldId) when name/kind are valid; returns None
+      when the item is unsupported.
+    """
+    if kind == CALLBACK_ITEM_KIND_GLOBAL_RVA:
+        field_id = GLOBAL_RVA_FIELD_IDS.get(name)
+        return (name, field_id) if field_id is not None else None
+    if kind == CALLBACK_ITEM_KIND_STRUCT_OFFSET:
+        canonical_name = CALLBACK_NAME_ALIASES.get(name, name)
+        if canonical_name in CALLBACK_STRUCT_OFFSET_FIELD_IDS:
+            return canonical_name, CALLBACK_STRUCT_OFFSET_FIELD_IDS[canonical_name]
+        field_id = TYPED_STRUCT_OFFSET_FIELD_IDS.get(name)
+        return (name, field_id) if field_id is not None else None
+    return None
 
 
 def validate_callback_items(path: Path, data: dict[str, Any], state: ValidationState) -> list[dict[str, Any]] | None:
@@ -459,6 +611,107 @@ def validate_callback_items(path: Path, data: dict[str, Any], state: ValidationS
     return normalized_items
 
 
+def typed_items_from_data(data: dict[str, Any]) -> Any:
+    """Return the preferred v3 typed item array from one profile root.
+
+    Inputs:
+    - data: Parsed profile dictionary.
+
+    Processing:
+    - Accepts both items and typedItems so the release tool can read the compact
+      pack spelling and the scattered-profile spelling.
+    - Prefers items when both are present because it is the v3 pack key.
+
+    Return behavior:
+    - Returns the raw JSON value for downstream validation.
+    """
+    items_value = data.get("items")
+    if isinstance(items_value, list) and items_value:
+        return items_value
+    typed_items_value = data.get("typedItems")
+    if isinstance(typed_items_value, list):
+        return typed_items_value
+    return items_value if "items" in data else typed_items_value
+
+
+def validate_typed_items(path: Path, data: dict[str, Any], state: ValidationState) -> list[dict[str, Any]] | None:
+    """Validate optional v3 typed items and return normalized pack records.
+
+    Inputs:
+    - path: Source JSON profile path used in diagnostics.
+    - data: Parsed profile root dictionary.
+    - state: Validation accumulator used for precise rejection reasons.
+
+    Processing:
+    - Treats a missing items/typedItems key as an empty typed set.
+    - Requires every present item to contain a supported name, StructOffset or
+      GlobalRva kind, and safe uint32 value.
+    - Enforces duplicate detection by shared field ID so aliases cannot target
+      the same R0 item twice.
+
+    Return behavior:
+    - Returns normalized objects with name/kind/value and optional required flag
+      when validation succeeds.
+    - Returns None and records a rejection when validation fails.
+    """
+    raw_items = typed_items_from_data(data)
+    if raw_items is None:
+        return []
+    if not isinstance(raw_items, list):
+        reject(state, path, "typed_items_not_array")
+        return None
+
+    normalized_items: list[dict[str, Any]] = []
+    seen_field_ids: set[int] = set()
+    for index, item in enumerate(raw_items):
+        context = f"typedItems[{index}]"
+        if not isinstance(item, dict):
+            reject(state, path, f"typed_item_not_object:{context}")
+            return None
+
+        raw_kind = item.get("kind")
+        if not isinstance(raw_kind, str):
+            reject(state, path, f"typed_kind_invalid:{context}")
+            return None
+        kind = raw_kind.strip()
+        if kind not in CALLBACK_ITEM_KINDS:
+            reject(state, path, f"typed_kind_unsupported:{context}:{kind}")
+            return None
+
+        raw_name = item.get("name")
+        if not isinstance(raw_name, str):
+            reject(state, path, f"typed_name_invalid:{context}")
+            return None
+        name = raw_name.strip()
+        normalized_name = normalize_typed_item_name(name, kind)
+        if normalized_name is None:
+            reject(state, path, f"typed_name_unknown:{name}:{kind}")
+            return None
+        canonical_name, field_id = normalized_name
+
+        value = parse_uint32(item.get("value"))
+        if value is None:
+            reject(state, path, f"typed_value_invalid:{canonical_name}")
+            return None
+        if kind == CALLBACK_ITEM_KIND_GLOBAL_RVA and (value == 0 or value > KSW_DYN_PROFILE_GLOBAL_RVA_MAX):
+            reject(state, path, f"typed_global_rva_out_of_range:{canonical_name}")
+            return None
+        if kind == CALLBACK_ITEM_KIND_STRUCT_OFFSET and (value == 0xFFFFFFFF or value > KSW_DYN_PROFILE_OFFSET_MAX):
+            reject(state, path, f"typed_struct_offset_invalid:{canonical_name}")
+            return None
+        if field_id in seen_field_ids:
+            reject(state, path, f"typed_duplicate:{canonical_name}")
+            return None
+        seen_field_ids.add(field_id)
+
+        normalized_item: dict[str, Any] = {"name": canonical_name, "kind": kind, "value": value}
+        if isinstance(item.get("required"), bool):
+            normalized_item["required"] = bool(item.get("required"))
+        normalized_items.append(normalized_item)
+
+    return normalized_items
+
+
 def reject(state: ValidationState, path: Path, reason: str) -> None:
     """Append one rejection record to the validation state.
 
@@ -504,12 +757,12 @@ def validate_profile(path: Path, state: ValidationState) -> ProfileRecord | None
         return None
 
     module = data.get("module")
-    fields = data.get("fields")
+    fields = data.get("fields", {})
     if not isinstance(module, dict):
         reject(state, path, "module_not_object")
         return None
-    if not isinstance(fields, dict) or not fields:
-        reject(state, path, "fields_empty_or_not_object")
+    if not isinstance(fields, dict):
+        reject(state, path, "fields_not_object")
         return None
 
     module_class = str(module.get("class", "")).strip().lower()
@@ -536,9 +789,34 @@ def validate_profile(path: Path, state: ValidationState) -> ProfileRecord | None
     callback_items = validate_callback_items(path, data, state)
     if callback_items is None:
         return None
+    typed_items = validate_typed_items(path, data, state)
+    if typed_items is None:
+        return None
+    if not fields and not typed_items:
+        reject(state, path, "fields_and_typed_items_empty")
+        return None
+
+    missing_fields = normalize_string_list(data.get("missingFields"))
+    missing_globals = normalize_string_list(data.get("missingGlobals"))
+    coverage_percent = parse_float_percent(data.get("coveragePercent"))
+    if coverage_percent is None:
+        resolved_count = len(typed_items) if typed_items else (len(fields) + len(callback_items))
+        missing_count = len(missing_fields) + len(missing_globals)
+        total_count = resolved_count + missing_count
+        coverage_percent = 0.0 if total_count == 0 else round((resolved_count / total_count) * 100.0, 1)
 
     identity = ProfileIdentity(module_class, machine, time_date_stamp, size_of_image)
-    return ProfileRecord(path=path, data=data, identity=identity, field_count=len(fields), callback_items=callback_items)
+    return ProfileRecord(
+        path=path,
+        data=data,
+        identity=identity,
+        field_count=len(fields),
+        callback_items=callback_items,
+        typed_items=typed_items,
+        missing_fields=missing_fields,
+        missing_globals=missing_globals,
+        coverage_percent=coverage_percent,
+    )
 
 
 def choose_duplicate_winner(records: list[ProfileRecord]) -> ProfileRecord:
@@ -556,7 +834,17 @@ def choose_duplicate_winner(records: list[ProfileRecord]) -> ProfileRecord:
     Return behavior:
     - Returns the selected ProfileRecord; does not mutate input records.
     """
-    return sorted(records, key=lambda item: (-item.field_count, -len(item.callback_items), item.profile_name, str(item.path)))[0]
+    return sorted(
+        records,
+        key=lambda item: (
+            -item.field_count,
+            -len(item.typed_items),
+            -len(item.callback_items),
+            -item.coverage_percent,
+            item.profile_name,
+            str(item.path),
+        ),
+    )[0]
 
 
 def deduplicate_profiles(state: ValidationState) -> list[ProfileRecord]:
@@ -635,6 +923,37 @@ def build_pack_field_dictionary(records: list[ProfileRecord]) -> tuple[list[str]
     return field_names, field_index
 
 
+def build_pack_typed_items(record: ProfileRecord, pack_version: int) -> list[dict[str, Any]]:
+    """Build pack typed items for one profile record.
+
+    Inputs:
+    - record: Validated profile record.
+    - pack_version: Selected compact pack schema version.
+
+    Processing:
+    - Reuses prevalidated typed_items when the source profile already provided
+      them.
+    - Falls back to legacy fields plus callbackItems when a typed v3 payload was
+      not present in the source JSON.
+
+    Return behavior:
+    - Returns a JSON-ready typed item list.
+    """
+    if pack_version != KSW_PACK_VERSION_V3:
+        return []
+    if record.typed_items:
+        return [dict(item) for item in record.typed_items]
+
+    typed_items: list[dict[str, Any]] = []
+    for field_name, offset_value in sorted(record.data.get("fields", {}).items()):
+        if field_name not in TYPED_KERNEL_STRUCT_OFFSET_FIELD_IDS:
+            continue
+        typed_items.append({"name": field_name, "kind": CALLBACK_ITEM_KIND_STRUCT_OFFSET, "value": require_uint32(offset_value, f"{record.path}:{field_name}")})
+    for item in record.callback_items:
+        typed_items.append(dict(item))
+    return typed_items
+
+
 def build_pack_profile_entry(record: ProfileRecord, field_index: dict[str, int], pack_version: int) -> dict[str, Any]:
     """Convert one validated profile record into a compact pack entry.
 
@@ -661,8 +980,8 @@ def build_pack_profile_entry(record: ProfileRecord, field_index: dict[str, int],
     if module_class is None:
         raise ValueError(f"unsupported module class for {record.path}")
 
-    fields = record.data.get("fields")
-    if not isinstance(fields, dict) or not fields:
+    fields = record.data.get("fields", {})
+    if not isinstance(fields, dict) or (not fields and pack_version != KSW_PACK_VERSION_V3):
         raise ValueError(f"invalid field set for {record.path}")
 
     packed_fields: list[list[int]] = []
@@ -684,6 +1003,11 @@ def build_pack_profile_entry(record: ProfileRecord, field_index: dict[str, int],
     }
     if pack_version == KSW_PACK_VERSION_V2:
         profile_entry["callbackItems"] = record.callback_items
+    elif pack_version == KSW_PACK_VERSION_V3:
+        profile_entry["items"] = build_pack_typed_items(record, pack_version)
+        profile_entry["coveragePercent"] = record.coverage_percent
+        profile_entry["missingFields"] = record.missing_fields
+        profile_entry["missingGlobals"] = record.missing_globals
     return profile_entry
 
 
@@ -850,9 +1174,11 @@ def build_manifest(
     class_counts: dict[str, int] = {}
     local_match: dict[str, Any] | None = None
     callback_item_count = 0
+    typed_item_count = 0
     for record in records:
         class_counts[record.identity.module_class] = class_counts.get(record.identity.module_class, 0) + 1
         callback_item_count += len(record.callback_items)
+        typed_item_count += len(record.typed_items)
         if local_identity is not None and record.identity == local_identity:
             local_match = {"profile": str(record.path), "profileName": record.profile_name}
 
@@ -862,6 +1188,7 @@ def build_manifest(
         pack_profiles = pack.get("profiles", [])
         pack_fields = pack.get("fieldDictionary", [])
         pack_callback_item_count = 0
+        pack_typed_item_count = 0
         if isinstance(pack_profiles, list):
             for profile in pack_profiles:
                 if not isinstance(profile, dict):
@@ -869,6 +1196,9 @@ def build_manifest(
                 callback_items = profile.get("callbackItems", [])
                 if isinstance(callback_items, list):
                     pack_callback_item_count += len(callback_items)
+                typed_items = profile.get("items", [])
+                if isinstance(typed_items, list):
+                    pack_typed_item_count += len(typed_items)
         manifest_pack_version = parse_uint32(pack.get("packVersion")) or KSW_DEFAULT_PACK_VERSION
         pack_summary = {
             "path": str(pack_path) if pack_path is not None else None,
@@ -877,6 +1207,7 @@ def build_manifest(
             "profileCount": len(pack_profiles) if isinstance(pack_profiles, list) else 0,
             "fieldDictionaryCount": len(pack_fields) if isinstance(pack_fields, list) else 0,
             "callbackItemCount": pack_callback_item_count,
+            "typedItemCount": pack_typed_item_count,
         }
 
     manifest = {
@@ -887,6 +1218,7 @@ def build_manifest(
         "acceptedBeforeDedup": len(state.accepted),
         "publishedProfiles": len(records),
         "callbackItemCount": callback_item_count,
+        "typedItemCount": typed_item_count,
         "copiedProfiles": len(copied),
         "removedScatteredProfiles": removed_scattered_profiles,
         "rejectedProfiles": len(state.rejected),
@@ -906,6 +1238,10 @@ def build_manifest(
                 "identity": record.identity.__dict__,
                 "fieldCount": record.field_count,
                 "callbackItemCount": len(record.callback_items),
+                "typedItemCount": len(record.typed_items),
+                "missingFields": record.missing_fields,
+                "missingGlobals": record.missing_globals,
+                "coveragePercent": record.coverage_percent,
             }
             for record in records
         ]
@@ -1011,6 +1347,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"acceptedBeforeDedup={len(state.accepted)}")
     print(f"publishedProfiles={len(final_records)}")
     print(f"callbackItems={report_manifest['callbackItemCount']}")
+    print(f"typedItems={report_manifest['typedItemCount']}")
     print(f"rejectedProfiles={len(state.rejected)}")
     print(f"duplicateGroups={len(state.duplicate_groups)}")
     print(f"copiedProfiles={len(copied)}")

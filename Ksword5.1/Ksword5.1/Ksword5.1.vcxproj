@@ -138,6 +138,7 @@
     <ClCompile Include="DriverDock\DriverDock.Operation.cpp" />
     <ClCompile Include="DriverDock\DriverDock.DebugAndUtils.cpp" />
     <ClCompile Include="DriverDock\DriverDock.Evidence.cpp" />
+    <ClCompile Include="DriverDock\DriverDock.Integrity.cpp" />
     <ClCompile Include="FileDock\FileDock.cpp" />
     <ClCompile Include="FileDock\FileDock.HandleUsage.cpp" />
     <ClCompile Include="FileDock\FileHandleUsageScanner.cpp" />
@@ -194,6 +195,7 @@
     <ClCompile Include="MemoryDock\MemoryDock.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.DriverMemoryRw.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.KernelExecutableMemory.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDock.KernelMemoryEvidence.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.UiBuild.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.UiWireAndStatus.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.ProcessRegion.cpp" />
@@ -213,6 +215,7 @@
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Export.cpp" />
     <ClCompile Include="MonitorDock\ProcessTraceMonitorWidget.Runtime.cpp" />
     <ClCompile Include="MonitorDock\ProcessTraceTimelineWidget.cpp" />
+    <ClCompile Include="MonitorDock\MonitorDock.ArkRiskCenter.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.UiBuild.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.UiConnections.cpp" />
@@ -241,6 +244,7 @@
     <ClCompile Include="ProcessDock\ProcessDetailWindow.ActionAndUtil.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.AdvancedInfo.cpp" />
     <ClCompile Include="ProcessDock\ProcessDock.cpp" />
+    <ClCompile Include="ProcessDock\ProcessDock.CrossView.cpp" />
     <ClCompile Include="ProcessDock\ProcessDock.ThreadTab.cpp" />
     <ClCompile Include="ProcessDock\ThreadStackWindow.cpp" />
     <ClCompile Include="ProcessDock\Process_Tool.cpp" />
@@ -317,6 +321,7 @@
     <ClCompile Include="ArkDriverClient\ArkDriverKernel.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverKeyboard.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverCallback.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverMutation.cpp" />
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="MainWindow.h" />
