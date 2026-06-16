@@ -96,6 +96,180 @@ namespace
     // - 文件落在 exe 同级 config 目录，便于发行包独立携带配置。
     constexpr const char* kDockLayoutConfigFileName = "ksword_ads_layout.bin";
 
+    // Windows ZBID 常量：
+    // - ZBID_DEFAULT：普通桌面窗口 band；
+    // - ZBID_UIACCESS：UIAccess 令牌可尝试使用的辅助功能 band；
+    // - 这里动态调用 SetWindowBand，避免旧系统/受限系统没有导出时直接链接失败。
+    constexpr DWORD kWindowBandDefault = 0;
+    constexpr DWORD kWindowBandUiAccess = 2;
+
+    using SetWindowBandFunction = BOOL(WINAPI*)(HWND, HWND, DWORD);
+
+    // resolveSetWindowBandFunction 作用：
+    // - 从 user32.dll 动态解析 SetWindowBand；
+    // - 该 API 不参与静态链接，失败时顶多退回 HWND_TOPMOST。
+    // 返回：函数指针；不可用时返回 nullptr。
+    SetWindowBandFunction resolveSetWindowBandFunction()
+    {
+        HMODULE user32ModuleHandle = ::GetModuleHandleW(L"user32.dll");
+        if (user32ModuleHandle == nullptr)
+        {
+            user32ModuleHandle = ::LoadLibraryW(L"user32.dll");
+        }
+        if (user32ModuleHandle == nullptr)
+        {
+            return nullptr;
+        }
+
+        return reinterpret_cast<SetWindowBandFunction>(
+            ::GetProcAddress(user32ModuleHandle, "SetWindowBand"));
+    }
+
+    // isCurrentProcessUiAccessTokenEnabled 作用：
+    // - 查询当前进程令牌是否已经启用 TokenUIAccess；
+    // - 只有带 UIAccess 时才尝试 UIAccess band，避免普通权限无意义调用。
+    // 返回：true=当前实例已带 UIAccess；false=普通令牌或查询失败。
+    bool isCurrentProcessUiAccessTokenEnabled()
+    {
+        HANDLE tokenHandle = nullptr;
+        if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &tokenHandle) == FALSE)
+        {
+            return false;
+        }
+
+        DWORD uiAccessValue = 0;
+        DWORD returnedLength = 0;
+        const BOOL queryOk = ::GetTokenInformation(
+            tokenHandle,
+            TokenUIAccess,
+            &uiAccessValue,
+            sizeof(uiAccessValue),
+            &returnedLength);
+        ::CloseHandle(tokenHandle);
+        return queryOk != FALSE && uiAccessValue != 0;
+    }
+
+    // tryApplyUiAccessWindowBand 作用：
+    // - 当当前进程已经带 UIAccess 位时，尝试把窗口放入 UIAccess band；
+    // - 取消置顶时尝试恢复 DEFAULT band；
+    // - 这是 best-effort：系统策略拒绝时仍保留 HWND_TOPMOST/NOTOPMOST 主路径。
+    // 入参 windowHandle：主窗口 HWND；
+    // 入参 pinnedState：true=尝试 UIAccess+TopMost，false=尝试恢复默认 band。
+    // 返回：true=成功切换 band；false=未启用 UIAccess、API 不可用或系统拒绝。
+    bool tryApplyUiAccessWindowBand(const HWND windowHandle, const bool pinnedState)
+    {
+        if (windowHandle == nullptr || ::IsWindow(windowHandle) == FALSE)
+        {
+            return false;
+        }
+
+        const SetWindowBandFunction setWindowBand = resolveSetWindowBandFunction();
+        if (setWindowBand == nullptr)
+        {
+            return false;
+        }
+
+        if (pinnedState && !isCurrentProcessUiAccessTokenEnabled())
+        {
+            return false;
+        }
+
+        // targetBand 用途：置顶时尝试 UIAccess band，取消置顶时回落普通 DEFAULT band。
+        const DWORD targetBand = pinnedState ? kWindowBandUiAccess : kWindowBandDefault;
+        // insertAfterHandle 用途：UIAccess band 内仍要求尽量排到最前；恢复默认时取消置顶。
+        const HWND insertAfterHandle = pinnedState ? HWND_TOPMOST : HWND_NOTOPMOST;
+        return setWindowBand(windowHandle, insertAfterHandle, targetBand) != FALSE;
+    }
+
+    // applyHighestPermittedTopMostLevel 作用：
+    // - 在当前进程权限允许范围内把主窗口提升到最高可达置顶层级；
+    // - UIAccess 令牌优先尝试 UIAccess band + HWND_TOPMOST，普通令牌退回 HWND_TOPMOST；
+    // - 额外尝试 BringWindowToTop/SetForegroundWindow，把同层级排序尽量推到最前；
+    // - 前台权限可能被系统策略拒绝，拒绝时不影响 HWND_TOPMOST 结果。
+    // 调用方式：MainWindow::setPinnedWindowState 内部调用。
+    // 入参 windowHandle：主窗口 HWND；
+    // 入参 pinnedState：true=置顶并尽量提升到顶层，false=取消置顶；
+    // 入参 errorCodeOut：SetWindowPos 失败时输出 GetLastError。
+    // 入参 uiAccessBandAppliedOut：可选输出是否成功应用 UIAccess band。
+    // 返回：true=核心置顶/取消置顶成功，false=SetWindowPos 失败。
+    bool applyHighestPermittedTopMostLevel(
+        const HWND windowHandle,
+        const bool pinnedState,
+        DWORD* errorCodeOut,
+        bool* uiAccessBandAppliedOut)
+    {
+        if (errorCodeOut != nullptr)
+        {
+            *errorCodeOut = ERROR_SUCCESS;
+        }
+        if (uiAccessBandAppliedOut != nullptr)
+        {
+            *uiAccessBandAppliedOut = false;
+        }
+
+        if (windowHandle == nullptr || ::IsWindow(windowHandle) == FALSE)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ERROR_INVALID_WINDOW_HANDLE;
+            }
+            return false;
+        }
+
+        // UIAccess band 用途：若当前实例已带 UIAccess，先尝试更高的辅助功能窗口 band。
+        // 失败不作为核心错误，因为普通 HWND_TOPMOST 仍是公开稳定兜底路径。
+        const bool uiAccessBandApplied = tryApplyUiAccessWindowBand(windowHandle, pinnedState);
+        if (uiAccessBandAppliedOut != nullptr)
+        {
+            *uiAccessBandAppliedOut = uiAccessBandApplied;
+        }
+
+        // insertAfterHandle 用途：选择 Win32 公开 z-order 中当前权限可操作的最高置顶层级。
+        const HWND insertAfterHandle = pinnedState ? HWND_TOPMOST : HWND_NOTOPMOST;
+        // setWindowPositionFlags 用途：置顶时允许系统激活/显示窗口，取消置顶时避免抢焦点。
+        const UINT setWindowPositionFlags = pinnedState
+            ? (SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+            : (SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+        const BOOL setTopMostResult = ::SetWindowPos(
+            windowHandle,
+            insertAfterHandle,
+            0,
+            0,
+            0,
+            0,
+            setWindowPositionFlags);
+        if (setTopMostResult == FALSE)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            return false;
+        }
+
+        if (pinnedState)
+        {
+            if (uiAccessBandApplied)
+            {
+                // UIAccess band 成功后再补一次 TOPMOST 排序，确保 band 内也尽量靠前。
+                ::SetWindowPos(
+                    windowHandle,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            }
+
+            // 当前权限若允许前台切换，则把窗口移动到同层级最前；失败不回滚置顶状态。
+            ::BringWindowToTop(windowHandle);
+            ::SetForegroundWindow(windowHandle);
+        }
+        return true;
+    }
+
     // GlobalContextMenuThemeFilter 作用：
     // - 在应用层拦截所有 QMenu 的显示/样式变化事件；
     // - 对“未显式设置样式”的菜单自动套用统一主题样式，避免遗漏单点 setStyleSheet。
@@ -2918,20 +3092,18 @@ void MainWindow::setPinnedWindowState(const bool pinnedState, const bool emitLog
         return;
     }
 
-    const BOOL setTopMostResult = ::SetWindowPos(
+    DWORD errorCode = ERROR_SUCCESS;
+    bool uiAccessBandApplied = false;
+    const bool setTopMostResult = applyHighestPermittedTopMostLevel(
         mainWindowHandle,
-        pinnedState ? HWND_TOPMOST : HWND_NOTOPMOST,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    if (setTopMostResult == FALSE)
+        pinnedState,
+        &errorCode,
+        &uiAccessBandApplied);
+    if (!setTopMostResult)
     {
-        const DWORD errorCode = ::GetLastError();
         kLogEvent failedEvent;
         err << failedEvent
-            << "[MainWindow] 置顶切换失败, targetPinned="
+            << "[MainWindow] 最高级置顶切换失败, targetPinned="
             << (pinnedState ? "true" : "false")
             << ", errorCode="
             << errorCode
@@ -2953,8 +3125,10 @@ void MainWindow::setPinnedWindowState(const bool pinnedState, const bool emitLog
     {
         kLogEvent pinEvent;
         info << pinEvent
-            << "[MainWindow] 置顶状态已切换, pinned="
+            << "[MainWindow] 置顶状态已切换到当前权限允许的最高层级, pinned="
             << (m_windowPinned ? "true" : "false")
+            << ", uiAccessBand="
+            << (uiAccessBandApplied ? "true" : "false")
             << eol;
     }
 }
@@ -2962,6 +3136,36 @@ void MainWindow::setPinnedWindowState(const bool pinnedState, const bool emitLog
 void MainWindow::togglePinnedWindowState()
 {
     setPinnedWindowState(!m_windowPinned, true);
+    persistPinnedWindowPreference();
+}
+
+void MainWindow::persistPinnedWindowPreference()
+{
+    // pinnedSettings 作用：复制当前外观设置并只更新置顶启动偏好，避免覆盖其它设置项。
+    ks::settings::AppearanceSettings pinnedSettings = m_currentAppearanceSettings;
+    if (pinnedSettings.startupTopMostEnabled == m_windowPinned)
+    {
+        return;
+    }
+
+    pinnedSettings.startupTopMostEnabled = m_windowPinned;
+    QString saveErrorText;
+    if (!ks::settings::saveAppearanceSettings(pinnedSettings, &saveErrorText))
+    {
+        kLogEvent pinPersistFailedEvent;
+        err << pinPersistFailedEvent
+            << "[MainWindow] 保存窗口置顶偏好失败，错误="
+            << saveErrorText.toStdString()
+            << eol;
+        return;
+    }
+
+    m_currentAppearanceSettings = pinnedSettings;
+    kLogEvent pinPersistEvent;
+    info << pinPersistEvent
+        << "[MainWindow] 已保存窗口置顶启动偏好, startupTopMost="
+        << (m_currentAppearanceSettings.startupTopMostEnabled ? "true" : "false")
+        << eol;
 }
 
 void MainWindow::setCaptureProtectionState(const bool protectedState, const bool emitLog)
@@ -6460,6 +6664,9 @@ void MainWindow::applyAppearanceSettings(
     kLogEvent appearanceApplyEvent;
 
     m_currentAppearanceSettings = settings;
+
+    // startupTopMostEnabled 作用：设置页和启动配置统一控制主窗口最高级置顶。
+    setPinnedWindowState(m_currentAppearanceSettings.startupTopMostEnabled, false);
 
     const bool darkModeEnabled = isDarkModeEffective(settings);
     KswordTheme::SetDarkModeEnabled(darkModeEnabled);
