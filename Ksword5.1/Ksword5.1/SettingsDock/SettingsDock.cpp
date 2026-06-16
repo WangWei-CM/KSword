@@ -260,6 +260,12 @@ void SettingsDock::initializeAppearanceTab()
     m_startupMaximizedCheckBox->setToolTip(QStringLiteral("下次启动主窗口时直接以最大化状态显示"));
     startupLayout->addWidget(m_startupMaximizedCheckBox);
 
+    // m_startupTopMostCheckBox 作用：控制“启动后是否自动设置 HWND_TOPMOST 最高级置顶”。
+    m_startupTopMostCheckBox = new QCheckBox(QStringLiteral("启动后默认最高级置顶"), startupGroupBox);
+    m_startupTopMostCheckBox->setToolTip(
+        QStringLiteral("开启后程序启动会自动置顶；带 UIAccess 时会尝试 UIAccess+TopMost，右上角图钉可手动切换并保存偏好"));
+    startupLayout->addWidget(m_startupTopMostCheckBox);
+
     // m_startupAutoAdminCheckBox 作用：控制“启动图出现前是否先尝试 UAC 提权”。
     m_startupAutoAdminCheckBox = new QCheckBox(QStringLiteral("启动时自动请求管理员权限"), startupGroupBox);
     m_startupAutoAdminCheckBox->setToolTip(
@@ -352,6 +358,10 @@ void SettingsDock::bindAppearanceSignals()
         markPendingChanges(QStringLiteral("启动时最大化开关切换"));
         });
 
+    connect(m_startupTopMostCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
+        markPendingChanges(QStringLiteral("启动后默认最高级置顶开关切换"));
+        });
+
     connect(m_startupAutoAdminCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
         markPendingChanges(QStringLiteral("启动时自动请求管理员权限开关切换"));
         });
@@ -433,6 +443,11 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
         m_startupMaximizedCheckBox->setChecked(settings.launchMaximizedOnStartup);
     }
 
+    if (m_startupTopMostCheckBox != nullptr)
+    {
+        m_startupTopMostCheckBox->setChecked(settings.startupTopMostEnabled);
+    }
+
     if (m_startupAutoAdminCheckBox != nullptr)
     {
         m_startupAutoAdminCheckBox->setChecked(settings.autoRequestAdminOnStartup);
@@ -511,6 +526,8 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
     }
     collectedSettings.launchMaximizedOnStartup =
         (m_startupMaximizedCheckBox != nullptr) && m_startupMaximizedCheckBox->isChecked();
+    collectedSettings.startupTopMostEnabled =
+        (m_startupTopMostCheckBox != nullptr) && m_startupTopMostCheckBox->isChecked();
     collectedSettings.autoRequestAdminOnStartup =
         (m_startupAutoAdminCheckBox != nullptr) && m_startupAutoAdminCheckBox->isChecked();
     collectedSettings.startupWindowScaleFactor = parseWindowScaleFactorFromUi();
@@ -573,6 +590,7 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         && nextSettings.backgroundOpacityPercent == m_currentAppearanceSettings.backgroundOpacityPercent
         && nextSettings.startupDefaultTabKey == m_currentAppearanceSettings.startupDefaultTabKey
         && nextSettings.launchMaximizedOnStartup == m_currentAppearanceSettings.launchMaximizedOnStartup
+        && nextSettings.startupTopMostEnabled == m_currentAppearanceSettings.startupTopMostEnabled
         && nextSettings.autoRequestAdminOnStartup == m_currentAppearanceSettings.autoRequestAdminOnStartup
         && sameScaleFactor
         && nextSettings.startupScaleRecommendPromptDisabled == m_currentAppearanceSettings.startupScaleRecommendPromptDisabled
@@ -624,6 +642,8 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         << m_currentAppearanceSettings.startupDefaultTabKey.toStdString()
         << "，启动时最大化="
         << (m_currentAppearanceSettings.launchMaximizedOnStartup ? "true" : "false")
+        << "，启动后默认最高级置顶="
+        << (m_currentAppearanceSettings.startupTopMostEnabled ? "true" : "false")
         << "，启动时自动请求管理员权限="
         << (m_currentAppearanceSettings.autoRequestAdminOnStartup ? "true" : "false")
         << "，启动窗口缩放因子="
