@@ -90,13 +90,17 @@
 #define KSWORD_ARK_KERNEL_SCAN_FLAG_INCLUDE_IMPORTS   0x00000010UL
 #define KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE            0x00000001UL
 // Driver unload flags。
-// - CLEAR_DISPATCH_ON_NO_UNLOAD：目标没有 DriverUnload 时清空 FastIo/MajorFunction。
-// - CLEAR_DISPATCH_AFTER_UNLOAD：DriverUnload 返回后仍清空 FastIo/MajorFunction。
+// - CLEAR_DISPATCH_ON_NO_UNLOAD：目标没有 DriverUnload 时把 MajorFunction 替换为拒绝 IRP stub，并清 FastIo。
+// - CLEAR_DISPATCH_AFTER_UNLOAD：DriverUnload 返回后把 MajorFunction 替换为拒绝 IRP stub，并清 FastIo。
 // - CLEAR_UNLOAD_POINTER：清空 DriverObject->DriverUnload，避免重复入口被误调用。
 // - DELETE_DEVICE_OBJECTS_ON_NO_UNLOAD：目标没有 DriverUnload 时尝试删除 DeviceObject 链。
+// - DELETE_DEVICE_OBJECTS_ALWAYS：最高风险实验强拆；即使 DriverUnload 返回也尝试删除 DeviceObject 链。
 // - MAKE_TEMPORARY_OBJECT：调用 ObMakeTemporaryObject，配合引用释放触发对象回收。
 // - TARGET_MODULE_BASE_PRESENT：请求携带模块基址，R0 先按 DriverObject->DriverStart 反查目标。
 // - REMOVE_CALLBACKS_BY_MODULE_BASE：请求携带模块基址时，先批量移除该模块登记的可移除回调。
+// - ALLOW_DESTRUCTIVE_CLEANUP：显式允许持久 DriverObject 改写和高危后处理。
+// 注意：CLEAR_* / DELETE_* / MAKE_TEMPORARY / REMOVE_CALLBACKS 均可能破坏目标驱动后续正常卸载；
+//      R0 会把缺少 ALLOW_DESTRUCTIVE_CLEANUP 的旧 FORCE_CLEANUP 请求降级为“仅调用 DriverUnload”。
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_ON_NO_UNLOAD      0x00000001UL
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_AFTER_UNLOAD      0x00000002UL
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_UNLOAD_POINTER             0x00000004UL
@@ -104,12 +108,12 @@
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_MAKE_TEMPORARY_OBJECT            0x00000010UL
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_TARGET_MODULE_BASE_PRESENT        0x00000020UL
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_REMOVE_CALLBACKS_BY_MODULE_BASE   0x00000040UL
+#define KSWORD_ARK_DRIVER_UNLOAD_FLAG_ALLOW_DESTRUCTIVE_CLEANUP         0x00000080UL
+#define KSWORD_ARK_DRIVER_UNLOAD_FLAG_DELETE_DEVICE_OBJECTS_ALWAYS      0x00000100UL
 #define KSWORD_ARK_DRIVER_UNLOAD_FLAG_FORCE_CLEANUP \
     (KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_ON_NO_UNLOAD | \
      KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_DISPATCH_AFTER_UNLOAD | \
-     KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_UNLOAD_POINTER | \
-     KSWORD_ARK_DRIVER_UNLOAD_FLAG_DELETE_DEVICE_OBJECTS_ON_NO_UNLOAD | \
-     KSWORD_ARK_DRIVER_UNLOAD_FLAG_MAKE_TEMPORARY_OBJECT)
+     KSWORD_ARK_DRIVER_UNLOAD_FLAG_CLEAR_UNLOAD_POINTER)
 
 // DriverObject 查询 flags。
 #define KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_MAJOR_FUNCTIONS 0x00000001UL
@@ -538,11 +542,11 @@ typedef struct _KSWORD_ARK_FORCE_UNLOAD_DRIVER_RESPONSE
     unsigned long version;
     unsigned long status;
     unsigned long flags;
-    unsigned long reserved;
+    unsigned long reserved; // requestedFlags：R3 原始请求 flags；R0 日志用于区分“未请求”和“preflight 降级”。
     long lastStatus;
     long waitStatus;
-    unsigned long reserved1;
-    unsigned long reserved2;
+    unsigned long cleanupFlagsApplied;
+    unsigned long deletedDeviceCount;
     unsigned long long driverObjectAddress;
     unsigned long long driverUnloadAddress;
     unsigned long callbackCandidates;

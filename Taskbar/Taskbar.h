@@ -34,6 +34,8 @@ private:
     SpectrumWidget* m_rightSpectrum;     // 右侧频谱组件
     TaskbarSharedState* m_sharedState;   // 多窗口共享的音频、CPU、网络采样状态
     QRect m_targetScreenGeometry;        // 当前窗口启动时绑定的目标显示器矩形
+    QString m_targetScreenName;          // Qt screen name used to match the corresponding Win32 monitor.
+    qreal m_targetDevicePixelRatio;      // Scale factor used when converting Qt DIP geometry to native pixels.
 
     QWidget* cpuBarContainer;            // CPU 柱状图容器
     QVector<QLabel*> cpuBars;            // CPU 每核心柱子集合
@@ -55,6 +57,21 @@ private:
     QPushButton* exitBtn;                // 退出按钮
 
     // AppBar 注册与系统消息处理。
+    // AppBar thickness helper: no input; converts logical window height to native pixels; returns pixel height.
+    int appBarThicknessInNativePixels() const;
+
+    // Target monitor helper: no input; resolves the Win32 monitor rectangle; returns native pixel geometry.
+    QRect targetScreenNativeGeometry() const;
+
+    // Target logical geometry helper: no input; resolves the Qt screen rectangle used for QWidget placement; returns logical coordinates.
+    QRect targetScreenLogicalGeometry() const;
+
+    // Spectrum minimum width helper: no input; adapts to logical screen width; returns a Qt DIP width.
+    int spectrumMinimumWidthForScreen() const;
+
+    // Spectrum maximum width helper: no input; caps elastic spectrum width; returns a Qt DIP width.
+    int spectrumMaximumWidthForScreen() const;
+
     void RegisterAsAppBar();
     void RemoveAppBar();
     bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;

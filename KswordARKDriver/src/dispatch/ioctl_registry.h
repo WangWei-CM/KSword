@@ -29,6 +29,8 @@ typedef struct _KSWORD_ARK_IOCTL_ENTRY
 } KSWORD_ARK_IOCTL_ENTRY;
 
 #define KSWORD_ARK_IOCTL_FLAG_NONE 0x00000000UL
+// 中文说明：查询型高频 IOCTL 可设置该位，dispatch 层仅在失败/拒绝时记录完成日志。
+#define KSWORD_ARK_IOCTL_FLAG_QUIET_SUCCESS 0x00000001UL
 #define KSWORD_ARK_IOCTL_CAPABILITY_NONE 0ULL
 
 _Must_inspect_result_

@@ -125,16 +125,19 @@ Return Value:
     }
 
     status = ioctlEntry->Handler(device, Request, InputBufferLength, OutputBufferLength, &completeBytes);
-    KswordARKDispatchLog(
-        device,
-        NT_SUCCESS(status) || status == STATUS_PENDING ? "Info" : "Warn",
-        "IOCTL complete: name=%s, code=0x%08X, status=0x%08X, in=%Iu, out=%Iu, bytes=%Iu.",
-        ioctlEntry->Name != NULL ? ioctlEntry->Name : "<unnamed>",
-        (unsigned int)ioctlEntry->IoControlCode,
-        (unsigned int)status,
-        InputBufferLength,
-        OutputBufferLength,
-        completeBytes);
+    if (!((ioctlEntry->Flags & KSWORD_ARK_IOCTL_FLAG_QUIET_SUCCESS) != 0UL &&
+        (NT_SUCCESS(status) || status == STATUS_PENDING))) {
+        KswordARKDispatchLog(
+            device,
+            NT_SUCCESS(status) || status == STATUS_PENDING ? "Info" : "Warn",
+            "IOCTL complete: name=%s, code=0x%08X, status=0x%08X, in=%Iu, out=%Iu, bytes=%Iu.",
+            ioctlEntry->Name != NULL ? ioctlEntry->Name : "<unnamed>",
+            (unsigned int)ioctlEntry->IoControlCode,
+            (unsigned int)status,
+            InputBufferLength,
+            OutputBufferLength,
+            completeBytes);
+    }
 
     if (status != STATUS_PENDING) {
         WdfRequestCompleteWithInformation(Request, status, completeBytes);

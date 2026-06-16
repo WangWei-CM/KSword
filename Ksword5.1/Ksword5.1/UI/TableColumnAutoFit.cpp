@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <iterator>
 #include <vector>
 
 #include <QAbstractItemView>
@@ -30,6 +31,7 @@ namespace
     constexpr const char* AutoFitHeaderHookedProperty = "_ksword_table_column_auto_fit_header_hooked";
     constexpr const char* AutoFitResizePendingProperty = "_ksword_table_column_auto_fit_resize_pending";
     constexpr const char* AutoFitResizePressPositionProperty = "_ksword_table_column_auto_fit_resize_press_position";
+    constexpr const char* AutoFitStretchSectionsProperty = "_ksword_table_column_auto_fit_stretch_sections";
 
     // kViewportPadding 作用：
     // - 给视口右边预留少量像素，规避样式边框/网格线取整导致的 1px 横向滚动条；
@@ -74,6 +76,7 @@ namespace
         int currentWidth = 0;   // currentWidth：自动 fit 前的当前列宽快照，保留给调试与后续扩展。
         int preferredWidth = 0; // preferredWidth：根据表头和抽样内容估算出的首选列宽。
         int fittedWidth = 0;    // fittedWidth：压缩/扩展后的目标列宽。
+        bool prefersViewportExpansion = false; // prefersViewportExpansion：业务层原本声明为 Stretch 的填充候选列。
     };
 
     // horizontalHeaderForView 作用：
@@ -311,6 +314,66 @@ namespace
         return std::max(minimumWidth, preferredWidth);
     }
 
+    // sectionHasRememberedStretchIntent 作用：
+    // - 判断某个逻辑列是否曾经由业务代码设置为 QHeaderView::Stretch；
+    // - 全局自动 fit 后会把列模式改成 Interactive，以便用户可拖拽，因此必须用属性保留原始 Stretch 意图；
+    // - 只读取当前 header 的属性，不改变列宽或 resize mode。
+    // 参数 header：目标横向表头；logicalIndex：待检查的逻辑列号。
+    // 返回值：true=该列应作为“无长内容时填满剩余宽度”的优先候选；false=普通列。
+    bool sectionHasRememberedStretchIntent(QHeaderView* header, const int logicalIndex)
+    {
+        if (header == nullptr || logicalIndex < 0 || logicalIndex >= header->count())
+        {
+            return false;
+        }
+
+        const QVariantList stretchSections =
+            header->property(AutoFitStretchSectionsProperty).toList();
+        for (const QVariant& stretchSection : stretchSections)
+        {
+            if (stretchSection.toInt() == logicalIndex)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // rememberStretchIntentIfNeeded 作用：
+    // - 在自动 fit 接管列模式前记录业务层声明为 QHeaderView::Stretch 的列；
+    // - 后续即使列模式被改为 Interactive，仍能按业务意图把剩余宽度分配给这些列；
+    // - 重复调用会去重，不会让属性列表无限增长。
+    // 参数 header：目标横向表头；logicalIndex：待记录的逻辑列号。
+    // 返回值：无；记录结果保存在 header 的 QObject 属性中。
+    void rememberStretchIntentIfNeeded(QHeaderView* header, const int logicalIndex)
+    {
+        if (header == nullptr ||
+            logicalIndex < 0 ||
+            logicalIndex >= header->count() ||
+            header->sectionResizeMode(logicalIndex) != QHeaderView::Stretch ||
+            sectionHasRememberedStretchIntent(header, logicalIndex))
+        {
+            return;
+        }
+
+        QVariantList stretchSections =
+            header->property(AutoFitStretchSectionsProperty).toList();
+        stretchSections.append(logicalIndex);
+        header->setProperty(AutoFitStretchSectionsProperty, stretchSections);
+    }
+
+    // sectionPrefersViewportExpansion 作用：
+    // - 综合“当前仍是 Stretch”和“历史曾是 Stretch”两种情况，判断列是否应优先吃掉剩余 viewport 宽度；
+    // - 当前仍是 Stretch 时顺手记忆，避免第一次自动 fit 后丢失业务层布局意图；
+    // - 不直接调整任何列宽，真正分配在 fitWidthsToAvailableSpace 中完成。
+    // 参数 header：目标横向表头；logicalIndex：待检查逻辑列号。
+    // 返回值：true=无长内容列时优先填充该列；false=普通列。
+    bool sectionPrefersViewportExpansion(QHeaderView* header, const int logicalIndex)
+    {
+        rememberStretchIntentIfNeeded(header, logicalIndex);
+        return sectionHasRememberedStretchIntent(header, logicalIndex);
+    }
+
     // collectVisibleSections 作用：
     // - 按当前视觉顺序收集没有隐藏的列；
     // - 同时读取当前列宽与内容感知首选宽度，后续再整体压入 viewport。
@@ -349,7 +412,8 @@ namespace
                 logicalIndex,
                 sectionWidth,
                 preferredWidth,
-                preferredWidth });
+                preferredWidth,
+                sectionPrefersViewportExpansion(header, logicalIndex) });
         }
 
         return visibleSections;
@@ -425,51 +489,100 @@ namespace
         if (fittedTotalWidth < availableWidth)
         {
             int remainingWidth = availableWidth - fittedTotalWidth;
-            int totalExpansionWeight = 0;
-            for (const VisibleSection& section : sections)
+            std::vector<int> expansionIndexes;
+            std::vector<int> expansionWeights;
+
+            // addExpansionTarget 作用：
+            // - 记录本轮可获得剩余宽度的目标列和权重；
+            // - 使用逻辑上限外的 vector 下标前先检查范围；
+            // - 返回值：无，结果写入 expansionIndexes/expansionWeights。
+            const auto addExpansionTarget =
+                [&](const int sectionIndex, const int expansionWeight) -> void
+                {
+                    if (sectionIndex < 0 || sectionIndex >= sectionCount)
+                    {
+                        return;
+                    }
+                    expansionIndexes.push_back(sectionIndex);
+                    expansionWeights.push_back(std::max(1, expansionWeight));
+                };
+
+            // 第一优先级：仍按原策略把空间分给明显长内容列，路径/命令行/日志内容这类列会获得更多空间。
+            for (int sectionIndex = 0; sectionIndex < sectionCount; ++sectionIndex)
             {
+                const VisibleSection& section = sections[static_cast<std::size_t>(sectionIndex)];
                 if (section.preferredWidth >= kLongColumnExpansionThreshold)
                 {
-                    totalExpansionWeight += std::max(
-                        1,
+                    addExpansionTarget(
+                        sectionIndex,
                         section.preferredWidth - kLongColumnExpansionThreshold);
                 }
             }
 
-            // 没有明显长内容列时保留右侧空白，而不是把所有短列平均拉宽。
+            // 第二优先级：没有明显长内容列时，尊重业务层原本设置为 Stretch 的列来填满 viewport。
+            if (expansionIndexes.empty())
+            {
+                for (int sectionIndex = 0; sectionIndex < sectionCount; ++sectionIndex)
+                {
+                    const VisibleSection& section = sections[static_cast<std::size_t>(sectionIndex)];
+                    if (section.prefersViewportExpansion)
+                    {
+                        addExpansionTarget(sectionIndex, section.preferredWidth);
+                    }
+                }
+            }
+
+            // 第三优先级：没有 Stretch 意图时，把剩余空间给当前首选宽度最大的可见列。
+            if (expansionIndexes.empty())
+            {
+                const auto largestPreferredIt = std::max_element(
+                    sections.begin(),
+                    sections.end(),
+                    [](const VisibleSection& leftSection, const VisibleSection& rightSection)
+                    {
+                        return leftSection.preferredWidth < rightSection.preferredWidth;
+                    });
+                if (largestPreferredIt != sections.end())
+                {
+                    addExpansionTarget(
+                        static_cast<int>(std::distance(sections.begin(), largestPreferredIt)),
+                        largestPreferredIt->preferredWidth);
+                }
+            }
+
+            // 兜底：理论上 sections 非空时不会走到这里；仍保留最后可见列，确保默认总宽尽量贴合 viewport。
+            if (expansionIndexes.empty())
+            {
+                addExpansionTarget(sectionCount - 1, 1);
+            }
+
+            int totalExpansionWeight = 0;
+            for (const int expansionWeight : expansionWeights)
+            {
+                totalExpansionWeight += std::max(1, expansionWeight);
+            }
             if (totalExpansionWeight <= 0)
             {
                 return;
             }
 
-            for (VisibleSection& section : sections)
+            for (std::size_t targetIndex = 0; targetIndex < expansionIndexes.size(); ++targetIndex)
             {
-                if (section.preferredWidth < kLongColumnExpansionThreshold)
-                {
-                    continue;
-                }
-
-                const int expansionWeight = std::max(
-                    1,
-                    section.preferredWidth - kLongColumnExpansionThreshold);
+                const int sectionIndex = expansionIndexes[targetIndex];
                 const int extraWidth =
-                    remainingWidth * expansionWeight / totalExpansionWeight;
-                section.fittedWidth += extraWidth;
+                    remainingWidth * expansionWeights[targetIndex] / totalExpansionWeight;
+                sections[static_cast<std::size_t>(sectionIndex)].fittedWidth += extraWidth;
             }
 
             int finalTotalWidth = totalFittedWidth();
-            for (VisibleSection& section : sections)
+            std::size_t roundRobinIndex = 0;
+            while (finalTotalWidth < availableWidth && !expansionIndexes.empty())
             {
-                if (finalTotalWidth >= availableWidth)
-                {
-                    break;
-                }
-                if (section.preferredWidth < kLongColumnExpansionThreshold)
-                {
-                    continue;
-                }
-                ++section.fittedWidth;
+                const int sectionIndex =
+                    expansionIndexes[roundRobinIndex % expansionIndexes.size()];
+                ++sections[static_cast<std::size_t>(sectionIndex)].fittedWidth;
                 ++finalTotalWidth;
+                ++roundRobinIndex;
             }
             return;
         }

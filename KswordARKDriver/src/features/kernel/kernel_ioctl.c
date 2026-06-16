@@ -186,10 +186,10 @@ Return Value:
 {
     KSWORD_ARK_QUERY_DRIVER_OBJECT_REQUEST* queryRequest = NULL;
     PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0;
     size_t actualOutputLength = 0;
     NTSTATUS status = STATUS_SUCCESS;
 
-    UNREFERENCED_PARAMETER(InputBufferLength);
     UNREFERENCED_PARAMETER(OutputBufferLength);
 
     if (BytesReturned == NULL) {
@@ -201,9 +201,15 @@ Return Value:
         Request,
         sizeof(KSWORD_ARK_QUERY_DRIVER_OBJECT_REQUEST),
         (PVOID*)&queryRequest,
-        NULL);
+        &actualInputLength);
     if (!NT_SUCCESS(status)) {
-        KswordARKKernelIoctlLog(Device, "Error", "R0 query-driver-object ioctl: input invalid, status=0x%08X.", (unsigned int)status);
+        KswordARKKernelIoctlLog(
+            Device,
+            "Error",
+            "R0 query-driver-object ioctl: input invalid, status=0x%08X, supplied=%Iu, required=%Iu.",
+            (unsigned int)status,
+            InputBufferLength,
+            sizeof(KSWORD_ARK_QUERY_DRIVER_OBJECT_REQUEST));
         return status;
     }
 
@@ -230,14 +236,19 @@ Return Value:
     if (*BytesReturned >= KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE_HEADER_SIZE) {
         KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE* responseHeader =
             (KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE*)outputBuffer;
-        KswordARKKernelIoctlLog(
-            Device,
-            "Info",
-            "R0 query-driver-object success: status=%lu, devices=%lu/%lu, outBytes=%Iu.",
-            (unsigned long)responseHeader->queryStatus,
-            (unsigned long)responseHeader->returnedDeviceCount,
-            (unsigned long)responseHeader->totalDeviceCount,
-            *BytesReturned);
+        if (responseHeader->queryStatus != KSWORD_ARK_DRIVER_OBJECT_QUERY_STATUS_NOT_FOUND) {
+            KswordARKKernelIoctlLog(
+                Device,
+                responseHeader->queryStatus == KSWORD_ARK_DRIVER_OBJECT_QUERY_STATUS_OK ||
+                    responseHeader->queryStatus == KSWORD_ARK_DRIVER_OBJECT_QUERY_STATUS_PARTIAL
+                    ? "Info"
+                    : "Warn",
+                "R0 query-driver-object success: status=%lu, devices=%lu/%lu, outBytes=%Iu.",
+                (unsigned long)responseHeader->queryStatus,
+                (unsigned long)responseHeader->returnedDeviceCount,
+                (unsigned long)responseHeader->totalDeviceCount,
+                *BytesReturned);
+        }
     }
 
     return status;
@@ -794,9 +805,12 @@ Return Value:
     size_t actualInputLength = 0U;
     size_t actualOutputLength = 0U;
     NTSTATUS status = STATUS_SUCCESS;
+    KSW_DRIVER_UNLOAD_DIAGNOSTICS unloadDiagnostics;
 
     UNREFERENCED_PARAMETER(InputBufferLength);
     UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    RtlZeroMemory(&unloadDiagnostics, sizeof(unloadDiagnostics));
 
     if (BytesReturned == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -847,7 +861,8 @@ Return Value:
         outputBuffer,
         actualOutputLength,
         unloadRequest,
-        BytesReturned);
+        BytesReturned,
+        &unloadDiagnostics);
     if (!NT_SUCCESS(status)) {
         KswordARKKernelIoctlLog(Device, "Error", "R0 force-unload-driver backend failed: status=0x%08X.", (unsigned int)status);
         return status;
@@ -865,8 +880,12 @@ Return Value:
         KswordARKKernelIoctlLog(
             Device,
             logLevel,
-            "R0 force-unload-driver response: status=%lu, object=0x%I64X, unload=0x%I64X, last=0x%08X, wait=0x%08X, callbacks=%lu/%lu, cbfail=%lu, cblast=0x%08X.",
+            "R0 force-unload-driver response: status=%lu, requested=0x%08X, effective=0x%08X, applied=0x%08X, deleted=%lu, object=0x%I64X, unload=0x%I64X, last=0x%08X, wait=0x%08X, callbacks=%lu/%lu, cbfail=%lu, cblast=0x%08X.",
             (unsigned long)response->status,
+            (unsigned int)response->reserved,
+            (unsigned int)response->flags,
+            (unsigned int)response->cleanupFlagsApplied,
+            (unsigned long)response->deletedDeviceCount,
             response->driverObjectAddress,
             response->driverUnloadAddress,
             (unsigned int)response->lastStatus,
@@ -875,6 +894,63 @@ Return Value:
             (unsigned long)response->callbackCandidates,
             (unsigned long)response->callbackFailures,
             (unsigned int)response->callbackLastStatus);
+
+        KswordARKKernelIoctlLog(
+            Device,
+            logLevel,
+            "R0 unload diag flags: stages=0x%08X req=0x%08X san=0x%08X fin=0x%08X ref=0x%08X pfBuild=0x%08X pf=0x%08X deny=0x%08X.",
+            (unsigned int)unloadDiagnostics.stages,
+            (unsigned int)unloadDiagnostics.requestedFlags,
+            (unsigned int)unloadDiagnostics.sanitizedFlags,
+            (unsigned int)unloadDiagnostics.finalFlags,
+            (unsigned int)unloadDiagnostics.referenceStatus,
+            (unsigned int)unloadDiagnostics.preflightBuildStatus,
+            (unsigned int)unloadDiagnostics.preflightStatus,
+            (unsigned int)unloadDiagnostics.preflightDenyStatus);
+
+        KswordARKKernelIoctlLog(
+            Device,
+            logLevel,
+            "R0 unload diag gates: allow=%u/%u/%u svc=%u unload=%u dyn=%u/%u/%u/%u dev=%u/%u/%u/%u/%u self=%u core=%u.",
+            unloadDiagnostics.allowZwUnload ? 1U : 0U,
+            unloadDiagnostics.allowDirectUnload ? 1U : 0U,
+            unloadDiagnostics.allowDestructiveCleanup ? 1U : 0U,
+            unloadDiagnostics.hasServiceRegistryPath ? 1U : 0U,
+            unloadDiagnostics.hasDriverUnload ? 1U : 0U,
+            unloadDiagnostics.hasValidDynData ? 1U : 0U,
+            unloadDiagnostics.hasPdbBackedDynData ? 1U : 0U,
+            unloadDiagnostics.hasValidDriverObjectOffsets ? 1U : 0U,
+            unloadDiagnostics.hasValidLoaderEvidence ? 1U : 0U,
+            unloadDiagnostics.hasDeviceChain ? 1U : 0U,
+            unloadDiagnostics.hasAttachedDevice ? 1U : 0U,
+            unloadDiagnostics.hasBusyDeviceReference ? 1U : 0U,
+            unloadDiagnostics.hasCrossDriverAttach ? 1U : 0U,
+            unloadDiagnostics.hasDeviceLoop ? 1U : 0U,
+            unloadDiagnostics.isSelfModule ? 1U : 0U,
+            unloadDiagnostics.isCoreKernelModule ? 1U : 0U);
+
+        KswordARKKernelIoctlLog(
+            Device,
+            logLevel,
+            "R0 unload diag zw: run=0x%08X wait=0x%08X unload=0x%08X verify=0x%08X start=0x%I64X ldr=0x%I64X.",
+            (unsigned int)unloadDiagnostics.zwRunStatus,
+            (unsigned int)unloadDiagnostics.zwWaitStatus,
+            (unsigned int)unloadDiagnostics.zwUnloadStatus,
+            (unsigned int)unloadDiagnostics.zwVerifyStatus,
+            unloadDiagnostics.driverStart,
+            unloadDiagnostics.loaderDllBase);
+
+        KswordARKKernelIoctlLog(
+            Device,
+            logLevel,
+            "R0 unload diag direct: run=0x%08X wait=0x%08X unload=0x%08X cleanup=0x%08X verify=0x%08X ldrEntry=0x%I64X ldrSize=0x%08X.",
+            (unsigned int)unloadDiagnostics.directRunStatus,
+            (unsigned int)unloadDiagnostics.directWaitStatus,
+            (unsigned int)unloadDiagnostics.directUnloadStatus,
+            (unsigned int)unloadDiagnostics.directCleanupStatus,
+            (unsigned int)unloadDiagnostics.directVerifyStatus,
+            unloadDiagnostics.loaderEntryAddress,
+            (unsigned int)unloadDiagnostics.loaderSizeOfImage);
     }
 
     return STATUS_SUCCESS;

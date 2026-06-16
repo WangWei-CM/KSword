@@ -997,6 +997,8 @@ namespace ksword::ark
         std::uint32_t flags = 0;             // flags：请求 flags 回显。
         long lastStatus = 0;                 // lastStatus：卸载线程/后端状态。
         long waitStatus = 0;                 // waitStatus：KeWaitForSingleObject 状态。
+        std::uint32_t cleanupFlagsApplied = 0; // cleanupFlagsApplied：R0 实际执行的持久清理 flags。
+        std::uint32_t deletedDeviceCount = 0;  // deletedDeviceCount：R0 实际删除的 DeviceObject 数量。
         std::uint64_t driverObjectAddress = 0; // driverObjectAddress：诊断地址。
         std::uint64_t driverUnloadAddress = 0; // driverUnloadAddress：DriverUnload 入口。
         std::uint32_t callbackCandidates = 0;  // callbackCandidates：按模块基址命中的回调候选数。

@@ -9,10 +9,51 @@
 #include <QScreen>
 #include <QVector>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
+namespace
+{
+    // initializeProcessDpiAwareness:
+    // - Input: none.
+    // - Processing: sets process DPI awareness before QApplication is created.
+    // - Return: none; the process falls back to system DPI awareness on older Windows builds.
+    void initializeProcessDpiAwareness()
+    {
+        HMODULE user32ModuleHandle = ::GetModuleHandleW(L"user32.dll");
+        if (user32ModuleHandle != nullptr)
+        {
+            using SetDpiAwarenessContextFunction = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+            const SetDpiAwarenessContextFunction setContextFunction =
+                reinterpret_cast<SetDpiAwarenessContextFunction>(
+                    ::GetProcAddress(user32ModuleHandle, "SetProcessDpiAwarenessContext"));
+            if (setContextFunction != nullptr)
+            {
+                if (setContextFunction(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+                {
+                    return;
+                }
+                if (setContextFunction(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE))
+                {
+                    return;
+                }
+            }
+        }
+
+        // Older Windows fallback: keep at least system-DPI-aware coordinates.
+        ::SetProcessDPIAware();
+    }
+}
+
 int main(int argc, char* argv[])
 {
     // 启用 OpenGLES，沿用原任务栏绘制路径，避免改动 Qt 渲染策略。
     QCoreApplication::setAttribute(Qt::AA_UseOpenGLES);
+
+    // Set DPI awareness before QApplication so QScreen geometry and AppBar math agree.
+    initializeProcessDpiAwareness();
 
     // QApplication 管理所有 Taskbar 窗口、屏幕事件和共享状态对象生命周期。
     QApplication app(argc, argv);

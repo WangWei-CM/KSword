@@ -944,6 +944,8 @@ namespace ksword::ark
         unloadResult.flags = static_cast<std::uint32_t>(response.flags);
         unloadResult.lastStatus = static_cast<long>(response.lastStatus);
         unloadResult.waitStatus = static_cast<long>(response.waitStatus);
+        unloadResult.cleanupFlagsApplied = static_cast<std::uint32_t>(response.cleanupFlagsApplied);
+        unloadResult.deletedDeviceCount = static_cast<std::uint32_t>(response.deletedDeviceCount);
         unloadResult.driverObjectAddress = static_cast<std::uint64_t>(response.driverObjectAddress);
         unloadResult.driverUnloadAddress = static_cast<std::uint64_t>(response.driverUnloadAddress);
         unloadResult.callbackCandidates = static_cast<std::uint32_t>(response.callbackCandidates);
@@ -959,7 +961,10 @@ namespace ksword::ark
         stream << "status=" << unloadResult.status
             << ", object=0x" << std::hex << unloadResult.driverObjectAddress
             << ", unload=0x" << unloadResult.driverUnloadAddress
-            << ", lastStatus=0x" << static_cast<unsigned long>(unloadResult.lastStatus)
+            << ", flags=0x" << unloadResult.flags
+            << ", applied=0x" << unloadResult.cleanupFlagsApplied
+            << ", deletedDevices=" << std::dec << unloadResult.deletedDeviceCount
+            << ", lastStatus=0x" << std::hex << static_cast<unsigned long>(unloadResult.lastStatus)
             << ", waitStatus=0x" << static_cast<unsigned long>(unloadResult.waitStatus)
             << ", callbackCandidates=" << std::dec << unloadResult.callbackCandidates
             << ", callbacksRemoved=" << unloadResult.callbacksRemoved
@@ -1016,6 +1021,8 @@ namespace ksword::ark
         unloadResult.flags = static_cast<std::uint32_t>(response.flags);
         unloadResult.lastStatus = static_cast<long>(response.lastStatus);
         unloadResult.waitStatus = static_cast<long>(response.waitStatus);
+        unloadResult.cleanupFlagsApplied = static_cast<std::uint32_t>(response.cleanupFlagsApplied);
+        unloadResult.deletedDeviceCount = static_cast<std::uint32_t>(response.deletedDeviceCount);
         unloadResult.driverObjectAddress = static_cast<std::uint64_t>(response.driverObjectAddress);
         unloadResult.driverUnloadAddress = static_cast<std::uint64_t>(response.driverUnloadAddress);
         unloadResult.callbackCandidates = static_cast<std::uint32_t>(response.callbackCandidates);
@@ -1032,7 +1039,10 @@ namespace ksword::ark
             << ", status=" << unloadResult.status
             << ", object=0x" << unloadResult.driverObjectAddress
             << ", unload=0x" << unloadResult.driverUnloadAddress
-            << ", lastStatus=0x" << static_cast<unsigned long>(unloadResult.lastStatus)
+            << ", flags=0x" << unloadResult.flags
+            << ", applied=0x" << unloadResult.cleanupFlagsApplied
+            << ", deletedDevices=" << std::dec << unloadResult.deletedDeviceCount
+            << ", lastStatus=0x" << std::hex << static_cast<unsigned long>(unloadResult.lastStatus)
             << ", waitStatus=0x" << static_cast<unsigned long>(unloadResult.waitStatus)
             << ", callbackCandidates=" << std::dec << unloadResult.callbackCandidates
             << ", callbacksRemoved=" << unloadResult.callbacksRemoved

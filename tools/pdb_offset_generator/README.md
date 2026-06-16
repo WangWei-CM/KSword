@@ -223,3 +223,40 @@ names above plus optional kernel globals:
 `StructOffset` accepts the legacy field dictionary names plus the new process,
 thread, handle table, KLDR, and DRIVER_OBJECT field names documented in
 `docs/next_phase_manifests/dyndata_v3.md`.
+
+## Driver unload research report
+
+`ksword_driver_unload_research.py` is a read-only research helper for the
+current unload investigation. It does not build R3, does not modify release
+artifacts, and does not execute any unload path.
+
+It summarizes:
+
+- existing scattered profile coverage for unload-relevant fields;
+- per-version readiness for `DriverObject` / `KLDR` / callback / kernel-global
+  evidence;
+- a static risk model for the current unload paths;
+- an optional PDB deep-dive mode for selected local PE/PDB pairs.
+
+Basic offline summary:
+
+```powershell
+python tools\pdb_offset_generator\ksword_driver_unload_research.py `
+  --output D:\PDB\scratch\driver_unload_research_report.json `
+  --markdown D:\PDB\scratch\driver_unload_research_report.md
+```
+
+Optional direct PDB deep dive on a filtered sample set:
+
+```powershell
+python tools\pdb_offset_generator\ksword_driver_unload_research.py `
+  --parse-pdb `
+  --module-class ntoskrnl `
+  --version-filter 10.0.26100 `
+  --max-pdb 8 `
+  --output D:\PDB\scratch\driver_unload_research_report.json
+```
+
+The deep-dive mode uses the local corpus paths already stored in the profile
+metadata and resolves additional `llvm-pdbutil` type/global evidence when the
+matching PE/PDB files are present.
