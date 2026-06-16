@@ -170,6 +170,9 @@ private:
     // m_startupMaximizedCheckBox 作用：设置下次启动时是否默认最大化显示。
     QCheckBox* m_startupMaximizedCheckBox = nullptr;
 
+    // m_startupTopMostCheckBox 作用：设置启动后是否默认启用最高级窗口置顶。
+    QCheckBox* m_startupTopMostCheckBox = nullptr;
+
     // m_startupAutoAdminCheckBox 作用：设置下次启动时是否先尝试申请管理员权限。
     QCheckBox* m_startupAutoAdminCheckBox = nullptr;
 
