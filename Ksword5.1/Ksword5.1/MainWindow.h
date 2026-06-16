@@ -342,6 +342,11 @@ private:
     // - 在当前置顶状态基础上做取反切换。
     void togglePinnedWindowState();
 
+    // persistPinnedWindowPreference 作用：
+    // - 将右上角图钉手动切换后的置顶偏好保存到设置 JSON；
+    // - 下次启动和设置页复用同一字段。
+    void persistPinnedWindowPreference();
+
     // setCaptureProtectionState 作用：
     // - 设置主窗口截屏屏蔽状态并同步标题栏眼睛图标；
     // - Windows 10 20H2+ 优先使用 WDA_EXCLUDEFROMCAPTURE 隐藏窗口；
