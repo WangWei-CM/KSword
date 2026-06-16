@@ -1,0 +1,63 @@
+{
+  "acceptedBeforeDedup": 2066,
+  "callbackItemCount": 40,
+  "classCounts": {
+    "ntkrla57": 532,
+    "ntoskrnl": 1533
+  },
+  "copiedProfiles": 0,
+  "duplicateGroups": 1,
+  "duplicates": [
+    {
+      "duplicates": [
+        "D:\\PDB\\profiles\\ark_dyndata\\ntoskrnl_amd64_10_0_22621_1483_6b8d28ceed9f2db625be38c2afaee7b51.json",
+        "D:\\PDB\\profiles\\ark_dyndata\\ntoskrnl_amd64_10_0_22621_1485_6b8d28ceed9f2db625be38c2afaee7b51.json"
+      ],
+      "identity": {
+        "machine": 34404,
+        "module_class": "ntoskrnl",
+        "size_of_image": 17068032,
+        "time_date_stamp": 2053043576
+      },
+      "winner": "D:\\PDB\\profiles\\ark_dyndata\\ntoskrnl_amd64_10_0_22621_1483_6b8d28ceed9f2db625be38c2afaee7b51.json"
+    }
+  ],
+  "generatedAt": "2026-06-15T17:39:09Z",
+  "localKernelIdentity": {
+    "machine": 34404,
+    "module_class": "ntoskrnl",
+    "size_of_image": 17063936,
+    "time_date_stamp": 476233443
+  },
+  "localKernelProfileMatch": {
+    "profile": "D:\\PDB\\profiles\\ark_dyndata\\ntoskrnl_amd64_10_0_19041_6456_f57e740b088e5056e8af0772f1cc5beb1.json",
+    "profileName": "ntoskrnl_amd64_10.0.19041.6456_f57e740b088e5056e8af0772f1cc5beb1"
+  },
+  "pack": {
+    "callbackItemCount": 0,
+    "fieldDictionaryCount": 38,
+    "packVersion": 3,
+    "path": "Ksword5.1\\Ksword5.1\\profiles\\ark_dyndata_pack_v3.json",
+    "profileCount": 2065,
+    "schemaVersion": 1,
+    "typedItemCount": 31230
+  },
+  "packVersion": 3,
+  "profileListOmitted": true,
+  "publishMode": "pack-only",
+  "publishedProfiles": 2065,
+  "rejected": [
+    {
+      "path": "D:\\PDB\\profiles\\ark_dyndata\\ntoskrnl_amd64_10_0_19041_2545_3bc3c474e5c073d3fdb71d47289f59991.json",
+      "reason": "fields_and_typed_items_empty"
+    },
+    {
+      "path": "D:\\PDB\\profiles\\ark_dyndata\\ntoskrnl_amd64_10_0_22621_3_b44fe411d9d0b669d036b61c9e44a9d51.json",
+      "reason": "fields_and_typed_items_empty"
+    }
+  ],
+  "rejectedProfiles": 2,
+  "removedScatteredProfiles": 0,
+  "schemaVersion": 1,
+  "typedItemCount": 375
+}

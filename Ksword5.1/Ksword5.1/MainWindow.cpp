@@ -3,6 +3,7 @@
 #include <QAction>
 #include <QEasingCurve>
 #include <QAbstractScrollArea>
+#include <QAbstractItemView>
 #include <QAbstractSlider>
 #include <QTextEdit>
 #include <QTextStream>
@@ -543,6 +544,11 @@ namespace
                 return false;
             }
 
+            if (isItemViewWheelEvent(watchedObject))
+            {
+                return false;
+            }
+
             if (isSmoothScrollDisabled(watchedObject))
             {
                 return false;
@@ -571,6 +577,30 @@ namespace
             animateScrollBar(targetScrollBar, targetValue);
             wheelEvent->accept();
             return true;
+        }
+
+        bool isItemViewWheelEvent(QObject* watchedObject) const
+        {
+            // isItemViewWheelEvent 作用：
+            // - 判断滚轮事件是否来自 QTableView/QTableWidget/QTreeView/QListView 等 item view 或其 viewport/滚动条子控件；
+            // - item view 的滚动条 value 往往是“行号/项号”，不是像素，不能用全局像素平滑算法放大处理；
+            // - 返回 true 时交回 Qt 默认 wheelEvent，让表格/树/列表按自身 singleStep/pageStep 正常滚动。
+            // 参数 watchedObject：QApplication 全局事件过滤器收到的事件源。
+            // 返回值：true=应跳过全局 smooth-scroll；false=可以继续尝试全局 smooth-scroll。
+            QObject* currentObject = watchedObject;
+            while (currentObject != nullptr)
+            {
+                if (qobject_cast<QAbstractItemView*>(currentObject) != nullptr)
+                {
+                    return true;
+                }
+
+                QWidget* currentWidget = qobject_cast<QWidget*>(currentObject);
+                currentObject = currentWidget != nullptr
+                    ? currentWidget->parentWidget()
+                    : currentObject->parent();
+            }
+            return false;
         }
 
         bool isSmoothScrollDisabled(QObject* watchedObject) const

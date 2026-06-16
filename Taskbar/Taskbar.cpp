@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <cmath>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QLabel>
@@ -19,6 +20,167 @@
 #include <Qscreen.h>
 
 #pragma comment(lib, "shell32.lib")
+
+namespace {
+constexpr int kTaskbarLogicalHeight = 32;
+constexpr int kTaskbarOuterMargin = 2;
+constexpr int kTaskbarContentHeight = kTaskbarLogicalHeight - (kTaskbarOuterMargin * 2);
+constexpr int kMinimumSpectrumWidth = 80;
+constexpr int kLargeScreenSpectrumMinimumWidth = 220;
+constexpr int kMaximumSpectrumWidth = 320;
+constexpr int kCompactScreenNonSpectrumBudget = 620;
+
+struct MonitorSearchContext {
+    QString targetName;
+    QRect nativeGeometry;
+    bool found;
+};
+
+// Win32 monitor enumeration callback: input is an HMONITOR and caller context;
+// processing compares MONITORINFOEX device names; return value controls enumeration continuation.
+BOOL CALLBACK findMonitorByDisplayName(HMONITOR monitor, HDC, LPRECT, LPARAM userData)
+{
+    MonitorSearchContext* context = reinterpret_cast<MonitorSearchContext*>(userData);
+    if (!context || context->targetName.isEmpty()) {
+        return TRUE;
+    }
+
+    MONITORINFOEXW monitorInfo = {};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo)) {
+        return TRUE;
+    }
+
+    const QString monitorName = QString::fromWCharArray(monitorInfo.szDevice).trimmed().toUpper();
+    if (monitorName != context->targetName) {
+        return TRUE;
+    }
+
+    const RECT& nativeRect = monitorInfo.rcMonitor;
+    context->nativeGeometry = QRect(
+        nativeRect.left,
+        nativeRect.top,
+        nativeRect.right - nativeRect.left,
+        nativeRect.bottom - nativeRect.top
+    );
+    context->found = true;
+    return FALSE;
+}
+
+// Validate a device pixel ratio: input is a Qt DPR value; processing rejects invalid values;
+// return value is a positive scale factor suitable for pixel conversion.
+qreal safeDevicePixelRatio(qreal devicePixelRatio)
+{
+    if (!std::isfinite(devicePixelRatio) || devicePixelRatio <= 0.0) {
+        return 1.0;
+    }
+    return devicePixelRatio;
+}
+
+// Convert a logical length to native pixels: input is a Qt DIP length and DPR; processing rounds
+// to the nearest physical pixel; return value is at least 1 pixel for non-empty AppBar reservation.
+int logicalLengthToNativePixels(int logicalLength, qreal devicePixelRatio)
+{
+    return qMax(1, qRound(static_cast<qreal>(logicalLength) * safeDevicePixelRatio(devicePixelRatio)));
+}
+
+// Convert a Qt logical rectangle to native pixels: input is a DIP rectangle and DPR; processing
+// scales origin and size; return value uses Win32-style physical pixel units.
+QRect logicalRectToNativePixels(const QRect& logicalRect, qreal devicePixelRatio)
+{
+    const qreal dpr = safeDevicePixelRatio(devicePixelRatio);
+    return QRect(
+        qRound(static_cast<qreal>(logicalRect.x()) * dpr),
+        qRound(static_cast<qreal>(logicalRect.y()) * dpr),
+        qRound(static_cast<qreal>(logicalRect.width()) * dpr),
+        qRound(static_cast<qreal>(logicalRect.height()) * dpr)
+    );
+}
+
+// Normalize a Qt screen name to the Win32 MONITORINFOEX device form: input is either
+// "DISPLAY1" or "\\.\DISPLAY1"; processing adds the missing prefix; return value is uppercase.
+QString normalizeDisplayDeviceNameForWin32(const QString& displayName)
+{
+    QString normalizedName = displayName.trimmed().replace('/', '\\').toUpper();
+    const QString win32Prefix = QStringLiteral("\\\\.\\");
+    if (!normalizedName.isEmpty() && !normalizedName.startsWith(win32Prefix)) {
+        normalizedName.prepend(win32Prefix);
+    }
+    return normalizedName;
+}
+
+// Resolve the monitor under a native point: input is a physical-pixel point; processing queries
+// MonitorFromPoint and GetMonitorInfo; return value is the monitor rectangle or an invalid rect.
+QRect nativeMonitorGeometryFromPoint(const QPoint& nativePoint)
+{
+    POINT point = { nativePoint.x(), nativePoint.y() };
+    HMONITOR monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONULL);
+    if (!monitor) {
+        return QRect();
+    }
+
+    MONITORINFOEXW monitorInfo = {};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo)) {
+        return QRect();
+    }
+
+    const RECT& nativeRect = monitorInfo.rcMonitor;
+    return QRect(
+        nativeRect.left,
+        nativeRect.top,
+        nativeRect.right - nativeRect.left,
+        nativeRect.bottom - nativeRect.top
+    );
+}
+
+// Resolve the monitor containing a window: input is an HWND; processing asks Win32 for the
+// nearest monitor and reads MONITORINFOEX; return value is the monitor rectangle or invalid.
+QRect nativeMonitorGeometryFromWindow(HWND windowHandle)
+{
+    if (!windowHandle) {
+        return QRect();
+    }
+
+    HMONITOR monitor = MonitorFromWindow(windowHandle, MONITOR_DEFAULTTONULL);
+    if (!monitor) {
+        return QRect();
+    }
+
+    MONITORINFOEXW monitorInfo = {};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo)) {
+        return QRect();
+    }
+
+    const RECT& nativeRect = monitorInfo.rcMonitor;
+    return QRect(
+        nativeRect.left,
+        nativeRect.top,
+        nativeRect.right - nativeRect.left,
+        nativeRect.bottom - nativeRect.top
+    );
+}
+
+// Map an AppBar rectangle from native monitor coordinates into Qt logical coordinates: input is
+// the native AppBar rect plus native/logical monitor rects; processing converts only per-monitor
+// offsets, not global desktop origin; return value is safe for mixed-DPI multi-monitor layouts.
+QRect mapNativeAppBarRectToLogicalScreen(const QRect& nativeAppBarRect,
+                                         const QRect& nativeScreenRect,
+                                         const QRect& logicalScreenRect,
+                                         qreal devicePixelRatio)
+{
+    const qreal dpr = safeDevicePixelRatio(devicePixelRatio);
+    const int logicalLeft = logicalScreenRect.left()
+        + qRound(static_cast<qreal>(nativeAppBarRect.left() - nativeScreenRect.left()) / dpr);
+    const int logicalTop = logicalScreenRect.top()
+        + qRound(static_cast<qreal>(nativeAppBarRect.top() - nativeScreenRect.top()) / dpr);
+    const int logicalWidth = qRound(static_cast<qreal>(nativeAppBarRect.width()) / dpr);
+    const int logicalHeight = qRound(static_cast<qreal>(nativeAppBarRect.height()) / dpr);
+
+    return QRect(logicalLeft, logicalTop, logicalWidth, logicalHeight);
+}
+}
 
 bool Taskbar::nativeEvent(const QByteArray& eventType, void* message, qintptr* result)
 {
@@ -42,6 +204,8 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState, QWidget
       m_rightSpectrum(nullptr),
       m_sharedState(sharedState),
       m_targetScreenGeometry(targetScreen ? targetScreen->geometry() : QRect()),
+      m_targetScreenName(targetScreen ? targetScreen->name() : QString()),
+      m_targetDevicePixelRatio(targetScreen ? targetScreen->devicePixelRatio() : 1.0),
       cpuBarContainer(nullptr),
       timer(nullptr),
       timeLabel(nullptr),
@@ -59,7 +223,7 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState, QWidget
 {
     // 1. 窗口基本属性设置。
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::ToolTip);
-    setFixedHeight(32);
+    setFixedHeight(kTaskbarLogicalHeight);
     setAttribute(Qt::WA_TranslucentBackground, false);
 
     // 2. 创建中心容器与外层布局。
@@ -80,7 +244,7 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState, QWidget
     QLabel* logoLabel = new QLabel(centralWidget);
     QPixmap pixmap(":/Image/Resource/Image/MainLogo.png");
     if (!pixmap.isNull()) {
-        logoLabel->setFixedHeight(40);
+        logoLabel->setFixedHeight(kTaskbarContentHeight);
         logoLabel->setMinimumWidth(1);
 
         QPixmap scaledPix = pixmap.scaled(
@@ -114,12 +278,14 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState, QWidget
 
     // -------------------------- 创建左右频谱组件 --------------------------
     m_leftSpectrum = new SpectrumWidget(SpectrumWidget::CenterToLeft, this);
-    m_leftSpectrum->setFixedHeight(32);
-    m_leftSpectrum->setMinimumWidth(450);
+    m_leftSpectrum->setFixedHeight(kTaskbarContentHeight);
+    m_leftSpectrum->setMinimumWidth(spectrumMinimumWidthForScreen());
+    m_leftSpectrum->setMaximumWidth(spectrumMaximumWidthForScreen());
 
     m_rightSpectrum = new SpectrumWidget(SpectrumWidget::CenterToRight, this);
-    m_rightSpectrum->setFixedHeight(32);
-    m_rightSpectrum->setMinimumWidth(450);
+    m_rightSpectrum->setFixedHeight(kTaskbarContentHeight);
+    m_rightSpectrum->setMinimumWidth(spectrumMinimumWidthForScreen());
+    m_rightSpectrum->setMaximumWidth(spectrumMaximumWidthForScreen());
 
     // -------------------------- 连接共享频谱数据 --------------------------
     if (m_sharedState) {
@@ -144,7 +310,7 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState, QWidget
         }
     )");
     timeLabel->setAlignment(Qt::AlignCenter);
-    timeLabel->setMinimumWidth(60);
+    timeLabel->setMinimumWidth(52);
 
     // -------------------------- 中部频谱+时间 --------------------------
     m_leftSpectrum->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
@@ -174,7 +340,7 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState, QWidget
     cpuBarContainer->setStyleSheet("background: transparent;");
 
     QHBoxLayout* cpuBarLayout = new QHBoxLayout(cpuBarContainer);
-    cpuBarLayout->setContentsMargins(4, 4, 4, 4);
+    cpuBarLayout->setContentsMargins(3, 3, 3, 3);
     cpuBarLayout->setSpacing(2);
 
     SYSTEM_INFO sysInfo;
@@ -201,7 +367,7 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState, QWidget
     networkSpeedContainer = new QWidget(centralWidget);
     networkSpeedContainer->setStyleSheet("background: transparent;");
     networkSpeedContainer->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
-    networkSpeedContainer->setMinimumWidth(80);
+    networkSpeedContainer->setMinimumWidth(74);
 
     QVBoxLayout* networkSpeedLayout = new QVBoxLayout(networkSpeedContainer);
     networkSpeedLayout->setContentsMargins(2, 2, 2, 2);
@@ -291,8 +457,104 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState, QWidget
     updateNetworkSpeedLabels();
 }
 
+int Taskbar::appBarThicknessInNativePixels() const
+{
+    // Input: none. Processing: convert the visible Qt taskbar height from device-independent
+    // pixels to Win32 native pixels. Return: AppBar reservation height in physical pixels.
+    return logicalLengthToNativePixels(height(), m_targetDevicePixelRatio);
+}
+
+QRect Taskbar::targetScreenNativeGeometry() const
+{
+    // Input: none. Processing: prefer MONITORINFOEX because SHAppBarMessage consumes physical
+    // monitor coordinates; fall back to Qt geometry scaled by DPR. Return: native monitor rect.
+    const QString normalizedTargetName = normalizeDisplayDeviceNameForWin32(m_targetScreenName);
+    if (!normalizedTargetName.isEmpty()) {
+        MonitorSearchContext context = { normalizedTargetName, QRect(), false };
+        EnumDisplayMonitors(nullptr, nullptr, findMonitorByDisplayName, reinterpret_cast<LPARAM>(&context));
+        if (context.found && context.nativeGeometry.isValid()) {
+            return context.nativeGeometry;
+        }
+    }
+
+    if (m_targetScreenGeometry.isValid()) {
+        const QRect windowMonitorGeometry = nativeMonitorGeometryFromWindow(reinterpret_cast<HWND>(winId()));
+        if (windowMonitorGeometry.isValid()) {
+            return windowMonitorGeometry;
+        }
+
+        const QPoint logicalCenter = m_targetScreenGeometry.center();
+        const QPoint nativeCenter(
+            qRound(static_cast<qreal>(logicalCenter.x()) * safeDevicePixelRatio(m_targetDevicePixelRatio)),
+            qRound(static_cast<qreal>(logicalCenter.y()) * safeDevicePixelRatio(m_targetDevicePixelRatio))
+        );
+        const QRect nativeMonitorGeometry = nativeMonitorGeometryFromPoint(nativeCenter);
+        if (nativeMonitorGeometry.isValid()) {
+            return nativeMonitorGeometry;
+        }
+
+        return logicalRectToNativePixels(m_targetScreenGeometry, m_targetDevicePixelRatio);
+    }
+
+    if (screen()) {
+        return logicalRectToNativePixels(screen()->geometry(), screen()->devicePixelRatio());
+    }
+
+    return QRect(0, 0, 1920, appBarThicknessInNativePixels());
+}
+
+QRect Taskbar::targetScreenLogicalGeometry() const
+{
+    // Input: none. Processing: use the constructor-bound QScreen geometry for stable multi-monitor
+    // placement, with the live QWidget screen as a fallback. Return: Qt logical screen rectangle.
+    if (m_targetScreenGeometry.isValid()) {
+        return m_targetScreenGeometry;
+    }
+
+    if (screen()) {
+        return screen()->geometry();
+    }
+
+    return QRect(0, 0, 1920, kTaskbarLogicalHeight);
+}
+
+int Taskbar::spectrumMinimumWidthForScreen() const
+{
+    // Input: none. Processing: reserve room for fixed logo/text/CPU/network/buttons first, then
+    // allow both spectrum widgets to shrink on compact screens. Return: minimum spectrum width.
+    const int logicalScreenWidth = m_targetScreenGeometry.isValid()
+        ? m_targetScreenGeometry.width()
+        : 1920;
+    const int availableForEachSpectrum =
+        (logicalScreenWidth - kCompactScreenNonSpectrumBudget) / 2;
+
+    return qBound(
+        kMinimumSpectrumWidth,
+        availableForEachSpectrum,
+        kLargeScreenSpectrumMinimumWidth
+    );
+}
+
+int Taskbar::spectrumMaximumWidthForScreen() const
+{
+    // Input: none. Processing: keep the middle audio visualizer elastic but bounded, so the
+    // surrounding spacers absorb wide-screen slack instead of pushing fixed content outward.
+    // Return: maximum spectrum width.
+    return qMax(spectrumMinimumWidthForScreen(), kMaximumSpectrumWidth);
+}
+
 void Taskbar::RegisterAsAppBar()
 {
+    // Input: none. Processing: register/update a top-edge AppBar using Win32 native-pixel
+    // coordinates, then position the Qt window in the same native rectangle. Return: none.
+    const QRect logicalScreenGeometry = targetScreenLogicalGeometry();
+    setGeometry(
+        logicalScreenGeometry.left(),
+        logicalScreenGeometry.top(),
+        logicalScreenGeometry.width(),
+        height()
+    );
+
     APPBARDATA abd = { 0 };
     abd.cbSize = sizeof(APPBARDATA);
     abd.hWnd = (HWND)winId();
@@ -309,32 +571,32 @@ void Taskbar::RegisterAsAppBar()
 
     abd.uEdge = ABE_TOP;
 
-    QRect screenGeometry;
-    if (m_targetScreenGeometry.isValid()) {
-        screenGeometry = m_targetScreenGeometry;
-    }
-    else if (screen()) {
-        screenGeometry = screen()->geometry();
-    }
-    else {
-        screenGeometry = QRect(0, 0, 1920, height());
-    }
+    const QRect screenGeometry = targetScreenNativeGeometry();
+    const int appBarThickness = appBarThicknessInNativePixels();
 
     abd.rc.left = screenGeometry.left();
     abd.rc.top = screenGeometry.top();
     abd.rc.right = screenGeometry.right() + 1;
-    abd.rc.bottom = screenGeometry.top() + height();
+    abd.rc.bottom = screenGeometry.top() + appBarThickness;
 
     SHAppBarMessage(ABM_QUERYPOS, &abd);
-    abd.rc.bottom = abd.rc.top + height();
+    abd.rc.bottom = abd.rc.top + appBarThickness;
     SHAppBarMessage(ABM_SETPOS, &abd);
 
-    setGeometry(
+    const QRect nativeAppBarRect(
         abd.rc.left,
         abd.rc.top,
         abd.rc.right - abd.rc.left,
         abd.rc.bottom - abd.rc.top
     );
+    const QRect logicalAppBarRect = mapNativeAppBarRectToLogicalScreen(
+        nativeAppBarRect,
+        screenGeometry,
+        logicalScreenGeometry,
+        m_targetDevicePixelRatio
+    );
+
+    setGeometry(logicalAppBarRect.left(), logicalAppBarRect.top(), logicalAppBarRect.width(), height());
 }
 
 Taskbar::~Taskbar()

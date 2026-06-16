@@ -133,7 +133,7 @@ namespace ksword::ark
             unsigned long maxRows = KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_MAX_ROWS,
             unsigned long maxIdtVectorsPerCpu = KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_IDT_VECTORS) const;
         DriverForceUnloadResult forceUnloadDriver(const std::wstring& driverName, unsigned long flags = 0UL, unsigned long timeoutMilliseconds = 3000UL) const;
-        DriverForceUnloadResult forceUnloadDriverByModuleBase(std::uint64_t moduleBase, const std::wstring& fallbackDriverName = std::wstring(), unsigned long flags = KSWORD_ARK_DRIVER_UNLOAD_FLAG_FORCE_CLEANUP, unsigned long timeoutMilliseconds = 3000UL) const;
+        DriverForceUnloadResult forceUnloadDriverByModuleBase(std::uint64_t moduleBase, const std::wstring& fallbackDriverName = std::wstring(), unsigned long flags = 0UL, unsigned long timeoutMilliseconds = 3000UL) const;
         // prepareMutation / commitMutation / rollbackMutation / queryMutationAudit：
         // - 输入：受控 transaction 参数或只读 audit 查询参数。
         // - 处理：仅在 ArkDriverClient 内封装 mutation IOCTL；Dock UI 不直接调用 DeviceIoControl。
