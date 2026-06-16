@@ -357,6 +357,7 @@ namespace
         defaultSettings.backgroundOpacityPercent = 35;
         defaultSettings.startupDefaultTabKey = QStringLiteral("welcome");
         defaultSettings.launchMaximizedOnStartup = false;
+        defaultSettings.startupTopMostEnabled = true;
         defaultSettings.autoRequestAdminOnStartup = false;
         defaultSettings.startupWindowScaleFactor = 1.0;
         defaultSettings.startupScaleRecommendPromptDisabled = false;
@@ -492,6 +493,10 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
             .toBool(loadedSettings.launchMaximizedOnStartup);
     }
 
+    // startupTopMostEnabled 作用：读取“启动后自动最高级置顶”开关，缺失时默认开启。
+    loadedSettings.startupTopMostEnabled = rootObject.value(QStringLiteral("startup_topmost_enabled"))
+        .toBool(loadedSettings.startupTopMostEnabled);
+
     // autoRequestAdminOnStartup 作用：读取“启动时自动请求管理员权限”开关，缺失时回退 false。
     loadedSettings.autoRequestAdminOnStartup = rootObject.value(QStringLiteral("startup_auto_request_admin"))
         .toBool(loadedSettings.autoRequestAdminOnStartup);
@@ -560,6 +565,7 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
         ? QStringLiteral("welcome")
         : settings.startupDefaultTabKey.trimmed().toLower());
     rootObject.insert(QStringLiteral("startup_maximized"), settings.launchMaximizedOnStartup);
+    rootObject.insert(QStringLiteral("startup_topmost_enabled"), settings.startupTopMostEnabled);
     rootObject.insert(QStringLiteral("startup_auto_request_admin"), settings.autoRequestAdminOnStartup);
     rootObject.insert(
         QStringLiteral("startup_window_scale_factor"),
