@@ -111,18 +111,22 @@ namespace
     // 返回：函数指针；不可用时返回 nullptr。
     SetWindowBandFunction resolveSetWindowBandFunction()
     {
-        HMODULE user32ModuleHandle = ::GetModuleHandleW(L"user32.dll");
-        if (user32ModuleHandle == nullptr)
-        {
-            user32ModuleHandle = ::LoadLibraryW(L"user32.dll");
-        }
-        if (user32ModuleHandle == nullptr)
-        {
-            return nullptr;
-        }
+        // cachedFunction 用途：缓存动态解析结果，避免每次图钉切换重复查询 user32 导出表。
+        static const SetWindowBandFunction cachedFunction = []() -> SetWindowBandFunction {
+            HMODULE user32ModuleHandle = ::GetModuleHandleW(L"user32.dll");
+            if (user32ModuleHandle == nullptr)
+            {
+                user32ModuleHandle = ::LoadLibraryW(L"user32.dll");
+            }
+            if (user32ModuleHandle == nullptr)
+            {
+                return nullptr;
+            }
 
-        return reinterpret_cast<SetWindowBandFunction>(
-            ::GetProcAddress(user32ModuleHandle, "SetWindowBand"));
+            return reinterpret_cast<SetWindowBandFunction>(
+                ::GetProcAddress(user32ModuleHandle, "SetWindowBand"));
+        }();
+        return cachedFunction;
     }
 
     // isCurrentProcessUiAccessTokenEnabled 作用：
@@ -131,22 +135,26 @@ namespace
     // 返回：true=当前实例已带 UIAccess；false=普通令牌或查询失败。
     bool isCurrentProcessUiAccessTokenEnabled()
     {
-        HANDLE tokenHandle = nullptr;
-        if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &tokenHandle) == FALSE)
-        {
-            return false;
-        }
+        // enabled 用途：TokenUIAccess 在进程生命周期内固定，首次查询后缓存结果即可。
+        static const bool enabled = []() -> bool {
+            HANDLE tokenHandle = nullptr;
+            if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &tokenHandle) == FALSE)
+            {
+                return false;
+            }
 
-        DWORD uiAccessValue = 0;
-        DWORD returnedLength = 0;
-        const BOOL queryOk = ::GetTokenInformation(
-            tokenHandle,
-            TokenUIAccess,
-            &uiAccessValue,
-            sizeof(uiAccessValue),
-            &returnedLength);
-        ::CloseHandle(tokenHandle);
-        return queryOk != FALSE && uiAccessValue != 0;
+            DWORD uiAccessValue = 0;
+            DWORD returnedLength = 0;
+            const BOOL queryOk = ::GetTokenInformation(
+                tokenHandle,
+                TokenUIAccess,
+                &uiAccessValue,
+                sizeof(uiAccessValue),
+                &returnedLength);
+            ::CloseHandle(tokenHandle);
+            return queryOk != FALSE && uiAccessValue != 0;
+        }();
+        return enabled;
     }
 
     // tryApplyUiAccessWindowBand 作用：
@@ -163,13 +171,13 @@ namespace
             return false;
         }
 
-        const SetWindowBandFunction setWindowBand = resolveSetWindowBandFunction();
-        if (setWindowBand == nullptr)
+        if (!isCurrentProcessUiAccessTokenEnabled())
         {
             return false;
         }
 
-        if (pinnedState && !isCurrentProcessUiAccessTokenEnabled())
+        const SetWindowBandFunction setWindowBand = resolveSetWindowBandFunction();
+        if (setWindowBand == nullptr)
         {
             return false;
         }
@@ -226,10 +234,8 @@ namespace
 
         // insertAfterHandle 用途：选择 Win32 公开 z-order 中当前权限可操作的最高置顶层级。
         const HWND insertAfterHandle = pinnedState ? HWND_TOPMOST : HWND_NOTOPMOST;
-        // setWindowPositionFlags 用途：置顶时允许系统激活/显示窗口，取消置顶时避免抢焦点。
-        const UINT setWindowPositionFlags = pinnedState
-            ? (SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
-            : (SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        // setWindowPositionFlags 用途：构造期也可能调用置顶，禁止 SWP_SHOWWINDOW 提前显示半初始化窗口。
+        const UINT setWindowPositionFlags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
 
         const BOOL setTopMostResult = ::SetWindowPos(
             windowHandle,
@@ -250,19 +256,6 @@ namespace
 
         if (pinnedState)
         {
-            if (uiAccessBandApplied)
-            {
-                // UIAccess band 成功后再补一次 TOPMOST 排序，确保 band 内也尽量靠前。
-                ::SetWindowPos(
-                    windowHandle,
-                    HWND_TOPMOST,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-            }
-
             // 当前权限若允许前台切换，则把窗口移动到同层级最前；失败不回滚置顶状态。
             ::BringWindowToTop(windowHandle);
             ::SetForegroundWindow(windowHandle);
