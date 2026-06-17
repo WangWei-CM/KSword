@@ -6945,8 +6945,8 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QAction* r0ClearHiddenProcessAction = r0VisibilitySubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_refresh.svg"),
         QStringLiteral("清空全部隐藏标记"));
-    r0HideProcessAction->setToolTip(QStringLiteral("摘除目标进程的 ActiveProcessLinks，但保留 PspCidTable，普通枚举将不可见。"));
-    r0UnhideProcessAction->setToolTip(QStringLiteral("恢复由 Ksword 记录的进程链表位置；若原位置不再相邻，则挂回 System 链头后。"));
+    r0HideProcessAction->setToolTip(QStringLiteral("修改目标进程 UniqueProcessId 并摘除 ActiveProcessLinks；保留 PspCidTable 以便 Ksword 按原 PID 恢复。"));
+    r0UnhideProcessAction->setToolTip(QStringLiteral("恢复由 Ksword 记录的 UniqueProcessId 和进程链表位置；若原位置不再相邻，则挂回 System 链头后。"));
     r0ClearHiddenProcessAction->setToolTip(QStringLiteral("恢复所有由 Ksword 摘链的进程，并清空驱动内记录。"));
     QMenu* r0DangerSubMenu = contextMenu.addMenu(
         buildR0ActionIcon(":/Icon/process_uncritical.svg"),
@@ -8536,8 +8536,8 @@ void ProcessDock::executeR0SetProcessHiddenAction(const bool hidden)
             QStringLiteral("R0进程隐藏(可恢复)"),
             QStringLiteral(
                 "将把选中的 %1 个进程写入 Ksword 驱动隐藏表。\n\n"
-                "说明：当前实现会真实摘除 ActiveProcessLinks，但保留 PspCidTable；"
-                "普通枚举看不到，Ksword 仍可通过 R0 CID 扫描读取。")
+                "说明：当前实现会同时修改 UniqueProcessId 并摘除 ActiveProcessLinks，"
+                "但保留 PspCidTable；普通枚举看不到，Ksword 仍可通过 R0 CID 扫描按原 PID 读取和恢复。")
                 .arg(actionTargets.size()),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No);
