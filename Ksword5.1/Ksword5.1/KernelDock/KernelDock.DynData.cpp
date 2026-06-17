@@ -2122,6 +2122,17 @@ void KernelDock::initializeDynDataTab()
     });
 }
 
+void KernelDock::requestDynDataRefresh()
+{
+    if (!m_dynDataTabInitialized)
+    {
+        ensureTabInitialized(m_dynDataTabIndex);
+        return;
+    }
+
+    refreshDynDataAsync();
+}
+
 void KernelDock::refreshDynDataAsync()
 {
     if (m_dynDataRefreshRunning.exchange(true))

@@ -92,6 +92,9 @@ PsGetProcessImageFileName(
 #define KSWORD_ARK_ENUM_SCAN_MAX_PID 0x00400000UL
 #define KSWORD_ARK_ENUM_SCAN_MIN_PID KSWORD_ARK_ENUM_PID_STEP
 #define KSWORD_ARK_PROCESS_HIDE_MAX_PIDS 256UL
+#define KSWORD_ARK_PROCESS_OFFSET_SCAN_LIMIT 0x2000UL
+#define KSWORD_ARK_PROCESS_HIDDEN_PID_TAG 0xE0000000UL
+#define KSWORD_ARK_PROCESS_HIDDEN_PID_MASK 0x0FFFFFFCUL
 
 #ifndef STATUS_NOT_FOUND
 #define STATUS_NOT_FOUND ((NTSTATUS)0xC0000225L)
@@ -104,11 +107,15 @@ typedef PEPROCESS(NTAPI* KSWORD_PS_GET_NEXT_PROCESS_FN)(
 typedef struct _KSWORD_ARK_PROCESS_HIDE_RECORD
 {
     ULONG Pid;
+    ULONG UniqueProcessIdOffset;
     ULONG ActiveProcessLinksOffset;
     PEPROCESS ProcessObject;
+    HANDLE OriginalUniqueProcessId;
+    HANDLE HiddenUniqueProcessId;
     LIST_ENTRY* ActiveProcessLinks;
     LIST_ENTRY* PreviousLink;
     LIST_ENTRY* NextLink;
+    BOOLEAN UniqueProcessIdPatched;
     BOOLEAN ActiveListUnlinked;
 } KSWORD_ARK_PROCESS_HIDE_RECORD;
 
@@ -322,6 +329,95 @@ Return Value:
 }
 
 static NTSTATUS
+KswordARKDriverReadProcessHandleField(
+    _In_ PEPROCESS ProcessObject,
+    _In_ ULONG Offset,
+    _Out_ HANDLE* ValueOut
+    )
+/*++
+
+Routine Description:
+
+    Safely read one HANDLE-sized EPROCESS field. 中文说明：用于读取
+    _EPROCESS.UniqueProcessId，避免直接解引用错误 DynData 偏移。
+
+Arguments:
+
+    ProcessObject - Target EPROCESS.
+    Offset - Field offset inside EPROCESS.
+    ValueOut - Receives the HANDLE-sized value.
+
+Return Value:
+
+    STATUS_SUCCESS or validation/exception status.
+
+--*/
+{
+    HANDLE handleValue = NULL;
+
+    if (ProcessObject == NULL || ValueOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *ValueOut = NULL;
+
+    if (!KswordARKDriverProcessDynOffsetPresent(Offset)) {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    __try {
+        RtlCopyMemory(&handleValue, (PUCHAR)ProcessObject + Offset, sizeof(handleValue));
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return GetExceptionCode();
+    }
+
+    *ValueOut = handleValue;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+KswordARKDriverWriteProcessHandleField(
+    _In_ PEPROCESS ProcessObject,
+    _In_ ULONG Offset,
+    _In_ HANDLE Value
+    )
+/*++
+
+Routine Description:
+
+    Safely write one HANDLE-sized EPROCESS field. 中文说明：用于 Ksword
+    管理的 _EPROCESS.UniqueProcessId 修改和恢复。
+
+Arguments:
+
+    ProcessObject - Target EPROCESS.
+    Offset - Field offset inside EPROCESS.
+    Value - HANDLE-sized value to write.
+
+Return Value:
+
+    STATUS_SUCCESS or validation/exception status.
+
+--*/
+{
+    if (ProcessObject == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!KswordARKDriverProcessDynOffsetPresent(Offset)) {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    __try {
+        RtlCopyMemory((PUCHAR)ProcessObject + Offset, &Value, sizeof(Value));
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return GetExceptionCode();
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 KswordARKDriverValidateActiveProcessLinksForUnlink(
     _In_ LIST_ENTRY* Link,
     _Outptr_ LIST_ENTRY** PreviousOut,
@@ -379,6 +475,267 @@ Return Value:
 
     *PreviousOut = previous;
     *NextOut = next;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+KswordARKDriverTryProcessListOffsets(
+    _In_ PEPROCESS ProcessObject,
+    _In_ ULONG ProcessId,
+    _In_ ULONG UniqueProcessIdOffset,
+    _In_ ULONG ActiveProcessLinksOffset
+    )
+/*++
+
+Routine Description:
+
+    Validate one candidate pair of _EPROCESS.UniqueProcessId and
+    _EPROCESS.ActiveProcessLinks offsets.
+
+Arguments:
+
+    ProcessObject - Target EPROCESS.
+    ProcessId - Original target PID.
+    UniqueProcessIdOffset - Candidate UniqueProcessId offset.
+    ActiveProcessLinksOffset - Candidate ActiveProcessLinks offset.
+
+Return Value:
+
+    STATUS_SUCCESS when the pair matches the target process and points to a
+    consistent active-process list node.
+
+--*/
+{
+    HANDLE uniqueProcessId = NULL;
+    LIST_ENTRY* previous = NULL;
+    LIST_ENTRY* next = NULL;
+    LIST_ENTRY* link = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (ProcessObject == NULL || ProcessId == 0UL || ProcessId <= 4UL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!KswordARKDriverProcessDynOffsetPresent(UniqueProcessIdOffset) ||
+        !KswordARKDriverProcessDynOffsetPresent(ActiveProcessLinksOffset)) {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    status = KswordARKDriverReadProcessHandleField(
+        ProcessObject,
+        UniqueProcessIdOffset,
+        &uniqueProcessId);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    if (HandleToULong(uniqueProcessId) != ProcessId) {
+        return STATUS_NOT_FOUND;
+    }
+
+    link = (LIST_ENTRY*)((PUCHAR)ProcessObject + ActiveProcessLinksOffset);
+    return KswordARKDriverValidateActiveProcessLinksForUnlink(link, &previous, &next);
+}
+
+static NTSTATUS
+KswordARKDriverResolveProcessListOffsets(
+    _In_ PEPROCESS ProcessObject,
+    _In_ ULONG ProcessId,
+    _In_opt_ const KSW_DYN_STATE* DynState,
+    _Out_ ULONG* UniqueProcessIdOffsetOut,
+    _Out_ ULONG* ActiveProcessLinksOffsetOut
+    )
+/*++
+
+Routine Description:
+
+    Resolve _EPROCESS.UniqueProcessId and ActiveProcessLinks offsets for the
+    target process. 中文说明：优先使用 DynData/PDB profile；缺失时利用这两个
+    字段在 EPROCESS 中相邻的布局做保守运行时扫描，避免未刷新 Kernel
+    DynData 页面时右键隐藏直接返回 STATUS_PROCEDURE_NOT_FOUND。
+
+Arguments:
+
+    ProcessObject - Target EPROCESS.
+    ProcessId - Original target PID.
+    DynState - Optional current DynData snapshot.
+    UniqueProcessIdOffsetOut - Receives UniqueProcessId offset.
+    ActiveProcessLinksOffsetOut - Receives ActiveProcessLinks offset.
+
+Return Value:
+
+    STATUS_SUCCESS or the best observed failure status.
+
+--*/
+{
+    ULONG uniqueOffset = KSW_DYN_OFFSET_UNAVAILABLE;
+    ULONG activeOffset = KSW_DYN_OFFSET_UNAVAILABLE;
+    ULONG scanOffset = 0UL;
+    NTSTATUS status = STATUS_PROCEDURE_NOT_FOUND;
+    NTSTATUS lastStatus = STATUS_PROCEDURE_NOT_FOUND;
+
+    if (ProcessObject == NULL ||
+        UniqueProcessIdOffsetOut == NULL ||
+        ActiveProcessLinksOffsetOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *UniqueProcessIdOffsetOut = KSW_DYN_OFFSET_UNAVAILABLE;
+    *ActiveProcessLinksOffsetOut = KSW_DYN_OFFSET_UNAVAILABLE;
+
+    if (DynState != NULL && DynState->Initialized) {
+        uniqueOffset = DynState->Kernel.EpUniqueProcessId;
+        activeOffset = DynState->Kernel.EpActiveProcessLinks;
+    }
+
+    if (KswordARKDriverProcessDynOffsetPresent(activeOffset) &&
+        !KswordARKDriverProcessDynOffsetPresent(uniqueOffset) &&
+        activeOffset >= sizeof(HANDLE)) {
+        uniqueOffset = activeOffset - (ULONG)sizeof(HANDLE);
+    }
+    if (KswordARKDriverProcessDynOffsetPresent(uniqueOffset) &&
+        !KswordARKDriverProcessDynOffsetPresent(activeOffset) &&
+        uniqueOffset <= (MAXULONG - (ULONG)sizeof(HANDLE))) {
+        activeOffset = uniqueOffset + (ULONG)sizeof(HANDLE);
+    }
+
+    if (KswordARKDriverProcessDynOffsetPresent(uniqueOffset) &&
+        KswordARKDriverProcessDynOffsetPresent(activeOffset)) {
+        status = KswordARKDriverTryProcessListOffsets(
+            ProcessObject,
+            ProcessId,
+            uniqueOffset,
+            activeOffset);
+        if (NT_SUCCESS(status)) {
+            *UniqueProcessIdOffsetOut = uniqueOffset;
+            *ActiveProcessLinksOffsetOut = activeOffset;
+            return STATUS_SUCCESS;
+        }
+        lastStatus = status;
+    }
+
+    for (scanOffset = 0UL;
+         scanOffset + (ULONG)sizeof(HANDLE) + (ULONG)sizeof(LIST_ENTRY) <= KSWORD_ARK_PROCESS_OFFSET_SCAN_LIMIT;
+         scanOffset += (ULONG)sizeof(PVOID)) {
+        HANDLE candidatePid = NULL;
+
+        status = KswordARKDriverReadProcessHandleField(ProcessObject, scanOffset, &candidatePid);
+        if (!NT_SUCCESS(status)) {
+            if (status != STATUS_PROCEDURE_NOT_FOUND) {
+                lastStatus = status;
+            }
+            continue;
+        }
+        if (HandleToULong(candidatePid) != ProcessId) {
+            continue;
+        }
+
+        uniqueOffset = scanOffset;
+        activeOffset = scanOffset + (ULONG)sizeof(HANDLE);
+        status = KswordARKDriverTryProcessListOffsets(
+            ProcessObject,
+            ProcessId,
+            uniqueOffset,
+            activeOffset);
+        if (NT_SUCCESS(status)) {
+            *UniqueProcessIdOffsetOut = uniqueOffset;
+            *ActiveProcessLinksOffsetOut = activeOffset;
+            return STATUS_SUCCESS;
+        }
+        lastStatus = status;
+    }
+
+    return (lastStatus == STATUS_NOT_FOUND) ? STATUS_PROCEDURE_NOT_FOUND : lastStatus;
+}
+
+static HANDLE
+KswordARKDriverBuildHiddenUniqueProcessId(
+    _In_ ULONG ProcessId
+    )
+/*++
+
+Routine Description:
+
+    Build a deterministic fake PID for the UniqueProcessId field. 中文说明：高位
+    打标并保留低位 PID 信息，避免与正常低范围 PID 冲突，同时便于调试。
+
+Arguments:
+
+    ProcessId - Original PID.
+
+Return Value:
+
+    HANDLE-sized fake PID value.
+
+--*/
+{
+    ULONG hiddenPid = KSWORD_ARK_PROCESS_HIDDEN_PID_TAG |
+        (ProcessId & KSWORD_ARK_PROCESS_HIDDEN_PID_MASK);
+
+    if (hiddenPid == ProcessId || hiddenPid <= 4UL) {
+        hiddenPid = KSWORD_ARK_PROCESS_HIDDEN_PID_TAG;
+    }
+    return ULongToHandle(hiddenPid);
+}
+
+static NTSTATUS
+KswordARKDriverPatchUniqueProcessIdForHide(
+    _In_ PEPROCESS ProcessObject,
+    _In_ ULONG ProcessId,
+    _In_ ULONG UniqueProcessIdOffset,
+    _Out_ HANDLE* OriginalUniqueProcessIdOut,
+    _Out_ HANDLE* HiddenUniqueProcessIdOut
+    )
+/*++
+
+Routine Description:
+
+    Patch _EPROCESS.UniqueProcessId for Ksword-managed hide.
+
+Arguments:
+
+    ProcessObject - Target EPROCESS.
+    ProcessId - Original PID.
+    UniqueProcessIdOffset - Offset resolved from DynData or runtime scan.
+    OriginalUniqueProcessIdOut - Receives original HANDLE value.
+    HiddenUniqueProcessIdOut - Receives written fake HANDLE value.
+
+Return Value:
+
+    STATUS_SUCCESS when the PID field was modified.
+
+--*/
+{
+    HANDLE originalUniqueProcessId = NULL;
+    HANDLE hiddenUniqueProcessId = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (OriginalUniqueProcessIdOut == NULL || HiddenUniqueProcessIdOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *OriginalUniqueProcessIdOut = NULL;
+    *HiddenUniqueProcessIdOut = NULL;
+
+    status = KswordARKDriverReadProcessHandleField(
+        ProcessObject,
+        UniqueProcessIdOffset,
+        &originalUniqueProcessId);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    if (HandleToULong(originalUniqueProcessId) != ProcessId) {
+        return STATUS_DATA_ERROR;
+    }
+
+    hiddenUniqueProcessId = KswordARKDriverBuildHiddenUniqueProcessId(ProcessId);
+    status = KswordARKDriverWriteProcessHandleField(
+        ProcessObject,
+        UniqueProcessIdOffset,
+        hiddenUniqueProcessId);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    *OriginalUniqueProcessIdOut = originalUniqueProcessId;
+    *HiddenUniqueProcessIdOut = hiddenUniqueProcessId;
     return STATUS_SUCCESS;
 }
 
@@ -450,6 +807,65 @@ Return Value:
     *PreviousOut = previous;
     *NextOut = next;
     return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+KswordARKDriverRestoreUniqueProcessIdRecord(
+    _Inout_ KSWORD_ARK_PROCESS_HIDE_RECORD* Record
+    )
+/*++
+
+Routine Description:
+
+    Restore _EPROCESS.UniqueProcessId for one Ksword hide record.
+
+Arguments:
+
+    Record - Hide record with original/fake PID values.
+
+Return Value:
+
+    STATUS_SUCCESS when restored or no PID patch is pending.
+
+--*/
+{
+    HANDLE currentUniqueProcessId = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (Record == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!Record->UniqueProcessIdPatched) {
+        return STATUS_SUCCESS;
+    }
+    if (Record->ProcessObject == NULL ||
+        !KswordARKDriverProcessDynOffsetPresent(Record->UniqueProcessIdOffset)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = KswordARKDriverReadProcessHandleField(
+        Record->ProcessObject,
+        Record->UniqueProcessIdOffset,
+        &currentUniqueProcessId);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    if (currentUniqueProcessId == Record->OriginalUniqueProcessId) {
+        Record->UniqueProcessIdPatched = FALSE;
+        return STATUS_SUCCESS;
+    }
+    if (currentUniqueProcessId != Record->HiddenUniqueProcessId) {
+        return STATUS_DATA_ERROR;
+    }
+
+    status = KswordARKDriverWriteProcessHandleField(
+        Record->ProcessObject,
+        Record->UniqueProcessIdOffset,
+        Record->OriginalUniqueProcessId);
+    if (NT_SUCCESS(status)) {
+        Record->UniqueProcessIdPatched = FALSE;
+    }
+    return status;
 }
 
 static NTSTATUS
@@ -782,11 +1198,12 @@ KswordARKDriverSetProcessVisibility(
 
 Routine Description:
 
-    Execute Ksword-owned process visibility changes. 中文说明：HIDE 会把目标
-    EPROCESS.ActiveProcessLinks 从内核活动进程链表摘下，保留 PspCidTable；
-    因此普通 R3 枚举不可见，而 Ksword 的 R0 CID 扫描仍能读取目标并打上
-    KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI。UNHIDE/CLEAR_ALL 只恢复由
-    本驱动保存的记录，不接受 R3 传入任何内核地址。
+    Execute Ksword-owned process visibility changes. 中文说明：HIDE 会先修改
+    目标 _EPROCESS.UniqueProcessId，再把 ActiveProcessLinks 从内核活动进程
+    链表摘下，保留 PspCidTable；因此普通 R3 枚举不可见，而 Ksword 的 R0
+    CID 扫描仍能按原 PID 读取目标并打上
+    KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI。UNHIDE/CLEAR_ALL 只恢复由本
+    驱动保存的 PID 和链表记录，不接受 R3 传入任何内核地址。
 
 Arguments:
 
@@ -807,6 +1224,8 @@ Return Value:
     NTSTATUS restoreStatus = STATUS_SUCCESS;
     PEPROCESS processObject = NULL;
     KSW_DYN_STATE dynState;
+    ULONG uniqueProcessIdOffset = KSW_DYN_OFFSET_UNAVAILABLE;
+    ULONG activeProcessLinksOffset = KSW_DYN_OFFSET_UNAVAILABLE;
 
     if (StatusOut == NULL || HiddenCountOut == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -830,14 +1249,35 @@ Return Value:
         return STATUS_SUCCESS;
     }
     if (Action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE) {
-        KswordARKDynDataSnapshot(&dynState);
-        if (!dynState.Initialized ||
-            !KswordARKDriverProcessDynOffsetPresent(dynState.Kernel.EpActiveProcessLinks)) {
-            return STATUS_PROCEDURE_NOT_FOUND;
+        BOOLEAN alreadyHidden = FALSE;
+        ExAcquirePushLockShared(&g_KswordArkProcessHideState.Lock);
+        for (index = 0UL; index < g_KswordArkProcessHideState.Count; ++index) {
+            if (g_KswordArkProcessHideState.Records[index].Pid == ProcessId) {
+                alreadyHidden = TRUE;
+                break;
+            }
+        }
+        *HiddenCountOut = g_KswordArkProcessHideState.Count;
+        ExReleasePushLockShared(&g_KswordArkProcessHideState.Lock);
+        if (alreadyHidden) {
+            *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN;
+            return STATUS_SUCCESS;
         }
 
+        KswordARKDynDataSnapshot(&dynState);
         status = PsLookupProcessByProcessId(ULongToHandle(ProcessId), &processObject);
         if (!NT_SUCCESS(status)) {
+            return status;
+        }
+        status = KswordARKDriverResolveProcessListOffsets(
+            processObject,
+            ProcessId,
+            &dynState,
+            &uniqueProcessIdOffset,
+            &activeProcessLinksOffset);
+        if (!NT_SUCCESS(status)) {
+            ObDereferenceObject(processObject);
+            processObject = NULL;
             return status;
         }
     }
@@ -856,7 +1296,10 @@ Return Value:
             while (index < g_KswordArkProcessHideState.Count) {
                 KSWORD_ARK_PROCESS_HIDE_RECORD* record =
                     &g_KswordArkProcessHideState.Records[index];
-                restoreStatus = KswordARKDriverRestoreActiveProcessLinksRecord(record);
+                restoreStatus = KswordARKDriverRestoreUniqueProcessIdRecord(record);
+                if (NT_SUCCESS(restoreStatus)) {
+                    restoreStatus = KswordARKDriverRestoreActiveProcessLinksRecord(record);
+                }
                 if (!NT_SUCCESS(restoreStatus)) {
                     if (NT_SUCCESS(status)) {
                         status = restoreStatus;
@@ -897,21 +1340,65 @@ Return Value:
                 LIST_ENTRY* link = NULL;
                 LIST_ENTRY* previous = NULL;
                 LIST_ENTRY* next = NULL;
+                HANDLE originalUniqueProcessId = NULL;
+                HANDLE hiddenUniqueProcessId = NULL;
 
-                status = KswordARKDriverUnlinkActiveProcessLinks(
+                status = KswordARKDriverPatchUniqueProcessIdForHide(
                     processObject,
-                    dynState.Kernel.EpActiveProcessLinks,
-                    &link,
-                    &previous,
-                    &next);
+                    ProcessId,
+                    uniqueProcessIdOffset,
+                    &originalUniqueProcessId,
+                    &hiddenUniqueProcessId);
+                if (!NT_SUCCESS(status)) {
+                    *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_UNKNOWN;
+                }
+                if (NT_SUCCESS(status)) {
+                    status = KswordARKDriverUnlinkActiveProcessLinks(
+                        processObject,
+                        activeProcessLinksOffset,
+                        &link,
+                        &previous,
+                        &next);
+                    if (!NT_SUCCESS(status)) {
+                        KSWORD_ARK_PROCESS_HIDE_RECORD rollbackRecord;
+                        NTSTATUS rollbackStatus = STATUS_SUCCESS;
+                        RtlZeroMemory(&rollbackRecord, sizeof(rollbackRecord));
+                        rollbackRecord.ProcessObject = processObject;
+                        rollbackRecord.Pid = ProcessId;
+                        rollbackRecord.UniqueProcessIdOffset = uniqueProcessIdOffset;
+                        rollbackRecord.OriginalUniqueProcessId = originalUniqueProcessId;
+                        rollbackRecord.HiddenUniqueProcessId = hiddenUniqueProcessId;
+                        rollbackRecord.UniqueProcessIdPatched = TRUE;
+                        rollbackStatus = KswordARKDriverRestoreUniqueProcessIdRecord(&rollbackRecord);
+                        if (!NT_SUCCESS(rollbackStatus)) {
+                            RtlZeroMemory(record, sizeof(*record));
+                            record->Pid = ProcessId;
+                            record->UniqueProcessIdOffset = uniqueProcessIdOffset;
+                            record->ActiveProcessLinksOffset = activeProcessLinksOffset;
+                            record->ProcessObject = processObject;
+                            record->OriginalUniqueProcessId = originalUniqueProcessId;
+                            record->HiddenUniqueProcessId = hiddenUniqueProcessId;
+                            record->UniqueProcessIdPatched = TRUE;
+                            record->ActiveListUnlinked = FALSE;
+                            processObject = NULL;
+                            g_KswordArkProcessHideState.Count += 1UL;
+                            *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN;
+                            status = rollbackStatus;
+                        }
+                    }
+                }
                 if (NT_SUCCESS(status)) {
                     RtlZeroMemory(record, sizeof(*record));
                     record->Pid = ProcessId;
-                    record->ActiveProcessLinksOffset = dynState.Kernel.EpActiveProcessLinks;
+                    record->UniqueProcessIdOffset = uniqueProcessIdOffset;
+                    record->ActiveProcessLinksOffset = activeProcessLinksOffset;
                     record->ProcessObject = processObject;
+                    record->OriginalUniqueProcessId = originalUniqueProcessId;
+                    record->HiddenUniqueProcessId = hiddenUniqueProcessId;
                     record->ActiveProcessLinks = link;
                     record->PreviousLink = previous;
                     record->NextLink = next;
+                    record->UniqueProcessIdPatched = TRUE;
                     record->ActiveListUnlinked = TRUE;
                     processObject = NULL;
                     g_KswordArkProcessHideState.Count += 1UL;
@@ -923,7 +1410,10 @@ Return Value:
             if (foundIndex != MAXULONG) {
                 KSWORD_ARK_PROCESS_HIDE_RECORD* record =
                     &g_KswordArkProcessHideState.Records[foundIndex];
-                status = KswordARKDriverRestoreActiveProcessLinksRecord(record);
+                status = KswordARKDriverRestoreUniqueProcessIdRecord(record);
+                if (NT_SUCCESS(status)) {
+                    status = KswordARKDriverRestoreActiveProcessLinksRecord(record);
+                }
                 if (!NT_SUCCESS(status)) {
                     *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN;
                     *HiddenCountOut = g_KswordArkProcessHideState.Count;
