@@ -422,8 +422,9 @@ KswordARKProcessIoctlSetVisibility(
 
 Routine Description:
 
-    处理 IOCTL_KSWORD_ARK_SET_PROCESS_VISIBILITY。中文说明：该 IOCTL 只更新
-    驱动内可恢复隐藏标记，不执行 DKOM 断链，实际过滤由 R3 进程列表完成。
+    处理 IOCTL_KSWORD_ARK_SET_PROCESS_VISIBILITY。中文说明：该 IOCTL 执行
+    Ksword 管理的 ActiveProcessLinks 可恢复摘链/恢复；handler 负责写访问、
+    safety policy 和固定包校验，后端不接受 R3 传入内核地址。
 
 Arguments:
 
@@ -488,6 +489,29 @@ Return Value:
     RtlZeroMemory(visibilityResponse, sizeof(*visibilityResponse));
     visibilityResponse->version = KSWORD_ARK_ENUM_PROCESS_PROTOCOL_VERSION;
     visibilityResponse->processId = visibilityRequest->processId;
+
+    if (visibilityRequest->action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE) {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_KERNEL_PATCH;
+        safetyContext.TargetProcessId = (ULONG)visibilityRequest->processId;
+        safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+        if (!NT_SUCCESS(status)) {
+            visibilityResponse->status = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_UNKNOWN;
+            visibilityResponse->hiddenCount = 0UL;
+            visibilityResponse->lastStatus = status;
+            *BytesReturned = sizeof(*visibilityResponse);
+            KswordARKProcessIoctlLog(
+                Device,
+                "Warn",
+                "R0 process visibility denied by safety policy: pid=%lu, action=%lu, status=0x%08X.",
+                (unsigned long)visibilityRequest->processId,
+                (unsigned long)visibilityRequest->action,
+                (unsigned int)status);
+            return status;
+        }
+    }
 
     status = KswordARKDriverSetProcessVisibility(
         (ULONG)visibilityRequest->processId,

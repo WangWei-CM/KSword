@@ -79,6 +79,20 @@ KswordARKDriverQueryDriverIntegrity(
     );
 
 NTSTATUS
+KswordARKDriverQueryCpuHardware(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
+KswordARKDriverQueryPhysicalMemoryLayout(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
 KswordARKDriverEnumerateShadowSsdt(
     _Out_writes_bytes_to_(outputBufferLength, *bytesWrittenOut) PVOID outputBuffer,
     _In_ size_t outputBufferLength,

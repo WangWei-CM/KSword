@@ -452,11 +452,12 @@ private:
     // - protectionLevel 使用单字节原生层级编码（Signer<<4 | Type）。
     void executeR0SetPplProtectionAction(std::uint8_t protectionLevel, const QString& levelDisplayText);
     // executeR0SetProcessHiddenAction：
-    // - 作用：通过 R0 更新可恢复隐藏标记，并让本进程列表默认过滤这些 PID。
+    // - 作用：通过 R0 摘除/恢复目标进程的 ActiveProcessLinks；普通枚举不可见，
+    //   Ksword 仍可通过 R0 CID 扫描读取并显示隐藏项。
     // - 参数 hidden：true=隐藏选中进程；false=取消隐藏选中进程。
     void executeR0SetProcessHiddenAction(bool hidden);
     // executeR0ClearProcessHiddenAction：
-    // - 作用：清空驱动内所有可恢复隐藏标记，并刷新进程列表。
+    // - 作用：恢复驱动内所有被 Ksword 摘链的进程，并刷新进程列表。
     void executeR0ClearProcessHiddenAction();
     // executeR0SetBreakOnTerminationAction：
     // - 作用：通过 R0 设置或清除 BreakOnTermination 关键进程标记。
@@ -578,7 +579,7 @@ private:
     QPushButton* m_startButton = nullptr;     // 开始监视按钮。
     QPushButton* m_pauseButton = nullptr;     // 暂停监视按钮。
     QCheckBox* m_kernelCompareCheck = nullptr;// 刷新时是否额外请求内核进程列表并做差异对比。
-    QCheckBox* m_showKswordHiddenProcessCheck = nullptr; // 是否显示被 Ksword R0 标记隐藏的进程。
+    QCheckBox* m_showKswordHiddenProcessCheck = nullptr; // 是否显示被 Ksword R0 摘链隐藏的进程。
     QLineEdit* m_processSearchLineEdit = nullptr; // 进程搜索框；用于按名称/PID/路径等关键词过滤当前列表。
     QLabel* m_refreshLabel = nullptr;         // 列表刷新间隔标签。
     QLineEdit* m_tableRefreshIntervalEdit = nullptr; // 进程表格重绘间隔输入框，默认 2 秒。

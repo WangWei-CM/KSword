@@ -899,6 +899,139 @@ namespace ksword::ark
             maxIdtVectorsPerCpu);
     }
 
+    CpuHardwareSnapshotResult DriverClient::queryCpuHardwareSnapshot() const
+    {
+        // 输入：无；R0 CPUID 查询不需要筛选参数。
+        // 处理：读取固定大小响应并复制到 R3 稳定模型，避免 UI 直接依赖共享 C 结构布局。
+        // 返回：CpuHardwareSnapshotResult；旧驱动未注册 IOCTL 时 unsupported=true。
+        CpuHardwareSnapshotResult snapshotResult{};
+        KSWORD_ARK_QUERY_CPU_HARDWARE_RESPONSE response{};
+
+        snapshotResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_QUERY_CPU_HARDWARE,
+            nullptr,
+            0UL,
+            &response,
+            static_cast<unsigned long>(sizeof(response)));
+        if (!snapshotResult.io.ok)
+        {
+            snapshotResult.unsupported = isUnsupportedIoctlError(snapshotResult.io.win32Error);
+            snapshotResult.io.message = snapshotResult.unsupported
+                ? "IOCTL_KSWORD_ARK_QUERY_CPU_HARDWARE unsupported or driver version is too old"
+                : "DeviceIoControl(IOCTL_KSWORD_ARK_QUERY_CPU_HARDWARE) failed, error=" +
+                    std::to_string(snapshotResult.io.win32Error);
+            return snapshotResult;
+        }
+        if (snapshotResult.io.bytesReturned < sizeof(response))
+        {
+            snapshotResult.io.ok = false;
+            snapshotResult.io.message =
+                "cpu hardware response too small, bytesReturned=" +
+                std::to_string(snapshotResult.io.bytesReturned);
+            return snapshotResult;
+        }
+
+        snapshotResult.version = static_cast<std::uint32_t>(response.version);
+        snapshotResult.fieldFlags = static_cast<std::uint32_t>(response.fieldFlags);
+        snapshotResult.logicalProcessorCount = static_cast<std::uint32_t>(response.logicalProcessorCount);
+        snapshotResult.activeProcessorCount = static_cast<std::uint32_t>(response.activeProcessorCount);
+        snapshotResult.packageCount = static_cast<std::uint32_t>(response.packageCount);
+        snapshotResult.family = static_cast<std::uint32_t>(response.family);
+        snapshotResult.model = static_cast<std::uint32_t>(response.model);
+        snapshotResult.stepping = static_cast<std::uint32_t>(response.stepping);
+        snapshotResult.processorType = static_cast<std::uint32_t>(response.processorType);
+        snapshotResult.brandIndex = static_cast<std::uint32_t>(response.brandIndex);
+        snapshotResult.clflushLineSize = static_cast<std::uint32_t>(response.clflushLineSize);
+        snapshotResult.initialApicId = static_cast<std::uint32_t>(response.initialApicId);
+        snapshotResult.maxBasicLeaf = static_cast<std::uint32_t>(response.maxBasicLeaf);
+        snapshotResult.maxExtendedLeaf = static_cast<std::uint32_t>(response.maxExtendedLeaf);
+        snapshotResult.lastStatus = static_cast<long>(response.lastStatus);
+        snapshotResult.io.ntStatus = snapshotResult.lastStatus;
+        snapshotResult.featureMask = static_cast<std::uint64_t>(response.featureMask);
+        snapshotResult.leaf1Ecx = static_cast<std::uint64_t>(response.leaf1Ecx);
+        snapshotResult.leaf1Edx = static_cast<std::uint64_t>(response.leaf1Edx);
+        snapshotResult.leaf7Ebx = static_cast<std::uint64_t>(response.leaf7Ebx);
+        snapshotResult.leaf7Ecx = static_cast<std::uint64_t>(response.leaf7Ecx);
+        snapshotResult.leaf7Edx = static_cast<std::uint64_t>(response.leaf7Edx);
+        snapshotResult.leaf80000001Ecx = static_cast<std::uint64_t>(response.leaf80000001Ecx);
+        snapshotResult.leaf80000001Edx = static_cast<std::uint64_t>(response.leaf80000001Edx);
+        snapshotResult.vendor = fixedKernelAnsiToString(response.vendor, KSWORD_ARK_CPU_HARDWARE_VENDOR_CHARS);
+        snapshotResult.brand = fixedKernelAnsiToString(response.brand, KSWORD_ARK_CPU_HARDWARE_BRAND_CHARS);
+
+        std::ostringstream stream;
+        stream << "version=" << snapshotResult.version
+            << ", vendor=" << snapshotResult.vendor
+            << ", brand=" << snapshotResult.brand
+            << ", logical=" << snapshotResult.logicalProcessorCount
+            << ", active=" << snapshotResult.activeProcessorCount
+            << ", family=" << snapshotResult.family
+            << ", model=" << snapshotResult.model
+            << ", stepping=" << snapshotResult.stepping
+            << ", features=0x" << std::hex << snapshotResult.featureMask
+            << ", lastStatus=0x" << static_cast<unsigned long>(snapshotResult.lastStatus);
+        snapshotResult.io.message = stream.str();
+        return snapshotResult;
+    }
+
+    PhysicalMemoryLayoutResult DriverClient::queryPhysicalMemoryLayout() const
+    {
+        // 输入：无；R0 只返回物理内存范围聚合统计。
+        // 处理：解析固定大小响应，避免 UI 直接依赖共享 C 结构。
+        // 返回：PhysicalMemoryLayoutResult；不会包含任何物理内存字节内容。
+        PhysicalMemoryLayoutResult layoutResult{};
+        KSWORD_ARK_QUERY_PHYSICAL_MEMORY_LAYOUT_RESPONSE response{};
+
+        layoutResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_QUERY_PHYSICAL_MEMORY_LAYOUT,
+            nullptr,
+            0UL,
+            &response,
+            static_cast<unsigned long>(sizeof(response)));
+        if (!layoutResult.io.ok)
+        {
+            layoutResult.unsupported = isUnsupportedIoctlError(layoutResult.io.win32Error);
+            layoutResult.io.message = layoutResult.unsupported
+                ? "IOCTL_KSWORD_ARK_QUERY_PHYSICAL_MEMORY_LAYOUT unsupported or driver version is too old"
+                : "DeviceIoControl(IOCTL_KSWORD_ARK_QUERY_PHYSICAL_MEMORY_LAYOUT) failed, error=" +
+                    std::to_string(layoutResult.io.win32Error);
+            return layoutResult;
+        }
+        if (layoutResult.io.bytesReturned < sizeof(response))
+        {
+            layoutResult.io.ok = false;
+            layoutResult.io.message =
+                "physical memory layout response too small, bytesReturned=" +
+                std::to_string(layoutResult.io.bytesReturned);
+            return layoutResult;
+        }
+
+        layoutResult.version = static_cast<std::uint32_t>(response.version);
+        layoutResult.fieldFlags = static_cast<std::uint32_t>(response.fieldFlags);
+        layoutResult.rangeCount = static_cast<std::uint32_t>(response.rangeCount);
+        layoutResult.zeroLengthRangeCount = static_cast<std::uint32_t>(response.zeroLengthRangeCount);
+        layoutResult.truncated = static_cast<std::uint32_t>(response.truncated);
+        layoutResult.lastStatus = static_cast<long>(response.lastStatus);
+        layoutResult.io.ntStatus = layoutResult.lastStatus;
+        layoutResult.totalPhysicalBytes = static_cast<std::uint64_t>(response.totalPhysicalBytes);
+        layoutResult.highestPhysicalAddress = static_cast<std::uint64_t>(response.highestPhysicalAddress);
+        layoutResult.largestRangeBytes = static_cast<std::uint64_t>(response.largestRangeBytes);
+        layoutResult.smallestRangeBytes = static_cast<std::uint64_t>(response.smallestRangeBytes);
+        layoutResult.firstBaseAddress = static_cast<std::uint64_t>(response.firstBaseAddress);
+        layoutResult.lastEndAddress = static_cast<std::uint64_t>(response.lastEndAddress);
+        layoutResult.estimatedAddressSpaceGapBytes = static_cast<std::uint64_t>(response.estimatedAddressSpaceGapBytes);
+
+        std::ostringstream stream;
+        stream << "version=" << layoutResult.version
+            << ", ranges=" << layoutResult.rangeCount
+            << ", total=" << layoutResult.totalPhysicalBytes
+            << ", highest=0x" << std::hex << layoutResult.highestPhysicalAddress
+            << ", largest=" << std::dec << layoutResult.largestRangeBytes
+            << ", gap=" << layoutResult.estimatedAddressSpaceGapBytes
+            << ", lastStatus=0x" << std::hex << static_cast<unsigned long>(layoutResult.lastStatus);
+        layoutResult.io.message = stream.str();
+        return layoutResult;
+    }
+
     DriverForceUnloadResult DriverClient::forceUnloadDriver(
         const std::wstring& driverName,
         const unsigned long flags,

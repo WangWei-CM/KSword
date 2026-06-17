@@ -10,6 +10,8 @@ namespace ksword::ark
 {
     namespace
     {
+        constexpr long kNtStatusInvalidParameter = -1073741811L;
+
         std::wstring fixedWideToWString(const wchar_t* textBuffer, const std::size_t maxChars)
         {
             // textBuffer 用途：解析共享协议中的固定 UTF-16 缓冲。
@@ -32,7 +34,24 @@ namespace ksword::ark
         const std::uint32_t processId,
         const unsigned long flags) const
     {
+        // processId 输入：
+        // - R0 HandleTable 枚举语义只支持“单个真实进程 PID”；
+        // - pid 0 不是“全局枚举”，提前在 R3 拦截可避免向驱动刷无效 IOCTL 日志。
+        // 返回：io.ok=false，调用方可把它当作该 PID 不可枚举而继续其它诊断路径。
         HandleEnumResult enumResult{};
+        if (processId == 0U)
+        {
+            enumResult.io.ok = false;
+            enumResult.io.win32Error = ERROR_INVALID_PARAMETER;
+            enumResult.io.ntStatus = kNtStatusInvalidParameter;
+            enumResult.processId = processId;
+            enumResult.overallStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_UNAVAILABLE;
+            enumResult.lastStatus = kNtStatusInvalidParameter;
+            enumResult.io.message =
+                "enumerateProcessHandles requires a non-zero target pid; pid=0 is not a global enumeration request";
+            return enumResult;
+        }
+
         KSWORD_ARK_ENUM_PROCESS_HANDLES_REQUEST request{};
         request.flags = flags;
         request.processId = processId;

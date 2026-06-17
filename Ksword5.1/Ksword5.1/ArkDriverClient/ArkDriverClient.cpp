@@ -282,10 +282,10 @@ namespace ksword::ark
 
     ProcessVisibilityResult DriverClient::setProcessVisibility(
         const std::uint32_t processId,
-        const unsigned long action,
-        const unsigned long flags) const
+    const unsigned long action,
+    const unsigned long flags) const
     {
-        // 作用：请求 R0 更新可恢复进程隐藏标记。
+        // 作用：请求 R0 执行进程可见性动作（真实摘链/恢复）。
         // 返回：解析后的响应；IOCTL 失败时 io.ok=false 且 message 带 Win32 错误。
         ProcessVisibilityResult visibilityResult{};
         KSWORD_ARK_SET_PROCESS_VISIBILITY_REQUEST request{};

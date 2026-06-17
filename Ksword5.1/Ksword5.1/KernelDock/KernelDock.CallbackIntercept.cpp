@@ -671,6 +671,10 @@ namespace
 
     QString normalizeRegistryTargetPatternForKernel(const QString& rawTargetPattern)
     {
+        // 输入：用户在注册表规则“目标程序/路径”里输入的 Win32 注册表路径或内核路径。
+        // 处理：剥离 regedit 地址栏常见的“计算机\”显示根，并把 HK* 根别名转换为
+        //       Cm callback 实际用于匹配的 \REGISTRY\... 对象名。
+        // 返回：可直接下发给 R0 规则引擎的匹配 pattern；无法识别时保留用户原文。
         QString targetPattern = rawTargetPattern.trimmed();
         if (targetPattern.isEmpty())
         {
@@ -678,6 +682,22 @@ namespace
         }
 
         targetPattern.replace('/', '\\');
+
+        auto stripDisplayComputerRoot = [&targetPattern](const QString& displayRootText) {
+            // 输入：regedit 地址栏展示层根名，例如“计算机”或英文系统上的“Computer”。
+            // 处理：仅当根名后面确实跟路径分隔符时剥离，避免误伤普通键名。
+            // 返回：无；通过捕获的 targetPattern 原地更新。
+            if (targetPattern.compare(displayRootText, Qt::CaseInsensitive) == 0)
+            {
+                targetPattern.clear();
+                return;
+            }
+            const QString rootPrefix = QStringLiteral("%1\\").arg(displayRootText);
+            if (targetPattern.startsWith(rootPrefix, Qt::CaseInsensitive))
+            {
+                targetPattern.remove(0, rootPrefix.size());
+            }
+        };
 
         auto trimLeadingSlash = [](QString* textValue) {
             if (textValue == nullptr)
@@ -688,6 +708,90 @@ namespace
             {
                 textValue->remove(0, 1);
             }
+        };
+
+        auto queryDwordRegistryValue = [](
+            const HKEY rootKey,
+            const QString& subKeyText,
+            const QString& valueNameText,
+            DWORD* valueOut) -> bool {
+            // 输入：注册表根、子键和值名。
+            // 处理：用 Win32 API 读取 REG_DWORD，用于把 HKCC 的两个别名层解析成
+            //       Cm callback 已确认会返回的真实 ControlSet/Profile 对象名。
+            // 返回：读取到 DWORD 时返回 true；失败时返回 false，调用方使用兼容回退。
+            HKEY keyHandle = nullptr;
+            DWORD valueType = 0U;
+            DWORD valueData = 0U;
+            DWORD valueBytes = sizeof(valueData);
+
+            if (valueOut == nullptr)
+            {
+                return false;
+            }
+            *valueOut = 0U;
+
+            if (::RegOpenKeyExW(
+                rootKey,
+                reinterpret_cast<LPCWSTR>(subKeyText.utf16()),
+                0U,
+                KEY_QUERY_VALUE,
+                &keyHandle) != ERROR_SUCCESS)
+            {
+                return false;
+            }
+
+            const LONG queryStatus = ::RegQueryValueExW(
+                keyHandle,
+                reinterpret_cast<LPCWSTR>(valueNameText.utf16()),
+                nullptr,
+                &valueType,
+                reinterpret_cast<LPBYTE>(&valueData),
+                &valueBytes);
+            ::RegCloseKey(keyHandle);
+
+            if (queryStatus != ERROR_SUCCESS ||
+                valueType != REG_DWORD ||
+                valueBytes != sizeof(valueData) ||
+                valueData == 0U)
+            {
+                return false;
+            }
+
+            *valueOut = valueData;
+            return true;
+        };
+
+        auto currentConfigRegistryRoot = [&queryDwordRegistryValue]() -> QString {
+            // 输入：无；读取本机 HKLM\SYSTEM\Select\Current 和
+            //       HKLM\SYSTEM\CurrentControlSet\Control\IDConfigDB\CurrentConfig。
+            // 处理：把 HKCC/HKEY_CURRENT_CONFIG 解析成注册表回调实际观察到的
+            //       \REGISTRY\MACHINE\SYSTEM\ControlSet00X\Hardware Profiles\000Y。
+            // 返回：成功时返回真实 HKCC 内核根；读取失败时回退到历史别名路径。
+            DWORD controlSetIndex = 0U;
+            DWORD hardwareProfileIndex = 0U;
+
+            if (!queryDwordRegistryValue(
+                HKEY_LOCAL_MACHINE,
+                QStringLiteral("SYSTEM\\Select"),
+                QStringLiteral("Current"),
+                &controlSetIndex))
+            {
+                return QStringLiteral("\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Hardware Profiles\\Current");
+            }
+
+            if (!queryDwordRegistryValue(
+                HKEY_LOCAL_MACHINE,
+                QStringLiteral("SYSTEM\\CurrentControlSet\\Control\\IDConfigDB"),
+                QStringLiteral("CurrentConfig"),
+                &hardwareProfileIndex))
+            {
+                return QStringLiteral("\\REGISTRY\\MACHINE\\SYSTEM\\ControlSet%1\\Hardware Profiles\\Current")
+                    .arg(controlSetIndex, 3, 10, QChar('0'));
+            }
+
+            return QStringLiteral("\\REGISTRY\\MACHINE\\SYSTEM\\ControlSet%1\\Hardware Profiles\\%2")
+                .arg(controlSetIndex, 3, 10, QChar('0'))
+                .arg(hardwareProfileIndex, 4, 10, QChar('0'));
         };
 
         auto restPathAfterRoot = [&](const QString& rootText) {
@@ -744,6 +848,13 @@ namespace
             return sidText;
         };
 
+        stripDisplayComputerRoot(QStringLiteral("计算机"));
+        stripDisplayComputerRoot(QStringLiteral("Computer"));
+        if (targetPattern.isEmpty())
+        {
+            return targetPattern;
+        }
+
         if (targetPattern.startsWith(QStringLiteral("\\REGISTRY\\"), Qt::CaseInsensitive) ||
             targetPattern.compare(QStringLiteral("\\REGISTRY"), Qt::CaseInsensitive) == 0)
         {
@@ -776,15 +887,11 @@ namespace
         }
         if (targetPattern.startsWith(QStringLiteral("HKCC"), Qt::CaseInsensitive))
         {
-            return buildWithRoot(
-                QStringLiteral("\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Hardware Profiles\\Current"),
-                restPathAfterRoot(QStringLiteral("HKCC")));
+            return buildWithRoot(currentConfigRegistryRoot(), restPathAfterRoot(QStringLiteral("HKCC")));
         }
         if (targetPattern.startsWith(QStringLiteral("HKEY_CURRENT_CONFIG"), Qt::CaseInsensitive))
         {
-            return buildWithRoot(
-                QStringLiteral("\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Hardware Profiles\\Current"),
-                restPathAfterRoot(QStringLiteral("HKEY_CURRENT_CONFIG")));
+            return buildWithRoot(currentConfigRegistryRoot(), restPathAfterRoot(QStringLiteral("HKEY_CURRENT_CONFIG")));
         }
         if (targetPattern.startsWith(QStringLiteral("HKCU"), Qt::CaseInsensitive))
         {

@@ -1,4 +1,5 @@
 #include "NetworkDock.InternalCommon.h"
+#include "NetworkFirewallPage.h"
 
 #include <QFrame>
 #include <QScrollArea>
@@ -21,6 +22,7 @@ void NetworkDock::initializeUi()
     initializeTrafficMonitorTab();
     initializeRateLimitTab();
     initializeConnectionManageTab();
+    initializeFirewallTab();
     initializeManualRequestTab();
     initializeMultiThreadDownloadTab();
     initializeHttpsAnalyzeTab();
@@ -367,6 +369,19 @@ void NetworkDock::initializeConnectionManageTab()
 
     kLogEvent initConnectionTabEvent;
     info << initConnectionTabEvent << "[NetworkDock] 连接管理页初始化完成（TCP/UDP）。" << eol;
+}
+
+void NetworkDock::initializeFirewallTab()
+{
+    // 防火墙页：
+    // - 输入：无，页面内部动态加载 fwpuclnt.dll 并管理 WFP engine；
+    // - 处理：独立展示历史/实时防火墙事件，不复用流量抓包管线；
+    // - 返回：无，作为 NetworkDock 顶层 Tab 呈现。
+    m_firewallPage = new NetworkFirewallPage(this);
+    m_sideTabWidget->addTab(
+        m_firewallPage,
+        QIcon(QStringLiteral(":/Icon/process_critical.svg")),
+        QStringLiteral("防火墙"));
 }
 
 void NetworkDock::initializeManualRequestTab()

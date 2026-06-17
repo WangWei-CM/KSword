@@ -132,6 +132,16 @@ namespace ksword::ark
             unsigned long flags = KSWORD_ARK_DRIVER_INTEGRITY_FLAG_CPU | KSWORD_ARK_DRIVER_INTEGRITY_FLAG_IDT_ENTRIES,
             unsigned long maxRows = KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_MAX_ROWS,
             unsigned long maxIdtVectorsPerCpu = KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_IDT_VECTORS) const;
+        // queryCpuHardwareSnapshot：
+        // - 输入：无；R0 只执行 CPUID 与处理器数量查询。
+        // - 处理：封装 IOCTL_KSWORD_ARK_QUERY_CPU_HARDWARE，解析 vendor/brand/family/model/feature mask。
+        // - 返回：CpuHardwareSnapshotResult；旧驱动未注册 IOCTL 时 unsupported=true。
+        CpuHardwareSnapshotResult queryCpuHardwareSnapshot() const;
+        // queryPhysicalMemoryLayout：
+        // - 输入：无；R0 只读取 MmGetPhysicalMemoryRanges 聚合结果。
+        // - 处理：封装 IOCTL_KSWORD_ARK_QUERY_PHYSICAL_MEMORY_LAYOUT，解析物理内存范围统计。
+        // - 返回：PhysicalMemoryLayoutResult；不返回任何内存内容。
+        PhysicalMemoryLayoutResult queryPhysicalMemoryLayout() const;
         DriverForceUnloadResult forceUnloadDriver(const std::wstring& driverName, unsigned long flags = 0UL, unsigned long timeoutMilliseconds = 3000UL) const;
         DriverForceUnloadResult forceUnloadDriverByModuleBase(std::uint64_t moduleBase, const std::wstring& fallbackDriverName = std::wstring(), unsigned long flags = 0UL, unsigned long timeoutMilliseconds = 3000UL) const;
         // prepareMutation / commitMutation / rollbackMutation / queryMutationAudit：

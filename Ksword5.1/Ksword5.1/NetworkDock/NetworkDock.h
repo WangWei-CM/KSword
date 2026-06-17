@@ -52,6 +52,7 @@ class QScrollArea;
 class QStandardItemModel;
 class CodeEditorWidget;
 class MultiThreadDownloadSegmentBarWidget;
+class NetworkFirewallPage;
 
 namespace ks::network
 {
@@ -319,6 +320,11 @@ private:
     // - 作用：构建“多线程下载”页（URL/路径/线程数 + 任务与分段进度）。
     // - 返回：无。
     void initializeMultiThreadDownloadTab();
+
+    // initializeFirewallTab：
+    // - 作用：构建“防火墙”页（WFP 历史事件 + 实时订阅）。
+    // - 返回：无。
+    void initializeFirewallTab();
 
     // initializeArpCacheTab：
     // - 作用：构建“ARP缓存”页（展示 + 编辑）。
@@ -1114,7 +1120,10 @@ private:
     QTableWidget* m_tcpConnectionTable = nullptr;    // TCP 连接监控表。
     QTableWidget* m_udpEndpointTable = nullptr;      // UDP 端点监控表。
 
-    // ========================= Tab4：请求构造 ====================
+    // ========================= Tab4：防火墙 ====================
+    NetworkFirewallPage* m_firewallPage = nullptr;   // 防火墙页容器。
+
+    // ========================= Tab5：请求构造 ====================
     QWidget* m_manualRequestPage = nullptr;          // 请求构造页容器。
     QVBoxLayout* m_manualRequestLayout = nullptr;    // 请求构造页主布局。
     QComboBox* m_manualApiCombo = nullptr;           // API 方式选择（TCP/UDP）。

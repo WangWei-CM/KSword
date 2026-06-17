@@ -264,6 +264,67 @@ namespace
         return true;
     }
 
+    // applyAppBarAwareMaximizedBounds 作用：
+    // - 输入 windowHandle：收到 WM_GETMINMAXINFO 的顶层窗口句柄；
+    // - 输入 minMaxInfo：系统传入的最大化尺寸/位置结构；
+    // - 处理：读取窗口所在显示器的 rcMonitor 与 rcWork，并把最大化矩形限制到 rcWork；
+    // - 返回：true 表示已经写入 AppBar/任务栏感知的最大化约束，false 表示参数或系统查询失败。
+    bool applyAppBarAwareMaximizedBounds(
+        const HWND windowHandle,
+        MINMAXINFO* const minMaxInfo)
+    {
+        if (windowHandle == nullptr ||
+            ::IsWindow(windowHandle) == FALSE ||
+            minMaxInfo == nullptr)
+        {
+            return false;
+        }
+
+        // monitorHandle 用途：选择离当前窗口最近的显示器，兼容多屏与窗口跨屏场景。
+        const HMONITOR monitorHandle = ::MonitorFromWindow(
+            windowHandle,
+            MONITOR_DEFAULTTONEAREST);
+        if (monitorHandle == nullptr)
+        {
+            return false;
+        }
+
+        // monitorInfo 用途：
+        // - rcMonitor 是完整物理显示器矩形；
+        // - rcWork 是扣除任务栏/AppBar 后的可用工作区。
+        MONITORINFO monitorInfo = {};
+        monitorInfo.cbSize = sizeof(monitorInfo);
+        if (::GetMonitorInfoW(monitorHandle, &monitorInfo) == FALSE)
+        {
+            return false;
+        }
+
+        const RECT& monitorRect = monitorInfo.rcMonitor;
+        const RECT& workRect = monitorInfo.rcWork;
+        const LONG workWidth = workRect.right - workRect.left;
+        const LONG workHeight = workRect.bottom - workRect.top;
+        if (workWidth <= 0 || workHeight <= 0)
+        {
+            return false;
+        }
+
+        // ptMaxPosition 是相对当前 monitor 左上角的最大化偏移：
+        // - 顶部 AppBar 时 rcWork.top > rcMonitor.top，这里会把 Y 修正为任务栏高度；
+        // - 底部任务栏时 top 通常为 0，只缩小高度，不改变 Y。
+        minMaxInfo->ptMaxPosition.x = workRect.left - monitorRect.left;
+        minMaxInfo->ptMaxPosition.y = workRect.top - monitorRect.top;
+
+        // ptMaxSize 是最大化后的客户外框尺寸，必须与工作区尺寸一致。
+        // 若只改高度而不改 ptMaxPosition，就会出现顶部遮挡、底部空隙的问题。
+        minMaxInfo->ptMaxSize.x = workWidth;
+        minMaxInfo->ptMaxSize.y = workHeight;
+
+        // ptMaxTrackSize 限制用户拖拽/系统最大化时的最大跟踪尺寸，和工作区保持一致。
+        minMaxInfo->ptMaxTrackSize.x = workWidth;
+        minMaxInfo->ptMaxTrackSize.y = workHeight;
+        return true;
+    }
+
     // GlobalContextMenuThemeFilter 作用：
     // - 在应用层拦截所有 QMenu 的显示/样式变化事件；
     // - 对“未显式设置样式”的菜单自动套用统一主题样式，避免遗漏单点 setStyleSheet。
@@ -2850,6 +2911,19 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
     if (nativeMessage == nullptr)
     {
         return QMainWindow::nativeEvent(eventType, message, result);
+    }
+
+    if (nativeMessage->message == WM_GETMINMAXINFO)
+    {
+        // WM_GETMINMAXINFO 作用：
+        // - 系统在最大化/拖拽到屏幕边缘前询问窗口最大尺寸和位置；
+        // - 自绘无边框窗口若不主动写入 rcWork，相邻 AppBar 可能只缩小高度却仍从 (0,0) 开始。
+        MINMAXINFO* const minMaxInfo = reinterpret_cast<MINMAXINFO*>(nativeMessage->lParam);
+        if (applyAppBarAwareMaximizedBounds(nativeMessage->hwnd, minMaxInfo))
+        {
+            *result = 0;
+            return true;
+        }
     }
 
     if (nativeMessage->message == WM_NCCALCSIZE)

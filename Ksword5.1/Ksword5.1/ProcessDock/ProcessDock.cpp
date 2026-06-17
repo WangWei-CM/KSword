@@ -1549,14 +1549,14 @@ namespace
         const unsigned long action,
         std::string* const detailTextOut)
     {
-        // 作用：调用 ArkDriverClient 更新 R0 可恢复隐藏标记。
+        // 作用：调用 ArkDriverClient 执行 R0 进程可见性动作。
         // 返回：true 表示驱动接受并更新；false 表示 IOCTL 或 R0 状态失败。
         if (detailTextOut != nullptr)
         {
             detailTextOut->clear();
         }
 
-        if (action != KSWORD_ARK_PROCESS_VISIBILITY_ACTION_CLEAR_ALL &&
+        if (action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE &&
             (targetPid == 0U || targetPid <= 4U))
         {
             if (detailTextOut != nullptr)
@@ -2630,14 +2630,14 @@ void ProcessDock::initializeTopControls()
     // - UI 会把“R0 有、R3 无”的进程按红色高亮显示。
     m_kernelCompareCheck = new QCheckBox("刷新时对比内核进程（查隐藏）", this);
     m_kernelCompareCheck->setChecked(false);
-    m_kernelCompareCheck->setToolTip("勾选后刷新会额外请求驱动进程列表，并高亮仅内核可见的进程。");
+    m_kernelCompareCheck->setToolTip("勾选后刷新会额外请求驱动进程列表，并显示仅内核可见的进程。");
 
     // Ksword 可恢复隐藏显示开关：
     // - 默认不显示 R0 标记隐藏的进程；
     // - 勾选后仍展示这些行，便于右键“取消隐藏”。
     m_showKswordHiddenProcessCheck = new QCheckBox(QStringLiteral("显示Ksword隐藏项"), this);
     m_showKswordHiddenProcessCheck->setChecked(false);
-    m_showKswordHiddenProcessCheck->setToolTip(QStringLiteral("显示通过 R0 可恢复隐藏标记过滤的进程，用于取消隐藏或核对状态。"));
+    m_showKswordHiddenProcessCheck->setToolTip(QStringLiteral("显示由 R0 摘链后仍可通过内核扫描读取的 Ksword 隐藏项。"));
 
     // 按钮统一蓝色风格（图标按钮版本）。
     const QString buttonStyle = buildBlueButtonStyle(true);
@@ -4342,7 +4342,9 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     const int strategyIndex = m_strategyCombo->currentIndex();
     const bool detailModeEnabled = (currentViewMode() == ViewMode::Detail);
     const bool queryKernelProcessList =
-        (m_kernelCompareCheck != nullptr && m_kernelCompareCheck->isChecked());
+        (m_kernelCompareCheck != nullptr && m_kernelCompareCheck->isChecked()) ||
+        (m_showKswordHiddenProcessCheck != nullptr && m_showKswordHiddenProcessCheck->isChecked()) ||
+        !m_hiddenProcessPidSet.empty();
     const bool isFirstRefresh = m_cacheByIdentity.empty();
     const int staticDetailFillBudget =
         detailModeEnabled
@@ -6778,9 +6780,9 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QAction* r0ClearHiddenProcessAction = r0VisibilitySubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_refresh.svg"),
         QStringLiteral("清空全部隐藏标记"));
-    r0HideProcessAction->setToolTip(QStringLiteral("只更新 Ksword 驱动内可恢复隐藏表，不执行 DKOM 断链。"));
-    r0UnhideProcessAction->setToolTip(QStringLiteral("从 Ksword 驱动隐藏表移除选中 PID。"));
-    r0ClearHiddenProcessAction->setToolTip(QStringLiteral("清空驱动内所有隐藏 PID 标记。"));
+    r0HideProcessAction->setToolTip(QStringLiteral("摘除目标进程的 ActiveProcessLinks，但保留 PspCidTable，普通枚举将不可见。"));
+    r0UnhideProcessAction->setToolTip(QStringLiteral("恢复由 Ksword 记录的进程链表位置；若原位置不再相邻，则挂回 System 链头后。"));
+    r0ClearHiddenProcessAction->setToolTip(QStringLiteral("恢复所有由 Ksword 摘链的进程，并清空驱动内记录。"));
     QMenu* r0DangerSubMenu = contextMenu.addMenu(
         buildR0ActionIcon(":/Icon/process_uncritical.svg"),
         QStringLiteral("R0危险进程标志/DKOM"));
@@ -8369,8 +8371,8 @@ void ProcessDock::executeR0SetProcessHiddenAction(const bool hidden)
             QStringLiteral("R0进程隐藏(可恢复)"),
             QStringLiteral(
                 "将把选中的 %1 个进程写入 Ksword 驱动隐藏表。\n\n"
-                "说明：当前实现只影响 Ksword 进程列表过滤和 R0 枚举标记，不做 DKOM 断链；"
-                "可通过“显示Ksword隐藏项”或“清空全部隐藏标记”恢复。")
+                "说明：当前实现会真实摘除 ActiveProcessLinks，但保留 PspCidTable；"
+                "普通枚举看不到，Ksword 仍可通过 R0 CID 扫描读取。")
                 .arg(actionTargets.size()),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No);
@@ -8432,6 +8434,10 @@ void ProcessDock::executeR0SetProcessHiddenAction(const bool hidden)
         << ", failure=" << failureCount
         << eol;
     showActionResultMessage(titleText, failureCount == 0U, summaryText.toStdString(), logEvent);
+    if (hidden && successCount > 0U && m_kernelCompareCheck != nullptr && !m_kernelCompareCheck->isChecked())
+    {
+        m_kernelCompareCheck->setChecked(true);
+    }
     requestAsyncRefresh(true);
 }
 

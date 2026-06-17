@@ -1,0 +1,14 @@
+#include "resource.h"
+
+// The first ICON resource becomes the executable shell icon used by Explorer,
+// Task Manager, and default Win32 window icon selection.
+IDI_KSWORD_APP_ICON ICON KSWORD_APP_ICON_FILE
+
+// RCDATA copies keep the custom FLTK title bar self-contained at runtime; the
+// same files remain ordinary project assets so designers can replace them.
+IDR_KSWORD_APP_ICON_ICO RCDATA KSWORD_APP_ICON_FILE
+IDR_KSWORD_APP_LOGO_PNG RCDATA KSWORD_APP_LOGO_FILE
+
+// The installer extracts this character PNG to a temporary file because the
+// layered Win32 helper consumes a filesystem path.
+IDR_KSWORD_SETUP_CHARACTER_PNG RCDATA KSWORD_SETUP_CHARACTER_FILE

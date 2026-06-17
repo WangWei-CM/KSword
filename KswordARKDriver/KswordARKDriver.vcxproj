@@ -37,6 +37,7 @@
     <ClCompile Include="src\features\kernel\driver_object_query.c" />
     <ClCompile Include="src\features\kernel\driver_integrity.c" />
     <ClCompile Include="src\features\kernel\kernel_cpu_integrity.c" />
+    <ClCompile Include="src\features\kernel\cpu_hardware_query.c" />
     <ClCompile Include="src\features\kernel\driver_unload.c" />
     <ClCompile Include="src\features\kernel\ssdt_query.c" />
     <ClCompile Include="src\features\kernel\hook_scan.c" />
@@ -107,7 +108,7 @@
     <ClCompile Include="src\features\keyboard\keyboard_ioctl.c" />
     <ClCompile Include="src\features\mutation\mutation_transaction.c" />
     <ClCompile Include="src\features\mutation\mutation_ioctl.c" />
-  <ClCompile Include="src\features\callback\callback_external_wfp.c" /><ClCompile Include="src\features\callback\callback_external_minifilter.c" /><ClCompile Include="src\features\callback\callback_external_safe.c" /><ClCompile Include="src\features\memory\memory_physical.c" /><ClCompile Include="src\features\memory\memory_pagetable.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan_helpers.c" /><ClCompile Include="src\features\memory\memory_kernel_evidence.c" /><ClCompile Include="src\features\memory\memory_ioctl.c" /></ItemGroup>
+  <ClCompile Include="src\features\callback\callback_external_wfp.c" /><ClCompile Include="src\features\callback\callback_external_minifilter.c" /><ClCompile Include="src\features\callback\callback_external_safe.c" /><ClCompile Include="src\features\memory\memory_physical.c" /><ClCompile Include="src\features\memory\memory_physical_layout.c" /><ClCompile Include="src\features\memory\memory_pagetable.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan_helpers.c" /><ClCompile Include="src\features\memory\memory_kernel_evidence.c" /><ClCompile Include="src\features\memory\memory_ioctl.c" /></ItemGroup>
   <ItemGroup>
     <ClInclude Include="Device.h" />
     <ClInclude Include="Driver.h" />

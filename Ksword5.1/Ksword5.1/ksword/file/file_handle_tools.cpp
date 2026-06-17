@@ -918,9 +918,14 @@ namespace ks::file
     {
         HandleSnapshotResult result{};
         const auto beginTime = std::chrono::steady_clock::now();
-        if (options.enumMode == HandleEnumMode::KernelHandleTable && !options.hasPidFilter)
+        if (options.enumMode == HandleEnumMode::KernelHandleTable &&
+            (!options.hasPidFilter || options.pidFilter == 0U))
         {
-            result.diagnosticText = L"Kernel HandleTable 模式需要先输入目标 PID。";
+            // 输入：KernelHandleTable 模式只支持针对单个真实进程 PID 补充 R0 视图。
+            // 处理：pidFilter 为空或为 0 时不调用 ArkDriverClient，避免向驱动发送
+            // pid=0 并生成 STATUS_INVALID_PARAMETER 日志噪声。
+            // 返回：空快照和明确诊断，调用方可继续使用 R3 DuplicateHandle 路径。
+            result.diagnosticText = L"Kernel HandleTable 模式需要先输入非 0 目标 PID。";
             result.elapsedMs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - beginTime).count());
             return result;

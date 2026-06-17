@@ -93,16 +93,31 @@ PsGetProcessImageFileName(
 #define KSWORD_ARK_ENUM_SCAN_MIN_PID KSWORD_ARK_ENUM_PID_STEP
 #define KSWORD_ARK_PROCESS_HIDE_MAX_PIDS 256UL
 
+#ifndef STATUS_NOT_FOUND
+#define STATUS_NOT_FOUND ((NTSTATUS)0xC0000225L)
+#endif
+
 typedef PEPROCESS(NTAPI* KSWORD_PS_GET_NEXT_PROCESS_FN)(
     _In_opt_ PEPROCESS Process
     );
+
+typedef struct _KSWORD_ARK_PROCESS_HIDE_RECORD
+{
+    ULONG Pid;
+    ULONG ActiveProcessLinksOffset;
+    PEPROCESS ProcessObject;
+    LIST_ENTRY* ActiveProcessLinks;
+    LIST_ENTRY* PreviousLink;
+    LIST_ENTRY* NextLink;
+    BOOLEAN ActiveListUnlinked;
+} KSWORD_ARK_PROCESS_HIDE_RECORD;
 
 typedef struct _KSWORD_ARK_PROCESS_HIDE_STATE
 {
     EX_PUSH_LOCK Lock;
     BOOLEAN Initialized;
     ULONG Count;
-    ULONG Pids[KSWORD_ARK_PROCESS_HIDE_MAX_PIDS];
+    KSWORD_ARK_PROCESS_HIDE_RECORD Records[KSWORD_ARK_PROCESS_HIDE_MAX_PIDS];
 } KSWORD_ARK_PROCESS_HIDE_STATE;
 
 static KSWORD_ARK_PROCESS_HIDE_STATE g_KswordArkProcessHideState;
@@ -115,8 +130,9 @@ KswordARKDriverEnsureProcessHideStateInitialized(
 
 Routine Description:
 
-    初始化驱动内进程隐藏状态表。中文说明：该表只影响 Ksword 自身的 R0
-    枚举标记和 R3 展示过滤，不修改 EPROCESS 链表，保证可恢复。
+    初始化驱动内进程隐藏状态表。中文说明：该表记录由 Ksword 执行的
+    ActiveProcessLinks 摘链状态，包括目标 EPROCESS 引用和原前后节点，
+    供后续取消隐藏或清空全部隐藏时恢复链表。
 
 Arguments:
 
@@ -145,8 +161,9 @@ KswordARKDriverIsProcessHiddenByUi(
 
 Routine Description:
 
-    查询 PID 是否被 Ksword R0 可恢复隐藏表标记。中文说明：调用方只读取
-    状态，不做写入，读锁保护 Count/Pids 的一致性。
+    查询 PID 是否被 Ksword R0 可恢复隐藏表记录。中文说明：真实隐藏
+    通过 ActiveProcessLinks 摘链完成；该 helper 只用于枚举时补充
+    KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI，方便 R3 识别和过滤。
 
 Arguments:
 
@@ -164,7 +181,7 @@ Return Value:
     KswordARKDriverEnsureProcessHideStateInitialized();
     ExAcquirePushLockShared(&g_KswordArkProcessHideState.Lock);
     for (index = 0UL; index < g_KswordArkProcessHideState.Count; ++index) {
-        if (g_KswordArkProcessHideState.Pids[index] == ProcessId) {
+        if (g_KswordArkProcessHideState.Records[index].Pid == ProcessId) {
             hidden = TRUE;
             break;
         }
@@ -276,6 +293,253 @@ Return Value:
 --*/
 {
     return (Offset != KSW_DYN_OFFSET_UNAVAILABLE && Offset != 0x0000FFFFUL) ? TRUE : FALSE;
+}
+
+static BOOLEAN
+KswordARKDriverProcessListPointerAligned(
+    _In_ const VOID* Pointer
+    )
+/*++
+
+Routine Description:
+
+    Validate basic LIST_ENTRY pointer alignment before touching neighbor links.
+    中文说明：该函数只做廉价格式检查，避免明显错误的 DynData 偏移或
+    损坏链表指针导致后续读写落在非对齐地址。
+
+Arguments:
+
+    Pointer - 待检查的内核指针。
+
+Return Value:
+
+    TRUE 表示指针非空且满足指针宽度对齐；FALSE 表示不可安全用于链表读写。
+
+--*/
+{
+    return (Pointer != NULL &&
+        (((ULONG_PTR)Pointer & (sizeof(PVOID) - 1U)) == 0U)) ? TRUE : FALSE;
+}
+
+static NTSTATUS
+KswordARKDriverValidateActiveProcessLinksForUnlink(
+    _In_ LIST_ENTRY* Link,
+    _Outptr_ LIST_ENTRY** PreviousOut,
+    _Outptr_ LIST_ENTRY** NextOut
+    )
+/*++
+
+Routine Description:
+
+    Validate the target EPROCESS.ActiveProcessLinks node before DKOM unlink.
+    中文说明：隐藏前必须确认目标节点仍在双向链中，且前后节点能回指
+    当前节点；否则拒绝摘链，避免在已损坏链表上继续写入。
+
+Arguments:
+
+    Link - 目标进程的 ActiveProcessLinks 字段地址。
+    PreviousOut - 返回 Link->Blink。
+    NextOut - 返回 Link->Flink。
+
+Return Value:
+
+    STATUS_SUCCESS 表示可摘链；失败表示参数、对齐或邻居一致性检查未通过。
+
+--*/
+{
+    LIST_ENTRY* next = NULL;
+    LIST_ENTRY* previous = NULL;
+
+    if (Link == NULL || PreviousOut == NULL || NextOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *PreviousOut = NULL;
+    *NextOut = NULL;
+
+    if (!KswordARKDriverProcessListPointerAligned(Link)) {
+        return STATUS_DATATYPE_MISALIGNMENT;
+    }
+
+    __try {
+        next = Link->Flink;
+        previous = Link->Blink;
+        if (!KswordARKDriverProcessListPointerAligned(next) ||
+            !KswordARKDriverProcessListPointerAligned(previous) ||
+            next == Link ||
+            previous == Link ||
+            next->Blink != Link ||
+            previous->Flink != Link) {
+            return STATUS_DATA_ERROR;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return GetExceptionCode();
+    }
+
+    *PreviousOut = previous;
+    *NextOut = next;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+KswordARKDriverUnlinkActiveProcessLinks(
+    _In_ PEPROCESS ProcessObject,
+    _In_ ULONG ActiveProcessLinksOffset,
+    _Outptr_ LIST_ENTRY** LinkOut,
+    _Outptr_ LIST_ENTRY** PreviousOut,
+    _Outptr_ LIST_ENTRY** NextOut
+    )
+/*++
+
+Routine Description:
+
+    Remove one process from the kernel ActiveProcessLinks list. 中文说明：本函数
+    只摘 ActiveProcessLinks，不删除 PspCidTable，也不关闭句柄表；因此
+    普通 NtQuerySystemInformation 视图不可见，但 Ksword 仍可通过
+    PsLookupProcessByProcessId/CID 扫描重新拿到 EPROCESS。
+
+Arguments:
+
+    ProcessObject - 已引用的目标 EPROCESS。
+    ActiveProcessLinksOffset - DynData 给出的 EPROCESS.ActiveProcessLinks 偏移。
+    LinkOut - 返回目标 LIST_ENTRY 地址。
+    PreviousOut - 返回摘链前前驱节点。
+    NextOut - 返回摘链前后继节点。
+
+Return Value:
+
+    STATUS_SUCCESS 表示摘链完成；失败表示偏移缺失、链表不一致或异常访问。
+
+--*/
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    LIST_ENTRY* link = NULL;
+    LIST_ENTRY* previous = NULL;
+    LIST_ENTRY* next = NULL;
+
+    if (ProcessObject == NULL || LinkOut == NULL || PreviousOut == NULL || NextOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *LinkOut = NULL;
+    *PreviousOut = NULL;
+    *NextOut = NULL;
+
+    if (!KswordARKDriverProcessDynOffsetPresent(ActiveProcessLinksOffset)) {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    link = (LIST_ENTRY*)((PUCHAR)ProcessObject + ActiveProcessLinksOffset);
+    status = KswordARKDriverValidateActiveProcessLinksForUnlink(link, &previous, &next);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    __try {
+        previous->Flink = next;
+        next->Blink = previous;
+        link->Flink = link;
+        link->Blink = link;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return GetExceptionCode();
+    }
+
+    *LinkOut = link;
+    *PreviousOut = previous;
+    *NextOut = next;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+KswordARKDriverRestoreActiveProcessLinksRecord(
+    _Inout_ KSWORD_ARK_PROCESS_HIDE_RECORD* Record
+    )
+/*++
+
+Routine Description:
+
+    Restore one Ksword-hidden process back into ActiveProcessLinks. 中文说明：
+    恢复时要求目标节点仍保持 self-loop。若隐藏时保存的前后节点仍然
+    相邻，则放回原位置；若链表期间发生正常插入导致原邻居不再相邻，
+    则退化为插到 PsInitialSystemProcess 后面，避免切断当前活动链。
+
+Arguments:
+
+    Record - 隐藏记录，包含目标 EPROCESS、目标链表节点和保存的前后节点。
+
+Return Value:
+
+    STATUS_SUCCESS 表示恢复完成或记录本来未摘链；失败表示链表状态不适合恢复。
+
+--*/
+{
+    LIST_ENTRY* link = NULL;
+    LIST_ENTRY* previous = NULL;
+    LIST_ENTRY* next = NULL;
+    LIST_ENTRY* insertAfter = NULL;
+    LIST_ENTRY* insertBefore = NULL;
+    LIST_ENTRY* systemHead = NULL;
+
+    if (Record == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!Record->ActiveListUnlinked) {
+        return STATUS_SUCCESS;
+    }
+
+    link = Record->ActiveProcessLinks;
+    previous = Record->PreviousLink;
+    next = Record->NextLink;
+
+    if (!KswordARKDriverProcessListPointerAligned(link) ||
+        !KswordARKDriverProcessListPointerAligned(previous) ||
+        !KswordARKDriverProcessListPointerAligned(next) ||
+        !KswordARKDriverProcessDynOffsetPresent(Record->ActiveProcessLinksOffset)) {
+        return STATUS_DATATYPE_MISALIGNMENT;
+    }
+
+    __try {
+        if (link->Flink != link || link->Blink != link) {
+            return STATUS_DATA_ERROR;
+        }
+
+        /*
+         * Prefer exact original placement when the saved neighbors are still
+         * adjacent.  If they are not, insert immediately after the System
+         * process list head.  This fallback preserves all current nodes instead
+         * of overwriting previous->Flink/next->Blink across a changed chain.
+         */
+        if (previous->Flink == next && next->Blink == previous) {
+            insertAfter = previous;
+            insertBefore = next;
+        }
+        else {
+            if (PsInitialSystemProcess == NULL) {
+                return STATUS_PROCEDURE_NOT_FOUND;
+            }
+            systemHead = (LIST_ENTRY*)((PUCHAR)PsInitialSystemProcess + Record->ActiveProcessLinksOffset);
+            if (!KswordARKDriverProcessListPointerAligned(systemHead) ||
+                !KswordARKDriverProcessListPointerAligned(systemHead->Flink) ||
+                systemHead->Flink->Blink != systemHead) {
+                return STATUS_DATA_ERROR;
+            }
+            insertAfter = systemHead;
+            insertBefore = systemHead->Flink;
+        }
+
+        link->Blink = insertAfter;
+        link->Flink = insertBefore;
+        insertAfter->Flink = link;
+        insertBefore->Blink = link;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return GetExceptionCode();
+    }
+
+    Record->ActiveListUnlinked = FALSE;
+    return STATUS_SUCCESS;
 }
 
 static NTSTATUS
@@ -518,9 +782,11 @@ KswordARKDriverSetProcessVisibility(
 
 Routine Description:
 
-    更新 Ksword 驱动内维护的进程隐藏标记。中文说明：这不是 DKOM 断链，
-    只改变本驱动枚举响应中的 KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI，
-    R3 进程列表可据此过滤/恢复，避免不可控内核链表破坏。
+    Execute Ksword-owned process visibility changes. 中文说明：HIDE 会把目标
+    EPROCESS.ActiveProcessLinks 从内核活动进程链表摘下，保留 PspCidTable；
+    因此普通 R3 枚举不可见，而 Ksword 的 R0 CID 扫描仍能读取目标并打上
+    KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI。UNHIDE/CLEAR_ALL 只恢复由
+    本驱动保存的记录，不接受 R3 传入任何内核地址。
 
 Arguments:
 
@@ -531,13 +797,16 @@ Arguments:
 
 Return Value:
 
-    STATUS_SUCCESS 或参数/资源状态。
+    STATUS_SUCCESS 表示动作完成；失败表示参数、查找、DynData 或链表状态异常。
 
 --*/
 {
     ULONG index = 0UL;
     ULONG foundIndex = MAXULONG;
     NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS restoreStatus = STATUS_SUCCESS;
+    PEPROCESS processObject = NULL;
+    KSW_DYN_STATE dynState;
 
     if (StatusOut == NULL || HiddenCountOut == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -545,28 +814,75 @@ Return Value:
 
     *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_UNKNOWN;
     *HiddenCountOut = 0UL;
+    RtlZeroMemory(&dynState, sizeof(dynState));
     KswordARKDriverEnsureProcessHideStateInitialized();
 
-    if (Action != KSWORD_ARK_PROCESS_VISIBILITY_ACTION_CLEAR_ALL &&
+    if (Action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE &&
         (ProcessId == 0UL || ProcessId <= 4UL)) {
         return STATUS_INVALID_PARAMETER;
+    }
+    if (Action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_UNHIDE &&
+        (ProcessId == 0UL || ProcessId <= 4UL)) {
+        *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_VISIBLE;
+        ExAcquirePushLockShared(&g_KswordArkProcessHideState.Lock);
+        *HiddenCountOut = g_KswordArkProcessHideState.Count;
+        ExReleasePushLockShared(&g_KswordArkProcessHideState.Lock);
+        return STATUS_SUCCESS;
+    }
+    if (Action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE) {
+        KswordARKDynDataSnapshot(&dynState);
+        if (!dynState.Initialized ||
+            !KswordARKDriverProcessDynOffsetPresent(dynState.Kernel.EpActiveProcessLinks)) {
+            return STATUS_PROCEDURE_NOT_FOUND;
+        }
+
+        status = PsLookupProcessByProcessId(ULongToHandle(ProcessId), &processObject);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
     }
 
     ExAcquirePushLockExclusive(&g_KswordArkProcessHideState.Lock);
     __try {
         for (index = 0UL; index < g_KswordArkProcessHideState.Count; ++index) {
-            if (g_KswordArkProcessHideState.Pids[index] == ProcessId) {
+            if (g_KswordArkProcessHideState.Records[index].Pid == ProcessId) {
                 foundIndex = index;
                 break;
             }
         }
 
         if (Action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_CLEAR_ALL) {
-            RtlZeroMemory(
-                g_KswordArkProcessHideState.Pids,
-                sizeof(g_KswordArkProcessHideState.Pids));
-            g_KswordArkProcessHideState.Count = 0UL;
-            *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_CLEARED;
+            index = 0UL;
+            while (index < g_KswordArkProcessHideState.Count) {
+                KSWORD_ARK_PROCESS_HIDE_RECORD* record =
+                    &g_KswordArkProcessHideState.Records[index];
+                restoreStatus = KswordARKDriverRestoreActiveProcessLinksRecord(record);
+                if (!NT_SUCCESS(restoreStatus)) {
+                    if (NT_SUCCESS(status)) {
+                        status = restoreStatus;
+                    }
+                    ++index;
+                    continue;
+                }
+
+                if (record->ProcessObject != NULL) {
+                    ObDereferenceObject(record->ProcessObject);
+                    record->ProcessObject = NULL;
+                }
+                for (foundIndex = index + 1UL;
+                     foundIndex < g_KswordArkProcessHideState.Count;
+                     ++foundIndex) {
+                    g_KswordArkProcessHideState.Records[foundIndex - 1UL] =
+                        g_KswordArkProcessHideState.Records[foundIndex];
+                }
+                g_KswordArkProcessHideState.Count -= 1UL;
+                RtlZeroMemory(
+                    &g_KswordArkProcessHideState.Records[g_KswordArkProcessHideState.Count],
+                    sizeof(g_KswordArkProcessHideState.Records[g_KswordArkProcessHideState.Count]));
+            }
+            *StatusOut = (g_KswordArkProcessHideState.Count == 0UL)
+                ? KSWORD_ARK_PROCESS_VISIBILITY_STATUS_CLEARED
+                : KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN;
         }
         else if (Action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE) {
             if (foundIndex != MAXULONG) {
@@ -576,20 +892,57 @@ Return Value:
                 status = STATUS_INSUFFICIENT_RESOURCES;
             }
             else {
-                g_KswordArkProcessHideState.Pids[g_KswordArkProcessHideState.Count] = ProcessId;
-                g_KswordArkProcessHideState.Count += 1UL;
-                *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN;
+                KSWORD_ARK_PROCESS_HIDE_RECORD* record =
+                    &g_KswordArkProcessHideState.Records[g_KswordArkProcessHideState.Count];
+                LIST_ENTRY* link = NULL;
+                LIST_ENTRY* previous = NULL;
+                LIST_ENTRY* next = NULL;
+
+                status = KswordARKDriverUnlinkActiveProcessLinks(
+                    processObject,
+                    dynState.Kernel.EpActiveProcessLinks,
+                    &link,
+                    &previous,
+                    &next);
+                if (NT_SUCCESS(status)) {
+                    RtlZeroMemory(record, sizeof(*record));
+                    record->Pid = ProcessId;
+                    record->ActiveProcessLinksOffset = dynState.Kernel.EpActiveProcessLinks;
+                    record->ProcessObject = processObject;
+                    record->ActiveProcessLinks = link;
+                    record->PreviousLink = previous;
+                    record->NextLink = next;
+                    record->ActiveListUnlinked = TRUE;
+                    processObject = NULL;
+                    g_KswordArkProcessHideState.Count += 1UL;
+                    *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN;
+                }
             }
         }
         else if (Action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_UNHIDE) {
             if (foundIndex != MAXULONG) {
+                KSWORD_ARK_PROCESS_HIDE_RECORD* record =
+                    &g_KswordArkProcessHideState.Records[foundIndex];
+                status = KswordARKDriverRestoreActiveProcessLinksRecord(record);
+                if (!NT_SUCCESS(status)) {
+                    *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN;
+                    *HiddenCountOut = g_KswordArkProcessHideState.Count;
+                    __leave;
+                }
+
+                if (record->ProcessObject != NULL) {
+                    ObDereferenceObject(record->ProcessObject);
+                    record->ProcessObject = NULL;
+                }
                 for (index = foundIndex + 1UL; index < g_KswordArkProcessHideState.Count; ++index) {
-                    g_KswordArkProcessHideState.Pids[index - 1UL] =
-                        g_KswordArkProcessHideState.Pids[index];
+                    g_KswordArkProcessHideState.Records[index - 1UL] =
+                        g_KswordArkProcessHideState.Records[index];
                 }
                 if (g_KswordArkProcessHideState.Count > 0UL) {
                     g_KswordArkProcessHideState.Count -= 1UL;
-                    g_KswordArkProcessHideState.Pids[g_KswordArkProcessHideState.Count] = 0UL;
+                    RtlZeroMemory(
+                        &g_KswordArkProcessHideState.Records[g_KswordArkProcessHideState.Count],
+                        sizeof(g_KswordArkProcessHideState.Records[g_KswordArkProcessHideState.Count]));
                 }
             }
             *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_VISIBLE;
@@ -602,6 +955,11 @@ Return Value:
     }
     __finally {
         ExReleasePushLockExclusive(&g_KswordArkProcessHideState.Lock);
+    }
+
+    if (processObject != NULL) {
+        ObDereferenceObject(processObject);
+        processObject = NULL;
     }
 
     return status;

@@ -1,7 +1,9 @@
 #include "HardwareDock.h"
 #include "DiskMonitorPage.h"
 #include "MemoryCompositionHistoryWidget.h"
+#include "HardwareR0EvidencePage.h"
 #include "HardwareOtherDevicesPage.h"
+#include "HardwareDeviceManagerPage.h"
 
 // ============================================================
 // HardwareDock.cpp
@@ -11,6 +13,7 @@
 // 3) 显卡与内存模块信息通过 PowerShell/WMI 文本化展示。
 // ============================================================
 
+#include "../ArkDriverClient/ArkDriverClient.h"
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/PerformanceNavCard.h"
@@ -23,6 +26,7 @@
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QHeaderView>
+#include <QIcon>
 #include <QLabel>
 #include <QListWidget>
 #include <QListWidgetItem>
@@ -436,7 +440,7 @@ namespace
     }
 
     // formatDurationText 作用：
-    // - 把秒数格式化为“天:时:分:秒”； 
+    // - 把秒数格式化为“天:时:分:秒”；
     // - 用于 CPU 页“正常运行时间”展示。
     QString formatDurationText(const std::uint64_t totalSeconds)
     {
@@ -494,7 +498,7 @@ namespace
     };
 
     // GpuHardwareSummarySnapshot 作用：
-    // - 保存显卡摘要（名称、驱动、显存）； 
+    // - 保存显卡摘要（名称、驱动、显存）；
     // - 由后台 PowerShell 查询填充，用于 GPU 利用率详情页展示。
     struct GpuHardwareSummarySnapshot
     {
@@ -506,7 +510,7 @@ namespace
     };
 
     // queryMemoryHardwareSummarySnapshot 作用：
-    // - 查询内存硬件参数（速度、插槽、外形规格）； 
+    // - 查询内存硬件参数（速度、插槽、外形规格）；
     // - 仅在后台线程调用，避免阻塞 UI。
     MemoryHardwareSummarySnapshot queryMemoryHardwareSummarySnapshot()
     {
@@ -536,7 +540,7 @@ namespace
     }
 
     // queryGpuHardwareSummarySnapshot 作用：
-    // - 查询显卡摘要（名称、驱动版本、专用显存）； 
+    // - 查询显卡摘要（名称、驱动版本、专用显存）；
     // - 仅在后台线程调用，避免阻塞 UI。
     GpuHardwareSummarySnapshot queryGpuHardwareSummarySnapshot()
     {
@@ -1536,6 +1540,7 @@ void HardwareDock::startInitialSamplingAfterFirstPaint()
         dockPointer->refreshAllViews();
         dockPointer->requestAsyncStaticInfoRefresh();
         dockPointer->requestAsyncSensorRefresh();
+        dockPointer->requestAsyncR0HardwareHealthRefresh();
 
         if (dockPointer->m_refreshTimer != nullptr)
         {
@@ -1559,9 +1564,11 @@ void HardwareDock::initializeUi()
     initializeUtilizationTab();
     initializeOverviewTab();
     initializeCpuTab();
+    initializeR0EvidenceTab();
     initializeGpuTab();
     initializeMemoryTab();
     initializeDiskMonitorTab();
+    initializeDeviceManagerTab();
     initializeOtherDevicesTab();
 
     if (m_sideTabWidget != nullptr)
@@ -2751,6 +2758,19 @@ void HardwareDock::initializeCpuTab()
     m_sideTabWidget->addTab(m_cpuPage, QStringLiteral("CPU"));
 }
 
+void HardwareDock::initializeR0EvidenceTab()
+{
+    // R0 硬件证据页：
+    // - 输入：无，依赖 HardwareR0EvidencePage 内部通过 ArkDriverClient 访问驱动；
+    // - 处理：把 CPU/MSR/IDT/GDT 只读证据作为硬件 Dock 的独立侧边页；
+    // - 返回：无，页面由 Qt 父子树托管。
+    m_r0EvidencePage = new HardwareR0EvidencePage(m_sideTabWidget);
+    m_sideTabWidget->addTab(
+        m_r0EvidencePage,
+        QIcon(QStringLiteral(":/Icon/process_critical.svg")),
+        QStringLiteral("R0证据"));
+}
+
 void HardwareDock::initializeGpuTab()
 {
     m_gpuPage = new QWidget(m_sideTabWidget);
@@ -2793,6 +2813,16 @@ void HardwareDock::initializeDiskMonitorTab()
             QStringLiteral("切换到本页后再启动文件 ETW 与进程 IO 采样，避免拖慢硬件页首次打开。")),
         1);
     m_sideTabWidget->addTab(m_diskMonitorHostPage, QStringLiteral("硬盘监控"));
+}
+
+void HardwareDock::initializeDeviceManagerTab()
+{
+    // 设备管理页：
+    // - 输入：无，内部使用 SetupAPI/CfgMgr 异步枚举 PnP 设备；
+    // - 处理：直接创建页面，页面自身控制后台刷新和搜索；
+    // - 返回：无，作为硬件 Dock 的独立 Tab 呈现。
+    m_deviceManagerPage = new HardwareDeviceManagerPage(m_sideTabWidget);
+    m_sideTabWidget->addTab(m_deviceManagerPage, QStringLiteral("设备管理"));
 }
 
 void HardwareDock::initializeOtherDevicesTab()
@@ -3500,7 +3530,10 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
 
 void HardwareDock::refreshCpuTopologyStaticInfo()
 {
-    m_cpuModelText = queryCpuBrandTextByCpuid();
+    if (m_cpuModelText.isEmpty() || m_cpuModelText == QStringLiteral("N/A"))
+    {
+        m_cpuModelText = queryCpuBrandTextByCpuid();
+    }
     if (m_cpuModelLabel != nullptr && !m_cpuModelText.isEmpty())
     {
         m_cpuModelLabel->setText(m_cpuModelText);
@@ -3739,6 +3772,16 @@ void HardwareDock::refreshAllViews()
     sampleCpuPowerInfo(&powerInfoList);
 
     ++m_sampleCounter;
+    pushBoundedHistorySample(&m_cpuUsageHistoryPercent, totalCpuUsage);
+    pushBoundedHistorySample(&m_memoryUsageHistoryPercent, memoryUsagePercent);
+    pushBoundedHistorySample(&m_gpuUsageHistoryPercent, gpuUsagePercent);
+    pushBoundedHistorySample(
+        &m_diskAggregateHistoryBytesPerSec,
+        std::max(0.0, diskReadBytesPerSec) + std::max(0.0, diskWriteBytesPerSec));
+    pushBoundedHistorySample(
+        &m_networkAggregateHistoryBytesPerSec,
+        std::max(0.0, networkRxBytesPerSec) + std::max(0.0, networkTxBytesPerSec));
+    requestAsyncR0HardwareHealthRefresh();
     updateOverviewText(totalCpuUsage, memoryUsagePercent);
     updateUtilizationView(
         coreUsageList,
@@ -4737,11 +4780,12 @@ void HardwareDock::updateOverviewText(const double cpuUsagePercent, const double
     ::GlobalMemoryStatusEx(&memoryStatus);
 
     const QString summaryText = QStringLiteral(
-        "CPU总体利用率: %1%    内存利用率: %2%    可用内存: %3 / 总内存: %4")
+        "CPU总体利用率: %1%    内存利用率: %2%    可用内存: %3 / 总内存: %4    %5")
         .arg(cpuUsagePercent, 0, 'f', 1)
         .arg(memoryUsagePercent, 0, 'f', 1)
         .arg(bytesToGiBText(memoryStatus.ullAvailPhys))
-        .arg(bytesToGiBText(memoryStatus.ullTotalPhys));
+        .arg(bytesToGiBText(memoryStatus.ullTotalPhys))
+        .arg(m_r0HardwareHealthSummaryText);
     m_overviewSummaryLabel->setText(summaryText);
 }
 
@@ -4767,11 +4811,16 @@ void HardwareDock::updateUtilizationView(
 
     if (m_utilizationSummaryLabel != nullptr)
     {
+        const UtilizationStatisticSnapshot cpuStats = buildStatisticSnapshot(m_cpuUsageHistoryPercent);
         m_utilizationSummaryLabel->setText(
-            QStringLiteral("CPU 总体利用率：%1%    内存：%2%    逻辑处理器：%3")
+            QStringLiteral("CPU 总体：%1%    均值：%2%    峰值：%3%    趋势：%4    逻辑处理器：%5    %6    %7")
             .arg(averageCpuUsage, 0, 'f', 1)
-            .arg(memoryUsagePercent, 0, 'f', 1)
-            .arg(coreUsageList.size()));
+            .arg(cpuStats.averageValue, 0, 'f', 1)
+            .arg(cpuStats.peakValue, 0, 'f', 1)
+            .arg(buildTrendText(cpuStats, true))
+            .arg(coreUsageList.size())
+            .arg(m_r0HardwareHealthSummaryText)
+            .arg(m_r0CpuHardwareSummaryText));
     }
 
     if (m_cpuModelLabel != nullptr && !m_cpuModelText.isEmpty())
@@ -4796,8 +4845,14 @@ void HardwareDock::updateUtilizationView(
     // 内存子页：更新摘要与折线趋势。
     if (m_memoryUtilSummaryLabel != nullptr)
     {
+        const UtilizationStatisticSnapshot memoryStats = buildStatisticSnapshot(m_memoryUsageHistoryPercent);
         m_memoryUtilSummaryLabel->setText(
-            QStringLiteral("当前内存占用：%1%").arg(memoryUsagePercent, 0, 'f', 1));
+            QStringLiteral("当前内存占用：%1%    均值：%2%    峰值：%3%    趋势：%4    %5")
+            .arg(memoryUsagePercent, 0, 'f', 1)
+            .arg(memoryStats.averageValue, 0, 'f', 1)
+            .arg(memoryStats.peakValue, 0, 'f', 1)
+            .arg(buildTrendText(memoryStats, true))
+            .arg(m_r0PhysicalMemorySummaryText));
     }
     if (m_memoryCompositionHistoryWidget != nullptr)
     {
@@ -4822,10 +4877,13 @@ void HardwareDock::updateUtilizationView(
     // 磁盘子页：更新读写速率摘要与折线趋势。
     if (m_diskUtilSummaryLabel != nullptr)
     {
+        const UtilizationStatisticSnapshot diskStats = buildStatisticSnapshot(m_diskAggregateHistoryBytesPerSec);
         m_diskUtilSummaryLabel->setText(
-            QStringLiteral("读取：%1    写入：%2")
+            QStringLiteral("读取：%1    写入：%2    合计均值：%3    峰值：%4")
             .arg(formatRateText(diskReadBytesPerSec))
-            .arg(formatRateText(diskWriteBytesPerSec)));
+            .arg(formatRateText(diskWriteBytesPerSec))
+            .arg(formatRateText(diskStats.averageValue))
+            .arg(formatRateText(diskStats.peakValue)));
     }
     appendFilledSeriesPoint(
         m_diskReadLineSeries,
@@ -4851,10 +4909,13 @@ void HardwareDock::updateUtilizationView(
     // 网络子页：更新上下行速率摘要与折线趋势。
     if (m_networkUtilSummaryLabel != nullptr)
     {
+        const UtilizationStatisticSnapshot networkStats = buildStatisticSnapshot(m_networkAggregateHistoryBytesPerSec);
         m_networkUtilSummaryLabel->setText(
-            QStringLiteral("接收：%1    发送：%2")
+            QStringLiteral("接收：%1    发送：%2    合计均值：%3    峰值：%4")
             .arg(formatRateText(networkRxBytesPerSec))
-            .arg(formatRateText(networkTxBytesPerSec)));
+            .arg(formatRateText(networkTxBytesPerSec))
+            .arg(formatRateText(networkStats.averageValue))
+            .arg(formatRateText(networkStats.peakValue)));
     }
     appendFilledSeriesPoint(
         m_networkRxLineSeries,
@@ -4880,9 +4941,12 @@ void HardwareDock::updateUtilizationView(
     // GPU 子页：更新利用率摘要与折线趋势。
     if (m_gpuUtilSummaryLabel != nullptr)
     {
+        const UtilizationStatisticSnapshot gpuStats = buildStatisticSnapshot(m_gpuUsageHistoryPercent);
         m_gpuUtilSummaryLabel->setText(
-            QStringLiteral("GPU 当前利用率：%1%    3D：%2%    Copy：%3%")
+            QStringLiteral("GPU 当前：%1%    均值：%2%    峰值：%3%    3D：%4%    Copy：%5%")
             .arg(gpuUsagePercent, 0, 'f', 1)
+            .arg(gpuStats.averageValue, 0, 'f', 1)
+            .arg(gpuStats.peakValue, 0, 'f', 1)
             .arg(m_gpuUsage3DPercent, 0, 'f', 1)
             .arg(m_gpuUsageCopyPercent, 0, 'f', 1));
     }
@@ -5402,6 +5466,7 @@ void HardwareDock::updateTaskManagerDetailLabels(
         ? (maxMhzSum / static_cast<double>(cpuPowerCount) / 1000.0)
         : 0.0;
     m_lastCpuSpeedGhz = currentCpuGhz;
+    const UtilizationStatisticSnapshot cpuStats = buildStatisticSnapshot(m_cpuUsageHistoryPercent);
 
     // 系统性能快照用于进程/线程/句柄与提交内存统计。
     SystemPerformanceSnapshot perfSnapshot;
@@ -5414,12 +5479,16 @@ void HardwareDock::updateTaskManagerDetailLabels(
         m_cpuUtilPrimaryDetailLabel->setText(
             QStringLiteral(
                 "利用率: %1%\n"
-                "速度: %2 GHz\n"
-                "进程: %3\n"
-                "线程: %4\n"
-                "句柄: %5\n"
-                "正常运行时间: %6")
+                "均值: %2%   峰值: %3%   趋势: %4\n"
+                "速度: %5 GHz\n"
+                "进程: %6\n"
+                "线程: %7\n"
+                "句柄: %8\n"
+                "正常运行时间: %9")
             .arg(averageCpuUsage, 0, 'f', 1)
+            .arg(cpuStats.averageValue, 0, 'f', 1)
+            .arg(cpuStats.peakValue, 0, 'f', 1)
+            .arg(buildTrendText(cpuStats, true))
             .arg(currentCpuGhz, 0, 'f', 2)
             .arg(perfOk ? QString::number(perfSnapshot.processCount) : QStringLiteral("N/A"))
             .arg(perfOk ? QString::number(perfSnapshot.threadCount) : QStringLiteral("N/A"))
@@ -5432,13 +5501,19 @@ void HardwareDock::updateTaskManagerDetailLabels(
         m_cpuUtilSecondaryDetailLabel->setText(
             QStringLiteral(
                 "基准速度: %1 GHz\n"
-                "插槽: %2\n"
-                "内核: %3\n"
-                "逻辑处理器: %4\n"
-                "L1缓存: %5\n"
-                "L2缓存: %6\n"
-                "L3缓存: %7")
+                "压力等级: %2\n"
+                "%3\n"
+                "%4\n"
+                "插槽: %5\n"
+                "内核: %6\n"
+                "逻辑处理器: %7\n"
+                "L1缓存: %8\n"
+                "L2缓存: %9\n"
+                "L3缓存: %10")
             .arg(baseCpuGhz, 0, 'f', 2)
+            .arg(buildPressureLevelText(averageCpuUsage))
+            .arg(m_r0HardwareHealthDetailText)
+            .arg(m_r0CpuHardwareDetailText)
             .arg(m_cpuPackageCount > 0 ? QString::number(m_cpuPackageCount) : QStringLiteral("N/A"))
             .arg(m_cpuPhysicalCoreCount > 0 ? QString::number(m_cpuPhysicalCoreCount) : QStringLiteral("N/A"))
             .arg(m_cpuLogicalCoreCount > 0 ? QString::number(m_cpuLogicalCoreCount) : QStringLiteral("N/A"))
@@ -5461,16 +5536,21 @@ void HardwareDock::updateTaskManagerDetailLabels(
         }
         if (m_memoryUtilPrimaryDetailLabel != nullptr)
         {
+            const UtilizationStatisticSnapshot memoryStats = buildStatisticSnapshot(m_memoryUsageHistoryPercent);
             m_memoryUtilPrimaryDetailLabel->setText(
                 QStringLiteral(
                     "使用中(含缓存): %1 GB\n"
-                    "可用: %2 GB\n"
-                    "已提交: %3 / %4\n"
-                    "已缓存: %5\n"
-                    "分页池: %6\n"
-                    "非分页池: %7")
+                    "当前利用率: %2%\n"
+                    "均值: %3%   峰值: %4%   趋势: %5\n"
+                    "已提交: %6 / %7\n"
+                    "已缓存: %8\n"
+                    "分页池: %9\n"
+                    "非分页池: %10")
                 .arg(usedGiB, 0, 'f', 1)
-                .arg(availableGiB, 0, 'f', 1)
+                .arg(memoryUsagePercent, 0, 'f', 1)
+                .arg(memoryStats.averageValue, 0, 'f', 1)
+                .arg(memoryStats.peakValue, 0, 'f', 1)
+                .arg(buildTrendText(memoryStats, true))
                 .arg(perfOk ? bytesToReadableText(static_cast<double>(perfSnapshot.commitTotalBytes)) : QStringLiteral("N/A"))
                 .arg(perfOk ? bytesToReadableText(static_cast<double>(perfSnapshot.commitLimitBytes)) : QStringLiteral("N/A"))
                 .arg(perfOk ? bytesToReadableText(static_cast<double>(perfSnapshot.cachedBytes)) : QStringLiteral("N/A"))
@@ -5492,12 +5572,14 @@ void HardwareDock::updateTaskManagerDetailLabels(
                 "速度: %1 MHz\n"
                 "已使用插槽: %2/%3\n"
                 "外形规格: %4\n"
-                "硬件保留内存: %5")
+                "硬件保留内存: %5\n"
+                "%6")
             .arg(m_memorySpeedMhz > 0 ? QString::number(m_memorySpeedMhz) : QStringLiteral("N/A"))
             .arg(m_memorySlotUsed > 0 ? QString::number(m_memorySlotUsed) : QStringLiteral("N/A"))
             .arg(m_memorySlotTotal > 0 ? QString::number(m_memorySlotTotal) : QStringLiteral("N/A"))
             .arg(m_memoryFormFactorText.isEmpty() ? QStringLiteral("N/A") : m_memoryFormFactorText)
-            .arg(bytesToReadableText(reservedBytes)));
+            .arg(bytesToReadableText(reservedBytes))
+            .arg(m_r0PhysicalMemoryDetailText));
     }
 
     if ((m_sampleCounter % 15) == 1)
@@ -5511,17 +5593,22 @@ void HardwareDock::updateTaskManagerDetailLabels(
             diskTotalRate / std::max(1.0, m_diskNavAutoScaleBytesPerSec) * 100.0,
             0.0,
             100.0);
+        const UtilizationStatisticSnapshot diskStats = buildStatisticSnapshot(m_diskAggregateHistoryBytesPerSec);
         m_diskUtilDetailLabel->setText(
             QStringLiteral(
                 "活动时间(近似): %1%\n"
-                "读取速度: %2\n"
-                "写入速度: %3\n"
-                "系统卷: %4\n"
-                "总容量: %5\n"
-                "可用: %6")
+                "当前合计: %2\n"
+                "均值: %3\n"
+                "峰值: %4\n"
+                "趋势: %5\n"
+                "系统卷: %6\n"
+                "总容量: %7\n"
+                "可用: %8")
             .arg(diskApproxPercent, 0, 'f', 1)
-            .arg(formatRateText(diskReadBytesPerSec))
-            .arg(formatRateText(diskWriteBytesPerSec))
+            .arg(formatRateText(diskTotalRate))
+            .arg(formatRateText(diskStats.averageValue))
+            .arg(formatRateText(diskStats.peakValue))
+            .arg(buildTrendText(diskStats, false))
             .arg(m_systemVolumeText.isEmpty() ? QStringLiteral("N/A") : m_systemVolumeText)
             .arg(m_systemVolumeTotalBytes > 0
                 ? bytesToReadableText(static_cast<double>(m_systemVolumeTotalBytes))
@@ -5537,15 +5624,24 @@ void HardwareDock::updateTaskManagerDetailLabels(
             ? QStringLiteral("N/A")
             : m_primaryNetworkAdapterName;
         const double linkMbps = static_cast<double>(m_primaryNetworkLinkBitsPerSecond) / (1000.0 * 1000.0);
+        const UtilizationStatisticSnapshot networkStats = buildStatisticSnapshot(m_networkAggregateHistoryBytesPerSec);
         m_networkUtilDetailLabel->setText(
             QStringLiteral(
                 "适配器: %1\n"
                 "发送: %2\n"
                 "接收: %3\n"
-                "链路速度: %4 Mbps")
+                "合计: %4\n"
+                "均值: %5\n"
+                "峰值: %6\n"
+                "趋势: %7\n"
+                "链路速度: %8 Mbps")
             .arg(adapterText)
             .arg(formatRateText(networkTxBytesPerSec))
             .arg(formatRateText(networkRxBytesPerSec))
+            .arg(formatRateText(networkRxBytesPerSec + networkTxBytesPerSec))
+            .arg(formatRateText(networkStats.averageValue))
+            .arg(formatRateText(networkStats.peakValue))
+            .arg(buildTrendText(networkStats, false))
             .arg(linkMbps > 0.0 ? QString::number(linkMbps, 'f', 1) : QStringLiteral("N/A")));
     }
 
@@ -5573,16 +5669,21 @@ void HardwareDock::updateTaskManagerDetailLabels(
 
     if (m_gpuUtilDetailLabel != nullptr)
     {
+        const UtilizationStatisticSnapshot gpuStats = buildStatisticSnapshot(m_gpuUsageHistoryPercent);
         m_gpuUtilDetailLabel->setText(
             QStringLiteral(
                 "利用率: %1%\n"
-                "3D: %2%   Copy: %3%   Video Encode: %4%   Video Decode: %5%\n"
-                "专用显存: %6 / %7 GiB\n"
-                "共享显存: %8 / %9 GiB\n"
-                "驱动版本: %10\n"
-                "驱动日期: %11\n"
-                "PNP: %12")
+                "均值: %2%   峰值: %3%   趋势: %4\n"
+                "3D: %5%   Copy: %6%   Video Encode: %7%   Video Decode: %8%\n"
+                "专用显存: %9 / %10 GiB\n"
+                "共享显存: %11 / %12 GiB\n"
+                "驱动版本: %13\n"
+                "驱动日期: %14\n"
+                "PNP: %15")
             .arg(gpuUsagePercent, 0, 'f', 1)
+            .arg(gpuStats.averageValue, 0, 'f', 1)
+            .arg(gpuStats.peakValue, 0, 'f', 1)
+            .arg(buildTrendText(gpuStats, true))
             .arg(m_gpuUsage3DPercent, 0, 'f', 1)
             .arg(m_gpuUsageCopyPercent, 0, 'f', 1)
             .arg(m_gpuUsageVideoEncodePercent, 0, 'f', 1)
@@ -5923,6 +6024,424 @@ void HardwareDock::rebuildDualRateNavCard(
 QString HardwareDock::formatRateText(const double bytesPerSecondValue) const
 {
     return bytesPerSecondToText(bytesPerSecondValue);
+}
+
+void HardwareDock::pushBoundedHistorySample(
+    std::vector<double>* historyList,
+    const double sampleValue) const
+{
+    if (historyList == nullptr)
+    {
+        return;
+    }
+
+    // historyCapacity 用途：复用主图历史长度，保持统计窗口与图表窗口一致。
+    const int historyCapacity = std::max(1, m_historyLength);
+    historyList->push_back(std::max(0.0, sampleValue));
+    while (static_cast<int>(historyList->size()) > historyCapacity)
+    {
+        historyList->erase(historyList->begin());
+    }
+}
+
+HardwareDock::UtilizationStatisticSnapshot HardwareDock::buildStatisticSnapshot(
+    const std::vector<double>& historyList) const
+{
+    UtilizationStatisticSnapshot snapshot;
+    if (historyList.empty())
+    {
+        return snapshot;
+    }
+
+    // sampleCount/average/peak/min 均基于当前可见历史窗口，而不是进程生命周期累计值。
+    snapshot.sampleCount = static_cast<int>(historyList.size());
+    snapshot.currentValue = historyList.back();
+    snapshot.minValue = std::numeric_limits<double>::max();
+    for (const double sampleValue : historyList)
+    {
+        const double safeSampleValue = std::max(0.0, sampleValue);
+        snapshot.averageValue += safeSampleValue;
+        snapshot.peakValue = std::max(snapshot.peakValue, safeSampleValue);
+        snapshot.minValue = std::min(snapshot.minValue, safeSampleValue);
+    }
+    snapshot.averageValue /= static_cast<double>(snapshot.sampleCount);
+    snapshot.trendDelta = snapshot.currentValue - std::max(0.0, historyList.front());
+    if (snapshot.minValue == std::numeric_limits<double>::max())
+    {
+        snapshot.minValue = 0.0;
+    }
+    return snapshot;
+}
+
+QString HardwareDock::buildTrendText(
+    const UtilizationStatisticSnapshot& snapshot,
+    const bool percentUnit) const
+{
+    // threshold 用途：忽略极小波动，避免页面每秒在“上升/下降”之间抖动。
+    const double threshold = percentUnit ? 1.0 : 1024.0;
+    if (std::abs(snapshot.trendDelta) < threshold)
+    {
+        return QStringLiteral("平稳");
+    }
+
+    const QString directionText = snapshot.trendDelta > 0.0
+        ? QStringLiteral("上升")
+        : QStringLiteral("下降");
+    const double absoluteDelta = std::abs(snapshot.trendDelta);
+    if (percentUnit)
+    {
+        return QStringLiteral("%1 %2%")
+            .arg(directionText)
+            .arg(absoluteDelta, 0, 'f', 1);
+    }
+    return QStringLiteral("%1 %2")
+        .arg(directionText)
+        .arg(formatRateText(absoluteDelta));
+}
+
+QString HardwareDock::buildPressureLevelText(const double percentValue) const
+{
+    const double safePercentValue = std::clamp(percentValue, 0.0, 100.0);
+    if (safePercentValue >= 90.0)
+    {
+        return QStringLiteral("极高");
+    }
+    if (safePercentValue >= 75.0)
+    {
+        return QStringLiteral("高");
+    }
+    if (safePercentValue >= 45.0)
+    {
+        return QStringLiteral("中");
+    }
+    if (safePercentValue >= 15.0)
+    {
+        return QStringLiteral("低");
+    }
+    return QStringLiteral("空闲");
+}
+
+QString HardwareDock::buildR0CpuFeatureBadgeText(const std::uint64_t featureMask) const
+{
+    // 输入：R0 CPUID 查询返回的 KSWORD_ARK_CPU_FEATURE_* 位图。
+    // 处理：按性能/虚拟化/安全能力优先级输出短 badge，避免 UI 直接解析原始 CPUID 寄存器。
+    // 返回：逗号分隔的能力文本；无可展示能力时返回 N/A。
+    QStringList featureList;
+    const auto appendFeatureIfPresent =
+        [&featureList, featureMask](const std::uint64_t bitValue, const QString& featureName)
+        {
+            if ((featureMask & bitValue) != 0ULL)
+            {
+                featureList.append(featureName);
+            }
+        };
+
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_SSE, QStringLiteral("SSE"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_SSE2, QStringLiteral("SSE2"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_SSE3, QStringLiteral("SSE3"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_SSSE3, QStringLiteral("SSSE3"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_SSE41, QStringLiteral("SSE4.1"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_SSE42, QStringLiteral("SSE4.2"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_AES, QStringLiteral("AES"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_AVX, QStringLiteral("AVX"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_AVX2, QStringLiteral("AVX2"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_AVX512F, QStringLiteral("AVX512F"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_VMX, QStringLiteral("VMX"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_NX, QStringLiteral("NX"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_SMEP, QStringLiteral("SMEP"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_SMAP, QStringLiteral("SMAP"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_RDTSCP, QStringLiteral("RDTSCP"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_INVARIANT_TSC, QStringLiteral("Invariant TSC"));
+    appendFeatureIfPresent(KSWORD_ARK_CPU_FEATURE_HYPERVISOR, QStringLiteral("Hypervisor"));
+
+    return featureList.isEmpty() ? QStringLiteral("N/A") : featureList.join(QStringLiteral(", "));
+}
+
+QString HardwareDock::buildPercentStatisticLine(
+    const QString& labelText,
+    const UtilizationStatisticSnapshot& snapshot) const
+{
+    return QStringLiteral("%1: 当前 %2% / 均值 %3% / 峰值 %4% / 趋势 %5 / 压力 %6 / 样本 %7")
+        .arg(labelText)
+        .arg(snapshot.currentValue, 0, 'f', 1)
+        .arg(snapshot.averageValue, 0, 'f', 1)
+        .arg(snapshot.peakValue, 0, 'f', 1)
+        .arg(buildTrendText(snapshot, true))
+        .arg(buildPressureLevelText(snapshot.currentValue))
+        .arg(snapshot.sampleCount);
+}
+
+QString HardwareDock::buildRateStatisticLine(
+    const QString& labelText,
+    const UtilizationStatisticSnapshot& snapshot) const
+{
+    return QStringLiteral("%1: 当前 %2 / 均值 %3 / 峰值 %4 / 趋势 %5 / 样本 %6")
+        .arg(labelText)
+        .arg(formatRateText(snapshot.currentValue))
+        .arg(formatRateText(snapshot.averageValue))
+        .arg(formatRateText(snapshot.peakValue))
+        .arg(buildTrendText(snapshot, false))
+        .arg(snapshot.sampleCount);
+}
+
+void HardwareDock::requestAsyncR0HardwareHealthRefresh()
+{
+    // expectedFlag 用途：避免多个 R0 采样线程并发。
+    bool expectedFlag = false;
+    if (!m_r0HardwareHealthRefreshing.compare_exchange_strong(expectedFlag, true))
+    {
+        return;
+    }
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_lastR0HardwareHealthRefreshMs > 0 && nowMs - m_lastR0HardwareHealthRefreshMs < 10'000)
+    {
+        m_r0HardwareHealthRefreshing.store(false);
+        return;
+    }
+
+    QPointer<HardwareDock> safeThis(this);
+    std::thread([safeThis, nowMs]() {
+        const ksword::ark::DriverClient client;
+        const ksword::ark::DriverCapabilitiesQueryResult capabilityResult = client.queryDriverCapabilities();
+        const ksword::ark::DynDataCapabilitiesResult dynDataResult = client.queryDynDataCapabilities();
+        const ksword::ark::DriverIntegrityResult integrityResult = client.queryKernelCpuIntegrity();
+        const ksword::ark::CpuHardwareSnapshotResult cpuHardwareResult = client.queryCpuHardwareSnapshot();
+        const ksword::ark::PhysicalMemoryLayoutResult physicalMemoryResult = client.queryPhysicalMemoryLayout();
+
+        if (safeThis.isNull())
+        {
+            return;
+        }
+
+        const bool invokeOk = QMetaObject::invokeMethod(
+            safeThis.data(),
+            [safeThis, nowMs, capabilityResult, dynDataResult, integrityResult, cpuHardwareResult, physicalMemoryResult]()
+            {
+                if (safeThis.isNull())
+                {
+                    return;
+                }
+
+                const int cpuEvidenceCount = static_cast<int>(integrityResult.cpuCount);
+                int idtEvidenceCount = 0;
+                int msrEvidenceCount = 0;
+                int highRiskCount = 0;
+                int cpuProtectionRiskCount = 0;
+                int unresolvedOwnerRiskCount = 0;
+                for (const auto& entry : integrityResult.entries)
+                {
+                    if (entry.evidenceClass == KSWORD_ARK_DRIVER_INTEGRITY_CLASS_IDT_HANDLER)
+                    {
+                        ++idtEvidenceCount;
+                    }
+                    if (entry.evidenceClass == KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MSR_ENTRY)
+                    {
+                        ++msrEvidenceCount;
+                    }
+                    if (entry.riskFlags != KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE)
+                    {
+                        ++highRiskCount;
+                    }
+                    if ((entry.riskFlags
+                        & (KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_WP_DISABLED
+                            | KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_NXE_DISABLED
+                            | KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMEP_DISABLED
+                            | KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMAP_DISABLED)) != 0U)
+                    {
+                        ++cpuProtectionRiskCount;
+                    }
+                    if ((entry.riskFlags
+                        & (KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED
+                            | KSWORD_ARK_DRIVER_INTEGRITY_RISK_IDT_NON_CORE_OWNER
+                            | KSWORD_ARK_DRIVER_INTEGRITY_RISK_DESCRIPTOR_INVALID)) != 0U)
+                    {
+                        ++unresolvedOwnerRiskCount;
+                    }
+                }
+
+                int availableFeatureCount = 0;
+                int degradedFeatureCount = 0;
+                int deniedFeatureCount = 0;
+                for (const auto& featureEntry : capabilityResult.entries)
+                {
+                    if (featureEntry.state == KSWORD_ARK_FEATURE_STATE_AVAILABLE)
+                    {
+                        ++availableFeatureCount;
+                    }
+                    else if (featureEntry.state == KSWORD_ARK_FEATURE_STATE_DEGRADED)
+                    {
+                        ++degradedFeatureCount;
+                    }
+                    else if (featureEntry.state == KSWORD_ARK_FEATURE_STATE_DENIED_BY_POLICY)
+                    {
+                        ++deniedFeatureCount;
+                    }
+                }
+
+                int healthScore = 100;
+                if (!capabilityResult.io.ok)
+                {
+                    healthScore -= 25;
+                }
+                if (!dynDataResult.io.ok || dynDataResult.capabilityMask == 0ULL)
+                {
+                    healthScore -= 10;
+                }
+                if (!integrityResult.io.ok)
+                {
+                    healthScore -= 35;
+                }
+                healthScore -= std::min(30, highRiskCount * 4);
+                healthScore -= std::min(25, cpuProtectionRiskCount * 8);
+                healthScore -= std::min(15, unresolvedOwnerRiskCount * 2);
+                healthScore -= std::min(10, degradedFeatureCount * 2);
+                healthScore -= std::min(10, deniedFeatureCount * 2);
+                healthScore = std::clamp(healthScore, 0, 100);
+
+                const QString healthLevelText = healthScore >= 90
+                    ? QStringLiteral("优秀")
+                    : (healthScore >= 75
+                        ? QStringLiteral("良好")
+                        : (healthScore >= 55
+                            ? QStringLiteral("关注")
+                            : QStringLiteral("高风险")));
+
+                safeThis->m_r0HardwareHealthSummaryText = QStringLiteral(
+                    "R0硬件健康: %1分/%2 | 风险=%3 保护风险=%4 | CPU=%5 IDT=%6 MSR=%7")
+                    .arg(healthScore)
+                    .arg(healthLevelText)
+                    .arg(highRiskCount)
+                    .arg(cpuProtectionRiskCount)
+                    .arg(cpuEvidenceCount)
+                    .arg(idtEvidenceCount)
+                    .arg(msrEvidenceCount);
+
+                const QString lastStatusText = QStringLiteral("0x%1")
+                    .arg(static_cast<unsigned long>(integrityResult.lastStatus), 8, 16, QChar('0'))
+                    .toUpper();
+                safeThis->m_r0HardwareHealthDetailText = QStringLiteral(
+                    "R0健康: %1分/%2  CPU=%3  IDT=%4  MSR=%5  风险=%6  保护风险=%7\n"
+                    "协议: avail=%8 degraded=%9 denied=%10  |  Last=%11")
+                    .arg(healthScore)
+                    .arg(healthLevelText)
+                    .arg(cpuEvidenceCount)
+                    .arg(idtEvidenceCount)
+                    .arg(msrEvidenceCount)
+                    .arg(highRiskCount)
+                    .arg(cpuProtectionRiskCount)
+                    .arg(availableFeatureCount)
+                    .arg(degradedFeatureCount)
+                    .arg(deniedFeatureCount)
+                    .arg(integrityResult.io.ok ? lastStatusText : QStringLiteral("N/A"));
+
+                if (cpuHardwareResult.io.ok)
+                {
+                    const QString vendorText = QString::fromStdString(cpuHardwareResult.vendor).trimmed();
+                    const QString brandText = QString::fromStdString(cpuHardwareResult.brand).trimmed();
+                    const QString featureBadgeText = safeThis->buildR0CpuFeatureBadgeText(cpuHardwareResult.featureMask);
+                    const QString leafText = QStringLiteral("basic=0x%1 ext=0x%2")
+                        .arg(cpuHardwareResult.maxBasicLeaf, 0, 16)
+                        .arg(cpuHardwareResult.maxExtendedLeaf, 0, 16)
+                        .toUpper();
+                    safeThis->m_r0CpuHardwareSummaryText = QStringLiteral(
+                        "R0 CPU: %1 F%2/M%3/S%4 | 特性: %5")
+                        .arg(vendorText.isEmpty() ? QStringLiteral("N/A") : vendorText)
+                        .arg(cpuHardwareResult.family)
+                        .arg(cpuHardwareResult.model)
+                        .arg(cpuHardwareResult.stepping)
+                        .arg(featureBadgeText);
+                    safeThis->m_r0CpuHardwareDetailText = QStringLiteral(
+                        "R0 CPUID: %1\n"
+                        "Vendor: %2\n"
+                        "Family/Model/Stepping: %3/%4/%5\n"
+                        "Logical/Active: %6/%7\n"
+                        "CLFLUSH line: %8 bytes\n"
+                        "Leaves: %9\n"
+                        "FeatureMask: 0x%10\n"
+                        "Features: %11")
+                        .arg(brandText.isEmpty() ? QStringLiteral("N/A") : brandText)
+                        .arg(vendorText.isEmpty() ? QStringLiteral("N/A") : vendorText)
+                        .arg(cpuHardwareResult.family)
+                        .arg(cpuHardwareResult.model)
+                        .arg(cpuHardwareResult.stepping)
+                        .arg(cpuHardwareResult.logicalProcessorCount)
+                        .arg(cpuHardwareResult.activeProcessorCount)
+                        .arg(cpuHardwareResult.clflushLineSize)
+                        .arg(leafText)
+                        .arg(cpuHardwareResult.featureMask, 16, 16, QChar('0'))
+                        .arg(featureBadgeText);
+                    if (!brandText.isEmpty())
+                    {
+                        safeThis->m_cpuModelText = brandText;
+                        if (safeThis->m_cpuModelLabel != nullptr)
+                        {
+                            safeThis->m_cpuModelLabel->setText(brandText);
+                        }
+                    }
+                }
+                else
+                {
+                    safeThis->m_r0CpuHardwareSummaryText = cpuHardwareResult.unsupported
+                        ? QStringLiteral("R0 CPU硬件: 当前驱动不支持 CPUID 快照")
+                        : QStringLiteral("R0 CPU硬件: 查询失败 err=%1")
+                            .arg(cpuHardwareResult.io.win32Error);
+                    safeThis->m_r0CpuHardwareDetailText = QStringLiteral(
+                        "R0 CPUID 查询不可用: %1")
+                        .arg(QString::fromStdString(cpuHardwareResult.io.message));
+                }
+
+                if (physicalMemoryResult.io.ok)
+                {
+                    const QString totalText = bytesToReadableText(static_cast<double>(physicalMemoryResult.totalPhysicalBytes));
+                    const QString largestText = bytesToReadableText(static_cast<double>(physicalMemoryResult.largestRangeBytes));
+                    const QString gapText = bytesToReadableText(static_cast<double>(physicalMemoryResult.estimatedAddressSpaceGapBytes));
+                    safeThis->m_r0PhysicalMemorySummaryText = QStringLiteral(
+                        "R0物理内存: %1 | ranges=%2 | 最大连续=%3")
+                        .arg(totalText)
+                        .arg(physicalMemoryResult.rangeCount)
+                        .arg(largestText);
+                    safeThis->m_r0PhysicalMemoryDetailText = QStringLiteral(
+                        "R0物理内存布局\n"
+                        "总物理内存: %1\n"
+                        "Range数量: %2  零长度: %3\n"
+                        "最大连续Range: %4\n"
+                        "最小Range: %5\n"
+                        "最高物理地址: 0x%6\n"
+                        "首Range基址: 0x%7\n"
+                        "末Range结束: 0x%8\n"
+                        "估算地址空洞: %9")
+                        .arg(totalText)
+                        .arg(physicalMemoryResult.rangeCount)
+                        .arg(physicalMemoryResult.zeroLengthRangeCount)
+                        .arg(largestText)
+                        .arg(bytesToReadableText(static_cast<double>(physicalMemoryResult.smallestRangeBytes)))
+                        .arg(QString::number(physicalMemoryResult.highestPhysicalAddress, 16).toUpper())
+                        .arg(QString::number(physicalMemoryResult.firstBaseAddress, 16).toUpper())
+                        .arg(QString::number(physicalMemoryResult.lastEndAddress, 16).toUpper())
+                        .arg(gapText);
+                }
+                else
+                {
+                    safeThis->m_r0PhysicalMemorySummaryText = physicalMemoryResult.unsupported
+                        ? QStringLiteral("R0物理内存: 当前驱动不支持布局快照")
+                        : QStringLiteral("R0物理内存: 查询失败 err=%1")
+                            .arg(physicalMemoryResult.io.win32Error);
+                    safeThis->m_r0PhysicalMemoryDetailText = QStringLiteral(
+                        "R0物理内存布局查询不可用: %1")
+                        .arg(QString::fromStdString(physicalMemoryResult.io.message));
+                }
+
+                safeThis->m_lastR0HardwareHealthRefreshMs = nowMs;
+                safeThis->m_r0HardwareHealthRefreshing.store(false);
+            },
+            Qt::QueuedConnection);
+
+        if (!invokeOk && !safeThis.isNull())
+        {
+            safeThis->m_r0HardwareHealthRefreshing.store(false);
+        }
+    }).detach();
 }
 
 void HardwareDock::refreshStaticHardwareTexts(const bool forceRefresh)

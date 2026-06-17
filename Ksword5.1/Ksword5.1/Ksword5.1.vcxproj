@@ -159,6 +159,8 @@
     <ClCompile Include="HardwareDock\HardwareDock.cpp" />
     <ClCompile Include="HardwareDock\DiskMonitorPage.cpp" />
     <ClCompile Include="HardwareDock\MemoryCompositionHistoryWidget.cpp" />
+    <ClCompile Include="HardwareDock\HardwareR0EvidencePage.cpp" />
+    <ClCompile Include="HardwareDock\HardwareDeviceManagerPage.cpp" />
     <ClCompile Include="HardwareDock\HardwareOtherDevicesPage.cpp" />
     <ClCompile Include="Framework\Log.cpp" />
     <ClCompile Include="Framework\LogDockWidget.cpp" />
@@ -233,6 +235,7 @@
     <ClCompile Include="NetworkDock\NetworkDock.NetworkDiagnostics.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.DetailAndUtils.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.InternalHelpers.cpp" />
+    <ClCompile Include="NetworkDock\NetworkFirewallPage.cpp" />
     <ClCompile Include="NetworkDock\HttpsProxyService.cpp" />
     <ClCompile Include="OtherDock\OtherDock.DesktopCreate.cpp" />
     <ClCompile Include="OtherDock\OtherDock.Desktop.cpp" />
@@ -374,6 +377,8 @@
     <QtMoc Include="HardwareDock\HardwareDock.h" />
     <QtMoc Include="HardwareDock\DiskMonitorPage.h" />
     <ClInclude Include="HardwareDock\MemoryCompositionHistoryWidget.h" />
+    <ClInclude Include="HardwareDock\HardwareR0EvidencePage.h" />
+    <QtMoc Include="HardwareDock\HardwareDeviceManagerPage.h" />
     <QtMoc Include="HardwareDock\HardwareOtherDevicesPage.h" />
     <QtMoc Include="KernelDock\KernelDock.h" />
     <QtMoc Include="KernelDock\KernelDock.CallbackPromptManager.h" />
@@ -399,6 +404,7 @@
     <QtMoc Include="NetworkDock\NetworkDock.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalCommon.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalHelpers.h" />
+    <QtMoc Include="NetworkDock\NetworkFirewallPage.h" />
     <ClInclude Include="NetworkDock\HttpsProxyService.h" />
     <QtMoc Include="OtherDock\OtherDock.h" />
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h" />
@@ -457,6 +463,18 @@
       <KswordTestSigningCertificateSource>$(MSBuildProjectDirectory)\..\..\.cert\KswordARK-TestSigning.cer</KswordTestSigningCertificateSource>
     </PropertyGroup>
     <Copy SourceFiles="$(KswordTestSigningCertificateSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(KswordTestSigningCertificateSource)')" />
+  </Target>
+  <Target Name="CopyKswordArkDriverArtifacts" AfterTargets="Build">
+    <PropertyGroup>
+      <KswordArkDriverOutputDir>$(MSBuildProjectDirectory)\..\..\KswordARKDriver\x64\$(Configuration)\</KswordArkDriverOutputDir>
+      <KswordArkDriverSysSource>$(KswordArkDriverOutputDir)KswordARK.sys</KswordArkDriverSysSource>
+      <KswordArkDriverPdbSource>$(KswordArkDriverOutputDir)KswordARK.pdb</KswordArkDriverPdbSource>
+      <KswordArkDriverInfSource>$(KswordArkDriverOutputDir)KswordARKDriver.inf</KswordArkDriverInfSource>
+    </PropertyGroup>
+    <Copy SourceFiles="$(KswordArkDriverSysSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="false" Condition="Exists('$(KswordArkDriverSysSource)')" />
+    <Copy SourceFiles="$(KswordArkDriverPdbSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="false" Condition="Exists('$(KswordArkDriverPdbSource)')" />
+    <Copy SourceFiles="$(KswordArkDriverInfSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="false" Condition="Exists('$(KswordArkDriverInfSource)')" />
+    <Warning Condition="!Exists('$(KswordArkDriverSysSource)')" Text="KswordARK driver binary was not found for output sync: $(KswordArkDriverSysSource)" />
   </Target>
   <!-- Release 主程序构建完成后复用驱动测试签名证书，签名失败只告警，避免阻断普通编译。 -->
   <Target Name="KswordMainAutoTestSignAfterBuild" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='Release|x64' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoTestSign)'!='true'">
