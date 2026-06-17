@@ -216,6 +216,11 @@ private:
     // - 处理：在 KswordARK 服务启动或确认运行后恢复日志轮询和回调等待管理器；
     // - 返回：无返回值，重复调用会被各子模块幂等忽略。
     void startR0RuntimeConsumersAfterServiceStart();
+    // refreshR0DynDataAfterServiceStart 作用：
+    // - 输入：无；
+    // - 处理：KswordARK 驱动装载后立即触发 DynData profile pack 匹配与下发；
+    // - 返回：无返回值，失败只写日志，R0 功能仍可依赖驱动侧运行时兜底。
+    void refreshR0DynDataAfterServiceStart();
     void startR0DriverLogPoller();
     void stopR0DriverLogPoller();
     void runR0DriverLogPollerLoop();

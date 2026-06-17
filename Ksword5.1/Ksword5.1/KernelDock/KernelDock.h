@@ -427,6 +427,10 @@ public:
     // - 资源由 Qt 父子机制与容器自动释放。
     ~KernelDock() override = default;
 
+    // requestDynDataRefresh：
+    // - 作用：对外触发 DynData 页初始化和异步刷新。
+    void requestDynDataRefresh();
+
 private:
     // ==================== UI 初始化 ====================
     // initializeUi：

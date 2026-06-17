@@ -4783,6 +4783,50 @@ void MainWindow::startR0RuntimeConsumersAfterServiceStart()
         callbackPromptManager->setHostWindow(this);
         callbackPromptManager->start();
     }
+
+    refreshR0DynDataAfterServiceStart();
+}
+
+void MainWindow::refreshR0DynDataAfterServiceStart()
+{
+    // R0 服务启动后立即把本地 PDB profile pack 下发到驱动：
+    // - 复用 KernelDock 现有的 profile 匹配、v3 typed item 解析和 APPLY_DYN_PROFILE_EX；
+    // - 不切换当前 Dock，只确保惰性 KernelDock 内容已初始化；
+    // - 失败只进入日志/KernelDock 状态，具体 R0 功能仍有驱动侧运行时偏移兜底。
+    QTimer::singleShot(0, this, [this]() {
+        kLogEvent logEvent;
+        if (m_dockKernel == nullptr)
+        {
+            QTimer::singleShot(1000, this, [this]() {
+                kLogEvent retryEvent;
+                if (m_dockKernel == nullptr)
+                {
+                    warn << retryEvent
+                        << "[MainWindow][R0] DynData 自动载入延迟重试跳过：KernelDock 壳尚未创建。"
+                        << eol;
+                    return;
+                }
+                refreshR0DynDataAfterServiceStart();
+                });
+            return;
+        }
+        if (m_dockKernel != nullptr)
+        {
+            ensureDockContentInitialized(m_dockKernel);
+        }
+        if (m_kernelWidget == nullptr)
+        {
+            warn << logEvent
+                << "[MainWindow][R0] DynData 自动载入跳过：KernelDock 未初始化。"
+                << eol;
+            return;
+        }
+
+        info << logEvent
+            << "[MainWindow][R0] 驱动已装载，开始自动刷新 DynData profile。"
+            << eol;
+        m_kernelWidget->requestDynDataRefresh();
+        });
 }
 
 void MainWindow::stopR0DriverLogPoller()
