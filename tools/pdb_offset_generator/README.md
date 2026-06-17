@@ -60,35 +60,36 @@ python tools\pdb_offset_generator\ksword_profile_release_sync.py `
   --emit-pack
 ```
 
-To publish the callback-aware pack used by newer R3 loaders, request pack v2
-and write it directly to `Release\profiles\ark_dyndata_pack_v2.json`:
+To publish the typed offset pack used by the current R3 loader path, request
+pack v3 and write it directly to `Release\profiles\ark_dyndata_pack_v3.json`:
 
 ```powershell
 python tools\pdb_offset_generator\ksword_profile_release_sync.py `
   --emit-pack `
-  --pack-version 2 `
-  --pack-output Release\profiles\ark_dyndata_pack_v2.json
+  --pack-version 3 `
+  --pack-output Release\profiles\ark_dyndata_pack_v3.json
 ```
 
 The default output path is version-specific:
 
 - v1: `<release-root>\profiles\ark_dyndata_pack_v1.json`
 - v2: `<release-root>\profiles\ark_dyndata_pack_v2.json`
-- v3: `<release-root>\profiles\ark_dyndata_pack_v3.json`
+- v3: `<release-root>\profiles\ark_dyndata_pack_v3.json` (preferred for
+  `EpActiveProcessLinks` and other typed `StructOffset` fields)
 
 `--pack-only` keeps its existing behavior and can also be combined with
 `--pack-version 2` or `--pack-version 3`. `--pack-output` overrides the computed
 v1/v2/v3 path when a specific destination is required.
 
-For a release-side v2 pack that lands at `Release\profiles\ark_dyndata_pack_v2.json`
+For a release-side v3 pack that lands at `Release\profiles\ark_dyndata_pack_v3.json`
 and does not publish scattered JSON, use pack-only together with `--clean-target`:
 
 ```powershell
 python tools\pdb_offset_generator\ksword_profile_release_sync.py `
   --release-root Ksword5.1\Ksword5.1\x64\Release `
   --pack-only `
-  --pack-version 2 `
-  --pack-output Ksword5.1\Ksword5.1\x64\Release\profiles\ark_dyndata_pack_v2.json `
+  --pack-version 3 `
+  --pack-output Ksword5.1\Ksword5.1\x64\Release\profiles\ark_dyndata_pack_v3.json `
   --clean-target
 ```
 
@@ -134,8 +135,8 @@ not copied into the pack.
 
 Pack v3 remains compatible with the v1/v2 identity and `fields` layout, but it
 adds a typed `items` array for every profile. R3 loaders accept packVersion 1,
-2, or 3; v3 is preferred for next-phase features because `items` can carry both
-`StructOffset` and optional `GlobalRva` entries:
+2, or 3; v3 is preferred for the current offset-extraction path because `items`
+can carry both `StructOffset` and optional `GlobalRva` entries:
 
 ```json
 {
@@ -168,6 +169,21 @@ adds a typed `items` array for every profile. R3 loaders accept packVersion 1,
 Release reports now include per-profile `missingFields`, `missingGlobals`, and
 `coveragePercent` so the pack can be audited without opening every scattered
 profile.
+
+## ActiveProcessLinks audit helper
+
+Use `ksword_active_process_links_audit.py` to verify that the current
+`ark_dyndata_pack_v3.json` contains `_EPROCESS.ActiveProcessLinks` for the
+local `ntoskrnl.exe` identity:
+
+```powershell
+python tools\pdb_offset_generator\ksword_active_process_links_audit.py `
+  --pack Ksword5.1\Ksword5.1\x64\Release\profiles\ark_dyndata_pack_v3.json `
+  --kernel C:\Windows\System32\ntoskrnl.exe
+```
+
+The script prints the matching profile name, the legacy `fields` offset list,
+the v3 typed item offset list, and exits non-zero if the offset is missing.
 
 ## callbackItems release validation
 

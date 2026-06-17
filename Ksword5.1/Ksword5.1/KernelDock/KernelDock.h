@@ -356,6 +356,9 @@ struct KernelDriverStatusSummary
     std::uint32_t dynDataSystemInformerFieldCount = 0; // dynDataSystemInformerFieldCount：来源为 System Informer 的可用字段数。
     std::uint32_t dynDataExtraTableFieldCount = 0; // dynDataExtraTableFieldCount：来源为 Ksword extra table 的可用字段数。
     std::uint32_t dynDataUnavailableFieldCount = 0; // dynDataUnavailableFieldCount：当前不可用字段数。
+    bool dynDataActiveProcessLinksPresent = false; // dynDataActiveProcessLinksPresent：R0 当前是否公开了 _EPROCESS.ActiveProcessLinks 偏移。
+    std::uint32_t dynDataActiveProcessLinksOffset = 0xFFFFFFFFU; // dynDataActiveProcessLinksOffset：R0 当前生效的 ActiveProcessLinks 偏移。
+    std::uint32_t dynDataActiveProcessLinksSource = 0; // dynDataActiveProcessLinksSource：R0 当前 ActiveProcessLinks 偏移来源。
     std::uint32_t ntoskrnlClassId = 0;       // ntoskrnlClassId：当前 ntoskrnl profile class。
     std::uint32_t ntoskrnlMachine = 0;       // ntoskrnlMachine：当前 ntoskrnl PE Machine。
     std::uint32_t ntoskrnlTimeDateStamp = 0; // ntoskrnlTimeDateStamp：当前 ntoskrnl PE TimeDateStamp。
@@ -366,6 +369,8 @@ struct KernelDriverStatusSummary
     std::uint32_t localPdbProfileFieldCount = 0; // localPdbProfileFieldCount：命中 profile 声明字段数。
     std::uint32_t localPdbProfileTypedItemCount = 0; // localPdbProfileTypedItemCount：命中 profile 声明 v3 typed items 数。
     std::uint32_t localPdbProfileCallbackItemCount = 0; // localPdbProfileCallbackItemCount：命中 profile 声明 callbackItems 数。
+    bool localPdbProfileActiveProcessLinksPresent = false; // localPdbProfileActiveProcessLinksPresent：本地 pack 是否包含 ActiveProcessLinks。
+    std::uint32_t localPdbProfileActiveProcessLinksOffset = 0xFFFFFFFFU; // localPdbProfileActiveProcessLinksOffset：本地 pack 提取的 ActiveProcessLinks 偏移。
     double localPdbProfileCoveragePercent = -1.0; // localPdbProfileCoveragePercent：release_sync 写入的 profile 覆盖率，负数表示未知。
     QString localPdbProfileNameText;         // localPdbProfileNameText：本地 pack 命中的 profile 名。
     QString localPdbProfileVersionText;      // localPdbProfileVersionText：从 profile 名提取的 Windows 版本号。

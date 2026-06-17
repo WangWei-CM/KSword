@@ -1544,6 +1544,12 @@ namespace
         return result.ok;
     }
 
+    // activeProcessLinksDynDataDiagnostic 前置声明：
+    // - 输入：已构造好的 DriverClient；
+    // - 处理：在文件后半段定义的只读 DynData 诊断 helper；
+    // - 返回：追加到隐藏动作失败详情中的诊断字符串。
+    std::string activeProcessLinksDynDataDiagnostic(const ksword::ark::DriverClient& driverClient);
+
     bool setProcessVisibilityByR0Driver(
         const std::uint32_t targetPid,
         const unsigned long action,
@@ -1569,15 +1575,24 @@ namespace
         const ksword::ark::DriverClient driverClient;
         const ksword::ark::ProcessVisibilityResult result =
             driverClient.setProcessVisibility(targetPid, action);
-        if (detailTextOut != nullptr)
-        {
-            *detailTextOut = result.io.message;
-        }
-        return result.io.ok &&
+        const bool actionSucceeded = result.io.ok &&
             result.lastStatus >= 0 &&
             (result.status == KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN ||
                 result.status == KSWORD_ARK_PROCESS_VISIBILITY_STATUS_VISIBLE ||
                 result.status == KSWORD_ARK_PROCESS_VISIBILITY_STATUS_CLEARED);
+        if (detailTextOut != nullptr)
+        {
+            *detailTextOut = result.io.message;
+            if (!actionSucceeded)
+            {
+                if (!detailTextOut->empty())
+                {
+                    *detailTextOut += " | ";
+                }
+                *detailTextOut += activeProcessLinksDynDataDiagnostic(driverClient);
+            }
+        }
+        return actionSucceeded;
     }
 
     bool setProcessSpecialFlagsByR0Driver(
@@ -1698,6 +1713,156 @@ namespace
         default:
             return QStringLiteral("Unavailable");
         }
+    }
+
+    // dynDataFieldSourceText 作用：
+    // - 输入：QUERY_DYN_FIELDS 返回的 KSW_DYN_FIELD_SOURCE_* 来源值；
+    // - 处理：转换为动作失败详情中可读的来源文本；
+    // - 返回：PDB profile、System Informer、runtime pattern 或 Unavailable。
+    QString dynDataFieldSourceText(const std::uint32_t sourceValue)
+    {
+        switch (sourceValue)
+        {
+        case KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER:
+            return QStringLiteral("System Informer");
+        case KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN:
+            return QStringLiteral("Runtime pattern");
+        case KSW_DYN_FIELD_SOURCE_KSWORD_EXTRA_TABLE:
+            return QStringLiteral("Ksword extra table");
+        case KSW_DYN_FIELD_SOURCE_PDB_PROFILE:
+            return QStringLiteral("PDB profile");
+        default:
+            return QStringLiteral("Unavailable");
+        }
+    }
+
+    // dynDataOffsetPresent 作用：
+    // - 输入：DynData 字段 flags 与 offset；
+    // - 处理：同时检查 PRESENT bit 和不可用哨兵；
+    // - 返回：true 表示该字段当前对 R0 可用。
+    bool dynDataOffsetPresent(const std::uint32_t flags, const std::uint32_t offset)
+    {
+        return (flags & KSW_DYN_FIELD_FLAG_PRESENT) != 0U &&
+            offset != 0xFFFFFFFFU &&
+            offset != 0x0000FFFFU;
+    }
+
+    // dynDataOffsetText 作用：
+    // - 输入：DynData 字段 offset；
+    // - 处理：不可用哨兵显示 <不可用>，可用值同时展示 hex/decimal；
+    // - 返回：动作详情中的偏移文本。
+    QString dynDataOffsetText(const std::uint32_t offset)
+    {
+        if (offset == 0xFFFFFFFFU || offset == 0x0000FFFFU)
+        {
+            return QStringLiteral("<不可用>");
+        }
+        return QStringLiteral("0x%1 (%2)")
+            .arg(offset, 8, 16, QChar('0'))
+            .arg(offset)
+            .toUpper();
+    }
+
+    // dynDataStatusFlagText 作用：
+    // - 输入：QUERY_DYN_STATUS 返回的 KSW_DYN_STATUS_FLAG_* 位图；
+    // - 处理：只列出对偏移应用链路有解释价值的 active/profile 标志；
+    // - 返回：动作失败详情中可读的状态标志文本。
+    QString dynDataStatusFlagText(const std::uint32_t statusFlags)
+    {
+        QStringList parts;
+        if ((statusFlags & KSW_DYN_STATUS_FLAG_INITIALIZED) != 0U)
+        {
+            parts << QStringLiteral("Initialized");
+        }
+        if ((statusFlags & KSW_DYN_STATUS_FLAG_NTOS_ACTIVE) != 0U)
+        {
+            parts << QStringLiteral("NtosActive");
+        }
+        if ((statusFlags & KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE) != 0U)
+        {
+            parts << QStringLiteral("PdbProfileActive");
+        }
+        if ((statusFlags & KSW_DYN_STATUS_FLAG_CALLBACK_PROFILE_ACTIVE) != 0U)
+        {
+            parts << QStringLiteral("CallbackProfileActive");
+        }
+        return parts.isEmpty() ? QStringLiteral("None") : parts.join(QStringLiteral("|"));
+    }
+
+    // activeProcessLinksDynDataDiagnostic 作用：
+    // - 输入：已打开的 DriverClient；
+    // - 处理：只读查询 R0 DynData status 和字段表，定位 _EPROCESS.ActiveProcessLinks 是否已应用；
+    // - 返回：一行诊断文本，供 R0 可见性动作失败时追加到 detailText。
+    std::string activeProcessLinksDynDataDiagnostic(const ksword::ark::DriverClient& driverClient)
+    {
+        QStringList diagnosticParts;
+
+        const ksword::ark::DynDataStatusResult statusResult = driverClient.queryDynDataStatus();
+        if (statusResult.io.ok)
+        {
+            const QString statusFlagsText = QStringLiteral("0x%1")
+                .arg(statusResult.statusFlags, 8, 16, QChar('0'))
+                .toUpper();
+            const QString capabilityText = QStringLiteral("0x%1")
+                .arg(static_cast<qulonglong>(statusResult.capabilityMask), 16, 16, QChar('0'))
+                .toUpper();
+            const QString lastStatusText = QStringLiteral("0x%1")
+                .arg(static_cast<std::uint32_t>(statusResult.lastStatus), 8, 16, QChar('0'))
+                .toUpper();
+            diagnosticParts << QStringLiteral(
+                "DynDataStatus: flags=%1(%2), caps=%3, fields=%4, lastStatus=%5")
+                .arg(statusFlagsText)
+                .arg(dynDataStatusFlagText(statusResult.statusFlags))
+                .arg(capabilityText)
+                .arg(statusResult.fieldCount)
+                .arg(lastStatusText);
+            if ((statusResult.statusFlags & KSW_DYN_STATUS_FLAG_NTOS_ACTIVE) != 0U &&
+                (statusResult.statusFlags & KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE) == 0U)
+            {
+                diagnosticParts << QStringLiteral("Hint: ntoskrnl DynData is active but PDB profile is not active; refresh Kernel/DynData to apply the v3 profile pack.");
+            }
+        }
+        else
+        {
+            diagnosticParts << QStringLiteral("DynDataStatus unavailable: %1")
+                .arg(QString::fromStdString(statusResult.io.message));
+        }
+
+        const ksword::ark::DynDataFieldsResult fieldsResult = driverClient.queryDynDataFields();
+        if (!fieldsResult.io.ok)
+        {
+            diagnosticParts << QStringLiteral("DynData ActiveProcessLinks unavailable: %1")
+                .arg(QString::fromStdString(fieldsResult.io.message));
+            return diagnosticParts.join(QStringLiteral(" | ")).toStdString();
+        }
+
+        for (const ksword::ark::DynDataFieldEntry& entry : fieldsResult.entries)
+        {
+            if (entry.fieldId != KSW_DYN_FIELD_ID_EP_ACTIVE_PROCESS_LINKS)
+            {
+                continue;
+            }
+
+            const bool present = dynDataOffsetPresent(entry.flags, entry.offset);
+            const QString flagsText = QStringLiteral("0x%1")
+                .arg(entry.flags, 8, 16, QChar('0'))
+                .toUpper();
+            const QString capabilityText = QStringLiteral("0x%1")
+                .arg(static_cast<qulonglong>(entry.capabilityMask), 16, 16, QChar('0'))
+                .toUpper();
+            const QString diagnosticText = QStringLiteral(
+                "DynData ActiveProcessLinks: present=%1, offset=%2, source=%3, flags=%4, capability=%5")
+                .arg(present ? QStringLiteral("true") : QStringLiteral("false"))
+                .arg(dynDataOffsetText(entry.offset))
+                .arg(dynDataFieldSourceText(entry.source))
+                .arg(flagsText)
+                .arg(capabilityText);
+            diagnosticParts << diagnosticText;
+            return diagnosticParts.join(QStringLiteral(" | ")).toStdString();
+        }
+
+        diagnosticParts << QStringLiteral("DynData ActiveProcessLinks unavailable: field not returned by R0.");
+        return diagnosticParts.join(QStringLiteral(" | ")).toStdString();
     }
 
     QString processR0StatusText(const std::uint32_t statusValue)

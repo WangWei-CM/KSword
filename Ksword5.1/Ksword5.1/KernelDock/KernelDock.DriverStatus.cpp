@@ -73,6 +73,8 @@ namespace
         std::uint32_t fieldCount = 0;         // fieldCount：命中 profile 声明字段数。
         std::uint32_t typedItemCount = 0;     // typedItemCount：命中 profile 声明 v3 items 数。
         std::uint32_t callbackItemCount = 0;  // callbackItemCount：命中 profile 声明 callbackItems 数。
+        bool activeProcessLinksPresent = false; // activeProcessLinksPresent：命中 profile 是否包含 ActiveProcessLinks。
+        std::uint32_t activeProcessLinksOffset = 0xFFFFFFFFU; // activeProcessLinksOffset：本地 pack 中的 ActiveProcessLinks 偏移。
         double coveragePercent = -1.0;        // coveragePercent：release_sync 计算的 profile 覆盖率，负数表示未知。
         QString profileNameText;              // profileNameText：命中 profileName。
         QString versionText;                  // versionText：从 profileName 提取的 Windows 版本号。
@@ -184,6 +186,28 @@ namespace
             offset != 0x0000FFFFU;
     }
 
+    // offsetAvailable：
+    // - 输入 offset：本地 profile 或 R0 字段表中的偏移值；
+    // - 处理：统一过滤两个历史不可用哨兵，避免 UI 把缺失值显示为可用偏移；
+    // - 返回：true 表示偏移可用于后续诊断展示。
+    bool offsetAvailable(const std::uint32_t offset)
+    {
+        return offset != 0xFFFFFFFFU && offset != 0x0000FFFFU;
+    }
+
+    // formatOffset32：
+    // - 输入 offset：32-bit 字段偏移；
+    // - 处理：对不可用哨兵显示 <不可用>，否则同时显示 hex/decimal 便于和 WinDbg/PDB 对照；
+    // - 返回：可直接放入摘要表或诊断报告的偏移文本。
+    QString formatOffset32(const std::uint32_t offset)
+    {
+        if (!offsetAvailable(offset))
+        {
+            return QStringLiteral("<不可用>");
+        }
+        return QStringLiteral("%1 (%2)").arg(formatHex32(offset)).arg(offset);
+    }
+
     // parseProfileUInt32：
     // - 输入 value：pack JSON 中可能是数字或 0x 字符串的值；
     // - 处理：按 32-bit 无符号整数解析并做范围校验；
@@ -279,6 +303,27 @@ namespace
         }
     }
 
+    // sourceText：
+    // - 输入 source：KSW_DYN_FIELD_SOURCE_*；
+    // - 处理：把 R0 字段来源转换为用户可读文本；
+    // - 返回：System Informer/runtime/PDB profile 等来源名称。
+    QString sourceText(const std::uint32_t source)
+    {
+        switch (source)
+        {
+        case KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER:
+            return QStringLiteral("System Informer");
+        case KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN:
+            return QStringLiteral("Ksword runtime pattern");
+        case KSW_DYN_FIELD_SOURCE_KSWORD_EXTRA_TABLE:
+            return QStringLiteral("Ksword extra table");
+        case KSW_DYN_FIELD_SOURCE_PDB_PROFILE:
+            return QStringLiteral("PDB profile");
+        default:
+            return QStringLiteral("Unavailable");
+        }
+    }
+
     // extractVersionFromProfileName：
     // - 输入 profileName：生成器写入的 profileName；
     // - 处理：提取第一个 Windows 四段版本号；
@@ -288,6 +333,106 @@ namespace
         static const QRegularExpression kVersionPattern(QStringLiteral("(\\d+\\.\\d+\\.\\d+\\.\\d+)"));
         const QRegularExpressionMatch match = kVersionPattern.match(profileName);
         return match.hasMatch() ? match.captured(1) : QString();
+    }
+
+    // fieldDictionaryIndex：
+    // - 输入 fieldDictionary/fieldNames：compact pack 的字段字典和允许的字段名别名；
+    // - 处理：线性查找字段索引，pack 字典很小，保持逻辑直观且避免额外 map 状态；
+    // - 返回：命中返回 true 并写出 index，否则返回 false。
+    bool fieldDictionaryIndex(const QJsonArray& fieldDictionary, const QStringList& fieldNames, std::uint32_t& indexOut)
+    {
+        indexOut = 0U;
+        for (int index = 0; index < fieldDictionary.size(); ++index)
+        {
+            const QString fieldName = fieldDictionary.at(index).toString().trimmed();
+            if (fieldNames.contains(fieldName, Qt::CaseSensitive))
+            {
+                indexOut = static_cast<std::uint32_t>(index);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // extractActiveProcessLinksFromPackEntry：
+    // - 输入 profileObject/fieldDictionary：已命中当前 ntoskrnl identity 的 compact profile；
+    // - 处理：优先解析 v3 items/typedItems 中的 EpActiveProcessLinks StructOffset；
+    //   若不存在，再回退解析 fields 的 [fieldIndex, offset] pair。
+    // - 返回：成功提取可用偏移 true，并写出 offsetOut；否则 false。
+    bool extractActiveProcessLinksFromPackEntry(
+        const QJsonObject& profileObject,
+        const QJsonArray& fieldDictionary,
+        std::uint32_t& offsetOut)
+    {
+        offsetOut = 0xFFFFFFFFU;
+
+        QJsonArray typedItemsArray = profileObject.value(QStringLiteral("items")).toArray();
+        if (typedItemsArray.isEmpty())
+        {
+            typedItemsArray = profileObject.value(QStringLiteral("typedItems")).toArray();
+        }
+        for (const QJsonValue& itemValue : typedItemsArray)
+        {
+            if (!itemValue.isObject())
+            {
+                continue;
+            }
+
+            const QJsonObject itemObject = itemValue.toObject();
+            const QString itemName = itemObject.value(QStringLiteral("name")).toString().trimmed();
+            const QString itemKind = itemObject.value(QStringLiteral("kind")).toString().trimmed();
+            if (itemName != QStringLiteral("EpActiveProcessLinks") &&
+                itemName != QStringLiteral("_EPROCESS.ActiveProcessLinks"))
+            {
+                continue;
+            }
+            if (itemKind.compare(QStringLiteral("StructOffset"), Qt::CaseInsensitive) != 0)
+            {
+                continue;
+            }
+
+            std::uint32_t parsedOffset = 0U;
+            if (parseProfileUInt32(itemObject.value(QStringLiteral("value")), parsedOffset) &&
+                offsetAvailable(parsedOffset))
+            {
+                offsetOut = parsedOffset;
+                return true;
+            }
+        }
+
+        std::uint32_t activeProcessLinksIndex = 0U;
+        if (!fieldDictionaryIndex(
+            fieldDictionary,
+            QStringList{ QStringLiteral("EpActiveProcessLinks"), QStringLiteral("_EPROCESS.ActiveProcessLinks") },
+            activeProcessLinksIndex))
+        {
+            return false;
+        }
+
+        const QJsonArray fieldsArray = profileObject.value(QStringLiteral("fields")).toArray();
+        for (const QJsonValue& fieldValue : fieldsArray)
+        {
+            const QJsonArray pairArray = fieldValue.toArray();
+            if (pairArray.size() != 2)
+            {
+                continue;
+            }
+
+            std::uint32_t fieldIndex = 0U;
+            std::uint32_t parsedOffset = 0U;
+            if (!parseProfileUInt32(pairArray.at(0), fieldIndex) ||
+                !parseProfileUInt32(pairArray.at(1), parsedOffset))
+            {
+                continue;
+            }
+            if (fieldIndex == activeProcessLinksIndex && offsetAvailable(parsedOffset))
+            {
+                offsetOut = parsedOffset;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // findMatchingLocalPdbProfilePack：
@@ -394,17 +539,22 @@ namespace
                 result.fieldCount = static_cast<std::uint32_t>(fieldsArray.size());
                 result.typedItemCount = static_cast<std::uint32_t>(typedItemsArray.size());
                 result.callbackItemCount = static_cast<std::uint32_t>(callbackItemsArray.size());
+                result.activeProcessLinksPresent = extractActiveProcessLinksFromPackEntry(
+                    profileObject,
+                    rootObject.value(QStringLiteral("fieldDictionary")).toArray(),
+                    result.activeProcessLinksOffset);
                 const double coveragePercent = profileObject.value(QStringLiteral("coveragePercent")).toDouble(-1.0);
                 result.coveragePercent = coveragePercent >= 0.0 ? coveragePercent : -1.0;
                 result.profileNameText = profileObject.value(QStringLiteral("profileName")).toString(QStringLiteral("pack-profile"));
                 result.versionText = extractVersionFromProfileName(result.profileNameText);
                 result.messageText = result.valid
-                    ? QStringLiteral("本地 PDB profile pack 命中；profiles=%1，扫描=%2，字段=%3，typedItems=%4，callbackItems=%5，覆盖率=%6。")
+                    ? QStringLiteral("本地 PDB profile pack 命中；profiles=%1，扫描=%2，字段=%3，typedItems=%4，callbackItems=%5，ActiveProcessLinks=%6，覆盖率=%7。")
                         .arg(result.profileCount)
                         .arg(result.scannedProfileCount)
                         .arg(result.fieldCount)
                         .arg(result.typedItemCount)
                         .arg(result.callbackItemCount)
+                        .arg(result.activeProcessLinksPresent ? formatOffset32(result.activeProcessLinksOffset) : QStringLiteral("<缺失>"))
                         .arg(result.coveragePercent >= 0.0 ? QStringLiteral("%1%").arg(result.coveragePercent, 0, 'f', 1) : QStringLiteral("<未知>"))
                     : QStringLiteral("本地 PDB profile pack 命中 identity，但 fields/items 均为空，已视为无效。");
                 return result;
@@ -522,18 +672,39 @@ namespace
     {
         if (summary.localPdbProfileMatched)
         {
-            return QStringLiteral("命中：%1，版本=%2，字段=%3，typedItems=%4，callbackItems=%5，coverage=%6，packProfiles=%7，路径=%8")
+            return QStringLiteral("命中：%1，版本=%2，字段=%3，typedItems=%4，callbackItems=%5，ActiveProcessLinks=%6，coverage=%7，packProfiles=%8，路径=%9")
                 .arg(safeText(summary.localPdbProfileNameText))
                 .arg(safeText(summary.localPdbProfileVersionText, QStringLiteral("<未提取>")))
                 .arg(summary.localPdbProfileFieldCount)
                 .arg(summary.localPdbProfileTypedItemCount)
                 .arg(summary.localPdbProfileCallbackItemCount)
+                .arg(summary.localPdbProfileActiveProcessLinksPresent
+                    ? formatOffset32(summary.localPdbProfileActiveProcessLinksOffset)
+                    : QStringLiteral("<缺失>"))
                 .arg(summary.localPdbProfileCoveragePercent >= 0.0 ? QStringLiteral("%1%").arg(summary.localPdbProfileCoveragePercent, 0, 'f', 1) : QStringLiteral("<未知>"))
                 .arg(summary.localPdbProfilePackProfileCount)
                 .arg(safeText(summary.localPdbProfilePathText));
         }
 
         return safeText(summary.localPdbProfileMessageText, QStringLiteral("未命中或未扫描。"));
+    }
+
+    // activeProcessLinksOffsetText：
+    // - 输入 summary：驱动状态摘要；
+    // - 处理：合并本地 pack 提取值与 R0 当前字段表值，突出二者是否都可用；
+    // - 返回：用于摘要表/报告的 ActiveProcessLinks 偏移诊断文本。
+    QString activeProcessLinksOffsetText(const KernelDriverStatusSummary& summary)
+    {
+        const QString localText = summary.localPdbProfileActiveProcessLinksPresent
+            ? formatOffset32(summary.localPdbProfileActiveProcessLinksOffset)
+            : QStringLiteral("<缺失>");
+        const QString r0Text = summary.dynDataActiveProcessLinksPresent
+            ? formatOffset32(summary.dynDataActiveProcessLinksOffset)
+            : QStringLiteral("<未应用>");
+        return QStringLiteral("LocalPack=%1；R0=%2；R0Source=%3")
+            .arg(localText)
+            .arg(r0Text)
+            .arg(sourceText(summary.dynDataActiveProcessLinksSource));
     }
 
     // callbackProfileCoverageText：
@@ -689,6 +860,7 @@ namespace
         lines << QStringLiteral("当前内核: %1").arg(kernelIdentityText(summary));
         lines << QStringLiteral("识别版本: %1").arg(kernelVersionText(summary));
         lines << QStringLiteral("本地 PDB profile: %1").arg(localPdbProfileText(summary));
+        lines << QStringLiteral("ActiveProcessLinks 偏移: %1").arg(activeProcessLinksOffsetText(summary));
         lines << QStringLiteral("可信偏移: %1").arg(trustedOffsetText(summary));
         lines << QStringLiteral("字段覆盖: %1").arg(fieldCoverageText(summary));
         lines << QStringLiteral("字段来源: %1").arg(fieldSourceSummaryText(summary));
@@ -723,6 +895,7 @@ namespace
         lines << QStringLiteral("LocalPdbProfileName: %1").arg(safeText(summary.localPdbProfileNameText, QStringLiteral("None")));
         lines << QStringLiteral("LocalPdbProfilePath: %1").arg(safeText(summary.localPdbProfilePathText, QStringLiteral("None")));
         lines << QStringLiteral("LocalPdbProfileMessage: %1").arg(safeText(summary.localPdbProfileMessageText, QStringLiteral("None")));
+        lines << QStringLiteral("ActiveProcessLinksOffset: %1").arg(activeProcessLinksOffsetText(summary));
         lines << QStringLiteral("CallbackProfileCoverage: %1").arg(callbackProfileCoverageText(summary));
         lines << QStringLiteral("PdbProfileActive: %1").arg(boolText(summary.pdbProfileActive));
         lines << QStringLiteral("CallbackProfileActive: %1").arg(boolText(summary.callbackProfileActive));
@@ -767,6 +940,7 @@ namespace
         appendSummaryRow(table, QStringLiteral("当前内核"), kernelIdentityText(summary));
         appendSummaryRow(table, QStringLiteral("识别版本"), kernelVersionText(summary));
         appendSummaryRow(table, QStringLiteral("本地 PDB profile"), localPdbProfileText(summary));
+        appendSummaryRow(table, QStringLiteral("ActiveProcessLinks 偏移"), activeProcessLinksOffsetText(summary));
         appendSummaryRow(table, QStringLiteral("Callback profile 覆盖"), callbackProfileCoverageText(summary));
         appendSummaryRow(table, QStringLiteral("可信偏移"), trustedOffsetText(summary));
         appendSummaryRow(table, QStringLiteral("字段覆盖"), fieldCoverageText(summary));
@@ -939,6 +1113,13 @@ namespace
                 {
                     summaryOut.dynDataRequiredMissingCount += 1U;
                 }
+
+                if (entry.fieldId == KSW_DYN_FIELD_ID_EP_ACTIVE_PROCESS_LINKS)
+                {
+                    summaryOut.dynDataActiveProcessLinksPresent = fieldOffsetPresent(entry.flags, entry.offset);
+                    summaryOut.dynDataActiveProcessLinksOffset = entry.offset;
+                    summaryOut.dynDataActiveProcessLinksSource = entry.source;
+                }
             }
         }
 
@@ -954,6 +1135,8 @@ namespace
             summaryOut.localPdbProfilePathText = packMatch.pathText;
             summaryOut.localPdbProfileMessageText = packMatch.messageText;
             summaryOut.localPdbProfileCallbackItemCount = packMatch.callbackItemCount;
+            summaryOut.localPdbProfileActiveProcessLinksPresent = packMatch.activeProcessLinksPresent;
+            summaryOut.localPdbProfileActiveProcessLinksOffset = packMatch.activeProcessLinksOffset;
             summaryOut.localPdbProfileCoveragePercent = packMatch.coveragePercent;
         }
 
