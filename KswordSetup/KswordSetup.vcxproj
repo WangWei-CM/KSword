@@ -159,7 +159,7 @@
   <ItemGroup>
     <ResourceCompile Include="KswordSetup.rc" />
     <ResourceCompile Include="generated\PayloadResources.rc" />
-    <Image Include="Resources\app.ico" />
+    <Image Include="..\Ksword5.1\Ksword5.1\Resource\Logo\KswordLogo.ico" />
     <Image Include="Resources\app_logo.png" />
     <Image Include="F27364739B6A229C3EA888E3C9DE85F9.png" />
     <None Include="scripts\Generate-KswordSetupPayload.ps1" />

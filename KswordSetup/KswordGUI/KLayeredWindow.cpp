@@ -276,7 +276,6 @@ void KLayeredImageWindow::setClickThrough(bool enabled) {
     click_through_ = enabled;
     updateExtendedStyle();
 }
-
 bool KLayeredImageWindow::valid() const {
     return hwnd_ != nullptr && ::IsWindow(hwnd_) != FALSE;
 }
@@ -307,7 +306,7 @@ bool KLayeredImageWindow::ensureWindow(HWND owner) {
     hwnd_ = ::CreateWindowExW(
         exStyle,
         kLayeredImageWindowClass,
-        L"",
+        L"KswordSetup Character",
         WS_POPUP,
         0,
         0,
@@ -325,6 +324,7 @@ void KLayeredImageWindow::updateExtendedStyle() {
         return;
     }
     LONG_PTR exStyle = ::GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
+    exStyle &= ~static_cast<LONG_PTR>(WS_EX_APPWINDOW);
     exStyle |= WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
     if (click_through_) {
         exStyle |= WS_EX_TRANSPARENT;
@@ -333,4 +333,6 @@ void KLayeredImageWindow::updateExtendedStyle() {
         exStyle &= ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT);
     }
     ::SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, exStyle);
+    ::SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 }
