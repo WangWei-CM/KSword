@@ -1,5 +1,6 @@
 #include "Taskbar.h"
 #include "DisplayRestartMonitor.h"
+#include "SosHotkeyLauncher.h"
 #include "TaskbarSharedState.h"
 
 #include <QtWidgets/QApplication>
@@ -57,6 +58,13 @@ int main(int argc, char* argv[])
 
     // QApplication 管理所有 Taskbar 窗口、屏幕事件和共享状态对象生命周期。
     QApplication app(argc, argv);
+
+    // SOS 键盘钩子尽早启动：
+    // - 独立高优先级线程安装 WH_KEYBOARD_LL；
+    // - 只检测 S O S Enter 固定序列；
+    // - 命中后启动 Ksword5.1 主程序。
+    SosHotkeyLauncher sosHotkeyLauncher(QCoreApplication::applicationDirPath());
+    sosHotkeyLauncher.start();
 
     // 显示器变化监控器在屏幕数量或分辨率变化时自动拉起新进程并退出旧进程。
     DisplayRestartMonitor displayRestartMonitor(&app);
