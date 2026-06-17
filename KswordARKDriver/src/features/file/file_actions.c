@@ -550,24 +550,59 @@ Return Value:
     }
 }
 
-static NTSTATUS
-KswordARKDriverDeleteFileWithDispositionEx(
-    _In_ HANDLE fileHandle
+static BOOLEAN
+KswordARKDriverIsDispositionExUnsupportedStatus(
+    _In_ NTSTATUS dispositionStatus
     )
 /*++
 
 Routine Description:
 
-    Retry delete by FileDispositionInformationEx with stronger semantics:
-    POSIX delete + force image section check + ignore readonly attribute.
+    判断 FileDispositionInformationEx 是否因为系统/文件系统不支持而失败。
+    中文说明：这类失败不代表目标文件不可删除，调用方应保留传统
+    FileDispositionInformation 的原始状态，避免把诊断误导成参数错误。
 
 Arguments:
 
-    fileHandle - Open file handle.
+    dispositionStatus - ZwSetInformationFile(FileDispositionInformationEx) 返回值。
 
 Return Value:
 
-    NTSTATUS
+    TRUE 表示应视为 Ex 删除路径不可用；FALSE 表示这是一次真实删除失败。
+
+--*/
+{
+    switch (dispositionStatus) {
+    case STATUS_INVALID_INFO_CLASS:
+    case STATUS_NOT_SUPPORTED:
+    case STATUS_INVALID_PARAMETER:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+static NTSTATUS
+KswordARKDriverSetFileDispositionExFlags(
+    _In_ HANDLE fileHandle,
+    _In_ ULONG dispositionFlags
+    )
+/*++
+
+Routine Description:
+
+    使用调用方指定的 FileDispositionInformationEx flags 标记文件删除。
+    中文说明：把 ZwSetInformationFile 的薄封装拆出来，便于主删除流程先尝试
+    POSIX unlink 语义，再在兼容性需要时尝试旧的 force-image-check 组合。
+
+Arguments:
+
+    fileHandle - 已用 DELETE 权限打开的文件句柄。
+    dispositionFlags - FILE_DISPOSITION_* 标志组合。
+
+Return Value:
+
+    ZwSetInformationFile 返回的 NTSTATUS。
 
 --*/
 {
@@ -575,11 +610,7 @@ Return Value:
     IO_STATUS_BLOCK ioStatusBlock;
 
     RtlZeroMemory(&dispositionInformationEx, sizeof(dispositionInformationEx));
-    dispositionInformationEx.Flags =
-        FILE_DISPOSITION_DELETE
-        | FILE_DISPOSITION_POSIX_SEMANTICS
-        | FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK
-        | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE;
+    dispositionInformationEx.Flags = dispositionFlags;
 
     RtlZeroMemory(&ioStatusBlock, sizeof(ioStatusBlock));
     return ZwSetInformationFile(
@@ -588,6 +619,63 @@ Return Value:
         &dispositionInformationEx,
         (ULONG)sizeof(dispositionInformationEx),
         KSWORD_FILE_DISPOSITION_INFORMATION_EX_CLASS_VALUE);
+}
+
+static NTSTATUS
+KswordARKDriverDeleteFileWithDispositionEx(
+    _In_ HANDLE fileHandle
+    )
+/*++
+
+Routine Description:
+
+    使用 FileDispositionInformationEx 重试文件删除。中文说明：优先使用
+    POSIX_SEMANTICS + IGNORE_READONLY_ATTRIBUTE，不设置
+    FORCE_IMAGE_SECTION_CHECK。这样针对“文件仍被进程映像/模块 section 映射”
+    的场景，内核可以按 POSIX unlink 语义移除目录项，而不是被我们主动要求
+    检查 image section 后失败。只有当首选 Ex 组合表现为不支持/参数不兼容时，
+    才尝试保留旧版本行为的 force-image-check 组合，兼容历史系统差异。
+
+Arguments:
+
+    fileHandle - 已用 DELETE 权限打开的文件句柄。
+
+Return Value:
+
+    NTSTATUS。成功表示目标已被标记删除；不支持 Ex 时返回首选尝试的状态，
+    上层会继续使用传统删除的 firstDeleteStatus 作为最终诊断。
+
+--*/
+{
+    const ULONG preferredDispositionFlags =
+        FILE_DISPOSITION_DELETE
+        | FILE_DISPOSITION_POSIX_SEMANTICS
+        | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE;
+    const ULONG legacyDispositionFlags =
+        preferredDispositionFlags
+        | FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK;
+    NTSTATUS status;
+    NTSTATUS legacyStatus;
+
+    status = KswordARKDriverSetFileDispositionExFlags(fileHandle, preferredDispositionFlags);
+    if (NT_SUCCESS(status)) {
+        return status;
+    }
+
+    if (!KswordARKDriverIsDispositionExUnsupportedStatus(status)) {
+        return status;
+    }
+
+    legacyStatus = KswordARKDriverSetFileDispositionExFlags(fileHandle, legacyDispositionFlags);
+    if (NT_SUCCESS(legacyStatus)) {
+        return legacyStatus;
+    }
+
+    if (!KswordARKDriverIsDispositionExUnsupportedStatus(legacyStatus)) {
+        return legacyStatus;
+    }
+
+    return status;
 }
 
 static NTSTATUS

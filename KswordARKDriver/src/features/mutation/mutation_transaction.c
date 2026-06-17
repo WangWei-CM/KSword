@@ -165,7 +165,19 @@ KswordARKMutationRangeReadable(_In_ ULONGLONG Address, _In_ ULONG Bytes)
         return FALSE;
     }
     for (index = 0UL; index < Bytes; index += 1UL) {
-        if (!MmIsNonPagedSystemAddressValid((PVOID)(ULONG_PTR)(Address + (ULONGLONG)index))) {
+        BOOLEAN addressValid = FALSE;
+#pragma warning(push)
+#pragma warning(disable: 4996)
+        /*
+         * MmIsNonPagedSystemAddressValid is deprecated in current WDK headers,
+         * but this mutation preflight path intentionally preserves the existing
+         * nonpaged-address gate before MmCopyMemory. The warning is suppressed
+         * locally so WarningAsError builds can still validate unrelated driver
+         * changes without broad project-level warning policy changes.
+         */
+        addressValid = MmIsNonPagedSystemAddressValid((PVOID)(ULONG_PTR)(Address + (ULONGLONG)index));
+#pragma warning(pop)
+        if (!addressValid) {
             return FALSE;
         }
     }

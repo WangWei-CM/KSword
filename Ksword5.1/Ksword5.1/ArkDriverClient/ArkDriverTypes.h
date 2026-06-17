@@ -754,6 +754,67 @@ namespace ksword::ark
         std::vector<DriverIntegrityEvidenceEntry> entries;
     };
 
+    // CpuHardwareSnapshotResult carries the read-only R0 CPUID hardware packet.
+    // Input: produced by DriverClient::queryCpuHardwareSnapshot.
+    // Processing: featureMask is a stable KSWORD_ARK_CPU_FEATURE_* projection while
+    // raw CPUID leaves remain available for diagnostics and future UI expansion.
+    // Return behavior: returned by value; unsupported=true means the loaded driver
+    // predates IOCTL_KSWORD_ARK_QUERY_CPU_HARDWARE.
+    struct CpuHardwareSnapshotResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        std::uint32_t version = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t logicalProcessorCount = 0;
+        std::uint32_t activeProcessorCount = 0;
+        std::uint32_t packageCount = 0;
+        std::uint32_t family = 0;
+        std::uint32_t model = 0;
+        std::uint32_t stepping = 0;
+        std::uint32_t processorType = 0;
+        std::uint32_t brandIndex = 0;
+        std::uint32_t clflushLineSize = 0;
+        std::uint32_t initialApicId = 0;
+        std::uint32_t maxBasicLeaf = 0;
+        std::uint32_t maxExtendedLeaf = 0;
+        long lastStatus = 0;
+        std::uint64_t featureMask = 0;
+        std::uint64_t leaf1Ecx = 0;
+        std::uint64_t leaf1Edx = 0;
+        std::uint64_t leaf7Ebx = 0;
+        std::uint64_t leaf7Ecx = 0;
+        std::uint64_t leaf7Edx = 0;
+        std::uint64_t leaf80000001Ecx = 0;
+        std::uint64_t leaf80000001Edx = 0;
+        std::string vendor;
+        std::string brand;
+    };
+
+    // PhysicalMemoryLayoutResult is the R3 view of the R0 physical memory map summary.
+    // Input: produced by DriverClient::queryPhysicalMemoryLayout.
+    // Processing: stores aggregate ranges only; no physical memory bytes or per-page
+    // content are returned to the UI.
+    // Return behavior: returned by value; unsupported=true means the loaded driver is old.
+    struct PhysicalMemoryLayoutResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        std::uint32_t version = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t rangeCount = 0;
+        std::uint32_t zeroLengthRangeCount = 0;
+        std::uint32_t truncated = 0;
+        long lastStatus = 0;
+        std::uint64_t totalPhysicalBytes = 0;
+        std::uint64_t highestPhysicalAddress = 0;
+        std::uint64_t largestRangeBytes = 0;
+        std::uint64_t smallestRangeBytes = 0;
+        std::uint64_t firstBaseAddress = 0;
+        std::uint64_t lastEndAddress = 0;
+        std::uint64_t estimatedAddressSpaceGapBytes = 0;
+    };
+
     // MutationPrepareInput is the safe R3-side representation of a mutation prepare request.
     // Input: UI/future repair paths populate target kind, address, bytes and expected-before bytes.
     // Processing: DriverClient packs the fields into KSWORD_ARK_MUTATION_PREPARE_REQUEST.

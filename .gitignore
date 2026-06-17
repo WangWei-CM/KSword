@@ -30,3 +30,6 @@ aqtinstall.log
 
 # 本机 Qt/MSBuild 自动探测脚本生成的本地路径配置。
 Directory.Build.props
+
+# KswordSetup build-generated embedded payload resource lists.
+/KswordSetup/generated/

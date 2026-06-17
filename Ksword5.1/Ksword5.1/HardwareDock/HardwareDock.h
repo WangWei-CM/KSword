@@ -19,6 +19,8 @@
 class CodeEditorWidget;
 class DiskMonitorPage;
 class MemoryCompositionHistoryWidget;
+class HardwareR0EvidencePage;
+class HardwareDeviceManagerPage;
 class HardwareOtherDevicesPage;
 class PerformanceNavCard;
 class QChartView;
@@ -120,6 +122,20 @@ private:
         std::uint64_t cachedBytes = 0;         // cachedBytes：系统缓存字节。
         std::uint64_t pagedPoolBytes = 0;      // pagedPoolBytes：分页池字节。
         std::uint64_t nonPagedPoolBytes = 0;   // nonPagedPoolBytes：非分页池字节。
+    };
+
+    // UtilizationStatisticSnapshot：
+    // - 作用：保存一个历史窗口的统计结果；
+    // - 处理：由当前值、均值、峰值、最小值和趋势差组成；
+    // - 返回行为：仅承载统计数据，不执行任何采样。
+    struct UtilizationStatisticSnapshot
+    {
+        double currentValue = 0.0;   // currentValue：最近一次采样值。
+        double averageValue = 0.0;   // averageValue：窗口均值。
+        double peakValue = 0.0;      // peakValue：窗口峰值。
+        double minValue = 0.0;       // minValue：窗口最小值。
+        double trendDelta = 0.0;    // trendDelta：当前值与窗口起点值的差值。
+        int sampleCount = 0;         // sampleCount：参与统计的样本数。
     };
 
     // UtilizationDeviceKind：
@@ -296,9 +312,11 @@ private:
     void initializeUtilizationNetworkSubTab();
     void initializeUtilizationGpuSubTab();
     void initializeCpuTab();
+    void initializeR0EvidenceTab();
     void initializeGpuTab();
     void initializeMemoryTab();
     void initializeDiskMonitorTab();
+    void initializeDeviceManagerTab();
     void initializeOtherDevicesTab();
 
     // ensureDiskMonitorTabInitialized 作用：
@@ -430,9 +448,17 @@ private:
         double* upperBoundBytesPerSecondOut,
         const QString& subtitleText);
     QString formatRateText(double bytesPerSecondValue) const;
+    void pushBoundedHistorySample(std::vector<double>* historyList, double sampleValue) const;
+    UtilizationStatisticSnapshot buildStatisticSnapshot(const std::vector<double>& historyList) const;
+    QString buildPercentStatisticLine(const QString& labelText, const UtilizationStatisticSnapshot& snapshot) const;
+    QString buildRateStatisticLine(const QString& labelText, const UtilizationStatisticSnapshot& snapshot) const;
+    QString buildTrendText(const UtilizationStatisticSnapshot& snapshot, bool percentUnit) const;
+    QString buildPressureLevelText(double percentValue) const;
+    QString buildR0CpuFeatureBadgeText(std::uint64_t featureMask) const;
     void refreshStaticHardwareTexts(bool forceRefresh);
     void requestAsyncStaticInfoRefresh();
     void requestAsyncSensorRefresh();
+    void requestAsyncR0HardwareHealthRefresh();
     void refreshCpuTopologyStaticInfo();
     void refreshSystemVolumeInfo();
 
@@ -546,6 +572,7 @@ private:
     QVBoxLayout* m_cpuLayout = nullptr;       // m_cpuLayout：CPU 布局。
     QLabel* m_cpuDetailLabel = nullptr;       // m_cpuDetailLabel：温度/电压等摘要标签。
     QTableWidget* m_cpuDetailTable = nullptr; // m_cpuDetailTable：每核详情表。
+    HardwareR0EvidencePage* m_r0EvidencePage = nullptr; // m_r0EvidencePage：R0 硬件证据页。
 
     // 显卡与内存页（原有文本页）。
     QWidget* m_gpuPage = nullptr;               // m_gpuPage：显卡 Tab。
@@ -555,6 +582,7 @@ private:
     QVBoxLayout* m_memoryLayout = nullptr;      // m_memoryLayout：内存布局。
     CodeEditorWidget* m_memoryEditor = nullptr; // m_memoryEditor：内存详情文本。
     QWidget* m_diskMonitorHostPage = nullptr;      // m_diskMonitorHostPage：硬盘监控延迟加载宿主页。
+    HardwareDeviceManagerPage* m_deviceManagerPage = nullptr; // m_deviceManagerPage：SetupAPI/CfgMgr 设备管理页。
     QWidget* m_otherDevicesHostPage = nullptr;     // m_otherDevicesHostPage：其他设备延迟加载宿主页。
     DiskMonitorPage* m_diskMonitorPage = nullptr;  // m_diskMonitorPage：硬盘监控真实页面，首次进入子 Tab 后创建。
     HardwareOtherDevicesPage* m_otherDevicesPage = nullptr; // m_otherDevicesPage：其他硬件设备真实页面，首次进入子 Tab 后创建。
@@ -569,6 +597,7 @@ private:
     QString m_cachedMemoryStaticText;         // m_cachedMemoryStaticText：内存静态文本缓存。
     std::atomic_bool m_staticInfoRefreshing{ false }; // m_staticInfoRefreshing：静态信息异步刷新锁。
     std::atomic_bool m_sensorRefreshing{ false };     // m_sensorRefreshing：传感器异步刷新锁。
+    std::atomic_bool m_r0HardwareHealthRefreshing{ false }; // m_r0HardwareHealthRefreshing：R0硬件健康异步刷新锁。
     bool m_initialSamplingStarted = false;            // m_initialSamplingStarted：首次显示时是否已启动首轮采样。
     std::uint64_t m_lastNetworkRxBytes = 0;           // m_lastNetworkRxBytes：兼容旧聚合网络采样的累计接收字节。
     std::uint64_t m_lastNetworkTxBytes = 0;           // m_lastNetworkTxBytes：兼容旧聚合网络采样的累计发送字节。
@@ -585,6 +614,13 @@ private:
     std::uint64_t m_cpuL2CacheBytes = 0;     // m_cpuL2CacheBytes：L2 缓存总字节。
     std::uint64_t m_cpuL3CacheBytes = 0;     // m_cpuL3CacheBytes：L3 缓存总字节。
     double m_lastCpuSpeedGhz = 0.0;          // m_lastCpuSpeedGhz：最近一次 CPU 速度（GHz）。
+    qint64 m_lastR0HardwareHealthRefreshMs = 0; // m_lastR0HardwareHealthRefreshMs：最近一次 R0 硬件健康刷新时间。
+    QString m_r0HardwareHealthSummaryText = QStringLiteral("R0硬件健康: 等待采样"); // m_r0HardwareHealthSummaryText：利用率页 R0 健康摘要。
+    QString m_r0HardwareHealthDetailText = QStringLiteral("R0 CPU/MSR/IDT 证据尚未采样。"); // m_r0HardwareHealthDetailText：CPU 详情页 R0 证据明细摘要。
+    QString m_r0CpuHardwareSummaryText = QStringLiteral("R0 CPU硬件: 等待采样"); // m_r0CpuHardwareSummaryText：R0 CPUID 摘要。
+    QString m_r0CpuHardwareDetailText = QStringLiteral("R0 CPUID 硬件快照尚未采样。"); // m_r0CpuHardwareDetailText：R0 CPU特性明细。
+    QString m_r0PhysicalMemorySummaryText = QStringLiteral("R0物理内存: 等待采样"); // m_r0PhysicalMemorySummaryText：R0 物理内存布局摘要。
+    QString m_r0PhysicalMemoryDetailText = QStringLiteral("R0 物理内存布局尚未采样。"); // m_r0PhysicalMemoryDetailText：R0 内存 range 统计明细。
 
     int m_memorySpeedMhz = 0;                // m_memorySpeedMhz：内存主频（MHz）。
     int m_memorySlotUsed = 0;                // m_memorySlotUsed：已用内存插槽数量。
@@ -611,6 +647,11 @@ private:
 
     double m_diskNavAutoScaleBytesPerSec = 1024.0 * 1024.0; // m_diskNavAutoScaleBytesPerSec：兼容旧聚合磁盘页的动态缩放上限。
     double m_networkNavAutoScaleBytesPerSec = 1024.0 * 1024.0; // m_networkNavAutoScaleBytesPerSec：兼容旧聚合网络页的动态缩放上限。
+    std::vector<double> m_cpuUsageHistoryPercent; // m_cpuUsageHistoryPercent：CPU总体利用率历史，用于窗口统计。
+    std::vector<double> m_memoryUsageHistoryPercent; // m_memoryUsageHistoryPercent：内存利用率历史，用于窗口统计。
+    std::vector<double> m_gpuUsageHistoryPercent; // m_gpuUsageHistoryPercent：GPU总体利用率历史，用于窗口统计。
+    std::vector<double> m_diskAggregateHistoryBytesPerSec; // m_diskAggregateHistoryBytesPerSec：磁盘聚合吞吐历史。
+    std::vector<double> m_networkAggregateHistoryBytesPerSec; // m_networkAggregateHistoryBytesPerSec：网络聚合吞吐历史。
     std::vector<double> m_memoryNavUsedHistoryPercent; // m_memoryNavUsedHistoryPercent：内存已用缩略图历史。
     std::vector<double> m_memoryNavCachedHistoryPercent; // m_memoryNavCachedHistoryPercent：内存缓存/池缩略图历史。
     std::vector<double> m_diskNavReadHistoryBytesPerSec; // m_diskNavReadHistoryBytesPerSec：兼容旧聚合磁盘卡片读取历史。
