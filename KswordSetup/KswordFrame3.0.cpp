@@ -16,9 +16,12 @@
 #include <vector>
 
 namespace {
-constexpr int kTemporaryWindowHeight = 720;
-constexpr int kTemporaryRightWindowWidth = 580;
+constexpr int kTemporaryWindowHeight = 504;
+constexpr int kTemporaryRightWindowWidth = 600;
 constexpr int kTemporaryLayeredImageWidth = 405;
+constexpr int kTemporaryLayeredImageHeight = 720;
+constexpr int kTemporaryImageOverlap = 243;
+constexpr int kTemporaryImageVerticalOffset = (kTemporaryLayeredImageHeight - kTemporaryWindowHeight) / 2;
 
 // CenteredWindowX computes the left edge for a window centered in the work area.
 // Input is the work area origin/width and window width; output is a screen x.
@@ -59,9 +62,18 @@ int main(int argc, char** argv) {
     int workWidth = 0;
     int workHeight = 0;
     Fl::screen_work_area(workX, workY, workWidth, workHeight);
-    const int combinedWidth = kTemporaryLayeredImageWidth + kTemporaryRightWindowWidth;
-    const int windowX = CenteredWindowX(workX, workWidth, combinedWidth) + kTemporaryLayeredImageWidth;
-    const int windowY = CenteredWindowY(workY, workHeight, kTemporaryWindowHeight);
+    // The transparent character image intentionally overlaps the installer
+    // panel by roughly half of the image width. Inputs are the visible combined
+    // width and overlap; processing centers the visible silhouette+panel group;
+    // output is the FLTK panel's top-left x coordinate.
+    const int combinedWidth = kTemporaryLayeredImageWidth - kTemporaryImageOverlap + kTemporaryRightWindowWidth;
+    const int windowX = CenteredWindowX(workX, workWidth, combinedWidth) + kTemporaryLayeredImageWidth - kTemporaryImageOverlap;
+    // The character PNG is taller than the compact installer panel. Center the
+    // group by the PNG height, then place the right-side panel in the vertical
+    // middle of the character. GuiAfterShowMain applies the inverse image offset
+    // so the character itself stays anchored at the group top.
+    const int groupTopY = CenteredWindowY(workY, workHeight, kTemporaryLayeredImageHeight);
+    const int windowY = groupTopY + kTemporaryImageVerticalOffset;
 
     Fl_Window* window = new Fl_Window(windowX, windowY, kTemporaryRightWindowWidth, kTemporaryWindowHeight, "PNG transparent-left window test");
     window->begin();

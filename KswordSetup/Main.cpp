@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -28,12 +29,23 @@
 #pragma comment(lib, "Shell32.lib")
 #pragma comment(lib, "Ole32.lib")
 
+extern HWND fl_win32_xid(const Fl_Window* window);
+
+#ifndef KSWORD_SETUP_ENABLE_TOPMOST
+#define KSWORD_SETUP_ENABLE_TOPMOST 0
+#endif
+
 namespace {
-constexpr int kWindowWidth = 580;
-constexpr int kWindowHeight = 720;
+constexpr int kWindowWidth = 600;
+constexpr int kWindowHeight = 504;
 constexpr int kLayeredImageWidth = 405;
+// kImageOverlap controls how much of the character PNG covers the installer
+// panel. 243 is about 60% of the 405px character width; tweak this one value
+// when fine-adjusting the horizontal overlap.
+constexpr int kImageOverlap = 223;
 constexpr int kImageDrawHeight = 720;
-constexpr int kPad = 30;
+constexpr int kImageVerticalOffset = (kImageDrawHeight - kWindowHeight) / 2;
+constexpr int kPad = 24;
 constexpr wchar_t kDefaultInstallDir[] = L"C:\\Program Files\\KswordARK";
 constexpr wchar_t kStateArg[] = L"--install-state";
 constexpr wchar_t kSettingsRel[] = L"Style\\appearance_settings.json";
@@ -62,6 +74,17 @@ struct InstallResult {
     std::wstring logText;
 };
 
+// PageLayout groups the right-side safe content rectangle. The left gutter is
+// intentionally blank because the character art overlaps that part of the card.
+struct PageLayout {
+    int cardX = 0;
+    int cardY = 0;
+    int cardW = 0;
+    int cardH = 0;
+    int contentX = 0;
+    int contentW = 0;
+};
+
 KLayeredImageWindow g_characterWindow;
 KInput* g_pathInput = nullptr;
 KCheckBox* g_adminCheck = nullptr;
@@ -74,7 +97,31 @@ KCheckBox* g_launchCheck = nullptr;
 KTextDisplay* g_status = nullptr;
 KButton* g_installButton = nullptr;
 KButton* g_browseButton = nullptr;
+KCard* g_setupPage = nullptr;
+KCard* g_installPage = nullptr;
+Fl_Window* g_mainWindow = nullptr;
+bool g_topMostPaused = false;
 std::wstring g_characterImagePath;
+
+// BuildPageLayout computes the reusable installer card geometry. Input is none;
+// processing reserves a 30% left gutter for the overlaid character; output is
+// the card and safe content rectangle used by every page.
+PageLayout BuildPageLayout() {
+    PageLayout layout;
+    layout.cardX = kPad;
+    layout.cardY = 20;
+    layout.cardW = kWindowWidth - kPad * 2;
+    layout.cardH = kWindowHeight - 40;
+    const int gutterW = layout.cardW * 30 / 100;
+    layout.contentX = layout.cardX + gutterW + 18;
+    layout.contentW = layout.cardW - gutterW - 42;
+    return layout;
+}
+
+void ApplyInstallerZOrder(Fl_Window* owner);
+void SetInstallerShellDialogMode(bool enabled);
+int TopMostMessageBox(const wchar_t* text, const wchar_t* caption, UINT type);
+void EnsureTaskbarAppWindow(Fl_Window* window);
 
 // WideToUtf8 converts UTF-16 Win32 text to UTF-8 for FLTK widgets. Input is a
 // UTF-16 string, processing uses WideCharToMultiByte, and output is UTF-8 bytes.
@@ -386,6 +433,17 @@ std::wstring Quote(const std::wstring& arg) {
     return out;
 }
 
+// SystemExePath resolves a system executable inside the Windows directory.
+// Input is a relative path under System32; output is an absolute path used to
+// avoid CreateProcess search-path ambiguity and WOW64 surprises.
+std::wstring SystemExePath(const wchar_t* relativePath) {
+    wchar_t sysDir[MAX_PATH]{};
+    if (!::GetSystemDirectoryW(sysDir, MAX_PATH)) {
+        return relativePath ? std::wstring(relativePath) : std::wstring();
+    }
+    return Join(sysDir, relativePath ? std::wstring(relativePath) : std::wstring());
+}
+
 // TempStatePath allocates an elevation handoff file path. Input is none;
 // processing uses GetTempPath/GetTempFileName; output is a temporary path.
 std::wstring TempStatePath() {
@@ -444,6 +502,23 @@ bool RelaunchElevated(const std::wstring& stateFile) {
     return reinterpret_cast<INT_PTR>(rc) > 32;
 }
 
+// ShowSetupPage activates the first settings page. Input is none; processing
+// flips FLTK group visibility and refreshes the window; no value is returned.
+void ShowSetupPage() {
+    if (g_setupPage) g_setupPage->show();
+    if (g_installPage) g_installPage->hide();
+    if (g_mainWindow) g_mainWindow->redraw();
+}
+
+// ShowInstallPage activates the second progress/result page. Input is none;
+// processing hides the initial settings components and refreshes; no return.
+void ShowInstallPage() {
+    if (g_setupPage) g_setupPage->hide();
+    if (g_installPage) g_installPage->show();
+    if (g_mainWindow) g_mainWindow->redraw();
+    Fl::check();
+}
+
 // CollectOptions reads the current widget state. Input is global FLTK widgets;
 // processing applies defaults and trimming; output is an InstallOptions object.
 InstallOptions CollectOptions() {
@@ -499,9 +574,11 @@ bool ExtractPayload(const InstallOptions& o, std::wstring* log) {
 bool WriteSettings(const InstallOptions& o, std::wstring* log) {
     const std::wstring file = Join(o.installDir, kSettingsRel);
     if (ExistsFile(file)) {
-        int choice = ::MessageBoxW(nullptr,
+        SetInstallerShellDialogMode(true);
+        int choice = TopMostMessageBox(
             L"检测到已有配置文件。\n\n选择“是”覆盖安装器生成配置；选择“否”保留原有一切配置。",
             L"KswordSetup 覆盖安装", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2);
+        SetInstallerShellDialogMode(false);
         if (choice != IDYES) {
             AppendLog(log, L"保留已有配置: " + file);
             return true;
@@ -542,7 +619,10 @@ bool RunWait(const std::wstring& exe, const std::wstring& args, const std::wstri
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
-    if (!::CreateProcessW(exe.c_str(), mutableCmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi)) return false;
+    if (!::CreateProcessW(exe.c_str(), mutableCmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi)) {
+        if (exitCode) *exitCode = ::GetLastError();
+        return false;
+    }
     DWORD wait = ::WaitForSingleObject(pi.hProcess, timeoutMs);
     if (wait == WAIT_TIMEOUT) ::TerminateProcess(pi.hProcess, 1460);
     DWORD code = 1;
@@ -553,16 +633,113 @@ bool RunWait(const std::wstring& exe, const std::wstring& args, const std::wstri
     return wait == WAIT_OBJECT_0 && code == 0;
 }
 
+// RunWaitCapture starts a process, waits for completion, and captures combined
+// stdout/stderr text for diagnostics. Inputs mirror RunWait plus an output
+// buffer; output text is decoded with the OEM code page because console tools
+// usually emit that encoding when launched without a console window.
+bool RunWaitCapture(const std::wstring& exe, const std::wstring& args, const std::wstring& cwd, DWORD timeoutMs, DWORD* exitCode, std::wstring* output) {
+    if (output) output->clear();
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = nullptr;
+
+    HANDLE readPipe = nullptr;
+    HANDLE writePipe = nullptr;
+    if (!::CreatePipe(&readPipe, &writePipe, &sa, 0)) {
+        if (exitCode) *exitCode = ::GetLastError();
+        return false;
+    }
+    ::SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+
+    std::wstring cmd = Quote(exe) + (args.empty() ? L"" : L" " + args);
+    std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+    mutableCmd.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = ::GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = writePipe;
+    si.hStdError = writePipe;
+
+    PROCESS_INFORMATION pi{};
+    const BOOL created = ::CreateProcessW(
+        exe.c_str(),
+        mutableCmd.data(),
+        nullptr,
+        nullptr,
+        TRUE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        cwd.empty() ? nullptr : cwd.c_str(),
+        &si,
+        &pi);
+
+    ::CloseHandle(writePipe);
+    writePipe = nullptr;
+
+    if (!created) {
+        if (output) {
+            *output = L"CreateProcessW failed, last error=" + std::to_wstring(::GetLastError());
+        }
+        ::CloseHandle(readPipe);
+        if (exitCode) *exitCode = ::GetLastError();
+        return false;
+    }
+
+    DWORD wait = ::WaitForSingleObject(pi.hProcess, timeoutMs);
+    if (wait == WAIT_TIMEOUT) {
+        ::TerminateProcess(pi.hProcess, 1460);
+    }
+
+    std::string captured;
+    char buffer[4096];
+    DWORD read = 0;
+    while (::ReadFile(readPipe, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+        captured.append(buffer, buffer + read);
+    }
+    ::CloseHandle(readPipe);
+
+    DWORD code = 1;
+    ::GetExitCodeProcess(pi.hProcess, &code);
+    ::CloseHandle(pi.hThread);
+    ::CloseHandle(pi.hProcess);
+    if (exitCode) *exitCode = code;
+
+    if (output && !captured.empty()) {
+        const int wideLen = ::MultiByteToWideChar(CP_OEMCP, 0, captured.data(), (int)captured.size(), nullptr, 0);
+        if (wideLen > 0) {
+            std::wstring wide((size_t)wideLen, L'\0');
+            ::MultiByteToWideChar(CP_OEMCP, 0, captured.data(), (int)captured.size(), &wide[0], wideLen);
+            *output = std::move(wide);
+        }
+    }
+
+    return wait == WAIT_OBJECT_0 && code == 0;
+}
+
 // InstallTaskmgr calls the released TaskmgrHijack.ps1 in parameter mode. Input is
 // install options; processing points IFEO at installed Ksword5.1.exe; output is
 // true when PowerShell exits successfully.
 bool InstallTaskmgr(const InstallOptions& o, std::wstring* log) {
     const std::wstring script = Join(o.installDir, kTaskmgrScript);
     const std::wstring target = Join(o.installDir, kMainExe);
-    const std::wstring args = L"-NoProfile -ExecutionPolicy Bypass -File " + Quote(script) + L" -Install -TargetExe " + Quote(target);
+    const std::wstring powershell = SystemExePath(L"WindowsPowerShell\\v1.0\\powershell.exe");
+    const std::wstring args = L"-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + Quote(script) + L" -Install -TargetExe " + Quote(target);
     DWORD code = 1;
-    const bool ok = ExistsFile(script) && ExistsFile(target) && RunWait(L"powershell.exe", args, o.installDir, 60000, &code);
-    AppendLog(log, ok ? L"已替换系统任务管理器。" : L"任务管理器替换失败，退出码: " + std::to_wstring(code));
+    std::wstring detail;
+    const bool ok = ExistsFile(script) && ExistsFile(target) && RunWaitCapture(powershell, args, o.installDir, 60000, &code, &detail);
+    if (ok) {
+        AppendLog(log, L"已替换系统任务管理器。");
+    }
+    else {
+        AppendLog(log, L"任务管理器替换失败，退出码: " + std::to_wstring(code));
+        if (!detail.empty()) {
+            AppendLog(log, L"详细信息: " + detail);
+        }
+    }
     return ok;
 }
 
@@ -570,8 +747,18 @@ bool InstallTaskmgr(const InstallOptions& o, std::wstring* log) {
 // waits for bcdedit; output is true when Windows accepts the setting.
 bool EnableTestMode(std::wstring* log) {
     DWORD code = 1;
-    const bool ok = RunWait(L"bcdedit.exe", L"/set testsigning on", L"", 60000, &code);
-    AppendLog(log, ok ? L"已执行 bcdedit /set testsigning on。" : L"启动测试模式失败，退出码: " + std::to_wstring(code));
+    const std::wstring bcdedit = SystemExePath(L"bcdedit.exe");
+    std::wstring detail;
+    const bool ok = RunWaitCapture(bcdedit, L"/set testsigning on", L"", 60000, &code, &detail);
+    if (ok) {
+        AppendLog(log, L"已执行 bcdedit /set testsigning on。");
+    }
+    else {
+        AppendLog(log, L"启动测试模式失败，退出码: " + std::to_wstring(code));
+        if (!detail.empty()) {
+            AppendLog(log, L"详细信息: " + detail);
+        }
+    }
     return ok;
 }
 
@@ -650,7 +837,9 @@ InstallResult PerformInstall(const InstallOptions& o) {
         const bool testOk = EnableTestMode(&r.logText);
         r.ok = testOk && r.ok;
         if (testOk) {
-            int choice = ::MessageBoxW(nullptr, L"测试模式已写入，需要重启系统后生效。是否立即重启？", L"KswordSetup", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2);
+            SetInstallerShellDialogMode(true);
+            int choice = TopMostMessageBox(L"测试模式已写入，需要重启系统后生效。是否立即重启？", L"KswordSetup", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2);
+            SetInstallerShellDialogMode(false);
             r.rebootNow = choice == IDYES;
         }
     }
@@ -662,17 +851,22 @@ InstallResult PerformInstall(const InstallOptions& o) {
 // current UI state; processing performs UAC handoff when needed; no return.
 void StartInstall() {
     InstallOptions o = CollectOptions();
+    ShowInstallPage();
+    SetStatus(L"准备安装...");
     if (NeedsElevation(o) && !IsElevated()) {
+        SetStatus(L"当前选项需要管理员权限，正在请求 UAC...\r\n需要管理员权限的选项包括默认 Program Files 路径、替换任务管理器、启动测试模式或全用户快捷方式。");
         std::wstring state = TempStatePath();
         if (!SaveState(state, o)) {
-            ::MessageBoxW(nullptr, L"写入提权状态文件失败。", L"KswordSetup", MB_ICONERROR);
+            TopMostMessageBox(L"写入提权状态文件失败。", L"KswordSetup", MB_ICONERROR);
+            ShowSetupPage();
             return;
         }
         if (RelaunchElevated(state)) {
             SetStatus(L"已请求管理员权限，请在 UAC 窗口确认。确认后安装将在新窗口继续。");
             return;
         }
-        ::MessageBoxW(nullptr, L"管理员权限请求被取消或启动失败。", L"KswordSetup", MB_ICONWARNING);
+        TopMostMessageBox(L"管理员权限请求被取消或启动失败。", L"KswordSetup", MB_ICONWARNING);
+        ShowSetupPage();
         return;
     }
     if (g_installButton) g_installButton->deactivate();
@@ -690,9 +884,13 @@ void StartInstall() {
 // BrowseInstallDir opens the native folder picker. Input is current UI path;
 // processing uses IFileDialog in folder mode; no return value.
 void BrowseInstallDir() {
+    SetInstallerShellDialogMode(true);
     IFileDialog* dlg = nullptr;
     HRESULT hr = ::CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_IFileDialog, (void**)&dlg);
-    if (FAILED(hr) || !dlg) return;
+    if (FAILED(hr) || !dlg) {
+        SetInstallerShellDialogMode(false);
+        return;
+    }
     DWORD opts = 0;
     dlg->GetOptions(&opts);
     dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
@@ -709,6 +907,7 @@ void BrowseInstallDir() {
         }
     }
     dlg->Release();
+    SetInstallerShellDialogMode(false);
 }
 
 // ExtractCharacterImage releases the left PNG to temp for KLayeredImageWindow.
@@ -720,6 +919,90 @@ std::string ExtractCharacterImage() {
     else g_characterImagePath = Join(temp, L"KswordSetupCharacter.png");
     ExtractRc(IDR_KSWORD_SETUP_CHARACTER_PNG, g_characterImagePath);
     return WideToUtf8(g_characterImagePath);
+}
+
+// ApplyInstallerZOrder keeps the installer panel and character image in the
+// requested topmost order. When the compile-time switch is disabled, this
+// becomes a no-op so the installer can be tested without any topmost behavior.
+void ApplyInstallerZOrder(Fl_Window* owner) {
+#if KSWORD_SETUP_ENABLE_TOPMOST
+    if (!owner) return;
+    HWND ownerHwnd = fl_win32_xid(owner);
+    if (ownerHwnd) {
+        ::SetWindowPos(ownerHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    HWND imageHwnd = g_characterWindow.hwnd();
+    if (imageHwnd) {
+        ::SetWindowPos(imageHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+#else
+    (void)owner;
+#endif
+}
+
+// SetInstallerShellDialogMode temporarily disables the topmost behavior while a
+// shell dialog is shown. When the compile-time switch is disabled, the helper
+// stays inert and simply preserves the installer state.
+void SetInstallerShellDialogMode(bool enabled) {
+#if KSWORD_SETUP_ENABLE_TOPMOST
+    g_topMostPaused = enabled;
+    HWND ownerHwnd = g_mainWindow ? fl_win32_xid(g_mainWindow) : nullptr;
+    HWND imageHwnd = g_characterWindow.hwnd();
+    const HWND insertAfter = enabled ? HWND_NOTOPMOST : HWND_TOPMOST;
+    const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+    if (ownerHwnd) {
+        ::SetWindowPos(ownerHwnd, insertAfter, 0, 0, 0, 0, flags);
+    }
+    if (imageHwnd) {
+        ::SetWindowPos(imageHwnd, insertAfter, 0, 0, 0, 0, flags);
+    }
+    if (!enabled && g_mainWindow) {
+        ApplyInstallerZOrder(g_mainWindow);
+    }
+#else
+    (void)enabled;
+#endif
+}
+
+// TopMostMessageBox shows a native message box above the installer. Inputs are
+// normal MessageBoxW parameters; processing optionally adds MB_TOPMOST when the
+// compile-time switch is enabled; output is the clicked button id.
+int TopMostMessageBox(const wchar_t* text, const wchar_t* caption, UINT type) {
+    HWND ownerHwnd = g_mainWindow ? fl_win32_xid(g_mainWindow) : nullptr;
+#if KSWORD_SETUP_ENABLE_TOPMOST
+    return ::MessageBoxW(ownerHwnd, text, caption, type | MB_TOPMOST | MB_SETFOREGROUND);
+#else
+    return ::MessageBoxW(ownerHwnd, text, caption, type | MB_SETFOREGROUND);
+#endif
+}
+
+// EnsureTaskbarAppWindow makes the FLTK owner a normal shell application window.
+// Input is the right-side installer window; processing removes tool/noactivate
+// styles and forces WS_EX_APPWINDOW; no value is returned.
+void EnsureTaskbarAppWindow(Fl_Window* window) {
+    HWND hwnd = window ? fl_win32_xid(window) : nullptr;
+    if (!hwnd) return;
+    LONG_PTR exStyle = ::GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    exStyle &= ~(static_cast<LONG_PTR>(WS_EX_TOOLWINDOW) | static_cast<LONG_PTR>(WS_EX_NOACTIVATE));
+    exStyle |= WS_EX_APPWINDOW;
+    ::SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exStyle);
+    ::SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
+    ::SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+// ReassertInstallerZOrder is a low-frequency FLTK timer callback. Input is the
+// owner window pointer; processing reapplies z-order after activation/focus
+// churn; no value is returned and the timer stops once the owner closes.
+void ReassertInstallerZOrder(void* data) {
+    auto* owner = static_cast<Fl_Window*>(data);
+    if (!owner || !owner->shown()) return;
+#if KSWORD_SETUP_ENABLE_TOPMOST
+    if (!g_topMostPaused) {
+        ApplyInstallerZOrder(owner);
+    }
+    Fl::repeat_timeout(0.75, ReassertInstallerZOrder, data);
+#endif
 }
 
 // ParseStateArgument returns the --install-state path. Input is process command
@@ -740,39 +1023,64 @@ std::wstring ParseStateArgument() {
 // processing creates K* widgets and callbacks; no return value.
 void ConfigureRightContent(Fl_Window* window) {
     const KTheme& theme = KThemeManager::instance().theme();
-    const int cardX = kPad;
-    const int cardY = 28;
-    const int cardW = kWindowWidth - kPad * 2;
-    const int cardH = kWindowHeight - 56;
-    KCard* card = KCreateCard(cardX, cardY, cardW, cardH, "KswordARK 安装设置");
-    card->setSubtitle("选择安装路径和首次启动行为，点击安装时按需请求管理员权限。");
-    card->begin();
-    KText* title = KCreateText(cardX + 24, cardY + 70, cardW - 48, 28, "KswordSetup");
-    title->labelsize(20);
+    const PageLayout layout = BuildPageLayout();
+
+    g_setupPage = KCreateCard(layout.cardX, layout.cardY, layout.cardW, layout.cardH, nullptr);
+    g_setupPage->setTitle("");
+    g_setupPage->setSubtitle("");
+    g_setupPage->begin();
+    KText* headerTitle = KCreateText(layout.contentX, layout.cardY + 22, layout.contentW, 26, "KswordSetup");
+    headerTitle->labelsize(19);
+    headerTitle->labelcolor(theme.text);
+    KText* headerSubtitle = KCreateText(layout.contentX, layout.cardY + 46, layout.contentW, 22, "选择安装路径和首次启动行为，点击安装时按需请求管理员权限。");
+    headerSubtitle->labelsize(13);
+    headerSubtitle->labelcolor(theme.mutedText);
+    KText* title = KCreateText(layout.contentX, layout.cardY + 82, layout.contentW, 26, "安装路径");
+    title->labelsize(19);
     title->labelcolor(theme.text);
-    KCreateText(cardX + 24, cardY + 112, 120, 24, "安装路径");
-    g_pathInput = KCreateInput(cardX + 24, cardY + 142, cardW - 154, 32, nullptr);
+    g_pathInput = KCreateInput(layout.contentX, layout.cardY + 108, layout.contentW - 112, 30, nullptr);
     g_pathInput->value(WideToUtf8(kDefaultInstallDir).c_str());
-    g_browseButton = KCreateButton(cardX + cardW - 118, cardY + 142, 94, 32, "浏览", KBUTTON_LIGHT);
+    g_browseButton = KCreateButton(layout.contentX + layout.contentW - 94, layout.cardY + 108, 94, 30, "浏览", KBUTTON_LIGHT);
     g_browseButton->callback([](Fl_Widget*, void*) { BrowseInstallDir(); });
-    int y = cardY + 192;
-    g_adminCheck = KCreateCheckBox(cardX + 24, y, cardW - 48, 28, "启动时自动请求管理员权限"); g_adminCheck->value(1); y += 34;
-    g_maxCheck = KCreateCheckBox(cardX + 24, y, cardW - 48, 28, "启动时默认最大化"); g_maxCheck->value(1); y += 34;
-    g_taskmgrCheck = KCreateCheckBox(cardX + 24, y, cardW - 48, 28, "替换系统自带任务管理器"); y += 34;
-    g_testModeCheck = KCreateCheckBox(cardX + 24, y, cardW - 48, 28, "启动测试模式（testsigning）"); y += 34;
-    g_desktopCheck = KCreateCheckBox(cardX + 24, y, cardW - 48, 28, "创建桌面快捷方式"); g_desktopCheck->value(1); y += 34;
-    g_startMenuCheck = KCreateCheckBox(cardX + 24, y, cardW - 48, 28, "创建开始菜单快捷方式"); g_startMenuCheck->value(1); y += 34;
-    g_launchCheck = KCreateCheckBox(cardX + 24, y, cardW - 48, 28, "安装完成后启动 Ksword"); g_launchCheck->value(1);
-    g_status = KCreateTextDisplay(cardX + 24, cardY + 450, cardW - 48, 142, nullptr);
-    g_status->set_text("准备安装。\n内嵌 Release payload 会释放到目标目录。\n覆盖安装时会询问是否保留已有配置。");
-    g_installButton = KCreateButton(cardX + cardW - 244, cardY + cardH - 48, 104, 34, "安装", KBUTTON_HEAVY);
+    int y = layout.cardY + 150;
+    g_adminCheck = KCreateCheckBox(layout.contentX, y, layout.contentW, 24, "启动时自动请求管理员权限"); g_adminCheck->value(1); y += 27;
+    g_maxCheck = KCreateCheckBox(layout.contentX, y, layout.contentW, 24, "启动时默认最大化"); g_maxCheck->value(1); y += 27;
+    g_taskmgrCheck = KCreateCheckBox(layout.contentX, y, layout.contentW, 24, "替换系统自带任务管理器（需要管理员权限）"); y += 27;
+    g_testModeCheck = KCreateCheckBox(layout.contentX, y, layout.contentW, 24, "启动测试模式 testsigning（需要管理员权限）"); y += 27;
+    g_desktopCheck = KCreateCheckBox(layout.contentX, y, layout.contentW, 24, "创建桌面快捷方式"); g_desktopCheck->value(1); y += 27;
+    g_startMenuCheck = KCreateCheckBox(layout.contentX, y, layout.contentW, 24, "创建开始菜单快捷方式"); g_startMenuCheck->value(1);
+    g_installButton = KCreateButton(layout.contentX + layout.contentW - 224, layout.cardY + layout.cardH - 48, 104, 34, "安装", KBUTTON_HEAVY);
     g_installButton->callback([](Fl_Widget*, void*) { StartInstall(); });
-    KButton* closeButton = KCreateButton(cardX + cardW - 124, cardY + cardH - 48, 100, 34, "关闭", KBUTTON_LIGHT);
+    KButton* closeButton = KCreateButton(layout.contentX + layout.contentW - 104, layout.cardY + layout.cardH - 48, 100, 34, "关闭", KBUTTON_LIGHT);
     closeButton->callback([](Fl_Widget*, void* data) {
         g_characterWindow.destroy();
         if (auto* owner = static_cast<Fl_Window*>(data)) owner->hide();
     }, window);
-    card->end();
+    g_setupPage->end();
+
+    g_installPage = KCreateCard(layout.cardX, layout.cardY, layout.cardW, layout.cardH, nullptr);
+    g_installPage->setTitle("");
+    g_installPage->setSubtitle("");
+    g_installPage->begin();
+    KText* installTitle = KCreateText(layout.contentX, layout.cardY + 22, layout.contentW, 28, "安装进度");
+    installTitle->labelsize(19);
+    installTitle->labelcolor(theme.text);
+    KText* installSubtitle = KCreateText(layout.contentX, layout.cardY + 48, layout.contentW, 22, "安装时会释放内嵌 payload，并在需要时执行管理员操作。");
+    installSubtitle->labelsize(13);
+    installSubtitle->labelcolor(theme.mutedText);
+    g_status = KCreateTextDisplay(layout.contentX, layout.cardY + 86, layout.contentW, 250, nullptr);
+    g_status->set_text("等待开始安装。");
+    g_launchCheck = KCreateCheckBox(layout.contentX, layout.cardY + 350, layout.contentW, 24, "安装完成后启动 Ksword");
+    g_launchCheck->value(1);
+    KButton* backButton = KCreateButton(layout.contentX + layout.contentW - 224, layout.cardY + layout.cardH - 48, 104, 34, "返回", KBUTTON_LIGHT);
+    backButton->callback([](Fl_Widget*, void*) { ShowSetupPage(); });
+    KButton* finishButton = KCreateButton(layout.contentX + layout.contentW - 104, layout.cardY + layout.cardH - 48, 100, 34, "关闭", KBUTTON_LIGHT);
+    finishButton->callback([](Fl_Widget*, void* data) {
+        g_characterWindow.destroy();
+        if (auto* owner = static_cast<Fl_Window*>(data)) owner->hide();
+    }, window);
+    g_installPage->end();
+    g_installPage->hide();
 }
 } // namespace
 
@@ -781,6 +1089,7 @@ void ConfigureRightContent(Fl_Window* window) {
 void GuiInitMain(const std::vector<std::string>& args, Fl_Window* MainWindow) {
     (void)args;
     if (!MainWindow) return;
+    g_mainWindow = MainWindow;
     MainWindow->label("KswordSetup");
     MainWindow->size(kWindowWidth, kWindowHeight);
     MainWindow->border(0);
@@ -794,9 +1103,12 @@ void GuiInitMain(const std::vector<std::string>& args, Fl_Window* MainWindow) {
 // no value is returned.
 void GuiAfterShowMain(Fl_Window* MainWindow) {
     if (!MainWindow) return;
+    EnsureTaskbarAppWindow(MainWindow);
     const std::string characterPath = ExtractCharacterImage();
     g_characterWindow.setClickThrough(true);
-    g_characterWindow.showPngForWindow(MainWindow, characterPath, -kLayeredImageWidth + 6, 0, kLayeredImageWidth, kImageDrawHeight);
+    g_characterWindow.showPngForWindow(MainWindow, characterPath, -kLayeredImageWidth + kImageOverlap, -kImageVerticalOffset, kLayeredImageWidth, kImageDrawHeight);
+    ApplyInstallerZOrder(MainWindow);
+    Fl::add_timeout(0.75, ReassertInstallerZOrder, MainWindow);
     const std::wstring state = ParseStateArgument();
     if (!state.empty()) {
         ApplyOptions(LoadState(state));
@@ -812,3 +1124,4 @@ int AsyncMain(const std::vector<std::string>& args) {
     (void)args;
     return 0;
 }
+
