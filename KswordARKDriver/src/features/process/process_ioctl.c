@@ -442,6 +442,7 @@ Return Value:
 {
     KSWORD_ARK_SET_PROCESS_VISIBILITY_REQUEST* visibilityRequest = NULL;
     KSWORD_ARK_SET_PROCESS_VISIBILITY_RESPONSE* visibilityResponse = NULL;
+    KSWORD_ARK_SET_PROCESS_VISIBILITY_REQUEST visibilityRequestValue;
     PVOID inputBuffer = NULL;
     PVOID outputBuffer = NULL;
     size_t actualInputLength = 0U;
@@ -485,16 +486,18 @@ Return Value:
     }
 
     visibilityRequest = (KSWORD_ARK_SET_PROCESS_VISIBILITY_REQUEST*)inputBuffer;
+    RtlZeroMemory(&visibilityRequestValue, sizeof(visibilityRequestValue));
+    RtlCopyMemory(&visibilityRequestValue, visibilityRequest, sizeof(visibilityRequestValue));
     visibilityResponse = (KSWORD_ARK_SET_PROCESS_VISIBILITY_RESPONSE*)outputBuffer;
     RtlZeroMemory(visibilityResponse, sizeof(*visibilityResponse));
     visibilityResponse->version = KSWORD_ARK_ENUM_PROCESS_PROTOCOL_VERSION;
-    visibilityResponse->processId = visibilityRequest->processId;
+    visibilityResponse->processId = visibilityRequestValue.processId;
 
-    if (visibilityRequest->action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE) {
+    if (visibilityRequestValue.action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE) {
         KSWORD_ARK_SAFETY_CONTEXT safetyContext;
         RtlZeroMemory(&safetyContext, sizeof(safetyContext));
         safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_KERNEL_PATCH;
-        safetyContext.TargetProcessId = (ULONG)visibilityRequest->processId;
+        safetyContext.TargetProcessId = (ULONG)visibilityRequestValue.processId;
         safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
         status = KswordARKSafetyEvaluate(Device, &safetyContext);
         if (!NT_SUCCESS(status)) {
@@ -506,16 +509,16 @@ Return Value:
                 Device,
                 "Warn",
                 "R0 process visibility denied by safety policy: pid=%lu, action=%lu, status=0x%08X.",
-                (unsigned long)visibilityRequest->processId,
-                (unsigned long)visibilityRequest->action,
+                (unsigned long)visibilityRequestValue.processId,
+                (unsigned long)visibilityRequestValue.action,
                 (unsigned int)status);
             return status;
         }
     }
 
     status = KswordARKDriverSetProcessVisibility(
-        (ULONG)visibilityRequest->processId,
-        (ULONG)visibilityRequest->action,
+        (ULONG)visibilityRequestValue.processId,
+        (ULONG)visibilityRequestValue.action,
         &visibilityStatus,
         &hiddenCount);
 
@@ -529,8 +532,8 @@ Return Value:
             Device,
             "Info",
             "R0 process visibility updated: pid=%lu, action=%lu, status=%lu, hiddenCount=%lu.",
-            (unsigned long)visibilityRequest->processId,
-            (unsigned long)visibilityRequest->action,
+            (unsigned long)visibilityRequestValue.processId,
+            (unsigned long)visibilityRequestValue.action,
             (unsigned long)visibilityStatus,
             (unsigned long)hiddenCount);
     }
@@ -539,8 +542,8 @@ Return Value:
             Device,
             "Error",
             "R0 process visibility failed: pid=%lu, action=%lu, status=0x%08X.",
-            (unsigned long)visibilityRequest->processId,
-            (unsigned long)visibilityRequest->action,
+            (unsigned long)visibilityRequestValue.processId,
+            (unsigned long)visibilityRequestValue.action,
             (unsigned int)status);
     }
 
@@ -579,6 +582,7 @@ Return Value:
 {
     KSWORD_ARK_SET_PROCESS_SPECIAL_FLAGS_REQUEST* specialRequest = NULL;
     KSWORD_ARK_SET_PROCESS_SPECIAL_FLAGS_RESPONSE* specialResponse = NULL;
+    KSWORD_ARK_SET_PROCESS_SPECIAL_FLAGS_REQUEST specialRequestValue;
     PVOID inputBuffer = NULL;
     PVOID outputBuffer = NULL;
     size_t actualInputLength = 0U;
@@ -623,27 +627,29 @@ Return Value:
     }
 
     specialRequest = (KSWORD_ARK_SET_PROCESS_SPECIAL_FLAGS_REQUEST*)inputBuffer;
+    RtlZeroMemory(&specialRequestValue, sizeof(specialRequestValue));
+    RtlCopyMemory(&specialRequestValue, specialRequest, sizeof(specialRequestValue));
     specialResponse = (KSWORD_ARK_SET_PROCESS_SPECIAL_FLAGS_RESPONSE*)outputBuffer;
     RtlZeroMemory(specialResponse, sizeof(*specialResponse));
     specialResponse->version = KSWORD_ARK_ENUM_PROCESS_PROTOCOL_VERSION;
-    specialResponse->processId = specialRequest->processId;
-    specialResponse->action = specialRequest->action;
+    specialResponse->processId = specialRequestValue.processId;
+    specialResponse->action = specialRequestValue.action;
 
-    status = KswordARKValidateUserPid((ULONG)specialRequest->processId);
+    status = KswordARKValidateUserPid((ULONG)specialRequestValue.processId);
     if (NT_SUCCESS(status)) {
         KSWORD_ARK_SAFETY_CONTEXT safetyContext;
         RtlZeroMemory(&safetyContext, sizeof(safetyContext));
         safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_PROCESS_SET_PROTECTION;
-        safetyContext.TargetProcessId = (ULONG)specialRequest->processId;
+        safetyContext.TargetProcessId = (ULONG)specialRequestValue.processId;
         safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
         status = KswordARKSafetyEvaluate(Device, &safetyContext);
     }
 
     if (NT_SUCCESS(status)) {
         status = KswordARKDriverSetProcessSpecialFlags(
-            (ULONG)specialRequest->processId,
-            (ULONG)specialRequest->action,
-            (ULONG)specialRequest->flags,
+            (ULONG)specialRequestValue.processId,
+            (ULONG)specialRequestValue.action,
+            (ULONG)specialRequestValue.flags,
             &operationStatus,
             &appliedFlags,
             &touchedThreadCount);
@@ -662,8 +668,8 @@ Return Value:
         Device,
         NT_SUCCESS(status) ? "Info" : "Error",
         "R0 process-special result: pid=%lu, action=%lu, status=%lu, touched=%lu, nt=0x%08X.",
-        (unsigned long)specialRequest->processId,
-        (unsigned long)specialRequest->action,
+        (unsigned long)specialRequestValue.processId,
+        (unsigned long)specialRequestValue.action,
         (unsigned long)operationStatus,
         (unsigned long)touchedThreadCount,
         (unsigned int)status);
@@ -701,6 +707,7 @@ Return Value:
 {
     KSWORD_ARK_DKOM_PROCESS_REQUEST* dkomRequest = NULL;
     KSWORD_ARK_DKOM_PROCESS_RESPONSE* dkomResponse = NULL;
+    KSWORD_ARK_DKOM_PROCESS_REQUEST dkomRequestValue;
     PVOID inputBuffer = NULL;
     PVOID outputBuffer = NULL;
     size_t actualInputLength = 0U;
@@ -746,27 +753,29 @@ Return Value:
     }
 
     dkomRequest = (KSWORD_ARK_DKOM_PROCESS_REQUEST*)inputBuffer;
+    RtlZeroMemory(&dkomRequestValue, sizeof(dkomRequestValue));
+    RtlCopyMemory(&dkomRequestValue, dkomRequest, sizeof(dkomRequestValue));
     dkomResponse = (KSWORD_ARK_DKOM_PROCESS_RESPONSE*)outputBuffer;
     RtlZeroMemory(dkomResponse, sizeof(*dkomResponse));
     dkomResponse->version = KSWORD_ARK_ENUM_PROCESS_PROTOCOL_VERSION;
-    dkomResponse->processId = dkomRequest->processId;
-    dkomResponse->action = dkomRequest->action;
+    dkomResponse->processId = dkomRequestValue.processId;
+    dkomResponse->action = dkomRequestValue.action;
 
-    status = KswordARKValidateUserPid((ULONG)dkomRequest->processId);
+    status = KswordARKValidateUserPid((ULONG)dkomRequestValue.processId);
     if (NT_SUCCESS(status)) {
         KSWORD_ARK_SAFETY_CONTEXT safetyContext;
         RtlZeroMemory(&safetyContext, sizeof(safetyContext));
         safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_KERNEL_PATCH;
-        safetyContext.TargetProcessId = (ULONG)dkomRequest->processId;
+        safetyContext.TargetProcessId = (ULONG)dkomRequestValue.processId;
         safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
         status = KswordARKSafetyEvaluate(Device, &safetyContext);
     }
 
     if (NT_SUCCESS(status)) {
         status = KswordARKDriverDkomProcess(
-            (ULONG)dkomRequest->processId,
-            (ULONG)dkomRequest->action,
-            (ULONG)dkomRequest->flags,
+            (ULONG)dkomRequestValue.processId,
+            (ULONG)dkomRequestValue.action,
+            (ULONG)dkomRequestValue.flags,
             &operationStatus,
             &removedEntries,
             &pspCidTableAddress,
@@ -787,8 +796,8 @@ Return Value:
         Device,
         NT_SUCCESS(status) ? "Info" : "Error",
         "R0 process-dkom result: pid=%lu, action=%lu, status=%lu, removed=%lu, cid=0x%I64X, nt=0x%08X.",
-        (unsigned long)dkomRequest->processId,
-        (unsigned long)dkomRequest->action,
+        (unsigned long)dkomRequestValue.processId,
+        (unsigned long)dkomRequestValue.action,
         (unsigned long)operationStatus,
         (unsigned long)removedEntries,
         pspCidTableAddress,

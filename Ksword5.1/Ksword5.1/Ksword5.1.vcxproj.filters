@@ -918,7 +918,10 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="qtvars.pro" />
-    <None Include="profiles\ark_dyndata_pack_v1.json">
+    <None Include="profiles\ark_dyndata_pack_v2.json">
+      <Filter>Profile Files</Filter>
+    </None>
+    <None Include="profiles\ark_dyndata_pack_v3.json">
       <Filter>Profile Files</Filter>
     </None>
   </ItemGroup>
