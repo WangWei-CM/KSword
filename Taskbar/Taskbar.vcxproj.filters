@@ -49,6 +49,9 @@
     <ClCompile Include="DisplayRestartMonitor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="SosHotkeyLauncher.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="AudioAnalyze.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -78,6 +81,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Function.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SosHotkeyLauncher.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
