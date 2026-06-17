@@ -122,6 +122,7 @@
     <ClCompile Include="Function.cpp" />
     <ClCompile Include="Override.cpp" />
     <ClCompile Include="DisplayRestartMonitor.cpp" />
+    <ClCompile Include="SosHotkeyLauncher.cpp" />
     <ClCompile Include="SpectrumWidget.cpp">
       <DynamicSource Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">input</DynamicSource>
       <QtMocFileName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">%(Filename).moc</QtMocFileName>
@@ -141,6 +142,7 @@
     <QtMoc Include="TaskbarSharedState.h" />
     <QtMoc Include="AudioAnalyze.h" />
     <ClInclude Include="Function.h" />
+    <ClInclude Include="SosHotkeyLauncher.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">
