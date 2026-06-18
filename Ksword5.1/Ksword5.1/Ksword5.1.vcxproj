@@ -94,7 +94,7 @@
       <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <Optimization>Disabled</Optimization>
       <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <Link>
@@ -480,6 +480,15 @@
     <Copy SourceFiles="$(KswordArkDriverPdbSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="false" Condition="Exists('$(KswordArkDriverPdbSource)')" />
     <Copy SourceFiles="$(KswordArkDriverInfSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="false" Condition="Exists('$(KswordArkDriverInfSource)')" />
     <Warning Condition="!Exists('$(KswordArkDriverSysSource)')" Text="KswordARK driver binary was not found for output sync: $(KswordArkDriverSysSource)" />
+  </Target>
+  <!-- Qt 官方动态库由 MSVC /MD 构建，即使 Ksword5.1.exe 自身使用 /MT，也仍需把 VC 运行库 DLL 随 Release 输出部署。 -->
+  <Target Name="CopyVisualCppRuntimeRedist" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ItemGroup>
+      <KswordVisualCppRuntimeRedist Include="$(VCToolsRedistDir)x64\Microsoft.VC143.CRT\*.dll" Condition="'$(VCToolsRedistDir)' != ''" />
+      <KswordVisualCppRuntimeRedist Include="$(VCInstallDir)Redist\MSVC\*\x64\Microsoft.VC143.CRT\*.dll" Condition="'$(VCInstallDir)' != ''" />
+    </ItemGroup>
+    <Copy SourceFiles="@(KswordVisualCppRuntimeRedist)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="'@(KswordVisualCppRuntimeRedist)' != ''" />
+    <Warning Condition="'@(KswordVisualCppRuntimeRedist)' == ''" Text="VC++ runtime redist DLLs were not found under VCToolsRedistDir or VCInstallDir\Redist\MSVC; Qt DLLs may fail to load on machines without VC++ Redistributable installed." />
   </Target>
   <!-- Release 主程序构建完成后复用驱动测试签名证书，签名失败只告警，避免阻断普通编译。 -->
   <Target Name="KswordMainAutoTestSignAfterBuild" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='Release|x64' and Exists('$(TargetPath)') and '$(KswordArkSkipAutoTestSign)'!='true'">

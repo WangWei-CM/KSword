@@ -1,4 +1,4 @@
-<?xml version='1.0' encoding='utf-8'?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -84,7 +84,8 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-    <AdditionalIncludeDirectories /></ClCompile>
+      <AdditionalIncludeDirectories />
+    </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -99,7 +100,8 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-    <AdditionalIncludeDirectories /></ClCompile>
+      <AdditionalIncludeDirectories />
+    </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -131,6 +133,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>$(ProjectDir)generated;$(ProjectDir)fltk\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -147,7 +150,21 @@
     <ClCompile Include="KswordWinAPICore\KLog.cpp" />
     <ClCompile Include="KswordWinAPICore\ksword.cpp" />
     <ClCompile Include="Main.cpp" />
-  <ClCompile Include="KswordGUI\KDataView.cpp" /><ClCompile Include="KswordGUI\KDock.cpp" /><ClCompile Include="KswordGUI\KIcon.cpp" /><ClCompile Include="KswordGUI\KImage.cpp" /><ClCompile Include="KswordGUI\KLayeredWindow.cpp" /><ClCompile Include="KswordGUI\KLayout.cpp" /><ClCompile Include="KswordGUI\KNavigation.cpp" /><ClCompile Include="KswordGUI\KOverlay.cpp" /><ClCompile Include="KswordGUI\KTable.cpp" /><ClCompile Include="KswordGUI\KTheme.cpp" /><ClCompile Include="KswordGUI\KTitleBar.cpp" /><ClCompile Include="KswordGUI\KVisual.cpp" /><ClCompile Include="KswordGUI\KWidgetFactories.cpp" /><ClCompile Include="KswordGUI\KWidgets.cpp" /></ItemGroup>
+    <ClCompile Include="KswordGUI\KDataView.cpp" />
+    <ClCompile Include="KswordGUI\KDock.cpp" />
+    <ClCompile Include="KswordGUI\KIcon.cpp" />
+    <ClCompile Include="KswordGUI\KImage.cpp" />
+    <ClCompile Include="KswordGUI\KLayeredWindow.cpp" />
+    <ClCompile Include="KswordGUI\KLayout.cpp" />
+    <ClCompile Include="KswordGUI\KNavigation.cpp" />
+    <ClCompile Include="KswordGUI\KOverlay.cpp" />
+    <ClCompile Include="KswordGUI\KTable.cpp" />
+    <ClCompile Include="KswordGUI\KTheme.cpp" />
+    <ClCompile Include="KswordGUI\KTitleBar.cpp" />
+    <ClCompile Include="KswordGUI\KVisual.cpp" />
+    <ClCompile Include="KswordGUI\KWidgetFactories.cpp" />
+    <ClCompile Include="KswordGUI\KWidgets.cpp" />
+  </ItemGroup>
   <ItemGroup>
     <ClInclude Include="KswordGUI\KswordStyle.h" />
     <ClInclude Include="resource.h" />
@@ -155,7 +172,19 @@
     <ClInclude Include="KswordWinAPICore\Environment.h" />
     <ClInclude Include="KswordWinAPICore\KLog.h" />
     <ClInclude Include="KswordWinAPICore\ksword.h" />
-  <ClInclude Include="KswordGUI\KDataView.h" /><ClInclude Include="KswordGUI\KDock.h" /><ClInclude Include="KswordGUI\KIcon.h" /><ClInclude Include="KswordGUI\KImage.h" /><ClInclude Include="KswordGUI\KLayeredWindow.h" /><ClInclude Include="KswordGUI\KLayout.h" /><ClInclude Include="KswordGUI\KNavigation.h" /><ClInclude Include="KswordGUI\KOverlay.h" /><ClInclude Include="KswordGUI\KTheme.h" /><ClInclude Include="KswordGUI\KTitleBar.h" /><ClInclude Include="KswordGUI\KVisual.h" /><ClInclude Include="KswordGUI\KWidgets.h" /></ItemGroup>
+    <ClInclude Include="KswordGUI\KDataView.h" />
+    <ClInclude Include="KswordGUI\KDock.h" />
+    <ClInclude Include="KswordGUI\KIcon.h" />
+    <ClInclude Include="KswordGUI\KImage.h" />
+    <ClInclude Include="KswordGUI\KLayeredWindow.h" />
+    <ClInclude Include="KswordGUI\KLayout.h" />
+    <ClInclude Include="KswordGUI\KNavigation.h" />
+    <ClInclude Include="KswordGUI\KOverlay.h" />
+    <ClInclude Include="KswordGUI\KTheme.h" />
+    <ClInclude Include="KswordGUI\KTitleBar.h" />
+    <ClInclude Include="KswordGUI\KVisual.h" />
+    <ClInclude Include="KswordGUI\KWidgets.h" />
+  </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="KswordSetup.rc" />
     <ResourceCompile Include="generated\PayloadResources.rc" />
