@@ -4,6 +4,8 @@
 #include <QColor>
 #include <QHash>
 #include <QIcon>
+#include <QSet>
+#include <QVector>
 #include <QWidget>
 
 class QFileIconProvider;
@@ -39,6 +41,13 @@ private:
         ColumnCount
     };
 
+    enum class ProcessGroupType
+    {
+        Application = 0,
+        Background,
+        WindowsSystem
+    };
+
     struct CounterSample
     {
         quint64 cpuTime100ns = 0;
@@ -49,8 +58,11 @@ private:
     struct ProcessEntry
     {
         quint32 pid = 0;
+        quint32 parentPid = 0;
+        quint32 applicationRootPid = 0;
         QString processName;
         QString imagePath;
+        ProcessGroupType groupType = ProcessGroupType::Background;
         double cpuPercent = 0.0;
         double ramMB = 0.0;
         double diskMBps = 0.0;
@@ -73,11 +85,16 @@ private:
     };
 
     void initializeUi();
+    void applyTreeWidgetStyle();
     void showContextMenu(const QPoint& localPosition);
     bool terminateProcessByPid(quint32 processIdValue);
+    int terminateProcessesByPidList(const QVector<quint32>& processIdList);
     void startRefreshing();
     void stopRefreshing();
     void requestRefresh();
+    void captureExpandedState();
+    void captureExpandedStateForItem(QTreeWidgetItem* itemPointer);
+    void restoreExpandedState(QTreeWidgetItem* itemPointer, const QString& stateKey, bool defaultExpanded);
     static RefreshResult collectRefreshResult(
         const QHash<quint32, CounterSample>& previousSamples,
         const QHash<QString, QString>& cachedImagePathByIdentity,
@@ -85,9 +102,27 @@ private:
     void applyRefreshResult(const RefreshResult& result);
     void updateHeaderSummary(const RefreshResult& result);
     QIcon resolveProcessIcon(const ProcessEntry& entry);
+    static void classifyProcessGroups(QVector<ProcessEntry>* entries, const QSet<quint32>& visibleWindowPidSet);
+    static quint32 findApplicationRootPid(quint32 pidValue, const QHash<quint32, quint32>& parentPidByPid, const QSet<quint32>& visibleWindowPidSet);
+    static bool isWindowsSystemProcess(const ProcessEntry& entry, const QString& windowsDirectoryPath);
+    static ProcessEntry aggregateApplicationEntry(const QVector<ProcessEntry>& applicationEntries);
+    static QString expansionKeyForGroup(ProcessGroupType groupType);
+    static QString expansionKeyForApplication(quint32 rootPidValue);
+    static QString expansionKeyForProcess(quint32 pidValue);
+    static QString processGroupTitle(ProcessGroupType groupType, int entryCount);
+    static int processGroupOrder(ProcessGroupType groupType);
+    static QTreeWidgetItem* createProcessGroupItem(ProcessGroupType groupType, int entryCount);
+    QTreeWidgetItem* createApplicationRootItem(
+        const ProcessEntry& aggregateEntry,
+        const QVector<ProcessEntry>& applicationEntries,
+        int childProcessCount,
+        double maxRamMB,
+        double maxDiskMBps,
+        double maxNetKBps);
     static QString buildProcessIdentityKey(quint32 pidValue, const QString& processName);
-    void updateOrCreateRow(
+    QTreeWidgetItem* updateOrCreateRow(
         const ProcessEntry& entry,
+        QTreeWidgetItem* parentItem,
         double maxRamMB,
         double maxDiskMBps,
         double maxNetKBps);
@@ -110,4 +145,5 @@ private:
     QHash<QString, QIcon> m_iconCacheByIdentity;
     QHash<QString, QIcon> m_iconCacheByPath;
     QHash<quint32, QTreeWidgetItem*> m_itemByPid;
+    QHash<QString, bool> m_expandedStateByKey;
 };

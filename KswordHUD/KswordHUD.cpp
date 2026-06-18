@@ -30,6 +30,8 @@ namespace
 {
     constexpr int kHudOuterMargin = 36;
     constexpr int kHudCenterGap = 24;
+    constexpr int kDefaultLeftWidgetBackgroundOpacityPercent = 38;
+    constexpr int kDefaultRightWidgetBackgroundOpacityPercent = 45;
 
     QColor parseConfigColor(const QString& colorText, const QColor& fallbackColor)
     {
@@ -360,7 +362,7 @@ KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
         shouldWriteConfig = true;
     }
     if (!configObject.contains(QStringLiteral("leftWidgetBackgroundOpacityPercent"))) {
-        configObject.insert(QStringLiteral("leftWidgetBackgroundOpacityPercent"), 0);
+        configObject.insert(QStringLiteral("leftWidgetBackgroundOpacityPercent"), kDefaultLeftWidgetBackgroundOpacityPercent);
         shouldWriteConfig = true;
     }
     if (!configObject.contains(QStringLiteral("leftProcessTableFontColor"))) {
@@ -372,7 +374,7 @@ KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
         shouldWriteConfig = true;
     }
     if (!configObject.contains(QStringLiteral("rightWidgetBackgroundOpacityPercent"))) {
-        configObject.insert(QStringLiteral("rightWidgetBackgroundOpacityPercent"), 0);
+        configObject.insert(QStringLiteral("rightWidgetBackgroundOpacityPercent"), kDefaultRightWidgetBackgroundOpacityPercent);
         shouldWriteConfig = true;
     }
     if (shouldWriteConfig && configFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
@@ -394,7 +396,7 @@ KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
         configObject.value(QStringLiteral("leftWidgetBackgroundColor")).toString(QStringLiteral("#0A0F16"));
     config.leftWidgetBackgroundOpacityPercent = qBound(
         0,
-        configObject.value(QStringLiteral("leftWidgetBackgroundOpacityPercent")).toInt(0),
+        configObject.value(QStringLiteral("leftWidgetBackgroundOpacityPercent")).toInt(kDefaultLeftWidgetBackgroundOpacityPercent),
         100);
     config.leftProcessTableFontColor =
         configObject.value(QStringLiteral("leftProcessTableFontColor")).toString(QStringLiteral("#FFFFFF"));
@@ -402,7 +404,7 @@ KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
         configObject.value(QStringLiteral("rightWidgetBackgroundColor")).toString(QStringLiteral("#0A0F16"));
     config.rightWidgetBackgroundOpacityPercent = qBound(
         0,
-        configObject.value(QStringLiteral("rightWidgetBackgroundOpacityPercent")).toInt(0),
+        configObject.value(QStringLiteral("rightWidgetBackgroundOpacityPercent")).toInt(kDefaultRightWidgetBackgroundOpacityPercent),
         100);
     return config;
 }
@@ -456,12 +458,16 @@ void KswordHUD::applyHudConfig(const HudConfig& config)
     if (m_leftWidget != nullptr) {
         m_leftWidget->setStyleSheet(buildWidgetBackgroundStyle(
             leftBackgroundColor,
-            config.leftWidgetBackgroundOpacityPercent));
+            config.leftWidgetBackgroundOpacityPercent > 0
+            ? config.leftWidgetBackgroundOpacityPercent
+            : kDefaultLeftWidgetBackgroundOpacityPercent));
     }
     if (m_rightWidget != nullptr) {
         m_rightWidget->setStyleSheet(buildWidgetBackgroundStyle(
             rightBackgroundColor,
-            config.rightWidgetBackgroundOpacityPercent));
+            config.rightWidgetBackgroundOpacityPercent > 0
+            ? config.rightWidgetBackgroundOpacityPercent
+            : kDefaultRightWidgetBackgroundOpacityPercent));
     }
     if (m_processListPanel != nullptr) {
         m_processListPanel->setTableTextColor(leftProcessTableFontColor);
