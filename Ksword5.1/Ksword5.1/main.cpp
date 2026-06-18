@@ -37,6 +37,7 @@
 namespace
 {
     constexpr wchar_t kUnlockerKeyName[] = L"Ksword.FileUnlocker";
+    constexpr wchar_t kKswordMainWindowTitle[] = L"Ksword5.1";
 
     // kStartupScaleRecommendedLogicalWidth 作用：
     // - 定义启动分辨率审查的最低建议逻辑宽度；
@@ -66,6 +67,88 @@ namespace
             directoryBuffer.resize(static_cast<std::size_t>(copiedLength) + 1, L'\0');
         }
         return std::wstring();
+    }
+
+    // ExistingKswordWindowSearchContext 说明：
+    // - 输入：由 EnumWindows 回调读写；
+    // - 处理逻辑：记录当前进程 PID，并在其它进程的顶层可见窗口中匹配 Ksword 主窗口标题；
+    // - 返回行为：foundWindow 非空表示发现已运行实例。
+    struct ExistingKswordWindowSearchContext
+    {
+        DWORD currentProcessId = 0; // currentProcessId：当前启动实例 PID，用于排除自身窗口。
+        HWND foundWindow = nullptr; // foundWindow：发现的已有 Ksword 主窗口句柄。
+    };
+
+    // enumExistingKswordWindowProc 作用：
+    // - 输入：Win32 顶层窗口枚举回调参数；
+    // - 处理：跳过不可见窗口/当前进程窗口，按标题精确匹配 Ksword 主窗口；
+    // - 返回：TRUE 继续枚举；FALSE 表示已找到目标并停止枚举。
+    BOOL CALLBACK enumExistingKswordWindowProc(HWND windowHandle, LPARAM parameter)
+    {
+        auto* context = reinterpret_cast<ExistingKswordWindowSearchContext*>(parameter);
+        if (context == nullptr || windowHandle == nullptr || ::IsWindow(windowHandle) == FALSE)
+        {
+            return TRUE;
+        }
+        if (::IsWindowVisible(windowHandle) == FALSE)
+        {
+            return TRUE;
+        }
+
+        DWORD processId = 0;
+        (void)::GetWindowThreadProcessId(windowHandle, &processId);
+        if (processId == 0 || processId == context->currentProcessId)
+        {
+            return TRUE;
+        }
+
+        wchar_t titleBuffer[256] = {};
+        const int titleLength = ::GetWindowTextW(windowHandle, titleBuffer, static_cast<int>(std::size(titleBuffer)));
+        if (titleLength <= 0)
+        {
+            return TRUE;
+        }
+        if (wcscmp(titleBuffer, kKswordMainWindowTitle) != 0)
+        {
+            return TRUE;
+        }
+
+        context->foundWindow = windowHandle;
+        return FALSE;
+    }
+
+    // findExistingKswordMainWindow 作用：
+    // - 输入：无；
+    // - 处理：在 QApplication 创建前枚举系统顶层窗口，寻找已经运行的 Ksword 主窗口；
+    // - 返回：找到则返回 HWND，否则返回 nullptr。
+    HWND findExistingKswordMainWindow()
+    {
+        ExistingKswordWindowSearchContext context;
+        context.currentProcessId = ::GetCurrentProcessId();
+        (void)::EnumWindows(enumExistingKswordWindowProc, reinterpret_cast<LPARAM>(&context));
+        return context.foundWindow;
+    }
+
+    // activateExistingKswordMainWindow 作用：
+    // - 输入 windowHandle：已有 Ksword 主窗口；
+    // - 处理：如果最小化则恢复，再尽量前置并激活；
+    // - 返回：无返回值，失败不阻断当前实例退出。
+    void activateExistingKswordMainWindow(HWND windowHandle)
+    {
+        if (windowHandle == nullptr || ::IsWindow(windowHandle) == FALSE)
+        {
+            return;
+        }
+        if (::IsIconic(windowHandle) != FALSE)
+        {
+            (void)::ShowWindow(windowHandle, SW_RESTORE);
+        }
+        else
+        {
+            (void)::ShowWindow(windowHandle, SW_SHOWNORMAL);
+        }
+        (void)::SetForegroundWindow(windowHandle);
+        (void)::BringWindowToTop(windowHandle);
     }
 
     // buildStartupTraceFilePath 作用：
@@ -885,6 +968,13 @@ int main(int argc, char* argv[])
     startupTraceRaw("startup trace initialized without console binding");
     initializeProcessDpiAwareness();
     startupTraceRaw("initializeProcessDpiAwareness finished");
+
+    if (HWND existingWindowHandle = findExistingKswordMainWindow())
+    {
+        startupTraceRaw("existing Ksword main window found, activating it and exiting current instance");
+        activateExistingKswordMainWindow(existingWindowHandle);
+        return 0;
+    }
 
     {
         kLogEvent startupMainEvent;

@@ -621,6 +621,7 @@ private:
     bool m_objectTypeRefreshPending = false;     // m_objectTypeRefreshPending：对象类型刷新待执行请求标记。
     bool m_handleDetailRefreshInProgress = false; // m_handleDetailRefreshInProgress：句柄详情刷新互斥标记。
     bool m_handleDetailRefreshPending = false;   // m_handleDetailRefreshPending：句柄详情刷新待执行请求标记。
+    bool m_objectNameRetryAfterTypeMapQueued = false; // m_objectNameRetryAfterTypeMapQueued：对象类型映射就绪后是否已安排过一次对象名补刷。
     bool m_initialRefreshDone = false;           // m_initialRefreshDone：首轮刷新是否已完成。
     std::uint64_t m_refreshTicket = 0;           // m_refreshTicket：句柄刷新序号，防止乱序覆盖。
     std::uint64_t m_objectTypeRefreshTicket = 0; // m_objectTypeRefreshTicket：对象类型刷新序号。

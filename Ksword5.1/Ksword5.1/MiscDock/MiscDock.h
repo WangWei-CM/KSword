@@ -5,7 +5,7 @@
 // 作用：
 // 1) 提供“杂项”总入口页；
 // 2) 通过内部 Tab 承载子功能模块；
-// 3) 当前包含“引导”“右键菜单清理”“磁盘编辑”等子模块。
+// 3) 当前包含“引导”“右键菜单清理”“磁盘编辑”“应用控制”等子模块。
 // ============================================================
 
 #include "../Framework.h"
@@ -19,6 +19,7 @@ namespace ks::misc
 {
     class DiskEditorTab;
     class ContextMenuCleanerTab;
+    class ApplicationControlPage;
 }
 
 class MiscDock final : public QWidget
@@ -44,4 +45,5 @@ private:
     BootEditorTab* m_bootEditorTab = nullptr; // m_bootEditorTab：引导编辑器页组件。
     ks::misc::DiskEditorTab* m_diskEditorTab = nullptr; // m_diskEditorTab：磁盘编辑器页组件。
     ks::misc::ContextMenuCleanerTab* m_contextMenuCleanerTab = nullptr; // m_contextMenuCleanerTab：右键菜单清理页组件。
+    ks::misc::ApplicationControlPage* m_applicationControlPage = nullptr; // m_applicationControlPage：应用控制页组件。
 };

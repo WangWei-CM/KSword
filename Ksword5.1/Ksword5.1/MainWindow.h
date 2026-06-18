@@ -282,6 +282,12 @@ private:
 
     void initializeNextDeferredDock();
 
+    // ensureVisibleLazyDocksInitialized 作用：
+    // - 输入 reasonText：触发原因，写入日志便于排查启动黑屏；
+    // - 处理：扫描 ADS 当前/可见惰性 Dock，占位页若已进入显示路径则立即挂载真实内容；
+    // - 返回：无返回值。
+    void ensureVisibleLazyDocksInitialized(const QString& reasonText);
+
     // reportStartupProgress 作用：
     // - 安全调用启动进度回调；
     // - 让 MainWindow 内部各阶段都能主动更新 splash 文案。

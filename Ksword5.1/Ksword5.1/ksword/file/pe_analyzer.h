@@ -29,6 +29,30 @@ namespace ks::file
         double entropy = 0.0;
     };
 
+    // PeImportFunctionSummary 作用：
+    // - 保存单个导入函数的结构化信息；
+    // - UI 可直接使用该结构填充“依赖 DLL”表格，不需要从文本报告反向解析。
+    struct PeImportFunctionSummary
+    {
+        std::string dllName;             // dllName：所属导入 DLL 名称。
+        std::string functionName;        // functionName：按名称导入时的函数名；按序号导入时为空。
+        std::uint16_t hint = 0;          // hint：IMAGE_IMPORT_BY_NAME.Hint；按序号导入时为 0。
+        std::uint16_t ordinal = 0;       // ordinal：按序号导入时的 ordinal；按名称导入时为 0。
+        std::uint32_t thunkRva = 0;      // thunkRva：当前 thunk/IAT 项的 RVA，便于定位。
+        bool importByOrdinal = false;    // importByOrdinal：true=Ordinal 导入；false=名称导入。
+    };
+
+    // PeImportModuleSummary 作用：
+    // - 保存一个 IMAGE_IMPORT_DESCRIPTOR 对应的 DLL 及其函数列表；
+    // - descriptorIndex 用于展示与损坏导入表诊断。
+    struct PeImportModuleSummary
+    {
+        std::string dllName;                         // dllName：导入描述符指向的 DLL 名称。
+        std::uint32_t descriptorIndex = 0;           // descriptorIndex：导入描述符序号。
+        std::vector<PeImportFunctionSummary> imports; // imports：该 DLL 下解析出的导入函数。
+        std::string diagnosticText;                  // diagnosticText：局部解析失败或截断说明。
+    };
+
     // PeAnalysisResult 作用：
     // - 聚合 PE 解析结果文本与结构化节表摘要；
     // - success=false 时 reportText 保存可读失败原因。
@@ -41,6 +65,7 @@ namespace ks::file
         std::uint32_t entryPointRva = 0;
         std::uint64_t imageBase = 0;
         std::vector<PeSectionSummary> sections;
+        std::vector<PeImportModuleSummary> importModules;
         std::wstring reportText;
     };
 

@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstring>
 #include <cwctype>
+#include <iomanip>
 #include <iterator>
 #include <set>
 #include <sstream>
@@ -21,6 +22,7 @@
 #endif
 #include <TlHelp32.h>
 #include <sddl.h>
+#include <winioctl.h>
 
 namespace ks::file
 {
@@ -32,9 +34,19 @@ namespace ks::file
         constexpr ULONG kObjectBasicInformationClass = 0;
         constexpr ULONG kObjectNameInformationClass = 1;
         constexpr ULONG kObjectTypeInformationClass = 2;
+        constexpr ULONG kMaxReparseBufferBytes = 16U * 1024U;
         constexpr NTSTATUS kStatusInfoLengthMismatch = static_cast<NTSTATUS>(0xC0000004);
         constexpr NTSTATUS kStatusBufferOverflow = static_cast<NTSTATUS>(0x80000005);
         constexpr NTSTATUS kStatusBufferTooSmall = static_cast<NTSTATUS>(0xC0000023);
+        constexpr std::uint32_t kReparseTagMicrosoftFlag = 0x80000000U;
+        constexpr std::uint32_t kReparseTagNameSurrogateFlag = 0x20000000U;
+        constexpr std::uint32_t kReparseTagAppExecLink =
+#ifdef IO_REPARSE_TAG_APPEXECLINK
+            IO_REPARSE_TAG_APPEXECLINK;
+#else
+            0x8000001BU;
+#endif
+        constexpr USHORT kSymbolicLinkRelativeFlag = 1U;
 
         // Native mirror for SystemExtendedHandleInformation rows. Only fields used by
         // FileDock and HandleDock are modeled, and every access is bounded by buffer size.
@@ -230,6 +242,195 @@ namespace ks::file
             std::wostringstream stream;
             stream << L"0x" << std::uppercase << std::hex << static_cast<std::uint32_t>(statusValue);
             return stream.str();
+        }
+
+        std::wstring BuildHexPreview(const std::uint8_t* data, const std::size_t dataSize, const std::size_t maxBytes)
+        {
+            if (data == nullptr || dataSize == 0)
+            {
+                return L"<empty>";
+            }
+
+            const std::size_t previewBytes = std::min(dataSize, maxBytes);
+            std::wostringstream stream;
+            stream << std::uppercase << std::hex;
+            for (std::size_t index = 0; index < previewBytes; ++index)
+            {
+                if (index != 0)
+                {
+                    stream << L' ';
+                }
+                stream << std::setw(2) << std::setfill(L'0') << static_cast<unsigned int>(data[index]);
+            }
+            if (previewBytes < dataSize)
+            {
+                stream << L" ...";
+            }
+            return stream.str();
+        }
+
+        std::wstring ExtractWideStringFromBuffer(
+            const std::vector<std::uint8_t>& buffer,
+            const std::size_t byteOffset,
+            const std::size_t byteLength)
+        {
+            if (byteOffset > buffer.size() || byteLength == 0 || (byteOffset + byteLength) > buffer.size())
+            {
+                return {};
+            }
+
+            const std::size_t wcharCount = byteLength / sizeof(wchar_t);
+            if (wcharCount == 0)
+            {
+                return {};
+            }
+
+            std::wstring text;
+            text.resize(wcharCount);
+            std::memcpy(text.data(), buffer.data() + byteOffset, wcharCount * sizeof(wchar_t));
+            return TrimWideCopy(text);
+        }
+
+        std::wstring NormalizeReparseNativePath(std::wstring text)
+        {
+            text = NormalizeNativePath(text);
+            if (StartsWithInsensitive(text, L"\\??\\UNC\\"))
+            {
+                return L"\\\\" + text.substr(8);
+            }
+            if (StartsWithInsensitive(text, L"\\??\\Volume{"))
+            {
+                return L"\\\\?\\" + text.substr(4);
+            }
+            if (StartsWithInsensitive(text, L"\\??\\"))
+            {
+                return text.substr(4);
+            }
+            if (StartsWithInsensitive(text, L"\\Device\\Mup\\"))
+            {
+                return L"\\\\" + text.substr(12);
+            }
+            return text;
+        }
+
+        bool IsMicrosoftReparseTagValue(const std::uint32_t tag)
+        {
+            return (tag & kReparseTagMicrosoftFlag) != 0U;
+        }
+
+        bool IsNameSurrogateReparseTagValue(const std::uint32_t tag)
+        {
+            return (tag & kReparseTagNameSurrogateFlag) != 0U;
+        }
+
+        bool LooksLikeAbsoluteWin32Path(const std::wstring& pathText)
+        {
+            const std::wstring normalizedText = NormalizeNativePath(pathText);
+            return normalizedText.rfind(L"\\\\", 0) == 0
+                || normalizedText.rfind(L"\\", 0) == 0
+                || (normalizedText.size() >= 3 && normalizedText[1] == L':' && normalizedText[2] == L'\\');
+        }
+
+        std::wstring ResolveRelativeTargetPath(
+            const std::wstring& linkPath,
+            const std::wstring& targetPath)
+        {
+            const std::wstring normalizedTarget = NormalizeNativePath(targetPath);
+            if (normalizedTarget.empty() || LooksLikeAbsoluteWin32Path(normalizedTarget))
+            {
+                return normalizedTarget;
+            }
+
+            const std::wstring normalizedLink = NormalizeNativePath(linkPath);
+            const std::size_t slashPos = normalizedLink.find_last_of(L'\\');
+            if (slashPos == std::wstring::npos)
+            {
+                return normalizedTarget;
+            }
+
+            const std::wstring parentPath = normalizedLink.substr(0, slashPos);
+            const std::wstring combinedPath = parentPath + L"\\" + normalizedTarget;
+            const DWORD requiredChars = ::GetFullPathNameW(combinedPath.c_str(), 0, nullptr, nullptr);
+            if (requiredChars == 0)
+            {
+                return NormalizeNativePath(combinedPath);
+            }
+
+            std::vector<wchar_t> buffer(static_cast<std::size_t>(requiredChars) + 1U, L'\0');
+            const DWORD writtenChars = ::GetFullPathNameW(
+                combinedPath.c_str(),
+                static_cast<DWORD>(buffer.size()),
+                buffer.data(),
+                nullptr);
+            return (writtenChars > 0 && writtenChars < buffer.size())
+                ? NormalizeNativePath(std::wstring(buffer.data(), writtenChars))
+                : NormalizeNativePath(combinedPath);
+        }
+
+        std::wstring TagNameFromReparseTag(const std::uint32_t tag)
+        {
+            switch (tag)
+            {
+            case IO_REPARSE_TAG_SYMLINK:
+                return L"IO_REPARSE_TAG_SYMLINK";
+            case IO_REPARSE_TAG_MOUNT_POINT:
+                return L"IO_REPARSE_TAG_MOUNT_POINT";
+            case kReparseTagAppExecLink:
+                return L"IO_REPARSE_TAG_APPEXECLINK";
+            default:
+                return L"IO_REPARSE_TAG_" + std::to_wstring(tag);
+            }
+        }
+
+        std::wstring KindNameFromReparseTag(
+            const std::uint32_t tag,
+            const std::wstring& substituteName,
+            const std::wstring& printName)
+        {
+            if (tag == IO_REPARSE_TAG_SYMLINK)
+            {
+                return L"SYMLINK";
+            }
+            if (tag == IO_REPARSE_TAG_MOUNT_POINT)
+            {
+                const std::wstring normalizedTarget = NormalizeReparseNativePath(
+                    !substituteName.empty() ? substituteName : printName);
+                if (StartsWithInsensitive(normalizedTarget, L"\\\\?\\Volume{")
+                    || StartsWithInsensitive(normalizedTarget, L"\\\\.\\Volume{")
+                    || StartsWithInsensitive(normalizedTarget, L"\\Device\\HarddiskVolume")
+                    || StartsWithInsensitive(normalizedTarget, L"\\Device\\Mup\\"))
+                {
+                    return L"MOUNT_POINT";
+                }
+                return L"JUNCTION";
+            }
+            if (tag == kReparseTagAppExecLink)
+            {
+                return L"APPEXECLINK";
+            }
+            return L"UNKNOWN_REPARSE";
+        }
+
+        void PopulateReparseTargetFields(ks::file::ReparsePointQueryResult& result)
+        {
+            const std::wstring normalizedSubstitute = NormalizeReparseNativePath(result.substituteName);
+            const std::wstring normalizedPrint = NormalizeReparseNativePath(result.printName);
+            if (!normalizedPrint.empty())
+            {
+                result.resolvedTargetPath = normalizedPrint;
+            }
+            else if (!normalizedSubstitute.empty())
+            {
+                result.resolvedTargetPath = normalizedSubstitute;
+            }
+
+            if (result.tag == IO_REPARSE_TAG_SYMLINK)
+            {
+                if (result.substituteName.empty() && !result.printName.empty())
+                {
+                    result.substituteName = result.printName;
+                }
+            }
         }
 
         std::wstring BuildPathRuleText(const std::wstring& sourceText, const bool directoryRule)
@@ -770,6 +971,170 @@ namespace ks::file
             return true;
         }
         return false;
+    }
+
+    ReparsePointQueryResult QueryReparsePointInfo(
+        const std::wstring& absolutePath,
+        const bool directoryHint)
+    {
+        ReparsePointQueryResult result{};
+        const std::wstring normalizedPath = MakeAbsolutePath(absolutePath);
+        if (TrimWideCopy(normalizedPath).empty())
+        {
+            result.errorText = L"路径为空。";
+            result.win32Error = ERROR_INVALID_PARAMETER;
+            return result;
+        }
+
+        DWORD openFlags = FILE_FLAG_OPEN_REPARSE_POINT;
+        if (directoryHint)
+        {
+            openFlags |= FILE_FLAG_BACKUP_SEMANTICS;
+        }
+
+        HANDLE fileHandle = ::CreateFileW(
+            normalizedPath.c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            openFlags,
+            nullptr);
+        if (fileHandle == INVALID_HANDLE_VALUE || fileHandle == nullptr)
+        {
+            result.errorText = L"CreateFileW 失败。";
+            result.win32Error = ::GetLastError();
+            return result;
+        }
+
+        result.pathOpened = true;
+        std::vector<std::uint8_t> buffer(kMaxReparseBufferBytes, 0);
+        DWORD returnedBytes = 0;
+        const BOOL ioOk = ::DeviceIoControl(
+            fileHandle,
+            FSCTL_GET_REPARSE_POINT,
+            nullptr,
+            0,
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()),
+            &returnedBytes,
+            nullptr);
+        if (ioOk == FALSE)
+        {
+            result.win32Error = ::GetLastError();
+            result.errorText = L"FSCTL_GET_REPARSE_POINT 失败。";
+            if (result.win32Error == ERROR_NOT_A_REPARSE_POINT)
+            {
+                result.isReparsePoint = false;
+            }
+            ::CloseHandle(fileHandle);
+            return result;
+        }
+
+        result.querySucceeded = true;
+        result.isReparsePoint = true;
+        if (returnedBytes < 8U)
+        {
+            result.errorText = L"重解析缓冲区尺寸异常。";
+            ::CloseHandle(fileHandle);
+            return result;
+        }
+
+        std::uint32_t tagValue = 0;
+        std::memcpy(&tagValue, buffer.data(), sizeof(tagValue));
+        result.tag = tagValue;
+        result.isMicrosoftTag = IsMicrosoftReparseTagValue(tagValue);
+        result.isNameSurrogate = IsNameSurrogateReparseTagValue(tagValue);
+        result.tagName = TagNameFromReparseTag(tagValue);
+        result.rawHexPreview = BuildHexPreview(buffer.data(), returnedBytes, 64U);
+
+        if (tagValue == IO_REPARSE_TAG_SYMLINK)
+        {
+            if (returnedBytes < 20U)
+            {
+                result.errorText = L"符号链接重解析缓冲区尺寸异常。";
+            }
+            else
+            {
+                const auto readU16 = [&buffer](const std::size_t offset) -> USHORT
+                {
+                    USHORT value = 0;
+                    std::memcpy(&value, buffer.data() + offset, sizeof(value));
+                    return value;
+                };
+                const auto readU32 = [&buffer](const std::size_t offset) -> std::uint32_t
+                {
+                    std::uint32_t value = 0;
+                    std::memcpy(&value, buffer.data() + offset, sizeof(value));
+                    return value;
+                };
+
+                const USHORT substituteOffset = readU16(8U);
+                const USHORT substituteLength = readU16(10U);
+                const USHORT printOffset = readU16(12U);
+                const USHORT printLength = readU16(14U);
+                const std::uint32_t flags = readU32(16U);
+                result.isRelative = (flags & kSymbolicLinkRelativeFlag) != 0U;
+                result.substituteName = ExtractWideStringFromBuffer(buffer, 20U + substituteOffset, substituteLength);
+                result.printName = ExtractWideStringFromBuffer(buffer, 20U + printOffset, printLength);
+                result.kindName = KindNameFromReparseTag(tagValue, result.substituteName, result.printName);
+                PopulateReparseTargetFields(result);
+            }
+        }
+        else if (tagValue == IO_REPARSE_TAG_MOUNT_POINT)
+        {
+            if (returnedBytes < 16U)
+            {
+                result.errorText = L"挂载点重解析缓冲区尺寸异常。";
+            }
+            else
+            {
+                const auto readU16 = [&buffer](const std::size_t offset) -> USHORT
+                {
+                    USHORT value = 0;
+                    std::memcpy(&value, buffer.data() + offset, sizeof(value));
+                    return value;
+                };
+
+                const USHORT substituteOffset = readU16(8U);
+                const USHORT substituteLength = readU16(10U);
+                const USHORT printOffset = readU16(12U);
+                const USHORT printLength = readU16(14U);
+                result.substituteName = ExtractWideStringFromBuffer(buffer, 16U + substituteOffset, substituteLength);
+                result.printName = ExtractWideStringFromBuffer(buffer, 16U + printOffset, printLength);
+                result.kindName = KindNameFromReparseTag(tagValue, result.substituteName, result.printName);
+                PopulateReparseTargetFields(result);
+            }
+        }
+        else if (tagValue == kReparseTagAppExecLink)
+        {
+            const std::size_t payloadSize = returnedBytes > 8U ? returnedBytes - 8U : 0U;
+            result.kindName = KindNameFromReparseTag(tagValue, {}, {});
+            result.rawPayloadText = L"APPEXECLINK 原始数据（未结构化解析），长度=" + std::to_wstring(payloadSize);
+            PopulateReparseTargetFields(result);
+        }
+        else
+        {
+            result.kindName = KindNameFromReparseTag(tagValue, {}, {});
+            result.rawPayloadText = L"未知重解析点，原始数据长度=" + std::to_wstring(returnedBytes > 8U ? returnedBytes - 8U : 0U);
+            PopulateReparseTargetFields(result);
+        }
+
+        if (result.kindName.empty())
+        {
+            result.kindName = L"UNKNOWN_REPARSE";
+        }
+        if (result.isRelative && !TrimWideCopy(result.resolvedTargetPath).empty())
+        {
+            result.resolvedTargetPath = ResolveRelativeTargetPath(normalizedPath, result.resolvedTargetPath);
+        }
+        if (result.rawPayloadText.empty())
+        {
+            result.rawPayloadText = L"RawHex=" + result.rawHexPreview;
+        }
+
+        ::CloseHandle(fileHandle);
+        return result;
     }
     bool QueryObjectBasicInfo(const NtApiSet& apiSet, HANDLE objectHandle, ObjectBasicInfo& basicInfoOut)
     {

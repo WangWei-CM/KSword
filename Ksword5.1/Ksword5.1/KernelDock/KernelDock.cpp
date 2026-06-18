@@ -10,6 +10,13 @@
 // ============================================================
 
 #include "../UI/CodeEditorWidget.h"
+#include "KernelBaseNamedObjectsTab.h"
+#include "KernelCommunicationEndpointTab.h"
+#include "KernelDeviceDriverObjectsTab.h"
+#include "KernelNamedPipeTab.h"
+#include "KernelObjectDirectoryDeepTab.h"
+#include "KernelObjectTypeMatrixTab.h"
+#include "KernelSymbolicLinkTab.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -26,6 +33,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSplitter>
+#include <QShowEvent>
 #include <QSvgRenderer>
 #include <QTableWidget>
 #include <QTabWidget>
@@ -154,6 +162,7 @@ namespace
     {
         return tintedSvgIcon(iconPath, QColor(255, 255, 255));
     }
+
 }
 
 KernelDock::KernelDock(QWidget* parent)
@@ -165,7 +174,12 @@ KernelDock::KernelDock(QWidget* parent)
     initializeUi();
     initializeConnections();
 
-    // 首次延迟加载当前页，避免切到内核 Dock 时同步初始化全部页签造成卡顿。
+    // 首屏页必须同步初始化：
+    // - KernelDock 常被 ADS 恢复为当前 Dock，此时 show/currentChanged 时序可能不会再触发内部页初始化；
+    // - 只初始化当前页，不会全量构建其它重页面，能彻底避免“内核 Dock 黑屏/无 UI”。
+    ensureTabInitialized(m_tabWidget != nullptr ? m_tabWidget->currentIndex() : -1);
+
+    // 再保留一次 0ms 兜底，覆盖主题/ADS 延迟恢复导致 currentIndex 稍后改变的情况。
     QTimer::singleShot(0, this, [this]() {
         ensureTabInitialized(m_tabWidget != nullptr ? m_tabWidget->currentIndex() : -1);
     });
@@ -173,8 +187,36 @@ KernelDock::KernelDock(QWidget* parent)
     info << initEvent << "[KernelDock] 构造完成。" << eol;
 }
 
+void KernelDock::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    if (m_tabWidget == nullptr)
+    {
+        return;
+    }
+
+    // ADS 恢复布局后，KernelDock 的内部 QTabWidget 可能已经显示但首页尚未初始化。
+    // showEvent 里做幂等兜底，保证当前内部页至少有真实 UI 内容。
+    ensureTabInitialized(m_tabWidget->currentIndex());
+    QTimer::singleShot(0, this, [this]() {
+        if (m_tabWidget != nullptr)
+        {
+            ensureTabInitialized(m_tabWidget->currentIndex());
+        }
+    });
+}
+
 void KernelDock::initializeUi()
 {
+    setAutoFillBackground(true);
+    setAttribute(Qt::WA_StyledBackground, true);
+    setStyleSheet(QStringLiteral(
+        "KernelDock{background:%1;color:%2;}"
+        "QTabWidget::pane{background:%1;border:1px solid %3;}")
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::TextPrimaryHex())
+        .arg(KswordTheme::BorderHex()));
+
     m_rootLayout = new QVBoxLayout(this);
     m_rootLayout->setContentsMargins(6, 6, 6, 6);
     m_rootLayout->setSpacing(4);
@@ -392,31 +434,73 @@ void KernelDock::initializeObjectNamespaceTab()
     m_objectNamespaceLayout->setContentsMargins(4, 4, 4, 4);
     m_objectNamespaceLayout->setSpacing(6);
 
+    m_objectNamespaceInnerTabWidget = new QTabWidget(m_objectNamespacePage);
+    m_objectNamespaceInnerTabWidget->setIconSize(QSize(16, 16));
+    m_objectNamespaceLayout->addWidget(m_objectNamespaceInnerTabWidget, 1);
+
+    m_objectNamespaceOverviewPage = new QWidget(m_objectNamespaceInnerTabWidget);
+    m_objectNamespaceOverviewLayout = new QVBoxLayout(m_objectNamespaceOverviewPage);
+    m_objectNamespaceOverviewLayout->setContentsMargins(4, 4, 4, 4);
+    m_objectNamespaceOverviewLayout->setSpacing(6);
+
+    m_objectNamespaceInnerTabWidget->addTab(
+        m_objectNamespaceOverviewPage,
+        tabIcon(QStringLiteral(":/Icon/process_tree.svg")),
+        QStringLiteral("总览"));
+    m_objectNamespaceInnerTabWidget->addTab(
+        new KernelObjectDirectoryDeepTab(m_objectNamespaceInnerTabWidget),
+        tabIcon(QStringLiteral(":/Icon/process_tree.svg")),
+        QStringLiteral("目录递归"));
+    m_objectNamespaceInnerTabWidget->addTab(
+        new KernelNamedPipeTab(m_objectNamespaceInnerTabWidget),
+        tabIcon(QStringLiteral(":/Icon/process_details.svg")),
+        QStringLiteral("命名管道"));
+    m_objectNamespaceInnerTabWidget->addTab(
+        new KernelBaseNamedObjectsTab(m_objectNamespaceInnerTabWidget),
+        tabIcon(QStringLiteral(":/Icon/process_threads.svg")),
+        QStringLiteral("BaseNamedObjects"));
+    m_objectNamespaceInnerTabWidget->addTab(
+        new KernelSymbolicLinkTab(m_objectNamespaceInnerTabWidget),
+        tabIcon(QStringLiteral(":/Icon/process_refresh.svg")),
+        QStringLiteral("符号链接"));
+    m_objectNamespaceInnerTabWidget->addTab(
+        new KernelDeviceDriverObjectsTab(m_objectNamespaceInnerTabWidget),
+        tabIcon(QStringLiteral(":/Icon/process_details.svg")),
+        QStringLiteral("设备与驱动"));
+    m_objectNamespaceInnerTabWidget->addTab(
+        new KernelObjectTypeMatrixTab(m_objectNamespaceInnerTabWidget),
+        tabIcon(QStringLiteral(":/Icon/process_list.svg")),
+        QStringLiteral("对象类型"));
+    m_objectNamespaceInnerTabWidget->addTab(
+        new KernelCommunicationEndpointTab(m_objectNamespaceInnerTabWidget),
+        tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
+        QStringLiteral("通信端点"));
+
     m_objectNamespaceToolLayout = new QHBoxLayout();
     m_objectNamespaceToolLayout->setContentsMargins(0, 0, 0, 0);
     m_objectNamespaceToolLayout->setSpacing(6);
 
-    m_refreshObjectNamespaceButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_objectNamespacePage);
+    m_refreshObjectNamespaceButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_objectNamespaceOverviewPage);
     m_refreshObjectNamespaceButton->setToolTip(QStringLiteral("刷新对象命名空间枚举结果"));
     m_refreshObjectNamespaceButton->setStyleSheet(blueButtonStyle());
     m_refreshObjectNamespaceButton->setFixedWidth(34);
 
-    m_objectNamespaceFilterEdit = new QLineEdit(m_objectNamespacePage);
+    m_objectNamespaceFilterEdit = new QLineEdit(m_objectNamespaceOverviewPage);
     m_objectNamespaceFilterEdit->setPlaceholderText(QStringLiteral("按根目录/目录路径/对象名/对象类型/状态筛选"));
     m_objectNamespaceFilterEdit->setToolTip(QStringLiteral("输入关键字后实时过滤对象命名空间树"));
     m_objectNamespaceFilterEdit->setClearButtonEnabled(true);
     m_objectNamespaceFilterEdit->setStyleSheet(blueInputStyle());
 
-    m_objectNamespaceStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_objectNamespacePage);
+    m_objectNamespaceStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_objectNamespaceOverviewPage);
     m_objectNamespaceStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
     m_objectNamespaceToolLayout->addWidget(m_refreshObjectNamespaceButton, 0);
     m_objectNamespaceToolLayout->addWidget(m_objectNamespaceFilterEdit, 1);
     m_objectNamespaceToolLayout->addWidget(m_objectNamespaceStatusLabel, 0);
-    m_objectNamespaceLayout->addLayout(m_objectNamespaceToolLayout);
+    m_objectNamespaceOverviewLayout->addLayout(m_objectNamespaceToolLayout);
 
-    QSplitter* verticalSplitter = new QSplitter(Qt::Vertical, m_objectNamespacePage);
-    m_objectNamespaceLayout->addWidget(verticalSplitter, 1);
+    QSplitter* verticalSplitter = new QSplitter(Qt::Vertical, m_objectNamespaceOverviewPage);
+    m_objectNamespaceOverviewLayout->addWidget(verticalSplitter, 1);
 
     QSplitter* horizontalSplitter = new QSplitter(Qt::Horizontal, verticalSplitter);
 

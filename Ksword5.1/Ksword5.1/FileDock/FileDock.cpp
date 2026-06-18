@@ -13,9 +13,11 @@
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/HexEditorWidget.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../ksword/file/file.h"
 
 #include <QApplication>
 #include <QAbstractItemView>
+#include <QAction>
 #include <QClipboard>
 #include <QCheckBox>
 #include <QColor>
@@ -43,6 +45,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QModelIndex>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QProgressBar>
@@ -255,6 +258,188 @@ namespace
         }
         return (fileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U;
     }
+
+    QString formatWin32ErrorText(const std::uint32_t errorCode)
+    {
+        if (errorCode == ERROR_SUCCESS)
+        {
+            return QStringLiteral("0");
+        }
+
+        wchar_t* messageBuffer = nullptr;
+        const DWORD chars = ::FormatMessageW(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr,
+            errorCode,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            reinterpret_cast<LPWSTR>(&messageBuffer),
+            0,
+            nullptr);
+        QString messageText;
+        if (chars > 0 && messageBuffer != nullptr)
+        {
+            messageText = QString::fromWCharArray(messageBuffer, static_cast<int>(chars)).trimmed();
+        }
+        if (messageBuffer != nullptr)
+        {
+            ::LocalFree(messageBuffer);
+        }
+        return messageText.isEmpty()
+            ? QString::number(errorCode)
+            : QStringLiteral("%1 (%2)").arg(errorCode).arg(messageText);
+    }
+
+    QString formatReparseTagText(const std::uint32_t tagValue)
+    {
+        return QStringLiteral("0x%1")
+            .arg(tagValue, 8, 16, QChar('0'))
+            .toUpper();
+    }
+
+    ks::file::ReparsePointQueryResult queryReparsePointForUi(const QString& path)
+    {
+        const QString nativePathText = QDir::toNativeSeparators(path).trimmed();
+        if (nativePathText.isEmpty())
+        {
+            ks::file::ReparsePointQueryResult result{};
+            result.errorText = L"路径为空。";
+            result.win32Error = ERROR_INVALID_PARAMETER;
+            return result;
+        }
+
+        const DWORD attributes = ::GetFileAttributesW(nativePathText.toStdWString().c_str());
+        const bool directoryHint = attributes != INVALID_FILE_ATTRIBUTES
+            && ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U);
+        return ks::file::QueryReparsePointInfo(nativePathText.toStdWString(), directoryHint);
+    }
+
+    QString reparseKindMarkerForPath(const QString& path)
+    {
+        const QString nativePathText = QDir::toNativeSeparators(path).trimmed();
+        if (nativePathText.isEmpty())
+        {
+            return QString();
+        }
+
+        const DWORD attributes = ::GetFileAttributesW(nativePathText.toStdWString().c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U)
+        {
+            return QString();
+        }
+
+        const ks::file::ReparsePointQueryResult result = queryReparsePointForUi(nativePathText);
+        const QString kindText = QString::fromStdWString(result.kindName).trimmed();
+        return kindText.isEmpty() ? QStringLiteral("UNKNOWN_REPARSE") : kindText;
+    }
+
+    QString reparseTargetFromResult(const ks::file::ReparsePointQueryResult& result)
+    {
+        QString targetText = QString::fromStdWString(result.resolvedTargetPath).trimmed();
+        if (targetText.isEmpty())
+        {
+            targetText = QString::fromStdWString(result.printName).trimmed();
+        }
+        if (targetText.isEmpty())
+        {
+            targetText = QString::fromStdWString(result.substituteName).trimmed();
+        }
+        return QDir::toNativeSeparators(targetText);
+    }
+
+    QString formatReparsePointText(const QString& path)
+    {
+        const ks::file::ReparsePointQueryResult result = queryReparsePointForUi(path);
+        QString content;
+        content += QStringLiteral("目标路径: %1\n").arg(QDir::toNativeSeparators(path));
+
+        if (!result.pathOpened)
+        {
+            content += QStringLiteral("状态: 无法打开目标（使用 FILE_FLAG_OPEN_REPARSE_POINT）\n");
+            content += QStringLiteral("Win32错误: %1\n").arg(formatWin32ErrorText(result.win32Error));
+            content += QStringLiteral("原因: %1\n").arg(QString::fromStdWString(result.errorText));
+            return content;
+        }
+
+        if (!result.querySucceeded)
+        {
+            content += QStringLiteral("状态: FSCTL_GET_REPARSE_POINT 查询失败\n");
+            content += QStringLiteral("是否重解析点: %1\n").arg(result.isReparsePoint ? QStringLiteral("是") : QStringLiteral("否"));
+            content += QStringLiteral("Win32错误: %1\n").arg(formatWin32ErrorText(result.win32Error));
+            content += QStringLiteral("原因: %1\n").arg(QString::fromStdWString(result.errorText));
+            return content;
+        }
+
+        content += QStringLiteral("状态: OK\n");
+        content += QStringLiteral("Reparse Tag: %1\n").arg(formatReparseTagText(result.tag));
+        content += QStringLiteral("Tag名称: %1\n").arg(QString::fromStdWString(result.tagName));
+        content += QStringLiteral("类型标记: %1\n").arg(QString::fromStdWString(result.kindName));
+        content += QStringLiteral("Microsoft Tag: %1\n").arg(result.isMicrosoftTag ? QStringLiteral("是") : QStringLiteral("否"));
+        content += QStringLiteral("Name Surrogate: %1\n").arg(result.isNameSurrogate ? QStringLiteral("是") : QStringLiteral("否"));
+        content += QStringLiteral("是否相对链接: %1\n").arg(result.isRelative ? QStringLiteral("是") : QStringLiteral("否"));
+        content += QStringLiteral("Substitute Name: %1\n").arg(QString::fromStdWString(result.substituteName));
+        content += QStringLiteral("Print Name: %1\n").arg(QString::fromStdWString(result.printName));
+        content += QStringLiteral("解析目标路径: %1\n").arg(reparseTargetFromResult(result));
+        content += QStringLiteral("原始信息: %1\n").arg(QString::fromStdWString(result.rawPayloadText));
+        content += QStringLiteral("Raw Hex Preview: %1\n").arg(QString::fromStdWString(result.rawHexPreview));
+        if (!result.errorText.empty())
+        {
+            content += QStringLiteral("解析提示: %1\n").arg(QString::fromStdWString(result.errorText));
+        }
+        return content;
+    }
+
+    class ReparseAwareFileSystemModel final : public QFileSystemModel
+    {
+    public:
+        explicit ReparseAwareFileSystemModel(QObject* parent = nullptr)
+            : QFileSystemModel(parent)
+        {
+        }
+
+        QVariant data(const QModelIndex& index, const int role = Qt::DisplayRole) const override
+        {
+            const QVariant baseValue = QFileSystemModel::data(index, role);
+            if (!index.isValid())
+            {
+                return baseValue;
+            }
+
+            if (role != Qt::DisplayRole && role != Qt::ToolTipRole)
+            {
+                return baseValue;
+            }
+
+            const QString markerText = reparseKindMarkerForPath(filePath(index));
+            if (markerText.isEmpty())
+            {
+                return baseValue;
+            }
+
+            if (role == Qt::ToolTipRole)
+            {
+                QString toolTipText = baseValue.toString();
+                if (!toolTipText.isEmpty())
+                {
+                    toolTipText += QLatin1Char('\n');
+                }
+                toolTipText += QStringLiteral("重解析点: %1").arg(markerText);
+                return toolTipText;
+            }
+
+            if (index.column() == 0)
+            {
+                return QStringLiteral("%1 [%2]").arg(baseValue.toString(), markerText);
+            }
+            if (index.column() == 2)
+            {
+                const QString typeText = baseValue.toString().trimmed();
+                return typeText.isEmpty()
+                    ? markerText
+                    : QStringLiteral("%1 / %2").arg(markerText, typeText);
+            }
+            return baseValue;
+        }
+    };
 
     // buildDriverNtPath：
     // - 作用：把 Win32 路径转成驱动可直接使用的 NT 路径；
@@ -1428,13 +1613,20 @@ namespace
             rootLayout->addWidget(tabWidget, 1);
 
             tabWidget->addTab(buildGeneralTab(), QStringLiteral("常规信息"));
-            tabWidget->addTab(buildSecurityTab(), QStringLiteral("安全与权限"));
+            tabWidget->addTab(buildDeferredTab(QStringLiteral("reparse")), QStringLiteral("重解析点 / 符号链接"));
+            tabWidget->addTab(buildDeferredTab(QStringLiteral("security")), QStringLiteral("安全与权限"));
             tabWidget->addTab(buildHashTab(), QStringLiteral("哈希与完整性"));
-            tabWidget->addTab(buildUsageTab(), QStringLiteral("文件占用"));
-            tabWidget->addTab(buildSignatureTab(), QStringLiteral("数字签名"));
-            tabWidget->addTab(buildPeTab(), QStringLiteral("PE信息"));
-            tabWidget->addTab(buildStringsTab(), QStringLiteral("字符串"));
-            tabWidget->addTab(buildHexTab(), QStringLiteral("十六进制"));
+            tabWidget->addTab(buildDeferredTab(QStringLiteral("usage")), QStringLiteral("文件占用"));
+            tabWidget->addTab(buildDeferredTab(QStringLiteral("signature")), QStringLiteral("数字签名"));
+            tabWidget->addTab(buildDeferredTab(QStringLiteral("pe")), QStringLiteral("PE信息"));
+            tabWidget->addTab(buildDeferredTab(QStringLiteral("dependencies")), QStringLiteral("依赖 DLL"));
+            tabWidget->addTab(buildDeferredTab(QStringLiteral("strings")), QStringLiteral("字符串"));
+            tabWidget->addTab(buildDeferredTab(QStringLiteral("hex")), QStringLiteral("十六进制"));
+
+            connect(tabWidget, &QTabWidget::currentChanged, this, [this, tabWidget](const int tabIndex)
+                {
+                    activateDeferredTab(tabWidget, tabIndex);
+                });
         }
 
     private:
@@ -1546,7 +1738,7 @@ namespace
             }
         }
 
-        ksword::ark::FileInfoQueryResult queryR0FileInfo(const QFileInfo& info, const QString& ntPathText) const
+        static ksword::ark::FileInfoQueryResult queryR0FileInfo(const QFileInfo& info, const QString& ntPathText)
         {
             // 用途：通过 ArkDriverClient 调用 R0 文件基础信息查询。
             // 返回：驱动不可用时 ok=false，常规页自动回退 R3 展示。
@@ -1882,66 +2074,73 @@ namespace
             QThreadPool::globalInstance()->start(task);
         }
 
-        QWidget* buildGeneralTab()
+        void startR0FileInfoLoad(CodeEditorWidget* textEditorWidget, const QFileInfo& info, const QString& ntPathText, const QString& baseContent)
         {
-            QWidget* page = new QWidget(this);
-            QVBoxLayout* layout = new QVBoxLayout(page);
-            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
-            textEditorWidget->setReadOnly(true);
-
-            const QFileInfo info(m_filePath);
-            const QString ntPathText = buildDriverNtPath(info.absoluteFilePath());
-            const ksword::ark::FileInfoQueryResult r0Info = queryR0FileInfo(info, ntPathText);
-            QString content;
-            content += QStringLiteral("[路径]\n");
-            content += QStringLiteral("Win32路径: %1\n").arg(QDir::toNativeSeparators(info.absoluteFilePath()));
-            content += QStringLiteral("NT路径: %1\n").arg(ntPathText.isEmpty() ? QStringLiteral("<转换失败>") : ntPathText);
-            if (!r0Info.objectName.empty())
+            // 用途：后台读取 R0 文件基础信息，避免常规页构建时阻塞属性窗口打开。
+            // 输入：textEditorWidget 为 UI 回填目标，info/ntPathText/baseContent 为首屏已生成的 R3 信息。
+            // 处理：工作线程调用 ArkDriverClient；UI 线程只追加最终文本。
+            // 返回：无；对话框关闭或控件释放后自动丢弃结果。
+            if (textEditorWidget == nullptr)
             {
-                content += QStringLiteral("R0对象名: %1\n").arg(QString::fromStdWString(r0Info.objectName));
+                return;
             }
-            content += QStringLiteral("查询来源: %1\n\n").arg(r0Info.io.ok ? QStringLiteral("R0 KswordARK + R3 QFileInfo") : QStringLiteral("R3 QFileInfo (R0不可用)"));
 
-            content += QStringLiteral("[R3 QFileInfo]\n");
-            content += QStringLiteral("完整路径: %1\n").arg(info.absoluteFilePath());
-            content += QStringLiteral("文件名: %1\n").arg(info.fileName());
-            content += QStringLiteral("类型: %1\n").arg(info.suffix());
-            content += QStringLiteral("大小: %1 字节\n").arg(info.size());
-            content += QStringLiteral("创建时间: %1\n").arg(info.birthTime().toString("yyyy-MM-dd HH:mm:ss"));
-            content += QStringLiteral("修改时间: %1\n").arg(info.lastModified().toString("yyyy-MM-dd HH:mm:ss"));
-            content += QStringLiteral("访问时间: %1\n").arg(info.lastRead().toString("yyyy-MM-dd HH:mm:ss"));
-            content += QStringLiteral("是否可执行: %1\n").arg(info.isExecutable() ? QStringLiteral("是") : QStringLiteral("否"));
-            content += QStringLiteral("是否隐藏: %1\n").arg(info.isHidden() ? QStringLiteral("是") : QStringLiteral("否"));
-            content += QStringLiteral("是否可写: %1\n").arg(info.isWritable() ? QStringLiteral("是") : QStringLiteral("否"));
+            QPointer<FileDetailDialog> guardThis(this);
+            QPointer<CodeEditorWidget> editorGuard(textEditorWidget);
+            auto* task = QRunnable::create([guardThis, editorGuard, info, ntPathText, baseContent]()
+                {
+                    FileDetailDialog* targetDialog = guardThis.data();
+                    if (targetDialog == nullptr)
+                    {
+                        return;
+                    }
 
-            content += QStringLiteral("\n[R0 文件基础信息]\n");
-            content += formatR0FileInfoText(r0Info);
-            textEditorWidget->setText(content);
+                    const ksword::ark::FileInfoQueryResult r0Info =
+                        FileDetailDialog::queryR0FileInfo(info, ntPathText);
+                    targetDialog = guardThis.data();
+                    if (targetDialog == nullptr)
+                    {
+                        return;
+                    }
 
-            layout->addWidget(textEditorWidget, 1);
-            return page;
+                    QMetaObject::invokeMethod(
+                        targetDialog,
+                        [guardThis, editorGuard, baseContent, r0Info]()
+                        {
+                            if (guardThis == nullptr || editorGuard == nullptr)
+                            {
+                                return;
+                            }
+
+                            QString content = baseContent;
+                            content.replace(
+                                QStringLiteral("查询来源: R3 QFileInfo（R0 信息后台加载）"),
+                                QStringLiteral("查询来源: %1").arg(r0Info.io.ok
+                                    ? QStringLiteral("R0 KswordARK + R3 QFileInfo")
+                                    : QStringLiteral("R3 QFileInfo (R0不可用)")));
+                            content += QStringLiteral("\n[R0 文件基础信息]\n");
+                            if (!r0Info.objectName.empty())
+                            {
+                                content += QStringLiteral("R0对象名: %1\n").arg(QString::fromStdWString(r0Info.objectName));
+                            }
+                            content += guardThis->formatR0FileInfoText(r0Info);
+                            editorGuard->setText(content);
+                        },
+                        Qt::QueuedConnection);
+                });
+            task->setAutoDelete(true);
+            QThreadPool::globalInstance()->start(task);
         }
 
-        QWidget* buildSecurityTab()
+        static QString buildSecurityDeepText(const QString& nativePath)
         {
-            QWidget* page = new QWidget(this);
-            QVBoxLayout* layout = new QVBoxLayout(page);
-            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
-            textEditorWidget->setReadOnly(true);
-
+            // 用途：读取 Owner/Group/DACL/SACL 并生成权限明细文本。
+            // 输入：nativePath 为 Windows 本机路径；调用者确保在后台线程执行。
+            // 处理：GetNamedSecurityInfoW 返回的安全描述符在本函数内 LocalFree。
+            // 返回：可追加到安全页的深层 ACL/SID 文本；失败时包含错误码。
             QString content;
-            const QString nativePath = QDir::toNativeSeparators(m_filePath);
             std::wstring nativePathBuffer = nativePath.toStdWString();
-            content += QStringLiteral("目标路径: %1\n").arg(nativePath);
 
-            // 先给出 Qt 维度的快速权限摘要，便于与 ACL 细节对照。
-            QFileInfo info(m_filePath);
-            content += QStringLiteral("快速权限摘要:\n");
-            content += QStringLiteral("Read: %1\n").arg(info.isReadable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
-            content += QStringLiteral("Write: %1\n").arg(info.isWritable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
-            content += QStringLiteral("Execute: %1\n").arg(info.isExecutable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
-
-            // 使用 GetNamedSecurityInfoW 拉取 Owner / Group / DACL，做深层 ACL/SID 解析。
             PSID ownerSid = nullptr;
             PSID groupSid = nullptr;
             PACL dacl = nullptr;
@@ -1976,7 +2175,6 @@ namespace
                 ::LocalFree(securityDescriptor);
             }
 
-            // 尝试读取 SACL（审计 ACL），多数场景需要 SeSecurityPrivilege，失败也应输出原因。
             PSID saclOwnerSid = nullptr;
             PSID saclGroupSid = nullptr;
             PACL sacl = nullptr;
@@ -2002,9 +2200,657 @@ namespace
             }
 
             content += QStringLiteral("\n说明：Mask 显示为十六进制，权限列为常见位标志拆解。");
+            return content;
+        }
+
+        void startSecurityDeepLoad(CodeEditorWidget* textEditorWidget, const QString& baseContent, const QString& nativePath)
+        {
+            // 用途：后台执行深层 ACL/SACL 解析。
+            // 输入：baseContent 为快速权限摘要，nativePath 为目标路径。
+            // 处理：工作线程调用 Windows 安全 API，结束后一次性回填编辑器。
+            // 返回：无；控件失效时丢弃结果。
+            if (textEditorWidget == nullptr)
+            {
+                return;
+            }
+
+            QPointer<FileDetailDialog> guardThis(this);
+            QPointer<CodeEditorWidget> editorGuard(textEditorWidget);
+            auto* task = QRunnable::create([guardThis, editorGuard, baseContent, nativePath]()
+                {
+                    FileDetailDialog* targetDialog = guardThis.data();
+                    if (targetDialog == nullptr)
+                    {
+                        return;
+                    }
+                    const QString deepText = FileDetailDialog::buildSecurityDeepText(nativePath);
+                    targetDialog = guardThis.data();
+                    if (targetDialog == nullptr)
+                    {
+                        return;
+                    }
+
+                    QMetaObject::invokeMethod(
+                        targetDialog,
+                        [editorGuard, baseContent, deepText]()
+                        {
+                            if (editorGuard != nullptr)
+                            {
+                                editorGuard->setText(baseContent + deepText);
+                            }
+                        },
+                        Qt::QueuedConnection);
+                });
+            task->setAutoDelete(true);
+            QThreadPool::globalInstance()->start(task);
+        }
+
+        void startSignatureLoad(CodeEditorWidget* textEditorWidget)
+        {
+            // 用途：后台调用 PowerShell Get-AuthenticodeSignature。
+            // 输入：textEditorWidget 为签名页显示目标。
+            // 处理：外部进程最多等待 15 秒，超时会终止并回填错误文本。
+            // 返回：无。
+            if (textEditorWidget == nullptr)
+            {
+                return;
+            }
+
+            textEditorWidget->setText(QStringLiteral("正在后台读取 Authenticode 签名信息...\n目标: %1")
+                .arg(QDir::toNativeSeparators(m_filePath)));
+
+            const QString filePathSnapshot = m_filePath;
+            QPointer<FileDetailDialog> guardThis(this);
+            QPointer<CodeEditorWidget> editorGuard(textEditorWidget);
+            auto* task = QRunnable::create([guardThis, editorGuard, filePathSnapshot]()
+                {
+                    QProcess process;
+                    process.setProgram(QStringLiteral("powershell.exe"));
+                    QString escapedPath = filePathSnapshot;
+                    escapedPath.replace(QStringLiteral("'"), QStringLiteral("''"));
+                    const QString scriptText = QStringLiteral(
+                        "$sig=Get-AuthenticodeSignature -LiteralPath '%1';"
+                        "$cert=$sig.SignerCertificate;"
+                        "$subj=if($cert){$cert.Subject}else{'<无证书>'};"
+                        "$issuer=if($cert){$cert.Issuer}else{'<无证书>'};"
+                        "$thumb=if($cert){$cert.Thumbprint}else{'<无证书>'};"
+                        "$from=if($cert){$cert.NotBefore}else{'<无证书>'};"
+                        "$to=if($cert){$cert.NotAfter}else{'<无证书>'};"
+                        "$statusMsg=if($sig.StatusMessage){$sig.StatusMessage}else{'<无附加消息>'};"
+                        "Write-Output ('状态: ' + $sig.Status);"
+                        "Write-Output ('状态说明: ' + $statusMsg);"
+                        "Write-Output ('签名者主题: ' + $subj);"
+                        "Write-Output ('签名者颁发者: ' + $issuer);"
+                        "Write-Output ('证书指纹: ' + $thumb);"
+                        "Write-Output ('证书生效: ' + $from);"
+                        "Write-Output ('证书失效: ' + $to);"
+                        "Write-Output ('是否含时间戳: ' + ([bool]$sig.TimeStamperCertificate));")
+                        .arg(escapedPath);
+                    process.setArguments(QStringList{
+                        QStringLiteral("-NoProfile"),
+                        QStringLiteral("-ExecutionPolicy"),
+                        QStringLiteral("Bypass"),
+                        QStringLiteral("-Command"),
+                        scriptText
+                        });
+                    process.start();
+                    const bool finished = process.waitForFinished(15000);
+                    if (!finished)
+                    {
+                        process.kill();
+                        process.waitForFinished(1000);
+                    }
+
+                    const QString stdOutText = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+                    const QString stdErrText = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
+                    QString finalText;
+                    if (!finished)
+                    {
+                        finalText = QStringLiteral("签名检查超时，已终止 PowerShell。");
+                    }
+                    else if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0 || stdOutText.isEmpty())
+                    {
+                        finalText = QStringLiteral("签名检查失败。\n退出码: %1\n").arg(process.exitCode());
+                        finalText += stdErrText.isEmpty()
+                            ? QStringLiteral("错误输出为空，可能系统未启用 PowerShell 或文件不可访问。")
+                            : QStringLiteral("错误输出:\n%1").arg(stdErrText);
+                    }
+                    else
+                    {
+                        finalText = stdOutText;
+                    }
+
+                    FileDetailDialog* targetDialog = guardThis.data();
+                    if (targetDialog == nullptr)
+                    {
+                        return;
+                    }
+                    QMetaObject::invokeMethod(
+                        targetDialog,
+                        [editorGuard, finalText]()
+                        {
+                            if (editorGuard != nullptr)
+                            {
+                                editorGuard->setText(finalText);
+                            }
+                        },
+                        Qt::QueuedConnection);
+                });
+            task->setAutoDelete(true);
+            QThreadPool::globalInstance()->start(task);
+        }
+
+        void startPeAnalysisLoad(CodeEditorWidget* textEditorWidget)
+        {
+            // 用途：后台执行 PE 深度解析文本生成。
+            // 输入：textEditorWidget 为 PE 信息页显示目标。
+            // 处理：调用 FilePropertyPeAnalyzer，避免 Import/Export/Directory 解析卡住 UI。
+            // 返回：无。
+            if (textEditorWidget == nullptr)
+            {
+                return;
+            }
+
+            textEditorWidget->setText(QStringLiteral("PE 信息加载中...\n目标: %1")
+                .arg(QDir::toNativeSeparators(m_filePath)));
+            const QString filePathSnapshot = m_filePath;
+            QPointer<FileDetailDialog> guardThis(this);
+            QPointer<CodeEditorWidget> editorGuard(textEditorWidget);
+            auto* task = QRunnable::create([guardThis, editorGuard, filePathSnapshot]()
+                {
+                    const QString peText = file_dock_detail::buildPeAnalysisText(filePathSnapshot);
+                    FileDetailDialog* targetDialog = guardThis.data();
+                    if (targetDialog == nullptr)
+                    {
+                        return;
+                    }
+                    QMetaObject::invokeMethod(
+                        targetDialog,
+                        [editorGuard, peText]()
+                        {
+                            if (editorGuard != nullptr)
+                            {
+                                editorGuard->setText(peText);
+                            }
+                        },
+                        Qt::QueuedConnection);
+                });
+            task->setAutoDelete(true);
+            QThreadPool::globalInstance()->start(task);
+        }
+
+        static QString extractPrintableStringsPreview(const QString& filePath)
+        {
+            // 用途：以分块方式提取可打印 ASCII 字符串，替代 readAll。
+            // 输入：filePath 为目标文件路径。
+            // 处理：最多输出 2000 条字符串，最多扫描 128MiB，避免超大文件长时间占用线程。
+            // 返回：可直接显示的字符串列表或错误/截断说明。
+            QFile file(filePath);
+            if (!file.open(QIODevice::ReadOnly))
+            {
+                return QStringLiteral("无法读取文件，无法提取字符串。错误: %1").arg(file.errorString());
+            }
+
+            constexpr qint64 kChunkBytes = 1024 * 1024;
+            constexpr qint64 kMaxScanBytes = 128LL * 1024LL * 1024LL;
+            QString current;
+            QStringList result;
+            qint64 scannedBytes = 0;
+            while (!file.atEnd() && result.size() < 2000 && scannedBytes < kMaxScanBytes)
+            {
+                const QByteArray bytes = file.read(std::min(kChunkBytes, kMaxScanBytes - scannedBytes));
+                if (bytes.isEmpty())
+                {
+                    break;
+                }
+                scannedBytes += bytes.size();
+                for (char ch : bytes)
+                {
+                    const unsigned char c = static_cast<unsigned char>(ch);
+                    if (std::isprint(c) != 0)
+                    {
+                        current.append(QChar::fromLatin1(ch));
+                    }
+                    else
+                    {
+                        if (current.length() >= 4)
+                        {
+                            result.append(current);
+                            if (result.size() >= 2000)
+                            {
+                                break;
+                            }
+                        }
+                        current.clear();
+                    }
+                }
+            }
+            if (current.length() >= 4 && result.size() < 2000)
+            {
+                result.append(current);
+            }
+
+            QString rawStringText = result.join('\n');
+            if (rawStringText.trimmed().isEmpty())
+            {
+                rawStringText = QStringLiteral("<未提取到可打印字符串，或文件内容全部为二进制不可见字符。>");
+            }
+            if (!file.atEnd())
+            {
+                rawStringText += QStringLiteral("\n\n[提示] 已达到扫描/显示上限：扫描 %1 字节，显示 %2 条。")
+                    .arg(scannedBytes)
+                    .arg(result.size());
+            }
+            return rawStringText;
+        }
+
+        void startStringsLoad(CodeEditorWidget* textEditorWidget)
+        {
+            // 用途：后台提取字符串页内容。
+            // 输入：textEditorWidget 为字符串页显示目标。
+            // 处理：分块扫描文件，结果完成后回填 UI。
+            // 返回：无。
+            if (textEditorWidget == nullptr)
+            {
+                return;
+            }
+
+            textEditorWidget->setText(QStringLiteral("字符串扫描中...\n目标: %1")
+                .arg(QDir::toNativeSeparators(m_filePath)));
+            const QString filePathSnapshot = m_filePath;
+            QPointer<FileDetailDialog> guardThis(this);
+            QPointer<CodeEditorWidget> editorGuard(textEditorWidget);
+            auto* task = QRunnable::create([guardThis, editorGuard, filePathSnapshot]()
+                {
+                    const QString stringsText = FileDetailDialog::extractPrintableStringsPreview(filePathSnapshot);
+                    FileDetailDialog* targetDialog = guardThis.data();
+                    if (targetDialog == nullptr)
+                    {
+                        return;
+                    }
+                    QMetaObject::invokeMethod(
+                        targetDialog,
+                        [editorGuard, stringsText]()
+                        {
+                            if (editorGuard != nullptr)
+                            {
+                                editorGuard->setText(stringsText);
+                            }
+                        },
+                        Qt::QueuedConnection);
+                });
+            task->setAutoDelete(true);
+            QThreadPool::globalInstance()->start(task);
+        }
+
+        static QString dependencyRowsToClipboardText(QTableWidget* table, const bool dllOnly)
+        {
+            // 用途：把依赖 DLL 表格选中行转换为剪贴板文本。
+            // 输入：table 为依赖页表格，dllOnly 控制只复制 DLL 名称还是整行。
+            // 返回：以换行分隔的文本；没有选中行时返回空字符串。
+            if (table == nullptr)
+            {
+                return QString();
+            }
+
+            std::set<int> selectedRows;
+            if (table->selectionModel() != nullptr)
+            {
+                const QModelIndexList rowIndexes = table->selectionModel()->selectedRows();
+                for (const QModelIndex& index : rowIndexes)
+                {
+                    selectedRows.insert(index.row());
+                }
+            }
+            if (selectedRows.empty() && table->currentRow() >= 0)
+            {
+                selectedRows.insert(table->currentRow());
+            }
+
+            QStringList lines;
+            QStringList seenDllNames;
+            for (const int rowIndex : selectedRows)
+            {
+                if (rowIndex < 0 || rowIndex >= table->rowCount())
+                {
+                    continue;
+                }
+                if (dllOnly)
+                {
+                    const QTableWidgetItem* dllItem = table->item(rowIndex, 0);
+                    const QString dllName = dllItem != nullptr ? dllItem->text().trimmed() : QString();
+                    if (!dllName.isEmpty() && !seenDllNames.contains(dllName, Qt::CaseInsensitive))
+                    {
+                        seenDllNames.push_back(dllName);
+                        lines.push_back(dllName);
+                    }
+                    continue;
+                }
+
+                QStringList columns;
+                for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+                {
+                    const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+                    columns.push_back(item != nullptr ? item->text() : QString());
+                }
+                lines.push_back(columns.join('\t'));
+            }
+            return lines.join('\n');
+        }
+
+        void populateDependencyTable(QTableWidget* table, QLabel* statusLabel, const file_dock_detail::PeDependencyResult& result, const qint64 elapsedMs)
+        {
+            // 用途：把后台解析出的依赖 DLL 结果填入表格。
+            // 输入：table/statusLabel 为 UI 控件，result 为结构化导入表，elapsedMs 为解析耗时。
+            // 处理：批量禁用排序和刷新，减少大量导入项时的 UI 抖动。
+            // 返回：无。
+            if (table == nullptr || statusLabel == nullptr)
+            {
+                return;
+            }
+
+            table->setSortingEnabled(false);
+            table->setUpdatesEnabled(false);
+            table->clearContents();
+            constexpr int kMaxDisplayedDependencyRows = 20000;
+            const int totalRowCount = static_cast<int>(result.rows.size());
+            const int displayedRowCount = std::min(totalRowCount, kMaxDisplayedDependencyRows);
+            table->setRowCount(displayedRowCount);
+            for (int rowIndex = 0; rowIndex < displayedRowCount; ++rowIndex)
+            {
+                const file_dock_detail::PeDependencyRow& row = result.rows[rowIndex];
+                const QString functionText = row.importMode == QStringLiteral("Ordinal")
+                    ? QStringLiteral("#%1").arg(row.ordinalText)
+                    : (row.functionName.trimmed().isEmpty() ? QStringLiteral("-") : row.functionName);
+
+                table->setItem(rowIndex, 0, new QTableWidgetItem(row.dllName));
+                table->setItem(rowIndex, 1, new QTableWidgetItem(functionText));
+                table->setItem(rowIndex, 2, new QTableWidgetItem(row.hintText));
+                table->setItem(rowIndex, 3, new QTableWidgetItem(row.importMode));
+                table->setItem(rowIndex, 4, new QTableWidgetItem(row.thunkRvaText));
+                table->setItem(rowIndex, 5, new QTableWidgetItem(row.diagnosticText));
+            }
+            table->setUpdatesEnabled(true);
+            table->setSortingEnabled(true);
+            if (table->horizontalHeader() != nullptr)
+            {
+                table->resizeColumnToContents(0);
+                table->resizeColumnToContents(1);
+                table->resizeColumnToContents(2);
+                table->resizeColumnToContents(3);
+            }
+
+            if (!result.success)
+            {
+                statusLabel->setText(result.isPe
+                    ? QStringLiteral("● PE 解析失败，未能读取依赖 DLL。耗时 %1 ms").arg(elapsedMs)
+                    : QStringLiteral("● 不适用：目标不是 PE 文件。耗时 %1 ms").arg(elapsedMs));
+                return;
+            }
+            if (!result.errorText.trimmed().isEmpty() && result.rows.isEmpty())
+            {
+                statusLabel->setText(QStringLiteral("● %1 耗时 %2 ms").arg(result.errorText.trimmed()).arg(elapsedMs));
+                return;
+            }
+            QString statusText = QStringLiteral("● 加载完成 %1 ms | DLL:%2 | 导入项:%3")
+                .arg(elapsedMs)
+                .arg(result.dllNames.size())
+                .arg(result.rows.size());
+            if (displayedRowCount < totalRowCount)
+            {
+                statusText += QStringLiteral(" | 表格仅显示前 %1 行").arg(displayedRowCount);
+            }
+            statusLabel->setText(statusText);
+        }
+
+        void startDependencyLoad(QTableWidget* table, QLabel* statusLabel, CodeEditorWidget* detailEditor)
+        {
+            // 用途：后台读取 EXE/DLL Import Directory 并展示依赖 DLL。
+            // 输入：table/statusLabel/detailEditor 为依赖页 UI 控件。
+            // 处理：工作线程解析 PE；UI 线程填表和显示错误详情，失败不阻塞不崩溃。
+            // 返回：无。
+            if (table == nullptr || statusLabel == nullptr || detailEditor == nullptr)
+            {
+                return;
+            }
+
+            statusLabel->setText(QStringLiteral("● 正在后台读取 Import Directory..."));
+            detailEditor->setText(QStringLiteral("依赖 DLL 加载中...\n目标: %1")
+                .arg(QDir::toNativeSeparators(m_filePath)));
+
+            const QString filePathSnapshot = m_filePath;
+            QPointer<FileDetailDialog> guardThis(this);
+            QPointer<QTableWidget> tableGuard(table);
+            QPointer<QLabel> statusGuard(statusLabel);
+            QPointer<CodeEditorWidget> detailGuard(detailEditor);
+            auto* task = QRunnable::create([guardThis, tableGuard, statusGuard, detailGuard, filePathSnapshot]()
+                {
+                    const auto beginTime = std::chrono::steady_clock::now();
+                    const file_dock_detail::PeDependencyResult result =
+                        file_dock_detail::analyzePeDependencies(filePathSnapshot);
+                    const qint64 elapsedMs = static_cast<qint64>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - beginTime).count());
+
+                    FileDetailDialog* targetDialog = guardThis.data();
+                    if (targetDialog == nullptr)
+                    {
+                        return;
+                    }
+                    QMetaObject::invokeMethod(
+                        targetDialog,
+                        [guardThis, tableGuard, statusGuard, detailGuard, result, elapsedMs]()
+                        {
+                            if (guardThis == nullptr || tableGuard == nullptr ||
+                                statusGuard == nullptr || detailGuard == nullptr)
+                            {
+                                return;
+                            }
+
+                            guardThis->populateDependencyTable(tableGuard, statusGuard, result, elapsedMs);
+                            QString detailText;
+                            detailText += QStringLiteral("目标: %1\n").arg(QDir::toNativeSeparators(guardThis->m_filePath));
+                            if (!result.success || !result.errorText.trimmed().isEmpty())
+                            {
+                                detailText += QStringLiteral("%1\n").arg(result.errorText.trimmed());
+                            }
+                            else
+                            {
+                                detailText += QStringLiteral("依赖 DLL 名称:\n");
+                                for (const QString& dllName : result.dllNames)
+                                {
+                                    detailText += QStringLiteral("  - %1\n").arg(dllName);
+                                }
+                            }
+                            detailGuard->setText(detailText);
+                        },
+                        Qt::QueuedConnection);
+                });
+            task->setAutoDelete(true);
+            QThreadPool::globalInstance()->start(task);
+        }
+
+        QWidget* buildDeferredTab(const QString& lazyKey)
+        {
+            // 用途：创建文件属性窗口的轻量占位页。
+            // 处理：只保存 lazyKey 和提示文本，不读取文件、不启动外部进程；
+            // 返回：首次切换到该页时由 activateDeferredTab 替换为真实页面。
+            QWidget* page = new QWidget(this);
+            page->setProperty("ks_file_detail_lazy_key", lazyKey);
+            QVBoxLayout* layout = new QVBoxLayout(page);
+            QLabel* loadingLabel = new QLabel(page);
+            loadingLabel->setWordWrap(true);
+            loadingLabel->setText(QStringLiteral(
+                "该页面将在首次打开时加载。\n"
+                "这样文件属性窗口可以先快速弹出，PE/签名/字符串等重型分析不会阻塞首屏。"));
+            layout->addWidget(loadingLabel, 0);
+            layout->addStretch(1);
+            return page;
+        }
+
+        void activateDeferredTab(QTabWidget* tabWidget, const int tabIndex)
+        {
+            // 用途：首次选中懒加载页时，用真实页面替换占位页。
+            // 输入 tabWidget/tabIndex：当前属性窗口 Tab 容器和被激活的索引。
+            // 处理：根据 lazyKey 创建对应页面；重型页面内部继续走后台线程。
+            // 返回：无；已加载页面不会重复替换。
+            if (tabWidget == nullptr || tabIndex < 0)
+            {
+                return;
+            }
+
+            QWidget* placeholderPage = tabWidget->widget(tabIndex);
+            if (placeholderPage == nullptr)
+            {
+                return;
+            }
+            const QString lazyKey = placeholderPage
+                ->property("ks_file_detail_lazy_key")
+                .toString()
+                .trimmed()
+                .toLower();
+            if (lazyKey.isEmpty())
+            {
+                return;
+            }
+
+            QWidget* realPage = nullptr;
+            if (lazyKey == QStringLiteral("security"))
+            {
+                realPage = buildSecurityTab();
+            }
+            else if (lazyKey == QStringLiteral("reparse"))
+            {
+                realPage = buildReparseTab();
+            }
+            else if (lazyKey == QStringLiteral("usage"))
+            {
+                realPage = buildUsageTab();
+            }
+            else if (lazyKey == QStringLiteral("signature"))
+            {
+                realPage = buildSignatureTab();
+            }
+            else if (lazyKey == QStringLiteral("pe"))
+            {
+                realPage = buildPeTab();
+            }
+            else if (lazyKey == QStringLiteral("dependencies"))
+            {
+                realPage = buildDependencyTab();
+            }
+            else if (lazyKey == QStringLiteral("strings"))
+            {
+                realPage = buildStringsTab();
+            }
+            else if (lazyKey == QStringLiteral("hex"))
+            {
+                realPage = buildHexTab();
+            }
+
+            if (realPage == nullptr)
+            {
+                return;
+            }
+
+            const QString titleText = tabWidget->tabText(tabIndex);
+            tabWidget->removeTab(tabIndex);
+            tabWidget->insertTab(tabIndex, realPage, titleText);
+            tabWidget->setCurrentIndex(tabIndex);
+            placeholderPage->deleteLater();
+        }
+
+        QWidget* buildGeneralTab()
+        {
+            QWidget* page = new QWidget(this);
+            QVBoxLayout* layout = new QVBoxLayout(page);
+            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
+            textEditorWidget->setReadOnly(true);
+
+            const QFileInfo info(m_filePath);
+            const QString ntPathText = buildDriverNtPath(info.absoluteFilePath());
+            QString content;
+            content += QStringLiteral("[路径]\n");
+            content += QStringLiteral("Win32路径: %1\n").arg(QDir::toNativeSeparators(info.absoluteFilePath()));
+            content += QStringLiteral("NT路径: %1\n").arg(ntPathText.isEmpty() ? QStringLiteral("<转换失败>") : ntPathText);
+            content += QStringLiteral("查询来源: R3 QFileInfo（R0 信息后台加载）\n\n");
+
+            content += QStringLiteral("[R3 QFileInfo]\n");
+            content += QStringLiteral("完整路径: %1\n").arg(info.absoluteFilePath());
+            content += QStringLiteral("文件名: %1\n").arg(info.fileName());
+            content += QStringLiteral("类型: %1\n").arg(info.suffix());
+            content += QStringLiteral("大小: %1 字节\n").arg(info.size());
+            content += QStringLiteral("创建时间: %1\n").arg(info.birthTime().toString("yyyy-MM-dd HH:mm:ss"));
+            content += QStringLiteral("修改时间: %1\n").arg(info.lastModified().toString("yyyy-MM-dd HH:mm:ss"));
+            content += QStringLiteral("访问时间: %1\n").arg(info.lastRead().toString("yyyy-MM-dd HH:mm:ss"));
+            content += QStringLiteral("是否可执行: %1\n").arg(info.isExecutable() ? QStringLiteral("是") : QStringLiteral("否"));
+            content += QStringLiteral("是否隐藏: %1\n").arg(info.isHidden() ? QStringLiteral("是") : QStringLiteral("否"));
+            content += QStringLiteral("是否可写: %1\n").arg(info.isWritable() ? QStringLiteral("是") : QStringLiteral("否"));
+            if (isPathReparsePoint(info.absoluteFilePath()))
+            {
+                content += QStringLiteral("重解析点: 是（首屏仅做属性位判断，不同步追踪链接目标）\n");
+            }
+            else
+            {
+                content += QStringLiteral("重解析点: 否\n");
+            }
+
+            const QString baseContent = content;
+            content += QStringLiteral("\n[R0 文件基础信息]\n");
+            content += QStringLiteral("正在后台加载，属性窗口首屏不会等待驱动查询完成...\n");
             textEditorWidget->setText(content);
 
             layout->addWidget(textEditorWidget, 1);
+            startR0FileInfoLoad(textEditorWidget, info, ntPathText, baseContent);
+            return page;
+        }
+
+        QWidget* buildReparseTab()
+        {
+            QWidget* page = new QWidget(this);
+            QVBoxLayout* layout = new QVBoxLayout(page);
+            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
+            textEditorWidget->setReadOnly(true);
+
+            QString content;
+            if (!isPathReparsePoint(m_filePath))
+            {
+                content += QStringLiteral("目标路径: %1\n").arg(QDir::toNativeSeparators(m_filePath));
+                content += QStringLiteral("状态: 当前目标不是 FILE_ATTRIBUTE_REPARSE_POINT。\n");
+            }
+            else
+            {
+                content += formatReparsePointText(m_filePath);
+            }
+
+            textEditorWidget->setText(content);
+            layout->addWidget(textEditorWidget, 1);
+            return page;
+        }
+
+        QWidget* buildSecurityTab()
+        {
+            QWidget* page = new QWidget(this);
+            QVBoxLayout* layout = new QVBoxLayout(page);
+            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
+            textEditorWidget->setReadOnly(true);
+
+            QString content;
+            const QString nativePath = QDir::toNativeSeparators(m_filePath);
+            content += QStringLiteral("目标路径: %1\n").arg(nativePath);
+
+            // 先给出 Qt 维度的快速权限摘要，便于与 ACL 细节对照。
+            QFileInfo info(m_filePath);
+            content += QStringLiteral("快速权限摘要:\n");
+            content += QStringLiteral("Read: %1\n").arg(info.isReadable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
+            content += QStringLiteral("Write: %1\n").arg(info.isWritable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
+            content += QStringLiteral("Execute: %1\n").arg(info.isExecutable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
+            const QString baseContent = content;
+            content += QStringLiteral("\n深层 Owner/Group/DACL/SACL 正在后台加载...\n");
+            textEditorWidget->setText(content);
+
+            layout->addWidget(textEditorWidget, 1);
+            startSecurityDeepLoad(textEditorWidget, baseContent, nativePath);
             return page;
         }
 
@@ -2108,62 +2954,8 @@ namespace
             QVBoxLayout* layout = new QVBoxLayout(page);
             CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
             textEditorWidget->setReadOnly(true);
-
-            // 调用 PowerShell 获取 Authenticode 详细信息，提供可审计的签名结果。
-            QProcess process;
-            process.setProgram(QStringLiteral("powershell.exe"));
-            const QString safeFilePath = m_filePath;
-            QString escapedPath = safeFilePath;
-            escapedPath.replace(QStringLiteral("'"), QStringLiteral("''"));
-            const QString scriptText = QStringLiteral(
-                "$sig=Get-AuthenticodeSignature -LiteralPath '%1';"
-                "$cert=$sig.SignerCertificate;"
-                "$subj=if($cert){$cert.Subject}else{'<无证书>'};"
-                "$issuer=if($cert){$cert.Issuer}else{'<无证书>'};"
-                "$thumb=if($cert){$cert.Thumbprint}else{'<无证书>'};"
-                "$from=if($cert){$cert.NotBefore}else{'<无证书>'};"
-                "$to=if($cert){$cert.NotAfter}else{'<无证书>'};"
-                "$statusMsg=if($sig.StatusMessage){$sig.StatusMessage}else{'<无附加消息>'};"
-                "Write-Output ('状态: ' + $sig.Status);"
-                "Write-Output ('状态说明: ' + $statusMsg);"
-                "Write-Output ('签名者主题: ' + $subj);"
-                "Write-Output ('签名者颁发者: ' + $issuer);"
-                "Write-Output ('证书指纹: ' + $thumb);"
-                "Write-Output ('证书生效: ' + $from);"
-                "Write-Output ('证书失效: ' + $to);"
-                "Write-Output ('是否含时间戳: ' + ([bool]$sig.TimeStamperCertificate));")
-                .arg(escapedPath);
-            process.setArguments(QStringList{
-                QStringLiteral("-NoProfile"),
-                QStringLiteral("-ExecutionPolicy"),
-                QStringLiteral("Bypass"),
-                QStringLiteral("-Command"),
-                scriptText
-                });
-            process.start();
-            process.waitForFinished(15000);
-
-            const QString stdOutText = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
-            const QString stdErrText = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
-            if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0 || stdOutText.isEmpty())
-            {
-                QString failText = QStringLiteral("签名检查失败。\n");
-                failText += QStringLiteral("退出码: %1\n").arg(process.exitCode());
-                if (!stdErrText.isEmpty())
-                {
-                    failText += QStringLiteral("错误输出:\n%1").arg(stdErrText);
-                }
-                else
-                {
-                    failText += QStringLiteral("错误输出为空，可能系统未启用 PowerShell 或文件不可访问。");
-                }
-                textEditorWidget->setText(failText);
-                layout->addWidget(textEditorWidget, 1);
-                return page;
-            }
-
-            textEditorWidget->setText(stdOutText);
             layout->addWidget(textEditorWidget, 1);
+            startSignatureLoad(textEditorWidget);
             return page;
         }
 
@@ -2173,9 +2965,80 @@ namespace
             QVBoxLayout* layout = new QVBoxLayout(page);
             CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
             textEditorWidget->setReadOnly(true);
-            textEditorWidget->setText(file_dock_detail::buildPeAnalysisText(m_filePath));
 
             layout->addWidget(textEditorWidget, 1);
+            startPeAnalysisLoad(textEditorWidget);
+            return page;
+        }
+
+        QWidget* buildDependencyTab()
+        {
+            // 用途：创建“依赖 DLL”页 UI。
+            // 处理：表格展示 DLL/函数/Ordinal/Hint/IAT RVA，底部文本显示摘要或错误；
+            //      真实 PE Import Directory 解析由后台线程完成。
+            // 返回：可嵌入属性窗口的 QWidget。
+            QWidget* page = new QWidget(this);
+            QVBoxLayout* layout = new QVBoxLayout(page);
+
+            QLabel* statusLabel = new QLabel(QStringLiteral("● 等待加载依赖 DLL"), page);
+            statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            layout->addWidget(statusLabel, 0);
+
+            QTableWidget* table = new QTableWidget(page);
+            table->setColumnCount(6);
+            table->setHorizontalHeaderLabels(QStringList{
+                QStringLiteral("DLL 名称"),
+                QStringLiteral("函数名 / Ordinal"),
+                QStringLiteral("Hint"),
+                QStringLiteral("导入方式"),
+                QStringLiteral("Thunk/IAT RVA"),
+                QStringLiteral("诊断")
+                });
+            table->setAlternatingRowColors(true);
+            table->setSelectionBehavior(QAbstractItemView::SelectRows);
+            table->setSelectionMode(QAbstractItemView::ExtendedSelection);
+            table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+            table->setSortingEnabled(true);
+            table->setContextMenuPolicy(Qt::CustomContextMenu);
+            if (table->horizontalHeader() != nullptr)
+            {
+                table->horizontalHeader()->setStretchLastSection(true);
+            }
+            layout->addWidget(table, 3);
+
+            CodeEditorWidget* detailEditor = new CodeEditorWidget(page);
+            detailEditor->setReadOnly(true);
+            layout->addWidget(detailEditor, 1);
+
+            connect(table, &QTableWidget::customContextMenuRequested, this, [table](const QPoint& position)
+                {
+                    if (table == nullptr)
+                    {
+                        return;
+                    }
+
+                    QMenu menu(table);
+                    QAction* copyRowsAction = menu.addAction(QStringLiteral("复制选中行"));
+                    QAction* copyDllAction = menu.addAction(QStringLiteral("复制 DLL 名称"));
+                    QAction* selectedAction = menu.exec(table->viewport()->mapToGlobal(position));
+                    if (selectedAction == nullptr)
+                    {
+                        return;
+                    }
+                    if (selectedAction != copyRowsAction && selectedAction != copyDllAction)
+                    {
+                        return;
+                    }
+
+                    const bool dllOnly = selectedAction == copyDllAction;
+                    const QString clipboardText = dependencyRowsToClipboardText(table, dllOnly);
+                    if (!clipboardText.isEmpty() && QApplication::clipboard() != nullptr)
+                    {
+                        QApplication::clipboard()->setText(clipboardText);
+                    }
+                });
+
+            startDependencyLoad(table, statusLabel, detailEditor);
             return page;
         }
 
@@ -2186,52 +3049,7 @@ namespace
             CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
             textEditorWidget->setReadOnly(true);
             layout->addWidget(textEditorWidget, 1);
-
-            QFile file(m_filePath);
-            QString rawStringText;
-            if (!file.open(QIODevice::ReadOnly))
-            {
-                rawStringText = QStringLiteral("无法读取文件，无法提取字符串。");
-                textEditorWidget->setText(rawStringText);
-                return page;
-            }
-
-            const QByteArray bytes = file.readAll();
-            file.close();
-
-            QString current;
-            QStringList result;
-            for (char ch : bytes)
-            {
-                const unsigned char c = static_cast<unsigned char>(ch);
-                if (std::isprint(c) != 0)
-                {
-                    current.append(QChar::fromLatin1(ch));
-                }
-                else
-                {
-                    if (current.length() >= 4)
-                    {
-                        result.append(current);
-                    }
-                    current.clear();
-                }
-                if (result.size() >= 2000)
-                {
-                    break;
-                }
-            }
-            if (current.length() >= 4 && result.size() < 2000)
-            {
-                result.append(current);
-            }
-
-            rawStringText = result.join('\n');
-            if (rawStringText.trimmed().isEmpty())
-            {
-                rawStringText = QStringLiteral("<未提取到可打印字符串，或文件内容全部为二进制不可见字符。>");
-            }
-            textEditorWidget->setText(rawStringText);
+            startStringsLoad(textEditorWidget);
 
             return page;
         }
@@ -2489,7 +3307,7 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     panel.toolLayout->addWidget(panel.filterEdit, 1);
     panel.rootLayout->addWidget(panel.toolWidget, 0);
 
-    panel.fsModel = new QFileSystemModel(panel.rootWidget);
+    panel.fsModel = new ReparseAwareFileSystemModel(panel.rootWidget);
     panel.fsModel->setReadOnly(false);
     panel.fsModel->setResolveSymlinks(true);
     panel.fsModel->setFilter(QDir::AllEntries | QDir::NoDotAndDotDot);
@@ -3561,7 +4379,13 @@ bool FileDock::reloadManualModel(FilePanelWidgets& panel, const bool showWarning
         sizeItem->setData(static_cast<qulonglong>(itemValue.sizeBytes), Qt::UserRole);
         rowItems.push_back(sizeItem);
 
-        rowItems.push_back(new QStandardItem(itemValue.typeText));
+        QString typeText = itemValue.typeText;
+        const QString reparseMarkerText = reparseKindMarkerForPath(itemValue.absolutePath);
+        if (!reparseMarkerText.isEmpty())
+        {
+            typeText = QStringLiteral("%1 / %2").arg(reparseMarkerText, typeText);
+        }
+        rowItems.push_back(new QStandardItem(typeText));
         rowItems.push_back(new QStandardItem(itemValue.modifiedTime.isValid()
             ? itemValue.modifiedTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
             : QStringLiteral("-")));
@@ -3821,7 +4645,13 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
                         sizeItem->setData(static_cast<qulonglong>(itemValue.sizeBytes), Qt::UserRole);
                         rowItems.push_back(sizeItem);
 
-                        rowItems.push_back(new QStandardItem(itemValue.typeText));
+                        QString typeText = itemValue.typeText;
+                        const QString reparseMarkerText = reparseKindMarkerForPath(itemValue.absolutePath);
+                        if (!reparseMarkerText.isEmpty())
+                        {
+                            typeText = QStringLiteral("%1 / %2").arg(reparseMarkerText, typeText);
+                        }
+                        rowItems.push_back(new QStandardItem(typeText));
                         rowItems.push_back(new QStandardItem(itemValue.modifiedTime.isValid()
                             ? itemValue.modifiedTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
                             : QStringLiteral("-")));
@@ -4382,11 +5212,22 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
 
     // 统计选中内容类型：用于控制菜单可用状态，避免多选时误触单文件功能。
     bool hasAnyFile = false;
+    QStringList linkTargetList;
     for (const QString& path : menuPaths)
     {
         QFileInfo info(path);
         hasAnyFile = hasAnyFile || info.isFile();
+        if (isPathReparsePoint(path))
+        {
+            const ks::file::ReparsePointQueryResult reparseResult = queryReparsePointForUi(path);
+            const QString targetText = reparseTargetFromResult(reparseResult).trimmed();
+            if (!targetText.isEmpty() && !linkTargetList.contains(targetText, Qt::CaseInsensitive))
+            {
+                linkTargetList.push_back(targetText);
+            }
+        }
     }
+    const QString firstLinkTarget = (!linkTargetList.isEmpty() && isSingleSelection) ? linkTargetList.front() : QString();
 
     QMenu menu(this);
     menu.setStyleSheet(buildContextMenuStyle());
@@ -4395,6 +5236,9 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* copyPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制路径"));
     QAction* copyKernelPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制内核模式地址"));
     QAction* copyShortNameAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制短文件名"));
+    QAction* copyLinkTargetAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制链接目标"));
+    QAction* openLinkTargetAction = menu.addAction(QIcon(":/Icon/process_start.svg"), QStringLiteral("打开链接目标"));
+    QAction* locateLinkTargetAction = menu.addAction(QIcon(":/Icon/process_open_folder.svg"), QStringLiteral("定位链接目标"));
     menu.addSeparator();
     QAction* copyAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制"));
     QAction* cutAction = menu.addAction(QIcon(":/Icon/process_suspend.svg"), QStringLiteral("剪切"));
@@ -4428,6 +5272,9 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     copyPathAction->setEnabled(hasSelection);
     copyKernelPathAction->setEnabled(hasSelection);
     copyShortNameAction->setEnabled(hasSelection);
+    copyLinkTargetAction->setEnabled(!linkTargetList.isEmpty());
+    openLinkTargetAction->setEnabled(!firstLinkTarget.isEmpty());
+    locateLinkTargetAction->setEnabled(!firstLinkTarget.isEmpty());
     copyAction->setEnabled(hasSelection);
     cutAction->setEnabled(hasSelection);
     pasteAction->setEnabled(!m_clipboardPaths.empty());
@@ -4532,6 +5379,47 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     if (selectedAction == copyShortNameAction)
     {
         copySelectedItemShortName(panel);
+        return;
+    }
+    if (selectedAction == copyLinkTargetAction)
+    {
+        QApplication::clipboard()->setText(linkTargetList.join(QStringLiteral("\n")));
+        kLogEvent event;
+        info << event
+            << "[FileDock] 复制链接目标到剪贴板, panel="
+            << panel.panelNameText.toStdString()
+            << ", count="
+            << linkTargetList.size()
+            << eol;
+        return;
+    }
+    if (selectedAction == openLinkTargetAction)
+    {
+        const bool openOk = QDesktopServices::openUrl(QUrl::fromLocalFile(firstLinkTarget));
+        if (!openOk)
+        {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("打开链接目标"),
+                QStringLiteral("无法打开链接目标：%1").arg(QDir::toNativeSeparators(firstLinkTarget)));
+        }
+        return;
+    }
+    if (selectedAction == locateLinkTargetAction)
+    {
+        const QFileInfo targetInfo(firstLinkTarget);
+        const QString locatePath = targetInfo.isDir()
+            ? targetInfo.absoluteFilePath()
+            : targetInfo.absolutePath();
+        if (locatePath.trimmed().isEmpty() || !QDir(locatePath).exists())
+        {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("定位链接目标"),
+                QStringLiteral("目标所在目录不存在或不可访问：%1").arg(QDir::toNativeSeparators(firstLinkTarget)));
+            return;
+        }
+        navigateToPath(panel, locatePath, true);
         return;
     }
     if (selectedAction == copyAction)
@@ -5459,7 +6347,14 @@ void FileDock::deleteSelectedItem(FilePanelWidgets& panel)
             QFileInfo info(path);
             if (info.isDir())
             {
-                removeOk = QDir(path).removeRecursively();
+                if (isPathReparsePoint(path))
+                {
+                    removeOk = (::RemoveDirectoryW(QDir::toNativeSeparators(path).toStdWString().c_str()) != FALSE);
+                }
+                else
+                {
+                    removeOk = QDir(path).removeRecursively();
+                }
             }
             else
             {

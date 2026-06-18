@@ -12,6 +12,7 @@
 #include <QDateTime>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHeaderView>
@@ -23,6 +24,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QClipboard>
+#include <QIODevice>
 #include <QPlainTextEdit>
 #include <QPixmap>
 #include <QPushButton>
@@ -33,6 +35,7 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTimer>
 #include <QTimeZone>
 #include <QUrl>
 #include <QVariant>
@@ -68,6 +71,21 @@ namespace
         TimeoutMs,
         TimeoutDefaultDecision,
         Priority,
+        Count
+    };
+
+    enum class FileMonitorColumn : int
+    {
+        Time = 0,
+        Pid,
+        Process,
+        Path,
+        FsctlName,
+        ControlCode,
+        Status,
+        FileObject,
+        InputLength,
+        OutputLength,
         Count
     };
 
@@ -943,6 +961,24 @@ namespace
         return item;
     }
 
+    QString formatFileMonitorHex32(const quint32 value)
+    {
+        return QStringLiteral("0x%1").arg(value, 8, 16, QChar('0')).toUpper();
+    }
+
+    QString formatFileMonitorHex64(const quint64 value)
+    {
+        return QStringLiteral("0x%1").arg(value, 16, 16, QChar('0')).toUpper();
+    }
+
+    QString fileMonitorFsctlNameText(const quint32 fsControlCode)
+    {
+        const wchar_t* nameText = KswordARKFileMonitorFsctlCodeToText(fsControlCode);
+        return nameText != nullptr
+            ? QString::fromWCharArray(nameText)
+            : QStringLiteral("UNKNOWN_FSCTL");
+    }
+
     void applyRuleLineEditStyle(QLineEdit* lineEdit)
     {
         if (lineEdit == nullptr)
@@ -1357,6 +1393,68 @@ private:
         logTabWidget->addTab(m_eventLogEditor, QStringLiteral("事件日志"));
         rootLayout->addWidget(logTabWidget, 0);
 
+        auto* fileMonitorFrame = new QFrame(scrollContent);
+        fileMonitorFrame->setFrameShape(QFrame::StyledPanel);
+        auto* fileMonitorLayout = new QVBoxLayout(fileMonitorFrame);
+        fileMonitorLayout->setContentsMargins(8, 8, 8, 8);
+        fileMonitorLayout->setSpacing(6);
+
+        auto* fileMonitorToolbar = new QHBoxLayout();
+        fileMonitorToolbar->setContentsMargins(0, 0, 0, 0);
+        fileMonitorToolbar->setSpacing(6);
+        auto* fileMonitorTitleLabel = new QLabel(QStringLiteral("文件监控：Oplock / FSCTL"), fileMonitorFrame);
+        fileMonitorTitleLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextPrimaryHex()));
+        m_startFileMonitorFsctlButton = new QPushButton(fileMonitorFrame);
+        m_drainFileMonitorButton = new QPushButton(fileMonitorFrame);
+        m_clearFileMonitorButton = new QPushButton(fileMonitorFrame);
+        m_exportFileMonitorButton = new QPushButton(fileMonitorFrame);
+        setupIconButton(m_startFileMonitorFsctlButton, QIcon(QStringLiteral(":/Icon/process_start.svg")), QStringLiteral("启动/补充 FSCTL 文件监控"));
+        setupIconButton(m_drainFileMonitorButton, QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("读取文件监控事件"));
+        setupIconButton(m_clearFileMonitorButton, QIcon(QStringLiteral(":/Icon/log_clear.svg")), QStringLiteral("清空当前文件监控表格"));
+        setupIconButton(m_exportFileMonitorButton, QIcon(QStringLiteral(":/Icon/log_export.svg")), QStringLiteral("导出当前可见文件监控事件"));
+        m_fileMonitorFsctlOnlyCheck = new QCheckBox(QStringLiteral("仅显示 Oplock / FSCTL"), fileMonitorFrame);
+        m_fileMonitorFsctlOnlyCheck->setChecked(true);
+        m_fileMonitorStatusLabel = new QLabel(QStringLiteral("等待启动或读取事件"), fileMonitorFrame);
+        m_fileMonitorStatusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+
+        fileMonitorToolbar->addWidget(fileMonitorTitleLabel, 0);
+        fileMonitorToolbar->addWidget(m_startFileMonitorFsctlButton, 0);
+        fileMonitorToolbar->addWidget(m_drainFileMonitorButton, 0);
+        fileMonitorToolbar->addWidget(m_clearFileMonitorButton, 0);
+        fileMonitorToolbar->addWidget(m_exportFileMonitorButton, 0);
+        fileMonitorToolbar->addWidget(m_fileMonitorFsctlOnlyCheck, 0);
+        fileMonitorToolbar->addStretch(1);
+        fileMonitorToolbar->addWidget(m_fileMonitorStatusLabel, 0);
+        fileMonitorLayout->addLayout(fileMonitorToolbar, 0);
+
+        m_fileMonitorTable = new QTableWidget(fileMonitorFrame);
+        m_fileMonitorTable->setColumnCount(static_cast<int>(FileMonitorColumn::Count));
+        m_fileMonitorTable->setHorizontalHeaderLabels(QStringList{
+            QStringLiteral("时间"),
+            QStringLiteral("PID"),
+            QStringLiteral("进程"),
+            QStringLiteral("文件路径"),
+            QStringLiteral("FSCTL 名称"),
+            QStringLiteral("控制码"),
+            QStringLiteral("状态码"),
+            QStringLiteral("FileObject"),
+            QStringLiteral("In"),
+            QStringLiteral("Out")
+            });
+        m_fileMonitorTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_fileMonitorTable->setSelectionMode(QAbstractItemView::SingleSelection);
+        m_fileMonitorTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_fileMonitorTable->setAlternatingRowColors(true);
+        m_fileMonitorTable->setWordWrap(false);
+        m_fileMonitorTable->verticalHeader()->setVisible(false);
+        m_fileMonitorTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        m_fileMonitorTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(FileMonitorColumn::Path), QHeaderView::Stretch);
+        fileMonitorLayout->addWidget(m_fileMonitorTable, 1);
+        rootLayout->addWidget(fileMonitorFrame, 1);
+
+        m_fileMonitorDrainTimer = new QTimer(m_hostPage);
+        m_fileMonitorDrainTimer->setInterval(1500);
+
         auto* kernelBadgeLayout = new QHBoxLayout();
         kernelBadgeLayout->setContentsMargins(0, 0, 0, 0);
         kernelBadgeLayout->setSpacing(0);
@@ -1443,6 +1541,237 @@ private:
             m_moveRuleUpButton->setEnabled(currentRuleTable() != nullptr);
             m_moveRuleDownButton->setEnabled(currentRuleTable() != nullptr);
         });
+
+        connect(m_startFileMonitorFsctlButton, &QPushButton::clicked, m_hostPage, [this]() {
+            startFileMonitorFsctlCapture();
+        });
+        connect(m_drainFileMonitorButton, &QPushButton::clicked, m_hostPage, [this]() {
+            drainFileMonitorEvents();
+        });
+        connect(m_clearFileMonitorButton, &QPushButton::clicked, m_hostPage, [this]() {
+            clearFileMonitorEvents();
+        });
+        connect(m_exportFileMonitorButton, &QPushButton::clicked, m_hostPage, [this]() {
+            exportVisibleFileMonitorEvents();
+        });
+        connect(m_fileMonitorFsctlOnlyCheck, &QCheckBox::toggled, m_hostPage, [this](bool) {
+            applyFileMonitorEventFilter();
+        });
+        connect(m_fileMonitorDrainTimer, &QTimer::timeout, m_hostPage, [this]() {
+            drainFileMonitorEvents();
+        });
+    }
+
+    QString resolveProcessNameForFileMonitor(const quint32 processId)
+    {
+        if (processId == 0U)
+        {
+            return QStringLiteral("Idle");
+        }
+        if (processId == 4U)
+        {
+            return QStringLiteral("System");
+        }
+        const auto cacheIterator = m_fileMonitorProcessNameCache.constFind(processId);
+        if (cacheIterator != m_fileMonitorProcessNameCache.constEnd())
+        {
+            return cacheIterator.value();
+        }
+
+        QString processName;
+        HANDLE processHandle = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+        if (processHandle != nullptr)
+        {
+            wchar_t imagePathBuffer[MAX_PATH * 4] = {};
+            DWORD imagePathChars = static_cast<DWORD>(sizeof(imagePathBuffer) / sizeof(imagePathBuffer[0]));
+            if (::QueryFullProcessImageNameW(processHandle, 0, imagePathBuffer, &imagePathChars) != FALSE)
+            {
+                processName = QFileInfo(QString::fromWCharArray(imagePathBuffer, static_cast<int>(imagePathChars))).fileName();
+            }
+            ::CloseHandle(processHandle);
+        }
+        if (processName.isEmpty())
+        {
+            processName = QStringLiteral("PID %1").arg(processId);
+        }
+        m_fileMonitorProcessNameCache.insert(processId, processName);
+        return processName;
+    }
+
+    void startFileMonitorFsctlCapture()
+    {
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::FileMonitorStatusResult beforeStatus = driverClient.queryFileMonitorStatus();
+        unsigned long requestedMask = KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
+        if (beforeStatus.io.ok &&
+            (beforeStatus.runtimeFlags & KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED) != 0U)
+        {
+            requestedMask = beforeStatus.operationMask | KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
+        }
+
+        const ksword::ark::IoResult startResult = driverClient.controlFileMonitor(
+            KSWORD_ARK_FILE_MONITOR_ACTION_START,
+            requestedMask,
+            beforeStatus.io.ok ? beforeStatus.processIdFilter : 0UL,
+            0UL);
+        if (!startResult.ok)
+        {
+            const QString detailText = QString::fromStdString(startResult.message);
+            m_fileMonitorStatusLabel->setText(QStringLiteral("启动失败：error=%1").arg(startResult.win32Error));
+            appendAppLog(QStringLiteral("文件监控 FSCTL 启动失败：%1").arg(detailText));
+            return;
+        }
+
+        m_fileMonitorStatusLabel->setText(QStringLiteral("FSCTL 文件监控已启动，mask=0x%1")
+            .arg(requestedMask, 8, 16, QChar('0')).toUpper());
+        appendAppLog(QStringLiteral("文件监控 FSCTL 已启动：mask=0x%1")
+            .arg(requestedMask, 8, 16, QChar('0')).toUpper());
+        if (m_fileMonitorDrainTimer != nullptr && !m_fileMonitorDrainTimer->isActive())
+        {
+            m_fileMonitorDrainTimer->start();
+        }
+        drainFileMonitorEvents();
+    }
+
+    void drainFileMonitorEvents()
+    {
+        if (m_fileMonitorTable == nullptr)
+        {
+            return;
+        }
+
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::FileMonitorDrainResult drainResult = driverClient.drainFileMonitor(128UL, 0UL);
+        if (!drainResult.io.ok)
+        {
+            m_fileMonitorStatusLabel->setText(QStringLiteral("读取失败：error=%1").arg(drainResult.io.win32Error));
+            return;
+        }
+
+        for (const ksword::ark::FileMonitorEventRow& eventRow : drainResult.events)
+        {
+            appendFileMonitorEventRow(eventRow);
+        }
+        applyFileMonitorEventFilter();
+        m_fileMonitorStatusLabel->setText(
+            QStringLiteral("读取 %1 条，队列前=%2，丢弃=%3")
+            .arg(drainResult.events.size())
+            .arg(drainResult.totalQueuedBeforeDrain)
+            .arg(drainResult.droppedCount));
+    }
+
+    void appendFileMonitorEventRow(const ksword::ark::FileMonitorEventRow& eventRow)
+    {
+        if (m_fileMonitorTable == nullptr)
+        {
+            return;
+        }
+
+        const bool isFsctlEvent =
+            (eventRow.operationType & KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL) != 0U;
+        const int rowIndex = m_fileMonitorTable->rowCount();
+        m_fileMonitorTable->insertRow(rowIndex);
+
+        QTableWidgetItem* timeItem = makeReadOnlyItem(utc100nsToDisplayText(static_cast<quint64>(eventRow.timeUtc100ns)));
+        timeItem->setData(Qt::UserRole, isFsctlEvent);
+        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Time), timeItem);
+        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Pid), makeReadOnlyItem(QString::number(eventRow.processId)));
+        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Process), makeReadOnlyItem(resolveProcessNameForFileMonitor(eventRow.processId)));
+        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Path), makeReadOnlyItem(QString::fromStdWString(eventRow.path)));
+        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::FsctlName), makeReadOnlyItem(isFsctlEvent ? fileMonitorFsctlNameText(eventRow.fsControlCode) : QStringLiteral("-")));
+        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::ControlCode), makeReadOnlyItem(isFsctlEvent ? formatFileMonitorHex32(eventRow.fsControlCode) : QStringLiteral("-")));
+        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Status), makeReadOnlyItem(
+            (eventRow.fieldFlags & KSWORD_ARK_FILE_MONITOR_FIELD_RESULT_PRESENT) != 0U
+            ? formatFileMonitorHex32(static_cast<quint32>(eventRow.resultStatus))
+            : QStringLiteral("-")));
+        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::FileObject), makeReadOnlyItem(formatFileMonitorHex64(eventRow.fileObjectAddress)));
+        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::InputLength), makeReadOnlyItem(isFsctlEvent ? QString::number(eventRow.fsInputBufferLength) : QStringLiteral("-")));
+        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::OutputLength), makeReadOnlyItem(isFsctlEvent ? QString::number(eventRow.fsOutputBufferLength) : QStringLiteral("-")));
+    }
+
+    void applyFileMonitorEventFilter()
+    {
+        if (m_fileMonitorTable == nullptr || m_fileMonitorFsctlOnlyCheck == nullptr)
+        {
+            return;
+        }
+
+        const bool fsctlOnly = m_fileMonitorFsctlOnlyCheck->isChecked();
+        for (int rowIndex = 0; rowIndex < m_fileMonitorTable->rowCount(); ++rowIndex)
+        {
+            const QTableWidgetItem* markerItem = m_fileMonitorTable->item(rowIndex, static_cast<int>(FileMonitorColumn::Time));
+            const bool isFsctlEvent = markerItem != nullptr && markerItem->data(Qt::UserRole).toBool();
+            m_fileMonitorTable->setRowHidden(rowIndex, fsctlOnly && !isFsctlEvent);
+        }
+    }
+
+    void clearFileMonitorEvents()
+    {
+        if (m_fileMonitorTable != nullptr)
+        {
+            m_fileMonitorTable->setRowCount(0);
+        }
+        if (m_fileMonitorStatusLabel != nullptr)
+        {
+            m_fileMonitorStatusLabel->setText(QStringLiteral("当前表格已清空"));
+        }
+    }
+
+    void exportVisibleFileMonitorEvents()
+    {
+        if (m_fileMonitorTable == nullptr)
+        {
+            return;
+        }
+
+        const QString filePath = QFileDialog::getSaveFileName(
+            m_hostPage,
+            QStringLiteral("导出文件监控事件"),
+            QStringLiteral("file_monitor_fsctl.tsv"),
+            QStringLiteral("TSV 文件 (*.tsv);;所有文件 (*.*)"));
+        if (filePath.isEmpty())
+        {
+            return;
+        }
+
+        QFile outputFile(filePath);
+        if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+        {
+            QMessageBox::warning(m_hostPage, QStringLiteral("文件监控"), QStringLiteral("无法写入导出文件：%1").arg(filePath));
+            return;
+        }
+
+        QStringList lines;
+        QStringList headerCells;
+        for (int columnIndex = 0; columnIndex < m_fileMonitorTable->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* headerItem = m_fileMonitorTable->horizontalHeaderItem(columnIndex);
+            headerCells << (headerItem != nullptr ? headerItem->text() : QString());
+        }
+        lines << headerCells.join(QLatin1Char('\t'));
+
+        for (int rowIndex = 0; rowIndex < m_fileMonitorTable->rowCount(); ++rowIndex)
+        {
+            if (m_fileMonitorTable->isRowHidden(rowIndex))
+            {
+                continue;
+            }
+            QStringList rowCells;
+            for (int columnIndex = 0; columnIndex < m_fileMonitorTable->columnCount(); ++columnIndex)
+            {
+                const QTableWidgetItem* cellItem = m_fileMonitorTable->item(rowIndex, columnIndex);
+                QString cellText = cellItem != nullptr ? cellItem->text() : QString();
+                cellText.replace(QLatin1Char('\t'), QLatin1Char(' '));
+                cellText.replace(QLatin1Char('\n'), QLatin1Char(' '));
+                cellText.replace(QLatin1Char('\r'), QLatin1Char(' '));
+                rowCells << cellText;
+            }
+            lines << rowCells.join(QLatin1Char('\t'));
+        }
+
+        outputFile.write(lines.join(QLatin1Char('\n')).toUtf8());
+        outputFile.write("\n");
+        m_fileMonitorStatusLabel->setText(QStringLiteral("已导出：%1").arg(filePath));
     }
 
     void createRuleTableTab(quint32 callbackType, const QString& titleText)
@@ -3206,11 +3535,28 @@ private:
                 .arg(QString::fromStdString(beforeStatus.io.message)));
         }
 
-        const ksword::ark::IoResult startResult = driverClient.controlFileMonitor(
+        ksword::ark::IoResult startResult = driverClient.controlFileMonitor(
             KSWORD_ARK_FILE_MONITOR_ACTION_START,
             KSWORD_ARK_FILE_MONITOR_OPERATION_ALL,
             0UL,
             0UL);
+        if (!startResult.ok)
+        {
+            const unsigned long legacyOperationMask =
+                KSWORD_ARK_FILE_MONITOR_OPERATION_ALL & ~KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
+            const ksword::ark::IoResult legacyStartResult = driverClient.controlFileMonitor(
+                KSWORD_ARK_FILE_MONITOR_ACTION_START,
+                legacyOperationMask,
+                0UL,
+                0UL);
+            if (legacyStartResult.ok)
+            {
+                appendAppLog(
+                    QStringLiteral("文件系统微过滤器以旧掩码启动：mask=0x%1；当前驱动可能尚未支持 FSCTL 事件。")
+                    .arg(legacyOperationMask, 8, 16, QChar('0')).toUpper());
+                startResult = legacyStartResult;
+            }
+        }
         if (!startResult.ok)
         {
             const ksword::ark::FileMonitorStatusResult failStatus =
@@ -3513,6 +3859,16 @@ private:
 
     QPlainTextEdit* m_appLogEditor = nullptr;
     QPlainTextEdit* m_eventLogEditor = nullptr;
+
+    QPushButton* m_startFileMonitorFsctlButton = nullptr;
+    QPushButton* m_drainFileMonitorButton = nullptr;
+    QPushButton* m_clearFileMonitorButton = nullptr;
+    QPushButton* m_exportFileMonitorButton = nullptr;
+    QCheckBox* m_fileMonitorFsctlOnlyCheck = nullptr;
+    QLabel* m_fileMonitorStatusLabel = nullptr;
+    QTableWidget* m_fileMonitorTable = nullptr;
+    QTimer* m_fileMonitorDrainTimer = nullptr;
+    QHash<quint32, QString> m_fileMonitorProcessNameCache;
 
     KSWORD_ARK_CALLBACK_RUNTIME_STATE m_runtimeState{};
     quint64 m_nextRuleVersion = 1ULL;

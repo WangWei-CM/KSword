@@ -405,6 +405,46 @@ namespace ksword::ark
         long lastErrorStatus = 0;       // lastErrorStatus：最近一次文件监控错误。
     };
 
+    // FileMonitorEventRow 是 R0 file-monitor ring buffer 的 R3 展示模型。
+    struct FileMonitorEventRow
+    {
+        std::uint32_t version = 0;       // version：事件协议版本。
+        std::uint32_t size = 0;          // size：R0 事件结构大小。
+        std::uint32_t operationType = 0; // operationType：KSWORD_ARK_FILE_MONITOR_OPERATION_*。
+        std::uint32_t majorFunction = 0; // majorFunction：IRP_MJ_*。
+        std::uint32_t minorFunction = 0; // minorFunction：IRP_MN_*。
+        std::uint32_t processId = 0;     // processId：请求发起进程 PID。
+        std::uint32_t threadId = 0;      // threadId：请求发起线程 ID。
+        std::uint32_t fieldFlags = 0;    // fieldFlags：有效字段位图。
+        std::uint32_t desiredAccess = 0; // desiredAccess：Create/Open 访问掩码。
+        std::uint32_t shareAccess = 0;   // shareAccess：Create/Open 共享掩码。
+        std::uint32_t createOptions = 0; // createOptions：Create/Open options。
+        std::uint32_t fileInformationClass = 0; // fileInformationClass：SetInformation class。
+        long resultStatus = 0;           // resultStatus：post-operation NTSTATUS。
+        std::uint32_t pathLengthChars = 0; // pathLengthChars：R0 返回路径字符数。
+        std::uint64_t sequence = 0;      // sequence：R0 事件序号。
+        std::int64_t timeUtc100ns = 0;   // timeUtc100ns：UTC FILETIME。
+        std::uint64_t fileObjectAddress = 0; // fileObjectAddress：FileObject 地址，仅诊断展示。
+        std::uint32_t fsControlCode = 0; // fsControlCode：IRP_MJ_FILE_SYSTEM_CONTROL 控制码。
+        std::uint32_t fsInputBufferLength = 0; // fsInputBufferLength：输入缓冲区长度。
+        std::uint32_t fsOutputBufferLength = 0; // fsOutputBufferLength：输出缓冲区长度。
+        std::wstring path;               // path：R0 解析出的 normalized/opened file name。
+    };
+
+    // FileMonitorDrainResult 是文件监控 drain IOCTL 的解析结果。
+    struct FileMonitorDrainResult
+    {
+        IoResult io;                     // io：DeviceIoControl 调用状态。
+        std::uint32_t version = 0;       // version：响应协议版本。
+        std::uint32_t totalQueuedBeforeDrain = 0; // totalQueuedBeforeDrain：取出前队列深度。
+        std::uint32_t returnedCount = 0; // returnedCount：本次返回事件数。
+        std::uint32_t entrySize = 0;     // entrySize：R0 单个事件字节数。
+        std::uint32_t droppedCount = 0;  // droppedCount：累计丢弃事件数。
+        std::uint32_t runtimeFlags = 0;  // runtimeFlags：REGISTERED/STARTED/DROPPED。
+        std::uint32_t ringCapacity = 0;  // ringCapacity：R0 ring 容量。
+        std::vector<FileMonitorEventRow> events; // events：已解析事件列表。
+    };
+
     // RegistryReadResult 是 R0 注册表值读取响应的 R3 模型。
     struct RegistryReadResult
     {
