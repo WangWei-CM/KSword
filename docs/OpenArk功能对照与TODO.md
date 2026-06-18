@@ -20,7 +20,7 @@
 | OpenArk 功能域 | KSword 状态 | KSword 已有能力 | 缺口 / 备注 |
 |---|---|---|---|
 | Process 进程列表 | 已覆盖 | 进程枚举、树/列表显示、搜索、进程路径、命令行、用户、启动时间、CPU/内存/磁盘/GPU/网络、R3/R0 枚举对比，内存模块已提供进程内存 Dump 到文件。 | 进程详情内的窗口/句柄/内存页可继续与独立模块做更强联动。 |
-| Process 进程操作 | 部分覆盖 | 结束、挂起/恢复、优先级、关键进程、R0 结束/挂起、PPL 设置、打开目录、CreateProcess 参数化创建，进程内存 Dump 到文件。 | 缺少 OpenArk 风格 `Send to Scanner` 一键入口；如需完全对齐，可额外提供 MiniDump/FullDump 命名兼容入口。 |
+| Process 进程操作 | 部分覆盖 | 结束、挂起/恢复、优先级、关键进程、R0 结束/挂起、PPL 设置、R0 可恢复隐藏（UniqueProcessId + ActiveProcessLinks）、打开目录、CreateProcess 参数化创建，进程内存 Dump 到文件。 | 缺少 OpenArk 风格 `Send to Scanner` 一键入口；如需完全对齐，可额外提供 MiniDump/FullDump 命名兼容入口。 |
 | 线程列表 | 已覆盖 | 全局线程页、进程详情线程页、线程状态/优先级/起始地址/TEB/寄存器摘要，支持线程挂起/恢复/终止。 | OpenArk 的“按进程右键 Enum Thread”可通过详情页实现；可增加右键快捷入口。 |
 | 模块列表 | 已覆盖 | 进程详情模块页、模块基址/大小/路径/签名、刷新、模块卸载、模块关联线程操作。 | 缺少一键“发送到 Scanner/文件详情”的统一动作。 |
 | DLL / Shellcode 注入 | 已覆盖并超越 | 进程详情操作页有 DLL 注入和 Shellcode 注入。 | 高危功能应保持确认、日志和授权提示。 |
@@ -29,7 +29,7 @@
 | ObjectTypes | 已覆盖 | 句柄模块提供对象类型统计、类型索引、对象数、句柄数、访问掩码等。 | 字段比 OpenArk 更偏 Native；可在内核页增加跳转。 |
 | ObjectSections | 未覆盖 | 未发现 SectionDirectory/SectionName/Session/Dump/Edit 专门页。 | 放入 TODO。 |
 | 进程内存 | 部分覆盖 | 内存模块支持进程附加、内存区域、搜索、十六进制查看、断点、书签、进程内存 Dump。 | OpenArk 的“可疑内存扫描/RX 私有页聚焦”需要补专用规则；内核内存读写另见 Kernel Memory。 |
-| Kernel 入口 | 部分覆盖 | KSword 通过 `KswordARKDriver` 和共享 IOCTL 执行 R0 功能，主程序有驱动日志读取。 | 缺少 OpenArk 式统一“进入/退出 KernelMode”状态页和所有依赖项的集中提示。 |
+| Kernel 入口 | 部分覆盖 | KSword 通过 `KswordARKDriver` 和共享 IOCTL 执行 R0 功能，主程序有驱动日志读取，并在驱动装载后自动触发 DynData profile 下发。 | 缺少 OpenArk 式统一“进入/退出 KernelMode”状态页和所有依赖项的集中提示。 |
 | DriverKit 驱动安装器 | 部分覆盖 | 驱动服务注册/更新、加载、卸载、删除、状态查询。 | 缺 NT/WDF Installer、无签/过期签名安装、签名、写/清理注册表向导。 |
 | Driver Manager | 部分覆盖 | 驱动服务列表、已加载内核模块、路径、基址、DBWIN 调试输出。 | 缺签名/版本/公司/描述字段完整表、DriverObject/DeviceObject/Dispatch/FastIo/IRP Hook 检查。 |
 | System Notify | 部分覆盖 | 回调拦截支持注册表、进程、线程、镜像、对象规则；外部回调移除支持进程/线程/镜像 notify。 | 缺全量回调枚举表、模块归属、入口反汇编；注册表/Ob/Minifilter/WFP/ETW 外部删除未完整支持。 |
