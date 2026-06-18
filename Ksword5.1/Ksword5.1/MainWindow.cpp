@@ -19,6 +19,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QScreen>
+#include <QSet>
 #include <QWindow>
 #include <QWidget>
 #include <QHBoxLayout>
@@ -264,6 +265,67 @@ namespace
         return true;
     }
 
+    // isKswordPopupTopMostTrackingEnabled 作用：
+    // - 输入：无；
+    // - 处理：从 QApplication 属性读取主窗口当前是否置顶；
+    // - 返回：true 表示后续弹出的 QDialog/QMenu 也应保持 TOPMOST，避免被主窗口遮住。
+    bool isKswordPopupTopMostTrackingEnabled()
+    {
+        QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
+        return appInstance != nullptr
+            && appInstance->property("ksword_main_window_topmost").toBool();
+    }
+
+    // applyTopMostToTopLevelWidget 作用：
+    // - 输入 widget：Qt 顶层窗口；topMostState：目标置顶状态；
+    // - 处理：把弹窗、新建工具窗、详情窗等顶层窗口同步为 TOPMOST/NOTOPMOST；
+    // - 返回：无返回值；失败静默，因为置顶同步不应阻断原有窗口生命周期。
+    void applyTopMostToTopLevelWidget(QWidget* widget, const bool topMostState)
+    {
+        if (widget == nullptr || !widget->isWindow())
+        {
+            return;
+        }
+
+        const HWND windowHandle = reinterpret_cast<HWND>(widget->winId());
+        if (windowHandle == nullptr || ::IsWindow(windowHandle) == FALSE)
+        {
+            return;
+        }
+
+        (void)::SetWindowPos(
+            windowHandle,
+            topMostState ? HWND_TOPMOST : HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+
+    // syncTopMostForAllAuxiliaryTopLevelWidgets 作用：
+    // - 输入 mainWindow：主窗口指针；topMostState：目标置顶状态；
+    // - 处理：遍历当前 Qt 顶层窗口，除主窗口外统一继承或取消置顶；
+    // - 返回：无返回值。
+    void syncTopMostForAllAuxiliaryTopLevelWidgets(QWidget* mainWindow, const bool topMostState)
+    {
+        QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
+        if (appInstance == nullptr)
+        {
+            return;
+        }
+
+        const QWidgetList topLevelWidgetList = appInstance->topLevelWidgets();
+        for (QWidget* widget : topLevelWidgetList)
+        {
+            if (widget == nullptr || widget == mainWindow)
+            {
+                continue;
+            }
+            applyTopMostToTopLevelWidget(widget, topMostState);
+        }
+    }
+
     // applyAppBarAwareMaximizedBounds 作用：
     // - 输入 windowHandle：收到 WM_GETMINMAXINFO 的顶层窗口句柄；
     // - 输入 minMaxInfo：系统传入的最大化尺寸/位置结构；
@@ -365,6 +427,51 @@ namespace
             {
                 menuWidget->setStyleSheet(KswordTheme::ContextMenuStyle());
                 menuWidget->setProperty("ksword_auto_context_menu_themed", true);
+            }
+            if (isKswordPopupTopMostTrackingEnabled())
+            {
+                applyTopMostToTopLevelWidget(menuWidget, true);
+            }
+
+            return QObject::eventFilter(watchedObject, eventObject);
+        }
+    };
+
+    // GlobalTopLevelTopMostFilter 作用：
+    // - 输入：QApplication 全局事件流；
+    // - 处理：主窗口置顶时，对所有后续显示的顶层窗口同步 HWND_TOPMOST；
+    // - 返回：始终交回 Qt 默认处理，不吞事件。
+    class GlobalTopLevelTopMostFilter final : public QObject
+    {
+    public:
+        explicit GlobalTopLevelTopMostFilter(QObject* parent = nullptr)
+            : QObject(parent)
+        {
+        }
+
+    protected:
+        bool eventFilter(QObject* watchedObject, QEvent* eventObject) override
+        {
+            if (watchedObject == nullptr || eventObject == nullptr)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            const QEvent::Type eventType = eventObject->type();
+            if (eventType != QEvent::Show && eventType != QEvent::WindowActivate)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            QWidget* widget = qobject_cast<QWidget*>(watchedObject);
+            if (widget == nullptr || widget->isWindow() == false)
+            {
+                return QObject::eventFilter(watchedObject, eventObject);
+            }
+
+            if (isKswordPopupTopMostTrackingEnabled())
+            {
+                applyTopMostToTopLevelWidget(widget, true);
             }
 
             return QObject::eventFilter(watchedObject, eventObject);
@@ -773,6 +880,13 @@ namespace
         {
             contextMenuThemeFilter = new GlobalContextMenuThemeFilter(appInstance);
             appInstance->installEventFilter(contextMenuThemeFilter);
+        }
+
+        static GlobalTopLevelTopMostFilter* topLevelTopMostFilter = nullptr;
+        if (topLevelTopMostFilter == nullptr)
+        {
+            topLevelTopMostFilter = new GlobalTopLevelTopMostFilter(appInstance);
+            appInstance->installEventFilter(topLevelTopMostFilter);
         }
     }
 
@@ -1776,6 +1890,226 @@ namespace
         return true;
     }
 
+    // findExplorerProcessInSession 作用：
+    // - 输入 currentSessionId：当前交互 Session；
+    // - 处理：遍历进程快照，寻找同 Session 的 explorer.exe；
+    // - 返回：true 表示找到可用候选，并输出 PID/进程名。
+    bool findExplorerProcessInSession(
+        const DWORD currentSessionId,
+        DWORD* const processIdOut,
+        QString* const processNameOut,
+        QString* const detailTextOut)
+    {
+        if (processIdOut != nullptr)
+        {
+            *processIdOut = 0;
+        }
+        if (processNameOut != nullptr)
+        {
+            processNameOut->clear();
+        }
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+
+        ScopedHandle snapshotHandle(::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+        if (!snapshotHandle.isValid())
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = formatWin32StepFailure(QStringLiteral("CreateToolhelp32Snapshot"), ::GetLastError());
+            }
+            return false;
+        }
+
+        PROCESSENTRY32W processEntry{};
+        processEntry.dwSize = sizeof(processEntry);
+        if (::Process32FirstW(snapshotHandle.get(), &processEntry) == FALSE)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = formatWin32StepFailure(QStringLiteral("Process32FirstW"), ::GetLastError());
+            }
+            return false;
+        }
+
+        do
+        {
+            DWORD processSessionId = 0;
+            if (::ProcessIdToSessionId(processEntry.th32ProcessID, &processSessionId) == FALSE)
+            {
+                continue;
+            }
+            if (processSessionId != currentSessionId)
+            {
+                continue;
+            }
+            if (_wcsicmp(processEntry.szExeFile, L"explorer.exe") != 0)
+            {
+                continue;
+            }
+
+            if (processIdOut != nullptr)
+            {
+                *processIdOut = processEntry.th32ProcessID;
+            }
+            if (processNameOut != nullptr)
+            {
+                *processNameOut = QString::fromWCharArray(processEntry.szExeFile);
+            }
+            return true;
+        } while (::Process32NextW(snapshotHandle.get(), &processEntry) != FALSE);
+
+        if (detailTextOut != nullptr)
+        {
+            *detailTextOut = QStringLiteral("当前 Session 未找到 explorer.exe。");
+        }
+        return false;
+    }
+
+    // quoteQStringCommandLineArgument 作用：
+    // - 输入 argumentText：Qt 字符串参数；
+    // - 处理：使用最小 Win32 命令行转义包裹双引号；
+    // - 返回：可拼入 CreateProcessAsUserW commandLine 的参数片段。
+    QString quoteQStringCommandLineArgument(QString argumentText)
+    {
+        argumentText.replace(QStringLiteral("\""), QStringLiteral("\\\""));
+        return QStringLiteral("\"%1\"").arg(argumentText);
+    }
+
+    // launchSelfAsUnelevatedFromExplorer 作用：
+    // - 输入 argumentList：当前 QApplication 参数列表；
+    // - 处理：复制同 Session explorer.exe 的主令牌启动自身，从 UIAccess/SYSTEM 回到普通用户态；
+    // - 返回：true 表示普通实例已经创建，false 表示调用方可回退 ShellExecute。
+    bool launchSelfAsUnelevatedFromExplorer(const QStringList& argumentList, QString* detailTextOut)
+    {
+        if (detailTextOut != nullptr)
+        {
+            detailTextOut->clear();
+        }
+
+        wchar_t executablePathBuffer[MAX_PATH] = {};
+        const DWORD executablePathLength = ::GetModuleFileNameW(nullptr, executablePathBuffer, MAX_PATH);
+        if (executablePathLength == 0 || executablePathLength >= MAX_PATH)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = formatWin32StepFailure(QStringLiteral("GetModuleFileNameW"), ::GetLastError());
+            }
+            return false;
+        }
+
+        DWORD currentSessionId = 0;
+        if (::ProcessIdToSessionId(::GetCurrentProcessId(), &currentSessionId) == FALSE)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = formatWin32StepFailure(QStringLiteral("ProcessIdToSessionId"), ::GetLastError());
+            }
+            return false;
+        }
+
+        DWORD explorerPid = 0;
+        QString explorerName;
+        QString findDetailText;
+        if (!findExplorerProcessInSession(currentSessionId, &explorerPid, &explorerName, &findDetailText))
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = findDetailText;
+            }
+            return false;
+        }
+
+        ScopedHandle explorerProcessHandle(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, explorerPid));
+        if (!explorerProcessHandle.isValid())
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = formatWin32StepFailure(QStringLiteral("OpenProcess(%1)").arg(explorerName), ::GetLastError());
+            }
+            return false;
+        }
+
+        HANDLE rawExplorerTokenHandle = nullptr;
+        if (::OpenProcessToken(explorerProcessHandle.get(), TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY, &rawExplorerTokenHandle) == FALSE)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = formatWin32StepFailure(QStringLiteral("OpenProcessToken(%1)").arg(explorerName), ::GetLastError());
+            }
+            return false;
+        }
+        ScopedHandle explorerTokenHandle(rawExplorerTokenHandle);
+
+        SECURITY_ATTRIBUTES securityAttributes{};
+        securityAttributes.nLength = sizeof(securityAttributes);
+        HANDLE rawPrimaryTokenHandle = nullptr;
+        if (::DuplicateTokenEx(
+            explorerTokenHandle.get(),
+            MAXIMUM_ALLOWED,
+            &securityAttributes,
+            SecurityImpersonation,
+            TokenPrimary,
+            &rawPrimaryTokenHandle) == FALSE)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = formatWin32StepFailure(QStringLiteral("DuplicateTokenEx(explorer)"), ::GetLastError());
+            }
+            return false;
+        }
+        ScopedHandle primaryTokenHandle(rawPrimaryTokenHandle);
+
+        QString commandLineText = quoteQStringCommandLineArgument(QString::fromWCharArray(executablePathBuffer));
+        for (int index = 1; index < argumentList.size(); ++index)
+        {
+            commandLineText += QLatin1Char(' ');
+            commandLineText += quoteQStringCommandLineArgument(argumentList.at(index));
+        }
+
+        std::wstring mutableCommandLine = commandLineText.toStdWString();
+        STARTUPINFOW startupInfo{};
+        startupInfo.cb = sizeof(startupInfo);
+        PROCESS_INFORMATION processInfo{};
+        const BOOL createOk = ::CreateProcessAsUserW(
+            primaryTokenHandle.get(),
+            nullptr,
+            mutableCommandLine.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            0,
+            nullptr,
+            nullptr,
+            &startupInfo,
+            &processInfo);
+        if (createOk == FALSE)
+        {
+            if (detailTextOut != nullptr)
+            {
+                *detailTextOut = formatWin32StepFailure(QStringLiteral("CreateProcessAsUserW(explorer token)"), ::GetLastError());
+            }
+            return false;
+        }
+
+        if (processInfo.hThread != nullptr)
+        {
+            ::CloseHandle(processInfo.hThread);
+        }
+        if (processInfo.hProcess != nullptr)
+        {
+            ::CloseHandle(processInfo.hProcess);
+        }
+
+        if (detailTextOut != nullptr)
+        {
+            *detailTextOut = QStringLiteral("已通过 explorer.exe 普通用户令牌启动新实例，PID=%1。").arg(processInfo.dwProcessId);
+        }
+        return true;
+    }
+
     QString serviceStateToText(const DWORD serviceState)
     {
         switch (serviceState)
@@ -2577,10 +2911,23 @@ void MainWindow::showEvent(QShowEvent* event)
 
     if (m_deferredDockInitializationStarted)
     {
+        QTimer::singleShot(0, this, [this]()
+            {
+                ensureVisibleLazyDocksInitialized(QStringLiteral("showEvent-repeat"));
+            });
         return;
     }
 
     m_deferredDockInitializationStarted = true;
+    ensureVisibleLazyDocksInitialized(QStringLiteral("showEvent-immediate"));
+    QTimer::singleShot(0, this, [this]()
+        {
+            ensureVisibleLazyDocksInitialized(QStringLiteral("showEvent-deferred-0"));
+        });
+    QTimer::singleShot(250, this, [this]()
+        {
+            ensureVisibleLazyDocksInitialized(QStringLiteral("showEvent-deferred-250"));
+        });
 
     // 懒加载策略修正：
     // - 旧逻辑会在主窗口 show 后继续把所有未初始化 Dock 逐个补载；
@@ -3174,6 +3521,11 @@ void MainWindow::setPinnedWindowState(const bool pinnedState, const bool emitLog
 {
     if (m_windowPinned == pinnedState)
     {
+        if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
+        {
+            appInstance->setProperty("ksword_main_window_topmost", m_windowPinned);
+        }
+        syncTopMostForAllAuxiliaryTopLevelWidgets(this, m_windowPinned);
         if (m_customTitleBar != nullptr)
         {
             m_customTitleBar->setPinnedState(m_windowPinned);
@@ -3213,6 +3565,11 @@ void MainWindow::setPinnedWindowState(const bool pinnedState, const bool emitLog
     }
 
     m_windowPinned = pinnedState;
+    if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
+    {
+        appInstance->setProperty("ksword_main_window_topmost", m_windowPinned);
+    }
+    syncTopMostForAllAuxiliaryTopLevelWidgets(this, m_windowPinned);
     if (m_customTitleBar != nullptr)
     {
         m_customTitleBar->setPinnedState(m_windowPinned);
@@ -4611,12 +4968,29 @@ void MainWindow::handleUiAccessButtonClicked()
 
     if (hasUiAccessPrivilege())
     {
-        QMessageBox::information(
-            this,
-            QStringLiteral("UIAccess"),
-            QStringLiteral("当前实例已经带 UIAccess 令牌位。\n\n证书路径：%1")
-                .arg(certificatePath));
-        refreshPrivilegeStatusButtons();
+        QString launchDetailText;
+        const bool launchOk = launchSelfAsUnelevatedFromExplorer(QCoreApplication::arguments(), &launchDetailText);
+        if (!launchOk)
+        {
+            kLogEvent logEvent;
+            err << logEvent
+                << "[MainWindow][UIAccess] 从 UIAccess 降级重启普通实例失败: "
+                << launchDetailText.toStdString()
+                << eol;
+            QMessageBox::warning(
+                this,
+                QStringLiteral("UIAccess"),
+                QStringLiteral("普通权限重启失败，当前实例保持运行。\n\n%1").arg(launchDetailText));
+            refreshPrivilegeStatusButtons();
+            return;
+        }
+
+        kLogEvent logEvent;
+        info << logEvent
+            << "[MainWindow][UIAccess] 当前实例已带 UIAccess，已启动普通权限实例并准备正常退出: "
+            << launchDetailText.toStdString()
+            << eol;
+        close();
         return;
     }
 
@@ -6112,6 +6486,28 @@ bool MainWindow::restoreDockLayoutFromConfig()
         << ", bytes="
         << savedStateBytes.size()
         << eol;
+    if (restoreOk)
+    {
+        // ADS 恢复当前激活 Dock 时不会重新触发用户点击事件：
+        // 如果恢复到惰性占位页（典型是上次退出时停在“内核”Dock），这里主动加载一次，
+        // 避免启动后看到纯黑 placeholder 而没有真实内容挂载。
+        ensureVisibleLazyDocksInitialized(QStringLiteral("restoreDockLayout"));
+        QTimer::singleShot(0, this, [this]()
+            {
+                ensureVisibleLazyDocksInitialized(QStringLiteral("restoreDockLayout-deferred-0"));
+                if (m_dockKernel != nullptr && !m_dockKernel->property("ks_lazy_initialized").toBool())
+                {
+                    ensureDockContentInitialized(m_dockKernel);
+                }
+            });
+        QTimer::singleShot(250, this, [this]()
+            {
+                if (m_dockKernel != nullptr && !m_dockKernel->property("ks_lazy_initialized").toBool())
+                {
+                    ensureDockContentInitialized(m_dockKernel);
+                }
+            });
+    }
     return restoreOk;
 }
 
@@ -6188,6 +6584,64 @@ void MainWindow::initializeNextDeferredDock()
     }
 
     reportStartupProgress(98, QStringLiteral("剩余页面补载完成。"));
+}
+
+void MainWindow::ensureVisibleLazyDocksInitialized(const QString& reasonText)
+{
+    if (m_pDockManager == nullptr)
+    {
+        return;
+    }
+
+    const QList<ads::CDockWidget*> candidateDockList{
+        m_dockWelcome,
+        m_dockProcess,
+        m_dockNetwork,
+        m_dockMemory,
+        m_dockFile,
+        m_dockDriver,
+        m_dockKernel,
+        m_dockMonitorTab,
+        m_dockHardware,
+        m_dockPrivilege,
+        m_dockWindow,
+        m_dockRegistry,
+        m_dockHandle,
+        m_dockStartup,
+        m_dockService,
+        m_dockMisc
+    };
+
+    ads::CDockWidget* focusedDockWidget = m_pDockManager->focusedDockWidget();
+    for (ads::CDockWidget* dockWidget : candidateDockList)
+    {
+        if (dockWidget == nullptr || dockWidget->property("ks_lazy_initialized").toBool())
+        {
+            continue;
+        }
+
+        const bool shouldInitialize =
+            dockWidget == focusedDockWidget ||
+            dockWidget->isCurrentTab() ||
+            dockWidget->isVisible();
+        if (!shouldInitialize)
+        {
+            continue;
+        }
+
+        kLogEvent lazyDockEvent;
+        info << lazyDockEvent
+            << "[MainWindow][LazyDock] 可见惰性 Dock 触发即时加载, reason="
+            << reasonText.toStdString()
+            << ", dock="
+            << dockWidget->property("ks_lazy_key").toString().toStdString()
+            << ", current="
+            << (dockWidget->isCurrentTab() ? "true" : "false")
+            << ", visible="
+            << (dockWidget->isVisible() ? "true" : "false")
+            << eol;
+        ensureDockContentInitialized(dockWidget);
+    }
 }
 
 void MainWindow::initDockWidgets()

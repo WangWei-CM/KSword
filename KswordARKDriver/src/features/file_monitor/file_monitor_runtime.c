@@ -75,6 +75,7 @@ static const FLT_OPERATION_REGISTRATION g_KswordArkFileMonitorOperations[] =
     { IRP_MJ_READ, 0, KswordArkMinifilterPreOperation, NULL },
     { IRP_MJ_WRITE, 0, KswordArkMinifilterPreOperation, NULL },
     { IRP_MJ_SET_INFORMATION, 0, KswordArkMinifilterPreOperation, KswordArkMinifilterPostOperation },
+    { IRP_MJ_FILE_SYSTEM_CONTROL, 0, KswordArkMinifilterPreOperation, KswordArkMinifilterPostOperation },
     { IRP_MJ_CLEANUP, 0, KswordArkMinifilterPreOperation, NULL },
     { IRP_MJ_CLOSE, 0, KswordArkMinifilterPreOperation, NULL },
     { IRP_MJ_OPERATION_END }
@@ -537,6 +538,12 @@ Return Value:
     else if (Data->Iopb->MajorFunction == IRP_MJ_SET_INFORMATION) {
         Event->fileInformationClass = Data->Iopb->Parameters.SetFileInformation.FileInformationClass;
     }
+    else if (Data->Iopb->MajorFunction == IRP_MJ_FILE_SYSTEM_CONTROL) {
+        Event->fsControlCode = Data->Iopb->Parameters.FileSystemControl.Common.FsControlCode;
+        Event->fsInputBufferLength = Data->Iopb->Parameters.FileSystemControl.Common.InputBufferLength;
+        Event->fsOutputBufferLength = Data->Iopb->Parameters.FileSystemControl.Common.OutputBufferLength;
+        Event->fieldFlags |= KSWORD_ARK_FILE_MONITOR_FIELD_FSCTL_PRESENT;
+    }
 
     nameStatus = FltGetFileNameInformation(
         Data,
@@ -715,6 +722,7 @@ Return Value:
     }
 
     if (Data->Iopb->MajorFunction == IRP_MJ_CREATE ||
+        Data->Iopb->MajorFunction == IRP_MJ_FILE_SYSTEM_CONTROL ||
         Data->Iopb->MajorFunction == IRP_MJ_SET_INFORMATION) {
         return FLT_PREOP_SUCCESS_WITH_CALLBACK;
     }

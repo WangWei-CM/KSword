@@ -8,7 +8,12 @@
 // ============================================================
 
 #if defined(_WIN32) && !defined(_KERNEL_MODE) && !defined(_NTDDK_) && !defined(_NTIFS_)
+// User-mode translation units may include this shared protocol header before
+// any Windows SDK I/O-control header.  Pull in windows.h for SDK base types and
+// winioctl.h for CTL_CODE/access-mask macros first; the fallback definitions
+// below remain reserved for unusual minimal include environments.
 #include <windows.h>
+#include <winioctl.h>
 #endif
 
 #ifndef FILE_DEVICE_UNKNOWN

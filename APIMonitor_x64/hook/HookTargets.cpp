@@ -6,10 +6,18 @@
 
 #include <WinReg.h>
 #include <shellapi.h>
+#include <winioctl.h>
 #include <winternl.h>
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#endif
+
+#ifndef FSCTL_REQUEST_OPLOCK
+#define FSCTL_REQUEST_OPLOCK CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 144, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#endif
+#ifndef FSCTL_REQUEST_FILTER_OPLOCK
+#define FSCTL_REQUEST_FILTER_OPLOCK CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 23, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #endif
 
 typedef enum _KS_FILE_INFORMATION_CLASS
@@ -398,6 +406,31 @@ namespace apimon
         InlineHookRecord g_ntGetContextThreadHook{};
         InlineHookRecord g_ntSetContextThreadHook{};
         std::mutex g_hookOperationMutex;
+
+        const wchar_t* FsctlCodeToText(const ULONG fsControlCode)
+        {
+            switch (fsControlCode)
+            {
+            case FSCTL_REQUEST_OPLOCK:
+                return L"FSCTL_REQUEST_OPLOCK";
+            case FSCTL_REQUEST_BATCH_OPLOCK:
+                return L"FSCTL_REQUEST_BATCH_OPLOCK";
+            case FSCTL_REQUEST_FILTER_OPLOCK:
+                return L"FSCTL_REQUEST_FILTER_OPLOCK";
+            case FSCTL_OPLOCK_BREAK_ACKNOWLEDGE:
+                return L"FSCTL_OPLOCK_BREAK_ACKNOWLEDGE";
+            case FSCTL_OPBATCH_ACK_CLOSE_PENDING:
+                return L"FSCTL_OPBATCH_ACK_CLOSE_PENDING";
+            case FSCTL_OPLOCK_BREAK_NOTIFY:
+                return L"FSCTL_OPLOCK_BREAK_NOTIFY";
+            case FSCTL_REQUEST_OPLOCK_LEVEL_1:
+                return L"FSCTL_REQUEST_OPLOCK_LEVEL_1";
+            case FSCTL_REQUEST_OPLOCK_LEVEL_2:
+                return L"FSCTL_REQUEST_OPLOCK_LEVEL_2";
+            default:
+                return L"UNKNOWN_FSCTL";
+            }
+        }
 
         CreateFileAFn g_createFileAOriginal = nullptr;
         CreateFileWFn g_createFileWOriginal = nullptr;
@@ -3706,14 +3739,20 @@ namespace apimon
 
             const NTSTATUS statusValue = g_ntFsControlFileOriginal(fileHandle, eventHandle, apcRoutinePointer, apcContextPointer, ioStatusBlockPointer, fsControlCode, inputBufferPointer, inputBufferLength, outputBufferPointer, outputBufferLength);
             wchar_t detailBuffer[ks::winapi_monitor::kMaxDetailChars] = {};
-            AppendWideText(detailBuffer, L"handle=");
+            AppendWideText(detailBuffer, L"fsctlName=");
+            AppendWideText(detailBuffer, FsctlCodeToText(fsControlCode));
+            AppendWideText(detailBuffer, L" handle=");
             AppendHexText(detailBuffer, reinterpret_cast<std::uint64_t>(fileHandle));
             AppendWideText(detailBuffer, L" code=");
             AppendHexText(detailBuffer, fsControlCode);
+            AppendWideText(detailBuffer, L" status=");
+            AppendHexText(detailBuffer, static_cast<std::uint32_t>(statusValue));
             AppendWideText(detailBuffer, L" in=");
             AppendUnsignedText(detailBuffer, inputBufferLength);
             AppendWideText(detailBuffer, L" out=");
             AppendUnsignedText(detailBuffer, outputBufferLength);
+            AppendWideText(detailBuffer, L" info=");
+            AppendUnsignedText(detailBuffer, ioStatusBlockPointer != nullptr ? static_cast<unsigned long long>(ioStatusBlockPointer->Information) : 0);
             SendRawEventWithStatus(ks::winapi_monitor::EventCategory::File, L"ntdll", L"NtFsControlFile", statusValue, detailBuffer);
             return statusValue;
         }

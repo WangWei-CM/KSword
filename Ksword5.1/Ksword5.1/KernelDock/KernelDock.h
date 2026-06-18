@@ -31,6 +31,7 @@ class QTableWidget;
 class QTabWidget;
 class QTreeWidget;
 class QVBoxLayout;
+class QShowEvent;
 class CodeEditorWidget;
 class CallbackInterceptController;
 
@@ -431,6 +432,13 @@ public:
     // - 作用：对外触发 DynData 页初始化和异步刷新。
     void requestDynDataRefresh();
 
+protected:
+    // showEvent：
+    // - 输入 event：Qt 显示事件；
+    // - 处理：内核 Dock 被 ADS 延迟挂载/恢复后，再次确保当前内部页真实初始化；
+    // - 返回：无返回值。
+    void showEvent(QShowEvent* event) override;
+
 private:
     // ==================== UI 初始化 ====================
     // initializeUi：
@@ -829,6 +837,9 @@ private:
     // ==================== 对象命名空间页 ====================
     QWidget* m_objectNamespacePage = nullptr;                  // m_objectNamespacePage：对象命名空间页容器。
     QVBoxLayout* m_objectNamespaceLayout = nullptr;            // m_objectNamespaceLayout：对象命名空间页布局。
+    QTabWidget* m_objectNamespaceInnerTabWidget = nullptr;      // m_objectNamespaceInnerTabWidget：对象命名空间内部能力页签。
+    QWidget* m_objectNamespaceOverviewPage = nullptr;           // m_objectNamespaceOverviewPage：对象命名空间总览页。
+    QVBoxLayout* m_objectNamespaceOverviewLayout = nullptr;     // m_objectNamespaceOverviewLayout：对象命名空间总览页布局。
     QHBoxLayout* m_objectNamespaceToolLayout = nullptr;        // m_objectNamespaceToolLayout：对象命名空间工具栏布局。
     QPushButton* m_refreshObjectNamespaceButton = nullptr;     // m_refreshObjectNamespaceButton：对象命名空间刷新按钮。
     QLineEdit* m_objectNamespaceFilterEdit = nullptr;          // m_objectNamespaceFilterEdit：对象命名空间关键词过滤输入框。

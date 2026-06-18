@@ -69,6 +69,10 @@ KswordARKFileMonitorMapMajorToOperation(
         MinorFunction,
         Parameters);
 
+    if (MajorFunction == IRP_MJ_FILE_SYSTEM_CONTROL) {
+        return KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
+    }
+
     switch (minifilterOperation) {
     case KSWORD_ARK_MINIFILTER_OP_CREATE:
         return KSWORD_ARK_FILE_MONITOR_OPERATION_CREATE;

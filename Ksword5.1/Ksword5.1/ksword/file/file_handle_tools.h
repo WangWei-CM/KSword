@@ -110,6 +110,30 @@ namespace ks::file
         bool directoryMode = false;
     };
 
+    // ReparsePointQueryResult 作用：
+    // - 表示一次 FSCTL_GET_REPARSE_POINT 查询的完整结果；
+    // - 既保留结构化字段，也保留降级展示所需的原始信息；
+    // - 调用方可以在属性页、列表列文本或右键动作里复用同一份结果。
+    struct ReparsePointQueryResult
+    {
+        bool pathOpened = false;                 // pathOpened：是否成功以“打开重解析点”的方式拿到句柄。
+        bool querySucceeded = false;             // querySucceeded：FSCTL_GET_REPARSE_POINT 是否成功返回。
+        bool isReparsePoint = false;             // isReparsePoint：目标是否确认为重解析点。
+        bool isMicrosoftTag = false;             // isMicrosoftTag：tag 是否为 Microsoft 预定义 tag。
+        bool isNameSurrogate = false;            // isNameSurrogate：是否为“命名代理”类重解析点。
+        bool isRelative = false;                 // isRelative：仅对符号链接有意义，表示是否为相对链接。
+        std::uint32_t tag = 0;                   // tag：重解析点 tag 的原始 32 位值。
+        std::wstring tagName;                    // tagName：人类可读的 tag 名称，例如 IO_REPARSE_TAG_SYMLINK。
+        std::wstring kindName;                   // kindName：用于 UI 展示的分类名，例如 SYMLINK/JUNCTION/MOUNT_POINT。
+        std::wstring substituteName;            // substituteName：重解析缓冲中的 Substitute Name。
+        std::wstring printName;                 // printName：重解析缓冲中的 Print Name。
+        std::wstring resolvedTargetPath;        // resolvedTargetPath：尽量解析后的最终目标路径。
+        std::wstring rawPayloadText;             // rawPayloadText：未能结构化解析时的原始文本或摘要。
+        std::wstring rawHexPreview;             // rawHexPreview：原始缓冲的十六进制摘要，便于兜底排障。
+        std::wstring errorText;                 // errorText：打开或查询失败原因；不阻塞 UI 展示。
+        std::uint32_t win32Error = 0;            // win32Error：原始 GetLastError 结果。
+    };
+
     // HandleSnapshotOptions 作用：
     // - 为句柄 Dock 后台刷新打包输入条件；
     // - 字段均为 std 类型，避免后台层读取 Qt 控件。
@@ -259,6 +283,20 @@ namespace ks::file
         HANDLE objectHandle,
         ULONG informationClass,
         std::wstring& textOut);
+
+    // QueryReparsePointInfo 作用：
+    // - 以 FILE_FLAG_OPEN_REPARSE_POINT 的方式打开文件或目录；
+    // - 通过 FSCTL_GET_REPARSE_POINT 读取重解析缓冲；
+    // - 对 SYMLINK / MOUNT_POINT / APPEXECLINK 生成可读结果，并保留原始降级信息。
+    // 入参 absolutePath：
+    // - 目标文件或目录的 DOS/UNC 绝对路径。
+    // 入参 directoryHint：
+    // - true 表示目标更可能是目录，可附加 FILE_FLAG_BACKUP_SEMANTICS 打开目录句柄。
+    // 返回值：
+    // - 结构体本身始终返回，调用方根据 pathOpened/querySucceeded/isReparsePoint 判断展示层级。
+    ReparsePointQueryResult QueryReparsePointInfo(
+        const std::wstring& absolutePath,
+        bool directoryHint);
 
     // QueryObjectBasicInfo 作用：读取对象 HandleCount/PointerCount。
     bool QueryObjectBasicInfo(

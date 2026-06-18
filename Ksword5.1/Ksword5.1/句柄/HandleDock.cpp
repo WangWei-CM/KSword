@@ -717,27 +717,84 @@ void HandleDock::applyHandleRefreshResult(
 
     m_allRows = refreshResult.rows;
     m_typeNameCacheByIndex = refreshResult.updatedTypeNameCacheByIndex;
+    if (!m_typeNameMapByIndexFromObjectTab.empty())
+    {
+        for (HandleRow& row : m_allRows)
+        {
+            const auto typeIt = m_typeNameMapByIndexFromObjectTab.find(row.typeIndex);
+            if (typeIt != m_typeNameMapByIndexFromObjectTab.end() && !typeIt->second.empty())
+            {
+                row.typeName = QString::fromStdString(typeIt->second);
+            }
+        }
+    }
     refreshTypeFilterItemsFromAllRows();
     applyLocalHandleFilters();
 
+    const HandleEnumMode currentEnumMode = resolveHandleEnumModeFromText(
+        m_enumModeCombo != nullptr ? m_enumModeCombo->currentText() : QString());
+    const bool canResolveNames =
+        currentEnumMode != HandleEnumMode::UserSnapshot &&
+        m_resolveNameCheckBox != nullptr &&
+        m_resolveNameCheckBox->isChecked() &&
+        !m_typeNameMapByIndexFromObjectTab.empty();
+    const bool hasRowsWaitingForObjectName = std::any_of(
+        m_allRows.begin(),
+        m_allRows.end(),
+        [](const HandleRow& row)
+        {
+            return !row.objectNameAvailable && !row.objectNameFailed;
+        });
+    if (canResolveNames && hasRowsWaitingForObjectName)
+    {
+        if (!m_objectNameRetryAfterTypeMapQueued)
+        {
+            m_objectNameRetryAfterTypeMapQueued = true;
+            m_refreshPending = true;
+        }
+    }
+
     QString statusText = QStringLiteral(
-        "● 刷新完成 %1 ms | 总句柄:%2 | 显示:%3 | 计数已解析:%4 | 名称已解析:%5 | 名称回退:%6 | 类型映射命中:%7 | R0:%8 | 仅R3:%9 | 仅R0:%10 | 双源:%11")
+        "● 完成 %1 ms | 总:%2 | 显示:%3 | 名称:%4 | 类型:%5 | R0:%6")
         .arg(refreshResult.elapsedMs)
         .arg(refreshResult.totalHandleCount)
         .arg(m_rows.size())
-        .arg(refreshResult.basicInfoResolvedCount)
         .arg(refreshResult.resolvedNameCount)
-        .arg(refreshResult.fallbackNameCount)
         .arg(refreshResult.objectTypeMappedCount)
-        .arg(refreshResult.kernelHandleCount)
-        .arg(refreshResult.userOnlyCount)
-        .arg(refreshResult.kernelOnlyCount)
-        .arg(refreshResult.bothCount);
+        .arg(refreshResult.kernelHandleCount);
     if (!refreshResult.diagnosticText.trimmed().isEmpty())
     {
-        statusText += QStringLiteral(" | %1").arg(refreshResult.diagnosticText);
+        statusText += QStringLiteral(" | 有诊断");
     }
     updateHandleStatusLabel(statusText, false);
+    if (m_statusLabel != nullptr)
+    {
+        m_statusLabel->setToolTip(QStringLiteral(
+            "总句柄:%1\n"
+            "当前显示:%2\n"
+            "计数已解析:%3\n"
+            "名称已解析:%4\n"
+            "名称回退:%5\n"
+            "类型映射命中:%6\n"
+            "R0:%7\n"
+            "仅R3:%8\n"
+            "仅R0:%9\n"
+            "双源:%10\n"
+            "诊断:%11")
+            .arg(refreshResult.totalHandleCount)
+            .arg(m_rows.size())
+            .arg(refreshResult.basicInfoResolvedCount)
+            .arg(refreshResult.resolvedNameCount)
+            .arg(refreshResult.fallbackNameCount)
+            .arg(refreshResult.objectTypeMappedCount)
+            .arg(refreshResult.kernelHandleCount)
+            .arg(refreshResult.userOnlyCount)
+            .arg(refreshResult.kernelOnlyCount)
+            .arg(refreshResult.bothCount)
+            .arg(refreshResult.diagnosticText.trimmed().isEmpty()
+                ? QStringLiteral("无")
+                : refreshResult.diagnosticText));
+    }
 
     m_refreshInProgress = false;
     kPro.set(m_refreshProgressPid, "句柄刷新完成", 0, 100.0f);
@@ -779,6 +836,7 @@ void HandleDock::applyObjectTypeRefreshResult(
 
     m_objectTypeRows = refreshResult.rows;
     m_typeNameMapByIndexFromObjectTab = refreshResult.typeNameMapByIndex;
+    m_objectNameRetryAfterTypeMapQueued = false;
     rebuildObjectTypeTable(m_objectTypeFilterEdit->text().trimmed());
 
     QString statusText = QStringLiteral("● 刷新完成 %1 ms | 类型数:%2")
@@ -793,6 +851,32 @@ void HandleDock::applyObjectTypeRefreshResult(
     m_objectTypeRefreshInProgress = false;
     kPro.set(m_objectTypeRefreshProgressPid, "对象类型刷新完成", 0, 100.0f);
     syncHandleTypeNamesFromObjectTypeMap();
+
+    const HandleEnumMode currentEnumMode = resolveHandleEnumModeFromText(
+        m_enumModeCombo != nullptr ? m_enumModeCombo->currentText() : QString());
+    const bool canResolveNames =
+        currentEnumMode != HandleEnumMode::UserSnapshot &&
+        m_resolveNameCheckBox != nullptr &&
+        m_resolveNameCheckBox->isChecked();
+    const bool hasRowsWaitingForObjectName = std::any_of(
+        m_allRows.begin(),
+        m_allRows.end(),
+        [](const HandleRow& row)
+        {
+            return !row.objectNameAvailable && !row.objectNameFailed;
+        });
+    if (canResolveNames && hasRowsWaitingForObjectName && !m_objectNameRetryAfterTypeMapQueued)
+    {
+        m_objectNameRetryAfterTypeMapQueued = true;
+        kLogEvent nameRetryEvent;
+        info << nameRetryEvent
+            << "[HandleDock] applyObjectTypeRefreshResult: object type map is ready, scheduling one handle refresh to resolve object names."
+            << eol;
+        QMetaObject::invokeMethod(this, [this]()
+            {
+                requestAsyncRefresh(true);
+            }, Qt::QueuedConnection);
+    }
 
     if (m_objectTypeRefreshPending)
     {

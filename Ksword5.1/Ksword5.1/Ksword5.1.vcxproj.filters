@@ -59,6 +59,9 @@
     <ClCompile Include="MiscDock\BootEditor\BootEditorTab.Actions.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MiscDock\ApplicationControlPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MiscDock\DiskEditor\DiskEditorBackend.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -164,6 +167,21 @@
     <ClCompile Include="KernelDock\KernelDock.Ssdt.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="KernelDock\KernelBaseNamedObjectsTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelBaseNamedObjectsWorker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelCommunicationEndpointTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDeviceDriverObjectsTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDeviceDriverObjectsWorker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KernelDock\KernelDockAtomWorker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -174,6 +192,27 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="KernelDock\KernelDockSsdtWorker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelNamedPipeTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelNamedPipeWorker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelObjectDirectoryDeepTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelObjectDirectoryDeepWorker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelObjectTypeMatrixTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelSymbolicLinkTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelSymbolicLinkWorker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MemoryDock\MemoryDock.cpp">
@@ -634,6 +673,9 @@
     <QtMoc Include="MiscDock\BootEditor\BootEditorTab.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="MiscDock\ApplicationControlPage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="MiscDock\ContextMenuCleaner\ContextMenuCleanerTab.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -783,10 +825,46 @@
     <ClInclude Include="KernelDock\KernelDockAtomWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="KernelDock\KernelBaseNamedObjectsTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelBaseNamedObjectsWorker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelCommunicationEndpointTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelDeviceDriverObjectsTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelDeviceDriverObjectsWorker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="KernelDock\KernelDockObjectNamespaceWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="KernelDock\KernelDockSsdtWorker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelNamedPipeTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelNamedPipeWorker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelObjectDirectoryDeepTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelObjectDirectoryDeepWorker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelObjectTypeMatrixTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelSymbolicLinkTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelSymbolicLinkWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Ksword.h">

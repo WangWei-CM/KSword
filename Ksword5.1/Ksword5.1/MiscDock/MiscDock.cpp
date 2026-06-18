@@ -1,6 +1,7 @@
 #include "MiscDock.h"
 
 #include "BootEditor/BootEditorTab.h"
+#include "ApplicationControlPage.h"
 #include "ContextMenuCleaner/ContextMenuCleanerTab.h"
 #include "DiskEditor/DiskEditorTab.h"
 
@@ -49,4 +50,13 @@ void MiscDock::initializeUi()
         m_diskEditorTab,
         QIcon(QStringLiteral(":/Icon/disk_storage.svg")),
         QStringLiteral("磁盘编辑"));
+
+    // 应用控制页：
+    // - 第一版仅做 AppLocker / WDAC / Defender / 事件日志只读诊断；
+    // - 不修改、不删除、不禁用任何策略。
+    m_applicationControlPage = new ks::misc::ApplicationControlPage(m_mainTabWidget);
+    m_mainTabWidget->addTab(
+        m_applicationControlPage,
+        QIcon(QStringLiteral(":/Icon/process_details.svg")),
+        QStringLiteral("应用控制"));
 }

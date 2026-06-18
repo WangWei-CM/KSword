@@ -1,6 +1,8 @@
 #include "ArkDriverClient.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstring>
 #include <sstream>
 #include <string>
 
@@ -23,6 +25,62 @@ namespace ksword::ark
                 ++length;
             }
             return std::wstring(textBuffer, textBuffer + length);
+        }
+
+        template <typename TValue>
+        void copyFileMonitorFieldIfPresent(
+            const unsigned char* entryBytes,
+            const std::size_t entrySize,
+            const std::size_t fieldOffset,
+            TValue* valueOut)
+        {
+            if (entryBytes == nullptr || valueOut == nullptr)
+            {
+                return;
+            }
+            if (entrySize < fieldOffset || (entrySize - fieldOffset) < sizeof(TValue))
+            {
+                return;
+            }
+            std::memcpy(valueOut, entryBytes + fieldOffset, sizeof(TValue));
+        }
+
+        FileMonitorEventRow parseFileMonitorEventRow(const unsigned char* entryBytes, const std::size_t entrySize)
+        {
+            FileMonitorEventRow row{};
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, version), &row.version);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, size), &row.size);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, operationType), &row.operationType);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, majorFunction), &row.majorFunction);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, minorFunction), &row.minorFunction);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, processId), &row.processId);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, threadId), &row.threadId);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, fieldFlags), &row.fieldFlags);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, desiredAccess), &row.desiredAccess);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, shareAccess), &row.shareAccess);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, createOptions), &row.createOptions);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, fileInformationClass), &row.fileInformationClass);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, resultStatus), &row.resultStatus);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, pathLengthChars), &row.pathLengthChars);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, sequence), &row.sequence);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, timeUtc100ns), &row.timeUtc100ns);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, fileObjectAddress), &row.fileObjectAddress);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, fsControlCode), &row.fsControlCode);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, fsInputBufferLength), &row.fsInputBufferLength);
+            copyFileMonitorFieldIfPresent(entryBytes, entrySize, offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, fsOutputBufferLength), &row.fsOutputBufferLength);
+
+            constexpr std::size_t pathOffset = offsetof(KSWORD_ARK_FILE_MONITOR_EVENT, path);
+            if (entryBytes != nullptr && entrySize > pathOffset)
+            {
+                const std::size_t availablePathBytes = entrySize - pathOffset;
+                const std::size_t availablePathChars = std::min<std::size_t>(
+                    KSWORD_ARK_FILE_MONITOR_PATH_CHARS,
+                    availablePathBytes / sizeof(wchar_t));
+                row.path = fixedWideToWString(
+                    reinterpret_cast<const wchar_t*>(entryBytes + pathOffset),
+                    availablePathChars);
+            }
+            return row;
         }
     }
 
@@ -244,5 +302,85 @@ namespace ksword::ark
             << ", bytesReturned=" << statusResult.io.bytesReturned;
         statusResult.io.message = stream.str();
         return statusResult;
+    }
+
+    FileMonitorDrainResult DriverClient::drainFileMonitor(const unsigned long maxEvents, const unsigned long flags) const
+    {
+        FileMonitorDrainResult drainResult{};
+        const unsigned long requestedEvents = (maxEvents == 0UL) ? 128UL : std::min<unsigned long>(maxEvents, 512UL);
+        constexpr std::size_t responseHeaderBytes =
+            sizeof(KSWORD_ARK_FILE_MONITOR_DRAIN_RESPONSE) - sizeof(KSWORD_ARK_FILE_MONITOR_EVENT);
+        const std::size_t outputBytes =
+            responseHeaderBytes + (static_cast<std::size_t>(requestedEvents) * sizeof(KSWORD_ARK_FILE_MONITOR_EVENT));
+
+        KSWORD_ARK_FILE_MONITOR_DRAIN_REQUEST request{};
+        request.maxEvents = requestedEvents;
+        request.flags = flags;
+        std::vector<unsigned char> outputBuffer(outputBytes);
+
+        drainResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_FILE_MONITOR_DRAIN,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            outputBuffer.data(),
+            static_cast<unsigned long>(outputBuffer.size()));
+        if (!drainResult.io.ok)
+        {
+            drainResult.io.message =
+                "DeviceIoControl(IOCTL_KSWORD_ARK_FILE_MONITOR_DRAIN) failed, error=" +
+                std::to_string(drainResult.io.win32Error);
+            return drainResult;
+        }
+        if (drainResult.io.bytesReturned < responseHeaderBytes)
+        {
+            drainResult.io.ok = false;
+            drainResult.io.win32Error = ERROR_INSUFFICIENT_BUFFER;
+            drainResult.io.message =
+                "file-monitor drain response too small, bytesReturned=" +
+                std::to_string(drainResult.io.bytesReturned);
+            return drainResult;
+        }
+
+        KSWORD_ARK_FILE_MONITOR_DRAIN_RESPONSE responseHeader{};
+        std::memcpy(&responseHeader, outputBuffer.data(), responseHeaderBytes);
+        drainResult.version = static_cast<std::uint32_t>(responseHeader.version);
+        drainResult.totalQueuedBeforeDrain = static_cast<std::uint32_t>(responseHeader.totalQueuedBeforeDrain);
+        drainResult.returnedCount = static_cast<std::uint32_t>(responseHeader.returnedCount);
+        drainResult.entrySize = static_cast<std::uint32_t>(responseHeader.entrySize);
+        drainResult.droppedCount = static_cast<std::uint32_t>(responseHeader.droppedCount);
+        drainResult.runtimeFlags = static_cast<std::uint32_t>(responseHeader.runtimeFlags);
+        drainResult.ringCapacity = static_cast<std::uint32_t>(responseHeader.ringCapacity);
+
+        if (drainResult.entrySize == 0U)
+        {
+            drainResult.io.ok = false;
+            drainResult.io.win32Error = ERROR_INVALID_DATA;
+            drainResult.io.message = "file-monitor drain entrySize is zero.";
+            return drainResult;
+        }
+
+        const std::size_t availableEventBytes = drainResult.io.bytesReturned - responseHeaderBytes;
+        const std::size_t availableEvents = availableEventBytes / drainResult.entrySize;
+        const std::size_t eventsToParse = std::min<std::size_t>(
+            static_cast<std::size_t>(drainResult.returnedCount),
+            availableEvents);
+        const unsigned char* firstEntry = outputBuffer.data() + responseHeaderBytes;
+        drainResult.events.reserve(eventsToParse);
+        for (std::size_t eventIndex = 0U; eventIndex < eventsToParse; ++eventIndex)
+        {
+            drainResult.events.push_back(parseFileMonitorEventRow(
+                firstEntry + (eventIndex * drainResult.entrySize),
+                drainResult.entrySize));
+        }
+
+        std::ostringstream stream;
+        stream << "file-monitor drain returned=" << drainResult.returnedCount
+            << ", parsed=" << drainResult.events.size()
+            << ", queuedBefore=" << drainResult.totalQueuedBeforeDrain
+            << ", dropped=" << drainResult.droppedCount
+            << ", entrySize=" << drainResult.entrySize
+            << ", bytesReturned=" << drainResult.io.bytesReturned;
+        drainResult.io.message = stream.str();
+        return drainResult;
     }
 }

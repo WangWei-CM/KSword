@@ -179,16 +179,21 @@ namespace ks::file
         }
 
         // ReadAsciiAtOffset reads a NUL-terminated ANSI/UTF-8-ish PE string.
-        // PE names are byte strings, and UTF-8 conversion preserves ASCII exactly.
+        // Inputs are the mapped file byte array and a validated file offset. The
+        // loop is capped so malformed PE files cannot turn a missing NUL byte into
+        // a whole-file string allocation. The return value is empty when the offset
+        // is outside the file, otherwise it contains at most kMaxPeStringBytes bytes.
         std::wstring ReadAsciiAtOffset(const std::vector<std::uint8_t>& fileBytes, std::uint64_t offsetValue)
         {
             if (offsetValue >= static_cast<std::uint64_t>(fileBytes.size()))
             {
                 return std::wstring();
             }
+            constexpr std::size_t kMaxPeStringBytes = 4096;
             const std::size_t beginOffset = static_cast<std::size_t>(offsetValue);
             std::size_t endOffset = beginOffset;
-            while (endOffset < fileBytes.size() && fileBytes[endOffset] != 0)
+            const std::size_t cappedEndOffset = std::min(fileBytes.size(), beginOffset + kMaxPeStringBytes);
+            while (endOffset < cappedEndOffset && fileBytes[endOffset] != 0)
             {
                 ++endOffset;
             }
@@ -444,6 +449,176 @@ namespace ks::file
                     }
                 }
             }
+        }
+
+        // CollectImportTable walks IMAGE_IMPORT_DESCRIPTOR and thunk arrays into
+        // structured rows. Inputs are the already-read file bytes, PE bitness, header
+        // size, section table and import directory entry. Processing mirrors
+        // AppendImportTable but stores bounded module/function records for UI tables.
+        // Return value is a vector; malformed ranges are reported per-module through
+        // diagnosticText and never throw or access outside fileBytes.
+        std::vector<PeImportModuleSummary> CollectImportTable(
+            const std::vector<std::uint8_t>& fileBytes,
+            const bool isPe64,
+            const std::uint32_t sizeOfHeadersValue,
+            const std::vector<IMAGE_SECTION_HEADER>& sectionList,
+            const IMAGE_DATA_DIRECTORY& importDirectory)
+        {
+            std::vector<PeImportModuleSummary> moduleList;
+            if (importDirectory.VirtualAddress == 0 || importDirectory.Size == 0)
+            {
+                return moduleList;
+            }
+
+            std::uint32_t descriptorOffset = 0;
+            if (!RvaToFileOffset(importDirectory.VirtualAddress, sizeOfHeadersValue, sectionList, descriptorOffset))
+            {
+                PeImportModuleSummary errorModule{};
+                errorModule.dllName = "<Import Directory RVA mapping failed>";
+                errorModule.diagnosticText = "Import Directory RVA could not be mapped to a file offset.";
+                moduleList.push_back(std::move(errorModule));
+                return moduleList;
+            }
+
+            for (std::uint32_t moduleIndex = 0; moduleIndex < kMaxImportDescriptors; ++moduleIndex)
+            {
+                IMAGE_IMPORT_DESCRIPTOR descriptor{};
+                const std::uint64_t currentOffset =
+                    static_cast<std::uint64_t>(descriptorOffset) +
+                    static_cast<std::uint64_t>(moduleIndex) * sizeof(descriptor);
+                if (!ReadPodAtOffset(fileBytes, currentOffset, descriptor))
+                {
+                    PeImportModuleSummary errorModule{};
+                    errorModule.descriptorIndex = moduleIndex;
+                    errorModule.dllName = "<Import Descriptor read failed>";
+                    errorModule.diagnosticText = "Import descriptor could not be read safely.";
+                    moduleList.push_back(std::move(errorModule));
+                    return moduleList;
+                }
+                if (descriptor.OriginalFirstThunk == 0 && descriptor.FirstThunk == 0 && descriptor.Name == 0)
+                {
+                    break;
+                }
+
+                PeImportModuleSummary module{};
+                module.descriptorIndex = moduleIndex;
+
+                std::uint32_t moduleNameOffset = 0;
+                if (RvaToFileOffset(descriptor.Name, sizeOfHeadersValue, sectionList, moduleNameOffset))
+                {
+                    module.dllName = ks::str::Utf16ToUtf8(ReadAsciiAtOffset(fileBytes, moduleNameOffset));
+                }
+                else
+                {
+                    module.dllName = "<Name RVA mapping failed>";
+                    module.diagnosticText = "DLL name RVA could not be mapped.";
+                }
+
+                const std::uint32_t thunkRva =
+                    descriptor.OriginalFirstThunk != 0 ? descriptor.OriginalFirstThunk : descriptor.FirstThunk;
+                const std::uint32_t displayThunkRva =
+                    descriptor.FirstThunk != 0 ? descriptor.FirstThunk : thunkRva;
+                std::uint32_t thunkOffset = 0;
+                if (!RvaToFileOffset(thunkRva, sizeOfHeadersValue, sectionList, thunkOffset))
+                {
+                    if (!module.diagnosticText.empty())
+                    {
+                        module.diagnosticText += " ";
+                    }
+                    module.diagnosticText += "Thunk RVA could not be mapped.";
+                    moduleList.push_back(std::move(module));
+                    continue;
+                }
+
+                const std::uint32_t thunkWidth = isPe64
+                    ? static_cast<std::uint32_t>(sizeof(std::uint64_t))
+                    : static_cast<std::uint32_t>(sizeof(std::uint32_t));
+                for (std::uint32_t importIndex = 0; importIndex < kMaxImportPerModule; ++importIndex)
+                {
+                    PeImportFunctionSummary function{};
+                    function.dllName = module.dllName;
+                    function.thunkRva = displayThunkRva + (importIndex * thunkWidth);
+
+                    if (isPe64)
+                    {
+                        std::uint64_t thunkValue = 0;
+                        if (!ReadPodAtOffset(
+                            fileBytes,
+                            static_cast<std::uint64_t>(thunkOffset) + importIndex * sizeof(thunkValue),
+                            thunkValue) ||
+                            thunkValue == 0)
+                        {
+                            break;
+                        }
+                        if ((thunkValue & IMAGE_ORDINAL_FLAG64) != 0)
+                        {
+                            function.importByOrdinal = true;
+                            function.ordinal = static_cast<std::uint16_t>(thunkValue & 0xFFFFULL);
+                            module.imports.push_back(std::move(function));
+                            continue;
+                        }
+
+                        std::uint32_t importNameOffset = 0;
+                        if (!RvaToFileOffset(
+                            static_cast<std::uint32_t>(thunkValue),
+                            sizeOfHeadersValue,
+                            sectionList,
+                            importNameOffset))
+                        {
+                            function.functionName = "<Name RVA mapping failed>";
+                            module.imports.push_back(std::move(function));
+                            continue;
+                        }
+                        ReadPodAtOffset(fileBytes, importNameOffset, function.hint);
+                        function.functionName = ks::str::Utf16ToUtf8(
+                            ReadAsciiAtOffset(fileBytes, importNameOffset + sizeof(std::uint16_t)));
+                        module.imports.push_back(std::move(function));
+                    }
+                    else
+                    {
+                        std::uint32_t thunkValue = 0;
+                        if (!ReadPodAtOffset(
+                            fileBytes,
+                            static_cast<std::uint64_t>(thunkOffset) + importIndex * sizeof(thunkValue),
+                            thunkValue) ||
+                            thunkValue == 0)
+                        {
+                            break;
+                        }
+                        if ((thunkValue & IMAGE_ORDINAL_FLAG32) != 0)
+                        {
+                            function.importByOrdinal = true;
+                            function.ordinal = static_cast<std::uint16_t>(thunkValue & 0xFFFFU);
+                            module.imports.push_back(std::move(function));
+                            continue;
+                        }
+
+                        std::uint32_t importNameOffset = 0;
+                        if (!RvaToFileOffset(thunkValue, sizeOfHeadersValue, sectionList, importNameOffset))
+                        {
+                            function.functionName = "<Name RVA mapping failed>";
+                            module.imports.push_back(std::move(function));
+                            continue;
+                        }
+                        ReadPodAtOffset(fileBytes, importNameOffset, function.hint);
+                        function.functionName = ks::str::Utf16ToUtf8(
+                            ReadAsciiAtOffset(fileBytes, importNameOffset + sizeof(std::uint16_t)));
+                        module.imports.push_back(std::move(function));
+                    }
+                }
+
+                if (module.imports.size() >= kMaxImportPerModule)
+                {
+                    if (!module.diagnosticText.empty())
+                    {
+                        module.diagnosticText += " ";
+                    }
+                    module.diagnosticText += "Import function list was truncated by safety limit.";
+                }
+                moduleList.push_back(std::move(module));
+            }
+
+            return moduleList;
         }
 
         // AppendExportTable reports export directory metadata and named exports.
@@ -950,6 +1125,12 @@ namespace ks::file
         result.subsystem = subsystemValue;
         result.entryPointRva = entryPointRva;
         result.imageBase = imageBaseValue;
+        result.importModules = CollectImportTable(
+            fileBytes,
+            isPe64,
+            sizeOfHeadersValue,
+            sectionList,
+            dataDirectoryList[IMAGE_DIRECTORY_ENTRY_IMPORT]);
 
         std::wostringstream outputStream;
         outputStream << L"[PE头]\n";
