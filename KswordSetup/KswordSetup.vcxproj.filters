@@ -1,4 +1,4 @@
-<?xml version='1.0' encoding='utf-8'?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
   <ItemGroup>
     <Filter Include="源文件">
@@ -33,7 +33,49 @@
     <ClCompile Include="KswordGUI\KswordStyle.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-  <ClCompile Include="KswordGUI\KDataView.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="KswordGUI\KDock.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="KswordGUI\KIcon.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="KswordGUI\KImage.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="KswordGUI\KLayout.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="KswordGUI\KNavigation.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="KswordGUI\KOverlay.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="KswordGUI\KTable.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="KswordGUI\KTheme.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="KswordGUI\KTitleBar.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="KswordGUI\KVisual.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="KswordGUI\KWidgetFactories.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="KswordGUI\KWidgets.cpp"><Filter>源文件</Filter></ClCompile></ItemGroup>
+    <ClCompile Include="KswordGUI\KDataView.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KDock.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KIcon.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KImage.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KLayout.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KNavigation.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KOverlay.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KTable.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KTheme.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KTitleBar.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KVisual.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KWidgetFactories.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KWidgets.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KswordGUI\KLayeredWindow.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+  </ItemGroup>
   <ItemGroup>
     <ClInclude Include="KswordWinAPICore\ksword.h">
       <Filter>头文件</Filter>
@@ -53,7 +95,43 @@
     <ClInclude Include="generated\PayloadResources.h">
       <Filter>头文件</Filter>
     </ClInclude>
-  <ClInclude Include="KswordGUI\KDataView.h"><Filter>头文件</Filter></ClInclude><ClInclude Include="KswordGUI\KDock.h"><Filter>头文件</Filter></ClInclude><ClInclude Include="KswordGUI\KIcon.h"><Filter>头文件</Filter></ClInclude><ClInclude Include="KswordGUI\KImage.h"><Filter>头文件</Filter></ClInclude><ClInclude Include="KswordGUI\KLayout.h"><Filter>头文件</Filter></ClInclude><ClInclude Include="KswordGUI\KNavigation.h"><Filter>头文件</Filter></ClInclude><ClInclude Include="KswordGUI\KOverlay.h"><Filter>头文件</Filter></ClInclude><ClInclude Include="KswordGUI\KTheme.h"><Filter>头文件</Filter></ClInclude><ClInclude Include="KswordGUI\KTitleBar.h"><Filter>头文件</Filter></ClInclude><ClInclude Include="KswordGUI\KVisual.h"><Filter>头文件</Filter></ClInclude><ClInclude Include="KswordGUI\KWidgets.h"><Filter>头文件</Filter></ClInclude></ItemGroup>
+    <ClInclude Include="KswordGUI\KDataView.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="KswordGUI\KDock.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="KswordGUI\KIcon.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="KswordGUI\KImage.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="KswordGUI\KLayout.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="KswordGUI\KNavigation.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="KswordGUI\KOverlay.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="KswordGUI\KTheme.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="KswordGUI\KTitleBar.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="KswordGUI\KVisual.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="KswordGUI\KWidgets.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="KswordGUI\KLayeredWindow.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+  </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="KswordSetup.rc">
       <Filter>资源文件</Filter>
