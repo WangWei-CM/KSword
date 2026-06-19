@@ -76,6 +76,9 @@ public:
         bool minimized = false;             // 是否最小化。
         bool maximized = false;             // 是否最大化。
         bool valid = false;                 // IsWindow 是否有效。
+        bool displayAffinityKnown = false;  // 是否成功读取 DisplayAffinity。
+        std::uint32_t displayAffinityValue = 0; // DisplayAffinity 原始 WDA_* 值。
+        std::uint32_t displayAffinityError = 0; // DisplayAffinity 读取失败时的 Win32 错误。
         int zOrder = 0;                     // 枚举顺序（近似 Z 序）。
         QString enumApiName;                // 枚举来源 API 名称。
         int alphaValue = 255;               // 分层窗口透明度（0-255）。
@@ -141,6 +144,20 @@ private:
     void exportVisibleRowsToTsv();
     void openWindowDetailDialog(const WindowInfo& info);
     const WindowInfo* findInfoByHwnd(quint64 hwndValue) const;
+    // setCaptureProtectionForSelectedWindow：
+    // - 作用：对当前选中的窗口启用/取消防截图保护；
+    // - 调用：窗口列表工具栏按钮；
+    // - 传入 protectedState：true=启用，false=取消；
+    // - 传出：无，结果通过日志、消息框和列表刷新反馈。
+    void setCaptureProtectionForSelectedWindow(bool protectedState);
+
+    // setCaptureProtectionForWindow：
+    // - 作用：对指定窗口快照执行防截图保护操作；
+    // - 调用：右键菜单和选中项工具栏；
+    // - 传入 info：目标窗口快照；
+    // - 传入 protectedState：true=启用，false=取消。
+    void setCaptureProtectionForWindow(const WindowInfo& info, bool protectedState);
+
     // handleWindowPickerRelease：
     // - 作用：处理“准星拖拽拾取”释放事件，定位鼠标下窗口并弹出详情；
     // - 调用：由窗口列表顶部拾取按钮在鼠标松开时触发；
@@ -170,6 +187,8 @@ private:
     QWidget* m_windowListToolWidget = nullptr;    // 窗口列表页顶部工具条容器。
     QHBoxLayout* m_windowListToolLayout = nullptr;// 窗口列表页顶部工具条布局。
     QPushButton* m_windowPickerButton = nullptr;  // 准星拖拽拾取按钮（释放时按鼠标位置打开窗口详情）。
+    QPushButton* m_protectCaptureButton = nullptr; // 对选中窗口启用防截图保护按钮。
+    QPushButton* m_unprotectCaptureButton = nullptr; // 对选中窗口取消防截图保护按钮。
     QLabel* m_windowPickerHintLabel = nullptr;    // 准星按钮旁提示文案，说明拖拽用法。
 
     // 窗口列表页：左树右预览。
