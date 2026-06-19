@@ -18,6 +18,64 @@
 #include <limits>
 #include <vector>
 
+namespace
+{
+    QString driverMemoryReadStatusText(const std::uint32_t readStatus)
+    {
+        // 输入：驱动返回的 KSWORD_ARK_MEMORY_READ_STATUS_* 枚举值。
+        // 处理：转换成 UI 可直接显示的中文诊断，避免用户只看到数字状态。
+        // 返回：状态说明字符串；未知枚举保留原值，方便定位协议不匹配。
+        switch (readStatus)
+        {
+        case KSWORD_ARK_MEMORY_READ_STATUS_OK:
+            return QStringLiteral("读取成功");
+        case KSWORD_ARK_MEMORY_READ_STATUS_PARTIAL_COPY:
+            return QStringLiteral("部分读取成功");
+        case KSWORD_ARK_MEMORY_READ_STATUS_PROCESS_LOOKUP_FAILED:
+            return QStringLiteral("目标进程查找失败");
+        case KSWORD_ARK_MEMORY_READ_STATUS_COPY_FAILED:
+            return QStringLiteral("内存复制失败");
+        case KSWORD_ARK_MEMORY_READ_STATUS_RANGE_REJECTED:
+            return QStringLiteral("地址范围被拒绝");
+        case KSWORD_ARK_MEMORY_READ_STATUS_BUFFER_TOO_SMALL:
+            return QStringLiteral("响应缓冲区不足");
+        case KSWORD_ARK_MEMORY_READ_STATUS_ZERO_FILLED:
+            return QStringLiteral("目标范围不可读，已被驱动补零");
+        case KSWORD_ARK_MEMORY_READ_STATUS_UNAVAILABLE:
+        default:
+            return QStringLiteral("未知读取状态(%1)").arg(readStatus);
+        }
+    }
+
+    QString driverMemoryNtStatusText(const long status)
+    {
+        // 输入：驱动透传的 NTSTATUS。
+        // 处理：固定按 8 位十六进制展示，便于和内核日志/WinDbg 对齐。
+        // 返回：形如 0xC0000005 的字符串。
+        return QStringLiteral("0x%1")
+            .arg(static_cast<unsigned long>(status), 8, 16, QChar('0'))
+            .toUpper();
+    }
+
+    bool driverMemoryReadStatusHasUsableBytes(const std::uint32_t readStatus)
+    {
+        // 输入：驱动读取状态。
+        // 处理：只有完整读取或部分读取才允许刷新 Hex 缓存；全补零不再伪装成成功。
+        // 返回：true 表示 response->data 可作为真实读取结果展示。
+        return readStatus == KSWORD_ARK_MEMORY_READ_STATUS_OK ||
+            readStatus == KSWORD_ARK_MEMORY_READ_STATUS_PARTIAL_COPY;
+    }
+
+    bool driverMemoryAddressLooksKernelVa(const std::uint64_t address)
+    {
+        // 输入：用户最终请求的虚拟地址。
+        // 处理：Windows x64 内核地址通常位于 canonical high-half；这里仅用于
+        // R3 自动选择 IOCTL flag，R0 仍会再次校验地址范围。
+        // 返回：true 表示应按内核虚拟地址读取，不再按目标进程用户 VA 解释。
+        return address >= 0xFFFF000000000000ULL;
+    }
+}
+
 // ============================================================
 // MemoryDock.DriverMemoryRw.cpp
 // 作用：
@@ -218,12 +276,6 @@ bool MemoryDock::resolveDriverMemoryRequestFromUi(
             targetNameOut = m_processCombo->itemData(processIndex, Qt::UserRole + 1).toString();
         }
     }
-    if (targetPidOut == 0U)
-    {
-        errorTextOut = "请选择有效目标进程；R0 读写需要 PID，但不要求先附加 Win32 进程句柄。";
-        return false;
-    }
-
     // 中心地址仍按原有地址解析规则处理；配合 offsetBase 得到最终 R0 地址。
     if (m_driverMemoryAddressEdit == nullptr ||
         !parseAddressText(m_driverMemoryAddressEdit->text().trimmed(), centerAddressOut))
@@ -238,7 +290,72 @@ bool MemoryDock::resolveDriverMemoryRequestFromUi(
     }
 
     effectiveCenterAddressOut = offsetBaseOut + centerAddressOut;
+    if (driverMemoryAddressLooksKernelVa(effectiveCenterAddressOut))
+    {
+        targetPidOut = 0U;
+        targetNameOut = QStringLiteral("Kernel VA");
+        return true;
+    }
+    if (targetPidOut == 0U)
+    {
+        errorTextOut = "请选择有效目标进程；R0 读用户态 VA 需要 PID。若要读内核地址，请输入 0xFFFF... 高半区地址。";
+        return false;
+    }
     return true;
+}
+
+void MemoryDock::prepareDriverMemoryReadAtAddress(
+    const std::uint64_t absoluteAddress,
+    const std::uint64_t preferredBytes,
+    const bool triggerRead)
+{
+    // 输入：来自内存区域/模块/搜索结果等已知有效来源的进程虚拟地址。
+    // 处理：切到驱动读写页，填入绝对地址，并把读取窗口调整为从该地址向后读。
+    // 返回：无返回值；可选立即触发 driverReadMemoryFromUi。
+    if (m_tabWidget != nullptr && m_tabDriverMemoryRw != nullptr)
+    {
+        m_tabWidget->setCurrentWidget(m_tabDriverMemoryRw);
+    }
+    if (m_driverMemoryBaseCombo != nullptr)
+    {
+        const int pidIndex = m_driverMemoryBaseCombo->findData(
+            QVariant::fromValue(static_cast<uint>(m_attachedPid)),
+            Qt::UserRole);
+        if (pidIndex >= 0)
+        {
+            m_driverMemoryBaseCombo->setCurrentIndex(pidIndex);
+        }
+    }
+    if (m_driverMemoryAddressEdit != nullptr)
+    {
+        m_driverMemoryAddressEdit->setText(formatAddress(absoluteAddress));
+    }
+
+    if (preferredBytes > 0ULL &&
+        m_driverMemoryBeforeSpin != nullptr &&
+        m_driverMemoryAfterSpin != nullptr)
+    {
+        const std::uint64_t cappedBytes = std::min<std::uint64_t>(
+            preferredBytes,
+            static_cast<std::uint64_t>(KSWORD_ARK_MEMORY_READ_MAX_BYTES));
+        m_driverMemoryBeforeSpin->setValue(0);
+        m_driverMemoryAfterSpin->setValue(static_cast<int>(cappedBytes));
+    }
+
+    if (m_driverMemoryRangeLabel != nullptr)
+    {
+        m_driverMemoryRangeLabel->setText(QStringLiteral("范围: 已填入 %1，准备 R0 读取。")
+            .arg(formatAddress(absoluteAddress)));
+    }
+    if (m_driverMemoryStatusLabel != nullptr)
+    {
+        m_driverMemoryStatusLabel->setText(QStringLiteral("已从内存区域填入有效地址；点击 R0读取，或等待自动读取。"));
+    }
+
+    if (triggerRead)
+    {
+        driverReadMemoryFromUi();
+    }
 }
 
 void MemoryDock::driverReadMemoryFromUi()
@@ -277,13 +394,17 @@ void MemoryDock::driverReadMemoryFromUi()
         return;
     }
 
-    // 计算读取范围：默认中心地址前后各 1KB，并防止低地址下溢。
+    // 计算读取范围：
+    // - before/after 是中心地址左右两侧的字节预算；
+    // - 使用半开区间 [baseAddress, endAddress)，避免旧逻辑多读 1 字节；
+    // - 低地址下溢时把起点夹到 0，但仍会保留清晰诊断，避免看起来“按钮没反应”。
     const std::uint64_t beforeBytes =
         static_cast<std::uint64_t>(m_driverMemoryBeforeSpin->value());
     const std::uint64_t afterBytes =
         static_cast<std::uint64_t>(m_driverMemoryAfterSpin->value());
     const std::uint64_t baseAddress =
         (centerAddress >= beforeBytes) ? (centerAddress - beforeBytes) : 0ULL;
+    const bool kernelAddressRead = driverMemoryAddressLooksKernelVa(centerAddress);
     if (afterBytes > (std::numeric_limits<std::uint64_t>::max)() - centerAddress)
     {
         if (m_driverMemoryStatusLabel != nullptr)
@@ -294,29 +415,54 @@ void MemoryDock::driverReadMemoryFromUi()
         return;
     }
     const std::uint64_t endAddress = centerAddress + afterBytes;
-    if (endAddress < centerAddress)
+    if (endAddress <= baseAddress)
     {
         if (m_driverMemoryStatusLabel != nullptr)
         {
-            m_driverMemoryStatusLabel->setText("读取范围发生地址回绕，已拒绝。");
+            m_driverMemoryStatusLabel->setText("读取范围为空或发生地址回绕，已拒绝。");
         }
-        QMessageBox::warning(this, "驱动内存读写", "读取范围发生地址回绕。");
+        if (m_driverMemoryRangeLabel != nullptr)
+        {
+            m_driverMemoryRangeLabel->setText("范围: 读取请求无效");
+        }
+        QMessageBox::warning(this, "驱动内存读写", "读取范围为空或发生地址回绕。");
         return;
     }
 
     // totalBytes 是 R0 单次读取长度，受共享协议上限约束。
-    const std::uint64_t totalBytes64 = endAddress - baseAddress + 1ULL;
+    const std::uint64_t totalBytes64 = endAddress - baseAddress;
     if (totalBytes64 == 0ULL || totalBytes64 > KSWORD_ARK_MEMORY_READ_MAX_BYTES)
     {
         if (m_driverMemoryStatusLabel != nullptr)
         {
             m_driverMemoryStatusLabel->setText("读取范围超过驱动单次请求上限。");
         }
+        if (m_driverMemoryRangeLabel != nullptr)
+        {
+            m_driverMemoryRangeLabel->setText(QString("范围: %1 - %2 | 请求长度: %3 字节，超过上限")
+                .arg(formatAddress(baseAddress))
+                .arg(formatAddress(endAddress - 1ULL))
+                .arg(totalBytes64));
+        }
         QMessageBox::warning(this, "驱动内存读写", "读取范围超过驱动单次请求上限。");
         return;
     }
 
     // 调用 ArkDriverClient，Dock 不直接 DeviceIoControl。
+    const QString requestRangeText = QString("范围: %1 - %2 | 请求: %3 字节 | %4 | 中心: %5")
+        .arg(formatAddress(baseAddress))
+        .arg(formatAddress(endAddress - 1ULL))
+        .arg(totalBytes64)
+        .arg(kernelAddressRead
+            ? QStringLiteral("内核地址")
+            : QStringLiteral("PID: %1%2")
+                .arg(targetPid)
+                .arg(targetProcessName.isEmpty() ? QString() : QString(" (%1)").arg(targetProcessName)))
+        .arg(formatAddress(centerAddress));
+    if (m_driverMemoryRangeLabel != nullptr)
+    {
+        m_driverMemoryRangeLabel->setText(requestRangeText + QStringLiteral(" | R0读取中..."));
+    }
     if (m_driverMemoryStatusLabel != nullptr)
     {
         m_driverMemoryStatusLabel->setText("正在通过 R0 读取内存...");
@@ -327,10 +473,15 @@ void MemoryDock::driverReadMemoryFromUi()
             targetPid,
             baseAddress,
             static_cast<std::uint32_t>(totalBytes64),
-            KSWORD_ARK_MEMORY_READ_FLAG_ZERO_FILL_UNREADABLE);
+            KSWORD_ARK_MEMORY_READ_FLAG_ZERO_FILL_UNREADABLE |
+            (kernelAddressRead ? KSWORD_ARK_MEMORY_READ_FLAG_KERNEL_ADDRESS : 0UL));
     if (!readResult.io.ok)
     {
         resetDriverMemoryRwState();
+        if (m_driverMemoryRangeLabel != nullptr)
+        {
+            m_driverMemoryRangeLabel->setText(requestRangeText + QStringLiteral(" | IOCTL失败"));
+        }
         if (m_driverMemoryStatusLabel != nullptr)
         {
             m_driverMemoryStatusLabel->setText(QString("R0读取失败：%1").arg(QString::fromStdString(readResult.io.message)));
@@ -339,16 +490,66 @@ void MemoryDock::driverReadMemoryFromUi()
         return;
     }
 
+    const QString readStatusText = driverMemoryReadStatusText(readResult.readStatus);
+    const QString copyStatusText = driverMemoryNtStatusText(readResult.copyStatus);
+    if (!driverMemoryReadStatusHasUsableBytes(readResult.readStatus))
+    {
+        const QString failureText = QString(
+            "R0读取未取得可用字节：%1。\n\n"
+            "目标=%2\n"
+            "请求范围=%4 - %5\n"
+            "请求长度=%6 字节\n"
+            "copyStatus=%7\n\n"
+            "提示：用户态 VA 请先在“内存区域”页选中 MEM_COMMIT 区域；内核 VA 请输入 0xFFFF... 高半区有效地址。")
+            .arg(readStatusText)
+            .arg(kernelAddressRead
+                ? QStringLiteral("内核地址")
+                : QStringLiteral("PID=%1%2")
+                    .arg(targetPid)
+                    .arg(targetProcessName.isEmpty() ? QString() : QString(" (%1)").arg(targetProcessName)))
+            .arg(formatAddress(baseAddress))
+            .arg(formatAddress(endAddress - 1ULL))
+            .arg(totalBytes64)
+            .arg(copyStatusText);
+
+        resetDriverMemoryRwState();
+        if (m_driverMemoryRangeLabel != nullptr)
+        {
+            m_driverMemoryRangeLabel->setText(requestRangeText + QStringLiteral(" | 未读到可用字节"));
+        }
+        if (m_driverMemoryStatusLabel != nullptr)
+        {
+            QString compactFailureText = failureText;
+            compactFailureText.replace(QLatin1Char('\n'), QLatin1Char(' '));
+            m_driverMemoryStatusLabel->setText(compactFailureText);
+        }
+        QMessageBox::warning(this, "驱动内存读写", failureText);
+        return;
+    }
+
     // R0 按要求把不可读区域补 00，因此 UI 只要求数据长度和请求长度一致。
     if (readResult.data.empty())
     {
+        const QString emptyResponseText = QString(
+            "R0响应无数据：readStatus=%1(%2)，source=%3，fieldFlags=0x%4，bytesRead=%5，bytesReturned=%6，copyStatus=%7，io=%8")
+            .arg(readResult.readStatus)
+            .arg(readStatusText)
+            .arg(readResult.source)
+            .arg(readResult.fieldFlags, 8, 16, QChar('0'))
+            .arg(readResult.bytesRead)
+            .arg(readResult.io.bytesReturned)
+            .arg(copyStatusText)
+            .arg(QString::fromStdString(readResult.io.message));
         resetDriverMemoryRwState();
+        if (m_driverMemoryRangeLabel != nullptr)
+        {
+            m_driverMemoryRangeLabel->setText(requestRangeText + QStringLiteral(" | 响应无数据，详见状态栏"));
+        }
         if (m_driverMemoryStatusLabel != nullptr)
         {
-            m_driverMemoryStatusLabel->setText(QString("R0未返回数据，readStatus=%1 copyStatus=0x%2")
-                .arg(readResult.readStatus)
-                .arg(static_cast<unsigned long>(readResult.copyStatus), 8, 16, QChar('0')));
+            m_driverMemoryStatusLabel->setText(emptyResponseText);
         }
+        QMessageBox::warning(this, "驱动内存读写", emptyResponseText);
         return;
     }
 
@@ -364,7 +565,7 @@ void MemoryDock::driverReadMemoryFromUi()
     m_driverMemoryEditedBytes = m_driverMemoryOriginalBytes;
     m_driverMemoryHasSnapshot = true;
 
-    // 更新 HexEditor；开启可编辑，但不触发真实写入。
+    // 更新 HexEditor；编辑只改 R3 缓存，点击“应用差异”后才提交 R0。
     m_driverMemoryHexEditor->setEditable(true);
     m_driverMemoryHexEditor->setBytesPerRow(16);
     m_driverMemoryHexEditor->setByteArray(
@@ -373,25 +574,34 @@ void MemoryDock::driverReadMemoryFromUi()
 
     // 刷新状态标签和按钮状态。
     m_driverMemoryApplyButton->setEnabled(false);
+    m_driverMemoryApplyButton->setToolTip(kernelAddressRead
+        ? QStringLiteral("将差异写回内核虚拟地址；需要二次确认和 Force。")
+        : QString());
     m_driverMemoryRangeLabel->setText(
         QString("范围: %1 - %2 | 长度: %3 字节 | PID: %4%5 | 基址: %6 | 中心: %7")
         .arg(formatAddress(m_driverMemoryBaseAddress))
         .arg(formatAddress(m_driverMemoryBaseAddress + static_cast<std::uint64_t>(m_driverMemoryEditedBytes.size()) - 1ULL))
         .arg(m_driverMemoryEditedBytes.size())
-        .arg(targetPid)
-        .arg(targetProcessName.isEmpty() ? QString() : QString(" (%1)").arg(targetProcessName))
+        .arg(kernelAddressRead ? 0U : targetPid)
+        .arg(kernelAddressRead
+            ? QStringLiteral(" (Kernel VA)")
+            : (targetProcessName.isEmpty() ? QString() : QString(" (%1)").arg(targetProcessName)))
         .arg(formatAddress(offsetBase))
         .arg(formatAddress(centerAddress)));
     if (m_driverMemoryStatusLabel != nullptr)
     {
         m_driverMemoryStatusLabel->setText(
-            QString("R0读取完成：PID=%1，请求=%2 字节，返回=%3 字节，状态=%4，copyStatus=0x%5。输入中心=%6，不可读字节已按 00 填充。")
-            .arg(targetPid)
+            QString("R0读取完成：%1，请求=%2 字节，返回=%3 字节，状态=%4(%5)，copyStatus=%6。输入中心=%7%8")
+            .arg(kernelAddressRead ? QStringLiteral("内核地址") : QStringLiteral("PID=%1").arg(targetPid))
             .arg(readResult.requestedBytes)
             .arg(readResult.data.size())
             .arg(readResult.readStatus)
-            .arg(static_cast<unsigned long>(readResult.copyStatus), 8, 16, QChar('0'))
-            .arg(formatAddress(centerAddressInput)));
+            .arg(readStatusText)
+            .arg(copyStatusText)
+            .arg(formatAddress(centerAddressInput))
+            .arg(readResult.readStatus == KSWORD_ARK_MEMORY_READ_STATUS_PARTIAL_COPY
+                ? QStringLiteral("；部分不可读字节已按 00 填充。")
+                : QStringLiteral("。")));
     }
 
     // 读取完成日志：记录范围与协议状态。
@@ -419,7 +629,8 @@ void MemoryDock::driverApplyMemoryDiffFromUi()
         << m_driverMemoryEditedBytes.size()
         << eol;
 
-    if (m_driverMemorySnapshotPid == 0U || !m_driverMemoryHasSnapshot)
+    const bool kernelAddressSnapshot = driverMemoryAddressLooksKernelVa(m_driverMemoryBaseAddress);
+    if ((!kernelAddressSnapshot && m_driverMemorySnapshotPid == 0U) || !m_driverMemoryHasSnapshot)
     {
         if (m_driverMemoryStatusLabel != nullptr)
         {
@@ -447,10 +658,13 @@ void MemoryDock::driverApplyMemoryDiffFromUi()
     const QMessageBox::StandardButton confirmResult = QMessageBox::question(
         this,
         "应用内存差异",
-        QString("将通过 R0 写入 %1 个差异块到 PID=%2%3。\n只写入和原始备份不同的字节，是否继续？")
+        QString("将通过 R0 写入 %1 个差异块到 %2。\n只写入和原始备份不同的字节，是否继续？")
         .arg(diffBlocks.size())
-        .arg(m_driverMemorySnapshotPid)
-        .arg(m_driverMemorySnapshotProcessName.isEmpty() ? QString() : QString(" (%1)").arg(m_driverMemorySnapshotProcessName)),
+        .arg(kernelAddressSnapshot
+            ? QStringLiteral("内核虚拟地址")
+            : QStringLiteral("PID=%1%2")
+                .arg(m_driverMemorySnapshotPid)
+                .arg(m_driverMemorySnapshotProcessName.isEmpty() ? QString() : QString(" (%1)").arg(m_driverMemorySnapshotProcessName))),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
     if (confirmResult != QMessageBox::Yes)
@@ -487,12 +701,16 @@ void MemoryDock::driverApplyMemoryDiffFromUi()
 
             const std::uint64_t chunkAddress =
                 block.address + static_cast<std::uint64_t>(offset);
-            unsigned long writeFlags = forceWriteApproved ?
-                KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE :
-                0UL;
+            unsigned long writeFlags = kernelAddressSnapshot
+                ? KSWORD_ARK_MEMORY_WRITE_FLAG_KERNEL_ADDRESS
+                : 0UL;
+            if (forceWriteApproved)
+            {
+                writeFlags |= KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE;
+            }
             ksword::ark::VirtualMemoryWriteResult writeResult =
                 driverClient.writeVirtualMemory(
-                    m_driverMemorySnapshotPid,
+                    kernelAddressSnapshot ? 0U : m_driverMemorySnapshotPid,
                     chunkAddress,
                     chunk,
                     writeFlags);
@@ -518,9 +736,9 @@ void MemoryDock::driverApplyMemoryDiffFromUi()
                 }
 
                 forceWriteApproved = true;
-                writeFlags = KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE;
+                writeFlags |= KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE;
                 writeResult = driverClient.writeVirtualMemory(
-                    m_driverMemorySnapshotPid,
+                    kernelAddressSnapshot ? 0U : m_driverMemorySnapshotPid,
                     chunkAddress,
                     chunk,
                     writeFlags);

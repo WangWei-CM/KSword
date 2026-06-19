@@ -28,6 +28,7 @@ Environment:
     (sizeof(KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE) - sizeof(((KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE*)0)->data))
 #define KSWORD_ARK_MEMORY_WRITE_REQUEST_HEADER_SIZE \
     (sizeof(KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST) - sizeof(((KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST*)0)->data))
+#define KSWORD_ARK_MEMORY_IOCTL_POOL_TAG 'iMsK'
 
 static VOID
 KswordARKMemoryIoctlLog(
@@ -198,6 +199,7 @@ Return Value:
 --*/
 {
     KSWORD_ARK_READ_VIRTUAL_MEMORY_REQUEST* readRequest = NULL;
+    KSWORD_ARK_READ_VIRTUAL_MEMORY_REQUEST readRequestValue;
     PVOID inputBuffer = NULL;
     PVOID outputBuffer = NULL;
     size_t actualInputLength = 0U;
@@ -223,17 +225,24 @@ Return Value:
     }
 
     readRequest = (KSWORD_ARK_READ_VIRTUAL_MEMORY_REQUEST*)inputBuffer;
-    if ((readRequest->flags & ~KSWORD_ARK_MEMORY_READ_FLAG_ZERO_FILL_UNREADABLE) != 0UL) {
-        KswordARKMemoryIoctlLog(Device, "Warn", "R0 read-vm ioctl: flags rejected, flags=0x%08X.", (unsigned int)readRequest->flags);
+    RtlZeroMemory(&readRequestValue, sizeof(readRequestValue));
+    RtlCopyMemory(&readRequestValue, readRequest, sizeof(readRequestValue));
+
+    if ((readRequestValue.flags & ~(
+        KSWORD_ARK_MEMORY_READ_FLAG_ZERO_FILL_UNREADABLE |
+        KSWORD_ARK_MEMORY_READ_FLAG_KERNEL_ADDRESS)) != 0UL) {
+        KswordARKMemoryIoctlLog(Device, "Warn", "R0 read-vm ioctl: flags rejected, flags=0x%08X.", (unsigned int)readRequestValue.flags);
         return STATUS_INVALID_PARAMETER;
     }
-    status = KswordARKValidateUserPid(readRequest->processId);
-    if (!NT_SUCCESS(status)) {
-        KswordARKMemoryIoctlLog(Device, "Warn", "R0 read-vm ioctl: pid rejected, pid=%lu.", (unsigned long)readRequest->processId);
-        return status;
+    if ((readRequestValue.flags & KSWORD_ARK_MEMORY_READ_FLAG_KERNEL_ADDRESS) == 0UL) {
+        status = KswordARKValidateUserPid(readRequestValue.processId);
+        if (!NT_SUCCESS(status)) {
+            KswordARKMemoryIoctlLog(Device, "Warn", "R0 read-vm ioctl: pid rejected, pid=%lu.", (unsigned long)readRequestValue.processId);
+            return status;
+        }
     }
-    if (readRequest->bytesToRead > KSWORD_ARK_MEMORY_READ_MAX_BYTES) {
-        KswordARKMemoryIoctlLog(Device, "Warn", "R0 read-vm ioctl: size rejected, pid=%lu, bytes=%lu.", (unsigned long)readRequest->processId, (unsigned long)readRequest->bytesToRead);
+    if (readRequestValue.bytesToRead > KSWORD_ARK_MEMORY_READ_MAX_BYTES) {
+        KswordARKMemoryIoctlLog(Device, "Warn", "R0 read-vm ioctl: size rejected, pid=%lu, bytes=%lu.", (unsigned long)readRequestValue.processId, (unsigned long)readRequestValue.bytesToRead);
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -250,10 +259,10 @@ Return Value:
     status = KswordARKDriverReadVirtualMemory(
         outputBuffer,
         actualOutputLength,
-        readRequest,
+        &readRequestValue,
         BytesReturned);
     if (!NT_SUCCESS(status)) {
-        KswordARKMemoryIoctlLog(Device, "Error", "R0 read-vm failed: pid=%lu, address=0x%I64X, bytes=%lu, status=0x%08X.", (unsigned long)readRequest->processId, readRequest->baseAddress, (unsigned long)readRequest->bytesToRead, (unsigned int)status);
+        KswordARKMemoryIoctlLog(Device, "Error", "R0 read-vm failed: pid=%lu, address=0x%I64X, bytes=%lu, status=0x%08X.", (unsigned long)readRequestValue.processId, readRequestValue.baseAddress, (unsigned long)readRequestValue.bytesToRead, (unsigned int)status);
         return status;
     }
 
@@ -303,6 +312,7 @@ Return Value:
 --*/
 {
     KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST* writeRequest = NULL;
+    KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST* writeRequestCopy = NULL;
     PVOID inputBuffer = NULL;
     PVOID outputBuffer = NULL;
     size_t actualInputLength = 0U;
@@ -310,7 +320,9 @@ Return Value:
     size_t requiredInputLength = 0U;
     const ULONG allowedFlags =
         KSWORD_ARK_MEMORY_WRITE_FLAG_UI_CONFIRMED |
-        KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE;
+        KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE |
+        KSWORD_ARK_MEMORY_WRITE_FLAG_KERNEL_ADDRESS;
+    BOOLEAN writeKernelAddress = FALSE;
     NTSTATUS status = STATUS_SUCCESS;
 
     UNREFERENCED_PARAMETER(InputBufferLength);
@@ -342,10 +354,14 @@ Return Value:
         KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm ioctl: flags rejected, flags=0x%08X.", (unsigned int)writeRequest->flags);
         return STATUS_INVALID_PARAMETER;
     }
-    status = KswordARKValidateUserPid(writeRequest->processId);
-    if (!NT_SUCCESS(status)) {
-        KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm ioctl: pid rejected, pid=%lu.", (unsigned long)writeRequest->processId);
-        return status;
+    writeKernelAddress =
+        ((writeRequest->flags & KSWORD_ARK_MEMORY_WRITE_FLAG_KERNEL_ADDRESS) != 0UL) ? TRUE : FALSE;
+    if (!writeKernelAddress) {
+        status = KswordARKValidateUserPid(writeRequest->processId);
+        if (!NT_SUCCESS(status)) {
+            KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm ioctl: pid rejected, pid=%lu.", (unsigned long)writeRequest->processId);
+            return status;
+        }
     }
     if (writeRequest->bytesToWrite == 0UL ||
         writeRequest->bytesToWrite > KSWORD_ARK_MEMORY_WRITE_MAX_BYTES) {
@@ -365,6 +381,22 @@ Return Value:
         return STATUS_INVALID_PARAMETER;
     }
 
+    /*
+     * METHOD_BUFFERED may alias the input and output system buffers.  Copy the
+     * variable-length write request before retrieving/clearing the output
+     * buffer, otherwise RtlZeroMemory(outputBuffer) can erase request->data.
+     */
+    writeRequestCopy = (KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST*)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED,
+        requiredInputLength,
+        KSWORD_ARK_MEMORY_IOCTL_POOL_TAG);
+    if (writeRequestCopy == NULL) {
+        KswordARKMemoryIoctlLog(Device, "Error", "R0 write-vm ioctl: input copy allocation failed, bytes=%Iu.", requiredInputLength);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(writeRequestCopy, writeRequest, requiredInputLength);
+    writeRequest = writeRequestCopy;
+
     status = KswordARKRetrieveRequiredOutputBuffer(
         Request,
         sizeof(KSWORD_ARK_WRITE_VIRTUAL_MEMORY_RESPONSE),
@@ -372,6 +404,7 @@ Return Value:
         &actualOutputLength);
     if (!NT_SUCCESS(status)) {
         KswordARKMemoryIoctlLog(Device, "Error", "R0 write-vm ioctl: output invalid, status=0x%08X.", (unsigned int)status);
+        ExFreePoolWithTag(writeRequestCopy, KSWORD_ARK_MEMORY_IOCTL_POOL_TAG);
         return status;
     }
 
@@ -381,20 +414,25 @@ Return Value:
         RtlZeroMemory(outputBuffer, actualOutputLength);
         response->version = KSWORD_ARK_MEMORY_PROTOCOL_VERSION;
         response->size = sizeof(*response);
-        response->processId = writeRequest->processId;
+        response->processId = writeKernelAddress ? 0UL : writeRequest->processId;
         response->fieldFlags =
-            KSWORD_ARK_MEMORY_FIELD_ADDRESS_USER_RANGE |
+            (writeKernelAddress
+                ? KSWORD_ARK_MEMORY_FIELD_ADDRESS_KERNEL_RANGE
+                : KSWORD_ARK_MEMORY_FIELD_ADDRESS_USER_RANGE) |
             KSWORD_ARK_MEMORY_FIELD_WRITE_DATA_PRESENT |
             KSWORD_ARK_MEMORY_FIELD_FORCE_WRITE_REQUIRED;
         response->writeStatus = KSWORD_ARK_MEMORY_WRITE_STATUS_FORCE_REQUIRED;
         response->lookupStatus = STATUS_SUCCESS;
         response->copyStatus = STATUS_REQUEST_NOT_ACCEPTED;
-        response->source = KSWORD_ARK_MEMORY_SOURCE_R0_MM_WRITE_VIRTUAL_MEMORY;
+        response->source = writeKernelAddress
+            ? KSWORD_ARK_MEMORY_SOURCE_R0_MM_COPY_KERNEL_VIRTUAL
+            : KSWORD_ARK_MEMORY_SOURCE_R0_MM_WRITE_VIRTUAL_MEMORY;
         response->requestedBaseAddress = writeRequest->baseAddress;
         response->requestedBytes = writeRequest->bytesToWrite;
         response->maxBytesPerRequest = KSWORD_ARK_MEMORY_WRITE_MAX_BYTES;
         *BytesReturned = sizeof(*response);
-        KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm requires force confirmation: pid=%lu, address=0x%I64X, bytes=%lu.", (unsigned long)writeRequest->processId, writeRequest->baseAddress, (unsigned long)writeRequest->bytesToWrite);
+        KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm requires force confirmation: pid=%lu, flags=0x%08X, address=0x%I64X, bytes=%lu.", (unsigned long)writeRequest->processId, (unsigned int)writeRequest->flags, writeRequest->baseAddress, (unsigned long)writeRequest->bytesToWrite);
+        ExFreePoolWithTag(writeRequestCopy, KSWORD_ARK_MEMORY_IOCTL_POOL_TAG);
         return STATUS_SUCCESS;
     }
 
@@ -402,7 +440,7 @@ Return Value:
         KSWORD_ARK_SAFETY_CONTEXT safetyContext;
         RtlZeroMemory(&safetyContext, sizeof(safetyContext));
         safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_MEMORY_WRITE;
-        safetyContext.TargetProcessId = writeRequest->processId;
+        safetyContext.TargetProcessId = writeKernelAddress ? 0UL : writeRequest->processId;
         safetyContext.ContextFlags =
             ((writeRequest->flags & KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE) != 0UL) ?
             KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED :
@@ -410,6 +448,7 @@ Return Value:
         status = KswordARKSafetyEvaluate(Device, &safetyContext);
         if (!NT_SUCCESS(status)) {
             KswordARKMemoryIoctlLog(Device, "Warn", "R0 write-vm denied by safety policy: pid=%lu, address=0x%I64X, bytes=%lu, status=0x%08X.", (unsigned long)writeRequest->processId, writeRequest->baseAddress, (unsigned long)writeRequest->bytesToWrite, (unsigned int)status);
+            ExFreePoolWithTag(writeRequestCopy, KSWORD_ARK_MEMORY_IOCTL_POOL_TAG);
             return status;
         }
     }
@@ -422,6 +461,7 @@ Return Value:
         BytesReturned);
     if (!NT_SUCCESS(status)) {
         KswordARKMemoryIoctlLog(Device, "Error", "R0 write-vm failed: pid=%lu, address=0x%I64X, bytes=%lu, status=0x%08X.", (unsigned long)writeRequest->processId, writeRequest->baseAddress, (unsigned long)writeRequest->bytesToWrite, (unsigned int)status);
+        ExFreePoolWithTag(writeRequestCopy, KSWORD_ARK_MEMORY_IOCTL_POOL_TAG);
         return status;
     }
 
@@ -439,5 +479,6 @@ Return Value:
             (unsigned long)response->bytesWritten);
     }
 
+    ExFreePoolWithTag(writeRequestCopy, KSWORD_ARK_MEMORY_IOCTL_POOL_TAG);
     return STATUS_SUCCESS;
 }

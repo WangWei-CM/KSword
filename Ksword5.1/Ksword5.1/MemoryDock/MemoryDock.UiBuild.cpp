@@ -600,7 +600,8 @@ void MemoryDock::initializeDriverMemoryRwTab()
     m_driverMemoryBaseCombo->setMinimumWidth(260);
     m_driverMemoryBaseCombo->setStyleSheet(buildBlueComboStyle());
     m_driverMemoryBaseCombo->setToolTip(
-        "可输入 0 或 0x... 作为偏移基址；输入非 0x 文本时按进程名/PID 从下拉列表筛选目标进程。");
+        "可输入 0 或 0x... 作为偏移基址；输入非 0x 文本时按进程名/PID 从下拉列表筛选目标进程。"
+        "中心地址为 0xFFFF... 高半区时自动按内核虚拟地址读取，并忽略 PID。");
     m_driverMemoryBaseCombo->addItem("0", QVariant::fromValue(static_cast<uint>(0U)));
     m_driverMemoryBaseCombo->setItemData(0, QString(), Qt::UserRole + 1);
     if (m_driverMemoryBaseCombo->lineEdit() != nullptr)
@@ -609,7 +610,7 @@ void MemoryDock::initializeDriverMemoryRwTab()
     }
 
     m_driverMemoryAddressEdit = new QLineEdit(requestGroup);
-    m_driverMemoryAddressEdit->setPlaceholderText("中心地址或偏移，例如 0x1000");
+    m_driverMemoryAddressEdit->setPlaceholderText("用户态有效地址/偏移，或 0xFFFF... 内核虚拟地址");
     m_driverMemoryAddressEdit->setStyleSheet(inputStyle);
 
     m_driverMemoryBeforeSpin = new QSpinBox(requestGroup);
@@ -653,7 +654,7 @@ void MemoryDock::initializeDriverMemoryRwTab()
     m_driverMemoryHexEditor->setEditable(true);
     tabLayout->addWidget(m_driverMemoryHexEditor, 1);
 
-    m_driverMemoryStatusLabel = new QLabel("输入地址后点击 R0读取；修改缓存后点击“应用差异到真实内存”。", m_tabDriverMemoryRw);
+    m_driverMemoryStatusLabel = new QLabel("用户态地址建议从“内存区域”右键 R0读取；输入 0xFFFF... 高半区地址会走内核虚拟地址读取。", m_tabDriverMemoryRw);
     m_driverMemoryStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     tabLayout->addWidget(m_driverMemoryStatusLabel);
 

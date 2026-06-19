@@ -106,7 +106,9 @@ namespace ksword::ark
             << std::dec << ", requested=" << readResult.requestedBytes
             << ", read=" << readResult.bytesRead
             << ", status=" << readResult.readStatus
-            << ", nt=0x" << std::hex << static_cast<unsigned long>(readResult.copyStatus);
+            << ", source=" << readResult.source
+            << ", flags=0x" << std::hex << std::uppercase << flags
+            << ", nt=0x" << static_cast<unsigned long>(readResult.copyStatus);
         readResult.io.message = stream.str();
         return readResult;
     }
@@ -183,6 +185,8 @@ namespace ksword::ark
             << std::dec << ", requested=" << writeResult.requestedBytes
             << ", written=" << writeResult.bytesWritten
             << ", status=" << writeResult.writeStatus
+            << ", source=" << writeResult.source
+            << ", flags=0x" << std::hex << std::uppercase << flags
             << ", fields=0x" << std::hex << std::uppercase << writeResult.fieldFlags
             << ", nt=0x" << std::hex << static_cast<unsigned long>(writeResult.copyStatus);
         if (writeResult.writeStatus == KSWORD_ARK_MEMORY_WRITE_STATUS_FORCE_REQUIRED)

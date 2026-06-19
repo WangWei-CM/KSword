@@ -105,6 +105,21 @@ ZwQueryVirtualMemory(
 #define KSWORD_ARK_MEMORY_WRITE_REQUEST_HEADER_SIZE \
     (sizeof(KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST) - sizeof(((KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST*)0)->data))
 
+/*
+ * KswordARKMemoryRwCanary
+ * Inputs:
+ * - No input; this is a dedicated exported writable test cell.
+ * Processing:
+ * - Kernel-memory read/write UI can target this address to verify the R0
+ *   kernel VA read/write path without modifying real kernel state.
+ * Return behavior:
+ * - No function return; callers read/write its bytes through the normal memory
+ *   IOCTL path.  The value is intentionally volatile and exported so it is kept
+ *   in the image and can be located by RVA from the PE export table.
+ */
+__declspec(dllexport) volatile ULONGLONG KswordARKMemoryRwCanary =
+    0x1122334455667788ULL;
+
 typedef struct _KSWORD_ARK_MEMORY_BASIC_INFORMATION
 {
     PVOID BaseAddress;
@@ -158,6 +173,170 @@ Return Value:
     }
 
     return endAddress <= highestUserAddress;
+}
+
+static BOOLEAN
+KswordARKMemoryIsKernelAddressRange(
+    _In_ ULONG64 BaseAddress,
+    _In_ SIZE_T Length
+    )
+/*++
+
+Routine Description:
+
+    Validate a kernel virtual-address read range without touching memory.
+    中文说明：该检查只验证高半区和回绕，不保证页面 present；真正访问由
+    MmCopyMemory 完成，避免坏地址导致 bugcheck。
+
+Arguments:
+
+    BaseAddress - Requested kernel virtual address.
+    Length - Requested byte count.
+
+Return Value:
+
+    TRUE if the range is syntactically a kernel VA range.
+
+--*/
+{
+    ULONG64 endAddress = 0ULL;
+    ULONG64 highestUserAddress = (ULONG64)(ULONG_PTR)MmHighestUserAddress;
+
+    if (Length == 0U) {
+        return TRUE;
+    }
+
+    endAddress = BaseAddress + (ULONG64)Length - 1ULL;
+    if (endAddress < BaseAddress) {
+        return FALSE;
+    }
+
+    return BaseAddress > highestUserAddress;
+}
+
+static NTSTATUS
+KswordARKMemoryCopyKernelVirtualMemory(
+    _In_ ULONG64 SourceAddress,
+    _Out_writes_bytes_(BytesToRead) UCHAR* Destination,
+    _In_ SIZE_T BytesToRead,
+    _Out_ SIZE_T* BytesCopiedOut
+    )
+/*++
+
+Routine Description:
+
+    Copy kernel virtual memory into a caller-owned response buffer. 中文说明：
+    使用 MmCopyMemory 的 virtual 模式读取内核地址；函数只读，不修改目标内存。
+
+Arguments:
+
+    SourceAddress - Kernel virtual source address.
+    Destination - Output buffer.
+    BytesToRead - Bytes requested.
+    BytesCopiedOut - Receives bytes copied by MmCopyMemory.
+
+Return Value:
+
+    STATUS_SUCCESS or the MmCopyMemory/exception status.
+
+--*/
+{
+    MM_COPY_ADDRESS copyAddress;
+    SIZE_T copiedBytes = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (Destination == NULL || BytesCopiedOut == NULL || BytesToRead == 0U) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesCopiedOut = 0U;
+    if (KeGetCurrentIrql() > APC_LEVEL) {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    RtlZeroMemory(&copyAddress, sizeof(copyAddress));
+    copyAddress.VirtualAddress = (PVOID)(ULONG_PTR)SourceAddress;
+    __try {
+        status = MmCopyMemory(
+            Destination,
+            copyAddress,
+            BytesToRead,
+            MM_COPY_MEMORY_VIRTUAL,
+            &copiedBytes);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+        copiedBytes = 0U;
+    }
+
+    *BytesCopiedOut = copiedBytes;
+    return status;
+}
+
+static NTSTATUS
+KswordARKMemoryWriteKernelVirtualMemory(
+    _In_ ULONG64 DestinationAddress,
+    _In_reads_bytes_(BytesToWrite) const UCHAR* Source,
+    _In_ SIZE_T BytesToWrite,
+    _Out_ SIZE_T* BytesWrittenOut
+    )
+/*++
+
+Routine Description:
+
+    Write bytes into kernel virtual memory under SEH protection. 中文说明：该路径
+    仅在 R3 明确传入 KERNEL_ADDRESS + FORCE 后使用；函数不改页保护，目标页
+    必须本身可写。
+
+Arguments:
+
+    DestinationAddress - Kernel virtual destination address.
+    Source - Caller-provided bytes from METHOD_BUFFERED input.
+    BytesToWrite - Number of bytes to write.
+    BytesWrittenOut - Receives bytes copied before failure.
+
+Return Value:
+
+    STATUS_SUCCESS when all bytes were written; otherwise an exception/status code.
+
+--*/
+{
+    SIZE_T writeOffset = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (Source == NULL || BytesWrittenOut == NULL || BytesToWrite == 0U) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+    if (KeGetCurrentIrql() > APC_LEVEL) {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    while (writeOffset < BytesToWrite) {
+        SIZE_T chunkBytes = BytesToWrite - writeOffset;
+        ULONG64 chunkAddress = DestinationAddress + (ULONG64)writeOffset;
+        ULONG64 pageOffset = chunkAddress & (ULONG64)(PAGE_SIZE - 1U);
+        SIZE_T pageBytes = (SIZE_T)PAGE_SIZE - (SIZE_T)pageOffset;
+
+        if (chunkBytes > pageBytes) {
+            chunkBytes = pageBytes;
+        }
+
+        __try {
+            RtlCopyMemory(
+                (PVOID)(ULONG_PTR)chunkAddress,
+                Source + writeOffset,
+                chunkBytes);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            status = GetExceptionCode();
+            break;
+        }
+
+        writeOffset += chunkBytes;
+    }
+
+    *BytesWrittenOut = writeOffset;
+    return (writeOffset == BytesToWrite) ? STATUS_SUCCESS : status;
 }
 
 static NTSTATUS
@@ -500,6 +679,7 @@ Return Value:
     SIZE_T bytesAvailable = 0U;
     SIZE_T bytesToRead = 0U;
     BOOLEAN zeroFillUnreadable = FALSE;
+    BOOLEAN readKernelAddress = FALSE;
     NTSTATUS status = STATUS_SUCCESS;
 
     if (OutputBuffer == NULL || Request == NULL || BytesWrittenOut == NULL) {
@@ -509,7 +689,10 @@ Return Value:
     if (OutputBufferLength < KSWORD_ARK_MEMORY_READ_RESPONSE_HEADER_SIZE) {
         return STATUS_BUFFER_TOO_SMALL;
     }
-    if (Request->processId == 0UL || Request->processId <= 4UL) {
+    readKernelAddress =
+        ((Request->flags & KSWORD_ARK_MEMORY_READ_FLAG_KERNEL_ADDRESS) != 0UL) ? TRUE : FALSE;
+
+    if (!readKernelAddress && (Request->processId == 0UL || Request->processId <= 4UL)) {
         return STATUS_INVALID_PARAMETER;
     }
     if (Request->bytesToRead > KSWORD_ARK_MEMORY_READ_MAX_BYTES) {
@@ -520,19 +703,28 @@ Return Value:
         response = (KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE*)OutputBuffer;
         response->version = KSWORD_ARK_MEMORY_PROTOCOL_VERSION;
         response->headerSize = KSWORD_ARK_MEMORY_READ_RESPONSE_HEADER_SIZE;
-        response->processId = Request->processId;
+        response->processId = readKernelAddress ? 0UL : Request->processId;
         response->readStatus = KSWORD_ARK_MEMORY_READ_STATUS_OK;
         response->lookupStatus = STATUS_SUCCESS;
         response->copyStatus = STATUS_SUCCESS;
-        response->source = KSWORD_ARK_MEMORY_SOURCE_R0_MM_COPY_VIRTUAL_MEMORY;
+        response->source = readKernelAddress
+            ? KSWORD_ARK_MEMORY_SOURCE_R0_MM_COPY_KERNEL_VIRTUAL
+            : KSWORD_ARK_MEMORY_SOURCE_R0_MM_COPY_VIRTUAL_MEMORY;
         response->requestedBaseAddress = Request->baseAddress;
         response->requestedBytes = 0UL;
         response->maxBytesPerRequest = KSWORD_ARK_MEMORY_READ_MAX_BYTES;
-        response->fieldFlags |= KSWORD_ARK_MEMORY_FIELD_ADDRESS_USER_RANGE;
+        response->fieldFlags |= readKernelAddress
+            ? KSWORD_ARK_MEMORY_FIELD_ADDRESS_KERNEL_RANGE
+            : KSWORD_ARK_MEMORY_FIELD_ADDRESS_USER_RANGE;
         *BytesWrittenOut = KSWORD_ARK_MEMORY_READ_RESPONSE_HEADER_SIZE;
         return STATUS_SUCCESS;
     }
-    if (!KswordARKMemoryIsUserAddressRange(Request->baseAddress, (SIZE_T)Request->bytesToRead)) {
+    if (readKernelAddress) {
+        if (!KswordARKMemoryIsKernelAddressRange(Request->baseAddress, (SIZE_T)Request->bytesToRead)) {
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+    else if (!KswordARKMemoryIsUserAddressRange(Request->baseAddress, (SIZE_T)Request->bytesToRead)) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -541,15 +733,19 @@ Return Value:
     response = (KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE*)OutputBuffer;
     response->version = KSWORD_ARK_MEMORY_PROTOCOL_VERSION;
     response->headerSize = KSWORD_ARK_MEMORY_READ_RESPONSE_HEADER_SIZE;
-    response->processId = Request->processId;
+    response->processId = readKernelAddress ? 0UL : Request->processId;
     response->readStatus = KSWORD_ARK_MEMORY_READ_STATUS_UNAVAILABLE;
     response->lookupStatus = STATUS_SUCCESS;
     response->copyStatus = STATUS_NOT_SUPPORTED;
-    response->source = KSWORD_ARK_MEMORY_SOURCE_R0_MM_COPY_VIRTUAL_MEMORY;
+    response->source = readKernelAddress
+        ? KSWORD_ARK_MEMORY_SOURCE_R0_MM_COPY_KERNEL_VIRTUAL
+        : KSWORD_ARK_MEMORY_SOURCE_R0_MM_COPY_VIRTUAL_MEMORY;
     response->requestedBaseAddress = Request->baseAddress;
     response->requestedBytes = Request->bytesToRead;
     response->maxBytesPerRequest = KSWORD_ARK_MEMORY_READ_MAX_BYTES;
-    response->fieldFlags |= KSWORD_ARK_MEMORY_FIELD_ADDRESS_USER_RANGE;
+    response->fieldFlags |= readKernelAddress
+        ? KSWORD_ARK_MEMORY_FIELD_ADDRESS_KERNEL_RANGE
+        : KSWORD_ARK_MEMORY_FIELD_ADDRESS_USER_RANGE;
     zeroFillUnreadable =
         ((Request->flags & KSWORD_ARK_MEMORY_READ_FLAG_ZERO_FILL_UNREADABLE) != 0UL) ? TRUE : FALSE;
 
@@ -558,6 +754,77 @@ Return Value:
     if (bytesToRead > bytesAvailable) {
         response->readStatus = KSWORD_ARK_MEMORY_READ_STATUS_BUFFER_TOO_SMALL;
         *BytesWrittenOut = KSWORD_ARK_MEMORY_READ_RESPONSE_HEADER_SIZE;
+        return STATUS_SUCCESS;
+    }
+
+    if (readKernelAddress) {
+        SIZE_T copyOffset = 0U;
+        SIZE_T readableBytes = 0U;
+        NTSTATUS firstCopyFailure = STATUS_SUCCESS;
+        BOOLEAN anyCopyFailure = FALSE;
+
+        while (copyOffset < bytesToRead) {
+            SIZE_T chunkBytes = bytesToRead - copyOffset;
+            SIZE_T chunkCopied = 0U;
+            NTSTATUS chunkStatus = STATUS_SUCCESS;
+
+            if (chunkBytes > PAGE_SIZE) {
+                chunkBytes = PAGE_SIZE;
+            }
+
+            chunkStatus = KswordARKMemoryCopyKernelVirtualMemory(
+                Request->baseAddress + (ULONG64)copyOffset,
+                response->data + copyOffset,
+                chunkBytes,
+                &chunkCopied);
+            readableBytes += chunkCopied;
+            if (!NT_SUCCESS(chunkStatus) || chunkCopied != chunkBytes) {
+                anyCopyFailure = TRUE;
+                if (NT_SUCCESS(firstCopyFailure) && !NT_SUCCESS(chunkStatus)) {
+                    firstCopyFailure = chunkStatus;
+                }
+            }
+            copyOffset += chunkBytes;
+        }
+
+        if (anyCopyFailure && NT_SUCCESS(firstCopyFailure)) {
+            firstCopyFailure = STATUS_PARTIAL_COPY;
+        }
+        response->copyStatus = anyCopyFailure ? firstCopyFailure : STATUS_SUCCESS;
+        response->bytesRead = zeroFillUnreadable
+            ? Request->bytesToRead
+            : (ULONG)readableBytes;
+        bytesCopied = zeroFillUnreadable ? bytesToRead : readableBytes;
+
+        if (bytesCopied > 0U) {
+            response->fieldFlags |= KSWORD_ARK_MEMORY_FIELD_READ_DATA_PRESENT;
+        }
+        if (!anyCopyFailure && readableBytes == bytesToRead) {
+            response->readStatus = KSWORD_ARK_MEMORY_READ_STATUS_OK;
+        }
+        else if (readableBytes > 0U) {
+            response->fieldFlags |= KSWORD_ARK_MEMORY_FIELD_PARTIAL_COPY;
+            if (zeroFillUnreadable) {
+                response->fieldFlags |= KSWORD_ARK_MEMORY_FIELD_ZERO_FILLED_UNREADABLE;
+            }
+            response->readStatus = KSWORD_ARK_MEMORY_READ_STATUS_PARTIAL_COPY;
+        }
+        else {
+            if (zeroFillUnreadable) {
+                response->fieldFlags |=
+                    KSWORD_ARK_MEMORY_FIELD_READ_DATA_PRESENT |
+                    KSWORD_ARK_MEMORY_FIELD_PARTIAL_COPY |
+                    KSWORD_ARK_MEMORY_FIELD_ZERO_FILLED_UNREADABLE;
+                bytesCopied = bytesToRead;
+                response->bytesRead = Request->bytesToRead;
+                response->readStatus = KSWORD_ARK_MEMORY_READ_STATUS_ZERO_FILLED;
+            }
+            else {
+                response->readStatus = KSWORD_ARK_MEMORY_READ_STATUS_COPY_FAILED;
+            }
+        }
+
+        *BytesWrittenOut = KSWORD_ARK_MEMORY_READ_RESPONSE_HEADER_SIZE + bytesCopied;
         return STATUS_SUCCESS;
     }
 
@@ -688,6 +955,7 @@ Return Value:
     SIZE_T bytesCopied = 0U;
     SIZE_T bytesToWrite = 0U;
     SIZE_T requiredInputBytes = 0U;
+    BOOLEAN writeKernelAddress = FALSE;
     NTSTATUS status = STATUS_SUCCESS;
 
     if (OutputBuffer == NULL || Request == NULL || BytesWrittenOut == NULL) {
@@ -700,7 +968,10 @@ Return Value:
     if (RequestBufferLength < KSWORD_ARK_MEMORY_WRITE_REQUEST_HEADER_SIZE) {
         return STATUS_INVALID_PARAMETER;
     }
-    if (Request->processId == 0UL || Request->processId <= 4UL) {
+    writeKernelAddress =
+        ((Request->flags & KSWORD_ARK_MEMORY_WRITE_FLAG_KERNEL_ADDRESS) != 0UL) ? TRUE : FALSE;
+
+    if (!writeKernelAddress && (Request->processId == 0UL || Request->processId <= 4UL)) {
         return STATUS_INVALID_PARAMETER;
     }
     if (Request->bytesToWrite == 0UL ||
@@ -716,7 +987,12 @@ Return Value:
     if (RequestBufferLength < requiredInputBytes) {
         return STATUS_INVALID_PARAMETER;
     }
-    if (!KswordARKMemoryIsUserAddressRange(Request->baseAddress, bytesToWrite)) {
+    if (writeKernelAddress) {
+        if (!KswordARKMemoryIsKernelAddressRange(Request->baseAddress, bytesToWrite)) {
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+    else if (!KswordARKMemoryIsUserAddressRange(Request->baseAddress, bytesToWrite)) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -724,20 +1000,48 @@ Return Value:
     response = (KSWORD_ARK_WRITE_VIRTUAL_MEMORY_RESPONSE*)OutputBuffer;
     response->version = KSWORD_ARK_MEMORY_PROTOCOL_VERSION;
     response->size = sizeof(*response);
-    response->processId = Request->processId;
+    response->processId = writeKernelAddress ? 0UL : Request->processId;
     response->fieldFlags =
-        KSWORD_ARK_MEMORY_FIELD_ADDRESS_USER_RANGE |
+        (writeKernelAddress
+            ? KSWORD_ARK_MEMORY_FIELD_ADDRESS_KERNEL_RANGE
+            : KSWORD_ARK_MEMORY_FIELD_ADDRESS_USER_RANGE) |
         KSWORD_ARK_MEMORY_FIELD_WRITE_DATA_PRESENT;
     response->writeStatus = KSWORD_ARK_MEMORY_WRITE_STATUS_UNAVAILABLE;
     response->lookupStatus = STATUS_SUCCESS;
     response->copyStatus = STATUS_NOT_SUPPORTED;
-    response->source = KSWORD_ARK_MEMORY_SOURCE_R0_MM_WRITE_VIRTUAL_MEMORY;
+    response->source = writeKernelAddress
+        ? KSWORD_ARK_MEMORY_SOURCE_R0_MM_COPY_KERNEL_VIRTUAL
+        : KSWORD_ARK_MEMORY_SOURCE_R0_MM_WRITE_VIRTUAL_MEMORY;
     response->requestedBaseAddress = Request->baseAddress;
     response->requestedBytes = Request->bytesToWrite;
     response->maxBytesPerRequest = KSWORD_ARK_MEMORY_WRITE_MAX_BYTES;
 
     if ((Request->flags & KSWORD_ARK_MEMORY_WRITE_FLAG_FORCE) != 0UL) {
         response->fieldFlags |= KSWORD_ARK_MEMORY_FIELD_FORCE_WRITE_USED;
+    }
+
+    if (writeKernelAddress) {
+        status = KswordARKMemoryWriteKernelVirtualMemory(
+            Request->baseAddress,
+            Request->data,
+            bytesToWrite,
+            &bytesCopied);
+        response->copyStatus = status;
+        response->bytesWritten = (ULONG)bytesCopied;
+
+        if (NT_SUCCESS(status) && bytesCopied == bytesToWrite) {
+            response->writeStatus = KSWORD_ARK_MEMORY_WRITE_STATUS_OK;
+        }
+        else if (bytesCopied > 0U) {
+            response->fieldFlags |= KSWORD_ARK_MEMORY_FIELD_PARTIAL_COPY;
+            response->writeStatus = KSWORD_ARK_MEMORY_WRITE_STATUS_PARTIAL_COPY;
+        }
+        else {
+            response->writeStatus = KSWORD_ARK_MEMORY_WRITE_STATUS_COPY_FAILED;
+        }
+
+        *BytesWrittenOut = sizeof(*response);
+        return STATUS_SUCCESS;
     }
 
     status = PsLookupProcessByProcessId(ULongToHandle(Request->processId), &processObject);

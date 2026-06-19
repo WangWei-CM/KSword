@@ -478,6 +478,17 @@ private:
     // - 返回：无。
     void resetDriverMemoryRwState();
 
+    // prepareDriverMemoryReadAtAddress：
+    // - 作用：把已知有效区域/地址填入 Tab6，并可选择立即触发 R0 读取。
+    // - 参数 absoluteAddress：目标进程虚拟地址。
+    // - 参数 preferredBytes：期望读取长度，0 表示保留当前前后范围。
+    // - 参数 triggerRead：true=填充后立即点击 R0 读取；false=只切页填充。
+    // - 返回：无。
+    void prepareDriverMemoryReadAtAddress(
+        std::uint64_t absoluteAddress,
+        std::uint64_t preferredBytes,
+        bool triggerRead);
+
     // refreshKernelExecutableMemoryScanAsync：
     // - 作用：异步刷新内核可执行页扫描结果。
     // - 返回：无。

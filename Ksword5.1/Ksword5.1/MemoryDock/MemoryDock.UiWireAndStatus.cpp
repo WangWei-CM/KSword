@@ -458,6 +458,7 @@ void MemoryDock::initializeConnections()
 
         QMenu menu(this);
         QAction* viewAction = menu.addAction("查看此区域");
+        QAction* r0ReadAction = menu.addAction("R0读取此区域");
         QAction* copyAction = menu.addAction("复制基址");
         QAction* searchAction = menu.addAction("搜索此区域");
         QAction* selectedAction = menu.exec(m_regionTable->viewport()->mapToGlobal(localPosition));
@@ -491,6 +492,32 @@ void MemoryDock::initializeConnections()
                 << formatAddress(baseAddress).toStdString()
                 << eol;
             jumpToAddress(baseAddress);
+            return;
+        }
+        if (selectedAction == r0ReadAction)
+        {
+            // R0 读取此区域：
+            // - 输入：区域表当前行的 base/size UserRole；
+            // - 处理：填充驱动读写页为“从区域基址向后读”，最多单次读取 4KB；
+            // - 返回：无返回值，读取结果由驱动读写页状态栏和 HexEditor 展示。
+            const QTableWidgetItem* baseItem = m_regionTable->item(row, 0);
+            const QTableWidgetItem* sizeItem = m_regionTable->item(row, 1);
+            if (baseItem != nullptr && sizeItem != nullptr)
+            {
+                const std::uint64_t regionBase = baseItem->data(Qt::UserRole).toULongLong();
+                const std::uint64_t regionSize = sizeItem->data(Qt::UserRole).toULongLong();
+                const std::uint64_t bytesToRead = std::min<std::uint64_t>(
+                    regionSize == 0ULL ? 4096ULL : regionSize,
+                    4096ULL);
+                kLogEvent regionR0ReadEvent;
+                info << regionR0ReadEvent
+                    << "[MemoryDock] 区域表右键R0读取区域, base="
+                    << formatAddress(regionBase).toStdString()
+                    << ", bytes="
+                    << bytesToRead
+                    << eol;
+                prepareDriverMemoryReadAtAddress(regionBase, bytesToRead, true);
+            }
             return;
         }
         if (selectedAction == searchAction)
@@ -1134,4 +1161,3 @@ void MemoryDock::initializeBookmarkRefreshTimer()
         });
     m_bookmarkRefreshTimer->start();
 }
-
