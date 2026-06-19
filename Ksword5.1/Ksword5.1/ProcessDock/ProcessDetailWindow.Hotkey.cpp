@@ -1206,6 +1206,29 @@ void ProcessDetailWindow::initializeHotkeyTab()
     m_refreshHotkeyButton->setStyleSheet(buttonStyle);
 }
 
+void ProcessDetailWindow::showHotkeyTabAndRefresh()
+{
+    // 右键菜单直达入口：
+    // - 输入：无，目标进程来自当前详情窗口绑定的 m_baseRecord；
+    // - 处理：先切到“进程热键”页，再复用已有异步热键刷新函数；
+    // - 返回：无。若控件尚未初始化或扫描正在进行，则保持当前安全状态。
+    if (m_tabWidget != nullptr && m_hotkeyTab != nullptr)
+    {
+        m_tabWidget->setCurrentWidget(m_hotkeyTab);
+    }
+
+    if (!m_hotkeyRefreshing)
+    {
+        requestAsyncHotkeyRefresh();
+    }
+
+    kLogEvent hotkeyEntryEvent;
+    info << hotkeyEntryEvent
+        << "[ProcessDetailWindow] showHotkeyTabAndRefresh: pid="
+        << m_baseRecord.pid
+        << eol;
+}
+
 void ProcessDetailWindow::updateHotkeyStatusLabel(const QString& statusText, const bool refreshing)
 {
     if (m_hotkeyStatusLabel == nullptr)

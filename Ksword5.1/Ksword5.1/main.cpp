@@ -38,6 +38,7 @@ namespace
 {
     constexpr wchar_t kUnlockerKeyName[] = L"Ksword.FileUnlocker";
     constexpr wchar_t kKswordMainWindowTitle[] = L"Ksword5.1";
+    constexpr wchar_t kPrivilegeRestartArgument[] = L"--ksword-privilege-restart";
 
     // kStartupScaleRecommendedLogicalWidth 作用：
     // - 定义启动分辨率审查的最低建议逻辑宽度；
@@ -127,6 +128,63 @@ namespace
         context.currentProcessId = ::GetCurrentProcessId();
         (void)::EnumWindows(enumExistingKswordWindowProc, reinterpret_cast<LPARAM>(&context));
         return context.foundWindow;
+    }
+
+    // hasCommandLineArgument 作用：
+    // - 输入 argumentText：需要查找的内部命令行参数；
+    // - 处理：使用 CommandLineToArgvW 按 Win32 规则解析当前命令行，避免手写拆分误判引号；
+    // - 返回：找到完全匹配参数返回 true，否则返回 false。
+    bool hasCommandLineArgument(const wchar_t* argumentText)
+    {
+        if (argumentText == nullptr || argumentText[0] == L'\0')
+        {
+            return false;
+        }
+
+        int argumentCount = 0;
+        LPWSTR* argumentVector = ::CommandLineToArgvW(::GetCommandLineW(), &argumentCount);
+        if (argumentVector == nullptr)
+        {
+            return false;
+        }
+
+        bool found = false;
+        for (int argumentIndex = 1; argumentIndex < argumentCount; ++argumentIndex)
+        {
+            if (_wcsicmp(argumentVector[argumentIndex], argumentText) == 0)
+            {
+                found = true;
+                break;
+            }
+        }
+        ::LocalFree(argumentVector);
+        return found;
+    }
+
+    // appendInternalArgumentIfMissing 作用：
+    // - 输入 parameterText：已有命令行参数；argumentText：需要追加的内部参数；
+    // - 处理：当前参数中没有该内部标记时追加，避免多轮权限重启重复堆叠；
+    // - 返回：可直接交给 ShellExecuteW/CreateProcessW 的参数字符串。
+    std::wstring appendInternalArgumentIfMissing(
+        const std::wstring& parameterText,
+        const wchar_t* argumentText)
+    {
+        if (argumentText == nullptr || argumentText[0] == L'\0')
+        {
+            return parameterText;
+        }
+        if (hasCommandLineArgument(argumentText))
+        {
+            return parameterText;
+        }
+
+        std::wstring resultText = parameterText;
+        if (!resultText.empty())
+        {
+            resultText += L" ";
+        }
+        resultText += argumentText;
+        return resultText;
     }
 
     // activateExistingKswordMainWindow 作用：
@@ -435,7 +493,9 @@ namespace
         }
 
         // parameterText 作用：保存当前命令行参数，传递给新启动实例。
-        const std::wstring parameterText = extractCurrentProcessParameterText();
+        const std::wstring parameterText = appendInternalArgumentIfMissing(
+            extractCurrentProcessParameterText(),
+            kPrivilegeRestartArgument);
         const std::wstring executableDirectory = resolveExecutableDirectoryPath(executablePath);
         HINSTANCE shellResult = ::ShellExecuteW(
             nullptr,
@@ -462,7 +522,9 @@ namespace
 
         // commandLineText 作用：CreateProcessW 要求可写命令行缓冲区。
         std::wstring commandLineText = L"\"" + executablePath + L"\"";
-        const std::wstring parameterText = extractCurrentProcessParameterText();
+        const std::wstring parameterText = appendInternalArgumentIfMissing(
+            extractCurrentProcessParameterText(),
+            kPrivilegeRestartArgument);
         if (!parameterText.empty())
         {
             commandLineText += L" ";
@@ -969,11 +1031,19 @@ int main(int argc, char* argv[])
     initializeProcessDpiAwareness();
     startupTraceRaw("initializeProcessDpiAwareness finished");
 
-    if (HWND existingWindowHandle = findExistingKswordMainWindow())
+    const bool privilegeRestartLaunch = hasCommandLineArgument(kPrivilegeRestartArgument);
+    if (!privilegeRestartLaunch)
     {
-        startupTraceRaw("existing Ksword main window found, activating it and exiting current instance");
-        activateExistingKswordMainWindow(existingWindowHandle);
-        return 0;
+        if (HWND existingWindowHandle = findExistingKswordMainWindow())
+        {
+            startupTraceRaw("existing Ksword main window found, activating it and exiting current instance");
+            activateExistingKswordMainWindow(existingWindowHandle);
+            return 0;
+        }
+    }
+    else
+    {
+        startupTraceRaw("privilege restart marker found, skipping single-instance check");
     }
 
     {

@@ -7000,6 +7000,11 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QAction* openMemoryAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_details.svg"),
         "跳转到内存操作（可在此处转储）");
+    QAction* scanHotkeyAction = contextMenu.addAction(
+        blueTintedIcon(":/Icon/process_refresh.svg"),
+        QStringLiteral("扫描进程热键"));
+    scanHotkeyAction->setToolTip(QStringLiteral("打开进程详细信息并直达“进程热键”页，扫描窗口热键、菜单快捷键、Accelerator、快捷方式和R0热键表。"));
+    scanHotkeyAction->setEnabled(!hasBatchSelection);
 
     // 优先级二级菜单。
     QMenu* prioritySubMenu = contextMenu.addMenu(blueTintedIcon(":/Icon/process_priority.svg"), "设置进程优先级");
@@ -7065,6 +7070,7 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         else if (selectedAction == clearCriticalAction) { executeSetCriticalAction(false); }
         else if (selectedAction == openFolderAction) { executeOpenFolderAction(); }
         else if (selectedAction == openMemoryAction) { executeOpenMemoryOperationAction(); }
+        else if (selectedAction == scanHotkeyAction) { openSelectedProcessHotkeyScanner(); }
         else if (selectedAction == detailsAction) { openProcessDetailsPlaceholder(); }
         else if (selectedAction->parent() == prioritySubMenu)
         {
@@ -9506,6 +9512,97 @@ void ProcessDock::openProcessDetailsPlaceholder()
     info << logEvent
         << "[ProcessDock] 创建新的进程详情窗口, pid=" << detailRecord.pid
         << ", identity=" << identityKey
+        << eol;
+}
+
+void ProcessDock::openSelectedProcessHotkeyScanner()
+{
+    // 进程列表右键“扫描进程热键”入口：
+    // - 输入：当前右键菜单冻结的单个进程动作目标；
+    // - 处理：复用已有详情窗口缓存，必要时创建详情窗口，然后切到热键页并触发扫描；
+    // - 返回：无。批量选择时直接提示，避免一次打开多个详情窗口造成 UI 噪声。
+    const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
+    if (actionTargets.empty())
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] 扫描进程热键失败：当前没有选中进程。" << eol;
+        QMessageBox::warning(this, QStringLiteral("扫描进程热键"), QStringLiteral("请先在表格中选中一个进程。"));
+        return;
+    }
+    if (actionTargets.size() > 1U)
+    {
+        kLogEvent logEvent;
+        warn << logEvent
+            << "[ProcessDock] 扫描进程热键失败：仅支持单进程, selectedCount="
+            << actionTargets.size()
+            << eol;
+        QMessageBox::information(this, QStringLiteral("扫描进程热键"), QStringLiteral("请只选中一个进程再扫描热键。"));
+        return;
+    }
+
+    ks::process::ProcessRecord detailRecord = actionTargets.front().record;
+    const std::string identityKey = ks::process::BuildProcessIdentityKey(
+        detailRecord.pid,
+        detailRecord.creationTime100ns);
+
+    ProcessDetailWindow* detailWindow = nullptr;
+    auto existingWindowIt = m_detailWindowByIdentity.find(identityKey);
+    if (existingWindowIt != m_detailWindowByIdentity.end() && existingWindowIt->second != nullptr)
+    {
+        detailWindow = existingWindowIt->second.data();
+        detailWindow->updateBaseRecord(detailRecord);
+        m_detailWindowLastSyncTimeByIdentity[identityKey] = std::chrono::steady_clock::now();
+    }
+    else
+    {
+        detailWindow = new ProcessDetailWindow(detailRecord, nullptr);
+        detailWindow->setAttribute(Qt::WA_DeleteOnClose, true);
+        m_detailWindowByIdentity[identityKey] = detailWindow;
+        m_detailWindowLastSyncTimeByIdentity[identityKey] = std::chrono::steady_clock::now();
+
+        connect(detailWindow, &QObject::destroyed, this, [this, identityKey]() {
+            m_detailWindowByIdentity.erase(identityKey);
+            m_detailWindowLastSyncTimeByIdentity.erase(identityKey);
+        });
+        connect(detailWindow, &ProcessDetailWindow::requestOpenProcessByPid, this, [this](const std::uint32_t parentPid) {
+            openProcessDetailWindowByPid(parentPid);
+        });
+        connect(detailWindow, &ProcessDetailWindow::requestOpenHandleDockByPid, this, [this](const std::uint32_t targetPid) {
+            const bool invokeOk = QMetaObject::invokeMethod(
+                this->parent(),
+                "focusHandleDockByPid",
+                Qt::QueuedConnection,
+                Q_ARG(quint32, static_cast<quint32>(targetPid)));
+            if (!invokeOk)
+            {
+                kLogEvent logEvent;
+                warn << logEvent
+                    << "[ProcessDock] requestOpenHandleDockByPid 转发失败, pid="
+                    << targetPid
+                    << eol;
+            }
+        });
+    }
+
+    if (detailWindow == nullptr)
+    {
+        kLogEvent logEvent;
+        warn << logEvent << "[ProcessDock] 扫描进程热键失败：详情窗口创建失败。" << eol;
+        QMessageBox::warning(this, QStringLiteral("扫描进程热键"), QStringLiteral("无法创建进程详细信息窗口。"));
+        return;
+    }
+
+    detailWindow->show();
+    detailWindow->raise();
+    detailWindow->activateWindow();
+    detailWindow->showHotkeyTabAndRefresh();
+
+    kLogEvent logEvent;
+    info << logEvent
+        << "[ProcessDock] 打开进程热键扫描入口, pid="
+        << detailRecord.pid
+        << ", identity="
+        << identityKey
         << eol;
 }
 

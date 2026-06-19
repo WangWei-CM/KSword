@@ -59,6 +59,11 @@ namespace filedock::handleusage
     // - 支持文件和目录两种匹配规则（文件精确匹配、目录前缀匹配）。
     // 调用方式：FileHandleUsageWindow 后台线程调用。
     // 传入 absolutePaths：目标绝对路径集合（可多选）。
+    // 传入 progressPid：进度条 id，0 表示不转接进度。
+    // 传入 tryKernelHandleTable：true 表示优先尝试 R0 HandleTable；false 表示只做 R3/合成占用扫描。
     // 传出：HandleUsageScanResult（按值返回）。
-    HandleUsageScanResult scanHandleUsageByPaths(const std::vector<QString>& absolutePaths, int progressPid = 0);
+    HandleUsageScanResult scanHandleUsageByPaths(
+        const std::vector<QString>& absolutePaths,
+        int progressPid = 0,
+        bool tryKernelHandleTable = true);
 }

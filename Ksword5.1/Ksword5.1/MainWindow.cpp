@@ -88,6 +88,8 @@
 
 namespace
 {
+    constexpr wchar_t kKswordPrivilegeRestartArgument[] = L"--ksword-privilege-restart";
+
     // kDockLayoutConfigFileVersion 作用：
     // - 作为 ADS saveState/restoreState 的版本号；
     // - Dock 集合或默认布局发生不兼容变化时递增，可自动放弃旧布局。
@@ -1581,6 +1583,36 @@ namespace
         return QStringLiteral("\"%1\"").arg(escapedText);
     }
 
+    // containsQtArgument 作用：
+    // - 输入 argumentList：QCoreApplication 参数列表；argumentText：内部参数名；
+    // - 处理：跳过 exe 路径，只做大小写不敏感的完整参数匹配；
+    // - 返回：已存在该参数返回 true，否则返回 false。
+    bool containsQtArgument(const QStringList& argumentList, const QString& argumentText)
+    {
+        for (int index = 1; index < argumentList.size(); ++index)
+        {
+            if (QString::compare(argumentList.at(index), argumentText, Qt::CaseInsensitive) == 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // argumentsWithPrivilegeRestartMarker 作用：
+    // - 输入 argumentList：当前 Qt 参数；
+    // - 处理：为 UIAccess/Admin 权限切换重启追加内部标记参数，避免新实例被防多开直接拦截；
+    // - 返回：包含内部标记的参数列表；若已存在则原样返回。
+    QStringList argumentsWithPrivilegeRestartMarker(QStringList argumentList)
+    {
+        const QString markerText = QString::fromWCharArray(kKswordPrivilegeRestartArgument);
+        if (!containsQtArgument(argumentList, markerText))
+        {
+            argumentList.push_back(markerText);
+        }
+        return argumentList;
+    }
+
     QString formatWin32StepFailure(const QString& stepText, const DWORD errorCode)
     {
         // stepText 用途：描述失败 API 或阶段，便于 UI 与日志直接定位。
@@ -2062,11 +2094,12 @@ namespace
         }
         ScopedHandle primaryTokenHandle(rawPrimaryTokenHandle);
 
+        const QStringList launchArgumentList = argumentsWithPrivilegeRestartMarker(argumentList);
         QString commandLineText = quoteQStringCommandLineArgument(QString::fromWCharArray(executablePathBuffer));
-        for (int index = 1; index < argumentList.size(); ++index)
+        for (int index = 1; index < launchArgumentList.size(); ++index)
         {
             commandLineText += QLatin1Char(' ');
-            commandLineText += quoteQStringCommandLineArgument(argumentList.at(index));
+            commandLineText += quoteQStringCommandLineArgument(launchArgumentList.at(index));
         }
 
         std::wstring mutableCommandLine = commandLineText.toStdWString();
@@ -4877,6 +4910,8 @@ bool MainWindow::launchSelfWithSystemUiAccessToken(QString* detailTextOut)
     }
 
     QString commandLineText = quoteWin32CommandLineArgument(selfPath);
+    commandLineText += QLatin1Char(' ');
+    commandLineText += QString::fromWCharArray(kKswordPrivilegeRestartArgument);
     std::wstring commandLineWide = commandLineText.toStdWString();
     std::wstring applicationPathWide = selfPath;
 
@@ -6035,7 +6070,7 @@ void MainWindow::requestAdminElevationRestart()
         nullptr,
         L"runas",
         exePathBuffer,
-        nullptr,
+        kKswordPrivilegeRestartArgument,
         nullptr,
         SW_SHOWNORMAL);
     if (reinterpret_cast<std::intptr_t>(shellResult) <= 32)
@@ -6360,15 +6395,16 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     kPro.set(progressPid, QStringLiteral("正在创建%1页内容").arg(dockTitleText).toStdString(), 0, 45.0f);
     QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
-    // KernelDock owns a complex QTabWidget hierarchy and must remain an opaque, styled root.
-    // The generic transparent QWidget rule used by wallpaper-friendly docks also matches every
-    // nested tab page; after ADS restores the kernel dock as the startup page that can leave the
-    // whole dock painting the black parent surface.  Keep the rule for ordinary docks only.
+    // KernelDock 挂载策略：
+    // - 没有背景图时保持根控件自绘，避免 ADS 恢复布局后露出黑色父容器；
+    // - 有背景图时允许根控件透明，把底图透出来，仅由全局 QSS 保持表格/树/列表可读。
     realWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     if (isKernelDock)
     {
-        realWidget->setAutoFillBackground(true);
-        realWidget->setAttribute(Qt::WA_StyledBackground, true);
+        const bool allowWallpaperThroughKernelDock =
+            isBackgroundImageReady(m_currentAppearanceSettings.backgroundImagePath);
+        realWidget->setAutoFillBackground(!allowWallpaperThroughKernelDock);
+        realWidget->setAttribute(Qt::WA_StyledBackground, !allowWallpaperThroughKernelDock);
     }
     else
     {
@@ -6675,9 +6711,12 @@ void MainWindow::repairKernelDockAfterLayoutRestore(const QString& reasonText)
     {
         // 内核 Dock 是唯一已观察到 ADS 恢复后黑屏的主 Dock。这里不依赖 visible/current
         // 判断，直接确保 Dock 内容是 KernelDock 本体，避免恢复到旧占位页或空容器。
+        // 背景图模式下不能再强制根控件自绘实底，否则会把主窗口背景图挡住。
         QWidget* oldWidget = m_dockKernel->takeWidget();
-        m_kernelWidget->setAutoFillBackground(true);
-        m_kernelWidget->setAttribute(Qt::WA_StyledBackground, true);
+        const bool allowWallpaperThroughKernelDock =
+            isBackgroundImageReady(m_currentAppearanceSettings.backgroundImagePath);
+        m_kernelWidget->setAutoFillBackground(!allowWallpaperThroughKernelDock);
+        m_kernelWidget->setAttribute(Qt::WA_StyledBackground, !allowWallpaperThroughKernelDock);
         m_kernelWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         m_dockKernel->setWidget(m_kernelWidget, ads::CDockWidget::ForceNoScrollArea);
         m_dockKernel->setProperty("ks_lazy_initialized", true);
@@ -7331,14 +7370,16 @@ void MainWindow::initAppearanceSettings()
             });
     }
 
-    reportStartupProgress(90, QStringLiteral("正在应用主界面主题..."));
+    reportStartupProgress(89, QStringLiteral("正在应用主界面样式..."));
     applyAppearanceSettings(m_currentAppearanceSettings, QStringLiteral("初始化加载"));
     if (!m_dockLayoutRestoredFromConfig)
     {
+        reportStartupProgress(92, QStringLiteral("正在激活启动页签..."));
         raiseStartupDockByKey(m_currentAppearanceSettings.startupDefaultTabKey, QStringLiteral("初始化加载"));
     }
     else
     {
+        reportStartupProgress(92, QStringLiteral("正在沿用上次 Dock 布局..."));
         info << appearanceInitEvent << "[MainWindow] 已恢复 ADS 布局，跳过启动默认页签覆盖。" << eol;
     }
     info << appearanceInitEvent << "[MainWindow] 外观设置系统初始化完成。" << eol;
@@ -7464,10 +7505,25 @@ void MainWindow::applyAppearanceSettings(
         m_pDockManager->setAttribute(Qt::WA_StyledBackground, false);
     }
 
+    // 启动进度拆分：
+    // - applyAppearanceSettings 不只设置 QPalette/QSS，还会刷新若干主题关联控件；
+    // - 仅在初始化加载时上报，避免用户运行期切换主题时干扰启动画面状态。
+    if (triggerReason == QStringLiteral("初始化加载"))
+    {
+        reportStartupProgress(90, QStringLiteral("正在刷新主题关联控件..."));
+    }
+
     // 主题切换后主动刷新“按主题着色的表格行”，避免墨绿色残留到浅色模式。
     if (m_processWidget != nullptr)
     {
         m_processWidget->refreshThemeVisuals();
+    }
+
+    // 内核 Dock 修复是为了避免 ADS 恢复布局后出现黑屏占位页。它属于启动布局校正，
+    // 不是单纯的“应用样式”，因此启动提示单独拆出，便于判断耗时是否来自这里。
+    if (triggerReason == QStringLiteral("初始化加载"))
+    {
+        reportStartupProgress(91, QStringLiteral("正在确认内核 Dock 显示状态..."));
     }
     repairKernelDockAfterLayoutRestore(QStringLiteral("applyAppearanceSettings"));
 
@@ -8077,37 +8133,78 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             "}")
         : QString();
 
-    // kernelDockOpaqueStyle 作用：
-    // - KernelDock 是多层 QTabWidget/QStackedWidget/视图控件组合，不能跟随背景图模式全透明；
-    // - 该规则放在透明 Dock 规则之后，按 objectName 精确恢复内核 Dock 的主题底色；
-    // - 防止上次退出停留在内核 Dock 时，ADS 恢复后只露出黑色父容器而看不到真实 UI。
-    const QString kernelDockOpaqueStyle = QStringLiteral(
-        "ads--CDockWidget#ksDock_kernel,"
-        "ads--CDockWidget#ksDock_kernel > QWidget,"
-        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot,"
-        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTabWidget::pane,"
-        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QStackedWidget,"
-        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QStackedWidget > QWidget{"
-        "  background:%1 !important;"
-        "  background-color:%1 !important;"
-        "  color:%3 !important;"
-        "}"
-        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTableView,"
-        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTableWidget,"
-        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTreeView,"
-        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTreeWidget,"
-        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QListView,"
-        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QListWidget{"
-        "  background:%1 !important;"
-        "  background-color:%1 !important;"
-        "  alternate-background-color:%2 !important;"
-        "  color:%3 !important;"
-        "  gridline-color:%4 !important;"
-        "}")
-        .arg(surfaceBackgroundText)
-        .arg(surfaceAltBackgroundText)
-        .arg(primaryTextColor)
-        .arg(borderColorText);
+    // kernelDockContainerStyle 作用：
+    // - 无背景图：内核 Dock 根容器保持主题实底，防止 ADS 恢复布局后露出黑色父容器；
+    // - 有背景图：根容器、Tab pane、StackedWidget 改为透明，让主窗口背景图透出。
+    // 返回：仅控制内核 Dock 外层/页面容器背景，不触碰表格/树/列表等内容视图。
+    const QString kernelDockContainerStyle = enableDockTransparencyForBackgroundImage
+        ? QStringLiteral(
+            "ads--CDockWidget#ksDock_kernel,"
+            "ads--CDockWidget#ksDock_kernel > QWidget,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTabWidget::pane,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QStackedWidget,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QStackedWidget > QWidget{"
+            "  background:transparent !important;"
+            "  background-color:transparent !important;"
+            "  color:%1 !important;"
+            "}")
+            .arg(primaryTextColor)
+        : QStringLiteral(
+            "ads--CDockWidget#ksDock_kernel,"
+            "ads--CDockWidget#ksDock_kernel > QWidget,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTabWidget::pane,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QStackedWidget,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QStackedWidget > QWidget{"
+            "  background:%1 !important;"
+            "  background-color:%1 !important;"
+            "  color:%2 !important;"
+            "}")
+            .arg(surfaceBackgroundText)
+            .arg(primaryTextColor);
+
+    // kernelDockContentStyle 作用：
+    // - 背景图模式下，内核 Dock 内的表格/树/列表也透明，避免整块表格遮住背景图；
+    // - 无背景图时保留主题实底，继续保持普通主题观感。
+    const QString kernelDockContentStyle = enableDockTransparencyForBackgroundImage
+        ? QStringLiteral(
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTableView,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTableWidget,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTreeView,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTreeWidget,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QListView,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QListWidget,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QAbstractScrollArea,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QAbstractScrollArea > QWidget,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QAbstractScrollArea::viewport{"
+            "  background:transparent !important;"
+            "  background-color:transparent !important;"
+            "  alternate-background-color:transparent !important;"
+            "  color:%1 !important;"
+            "  gridline-color:%2 !important;"
+            "}")
+            .arg(primaryTextColor)
+            .arg(borderColorText)
+        : QStringLiteral(
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTableView,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTableWidget,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTreeView,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTreeWidget,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QListView,"
+            "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QListWidget{"
+            "  background:%1 !important;"
+            "  background-color:%1 !important;"
+            "  alternate-background-color:%2 !important;"
+            "  color:%3 !important;"
+            "  gridline-color:%4 !important;"
+            "}")
+            .arg(surfaceBackgroundText)
+            .arg(surfaceAltBackgroundText)
+            .arg(primaryTextColor)
+            .arg(borderColorText);
+
+    const QString kernelDockStyle = kernelDockContainerStyle + kernelDockContentStyle;
 
     if (!darkModeEnabled)
     {
@@ -8165,7 +8262,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             + tooltipStyle
             + dockContentTransparentStyle
             + finalDockAreaTransparentStyle
-            + kernelDockOpaqueStyle;
+            + kernelDockStyle;
     }
 
     return rootStyle
@@ -8220,5 +8317,5 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         + tooltipStyle
         + dockContentTransparentStyle
         + finalDockAreaTransparentStyle
-        + kernelDockOpaqueStyle;
+        + kernelDockStyle;
 }

@@ -835,7 +835,18 @@ CodeEditorWidget::CodeEditorWidget(QWidget* parent)
     updateStatusText();
 }
 
-CodeEditorWidget::~CodeEditorWidget() = default;
+CodeEditorWidget::~CodeEditorWidget()
+{
+    // 析构防护：
+    // - 输入：Qt 父子销毁链触发析构；
+    // - 处理：先标记销毁中，再断开编辑器发往本组件的状态刷新信号；
+    // - 返回：无返回值，子控件仍由 Qt 父子机制回收。
+    m_destroying = true;
+    if (m_editor != nullptr)
+    {
+        QObject::disconnect(m_editor, nullptr, this, nullptr);
+    }
+}
 
 QString CodeEditorWidget::text() const
 {
@@ -1259,6 +1270,15 @@ void CodeEditorWidget::closeInlinePanels()
 
 void CodeEditorWidget::updateStatusText()
 {
+    // 退出保护：
+    // - MainWindow 析构期间 QPlainTextEdit 可能仍发出 cursor/textChanged；
+    // - 此时 m_editor 或 m_statusLabel 已经进入 Qt 子对象析构链，继续取 cursor/setText 会触发断点异常；
+    // - 销毁期或关键子控件为空时直接跳过，正常运行期行为不变。
+    if (m_destroying || m_editor == nullptr || m_statusLabel == nullptr)
+    {
+        return;
+    }
+
     const QTextCursor cursor = m_editor->textCursor();
     const QString fileName = m_currentFilePath.trimmed().isEmpty() ? QStringLiteral("<未命名>") : m_currentFilePath;
     m_statusLabel->setText(QStringLiteral("行:%1 列:%2 字符:%3 文件:%4 模式:%5 编码:%6")

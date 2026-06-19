@@ -2,6 +2,7 @@
 
 #include "KernelDock.CallbackIntercept.h"
 #include "KernelDock.CallbackPromptManager.h"
+#include "../SettingsDock/AppearanceSettings.h"
 #include "../theme.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
 
@@ -9,7 +10,9 @@
 #include <QAbstractItemView>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDateTime>
+#include <QDir>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -88,6 +91,35 @@ namespace
         OutputLength,
         Count
     };
+
+    // callbackBackgroundImageReady 作用：
+    // - 输入 rawImagePath：外观设置中的背景图路径，可为绝对路径或相对 exe 目录路径；
+    // - 处理：只判断文件是否存在，不加载图片，避免样式判断带来额外开销；
+    // - 返回：背景图可用返回 true，否则返回 false。
+    bool callbackBackgroundImageReady(const QString& rawImagePath)
+    {
+        const QString trimmedPath = rawImagePath.trimmed();
+        if (trimmedPath.isEmpty())
+        {
+            return false;
+        }
+
+        const QString resolvedPath = QDir::isAbsolutePath(trimmedPath)
+            ? QDir::cleanPath(trimmedPath)
+            : QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(trimmedPath);
+        const QFileInfo imageFileInfo(QDir::cleanPath(resolvedPath));
+        return imageFileInfo.exists() && imageFileInfo.isFile();
+    }
+
+    // callbackAllowWallpaperThroughControls 作用：
+    // - 输入：无，读取当前外观配置；
+    // - 处理：用于驱动回调 Tab 判断局部表格/面板是否应透明；
+    // - 返回：true 表示背景图模式，局部容器应尽量透明。
+    bool callbackAllowWallpaperThroughControls()
+    {
+        const ks::settings::AppearanceSettings settings = ks::settings::loadAppearanceSettings();
+        return callbackBackgroundImageReady(settings.backgroundImagePath);
+    }
 
     class OpaqueTableEditorDelegate final : public QStyledItemDelegate
     {
@@ -388,12 +420,16 @@ namespace
 
     QString callbackRulePanelStyle()
     {
-        // 作用：提供自定义单元格面板的统一不透明样式，避免透明父容器导致可读性下降。
+        // 作用：提供自定义单元格面板样式；背景图模式下透明，普通主题下保持实底。
         // 返回：Qt stylesheet 字符串，供第一排操作复选区和第二排详情区复用。
+        const QString panelBackground = callbackAllowWallpaperThroughControls()
+            ? QStringLiteral("transparent")
+            : KswordTheme::SurfaceHex();
         return QStringLiteral(
             "QWidget#ksCallbackRuleOperationPanel,"
             "QWidget#ksCallbackRuleDetailPanel{"
             "  background:%1;"
+            "  background-color:%1;"
             "  color:%2;"
             "}"
             "QWidget#ksCallbackRuleOperationPanel QCheckBox,"
@@ -404,21 +440,33 @@ namespace
             "  color:%3;"
             "  font-weight:600;"
             "}")
-            .arg(KswordTheme::SurfaceHex())
+            .arg(panelBackground)
             .arg(KswordTheme::TextPrimaryHex())
             .arg(KswordTheme::PrimaryBlueHex);
     }
 
     QString callbackRuleTableStyle()
     {
-        // 作用：统一回调规则表格的表头、选中态和网格颜色。
+        // 作用：统一回调规则表格的背景、表头、选中态和网格颜色。
         // 返回：Qt stylesheet 字符串，所有回调类型 Tab 共享。
+        const bool allowWallpaperThrough = callbackAllowWallpaperThroughControls();
+        const QString tableBackground = allowWallpaperThrough
+            ? QStringLiteral("transparent")
+            : KswordTheme::SurfaceHex();
+        const QString alternateBackground = allowWallpaperThrough
+            ? QStringLiteral("transparent")
+            : KswordTheme::SurfaceAltHex();
         return QStringLiteral(
             "QTableWidget{"
             "  background:%1;"
+            "  background-color:%1;"
             "  alternate-background-color:%2;"
             "  color:%3;"
             "  gridline-color:%4;"
+            "}"
+            "QTableWidget::viewport{"
+            "  background:%1;"
+            "  background-color:%1;"
             "}"
             "QTableWidget::item:selected{"
             "  background:%5;"
@@ -431,8 +479,8 @@ namespace
             "  padding:3px 6px;"
             "  font-weight:600;"
             "}")
-            .arg(KswordTheme::SurfaceHex())
-            .arg(KswordTheme::SurfaceAltHex())
+            .arg(tableBackground)
+            .arg(alternateBackground)
             .arg(KswordTheme::TextPrimaryHex())
             .arg(KswordTheme::BorderHex())
             .arg(KswordTheme::PrimaryBlueHex);
@@ -470,6 +518,28 @@ namespace
             .arg(KswordTheme::BorderHex())
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::TextDisabledColorHex());
+    }
+
+    // applyCallbackTableTransparency 作用：
+    // - 输入 tableWidget：驱动回调 Tab 内的表格；
+    // - 处理：背景图模式下关闭表格和 viewport 的自动填充，确保背景图能透过表格空白区；
+    // - 返回：无返回值。
+    void applyCallbackTableTransparency(QTableWidget* tableWidget)
+    {
+        if (tableWidget == nullptr)
+        {
+            return;
+        }
+
+        const bool allowWallpaperThrough = callbackAllowWallpaperThroughControls();
+        tableWidget->setAutoFillBackground(!allowWallpaperThrough);
+        tableWidget->setAttribute(Qt::WA_StyledBackground, !allowWallpaperThrough);
+        tableWidget->viewport()->setAutoFillBackground(!allowWallpaperThrough);
+        tableWidget->viewport()->setAttribute(Qt::WA_StyledBackground, !allowWallpaperThrough);
+        if (allowWallpaperThrough)
+        {
+            tableWidget->setAlternatingRowColors(false);
+        }
     }
 
     QString normalizeCustomMaskEditText(QLineEdit* maskEdit)
@@ -1250,12 +1320,33 @@ private:
         scrollArea->setFrameShape(QFrame::NoFrame);
         scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        scrollArea->setAutoFillBackground(false);
+        scrollArea->setAttribute(Qt::WA_StyledBackground, false);
+        scrollArea->viewport()->setAutoFillBackground(false);
+        scrollArea->viewport()->setAttribute(Qt::WA_StyledBackground, false);
+        scrollArea->setStyleSheet(QStringLiteral(
+            "QScrollArea,QScrollArea > QWidget,QScrollArea::viewport{"
+            "  background:transparent;"
+            "  background-color:transparent;"
+            "}"));
         outerLayout->addWidget(scrollArea, 1);
 
         auto* scrollContent = new QWidget(scrollArea);
         scrollContent->setObjectName(QStringLiteral("ksCallbackInterceptScrollContent"));
         scrollContent->setAutoFillBackground(false);
         scrollContent->setAttribute(Qt::WA_StyledBackground, false);
+        if (callbackAllowWallpaperThroughControls())
+        {
+            scrollContent->setStyleSheet(QStringLiteral(
+                "QWidget#ksCallbackInterceptScrollContent,"
+                "QWidget#ksCallbackInterceptScrollContent QWidget,"
+                "QWidget#ksCallbackInterceptScrollContent QSplitter,"
+                "QWidget#ksCallbackInterceptScrollContent QTabWidget::pane,"
+                "QWidget#ksCallbackInterceptScrollContent QTabBar::tab:!selected{"
+                "  background:transparent;"
+                "  background-color:transparent;"
+                "}"));
+        }
         scrollArea->setWidget(scrollContent);
 
         auto* rootLayout = new QVBoxLayout(scrollContent);
@@ -1349,6 +1440,8 @@ private:
         m_groupTable->verticalHeader()->setVisible(false);
         m_groupTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         m_groupTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(GroupColumn::Comment), QHeaderView::Stretch);
+        m_groupTable->setStyleSheet(callbackRuleTableStyle());
+        applyCallbackTableTransparency(m_groupTable);
         groupLayout->addWidget(m_groupTable, 1);
 
         auto* rightPane = new QWidget(mainSplitter);
@@ -1395,6 +1488,15 @@ private:
 
         auto* fileMonitorFrame = new QFrame(scrollContent);
         fileMonitorFrame->setFrameShape(QFrame::StyledPanel);
+        const bool allowWallpaperThroughFileMonitor = callbackAllowWallpaperThroughControls();
+        fileMonitorFrame->setAutoFillBackground(!allowWallpaperThroughFileMonitor);
+        fileMonitorFrame->setAttribute(Qt::WA_StyledBackground, !allowWallpaperThroughFileMonitor);
+        fileMonitorFrame->setStyleSheet(allowWallpaperThroughFileMonitor
+            ? QStringLiteral("QFrame{background:transparent;background-color:transparent;border:1px solid %1;}")
+                .arg(KswordTheme::BorderHex())
+            : QStringLiteral("QFrame{background:%1;background-color:%1;border:1px solid %2;}")
+                .arg(KswordTheme::SurfaceHex())
+                .arg(KswordTheme::BorderHex()));
         auto* fileMonitorLayout = new QVBoxLayout(fileMonitorFrame);
         fileMonitorLayout->setContentsMargins(8, 8, 8, 8);
         fileMonitorLayout->setSpacing(6);
@@ -1449,6 +1551,8 @@ private:
         m_fileMonitorTable->verticalHeader()->setVisible(false);
         m_fileMonitorTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         m_fileMonitorTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(FileMonitorColumn::Path), QHeaderView::Stretch);
+        m_fileMonitorTable->setStyleSheet(callbackRuleTableStyle());
+        applyCallbackTableTransparency(m_fileMonitorTable);
         fileMonitorLayout->addWidget(m_fileMonitorTable, 1);
         rootLayout->addWidget(fileMonitorFrame, 1);
 
@@ -1809,6 +1913,7 @@ private:
         ruleTable->setAlternatingRowColors(true);
         ruleTable->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
         ruleTable->setStyleSheet(callbackRuleTableStyle());
+        applyCallbackTableTransparency(ruleTable);
 
         // 表头允许用户拖动调整列宽；默认宽度优先压缩身份列，把空间留给操作和匹配字段。
         QHeaderView* ruleHeader = ruleTable->horizontalHeader();
@@ -2402,8 +2507,9 @@ private:
         // 入参 operationMask：当前规则掩码；返回：可直接放入 QTableWidget 的 QWidget。
         auto* operationPanel = new QWidget(ruleTable);
         operationPanel->setObjectName(QStringLiteral("ksCallbackRuleOperationPanel"));
-        operationPanel->setAutoFillBackground(true);
-        operationPanel->setAttribute(Qt::WA_StyledBackground, true);
+        const bool allowWallpaperThroughOperationPanel = callbackAllowWallpaperThroughControls();
+        operationPanel->setAutoFillBackground(!allowWallpaperThroughOperationPanel);
+        operationPanel->setAttribute(Qt::WA_StyledBackground, !allowWallpaperThroughOperationPanel);
         operationPanel->setStyleSheet(callbackRulePanelStyle());
 
         auto* panelLayout = new QGridLayout(operationPanel);
@@ -2504,8 +2610,9 @@ private:
         // 入参 ruleModel：当前规则值；返回：可放入 detailRow 的 QWidget。
         auto* detailPanel = new QWidget(ruleTable);
         detailPanel->setObjectName(QStringLiteral("ksCallbackRuleDetailPanel"));
-        detailPanel->setAutoFillBackground(true);
-        detailPanel->setAttribute(Qt::WA_StyledBackground, true);
+        const bool allowWallpaperThroughDetailPanel = callbackAllowWallpaperThroughControls();
+        detailPanel->setAutoFillBackground(!allowWallpaperThroughDetailPanel);
+        detailPanel->setAttribute(Qt::WA_StyledBackground, !allowWallpaperThroughDetailPanel);
         detailPanel->setStyleSheet(callbackRulePanelStyle());
 
         auto* detailLayout = new QGridLayout(detailPanel);

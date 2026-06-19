@@ -19,6 +19,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -117,6 +118,30 @@ namespace
         std::uint64_t sizeBytes = 0;            // 文件大小。
         bool isDirectory = false;               // 是否目录。
         QDateTime modifiedTime;                 // 修改时间。
+    };
+
+    // ExFatBootInfo 作用：
+    // - 保存 exFAT Boot Region 中目录枚举需要的字段；
+    // - exFAT 的簇堆从 clusterHeapOffset 开始，簇号仍从 2 开始。
+    struct ExFatBootInfo
+    {
+        std::uint64_t fatOffsetBytes = 0;        // FAT 起始字节偏移。
+        std::uint64_t clusterHeapOffsetBytes = 0;// 簇堆起始字节偏移。
+        std::uint32_t clusterCount = 0;          // 卷内簇数量。
+        std::uint32_t rootDirectoryCluster = 2;  // 根目录起始簇。
+        std::uint32_t bytesPerSector = 512;      // 每扇区字节数。
+        std::uint32_t sectorsPerCluster = 1;     // 每簇扇区数。
+        std::uint32_t bytesPerCluster = 512;     // 每簇字节数。
+    };
+
+    // ExFatEntry 作用：表示 exFAT 目录项解析结果。
+    struct ExFatEntry
+    {
+        QString name;                            // 文件名。
+        std::uint32_t firstCluster = 0;          // 起始簇号。
+        std::uint64_t sizeBytes = 0;             // 文件大小。
+        bool isDirectory = false;                // 是否目录。
+        bool noFatChain = false;                 // true 表示目录/文件内容按连续簇读取。
     };
 
     // NtfsCacheEntry 作用：
@@ -431,6 +456,108 @@ namespace
             errorTextOut = QStringLiteral("读取长度不足, expect=%1, actual=%2").arg(sizeValue).arg(readSize);
             return false;
         }
+        return true;
+    }
+
+    // readBytesAtSectorAlignedOffset 作用：
+    // - 输入任意卷内字节偏移和读取长度，内部先扩大为扇区对齐的读取窗口；
+    // - 处理 raw volume 句柄在 FAT/FAT32/exFAT FAT 表项读取时拒绝非扇区对齐 seek 的情况；
+    // - 成功时仅把调用方请求的原始字节范围复制到 bufferPtr，函数本身无其它返回数据；
+    // - 失败时返回 false，并把阶段、簇号、原始偏移、对齐偏移和扇区大小写入 errorTextOut。
+    bool readBytesAtSectorAlignedOffset(
+        const HANDLE fileHandle,
+        const std::uint64_t offsetValue,
+        const std::uint32_t sizeValue,
+        const std::uint32_t sectorSizeValue,
+        const QString& stageText,
+        const std::uint32_t clusterValue,
+        std::byte* bufferPtr,
+        QString& errorTextOut)
+    {
+        if (bufferPtr == nullptr || sizeValue == 0)
+        {
+            errorTextOut = QStringLiteral("%1失败：读取参数为空, cluster=%2, entryOffset=0x%3, size=%4, sectorSize=%5")
+                .arg(stageText)
+                .arg(clusterValue)
+                .arg(QString::number(offsetValue, 16).toUpper())
+                .arg(sizeValue)
+                .arg(sectorSizeValue);
+            return false;
+        }
+        if (sectorSizeValue == 0)
+        {
+            errorTextOut = QStringLiteral("%1失败：扇区大小为0, cluster=%2, entryOffset=0x%3")
+                .arg(stageText)
+                .arg(clusterValue)
+                .arg(QString::number(offsetValue, 16).toUpper());
+            return false;
+        }
+        if (offsetValue > std::numeric_limits<std::uint64_t>::max() - static_cast<std::uint64_t>(sizeValue))
+        {
+            errorTextOut = QStringLiteral("%1失败：读取偏移溢出, cluster=%2, entryOffset=0x%3, size=%4, sectorSize=%5")
+                .arg(stageText)
+                .arg(clusterValue)
+                .arg(QString::number(offsetValue, 16).toUpper())
+                .arg(sizeValue)
+                .arg(sectorSizeValue);
+            return false;
+        }
+
+        const std::uint64_t sectorSize = static_cast<std::uint64_t>(sectorSizeValue);
+        const std::uint64_t alignedOffset = (offsetValue / sectorSize) * sectorSize;
+        const std::uint64_t inSectorOffset = offsetValue - alignedOffset;
+        const std::uint64_t requestEndOffset = offsetValue + static_cast<std::uint64_t>(sizeValue);
+        if (requestEndOffset > std::numeric_limits<std::uint64_t>::max() - (sectorSize - 1ULL)
+            || alignedOffset > static_cast<std::uint64_t>(std::numeric_limits<LONGLONG>::max()))
+        {
+            errorTextOut = QStringLiteral("%1失败：对齐偏移溢出, cluster=%2, entryOffset=0x%3, alignedOffset=0x%4, size=%5, sectorSize=%6")
+                .arg(stageText)
+                .arg(clusterValue)
+                .arg(QString::number(offsetValue, 16).toUpper())
+                .arg(QString::number(alignedOffset, 16).toUpper())
+                .arg(sizeValue)
+                .arg(sectorSizeValue);
+            return false;
+        }
+        const std::uint64_t alignedEndOffset =
+            ((requestEndOffset + sectorSize - 1ULL) / sectorSize) * sectorSize;
+        const std::uint64_t alignedSize64 = alignedEndOffset - alignedOffset;
+        if (alignedSize64 > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+        {
+            errorTextOut = QStringLiteral("%1失败：对齐读取窗口过大, cluster=%2, entryOffset=0x%3, alignedOffset=0x%4, alignedSize=%5, sectorSize=%6")
+                .arg(stageText)
+                .arg(clusterValue)
+                .arg(QString::number(offsetValue, 16).toUpper())
+                .arg(QString::number(alignedOffset, 16).toUpper())
+                .arg(alignedSize64)
+                .arg(sectorSizeValue);
+            return false;
+        }
+
+        std::vector<std::byte> alignedBytes(static_cast<std::size_t>(alignedSize64));
+        QString innerErrorText;
+        if (!readBytesAtOffset(
+            fileHandle,
+            alignedOffset,
+            static_cast<std::uint32_t>(alignedSize64),
+            alignedBytes.data(),
+            innerErrorText))
+        {
+            errorTextOut = QStringLiteral("%1失败, cluster=%2, entryOffset=0x%3, alignedOffset=0x%4, alignedSize=%5, sectorSize=%6, inner=%7")
+                .arg(stageText)
+                .arg(clusterValue)
+                .arg(QString::number(offsetValue, 16).toUpper())
+                .arg(QString::number(alignedOffset, 16).toUpper())
+                .arg(alignedSize64)
+                .arg(sectorSizeValue)
+                .arg(innerErrorText);
+            return false;
+        }
+
+        std::memcpy(
+            bufferPtr,
+            alignedBytes.data() + static_cast<std::size_t>(inSectorOffset),
+            static_cast<std::size_t>(sizeValue));
         return true;
     }
 
@@ -2236,7 +2363,15 @@ namespace
     {
         const std::uint64_t entryOffset = infoValue.fatOffset + static_cast<std::uint64_t>(clusterValue) * 4ULL;
         std::array<std::byte, 4> entryBytes{};
-        if (!readBytesAtOffset(volumeHandle, entryOffset, 4, entryBytes.data(), errorTextOut))
+        if (!readBytesAtSectorAlignedOffset(
+            volumeHandle,
+            entryOffset,
+            4,
+            infoValue.bytesPerSector,
+            QStringLiteral("FAT32 FAT entry"),
+            clusterValue,
+            entryBytes.data(),
+            errorTextOut))
         {
             return false;
         }
@@ -2409,6 +2544,297 @@ namespace
         clusterOut = currentCluster;
         return true;
     }
+
+    // readExFatBootInfo 作用：
+    // - 读取 exFAT Boot Sector 并计算 FAT/ClusterHeap 基础偏移；
+    // - 返回 false 时 errorTextOut 给出可显示错误。
+    bool readExFatBootInfo(const HANDLE volumeHandle, ExFatBootInfo& infoOut, QString& errorTextOut)
+    {
+        std::array<std::byte, 512> bootBytes{};
+        if (!readBytesAtOffset(volumeHandle, 0, 512, bootBytes.data(), errorTextOut))
+        {
+            return false;
+        }
+
+        const QByteArray fsText(reinterpret_cast<const char*>(bootBytes.data() + 3), 8);
+        if (fsText != QByteArrayLiteral("EXFAT   "))
+        {
+            errorTextOut = QStringLiteral("不是 exFAT 卷。");
+            return false;
+        }
+
+        const std::uint8_t bytesPerSectorShift = static_cast<std::uint8_t>(bootBytes[108]);
+        const std::uint8_t sectorsPerClusterShift = static_cast<std::uint8_t>(bootBytes[109]);
+        if (bytesPerSectorShift < 9 || bytesPerSectorShift > 12 || sectorsPerClusterShift > 25)
+        {
+            errorTextOut = QStringLiteral("exFAT Boot Sector 参数异常。");
+            return false;
+        }
+
+        infoOut.bytesPerSector = 1UL << bytesPerSectorShift;
+        infoOut.sectorsPerCluster = 1UL << sectorsPerClusterShift;
+        infoOut.bytesPerCluster = infoOut.bytesPerSector * infoOut.sectorsPerCluster;
+        infoOut.fatOffsetBytes = le32(bootBytes.data() + 80) * static_cast<std::uint64_t>(infoOut.bytesPerSector);
+        infoOut.clusterHeapOffsetBytes = le32(bootBytes.data() + 88) * static_cast<std::uint64_t>(infoOut.bytesPerSector);
+        infoOut.clusterCount = le32(bootBytes.data() + 92);
+        infoOut.rootDirectoryCluster = le32(bootBytes.data() + 96);
+        if (infoOut.clusterCount == 0 ||
+            infoOut.rootDirectoryCluster < 2 ||
+            infoOut.rootDirectoryCluster >= infoOut.clusterCount + 2ULL ||
+            infoOut.bytesPerCluster == 0)
+        {
+            errorTextOut = QStringLiteral("exFAT 簇参数异常。");
+            return false;
+        }
+        return true;
+    }
+
+    // exFatClusterOffset 作用：把 exFAT 簇号转换为卷内字节偏移。
+    std::uint64_t exFatClusterOffset(const ExFatBootInfo& infoValue, const std::uint32_t clusterValue)
+    {
+        const std::uint64_t clusterIndex = (clusterValue <= 2U) ? 0ULL : static_cast<std::uint64_t>(clusterValue - 2U);
+        return infoValue.clusterHeapOffsetBytes + clusterIndex * static_cast<std::uint64_t>(infoValue.bytesPerCluster);
+    }
+
+    // readExFatNextCluster 作用：读取 exFAT FAT 表中的下一簇编号。
+    bool readExFatNextCluster(
+        const HANDLE volumeHandle,
+        const ExFatBootInfo& infoValue,
+        const std::uint32_t clusterValue,
+        std::uint32_t& nextOut,
+        QString& errorTextOut)
+    {
+        const std::uint64_t entryOffset = infoValue.fatOffsetBytes + static_cast<std::uint64_t>(clusterValue) * 4ULL;
+        std::array<std::byte, 4> entryBytes{};
+        if (!readBytesAtSectorAlignedOffset(
+            volumeHandle,
+            entryOffset,
+            4,
+            infoValue.bytesPerSector,
+            QStringLiteral("exFAT FAT entry"),
+            clusterValue,
+            entryBytes.data(),
+            errorTextOut))
+        {
+            return false;
+        }
+        nextOut = le32(entryBytes.data());
+        return true;
+    }
+
+    // loadExFatClusterChain 作用：
+    // - 读取 exFAT 目录簇链；
+    // - noFatChain=true 时按连续簇读取，常见于 NoFatChain 标志目录。
+    bool loadExFatClusterChain(
+        const HANDLE volumeHandle,
+        const ExFatBootInfo& infoValue,
+        const std::uint32_t firstCluster,
+        const std::uint64_t dataLength,
+        const bool noFatChain,
+        std::vector<std::uint32_t>& chainOut,
+        QString& errorTextOut)
+    {
+        chainOut.clear();
+        if (firstCluster < 2 || firstCluster >= infoValue.clusterCount + 2ULL)
+        {
+            return false;
+        }
+
+        const std::uint64_t requestedClusters = dataLength == 0
+            ? 1ULL
+            : ((dataLength + infoValue.bytesPerCluster - 1ULL) / infoValue.bytesPerCluster);
+        const std::uint64_t maxClusters = std::min<std::uint64_t>(std::max<std::uint64_t>(requestedClusters, 1ULL), 262144ULL);
+        std::uint32_t currentCluster = firstCluster;
+        for (std::uint64_t index = 0; index < maxClusters; ++index)
+        {
+            if (currentCluster < 2 || currentCluster >= infoValue.clusterCount + 2ULL)
+            {
+                break;
+            }
+            chainOut.push_back(currentCluster);
+            if (noFatChain)
+            {
+                currentCluster += 1U;
+                continue;
+            }
+
+            std::uint32_t nextCluster = 0;
+            if (!readExFatNextCluster(volumeHandle, infoValue, currentCluster, nextCluster, errorTextOut))
+            {
+                return false;
+            }
+            if (nextCluster >= 0xFFFFFFF8UL || nextCluster == 0 || nextCluster == currentCluster)
+            {
+                break;
+            }
+            currentCluster = nextCluster;
+        }
+        return !chainOut.empty();
+    }
+
+    // decodeExFatNamePart 作用：解析 exFAT 文件名二级目录项中的 UTF-16 名称片段。
+    QString decodeExFatNamePart(const std::byte* entryPtr, const std::uint8_t maxChars)
+    {
+        QString textOut;
+        const std::uint8_t charsToRead = std::min<std::uint8_t>(maxChars, 15U);
+        for (std::uint8_t i = 0; i < charsToRead; ++i)
+        {
+            const char16_t ch = static_cast<char16_t>(le16(entryPtr + 2 + (i * 2)));
+            if (ch == 0x0000 || ch == 0xFFFF)
+            {
+                break;
+            }
+            textOut.append(QChar(ch));
+        }
+        return textOut;
+    }
+
+    // enumerateExFatDirectoryByCluster 作用：解析 exFAT 目录簇链下的目录项。
+    bool enumerateExFatDirectoryByCluster(
+        const HANDLE volumeHandle,
+        const ExFatBootInfo& infoValue,
+        const std::uint32_t dirCluster,
+        const std::uint64_t dirDataLength,
+        const bool noFatChain,
+        std::vector<ExFatEntry>& entriesOut,
+        QString& errorTextOut)
+    {
+        entriesOut.clear();
+        std::vector<std::uint32_t> chainList;
+        if (!loadExFatClusterChain(volumeHandle, infoValue, dirCluster, dirDataLength, noFatChain, chainList, errorTextOut))
+        {
+            return false;
+        }
+
+        std::vector<std::byte> clusterBytes(infoValue.bytesPerCluster);
+        std::vector<std::byte> directoryBytes;
+        directoryBytes.reserve(chainList.size() * static_cast<std::size_t>(infoValue.bytesPerCluster));
+        for (std::uint32_t clusterValue : chainList)
+        {
+            if (!readBytesAtOffset(
+                volumeHandle,
+                exFatClusterOffset(infoValue, clusterValue),
+                infoValue.bytesPerCluster,
+                clusterBytes.data(),
+                errorTextOut))
+            {
+                return false;
+            }
+            directoryBytes.insert(directoryBytes.end(), clusterBytes.begin(), clusterBytes.end());
+            if (dirDataLength > 0 && directoryBytes.size() >= dirDataLength)
+            {
+                break;
+            }
+        }
+
+        for (std::size_t off = 0; off + 32 <= directoryBytes.size(); off += 32)
+        {
+            const std::byte* entryPtr = directoryBytes.data() + off;
+            const std::uint8_t entryType = static_cast<std::uint8_t>(entryPtr[0]);
+            if (entryType == 0x00)
+            {
+                break;
+            }
+            if (entryType != 0x85)
+            {
+                continue;
+            }
+
+            const std::uint8_t secondaryCount = static_cast<std::uint8_t>(entryPtr[1]);
+            if (secondaryCount == 0 || off + (static_cast<std::size_t>(secondaryCount) + 1ULL) * 32ULL > directoryBytes.size())
+            {
+                continue;
+            }
+
+            const std::uint16_t attributes = le16(entryPtr + 4);
+            bool streamSeen = false;
+            std::uint8_t nameLength = 0;
+            std::uint32_t firstCluster = 0;
+            std::uint64_t dataLength = 0;
+            bool childNoFatChain = false;
+            QString nameText;
+            for (std::uint8_t subIndex = 1; subIndex <= secondaryCount; ++subIndex)
+            {
+                const std::byte* secondaryPtr = directoryBytes.data() + off + static_cast<std::size_t>(subIndex) * 32ULL;
+                const std::uint8_t secondaryType = static_cast<std::uint8_t>(secondaryPtr[0]);
+                if (secondaryType == 0xC0)
+                {
+                    streamSeen = true;
+                    childNoFatChain = (static_cast<std::uint8_t>(secondaryPtr[1]) & 0x02U) != 0;
+                    nameLength = static_cast<std::uint8_t>(secondaryPtr[3]);
+                    firstCluster = le32(secondaryPtr + 20);
+                    dataLength = le64(secondaryPtr + 24);
+                    continue;
+                }
+                if (secondaryType == 0xC1 && streamSeen)
+                {
+                    const std::uint8_t remainingChars = static_cast<std::uint8_t>(
+                        nameLength > static_cast<std::uint8_t>(nameText.size())
+                        ? (nameLength - static_cast<std::uint8_t>(nameText.size()))
+                        : 0U);
+                    nameText += decodeExFatNamePart(secondaryPtr, remainingChars);
+                }
+            }
+            if (nameText.isEmpty())
+            {
+                continue;
+            }
+
+            ExFatEntry itemValue{};
+            itemValue.name = nameText;
+            itemValue.firstCluster = firstCluster;
+            itemValue.sizeBytes = dataLength;
+            itemValue.isDirectory = (attributes & 0x10U) != 0;
+            itemValue.noFatChain = childNoFatChain;
+            entriesOut.push_back(std::move(itemValue));
+        }
+        return true;
+    }
+
+    // resolveExFatDirectory 作用：按路径定位 exFAT 目标目录的簇号和目录流长度。
+    bool resolveExFatDirectory(
+        const HANDLE volumeHandle,
+        const ExFatBootInfo& infoValue,
+        const QStringList& pathSegments,
+        std::uint32_t& clusterOut,
+        std::uint64_t& dataLengthOut,
+        bool& noFatChainOut,
+        QString& errorTextOut)
+    {
+        clusterOut = infoValue.rootDirectoryCluster;
+        dataLengthOut = 0;
+        noFatChainOut = false;
+        for (const QString& segmentText : pathSegments)
+        {
+            std::vector<ExFatEntry> children;
+            if (!enumerateExFatDirectoryByCluster(volumeHandle, infoValue, clusterOut, dataLengthOut, noFatChainOut, children, errorTextOut))
+            {
+                return false;
+            }
+            bool found = false;
+            for (const ExFatEntry& childItem : children)
+            {
+                if (!childItem.isDirectory)
+                {
+                    continue;
+                }
+                if (childItem.name.compare(segmentText, Qt::CaseInsensitive) == 0)
+                {
+                    clusterOut = childItem.firstCluster;
+                    dataLengthOut = childItem.sizeBytes;
+                    noFatChainOut = childItem.noFatChain;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                errorTextOut = QStringLiteral("exFAT目录不存在：%1").arg(segmentText);
+                return false;
+            }
+        }
+        return true;
+    }
 }
 
 ks::file::ManualFsType ks::file::ManualFileSystemParser::detectFileSystemType(const QString& pathText)
@@ -2435,6 +2861,10 @@ ks::file::ManualFsType ks::file::ManualFileSystemParser::detectFileSystemType(co
     {
         return ManualFsType::Fat32;
     }
+    if (fsText == QStringLiteral("EXFAT"))
+    {
+        return ManualFsType::ExFat;
+    }
     return ManualFsType::Unknown;
 }
 
@@ -2443,7 +2873,8 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
     std::vector<ManualDirectoryEntry>& entriesOut,
     ManualFsType& fsTypeOut,
     QString& errorTextOut,
-    bool* usedWinApiFallbackOut)
+    bool* usedWinApiFallbackOut,
+    const ManualFsType requestedFsType)
 {
     entriesOut.clear();
     errorTextOut.clear();
@@ -2451,7 +2882,9 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
     {
         *usedWinApiFallbackOut = false;
     }
-    fsTypeOut = detectFileSystemType(pathText);
+    fsTypeOut = requestedFsType == ManualFsType::Unknown
+        ? detectFileSystemType(pathText)
+        : requestedFsType;
 
     if (fsTypeOut == ManualFsType::Ntfs)
     {
@@ -2670,9 +3103,57 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
             entriesOut.push_back(std::move(itemValue));
         }
     }
+    else if (fsTypeOut == ManualFsType::ExFat)
+    {
+        const QString volumeRoot = trimVolumeRoot(pathText);
+        QString openErrorText;
+        HANDLE volumeHandle = openReadHandle(buildVolumeDevicePath(volumeRoot), openErrorText);
+        if (volumeHandle == INVALID_HANDLE_VALUE)
+        {
+            errorTextOut = openErrorText;
+            return false;
+        }
+
+        ExFatBootInfo bootInfo{};
+        if (!readExFatBootInfo(volumeHandle, bootInfo, errorTextOut))
+        {
+            ::CloseHandle(volumeHandle);
+            return false;
+        }
+
+        std::uint32_t dirCluster = bootInfo.rootDirectoryCluster;
+        std::uint64_t dirDataLength = 0;
+        bool dirNoFatChain = false;
+        const QStringList pathSegments = splitRelativeSegments(pathText);
+        if (!resolveExFatDirectory(volumeHandle, bootInfo, pathSegments, dirCluster, dirDataLength, dirNoFatChain, errorTextOut))
+        {
+            ::CloseHandle(volumeHandle);
+            return false;
+        }
+
+        std::vector<ExFatEntry> exFatEntries;
+        if (!enumerateExFatDirectoryByCluster(volumeHandle, bootInfo, dirCluster, dirDataLength, dirNoFatChain, exFatEntries, errorTextOut))
+        {
+            ::CloseHandle(volumeHandle);
+            return false;
+        }
+        ::CloseHandle(volumeHandle);
+
+        const QString currentPath = QDir::toNativeSeparators(QDir::cleanPath(pathText));
+        for (const ExFatEntry& exFatItem : exFatEntries)
+        {
+            ManualDirectoryEntry itemValue{};
+            itemValue.name = exFatItem.name;
+            itemValue.absolutePath = QDir(currentPath).filePath(exFatItem.name);
+            itemValue.isDirectory = exFatItem.isDirectory;
+            itemValue.sizeBytes = exFatItem.isDirectory ? 0 : exFatItem.sizeBytes;
+            itemValue.typeText = buildTypeText(exFatItem.name, exFatItem.isDirectory);
+            entriesOut.push_back(std::move(itemValue));
+        }
+    }
     else
     {
-        errorTextOut = QStringLiteral("当前卷不是 NTFS/FAT32，无法手动解析。");
+        errorTextOut = QStringLiteral("当前卷不是 NTFS/FAT32/exFAT，无法手动解析。");
         return false;
     }
 
@@ -2685,7 +3166,7 @@ bool ks::file::ManualFileSystemParser::enumerateDirectory(
             << ", fsType="
             << (fsTypeOut == ManualFsType::Ntfs
                 ? "NTFS"
-                : (fsTypeOut == ManualFsType::Fat32 ? "FAT32" : "Unknown"))
+                : (fsTypeOut == ManualFsType::Fat32 ? "FAT32" : (fsTypeOut == ManualFsType::ExFat ? "exFAT" : "Unknown")))
             << eol;
     }
 

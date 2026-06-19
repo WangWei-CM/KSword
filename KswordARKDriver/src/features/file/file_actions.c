@@ -48,6 +48,12 @@ typedef struct _KSWORD_FILE_DISPOSITION_INFORMATION_EX
     ULONG Flags;
 } KSWORD_FILE_DISPOSITION_INFORMATION_EX, *PKSWORD_FILE_DISPOSITION_INFORMATION_EX;
 
+typedef enum _KSWORD_ARK_MMFLUSH_TYPE
+{
+    KswordArkMmFlushForDelete = 0,
+    KswordArkMmFlushForWrite = 1
+} KSWORD_ARK_MMFLUSH_TYPE;
+
 typedef PVOID
 (NTAPI* KSWORD_ARK_FILE_EX_ALLOCATE_POOL2_FN)(
     _In_ POOL_FLAGS Flags,
@@ -62,6 +68,13 @@ ObQueryNameString(
     _Out_writes_bytes_opt_(Length) POBJECT_NAME_INFORMATION ObjectNameInfo,
     _In_ ULONG Length,
     _Out_ PULONG ReturnLength
+    );
+
+NTKERNELAPI
+BOOLEAN
+MmFlushImageSection(
+    _In_ PSECTION_OBJECT_POINTERS SectionPointer,
+    _In_ KSWORD_ARK_MMFLUSH_TYPE FlushType
     );
 
 static PVOID
@@ -622,6 +635,60 @@ Return Value:
 }
 
 static NTSTATUS
+KswordARKDriverFlushImageSectionForDelete(
+    _In_ HANDLE fileHandle
+    )
+/*++
+
+Routine Description:
+
+    Ask the memory manager to flush the target file's image section before a
+    delete retry. 中文说明：运行中 EXE/DLL 常见失败码是 STATUS_CANNOT_DELETE，
+    根因通常是 FileObject->SectionObjectPointer->ImageSectionObject 仍存在。
+    MmFlushImageSection(MmFlushForDelete) 是公开的安全删除前置检查：如果映像
+    section 已经没有活动映射，它会清理并允许后续删除；如果进程仍在运行，它会
+    返回 FALSE，本函数保留 STATUS_CANNOT_DELETE，不做不安全的 ControlArea 手术。
+
+Arguments:
+
+    fileHandle - 已打开的目标文件句柄。
+
+Return Value:
+
+    STATUS_SUCCESS 表示 image section 已可安全清理或无需清理；
+    STATUS_CANNOT_DELETE 表示仍有活动映像 section，调用方应提示先结束进程或重启删除；
+    其它 NTSTATUS 表示引用 FILE_OBJECT 失败。
+
+--*/
+{
+    PFILE_OBJECT fileObject = NULL;
+    PSECTION_OBJECT_POINTERS sectionPointers = NULL;
+    NTSTATUS status;
+    BOOLEAN flushOk;
+
+    status = ObReferenceObjectByHandle(
+        fileHandle,
+        0,
+        *IoFileObjectType,
+        KernelMode,
+        (PVOID*)&fileObject,
+        NULL);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    sectionPointers = fileObject->SectionObjectPointer;
+    if (sectionPointers == NULL || sectionPointers->ImageSectionObject == NULL) {
+        ObDereferenceObject(fileObject);
+        return STATUS_SUCCESS;
+    }
+
+    flushOk = MmFlushImageSection(sectionPointers, KswordArkMmFlushForDelete);
+    ObDereferenceObject(fileObject);
+    return flushOk ? STATUS_SUCCESS : STATUS_CANNOT_DELETE;
+}
+
+static NTSTATUS
 KswordARKDriverDeleteFileWithDispositionEx(
     _In_ HANDLE fileHandle
     )
@@ -832,7 +899,17 @@ Return Value:
 
     if (!NT_SUCCESS(status) &&
         KswordARKDriverShouldRetryDeleteWithDispositionEx(status, isDirectory)) {
-        const NTSTATUS fallbackStatus = KswordARKDriverDeleteFileWithDispositionEx(fileHandle);
+        NTSTATUS fallbackStatus = KswordARKDriverDeleteFileWithDispositionEx(fileHandle);
+        if (!NT_SUCCESS(fallbackStatus) &&
+            (fallbackStatus == STATUS_CANNOT_DELETE || fallbackStatus == STATUS_USER_MAPPED_FILE)) {
+            const NTSTATUS flushStatus = KswordARKDriverFlushImageSectionForDelete(fileHandle);
+            if (NT_SUCCESS(flushStatus)) {
+                fallbackStatus = KswordARKDriverDeleteFileWithDispositionEx(fileHandle);
+            }
+            else if (fallbackStatus == STATUS_CANNOT_DELETE) {
+                fallbackStatus = flushStatus;
+            }
+        }
         if (NT_SUCCESS(fallbackStatus)) {
             status = fallbackStatus;
         }

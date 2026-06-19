@@ -3,7 +3,7 @@
 // ============================================================
 // ManualFileSystemParser.h
 // 作用：
-// 1) 提供“手动解析文件系统”能力，支持 NTFS/FAT32；
+// 1) 提供“手动解析文件系统”能力，支持 NTFS/FAT32/exFAT；
 // 2) 提供目录项枚举接口，供 FileDock 手动模式直接展示；
 // 3) 提供 NTFS 误删项扫描与驻留数据恢复能力。
 // ============================================================
@@ -27,7 +27,8 @@ namespace ks::file
     {
         Unknown = 0,
         Ntfs = 1,
-        Fat32 = 2
+        Fat32 = 2,
+        ExFat = 3
     };
 
     // ManualDirectoryEntry 作用：
@@ -61,13 +62,13 @@ namespace ks::file
     };
 
     // ManualFileSystemParser 作用：
-    // - 封装 NTFS/FAT32 的底层读取与解析；
+    // - 封装 NTFS/FAT32/exFAT 的底层读取与解析；
     // - 对外输出统一结构，避免 UI 层直接处理底层格式。
     class ManualFileSystemParser final
     {
     public:
         // detectFileSystemType 作用：
-        // - 识别路径所在卷的文件系统类型（NTFS/FAT32）。
+        // - 识别路径所在卷的文件系统类型（NTFS/FAT32/exFAT）。
         // 调用方法：
         // - UI 在切换目录或切换读取模式时调用。
         // 入参 pathText：
@@ -98,7 +99,8 @@ namespace ks::file
             std::vector<ManualDirectoryEntry>& entriesOut,
             ManualFsType& fsTypeOut,
             QString& errorTextOut,
-            bool* usedWinApiFallbackOut = nullptr);
+            bool* usedWinApiFallbackOut = nullptr,
+            ManualFsType requestedFsType = ManualFsType::Unknown);
 
         // enumerateNtfsDeletedFiles 作用：
         // - 扫描指定 NTFS 卷内“已删除”文件候选项。

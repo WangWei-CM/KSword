@@ -397,6 +397,11 @@ private:
     void copyCurrentThreadCell();
     void copyCurrentThreadRow();
     void openProcessDetailsPlaceholder();
+    // openSelectedProcessHotkeyScanner 作用：
+    // - 从进程列表右键菜单打开当前进程详情窗口；
+    // - 自动切换到“进程热键”页并启动热键扫描；
+    // - 仅支持单进程，避免批量菜单误触发多个扫描窗口。
+    void openSelectedProcessHotkeyScanner();
     void openProcessDetailWindowByPid(std::uint32_t pid);
     void openThreadOwnerProcessDetails();
     // openThreadStackWindow 作用：

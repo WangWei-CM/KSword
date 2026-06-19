@@ -984,7 +984,10 @@ namespace
 
         const std::vector<QString> scanTargets{ path };
         const filedock::handleusage::HandleUsageScanResult scanResult =
-            filedock::handleusage::scanHandleUsageByPaths(scanTargets, 0);
+            filedock::handleusage::scanHandleUsageByPaths(
+                scanTargets,
+                0,
+                false);
 
         std::set<std::uint32_t> processIdSet;
         QStringList processPreviewList;
@@ -1092,6 +1095,8 @@ namespace
             return QStringLiteral("NTFS");
         case ks::file::ManualFsType::Fat32:
             return QStringLiteral("FAT32");
+        case ks::file::ManualFsType::ExFat:
+            return QStringLiteral("exFAT");
         default:
             return QStringLiteral("Unknown");
         }
@@ -3292,8 +3297,13 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
 
     panel.readModeCombo = new QComboBox(panel.toolWidget);
     panel.readModeCombo->setStyleSheet(buildBlueInputStyle());
-    panel.readModeCombo->addItems(QStringList{ QStringLiteral("Windows API"), QStringLiteral("手动解析文件系统") });
-    panel.readModeCombo->setToolTip(QStringLiteral("切换目录读取方式：Windows API 或手动解析 NTFS/FAT32"));
+    panel.readModeCombo->addItems(QStringList{
+        QStringLiteral("Windows API"),
+        QStringLiteral("手动解析文件系统"),
+        QStringLiteral("作为NTFS解析"),
+        QStringLiteral("作为FAT32解析"),
+        QStringLiteral("作为exFAT解析") });
+    panel.readModeCombo->setToolTip(QStringLiteral("切换目录读取方式：Windows API、自动手动解析，或强制按 NTFS/FAT32/exFAT 解析。"));
 
     panel.filterEdit = new QLineEdit(panel.toolWidget);
     panel.filterEdit->setPlaceholderText(QStringLiteral("快速过滤"));
@@ -3562,6 +3572,11 @@ void FileDock::initializeConnections(FilePanelWidgets& panel)
 
     // 读取模式切换：Windows API 与手动解析模型实时切换。
     connect(panel.readModeCombo, &QComboBox::currentIndexChanged, this, [this, &panel](int) {
+        panel.manualLoadedPath.clear();
+        if (panel.manualModel != nullptr)
+        {
+            panel.manualModel->setRowCount(0);
+        }
         applyReadModeToPanel(panel);
         refreshPanel(panel);
     });
@@ -4283,7 +4298,11 @@ void FileDock::applyReadModeToPanel(FilePanelWidgets& panel)
         panel.showSystemCheck->setEnabled(false);
         if (panel.parserStatusLabel != nullptr)
         {
-            panel.parserStatusLabel->setText(QStringLiteral("解析器: 手动解析"));
+            const ks::file::ManualFsType requestedFsType = requestedManualFsTypeForPanel(panel);
+            panel.parserStatusLabel->setText(
+                requestedFsType == ks::file::ManualFsType::Unknown
+                ? QStringLiteral("解析器: 手动解析")
+                : QStringLiteral("解析器: %1 (待解析)").arg(manualFsTypeToText(requestedFsType)));
         }
     }
     else
@@ -4327,12 +4346,14 @@ bool FileDock::reloadManualModel(FilePanelWidgets& panel, const bool showWarning
     QString errorText;
     // usedWinApiFallback：记录手动 NTFS 解析是否已经降级到 Windows API。
     bool usedWinApiFallback = false;
+    const ks::file::ManualFsType requestedFsType = requestedManualFsTypeForPanel(panel);
     const bool parseOk = ks::file::ManualFileSystemParser::enumerateDirectory(
         panel.currentPath,
         entries,
         fsType,
         errorText,
-        &usedWinApiFallback);
+        &usedWinApiFallback,
+        requestedFsType);
 
     panel.manualModel->removeRows(0, panel.manualModel->rowCount());
     panel.lastManualFsType = fsType;
@@ -4435,13 +4456,17 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
 
     // requestedPath：记录本次调用目标路径，避免在异步流程里读取到后续变更值。
     const QString requestedPath = panel.currentPath;
+    const ks::file::ManualFsType requestedFsType = requestedManualFsTypeForPanel(panel);
 
     // 路径已经加载且当前没有任务运行时，直接复用结果，避免无意义重复解析。
     if (!panel.manualParseInProgress
-        && panel.manualLoadedPath.compare(requestedPath, Qt::CaseInsensitive) == 0)
+        && panel.manualLoadedPath.compare(requestedPath, Qt::CaseInsensitive) == 0
+        && panel.manualRequestedFsType == requestedFsType)
     {
         return;
     }
+
+    panel.manualRequestedFsType = requestedFsType;
 
     // 若已有后台任务在跑，仅在“目标路径发生变化”时登记 pending。
     // 同一路径重复触发（例如用户调排序/过滤）不再触发第二次全盘解析。
@@ -4511,7 +4536,7 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
     }
 
     QPointer<FileDock> safeThis(this);
-    std::thread([safeThis, leftPanelRequest, requestPath, panelNameText, showWarningMessage, requestSerial, progressPid]() {
+    std::thread([safeThis, leftPanelRequest, requestPath, requestedFsType, panelNameText, showWarningMessage, requestSerial, progressPid]() {
         kPro.set(progressPid, "解析文件系统结构中", 0, 35.0f);
 
         std::vector<ks::file::ManualDirectoryEntry> parsedEntries;
@@ -4524,7 +4549,8 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
             parsedEntries,
             parsedFsType,
             parseErrorText,
-            &usedWinApiFallback);
+            &usedWinApiFallback,
+            requestedFsType);
 
         kPro.set(progressPid, parseOk ? "生成目录列表中" : "解析失败，整理错误信息", 0, 78.0f);
 
@@ -4536,7 +4562,7 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
 
         const bool invokeOk = QMetaObject::invokeMethod(
             safeThis.data(),
-            [safeThis, leftPanelRequest, requestPath, panelNameText, showWarningMessage, requestSerial, progressPid, parseOk, parsedEntries, parsedFsType, parseErrorText, usedWinApiFallback]() {
+            [safeThis, leftPanelRequest, requestPath, requestedFsType, panelNameText, showWarningMessage, requestSerial, progressPid, parseOk, parsedEntries, parsedFsType, parseErrorText, usedWinApiFallback]() {
                 if (safeThis.isNull())
                 {
                     kPro.set(progressPid, "界面已关闭", 0, 100.0f);
@@ -4585,6 +4611,7 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
 
                 targetPanel.manualParseInProgress = false;
                 targetPanel.manualParsingPath.clear();
+                targetPanel.manualRequestedFsType = requestedFsType;
                 if (targetPanel.readModeCombo != nullptr)
                 {
                     targetPanel.readModeCombo->setEnabled(true);
@@ -4723,7 +4750,27 @@ void FileDock::requestAsyncManualReload(FilePanelWidgets& panel, const bool show
 
 bool FileDock::currentModeIsManual(const FilePanelWidgets& panel) const
 {
-    return panel.readModeCombo != nullptr && panel.readModeCombo->currentIndex() == 1;
+    return panel.readModeCombo != nullptr && panel.readModeCombo->currentIndex() >= 1;
+}
+
+ks::file::ManualFsType FileDock::requestedManualFsTypeForPanel(const FilePanelWidgets& panel) const
+{
+    if (panel.readModeCombo == nullptr)
+    {
+        return ks::file::ManualFsType::Unknown;
+    }
+
+    switch (panel.readModeCombo->currentIndex())
+    {
+    case 2:
+        return ks::file::ManualFsType::Ntfs;
+    case 3:
+        return ks::file::ManualFsType::Fat32;
+    case 4:
+        return ks::file::ManualFsType::ExFat;
+    default:
+        return ks::file::ManualFsType::Unknown;
+    }
 }
 
 void FileDock::initializeRecoveryPage()

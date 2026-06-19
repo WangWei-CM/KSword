@@ -280,4 +280,9 @@ private:
 
     // m_readOnlyMode：标记当前是否只读模式。
     bool m_readOnlyMode = false;
+
+    // m_destroying：标记组件正在析构。
+    // - 输入/处理：析构函数置 true，所有延迟信号回调在刷新 UI 前检查；
+    // - 返回行为：无返回值，用于避免 MainWindow 退出销毁链中访问已释放子控件。
+    bool m_destroying = false;
 };

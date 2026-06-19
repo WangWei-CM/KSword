@@ -17,12 +17,16 @@
 #include "KernelObjectDirectoryDeepTab.h"
 #include "KernelObjectTypeMatrixTab.h"
 #include "KernelSymbolicLinkTab.h"
+#include "../SettingsDock/AppearanceSettings.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
 #include <QApplication>
-#include <QEventLoop>
 #include <QComboBox>
+#include <QCoreApplication>
+#include <QDir>
+#include <QEventLoop>
+#include <QFileInfo>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -82,6 +86,35 @@ namespace
             "QTableWidget::item:selected{background:%1;color:#FFFFFF;}"
             "QTreeWidget::item:selected{background:%1;color:#FFFFFF;}")
             .arg(KswordTheme::PrimaryBlueHex);
+    }
+
+    // kernelDockBackgroundImageReady 作用：
+    // - 输入 rawImagePath：外观设置中的背景图路径，可为绝对路径或相对 exe 目录路径；
+    // - 处理：只做轻量存在性/文件性检查，避免 KernelDock 根控件在背景图模式下强行刷实底；
+    // - 返回：背景图可用返回 true，否则返回 false。
+    bool kernelDockBackgroundImageReady(const QString& rawImagePath)
+    {
+        const QString trimmedPath = rawImagePath.trimmed();
+        if (trimmedPath.isEmpty())
+        {
+            return false;
+        }
+
+        const QString resolvedPath = QDir::isAbsolutePath(trimmedPath)
+            ? QDir::cleanPath(trimmedPath)
+            : QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(trimmedPath);
+        const QFileInfo imageFileInfo(QDir::cleanPath(resolvedPath));
+        return imageFileInfo.exists() && imageFileInfo.isFile();
+    }
+
+    // kernelDockAllowWallpaperThroughRoot 作用：
+    // - 输入：无，直接读取当前外观设置；
+    // - 处理：判断全局背景图是否可用；
+    // - 返回：true 表示 KernelDock 根/页容器应透明，false 表示保持主题实底以规避 ADS 黑底。
+    bool kernelDockAllowWallpaperThroughRoot()
+    {
+        const ks::settings::AppearanceSettings settings = ks::settings::loadAppearanceSettings();
+        return kernelDockBackgroundImageReady(settings.backgroundImagePath);
     }
 
     // statusLabelStyle：
@@ -252,27 +285,66 @@ QString KernelDock::displayStateSummary() const
 void KernelDock::initializeUi()
 {
     setObjectName(QStringLiteral("KernelDockRoot"));
-    setAutoFillBackground(true);
-    setAttribute(Qt::WA_StyledBackground, true);
-    setStyleSheet(QStringLiteral(
-        "KernelDock#KernelDockRoot{background:%1 !important;color:%2 !important;}"
-        "KernelDock#KernelDockRoot QTabWidget::pane{background:%1 !important;border:1px solid %3;}"
-        "KernelDock#KernelDockRoot QStackedWidget,"
-        "KernelDock#KernelDockRoot QStackedWidget > QWidget{background:%1 !important;color:%2 !important;}"
-        "KernelDock#KernelDockRoot QTableView,"
-        "KernelDock#KernelDockRoot QTableWidget,"
-        "KernelDock#KernelDockRoot QTreeView,"
-        "KernelDock#KernelDockRoot QTreeWidget,"
-        "KernelDock#KernelDockRoot QListView,"
-        "KernelDock#KernelDockRoot QListWidget{"
-        "  background:%1 !important;"
-        "  alternate-background-color:%4 !important;"
-        "  color:%2 !important;"
-        "}")
-        .arg(KswordTheme::SurfaceHex())
-        .arg(KswordTheme::TextPrimaryHex())
-        .arg(KswordTheme::BorderHex())
-        .arg(KswordTheme::SurfaceAltHex()));
+    const bool allowWallpaperThroughRoot = kernelDockAllowWallpaperThroughRoot();
+    setAutoFillBackground(!allowWallpaperThroughRoot);
+    setAttribute(Qt::WA_StyledBackground, !allowWallpaperThroughRoot);
+
+    // rootContainerStyle 作用：
+    // - 无背景图时使用主题实底，继续规避 ADS 恢复布局后的黑色父容器；
+    // - 有背景图时只让根/页容器透明，数据视图仍保留实底，避免文字压在图片上不可读。
+    const QString rootContainerStyle = allowWallpaperThroughRoot
+        ? QStringLiteral(
+            "KernelDock#KernelDockRoot{background:transparent !important;color:%1 !important;}"
+            "KernelDock#KernelDockRoot QTabWidget::pane{background:transparent !important;border:1px solid %2;}"
+            "KernelDock#KernelDockRoot QStackedWidget,"
+            "KernelDock#KernelDockRoot QStackedWidget > QWidget{background:transparent !important;color:%1 !important;}")
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+        : QStringLiteral(
+            "KernelDock#KernelDockRoot{background:%1 !important;color:%2 !important;}"
+            "KernelDock#KernelDockRoot QTabWidget::pane{background:%1 !important;border:1px solid %3;}"
+            "KernelDock#KernelDockRoot QStackedWidget,"
+            "KernelDock#KernelDockRoot QStackedWidget > QWidget{background:%1 !important;color:%2 !important;}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex());
+
+    // contentViewStyle 作用：
+    // - 背景图模式下表格/树/列表透明，避免内核 Dock 内部形成大块遮罩；
+    // - 无背景图时保持主题实底。
+    const QString contentViewStyle = allowWallpaperThroughRoot
+        ? QStringLiteral(
+            "KernelDock#KernelDockRoot QTableView,"
+            "KernelDock#KernelDockRoot QTableWidget,"
+            "KernelDock#KernelDockRoot QTreeView,"
+            "KernelDock#KernelDockRoot QTreeWidget,"
+            "KernelDock#KernelDockRoot QListView,"
+            "KernelDock#KernelDockRoot QListWidget,"
+            "KernelDock#KernelDockRoot QAbstractScrollArea,"
+            "KernelDock#KernelDockRoot QAbstractScrollArea > QWidget,"
+            "KernelDock#KernelDockRoot QAbstractScrollArea::viewport{"
+            "  background:transparent !important;"
+            "  background-color:transparent !important;"
+            "  alternate-background-color:transparent !important;"
+            "  color:%1 !important;"
+            "}")
+            .arg(KswordTheme::TextPrimaryHex())
+        : QStringLiteral(
+            "KernelDock#KernelDockRoot QTableView,"
+            "KernelDock#KernelDockRoot QTableWidget,"
+            "KernelDock#KernelDockRoot QTreeView,"
+            "KernelDock#KernelDockRoot QTreeWidget,"
+            "KernelDock#KernelDockRoot QListView,"
+            "KernelDock#KernelDockRoot QListWidget{"
+            "  background:%1 !important;"
+            "  alternate-background-color:%3 !important;"
+            "  color:%2 !important;"
+            "}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::SurfaceAltHex());
+
+    setStyleSheet(rootContainerStyle + contentViewStyle);
 
     m_rootLayout = new QVBoxLayout(this);
     m_rootLayout->setContentsMargins(6, 6, 6, 6);

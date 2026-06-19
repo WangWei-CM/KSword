@@ -58,6 +58,14 @@ public:
     // pid 作用：返回当前窗口绑定进程 PID。
     std::uint32_t pid() const;
 
+    // showHotkeyTabAndRefresh 作用：
+    // - 将详情窗口切换到“进程热键”页；
+    // - 复用详情页已有热键扫描流程，触发一次异步刷新；
+    // - 调用方通常来自进程列表右键菜单，用于把隐藏较深的热键功能变成一键入口。
+    // 参数：无。
+    // 返回：无。
+    void showHotkeyTabAndRefresh();
+
 signals:
     // requestOpenProcessByPid 作用：
     // - 在“转到父进程”按钮点击时发出；
