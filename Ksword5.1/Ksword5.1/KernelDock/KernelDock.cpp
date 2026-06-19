@@ -190,32 +190,89 @@ KernelDock::KernelDock(QWidget* parent)
 void KernelDock::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
+
+    // ADS 恢复布局后，KernelDock 的内部 QTabWidget 可能已经显示但首页尚未初始化。
+    // showEvent 里做幂等兜底，保证当前内部页至少有真实 UI 内容。
+    ensureCurrentTabReadyForDisplay();
+    QTimer::singleShot(0, this, [this]() {
+        ensureCurrentTabReadyForDisplay();
+    });
+}
+
+void KernelDock::ensureCurrentTabReadyForDisplay()
+{
     if (m_tabWidget == nullptr)
     {
         return;
     }
 
-    // ADS 恢复布局后，KernelDock 的内部 QTabWidget 可能已经显示但首页尚未初始化。
-    // showEvent 里做幂等兜底，保证当前内部页至少有真实 UI 内容。
+    // ADS restoreState 会恢复外层 Dock 激活状态，但不一定会再次触发内部 QTabWidget
+    // currentChanged。这里由 MainWindow/showEvent 主动调用，确保当前页已有真实子控件。
     ensureTabInitialized(m_tabWidget->currentIndex());
-    QTimer::singleShot(0, this, [this]() {
-        if (m_tabWidget != nullptr)
-        {
-            ensureTabInitialized(m_tabWidget->currentIndex());
-        }
-    });
+    m_tabWidget->updateGeometry();
+    m_tabWidget->update();
+    updateGeometry();
+    update();
+}
+
+QString KernelDock::displayStateSummary() const
+{
+    if (m_tabWidget == nullptr)
+    {
+        return QStringLiteral("tabWidget=null");
+    }
+
+    QWidget* currentPage = m_tabWidget->currentWidget();
+    const QSize tabSize = m_tabWidget->size();
+    const QSize pageSize = currentPage != nullptr ? currentPage->size() : QSize();
+    const int pageChildCount = currentPage != nullptr
+        ? currentPage->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly).size()
+        : 0;
+    const int innerTabCount = m_objectNamespaceInnerTabWidget != nullptr
+        ? m_objectNamespaceInnerTabWidget->count()
+        : -1;
+
+    // 返回值保持单行，便于日志面板和文件日志直接 grep KernelDockRepair。
+    return QStringLiteral(
+        "tabCount=%1,current=%2,tabSize=%3x%4,page=%5,pageVisible=%6,pageSize=%7x%8,"
+        "pageChildren=%9,objectNsReady=%10,innerTabs=%11")
+        .arg(m_tabWidget->count())
+        .arg(m_tabWidget->currentIndex())
+        .arg(tabSize.width())
+        .arg(tabSize.height())
+        .arg(currentPage != nullptr ? currentPage->objectName() : QStringLiteral("<null>"))
+        .arg(currentPage != nullptr && currentPage->isVisible() ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(pageSize.width())
+        .arg(pageSize.height())
+        .arg(pageChildCount)
+        .arg(m_objectNamespaceTabInitialized ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(innerTabCount);
 }
 
 void KernelDock::initializeUi()
 {
+    setObjectName(QStringLiteral("KernelDockRoot"));
     setAutoFillBackground(true);
     setAttribute(Qt::WA_StyledBackground, true);
     setStyleSheet(QStringLiteral(
-        "KernelDock{background:%1;color:%2;}"
-        "QTabWidget::pane{background:%1;border:1px solid %3;}")
+        "KernelDock#KernelDockRoot{background:%1 !important;color:%2 !important;}"
+        "KernelDock#KernelDockRoot QTabWidget::pane{background:%1 !important;border:1px solid %3;}"
+        "KernelDock#KernelDockRoot QStackedWidget,"
+        "KernelDock#KernelDockRoot QStackedWidget > QWidget{background:%1 !important;color:%2 !important;}"
+        "KernelDock#KernelDockRoot QTableView,"
+        "KernelDock#KernelDockRoot QTableWidget,"
+        "KernelDock#KernelDockRoot QTreeView,"
+        "KernelDock#KernelDockRoot QTreeWidget,"
+        "KernelDock#KernelDockRoot QListView,"
+        "KernelDock#KernelDockRoot QListWidget{"
+        "  background:%1 !important;"
+        "  alternate-background-color:%4 !important;"
+        "  color:%2 !important;"
+        "}")
         .arg(KswordTheme::SurfaceHex())
         .arg(KswordTheme::TextPrimaryHex())
-        .arg(KswordTheme::BorderHex()));
+        .arg(KswordTheme::BorderHex())
+        .arg(KswordTheme::SurfaceAltHex()));
 
     m_rootLayout = new QVBoxLayout(this);
     m_rootLayout->setContentsMargins(6, 6, 6, 6);

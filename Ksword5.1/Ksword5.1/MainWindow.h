@@ -288,6 +288,12 @@ private:
     // - 返回：无返回值。
     void ensureVisibleLazyDocksInitialized(const QString& reasonText);
 
+    // repairKernelDockAfterLayoutRestore 作用：
+    // - 输入 reasonText：触发来源，写入日志便于排查内核 Dock 启动黑屏；
+    // - 处理：确认 ADS 内核 Dock 挂载的是 KernelDock 实例而不是占位页/空壳，并触发当前内部页重绘；
+    // - 返回：无返回值。
+    void repairKernelDockAfterLayoutRestore(const QString& reasonText);
+
     // reportStartupProgress 作用：
     // - 安全调用启动进度回调；
     // - 让 MainWindow 内部各阶段都能主动更新 splash 文案。
