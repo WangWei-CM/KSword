@@ -246,6 +246,7 @@
     <ClCompile Include="NetworkDock\NetworkDock.MultiThreadDownload.Clipboard.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.HttpsAnalyze.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.NetworkDiagnostics.cpp" />
+    <ClCompile Include="NetworkDock\NetworkDock.Nids.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.DetailAndUtils.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.InternalHelpers.cpp" />
     <ClCompile Include="NetworkDock\NetworkFirewallPage.cpp" />
@@ -312,6 +313,7 @@
     <ClCompile Include="ksword\network\network_diagnostics_tools.cpp" />
     <ClCompile Include="ksword\network\network_download_tools.cpp" />
     <ClCompile Include="ksword\network\network_format_tools.cpp" />
+    <ClCompile Include="ksword\network\network_nids.cpp" />
     <ClCompile Include="ksword\process\process.cpp" />
     <ClCompile Include="ksword\service\service.cpp" />
     <ClCompile Include="ksword\startup\startup.cpp" />
@@ -387,6 +389,7 @@
     <ClInclude Include="ksword\network\network_diagnostics_tools.h" />
     <ClInclude Include="ksword\network\network_download_tools.h" />
     <ClInclude Include="ksword\network\network_format_tools.h" />
+    <ClInclude Include="ksword\network\network_nids.h" />
     <ClInclude Include="ksword\network\network_request_tools.h" />
     <ClInclude Include="ksword\process\process.h" />
     <ClInclude Include="ksword\service\service.h" />

@@ -335,6 +335,9 @@
     <ClCompile Include="NetworkDock\NetworkDock.NetworkDiagnostics.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="NetworkDock\NetworkDock.Nids.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="NetworkDock\NetworkDock.DetailAndUtils.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -531,6 +534,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ksword\network\network_format_tools.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ksword\network\network_nids.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ksword\process\process.cpp">
@@ -898,6 +904,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ksword\network\network_format_tools.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ksword\network\network_nids.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ksword\network\network_request_tools.h">

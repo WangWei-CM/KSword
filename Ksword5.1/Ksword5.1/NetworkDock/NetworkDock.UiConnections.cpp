@@ -20,6 +20,104 @@ void NetworkDock::initializeConnections()
             clearAllPacketRows();
         });
 
+    // NIDS 控制连接：实时检测开关、等级过滤和清空。
+    connect(m_nidsEnableCheck, &QCheckBox::toggled, this, [this](const bool checked)
+        {
+            if (!checked)
+            {
+                m_nidsEngine.Reset();
+            }
+            updateNidsStatusLabel();
+        });
+    connect(m_nidsSeverityFilterCombo, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, [this](const int /*index*/)
+        {
+            rebuildNidsAlertTable();
+            updateNidsStatusLabel();
+        });
+    connect(m_nidsClearButton, &QPushButton::clicked, this, [this]()
+        {
+            clearNidsAlerts();
+        });
+    const auto nidsAlertSequenceForRow = [this](const int row, std::uint64_t& sequenceIdOut) -> bool
+        {
+            if (m_nidsAlertTable == nullptr || row < 0 || row >= m_nidsAlertTable->rowCount())
+            {
+                return false;
+            }
+
+            QTableWidgetItem* timeItem = m_nidsAlertTable->item(row, toNidsAlertColumn(NidsAlertTableColumn::Time));
+            if (timeItem == nullptr)
+            {
+                return false;
+            }
+
+            const QVariant sequenceVariant = timeItem->data(Qt::UserRole);
+            if (!sequenceVariant.isValid())
+            {
+                return false;
+            }
+            sequenceIdOut = static_cast<std::uint64_t>(sequenceVariant.toULongLong());
+            return sequenceIdOut != 0;
+        };
+    connect(m_nidsAlertTable, &QTableWidget::cellDoubleClicked, this,
+        [this, nidsAlertSequenceForRow](const int row, const int /*column*/)
+        {
+            std::uint64_t sequenceId = 0;
+            if (nidsAlertSequenceForRow(row, sequenceId))
+            {
+                openPacketDetailWindowBySequenceId(sequenceId);
+            }
+        });
+    connect(m_nidsAlertTable, &QWidget::customContextMenuRequested, this,
+        [this, nidsAlertSequenceForRow](const QPoint& position)
+        {
+            if (m_nidsAlertTable == nullptr)
+            {
+                return;
+            }
+
+            const QModelIndex index = m_nidsAlertTable->indexAt(position);
+            if (!index.isValid())
+            {
+                return;
+            }
+
+            QMenu contextMenu(this);
+            contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+            QAction* detailAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("查看关联报文详情"));
+            QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制告警行"));
+            QAction* selectedAction = contextMenu.exec(m_nidsAlertTable->viewport()->mapToGlobal(position));
+            if (selectedAction == nullptr)
+            {
+                return;
+            }
+
+            if (selectedAction == detailAction)
+            {
+                std::uint64_t sequenceId = 0;
+                if (nidsAlertSequenceForRow(index.row(), sequenceId))
+                {
+                    openPacketDetailWindowBySequenceId(sequenceId);
+                }
+                return;
+            }
+
+            if (selectedAction == copyRowAction)
+            {
+                QStringList rowTextList;
+                rowTextList.reserve(m_nidsAlertTable->columnCount());
+                for (int columnIndex = 0; columnIndex < m_nidsAlertTable->columnCount(); ++columnIndex)
+                {
+                    QTableWidgetItem* item = m_nidsAlertTable->item(index.row(), columnIndex);
+                    rowTextList.push_back(item == nullptr ? QString() : item->text());
+                }
+                if (QGuiApplication::clipboard() != nullptr)
+                {
+                    QGuiApplication::clipboard()->setText(rowTextList.join('\t'));
+                }
+            }
+        });
+
     // 流量时间轴连接：
     // - ProcessTraceTimelineWidget 内部复用了 ETW 页的框选、拖拽和滚轮缩放工具；
     // - 这里仅接收最终时间范围，并把它叠加到现有规则组过滤与表格重建流程。
