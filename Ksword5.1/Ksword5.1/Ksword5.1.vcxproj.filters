@@ -356,7 +356,13 @@
     <ClCompile Include="OtherDock\OtherDock.DesktopSwitch.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="OtherDock\OtherDock.WindowProtection.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="OtherDock\OtherDock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="OtherDock\WindowCaptureProtection.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="PrivilegeDock\PrivilegeDock.cpp">
@@ -715,6 +721,9 @@
     <QtMoc Include="OtherDock\OtherDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="OtherDock\WindowCaptureProtection.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>

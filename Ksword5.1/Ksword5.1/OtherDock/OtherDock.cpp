@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../ProcessDock/ProcessDetailWindow.h"
+#include "WindowCaptureProtection.h"
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
 
@@ -941,6 +942,10 @@ namespace
         infoOut.topMost = (infoOut.exStyleValue & WS_EX_TOPMOST) != 0;
         infoOut.minimized = ::IsIconic(windowHandle) != FALSE;
         infoOut.maximized = ::IsZoomed(windowHandle) != FALSE;
+        infoOut.displayAffinityKnown = ks::window::QueryWindowDisplayAffinity(
+            infoOut.hwndValue,
+            infoOut.displayAffinityValue,
+            &infoOut.displayAffinityError);
 
         std::uint32_t processId = 0;
         const DWORD threadId = ::GetWindowThreadProcessId(windowHandle, reinterpret_cast<DWORD*>(&processId));
@@ -2952,16 +2957,28 @@ void OtherDock::initializeUi()
     m_windowPickerButton->setStyleSheet(blueButtonStyle());
     m_windowPickerButton->setFixedWidth(32);
 
+    m_protectCaptureButton = new QPushButton(QIcon(":/Icon/titlebar_capture_protected.svg"), QString(), m_windowListToolWidget);
+    m_protectCaptureButton->setToolTip(QStringLiteral("对选中窗口启用防截图保护：优先从截图/录屏中隐藏，失败时回退黑屏"));
+    m_protectCaptureButton->setStyleSheet(blueButtonStyle());
+    m_protectCaptureButton->setFixedWidth(32);
+
+    m_unprotectCaptureButton = new QPushButton(QIcon(":/Icon/titlebar_capture_allowed.svg"), QString(), m_windowListToolWidget);
+    m_unprotectCaptureButton->setToolTip(QStringLiteral("取消选中窗口的防截图保护，恢复普通截图/录屏捕获"));
+    m_unprotectCaptureButton->setStyleSheet(blueButtonStyle());
+    m_unprotectCaptureButton->setFixedWidth(32);
+
     m_windowPickerHintLabel = new QLabel(
-        QStringLiteral("拖拽准星到目标窗口并松开，可直接打开窗口详细信息"),
+        QStringLiteral("拖拽准星可定位窗口；选中窗口后可启用或取消防截图保护"),
         m_windowListToolWidget);
-    m_windowPickerHintLabel->setToolTip(QStringLiteral("用于快速定位任意窗口，不需要先在左侧列表里查找"));
+    m_windowPickerHintLabel->setToolTip(QStringLiteral("防截图保护会对顶层窗口写入 DisplayAffinity，外部进程窗口会尝试远程调用"));
 
     pickerButton->setReleaseCallback([this](const QPoint& globalPos) {
         handleWindowPickerRelease(globalPos);
     });
 
     m_windowListToolLayout->addWidget(m_windowPickerButton, 0);
+    m_windowListToolLayout->addWidget(m_protectCaptureButton, 0);
+    m_windowListToolLayout->addWidget(m_unprotectCaptureButton, 0);
     m_windowListToolLayout->addWidget(m_windowPickerHintLabel, 0);
     m_windowListToolLayout->addStretch(1);
     m_windowListPageLayout->addWidget(m_windowListToolWidget, 0);
@@ -3249,6 +3266,14 @@ void OtherDock::initializeConnections()
     // 右键菜单：窗口操作入口。
     connect(m_windowTree, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
         showWindowContextMenu(pos);
+    });
+
+    // 防截图保护按钮：对当前选中窗口执行启用/取消操作。
+    connect(m_protectCaptureButton, &QPushButton::clicked, this, [this]() {
+        setCaptureProtectionForSelectedWindow(true);
+    });
+    connect(m_unprotectCaptureButton, &QPushButton::clicked, this, [this]() {
+        setCaptureProtectionForSelectedWindow(false);
     });
 
     // 双击行：直接打开窗口详细信息。
@@ -3950,6 +3975,19 @@ void OtherDock::updatePreviewPanel(const WindowInfo* info)
     quickText += QStringLiteral("状态:%1  透明度:%2\n")
         .arg(windowStateText(info->valid, info->minimized, info->maximized))
         .arg(info->alphaValue);
+    if (info->displayAffinityKnown)
+    {
+        const QString affinityHexText =
+            QString::number(static_cast<qulonglong>(info->displayAffinityValue), 16).toUpper();
+        quickText += QStringLiteral("DisplayAffinity: 0x%1 (%2)\n")
+            .arg(affinityHexText)
+            .arg(QString::fromStdString(ks::window::DisplayAffinityName(info->displayAffinityValue)));
+    }
+    else
+    {
+        quickText += QStringLiteral("DisplayAffinity: 未知（错误码=%1）\n")
+            .arg(info->displayAffinityError);
+    }
     m_quickInfoText->setPlainText(quickText);
 
     kLogEvent event;
@@ -4086,6 +4124,8 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
     QAction* showHideAction = menu.addAction(QIcon(":/Icon/process_pause.svg"), QStringLiteral("显示/隐藏"));
     QAction* enableDisableAction = menu.addAction(QIcon(":/Icon/process_uncritical.svg"), QStringLiteral("启用/禁用"));
     QAction* flashAction = menu.addAction(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("闪烁窗口"));
+    QAction* protectCaptureAction = menu.addAction(QIcon(":/Icon/titlebar_capture_protected.svg"), QStringLiteral("启用防截图保护"));
+    QAction* unprotectCaptureAction = menu.addAction(QIcon(":/Icon/titlebar_capture_allowed.svg"), QStringLiteral("取消防截图保护"));
     menu.addSeparator();
     QAction* processDetailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
     QAction* windowDetailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("在详细信息中打开"));
@@ -4168,6 +4208,14 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
         flashInfo.dwTimeout = 0;
         ::FlashWindowEx(&flashInfo);
     }
+    else if (selectedAction == protectCaptureAction)
+    {
+        setCaptureProtectionForWindow(*windowInfo, true);
+    }
+    else if (selectedAction == unprotectCaptureAction)
+    {
+        setCaptureProtectionForWindow(*windowInfo, false);
+    }
     else if (selectedAction == processDetailAction)
     {
         kLogEvent event;
@@ -4241,7 +4289,10 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
     }
 
     // 任意状态类动作后都刷新一次，确保列表与真实状态一致。
-    refreshWindowListAsync();
+    if (selectedAction != protectCaptureAction && selectedAction != unprotectCaptureAction)
+    {
+        refreshWindowListAsync();
+    }
 }
 
 void OtherDock::exportVisibleRowsToTsv()
