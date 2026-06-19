@@ -1,6 +1,7 @@
 #include "ArkDriverClient.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <sstream>
 #include <vector>
@@ -10,12 +11,10 @@ namespace ksword::ark
     namespace
     {
         constexpr std::size_t kReadResponseHeaderSize =
-            sizeof(KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE) -
-            sizeof(((KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE*)nullptr)->data);
+            offsetof(KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE, data);
 
         constexpr std::size_t kWriteRequestHeaderSize =
-            sizeof(KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST) -
-            sizeof(((KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST*)nullptr)->data);
+            offsetof(KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST, data);
     }
 
     VirtualMemoryReadResult DriverClient::readVirtualMemory(
