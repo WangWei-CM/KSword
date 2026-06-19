@@ -59,6 +59,7 @@ void NetworkDock::onPacketCaptured(const ks::network::PacketRecord& packetRecord
     timelinePoint.typeText = packetTimelineTypeText(packetRecord);
     m_packetTimelineEventPoints.push_back(std::move(timelinePoint));
     addPacketTimelineRateSample(packetRecord, timelineTime100ns);
+    processNidsPacket(packetRecord);
 
     // 当前报文若通过“组合过滤条件”才追加到主表（过滤关闭时默认全部通过）。
     if (packetPassesMonitorFilter(packetRecord.sequenceId, packetRecord))
@@ -799,6 +800,7 @@ void NetworkDock::clearAllPacketRows()
     m_packetSequenceOrder.clear();
     m_packetBySequence.clear();
     m_packetTimelineEventPoints.clear();
+    clearNidsAlerts();
     resetPacketTimelineClockForCurrentState();
     resetPacketTimelineToCurrentRange();
     refreshPacketTimelinePoints();

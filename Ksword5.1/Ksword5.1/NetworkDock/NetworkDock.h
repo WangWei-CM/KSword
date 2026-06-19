@@ -12,6 +12,7 @@
 
 #include "../Framework.h"
 #include "../MonitorDock/ProcessTraceTimelineWidget.h"
+#include "../ksword/network/network_nids.h"
 
 #include <QHash>
 #include <QIcon>
@@ -134,6 +135,23 @@ private:
         Pid = 0,        // 所属 PID。
         ProcessName,    // 进程名（带图标）。
         LocalEndpoint,  // 本地地址:端口。
+        Count           // 列总数。
+    };
+
+    // NidsAlertTableColumn：NIDS 告警表列定义。
+    enum class NidsAlertTableColumn : int
+    {
+        Time = 0,       // 告警时间。
+        Severity,       // 告警等级。
+        Category,       // 告警分类。
+        Rule,           // 规则编号。
+        Protocol,       // 协议。
+        Direction,      // 方向。
+        Pid,            // 关联 PID。
+        ProcessName,    // 进程名。
+        LocalEndpoint,  // 本地端点。
+        RemoteEndpoint, // 远端端点。
+        Detail,         // 告警详情。
         Count           // 列总数。
     };
 
@@ -301,6 +319,11 @@ private:
     // - 返回：无。
     void initializeTrafficMonitorTab();
 
+    // initializeNidsTab：
+    // - 作用：构建“NIDS”页（开关 + 等级过滤 + 实时告警表）。
+    // - 返回：无。
+    void initializeNidsTab();
+
     // initializeRateLimitTab：
     // - 作用：构建“进程限速”页（规则输入 + 规则表 + 动作日志）。
     // - 返回：无。
@@ -378,6 +401,39 @@ private:
     // - 参数 packetRecord：后台服务解析出的报文记录。
     // - 返回：无。
     void onPacketCaptured(const ks::network::PacketRecord& packetRecord);
+
+    // processNidsPacket：
+    // - 作用：把单条报文送入 NIDS 引擎并追加新告警。
+    // - 参数 packetRecord：后台服务解析出的报文记录。
+    // - 返回：无。
+    void processNidsPacket(const ks::network::PacketRecord& packetRecord);
+
+    // appendNidsAlertRow：
+    // - 作用：把单条 NIDS 告警追加到表格末尾。
+    // - 参数 alertRecord：待显示告警。
+    // - 返回：无。
+    void appendNidsAlertRow(const ks::network::NidsAlert& alertRecord);
+
+    // rebuildNidsAlertTable：
+    // - 作用：按当前等级过滤重建 NIDS 告警表。
+    // - 返回：无。
+    void rebuildNidsAlertTable();
+
+    // clearNidsAlerts：
+    // - 作用：清空 NIDS 告警、统计和引擎窗口状态。
+    // - 返回：无。
+    void clearNidsAlerts();
+
+    // updateNidsStatusLabel：
+    // - 作用：刷新 NIDS 页状态与计数摘要。
+    // - 返回：无。
+    void updateNidsStatusLabel();
+
+    // nidsAlertPassesFilter：
+    // - 作用：判断告警是否满足当前等级过滤。
+    // - 参数 alertRecord：待判断告警。
+    // - 返回：true=显示；false=隐藏。
+    bool nidsAlertPassesFilter(const ks::network::NidsAlert& alertRecord) const;
 
     // onStatusMessageArrived：
     // - 作用：显示后台状态文本并同步按钮状态。
@@ -1027,6 +1083,12 @@ private:
     // - 返回：对应列号。
     static int toUdpEndpointColumn(UdpEndpointTableColumn column);
 
+    // toNidsAlertColumn：
+    // - 作用：把 NIDS 告警列枚举转成 int 列号。
+    // - 参数 column：NIDS 告警列枚举值。
+    // - 返回：对应列号。
+    static int toNidsAlertColumn(NidsAlertTableColumn column);
+
     // tryParsePidText：
     // - 作用：解析十进制 PID 文本。
     // - 参数 pidText：输入文本。
@@ -1095,7 +1157,17 @@ private:
     ProcessTraceTimelineWidget* m_packetTimelineWidget = nullptr; // 流量监控页时间轴（复用 ETW 框选交互控件）。
     QTableWidget* m_packetTable = nullptr;             // 全量发送报文表格。
 
-    // ========================= Tab2：进程限速 ====================
+    // ========================= Tab2：NIDS ====================
+    QWidget* m_nidsPage = nullptr;            // NIDS 页容器。
+    QVBoxLayout* m_nidsLayout = nullptr;      // NIDS 页主布局。
+    QHBoxLayout* m_nidsControlLayout = nullptr; // NIDS 控制栏布局。
+    QCheckBox* m_nidsEnableCheck = nullptr;   // NIDS 实时检测开关。
+    QComboBox* m_nidsSeverityFilterCombo = nullptr; // 告警等级过滤。
+    QPushButton* m_nidsClearButton = nullptr; // 清空 NIDS 告警按钮。
+    QLabel* m_nidsStatusLabel = nullptr;      // NIDS 运行状态标签。
+    QTableWidget* m_nidsAlertTable = nullptr; // NIDS 告警表。
+
+    // ========================= Tab3：进程限速 ====================
     QWidget* m_rateLimitPage = nullptr;           // 进程限速页容器。
     QVBoxLayout* m_rateLimitLayout = nullptr;     // 进程限速页主布局。
     QHBoxLayout* m_rateLimitControlLayout = nullptr; // 限速控制栏布局。
@@ -1229,6 +1301,7 @@ private:
 
     // ========================= 后台服务与缓存 ====================
     std::unique_ptr<ks::network::TrafficMonitorService> m_trafficService; // 抓包/限速后台服务对象。
+    ks::network::NidsEngine m_nidsEngine; // NIDS 规则引擎实例。
     QTimer* m_rateLimitRefreshTimer = nullptr; // 限速规则轮询刷新定时器。
     QTimer* m_packetFlushTimer = nullptr;      // 报文批量刷新定时器（UI 节流关键）。
     QTimer* m_connectionRefreshTimer = nullptr; // 连接快照轮询刷新定时器（TCP/UDP）。
@@ -1274,6 +1347,11 @@ private:
     std::deque<ks::network::PacketRecord> m_pendingPacketQueue;
     mutable std::mutex m_pendingPacketMutex;
     std::uint64_t m_droppedPacketCount = 0; // 队列满时丢弃计数（用于状态提示）。
+
+    static constexpr std::size_t kMaxNidsAlertCount = 2000; // NIDS 告警缓存上限。
+    std::deque<ks::network::NidsAlert> m_nidsAlertList; // NIDS 告警缓存，按时间顺序保存。
+    std::uint64_t m_nidsAnalyzedPacketCount = 0; // 已送入 NIDS 的报文数量。
+    std::uint64_t m_nidsTotalAlertCount = 0;     // 本轮累计告警数量。
 
     // 连接快照缓存：
     // - UI 表格行与快照向量按同索引对应；
