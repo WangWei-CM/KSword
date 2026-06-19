@@ -30,6 +30,7 @@ class QFormLayout;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
+class QPlainTextEdit;
 class QPushButton;
 class QTabWidget;
 class QTableWidget;
@@ -585,12 +586,34 @@ private:
     // ======== PEB页控件与状态 ========
     QVBoxLayout* m_pebLayout = nullptr;            // PEB 页布局。
     QPushButton* m_refreshPebButton = nullptr;     // 刷新 PEB 信息按钮。
+    QPushButton* m_applyPebEditButton = nullptr;   // 应用 PEB 可编辑字段按钮。
     QLabel* m_pebStatusLabel = nullptr;            // PEB 页状态文本。
+    QComboBox* m_pebTargetCombo = nullptr;          // PEB 写入目标：NativePEB / Wow64PEB。
+    QLineEdit* m_pebCommandLineEdit = nullptr;      // 可编辑 CommandLine。
+    QLineEdit* m_pebImagePathEdit = nullptr;        // 可编辑 ImagePathName。
+    QLineEdit* m_pebCurrentDirectoryEdit = nullptr; // 可编辑 CurrentDirectory.DosPath。
+    QLineEdit* m_pebImageBaseEdit = nullptr;        // 高级：PEB.ImageBaseAddress。
+    QLineEdit* m_pebAffinityMaskEdit = nullptr;     // 可编辑进程亲和性掩码。
+    QComboBox* m_pebPriorityClassCombo = nullptr;   // 可编辑优先级。
+    QLineEdit* m_pebEnvironmentNameEdit = nullptr;  // 环境变量名。
+    QLineEdit* m_pebEnvironmentValueEdit = nullptr; // 环境变量值。
+    QPlainTextEdit* m_pebReadonlyReasonOutput = nullptr; // 不可直接修改字段说明。
     CodeEditorWidget* m_pebDetailOutput = nullptr;   // PEB 信息输出框（统一文本编辑器组件，只读）。
     bool m_pebRefreshing = false;                  // PEB 页刷新状态。
     bool m_pebInitialRefreshStarted = false;       // PEB 页首次刷新是否已经按需启动。
     std::uint64_t m_pebRefreshTicket = 0;          // PEB 页刷新序号。
     int m_pebRefreshProgressPid = 0;               // PEB 页刷新进度 PID。
+
+    // applyPebEditableFields：
+    // - 读取 PEB 页编辑区输入；
+    // - 尽量写回远程 PEB/ProcessParameters 与进程基础运行属性；
+    // - 成功/失败通过状态栏和消息框反馈。
+    void applyPebEditableFields();
+    // populatePebEditableFieldsFromText：
+    // - 从 PEB 刷新文本中提取当前目标 PEB 的可写字段；
+    // - 自动填充编辑框，避免用户手工复制长命令行或路径；
+    // - 仅更新 UI 控件，无返回值。
+    void populatePebEditableFieldsFromText(const QString& detailText);
     bool m_staticDetailRefreshing = false;         // 静态详情后台补齐是否进行中。
     bool m_staticDetailRefreshAttempted = false;   // 静态详情是否已经尝试后台补齐，避免周期刷新重复排队。
     std::uint64_t m_staticDetailRefreshTicket = 0; // 静态详情刷新序号。

@@ -41,7 +41,9 @@
 #include <QMetaObject>
 #include <QPalette>
 #include <QPointer>
+#include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QRunnable>
 #include <QSet>
 #include <QStringList>
@@ -57,8 +59,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>

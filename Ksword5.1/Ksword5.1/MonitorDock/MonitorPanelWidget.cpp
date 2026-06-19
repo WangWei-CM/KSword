@@ -14,6 +14,7 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QFont>
+#include <QLabel>
 #include <QList>
 #include <QPainter>
 #include <QResizeEvent>
@@ -176,6 +177,7 @@ MonitorPanelWidget::~MonitorPanelWidget()
 void MonitorPanelWidget::resizeEvent(QResizeEvent* resizeEventPointer)
 {
     QWidget::resizeEvent(resizeEventPointer);
+    updateCompactVisibility();
     adjustChartCellHeights();
 }
 
@@ -183,6 +185,7 @@ void MonitorPanelWidget::showEvent(QShowEvent* showEventPointer)
 {
     QWidget::showEvent(showEventPointer);
     applyChartTextTheme();
+    updateCompactVisibility();
     // 延迟到事件循环末尾再重排，保证首帧也能拿到稳定几何尺寸。
     QTimer::singleShot(0, this, [this]()
     {
@@ -201,13 +204,20 @@ void MonitorPanelWidget::initializeUi()
     // - 四宫格图表占满整个监视面板；
     // - 间距统一为 6，和全项目 Dock 风格一致。
     m_rootLayout = new QVBoxLayout(this);
-    m_rootLayout->setContentsMargins(4, 4, 4, 4);
-    m_rootLayout->setSpacing(6);
+    m_rootLayout->setContentsMargins(2, 2, 2, 2);
+    m_rootLayout->setSpacing(2);
+
+    m_compactSummaryLabel = new QLabel(this);
+    m_compactSummaryLabel->setAlignment(Qt::AlignCenter);
+    m_compactSummaryLabel->setWordWrap(true);
+    m_compactSummaryLabel->setVisible(false);
+    m_compactSummaryLabel->setText(QStringLiteral("监视面板高度过低，已隐藏图表。"));
+    m_rootLayout->addWidget(m_compactSummaryLabel, 1);
 
     m_chartGridLayout = new QGridLayout();
     m_chartGridLayout->setContentsMargins(0, 0, 0, 0);
-    m_chartGridLayout->setHorizontalSpacing(6);
-    m_chartGridLayout->setVerticalSpacing(6);
+    m_chartGridLayout->setHorizontalSpacing(2);
+    m_chartGridLayout->setVerticalSpacing(2);
     m_rootLayout->addLayout(m_chartGridLayout, 1);
 
     // ===================== CPU 每核柱状图 =====================
@@ -314,8 +324,7 @@ void MonitorPanelWidget::initializeUi()
     memoryTrendChart->addSeries(standbyAreaSeries);
     memoryTrendChart->addSeries(availableAreaSeries);
     memoryTrendChart->addSeries(m_memoryUsageSeries);
-    memoryTrendChart->legend()->setVisible(true);
-    memoryTrendChart->legend()->setAlignment(Qt::AlignBottom);
+    memoryTrendChart->legend()->hide();
     memoryTrendChart->setBackgroundVisible(false);
     memoryTrendChart->setBackgroundRoundness(0);
     memoryTrendChart->setMargins(QMargins(0, 0, 0, 0));
@@ -395,8 +404,7 @@ void MonitorPanelWidget::initializeUi()
         chart->setBackgroundRoundness(0);
         chart->setMargins(QMargins(0, 0, 0, 0));
         chart->setTitle(titleText);
-        chart->legend()->setVisible(true);
-        chart->legend()->setAlignment(Qt::AlignBottom);
+        chart->legend()->hide();
 
         QValueAxis* axisX = new QValueAxis(chart);
         axisX->setRange(0, m_historyLength);
@@ -703,6 +711,20 @@ void MonitorPanelWidget::refreshMetrics()
             .arg(bytesPerSecondToText(networkRxBytesPerSec))
             .arg(bytesPerSecondToText(networkTxBytesPerSec)));
     }
+
+    m_lastCompactSummaryText = QStringLiteral(
+        "CPU %1% | 内存 %2% | 磁盘 读 %3 / 写 %4 | 网络 下 %5 / 上 %6")
+        .arg(totalCpuUsage, 0, 'f', 1)
+        .arg(memorySample.usedPercent, 0, 'f', 1)
+        .arg(bytesPerSecondToText(diskReadBytesPerSec))
+        .arg(bytesPerSecondToText(diskWriteBytesPerSec))
+        .arg(bytesPerSecondToText(networkRxBytesPerSec))
+        .arg(bytesPerSecondToText(networkTxBytesPerSec));
+    if (m_compactSummaryLabel != nullptr)
+    {
+        m_compactSummaryLabel->setText(m_lastCompactSummaryText);
+    }
+    updateCompactVisibility();
 }
 
 bool MonitorPanelWidget::samplePerCoreCpuUsage(
@@ -977,6 +999,17 @@ void MonitorPanelWidget::applyChartTextTheme()
     const QColor mutedTextColor = monitorPanelMutedTextColor();
     const QBrush primaryTextBrush(primaryTextColor);
     const QBrush mutedTextBrush(mutedTextColor);
+    if (m_compactSummaryLabel != nullptr)
+    {
+        m_compactSummaryLabel->setStyleSheet(QStringLiteral(
+            "QLabel{"
+            "  color:%1;"
+            "  background:transparent;"
+            "  font-weight:600;"
+            "  padding:4px;"
+            "}")
+            .arg(primaryTextColor.name(QColor::HexRgb)));
+    }
 
     // chartList 变量：统一枚举四张图，确保标题/图例在深浅色下都可读。
     const QList<QChart*> chartList{
@@ -1004,6 +1037,7 @@ void MonitorPanelWidget::applyChartTextTheme()
 
         chart->setTitleBrush(primaryTextBrush);
         chart->setTitleFont(titleFont);
+        chart->legend()->hide();
         chart->legend()->setLabelColor(primaryTextColor);
         chart->legend()->setFont(legendFont);
         chart->setAnimationOptions(barChartNeedsSoftAnimation ? QChart::SeriesAnimations : QChart::NoAnimation);
@@ -1024,8 +1058,45 @@ void MonitorPanelWidget::applyChartTextTheme()
     }
 }
 
+void MonitorPanelWidget::updateCompactVisibility()
+{
+    // 低高度保护：
+    // - QtCharts 在极小高度下仍会计算标题、plotArea、图例和坐标轴；
+    // - 直接隐藏所有 chart view，仅保留一行摘要，避免布局震荡或崩溃。
+    const bool compactTextOnly = height() > 0 && height() < 200;
+    if (m_compactSummaryLabel != nullptr)
+    {
+        m_compactSummaryLabel->setVisible(compactTextOnly);
+        if (!m_lastCompactSummaryText.isEmpty())
+        {
+            m_compactSummaryLabel->setText(m_lastCompactSummaryText);
+        }
+    }
+
+    const QList<QChartView*> chartViewList{
+        m_cpuChartView,
+        m_memoryTrendChartView,
+        m_diskChartView,
+        m_networkChartView
+    };
+    for (QChartView* chartView : chartViewList)
+    {
+        if (chartView != nullptr)
+        {
+            chartView->setVisible(!compactTextOnly);
+        }
+    }
+}
+
 void MonitorPanelWidget::adjustChartCellHeights()
 {
+    if (height() > 0 && height() < 200)
+    {
+        updateCompactVisibility();
+        return;
+    }
+    updateCompactVisibility();
+
     // applyMaxHeightIfChanged 作用：
     // - 仅收紧图表最大高度，最小高度始终保持 0；
     // - 避免子控件 minimumHeight 反向抬高父容器导致“无限变长”。
@@ -1082,7 +1153,7 @@ void MonitorPanelWidget::adjustChartCellHeights()
     applyMaxHeightIfChanged(m_diskChartView, chartRowHeight);
     applyMaxHeightIfChanged(m_networkChartView, chartRowHeight);
 
-    // compactMode 用途：低高度时简化图例/标题，减少内部布局占用，避免出现滚动条。
+    // compactMode 用途：低高度时简化标题边距，减少内部布局占用，避免出现滚动条。
     const bool compactMode = (chartRowHeight < 92);
     auto applyChartCompactMode =
         [compactMode](QChartView* chartViewPointer)
@@ -1094,7 +1165,7 @@ void MonitorPanelWidget::adjustChartCellHeights()
             QChart* chartPointer = chartViewPointer->chart();
             if (chartPointer->legend() != nullptr)
             {
-                chartPointer->legend()->setVisible(!compactMode);
+                chartPointer->legend()->hide();
             }
             if (compactMode)
             {

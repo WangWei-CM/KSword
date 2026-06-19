@@ -697,6 +697,716 @@ namespace
         return result;
     }
 
+    // PebEditTargetSnapshot：
+    // - 表示一次“准备写 PEB”的目标上下文；
+    // - isWow64Target=true 时按 32 位 PEB/ProcessParameters 布局写入；
+    // - 返回给 UI 写入流程使用，不直接持有句柄生命周期。
+    struct PebEditTargetSnapshot final
+    {
+        bool valid = false;                         // 是否成功解析到目标 PEB。
+        bool isWow64Target = false;                 // true=Wow64PEB/32位布局，false=NativePEB/64位布局。
+        std::uint64_t pebAddress = 0;               // 远程 PEB 地址。
+        std::uint64_t processParametersAddress = 0; // 远程 RTL_USER_PROCESS_PARAMETERS 地址。
+        std::uint64_t imageBaseAddress = 0;         // 当前 PEB.ImageBaseAddress。
+        std::uint64_t environmentAddress = 0;       // 当前 Environment 指针。
+        RtlUserProcessParameters64Lite params64{};  // 64 位参数块快照。
+        RtlUserProcessParameters32Lite params32{};  // 32 位参数块快照。
+        QString errorText;                          // 失败原因。
+    };
+
+    // parseUnsignedIntegerText：
+    // - 解析 UI 输入中的十六进制/十进制无符号整数；
+    // - 支持 0x/0X 前缀和纯十进制；
+    // - 成功时写入 valueOut 并返回 true，失败返回 false。
+    bool parseUnsignedIntegerText(const QString& inputText, std::uint64_t& valueOut)
+    {
+        QString text = inputText.trimmed();
+        if (text.isEmpty())
+        {
+            return false;
+        }
+
+        bool ok = false;
+        int base = 10;
+        if (text.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+        {
+            text = text.mid(2);
+            base = 16;
+        }
+        valueOut = text.toULongLong(&ok, base);
+        return ok;
+    }
+
+    // writeRemoteBytesWithProtect：
+    // - 向目标进程写入一段远程内存；
+    // - 先直接 WriteProcessMemory，失败时临时改 PAGE_READWRITE 再重试；
+    // - 返回 true 表示完整写入，false 表示地址不可写或权限不足。
+    bool writeRemoteBytesWithProtect(
+        HANDLE processHandle,
+        const std::uint64_t remoteAddress,
+        const void* localBuffer,
+        const SIZE_T localSize,
+        QString* errorTextOut)
+    {
+        if (errorTextOut != nullptr)
+        {
+            errorTextOut->clear();
+        }
+        if (processHandle == nullptr || remoteAddress == 0 || localBuffer == nullptr || localSize == 0)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("写入参数为空。");
+            }
+            return false;
+        }
+
+        SIZE_T bytesWritten = 0;
+        BOOL writeOk = WriteProcessMemory(
+            processHandle,
+            reinterpret_cast<LPVOID>(static_cast<std::uintptr_t>(remoteAddress)),
+            localBuffer,
+            localSize,
+            &bytesWritten);
+        if (writeOk != FALSE && bytesWritten == localSize)
+        {
+            return true;
+        }
+
+        const DWORD firstError = GetLastError();
+        DWORD oldProtect = 0;
+        if (VirtualProtectEx(
+            processHandle,
+            reinterpret_cast<LPVOID>(static_cast<std::uintptr_t>(remoteAddress)),
+            localSize,
+            PAGE_READWRITE,
+            &oldProtect) == FALSE)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("WriteProcessMemory失败(%1)，VirtualProtectEx失败(%2)。")
+                    .arg(firstError)
+                    .arg(GetLastError());
+            }
+            return false;
+        }
+
+        bytesWritten = 0;
+        writeOk = WriteProcessMemory(
+            processHandle,
+            reinterpret_cast<LPVOID>(static_cast<std::uintptr_t>(remoteAddress)),
+            localBuffer,
+            localSize,
+            &bytesWritten);
+        const DWORD secondError = GetLastError();
+
+        DWORD ignoredProtect = 0;
+        VirtualProtectEx(
+            processHandle,
+            reinterpret_cast<LPVOID>(static_cast<std::uintptr_t>(remoteAddress)),
+            localSize,
+            oldProtect,
+            &ignoredProtect);
+
+        if (writeOk != FALSE && bytesWritten == localSize)
+        {
+            return true;
+        }
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = QStringLiteral("WriteProcessMemory失败(%1)，重试失败(%2)，written=%3/%4。")
+                .arg(firstError)
+                .arg(secondError)
+                .arg(static_cast<qulonglong>(bytesWritten))
+                .arg(static_cast<qulonglong>(localSize));
+        }
+        return false;
+    }
+
+    // buildRemoteUtf16Buffer：
+    // - 把 QString 转成远程 UNICODE_STRING 可用的 UTF-16LE 缓冲；
+    // - 输出包含结尾 NUL，Length 字段仍由调用者使用“不含 NUL”的字节数。
+    std::vector<wchar_t> buildRemoteUtf16Buffer(const QString& text)
+    {
+        std::vector<wchar_t> buffer(static_cast<std::size_t>(text.size()) + 1, L'\0');
+        if (!text.isEmpty())
+        {
+            std::memcpy(
+                buffer.data(),
+                text.utf16(),
+                static_cast<std::size_t>(text.size()) * sizeof(wchar_t));
+        }
+        return buffer;
+    }
+
+    // allocateRemoteUnicodeBuffer：
+    // - 在目标进程分配 UTF-16 字符串缓冲并写入内容；
+    // - wow64Required=true 时要求返回地址能放入 32 位指针；
+    // - 成功时输出远程地址，失败返回 false。
+    bool allocateRemoteUnicodeBuffer(
+        HANDLE processHandle,
+        const QString& text,
+        const bool wow64Required,
+        std::uint64_t& remoteBufferOut,
+        QString* errorTextOut)
+    {
+        remoteBufferOut = 0;
+        const std::vector<wchar_t> buffer = buildRemoteUtf16Buffer(text);
+        const SIZE_T byteSize = static_cast<SIZE_T>(buffer.size() * sizeof(wchar_t));
+        LPVOID remoteBuffer = VirtualAllocEx(
+            processHandle,
+            nullptr,
+            byteSize,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_READWRITE);
+        if (remoteBuffer == nullptr)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("VirtualAllocEx字符串缓冲失败(%1)。").arg(GetLastError());
+            }
+            return false;
+        }
+
+        remoteBufferOut = reinterpret_cast<std::uint64_t>(remoteBuffer);
+        if (wow64Required && remoteBufferOut > 0xFFFFFFFFULL)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("Wow64字符串新缓冲区地址超过32位范围：%1。")
+                    .arg(uint64ToHex(remoteBufferOut));
+            }
+            return false;
+        }
+
+        if (!writeRemoteBytesWithProtect(
+            processHandle,
+            remoteBufferOut,
+            buffer.data(),
+            byteSize,
+            errorTextOut))
+        {
+            return false;
+        }
+        return true;
+    }
+
+    // updateRemoteUnicodeString64：
+    // - 更新 64 位 RTL_USER_PROCESS_PARAMETERS 内的 UNICODE_STRING 字段；
+    // - 新字符串能放入原缓冲时原地覆盖，否则远程分配新缓冲并改写描述符；
+    // - 返回 true 表示描述符与字符串写入完成。
+    bool updateRemoteUnicodeString64(
+        HANDLE processHandle,
+        const std::uint64_t descriptorAddress,
+        const UNICODE_STRING& currentDescriptor,
+        const QString& newText,
+        QString* errorTextOut)
+    {
+        if (newText.size() > (std::numeric_limits<USHORT>::max() / static_cast<int>(sizeof(wchar_t)) - 1))
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("字符串超过UNICODE_STRING长度上限。");
+            }
+            return false;
+        }
+        const std::vector<wchar_t> newBuffer = buildRemoteUtf16Buffer(newText);
+        const USHORT newLengthBytes = static_cast<USHORT>(newText.size() * sizeof(wchar_t));
+        const USHORT newMaximumBytes = static_cast<USHORT>(newBuffer.size() * sizeof(wchar_t));
+
+        UNICODE_STRING updatedDescriptor = currentDescriptor;
+        const std::uint64_t currentBufferAddress = reinterpret_cast<std::uint64_t>(currentDescriptor.Buffer);
+        if (currentBufferAddress != 0 && currentDescriptor.MaximumLength >= newMaximumBytes)
+        {
+            if (!writeRemoteBytesWithProtect(
+                processHandle,
+                currentBufferAddress,
+                newBuffer.data(),
+                static_cast<SIZE_T>(newMaximumBytes),
+                errorTextOut))
+            {
+                return false;
+            }
+            updatedDescriptor.Length = newLengthBytes;
+        }
+        else
+        {
+            std::uint64_t allocatedAddress = 0;
+            if (!allocateRemoteUnicodeBuffer(
+                processHandle,
+                newText,
+                false,
+                allocatedAddress,
+                errorTextOut))
+            {
+                return false;
+            }
+            updatedDescriptor.Length = newLengthBytes;
+            updatedDescriptor.MaximumLength = newMaximumBytes;
+            updatedDescriptor.Buffer = reinterpret_cast<PWSTR>(static_cast<std::uintptr_t>(allocatedAddress));
+        }
+
+        return writeRemoteBytesWithProtect(
+            processHandle,
+            descriptorAddress,
+            &updatedDescriptor,
+            static_cast<SIZE_T>(sizeof(updatedDescriptor)),
+            errorTextOut);
+    }
+
+    // updateRemoteUnicodeString32：
+    // - 更新 Wow64/32 位 RTL_USER_PROCESS_PARAMETERS 内的 UNICODE_STRING 字段；
+    // - Buffer/Length/MaximumLength 按 32 位布局写回；
+    // - 返回 true 表示描述符与字符串写入完成。
+    bool updateRemoteUnicodeString32(
+        HANDLE processHandle,
+        const std::uint64_t descriptorAddress,
+        const RemoteUnicodeString32& currentDescriptor,
+        const QString& newText,
+        QString* errorTextOut)
+    {
+        if (newText.size() > (std::numeric_limits<USHORT>::max() / static_cast<int>(sizeof(wchar_t)) - 1))
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("字符串超过UNICODE_STRING长度上限。");
+            }
+            return false;
+        }
+        const std::vector<wchar_t> newBuffer = buildRemoteUtf16Buffer(newText);
+        const USHORT newLengthBytes = static_cast<USHORT>(newText.size() * sizeof(wchar_t));
+        const USHORT newMaximumBytes = static_cast<USHORT>(newBuffer.size() * sizeof(wchar_t));
+
+        RemoteUnicodeString32 updatedDescriptor = currentDescriptor;
+        if (currentDescriptor.buffer != 0 && currentDescriptor.maximumLength >= newMaximumBytes)
+        {
+            if (!writeRemoteBytesWithProtect(
+                processHandle,
+                static_cast<std::uint64_t>(currentDescriptor.buffer),
+                newBuffer.data(),
+                static_cast<SIZE_T>(newMaximumBytes),
+                errorTextOut))
+            {
+                return false;
+            }
+            updatedDescriptor.length = newLengthBytes;
+        }
+        else
+        {
+            std::uint64_t allocatedAddress = 0;
+            if (!allocateRemoteUnicodeBuffer(
+                processHandle,
+                newText,
+                true,
+                allocatedAddress,
+                errorTextOut))
+            {
+                return false;
+            }
+            updatedDescriptor.length = newLengthBytes;
+            updatedDescriptor.maximumLength = newMaximumBytes;
+            updatedDescriptor.buffer = static_cast<std::uint32_t>(allocatedAddress);
+        }
+
+        return writeRemoteBytesWithProtect(
+            processHandle,
+            descriptorAddress,
+            &updatedDescriptor,
+            static_cast<SIZE_T>(sizeof(updatedDescriptor)),
+            errorTextOut);
+    }
+
+    // readRemoteEnvironmentBlock：
+    // - 完整读取远程环境变量块，直到双 NUL 或达到安全上限；
+    // - 返回 QStringList，每项为原始 "NAME=value" 文本；
+    // - 失败时 errorTextOut 给出具体原因。
+    bool readRemoteEnvironmentBlock(
+        HANDLE processHandle,
+        const std::uint64_t environmentAddress,
+        QStringList& environmentLinesOut,
+        QString* errorTextOut)
+    {
+        environmentLinesOut.clear();
+        if (errorTextOut != nullptr)
+        {
+            errorTextOut->clear();
+        }
+        if (processHandle == nullptr || environmentAddress == 0)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("Environment指针为空。");
+            }
+            return false;
+        }
+
+        std::vector<wchar_t> environmentChars;
+        bool foundDoubleNull = false;
+        std::size_t offsetBytes = 0;
+        while (offsetBytes < kMaxEnvironmentPreviewBytes)
+        {
+            const std::size_t requestBytes = std::min<std::size_t>(
+                kEnvironmentReadChunkBytes,
+                kMaxEnvironmentPreviewBytes - offsetBytes);
+            std::vector<std::uint8_t> chunkBuffer(requestBytes, 0);
+            SIZE_T bytesRead = 0;
+            const BOOL readOk = ReadProcessMemory(
+                processHandle,
+                reinterpret_cast<LPCVOID>(
+                    static_cast<std::uintptr_t>(environmentAddress + offsetBytes)),
+                chunkBuffer.data(),
+                static_cast<SIZE_T>(chunkBuffer.size()),
+                &bytesRead);
+            if (readOk == FALSE || bytesRead < sizeof(wchar_t))
+            {
+                if (errorTextOut != nullptr)
+                {
+                    *errorTextOut = QStringLiteral("读取Environment块失败(%1)，offset=%2。")
+                        .arg(GetLastError())
+                        .arg(static_cast<qulonglong>(offsetBytes));
+                }
+                return false;
+            }
+
+            const std::size_t charCount = static_cast<std::size_t>(bytesRead / sizeof(wchar_t));
+            const std::size_t scanStart = environmentChars.empty() ? 1 : environmentChars.size();
+            const auto* chunkChars = reinterpret_cast<const wchar_t*>(chunkBuffer.data());
+            environmentChars.insert(environmentChars.end(), chunkChars, chunkChars + charCount);
+            for (std::size_t index = scanStart; index < environmentChars.size(); ++index)
+            {
+                if (environmentChars[index - 1] == L'\0' && environmentChars[index] == L'\0')
+                {
+                    environmentChars.resize(index + 1);
+                    foundDoubleNull = true;
+                    break;
+                }
+            }
+            if (foundDoubleNull)
+            {
+                break;
+            }
+
+            const std::size_t consumedBytes = charCount * sizeof(wchar_t);
+            if (consumedBytes == 0)
+            {
+                break;
+            }
+            offsetBytes += consumedBytes;
+        }
+
+        if (!foundDoubleNull)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("Environment块超过128KB或缺少双NUL终止。");
+            }
+            return false;
+        }
+
+        std::size_t cursorIndex = 0;
+        while (cursorIndex < environmentChars.size())
+        {
+            const wchar_t* lineBegin = environmentChars.data() + cursorIndex;
+            std::size_t lineLength = 0;
+            while (cursorIndex + lineLength < environmentChars.size() &&
+                environmentChars[cursorIndex + lineLength] != L'\0')
+            {
+                ++lineLength;
+            }
+            if (lineLength == 0)
+            {
+                break;
+            }
+            environmentLinesOut << QString::fromWCharArray(lineBegin, static_cast<int>(lineLength));
+            cursorIndex += lineLength + 1;
+        }
+        return true;
+    }
+
+    // updateRemoteEnvironmentVariable：
+    // - 在远程环境变量块中新增或替换单个 NAME=value；
+    // - 通过分配新环境块并更新 ProcessParameters.Environment 指针完成；
+    // - 不释放旧环境块，避免破坏目标进程自身分配器元数据。
+    bool updateRemoteEnvironmentVariable(
+        HANDLE processHandle,
+        const PebEditTargetSnapshot& targetSnapshot,
+        const QString& variableName,
+        const QString& variableValue,
+        QString* errorTextOut)
+    {
+        const QString normalizedName = variableName.trimmed();
+        if (normalizedName.isEmpty() || normalizedName.contains('='))
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("环境变量名为空或包含等号。");
+            }
+            return false;
+        }
+
+        QStringList environmentLines;
+        if (!readRemoteEnvironmentBlock(
+            processHandle,
+            targetSnapshot.environmentAddress,
+            environmentLines,
+            errorTextOut))
+        {
+            return false;
+        }
+
+        const QString replacementLine = normalizedName + QLatin1Char('=') + variableValue;
+        bool replaced = false;
+        for (QString& lineText : environmentLines)
+        {
+            const int equalIndex = lineText.indexOf('=');
+            if (equalIndex <= 0)
+            {
+                continue;
+            }
+            const QString existingName = lineText.left(equalIndex);
+            if (existingName.compare(normalizedName, Qt::CaseInsensitive) == 0)
+            {
+                lineText = replacementLine;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced)
+        {
+            environmentLines << replacementLine;
+        }
+
+        std::vector<wchar_t> environmentBuffer;
+        for (const QString& lineText : environmentLines)
+        {
+            const int oldSize = static_cast<int>(environmentBuffer.size());
+            environmentBuffer.resize(environmentBuffer.size() + static_cast<std::size_t>(lineText.size()) + 1, L'\0');
+            if (!lineText.isEmpty())
+            {
+                std::memcpy(
+                    environmentBuffer.data() + oldSize,
+                    lineText.utf16(),
+                    static_cast<std::size_t>(lineText.size()) * sizeof(wchar_t));
+            }
+        }
+        environmentBuffer.push_back(L'\0');
+
+        const SIZE_T byteSize = static_cast<SIZE_T>(environmentBuffer.size() * sizeof(wchar_t));
+        LPVOID remoteBuffer = VirtualAllocEx(
+            processHandle,
+            nullptr,
+            byteSize,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_READWRITE);
+        if (remoteBuffer == nullptr)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("VirtualAllocEx环境块失败(%1)。").arg(GetLastError());
+            }
+            return false;
+        }
+
+        const std::uint64_t remoteAddress = reinterpret_cast<std::uint64_t>(remoteBuffer);
+        if (targetSnapshot.isWow64Target && remoteAddress > 0xFFFFFFFFULL)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("Wow64环境块新地址超过32位范围：%1。")
+                    .arg(uint64ToHex(remoteAddress));
+            }
+            return false;
+        }
+
+        if (!writeRemoteBytesWithProtect(
+            processHandle,
+            remoteAddress,
+            environmentBuffer.data(),
+            byteSize,
+            errorTextOut))
+        {
+            return false;
+        }
+
+        if (targetSnapshot.isWow64Target)
+        {
+            const std::uint32_t remoteAddress32 = static_cast<std::uint32_t>(remoteAddress);
+            const std::uint64_t fieldAddress =
+                targetSnapshot.processParametersAddress + offsetof(RtlUserProcessParameters32Lite, environment);
+            return writeRemoteBytesWithProtect(
+                processHandle,
+                fieldAddress,
+                &remoteAddress32,
+                static_cast<SIZE_T>(sizeof(remoteAddress32)),
+                errorTextOut);
+        }
+
+        const std::uint64_t fieldAddress =
+            targetSnapshot.processParametersAddress + offsetof(RtlUserProcessParameters64Lite, environment);
+        const PVOID remotePointer = reinterpret_cast<PVOID>(static_cast<std::uintptr_t>(remoteAddress));
+        return writeRemoteBytesWithProtect(
+            processHandle,
+            fieldAddress,
+            &remotePointer,
+            static_cast<SIZE_T>(sizeof(remotePointer)),
+            errorTextOut);
+    }
+
+    // queryPebEditTargetSnapshot：
+    // - 根据 UI 目标选择解析 NativePEB 或 Wow64PEB；
+    // - 同时读取 ProcessParameters 快照，供后续写字段计算偏移；
+    // - 返回 valid=false 表示目标不可用。
+    PebEditTargetSnapshot queryPebEditTargetSnapshot(
+        HANDLE processHandle,
+        const QString& targetName)
+    {
+        PebEditTargetSnapshot snapshot{};
+        if (processHandle == nullptr)
+        {
+            snapshot.errorText = QStringLiteral("进程句柄为空。");
+            return snapshot;
+        }
+
+        HMODULE ntdllModule = GetModuleHandleW(L"ntdll.dll");
+        const NtQueryInformationProcessFn ntQueryProcess = reinterpret_cast<NtQueryInformationProcessFn>(
+            ntdllModule != nullptr ? GetProcAddress(ntdllModule, "NtQueryInformationProcess") : nullptr);
+        if (ntQueryProcess == nullptr)
+        {
+            snapshot.errorText = QStringLiteral("无法定位NtQueryInformationProcess。");
+            return snapshot;
+        }
+
+        PROCESS_BASIC_INFORMATION basicInfo{};
+        const NTSTATUS basicStatus = ntQueryProcess(
+            processHandle,
+            static_cast<ULONG>(ProcessBasicInformation),
+            &basicInfo,
+            static_cast<ULONG>(sizeof(basicInfo)),
+            nullptr);
+        if (!NT_SUCCESS(basicStatus))
+        {
+            snapshot.errorText = QStringLiteral("NtQueryInformationProcess(ProcessBasicInformation)失败：%1。")
+                .arg(QStringLiteral("0x%1")
+                    .arg(static_cast<unsigned long>(basicStatus), 8, 16, QChar('0'))
+                    .toUpper());
+            return snapshot;
+        }
+
+        const bool wantWow64 = targetName.compare(QStringLiteral("Wow64PEB"), Qt::CaseInsensitive) == 0;
+        if (wantWow64)
+        {
+            ULONG_PTR wow64PebAddress = 0;
+            if (!queryNtProcessInfoFixed(
+                ntQueryProcess,
+                processHandle,
+                kProcessInfoClassWow64Information,
+                wow64PebAddress) ||
+                wow64PebAddress == 0)
+            {
+                snapshot.errorText = QStringLiteral("目标没有可用Wow64PEB。");
+                return snapshot;
+            }
+
+            Peb32Lite peb32{};
+            if (!readRemoteStructure(processHandle, static_cast<std::uint64_t>(wow64PebAddress), peb32))
+            {
+                snapshot.errorText = QStringLiteral("读取Wow64PEB头失败。");
+                return snapshot;
+            }
+            if (peb32.processParameters == 0)
+            {
+                snapshot.errorText = QStringLiteral("Wow64PEB.ProcessParameters为空。");
+                return snapshot;
+            }
+            if (!readRemoteStructure(
+                processHandle,
+                static_cast<std::uint64_t>(peb32.processParameters),
+                snapshot.params32))
+            {
+                snapshot.errorText = QStringLiteral("读取32位ProcessParameters失败。");
+                return snapshot;
+            }
+
+            snapshot.valid = true;
+            snapshot.isWow64Target = true;
+            snapshot.pebAddress = static_cast<std::uint64_t>(wow64PebAddress);
+            snapshot.processParametersAddress = static_cast<std::uint64_t>(peb32.processParameters);
+            snapshot.imageBaseAddress = static_cast<std::uint64_t>(peb32.imageBaseAddress);
+            snapshot.environmentAddress = static_cast<std::uint64_t>(snapshot.params32.environment);
+            return snapshot;
+        }
+
+        if (basicInfo.PebBaseAddress == nullptr)
+        {
+            snapshot.errorText = QStringLiteral("NativePEB地址为空。");
+            return snapshot;
+        }
+
+        Peb64Lite peb64{};
+        snapshot.pebAddress = reinterpret_cast<std::uint64_t>(basicInfo.PebBaseAddress);
+        if (!readRemoteStructure(processHandle, snapshot.pebAddress, peb64))
+        {
+            snapshot.errorText = QStringLiteral("读取NativePEB头失败。");
+            return snapshot;
+        }
+        if (peb64.processParameters == nullptr)
+        {
+            snapshot.errorText = QStringLiteral("NativePEB.ProcessParameters为空。");
+            return snapshot;
+        }
+        snapshot.processParametersAddress = reinterpret_cast<std::uint64_t>(peb64.processParameters);
+        if (!readRemoteStructure(processHandle, snapshot.processParametersAddress, snapshot.params64))
+        {
+            snapshot.errorText = QStringLiteral("读取64位ProcessParameters失败。");
+            return snapshot;
+        }
+
+        snapshot.valid = true;
+        snapshot.isWow64Target = false;
+        snapshot.imageBaseAddress = reinterpret_cast<std::uint64_t>(peb64.imageBaseAddress);
+        snapshot.environmentAddress = reinterpret_cast<std::uint64_t>(snapshot.params64.environment);
+        return snapshot;
+    }
+
+    // updatePebImageBaseAddress：
+    // - 只改 PEB.ImageBaseAddress 字段；
+    // - 不重映射镜像，也不修复 LDR 链表，属于高级欺骗/测试能力。
+    bool updatePebImageBaseAddress(
+        HANDLE processHandle,
+        const PebEditTargetSnapshot& targetSnapshot,
+        const std::uint64_t newImageBaseAddress,
+        QString* errorTextOut)
+    {
+        if (targetSnapshot.isWow64Target)
+        {
+            if (newImageBaseAddress > 0xFFFFFFFFULL)
+            {
+                if (errorTextOut != nullptr)
+                {
+                    *errorTextOut = QStringLiteral("Wow64PEB.ImageBaseAddress不能超过32位。");
+                }
+                return false;
+            }
+            const std::uint32_t imageBase32 = static_cast<std::uint32_t>(newImageBaseAddress);
+            const std::uint64_t fieldAddress = targetSnapshot.pebAddress + offsetof(Peb32Lite, imageBaseAddress);
+            return writeRemoteBytesWithProtect(
+                processHandle,
+                fieldAddress,
+                &imageBase32,
+                static_cast<SIZE_T>(sizeof(imageBase32)),
+                errorTextOut);
+        }
+
+        const PVOID imageBasePointer = reinterpret_cast<PVOID>(static_cast<std::uintptr_t>(newImageBaseAddress));
+        const std::uint64_t fieldAddress = targetSnapshot.pebAddress + offsetof(Peb64Lite, imageBaseAddress);
+        return writeRemoteBytesWithProtect(
+            processHandle,
+            fieldAddress,
+            &imageBasePointer,
+            static_cast<SIZE_T>(sizeof(imageBasePointer)),
+            errorTextOut);
+    }
+
     // memoryStateToText：
     // - 内存区域 State 字段文本化。
     QString memoryStateToText(const DWORD stateValue)
@@ -3274,6 +3984,7 @@ void ProcessDetailWindow::applyPebRefreshResult(const TextRefreshResult& refresh
     {
         m_pebDetailOutput->setText(refreshResult.detailText);
     }
+    populatePebEditableFieldsFromText(refreshResult.detailText);
     if (m_pebStatusLabel != nullptr)
     {
         QString statusText = QString("● 刷新完成 %1 ms").arg(refreshResult.elapsedMs);
@@ -3297,6 +4008,423 @@ void ProcessDetailWindow::applyPebRefreshResult(const TextRefreshResult& refresh
         << ", diagnostic="
         << refreshResult.diagnosticText.toStdString()
         << eol;
+}
+
+void ProcessDetailWindow::applyPebEditableFields()
+{
+    // PEB可编辑字段应用：
+    // - 字符串字段写 RTL_USER_PROCESS_PARAMETERS 内的 UNICODE_STRING；
+    // - 环境变量通过替换 Environment 指针指向的新环境块完成；
+    // - 亲和性/优先级走 Win32 API，属于真实进程属性而非 PEB 字段。
+    if (m_baseRecord.pid == 0)
+    {
+        QMessageBox::warning(this, QStringLiteral("PEB 修改"), QStringLiteral("PID 为 0，不能修改。"));
+        return;
+    }
+
+    const QMessageBox::StandardButton confirmButton = QMessageBox::warning(
+        this,
+        QStringLiteral("确认修改远程 PEB"),
+        QStringLiteral(
+            "即将写入目标进程的 PEB/ProcessParameters 或修改进程运行属性。\n\n"
+            "错误的 CommandLine/ImagePath/CurrentDirectory/ImageBaseAddress 可能导致目标进程自身逻辑或第三方工具误判。\n"
+            "建议只对测试进程执行。是否继续？"),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (confirmButton != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    const QString targetName = (m_pebTargetCombo != nullptr)
+        ? m_pebTargetCombo->currentData().toString()
+        : QStringLiteral("NativePEB");
+    QStringList resultLines;
+    int successCount = 0;
+    int failCount = 0;
+    int skipCount = 0;
+
+    HANDLE processHandle = OpenProcess(
+        PROCESS_QUERY_INFORMATION |
+        PROCESS_QUERY_LIMITED_INFORMATION |
+        PROCESS_VM_READ |
+        PROCESS_VM_WRITE |
+        PROCESS_VM_OPERATION |
+        PROCESS_SET_INFORMATION,
+        FALSE,
+        m_baseRecord.pid);
+    if (processHandle == nullptr)
+    {
+        const DWORD errorCode = GetLastError();
+        QMessageBox::critical(
+            this,
+            QStringLiteral("PEB 修改失败"),
+            QStringLiteral("OpenProcess失败：%1").arg(errorCode));
+        return;
+    }
+
+    PebEditTargetSnapshot targetSnapshot = queryPebEditTargetSnapshot(processHandle, targetName);
+    if (!targetSnapshot.valid)
+    {
+        CloseHandle(processHandle);
+        QMessageBox::critical(
+            this,
+            QStringLiteral("PEB 修改失败"),
+            QStringLiteral("%1不可用：%2").arg(targetName, targetSnapshot.errorText));
+        return;
+    }
+
+    const auto appendApplyResult = [&resultLines, &successCount, &failCount, &skipCount](
+        const QString& fieldName,
+        const bool attempted,
+        const bool success,
+        const QString& detailText)
+        {
+            if (!attempted)
+            {
+                ++skipCount;
+                resultLines << QStringLiteral("[跳过] %1：%2").arg(fieldName, detailText);
+                return;
+            }
+            if (success)
+            {
+                ++successCount;
+                resultLines << QStringLiteral("[成功] %1：%2").arg(fieldName, detailText);
+            }
+            else
+            {
+                ++failCount;
+                resultLines << QStringLiteral("[失败] %1：%2").arg(fieldName, detailText);
+            }
+        };
+
+    const auto applyStringField = [&](const QString& fieldName, const QString& inputText) {
+        if (inputText.isEmpty())
+        {
+            appendApplyResult(fieldName, false, false, QStringLiteral("输入为空。"));
+            return;
+        }
+
+        QString currentText;
+        std::uint64_t descriptorAddress = 0;
+        QString errorText;
+        bool writeOk = false;
+        if (targetSnapshot.isWow64Target)
+        {
+            RemoteUnicodeString32 descriptor{};
+            if (fieldName == QStringLiteral("CommandLine"))
+            {
+                descriptor = targetSnapshot.params32.commandLine;
+                descriptorAddress = targetSnapshot.processParametersAddress +
+                    offsetof(RtlUserProcessParameters32Lite, commandLine);
+            }
+            else if (fieldName == QStringLiteral("ImagePathName"))
+            {
+                descriptor = targetSnapshot.params32.imagePathName;
+                descriptorAddress = targetSnapshot.processParametersAddress +
+                    offsetof(RtlUserProcessParameters32Lite, imagePathName);
+            }
+            else
+            {
+                descriptor = targetSnapshot.params32.currentDirectory.dosPath;
+                descriptorAddress = targetSnapshot.processParametersAddress +
+                    offsetof(RtlUserProcessParameters32Lite, currentDirectory) +
+                    offsetof(Curdir32, dosPath);
+            }
+            currentText = readRemoteUnicodeString32(processHandle, descriptor);
+            if (currentText == inputText)
+            {
+                appendApplyResult(fieldName, false, false, QStringLiteral("未变化。"));
+                return;
+            }
+            writeOk = updateRemoteUnicodeString32(
+                processHandle,
+                descriptorAddress,
+                descriptor,
+                inputText,
+                &errorText);
+        }
+        else
+        {
+            UNICODE_STRING descriptor{};
+            if (fieldName == QStringLiteral("CommandLine"))
+            {
+                descriptor = targetSnapshot.params64.commandLine;
+                descriptorAddress = targetSnapshot.processParametersAddress +
+                    offsetof(RtlUserProcessParameters64Lite, commandLine);
+            }
+            else if (fieldName == QStringLiteral("ImagePathName"))
+            {
+                descriptor = targetSnapshot.params64.imagePathName;
+                descriptorAddress = targetSnapshot.processParametersAddress +
+                    offsetof(RtlUserProcessParameters64Lite, imagePathName);
+            }
+            else
+            {
+                descriptor = targetSnapshot.params64.currentDirectory.dosPath;
+                descriptorAddress = targetSnapshot.processParametersAddress +
+                    offsetof(RtlUserProcessParameters64Lite, currentDirectory) +
+                    offsetof(Curdir64, dosPath);
+            }
+            currentText = readRemoteUnicodeString64(processHandle, descriptor);
+            if (currentText == inputText)
+            {
+                appendApplyResult(fieldName, false, false, QStringLiteral("未变化。"));
+                return;
+            }
+            writeOk = updateRemoteUnicodeString64(
+                processHandle,
+                descriptorAddress,
+                descriptor,
+                inputText,
+                &errorText);
+        }
+
+        appendApplyResult(
+            fieldName,
+            true,
+            writeOk,
+            writeOk
+                ? QStringLiteral("已写入 %1 字符。").arg(inputText.size())
+                : errorText);
+    };
+
+    if (m_pebCommandLineEdit != nullptr)
+    {
+        applyStringField(QStringLiteral("CommandLine"), m_pebCommandLineEdit->text());
+    }
+    if (m_pebImagePathEdit != nullptr)
+    {
+        applyStringField(QStringLiteral("ImagePathName"), m_pebImagePathEdit->text());
+    }
+    if (m_pebCurrentDirectoryEdit != nullptr)
+    {
+        applyStringField(QStringLiteral("CurrentDirectory"), m_pebCurrentDirectoryEdit->text());
+    }
+
+    if (m_pebEnvironmentNameEdit != nullptr && !m_pebEnvironmentNameEdit->text().trimmed().isEmpty())
+    {
+        QString errorText;
+        const bool envOk = updateRemoteEnvironmentVariable(
+            processHandle,
+            targetSnapshot,
+            m_pebEnvironmentNameEdit->text(),
+            (m_pebEnvironmentValueEdit != nullptr) ? m_pebEnvironmentValueEdit->text() : QString(),
+            &errorText);
+        appendApplyResult(
+            QStringLiteral("Environment"),
+            true,
+            envOk,
+            envOk
+                ? QStringLiteral("已新增/替换 %1。").arg(m_pebEnvironmentNameEdit->text().trimmed())
+                : errorText);
+    }
+    else
+    {
+        appendApplyResult(QStringLiteral("Environment"), false, false, QStringLiteral("未填写变量名。"));
+    }
+
+    if (m_pebImageBaseEdit != nullptr && !m_pebImageBaseEdit->text().trimmed().isEmpty())
+    {
+        std::uint64_t imageBaseValue = 0;
+        if (!parseUnsignedIntegerText(m_pebImageBaseEdit->text(), imageBaseValue))
+        {
+            appendApplyResult(QStringLiteral("ImageBaseAddress"), true, false, QStringLiteral("数值格式无效。"));
+        }
+        else if (imageBaseValue == targetSnapshot.imageBaseAddress)
+        {
+            appendApplyResult(QStringLiteral("ImageBaseAddress"), false, false, QStringLiteral("未变化。"));
+        }
+        else
+        {
+            QString errorText;
+            const bool imageBaseOk = updatePebImageBaseAddress(
+                processHandle,
+                targetSnapshot,
+                imageBaseValue,
+                &errorText);
+            appendApplyResult(
+                QStringLiteral("ImageBaseAddress"),
+                true,
+                imageBaseOk,
+                imageBaseOk ? QStringLiteral("已写入 %1。").arg(uint64ToHex(imageBaseValue)) : errorText);
+        }
+    }
+    else
+    {
+        appendApplyResult(QStringLiteral("ImageBaseAddress"), false, false, QStringLiteral("输入为空。"));
+    }
+
+    if (m_pebAffinityMaskEdit != nullptr && !m_pebAffinityMaskEdit->text().trimmed().isEmpty())
+    {
+        std::uint64_t affinityValue = 0;
+        if (!parseUnsignedIntegerText(m_pebAffinityMaskEdit->text(), affinityValue) || affinityValue == 0)
+        {
+            appendApplyResult(QStringLiteral("AffinityMask"), true, false, QStringLiteral("亲和性掩码格式无效或为0。"));
+        }
+        else
+        {
+            ULONG_PTR processAffinity = 0;
+            ULONG_PTR systemAffinity = 0;
+            const bool queryAffinityOk = GetProcessAffinityMask(processHandle, &processAffinity, &systemAffinity) != FALSE;
+            if (queryAffinityOk && static_cast<std::uint64_t>(processAffinity) == affinityValue)
+            {
+                appendApplyResult(QStringLiteral("AffinityMask"), false, false, QStringLiteral("未变化。"));
+            }
+            else if (affinityValue > static_cast<std::uint64_t>(std::numeric_limits<ULONG_PTR>::max()))
+            {
+                appendApplyResult(QStringLiteral("AffinityMask"), true, false, QStringLiteral("掩码超过当前进程位宽。"));
+            }
+            else if (SetProcessAffinityMask(processHandle, static_cast<ULONG_PTR>(affinityValue)) == FALSE)
+            {
+                appendApplyResult(
+                    QStringLiteral("AffinityMask"),
+                    true,
+                    false,
+                    QStringLiteral("SetProcessAffinityMask失败(%1)。").arg(GetLastError()));
+            }
+            else
+            {
+                appendApplyResult(
+                    QStringLiteral("AffinityMask"),
+                    true,
+                    true,
+                    QStringLiteral("已设置为 %1。").arg(uint64ToHex(affinityValue)));
+            }
+        }
+    }
+    else
+    {
+        appendApplyResult(QStringLiteral("AffinityMask"), false, false, QStringLiteral("输入为空。"));
+    }
+
+    if (m_pebPriorityClassCombo != nullptr)
+    {
+        const DWORD priorityClass = static_cast<DWORD>(m_pebPriorityClassCombo->currentData().toUInt());
+        if (priorityClass == 0)
+        {
+            appendApplyResult(QStringLiteral("PriorityClass"), false, false, QStringLiteral("选择为不修改。"));
+        }
+        else
+        {
+            const DWORD currentPriority = GetPriorityClass(processHandle);
+            if (currentPriority == priorityClass)
+            {
+                appendApplyResult(QStringLiteral("PriorityClass"), false, false, QStringLiteral("未变化。"));
+            }
+            else if (SetPriorityClass(processHandle, priorityClass) == FALSE)
+            {
+                appendApplyResult(
+                    QStringLiteral("PriorityClass"),
+                    true,
+                    false,
+                    QStringLiteral("SetPriorityClass失败(%1)。").arg(GetLastError()));
+            }
+            else
+            {
+                appendApplyResult(
+                    QStringLiteral("PriorityClass"),
+                    true,
+                    true,
+                    QStringLiteral("已设置为 %1。").arg(describePriorityClass(priorityClass)));
+            }
+        }
+    }
+
+    CloseHandle(processHandle);
+
+    const QString summaryText = QStringLiteral("成功 %1，失败 %2，跳过 %3")
+        .arg(successCount)
+        .arg(failCount)
+        .arg(skipCount);
+    if (m_pebStatusLabel != nullptr)
+    {
+        m_pebStatusLabel->setText(QStringLiteral("● PEB修改完成：%1").arg(summaryText));
+        m_pebStatusLabel->setStyleSheet(buildStateLabelStyle(
+            failCount == 0 ? statusIdleColor() : statusWarningColor(),
+            700));
+    }
+
+    QMessageBox::information(
+        this,
+        QStringLiteral("PEB 修改结果"),
+        summaryText + QStringLiteral("\n\n") + resultLines.join('\n'));
+    requestAsyncPebRefresh();
+}
+
+void ProcessDetailWindow::populatePebEditableFieldsFromText(const QString& detailText)
+{
+    // PEB编辑区自动填充：
+    // - 从刷新文本中抽取当前选中 PEB 的字符串字段；
+    // - 数值类字段优先取全局 ProcessAffinity/PriorityClass/ImageBaseAddress；
+    // - 只更新编辑框内容，不触发任何远程写入。
+    if (detailText.trimmed().isEmpty())
+    {
+        return;
+    }
+
+    const QString targetName = (m_pebTargetCombo != nullptr)
+        ? m_pebTargetCombo->currentData().toString()
+        : QStringLiteral("NativePEB");
+    const QString escapedTarget = QRegularExpression::escape(targetName);
+
+    const auto captureSingleLine = [&detailText](const QString& patternText) -> QString
+        {
+            const QRegularExpression pattern(
+                patternText,
+                QRegularExpression::MultilineOption);
+            const QRegularExpressionMatch match = pattern.match(detailText);
+            if (!match.hasMatch())
+            {
+                return QString();
+            }
+            return match.captured(1).trimmed();
+        };
+
+    const QString commandLineText = captureSingleLine(
+        QStringLiteral("^CommandLine\\(%1\\):\\s*(.*)$").arg(escapedTarget));
+    const QString imagePathText = captureSingleLine(
+        QStringLiteral("^ImagePath\\(%1\\):\\s*(.*)$").arg(escapedTarget));
+    const QString currentDirectoryText = captureSingleLine(
+        QStringLiteral("^CurrentDirectory\\(%1\\):\\s*(.*)$").arg(escapedTarget));
+    const QString imageBaseText = captureSingleLine(
+        QStringLiteral("^\\s*ImageBaseAddress:\\s*(0X[0-9A-Fa-f]+|0x[0-9A-Fa-f]+|[0-9]+)\\s*$"));
+    const QString affinityText = captureSingleLine(
+        QStringLiteral("^ProcessAffinity:\\s*(0X[0-9A-Fa-f]+|0x[0-9A-Fa-f]+|[0-9]+)\\s*$"));
+    const QString priorityText = captureSingleLine(QStringLiteral("^PriorityClass:\\s*([^\\r\\n]+)\\s*$"));
+
+    if (m_pebCommandLineEdit != nullptr)
+    {
+        m_pebCommandLineEdit->setText(commandLineText);
+    }
+    if (m_pebImagePathEdit != nullptr)
+    {
+        m_pebImagePathEdit->setText(imagePathText);
+    }
+    if (m_pebCurrentDirectoryEdit != nullptr)
+    {
+        m_pebCurrentDirectoryEdit->setText(currentDirectoryText);
+    }
+    if (m_pebImageBaseEdit != nullptr && !imageBaseText.isEmpty())
+    {
+        m_pebImageBaseEdit->setText(imageBaseText);
+    }
+    if (m_pebAffinityMaskEdit != nullptr && !affinityText.isEmpty())
+    {
+        m_pebAffinityMaskEdit->setText(affinityText);
+    }
+    if (m_pebPriorityClassCombo != nullptr && !priorityText.isEmpty())
+    {
+        const QString normalizedPriority = priorityText.section('(', 0, 0).trimmed();
+        for (int index = 0; index < m_pebPriorityClassCombo->count(); ++index)
+        {
+            if (m_pebPriorityClassCombo->itemText(index).compare(normalizedPriority, Qt::CaseInsensitive) == 0)
+            {
+                m_pebPriorityClassCombo->setCurrentIndex(index);
+                break;
+            }
+        }
+    }
 }
 
 void ProcessDetailWindow::requestAsyncSectionRefresh()

@@ -15,6 +15,7 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QStyledItemDelegate>
 #include <QItemSelectionModel>
 #include <QLineEdit>
 #include <QMenu>
@@ -59,6 +60,52 @@ namespace
     constexpr const char* IconClipboardPath = ":/Icon/log_clipboard.svg";
     constexpr const char* IconTrackPath = ":/Icon/log_track.svg";
     constexpr const char* IconCancelTrackPath = ":/Icon/log_cancel_track.svg";
+
+    // LogContentWrapDelegate：
+    // - 输入：日志表格模型索引和默认绘制 option；
+    // - 处理：只允许内容/文件/函数这些长文本列换行，时间列和等级列保持单行；
+    // - 返回：通过 sizeHint/paint 影响视图绘制，不改变模型数据。
+    class LogContentWrapDelegate final : public QStyledItemDelegate
+    {
+    public:
+        explicit LogContentWrapDelegate(QObject* parentObject = nullptr)
+            : QStyledItemDelegate(parentObject)
+        {
+        }
+
+        void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+        {
+            QStyleOptionViewItem adjustedOption(option);
+            initStyleOption(&adjustedOption, index);
+            adjustedOption.textElideMode = isWrappingColumn(index.column()) ? Qt::ElideNone : Qt::ElideRight;
+            adjustedOption.features.setFlag(QStyleOptionViewItem::WrapText, isWrappingColumn(index.column()));
+            QStyledItemDelegate::paint(painter, adjustedOption, index);
+        }
+
+        QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+        {
+            if (!isWrappingColumn(index.column()))
+            {
+                QSize baseSize = QStyledItemDelegate::sizeHint(option, index);
+                baseSize.setHeight(24);
+                return baseSize;
+            }
+
+            QStyleOptionViewItem adjustedOption(option);
+            initStyleOption(&adjustedOption, index);
+            adjustedOption.textElideMode = Qt::ElideNone;
+            adjustedOption.features.setFlag(QStyleOptionViewItem::WrapText, true);
+            QSize baseSize = QStyledItemDelegate::sizeHint(adjustedOption, index);
+            baseSize.setHeight(std::clamp(baseSize.height(), 24, 120));
+            return baseSize;
+        }
+
+    private:
+        static bool isWrappingColumn(const int column)
+        {
+            return column == ContentColumn || column == FileColumn || column == FunctionColumn;
+        }
+    };
 
     // DefaultButtonIconSize：日志面板按钮与菜单图标默认尺寸。
     constexpr QSize DefaultButtonIconSize(16, 16);
@@ -285,14 +332,16 @@ void LogDockWidget::initializeUi()
 
     m_logTable = new QTableView(this);
     m_logTable->setModel(m_logModel);
+    m_logTable->setItemDelegate(new LogContentWrapDelegate(m_logTable));
     m_logTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_logTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_logTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_logTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_logTable->setWordWrap(false);
+    m_logTable->setWordWrap(true);
     m_logTable->setShowGrid(true);
     m_logTable->setAlternatingRowColors(false);
     m_logTable->setSortingEnabled(false);
+    m_logTable->setTextElideMode(Qt::ElideNone);
 
     // 表格头部策略：等级列固定宽度，其余列可交互拖动。
     QHeaderView* horizontalHeader = m_logTable->horizontalHeader();
@@ -307,13 +356,15 @@ void LogDockWidget::initializeUi()
 
     // 等级列只容纳彩色方块，因此锁定窄列宽。
     m_logTable->setColumnWidth(LevelColumn, 24);
-    m_logTable->setColumnWidth(TimeColumn, 150);
+    m_logTable->setColumnWidth(TimeColumn, 170);
     m_logTable->setColumnWidth(ContentColumn, 320);
     m_logTable->setColumnWidth(FileColumn, 240);
     m_logTable->setColumnWidth(FunctionColumn, 320);
     m_logTable->verticalHeader()->setVisible(false);
-    m_logTable->verticalHeader()->setDefaultSectionSize(22);
-    m_logTable->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    m_logTable->verticalHeader()->setDefaultSectionSize(28);
+    m_logTable->verticalHeader()->setMinimumSectionSize(24);
+    m_logTable->verticalHeader()->setMaximumSectionSize(120);
+    m_logTable->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
 
     // 默认关闭详细信息模式，仅显示等级/时间/内容。
     applyDetailColumnVisibility();
@@ -420,6 +471,7 @@ void LogDockWidget::rebuildTable(std::vector<kEvent> filteredEvents)
     // setRows 内部使用 beginResetModel/endResetModel。
     // 对日志这种周期性整体刷新场景，模型 reset 比逐单元格 item 更新更稳定且更少堆分配。
     m_logModel->setRows(std::move(filteredEvents));
+    m_logTable->resizeRowsToContents();
 
     // 根据“保持滚动到底端”开关决定刷新后的滚动行为。
     if (m_autoScrollCheck->isChecked())

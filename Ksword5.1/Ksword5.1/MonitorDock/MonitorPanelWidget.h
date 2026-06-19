@@ -18,6 +18,7 @@
 class QBarSet;
 class QChartView;
 class QGridLayout;
+class QLabel;
 class QLineSeries;
 class QResizeEvent;
 class QShowEvent;
@@ -129,10 +130,17 @@ private:
     // - 修复深色模式下左下角监视器文字对比度过低。
     void applyChartTextTheme();
 
+    // updateCompactVisibility 作用：
+    // - 当 Dock 高度过低时隐藏四张图，仅显示文字摘要；
+    // - 避免 QtCharts 在极小高度下反复布局造成闪烁或崩溃；
+    // - 返回：无返回值，直接更新控件可见性。
+    void updateCompactVisibility();
+
 private:
     // 布局控件。
     QVBoxLayout* m_rootLayout = nullptr;   // m_rootLayout：根布局。
     QGridLayout* m_chartGridLayout = nullptr; // m_chartGridLayout：四宫格布局。
+    QLabel* m_compactSummaryLabel = nullptr; // m_compactSummaryLabel：低高度时显示的文字摘要。
     QTimer* m_refreshTimer = nullptr;      // m_refreshTimer：性能采样定时器。
 
     // CPU/内存图控件。
@@ -165,6 +173,7 @@ private:
     // 历史采样状态。
     int m_historyLength = 60;        // m_historyLength：折线图保留点数。
     int m_sampleCounter = 0;         // m_sampleCounter：当前采样序号。
+    QString m_lastCompactSummaryText; // m_lastCompactSummaryText：最近一次采样摘要文本。
     std::uint64_t m_lastNetworkRxBytes = 0; // m_lastNetworkRxBytes：上次网络接收累计字节。
     std::uint64_t m_lastNetworkTxBytes = 0; // m_lastNetworkTxBytes：上次网络发送累计字节。
     qint64 m_lastNetworkSampleMs = 0;       // m_lastNetworkSampleMs：上次网络采样时间戳(ms)。

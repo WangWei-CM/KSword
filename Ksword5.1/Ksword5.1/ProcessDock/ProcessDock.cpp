@@ -33,6 +33,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QList>
+#include <QListView>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
@@ -40,6 +41,7 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPalette>
 #include <QPlainTextEdit>
 #include <QPointF>
 #include <QPersistentModelIndex>
@@ -2305,28 +2307,166 @@ namespace
             : QStringLiteral("#AFC4DC");
 
         return QStringLiteral(
-            "QComboBox{"
-            "  background-color:%1;"
-            "  color:%2;"
-            "  border:1px solid %3;"
+            "QComboBox#ProcessDockStrategyCombo,QComboBox#ProcessDockViewModeCombo{"
+            "  background-color:%1 !important;"
+            "  background:%1 !important;"
+            "  color:%2 !important;"
+            "  border:1px solid %3 !important;"
             "  border-radius:3px;"
             "  padding:2px 20px 2px 6px;"
             "}"
-            "QComboBox::drop-down{"
-            "  border:none;"
+            "QComboBox#ProcessDockStrategyCombo:hover,QComboBox#ProcessDockViewModeCombo:hover{"
+            "  background-color:%5 !important;"
+            "  background:%5 !important;"
+            "  color:%2 !important;"
+            "  border:1px solid %4 !important;"
+            "}"
+            "QComboBox#ProcessDockStrategyCombo:focus,QComboBox#ProcessDockViewModeCombo:focus,"
+            "QComboBox#ProcessDockStrategyCombo:on,QComboBox#ProcessDockViewModeCombo:on{"
+            "  background-color:%1 !important;"
+            "  background:%1 !important;"
+            "  color:%2 !important;"
+            "  border:1px solid %4 !important;"
+            "}"
+            "QComboBox#ProcessDockStrategyCombo::drop-down,QComboBox#ProcessDockViewModeCombo::drop-down{"
+            "  background-color:%1 !important;"
+            "  background:%1 !important;"
+            "  border:none !important;"
             "  width:18px;"
             "}"
-            "QComboBox QAbstractItemView{"
-            "  background-color:%1;"
-            "  color:%2;"
-            "  border:1px solid %3;"
-            "  selection-background-color:%4;"
-            "  selection-color:%2;"
+            "QComboBox#ProcessDockStrategyCombo::down-arrow,QComboBox#ProcessDockViewModeCombo::down-arrow{"
+            "  image:none !important;"
+            "  width:0px;"
+            "  height:0px;"
+            "}"
+            "QComboBox#ProcessDockStrategyCombo QAbstractItemView,QComboBox#ProcessDockViewModeCombo QAbstractItemView{"
+            "  background-color:%1 !important;"
+            "  background:%1 !important;"
+            "  alternate-background-color:%1 !important;"
+            "  color:%2 !important;"
+            "  border:1px solid %3 !important;"
+            "  selection-background-color:%4 !important;"
+            "  selection-color:#FFFFFF !important;"
+            "  outline:0;"
+            "}"
+            "QComboBox#ProcessDockStrategyCombo QAbstractItemView::item,QComboBox#ProcessDockViewModeCombo QAbstractItemView::item{"
+            "  background-color:%1 !important;"
+            "  color:%2 !important;"
+            "}"
+            "QComboBox#ProcessDockStrategyCombo QAbstractItemView::item:hover,QComboBox#ProcessDockViewModeCombo QAbstractItemView::item:hover{"
+            "  background-color:%5 !important;"
+            "  color:%2 !important;"
+            "}"
+            "QComboBox#ProcessDockStrategyCombo QAbstractItemView::item:selected,QComboBox#ProcessDockViewModeCombo QAbstractItemView::item:selected{"
+            "  background-color:%4 !important;"
+            "  color:#FFFFFF !important;"
             "}")
             .arg(comboBackgroundColor)
             .arg(comboTextColor)
             .arg(comboBorderColor)
-            .arg(KswordTheme::PrimaryBlueHex);
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::IsDarkModeEnabled()
+                ? QStringLiteral("#203753")
+                : QStringLiteral("#EAF4FF"));
+    }
+
+    // buildBlueComboBoxPopupViewStyle 作用：
+    // - 给 QComboBox::view() 直接设置弹出列表样式；
+    // - QComboBox 的 popup 是独立 item view，父级选择器在某些 Qt/Windows 主题下压不住白底；
+    // - 返回：仅作用于 popup view 的 QSS，主框样式仍由 buildBlueComboBoxStyle 负责。
+    QString buildBlueComboBoxPopupViewStyle()
+    {
+        const QString comboBackgroundColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#172232")
+            : QStringLiteral("#FFFFFF");
+        const QString comboHoverColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#203753")
+            : QStringLiteral("#EAF4FF");
+        const QString comboTextColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#F4F8FF")
+            : QStringLiteral("#172B43");
+        const QString comboBorderColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#34506D")
+            : QStringLiteral("#AFC4DC");
+
+        return QStringLiteral(
+            "QAbstractItemView,QListView{"
+            "  background-color:%1 !important;"
+            "  background:%1 !important;"
+            "  alternate-background-color:%1 !important;"
+            "  color:%2 !important;"
+            "  border:1px solid %3 !important;"
+            "  outline:0;"
+            "}"
+            "QAbstractItemView::item,QListView::item{"
+            "  background-color:%1 !important;"
+            "  color:%2 !important;"
+            "  min-height:22px;"
+            "  padding:3px 8px;"
+            "}"
+            "QAbstractItemView::item:hover,QListView::item:hover{"
+            "  background-color:%5 !important;"
+            "  color:%2 !important;"
+            "}"
+            "QAbstractItemView::item:selected,QListView::item:selected{"
+            "  background-color:%4 !important;"
+            "  color:#FFFFFF !important;"
+            "}")
+            .arg(comboBackgroundColor)
+            .arg(comboTextColor)
+            .arg(comboBorderColor)
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(comboHoverColor);
+    }
+
+    // applyBlueComboBoxRuntimeStyle 作用：
+    // - 运行时同时设置 stylesheet 与 palette；
+    // - 输入 comboBoxPointer 为进程页顶部的两个下拉框；
+    // - 返回：无，直接修正主框与 popup view 的深色/浅色配色。
+    void applyBlueComboBoxRuntimeStyle(QComboBox* comboBoxPointer)
+    {
+        if (comboBoxPointer == nullptr)
+        {
+            return;
+        }
+
+        const QString comboBackgroundColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#172232")
+            : QStringLiteral("#FFFFFF");
+        const QString comboTextColor = KswordTheme::IsDarkModeEnabled()
+            ? QStringLiteral("#F4F8FF")
+            : QStringLiteral("#172B43");
+
+        comboBoxPointer->setStyleSheet(buildBlueComboBoxStyle());
+
+        QPalette comboPalette = comboBoxPointer->palette();
+        comboPalette.setColor(QPalette::Base, QColor(comboBackgroundColor));
+        comboPalette.setColor(QPalette::Window, QColor(comboBackgroundColor));
+        comboPalette.setColor(QPalette::Button, QColor(comboBackgroundColor));
+        comboPalette.setColor(QPalette::Text, QColor(comboTextColor));
+        comboPalette.setColor(QPalette::ButtonText, QColor(comboTextColor));
+        comboPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
+        comboPalette.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#FFFFFF")));
+        comboBoxPointer->setPalette(comboPalette);
+
+        QAbstractItemView* popupView = comboBoxPointer->view();
+        if (popupView == nullptr)
+        {
+            return;
+        }
+
+        popupView->setPalette(comboPalette);
+        popupView->setAutoFillBackground(true);
+        popupView->setStyleSheet(buildBlueComboBoxPopupViewStyle());
+        if (popupView->viewport() != nullptr)
+        {
+            popupView->viewport()->setAutoFillBackground(true);
+            popupView->viewport()->setPalette(comboPalette);
+            popupView->viewport()->setStyleSheet(QStringLiteral(
+                "background:%1 !important;"
+                "background-color:%1 !important;")
+                .arg(comboBackgroundColor));
+        }
     }
 
     // 统一“普通输入框”主题边框。
@@ -2639,6 +2779,8 @@ void ProcessDock::refreshThemeVisuals()
 {
     // 仅重建当前表格可视层，不触发新的后台枚举任务。
     // 用途：深浅色切换后，立即刷新“新增/退出”行的主题高亮色。
+    applyBlueComboBoxRuntimeStyle(m_strategyCombo);
+    applyBlueComboBoxRuntimeStyle(m_viewModeCombo);
     rebuildTable();
     rebuildThreadTable();
 }
@@ -2708,6 +2850,7 @@ void ProcessDock::initializeTopControls()
     // 2) NtQuerySystemInformation
     // 说明：不再默认 Auto，直接明确展示当前使用的方法。
     m_strategyCombo = new QComboBox(this);
+    m_strategyCombo->setObjectName(QStringLiteral("ProcessDockStrategyCombo"));
     m_strategyCombo->addItem(QIcon(IconRefresh), "Toolhelp Snapshot / Process32First / Process32Next");
     m_strategyCombo->addItem(QIcon(IconRefresh), "NtQuerySystemInformation");
     m_strategyCombo->setCurrentIndex(1);
@@ -2727,6 +2870,7 @@ void ProcessDock::initializeTopControls()
 
     // 视图模式下拉框：默认监视视图。
     m_viewModeCombo = new QComboBox(this);
+    m_viewModeCombo->setObjectName(QStringLiteral("ProcessDockViewModeCombo"));
     m_viewModeCombo->addItem(QIcon(IconList), "监视视图");
     m_viewModeCombo->addItem(QIcon(IconProcessMain), "详细信息视图");
     m_viewModeCombo->setCurrentIndex(static_cast<int>(ViewMode::Monitor));
@@ -2735,9 +2879,8 @@ void ProcessDock::initializeTopControls()
     m_viewModeCombo->setMinimumContentsLength(8);
     m_viewModeCombo->setMaximumWidth(180);
 
-    const QString comboStyle = buildBlueComboBoxStyle();
-    m_strategyCombo->setStyleSheet(comboStyle);
-    m_viewModeCombo->setStyleSheet(comboStyle);
+    applyBlueComboBoxRuntimeStyle(m_strategyCombo);
+    applyBlueComboBoxRuntimeStyle(m_viewModeCombo);
 
     // 开始/暂停按钮：按需求仅显示图标。
     m_startButton = new QPushButton(QIcon(IconStart), "", this);
@@ -2951,10 +3094,14 @@ void ProcessDock::initializeProcessActivityPanel()
     m_activityTimelineSlider->setVisible(false);
     m_activityTimelineSlider->setToolTip(QStringLiteral("隐藏时间轴：内部仅保存当前样本索引，用户通过折线图点击切换历史时刻。"));
 
-    m_activitySnapshotLabel = new QLabel(QStringLiteral("时间轴快照：暂无样本"), m_activityPanelWidget);
-    m_activitySnapshotLabel->setWordWrap(true);
-    m_activitySnapshotLabel->setMinimumHeight(36);
-    m_activitySnapshotLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    // 快照说明曾经用于展示折线图当前采样点的长文本，但会挤占进程列表空间。
+    // 现在保留对象指针给旧逻辑判空使用，同时不加入布局、不显示文本。
+    m_activitySnapshotLabel = new QLabel(m_activityPanelWidget);
+    m_activitySnapshotLabel->setVisible(false);
+    m_activitySnapshotLabel->setWordWrap(false);
+    m_activitySnapshotLabel->setMinimumHeight(0);
+    m_activitySnapshotLabel->setMaximumHeight(0);
+    m_activitySnapshotLabel->setTextInteractionFlags(Qt::NoTextInteraction);
     m_activitySnapshotLabel->setStyleSheet(QStringLiteral(
         "QLabel {"
         "  color:%1;"
@@ -2969,7 +3116,6 @@ void ProcessDock::initializeProcessActivityPanel()
 
     panelLayout->addLayout(toolbarLayout);
     panelLayout->addWidget(m_activityChartWidget);
-    panelLayout->addWidget(m_activitySnapshotLabel);
     m_processPageLayout->addWidget(m_activityPanelWidget, 0);
 }
 
