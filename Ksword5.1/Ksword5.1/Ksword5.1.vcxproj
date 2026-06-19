@@ -253,7 +253,9 @@
     <ClCompile Include="OtherDock\OtherDock.DesktopCreate.cpp" />
     <ClCompile Include="OtherDock\OtherDock.Desktop.cpp" />
     <ClCompile Include="OtherDock\OtherDock.DesktopSwitch.cpp" />
+    <ClCompile Include="OtherDock\OtherDock.WindowProtection.cpp" />
     <ClCompile Include="OtherDock\OtherDock.cpp" />
+    <ClCompile Include="OtherDock\WindowCaptureProtection.cpp" />
     <ClCompile Include="PrivilegeDock\PrivilegeDock.cpp" />
     <ClCompile Include="RegistryDock_Themed.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.cpp" />
@@ -433,6 +435,7 @@
     <QtMoc Include="NetworkDock\NetworkFirewallPage.h" />
     <ClInclude Include="NetworkDock\HttpsProxyService.h" />
     <QtMoc Include="OtherDock\OtherDock.h" />
+    <ClInclude Include="OtherDock\WindowCaptureProtection.h" />
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h" />
     <QtMoc Include="RegistryDock\RegistryDock.h" />
     <QtMoc Include="ProcessDock\ProcessDetailWindow.h" />
