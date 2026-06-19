@@ -326,6 +326,7 @@ namespace ksword::ark
         std::ostringstream stream;
         stream << "pid=" << visibilityResult.processId
             << ", action=" << action
+            << ", flags=0x" << std::hex << std::uppercase << flags << std::dec
             << ", status=" << visibilityResult.status
             << ", hiddenCount=" << visibilityResult.hiddenCount
             << ", lastStatus=0x" << std::hex << static_cast<unsigned long>(visibilityResult.lastStatus);

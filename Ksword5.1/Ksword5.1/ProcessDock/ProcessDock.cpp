@@ -1553,9 +1553,11 @@ namespace
     bool setProcessVisibilityByR0Driver(
         const std::uint32_t targetPid,
         const unsigned long action,
+        const unsigned long flags,
         std::string* const detailTextOut)
     {
         // 作用：调用 ArkDriverClient 执行 R0 进程可见性动作。
+        // 处理：隐藏动作通过 flags 明确选择只改 PID、只断链或旧版双操作。
         // 返回：true 表示驱动接受并更新；false 表示 IOCTL 或 R0 状态失败。
         if (detailTextOut != nullptr)
         {
@@ -1574,7 +1576,7 @@ namespace
 
         const ksword::ark::DriverClient driverClient;
         const ksword::ark::ProcessVisibilityResult result =
-            driverClient.setProcessVisibility(targetPid, action);
+            driverClient.setProcessVisibility(targetPid, action, flags);
         const bool actionSucceeded = result.io.ok &&
             result.lastStatus >= 0 &&
             (result.status == KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN ||
@@ -6936,16 +6938,25 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     QMenu* r0VisibilitySubMenu = contextMenu.addMenu(
         buildR0ActionIcon(":/Icon/process_details.svg"),
         QStringLiteral("R0进程隐藏(可恢复)"));
-    QAction* r0HideProcessAction = r0VisibilitySubMenu->addAction(
+    QAction* r0HideUnlinkOnlyAction = r0VisibilitySubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_suspend.svg"),
-        QStringLiteral("隐藏选中进程"));
+        QStringLiteral("隐藏选中进程：只断链"));
+    QAction* r0HidePatchPidOnlyAction = r0VisibilitySubMenu->addAction(
+        buildR0ActionIcon(":/Icon/process_uncritical.svg"),
+        QStringLiteral("隐藏选中进程：只改PID"));
+    QAction* r0HideLegacyBothAction = r0VisibilitySubMenu->addAction(
+        buildR0ActionIcon(":/Icon/process_critical.svg"),
+        QStringLiteral("隐藏选中进程：改PID+断链(旧版高风险)"));
+    r0VisibilitySubMenu->addSeparator();
     QAction* r0UnhideProcessAction = r0VisibilitySubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_resume.svg"),
         QStringLiteral("取消隐藏选中进程"));
     QAction* r0ClearHiddenProcessAction = r0VisibilitySubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_refresh.svg"),
         QStringLiteral("清空全部隐藏标记"));
-    r0HideProcessAction->setToolTip(QStringLiteral("修改目标进程 UniqueProcessId 并摘除 ActiveProcessLinks；保留 PspCidTable 以便 Ksword 按原 PID 恢复。"));
+    r0HideUnlinkOnlyAction->setToolTip(QStringLiteral("只摘除 ActiveProcessLinks，不修改 PID；Ksword 更容易按原 PID 找回和恢复。"));
+    r0HidePatchPidOnlyAction->setToolTip(QStringLiteral("只修改 UniqueProcessId，不摘链；高风险，可能影响按原 PID 查找目标。"));
+    r0HideLegacyBothAction->setToolTip(QStringLiteral("兼容旧版：同时修改 UniqueProcessId 并摘除 ActiveProcessLinks；风险最高，仅用于复现实验。"));
     r0UnhideProcessAction->setToolTip(QStringLiteral("恢复由 Ksword 记录的 UniqueProcessId 和进程链表位置；若原位置不再相邻，则挂回 System 链头后。"));
     r0ClearHiddenProcessAction->setToolTip(QStringLiteral("恢复所有由 Ksword 摘链的进程，并清空驱动内记录。"));
     QMenu* r0DangerSubMenu = contextMenu.addMenu(
@@ -7030,7 +7041,15 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         else if (selectedAction == terminateProcessAction) { executeTerminateProcessAction(); }
         else if (selectedAction == r0TerminateAction) { executeR0TerminateProcessAction(); }
         else if (selectedAction == r0SuspendAction) { executeR0SuspendProcessAction(); }
-        else if (selectedAction == r0HideProcessAction) { executeR0SetProcessHiddenAction(true); }
+        else if (selectedAction == r0HideUnlinkOnlyAction) {
+            executeR0SetProcessHiddenAction(true, KSWORD_ARK_PROCESS_VISIBILITY_FLAG_UNLINK_ACTIVE_LIST);
+        }
+        else if (selectedAction == r0HidePatchPidOnlyAction) {
+            executeR0SetProcessHiddenAction(true, KSWORD_ARK_PROCESS_VISIBILITY_FLAG_PATCH_UNIQUE_PID);
+        }
+        else if (selectedAction == r0HideLegacyBothAction) {
+            executeR0SetProcessHiddenAction(true, KSWORD_ARK_PROCESS_VISIBILITY_FLAG_LEGACY_BOTH);
+        }
         else if (selectedAction == r0UnhideProcessAction) { executeR0SetProcessHiddenAction(false); }
         else if (selectedAction == r0ClearHiddenProcessAction) { executeR0ClearProcessHiddenAction(); }
         else if (selectedAction == r0EnableBreakAction) { executeR0SetBreakOnTerminationAction(true); }
@@ -8519,8 +8538,13 @@ void ProcessDock::executeR0SuspendProcessAction()
         false);
 }
 
-void ProcessDock::executeR0SetProcessHiddenAction(const bool hidden)
+void ProcessDock::executeR0SetProcessHiddenAction(
+    const bool hidden,
+    const unsigned long visibilityFlags)
 {
+    // 输入：hidden 指示隐藏/恢复方向，visibilityFlags 仅用于隐藏动作选择 R0 模式。
+    // 处理：批量调用驱动 IOCTL，并在隐藏成功后打开内核对比与 Ksword 隐藏项显示。
+    // 返回：无返回值；结果通过消息框、日志和异步刷新反馈给用户。
     const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
     if (actionTargets.empty())
     {
@@ -8531,14 +8555,39 @@ void ProcessDock::executeR0SetProcessHiddenAction(const bool hidden)
 
     if (hidden)
     {
+        const bool patchPid =
+            ((visibilityFlags & KSWORD_ARK_PROCESS_VISIBILITY_FLAG_PATCH_UNIQUE_PID) != 0UL);
+        const bool unlinkList =
+            ((visibilityFlags & KSWORD_ARK_PROCESS_VISIBILITY_FLAG_UNLINK_ACTIVE_LIST) != 0UL);
+        QString modeText;
+        QString riskText;
+        if (patchPid && unlinkList)
+        {
+            modeText = QStringLiteral("改 PID + 断链（旧版双操作）");
+            riskText = QStringLiteral("风险：最高；可能导致按原 PID 查找困难，退出路径也更敏感。");
+        }
+        else if (patchPid)
+        {
+            modeText = QStringLiteral("只改 PID");
+            riskText = QStringLiteral("风险：高；目标仍在活动链表中，但按原 PID 查找可能失效。");
+        }
+        else
+        {
+            modeText = QStringLiteral("只断链");
+            riskText = QStringLiteral("风险：相对低于改 PID；不改 UniqueProcessId，Ksword 更容易按原 PID 找回。");
+        }
+
         const QMessageBox::StandardButton choice = QMessageBox::warning(
             this,
             QStringLiteral("R0进程隐藏(可恢复)"),
             QStringLiteral(
                 "将把选中的 %1 个进程写入 Ksword 驱动隐藏表。\n\n"
-                "说明：当前实现会同时修改 UniqueProcessId 并摘除 ActiveProcessLinks，"
-                "但保留 PspCidTable；普通枚举看不到，Ksword 仍可通过 R0 CID 扫描按原 PID 读取和恢复。")
-                .arg(actionTargets.size()),
+                "模式：%2\n"
+                "%3\n\n"
+                "说明：驱动只保存 Ksword 本次修改过的字段；取消隐藏/清空时按记录恢复。")
+                .arg(actionTargets.size())
+                .arg(modeText)
+                .arg(riskText),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No);
         if (choice != QMessageBox::Yes)
@@ -8560,6 +8609,7 @@ void ProcessDock::executeR0SetProcessHiddenAction(const bool hidden)
         const bool actionOk = setProcessVisibilityByR0Driver(
             actionTarget.record.pid,
             action,
+            hidden ? visibilityFlags : 0UL,
             &detailText);
         if (actionOk)
         {
@@ -8603,6 +8653,12 @@ void ProcessDock::executeR0SetProcessHiddenAction(const bool hidden)
     {
         m_kernelCompareCheck->setChecked(true);
     }
+    if (hidden && successCount > 0U &&
+        m_showKswordHiddenProcessCheck != nullptr &&
+        !m_showKswordHiddenProcessCheck->isChecked())
+    {
+        m_showKswordHiddenProcessCheck->setChecked(true);
+    }
     requestAsyncRefresh(true);
 }
 
@@ -8623,6 +8679,7 @@ void ProcessDock::executeR0ClearProcessHiddenAction()
     const bool actionOk = setProcessVisibilityByR0Driver(
         0U,
         KSWORD_ARK_PROCESS_VISIBILITY_ACTION_CLEAR_ALL,
+        0UL,
         &detailText);
     if (actionOk)
     {

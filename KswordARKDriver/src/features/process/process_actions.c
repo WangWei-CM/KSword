@@ -1191,6 +1191,7 @@ NTSTATUS
 KswordARKDriverSetProcessVisibility(
     _In_ ULONG ProcessId,
     _In_ ULONG Action,
+    _In_ ULONG Flags,
     _Out_ ULONG* StatusOut,
     _Out_ ULONG* HiddenCountOut
     )
@@ -1198,17 +1199,16 @@ KswordARKDriverSetProcessVisibility(
 
 Routine Description:
 
-    Execute Ksword-owned process visibility changes. 中文说明：HIDE 会先修改
-    目标 _EPROCESS.UniqueProcessId，再把 ActiveProcessLinks 从内核活动进程
-    链表摘下，保留 PspCidTable；因此普通 R3 枚举不可见，而 Ksword 的 R0
-    CID 扫描仍能按原 PID 读取目标并打上
-    KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI。UNHIDE/CLEAR_ALL 只恢复由本
-    驱动保存的 PID 和链表记录，不接受 R3 传入任何内核地址。
+    Execute Ksword-owned process visibility changes. 中文说明：HIDE 根据 Flags
+    选择只修改 _EPROCESS.UniqueProcessId、只摘除 ActiveProcessLinks，或执行
+    两者兼容旧版行为；所有模式都保留 PspCidTable，UNHIDE/CLEAR_ALL 只恢复
+    由本驱动保存的 PID 和链表记录，不接受 R3 传入任何内核地址。
 
 Arguments:
 
     ProcessId - 目标 PID；ClearAll 动作忽略该值。
     Action - HIDE/UNHIDE/CLEAR_ALL。
+    Flags - HIDE 模式选择；0 表示兼容旧版双操作。
     StatusOut - 返回可读状态枚举。
     HiddenCountOut - 返回当前隐藏 PID 数量。
 
@@ -1226,6 +1226,9 @@ Return Value:
     KSW_DYN_STATE dynState;
     ULONG uniqueProcessIdOffset = KSW_DYN_OFFSET_UNAVAILABLE;
     ULONG activeProcessLinksOffset = KSW_DYN_OFFSET_UNAVAILABLE;
+    ULONG visibilityFlags = 0UL;
+    BOOLEAN shouldPatchUniquePid = FALSE;
+    BOOLEAN shouldUnlinkActiveList = FALSE;
 
     if (StatusOut == NULL || HiddenCountOut == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -1235,6 +1238,32 @@ Return Value:
     *HiddenCountOut = 0UL;
     RtlZeroMemory(&dynState, sizeof(dynState));
     KswordARKDriverEnsureProcessHideStateInitialized();
+
+    if (Action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE) {
+        visibilityFlags = Flags;
+        if (visibilityFlags == 0UL) {
+            visibilityFlags = KSWORD_ARK_PROCESS_VISIBILITY_FLAG_LEGACY_BOTH;
+        }
+        visibilityFlags &= KSWORD_ARK_PROCESS_VISIBILITY_FLAG_LEGACY_BOTH;
+        if (visibilityFlags == 0UL) {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        /*
+         * The booleans are computed once before acquiring the state lock so the
+         * actual mutation path has a single source of truth.  Return behavior:
+         * UNHIDE/CLEAR_ALL ignore Flags and restore whatever a prior record says
+         * was actually changed.
+         */
+        shouldPatchUniquePid =
+            ((visibilityFlags & KSWORD_ARK_PROCESS_VISIBILITY_FLAG_PATCH_UNIQUE_PID) != 0UL)
+            ? TRUE
+            : FALSE;
+        shouldUnlinkActiveList =
+            ((visibilityFlags & KSWORD_ARK_PROCESS_VISIBILITY_FLAG_UNLINK_ACTIVE_LIST) != 0UL)
+            ? TRUE
+            : FALSE;
+    }
 
     if (Action == KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE &&
         (ProcessId == 0UL || ProcessId <= 4UL)) {
@@ -1343,23 +1372,25 @@ Return Value:
                 HANDLE originalUniqueProcessId = NULL;
                 HANDLE hiddenUniqueProcessId = NULL;
 
-                status = KswordARKDriverPatchUniqueProcessIdForHide(
-                    processObject,
-                    ProcessId,
-                    uniqueProcessIdOffset,
-                    &originalUniqueProcessId,
-                    &hiddenUniqueProcessId);
-                if (!NT_SUCCESS(status)) {
-                    *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_UNKNOWN;
+                if (shouldPatchUniquePid) {
+                    status = KswordARKDriverPatchUniqueProcessIdForHide(
+                        processObject,
+                        ProcessId,
+                        uniqueProcessIdOffset,
+                        &originalUniqueProcessId,
+                        &hiddenUniqueProcessId);
+                    if (!NT_SUCCESS(status)) {
+                        *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_UNKNOWN;
+                    }
                 }
-                if (NT_SUCCESS(status)) {
+                if (NT_SUCCESS(status) && shouldUnlinkActiveList) {
                     status = KswordARKDriverUnlinkActiveProcessLinks(
                         processObject,
                         activeProcessLinksOffset,
                         &link,
                         &previous,
                         &next);
-                    if (!NT_SUCCESS(status)) {
+                    if (!NT_SUCCESS(status) && shouldPatchUniquePid) {
                         KSWORD_ARK_PROCESS_HIDE_RECORD rollbackRecord;
                         NTSTATUS rollbackStatus = STATUS_SUCCESS;
                         RtlZeroMemory(&rollbackRecord, sizeof(rollbackRecord));
@@ -1398,8 +1429,8 @@ Return Value:
                     record->ActiveProcessLinks = link;
                     record->PreviousLink = previous;
                     record->NextLink = next;
-                    record->UniqueProcessIdPatched = TRUE;
-                    record->ActiveListUnlinked = TRUE;
+                    record->UniqueProcessIdPatched = shouldPatchUniquePid;
+                    record->ActiveListUnlinked = shouldUnlinkActiveList;
                     processObject = NULL;
                     g_KswordArkProcessHideState.Count += 1UL;
                     *StatusOut = KSWORD_ARK_PROCESS_VISIBILITY_STATUS_HIDDEN;

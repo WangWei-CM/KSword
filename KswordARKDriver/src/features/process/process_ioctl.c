@@ -519,6 +519,7 @@ Return Value:
     status = KswordARKDriverSetProcessVisibility(
         (ULONG)visibilityRequestValue.processId,
         (ULONG)visibilityRequestValue.action,
+        (ULONG)visibilityRequestValue.flags,
         &visibilityStatus,
         &hiddenCount);
 
@@ -531,9 +532,10 @@ Return Value:
         KswordARKProcessIoctlLog(
             Device,
             "Info",
-            "R0 process visibility updated: pid=%lu, action=%lu, status=%lu, hiddenCount=%lu.",
+            "R0 process visibility updated: pid=%lu, action=%lu, flags=0x%08lX, status=%lu, hiddenCount=%lu.",
             (unsigned long)visibilityRequestValue.processId,
             (unsigned long)visibilityRequestValue.action,
+            (unsigned long)visibilityRequestValue.flags,
             (unsigned long)visibilityStatus,
             (unsigned long)hiddenCount);
     }
@@ -541,9 +543,10 @@ Return Value:
         KswordARKProcessIoctlLog(
             Device,
             "Error",
-            "R0 process visibility failed: pid=%lu, action=%lu, status=0x%08X.",
+            "R0 process visibility failed: pid=%lu, action=%lu, flags=0x%08lX, status=0x%08X.",
             (unsigned long)visibilityRequestValue.processId,
             (unsigned long)visibilityRequestValue.action,
+            (unsigned long)visibilityRequestValue.flags,
             (unsigned int)status);
     }
 

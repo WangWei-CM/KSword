@@ -36,6 +36,7 @@ NTSTATUS
 KswordARKDriverSetProcessVisibility(
     _In_ ULONG ProcessId,
     _In_ ULONG Action,
+    _In_ ULONG Flags,
     _Out_ ULONG* StatusOut,
     _Out_ ULONG* HiddenCountOut
     );

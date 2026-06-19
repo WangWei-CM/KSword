@@ -452,11 +452,11 @@ private:
     // - protectionLevel 使用单字节原生层级编码（Signer<<4 | Type）。
     void executeR0SetPplProtectionAction(std::uint8_t protectionLevel, const QString& levelDisplayText);
     // executeR0SetProcessHiddenAction：
-    // - 作用：通过 R0 修改/恢复目标进程 UniqueProcessId，并摘除/恢复
-    //   ActiveProcessLinks；普通枚举不可见，Ksword 仍可通过 R0 CID 扫描按原
-    //   PID 读取并显示隐藏项。
+    // - 作用：通过 R0 修改/恢复目标进程可见性；隐藏时由 visibilityFlags
+    //   选择只改 UniqueProcessId、只摘 ActiveProcessLinks，或兼容旧版双操作。
     // - 参数 hidden：true=隐藏选中进程；false=取消隐藏选中进程。
-    void executeR0SetProcessHiddenAction(bool hidden);
+    // - 参数 visibilityFlags：仅 hidden=true 时生效；恢复时忽略并按驱动记录还原。
+    void executeR0SetProcessHiddenAction(bool hidden, unsigned long visibilityFlags = 0UL);
     // executeR0ClearProcessHiddenAction：
     // - 作用：恢复驱动内所有被 Ksword 修改 PID/摘链的进程，并刷新进程列表。
     void executeR0ClearProcessHiddenAction();
