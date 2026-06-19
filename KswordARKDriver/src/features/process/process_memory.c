@@ -98,6 +98,10 @@ ZwQueryVirtualMemory(
 #define STATUS_REQUEST_NOT_ACCEPTED ((NTSTATUS)0xC00000D0L)
 #endif
 
+#ifndef STATUS_DATA_ERROR
+#define STATUS_DATA_ERROR ((NTSTATUS)0xC000003EL)
+#endif
+
 #define KSWORD_ARK_MEMORY_BASIC_INFORMATION_CLASS 0UL
 #define KSWORD_ARK_MEMORY_MAPPED_FILENAME_INFORMATION_CLASS 2UL
 #define KSWORD_ARK_MEMORY_READ_RESPONSE_HEADER_SIZE \
@@ -312,27 +316,32 @@ Return Value:
     }
 
     while (writeOffset < BytesToWrite) {
-        SIZE_T chunkBytes = BytesToWrite - writeOffset;
-        ULONG64 chunkAddress = DestinationAddress + (ULONG64)writeOffset;
-        ULONG64 pageOffset = chunkAddress & (ULONG64)(PAGE_SIZE - 1U);
-        SIZE_T pageBytes = (SIZE_T)PAGE_SIZE - (SIZE_T)pageOffset;
+        volatile UCHAR* destinationByte =
+            (volatile UCHAR*)(ULONG_PTR)(DestinationAddress + (ULONG64)writeOffset);
+        UCHAR verifyByte = 0U;
 
-        if (chunkBytes > pageBytes) {
-            chunkBytes = pageBytes;
-        }
-
+        /*
+         * Use volatile byte stores and immediate read-back verification.  A
+         * plain RtlCopyMemory can report no exception even when the caller later
+         * observes unchanged data through a different path; verification makes
+         * the IOCTL result reflect the actual persisted byte value.
+         */
         __try {
-            RtlCopyMemory(
-                (PVOID)(ULONG_PTR)chunkAddress,
-                Source + writeOffset,
-                chunkBytes);
+            *destinationByte = Source[writeOffset];
+            KeMemoryBarrier();
+            verifyByte = *destinationByte;
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
             status = GetExceptionCode();
             break;
         }
 
-        writeOffset += chunkBytes;
+        if (verifyByte != Source[writeOffset]) {
+            status = STATUS_DATA_ERROR;
+            break;
+        }
+
+        writeOffset += 1U;
     }
 
     *BytesWrittenOut = writeOffset;
