@@ -20,6 +20,7 @@ void NetworkDock::initializeUi()
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
     initializeTrafficMonitorTab();
+    initializeNidsTab();
     initializeRateLimitTab();
     initializeConnectionManageTab();
     initializeFirewallTab();

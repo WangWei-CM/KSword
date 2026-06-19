@@ -166,6 +166,11 @@ int NetworkDock::toUdpEndpointColumn(const UdpEndpointTableColumn column)
     return static_cast<int>(column);
 }
 
+int NetworkDock::toNidsAlertColumn(const NidsAlertTableColumn column)
+{
+    return static_cast<int>(column);
+}
+
 bool NetworkDock::tryParsePidText(const QString& pidText, std::uint32_t& pidOut)
 {
     bool parseOk = false;
