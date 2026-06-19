@@ -432,6 +432,18 @@ public:
     // - 作用：对外触发 DynData 页初始化和异步刷新。
     void requestDynDataRefresh();
 
+    // ensureCurrentTabReadyForDisplay：
+    // - 输入：无，使用当前顶层 Tab 索引；
+    // - 处理：确保当前 Tab 的真实 UI 已初始化，并安排一次重绘；
+    // - 返回：无返回值。供 MainWindow 在 ADS 恢复布局/显示后兜底调用。
+    void ensureCurrentTabReadyForDisplay();
+
+    // displayStateSummary：
+    // - 输入：无；
+    // - 处理：汇总顶层 Tab、当前页和对象命名空间内层 Tab 的可见/尺寸/初始化状态；
+    // - 返回：用于启动黑屏排查的紧凑日志文本。
+    QString displayStateSummary() const;
+
 protected:
     // showEvent：
     // - 输入 event：Qt 显示事件；

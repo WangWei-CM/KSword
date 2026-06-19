@@ -2914,19 +2914,23 @@ void MainWindow::showEvent(QShowEvent* event)
         QTimer::singleShot(0, this, [this]()
             {
                 ensureVisibleLazyDocksInitialized(QStringLiteral("showEvent-repeat"));
+                repairKernelDockAfterLayoutRestore(QStringLiteral("showEvent-repeat"));
             });
         return;
     }
 
     m_deferredDockInitializationStarted = true;
     ensureVisibleLazyDocksInitialized(QStringLiteral("showEvent-immediate"));
+    repairKernelDockAfterLayoutRestore(QStringLiteral("showEvent-immediate"));
     QTimer::singleShot(0, this, [this]()
         {
             ensureVisibleLazyDocksInitialized(QStringLiteral("showEvent-deferred-0"));
+            repairKernelDockAfterLayoutRestore(QStringLiteral("showEvent-deferred-0"));
         });
     QTimer::singleShot(250, this, [this]()
         {
             ensureVisibleLazyDocksInitialized(QStringLiteral("showEvent-deferred-250"));
+            repairKernelDockAfterLayoutRestore(QStringLiteral("showEvent-deferred-250"));
         });
 
     // 懒加载策略修正：
@@ -6269,6 +6273,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
     const bool isNetworkDock = (dockKey == QStringLiteral("network"));
+    const bool isKernelDock = (dockKey == QStringLiteral("kernel"));
     QWidget* realWidget = nullptr;
 
     if (dockKey == QStringLiteral("process"))
@@ -6355,18 +6360,31 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     kPro.set(progressPid, QStringLiteral("正在创建%1页内容").arg(dockTitleText).toStdString(), 0, 45.0f);
     QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
-    realWidget->setAutoFillBackground(false);
-    realWidget->setAttribute(Qt::WA_StyledBackground, false);
+    // KernelDock owns a complex QTabWidget hierarchy and must remain an opaque, styled root.
+    // The generic transparent QWidget rule used by wallpaper-friendly docks also matches every
+    // nested tab page; after ADS restores the kernel dock as the startup page that can leave the
+    // whole dock painting the black parent surface.  Keep the rule for ordinary docks only.
     realWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    realWidget->setStyleSheet(
-        realWidget->styleSheet()
-        + QStringLiteral(
-            "QWidget{"
-            "  background:transparent;"
-            "  background-color:transparent;"
-            "}"));
+    if (isKernelDock)
+    {
+        realWidget->setAutoFillBackground(true);
+        realWidget->setAttribute(Qt::WA_StyledBackground, true);
+    }
+    else
+    {
+        realWidget->setAutoFillBackground(false);
+        realWidget->setAttribute(Qt::WA_StyledBackground, false);
+        realWidget->setStyleSheet(
+            realWidget->styleSheet()
+            + QStringLiteral(
+                "QWidget{"
+                "  background:transparent;"
+                "  background-color:transparent;"
+                "}"));
+    }
 
-    const bool shouldSuppressOuterScrollArea = isNetworkDock || (dockKey == QStringLiteral("hardware"));
+    const bool shouldSuppressOuterScrollArea =
+        isNetworkDock || (dockKey == QStringLiteral("hardware")) || isKernelDock;
     if (isNetworkDock)
     {
         // 网络页额外要求：
@@ -6492,20 +6510,15 @@ bool MainWindow::restoreDockLayoutFromConfig()
         // 如果恢复到惰性占位页（典型是上次退出时停在“内核”Dock），这里主动加载一次，
         // 避免启动后看到纯黑 placeholder 而没有真实内容挂载。
         ensureVisibleLazyDocksInitialized(QStringLiteral("restoreDockLayout"));
+        repairKernelDockAfterLayoutRestore(QStringLiteral("restoreDockLayout"));
         QTimer::singleShot(0, this, [this]()
             {
                 ensureVisibleLazyDocksInitialized(QStringLiteral("restoreDockLayout-deferred-0"));
-                if (m_dockKernel != nullptr && !m_dockKernel->property("ks_lazy_initialized").toBool())
-                {
-                    ensureDockContentInitialized(m_dockKernel);
-                }
+                repairKernelDockAfterLayoutRestore(QStringLiteral("restoreDockLayout-deferred-0"));
             });
         QTimer::singleShot(250, this, [this]()
             {
-                if (m_dockKernel != nullptr && !m_dockKernel->property("ks_lazy_initialized").toBool())
-                {
-                    ensureDockContentInitialized(m_dockKernel);
-                }
+                repairKernelDockAfterLayoutRestore(QStringLiteral("restoreDockLayout-deferred-250"));
             });
     }
     return restoreOk;
@@ -6644,6 +6657,78 @@ void MainWindow::ensureVisibleLazyDocksInitialized(const QString& reasonText)
     }
 }
 
+void MainWindow::repairKernelDockAfterLayoutRestore(const QString& reasonText)
+{
+    if (m_dockKernel == nullptr)
+    {
+        return;
+    }
+
+    if (m_kernelWidget == nullptr)
+    {
+        m_kernelWidget = new KernelDock(this);
+    }
+
+    QWidget* mountedWidget = m_dockKernel->widget();
+    const bool needsRemount = (mountedWidget != m_kernelWidget);
+    if (needsRemount)
+    {
+        // 内核 Dock 是唯一已观察到 ADS 恢复后黑屏的主 Dock。这里不依赖 visible/current
+        // 判断，直接确保 Dock 内容是 KernelDock 本体，避免恢复到旧占位页或空容器。
+        QWidget* oldWidget = m_dockKernel->takeWidget();
+        m_kernelWidget->setAutoFillBackground(true);
+        m_kernelWidget->setAttribute(Qt::WA_StyledBackground, true);
+        m_kernelWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        m_dockKernel->setWidget(m_kernelWidget, ads::CDockWidget::ForceNoScrollArea);
+        m_dockKernel->setProperty("ks_lazy_initialized", true);
+        if (oldWidget != nullptr && oldWidget != m_kernelWidget)
+        {
+            oldWidget->deleteLater();
+        }
+        mountedWidget = m_dockKernel->widget();
+    }
+
+    if (m_kernelWidget != nullptr)
+    {
+        m_kernelWidget->ensureCurrentTabReadyForDisplay();
+        m_kernelWidget->show();
+        m_kernelWidget->raise();
+        m_kernelWidget->updateGeometry();
+        m_kernelWidget->update();
+    }
+
+    m_dockKernel->setMinimumSizeHintMode(ads::CDockWidget::MinimumSizeHintFromDockWidget);
+    m_dockKernel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_dockKernel->updateGeometry();
+    m_dockKernel->update();
+
+    kLogEvent repairEvent;
+    info << repairEvent
+        << "[MainWindow][KernelDockRepair] reason="
+        << reasonText.toStdString()
+        << ", remount="
+        << (needsRemount ? "true" : "false")
+        << ", dockVisible="
+        << (m_dockKernel->isVisible() ? "true" : "false")
+        << ", dockCurrent="
+        << (m_dockKernel->isCurrentTab() ? "true" : "false")
+        << ", dockSize="
+        << m_dockKernel->size().width()
+        << "x"
+        << m_dockKernel->size().height()
+        << ", widgetMatches="
+        << ((mountedWidget == m_kernelWidget) ? "true" : "false")
+        << ", kernelVisible="
+        << ((m_kernelWidget != nullptr && m_kernelWidget->isVisible()) ? "true" : "false")
+        << ", kernelSize="
+        << (m_kernelWidget != nullptr ? m_kernelWidget->size().width() : 0)
+        << "x"
+        << (m_kernelWidget != nullptr ? m_kernelWidget->size().height() : 0)
+        << ", kernelState="
+        << (m_kernelWidget != nullptr ? m_kernelWidget->displayStateSummary().toStdString() : std::string("null"))
+        << eol;
+}
+
 void MainWindow::initDockWidgets()
 {
     const QString startupDockKey = m_currentAppearanceSettings.startupDefaultTabKey.trimmed().toLower();
@@ -6662,7 +6747,10 @@ void MainWindow::initDockWidgets()
     if (shouldEagerLoad(QStringLiteral("memory"))) { m_memoryWidget = new MemoryDock(this); }
     if (shouldEagerLoad(QStringLiteral("file"))) { m_fileWidget = new FileDock(this); }
     if (shouldEagerLoad(QStringLiteral("driver"))) { m_driverWidget = new DriverDock(this); }
-    if (shouldEagerLoad(QStringLiteral("kernel"))) { m_kernelWidget = new KernelDock(this); }
+    // KernelDock 不再参与主 Dock 惰性占位：
+    // - 它是启动恢复黑屏的唯一复现场景；
+    // - 真实创建成本可控，且能避免 ADS restoreState 把占位页/空容器恢复为当前页。
+    m_kernelWidget = new KernelDock(this);
     if (shouldEagerLoad(QStringLiteral("monitor"))) { m_monitorWidget = new MonitorDock(this); }
     if (shouldEagerLoad(QStringLiteral("hardware"))) { m_hardwareWidget = new HardwareDock(this); }
     if (shouldEagerLoad(QStringLiteral("privilege"))) { m_privilegeWidget = new PrivilegeDock(this); }
@@ -6688,6 +6776,7 @@ void MainWindow::initDockWidgets()
         const QString& title,
         const QString& dockKey,
         const ads::CDockWidget::eInsertMode insertMode = ads::CDockWidget::AutoScrollArea) -> ads::CDockWidget* {
+        const bool isKernelDock = (dockKey == QStringLiteral("kernel"));
         ads::CDockWidget* dock = new ads::CDockWidget(title);
         configureDockWidgetPersistentIdentity(dock, dockKey);
         dock->setWidget(widget, insertMode);
@@ -6703,8 +6792,11 @@ void MainWindow::initDockWidgets()
         dock->setAttribute(Qt::WA_StyledBackground, false);
         if (widget != nullptr)
         {
-            widget->setAutoFillBackground(false);
-            widget->setAttribute(Qt::WA_StyledBackground, false);
+            // KernelDock paints its own tab surface.  Do not convert it to a transparent root here,
+            // otherwise a restored startup kernel dock can inherit the dark ADS background before
+            // its internal pages get a chance to repaint.
+            widget->setAutoFillBackground(isKernelDock);
+            widget->setAttribute(Qt::WA_StyledBackground, isKernelDock);
         }
         return dock;
         };
@@ -6716,8 +6808,9 @@ void MainWindow::initDockWidgets()
         const QString& dockKey)
         {
             const bool isNetworkDock = (dockKey == QStringLiteral("network"));
+            const bool isKernelDock = (dockKey == QStringLiteral("kernel"));
             const bool shouldSuppressOuterScrollArea =
-                isNetworkDock || (dockKey == QStringLiteral("hardware"));
+                isNetworkDock || (dockKey == QStringLiteral("hardware")) || isKernelDock;
             QWidget* dockContentWidget = eagerWidget;
             if (dockContentWidget == nullptr)
             {
@@ -7376,6 +7469,7 @@ void MainWindow::applyAppearanceSettings(
     {
         m_processWidget->refreshThemeVisuals();
     }
+    repairKernelDockAfterLayoutRestore(QStringLiteral("applyAppearanceSettings"));
 
     if (m_customTitleBar != nullptr)
     {
@@ -7983,6 +8077,38 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             "}")
         : QString();
 
+    // kernelDockOpaqueStyle 作用：
+    // - KernelDock 是多层 QTabWidget/QStackedWidget/视图控件组合，不能跟随背景图模式全透明；
+    // - 该规则放在透明 Dock 规则之后，按 objectName 精确恢复内核 Dock 的主题底色；
+    // - 防止上次退出停留在内核 Dock 时，ADS 恢复后只露出黑色父容器而看不到真实 UI。
+    const QString kernelDockOpaqueStyle = QStringLiteral(
+        "ads--CDockWidget#ksDock_kernel,"
+        "ads--CDockWidget#ksDock_kernel > QWidget,"
+        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot,"
+        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTabWidget::pane,"
+        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QStackedWidget,"
+        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QStackedWidget > QWidget{"
+        "  background:%1 !important;"
+        "  background-color:%1 !important;"
+        "  color:%3 !important;"
+        "}"
+        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTableView,"
+        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTableWidget,"
+        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTreeView,"
+        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QTreeWidget,"
+        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QListView,"
+        "ads--CDockWidget#ksDock_kernel QWidget#KernelDockRoot QListWidget{"
+        "  background:%1 !important;"
+        "  background-color:%1 !important;"
+        "  alternate-background-color:%2 !important;"
+        "  color:%3 !important;"
+        "  gridline-color:%4 !important;"
+        "}")
+        .arg(surfaceBackgroundText)
+        .arg(surfaceAltBackgroundText)
+        .arg(primaryTextColor)
+        .arg(borderColorText);
+
     if (!darkModeEnabled)
     {
         return rootStyle
@@ -8038,7 +8164,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             + sharedOverlayStyle
             + tooltipStyle
             + dockContentTransparentStyle
-            + finalDockAreaTransparentStyle;
+            + finalDockAreaTransparentStyle
+            + kernelDockOpaqueStyle;
     }
 
     return rootStyle
@@ -8092,5 +8219,6 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         + sharedOverlayStyle
         + tooltipStyle
         + dockContentTransparentStyle
-        + finalDockAreaTransparentStyle;
+        + finalDockAreaTransparentStyle
+        + kernelDockOpaqueStyle;
 }
