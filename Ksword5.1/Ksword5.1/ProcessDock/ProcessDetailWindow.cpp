@@ -399,4 +399,93 @@ namespace process_detail_window_internal
 
         return QString::fromWCharArray(buffer.data());
     }
+
+    int calculateStandaloneWindowMaxWidth(
+        QWidget* candidateParent,
+        QWidget* fallbackWindow,
+        const double ratio,
+        const int fallbackWidth)
+    {
+        // 输入：
+        // - candidateParent：优先参考的客户区控件，通常是打开独立窗口的 Dock/主窗口。
+        // - fallbackWindow：当前独立窗口，用于在无父控件时定位屏幕。
+        // - ratio：客户区宽度比例，本需求调用侧传 0.75。
+        // - fallbackWidth：所有来源都不可用时的默认宽度。
+        // 处理：
+        // - 优先使用 parent contentsRect，避免窗口装饰/边框参与计算；
+        // - 其次使用当前活动窗口客户区；
+        // - 最后退回屏幕 availableGeometry。
+        // 返回：按比例计算出的最大宽度；仅在完全无法判断时使用回退宽度。
+        int clientWidth = 0;
+        if (candidateParent != nullptr && candidateParent->contentsRect().width() > 0)
+        {
+            clientWidth = candidateParent->contentsRect().width();
+        }
+
+        if (clientWidth <= 0)
+        {
+            QWidget* activeWindow = QApplication::activeWindow();
+            if (activeWindow != nullptr &&
+                activeWindow != fallbackWindow &&
+                activeWindow->contentsRect().width() > 0)
+            {
+                clientWidth = activeWindow->contentsRect().width();
+            }
+        }
+
+        QScreen* targetScreen = nullptr;
+        if (candidateParent != nullptr && candidateParent->windowHandle() != nullptr)
+        {
+            targetScreen = candidateParent->windowHandle()->screen();
+        }
+        if (targetScreen == nullptr && fallbackWindow != nullptr && fallbackWindow->windowHandle() != nullptr)
+        {
+            targetScreen = fallbackWindow->windowHandle()->screen();
+        }
+        if (targetScreen == nullptr)
+        {
+            targetScreen = QApplication::primaryScreen();
+        }
+        if (clientWidth <= 0 && targetScreen != nullptr)
+        {
+            clientWidth = targetScreen->availableGeometry().width();
+        }
+
+        const int boundedFallbackWidth = std::max(1, fallbackWidth);
+        if (clientWidth <= 0 || ratio <= 0.0)
+        {
+            return boundedFallbackWidth;
+        }
+
+        return std::max(1, static_cast<int>(std::floor(static_cast<double>(clientWidth) * ratio)));
+    }
+
+    void applyStandaloneWindowWidthLimit(
+        QWidget* window,
+        QWidget* candidateParent,
+        const QSize& preferredSize,
+        const double ratio)
+    {
+        // 输入：
+        // - window：待约束的独立窗口；
+        // - candidateParent：客户区宽度来源；
+        // - preferredSize：原始设计尺寸；
+        // - ratio：最大宽度比例。
+        // 处理：
+        // - 设置 maximumWidth；
+        // - 初始 resize 宽度裁剪到 maximumWidth 内。
+        // 返回：无，直接修改窗口几何。
+        if (window == nullptr)
+        {
+            return;
+        }
+
+        const int maxWidth = calculateStandaloneWindowMaxWidth(
+            candidateParent,
+            window,
+            ratio,
+            preferredSize.width());
+        window->setMaximumWidth(maxWidth);
+        window->resize(std::min(preferredSize.width(), maxWidth), preferredSize.height());
+    }
 }

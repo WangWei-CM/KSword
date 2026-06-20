@@ -241,7 +241,7 @@ namespace
 
     // formatActivityElapsedText 作用：
     // - 将记录相对毫秒转换为紧凑时间轴标签；
-    // - 小于 1 秒时保留 0.1s 精度，便于 0.1s 打点场景定位。
+    // - 小于 1 秒时保留 0.1s 精度，便于用户手动设置亚秒级打点时定位。
     QString formatActivityElapsedText(const std::uint64_t elapsedMs)
     {
         if (elapsedMs < 1000U)
@@ -2894,7 +2894,7 @@ void ProcessDock::initializeTopControls()
 
     // 进程表刷新间隔：
     // - 该间隔只控制下方进程表格重绘频率，默认 2 秒；
-    // - 后台监视和活动打点仍走 0.1 秒采样，避免表格渲染成本影响记录精度。
+    // - 后台监视和活动打点默认走 1 秒采样，避免表格渲染成本影响记录精度。
     m_refreshLabel = new QLabel("列表刷新(s):", this);
     m_tableRefreshIntervalEdit = new QLineEdit(this);
     m_tableRefreshIntervalEdit->setText(QStringLiteral("2.0"));
@@ -2906,15 +2906,15 @@ void ProcessDock::initializeTopControls()
     m_tableRefreshIntervalEdit->setEnabled(false);
 
     // 记录/打点间隔输入框：
-    // - 允许小数秒，默认 0.1s；
+    // - 允许小数秒，默认 1s；
     // - 该间隔驱动后台监视刷新和活动记录采样。
     m_sampleIntervalLabel = new QLabel("记录打点(s):", this);
     m_refreshIntervalEdit = new QLineEdit(this);
-    m_refreshIntervalEdit->setText(QStringLiteral("0.1"));
+    m_refreshIntervalEdit->setText(QStringLiteral("1.0"));
     m_refreshIntervalEdit->setFixedWidth(64);
     m_refreshIntervalEdit->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_refreshIntervalEdit->setValidator(new QDoubleValidator(0.05, 60.0, 3, m_refreshIntervalEdit));
-    m_refreshIntervalEdit->setToolTip("记录打点间隔，允许输入小数秒，默认 0.1；过小间隔会提高系统枚举开销。");
+    m_refreshIntervalEdit->setToolTip("记录打点间隔，允许输入小数秒，默认 1；过小间隔会提高系统枚举开销。");
     m_refreshIntervalEdit->setStyleSheet(buildBlueLineEditStyle());
     m_refreshIntervalEdit->setEnabled(false);
 
@@ -4251,7 +4251,7 @@ void ProcessDock::initializeCreateProcessConnections()
 void ProcessDock::initializeTimer()
 {
     // 周期监视定时器：
-    // - 默认 0.1 秒执行后台进程刷新和活动打点；
+    // - 默认 1 秒执行后台进程刷新和活动打点；
     // - 下方进程表格是否重绘由独立“列表刷新(s)”输入框节流。
     m_refreshTimer = new QTimer(this);
     m_refreshTimer->setInterval(refreshIntervalMillisecondsFromInput());
@@ -4263,18 +4263,18 @@ void ProcessDock::initializeTimer()
 
 int ProcessDock::refreshIntervalMillisecondsFromInput() const
 {
-    // 输入为空或非法时回退默认 0.1s；
+    // 输入为空或非法时回退默认 1s；
     // clamp 避免极小间隔造成后台枚举连续堆积。
     bool parseOk = false;
     double secondsValue = (m_refreshIntervalEdit != nullptr)
         ? m_refreshIntervalEdit->text().trimmed().toDouble(&parseOk)
-        : 0.1;
+        : 1.0;
     if (parseOk && !std::isfinite(secondsValue))
     {
         parseOk = false;
-        secondsValue = 0.1;
+        secondsValue = 1.0;
     }
-    const double safeSeconds = parseOk ? secondsValue : 0.1;
+    const double safeSeconds = parseOk ? secondsValue : 1.0;
     const double clampedSeconds = std::clamp(
         safeSeconds,
         static_cast<double>(ActivityMinimumIntervalMilliseconds) / 1000.0,
@@ -4318,7 +4318,7 @@ void ProcessDock::applyRefreshIntervalInput()
 
 int ProcessDock::tableRefreshIntervalMillisecondsFromInput() const
 {
-    // 表格刷新默认 2 秒；该值只影响 UI 重绘，不影响 0.1 秒后台采样。
+    // 表格刷新默认 2 秒；该值只影响 UI 重绘，不影响 1 秒后台采样。
     bool parseOk = false;
     double secondsValue = (m_tableRefreshIntervalEdit != nullptr)
         ? m_tableRefreshIntervalEdit->text().trimmed().toDouble(&parseOk)
@@ -4807,7 +4807,7 @@ void ProcessDock::applyRefreshResult(const RefreshResult& refreshResult, const b
         ++windowIt;
     }
 
-    // 用新结果替换缓存；表格重绘由独立“列表刷新(s)”节流，避免 0.1s 打点拖垮 UI。
+    // 用新结果替换缓存；表格重绘由独立“列表刷新(s)”节流，避免高频打点拖垮 UI。
     m_cacheByIdentity = refreshResult.nextCache;
     m_counterSampleByIdentity = refreshResult.nextCounters;
 
@@ -4888,7 +4888,7 @@ bool ProcessDock::shouldRebuildProcessTableForRefresh(const bool forceUiRefresh)
         return true;
     }
 
-    // 非强制后台监视按独立 UI 间隔节流，避免每 0.1s 重建整张进程表。
+    // 非强制后台监视按独立 UI 间隔节流，避免高频采样时重建整张进程表。
     const int intervalMs = tableRefreshIntervalMillisecondsFromInput();
     const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - m_lastProcessTableRebuildTime).count();
@@ -6023,7 +6023,7 @@ void ProcessDock::appendProcessActivitySample()
 
 bool ProcessDock::trimProcessActivitySamples()
 {
-    // 样本缓存固定上限，避免 0.1s 长时间记录造成内存无限增长。
+    // 样本缓存固定上限，避免长时间记录造成内存无限增长。
     if (m_activitySamples.size() <= ActivityMaximumSampleCount)
     {
         return false;

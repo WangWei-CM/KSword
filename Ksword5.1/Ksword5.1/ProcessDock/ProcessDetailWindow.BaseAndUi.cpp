@@ -145,7 +145,14 @@ ProcessDetailWindow::ProcessDetailWindow(const ks::process::ProcessRecord& baseR
     setWindowFlag(Qt::Window, true);
     setWindowModality(Qt::NonModal);
     setAttribute(Qt::WA_DeleteOnClose, true);
-    resize(1160, 760);
+    // 独立详情窗不能无限按内容撑宽：
+    // - 以父窗口/客户区宽度为基准，把最大宽度限制为 75%；
+    // - 初始设计宽度也同步裁剪，避免长路径/命令行把窗口撑出屏幕。
+    applyStandaloneWindowWidthLimit(
+        this,
+        parent,
+        QSize(1160, 760),
+        0.75);
 
     // identity 用于日志和窗口复用定位。
     m_identityKey = ks::process::BuildProcessIdentityKey(

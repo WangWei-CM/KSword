@@ -595,7 +595,7 @@ private:
     QLabel* m_refreshLabel = nullptr;         // 列表刷新间隔标签。
     QLineEdit* m_tableRefreshIntervalEdit = nullptr; // 进程表格重绘间隔输入框，默认 2 秒。
     QLabel* m_sampleIntervalLabel = nullptr;  // 记录打点间隔标签。
-    QLineEdit* m_refreshIntervalEdit = nullptr; // 记录打点/后台监视间隔输入框，允许小数秒，默认 0.1 秒。
+    QLineEdit* m_refreshIntervalEdit = nullptr; // 记录打点/后台监视间隔输入框，允许小数秒，默认 1 秒。
     QLabel* m_refreshStateLabel = nullptr;    // 刷新状态标签（明显展示“刷新中/空闲+耗时”）。
 
     // ======== 进程活动记录面板 ========

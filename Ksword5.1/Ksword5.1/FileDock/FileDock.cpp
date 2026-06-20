@@ -35,6 +35,7 @@
 #include <QFileSystemModel>
 #include <QFormLayout>
 #include <QFrame>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -53,6 +54,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QRunnable>
+#include <QScreen>
 #include <QScrollArea>
 #include <QShortcut>
 #include <QSortFilterProxyModel>
@@ -89,6 +91,8 @@
 
 #include <Aclapi.h>
 #include <Sddl.h>
+
+#pragma comment(lib, "Advapi32.lib")
 
 namespace
 {
@@ -182,6 +186,92 @@ namespace
             }
         }
         return preferredParent;
+    }
+
+    int calculateFileStandaloneWindowMaxWidth(
+        QWidget* candidateParent,
+        QWidget* fallbackWindow,
+        const double ratio,
+        const int fallbackWidth)
+    {
+        // 输入：
+        // - candidateParent：优先参考的客户区控件；
+        // - fallbackWindow：当前独立窗口，用于屏幕回退；
+        // - ratio：客户区宽度比例；
+        // - fallbackWidth：回退宽度。
+        // 处理：
+        // - 优先使用父控件 contentsRect 宽度；
+        // - 父控件不可用时使用活动窗口客户区；
+        // - 最后使用屏幕可用区域宽度。
+        // 返回：按比例计算出的最大宽度；仅在完全无法判断时使用回退宽度。
+        int clientWidth = 0;
+        if (candidateParent != nullptr && candidateParent->contentsRect().width() > 0)
+        {
+            clientWidth = candidateParent->contentsRect().width();
+        }
+
+        if (clientWidth <= 0)
+        {
+            QWidget* activeWindow = QApplication::activeWindow();
+            if (activeWindow != nullptr &&
+                activeWindow != fallbackWindow &&
+                activeWindow->contentsRect().width() > 0)
+            {
+                clientWidth = activeWindow->contentsRect().width();
+            }
+        }
+
+        QScreen* targetScreen = nullptr;
+        if (candidateParent != nullptr && candidateParent->windowHandle() != nullptr)
+        {
+            targetScreen = candidateParent->windowHandle()->screen();
+        }
+        if (targetScreen == nullptr && fallbackWindow != nullptr && fallbackWindow->windowHandle() != nullptr)
+        {
+            targetScreen = fallbackWindow->windowHandle()->screen();
+        }
+        if (targetScreen == nullptr)
+        {
+            targetScreen = QApplication::primaryScreen();
+        }
+        if (clientWidth <= 0 && targetScreen != nullptr)
+        {
+            clientWidth = targetScreen->availableGeometry().width();
+        }
+
+        const int boundedFallbackWidth = std::max(1, fallbackWidth);
+        if (clientWidth <= 0 || ratio <= 0.0)
+        {
+            return boundedFallbackWidth;
+        }
+        return std::max(1, static_cast<int>(std::floor(static_cast<double>(clientWidth) * ratio)));
+    }
+
+    void applyFileStandaloneWindowWidthLimit(
+        QWidget* window,
+        QWidget* candidateParent,
+        const QSize& preferredSize,
+        const double ratio)
+    {
+        // 输入：
+        // - window：待约束的文件属性窗口；
+        // - candidateParent：客户区宽度来源；
+        // - preferredSize：原始设计尺寸；
+        // - ratio：最大宽度比例。
+        // 处理：设置 maximumWidth 并裁剪初始 resize 宽度。
+        // 返回：无。
+        if (window == nullptr)
+        {
+            return;
+        }
+
+        const int maxWidth = calculateFileStandaloneWindowMaxWidth(
+            candidateParent,
+            window,
+            ratio,
+            preferredSize.width());
+        window->setMaximumWidth(maxWidth);
+        window->resize(std::min(preferredSize.width(), maxWidth), preferredSize.height());
     }
 
     // buildOpaqueStandaloneDialogStyle 作用：
@@ -1501,6 +1591,153 @@ namespace
         return rightList.isEmpty() ? QStringLiteral("None") : rightList.join('|');
     }
 
+    struct FileSecurityAceRow
+    {
+        QString scopeText;       // scopeText：ACE 来源范围，当前主要为 DACL/SACL。
+        QString typeText;        // typeText：ACE 类型文本，例如 ACCESS_ALLOWED。
+        QString flagsText;       // flagsText：继承/审计标志文本。
+        DWORD mask = 0;          // mask：原始访问掩码，用于显示和后续编辑定位。
+        QString rightsText;      // rightsText：mask 拆解后的常见文件权限名。
+        QString sidText;         // sidText：字符串 SID，便于稳定定位。
+        QString accountText;     // accountText：LookupAccountSidW 解析出的账户名。
+        DWORD aceIndex = 0;      // aceIndex：ACL 内 ACE 序号。
+        bool canEdit = false;    // canEdit：当前 UI 是否允许对该 ACE 执行删除/替换。
+    };
+
+    struct FileSecuritySnapshot
+    {
+        bool descriptorOk = false;        // descriptorOk：Owner/Group/DACL 是否读取成功。
+        bool saclOk = false;              // saclOk：SACL 是否读取成功。
+        DWORD descriptorError = ERROR_SUCCESS; // descriptorError：读取 Owner/Group/DACL 的 Win32 错误码。
+        DWORD saclError = ERROR_SUCCESS;       // saclError：读取 SACL 的 Win32 错误码。
+        QString ownerSidText;             // ownerSidText：Owner SID 字符串。
+        QString ownerAccountText;         // ownerAccountText：Owner 账户文本。
+        QString groupSidText;             // groupSidText：Primary Group SID 字符串。
+        QString groupAccountText;         // groupAccountText：Primary Group 账户文本。
+        QString detailText;               // detailText：兼容旧版本的完整文本明细，读取失败也会保留错误。
+        std::vector<FileSecurityAceRow> aceRows; // aceRows：表格化 ACE 列表。
+    };
+
+    // appendAclRows：
+    // - 输入 scopeText/aclValue：ACL 名称与 Windows ACL 指针。
+    // - 处理：解析支持的 ACE 结构并转换为 UI 表格行；未知 ACE 仍进入文本明细。
+    // - 返回：无，解析出的行追加到 rowsOut。
+    void appendAclRows(const QString& scopeText, PACL aclValue, std::vector<FileSecurityAceRow>& rowsOut)
+    {
+        if (aclValue == nullptr)
+        {
+            return;
+        }
+
+        ACL_SIZE_INFORMATION aclSizeInfo{};
+        if (::GetAclInformation(
+            aclValue,
+            &aclSizeInfo,
+            static_cast<DWORD>(sizeof(aclSizeInfo)),
+            AclSizeInformation) == FALSE)
+        {
+            return;
+        }
+
+        for (DWORD aceIndex = 0; aceIndex < aclSizeInfo.AceCount; ++aceIndex)
+        {
+            LPVOID acePointer = nullptr;
+            if (::GetAce(aclValue, aceIndex, &acePointer) == FALSE || acePointer == nullptr)
+            {
+                continue;
+            }
+
+            ACE_HEADER* aceHeader = reinterpret_cast<ACE_HEADER*>(acePointer);
+            DWORD accessMask = 0;
+            PSID aceSid = nullptr;
+            bool editableAce = false;
+
+            switch (aceHeader->AceType)
+            {
+            case ACCESS_ALLOWED_ACE_TYPE:
+            {
+                ACCESS_ALLOWED_ACE* aceBody = reinterpret_cast<ACCESS_ALLOWED_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                editableAce = scopeText == QStringLiteral("DACL") && (aceHeader->AceFlags & INHERITED_ACE) == 0;
+                break;
+            }
+            case ACCESS_DENIED_ACE_TYPE:
+            {
+                ACCESS_DENIED_ACE* aceBody = reinterpret_cast<ACCESS_DENIED_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                editableAce = scopeText == QStringLiteral("DACL") && (aceHeader->AceFlags & INHERITED_ACE) == 0;
+                break;
+            }
+            case SYSTEM_AUDIT_ACE_TYPE:
+            {
+                SYSTEM_AUDIT_ACE* aceBody = reinterpret_cast<SYSTEM_AUDIT_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                break;
+            }
+            case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+            {
+                ACCESS_ALLOWED_OBJECT_ACE* aceBody = reinterpret_cast<ACCESS_ALLOWED_OBJECT_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                break;
+            }
+            case ACCESS_DENIED_OBJECT_ACE_TYPE:
+            {
+                ACCESS_DENIED_OBJECT_ACE* aceBody = reinterpret_cast<ACCESS_DENIED_OBJECT_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                break;
+            }
+            case SYSTEM_AUDIT_OBJECT_ACE_TYPE:
+            {
+                SYSTEM_AUDIT_OBJECT_ACE* aceBody = reinterpret_cast<SYSTEM_AUDIT_OBJECT_ACE*>(acePointer);
+                accessMask = aceBody->Mask;
+                aceSid = reinterpret_cast<PSID>(&aceBody->SidStart);
+                break;
+            }
+            default:
+                break;
+            }
+
+            FileSecurityAceRow row;
+            row.scopeText = scopeText;
+            row.typeText = aceTypeToText(aceHeader->AceType);
+            row.flagsText = aceFlagsToText(aceHeader->AceFlags);
+            row.mask = accessMask;
+            row.rightsText = accessMaskToText(accessMask);
+            row.sidText = sidToStringText(aceSid);
+            row.accountText = sidToAccountText(aceSid);
+            row.aceIndex = aceIndex;
+            row.canEdit = editableAce && aceSid != nullptr;
+            rowsOut.push_back(row);
+        }
+    }
+
+    // createReadonlyTableItem：
+    // - 输入 cellText：待展示文本。
+    // - 处理：创建不可编辑表格单元格，避免权限表误触编辑。
+    // - 返回：新建 QTableWidgetItem，由表格接管生命周期。
+    QTableWidgetItem* createReadonlyTableItem(const QString& cellText)
+    {
+        QTableWidgetItem* item = new QTableWidgetItem(cellText);
+        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+        return item;
+    }
+
+    // formatAccessMaskHex：
+    // - 输入 accessMask：Win32 文件访问掩码。
+    // - 处理：统一格式化为 8 位十六进制。
+    // - 返回：0x 前缀大写文本。
+    QString formatAccessMaskHex(const DWORD accessMask)
+    {
+        return QStringLiteral("0x%1")
+            .arg(accessMask, 8, 16, QLatin1Char('0'))
+            .toUpper();
+    }
+
     // appendAclText 作用：
     // - 解析 ACL 中每一条 ACE，输出类型、标志、掩码、SID 与账户名；
     // - titleText 用于区分 DACL 与 SACL 段落。
@@ -1611,7 +1848,14 @@ namespace
             setAutoFillBackground(true);
             setStyleSheet(buildOpaqueStandaloneDialogStyle(objectName()));
             setWindowTitle(QStringLiteral("文件属性 - %1").arg(QFileInfo(filePath).fileName()));
-            resize(980, 680);
+            // 文件属性窗内容可能包含超长路径、证书链和 PE 字段：
+            // - 最大宽度按父窗口客户区 75% 限制；
+            // - 初始宽度同步裁剪，防止窗口被长文本撑出屏幕。
+            applyFileStandaloneWindowWidthLimit(
+                this,
+                resolveVisibleDialogParent(parent),
+                QSize(980, 680),
+                0.75);
 
             QVBoxLayout* rootLayout = new QVBoxLayout(this);
             QTabWidget* tabWidget = new QTabWidget(this);
@@ -2137,12 +2381,13 @@ namespace
             QThreadPool::globalInstance()->start(task);
         }
 
-        static QString buildSecurityDeepText(const QString& nativePath)
+        static FileSecuritySnapshot loadFileSecuritySnapshot(const QString& nativePath)
         {
-            // 用途：读取 Owner/Group/DACL/SACL 并生成权限明细文本。
+            // 用途：读取 Owner/Group/DACL/SACL 并生成权限页快照。
             // 输入：nativePath 为 Windows 本机路径；调用者确保在后台线程执行。
-            // 处理：GetNamedSecurityInfoW 返回的安全描述符在本函数内 LocalFree。
-            // 返回：可追加到安全页的深层 ACL/SID 文本；失败时包含错误码。
+            // 处理：同步调用 Windows 安全 API，同时保留旧文本明细和新表格行。
+            // 返回：FileSecuritySnapshot；读取失败时 detailText 包含错误码，aceRows 可为空。
+            FileSecuritySnapshot snapshot;
             QString content;
             std::wstring nativePathBuffer = nativePath.toStdWString();
 
@@ -2162,21 +2407,29 @@ namespace
                 &dacl,
                 nullptr,
                 &securityDescriptor);
+            snapshot.descriptorError = queryResult;
             if (queryResult != ERROR_SUCCESS)
             {
                 content += QStringLiteral("\n深层安全描述符读取失败, code=%1\n").arg(queryResult);
             }
             else
             {
+                snapshot.descriptorOk = true;
+                snapshot.ownerSidText = sidToStringText(ownerSid);
+                snapshot.ownerAccountText = sidToAccountText(ownerSid);
+                snapshot.groupSidText = sidToStringText(groupSid);
+                snapshot.groupAccountText = sidToAccountText(groupSid);
+
                 content += QStringLiteral("\n[Owner]\n");
-                content += QStringLiteral("SID: %1\n").arg(sidToStringText(ownerSid));
-                content += QStringLiteral("账户: %1\n").arg(sidToAccountText(ownerSid));
+                content += QStringLiteral("SID: %1\n").arg(snapshot.ownerSidText);
+                content += QStringLiteral("账户: %1\n").arg(snapshot.ownerAccountText);
 
                 content += QStringLiteral("\n[Primary Group]\n");
-                content += QStringLiteral("SID: %1\n").arg(sidToStringText(groupSid));
-                content += QStringLiteral("账户: %1\n").arg(sidToAccountText(groupSid));
+                content += QStringLiteral("SID: %1\n").arg(snapshot.groupSidText);
+                content += QStringLiteral("账户: %1\n").arg(snapshot.groupAccountText);
 
                 appendAclText(QStringLiteral("DACL"), dacl, content);
+                appendAclRows(QStringLiteral("DACL"), dacl, snapshot.aceRows);
                 ::LocalFree(securityDescriptor);
             }
 
@@ -2193,9 +2446,12 @@ namespace
                 nullptr,
                 &sacl,
                 &saclDescriptor);
+            snapshot.saclError = saclResult;
             if (saclResult == ERROR_SUCCESS)
             {
+                snapshot.saclOk = true;
                 appendAclText(QStringLiteral("SACL"), sacl, content);
+                appendAclRows(QStringLiteral("SACL"), sacl, snapshot.aceRows);
                 ::LocalFree(saclDescriptor);
             }
             else
@@ -2205,30 +2461,123 @@ namespace
             }
 
             content += QStringLiteral("\n说明：Mask 显示为十六进制，权限列为常见位标志拆解。");
-            return content;
+            snapshot.detailText = content;
+            return snapshot;
         }
 
-        void startSecurityDeepLoad(CodeEditorWidget* textEditorWidget, const QString& baseContent, const QString& nativePath)
+        static QString buildSecurityDeepText(const QString& nativePath)
         {
-            // 用途：后台执行深层 ACL/SACL 解析。
+            // 用途：兼容旧调用点，生成纯文本安全描述符明细。
+            // 输入：nativePath 为 Windows 本机路径。
+            // 处理：委托 loadFileSecuritySnapshot，避免维护两套 ACL 解析逻辑。
+            // 返回：可展示文本；失败时包含错误码。
+            return loadFileSecuritySnapshot(nativePath).detailText;
+        }
+
+        void populateSecurityWidgets(
+            QTableWidget* aceTable,
+            CodeEditorWidget* detailEditor,
+            QLabel* statusLabel,
+            const QString& baseContent,
+            const FileSecuritySnapshot& snapshot)
+        {
+            // 用途：把后台读取的权限快照回填到权限页 UI。
+            // 输入：aceTable/detailEditor/statusLabel 为目标控件，snapshot 为读取结果。
+            // 处理：表格展示可编辑 DACL ACE，详情框保留完整文本和错误码。
+            // 返回：无；控件为空时跳过对应更新。
+            if (aceTable != nullptr)
+            {
+                aceTable->setSortingEnabled(false);
+                aceTable->setRowCount(static_cast<int>(snapshot.aceRows.size()));
+                for (int rowIndex = 0; rowIndex < static_cast<int>(snapshot.aceRows.size()); ++rowIndex)
+                {
+                    const FileSecurityAceRow& row = snapshot.aceRows[static_cast<std::size_t>(rowIndex)];
+                    aceTable->setItem(rowIndex, 0, createReadonlyTableItem(row.scopeText));
+                    aceTable->setItem(rowIndex, 1, createReadonlyTableItem(QString::number(row.aceIndex)));
+                    aceTable->setItem(rowIndex, 2, createReadonlyTableItem(row.typeText));
+                    aceTable->setItem(rowIndex, 3, createReadonlyTableItem(row.accountText));
+                    aceTable->setItem(rowIndex, 4, createReadonlyTableItem(row.sidText));
+                    aceTable->setItem(rowIndex, 5, createReadonlyTableItem(formatAccessMaskHex(row.mask)));
+                    aceTable->setItem(rowIndex, 6, createReadonlyTableItem(row.rightsText));
+                    aceTable->setItem(rowIndex, 7, createReadonlyTableItem(row.flagsText));
+                    aceTable->setItem(rowIndex, 8, createReadonlyTableItem(row.canEdit ? QStringLiteral("可编辑") : QStringLiteral("只读展示")));
+                    for (int columnIndex = 0; columnIndex < aceTable->columnCount(); ++columnIndex)
+                    {
+                        QTableWidgetItem* item = aceTable->item(rowIndex, columnIndex);
+                        if (item == nullptr)
+                        {
+                            continue;
+                        }
+                        item->setData(Qt::UserRole + 1, row.scopeText);
+                        item->setData(Qt::UserRole + 2, static_cast<qulonglong>(row.aceIndex));
+                        item->setData(Qt::UserRole + 3, row.sidText);
+                        item->setData(Qt::UserRole + 4, row.typeText);
+                        item->setData(Qt::UserRole + 5, static_cast<qulonglong>(row.mask));
+                        item->setData(Qt::UserRole + 6, row.canEdit);
+                    }
+                }
+                aceTable->setSortingEnabled(true);
+                aceTable->resizeColumnsToContents();
+            }
+
+            if (detailEditor != nullptr)
+            {
+                QString detailText = baseContent;
+                if (snapshot.descriptorOk)
+                {
+                    detailText += QStringLiteral("\n[摘要]\nOwner: %1 | %2\nPrimary Group: %3 | %4\n")
+                        .arg(snapshot.ownerAccountText)
+                        .arg(snapshot.ownerSidText)
+                        .arg(snapshot.groupAccountText)
+                        .arg(snapshot.groupSidText);
+                }
+                detailText += snapshot.detailText;
+                detailEditor->setText(detailText);
+            }
+
+            if (statusLabel != nullptr)
+            {
+                const QString daclState = snapshot.descriptorOk
+                    ? QStringLiteral("DACL 已读取")
+                    : QStringLiteral("DACL 读取失败:%1").arg(snapshot.descriptorError);
+                const QString saclState = snapshot.saclOk
+                    ? QStringLiteral("SACL 已读取")
+                    : QStringLiteral("SACL 只读失败:%1").arg(snapshot.saclError);
+                statusLabel->setText(QStringLiteral("● %1；%2；ACE=%3")
+                    .arg(daclState)
+                    .arg(saclState)
+                    .arg(snapshot.aceRows.size()));
+            }
+        }
+
+        void startSecurityDeepLoad(
+            QTableWidget* aceTable,
+            CodeEditorWidget* detailEditor,
+            QLabel* statusLabel,
+            const QString& baseContent,
+            const QString& nativePath)
+        {
+            // 用途：后台执行深层 ACL/SACL 解析并刷新权限页 UI。
             // 输入：baseContent 为快速权限摘要，nativePath 为目标路径。
-            // 处理：工作线程调用 Windows 安全 API，结束后一次性回填编辑器。
+            // 处理：工作线程读取安全描述符，UI 线程更新表格、状态和详情文本。
             // 返回：无；控件失效时丢弃结果。
-            if (textEditorWidget == nullptr)
+            if (aceTable == nullptr || detailEditor == nullptr || statusLabel == nullptr)
             {
                 return;
             }
 
             QPointer<FileDetailDialog> guardThis(this);
-            QPointer<CodeEditorWidget> editorGuard(textEditorWidget);
-            auto* task = QRunnable::create([guardThis, editorGuard, baseContent, nativePath]()
+            QPointer<QTableWidget> tableGuard(aceTable);
+            QPointer<CodeEditorWidget> editorGuard(detailEditor);
+            QPointer<QLabel> statusGuard(statusLabel);
+            auto* task = QRunnable::create([guardThis, tableGuard, editorGuard, statusGuard, baseContent, nativePath]()
                 {
                     FileDetailDialog* targetDialog = guardThis.data();
                     if (targetDialog == nullptr)
                     {
                         return;
                     }
-                    const QString deepText = FileDetailDialog::buildSecurityDeepText(nativePath);
+                    const FileSecuritySnapshot snapshot = FileDetailDialog::loadFileSecuritySnapshot(nativePath);
                     targetDialog = guardThis.data();
                     if (targetDialog == nullptr)
                     {
@@ -2237,17 +2586,400 @@ namespace
 
                     QMetaObject::invokeMethod(
                         targetDialog,
-                        [editorGuard, baseContent, deepText]()
+                        [guardThis, tableGuard, editorGuard, statusGuard, baseContent, snapshot]()
                         {
-                            if (editorGuard != nullptr)
+                            if (guardThis != nullptr)
                             {
-                                editorGuard->setText(baseContent + deepText);
+                                guardThis->populateSecurityWidgets(
+                                    tableGuard,
+                                    editorGuard,
+                                    statusGuard,
+                                    baseContent,
+                                    snapshot);
                             }
                         },
                         Qt::QueuedConnection);
                 });
             task->setAutoDelete(true);
             QThreadPool::globalInstance()->start(task);
+        }
+
+        DWORD maskFromSecurityPreset(const int presetIndex)
+        {
+            // 用途：把权限预设下拉框映射为 Windows 文件访问掩码。
+            // 输入：presetIndex 为 QComboBox 当前索引。
+            // 处理：优先覆盖常见文件安全页语义，减少用户手工拼位需求。
+            // 返回：FILE_* / 标准权限组合掩码。
+            switch (presetIndex)
+            {
+            case 0:
+                return FILE_GENERIC_READ;
+            case 1:
+                return FILE_GENERIC_WRITE;
+            case 2:
+                return FILE_GENERIC_READ | FILE_GENERIC_WRITE;
+            case 3:
+                return FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+            case 4:
+                return FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
+            case 5:
+                return FILE_ALL_ACCESS;
+            default:
+                return FILE_GENERIC_READ;
+            }
+        }
+
+        DWORD maskFromSecurityChecks(
+            QCheckBox* readCheck,
+            QCheckBox* writeCheck,
+            QCheckBox* executeCheck,
+            QCheckBox* deleteCheck,
+            QCheckBox* writeDacCheck,
+            QCheckBox* writeOwnerCheck)
+        {
+            // 用途：把高级复选框合成为访问掩码。
+            // 输入：各权限复选框控件，可为空。
+            // 处理：只采纳勾选的权限位；未勾选时返回 0。
+            // 返回：访问掩码。
+            DWORD mask = 0;
+            if (readCheck != nullptr && readCheck->isChecked()) mask |= FILE_GENERIC_READ;
+            if (writeCheck != nullptr && writeCheck->isChecked()) mask |= FILE_GENERIC_WRITE;
+            if (executeCheck != nullptr && executeCheck->isChecked()) mask |= FILE_GENERIC_EXECUTE;
+            if (deleteCheck != nullptr && deleteCheck->isChecked()) mask |= DELETE;
+            if (writeDacCheck != nullptr && writeDacCheck->isChecked()) mask |= WRITE_DAC;
+            if (writeOwnerCheck != nullptr && writeOwnerCheck->isChecked()) mask |= WRITE_OWNER;
+            return mask;
+        }
+
+        DWORD inheritanceFlagsFromCombo(const int inheritIndex)
+        {
+            // 用途：把继承范围下拉框映射为 EXPLICIT_ACCESS 继承标志。
+            // 输入：inheritIndex 为 QComboBox 当前索引。
+            // 处理：文件默认不继承，目录可选择子对象继承。
+            // 返回：NO_INHERITANCE / SUB_CONTAINERS_AND_OBJECTS_INHERIT 等标志。
+            switch (inheritIndex)
+            {
+            case 1:
+                return SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+            case 2:
+                return SUB_OBJECTS_ONLY_INHERIT;
+            case 3:
+                return SUB_CONTAINERS_ONLY_INHERIT;
+            default:
+                return NO_INHERITANCE;
+            }
+        }
+
+        bool extractAceSidAndType(LPVOID acePointer, BYTE* aceTypeOut, PSID* sidOut)
+        {
+            // 用途：从常见 ACE 结构取出 AceType 与 SID 指针。
+            // 输入：acePointer 来自 GetAce。
+            // 处理：只解析当前 UI 支持删除的 DACL ACE 类型。
+            // 返回：成功解析返回 true；未知类型返回 false。
+            if (acePointer == nullptr || aceTypeOut == nullptr || sidOut == nullptr)
+            {
+                return false;
+            }
+
+            ACE_HEADER* aceHeader = reinterpret_cast<ACE_HEADER*>(acePointer);
+            *aceTypeOut = aceHeader->AceType;
+            *sidOut = nullptr;
+            switch (aceHeader->AceType)
+            {
+            case ACCESS_ALLOWED_ACE_TYPE:
+                *sidOut = reinterpret_cast<PSID>(&reinterpret_cast<ACCESS_ALLOWED_ACE*>(acePointer)->SidStart);
+                return true;
+            case ACCESS_DENIED_ACE_TYPE:
+                *sidOut = reinterpret_cast<PSID>(&reinterpret_cast<ACCESS_DENIED_ACE*>(acePointer)->SidStart);
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        DWORD applySecurityAceChange(
+            const QString& accountText,
+            const DWORD accessMask,
+            const ACCESS_MODE accessMode,
+            const DWORD inheritanceFlags,
+            QString& detailTextOut)
+        {
+            // 用途：添加或设置一个 DACL ACE。
+            // 输入：accountText 为账户名或 SID 字符串，accessMask 为权限掩码，accessMode 为允许/拒绝模式。
+            // 处理：读取现有 DACL，调用 SetEntriesInAclW 合成新 DACL，再写回文件对象。
+            // 返回：Win32 错误码；ERROR_SUCCESS 表示写入成功。
+            const QString normalizedAccount = accountText.trimmed();
+            if (normalizedAccount.isEmpty())
+            {
+                detailTextOut = QStringLiteral("账户不能为空。可填写 DOMAIN\\User、BUILTIN\\Administrators 或 S-1-...。");
+                return ERROR_INVALID_PARAMETER;
+            }
+            if (accessMask == 0)
+            {
+                detailTextOut = QStringLiteral("权限掩码为 0，未执行写入。");
+                return ERROR_INVALID_PARAMETER;
+            }
+
+            std::wstring pathBuffer = QDir::toNativeSeparators(m_filePath).toStdWString();
+            PACL oldDacl = nullptr;
+            PSECURITY_DESCRIPTOR securityDescriptor = nullptr;
+            DWORD result = ::GetNamedSecurityInfoW(
+                pathBuffer.data(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                nullptr,
+                nullptr,
+                &oldDacl,
+                nullptr,
+                &securityDescriptor);
+            if (result != ERROR_SUCCESS)
+            {
+                detailTextOut = QStringLiteral("读取现有 DACL 失败，code=%1。").arg(result);
+                return result;
+            }
+
+            std::wstring accountBuffer = normalizedAccount.toStdWString();
+            PSID trusteeSid = nullptr;
+            const bool accountLooksLikeSid = normalizedAccount.startsWith(QStringLiteral("S-"), Qt::CaseInsensitive);
+            if (accountLooksLikeSid)
+            {
+                if (::ConvertStringSidToSidW(accountBuffer.c_str(), &trusteeSid) == FALSE || trusteeSid == nullptr)
+                {
+                    result = ::GetLastError();
+                    if (securityDescriptor != nullptr)
+                    {
+                        ::LocalFree(securityDescriptor);
+                    }
+                    detailTextOut = QStringLiteral("SID 字符串解析失败，code=%1，SID=%2。")
+                        .arg(result)
+                        .arg(normalizedAccount);
+                    return result;
+                }
+            }
+
+            EXPLICIT_ACCESS_W explicitAccess{};
+            explicitAccess.grfAccessPermissions = accessMask;
+            explicitAccess.grfAccessMode = accessMode;
+            explicitAccess.grfInheritance = inheritanceFlags;
+            explicitAccess.Trustee.TrusteeForm = accountLooksLikeSid ? TRUSTEE_IS_SID : TRUSTEE_IS_NAME;
+            explicitAccess.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
+            explicitAccess.Trustee.ptstrName = accountLooksLikeSid
+                ? reinterpret_cast<LPWSTR>(trusteeSid)
+                : accountBuffer.data();
+
+            PACL newDacl = nullptr;
+            result = ::SetEntriesInAclW(1, &explicitAccess, oldDacl, &newDacl);
+            if (result == ERROR_SUCCESS)
+            {
+                result = ::SetNamedSecurityInfoW(
+                    pathBuffer.data(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    nullptr,
+                    nullptr,
+                    newDacl,
+                    nullptr);
+            }
+
+            if (newDacl != nullptr)
+            {
+                ::LocalFree(newDacl);
+            }
+            if (trusteeSid != nullptr)
+            {
+                ::LocalFree(trusteeSid);
+            }
+            if (securityDescriptor != nullptr)
+            {
+                ::LocalFree(securityDescriptor);
+            }
+
+            detailTextOut = result == ERROR_SUCCESS
+                ? QStringLiteral("已写入 DACL：账户=%1，模式=%2，Mask=%3，继承标志=0x%4。")
+                    .arg(normalizedAccount)
+                    .arg(accessMode == DENY_ACCESS ? QStringLiteral("拒绝") : QStringLiteral("允许/设置"))
+                    .arg(formatAccessMaskHex(accessMask))
+                    .arg(inheritanceFlags, 0, 16)
+                : QStringLiteral("写入 DACL 失败，code=%1。账户=%2，Mask=%3。")
+                    .arg(result)
+                    .arg(normalizedAccount)
+                    .arg(formatAccessMaskHex(accessMask));
+            return result;
+        }
+
+        DWORD deleteSelectedDaclAce(QTableWidget* aceTable, QString& detailTextOut)
+        {
+            // 用途：删除权限表中当前选中的非继承 DACL ACE。
+            // 输入：aceTable 为权限页 ACE 表格，当前行保存 SID/类型/序号元数据。
+            // 处理：读取现有 DACL，复制除目标 ACE 外的原始 ACE 字节，最后 SetNamedSecurityInfoW 写回。
+            // 返回：Win32 错误码；ERROR_SUCCESS 表示删除成功。
+            if (aceTable == nullptr || aceTable->currentRow() < 0)
+            {
+                detailTextOut = QStringLiteral("请先在 DACL 表格中选择一条可编辑 ACE。");
+                return ERROR_INVALID_PARAMETER;
+            }
+
+            const int rowIndex = aceTable->currentRow();
+            QTableWidgetItem* firstItem = aceTable->item(rowIndex, 0);
+            if (firstItem == nullptr)
+            {
+                detailTextOut = QStringLiteral("选中行无元数据，无法删除。");
+                return ERROR_INVALID_PARAMETER;
+            }
+
+            const QString scopeText = firstItem->data(Qt::UserRole + 1).toString();
+            const DWORD selectedAceIndex = firstItem->data(Qt::UserRole + 2).toUInt();
+            const QString selectedSidText = firstItem->data(Qt::UserRole + 3).toString();
+            const QString selectedTypeText = firstItem->data(Qt::UserRole + 4).toString();
+            const bool canEdit = firstItem->data(Qt::UserRole + 6).toBool();
+            if (scopeText != QStringLiteral("DACL") || !canEdit)
+            {
+                detailTextOut = QStringLiteral("当前 ACE 只能展示，不能由此按钮修改。继承 ACE、SACL 和对象 ACE 需要在来源对象或审计页处理。");
+                return ERROR_ACCESS_DENIED;
+            }
+
+            std::wstring pathBuffer = QDir::toNativeSeparators(m_filePath).toStdWString();
+            PACL oldDacl = nullptr;
+            PSECURITY_DESCRIPTOR securityDescriptor = nullptr;
+            DWORD result = ::GetNamedSecurityInfoW(
+                pathBuffer.data(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                nullptr,
+                nullptr,
+                &oldDacl,
+                nullptr,
+                &securityDescriptor);
+            if (result != ERROR_SUCCESS)
+            {
+                detailTextOut = QStringLiteral("读取现有 DACL 失败，code=%1。").arg(result);
+                return result;
+            }
+            if (oldDacl == nullptr)
+            {
+                if (securityDescriptor != nullptr)
+                {
+                    ::LocalFree(securityDescriptor);
+                }
+                detailTextOut = QStringLiteral("当前 DACL 为空，无法删除 ACE。");
+                return ERROR_NOT_FOUND;
+            }
+
+            ACL_SIZE_INFORMATION aclSizeInfo{};
+            if (::GetAclInformation(oldDacl, &aclSizeInfo, sizeof(aclSizeInfo), AclSizeInformation) == FALSE)
+            {
+                result = ::GetLastError();
+                ::LocalFree(securityDescriptor);
+                detailTextOut = QStringLiteral("读取 ACL 信息失败，code=%1。").arg(result);
+                return result;
+            }
+
+            DWORD newAclBytes = sizeof(ACL);
+            bool targetFound = false;
+            for (DWORD aceIndex = 0; aceIndex < aclSizeInfo.AceCount; ++aceIndex)
+            {
+                LPVOID acePointer = nullptr;
+                if (::GetAce(oldDacl, aceIndex, &acePointer) == FALSE || acePointer == nullptr)
+                {
+                    result = ::GetLastError();
+                    ::LocalFree(securityDescriptor);
+                    detailTextOut = QStringLiteral("读取 ACE[%1] 失败，code=%2。").arg(aceIndex).arg(result);
+                    return result;
+                }
+
+                ACE_HEADER* aceHeader = reinterpret_cast<ACE_HEADER*>(acePointer);
+                BYTE aceType = 0;
+                PSID aceSid = nullptr;
+                const bool sidOk = extractAceSidAndType(acePointer, &aceType, &aceSid);
+                const bool isTarget = sidOk
+                    && aceIndex == selectedAceIndex
+                    && aceTypeToText(aceType) == selectedTypeText
+                    && sidToStringText(aceSid) == selectedSidText
+                    && (aceHeader->AceFlags & INHERITED_ACE) == 0;
+                if (isTarget)
+                {
+                    targetFound = true;
+                    continue;
+                }
+                newAclBytes += aceHeader->AceSize;
+            }
+
+            if (!targetFound)
+            {
+                ::LocalFree(securityDescriptor);
+                detailTextOut = QStringLiteral("未在当前 DACL 中找到匹配 ACE，可能权限已被其它进程修改。请刷新后重试。");
+                return ERROR_NOT_FOUND;
+            }
+
+            PACL newDacl = reinterpret_cast<PACL>(::LocalAlloc(LPTR, newAclBytes));
+            if (newDacl == nullptr)
+            {
+                result = ::GetLastError();
+                ::LocalFree(securityDescriptor);
+                detailTextOut = QStringLiteral("分配新 DACL 失败，code=%1。").arg(result);
+                return result;
+            }
+
+            const DWORD aclRevision = oldDacl->AclRevision;
+            if (::InitializeAcl(newDacl, newAclBytes, aclRevision) == FALSE)
+            {
+                result = ::GetLastError();
+                ::LocalFree(newDacl);
+                ::LocalFree(securityDescriptor);
+                detailTextOut = QStringLiteral("初始化新 DACL 失败，code=%1。").arg(result);
+                return result;
+            }
+
+            for (DWORD aceIndex = 0; aceIndex < aclSizeInfo.AceCount; ++aceIndex)
+            {
+                LPVOID acePointer = nullptr;
+                if (::GetAce(oldDacl, aceIndex, &acePointer) == FALSE || acePointer == nullptr)
+                {
+                    result = ::GetLastError();
+                    ::LocalFree(newDacl);
+                    ::LocalFree(securityDescriptor);
+                    detailTextOut = QStringLiteral("复制 ACE[%1] 前读取失败，code=%2。").arg(aceIndex).arg(result);
+                    return result;
+                }
+
+                ACE_HEADER* aceHeader = reinterpret_cast<ACE_HEADER*>(acePointer);
+                BYTE aceType = 0;
+                PSID aceSid = nullptr;
+                const bool sidOk = extractAceSidAndType(acePointer, &aceType, &aceSid);
+                const bool isTarget = sidOk
+                    && aceIndex == selectedAceIndex
+                    && aceTypeToText(aceType) == selectedTypeText
+                    && sidToStringText(aceSid) == selectedSidText
+                    && (aceHeader->AceFlags & INHERITED_ACE) == 0;
+                if (isTarget)
+                {
+                    continue;
+                }
+                if (::AddAce(newDacl, aclRevision, MAXDWORD, acePointer, aceHeader->AceSize) == FALSE)
+                {
+                    result = ::GetLastError();
+                    ::LocalFree(newDacl);
+                    ::LocalFree(securityDescriptor);
+                    detailTextOut = QStringLiteral("复制 ACE[%1] 到新 DACL 失败，code=%2。").arg(aceIndex).arg(result);
+                    return result;
+                }
+            }
+
+            result = ::SetNamedSecurityInfoW(
+                pathBuffer.data(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                nullptr,
+                nullptr,
+                newDacl,
+                nullptr);
+            ::LocalFree(newDacl);
+            ::LocalFree(securityDescriptor);
+
+            detailTextOut = result == ERROR_SUCCESS
+                ? QStringLiteral("已删除 ACE[%1]：%2 | %3。").arg(selectedAceIndex).arg(selectedTypeText, selectedSidText)
+                : QStringLiteral("删除 ACE 写回失败，code=%1。").arg(result);
+            return result;
         }
 
         void startSignatureLoad(CodeEditorWidget* textEditorWidget)
@@ -2837,25 +3569,254 @@ namespace
         {
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
-            CodeEditorWidget* textEditorWidget = new CodeEditorWidget(page);
-            textEditorWidget->setReadOnly(true);
 
-            QString content;
             const QString nativePath = QDir::toNativeSeparators(m_filePath);
-            content += QStringLiteral("目标路径: %1\n").arg(nativePath);
+            QString baseContent;
+            baseContent += QStringLiteral("目标路径: %1\n").arg(nativePath);
 
             // 先给出 Qt 维度的快速权限摘要，便于与 ACL 细节对照。
             QFileInfo info(m_filePath);
-            content += QStringLiteral("快速权限摘要:\n");
-            content += QStringLiteral("Read: %1\n").arg(info.isReadable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
-            content += QStringLiteral("Write: %1\n").arg(info.isWritable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
-            content += QStringLiteral("Execute: %1\n").arg(info.isExecutable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
-            const QString baseContent = content;
-            content += QStringLiteral("\n深层 Owner/Group/DACL/SACL 正在后台加载...\n");
-            textEditorWidget->setText(content);
+            baseContent += QStringLiteral("快速权限摘要:\n");
+            baseContent += QStringLiteral("Read: %1\n").arg(info.isReadable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
+            baseContent += QStringLiteral("Write: %1\n").arg(info.isWritable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
+            baseContent += QStringLiteral("Execute: %1\n").arg(info.isExecutable() ? QStringLiteral("允许") : QStringLiteral("拒绝"));
 
-            layout->addWidget(textEditorWidget, 1);
-            startSecurityDeepLoad(textEditorWidget, baseContent, nativePath);
+            QGroupBox* operationGroup = new QGroupBox(QStringLiteral("权限编辑"), page);
+            QGridLayout* operationLayout = new QGridLayout(operationGroup);
+
+            QLineEdit* accountEdit = new QLineEdit(operationGroup);
+            accountEdit->setPlaceholderText(QStringLiteral("账户或 SID，例如 BUILTIN\\Administrators / Everyone / S-1-5-32-544"));
+            accountEdit->setStyleSheet(buildBlueInputStyle());
+
+            QComboBox* accessModeCombo = new QComboBox(operationGroup);
+            accessModeCombo->setStyleSheet(buildBlueInputStyle());
+            accessModeCombo->addItem(QStringLiteral("允许：添加/合并"), static_cast<int>(GRANT_ACCESS));
+            accessModeCombo->addItem(QStringLiteral("允许：替换该主体权限"), static_cast<int>(SET_ACCESS));
+            accessModeCombo->addItem(QStringLiteral("拒绝：添加/合并"), static_cast<int>(DENY_ACCESS));
+
+            QComboBox* presetCombo = new QComboBox(operationGroup);
+            presetCombo->setStyleSheet(buildBlueInputStyle());
+            presetCombo->addItems(QStringList{
+                QStringLiteral("读取"),
+                QStringLiteral("写入"),
+                QStringLiteral("读取 + 写入"),
+                QStringLiteral("读取 + 执行"),
+                QStringLiteral("修改"),
+                QStringLiteral("完全控制") });
+            presetCombo->setCurrentIndex(4);
+
+            QLineEdit* customMaskEdit = new QLineEdit(operationGroup);
+            customMaskEdit->setPlaceholderText(QStringLiteral("可选自定义 Mask，如 0x001F01FF；留空使用预设/复选框"));
+            customMaskEdit->setStyleSheet(buildBlueInputStyle());
+
+            QComboBox* inheritanceCombo = new QComboBox(operationGroup);
+            inheritanceCombo->setStyleSheet(buildBlueInputStyle());
+            inheritanceCombo->addItems(QStringList{
+                QStringLiteral("仅当前对象"),
+                QStringLiteral("目录和文件继承"),
+                QStringLiteral("仅文件继承"),
+                QStringLiteral("仅目录继承") });
+
+            QCheckBox* readCheck = new QCheckBox(QStringLiteral("读"), operationGroup);
+            QCheckBox* writeCheck = new QCheckBox(QStringLiteral("写"), operationGroup);
+            QCheckBox* executeCheck = new QCheckBox(QStringLiteral("执行"), operationGroup);
+            QCheckBox* deleteCheck = new QCheckBox(QStringLiteral("删除"), operationGroup);
+            QCheckBox* writeDacCheck = new QCheckBox(QStringLiteral("改 DACL"), operationGroup);
+            QCheckBox* writeOwnerCheck = new QCheckBox(QStringLiteral("改所有者"), operationGroup);
+
+            QPushButton* applyAceButton = new QPushButton(QStringLiteral("应用 ACE"), operationGroup);
+            QPushButton* deleteAceButton = new QPushButton(QStringLiteral("删除选中 ACE"), operationGroup);
+            QPushButton* refreshButton = new QPushButton(QStringLiteral("刷新权限"), operationGroup);
+            applyAceButton->setStyleSheet(buildBlueButtonStyle());
+            deleteAceButton->setStyleSheet(buildBlueButtonStyle());
+            refreshButton->setStyleSheet(buildBlueButtonStyle());
+
+            operationLayout->addWidget(new QLabel(QStringLiteral("主体"), operationGroup), 0, 0);
+            operationLayout->addWidget(accountEdit, 0, 1, 1, 5);
+            operationLayout->addWidget(new QLabel(QStringLiteral("动作"), operationGroup), 1, 0);
+            operationLayout->addWidget(accessModeCombo, 1, 1);
+            operationLayout->addWidget(new QLabel(QStringLiteral("预设"), operationGroup), 1, 2);
+            operationLayout->addWidget(presetCombo, 1, 3);
+            operationLayout->addWidget(new QLabel(QStringLiteral("继承"), operationGroup), 1, 4);
+            operationLayout->addWidget(inheritanceCombo, 1, 5);
+            operationLayout->addWidget(new QLabel(QStringLiteral("权限位"), operationGroup), 2, 0);
+            operationLayout->addWidget(readCheck, 2, 1);
+            operationLayout->addWidget(writeCheck, 2, 2);
+            operationLayout->addWidget(executeCheck, 2, 3);
+            operationLayout->addWidget(deleteCheck, 2, 4);
+            operationLayout->addWidget(writeDacCheck, 2, 5);
+            operationLayout->addWidget(writeOwnerCheck, 3, 1);
+            operationLayout->addWidget(new QLabel(QStringLiteral("Mask"), operationGroup), 4, 0);
+            operationLayout->addWidget(customMaskEdit, 4, 1, 1, 3);
+            operationLayout->addWidget(applyAceButton, 4, 4);
+            operationLayout->addWidget(deleteAceButton, 4, 5);
+            operationLayout->addWidget(refreshButton, 5, 5);
+            layout->addWidget(operationGroup, 0);
+
+            QLabel* statusLabel = new QLabel(QStringLiteral("● 正在读取安全描述符..."), page);
+            statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            layout->addWidget(statusLabel, 0);
+
+            QSplitter* splitter = new QSplitter(Qt::Vertical, page);
+            QTableWidget* aceTable = new QTableWidget(splitter);
+            aceTable->setColumnCount(9);
+            aceTable->setHorizontalHeaderLabels(QStringList{
+                QStringLiteral("范围"),
+                QStringLiteral("序号"),
+                QStringLiteral("类型"),
+                QStringLiteral("账户"),
+                QStringLiteral("SID"),
+                QStringLiteral("Mask"),
+                QStringLiteral("权限"),
+                QStringLiteral("标志"),
+                QStringLiteral("编辑状态")
+                });
+            aceTable->setAlternatingRowColors(true);
+            aceTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+            aceTable->setSelectionMode(QAbstractItemView::SingleSelection);
+            aceTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+            aceTable->setSortingEnabled(true);
+            if (aceTable->horizontalHeader() != nullptr)
+            {
+                aceTable->horizontalHeader()->setStretchLastSection(true);
+            }
+
+            CodeEditorWidget* detailEditor = new CodeEditorWidget(splitter);
+            detailEditor->setReadOnly(true);
+            detailEditor->setText(baseContent + QStringLiteral(
+                "\n深层 Owner/Group/DACL/SACL 正在后台加载...\n"
+                "\n操作说明：\n"
+                "- 上方表格用于结构化展示 ACE；继承 ACE、SACL、对象 ACE 默认只读展示。\n"
+                "- 应用 ACE 使用 Windows 安全 API 写 DACL，失败会保留错误码。\n"
+                "- 删除选中 ACE 只删除非继承 DACL 中精确匹配的当前 ACE。\n"));
+
+            splitter->addWidget(aceTable);
+            splitter->addWidget(detailEditor);
+            splitter->setStretchFactor(0, 3);
+            splitter->setStretchFactor(1, 2);
+            layout->addWidget(splitter, 1);
+
+            const auto syncChecksFromPreset = [this, presetCombo, readCheck, writeCheck, executeCheck, deleteCheck, writeDacCheck, writeOwnerCheck]()
+                {
+                    const DWORD presetMask = maskFromSecurityPreset(presetCombo->currentIndex());
+                    readCheck->setChecked((presetMask & FILE_GENERIC_READ) == FILE_GENERIC_READ);
+                    writeCheck->setChecked((presetMask & FILE_GENERIC_WRITE) == FILE_GENERIC_WRITE);
+                    executeCheck->setChecked((presetMask & FILE_GENERIC_EXECUTE) == FILE_GENERIC_EXECUTE);
+                    deleteCheck->setChecked((presetMask & DELETE) != 0);
+                    writeDacCheck->setChecked((presetMask & WRITE_DAC) != 0);
+                    writeOwnerCheck->setChecked((presetMask & WRITE_OWNER) != 0);
+                };
+            syncChecksFromPreset();
+            connect(presetCombo, &QComboBox::currentIndexChanged, this, [syncChecksFromPreset](int)
+                {
+                    syncChecksFromPreset();
+                });
+
+            const auto refreshSecurityUi = [this, aceTable, detailEditor, statusLabel, baseContent, nativePath]()
+                {
+                    if (aceTable != nullptr)
+                    {
+                        aceTable->setRowCount(0);
+                    }
+                    if (statusLabel != nullptr)
+                    {
+                        statusLabel->setText(QStringLiteral("● 正在读取安全描述符..."));
+                    }
+                    if (detailEditor != nullptr)
+                    {
+                        detailEditor->setText(baseContent + QStringLiteral("\n深层 Owner/Group/DACL/SACL 正在后台加载...\n"));
+                    }
+                    startSecurityDeepLoad(aceTable, detailEditor, statusLabel, baseContent, nativePath);
+                };
+
+            connect(refreshButton, &QPushButton::clicked, this, refreshSecurityUi);
+            connect(applyAceButton, &QPushButton::clicked, this,
+                [this,
+                accountEdit,
+                accessModeCombo,
+                inheritanceCombo,
+                customMaskEdit,
+                readCheck,
+                writeCheck,
+                executeCheck,
+                deleteCheck,
+                writeDacCheck,
+                writeOwnerCheck,
+                statusLabel,
+                refreshSecurityUi]()
+                {
+                    DWORD accessMask = maskFromSecurityChecks(
+                        readCheck,
+                        writeCheck,
+                        executeCheck,
+                        deleteCheck,
+                        writeDacCheck,
+                        writeOwnerCheck);
+                    const QString customMaskText = customMaskEdit->text().trimmed();
+                    if (!customMaskText.isEmpty())
+                    {
+                        bool parseOk = false;
+                        const qulonglong parsedMask = customMaskText.toULongLong(&parseOk, 0);
+                        if (!parseOk || parsedMask > 0xFFFFFFFFULL)
+                        {
+                            QMessageBox::warning(this, QStringLiteral("权限编辑"), QStringLiteral("自定义 Mask 格式无效：%1").arg(customMaskText));
+                            return;
+                        }
+                        accessMask = static_cast<DWORD>(parsedMask);
+                    }
+
+                    QString detailText;
+                    const ACCESS_MODE accessMode = static_cast<ACCESS_MODE>(accessModeCombo->currentData().toInt());
+                    const DWORD result = applySecurityAceChange(
+                        accountEdit->text(),
+                        accessMask,
+                        accessMode,
+                        inheritanceFlagsFromCombo(inheritanceCombo->currentIndex()),
+                        detailText);
+                    if (statusLabel != nullptr)
+                    {
+                        statusLabel->setText(result == ERROR_SUCCESS
+                            ? QStringLiteral("● %1").arg(detailText)
+                            : QStringLiteral("● %1").arg(detailText));
+                    }
+                    if (result != ERROR_SUCCESS)
+                    {
+                        QMessageBox::warning(this, QStringLiteral("权限编辑"), detailText);
+                        refreshSecurityUi();
+                        return;
+                    }
+                    refreshSecurityUi();
+                });
+
+            connect(deleteAceButton, &QPushButton::clicked, this, [this, aceTable, statusLabel, refreshSecurityUi]()
+                {
+                    const QMessageBox::StandardButton userChoice = QMessageBox::question(
+                        this,
+                        QStringLiteral("删除 ACE"),
+                        QStringLiteral("将删除当前选中的非继承 DACL ACE。\n继承 ACE 需要到来源目录修改。是否继续？"),
+                        QMessageBox::Yes | QMessageBox::No,
+                        QMessageBox::No);
+                    if (userChoice != QMessageBox::Yes)
+                    {
+                        return;
+                    }
+
+                    QString detailText;
+                    const DWORD result = deleteSelectedDaclAce(aceTable, detailText);
+                    if (statusLabel != nullptr)
+                    {
+                        statusLabel->setText(QStringLiteral("● %1").arg(detailText));
+                    }
+                    if (result != ERROR_SUCCESS)
+                    {
+                        QMessageBox::warning(this, QStringLiteral("删除 ACE"), detailText);
+                        refreshSecurityUi();
+                        return;
+                    }
+                    refreshSecurityUi();
+                });
+
+            QMetaObject::invokeMethod(page, refreshSecurityUi, Qt::QueuedConnection);
             return page;
         }
 

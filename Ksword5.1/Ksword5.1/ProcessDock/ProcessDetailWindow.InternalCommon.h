@@ -49,6 +49,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QRunnable>
+#include <QScreen>
 #include <QSet>
 #include <QStringList>
 #include <QStandardPaths>
@@ -60,9 +61,11 @@
 #include <QTreeWidgetItem>
 #include <QtGlobal>
 #include <QVBoxLayout>
+#include <QWindow>
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -188,4 +191,16 @@ namespace process_detail_window_internal
 
     // readRemoteUnicodeString 作用：读取远程进程中的 UNICODE_STRING 内容。
     QString readRemoteUnicodeString(HANDLE processHandle, const UNICODE_STRING& remoteUnicode);
+
+    // calculateStandaloneWindowMaxWidth 作用：
+    // - 输入 candidateParent 为优先参考的客户区控件，fallbackWindow 为当前独立窗口；
+    // - 处理时优先取父控件 contentsRect().width()，否则退回活动窗口/屏幕可用宽度；
+    // - 返回客户区宽度乘以 ratio 后的最大窗口宽度，无法判断时返回 fallbackWidth。
+    int calculateStandaloneWindowMaxWidth(QWidget* candidateParent, QWidget* fallbackWindow, double ratio, int fallbackWidth);
+
+    // applyStandaloneWindowWidthLimit 作用：
+    // - 输入目标窗口、参考父控件、期望初始尺寸和比例；
+    // - 处理时设置窗口 maximumWidth，并把初始 resize 宽度裁剪到最大宽度以内；
+    // - 返回值：无，直接修改 window 的几何约束。
+    void applyStandaloneWindowWidthLimit(QWidget* window, QWidget* candidateParent, const QSize& preferredSize, double ratio);
 }
