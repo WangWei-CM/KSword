@@ -17,10 +17,12 @@
 #include <QCursor>
 #include <QDateTime>
 #include <QDoubleValidator>
+#include <QDir>
 #include <QEvent>
 #include <QFileDialog>
 #include <QFileIconProvider>
 #include <QFileInfo>
+#include <QFont>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
@@ -145,6 +147,10 @@ namespace
     constexpr int ProcessNumericSortRole = Qt::UserRole + 200;
     constexpr int ProcessEfficiencyModeRole = Qt::UserRole + 201;
     constexpr int ProcessEfficiencyModeKnownRole = Qt::UserRole + 202;
+    constexpr int ProcessTreeDepthRole = Qt::UserRole + 203;
+    constexpr int ProcessRowKindRole = Qt::UserRole + 204;
+    constexpr int ProcessExpandableRole = Qt::UserRole + 205;
+    constexpr int ProcessExpandedRole = Qt::UserRole + 206;
     constexpr int ActivityMinimumIntervalMilliseconds = 50;
     constexpr int ActivityMaximumIntervalMilliseconds = 60000;
     constexpr int ProcessTableMinimumIntervalMilliseconds = 500;
@@ -1208,14 +1214,26 @@ namespace
             itemOption.state &= ~QStyle::State_MouseOver;
             itemOption.state &= ~QStyle::State_HasFocus;
 
+            const bool customNameColumn =
+                painter != nullptr &&
+                index.isValid() &&
+                index.column() == 0 &&
+                index.data(ProcessTreeDepthRole).isValid();
             const bool drawEfficiencyLeaf =
                 index.column() == 0 &&
                 index.data(ProcessEfficiencyModeRole).toBool();
-            if (drawEfficiencyLeaf)
+            if (customNameColumn)
             {
-                itemOption.rect.adjust(0, 0, -22, 0);
+                drawProcessNameCell(painter, itemOption, index, drawEfficiencyLeaf);
             }
-            QStyledItemDelegate::paint(painter, itemOption, index);
+            else
+            {
+                if (drawEfficiencyLeaf)
+                {
+                    itemOption.rect.adjust(0, 0, -22, 0);
+                }
+                QStyledItemDelegate::paint(painter, itemOption, index);
+            }
 
             if (painter == nullptr)
             {
@@ -1266,6 +1284,145 @@ namespace
         }
 
     private:
+        // drawProcessNameCell：
+        // - 输入：Name 列模型索引、绘图状态，以及是否绘制效率模式叶子；
+        // - 处理：先让 Qt 绘制背景，再按“虚线层级 -> 图标 -> 文本”手动绘制内容；
+        // - 返回：无返回值，普通树状视图和友好视图共用这一表示层。
+        void drawProcessNameCell(
+            QPainter* painter,
+            QStyleOptionViewItem itemOption,
+            const QModelIndex& index,
+            const bool drawEfficiencyLeaf) const
+        {
+            if (painter == nullptr || !index.isValid())
+            {
+                return;
+            }
+
+            QStyleOptionViewItem backgroundOption(itemOption);
+            initStyleOption(&backgroundOption, index);
+            backgroundOption.state = itemOption.state;
+            backgroundOption.text.clear();
+            backgroundOption.icon = QIcon();
+            const QWidget* viewWidget = itemOption.widget;
+            QStyle* viewStyle = viewWidget != nullptr ? viewWidget->style() : QApplication::style();
+            if (viewStyle != nullptr)
+            {
+                viewStyle->drawControl(QStyle::CE_ItemViewItem, &backgroundOption, painter, viewWidget);
+            }
+
+            bool depthOk = false;
+            const int depth = index.data(ProcessTreeDepthRole).toInt(&depthOk);
+            const int safeDepth = depthOk ? std::max(0, depth) : 0;
+            const int rowKind = index.data(ProcessRowKindRole).toInt();
+            const bool expandable = index.data(ProcessExpandableRole).toBool();
+            const bool expanded = index.data(ProcessExpandedRole).toBool();
+
+            QRect contentRect = itemOption.rect.adjusted(6, 0, -6, 0);
+            if (drawEfficiencyLeaf)
+            {
+                contentRect.adjust(0, 0, -22, 0);
+            }
+
+            const int levelWidth = 18;
+            const int iconSize = std::min(18, std::max(12, itemOption.rect.height() - 6));
+            const int iconTextGap = 6;
+            const int treeAreaWidth = safeDepth * levelWidth;
+            const QColor lineColor = KswordTheme::IsDarkModeEnabled()
+                ? QColor(124, 145, 172, 160)
+                : QColor(112, 132, 158, 170);
+
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing, true);
+            QPen treePen(lineColor, 1.0, Qt::DotLine, Qt::RoundCap);
+            painter->setPen(treePen);
+
+            const int centerY = contentRect.center().y();
+            for (int level = 0; level < safeDepth; ++level)
+            {
+                const int x = contentRect.left() + level * levelWidth + levelWidth / 2;
+                painter->drawLine(
+                    QPoint(x, itemOption.rect.top() + 4),
+                    QPoint(x, itemOption.rect.bottom() - 4));
+                if (level + 1 == safeDepth)
+                {
+                    painter->drawLine(
+                        QPoint(x, centerY),
+                        QPoint(contentRect.left() + treeAreaWidth - 3, centerY));
+                }
+            }
+
+            int cursorX = contentRect.left() + treeAreaWidth;
+            if (expandable)
+            {
+                const QRect markerRect(
+                    cursorX,
+                    centerY - 7,
+                    14,
+                    14);
+                painter->setPen(QPen(KswordTheme::PrimaryBlueColor, 1.2));
+                painter->setBrush(Qt::NoBrush);
+                const QPointF p1 = expanded
+                    ? QPointF(markerRect.left() + 3.5, markerRect.top() + 5.0)
+                    : QPointF(markerRect.left() + 5.0, markerRect.top() + 3.5);
+                const QPointF p2 = expanded
+                    ? QPointF(markerRect.center().x(), markerRect.bottom() - 4.0)
+                    : QPointF(markerRect.right() - 4.0, markerRect.center().y());
+                const QPointF p3 = expanded
+                    ? QPointF(markerRect.right() - 3.5, markerRect.top() + 5.0)
+                    : QPointF(markerRect.left() + 5.0, markerRect.bottom() - 3.5);
+                QPainterPath markerPath;
+                markerPath.moveTo(p1);
+                markerPath.lineTo(p2);
+                markerPath.lineTo(p3);
+                painter->drawPath(markerPath);
+                cursorX += markerRect.width() + 2;
+            }
+
+            const QIcon iconValue = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
+            if (!iconValue.isNull())
+            {
+                const QRect iconRect(
+                    cursorX,
+                    centerY - iconSize / 2,
+                    iconSize,
+                    iconSize);
+                iconValue.paint(painter, iconRect, Qt::AlignCenter, QIcon::Normal);
+                cursorX += iconSize + iconTextGap;
+            }
+            else if (rowKind != 1)
+            {
+                cursorX += iconTextGap;
+            }
+
+            const QString textValue = index.data(Qt::DisplayRole).toString();
+            QRect textRect(
+                cursorX,
+                contentRect.top(),
+                std::max(0, contentRect.right() - cursorX + 1),
+                contentRect.height());
+            QFont textFont = itemOption.font;
+            if (index.data(Qt::FontRole).isValid())
+            {
+                textFont = qvariant_cast<QFont>(index.data(Qt::FontRole));
+            }
+            painter->setFont(textFont);
+            const QVariant foregroundData = index.data(Qt::ForegroundRole);
+            if (foregroundData.canConvert<QBrush>())
+            {
+                painter->setPen(qvariant_cast<QBrush>(foregroundData).color());
+            }
+            else
+            {
+                painter->setPen(itemOption.palette.color(QPalette::Text));
+            }
+            painter->drawText(
+                textRect,
+                Qt::AlignLeft | Qt::AlignVCenter,
+                itemOption.fontMetrics.elidedText(textValue, Qt::ElideRight, textRect.width()));
+            painter->restore();
+        }
+
         // sameModelRow：
         // - 输入：两个持久模型索引；
         // - 处理：只比较 model/parent/row，不比较列；
@@ -2868,6 +3025,15 @@ void ProcessDock::initializeTopControls()
     m_treeToggleButton->setChecked(false);
     m_treeToggleButton->setToolTip("切换为树状视图");
 
+    // 进程友好视图：
+    // - 默认勾选，优先按“应用/后台进程/系统”三类展示；
+    // - 关闭后恢复原有列表/树状按钮行为，避免改变老用户的定位习惯。
+    m_friendlyViewCheck = new QCheckBox(QStringLiteral("进程友好视图"), this);
+    m_friendlyViewCheck->setChecked(true);
+    m_friendlyViewCheck->setToolTip(QStringLiteral(
+        "默认开启：按应用、后台进程、系统分类；应用下按根进程聚合并树状缩进。"
+        "搜索或查看历史活动快照时会自动回退为普通扁平列表。"));
+
     // 视图模式下拉框：默认监视视图。
     m_viewModeCombo = new QComboBox(this);
     m_viewModeCombo->setObjectName(QStringLiteral("ProcessDockViewModeCombo"));
@@ -2958,6 +3124,7 @@ void ProcessDock::initializeTopControls()
     // 第一行放“操作按钮 + 刷新间隔”。
     m_controlLayout->addWidget(m_strategyCombo);
     m_controlLayout->addWidget(m_treeToggleButton);
+    m_controlLayout->addWidget(m_friendlyViewCheck);
     m_controlLayout->addWidget(m_viewModeCombo);
     m_controlLayout->addWidget(m_startButton);
     m_controlLayout->addWidget(m_pauseButton);
@@ -3261,7 +3428,16 @@ void ProcessDock::initializeProcessTable()
         {
             return processTableData(tableRow, column, role);
         },
-        this);
+        this,
+        [](const ProcessTableRow& tableRow, const int) -> Qt::ItemFlags
+        {
+            // Inputs: one ProcessTableRow and the requested column.
+            // Processing: synthetic rows stay enabled for hover/paint but are not selectable.
+            // Return: item flags used by Qt selection and context menu targeting.
+            return tableRow.rowKind == ProcessDock::ProcessTableRowKind::Process
+                ? (Qt::ItemIsEnabled | Qt::ItemIsSelectable)
+                : Qt::ItemIsEnabled;
+        });
     m_processSortProxy = new ProcessTableSortProxy(this);
     m_processSortProxy->setSourceModel(m_processTableModel);
     static_cast<ProcessTableSortProxy*>(m_processSortProxy)->setHeaderTexts(ProcessTableHeaders);
@@ -3808,6 +3984,35 @@ void ProcessDock::initializeConnections()
         rebuildTable();
     });
 
+    // 进程友好视图：
+    // - 勾选时 buildDisplayOrder 优先使用应用/后台/系统分类；
+    // - 原树状按钮状态被保留但不参与友好视图排序，关闭后立即恢复旧行为。
+    connect(m_friendlyViewCheck, &QCheckBox::toggled, this, [this](const bool checked) {
+        m_activityTableSnapshotIndex = -1;
+        m_activityTableSnapshotRecords.clear();
+        if (m_treeToggleButton != nullptr)
+        {
+            m_treeToggleButton->setEnabled(!checked);
+            m_treeToggleButton->setToolTip(checked
+                ? QStringLiteral("进程友好视图开启时暂不使用普通树状排序")
+                : QStringLiteral("切换为树状视图"));
+        }
+        kLogEvent logEvent;
+        info << logEvent
+            << "[ProcessDock] 进程友好视图开关变更, friendlyView="
+            << (checked ? "true" : "false")
+            << eol;
+        rebuildTable();
+    });
+    if (m_treeToggleButton != nullptr && m_friendlyViewCheck != nullptr)
+    {
+        m_treeToggleButton->setEnabled(!m_friendlyViewCheck->isChecked());
+        if (m_friendlyViewCheck->isChecked())
+        {
+            m_treeToggleButton->setToolTip(QStringLiteral("进程友好视图开启时暂不使用普通树状排序"));
+        }
+    }
+
     // 树/列表切换：仅图标切换（不显示文字），并立即重建表格。
     connect(m_treeToggleButton, &QPushButton::toggled, this, [this](const bool checked) {
         m_activityTableSnapshotIndex = -1;
@@ -4009,6 +4214,41 @@ void ProcessDock::initializeConnections()
         showHeaderContextMenu(localPosition);
     });
 
+    // 友好视图需要保留“应用/后台/系统”分组结构，不能让 QSortFilterProxyModel 直接打散源顺序。
+    // 因此表头点击在友好视图中只记录排序列/方向并重建分组；普通列表/历史快照继续走 Qt 默认排序。
+    connect(m_processTable->horizontalHeader(), &QHeaderView::sectionClicked, this, [this](const int logicalIndex) {
+        if (!isFriendlyViewEnabled() ||
+            isProcessActivityTableSnapshotActive() ||
+            !currentProcessSearchText().isEmpty())
+        {
+            return;
+        }
+        if (logicalIndex < 0 || logicalIndex >= static_cast<int>(TableColumn::Count))
+        {
+            return;
+        }
+
+        if (m_friendlySortColumn == logicalIndex)
+        {
+            m_friendlySortOrder = (m_friendlySortOrder == Qt::AscendingOrder)
+                ? Qt::DescendingOrder
+                : Qt::AscendingOrder;
+        }
+        else
+        {
+            m_friendlySortColumn = logicalIndex;
+            m_friendlySortOrder = logicalIndex == toColumnIndex(TableColumn::Name)
+                ? Qt::AscendingOrder
+                : Qt::DescendingOrder;
+        }
+
+        if (m_processSortProxy != nullptr)
+        {
+            m_processSortProxy->sort(toColumnIndex(TableColumn::Name), Qt::AscendingOrder);
+        }
+        rebuildTable();
+    });
+
     // 搜索框输入变更后直接重建表格：
     // - 仅过滤当前缓存，不等待下一轮刷新；
     // - 这样键入 notepad 等关键词时结果会立即收敛。
@@ -4106,9 +4346,13 @@ void ProcessDock::initializeConnections()
         }
 
         const ProcessTableRow* tableRow = processTableRowForViewIndex(index);
-        if (tableRow != nullptr)
+        if (tableRow != nullptr && tableRow->rowKind == ProcessTableRowKind::Process)
         {
             m_trackedSelectedIdentityKey = tableRow->identityKey;
+        }
+        else if (tableRow != nullptr)
+        {
+            m_trackedSelectedIdentityKey.clear();
         }
         if (index.column() >= 0 && index.column() < static_cast<int>(TableColumn::Count))
         {
@@ -4118,6 +4362,35 @@ void ProcessDock::initializeConnections()
         {
             syncTrackedSelectionFromTable();
         });
+    });
+
+    // 双击友好视图合成行时折叠/展开；真实进程行保持“打开详情”的任务管理器式行为。
+    connect(m_processTable, &QAbstractItemView::doubleClicked, this, [this](const QModelIndex& index) {
+        const ProcessTableRow* tableRow = processTableRowForViewIndex(index);
+        if (tableRow == nullptr)
+        {
+            return;
+        }
+
+        if (tableRow->rowKind == ProcessTableRowKind::GroupHeader ||
+            tableRow->rowKind == ProcessTableRowKind::ApplicationAggregate)
+        {
+            if (!tableRow->expansionKey.isEmpty())
+            {
+                const bool defaultExpanded = tableRow->rowKind == ProcessTableRowKind::GroupHeader;
+                const bool currentExpanded = m_friendlyExpandedStateByKey.value(
+                    tableRow->expansionKey,
+                    defaultExpanded);
+                m_friendlyExpandedStateByKey.insert(tableRow->expansionKey, !currentExpanded);
+                rebuildTable();
+            }
+            return;
+        }
+
+        if (tableRow->rowKind == ProcessTableRowKind::Process)
+        {
+            openProcessDetailWindowByPid(tableRow->record.pid);
+        }
     });
 
     // Alt+E 作用：
@@ -5508,7 +5781,7 @@ void ProcessDock::rebuildTable()
     const int horizontalScrollValueBeforeRebuild = (horizontalScrollBar != nullptr) ? horizontalScrollBar->value() : 0;
 
     const bool activitySnapshotActive = isProcessActivityTableSnapshotActive();
-    const bool enableSorting = activitySnapshotActive || !isTreeModeEnabled();
+    const bool enableSorting = activitySnapshotActive || (!isTreeModeEnabled() && !isFriendlyViewEnabled());
     if (m_processSortProxy != nullptr)
     {
         auto* processSortProxy = static_cast<ProcessTableSortProxy*>(m_processSortProxy);
@@ -5524,7 +5797,7 @@ void ProcessDock::rebuildTable()
     std::uint32_t maxHandleCount = 0;
     for (const DisplayRow& displayRow : displayRows)
     {
-        if (displayRow.record == nullptr)
+        if (displayRow.record == nullptr || displayRow.rowKind == ProcessTableRowKind::GroupHeader)
         {
             continue;
         }
@@ -5550,10 +5823,15 @@ void ProcessDock::rebuildTable()
         const ks::process::ProcessRecord& processRecord = *displayRow.record;
         ProcessTableRow tableRow{};
         tableRow.record = processRecord;
-        tableRow.identityKey = ks::process::BuildProcessIdentityKey(
-            processRecord.pid,
-            processRecord.creationTime100ns);
+        tableRow.rowKind = displayRow.rowKind;
+        tableRow.friendlyGroupType = displayRow.friendlyGroupType;
+        tableRow.syntheticTitle = displayRow.syntheticTitle;
+        tableRow.expansionKey = displayRow.expansionKey;
+        tableRow.identityKey = displayRow.rowKind == ProcessTableRowKind::Process
+            ? ks::process::BuildProcessIdentityKey(processRecord.pid, processRecord.creationTime100ns)
+            : std::string();
         tableRow.depth = displayRow.depth;
+        tableRow.hasChildren = displayRow.hasChildren;
         tableRow.isNew = displayRow.isNew;
         tableRow.isExited = displayRow.isExited;
         tableRow.isKernelOnly = displayRow.isKernelOnly;
@@ -5601,8 +5879,13 @@ void ProcessDock::rebuildTable()
     }
     else
     {
-        // 树状模式由 buildTreeDisplayOrder 决定顺序；代理用第 0 列触发一次源顺序排序。
+        // 树状/友好模式由 build*DisplayOrder 决定顺序；代理用第 0 列触发一次源顺序排序。
         m_processSortProxy->sort(toColumnIndex(TableColumn::Name), Qt::AscendingOrder);
+        if (headerView != nullptr && isFriendlyViewEnabled())
+        {
+            headerView->setSortIndicatorShown(true);
+            headerView->setSortIndicator(m_friendlySortColumn, m_friendlySortOrder);
+        }
     }
 
     // 按 identityKey 恢复用户之前选中的进程：
@@ -5683,6 +5966,7 @@ void ProcessDock::rebuildTable()
     dbg << logEvent
         << "[ProcessDock] rebuildTable 完成, rows=" << displayRows.size()
         << ", treeMode=" << (isTreeModeEnabled() ? "true" : "false")
+        << ", friendlyView=" << (isFriendlyViewEnabled() ? "true" : "false")
         << ", sortingEnabled=" << (enableSorting ? "true" : "false")
         << ", sortColumn=" << (enableSorting && headerView != nullptr ? headerView->sortIndicatorSection() : -1)
         << eol;
@@ -5706,7 +5990,9 @@ void ProcessDock::updateUsageSummaryInHeader(const std::vector<DisplayRow>& disp
     std::uint64_t totalHandleCount = 0;
     for (const DisplayRow& displayRow : displayRows)
     {
-        if (displayRow.record == nullptr || displayRow.isExited)
+        if (displayRow.record == nullptr ||
+            displayRow.rowKind != ProcessTableRowKind::Process ||
+            displayRow.isExited)
         {
             continue;
         }
@@ -5749,7 +6035,9 @@ void ProcessDock::applyR0ColumnAvailability(const std::vector<DisplayRow>& displ
     bool hasVisibleR0Extension = false;
     for (const DisplayRow& displayRow : displayRows)
     {
-        if (displayRow.record == nullptr || displayRow.isExited)
+        if (displayRow.record == nullptr ||
+            displayRow.rowKind != ProcessTableRowKind::Process ||
+            displayRow.isExited)
         {
             continue;
         }
@@ -6455,10 +6743,112 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
         // - 返回该行 PID+创建时间组成的 identityKey 文本。
         return QString::fromStdString(tableRow.identityKey);
     }
+    if (tableColumn == TableColumn::Name)
+    {
+        if (role == ProcessTreeDepthRole)
+        {
+            return tableRow.depth;
+        }
+        if (role == ProcessRowKindRole)
+        {
+            return static_cast<int>(tableRow.rowKind);
+        }
+        if (role == ProcessExpandableRole)
+        {
+            return tableRow.rowKind == ProcessTableRowKind::GroupHeader ||
+                tableRow.rowKind == ProcessTableRowKind::ApplicationAggregate ||
+                tableRow.hasChildren;
+        }
+        if (role == ProcessExpandedRole)
+        {
+            if (tableRow.rowKind == ProcessTableRowKind::ApplicationAggregate)
+            {
+                return m_friendlyExpandedStateByKey.value(tableRow.expansionKey, false);
+            }
+            if (tableRow.rowKind == ProcessTableRowKind::GroupHeader)
+            {
+                return m_friendlyExpandedStateByKey.value(tableRow.expansionKey, true);
+            }
+            return tableRow.hasChildren;
+        }
+    }
+    if (tableRow.rowKind == ProcessTableRowKind::GroupHeader)
+    {
+        // GroupHeader is a synthetic non-process row:
+        // - inputs are the stored title and expansion key;
+        // - processing keeps only the Name column populated;
+        // - return values are display/tooltip/paint roles, never process action data.
+        if (role == Qt::DisplayRole)
+        {
+            if (tableColumn != TableColumn::Name)
+            {
+                return QString();
+            }
+            return tableRow.syntheticTitle;
+        }
+        if (role == Qt::ToolTipRole && tableColumn == TableColumn::Name)
+        {
+            return QStringLiteral("分类标题：双击可折叠/展开；不会作为进程操作目标。");
+        }
+        if (role == Qt::FontRole)
+        {
+            QFont font;
+            font.setBold(true);
+            return font;
+        }
+        if (role == Qt::ForegroundRole)
+        {
+            return QBrush(KswordTheme::PrimaryBlueColor);
+        }
+        if (role == Qt::BackgroundRole)
+        {
+            const QColor backgroundColor = KswordTheme::IsDarkModeEnabled()
+                ? QColor(24, 42, 70, 180)
+                : QColor(225, 239, 255);
+            return QBrush(backgroundColor);
+        }
+        if (role == ProcessNumericSortRole)
+        {
+            return -1.0;
+        }
+        return {};
+    }
+    if (tableRow.rowKind == ProcessTableRowKind::ApplicationAggregate)
+    {
+        // ApplicationAggregate is a synthetic application parent row:
+        // - name comes from syntheticTitle and metrics come from the aggregate record;
+        // - the row is enabled for expand/collapse but intentionally not selectable/actionable;
+        // - children below it remain normal process rows.
+        if (role == Qt::DisplayRole)
+        {
+            if (tableColumn == TableColumn::Name)
+            {
+                return tableRow.syntheticTitle;
+            }
+            return formatColumnText(processRecord, tableColumn, tableRow.depth);
+        }
+        if (role == Qt::DecorationRole && tableColumn == TableColumn::Name)
+        {
+            return resolveProcessIcon(processRecord);
+        }
+        if (role == Qt::ToolTipRole && tableColumn == TableColumn::Name)
+        {
+            return QStringLiteral("应用聚合行：汇总该应用进程树的 CPU/RAM/DISK/GPU/NET；双击可折叠/展开，不作为进程操作目标。");
+        }
+        if (role == Qt::FontRole)
+        {
+            QFont font;
+            font.setBold(true);
+            return font;
+        }
+    }
     if (role == Qt::DisplayRole)
     {
-        // DisplayRole 只负责文本；树状缩进前缀仍由 formatColumnText(depth) 保持旧显示。
-        return formatColumnText(processRecord, tableColumn, tableRow.depth);
+        // DisplayRole 只负责文本；Name 列层级线/图标由 delegate 统一绘制，避免图标落在缩进前。
+        return formatColumnText(
+            processRecord,
+            tableColumn,
+            tableColumn == TableColumn::Name ? 0 : tableRow.depth);
     }
     if (role == Qt::DecorationRole && tableColumn == TableColumn::Name)
     {
@@ -6707,6 +7097,10 @@ ProcessDock::ProcessActionTarget ProcessDock::processActionTargetFromTableRow(co
 {
     // 输入：模型行；处理：优先从实时缓存取完整记录，缓存缺失时用模型行 record 兜底；返回：动作目标副本。
     ProcessActionTarget actionTarget{};
+    if (tableRow.rowKind != ProcessTableRowKind::Process)
+    {
+        return actionTarget;
+    }
     actionTarget.identityKey = tableRow.identityKey;
     if (actionTarget.identityKey.empty())
     {
@@ -6736,6 +7130,11 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildDisplayOrder() const
     if (!currentProcessSearchText().isEmpty())
     {
         return buildListDisplayOrder();
+    }
+
+    if (isFriendlyViewEnabled())
+    {
+        return buildFriendlyDisplayOrder();
     }
 
     return isTreeModeEnabled() ? buildTreeDisplayOrder() : buildListDisplayOrder();
@@ -6894,6 +7293,8 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildTreeDisplayOrder() const
             DisplayRow displayRow{};
             displayRow.record = const_cast<ks::process::ProcessRecord*>(&node.cacheEntry->record);
             displayRow.depth = depth;
+            displayRow.hasChildren =
+                childrenByParentPid.find(node.cacheEntry->record.pid) != childrenByParentPid.end();
             displayRow.isNew = node.cacheEntry->isNewInLatestRound;
             displayRow.isExited = node.cacheEntry->isExitedInLatestRound;
             displayRow.isKernelOnly = node.cacheEntry->isKernelOnlyInLatestRound;
@@ -6929,6 +7330,7 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildTreeDisplayOrder() const
         DisplayRow fallbackRow{};
         fallbackRow.record = const_cast<ks::process::ProcessRecord*>(&node.cacheEntry->record);
         fallbackRow.depth = 0;
+        fallbackRow.hasChildren = childrenByParentPid.find(node.cacheEntry->record.pid) != childrenByParentPid.end();
         fallbackRow.isNew = node.cacheEntry->isNewInLatestRound;
         fallbackRow.isExited = node.cacheEntry->isExitedInLatestRound;
         fallbackRow.isKernelOnly = node.cacheEntry->isKernelOnlyInLatestRound;
@@ -6938,10 +7340,489 @@ std::vector<ProcessDock::DisplayRow> ProcessDock::buildTreeDisplayOrder() const
     return displayRows;
 }
 
+std::vector<ProcessDock::DisplayRow> ProcessDock::buildFriendlyDisplayOrder() const
+{
+    // Inputs: live process cache, hidden-item switch, and current visible-window owners.
+    // Processing: classify rows into Application/Background/System, then emit a source-order
+    // table that visually behaves like a tree while staying on QTableView + FlatTableModel.
+    // Return: display rows containing group headers, application aggregates, and real processes.
+    struct FriendlyNode
+    {
+        const std::string* identityKey = nullptr;
+        const CacheEntry* cacheEntry = nullptr;
+        std::uint32_t applicationRootPid = 0;
+    };
+
+    std::vector<FriendlyNode> nodes;
+    nodes.reserve(m_cacheByIdentity.size());
+    std::unordered_map<std::uint32_t, std::uint32_t> parentPidByPid;
+    parentPidByPid.reserve(m_cacheByIdentity.size());
+
+    for (const auto& cachePair : m_cacheByIdentity)
+    {
+        const ks::process::ProcessRecord& processRecord = cachePair.second.record;
+        const bool isKswordHidden =
+            ((processRecord.r0Flags & KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI) != 0U) ||
+            (m_hiddenProcessPidSet.find(processRecord.pid) != m_hiddenProcessPidSet.end());
+        const bool showKswordHidden =
+            (m_showKswordHiddenProcessCheck != nullptr && m_showKswordHiddenProcessCheck->isChecked());
+        if (isKswordHidden && !showKswordHidden)
+        {
+            continue;
+        }
+
+        parentPidByPid[processRecord.pid] = processRecord.parentPid;
+        nodes.push_back(FriendlyNode{ &cachePair.first, &cachePair.second, 0U });
+    }
+
+    const QSet<std::uint32_t> visibleWindowPidSet = collectVisibleWindowPidSet();
+    wchar_t windowsDirectoryBuffer[MAX_PATH]{};
+    QString windowsDirectoryPath;
+    const UINT windowsDirectoryLength = ::GetWindowsDirectoryW(windowsDirectoryBuffer, MAX_PATH);
+    if (windowsDirectoryLength > 0U)
+    {
+        windowsDirectoryPath = QDir::fromNativeSeparators(
+            QString::fromWCharArray(windowsDirectoryBuffer, static_cast<int>(windowsDirectoryLength))).toLower();
+    }
+
+    std::vector<const FriendlyNode*> applicationNodes;
+    std::vector<const FriendlyNode*> backgroundNodes;
+    std::vector<const FriendlyNode*> systemNodes;
+    applicationNodes.reserve(nodes.size());
+    backgroundNodes.reserve(nodes.size());
+    systemNodes.reserve(nodes.size());
+
+    for (FriendlyNode& node : nodes)
+    {
+        if (node.cacheEntry == nullptr)
+        {
+            continue;
+        }
+
+        node.applicationRootPid = findFriendlyApplicationRootPid(
+            node.cacheEntry->record.pid,
+            parentPidByPid,
+            visibleWindowPidSet);
+        if (node.applicationRootPid != 0U)
+        {
+            applicationNodes.push_back(&node);
+            continue;
+        }
+
+        if (isFriendlyWindowsSystemProcess(node.cacheEntry->record, windowsDirectoryPath))
+        {
+            systemNodes.push_back(&node);
+        }
+        else
+        {
+            backgroundNodes.push_back(&node);
+        }
+    }
+
+    const int friendlySortColumn = std::clamp(
+        m_friendlySortColumn,
+        0,
+        static_cast<int>(TableColumn::Count) - 1);
+    const Qt::SortOrder friendlySortOrder = m_friendlySortOrder;
+    const auto compareRecordByFriendlySort =
+        [friendlySortColumn, friendlySortOrder](
+            const ks::process::ProcessRecord& leftRecord,
+            const ks::process::ProcessRecord& rightRecord) -> bool
+        {
+            // Inputs: two process records and the active friendly-view sort column/order.
+            // Processing: compare only the primary selected column with the selected direction,
+            // then use name/PID/creation time as ascending tie breakers so rows do not jitter.
+            // Return: true when left should be displayed before right.
+            const auto compareText = [](const QString& leftText, const QString& rightText) -> int
+            {
+                const int caseInsensitiveResult = leftText.compare(rightText, Qt::CaseInsensitive);
+                if (caseInsensitiveResult != 0)
+                {
+                    return caseInsensitiveResult;
+                }
+                return leftText.compare(rightText, Qt::CaseSensitive);
+            };
+            const auto compareDouble = [](const double leftValue, const double rightValue) -> int
+            {
+                if (std::fabs(leftValue - rightValue) <= 0.001)
+                {
+                    return 0;
+                }
+                return leftValue < rightValue ? -1 : 1;
+            };
+            const auto compareUInt64 = [](const std::uint64_t leftValue, const std::uint64_t rightValue) -> int
+            {
+                if (leftValue == rightValue)
+                {
+                    return 0;
+                }
+                return leftValue < rightValue ? -1 : 1;
+            };
+
+            int primaryResult = 0;
+            switch (static_cast<TableColumn>(friendlySortColumn))
+            {
+            case TableColumn::Name:
+                primaryResult = compareText(
+                    QString::fromStdString(leftRecord.processName),
+                    QString::fromStdString(rightRecord.processName));
+                break;
+            case TableColumn::Pid:
+                primaryResult = compareUInt64(leftRecord.pid, rightRecord.pid);
+                break;
+            case TableColumn::Cpu:
+                primaryResult = compareDouble(leftRecord.cpuPercent, rightRecord.cpuPercent);
+                break;
+            case TableColumn::Ram:
+                primaryResult = compareDouble(leftRecord.workingSetMB, rightRecord.workingSetMB);
+                break;
+            case TableColumn::Disk:
+                primaryResult = compareDouble(leftRecord.diskMBps, rightRecord.diskMBps);
+                break;
+            case TableColumn::Gpu:
+                primaryResult = compareDouble(leftRecord.gpuPercent, rightRecord.gpuPercent);
+                break;
+            case TableColumn::Net:
+                primaryResult = compareDouble(leftRecord.netKBps, rightRecord.netKBps);
+                break;
+            case TableColumn::Signature:
+                primaryResult = compareText(
+                    QString::fromStdString(leftRecord.signatureState),
+                    QString::fromStdString(rightRecord.signatureState));
+                break;
+            case TableColumn::Path:
+                primaryResult = compareText(
+                    QString::fromStdString(leftRecord.imagePath),
+                    QString::fromStdString(rightRecord.imagePath));
+                break;
+            case TableColumn::ParentPid:
+                primaryResult = compareUInt64(leftRecord.parentPid, rightRecord.parentPid);
+                break;
+            case TableColumn::CommandLine:
+                primaryResult = compareText(
+                    QString::fromStdString(leftRecord.commandLine),
+                    QString::fromStdString(rightRecord.commandLine));
+                break;
+            case TableColumn::User:
+                primaryResult = compareText(
+                    QString::fromStdString(leftRecord.userName),
+                    QString::fromStdString(rightRecord.userName));
+                break;
+            case TableColumn::StartTime:
+                primaryResult = compareUInt64(leftRecord.creationTime100ns, rightRecord.creationTime100ns);
+                break;
+            case TableColumn::IsAdmin:
+                primaryResult = compareUInt64(leftRecord.isAdmin ? 1U : 0U, rightRecord.isAdmin ? 1U : 0U);
+                break;
+            case TableColumn::PplLevel:
+                primaryResult = compareUInt64(leftRecord.protectionLevel, rightRecord.protectionLevel);
+                break;
+            case TableColumn::Protection:
+            case TableColumn::Ppl:
+                primaryResult = compareUInt64(leftRecord.r0Protection, rightRecord.r0Protection);
+                break;
+            case TableColumn::HandleCount:
+                primaryResult = compareUInt64(leftRecord.handleCount, rightRecord.handleCount);
+                break;
+            case TableColumn::HandleTable:
+                primaryResult = compareUInt64(
+                    (leftRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_OBJECT_TABLE_AVAILABLE) != 0U ? 1U : 0U,
+                    (rightRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_OBJECT_TABLE_AVAILABLE) != 0U ? 1U : 0U);
+                break;
+            case TableColumn::SectionObject:
+                primaryResult = compareUInt64(
+                    (leftRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_SECTION_OBJECT_AVAILABLE) != 0U ? 1U : 0U,
+                    (rightRecord.r0FieldFlags & KSWORD_ARK_PROCESS_FIELD_SECTION_OBJECT_AVAILABLE) != 0U ? 1U : 0U);
+                break;
+            case TableColumn::R0Status:
+                primaryResult = compareUInt64(leftRecord.r0Status, rightRecord.r0Status);
+                break;
+            default:
+                primaryResult = 0;
+                break;
+            }
+
+            if (primaryResult != 0)
+            {
+                return friendlySortOrder == Qt::AscendingOrder
+                    ? primaryResult < 0
+                    : primaryResult > 0;
+            }
+
+            const int nameTieResult = compareText(
+                QString::fromStdString(leftRecord.processName),
+                QString::fromStdString(rightRecord.processName));
+            if (nameTieResult != 0)
+            {
+                return nameTieResult < 0;
+            }
+            if (leftRecord.pid != rightRecord.pid)
+            {
+                return leftRecord.pid < rightRecord.pid;
+            }
+            return leftRecord.creationTime100ns < rightRecord.creationTime100ns;
+        };
+
+    const auto processSorter = [&compareRecordByFriendlySort](const FriendlyNode* leftNode, const FriendlyNode* rightNode) -> bool
+    {
+        if (leftNode == nullptr || rightNode == nullptr ||
+            leftNode->cacheEntry == nullptr || rightNode->cacheEntry == nullptr)
+        {
+            return leftNode < rightNode;
+        }
+
+        return compareRecordByFriendlySort(leftNode->cacheEntry->record, rightNode->cacheEntry->record);
+    };
+
+    std::sort(applicationNodes.begin(), applicationNodes.end(), processSorter);
+    std::sort(backgroundNodes.begin(), backgroundNodes.end(), processSorter);
+    std::sort(systemNodes.begin(), systemNodes.end(), processSorter);
+
+    m_friendlySyntheticRecords.clear();
+    m_friendlySyntheticRecords.reserve(applicationNodes.size() + 3U);
+
+    std::vector<DisplayRow> displayRows;
+    displayRows.reserve(nodes.size() + applicationNodes.size() + 3U);
+
+    const auto appendSyntheticRecordRow =
+        [this, &displayRows](
+            const ks::process::ProcessRecord& syntheticRecord,
+            const ProcessTableRowKind rowKind,
+            const FriendlyProcessGroupType groupType,
+            const QString& title,
+            const QString& expansionKey,
+            const int depth)
+        {
+            // Inputs: prepared synthetic ProcessRecord and row metadata.
+            // Processing: store the record in a stable member vector, then add a DisplayRow pointer.
+            // Return: no value; displayRows receives one synthetic row.
+            m_friendlySyntheticRecords.push_back(syntheticRecord);
+
+            DisplayRow displayRow{};
+            displayRow.record = &m_friendlySyntheticRecords.back();
+            displayRow.rowKind = rowKind;
+            displayRow.friendlyGroupType = groupType;
+            displayRow.syntheticTitle = title;
+            displayRow.expansionKey = expansionKey;
+            displayRow.depth = depth;
+            displayRow.hasChildren = rowKind == ProcessTableRowKind::GroupHeader ||
+                rowKind == ProcessTableRowKind::ApplicationAggregate;
+            displayRows.push_back(std::move(displayRow));
+        };
+
+    const auto appendGroupHeader =
+        [&appendSyntheticRecordRow](const FriendlyProcessGroupType groupType, const int entryCount)
+        {
+            ks::process::ProcessRecord syntheticRecord{};
+            syntheticRecord.processName = friendlyGroupTitle(groupType, entryCount).toStdString();
+            syntheticRecord.imagePath = "[FriendlyGroup]";
+            appendSyntheticRecordRow(
+                syntheticRecord,
+                ProcessTableRowKind::GroupHeader,
+                groupType,
+                friendlyGroupTitle(groupType, entryCount),
+                friendlyExpansionKeyForGroup(groupType),
+                0);
+        };
+
+    const auto appendRealNode =
+        [&displayRows](const FriendlyNode* node, const int depth, const bool hasChildren = false)
+        {
+            if (node == nullptr || node->cacheEntry == nullptr)
+            {
+                return;
+            }
+
+            DisplayRow displayRow{};
+            displayRow.record = const_cast<ks::process::ProcessRecord*>(&node->cacheEntry->record);
+            displayRow.rowKind = ProcessTableRowKind::Process;
+            displayRow.depth = depth;
+            displayRow.hasChildren = hasChildren;
+            displayRow.isNew = node->cacheEntry->isNewInLatestRound;
+            displayRow.isExited = node->cacheEntry->isExitedInLatestRound;
+            displayRow.isKernelOnly = node->cacheEntry->isKernelOnlyInLatestRound;
+            displayRows.push_back(std::move(displayRow));
+        };
+
+    appendGroupHeader(FriendlyProcessGroupType::Application, static_cast<int>(applicationNodes.size()));
+    if (m_friendlyExpandedStateByKey.value(
+        friendlyExpansionKeyForGroup(FriendlyProcessGroupType::Application),
+        true))
+    {
+        std::unordered_map<std::uint32_t, std::vector<const FriendlyNode*>> applicationNodesByRootPid;
+        for (const FriendlyNode* node : applicationNodes)
+        {
+            if (node == nullptr || node->cacheEntry == nullptr)
+            {
+                continue;
+            }
+            const std::uint32_t rootPid = node->applicationRootPid != 0U
+                ? node->applicationRootPid
+                : node->cacheEntry->record.pid;
+            applicationNodesByRootPid[rootPid].push_back(node);
+        }
+
+        std::vector<std::pair<std::uint32_t, std::vector<const FriendlyNode*>>> applicationBuckets;
+        applicationBuckets.reserve(applicationNodesByRootPid.size());
+        for (auto& bucketPair : applicationNodesByRootPid)
+        {
+            std::sort(bucketPair.second.begin(), bucketPair.second.end(), processSorter);
+            applicationBuckets.push_back(std::make_pair(bucketPair.first, std::move(bucketPair.second)));
+        }
+
+        const auto aggregateApplicationBucket =
+            [](const std::vector<const FriendlyNode*>& bucketNodes, const std::uint32_t rootPid)
+            {
+                std::vector<const CacheEntry*> cacheEntries;
+                cacheEntries.reserve(bucketNodes.size());
+                for (const FriendlyNode* node : bucketNodes)
+                {
+                    if (node != nullptr && node->cacheEntry != nullptr)
+                    {
+                        cacheEntries.push_back(node->cacheEntry);
+                    }
+                }
+                return aggregateFriendlyApplicationRecord(cacheEntries, rootPid);
+            };
+
+        std::sort(
+            applicationBuckets.begin(),
+            applicationBuckets.end(),
+            [&aggregateApplicationBucket, &compareRecordByFriendlySort](const auto& leftBucket, const auto& rightBucket)
+            {
+                const ks::process::ProcessRecord leftAggregate =
+                    aggregateApplicationBucket(leftBucket.second, leftBucket.first);
+                const ks::process::ProcessRecord rightAggregate =
+                    aggregateApplicationBucket(rightBucket.second, rightBucket.first);
+                return compareRecordByFriendlySort(leftAggregate, rightAggregate);
+            });
+
+        for (const auto& bucket : applicationBuckets)
+        {
+            const std::uint32_t rootPid = bucket.first;
+            const std::vector<const FriendlyNode*>& bucketNodes = bucket.second;
+            if (bucketNodes.empty())
+            {
+                continue;
+            }
+
+            const ks::process::ProcessRecord aggregateRecord =
+                aggregateApplicationBucket(bucketNodes, rootPid);
+            appendSyntheticRecordRow(
+                aggregateRecord,
+                ProcessTableRowKind::ApplicationAggregate,
+                FriendlyProcessGroupType::Application,
+                QStringLiteral("%1 (%2)").arg(QString::fromStdString(aggregateRecord.processName)).arg(bucketNodes.size()),
+                friendlyExpansionKeyForApplication(rootPid),
+                1);
+
+            if (!m_friendlyExpandedStateByKey.value(friendlyExpansionKeyForApplication(rootPid), false))
+            {
+                continue;
+            }
+
+            std::unordered_map<std::uint32_t, std::vector<const FriendlyNode*>> childrenByParentPid;
+            childrenByParentPid.reserve(bucketNodes.size());
+            for (const FriendlyNode* node : bucketNodes)
+            {
+                if (node == nullptr || node->cacheEntry == nullptr)
+                {
+                    continue;
+                }
+                childrenByParentPid[node->cacheEntry->record.parentPid].push_back(node);
+            }
+            for (auto& childPair : childrenByParentPid)
+            {
+                std::sort(childPair.second.begin(), childPair.second.end(), processSorter);
+            }
+
+            std::unordered_set<std::uint32_t> emittedPidSet;
+            const std::function<void(const FriendlyNode*, int)> appendTreeNode =
+                [&](const FriendlyNode* node, const int depth)
+                {
+                    if (node == nullptr || node->cacheEntry == nullptr)
+                    {
+                        return;
+                    }
+                    const std::uint32_t pid = node->cacheEntry->record.pid;
+                    if (!emittedPidSet.insert(pid).second)
+                    {
+                        return;
+                    }
+
+                    appendRealNode(
+                        node,
+                        depth,
+                        childrenByParentPid.find(pid) != childrenByParentPid.end());
+                    const auto childIt = childrenByParentPid.find(pid);
+                    if (childIt == childrenByParentPid.end())
+                    {
+                        return;
+                    }
+                    for (const FriendlyNode* childNode : childIt->second)
+                    {
+                        appendTreeNode(childNode, depth + 1);
+                    }
+                };
+
+            const auto rootIt = std::find_if(
+                bucketNodes.cbegin(),
+                bucketNodes.cend(),
+                [rootPid](const FriendlyNode* node)
+                {
+                    return node != nullptr &&
+                        node->cacheEntry != nullptr &&
+                        node->cacheEntry->record.pid == rootPid;
+                });
+            if (rootIt != bucketNodes.cend())
+            {
+                appendTreeNode(*rootIt, 2);
+            }
+
+            for (const FriendlyNode* node : bucketNodes)
+            {
+                if (node == nullptr || node->cacheEntry == nullptr)
+                {
+                    continue;
+                }
+                if (emittedPidSet.find(node->cacheEntry->record.pid) == emittedPidSet.end())
+                {
+                    appendTreeNode(node, 2);
+                }
+            }
+        }
+    }
+
+    const auto appendFlatGroup =
+        [&](const FriendlyProcessGroupType groupType, const std::vector<const FriendlyNode*>& groupNodes)
+        {
+            appendGroupHeader(groupType, static_cast<int>(groupNodes.size()));
+            if (!m_friendlyExpandedStateByKey.value(friendlyExpansionKeyForGroup(groupType), true))
+            {
+                return;
+            }
+            for (const FriendlyNode* node : groupNodes)
+            {
+                appendRealNode(node, 1);
+            }
+        };
+    appendFlatGroup(FriendlyProcessGroupType::Background, backgroundNodes);
+    appendFlatGroup(FriendlyProcessGroupType::WindowsSystem, systemNodes);
+
+    return displayRows;
+}
+
 void ProcessDock::showTableContextMenu(const QPoint& localPosition)
 {
     const QModelIndex clickedIndex = m_processTable->indexAt(localPosition);
     if (!clickedIndex.isValid())
+    {
+        clearContextActionBinding();
+        return;
+    }
+
+    const ProcessTableRow* clickedTableRow = processTableRowForViewIndex(clickedIndex);
+    if (clickedTableRow == nullptr || clickedTableRow->rowKind != ProcessTableRowKind::Process)
     {
         clearContextActionBinding();
         return;
@@ -7416,7 +8297,9 @@ void ProcessDock::bindContextActionToIndex(const QModelIndex& clickedIndex)
     for (const QModelIndex& rowIndex : effectiveRows)
     {
         const ProcessTableRow* tableRow = processTableRowForViewIndex(rowIndex);
-        if (tableRow == nullptr || tableRow->identityKey.empty())
+        if (tableRow == nullptr ||
+            tableRow->rowKind != ProcessTableRowKind::Process ||
+            tableRow->identityKey.empty())
         {
             continue;
         }
@@ -7466,7 +8349,7 @@ std::string ProcessDock::selectedIdentityKey() const
     {
         const QModelIndex currentIndex = selectionModel->currentIndex();
         const ProcessTableRow* tableRow = processTableRowForViewIndex(currentIndex);
-        if (tableRow != nullptr)
+        if (tableRow != nullptr && tableRow->rowKind == ProcessTableRowKind::Process)
         {
             return tableRow->identityKey;
         }
@@ -7511,7 +8394,9 @@ std::vector<ProcessDock::ProcessActionTarget> ProcessDock::selectedActionTargets
         for (const QModelIndex& rowIndex : selectedRows)
         {
             const ProcessTableRow* tableRow = processTableRowForViewIndex(rowIndex);
-            if (tableRow == nullptr || tableRow->identityKey.empty())
+            if (tableRow == nullptr ||
+                tableRow->rowKind != ProcessTableRowKind::Process ||
+                tableRow->identityKey.empty())
             {
                 continue;
             }
@@ -7597,7 +8482,9 @@ void ProcessDock::syncTrackedSelectionFromTable()
     for (const QModelIndex& rowIndex : selectedRows)
     {
         const ProcessTableRow* tableRow = processTableRowForViewIndex(rowIndex);
-        if (tableRow == nullptr || tableRow->identityKey.empty())
+        if (tableRow == nullptr ||
+            tableRow->rowKind != ProcessTableRowKind::Process ||
+            tableRow->identityKey.empty())
         {
             continue;
         }
@@ -7612,7 +8499,9 @@ void ProcessDock::syncTrackedSelectionFromTable()
         ? m_processTable->selectionModel()->currentIndex()
         : QModelIndex();
     const ProcessTableRow* currentRow = processTableRowForViewIndex(currentIndex);
-    if (currentRow != nullptr && !currentRow->identityKey.empty())
+    if (currentRow != nullptr &&
+        currentRow->rowKind == ProcessTableRowKind::Process &&
+        !currentRow->identityKey.empty())
     {
         m_trackedSelectedIdentityKey = currentRow->identityKey;
         if (visitedIdentitySet.find(currentRow->identityKey) == visitedIdentitySet.end())
@@ -7757,7 +8646,8 @@ QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processR
     switch (column)
     {
     case TableColumn::Name:
-        return QString::fromStdString(buildRulerPrefix(depth) + processRecord.processName);
+        Q_UNUSED(depth);
+        return QString::fromStdString(processRecord.processName);
     case TableColumn::Pid:
         return QString::number(processRecord.pid);
     case TableColumn::Cpu:
@@ -8201,6 +9091,224 @@ std::uint64_t ProcessDock::parseUInt64WithDefault(
         *parseOkOut = true;
     }
     return parsedValue;
+}
+
+QSet<std::uint32_t> ProcessDock::collectVisibleWindowPidSet()
+{
+    // Inputs: current desktop top-level window list.
+    // Processing: EnumWindows collects visible, non-tool, non-owned windows and maps them to owner PIDs.
+    // Return: PID set used as application roots for friendly process grouping.
+    QSet<std::uint32_t> visibleWindowPidSet;
+    ::EnumWindows(
+        [](HWND windowHandle, LPARAM parameter) -> BOOL
+        {
+            auto* pidSet = reinterpret_cast<QSet<std::uint32_t>*>(parameter);
+            if (pidSet == nullptr ||
+                windowHandle == nullptr ||
+                ::IsWindowVisible(windowHandle) == FALSE)
+            {
+                return TRUE;
+            }
+
+            if (::GetWindow(windowHandle, GW_OWNER) != nullptr)
+            {
+                return TRUE;
+            }
+
+            const LONG_PTR extendedStyle = ::GetWindowLongPtrW(windowHandle, GWL_EXSTYLE);
+            if ((extendedStyle & WS_EX_TOOLWINDOW) != 0)
+            {
+                return TRUE;
+            }
+
+            wchar_t titleBuffer[2]{};
+            if (::GetWindowTextW(windowHandle, titleBuffer, 2) <= 0)
+            {
+                return TRUE;
+            }
+
+            DWORD pidValue = 0;
+            ::GetWindowThreadProcessId(windowHandle, &pidValue);
+            if (pidValue != 0U)
+            {
+                pidSet->insert(static_cast<std::uint32_t>(pidValue));
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&visibleWindowPidSet));
+    return visibleWindowPidSet;
+}
+
+std::uint32_t ProcessDock::findFriendlyApplicationRootPid(
+    const std::uint32_t pid,
+    const std::unordered_map<std::uint32_t, std::uint32_t>& parentPidByPid,
+    const QSet<std::uint32_t>& visibleWindowPidSet)
+{
+    // Inputs: one PID, the PID->parent index, and visible-window root candidates.
+    // Processing: walk ancestors defensively and stop on missing parents, cycles, or PID zero.
+    // Return: the first visible-window PID in the ancestor chain, or 0 when the process is not an app tree.
+    std::unordered_set<std::uint32_t> visitedPidSet;
+    std::uint32_t currentPid = pid;
+    while (currentPid != 0U && visitedPidSet.insert(currentPid).second)
+    {
+        if (visibleWindowPidSet.contains(currentPid))
+        {
+            return currentPid;
+        }
+
+        const auto parentIt = parentPidByPid.find(currentPid);
+        if (parentIt == parentPidByPid.end() || parentIt->second == currentPid)
+        {
+            break;
+        }
+        currentPid = parentIt->second;
+    }
+    return 0U;
+}
+
+bool ProcessDock::isFriendlyWindowsSystemProcess(
+    const ks::process::ProcessRecord& processRecord,
+    const QString& normalizedWindowsDirectoryPath)
+{
+    // Inputs: a process snapshot and normalized Windows directory path.
+    // Processing: classify kernel/session-manager/core Windows names or Windows-directory images as system.
+    // Return: true when the row belongs under the friendly “系统” group.
+    if (processRecord.pid == 0U || processRecord.pid == 4U)
+    {
+        return true;
+    }
+
+    const QString processName = QString::fromStdString(processRecord.processName).trimmed().toLower();
+    static const QSet<QString> kSystemProcessNames = {
+        QStringLiteral("system"),
+        QStringLiteral("system idle process"),
+        QStringLiteral("registry"),
+        QStringLiteral("smss.exe"),
+        QStringLiteral("csrss.exe"),
+        QStringLiteral("wininit.exe"),
+        QStringLiteral("winlogon.exe"),
+        QStringLiteral("services.exe"),
+        QStringLiteral("lsass.exe"),
+        QStringLiteral("lsaiso.exe"),
+        QStringLiteral("fontdrvhost.exe"),
+        QStringLiteral("dwm.exe"),
+        QStringLiteral("wudfhost.exe"),
+        QStringLiteral("audiodg.exe"),
+        QStringLiteral("memory compression")
+    };
+    if (kSystemProcessNames.contains(processName))
+    {
+        return true;
+    }
+
+    const QString imagePath = QString::fromStdString(
+        !processRecord.imagePath.empty() ? processRecord.imagePath : processRecord.r0ImagePath).trimmed();
+    if (imagePath.isEmpty() || normalizedWindowsDirectoryPath.isEmpty())
+    {
+        return false;
+    }
+
+    const QString normalizedImagePath = QDir::fromNativeSeparators(imagePath).toLower();
+    return normalizedImagePath.startsWith(normalizedWindowsDirectoryPath + QStringLiteral("/"));
+}
+
+QString ProcessDock::friendlyGroupTitle(const FriendlyProcessGroupType groupType, const int entryCount)
+{
+    // Inputs: friendly group type and current member count.
+    // Processing: format localized group names shared by headers and synthetic records.
+    // Return: user-visible title text.
+    switch (groupType)
+    {
+    case FriendlyProcessGroupType::Application:
+        return QStringLiteral("应用 (%1)").arg(entryCount);
+    case FriendlyProcessGroupType::WindowsSystem:
+        return QStringLiteral("系统 (%1)").arg(entryCount);
+    case FriendlyProcessGroupType::Background:
+    default:
+        return QStringLiteral("后台进程 (%1)").arg(entryCount);
+    }
+}
+
+QString ProcessDock::friendlyExpansionKeyForGroup(const FriendlyProcessGroupType groupType)
+{
+    // Inputs: friendly group type.
+    // Processing: convert enum to stable state key.
+    // Return: key used by m_friendlyExpandedStateByKey.
+    switch (groupType)
+    {
+    case FriendlyProcessGroupType::Application:
+        return QStringLiteral("friendly:group:application");
+    case FriendlyProcessGroupType::WindowsSystem:
+        return QStringLiteral("friendly:group:system");
+    case FriendlyProcessGroupType::Background:
+    default:
+        return QStringLiteral("friendly:group:background");
+    }
+}
+
+QString ProcessDock::friendlyExpansionKeyForApplication(const std::uint32_t rootPid)
+{
+    // Inputs: an application root PID.
+    // Processing: format a stable key that survives refreshes while PID remains alive.
+    // Return: key used to persist aggregate expansion state.
+    return QStringLiteral("friendly:app:%1").arg(static_cast<qulonglong>(rootPid));
+}
+
+ks::process::ProcessRecord ProcessDock::aggregateFriendlyApplicationRecord(
+    const std::vector<const CacheEntry*>& applicationEntries,
+    const std::uint32_t rootPid)
+{
+    // Inputs: all cache entries assigned to one application root and that root PID.
+    // Processing: choose the root process as display identity and sum per-process metrics.
+    // Return: synthetic ProcessRecord for the non-actionable application aggregate row.
+    ks::process::ProcessRecord aggregateRecord{};
+    if (applicationEntries.empty())
+    {
+        aggregateRecord.pid = rootPid;
+        aggregateRecord.processName = "Application";
+        return aggregateRecord;
+    }
+
+    const CacheEntry* identityEntry = applicationEntries.front();
+    for (const CacheEntry* entry : applicationEntries)
+    {
+        if (entry != nullptr && entry->record.pid == rootPid)
+        {
+            identityEntry = entry;
+            break;
+        }
+    }
+    if (identityEntry != nullptr)
+    {
+        aggregateRecord = identityEntry->record;
+    }
+
+    aggregateRecord.pid = rootPid;
+    aggregateRecord.parentPid = 0U;
+    aggregateRecord.threadCount = 0U;
+    aggregateRecord.handleCount = 0U;
+    aggregateRecord.cpuPercent = 0.0;
+    aggregateRecord.ramMB = 0.0;
+    aggregateRecord.workingSetMB = 0.0;
+    aggregateRecord.diskMBps = 0.0;
+    aggregateRecord.gpuPercent = 0.0;
+    aggregateRecord.netKBps = 0.0;
+    for (const CacheEntry* entry : applicationEntries)
+    {
+        if (entry == nullptr)
+        {
+            continue;
+        }
+        aggregateRecord.threadCount += entry->record.threadCount;
+        aggregateRecord.handleCount += entry->record.handleCount;
+        aggregateRecord.cpuPercent += entry->record.cpuPercent;
+        aggregateRecord.ramMB += entry->record.ramMB;
+        aggregateRecord.workingSetMB += entry->record.workingSetMB;
+        aggregateRecord.diskMBps += entry->record.diskMBps;
+        aggregateRecord.gpuPercent += entry->record.gpuPercent;
+        aggregateRecord.netKBps += entry->record.netKBps;
+    }
+    return aggregateRecord;
 }
 
 void ProcessDock::appendCreateResultLine(const QString& lineText)
@@ -8737,6 +9845,14 @@ void ProcessDock::executeCreateProcessRequest()
 bool ProcessDock::isTreeModeEnabled() const
 {
     return m_treeToggleButton != nullptr && m_treeToggleButton->isChecked();
+}
+
+bool ProcessDock::isFriendlyViewEnabled() const
+{
+    // Inputs: current checkbox pointer/state.
+    // Processing: guard nullptr during construction and return the user-facing switch state.
+    // Return: true when friendly grouping should override the legacy tree/list order.
+    return m_friendlyViewCheck != nullptr && m_friendlyViewCheck->isChecked();
 }
 
 ProcessDock::ViewMode ProcessDock::currentViewMode() const

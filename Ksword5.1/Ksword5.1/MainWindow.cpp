@@ -15,6 +15,7 @@
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -116,13 +117,92 @@ namespace
 
     // dockTabHoverFillColor 作用：
     // - 返回 Dock 标签悬停时强制填充的背景色；
-    // - 深色模式必须使用实色深蓝，避免系统/ADS 默认调色板回退为白色。
-    // 返回：当前主题对应的 hover 背景 QColor。
-    QColor dockTabHoverFillColor()
+    // - 普通标签 hover 使用弱蓝底，当前选中标签 hover 继续使用主蓝底；
+    // - 避免浅色模式下选中 Dock 被 hover 补绘覆盖成淡蓝色。
+    // 入参 activeTab：true 表示当前标签为 ADS 选中标签。
+    // 返回：当前主题和标签状态对应的 hover 背景 QColor。
+    QColor dockTabHoverFillColor(const bool activeTab)
     {
+        if (activeTab)
+        {
+            return QColor(KswordTheme::PrimaryBlueHex);
+        }
         return QColor(KswordTheme::IsDarkModeEnabled()
             ? KswordTheme::PrimaryBlueSubtleDarkHex
             : KswordTheme::PrimaryBlueSubtleLightHex);
+    }
+
+    // dockTabTextColor 作用：
+    // - 返回 ADS Dock 标签文字的最终颜色；
+    // - 选中标签在浅色模式使用深色字，在深色模式使用白字；
+    // - 未选中标签沿用当前主题主文字色。
+    // 入参 activeTab：true=当前选中标签；false=普通标签。
+    // 返回：可直接写入 QWidget/QLabel palette 与局部样式表的 QColor。
+    QColor dockTabTextColor(const bool activeTab)
+    {
+        if (!activeTab)
+        {
+            return KswordTheme::TextPrimaryColor();
+        }
+
+        return KswordTheme::IsDarkModeEnabled()
+            ? QColor(255, 255, 255)
+            : QColor(16, 35, 54);
+    }
+
+    // applyDockTabTextColor 作用：
+    // - 对 ADS 标签本体和内部 QLabel/CElidingLabel 直接写文字色；
+    // - 绕过父级 QSS 选择器对 ADS 内部标签控件不生效或被 hover 规则覆盖的问题。
+    // 入参 tabWidget：ADS 主标签或自动隐藏侧边标签。
+    // 入参 activeTab：true=选中标签；false=普通标签。
+    // 返回：无返回值；仅在颜色变化时更新 palette/styleSheet，避免 StyleChange 风暴。
+    void applyDockTabTextColor(QWidget* tabWidget, const bool activeTab)
+    {
+        if (tabWidget == nullptr)
+        {
+            return;
+        }
+
+        const QColor finalTextColor = dockTabTextColor(activeTab);
+        const QString finalTextColorName = finalTextColor.name(QColor::HexRgb).toUpper();
+
+        if (tabWidget->property("kswordDockTabTextColor").toString() != finalTextColorName)
+        {
+            QPalette tabPalette = tabWidget->palette();
+            tabPalette.setColor(QPalette::WindowText, finalTextColor);
+            tabPalette.setColor(QPalette::Text, finalTextColor);
+            tabPalette.setColor(QPalette::ButtonText, finalTextColor);
+            tabWidget->setPalette(tabPalette);
+            tabWidget->setProperty("kswordDockTabTextColor", finalTextColorName);
+        }
+
+        const QString labelStyle = QStringLiteral(
+            "color:%1 !important;"
+            "background-color:transparent !important;"
+            "background:transparent !important;"
+            "font-weight:%2;")
+            .arg(finalTextColorName)
+            .arg(activeTab ? QStringLiteral("700") : QStringLiteral("600"));
+
+        const QList<QLabel*> labelChildren = tabWidget->findChildren<QLabel*>();
+        for (QLabel* labelWidget : labelChildren)
+        {
+            if (labelWidget == nullptr)
+            {
+                continue;
+            }
+
+            QPalette labelPalette = labelWidget->palette();
+            labelPalette.setColor(QPalette::WindowText, finalTextColor);
+            labelPalette.setColor(QPalette::Text, finalTextColor);
+            labelPalette.setColor(QPalette::ButtonText, finalTextColor);
+            labelWidget->setPalette(labelPalette);
+
+            if (labelWidget->styleSheet() != labelStyle)
+            {
+                labelWidget->setStyleSheet(labelStyle);
+            }
+        }
     }
 
     // configureDockTabStyleSurface 作用：
@@ -192,6 +272,7 @@ namespace
         for (ads::CDockWidgetTab* dockTab : dockTabs)
         {
             configureDockTabStyleSurface(dockTab, kKswordDockTabPropertyName);
+            applyDockTabTextColor(dockTab, dockTab->property("activeTab").toBool());
         }
 
         const QList<ads::CAutoHideTab*> autoHideTabs =
@@ -199,6 +280,7 @@ namespace
         for (ads::CAutoHideTab* autoHideTab : autoHideTabs)
         {
             configureDockTabStyleSurface(autoHideTab, kKswordAutoHideTabPropertyName);
+            applyDockTabTextColor(autoHideTab, autoHideTab->property("activeTab").toBool());
         }
     }
 
@@ -215,6 +297,16 @@ namespace
             : ads::CDockWidgetTab(dockWidget, parent)
         {
             configureDockTabStyleSurface(this, kKswordDockTabPropertyName);
+            syncDockTabTextColor();
+            QObject::connect(
+                this,
+                &ads::CDockWidgetTab::activeTabChanged,
+                this,
+                [this]()
+                {
+                    syncDockTabTextColor();
+                    update();
+                });
         }
 
     protected:
@@ -227,8 +319,20 @@ namespace
                     eventObject->type() == QEvent::HoverEnter ||
                     eventObject->type() == QEvent::HoverLeave ||
                     eventObject->type() == QEvent::HoverMove);
+            const bool shouldSyncTextAfterEvent =
+                eventObject != nullptr &&
+                (eventObject->type() == QEvent::DynamicPropertyChange ||
+                    eventObject->type() == QEvent::PaletteChange ||
+                    eventObject->type() == QEvent::ApplicationPaletteChange ||
+                    eventObject->type() == QEvent::StyleChange ||
+                    eventObject->type() == QEvent::Polish ||
+                    eventObject->type() == QEvent::Show);
 
             const bool handled = ads::CDockWidgetTab::event(eventObject);
+            if (shouldSyncTextAfterEvent)
+            {
+                syncDockTabTextColor();
+            }
             if (shouldRepaintAfterEvent)
             {
                 update();
@@ -245,11 +349,24 @@ namespace
             }
 
             // 在基类 QFrame/QSS 绘制之后补一层实色背景，盖掉 ADS/系统默认白底；
+            // 选中标签必须保持主蓝底，避免浅色模式 hover 时变成淡蓝底。
             // 子 QLabel 会在父控件 paintEvent 返回后再绘制，因此文字不会被遮住。
+            const bool activeTab = property("activeTab").toBool();
             QPainter painter(this);
             painter.setPen(Qt::NoPen);
-            painter.setBrush(dockTabHoverFillColor());
+            painter.setBrush(dockTabHoverFillColor(activeTab));
             painter.drawRect(paintEventObject != nullptr ? paintEventObject->rect() : rect());
+        }
+
+    private:
+        // syncDockTabTextColor 作用：
+        // - 读取 ADS activeTab 属性；
+        // - 将当前主题下应使用的文字色同步到标签本体和内部 QLabel。
+        // 输入：无显式入参；依赖当前对象 activeTab 动态属性和全局主题状态。
+        // 返回：无返回值。
+        void syncDockTabTextColor()
+        {
+            applyDockTabTextColor(this, property("activeTab").toBool());
         }
     };
 
@@ -267,6 +384,7 @@ namespace
         {
             setDockWidget(dockWidget);
             configureDockTabStyleSurface(this, kKswordAutoHideTabPropertyName);
+            syncDockTabTextColor();
         }
 
     protected:
@@ -279,13 +397,36 @@ namespace
                     eventObject->type() == QEvent::HoverEnter ||
                     eventObject->type() == QEvent::HoverLeave ||
                     eventObject->type() == QEvent::HoverMove);
+            const bool shouldSyncTextAfterEvent =
+                eventObject != nullptr &&
+                (eventObject->type() == QEvent::DynamicPropertyChange ||
+                    eventObject->type() == QEvent::PaletteChange ||
+                    eventObject->type() == QEvent::ApplicationPaletteChange ||
+                    eventObject->type() == QEvent::StyleChange ||
+                    eventObject->type() == QEvent::Polish ||
+                    eventObject->type() == QEvent::Show);
 
             const bool handled = ads::CAutoHideTab::event(eventObject);
+            if (shouldSyncTextAfterEvent)
+            {
+                syncDockTabTextColor();
+            }
             if (shouldRepaintAfterEvent)
             {
                 update();
             }
             return handled;
+        }
+
+    private:
+        // syncDockTabTextColor 作用：
+        // - 读取 ADS activeTab 属性；
+        // - 将当前主题下应使用的文字色同步到自动隐藏标签本体和内部 QLabel。
+        // 输入：无显式入参；依赖当前对象 activeTab 动态属性和全局主题状态。
+        // 返回：无返回值。
+        void syncDockTabTextColor()
+        {
+            applyDockTabTextColor(this, property("activeTab").toBool());
         }
     };
 
@@ -2734,7 +2875,7 @@ namespace
 
     // buildGlobalTooltipStyleBlock 作用：
     // - 生成全局 Tooltip 样式片段；
-    // - 片段带起止标记，供 applyGlobalTooltipStyleBlock 做替换更新。
+    // - 片段带起止标记，供 applyGlobalApplicationStyleBlocks 做替换更新。
     // 调用方式：applyAppearanceSettings 内部调用。
     // 入参 darkModeEnabled：当前是否深色模式。
     // 返回：可直接拼接到 QApplication 样式表的 Tooltip 片段。
@@ -2817,69 +2958,120 @@ namespace
             .arg(QString::fromLatin1(kContextMenuStyleEndMarker));
     }
 
-    // applyGlobalTooltipStyleBlock 作用：
-    // - 把 Tooltip 样式片段写入 QApplication 样式表；
-    // - 先删除旧标记片段，再追加新片段，确保切换主题后 Tooltip 立即生效。
-    // 调用方式：applyAppearanceSettings 内部调用。
-    // 入参 tooltipStyleBlock：buildGlobalTooltipStyleBlock 生成的样式片段。
-    void applyGlobalTooltipStyleBlock(const QString& tooltipStyleBlock)
+    // replaceMarkedStyleBlock 作用：
+    // - 在已有 QApplication 样式表文本中替换一个带起止标记的样式块；
+    // - 没有旧块时追加新块，旧块损坏时也按追加处理，避免误删其它 QSS；
+    // - 返回值：true 表示 styleSheetText 被修改。
+    bool replaceMarkedStyleBlock(
+        QString& styleSheetText,
+        const char* const beginMarker,
+        const char* const endMarker,
+        const QString& replacementBlock)
     {
-        QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
-        if (appInstance == nullptr)
+        if (beginMarker == nullptr || endMarker == nullptr)
         {
-            return;
+            return false;
         }
 
-        // appStyleSheetText 作用：读取并更新 QApplication 当前样式表文本。
-        QString appStyleSheetText = appInstance->styleSheet();
-        const QString beginMarkerText = QString::fromLatin1(kTooltipStyleBeginMarker);
-        const QString endMarkerText = QString::fromLatin1(kTooltipStyleEndMarker);
-        const int beginMarkerIndex = appStyleSheetText.indexOf(beginMarkerText);
+        const QString beginMarkerText = QString::fromLatin1(beginMarker);
+        const QString endMarkerText = QString::fromLatin1(endMarker);
+        const int beginMarkerIndex = styleSheetText.indexOf(beginMarkerText);
 
         if (beginMarkerIndex >= 0)
         {
-            const int endMarkerIndex = appStyleSheetText.indexOf(endMarkerText, beginMarkerIndex);
+            const int endMarkerIndex = styleSheetText.indexOf(endMarkerText, beginMarkerIndex);
             if (endMarkerIndex >= 0)
             {
                 const int removeLength = (endMarkerIndex - beginMarkerIndex) + endMarkerText.length();
-                appStyleSheetText.remove(beginMarkerIndex, removeLength);
+                const QString oldBlock = styleSheetText.mid(beginMarkerIndex, removeLength);
+                if (oldBlock == replacementBlock)
+                {
+                    return false;
+                }
+                styleSheetText.replace(beginMarkerIndex, removeLength, replacementBlock);
+                return true;
             }
         }
 
-        appStyleSheetText += tooltipStyleBlock;
-        appInstance->setStyleSheet(appStyleSheetText);
+        if (!styleSheetText.endsWith(QLatin1Char('\n')))
+        {
+            styleSheetText += QLatin1Char('\n');
+        }
+        styleSheetText += replacementBlock;
+        return true;
     }
 
-    // applyGlobalContextMenuStyleBlock 作用：
-    // - 把 QMenu 样式片段写入 QApplication 样式表；
-    // - 先删除旧标记片段，再追加新片段，确保主题切换后右键菜单立即生效。
+    // applyGlobalApplicationStyleBlocks 作用：
+    // - 合并更新 QApplication 级别 Tooltip/QMenu 样式块；
+    // - 只在最终样式表内容确实变化时调用一次 QApplication::setStyleSheet；
+    // - 避免原先 Tooltip 与 QMenu 分别 setStyleSheet 导致启动阶段全局 repolish 两次。
     // 调用方式：applyAppearanceSettings 内部调用。
-    // 入参 contextMenuStyleBlock：buildGlobalContextMenuStyleBlock 生成的样式片段。
-    void applyGlobalContextMenuStyleBlock(const QString& contextMenuStyleBlock)
+    // 入参 tooltipStyleBlock/contextMenuStyleBlock：已带标记的 QSS 片段。
+    // 返回：实际触发 QApplication::setStyleSheet 时返回 true。
+    bool applyGlobalApplicationStyleBlocks(
+        const QString& tooltipStyleBlock,
+        const QString& contextMenuStyleBlock,
+        qint64* elapsedMsOut = nullptr,
+        int* widgetCountOut = nullptr,
+        int* styleLengthOut = nullptr)
     {
         QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
         if (appInstance == nullptr)
         {
-            return;
+            if (elapsedMsOut != nullptr)
+            {
+                *elapsedMsOut = 0;
+            }
+            if (widgetCountOut != nullptr)
+            {
+                *widgetCountOut = 0;
+            }
+            if (styleLengthOut != nullptr)
+            {
+                *styleLengthOut = 0;
+            }
+            return false;
         }
 
         QString appStyleSheetText = appInstance->styleSheet();
-        const QString beginMarkerText = QString::fromLatin1(kContextMenuStyleBeginMarker);
-        const QString endMarkerText = QString::fromLatin1(kContextMenuStyleEndMarker);
-        const int beginMarkerIndex = appStyleSheetText.indexOf(beginMarkerText);
+        const QString oldStyleSheetText = appStyleSheetText;
 
-        if (beginMarkerIndex >= 0)
+        replaceMarkedStyleBlock(
+            appStyleSheetText,
+            kTooltipStyleBeginMarker,
+            kTooltipStyleEndMarker,
+            tooltipStyleBlock);
+        replaceMarkedStyleBlock(
+            appStyleSheetText,
+            kContextMenuStyleBeginMarker,
+            kContextMenuStyleEndMarker,
+            contextMenuStyleBlock);
+
+        if (styleLengthOut != nullptr)
         {
-            const int endMarkerIndex = appStyleSheetText.indexOf(endMarkerText, beginMarkerIndex);
-            if (endMarkerIndex >= 0)
+            *styleLengthOut = appStyleSheetText.length();
+        }
+        if (widgetCountOut != nullptr)
+        {
+            *widgetCountOut = appInstance->allWidgets().size();
+        }
+        if (appStyleSheetText == oldStyleSheetText)
+        {
+            if (elapsedMsOut != nullptr)
             {
-                const int removeLength = (endMarkerIndex - beginMarkerIndex) + endMarkerText.length();
-                appStyleSheetText.remove(beginMarkerIndex, removeLength);
+                *elapsedMsOut = 0;
             }
+            return false;
         }
 
-        appStyleSheetText += contextMenuStyleBlock;
+        QElapsedTimer applyTimer;
+        applyTimer.start();
         appInstance->setStyleSheet(appStyleSheetText);
+        if (elapsedMsOut != nullptr)
+        {
+            *elapsedMsOut = applyTimer.elapsed();
+        }
+        return true;
     }
 
     // isBackgroundImageReady 作用：
@@ -7679,14 +7871,29 @@ void MainWindow::applyAppearanceSettings(
     QToolTip::setPalette(toolTipPalette);
     QToolTip::setFont(QApplication::font());
 
-    // 同步写入 QApplication 样式表中的 QToolTip 规则：
+    // 同步写入 QApplication 样式表中的 QToolTip/QMenu 规则：
     // - 覆盖所有顶层窗口（含浮动 Dock 与后续新建窗口）；
-    // - 修复“部分按钮 Tooltip 仍白底”的残留问题。
-    applyGlobalTooltipStyleBlock(buildGlobalTooltipStyleBlock(darkModeEnabled));
-    // 同步写入 QApplication 样式表中的 QMenu 规则：
-    // - 兜底标准输入控件（QLineEdit/QTextEdit/QPlainTextEdit）右键菜单；
-    // - 覆盖独立顶层窗口中未手动设置菜单样式的场景。
-    applyGlobalContextMenuStyleBlock(buildGlobalContextMenuStyleBlock(darkModeEnabled));
+    // - 两个片段必须合并后只 setStyleSheet 一次，否则启动后期会全局 repolish 两遍。
+    // - 相同内容会跳过 QApplication::setStyleSheet，避免重复应用外观设置时产生样式风暴。
+    qint64 globalAppStyleApplyMs = 0;
+    int globalAppStyleWidgetCount = 0;
+    int globalAppStyleLength = 0;
+    const bool globalAppStyleChanged = applyGlobalApplicationStyleBlocks(
+        buildGlobalTooltipStyleBlock(darkModeEnabled),
+        buildGlobalContextMenuStyleBlock(darkModeEnabled),
+        &globalAppStyleApplyMs,
+        &globalAppStyleWidgetCount,
+        &globalAppStyleLength);
+    if (globalAppStyleChanged || triggerReason == QStringLiteral("初始化加载"))
+    {
+        dbg << appearanceApplyEvent
+            << "[MainWindow] QApplication 全局 Tooltip/QMenu 样式"
+            << (globalAppStyleChanged ? "已应用" : "未变化跳过")
+            << ", elapsedMs=" << globalAppStyleApplyMs
+            << ", widgetCount=" << globalAppStyleWidgetCount
+            << ", styleLength=" << globalAppStyleLength
+            << eol;
+    }
 
     // 全局 QMessageBox 主题刷新：
     // - 深浅色切换后，已打开的消息框也同步改为当前主题；
@@ -7949,6 +8156,13 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     const QString inactiveTabTextColor = primaryTextColor;
     const QString activeTabColor = activeThemeColor;
     const QString activeTabTextColor = selectedTextColor;
+    // dockActiveTabTextColor 作用：
+    // - 只控制 ADS Dock 选中标签文字；
+    // - 浅色模式按需求使用黑色/深色字，避免“蓝底白字”；
+    // - 普通 QTabBar 仍沿用 activeTabTextColor，避免扩大样式影响面。
+    const QString dockActiveTabTextColor = darkModeEnabled
+        ? QStringLiteral("#FFFFFF")
+        : QStringLiteral("#102336");
     const QString tabHoverColor = darkModeEnabled
         ? QStringLiteral("#173553")
         : subtleThemeColor;
@@ -8270,10 +8484,15 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "ads--CDockWidgetTab[activeTab=\"true\"],ads--CAutoHideTab[activeTab=\"true\"]{"
         "  background-color:%4 !important;"
         "  background:%4 !important;"
-        "  color:%5 !important;"
+        "  color:%8 !important;"
         "}"
-        "ads--CDockWidgetTab[activeTab=\"true\"] QLabel,ads--CAutoHideTab[activeTab=\"true\"] QLabel{"
-        "  color:%5 !important;"
+        "ads--CDockWidgetTab[activeTab=\"true\"] QLabel,"
+        "ads--CDockWidgetTab[activeTab=\"true\"] QWidget,"
+        "ads--CAutoHideTab[activeTab=\"true\"] QLabel,"
+        "ads--CAutoHideTab[activeTab=\"true\"] QWidget{"
+        "  color:%8 !important;"
+        "  background-color:transparent !important;"
+        "  background:transparent !important;"
         "  font-weight:700;"
         "}"
         "ads--CDockWidgetTab:hover,"
@@ -8318,6 +8537,20 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  background-color:%7 !important;"
         "  background:%7 !important;"
         "}"
+        "ads--CDockWidgetTab[activeTab=\"true\"]:hover,"
+        "ads--CAutoHideTab[activeTab=\"true\"]:hover{"
+        "  background-color:%4 !important;"
+        "  background:%4 !important;"
+        "  color:%8 !important;"
+        "}"
+        "ads--CDockWidgetTab[activeTab=\"true\"]:hover QLabel,"
+        "ads--CDockWidgetTab[activeTab=\"true\"]:hover QWidget,"
+        "ads--CAutoHideTab[activeTab=\"true\"]:hover QLabel,"
+        "ads--CAutoHideTab[activeTab=\"true\"]:hover QWidget{"
+        "  color:%8 !important;"
+        "  background-color:transparent !important;"
+        "  background:transparent !important;"
+        "}"
         "ads--CDockAreaTitleBar QToolButton,ads--CDockAreaTitleBar QPushButton{"
         "  border:none !important;"
         "  background:transparent !important;"
@@ -8328,7 +8561,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         .arg(activeTabColor)
         .arg(activeTabTextColor)
         .arg(tabHoverColor)
-        .arg(dockTabChildHoverColor);
+        .arg(dockTabChildHoverColor)
+        .arg(dockActiveTabTextColor);
 
     const QString sharedOverlayStyle = depthOverlayStyle
         + scrollBarOverlayStyle

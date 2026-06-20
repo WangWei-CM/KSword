@@ -16,6 +16,7 @@
 #include <QIcon>
 #include <QModelIndex>
 #include <QPointer>
+#include <QSet>
 #include <QSize>
 #include <QVariant>
 #include <QWidget>
@@ -196,11 +197,35 @@ private:
         Detail = 1   // 详细信息视图（展示所有补充字段）。
     };
 
+    // ProcessTableRowKind：
+    // - Process 表示真实进程行，可作为右键、双击、R0/R3 操作目标；
+    // - GroupHeader 表示“应用/后台进程/系统”分类标题，只负责展示和展开；
+    // - ApplicationAggregate 表示某个应用的聚合父行，展示汇总指标但不直接执行进程动作。
+    enum class ProcessTableRowKind : int
+    {
+        Process = 0,
+        GroupHeader,
+        ApplicationAggregate
+    };
+
+    // FriendlyProcessGroupType：进程友好视图的三级分类，顺序贴近任务管理器/HUD。
+    enum class FriendlyProcessGroupType : int
+    {
+        Application = 0,
+        Background,
+        WindowsSystem
+    };
+
     // DisplayRow：列表渲染层的数据结构（带状态标记）。
     struct DisplayRow
     {
         ks::process::ProcessRecord* record = nullptr; // 指向缓存中的实体数据。
+        ProcessTableRowKind rowKind = ProcessTableRowKind::Process; // rowKind：真实进程/分类标题/应用聚合。
+        FriendlyProcessGroupType friendlyGroupType = FriendlyProcessGroupType::Background; // friendlyGroupType：友好视图分类。
+        QString syntheticTitle;                       // syntheticTitle：合成行名称列显示文本；真实进程为空。
+        QString expansionKey;                         // expansionKey：合成行展开状态键；真实进程通常为空。
         int depth = 0;                                // 树状列表下的缩进深度。
+        bool hasChildren = false;                     // hasChildren：真实树状/友好视图下是否存在子进程。
         bool isNew = false;                           // 本轮新增进程（绿色高亮）。
         bool isExited = false;                        // 本轮退出但保留一轮（灰色高亮）。
         bool isKernelOnly = false;                    // 仅内核枚举可见（疑似隐藏进程，红色高亮）。
@@ -214,7 +239,12 @@ private:
     {
         ks::process::ProcessRecord record;            // record：表格行持有的进程快照，避免后台刷新替换缓存后悬空。
         std::string identityKey;                      // identityKey：PID+创建时间，用于选择恢复和动作绑定。
+        ProcessTableRowKind rowKind = ProcessTableRowKind::Process; // rowKind：控制展示和动作是否允许。
+        FriendlyProcessGroupType friendlyGroupType = FriendlyProcessGroupType::Background; // friendlyGroupType：合成行所属分类。
+        QString syntheticTitle;                       // syntheticTitle：分类/聚合行的展示标题。
+        QString expansionKey;                         // expansionKey：分类/聚合行展开状态键。
         int depth = 0;                                // depth：树状显示时的缩进层级。
+        bool hasChildren = false;                     // hasChildren：供表示层绘制树状展开提示。
         bool isNew = false;                           // isNew：新增行高亮标记。
         bool isExited = false;                        // isExited：退出保留行高亮标记。
         bool isKernelOnly = false;                    // isKernelOnly：仅内核可见进程高亮标记。
@@ -379,6 +409,7 @@ private:
     std::vector<DisplayRow> buildDisplayOrder() const;
     std::vector<DisplayRow> buildTreeDisplayOrder() const;
     std::vector<DisplayRow> buildListDisplayOrder() const;
+    std::vector<DisplayRow> buildFriendlyDisplayOrder() const;
     std::vector<DisplayRow> buildActivitySnapshotDisplayOrder() const;
     void applyR0ColumnAvailability(const std::vector<DisplayRow>& displayRows);
 
@@ -386,6 +417,7 @@ private:
     void applyViewMode(ViewMode viewMode);
     void applyDefaultColumnWidths();
     bool isTreeModeEnabled() const;
+    bool isFriendlyViewEnabled() const;
     ViewMode currentViewMode() const;
 
     // ======== 表格交互 ========
@@ -555,6 +587,20 @@ private:
     static bool parseUnsignedText(const QString& text, std::uint64_t& valueOut);
     static std::uint32_t parseUInt32WithDefault(const QString& text, std::uint32_t defaultValue, bool* parseOkOut = nullptr);
     static std::uint64_t parseUInt64WithDefault(const QString& text, std::uint64_t defaultValue, bool* parseOkOut = nullptr);
+    static QSet<std::uint32_t> collectVisibleWindowPidSet();
+    static std::uint32_t findFriendlyApplicationRootPid(
+        std::uint32_t pid,
+        const std::unordered_map<std::uint32_t, std::uint32_t>& parentPidByPid,
+        const QSet<std::uint32_t>& visibleWindowPidSet);
+    static bool isFriendlyWindowsSystemProcess(
+        const ks::process::ProcessRecord& processRecord,
+        const QString& normalizedWindowsDirectoryPath);
+    static QString friendlyGroupTitle(FriendlyProcessGroupType groupType, int entryCount);
+    static QString friendlyExpansionKeyForGroup(FriendlyProcessGroupType groupType);
+    static QString friendlyExpansionKeyForApplication(std::uint32_t rootPid);
+    static ks::process::ProcessRecord aggregateFriendlyApplicationRecord(
+        const std::vector<const CacheEntry*>& applicationEntries,
+        std::uint32_t rootPid);
 
     // ======== 后台线程核心函数（静态） ========
     static RefreshResult buildRefreshResult(
@@ -589,6 +635,7 @@ private:
     QComboBox* m_viewModeCombo = nullptr;     // 监视视图/详细视图下拉框。
     QPushButton* m_startButton = nullptr;     // 开始监视按钮。
     QPushButton* m_pauseButton = nullptr;     // 暂停监视按钮。
+    QCheckBox* m_friendlyViewCheck = nullptr; // 进程友好视图：应用/后台进程/系统分类，默认开启。
     QCheckBox* m_kernelCompareCheck = nullptr;// 刷新时是否额外请求内核进程列表并做差异对比。
     QCheckBox* m_showKswordHiddenProcessCheck = nullptr; // 是否显示被 Ksword R0 摘链隐藏的进程。
     QLineEdit* m_processSearchLineEdit = nullptr; // 进程搜索框；用于按名称/PID/路径等关键词过滤当前列表。
@@ -627,6 +674,10 @@ private:
     QTableView* m_processTable = nullptr;     // 进程列表表格视图（支持列拖动/排序/右键）。
     ProcessTableModel* m_processTableModel = nullptr; // 进程列表轻量模型，避免刷新时重建 item。
     QSortFilterProxyModel* m_processSortProxy = nullptr; // 进程列表排序代理，保持数值列排序行为。
+    QHash<QString, bool> m_friendlyExpandedStateByKey; // 友好视图分类/应用聚合行展开状态；缺省按展开处理。
+    int m_friendlySortColumn = static_cast<int>(TableColumn::Name); // 友好视图内部排序列，默认按进程名 A-Z。
+    Qt::SortOrder m_friendlySortOrder = Qt::AscendingOrder; // 友好视图内部排序方向，点击表头切换。
+    mutable std::vector<ks::process::ProcessRecord> m_friendlySyntheticRecords; // 友好视图合成标题/聚合行记录缓存。
 
     // ======== 线程页控件 ========
     QHBoxLayout* m_threadTopLayout = nullptr; // 线程页顶部操作栏。

@@ -27,6 +27,12 @@ namespace ks::ui
         // - 这比每个单元格维护独立 item 对象更轻量。
         using DataResolver = std::function<QVariant(const RowType& row, int column, int role)>;
 
+        // FlagsResolver 作用：
+        // - 允许调用方按行/列动态控制 Qt item flags；
+        // - 默认保持只读可选，兼容既有表格；
+        // - 进程友好视图会用它让分类标题和应用聚合行不可选，避免误触发进程动作。
+        using FlagsResolver = std::function<Qt::ItemFlags(const RowType& row, int column)>;
+
         // ColumnSpec 作用：
         // - 保存横向表头文本和默认对齐方式；
         // - 真正的数据由 DataResolver 提供。
@@ -39,10 +45,15 @@ namespace ks::ui
         // 构造函数作用：
         // - 接收固定列定义与数据解析回调；
         // - 返回：无，模型对象直接交给 QTableView 绑定。
-        explicit FlatTableModel(std::vector<ColumnSpec> columns, DataResolver resolver, QObject* parent = nullptr)
+        explicit FlatTableModel(
+            std::vector<ColumnSpec> columns,
+            DataResolver resolver,
+            QObject* parent = nullptr,
+            FlagsResolver flagsResolver = FlagsResolver())
             : QAbstractTableModel(parent)
             , m_columns(std::move(columns))
             , m_dataResolver(std::move(resolver))
+            , m_flagsResolver(std::move(flagsResolver))
         {
         }
 
@@ -162,12 +173,27 @@ namespace ks::ui
                 return Qt::NoItemFlags;
             }
 
+            const int row = index.row();
+            const int column = index.column();
+            if (row < 0 || column < 0 ||
+                row >= static_cast<int>(m_rows.size()) ||
+                column >= static_cast<int>(m_columns.size()))
+            {
+                return Qt::NoItemFlags;
+            }
+
+            if (m_flagsResolver)
+            {
+                return m_flagsResolver(m_rows[static_cast<std::size_t>(row)], column);
+            }
+
             return Qt::ItemIsEnabled | Qt::ItemIsSelectable;
         }
 
     private:
         std::vector<ColumnSpec> m_columns;  // m_columns：固定横向列定义。
         DataResolver m_dataResolver;        // m_dataResolver：单元格角色解析器。
+        FlagsResolver m_flagsResolver;      // m_flagsResolver：可选行 flags 解析器，未设置时保持默认可选。
         std::vector<RowType> m_rows;        // m_rows：当前可见行快照。
     };
 }
