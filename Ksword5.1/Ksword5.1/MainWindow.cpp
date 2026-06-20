@@ -27,6 +27,7 @@
 #include <QLabel>
 #include <QList>
 #include <QPainter>
+#include <QPaintEvent>
 #include <QPalette>
 #include <QPointF>
 #include <QPixmap>
@@ -54,7 +55,10 @@
 #include "Framework/LogDockWidget.h"
 #include "Framework/ProgressDockWidget.h"
 #include "Framework/CustomTitleBar.h"
+#include "include/ads/AutoHideTab.h"
+#include "include/ads/DockComponentsFactory.h"
 #include "include/ads/DockWidgetTab.h"
+#include "include/ads/FloatingDockContainer.h"
 #include "ArkDriverClient/ArkDriverClient.h"
 #include "KernelDock/KernelDock.CallbackPromptManager.h"
 #include "UI/CodeEditorWidget.h"
@@ -99,6 +103,227 @@ namespace
     // - 定义用户拖拽后的 ADS 布局配置文件名；
     // - 文件落在 exe 同级 config 目录，便于发行包独立携带配置。
     constexpr const char* kDockLayoutConfigFileName = "ksword_ads_layout.bin";
+
+    // kKswordDockTabPropertyName 作用：
+    // - 给 ADS 主 Dock 标签打动态属性，供最终兜底 QSS 精准选择；
+    // - 避免泛化 QWidget:hover 影响 Dock 内容区其它控件。
+    constexpr const char* kKswordDockTabPropertyName = "kswordDockTab";
+
+    // kKswordAutoHideTabPropertyName 作用：
+    // - 给 ADS 自动隐藏侧边标签打动态属性；
+    // - 与主 Dock 标签使用相同悬停色，但保持选择器独立。
+    constexpr const char* kKswordAutoHideTabPropertyName = "kswordAutoHideTab";
+
+    // dockTabHoverFillColor 作用：
+    // - 返回 Dock 标签悬停时强制填充的背景色；
+    // - 深色模式必须使用实色深蓝，避免系统/ADS 默认调色板回退为白色。
+    // 返回：当前主题对应的 hover 背景 QColor。
+    QColor dockTabHoverFillColor()
+    {
+        return QColor(KswordTheme::IsDarkModeEnabled()
+            ? KswordTheme::PrimaryBlueSubtleDarkHex
+            : KswordTheme::PrimaryBlueSubtleLightHex);
+    }
+
+    // configureDockTabStyleSurface 作用：
+    // - 对 ADS 标签及其直接子控件启用 QSS/hover 背景绘制所需属性；
+    // - 这是一次性初始化，不在事件过滤器中修改 stylesheet，避免 StyleChange 递归。
+    // 入参 tabWidget：ADS 标签 QWidget；propertyName：要写入的动态属性名。
+    // 返回：无返回值。
+    void configureDockTabStyleSurface(QWidget* tabWidget, const char* propertyName)
+    {
+        if (tabWidget == nullptr || propertyName == nullptr)
+        {
+            return;
+        }
+
+        tabWidget->setProperty(propertyName, true);
+        tabWidget->setAttribute(Qt::WA_Hover, true);
+        tabWidget->setAttribute(Qt::WA_StyledBackground, true);
+        tabWidget->setAutoFillBackground(false);
+        tabWidget->setMouseTracking(true);
+
+        // 子 QLabel/QWidget 是 ADS 标签文字与图标的实际承载层；
+        // 只处理直接子级，避免误改 Dock 内容页内的业务控件。
+        const QList<QWidget*> directChildren =
+            tabWidget->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+        for (QWidget* childWidget : directChildren)
+        {
+            if (childWidget == nullptr)
+            {
+                continue;
+            }
+            childWidget->setAttribute(Qt::WA_Hover, true);
+            childWidget->setAttribute(Qt::WA_StyledBackground, true);
+            childWidget->setAutoFillBackground(false);
+        }
+    }
+
+    // configureAdsDockTabVisualIdentity 作用：
+    // - 同时标记一个 CDockWidget 的主标签和自动隐藏侧边标签；
+    // - 用于创建后、布局恢复后、浮动窗口同步外观时的安全兜底。
+    // 入参 dockWidget：待处理的 ADS Dock；为空时直接返回。
+    // 返回：无返回值。
+    void configureAdsDockTabVisualIdentity(ads::CDockWidget* dockWidget)
+    {
+        if (dockWidget == nullptr)
+        {
+            return;
+        }
+
+        configureDockTabStyleSurface(dockWidget->tabWidget(), kKswordDockTabPropertyName);
+        configureDockTabStyleSurface(dockWidget->sideTabWidget(), kKswordAutoHideTabPropertyName);
+    }
+
+    // refreshAdsDockTabVisualIdentities 作用：
+    // - 扫描某个根窗口下已经存在的 ADS 标签并补齐动态属性；
+    // - 适用于 restoreState 或浮动窗口创建后产生/迁移的标签。
+    // 入参 rootWidget：扫描根节点；为空时直接返回。
+    // 返回：无返回值。
+    void refreshAdsDockTabVisualIdentities(QWidget* rootWidget)
+    {
+        if (rootWidget == nullptr)
+        {
+            return;
+        }
+
+        const QList<ads::CDockWidgetTab*> dockTabs =
+            rootWidget->findChildren<ads::CDockWidgetTab*>();
+        for (ads::CDockWidgetTab* dockTab : dockTabs)
+        {
+            configureDockTabStyleSurface(dockTab, kKswordDockTabPropertyName);
+        }
+
+        const QList<ads::CAutoHideTab*> autoHideTabs =
+            rootWidget->findChildren<ads::CAutoHideTab*>();
+        for (ads::CAutoHideTab* autoHideTab : autoHideTabs)
+        {
+            configureDockTabStyleSurface(autoHideTab, kKswordAutoHideTabPropertyName);
+        }
+    }
+
+    // KswordAdsDockWidgetTab 作用：
+    // - 替代 ADS 默认 CDockWidgetTab；
+    // - 在 hover 时由标签自身补画深色背景，绕过 ADS/系统默认样式偶发白底。
+    // 输入：构造时接收所属 CDockWidget 与可选父 QWidget。
+    // 处理：初始化 QSS 识别属性；hover/leave 时只触发 repaint，不改 stylesheet。
+    // 返回：构造函数无返回；event 返回基类事件处理结果；paintEvent 无返回。
+    class KswordAdsDockWidgetTab final : public ads::CDockWidgetTab
+    {
+    public:
+        explicit KswordAdsDockWidgetTab(ads::CDockWidget* dockWidget, QWidget* parent = nullptr)
+            : ads::CDockWidgetTab(dockWidget, parent)
+        {
+            configureDockTabStyleSurface(this, kKswordDockTabPropertyName);
+        }
+
+    protected:
+        bool event(QEvent* eventObject) override
+        {
+            const bool shouldRepaintAfterEvent =
+                eventObject != nullptr &&
+                (eventObject->type() == QEvent::Enter ||
+                    eventObject->type() == QEvent::Leave ||
+                    eventObject->type() == QEvent::HoverEnter ||
+                    eventObject->type() == QEvent::HoverLeave ||
+                    eventObject->type() == QEvent::HoverMove);
+
+            const bool handled = ads::CDockWidgetTab::event(eventObject);
+            if (shouldRepaintAfterEvent)
+            {
+                update();
+            }
+            return handled;
+        }
+
+        void paintEvent(QPaintEvent* paintEventObject) override
+        {
+            ads::CDockWidgetTab::paintEvent(paintEventObject);
+            if (!isEnabled() || !underMouse())
+            {
+                return;
+            }
+
+            // 在基类 QFrame/QSS 绘制之后补一层实色背景，盖掉 ADS/系统默认白底；
+            // 子 QLabel 会在父控件 paintEvent 返回后再绘制，因此文字不会被遮住。
+            QPainter painter(this);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(dockTabHoverFillColor());
+            painter.drawRect(paintEventObject != nullptr ? paintEventObject->rect() : rect());
+        }
+    };
+
+    // KswordAdsAutoHideTab 作用：
+    // - 替代 ADS 默认自动隐藏标签；
+    // - 保持 ADS 原绘制逻辑，只补齐 hover/QSS 属性并在 hover 变化时触发 repaint。
+    // 输入：构造时接收所属 CDockWidget 与可选父 QWidget。
+    // 处理：设置 Dock 关联与样式属性；不修改 stylesheet。
+    // 返回：构造函数无返回；event 返回基类事件处理结果。
+    class KswordAdsAutoHideTab final : public ads::CAutoHideTab
+    {
+    public:
+        explicit KswordAdsAutoHideTab(ads::CDockWidget* dockWidget, QWidget* parent = nullptr)
+            : ads::CAutoHideTab(parent)
+        {
+            setDockWidget(dockWidget);
+            configureDockTabStyleSurface(this, kKswordAutoHideTabPropertyName);
+        }
+
+    protected:
+        bool event(QEvent* eventObject) override
+        {
+            const bool shouldRepaintAfterEvent =
+                eventObject != nullptr &&
+                (eventObject->type() == QEvent::Enter ||
+                    eventObject->type() == QEvent::Leave ||
+                    eventObject->type() == QEvent::HoverEnter ||
+                    eventObject->type() == QEvent::HoverLeave ||
+                    eventObject->type() == QEvent::HoverMove);
+
+            const bool handled = ads::CAutoHideTab::event(eventObject);
+            if (shouldRepaintAfterEvent)
+            {
+                update();
+            }
+            return handled;
+        }
+    };
+
+    // KswordAdsDockComponentsFactory 作用：
+    // - 让 ADS 在创建 Dock 标签时使用 Ksword 自定义标签类；
+    // - 保留 ADS 其它组件的默认工厂行为，降低改动面。
+    // 输入：ADS 在创建标签时传入所属 CDockWidget。
+    // 处理：返回自定义主标签/自动隐藏标签实例。
+    // 返回：新建的 CDockWidgetTab 或 CAutoHideTab，所有权交给 ADS。
+    class KswordAdsDockComponentsFactory final : public ads::CDockComponentsFactory
+    {
+    public:
+        ads::CDockWidgetTab* createDockWidgetTab(ads::CDockWidget* dockWidget) const override
+        {
+            return new KswordAdsDockWidgetTab(dockWidget);
+        }
+
+        ads::CAutoHideTab* createDockWidgetSideTab(ads::CDockWidget* dockWidget) const override
+        {
+            return new KswordAdsAutoHideTab(dockWidget);
+        }
+    };
+
+    // ensureKswordAdsDockComponentsFactoryInstalled 作用：
+    // - 在 CDockManager 创建前安装一次自定义 ADS 组件工厂；
+    // - 防止默认 CDockWidgetTab 在深色 hover 下继续暴露系统白底。
+    // 返回：无返回值；重复调用会被静态标志忽略。
+    void ensureKswordAdsDockComponentsFactoryInstalled()
+    {
+        static bool installed = false;
+        if (installed)
+        {
+            return;
+        }
+
+        ads::CDockComponentsFactory::setFactory(new KswordAdsDockComponentsFactory());
+        installed = true;
+    }
 
     // Windows ZBID 常量：
     // - ZBID_DEFAULT：普通桌面窗口 band；
@@ -2718,6 +2943,9 @@ MainWindow::MainWindow(
     ads::CDockManager::setConfigFlag(ads::CDockManager::DockAreaHasCloseButton, false);
     ads::CDockManager::setConfigFlag(ads::CDockManager::DockAreaHasUndockButton, false);
     ads::CDockManager::setConfigFlag(ads::CDockManager::DockAreaHasTabsMenuButton, false);
+    // 自定义 ADS 标签工厂必须早于 CDockManager/DockWidget 创建；
+    // 否则默认 CDockWidgetTab 已经实例化，后续再换工厂无法修复当前标签的 hover 白底。
+    ensureKswordAdsDockComponentsFactoryInstalled();
 
     // 创建主窗口根容器：
     // - 第 0 行放自绘标题栏；
@@ -6438,6 +6666,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         realWidget,
         shouldSuppressOuterScrollArea ? ads::CDockWidget::ForceNoScrollArea : ads::CDockWidget::AutoScrollArea);
     dockWidget->setProperty("ks_lazy_initialized", true);
+    configureAdsDockTabVisualIdentity(dockWidget);
     if (oldWidget != nullptr)
     {
         oldWidget->deleteLater();
@@ -6837,6 +7066,7 @@ void MainWindow::initDockWidgets()
             widget->setAutoFillBackground(isKernelDock);
             widget->setAttribute(Qt::WA_StyledBackground, isKernelDock);
         }
+        configureAdsDockTabVisualIdentity(dock);
         return dock;
         };
 
@@ -6971,6 +7201,7 @@ void MainWindow::initDockWidgets()
     for (ads::CDockWidget* dockWidget : mainDockTabList)
     {
         setupDockTabText(dockWidget);
+        configureAdsDockTabVisualIdentity(dockWidget);
     }
 
     // 顶部菜单栏已精简，不再注册 Dock 视图切换菜单。
@@ -7042,6 +7273,7 @@ void MainWindow::setupDockLayout()
     // - ADS restoreState 要求所有 DockWidget 已注册；
     // - objectName 已在 initDockWidgets 中固定为英文 key，避免中文标题变化破坏恢复。
     restoreDockLayoutFromConfig();
+    refreshAdsDockTabVisualIdentities(m_pDockManager);
 }
 
 void MainWindow::focusHandleDockByPid(const quint32 pid)
@@ -7503,6 +7735,7 @@ void MainWindow::applyAppearanceSettings(
         // 避免局部样式覆盖背景画刷导致背景图不可见。
         m_pDockManager->setStyleSheet(QString());
         m_pDockManager->setAttribute(Qt::WA_StyledBackground, false);
+        refreshAdsDockTabVisualIdentities(m_pDockManager);
     }
 
     // 启动进度拆分：
@@ -7666,6 +7899,7 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
             darkModeEnabled,
             enableDockTransparencyForBackgroundImage);
     floatingWidget->setStyleSheet(appearanceStyleSheet);
+    refreshAdsDockTabVisualIdentities(floatingWidget);
 
     ads::CDockContainerWidget* dockContainer = floatingWidget->dockContainer();
     if (dockContainer != nullptr)
@@ -7718,6 +7952,11 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     const QString tabHoverColor = darkModeEnabled
         ? QStringLiteral("#173553")
         : subtleThemeColor;
+    // dockTabChildHoverColor 作用：
+    // - ADS Dock 标签内部常由 QLabel/QWidget 组合绘制；
+    // - 深色模式下如果子控件继续透明或继承错误 palette，会露出近白底；
+    // - 因此 hover 时父子统一使用明确背景色，避免半透明/调色板回退。
+    const QString dockTabChildHoverColor = tabHoverColor;
     const QString comboBackgroundColor = surfaceBackgroundText;
     const QString comboTextColor = primaryTextColor;
     const QString comboBorderColor = borderColorText;
@@ -8008,6 +8247,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "}"
         "QTabBar::tab:hover:!selected{"
         "  background-color:%6 !important;"
+        "  background:%6 !important;"
         "  color:%2 !important;"
         "}"
         "ads--CDockAreaTabBar{"
@@ -8029,35 +8269,54 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "}"
         "ads--CDockWidgetTab[activeTab=\"true\"],ads--CAutoHideTab[activeTab=\"true\"]{"
         "  background-color:%4 !important;"
+        "  background:%4 !important;"
         "  color:%5 !important;"
         "}"
         "ads--CDockWidgetTab[activeTab=\"true\"] QLabel,ads--CAutoHideTab[activeTab=\"true\"] QLabel{"
         "  color:%5 !important;"
         "  font-weight:700;"
         "}"
-        "ads--CDockWidgetTab:hover,ads--CAutoHideTab:hover{"
-        "  background-color:%6 !important;"
-        "  background:%6 !important;"
-        "  color:%2 !important;"
-        "}"
-        "ads--CDockWidgetTab:hover[activeTab=\"false\"],"
-        "ads--CAutoHideTab:hover[activeTab=\"false\"]{"
-        "  background-color:%6 !important;"
-        "  background:%6 !important;"
-        "  color:%2 !important;"
-        "}"
-        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CDockWidgetTab:hover,"
-        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CAutoHideTab:hover{"
+        "ads--CDockWidgetTab:hover,"
+        "ads--CDockWidgetTab[activeTab=\"true\"]:hover,"
+        "ads--CDockWidgetTab[kswordDockTab=\"true\"]:hover,"
+        "ads--CAutoHideTab:hover,"
+        "ads--CAutoHideTab[activeTab=\"true\"]:hover,"
+        "ads--CAutoHideTab[kswordAutoHideTab=\"true\"]:hover{"
         "  background-color:%6 !important;"
         "  background:%6 !important;"
         "  color:%2 !important;"
         "  border:none !important;"
         "}"
-        "ads--CDockWidgetTab:hover QLabel,ads--CAutoHideTab:hover QLabel,"
-        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CDockWidgetTab:hover QLabel,"
-        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CAutoHideTab:hover QLabel{"
+        "ads--CDockWidgetTab:hover[activeTab=\"false\"],"
+        "ads--CDockWidgetTab[kswordDockTab=\"true\"]:hover[activeTab=\"false\"],"
+        "ads--CAutoHideTab:hover[activeTab=\"false\"],"
+        "ads--CAutoHideTab[kswordAutoHideTab=\"true\"]:hover[activeTab=\"false\"]{"
+        "  background-color:%6 !important;"
+        "  background:%6 !important;"
         "  color:%2 !important;"
-        "  background:transparent !important;"
+        "}"
+        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CDockWidgetTab:hover,"
+        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CDockWidgetTab[kswordDockTab=\"true\"]:hover,"
+        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CAutoHideTab:hover,"
+        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CAutoHideTab[kswordAutoHideTab=\"true\"]:hover{"
+        "  background-color:%6 !important;"
+        "  background:%6 !important;"
+        "  color:%2 !important;"
+        "  border:none !important;"
+        "}"
+        "ads--CDockWidgetTab:hover QLabel,ads--CDockWidgetTab:hover QWidget,"
+        "ads--CDockWidgetTab[kswordDockTab=\"true\"]:hover QLabel,"
+        "ads--CDockWidgetTab[kswordDockTab=\"true\"]:hover QWidget,"
+        "ads--CAutoHideTab:hover QLabel,ads--CAutoHideTab:hover QWidget,"
+        "ads--CAutoHideTab[kswordAutoHideTab=\"true\"]:hover QLabel,"
+        "ads--CAutoHideTab[kswordAutoHideTab=\"true\"]:hover QWidget,"
+        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CDockWidgetTab:hover QLabel,"
+        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CDockWidgetTab:hover QWidget,"
+        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CAutoHideTab:hover QLabel,"
+        "ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CAutoHideTab:hover QWidget{"
+        "  color:%2 !important;"
+        "  background-color:%7 !important;"
+        "  background:%7 !important;"
         "}"
         "ads--CDockAreaTitleBar QToolButton,ads--CDockAreaTitleBar QPushButton{"
         "  border:none !important;"
@@ -8068,7 +8327,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         .arg(panelBorderColor)
         .arg(activeTabColor)
         .arg(activeTabTextColor)
-        .arg(tabHoverColor);
+        .arg(tabHoverColor)
+        .arg(dockTabChildHoverColor);
 
     const QString sharedOverlayStyle = depthOverlayStyle
         + scrollBarOverlayStyle

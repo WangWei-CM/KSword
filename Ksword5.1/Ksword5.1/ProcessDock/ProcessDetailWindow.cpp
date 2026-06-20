@@ -198,7 +198,7 @@ namespace process_detail_window_internal
             .arg(KswordTheme::BorderHex())
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::SurfaceAltHex());
+            .arg(KswordTheme::PrimaryBlueSubtleHex());
     }
 
     QString buildStateLabelStyle(const QColor& textColor, const int fontWeight)

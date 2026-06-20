@@ -2810,7 +2810,7 @@ void ProcessDock::initializeUi()
             "QTabBar::tab:hover:!selected{background-color:%3;color:%4;}" )
             .arg(ProcessSideTabMinHeightPx)
             .arg(KswordTheme::PrimaryBlueHex)
-            .arg(KswordTheme::SurfaceAltHex())
+            .arg(KswordTheme::PrimaryBlueSubtleHex())
             .arg(KswordTheme::TextPrimaryHex()));
     }
 
