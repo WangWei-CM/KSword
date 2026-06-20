@@ -18,6 +18,8 @@
 class QCheckBox;
 class QLabel;
 class QLineEdit;
+class QMenu;
+class QPoint;
 class QPushButton;
 class QSplitter;
 class QTreeWidget;
@@ -61,6 +63,12 @@ public:
         QString parentInstanceIdText; // parentInstanceIdText：父设备 Instance ID。
         QString classGuidText;        // classGuidText：设备类 GUID。
         QString driverText;           // driverText：驱动注册表键或 INF 相关字段。
+        QString driverInfPathText;    // driverInfPathText：设备当前使用的 INF 名称或路径。
+        QString driverProviderText;   // driverProviderText：驱动提供商。
+        QString driverVersionText;    // driverVersionText：驱动版本。
+        QString driverDateText;       // driverDateText：驱动日期。
+        QString driverRegistryPathText; // driverRegistryPathText：HKLM\SYSTEM\CCS\Control\Class 下的驱动键路径。
+        QString serviceImagePathText; // serviceImagePathText：服务 ImagePath，通常指向 .sys 驱动文件。
         QString locationText;         // locationText：位置描述。
         QString hardwareIdsText;      // hardwareIdsText：硬件 ID 列表。
         QString compatibleIdsText;    // compatibleIdsText：兼容 ID 列表。
@@ -108,6 +116,48 @@ private:
     // - 无返回值。
     void updateDetailForItem(QTreeWidgetItem* itemPointer);
 
+    // showDeviceContextMenu 作用：
+    // - 输入：设备树局部坐标；
+    // - 处理：按当前选中设备构造属性、驱动详情、卸载、删除驱动包等右键菜单；
+    // - 返回值：无。
+    void showDeviceContextMenu(const QPoint& localPosition);
+
+    // showSelectedDeviceProperties 作用：
+    // - 输入：当前树选中的设备；
+    // - 处理：打开只读属性对话框，展示 SetupAPI/CfgMgr 已枚举字段；
+    // - 返回值：无。
+    void showSelectedDeviceProperties();
+
+    // showSelectedDeviceDriverDetails 作用：
+    // - 输入：当前树选中的设备；
+    // - 处理：打开只读驱动详情对话框，展示 INF、Provider、Version、服务 ImagePath 等字段；
+    // - 返回值：无。
+    void showSelectedDeviceDriverDetails();
+
+    // copySelectedDeviceInstanceId 作用：
+    // - 输入：当前树选中的设备；
+    // - 处理：复制 Instance ID 到剪贴板；
+    // - 返回值：无。
+    void copySelectedDeviceInstanceId();
+
+    // uninstallSelectedDevice 作用：
+    // - 输入：当前树选中的设备；
+    // - 处理：二次确认后通过 SetupAPI DIF_REMOVE 卸载设备节点；
+    // - 返回值：无。
+    void uninstallSelectedDevice();
+
+    // deleteSelectedDeviceDriverPackage 作用：
+    // - 输入：当前树选中的设备；
+    // - 处理：二次确认后通过 SetupUninstallOEMInf 删除 OEM INF 驱动包；
+    // - 返回值：无。
+    void deleteSelectedDeviceDriverPackage();
+
+    // selectedDeviceEntry 作用：
+    // - 输入：当前树选中项；
+    // - 处理：从 Qt::UserRole 取回 DeviceEntry 指针；
+    // - 返回：成功时返回当前设备指针，否则返回 nullptr。
+    const DeviceEntry* selectedDeviceEntry() const;
+
     // enumerateDevicesSnapshot 作用：
     // - 输入：includeAllDevices 为 true 时枚举历史/非当前设备；
     // - 处理：调用 SetupAPI/CfgMgr 读取设备属性；
@@ -119,6 +169,7 @@ private:
     QLabel* m_statusLabel = nullptr;          // m_statusLabel：刷新状态文本。
     QPushButton* m_refreshButton = nullptr;   // m_refreshButton：刷新按钮。
     QCheckBox* m_showAllDevicesCheck = nullptr; // m_showAllDevicesCheck：是否展示全部设备。
+    QCheckBox* m_showProblemOnlyCheck = nullptr; // m_showProblemOnlyCheck：是否只显示异常设备。
     QLineEdit* m_searchEdit = nullptr;        // m_searchEdit：树过滤输入框。
     QSplitter* m_splitter = nullptr;          // m_splitter：设备树/详情分割器。
     QTreeWidget* m_deviceTree = nullptr;      // m_deviceTree：System Informer 风格设备树。

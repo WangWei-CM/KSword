@@ -10,6 +10,7 @@
 // ============================================================
 
 #include <cstddef> // std::size_t: revision counters and vector indexes.
+#include <cstdint> // std::uint32_t: compact log level filter mask.
 #include <ctime>   // std::time_t: log timestamps.
 #include <mutex>   // std::mutex: thread-safe log storage.
 #include <ostream> // std::ostream: stream manipulator overload.
@@ -104,6 +105,17 @@ namespace ks::log
         // Processing: lock and copy matching records.
         // Return behavior: vector of matching Event records.
         std::vector<Event> Track(GUID targetGuid);
+
+        // SnapshotRecent copies only the newest matching records for UI refresh.
+        // Input: maxCount caps returned rows; enabledLevelMask uses one bit per Level value;
+        //        trackedGuid optionally limits records to one logical event id.
+        // Processing: lock, scan records from newest to oldest, copy at most maxCount matches,
+        //             then restore chronological order in the returned vector.
+        // Return behavior: vector containing the newest matching Event records; internal storage remains full.
+        std::vector<Event> SnapshotRecent(
+            std::size_t maxCount,
+            std::uint32_t enabledLevelMask,
+            const GUID* trackedGuid = nullptr) const;
 
         // Snapshot copies all records for UI refresh/export consumers.
         // Input: none.

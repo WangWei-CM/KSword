@@ -13,7 +13,7 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "APIMonitor_x64", "..\APIMon
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KswordARKDriver", "..\KswordARKDriver\KswordARKDriver.vcxproj", "{E4B6A5CC-D9ED-FCA2-46D5-5035E8728524}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KswordDriverSDK", "..\KswordDriverSDK\KswordDriverSDK.vcxproj", "{BDE77103-B963-40A8-A28E-0B9C26A5C5DD}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KswordCLI", "..\KswordCLI\KswordCLI.vcxproj", "{BDE77103-B963-40A8-A28E-0B9C26A5C5DD}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KswordSetup", "..\KswordSetup\KswordSetup.vcxproj", "{9B7CB5ED-A00A-4E2F-9E07-1A5C2B75B3D1}"
 	ProjectSection(ProjectDependencies) = postProject

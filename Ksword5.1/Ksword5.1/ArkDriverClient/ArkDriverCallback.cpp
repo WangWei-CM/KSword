@@ -95,6 +95,84 @@ namespace ksword::ark
         return result;
     }
 
+    IoResult DriverClient::setMinifilterBypassPids(const std::vector<std::uint32_t>& processIds) const
+    {
+        // Input: UI-collected PID list; duplicates and zero are tolerated here
+        // but normalized before crossing into R0.
+        // Processing: build the shared fixed packet and send it only through the
+        // central DriverClient DeviceIoControl helper.
+        // Return: IoResult describes Win32 transport success/failure.
+        KSWORD_ARK_MINIFILTER_BYPASS_PID_REQUEST request{};
+        request.size = sizeof(request);
+        request.version = KSWORD_ARK_CALLBACK_PROTOCOL_VERSION;
+
+        for (const std::uint32_t processId : processIds)
+        {
+            if (processId == 0U)
+            {
+                continue;
+            }
+            const auto existingIterator = std::find(
+                request.processIds,
+                request.processIds + request.pidCount,
+                static_cast<unsigned long>(processId));
+            if (existingIterator != request.processIds + request.pidCount)
+            {
+                continue;
+            }
+            if (request.pidCount >= KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT)
+            {
+                IoResult errorResult{};
+                errorResult.ok = false;
+                errorResult.win32Error = ERROR_INVALID_PARAMETER;
+                errorResult.message = "too many minifilter bypass PIDs, max=" +
+                    std::to_string(KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT);
+                return errorResult;
+            }
+            request.processIds[request.pidCount] = static_cast<unsigned long>(processId);
+            ++request.pidCount;
+        }
+
+        return deviceIoControl(
+            IOCTL_KSWORD_ARK_SET_MINIFILTER_BYPASS_PIDS,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            nullptr,
+            0);
+    }
+
+    MinifilterBypassPidResult DriverClient::queryMinifilterBypassPids() const
+    {
+        // Input: none.
+        // Processing: request the fixed whitelist response and verify the
+        // kernel returned at least the full v1 response structure.
+        // Return: response packet plus IoResult; io.ok is false on short reads.
+        MinifilterBypassPidResult result{};
+        result.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_QUERY_MINIFILTER_BYPASS_PIDS,
+            nullptr,
+            0,
+            &result.response,
+            static_cast<unsigned long>(sizeof(result.response)));
+        if (result.io.ok && result.io.bytesReturned < sizeof(result.response))
+        {
+            result.io.ok = false;
+            result.io.win32Error = ERROR_INSUFFICIENT_BUFFER;
+            result.io.message = "minifilter bypass PID response too small, bytesReturned=" +
+                std::to_string(result.io.bytesReturned);
+        }
+        if (result.io.ok &&
+            (result.response.size < sizeof(result.response) ||
+                result.response.version != KSWORD_ARK_CALLBACK_PROTOCOL_VERSION ||
+                result.response.pidCount > KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT))
+        {
+            result.io.ok = false;
+            result.io.win32Error = ERROR_INVALID_DATA;
+            result.io.message = "minifilter bypass PID response header invalid";
+        }
+        return result;
+    }
+
     IoResult DriverClient::answerCallbackEvent(const KSWORD_ARK_CALLBACK_ANSWER_REQUEST& request) const
     {
         KSWORD_ARK_CALLBACK_ANSWER_REQUEST mutableRequest = request;

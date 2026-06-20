@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <cstddef>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
@@ -572,6 +573,52 @@ namespace
         return static_cast<std::uint64_t>(value);
     }
 
+    // parsePidListText converts a delimiter-separated PID list into unique PID values.
+    // Inputs: text accepts decimal or 0x-prefixed numbers separated by comma, semicolon, pipe, or whitespace.
+    // Processing: PID zero is ignored and duplicates are removed while preserving first-seen order.
+    // Returns: normalized PID vector; throws when a token is malformed or the protocol maximum is exceeded.
+    std::vector<std::uint32_t> parsePidListText(const std::wstring& text)
+    {
+        std::vector<std::uint32_t> processIds;
+        std::wstring token;
+
+        const auto flushToken = [&]()
+        {
+            if (token.empty())
+            {
+                return;
+            }
+
+            const std::uint32_t processId = parseU32(token.c_str(), "pid list");
+            token.clear();
+            if (processId == 0U)
+            {
+                return;
+            }
+            if (std::find(processIds.begin(), processIds.end(), processId) != processIds.end())
+            {
+                return;
+            }
+            if (processIds.size() >= KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT)
+            {
+                throw std::out_of_range("too many pids");
+            }
+            processIds.push_back(processId);
+        };
+
+        for (const wchar_t ch : text)
+        {
+            if (ch == L',' || ch == L';' || ch == L'|' || std::iswspace(ch) != 0)
+            {
+                flushToken();
+                continue;
+            }
+            token.push_back(ch);
+        }
+        flushToken();
+        return processIds;
+    }
+
     // hex64 formats a 64-bit integer as a fixed-width hexadecimal value.
     // Inputs: value is the integer to render.
     // Processing: uses an isolated stringstream to avoid mutating global cout state.
@@ -998,14 +1045,14 @@ namespace
     void printUsage()
     {
         std::wcout
-            << L"KswordDriverSDK CLI\n"
-            << L"usage: KswordDriverSDK.exe <family> <subcommand> [--named-options]\n\n"
+            << L"KswordCLI CLI\n"
+            << L"usage: KswordCLI.exe <family> <subcommand> [--named-options]\n\n"
             << L"Families and subcommands:\n"
             << L"  process   terminate | suspend | set-ppl | enum | set-visibility | set-special-flags | dkom | crossview\n"
             << L"  memory    query-va | read-va | write-va | read-phys | write-phys | translate-va | query-pte | scan-kexec | scan-evidence\n"
             << L"  file      delete-path | query-info | monitor-control | monitor-drain | monitor-status\n"
             << L"  kernel    ssdt | shadow-ssdt | scan-inline-hooks | patch-inline-hook | enum-iat-eat-hooks | query-driver-object | query-driver-integrity | force-unload-driver | query-cpu | query-phys-layout\n"
-            << L"  callback  set-rules | runtime-state | wait-event | answer-event | cancel-pending | remove | remove-ex | enum\n"
+            << L"  callback  set-rules | runtime-state | wait-event | answer-event | cancel-pending | remove | remove-ex | enum | set-minifilter-bypass-pids | query-minifilter-bypass-pids\n"
             << L"  dyn       status | fields | capabilities | apply-profile | apply-profile-ex\n"
             << L"  thread    enum | crossview\n"
             << L"  handle    enum | query-object\n"
@@ -1024,10 +1071,12 @@ namespace
             << L"  log       [--max-frames N]\n\n"
             << L"Common options: --flags 0xN --limit N --hexdump\n"
             << L"Examples:\n"
-            << L"  KswordDriverSDK.exe capability query-driver-capabilities\n"
-            << L"  KswordDriverSDK.exe process enum --flags 0x1 --limit 32\n"
-            << L"  KswordDriverSDK.exe memory read-va --pid 1234 --address 0x7ff700000000 --bytes 64 --hexdump\n"
-            << L"  KswordDriverSDK.exe callback set-rules --blob rules.bin\n";
+            << L"  KswordCLI.exe capability query-driver-capabilities\n"
+            << L"  KswordCLI.exe process enum --flags 0x1 --limit 32\n"
+            << L"  KswordCLI.exe memory read-va --pid 1234 --address 0x7ff700000000 --bytes 64 --hexdump\n"
+            << L"  KswordCLI.exe callback set-rules --blob rules.bin\n"
+            << L"  KswordCLI.exe callback set-minifilter-bypass-pids --pids 1234,5678\n"
+            << L"  KswordCLI.exe callback query-minifilter-bypass-pids\n";
     }
 
     // printCountHeader renders the common variable-response metadata.
@@ -1185,7 +1234,10 @@ namespace
             request.flags = getOptionU32(args, L"--flags", 0U);
             if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_SET_PROCESS_VISIBILITY, L"IOCTL_KSWORD_ARK_SET_PROCESS_VISIBILITY", request, response, io)) return 3;
             printResponseBanner(response.version, response.status, response.lastStatus, io.bytesReturned);
-            std::wcout << L"pid=" << response.processId << L" hiddenCount=" << response.hiddenCount << L"\n";
+            std::wcout << L"pid=" << response.processId
+                       << L" action=" << request.action
+                       << L" requestFlags=0x" << std::hex << request.flags
+                       << std::dec << L" hiddenCount=" << response.hiddenCount << L"\n";
             return 0;
         }
         if (sub == L"set-special-flags")
@@ -1324,11 +1376,13 @@ namespace
         {
             KSWORD_ARK_READ_VIRTUAL_MEMORY_REQUEST request{};
             request.flags = getOptionU32(args, L"--flags", 0U);
-            request.processId = requireOptionU32(args, L"--pid");
+            request.processId = ((request.flags & KSWORD_ARK_MEMORY_READ_FLAG_KERNEL_ADDRESS) != 0UL)
+                ? getOptionU32(args, L"--pid", 0U)
+                : requireOptionU32(args, L"--pid");
             request.baseAddress = requireOptionU64(args, L"--address");
             request.bytesToRead = requireOptionU32(args, L"--bytes");
             if (request.bytesToRead > KSWORD_ARK_MEMORY_READ_MAX_BYTES) { std::wcerr << L"error: --bytes exceeds protocol max\n"; return 1; }
-            constexpr std::size_t headerSize = sizeof(KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE) - sizeof(((KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE*)nullptr)->data);
+            constexpr std::size_t headerSize = offsetof(KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE, data);
             std::vector<std::uint8_t> buffer(headerSize + request.bytesToRead, 0U);
             const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_READ_VIRTUAL_MEMORY", IOCTL_KSWORD_ARK_READ_VIRTUAL_MEMORY, &request, sizeof(request), buffer, io);
             if (rc != 0) return rc;
@@ -1336,6 +1390,8 @@ namespace
             const auto* response = reinterpret_cast<const KSWORD_ARK_READ_VIRTUAL_MEMORY_RESPONSE*>(buffer.data());
             printResponseBanner(response->version, response->readStatus, response->copyStatus, io.bytesReturned);
             std::wcout << L"pid=" << response->processId << L" fields=0x" << std::hex << response->fieldFlags
+                       << L" requestFlags=0x" << request.flags
+                       << L" copyStatus=0x" << static_cast<unsigned long>(response->copyStatus)
                        << L" source=" << std::dec << response->source
                        << L" requested=" << response->requestedBytes << L" read=" << response->bytesRead
                        << L" max=" << response->maxBytesPerRequest
@@ -1348,11 +1404,13 @@ namespace
         {
             const std::vector<std::uint8_t> bytes = loadBytesFromHexOrFile(args, L"--hex", L"--data-file", KSWORD_ARK_MEMORY_WRITE_MAX_BYTES, true);
             if (bytes.empty()) { std::wcerr << L"error: write-va payload is empty\n"; return 1; }
-            constexpr std::size_t headerSize = sizeof(KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST) - sizeof(((KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST*)nullptr)->data);
+            constexpr std::size_t headerSize = offsetof(KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST, data);
             std::vector<std::uint8_t> input(headerSize + bytes.size(), 0U);
             auto* request = reinterpret_cast<KSWORD_ARK_WRITE_VIRTUAL_MEMORY_REQUEST*>(input.data());
             request->flags = getOptionU32(args, L"--flags", KSWORD_ARK_MEMORY_WRITE_FLAG_UI_CONFIRMED);
-            request->processId = requireOptionU32(args, L"--pid");
+            request->processId = ((request->flags & KSWORD_ARK_MEMORY_WRITE_FLAG_KERNEL_ADDRESS) != 0UL)
+                ? getOptionU32(args, L"--pid", 0U)
+                : requireOptionU32(args, L"--pid");
             request->baseAddress = requireOptionU64(args, L"--address");
             request->bytesToWrite = static_cast<unsigned long>(bytes.size());
             std::copy(bytes.begin(), bytes.end(), request->data);
@@ -1364,8 +1422,11 @@ namespace
             if (io.bytesReturned < sizeof(response)) { std::wcerr << L"error: write-va response too small\n"; return 4; }
             printResponseBanner(response.version, response.writeStatus, response.copyStatus, io.bytesReturned);
             std::wcout << L"pid=" << response.processId << L" fields=0x" << std::hex << response.fieldFlags
+                       << L" requestFlags=0x" << request->flags
+                       << L" copyStatus=0x" << static_cast<unsigned long>(response.copyStatus)
+                       << L" source=" << std::dec << response.source
                        << L" address=" << hex64(response.requestedBaseAddress)
-                       << std::dec << L" requested=" << response.requestedBytes
+                       << L" requested=" << response.requestedBytes
                        << L" written=" << response.bytesWritten << L" max=" << response.maxBytesPerRequest << L"\n";
             return 0;
         }
@@ -1612,7 +1673,20 @@ namespace
                            << L" flags=0x" << std::hex << entry->fieldFlags
                            << L" result=0x" << static_cast<unsigned long>(entry->resultStatus)
                            << std::dec << L" seq=" << entry->sequence
-                           << L" path='" << fixedWide(entry->path, KSWORD_ARK_FILE_MONITOR_PATH_CHARS) << L"'\n";
+                           << L" path='" << fixedWide(entry->path, KSWORD_ARK_FILE_MONITOR_PATH_CHARS) << L"'";
+                if ((entry->fieldFlags & KSWORD_ARK_FILE_MONITOR_FIELD_FSCTL_PRESENT) != 0UL)
+                {
+                    const wchar_t* fsctlText = KswordARKFileMonitorFsctlCodeToText(entry->fsControlCode);
+                    std::wcout << L" fsctl=0x" << std::hex << entry->fsControlCode
+                               << std::dec << L" fsInput=" << entry->fsInputBufferLength
+                               << L" fsOutput=" << entry->fsOutputBufferLength
+                               << L" oplock=" << (KswordARKFileMonitorFsctlIsOplockRelated(entry->fsControlCode) ? L"true" : L"false");
+                    if (fsctlText != nullptr)
+                    {
+                        std::wcout << L" fsctlName='" << fsctlText << L"'";
+                    }
+                }
+                std::wcout << L"\n";
             }
             return 0;
         }
@@ -2215,6 +2289,57 @@ namespace
             dumpWideText(L"modulePath", fixedWide(response.modulePath, KSWORD_ARK_EXTERNAL_CALLBACK_MODULE_NAME_MAX_CHARS));
             dumpWideText(L"serviceName", fixedWide(response.serviceName, KSWORD_ARK_EXTERNAL_CALLBACK_SERVICE_NAME_MAX_CHARS));
             dumpWideText(L"message", fixedWide(response.message, KSWORD_ARK_CALLBACK_ENUM_DETAIL_CHARS));
+            return 0;
+        }
+        if (sub == L"set-minifilter-bypass-pids")
+        {
+            const std::vector<std::uint32_t> processIds = parsePidListText(requireOptionText(args, L"--pids"));
+            KSWORD_ARK_MINIFILTER_BYPASS_PID_REQUEST request{};
+            request.size = sizeof(request);
+            request.version = KSWORD_ARK_CALLBACK_PROTOCOL_VERSION;
+            request.flags = getOptionU32(args, L"--flags", 0U);
+            request.pidCount = static_cast<unsigned long>(processIds.size());
+            for (std::size_t index = 0U; index < processIds.size(); ++index)
+            {
+                request.processIds[index] = static_cast<unsigned long>(processIds[index]);
+            }
+            return runNoOutputIoctl(
+                L"IOCTL_KSWORD_ARK_SET_MINIFILTER_BYPASS_PIDS",
+                IOCTL_KSWORD_ARK_SET_MINIFILTER_BYPASS_PIDS,
+                &request,
+                sizeof(request));
+        }
+        if (sub == L"query-minifilter-bypass-pids")
+        {
+            KSWORD_ARK_MINIFILTER_BYPASS_PID_RESPONSE response{};
+            if (!sendFixedNoInput(
+                IOCTL_KSWORD_ARK_QUERY_MINIFILTER_BYPASS_PIDS,
+                L"IOCTL_KSWORD_ARK_QUERY_MINIFILTER_BYPASS_PIDS",
+                response,
+                io))
+            {
+                return 3;
+            }
+            if (response.size < sizeof(response) ||
+                response.version != KSWORD_ARK_CALLBACK_PROTOCOL_VERSION ||
+                response.pidCount > KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT)
+            {
+                std::wcerr << L"error: minifilter bypass PID response header invalid\n";
+                return 4;
+            }
+            printResponseBanner(response.version, response.pidCount, 0, io.bytesReturned);
+            std::wcout << L"size=" << response.size
+                       << L" flags=0x" << std::hex << response.flags
+                       << std::dec << L" pidCount=" << response.pidCount << L" pids=";
+            for (unsigned long index = 0UL; index < response.pidCount; ++index)
+            {
+                if (index != 0UL)
+                {
+                    std::wcout << L",";
+                }
+                std::wcout << response.processIds[index];
+            }
+            std::wcout << L"\n";
             return 0;
         }
         if (sub == L"enum")

@@ -3567,8 +3567,8 @@ void ProcessDock::initializeCreateProcessPage()
     startupLayout->setHorizontalSpacing(8);
     startupLayout->setVerticalSpacing(6);
     m_useStartupInfoCheck = new QCheckBox("启用 lpStartupInfo（启动信息结构体，取消则传 NULL）", startupGroup);
-    m_useStartupInfoCheck->setChecked(false);
-    m_useStartupInfoCheck->setToolTip("注意：Win32 通常要求该参数非空，传 NULL 主要用于测试极限场景。");
+    m_useStartupInfoCheck->setChecked(true);
+    m_useStartupInfoCheck->setToolTip("默认启用并传入有效 STARTUPINFOW；取消勾选只用于测试 NULL 参数失败路径。");
 
     m_siCbEdit = new QLineEdit("0", startupGroup);
     m_siReservedEdit = new QLineEdit(startupGroup);
@@ -3663,8 +3663,8 @@ void ProcessDock::initializeCreateProcessPage()
     processInfoLayout->setVerticalSpacing(6);
 
     m_useProcessInfoCheck = new QCheckBox("启用 lpProcessInformation（进程信息输出结构，取消则传 NULL）", processInfoGroup);
-    m_useProcessInfoCheck->setChecked(false);
-    m_useProcessInfoCheck->setToolTip("注意：Win32 通常要求该参数非空，传 NULL 会导致调用失败。");
+    m_useProcessInfoCheck->setChecked(true);
+    m_useProcessInfoCheck->setToolTip("默认启用并传入有效 PROCESS_INFORMATION；取消勾选只用于测试 NULL 参数失败路径。");
     m_piProcessHandleEdit = new QLineEdit("0", processInfoGroup);
     m_piThreadHandleEdit = new QLineEdit("0", processInfoGroup);
     m_piPidEdit = new QLineEdit("0", processInfoGroup);
@@ -3758,11 +3758,11 @@ void ProcessDock::initializeCreateProcessPage()
     m_applicationNameEdit->setToolTip("lpApplicationName：应用程序路径。可为 null，由命令行首段决定可执行文件。");
     m_commandLineEdit->setToolTip("lpCommandLine：完整命令行。可执行路径 + 参数，传入后可能被 API 就地修改。");
     m_currentDirectoryEdit->setToolTip("lpCurrentDirectory：子进程初始工作目录。");
-    m_environmentEditor->setToolTip("lpEnvironment：环境变量块。每行 KEY=VALUE；禁用时传 null。");
+    m_environmentEditor->setToolTip("lpEnvironment：环境变量块。每行 KEY=VALUE；禁用或启用但内容为空时传 null。取消 Unicode 时按系统 ANSI 代码页传递。");
     m_inheritHandleCheck->setToolTip("bInheritHandles：是否继承父进程可继承句柄。");
     m_creationFlagsEdit->setToolTip("dwCreationFlags：创建标志位掩码；可在下方复选框中逐位勾选组合。");
-    m_useStartupInfoCheck->setToolTip("lpStartupInfo：启动信息结构体，控制窗口/标准句柄等行为。");
-    m_useProcessInfoCheck->setToolTip("lpProcessInformation：接收新进程与主线程句柄/PID/TID 的输出结构。");
+    m_useStartupInfoCheck->setToolTip("lpStartupInfo：启动信息结构体，默认传入有效 STARTUPINFOW；取消勾选才传 null。");
+    m_useProcessInfoCheck->setToolTip("lpProcessInformation：默认传入有效输出结构接收 PID/TID；返回的句柄会在后端记录后立即关闭。");
     m_useProcessSecurityCheck->setToolTip("lpProcessAttributes：进程对象安全属性。");
     m_useThreadSecurityCheck->setToolTip("lpThreadAttributes：主线程对象安全属性。");
     m_siFlagsEdit->setToolTip("STARTUPINFO.dwFlags：启动标志位掩码；可在下方 STARTF 复选框中组合。");
@@ -8283,7 +8283,7 @@ void ProcessDock::resetCreateProcessForm()
     if (m_threadSecurityDescriptorEdit != nullptr) m_threadSecurityDescriptorEdit->setText("0");
     if (m_threadSecurityInheritCheck != nullptr) m_threadSecurityInheritCheck->setChecked(false);
 
-    if (m_useStartupInfoCheck != nullptr) m_useStartupInfoCheck->setChecked(false);
+    if (m_useStartupInfoCheck != nullptr) m_useStartupInfoCheck->setChecked(true);
     if (m_siCbEdit != nullptr) m_siCbEdit->setText("0");
     if (m_siReservedEdit != nullptr) m_siReservedEdit->clear();
     if (m_siDesktopEdit != nullptr) m_siDesktopEdit->clear();
@@ -8303,7 +8303,7 @@ void ProcessDock::resetCreateProcessForm()
     if (m_siStdOutputEdit != nullptr) m_siStdOutputEdit->setText("0");
     if (m_siStdErrorEdit != nullptr) m_siStdErrorEdit->setText("0");
 
-    if (m_useProcessInfoCheck != nullptr) m_useProcessInfoCheck->setChecked(false);
+    if (m_useProcessInfoCheck != nullptr) m_useProcessInfoCheck->setChecked(true);
     if (m_piProcessHandleEdit != nullptr) m_piProcessHandleEdit->setText("0");
     if (m_piThreadHandleEdit != nullptr) m_piThreadHandleEdit->setText("0");
     if (m_piPidEdit != nullptr) m_piPidEdit->setText("0");
@@ -8362,6 +8362,10 @@ ks::process::CreateProcessRequest ProcessDock::buildCreateProcessRequestFromUi(
     request.environmentUnicode = (m_environmentUnicodeCheck != nullptr && m_environmentUnicodeCheck->isChecked());
     if (request.useEnvironment && m_environmentEditor != nullptr)
     {
+        // lpEnvironment 语义：
+        // - 勾选并填写至少一行 KEY=VALUE 时，后端按 Unicode/ANSI 选项构造环境块；
+        // - 勾选但内容为空时，仍按 UI 提示传 nullptr，表示继承父进程环境；
+        // - 这样避免把空编辑器误转成“空环境块”，导致子进程缺失 PATH 等基础变量。
         const QStringList envLines = m_environmentEditor->toPlainText().split('\n');
         for (const QString& lineText : envLines)
         {
@@ -8370,6 +8374,10 @@ ks::process::CreateProcessRequest ProcessDock::buildCreateProcessRequestFromUi(
             {
                 request.environmentEntries.push_back(trimmedText.toStdString());
             }
+        }
+        if (request.environmentEntries.empty())
+        {
+            request.useEnvironment = false;
         }
     }
 
@@ -8384,6 +8392,12 @@ ks::process::CreateProcessRequest ProcessDock::buildCreateProcessRequestFromUi(
     {
         failBuild("dwCreationFlags 解析失败，请输入十进制或 0x 十六进制。");
         return request;
+    }
+    // CREATE_UNICODE_ENVIRONMENT 既能由专用复选框表达，也能由 dwCreationFlags 位标志区手工组合。
+    // 这里以最终 flags 为准反向合并，防止 UI flags 中已有 Unicode 位但环境块按 ANSI 构造。
+    if ((request.creationFlags & 0x00000400U) != 0U)
+    {
+        request.environmentUnicode = true;
     }
 
     request.processAttributes.useValue = (m_useProcessSecurityCheck != nullptr && m_useProcessSecurityCheck->isChecked());
@@ -8547,27 +8561,107 @@ ks::process::CreateProcessRequest ProcessDock::buildCreateProcessRequestFromUi(
     return request;
 }
 
+bool ProcessDock::buildTokenPrivilegeEditRequestFromUi(
+    ks::process::CreateProcessRequest* const requestOut,
+    QString* const errorTextOut) const
+{
+    // 仅应用令牌调整时不需要 CreateProcessW 的路径、环境、STARTUPINFO 等参数。
+    // 输入：requestOut 接收 Token 字段；errorTextOut 接收解析失败原因。
+    // 处理：只校验 Token 模式、source PID、DesiredAccess 和特权表动作。
+    // 返回：true 表示可调用 ApplyTokenPrivilegeEditsByPid；false 表示 UI 参数不满足调权要求。
+    if (requestOut == nullptr)
+    {
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = "内部错误：requestOut 为空。";
+        }
+        return false;
+    }
+
+    ks::process::CreateProcessRequest request;
+    request.tokenModeEnabled = (m_createMethodCombo != nullptr && m_createMethodCombo->currentIndex() == 1);
+    if (!request.tokenModeEnabled)
+    {
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = "当前不是 Token 模式，无法仅应用令牌调整。";
+        }
+        return false;
+    }
+
+    bool parseOk = false;
+    request.tokenSourcePid = parseUInt32WithDefault(
+        m_tokenSourcePidEdit != nullptr ? m_tokenSourcePidEdit->text() : QString(),
+        0,
+        &parseOk);
+    if (!parseOk)
+    {
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = "Token 模式 source PID 解析失败。";
+        }
+        return false;
+    }
+
+    request.tokenDesiredAccess = parseUInt32WithDefault(
+        m_tokenDesiredAccessEdit != nullptr ? m_tokenDesiredAccessEdit->text() : QString(),
+        0,
+        &parseOk);
+    if (!parseOk)
+    {
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = "Token 模式 desired access 解析失败。";
+        }
+        return false;
+    }
+
+    request.duplicatePrimaryToken = (m_tokenDuplicatePrimaryCheck != nullptr && m_tokenDuplicatePrimaryCheck->isChecked());
+    if (m_tokenPrivilegeTable != nullptr)
+    {
+        for (int row = 0; row < m_tokenPrivilegeTable->rowCount(); ++row)
+        {
+            QTableWidgetItem* privilegeItem = m_tokenPrivilegeTable->item(row, 0);
+            QComboBox* actionCombo = qobject_cast<QComboBox*>(m_tokenPrivilegeTable->cellWidget(row, 1));
+            if (privilegeItem == nullptr || actionCombo == nullptr)
+            {
+                continue;
+            }
+
+            const auto actionValue = static_cast<ks::process::TokenPrivilegeAction>(
+                actionCombo->currentData().toInt());
+            if (actionValue == ks::process::TokenPrivilegeAction::Keep)
+            {
+                continue;
+            }
+
+            ks::process::TokenPrivilegeEdit editItem{};
+            editItem.privilegeName = privilegeItem->text().trimmed().toStdString();
+            editItem.action = actionValue;
+            request.tokenPrivilegeEdits.push_back(std::move(editItem));
+        }
+    }
+
+    *requestOut = std::move(request);
+    if (errorTextOut != nullptr)
+    {
+        errorTextOut->clear();
+    }
+    return true;
+}
+
 void ProcessDock::executeApplyTokenPrivilegeEditsOnly()
 {
     // 令牌调整动作日志：整段流程复用同一个 kLogEvent，避免离散调用链。
     kLogEvent actionEvent;
-    bool buildOk = false;
     QString errorText;
-    const ks::process::CreateProcessRequest request = buildCreateProcessRequestFromUi(&buildOk, &errorText);
-    if (!buildOk)
+    ks::process::CreateProcessRequest request;
+    if (!buildTokenPrivilegeEditRequestFromUi(&request, &errorText))
     {
         appendCreateResultLine("参数解析失败: " + errorText);
         err << actionEvent
             << "[ProcessDock] 令牌调整参数解析失败, error="
             << errorText.toStdString()
-            << eol;
-        return;
-    }
-    if (!request.tokenModeEnabled)
-    {
-        appendCreateResultLine("当前不是 Token 模式，无法仅应用令牌调整。");
-        warn << actionEvent
-            << "[ProcessDock] 令牌调整被拒绝：当前非 Token 模式。"
             << eol;
         return;
     }
@@ -8620,7 +8714,7 @@ void ProcessDock::executeCreateProcessRequest()
     if (createResult.processInfoAvailable)
     {
         appendCreateResultLine(
-            QString("输出 PI: pid=%1 tid=%2 hProcess=0x%3 hThread=0x%4")
+            QString("输出 PI: pid=%1 tid=%2（后端已关闭返回的 hProcess/hThread 句柄快照: 0x%3 / 0x%4）")
             .arg(createResult.dwProcessId)
             .arg(createResult.dwThreadId)
             .arg(QString::number(createResult.hProcess, 16))

@@ -1900,9 +1900,13 @@ namespace
     }
 
     // 把 UI 传入的多行 KEY=VALUE 转为 Unicode 环境块（双 \0 结尾）。
+    // 输入：entries 是 UTF-8 文本，每个元素代表一条环境变量。
+    // 处理：跳过空白行和转换失败行，按 Win32 要求拼接为 "A=B\0C=D\0\0"。
+    // 返回：有至少一条有效项时返回完整环境块；没有有效项时返回空 vector，让调用层传 nullptr。
     std::vector<wchar_t> BuildUnicodeEnvironmentBlock(const std::vector<std::string>& entries)
     {
         std::vector<wchar_t> environmentBlock;
+        bool hasEntry = false;
         for (const std::string& entryText : entries)
         {
             const std::string trimmedEntry = ks::str::TrimCopy(entryText);
@@ -1919,14 +1923,85 @@ namespace
 
             environmentBlock.insert(environmentBlock.end(), wideEntry.begin(), wideEntry.end());
             environmentBlock.push_back(L'\0');
+            hasEntry = true;
         }
 
-        // 环境块必须以双 \0 结束，即使没有任何条目也要保证格式正确。
-        environmentBlock.push_back(L'\0');
-        if (environmentBlock.size() == 1)
+        if (!hasEntry)
         {
-            environmentBlock.push_back(L'\0');
+            return std::vector<wchar_t>();
         }
+
+        // 环境块必须以双 \0 结束；前面每条变量已经追加一个 \0，这里补最后一个。
+        environmentBlock.push_back(L'\0');
+        return environmentBlock;
+    }
+
+    // 把 UI 传入的多行 KEY=VALUE 转为 ANSI 环境块（双 \0 结尾）。
+    // 输入：entries 是 UTF-8 文本，每个元素代表一条环境变量。
+    // 处理：先转 UTF-16，再按系统 ANSI 代码页转窄字节，匹配未设置 CREATE_UNICODE_ENVIRONMENT 的 Win32 语义。
+    // 返回：有至少一条有效项时返回完整环境块；没有有效项或转换失败时返回空 vector，让调用层传 nullptr。
+    std::vector<char> BuildAnsiEnvironmentBlock(const std::vector<std::string>& entries)
+    {
+        std::vector<char> environmentBlock;
+        bool hasEntry = false;
+        for (const std::string& entryText : entries)
+        {
+            const std::string trimmedEntry = ks::str::TrimCopy(entryText);
+            if (trimmedEntry.empty())
+            {
+                continue;
+            }
+
+            const std::wstring wideEntry = ks::str::Utf8ToUtf16(trimmedEntry);
+            if (wideEntry.empty())
+            {
+                continue;
+            }
+
+            const int ansiLengthWithNull = ::WideCharToMultiByte(
+                CP_ACP,
+                0,
+                wideEntry.c_str(),
+                -1,
+                nullptr,
+                0,
+                nullptr,
+                nullptr);
+            if (ansiLengthWithNull <= 1)
+            {
+                continue;
+            }
+
+            std::vector<char> ansiEntry(static_cast<std::size_t>(ansiLengthWithNull), '\0');
+            const int convertedLengthWithNull = ::WideCharToMultiByte(
+                CP_ACP,
+                0,
+                wideEntry.c_str(),
+                -1,
+                ansiEntry.data(),
+                ansiLengthWithNull,
+                nullptr,
+                nullptr);
+            if (convertedLengthWithNull <= 1)
+            {
+                continue;
+            }
+
+            environmentBlock.insert(
+                environmentBlock.end(),
+                ansiEntry.begin(),
+                ansiEntry.end() - 1);
+            environmentBlock.push_back('\0');
+            hasEntry = true;
+        }
+
+        if (!hasEntry)
+        {
+            return std::vector<char>();
+        }
+
+        // 环境块必须以双 \0 结束；前面每条变量已经追加一个 \0，这里补最后一个。
+        environmentBlock.push_back('\0');
         return environmentBlock;
     }
 
@@ -4944,16 +5019,25 @@ namespace ks::process
             request.threadAttributes,
             threadSecurityAttributes) ? &threadSecurityAttributes : nullptr;
 
-        std::vector<wchar_t> environmentBlock;
+        std::vector<wchar_t> unicodeEnvironmentBlock;
+        std::vector<char> ansiEnvironmentBlock;
         LPVOID environmentPtr = nullptr;
         DWORD creationFlags = static_cast<DWORD>(request.creationFlags);
         if (request.useEnvironment)
         {
-            environmentBlock = BuildUnicodeEnvironmentBlock(request.environmentEntries);
-            environmentPtr = environmentBlock.empty() ? nullptr : environmentBlock.data();
-            if (request.environmentUnicode)
+            const bool useUnicodeEnvironment =
+                request.environmentUnicode || ((creationFlags & CREATE_UNICODE_ENVIRONMENT) != 0);
+            if (useUnicodeEnvironment)
             {
                 creationFlags |= CREATE_UNICODE_ENVIRONMENT;
+                unicodeEnvironmentBlock = BuildUnicodeEnvironmentBlock(request.environmentEntries);
+                environmentPtr = unicodeEnvironmentBlock.empty() ? nullptr : unicodeEnvironmentBlock.data();
+            }
+            else
+            {
+                creationFlags &= ~static_cast<DWORD>(CREATE_UNICODE_ENVIRONMENT);
+                ansiEnvironmentBlock = BuildAnsiEnvironmentBlock(request.environmentEntries);
+                environmentPtr = ansiEnvironmentBlock.empty() ? nullptr : ansiEnvironmentBlock.data();
             }
         }
 

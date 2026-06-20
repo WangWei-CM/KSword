@@ -277,6 +277,14 @@ private:
     // 传出：无（结果通过 applyHandleRefreshResult 回填）。
     void requestAsyncRefresh(bool forceRefresh);
 
+    // requestAsyncRefreshWithoutTypePrecondition 作用：
+    // - 启动实际句柄枚举后台任务，不再检查对象类型映射是否已就绪；
+    // - 仅供 requestAsyncRefresh 的正常路径和对象类型快照失败时的兜底路径调用。
+    // 调用方法：requestAsyncRefresh / applyObjectTypeRefreshResult 内部调用。
+    // 传入 forceRefresh：true 表示进行中时记录待执行请求；false 表示进行中时忽略。
+    // 传出：无（结果通过 applyHandleRefreshResult 回填）。
+    void requestAsyncRefreshWithoutTypePrecondition(bool forceRefresh);
+
     // requestObjectTypeRefreshAsync 作用：
     // - 发起异步对象类型刷新任务；
     // - 成功后更新 typeIndex->typeName 映射供句柄枚举复用。
@@ -287,7 +295,7 @@ private:
 
     // applyHandleRefreshResult 作用：
     // - 在主线程应用句柄刷新结果；
-    // - 更新表格、类型下拉、状态文字与缓存。
+    // - 更新缓存、类型下拉、状态文字，并在类型映射可用后更新表格。
     // 调用方法：后台任务完成后 invokeMethod 回调。
     // 传入 refreshTicket：任务序号；refreshResult：后台结果对象。
     // 传出：无。
@@ -304,16 +312,24 @@ private:
     // rebuildHandleTable 作用：
     // - 根据 m_rows 重建句柄列表表格；
     // - 同步每行 UserRole 元数据供右键动作使用。
-    // 调用方法：applyHandleRefreshResult 内部调用。
+    // 调用方法：applyHandleRefreshResult / syncHandleTypeNamesFromObjectTypeMap 内部调用。
     // 传入/传出：无。
     void rebuildHandleTable();
 
     // applyLocalHandleFilters 作用：
     // - 对当前完整句柄快照做本地过滤，不重新枚举系统句柄；
     // - 用于 PID/类型/关键字等轻量交互，避免反复重型刷新。
-    // 调用方法：过滤条件变更、句柄刷新完成后调用。
+    // 调用方法：过滤条件变更、句柄刷新完成且可渲染时调用。
     // 传入/传出：无。
     void applyLocalHandleFilters();
+
+    // applyLocalHandleFilters 作用：
+    // - 对当前完整句柄快照做本地过滤，并按需重建图形界面表格；
+    // - 句柄枚举先完成但对象类型映射尚未到达时，只更新 m_rows 缓存，不触发表格渲染。
+    // 调用方法：applyHandleRefreshResult / syncHandleTypeNamesFromObjectTypeMap / applyLocalHandleFilters 调用。
+    // 传入 rebuildTable：true 立即重建表格；false 仅更新过滤缓存。
+    // 传出：无。
+    void applyLocalHandleFilters(bool rebuildTable);
 
     // rebuildObjectTypeTable 作用：
     // - 根据 m_objectTypeRows 重建对象类型表；
@@ -621,7 +637,7 @@ private:
     bool m_objectTypeRefreshPending = false;     // m_objectTypeRefreshPending：对象类型刷新待执行请求标记。
     bool m_handleDetailRefreshInProgress = false; // m_handleDetailRefreshInProgress：句柄详情刷新互斥标记。
     bool m_handleDetailRefreshPending = false;   // m_handleDetailRefreshPending：句柄详情刷新待执行请求标记。
-    bool m_objectNameRetryAfterTypeMapQueued = false; // m_objectNameRetryAfterTypeMapQueued：对象类型映射就绪后是否已安排过一次对象名补刷。
+    bool m_handleRenderDeferredUntilTypeMap = false; // m_handleRenderDeferredUntilTypeMap：句柄枚举已完成但表格渲染正等待对象类型映射。
     bool m_initialRefreshDone = false;           // m_initialRefreshDone：首轮刷新是否已完成。
     std::uint64_t m_refreshTicket = 0;           // m_refreshTicket：句柄刷新序号，防止乱序覆盖。
     std::uint64_t m_objectTypeRefreshTicket = 0; // m_objectTypeRefreshTicket：对象类型刷新序号。

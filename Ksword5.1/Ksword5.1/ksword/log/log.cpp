@@ -301,6 +301,55 @@ namespace ks::log
         return trackedEvents;
     }
 
+    std::vector<Event> LogEntry::SnapshotRecent(
+        const std::size_t maxCount,
+        const std::uint32_t enabledLevelMask,
+        const GUID* const trackedGuid) const
+    {
+        std::vector<Event> recentEvents;
+        if (maxCount == 0 || enabledLevelMask == 0)
+        {
+            return recentEvents;
+        }
+
+        std::lock_guard<std::mutex> lockGuard(m_mutex);
+        recentEvents.reserve(std::min(maxCount, m_events.size()));
+
+        // UI 只需要“最近 N 条”，但内部 m_events 必须继续保留全量历史。
+        // 因此这里从尾部倒序扫描，命中筛选条件后才复制；达到 maxCount 立即停止。
+        // 这样日志量很大时，日志 Dock 刷新不会为了显示 200 行而复制全部历史。
+        for (auto reverseIterator = m_events.rbegin(); reverseIterator != m_events.rend(); ++reverseIterator)
+        {
+            const Event& singleEvent = *reverseIterator;
+            const unsigned int levelIndex = static_cast<unsigned int>(singleEvent.level);
+            if (levelIndex >= 32U)
+            {
+                continue;
+            }
+
+            const std::uint32_t levelBit = (std::uint32_t{ 1 } << levelIndex);
+            if ((enabledLevelMask & levelBit) == 0)
+            {
+                continue;
+            }
+
+            if (trackedGuid != nullptr && !::ks::log::IsSameGuid(singleEvent.guid, *trackedGuid))
+            {
+                continue;
+            }
+
+            recentEvents.push_back(singleEvent);
+            if (recentEvents.size() >= maxCount)
+            {
+                break;
+            }
+        }
+
+        // 倒序扫描得到的是“新到旧”，表格仍按正常时间顺序“旧到新”显示。
+        std::reverse(recentEvents.begin(), recentEvents.end());
+        return recentEvents;
+    }
+
     std::vector<Event> LogEntry::Snapshot() const
     {
         std::lock_guard<std::mutex> lockGuard(m_mutex);

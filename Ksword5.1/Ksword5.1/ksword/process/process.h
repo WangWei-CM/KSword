@@ -141,8 +141,8 @@ namespace ks::process
         bool usedTokenPath = false;
         bool usedCreateProcessWithTokenFallback = false;
         bool processInfoAvailable = false;
-        std::uint64_t hProcess = 0;
-        std::uint64_t hThread = 0;
+        std::uint64_t hProcess = 0;             // 返回快照：后端已 CloseHandle，不可再用作有效句柄。
+        std::uint64_t hThread = 0;              // 返回快照：后端已 CloseHandle，不可再用作有效句柄。
         std::uint32_t dwProcessId = 0;
         std::uint32_t dwThreadId = 0;
     };

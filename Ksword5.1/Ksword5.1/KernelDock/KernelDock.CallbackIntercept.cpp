@@ -49,6 +49,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <vector>
 
 namespace
 {
@@ -89,6 +90,13 @@ namespace
         FileObject,
         InputLength,
         OutputLength,
+        Count
+    };
+
+    enum class MinifilterBypassPidColumn : int
+    {
+        Pid = 0,
+        Process,
         Count
     };
 
@@ -1476,6 +1484,7 @@ private:
         createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD, QStringLiteral("镜像加载"));
         createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_OBJECT, QStringLiteral("对象管理器"));
         createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_MINIFILTER, QStringLiteral("文件系统微过滤器"));
+        createMinifilterBypassPidTab(m_ruleTabWidget);
 
         auto* logTabWidget = new QTabWidget(scrollContent);
         m_appLogEditor = new QPlainTextEdit(logTabWidget);
@@ -1627,6 +1636,25 @@ private:
         });
         connect(m_moveRuleDownButton, &QPushButton::clicked, m_hostPage, [this]() {
             moveCurrentRule(1);
+        });
+
+        connect(m_minifilterBypassAddButton, &QPushButton::clicked, m_hostPage, [this]() {
+            addMinifilterBypassPidFromEdit();
+        });
+        connect(m_minifilterBypassRemoveButton, &QPushButton::clicked, m_hostPage, [this]() {
+            removeCurrentMinifilterBypassPid();
+        });
+        connect(m_minifilterBypassApplyButton, &QPushButton::clicked, m_hostPage, [this]() {
+            applyMinifilterBypassPidsToDriver();
+        });
+        connect(m_minifilterBypassClearButton, &QPushButton::clicked, m_hostPage, [this]() {
+            clearMinifilterBypassPidsAndApply();
+        });
+        connect(m_minifilterBypassRefreshButton, &QPushButton::clicked, m_hostPage, [this]() {
+            refreshMinifilterBypassPidsFromDriver();
+        });
+        connect(m_minifilterBypassPidEdit, &QLineEdit::returnPressed, m_hostPage, [this]() {
+            addMinifilterBypassPidFromEdit();
         });
 
         connect(m_groupTable, &QTableWidget::itemChanged, m_hostPage, [this](QTableWidgetItem*) {
@@ -1876,6 +1904,367 @@ private:
         outputFile.write(lines.join(QLatin1Char('\n')).toUtf8());
         outputFile.write("\n");
         m_fileMonitorStatusLabel->setText(QStringLiteral("已导出：%1").arg(filePath));
+    }
+
+    void createMinifilterBypassPidTab(QWidget* parentWidget)
+    {
+        // 输入：父 TabWidget；处理：创建 PID 白名单输入区、表格和状态栏；
+        // 返回：无，控件指针保存在成员变量中供按钮槽函数使用。
+        if (m_ruleTabWidget == nullptr)
+        {
+            return;
+        }
+
+        auto* tabPage = new QWidget(parentWidget);
+        auto* tabLayout = new QVBoxLayout(tabPage);
+        tabLayout->setContentsMargins(8, 8, 8, 8);
+        tabLayout->setSpacing(8);
+
+        auto* hintLabel = new QLabel(
+            QStringLiteral("白名单 PID 的文件系统请求会在 minifilter 入口直接放行，跳过回调规则、重定向和文件监控采集。"),
+            tabPage);
+        hintLabel->setWordWrap(true);
+        hintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+        tabLayout->addWidget(hintLabel, 0);
+
+        auto* inputLayout = new QHBoxLayout();
+        inputLayout->setContentsMargins(0, 0, 0, 0);
+        inputLayout->setSpacing(6);
+
+        auto* pidLabel = new QLabel(QStringLiteral("PID 白名单"), tabPage);
+        pidLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextPrimaryHex()));
+        m_minifilterBypassPidEdit = new QLineEdit(tabPage);
+        m_minifilterBypassPidEdit->setPlaceholderText(QStringLiteral("输入 PID，支持 1234 / 0x4D2；多个 PID 用空格、逗号或换行分隔"));
+        applyRuleLineEditStyle(m_minifilterBypassPidEdit);
+        m_minifilterBypassAddButton = new QPushButton(QStringLiteral("添加"), tabPage);
+        m_minifilterBypassRemoveButton = new QPushButton(QStringLiteral("移除选中"), tabPage);
+        m_minifilterBypassApplyButton = new QPushButton(QStringLiteral("应用到驱动"), tabPage);
+        m_minifilterBypassClearButton = new QPushButton(QStringLiteral("清空并应用"), tabPage);
+        m_minifilterBypassRefreshButton = new QPushButton(QStringLiteral("从驱动刷新"), tabPage);
+
+        inputLayout->addWidget(pidLabel, 0);
+        inputLayout->addWidget(m_minifilterBypassPidEdit, 1);
+        inputLayout->addWidget(m_minifilterBypassAddButton, 0);
+        inputLayout->addWidget(m_minifilterBypassRemoveButton, 0);
+        inputLayout->addWidget(m_minifilterBypassApplyButton, 0);
+        inputLayout->addWidget(m_minifilterBypassClearButton, 0);
+        inputLayout->addWidget(m_minifilterBypassRefreshButton, 0);
+        tabLayout->addLayout(inputLayout, 0);
+
+        m_minifilterBypassPidTable = new QTableWidget(tabPage);
+        m_minifilterBypassPidTable->setColumnCount(static_cast<int>(MinifilterBypassPidColumn::Count));
+        m_minifilterBypassPidTable->setHorizontalHeaderLabels(QStringList{
+            QStringLiteral("PID"),
+            QStringLiteral("进程")
+            });
+        m_minifilterBypassPidTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_minifilterBypassPidTable->setSelectionMode(QAbstractItemView::SingleSelection);
+        m_minifilterBypassPidTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_minifilterBypassPidTable->setSortingEnabled(false);
+        m_minifilterBypassPidTable->setWordWrap(false);
+        m_minifilterBypassPidTable->verticalHeader()->setVisible(false);
+        m_minifilterBypassPidTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(MinifilterBypassPidColumn::Pid), QHeaderView::ResizeToContents);
+        m_minifilterBypassPidTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(MinifilterBypassPidColumn::Process), QHeaderView::Stretch);
+        m_minifilterBypassPidTable->setStyleSheet(callbackRuleTableStyle());
+        applyCallbackTableTransparency(m_minifilterBypassPidTable);
+        tabLayout->addWidget(m_minifilterBypassPidTable, 1);
+
+        m_minifilterBypassStatusLabel = new QLabel(QStringLiteral("尚未从驱动刷新；编辑后点击“应用到驱动”生效。"), tabPage);
+        m_minifilterBypassStatusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+        tabLayout->addWidget(m_minifilterBypassStatusLabel, 0);
+
+        m_ruleTabWidget->addTab(tabPage, QStringLiteral("Minifilter PID 放行"));
+    }
+
+    QList<quint32> parseMinifilterBypassPidText(const QString& rawText, QString* errorTextOut) const
+    {
+        // 输入：用户输入的 PID 字符串；处理：按空白/逗号/分号拆分并支持 0x 十六进制；
+        // 返回：去重后的 PID 列表，失败时返回空列表并写入 errorTextOut。
+        QList<quint32> pidList;
+        QString normalizedText = rawText;
+        normalizedText.replace(QLatin1Char(','), QLatin1Char(' '));
+        normalizedText.replace(QLatin1Char(';'), QLatin1Char(' '));
+        normalizedText.replace(QLatin1Char('\n'), QLatin1Char(' '));
+        normalizedText.replace(QLatin1Char('\r'), QLatin1Char(' '));
+        normalizedText.replace(QLatin1Char('\t'), QLatin1Char(' '));
+
+        const QStringList tokenList = normalizedText.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        if (tokenList.isEmpty())
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("请输入至少一个 PID。");
+            }
+            return {};
+        }
+
+        for (const QString& tokenText : tokenList)
+        {
+            quint32 processId = 0U;
+            if (!parseUnsignedText(tokenText, &processId) || processId == 0U)
+            {
+                if (errorTextOut != nullptr)
+                {
+                    *errorTextOut = QStringLiteral("PID 无效：%1").arg(tokenText);
+                }
+                return {};
+            }
+            if (!pidList.contains(processId))
+            {
+                pidList.append(processId);
+            }
+        }
+        return pidList;
+    }
+
+    int findMinifilterBypassPidRow(const quint32 processId) const
+    {
+        // 输入：目标 PID；处理：扫描白名单表格 PID 列的 UserRole/文本；
+        // 返回：命中的行号，未命中返回 -1。
+        if (m_minifilterBypassPidTable == nullptr)
+        {
+            return -1;
+        }
+
+        for (int rowIndex = 0; rowIndex < m_minifilterBypassPidTable->rowCount(); ++rowIndex)
+        {
+            const QTableWidgetItem* pidItem =
+                m_minifilterBypassPidTable->item(rowIndex, static_cast<int>(MinifilterBypassPidColumn::Pid));
+            if (pidItem != nullptr && static_cast<quint32>(pidItem->data(Qt::UserRole).toUInt()) == processId)
+            {
+                return rowIndex;
+            }
+        }
+        return -1;
+    }
+
+    bool appendMinifilterBypassPidRow(const quint32 processId)
+    {
+        // 输入：一个有效 PID；处理：跳过重复项并追加 PID/进程名只读行；
+        // 返回：成功追加返回 true，重复或超限返回 false。
+        if (m_minifilterBypassPidTable == nullptr ||
+            processId == 0U ||
+            findMinifilterBypassPidRow(processId) >= 0)
+        {
+            return false;
+        }
+        if (m_minifilterBypassPidTable->rowCount() >= static_cast<int>(KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT))
+        {
+            return false;
+        }
+
+        const int rowIndex = m_minifilterBypassPidTable->rowCount();
+        m_minifilterBypassPidTable->insertRow(rowIndex);
+        QTableWidgetItem* pidItem = makeReadOnlyItem(QString::number(processId));
+        pidItem->setData(Qt::UserRole, processId);
+        m_minifilterBypassPidTable->setItem(rowIndex, static_cast<int>(MinifilterBypassPidColumn::Pid), pidItem);
+        m_minifilterBypassPidTable->setItem(
+            rowIndex,
+            static_cast<int>(MinifilterBypassPidColumn::Process),
+            makeReadOnlyItem(resolveProcessNameForFileMonitor(processId)));
+        return true;
+    }
+
+    void addMinifilterBypassPidFromEdit()
+    {
+        // 输入：PID 输入框文本；处理：解析并追加到本地白名单表；
+        // 返回：无；错误通过状态栏和弹窗提示。
+        if (m_minifilterBypassPidEdit == nullptr)
+        {
+            return;
+        }
+
+        QString errorText;
+        const QList<quint32> pidList = parseMinifilterBypassPidText(m_minifilterBypassPidEdit->text(), &errorText);
+        if (!errorText.isEmpty())
+        {
+            if (m_minifilterBypassStatusLabel != nullptr)
+            {
+                m_minifilterBypassStatusLabel->setText(QStringLiteral("添加失败：%1").arg(errorText));
+            }
+            QMessageBox::warning(m_hostPage, QStringLiteral("Minifilter PID 放行"), errorText);
+            return;
+        }
+
+        int addedCount = 0;
+        for (const quint32 processId : pidList)
+        {
+            if (appendMinifilterBypassPidRow(processId))
+            {
+                ++addedCount;
+            }
+        }
+
+        if (m_minifilterBypassPidTable != nullptr &&
+            m_minifilterBypassPidTable->rowCount() >= static_cast<int>(KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT) &&
+            addedCount < static_cast<int>(pidList.size()))
+        {
+            QMessageBox::warning(
+                m_hostPage,
+                QStringLiteral("Minifilter PID 放行"),
+                QStringLiteral("白名单最多 %1 个 PID，超出的项目未添加。")
+                .arg(KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT));
+        }
+
+        if (addedCount > 0)
+        {
+            m_minifilterBypassPidEdit->clear();
+        }
+        if (m_minifilterBypassStatusLabel != nullptr)
+        {
+            m_minifilterBypassStatusLabel->setText(QStringLiteral("已添加 %1 个 PID；点击“应用到驱动”后生效。").arg(addedCount));
+        }
+    }
+
+    void removeCurrentMinifilterBypassPid()
+    {
+        // 输入：当前表格选择；处理：删除选中行；
+        // 返回：无；删除只影响 UI，需用户点击应用下发。
+        if (m_minifilterBypassPidTable == nullptr)
+        {
+            return;
+        }
+
+        const int rowIndex = m_minifilterBypassPidTable->currentRow();
+        if (rowIndex < 0)
+        {
+            return;
+        }
+
+        m_minifilterBypassPidTable->removeRow(rowIndex);
+        if (m_minifilterBypassStatusLabel != nullptr)
+        {
+            m_minifilterBypassStatusLabel->setText(QStringLiteral("已移除选中 PID；点击“应用到驱动”后生效。"));
+        }
+    }
+
+    std::vector<std::uint32_t> collectMinifilterBypassPidsFromUi() const
+    {
+        // 输入：当前白名单表格；处理：按行读取 PID 并跳过无效/重复项；
+        // 返回：用于 ArkDriverClient 下发的 std::vector PID 列表。
+        std::vector<std::uint32_t> processIds;
+        if (m_minifilterBypassPidTable == nullptr)
+        {
+            return processIds;
+        }
+
+        for (int rowIndex = 0; rowIndex < m_minifilterBypassPidTable->rowCount(); ++rowIndex)
+        {
+            const QTableWidgetItem* pidItem =
+                m_minifilterBypassPidTable->item(rowIndex, static_cast<int>(MinifilterBypassPidColumn::Pid));
+            const quint32 processId = pidItem != nullptr
+                ? static_cast<quint32>(pidItem->data(Qt::UserRole).toUInt())
+                : 0U;
+            if (processId == 0U)
+            {
+                continue;
+            }
+            if (std::find(processIds.cbegin(), processIds.cend(), static_cast<std::uint32_t>(processId)) == processIds.cend())
+            {
+                processIds.push_back(static_cast<std::uint32_t>(processId));
+            }
+        }
+        return processIds;
+    }
+
+    void populateMinifilterBypassPids(const std::vector<std::uint32_t>& processIds)
+    {
+        // 输入：驱动返回或本地整理后的 PID 列表；处理：重建表格；
+        // 返回：无，表格内容变为 PID 快照。
+        if (m_minifilterBypassPidTable == nullptr)
+        {
+            return;
+        }
+
+        m_minifilterBypassPidTable->setRowCount(0);
+        for (const std::uint32_t processId : processIds)
+        {
+            appendMinifilterBypassPidRow(static_cast<quint32>(processId));
+        }
+    }
+
+    void applyMinifilterBypassPidsToDriver()
+    {
+        // 输入：当前白名单表格；处理：通过 ArkDriverClient 设置驱动白名单；
+        // 返回：无；失败弹窗并写应用日志。
+        const std::vector<std::uint32_t> processIds = collectMinifilterBypassPidsFromUi();
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::IoResult ioResult = driverClient.setMinifilterBypassPids(processIds);
+        if (!ioResult.ok)
+        {
+            const QString detailText = QString::fromStdString(ioResult.message);
+            if (m_minifilterBypassStatusLabel != nullptr)
+            {
+                m_minifilterBypassStatusLabel->setText(QStringLiteral("应用失败：error=%1").arg(ioResult.win32Error));
+            }
+            appendAppLog(QStringLiteral("Minifilter PID 放行应用失败：error=%1，detail=%2")
+                .arg(ioResult.win32Error)
+                .arg(detailText));
+            QMessageBox::warning(
+                m_hostPage,
+                QStringLiteral("Minifilter PID 放行"),
+                QStringLiteral("应用到驱动失败，error=%1。").arg(ioResult.win32Error));
+            return;
+        }
+
+        if (m_minifilterBypassStatusLabel != nullptr)
+        {
+            m_minifilterBypassStatusLabel->setText(QStringLiteral("已应用到驱动：%1 个 PID。").arg(static_cast<qulonglong>(processIds.size())));
+        }
+        appendAppLog(QStringLiteral("Minifilter PID 放行已应用：count=%1。").arg(static_cast<qulonglong>(processIds.size())));
+    }
+
+    void clearMinifilterBypassPidsAndApply()
+    {
+        // 输入：无；处理：清空 UI 表格并立即向驱动下发空白名单；
+        // 返回：无，失败时驱动状态可能仍保持原白名单。
+        if (m_minifilterBypassPidTable != nullptr)
+        {
+            m_minifilterBypassPidTable->setRowCount(0);
+        }
+        applyMinifilterBypassPidsToDriver();
+    }
+
+    void refreshMinifilterBypassPidsFromDriver()
+    {
+        // 输入：无；处理：查询驱动当前白名单并刷新表格；
+        // 返回：无；失败只更新状态栏/日志，不改变本地表格。
+        const ksword::ark::DriverClient driverClient;
+        const ksword::ark::MinifilterBypassPidResult queryResult =
+            driverClient.queryMinifilterBypassPids();
+        if (!queryResult.io.ok)
+        {
+            const QString detailText = QString::fromStdString(queryResult.io.message);
+            if (m_minifilterBypassStatusLabel != nullptr)
+            {
+                m_minifilterBypassStatusLabel->setText(QStringLiteral("刷新失败：error=%1").arg(queryResult.io.win32Error));
+            }
+            appendAppLog(QStringLiteral("Minifilter PID 放行刷新失败：error=%1，detail=%2")
+                .arg(queryResult.io.win32Error)
+                .arg(detailText));
+            return;
+        }
+
+        const unsigned long safeCount = std::min<unsigned long>(
+            queryResult.response.pidCount,
+            KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT);
+        std::vector<std::uint32_t> processIds;
+        processIds.reserve(static_cast<std::size_t>(safeCount));
+        for (unsigned long pidIndex = 0UL; pidIndex < safeCount; ++pidIndex)
+        {
+            const unsigned long processId = queryResult.response.processIds[pidIndex];
+            if (processId != 0UL)
+            {
+                processIds.push_back(static_cast<std::uint32_t>(processId));
+            }
+        }
+
+        populateMinifilterBypassPids(processIds);
+        if (m_minifilterBypassStatusLabel != nullptr)
+        {
+            m_minifilterBypassStatusLabel->setText(QStringLiteral("已从驱动刷新：%1 个 PID。").arg(static_cast<qulonglong>(processIds.size())));
+        }
+        appendAppLog(QStringLiteral("Minifilter PID 放行已刷新：count=%1。").arg(static_cast<qulonglong>(processIds.size())));
     }
 
     void createRuleTableTab(quint32 callbackType, const QString& titleText)
@@ -3963,6 +4352,15 @@ private:
     QTabWidget* m_ruleTabWidget = nullptr;
     QHash<quint32, QTableWidget*> m_ruleTableMap;
     QHash<int, quint32> m_tabCallbackTypeMap;
+
+    QLineEdit* m_minifilterBypassPidEdit = nullptr;
+    QPushButton* m_minifilterBypassAddButton = nullptr;
+    QPushButton* m_minifilterBypassRemoveButton = nullptr;
+    QPushButton* m_minifilterBypassApplyButton = nullptr;
+    QPushButton* m_minifilterBypassClearButton = nullptr;
+    QPushButton* m_minifilterBypassRefreshButton = nullptr;
+    QLabel* m_minifilterBypassStatusLabel = nullptr;
+    QTableWidget* m_minifilterBypassPidTable = nullptr;
 
     QPlainTextEdit* m_appLogEditor = nullptr;
     QPlainTextEdit* m_eventLogEditor = nullptr;

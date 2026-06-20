@@ -1116,6 +1116,17 @@ namespace ksword::ark
         KSWORD_ARK_CALLBACK_RUNTIME_STATE state{};
     };
 
+    // MinifilterBypassPidResult wraps the fixed PID whitelist response.
+    // Input: none; DriverClient::queryMinifilterBypassPids fills this struct.
+    // Processing: io reports transport/protocol success and response carries
+    // the full R0 whitelist snapshot.
+    // Return behavior: the struct itself has no methods; callers inspect io.ok.
+    struct MinifilterBypassPidResult
+    {
+        IoResult io;
+        KSWORD_ARK_MINIFILTER_BYPASS_PID_RESPONSE response{};
+    };
+
     // CallbackRemoveResult wraps the legacy external-callback removal response packet.
     struct CallbackRemoveResult
     {

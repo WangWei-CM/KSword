@@ -74,4 +74,23 @@ KswordARKCallbackIoctlEnumCallbacks(
     _Out_ size_t* CompleteBytesOut
     );
 
+NTSTATUS
+KswordARKCallbackIoctlSetMinifilterBypassPids(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _Out_ size_t* CompleteBytesOut
+    );
+
+NTSTATUS
+KswordARKCallbackIoctlQueryMinifilterBypassPids(
+    _In_ WDFREQUEST Request,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* CompleteBytesOut
+    );
+
+BOOLEAN
+KswordArkCallbackIsMinifilterBypassPid(
+    _In_ ULONG ProcessId
+    );
+
 EXTERN_C_END

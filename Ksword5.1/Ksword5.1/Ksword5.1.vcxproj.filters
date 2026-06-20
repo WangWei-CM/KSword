@@ -386,6 +386,9 @@
     <ClCompile Include="ProcessDock\ProcessDetailWindow.ActionAndUtil.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ProcessDock\ProcessDetailWindow.ExtendedActions.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="ProcessDock\ProcessDetailWindow.AdvancedInfo.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

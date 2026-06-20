@@ -160,6 +160,8 @@ namespace ksword::ark
             KSWORD_ARK_CALLBACK_EVENT_PACKET& eventPacket,
             OVERLAPPED* overlapped) const;
         CallbackRuntimeResult queryCallbackRuntimeState() const;
+        IoResult setMinifilterBypassPids(const std::vector<std::uint32_t>& processIds) const;
+        MinifilterBypassPidResult queryMinifilterBypassPids() const;
         IoResult answerCallbackEvent(const KSWORD_ARK_CALLBACK_ANSWER_REQUEST& request) const;
         IoResult cancelAllPendingCallbackDecisions() const;
         CallbackRemoveResult removeExternalCallback(const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_REQUEST& request) const;

@@ -72,6 +72,9 @@ void ProcessDetailWindow::executeSelectedTerminateAction()
     case 1:
         executeTerminateThreadsAction();
         break;
+    case 2:
+        executeTerminateProcessComboAction();
+        break;
     default:
     {
         kLogEvent invalidTerminateActionEvent;

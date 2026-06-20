@@ -177,6 +177,29 @@ void NetworkDock::terminateSelectedTcpConnection()
     // - 自动刷新定时器可能在确认框打开期间重建 m_tcpConnectionCache；
     // - 若继续使用引用，用户点击确认后可能访问悬空对象并导致关闭请求参数错误。
     const ks::network::TcpConnectionRecord targetConnection = m_tcpConnectionCache[static_cast<std::size_t>(cacheIndex)];
+    // DELETE_TCB 只适用于 IPv4 活动连接：
+    // - LISTEN 行是监听 socket，不是已建立连接；
+    // - IPv6 行不能传给 IPv4-only 的 SetTcpEntry；
+    // - 在弹确认框前拦截这些场景，避免把系统返回的 317 误提示成权限不足。
+    const std::string unsupportedReason = ks::network::GetTcpTerminationUnsupportedReason(targetConnection);
+    if (!unsupportedReason.empty())
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("连接管理"),
+            QStringLiteral("当前 TCP 行不能通过 DELETE_TCB 终止：%1").arg(toQString(unsupportedReason)));
+
+        kLogEvent unsupportedTerminateEvent;
+        info << unsupportedTerminateEvent
+            << "[NetworkDock] 跳过不支持的 TCP 终止请求, pid=" << targetConnection.processId
+            << ", state=" << targetConnection.tcpStateText
+            << ", local=" << targetConnection.localAddressText << ":" << targetConnection.localPort
+            << ", remote=" << targetConnection.remoteAddressText << ":" << targetConnection.remotePort
+            << ", reason=" << unsupportedReason
+            << eol;
+        return;
+    }
+
     const int userChoice = QMessageBox::question(
         this,
         QStringLiteral("终止 TCP 连接"),
@@ -252,6 +275,5 @@ void NetworkDock::copySelectedConnectionRowToClipboard(QTableWidget* tableWidget
         << ", row=" << selectedRow
         << eol;
 }
-
 
 

@@ -535,6 +535,11 @@ private:
     // 返回值：无。
     void showActionResultMessage(const QString& title, bool actionOk, const std::string& detailText, const kLogEvent& actionEvent);
     ks::process::CreateProcessRequest buildCreateProcessRequestFromUi(bool* buildOk, QString* errorTextOut) const;
+    // buildTokenPrivilegeEditRequestFromUi 作用：
+    // - 只读取 Token 模式和特权表字段，不解析 CreateProcessW 其它输入；
+    // - 用于“仅应用令牌调整”按钮，避免无关创建参数阻断调权操作；
+    // - 返回值：true 表示 requestOut 已填充 Token 相关字段，false 表示 errorTextOut 保存失败原因。
+    bool buildTokenPrivilegeEditRequestFromUi(ks::process::CreateProcessRequest* requestOut, QString* errorTextOut) const;
     void executeCreateProcessRequest();
     void executeApplyTokenPrivilegeEditsOnly();
     void appendCreateResultLine(const QString& lineText);

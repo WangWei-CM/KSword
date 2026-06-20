@@ -11,12 +11,18 @@
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
 
+#include <QAction>
 #include <QCheckBox>
+#include <QApplication>
+#include <QClipboard>
 #include <QDateTime>
+#include <QDialog>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
+#include <QMessageBox>
 #include <QMetaObject>
 #include <QPointer>
 #include <QPushButton>
@@ -29,6 +35,8 @@
 #include <QVariant>
 
 #include <algorithm>
+#include <cwchar>
+#include <iterator>
 #include <memory>
 #include <thread>
 
@@ -284,6 +292,271 @@ namespace
         return QString::fromWCharArray(buffer);
     }
 
+    // registryPropertyString 作用：
+    // - 输入：SetupAPI 设备信息句柄、设备数据、SPDRP_* 属性编号；
+    // - 处理：读取老式设备注册表属性，补齐部分 DEVPROPKEY 不稳定字段；
+    // - 返回：字符串/多字符串属性使用换行连接，失败时返回空字符串。
+    QString registryPropertyString(
+        HDEVINFO deviceInfoSet,
+        SP_DEVINFO_DATA* deviceInfoData,
+        const DWORD propertyValue)
+    {
+        DWORD requiredSize = 0;
+        DWORD propertyType = 0;
+        SetupDiGetDeviceRegistryPropertyW(
+            deviceInfoSet,
+            deviceInfoData,
+            propertyValue,
+            &propertyType,
+            nullptr,
+            0,
+            &requiredSize);
+        if (requiredSize == 0)
+        {
+            return QString();
+        }
+
+        std::vector<BYTE> buffer(requiredSize + sizeof(wchar_t) * 2U, 0);
+        if (!SetupDiGetDeviceRegistryPropertyW(
+            deviceInfoSet,
+            deviceInfoData,
+            propertyValue,
+            &propertyType,
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()),
+            nullptr))
+        {
+            return QString();
+        }
+
+        if (propertyType == REG_MULTI_SZ)
+        {
+            QStringList valueList;
+            const wchar_t* cursor = reinterpret_cast<const wchar_t*>(buffer.data());
+            while (cursor != nullptr && *cursor != L'\0')
+            {
+                const QString valueText = QString::fromWCharArray(cursor).trimmed();
+                if (!valueText.isEmpty())
+                {
+                    valueList.append(valueText);
+                }
+                cursor += wcslen(cursor) + 1;
+            }
+            return valueList.join(QStringLiteral("\n"));
+        }
+
+        if (propertyType == REG_SZ || propertyType == REG_EXPAND_SZ)
+        {
+            return QString::fromWCharArray(reinterpret_cast<const wchar_t*>(buffer.data())).trimmed();
+        }
+
+        return QString();
+    }
+
+    // serviceImagePath 作用：
+    // - 输入：设备 Service 名；
+    // - 处理：读取 HKLM\SYSTEM\CurrentControlSet\Services\<Service>\ImagePath；
+    // - 返回：成功时返回驱动服务映像路径，失败时返回空字符串。
+    QString serviceImagePath(const QString& serviceNameText)
+    {
+        if (serviceNameText.trimmed().isEmpty())
+        {
+            return QString();
+        }
+
+        const QString keyPath = QStringLiteral("SYSTEM\\CurrentControlSet\\Services\\%1").arg(serviceNameText.trimmed());
+        HKEY serviceKey = nullptr;
+        if (RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            reinterpret_cast<LPCWSTR>(keyPath.utf16()),
+            0,
+            KEY_READ,
+            &serviceKey) != ERROR_SUCCESS)
+        {
+            return QString();
+        }
+
+        DWORD valueType = 0;
+        DWORD valueSize = 0;
+        const LONG querySizeResult = RegQueryValueExW(
+            serviceKey,
+            L"ImagePath",
+            nullptr,
+            &valueType,
+            nullptr,
+            &valueSize);
+        if (querySizeResult != ERROR_SUCCESS || valueSize == 0)
+        {
+            RegCloseKey(serviceKey);
+            return QString();
+        }
+
+        std::vector<BYTE> buffer(valueSize + sizeof(wchar_t), 0);
+        const LONG queryValueResult = RegQueryValueExW(
+            serviceKey,
+            L"ImagePath",
+            nullptr,
+            &valueType,
+            buffer.data(),
+            &valueSize);
+        RegCloseKey(serviceKey);
+        if (queryValueResult != ERROR_SUCCESS || (valueType != REG_SZ && valueType != REG_EXPAND_SZ))
+        {
+            return QString();
+        }
+
+        return QString::fromWCharArray(reinterpret_cast<const wchar_t*>(buffer.data())).trimmed();
+    }
+
+    // driverRegistryPathFromClassKey 作用：
+    // - 输入：ClassGuid 与 Driver key name，例如 "0001"；
+    // - 处理：拼接设备管理器驱动注册表路径；
+    // - 返回：字段完整时返回 HKLM\SYSTEM\CurrentControlSet\Control\Class\{GUID}\0001。
+    QString driverRegistryPathFromClassKey(const QString& classGuidText, const QString& driverKeyText)
+    {
+        if (classGuidText.trimmed().isEmpty() || driverKeyText.trimmed().isEmpty())
+        {
+            return QString();
+        }
+
+        return QStringLiteral("HKLM\\SYSTEM\\CurrentControlSet\\Control\\Class\\%1\\%2")
+            .arg(classGuidText.trimmed(), driverKeyText.trimmed());
+    }
+
+    // formatWin32Error 作用：
+    // - 输入：Win32 错误码；
+    // - 处理：调用 FormatMessageW 获取系统错误文本；
+    // - 返回：包含十进制、十六进制和消息正文的诊断字符串。
+    QString formatWin32Error(const DWORD errorCode)
+    {
+        wchar_t* messageBuffer = nullptr;
+        const DWORD writtenLength = FormatMessageW(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr,
+            errorCode,
+            0,
+            reinterpret_cast<LPWSTR>(&messageBuffer),
+            0,
+            nullptr);
+
+        QString messageText;
+        if (writtenLength > 0 && messageBuffer != nullptr)
+        {
+            messageText = QString::fromWCharArray(messageBuffer).trimmed();
+            LocalFree(messageBuffer);
+        }
+
+        if (messageText.isEmpty())
+        {
+            messageText = QStringLiteral("未知错误");
+        }
+
+        return QStringLiteral("%1 (0x%2): %3")
+            .arg(errorCode)
+            .arg(errorCode, 8, 16, QLatin1Char('0'))
+            .arg(messageText);
+    }
+
+    // currentProcessIsElevated 作用：
+    // - 输入：当前进程；
+    // - 处理：查询 TokenElevation；
+    // - 返回：管理员提升运行时返回 true，否则返回 false。
+    bool currentProcessIsElevated()
+    {
+        HANDLE tokenHandle = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tokenHandle))
+        {
+            return false;
+        }
+
+        TOKEN_ELEVATION elevation{};
+        DWORD returnLength = 0;
+        const BOOL queryOk = GetTokenInformation(
+            tokenHandle,
+            TokenElevation,
+            &elevation,
+            sizeof(elevation),
+            &returnLength);
+        CloseHandle(tokenHandle);
+        return queryOk != FALSE && elevation.TokenIsElevated != 0;
+    }
+
+    // instanceIdFromDevInst 前置声明：
+    // - findDeviceInfoDataByInstanceId 需要在重新定位设备时回退读取 CfgMgr Instance ID；
+    // - 实现放在下方，声明放在这里避免函数定义顺序导致编译失败。
+    QString instanceIdFromDevInst(DEVINST devInst);
+
+    // findDeviceInfoDataByInstanceId 作用：
+    // - 输入：PnP Instance ID；
+    // - 处理：重新打开 SetupAPI 设备集合并定位对应 SP_DEVINFO_DATA；
+    // - 返回：成功时填充 deviceInfoSetOut/deviceInfoDataOut，调用方必须 SetupDiDestroyDeviceInfoList。
+    bool findDeviceInfoDataByInstanceId(
+        const QString& instanceIdText,
+        HDEVINFO* const deviceInfoSetOut,
+        SP_DEVINFO_DATA* const deviceInfoDataOut,
+        QString* const errorTextOut)
+    {
+        if (deviceInfoSetOut == nullptr || deviceInfoDataOut == nullptr)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("内部错误：输出参数为空。");
+            }
+            return false;
+        }
+
+        *deviceInfoSetOut = INVALID_HANDLE_VALUE;
+        ZeroMemory(deviceInfoDataOut, sizeof(*deviceInfoDataOut));
+        deviceInfoDataOut->cbSize = sizeof(SP_DEVINFO_DATA);
+        if (instanceIdText.trimmed().isEmpty())
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("设备 Instance ID 为空。");
+            }
+            return false;
+        }
+
+        HDEVINFO deviceInfoSet = SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES);
+        if (deviceInfoSet == INVALID_HANDLE_VALUE)
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("SetupDiGetClassDevsW 失败：%1").arg(formatWin32Error(GetLastError()));
+            }
+            return false;
+        }
+
+        for (DWORD index = 0;; ++index)
+        {
+            SP_DEVINFO_DATA candidateData{};
+            candidateData.cbSize = sizeof(candidateData);
+            if (!SetupDiEnumDeviceInfo(deviceInfoSet, index, &candidateData))
+            {
+                break;
+            }
+
+            QString candidateInstanceId = propertyString(deviceInfoSet, &candidateData, DEVPKEY_Device_InstanceId);
+            if (candidateInstanceId.isEmpty())
+            {
+                candidateInstanceId = instanceIdFromDevInst(candidateData.DevInst);
+            }
+            if (candidateInstanceId.compare(instanceIdText, Qt::CaseInsensitive) == 0)
+            {
+                *deviceInfoSetOut = deviceInfoSet;
+                *deviceInfoDataOut = candidateData;
+                return true;
+            }
+        }
+
+        SetupDiDestroyDeviceInfoList(deviceInfoSet);
+        if (errorTextOut != nullptr)
+        {
+            *errorTextOut = QStringLiteral("未找到设备：%1").arg(instanceIdText);
+        }
+        return false;
+    }
+
     // instanceIdFromDevInst 作用：
     // - 输入：CfgMgr devinst；
     // - 处理：调用 CM_Get_Device_IDW 获取实例 ID；
@@ -361,7 +634,7 @@ namespace
             return true;
         }
 
-        const QString joinedText = QStringLiteral("%1\n%2\n%3\n%4\n%5\n%6\n%7\n%8")
+        const QString joinedText = QStringLiteral("%1\n%2\n%3\n%4\n%5\n%6\n%7\n%8\n%9\n%10\n%11")
             .arg(entry.nameText)
             .arg(entry.manufacturerText)
             .arg(entry.serviceText)
@@ -370,8 +643,259 @@ namespace
             .arg(entry.instanceIdText)
             .arg(entry.parentInstanceIdText)
             .arg(entry.hardwareIdsText)
+            .arg(entry.driverInfPathText)
+            .arg(entry.driverProviderText)
+            .arg(entry.serviceImagePathText)
             .toLower();
         return joinedText.contains(lowerFilterText);
+    }
+
+    // buildDevicePropertiesText 作用：
+    // - 输入：设备快照；
+    // - 处理：整理成设备属性页正文；
+    // - 返回：适合 CodeEditorWidget 展示的只读文本。
+    QString buildDevicePropertiesText(const HardwareDeviceManagerPage::DeviceEntry& entry)
+    {
+        return QStringLiteral(
+            "[General]\n"
+            "Name: %1\n"
+            "Manufacturer: %2\n"
+            "Class: %3\n"
+            "Class GUID: %4\n"
+            "Enumerator: %5\n"
+            "Location: %6\n"
+            "Installed: %7\n"
+            "Present: %8\n"
+            "HasProblem: %9\n"
+            "Problem: %10\n"
+            "Status: %11\n\n"
+            "[Identity]\n"
+            "Instance ID:\n%12\n\n"
+            "Parent Instance ID:\n%13\n\n"
+            "Hardware IDs:\n%14\n\n"
+            "Compatible IDs:\n%15\n\n"
+            "[Driver Binding]\n"
+            "Service: %16\n"
+            "Driver Key: %17\n"
+            "Driver Registry Path: %18\n"
+            "Driver INF: %19\n"
+            "Provider: %20\n"
+            "Version: %21\n"
+            "Date: %22\n"
+            "Service ImagePath: %23\n")
+            .arg(safeDisplayText(entry.nameText))
+            .arg(safeDisplayText(entry.manufacturerText))
+            .arg(safeDisplayText(entry.classText))
+            .arg(safeDisplayText(entry.classGuidText))
+            .arg(safeDisplayText(entry.enumeratorText))
+            .arg(safeDisplayText(entry.locationText))
+            .arg(safeDisplayText(entry.installedText))
+            .arg(entry.isPresent ? QStringLiteral("Yes") : QStringLiteral("No"))
+            .arg(entry.hasProblem ? QStringLiteral("Yes") : QStringLiteral("No"))
+            .arg(safeDisplayText(entry.problemText))
+            .arg(safeDisplayText(entry.statusText))
+            .arg(safeDisplayText(entry.instanceIdText))
+            .arg(safeDisplayText(entry.parentInstanceIdText))
+            .arg(safeDisplayText(entry.hardwareIdsText))
+            .arg(safeDisplayText(entry.compatibleIdsText))
+            .arg(safeDisplayText(entry.serviceText))
+            .arg(safeDisplayText(entry.driverText))
+            .arg(safeDisplayText(entry.driverRegistryPathText))
+            .arg(safeDisplayText(entry.driverInfPathText))
+            .arg(safeDisplayText(entry.driverProviderText))
+            .arg(safeDisplayText(entry.driverVersionText))
+            .arg(safeDisplayText(entry.driverDateText))
+            .arg(safeDisplayText(entry.serviceImagePathText));
+    }
+
+    // buildDriverDetailsText 作用：
+    // - 输入：设备快照；
+    // - 处理：整理成“驱动程序详细信息”正文；
+    // - 返回：INF、Provider、Version、服务镜像路径等驱动排障信息。
+    QString buildDriverDetailsText(const HardwareDeviceManagerPage::DeviceEntry& entry)
+    {
+        return QStringLiteral(
+            "[Driver]\n"
+            "Device: %1\n"
+            "Instance ID:\n%2\n\n"
+            "Service: %3\n"
+            "Service ImagePath: %4\n"
+            "Driver Key: %5\n"
+            "Driver Registry Path: %6\n"
+            "Driver INF: %7\n"
+            "Provider: %8\n"
+            "Version: %9\n"
+            "Date: %10\n"
+            "Class: %11\n"
+            "Class GUID: %12\n\n"
+            "[Matching IDs]\n"
+            "Hardware IDs:\n%13\n\n"
+            "Compatible IDs:\n%14\n\n"
+            "[Notes]\n"
+            "- 卸载设备会移除当前 DevNode，可能要求重启或重新扫描硬件。\n"
+            "- 删除驱动包只支持 oem*.inf；系统内置 INF 或正在使用的驱动包通常会失败。\n")
+            .arg(safeDisplayText(entry.nameText))
+            .arg(safeDisplayText(entry.instanceIdText))
+            .arg(safeDisplayText(entry.serviceText))
+            .arg(safeDisplayText(entry.serviceImagePathText))
+            .arg(safeDisplayText(entry.driverText))
+            .arg(safeDisplayText(entry.driverRegistryPathText))
+            .arg(safeDisplayText(entry.driverInfPathText))
+            .arg(safeDisplayText(entry.driverProviderText))
+            .arg(safeDisplayText(entry.driverVersionText))
+            .arg(safeDisplayText(entry.driverDateText))
+            .arg(safeDisplayText(entry.classText))
+            .arg(safeDisplayText(entry.classGuidText))
+            .arg(safeDisplayText(entry.hardwareIdsText))
+            .arg(safeDisplayText(entry.compatibleIdsText));
+    }
+
+    // showTextDialog 作用：
+    // - 输入：父窗口、标题、正文；
+    // - 处理：使用项目 CodeEditorWidget 弹出只读文本窗口；
+    // - 返回值：无。
+    void showTextDialog(QWidget* const parentWidget, const QString& titleText, const QString& bodyText)
+    {
+        QDialog dialog(parentWidget);
+        dialog.setWindowTitle(titleText);
+        dialog.resize(820, 620);
+
+        QVBoxLayout* layout = new QVBoxLayout(&dialog);
+        CodeEditorWidget* editor = new CodeEditorWidget(&dialog);
+        editor->setReadOnly(true);
+        editor->setText(bodyText);
+        layout->addWidget(editor, 1);
+
+        QPushButton* closeButton = new QPushButton(QStringLiteral("关闭"), &dialog);
+        QObject::connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+        QHBoxLayout* buttonLayout = new QHBoxLayout();
+        buttonLayout->addStretch(1);
+        buttonLayout->addWidget(closeButton);
+        layout->addLayout(buttonLayout);
+
+        dialog.exec();
+    }
+
+    // uninstallDeviceByInstanceId 作用：
+    // - 输入：PnP Instance ID；
+    // - 处理：定位 SP_DEVINFO_DATA 后调用 DIF_REMOVE；
+    // - 返回：成功时 true；失败时 errorTextOut 保存 Win32 诊断。
+    bool uninstallDeviceByInstanceId(const QString& instanceIdText, QString* const errorTextOut)
+    {
+        HDEVINFO deviceInfoSet = INVALID_HANDLE_VALUE;
+        SP_DEVINFO_DATA deviceInfoData{};
+        QString findErrorText;
+        if (!findDeviceInfoDataByInstanceId(instanceIdText, &deviceInfoSet, &deviceInfoData, &findErrorText))
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = findErrorText;
+            }
+            return false;
+        }
+
+        SP_REMOVEDEVICE_PARAMS removeParams{};
+        removeParams.ClassInstallHeader.cbSize = sizeof(SP_CLASSINSTALL_HEADER);
+        removeParams.ClassInstallHeader.InstallFunction = DIF_REMOVE;
+        removeParams.Scope = DI_REMOVEDEVICE_GLOBAL;
+        removeParams.HwProfile = 0;
+
+        if (!SetupDiSetClassInstallParamsW(
+            deviceInfoSet,
+            &deviceInfoData,
+            &removeParams.ClassInstallHeader,
+            sizeof(removeParams)))
+        {
+            const DWORD errorCode = GetLastError();
+            SetupDiDestroyDeviceInfoList(deviceInfoSet);
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("SetupDiSetClassInstallParamsW 失败：%1").arg(formatWin32Error(errorCode));
+            }
+            return false;
+        }
+
+        if (!SetupDiCallClassInstaller(DIF_REMOVE, deviceInfoSet, &deviceInfoData))
+        {
+            const DWORD errorCode = GetLastError();
+            SetupDiDestroyDeviceInfoList(deviceInfoSet);
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("SetupDiCallClassInstaller(DIF_REMOVE) 失败：%1").arg(formatWin32Error(errorCode));
+            }
+            return false;
+        }
+
+        SetupDiDestroyDeviceInfoList(deviceInfoSet);
+        if (errorTextOut != nullptr)
+        {
+            errorTextOut->clear();
+        }
+        return true;
+    }
+
+    // normalizeOemInfName 作用：
+    // - 输入：SetupAPI/DEVPROP 返回的 INF 字段；
+    // - 处理：提取文件名并只允许 oem*.inf；
+    // - 返回：可传入 SetupUninstallOEMInfW 的 INF 文件名，非 OEM INF 返回空。
+    QString normalizeOemInfName(const QString& infText)
+    {
+        QString normalizedText = infText.trimmed();
+        if (normalizedText.isEmpty())
+        {
+            return QString();
+        }
+
+        normalizedText.replace(QLatin1Char('/'), QLatin1Char('\\'));
+        const int separatorIndex = normalizedText.lastIndexOf(QLatin1Char('\\'));
+        if (separatorIndex >= 0)
+        {
+            normalizedText = normalizedText.mid(separatorIndex + 1);
+        }
+
+        if (!normalizedText.startsWith(QStringLiteral("oem"), Qt::CaseInsensitive)
+            || !normalizedText.endsWith(QStringLiteral(".inf"), Qt::CaseInsensitive))
+        {
+            return QString();
+        }
+        return normalizedText;
+    }
+
+    // uninstallOemInfPackage 作用：
+    // - 输入：INF 名称或路径；
+    // - 处理：调用 SetupUninstallOEMInfW 删除第三方驱动包；
+    // - 返回：成功时 true；失败时 errorTextOut 保存 Win32 诊断。
+    bool uninstallOemInfPackage(const QString& infText, QString* const errorTextOut)
+    {
+        const QString oemInfName = normalizeOemInfName(infText);
+        if (oemInfName.isEmpty())
+        {
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("当前设备没有可删除的 oem*.inf 驱动包。");
+            }
+            return false;
+        }
+
+        if (!SetupUninstallOEMInfW(
+            reinterpret_cast<LPCWSTR>(oemInfName.utf16()),
+            SUOI_FORCEDELETE,
+            nullptr))
+        {
+            const DWORD errorCode = GetLastError();
+            if (errorTextOut != nullptr)
+            {
+                *errorTextOut = QStringLiteral("SetupUninstallOEMInfW(%1) 失败：%2")
+                    .arg(oemInfName, formatWin32Error(errorCode));
+            }
+            return false;
+        }
+
+        if (errorTextOut != nullptr)
+        {
+            errorTextOut->clear();
+        }
+        return true;
     }
 }
 
@@ -408,6 +932,10 @@ void HardwareDeviceManagerPage::initializeUi()
     m_showAllDevicesCheck->setToolTip(QStringLiteral("关闭时仅枚举当前存在设备；开启后包含历史/非当前设备。"));
     headerLayout->addWidget(m_showAllDevicesCheck, 0);
 
+    m_showProblemOnlyCheck = new QCheckBox(QStringLiteral("只显示异常设备"), this);
+    m_showProblemOnlyCheck->setToolTip(QStringLiteral("仅显示 HasProblem 或 CM_PROB 非 0 的设备节点，并保留其父级路径。"));
+    headerLayout->addWidget(m_showProblemOnlyCheck, 0);
+
     m_searchEdit = new QLineEdit(this);
     m_searchEdit->setPlaceholderText(QStringLiteral("搜索名称、厂商、服务、类、枚举器、Instance ID..."));
     m_searchEdit->setMinimumWidth(220);
@@ -435,6 +963,7 @@ void HardwareDeviceManagerPage::initializeUi()
     m_deviceTree->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_deviceTree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_deviceTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_deviceTree->setContextMenuPolicy(Qt::CustomContextMenu);
     m_deviceTree->setUniformRowHeights(true);
     m_deviceTree->setAlternatingRowColors(true);
     m_deviceTree->header()->setStretchLastSection(false);
@@ -468,6 +997,23 @@ void HardwareDeviceManagerPage::initializeConnections()
         refreshDevicesAsync(true);
     });
 
+    connect(m_showProblemOnlyCheck, &QCheckBox::toggled, this, [this](const bool)
+    {
+        if (m_deviceTree == nullptr)
+        {
+            return;
+        }
+        const QString filterText = m_searchEdit != nullptr ? m_searchEdit->text().trimmed().toLower() : QString();
+        for (int index = 0; index < m_deviceTree->topLevelItemCount(); ++index)
+        {
+            applyFilterToTree(m_deviceTree->topLevelItem(index), filterText);
+        }
+        if (m_showProblemOnlyCheck != nullptr && m_showProblemOnlyCheck->isChecked())
+        {
+            m_deviceTree->expandAll();
+        }
+    });
+
     connect(m_searchEdit, &QLineEdit::textChanged, this, [this](const QString&)
     {
         if (m_deviceTree == nullptr)
@@ -492,6 +1038,24 @@ void HardwareDeviceManagerPage::initializeConnections()
         [this](QTreeWidgetItem* currentItem, QTreeWidgetItem*)
         {
             updateDetailForItem(currentItem);
+        });
+
+    connect(
+        m_deviceTree,
+        &QTreeWidget::itemDoubleClicked,
+        this,
+        [this](QTreeWidgetItem*, int)
+        {
+            showSelectedDeviceProperties();
+        });
+
+    connect(
+        m_deviceTree,
+        &QTreeWidget::customContextMenuRequested,
+        this,
+        [this](const QPoint& localPosition)
+        {
+            showDeviceContextMenu(localPosition);
         });
 }
 
@@ -715,7 +1279,10 @@ bool HardwareDeviceManagerPage::applyFilterToTree(QTreeWidgetItem* itemPointer, 
     const quintptr rawPointer = itemPointer->data(ColumnName, Qt::UserRole).value<quintptr>();
     const DeviceEntry* entryPointer = reinterpret_cast<const DeviceEntry*>(rawPointer);
     const bool selfMatched = entryPointer != nullptr && itemMatchesFilter(*entryPointer, filterText);
-    const bool visible = filterText.isEmpty() || selfMatched || childMatched;
+    const bool problemOnlyEnabled = m_showProblemOnlyCheck != nullptr && m_showProblemOnlyCheck->isChecked();
+    const bool selfProblemMatched = entryPointer != nullptr && (!problemOnlyEnabled || entryPointer->hasProblem);
+    const bool visible = (filterText.isEmpty() || selfMatched || childMatched)
+        && (!problemOnlyEnabled || selfProblemMatched || childMatched);
     itemPointer->setHidden(!visible);
     return visible;
 }
@@ -741,42 +1308,269 @@ void HardwareDeviceManagerPage::updateDetailForItem(QTreeWidgetItem* itemPointer
     }
 
     const DeviceEntry& entry = *entryPointer;
-    const QString detailText = QStringLiteral(
-        "Name: %1\n"
-        "Manufacturer: %2\n"
-        "Service: %3\n"
-        "Class: %4\n"
-        "Enumerator: %5\n"
-        "Installed: %6\n"
-        "Present: %7\n"
-        "HasProblem: %8\n"
-        "Problem: %9\n"
-        "Status: %10\n\n"
-        "Instance ID:\n%11\n\n"
-        "Parent Instance ID:\n%12\n\n"
-        "Class GUID:\n%13\n\n"
-        "Driver:\n%14\n\n"
-        "Location:\n%15\n\n"
-        "Hardware IDs:\n%16\n\n"
-        "Compatible IDs:\n%17\n")
-        .arg(safeDisplayText(entry.nameText))
-        .arg(safeDisplayText(entry.manufacturerText))
-        .arg(safeDisplayText(entry.serviceText))
-        .arg(safeDisplayText(entry.classText))
-        .arg(safeDisplayText(entry.enumeratorText))
-        .arg(safeDisplayText(entry.installedText))
-        .arg(entry.isPresent ? QStringLiteral("Yes") : QStringLiteral("No"))
-        .arg(entry.hasProblem ? QStringLiteral("Yes") : QStringLiteral("No"))
-        .arg(safeDisplayText(entry.problemText))
-        .arg(safeDisplayText(entry.statusText))
-        .arg(safeDisplayText(entry.instanceIdText))
-        .arg(safeDisplayText(entry.parentInstanceIdText))
-        .arg(safeDisplayText(entry.classGuidText))
-        .arg(safeDisplayText(entry.driverText))
-        .arg(safeDisplayText(entry.locationText))
-        .arg(safeDisplayText(entry.hardwareIdsText))
-        .arg(safeDisplayText(entry.compatibleIdsText));
-    m_detailEditor->setText(detailText);
+    m_detailEditor->setText(buildDevicePropertiesText(entry));
+}
+
+const HardwareDeviceManagerPage::DeviceEntry* HardwareDeviceManagerPage::selectedDeviceEntry() const
+{
+    // 输入：当前设备树选择。
+    // 处理：读取 QTreeWidgetItem 上保存的 DeviceEntry 指针；该指针指向 m_deviceList 中的当前快照。
+    // 返回：有有效选择时返回设备快照指针，否则返回 nullptr。
+    if (m_deviceTree == nullptr || m_deviceTree->currentItem() == nullptr)
+    {
+        return nullptr;
+    }
+
+    const quintptr rawPointer = m_deviceTree->currentItem()->data(ColumnName, Qt::UserRole).value<quintptr>();
+    return reinterpret_cast<const DeviceEntry*>(rawPointer);
+}
+
+void HardwareDeviceManagerPage::showDeviceContextMenu(const QPoint& localPosition)
+{
+    // 输入：设备树局部坐标。
+    // 处理：如果点中有效设备节点，则提供设备管理器常用动作；卸载/删除包动作会在执行时再次确认。
+    // 返回值：无。
+    if (m_deviceTree == nullptr)
+    {
+        return;
+    }
+
+    QTreeWidgetItem* itemPointer = m_deviceTree->itemAt(localPosition);
+    if (itemPointer == nullptr)
+    {
+        return;
+    }
+    m_deviceTree->setCurrentItem(itemPointer);
+
+    const DeviceEntry* entryPointer = selectedDeviceEntry();
+    if (entryPointer == nullptr)
+    {
+        return;
+    }
+
+    QMenu menu(this);
+    QAction* propertiesAction = menu.addAction(QStringLiteral("查看属性"));
+    QAction* driverDetailsAction = menu.addAction(QStringLiteral("驱动程序详细信息"));
+    QAction* copyInstanceIdAction = menu.addAction(QStringLiteral("复制 Instance ID"));
+    menu.addSeparator();
+    QAction* uninstallDeviceAction = menu.addAction(QStringLiteral("卸载设备..."));
+    QAction* deleteDriverPackageAction = menu.addAction(QStringLiteral("删除驱动包..."));
+    menu.addSeparator();
+    QAction* refreshAction = menu.addAction(QStringLiteral("刷新"));
+
+    const bool hasOemInf = !normalizeOemInfName(entryPointer->driverInfPathText).isEmpty();
+    deleteDriverPackageAction->setEnabled(hasOemInf);
+    if (!hasOemInf)
+    {
+        deleteDriverPackageAction->setToolTip(QStringLiteral("仅支持删除 oem*.inf 第三方驱动包。"));
+    }
+
+    QAction* selectedAction = menu.exec(m_deviceTree->viewport()->mapToGlobal(localPosition));
+    if (selectedAction == nullptr)
+    {
+        return;
+    }
+    if (selectedAction == propertiesAction)
+    {
+        showSelectedDeviceProperties();
+    }
+    else if (selectedAction == driverDetailsAction)
+    {
+        showSelectedDeviceDriverDetails();
+    }
+    else if (selectedAction == copyInstanceIdAction)
+    {
+        copySelectedDeviceInstanceId();
+    }
+    else if (selectedAction == uninstallDeviceAction)
+    {
+        uninstallSelectedDevice();
+    }
+    else if (selectedAction == deleteDriverPackageAction)
+    {
+        deleteSelectedDeviceDriverPackage();
+    }
+    else if (selectedAction == refreshAction)
+    {
+        refreshDevicesAsync(true);
+    }
+}
+
+void HardwareDeviceManagerPage::showSelectedDeviceProperties()
+{
+    // 输入：当前选中的设备。
+    // 处理：使用当前快照展示设备属性，避免在 UI 线程重新枚举造成卡顿。
+    // 返回值：无。
+    const DeviceEntry* entryPointer = selectedDeviceEntry();
+    if (entryPointer == nullptr)
+    {
+        QMessageBox::information(this, QStringLiteral("设备属性"), QStringLiteral("请先选择一个设备。"));
+        return;
+    }
+
+    showTextDialog(
+        this,
+        QStringLiteral("设备属性 - %1").arg(safeDisplayText(entryPointer->nameText)),
+        buildDevicePropertiesText(*entryPointer));
+}
+
+void HardwareDeviceManagerPage::showSelectedDeviceDriverDetails()
+{
+    // 输入：当前选中的设备。
+    // 处理：展示驱动程序详细信息，包括驱动服务、INF、Provider、Version 和服务镜像路径。
+    // 返回值：无。
+    const DeviceEntry* entryPointer = selectedDeviceEntry();
+    if (entryPointer == nullptr)
+    {
+        QMessageBox::information(this, QStringLiteral("驱动程序详细信息"), QStringLiteral("请先选择一个设备。"));
+        return;
+    }
+
+    showTextDialog(
+        this,
+        QStringLiteral("驱动程序详细信息 - %1").arg(safeDisplayText(entryPointer->nameText)),
+        buildDriverDetailsText(*entryPointer));
+}
+
+void HardwareDeviceManagerPage::copySelectedDeviceInstanceId()
+{
+    // 输入：当前选中的设备。
+    // 处理：复制 Instance ID 到系统剪贴板，并更新状态栏文本。
+    // 返回值：无。
+    const DeviceEntry* entryPointer = selectedDeviceEntry();
+    if (entryPointer == nullptr || entryPointer->instanceIdText.trimmed().isEmpty())
+    {
+        QMessageBox::information(this, QStringLiteral("复制 Instance ID"), QStringLiteral("当前设备没有可复制的 Instance ID。"));
+        return;
+    }
+
+    QClipboard* clipboard = QApplication::clipboard();
+    if (clipboard != nullptr)
+    {
+        clipboard->setText(entryPointer->instanceIdText);
+    }
+    if (m_statusLabel != nullptr)
+    {
+        m_statusLabel->setText(QStringLiteral("已复制 Instance ID：%1").arg(entryPointer->instanceIdText));
+    }
+}
+
+void HardwareDeviceManagerPage::uninstallSelectedDevice()
+{
+    // 输入：当前选中的设备。
+    // 处理：管理员权限检查和二次确认后调用 SetupAPI DIF_REMOVE 卸载设备节点。
+    // 返回值：无。
+    const DeviceEntry* entryPointer = selectedDeviceEntry();
+    if (entryPointer == nullptr)
+    {
+        QMessageBox::information(this, QStringLiteral("卸载设备"), QStringLiteral("请先选择一个设备。"));
+        return;
+    }
+    if (!currentProcessIsElevated())
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("卸载设备"),
+            QStringLiteral("卸载设备需要管理员权限。请以管理员身份运行程序后重试。"));
+        return;
+    }
+
+    const QString confirmText = QStringLiteral(
+        "确定要卸载此设备吗？\n\n"
+        "名称：%1\n"
+        "Instance ID：\n%2\n\n"
+        "该操作可能导致设备暂时不可用，并可能要求重启。")
+        .arg(safeDisplayText(entryPointer->nameText), safeDisplayText(entryPointer->instanceIdText));
+    if (QMessageBox::question(
+        this,
+        QStringLiteral("确认卸载设备"),
+        confirmText,
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No) != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    QString errorText;
+    const bool uninstallOk = uninstallDeviceByInstanceId(entryPointer->instanceIdText, &errorText);
+    if (!uninstallOk)
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("卸载设备失败"),
+            errorText.isEmpty() ? QStringLiteral("未知错误。") : errorText);
+        return;
+    }
+
+    QMessageBox::information(
+        this,
+        QStringLiteral("卸载设备"),
+        QStringLiteral("设备卸载请求已提交。若设备仍显示或状态未变化，请刷新或重启系统。"));
+    refreshDevicesAsync(true);
+}
+
+void HardwareDeviceManagerPage::deleteSelectedDeviceDriverPackage()
+{
+    // 输入：当前选中的设备。
+    // 处理：管理员权限检查和二次确认后删除 oem*.inf 驱动包。
+    // 返回值：无。
+    const DeviceEntry* entryPointer = selectedDeviceEntry();
+    if (entryPointer == nullptr)
+    {
+        QMessageBox::information(this, QStringLiteral("删除驱动包"), QStringLiteral("请先选择一个设备。"));
+        return;
+    }
+    if (!currentProcessIsElevated())
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("删除驱动包"),
+            QStringLiteral("删除驱动包需要管理员权限。请以管理员身份运行程序后重试。"));
+        return;
+    }
+
+    const QString oemInfName = normalizeOemInfName(entryPointer->driverInfPathText);
+    if (oemInfName.isEmpty())
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("删除驱动包"),
+            QStringLiteral("当前设备没有可删除的 oem*.inf 第三方驱动包。"));
+        return;
+    }
+
+    const QString confirmText = QStringLiteral(
+        "确定要从 Driver Store 删除此驱动包吗？\n\n"
+        "设备：%1\n"
+        "INF：%2\n\n"
+        "建议先卸载设备，再删除驱动包。该操作可能影响同包驱动的其它设备。")
+        .arg(safeDisplayText(entryPointer->nameText), oemInfName);
+    if (QMessageBox::question(
+        this,
+        QStringLiteral("确认删除驱动包"),
+        confirmText,
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No) != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    QString errorText;
+    const bool deleteOk = uninstallOemInfPackage(oemInfName, &errorText);
+    if (!deleteOk)
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("删除驱动包失败"),
+            errorText.isEmpty() ? QStringLiteral("未知错误。") : errorText);
+        return;
+    }
+
+    QMessageBox::information(
+        this,
+        QStringLiteral("删除驱动包"),
+        QStringLiteral("驱动包已删除：%1").arg(oemInfName));
+    refreshDevicesAsync(true);
 }
 
 std::vector<HardwareDeviceManagerPage::DeviceEntry>
@@ -815,16 +1609,25 @@ HardwareDeviceManagerPage::enumerateDevicesSnapshot(const bool includeAllDevices
         entry.parentInstanceIdText = propertyString(deviceInfoSet, &deviceInfoData, DEVPKEY_Device_Parent);
         entry.classGuidText = propertyGuidText(deviceInfoSet, &deviceInfoData, DEVPKEY_Device_ClassGuid);
         entry.driverText = propertyString(deviceInfoSet, &deviceInfoData, DEVPKEY_Device_Driver);
-        const QString driverInfText = propertyString(deviceInfoSet, &deviceInfoData, DEVPKEY_Device_DriverInfPath);
-        if (!driverInfText.isEmpty())
+        if (entry.driverText.isEmpty())
+        {
+            entry.driverText = registryPropertyString(deviceInfoSet, &deviceInfoData, SPDRP_DRIVER);
+        }
+        entry.driverInfPathText = propertyString(deviceInfoSet, &deviceInfoData, DEVPKEY_Device_DriverInfPath);
+        entry.driverProviderText = propertyString(deviceInfoSet, &deviceInfoData, DEVPKEY_Device_DriverProvider);
+        entry.driverVersionText = propertyString(deviceInfoSet, &deviceInfoData, DEVPKEY_Device_DriverVersion);
+        entry.driverDateText = propertyFileTimeText(deviceInfoSet, &deviceInfoData, DEVPKEY_Device_DriverDate);
+        entry.driverRegistryPathText = driverRegistryPathFromClassKey(entry.classGuidText, entry.driverText);
+        if (!entry.driverInfPathText.isEmpty())
         {
             entry.driverText = entry.driverText.isEmpty()
-                ? driverInfText
-                : QStringLiteral("%1 | INF=%2").arg(entry.driverText, driverInfText);
+                ? entry.driverInfPathText
+                : QStringLiteral("%1 | INF=%2").arg(entry.driverText, entry.driverInfPathText);
         }
         entry.locationText = propertyString(deviceInfoSet, &deviceInfoData, DEVPKEY_Device_LocationInfo);
         entry.hardwareIdsText = propertyStringList(deviceInfoSet, &deviceInfoData, DEVPKEY_Device_HardwareIds);
         entry.compatibleIdsText = propertyStringList(deviceInfoSet, &deviceInfoData, DEVPKEY_Device_CompatibleIds);
+        entry.serviceImagePathText = serviceImagePath(entry.serviceText);
         entry.isPresent = propertyBool(deviceInfoSet, &deviceInfoData, DEVPKEY_Device_IsPresent);
         if (!includeAllDevices)
         {

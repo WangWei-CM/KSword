@@ -154,9 +154,17 @@ namespace process_detail_window_internal
             "  color:%2;"
             "  border:1px solid %3;"
             "}"
+            "QWidget#ProcessDetailWindowRoot QMenu::item{"
+            "  padding:5px 24px 5px 24px;"
+            "  background:transparent;"
+            "}"
             "QWidget#ProcessDetailWindowRoot QMenu::item:selected{"
             "  background:%5;"
             "  color:#FFFFFF;"
+            "}"
+            "QWidget#ProcessDetailWindowRoot QMenu::item:disabled{"
+            "  color:%6;"
+            "  background:%4;"
             "}"
             "QWidget#ProcessDetailWindowRoot QMenu::separator{"
             "  height:1px;"
@@ -199,6 +207,82 @@ namespace process_detail_window_internal
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(KswordTheme::PrimaryBlueSubtleHex());
+    }
+
+    QString buildProcessDetailMenuStyle()
+    {
+        // 菜单样式必须显式声明背景/文字/选中/禁用态，避免透明父控件导致黑底黑字。
+        return QStringLiteral(
+            "QMenu{"
+            "  background:%1;"
+            "  color:%2;"
+            "  border:1px solid %3;"
+            "  padding:4px;"
+            "}"
+            "QMenu::item{"
+            "  padding:5px 24px 5px 24px;"
+            "  background:transparent;"
+            "}"
+            "QMenu::item:selected{"
+            "  background:%4;"
+            "  color:#FFFFFF;"
+            "}"
+            "QMenu::item:disabled{"
+            "  color:%5;"
+            "  background:%1;"
+            "}"
+            "QMenu::separator{"
+            "  height:1px;"
+            "  background:%3;"
+            "  margin:3px 6px;"
+            "}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::TextSecondaryHex());
+    }
+
+    QIcon buildProcessDetailR0ActionIcon(const QString& iconPath)
+    {
+        // R0 图标构造：
+        // - 先加载普通业务图标；
+        // - 再叠加 qrc 中的 Kernel.png，满足 R0 入口统一视觉标识要求。
+        constexpr QSize detailR0IconSize(18, 18);
+        QPixmap iconPixmap(iconPath);
+        if (!iconPixmap.isNull())
+        {
+            iconPixmap = iconPixmap.scaled(
+                detailR0IconSize,
+                Qt::KeepAspectRatio,
+                Qt::SmoothTransformation);
+        }
+        if (iconPixmap.isNull())
+        {
+            iconPixmap = QPixmap(detailR0IconSize);
+            iconPixmap.fill(Qt::transparent);
+        }
+
+        const QPixmap kernelPixmap(QStringLiteral(":/Image/kernel_badge.png"));
+        if (!kernelPixmap.isNull())
+        {
+            const int badgeSide = std::max(8, std::min(iconPixmap.width(), iconPixmap.height()) / 2);
+            const QPixmap scaledBadge = kernelPixmap.scaled(
+                badgeSide,
+                badgeSide,
+                Qt::KeepAspectRatio,
+                Qt::SmoothTransformation);
+
+            QPainter painter(&iconPixmap);
+            painter.setRenderHint(QPainter::Antialiasing, true);
+            painter.drawPixmap(
+                iconPixmap.width() - scaledBadge.width(),
+                iconPixmap.height() - scaledBadge.height(),
+                scaledBadge);
+            painter.end();
+        }
+
+        return QIcon(iconPixmap);
     }
 
     QString buildStateLabelStyle(const QColor& textColor, const int fontWeight)

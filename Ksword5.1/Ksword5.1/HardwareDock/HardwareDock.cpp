@@ -86,6 +86,15 @@ namespace
     // - 实际定义位于同命名空间后半段。
     QString queryPowerShellTextSync(const QString& scriptText, int timeoutMs);
 
+    // CPU core chart compact layout constants:
+    // - Input: used by the CPU utilization page grid and each per-core chart cell.
+    // - Processing: reduce the grid gap and per-cell chrome so dense multi-core CPUs waste less blank space.
+    // - Return behavior: constants only; no runtime return value.
+    constexpr int kCpuCoreChartGridSpacingPx = 2;
+    constexpr int kCpuCoreChartCellMarginPx = 2;
+    constexpr int kCpuCoreChartInnerSpacingPx = 1;
+    constexpr int kCpuCoreChartChromeReservePx = 5;
+
     // buildStatusColor 作用：
     // - 深浅色模式下返回统一可读的次级文本颜色。
     QColor buildStatusColor()
@@ -1996,7 +2005,7 @@ void HardwareDock::adjustUtilizationChartHeights()
                 const int titleReserveHeight = chartEntry.titleLabel != nullptr
                     ? std::min(18, std::max(0, chartEntry.titleLabel->sizeHint().height()))
                     : 0;
-                const int chartHeight = std::max(1, cellHeight - titleReserveHeight - 10);
+                const int chartHeight = std::max(1, cellHeight - titleReserveHeight - kCpuCoreChartChromeReservePx);
                 applyFixedHeightIfChanged(chartEntry.chartView, chartHeight);
             }
         }
@@ -2248,8 +2257,8 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     appendTransparentBackgroundStyle(m_coreChartHostWidget);
     m_coreChartGridLayout = new QGridLayout(m_coreChartHostWidget);
     m_coreChartGridLayout->setContentsMargins(0, 0, 0, 0);
-    m_coreChartGridLayout->setHorizontalSpacing(6);
-    m_coreChartGridLayout->setVerticalSpacing(6);
+    m_coreChartGridLayout->setHorizontalSpacing(kCpuCoreChartGridSpacingPx);
+    m_coreChartGridLayout->setVerticalSpacing(kCpuCoreChartGridSpacingPx);
     // coreChartPlaceholderLabel 用途：首帧前暂时代替大量 QChartView，避免构造硬件页时一次性创建每核心图表。
     QLabel* coreChartPlaceholderLabel = new QLabel(QStringLiteral("CPU 核心图将在首帧后加载..."), m_coreChartHostWidget);
     coreChartPlaceholderLabel->setAlignment(Qt::AlignCenter);
@@ -2937,8 +2946,12 @@ void HardwareDock::initializeCoreCharts()
         configureCompressibleWidget(chartEntry.containerWidget, QSizePolicy::Expanding, QSizePolicy::Expanding);
         appendTransparentBackgroundStyle(chartEntry.containerWidget);
         QVBoxLayout* containerLayout = new QVBoxLayout(chartEntry.containerWidget);
-        containerLayout->setContentsMargins(4, 4, 4, 4);
-        containerLayout->setSpacing(2);
+        containerLayout->setContentsMargins(
+            kCpuCoreChartCellMarginPx,
+            kCpuCoreChartCellMarginPx,
+            kCpuCoreChartCellMarginPx,
+            kCpuCoreChartCellMarginPx);
+        containerLayout->setSpacing(kCpuCoreChartInnerSpacingPx);
 
         chartEntry.titleLabel = new QLabel(
             QStringLiteral("CPU %1").arg(coreIndex),

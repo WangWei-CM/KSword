@@ -3,6 +3,7 @@
 #include "../UI/FlatTableModel.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <utility>
 
 #include <QAction>
@@ -17,6 +18,7 @@
 #include <QInputDialog>
 #include <QStyledItemDelegate>
 #include <QItemSelectionModel>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
@@ -25,6 +27,7 @@
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSize>
+#include <QSpinBox>
 #include <QStringList>
 #include <QTableView>
 #include <QTimer>
@@ -110,6 +113,9 @@ namespace
     // DefaultButtonIconSize：日志面板按钮与菜单图标默认尺寸。
     constexpr QSize DefaultButtonIconSize(16, 16);
     constexpr int ActionButtonExtent = 28; // ActionButtonExtent：顶部图标按钮边长（像素）。
+    constexpr int DefaultVisibleLogLimit = 200;  // 默认只把最近 200 条日志渲染到 UI，降低 Dock 刷新压力。
+    constexpr int MinVisibleLogLimit = 1;        // 最小允许显示 1 条，避免“条数”控件出现不直观的隐藏下限。
+    constexpr int MaxVisibleLogLimit = 10000;    // 最大值保留诊断弹性，同时限制极端行数拖垮表格绘制。
 
     // createBlueThemedIcon 作用：
     // - 把 qrc 中的单色 SVG 图标重新着色为主题蓝色；
@@ -213,6 +219,37 @@ namespace
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::BorderHex());
     }
+
+    // buildBlueInputStyleSheet 作用：
+    // - 生成日志工具栏里数字输入框/标签的主题样式；
+    // - 显式指定背景、前景和 hover/focus 边框，避免深色模式下继承到浅色白块；
+    // - 返回值：可直接应用到 QSpinBox/QLabel 的 QSS 字符串。
+    QString buildBlueInputStyleSheet()
+    {
+        return QStringLiteral(
+            "QSpinBox {"
+            "  color: %3;"
+            "  background: %2;"
+            "  border: 1px solid %1;"
+            "  border-radius: 3px;"
+            "  padding: 2px 6px;"
+            "}"
+            "QSpinBox:hover, QSpinBox:focus {"
+            "  border: 1px solid %4;"
+            "}"
+            "QSpinBox::up-button, QSpinBox::down-button {"
+            "  width: 14px;"
+            "  border: none;"
+            "  background: transparent;"
+            "}"
+            "QLabel {"
+            "  color: %3;"
+            "}")
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::PrimaryBlueHex);
+    }
 }
 
 LogDockWidget::LogDockWidget(QWidget* parent)
@@ -251,6 +288,17 @@ void LogDockWidget::initializeUi()
     m_fatalCheck = new QCheckBox("Fatal", this);
     m_detailCheck = new QCheckBox("详细信息", this);
     m_autoScrollCheck = new QCheckBox("保持滚动到最底端", this);
+    m_visibleLimitSpin = new QSpinBox(this);
+
+    // 最近日志条数：
+    // - 只限制 QTableView 中实际渲染的行数，避免日志风暴时图形界面被成千上万行拖死；
+    // - 不截断 KswordARKEventEntry 内部历史，因此用户把 200 改成 1000 后会立刻从旧日志中补齐。
+    m_visibleLimitSpin->setRange(MinVisibleLogLimit, MaxVisibleLogLimit);
+    m_visibleLimitSpin->setSingleStep(100);
+    m_visibleLimitSpin->setValue(DefaultVisibleLogLimit);
+    m_visibleLimitSpin->setSuffix(QStringLiteral(" 条"));
+    m_visibleLimitSpin->setKeyboardTracking(false);
+    m_visibleLimitSpin->setMaximumWidth(96);
 
     // 按钮均设置图标与提示，满足“尽量用图标 + 悬停说明功能”。
     m_exportButton->setToolTip("导出全部日志到 .txt 文件");
@@ -258,6 +306,7 @@ void LogDockWidget::initializeUi()
     m_copyVisibleButton->setToolTip("复制当前可见列表内容（支持追踪过滤状态）");
     m_detailCheck->setToolTip("显示文件列和函数列");
     m_autoScrollCheck->setToolTip("开启后表格刷新将自动滚动到最后一行");
+    m_visibleLimitSpin->setToolTip("仅限制界面显示的最近日志条数；内部日志仍保留全量，调大后会立即显示已记录的旧日志。");
 
     // 图标尺寸与按钮尺寸统一，保证工具栏视觉紧凑并保持纯图标风格。
     m_exportButton->setIconSize(DefaultButtonIconSize);
@@ -286,6 +335,7 @@ void LogDockWidget::initializeUi()
     m_fatalCheck->setStyleSheet(blueCheckBoxStyle);
     m_detailCheck->setStyleSheet(blueCheckBoxStyle);
     m_autoScrollCheck->setStyleSheet(blueCheckBoxStyle);
+    m_visibleLimitSpin->setStyleSheet(buildBlueInputStyleSheet());
 
     // Debug 默认关闭：避免日志输出 Dock 首次打开时被调试级别噪声淹没。
     m_debugCheck->setChecked(false);
@@ -304,6 +354,13 @@ void LogDockWidget::initializeUi()
     m_actionLayout->addWidget(m_fatalCheck);
     m_actionLayout->addWidget(m_detailCheck);
     m_actionLayout->addWidget(m_autoScrollCheck);
+    m_actionLayout->addSpacing(8);
+
+    QLabel* visibleLimitLabel = new QLabel(QStringLiteral("展示最近日志条数:"), this);
+    visibleLimitLabel->setToolTip(m_visibleLimitSpin->toolTip());
+    visibleLimitLabel->setStyleSheet(buildBlueInputStyleSheet());
+    m_actionLayout->addWidget(visibleLimitLabel);
+    m_actionLayout->addWidget(m_visibleLimitSpin);
     m_actionLayout->addStretch(1);
 
     // 第三层：日志表格，要求不可编辑且占满 Dock。
@@ -390,6 +447,11 @@ void LogDockWidget::initializeConnections()
     connect(m_warnCheck, &QCheckBox::toggled, this, [this]() { refreshTableFromManager(true); });
     connect(m_errorCheck, &QCheckBox::toggled, this, [this]() { refreshTableFromManager(true); });
     connect(m_fatalCheck, &QCheckBox::toggled, this, [this]() { refreshTableFromManager(true); });
+    connect(m_visibleLimitSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](const int) {
+        // 用户调大显示条数时必须立即从内部全量历史里补旧日志；
+        // 因此这里强制刷新，即使日志 revision 没有变化也要重建可见快照。
+        refreshTableFromManager(true);
+    });
 
     // 右键菜单连接。
     connect(m_logTable, &QWidget::customContextMenuRequested, this, [this](const QPoint& position) {
@@ -432,29 +494,29 @@ void LogDockWidget::refreshTableFromManager(const bool forceRefresh)
     }
     m_lastRevision = currentRevision;
 
-    // 从全局日志管理器读取完整快照，然后在 UI 层应用筛选。
-    const std::vector<kEvent> allEvents = KswordARKEventEntry.Snapshot();
-    std::vector<kEvent> filteredEvents;
-    filteredEvents.reserve(allEvents.size());
-
-    for (const kEvent& singleEvent : allEvents)
+    // 从全局日志管理器读取“最近 N 条匹配日志”而不是完整快照：
+    // - KswordARKEventEntry 内部仍然保留全量历史，导出/清空行为不变；
+    // - UI 只拿当前等级/GUID 筛选后的最近 visibleLogLimit() 条，避免表格模型和行高计算被海量日志拖死；
+    // - 用户把 200 调大到 1000 时，这里会重新扫描内部历史并立刻补齐之前已经记录的日志。
+    std::uint32_t enabledLevelMask = 0;
+    for (const kLogLevel level : {
+        kLogLevel::Debug,
+        kLogLevel::Info,
+        kLogLevel::Warn,
+        kLogLevel::Error,
+        kLogLevel::Fatal })
     {
-        // 追踪模式开启时，仅显示同 GUID 事件。
-        if (m_isTracking && !IsSameGuid(singleEvent.guid, m_trackingGuid))
+        if (isLevelEnabledByCheckbox(level))
         {
-            continue;
+            enabledLevelMask |= (std::uint32_t{ 1 } << static_cast<unsigned int>(level));
         }
-
-        // 等级筛选由复选框控制。
-        if (!isLevelEnabledByCheckbox(singleEvent.level))
-        {
-            continue;
-        }
-
-        filteredEvents.push_back(singleEvent);
     }
 
     // filteredEvents 之后交给模型持有；复制与追踪逻辑通过 visibleEvents()/visibleEventAt() 读取模型快照。
+    std::vector<kEvent> filteredEvents = KswordARKEventEntry.SnapshotRecent(
+        static_cast<std::size_t>(visibleLogLimit()),
+        enabledLevelMask,
+        m_isTracking ? &m_trackingGuid : nullptr);
     rebuildTable(std::move(filteredEvents));
 }
 
@@ -482,6 +544,18 @@ void LogDockWidget::rebuildTable(std::vector<kEvent> filteredEvents)
     {
         m_logTable->verticalScrollBar()->setValue(previousScrollValue);
     }
+}
+
+int LogDockWidget::visibleLogLimit() const
+{
+    // UI 构造早期或单元测试环境下数字框可能为空；此时回退默认值。
+    // 返回值只用于限制界面渲染数量，不参与 KswordARKEventEntry 的内部存储裁剪。
+    if (m_visibleLimitSpin == nullptr)
+    {
+        return DefaultVisibleLogLimit;
+    }
+
+    return std::clamp(m_visibleLimitSpin->value(), MinVisibleLogLimit, MaxVisibleLogLimit);
 }
 
 QVariant LogDockWidget::resolveLogTableData(const kEvent& logItem, const int column, const int role) const

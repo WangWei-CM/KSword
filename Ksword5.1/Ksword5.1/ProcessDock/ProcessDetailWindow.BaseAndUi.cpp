@@ -1082,15 +1082,16 @@ void ProcessDetailWindow::initializeActionTab()
     m_actionLayout->setContentsMargins(6, 6, 6, 6);
     m_actionLayout->setSpacing(10);
 
-    // buildCompactActionButton 作用：
-    // - 为操作页生成统一尺寸的紧凑按钮；
-    // - 简单语义按钮只保留图标，把含义放到 tooltip，减少“又宽又丑”的占位。
-    const auto buildCompactActionButton =
-        [](const QString& iconPath, const QString& toolTipText, QWidget* parentWidget) -> QPushButton*
+    // buildTextActionButton 作用：
+    // - 为操作页生成统一文字按钮；
+    // - 输入 buttonText 作为用户直接可见的按钮含义，toolTipText 作为补充解释；
+    // - 返回 QPushButton，不使用图标-only 形态，避免操作面板含义不直观。
+    const auto buildTextActionButton =
+        [](const QString& buttonText, const QString& toolTipText, QWidget* parentWidget) -> QPushButton*
     {
-        QPushButton* actionButton = new QPushButton(QIcon(iconPath), QString(), parentWidget);
-        actionButton->setFixedSize(34, 34);
-        actionButton->setIconSize(QSize(16, 16));
+        QPushButton* actionButton = new QPushButton(buttonText, parentWidget);
+        actionButton->setMinimumHeight(32);
+        actionButton->setMinimumWidth(72);
         actionButton->setToolTip(toolTipText);
         return actionButton;
     };
@@ -1104,28 +1105,29 @@ void ProcessDetailWindow::initializeActionTab()
     controlLayout->setVerticalSpacing(8);
 
     m_terminateActionCombo = new QComboBox(controlGroup);
+    m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "结束进程(组合方法链)", 2);
     m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "TerminateProcess", 0);
     m_terminateActionCombo->addItem(QIcon(":/Icon/process_terminate.svg"), "TerminateThread(全部线程)", 1);
     m_terminateActionCombo->setToolTip("选择结束当前进程的执行方案");
-    m_executeTerminateActionButton = buildCompactActionButton(
-        QStringLiteral(":/Icon/process_terminate.svg"),
+    m_executeTerminateActionButton = buildTextActionButton(
+        QStringLiteral("执行"),
         QStringLiteral("执行当前选中的结束方案"),
         controlGroup);
 
-    m_suspendProcessButton = buildCompactActionButton(
-        QStringLiteral(":/Icon/process_suspend.svg"),
+    m_suspendProcessButton = buildTextActionButton(
+        QStringLiteral("挂起"),
         QStringLiteral("挂起当前进程"),
         controlGroup);
-    m_resumeProcessButton = buildCompactActionButton(
-        QStringLiteral(":/Icon/process_resume.svg"),
+    m_resumeProcessButton = buildTextActionButton(
+        QStringLiteral("恢复"),
         QStringLiteral("恢复当前进程"),
         controlGroup);
-    m_setCriticalButton = buildCompactActionButton(
-        QStringLiteral(":/Icon/process_critical.svg"),
+    m_setCriticalButton = buildTextActionButton(
+        QStringLiteral("设为关键"),
         QStringLiteral("把当前进程设为关键进程"),
         controlGroup);
-    m_clearCriticalButton = buildCompactActionButton(
-        QStringLiteral(":/Icon/process_uncritical.svg"),
+    m_clearCriticalButton = buildTextActionButton(
+        QStringLiteral("取消关键"),
         QStringLiteral("取消当前进程的关键进程标记"),
         controlGroup);
     m_priorityCombo = new QComboBox(controlGroup);
@@ -1137,8 +1139,8 @@ void ProcessDetailWindow::initializeActionTab()
     m_priorityCombo->addItem("Realtime", 5);
     m_priorityCombo->setCurrentIndex(2);
     m_priorityCombo->setToolTip("选择当前进程的新优先级");
-    m_applyPriorityButton = buildCompactActionButton(
-        QStringLiteral(":/Icon/process_priority.svg"),
+    m_applyPriorityButton = buildTextActionButton(
+        QStringLiteral("应用"),
         QStringLiteral("应用当前选中的进程优先级"),
         controlGroup);
 
@@ -1156,9 +1158,93 @@ void ProcessDetailWindow::initializeActionTab()
     controlLayout->addWidget(m_applyPriorityButton, 3, 4);
     m_actionLayout->addWidget(controlGroup);
 
+    // 补充操作组：
+    // - 与进程列表右键菜单对齐，把详情页原先遗漏的效率模式、PPL 刷新和 R0 能力放进来；
+    // - R0 按钮统一叠加 Kernel.png 角标，菜单弹出项在点击时动态生成。
+    QGroupBox* extendedActionGroup = new QGroupBox(QStringLiteral("右键菜单同步能力"), m_actionTab);
+    QGridLayout* extendedActionLayout = new QGridLayout(extendedActionGroup);
+    extendedActionLayout->setHorizontalSpacing(8);
+    extendedActionLayout->setVerticalSpacing(8);
+
+    m_openProcessFolderButton = buildTextActionButton(
+        QStringLiteral("打开目录"),
+        QStringLiteral("打开当前进程所在目录"),
+        extendedActionGroup);
+    m_refreshPplProtectionButton = buildTextActionButton(
+        QStringLiteral("刷新PPL"),
+        QStringLiteral("手动刷新当前进程 PPL 保护级别"),
+        extendedActionGroup);
+    m_enableEfficiencyModeButton = buildTextActionButton(
+        QStringLiteral("开效率"),
+        QStringLiteral("开启当前进程效率模式（绿叶）"),
+        extendedActionGroup);
+    m_disableEfficiencyModeButton = buildTextActionButton(
+        QStringLiteral("关效率"),
+        QStringLiteral("关闭当前进程效率模式"),
+        extendedActionGroup);
+
+    // buildR0MenuButton 作用：
+    // - 为 R0 功能创建“文字 + Kernel.png 角标”的按钮；
+    // - 输入 buttonText 为可见文字，iconPath 用于生成 R0 角标图标，toolTipText 为补充说明；
+    // - 返回按钮对象，调用方负责接入布局和 clicked 处理。
+    const auto buildR0MenuButton =
+        [](const QString& buttonText, const QString& iconPath, const QString& toolTipText, QWidget* parentWidget) -> QPushButton*
+    {
+        QPushButton* actionButton = new QPushButton(
+            buildProcessDetailR0ActionIcon(iconPath),
+            buttonText,
+            parentWidget);
+        actionButton->setMinimumHeight(32);
+        actionButton->setMinimumWidth(92);
+        actionButton->setIconSize(QSize(16, 16));
+        actionButton->setToolTip(toolTipText);
+        return actionButton;
+    };
+
+    m_r0TerminateProcessButton = buildR0MenuButton(
+        QStringLiteral("R0结束"),
+        QStringLiteral(":/Icon/process_terminate.svg"),
+        QStringLiteral("通过 R0 驱动结束当前进程"),
+        extendedActionGroup);
+    m_r0SuspendProcessButton = buildR0MenuButton(
+        QStringLiteral("R0挂起"),
+        QStringLiteral(":/Icon/process_suspend.svg"),
+        QStringLiteral("通过 R0 驱动挂起当前进程"),
+        extendedActionGroup);
+    m_r0SetPplButton = buildR0MenuButton(
+        QStringLiteral("R0 PPL"),
+        QStringLiteral(":/Icon/process_critical.svg"),
+        QStringLiteral("通过 R0 驱动设置当前进程 PPL 层级"),
+        extendedActionGroup);
+    m_r0VisibilityButton = buildR0MenuButton(
+        QStringLiteral("R0隐藏"),
+        QStringLiteral(":/Icon/process_details.svg"),
+        QStringLiteral("通过 R0 驱动隐藏/恢复当前进程"),
+        extendedActionGroup);
+    m_r0DangerFlagsButton = buildR0MenuButton(
+        QStringLiteral("R0危险"),
+        QStringLiteral(":/Icon/process_uncritical.svg"),
+        QStringLiteral("R0 BreakOnTermination / APC / DKOM 高风险操作"),
+        extendedActionGroup);
+
+    extendedActionLayout->addWidget(new QLabel(QStringLiteral("辅助"), extendedActionGroup), 0, 0);
+    extendedActionLayout->addWidget(m_openProcessFolderButton, 0, 1);
+    extendedActionLayout->addWidget(m_refreshPplProtectionButton, 0, 2);
+    extendedActionLayout->addWidget(new QLabel(QStringLiteral("效率模式"), extendedActionGroup), 1, 0);
+    extendedActionLayout->addWidget(m_enableEfficiencyModeButton, 1, 1);
+    extendedActionLayout->addWidget(m_disableEfficiencyModeButton, 1, 2);
+    extendedActionLayout->addWidget(new QLabel(QStringLiteral("R0"), extendedActionGroup), 2, 0);
+    extendedActionLayout->addWidget(m_r0TerminateProcessButton, 2, 1);
+    extendedActionLayout->addWidget(m_r0SuspendProcessButton, 2, 2);
+    extendedActionLayout->addWidget(m_r0SetPplButton, 2, 3);
+    extendedActionLayout->addWidget(m_r0VisibilityButton, 2, 4);
+    extendedActionLayout->addWidget(m_r0DangerFlagsButton, 2, 5);
+    extendedActionLayout->setColumnStretch(6, 1);
+    m_actionLayout->addWidget(extendedActionGroup);
+
     // 注入与载入组：
     // - 把 DLL / Shellcode 两套操作收成统一两行；
-    // - 浏览与执行按钮改成图标按钮，减少横向占用。
+    // - 浏览与执行按钮使用文字按钮，保证操作面板不再依赖图标表达含义。
     QGroupBox* injectGroup = new QGroupBox("注入与载入", m_actionTab);
     QGridLayout* injectLayout = new QGridLayout(injectGroup);
     injectLayout->setHorizontalSpacing(8);
@@ -1166,23 +1252,23 @@ void ProcessDetailWindow::initializeActionTab()
 
     m_dllPathLineEdit = new QLineEdit(injectGroup);
     m_dllPathLineEdit->setPlaceholderText("请选择要注入的 DLL 路径");
-    m_browseDllButton = buildCompactActionButton(
-        QStringLiteral(":/Icon/process_open_folder.svg"),
+    m_browseDllButton = buildTextActionButton(
+        QStringLiteral("浏览"),
         QStringLiteral("浏览并选择 DLL 文件"),
         injectGroup);
-    m_injectDllButton = buildCompactActionButton(
-        QStringLiteral(":/Icon/process_start.svg"),
+    m_injectDllButton = buildTextActionButton(
+        QStringLiteral("注入"),
         QStringLiteral("执行 DLL 注入"),
         injectGroup);
 
     m_shellcodePathLineEdit = new QLineEdit(injectGroup);
     m_shellcodePathLineEdit->setPlaceholderText("请选择原始 shellcode 二进制文件");
-    m_browseShellcodeButton = buildCompactActionButton(
-        QStringLiteral(":/Icon/process_open_folder.svg"),
+    m_browseShellcodeButton = buildTextActionButton(
+        QStringLiteral("浏览"),
         QStringLiteral("浏览并选择 shellcode 文件"),
         injectGroup);
-    m_injectShellcodeButton = buildCompactActionButton(
-        QStringLiteral(":/Icon/process_start.svg"),
+    m_injectShellcodeButton = buildTextActionButton(
+        QStringLiteral("执行"),
         QStringLiteral("执行 shellcode 注入"),
         injectGroup);
 
@@ -1238,6 +1324,15 @@ void ProcessDetailWindow::initializeActionTab()
         m_setCriticalButton,
         m_clearCriticalButton,
         m_applyPriorityButton,
+        m_openProcessFolderButton,
+        m_refreshPplProtectionButton,
+        m_enableEfficiencyModeButton,
+        m_disableEfficiencyModeButton,
+        m_r0TerminateProcessButton,
+        m_r0SuspendProcessButton,
+        m_r0SetPplButton,
+        m_r0VisibilityButton,
+        m_r0DangerFlagsButton,
         m_browseDllButton,
         m_injectDllButton,
         m_browseShellcodeButton,
@@ -1991,6 +2086,182 @@ void ProcessDetailWindow::initializeConnections()
     connect(m_setCriticalButton, &QPushButton::clicked, this, [this]() { executeSetCriticalAction(true); });
     connect(m_clearCriticalButton, &QPushButton::clicked, this, [this]() { executeSetCriticalAction(false); });
     connect(m_applyPriorityButton, &QPushButton::clicked, this, [this]() { executeSetPriorityAction(); });
+    connect(m_openProcessFolderButton, &QPushButton::clicked, this, [this]() { executeOpenProcessFolderAction(); });
+    connect(m_refreshPplProtectionButton, &QPushButton::clicked, this, [this]() { executeRefreshPplProtectionLevelAction(); });
+    connect(m_enableEfficiencyModeButton, &QPushButton::clicked, this, [this]() { executeSetEfficiencyModeAction(true); });
+    connect(m_disableEfficiencyModeButton, &QPushButton::clicked, this, [this]() { executeSetEfficiencyModeAction(false); });
+    connect(m_r0TerminateProcessButton, &QPushButton::clicked, this, [this]() { executeR0TerminateProcessAction(); });
+    connect(m_r0SuspendProcessButton, &QPushButton::clicked, this, [this]() { executeR0SuspendProcessAction(); });
+
+    // R0 PPL 菜单：
+    // - 菜单内容与进程列表右键菜单保持一致；
+    // - 每次点击按钮时动态创建局部 QMenu，避免窗口生命周期内持有陈旧 QAction。
+    connect(m_r0SetPplButton, &QPushButton::clicked, this, [this]() {
+        QMenu r0PplMenu(this);
+        r0PplMenu.setStyleSheet(buildProcessDetailMenuStyle());
+        QAction* noneAction = r0PplMenu.addAction(
+            buildProcessDetailR0ActionIcon(QStringLiteral(":/Icon/process_critical.svg")),
+            QStringLiteral("关闭PPL保护 (0x00)"));
+        noneAction->setData(0x00U);
+        r0PplMenu.addSeparator();
+
+        struct PplSignerPreset
+        {
+            int signerValue = 0;             // signerValue：PPL Signer 数值。
+            const char* signerName = "";    // signerName：菜单展示名称。
+            const char* meaningText = "";   // meaningText：菜单展示释义。
+            bool supportedByDriver = false; // supportedByDriver：当前驱动是否支持。
+        };
+        const PplSignerPreset presetList[] =
+        {
+            { 1, "Authenticode", "签名代码（Authenticode）", true },
+            { 2, "CodeGen", "动态代码生成", true },
+            { 3, "Antimalware", "反恶意软件", true },
+            { 4, "Lsa", "本地安全机构", true },
+            { 5, "Windows", "Windows 组件", true },
+            { 6, "WinTcb", "可信计算基础（最高）", true },
+            { 7, "WinSystem", "系统 signer（当前驱动未启用）", false }
+        };
+        for (const PplSignerPreset& presetEntry : presetList)
+        {
+            const unsigned int protectionLevel =
+                (static_cast<unsigned int>(presetEntry.signerValue) << 4U) | 0x01U;
+            const QString protectionLevelHexText = QStringLiteral("0x%1")
+                .arg(protectionLevel, 2, 16, QChar('0'))
+                .toUpper();
+            QAction* presetAction = r0PplMenu.addAction(
+                buildProcessDetailR0ActionIcon(QStringLiteral(":/Icon/process_critical.svg")),
+                QStringLiteral("%1 (%2) → %3 [%4]")
+                .arg(QString::fromLatin1(presetEntry.signerName))
+                .arg(presetEntry.signerValue)
+                .arg(QString::fromUtf8(presetEntry.meaningText))
+                .arg(protectionLevelHexText));
+            presetAction->setData(protectionLevel);
+            if (!presetEntry.supportedByDriver)
+            {
+                presetAction->setEnabled(false);
+                presetAction->setToolTip(QStringLiteral("该 Signer 在当前驱动下暂无签名级别联动映射。"));
+            }
+        }
+
+        QAction* selectedAction = r0PplMenu.exec(m_r0SetPplButton->mapToGlobal(QPoint(0, m_r0SetPplButton->height())));
+        if (selectedAction == nullptr)
+        {
+            return;
+        }
+        const unsigned int levelValue = selectedAction->data().toUInt();
+        if (levelValue > 0xFFU)
+        {
+            kLogEvent actionEvent;
+            warn << actionEvent
+                << "[ProcessDetailWindow] R0 PPL 层级菜单值无效, levelValue="
+                << levelValue
+                << eol;
+            showActionResultMessage(
+                QStringLiteral("R0设置PPL层级"),
+                false,
+                std::string("invalid PPL level value"),
+                actionEvent);
+            return;
+        }
+        executeR0SetPplProtectionAction(
+            static_cast<std::uint8_t>(levelValue),
+            selectedAction->text());
+    });
+
+    // R0 可恢复隐藏菜单：
+    // - 通过 ArkDriverClient 发送可恢复隐藏/恢复请求；
+    // - 菜单项显式 tooltip 说明具体内核侧变更策略。
+    connect(m_r0VisibilityButton, &QPushButton::clicked, this, [this]() {
+        QMenu visibilityMenu(this);
+        visibilityMenu.setStyleSheet(buildProcessDetailMenuStyle());
+        QAction* hideUnlinkOnlyAction = visibilityMenu.addAction(
+            buildProcessDetailR0ActionIcon(QStringLiteral(":/Icon/process_suspend.svg")),
+            QStringLiteral("隐藏当前进程：只断链"));
+        QAction* hidePatchPidOnlyAction = visibilityMenu.addAction(
+            buildProcessDetailR0ActionIcon(QStringLiteral(":/Icon/process_uncritical.svg")),
+            QStringLiteral("隐藏当前进程：只改PID"));
+        QAction* hideLegacyBothAction = visibilityMenu.addAction(
+            buildProcessDetailR0ActionIcon(QStringLiteral(":/Icon/process_critical.svg")),
+            QStringLiteral("隐藏当前进程：改PID+断链(旧版高风险)"));
+        visibilityMenu.addSeparator();
+        QAction* unhideProcessAction = visibilityMenu.addAction(
+            buildProcessDetailR0ActionIcon(QStringLiteral(":/Icon/process_resume.svg")),
+            QStringLiteral("取消隐藏当前进程"));
+        QAction* clearHiddenAction = visibilityMenu.addAction(
+            buildProcessDetailR0ActionIcon(QStringLiteral(":/Icon/process_refresh.svg")),
+            QStringLiteral("清空全部隐藏标记"));
+        hideUnlinkOnlyAction->setToolTip(QStringLiteral("只摘除 ActiveProcessLinks，不修改 PID；更容易按原 PID 找回和恢复。"));
+        hidePatchPidOnlyAction->setToolTip(QStringLiteral("只修改 UniqueProcessId，不摘链；高风险，可能影响按原 PID 查找目标。"));
+        hideLegacyBothAction->setToolTip(QStringLiteral("兼容旧版：同时修改 UniqueProcessId 并摘除 ActiveProcessLinks；风险最高。"));
+        unhideProcessAction->setToolTip(QStringLiteral("恢复由 Ksword 记录的 UniqueProcessId 和进程链表位置。"));
+        clearHiddenAction->setToolTip(QStringLiteral("恢复所有由 Ksword 摘链的进程，并清空驱动内记录。"));
+
+        QAction* selectedAction = visibilityMenu.exec(m_r0VisibilityButton->mapToGlobal(QPoint(0, m_r0VisibilityButton->height())));
+        if (selectedAction == hideUnlinkOnlyAction)
+        {
+            executeR0SetProcessHiddenAction(true, KSWORD_ARK_PROCESS_VISIBILITY_FLAG_UNLINK_ACTIVE_LIST);
+        }
+        else if (selectedAction == hidePatchPidOnlyAction)
+        {
+            executeR0SetProcessHiddenAction(true, KSWORD_ARK_PROCESS_VISIBILITY_FLAG_PATCH_UNIQUE_PID);
+        }
+        else if (selectedAction == hideLegacyBothAction)
+        {
+            executeR0SetProcessHiddenAction(true, KSWORD_ARK_PROCESS_VISIBILITY_FLAG_LEGACY_BOTH);
+        }
+        else if (selectedAction == unhideProcessAction)
+        {
+            executeR0SetProcessHiddenAction(false);
+        }
+        else if (selectedAction == clearHiddenAction)
+        {
+            executeR0ClearProcessHiddenAction();
+        }
+    });
+
+    // R0 危险标志/DKOM 菜单：
+    // - BreakOnTermination/APC/DKOM 与列表右键菜单能力对齐；
+    // - 高风险确认在动作函数内部完成，菜单本身只负责分发。
+    connect(m_r0DangerFlagsButton, &QPushButton::clicked, this, [this]() {
+        QMenu dangerMenu(this);
+        dangerMenu.setStyleSheet(buildProcessDetailMenuStyle());
+        QAction* enableBreakAction = dangerMenu.addAction(
+            buildProcessDetailR0ActionIcon(QStringLiteral(":/Icon/process_critical.svg")),
+            QStringLiteral("启用 BreakOnTermination"));
+        QAction* disableBreakAction = dangerMenu.addAction(
+            buildProcessDetailR0ActionIcon(QStringLiteral(":/Icon/process_uncritical.svg")),
+            QStringLiteral("关闭 BreakOnTermination"));
+        QAction* disableApcAction = dangerMenu.addAction(
+            buildProcessDetailR0ActionIcon(QStringLiteral(":/Icon/process_suspend.svg")),
+            QStringLiteral("禁止APC插入(现有线程)"));
+        dangerMenu.addSeparator();
+        QAction* dkomCidRemoveAction = dangerMenu.addAction(
+            buildProcessDetailR0ActionIcon(QStringLiteral(":/Icon/process_uncritical.svg")),
+            QStringLiteral("DKOM从PspCidTable删除"));
+        enableBreakAction->setToolTip(QStringLiteral("调用 ZwSetInformationProcess(ProcessBreakOnTermination=1)。"));
+        disableBreakAction->setToolTip(QStringLiteral("调用 ZwSetInformationProcess(ProcessBreakOnTermination=0)。"));
+        disableApcAction->setToolTip(QStringLiteral("清除目标进程现有线程 ETHREAD ApcQueueable 位。"));
+        dkomCidRemoveAction->setToolTip(QStringLiteral("从 PspCidTable 清零目标 EPROCESS 的 CID 表项；高风险且不可通过本菜单恢复。"));
+
+        QAction* selectedAction = dangerMenu.exec(m_r0DangerFlagsButton->mapToGlobal(QPoint(0, m_r0DangerFlagsButton->height())));
+        if (selectedAction == enableBreakAction)
+        {
+            executeR0SetBreakOnTerminationAction(true);
+        }
+        else if (selectedAction == disableBreakAction)
+        {
+            executeR0SetBreakOnTerminationAction(false);
+        }
+        else if (selectedAction == disableApcAction)
+        {
+            executeR0DisableApcInsertionAction();
+        }
+        else if (selectedAction == dkomCidRemoveAction)
+        {
+            executeR0DkomRemoveFromCidTableAction();
+        }
+    });
     connect(m_injectDllButton, &QPushButton::clicked, this, [this]() { executeInjectDllAction(); });
     connect(m_injectShellcodeButton, &QPushButton::clicked, this, [this]() { executeInjectShellcodeAction(); });
 

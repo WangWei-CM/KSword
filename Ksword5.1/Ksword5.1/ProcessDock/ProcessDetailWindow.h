@@ -370,12 +370,77 @@ private:
 
     // ======== 操作页动作 ========
     void executeTerminateProcessAction();
+    // executeTerminateProcessComboAction 作用：
+    // - 执行与进程列表右键“结束进程”一致的多方法组合结束动作；
+    // - 输入为当前详情页绑定 PID，处理过程按固定方法链逐项尝试；
+    // - 返回值：无，动作结果统一写日志。
+    void executeTerminateProcessComboAction();
     void executeTerminateThreadsAction();
     void executeSelectedTerminateAction();
     void executeSuspendProcessAction();
     void executeResumeProcessAction();
     void executeSetCriticalAction(bool enableCritical);
     void executeSetPriorityAction();
+    // executeSetPriorityActionById 作用：
+    // - 根据菜单/按钮传入的优先级 ID 设置目标进程优先级；
+    // - 输入 priorityActionId 对应 Idle/BelowNormal/Normal/AboveNormal/High/Realtime；
+    // - 返回值：无，底层调用结果写日志。
+    void executeSetPriorityActionById(int priorityActionId);
+    // executeSetEfficiencyModeAction 作用：
+    // - 开启或关闭目标进程 Windows 效率模式；
+    // - 输入 enableEfficiencyMode 为 true 时开启，false 时关闭；
+    // - 返回值：无，底层调用结果写日志。
+    void executeSetEfficiencyModeAction(bool enableEfficiencyMode);
+    // executeOpenProcessFolderAction 作用：
+    // - 在资源管理器中定位当前进程映像文件所在位置；
+    // - 输入来自 m_baseRecord.pid，不需要额外参数；
+    // - 返回值：无，底层调用结果写日志。
+    void executeOpenProcessFolderAction();
+    // executeRefreshPplProtectionLevelAction 作用：
+    // - 通过 R3 ProcessProtectionLevelInfo 刷新当前进程 PPL 枚举；
+    // - 输入来自 m_baseRecord.pid，刷新后更新详情页缓存与文本；
+    // - 返回值：无，查询结果写日志。
+    void executeRefreshPplProtectionLevelAction();
+    // executeR0TerminateProcessAction 作用：
+    // - 通过 ArkDriverClient 请求 R0 结束当前进程；
+    // - 输入来自 m_baseRecord.pid，不直接 DeviceIoControl；
+    // - 返回值：无，驱动调用摘要写日志。
+    void executeR0TerminateProcessAction();
+    // executeR0SuspendProcessAction 作用：
+    // - 通过 ArkDriverClient 请求 R0 挂起当前进程；
+    // - 输入来自 m_baseRecord.pid，不直接 DeviceIoControl；
+    // - 返回值：无，驱动调用摘要写日志。
+    void executeR0SuspendProcessAction();
+    // executeR0SetPplProtectionAction 作用：
+    // - 通过 ArkDriverClient 设置目标进程 PS_PROTECTION 原始字节；
+    // - 输入 protectionLevel 为 Signer<<4 | Type，levelDisplayText 用于日志展示；
+    // - 返回值：无，驱动调用摘要写日志。
+    void executeR0SetPplProtectionAction(std::uint8_t protectionLevel, const QString& levelDisplayText);
+    // executeR0SetProcessHiddenAction 作用：
+    // - 通过 ArkDriverClient 执行可恢复隐藏/取消隐藏；
+    // - 输入 hidden=true 表示隐藏，visibilityFlags 指定改 PID/断链策略；
+    // - 返回值：无，驱动调用摘要写日志。
+    void executeR0SetProcessHiddenAction(bool hidden, unsigned long visibilityFlags = 0UL);
+    // executeR0ClearProcessHiddenAction 作用：
+    // - 通过 ArkDriverClient 清空驱动内全部可恢复隐藏标记；
+    // - 输入无，影响驱动记录的全部目标；
+    // - 返回值：无，驱动调用摘要写日志。
+    void executeR0ClearProcessHiddenAction();
+    // executeR0SetBreakOnTerminationAction 作用：
+    // - 通过 ArkDriverClient 设置或清除 BreakOnTermination；
+    // - 输入 enabled=true 表示启用，false 表示关闭；
+    // - 返回值：无，驱动调用摘要写日志。
+    void executeR0SetBreakOnTerminationAction(bool enabled);
+    // executeR0DisableApcInsertionAction 作用：
+    // - 通过 ArkDriverClient 清除当前进程现有线程 ApcQueueable 位；
+    // - 输入来自 m_baseRecord.pid；
+    // - 返回值：无，驱动调用摘要写日志。
+    void executeR0DisableApcInsertionAction();
+    // executeR0DkomRemoveFromCidTableAction 作用：
+    // - 通过 ArkDriverClient 从 PspCidTable 删除当前进程 CID 表项；
+    // - 输入来自 m_baseRecord.pid；
+    // - 返回值：无，驱动调用摘要写日志。
+    void executeR0DkomRemoveFromCidTableAction();
     void executeInjectDllAction();
     void executeInjectShellcodeAction();
 
@@ -462,6 +527,15 @@ private:
 
     QComboBox* m_priorityCombo = nullptr;      // 优先级选择框。
     QPushButton* m_applyPriorityButton = nullptr; // 应用优先级按钮。
+    QPushButton* m_openProcessFolderButton = nullptr; // 打开进程所在目录按钮。
+    QPushButton* m_refreshPplProtectionButton = nullptr; // 手动刷新 PPL 保护级别按钮。
+    QPushButton* m_enableEfficiencyModeButton = nullptr; // 开启效率模式按钮。
+    QPushButton* m_disableEfficiencyModeButton = nullptr; // 关闭效率模式按钮。
+    QPushButton* m_r0TerminateProcessButton = nullptr; // R0 结束进程按钮。
+    QPushButton* m_r0SuspendProcessButton = nullptr; // R0 挂起进程按钮。
+    QPushButton* m_r0SetPplButton = nullptr; // R0 设置 PPL 层级按钮。
+    QPushButton* m_r0VisibilityButton = nullptr; // R0 可恢复隐藏菜单按钮。
+    QPushButton* m_r0DangerFlagsButton = nullptr; // R0 危险标志/DKOM 菜单按钮。
 
     QLineEdit* m_dllPathLineEdit = nullptr;    // DLL 路径输入框。
     QPushButton* m_browseDllButton = nullptr;  // 浏览 DLL 按钮。

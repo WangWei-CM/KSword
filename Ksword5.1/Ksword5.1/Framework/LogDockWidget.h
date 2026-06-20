@@ -21,6 +21,7 @@
 class QCheckBox;
 class QHBoxLayout;
 class QPushButton;
+class QSpinBox;
 class QTableView;
 class QTimer;
 class QVBoxLayout;
@@ -59,6 +60,7 @@ private:
     // refreshTableFromManager 作用：
     // - 从日志管理器读取快照；
     // - 应用等级筛选/追踪筛选；
+    // - 仅把最近 N 条筛选命中的日志交给表格模型，内部日志仍由 KswordARKEventEntry 保留全量；
     // - 重建表格并在需要时滚动到底部。
     // 参数 forceRefresh：
     // - true  强制刷新（用于用户主动操作）；
@@ -70,6 +72,13 @@ private:
     // - 不再为每个单元格创建 QTableWidgetItem，减少刷新时的堆分配与析构压力。
     // 参数 filteredEvents：已筛选后的可见日志集合。
     void rebuildTable(std::vector<kEvent> filteredEvents);
+
+    // visibleLogLimit 作用：
+    // - 读取“最近日志条数”数字框当前值；
+    // - 在 UI 尚未初始化或控件异常时回退到默认显示条数。
+    // 参数：无。
+    // 返回值：当前界面允许展示的最大日志行数，不影响内部全量日志存储。
+    int visibleLogLimit() const;
 
     // applyDetailColumnVisibility 作用：
     // - 根据“详细信息”复选框状态切换文件列与函数列；
@@ -198,6 +207,7 @@ private:
     QCheckBox* m_fatalCheck = nullptr;        // Fatal 级别显示开关。
     QCheckBox* m_detailCheck = nullptr;       // “详细信息”开关：控制文件/函数列显示。
     QCheckBox* m_autoScrollCheck = nullptr;   // “保持滚动到最底端”开关。
+    QSpinBox* m_visibleLimitSpin = nullptr;   // “最近日志条数”输入：只限制界面渲染行数，不截断内部日志。
 
     QPushButton* m_exportButton = nullptr;       // 导出日志按钮。
     QPushButton* m_clearButton = nullptr;        // 清空日志按钮。

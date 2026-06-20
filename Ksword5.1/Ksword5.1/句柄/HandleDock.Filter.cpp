@@ -24,6 +24,11 @@
 
 void HandleDock::applyLocalHandleFilters()
 {
+    applyLocalHandleFilters(true);
+}
+
+void HandleDock::applyLocalHandleFilters(const bool rebuildTable)
+{
     const QString pidText = (m_pidFilterEdit != nullptr) ? m_pidFilterEdit->text().trimmed() : QString();
     const QString keywordText = (m_keywordFilterEdit != nullptr) ? m_keywordFilterEdit->text().trimmed().toLower() : QString();
     const QString typeFilterText = (m_typeFilterCombo != nullptr) ? m_typeFilterCombo->currentText().trimmed() : QString();
@@ -101,6 +106,11 @@ void HandleDock::applyLocalHandleFilters()
             }
         }
         m_rows.push_back(row);
+    }
+
+    if (!rebuildTable)
+    {
+        return;
     }
 
     rebuildHandleTable();
@@ -185,9 +195,18 @@ void HandleDock::syncHandleTypeNamesFromObjectTypeMap()
 {
     if (m_allRows.empty() || m_typeNameMapByIndexFromObjectTab.empty())
     {
+        if (m_handleRenderDeferredUntilTypeMap && !m_allRows.empty())
+        {
+            // 对象类型快照可能失败或返回空映射。此时不能永久压住句柄列表，
+            // 兜底使用枚举阶段已有类型文本渲染一次，保证用户仍能看到刷新结果。
+            m_handleRenderDeferredUntilTypeMap = false;
+            refreshTypeFilterItemsFromAllRows();
+            applyLocalHandleFilters(true);
+        }
         return;
     }
 
+    // 对象类型映射已到达：把当前缓存行转换为最终类型名，然后只触发一次句柄表渲染。
     for (HandleRow& row : m_allRows)
     {
         const auto foundIt = m_typeNameMapByIndexFromObjectTab.find(row.typeIndex);
@@ -197,6 +216,7 @@ void HandleDock::syncHandleTypeNamesFromObjectTypeMap()
         }
     }
     refreshTypeFilterItemsFromAllRows();
+    m_handleRenderDeferredUntilTypeMap = false;
     applyLocalHandleFilters();
 
     kLogEvent syncTypeNameEvent;

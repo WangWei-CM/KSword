@@ -17,6 +17,7 @@
 #include "../../../shared/driver/KswordArkDynDataIoctl.h"
 
 #include <QAbstractItemView>
+#include <QAction>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -40,8 +41,11 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPalette>
+#include <QPainter>
 #include <QPointer>
 #include <QPlainTextEdit>
+#include <QPoint>
+#include <QPixmap>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QRunnable>
@@ -62,6 +66,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -138,6 +143,18 @@ namespace process_detail_window_internal
 
     // buildProcessDetailRootStyle 作用：生成详情窗口根样式。
     QString buildProcessDetailRootStyle();
+
+    // buildProcessDetailMenuStyle 作用：
+    // - 生成详情页按钮弹出菜单/右键菜单的显式不透明样式；
+    // - 输入无，处理时读取当前主题颜色；
+    // - 返回可直接 setStyleSheet 到 QMenu 的样式文本。
+    QString buildProcessDetailMenuStyle();
+
+    // buildProcessDetailR0ActionIcon 作用：
+    // - 基于普通功能图标叠加 Kernel.png 角标；
+    // - 输入 iconPath 为 qrc 图标路径，处理时在右下角绘制 R0 标识；
+    // - 返回带 R0 标识的 QIcon，供按钮和菜单项使用。
+    QIcon buildProcessDetailR0ActionIcon(const QString& iconPath);
 
     // buildStateLabelStyle 作用：生成状态标签样式文本。
     QString buildStateLabelStyle(const QColor& textColor, int fontWeight);

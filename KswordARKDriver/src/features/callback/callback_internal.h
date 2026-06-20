@@ -107,6 +107,9 @@ typedef struct _KSWORD_ARK_CALLBACK_RUNTIME
     BOOLEAN MiniFilterStarted;
     NTSTATUS MiniFilterRegisterStatus;
     NTSTATUS MiniFilterStartStatus;
+    EX_PUSH_LOCK MiniFilterBypassPidLock;
+    ULONG MiniFilterBypassPidCount;
+    ULONG MiniFilterBypassPids[KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT];
     ULONG RegisteredCallbacksMask;
     BOOLEAN Initialized;
 } KSWORD_ARK_CALLBACK_RUNTIME;
@@ -342,6 +345,24 @@ KswordArkCallbackMatchRule(
     _In_opt_ PCUNICODE_STRING initiatorPath,
     _In_opt_ PCUNICODE_STRING targetPath,
     _Out_ KSWORD_ARK_CALLBACK_MATCH_RESULT* matchResultOut
+    );
+
+NTSTATUS
+KswordArkCallbackSetMinifilterBypassPids(
+    _In_reads_opt_(PidCount) const ULONG* ProcessIds,
+    _In_ ULONG PidCount
+    );
+
+NTSTATUS
+KswordArkCallbackQueryMinifilterBypassPids(
+    _Out_writes_bytes_(OutputBufferLength) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+BOOLEAN
+KswordArkCallbackIsMinifilterBypassPid(
+    _In_ ULONG ProcessId
     );
 
 NTSTATUS

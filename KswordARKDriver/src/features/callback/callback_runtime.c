@@ -357,10 +357,13 @@ KswordARKCallbackInitialize(
     runtime->MiniFilterStarted = FALSE;
     runtime->MiniFilterRegisterStatus = STATUS_NOT_SUPPORTED;
     runtime->MiniFilterStartStatus = STATUS_NOT_SUPPORTED;
+    runtime->MiniFilterBypassPidCount = 0U;
+    RtlZeroMemory(runtime->MiniFilterBypassPids, sizeof(runtime->MiniFilterBypassPids));
     runtime->RegisteredCallbacksMask = 0U;
     runtime->Initialized = FALSE;
     ExInitializePushLock(&runtime->SnapshotLock);
     ExInitializePushLock(&runtime->PendingLock);
+    ExInitializePushLock(&runtime->MiniFilterBypassPidLock);
     InitializeListHead(&runtime->PendingDecisionList);
 
     status = KswordArkCallbackWaiterInitialize(runtime);
@@ -462,6 +465,199 @@ KswordARKCallbackUninitialize(
 }
 
 NTSTATUS
+KswordArkCallbackSetMinifilterBypassPids(
+    _In_reads_opt_(PidCount) const ULONG* ProcessIds,
+    _In_ ULONG PidCount
+    )
+/*++
+
+Routine Description:
+
+    Replace the in-memory minifilter bypass PID list used by the hot-path
+    pre-operation callback. PID zero is ignored because it is not a user-mode
+    process identity that should be allowlisted from the UI.
+
+Arguments:
+
+    ProcessIds - Optional caller-owned PID array. It may be NULL only when
+        PidCount is zero.
+    PidCount - Number of input PID slots to inspect.
+
+Return Value:
+
+    STATUS_SUCCESS when the runtime list has been replaced. An NTSTATUS error
+    is returned for invalid packet shape, over-limit counts or missing runtime.
+
+--*/
+{
+    KSWORD_ARK_CALLBACK_RUNTIME* runtime = KswordArkCallbackGetRuntime();
+    ULONG uniquePids[KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT];
+    ULONG readIndex = 0UL;
+    ULONG scanIndex = 0UL;
+    ULONG writeIndex = 0UL;
+
+    if (PidCount > KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (PidCount != 0UL && ProcessIds == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (runtime == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    RtlZeroMemory(uniquePids, sizeof(uniquePids));
+    for (readIndex = 0UL; readIndex < PidCount; ++readIndex) {
+        BOOLEAN duplicatePid = FALSE;
+        ULONG candidatePid = ProcessIds[readIndex];
+
+        if (candidatePid == 0UL) {
+            continue;
+        }
+
+        for (scanIndex = 0UL; scanIndex < writeIndex; ++scanIndex) {
+            if (uniquePids[scanIndex] == candidatePid) {
+                duplicatePid = TRUE;
+                break;
+            }
+        }
+
+        if (!duplicatePid && writeIndex < KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT) {
+            uniquePids[writeIndex] = candidatePid;
+            ++writeIndex;
+        }
+    }
+
+    ExAcquirePushLockExclusive(&runtime->MiniFilterBypassPidLock);
+    RtlZeroMemory(runtime->MiniFilterBypassPids, sizeof(runtime->MiniFilterBypassPids));
+    if (writeIndex != 0UL) {
+        RtlCopyMemory(runtime->MiniFilterBypassPids, uniquePids, (SIZE_T)writeIndex * sizeof(ULONG));
+    }
+    runtime->MiniFilterBypassPidCount = writeIndex;
+    ExReleasePushLockExclusive(&runtime->MiniFilterBypassPidLock);
+
+    KswordArkCallbackLogFormat(
+        "Info",
+        "Minifilter bypass PID whitelist updated, count=%lu.",
+        (unsigned long)writeIndex);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordArkCallbackQueryMinifilterBypassPids(
+    _Out_writes_bytes_(OutputBufferLength) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    )
+/*++
+
+Routine Description:
+
+    Copy the current minifilter bypass PID list into the shared R3/R0 response
+    structure. The copy is protected by the runtime push lock so user mode sees
+    one consistent snapshot.
+
+Arguments:
+
+    OutputBuffer - Caller output buffer that receives the fixed response packet.
+    OutputBufferLength - Output buffer size supplied by WDF.
+    BytesWrittenOut - Receives sizeof(KSWORD_ARK_MINIFILTER_BYPASS_PID_RESPONSE).
+
+Return Value:
+
+    STATUS_SUCCESS when the response packet was written; otherwise an NTSTATUS
+    validation or runtime availability error.
+
+--*/
+{
+    KSWORD_ARK_CALLBACK_RUNTIME* runtime = KswordArkCallbackGetRuntime();
+    KSWORD_ARK_MINIFILTER_BYPASS_PID_RESPONSE* response = NULL;
+    ULONG pidCount = 0UL;
+
+    if (BytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+
+    if (OutputBuffer == NULL ||
+        OutputBufferLength < sizeof(KSWORD_ARK_MINIFILTER_BYPASS_PID_RESPONSE)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    if (runtime == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    response = (KSWORD_ARK_MINIFILTER_BYPASS_PID_RESPONSE*)OutputBuffer;
+    RtlZeroMemory(response, sizeof(*response));
+    response->size = sizeof(*response);
+    response->version = KSWORD_ARK_CALLBACK_PROTOCOL_VERSION;
+
+    ExAcquirePushLockShared(&runtime->MiniFilterBypassPidLock);
+    pidCount = runtime->MiniFilterBypassPidCount;
+    if (pidCount > KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT) {
+        pidCount = KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT;
+    }
+    response->pidCount = pidCount;
+    if (pidCount != 0UL) {
+        RtlCopyMemory(response->processIds, runtime->MiniFilterBypassPids, (SIZE_T)pidCount * sizeof(ULONG));
+    }
+    ExReleasePushLockShared(&runtime->MiniFilterBypassPidLock);
+
+    *BytesWrittenOut = sizeof(*response);
+    return STATUS_SUCCESS;
+}
+
+BOOLEAN
+KswordArkCallbackIsMinifilterBypassPid(
+    _In_ ULONG ProcessId
+    )
+/*++
+
+Routine Description:
+
+    Check whether a requestor PID is present in the minifilter bypass whitelist.
+    The minifilter calls this before callback rules, redirect rewriting and file
+    monitor capture so allowlisted requests pass through to the filesystem stack.
+
+Arguments:
+
+    ProcessId - Requestor process identifier from FltGetRequestorProcessId.
+
+Return Value:
+
+    TRUE when ProcessId is allowlisted; FALSE otherwise.
+
+--*/
+{
+    KSWORD_ARK_CALLBACK_RUNTIME* runtime = KswordArkCallbackGetRuntime();
+    ULONG pidIndex = 0UL;
+    ULONG pidCount = 0UL;
+    BOOLEAN matchedPid = FALSE;
+
+    if (ProcessId == 0UL || runtime == NULL) {
+        return FALSE;
+    }
+
+    ExAcquirePushLockShared(&runtime->MiniFilterBypassPidLock);
+    pidCount = runtime->MiniFilterBypassPidCount;
+    if (pidCount > KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT) {
+        pidCount = KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT;
+    }
+    for (pidIndex = 0UL; pidIndex < pidCount; ++pidIndex) {
+        if (runtime->MiniFilterBypassPids[pidIndex] == ProcessId) {
+            matchedPid = TRUE;
+            break;
+        }
+    }
+    ExReleasePushLockShared(&runtime->MiniFilterBypassPidLock);
+
+    return matchedPid;
+}
+
+NTSTATUS
 KswordARKCallbackIoctlSetRules(
     _In_ WDFREQUEST Request,
     _In_ size_t InputBufferLength,
@@ -535,6 +731,131 @@ KswordARKCallbackIoctlGetRuntimeState(
     KswordArkCallbackQueryRuntimeState(stateBuffer);
     *CompleteBytesOut = sizeof(KSWORD_ARK_CALLBACK_RUNTIME_STATE);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKCallbackIoctlSetMinifilterBypassPids(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _Out_ size_t* CompleteBytesOut
+    )
+/*++
+
+Routine Description:
+
+    Validate the R3 minifilter bypass PID packet and replace the runtime PID
+    whitelist. The actual storage update is delegated to the callback runtime
+    helper so dispatch remains thin.
+
+Arguments:
+
+    Request - WDF request that carries KSWORD_ARK_MINIFILTER_BYPASS_PID_REQUEST.
+    InputBufferLength - Caller supplied input buffer length.
+    CompleteBytesOut - Receives the consumed input byte count on success.
+
+Return Value:
+
+    STATUS_SUCCESS when the whitelist is updated; otherwise an NTSTATUS
+    validation or WDF buffer retrieval error.
+
+--*/
+{
+    KSWORD_ARK_MINIFILTER_BYPASS_PID_REQUEST* requestPacket = NULL;
+    PVOID inputBuffer = NULL;
+    size_t inputLength = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (CompleteBytesOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *CompleteBytesOut = 0U;
+
+    if (InputBufferLength < sizeof(KSWORD_ARK_MINIFILTER_BYPASS_PID_REQUEST)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    status = WdfRequestRetrieveInputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_MINIFILTER_BYPASS_PID_REQUEST),
+        &inputBuffer,
+        &inputLength);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    if (inputLength < sizeof(KSWORD_ARK_MINIFILTER_BYPASS_PID_REQUEST)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    requestPacket = (KSWORD_ARK_MINIFILTER_BYPASS_PID_REQUEST*)inputBuffer;
+    if (requestPacket->size < sizeof(KSWORD_ARK_MINIFILTER_BYPASS_PID_REQUEST) ||
+        requestPacket->version != KSWORD_ARK_CALLBACK_PROTOCOL_VERSION ||
+        requestPacket->pidCount > KSWORD_ARK_MINIFILTER_BYPASS_PID_MAX_COUNT) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = KswordArkCallbackSetMinifilterBypassPids(
+        requestPacket->processIds,
+        requestPacket->pidCount);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    *CompleteBytesOut = sizeof(KSWORD_ARK_MINIFILTER_BYPASS_PID_REQUEST);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+KswordARKCallbackIoctlQueryMinifilterBypassPids(
+    _In_ WDFREQUEST Request,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* CompleteBytesOut
+    )
+/*++
+
+Routine Description:
+
+    Retrieve the caller output buffer and return the current minifilter bypass
+    PID whitelist as one fixed shared-protocol response packet.
+
+Arguments:
+
+    Request - WDF request that owns the output buffer.
+    OutputBufferLength - Caller supplied output buffer length.
+    CompleteBytesOut - Receives the response byte count on success.
+
+Return Value:
+
+    STATUS_SUCCESS when the response is filled; otherwise an NTSTATUS
+    validation or WDF buffer retrieval error.
+
+--*/
+{
+    KSWORD_ARK_MINIFILTER_BYPASS_PID_RESPONSE* responsePacket = NULL;
+    size_t outputLength = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (CompleteBytesOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *CompleteBytesOut = 0U;
+
+    if (OutputBufferLength < sizeof(KSWORD_ARK_MINIFILTER_BYPASS_PID_RESPONSE)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    status = WdfRequestRetrieveOutputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_MINIFILTER_BYPASS_PID_RESPONSE),
+        (PVOID*)&responsePacket,
+        &outputLength);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    return KswordArkCallbackQueryMinifilterBypassPids(
+        responsePacket,
+        outputLength,
+        CompleteBytesOut);
 }
 
 NTSTATUS

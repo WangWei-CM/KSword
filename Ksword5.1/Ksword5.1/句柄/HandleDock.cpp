@@ -596,10 +596,33 @@ void HandleDock::requestAsyncRefresh(const bool forceRefresh)
         return;
     }
 
-    // 若对象类型映射尚未就绪，先触发对象类型刷新，再继续句柄刷新。
-    if (m_typeNameMapByIndexFromObjectTab.empty() && !m_objectTypeRefreshInProgress)
+    if (m_typeNameMapByIndexFromObjectTab.empty())
     {
-        requestObjectTypeRefreshAsync(false);
+        // 句柄对象名解析依赖稳定的 typeIndex->typeName 映射。首次进入页面时如果句柄枚举
+        // 和对象类型枚举并行运行，句柄表会先按临时类型渲染一次，随后又因类型映射/对象名补刷
+        // 触发第二次重型枚举和第二次表格渲染。这里把句柄刷新降级为待执行请求，等对象类型
+        // 快照完成后再开始唯一一次句柄枚举；若类型快照失败，applyObjectTypeRefreshResult 会兜底放行。
+        m_refreshPending = true;
+        updateHandleStatusLabel(QStringLiteral("● 等待对象类型快照完成后刷新句柄列表..."), true);
+        if (!m_objectTypeRefreshInProgress)
+        {
+            requestObjectTypeRefreshAsync(false);
+        }
+        return;
+    }
+
+    requestAsyncRefreshWithoutTypePrecondition(forceRefresh);
+}
+
+void HandleDock::requestAsyncRefreshWithoutTypePrecondition(const bool forceRefresh)
+{
+    if (m_refreshInProgress)
+    {
+        if (forceRefresh)
+        {
+            m_refreshPending = true;
+        }
+        return;
     }
 
     const HandleRefreshOptions options = collectHandleRefreshOptions();
@@ -717,8 +740,13 @@ void HandleDock::applyHandleRefreshResult(
 
     m_allRows = refreshResult.rows;
     m_typeNameCacheByIndex = refreshResult.updatedTypeNameCacheByIndex;
-    if (!m_typeNameMapByIndexFromObjectTab.empty())
+    const bool canRenderAfterTypeMapping = !m_typeNameMapByIndexFromObjectTab.empty();
+    const bool canRenderWithoutTypeMapping =
+        !canRenderAfterTypeMapping && !m_objectTypeRefreshInProgress;
+    if (canRenderAfterTypeMapping)
     {
+        // 对象类型映射已经可用时，先把 typeIndex 翻译成稳定类型名，再触发表格渲染。
+        // 这样首轮刷新可在后台完成对象名解析后一次性呈现最终行数据。
         for (HandleRow& row : m_allRows)
         {
             const auto typeIt = m_typeNameMapByIndexFromObjectTab.find(row.typeIndex);
@@ -729,29 +757,19 @@ void HandleDock::applyHandleRefreshResult(
         }
     }
     refreshTypeFilterItemsFromAllRows();
-    applyLocalHandleFilters();
-
-    const HandleEnumMode currentEnumMode = resolveHandleEnumModeFromText(
-        m_enumModeCombo != nullptr ? m_enumModeCombo->currentText() : QString());
-    const bool canResolveNames =
-        currentEnumMode != HandleEnumMode::UserSnapshot &&
-        m_resolveNameCheckBox != nullptr &&
-        m_resolveNameCheckBox->isChecked() &&
-        !m_typeNameMapByIndexFromObjectTab.empty();
-    const bool hasRowsWaitingForObjectName = std::any_of(
-        m_allRows.begin(),
-        m_allRows.end(),
-        [](const HandleRow& row)
-        {
-            return !row.objectNameAvailable && !row.objectNameFailed;
-        });
-    if (canResolveNames && hasRowsWaitingForObjectName)
+    if (canRenderAfterTypeMapping || canRenderWithoutTypeMapping)
     {
-        if (!m_objectNameRetryAfterTypeMapQueued)
-        {
-            m_objectNameRetryAfterTypeMapQueued = true;
-            m_refreshPending = true;
-        }
+        // 正常路径：对象类型映射已就绪后渲染一次。
+        // 兜底路径：对象类型快照已结束但返回空映射时，不再等待第二轮，直接渲染一次。
+        m_handleRenderDeferredUntilTypeMap = false;
+        applyLocalHandleFilters(true);
+    }
+    else
+    {
+        // 仅保留给历史/异常并发路径：句柄枚举已经完成但对象类型快照仍在运行时，
+        // 只更新 m_rows 缓存，不重建 QTreeWidget，避免出现两次 UI 渲染。
+        m_handleRenderDeferredUntilTypeMap = true;
+        applyLocalHandleFilters(false);
     }
 
     QString statusText = QStringLiteral(
@@ -836,7 +854,6 @@ void HandleDock::applyObjectTypeRefreshResult(
 
     m_objectTypeRows = refreshResult.rows;
     m_typeNameMapByIndexFromObjectTab = refreshResult.typeNameMapByIndex;
-    m_objectNameRetryAfterTypeMapQueued = false;
     rebuildObjectTypeTable(m_objectTypeFilterEdit->text().trimmed());
 
     QString statusText = QStringLiteral("● 刷新完成 %1 ms | 类型数:%2")
@@ -850,32 +867,38 @@ void HandleDock::applyObjectTypeRefreshResult(
 
     m_objectTypeRefreshInProgress = false;
     kPro.set(m_objectTypeRefreshProgressPid, "对象类型刷新完成", 0, 100.0f);
-    syncHandleTypeNamesFromObjectTypeMap();
 
-    const HandleEnumMode currentEnumMode = resolveHandleEnumModeFromText(
-        m_enumModeCombo != nullptr ? m_enumModeCombo->currentText() : QString());
-    const bool canResolveNames =
-        currentEnumMode != HandleEnumMode::UserSnapshot &&
-        m_resolveNameCheckBox != nullptr &&
-        m_resolveNameCheckBox->isChecked();
-    const bool hasRowsWaitingForObjectName = std::any_of(
-        m_allRows.begin(),
-        m_allRows.end(),
-        [](const HandleRow& row)
-        {
-            return !row.objectNameAvailable && !row.objectNameFailed;
-        });
-    if (canResolveNames && hasRowsWaitingForObjectName && !m_objectNameRetryAfterTypeMapQueued)
+    const bool hasQueuedHandleRefresh = m_refreshPending;
+    if (!hasQueuedHandleRefresh)
     {
-        m_objectNameRetryAfterTypeMapQueued = true;
-        kLogEvent nameRetryEvent;
-        info << nameRetryEvent
-            << "[HandleDock] applyObjectTypeRefreshResult: object type map is ready, scheduling one handle refresh to resolve object names."
-            << eol;
-        QMetaObject::invokeMethod(this, [this]()
-            {
-                requestAsyncRefresh(true);
-            }, Qt::QueuedConnection);
+        // 只有没有等待中的句柄刷新时，才把对象类型映射同步到既有表格缓存。
+        // 若已有句柄刷新在排队，后续那一轮会生成最终快照并渲染一次，避免旧缓存先渲染一次。
+        syncHandleTypeNamesFromObjectTypeMap();
+    }
+
+    if (hasQueuedHandleRefresh)
+    {
+        // 对象类型刷新是句柄刷新前置步骤。这里消费等待中的句柄刷新请求，保证随后只进行
+        // 一次后台枚举和一次句柄表渲染，不再额外安排“对象名补刷”导致第二轮卡顿。
+        m_refreshPending = false;
+        if (!m_typeNameMapByIndexFromObjectTab.empty())
+        {
+            QMetaObject::invokeMethod(this, [this]()
+                {
+                    requestAsyncRefresh(true);
+                }, Qt::QueuedConnection);
+        }
+        else
+        {
+            kLogEvent typeMapFallbackEvent;
+            warn << typeMapFallbackEvent
+                << "[HandleDock] applyObjectTypeRefreshResult: object type map is empty, running one fallback handle refresh without type precondition."
+                << eol;
+            QMetaObject::invokeMethod(this, [this]()
+                {
+                    requestAsyncRefreshWithoutTypePrecondition(true);
+                }, Qt::QueuedConnection);
+        }
     }
 
     if (m_objectTypeRefreshPending)

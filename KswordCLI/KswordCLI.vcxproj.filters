@@ -15,7 +15,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="KswordDriverSDK.cpp">
+    <ClCompile Include="KswordCLI.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

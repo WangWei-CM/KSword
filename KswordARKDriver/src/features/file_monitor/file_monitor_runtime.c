@@ -697,6 +697,11 @@ Return Value:
         Data->Iopb->MinorFunction,
         &Data->Iopb->Parameters);
 
+    if (operationType != 0UL &&
+        KswordArkCallbackIsMinifilterBypassPid((ULONG)(ULONG_PTR)FltGetRequestorProcessId(Data))) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
     callbackStatus = KswordArkMinifilterApplyRule(
         Data,
         FltObjects,

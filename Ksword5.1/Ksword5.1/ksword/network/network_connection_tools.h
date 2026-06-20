@@ -234,6 +234,54 @@ namespace ks::network
             return tcpRow;
         }
 
+        // GetTcpTerminationUnsupportedReason：
+        // - 输入：UI 缓存的 TCP 记录；
+        // - 处理：按 SetTcpEntry(DELETE_TCB) 的能力边界提前判定不可终止场景；
+        // - 返回：可终止时返回空字符串，不可终止时返回给 UI/日志使用的原因文本。
+        inline std::string GetTcpTerminationUnsupportedReason(const TcpConnectionRecord& connectionRecord)
+        {
+            // SetTcpEntry 只接受 IPv4 MIB_TCPROW；IPv6 行来自另一张表，不能转换成 MIB_TCPROW。
+            if (connectionRecord.isIpv6)
+            {
+                return "IPv6 TCP 连接暂不支持通过 SetTcpEntry 终止。";
+            }
+
+            // LISTEN 行代表服务端监听端点，不是已建立连接 TCB：
+            // - 典型远端端点为 0.0.0.0:0；
+            // - SetTcpEntry(DELETE_TCB) 无法关闭监听 socket；
+            // - 若需要释放端口，必须结束/控制持有该监听 socket 的进程或服务。
+            if (connectionRecord.tcpStateCode == MIB_TCP_STATE_LISTEN)
+            {
+                return "LISTEN 是监听端口，不是已建立 TCP 连接；SetTcpEntry(DELETE_TCB) 不能关闭监听 socket。请结束/停止持有该端口的进程或服务。";
+            }
+
+            // CLOSED/DELETE_TCB 已不是可操作的活动连接；继续提交只会得到误导性错误码。
+            if (connectionRecord.tcpStateCode == MIB_TCP_STATE_CLOSED ||
+                connectionRecord.tcpStateCode == MIB_TCP_STATE_DELETE_TCB)
+            {
+                return "目标 TCP 行已处于关闭/删除状态，不需要再次提交 DELETE_TCB。";
+            }
+
+            // 没有远端端点通常说明它不是一个可删除的已建立/半关闭四元组。
+            if (connectionRecord.remotePort == 0 ||
+                connectionRecord.remoteAddressText.empty() ||
+                connectionRecord.remoteAddressText == "0.0.0.0")
+            {
+                return "目标 TCP 行缺少有效远端端点，不是 SetTcpEntry 可终止的连接四元组。";
+            }
+
+            return std::string();
+        }
+
+        // IsTcpConnectionTerminableBySetTcpEntry：
+        // - 输入：UI 缓存的 TCP 记录；
+        // - 处理：复用原因构造函数，仅判断是否可执行 DELETE_TCB；
+        // - 返回：当前记录可提交 SetTcpEntry 时返回 true，否则返回 false。
+        inline bool IsTcpConnectionTerminableBySetTcpEntry(const TcpConnectionRecord& connectionRecord)
+        {
+            return GetTcpTerminationUnsupportedReason(connectionRecord).empty();
+        }
+
         // FormatSetTcpEntryFailure：
         // - 输入：SetTcpEntry 返回码；
         // - 处理：把常见错误码补充成 UI 可读诊断，尤其区分权限、参数和连接已变化；
@@ -246,9 +294,9 @@ namespace ks::network
             {
                 stream << " (需要以管理员权限运行，或目标连接受系统策略保护)";
             }
-            else if (setResult == 317)
+            else if (setResult == ERROR_MR_MID_NOT_FOUND)
             {
-                stream << " (当前进程可能未提升权限运行，请以管理员权限启动后重试)";
+                stream << " (系统未提供该错误码的消息文本；常见于向 SetTcpEntry 提交了不支持的 TCP 行，例如 LISTEN 监听端口或已变化的连接)";
             }
             else if (setResult == ERROR_INVALID_PARAMETER)
             {
@@ -280,6 +328,24 @@ namespace ks::network
                 << " remote=" << connectionRecord.remoteAddressText << ":" << connectionRecord.remotePort;
         }
     } // namespace connection_detail
+
+    // GetTcpTerminationUnsupportedReason：
+    // - 输入：TCP 连接快照记录；
+    // - 处理：检查该记录是否属于 SetTcpEntry(DELETE_TCB) 支持的 IPv4 活动连接；
+    // - 返回：可终止时返回空字符串；不可终止时返回面向用户的原因文本。
+    inline std::string GetTcpTerminationUnsupportedReason(const TcpConnectionRecord& connectionRecord)
+    {
+        return connection_detail::GetTcpTerminationUnsupportedReason(connectionRecord);
+    }
+
+    // IsTcpConnectionTerminableBySetTcpEntry：
+    // - 输入：TCP 连接快照记录；
+    // - 处理：复用终止前置检查；
+    // - 返回：记录可提交 SetTcpEntry(DELETE_TCB) 时返回 true，否则返回 false。
+    inline bool IsTcpConnectionTerminableBySetTcpEntry(const TcpConnectionRecord& connectionRecord)
+    {
+        return connection_detail::IsTcpConnectionTerminableBySetTcpEntry(connectionRecord);
+    }
 
     // EnumerateTcpConnectionRecords：
     // - 枚举当前系统 IPv4 + IPv6 TCP 连接快照；
@@ -669,11 +735,15 @@ namespace ks::network
         }
 
         // 终止连接能力当前仅覆盖 IPv4（SetTcpEntry）；IPv6 连接仅支持展示，不支持终止。
-        if (connectionRecord.isIpv6)
+        const std::string unsupportedReason = connection_detail::GetTcpTerminationUnsupportedReason(connectionRecord);
+        if (!unsupportedReason.empty())
         {
             if (detailTextOut != nullptr)
             {
-                *detailTextOut = "IPv6 TCP 连接暂不支持通过 SetTcpEntry 终止。";
+                std::ostringstream unsupportedStream;
+                unsupportedStream << unsupportedReason;
+                connection_detail::AppendTcpEndpointText(unsupportedStream, connectionRecord);
+                *detailTextOut = unsupportedStream.str();
             }
             return false;
         }

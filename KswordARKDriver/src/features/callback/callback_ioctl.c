@@ -116,6 +116,117 @@ Return Value:
 }
 
 NTSTATUS
+KswordARKCallbackIoctlSetMinifilterBypassPidsHandler(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle IOCTL_KSWORD_ARK_SET_MINIFILTER_BYPASS_PIDS. This mutates callback
+    behavior because allowlisted PIDs bypass minifilter rules, redirect and file
+    monitor capture, so it reuses the callback-set safety policy gate.
+
+Arguments:
+
+    Device - WDF device used for safety evaluation and audit logging.
+    Request - Current IOCTL request.
+    InputBufferLength - Whitelist request packet length.
+    OutputBufferLength - Caller output length; unused for this IOCTL.
+    BytesReturned - Receives callback module completion bytes.
+
+Return Value:
+
+    NTSTATUS from safety evaluation or KswordARKCallbackIoctlSetMinifilterBypassPids.
+
+--*/
+{
+    NTSTATUS status;
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0;
+
+    {
+        KSWORD_ARK_SAFETY_CONTEXT safetyContext;
+        RtlZeroMemory(&safetyContext, sizeof(safetyContext));
+        safetyContext.Operation = KSWORD_ARK_SAFETY_OPERATION_CALLBACK_SET_RULES;
+        safetyContext.TargetProcessId = 0UL;
+        safetyContext.ContextFlags = KSWORD_ARK_SAFETY_CONTEXT_FLAG_UI_CONFIRMED;
+        status = KswordARKSafetyEvaluate(Device, &safetyContext);
+        if (!NT_SUCCESS(status)) {
+            KswordARKCallbackIoctlLog(Device, "Warn", "Minifilter bypass PID update denied by safety policy, status=0x%08X.", (unsigned int)status);
+            return status;
+        }
+    }
+
+    status = KswordARKCallbackIoctlSetMinifilterBypassPids(
+        Request,
+        InputBufferLength,
+        BytesReturned);
+    if (NT_SUCCESS(status)) {
+        (void)KswordARKDriverEnqueueLogFrame(Device, "Info", "Minifilter bypass PID whitelist applied.");
+    }
+    else {
+        KswordARKCallbackIoctlLog(Device, "Warn", "Minifilter bypass PID update failed, status=0x%08X.", (unsigned int)status);
+    }
+    return status;
+}
+
+NTSTATUS
+KswordARKCallbackIoctlQueryMinifilterBypassPidsHandler(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle IOCTL_KSWORD_ARK_QUERY_MINIFILTER_BYPASS_PIDS. The operation is
+    read-only and returns the current fixed-size whitelist response packet.
+
+Arguments:
+
+    Device - WDF device used for diagnostic logging.
+    Request - Current IOCTL request.
+    InputBufferLength - Caller input length; unused for this IOCTL.
+    OutputBufferLength - Whitelist response buffer length.
+    BytesReturned - Receives response byte count.
+
+Return Value:
+
+    NTSTATUS from KswordARKCallbackIoctlQueryMinifilterBypassPids.
+
+--*/
+{
+    NTSTATUS status;
+    UNREFERENCED_PARAMETER(InputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0;
+
+    status = KswordARKCallbackIoctlQueryMinifilterBypassPids(
+        Request,
+        OutputBufferLength,
+        BytesReturned);
+    if (!NT_SUCCESS(status)) {
+        KswordARKCallbackIoctlLog(Device, "Warn", "Minifilter bypass PID query failed, status=0x%08X.", (unsigned int)status);
+    }
+    return status;
+}
+
+NTSTATUS
 KswordARKCallbackIoctlGetRuntimeStateHandler(
     _In_ WDFDEVICE Device,
     _In_ WDFREQUEST Request,
