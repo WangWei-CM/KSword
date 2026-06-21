@@ -39,9 +39,17 @@ const QString QSS_MainWindow_TabWidget = R"(
         font-weight: 700;
     }
 
-    QTabBar::tab:hover:!selected {
-        background-color: #173553 !important;
-        background: #173553 !important;
+    QTabBar::tab:selected:hover,
+    QTabBar::tab:selected:pressed {
+        background-color: #43A0FF !important;
+        background: #43A0FF !important;
+        color: #FFFFFF;
+    }
+
+    QTabBar::tab:hover:!selected,
+    QTabBar::tab:pressed:!selected {
+        background-color: palette(alternate-base) !important;
+        background: palette(alternate-base) !important;
         color: palette(text);
     }
 )";
@@ -97,9 +105,17 @@ const QString QSS_MainWindow_dockStyle = R"(
         font-weight: 700;
     }
 
-    QMainWindow QTabBar::tab:hover:!selected {
-        background-color: #173553 !important;
-        background: #173553 !important;
+    QMainWindow QTabBar::tab:selected:hover,
+    QMainWindow QTabBar::tab:selected:pressed {
+        background-color: #43A0FF !important;
+        background: #43A0FF !important;
+        color: #FFFFFF;
+    }
+
+    QMainWindow QTabBar::tab:hover:!selected,
+    QMainWindow QTabBar::tab:pressed:!selected {
+        background-color: palette(alternate-base) !important;
+        background: palette(alternate-base) !important;
         color: palette(text);
     }
 

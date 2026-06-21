@@ -319,7 +319,7 @@ namespace ks::ui
         m_appIconLabel->setAlignment(Qt::AlignCenter);
 
         m_titleTextLabel = new QLabel(m_leftWidget);
-        m_titleTextLabel->setText(QStringLiteral("Ksword5.1(%1)").arg(resolveCompileDateText()));
+        m_titleTextLabel->setText(QStringLiteral("KswordARK-5.1-Release(%1)").arg(resolveCompileDateText()));
         m_titleTextLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
 
         m_rawUserNameText = resolveCurrentUserNameText();

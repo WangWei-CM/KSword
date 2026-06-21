@@ -82,7 +82,15 @@ int main(int argc, char** argv) {
     GuiInitMain(args, window);
 
     window->end();
-    window->show(argc, argv);
+    // Do not pass the process command line to FLTK here. Input arguments are
+    // installer-owned control flags such as "--install-state <file>", and
+    // Fl_Window::show(argc, argv) would parse them as FLTK/X11-style window
+    // options. Unknown installer flags make FLTK display its generic "options
+    // are:" error dialog before GuiAfterShowMain() can consume the state file.
+    // The installer handles command-line state through ParseStateArgument(), so
+    // this plain show() call has no return value and only makes the window
+    // visible.
+    window->show();
     KApplyWindowIcon(window);
     GuiAfterShowMain(window);
     const int exitCode = Fl::run();

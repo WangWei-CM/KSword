@@ -46,17 +46,50 @@ constexpr int kImageOverlap = 223;
 constexpr int kImageDrawHeight = 720;
 constexpr int kImageVerticalOffset = (kImageDrawHeight - kWindowHeight) / 2;
 constexpr int kPad = 24;
-constexpr wchar_t kDefaultInstallDir[] = L"C:\\Program Files\\KswordARK";
+constexpr wchar_t kDefaultInstallLeaf[] = L"KswordARK";
 constexpr wchar_t kStateArg[] = L"--install-state";
 constexpr wchar_t kSettingsRel[] = L"Style\\appearance_settings.json";
 constexpr wchar_t kMainExe[] = L"Ksword5.1.exe";
 constexpr wchar_t kTaskmgrScript[] = L"TaskmgrHijack.ps1";
 
+// AppendPath joins two path fragments without depending on later helpers. Inputs
+// are a parent directory and child name; processing inserts one slash when
+// needed; output is a Windows path string.
+std::wstring AppendPath(const std::wstring& dir, const wchar_t* child) {
+    if (dir.empty()) return child ? std::wstring(child) : std::wstring();
+    if (!child || !*child) return dir;
+    if (dir.back() == L'\\' || dir.back() == L'/') return dir + child;
+    return dir + L"\\" + child;
+}
+
+// DefaultInstallDir resolves the per-user installation root. Input is none;
+// processing prefers %LOCALAPPDATA%\Programs and falls back to %LOCALAPPDATA%;
+// output is a writable current-user path that normally does not need UAC.
+std::wstring DefaultInstallDir() {
+    PWSTR raw = nullptr;
+    HRESULT hr = ::SHGetKnownFolderPath(FOLDERID_UserProgramFiles, KF_FLAG_CREATE, nullptr, &raw);
+    if (FAILED(hr) || !raw) {
+        hr = ::SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &raw);
+    }
+    if (SUCCEEDED(hr) && raw) {
+        std::wstring dir(raw);
+        ::CoTaskMemFree(raw);
+        return AppendPath(dir, kDefaultInstallLeaf);
+    }
+
+    wchar_t localAppData[MAX_PATH]{};
+    DWORD n = ::GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        return AppendPath(AppendPath(localAppData, L"Programs"), kDefaultInstallLeaf);
+    }
+    return AppendPath(L".", kDefaultInstallLeaf);
+}
+
 // InstallOptions is the installer input model. Values come from FLTK widgets or
 // the elevation handoff JSON file; PerformInstall consumes them and returns no
 // mutations through this struct after installation starts.
 struct InstallOptions {
-    std::wstring installDir = kDefaultInstallDir;
+    std::wstring installDir = DefaultInstallDir();
     bool startupAdmin = true;
     bool startupMaximized = true;
     bool replaceTaskmgr = false;
@@ -312,17 +345,10 @@ bool JsonFindBool(const std::string& json, const char* key, bool defValue) {
     return defValue;
 }
 
-// IsDefaultInstallDir reports whether the selected path is the protected
-// Program Files installation root. Input is a directory path; output is a
-// boolean used to decide whether UAC is required.
-bool IsDefaultInstallDir(const std::wstring& dir) {
-    return _wcsicmp(dir.c_str(), kDefaultInstallDir) == 0;
-}
-
 // NeedsElevation evaluates whether the requested options touch privileged
 // locations. Input is install options; output is true when UAC should be used.
 bool NeedsElevation(const InstallOptions& o) {
-    return IsDefaultInstallDir(o.installDir) || o.replaceTaskmgr || o.testMode || o.desktopShortcut || o.startMenuShortcut;
+    return o.replaceTaskmgr || o.testMode;
 }
 
 // FileExistsInDir reports whether a file exists under the install root. Input is
@@ -480,7 +506,7 @@ InstallOptions LoadState(const std::wstring& file) {
     std::vector<char> bytes;
     if (!ReadBytes(file, &bytes)) return o;
     const std::string json(bytes.begin(), bytes.end());
-    o.installDir = JsonFindString(json, "installDir", kDefaultInstallDir);
+    o.installDir = JsonFindString(json, "installDir", DefaultInstallDir());
     o.startupAdmin = JsonFindBool(json, "startupAdmin", true);
     o.startupMaximized = JsonFindBool(json, "startupMaximized", true);
     o.replaceTaskmgr = JsonFindBool(json, "replaceTaskmgr", false);
@@ -524,7 +550,7 @@ void ShowInstallPage() {
 InstallOptions CollectOptions() {
     InstallOptions o;
     if (g_pathInput && g_pathInput->value()) o.installDir = Trim(Utf8ToWide(g_pathInput->value()));
-    if (o.installDir.empty()) o.installDir = kDefaultInstallDir;
+    if (o.installDir.empty()) o.installDir = DefaultInstallDir();
     o.startupAdmin = !g_adminCheck || g_adminCheck->value() != 0;
     o.startupMaximized = !g_maxCheck || g_maxCheck->value() != 0;
     o.replaceTaskmgr = g_taskmgrCheck && g_taskmgrCheck->value() != 0;
@@ -793,19 +819,19 @@ bool CreateShortcut(const std::wstring& link, const std::wstring& target, const 
     return SUCCEEDED(hr);
 }
 
-// CreateShortcuts creates selected all-user shortcuts. Input is install options;
-// processing writes Public Desktop/Common Programs links; output is true when all
-// requested shortcuts succeed.
+// CreateShortcuts creates selected current-user shortcuts. Input is install
+// options; processing writes Desktop/Programs links for the interactive user;
+// output is true when all requested shortcuts succeed.
 bool CreateShortcuts(const InstallOptions& o, std::wstring* log) {
     bool all = true;
     const std::wstring target = Join(o.installDir, kMainExe);
     if (o.desktopShortcut) {
-        bool ok = CreateShortcut(Join(KnownFolder(FOLDERID_PublicDesktop), L"KswordARK.lnk"), target, o.installDir);
+        bool ok = CreateShortcut(Join(KnownFolder(FOLDERID_Desktop), L"KswordARK.lnk"), target, o.installDir);
         AppendLog(log, ok ? L"已创建桌面快捷方式。" : L"创建桌面快捷方式失败。");
         all = all && ok;
     }
     if (o.startMenuShortcut) {
-        bool ok = CreateShortcut(Join(Join(KnownFolder(FOLDERID_CommonPrograms), L"KswordARK"), L"KswordARK.lnk"), target, o.installDir);
+        bool ok = CreateShortcut(Join(Join(KnownFolder(FOLDERID_Programs), L"KswordARK"), L"KswordARK.lnk"), target, o.installDir);
         AppendLog(log, ok ? L"已创建开始菜单快捷方式。" : L"创建开始菜单快捷方式失败。");
         all = all && ok;
     }
@@ -854,7 +880,7 @@ void StartInstall() {
     ShowInstallPage();
     SetStatus(L"准备安装...");
     if (NeedsElevation(o) && !IsElevated()) {
-        SetStatus(L"当前选项需要管理员权限，正在请求 UAC...\r\n需要管理员权限的选项包括默认 Program Files 路径、替换任务管理器、启动测试模式或全用户快捷方式。");
+        SetStatus(L"当前选项需要管理员权限，正在请求 UAC...\r\n需要管理员权限的选项包括替换任务管理器或启动测试模式。");
         std::wstring state = TempStatePath();
         if (!SaveState(state, o)) {
             TopMostMessageBox(L"写入提权状态文件失败。", L"KswordSetup", MB_ICONERROR);
@@ -1039,7 +1065,7 @@ void ConfigureRightContent(Fl_Window* window) {
     title->labelsize(19);
     title->labelcolor(theme.text);
     g_pathInput = KCreateInput(layout.contentX, layout.cardY + 108, layout.contentW - 112, 30, nullptr);
-    g_pathInput->value(WideToUtf8(kDefaultInstallDir).c_str());
+    g_pathInput->value(WideToUtf8(DefaultInstallDir()).c_str());
     g_browseButton = KCreateButton(layout.contentX + layout.contentW - 94, layout.cardY + 108, 94, 30, "浏览", KBUTTON_LIGHT);
     g_browseButton->callback([](Fl_Widget*, void*) { BrowseInstallDir(); });
     int y = layout.cardY + 150;

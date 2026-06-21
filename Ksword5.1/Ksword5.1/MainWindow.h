@@ -167,26 +167,10 @@ private:
 
     // handleUiAccessButtonClicked 作用：
     // - 处理标题栏 UIAccess 按钮点击；
-    // - 先处理证书信任，再按需尝试 SYSTEM TokenUIAccess fallback 启动。
+    // - 当前实例已带 UIAccess 时降级回普通用户实例；
+    // - 否则按需触发管理员提权，并尝试 SYSTEM TokenUIAccess fallback 启动。
     void handleUiAccessButtonClicked();
     void handleR0StatusButtonClicked();
-
-    // isUiAccessCertificateTrusted 作用：
-    // - 检查 KswordARK 测试签名证书是否已在本机 Root 与 TrustedPublisher。
-    bool isUiAccessCertificateTrusted() const;
-
-    // resolveUiAccessCertificatePath 作用：
-    // - 在发行目录和仓库 .cert 目录中定位公钥证书文件。
-    QString resolveUiAccessCertificatePath() const;
-
-    // installUiAccessCertificate 作用：
-    // - 把公钥证书导入 LocalMachine 证书存储；
-    // - 不读取、不导入 PFX 私钥。
-    bool installUiAccessCertificate(QString* detailTextOut);
-
-    // confirmUiAccessTrustImport 作用：
-    // - 弹出导入前确认框，说明系统信任和私钥泄露风险。
-    bool confirmUiAccessTrustImport(const QString& certificatePath);
 
     // hasUiAccessPrivilege 作用：
     // - 查询当前进程令牌 TokenUIAccess 状态；
@@ -477,7 +461,7 @@ private:
     bool m_captureProtectionEnabled = false;            // m_captureProtectionEnabled：主窗口当前是否启用截屏屏蔽。
 
     // 顶部菜单栏右侧权限按钮（纯文字）：
-    // - UIAccess：证书信任检查与 SYSTEM TokenUIAccess fallback；
+    // - UIAccess：SYSTEM TokenUIAccess fallback 与普通用户实例回退；
     // - Admin：管理员权限状态与提权入口；
     // - Debug：SeDebugPrivilege 状态与申请入口；
     // - System：是否 LocalSystem 身份；
@@ -489,7 +473,7 @@ private:
     QToolButton* m_licenseMenuButton = nullptr;  // m_licenseMenuButton：功能条左侧“许可证”按钮。
     QToolButton* m_exitMenuButton = nullptr;     // m_exitMenuButton：功能条左侧“退出”按钮。
     QToolButton* m_settingsMenuButton = nullptr; // m_settingsMenuButton：功能条左侧“设置”入口按钮。
-    QPushButton* m_uiAccessStatusButton = nullptr; // m_uiAccessStatusButton：导入 UIAccess 测试签名公钥证书的入口。
+    QPushButton* m_uiAccessStatusButton = nullptr; // m_uiAccessStatusButton：触发 UIAccess fallback 或降级回普通实例的入口。
     QPushButton* m_adminStatusButton = nullptr;
     QPushButton* m_debugStatusButton = nullptr;
     QPushButton* m_systemStatusButton = nullptr;

@@ -37,8 +37,9 @@
 namespace
 {
     constexpr wchar_t kUnlockerKeyName[] = L"Ksword.FileUnlocker";
-    constexpr wchar_t kKswordMainWindowTitle[] = L"Ksword5.1";
+    constexpr wchar_t kKswordMainWindowPropertyName[] = L"KswordARK.MainWindow.Singleton.Release";
     constexpr wchar_t kPrivilegeRestartArgument[] = L"--ksword-privilege-restart";
+    constexpr ULONG_PTR kUnlockerCopyDataMessageId = 0x4B535755; // "KSWU"：Ksword shell unlocker IPC。
 
     // kStartupScaleRecommendedLogicalWidth 作用：
     // - 定义启动分辨率审查的最低建议逻辑宽度；
@@ -72,7 +73,7 @@ namespace
 
     // ExistingKswordWindowSearchContext 说明：
     // - 输入：由 EnumWindows 回调读写；
-    // - 处理逻辑：记录当前进程 PID，并在其它进程的顶层可见窗口中匹配 Ksword 主窗口标题；
+    // - 处理逻辑：记录当前进程 PID，并在其它进程的顶层可见窗口中匹配 Ksword 主窗口标记；
     // - 返回行为：foundWindow 非空表示发现已运行实例。
     struct ExistingKswordWindowSearchContext
     {
@@ -82,7 +83,8 @@ namespace
 
     // enumExistingKswordWindowProc 作用：
     // - 输入：Win32 顶层窗口枚举回调参数；
-    // - 处理：跳过不可见窗口/当前进程窗口，按标题精确匹配 Ksword 主窗口；
+    // - 处理：跳过不可见窗口/当前进程窗口，只按窗口属性识别 Ksword 主窗口；
+    // - 说明：不再按窗口标题兜底，避免资源管理器等普通窗口标题撞名导致误判单实例。
     // - 返回：TRUE 继续枚举；FALSE 表示已找到目标并停止枚举。
     BOOL CALLBACK enumExistingKswordWindowProc(HWND windowHandle, LPARAM parameter)
     {
@@ -103,19 +105,12 @@ namespace
             return TRUE;
         }
 
-        wchar_t titleBuffer[256] = {};
-        const int titleLength = ::GetWindowTextW(windowHandle, titleBuffer, static_cast<int>(std::size(titleBuffer)));
-        if (titleLength <= 0)
+        if (::GetPropW(windowHandle, kKswordMainWindowPropertyName) != nullptr)
         {
-            return TRUE;
+            context->foundWindow = windowHandle;
+            return FALSE;
         }
-        if (wcscmp(titleBuffer, kKswordMainWindowTitle) != 0)
-        {
-            return TRUE;
-        }
-
-        context->foundWindow = windowHandle;
-        return FALSE;
+        return TRUE;
     }
 
     // findExistingKswordMainWindow 作用：
@@ -159,6 +154,71 @@ namespace
         }
         ::LocalFree(argumentVector);
         return found;
+    }
+
+    // collectUnlockPathsFromCommandLine：
+    // - 输入：无，直接解析当前进程命令行；
+    // - 处理：收集所有 "--unlock <path>" 参数，供单实例转发和正常启动流程复用；
+    // - 返回：按命令行顺序返回待解锁路径列表。
+    std::vector<std::wstring> collectUnlockPathsFromCommandLine()
+    {
+        std::vector<std::wstring> unlockPathList;
+        int argumentCount = 0;
+        LPWSTR* argumentVector = ::CommandLineToArgvW(::GetCommandLineW(), &argumentCount);
+        if (argumentVector == nullptr)
+        {
+            return unlockPathList;
+        }
+
+        for (int argumentIndex = 1; argumentIndex < argumentCount; ++argumentIndex)
+        {
+            if (_wcsicmp(argumentVector[argumentIndex], L"--unlock") != 0)
+            {
+                continue;
+            }
+            if ((argumentIndex + 1) >= argumentCount)
+            {
+                break;
+            }
+
+            const wchar_t* const pathText = argumentVector[argumentIndex + 1];
+            if (pathText != nullptr && pathText[0] != L'\0')
+            {
+                unlockPathList.emplace_back(pathText);
+            }
+            argumentIndex += 1;
+        }
+
+        ::LocalFree(argumentVector);
+        return unlockPathList;
+    }
+
+    // sendUnlockPathToExistingMainWindow：
+    // - 输入：windowHandle 为已有 Ksword 主窗口句柄，unlockPath 为 Shell 右键传入路径；
+    // - 处理：通过 WM_COPYDATA 把路径交给已有实例，由已有实例执行文件解锁器；
+    // - 返回：消息成功送达返回 true，失败返回 false。
+    bool sendUnlockPathToExistingMainWindow(HWND windowHandle, const std::wstring& unlockPath)
+    {
+        if (windowHandle == nullptr || ::IsWindow(windowHandle) == FALSE || unlockPath.empty())
+        {
+            return false;
+        }
+
+        COPYDATASTRUCT copyData{};
+        copyData.dwData = kUnlockerCopyDataMessageId;
+        copyData.cbData = static_cast<DWORD>((unlockPath.size() + 1) * sizeof(wchar_t));
+        copyData.lpData = const_cast<wchar_t*>(unlockPath.c_str());
+
+        DWORD_PTR sendResult = 0;
+        const LRESULT messageResult = ::SendMessageTimeoutW(
+            windowHandle,
+            WM_COPYDATA,
+            0,
+            reinterpret_cast<LPARAM>(&copyData),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            3000,
+            &sendResult);
+        return messageResult != 0;
     }
 
     // appendInternalArgumentIfMissing 作用：
@@ -442,6 +502,104 @@ namespace
             &returnLength);
         ::CloseHandle(tokenHandle);
         return queryOk != FALSE && tokenElevation.TokenIsElevated != 0;
+    }
+
+    // tryEnableStartupDebugPrivilege：
+    // - 输入：无，直接作用于当前进程 token；
+    // - 处理：当当前进程已经是提升管理员时，尝试启用 SeDebugPrivilege；
+    // - 返回：true 表示权限已成功启用；false 表示当前非管理员或启用失败，失败原因写入日志。
+    bool tryEnableStartupDebugPrivilege()
+    {
+        if (!isCurrentProcessElevated())
+        {
+            startupTraceRaw("startup SeDebugPrivilege skipped: process is not elevated");
+            kLogEvent event;
+            warn << event
+                << "[main] 启动期 SeDebugPrivilege 跳过：当前进程不是管理员。"
+                << eol;
+            return false;
+        }
+
+        HANDLE tokenHandle = nullptr;
+        if (::OpenProcessToken(
+            ::GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &tokenHandle) == FALSE)
+        {
+            const DWORD errorCode = ::GetLastError();
+            startupTraceRaw(
+                std::string("startup SeDebugPrivilege OpenProcessToken failed, error=")
+                + std::to_string(errorCode));
+            kLogEvent event;
+            err << event
+                << "[main] 启动期 SeDebugPrivilege 申请失败：OpenProcessToken error="
+                << errorCode
+                << eol;
+            return false;
+        }
+
+        LUID debugPrivilegeLuid{};
+        if (::LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &debugPrivilegeLuid) == FALSE)
+        {
+            const DWORD errorCode = ::GetLastError();
+            ::CloseHandle(tokenHandle);
+            startupTraceRaw(
+                std::string("startup SeDebugPrivilege LookupPrivilegeValue failed, error=")
+                + std::to_string(errorCode));
+            kLogEvent event;
+            err << event
+                << "[main] 启动期 SeDebugPrivilege 申请失败：LookupPrivilegeValue error="
+                << errorCode
+                << eol;
+            return false;
+        }
+
+        TOKEN_PRIVILEGES tokenPrivileges{};
+        tokenPrivileges.PrivilegeCount = 1;
+        tokenPrivileges.Privileges[0].Luid = debugPrivilegeLuid;
+        tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (::AdjustTokenPrivileges(
+            tokenHandle,
+            FALSE,
+            &tokenPrivileges,
+            sizeof(tokenPrivileges),
+            nullptr,
+            nullptr) == FALSE)
+        {
+            const DWORD errorCode = ::GetLastError();
+            ::CloseHandle(tokenHandle);
+            startupTraceRaw(
+                std::string("startup SeDebugPrivilege AdjustTokenPrivileges failed, error=")
+                + std::to_string(errorCode));
+            kLogEvent event;
+            err << event
+                << "[main] 启动期 SeDebugPrivilege 申请失败：AdjustTokenPrivileges error="
+                << errorCode
+                << eol;
+            return false;
+        }
+
+        const DWORD adjustError = ::GetLastError();
+        ::CloseHandle(tokenHandle);
+        if (adjustError != ERROR_SUCCESS)
+        {
+            startupTraceRaw(
+                std::string("startup SeDebugPrivilege AdjustTokenPrivileges returned error=")
+                + std::to_string(adjustError));
+            kLogEvent event;
+            err << event
+                << "[main] 启动期 SeDebugPrivilege 申请失败：AdjustTokenPrivileges returned error="
+                << adjustError
+                << eol;
+            return false;
+        }
+
+        startupTraceRaw("startup SeDebugPrivilege enabled");
+        kLogEvent event;
+        info << event
+            << "[main] 启动期 SeDebugPrivilege 已启用。"
+            << eol;
+        return true;
     }
 
     // extractCurrentProcessParameterText 作用：
@@ -1031,12 +1189,42 @@ int main(int argc, char* argv[])
     initializeProcessDpiAwareness();
     startupTraceRaw("initializeProcessDpiAwareness finished");
 
+    const std::vector<std::wstring> startupUnlockPathList = collectUnlockPathsFromCommandLine();
     const bool privilegeRestartLaunch = hasCommandLineArgument(kPrivilegeRestartArgument);
     if (!privilegeRestartLaunch)
     {
         if (HWND existingWindowHandle = findExistingKswordMainWindow())
         {
-            startupTraceRaw("existing Ksword main window found, activating it and exiting current instance");
+            if (!startupUnlockPathList.empty())
+            {
+                startupTraceRaw("existing Ksword main window found, forwarding unlock request and exiting current instance");
+                bool allUnlockRequestsForwarded = true;
+                for (const std::wstring& unlockPath : startupUnlockPathList)
+                {
+                    if (!sendUnlockPathToExistingMainWindow(existingWindowHandle, unlockPath))
+                    {
+                        allUnlockRequestsForwarded = false;
+                    }
+                }
+
+                if (!allUnlockRequestsForwarded && !isCurrentProcessElevated())
+                {
+                    // 兜底策略：
+                    // - 正常路径应由已有主窗口的 ChangeWindowMessageFilterEx 放行 WM_COPYDATA；
+                    // - 如果目标实例较旧/窗口尚未完成初始化/系统策略导致发送失败，普通权限实例不应直接丢弃路径；
+                    // - 尝试提权重启，至少让文件解锁请求能进入一个具备管理员权限的新实例。
+                    startupTraceRaw("unlock forwarding failed from non-elevated process, trying elevated relaunch fallback");
+                    if (tryLaunchElevatedSelfBeforeSplash())
+                    {
+                        startupTraceRaw("unlock forwarding fallback elevated relaunch succeeded");
+                        return 0;
+                    }
+                }
+            }
+            else
+            {
+                startupTraceRaw("existing Ksword main window found, activating it and exiting current instance");
+            }
             activateExistingKswordMainWindow(existingWindowHandle);
             return 0;
         }
@@ -1044,6 +1232,31 @@ int main(int argc, char* argv[])
     else
     {
         startupTraceRaw("privilege restart marker found, skipping single-instance check");
+    }
+
+    if (!startupUnlockPathList.empty() && !privilegeRestartLaunch && !isCurrentProcessElevated())
+    {
+        // Shell 文件解锁入口必须尽早提权：
+        // - 文件占用扫描依赖管理员权限和 SeDebugPrivilege，否则系统/高权限进程句柄容易漏报；
+        // - 这里位于 splash/QApplication 创建前，避免普通权限实例先初始化 UI 再重启造成闪烁；
+        // - 参数由 tryLaunchElevatedSelfBeforeSplash 原样透传，并追加内部重启标记防止循环。
+        startupTraceRaw("unlock startup requested without elevation, launching elevated self before splash");
+        kLogEvent unlockElevationEvent;
+        info << unlockElevationEvent
+            << "[main] 检测到文件解锁参数且当前不是管理员，准备立即提权重启。"
+            << eol;
+        const bool elevatedLaunchStarted = tryLaunchElevatedSelfBeforeSplash();
+        if (elevatedLaunchStarted)
+        {
+            startupTraceRaw("unlock elevated relaunch succeeded, exiting current instance");
+            warn << unlockElevationEvent
+                << "[main] 文件解锁管理员实例已启动，当前普通权限实例退出。"
+                << eol;
+            return 0;
+        }
+        warn << unlockElevationEvent
+            << "[main] 文件解锁管理员实例未能启动，将继续当前实例启动。"
+            << eol;
     }
 
     {
@@ -1126,6 +1339,13 @@ int main(int argc, char* argv[])
             << "[main] 自动管理员请求未拉起新实例，将继续当前实例启动。"
             << eol;
     }
+
+    // 管理员实例需要和普通“正常启动后手动点 Debug”保持一致：
+    // - 带 admin/--ksword-privilege-restart 参数启动时不会经过按钮点击流程；
+    // - 因此在 QApplication 创建前统一尝试启用 SeDebugPrivilege，避免进程/句柄相关功能降级。
+    startupTraceRaw("before startup SeDebugPrivilege request");
+    (void)tryEnableStartupDebugPrivilege();
+    startupTraceRaw("after startup SeDebugPrivilege request");
 
     startupTraceRaw("before applyQtScaleFactorEnvironment");
     applyQtScaleFactorEnvironment(startupSettings.startupWindowScaleFactor);
@@ -1230,16 +1450,9 @@ int main(int argc, char* argv[])
     }
 
     QStringList unlockPathList;
-    for (int index = 1; index < argumentList.size(); ++index)
+    for (const std::wstring& unlockPath : startupUnlockPathList)
     {
-        if (argumentList[index] == QStringLiteral("--unlock"))
-        {
-            if (index + 1 < argumentList.size())
-            {
-                unlockPathList.push_back(argumentList[index + 1]);
-                index += 1;
-            }
-        }
+        unlockPathList.push_back(QString::fromStdWString(unlockPath));
     }
 
     // startupProgressCallback 作用：

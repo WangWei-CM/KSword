@@ -6,18 +6,31 @@
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QFileDialog>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
+#include <QProcess>
 #include <QPushButton>
 #include <QSlider>
+#include <QStringList>
 #include <QTabWidget>
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
 #include <cmath>
+#include <string>
+#include <vector>
 
 namespace
 {
@@ -27,6 +40,7 @@ namespace
     constexpr const char* IconThemeDark = ":/Icon/settings_theme_dark.svg";
     constexpr const char* IconBrowseBackground = ":/Icon/settings_background_browse.svg";
     constexpr const char* IconResetBackground = ":/Icon/settings_background_reset.svg";
+    constexpr wchar_t kUnlockerKeyName[] = L"Ksword.FileUnlocker";
 
     // formatScaleFactorText 作用：
     // - 把缩放因子格式化为两位小数字符串；
@@ -37,6 +51,115 @@ namespace
     QString formatScaleFactorText(const double scaleFactor)
     {
         return QString::number(ks::settings::normalizeWindowScaleFactor(scaleFactor), 'f', 2);
+    }
+
+    std::wstring queryCurrentExecutablePath()
+    {
+        std::vector<wchar_t> pathBuffer(1024, L'\0');
+        while (pathBuffer.size() < 32768)
+        {
+            ::SetLastError(ERROR_SUCCESS);
+            const DWORD copiedLength = ::GetModuleFileNameW(
+                nullptr,
+                pathBuffer.data(),
+                static_cast<DWORD>(pathBuffer.size()));
+            const DWORD lastError = ::GetLastError();
+            if (copiedLength == 0)
+            {
+                return std::wstring();
+            }
+            if (copiedLength < pathBuffer.size() && lastError != ERROR_INSUFFICIENT_BUFFER)
+            {
+                return std::wstring(pathBuffer.data(), copiedLength);
+            }
+            pathBuffer.resize(pathBuffer.size() * 2, L'\0');
+        }
+        return std::wstring();
+    }
+
+    bool writeRegistryString(
+        HKEY rootKey,
+        const std::wstring& subKeyPath,
+        const wchar_t* valueName,
+        const std::wstring& valueText)
+    {
+        HKEY keyHandle = nullptr;
+        const LONG createResult = ::RegCreateKeyExW(
+            rootKey,
+            subKeyPath.c_str(),
+            0,
+            nullptr,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            nullptr,
+            &keyHandle,
+            nullptr);
+        if (createResult != ERROR_SUCCESS)
+        {
+            return false;
+        }
+
+        const DWORD valueSizeBytes = static_cast<DWORD>((valueText.size() + 1) * sizeof(wchar_t));
+        const LONG setResult = ::RegSetValueExW(
+            keyHandle,
+            valueName,
+            0,
+            REG_SZ,
+            reinterpret_cast<const BYTE*>(valueText.c_str()),
+            valueSizeBytes);
+        ::RegCloseKey(keyHandle);
+        return setResult == ERROR_SUCCESS;
+    }
+
+    void deleteRegistryTreeBestEffort(HKEY rootKey, const std::wstring& subKeyPath)
+    {
+        ::RegDeleteTreeW(rootKey, subKeyPath.c_str());
+    }
+
+    bool registerUnlockerContextMenuNow(const std::wstring& executablePath)
+    {
+        if (executablePath.empty())
+        {
+            return false;
+        }
+
+        const std::wstring commandForFile = L"\"" + executablePath + L"\" --unlock \"%1\"";
+        const std::wstring commandForBackground = L"\"" + executablePath + L"\" --unlock \"%V\"";
+        const std::wstring baseStar = L"Software\\Classes\\*\\shell\\" + std::wstring(kUnlockerKeyName);
+        const std::wstring baseDirectory = L"Software\\Classes\\Directory\\shell\\" + std::wstring(kUnlockerKeyName);
+        const std::wstring baseDrive = L"Software\\Classes\\Drive\\shell\\" + std::wstring(kUnlockerKeyName);
+        const std::wstring baseBackground =
+            L"Software\\Classes\\Directory\\Background\\shell\\" + std::wstring(kUnlockerKeyName);
+
+        return
+            writeRegistryString(HKEY_CURRENT_USER, baseStar, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
+            && writeRegistryString(HKEY_CURRENT_USER, baseStar, L"Icon", executablePath)
+            && writeRegistryString(HKEY_CURRENT_USER, baseStar + L"\\command", nullptr, commandForFile)
+            && writeRegistryString(HKEY_CURRENT_USER, baseDirectory, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
+            && writeRegistryString(HKEY_CURRENT_USER, baseDirectory, L"Icon", executablePath)
+            && writeRegistryString(HKEY_CURRENT_USER, baseDirectory + L"\\command", nullptr, commandForFile)
+            && writeRegistryString(HKEY_CURRENT_USER, baseDrive, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
+            && writeRegistryString(HKEY_CURRENT_USER, baseDrive, L"Icon", executablePath)
+            && writeRegistryString(HKEY_CURRENT_USER, baseDrive + L"\\command", nullptr, commandForFile)
+            && writeRegistryString(HKEY_CURRENT_USER, baseBackground, nullptr, L"使用 Ksword 文件解锁器(R3/R0)")
+            && writeRegistryString(HKEY_CURRENT_USER, baseBackground, L"Icon", executablePath)
+            && writeRegistryString(HKEY_CURRENT_USER, baseBackground + L"\\command", nullptr, commandForBackground);
+    }
+
+    void unregisterUnlockerContextMenuNow()
+    {
+        deleteRegistryTreeBestEffort(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\*\\shell\\" + std::wstring(kUnlockerKeyName));
+        deleteRegistryTreeBestEffort(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\Directory\\shell\\" + std::wstring(kUnlockerKeyName));
+        deleteRegistryTreeBestEffort(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\Drive\\shell\\" + std::wstring(kUnlockerKeyName));
+        deleteRegistryTreeBestEffort(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\Directory\\Background\\shell\\" + std::wstring(kUnlockerKeyName));
     }
 }
 
@@ -275,8 +398,35 @@ void SettingsDock::initializeAppearanceTab()
     // m_unlockerShellContextMenuCheckBox 作用：控制是否启用系统右键“文件解锁器”菜单。
     m_unlockerShellContextMenuCheckBox = new QCheckBox(QStringLiteral("启用系统右键“文件解锁器”菜单"), startupGroupBox);
     m_unlockerShellContextMenuCheckBox->setToolTip(
-        QStringLiteral("关闭后会在下次启动时自动移除系统右键菜单中的“Ksword 文件解锁器(R3/R0)”项"));
+        QStringLiteral("点击“应用”后会立即注册或移除系统右键菜单中的“Ksword 文件解锁器(R3/R0)”项"));
     startupLayout->addWidget(m_unlockerShellContextMenuCheckBox);
+
+    QLabel* taskmgrHijackHintLabel = new QLabel(
+        QStringLiteral("任务管理器映像劫持：调用程序当前目录下的 TaskmgrHijack.ps1，脚本会按需弹出管理员提权。"),
+        startupGroupBox);
+    taskmgrHijackHintLabel->setWordWrap(true);
+    startupLayout->addWidget(taskmgrHijackHintLabel);
+
+    QHBoxLayout* taskmgrHijackButtonLayout = new QHBoxLayout();
+    taskmgrHijackButtonLayout->setSpacing(8);
+
+    // m_installTaskmgrHijackButton 作用：将 taskmgr.exe IFEO Debugger 指向当前 Ksword5.1.exe。
+    m_installTaskmgrHijackButton = new QPushButton(QStringLiteral("映像劫持任务管理器"), startupGroupBox);
+    m_installTaskmgrHijackButton->setMinimumWidth(146);
+    m_installTaskmgrHijackButton->setFixedHeight(30);
+    m_installTaskmgrHijackButton->setToolTip(
+        QStringLiteral("执行 TaskmgrHijack.ps1 -Install -TargetExe 当前程序，打开任务管理器时转到 Ksword"));
+    taskmgrHijackButtonLayout->addWidget(m_installTaskmgrHijackButton, 0);
+
+    // m_uninstallTaskmgrHijackButton 作用：移除 taskmgr.exe IFEO Debugger，还原系统任务管理器。
+    m_uninstallTaskmgrHijackButton = new QPushButton(QStringLiteral("还原任务管理器"), startupGroupBox);
+    m_uninstallTaskmgrHijackButton->setMinimumWidth(126);
+    m_uninstallTaskmgrHijackButton->setFixedHeight(30);
+    m_uninstallTaskmgrHijackButton->setToolTip(
+        QStringLiteral("执行 TaskmgrHijack.ps1 -Uninstall，移除 taskmgr.exe 映像劫持配置"));
+    taskmgrHijackButtonLayout->addWidget(m_uninstallTaskmgrHijackButton, 0);
+    taskmgrHijackButtonLayout->addStretch(1);
+    startupLayout->addLayout(taskmgrHijackButtonLayout);
 
     // 启动缩放因子设置：重启后生效，用于统一控制主窗口 UI 缩放倍率。
     QHBoxLayout* startupScaleLayout = new QHBoxLayout();
@@ -368,6 +518,14 @@ void SettingsDock::bindAppearanceSignals()
 
     connect(m_unlockerShellContextMenuCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
         markPendingChanges(QStringLiteral("系统右键文件解锁器开关切换"));
+        });
+
+    connect(m_installTaskmgrHijackButton, &QPushButton::clicked, this, [this]() {
+        launchTaskmgrHijackScript(true);
+        });
+
+    connect(m_uninstallTaskmgrHijackButton, &QPushButton::clicked, this, [this]() {
+        launchTaskmgrHijackScript(false);
         });
 
     connect(m_scrollBarWidthCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
@@ -568,7 +726,7 @@ void SettingsDock::updateApplyButtonState()
     m_applySettingsButton->setEnabled(m_hasPendingChanges);
     m_applySettingsButton->setToolTip(
         m_hasPendingChanges
-        ? QStringLiteral("应用当前设置改动（主题/背景立即生效，启动相关选项下次启动生效）")
+        ? QStringLiteral("应用当前设置改动（主题/背景和系统右键菜单立即生效，部分启动选项下次启动生效）")
         : QStringLiteral("当前设置已应用，无待提交改动"));
 }
 
@@ -582,6 +740,8 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
     // settingsEvent 作用：本次“设置变更”调用链统一日志事件对象。
     kLogEvent settingsEvent;
     const ks::settings::AppearanceSettings nextSettings = collectSettingsFromUi();
+    const bool unlockerShellContextMenuChanged =
+        nextSettings.unlockerShellContextMenuEnabled != m_currentAppearanceSettings.unlockerShellContextMenuEnabled;
     const bool sameScaleFactor =
         std::fabs(nextSettings.startupWindowScaleFactor - m_currentAppearanceSettings.startupWindowScaleFactor) < 0.0001;
 
@@ -615,6 +775,36 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
             << saveErrorText.toStdString()
             << eol;
         return;
+    }
+
+    if (unlockerShellContextMenuChanged)
+    {
+        if (nextSettings.unlockerShellContextMenuEnabled)
+        {
+            const std::wstring executablePath = queryCurrentExecutablePath();
+            const bool registerOk = registerUnlockerContextMenuNow(executablePath);
+            if (!registerOk)
+            {
+                warn << settingsEvent
+                    << "[SettingsDock] 系统右键文件解锁器菜单即时注册失败，将保留配置并在下次启动重试。"
+                    << eol;
+            }
+            else
+            {
+                info << settingsEvent
+                    << "[SettingsDock] 系统右键文件解锁器菜单已即时注册。"
+                    << eol;
+            }
+        }
+        else
+        {
+            // 取消勾选必须立即移除 HKCU\Software\Classes 下的四类 shell 菜单，
+            // 不能只写配置等待下次启动，否则用户会看到右键菜单仍然残留。
+            unregisterUnlockerContextMenuNow();
+            info << settingsEvent
+                << "[SettingsDock] 系统右键文件解锁器菜单已即时移除。"
+                << eol;
+        }
     }
 
     m_currentAppearanceSettings = nextSettings;
@@ -738,6 +928,112 @@ void SettingsDock::updateWindowScaleFactorHintLabel(const double normalizedScale
     const int scalePercent = static_cast<int>(std::lround(safeScaleFactor * 100.0));
     m_startupWindowScaleHintLabel->setText(
         QStringLiteral("当前：约 %1%%（重启后生效，系统缩放会叠加）").arg(scalePercent));
+}
+
+void SettingsDock::launchTaskmgrHijackScript(const bool install)
+{
+    // scriptPath 作用：
+    // - 固定从应用当前目录查找 TaskmgrHijack.ps1，匹配 Release 包复制脚本的部署方式；
+    // - 不回退仓库路径，避免发布包和开发目录行为不一致。
+    const QString applicationDirectoryPath = QCoreApplication::applicationDirPath();
+    const QString scriptPath = QDir(applicationDirectoryPath).absoluteFilePath(QStringLiteral("TaskmgrHijack.ps1"));
+    const QFileInfo scriptFileInfo(scriptPath);
+    if (!scriptFileInfo.exists() || !scriptFileInfo.isFile())
+    {
+        const QString errorText = QStringLiteral("未找到任务管理器映像劫持脚本。\n\n路径：%1").arg(scriptPath);
+        kLogEvent settingsEvent;
+        err << settingsEvent
+            << "[SettingsDock] TaskmgrHijack.ps1 不存在，无法执行任务管理器映像劫持动作: "
+            << scriptPath.toStdString()
+            << eol;
+        QMessageBox::warning(this, QStringLiteral("任务管理器映像劫持"), errorText);
+        return;
+    }
+
+    // targetExePath 作用：
+    // - 安装时显式传入当前 Ksword 主程序路径，避免 PowerShell 工作目录变化导致脚本找不到 Ksword5.1.exe；
+    // - 卸载时不需要 TargetExe，保持脚本参数语义最小化。
+    const QString targetExePath = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
+    QStringList argumentList;
+    argumentList
+        << QStringLiteral("-NoProfile")
+        << QStringLiteral("-ExecutionPolicy")
+        << QStringLiteral("Bypass")
+        << QStringLiteral("-File")
+        << QDir::toNativeSeparators(scriptPath)
+        << (install ? QStringLiteral("-Install") : QStringLiteral("-Uninstall"));
+    if (install)
+    {
+        argumentList << QStringLiteral("-TargetExe") << targetExePath;
+    }
+
+    // powershellProcess 作用：
+    // - 异步启动脚本，避免设置对话框阻塞；
+    // - 脚本内部 Ensure-Administrator 会在需要时重新 RunAs，并在管理员窗口继续执行。
+    QProcess* powershellProcess = new QProcess(this);
+    powershellProcess->setProgram(QStringLiteral("powershell.exe"));
+    powershellProcess->setArguments(argumentList);
+    powershellProcess->setWorkingDirectory(applicationDirectoryPath);
+
+    connect(powershellProcess, &QProcess::errorOccurred, this,
+        [this, powershellProcess, install](const QProcess::ProcessError processError) {
+            const QString errorText = powershellProcess->errorString();
+            kLogEvent settingsEvent;
+            err << settingsEvent
+                << "[SettingsDock] 启动 TaskmgrHijack.ps1 失败, action="
+                << (install ? "install" : "uninstall")
+                << ", processError="
+                << static_cast<int>(processError)
+                << ", error="
+                << errorText.toStdString()
+                << eol;
+            QMessageBox::warning(
+                this,
+                QStringLiteral("任务管理器映像劫持"),
+                QStringLiteral("启动 PowerShell 脚本失败。\n\n%1").arg(errorText));
+        });
+    connect(powershellProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+        [powershellProcess, install](const int exitCode, const QProcess::ExitStatus exitStatus) {
+            kLogEvent settingsEvent;
+            info << settingsEvent
+                << "[SettingsDock] TaskmgrHijack.ps1 进程结束, action="
+                << (install ? "install" : "uninstall")
+                << ", exitCode="
+                << exitCode
+                << ", exitStatus="
+                << static_cast<int>(exitStatus)
+                << eol;
+            powershellProcess->deleteLater();
+        });
+
+    powershellProcess->start();
+    if (!powershellProcess->waitForStarted(3000))
+    {
+        const QString errorText = powershellProcess->errorString();
+        kLogEvent settingsEvent;
+        err << settingsEvent
+            << "[SettingsDock] TaskmgrHijack.ps1 未能启动, action="
+            << (install ? "install" : "uninstall")
+            << ", error="
+            << errorText.toStdString()
+            << eol;
+        QMessageBox::warning(
+            this,
+            QStringLiteral("任务管理器映像劫持"),
+            QStringLiteral("启动 PowerShell 脚本失败。\n\n%1").arg(errorText));
+        powershellProcess->deleteLater();
+        return;
+    }
+
+    kLogEvent settingsEvent;
+    info << settingsEvent
+        << "[SettingsDock] 已启动 TaskmgrHijack.ps1, action="
+        << (install ? "install" : "uninstall")
+        << ", script="
+        << scriptPath.toStdString()
+        << ", targetExe="
+        << targetExePath.toStdString()
+        << eol;
 }
 
 double SettingsDock::parseWindowScaleFactorFromUi() const

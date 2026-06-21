@@ -28,6 +28,7 @@
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QDateTime>
+#include <QEvent>
 #include <QFile>
 #include <QFileDevice>
 #include <QFileInfo>
@@ -47,6 +48,7 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QModelIndex>
+#include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QProgressBar>
@@ -76,6 +78,11 @@
 #include <QVector>
 #include <QVBoxLayout>
 #include <QWindow>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
 
 #include <array>
 #include <algorithm>
@@ -1339,7 +1346,7 @@ namespace
             .arg(KswordTheme::PrimaryBluePressedHex);
     }
 
-    // 递归复制目录：用于粘贴目录场景。
+    // 递归复制目录：用于跨面板复制目录场景。
     bool copyDirectoryRecursively(const QString& sourcePath, const QString& targetPath, QString& errorTextOut)
     {
         QDir sourceDir(sourcePath);
@@ -1407,6 +1414,61 @@ namespace
         return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
     }
 
+    // openCommandPromptInDirectory：
+    // - 作用：用 Win32 CreateProcessW 显式创建一个新控制台 cmd.exe，并把工作目录设置为目标路径；
+    // - 参数 workPath：要作为 cmd 当前目录的文件夹路径；会转换为 Windows 原生分隔符；
+    // - 参数 errorCodeOut：返回 CreateProcessW 失败时的 GetLastError，成功时为 ERROR_SUCCESS；
+    // - 返回：true 表示 cmd 进程已创建；false 表示创建失败。
+    bool openCommandPromptInDirectory(const QString& workPath, DWORD* const errorCodeOut)
+    {
+        if (errorCodeOut != nullptr)
+        {
+            *errorCodeOut = ERROR_SUCCESS;
+        }
+
+        const QString nativeWorkPath = QDir::toNativeSeparators(workPath);
+        std::wstring commandLineText = L"cmd.exe /K";
+        std::wstring currentDirectoryText = nativeWorkPath.toStdWString();
+        if (currentDirectoryText.empty())
+        {
+            currentDirectoryText = QDir::toNativeSeparators(QDir::homePath()).toStdWString();
+        }
+
+        STARTUPINFOW startupInfo{};
+        startupInfo.cb = sizeof(startupInfo);
+        PROCESS_INFORMATION processInfo{};
+
+        const BOOL createOk = ::CreateProcessW(
+            nullptr,
+            commandLineText.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NEW_CONSOLE,
+            nullptr,
+            currentDirectoryText.c_str(),
+            &startupInfo,
+            &processInfo);
+        if (createOk == FALSE)
+        {
+            if (errorCodeOut != nullptr)
+            {
+                *errorCodeOut = ::GetLastError();
+            }
+            return false;
+        }
+
+        if (processInfo.hThread != nullptr)
+        {
+            ::CloseHandle(processInfo.hThread);
+        }
+        if (processInfo.hProcess != nullptr)
+        {
+            ::CloseHandle(processInfo.hProcess);
+        }
+        return true;
+    }
+
     // takeOwnershipBySystemCommand：
     // - 作用：对目标路径执行 takeown 与 icacls，获取所有权并授权管理员组完全控制。
     // - 参数 targetPath：待处理文件/目录路径。
@@ -1418,7 +1480,7 @@ namespace
         const QString quotedPath = QStringLiteral("\"%1\"").arg(QDir::toNativeSeparators(targetPath));
         const QString takeOwnCommand = info.isDir()
             ? QStringLiteral("takeown /F %1 /A /R /D Y").arg(quotedPath)
-            : QStringLiteral("takeown /F %1 /A /D Y").arg(quotedPath);
+            : QStringLiteral("takeown /F %1 /A").arg(quotedPath);
         const QString grantCommand = info.isDir()
             ? QStringLiteral("icacls %1 /grant *S-1-5-32-544:F /T /C").arg(quotedPath)
             : QStringLiteral("icacls %1 /grant *S-1-5-32-544:F /C").arg(quotedPath);
@@ -3863,15 +3925,17 @@ namespace
         QWidget* buildUsageTab()
         {
             // 用途：Phase-10 把现有文件占用扫描结果直接嵌入属性窗口。
-            // 处理：后台调用 FileHandleUsageScanner；Scanner 当前会优先使用用户态句柄快照，
-            // 并在诊断中标记 DuplicateHandle/NtObjectName 等来源。后续 R0 HandleTable
-            // 增强可以在 Scanner 内部扩展，属性页无需直接 DeviceIoControl。
+            // 处理：这里只创建轻量 UI，不在首次切换 Tab 时自动扫描，避免系统句柄枚举
+            //       和结果回填让属性窗口卡顿；用户点击“刷新占用”后再后台扫描。
+            //       Scanner 当前会优先使用用户态句柄快照，并在诊断中标记
+            //       DuplicateHandle/NtObjectName 等来源。后续 R0 HandleTable 增强可以
+            //       在 Scanner 内部扩展，属性页无需直接 DeviceIoControl。
             QWidget* page = new QWidget(this);
             QVBoxLayout* layout = new QVBoxLayout(page);
 
             QHBoxLayout* toolbarLayout = new QHBoxLayout();
             QPushButton* refreshButton = new QPushButton(QStringLiteral("刷新占用"), page);
-            QLabel* statusLabel = new QLabel(QStringLiteral("● 等待扫描"), page);
+            QLabel* statusLabel = new QLabel(QStringLiteral("● 未扫描，点击“刷新占用”开始枚举文件占用。"), page);
             statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
             toolbarLayout->addWidget(refreshButton, 0);
             toolbarLayout->addWidget(statusLabel, 1);
@@ -3903,14 +3967,6 @@ namespace
                 {
                     refreshUsageTable(table, statusLabel, refreshButton);
                 });
-
-            QMetaObject::invokeMethod(
-                page,
-                [this, table, statusLabel, refreshButton]()
-                {
-                    refreshUsageTable(table, statusLabel, refreshButton);
-                },
-                Qt::QueuedConnection);
             return page;
         }
 
@@ -4111,6 +4167,51 @@ FileDock::~FileDock()
     }
 }
 
+bool FileDock::eventFilter(QObject* watched, QEvent* event)
+{
+    // QFileSystemModel/QTreeView 在右键按下阶段会按默认鼠标选择规则更新当前行。
+    // 这里提前处理文件列表 viewport 的右键：命中已选中行时保留现有多选集合；
+    // 命中未选中行时切换为该单行，保证后续自定义菜单读取 selectedPaths() 一致。
+    if (event != nullptr && event->type() == QEvent::MouseButtonPress)
+    {
+        QMouseEvent* const mouseEvent = static_cast<QMouseEvent*>(event);
+        if (mouseEvent != nullptr && mouseEvent->button() == Qt::RightButton)
+        {
+            FilePanelWidgets* targetPanel = nullptr;
+            if (m_leftPanel.fileView != nullptr && watched == m_leftPanel.fileView->viewport())
+            {
+                targetPanel = &m_leftPanel;
+            }
+            else if (m_rightPanel.fileView != nullptr && watched == m_rightPanel.fileView->viewport())
+            {
+                targetPanel = &m_rightPanel;
+            }
+
+            if (targetPanel != nullptr && targetPanel->fileView != nullptr)
+            {
+                const QModelIndex hitIndex = targetPanel->fileView->indexAt(mouseEvent->pos());
+                QItemSelectionModel* const selectionModel = targetPanel->fileView->selectionModel();
+                if (hitIndex.isValid() && selectionModel != nullptr)
+                {
+                    const QModelIndex hitRowIndex = hitIndex.siblingAtColumn(0);
+                    const bool hitAlreadySelected =
+                        selectionModel->isRowSelected(hitIndex.row(), hitIndex.parent()) ||
+                        (hitRowIndex.isValid() && selectionModel->isSelected(hitRowIndex));
+                    if (!hitAlreadySelected)
+                    {
+                        selectionModel->select(hitIndex, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+                    }
+                    // 只更新 current index，不调用 QTreeView::setCurrentIndex()，避免 Qt 按普通点击规则清掉多选集合。
+                    selectionModel->setCurrentIndex(hitIndex, QItemSelectionModel::NoUpdate);
+                    return true;
+                }
+            }
+        }
+    }
+
+    return QWidget::eventFilter(watched, event);
+}
+
 void FileDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
@@ -4306,10 +4407,10 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
 
     panel.fileView = new QTreeView(panel.rootWidget);
     panel.fileView->setModel(panel.proxyModel);
-    panel.fileView->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    panel.fileView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    configureFileViewSelection(panel);
     panel.fileView->setEditTriggers(QAbstractItemView::EditKeyPressed);
     panel.fileView->setContextMenuPolicy(Qt::CustomContextMenu);
+    panel.fileView->viewport()->installEventFilter(this);
     panel.fileView->setSortingEnabled(true);
     panel.fileView->setDragEnabled(true);
     panel.fileView->setAcceptDrops(true);
@@ -4628,11 +4729,6 @@ void FileDock::initializeConnections(FilePanelWidgets& panel)
     connect(cutShortcut, &QShortcut::activated, this, [this, &panel]() {
         cutSelectedItems(panel);
     });
-    QShortcut* pasteShortcut = new QShortcut(QKeySequence::Paste, panel.fileView);
-    pasteShortcut->setContext(Qt::WidgetShortcut);
-    connect(pasteShortcut, &QShortcut::activated, this, [this, &panel]() {
-        pasteClipboardItems(panel);
-    });
 }
 
 void FileDock::navigateToPath(FilePanelWidgets& panel, const QString& pathText, bool recordHistory)
@@ -4768,6 +4864,10 @@ void FileDock::refreshPanel(FilePanelWidgets& panel)
     if (currentModeIsManual(panel))
     {
         panel.manualLoadedPath.clear();
+    }
+    else
+    {
+        recreateFileSystemModel(panel);
     }
     navigateToPath(panel, panel.currentPath, false);
 }
@@ -5283,6 +5383,7 @@ void FileDock::applyReadModeToPanel(FilePanelWidgets& panel)
         }
     }
 
+    configureFileViewSelection(panel);
     panel.fileView->header()->setStretchLastSection(false);
     panel.fileView->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     QItemSelectionModel* selectionModel = panel.fileView->selectionModel();
@@ -5292,6 +5393,46 @@ void FileDock::applyReadModeToPanel(FilePanelWidgets& panel)
         connect(selectionModel, &QItemSelectionModel::selectionChanged, this, [this, &panel](const QItemSelection&, const QItemSelection&) {
             updatePanelStatus(panel);
         });
+    }
+}
+
+void FileDock::configureFileViewSelection(FilePanelWidgets& panel)
+{
+    if (panel.fileView == nullptr)
+    {
+        return;
+    }
+
+    // 文件面板的批量删除、复制、剪切、R0 删除等动作都从 selectedRows(0) 收集路径。
+    // 因此无论初始创建还是切换 Windows API/手动解析模型后，都必须保持“整行扩展多选”。
+    panel.fileView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    panel.fileView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+}
+
+void FileDock::recreateFileSystemModel(FilePanelWidgets& panel)
+{
+    if (panel.rootWidget == nullptr || panel.proxyModel == nullptr)
+    {
+        return;
+    }
+
+    // QFileSystemModel 对目录项元数据有缓存；同一路径 setRootPath() 往往不会重新读取文件大小。
+    // 手动刷新时重建模型，保证 size/mtime 等列从磁盘重新枚举，同时代理模型和视图仍沿用原对象。
+    QFileSystemModel* const oldModel = panel.fsModel;
+    panel.fsModel = new ReparseAwareFileSystemModel(panel.rootWidget);
+    panel.fsModel->setReadOnly(false);
+    panel.fsModel->setResolveSymlinks(true);
+    panel.fsModel->setFilter(QDir::AllEntries | QDir::NoDotAndDotDot);
+    panel.fsModel->setNameFilterDisables(false);
+    panel.proxyModel->setSourceModel(panel.fsModel);
+
+    connect(panel.fsModel, &QFileSystemModel::directoryLoaded, this, [this, &panel](const QString&) {
+        updatePanelStatus(panel);
+    });
+
+    if (oldModel != nullptr)
+    {
+        oldModel->deleteLater();
     }
 }
 
@@ -6204,12 +6345,16 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QItemSelectionModel* selectionModel = panel.fileView->selectionModel();
     if (hitIndex.isValid() && selectionModel != nullptr)
     {
-        const bool hitAlreadySelected = selectionModel->isSelected(hitIndex);
+        const QModelIndex hitRowIndex = hitIndex.siblingAtColumn(0);
+        const bool hitAlreadySelected =
+            selectionModel->isRowSelected(hitIndex.row(), hitIndex.parent()) ||
+            (hitRowIndex.isValid() && selectionModel->isSelected(hitRowIndex));
         if (!hitAlreadySelected)
         {
             selectionModel->select(hitIndex, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
         }
-        panel.fileView->setCurrentIndex(hitIndex);
+        // 右键菜单入口只同步当前焦点，不让 current index 更新反向破坏多选集合。
+        selectionModel->setCurrentIndex(hitIndex, QItemSelectionModel::NoUpdate);
     }
 
     // 右键菜单所使用的数据统一来自“当前选中集合”。
@@ -6237,10 +6382,18 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     }
     const QString firstLinkTarget = (!linkTargetList.isEmpty() && isSingleSelection) ? linkTargetList.front() : QString();
 
+    // 复制/移动是双栏文件管理器语义：源面板的选中项会直接落到对侧面板。
+    // 菜单文案必须把目标面板说清楚，避免用户误解为 Windows 剪贴板“复制/剪切”。
+    FilePanelWidgets* const transferTargetPanel = oppositePanelFor(panel);
+    const QString transferTargetText = (transferTargetPanel != nullptr)
+        ? transferTargetPanel->panelNameText
+        : QStringLiteral("对侧面板");
+    const QString copyToPanelText = QStringLiteral("复制到%1").arg(transferTargetText);
+    const QString moveToPanelText = QStringLiteral("移动到%1").arg(transferTargetText);
+
     QMenu menu(this);
     menu.setStyleSheet(buildContextMenuStyle());
     QAction* openAction = menu.addAction(QIcon(":/Icon/process_start.svg"), QStringLiteral("打开/运行"));
-    QAction* editAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("编辑（文本）"));
     QAction* copyPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制路径"));
     QAction* copyKernelPathAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制内核模式地址"));
     QAction* copyShortNameAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制短文件名"));
@@ -6248,9 +6401,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* openLinkTargetAction = menu.addAction(QIcon(":/Icon/process_start.svg"), QStringLiteral("打开链接目标"));
     QAction* locateLinkTargetAction = menu.addAction(QIcon(":/Icon/process_open_folder.svg"), QStringLiteral("定位链接目标"));
     menu.addSeparator();
-    QAction* copyAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制"));
-    QAction* cutAction = menu.addAction(QIcon(":/Icon/process_suspend.svg"), QStringLiteral("剪切"));
-    QAction* pasteAction = menu.addAction(QIcon(":/Icon/process_resume.svg"), QStringLiteral("粘贴"));
+    QAction* copyAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), copyToPanelText);
+    QAction* cutAction = menu.addAction(QIcon(":/Icon/process_suspend.svg"), moveToPanelText);
     QAction* renameAction = menu.addAction(QIcon(":/Icon/process_priority.svg"), QStringLiteral("重命名(F2)"));
     QAction* deleteAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("删除(Delete)"));
     QAction* driverDeleteAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("驱动删除(R0)"));
@@ -6276,7 +6428,6 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     // 结合选中集合动态启用菜单项，保证“多选”和“右键动作”行为一致。
     const bool singleFileOnly = isSingleSelection && QFileInfo(firstPath).isFile();
     openAction->setEnabled(hasSelection);
-    editAction->setEnabled(hasAnyFile);
     copyPathAction->setEnabled(hasSelection);
     copyKernelPathAction->setEnabled(hasSelection);
     copyShortNameAction->setEnabled(hasSelection);
@@ -6285,11 +6436,10 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     locateLinkTargetAction->setEnabled(!firstLinkTarget.isEmpty());
     copyAction->setEnabled(hasSelection);
     cutAction->setEnabled(hasSelection);
-    pasteAction->setEnabled(!m_clipboardPaths.empty());
     renameAction->setEnabled(isSingleSelection);
     deleteAction->setEnabled(hasSelection);
     driverDeleteAction->setEnabled(hasSelection);
-    unlockByDriverAction->setEnabled(hasSelection);
+    unlockByDriverAction->setEnabled(isSingleSelection);
     takeOwnerAction->setEnabled(hasSelection);
     detailAction->setEnabled(hasSelection);
     hashAction->setEnabled(hasAnyFile);
@@ -6325,53 +6475,6 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     if (selectedAction == openAction)
     {
         openSelectedItems(panel);
-        return;
-    }
-    if (selectedAction == editAction)
-    {
-        // 编辑操作支持多选：逐个交给系统默认编辑器。
-        kLogEvent editEvent;
-        int successCount = 0;
-        QStringList failedPaths;
-        for (const QString& path : menuPaths)
-        {
-            QFileInfo info(path);
-            if (!info.isFile())
-            {
-                continue;
-            }
-            const bool openOk = QDesktopServices::openUrl(QUrl::fromLocalFile(path));
-            if (openOk)
-            {
-                successCount += 1;
-                continue;
-            }
-
-            failedPaths.push_back(QDir::toNativeSeparators(path));
-        }
-
-        if (!failedPaths.isEmpty())
-        {
-            warn << editEvent
-                << "[FileDock] 编辑（文本）部分失败, panel="
-                << panel.panelNameText.toStdString()
-                << ", successCount="
-                << successCount
-                << ", failCount="
-                << failedPaths.size()
-                << ", failedPreview=\n"
-                << buildLogPreviewText(failedPaths).toStdString()
-                << eol;
-        }
-        else
-        {
-            info << editEvent
-                << "[FileDock] 编辑（文本）完成, panel="
-                << panel.panelNameText.toStdString()
-                << ", successCount="
-                << successCount
-                << eol;
-        }
         return;
     }
     if (selectedAction == copyPathAction)
@@ -6440,11 +6543,6 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
         cutSelectedItems(panel);
         return;
     }
-    if (selectedAction == pasteAction)
-    {
-        pasteClipboardItems(panel);
-        return;
-    }
     if (selectedAction == renameAction)
     {
         renameSelectedItem(panel);
@@ -6462,6 +6560,14 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     }
     if (selectedAction == unlockByDriverAction)
     {
+        if (!isSingleSelection)
+        {
+            QMessageBox::information(
+                this,
+                QStringLiteral("文件解锁器"),
+                QStringLiteral("文件解锁器暂不支持多文件批量解除占用，请只选择一个文件或目录。"));
+            return;
+        }
         unlockSelectedItemsByDriver(panel);
         return;
     }
@@ -6483,9 +6589,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     if (selectedAction == openTerminalAction)
     {
         const QString workPath = panel.currentPath.isEmpty() ? QDir::homePath() : panel.currentPath;
-        const bool startOk = QProcess::startDetached(
-            QStringLiteral("cmd.exe"),
-            QStringList{ QStringLiteral("/K"), QStringLiteral("cd /d \"%1\"").arg(workPath) });
+        DWORD terminalErrorCode = ERROR_SUCCESS;
+        const bool startOk = openCommandPromptInDirectory(workPath, &terminalErrorCode);
         kLogEvent terminalEvent;
         if (!startOk)
         {
@@ -6494,6 +6599,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
                 << panel.panelNameText.toStdString()
                 << ", workPath="
                 << QDir::toNativeSeparators(workPath).toStdString()
+                << ", error="
+                << terminalErrorCode
                 << eol;
         }
         else
@@ -6994,68 +7101,90 @@ void FileDock::copySelectedItemShortName(FilePanelWidgets& panel)
 
 void FileDock::copySelectedItems(FilePanelWidgets& panel)
 {
-    m_clipboardPaths = selectedPaths(panel);
-    m_clipboardCutMode = false;
-
-    if (!m_clipboardPaths.empty())
-    {
-        kLogEvent event;
-        info << event
-            << "[FileDock] 复制项, panel="
-            << panel.panelNameText.toStdString()
-            << ", count="
-            << m_clipboardPaths.size()
-            << eol;
-    }
+    transferSelectedItemsToOppositePanel(panel, false);
 }
 
 void FileDock::cutSelectedItems(FilePanelWidgets& panel)
 {
-    m_clipboardPaths = selectedPaths(panel);
-    m_clipboardCutMode = true;
-
-    if (!m_clipboardPaths.empty())
-    {
-        kLogEvent event;
-        info << event
-            << "[FileDock] 剪切项, panel="
-            << panel.panelNameText.toStdString()
-            << ", count="
-            << m_clipboardPaths.size()
-            << eol;
-    }
+    transferSelectedItemsToOppositePanel(panel, true);
 }
 
-void FileDock::pasteClipboardItems(FilePanelWidgets& panel)
+FileDock::FilePanelWidgets* FileDock::oppositePanelFor(FilePanelWidgets& sourcePanel)
 {
-    if (m_clipboardPaths.empty())
+    if (&sourcePanel == &m_leftPanel)
     {
+        return &m_rightPanel;
+    }
+    if (&sourcePanel == &m_rightPanel)
+    {
+        return &m_leftPanel;
+    }
+    return nullptr;
+}
+
+void FileDock::transferSelectedItemsToOppositePanel(FilePanelWidgets& sourcePanel, bool moveItems)
+{
+    const std::vector<QString> selectedItemPaths = selectedPaths(sourcePanel);
+    if (selectedItemPaths.empty())
+    {
+        return;
+    }
+
+    FilePanelWidgets* const targetPanel = oppositePanelFor(sourcePanel);
+    if (targetPanel == nullptr || targetPanel->currentPath.trimmed().isEmpty())
+    {
+        kLogEvent event;
+        warn << event
+            << "[FileDock] 跨面板文件传输取消：无法解析目标面板, sourcePanel="
+            << sourcePanel.panelNameText.toStdString()
+            << eol;
+        return;
+    }
+
+    const QDir targetDir(targetPanel->currentPath);
+    if (!targetDir.exists())
+    {
+        kLogEvent event;
+        warn << event
+            << "[FileDock] 跨面板文件传输取消：目标目录不存在, sourcePanel="
+            << sourcePanel.panelNameText.toStdString()
+            << ", targetPanel="
+            << targetPanel->panelNameText.toStdString()
+            << ", targetPath="
+            << QDir::toNativeSeparators(targetPanel->currentPath).toStdString()
+            << eol;
         return;
     }
 
     {
         kLogEvent event;
         info << event
-            << "[FileDock] 粘贴请求, panel="
-            << panel.panelNameText.toStdString()
+            << "[FileDock] 跨面板文件传输请求, sourcePanel="
+            << sourcePanel.panelNameText.toStdString()
+            << ", targetPanel="
+            << targetPanel->panelNameText.toStdString()
             << ", targetPath="
-            << QDir::toNativeSeparators(panel.currentPath).toStdString()
-            << ", clipboardCount="
-            << m_clipboardPaths.size()
-            << ", cutMode="
-            << (m_clipboardCutMode ? "true" : "false")
+            << QDir::toNativeSeparators(targetPanel->currentPath).toStdString()
+            << ", count="
+            << selectedItemPaths.size()
+            << ", mode="
+            << (moveItems ? "move" : "copy")
             << eol;
     }
 
-    // 用进度卡片反馈粘贴过程，避免用户无感等待。
-    const int progressPid = kPro.add("文件", "粘贴");
-    kPro.set(progressPid, "准备粘贴", 0, 5.0f);
+    // 复制/剪切在双栏中改为“源面板 -> 对侧面板当前目录”的直接动作，不再经过内部粘贴缓存。
+    // 进度标题沿用右键菜单的目标面板文案，避免再出现容易误解的“剪切到对侧”。
+    const QString progressTitle = moveItems
+        ? QStringLiteral("移动到%1").arg(targetPanel->panelNameText)
+        : QStringLiteral("复制到%1").arg(targetPanel->panelNameText);
+    const int progressPid = kPro.add("文件", progressTitle.toStdString());
+    kPro.set(progressPid, moveItems ? "准备移动" : "准备复制", 0, 5.0f);
 
     QStringList errorLines;
-    const std::size_t totalCount = m_clipboardPaths.size();
+    const std::size_t totalCount = selectedItemPaths.size();
     for (std::size_t i = 0; i < totalCount; ++i)
     {
-        const QString sourcePath = m_clipboardPaths[i];
+        const QString sourcePath = selectedItemPaths[i];
         QFileInfo sourceInfo(sourcePath);
         if (!sourceInfo.exists())
         {
@@ -7063,14 +7192,29 @@ void FileDock::pasteClipboardItems(FilePanelWidgets& panel)
             continue;
         }
 
-        const QString targetPath = QDir(panel.currentPath).filePath(sourceInfo.fileName());
+        const QString targetPath = targetDir.filePath(sourceInfo.fileName());
         if (QDir::cleanPath(sourcePath).compare(QDir::cleanPath(targetPath), Qt::CaseInsensitive) == 0)
         {
+            errorLines << QStringLiteral("源和目标相同，已跳过：%1").arg(sourcePath);
             continue;
+        }
+        if (sourceInfo.isDir())
+        {
+            const QString cleanSourceDirPath = QDir::cleanPath(sourceInfo.absoluteFilePath());
+            const QString cleanTargetPath = QDir::cleanPath(targetPath);
+            const QString sourcePrefix = cleanSourceDirPath.endsWith(QLatin1Char('/'))
+                ? cleanSourceDirPath
+                : cleanSourceDirPath + QLatin1Char('/');
+            if (cleanTargetPath.startsWith(sourcePrefix, Qt::CaseInsensitive))
+            {
+                errorLines << QStringLiteral("不能把目录复制或移动到自身子目录：%1 -> %2")
+                    .arg(sourcePath, targetPath);
+                continue;
+            }
         }
 
         bool itemOk = false;
-        if (m_clipboardCutMode)
+        if (moveItems)
         {
             // 剪切优先尝试重命名移动，失败再走复制+删除兜底。
             itemOk = QFile::rename(sourcePath, targetPath);
@@ -7127,25 +7271,21 @@ void FileDock::pasteClipboardItems(FilePanelWidgets& panel)
         }
 
         const float progress = 5.0f + (static_cast<float>(i + 1) / static_cast<float>(totalCount)) * 90.0f;
-        kPro.set(progressPid, "粘贴处理中", 0, progress);
+        kPro.set(progressPid, moveItems ? "移动处理中" : "复制处理中", 0, progress);
     }
 
-    if (m_clipboardCutMode && errorLines.isEmpty())
-    {
-        // 剪切全部成功时清空内部剪贴板。
-        m_clipboardPaths.clear();
-        m_clipboardCutMode = false;
-    }
-
-    refreshPanel(panel);
-    kPro.set(progressPid, "粘贴完成", 0, 100.0f);
+    refreshPanel(sourcePanel);
+    refreshPanel(*targetPanel);
+    kPro.set(progressPid, moveItems ? "移动完成" : "复制完成", 0, 100.0f);
 
     if (!errorLines.isEmpty())
     {
         kLogEvent event;
         warn << event
-            << "[FileDock] 粘贴部分失败, panel="
-            << panel.panelNameText.toStdString()
+            << "[FileDock] 跨面板文件传输部分失败, sourcePanel="
+            << sourcePanel.panelNameText.toStdString()
+            << ", targetPanel="
+            << targetPanel->panelNameText.toStdString()
             << ", errorCount="
             << errorLines.size()
             << ", errorPreview=\n"
@@ -7156,10 +7296,14 @@ void FileDock::pasteClipboardItems(FilePanelWidgets& panel)
 
     kLogEvent event;
     info << event
-        << "[FileDock] 粘贴完成, panel="
-        << panel.panelNameText.toStdString()
+        << "[FileDock] 跨面板文件传输完成, sourcePanel="
+        << sourcePanel.panelNameText.toStdString()
+        << ", targetPanel="
+        << targetPanel->panelNameText.toStdString()
         << ", totalCount="
         << totalCount
+        << ", mode="
+        << (moveItems ? "move" : "copy")
         << eol;
 }
 
@@ -7552,6 +7696,23 @@ void FileDock::unlockSelectedItemsByDriver(FilePanelWidgets& panel)
     const std::vector<QString> paths = selectedPaths(panel);
     if (paths.empty())
     {
+        return;
+    }
+    if (paths.size() != 1)
+    {
+        // 当前文件解锁器会先扫描占用来源，再让用户选择关闭句柄或结束进程。
+        // 多路径下候选句柄/进程关系容易混在一起，暂不提供批量入口，避免误结束无关进程。
+        QMessageBox::information(
+            this,
+            QStringLiteral("文件解锁器"),
+            QStringLiteral("文件解锁器暂不支持多文件批量解除占用，请只选择一个文件或目录。"));
+        kLogEvent event;
+        info << event
+            << "[FileDock] 文件解锁器取消：暂不支持多选, panel="
+            << panel.panelNameText.toStdString()
+            << ", selectedCount="
+            << paths.size()
+            << eol;
         return;
     }
 

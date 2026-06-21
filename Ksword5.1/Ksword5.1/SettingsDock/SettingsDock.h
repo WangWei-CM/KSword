@@ -123,6 +123,15 @@ private:
     // 调用方式：点击“恢复默认背景路径”按钮时调用。
     void resetBackgroundPathToDefault();
 
+    // launchTaskmgrHijackScript 作用：
+    // - 从程序当前目录启动 TaskmgrHijack.ps1；
+    // - install=true 时写入 taskmgr.exe IFEO Debugger，install=false 时移除该配置；
+    // - 脚本自身负责在非管理员环境下触发 UAC 提权。
+    // 调用方式：点击“映像劫持任务管理器”或“还原任务管理器”按钮时调用。
+    // 入参 install：true=安装映像劫持；false=卸载并还原任务管理器。
+    // 返回：无返回值；启动失败会弹窗并写日志。
+    void launchTaskmgrHijackScript(bool install);
+
     // parseWindowScaleFactorFromUi 作用：
     // - 从输入框解析并校正启动窗口缩放因子；
     // - 非法输入会自动回退到 1.0。
@@ -178,6 +187,12 @@ private:
 
     // m_unlockerShellContextMenuCheckBox 作用：设置是否启用系统右键“文件解锁器”菜单。
     QCheckBox* m_unlockerShellContextMenuCheckBox = nullptr;
+
+    // m_installTaskmgrHijackButton 作用：调用当前目录 TaskmgrHijack.ps1 安装 taskmgr.exe IFEO 映像劫持。
+    QPushButton* m_installTaskmgrHijackButton = nullptr;
+
+    // m_uninstallTaskmgrHijackButton 作用：调用当前目录 TaskmgrHijack.ps1 移除 taskmgr.exe IFEO 映像劫持。
+    QPushButton* m_uninstallTaskmgrHijackButton = nullptr;
 
     // m_scrollBarWidthCombo 作用：设置全局滚动条宽度（窄/宽）。
     QComboBox* m_scrollBarWidthCombo = nullptr;

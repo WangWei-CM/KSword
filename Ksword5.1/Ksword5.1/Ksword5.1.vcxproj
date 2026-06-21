@@ -497,13 +497,6 @@
     </PropertyGroup>
     <Copy SourceFiles="$(TaskmgrHijackScriptSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(TaskmgrHijackScriptSource)')" />
   </Target>
-  <!-- 把公钥证书复制到主程序输出目录，UIAccess 按钮只导入 .cer，不接触本地 .pfx 私钥。 -->
-  <Target Name="CopyKswordTestSigningCertificate" AfterTargets="Build">
-    <PropertyGroup>
-      <KswordTestSigningCertificateSource>$(MSBuildProjectDirectory)\..\..\.cert\KswordARK-TestSigning.cer</KswordTestSigningCertificateSource>
-    </PropertyGroup>
-    <Copy SourceFiles="$(KswordTestSigningCertificateSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(KswordTestSigningCertificateSource)')" />
-  </Target>
   <Target Name="CopyKswordArkDriverArtifacts" AfterTargets="Build">
     <PropertyGroup>
       <KswordArkDriverOutputDir>$(MSBuildProjectDirectory)\..\..\KswordARKDriver\x64\$(Configuration)\</KswordArkDriverOutputDir>

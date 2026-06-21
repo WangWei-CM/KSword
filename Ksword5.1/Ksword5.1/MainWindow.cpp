@@ -76,7 +76,6 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <sddl.h>
-#include <wincrypt.h>
 #include <winternl.h>
 
 #include <algorithm>
@@ -89,11 +88,12 @@
 #include <TlHelp32.h>
 
 #pragma comment(lib, "Dwmapi.lib")
-#pragma comment(lib, "Crypt32.lib")
 
 namespace
 {
     constexpr wchar_t kKswordPrivilegeRestartArgument[] = L"--ksword-privilege-restart";
+    constexpr wchar_t kKswordMainWindowPropertyName[] = L"KswordARK.MainWindow.Singleton.Release";
+    constexpr ULONG_PTR kUnlockerCopyDataMessageId = 0x4B535755; // "KSWU"：Ksword shell unlocker IPC。
 
     // kDockLayoutConfigFileVersion 作用：
     // - 作为 ADS saveState/restoreState 的版本号；
@@ -1325,7 +1325,6 @@ namespace
     constexpr char kR0LogPrefixWarn[] = "[Warn]";
     constexpr char kR0LogPrefixError[] = "[Error]";
     constexpr char kR0LogPrefixFatal[] = "[Fatal]";
-    constexpr wchar_t kUiAccessCertificateFileName[] = L"KswordARK-TestSigning.cer";
 
     // sharedR0DriverLogEvent 作用：
     // - 统一承载 R3 进程内“驱动日志转发”链路的 GUID；
@@ -1576,124 +1575,6 @@ namespace
         bool m_active = false; // m_active：记录析构时是否需要撤销线程模拟。
     };
 
-    class ScopedCertStore final
-    {
-    public:
-        // 构造函数：
-        // - 输入：Windows 证书存储句柄；
-        // - 处理：保存句柄并在析构时自动关闭；
-        // - 返回：无返回值。
-        explicit ScopedCertStore(const HCERTSTORE storeHandle = nullptr)
-            : m_storeHandle(storeHandle)
-        {
-        }
-
-        ScopedCertStore(const ScopedCertStore&) = delete;
-        ScopedCertStore& operator=(const ScopedCertStore&) = delete;
-
-        // 析构函数：
-        // - 输入：无；
-        // - 处理：关闭证书存储句柄，避免重复泄露；
-        // - 返回：无返回值。
-        ~ScopedCertStore()
-        {
-            reset();
-        }
-
-        // reset：
-        // - 输入：新的证书存储句柄；
-        // - 处理：先关闭旧句柄，再接管新句柄；
-        // - 返回：无返回值。
-        void reset(const HCERTSTORE newStoreHandle = nullptr)
-        {
-            if (m_storeHandle != nullptr)
-            {
-                ::CertCloseStore(m_storeHandle, 0);
-            }
-            m_storeHandle = newStoreHandle;
-        }
-
-        // get：
-        // - 输入：无；
-        // - 处理：返回当前证书存储句柄；
-        // - 返回：HCERTSTORE，可能为空。
-        HCERTSTORE get() const
-        {
-            return m_storeHandle;
-        }
-
-        // isValid：
-        // - 输入：无；
-        // - 处理：判断当前句柄是否可用；
-        // - 返回：true 表示有效。
-        bool isValid() const
-        {
-            return m_storeHandle != nullptr;
-        }
-
-    private:
-        HCERTSTORE m_storeHandle = nullptr; // m_storeHandle：当前托管的系统证书存储句柄。
-    };
-
-    class ScopedCertContext final
-    {
-    public:
-        // 构造函数：
-        // - 输入：证书上下文指针；
-        // - 处理：保存指针并在析构时释放；
-        // - 返回：无返回值。
-        explicit ScopedCertContext(PCCERT_CONTEXT certificateContext = nullptr)
-            : m_certificateContext(certificateContext)
-        {
-        }
-
-        ScopedCertContext(const ScopedCertContext&) = delete;
-        ScopedCertContext& operator=(const ScopedCertContext&) = delete;
-
-        // 析构函数：
-        // - 输入：无；
-        // - 处理：释放证书上下文；
-        // - 返回：无返回值。
-        ~ScopedCertContext()
-        {
-            reset();
-        }
-
-        // reset：
-        // - 输入：新的证书上下文；
-        // - 处理：先释放旧上下文，再接管新上下文；
-        // - 返回：无返回值。
-        void reset(PCCERT_CONTEXT newCertificateContext = nullptr)
-        {
-            if (m_certificateContext != nullptr)
-            {
-                ::CertFreeCertificateContext(m_certificateContext);
-            }
-            m_certificateContext = newCertificateContext;
-        }
-
-        // get：
-        // - 输入：无；
-        // - 处理：返回当前证书上下文；
-        // - 返回：PCCERT_CONTEXT，可能为空。
-        PCCERT_CONTEXT get() const
-        {
-            return m_certificateContext;
-        }
-
-        // isValid：
-        // - 输入：无；
-        // - 处理：判断当前证书上下文是否存在；
-        // - 返回：true 表示有效。
-        bool isValid() const
-        {
-            return m_certificateContext != nullptr;
-        }
-
-    private:
-        PCCERT_CONTEXT m_certificateContext = nullptr; // m_certificateContext：待自动释放的证书上下文。
-    };
-
     QString formatWin32ErrorText(const DWORD errorCode)
     {
         if (errorCode == ERROR_SUCCESS)
@@ -1725,220 +1606,6 @@ namespace
             messageText = QStringLiteral("未知系统错误");
         }
         return messageText;
-    }
-
-    QString formatCertificateDigestText(const QByteArray& digestBytes)
-    {
-        if (digestBytes.isEmpty())
-        {
-            return QStringLiteral("Unavailable");
-        }
-
-        QStringList digestPartList;
-        digestPartList.reserve(digestBytes.size());
-        for (const unsigned char digestByte : digestBytes)
-        {
-            digestPartList.append(QStringLiteral("%1")
-                .arg(static_cast<unsigned int>(digestByte), 2, 16, QChar('0'))
-                .toUpper());
-        }
-        return digestPartList.join(QStringLiteral(":"));
-    }
-
-    bool readCertificateContextFromFile(
-        const QString& certificatePath,
-        ScopedCertContext& certificateContextOut,
-        QString* detailTextOut)
-    {
-        // certificateContextOut 用途：把解析出的 DER/CRT 证书上下文交给调用方托管。
-        certificateContextOut.reset();
-        if (detailTextOut != nullptr)
-        {
-            detailTextOut->clear();
-        }
-
-        // certificateFile 用途：只读取公钥证书文件，不接触 .pfx 私钥材料。
-        QFile certificateFile(certificatePath);
-        if (!certificateFile.open(QIODevice::ReadOnly))
-        {
-            if (detailTextOut != nullptr)
-            {
-                *detailTextOut = QStringLiteral("无法读取证书文件：%1").arg(certificateFile.errorString());
-            }
-            return false;
-        }
-
-        // certificateBytes 用途：保存证书文件原始二进制，供 WinCrypt 解析。
-        const QByteArray certificateBytes = certificateFile.readAll();
-        if (certificateBytes.isEmpty())
-        {
-            if (detailTextOut != nullptr)
-            {
-                *detailTextOut = QStringLiteral("证书文件为空。");
-            }
-            return false;
-        }
-
-        // rawContext 用途：WinCrypt 返回的证书上下文，成功后交给 ScopedCertContext 管理。
-        PCCERT_CONTEXT rawContext = ::CertCreateCertificateContext(
-            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
-            reinterpret_cast<const BYTE*>(certificateBytes.constData()),
-            static_cast<DWORD>(certificateBytes.size()));
-        if (rawContext == nullptr)
-        {
-            const DWORD errorCode = ::GetLastError();
-            if (detailTextOut != nullptr)
-            {
-                *detailTextOut = QStringLiteral("解析证书失败，错误码：%1，系统信息：%2")
-                    .arg(errorCode)
-                    .arg(formatWin32ErrorText(errorCode));
-            }
-            return false;
-        }
-
-        certificateContextOut.reset(rawContext);
-        return true;
-    }
-
-    QByteArray certificateSha1Digest(const PCCERT_CONTEXT certificateContext)
-    {
-        if (certificateContext == nullptr)
-        {
-            return {};
-        }
-
-        // digestSize 用途：先查询证书 SHA1 指纹所需缓冲区长度。
-        DWORD digestSize = 0;
-        if (::CertGetCertificateContextProperty(
-            certificateContext,
-            CERT_HASH_PROP_ID,
-            nullptr,
-            &digestSize) == FALSE ||
-            digestSize == 0)
-        {
-            return {};
-        }
-
-        // digestBytes 用途：保存证书 SHA1 指纹，用于系统证书存储查重。
-        QByteArray digestBytes(static_cast<int>(digestSize), Qt::Uninitialized);
-        if (::CertGetCertificateContextProperty(
-            certificateContext,
-            CERT_HASH_PROP_ID,
-            reinterpret_cast<BYTE*>(digestBytes.data()),
-            &digestSize) == FALSE)
-        {
-            return {};
-        }
-        digestBytes.resize(static_cast<int>(digestSize));
-        return digestBytes;
-    }
-
-    bool certificateExistsInStore(
-        const wchar_t* storeName,
-        const QByteArray& certificateDigest,
-        DWORD* errorCodeOut)
-    {
-        if (errorCodeOut != nullptr)
-        {
-            *errorCodeOut = ERROR_SUCCESS;
-        }
-        if (storeName == nullptr || storeName[0] == L'\0' || certificateDigest.isEmpty())
-        {
-            if (errorCodeOut != nullptr)
-            {
-                *errorCodeOut = ERROR_INVALID_PARAMETER;
-            }
-            return false;
-        }
-
-        // storeHandle 用途：打开本机系统证书存储，只读查询当前证书是否已存在。
-        ScopedCertStore storeHandle(::CertOpenStore(
-            CERT_STORE_PROV_SYSTEM_W,
-            0,
-            static_cast<HCRYPTPROV_LEGACY>(0),
-            CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_OPEN_EXISTING_FLAG | CERT_STORE_READONLY_FLAG,
-            storeName));
-        if (!storeHandle.isValid())
-        {
-            if (errorCodeOut != nullptr)
-            {
-                *errorCodeOut = ::GetLastError();
-            }
-            return false;
-        }
-
-        // hashBlob 用途：把 SHA1 指纹包装成 CertFindCertificateInStore 所需结构。
-        CRYPT_HASH_BLOB hashBlob{};
-        hashBlob.cbData = static_cast<DWORD>(certificateDigest.size());
-        hashBlob.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(certificateDigest.constData()));
-        // foundContext 用途：承接查找到的证书上下文，析构时自动释放。
-        ScopedCertContext foundContext(::CertFindCertificateInStore(
-            storeHandle.get(),
-            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
-            0,
-            CERT_FIND_SHA1_HASH,
-            &hashBlob,
-            nullptr));
-        if (foundContext.isValid())
-        {
-            return true;
-        }
-
-        const DWORD findError = ::GetLastError();
-        if (findError != CRYPT_E_NOT_FOUND && errorCodeOut != nullptr)
-        {
-            *errorCodeOut = findError;
-        }
-        return false;
-    }
-
-    bool addCertificateToLocalMachineStore(
-        const wchar_t* storeName,
-        const PCCERT_CONTEXT certificateContext,
-        DWORD* errorCodeOut)
-    {
-        if (errorCodeOut != nullptr)
-        {
-            *errorCodeOut = ERROR_SUCCESS;
-        }
-        if (storeName == nullptr || storeName[0] == L'\0' || certificateContext == nullptr)
-        {
-            if (errorCodeOut != nullptr)
-            {
-                *errorCodeOut = ERROR_INVALID_PARAMETER;
-            }
-            return false;
-        }
-
-        // storeHandle 用途：打开本机系统证书存储，写入公钥证书信任项。
-        ScopedCertStore storeHandle(::CertOpenStore(
-            CERT_STORE_PROV_SYSTEM_W,
-            0,
-            static_cast<HCRYPTPROV_LEGACY>(0),
-            CERT_SYSTEM_STORE_LOCAL_MACHINE,
-            storeName));
-        if (!storeHandle.isValid())
-        {
-            if (errorCodeOut != nullptr)
-            {
-                *errorCodeOut = ::GetLastError();
-            }
-            return false;
-        }
-
-        if (::CertAddCertificateContextToStore(
-            storeHandle.get(),
-            certificateContext,
-            CERT_STORE_ADD_REPLACE_EXISTING,
-            nullptr) == FALSE)
-        {
-            if (errorCodeOut != nullptr)
-            {
-                *errorCodeOut = ::GetLastError();
-            }
-            return false;
-        }
-        return true;
     }
 
     QString quoteWin32CommandLineArgument(const std::wstring& argumentText)
@@ -3091,6 +2758,49 @@ namespace
         const QFileInfo imageFileInfo(resolvedImagePath);
         return imageFileInfo.exists() && imageFileInfo.isFile() && imageFileInfo.isReadable();
     }
+
+    // configureSingleInstanceMessageReception 作用：
+    // - 输入：mainWindowHandle 为 Qt 主窗口对应的原生 HWND；
+    // - 处理：给窗口设置稳定识别属性，并允许低完整性/普通权限实例投递 WM_COPYDATA；
+    // - 返回：无返回值，失败仅影响单实例 Shell 解锁转发兼容性，不阻断主程序启动。
+    void configureSingleInstanceMessageReception(HWND mainWindowHandle)
+    {
+        if (mainWindowHandle == nullptr || ::IsWindow(mainWindowHandle) == FALSE)
+        {
+            return;
+        }
+
+        (void)::SetPropW(
+            mainWindowHandle,
+            kKswordMainWindowPropertyName,
+            reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(1)));
+
+        // ChangeWindowMessageFilterEx 作用：
+        // - 当主程序以管理员运行，而资源管理器右键菜单以普通权限拉起第二实例时；
+        // - Windows UIPI 默认会拦截跨完整性级别消息，导致 WM_COPYDATA 送不到已有主窗口；
+        // - 这里只放行本功能需要的 WM_COPYDATA，不扩大为任意自定义消息。
+        CHANGEFILTERSTRUCT filterStatus{};
+        filterStatus.cbSize = sizeof(filterStatus);
+        (void)::ChangeWindowMessageFilterEx(
+            mainWindowHandle,
+            WM_COPYDATA,
+            MSGFLT_ALLOW,
+            &filterStatus);
+    }
+
+    // clearSingleInstanceMessageReception 作用：
+    // - 输入：mainWindowHandle 为 Qt 主窗口对应的原生 HWND；
+    // - 处理：窗口销毁前移除用于单实例识别的属性；
+    // - 返回：无返回值。
+    void clearSingleInstanceMessageReception(HWND mainWindowHandle)
+    {
+        if (mainWindowHandle == nullptr || ::IsWindow(mainWindowHandle) == FALSE)
+        {
+            return;
+        }
+
+        (void)::RemovePropW(mainWindowHandle, kKswordMainWindowPropertyName);
+    }
 }
 
 MainWindow::MainWindow(
@@ -3189,8 +2899,9 @@ MainWindow::MainWindow(
     QApplication::setQuitOnLastWindowClosed(true);
 
     // 设置窗口标题和大小
-    setWindowTitle("Ksword5.1");
+    setWindowTitle("KswordARK-5.1-Release");
     resize(1024, 768);
+    configureSingleInstanceMessageReception(reinterpret_cast<HWND>(winId()));
 
     // 初始化菜单
     reportStartupProgress(38, QStringLiteral("正在初始化菜单..."));
@@ -3233,6 +2944,7 @@ MainWindow::MainWindow(
 
 MainWindow::~MainWindow()
 {
+    clearSingleInstanceMessageReception(reinterpret_cast<HWND>(winId()));
     CallbackPromptManager::shutdownGlobalManager();
     stopR0DriverLogPoller();
     // ADS会自动管理内存，无需手动删除
@@ -3715,6 +3427,46 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
     if (nativeMessage == nullptr)
     {
         return QMainWindow::nativeEvent(eventType, message, result);
+    }
+
+    if (nativeMessage->message == WM_COPYDATA)
+    {
+        const COPYDATASTRUCT* const copyData =
+            reinterpret_cast<const COPYDATASTRUCT*>(nativeMessage->lParam);
+        if (copyData != nullptr
+            && copyData->dwData == kUnlockerCopyDataMessageId
+            && copyData->lpData != nullptr
+            && copyData->cbData >= sizeof(wchar_t))
+        {
+            const std::size_t wcharCount =
+                static_cast<std::size_t>(copyData->cbData / sizeof(wchar_t));
+            const wchar_t* const pathBuffer = reinterpret_cast<const wchar_t*>(copyData->lpData);
+            QString unlockPath = QString::fromWCharArray(pathBuffer, static_cast<int>(wcharCount));
+            const int nullIndex = unlockPath.indexOf(QChar::Null);
+            if (nullIndex >= 0)
+            {
+                unlockPath.truncate(nullIndex);
+            }
+            unlockPath = QDir::toNativeSeparators(unlockPath.trimmed());
+
+            if (!unlockPath.isEmpty())
+            {
+                kLogEvent event;
+                info << event
+                    << "[MainWindow] 收到单实例文件解锁请求: path="
+                    << unlockPath.toStdString()
+                    << eol;
+                QTimer::singleShot(0, this, [this, unlockPath]()
+                    {
+                        this->raise();
+                        this->activateWindow();
+                        openFileUnlockerDockByPath(unlockPath);
+                    });
+            }
+
+            *result = TRUE;
+            return true;
+        }
     }
 
     if (nativeMessage->message == WM_GETMINMAXINFO)
@@ -4531,7 +4283,7 @@ void MainWindow::initPrivilegeStatusButtons()
     buttonLayout->setContentsMargins(0, 0, 4, 0);
     buttonLayout->setSpacing(6);
 
-    // 按钮文本采用纯文字，满足用户要求；UIAccess 放在最左侧用于导入本机信任证书。
+    // 按钮文本采用纯文字，满足用户要求；UIAccess 放在最左侧用于切换 TokenUIAccess fallback。
     m_uiAccessStatusButton = new QPushButton("UIAccess", m_privilegeButtonContainer);
     m_adminStatusButton = new QPushButton("Admin", m_privilegeButtonContainer);
     m_debugStatusButton = new QPushButton("Debug", m_privilegeButtonContainer);
@@ -4561,7 +4313,7 @@ void MainWindow::initPrivilegeStatusButtons()
         m_uiAccessStatusButton->setMinimumWidth(74);
     }
 
-    m_uiAccessStatusButton->setToolTip("UIAccess：导入公钥证书并尝试 SYSTEM TokenUIAccess fallback 启动");
+    m_uiAccessStatusButton->setToolTip("UIAccess：尝试 SYSTEM TokenUIAccess fallback 启动");
     m_r0StatusButton->setToolTip("R0：KswordARK 驱动服务快捷开关");
 
     // 把容器挂到功能条右侧。
@@ -4571,8 +4323,8 @@ void MainWindow::initPrivilegeStatusButtons()
     }
 
     // UIAccess 按钮：
-    // - 弹出风险确认；
-    // - 用户确认后把测试签名公钥导入本机 Root 与 TrustedPublisher。
+    // - 当前实例已带 UIAccess 时降级回普通用户实例；
+    // - 未带 UIAccess 时按需提权，并尝试 SYSTEM TokenUIAccess fallback 启动。
     connect(m_uiAccessStatusButton, &QPushButton::clicked, this, [this]() {
         handleUiAccessButtonClicked();
     });
@@ -4824,7 +4576,6 @@ void MainWindow::refreshPrivilegeStatusButtons()
     const bool debugEnabled = hasDebugPrivilege();
     const bool systemEnabled = hasSystemPrivilege();
     const bool uiAccessEnabled = hasUiAccessPrivilege();
-    const bool uiAccessCertificateTrusted = isUiAccessCertificateTrusted();
 
     // R0 状态位：
     // - R0：检查 KswordARK 驱动服务是否处于运行态。
@@ -4846,13 +4597,9 @@ void MainWindow::refreshPrivilegeStatusButtons()
         {
             m_uiAccessStatusButton->setToolTip("UIAccess：当前进程令牌已启用 UIAccess");
         }
-        else if (uiAccessCertificateTrusted)
-        {
-            m_uiAccessStatusButton->setToolTip("UIAccess：证书已受信任，点击尝试 SYSTEM TokenUIAccess fallback 启动");
-        }
         else
         {
-            m_uiAccessStatusButton->setToolTip("UIAccess：点击导入公钥证书并尝试 SYSTEM TokenUIAccess fallback 启动");
+            m_uiAccessStatusButton->setToolTip("UIAccess：点击尝试 SYSTEM TokenUIAccess fallback 启动");
         }
     }
     if (m_adminStatusButton != nullptr)
@@ -4877,7 +4624,6 @@ void MainWindow::refreshPrivilegeStatusButtons()
     // 仅在状态变化时写日志，避免定时器造成日志刷屏。
     static bool hasPreviousState = false;
     static bool previousUiAccessToken = false;
-    static bool previousUiAccessCertificate = false;
     static bool previousAdmin = false;
     static bool previousDebug = false;
     static bool previousSystem = false;
@@ -4885,14 +4631,12 @@ void MainWindow::refreshPrivilegeStatusButtons()
     if (!hasPreviousState ||
         previousAdmin != adminEnabled ||
         previousUiAccessToken != uiAccessEnabled ||
-        previousUiAccessCertificate != uiAccessCertificateTrusted ||
         previousDebug != debugEnabled ||
         previousSystem != systemEnabled ||
         previousR0 != r0Enabled)
     {
         hasPreviousState = true;
         previousUiAccessToken = uiAccessEnabled;
-        previousUiAccessCertificate = uiAccessCertificateTrusted;
         previousAdmin = adminEnabled;
         previousDebug = debugEnabled;
         previousSystem = systemEnabled;
@@ -4901,7 +4645,6 @@ void MainWindow::refreshPrivilegeStatusButtons()
         kLogEvent logEvent;
         info << logEvent
             << "[MainWindow] 权限状态刷新, uiAccessToken=" << (uiAccessEnabled ? "true" : "false")
-            << ", uiAccessCert=" << (uiAccessCertificateTrusted ? "true" : "false")
             << ", admin=" << (adminEnabled ? "true" : "false")
             << ", debug=" << (debugEnabled ? "true" : "false")
             << ", system=" << (systemEnabled ? "true" : "false")
@@ -4917,169 +4660,6 @@ void MainWindow::applyPrivilegeButtonStyle(QPushButton* button, const bool activ
         return;
     }
     button->setStyleSheet(buildPrivilegeButtonStyle(activeState));
-}
-
-QString MainWindow::resolveUiAccessCertificatePath() const
-{
-    // candidatePathList 用途：按发行目录、仓库开发目录顺序保存证书候选路径。
-    const QDir applicationDirectory(QCoreApplication::applicationDirPath());
-    QStringList candidatePathList;
-    candidatePathList << applicationDirectory.absoluteFilePath(QString::fromWCharArray(kUiAccessCertificateFileName));
-    candidatePathList << applicationDirectory.absoluteFilePath(QStringLiteral(".cert/%1").arg(QString::fromWCharArray(kUiAccessCertificateFileName)));
-
-    QDir repositoryProbeDirectory = applicationDirectory;
-    for (int depthIndex = 0; depthIndex < 6; ++depthIndex)
-    {
-        const QString certificatePath = repositoryProbeDirectory.absoluteFilePath(
-            QStringLiteral(".cert/%1").arg(QString::fromWCharArray(kUiAccessCertificateFileName)));
-        candidatePathList << certificatePath;
-        if (!repositoryProbeDirectory.cdUp())
-        {
-            break;
-        }
-    }
-
-    for (const QString& candidatePath : candidatePathList)
-    {
-        // fileInfo 用途：确认候选路径是真实可读文件，避免把目录误当证书。
-        const QFileInfo fileInfo(candidatePath);
-        if (fileInfo.exists() && fileInfo.isFile() && fileInfo.isReadable())
-        {
-            return fileInfo.absoluteFilePath();
-        }
-    }
-    return candidatePathList.isEmpty() ? QString() : QFileInfo(candidatePathList.first()).absoluteFilePath();
-}
-
-bool MainWindow::isUiAccessCertificateTrusted() const
-{
-    // certificatePath 用途：定位当前发行目录或仓库中的公钥证书文件。
-    const QString certificatePath = resolveUiAccessCertificatePath();
-    ScopedCertContext certificateContext;
-    QString detailText;
-    if (!readCertificateContextFromFile(certificatePath, certificateContext, &detailText))
-    {
-        return false;
-    }
-
-    // digestBytes 用途：按 SHA1 指纹匹配系统证书存储中的同一张证书。
-    const QByteArray digestBytes = certificateSha1Digest(certificateContext.get());
-    if (digestBytes.isEmpty())
-    {
-        return false;
-    }
-
-    DWORD rootError = ERROR_SUCCESS;
-    DWORD publisherError = ERROR_SUCCESS;
-    const bool trustedInRoot = certificateExistsInStore(L"ROOT", digestBytes, &rootError);
-    const bool trustedInPublisher = certificateExistsInStore(L"TrustedPublisher", digestBytes, &publisherError);
-    return trustedInRoot && trustedInPublisher;
-}
-
-bool MainWindow::confirmUiAccessTrustImport(const QString& certificatePath)
-{
-    // certificateContext 用途：读取证书以展示指纹，让用户确认导入对象。
-    ScopedCertContext certificateContext;
-    QString detailText;
-    if (!readCertificateContextFromFile(certificatePath, certificateContext, &detailText))
-    {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("UIAccess"),
-            QStringLiteral("无法读取待导入的公钥证书。\n\n路径：%1\n\n%2")
-                .arg(certificatePath)
-                .arg(detailText));
-        return false;
-    }
-
-    // digestText 用途：把证书 SHA1 指纹展示给用户，降低误导入风险。
-    const QString digestText = formatCertificateDigestText(certificateSha1Digest(certificateContext.get()));
-    QMessageBox confirmDialog(this);
-    confirmDialog.setIcon(QMessageBox::Warning);
-    confirmDialog.setWindowTitle(QStringLiteral("确认导入 UIAccess 信任证书"));
-    confirmDialog.setText(QStringLiteral("将把 KswordARK 测试签名证书加入系统信任根。"));
-    confirmDialog.setInformativeText(
-        QStringLiteral(
-            "这一步会把下面的公钥证书导入本机 LocalMachine\\Root 和 LocalMachine\\TrustedPublisher：\n\n"
-            "%1\n\n"
-            "证书指纹：%2\n\n"
-            "含义：系统会信任由这张测试证书签名的 KswordARK 主程序、组件和测试驱动。"
-            "这不是导入私钥，私钥 PFX 仍应只保留在本机 .cert 目录并继续被 Git 忽略。\n\n"
-            "风险：如果私钥泄露，任何人都可以签出看起来同样受信任的程序或驱动；"
-            "如果把测试证书长期保留在系统信任根，恶意或误签的二进制也可能被系统信任。"
-            "仅应在自己的开发/测试机器上执行。")
-            .arg(certificatePath)
-            .arg(digestText));
-    QPushButton* cancelButton = confirmDialog.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
-    QPushButton* importButton = confirmDialog.addButton(QStringLiteral("确认导入"), QMessageBox::AcceptRole);
-    if (cancelButton != nullptr)
-    {
-        cancelButton->setToolTip(QStringLiteral("不修改系统证书信任区"));
-    }
-    if (importButton != nullptr)
-    {
-        importButton->setToolTip(QStringLiteral("导入公钥证书到本机受信任根和受信任发布者"));
-        importButton->setProperty("ksword_primary", true);
-    }
-
-    confirmDialog.exec();
-    return confirmDialog.clickedButton() == importButton;
-}
-
-bool MainWindow::installUiAccessCertificate(QString* detailTextOut)
-{
-    if (detailTextOut != nullptr)
-    {
-        detailTextOut->clear();
-    }
-
-    // certificatePath 用途：定位待导入的公钥证书；导入逻辑不读取、不导入 PFX 私钥。
-    const QString certificatePath = resolveUiAccessCertificatePath();
-    ScopedCertContext certificateContext;
-    QString readDetailText;
-    if (!readCertificateContextFromFile(certificatePath, certificateContext, &readDetailText))
-    {
-        if (detailTextOut != nullptr)
-        {
-            *detailTextOut = QStringLiteral("读取证书失败。\n路径：%1\n%2")
-                .arg(certificatePath)
-                .arg(readDetailText);
-        }
-        return false;
-    }
-
-    DWORD rootError = ERROR_SUCCESS;
-    DWORD publisherError = ERROR_SUCCESS;
-    const bool rootOk = addCertificateToLocalMachineStore(L"ROOT", certificateContext.get(), &rootError);
-    const bool publisherOk = addCertificateToLocalMachineStore(L"TrustedPublisher", certificateContext.get(), &publisherError);
-    if (!rootOk || !publisherOk)
-    {
-        QStringList errorLineList;
-        if (!rootOk)
-        {
-            errorLineList << QStringLiteral("LocalMachine\\Root 导入失败：%1 (%2)")
-                .arg(rootError)
-                .arg(formatWin32ErrorText(rootError));
-        }
-        if (!publisherOk)
-        {
-            errorLineList << QStringLiteral("LocalMachine\\TrustedPublisher 导入失败：%1 (%2)")
-                .arg(publisherError)
-                .arg(formatWin32ErrorText(publisherError));
-        }
-        if (detailTextOut != nullptr)
-        {
-            *detailTextOut = errorLineList.join(QStringLiteral("\n"));
-        }
-        return false;
-    }
-
-    if (detailTextOut != nullptr)
-    {
-        *detailTextOut = QStringLiteral("证书已导入 LocalMachine\\Root 和 LocalMachine\\TrustedPublisher。\n路径：%1")
-            .arg(certificatePath);
-    }
-    return true;
 }
 
 bool MainWindow::hasUiAccessPrivilege() const
@@ -5378,53 +4958,7 @@ bool MainWindow::launchSelfWithSystemUiAccessToken(QString* detailTextOut)
 
 void MainWindow::handleUiAccessButtonClicked()
 {
-    const QString certificatePath = resolveUiAccessCertificatePath();
-    const bool certificateTrusted = isUiAccessCertificateTrusted();
-    if (!certificateTrusted && !confirmUiAccessTrustImport(certificatePath))
-    {
-        kLogEvent logEvent;
-        info << logEvent << "[MainWindow][UIAccess] 用户取消导入测试签名公钥证书。" << eol;
-        return;
-    }
-
-    if (!certificateTrusted && !hasAdminPrivilege())
-    {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("UIAccess"),
-            QStringLiteral(
-                "导入 LocalMachine 证书存储需要管理员权限。\n\n"
-                "请先点击 Admin 提权重启后，再重新点击 UIAccess。"));
-        requestAdminElevationRestart();
-        return;
-    }
-
-    if (!certificateTrusted)
-    {
-        QString installDetailText;
-        const bool installOk = installUiAccessCertificate(&installDetailText);
-        if (!installOk)
-        {
-            kLogEvent logEvent;
-            err << logEvent
-                << "[MainWindow][UIAccess] 测试签名公钥证书导入失败: "
-                << installDetailText.toStdString()
-                << eol;
-            QMessageBox::warning(
-                this,
-                QStringLiteral("UIAccess 导入失败"),
-                installDetailText);
-            refreshPrivilegeStatusButtons();
-            return;
-        }
-
-        kLogEvent logEvent;
-        info << logEvent
-            << "[MainWindow][UIAccess] 已导入测试签名公钥证书: "
-            << certificatePath.toStdString()
-            << eol;
-    }
-
+    // 当前实例已经带 UIAccess 时，按钮语义为回到普通用户实例；该路径不依赖任何签名证书。
     if (hasUiAccessPrivilege())
     {
         QString launchDetailText;
@@ -8156,6 +7690,13 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     const QString inactiveTabTextColor = primaryTextColor;
     const QString activeTabColor = activeThemeColor;
     const QString activeTabTextColor = selectedTextColor;
+    // normalTabHoverColor 作用：
+    // - 只控制普通 QTabBar 的未选中悬停态；
+    // - 浅色模式使用明确的浅灰色，避免继承/回退到黑色背景；
+    // - ADS Dock tab 继续使用下面的 dockTabChildHoverColor，不在这里改动。
+    const QString normalTabHoverColor = darkModeEnabled
+        ? QStringLiteral("#173553")
+        : QStringLiteral("#F1F3F5");
     // dockActiveTabTextColor 作用：
     // - 只控制 ADS Dock 选中标签文字；
     // - 浅色模式按需求使用黑色/深色字，避免“蓝底白字”；
@@ -8460,9 +8001,21 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         "  font-weight:700;"
         "}"
         "QTabBar::tab:hover:!selected{"
-        "  background-color:%6 !important;"
-        "  background:%6 !important;"
+        "  background-color:%9 !important;"
+        "  background:%9 !important;"
         "  color:%2 !important;"
+        "}"
+        "QMainWindow QTabBar::tab:hover:!selected,"
+        "QMainWindow QTabBar::tab:pressed:!selected{"
+        "  background-color:%9 !important;"
+        "  background:%9 !important;"
+        "  color:%2 !important;"
+        "}"
+        "QMainWindow QTabBar::tab:selected:hover,"
+        "QMainWindow QTabBar::tab:selected:pressed{"
+        "  background-color:%4 !important;"
+        "  background:%4 !important;"
+        "  color:%5 !important;"
         "}"
         "ads--CDockAreaTabBar{"
         "  background:transparent !important;"
@@ -8562,7 +8115,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         .arg(activeTabTextColor)
         .arg(tabHoverColor)
         .arg(dockTabChildHoverColor)
-        .arg(dockActiveTabTextColor);
+        .arg(dockActiveTabTextColor)
+        .arg(normalTabHoverColor);
 
     const QString sharedOverlayStyle = depthOverlayStyle
         + scrollBarOverlayStyle
@@ -8699,6 +8253,34 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             .arg(borderColorText);
 
     const QString kernelDockStyle = kernelDockContainerStyle + kernelDockContentStyle;
+    // finalOrdinaryTabHoverStyle 作用：
+    // - 作为普通 QTabWidget/QTabBar 的最终 hover/pressed 兜底；
+    // - 深色模式使用深灰、浅色模式使用浅灰，避免基础 QSS 或平台 palette 反向回退；
+    // - 选择器刻意避开 ads--CDockWidgetTab/ads--CAutoHideTab，所以不影响 ADS Dock 标签。
+    const QString ordinaryTabHoverColor = darkModeEnabled
+        ? QStringLiteral("#263241")
+        : QStringLiteral("#F1F3F5");
+    const QString finalOrdinaryTabHoverStyle = QStringLiteral(
+        "QMainWindow QTabWidget QTabBar::tab:hover:!selected,"
+        "QMainWindow QTabWidget QTabBar::tab:pressed:!selected,"
+        "QTabWidget QTabBar::tab:hover:!selected,"
+        "QTabWidget QTabBar::tab:pressed:!selected{"
+        "  background-color:%1 !important;"
+        "  background:%1 !important;"
+        "  color:%2 !important;"
+        "}"
+        "QMainWindow QTabWidget QTabBar::tab:selected:hover,"
+        "QMainWindow QTabWidget QTabBar::tab:selected:pressed,"
+        "QTabWidget QTabBar::tab:selected:hover,"
+        "QTabWidget QTabBar::tab:selected:pressed{"
+        "  background-color:%3 !important;"
+        "  background:%3 !important;"
+        "  color:%4 !important;"
+        "}")
+        .arg(ordinaryTabHoverColor)
+        .arg(primaryTextColor)
+        .arg(activeTabColor)
+        .arg(activeTabTextColor);
 
     if (!darkModeEnabled)
     {
@@ -8756,7 +8338,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             + tooltipStyle
             + dockContentTransparentStyle
             + finalDockAreaTransparentStyle
-            + kernelDockStyle;
+            + kernelDockStyle
+            + finalOrdinaryTabHoverStyle;
     }
 
     return rootStyle
@@ -8811,5 +8394,6 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         + tooltipStyle
         + dockContentTransparentStyle
         + finalDockAreaTransparentStyle
-        + kernelDockStyle;
+        + kernelDockStyle
+        + finalOrdinaryTabHoverStyle;
 }

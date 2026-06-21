@@ -17,6 +17,7 @@
 #include <QDateTime>
 #include <QCoreApplication>
 #include <QSizePolicy>
+#include <QProcessEnvironment>
 #include <Qscreen.h>
 
 #pragma comment(lib, "shell32.lib")
@@ -35,6 +36,30 @@ struct MonitorSearchContext {
     QRect nativeGeometry;
     bool found;
 };
+
+// resolveCurrentUserNameText 作用：
+// - 输入：无，读取当前进程环境变量和 Win32 用户名 API；
+// - 处理：优先使用 USERNAME，失败时调用 GetUserNameW，最后给出稳定兜底；
+// - 返回：用于任务栏左侧身份文本的当前登录用户名。
+QString resolveCurrentUserNameText()
+{
+    const QString envUserNameText =
+        QProcessEnvironment::systemEnvironment().value(QStringLiteral("USERNAME")).trimmed();
+    if (!envUserNameText.isEmpty()) {
+        return envUserNameText;
+    }
+
+    wchar_t userNameBuffer[256] = {};
+    DWORD bufferLength = static_cast<DWORD>(std::size(userNameBuffer));
+    if (::GetUserNameW(userNameBuffer, &bufferLength) != FALSE) {
+        const QString apiUserNameText = QString::fromWCharArray(userNameBuffer).trimmed();
+        if (!apiUserNameText.isEmpty()) {
+            return apiUserNameText;
+        }
+    }
+
+    return QStringLiteral("UnknownUser");
+}
 
 // Win32 monitor enumeration callback: input is an HMONITOR and caller context;
 // processing compares MONITORINFOEX device names; return value controls enumeration continuation.
@@ -261,7 +286,7 @@ Taskbar::Taskbar(QScreen* targetScreen, TaskbarSharedState* sharedState, QWidget
 
     // -------------------------- 左侧文字 --------------------------
     QLabel* contentLabel = new QLabel(centralWidget);
-    contentLabel->setText("· WangWei_CM [Dev].");
+    contentLabel->setText(QStringLiteral("· %1 [Dev].").arg(resolveCurrentUserNameText()));
 
     contentLabel->setStyleSheet(R"(
         QLabel {

@@ -23,6 +23,7 @@
 class QCheckBox;
 class QComboBox;
 class QDialog;
+class QEvent;
 class QFileSystemModel;
 class QHBoxLayout;
 class QLabel;
@@ -70,6 +71,13 @@ public:
     // - 作用：对外暴露“文件解锁器”入口（单路径）；
     // - 供系统右键菜单命令启动后跨页联动调用。
     void unlockFileByPath(const QString& targetPath);
+
+protected:
+    // eventFilter：
+    // - 输入：watched 为被过滤对象，event 为 Qt 事件对象；
+    // - 处理：仅拦截文件列表 viewport 的右键按下事件，用于保留多选集合或切换到右键命中的单行；
+    // - 返回：事件已由 FileDock 处理时返回 true，否则交回 QWidget 默认实现。
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     // FilePanelWidgets：
@@ -187,6 +195,18 @@ private:
     // - 作用：根据读取模式切换面板模型（Windows API / 自动手动 / 强制文件系统解析）。
     void applyReadModeToPanel(FilePanelWidgets& panel);
 
+    // configureFileViewSelection：
+    // - 输入：panel 为需要配置的文件面板；
+    // - 处理：统一恢复文件列表的整行多选行为，避免 setModel() 替换 selection model 后退回默认交互；
+    // - 返回：无返回值。
+    void configureFileViewSelection(FilePanelWidgets& panel);
+
+    // recreateFileSystemModel：
+    // - 输入：panel 为需要强制刷新 Windows API 目录数据的面板；
+    // - 处理：重建 QFileSystemModel 并重新挂到代理模型，绕开 QFileSystemModel 对 size/mtime 的缓存；
+    // - 返回：无返回值。
+    void recreateFileSystemModel(FilePanelWidgets& panel);
+
     // reloadManualModel：
     // - 作用：手动解析当前目录并填充模型。
     // - 参数 showWarningMessage：是否在失败时弹框提示。
@@ -229,16 +249,24 @@ private:
     void copySelectedItemShortName(FilePanelWidgets& panel);
 
     // copySelectedItems：
-    // - 作用：复制选中项到内部剪贴板缓存（等待粘贴）。
+    // - 作用：把当前面板选中项直接复制到对侧面板当前目录。
     void copySelectedItems(FilePanelWidgets& panel);
 
     // cutSelectedItems：
-    // - 作用：剪切选中项到内部剪贴板缓存（粘贴后删除源文件）。
+    // - 作用：把当前面板选中项直接移动到对侧面板当前目录。
     void cutSelectedItems(FilePanelWidgets& panel);
 
-    // pasteClipboardItems：
-    // - 作用：把内部剪贴板中的路径粘贴到当前目录。
-    void pasteClipboardItems(FilePanelWidgets& panel);
+    // oppositePanelFor：
+    // - 输入：sourcePanel 为发起复制/剪切动作的源面板；
+    // - 处理：根据左右面板实例地址解析对侧面板；
+    // - 返回：成功时返回对侧面板指针，无法识别来源时返回 nullptr。
+    FilePanelWidgets* oppositePanelFor(FilePanelWidgets& sourcePanel);
+
+    // transferSelectedItemsToOppositePanel：
+    // - 输入：sourcePanel 为源面板，moveItems 为 true 时移动、false 时复制；
+    // - 处理：读取源面板多选路径，目标固定为对侧面板 currentPath，并逐项复制/移动；
+    // - 返回：无返回值，失败项写入日志与进度状态。
+    void transferSelectedItemsToOppositePanel(FilePanelWidgets& sourcePanel, bool moveItems);
 
     // createNewFileOrFolder：
     // - 作用：在当前目录创建新文件或新文件夹。
@@ -353,10 +381,6 @@ private:
     // 左右面板实例。
     FilePanelWidgets m_leftPanel;              // 左侧面板状态。
     FilePanelWidgets m_rightPanel;             // 右侧面板状态。
-
-    // 跨面板复制/剪切缓存。
-    std::vector<QString> m_clipboardPaths;     // 剪贴板中的路径列表。
-    bool m_clipboardCutMode = false;           // true=剪切；false=复制。
 
     // 文件解锁器后台线程状态。
     std::thread m_unlockerWorkerThread;
