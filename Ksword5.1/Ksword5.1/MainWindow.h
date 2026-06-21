@@ -315,6 +315,26 @@ private:
     // 调用方式：窗口句柄创建完成后、主题切换后调用。
     void applyNativeWindowFrameVisualStyle();
 
+    // initResizeBorderOverlays 作用：
+    // - 创建四条独立的 3px 主题蓝色边框控件；
+    // - 不修改根容器背景或布局，避免颜色透传污染标题栏/菜单栏。
+    void initResizeBorderOverlays();
+
+    // updateResizeBorderOverlays 作用：
+    // - 根据当前窗口尺寸重新摆放四条 3px 边框；
+    // - 最大化时隐藏边框，窗口化时显示并置顶。
+    void updateResizeBorderOverlays();
+
+    // applyResizeBorderOverlayStyle 作用：
+    // - 按当前主题主蓝色刷新四条边框控件样式；
+    // - 主题切换后可重复调用。
+    void applyResizeBorderOverlayStyle();
+
+    // handleResizeBorderOverlayEvent 作用：
+    // - 处理四条边框控件的鼠标移动与按下；
+    // - 左键按下时桥接为 Win32 原生边框缩放消息。
+    bool handleResizeBorderOverlayEvent(QObject* watchedObject, QEvent* event);
+
     // ensureStartupWindowVisibleOnScreen 作用：
     // - 在主窗口首次 show 后，把窗口尺寸与位置约束到当前可见屏幕；
     // - 修复低分辨率/高缩放下窗口初始区域落到屏幕外或整体超出可视区域的问题；
@@ -411,6 +431,12 @@ private:
     QWidget* m_mainRootContainer = nullptr; // m_mainRootContainer：主窗口根容器（承载标题栏+Dock 管理器）。
     QVBoxLayout* m_mainRootLayout = nullptr; // m_mainRootLayout：主窗口根容器纵向布局。
     ads::CDockManager* m_pDockManager = nullptr; // m_pDockManager：ADS Dock 管理器主对象。
+    QWidget* m_resizeBorderTop = nullptr; // m_resizeBorderTop：顶部 3px 主题蓝色缩放边框。
+    QWidget* m_resizeBorderBottom = nullptr; // m_resizeBorderBottom：底部 3px 主题蓝色缩放边框。
+    QWidget* m_resizeBorderLeft = nullptr; // m_resizeBorderLeft：左侧 3px 主题蓝色缩放边框。
+    QWidget* m_resizeBorderRight = nullptr; // m_resizeBorderRight：右侧 3px 主题蓝色缩放边框。
+    QWidget* m_resizeCornerBottomLeft = nullptr; // m_resizeCornerBottomLeft：左下角 6x6 主题蓝色三角形缩放提示。
+    QWidget* m_resizeCornerBottomRight = nullptr; // m_resizeCornerBottomRight：右下角 6x6 主题蓝色三角形缩放提示。
 
     // Dock Widgets
     ads::CDockWidget* m_dockWelcome = nullptr; // m_dockWelcome：欢迎页 Dock。

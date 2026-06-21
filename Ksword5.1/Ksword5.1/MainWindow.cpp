@@ -121,6 +121,19 @@ namespace
     constexpr const char* kKswordProcessUiAccessPropertyName = "ksword_process_uiaccess_enabled";
     constexpr const char* kKswordMainWindowTopMostPropertyName = "ksword_main_window_topmost";
     constexpr const char* kKswordMainWindowHwndPropertyName = "ksword_main_window_hwnd";
+    constexpr int kResizeBorderOverlayWidth = 3;
+    constexpr int kResizeCornerTriangleLeg = 6;
+
+    // makeNativeMouseLParam：
+    // - 输入 globalPoint：Qt 鼠标事件提供的全局坐标；
+    // - 处理：按 Win32 鼠标消息格式打包 signed x/y；
+    // - 返回：可直接传给 WM_NCLBUTTONDOWN 的 LPARAM。
+    LPARAM makeNativeMouseLParam(const QPoint& globalPoint)
+    {
+        return MAKELPARAM(
+            static_cast<SHORT>(globalPoint.x()),
+            static_cast<SHORT>(globalPoint.y()));
+    }
 
     // isNativeResizeHitTestCode：
     // - 输入：Windows 非客户区命中测试返回值；
@@ -137,6 +150,87 @@ namespace
             || hitTestCode == HTBOTTOMLEFT
             || hitTestCode == HTBOTTOMRIGHT;
     }
+
+    // cursorForResizeHitTestCode：
+    // - 输入 hitTestCode：Win32 边框缩放命中值；
+    // - 处理：转换为 Qt 光标形状；
+    // - 返回：对应缩放光标，非缩放命中返回箭头。
+    Qt::CursorShape cursorForResizeHitTestCode(const WPARAM hitTestCode)
+    {
+        switch (hitTestCode)
+        {
+        case HTLEFT:
+        case HTRIGHT:
+            return Qt::SizeHorCursor;
+        case HTTOP:
+        case HTBOTTOM:
+            return Qt::SizeVerCursor;
+        case HTTOPLEFT:
+        case HTBOTTOMRIGHT:
+            return Qt::SizeFDiagCursor;
+        case HTTOPRIGHT:
+        case HTBOTTOMLEFT:
+            return Qt::SizeBDiagCursor;
+        default:
+            return Qt::ArrowCursor;
+        }
+    }
+
+    // ResizeCornerTriangleWidget 作用：
+    // - 输入：构造时指定左下角或右下角；
+    // - 处理：在独立 6x6 overlay 控件内绘制一个直角三角形提示区域；
+    // - 返回：构造函数无返回；paintEvent 无返回，仅负责视觉绘制。
+    class ResizeCornerTriangleWidget final : public QWidget
+    {
+    public:
+        enum class Corner
+        {
+            BottomLeft,
+            BottomRight
+        };
+
+        explicit ResizeCornerTriangleWidget(const Corner corner, QWidget* parent = nullptr)
+            : QWidget(parent)
+            , m_corner(corner)
+        {
+            setAttribute(Qt::WA_NoSystemBackground, true);
+            setAttribute(Qt::WA_TranslucentBackground, true);
+            setAutoFillBackground(false);
+            setMouseTracking(true);
+        }
+
+    protected:
+        void paintEvent(QPaintEvent* event) override
+        {
+            Q_UNUSED(event);
+
+            QPainter painter(this);
+            painter.setRenderHint(QPainter::Antialiasing, false);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(KswordTheme::PrimaryBlueBorderHex));
+
+            const int right = std::max(0, width() - 1);
+            const int bottom = std::max(0, height() - 1);
+            QPoint trianglePoints[3];
+            if (m_corner == Corner::BottomLeft)
+            {
+                trianglePoints[0] = QPoint(0, bottom);
+                trianglePoints[1] = QPoint(0, 0);
+                trianglePoints[2] = QPoint(right, bottom);
+            }
+            else
+            {
+                trianglePoints[0] = QPoint(right, bottom);
+                trianglePoints[1] = QPoint(right, 0);
+                trianglePoints[2] = QPoint(0, bottom);
+            }
+
+            painter.drawPolygon(trianglePoints, 3);
+        }
+
+    private:
+        Corner m_corner; // m_corner：标记当前控件绘制左下角还是右下角三角形。
+    };
 
     // dockTabHoverFillColor 作用：
     // - 返回 Dock 标签悬停时强制填充的背景色；
@@ -2985,6 +3079,7 @@ MainWindow::MainWindow(
     m_pDockManager = new ads::CDockManager(m_mainRootContainer);
     m_mainRootLayout->addWidget(m_pDockManager, 1);
     setCentralWidget(m_mainRootContainer);
+    initResizeBorderOverlays();
 
     // m_backgroundRebuildTimer 用途：
     // - 合并窗口 resize 期间的背景重建请求；
@@ -3133,8 +3228,288 @@ void MainWindow::closeEvent(QCloseEvent* event)
     info << closeFinishLog << "[MainWindow] 已提交退出请求 (exit code=0)。" << eol;
 }
 
+void MainWindow::initResizeBorderOverlays()
+{
+    if (m_resizeBorderTop != nullptr)
+    {
+        return;
+    }
+
+    // createBorderOverlay：
+    // - 输入 parentWidget：四条边框的父窗口，这里固定为 MainWindow 本体；
+    // - 处理：创建独立 overlay 控件，不进入主布局，不改变根容器背景；
+    // - 返回：初始化好的 3px 蓝色边框控件。
+    auto createBorderOverlay = [this](const QString& objectNameText) -> QWidget*
+        {
+            QWidget* borderWidget = new QWidget(this);
+            borderWidget->setObjectName(objectNameText);
+            borderWidget->setAttribute(Qt::WA_StyledBackground, true);
+            borderWidget->setMouseTracking(true);
+            borderWidget->installEventFilter(this);
+            borderWidget->raise();
+            return borderWidget;
+        };
+
+    m_resizeBorderTop = createBorderOverlay(QStringLiteral("ksResizeBorderTop"));
+    m_resizeBorderBottom = createBorderOverlay(QStringLiteral("ksResizeBorderBottom"));
+    m_resizeBorderLeft = createBorderOverlay(QStringLiteral("ksResizeBorderLeft"));
+    m_resizeBorderRight = createBorderOverlay(QStringLiteral("ksResizeBorderRight"));
+    m_resizeCornerBottomLeft = new ResizeCornerTriangleWidget(
+        ResizeCornerTriangleWidget::Corner::BottomLeft,
+        this);
+    m_resizeCornerBottomLeft->setObjectName(QStringLiteral("ksResizeCornerBottomLeft"));
+    m_resizeCornerBottomLeft->installEventFilter(this);
+    m_resizeCornerBottomLeft->setCursor(Qt::SizeBDiagCursor);
+    m_resizeCornerBottomLeft->raise();
+    m_resizeCornerBottomRight = new ResizeCornerTriangleWidget(
+        ResizeCornerTriangleWidget::Corner::BottomRight,
+        this);
+    m_resizeCornerBottomRight->setObjectName(QStringLiteral("ksResizeCornerBottomRight"));
+    m_resizeCornerBottomRight->installEventFilter(this);
+    m_resizeCornerBottomRight->setCursor(Qt::SizeFDiagCursor);
+    m_resizeCornerBottomRight->raise();
+
+    applyResizeBorderOverlayStyle();
+    updateResizeBorderOverlays();
+}
+
+void MainWindow::updateResizeBorderOverlays()
+{
+    const std::array<QWidget*, 6> overlayWidgets = {
+        m_resizeBorderTop,
+        m_resizeBorderBottom,
+        m_resizeBorderLeft,
+        m_resizeBorderRight,
+        m_resizeCornerBottomLeft,
+        m_resizeCornerBottomRight
+    };
+
+    // updateResizeBorderOverlays 可能被早期 resize/show 状态同步触发；
+    // 在 initResizeBorderOverlays 完成前直接返回，避免空指针访问。
+    for (QWidget* overlayWidget : overlayWidgets)
+    {
+        if (overlayWidget == nullptr)
+        {
+            return;
+        }
+    }
+
+    const bool shouldShowBorders =
+        !isWindowActuallyMaximized()
+        && width() > (kResizeBorderOverlayWidth * 2)
+        && height() > (kResizeBorderOverlayWidth * 2);
+
+    for (QWidget* overlayWidget : overlayWidgets)
+    {
+        overlayWidget->setVisible(shouldShowBorders);
+        if (shouldShowBorders)
+        {
+            overlayWidget->raise();
+        }
+    }
+
+    if (!shouldShowBorders)
+    {
+        return;
+    }
+
+    const int border = kResizeBorderOverlayWidth;
+    m_resizeBorderTop->setGeometry(0, 0, width(), border);
+    m_resizeBorderBottom->setGeometry(0, height() - border, width(), border);
+    m_resizeBorderLeft->setGeometry(0, border, border, std::max(0, height() - border * 2));
+    m_resizeBorderRight->setGeometry(width() - border, border, border, std::max(0, height() - border * 2));
+    m_resizeCornerBottomLeft->setGeometry(
+        0,
+        height() - kResizeCornerTriangleLeg,
+        kResizeCornerTriangleLeg,
+        kResizeCornerTriangleLeg);
+    m_resizeCornerBottomRight->setGeometry(
+        width() - kResizeCornerTriangleLeg,
+        height() - kResizeCornerTriangleLeg,
+        kResizeCornerTriangleLeg,
+        kResizeCornerTriangleLeg);
+}
+
+void MainWindow::applyResizeBorderOverlayStyle()
+{
+    const QString borderStyleText = QStringLiteral(
+        "background:%1;"
+        "border:none;").arg(KswordTheme::PrimaryBlueBorderHex);
+
+    const std::array<QWidget*, 4> borderWidgets = {
+        m_resizeBorderTop,
+        m_resizeBorderBottom,
+        m_resizeBorderLeft,
+        m_resizeBorderRight
+    };
+    for (QWidget* borderWidget : borderWidgets)
+    {
+        if (borderWidget != nullptr)
+        {
+            borderWidget->setStyleSheet(borderStyleText);
+        }
+    }
+    if (m_resizeCornerBottomLeft != nullptr)
+    {
+        m_resizeCornerBottomLeft->update();
+    }
+    if (m_resizeCornerBottomRight != nullptr)
+    {
+        m_resizeCornerBottomRight->update();
+    }
+}
+
+bool MainWindow::handleResizeBorderOverlayEvent(QObject* watchedObject, QEvent* event)
+{
+    if (event == nullptr || watchedObject == nullptr)
+    {
+        return false;
+    }
+
+    QWidget* const borderWidget = qobject_cast<QWidget*>(watchedObject);
+    if (borderWidget == nullptr)
+    {
+        return false;
+    }
+
+    auto resolveOverlayHitTest = [this, watchedObject, borderWidget](const QPoint& localPoint) -> WPARAM
+        {
+            if (watchedObject == m_resizeBorderTop)
+            {
+                if (localPoint.x() < kResizeBorderOverlayWidth)
+                {
+                    return HTTOPLEFT;
+                }
+                if (localPoint.x() >= borderWidget->width() - kResizeBorderOverlayWidth)
+                {
+                    return HTTOPRIGHT;
+                }
+                return HTTOP;
+            }
+            if (watchedObject == m_resizeBorderBottom)
+            {
+                if (localPoint.x() < kResizeBorderOverlayWidth)
+                {
+                    return HTBOTTOMLEFT;
+                }
+                if (localPoint.x() >= borderWidget->width() - kResizeBorderOverlayWidth)
+                {
+                    return HTBOTTOMRIGHT;
+                }
+                return HTBOTTOM;
+            }
+            if (watchedObject == m_resizeBorderLeft)
+            {
+                return HTLEFT;
+            }
+            if (watchedObject == m_resizeBorderRight)
+            {
+                return HTRIGHT;
+            }
+            if (watchedObject == m_resizeCornerBottomLeft)
+            {
+                return HTBOTTOMLEFT;
+            }
+            if (watchedObject == m_resizeCornerBottomRight)
+            {
+                return HTBOTTOMRIGHT;
+            }
+            return HTNOWHERE;
+        };
+
+    WPARAM defaultHitTestCode = HTNOWHERE;
+    if (watchedObject == m_resizeBorderTop)
+    {
+        defaultHitTestCode = HTTOP;
+    }
+    else if (watchedObject == m_resizeBorderBottom)
+    {
+        defaultHitTestCode = HTBOTTOM;
+    }
+    else if (watchedObject == m_resizeBorderLeft)
+    {
+        defaultHitTestCode = HTLEFT;
+    }
+    else if (watchedObject == m_resizeBorderRight)
+    {
+        defaultHitTestCode = HTRIGHT;
+    }
+    else if (watchedObject == m_resizeCornerBottomLeft)
+    {
+        defaultHitTestCode = HTBOTTOMLEFT;
+    }
+    else if (watchedObject == m_resizeCornerBottomRight)
+    {
+        defaultHitTestCode = HTBOTTOMRIGHT;
+    }
+    else
+    {
+        return false;
+    }
+
+    if (event->type() == QEvent::MouseMove)
+    {
+        QMouseEvent* const mouseEvent = static_cast<QMouseEvent*>(event);
+        const WPARAM hitTestCode = mouseEvent != nullptr
+            ? resolveOverlayHitTest(mouseEvent->position().toPoint())
+            : defaultHitTestCode;
+        borderWidget->setCursor(cursorForResizeHitTestCode(hitTestCode));
+        return false;
+    }
+
+    if (event->type() == QEvent::Leave)
+    {
+        borderWidget->unsetCursor();
+        return false;
+    }
+
+    if (event->type() != QEvent::MouseButtonPress)
+    {
+        return false;
+    }
+
+    QMouseEvent* const mouseEvent = static_cast<QMouseEvent*>(event);
+    if (mouseEvent == nullptr || mouseEvent->button() != Qt::LeftButton)
+    {
+        return false;
+    }
+
+    const WPARAM hitTestCode = resolveOverlayHitTest(mouseEvent->position().toPoint());
+    if (!isNativeResizeHitTestCode(hitTestCode))
+    {
+        return false;
+    }
+
+    const HWND mainWindowHandle = reinterpret_cast<HWND>(winId());
+    if (mainWindowHandle == nullptr
+        || ::IsWindow(mainWindowHandle) == FALSE
+        || ::IsZoomed(mainWindowHandle) != FALSE)
+    {
+        return false;
+    }
+
+    // 四条 overlay 边框缩放入口：
+    // - 输入：鼠标左键按在独立 3px 蓝色边框控件；
+    // - 处理：桥接为原生 WM_NCLBUTTONDOWN + HT*；
+    // - 返回：true 表示系统接管拖动缩放，Qt 不再继续分发该事件。
+    const QPoint globalPoint = mouseEvent->globalPosition().toPoint();
+    ::ReleaseCapture();
+    ::SendMessageW(
+        mainWindowHandle,
+        WM_NCLBUTTONDOWN,
+        hitTestCode,
+        makeNativeMouseLParam(globalPoint));
+    mouseEvent->accept();
+    return true;
+}
+
 bool MainWindow::eventFilter(QObject* watchedObject, QEvent* event)
 {
+    if (handleResizeBorderOverlayEvent(watchedObject, event))
+    {
+        return true;
+    }
+
     ads::CFloatingDockContainer* floatingWidget =
         qobject_cast<ads::CFloatingDockContainer*>(watchedObject);
     if (floatingWidget != nullptr && event != nullptr)
@@ -3151,6 +3526,7 @@ bool MainWindow::eventFilter(QObject* watchedObject, QEvent* event)
 void MainWindow::resizeEvent(QResizeEvent* event)
 {
     QMainWindow::resizeEvent(event);
+    updateResizeBorderOverlays();
     scheduleWindowBackgroundBrushRebuild();
 }
 
@@ -3160,6 +3536,7 @@ void MainWindow::showEvent(QShowEvent* event)
     ensureNativeFramelessWindowStyle();
     applyNativeWindowFrameVisualStyle();
     syncCustomTitleBarMaximizedState();
+    updateResizeBorderOverlays();
 
     {
         kLogEvent showEventLog;
@@ -3234,6 +3611,7 @@ void MainWindow::changeEvent(QEvent* event)
         && event->type() == QEvent::WindowStateChange)
     {
         syncCustomTitleBarMaximizedState();
+        updateResizeBorderOverlays();
     }
 }
 
@@ -3671,6 +4049,7 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
             QTimer::singleShot(0, this, [this]()
                 {
                     syncCustomTitleBarMaximizedState();
+                    updateResizeBorderOverlays();
                 });
         }
     }
@@ -7671,6 +8050,8 @@ void MainWindow::applyAppearanceSettings(
             enableDockTransparencyForBackgroundImage);
 
     setStyleSheet(appearanceStyleSheet);
+    applyResizeBorderOverlayStyle();
+    updateResizeBorderOverlays();
     if (m_pDockManager != nullptr)
     {
         // DockManager 清空局部样式表，改为继承 MainWindow 的统一样式；
