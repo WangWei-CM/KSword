@@ -73,6 +73,97 @@ namespace
         return false;
     }
 
+#ifdef Q_OS_WIN
+    // makeMouseScreenLParam：
+    // - 输入 globalPoint：Qt 鼠标事件给出的全局屏幕坐标；
+    // - 处理：按 Windows 鼠标消息约定把 signed x/y 打包到 LPARAM；
+    // - 返回：可直接传给 WM_NCLBUTTONDOWN 的坐标参数。
+    LPARAM makeMouseScreenLParam(const QPoint& globalPoint)
+    {
+        return MAKELPARAM(
+            static_cast<SHORT>(globalPoint.x()),
+            static_cast<SHORT>(globalPoint.y()));
+    }
+
+    // resolveTopLevelMoveResizeHitTest：
+    // - 输入 hostWindowHandle：标题栏所属顶层窗口 HWND；
+    // - 输入 globalPoint：当前鼠标全局坐标；
+    // - 处理：在标题栏子控件主动桥接非客户区消息时，先判断是否落在窗口边框/角落；
+    // - 返回：边框返回 HTLEFT/HTTOP...，普通标题栏返回 HTCAPTION。
+    WPARAM resolveTopLevelMoveResizeHitTest(HWND hostWindowHandle, const QPoint& globalPoint)
+    {
+        if (hostWindowHandle == nullptr || ::IsWindow(hostWindowHandle) == FALSE)
+        {
+            return HTCAPTION;
+        }
+        if (::IsZoomed(hostWindowHandle) != FALSE)
+        {
+            return HTCAPTION;
+        }
+
+        RECT windowRectValue = {};
+        if (::GetWindowRect(hostWindowHandle, &windowRectValue) == FALSE)
+        {
+            return HTCAPTION;
+        }
+
+        const int frameWidthValue = windowRectValue.right - windowRectValue.left;
+        const int frameHeightValue = windowRectValue.bottom - windowRectValue.top;
+        if (frameWidthValue <= 0 || frameHeightValue <= 0)
+        {
+            return HTCAPTION;
+        }
+
+        const int borderWidth = std::max(
+            8,
+            static_cast<int>(
+                ::GetSystemMetrics(SM_CXSIZEFRAME)
+                + ::GetSystemMetrics(SM_CXPADDEDBORDER)));
+        const int frameLocalX = globalPoint.x() - windowRectValue.left;
+        const int frameLocalY = globalPoint.y() - windowRectValue.top;
+
+        const bool hitLeft = frameLocalX >= 0 && frameLocalX < borderWidth;
+        const bool hitRight = frameLocalX <= frameWidthValue && frameLocalX > (frameWidthValue - borderWidth);
+        const bool hitTop = frameLocalY >= 0 && frameLocalY < borderWidth;
+        const bool hitBottom = frameLocalY <= frameHeightValue && frameLocalY > (frameHeightValue - borderWidth);
+
+        if (hitTop && hitLeft)
+        {
+            return HTTOPLEFT;
+        }
+        if (hitTop && hitRight)
+        {
+            return HTTOPRIGHT;
+        }
+        if (hitBottom && hitLeft)
+        {
+            return HTBOTTOMLEFT;
+        }
+        if (hitBottom && hitRight)
+        {
+            return HTBOTTOMRIGHT;
+        }
+        if (hitLeft)
+        {
+            return HTLEFT;
+        }
+        if (hitRight)
+        {
+            return HTRIGHT;
+        }
+        if (hitTop)
+        {
+            return HTTOP;
+        }
+        if (hitBottom)
+        {
+            return HTBOTTOM;
+        }
+
+        return HTCAPTION;
+    }
+#endif
+
     // resolveApplicationPreviewIcon：
     // - 作用：优先从可执行文件路径提取系统壳层图标；
     // - 目标：让左上角图标与资源管理器中文件预览保持一致；
@@ -209,6 +300,46 @@ namespace ks::ui
 
     void CustomTitleBar::mousePressEvent(QMouseEvent* mouseEventPointer)
     {
+#ifdef Q_OS_WIN
+        // Windows 下标题栏移动由原生非客户区消息处理。
+        // 处理逻辑：
+        // - 输入：左键按在可拖动标题栏区域；
+        // - 处理：主动向顶层 HWND 投递 WM_NCLBUTTONDOWN/HTCAPTION；
+        // - 返回：系统接管移动、Aero Snap、最大化拖下还原；函数本身无返回值。
+        // 背景：
+        // - 自绘标题栏是 Qt 子控件，普通鼠标消息未必会先触发顶层窗口 WM_NCHITTEST；
+        // - 仅依赖 HTCAPTION 命中会导致“最大化后拖不下来”；
+        // - 这里显式桥接到原生非客户区，避免重新使用 showNormal()+setGeometry() 模拟拖动。
+        if (mouseEventPointer != nullptr
+            && mouseEventPointer->button() == Qt::LeftButton
+            && isPointInDraggableRegion(mouseEventPointer->position().toPoint()))
+        {
+            m_dragCandidateActive = false;
+            m_dragInProgress = false;
+            QWidget* hostWindowWidget = window();
+            const HWND hostWindowHandleValue =
+                hostWindowWidget != nullptr
+                ? reinterpret_cast<HWND>(hostWindowWidget->winId())
+                : nullptr;
+            if (hostWindowHandleValue != nullptr && ::IsWindow(hostWindowHandleValue) != FALSE)
+            {
+                const QPoint globalPoint = mouseEventPointer->globalPosition().toPoint();
+                const WPARAM hitTestCode = resolveTopLevelMoveResizeHitTest(hostWindowHandleValue, globalPoint);
+                ::ReleaseCapture();
+                ::SendMessageW(
+                    hostWindowHandleValue,
+                    WM_NCLBUTTONDOWN,
+                    hitTestCode,
+                    makeMouseScreenLParam(globalPoint));
+                mouseEventPointer->accept();
+                return;
+            }
+
+            QWidget::mousePressEvent(mouseEventPointer);
+            return;
+        }
+#endif
+
         if (mouseEventPointer != nullptr
             && mouseEventPointer->button() == Qt::LeftButton
             && isPointInDraggableRegion(mouseEventPointer->position().toPoint()))
@@ -232,6 +363,15 @@ namespace ks::ui
 
     void CustomTitleBar::mouseMoveEvent(QMouseEvent* mouseEventPointer)
     {
+#ifdef Q_OS_WIN
+        // Windows 下不再使用 showNormal()+setGeometry()+startSystemMove()
+        // 手工模拟标题栏拖动。该旧链路会让 Qt::WindowMaximized 与
+        // Win32 IsZoomed 脱节，表现为从最大化拖下后仍被认为最大化、
+        // 最大化按钮无效、边框缩放命中异常。
+        QWidget::mouseMoveEvent(mouseEventPointer);
+        return;
+#endif
+
         if (mouseEventPointer != nullptr
             && m_dragCandidateActive
             && !m_dragInProgress
@@ -279,6 +419,37 @@ namespace ks::ui
 
     void CustomTitleBar::mouseDoubleClickEvent(QMouseEvent* mouseEventPointer)
     {
+#ifdef Q_OS_WIN
+        // Windows 下双击标题栏同样由 HTCAPTION -> WM_NCLBUTTONDBLCLK 处理。
+        // 这里不再发 requestToggleMaximizeWindow，防止 Qt 双击事件与原生
+        // 非客户区双击各切换一次，导致最大化/还原互相抵消。
+        if (mouseEventPointer != nullptr
+            && mouseEventPointer->button() == Qt::LeftButton
+            && isPointInDraggableRegion(mouseEventPointer->position().toPoint()))
+        {
+            m_dragCandidateActive = false;
+            m_dragInProgress = false;
+            QWidget* hostWindowWidget = window();
+            const HWND hostWindowHandleValue =
+                hostWindowWidget != nullptr
+                ? reinterpret_cast<HWND>(hostWindowWidget->winId())
+                : nullptr;
+            if (hostWindowHandleValue != nullptr && ::IsWindow(hostWindowHandleValue) != FALSE)
+            {
+                ::SendMessageW(
+                    hostWindowHandleValue,
+                    WM_NCLBUTTONDBLCLK,
+                    static_cast<WPARAM>(HTCAPTION),
+                    makeMouseScreenLParam(mouseEventPointer->globalPosition().toPoint()));
+                mouseEventPointer->accept();
+                return;
+            }
+
+            QWidget::mouseDoubleClickEvent(mouseEventPointer);
+            return;
+        }
+#endif
+
         if (mouseEventPointer != nullptr
             && mouseEventPointer->button() == Qt::LeftButton
             && isPointInDraggableRegion(mouseEventPointer->position().toPoint()))

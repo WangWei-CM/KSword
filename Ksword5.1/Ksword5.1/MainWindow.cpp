@@ -122,6 +122,22 @@ namespace
     constexpr const char* kKswordMainWindowTopMostPropertyName = "ksword_main_window_topmost";
     constexpr const char* kKswordMainWindowHwndPropertyName = "ksword_main_window_hwnd";
 
+    // isNativeResizeHitTestCode：
+    // - 输入：Windows 非客户区命中测试返回值；
+    // - 处理：判断是否属于八个边框/角落缩放命中；
+    // - 返回：true 表示后续 WM_NCLBUTTONDOWN 必须交给 DefWindowProc 启动系统缩放。
+    bool isNativeResizeHitTestCode(const WPARAM hitTestCode)
+    {
+        return hitTestCode == HTLEFT
+            || hitTestCode == HTRIGHT
+            || hitTestCode == HTTOP
+            || hitTestCode == HTBOTTOM
+            || hitTestCode == HTTOPLEFT
+            || hitTestCode == HTTOPRIGHT
+            || hitTestCode == HTBOTTOMLEFT
+            || hitTestCode == HTBOTTOMRIGHT;
+    }
+
     // dockTabHoverFillColor 作用：
     // - 返回 Dock 标签悬停时强制填充的背景色；
     // - 普通标签 hover 使用弱蓝底，当前选中标签 hover 继续使用主蓝底；
@@ -3446,24 +3462,25 @@ void MainWindow::applyNativeWindowFrameVisualStyle()
 
 bool MainWindow::isWindowActuallyMaximized() const
 {
-    // maximizedState 用途：先基于 Qt 状态判断当前是否最大化。
-    bool maximizedState = (windowState() & Qt::WindowMaximized) != 0 || isMaximized();
 #ifdef Q_OS_WIN
-    // 仅在窗口句柄已创建后再读取 Win32 状态，避免初始化阶段触发 winId() 重入。
+    // Windows 下以 HWND 的 Zoomed 状态作为唯一真实来源：
+    // - 自绘标题栏/无边框窗口曾经混用 Qt::WindowMaximized 与 IsZoomed；
+    // - 最大化标题栏拖拽还原后，Qt 状态有机会残留 WindowMaximized；
+    // - 若继续 OR Qt 状态，会导致按钮图标、命中测试和最大化按钮目标态全部卡死。
     if (!testAttribute(Qt::WA_WState_Created))
     {
-        return maximizedState;
+        return (windowState() & Qt::WindowMaximized) != 0 || isMaximized();
     }
 
-    // mainWindowHandle 用途：读取 Win32 Zoomed 状态，补齐 Qt 状态判定盲区。
     const HWND mainWindowHandle = reinterpret_cast<HWND>(const_cast<MainWindow*>(this)->winId());
     if (mainWindowHandle != nullptr && ::IsWindow(mainWindowHandle) != FALSE)
     {
-        maximizedState = maximizedState || (::IsZoomed(mainWindowHandle) != FALSE);
+        return ::IsZoomed(mainWindowHandle) != FALSE;
     }
 #endif
 
-    return maximizedState;
+    // 非 Windows 或 HWND 尚不可用时回退 Qt 状态。
+    return (windowState() & Qt::WindowMaximized) != 0 || isMaximized();
 }
 
 void MainWindow::setWindowMaximizedBySystemCommand(const bool targetMaximizedState)
@@ -3598,10 +3615,13 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
 
     if (nativeMessage->message == WM_NCLBUTTONDOWN)
     {
-        // 对 HTCAPTION 显式转发给 DefWindowProc：
-        // - Qt 无边框窗口不会总是替我们走完原生标题栏拖动语义；
-        // - 这里显式调用原生默认过程，保证单击按住后可以拖动。
-        if (nativeMessage->wParam == HTCAPTION)
+        // 对 HTCAPTION 与边框缩放命中显式转发给 DefWindowProc：
+        // - Qt 无边框窗口不会总是替我们走完原生非客户区语义；
+        // - HTCAPTION 用于启动系统移动/最大化拖下还原；
+        // - HTLEFT/HTRIGHT/... 用于启动系统边框缩放；
+        // - 如果只转发 HTCAPTION，命中测试虽然返回了边框，拖边仍不会 resize。
+        if (nativeMessage->wParam == HTCAPTION
+            || isNativeResizeHitTestCode(nativeMessage->wParam))
         {
             *result = ::DefWindowProcW(
                 nativeMessage->hwnd,
@@ -3640,6 +3660,21 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
         return true;
     }
 
+    if (nativeMessage->message == WM_SIZE)
+    {
+        // WM_SIZE 作用：
+        // - 原生 HTCAPTION 拖拽、Win+方向键、Aero Snap、ShowWindow 都会经由此消息落地；
+        // - 这里不改变窗口状态，只在下一轮事件循环同步标题栏按钮图标；
+        // - 尤其覆盖“最大化窗口从标题栏拖下来”时 Qt WindowStateChange 不稳定触发的问题。
+        if (nativeMessage->wParam == SIZE_MAXIMIZED || nativeMessage->wParam == SIZE_RESTORED)
+        {
+            QTimer::singleShot(0, this, [this]()
+                {
+                    syncCustomTitleBarMaximizedState();
+                });
+        }
+    }
+
     if (nativeMessage->message == WM_NCHITTEST)
     {
         // maximizedInNativeMessage 用途：使用当前消息窗口句柄直接判定最大化状态，避免重入。
@@ -3653,7 +3688,8 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
             static_cast<LONG>(static_cast<short>(LOWORD(pointData))),
             static_cast<LONG>(static_cast<short>(HIWORD(pointData)))
         };
-        const QPoint localPoint = mapFromGlobal(QPoint(screenPoint.x, screenPoint.y));
+        const QPoint screenQPoint(screenPoint.x, screenPoint.y);
+        const QPoint localPoint = mapFromGlobal(screenQPoint);
         // windowRectValue 用途：读取顶层窗口的屏幕坐标矩形，供边框缩放命中使用。
         RECT windowRectValue = {};
         ::GetWindowRect(nativeMessage->hwnd, &windowRectValue);
@@ -3731,6 +3767,23 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
         {
             *result = HTCAPTION;
             return true;
+        }
+
+        // 自绘标题栏命中：
+        // - 边框缩放已在上方优先处理，这里只处理真正标题栏可拖动区；
+        // - 返回 HTCAPTION 后，Windows DefWindowProc 会接管移动、双击、Aero Snap；
+        // - 最大化窗口从标题栏拖下来也会走系统原生“还原并继续移动”语义；
+        // - 右侧窗口按钮、命令输入框、用户名徽标由 isPointInDraggableRegion 排除，继续保留 Qt 点击。
+        if (m_customTitleBar != nullptr
+            && m_customTitleBar->isVisible()
+            && m_customTitleBar->isEnabled())
+        {
+            const QPoint titleBarLocalPoint = m_customTitleBar->mapFromGlobal(screenQPoint);
+            if (m_customTitleBar->isPointInDraggableRegion(titleBarLocalPoint))
+            {
+                *result = HTCAPTION;
+                return true;
+            }
         }
 
     }
