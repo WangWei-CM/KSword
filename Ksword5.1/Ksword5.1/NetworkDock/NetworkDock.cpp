@@ -20,20 +20,11 @@ NetworkDock::NetworkDock(QWidget* parent)
     initializeConnections();
     loadMonitorFilterConfigFromDefaultPath();
 
-    // 限速页使用定时器轮询刷新规则状态（触发次数、当前窗口字节等）。
-    m_rateLimitRefreshTimer = new QTimer(this);
-    // 频率适度降低，减少后台快照 + UI 渲染对主线程的周期性压力。
-    m_rateLimitRefreshTimer->setInterval(1100);
-    connect(m_rateLimitRefreshTimer, &QTimer::timeout, this, [this]()
-        {
-            // 仅当“进程限速”页可见时刷新，避免隐藏页无意义占用 UI 线程。
-            if (m_sideTabWidget == nullptr || m_sideTabWidget->currentWidget() != m_rateLimitPage)
-            {
-                return;
-            }
-            refreshRateLimitTable();
-        });
-    m_rateLimitRefreshTimer->start();
+    // “进程限速”页当前不暴露给用户，因此不创建该页专用的轮询刷新定时器。
+    // 处理逻辑：
+    // - 输入为空：无用户可见的限速页，不需要定时拉取规则快照；
+    // - 处理：保持 m_rateLimitRefreshTimer 为 nullptr；
+    // - 返回：构造函数继续初始化其它网络功能页。
 
     // 报文批量刷新定时器：
     // - 由 UI 线程周期性批量消费后台队列；
@@ -133,7 +124,9 @@ NetworkDock::~NetworkDock()
         {
             if (taskState != nullptr)
             {
+                taskState->canceled.store(true);
                 taskState->cancelRequested.store(true);
+                taskState->pauseRequested.store(false);
             }
         }
     }

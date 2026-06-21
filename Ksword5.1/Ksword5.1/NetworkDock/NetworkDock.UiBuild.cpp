@@ -21,7 +21,11 @@ void NetworkDock::initializeUi()
 
     initializeTrafficMonitorTab();
     initializeNidsTab();
-    initializeRateLimitTab();
+    // The process rate-limit page is intentionally not exposed in the UI.
+    // Its current implementation throttles by suspending/resuming the whole
+    // target process, which is too coarse for a user-facing network dock tab.
+    // Keep initializeRateLimitTab() compiled for now so the backend/UI code can
+    // be restored later if a cleaner enforcement model replaces it.
     initializeConnectionManageTab();
     initializeFirewallTab();
     initializeManualRequestTab();

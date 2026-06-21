@@ -168,18 +168,32 @@ void NetworkDock::initializeConnections()
         });
 
     // 限速规则控制连接。
-    connect(m_applyRateLimitButton, &QPushButton::clicked, this, [this]()
-        {
-            applyOrUpdateRateLimitRule();
-        });
-    connect(m_removeRateLimitButton, &QPushButton::clicked, this, [this]()
-        {
-            removeSelectedRateLimitRule();
-        });
-    connect(m_clearRateLimitButton, &QPushButton::clicked, this, [this]()
-        {
-            clearAllRateLimitRules();
-        });
+    // 说明：
+    // - 当前版本隐藏“进程限速”页，因此这些按钮通常不会被创建；
+    // - 保留空指针保护，避免未来临时恢复 initializeRateLimitTab() 以外的路径时
+    //   出现 QObject::connect(nullptr, ...) 的启动期崩溃；
+    // - 函数无返回值，只在对应按钮存在时建立 UI 到业务函数的连接。
+    if (m_applyRateLimitButton != nullptr)
+    {
+        connect(m_applyRateLimitButton, &QPushButton::clicked, this, [this]()
+            {
+                applyOrUpdateRateLimitRule();
+            });
+    }
+    if (m_removeRateLimitButton != nullptr)
+    {
+        connect(m_removeRateLimitButton, &QPushButton::clicked, this, [this]()
+            {
+                removeSelectedRateLimitRule();
+            });
+    }
+    if (m_clearRateLimitButton != nullptr)
+    {
+        connect(m_clearRateLimitButton, &QPushButton::clicked, this, [this]()
+            {
+                clearAllRateLimitRules();
+            });
+    }
 
     // 连接管理控制连接。
     connect(m_refreshConnectionButton, &QPushButton::clicked, this, [this]()
@@ -861,12 +875,20 @@ void NetworkDock::initializeConnections()
         {
             flushDnsCache();
         });
-    connect(m_dnsTable, &QTableWidget::cellClicked, this, [this](const int row, const int /*column*/)
+    connect(m_dnsTable, &QTableWidget::itemSelectionChanged, this, [this]()
         {
-            if (m_dnsEntryEdit == nullptr || m_dnsTable == nullptr || row < 0 || row >= m_dnsTable->rowCount())
+            if (m_dnsEntryEdit == nullptr || m_dnsTable == nullptr)
             {
                 return;
             }
+
+            const QList<QTableWidgetItem*> selectedItemList = m_dnsTable->selectedItems();
+            if (selectedItemList.isEmpty())
+            {
+                return;
+            }
+
+            const int row = selectedItemList.first()->row();
             QTableWidgetItem* hostItem = m_dnsTable->item(row, 0);
             if (hostItem != nullptr)
             {

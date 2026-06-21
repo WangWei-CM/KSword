@@ -56,7 +56,9 @@
 
 #include <algorithm> // std::min/std::max：预览长度与范围标准化。
 #include <atomic>    // std::atomic_bool：跨线程状态门控。
+#include <chrono>    // std::chrono：下载暂停轮询等待的短周期睡眠。
 #include <limits>    // std::numeric_limits：包长上限范围表达。
+#include <set>       // std::set：表格多选行索引去重。
 #include <string>    // std::string：日志桥接文本类型。
 #include <thread>    // std::thread：长耗时请求放到后台执行。
 #include <unordered_set> // std::unordered_set：ARP接口索引去重。

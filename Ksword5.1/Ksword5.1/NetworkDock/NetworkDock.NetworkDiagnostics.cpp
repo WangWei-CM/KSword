@@ -78,7 +78,7 @@ void NetworkDock::initializeDnsCacheTab()
     m_dnsCacheControlLayout = new QHBoxLayout();
     m_dnsCacheControlLayout->setSpacing(6);
 
-    m_refreshDnsButton = new QPushButton(m_dnsCachePage);
+    m_refreshDnsButton = new QPushButton(QStringLiteral("刷新"), m_dnsCachePage);
     m_refreshDnsButton->setIcon(QIcon(":/Icon/process_refresh.svg"));
     m_refreshDnsButton->setToolTip(QStringLiteral("刷新 DNS 缓存列表"));
 
@@ -86,11 +86,11 @@ void NetworkDock::initializeDnsCacheTab()
     m_dnsEntryEdit->setPlaceholderText(QStringLiteral("输入要删除的 DNS 域名，或先在表格里选择"));
     m_dnsEntryEdit->setToolTip(QStringLiteral("删除指定域名的 DNS 缓存条目"));
 
-    m_removeDnsButton = new QPushButton(m_dnsCachePage);
+    m_removeDnsButton = new QPushButton(QStringLiteral("删除"), m_dnsCachePage);
     m_removeDnsButton->setIcon(QIcon(":/Icon/process_uncritical.svg"));
-    m_removeDnsButton->setToolTip(QStringLiteral("删除指定 DNS 缓存条目"));
+    m_removeDnsButton->setToolTip(QStringLiteral("删除输入框域名或表格选中的 DNS 缓存条目，支持多选"));
 
-    m_flushDnsButton = new QPushButton(m_dnsCachePage);
+    m_flushDnsButton = new QPushButton(QStringLiteral("清空"), m_dnsCachePage);
     m_flushDnsButton->setIcon(QIcon(":/Icon/log_clear.svg"));
     m_flushDnsButton->setToolTip(QStringLiteral("清空 DNS 缓存"));
 
@@ -112,7 +112,7 @@ void NetworkDock::initializeDnsCacheTab()
         QStringLiteral("标志")
         });
     m_dnsTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_dnsTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_dnsTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_dnsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_dnsTable->verticalHeader()->setVisible(false);
     m_dnsTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
@@ -606,12 +606,55 @@ void NetworkDock::refreshDnsCacheTable()
 
 void NetworkDock::removeDnsCacheEntry()
 {
-    QString entryName = m_dnsEntryEdit != nullptr ? m_dnsEntryEdit->text().trimmed() : QString();
-    if (entryName.isEmpty() && m_dnsTable != nullptr && m_dnsTable->currentRow() >= 0)
+    QStringList entryNameList;
+    const QString typedEntryName = m_dnsEntryEdit != nullptr ? m_dnsEntryEdit->text().trimmed() : QString();
+    if (m_dnsEntryEdit != nullptr && m_dnsEntryEdit->hasFocus() && !typedEntryName.isEmpty())
     {
-        entryName = m_dnsTable->item(m_dnsTable->currentRow(), 0)->text().trimmed();
+        entryNameList.push_back(typedEntryName);
     }
-    if (entryName.isEmpty())
+    if (entryNameList.isEmpty() && m_dnsTable != nullptr)
+    {
+        // 删除优先使用表格选中集合：
+        // - 多选删除时，输入框通常会被 selectionChanged 同步成第一行域名；
+        // - 如果这里仍优先读取输入框，就会退化成只能删除一个条目。
+        // - 例外：用户焦点仍在输入框内时，优先尊重手动输入的单个域名。
+        const QList<QTableWidgetItem*> selectedItems = m_dnsTable->selectedItems();
+        std::set<int> selectedRowSet;
+        for (QTableWidgetItem* item : selectedItems)
+        {
+            if (item != nullptr)
+            {
+                selectedRowSet.insert(item->row());
+            }
+        }
+        if (selectedRowSet.empty() && m_dnsTable->currentRow() >= 0)
+        {
+            selectedRowSet.insert(m_dnsTable->currentRow());
+        }
+
+        for (const int row : selectedRowSet)
+        {
+            QTableWidgetItem* hostItem = m_dnsTable->item(row, 0);
+            if (hostItem == nullptr)
+            {
+                continue;
+            }
+
+            const QString rowEntryName = hostItem->text().trimmed();
+            if (!rowEntryName.isEmpty() && !entryNameList.contains(rowEntryName, Qt::CaseInsensitive))
+            {
+                entryNameList.push_back(rowEntryName);
+            }
+        }
+    }
+    if (entryNameList.isEmpty())
+    {
+        if (!typedEntryName.isEmpty())
+        {
+            entryNameList.push_back(typedEntryName);
+        }
+    }
+    if (entryNameList.isEmpty())
     {
         kLogEvent event;
         dbg << event
@@ -623,8 +666,8 @@ void NetworkDock::removeDnsCacheEntry()
     {
         kLogEvent event;
         info << event
-            << "[NetworkDock] 尝试删除DNS缓存项, entry="
-            << entryName.toStdString()
+            << "[NetworkDock] 尝试删除DNS缓存项, count="
+            << entryNameList.size()
             << eol;
     }
 
@@ -656,25 +699,37 @@ void NetworkDock::removeDnsCacheEntry()
         return;
     }
 
-    const DNS_STATUS flushStatus = dnsFlushResolverCacheEntry(reinterpret_cast<PCWSTR>(entryName.utf16()));
-    if (flushStatus != 0)
+    QStringList failedEntryList;
+    for (const QString& entryName : entryNameList)
     {
-        kLogEvent event;
-        err << event
-            << "[NetworkDock] 删除DNS缓存失败, entry="
-            << entryName.toStdString()
-            << ", errorCode="
-            << flushStatus
-            << eol;
-        QMessageBox::warning(this, QStringLiteral("删除DNS缓存"), QString("删除失败，错误码=%1").arg(flushStatus));
-        return;
+        const DNS_STATUS flushStatus = dnsFlushResolverCacheEntry(reinterpret_cast<PCWSTR>(entryName.utf16()));
+        if (flushStatus != 0)
+        {
+            failedEntryList.push_back(QStringLiteral("%1（错误码=%2）").arg(entryName).arg(flushStatus));
+        }
     }
 
     kLogEvent event;
-    info << event
-        << "[NetworkDock] 删除DNS缓存成功, entry="
-        << entryName.toStdString()
-        << eol;
+    if (!failedEntryList.isEmpty())
+    {
+        warn << event
+            << "[NetworkDock] 删除DNS缓存部分失败, requestCount="
+            << entryNameList.size()
+            << ", failedCount="
+            << failedEntryList.size()
+            << eol;
+        QMessageBox::warning(
+            this,
+            QStringLiteral("删除DNS缓存"),
+            QStringLiteral("部分 DNS 缓存删除失败：\n%1").arg(failedEntryList.join(QStringLiteral("\n"))));
+    }
+    else
+    {
+        info << event
+            << "[NetworkDock] 删除DNS缓存成功, count="
+            << entryNameList.size()
+            << eol;
+    }
     refreshDnsCacheTable();
 }
 
@@ -685,7 +740,7 @@ void NetworkDock::flushDnsCache()
         << "[NetworkDock] 尝试清空DNS缓存。"
         << eol;
 
-    using DnsFlushResolverCacheFn = DNS_STATUS(WINAPI*)();
+    using DnsFlushResolverCacheFn = BOOL(WINAPI*)();
     HMODULE dnsapiModule = GetModuleHandleW(L"dnsapi.dll");
     if (dnsapiModule == nullptr)
     {
@@ -713,15 +768,18 @@ void NetworkDock::flushDnsCache()
         return;
     }
 
-    const DNS_STATUS flushStatus = dnsFlushResolverCache();
-    if (flushStatus != 0)
+    // DnsFlushResolverCache 返回 BOOL：非 0 表示成功，0 表示失败。
+    // 旧代码把返回值当成 DNS_STATUS，导致成功时进入“清空失败”分支，看起来按钮无效。
+    const BOOL flushOk = dnsFlushResolverCache();
+    if (flushOk == FALSE)
     {
+        const DWORD lastError = GetLastError();
         kLogEvent event;
         err << event
             << "[NetworkDock] 清空DNS缓存失败, errorCode="
-            << flushStatus
+            << lastError
             << eol;
-        QMessageBox::warning(this, QStringLiteral("清空DNS缓存"), QString("清空失败，错误码=%1").arg(flushStatus));
+        QMessageBox::warning(this, QStringLiteral("清空DNS缓存"), QString("清空失败，错误码=%1").arg(lastError));
         return;
     }
 

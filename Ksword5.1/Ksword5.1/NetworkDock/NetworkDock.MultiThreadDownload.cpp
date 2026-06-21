@@ -37,6 +37,7 @@ namespace
         MultiDownloadTaskColumnDownloaded,
         MultiDownloadTaskColumnProgress,
         MultiDownloadTaskColumnStatus,
+        MultiDownloadTaskColumnAction,
         MultiDownloadTaskColumnCount
     };
 
@@ -443,6 +444,7 @@ namespace
         const std::uint64_t endByte,
         const bool enableRange,
         const std::atomic_bool* cancelFlag,
+        const std::atomic_bool* pauseFlag,
         const std::function<void(std::uint64_t)>& chunkCallback,
         QString* errorTextOut)
     {
@@ -577,6 +579,27 @@ namespace
         bool resultOk = true;
         while (writtenBytes < expectedBytes)
         {
+            // 暂停采用线程内短周期等待：
+            // - 不关闭当前 WinHTTP 请求，继续时可从当前连接继续读取；
+            // - 等待期间仍然检查取消标志，确保用户点“取消”后能尽快退出。
+            while (pauseFlag != nullptr && pauseFlag->load())
+            {
+                if (cancelFlag != nullptr && cancelFlag->load())
+                {
+                    resultOk = false;
+                    if (errorTextOut != nullptr)
+                    {
+                        *errorTextOut = QStringLiteral("任务已取消。");
+                    }
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            }
+            if (!resultOk)
+            {
+                break;
+            }
+
             if (cancelFlag != nullptr && cancelFlag->load())
             {
                 resultOk = false;
@@ -813,7 +836,8 @@ void NetworkDock::initializeMultiThreadDownloadTab()
         QStringLiteral("总大小"),
         QStringLiteral("已下载"),
         QStringLiteral("进度"),
-        QStringLiteral("状态")
+        QStringLiteral("状态"),
+        QStringLiteral("操作")
         });
     m_multiDownloadTaskTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_multiDownloadTaskTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -1021,6 +1045,7 @@ void NetworkDock::startMultiThreadDownloadTask()
                         segmentState->rangeEndByte,
                         useRange,
                         &taskState->cancelRequested,
+                        &taskState->pauseRequested,
                         [taskState, segmentState](const std::uint64_t chunkBytes)
                         {
                             segmentState->downloadedBytes.fetch_add(chunkBytes);
@@ -1030,16 +1055,20 @@ void NetworkDock::startMultiThreadDownloadTask()
 
                     if (!downloadOk)
                     {
-                        taskState->failed.store(true);
                         taskState->cancelRequested.store(true);
+                        const bool canceledByUser = taskState->canceled.load();
+                        if (!canceledByUser)
+                        {
+                            taskState->failed.store(true);
+                        }
                         {
                             std::lock_guard<std::mutex> segmentGuard(segmentState->statusMutex);
-                            segmentState->statusText = QStringLiteral("失败");
+                            segmentState->statusText = canceledByUser ? QStringLiteral("已取消") : QStringLiteral("失败");
                         }
                         {
                             std::lock_guard<std::mutex> taskGuard(taskState->statusMutex);
-                            taskState->statusText = QStringLiteral("失败");
-                            if (taskState->errorReasonText.isEmpty())
+                            taskState->statusText = canceledByUser ? QStringLiteral("已取消") : QStringLiteral("失败");
+                            if (!canceledByUser && taskState->errorReasonText.isEmpty())
                             {
                                 taskState->errorReasonText = downloadErrorText;
                             }
@@ -1056,7 +1085,12 @@ void NetworkDock::startMultiThreadDownloadTask()
                     if (remainWorker <= 0)
                     {
                         taskState->finished.store(true);
-                        if (!taskState->failed.load())
+                        if (taskState->canceled.load())
+                        {
+                            std::lock_guard<std::mutex> taskGuard(taskState->statusMutex);
+                            taskState->statusText = QStringLiteral("已取消");
+                        }
+                        else if (!taskState->failed.load())
                         {
                             taskState->downloadedBytes.store(taskState->totalBytes);
                             std::lock_guard<std::mutex> taskGuard(taskState->statusMutex);
@@ -1147,6 +1181,77 @@ std::shared_ptr<NetworkDock::MultiThreadDownloadTaskState> NetworkDock::findMult
     return nullptr;
 }
 
+void NetworkDock::setMultiThreadDownloadTaskPaused(const int taskId, const bool paused)
+{
+    const std::shared_ptr<MultiThreadDownloadTaskState> taskState = findMultiThreadDownloadTaskById(taskId);
+    if (taskState == nullptr || taskState->finished.load() || taskState->cancelRequested.load())
+    {
+        return;
+    }
+
+    taskState->pauseRequested.store(paused);
+    {
+        std::lock_guard<std::mutex> taskGuard(taskState->statusMutex);
+        taskState->statusText = paused ? QStringLiteral("已暂停") : QStringLiteral("下载中");
+    }
+
+    for (const std::shared_ptr<MultiThreadDownloadSegmentState>& segmentState : taskState->segmentStateList)
+    {
+        if (segmentState == nullptr || segmentState->finished.load())
+        {
+            continue;
+        }
+
+        std::lock_guard<std::mutex> segmentGuard(segmentState->statusMutex);
+        segmentState->statusText = paused ? QStringLiteral("已暂停") : QStringLiteral("下载中");
+    }
+
+    kLogEvent pauseEvent;
+    info << pauseEvent
+        << "[NetworkDock] 多线程下载任务"
+        << (paused ? "暂停" : "继续")
+        << ", taskId="
+        << taskId
+        << eol;
+    refreshMultiThreadDownloadUi();
+}
+
+void NetworkDock::cancelMultiThreadDownloadTask(const int taskId)
+{
+    const std::shared_ptr<MultiThreadDownloadTaskState> taskState = findMultiThreadDownloadTaskById(taskId);
+    if (taskState == nullptr || taskState->finished.load())
+    {
+        return;
+    }
+
+    taskState->canceled.store(true);
+    taskState->cancelRequested.store(true);
+    taskState->pauseRequested.store(false);
+    {
+        std::lock_guard<std::mutex> taskGuard(taskState->statusMutex);
+        taskState->statusText = QStringLiteral("取消中");
+        taskState->errorReasonText.clear();
+    }
+
+    for (const std::shared_ptr<MultiThreadDownloadSegmentState>& segmentState : taskState->segmentStateList)
+    {
+        if (segmentState == nullptr || segmentState->finished.load())
+        {
+            continue;
+        }
+
+        std::lock_guard<std::mutex> segmentGuard(segmentState->statusMutex);
+        segmentState->statusText = QStringLiteral("取消中");
+    }
+
+    kLogEvent cancelEvent;
+    info << cancelEvent
+        << "[NetworkDock] 多线程下载任务取消请求, taskId="
+        << taskId
+        << eol;
+    refreshMultiThreadDownloadUi();
+}
+
 void NetworkDock::refreshMultiThreadDownloadUi()
 {
     if (m_multiDownloadTaskTable == nullptr
@@ -1169,6 +1274,7 @@ void NetworkDock::refreshMultiThreadDownloadUi()
     int runningCount = 0;
     int finishedCount = 0;
     int failedCount = 0;
+    int canceledCount = 0;
     for (int row = 0; row < static_cast<int>(snapshotList.size()); ++row)
     {
         const std::shared_ptr<MultiThreadDownloadTaskState>& taskState = snapshotList[static_cast<std::size_t>(row)];
@@ -1204,7 +1310,42 @@ void NetworkDock::refreshMultiThreadDownloadUi()
         setCellText(m_multiDownloadTaskTable, row, MultiDownloadTaskColumnProgress, QStringLiteral("%1%").arg(percent, 0, 'f', 2));
         setCellText(m_multiDownloadTaskTable, row, MultiDownloadTaskColumnStatus, statusText);
 
-        if (taskState->failed.load())
+        QWidget* actionWidget = new QWidget(m_multiDownloadTaskTable);
+        QHBoxLayout* actionLayout = new QHBoxLayout(actionWidget);
+        actionLayout->setContentsMargins(2, 2, 2, 2);
+        actionLayout->setSpacing(4);
+
+        const bool taskFinished = taskState->finished.load();
+        const bool taskCanceled = taskState->canceled.load();
+        const bool taskPaused = taskState->pauseRequested.load();
+        QPushButton* pauseButton = new QPushButton(taskPaused ? QStringLiteral("继续") : QStringLiteral("暂停"), actionWidget);
+        pauseButton->setIcon(QIcon(taskPaused ? ":/Icon/process_start.svg" : ":/Icon/process_pause.svg"));
+        pauseButton->setToolTip(taskPaused ? QStringLiteral("继续当前下载任务") : QStringLiteral("暂停当前下载任务"));
+        pauseButton->setEnabled(!taskFinished && !taskState->cancelRequested.load());
+        connect(pauseButton, &QPushButton::clicked, this, [this, taskId = taskState->taskId, taskPaused]()
+            {
+                setMultiThreadDownloadTaskPaused(taskId, !taskPaused);
+            });
+
+        QPushButton* cancelButton = new QPushButton(QStringLiteral("取消"), actionWidget);
+        cancelButton->setIcon(QIcon(":/Icon/log_cancel_track.svg"));
+        cancelButton->setToolTip(QStringLiteral("取消当前下载任务，已写入的临时文件内容会保留"));
+        cancelButton->setEnabled(!taskFinished && !taskState->cancelRequested.load());
+        connect(cancelButton, &QPushButton::clicked, this, [this, taskId = taskState->taskId]()
+            {
+                cancelMultiThreadDownloadTask(taskId);
+            });
+
+        actionLayout->addWidget(pauseButton);
+        actionLayout->addWidget(cancelButton);
+        actionLayout->addStretch(1);
+        m_multiDownloadTaskTable->setCellWidget(row, MultiDownloadTaskColumnAction, actionWidget);
+
+        if (taskCanceled)
+        {
+            ++canceledCount;
+        }
+        else if (taskState->failed.load())
         {
             ++failedCount;
         }
@@ -1221,10 +1362,11 @@ void NetworkDock::refreshMultiThreadDownloadUi()
     if (m_multiDownloadStatusLabel != nullptr)
     {
         m_multiDownloadStatusLabel->setText(
-            QStringLiteral("状态：运行中 %1，已完成 %2，失败 %3")
+            QStringLiteral("状态：运行中 %1，已完成 %2，失败 %3，已取消 %4")
             .arg(runningCount)
             .arg(finishedCount)
-            .arg(failedCount));
+            .arg(failedCount)
+            .arg(canceledCount));
     }
 
     if (m_multiDownloadSelectedTaskId <= 0 && !snapshotList.empty())

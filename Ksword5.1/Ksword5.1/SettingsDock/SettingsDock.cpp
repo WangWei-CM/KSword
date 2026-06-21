@@ -348,35 +348,10 @@ void SettingsDock::initializeAppearanceTab()
     startupLayout->setSpacing(8);
 
     QLabel* startupHintLabel = new QLabel(
-        QStringLiteral("设置应用下次启动时的默认页签、窗口显示方式与权限申请行为。"),
+        QStringLiteral("设置应用下次启动时的窗口显示方式与权限申请行为。"),
         startupGroupBox);
     startupHintLabel->setWordWrap(true);
     startupLayout->addWidget(startupHintLabel);
-
-    QHBoxLayout* startupSelectorLayout = new QHBoxLayout();
-    startupSelectorLayout->setSpacing(6);
-    startupSelectorLayout->addWidget(new QLabel(QStringLiteral("默认页签"), startupGroupBox), 0);
-
-    // m_startupDefaultTabCombo 作用：维护“启动默认页签 key”与“中文显示名”的映射。
-    m_startupDefaultTabCombo = new QComboBox(startupGroupBox);
-    m_startupDefaultTabCombo->setToolTip(QStringLiteral("选择应用下次启动时默认展示的主标签页"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("欢迎"), QStringLiteral("welcome"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("进程"), QStringLiteral("process"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("网络"), QStringLiteral("network"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("内存"), QStringLiteral("memory"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("文件"), QStringLiteral("file"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("驱动"), QStringLiteral("driver"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("内核"), QStringLiteral("kernel"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("监控"), QStringLiteral("monitor"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("硬件"), QStringLiteral("hardware"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("权限"), QStringLiteral("privilege"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("窗口"), QStringLiteral("window"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("注册表"), QStringLiteral("registry"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("启动项"), QStringLiteral("startup"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("服务"), QStringLiteral("service"));
-    m_startupDefaultTabCombo->addItem(QStringLiteral("杂项"), QStringLiteral("misc"));
-    startupSelectorLayout->addWidget(m_startupDefaultTabCombo, 1);
-    startupLayout->addLayout(startupSelectorLayout);
 
     // m_startupMaximizedCheckBox 作用：控制“下次启动时是否直接最大化显示”。
     m_startupMaximizedCheckBox = new QCheckBox(QStringLiteral("启动时最大化"), startupGroupBox);
@@ -500,10 +475,6 @@ void SettingsDock::bindAppearanceSignals()
         resetBackgroundPathToDefault();
         });
 
-    connect(m_startupDefaultTabCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-        markPendingChanges(QStringLiteral("启动默认页签切换"));
-        });
-
     connect(m_startupMaximizedCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
         markPendingChanges(QStringLiteral("启动时最大化开关切换"));
         });
@@ -581,21 +552,6 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
     m_backgroundPathEdit->setText(settings.backgroundImagePath);
     m_backgroundOpacitySlider->setValue(settings.backgroundOpacityPercent);
 
-    // startupTabIndex 作用：把配置中的启动页 key 映射为下拉框索引；缺失时回退“欢迎”。
-    int startupTabIndex = -1;
-    if (m_startupDefaultTabCombo != nullptr)
-    {
-        startupTabIndex = m_startupDefaultTabCombo->findData(settings.startupDefaultTabKey.trimmed().toLower());
-        if (startupTabIndex < 0)
-        {
-            startupTabIndex = m_startupDefaultTabCombo->findData(QStringLiteral("welcome"));
-        }
-        if (startupTabIndex >= 0)
-        {
-            m_startupDefaultTabCombo->setCurrentIndex(startupTabIndex);
-        }
-    }
-
     if (m_startupMaximizedCheckBox != nullptr)
     {
         m_startupMaximizedCheckBox->setChecked(settings.launchMaximizedOnStartup);
@@ -671,17 +627,8 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
         : rawPathText;
 
     collectedSettings.backgroundOpacityPercent = m_backgroundOpacitySlider->value();
-    if (m_startupDefaultTabCombo != nullptr)
-    {
-        const QString startupTabKey = m_startupDefaultTabCombo->currentData().toString().trimmed().toLower();
-        collectedSettings.startupDefaultTabKey = startupTabKey.isEmpty()
-            ? QStringLiteral("welcome")
-            : startupTabKey;
-    }
-    else
-    {
-        collectedSettings.startupDefaultTabKey = QStringLiteral("welcome");
-    }
+    // 启动页字段已不再由设置页编辑；保存其它设置时保留当前内存值，避免意外覆盖旧配置。
+    collectedSettings.startupDefaultTabKey = m_currentAppearanceSettings.startupDefaultTabKey;
     collectedSettings.launchMaximizedOnStartup =
         (m_startupMaximizedCheckBox != nullptr) && m_startupMaximizedCheckBox->isChecked();
     collectedSettings.startupTopMostEnabled =
@@ -748,7 +695,6 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
     if (nextSettings.themeMode == m_currentAppearanceSettings.themeMode
         && nextSettings.backgroundImagePath == m_currentAppearanceSettings.backgroundImagePath
         && nextSettings.backgroundOpacityPercent == m_currentAppearanceSettings.backgroundOpacityPercent
-        && nextSettings.startupDefaultTabKey == m_currentAppearanceSettings.startupDefaultTabKey
         && nextSettings.launchMaximizedOnStartup == m_currentAppearanceSettings.launchMaximizedOnStartup
         && nextSettings.startupTopMostEnabled == m_currentAppearanceSettings.startupTopMostEnabled
         && nextSettings.autoRequestAdminOnStartup == m_currentAppearanceSettings.autoRequestAdminOnStartup
@@ -828,9 +774,7 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         << m_currentAppearanceSettings.backgroundImagePath.toStdString()
         << "，透明度="
         << m_currentAppearanceSettings.backgroundOpacityPercent
-        << "%，启动默认页签="
-        << m_currentAppearanceSettings.startupDefaultTabKey.toStdString()
-        << "，启动时最大化="
+        << "%，启动时最大化="
         << (m_currentAppearanceSettings.launchMaximizedOnStartup ? "true" : "false")
         << "，启动后默认最高级置顶="
         << (m_currentAppearanceSettings.startupTopMostEnabled ? "true" : "false")

@@ -301,6 +301,8 @@ private:
         std::atomic_bool finished{ false }; // finished：任务是否已完成（成功或失败结束）。
         std::atomic_bool failed{ false }; // failed：任务是否失败结束。
         std::atomic_bool cancelRequested{ false }; // cancelRequested：任务是否收到取消请求。
+        std::atomic_bool canceled{ false }; // canceled：任务是否由用户主动取消。
+        std::atomic_bool pauseRequested{ false }; // pauseRequested：任务是否由用户主动暂停。
         QString statusText = QStringLiteral("等待启动"); // statusText：任务状态文本。
         QString errorReasonText; // errorReasonText：任务失败原因文本。
         mutable std::mutex statusMutex; // statusMutex：任务状态与错误文本并发保护锁。
@@ -932,6 +934,18 @@ private:
     // - 参数 taskId：任务编号。
     // - 返回：找到时返回共享指针，否则返回空。
     std::shared_ptr<MultiThreadDownloadTaskState> findMultiThreadDownloadTaskById(int taskId) const;
+
+    // setMultiThreadDownloadTaskPaused：
+    // - 作用：按任务编号暂停或继续一个仍在运行的多线程下载任务；
+    // - 入参 taskId：任务编号；paused 为 true 时暂停，false 时继续；
+    // - 返回：无返回值，找不到任务或任务已结束时直接忽略。
+    void setMultiThreadDownloadTaskPaused(int taskId, bool paused);
+
+    // cancelMultiThreadDownloadTask：
+    // - 作用：按任务编号请求取消一个仍在运行的多线程下载任务；
+    // - 入参 taskId：任务编号；
+    // - 返回：无返回值，找不到任务或任务已结束时直接忽略。
+    void cancelMultiThreadDownloadTask(int taskId);
 
     // ========================= ARP/DNS/存活主机 ======================
     // refreshArpCacheTable：

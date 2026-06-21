@@ -173,9 +173,6 @@ private:
     // m_backgroundOpacityValueLabel 作用：显示透明度百分比文本。
     QLabel* m_backgroundOpacityValueLabel = nullptr;
 
-    // m_startupDefaultTabCombo 作用：设置“应用启动时默认激活的主标签页”。
-    QComboBox* m_startupDefaultTabCombo = nullptr;
-
     // m_startupMaximizedCheckBox 作用：设置下次启动时是否默认最大化显示。
     QCheckBox* m_startupMaximizedCheckBox = nullptr;
 

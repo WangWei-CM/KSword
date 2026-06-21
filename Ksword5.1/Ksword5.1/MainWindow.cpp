@@ -42,6 +42,7 @@
 #include <QDialog>
 #include <QIODevice>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QProcess>
 #include <QStringList>
 #include <QToolTip>
@@ -49,6 +50,7 @@
 #include <QUrl>
 #include <QEvent>
 #include <QEventLoop>
+#include <QVariant>
 #include <QWheelEvent>
 #pragma warning(disable: 4996)
 #include "UI/UI.css/UI_css.h"
@@ -82,6 +84,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <unordered_map>
 #include <cstring>
 #include <vector>
@@ -114,6 +117,10 @@ namespace
     // - 给 ADS 自动隐藏侧边标签打动态属性；
     // - 与主 Dock 标签使用相同悬停色，但保持选择器独立。
     constexpr const char* kKswordAutoHideTabPropertyName = "kswordAutoHideTab";
+
+    constexpr const char* kKswordProcessUiAccessPropertyName = "ksword_process_uiaccess_enabled";
+    constexpr const char* kKswordMainWindowTopMostPropertyName = "ksword_main_window_topmost";
+    constexpr const char* kKswordMainWindowHwndPropertyName = "ksword_main_window_hwnd";
 
     // dockTabHoverFillColor 作用：
     // - 返回 Dock 标签悬停时强制填充的背景色；
@@ -148,6 +155,86 @@ namespace
         return KswordTheme::IsDarkModeEnabled()
             ? QColor(255, 255, 255)
             : QColor(16, 35, 54);
+    }
+
+    // shouldTemporarilyDropTopMostForDockSwitch：
+    // - 输入：无显式输入，读取 QApplication 全局属性；
+    // - 处理：只有当前进程具备 UIAccess 且主窗口全局处于 TOPMOST 时才需要临时取消；
+    // - 返回：true 表示 Dock 切换前后应执行 NOTOPMOST/TOPMOST 保护，false 表示完全不干预。
+    bool shouldTemporarilyDropTopMostForDockSwitch()
+    {
+        QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
+        return appInstance != nullptr
+            && appInstance->property(kKswordProcessUiAccessPropertyName).toBool()
+            && appInstance->property(kKswordMainWindowTopMostPropertyName).toBool();
+    }
+
+    // mainWindowHandleFromGlobalProperty：
+    // - 输入：无显式输入，读取 QApplication 上缓存的主窗口 HWND；
+    // - 处理：把 qulonglong 属性还原成 HWND，并用 IsWindow 校验；
+    // - 返回：有效主窗口句柄；缺失或失效时返回 nullptr。
+    HWND mainWindowHandleFromGlobalProperty()
+    {
+        QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
+        if (appInstance == nullptr)
+        {
+            return nullptr;
+        }
+
+        const HWND windowHandle = reinterpret_cast<HWND>(
+            static_cast<quintptr>(appInstance->property(kKswordMainWindowHwndPropertyName).toULongLong()));
+        return (windowHandle != nullptr && ::IsWindow(windowHandle) != FALSE) ? windowHandle : nullptr;
+    }
+
+    // setMainWindowTemporaryTopMost：
+    // - 输入：topMostState 为 true 时恢复 TOPMOST，false 时临时降到 NOTOPMOST；
+    // - 处理：仅调整主窗口 Win32 z-order，不修改 m_windowPinned、不改设置、不同步标题栏图钉；
+    // - 返回：SetWindowPos 成功返回 true，否则 false。
+    bool setMainWindowTemporaryTopMost(const bool topMostState)
+    {
+        const HWND windowHandle = mainWindowHandleFromGlobalProperty();
+        if (windowHandle == nullptr)
+        {
+            return false;
+        }
+
+        return ::SetWindowPos(
+            windowHandle,
+            topMostState ? HWND_TOPMOST : HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER) != FALSE;
+    }
+
+    // withTemporaryNonTopMostForDockSwitch：
+    // - 输入：switchOperation 为实际 Dock 切换动作；
+    // - 处理：仅在 UIAccess+TOPMOST 组合下，切换前临时 NOTOPMOST，切换后恢复 TOPMOST；
+    // - 返回：无返回值；switchOperation 为空时只执行一次保护判断不做动作。
+    void withTemporaryNonTopMostForDockSwitch(const std::function<void()>& switchOperation)
+    {
+        const bool shouldDropTopMost = shouldTemporarilyDropTopMostForDockSwitch();
+        if (shouldDropTopMost)
+        {
+            setMainWindowTemporaryTopMost(false);
+        }
+
+        if (switchOperation)
+        {
+            switchOperation();
+        }
+
+        if (shouldDropTopMost)
+        {
+            QTimer::singleShot(0, []()
+                {
+                    if (shouldTemporarilyDropTopMostForDockSwitch())
+                    {
+                        setMainWindowTemporaryTopMost(true);
+                    }
+                });
+        }
     }
 
     // applyDockTabTextColor 作用：
@@ -312,6 +399,12 @@ namespace
     protected:
         bool event(QEvent* eventObject) override
         {
+            const bool shouldGuardDockSwitch =
+                eventObject != nullptr &&
+                (eventObject->type() == QEvent::MouseButtonPress ||
+                    eventObject->type() == QEvent::MouseButtonRelease) &&
+                static_cast<QMouseEvent*>(eventObject)->button() == Qt::LeftButton &&
+                !property("activeTab").toBool();
             const bool shouldRepaintAfterEvent =
                 eventObject != nullptr &&
                 (eventObject->type() == QEvent::Enter ||
@@ -328,7 +421,18 @@ namespace
                     eventObject->type() == QEvent::Polish ||
                     eventObject->type() == QEvent::Show);
 
-            const bool handled = ads::CDockWidgetTab::event(eventObject);
+            bool handled = false;
+            if (shouldGuardDockSwitch)
+            {
+                withTemporaryNonTopMostForDockSwitch([this, eventObject, &handled]()
+                    {
+                        handled = ads::CDockWidgetTab::event(eventObject);
+                    });
+            }
+            else
+            {
+                handled = ads::CDockWidgetTab::event(eventObject);
+            }
             if (shouldSyncTextAfterEvent)
             {
                 syncDockTabTextColor();
@@ -641,7 +745,7 @@ namespace
     {
         QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
         return appInstance != nullptr
-            && appInstance->property("ksword_main_window_topmost").toBool();
+            && appInstance->property(kKswordMainWindowTopMostPropertyName).toBool();
     }
 
     // applyTopMostToTopLevelWidget 作用：
@@ -3728,11 +3832,21 @@ void MainWindow::initCustomTitleBar()
 
 void MainWindow::setPinnedWindowState(const bool pinnedState, const bool emitLog)
 {
+    if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
+    {
+        const HWND mainWindowHandle = reinterpret_cast<HWND>(winId());
+        const qulonglong mainWindowHandleValue =
+            static_cast<qulonglong>(reinterpret_cast<quintptr>(mainWindowHandle));
+        appInstance->setProperty(
+            kKswordMainWindowHwndPropertyName,
+            QVariant(mainWindowHandleValue));
+    }
+
     if (m_windowPinned == pinnedState)
     {
         if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
         {
-            appInstance->setProperty("ksword_main_window_topmost", m_windowPinned);
+            appInstance->setProperty(kKswordMainWindowTopMostPropertyName, m_windowPinned);
         }
         syncTopMostForAllAuxiliaryTopLevelWidgets(this, m_windowPinned);
         if (m_customTitleBar != nullptr)
@@ -3776,7 +3890,7 @@ void MainWindow::setPinnedWindowState(const bool pinnedState, const bool emitLog
     m_windowPinned = pinnedState;
     if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
     {
-        appInstance->setProperty("ksword_main_window_topmost", m_windowPinned);
+        appInstance->setProperty(kKswordMainWindowTopMostPropertyName, m_windowPinned);
     }
     syncTopMostForAllAuxiliaryTopLevelWidgets(this, m_windowPinned);
     if (m_customTitleBar != nullptr)
@@ -4576,6 +4690,10 @@ void MainWindow::refreshPrivilegeStatusButtons()
     const bool debugEnabled = hasDebugPrivilege();
     const bool systemEnabled = hasSystemPrivilege();
     const bool uiAccessEnabled = hasUiAccessPrivilege();
+    if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
+    {
+        appInstance->setProperty(kKswordProcessUiAccessPropertyName, uiAccessEnabled);
+    }
 
     // R0 状态位：
     // - R0：检查 KswordARK 驱动服务是否处于运行态。
@@ -4669,6 +4787,10 @@ bool MainWindow::hasUiAccessPrivilege() const
     HANDLE rawTokenHandle = nullptr;
     if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &rawTokenHandle) == FALSE)
     {
+        if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
+        {
+            appInstance->setProperty(kKswordProcessUiAccessPropertyName, false);
+        }
         return false;
     }
     tokenHandle.reset(rawTokenHandle);
@@ -4681,7 +4803,12 @@ bool MainWindow::hasUiAccessPrivilege() const
         &uiAccessValue,
         sizeof(uiAccessValue),
         &returnLength);
-    return queryOk != FALSE && uiAccessValue != 0;
+    const bool uiAccessEnabled = queryOk != FALSE && uiAccessValue != 0;
+    if (QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance()))
+    {
+        appInstance->setProperty(kKswordProcessUiAccessPropertyName, uiAccessEnabled);
+    }
+    return uiAccessEnabled;
 }
 
 bool MainWindow::launchSelfWithSystemUiAccessToken(QString* detailTextOut)
@@ -6991,9 +7118,12 @@ void MainWindow::setupDockLayout()
     m_pDockManager->addDockWidget(ads::RightDockWidgetArea, m_dockLog, bottomDockArea);
 
     // 6. 设置默认显示的标签页
-    m_dockWelcome->raise();
-    m_dockCurrentOp->raise();
-    m_dockMonitor->raise();
+    withTemporaryNonTopMostForDockSwitch([this]()
+        {
+            m_dockWelcome->raise();
+            m_dockCurrentOp->raise();
+            m_dockMonitor->raise();
+        });
 
     // 7. 默认布局搭建完成后再恢复用户布局：
     // - ADS restoreState 要求所有 DockWidget 已注册；
@@ -7021,7 +7151,10 @@ void MainWindow::focusHandleDockByPid(const quint32 pid)
     }
     if (m_dockHandle != nullptr)
     {
-        m_dockHandle->raise();
+        withTemporaryNonTopMostForDockSwitch([this]()
+            {
+                m_dockHandle->raise();
+            });
         m_dockHandle->setVisible(true);
     }
 }
@@ -7045,7 +7178,10 @@ void MainWindow::focusMemoryDockByPid(const quint32 pid)
     }
     if (m_dockMemory != nullptr)
     {
-        m_dockMemory->raise();
+        withTemporaryNonTopMostForDockSwitch([this]()
+            {
+                m_dockMemory->raise();
+            });
         m_dockMemory->setVisible(true);
     }
 }
@@ -7069,7 +7205,10 @@ void MainWindow::openProcessDetailByPid(const quint32 pid)
     }
     if (m_dockProcess != nullptr)
     {
-        m_dockProcess->raise();
+        withTemporaryNonTopMostForDockSwitch([this]()
+            {
+                m_dockProcess->raise();
+            });
         m_dockProcess->setVisible(true);
     }
 }
@@ -7093,7 +7232,10 @@ void MainWindow::focusServiceDockByName(const QString& serviceNameText)
     }
     if (m_dockService != nullptr)
     {
-        m_dockService->raise();
+        withTemporaryNonTopMostForDockSwitch([this]()
+            {
+                m_dockService->raise();
+            });
         m_dockService->setVisible(true);
     }
 }
@@ -7122,7 +7264,10 @@ void MainWindow::openFileDetailDockByPath(const QString& filePath)
     }
     if (m_dockFile != nullptr)
     {
-        m_dockFile->raise();
+        withTemporaryNonTopMostForDockSwitch([this]()
+            {
+                m_dockFile->raise();
+            });
         m_dockFile->setVisible(true);
     }
 }
@@ -7298,7 +7443,10 @@ void MainWindow::initAppearanceSettings()
             {
                 m_monitorWidget->activateMonitorTab(QStringLiteral("winapi"));
             }
-            targetDock->raise();
+            withTemporaryNonTopMostForDockSwitch([targetDock]()
+                {
+                    targetDock->raise();
+                });
             kLogEvent startupDockEvent;
             info << startupDockEvent
                 << "[MainWindow] 已激活启动默认页签, trigger="
