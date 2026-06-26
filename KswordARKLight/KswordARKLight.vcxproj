@@ -1,0 +1,328 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{44CC7D72-182E-4B28-9D88-531B09C77C41}</ProjectGuid>
+    <RootNamespace>KswordARKLight</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Platform)'=='x64'">
+    <OutDir>$(MSBuildProjectDirectory)\..\Ksword5.1\x64\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildProjectDirectory)\x64\$(Configuration)\obj\</IntDir>
+    <TargetName>KswordARKLight</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;UNICODE;_UNICODE;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory);$(MSBuildProjectDirectory)\..;$(MSBuildProjectDirectory)\..\Ksword5.1\Ksword5.1;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>Comctl32.lib;Shell32.lib;Advapi32.lib;Crypt32.lib;Wintrust.lib;Rstrtmgr.lib;Psapi.lib;Ntdll.lib;User32.lib;Gdi32.lib;Comdlg32.lib;Ole32.lib;OleAut32.lib;Setupapi.lib;Cfgmgr32.lib;Tdh.lib;Wevtapi.lib;Version.lib;Shlwapi.lib;Taskschd.lib;Wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>"/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'" %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;UNICODE;_UNICODE;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory);$(MSBuildProjectDirectory)\..;$(MSBuildProjectDirectory)\..\Ksword5.1\Ksword5.1;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalDependencies>Comctl32.lib;Shell32.lib;Advapi32.lib;Crypt32.lib;Wintrust.lib;Rstrtmgr.lib;Psapi.lib;Ntdll.lib;User32.lib;Gdi32.lib;Comdlg32.lib;Ole32.lib;OleAut32.lib;Setupapi.lib;Cfgmgr32.lib;Tdh.lib;Wevtapi.lib;Version.lib;Shlwapi.lib;Taskschd.lib;Wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>"/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'" %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ResourceCompile Include="KswordARKLight.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="App\Main.cpp" />
+    <ClCompile Include="App\MainWindow.cpp" />
+    <ClCompile Include="Core\Common.cpp" />
+    <ClCompile Include="Core\DriverService.cpp" />
+    <ClCompile Include="Core\NtApi.cpp" />
+    <ClCompile Include="Core\PathUtils.cpp" />
+    <ClCompile Include="Core\Privilege.cpp" />
+    <ClCompile Include="Docking\DockManager.cpp" />
+    <ClCompile Include="Features\Driver\DriverActions.cpp" />
+    <ClCompile Include="Features\Driver\DriverEnumerator.cpp" />
+    <ClCompile Include="Features\Driver\DriverFeature.cpp" />
+    <ClCompile Include="Features\Driver\DriverModel.cpp" />
+    <ClCompile Include="Features\Driver\DriverObjectView.cpp" />
+    <ClCompile Include="Features\Driver\DriverOverviewView.cpp" />
+    <ClCompile Include="Features\FeatureRegistry.cpp" />
+    <ClCompile Include="Features\File\FileActions.cpp" />
+    <ClCompile Include="Features\File\FileFeature.cpp" />
+    <ClCompile Include="Features\File\FileSystemEnumerator.cpp" />
+    <ClCompile Include="Features\File\FileView.cpp" />
+    <ClCompile Include="Features\File\PathNavigator.cpp" />
+    <ClCompile Include="Features\Hardware\HardwareEnumerator.cpp" />
+    <ClCompile Include="Features\Hardware\HardwareFeature.cpp" />
+    <ClCompile Include="Features\Hardware\HardwareModel.cpp" />
+    <ClCompile Include="Features\Hardware\HardwareView.cpp" />
+    <ClCompile Include="Features\Kernel\KernelAtomTableFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelBaseNamedObjectsFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelCallbackEnumerationFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelCallbackInterceptFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelCatalog.cpp" />
+    <ClCompile Include="Features\Kernel\KernelCommunicationEndpointFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelDeviceDriverObjectsFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelDriverStatusFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelDynDataFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelDynDataProfiles.cpp" />
+    <ClCompile Include="Features\Kernel\KernelFacade.cpp" />
+    <ClCompile Include="Features\Kernel\KernelFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelIatEatHookFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelInlineHookFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelModel.cpp" />
+    <ClCompile Include="Features\Kernel\KernelNamedPipeFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelNativeQueries.cpp" />
+    <ClCompile Include="Features\Kernel\KernelNtQueryLegacyFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelObjectDirectoryRecursiveFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelObjectNamespaceFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelObjectTypeMatrixFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelPage.cpp" />
+    <ClCompile Include="Features\Kernel\KernelPageLayout.cpp" />
+    <ClCompile Include="Features\Kernel\KernelR0ExtendedFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelShadowSsdtFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelSsdtFeature.cpp" />
+    <ClCompile Include="Features\Kernel\KernelSymbolicLinkFeature.cpp" />
+    <ClCompile Include="Features\Memory\DriverMemoryClient.cpp" />
+    <ClCompile Include="Features\Memory\DriverMemoryModel.cpp" />
+    <ClCompile Include="Features\Memory\DriverMemoryView.cpp" />
+    <ClCompile Include="Features\Memory\MemoryFeature.cpp" />
+    <ClCompile Include="Features\Monitor\EtwEventModel.cpp" />
+    <ClCompile Include="Features\Monitor\EtwFilterDialog.cpp" />
+    <ClCompile Include="Features\Monitor\EtwFilterModel.cpp" />
+    <ClCompile Include="Features\Monitor\EtwMonitorView.cpp" />
+    <ClCompile Include="Features\Monitor\EtwSessionController.cpp" />
+    <ClCompile Include="Features\Monitor\MonitorFeature.cpp" />
+    <ClCompile Include="Features\Process\ProcessActions.cpp" />
+    <ClCompile Include="Features\Process\ProcessEnumerator.cpp" />
+    <ClCompile Include="Features\Process\ProcessFeature.cpp" />
+    <ClCompile Include="Features\Process\ProcessModel.cpp" />
+    <ClCompile Include="Features\Process\ProcessView.cpp" />
+    <ClCompile Include="Features\Registry\RegistryActions.cpp" />
+    <ClCompile Include="Features\Registry\RegistryFeature.cpp" />
+    <ClCompile Include="Features\Registry\RegistryModel.cpp" />
+    <ClCompile Include="Features\Registry\RegistryView.cpp" />
+    <ClCompile Include="Features\ProcessDetail\ProcessDetailCollector.cpp" />
+    <ClCompile Include="Features\ProcessDetail\ProcessDetailFeature.cpp" />
+    <ClCompile Include="Features\ProcessDetail\ProcessDetailPage.cpp" />
+    <ClCompile Include="Features\Startup\StartupActions.cpp" />
+    <ClCompile Include="Features\Startup\StartupEnumerator.cpp" />
+    <ClCompile Include="Features\Startup\StartupFeature.cpp" />
+    <ClCompile Include="Features\Startup\StartupModel.cpp" />
+    <ClCompile Include="Features\Startup\StartupView.cpp" />
+    <ClCompile Include="Features\Window\WindowActions.cpp" />
+    <ClCompile Include="Features\Window\WindowEnumerator.cpp" />
+    <ClCompile Include="Features\Window\WindowFeature.cpp" />
+    <ClCompile Include="Features\Window\WindowModel.cpp" />
+    <ClCompile Include="Features\Window\WindowView.cpp" />
+    <ClCompile Include="Ui\Controls.cpp" />
+    <ClCompile Include="Ui\IconUtil.cpp" />
+    <ClCompile Include="Ui\ListViewUtil.cpp" />
+    <ClCompile Include="Ui\MenuUtil.cpp" />
+    <ClCompile Include="Ui\PlaceholderPage.cpp" />
+    <ClCompile Include="Ui\SplitterUtil.cpp" />
+    <ClCompile Include="Ui\TabUtil.cpp" />
+    <ClCompile Include="Ui\Theme.cpp" />
+    <ClCompile Include="Ui\TreeViewUtil.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverAlpc.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverCallback.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverCapabilities.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverCapability.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverClient.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverDynData.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverError.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverFile.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverKernel.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverKeyboard.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverMemory.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverMutation.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverProcess.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverRegistry.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverSection.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ksword\string\string.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="App\MainWindow.h" />
+    <ClInclude Include="Core\Common.h" />
+    <ClInclude Include="Core\DriverService.h" />
+    <ClInclude Include="Core\NtApi.h" />
+    <ClInclude Include="Core\PathUtils.h" />
+    <ClInclude Include="Core\Privilege.h" />
+    <ClInclude Include="Core\Win32Lean.h" />
+    <ClInclude Include="Docking\DockManager.h" />
+    <ClInclude Include="Features\Driver\DriverActions.h" />
+    <ClInclude Include="Features\Driver\DriverEnumerator.h" />
+    <ClInclude Include="Features\Driver\DriverFeature.h" />
+    <ClInclude Include="Features\Driver\DriverModel.h" />
+    <ClInclude Include="Features\Driver\DriverObjectView.h" />
+    <ClInclude Include="Features\Driver\DriverOverviewView.h" />
+    <ClInclude Include="Features\FeatureRegistry.h" />
+    <ClInclude Include="Features\File\FileActions.h" />
+    <ClInclude Include="Features\File\FileFeature.h" />
+    <ClInclude Include="Features\File\FileSystemEnumerator.h" />
+    <ClInclude Include="Features\File\FileView.h" />
+    <ClInclude Include="Features\File\PathNavigator.h" />
+    <ClInclude Include="Features\Hardware\HardwareEnumerator.h" />
+    <ClInclude Include="Features\Hardware\HardwareFeature.h" />
+    <ClInclude Include="Features\Hardware\HardwareModel.h" />
+    <ClInclude Include="Features\Hardware\HardwareView.h" />
+    <ClInclude Include="Features\Kernel\KernelAtomTableFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelBaseNamedObjectsFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelCallbackEnumerationFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelCallbackInterceptFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelCatalog.h" />
+    <ClInclude Include="Features\Kernel\KernelCommunicationEndpointFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelDeviceDriverObjectsFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelDriverStatusFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelDynDataFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelDynDataProfiles.h" />
+    <ClInclude Include="Features\Kernel\KernelFacade.h" />
+    <ClInclude Include="Features\Kernel\KernelFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelIatEatHookFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelInlineHookFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelModel.h" />
+    <ClInclude Include="Features\Kernel\KernelNamedPipeFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelNativeQueries.h" />
+    <ClInclude Include="Features\Kernel\KernelNtQueryLegacyFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelObjectDirectoryRecursiveFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelObjectNamespaceFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelObjectTypeMatrixFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelPage.h" />
+    <ClInclude Include="Features\Kernel\KernelPageLayout.h" />
+    <ClInclude Include="Features\Kernel\KernelR0ExtendedFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelShadowSsdtFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelSsdtFeature.h" />
+    <ClInclude Include="Features\Kernel\KernelSymbolicLinkFeature.h" />
+    <ClInclude Include="Features\Memory\DriverMemoryClient.h" />
+    <ClInclude Include="Features\Memory\DriverMemoryModel.h" />
+    <ClInclude Include="Features\Memory\DriverMemoryView.h" />
+    <ClInclude Include="Features\Memory\MemoryFeature.h" />
+    <ClInclude Include="Features\Monitor\EtwEventModel.h" />
+    <ClInclude Include="Features\Monitor\EtwFilterDialog.h" />
+    <ClInclude Include="Features\Monitor\EtwFilterModel.h" />
+    <ClInclude Include="Features\Monitor\EtwMonitorView.h" />
+    <ClInclude Include="Features\Monitor\EtwSessionController.h" />
+    <ClInclude Include="Features\Monitor\MonitorFeature.h" />
+    <ClInclude Include="Features\Process\ProcessActions.h" />
+    <ClInclude Include="Features\Process\ProcessEnumerator.h" />
+    <ClInclude Include="Features\Process\ProcessFeature.h" />
+    <ClInclude Include="Features\Process\ProcessModel.h" />
+    <ClInclude Include="Features\Process\ProcessView.h" />
+    <ClInclude Include="Features\Registry\RegistryActions.h" />
+    <ClInclude Include="Features\Registry\RegistryFeature.h" />
+    <ClInclude Include="Features\Registry\RegistryModel.h" />
+    <ClInclude Include="Features\Registry\RegistryView.h" />
+    <ClInclude Include="Features\ProcessDetail\ProcessDetailCollector.h" />
+    <ClInclude Include="Features\ProcessDetail\ProcessDetailFeature.h" />
+    <ClInclude Include="Features\ProcessDetail\ProcessDetailPage.h" />
+    <ClInclude Include="Features\ProcessDetail\ProcessDetailTypes.h" />
+    <ClInclude Include="Features\Startup\StartupActions.h" />
+    <ClInclude Include="Features\Startup\StartupEnumerator.h" />
+    <ClInclude Include="Features\Startup\StartupFeature.h" />
+    <ClInclude Include="Features\Startup\StartupModel.h" />
+    <ClInclude Include="Features\Startup\StartupView.h" />
+    <ClInclude Include="Features\Window\WindowActions.h" />
+    <ClInclude Include="Features\Window\WindowEnumerator.h" />
+    <ClInclude Include="Features\Window\WindowFeature.h" />
+    <ClInclude Include="Features\Window\WindowModel.h" />
+    <ClInclude Include="Features\Window\WindowView.h" />
+    <ClInclude Include="resource.h" />
+    <ClInclude Include="Ui\Controls.h" />
+    <ClInclude Include="Ui\IconUtil.h" />
+    <ClInclude Include="Ui\ListViewUtil.h" />
+    <ClInclude Include="Ui\MenuUtil.h" />
+    <ClInclude Include="Ui\ModuleDescriptor.h" />
+    <ClInclude Include="Ui\PlaceholderPage.h" />
+    <ClInclude Include="Ui\SplitterUtil.h" />
+    <ClInclude Include="Ui\TabUtil.h" />
+    <ClInclude Include="Ui\Theme.h" />
+    <ClInclude Include="Ui\TreeViewUtil.h" />
+    <ClInclude Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverCapabilities.h" />
+    <ClInclude Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverClient.h" />
+    <ClInclude Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverError.h" />
+    <ClInclude Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverTypes.h" />
+    <ClInclude Include="..\Ksword5.1\Ksword5.1\ksword\string\string.h" />
+    <ClInclude Include="..\shared\KswordArkLogProtocol.h" />
+    <ClInclude Include="..\shared\driver\KswordArkAlpcIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkCallbackIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkCapabilityIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkDynDataIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkFileIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkKernelIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkKeyboardIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkMemoryIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkMutationIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkPreflightIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkProcessIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkRedirectIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkRegistryIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkSafetyIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkSectionIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkThreadIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkTrustIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkWslSiloIoctl.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="..\Ksword5.1\Ksword5.1\Resource\Logo\KswordLogo.ico" />
+    <Image Include="..\Ksword5.1\Ksword5.1\Resource\Logo\Mainlogo.png" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>

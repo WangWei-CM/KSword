@@ -504,21 +504,69 @@ namespace
         return queryOk != FALSE && tokenElevation.TokenIsElevated != 0;
     }
 
-    // tryEnableStartupDebugPrivilege：
+    // narrowPrivilegeName 作用：
+    // - 输入 Windows privilege 常量宽字符串；
+    // - 处理：启动期日志只需要 ASCII privilege 名，逐字符窄化可避免引入 Qt 转码依赖；
+    // - 返回：可写入 startupTraceRaw/kLog 的窄字符串。
+    std::string narrowPrivilegeName(const wchar_t* const privilegeName)
+    {
+        if (privilegeName == nullptr)
+        {
+            return std::string("<null>");
+        }
+
+        std::string resultText;
+        for (const wchar_t* cursor = privilegeName; *cursor != L'\0'; ++cursor)
+        {
+            resultText.push_back(static_cast<char>(*cursor & 0x7F));
+        }
+        return resultText;
+    }
+
+    // tryEnableStartupProcessPrivileges：
     // - 输入：无，直接作用于当前进程 token；
-    // - 处理：当当前进程已经是提升管理员时，尝试启用 SeDebugPrivilege；
-    // - 返回：true 表示权限已成功启用；false 表示当前非管理员或启用失败，失败原因写入日志。
-    bool tryEnableStartupDebugPrivilege()
+    // - 处理：管理员启动后逐项启用进程相关特权，覆盖权限页中 30-52 行常用系统特权；
+    // - 返回：true 表示至少一个目标权限已成功启用；false 表示当前非管理员、打开令牌失败或全部失败。
+    bool tryEnableStartupProcessPrivileges()
     {
         if (!isCurrentProcessElevated())
         {
-            startupTraceRaw("startup SeDebugPrivilege skipped: process is not elevated");
+            startupTraceRaw("startup process privileges skipped: process is not elevated");
             kLogEvent event;
             warn << event
-                << "[main] 启动期 SeDebugPrivilege 跳过：当前进程不是管理员。"
+                << "[main] 启动期进程权限批量申请跳过：当前进程不是管理员。"
                 << eol;
             return false;
         }
+
+        // kStartupPrivilegeNames 用途：
+        // - 与权限快照中 30-52 行对应；
+        // - 逐项启用可避免某一项 ERROR_NOT_ALL_ASSIGNED 影响其它已分配特权。
+        static constexpr const wchar_t* kStartupPrivilegeNames[] = {
+            SE_SECURITY_NAME,
+            SE_TAKE_OWNERSHIP_NAME,
+            SE_LOAD_DRIVER_NAME,
+            SE_SYSTEM_PROFILE_NAME,
+            SE_SYSTEMTIME_NAME,
+            SE_PROF_SINGLE_PROCESS_NAME,
+            SE_INC_BASE_PRIORITY_NAME,
+            SE_CREATE_PAGEFILE_NAME,
+            SE_BACKUP_NAME,
+            SE_RESTORE_NAME,
+            SE_SHUTDOWN_NAME,
+            SE_DEBUG_NAME,
+            SE_SYSTEM_ENVIRONMENT_NAME,
+            SE_CHANGE_NOTIFY_NAME,
+            SE_REMOTE_SHUTDOWN_NAME,
+            SE_UNDOCK_NAME,
+            SE_MANAGE_VOLUME_NAME,
+            SE_IMPERSONATE_NAME,
+            SE_CREATE_GLOBAL_NAME,
+            SE_INC_WORKING_SET_NAME,
+            SE_TIME_ZONE_NAME,
+            SE_CREATE_SYMBOLIC_LINK_NAME,
+            SE_DELEGATE_SESSION_USER_IMPERSONATE_NAME
+        };
 
         HANDLE tokenHandle = nullptr;
         if (::OpenProcessToken(
@@ -528,77 +576,101 @@ namespace
         {
             const DWORD errorCode = ::GetLastError();
             startupTraceRaw(
-                std::string("startup SeDebugPrivilege OpenProcessToken failed, error=")
+                std::string("startup process privileges OpenProcessToken failed, error=")
                 + std::to_string(errorCode));
             kLogEvent event;
             err << event
-                << "[main] 启动期 SeDebugPrivilege 申请失败：OpenProcessToken error="
+                << "[main] 启动期进程权限批量申请失败：OpenProcessToken error="
                 << errorCode
                 << eol;
             return false;
         }
 
-        LUID debugPrivilegeLuid{};
-        if (::LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &debugPrivilegeLuid) == FALSE)
+        int enabledCount = 0;
+        int notAssignedCount = 0;
+        int failedCount = 0;
+        std::string failedDetailText;
+
+        for (const wchar_t* const privilegeName : kStartupPrivilegeNames)
         {
-            const DWORD errorCode = ::GetLastError();
-            ::CloseHandle(tokenHandle);
-            startupTraceRaw(
-                std::string("startup SeDebugPrivilege LookupPrivilegeValue failed, error=")
-                + std::to_string(errorCode));
-            kLogEvent event;
-            err << event
-                << "[main] 启动期 SeDebugPrivilege 申请失败：LookupPrivilegeValue error="
-                << errorCode
-                << eol;
-            return false;
+            const std::string privilegeNameText = narrowPrivilegeName(privilegeName);
+            LUID privilegeLuid{};
+            if (::LookupPrivilegeValueW(nullptr, privilegeName, &privilegeLuid) == FALSE)
+            {
+                const DWORD errorCode = ::GetLastError();
+                ++failedCount;
+                failedDetailText += privilegeNameText + ":LookupPrivilegeValue=" + std::to_string(errorCode) + ";";
+                continue;
+            }
+
+            TOKEN_PRIVILEGES tokenPrivileges{};
+            tokenPrivileges.PrivilegeCount = 1;
+            tokenPrivileges.Privileges[0].Luid = privilegeLuid;
+            tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            ::SetLastError(ERROR_SUCCESS);
+            if (::AdjustTokenPrivileges(
+                tokenHandle,
+                FALSE,
+                &tokenPrivileges,
+                sizeof(tokenPrivileges),
+                nullptr,
+                nullptr) == FALSE)
+            {
+                const DWORD errorCode = ::GetLastError();
+                ++failedCount;
+                failedDetailText += privilegeNameText + ":AdjustTokenPrivileges=" + std::to_string(errorCode) + ";";
+                continue;
+            }
+
+            const DWORD adjustError = ::GetLastError();
+            if (adjustError == ERROR_SUCCESS)
+            {
+                ++enabledCount;
+                continue;
+            }
+
+            if (adjustError == ERROR_NOT_ALL_ASSIGNED)
+            {
+                ++notAssignedCount;
+            }
+            else
+            {
+                ++failedCount;
+            }
+            failedDetailText += privilegeNameText + ":AdjustResult=" + std::to_string(adjustError) + ";";
         }
 
-        TOKEN_PRIVILEGES tokenPrivileges{};
-        tokenPrivileges.PrivilegeCount = 1;
-        tokenPrivileges.Privileges[0].Luid = debugPrivilegeLuid;
-        tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-        if (::AdjustTokenPrivileges(
-            tokenHandle,
-            FALSE,
-            &tokenPrivileges,
-            sizeof(tokenPrivileges),
-            nullptr,
-            nullptr) == FALSE)
-        {
-            const DWORD errorCode = ::GetLastError();
-            ::CloseHandle(tokenHandle);
-            startupTraceRaw(
-                std::string("startup SeDebugPrivilege AdjustTokenPrivileges failed, error=")
-                + std::to_string(errorCode));
-            kLogEvent event;
-            err << event
-                << "[main] 启动期 SeDebugPrivilege 申请失败：AdjustTokenPrivileges error="
-                << errorCode
-                << eol;
-            return false;
-        }
-
-        const DWORD adjustError = ::GetLastError();
         ::CloseHandle(tokenHandle);
-        if (adjustError != ERROR_SUCCESS)
-        {
-            startupTraceRaw(
-                std::string("startup SeDebugPrivilege AdjustTokenPrivileges returned error=")
-                + std::to_string(adjustError));
-            kLogEvent event;
-            err << event
-                << "[main] 启动期 SeDebugPrivilege 申请失败：AdjustTokenPrivileges returned error="
-                << adjustError
-                << eol;
-            return false;
-        }
 
-        startupTraceRaw("startup SeDebugPrivilege enabled");
+        startupTraceRaw(
+            std::string("startup process privileges finished: enabled=")
+            + std::to_string(enabledCount)
+            + ", not_assigned="
+            + std::to_string(notAssignedCount)
+            + ", failed="
+            + std::to_string(failedCount)
+            + ", detail="
+            + failedDetailText);
+
         kLogEvent event;
         info << event
-            << "[main] 启动期 SeDebugPrivilege 已启用。"
+            << "[main] 启动期进程权限批量申请完成，enabled="
+            << enabledCount
+            << ", notAssigned="
+            << notAssignedCount
+            << ", failed="
+            << failedCount
             << eol;
+
+        if (enabledCount <= 0)
+        {
+            kLogEvent failEvent;
+            err << failEvent
+                << "[main] 启动期进程权限批量申请没有成功启用任何目标权限。"
+                << eol;
+            return false;
+        }
+
         return true;
     }
 
@@ -1340,12 +1412,12 @@ int main(int argc, char* argv[])
             << eol;
     }
 
-    // 管理员实例需要和普通“正常启动后手动点 Debug”保持一致：
+    // 管理员实例需要在主窗口创建前尽早启用常用进程令牌特权：
     // - 带 admin/--ksword-privilege-restart 参数启动时不会经过按钮点击流程；
-    // - 因此在 QApplication 创建前统一尝试启用 SeDebugPrivilege，避免进程/句柄相关功能降级。
-    startupTraceRaw("before startup SeDebugPrivilege request");
-    (void)tryEnableStartupDebugPrivilege();
-    startupTraceRaw("after startup SeDebugPrivilege request");
+    // - 因此在 QApplication 创建前统一批量申请权限页 30-52 行特权，避免进程/句柄/R0/备份还原等功能降级。
+    startupTraceRaw("before startup process privilege request");
+    (void)tryEnableStartupProcessPrivileges();
+    startupTraceRaw("after startup process privilege request");
 
     startupTraceRaw("before applyQtScaleFactorEnvironment");
     applyQtScaleFactorEnvironment(startupSettings.startupWindowScaleFactor);

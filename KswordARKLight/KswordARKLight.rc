@@ -1,0 +1,6 @@
+#include "resource.h"
+
+// The executable icon and title-bar/logo payload come from the existing Ksword
+// branding assets while staying independent from the legacy GUI resource wrappers.
+IDI_KSWORDARKLIGHT_APP ICON "..\\Ksword5.1\\Ksword5.1\\Resource\\Logo\\KswordLogo.ico"
+IDR_KSWORDARKLIGHT_LOGO_PNG RCDATA "..\\Ksword5.1\\Ksword5.1\\Resource\\Logo\\Mainlogo.png"

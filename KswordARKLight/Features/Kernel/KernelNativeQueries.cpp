@@ -1,0 +1,2083 @@
+﻿#include "KernelNativeQueries.h"
+
+#include "../../Core/Win32Lean.h"
+
+#include <winternl.h>
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cwctype>
+#include <cwchar>
+#include <deque>
+#include <functional>
+#include <iomanip>
+#include <memory>
+#include <set>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#ifndef DIRECTORY_QUERY
+#define DIRECTORY_QUERY 0x0001
+#endif
+
+#ifndef SYMBOLIC_LINK_QUERY
+#define SYMBOLIC_LINK_QUERY 0x0001
+#endif
+
+#ifndef FILE_LIST_DIRECTORY
+#define FILE_LIST_DIRECTORY 0x0001
+#endif
+
+#ifndef FILE_DIRECTORY_FILE
+#define FILE_DIRECTORY_FILE 0x00000001
+#endif
+
+#ifndef FILE_SYNCHRONOUS_IO_NONALERT
+#define FILE_SYNCHRONOUS_IO_NONALERT 0x00000020
+#endif
+
+#ifndef OBJ_CASE_INSENSITIVE
+#define OBJ_CASE_INSENSITIVE 0x00000040L
+#endif
+
+#ifndef OBJ_INHERIT
+#define OBJ_INHERIT 0x00000002L
+#endif
+
+#ifndef OBJ_PERMANENT
+#define OBJ_PERMANENT 0x00000010L
+#endif
+
+#ifndef OBJ_EXCLUSIVE
+#define OBJ_EXCLUSIVE 0x00000020L
+#endif
+
+#ifndef OBJ_OPENIF
+#define OBJ_OPENIF 0x00000080L
+#endif
+
+#ifndef OBJ_OPENLINK
+#define OBJ_OPENLINK 0x00000100L
+#endif
+
+#ifndef OBJ_KERNEL_HANDLE
+#define OBJ_KERNEL_HANDLE 0x00000200L
+#endif
+
+#ifndef OBJ_FORCE_ACCESS_CHECK
+#define OBJ_FORCE_ACCESS_CHECK 0x00000400L
+#endif
+
+#ifndef OBJ_IGNORE_IMPERSONATED_DEVICEMAP
+#define OBJ_IGNORE_IMPERSONATED_DEVICEMAP 0x00000800L
+#endif
+
+#ifndef OBJ_DONT_REPARSE
+#define OBJ_DONT_REPARSE 0x00001000L
+#endif
+
+namespace Ksword::Features::Kernel {
+namespace {
+
+constexpr LONG kStatusSuccess = 0x00000000L;
+constexpr LONG kStatusInfoLengthMismatch = static_cast<LONG>(0xC0000004UL);
+constexpr LONG kStatusBufferTooSmall = static_cast<LONG>(0xC0000023UL);
+constexpr LONG kStatusBufferOverflow = static_cast<LONG>(0x80000005UL);
+constexpr LONG kStatusNoMoreEntries = static_cast<LONG>(0x8000001AUL);
+constexpr LONG kStatusNoSuchFile = static_cast<LONG>(0xC000000FUL);
+constexpr LONG kStatusUnsuccessful = static_cast<LONG>(0xC0000001UL);
+constexpr LONG kStatusInvalidHandle = static_cast<LONG>(0xC0000008UL);
+constexpr LONG kStatusAccessDenied = static_cast<LONG>(0xC0000022UL);
+constexpr LONG kStatusObjectTypeMismatch = static_cast<LONG>(0xC0000024UL);
+constexpr LONG kStatusObjectNameNotFound = static_cast<LONG>(0xC0000034UL);
+constexpr LONG kStatusObjectPathNotFound = static_cast<LONG>(0xC000003AUL);
+constexpr LONG kStatusNameTooLong = static_cast<LONG>(0xC0000106UL);
+constexpr LONG kStatusPipeDisconnected = static_cast<LONG>(0xC00000B0UL);
+constexpr LONG kStatusPipeBusy = static_cast<LONG>(0xC00000AEUL);
+constexpr LONG kStatusInstanceNotAvailable = static_cast<LONG>(0xC00000ABUL);
+constexpr ULONG kObjectBasicInformation = 0;
+constexpr ULONG kObjectNameInformation = 1;
+constexpr ULONG kObjectTypeInformation = 2;
+constexpr ULONG kObjectTypesInformation = 3;
+constexpr ULONG kFileDirectoryInformation = 1;
+constexpr std::size_t kMaxDirectoryRows = 2500;
+constexpr std::size_t kMaxTypeRows = 256;
+constexpr std::size_t kMaxExportRows = 512;
+
+using NtOpenDirectoryObjectFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
+using NtQueryDirectoryObjectFn = NTSTATUS(NTAPI*)(HANDLE, PVOID, ULONG, BOOLEAN, BOOLEAN, PULONG, PULONG);
+using NtOpenSymbolicLinkObjectFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
+using NtQuerySymbolicLinkObjectFn = NTSTATUS(NTAPI*)(HANDLE, PUNICODE_STRING, PULONG);
+using NtQueryObjectFn = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+using NtOpenFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, ULONG, ULONG);
+using NtQueryDirectoryFileFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG, ULONG, BOOLEAN, PUNICODE_STRING, BOOLEAN);
+using NtQuerySystemInformationFn = NTSTATUS(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
+using NtQueryInformationProcessFn = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+using NtQueryInformationThreadFn = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+using NtQueryInformationTokenFn = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+// KOBJECT_DIRECTORY_INFORMATION is the compact entry returned by
+// NtQueryDirectoryObject. Inputs are ntdll-owned counted strings; processing
+// copies them immediately into std::wstring before the buffer is reused.
+struct KOBJECT_DIRECTORY_INFORMATION {
+    UNICODE_STRING Name;
+    UNICODE_STRING TypeName;
+};
+
+// KOBJECT_BASIC_INFORMATION contains the small count fields needed for object
+// diagnostics. Input bytes come from NtQueryObject(ObjectBasicInformation);
+// output is copied to display text only.
+struct KOBJECT_BASIC_INFORMATION {
+    ULONG Attributes;
+    ACCESS_MASK GrantedAccess;
+    ULONG HandleCount;
+    ULONG PointerCount;
+    ULONG PagedPoolUsage;
+    ULONG NonPagedPoolUsage;
+    ULONG Reserved[3];
+    ULONG NameInfoSize;
+    ULONG TypeInfoSize;
+    ULONG SecurityDescriptorSize;
+    LARGE_INTEGER CreationTime;
+};
+
+// KOBJECT_TYPE_INFORMATION mirrors the object type block used by
+// NtQueryObject(ObjectTypesInformation). The trailing TypeName buffer is stored
+// after this structure and aligned by pointer size.
+struct KOBJECT_TYPE_INFORMATION {
+    UNICODE_STRING TypeName;
+    ULONG TotalNumberOfObjects;
+    ULONG TotalNumberOfHandles;
+    ULONG TotalPagedPoolUsage;
+    ULONG TotalNonPagedPoolUsage;
+    ULONG TotalNamePoolUsage;
+    ULONG TotalHandleTableUsage;
+    ULONG HighWaterNumberOfObjects;
+    ULONG HighWaterNumberOfHandles;
+    ULONG HighWaterPagedPoolUsage;
+    ULONG HighWaterNonPagedPoolUsage;
+    ULONG HighWaterNamePoolUsage;
+    ULONG HighWaterHandleTableUsage;
+    ULONG InvalidAttributes;
+    GENERIC_MAPPING GenericMapping;
+    ULONG ValidAccessMask;
+    BOOLEAN SecurityRequired;
+    BOOLEAN MaintainHandleCount;
+    UCHAR TypeIndex;
+    CHAR ReservedByte;
+    ULONG PoolType;
+    ULONG DefaultPagedPoolCharge;
+    ULONG DefaultNonPagedPoolCharge;
+};
+
+// KFILE_DIRECTORY_INFORMATION is the native directory result used for the
+// named-pipe namespace. Input is a byte chain with NextEntryOffset links;
+// processing copies names and timestamps into rows.
+struct KFILE_DIRECTORY_INFORMATION {
+    ULONG NextEntryOffset;
+    ULONG FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG FileAttributes;
+    ULONG FileNameLength;
+    WCHAR FileName[1];
+};
+
+// NtRuntime stores all dynamically resolved ntdll calls needed by the native
+// kernel pages. Input is the loaded ntdll module; output is a best-effort table
+// so individual pages can degrade without crashing.
+struct NtRuntime {
+    NtOpenDirectoryObjectFn openDirectoryObject = nullptr;
+    NtQueryDirectoryObjectFn queryDirectoryObject = nullptr;
+    NtOpenSymbolicLinkObjectFn openSymbolicLinkObject = nullptr;
+    NtQuerySymbolicLinkObjectFn querySymbolicLinkObject = nullptr;
+    NtQueryObjectFn queryObject = nullptr;
+    NtOpenFileFn openFile = nullptr;
+    NtQueryDirectoryFileFn queryDirectoryFile = nullptr;
+    NtQuerySystemInformationFn querySystemInformation = nullptr;
+    NtQueryInformationProcessFn queryInformationProcess = nullptr;
+    NtQueryInformationThreadFn queryInformationThread = nullptr;
+    NtQueryInformationTokenFn queryInformationToken = nullptr;
+};
+
+// DirectoryEntry is one object-manager child. Inputs are a parent path plus the
+// native name/type; processing derives FullPath and optional symlink target;
+// output is converted into KernelResultRow by the query workers.
+struct DirectoryEntry {
+    std::wstring parentPath;
+    std::wstring name;
+    std::wstring typeName;
+    std::wstring fullPath;
+    std::wstring targetPath;
+    std::wstring statusText;
+    std::wstring handleCountText;
+    std::wstring pointerCountText;
+    bool canOpen = false;
+};
+
+// QueryPacket carries rows and warnings while one worker runs. Inputs are row
+// append calls and warning text; processing later turns it into a facade result;
+// output is value-only and owns all strings.
+struct QueryPacket {
+    std::vector<KernelResultRow> rows;
+    std::vector<std::wstring> warnings;
+};
+
+// MakeResult is defined after the directory row helpers, but the Native action
+// helpers also need the same result finalizer. This forward declaration keeps
+// all R3 Native code inside one translation unit without introducing another
+// wrapper file or direct UI dependency.
+KernelOperationResult MakeResult(KernelFeatureId id, bool success, const std::wstring& operation, QueryPacket&& packet);
+std::vector<DirectoryEntry> EnumerateDirectoryFlat(const NtRuntime& runtime, const std::wstring& directoryPath, std::vector<std::wstring>& warnings);
+void AppendDirectoryEntryRow(
+    QueryPacket& packet,
+    const std::wstring& source,
+    std::size_t depth,
+    const DirectoryEntry& entry,
+    const std::wstring& enumApi = L"NtOpenDirectoryObject + NtQueryDirectoryObject");
+
+// Row builds one generic result row from named columns. Inputs are key/value
+// pairs and optional detail text; processing copies all strings; return is the
+// common model row used by KernelPage.
+KernelResultRow Row(std::initializer_list<std::pair<std::wstring, std::wstring>> columns, const std::wstring& detail = {}) {
+    KernelResultRow row;
+    row.columns.assign(columns.begin(), columns.end());
+    row.detailText = detail;
+    return row;
+}
+
+// HexText formats a 64-bit diagnostic integer. Input is an integer value;
+// processing uses uppercase hexadecimal; return is display text.
+std::wstring HexText(const std::uint64_t value) {
+    std::wostringstream stream;
+    stream << L"0x" << std::uppercase << std::hex << value;
+    return stream.str();
+}
+
+// StatusText formats NTSTATUS values without losing the original 32-bit code.
+// Input is a signed NTSTATUS; return is uppercase hex display text.
+std::wstring StatusText(const LONG status) {
+    return HexText(static_cast<std::uint32_t>(status));
+}
+
+// AppendFlagText appends a symbolic flag name into a compact "A|B|C" string.
+// Inputs are the output text, tested value, one flag and its display name; there
+// is no return value because the function mutates the output accumulator.
+void AppendFlagText(std::wstring& text, const ULONG value, const ULONG flag, const wchar_t* name) {
+    if ((value & flag) == 0) {
+        return;
+    }
+    if (!text.empty()) {
+        text += L"|";
+    }
+    text += name;
+}
+
+// ObjectAttributesText converts OBJ_* bits returned by NtQueryObject into
+// readable text. Input is the raw Attributes field; return includes unknown bits
+// as hex so no diagnostic information is lost.
+std::wstring ObjectAttributesText(const ULONG attributes) {
+    std::wstring text;
+    AppendFlagText(text, attributes, OBJ_INHERIT, L"INHERIT");
+    AppendFlagText(text, attributes, OBJ_PERMANENT, L"PERMANENT");
+    AppendFlagText(text, attributes, OBJ_EXCLUSIVE, L"EXCLUSIVE");
+    AppendFlagText(text, attributes, OBJ_CASE_INSENSITIVE, L"CASE_INSENSITIVE");
+    AppendFlagText(text, attributes, OBJ_OPENIF, L"OPENIF");
+    AppendFlagText(text, attributes, OBJ_OPENLINK, L"OPENLINK");
+    AppendFlagText(text, attributes, OBJ_KERNEL_HANDLE, L"KERNEL_HANDLE");
+    AppendFlagText(text, attributes, OBJ_FORCE_ACCESS_CHECK, L"FORCE_ACCESS_CHECK");
+    AppendFlagText(text, attributes, OBJ_IGNORE_IMPERSONATED_DEVICEMAP, L"IGNORE_IMPERSONATED_DEVICEMAP");
+    AppendFlagText(text, attributes, OBJ_DONT_REPARSE, L"DONT_REPARSE");
+    const ULONG known = OBJ_INHERIT
+        | OBJ_PERMANENT
+        | OBJ_EXCLUSIVE
+        | OBJ_CASE_INSENSITIVE
+        | OBJ_OPENIF
+        | OBJ_OPENLINK
+        | OBJ_KERNEL_HANDLE
+        | OBJ_FORCE_ACCESS_CHECK
+        | OBJ_IGNORE_IMPERSONATED_DEVICEMAP
+        | OBJ_DONT_REPARSE;
+    const ULONG unknown = attributes & ~known;
+    if (unknown != 0) {
+        if (!text.empty()) {
+            text += L"|";
+        }
+        text += L"UNKNOWN(" + HexText(unknown) + L")";
+    }
+    return text.empty() ? L"0" : text;
+}
+
+// AccessMaskText explains common access-mask bits for native object handles.
+// Input is ACCESS_MASK from ObjectBasicInformation; return is a compact
+// high-level description plus unknown bits when present.
+std::wstring AccessMaskText(const ACCESS_MASK access) {
+    std::wstring text;
+    AppendFlagText(text, access, DELETE, L"DELETE");
+    AppendFlagText(text, access, READ_CONTROL, L"READ_CONTROL");
+    AppendFlagText(text, access, WRITE_DAC, L"WRITE_DAC");
+    AppendFlagText(text, access, WRITE_OWNER, L"WRITE_OWNER");
+    AppendFlagText(text, access, SYNCHRONIZE, L"SYNCHRONIZE");
+    AppendFlagText(text, access, ACCESS_SYSTEM_SECURITY, L"ACCESS_SYSTEM_SECURITY");
+    AppendFlagText(text, access, GENERIC_READ, L"GENERIC_READ");
+    AppendFlagText(text, access, GENERIC_WRITE, L"GENERIC_WRITE");
+    AppendFlagText(text, access, GENERIC_EXECUTE, L"GENERIC_EXECUTE");
+    AppendFlagText(text, access, GENERIC_ALL, L"GENERIC_ALL");
+    const ULONG known = DELETE
+        | READ_CONTROL
+        | WRITE_DAC
+        | WRITE_OWNER
+        | SYNCHRONIZE
+        | ACCESS_SYSTEM_SECURITY
+        | GENERIC_READ
+        | GENERIC_WRITE
+        | GENERIC_EXECUTE
+        | GENERIC_ALL;
+    const ULONG unknown = access & ~known;
+    if (unknown != 0) {
+        if (!text.empty()) {
+            text += L"|";
+        }
+        text += L"SPECIFIC(" + HexText(unknown) + L")";
+    }
+    return text.empty() ? L"0" : text;
+}
+
+// IsSuccessStatus reports whether an NTSTATUS indicates success. Input is the
+// native status code; return follows the NT_SUCCESS convention.
+bool IsSuccessStatus(const LONG status) {
+    return status >= 0;
+}
+
+// StatusMeaningText explains common native status values shown by object and
+// pipe actions. Input is one NTSTATUS; return is a short human-readable reason
+// while preserving the raw hex in adjacent columns.
+std::wstring StatusMeaningText(const LONG status) {
+    switch (status) {
+    case kStatusSuccess: return L"成功";
+    case kStatusInfoLengthMismatch: return L"缓冲区长度不匹配";
+    case kStatusBufferTooSmall: return L"缓冲区过小";
+    case kStatusBufferOverflow: return L"缓冲区溢出/需重试";
+    case kStatusNoMoreEntries: return L"没有更多条目";
+    case kStatusNoSuchFile: return L"对象/文件不存在";
+    case kStatusUnsuccessful: return L"操作失败";
+    case kStatusInvalidHandle: return L"句柄无效";
+    case kStatusAccessDenied: return L"访问被拒绝";
+    case kStatusObjectTypeMismatch: return L"对象类型不匹配";
+    case kStatusObjectNameNotFound: return L"对象名不存在";
+    case kStatusObjectPathNotFound: return L"对象路径不存在";
+    case kStatusNameTooLong: return L"名称过长";
+    case kStatusPipeDisconnected: return L"管道已断开";
+    case kStatusPipeBusy: return L"管道忙";
+    case kStatusInstanceNotAvailable: return L"管道实例不可用";
+    default:
+        return IsSuccessStatus(status) ? L"成功或信息状态" : L"失败/受限";
+    }
+}
+
+// IsRetryStatus reports whether a native query should retry with a larger
+// buffer. Input is an NTSTATUS; return is true for common size statuses.
+bool IsRetryStatus(const LONG status) {
+    return status == kStatusInfoLengthMismatch || status == kStatusBufferTooSmall || status == kStatusBufferOverflow;
+}
+
+// CountedString copies a UNICODE_STRING into std::wstring. Input is the native
+// string descriptor; return is empty when the descriptor has no buffer.
+std::wstring CountedString(const UNICODE_STRING& value) {
+    if (!value.Buffer || value.Length == 0) {
+        return {};
+    }
+    return std::wstring(value.Buffer, value.Buffer + (value.Length / sizeof(wchar_t)));
+}
+
+// MakeUnicodeString creates a temporary UNICODE_STRING view over a std::wstring.
+// Input must outlive the call using the returned descriptor; return contains no
+// owned memory and is safe for immediate Nt* calls only.
+UNICODE_STRING MakeUnicodeString(const std::wstring& text) {
+    UNICODE_STRING result{};
+    result.Buffer = const_cast<PWSTR>(text.c_str());
+    result.Length = static_cast<USHORT>(text.size() * sizeof(wchar_t));
+    result.MaximumLength = static_cast<USHORT>(result.Length + sizeof(wchar_t));
+    return result;
+}
+
+// MakeObjectAttributes creates case-insensitive object attributes for one
+// native path. Inputs are a UNICODE_STRING and optional root handle; output is a
+// stack-only OBJECT_ATTRIBUTES value for immediate Nt* calls.
+OBJECT_ATTRIBUTES MakeObjectAttributes(UNICODE_STRING& name, HANDLE root = nullptr) {
+    OBJECT_ATTRIBUTES attributes{};
+    attributes.Length = sizeof(attributes);
+    attributes.RootDirectory = root;
+    attributes.Attributes = OBJ_CASE_INSENSITIVE;
+    attributes.ObjectName = &name;
+    return attributes;
+}
+
+// JoinObjectPath combines a directory path with a child name. Inputs are object
+// manager path components; processing avoids duplicate separators; return is the
+// child full path.
+std::wstring JoinObjectPath(const std::wstring& directoryPath, const std::wstring& name) {
+    if (directoryPath.empty()) {
+        return name;
+    }
+    if (name.empty()) {
+        return directoryPath;
+    }
+    if (directoryPath.back() == L'\\') {
+        return directoryPath + name;
+    }
+    return directoryPath + L"\\" + name;
+}
+
+// ToLowerCopy normalizes type names for case-insensitive comparisons. Input is
+// display text; return is a lower-case copy without modifying the original.
+std::wstring ToLowerCopy(std::wstring text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(std::towlower(ch));
+    });
+    return text;
+}
+
+// ContainsI checks whether text contains a fragment ignoring case. Inputs are
+// two strings; return is true when the fragment appears in text.
+bool ContainsI(const std::wstring& text, const std::wstring& fragment) {
+    if (fragment.empty()) {
+        return true;
+    }
+    return ToLowerCopy(text).find(ToLowerCopy(fragment)) != std::wstring::npos;
+}
+
+// StartsWithI checks whether text starts with a prefix ignoring case. Inputs are
+// two strings; return is true when the prefix occupies the beginning of text.
+bool StartsWithI(const std::wstring& text, const std::wstring& prefix) {
+    if (prefix.empty()) {
+        return true;
+    }
+    if (text.size() < prefix.size()) {
+        return false;
+    }
+    return _wcsnicmp(text.c_str(), prefix.c_str(), prefix.size()) == 0;
+}
+
+// ParseHexOrDecimal converts display numbers such as "0x001F0003" or "123" to
+// a native access mask. Input is one cell string; processing accepts hex or
+// decimal and rejects partial parses; output is zero when the cell is empty or
+// malformed, which keeps detail rendering safe for non-numeric rows.
+ACCESS_MASK ParseHexOrDecimal(const std::wstring& text) {
+    if (text.empty()) {
+        return 0;
+    }
+    wchar_t* end = nullptr;
+    const int base = StartsWithI(text, L"0x") ? 16 : 10;
+    const unsigned long value = std::wcstoul(text.c_str(), &end, base);
+    if (end == text.c_str() || (end != nullptr && *end != L'\0')) {
+        return 0;
+    }
+    return static_cast<ACCESS_MASK>(value);
+}
+
+// JoinStrings joins short display fragments with one separator. Inputs are
+// already formatted fragments; return is empty when there are no fragments.
+std::wstring JoinStrings(const std::vector<std::wstring>& values, const std::wstring& separator) {
+    std::wstring result;
+    for (const std::wstring& value : values) {
+        if (value.empty()) {
+            continue;
+        }
+        if (!result.empty()) {
+            result += separator;
+        }
+        result += value;
+    }
+    return result;
+}
+
+// DosPathCandidatesFromNtPath mirrors the original KernelSymbolicLinkWorker
+// helper: it maps \Device\... targets back to visible DOS drive candidates with
+// QueryDosDeviceW. Input is one NT target path; return is a de-duplicated list.
+std::vector<std::wstring> DosPathCandidatesFromNtPath(const std::wstring& ntPath) {
+    std::vector<std::wstring> candidates;
+    if (!StartsWithI(ntPath, L"\\Device\\")) {
+        return candidates;
+    }
+
+    for (wchar_t drive = L'A'; drive <= L'Z'; ++drive) {
+        wchar_t driveName[3]{ drive, L':', L'\0' };
+        wchar_t mappingBuffer[4096]{};
+        const DWORD mappingLength = ::QueryDosDeviceW(driveName, mappingBuffer, static_cast<DWORD>(_countof(mappingBuffer)));
+        if (mappingLength == 0) {
+            continue;
+        }
+
+        const wchar_t* cursor = mappingBuffer;
+        while (*cursor != L'\0') {
+            const std::wstring mapping(cursor);
+            if (!mapping.empty() && StartsWithI(ntPath, mapping)) {
+                std::wstring candidate(driveName);
+                const std::wstring suffix = ntPath.substr(mapping.size());
+                candidate += suffix.empty() ? L"\\" : suffix;
+                const bool duplicate = std::any_of(candidates.begin(), candidates.end(), [&](const std::wstring& existing) {
+                    return _wcsicmp(existing.c_str(), candidate.c_str()) == 0;
+                });
+                if (!duplicate) {
+                    candidates.push_back(std::move(candidate));
+                }
+            }
+            cursor += std::wcslen(cursor) + 1;
+        }
+    }
+    return candidates;
+}
+
+// JoinStrings joins a short list for display/filter matching. Inputs are copied
+// strings and a separator; processing is linear and side-effect free; output is
+// empty when there are no values.
+std::wstring JoinStrings(const std::vector<std::wstring>& values, const wchar_t* separator) {
+    std::wstring joined;
+    for (const std::wstring& value : values) {
+        if (value.empty()) {
+            continue;
+        }
+        if (!joined.empty()) {
+            joined += separator;
+        }
+        joined += value;
+    }
+    return joined;
+}
+
+// MatchesDirectoryFilter checks all meaningful object row fields against the
+// user's filter. Inputs are one object-manager entry and a filter string;
+// processing is case-insensitive; return controls whether the row is displayed.
+bool MatchesDirectoryFilter(const DirectoryEntry& entry, const std::wstring& filter) {
+    if (filter.empty()) {
+        return true;
+    }
+    return ContainsI(entry.parentPath, filter)
+        || ContainsI(entry.name, filter)
+        || ContainsI(entry.typeName, filter)
+        || ContainsI(entry.fullPath, filter)
+        || ContainsI(entry.targetPath, filter)
+        || ContainsI(entry.statusText, filter);
+}
+
+// MatchesColumnsFilter checks generic key/value columns against user text.
+// Inputs are a generic row and filter string; return is true when any key,
+// value, or detail field matches case-insensitively.
+bool MatchesColumnsFilter(const KernelResultRow& row, const std::wstring& filter) {
+    if (filter.empty()) {
+        return true;
+    }
+    if (ContainsI(row.detailText, filter)) {
+        return true;
+    }
+    for (const auto& column : row.columns) {
+        if (ContainsI(column.first, filter) || ContainsI(column.second, filter)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// FieldValue extracts one selected-row field from an action packet. Inputs are
+// the text fields copied by KernelPage and the desired key; output is empty when
+// the current row does not expose the requested column.
+std::wstring FieldValue(const KernelActionRequest& request, const std::wstring& key) {
+    for (const auto& field : request.rowFields) {
+        if (_wcsicmp(field.first.c_str(), key.c_str()) == 0) {
+            return field.second;
+        }
+    }
+    return {};
+}
+
+// FirstNonEmpty returns the first non-empty string from a short candidate list.
+// Inputs are already-normalized display strings; output is the preferred value
+// used to resolve object paths from heterogeneous KernelResultRow layouts.
+std::wstring FirstNonEmpty(std::initializer_list<std::wstring> values) {
+    for (const std::wstring& value : values) {
+        if (!value.empty()) {
+            return value;
+        }
+    }
+    return {};
+}
+
+// NativePathFromAction resolves a native object path from the selected row. The
+// input may be a generic object row, symbolic-link row, named-pipe row, or
+// fallback filter text; output is empty only when no usable path is available.
+std::wstring NativePathFromAction(const KernelActionRequest& request) {
+    const std::wstring direct = FirstNonEmpty({
+        FieldValue(request, L"Path"),
+        FieldValue(request, L"NtPath"),
+        FieldValue(request, L"fullPath"),
+        FieldValue(request, L"FullPath"),
+        FieldValue(request, L"完整路径"),
+        FieldValue(request, L"NT Path"),
+        FieldValue(request, L"targetPath"),
+        FieldValue(request, L"symbolicTarget"),
+        FieldValue(request, L"目标路径"),
+        FieldValue(request, L"符号链接目标"),
+        FieldValue(request, L"Directory"),
+        FieldValue(request, L"directoryPath"),
+        FieldValue(request, L"sourceDirectory"),
+        FieldValue(request, L"目录路径"),
+        FieldValue(request, L"来源目录"),
+        request.filterText,
+    });
+    if (!direct.empty()) {
+        return direct;
+    }
+    const std::wstring parent = FieldValue(request, L"Parent");
+    const std::wstring name = FirstNonEmpty({
+        FieldValue(request, L"Name"),
+        FieldValue(request, L"objectName"),
+        FieldValue(request, L"linkName"),
+        FieldValue(request, L"对象名称"),
+        FieldValue(request, L"名称"),
+        FieldValue(request, L"Pipe"),
+        FieldValue(request, L"Pipe Name"),
+    });
+    return JoinObjectPath(parent, name);
+}
+
+// ObjectTypeNameFromAction resolves a type name from ObjectTypeMatrix and other
+// object-result rows. Inputs are selected-row fields copied by KernelPage; the
+// return value is empty only when no type-like cell exists.
+std::wstring ObjectTypeNameFromAction(const KernelActionRequest& request) {
+    return FirstNonEmpty({
+        FieldValue(request, L"Type"),
+        FieldValue(request, L"TypeName"),
+        FieldValue(request, L"ObjectType"),
+        FieldValue(request, L"objectType"),
+        FieldValue(request, L"对象类型"),
+        FieldValue(request, L"类型"),
+        FieldValue(request, L"类型名"),
+    });
+}
+
+// AppendObjectTypeDetailRow renders an ObjectTypeMatrix row as a first-class
+// detail result. Inputs are the selected action request, resolved type name and
+// packet; processing copies count/access-mask fields without opening an object;
+// no value is returned because the row is appended to the packet.
+void AppendObjectTypeDetailRow(const KernelActionRequest& request, const std::wstring& type, QueryPacket& packet) {
+    packet.rows.push_back(Row({
+        { L"Action", L"NativeObjectTypeDetail" },
+        { L"Type", type },
+        { L"TypeIndex", FieldValue(request, L"TypeIndex") },
+        { L"Objects", FieldValue(request, L"Objects") },
+        { L"Handles", FieldValue(request, L"Handles") },
+        { L"HighObjects", FieldValue(request, L"HighObjects") },
+        { L"HighHandles", FieldValue(request, L"HighHandles") },
+        { L"ValidAccess", FieldValue(request, L"ValidAccess") },
+        { L"ValidAccessText", AccessMaskText(ParseHexOrDecimal(FieldValue(request, L"ValidAccess"))) },
+        { L"GenericRead", FieldValue(request, L"GenericRead") },
+        { L"GenericWrite", FieldValue(request, L"GenericWrite") },
+        { L"GenericExecute", FieldValue(request, L"GenericExecute") },
+        { L"GenericAll", FieldValue(request, L"GenericAll") },
+        { L"SecurityRequired", FieldValue(request, L"SecurityRequired") },
+        { L"MaintainHandleCount", FieldValue(request, L"MaintainHandleCount") },
+        { L"PoolType", FieldValue(request, L"PoolType") },
+        { L"Strategy", type == L"SymbolicLink"
+            ? L"NtOpenSymbolicLinkObject + NtQuerySymbolicLinkObject"
+            : (type.find(L"Port") != std::wstring::npos ? L"对象目录枚举 + R3 对象详情" : L"对象类型统计；具体对象需从对象目录页打开") },
+        { L"Status", L"对象类型矩阵行详情" },
+    }, L"对象类型矩阵行不对应单一对象路径，因此展示类型统计与访问掩码。"));
+}
+
+// MakeNativeActionResult creates the common result packet for R3 Native row
+// actions. Inputs are the action request, success flag, operation text, and
+// accumulated rows/warnings; output is the same grid model used by queries.
+KernelOperationResult MakeNativeActionResult(const KernelActionRequest& request, const bool success, const std::wstring& operation, QueryPacket&& packet) {
+    KernelOperationResult result = MakeResult(request.featureId, success, operation, std::move(packet));
+    result.destructiveAction = false;
+    return result;
+}
+
+// AppendObjectBasicInfoRow queries NtQueryObject(ObjectBasicInformation) for an
+// opened object handle. Inputs are runtime, object path, handle and open status;
+// processing appends a row even when the open failed so the UI shows the exact
+// status rather than silently doing nothing.
+void AppendObjectBasicInfoRow(QueryPacket& packet, const NtRuntime& runtime, const std::wstring& path, HANDLE handle, const LONG openStatus) {
+    KOBJECT_BASIC_INFORMATION basic{};
+    ULONG returned = 0;
+    LONG queryStatus = kStatusNoSuchFile;
+    if (handle && runtime.queryObject) {
+        queryStatus = runtime.queryObject(handle, kObjectBasicInformation, &basic, static_cast<ULONG>(sizeof(basic)), &returned);
+    }
+    const bool hasBasic = handle && runtime.queryObject && IsSuccessStatus(queryStatus);
+
+    packet.rows.push_back(Row({
+        { L"Action", L"NativeObjectQueryDetail" },
+        { L"Path", path },
+        { L"OpenStatus", StatusText(openStatus) },
+        { L"OpenStatusText", StatusMeaningText(openStatus) },
+        { L"QueryStatus", runtime.queryObject ? StatusText(queryStatus) : L"NtQueryObject unavailable" },
+        { L"QueryStatusText", runtime.queryObject ? StatusMeaningText(queryStatus) : L"NtQueryObject 未解析" },
+        { L"QueryReturned", std::to_wstring(returned) },
+        { L"Attributes", hasBasic ? HexText(basic.Attributes) : L"" },
+        { L"AttributesText", hasBasic ? ObjectAttributesText(basic.Attributes) : L"" },
+        { L"GrantedAccess", hasBasic ? HexText(basic.GrantedAccess) : L"" },
+        { L"GrantedAccessText", hasBasic ? AccessMaskText(basic.GrantedAccess) : L"" },
+        { L"Handles", hasBasic ? std::to_wstring(basic.HandleCount) : L"" },
+        { L"Pointers", hasBasic ? std::to_wstring(basic.PointerCount) : L"" },
+        { L"PagedPool", hasBasic ? std::to_wstring(basic.PagedPoolUsage) : L"" },
+        { L"NonPagedPool", hasBasic ? std::to_wstring(basic.NonPagedPoolUsage) : L"" },
+        { L"NameInfoSize", hasBasic ? std::to_wstring(basic.NameInfoSize) : L"" },
+        { L"TypeInfoSize", hasBasic ? std::to_wstring(basic.TypeInfoSize) : L"" },
+        { L"SecurityDescriptorSize", hasBasic ? std::to_wstring(basic.SecurityDescriptorSize) : L"" },
+        { L"Status", hasBasic ? L"已打开并读取对象基础信息" : L"未能读取对象基础信息" },
+    }, hasBasic ? AccessMaskText(basic.GrantedAccess) : StatusMeaningText(openStatus)));
+}
+
+// AppendQueriedObjectText asks NtQueryObject for name/type information. Inputs
+// are an opened object handle and info class; processing uses the growable query
+// helper shape manually because this file keeps Native actions local; output is
+// one detail row when the query is available.
+void AppendQueriedObjectText(QueryPacket& packet, const NtRuntime& runtime, HANDLE handle, const ULONG infoClass, const std::wstring& label) {
+    if (!runtime.queryObject || !handle) {
+        return;
+    }
+    ULONG bufferSize = 4096;
+    std::vector<std::byte> buffer;
+    LONG status = kStatusInfoLengthMismatch;
+    ULONG returned = 0;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        buffer.assign(bufferSize, std::byte{});
+        returned = 0;
+        status = runtime.queryObject(handle, infoClass, buffer.data(), bufferSize, &returned);
+        if (IsSuccessStatus(status) || !IsRetryStatus(status)) {
+            break;
+        }
+        bufferSize = std::max<ULONG>(bufferSize * 2, returned + 0x1000);
+    }
+    std::wstring value;
+    if (IsSuccessStatus(status) && buffer.size() >= sizeof(UNICODE_STRING)) {
+        const auto* counted = reinterpret_cast<const UNICODE_STRING*>(buffer.data());
+        value = CountedString(*counted);
+    }
+    packet.rows.push_back(Row({
+        { L"Action", L"NtQueryObject" },
+        { L"InfoClass", std::to_wstring(infoClass) },
+        { L"Field", label },
+        { L"Status", StatusText(status) },
+        { L"Bytes", std::to_wstring(buffer.size()) },
+        { L"Returned", std::to_wstring(returned) },
+        { L"Value", value },
+    }, value));
+}
+
+// Runtime loads ntdll exports lazily. Inputs are none; processing resolves each
+// symbol by name; return is a cached function table.
+const NtRuntime& Runtime() {
+    static NtRuntime runtime = [] {
+        NtRuntime result{};
+        HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
+        if (!ntdll) {
+            ntdll = ::LoadLibraryW(L"ntdll.dll");
+        }
+        if (!ntdll) {
+            return result;
+        }
+        result.openDirectoryObject = reinterpret_cast<NtOpenDirectoryObjectFn>(::GetProcAddress(ntdll, "NtOpenDirectoryObject"));
+        result.queryDirectoryObject = reinterpret_cast<NtQueryDirectoryObjectFn>(::GetProcAddress(ntdll, "NtQueryDirectoryObject"));
+        result.openSymbolicLinkObject = reinterpret_cast<NtOpenSymbolicLinkObjectFn>(::GetProcAddress(ntdll, "NtOpenSymbolicLinkObject"));
+        result.querySymbolicLinkObject = reinterpret_cast<NtQuerySymbolicLinkObjectFn>(::GetProcAddress(ntdll, "NtQuerySymbolicLinkObject"));
+        result.queryObject = reinterpret_cast<NtQueryObjectFn>(::GetProcAddress(ntdll, "NtQueryObject"));
+        result.openFile = reinterpret_cast<NtOpenFileFn>(::GetProcAddress(ntdll, "NtOpenFile"));
+        result.queryDirectoryFile = reinterpret_cast<NtQueryDirectoryFileFn>(::GetProcAddress(ntdll, "NtQueryDirectoryFile"));
+        result.querySystemInformation = reinterpret_cast<NtQuerySystemInformationFn>(::GetProcAddress(ntdll, "NtQuerySystemInformation"));
+        result.queryInformationProcess = reinterpret_cast<NtQueryInformationProcessFn>(::GetProcAddress(ntdll, "NtQueryInformationProcess"));
+        result.queryInformationThread = reinterpret_cast<NtQueryInformationThreadFn>(::GetProcAddress(ntdll, "NtQueryInformationThread"));
+        result.queryInformationToken = reinterpret_cast<NtQueryInformationTokenFn>(::GetProcAddress(ntdll, "NtQueryInformationToken"));
+        return result;
+    }();
+    return runtime;
+}
+
+// OpenDirectory opens an object-manager directory. Input is a native path such
+// as \Device; processing calls NtOpenDirectoryObject; return is a handle that
+// the caller must close or null on failure.
+HANDLE OpenDirectory(const NtRuntime& runtime, const std::wstring& path, LONG* statusOut = nullptr) {
+    if (!runtime.openDirectoryObject || path.empty()) {
+        if (statusOut) {
+            *statusOut = kStatusNoSuchFile;
+        }
+        return nullptr;
+    }
+
+    UNICODE_STRING unicodePath = MakeUnicodeString(path);
+    OBJECT_ATTRIBUTES attributes = MakeObjectAttributes(unicodePath);
+    HANDLE handle = nullptr;
+    const LONG status = runtime.openDirectoryObject(&handle, DIRECTORY_QUERY, &attributes);
+    if (statusOut) {
+        *statusOut = status;
+    }
+    return IsSuccessStatus(status) ? handle : nullptr;
+}
+
+// OpenSymbolicLink opens one object-manager symbolic link. Input is a native
+// link path; processing calls NtOpenSymbolicLinkObject; return is a closeable
+// handle or null on failure.
+HANDLE OpenSymbolicLink(const NtRuntime& runtime, const std::wstring& path, LONG* statusOut = nullptr) {
+    if (!runtime.openSymbolicLinkObject || path.empty()) {
+        if (statusOut) {
+            *statusOut = kStatusNoSuchFile;
+        }
+        return nullptr;
+    }
+
+    UNICODE_STRING unicodePath = MakeUnicodeString(path);
+    OBJECT_ATTRIBUTES attributes = MakeObjectAttributes(unicodePath);
+    HANDLE handle = nullptr;
+    const LONG status = runtime.openSymbolicLinkObject(&handle, SYMBOLIC_LINK_QUERY, &attributes);
+    if (statusOut) {
+        *statusOut = status;
+    }
+    return IsSuccessStatus(status) ? handle : nullptr;
+}
+
+// QuerySymbolicLinkTarget reads a symbolic-link target. Input is an opened link
+// handle; processing calls NtQuerySymbolicLinkObject; return is empty on error.
+std::wstring QuerySymbolicLinkTarget(const NtRuntime& runtime, HANDLE link) {
+    if (!runtime.querySymbolicLinkObject || !link) {
+        return {};
+    }
+
+    std::vector<wchar_t> buffer(2048, L'\0');
+    UNICODE_STRING target{};
+    target.Buffer = buffer.data();
+    target.MaximumLength = static_cast<USHORT>(buffer.size() * sizeof(wchar_t));
+    const LONG status = runtime.querySymbolicLinkObject(link, &target, nullptr);
+    if (!IsSuccessStatus(status)) {
+        return {};
+    }
+    return CountedString(target);
+}
+
+// QueryBasicObjectCounts reads handle and pointer counts from any object handle.
+// Inputs are runtime and object handle; processing calls NtQueryObject; output
+// strings stay empty when the object does not allow the query.
+void QueryBasicObjectCounts(const NtRuntime& runtime, HANDLE handle, std::wstring& handleCountText, std::wstring& pointerCountText) {
+    if (!runtime.queryObject || !handle) {
+        return;
+    }
+
+    KOBJECT_BASIC_INFORMATION basic{};
+    ULONG returned = 0;
+    const LONG status = runtime.queryObject(handle, kObjectBasicInformation, &basic, static_cast<ULONG>(sizeof(basic)), &returned);
+    if (!IsSuccessStatus(status)) {
+        return;
+    }
+    handleCountText = std::to_wstring(basic.HandleCount);
+    pointerCountText = std::to_wstring(basic.PointerCount);
+}
+
+// OpenNamedPipeReadOnly opens a named pipe namespace entry without reading or
+// writing payload data. Inputs are runtime and native pipe path; processing uses
+// NtOpenFile with FILE_READ_ATTRIBUTES|SYNCHRONIZE; return is a closeable handle
+// or null while statusOut/ioStatusOut carry the exact native result.
+HANDLE OpenNamedPipeReadOnly(const NtRuntime& runtime, const std::wstring& path, LONG* statusOut, IO_STATUS_BLOCK* ioStatusOut) {
+    if (!runtime.openFile || path.empty()) {
+        if (statusOut) {
+            *statusOut = kStatusNoSuchFile;
+        }
+        if (ioStatusOut) {
+            *ioStatusOut = {};
+        }
+        return nullptr;
+    }
+
+    UNICODE_STRING unicodePath = MakeUnicodeString(path);
+    OBJECT_ATTRIBUTES attributes = MakeObjectAttributes(unicodePath);
+    IO_STATUS_BLOCK localIoStatus{};
+    HANDLE pipe = nullptr;
+    const LONG openStatus = runtime.openFile(
+        &pipe,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        &attributes,
+        &localIoStatus,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_SYNCHRONOUS_IO_NONALERT);
+    if (statusOut) {
+        *statusOut = openStatus;
+    }
+    if (ioStatusOut) {
+        *ioStatusOut = localIoStatus;
+    }
+    return IsSuccessStatus(openStatus) ? pipe : nullptr;
+}
+
+// AppendDirectoryPreviewRows adds a small, live child preview for an opened
+// object directory. Inputs are a native path and row limit; processing reuses the
+// one-level directory enumerator; output rows make the right-click details page
+// actionable without forcing the full recursive tab.
+void AppendDirectoryPreviewRows(QueryPacket& packet, const NtRuntime& runtime, const std::wstring& path, const std::size_t limit) {
+    std::vector<std::wstring> warnings;
+    const std::vector<DirectoryEntry> entries = EnumerateDirectoryFlat(runtime, path, warnings);
+    packet.rows.push_back(Row({
+        { L"Action", L"NativeDirectoryPreview" },
+        { L"Path", path },
+        { L"Children", std::to_wstring(entries.size()) },
+        { L"PreviewLimit", std::to_wstring(limit) },
+        { L"Warnings", std::to_wstring(warnings.size()) },
+        { L"Status", entries.empty() ? L"无可显示子项或访问受限" : L"已读取目录子项预览" },
+    }));
+    for (const std::wstring& warning : warnings) {
+        packet.warnings.push_back(warning);
+    }
+    std::size_t added = 0;
+    for (const DirectoryEntry& entry : entries) {
+        if (added >= limit) {
+            break;
+        }
+        AppendDirectoryEntryRow(packet, L"DetailPreview", 0, entry);
+        ++added;
+    }
+}
+
+// DirectoryStatusText explains one object-manager row. Inputs are type and
+// query state; return is compact display text for the status/details column.
+std::wstring DirectoryStatusText(const std::wstring& typeName, const bool canOpen, const bool hasTarget) {
+    if (typeName == L"Directory") {
+        return canOpen ? L"目录，可继续展开" : L"目录，当前权限无法打开";
+    }
+    if (typeName == L"SymbolicLink") {
+        return hasTarget ? L"符号链接，已解析目标" : L"符号链接，目标未解析";
+    }
+    return canOpen ? L"对象可打开" : L"叶子对象或权限受限";
+}
+
+// EnumerateDirectoryFlat returns one level of object-manager children. Inputs
+// are runtime, directory path and warning sink; processing loops
+// NtQueryDirectoryObject; return is a vector of copied entries.
+std::vector<DirectoryEntry> EnumerateDirectoryFlat(const NtRuntime& runtime, const std::wstring& directoryPath, std::vector<std::wstring>& warnings) {
+    std::vector<DirectoryEntry> entries;
+    if (!runtime.openDirectoryObject || !runtime.queryDirectoryObject) {
+        warnings.push_back(L"NtOpenDirectoryObject/NtQueryDirectoryObject 不可用。");
+        return entries;
+    }
+
+    LONG openStatus = 0;
+    HANDLE directory = OpenDirectory(runtime, directoryPath, &openStatus);
+    if (!directory) {
+        warnings.push_back(std::wstring(L"无法打开对象目录 ") + directoryPath + L"，NTSTATUS=" + StatusText(openStatus));
+        return entries;
+    }
+
+    std::vector<std::byte> buffer(64 * 1024);
+    ULONG context = 0;
+    BOOLEAN restart = TRUE;
+    for (;;) {
+        ULONG returned = 0;
+        const LONG status = runtime.queryDirectoryObject(
+            directory,
+            buffer.data(),
+            static_cast<ULONG>(buffer.size()),
+            TRUE,
+            restart,
+            &context,
+            &returned);
+        restart = FALSE;
+        if (status == kStatusNoMoreEntries) {
+            break;
+        }
+        if (!IsSuccessStatus(status)) {
+            warnings.push_back(std::wstring(L"查询对象目录失败 ") + directoryPath + L"，NTSTATUS=" + StatusText(status));
+            break;
+        }
+
+        const auto* nativeEntry = reinterpret_cast<const KOBJECT_DIRECTORY_INFORMATION*>(buffer.data());
+        const std::wstring name = CountedString(nativeEntry->Name);
+        if (name.empty()) {
+            continue;
+        }
+
+        DirectoryEntry entry;
+        entry.parentPath = directoryPath;
+        entry.name = name;
+        entry.typeName = CountedString(nativeEntry->TypeName);
+        if (entry.typeName.empty()) {
+            entry.typeName = L"<unknown>";
+        }
+        entry.fullPath = JoinObjectPath(directoryPath, entry.name);
+
+        if (entry.typeName == L"Directory") {
+            LONG childStatus = 0;
+            HANDLE child = OpenDirectory(runtime, entry.fullPath, &childStatus);
+            if (child) {
+                entry.canOpen = true;
+                QueryBasicObjectCounts(runtime, child, entry.handleCountText, entry.pointerCountText);
+                ::CloseHandle(child);
+            }
+        } else if (entry.typeName == L"SymbolicLink") {
+            LONG linkStatus = 0;
+            HANDLE link = OpenSymbolicLink(runtime, entry.fullPath, &linkStatus);
+            if (link) {
+                entry.canOpen = true;
+                QueryBasicObjectCounts(runtime, link, entry.handleCountText, entry.pointerCountText);
+                entry.targetPath = QuerySymbolicLinkTarget(runtime, link);
+                ::CloseHandle(link);
+            }
+        }
+
+        if (entry.handleCountText.empty()) {
+            entry.handleCountText = L"N/A";
+        }
+        if (entry.pointerCountText.empty()) {
+            entry.pointerCountText = L"N/A";
+        }
+        entry.statusText = DirectoryStatusText(entry.typeName, entry.canOpen, !entry.targetPath.empty());
+        entries.push_back(std::move(entry));
+    }
+
+    ::CloseHandle(directory);
+    return entries;
+}
+
+// AppendDirectoryEntryRow converts one object-manager entry into a generic row.
+// Inputs are a source label, depth, object entry, and enumApi text; processing
+// formats the original KernelDock tree metadata plus copyable enumeration API
+// text; output is appended to the query packet with no return value.
+void AppendDirectoryEntryRow(
+    QueryPacket& packet,
+    const std::wstring& source,
+    const std::size_t depth,
+    const DirectoryEntry& entry,
+    const std::wstring& enumApi) {
+    packet.rows.push_back(Row({
+        { L"Source", source },
+        { L"EnumApi", enumApi },
+        { L"enumApi", enumApi },
+        { L"枚举 API", enumApi },
+        { L"Depth", std::to_wstring(depth) },
+        { L"Parent", entry.parentPath },
+        { L"Directory", entry.parentPath },
+        { L"directoryPath", entry.parentPath },
+        { L"sourceDirectory", entry.parentPath },
+        { L"Name", entry.name },
+        { L"objectName", entry.name },
+        { L"linkName", entry.name },
+        { L"Type", entry.typeName },
+        { L"objectType", entry.typeName },
+        { L"Path", entry.fullPath },
+        { L"fullPath", entry.fullPath },
+        { L"Target", entry.targetPath.empty() ? L"" : entry.targetPath },
+        { L"targetPath", entry.targetPath.empty() ? L"" : entry.targetPath },
+        { L"symbolicTarget", entry.targetPath.empty() ? L"" : entry.targetPath },
+        { L"dosCandidate", entry.targetPath.empty() ? L"" : JoinStrings(DosPathCandidatesFromNtPath(entry.targetPath), L"; ") },
+        { L"Win32Path", entry.targetPath.empty() ? L"" : JoinStrings(DosPathCandidatesFromNtPath(entry.targetPath), L"; ") },
+        { L"Handles", entry.handleCountText },
+        { L"Pointers", entry.pointerCountText },
+        { L"Status", entry.statusText },
+        { L"statusText", entry.statusText },
+    }, entry.targetPath.empty() ? entry.statusText : entry.targetPath));
+}
+
+// MakeResult finalizes a worker packet. Inputs are feature id, success state,
+// operation message and packet data; output is the facade result consumed by UI.
+KernelOperationResult MakeResult(KernelFeatureId id, const bool success, const std::wstring& operation, QueryPacket&& packet) {
+    KernelOperationResult result;
+    result.supported = true;
+    result.success = success;
+    result.message = operation + (success ? L" 完成。" : L" 未完整完成。");
+    if (!packet.warnings.empty()) {
+        result.message += L" ";
+        for (const std::wstring& warning : packet.warnings) {
+            result.message += warning;
+            result.message += L" ";
+        }
+    }
+    for (KernelResultRow& row : packet.rows) {
+        result.rows.push_back(std::move(row));
+    }
+    for (const std::wstring& warning : packet.warnings) {
+        result.rows.push_back(Row({
+            { L"Warning", warning },
+        }, warning));
+    }
+    return result;
+}
+
+// AppendDirectoryRoot appends all direct children under one root. Inputs are a
+// root path and source label; processing calls EnumerateDirectoryFlat; no value
+// is returned because rows/warnings are accumulated in packet.
+void AppendDirectoryRoot(QueryPacket& packet, const NtRuntime& runtime, const std::wstring& root, const std::wstring& source, const std::wstring& filter) {
+    const std::vector<DirectoryEntry> entries = EnumerateDirectoryFlat(runtime, root, packet.warnings);
+    if (entries.empty()) {
+        if (filter.empty() || ContainsI(root, filter)) {
+            packet.rows.push_back(Row({
+                { L"Source", source },
+                { L"Path", root },
+                { L"Status", L"无可显示子项或访问受限" },
+            }));
+        }
+        return;
+    }
+    for (const DirectoryEntry& entry : entries) {
+        if (MatchesDirectoryFilter(entry, filter)) {
+            AppendDirectoryEntryRow(packet, source, 0, entry);
+        }
+    }
+}
+
+// CommonNamespaceRoots returns object-manager roots used by multiple pages.
+// Input is none; return is an ordered list of readable high-value directories.
+std::vector<DWORD> DiscoverSessionIds(const NtRuntime& runtime) {
+    // DiscoverSessionIds mirrors the original BaseNamedObjects worker by
+    // enumerating numeric children under \Sessions. Inputs are the resolved NT
+    // runtime; processing also includes the current process session and session
+    // 0; output is de-duplicated and sorted for stable UI order.
+    DWORD currentSessionId = 0;
+    ::ProcessIdToSessionId(::GetCurrentProcessId(), &currentSessionId);
+    std::vector<DWORD> sessions{ 0, currentSessionId };
+    std::vector<std::wstring> warnings;
+    const std::vector<DirectoryEntry> entries = EnumerateDirectoryFlat(runtime, L"\\Sessions", warnings);
+    for (const DirectoryEntry& entry : entries) {
+        wchar_t* end = nullptr;
+        const unsigned long value = std::wcstoul(entry.name.c_str(), &end, 10);
+        if (end != entry.name.c_str() && *end == L'\0') {
+            sessions.push_back(static_cast<DWORD>(value));
+        }
+    }
+    std::sort(sessions.begin(), sessions.end());
+    sessions.erase(std::unique(sessions.begin(), sessions.end()), sessions.end());
+    return sessions;
+}
+
+std::vector<std::wstring> CommonNamespaceRoots() {
+    const NtRuntime& runtime = Runtime();
+    std::vector<std::wstring> roots{
+        L"\\",
+        L"\\Device",
+        L"\\Driver",
+        L"\\FileSystem",
+        L"\\FileSystem\\Filters",
+        L"\\BaseNamedObjects",
+        L"\\RPC Control",
+        L"\\Callback",
+        L"\\KernelObjects",
+        L"\\KnownDlls",
+        L"\\KnownDlls32",
+        L"\\Nls",
+        L"\\ObjectTypes",
+        L"\\Security",
+        L"\\Sessions",
+    };
+    for (const DWORD sessionId : DiscoverSessionIds(runtime)) {
+        const std::wstring prefix = std::wstring(L"\\Sessions\\") + std::to_wstring(sessionId);
+        roots.push_back(prefix + L"\\BaseNamedObjects");
+        roots.push_back(prefix + L"\\DosDevices");
+        roots.push_back(prefix + L"\\Windows");
+    }
+    std::sort(roots.begin(), roots.end());
+    roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
+    return roots;
+}
+
+// QueryObjectNamespaceOverview implements the first object namespace page.
+// Input is the request; processing enumerates key object directories one level;
+// return contains live R3 namespace rows.
+KernelOperationResult QueryObjectNamespaceOverview(const KernelRequest& request) {
+    const NtRuntime& runtime = Runtime();
+    QueryPacket packet;
+    for (const std::wstring& root : CommonNamespaceRoots()) {
+        AppendDirectoryRoot(packet, runtime, root, root, request.filterText);
+    }
+    return MakeResult(request.featureId, !packet.rows.empty(), L"对象命名空间枚举", std::move(packet));
+}
+
+// QueryObjectDirectoryRecursive implements bounded recursive namespace walking.
+// Input is the request filter as optional start path; processing BFS-enumerates
+// directories with caps to keep the UI responsive; return contains tree rows.
+KernelOperationResult QueryObjectDirectoryRecursive(const KernelRequest& request) {
+    const NtRuntime& runtime = Runtime();
+    QueryPacket packet;
+    const bool filterLooksLikePath = !request.filterText.empty() && request.filterText.front() == L'\\';
+    const std::wstring startPath = filterLooksLikePath ? request.filterText : L"\\";
+    const std::wstring rowFilter = filterLooksLikePath ? std::wstring{} : request.filterText;
+    std::size_t maxDepth = 4;
+    if (!request.moduleFilterText.empty()) {
+        wchar_t* end = nullptr;
+        const unsigned long parsed = std::wcstoul(request.moduleFilterText.c_str(), &end, 10);
+        if (end != request.moduleFilterText.c_str()) {
+            maxDepth = std::min<std::size_t>(32, parsed);
+        }
+    }
+    struct WorkItem {
+        std::wstring path;
+        std::size_t depth = 0;
+    };
+
+    std::deque<WorkItem> queue;
+    std::set<std::wstring> visited;
+    std::size_t scannedRows = 0;
+    queue.push_back({ startPath, 0 });
+    visited.insert(ToLowerCopy(startPath));
+
+    while (!queue.empty() && packet.rows.size() < kMaxDirectoryRows && scannedRows < kMaxDirectoryRows * 4) {
+        const WorkItem item = queue.front();
+        queue.pop_front();
+        const std::vector<DirectoryEntry> entries = EnumerateDirectoryFlat(runtime, item.path, packet.warnings);
+        for (const DirectoryEntry& entry : entries) {
+            ++scannedRows;
+            if (MatchesDirectoryFilter(entry, rowFilter)) {
+                AppendDirectoryEntryRow(packet, L"Recursive", item.depth, entry);
+            }
+            if (entry.typeName == L"Directory" && item.depth < maxDepth && packet.rows.size() < kMaxDirectoryRows && scannedRows < kMaxDirectoryRows * 4) {
+                const std::wstring key = ToLowerCopy(entry.fullPath);
+                if (visited.insert(key).second) {
+                    queue.push_back({ entry.fullPath, item.depth + 1 });
+                }
+            }
+        }
+    }
+
+    if (!queue.empty() || scannedRows >= kMaxDirectoryRows * 4) {
+        packet.warnings.push_back(std::wstring(L"目录递归达到显示上限 ") + std::to_wstring(kMaxDirectoryRows) + L" 行，已截断。可在“过滤/起点”输入框指定更小的对象目录。");
+    }
+    return MakeResult(request.featureId, !packet.rows.empty(), L"对象目录递归", std::move(packet));
+}
+
+// QuerySymbolicLinks enumerates common directories and resolves link targets.
+// Input is the request; processing filters object rows by SymbolicLink type;
+// return contains source path and target text.
+KernelOperationResult QuerySymbolicLinks(const KernelRequest& request) {
+    const NtRuntime& runtime = Runtime();
+    QueryPacket packet;
+    for (const std::wstring& root : CommonNamespaceRoots()) {
+        const std::vector<DirectoryEntry> entries = EnumerateDirectoryFlat(runtime, root, packet.warnings);
+        for (const DirectoryEntry& entry : entries) {
+            const bool targetMatched = request.moduleFilterText.empty() ||
+                ContainsI(entry.targetPath, request.moduleFilterText) ||
+                ContainsI(JoinStrings(DosPathCandidatesFromNtPath(entry.targetPath), L"; "), request.moduleFilterText);
+            if (entry.typeName == L"SymbolicLink" && MatchesDirectoryFilter(entry, request.filterText) && targetMatched) {
+                AppendDirectoryEntryRow(packet, root, 0, entry);
+            }
+        }
+    }
+    return MakeResult(request.featureId, !packet.rows.empty(), L"符号链接解析", std::move(packet));
+}
+
+// QueryDeviceDriverObjects enumerates object-manager device/driver roots. Input
+// is the request; processing is R3-only and does not call DeviceIoControl;
+// return contains Device/Driver/FileSystem object rows.
+KernelOperationResult QueryDeviceDriverObjects(const KernelRequest& request) {
+    const NtRuntime& runtime = Runtime();
+    QueryPacket packet;
+    const std::array<std::wstring, 4> roots{
+        L"\\Device",
+        L"\\Driver",
+        L"\\FileSystem",
+        L"\\FileSystem\\Filters",
+    };
+    for (const std::wstring& root : roots) {
+        AppendDirectoryRoot(packet, runtime, root, root, request.filterText);
+    }
+    return MakeResult(request.featureId, !packet.rows.empty(), L"设备与驱动对象枚举", std::move(packet));
+}
+
+// QueryBaseNamedObjects enumerates per-session and global BaseNamedObjects.
+// Input is the request; processing reads object-manager directories; return
+// contains mutex/event/section/semaphore style user-visible objects.
+KernelOperationResult QueryBaseNamedObjects(const KernelRequest& request) {
+    const NtRuntime& runtime = Runtime();
+    QueryPacket packet;
+    std::vector<std::wstring> roots{
+        L"\\BaseNamedObjects",
+    };
+    for (const DWORD sessionId : DiscoverSessionIds(runtime)) {
+        roots.push_back(std::wstring(L"\\Sessions\\") + std::to_wstring(sessionId) + L"\\BaseNamedObjects");
+    }
+    std::sort(roots.begin(), roots.end());
+    roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
+    for (const std::wstring& root : roots) {
+        AppendDirectoryRoot(packet, runtime, root, root, request.filterText);
+    }
+    return MakeResult(request.featureId, !packet.rows.empty(), L"BaseNamedObjects 枚举", std::move(packet));
+}
+
+// IsCommunicationType reports whether an object type is relevant to IPC or
+// synchronization. Input is an object-manager type string; return drives the
+// communication endpoint page filter.
+bool IsCommunicationType(const std::wstring& typeName) {
+    const std::wstring lower = ToLowerCopy(typeName);
+    return lower == L"alpc port"
+        || lower == L"port"
+        || lower == L"waitcompletionpacket"
+        || lower == L"tpworkerfactory"
+        || lower == L"event"
+        || lower == L"section"
+        || lower == L"mutant"
+        || lower == L"semaphore"
+        || lower == L"iocompletion"
+        || lower == L"timer"
+        || lower == L"job"
+        || lower == L"keyed event";
+}
+
+// AppendCommunicationEndpointsRecursive walks object-manager directories with a
+// small depth cap and records IPC/synchronization objects. Inputs are a root
+// path, source label and filter; processing avoids revisiting directories and
+// stops at the global row cap; no value is returned because rows accumulate in
+// the QueryPacket.
+void AppendCommunicationEndpointsRecursive(
+    QueryPacket& packet,
+    const NtRuntime& runtime,
+    const std::wstring& root,
+    const std::wstring& source,
+    const std::wstring& filter) {
+    struct WorkItem {
+        std::wstring path;
+        std::size_t depth = 0;
+    };
+
+    std::deque<WorkItem> queue;
+    std::set<std::wstring> visited;
+    queue.push_back({ root, 0 });
+    visited.insert(ToLowerCopy(root));
+    while (!queue.empty() && packet.rows.size() < kMaxDirectoryRows) {
+        const WorkItem item = queue.front();
+        queue.pop_front();
+        const std::vector<DirectoryEntry> entries = EnumerateDirectoryFlat(runtime, item.path, packet.warnings);
+        for (const DirectoryEntry& entry : entries) {
+            if (IsCommunicationType(entry.typeName) && MatchesDirectoryFilter(entry, filter)) {
+                AppendDirectoryEntryRow(packet, source, item.depth, entry);
+            }
+            if (entry.typeName == L"Directory" && item.depth < 3 && packet.rows.size() < kMaxDirectoryRows) {
+                const std::wstring key = ToLowerCopy(entry.fullPath);
+                if (visited.insert(key).second) {
+                    queue.push_back({ entry.fullPath, item.depth + 1 });
+                }
+            }
+        }
+    }
+}
+
+// QueryCommunicationEndpoint enumerates user/kernel-visible communication and
+// synchronization objects. Input is the request; processing filters common
+// namespace roots by type; return contains endpoint rows.
+KernelOperationResult QueryCommunicationEndpoint(const KernelRequest& request) {
+    const NtRuntime& runtime = Runtime();
+    QueryPacket packet;
+    for (const std::wstring& root : CommonNamespaceRoots()) {
+        AppendCommunicationEndpointsRecursive(packet, runtime, root, root, request.filterText);
+    }
+    return MakeResult(request.featureId, !packet.rows.empty(), L"通信端点枚举", std::move(packet));
+}
+
+// AlignPointer rounds an address up to the native pointer alignment. Input is a
+// byte pointer represented as uintptr_t; return points at the next entry block.
+std::uintptr_t AlignPointer(const std::uintptr_t value) {
+    const std::uintptr_t align = sizeof(void*) - 1;
+    return (value + align) & ~align;
+}
+
+// QueryObjectTypeMatrix calls NtQueryObject(ObjectTypesInformation). Input is
+// the request; processing parses the variable-length type array; return contains
+// object counts, handle counts and access masks.
+KernelOperationResult QueryObjectTypeMatrix(const KernelRequest& request) {
+    const NtRuntime& runtime = Runtime();
+    QueryPacket packet;
+    if (!runtime.queryObject) {
+        packet.warnings.push_back(L"NtQueryObject 不可用。");
+        return MakeResult(request.featureId, false, L"对象类型矩阵", std::move(packet));
+    }
+
+    ULONG bufferSize = 256 * 1024;
+    std::vector<std::byte> buffer;
+    LONG status = kStatusInfoLengthMismatch;
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        buffer.assign(bufferSize, std::byte{});
+        ULONG returned = 0;
+        status = runtime.queryObject(nullptr, kObjectTypesInformation, buffer.data(), bufferSize, &returned);
+        if (IsSuccessStatus(status)) {
+            break;
+        }
+        if (!IsRetryStatus(status)) {
+            break;
+        }
+        bufferSize = std::max<ULONG>(bufferSize * 2, returned + 0x10000);
+    }
+
+    if (!IsSuccessStatus(status) || buffer.size() < sizeof(ULONG)) {
+        packet.warnings.push_back(std::wstring(L"NtQueryObject(ObjectTypesInformation) 失败，NTSTATUS=") + StatusText(status));
+        return MakeResult(request.featureId, false, L"对象类型矩阵", std::move(packet));
+    }
+
+    const ULONG count = *reinterpret_cast<const ULONG*>(buffer.data());
+    std::uintptr_t cursor = AlignPointer(reinterpret_cast<std::uintptr_t>(buffer.data() + sizeof(ULONG)));
+    const std::uintptr_t end = reinterpret_cast<std::uintptr_t>(buffer.data() + buffer.size());
+    const std::size_t limit = std::min<std::size_t>(count, kMaxTypeRows);
+    for (std::size_t index = 0; index < limit && cursor + sizeof(KOBJECT_TYPE_INFORMATION) <= end; ++index) {
+        const auto* typeInfo = reinterpret_cast<const KOBJECT_TYPE_INFORMATION*>(cursor);
+        const std::wstring typeName = CountedString(typeInfo->TypeName);
+        KernelResultRow row = Row({
+            { L"Index", std::to_wstring(index) },
+            { L"TypeIndex", std::to_wstring(typeInfo->TypeIndex) },
+            { L"Type", typeName.empty() ? L"<unknown>" : typeName },
+            { L"Objects", std::to_wstring(typeInfo->TotalNumberOfObjects) },
+            { L"Handles", std::to_wstring(typeInfo->TotalNumberOfHandles) },
+            { L"HighObjects", std::to_wstring(typeInfo->HighWaterNumberOfObjects) },
+            { L"HighHandles", std::to_wstring(typeInfo->HighWaterNumberOfHandles) },
+            { L"PagedPool", std::to_wstring(typeInfo->TotalPagedPoolUsage) },
+            { L"NonPagedPool", std::to_wstring(typeInfo->TotalNonPagedPoolUsage) },
+            { L"NamePool", std::to_wstring(typeInfo->TotalNamePoolUsage) },
+            { L"HandleTable", std::to_wstring(typeInfo->TotalHandleTableUsage) },
+            { L"HighPagedPool", std::to_wstring(typeInfo->HighWaterPagedPoolUsage) },
+            { L"HighNonPagedPool", std::to_wstring(typeInfo->HighWaterNonPagedPoolUsage) },
+            { L"ValidAccess", HexText(typeInfo->ValidAccessMask) },
+            { L"InvalidAttributes", HexText(typeInfo->InvalidAttributes) },
+            { L"GenericRead", HexText(typeInfo->GenericMapping.GenericRead) },
+            { L"GenericWrite", HexText(typeInfo->GenericMapping.GenericWrite) },
+            { L"GenericExecute", HexText(typeInfo->GenericMapping.GenericExecute) },
+            { L"GenericAll", HexText(typeInfo->GenericMapping.GenericAll) },
+            { L"SecurityRequired", typeInfo->SecurityRequired ? L"true" : L"false" },
+            { L"MaintainHandleCount", typeInfo->MaintainHandleCount ? L"true" : L"false" },
+            { L"PoolType", std::to_wstring(typeInfo->PoolType) },
+            { L"DefaultPagedCharge", std::to_wstring(typeInfo->DefaultPagedPoolCharge) },
+            { L"DefaultNonPagedCharge", std::to_wstring(typeInfo->DefaultNonPagedPoolCharge) },
+        });
+        if (MatchesColumnsFilter(row, request.filterText)) {
+            packet.rows.push_back(std::move(row));
+        }
+
+        cursor += sizeof(KOBJECT_TYPE_INFORMATION);
+        cursor += typeInfo->TypeName.MaximumLength;
+        cursor = AlignPointer(cursor);
+    }
+
+    if (count > limit) {
+        packet.warnings.push_back(std::wstring(L"对象类型数量 ") + std::to_wstring(count) + L"，本次显示前 " + std::to_wstring(limit) + L" 项。");
+    }
+    return MakeResult(request.featureId, !packet.rows.empty(), L"对象类型矩阵", std::move(packet));
+}
+
+// FileTimeText converts a native LARGE_INTEGER timestamp into local time. Input
+// is a FILETIME-compatible large integer; return is compact date/time text or
+// empty when the timestamp is zero.
+std::wstring FileTimeText(const LARGE_INTEGER& value) {
+    if (value.QuadPart == 0) {
+        return {};
+    }
+    FILETIME utc{};
+    utc.dwLowDateTime = static_cast<DWORD>(value.LowPart);
+    utc.dwHighDateTime = static_cast<DWORD>(value.HighPart);
+    FILETIME local{};
+    SYSTEMTIME system{};
+    if (!::FileTimeToLocalFileTime(&utc, &local) || !::FileTimeToSystemTime(&local, &system)) {
+        return {};
+    }
+    wchar_t text[64]{};
+    ::swprintf_s(text, L"%04u-%02u-%02u %02u:%02u:%02u", system.wYear, system.wMonth, system.wDay, system.wHour, system.wMinute, system.wSecond);
+    return text;
+}
+
+// QueryNamedPipeDirectory enumerates one native named-pipe directory. Inputs are
+// the runtime, path and packet; processing uses NtOpenFile/NtQueryDirectoryFile;
+// no value is returned because rows are appended to packet.
+void QueryNamedPipeDirectory(const NtRuntime& runtime, const std::wstring& path, const std::wstring& filter, QueryPacket& packet) {
+    if (!runtime.openFile || !runtime.queryDirectoryFile) {
+        packet.warnings.push_back(L"NtOpenFile/NtQueryDirectoryFile 不可用。");
+        return;
+    }
+
+    UNICODE_STRING unicodePath = MakeUnicodeString(path);
+    OBJECT_ATTRIBUTES attributes = MakeObjectAttributes(unicodePath);
+    IO_STATUS_BLOCK ioStatus{};
+    HANDLE directory = nullptr;
+    const LONG openStatus = runtime.openFile(
+        &directory,
+        FILE_LIST_DIRECTORY | SYNCHRONIZE,
+        &attributes,
+        &ioStatus,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!IsSuccessStatus(openStatus) || !directory) {
+        packet.warnings.push_back(std::wstring(L"无法打开命名管道目录 ") + path + L"，NTSTATUS=" + StatusText(openStatus));
+        return;
+    }
+
+    std::vector<std::byte> buffer(128 * 1024);
+    BOOLEAN restart = TRUE;
+    for (;;) {
+        std::fill(buffer.begin(), buffer.end(), std::byte{});
+        ioStatus = {};
+        const LONG status = runtime.queryDirectoryFile(
+            directory,
+            nullptr,
+            nullptr,
+            nullptr,
+            &ioStatus,
+            buffer.data(),
+            static_cast<ULONG>(buffer.size()),
+            kFileDirectoryInformation,
+            FALSE,
+            nullptr,
+            restart);
+        restart = FALSE;
+        if (status == kStatusNoMoreEntries) {
+            break;
+        }
+        if (!IsSuccessStatus(status)) {
+            packet.warnings.push_back(std::wstring(L"查询命名管道目录失败 ") + path + L"，NTSTATUS=" + StatusText(status));
+            break;
+        }
+
+        std::size_t offset = 0;
+        for (;;) {
+            if (offset + sizeof(KFILE_DIRECTORY_INFORMATION) > buffer.size()) {
+                break;
+            }
+            const auto* info = reinterpret_cast<const KFILE_DIRECTORY_INFORMATION*>(buffer.data() + offset);
+            const std::wstring name(info->FileName, info->FileName + (info->FileNameLength / sizeof(wchar_t)));
+            if (!name.empty() && name != L"." && name != L"..") {
+                KernelResultRow row = Row({
+                    { L"Pipe", name },
+                    { L"Directory", path },
+                    { L"NtPath", JoinObjectPath(path, name) },
+                    { L"Win32Path", std::wstring(L"\\\\.\\pipe\\") + name },
+                    { L"Attributes", HexText(info->FileAttributes) },
+                    { L"Size", std::to_wstring(info->EndOfFile.QuadPart) },
+                    { L"Created", FileTimeText(info->CreationTime) },
+                    { L"LastAccess", FileTimeText(info->LastAccessTime) },
+                    { L"LastWrite", FileTimeText(info->LastWriteTime) },
+                    { L"Changed", FileTimeText(info->ChangeTime) },
+                    { L"Status", L"NtQueryDirectoryFile" },
+                });
+                if (MatchesColumnsFilter(row, filter)) {
+                    packet.rows.push_back(std::move(row));
+                }
+            }
+            if (info->NextEntryOffset == 0) {
+                break;
+            }
+            offset += info->NextEntryOffset;
+        }
+    }
+
+    ::CloseHandle(directory);
+}
+
+// QueryNamedPipes enumerates native named-pipe namespaces. Input is the request;
+// processing uses only Windows/Native file APIs; return lists live pipes.
+KernelOperationResult QueryNamedPipes(const KernelRequest& request) {
+    const NtRuntime& runtime = Runtime();
+    QueryPacket packet;
+    QueryNamedPipeDirectory(runtime, L"\\Device\\NamedPipe", request.filterText, packet);
+    QueryNamedPipeDirectory(runtime, L"\\??\\PIPE", request.filterText, packet);
+    return MakeResult(request.featureId, !packet.rows.empty(), L"命名管道枚举", std::move(packet));
+}
+
+// QueryAtomTable probes global atoms and registered clipboard formats. Input is
+// the request; processing uses documented Win32 getters only; return contains a
+// best-effort visible atom/format list.
+KernelOperationResult QueryAtomTable(const KernelRequest& request) {
+    QueryPacket packet;
+    const auto atomHexText = [](const UINT atomValue) {
+        std::wostringstream stream;
+        stream << L"0x" << std::uppercase << std::hex << std::setw(4) << std::setfill(L'0') << atomValue;
+        return stream.str();
+    };
+
+    for (UINT atom = 0xC000; atom <= 0xFFFF; ++atom) {
+        wchar_t globalNameBuffer[512]{};
+        const UINT globalLength = ::GlobalGetAtomNameW(
+            static_cast<ATOM>(atom),
+            globalNameBuffer,
+            static_cast<int>(_countof(globalNameBuffer)));
+
+        wchar_t clipboardNameBuffer[512]{};
+        const int clipboardLength = ::GetClipboardFormatNameW(
+            atom,
+            clipboardNameBuffer,
+            static_cast<int>(_countof(clipboardNameBuffer)));
+
+        if (globalLength == 0 && clipboardLength <= 0) {
+            continue;
+        }
+
+        const std::wstring globalName = globalLength > 0
+            ? std::wstring(globalNameBuffer, globalNameBuffer + globalLength)
+            : std::wstring();
+        const std::wstring clipboardName = clipboardLength > 0
+            ? std::wstring(clipboardNameBuffer, clipboardNameBuffer + clipboardLength)
+            : std::wstring();
+        const std::wstring displayName = !globalName.empty() ? globalName : clipboardName;
+
+        std::wstring sourceText;
+        std::wstring detailText;
+        if (!globalName.empty() && !clipboardName.empty()) {
+            sourceText = L"GlobalGetAtomNameW + GetClipboardFormatNameW";
+            if (_wcsicmp(globalName.c_str(), clipboardName.c_str()) == 0) {
+                detailText = L"Atom值: " + std::to_wstring(atom) + L" (" + atomHexText(atom) + L")\r\n"
+                    L"名称: " + displayName + L"\r\n"
+                    L"来源: Global + ClipboardFormat（同名）";
+            } else {
+                detailText = L"Atom值: " + std::to_wstring(atom) + L" (" + atomHexText(atom) + L")\r\n"
+                    L"Global名称: " + globalName + L"\r\n"
+                    L"ClipboardFormat名称: " + clipboardName + L"\r\n"
+                    L"来源: Global + ClipboardFormat（名称不同）";
+            }
+        } else if (!globalName.empty()) {
+            sourceText = L"GlobalGetAtomNameW";
+            detailText = L"Atom值: " + std::to_wstring(atom) + L" (" + atomHexText(atom) + L")\r\n"
+                L"名称: " + displayName + L"\r\n"
+                L"来源: GlobalGetAtomNameW";
+        } else {
+            sourceText = L"GetClipboardFormatNameW";
+            detailText = L"Atom值: " + std::to_wstring(atom) + L" (" + atomHexText(atom) + L")\r\n"
+                L"名称: " + displayName + L"\r\n"
+                L"来源: GetClipboardFormatNameW";
+        }
+
+        packet.rows.push_back(Row({
+            { L"Id", std::to_wstring(atom) },
+            { L"Hex", atomHexText(atom) },
+            { L"Name", displayName },
+            { L"Source", sourceText },
+            { L"Kind", sourceText },
+            { L"Status", L"SUCCESS" },
+            { L"GlobalName", globalName },
+            { L"ClipboardName", clipboardName },
+        }, detailText));
+    }
+
+    return MakeResult(request.featureId, true, L"Atom/Clipboard Format 遍历", std::move(packet));
+}
+
+// QueryGrowable invokes one NtQuery* function that follows the common
+// buffer-size contract. Inputs are a callable and initial size; processing grows
+// the buffer on size-related statuses; output is status and owned bytes.
+std::pair<LONG, std::vector<std::byte>> QueryGrowable(const std::function<LONG(PVOID, ULONG, PULONG)>& query, ULONG initialSize) {
+    std::vector<std::byte> buffer;
+    LONG status = kStatusInfoLengthMismatch;
+    ULONG bufferSize = initialSize;
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        buffer.assign(bufferSize, std::byte{});
+        ULONG returned = 0;
+        status = query(buffer.data(), bufferSize, &returned);
+        if (IsSuccessStatus(status)) {
+            return { status, std::move(buffer) };
+        }
+        if (!IsRetryStatus(status)) {
+            break;
+        }
+        bufferSize = std::max<ULONG>(bufferSize * 2, returned + 0x1000);
+    }
+    return { status, std::move(buffer) };
+}
+
+// AppendNtQueryRow writes a safe NtQuery probe result. Inputs identify the API,
+// class number, status and returned byte count; output is appended to packet.
+void AppendNtQueryRow(QueryPacket& packet, const std::wstring& filter, const std::wstring& category, const std::wstring& functionName, ULONG infoClass, LONG status, std::size_t bytes, const std::wstring& detail) {
+    KernelResultRow row = Row({
+        { L"Category", category },
+        { L"Function", functionName },
+        { L"Class", std::to_wstring(infoClass) },
+        { L"Status", StatusText(status) },
+        { L"Success", IsSuccessStatus(status) ? L"true" : L"false" },
+        { L"Bytes", std::to_wstring(bytes) },
+        { L"Detail", detail },
+    }, detail);
+    if (MatchesColumnsFilter(row, filter)) {
+        packet.rows.push_back(std::move(row));
+    }
+}
+
+// AppendNtdllExportRows lists NtQuery* exports from ntdll. Input is packet;
+// processing parses the PE export directory in memory; no value is returned.
+void AppendNtdllExportRows(QueryPacket& packet, const std::wstring& filter) {
+    HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) {
+        packet.warnings.push_back(L"ntdll.dll 未加载，无法枚举 NtQuery* 导出。");
+        return;
+    }
+
+    const auto* base = reinterpret_cast<const std::byte*>(ntdll);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        packet.warnings.push_back(L"ntdll DOS 头无效。");
+        return;
+    }
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) {
+        packet.warnings.push_back(L"ntdll NT 头无效。");
+        return;
+    }
+    const IMAGE_DATA_DIRECTORY& exportData = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (exportData.VirtualAddress == 0 || exportData.Size == 0) {
+        packet.warnings.push_back(L"ntdll 无导出目录。");
+        return;
+    }
+
+    const auto* exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + exportData.VirtualAddress);
+    const auto* names = reinterpret_cast<const DWORD*>(base + exports->AddressOfNames);
+    const auto* ordinals = reinterpret_cast<const WORD*>(base + exports->AddressOfNameOrdinals);
+    const auto* functions = reinterpret_cast<const DWORD*>(base + exports->AddressOfFunctions);
+    std::size_t added = 0;
+    for (DWORD index = 0; index < exports->NumberOfNames && added < kMaxExportRows; ++index) {
+        const char* exportName = reinterpret_cast<const char*>(base + names[index]);
+        if (!exportName || std::strncmp(exportName, "NtQuery", 7) != 0) {
+            continue;
+        }
+        const WORD ordinalIndex = ordinals[index];
+        const DWORD rva = ordinalIndex < exports->NumberOfFunctions ? functions[ordinalIndex] : 0;
+        const int wideLength = ::MultiByteToWideChar(CP_ACP, 0, exportName, -1, nullptr, 0);
+        std::wstring wideName;
+        if (wideLength > 0) {
+            wideName.assign(static_cast<std::size_t>(wideLength - 1), L'\0');
+            ::MultiByteToWideChar(CP_ACP, 0, exportName, -1, wideName.data(), wideLength);
+        }
+        KernelResultRow row = Row({
+            { L"Category", L"Export" },
+            { L"Function", wideName.empty() ? L"NtQuery*" : wideName },
+            { L"Ordinal", std::to_wstring(exports->Base + ordinalIndex) },
+            { L"RVA", HexText(rva) },
+            { L"Status", L"Exported" },
+        });
+        if (MatchesColumnsFilter(row, filter)) {
+            packet.rows.push_back(std::move(row));
+            ++added;
+        }
+    }
+}
+
+// QueryNtQueryLegacy executes safe NtQuery probes against current process,
+// thread and token handles, plus lists NtQuery* exports. Input is the request;
+// output is a live status matrix rather than static text.
+KernelOperationResult QueryNtQueryLegacy(const KernelRequest& request) {
+    const NtRuntime& runtime = Runtime();
+    QueryPacket packet;
+    AppendNtdllExportRows(packet, request.filterText);
+
+    if (runtime.querySystemInformation) {
+        const std::array<ULONG, 6> classes{ 0, 2, 3, 5, 11, 16 };
+        for (const ULONG infoClass : classes) {
+            auto [status, buffer] = QueryGrowable([&](PVOID data, ULONG size, PULONG returned) {
+                return runtime.querySystemInformation(infoClass, data, size, returned);
+            }, infoClass == 11 ? 1024 * 1024 : 128 * 1024);
+            AppendNtQueryRow(packet, request.filterText, L"System", L"NtQuerySystemInformation", infoClass, status, buffer.size(), L"安全枚举类探测");
+        }
+    } else {
+        packet.warnings.push_back(L"NtQuerySystemInformation 不可用。");
+    }
+
+    if (runtime.queryInformationProcess) {
+        const std::array<ULONG, 4> classes{ 0, 7, 20, 27 };
+        for (const ULONG infoClass : classes) {
+            auto [status, buffer] = QueryGrowable([&](PVOID data, ULONG size, PULONG returned) {
+                return runtime.queryInformationProcess(::GetCurrentProcess(), infoClass, data, size, returned);
+            }, 4096);
+            AppendNtQueryRow(packet, request.filterText, L"Process", L"NtQueryInformationProcess", infoClass, status, buffer.size(), L"当前进程句柄");
+        }
+    } else {
+        packet.warnings.push_back(L"NtQueryInformationProcess 不可用。");
+    }
+
+    if (runtime.queryInformationThread) {
+        const std::array<ULONG, 2> classes{ 0, 1 };
+        for (const ULONG infoClass : classes) {
+            auto [status, buffer] = QueryGrowable([&](PVOID data, ULONG size, PULONG returned) {
+                return runtime.queryInformationThread(::GetCurrentThread(), infoClass, data, size, returned);
+            }, 4096);
+            AppendNtQueryRow(packet, request.filterText, L"Thread", L"NtQueryInformationThread", infoClass, status, buffer.size(), L"当前线程句柄");
+        }
+    } else {
+        packet.warnings.push_back(L"NtQueryInformationThread 不可用。");
+    }
+
+    if (runtime.queryInformationToken) {
+        HANDLE token = nullptr;
+        if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
+            const std::array<ULONG, 3> classes{ 1, 25, 10 };
+            for (const ULONG infoClass : classes) {
+                auto [status, buffer] = QueryGrowable([&](PVOID data, ULONG size, PULONG returned) {
+                    return runtime.queryInformationToken(token, infoClass, data, size, returned);
+                }, 4096);
+                AppendNtQueryRow(packet, request.filterText, L"Token", L"NtQueryInformationToken", infoClass, status, buffer.size(), L"当前进程令牌");
+            }
+            ::CloseHandle(token);
+        } else {
+            packet.warnings.push_back(std::wstring(L"OpenProcessToken 失败，Win32=") + std::to_wstring(::GetLastError()));
+        }
+    } else {
+        packet.warnings.push_back(L"NtQueryInformationToken 不可用。");
+    }
+
+    if (runtime.queryObject) {
+        const std::array<ULONG, 3> classes{ kObjectBasicInformation, kObjectNameInformation, kObjectTypeInformation };
+        for (const ULONG infoClass : classes) {
+            auto [status, buffer] = QueryGrowable([&](PVOID data, ULONG size, PULONG returned) {
+                return runtime.queryObject(::GetCurrentProcess(), infoClass, data, size, returned);
+            }, 4096);
+            AppendNtQueryRow(packet, request.filterText, L"Object", L"NtQueryObject", infoClass, status, buffer.size(), L"当前进程伪句柄");
+        }
+    } else {
+        packet.warnings.push_back(L"NtQueryObject 不可用。");
+    }
+
+    return MakeResult(request.featureId, !packet.rows.empty(), L"历史 NtQuery 探测", std::move(packet));
+}
+
+// ExecuteNativeObjectDetail opens the selected object-manager path when the
+// type has a safe read-only opener in this lightweight project. Inputs are the
+// selected row fields; processing never guesses destructive access and records
+// unsupported object types as explicit rows; output is a detailed result table.
+KernelOperationResult ExecuteNativeObjectDetail(const KernelActionRequest& request) {
+    const NtRuntime& runtime = Runtime();
+    QueryPacket packet;
+    std::wstring type = ObjectTypeNameFromAction(request);
+    if (request.featureId == KernelFeatureId::ObjectTypeMatrix && !type.empty()) {
+        AppendObjectTypeDetailRow(request, type, packet);
+        return MakeNativeActionResult(request, true, L"R3 对象类型详情", std::move(packet));
+    }
+
+    const std::wstring path = NativePathFromAction(request);
+    if (path.empty()) {
+        if (request.featureId == KernelFeatureId::ObjectTypeMatrix && !type.empty()) {
+            AppendObjectTypeDetailRow(request, type, packet);
+            return MakeNativeActionResult(request, true, L"R3 对象类型详情", std::move(packet));
+        }
+        packet.warnings.push_back(L"当前行没有 Path/NtPath/Parent+Name，无法定位对象。");
+        return MakeNativeActionResult(request, false, L"R3 对象详情", std::move(packet));
+    }
+    if (type.empty() && (StartsWithI(path, L"\\Device\\NamedPipe") || StartsWithI(path, L"\\??\\PIPE"))) {
+        type = L"NamedPipe";
+    }
+    if (type.empty() && (path == L"\\" || path == FieldValue(request, L"Directory"))) {
+        type = L"Directory";
+    }
+
+    HANDLE handle = nullptr;
+    LONG openStatus = kStatusNoSuchFile;
+    IO_STATUS_BLOCK ioStatus{};
+    if (_wcsicmp(type.c_str(), L"SymbolicLink") == 0) {
+        handle = OpenSymbolicLink(runtime, path, &openStatus);
+    } else if (_wcsicmp(type.c_str(), L"Directory") == 0 || path == L"\\") {
+        handle = OpenDirectory(runtime, path, &openStatus);
+    } else if (_wcsicmp(type.c_str(), L"NamedPipe") == 0 || StartsWithI(path, L"\\Device\\NamedPipe") || StartsWithI(path, L"\\??\\PIPE")) {
+        type = L"NamedPipe";
+        handle = OpenNamedPipeReadOnly(runtime, path, &openStatus, &ioStatus);
+    }
+
+    if (!handle && _wcsicmp(type.c_str(), L"Directory") != 0 && _wcsicmp(type.c_str(), L"SymbolicLink") != 0 && _wcsicmp(type.c_str(), L"NamedPipe") != 0) {
+        packet.rows.push_back(Row({
+            { L"Action", L"NativeObjectQueryDetail" },
+            { L"Path", path },
+            { L"Type", type.empty() ? L"<unknown>" : type },
+            { L"Status", L"未打开" },
+            { L"Reason", L"该对象类型需要专用 NtOpen* API；轻量版当前仅对 Directory/SymbolicLink/NamedPipe 执行安全只读打开。" },
+            { L"Next", L"如需深入该类型，应新增专用 opener 并只走 R3 Native 或 ArkDriverClient。" },
+        }));
+        return MakeNativeActionResult(request, false, L"R3 对象详情", std::move(packet));
+    }
+
+    AppendObjectBasicInfoRow(packet, runtime, path, handle, openStatus);
+    AppendQueriedObjectText(packet, runtime, handle, kObjectNameInformation, L"Name");
+    AppendQueriedObjectText(packet, runtime, handle, kObjectTypeInformation, L"Type");
+
+    if (_wcsicmp(type.c_str(), L"Directory") == 0 && handle) {
+        AppendDirectoryPreviewRows(packet, runtime, path, 32);
+    } else if (_wcsicmp(type.c_str(), L"SymbolicLink") == 0) {
+        std::wstring target;
+        if (handle) {
+            target = QuerySymbolicLinkTarget(runtime, handle);
+        }
+        const std::vector<std::wstring> candidates = DosPathCandidatesFromNtPath(target);
+        packet.rows.push_back(Row({
+            { L"Action", L"NativeSymbolicLinkDetail" },
+            { L"Path", path },
+            { L"OpenStatus", StatusText(openStatus) },
+            { L"OpenStatusText", StatusMeaningText(openStatus) },
+            { L"Target", target },
+            { L"DosCandidates", JoinStrings(candidates, L"; ") },
+            { L"Status", target.empty() ? L"符号链接目标未解析" : L"已解析符号链接目标" },
+        }, target));
+    } else if (_wcsicmp(type.c_str(), L"NamedPipe") == 0) {
+        packet.rows.push_back(Row({
+            { L"Action", L"NativeNamedPipeDetail" },
+            { L"NtPath", path },
+            { L"Win32Path", StartsWithI(path, L"\\Device\\NamedPipe\\") ? std::wstring(L"\\\\.\\pipe\\") + path.substr(18) : L"" },
+            { L"OpenStatus", StatusText(openStatus) },
+            { L"OpenStatusText", StatusMeaningText(openStatus) },
+            { L"IoStatus", StatusText(static_cast<LONG>(ioStatus.Status)) },
+            { L"IoStatusText", StatusMeaningText(static_cast<LONG>(ioStatus.Status)) },
+            { L"Information", std::to_wstring(static_cast<std::uint64_t>(ioStatus.Information)) },
+            { L"Status", handle ? L"可只读打开管道对象" : L"不可打开、管道忙或权限受限" },
+        }));
+    }
+
+    if (handle) {
+        ::CloseHandle(handle);
+    }
+    return MakeNativeActionResult(request, handle != nullptr, L"R3 对象详情", std::move(packet));
+}
+
+// ExecuteNativeSymbolicLinkResolve resolves the selected symbolic link again on
+// demand. Inputs are row fields or the filter edit as fallback; processing calls
+// NtOpenSymbolicLinkObject/NtQuerySymbolicLinkObject only; output shows target,
+// DOS candidates and object count fields so the right-click operation is useful.
+KernelOperationResult ExecuteNativeSymbolicLinkResolve(const KernelActionRequest& request) {
+    const NtRuntime& runtime = Runtime();
+    QueryPacket packet;
+    const std::wstring path = NativePathFromAction(request);
+    if (path.empty()) {
+        packet.warnings.push_back(L"当前行没有可解析的符号链接 Path。");
+        return MakeNativeActionResult(request, false, L"符号链接解析", std::move(packet));
+    }
+
+    LONG openStatus = 0;
+    HANDLE link = OpenSymbolicLink(runtime, path, &openStatus);
+    std::wstring handleCount;
+    std::wstring pointerCount;
+    std::wstring target;
+    if (link) {
+        QueryBasicObjectCounts(runtime, link, handleCount, pointerCount);
+        target = QuerySymbolicLinkTarget(runtime, link);
+    }
+    const std::vector<std::wstring> candidates = DosPathCandidatesFromNtPath(target);
+    packet.rows.push_back(Row({
+        { L"Action", L"NativeSymbolicLinkResolve" },
+        { L"Path", path },
+        { L"OpenStatus", StatusText(openStatus) },
+        { L"OpenStatusText", StatusMeaningText(openStatus) },
+        { L"Target", target },
+        { L"DosCandidates", JoinStrings(candidates, L"; ") },
+        { L"Handles", handleCount.empty() ? L"N/A" : handleCount },
+        { L"Pointers", pointerCount.empty() ? L"N/A" : pointerCount },
+        { L"Status", link ? (target.empty() ? L"已打开但目标为空" : L"已打开并查询") : L"打开失败" },
+    }, target.empty() ? StatusMeaningText(openStatus) : target));
+    if (link) {
+        ::CloseHandle(link);
+    }
+    return MakeNativeActionResult(request, link != nullptr && !target.empty(), L"符号链接解析", std::move(packet));
+}
+
+// ExecuteNativeNamedPipeProbe validates whether the selected named-pipe entry
+// can be opened as a native file object. Inputs are the selected Pipe/NtPath
+// fields; processing uses NtOpenFile with read-only/synchronize access; output
+// reports NTSTATUS and basic object metadata without reading or writing pipe
+// payloads.
+KernelOperationResult ExecuteNativeNamedPipeProbe(const KernelActionRequest& request) {
+    const NtRuntime& runtime = Runtime();
+    QueryPacket packet;
+    const std::wstring path = NativePathFromAction(request);
+    if (path.empty()) {
+        packet.warnings.push_back(L"当前行没有 NtPath/Pipe，无法验证命名管道。");
+        return MakeNativeActionResult(request, false, L"命名管道打开验证", std::move(packet));
+    }
+    if (!runtime.openFile) {
+        packet.warnings.push_back(L"NtOpenFile 不可用。");
+        return MakeNativeActionResult(request, false, L"命名管道打开验证", std::move(packet));
+    }
+
+    LONG openStatus = kStatusNoSuchFile;
+    IO_STATUS_BLOCK ioStatus{};
+    HANDLE pipe = OpenNamedPipeReadOnly(runtime, path, &openStatus, &ioStatus);
+    AppendObjectBasicInfoRow(packet, runtime, path, pipe, openStatus);
+    packet.rows.push_back(Row({
+        { L"Action", L"NativeNamedPipeProbe" },
+        { L"NtPath", path },
+        { L"Win32Path", StartsWithI(path, L"\\Device\\NamedPipe\\") ? std::wstring(L"\\\\.\\pipe\\") + path.substr(18) : L"" },
+        { L"OpenStatus", StatusText(openStatus) },
+        { L"OpenStatusText", StatusMeaningText(openStatus) },
+        { L"IoStatus", StatusText(static_cast<LONG>(ioStatus.Status)) },
+        { L"IoStatusText", StatusMeaningText(static_cast<LONG>(ioStatus.Status)) },
+        { L"Information", std::to_wstring(static_cast<std::uint64_t>(ioStatus.Information)) },
+        { L"Access", L"FILE_READ_ATTRIBUTES|SYNCHRONIZE" },
+        { L"Share", L"READ|WRITE|DELETE" },
+        { L"Status", pipe ? L"可打开" : L"不可打开、管道忙或权限受限" },
+    }, StatusMeaningText(openStatus)));
+    if (pipe) {
+        ::CloseHandle(pipe);
+    }
+    return MakeNativeActionResult(request, pipe != nullptr, L"命名管道打开验证", std::move(packet));
+}
+
+} // namespace
+
+bool IsNativeKernelFeature(const KernelFeatureId id) {
+    switch (id) {
+    case KernelFeatureId::ObjectNamespaceOverview:
+    case KernelFeatureId::ObjectDirectoryRecursive:
+    case KernelFeatureId::NamedPipe:
+    case KernelFeatureId::BaseNamedObjects:
+    case KernelFeatureId::SymbolicLink:
+    case KernelFeatureId::DeviceDriverObjects:
+    case KernelFeatureId::ObjectTypeMatrix:
+    case KernelFeatureId::CommunicationEndpoint:
+    case KernelFeatureId::AtomTable:
+    case KernelFeatureId::NtQueryLegacy:
+        return true;
+    default:
+        return false;
+    }
+}
+
+KernelOperationResult QueryNativeKernelFeature(const KernelRequest& request) {
+    switch (request.featureId) {
+    case KernelFeatureId::ObjectNamespaceOverview:
+        return QueryObjectNamespaceOverview(request);
+    case KernelFeatureId::ObjectDirectoryRecursive:
+        return QueryObjectDirectoryRecursive(request);
+    case KernelFeatureId::NamedPipe:
+        return QueryNamedPipes(request);
+    case KernelFeatureId::BaseNamedObjects:
+        return QueryBaseNamedObjects(request);
+    case KernelFeatureId::SymbolicLink:
+        return QuerySymbolicLinks(request);
+    case KernelFeatureId::DeviceDriverObjects:
+        return QueryDeviceDriverObjects(request);
+    case KernelFeatureId::ObjectTypeMatrix:
+        return QueryObjectTypeMatrix(request);
+    case KernelFeatureId::CommunicationEndpoint:
+        return QueryCommunicationEndpoint(request);
+    case KernelFeatureId::AtomTable:
+        return QueryAtomTable(request);
+    case KernelFeatureId::NtQueryLegacy:
+        return QueryNtQueryLegacy(request);
+    default: {
+        KernelOperationResult result;
+        result.supported = false;
+        result.success = false;
+        result.message = L"该内核条目不是 R3 Native 查询项。";
+        result.rows.push_back(Row({
+            { L"功能", ToDisplayName(request.featureId) },
+            { L"状态", L"Unsupported native route" },
+        }, result.message));
+        return result;
+    }
+    }
+}
+
+KernelOperationResult ExecuteNativeKernelAction(const KernelActionRequest& request) {
+    switch (request.actionId) {
+    case KernelActionId::NativeObjectQueryDetail:
+        return ExecuteNativeObjectDetail(request);
+    case KernelActionId::NativeSymbolicLinkResolve:
+        return ExecuteNativeSymbolicLinkResolve(request);
+    case KernelActionId::NativeNamedPipeProbe:
+        return ExecuteNativeNamedPipeProbe(request);
+    default: {
+        QueryPacket packet;
+        packet.rows.push_back(Row({
+            { L"功能", ToDisplayName(request.featureId) },
+            { L"Action", std::to_wstring(static_cast<std::uint32_t>(request.actionId)) },
+            { L"状态", L"Unsupported native action" },
+        }, L"该 R3 Native 动作没有注册执行路径。"));
+        return MakeNativeActionResult(request, false, L"R3 Native 动作", std::move(packet));
+    }
+    }
+}
+
+} // namespace Ksword::Features::Kernel

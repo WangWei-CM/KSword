@@ -2309,6 +2309,8 @@ namespace ks::process
             processRecord.cpuPercent = 0.0;
             processRecord.gpuPercent = 0.0;
             processRecord.netKBps = 0.0;
+            processRecord.netRxKBps = 0.0;
+            processRecord.netTxKBps = 0.0;
             return false;
         }
 
@@ -2407,7 +2409,10 @@ namespace ks::process
         ::CloseHandle(processHandle);
 
         // GPU 由进程列表枚举阶段统一通过 PDH GPU Engine 聚合，避免单进程打开句柄时重复采样。
+        // 网络速率需要跨进程页抓包窗口计算；单进程动态刷新无法获得可靠累计值，因此置为 0。
         processRecord.netKBps = 0.0;
+        processRecord.netRxKBps = 0.0;
+        processRecord.netTxKBps = 0.0;
         processRecord.dynamicCountersReady = true;
         return true;
     }
@@ -2646,6 +2651,8 @@ namespace ks::process
             processRecord.cpuPercent = 0.0;
             processRecord.diskMBps = 0.0;
             processRecord.netKBps = 0.0;
+            processRecord.netRxKBps = 0.0;
+            processRecord.netTxKBps = 0.0;
             return;
         }
 
@@ -2655,6 +2662,8 @@ namespace ks::process
             processRecord.cpuPercent = 0.0;
             processRecord.diskMBps = 0.0;
             processRecord.netKBps = 0.0;
+            processRecord.netRxKBps = 0.0;
+            processRecord.netTxKBps = 0.0;
             return;
         }
 
@@ -2692,8 +2701,10 @@ namespace ks::process
             processRecord.diskMBps = 0.0;
         }
 
-        // Net 当前预留，暂置 0；GPU 不在这里清零，避免覆盖 PDH 采样结果。
+        // Net 由 ProcessDock 基于抓包累计值在本函数返回后写入；GPU 不在这里清零，避免覆盖 PDH 采样结果。
         processRecord.netKBps = 0.0;
+        processRecord.netRxKBps = 0.0;
+        processRecord.netTxKBps = 0.0;
     }
 
     std::vector<ProcessRecord> EnumerateProcesses(

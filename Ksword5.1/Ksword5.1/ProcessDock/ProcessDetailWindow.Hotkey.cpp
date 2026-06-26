@@ -1140,6 +1140,44 @@ namespace
         item->setFlags(item->flags() & ~Qt::ItemIsEditable);
         return item;
     }
+
+    void configureHotkeyTableGeometry(QTableWidget* tableWidget)
+    {
+        // 输入：
+        // - tableWidget：进程热键页或键盘页中的热键/钩子结果表。
+        // 处理：
+        // - 表格列宽总和可能超过详情窗初始宽度，尤其“详情/对象”字段包含长路径或 R0 诊断；
+        // - 禁止表头最后一列自动拉伸反向扩大 sizeHint；
+        // - 固定表格自身最小宽度为 0，让超出的列通过水平滚动条访问。
+        // 返回：无，直接调整表格几何策略。
+        if (tableWidget == nullptr || tableWidget->horizontalHeader() == nullptr)
+        {
+            return;
+        }
+
+        tableWidget->setMinimumWidth(0);
+        tableWidget->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+        tableWidget->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+        tableWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        tableWidget->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+        tableWidget->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+        tableWidget->horizontalHeader()->setStretchLastSection(false);
+    }
+
+    QString compactStatusText(const QString& statusText)
+    {
+        // 输入：完整状态文本，可能包含很长的 R0 诊断串。
+        // 处理：只压缩显示文本，不丢失 tooltip 中的完整诊断。
+        // 返回：适合放入单行 QLabel 的短文本。
+        constexpr int kStatusTextLimit = 160;
+        const QString trimmedText = statusText.trimmed();
+        if (trimmedText.size() <= kStatusTextLimit)
+        {
+            return trimmedText;
+        }
+        return QStringLiteral("%1...")
+            .arg(trimmedText.left(kStatusTextLimit - 3));
+    }
 }
 
 void ProcessDetailWindow::initializeHotkeyTab()
@@ -1162,6 +1200,8 @@ void ProcessDetailWindow::initializeHotkeyTab()
     m_refreshHotkeyButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("刷新热键"), hotkeyGroup);
     m_refreshHotkeyButton->setToolTip(QStringLiteral("扫描当前进程的窗口热键、菜单快捷键、Accelerator资源、快捷方式热键和R0热键表"));
     m_hotkeyStatusLabel = new QLabel(QStringLiteral("● 尚未刷新"), hotkeyGroup);
+    m_hotkeyStatusLabel->setMinimumWidth(0);
+    m_hotkeyStatusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_hotkeyStatusLabel->setStyleSheet(
         QStringLiteral("color:%1; font-weight:600;")
         .arg(KswordTheme::TextSecondaryHex()));
@@ -1188,8 +1228,7 @@ void ProcessDetailWindow::initializeHotkeyTab()
     m_hotkeyTable->setAlternatingRowColors(true);
     m_hotkeyTable->setSortingEnabled(true);
     m_hotkeyTable->verticalHeader()->setVisible(false);
-    m_hotkeyTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
-    m_hotkeyTable->horizontalHeader()->setStretchLastSection(true);
+    configureHotkeyTableGeometry(m_hotkeyTable);
     m_hotkeyTable->setColumnWidth(0, 260);
     m_hotkeyTable->setColumnWidth(1, 80);
     m_hotkeyTable->setColumnWidth(2, 130);
@@ -1236,7 +1275,8 @@ void ProcessDetailWindow::updateHotkeyStatusLabel(const QString& statusText, con
         return;
     }
 
-    m_hotkeyStatusLabel->setText(statusText);
+    m_hotkeyStatusLabel->setToolTip(statusText);
+    m_hotkeyStatusLabel->setText(compactStatusText(statusText));
     if (refreshing)
     {
         m_hotkeyStatusLabel->setStyleSheet(buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700));
@@ -1439,6 +1479,8 @@ void ProcessDetailWindow::initializeKeyboardTab()
     m_refreshKeyboardButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QStringLiteral("刷新键盘"), keyboardGroup);
     m_refreshKeyboardButton->setToolTip(QStringLiteral("扫描热键表和 WH_KEYBOARD/WH_KEYBOARD_LL 钩子链"));
     m_keyboardStatusLabel = new QLabel(QStringLiteral("● 尚未刷新"), keyboardGroup);
+    m_keyboardStatusLabel->setMinimumWidth(0);
+    m_keyboardStatusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_keyboardStatusLabel->setStyleSheet(
         QStringLiteral("color:%1; font-weight:600;")
         .arg(KswordTheme::TextSecondaryHex()));
@@ -1449,6 +1491,16 @@ void ProcessDetailWindow::initializeKeyboardTab()
     m_keyboardInnerTabWidget = new QTabWidget(keyboardGroup);
     QWidget* hotkeyPage = new QWidget(m_keyboardInnerTabWidget);
     QWidget* hookPage = new QWidget(m_keyboardInnerTabWidget);
+    m_keyboardTab->setMinimumWidth(0);
+    m_keyboardTab->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+    keyboardGroup->setMinimumWidth(0);
+    keyboardGroup->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+    m_keyboardInnerTabWidget->setMinimumWidth(0);
+    m_keyboardInnerTabWidget->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+    hotkeyPage->setMinimumWidth(0);
+    hotkeyPage->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+    hookPage->setMinimumWidth(0);
+    hookPage->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
     auto* hotkeyLayout = new QVBoxLayout(hotkeyPage);
     auto* hookLayout = new QVBoxLayout(hookPage);
     hotkeyLayout->setContentsMargins(0, 0, 0, 0);
@@ -1473,8 +1525,7 @@ void ProcessDetailWindow::initializeKeyboardTab()
     m_keyboardHotkeyTable->setAlternatingRowColors(true);
     m_keyboardHotkeyTable->setSortingEnabled(true);
     m_keyboardHotkeyTable->verticalHeader()->setVisible(false);
-    m_keyboardHotkeyTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
-    m_keyboardHotkeyTable->horizontalHeader()->setStretchLastSection(true);
+    configureHotkeyTableGeometry(m_keyboardHotkeyTable);
     m_keyboardHotkeyTable->setColumnWidth(0, 260);
     m_keyboardHotkeyTable->setColumnWidth(1, 80);
     m_keyboardHotkeyTable->setColumnWidth(2, 130);
@@ -1505,8 +1556,7 @@ void ProcessDetailWindow::initializeKeyboardTab()
     m_keyboardHookTable->setAlternatingRowColors(true);
     m_keyboardHookTable->setSortingEnabled(true);
     m_keyboardHookTable->verticalHeader()->setVisible(false);
-    m_keyboardHookTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
-    m_keyboardHookTable->horizontalHeader()->setStretchLastSection(true);
+    configureHotkeyTableGeometry(m_keyboardHookTable);
     m_keyboardHookTable->setColumnWidth(0, 180);
     m_keyboardHookTable->setColumnWidth(1, 120);
     m_keyboardHookTable->setColumnWidth(2, 90);
@@ -1533,7 +1583,8 @@ void ProcessDetailWindow::updateKeyboardStatusLabel(const QString& statusText, c
         return;
     }
 
-    m_keyboardStatusLabel->setText(statusText);
+    m_keyboardStatusLabel->setToolTip(statusText);
+    m_keyboardStatusLabel->setText(compactStatusText(statusText));
     if (refreshing)
     {
         m_keyboardStatusLabel->setStyleSheet(buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700));

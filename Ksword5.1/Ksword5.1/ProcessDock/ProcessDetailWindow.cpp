@@ -409,9 +409,10 @@ namespace process_detail_window_internal
         // 输入：
         // - candidateParent：优先参考的客户区控件，通常是打开独立窗口的 Dock/主窗口。
         // - fallbackWindow：当前独立窗口，用于在无父控件时定位屏幕。
-        // - ratio：客户区宽度比例，本需求调用侧传 0.75。
+        // - ratio：最大宽度比例，本需求调用侧固定传 0.75。
         // - fallbackWidth：所有来源都不可用时的默认宽度。
         // 处理：
+        // - 先定位目标屏幕，再把所有候选宽度都钳制到该屏幕可用宽度以内；
         // - 优先使用 parent contentsRect，避免窗口装饰/边框参与计算；
         // - 其次使用当前活动窗口客户区；
         // - 最后退回屏幕 availableGeometry。
@@ -455,6 +456,15 @@ namespace process_detail_window_internal
         if (clientWidth <= 0 || ratio <= 0.0)
         {
             return boundedFallbackWidth;
+        }
+
+        const int screenWidth = (targetScreen != nullptr)
+            ? targetScreen->availableGeometry().width()
+            : 0;
+        if (screenWidth > 0)
+        {
+            // 屏幕宽度是硬上限：避免热键页等宽内容把详情窗口撑出屏幕。
+            clientWidth = std::min(clientWidth, screenWidth);
         }
 
         return std::max(1, static_cast<int>(std::floor(static_cast<double>(clientWidth) * ratio)));

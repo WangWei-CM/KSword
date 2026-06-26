@@ -25,6 +25,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KswordSetup", "..\KswordSet
 		{BDE77103-B963-40A8-A28E-0B9C26A5C5DD} = {BDE77103-B963-40A8-A28E-0B9C26A5C5DD}
 	EndProjectSection
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KswordARKLight", "..\KswordARKLight\KswordARKLight.vcxproj", "{44CC7D72-182E-4B28-9D88-531B09C77C41}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -59,6 +61,10 @@ Global
 		{9B7CB5ED-A00A-4E2F-9E07-1A5C2B75B3D1}.Debug|x64.Build.0 = Debug|x64
 		{9B7CB5ED-A00A-4E2F-9E07-1A5C2B75B3D1}.Release|x64.ActiveCfg = Release|x64
 		{9B7CB5ED-A00A-4E2F-9E07-1A5C2B75B3D1}.Release|x64.Build.0 = Release|x64
+		{44CC7D72-182E-4B28-9D88-531B09C77C41}.Debug|x64.ActiveCfg = Debug|x64
+		{44CC7D72-182E-4B28-9D88-531B09C77C41}.Debug|x64.Build.0 = Debug|x64
+		{44CC7D72-182E-4B28-9D88-531B09C77C41}.Release|x64.ActiveCfg = Release|x64
+		{44CC7D72-182E-4B28-9D88-531B09C77C41}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

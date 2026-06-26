@@ -24,6 +24,8 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -63,6 +65,11 @@ namespace ks::process
     struct CounterSample;
     struct ProcessRecord;
     struct SystemThreadRecord;
+}
+
+namespace ks::network
+{
+    class TrafficMonitorService;
 }
 
 namespace ks::ui
@@ -280,6 +287,16 @@ private:
         ks::process::ProcessRecord record;  // record：动作执行线程使用的进程记录副本。
     };
 
+    // NetworkTrafficCounters：
+    // - 输入：TrafficMonitorService 上报的单包 PID、方向、大小；
+    // - 处理：按 PID 累计下行/上行字节；
+    // - 返回：作为刷新线程的只读快照，速率由 CounterSample 差分计算。
+    struct NetworkTrafficCounters
+    {
+        std::uint64_t rxBytes = 0; // rxBytes：累计下行字节。
+        std::uint64_t txBytes = 0; // txBytes：累计上行字节。
+    };
+
     // RefreshResult：后台线程刷新结果对象。
     struct RefreshResult
     {
@@ -330,6 +347,8 @@ public:
         double memoryMB = 0.0;         // memoryMB：该进程采样时工作集。
         double diskMBps = 0.0;         // diskMBps：该进程采样时磁盘吞吐。
         double netKBps = 0.0;          // netKBps：该进程采样时网络吞吐。
+        double netRxKBps = 0.0;        // netRxKBps：该进程采样时网络下行吞吐。
+        double netTxKBps = 0.0;        // netTxKBps：该进程采样时网络上行吞吐。
         double gpuPercent = 0.0;       // gpuPercent：该进程采样时 GPU 百分比。
     };
 
@@ -612,7 +631,13 @@ private:
         int progressTaskPid,
         const std::unordered_map<std::string, CacheEntry>& previousCache,
         const std::unordered_map<std::string, ks::process::CounterSample>& previousCounters,
+        const std::unordered_map<std::uint32_t, NetworkTrafficCounters>& networkTrafficSnapshot,
         std::uint32_t logicalCpuCount);
+
+    // ======== 进程网络吞吐采样 ========
+    void ensureProcessNetworkTrafficCaptureStarted();
+    void stopProcessNetworkTrafficCapture();
+    std::unordered_map<std::uint32_t, NetworkTrafficCounters> snapshotProcessNetworkTrafficCounters() const;
 
 private:
     // ======== 顶层布局 ========
@@ -781,6 +806,11 @@ private:
     // ======== 数据缓存 ========
     std::unordered_map<std::string, CacheEntry> m_cacheByIdentity; // 进程缓存（PID+CreateTime）。
     std::unordered_map<std::string, ks::process::CounterSample> m_counterSampleByIdentity; // 差值样本。
+    std::unique_ptr<ks::network::TrafficMonitorService> m_processNetworkTrafficService; // 进程页内部 TCP/UDP 抓包服务。
+    mutable std::mutex m_processNetworkTrafficMutex; // 保护 m_processNetworkTrafficByPid 与状态文本。
+    std::unordered_map<std::uint32_t, NetworkTrafficCounters> m_processNetworkTrafficByPid; // PID -> 网络累计字节。
+    std::string m_processNetworkTrafficStatusText; // 最近一次抓包服务状态/错误。
+    bool m_processNetworkTrafficCaptureStarted = false; // 抓包服务是否已经尝试启动。
     QHash<QString, QIcon> m_iconCacheByPath;  // 进程图标缓存，避免重复提取。
     QHash<QString, QIcon> m_activityIconCacheByProcessKey; // 历史活动图标缓存：进程名+路径 -> 图标。
     std::unordered_map<std::string, QPointer<ProcessDetailWindow>> m_detailWindowByIdentity; // 详情窗口缓存（同进程复用窗口）。

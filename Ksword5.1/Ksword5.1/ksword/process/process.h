@@ -196,7 +196,9 @@ namespace ks::process
         double workingSetMB = 0.0;         // RAM 实际使用工作集（MB）。
         double diskMBps = 0.0;             // 磁盘吞吐（MB/s）。
         double gpuPercent = 0.0;           // GPU 百分比（R3 通过 PDH GPU Engine 按 PID 聚合）。
-        double netKBps = 0.0;              // 网络（当前预留，默认 0）。
+        double netKBps = 0.0;              // 网络总吞吐（KB/s，等于下行 + 上行）。
+        double netRxKBps = 0.0;            // 网络下行吞吐（KB/s，由进程页抓包聚合写入）。
+        double netTxKBps = 0.0;            // 网络上行吞吐（KB/s，由进程页抓包聚合写入）。
 
         bool staticDetailsReady = false;   // true 表示详情字段已完整填充。
         bool dynamicCountersReady = false; // true 表示性能计数器可用。
@@ -317,6 +319,8 @@ namespace ks::process
     {
         std::uint64_t cpuTime100ns = 0;    // 上一轮 CPU 累计值。
         std::uint64_t ioBytes = 0;         // 上一轮 IO 累计值。
+        std::uint64_t networkRxBytes = 0;  // 上一轮按 PID 聚合的网络下行累计字节。
+        std::uint64_t networkTxBytes = 0;  // 上一轮按 PID 聚合的网络上行累计字节。
         std::uint64_t sampleTick100ns = 0; // 采样时刻（steady_clock 转 100ns）。
     };
 
@@ -383,7 +387,7 @@ namespace ks::process
     // UpdateDerivedCounters 作用：
     // - 根据“上一轮样本 + 当前原始计数器”计算 CPU%、DiskMB/s；
     // - GPU 由枚举阶段的 PDH GPU Engine 采样写入，本函数只保留该值；
-    // - Net 当前默认保留为 0（后续可扩展）。
+    // - Net 由 ProcessDock 的抓包聚合逻辑在本函数返回后写入，非进程页调用保持 0。
     // 参数 processRecord：目标记录（按引用写入衍生值）。
     // 参数 previousSample：上一轮样本（可空）。
     // 参数 nextSampleOut：输出下一轮样本。

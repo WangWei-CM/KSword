@@ -5,6 +5,7 @@
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/FlatTableModel.h"
 #include "../UI/TableColumnAutoFit.h"
+#include "../ksword/network/network.h"
 
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
@@ -2817,11 +2818,103 @@ ProcessDock::ProcessDock(QWidget* parent)
 
 ProcessDock::~ProcessDock()
 {
+    // 析构阶段先停止内部抓包线程：
+    // - 输入：无；
+    // - 处理：请求 TrafficMonitorService 退出并等待线程 join；
+    // - 返回：无，防止对象销毁后抓包回调继续访问成员。
+    stopProcessNetworkTrafficCapture();
+
     // 析构阶段主动解除全局事件过滤器，避免 QApplication 后续点击事件访问已销毁 Dock。
     if (QApplication::instance() != nullptr)
     {
         QApplication::instance()->removeEventFilter(this);
     }
+}
+
+void ProcessDock::ensureProcessNetworkTrafficCaptureStarted()
+{
+    // ensureProcessNetworkTrafficCaptureStarted：
+    // - 输入：无；
+    // - 处理：懒创建内部 TCP/UDP 抓包服务，并把报文按 PID 累计为下行/上行字节；
+    // - 返回：无。失败时状态文本留在 m_processNetworkTrafficStatusText，进程表网络列自然保持 0。
+    if (m_processNetworkTrafficCaptureStarted)
+    {
+        return;
+    }
+    m_processNetworkTrafficCaptureStarted = true;
+
+    if (m_processNetworkTrafficService == nullptr)
+    {
+        m_processNetworkTrafficService = std::make_unique<ks::network::TrafficMonitorService>();
+    }
+
+    m_processNetworkTrafficService->SetPacketCallback([this](const ks::network::PacketRecord& packetRecord) {
+        if (packetRecord.processId == 0U || packetRecord.totalPacketSize == 0U)
+        {
+            return;
+        }
+
+        std::lock_guard<std::mutex> guard(m_processNetworkTrafficMutex);
+        NetworkTrafficCounters& counters = m_processNetworkTrafficByPid[packetRecord.processId];
+        if (packetRecord.direction == ks::network::PacketDirection::Inbound)
+        {
+            counters.rxBytes += static_cast<std::uint64_t>(packetRecord.totalPacketSize);
+        }
+        else if (packetRecord.direction == ks::network::PacketDirection::Outbound)
+        {
+            counters.txBytes += static_cast<std::uint64_t>(packetRecord.totalPacketSize);
+        }
+    });
+
+    m_processNetworkTrafficService->SetStatusCallback([this](const std::string& statusText) {
+        std::lock_guard<std::mutex> guard(m_processNetworkTrafficMutex);
+        m_processNetworkTrafficStatusText = statusText;
+    });
+
+    const bool started = m_processNetworkTrafficService->StartCapture();
+    {
+        std::lock_guard<std::mutex> guard(m_processNetworkTrafficMutex);
+        if (started)
+        {
+            m_processNetworkTrafficStatusText = "process network traffic capture started";
+        }
+        else if (m_processNetworkTrafficStatusText.empty())
+        {
+            m_processNetworkTrafficStatusText = "process network traffic capture start failed";
+        }
+    }
+
+    kLogEvent logEvent;
+    (started ? info : warn) << logEvent
+        << "[ProcessDock] 进程网络吞吐抓包服务"
+        << (started ? "启动成功" : "启动失败")
+        << eol;
+}
+
+void ProcessDock::stopProcessNetworkTrafficCapture()
+{
+    // stopProcessNetworkTrafficCapture：
+    // - 输入：无；
+    // - 处理：停止内部抓包服务，断开回调，避免暂停或析构后继续累计；
+    // - 返回：无。
+    if (m_processNetworkTrafficService != nullptr)
+    {
+        m_processNetworkTrafficService->StopCapture();
+        m_processNetworkTrafficService->SetPacketCallback({});
+        m_processNetworkTrafficService->SetStatusCallback({});
+    }
+    m_processNetworkTrafficCaptureStarted = false;
+}
+
+std::unordered_map<std::uint32_t, ProcessDock::NetworkTrafficCounters>
+ProcessDock::snapshotProcessNetworkTrafficCounters() const
+{
+    // snapshotProcessNetworkTrafficCounters：
+    // - 输入：无；
+    // - 处理：在互斥锁内复制当前 PID 网络累计字节表；
+    // - 返回：刷新线程可安全读取的独立快照。
+    std::lock_guard<std::mutex> guard(m_processNetworkTrafficMutex);
+    return m_processNetworkTrafficByPid;
 }
 
 bool ProcessDock::eventFilter(QObject* watched, QEvent* event)
@@ -4100,6 +4193,7 @@ void ProcessDock::initializeConnections()
         {
             m_refreshTimer->stop();
         }
+        stopProcessNetworkTrafficCapture();
         updateRefreshStateUi(false, "● 已暂停刷新/记录");
         updateProcessActivityStatusLabel();
     });
@@ -4939,6 +5033,8 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     const std::uint32_t cpuCount = m_logicalCpuCount;
     const auto previousCache = m_cacheByIdentity;
     const auto previousCounters = m_counterSampleByIdentity;
+    ensureProcessNetworkTrafficCaptureStarted();
+    const auto networkTrafficSnapshot = snapshotProcessNetworkTrafficCounters();
 
     // ticket 用于丢弃过期结果（防止乱序覆盖）。
     const std::uint64_t localTicket = ++m_refreshTicket;
@@ -4987,7 +5083,8 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         progressPid,
         forceUiRefresh,
         previousCache,
-        previousCounters]() mutable {
+        previousCounters,
+        networkTrafficSnapshot]() mutable {
         const ProcessDock::RefreshResult refreshResult = ProcessDock::buildRefreshResult(
             strategyIndex,
             detailModeEnabled,
@@ -4997,6 +5094,7 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
             progressPid,
             previousCache,
             previousCounters,
+            networkTrafficSnapshot,
             cpuCount);
 
         if (guard == nullptr)
@@ -5177,6 +5275,7 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
     const int progressTaskPid,
     const std::unordered_map<std::string, CacheEntry>& previousCache,
     const std::unordered_map<std::string, ks::process::CounterSample>& previousCounters,
+    const std::unordered_map<std::uint32_t, ProcessDock::NetworkTrafficCounters>& networkTrafficSnapshot,
     const std::uint32_t logicalCpuCount)
 {
     const auto workerStartTime = std::chrono::steady_clock::now();
@@ -5634,6 +5733,35 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
             nextSample,
             logicalCpuCount,
             sampleTick);
+
+        // 网络吞吐计算：
+        // - 输入：抓包线程按 PID 累计的 TCP/UDP 下行、上行字节；
+        // - 处理：与上一轮 CounterSample 做差，再除以同一个刷新间隔；
+        // - 返回：写入 ProcessRecord 的 down/up/total KB/s，同时把累计值保存到下一轮样本。
+        const auto networkCounterIt = networkTrafficSnapshot.find(processRecord.pid);
+        if (networkCounterIt != networkTrafficSnapshot.end())
+        {
+            nextSample.networkRxBytes = networkCounterIt->second.rxBytes;
+            nextSample.networkTxBytes = networkCounterIt->second.txBytes;
+        }
+        if (oldSample != nullptr && sampleTick > oldSample->sampleTick100ns)
+        {
+            const double deltaSeconds = static_cast<double>(sampleTick - oldSample->sampleTick100ns) / 10000000.0;
+            if (deltaSeconds > 0.0)
+            {
+                const std::uint64_t deltaRxBytes =
+                    (nextSample.networkRxBytes >= oldSample->networkRxBytes)
+                    ? (nextSample.networkRxBytes - oldSample->networkRxBytes)
+                    : 0ULL;
+                const std::uint64_t deltaTxBytes =
+                    (nextSample.networkTxBytes >= oldSample->networkTxBytes)
+                    ? (nextSample.networkTxBytes - oldSample->networkTxBytes)
+                    : 0ULL;
+                processRecord.netRxKBps = (static_cast<double>(deltaRxBytes) / deltaSeconds) / 1024.0;
+                processRecord.netTxKBps = (static_cast<double>(deltaTxBytes) / deltaSeconds) / 1024.0;
+                processRecord.netKBps = processRecord.netRxKBps + processRecord.netTxKBps;
+            }
+        }
         refreshResult.nextCounters[identityKey] = nextSample;
 
         CacheEntry cacheEntry{};
@@ -6269,6 +6397,8 @@ void ProcessDock::appendProcessActivitySample()
         processPoint.memoryMB = processRecord.workingSetMB;
         processPoint.diskMBps = processRecord.diskMBps;
         processPoint.netKBps = processRecord.netKBps;
+        processPoint.netRxKBps = processRecord.netRxKBps;
+        processPoint.netTxKBps = processRecord.netTxKBps;
         processPoint.gpuPercent = processRecord.gpuPercent;
 
         const bool isSystemIdleProcess =
@@ -6550,6 +6680,8 @@ void ProcessDock::rebuildProcessActivityTableSnapshotRecords()
         record.workingSetMB = processPoint.memoryMB;
         record.diskMBps = processPoint.diskMBps;
         record.netKBps = processPoint.netKBps;
+        record.netRxKBps = processPoint.netRxKBps;
+        record.netTxKBps = processPoint.netTxKBps;
         record.gpuPercent = processPoint.gpuPercent;
         record.staticDetailsReady = true;
         record.dynamicCountersReady = true;
@@ -8662,7 +8794,9 @@ QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processR
     case TableColumn::Gpu:
         return QString::number(processRecord.gpuPercent, 'f', 1) + "%";
     case TableColumn::Net:
-        return QString::number(processRecord.netKBps, 'f', 2) + " KB/s";
+        return QStringLiteral("↓%1 / ↑%2 KB/s")
+            .arg(processRecord.netRxKBps, 0, 'f', 2)
+            .arg(processRecord.netTxKBps, 0, 'f', 2);
     case TableColumn::Signature:
         // 显示“厂家 + 可信状态”文本，未填充时显示 Unknown。
         return QString::fromStdString(processRecord.signatureState.empty() ? "Unknown" : processRecord.signatureState);
@@ -9293,6 +9427,8 @@ ks::process::ProcessRecord ProcessDock::aggregateFriendlyApplicationRecord(
     aggregateRecord.diskMBps = 0.0;
     aggregateRecord.gpuPercent = 0.0;
     aggregateRecord.netKBps = 0.0;
+    aggregateRecord.netRxKBps = 0.0;
+    aggregateRecord.netTxKBps = 0.0;
     for (const CacheEntry* entry : applicationEntries)
     {
         if (entry == nullptr)
@@ -9307,6 +9443,8 @@ ks::process::ProcessRecord ProcessDock::aggregateFriendlyApplicationRecord(
         aggregateRecord.diskMBps += entry->record.diskMBps;
         aggregateRecord.gpuPercent += entry->record.gpuPercent;
         aggregateRecord.netKBps += entry->record.netKBps;
+        aggregateRecord.netRxKBps += entry->record.netRxKBps;
+        aggregateRecord.netTxKBps += entry->record.netTxKBps;
     }
     return aggregateRecord;
 }
