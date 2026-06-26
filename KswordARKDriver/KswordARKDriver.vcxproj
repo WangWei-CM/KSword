@@ -28,6 +28,7 @@
     <ClCompile Include="src\features\callback\callback_remove_external.c" />
     <ClCompile Include="src\features\callback\callback_enum.c" />
     <ClCompile Include="src\features\callback\minifilter_callback.c" />
+    <ClCompile Include="src\features\callback\minifilter_inventory.c" />
     <ClCompile Include="src\features\callback\minifilter_runtime_link.c" />
     <ClCompile Include="src\features\callback\registry_callback.c" />
     <ClCompile Include="src\features\callback\process_callback.c" />
@@ -39,6 +40,7 @@
     <ClCompile Include="src\features\kernel\kernel_cpu_integrity.c" />
     <ClCompile Include="src\features\kernel\cpu_hardware_query.c" />
     <ClCompile Include="src\features\kernel\driver_unload.c" />
+    <ClCompile Include="src\features\kernel\kernel_object_audit.c" />
     <ClCompile Include="src\features\kernel\ssdt_query.c" />
     <ClCompile Include="src\features\kernel\hook_scan.c" />
     <ClCompile Include="src\features\kernel\hook_scan_support.c" />
@@ -67,6 +69,8 @@
     <ClCompile Include="src\features\dyndata\dyndata_loader.c" />
     <ClCompile Include="src\features\dyndata\dyndata_query.c" />
     <ClCompile Include="src\features\dyndata\dyndata_validate.c" />
+    <ClCompile Include="src\features\dyndata\dyndata_v4.c" />
+    <ClCompile Include="src\features\dyndata\dyndata_v4_query.c" />
     <ClCompile Include="src\features\capability\capability_query.c" />
     <ClCompile Include="src\features\capability\capability_ioctl.c" />
     <ClCompile Include="src\features\thread\thread_query.c" />
@@ -86,6 +90,8 @@
     <ClCompile Include="src\features\wsl\wsl_silo_ioctl.c" />
     <ClCompile Include="src\features\trust\trust_query.c" />
     <ClCompile Include="src\features\trust\trust_ioctl.c" />
+    <ClCompile Include="src\features\security_audit\security_audit_query.c" />
+    <ClCompile Include="src\features\security_audit\security_audit_ioctl.c" />
     <ClCompile Include="src\features\safety\safety_policy.c" />
     <ClCompile Include="src\features\safety\safety_ioctl.c" />
     <ClCompile Include="src\features\preflight\preflight_query.c" />
@@ -102,13 +108,23 @@
     <ClCompile Include="src\features\redirect\redirect_file.c" />
     <ClCompile Include="src\features\redirect\redirect_ioctl.c" />
     <ClCompile Include="src\features\network\network_runtime.c" />
+    <ClCompile Include="src\features\network\network_audit.c" />
     <ClCompile Include="src\features\network\network_wfp.c" />
     <ClCompile Include="src\features\network\network_ioctl.c" />
     <ClCompile Include="src\features\keyboard\keyboard_query.c" />
     <ClCompile Include="src\features\keyboard\keyboard_ioctl.c" />
+    <ClCompile Include="src\features\storage\storage_audit.c" />
+    <ClCompile Include="src\features\storage\storage_ioctl.c" />
+    <ClCompile Include="src\features\win32k\win32k_support.c" />
+    <ClCompile Include="src\features\win32k\win32k_query.c" />
+    <ClCompile Include="src\features\win32k\win32k_ioctl.c" />
     <ClCompile Include="src\features\mutation\mutation_transaction.c" />
     <ClCompile Include="src\features\mutation\mutation_ioctl.c" />
-  <ClCompile Include="src\features\callback\callback_external_wfp.c" /><ClCompile Include="src\features\callback\callback_external_minifilter.c" /><ClCompile Include="src\features\callback\callback_external_safe.c" /><ClCompile Include="src\features\memory\memory_physical.c" /><ClCompile Include="src\features\memory\memory_physical_layout.c" /><ClCompile Include="src\features\memory\memory_pagetable.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan_helpers.c" /><ClCompile Include="src\features\memory\memory_kernel_evidence.c" /><ClCompile Include="src\features\memory\memory_ioctl.c" /></ItemGroup>
+    <ClCompile Include="src\features\device_audit\device_audit_ioctl.c" />
+    <ClCompile Include="src\features\device_audit\device_audit_query.c" />
+    <ClCompile Include="src\features\device_audit\device_audit_support.c" />
+    <ClCompile Include="src\features\device_audit\device_audit_targets.c" />
+  <ClCompile Include="src\features\callback\callback_external_wfp.c" /><ClCompile Include="src\features\callback\callback_external_minifilter.c" /><ClCompile Include="src\features\callback\callback_external_safe.c" /><ClCompile Include="src\features\memory\memory_physical.c" /><ClCompile Include="src\features\memory\memory_physical_layout.c" /><ClCompile Include="src\features\memory\memory_pagetable.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan.c" /><ClCompile Include="src\features\memory\memory_kernel_exec_scan_helpers.c" /><ClCompile Include="src\features\memory\memory_kernel_evidence.c" /><ClCompile Include="src\features\memory\memory_evidence_enrichment.c" /><ClCompile Include="src\features\memory\memory_ioctl.c" /></ItemGroup>
   <ItemGroup>
     <ClInclude Include="Device.h" />
     <ClInclude Include="Driver.h" />
@@ -141,12 +157,15 @@
     <ClInclude Include="src\features\section\section_support.h" />
     <ClInclude Include="include\ark\ark_memory.h" />
     <ClInclude Include="include\ark\ark_memory_evidence.h" />
+    <ClInclude Include="src\features\memory\memory_evidence_enrichment.h" />
     <ClInclude Include="src\features\memory\memory_kernel_exec_scan_internal.h" />
     <ClInclude Include="src\features\thread\thread_crossview.h" />
     <ClInclude Include="include\ark\ark_file_monitor.h" />
     <ClInclude Include="src\features\file_monitor\file_monitor_internal.h" />
     <ClInclude Include="include\ark\ark_wsl_silo.h" />
     <ClInclude Include="include\ark\ark_trust.h" />
+    <ClInclude Include="..\shared\driver\KswordArkSecurityAuditIoctl.h" />
+    <ClInclude Include="src\features\security_audit\security_audit_internal.h" />
     <ClInclude Include="include\ark\ark_safety.h" />
     <ClInclude Include="include\ark\ark_preflight.h" />
     <ClInclude Include="include\ark\ark_registry.h" />
@@ -158,13 +177,23 @@
     <ClInclude Include="include\ark\ark_redirect.h" />
     <ClInclude Include="include\ark\ark_network.h" />
     <ClInclude Include="include\ark\ark_keyboard.h" />
+    <ClInclude Include="include\ark\ark_storage.h" />
     <ClInclude Include="include\ark\ark_mutation.h" />
+    <ClInclude Include="..\shared\driver\KswordArkKernelObjectIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkFilterIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkDeviceAuditIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkWin32kIoctl.h" />
     <ClInclude Include="src\features\redirect\redirect_internal.h" />
     <ClInclude Include="src\features\network\network_internal.h" />
     <ClInclude Include="src\features\kernel\hook_scan_support.h" />
     <ClInclude Include="src\features\kernel\driver_integrity.h" />
     <ClInclude Include="src\features\kernel\kernel_cpu_integrity.h" />
+    <ClInclude Include="src\features\kernel\kernel_object_audit.h" />
     <ClInclude Include="src\features\mutation\mutation_transaction.h" />
+    <ClInclude Include="src\features\dyndata\dyndata_v4_internal.h" />
+    <ClInclude Include="src\features\win32k\win32k_support.h" />
+    <ClInclude Include="src\features\win32k\win32k_query.h" />
+    <ClInclude Include="src\features\device_audit\device_audit_internal.h" />
   <ClInclude Include="src\features\callback\callback_external_core.h" /><ClInclude Include="src\features\callback\callback_external_wfp.h" /><ClInclude Include="src\features\callback\callback_external_minifilter.h" /><ClInclude Include="src\features\callback\callback_external_safe.h" /></ItemGroup>
   <ItemGroup>
     <Inf Include="KswordARKDriver.inf">

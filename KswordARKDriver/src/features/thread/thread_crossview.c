@@ -35,6 +35,10 @@ Environment:
 #define STATUS_BUFFER_OVERFLOW ((NTSTATUS)0x80000005L)
 #endif
 
+#ifndef STATUS_NOT_FOUND
+#define STATUS_NOT_FOUND ((NTSTATUS)0xC0000225L)
+#endif
+
 typedef PEPROCESS(NTAPI* KSW_THREAD_CROSSVIEW_PS_GET_NEXT_PROCESS_FN)(
     _In_opt_ PEPROCESS Process
     );
@@ -96,6 +100,14 @@ ObGetObjectType(
     );
 
 extern POBJECT_TYPE* PsThreadType;
+
+static NTSTATUS
+KswordARKThreadCrossViewReadCidFields(
+    _In_ const KSW_THREAD_CROSSVIEW_CONTEXT* Context,
+    _In_ const VOID* ThreadObject,
+    _Out_ ULONG* ProcessIdOut,
+    _Out_ ULONG* ThreadIdOut
+    );
 
 static PVOID
 KswordARKThreadCrossViewAllocate(
@@ -664,8 +676,114 @@ Return Value:
     row->dynDataCapabilityMask = Context->DynState.CapabilityMask;
     row->fieldOffsets = Context->FieldOffsets;
     row->lastStatus = STATUS_SUCCESS;
+    row->publicWalkStatus = STATUS_NOT_FOUND;
+    row->threadListStatus = STATUS_NOT_FOUND;
+    row->cidTableStatus = STATUS_NOT_FOUND;
+    row->startAddressStatus = STATUS_NOT_FOUND;
+    row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_OK;
     Context->RowCount += 1UL;
     return row;
+}
+
+static VOID
+KswordARKThreadCrossViewApplyDetailStatus(
+    _Inout_ KSWORD_ARK_THREAD_CROSSVIEW_ROW* Row,
+    _In_ NTSTATUS SourceStatus,
+    _In_ BOOLEAN UnsupportedField
+    )
+/*++
+
+Routine Description:
+
+    Update row-level partial, unsupported, and read-failure detail flags from one
+    collector branch without inferring undocumented thread termination state.
+
+Arguments:
+
+    Row - Mutable thread evidence row.
+    SourceStatus - NTSTATUS produced by the guarded source path.
+    UnsupportedField - TRUE when the collector intentionally skipped private
+        field access because DynData did not provide the PDB offset.
+
+Return Value:
+
+    None. The row is annotated in place.
+
+--*/
+{
+    if (Row == NULL) {
+        return;
+    }
+
+    if (UnsupportedField) {
+        Row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_UNSUPPORTED;
+        Row->denoiseFlags |= KSWORD_ARK_CROSSVIEW_DENOISE_UNSUPPORTED_PDB_FIELD;
+        return;
+    }
+
+    if (!NT_SUCCESS(SourceStatus)) {
+        Row->denoiseFlags |= KSWORD_ARK_CROSSVIEW_DENOISE_PARTIAL_EVIDENCE;
+        if (SourceStatus == STATUS_PROCEDURE_NOT_FOUND) {
+            Row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_UNSUPPORTED;
+            Row->denoiseFlags |= KSWORD_ARK_CROSSVIEW_DENOISE_UNSUPPORTED_PDB_FIELD;
+        }
+        else {
+            Row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_READ_FAILED;
+            Row->denoiseFlags |= KSWORD_ARK_CROSSVIEW_DENOISE_READ_FAILURE;
+        }
+    }
+}
+
+static VOID
+KswordARKThreadCrossViewRecordSourceEvidence(
+    _Inout_ KSWORD_ARK_THREAD_CROSSVIEW_ROW* Row,
+    _In_ ULONG SourceMask,
+    _In_ ULONG SourceProcessId,
+    _In_ ULONG SourceThreadId,
+    _In_ NTSTATUS SourceStatus
+    )
+/*++
+
+Routine Description:
+
+    Store per-source PID/TID/status values for public walk, ThreadListHead, and
+    PspCidTable evidence.
+
+Arguments:
+
+    Row - Mutable thread evidence row.
+    SourceMask - Single KSWORD_ARK_CROSSVIEW_SOURCE_* bit being merged.
+    SourceProcessId - Process ID observed by that source.
+    SourceThreadId - Thread ID observed by that source.
+    SourceStatus - Status from the source collector branch.
+
+Return Value:
+
+    None. The source-specific evidence columns are updated in place.
+
+--*/
+{
+    if (Row == NULL) {
+        return;
+    }
+
+    if ((SourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_PUBLIC_WALK) != 0UL) {
+        Row->publicProcessId = SourceProcessId;
+        Row->publicThreadId = SourceThreadId;
+        Row->publicWalkStatus = SourceStatus;
+    }
+    if ((SourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_THREAD_LIST) != 0UL) {
+        Row->threadListProcessId = SourceProcessId;
+        Row->threadListThreadId = SourceThreadId;
+        Row->threadListStatus = SourceStatus;
+    }
+    if ((SourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_CID_TABLE) != 0UL) {
+        Row->cidTableProcessId = SourceProcessId;
+        Row->cidTableThreadId = SourceThreadId;
+        Row->cidTableStatus = SourceStatus;
+    }
+
+    KswordARKThreadCrossViewApplyDetailStatus(Row, SourceStatus, FALSE);
 }
 
 static VOID
@@ -674,6 +792,8 @@ KswordARKThreadCrossViewMergeThreadObject(
     _In_ PETHREAD ThreadObject,
     _In_ ULONG SourceMask,
     _In_ NTSTATUS SourceStatus,
+    _In_ ULONG EvidenceProcessId,
+    _In_ ULONG EvidenceThreadId,
     _In_opt_z_ PCSTR DetailText
     )
 /*++
@@ -688,6 +808,8 @@ Arguments:
     ThreadObject - Referenced thread object.
     SourceMask - KSWORD_ARK_CROSSVIEW_SOURCE_* bit for the evidence source.
     SourceStatus - Last read/reference status to record.
+    EvidenceProcessId - PID observed by the source itself, or zero when absent.
+    EvidenceThreadId - TID observed by the source itself, or zero when absent.
     DetailText - Optional detail text when the row has no detail yet.
 
 Return Value:
@@ -700,6 +822,11 @@ Return Value:
     PEPROCESS processObject = NULL;
     ULONG processId = 0UL;
     ULONG threadId = 0UL;
+    ULONG cidProcessId = 0UL;
+    ULONG cidThreadId = 0UL;
+    ULONG sourceProcessId = 0UL;
+    ULONG sourceThreadId = 0UL;
+    NTSTATUS cidStatus = STATUS_SUCCESS;
 
     if (Context == NULL || ThreadObject == NULL) {
         return;
@@ -712,8 +839,12 @@ Return Value:
 
     threadId = HandleToULong(PsGetThreadId(ThreadObject));
     processId = HandleToULong(PsGetProcessId(processObject));
-    if (!KswordARKThreadCrossViewProcessInRequest(Context, processId) ||
-        !KswordARKThreadCrossViewTidInRequest(Context, threadId)) {
+    sourceProcessId = (EvidenceProcessId != 0UL) ? EvidenceProcessId : processId;
+    sourceThreadId = (EvidenceThreadId != 0UL) ? EvidenceThreadId : threadId;
+    if ((!KswordARKThreadCrossViewProcessInRequest(Context, processId) &&
+            !KswordARKThreadCrossViewProcessInRequest(Context, sourceProcessId)) ||
+        (!KswordARKThreadCrossViewTidInRequest(Context, threadId) &&
+            !KswordARKThreadCrossViewTidInRequest(Context, sourceThreadId))) {
         return;
     }
 
@@ -728,6 +859,42 @@ Return Value:
     row->processObjectAddress = (ULONG64)(ULONG_PTR)processObject;
     row->lastStatus = SourceStatus;
     KswordARKThreadCrossViewCopyImageName(row->imageName, processObject);
+    cidStatus = KswordARKThreadCrossViewReadCidFields(Context, ThreadObject, &cidProcessId, &cidThreadId);
+    if (NT_SUCCESS(cidStatus)) {
+        if ((SourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_THREAD_LIST) != 0UL) {
+            sourceProcessId = (EvidenceProcessId != 0UL) ? EvidenceProcessId : cidProcessId;
+            sourceThreadId = (EvidenceThreadId != 0UL) ? EvidenceThreadId : cidThreadId;
+        }
+        if (cidProcessId != processId || cidThreadId != threadId) {
+            row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_DATA_MISMATCH;
+            row->denoiseFlags |= KSWORD_ARK_CROSSVIEW_DENOISE_PARTIAL_EVIDENCE;
+            row->lastStatus = STATUS_DATA_ERROR;
+        }
+    }
+    else if (cidStatus == STATUS_PROCEDURE_NOT_FOUND) {
+        Context->CapabilityMissing = TRUE;
+        Context->MissingCapabilityMask |= KSW_CAP_THREAD_LIST_FIELDS;
+        Context->LastStatus = cidStatus;
+        row->lastStatus = cidStatus;
+        KswordARKThreadCrossViewApplyDetailStatus(row, cidStatus, TRUE);
+    }
+    else {
+        Context->LastStatus = cidStatus;
+        row->lastStatus = cidStatus;
+        KswordARKThreadCrossViewApplyDetailStatus(row, cidStatus, FALSE);
+    }
+    if ((EvidenceProcessId != 0UL && EvidenceProcessId != processId) ||
+        (EvidenceThreadId != 0UL && EvidenceThreadId != threadId)) {
+        row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_DATA_MISMATCH;
+        row->denoiseFlags |= KSWORD_ARK_CROSSVIEW_DENOISE_PARTIAL_EVIDENCE;
+        row->lastStatus = STATUS_DATA_ERROR;
+    }
+    KswordARKThreadCrossViewRecordSourceEvidence(
+        row,
+        SourceMask,
+        sourceProcessId,
+        sourceThreadId,
+        SourceStatus);
     if (DetailText != NULL && row->detail[0] == '\0') {
         KswordARKThreadCrossViewFormatDetail(row->detail, sizeof(row->detail), "%s", DetailText);
     }
@@ -783,8 +950,19 @@ Return Value:
 
     row->sourceMask |= SourceMask;
     row->anomalyFlags |= KSWORD_ARK_CROSSVIEW_ANOMALY_DANGLING_OBJECT;
+    row->denoiseFlags |=
+        KSWORD_ARK_CROSSVIEW_DENOISE_PARTIAL_EVIDENCE |
+        KSWORD_ARK_CROSSVIEW_DENOISE_REFERENCE_FAILURE |
+        KSWORD_ARK_CROSSVIEW_DENOISE_POSSIBLE_TERMINATING;
+    row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_PARTIAL;
     row->processId = ProcessId;
     row->lastStatus = SourceStatus;
+    KswordARKThreadCrossViewRecordSourceEvidence(
+        row,
+        SourceMask,
+        ProcessId,
+        ThreadId,
+        SourceStatus);
     if (row->detail[0] == '\0') {
         KswordARKThreadCrossViewFormatDetail(row->detail, sizeof(row->detail), "%s", DetailText);
     }
@@ -991,6 +1169,11 @@ Return Value:
 
     if (!NT_SUCCESS(status)) {
         Row->lastStatus = status;
+        Row->startAddressStatus = status;
+        KswordARKThreadCrossViewApplyDetailStatus(
+            Row,
+            status,
+            (status == STATUS_PROCEDURE_NOT_FOUND) ? TRUE : FALSE);
         if (Row->detail[0] == '\0') {
             KswordARKThreadCrossViewFormatDetail(
                 Row->detail,
@@ -1002,6 +1185,7 @@ Return Value:
     }
 
     Row->startAddress = (ULONG64)(ULONG_PTR)startAddress;
+    Row->startAddressStatus = STATUS_SUCCESS;
     if ((Context->Flags & KSWORD_ARK_THREAD_CROSSVIEW_FLAG_VALIDATE_START) != 0UL &&
         startAddress != NULL &&
         (ULONG_PTR)startAddress >= (ULONG_PTR)MmSystemRangeStart) {
@@ -1009,6 +1193,7 @@ Return Value:
             KswordARKHookFindModuleForAddress(Context->ModuleInfo, (ULONG_PTR)startAddress);
         if (Context->ModuleInfo != NULL && ownerModule == NULL) {
             Row->anomalyFlags |= KSWORD_ARK_CROSSVIEW_ANOMALY_START_ADDRESS_OUTSIDE_MODULE;
+            Row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_DATA_MISMATCH;
             KswordARKThreadCrossViewFormatDetail(
                 Row->detail,
                 sizeof(Row->detail),
@@ -1024,6 +1209,8 @@ KswordARKThreadCrossViewMergeThreadObjectWithStart(
     _In_ PETHREAD ThreadObject,
     _In_ ULONG SourceMask,
     _In_ NTSTATUS SourceStatus,
+    _In_ ULONG EvidenceProcessId,
+    _In_ ULONG EvidenceThreadId,
     _In_opt_z_ PCSTR DetailText
     )
 /*++
@@ -1038,6 +1225,8 @@ Arguments:
     ThreadObject - Referenced thread object.
     SourceMask - Evidence source bit.
     SourceStatus - Source read/reference status.
+    EvidenceProcessId - PID observed by the source itself, or zero when absent.
+    EvidenceThreadId - TID observed by the source itself, or zero when absent.
     DetailText - Optional row detail text.
 
 Return Value:
@@ -1054,7 +1243,14 @@ Return Value:
     }
 
     threadId = HandleToULong(PsGetThreadId(ThreadObject));
-    KswordARKThreadCrossViewMergeThreadObject(Context, ThreadObject, SourceMask, SourceStatus, DetailText);
+    KswordARKThreadCrossViewMergeThreadObject(
+        Context,
+        ThreadObject,
+        SourceMask,
+        SourceStatus,
+        EvidenceProcessId,
+        EvidenceThreadId,
+        DetailText);
     row = KswordARKThreadCrossViewFindRow(
         Context,
         (ULONG64)(ULONG_PTR)ThreadObject,
@@ -1131,6 +1327,8 @@ Return Value:
                     threadCursor,
                     KSWORD_ARK_CROSSVIEW_SOURCE_PUBLIC_WALK,
                     STATUS_SUCCESS,
+                    processId,
+                    HandleToULong(PsGetThreadId(threadCursor)),
                     "Observed through PsGetNextProcessThread.");
                 ObDereferenceObject(threadCursor);
                 threadCursor = nextThread;
@@ -1286,6 +1484,8 @@ Return Value:
                 threadObject,
                 KSWORD_ARK_CROSSVIEW_SOURCE_THREAD_LIST,
                 linkMismatch ? STATUS_DATA_ERROR : STATUS_SUCCESS,
+                0UL,
+                0UL,
                 linkMismatch ? "ThreadListHead blink/flink mismatch observed." : "Observed through EPROCESS.ThreadListHead.");
             row = KswordARKThreadCrossViewFindRow(Context, (ULONG64)(ULONG_PTR)threadObject, tid);
             if (row != NULL && PsGetThreadProcess(threadObject) != ProcessObject) {
@@ -1424,11 +1624,15 @@ Return Value:
     }
 
     if (Entry->Referenced && Entry->Object != NULL) {
+        (VOID)KswordARKThreadCrossViewReadCidFields(context, Entry->Object, &processId, &threadId);
+        UNREFERENCED_PARAMETER(threadId);
         KswordARKThreadCrossViewMergeThreadObjectWithStart(
             context,
             (PETHREAD)Entry->Object,
             KSWORD_ARK_CROSSVIEW_SOURCE_CID_TABLE,
             Entry->ReferenceStatus,
+            processId,
+            Entry->CidValue,
             "Observed through PspCidTable.");
     }
     else if (Entry->TypeMatched) {
@@ -1598,6 +1802,9 @@ Return Value:
         if ((row->anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_DANGLING_OBJECT) != 0UL) {
             row->confidence = 30UL;
         }
+        else if ((row->anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_START_ADDRESS_OUTSIDE_MODULE) != 0UL) {
+            row->confidence = 55UL;
+        }
         else if (hasPublic && hasThreadList && hasCid) {
             row->confidence = 98UL;
         }
@@ -1606,6 +1813,13 @@ Return Value:
         }
         else {
             row->confidence = 60UL;
+        }
+
+        if (Context->CapabilityMissing || Context->Truncated) {
+            row->denoiseFlags |= KSWORD_ARK_CROSSVIEW_DENOISE_PARTIAL_EVIDENCE;
+            if (row->detailStatus == KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_OK) {
+                row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_PARTIAL;
+            }
         }
 
         if (row->detail[0] == '\0') {

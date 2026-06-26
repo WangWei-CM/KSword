@@ -366,9 +366,9 @@ KswordARKKernelIoctlQueryDriverIntegrity(
 
 Routine Description:
 
-    Handle IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY. The IOCTL is intentionally
-    not registered in ioctl_registry.c yet; this handler is staged for the next
-    DriverDock integration session and performs read-only collection only.
+    Handle IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY. The existing 0x849 IOCTL
+    stays read-only and uses version/size fields so v1 rows remain a stable
+    prefix while v2 callers can consume typed DriverObject evidence columns.
 
 Arguments:
 
@@ -418,6 +418,7 @@ Return Value:
     if (!hasInput) {
         defaultRequest.version = KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION;
         defaultRequest.flags = KSWORD_ARK_DRIVER_INTEGRITY_FLAG_DEFAULT;
+        defaultRequest.requestSize = sizeof(KSWORD_ARK_QUERY_DRIVER_INTEGRITY_REQUEST);
         defaultRequest.maxRows = KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_MAX_ROWS;
         defaultRequest.maxIdtVectorsPerCpu = KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_IDT_VECTORS;
     }

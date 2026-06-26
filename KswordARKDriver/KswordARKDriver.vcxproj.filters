@@ -50,6 +50,9 @@
     <Filter Include="Source Files\\Features\\Safety">
       <UniqueIdentifier>{46FB8906-2B4B-4E0A-A0BA-C3E21CFB2D2D}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\Features\SecurityAudit">
+      <UniqueIdentifier>{9AA2AA22-03A6-433C-8B44-4705E4DE737D}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Source Files\\Features\\Preflight">
       <UniqueIdentifier>{DB4F3674-6C54-4925-9F6C-76E2BF199B65}</UniqueIdentifier>
     </Filter>
@@ -83,8 +86,16 @@
     <Filter Include="Source Files\Features\Keyboard">
       <UniqueIdentifier>{7B0CB69A-3F6D-4519-B7D7-D38809229979}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\Features\Win32k">
+      <UniqueIdentifier>{6B2C3A5D-E1F0-4D66-94C1-A3C28751D9B0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Features\DynData">
+      <UniqueIdentifier>{A7D4A2A0-24F0-4D06-9FC6-8F51F2E43B6C}</UniqueIdentifier>
+    </Filter>
+  <Filter Include="Source Files\Features\DeviceAudit"><UniqueIdentifier>{2C93F5C2-8C79-4F47-8E21-9B1A7F6C3A11}</UniqueIdentifier></Filter>
   <Filter Include="Source Files\Features\Memory"><UniqueIdentifier>{8F66C0B8-48D7-45BE-8D5E-6626DD52CFC4}</UniqueIdentifier></Filter>
-  <Filter Include="Source Files\Features\Mutation"><UniqueIdentifier>{4A154CC7-EEB6-4B74-BA9D-3EB757F43024}</UniqueIdentifier></Filter></ItemGroup>
+  <Filter Include="Source Files\Features\Mutation"><UniqueIdentifier>{4A154CC7-EEB6-4B74-BA9D-3EB757F43024}</UniqueIdentifier></Filter>
+  <Filter Include="Source Files\Features\Storage"><UniqueIdentifier>{59DB6425-6467-4D55-A3D0-27E60FA746F0}</UniqueIdentifier></Filter></ItemGroup>
   <ItemGroup>
     <None Include="ReadMe.txt" />
   </ItemGroup>
@@ -193,6 +204,12 @@
     <ClInclude Include="include\ark\ark_trust.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkSecurityAuditIoctl.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
+    <ClInclude Include="src\features\security_audit\security_audit_internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\ark\ark_safety.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
@@ -226,20 +243,32 @@
     <ClInclude Include="include\ark\ark_keyboard.h">
       <Filter>Header Files\Ark</Filter>
     </ClInclude>
+    <ClInclude Include="include\ark\ark_storage.h">
+      <Filter>Header Files\Ark</Filter>
+    </ClInclude>
     <ClInclude Include="src\features\network\network_internal.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\features\kernel\hook_scan_support.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-  <ClInclude Include="src\features\callback\callback_external_core.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_wfp.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_minifilter.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_safe.h"><Filter>Header Files</Filter></ClInclude>    <ClInclude Include="include\ark\ark_memory_evidence.h"><Filter>Header Files\Ark</Filter></ClInclude>
+  <ClInclude Include="src\features\callback\callback_external_core.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_wfp.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_minifilter.h"><Filter>Header Files</Filter></ClInclude><ClInclude Include="src\features\callback\callback_external_safe.h"><Filter>Header Files</Filter></ClInclude>    <ClInclude Include="include\ark\ark_memory_evidence.h"><Filter>Header Files\Ark</Filter></ClInclude><ClInclude Include="src\features\memory\memory_evidence_enrichment.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="include\ark\ark_mutation.h"><Filter>Header Files\Ark</Filter></ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkKernelObjectIoctl.h"><Filter>Header Files\Ark</Filter></ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkFilterIoctl.h"><Filter>Header Files\Ark</Filter></ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkDeviceAuditIoctl.h"><Filter>Header Files\Ark</Filter></ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkWin32kIoctl.h"><Filter>Header Files\Ark</Filter></ClInclude>
     <ClInclude Include="include\ark\ark_thread_crossview.h"><Filter>Header Files\Ark</Filter></ClInclude>
     <ClInclude Include="src\features\process\process_crossview.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\features\thread\thread_crossview.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\features\kernel\driver_integrity.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\features\kernel\kernel_cpu_integrity.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\features\kernel\kernel_object_audit.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\features\mutation\mutation_transaction.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\features\dyndata\dyndata_v4_internal.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\features\win32k\win32k_support.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\features\win32k\win32k_query.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\features\device_audit\device_audit_internal.h"><Filter>Header Files</Filter></ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\features\callback\callback_runtime.c">
@@ -258,6 +287,9 @@
       <Filter>Source Files\Features\Callback</Filter>
     </ClCompile>
     <ClCompile Include="src\features\callback\minifilter_callback.c">
+      <Filter>Source Files\Features\Callback</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\callback\minifilter_inventory.c">
       <Filter>Source Files\Features\Callback</Filter>
     </ClCompile>
     <ClCompile Include="src\features\callback\minifilter_runtime_link.c">
@@ -300,6 +332,9 @@
       <Filter>Source Files\Features\Kernel</Filter>
     </ClCompile>
     <ClCompile Include="src\features\kernel\driver_unload.c">
+      <Filter>Source Files\Features\Kernel</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\kernel\kernel_object_audit.c">
       <Filter>Source Files\Features\Kernel</Filter>
     </ClCompile>
     <ClCompile Include="src\features\file\file_actions.c">
@@ -377,6 +412,12 @@
     <ClCompile Include="src\features\dyndata\dyndata_validate.c">
       <Filter>Source Files\Features\DynData</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\dyndata\dyndata_v4.c">
+      <Filter>Source Files\Features\DynData</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\dyndata\dyndata_v4_query.c">
+      <Filter>Source Files\Features\DynData</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\capability\capability_query.c">
       <Filter>Source Files\Features</Filter>
     </ClCompile>
@@ -434,6 +475,12 @@
     <ClCompile Include="src\features\trust\trust_ioctl.c">
       <Filter>Source Files\Features\Trust</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\security_audit\security_audit_query.c">
+      <Filter>Source Files\Features\SecurityAudit</Filter>
+    </ClCompile>
+    <ClCompile Include="src\features\security_audit\security_audit_ioctl.c">
+      <Filter>Source Files\Features\SecurityAudit</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\safety\safety_policy.c">
       <Filter>Source Files\Features\Safety</Filter>
     </ClCompile>
@@ -470,6 +517,9 @@
     <ClCompile Include="src\features\network\network_runtime.c">
       <Filter>Source Files\Features\Network</Filter>
     </ClCompile>
+    <ClCompile Include="src\features\network\network_audit.c">
+      <Filter>Source Files\Features\Network</Filter>
+    </ClCompile>
     <ClCompile Include="src\features\redirect\redirect_registry.c">
       <Filter>Source Files\Features\Redirect</Filter>
     </ClCompile>
@@ -494,5 +544,9 @@
     <ClCompile Include="src\features\keyboard\keyboard_ioctl.c">
       <Filter>Source Files\Features\Keyboard</Filter>
     </ClCompile>
-  <ClCompile Include="src\features\callback\callback_external_wfp.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\callback\callback_external_minifilter.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\callback\callback_external_safe.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\memory\memory_physical.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_physical_layout.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_pagetable.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_kernel_exec_scan.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_kernel_exec_scan_helpers.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_ioctl.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_kernel_evidence.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\mutation\mutation_transaction.c"><Filter>Source Files\Features\Mutation</Filter></ClCompile><ClCompile Include="src\features\mutation\mutation_ioctl.c"><Filter>Source Files\Features\Mutation</Filter></ClCompile></ItemGroup>
+  <ClCompile Include="src\features\callback\callback_external_wfp.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\callback\callback_external_minifilter.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\callback\callback_external_safe.c"><Filter>Source Files\Features\Callback</Filter></ClCompile><ClCompile Include="src\features\memory\memory_physical.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_physical_layout.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_pagetable.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_kernel_exec_scan.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_kernel_exec_scan_helpers.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_ioctl.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_kernel_evidence.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\memory\memory_evidence_enrichment.c"><Filter>Source Files\Features\Memory</Filter></ClCompile><ClCompile Include="src\features\storage\storage_audit.c"><Filter>Source Files\Features\Storage</Filter></ClCompile><ClCompile Include="src\features\storage\storage_ioctl.c"><Filter>Source Files\Features\Storage</Filter></ClCompile><ClCompile Include="src\features\win32k\win32k_support.c"><Filter>Source Files\Features\Win32k</Filter></ClCompile><ClCompile Include="src\features\win32k\win32k_query.c"><Filter>Source Files\Features\Win32k</Filter></ClCompile><ClCompile Include="src\features\win32k\win32k_ioctl.c"><Filter>Source Files\Features\Win32k</Filter></ClCompile><ClCompile Include="src\features\mutation\mutation_transaction.c"><Filter>Source Files\Features\Mutation</Filter></ClCompile><ClCompile Include="src\features\mutation\mutation_ioctl.c"><Filter>Source Files\Features\Mutation</Filter></ClCompile>    <ClCompile Include="src\features\device_audit\device_audit_ioctl.c"><Filter>Source Files\Features\DeviceAudit</Filter></ClCompile>
+    <ClCompile Include="src\features\device_audit\device_audit_query.c"><Filter>Source Files\Features\DeviceAudit</Filter></ClCompile>
+    <ClCompile Include="src\features\device_audit\device_audit_support.c"><Filter>Source Files\Features\DeviceAudit</Filter></ClCompile>
+    <ClCompile Include="src\features\device_audit\device_audit_targets.c"><Filter>Source Files\Features\DeviceAudit</Filter></ClCompile>
+    <ClInclude Include="src\features\device_audit\device_audit_internal.h"><Filter>Header Files</Filter></ClInclude></ItemGroup>
 </Project>

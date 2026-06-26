@@ -41,25 +41,6 @@ typedef struct _HANDLE_TABLE_ENTRY
     } High;
 } HANDLE_TABLE_ENTRY, *PHANDLE_TABLE_ENTRY;
 
-typedef struct _OBJECT_HEADER
-{
-    SSIZE_T PointerCount;
-    PVOID HandleCountOrNextToFree;
-    EX_PUSH_LOCK Lock;
-    UCHAR TypeIndex;
-    UCHAR TraceFlags;
-    UCHAR InfoMask;
-    UCHAR Flags;
-#ifdef _WIN64
-    ULONG Reserved;
-#endif
-    PVOID ObjectCreateInfoOrQuotaBlockCharged;
-    PVOID SecurityDescriptor;
-    QUAD Body;
-} OBJECT_HEADER, *POBJECT_HEADER;
-
-C_ASSERT(FIELD_OFFSET(OBJECT_HEADER, Body) == sizeof(OBJECT_HEADER) - sizeof(QUAD));
-
 typedef
 _Function_class_(EX_ENUM_HANDLE_CALLBACK)
 _Must_inspect_result_
@@ -204,7 +185,7 @@ Return Value:
     Entry->otIndexOffset = KswordARKHandleNormalizeOffset(DynState->Kernel.OtIndex);
 }
 
-static POBJECT_HEADER
+static PVOID
 KswordARKHandleDecodeObjectHeader(
     _In_ const KSW_DYN_STATE* DynState,
     _In_ PHANDLE_TABLE_ENTRY HandleTableEntry
@@ -238,16 +219,26 @@ Return Value:
         return NULL;
     }
 
-    objectValue = (LONG_PTR)HandleTableEntry->Low.Object;
-    objectValue >>= DynState->Kernel.ObDecodeShift;
-    objectValue <<= 4;
-    return (POBJECT_HEADER)objectValue;
+    __try {
+        objectValue = (LONG_PTR)HandleTableEntry->Low.Object;
+        objectValue >>= DynState->Kernel.ObDecodeShift;
+        objectValue <<= 4;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return NULL;
+    }
+    return (PVOID)objectValue;
 #else
     UNREFERENCED_PARAMETER(DynState);
     if (HandleTableEntry == NULL) {
         return NULL;
     }
-    return (POBJECT_HEADER)((ULONG_PTR)HandleTableEntry->Low.Object & ~0x7UL);
+    __try {
+        return (PVOID)((ULONG_PTR)HandleTableEntry->Low.Object & ~0x7UL);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return NULL;
+    }
 #endif
 }
 
@@ -364,7 +355,7 @@ Return Value:
 
 --*/
 {
-    POBJECT_HEADER objectHeader = NULL;
+    PVOID objectHeader = NULL;
     PVOID objectBody = NULL;
     POBJECT_TYPE objectType = NULL;
 
@@ -374,17 +365,30 @@ Return Value:
 
     Entry->processId = Context->ProcessId;
     Entry->handleValue = HandleToULong(Handle);
-    Entry->grantedAccess = ((ULONG)HandleTableEntry->High.GrantedAccess) & KSWORD_ARK_OBJECT_GRANTED_ACCESS_MASK;
-    Entry->attributes = KswordARKHandleDecodeAttributes(&Context->DynState, HandleTableEntry);
     Entry->decodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_OK;
-    Entry->fieldFlags |= KSWORD_ARK_HANDLE_FIELD_GRANTED_ACCESS_PRESENT;
-    Entry->fieldFlags |= KSWORD_ARK_HANDLE_FIELD_ATTRIBUTES_PRESENT;
+    Entry->grantedAccessDecodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_UNAVAILABLE;
+    Entry->grantedAccessReadStatus = STATUS_UNSUCCESSFUL;
     KswordARKHandlePrepareEntryDynData(Entry, &Context->DynState);
+
+    __try {
+        Entry->grantedAccess = ((ULONG)HandleTableEntry->High.GrantedAccess) & KSWORD_ARK_OBJECT_GRANTED_ACCESS_MASK;
+        Entry->attributes = KswordARKHandleDecodeAttributes(&Context->DynState, HandleTableEntry);
+        Entry->grantedAccessDecodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_OK;
+        Entry->grantedAccessReadStatus = STATUS_SUCCESS;
+        Entry->fieldFlags |= KSWORD_ARK_HANDLE_FIELD_GRANTED_ACCESS_PRESENT;
+        Entry->fieldFlags |= KSWORD_ARK_HANDLE_FIELD_ATTRIBUTES_PRESENT;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        Context->LastStatus = GetExceptionCode();
+        Entry->decodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_PARTIAL;
+        Entry->grantedAccessDecodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_ACCESS_DECODE_FAILED;
+        Entry->grantedAccessReadStatus = Context->LastStatus;
+    }
 
     if ((Context->RequestFlags & KSWORD_ARK_ENUM_HANDLE_FLAG_INCLUDE_OBJECT) != 0UL) {
         objectHeader = KswordARKHandleDecodeObjectHeader(&Context->DynState, HandleTableEntry);
         if (objectHeader != NULL) {
-            objectBody = &objectHeader->Body;
+            objectBody = KswordARKHandleGetObjectBodyFromHeader(objectHeader);
             Entry->objectAddress = (ULONG64)(ULONG_PTR)objectBody;
             Entry->fieldFlags |= KSWORD_ARK_HANDLE_FIELD_OBJECT_PRESENT;
         }
@@ -401,8 +405,7 @@ Return Value:
 
         __try {
             objectType = ObGetObjectType(objectBody);
-            if (objectType != NULL && KswordARKHandleIsOffsetPresent(Context->DynState.Kernel.OtIndex)) {
-                Entry->objectTypeIndex = (ULONG)(*(PUCHAR)((PUCHAR)objectType + Context->DynState.Kernel.OtIndex));
+            if (NT_SUCCESS(KswordARKHandleReadObjectTypeIndex(objectType, &Context->DynState, &Entry->objectTypeIndex))) {
                 Entry->fieldFlags |= KSWORD_ARK_HANDLE_FIELD_TYPE_INDEX_PRESENT;
             }
             else if (Entry->decodeStatus == KSWORD_ARK_HANDLE_DECODE_STATUS_OK) {
@@ -415,6 +418,27 @@ Return Value:
                 Entry->decodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_TYPE_DECODE_FAILED;
             }
         }
+    }
+
+    if (objectHeader != NULL || objectBody != NULL) {
+        KswordARKHandleFillEntryObjectHeaderAudit(
+            Entry,
+            objectHeader,
+            objectBody,
+            objectType,
+            &Context->DynState);
+        if (Entry->objectHeaderDecodeStatus != KSWORD_ARK_HANDLE_DECODE_STATUS_OK &&
+            Entry->decodeStatus == KSWORD_ARK_HANDLE_DECODE_STATUS_OK) {
+            Entry->decodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_PARTIAL;
+        }
+    }
+
+    if (Entry->objectTypeIndexSource == KSWORD_ARK_OBJECT_TYPE_SOURCE_NONE) {
+        Entry->objectTypeIndexSource = KswordARKHandleMergeTypeIndexSource(
+            ((Entry->fieldFlags & KSWORD_ARK_HANDLE_FIELD_TYPE_INDEX_PRESENT) != 0UL) ? TRUE : FALSE,
+            Entry->objectTypeIndex,
+            ((Entry->fieldFlags & KSWORD_ARK_HANDLE_FIELD_HEADER_TYPE_INDEX_PRESENT) != 0UL) ? TRUE : FALSE,
+            Entry->objectHeaderTypeIndex);
     }
 
     if (Entry->decodeStatus == KSWORD_ARK_HANDLE_DECODE_STATUS_OK &&

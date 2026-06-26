@@ -330,6 +330,18 @@ Return Value:
     Offsets->pspCidTableRva = KswordARKCrossViewGlobalRvaPresent(DynState->KernelGlobals.PspCidTable)
         ? DynState->KernelGlobals.PspCidTable
         : KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
+    Offsets->epUniqueProcessIdSource = DynState->KernelSources.EpUniqueProcessId;
+    Offsets->epActiveProcessLinksSource = DynState->KernelSources.EpActiveProcessLinks;
+    Offsets->epThreadListHeadSource = DynState->KernelSources.EpThreadListHead;
+    Offsets->epImageFileNameSource = DynState->KernelSources.EpImageFileName;
+    Offsets->etCidSource = DynState->KernelSources.EtCid;
+    Offsets->etThreadListEntrySource = DynState->KernelSources.EtThreadListEntry;
+    Offsets->etStartAddressSource = DynState->KernelSources.EtStartAddress;
+    Offsets->etWin32StartAddressSource = DynState->KernelSources.EtWin32StartAddress;
+    Offsets->ktProcessSource = DynState->KernelSources.KtProcess;
+    Offsets->htTableCodeSource = DynState->KernelSources.HtTableCode;
+    Offsets->hteLowValueSource = DynState->KernelSources.HteLowValue;
+    Offsets->pspCidTableSource = DynState->KernelGlobalSources.PspCidTable;
 }
 
 NTSTATUS
@@ -899,9 +911,159 @@ Return Value:
     row->dynDataCapabilityMask = Context->DynState.CapabilityMask;
     row->fieldOffsets = Context->FieldOffsets;
     row->lastStatus = STATUS_SUCCESS;
+    row->publicWalkStatus = STATUS_NOT_FOUND;
+    row->activeListStatus = STATUS_NOT_FOUND;
+    row->cidTableStatus = STATUS_NOT_FOUND;
+    row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_OK;
     row->confidence = 0UL;
     Context->RowCount += 1UL;
     return row;
+}
+
+static VOID
+KswordARKProcessCrossViewApplyDetailStatus(
+    _Inout_ KSWORD_ARK_PROCESS_CROSSVIEW_ROW* Row,
+    _In_ NTSTATUS SourceStatus,
+    _In_ BOOLEAN UnsupportedField
+    )
+/*++
+
+Routine Description:
+
+    Update row-level detail status and denoise flags from one guarded read,
+    source walk, or object-reference result.
+
+Arguments:
+
+    Row - Mutable process evidence row.
+    SourceStatus - NTSTATUS reported by the source path.
+    UnsupportedField - TRUE when the status means a required PDB field was not
+        available and the collector intentionally avoided guessing an offset.
+
+Return Value:
+
+    None. The row is annotated in place for R3 display.
+
+--*/
+{
+    if (Row == NULL) {
+        return;
+    }
+
+    if (UnsupportedField) {
+        Row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_UNSUPPORTED;
+        Row->denoiseFlags |= KSWORD_ARK_CROSSVIEW_DENOISE_UNSUPPORTED_PDB_FIELD;
+        return;
+    }
+
+    if (!NT_SUCCESS(SourceStatus)) {
+        Row->denoiseFlags |= KSWORD_ARK_CROSSVIEW_DENOISE_PARTIAL_EVIDENCE;
+        if (SourceStatus == STATUS_PROCEDURE_NOT_FOUND) {
+            Row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_UNSUPPORTED;
+            Row->denoiseFlags |= KSWORD_ARK_CROSSVIEW_DENOISE_UNSUPPORTED_PDB_FIELD;
+        }
+        else {
+            Row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_READ_FAILED;
+            Row->denoiseFlags |= KSWORD_ARK_CROSSVIEW_DENOISE_READ_FAILURE;
+        }
+    }
+}
+
+static VOID
+KswordARKProcessCrossViewRecordSourceEvidence(
+    _Inout_ KSWORD_ARK_PROCESS_CROSSVIEW_ROW* Row,
+    _In_ ULONG SourceMask,
+    _In_ ULONG SourceProcessId,
+    _In_ NTSTATUS SourceStatus
+    )
+/*++
+
+Routine Description:
+
+    Store per-source PID and status values without changing the source mask or
+    performing any target mutation.
+
+Arguments:
+
+    Row - Mutable process evidence row.
+    SourceMask - Single KSWORD_ARK_CROSSVIEW_SOURCE_* bit being merged.
+    SourceProcessId - PID observed through that source.
+    SourceStatus - Status returned by that source path.
+
+Return Value:
+
+    None. The protocol row receives source-specific evidence fields.
+
+--*/
+{
+    if (Row == NULL) {
+        return;
+    }
+
+    if ((SourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_PUBLIC_WALK) != 0UL) {
+        Row->publicProcessId = SourceProcessId;
+        Row->publicWalkStatus = SourceStatus;
+    }
+    if ((SourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_ACTIVE_LIST) != 0UL) {
+        Row->activeListProcessId = SourceProcessId;
+        Row->activeListStatus = SourceStatus;
+    }
+    if ((SourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_CID_TABLE) != 0UL) {
+        Row->cidTableProcessId = SourceProcessId;
+        Row->cidTableStatus = SourceStatus;
+    }
+
+    KswordARKProcessCrossViewApplyDetailStatus(Row, SourceStatus, FALSE);
+}
+
+static NTSTATUS
+KswordARKProcessCrossViewReadPrivatePid(
+    _In_ const KSW_PROCESS_CROSSVIEW_CONTEXT* Context,
+    _In_ PEPROCESS ProcessObject,
+    _Out_ ULONG* ProcessIdOut
+    )
+/*++
+
+Routine Description:
+
+    Read EPROCESS.UniqueProcessId only when DynData exposes the PDB-backed
+    offset, so PID mismatch detection remains capability-gated.
+
+Arguments:
+
+    Context - Query context containing the DynData snapshot.
+    ProcessObject - Referenced EPROCESS object to inspect.
+    ProcessIdOut - Receives the private UniqueProcessId value as ULONG.
+
+Return Value:
+
+    STATUS_SUCCESS when the field was read; STATUS_PROCEDURE_NOT_FOUND when the
+    offset is unavailable; otherwise the guarded memory-read status.
+
+--*/
+{
+    PVOID processIdPointer = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (Context == NULL || ProcessObject == NULL || ProcessIdOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *ProcessIdOut = 0UL;
+
+    if (!KswordARKCrossViewOffsetPresent(Context->DynState.Kernel.EpUniqueProcessId)) {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    status = KswordARKCrossViewReadPointerField(
+        ProcessObject,
+        Context->DynState.Kernel.EpUniqueProcessId,
+        &processIdPointer);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    *ProcessIdOut = HandleToULong(processIdPointer);
+    return STATUS_SUCCESS;
 }
 
 static VOID
@@ -910,6 +1072,7 @@ KswordARKProcessCrossViewMergeProcessObject(
     _In_ PEPROCESS ProcessObject,
     _In_ ULONG SourceMask,
     _In_ NTSTATUS SourceStatus,
+    _In_ ULONG EvidenceProcessId,
     _In_opt_z_ PCSTR DetailText
     )
 /*++
@@ -924,6 +1087,8 @@ Arguments:
     ProcessObject - Referenced process object owned by the caller.
     SourceMask - KSWORD_ARK_CROSSVIEW_SOURCE_* bit for the evidence source.
     SourceStatus - Last read/reference status to record.
+    EvidenceProcessId - PID observed by the source itself, or zero when the
+        source has no independent PID key.
     DetailText - Optional detail text when the row has no detail yet.
 
 Return Value:
@@ -933,14 +1098,19 @@ Return Value:
 --*/
 {
     ULONG processId = 0UL;
+    ULONG privateProcessId = 0UL;
+    ULONG sourceProcessId = 0UL;
     KSWORD_ARK_PROCESS_CROSSVIEW_ROW* row = NULL;
+    NTSTATUS privatePidStatus = STATUS_SUCCESS;
 
     if (Context == NULL || ProcessObject == NULL) {
         return;
     }
 
     processId = HandleToULong(PsGetProcessId(ProcessObject));
-    if (!KswordARKProcessCrossViewPidInRequest(Context, processId)) {
+    sourceProcessId = (EvidenceProcessId != 0UL) ? EvidenceProcessId : processId;
+    if (!KswordARKProcessCrossViewPidInRequest(Context, processId) &&
+        !KswordARKProcessCrossViewPidInRequest(Context, sourceProcessId)) {
         return;
     }
 
@@ -957,6 +1127,36 @@ Return Value:
     row->parentProcessId = HandleToULong(PsGetProcessInheritedFromUniqueProcessId(ProcessObject));
     row->lastStatus = SourceStatus;
     KswordARKCrossViewCopyImageName(row->imageName, PsGetProcessImageFileName(ProcessObject));
+    privatePidStatus = KswordARKProcessCrossViewReadPrivatePid(Context, ProcessObject, &privateProcessId);
+    if (NT_SUCCESS(privatePidStatus)) {
+        if ((SourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_ACTIVE_LIST) != 0UL &&
+            EvidenceProcessId == 0UL) {
+            sourceProcessId = privateProcessId;
+        }
+        if (privateProcessId != processId) {
+            row->anomalyFlags |= KSWORD_ARK_CROSSVIEW_ANOMALY_PID_FIELD_MISMATCH;
+            row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_DATA_MISMATCH;
+            row->lastStatus = STATUS_DATA_ERROR;
+        }
+    }
+    else if (privatePidStatus == STATUS_PROCEDURE_NOT_FOUND) {
+        Context->CapabilityMissing = TRUE;
+        Context->MissingCapabilityMask |= KSW_CAP_PROCESS_LIST_FIELDS;
+        Context->LastStatus = privatePidStatus;
+        row->lastStatus = privatePidStatus;
+        KswordARKProcessCrossViewApplyDetailStatus(row, privatePidStatus, TRUE);
+    }
+    else {
+        Context->LastStatus = privatePidStatus;
+        row->lastStatus = privatePidStatus;
+        KswordARKProcessCrossViewApplyDetailStatus(row, privatePidStatus, FALSE);
+    }
+    if (EvidenceProcessId != 0UL && EvidenceProcessId != processId) {
+        row->anomalyFlags |= KSWORD_ARK_CROSSVIEW_ANOMALY_PID_FIELD_MISMATCH;
+        row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_DATA_MISMATCH;
+        row->lastStatus = STATUS_DATA_ERROR;
+    }
+    KswordARKProcessCrossViewRecordSourceEvidence(row, SourceMask, sourceProcessId, SourceStatus);
     if (DetailText != NULL && row->detail[0] == '\0') {
         KswordARKCrossViewFormatDetail(row->detail, sizeof(row->detail), "%s", DetailText);
     }
@@ -1009,7 +1209,13 @@ Return Value:
 
     row->sourceMask |= SourceMask;
     row->anomalyFlags |= KSWORD_ARK_CROSSVIEW_ANOMALY_DANGLING_OBJECT;
+    row->denoiseFlags |=
+        KSWORD_ARK_CROSSVIEW_DENOISE_PARTIAL_EVIDENCE |
+        KSWORD_ARK_CROSSVIEW_DENOISE_REFERENCE_FAILURE |
+        KSWORD_ARK_CROSSVIEW_DENOISE_POSSIBLE_TERMINATING;
+    row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_PARTIAL;
     row->lastStatus = SourceStatus;
+    KswordARKProcessCrossViewRecordSourceEvidence(row, SourceMask, ProcessId, SourceStatus);
     if (row->detail[0] == '\0') {
         KswordARKCrossViewFormatDetail(row->detail, sizeof(row->detail), "%s", DetailText);
     }
@@ -1400,6 +1606,7 @@ Return Value:
             if (Offsets != NULL) {
                 Offsets->pspCidTableRva = rva;
                 Offsets->pspCidTableAddress = (ULONG64)(ULONG_PTR)pspCidTableAddress;
+                Offsets->pspCidTableSource = DynState->KernelGlobalSources.PspCidTable;
             }
             return STATUS_SUCCESS;
         }
@@ -1410,6 +1617,7 @@ Return Value:
         *PspCidTableAddressOut = pspCidTableAddress;
         if (Offsets != NULL) {
             Offsets->pspCidTableAddress = (ULONG64)(ULONG_PTR)pspCidTableAddress;
+            Offsets->pspCidTableSource = KSWORD_ARK_CROSSVIEW_FIELD_SOURCE_RUNTIME_PATTERN;
         }
         return STATUS_SUCCESS;
     }
@@ -1929,6 +2137,7 @@ Return Value:
             processCursor,
             KSWORD_ARK_CROSSVIEW_SOURCE_PUBLIC_WALK,
             STATUS_SUCCESS,
+            HandleToULong(PsGetProcessId(processCursor)),
             "Observed through PsGetNextProcess.");
         ObDereferenceObject(processCursor);
         processCursor = nextProcess;
@@ -2012,6 +2221,7 @@ Return Value:
                 PsInitialSystemProcess,
                 KSWORD_ARK_CROSSVIEW_SOURCE_ACTIVE_LIST,
                 STATUS_SUCCESS,
+                0UL,
                 "Observed through ActiveProcessLinks head process.");
             ObDereferenceObject(PsInitialSystemProcess);
         }
@@ -2119,6 +2329,7 @@ Return Value:
                 processObject,
                 KSWORD_ARK_CROSSVIEW_SOURCE_ACTIVE_LIST,
                 linkMismatch ? STATUS_DATA_ERROR : STATUS_SUCCESS,
+                0UL,
                 linkMismatch ? "ActiveProcessLinks blink/flink mismatch observed." : "Observed through ActiveProcessLinks.");
             if (linkMismatch) {
                 KSWORD_ARK_PROCESS_CROSSVIEW_ROW* row = KswordARKProcessCrossViewFindRow(
@@ -2187,6 +2398,7 @@ Return Value:
             (PEPROCESS)Entry->Object,
             KSWORD_ARK_CROSSVIEW_SOURCE_CID_TABLE,
             Entry->ReferenceStatus,
+            Entry->CidValue,
             "Observed through PspCidTable.");
     }
     else if (Entry->TypeMatched) {
@@ -2339,6 +2551,9 @@ Return Value:
         if ((row->anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_DANGLING_OBJECT) != 0UL) {
             row->confidence = 30UL;
         }
+        else if ((row->anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_PID_FIELD_MISMATCH) != 0UL) {
+            row->confidence = 45UL;
+        }
         else if (hasPublic && hasActive && hasCid) {
             row->confidence = 98UL;
         }
@@ -2347,6 +2562,13 @@ Return Value:
         }
         else {
             row->confidence = 60UL;
+        }
+
+        if (Context->CapabilityMissing || Context->Truncated) {
+            row->denoiseFlags |= KSWORD_ARK_CROSSVIEW_DENOISE_PARTIAL_EVIDENCE;
+            if (row->detailStatus == KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_OK) {
+                row->detailStatus = KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_PARTIAL;
+            }
         }
 
         if (row->detail[0] == '\0') {

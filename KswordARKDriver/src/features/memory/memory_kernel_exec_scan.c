@@ -55,10 +55,9 @@ Return Value:
 {
     KSWORD_ARK_PAGE_TABLE_ENTRY_INFO pageInfo;
     KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY candidate;
+    KSW_KERNEL_EXEC_SECTION_OWNER sectionOwner;
     ULONG pageSize = PAGE_SIZE;
     ULONG64 pageBase = PageAddress;
-    BOOLEAN isTextLikePage = FALSE;
-    BOOLEAN isWritablePage = FALSE;
     NTSTATUS status = STATUS_SUCCESS;
 
     if (State == NULL || Request == NULL || ModuleEntry == NULL || NextAddressOut == NULL) {
@@ -70,6 +69,14 @@ Return Value:
     else {
         *NextAddressOut = PageAddress + (ULONG64)PAGE_SIZE;
     }
+    if (State->BytesScanned >= State->MaxBytes ||
+        (ULONG64)PAGE_SIZE > (State->MaxBytes - State->BytesScanned)) {
+        State->BudgetExhausted = TRUE;
+        State->Truncated = TRUE;
+        State->BytesScanned = State->MaxBytes;
+        return STATUS_SUCCESS;
+    }
+    State->BytesScanned += (ULONG64)PAGE_SIZE;
 
     status = KswordARKKernelExecQueryPage(PageAddress, &pageInfo);
     if (!NT_SUCCESS(status)) {
@@ -82,6 +89,16 @@ Return Value:
         if (pageBase <= PageAddress &&
             (ULONG64)pageSize <= (MAXULONGLONG - pageBase)) {
             *NextAddressOut = pageBase + (ULONG64)pageSize;
+        }
+        if (pageSize > PAGE_SIZE) {
+            ULONG64 extraBytes = (ULONG64)pageSize - (ULONG64)PAGE_SIZE;
+            if (extraBytes > (State->MaxBytes - State->BytesScanned)) {
+                State->BudgetExhausted = TRUE;
+                State->Truncated = TRUE;
+                State->BytesScanned = State->MaxBytes;
+                return STATUS_SUCCESS;
+            }
+            State->BytesScanned += extraBytes;
         }
     }
 
@@ -99,15 +116,15 @@ Return Value:
         return STATUS_SUCCESS;
     }
 
+    RtlZeroMemory(&sectionOwner, sizeof(sectionOwner));
     KswordARKKernelExecClassifyPageBySections(
         SectionHeaders,
         SectionCount,
         (ULONG64)(ULONG_PTR)ModuleEntry->ImageBase,
         ModuleEntry->ImageSize,
         pageBase,
-        pageInfo.pageSize,
-        &isTextLikePage,
-        &isWritablePage);
+        pageSize,
+        &sectionOwner);
 
     KswordARKKernelExecFillCandidate(
         pageBase,
@@ -115,8 +132,8 @@ Return Value:
         ModuleEntry,
         ModulePath,
         ModulePathBytes,
-        isTextLikePage,
-        isWritablePage,
+        &sectionOwner,
+        Request->hashBytes,
         &candidate);
 
     if (!KswordARKKernelExecShouldReturnCandidate(
@@ -402,9 +419,18 @@ Return Value:
     if ((Request->flags & ~KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_ALL) != 0UL) {
         return FALSE;
     }
+    if (Request->reserved0 != 0UL) {
+        return FALSE;
+    }
     if (Request->startAddress != 0ULL &&
         Request->endAddress != 0ULL &&
         Request->endAddress <= Request->startAddress) {
+        return FALSE;
+    }
+    if (Request->maxBytes > KSWORD_ARK_KERNEL_EXEC_SCAN_HARD_MAX_BYTES) {
+        return FALSE;
+    }
+    if (Request->hashBytes > KSWORD_ARK_KERNEL_EXEC_FIRST_BYTES_HARD_MAX) {
         return FALSE;
     }
     return TRUE;
@@ -441,6 +467,7 @@ Return Value:
 {
     KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE* response = NULL;
     KSW_HOOK_SYSTEM_MODULE_INFORMATION* moduleInfo = NULL;
+    KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST effectiveRequest;
     KSW_KERNEL_EXEC_SCAN_STATE state;
     ULONG moduleInfoBytes = 0UL;
     ULONG moduleIndex = 0UL;
@@ -458,18 +485,35 @@ Return Value:
     if (!KswordARKKernelExecValidateRequest(Request)) {
         return STATUS_INVALID_PARAMETER;
     }
+    RtlZeroMemory(&effectiveRequest, sizeof(effectiveRequest));
+    RtlCopyMemory(&effectiveRequest, Request, sizeof(effectiveRequest));
+    if (effectiveRequest.flags == 0UL) {
+        effectiveRequest.flags = KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_ALL;
+    }
+    if (effectiveRequest.maxBytes == 0ULL) {
+        effectiveRequest.maxBytes = KSWORD_ARK_KERNEL_EXEC_SCAN_DEFAULT_MAX_BYTES;
+    }
+    if (effectiveRequest.hashBytes == 0UL) {
+        effectiveRequest.hashBytes = KSWORD_ARK_KERNEL_EXEC_FIRST_BYTES_DEFAULT;
+    }
 
     RtlZeroMemory(OutputBuffer, OutputBufferLength);
     response = (KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE*)OutputBuffer;
     response->version = KSWORD_ARK_MEMORY_PROTOCOL_VERSION;
     response->status = KSWORD_ARK_KERNEL_EXEC_SCAN_STATUS_UNAVAILABLE;
+    response->sourceFlags = effectiveRequest.flags;
     response->entrySize = sizeof(KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY);
+    response->maxEntries = effectiveRequest.maxEntries;
+    response->maxBytes = effectiveRequest.maxBytes;
     response->lastStatus = STATUS_SUCCESS;
 
     entryCapacity = (ULONG)((OutputBufferLength - KSWORD_ARK_KERNEL_EXEC_SCAN_RESPONSE_HEADER_SIZE) /
         sizeof(KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY));
-    if (Request->maxEntries != 0UL && entryCapacity > Request->maxEntries) {
-        entryCapacity = Request->maxEntries;
+    if (effectiveRequest.maxEntries != 0UL && entryCapacity > effectiveRequest.maxEntries) {
+        entryCapacity = effectiveRequest.maxEntries;
+    }
+    if (response->maxEntries == 0UL) {
+        response->maxEntries = entryCapacity;
     }
 
     if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
@@ -492,22 +536,34 @@ Return Value:
     RtlZeroMemory(&state, sizeof(state));
     state.Response = response;
     state.EntryCapacity = entryCapacity;
+    state.MaxBytes = effectiveRequest.maxBytes;
 
     for (moduleIndex = 0UL; moduleIndex < moduleInfo->NumberOfModules; ++moduleIndex) {
         NTSTATUS moduleStatus = STATUS_SUCCESS;
 
         moduleStatus = KswordARKKernelExecScanModule(
             &state,
-            Request,
+            &effectiveRequest,
             &moduleInfo->Modules[moduleIndex]);
         if (!NT_SUCCESS(moduleStatus) && NT_SUCCESS(firstPartialStatus)) {
             firstPartialStatus = moduleStatus;
         }
+        if (state.BudgetExhausted) {
+            break;
+        }
     }
 
-    if (state.Truncated || !NT_SUCCESS(firstPartialStatus)) {
+    response->bytesScanned = state.BytesScanned;
+    if (state.Truncated) {
+        response->responseFlags |= KSWORD_ARK_KERNEL_EXEC_SCAN_RESPONSE_FLAG_TRUNCATED;
+    }
+    if (state.BudgetExhausted) {
+        response->responseFlags |= KSWORD_ARK_KERNEL_EXEC_SCAN_RESPONSE_FLAG_BUDGET_EXHAUSTED;
+    }
+
+    if (state.Truncated || state.BudgetExhausted || !NT_SUCCESS(firstPartialStatus)) {
         response->status = KSWORD_ARK_KERNEL_EXEC_SCAN_STATUS_PARTIAL_CONSERVATIVE;
-        response->lastStatus = state.Truncated ?
+        response->lastStatus = (state.Truncated || state.BudgetExhausted) ?
             STATUS_BUFFER_TOO_SMALL :
             firstPartialStatus;
     }

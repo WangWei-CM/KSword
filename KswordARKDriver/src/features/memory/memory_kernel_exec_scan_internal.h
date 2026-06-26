@@ -26,7 +26,28 @@ typedef struct _KSW_KERNEL_EXEC_SCAN_STATE
     // HaveLastAggregate/LastAggregate：保存上一条聚合行，便于连续页合并。
     BOOLEAN HaveLastAggregate;
     KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY LastAggregate;
+    // BytesScanned：累计页扫描预算；达到 MaxBytes 时只返回 partial，不继续探测。
+    ULONG64 BytesScanned;
+    // MaxBytes：本次请求可扫描的最大字节数，0 在 backend 归一化为默认值。
+    ULONG64 MaxBytes;
+    // BudgetExhausted：TRUE 表示扫描预算耗尽，响应必须标记 partial。
+    BOOLEAN BudgetExhausted;
 } KSW_KERNEL_EXEC_SCAN_STATE;
+
+typedef struct _KSW_KERNEL_EXEC_SECTION_OWNER
+{
+    // Found：TRUE 表示当前页至少命中一个有效 PE section。
+    BOOLEAN Found;
+    // IsTextLike：TRUE 表示所有重叠 section 都是 text/code-like。
+    BOOLEAN IsTextLike;
+    // IsWritable：TRUE 表示任一重叠 section 声明可写。
+    BOOLEAN IsWritable;
+    // SectionRva/SectionSize：第一条重叠 section 的 RVA 和大小，仅用于展示归因。
+    ULONG SectionRva;
+    ULONG SectionSize;
+    // SectionName：第一条重叠 section 的 8 字节 PE section 名称。
+    UCHAR SectionName[KSWORD_ARK_KERNEL_EXEC_SECTION_NAME_BYTES];
+} KSW_KERNEL_EXEC_SECTION_OWNER;
 
 ULONG64
 KswordARKKernelExecAlignDown(
@@ -72,6 +93,19 @@ KswordARKKernelExecShouldReturnCandidate(
     _In_ ULONG RiskFlags
     );
 
+ULONG
+KswordARKKernelExecProtectionFromPage(
+    _In_ const KSWORD_ARK_PAGE_TABLE_ENTRY_INFO* PageInfo
+    );
+
+BOOLEAN
+KswordARKKernelExecReadFirstBytesHash(
+    _In_ ULONG64 VirtualAddress,
+    _In_ ULONG BytesToHash,
+    _Out_ ULONG64* HashOut,
+    _Out_ ULONG* BytesHashedOut
+    );
+
 VOID
 KswordARKKernelExecFillCandidate(
     _In_ ULONG64 PageAddress,
@@ -79,8 +113,8 @@ KswordARKKernelExecFillCandidate(
     _In_ const KSW_HOOK_SYSTEM_MODULE_ENTRY* ModuleEntry,
     _In_reads_bytes_(ModulePathBytes) const UCHAR* ModulePath,
     _In_ ULONG ModulePathBytes,
-    _In_ BOOLEAN IsTextLikeSection,
-    _In_ BOOLEAN IsWritableSection,
+    _In_ const KSW_KERNEL_EXEC_SECTION_OWNER* SectionOwner,
+    _In_ ULONG HashBytes,
     _Out_ KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY* Candidate
     );
 
@@ -92,6 +126,5 @@ KswordARKKernelExecClassifyPageBySections(
     _In_ ULONG ModuleSize,
     _In_ ULONG64 PageAddress,
     _In_ ULONG PageSize,
-    _Out_ BOOLEAN* IsTextLikeOut,
-    _Out_ BOOLEAN* IsWritableOut
+    _Out_ KSW_KERNEL_EXEC_SECTION_OWNER* SectionOwnerOut
     );

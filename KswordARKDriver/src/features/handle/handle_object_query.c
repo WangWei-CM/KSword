@@ -17,8 +17,6 @@ Environment:
 #include "handle_support.h"
 
 #define KSWORD_ARK_HANDLE_POOL_TAG 'hOsK'
-#define KSWORD_ARK_OBJECT_PROXY_ALLOWED_ACCESS \
-    (READ_CONTROL | SYNCHRONIZE | 0x00000001UL | 0x00000002UL | 0x00000004UL | 0x00000008UL | 0x00000010UL)
 #define KSWORD_ARK_OBJECT_PROXY_ALLOWED_TYPE_MASK 0x0000007FUL
 
 #ifndef STATUS_INFO_LENGTH_MISMATCH
@@ -31,10 +29,6 @@ Environment:
 
 #ifndef STATUS_BUFFER_TOO_SMALL
 #define STATUS_BUFFER_TOO_SMALL ((NTSTATUS)0xC0000023L)
-#endif
-
-#ifndef OBJ_KERNEL_HANDLE
-#define OBJ_KERNEL_HANDLE 0x00000200L
 #endif
 
 typedef PVOID
@@ -79,18 +73,6 @@ ObQueryNameString(
     _Out_writes_bytes_opt_(Length) POBJECT_NAME_INFORMATION ObjectNameInfo,
     _In_ ULONG Length,
     _Out_ PULONG ReturnLength
-    );
-
-NTKERNELAPI
-NTSTATUS
-ObOpenObjectByPointer(
-    _In_ PVOID Object,
-    _In_ ULONG HandleAttributes,
-    _In_opt_ PACCESS_STATE PassedAccessState,
-    _In_opt_ ACCESS_MASK DesiredAccess,
-    _In_opt_ POBJECT_TYPE ObjectType,
-    _In_ KPROCESSOR_MODE AccessMode,
-    _Out_ PHANDLE Handle
     );
 
 static PVOID
@@ -337,7 +319,7 @@ Return Value:
 
 --*/
 {
-    if (ObjectTypeIndex == 0UL || ObjectTypeIndex >= 64UL) {
+    if (ObjectTypeIndex == 0UL || ObjectTypeIndex >= 32UL) {
         return FALSE;
     }
 
@@ -355,9 +337,9 @@ KswordARKHandleMaybeOpenProxyHandle(
 
 Routine Description:
 
-    Optionally open a downgraded kernel proxy handle for whitelisted object
-    types. 中文说明：第一版不把任意内核对象转成高权用户句柄；只有策略允许时
-    才尝试低权限打开，失败时在响应中保留明确原因。
+    Preserve the legacy proxy-handle policy fields without opening a proxy
+    handle. 中文说明：本审计路径只返回策略拒绝/降级原因，不创建、不关闭、
+    不复制任何目标对象句柄。
 
 Arguments:
 
@@ -368,14 +350,10 @@ Arguments:
 
 Return Value:
 
-    None.
+    None. The response is annotated in place.
 
 --*/
 {
-    ACCESS_MASK desiredAccess = 0;
-    HANDLE kernelHandle = NULL;
-    NTSTATUS status = STATUS_SUCCESS;
-
     if (Response == NULL) {
         return;
     }
@@ -389,40 +367,14 @@ Return Value:
         return;
     }
 
-    desiredAccess = Response->requestedAccess & KSWORD_ARK_OBJECT_PROXY_ALLOWED_ACCESS;
-    if (desiredAccess == 0UL) {
-        desiredAccess = READ_CONTROL;
-    }
-    Response->actualGrantedAccess = desiredAccess;
+    //
+    // 本任务只做 R0 句柄解码增强；即使类型在旧 proxy 白名单内，也不再打开
+    // 或关闭任何代理句柄，避免审计查询具备目标对象操作副作用。
+    //
     Response->proxyPolicyFlags =
         KSWORD_ARK_OBJECT_PROXY_POLICY_DOWNGRADED |
         KSWORD_ARK_OBJECT_PROXY_POLICY_TYPE_WHITELISTED;
-
-    status = ObOpenObjectByPointer(
-        Object,
-        OBJ_KERNEL_HANDLE,
-        NULL,
-        desiredAccess,
-        ObjectType,
-        KernelMode,
-        &kernelHandle);
-    if (!NT_SUCCESS(status)) {
-        Response->proxyStatus = KSWORD_ARK_OBJECT_PROXY_STATUS_OPEN_FAILED;
-        Response->proxyNtStatus = status;
-        return;
-    }
-
-    Response->proxyHandle = (ULONG64)(ULONG_PTR)kernelHandle;
-    Response->proxyStatus = KSWORD_ARK_OBJECT_PROXY_STATUS_OPENED;
-    Response->fieldFlags |= KSWORD_ARK_OBJECT_INFO_FIELD_PROXY_HANDLE_PRESENT;
-
-    //
-    // 当前协议只展示代理策略是否能打开；不把内核句柄传给 R3 使用。后续若要
-    // 返回用户句柄，必须用 ZwDuplicateObject 到请求进程并继续执行降权策略。
-    //
-    ZwClose(kernelHandle);
-    Response->proxyHandle = 0ULL;
-    Response->fieldFlags &= ~KSWORD_ARK_OBJECT_INFO_FIELD_PROXY_HANDLE_PRESENT;
+    Response->proxyStatus = KSWORD_ARK_OBJECT_PROXY_STATUS_DENIED_BY_POLICY;
 }
 
 NTSTATUS
@@ -457,6 +409,7 @@ Return Value:
     KSW_DYN_STATE dynState;
     PEPROCESS processObject = NULL;
     PVOID object = NULL;
+    PVOID objectHeader = NULL;
     POBJECT_TYPE objectType = NULL;
     OBJECT_HANDLE_INFORMATION handleInformation;
     DECLSPEC_ALIGN(16) UCHAR attachState[128];
@@ -485,6 +438,11 @@ Return Value:
     response->queryStatus = KSWORD_ARK_OBJECT_QUERY_STATUS_UNAVAILABLE;
     response->proxyStatus = KSWORD_ARK_OBJECT_PROXY_STATUS_NOT_REQUESTED;
     response->requestedAccess = Request->requestedAccess;
+    response->grantedAccessDecodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_UNAVAILABLE;
+    response->grantedAccessReadStatus = STATUS_UNSUCCESSFUL;
+    response->objectHeaderDecodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_UNAVAILABLE;
+    response->objectHeaderReadStatus = STATUS_UNSUCCESSFUL;
+    response->nameInfoStatus = KSWORD_ARK_OBJECT_NAME_INFO_STATUS_NOT_REQUESTED;
 
     RtlZeroMemory(&dynState, sizeof(dynState));
     RtlZeroMemory(&handleInformation, sizeof(handleInformation));
@@ -532,18 +490,43 @@ Return Value:
     response->objectReferenceStatus = STATUS_SUCCESS;
     response->objectAddress = (ULONG64)(ULONG_PTR)object;
     response->actualGrantedAccess = handleInformation.GrantedAccess;
+    response->grantedAccessDecodeStatus = KSWORD_ARK_HANDLE_DECODE_STATUS_OK;
+    response->grantedAccessReadStatus = STATUS_SUCCESS;
     response->fieldFlags |= KSWORD_ARK_OBJECT_INFO_FIELD_OBJECT_PRESENT;
+    response->fieldFlags |= KSWORD_ARK_OBJECT_INFO_FIELD_OBJECT_HEADER_BODY_PRESENT;
+    objectHeader = KswordARKHandleGetObjectHeaderFromBody(object);
 
     __try {
         objectType = ObGetObjectType(object);
-        if (objectType != NULL && KswordARKHandleIsOffsetPresent(dynState.Kernel.OtIndex)) {
-            response->objectTypeIndex = (ULONG)(*(PUCHAR)((PUCHAR)objectType + dynState.Kernel.OtIndex));
+        if (NT_SUCCESS(KswordARKHandleReadObjectTypeIndex(objectType, &dynState, &response->objectTypeIndex))) {
             response->fieldFlags |= KSWORD_ARK_OBJECT_INFO_FIELD_TYPE_INDEX_PRESENT;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         response->typeStatus = GetExceptionCode();
         response->queryStatus = KSWORD_ARK_OBJECT_QUERY_STATUS_TYPE_QUERY_FAILED;
+    }
+
+    KswordARKHandleFillQueryObjectHeaderAudit(
+        response,
+        objectHeader,
+        object,
+        objectType,
+        &dynState);
+    if (response->objectTypeIndexSource == KSWORD_ARK_OBJECT_TYPE_SOURCE_NONE) {
+        response->objectTypeIndexSource = KswordARKHandleMergeTypeIndexSource(
+            ((response->fieldFlags & KSWORD_ARK_OBJECT_INFO_FIELD_TYPE_INDEX_PRESENT) != 0UL) ? TRUE : FALSE,
+            response->objectTypeIndex,
+            ((response->fieldFlags & KSWORD_ARK_OBJECT_INFO_FIELD_HEADER_TYPE_INDEX_PRESENT) != 0UL) ? TRUE : FALSE,
+            response->objectHeaderTypeIndex);
+    }
+    if (response->objectHeaderDecodeStatus == KSWORD_ARK_HANDLE_DECODE_STATUS_HEADER_DYNDATA_MISSING &&
+        response->queryStatus == KSWORD_ARK_OBJECT_QUERY_STATUS_UNAVAILABLE) {
+        response->queryStatus = KSWORD_ARK_OBJECT_QUERY_STATUS_HEADER_DYNDATA_MISSING;
+    }
+    else if (response->objectHeaderDecodeStatus == KSWORD_ARK_HANDLE_DECODE_STATUS_HEADER_READ_FAILED &&
+        response->queryStatus == KSWORD_ARK_OBJECT_QUERY_STATUS_UNAVAILABLE) {
+        response->queryStatus = KSWORD_ARK_OBJECT_QUERY_STATUS_HEADER_QUERY_FAILED;
     }
 
     if ((requestFlags & KSWORD_ARK_QUERY_OBJECT_FLAG_INCLUDE_TYPE_NAME) != 0UL) {
@@ -557,11 +540,13 @@ Return Value:
         response->typeStatus = status;
         if (NT_SUCCESS(status)) {
             response->fieldFlags |= KSWORD_ARK_OBJECT_INFO_FIELD_TYPE_NAME_PRESENT;
+            response->objectTypeNameSource = KSWORD_ARK_OBJECT_TYPE_NAME_SOURCE_DYNDATA_OTNAME;
             if (truncated) {
                 response->queryStatus = KSWORD_ARK_OBJECT_QUERY_STATUS_NAME_TRUNCATED;
             }
         }
         else if (response->queryStatus == KSWORD_ARK_OBJECT_QUERY_STATUS_UNAVAILABLE) {
+            response->objectTypeNameSource = KSWORD_ARK_OBJECT_TYPE_NAME_SOURCE_QUERY_FAILED;
             response->queryStatus = KSWORD_ARK_OBJECT_QUERY_STATUS_TYPE_QUERY_FAILED;
         }
     }
@@ -577,11 +562,19 @@ Return Value:
         if (NT_SUCCESS(status)) {
             response->fieldFlags |= KSWORD_ARK_OBJECT_INFO_FIELD_OBJECT_NAME_PRESENT;
             if (truncated) {
+                response->nameInfoStatus = KSWORD_ARK_OBJECT_NAME_INFO_STATUS_QUERY_TRUNCATED;
                 response->queryStatus = KSWORD_ARK_OBJECT_QUERY_STATUS_NAME_TRUNCATED;
+            }
+            else {
+                response->nameInfoStatus = KSWORD_ARK_OBJECT_NAME_INFO_STATUS_QUERY_OK;
             }
         }
         else if (response->queryStatus == KSWORD_ARK_OBJECT_QUERY_STATUS_UNAVAILABLE) {
+            response->nameInfoStatus = KSWORD_ARK_OBJECT_NAME_INFO_STATUS_QUERY_FAILED;
             response->queryStatus = KSWORD_ARK_OBJECT_QUERY_STATUS_NAME_QUERY_FAILED;
+        }
+        else if (response->nameInfoStatus == KSWORD_ARK_OBJECT_NAME_INFO_STATUS_NOT_REQUESTED) {
+            response->nameInfoStatus = KSWORD_ARK_OBJECT_NAME_INFO_STATUS_QUERY_FAILED;
         }
     }
 

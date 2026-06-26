@@ -161,9 +161,16 @@ typedef struct _KSWORD_ARK_QUERY_FILE_SECTION_MAPPINGS_RESPONSE
     unsigned long reserved0;
     unsigned long long fileObjectAddress;
     unsigned long long sectionObjectPointersAddress;
+    unsigned long long dataSectionObjectAddress;
+    unsigned long long imageSectionObjectAddress;
+    unsigned long long sharedCacheMapAddress;
     unsigned long long dataControlAreaAddress;
     unsigned long long imageControlAreaAddress;
     unsigned long long dynDataCapabilityMask;
+    unsigned long mappedProcessCount;
+    unsigned long dataMappedProcessCount;
+    unsigned long imageMappedProcessCount;
+    unsigned long summaryFlags;
     unsigned long mmControlAreaListHeadOffset;
     unsigned long mmControlAreaLockOffset;
     unsigned long reserved1;

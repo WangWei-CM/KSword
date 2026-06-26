@@ -170,7 +170,7 @@ Return Value:
 
 static NTSTATUS
 KswordARKDriverQueryFileObjectName(
-    _In_ PFILE_OBJECT FileObject,
+    _In_ PVOID Object,
     _Out_writes_(ObjectNameChars) PWSTR ObjectName,
     _In_ USHORT ObjectNameChars
     )
@@ -183,7 +183,7 @@ Routine Description:
 
 Arguments:
 
-    FileObject - 已引用的文件对象。
+    Object - 已引用的内核对象，通常是 FILE_OBJECT 或 DEVICE_OBJECT。
     ObjectName - 响应包对象名数组。
     ObjectNameChars - ObjectName 数组长度。
 
@@ -201,11 +201,11 @@ Return Value:
     if (ObjectName != NULL && ObjectNameChars > 0U) {
         ObjectName[0] = L'\0';
     }
-    if (FileObject == NULL || ObjectName == NULL || ObjectNameChars == 0U) {
+    if (Object == NULL || ObjectName == NULL || ObjectNameChars == 0U) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    status = ObQueryNameString(FileObject, NULL, 0UL, &requiredBytes);
+    status = ObQueryNameString(Object, NULL, 0UL, &requiredBytes);
     if (status != STATUS_INFO_LENGTH_MISMATCH &&
         status != STATUS_BUFFER_OVERFLOW &&
         status != STATUS_BUFFER_TOO_SMALL &&
@@ -223,7 +223,7 @@ Return Value:
     }
 
     RtlZeroMemory(nameInfo, allocationBytes);
-    status = ObQueryNameString(FileObject, nameInfo, allocationBytes, &requiredBytes);
+    status = ObQueryNameString(Object, nameInfo, allocationBytes, &requiredBytes);
     if (NT_SUCCESS(status)) {
         const USHORT sourceChars = (USHORT)(nameInfo->Name.Length / sizeof(WCHAR));
         KswordARKDriverCopyWideStringToFixedBuffer(
@@ -235,6 +235,119 @@ Return Value:
 
     ExFreePoolWithTag(nameInfo, 'fOsK');
     return status;
+}
+
+static VOID
+KswordARKDriverFillFileObjectAuditFields(
+    _In_ PFILE_OBJECT FileObject,
+    _Inout_ KSWORD_ARK_QUERY_FILE_INFO_RESPONSE* Response
+    )
+/*++
+
+Routine Description:
+
+    Copy public FILE_OBJECT audit fields into the response. 中文说明：该函数只读
+    FILE_OBJECT 的 WDK 公开字段；所有地址仅用于诊断展示，不作为后续操作凭据。
+
+Arguments:
+
+    FileObject - 已引用的 FILE_OBJECT。
+    Response - 可写响应包。
+
+Return Value:
+
+    None. 本函数没有返回值。
+
+--*/
+{
+    if (FileObject == NULL || Response == NULL) {
+        return;
+    }
+
+    __try {
+        Response->deviceObjectAddress = (ULONG64)(ULONG_PTR)FileObject->DeviceObject;
+        Response->vpbAddress = (ULONG64)(ULONG_PTR)FileObject->Vpb;
+        Response->fsContextAddress = (ULONG64)(ULONG_PTR)FileObject->FsContext;
+        Response->fsContext2Address = (ULONG64)(ULONG_PTR)FileObject->FsContext2;
+        Response->deletePending = (FileObject->DeletePending != FALSE) ? 1UL : 0UL;
+        Response->readAccess = (FileObject->ReadAccess != FALSE) ? 1UL : 0UL;
+        Response->writeAccess = (FileObject->WriteAccess != FALSE) ? 1UL : 0UL;
+        Response->deleteAccess = (FileObject->DeleteAccess != FALSE) ? 1UL : 0UL;
+        Response->sharedRead = (FileObject->SharedRead != FALSE) ? 1UL : 0UL;
+        Response->sharedWrite = (FileObject->SharedWrite != FALSE) ? 1UL : 0UL;
+        Response->sharedDelete = (FileObject->SharedDelete != FALSE) ? 1UL : 0UL;
+        Response->fieldFlags |= KSWORD_ARK_FILE_INFO_FIELD_SHARE_ACCESS_PRESENT;
+        if (FileObject->DeviceObject != NULL) {
+            Response->fieldFlags |= KSWORD_ARK_FILE_INFO_FIELD_DEVICE_OBJECT_PRESENT;
+        }
+        if (FileObject->Vpb != NULL) {
+            Response->fieldFlags |= KSWORD_ARK_FILE_INFO_FIELD_VPB_PRESENT;
+        }
+        if (FileObject->FsContext != NULL || FileObject->FsContext2 != NULL) {
+            Response->fieldFlags |= KSWORD_ARK_FILE_INFO_FIELD_FS_CONTEXT_PRESENT;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        Response->objectStatus = GetExceptionCode();
+        if (Response->queryStatus == KSWORD_ARK_FILE_INFO_STATUS_UNAVAILABLE) {
+            Response->queryStatus = KSWORD_ARK_FILE_INFO_STATUS_OBJECT_FAILED;
+        }
+    }
+}
+
+static VOID
+KswordARKDriverFillFileVpbAuditFields(
+    _In_ PFILE_OBJECT FileObject,
+    _Inout_ KSWORD_ARK_QUERY_FILE_INFO_RESPONSE* Response
+    )
+/*++
+
+Routine Description:
+
+    Copy public VPB fields for the file object's mounted volume. 中文说明：VPB
+    可能不存在或正在变化，因此读取放在 SEH 中，失败只降级当前响应。
+
+Arguments:
+
+    FileObject - 已引用的 FILE_OBJECT。
+    Response - 可写响应包。
+
+Return Value:
+
+    None. 本函数没有返回值。
+
+--*/
+{
+    PVPB vpb = NULL;
+    USHORT labelChars = 0U;
+
+    if (FileObject == NULL || Response == NULL) {
+        return;
+    }
+
+    __try {
+        vpb = FileObject->Vpb;
+        if (vpb == NULL) {
+            return;
+        }
+        Response->vpbFlags = (ULONG)vpb->Flags;
+        Response->vpbSerialNumber = vpb->SerialNumber;
+        labelChars = (USHORT)(vpb->VolumeLabelLength / sizeof(WCHAR));
+        if (labelChars >= KSWORD_ARK_FILE_INFO_VOLUME_LABEL_MAX_CHARS) {
+            labelChars = KSWORD_ARK_FILE_INFO_VOLUME_LABEL_MAX_CHARS - 1U;
+        }
+        KswordARKDriverCopyWideStringToFixedBuffer(
+            Response->volumeLabel,
+            KSWORD_ARK_FILE_INFO_VOLUME_LABEL_MAX_CHARS,
+            vpb->VolumeLabel,
+            labelChars);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        Response->objectStatus = GetExceptionCode();
+        if (Response->queryStatus == KSWORD_ARK_FILE_INFO_STATUS_UNAVAILABLE) {
+            Response->queryStatus = KSWORD_ARK_FILE_INFO_STATUS_OBJECT_FAILED;
+        }
+    }
 }
 
 static NTSTATUS
@@ -463,6 +576,14 @@ Return Value:
         if (NT_SUCCESS(status)) {
             response->fileObjectAddress = (ULONG64)(ULONG_PTR)fileObject;
             response->fieldFlags |= KSWORD_ARK_FILE_INFO_FIELD_FILE_OBJECT_PRESENT;
+            KswordARKDriverFillFileObjectAuditFields(fileObject, response);
+            KswordARKDriverFillFileVpbAuditFields(fileObject, response);
+            if (fileObject->DeviceObject != NULL) {
+                (VOID)KswordARKDriverQueryFileObjectName(
+                    fileObject->DeviceObject,
+                    response->deviceName,
+                    KSWORD_ARK_FILE_INFO_DEVICE_NAME_MAX_CHARS);
+            }
         }
         else if (response->queryStatus == KSWORD_ARK_FILE_INFO_STATUS_UNAVAILABLE) {
             response->queryStatus = KSWORD_ARK_FILE_INFO_STATUS_OBJECT_FAILED;
@@ -492,12 +613,16 @@ Return Value:
             if (sectionPointers != NULL) {
                 response->dataSectionObjectAddress = (ULONG64)(ULONG_PTR)sectionPointers->DataSectionObject;
                 response->imageSectionObjectAddress = (ULONG64)(ULONG_PTR)sectionPointers->ImageSectionObject;
+                response->sharedCacheMapAddress = (ULONG64)(ULONG_PTR)sectionPointers->SharedCacheMap;
                 response->fieldFlags |= KSWORD_ARK_FILE_INFO_FIELD_SECTION_POINTERS_PRESENT;
                 if (sectionPointers->DataSectionObject != NULL) {
                     response->fieldFlags |= KSWORD_ARK_FILE_INFO_FIELD_DATA_SECTION_PRESENT;
                 }
                 if (sectionPointers->ImageSectionObject != NULL) {
                     response->fieldFlags |= KSWORD_ARK_FILE_INFO_FIELD_IMAGE_SECTION_PRESENT;
+                }
+                if (sectionPointers->SharedCacheMap != NULL) {
+                    response->fieldFlags |= KSWORD_ARK_FILE_INFO_FIELD_SHARED_CACHE_MAP_PRESENT;
                 }
             }
         }

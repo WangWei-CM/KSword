@@ -17,6 +17,10 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_CAPABILITIES 0x809
 #define KSWORD_ARK_IOCTL_FUNCTION_APPLY_DYN_PROFILE 0x82F
 #define KSWORD_ARK_IOCTL_FUNCTION_APPLY_DYN_PROFILE_EX 0x830
+#define KSWORD_ARK_IOCTL_FUNCTION_APPLY_DYN_PROFILE_V4 0x860
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_DYN_V4_MODULES 0x861
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_DYN_V4_CAPABILITY_GROUPS 0x862
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_DYN_V4_MISSING_ITEMS 0x863
 
 #define IOCTL_KSWORD_ARK_QUERY_DYN_STATUS \
     CTL_CODE( \
@@ -52,6 +56,34 @@
         KSWORD_ARK_IOCTL_FUNCTION_APPLY_DYN_PROFILE_EX, \
         METHOD_BUFFERED, \
         FILE_WRITE_ACCESS)
+
+#define IOCTL_KSWORD_ARK_APPLY_DYN_PROFILE_V4 \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_APPLY_DYN_PROFILE_V4, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_QUERY_DYN_V4_MODULES \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_DYN_V4_MODULES, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_QUERY_DYN_V4_CAPABILITY_GROUPS \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_DYN_V4_CAPABILITY_GROUPS, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_QUERY_DYN_V4_MISSING_ITEMS \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_DYN_V4_MISSING_ITEMS, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
 
 #define KSW_CAP_DYN_NTOS_ACTIVE             0x0000000000000001ULL
 #define KSW_CAP_DYN_LXCORE_ACTIVE           0x0000000000000002ULL
@@ -100,6 +132,14 @@
 #define KSW_DYN_PROFILE_CLASS_NTOSKRNL 0U
 #define KSW_DYN_PROFILE_CLASS_NTKRLA57 1U
 #define KSW_DYN_PROFILE_CLASS_LXCORE 2U
+#define KSW_DYN_PROFILE_CLASS_WIN32K 16U
+#define KSW_DYN_PROFILE_CLASS_WIN32KBASE 17U
+#define KSW_DYN_PROFILE_CLASS_WIN32KFULL 18U
+#define KSW_DYN_PROFILE_CLASS_TCPIP 32U
+#define KSW_DYN_PROFILE_CLASS_NDIS 33U
+#define KSW_DYN_PROFILE_CLASS_NETIO 34U
+#define KSW_DYN_PROFILE_CLASS_FLTMGR 48U
+#define KSW_DYN_PROFILE_CLASS_FVEVOL 64U
 
 #define KSW_DYN_FIELD_SOURCE_UNAVAILABLE 0UL
 #define KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER 1UL
@@ -201,6 +241,34 @@
 #define KSW_DYN_PROFILE_EX_ITEM_KIND_STRUCT_OFFSET 1UL
 #define KSW_DYN_PROFILE_EX_ITEM_KIND_GLOBAL_RVA 2UL
 
+#define KSW_DYN_V4_PROTOCOL_VERSION 4UL
+#define KSW_DYN_V4_PROFILE_NAME_CHARS 96U
+#define KSW_DYN_V4_ITEM_NAME_CHARS 96U
+#define KSW_DYN_V4_CAPABILITY_NAME_CHARS 96U
+#define KSW_DYN_V4_MISSING_REASON_CHARS 128U
+#define KSW_DYN_V4_MAX_MODULES 16U
+#define KSW_DYN_V4_MAX_ITEMS_PER_MODULE 256U
+#define KSW_DYN_V4_MAX_CAPABILITY_GROUPS_PER_MODULE 16U
+#define KSW_DYN_V4_MAX_MISSING_SUMMARY 64U
+#define KSW_DYN_V4_MAX_VALUE_U32 0xFFFFFFFFUL
+#define KSW_DYN_V4_STATUS_FLAG_IDENTITY_MATCHED 0x00000001UL
+#define KSW_DYN_V4_STATUS_FLAG_PROFILE_APPLIED 0x00000002UL
+#define KSW_DYN_V4_STATUS_FLAG_REQUIRED_COMPLETE 0x00000004UL
+#define KSW_DYN_V4_STATUS_FLAG_OPTIONAL_DEGRADED 0x00000008UL
+#define KSW_DYN_V4_STATUS_FLAG_IDENTITY_REJECTED 0x00000010UL
+#define KSW_DYN_V4_STATUS_FLAG_VALIDATION_FAILED 0x00000020UL
+#define KSW_DYN_V4_ITEM_KIND_STRUCT_OFFSET 1UL
+#define KSW_DYN_V4_ITEM_KIND_GLOBAL_RVA 2UL
+#define KSW_DYN_V4_ITEM_KIND_FUNCTION_RVA 3UL
+#define KSW_DYN_V4_ITEM_KIND_ENUM_VALUE 4UL
+#define KSW_DYN_V4_ITEM_KIND_TYPE_SIZE 5UL
+#define KSW_DYN_V4_ITEM_KIND_BIT_FIELD 6UL
+#define KSW_DYN_V4_ITEM_KIND_LIST_HEAD_GLOBAL 7UL
+#define KSW_DYN_V4_ITEM_FLAG_REQUIRED 0x00000001UL
+#define KSW_DYN_V4_ITEM_FLAG_OPTIONAL 0x00000002UL
+#define KSW_DYN_V4_MISSING_KIND_REQUIRED 1UL
+#define KSW_DYN_V4_MISSING_KIND_OPTIONAL 2UL
+
 #define KSW_DYN_PROFILE_EX_ITEM_FLAG_REQUIRED 0x00000001UL
 #define KSW_DYN_PROFILE_EX_ITEM_FLAG_CALLBACK 0x00000002UL
 
@@ -214,6 +282,80 @@ typedef struct _KSW_DYN_MODULE_IDENTITY_PACKET
     unsigned long long imageBase;
     wchar_t moduleName[KSW_DYN_MODULE_NAME_CHARS];
 } KSW_DYN_MODULE_IDENTITY_PACKET;
+
+typedef struct _KSW_DYN_V4_PDB_IDENTITY_PACKET
+{
+    char pdbName[KSW_DYN_PDB_NAME_CHARS];
+    char pdbGuid[KSW_DYN_PDB_GUID_CHARS];
+    unsigned long pdbAge;
+    unsigned long reserved;
+} KSW_DYN_V4_PDB_IDENTITY_PACKET;
+
+typedef struct _KSW_DYN_V4_MODULE_IDENTITY_PACKET
+{
+    KSW_DYN_MODULE_IDENTITY_PACKET image;
+    KSW_DYN_V4_PDB_IDENTITY_PACKET pdb;
+    char profileName[KSW_DYN_V4_PROFILE_NAME_CHARS];
+} KSW_DYN_V4_MODULE_IDENTITY_PACKET;
+
+typedef struct _KSW_DYN_V4_ITEM_PACKET
+{
+    unsigned long itemId;
+    unsigned long itemKind;
+    unsigned long flags;
+    unsigned long capabilityGroupId;
+    unsigned long valueLow;
+    unsigned long valueHigh;
+    unsigned long aux0;
+    unsigned long aux1;
+    unsigned long aux2;
+    unsigned long aux3;
+} KSW_DYN_V4_ITEM_PACKET;
+
+typedef struct _KSW_DYN_V4_CAPABILITY_GROUP_PACKET
+{
+    unsigned long groupId;
+    unsigned long flags;
+    unsigned long requiredItemCount;
+    unsigned long optionalItemCount;
+    char groupName[KSW_DYN_V4_CAPABILITY_NAME_CHARS];
+} KSW_DYN_V4_CAPABILITY_GROUP_PACKET;
+
+typedef struct _KSW_APPLY_DYN_PROFILE_V4_REQUEST
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long flags;
+    unsigned long itemCount;
+    unsigned long capabilityGroupCount;
+    unsigned long reserved;
+    KSW_DYN_V4_MODULE_IDENTITY_PACKET module;
+    KSW_DYN_V4_CAPABILITY_GROUP_PACKET capabilityGroups[KSW_DYN_V4_MAX_CAPABILITY_GROUPS_PER_MODULE];
+    KSW_DYN_V4_ITEM_PACKET items[1];
+} KSW_APPLY_DYN_PROFILE_V4_REQUEST;
+
+#define KSW_APPLY_DYN_PROFILE_V4_REQUEST_HEADER_SIZE \
+    (sizeof(KSW_APPLY_DYN_PROFILE_V4_REQUEST) - sizeof(KSW_DYN_V4_ITEM_PACKET))
+
+typedef struct _KSW_APPLY_DYN_PROFILE_V4_RESPONSE
+{
+    unsigned long size;
+    unsigned long version;
+    long status;
+    unsigned long statusFlags;
+    unsigned long appliedItemCount;
+    unsigned long rejectedItemCount;
+    unsigned long requiredItemCount;
+    unsigned long presentRequiredItemCount;
+    unsigned long optionalItemCount;
+    unsigned long presentOptionalItemCount;
+    unsigned long activeCapabilityGroupCount;
+    unsigned long missingRequiredItemCount;
+    unsigned long missingOptionalItemCount;
+    unsigned long reserved;
+    KSW_DYN_V4_MODULE_IDENTITY_PACKET module;
+    wchar_t message[KSW_DYN_REASON_CHARS];
+} KSW_APPLY_DYN_PROFILE_V4_RESPONSE;
 
 typedef struct _KSW_DYN_PROFILE_FIELD_PACKET
 {
@@ -341,3 +483,83 @@ typedef struct _KSW_QUERY_DYN_FIELDS_RESPONSE
     unsigned long reserved;
     KSW_DYN_FIELD_ENTRY entries[1];
 } KSW_QUERY_DYN_FIELDS_RESPONSE;
+
+typedef struct _KSW_DYN_V4_MODULE_STATUS_ENTRY
+{
+    unsigned long moduleIndex;
+    unsigned long statusFlags;
+    unsigned long itemCount;
+    unsigned long capabilityGroupCount;
+    unsigned long activeCapabilityGroupCount;
+    unsigned long missingRequiredItemCount;
+    unsigned long missingOptionalItemCount;
+    unsigned long reserved;
+    KSW_DYN_V4_MODULE_IDENTITY_PACKET module;
+} KSW_DYN_V4_MODULE_STATUS_ENTRY;
+
+typedef struct _KSW_QUERY_DYN_V4_MODULES_RESPONSE
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long totalCount;
+    unsigned long returnedCount;
+    unsigned long entrySize;
+    unsigned long reserved;
+    KSW_DYN_V4_MODULE_STATUS_ENTRY entries[1];
+} KSW_QUERY_DYN_V4_MODULES_RESPONSE;
+
+#define KSW_QUERY_DYN_V4_MODULES_RESPONSE_HEADER_SIZE \
+    (sizeof(KSW_QUERY_DYN_V4_MODULES_RESPONSE) - sizeof(KSW_DYN_V4_MODULE_STATUS_ENTRY))
+
+typedef struct _KSW_DYN_V4_CAPABILITY_GROUP_STATUS_ENTRY
+{
+    unsigned long moduleClassId;
+    unsigned long groupId;
+    unsigned long statusFlags;
+    unsigned long requiredItemCount;
+    unsigned long presentRequiredItemCount;
+    unsigned long optionalItemCount;
+    unsigned long presentOptionalItemCount;
+    unsigned long reserved;
+    char groupName[KSW_DYN_V4_CAPABILITY_NAME_CHARS];
+} KSW_DYN_V4_CAPABILITY_GROUP_STATUS_ENTRY;
+
+typedef struct _KSW_QUERY_DYN_V4_CAPABILITY_GROUPS_RESPONSE
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long totalCount;
+    unsigned long returnedCount;
+    unsigned long entrySize;
+    unsigned long reserved;
+    KSW_DYN_V4_CAPABILITY_GROUP_STATUS_ENTRY entries[1];
+} KSW_QUERY_DYN_V4_CAPABILITY_GROUPS_RESPONSE;
+
+#define KSW_QUERY_DYN_V4_CAPABILITY_GROUPS_RESPONSE_HEADER_SIZE \
+    (sizeof(KSW_QUERY_DYN_V4_CAPABILITY_GROUPS_RESPONSE) - sizeof(KSW_DYN_V4_CAPABILITY_GROUP_STATUS_ENTRY))
+
+typedef struct _KSW_DYN_V4_MISSING_ITEM_ENTRY
+{
+    unsigned long moduleClassId;
+    unsigned long itemId;
+    unsigned long itemKind;
+    unsigned long capabilityGroupId;
+    unsigned long missingKind;
+    unsigned long reserved;
+    char itemName[KSW_DYN_V4_ITEM_NAME_CHARS];
+    char reason[KSW_DYN_V4_MISSING_REASON_CHARS];
+} KSW_DYN_V4_MISSING_ITEM_ENTRY;
+
+typedef struct _KSW_QUERY_DYN_V4_MISSING_ITEMS_RESPONSE
+{
+    unsigned long size;
+    unsigned long version;
+    unsigned long totalCount;
+    unsigned long returnedCount;
+    unsigned long entrySize;
+    unsigned long reserved;
+    KSW_DYN_V4_MISSING_ITEM_ENTRY entries[1];
+} KSW_QUERY_DYN_V4_MISSING_ITEMS_RESPONSE;
+
+#define KSW_QUERY_DYN_V4_MISSING_ITEMS_RESPONSE_HEADER_SIZE \
+    (sizeof(KSW_QUERY_DYN_V4_MISSING_ITEMS_RESPONSE) - sizeof(KSW_DYN_V4_MISSING_ITEM_ENTRY))

@@ -143,6 +143,18 @@ typedef struct _KSWORD_ARK_THREAD_CROSSVIEW_ROW
     unsigned long confidence;
     char imageName[16];
     char detail[KSWORD_ARK_CROSSVIEW_DETAIL_CHARS];
+    unsigned long publicThreadId;
+    unsigned long threadListThreadId;
+    unsigned long cidTableThreadId;
+    unsigned long publicProcessId;
+    unsigned long threadListProcessId;
+    unsigned long cidTableProcessId;
+    long publicWalkStatus;
+    long threadListStatus;
+    long cidTableStatus;
+    long startAddressStatus;
+    unsigned long detailStatus;
+    unsigned long denoiseFlags;
 } KSWORD_ARK_THREAD_CROSSVIEW_ROW;
 
 typedef struct _KSWORD_ARK_THREAD_CROSSVIEW_RESPONSE

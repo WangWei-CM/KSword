@@ -33,6 +33,44 @@ static const ULONG g_KswordArkIatEatHookResponseHeaderSize =
     (ULONG)(sizeof(KSWORD_ARK_ENUM_IAT_EAT_HOOKS_RESPONSE) - sizeof(KSWORD_ARK_IAT_EAT_HOOK_ENTRY));
 
 static ULONG
+KswordARKHookFnv1a32(
+    _In_reads_bytes_(ByteCount) const UCHAR* Bytes,
+    _In_ ULONG ByteCount
+    )
+/*++
+
+Routine Description:
+
+    Computes a small FNV-1a hash for the first bytes captured in a hook row.
+    The hash is diagnostic evidence only and is not used for authorization.
+
+Arguments:
+
+    Bytes - Input byte buffer.
+    ByteCount - Number of bytes to hash.
+
+Return Value:
+
+    32-bit FNV-1a hash, or 0 when the input is empty.
+
+--*/
+{
+    ULONG hashValue = 2166136261UL;
+    ULONG byteIndex = 0UL;
+
+    if (Bytes == NULL || ByteCount == 0UL) {
+        return 0UL;
+    }
+
+    for (byteIndex = 0UL; byteIndex < ByteCount; ++byteIndex) {
+        hashValue ^= (ULONG)Bytes[byteIndex];
+        hashValue *= 16777619UL;
+    }
+
+    return hashValue;
+}
+
+static ULONG
 KswordARKHookClassifyInlineBytes(
     _In_ ULONG_PTR FunctionAddress,
     _In_reads_(ByteCount) const UCHAR* Bytes,
@@ -249,9 +287,13 @@ Return Value:
     Entry->hookType = HookType;
     Entry->functionAddress = (ULONGLONG)(ULONG_PTR)FunctionAddress;
     Entry->targetAddress = (ULONGLONG)TargetAddress;
+    Entry->currentTargetAddress = (ULONGLONG)TargetAddress;
     Entry->moduleBase = (ULONGLONG)(ULONG_PTR)ModuleEntry->ImageBase;
+    Entry->expectedOwnerBase = (ULONGLONG)(ULONG_PTR)ModuleEntry->ImageBase;
     Entry->originalByteCount = KSWORD_ARK_KERNEL_HOOK_BYTES;
     Entry->currentByteCount = KSWORD_ARK_KERNEL_HOOK_BYTES;
+    Entry->firstBytesHashStatus = KSWORD_ARK_KERNEL_HOOK_HASH_STATUS_CURRENT_BYTES;
+    Entry->firstBytesHash = KswordARKHookFnv1a32(CurrentBytes, KSWORD_ARK_KERNEL_HOOK_BYTES);
     Entry->flags = 0UL;
     RtlCopyMemory(Entry->expectedBytes, ExpectedBytes, KSWORD_ARK_KERNEL_HOOK_BYTES);
     RtlCopyMemory(Entry->currentBytes, CurrentBytes, KSWORD_ARK_KERNEL_HOOK_BYTES);
@@ -280,12 +322,19 @@ Return Value:
 
     if (HookType == KSWORD_ARK_INLINE_HOOK_TYPE_NONE) {
         Entry->status = KSWORD_ARK_KERNEL_HOOK_STATUS_CLEAN;
+        Entry->moduleRangeState = KSWORD_ARK_KERNEL_HOOK_RANGE_WITHIN_EXPECTED;
     }
-    else if (targetModule == ModuleEntry || targetModule == NULL) {
+    else if (targetModule == ModuleEntry) {
         Entry->status = KSWORD_ARK_KERNEL_HOOK_STATUS_INTERNAL_BRANCH;
+        Entry->moduleRangeState = KSWORD_ARK_KERNEL_HOOK_RANGE_WITHIN_EXPECTED;
+    }
+    else if (targetModule == NULL) {
+        Entry->status = KSWORD_ARK_KERNEL_HOOK_STATUS_INTERNAL_BRANCH;
+        Entry->moduleRangeState = KSWORD_ARK_KERNEL_HOOK_RANGE_UNRESOLVED;
     }
     else {
         Entry->status = KSWORD_ARK_KERNEL_HOOK_STATUS_SUSPICIOUS;
+        Entry->moduleRangeState = KSWORD_ARK_KERNEL_HOOK_RANGE_WITHIN_OTHER_MODULE;
     }
 }
 

@@ -5,15 +5,20 @@
 // ============================================================
 // KswordArkNetworkIoctl.h
 // 作用：
-// - 定义 R3/R0 网络过滤与端口隐藏控制协议；
+// - 定义 R3/R0 网络过滤、端口隐藏控制协议和只读网络审计查询协议；
 // - R0 通过 WFP callout 执行端口级阻断/放行策略；
 // - 端口隐藏采用规则快照与查询接口表达，R3 可据此过滤展示。
+// - 网络审计 IOCTL 只返回快照/骨架状态，不删除连接、不禁用 WFP、不 detach NDIS。
 // ============================================================
 
 #define KSWORD_ARK_NETWORK_PROTOCOL_VERSION 1UL
 
 #define KSWORD_ARK_IOCTL_FUNCTION_NETWORK_SET_RULES   0x829UL
 #define KSWORD_ARK_IOCTL_FUNCTION_NETWORK_QUERY_STATUS 0x82AUL
+#define KSWORD_ARK_IOCTL_FUNCTION_NETWORK_QUERY_TCP_ENDPOINTS 0x8A0UL
+#define KSWORD_ARK_IOCTL_FUNCTION_NETWORK_QUERY_UDP_ENDPOINTS 0x8A1UL
+#define KSWORD_ARK_IOCTL_FUNCTION_NETWORK_QUERY_WFP_INVENTORY 0x8A2UL
+#define KSWORD_ARK_IOCTL_FUNCTION_NETWORK_QUERY_NDIS_CHAIN    0x8A3UL
 
 #define IOCTL_KSWORD_ARK_NETWORK_SET_RULES \
     CTL_CODE( \
@@ -26,6 +31,34 @@
     CTL_CODE( \
         KSWORD_ARK_IOCTL_DEVICE_TYPE, \
         KSWORD_ARK_IOCTL_FUNCTION_NETWORK_QUERY_STATUS, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_NETWORK_QUERY_TCP_ENDPOINTS \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_NETWORK_QUERY_TCP_ENDPOINTS, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_NETWORK_QUERY_UDP_ENDPOINTS \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_NETWORK_QUERY_UDP_ENDPOINTS, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_NETWORK_QUERY_WFP_INVENTORY \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_NETWORK_QUERY_WFP_INVENTORY, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_NETWORK_QUERY_NDIS_CHAIN \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_NETWORK_QUERY_NDIS_CHAIN, \
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
 
@@ -60,8 +93,189 @@
 #define KSWORD_ARK_NETWORK_STATUS_INVALID_RULE     4UL
 #define KSWORD_ARK_NETWORK_STATUS_WFP_UNAVAILABLE  5UL
 #define KSWORD_ARK_NETWORK_STATUS_OPERATION_FAILED 6UL
+#define KSWORD_ARK_NETWORK_STATUS_AUDIT_UNAVAILABLE 7UL
+#define KSWORD_ARK_NETWORK_STATUS_AUDIT_STUB        8UL
 
 #define KSWORD_ARK_NETWORK_MAX_RULES 32UL
+#define KSWORD_ARK_NETWORK_AUDIT_MAX_REQUESTED_ROWS 1024UL
+
+#define KSWORD_ARK_NETWORK_AUDIT_QUERY_FLAG_INCLUDE_IPV4 0x00000001UL
+#define KSWORD_ARK_NETWORK_AUDIT_QUERY_FLAG_INCLUDE_IPV6 0x00000002UL
+#define KSWORD_ARK_NETWORK_AUDIT_QUERY_FLAG_INCLUDE_ALL \
+    (KSWORD_ARK_NETWORK_AUDIT_QUERY_FLAG_INCLUDE_IPV4 | \
+     KSWORD_ARK_NETWORK_AUDIT_QUERY_FLAG_INCLUDE_IPV6)
+
+#define KSWORD_ARK_NETWORK_AUDIT_SOURCE_NONE          0x00000000UL
+#define KSWORD_ARK_NETWORK_AUDIT_SOURCE_TCPIP_PDB     0x00000001UL
+#define KSWORD_ARK_NETWORK_AUDIT_SOURCE_NETIO_PDB     0x00000002UL
+#define KSWORD_ARK_NETWORK_AUDIT_SOURCE_NDIS_PDB      0x00000004UL
+#define KSWORD_ARK_NETWORK_AUDIT_SOURCE_RUNTIME_STATE 0x00000008UL
+
+#define KSWORD_ARK_NETWORK_AUDIT_ROW_FLAG_PDB_UNAVAILABLE 0x00000001UL
+#define KSWORD_ARK_NETWORK_AUDIT_ROW_FLAG_FIELD_MISSING   0x00000002UL
+#define KSWORD_ARK_NETWORK_AUDIT_ROW_FLAG_BUDGET_LIMITED  0x00000004UL
+#define KSWORD_ARK_NETWORK_AUDIT_ROW_FLAG_OWNER_UNKNOWN   0x00000008UL
+#define KSWORD_ARK_NETWORK_AUDIT_ROW_FLAG_MODULE_UNKNOWN  0x00000010UL
+
+#define KSWORD_ARK_NETWORK_ADDRESS_FAMILY_UNKNOWN 0UL
+#define KSWORD_ARK_NETWORK_ADDRESS_FAMILY_IPV4    4UL
+#define KSWORD_ARK_NETWORK_ADDRESS_FAMILY_IPV6    6UL
+
+#define KSWORD_ARK_NETWORK_TCP_STATE_UNKNOWN     0UL
+#define KSWORD_ARK_NETWORK_TCP_STATE_CLOSED      1UL
+#define KSWORD_ARK_NETWORK_TCP_STATE_LISTEN      2UL
+#define KSWORD_ARK_NETWORK_TCP_STATE_SYN_SENT    3UL
+#define KSWORD_ARK_NETWORK_TCP_STATE_SYN_RCVD    4UL
+#define KSWORD_ARK_NETWORK_TCP_STATE_ESTABLISHED 5UL
+#define KSWORD_ARK_NETWORK_TCP_STATE_FIN_WAIT_1  6UL
+#define KSWORD_ARK_NETWORK_TCP_STATE_FIN_WAIT_2  7UL
+#define KSWORD_ARK_NETWORK_TCP_STATE_CLOSE_WAIT  8UL
+#define KSWORD_ARK_NETWORK_TCP_STATE_CLOSING     9UL
+#define KSWORD_ARK_NETWORK_TCP_STATE_LAST_ACK    10UL
+#define KSWORD_ARK_NETWORK_TCP_STATE_TIME_WAIT   11UL
+#define KSWORD_ARK_NETWORK_TCP_STATE_DELETE_TCB  12UL
+
+#define KSWORD_ARK_NETWORK_WFP_OBJECT_PROVIDER  1UL
+#define KSWORD_ARK_NETWORK_WFP_OBJECT_SUBLAYER  2UL
+#define KSWORD_ARK_NETWORK_WFP_OBJECT_FILTER    3UL
+#define KSWORD_ARK_NETWORK_WFP_OBJECT_CALLOUT   4UL
+
+#define KSWORD_ARK_NETWORK_NDIS_OBJECT_MINIPORT 1UL
+#define KSWORD_ARK_NETWORK_NDIS_OBJECT_FILTER   2UL
+#define KSWORD_ARK_NETWORK_NDIS_OBJECT_PROTOCOL 3UL
+#define KSWORD_ARK_NETWORK_NDIS_OBJECT_BINDING  4UL
+
+#define KSWORD_ARK_NETWORK_NAME_CHARS 96U
+
+// 网络审计通用请求。maxRows 为 R0 返回预算，0 表示由 R0 使用保守默认预算。
+typedef struct _KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST
+{
+    unsigned long version;
+    unsigned long size;
+    unsigned long flags;
+    unsigned long maxRows;
+} KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST;
+
+// TCP/UDP endpoint 行。地址以 16 字节保存，IPv4 使用前 4 字节。
+typedef struct _KSWORD_ARK_NETWORK_ENDPOINT_ROW
+{
+    unsigned long rowId;
+    unsigned long addressFamily;
+    unsigned long protocol;
+    unsigned long state;
+    unsigned long owningPid;
+    unsigned long compartmentId;
+    unsigned long interfaceIndex;
+    unsigned long flags;
+    unsigned short localPort;
+    unsigned short remotePort;
+    unsigned long sourceFlags;
+    unsigned long fieldMask;
+    unsigned long reserved0;
+    unsigned long reserved1;
+    unsigned long long endpointObject;
+    unsigned long long owningProcessObject;
+    unsigned long long transportObject;
+    unsigned long long interfaceLuid;
+    unsigned char localAddress[16];
+    unsigned char remoteAddress[16];
+} KSWORD_ARK_NETWORK_ENDPOINT_ROW;
+
+// TCP/UDP endpoint 查询响应。totalRowCount 支持 count-first，returnedRowCount 受输出缓冲限制。
+typedef struct _KSWORD_ARK_NETWORK_ENDPOINT_RESPONSE
+{
+    unsigned long version;
+    unsigned long size;
+    unsigned long status;
+    unsigned long flags;
+    unsigned long totalRowCount;
+    unsigned long returnedRowCount;
+    unsigned long entrySize;
+    unsigned long sourceFlags;
+    unsigned long budgetRows;
+    unsigned long generation;
+    long lastStatus;
+    unsigned long reserved;
+    KSWORD_ARK_NETWORK_ENDPOINT_ROW entries[1];
+} KSWORD_ARK_NETWORK_ENDPOINT_RESPONSE;
+
+// WFP inventory 行。GUID 字段以原始 16 字节保存，函数地址用于后续 owner module 归属。
+typedef struct _KSWORD_ARK_NETWORK_WFP_INVENTORY_ROW
+{
+    unsigned long rowId;
+    unsigned long objectKind;
+    unsigned long flags;
+    unsigned long fieldMask;
+    unsigned long layerId;
+    unsigned long calloutId;
+    unsigned long long filterId;
+    unsigned long long weight;
+    unsigned long long objectAddress;
+    unsigned long long classifyAddress;
+    unsigned long long notifyAddress;
+    unsigned long long flowDeleteAddress;
+    unsigned long long ownerImageBase;
+    unsigned char providerKey[16];
+    unsigned char subLayerKey[16];
+    unsigned char objectKey[16];
+    wchar_t ownerModule[KSWORD_ARK_NETWORK_NAME_CHARS];
+} KSWORD_ARK_NETWORK_WFP_INVENTORY_ROW;
+
+// WFP inventory 响应。骨架阶段可返回 0 行与 AUDIT_STUB 状态。
+typedef struct _KSWORD_ARK_NETWORK_WFP_INVENTORY_RESPONSE
+{
+    unsigned long version;
+    unsigned long size;
+    unsigned long status;
+    unsigned long flags;
+    unsigned long totalRowCount;
+    unsigned long returnedRowCount;
+    unsigned long entrySize;
+    unsigned long sourceFlags;
+    unsigned long budgetRows;
+    unsigned long generation;
+    long lastStatus;
+    unsigned long reserved;
+    KSWORD_ARK_NETWORK_WFP_INVENTORY_ROW entries[1];
+} KSWORD_ARK_NETWORK_WFP_INVENTORY_RESPONSE;
+
+// NDIS chain 行。名称为诊断标签，不承诺包含完整设备实例路径。
+typedef struct _KSWORD_ARK_NETWORK_NDIS_CHAIN_ROW
+{
+    unsigned long rowId;
+    unsigned long objectKind;
+    unsigned long flags;
+    unsigned long fieldMask;
+    unsigned long ifIndex;
+    unsigned long filterOrder;
+    unsigned long reserved0;
+    unsigned long reserved1;
+    unsigned long long adapterLuid;
+    unsigned long long objectAddress;
+    unsigned long long parentObjectAddress;
+    unsigned long long driverObject;
+    unsigned long long imageBase;
+    wchar_t componentName[KSWORD_ARK_NETWORK_NAME_CHARS];
+    wchar_t ownerModule[KSWORD_ARK_NETWORK_NAME_CHARS];
+} KSWORD_ARK_NETWORK_NDIS_CHAIN_ROW;
+
+// NDIS chain 查询响应。后续 PDB traversal 必须维持 bounded traversal 和 count-first 语义。
+typedef struct _KSWORD_ARK_NETWORK_NDIS_CHAIN_RESPONSE
+{
+    unsigned long version;
+    unsigned long size;
+    unsigned long status;
+    unsigned long flags;
+    unsigned long totalRowCount;
+    unsigned long returnedRowCount;
+    unsigned long entrySize;
+    unsigned long sourceFlags;
+    unsigned long budgetRows;
+    unsigned long generation;
+    long lastStatus;
+    unsigned long reserved;
+    KSWORD_ARK_NETWORK_NDIS_CHAIN_ROW entries[1];
+} KSWORD_ARK_NETWORK_NDIS_CHAIN_RESPONSE;
 
 // 单条网络规则。port 为 0 表示匹配任意端口，processId 为 0 表示匹配任意进程。
 typedef struct _KSWORD_ARK_NETWORK_RULE

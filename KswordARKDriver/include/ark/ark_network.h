@@ -32,6 +32,38 @@ KswordARKNetworkQueryStatus(
     _Out_ size_t* BytesWrittenOut
     );
 
+NTSTATUS
+KswordARKNetworkQueryTcpEndpoints(
+    _In_opt_ const KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST* Request,
+    _Out_writes_bytes_(OutputBufferLength) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
+KswordARKNetworkQueryUdpEndpoints(
+    _In_opt_ const KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST* Request,
+    _Out_writes_bytes_(OutputBufferLength) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
+KswordARKNetworkQueryWfpInventory(
+    _In_opt_ const KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST* Request,
+    _Out_writes_bytes_(OutputBufferLength) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
+KswordARKNetworkQueryNdisChain(
+    _In_opt_ const KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST* Request,
+    _Out_writes_bytes_(OutputBufferLength) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
 BOOLEAN
 KswordARKNetworkShouldHidePort(
     _In_ ULONG Protocol,

@@ -972,6 +972,7 @@ Return Value:
     CHAR logMessage[KSWORD_ARK_LOG_ENTRY_MAX_BYTES] = { 0 };
 
     ExInitializePushLock(&g_KswordDynDataStateLock);
+    KswordARKDynDataV4Initialize();
     stateStatus = KswordARKDynDataBuildState(&newState);
     ExAcquirePushLockExclusive(&g_KswordDynDataStateLock);
     RtlCopyMemory(&g_KswordDynDataState, &newState, sizeof(g_KswordDynDataState));
@@ -1016,6 +1017,7 @@ Return Value:
 
 --*/
 {
+    KswordARKDynDataV4Uninitialize();
     ExAcquirePushLockExclusive(&g_KswordDynDataStateLock);
     RtlZeroMemory(&g_KswordDynDataState, sizeof(g_KswordDynDataState));
     ExReleasePushLockExclusive(&g_KswordDynDataStateLock);

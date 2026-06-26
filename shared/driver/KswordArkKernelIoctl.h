@@ -95,7 +95,9 @@
 #define KSWORD_ARK_DRIVER_OBJECT_PROTOCOL_VERSION 1UL
 #define KSWORD_ARK_KERNEL_HOOK_PROTOCOL_VERSION 1UL
 #define KSWORD_ARK_FORCE_UNLOAD_DRIVER_PROTOCOL_VERSION 1UL
-#define KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION 1UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION_V1 1UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION_V2 2UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION_V2
 #define KSWORD_ARK_CPU_HARDWARE_PROTOCOL_VERSION 1UL
 #define KSWORD_ARK_PHYSICAL_MEMORY_LAYOUT_PROTOCOL_VERSION 1UL
 
@@ -159,7 +161,8 @@
     (KSWORD_ARK_DRIVER_INTEGRITY_FLAG_DRIVER_OBJECT | \
      KSWORD_ARK_DRIVER_INTEGRITY_FLAG_SERVICE | \
      KSWORD_ARK_DRIVER_INTEGRITY_FLAG_CPU | \
-     KSWORD_ARK_DRIVER_INTEGRITY_FLAG_IDT_ENTRIES)
+     KSWORD_ARK_DRIVER_INTEGRITY_FLAG_IDT_ENTRIES | \
+     KSWORD_ARK_DRIVER_INTEGRITY_FLAG_OPTIONAL_GLOBALS)
 
 // Driver Integrity source mask.
 #define KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE       0x00000001UL
@@ -196,6 +199,36 @@
 #define KSWORD_ARK_DRIVER_INTEGRITY_RISK_DESCRIPTOR_INVALID    0x00020000UL
 #define KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE   0x00040000UL
 #define KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED             0x00080000UL
+
+// Driver Integrity response field flags.
+// These bits describe which v2 typed columns were populated by R0. Older R3
+// clients can ignore them because they reuse the former reserved response slot.
+#define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_COMMON                0x00000001UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_OWNER_MODULE          0x00000002UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DRIVER_OBJECT         0x00000004UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DEVICE_OBJECT         0x00000008UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DISPATCH_TARGET       0x00000010UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_FAST_IO_TARGET        0x00000020UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_KLDR                  0x00000040UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_OPTIONAL_GLOBAL       0x00000080UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_FIELD_CPU_CONTEXT           0x00000100UL
+
+// Driver Integrity response status flags.
+// These bits summarize whether rows are complete, partial, unsupported, or
+// truncated without requiring R3 to parse every evidence row first.
+#define KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL         0x00000001UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED     0x00000002UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_TRUNCATED       0x00000004UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PDB_REQUIRED    0x00000008UL
+
+// Driver Integrity per-entry target range state.
+// R0 only classifies observed pointers against loaded-module ranges; it never
+// patches or redirects targets based on these values.
+#define KSWORD_ARK_DRIVER_INTEGRITY_RANGE_UNKNOWN               0UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_RANGE_IN_DRIVER             1UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_RANGE_IN_OTHER_MODULE       2UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_RANGE_UNRESOLVED            3UL
+#define KSWORD_ARK_DRIVER_INTEGRITY_RANGE_NULL                  4UL
 
 // Driver Integrity evidence classes.
 #define KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MODULE_VIEW          1UL
@@ -236,6 +269,16 @@
 #define KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED      6UL
 #define KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED             7UL
 #define KSWORD_ARK_KERNEL_HOOK_STATUS_PATCH_FAILED        8UL
+
+// Kernel Hook module range state. These values are read-only evidence.
+#define KSWORD_ARK_KERNEL_HOOK_RANGE_UNKNOWN              0UL
+#define KSWORD_ARK_KERNEL_HOOK_RANGE_WITHIN_EXPECTED      1UL
+#define KSWORD_ARK_KERNEL_HOOK_RANGE_WITHIN_OTHER_MODULE  2UL
+#define KSWORD_ARK_KERNEL_HOOK_RANGE_UNRESOLVED           3UL
+
+// Kernel Hook first-byte hash status. The hash covers currentBytes only.
+#define KSWORD_ARK_KERNEL_HOOK_HASH_STATUS_UNAVAILABLE    0UL
+#define KSWORD_ARK_KERNEL_HOOK_HASH_STATUS_CURRENT_BYTES  1UL
 
 // Inline Hook 类型。
 #define KSWORD_ARK_INLINE_HOOK_TYPE_NONE                  0UL
@@ -419,7 +462,7 @@ typedef struct _KSWORD_ARK_INLINE_HOOK_ENTRY
     unsigned long flags;
     unsigned long originalByteCount;
     unsigned long currentByteCount;
-    unsigned long reserved;
+    unsigned long moduleRangeState;
     unsigned long long functionAddress;
     unsigned long long targetAddress;
     unsigned long long moduleBase;
@@ -429,6 +472,10 @@ typedef struct _KSWORD_ARK_INLINE_HOOK_ENTRY
     wchar_t targetModuleName[KSWORD_ARK_KERNEL_HOOK_MODULE_CHARS];
     unsigned char currentBytes[KSWORD_ARK_KERNEL_HOOK_BYTES];
     unsigned char expectedBytes[KSWORD_ARK_KERNEL_HOOK_BYTES];
+    unsigned long firstBytesHashStatus;
+    unsigned long firstBytesHash;
+    unsigned long long currentTargetAddress;
+    unsigned long long expectedOwnerBase;
 } KSWORD_ARK_INLINE_HOOK_ENTRY;
 
 typedef struct _KSWORD_ARK_SCAN_INLINE_HOOKS_RESPONSE
@@ -567,12 +614,20 @@ typedef struct _KSWORD_ARK_QUERY_DRIVER_INTEGRITY_REQUEST
     unsigned long maxIdtVectorsPerCpu;
     unsigned long maxDevices;
     unsigned long maxAttachedDevices;
-    unsigned long reserved0;
-    unsigned long reserved1;
+    unsigned long requestSize;
+    unsigned long requestFieldMask;
     unsigned long long targetModuleBase;
     wchar_t driverName[KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS];
 } KSWORD_ARK_QUERY_DRIVER_INTEGRITY_REQUEST;
 
+/*
+ * Driver Integrity evidence compatibility:
+ * - The fields through detail[] are the v1 prefix and must remain stable.
+ * - Protocol v2 appends typed columns so older R3 clients can keep using the
+ *   prefix while newer clients use entrySize/fieldMask/statusFlags.
+ * - Missing PDB/DynData data is reported as partial/unsupported; R0 never
+ *   guesses offsets from build numbers.
+ */
 typedef struct _KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE
 {
     unsigned long evidenceClass;
@@ -588,6 +643,28 @@ typedef struct _KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE
     unsigned long long ownerModuleBase;
     wchar_t ownerModule[KSWORD_ARK_DRIVER_INTEGRITY_OWNER_CHARS];
     wchar_t detail[KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS];
+    unsigned long entryStatus;
+    unsigned long statusFlags;
+    unsigned long fieldMask;
+    unsigned long riskScore;
+    unsigned long rangeState;
+    unsigned long ordinal;
+    unsigned long deviceType;
+    unsigned long deviceFlags;
+    unsigned long long driverObjectAddress;
+    unsigned long long driverStart;
+    unsigned long long driverSize;
+    unsigned long long driverSection;
+    unsigned long long driverUnload;
+    unsigned long long deviceObjectAddress;
+    unsigned long long nextDeviceObjectAddress;
+    unsigned long long attachedDeviceObjectAddress;
+    unsigned long long deviceDriverObjectAddress;
+    unsigned long long kldrEntryAddress;
+    unsigned long long kldrListHeadAddress;
+    unsigned long long kldrDllBase;
+    unsigned long kldrSizeOfImage;
+    unsigned long reserved2;
 } KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE;
 
 typedef struct _KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE
@@ -601,9 +678,9 @@ typedef struct _KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE
     unsigned long entrySize;
     unsigned long cpuCount;
     unsigned long moduleCount;
-    unsigned long reserved;
+    unsigned long fieldFlags;
     long lastStatus;
-    unsigned long reserved1;
+    unsigned long statusFlags;
     KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE entries[1];
 } KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE;
 

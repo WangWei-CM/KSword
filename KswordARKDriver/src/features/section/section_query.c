@@ -392,6 +392,9 @@ Return Value:
         if (sectionPointers != NULL) {
             dataControlArea = sectionPointers->DataSectionObject;
             imageControlArea = sectionPointers->ImageSectionObject;
+            response->dataSectionObjectAddress = (ULONG64)(ULONG_PTR)sectionPointers->DataSectionObject;
+            response->imageSectionObjectAddress = (ULONG64)(ULONG_PTR)sectionPointers->ImageSectionObject;
+            response->sharedCacheMapAddress = (ULONG64)(ULONG_PTR)sectionPointers->SharedCacheMap;
             response->dataControlAreaAddress = (ULONG64)(ULONG_PTR)dataControlArea;
             response->imageControlAreaAddress = (ULONG64)(ULONG_PTR)imageControlArea;
         }

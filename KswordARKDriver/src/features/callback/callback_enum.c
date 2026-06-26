@@ -83,27 +83,39 @@ typedef enum _KSWORD_ARK_CALLBACK_ENUM_OBJECT_LIST_STATE
 
 static const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT g_KswordArkCallbackEnumPdbNotifySourceContext = {
     KSWORD_ARK_CALLBACK_ENUM_SOURCE_PDB_PROFILE,
-    KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE,
+    KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE |
+        KSWORD_ARK_CALLBACK_TRUST_PROFILE_GATED |
+        KSWORD_ARK_CALLBACK_TRUST_STORAGE_VALIDATED,
     KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_PUBLIC_API | KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_REQUIRE_REVALIDATION,
     KSWORD_ARK_CALLBACK_ENUM_FIELD_TRUSTED |
         KSWORD_ARK_CALLBACK_ENUM_FIELD_VERIFIED_REMOVE |
-        KSWORD_ARK_CALLBACK_ENUM_FIELD_RAW_STORAGE_VALUE,
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_RAW_STORAGE_VALUE |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_STORAGE_ADDRESS |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_PROFILE_GATED,
     L"PDB callback profile trusted notify array"
 };
 
 static const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT g_KswordArkCallbackEnumPdbRegistrySourceContext = {
     KSWORD_ARK_CALLBACK_ENUM_SOURCE_PDB_PROFILE,
-    KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE,
+    KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE |
+        KSWORD_ARK_CALLBACK_TRUST_PROFILE_GATED |
+        KSWORD_ARK_CALLBACK_TRUST_STORAGE_VALIDATED,
     KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_NONE,
-    KSWORD_ARK_CALLBACK_ENUM_FIELD_TRUSTED,
+    KSWORD_ARK_CALLBACK_ENUM_FIELD_TRUSTED |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_STORAGE_ADDRESS |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_PROFILE_GATED,
     L"PDB callback profile trusted registry list"
 };
 
 static const KSWORD_ARK_CALLBACK_ENUM_SOURCE_CONTEXT g_KswordArkCallbackEnumPdbObjectSourceContext = {
     KSWORD_ARK_CALLBACK_ENUM_SOURCE_PDB_PROFILE,
-    KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE,
+    KSWORD_ARK_CALLBACK_TRUST_PDB_PROFILE |
+        KSWORD_ARK_CALLBACK_TRUST_PROFILE_GATED |
+        KSWORD_ARK_CALLBACK_TRUST_STORAGE_VALIDATED,
     KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_NONE,
-    KSWORD_ARK_CALLBACK_ENUM_FIELD_TRUSTED,
+    KSWORD_ARK_CALLBACK_ENUM_FIELD_TRUSTED |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_STORAGE_ADDRESS |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_PROFILE_GATED,
     L"PDB callback profile trusted object list"
 };
 
@@ -1243,6 +1255,14 @@ KswordArkCallbackEnumFinalizeModule(
         &Entry->moduleSize);
     if (NT_SUCCESS(status)) {
         Entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_MODULE;
+        Entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_OWNER_MODULE_RANGE;
+        Entry->trustFlags |= KSWORD_ARK_CALLBACK_TRUST_OWNER_MODULE_RESOLVED;
+        Entry->ownerRangeState = KSWORD_ARK_CALLBACK_OWNER_RANGE_WITHIN_MODULE;
+    }
+    else {
+        Entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_OWNER_MODULE_RANGE;
+        Entry->trustFlags |= KSWORD_ARK_CALLBACK_TRUST_OWNER_MODULE_MISSING;
+        Entry->ownerRangeState = KSWORD_ARK_CALLBACK_OWNER_RANGE_MODULE_UNRESOLVED;
     }
 }
 
@@ -1284,6 +1304,14 @@ Return Value:
         &Entry->moduleSize);
     if (NT_SUCCESS(status)) {
         Entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_MODULE;
+        Entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_OWNER_MODULE_RANGE;
+        Entry->trustFlags |= KSWORD_ARK_CALLBACK_TRUST_OWNER_MODULE_RESOLVED;
+        Entry->ownerRangeState = KSWORD_ARK_CALLBACK_OWNER_RANGE_WITHIN_MODULE;
+    }
+    else {
+        Entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_OWNER_MODULE_RANGE;
+        Entry->trustFlags |= KSWORD_ARK_CALLBACK_TRUST_OWNER_MODULE_MISSING;
+        Entry->ownerRangeState = KSWORD_ARK_CALLBACK_OWNER_RANGE_MODULE_UNRESOLVED;
     }
 }
 
@@ -1417,6 +1445,7 @@ Return Value:
     }
     if (RegistrationAddress != 0ULL) {
         entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_REGISTRATION_ADDRESS;
+        entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_STORAGE_ADDRESS;
     }
     if (OperationMask != 0UL) {
         entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_OPERATION_MASK;
@@ -1649,8 +1678,14 @@ Return Value:
     entry->fieldFlags = KSWORD_ARK_CALLBACK_ENUM_FIELD_HANDLE |
         KSWORD_ARK_CALLBACK_ENUM_FIELD_CALLBACK_ADDRESS |
         KSWORD_ARK_CALLBACK_ENUM_FIELD_REGISTRATION_ADDRESS |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_STORAGE_ADDRESS |
         KSWORD_ARK_CALLBACK_ENUM_FIELD_NAME |
-        KSWORD_ARK_CALLBACK_ENUM_FIELD_REMOVABLE_CANDIDATE;
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_REMOVABLE_CANDIDATE |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_VERIFIED_REMOVE;
+    entry->trustFlags = KSWORD_ARK_CALLBACK_TRUST_PUBLIC_API |
+        KSWORD_ARK_CALLBACK_TRUST_STORAGE_VALIDATED;
+    entry->removeBehavior = KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_PUBLIC_API |
+        KSWORD_ARK_CALLBACK_REMOVE_BEHAVIOR_REQUIRE_REVALIDATION;
     entry->lastStatus = status;
 
     if (NT_SUCCESS(status) && filterInfo != NULL && ((filterInfo->Flags & FLTFL_ASI_IS_MINIFILTER) != 0UL)) {
@@ -1824,6 +1859,7 @@ Return Value:
     entry->fieldFlags = KSWORD_ARK_CALLBACK_ENUM_FIELD_NAME;
     if (LocatedAddress != 0ULL) {
         entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_REGISTRATION_ADDRESS;
+        entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_STORAGE_ADDRESS;
     }
     KswordArkCallbackEnumCopyWide(entry->name, RTL_NUMBER_OF(entry->name), NameText);
     KswordArkCallbackEnumCopyWide(entry->detail, RTL_NUMBER_OF(entry->detail), DetailText);
@@ -2252,7 +2288,8 @@ Return Value:
         KSWORD_ARK_CALLBACK_ENUM_FIELD_REGISTRATION_ADDRESS |
         KSWORD_ARK_CALLBACK_ENUM_FIELD_NAME |
         KSWORD_ARK_CALLBACK_ENUM_FIELD_REMOVABLE_CANDIDATE |
-        KSWORD_ARK_CALLBACK_ENUM_FIELD_OPERATION_MASK;
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_OPERATION_MASK |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_STORAGE_ADDRESS;
     entry->operationMask = OperationMask;
     entry->callbackAddress = FunctionAddress;
     entry->contextAddress = ContextAddress;
@@ -2261,6 +2298,9 @@ Return Value:
     if (SourceContext != NULL &&
         (SourceContext->ExtraFieldFlags & KSWORD_ARK_CALLBACK_ENUM_FIELD_RAW_STORAGE_VALUE) != 0UL) {
         entry->rawStorageValue = FastRefValue;
+    }
+    if (SourceContext == NULL) {
+        entry->trustFlags |= KSWORD_ARK_CALLBACK_TRUST_FALLBACK_PATTERN;
     }
 
     (VOID)RtlStringCbPrintfW(
@@ -2441,12 +2481,16 @@ Return Value:
         KSWORD_ARK_CALLBACK_ENUM_FIELD_REGISTRATION_ADDRESS |
         KSWORD_ARK_CALLBACK_ENUM_FIELD_NAME |
         KSWORD_ARK_CALLBACK_ENUM_FIELD_REMOVABLE_CANDIDATE |
-        KSWORD_ARK_CALLBACK_ENUM_FIELD_OPERATION_MASK;
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_OPERATION_MASK |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_STORAGE_ADDRESS;
     entry->operationMask = KSWORD_ARK_REG_OP_ALL;
     entry->callbackAddress = FunctionAddress;
     entry->contextAddress = ContextAddress;
     entry->registrationAddress = EntryAddress;
     KswordArkCallbackEnumApplySourceContext(entry, SourceContext);
+    if (SourceContext == NULL) {
+        entry->trustFlags |= KSWORD_ARK_CALLBACK_TRUST_FALLBACK_PATTERN;
+    }
 
     (VOID)RtlStringCbPrintfW(
         entry->name,
@@ -3159,7 +3203,8 @@ Return Value:
         KSWORD_ARK_CALLBACK_ENUM_FIELD_NAME |
         KSWORD_ARK_CALLBACK_ENUM_FIELD_REMOVABLE_CANDIDATE |
         KSWORD_ARK_CALLBACK_ENUM_FIELD_OPERATION_MASK |
-        KSWORD_ARK_CALLBACK_ENUM_FIELD_OBJECT_TYPE_MASK;
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_OBJECT_TYPE_MASK |
+        KSWORD_ARK_CALLBACK_ENUM_FIELD_STORAGE_ADDRESS;
     entry->operationMask = OperationMask;
     entry->objectTypeMask = ObjectTypeMask;
     entry->callbackAddress = CallbackAddress;
@@ -3169,6 +3214,9 @@ Return Value:
         entry->fieldFlags |= KSWORD_ARK_CALLBACK_ENUM_FIELD_CONTEXT_ADDRESS;
     }
     KswordArkCallbackEnumApplySourceContext(entry, SourceContext);
+    if (SourceContext == NULL) {
+        entry->trustFlags |= KSWORD_ARK_CALLBACK_TRUST_FALLBACK_PATTERN;
+    }
 
     (VOID)RtlStringCbPrintfW(
         entry->name,

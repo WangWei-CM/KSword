@@ -419,6 +419,77 @@ Return Value:
 #endif
 }
 
+static VOID
+KswordARKPageTableFinalizeInfo(
+    _Inout_ KSWORD_ARK_PAGE_TABLE_ENTRY_INFO* Info
+    )
+/*++
+
+Routine Description:
+
+    填充页表查询的派生展示字段。中文说明：该函数只根据只读 walker 已经得到
+    的 flags/status 计算 confidence、protection 和 NX/write/user/global/large
+    标量，避免 R3 为常用列重复解释底层 bit。
+
+Arguments:
+
+    Info - 页表查询结果结构。
+
+Return Value:
+
+    None. 函数只写入 Info。
+
+--*/
+{
+    ULONG protection = 0UL;
+
+    if (Info == NULL) {
+        return;
+    }
+    if ((Info->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_PRESENT) != 0UL) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_PRESENT |
+            KSWORD_ARK_MEMORY_PROTECTION_READ;
+    }
+    if ((Info->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_WRITABLE) != 0UL) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_WRITE;
+        Info->writeFlag = 1UL;
+    }
+    if ((Info->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_NX) != 0UL) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_NX;
+        Info->nxFlag = 1UL;
+    }
+    else if ((Info->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_PRESENT) != 0UL) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_EXECUTE;
+    }
+    if ((Info->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_USER) != 0UL) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_USER;
+        Info->userFlag = 1UL;
+    }
+    if ((Info->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_GLOBAL) != 0UL) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_GLOBAL;
+        Info->globalFlag = 1UL;
+    }
+    if ((Info->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_LARGE_PAGE) != 0UL ||
+        Info->largePageType != KSWORD_ARK_PAGE_TABLE_LARGE_PAGE_NONE) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_LARGE;
+        Info->largePageFlag = 1UL;
+    }
+    Info->protection = protection;
+
+    if (Info->queryStatus == KSWORD_ARK_MEMORY_TRANSLATE_STATUS_OK && Info->resolved != 0UL) {
+        Info->confidence = KSWORD_ARK_PAGE_TABLE_CONFIDENCE_HIGH;
+    }
+    else if (Info->queryStatus == KSWORD_ARK_MEMORY_TRANSLATE_STATUS_NOT_PRESENT) {
+        Info->confidence = KSWORD_ARK_PAGE_TABLE_CONFIDENCE_LOW;
+    }
+    else if (Info->queryStatus == KSWORD_ARK_MEMORY_TRANSLATE_STATUS_UNAVAILABLE) {
+        Info->confidence = KSWORD_ARK_PAGE_TABLE_CONFIDENCE_UNKNOWN;
+    }
+    else {
+        Info->confidence = KSWORD_ARK_PAGE_TABLE_CONFIDENCE_MEDIUM;
+    }
+}
+
 static NTSTATUS
 KswordARKPageTableResolveProcess(
     _In_ ULONG ProcessId,
@@ -703,6 +774,7 @@ Return Value:
     if (!NT_SUCCESS(status)) {
         Info->queryStatus = KSWORD_ARK_MEMORY_TRANSLATE_STATUS_PROCESS_LOOKUP_FAILED;
         Info->walkStatus = STATUS_NOT_FOUND;
+        KswordARKPageTableFinalizeInfo(Info);
         return STATUS_SUCCESS;
     }
 
@@ -714,6 +786,7 @@ Return Value:
         Info->queryStatus = KSWORD_ARK_MEMORY_TRANSLATE_STATUS_READ_FAILED;
         Info->walkStatus = status;
     }
+    KswordARKPageTableFinalizeInfo(Info);
 
     return STATUS_SUCCESS;
 }

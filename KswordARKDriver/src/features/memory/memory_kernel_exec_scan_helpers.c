@@ -130,6 +130,42 @@ Return Value:
     return FALSE;
 }
 
+static ULONG64
+KswordARKKernelExecFnv1a64(
+    _In_reads_bytes_(BytesToHash) const UCHAR* Bytes,
+    _In_ ULONG BytesToHash
+    )
+/*++
+
+Routine Description:
+
+    计算 executable 首字节样本的 FNV-1a 64 位哈希。中文说明：调用方已经把
+    内核字节复制到本地缓冲，本函数不访问目标地址，也不返回原始字节。
+
+Arguments:
+
+    Bytes - 本地样本缓冲。
+    BytesToHash - 样本长度。
+
+Return Value:
+
+    哈希值；输入为空时返回 0。
+
+--*/
+{
+    ULONG index = 0UL;
+    ULONG64 hash = 1469598103934665603ULL;
+
+    if (Bytes == NULL || BytesToHash == 0UL) {
+        return 0ULL;
+    }
+    for (index = 0UL; index < BytesToHash; ++index) {
+        hash ^= (ULONG64)Bytes[index];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
 BOOLEAN
 KswordARKKernelExecSafeModuleRange(
     _In_ const KSW_HOOK_SYSTEM_MODULE_ENTRY* ModuleEntry,
@@ -212,7 +248,11 @@ Return Value:
     }
     if (Left->moduleBase != Right->moduleBase ||
         Left->moduleSize != Right->moduleSize ||
-        Left->pageSize != Right->pageSize) {
+        Left->pageSize != Right->pageSize ||
+        Left->sectionOwnerBase != Right->sectionOwnerBase ||
+        Left->sectionRva != Right->sectionRva ||
+        Left->sectionSize != Right->sectionSize ||
+        Left->unknownExecutable != Right->unknownExecutable) {
         return FALSE;
     }
 
@@ -229,8 +269,17 @@ Return Value:
         return FALSE;
     }
     if (Left->effectiveFlags != Right->effectiveFlags ||
+        Left->protection != Right->protection ||
         Left->riskFlags != Right->riskFlags ||
-        Left->ownerKind != Right->ownerKind) {
+        Left->ownerKind != Right->ownerKind ||
+        Left->hashAlgorithm != Right->hashAlgorithm ||
+        Left->hashStatus != Right->hashStatus ||
+        Left->firstBytesHashed != Right->firstBytesHashed ||
+        RtlCompareMemory(
+            Left->sectionName,
+            Right->sectionName,
+            KSWORD_ARK_KERNEL_EXEC_SECTION_NAME_BYTES) !=
+            KSWORD_ARK_KERNEL_EXEC_SECTION_NAME_BYTES) {
         return FALSE;
     }
     return Right->virtualAddress == leftEnd;
@@ -264,9 +313,15 @@ Return Value:
     }
 
     Target->effectiveFlags |= Source->effectiveFlags;
+    Target->protection |= Source->protection;
     Target->riskFlags |= Source->riskFlags;
     if (Source->ownerKind > Target->ownerKind) {
         Target->ownerKind = Source->ownerKind;
+    }
+    if (Target->hashStatus != KSWORD_ARK_KERNEL_EXEC_HASH_STATUS_READ_FAILED &&
+        Source->hashStatus == KSWORD_ARK_KERNEL_EXEC_HASH_STATUS_READ_FAILED) {
+        Target->hashStatus = Source->hashStatus;
+        Target->riskFlags |= KSWORD_ARK_KERNEL_EXEC_RISK_FIRST_BYTES_UNREADABLE;
     }
 }
 
@@ -302,10 +357,13 @@ Return Value:
     if (State->HaveLastAggregate) {
         if (KswordARKKernelExecCanMergeEntry(&State->LastAggregate, Candidate, &overlap)) {
             State->LastAggregate.pageCount += Candidate->pageCount;
+            State->LastAggregate.regionSize += Candidate->regionSize;
             KswordARKKernelExecMakeEntryMoreConservative(&State->LastAggregate, Candidate);
             if (!State->Truncated && State->Response->returnedCount > 0UL) {
                 State->Response->entries[State->Response->returnedCount - 1UL].pageCount =
                     State->LastAggregate.pageCount;
+                State->Response->entries[State->Response->returnedCount - 1UL].regionSize =
+                    State->LastAggregate.regionSize;
                 KswordARKKernelExecMakeEntryMoreConservative(
                     &State->Response->entries[State->Response->returnedCount - 1UL],
                     Candidate);
@@ -478,7 +536,139 @@ Return Value:
         OwnerKind == KSWORD_ARK_KERNEL_EXEC_OWNER_MODULE_NON_TEXT) {
         return TRUE;
     }
+    if ((effectiveFlags & KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_UNKNOWN_EXECUTABLE) != 0UL &&
+        (RiskFlags & KSWORD_ARK_KERNEL_EXEC_RISK_UNKNOWN_EXECUTABLE) != 0UL) {
+        return TRUE;
+    }
     return FALSE;
+}
+
+ULONG
+KswordARKKernelExecProtectionFromPage(
+    _In_ const KSWORD_ARK_PAGE_TABLE_ENTRY_INFO* PageInfo
+    )
+/*++
+
+Routine Description:
+
+    将页表 effectiveFlags 转为内存保护摘要。中文说明：该摘要只用于 R3 展示
+    P/R/W/X/NX/large/global/user 状态，不驱动任何写入或修复动作。
+
+Arguments:
+
+    PageInfo - 页表只读查询结果。
+
+Return Value:
+
+    KSWORD_ARK_MEMORY_PROTECTION_* 位图；输入无效时返回 0。
+
+--*/
+{
+    ULONG protection = 0UL;
+
+    if (PageInfo == NULL) {
+        return 0UL;
+    }
+    if ((PageInfo->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_PRESENT) != 0UL) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_PRESENT |
+            KSWORD_ARK_MEMORY_PROTECTION_READ;
+    }
+    if ((PageInfo->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_WRITABLE) != 0UL) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_WRITE;
+    }
+    if ((PageInfo->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_NX) != 0UL) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_NX;
+    }
+    else if ((PageInfo->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_PRESENT) != 0UL) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_EXECUTE;
+    }
+    if ((PageInfo->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_GLOBAL) != 0UL) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_GLOBAL;
+    }
+    if ((PageInfo->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_USER) != 0UL) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_USER;
+    }
+    if ((PageInfo->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_LARGE_PAGE) != 0UL ||
+        PageInfo->largePageType != KSWORD_ARK_PAGE_TABLE_LARGE_PAGE_NONE) {
+        protection |= KSWORD_ARK_MEMORY_PROTECTION_LARGE;
+    }
+    return protection;
+}
+
+BOOLEAN
+KswordARKKernelExecReadFirstBytesHash(
+    _In_ ULONG64 VirtualAddress,
+    _In_ ULONG BytesToHash,
+    _Out_ ULONG64* HashOut,
+    _Out_ ULONG* BytesHashedOut
+    )
+/*++
+
+Routine Description:
+
+    只读复制 executable 首字节并计算哈希。中文说明：函数使用 MmCopyMemory
+    virtual 路径和 SEH 保护，只返回哈希/长度，不返回原始字节，不修改目标页。
+
+Arguments:
+
+    VirtualAddress - 待读取的内核虚拟地址。
+    BytesToHash - 请求哈希长度，调用方已做硬上限归一化。
+    HashOut - 接收 FNV-1a 64 位哈希。
+    BytesHashedOut - 接收实际哈希字节数。
+
+Return Value:
+
+    TRUE 表示完整读取并完成哈希；FALSE 表示读取失败或参数无效。
+
+--*/
+{
+    UCHAR localBytes[KSWORD_ARK_KERNEL_EXEC_FIRST_BYTES_HARD_MAX];
+    MM_COPY_ADDRESS copyAddress;
+    SIZE_T copiedBytes = 0U;
+    ULONG hashLength = BytesToHash;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (HashOut != NULL) {
+        *HashOut = 0ULL;
+    }
+    if (BytesHashedOut != NULL) {
+        *BytesHashedOut = 0UL;
+    }
+    if (VirtualAddress == 0ULL ||
+        HashOut == NULL ||
+        BytesHashedOut == NULL ||
+        hashLength == 0UL) {
+        return FALSE;
+    }
+    if (hashLength > KSWORD_ARK_KERNEL_EXEC_FIRST_BYTES_HARD_MAX) {
+        hashLength = KSWORD_ARK_KERNEL_EXEC_FIRST_BYTES_HARD_MAX;
+    }
+
+    RtlZeroMemory(localBytes, sizeof(localBytes));
+    RtlZeroMemory(&copyAddress, sizeof(copyAddress));
+    copyAddress.VirtualAddress = (PVOID)(ULONG_PTR)VirtualAddress;
+    __try {
+        status = MmCopyMemory(
+            localBytes,
+            copyAddress,
+            (SIZE_T)hashLength,
+            MM_COPY_MEMORY_VIRTUAL,
+            &copiedBytes);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+        copiedBytes = 0U;
+    }
+
+    if (!NT_SUCCESS(status) || copiedBytes != (SIZE_T)hashLength) {
+        RtlZeroMemory(localBytes, sizeof(localBytes));
+        return FALSE;
+    }
+
+    *HashOut = KswordARKKernelExecFnv1a64(localBytes, hashLength);
+    *BytesHashedOut = hashLength;
+    RtlZeroMemory(localBytes, sizeof(localBytes));
+    return TRUE;
 }
 
 VOID
@@ -488,16 +678,17 @@ KswordARKKernelExecFillCandidate(
     _In_ const KSW_HOOK_SYSTEM_MODULE_ENTRY* ModuleEntry,
     _In_reads_bytes_(ModulePathBytes) const UCHAR* ModulePath,
     _In_ ULONG ModulePathBytes,
-    _In_ BOOLEAN IsTextLikeSection,
-    _In_ BOOLEAN IsWritableSection,
+    _In_ const KSW_KERNEL_EXEC_SECTION_OWNER* SectionOwner,
+    _In_ ULONG HashBytes,
     _Out_ KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY* Candidate
     )
 /*++
 
 Routine Description:
 
-    构造一个内核 executable page 响应行。中文说明：ownerKind/riskFlags 根据 PE
-    section 属性和页表 effectiveFlags 共同确定，模块路径来自 SystemModuleInformation。
+    构造一个内核 executable page 响应行。中文说明：ownerKind/riskFlags 根据
+    PE section 归因、页表 effectiveFlags 和首字节哈希状态共同确定，模块路径
+    来自 SystemModuleInformation；函数只读内存，不返回样本原始字节。
 
 Arguments:
 
@@ -506,8 +697,8 @@ Arguments:
     ModuleEntry - 所属已加载模块。
     ModulePath - 模块路径 ANSI 区间。
     ModulePathBytes - 模块路径最大字节数。
-    IsTextLikeSection - 当前 section 是否为 text/code。
-    IsWritableSection - 当前 section PE 属性是否可写。
+    SectionOwner - 当前页 section 归因信息。
+    HashBytes - 首字节哈希长度；0 表示不计算。
     Candidate - 输出响应行。
 
 Return Value:
@@ -518,24 +709,35 @@ Return Value:
 {
     ULONG ownerKind = KSWORD_ARK_KERNEL_EXEC_OWNER_MODULE_TEXT;
     ULONG riskFlags = KSWORD_ARK_KERNEL_EXEC_RISK_NONE;
+    ULONG pageSize = PAGE_SIZE;
 
     if (Candidate == NULL || PageInfo == NULL || ModuleEntry == NULL) {
         return;
     }
 
     RtlZeroMemory(Candidate, sizeof(*Candidate));
+    pageSize = (PageInfo->pageSize != 0UL) ? PageInfo->pageSize : PAGE_SIZE;
     Candidate->virtualAddress = PageAddress;
+    Candidate->regionSize = (ULONG64)pageSize;
     Candidate->pageCount = 1UL;
-    Candidate->pageSize = PageInfo->pageSize;
+    Candidate->pageSize = pageSize;
     Candidate->effectiveFlags = PageInfo->effectiveFlags;
+    Candidate->protection = KswordARKKernelExecProtectionFromPage(PageInfo);
     Candidate->moduleBase = (ULONG64)(ULONG_PTR)ModuleEntry->ImageBase;
     Candidate->moduleSize = ModuleEntry->ImageSize;
+    Candidate->hashAlgorithm = KSWORD_ARK_KERNEL_EXEC_HASH_NONE;
+    Candidate->hashStatus = KSWORD_ARK_KERNEL_EXEC_HASH_STATUS_UNAVAILABLE;
 
-    if (!IsTextLikeSection) {
+    if (SectionOwner == NULL || !SectionOwner->Found) {
+        ownerKind = KSWORD_ARK_KERNEL_EXEC_OWNER_MODULE_UNKNOWN_SECTION;
+        riskFlags |= KSWORD_ARK_KERNEL_EXEC_RISK_UNKNOWN_EXECUTABLE;
+        Candidate->unknownExecutable = 1UL;
+    }
+    else if (!SectionOwner->IsTextLike) {
         ownerKind = KSWORD_ARK_KERNEL_EXEC_OWNER_MODULE_NON_TEXT;
         riskFlags |= KSWORD_ARK_KERNEL_EXEC_RISK_MODULE_NON_TEXT_EXECUTABLE;
     }
-    if (IsWritableSection) {
+    if (SectionOwner != NULL && SectionOwner->IsWritable) {
         riskFlags |= KSWORD_ARK_KERNEL_EXEC_RISK_SECTION_WRITABLE;
     }
     if ((PageInfo->effectiveFlags & KSWORD_ARK_PAGE_TABLE_FLAG_WRITABLE) != 0UL) {
@@ -544,6 +746,35 @@ Return Value:
     }
     if (PageInfo->largePageType != KSWORD_ARK_PAGE_TABLE_LARGE_PAGE_NONE) {
         riskFlags |= KSWORD_ARK_KERNEL_EXEC_RISK_LARGE_PAGE;
+    }
+
+    if (SectionOwner != NULL) {
+        Candidate->sectionOwnerBase = Candidate->moduleBase;
+        Candidate->sectionRva = SectionOwner->SectionRva;
+        Candidate->sectionSize = SectionOwner->SectionSize;
+        RtlCopyMemory(
+            Candidate->sectionName,
+            SectionOwner->SectionName,
+            KSWORD_ARK_KERNEL_EXEC_SECTION_NAME_BYTES);
+    }
+    if (HashBytes != 0UL) {
+        ULONG bytesHashed = 0UL;
+        ULONG64 contentHash = 0ULL;
+
+        if (KswordARKKernelExecReadFirstBytesHash(
+            PageAddress,
+            HashBytes,
+            &contentHash,
+            &bytesHashed)) {
+            Candidate->hashAlgorithm = KSWORD_ARK_KERNEL_EXEC_HASH_FNV1A64;
+            Candidate->hashStatus = KSWORD_ARK_KERNEL_EXEC_HASH_STATUS_OK;
+            Candidate->firstBytesHashed = bytesHashed;
+            Candidate->contentHash = contentHash;
+        }
+        else {
+            Candidate->hashStatus = KSWORD_ARK_KERNEL_EXEC_HASH_STATUS_READ_FAILED;
+            riskFlags |= KSWORD_ARK_KERNEL_EXEC_RISK_FIRST_BYTES_UNREADABLE;
+        }
     }
 
     Candidate->ownerKind = ownerKind;
@@ -563,8 +794,7 @@ KswordARKKernelExecClassifyPageBySections(
     _In_ ULONG ModuleSize,
     _In_ ULONG64 PageAddress,
     _In_ ULONG PageSize,
-    _Out_ BOOLEAN* IsTextLikeOut,
-    _Out_ BOOLEAN* IsWritableOut
+    _Out_ KSW_KERNEL_EXEC_SECTION_OWNER* SectionOwnerOut
     )
 /*++
 
@@ -582,8 +812,7 @@ Arguments:
     ModuleSize - 模块映像大小。
     PageAddress - 当前页起始地址。
     PageSize - 当前页大小，来自页表解析或默认 4KB。
-    IsTextLikeOut - 返回 TRUE 表示该页只命中 text/code section。
-    IsWritableOut - 返回 TRUE 表示该页命中任一 writable section。
+    SectionOwnerOut - 返回 section 命中、text/writable 和第一条 section 归因。
 
 Return Value:
 
@@ -597,14 +826,16 @@ Return Value:
     BOOLEAN hasTextSection = FALSE;
     BOOLEAN hasNonTextSection = FALSE;
     BOOLEAN hasWritableSection = FALSE;
+    BOOLEAN hasAnySection = FALSE;
 
-    if (IsTextLikeOut != NULL) {
-        *IsTextLikeOut = FALSE;
+    if (SectionOwnerOut != NULL) {
+        RtlZeroMemory(SectionOwnerOut, sizeof(*SectionOwnerOut));
     }
-    if (IsWritableOut != NULL) {
-        *IsWritableOut = FALSE;
-    }
-    if (SectionHeaders == NULL || SectionCount == 0UL || ModuleSize == 0UL || PageSize == 0UL) {
+    if (SectionOwnerOut == NULL ||
+        SectionHeaders == NULL ||
+        SectionCount == 0UL ||
+        ModuleSize == 0UL ||
+        PageSize == 0UL) {
         return;
     }
     if ((ULONG64)PageSize > (MAXULONGLONG - PageAddress)) {
@@ -644,6 +875,7 @@ Return Value:
             continue;
         }
 
+        hasAnySection = TRUE;
         if (KswordARKKernelExecSectionIsTextLike(sectionHeader)) {
             hasTextSection = TRUE;
         }
@@ -653,12 +885,18 @@ Return Value:
         if ((sectionHeader->Characteristics & IMAGE_SCN_MEM_WRITE) != 0UL) {
             hasWritableSection = TRUE;
         }
+        if (SectionOwnerOut->SectionRva == 0UL &&
+            SectionOwnerOut->SectionSize == 0UL) {
+            SectionOwnerOut->SectionRva = sectionHeader->VirtualAddress;
+            SectionOwnerOut->SectionSize = sectionSize;
+            RtlCopyMemory(
+                SectionOwnerOut->SectionName,
+                sectionHeader->Name,
+                KSWORD_ARK_KERNEL_EXEC_SECTION_NAME_BYTES);
+        }
     }
 
-    if (IsTextLikeOut != NULL) {
-        *IsTextLikeOut = (hasTextSection && !hasNonTextSection) ? TRUE : FALSE;
-    }
-    if (IsWritableOut != NULL) {
-        *IsWritableOut = hasWritableSection;
-    }
+    SectionOwnerOut->Found = hasAnySection;
+    SectionOwnerOut->IsTextLike = (hasTextSection && !hasNonTextSection) ? TRUE : FALSE;
+    SectionOwnerOut->IsWritable = hasWritableSection;
 }

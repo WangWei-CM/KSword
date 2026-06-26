@@ -348,6 +348,126 @@ KswordARKDriverIntegrityPointerRisk(
     }
     return riskFlags;
 }
+static KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE*
+KswordARKDriverIntegrityLastEvidence(
+    _Inout_ KSW_DRIVER_INTEGRITY_BUILDER* Builder,
+    _In_ ULONG EvidenceClass,
+    _In_ ULONGLONG ObjectAddress,
+    _In_ ULONGLONG TargetAddress
+    )
+
+/* Read-only helper; returns the last row when it matches the just-added evidence, otherwise NULL. */
+{
+    KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE* response = NULL;
+    KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE* row = NULL;
+    if (Builder == NULL || Builder->Response == NULL || Builder->Response->returnedCount == 0UL) {
+        return NULL;
+    }
+    response = Builder->Response;
+    row = &response->entries[response->returnedCount - 1UL];
+    if (row->evidenceClass != EvidenceClass || row->objectAddress != ObjectAddress || row->targetAddress != TargetAddress) {
+        return NULL;
+    }
+    return row;
+}
+static ULONG
+KswordARKDriverIntegrityRangeState(
+    _In_opt_ const KSW_HOOK_SYSTEM_MODULE_INFORMATION* ModuleInfo,
+    _In_opt_ const KSW_HOOK_SYSTEM_MODULE_ENTRY* DriverModule,
+    _In_ ULONGLONG Address
+    )
+
+/* Read-only helper; classifies an observed pointer into driver, other module, unresolved, or NULL range. */
+{
+    const KSW_HOOK_SYSTEM_MODULE_ENTRY* ownerModule = NULL;
+    if (Address == 0ULL) {
+        return KSWORD_ARK_DRIVER_INTEGRITY_RANGE_NULL;
+    }
+    ownerModule = KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, Address);
+    if (ownerModule == NULL) {
+        return KSWORD_ARK_DRIVER_INTEGRITY_RANGE_UNRESOLVED;
+    }
+    if (DriverModule != NULL && ownerModule->ImageBase == DriverModule->ImageBase) {
+        return KSWORD_ARK_DRIVER_INTEGRITY_RANGE_IN_DRIVER;
+    }
+    return KSWORD_ARK_DRIVER_INTEGRITY_RANGE_IN_OTHER_MODULE;
+}
+static ULONG
+KswordARKDriverIntegrityScoreRisk(
+    _In_ ULONG RiskFlags
+    )
+
+/* Read-only helper; maps evidence bits to a bounded 0..100 score without changing system state. */
+{
+    ULONG score = 0UL;
+    if ((RiskFlags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED) != 0UL) {
+        score += 25UL;
+    }
+    if ((RiskFlags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE) != 0UL) {
+        score += 20UL;
+    }
+    if ((RiskFlags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED) != 0UL) {
+        score += 35UL;
+    }
+    if ((RiskFlags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_OWNER_MISMATCH) != 0UL) {
+        score += 45UL;
+    }
+    if ((RiskFlags & (KSWORD_ARK_DRIVER_INTEGRITY_RISK_OUTSIDE_DRIVER_IMAGE | KSWORD_ARK_DRIVER_INTEGRITY_RISK_SECTION_MISMATCH)) != 0UL) {
+        score += 35UL;
+    }
+    if ((RiskFlags & (KSWORD_ARK_DRIVER_INTEGRITY_RISK_DEVICE_LOOP | KSWORD_ARK_DRIVER_INTEGRITY_RISK_ATTACHED_LOOP | KSWORD_ARK_DRIVER_INTEGRITY_RISK_CROSS_DRIVER_ATTACH)) != 0UL) {
+        score += 30UL;
+    }
+    if ((RiskFlags & (KSWORD_ARK_DRIVER_INTEGRITY_RISK_EMPTY_UNLOAD | KSWORD_ARK_DRIVER_INTEGRITY_RISK_NULL_POINTER)) != 0UL) {
+        score += 10UL;
+    }
+    if ((RiskFlags & (KSWORD_ARK_DRIVER_INTEGRITY_RISK_IDT_NON_CORE_OWNER | KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_WP_DISABLED | KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_NXE_DISABLED | KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMEP_DISABLED | KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMAP_DISABLED)) != 0UL) {
+        score += 50UL;
+    }
+    return (score > 100UL) ? 100UL : score;
+}
+static VOID
+KswordARKDriverIntegrityFinalizeV2Rows(
+    _Inout_ KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE* Response
+    )
+
+/* Read-only helper; fills v2 common status, field masks, and scores after all collectors finish. */
+{
+    ULONG index = 0UL;
+    if (Response == NULL) {
+        return;
+    }
+    for (index = 0UL; index < Response->returnedCount; ++index) {
+        KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE* row = &Response->entries[index];
+        row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_COMMON;
+        if (row->ownerModuleBase != 0ULL) {
+            row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_OWNER_MODULE;
+        }
+        if (row->processorGroup != ~0UL || row->processorNumber != ~0UL || row->vector != ~0UL) {
+            row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_CPU_CONTEXT;
+        }
+        row->riskScore = KswordARKDriverIntegrityScoreRisk(row->riskFlags);
+        row->entryStatus = (row->riskFlags == KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE) ? KSWORD_ARK_DRIVER_INTEGRITY_STATUS_OK : KSWORD_ARK_DRIVER_INTEGRITY_STATUS_PARTIAL;
+        if ((row->riskFlags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED) != 0UL) {
+            row->entryStatus = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_QUERY_FAILED;
+        }
+        if ((row->riskFlags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE) != 0UL) {
+            row->entryStatus = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_UNAVAILABLE;
+            row->statusFlags |= KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED;
+        }
+        if ((row->riskFlags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE) != 0UL) {
+            row->statusFlags |= KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PDB_REQUIRED;
+        }
+        if (row->riskFlags != KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE) {
+            row->statusFlags |= KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL;
+        }
+        Response->fieldFlags |= row->fieldMask;
+        Response->statusFlags |= row->statusFlags;
+    }
+    if ((Response->flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED) != 0UL) {
+        Response->statusFlags |= KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_TRUNCATED;
+    }
+}
 static VOID
 KswordARKDriverIntegrityAddSystemModuleRow(
     _Inout_ KSW_DRIVER_INTEGRITY_BUILDER* Builder,
@@ -456,6 +576,7 @@ KswordARKDriverIntegrityAddDynRows(
 /* Read-only evidence collector; inputs, processing, and output are bounded by SAL and protocol fields. */
 {
     KSW_DRIVER_INTEGRITY_LDR_TARGET target;
+    KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE* row = NULL;
     NTSTATUS ldrStatus = STATUS_SUCCESS;
     WCHAR detail[KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS] = { 0 };
     RtlZeroMemory(&target, sizeof(target));
@@ -480,10 +601,12 @@ KswordARKDriverIntegrityAddDynRows(
             DriverSection, target.DllBase, riskFlags,
             KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_PS_LOADED_MODULES | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DYNDATA | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE,
             90UL, ~0UL, ~0UL, ~0UL, ownerModule, detail);
+        row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_PS_LOADED_MODULES, DriverSection, target.DllBase); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_KLDR; row->kldrEntryAddress = target.EntryAddress; row->kldrListHeadAddress = target.ListHeadAddress; row->kldrDllBase = target.DllBase; row->kldrSizeOfImage = target.SizeOfImage; }
         KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_SECTION,
             DriverSection, target.EntryAddress, riskFlags,
             KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_SECTION | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DYNDATA | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE,
             90UL, ~0UL, ~0UL, ~0UL, ownerModule, detail);
+        row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_SECTION, DriverSection, target.EntryAddress); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_KLDR; row->kldrEntryAddress = target.EntryAddress; row->kldrListHeadAddress = target.ListHeadAddress; row->kldrDllBase = target.DllBase; row->kldrSizeOfImage = target.SizeOfImage; }
     }
     else {
         KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail),
@@ -515,10 +638,12 @@ KswordARKDriverIntegrityAddDynRows(
         KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL, mmUnloaded, 0ULL,
             (mmUnloaded == 0ULL) ? (KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE | KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE) : KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE,
             mmSource, (mmUnloaded == 0ULL) ? 15UL : 45UL, ~0UL, ~0UL, ~0UL, mmOwner, detail);
+        row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL, mmUnloaded, 0ULL); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_OPTIONAL_GLOBAL; row->statusFlags |= KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED; }
         KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"PiDDBCacheTable global address=0x%llX; table schema not walked.", piDdb);
         KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL, piDdb, 0ULL,
             (piDdb == 0ULL) ? (KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE | KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE) : KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE,
             piSource, (piDdb == 0ULL) ? 15UL : 45UL, ~0UL, ~0UL, ~0UL, piOwner, detail);
+        row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL, piDdb, 0ULL); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_OPTIONAL_GLOBAL; row->statusFlags |= KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED; }
     }
 }
 static VOID
@@ -534,6 +659,7 @@ KswordARKDriverIntegrityAddDriverObjectRows(
     const ULONGLONG driverSize = (ULONGLONG)DriverObject->DriverSize;
     const KSW_HOOK_SYSTEM_MODULE_ENTRY* driverModule = KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, driverStart);
     WCHAR detail[KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS] = { 0 };
+    KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE* row = NULL;
     ULONG riskFlags = KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE;
     ULONG index = 0UL;
     if (driverStart == 0ULL || driverSize == 0ULL) {
@@ -554,6 +680,7 @@ KswordARKDriverIntegrityAddDriverObjectRows(
     KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_OBJECT, (ULONGLONG)(ULONG_PTR)DriverObject, driverStart, riskFlags,
         KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE, (driverModule != NULL) ? 90UL : 55UL,
         ~0UL, ~0UL, ~0UL, driverModule, detail);
+    row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_OBJECT, (ULONGLONG)(ULONG_PTR)DriverObject, driverStart); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DRIVER_OBJECT; row->driverObjectAddress = (ULONGLONG)(ULONG_PTR)DriverObject; row->driverStart = driverStart; row->driverSize = driverSize; row->driverSection = (ULONGLONG)(ULONG_PTR)DriverObject->DriverSection; row->driverUnload = (ULONGLONG)(ULONG_PTR)DriverObject->DriverUnload; }
     KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_SECTION, (ULONGLONG)(ULONG_PTR)DriverObject->DriverSection, driverStart,
         KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_SECTION,
         70UL, ~0UL, ~0UL, ~0UL, driverModule, L"DriverSection captured read-only; KLDR alignment row follows when DynData is available.");
@@ -568,6 +695,7 @@ KswordARKDriverIntegrityAddDriverObjectRows(
         KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MAJOR_FUNCTION, (ULONGLONG)(ULONG_PTR)&DriverObject->MajorFunction[index], address,
             KswordARKDriverIntegrityPointerRisk(ModuleInfo, driverModule, address), KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE,
             85UL, ~0UL, ~0UL, ~0UL, KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, address), detail);
+        row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MAJOR_FUNCTION, (ULONGLONG)(ULONG_PTR)&DriverObject->MajorFunction[index], address); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DISPATCH_TARGET | KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DRIVER_OBJECT; row->ordinal = index; row->driverObjectAddress = (ULONGLONG)(ULONG_PTR)DriverObject; row->driverStart = driverStart; row->driverSize = driverSize; row->rangeState = KswordARKDriverIntegrityRangeState(ModuleInfo, driverModule, address); }
     }
     if (DriverObject->FastIoDispatch != NULL) {
         for (index = 0UL; index < RTL_NUMBER_OF(g_KswordArkFastIoFields); ++index) {
@@ -581,6 +709,7 @@ KswordARKDriverIntegrityAddDriverObjectRows(
                 KswordARKDriverIntegrityPointerRisk(ModuleInfo, driverModule, (ULONGLONG)(ULONG_PTR)routine),
                 KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT | KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE,
                 80UL, ~0UL, ~0UL, ~0UL, KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, (ULONGLONG)(ULONG_PTR)routine), detail);
+            row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_FAST_IO, (ULONGLONG)(ULONG_PTR)fieldAddress, (ULONGLONG)(ULONG_PTR)routine); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_FAST_IO_TARGET | KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DRIVER_OBJECT; row->ordinal = index; row->driverObjectAddress = (ULONGLONG)(ULONG_PTR)DriverObject; row->driverStart = driverStart; row->driverSize = driverSize; row->rangeState = KswordARKDriverIntegrityRangeState(ModuleInfo, driverModule, (ULONGLONG)(ULONG_PTR)routine); }
         }
     }
 }
@@ -634,6 +763,7 @@ KswordARKDriverIntegrityAddDeviceRows(
 {
     PDEVICE_OBJECT visitedRoots[KSW_DRIVER_INTEGRITY_DEVICE_VISIT_LIMIT] = { 0 };
     PDEVICE_OBJECT rootDevice = DriverObject->DeviceObject;
+    KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE* row = NULL;
     ULONG rootCount = 0UL;
     if (MaxDevices == 0UL || MaxDevices > KSW_DRIVER_INTEGRITY_DEVICE_VISIT_LIMIT) {
         MaxDevices = KSW_DRIVER_INTEGRITY_DEVICE_VISIT_LIMIT;
@@ -669,6 +799,7 @@ KswordARKDriverIntegrityAddDeviceRows(
         KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DEVICE_CHAIN, (ULONGLONG)(ULONG_PTR)rootDevice,
             (ULONGLONG)(ULONG_PTR)rootSnapshot.AttachedDevice, riskFlags, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT, 80UL,
             ~0UL, ~0UL, ~0UL, NULL, detail);
+        row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DEVICE_CHAIN, (ULONGLONG)(ULONG_PTR)rootDevice, (ULONGLONG)(ULONG_PTR)rootSnapshot.AttachedDevice); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DEVICE_OBJECT | KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DRIVER_OBJECT; row->driverObjectAddress = (ULONGLONG)(ULONG_PTR)DriverObject; row->deviceObjectAddress = (ULONGLONG)(ULONG_PTR)rootDevice; row->nextDeviceObjectAddress = (ULONGLONG)(ULONG_PTR)rootSnapshot.NextDevice; row->attachedDeviceObjectAddress = (ULONGLONG)(ULONG_PTR)rootSnapshot.AttachedDevice; row->deviceDriverObjectAddress = (ULONGLONG)(ULONG_PTR)rootSnapshot.DriverObject; row->deviceType = rootSnapshot.DeviceType; row->deviceFlags = rootSnapshot.Flags; }
         attachedDevice = rootSnapshot.AttachedDevice;
         while (attachedDevice != NULL && attachedCount < MaxAttachedDevices) {
             KSW_DRIVER_INTEGRITY_DEVICE_SNAPSHOT attachedSnapshot;
@@ -691,6 +822,7 @@ KswordARKDriverIntegrityAddDeviceRows(
             KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DEVICE_CHAIN, (ULONGLONG)(ULONG_PTR)rootDevice,
                 (ULONGLONG)(ULONG_PTR)attachedDevice, attachedRisk, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT, 75UL,
                 ~0UL, ~0UL, ~0UL, NULL, detail);
+            row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DEVICE_CHAIN, (ULONGLONG)(ULONG_PTR)rootDevice, (ULONGLONG)(ULONG_PTR)attachedDevice); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DEVICE_OBJECT | KSWORD_ARK_DRIVER_INTEGRITY_FIELD_DRIVER_OBJECT; row->ordinal = attachedCount; row->driverObjectAddress = (ULONGLONG)(ULONG_PTR)DriverObject; row->deviceObjectAddress = (ULONGLONG)(ULONG_PTR)attachedDevice; row->nextDeviceObjectAddress = (ULONGLONG)(ULONG_PTR)attachedSnapshot.NextDevice; row->attachedDeviceObjectAddress = (ULONGLONG)(ULONG_PTR)attachedSnapshot.AttachedDevice; row->deviceDriverObjectAddress = (ULONGLONG)(ULONG_PTR)attachedSnapshot.DriverObject; row->deviceType = attachedSnapshot.DeviceType; row->deviceFlags = attachedSnapshot.Flags; }
             attachedDevice = attachedSnapshot.AttachedDevice;
         }
         rootDevice = rootSnapshot.NextDevice;
@@ -846,6 +978,7 @@ KswordARKDriverQueryDriverIntegrity(
         }
     }
     response->moduleCount = (moduleInfo != NULL) ? moduleInfo->NumberOfModules : 0UL;
+    KswordARKDriverIntegrityFinalizeV2Rows(response);
     if ((response->flags & (KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED | KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED | KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE)) != 0UL &&
         response->queryStatus == KSWORD_ARK_DRIVER_INTEGRITY_STATUS_OK) {
         response->queryStatus = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_PARTIAL;

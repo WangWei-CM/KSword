@@ -50,6 +50,11 @@
 #define KSWORD_ARK_FILE_INFO_FIELD_IMAGE_SECTION_PRESENT 0x00000040UL
 #define KSWORD_ARK_FILE_INFO_FIELD_DIRECTORY 0x00000080UL
 #define KSWORD_ARK_FILE_INFO_FIELD_REQUEST_PATH_PRESENT 0x00000100UL
+#define KSWORD_ARK_FILE_INFO_FIELD_DEVICE_OBJECT_PRESENT 0x00000200UL
+#define KSWORD_ARK_FILE_INFO_FIELD_VPB_PRESENT 0x00000400UL
+#define KSWORD_ARK_FILE_INFO_FIELD_FS_CONTEXT_PRESENT 0x00000800UL
+#define KSWORD_ARK_FILE_INFO_FIELD_SHARE_ACCESS_PRESENT 0x00001000UL
+#define KSWORD_ARK_FILE_INFO_FIELD_SHARED_CACHE_MAP_PRESENT 0x00002000UL
 
 #define KSWORD_ARK_FILE_INFO_STATUS_UNAVAILABLE 0UL
 #define KSWORD_ARK_FILE_INFO_STATUS_OK 1UL
@@ -62,6 +67,8 @@
 
 #define KSWORD_ARK_FILE_INFO_PATH_MAX_CHARS 1024U
 #define KSWORD_ARK_FILE_INFO_OBJECT_NAME_MAX_CHARS 1024U
+#define KSWORD_ARK_FILE_INFO_DEVICE_NAME_MAX_CHARS 512U
+#define KSWORD_ARK_FILE_INFO_VOLUME_LABEL_MAX_CHARS 64U
 
 typedef struct _KSWORD_ARK_DELETE_PATH_REQUEST
 {
@@ -100,9 +107,26 @@ typedef struct _KSWORD_ARK_QUERY_FILE_INFO_RESPONSE
     long long lastWriteTime;
     long long changeTime;
     unsigned long long fileObjectAddress;
+    unsigned long long deviceObjectAddress;
+    unsigned long long vpbAddress;
+    unsigned long long fsContextAddress;
+    unsigned long long fsContext2Address;
     unsigned long long sectionObjectPointersAddress;
     unsigned long long dataSectionObjectAddress;
     unsigned long long imageSectionObjectAddress;
+    unsigned long long sharedCacheMapAddress;
+    unsigned long deletePending;
+    unsigned long readAccess;
+    unsigned long writeAccess;
+    unsigned long deleteAccess;
+    unsigned long sharedRead;
+    unsigned long sharedWrite;
+    unsigned long sharedDelete;
+    unsigned long vpbFlags;
+    unsigned long vpbSerialNumber;
+    unsigned long reserved2;
     wchar_t ntPath[KSWORD_ARK_FILE_INFO_PATH_MAX_CHARS];
     wchar_t objectName[KSWORD_ARK_FILE_INFO_OBJECT_NAME_MAX_CHARS];
+    wchar_t deviceName[KSWORD_ARK_FILE_INFO_DEVICE_NAME_MAX_CHARS];
+    wchar_t volumeLabel[KSWORD_ARK_FILE_INFO_VOLUME_LABEL_MAX_CHARS];
 } KSWORD_ARK_QUERY_FILE_INFO_RESPONSE;

@@ -175,12 +175,38 @@ typedef struct _KSWORD_ARK_SET_PPL_LEVEL_REQUEST
 #define KSWORD_ARK_CROSSVIEW_ANOMALY_THREAD_NOT_IN_PROCESS_LIST   0x00000020UL
 #define KSWORD_ARK_CROSSVIEW_ANOMALY_START_ADDRESS_OUTSIDE_MODULE 0x00000040UL
 #define KSWORD_ARK_CROSSVIEW_ANOMALY_DANGLING_OBJECT              0x00000080UL
+#define KSWORD_ARK_CROSSVIEW_ANOMALY_PID_FIELD_MISMATCH           0x00000100UL
 
 #define KSWORD_ARK_CROSSVIEW_STATUS_UNKNOWN            0UL
 #define KSWORD_ARK_CROSSVIEW_STATUS_OK                 1UL
 #define KSWORD_ARK_CROSSVIEW_STATUS_PARTIAL            2UL
 #define KSWORD_ARK_CROSSVIEW_STATUS_CAPABILITY_MISSING 3UL
 #define KSWORD_ARK_CROSSVIEW_STATUS_READ_FAILED        4UL
+
+// Cross-view detail statuses describe the row-level collector outcome after
+// capability gating, guarded reads, and source merge checks.
+#define KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_UNKNOWN       0UL
+#define KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_OK            1UL
+#define KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_PARTIAL       2UL
+#define KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_UNSUPPORTED   3UL
+#define KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_READ_FAILED   4UL
+#define KSWORD_ARK_CROSSVIEW_DETAIL_STATUS_DATA_MISMATCH 5UL
+
+// Cross-view denoise flags make transient or partial evidence explicit without
+// guessing undocumented terminating fields when the PDB profile lacks them.
+#define KSWORD_ARK_CROSSVIEW_DENOISE_PARTIAL_EVIDENCE       0x00000001UL
+#define KSWORD_ARK_CROSSVIEW_DENOISE_READ_FAILURE           0x00000002UL
+#define KSWORD_ARK_CROSSVIEW_DENOISE_REFERENCE_FAILURE      0x00000004UL
+#define KSWORD_ARK_CROSSVIEW_DENOISE_POSSIBLE_TERMINATING   0x00000008UL
+#define KSWORD_ARK_CROSSVIEW_DENOISE_UNSUPPORTED_PDB_FIELD  0x00000010UL
+
+// Cross-view field provenance values mirror DynData item sources so R3 can show
+// whether offsets came from PDB, runtime pattern resolution, or were missing.
+#define KSWORD_ARK_CROSSVIEW_FIELD_SOURCE_UNAVAILABLE     0UL
+#define KSWORD_ARK_CROSSVIEW_FIELD_SOURCE_SYSTEM_INFORMER 1UL
+#define KSWORD_ARK_CROSSVIEW_FIELD_SOURCE_RUNTIME_PATTERN 2UL
+#define KSWORD_ARK_CROSSVIEW_FIELD_SOURCE_EXTRA_TABLE     3UL
+#define KSWORD_ARK_CROSSVIEW_FIELD_SOURCE_PDB_PROFILE     4UL
 
 #define KSWORD_ARK_CROSSVIEW_PROTOCOL_VERSION 1UL
 #define KSWORD_ARK_CROSSVIEW_DETAIL_CHARS 96U
@@ -211,6 +237,18 @@ typedef struct _KSWORD_ARK_CROSSVIEW_FIELD_OFFSETS
     unsigned long pspCidTableRva;
     unsigned long long pspCidTableAddress;
     unsigned long reserved;
+    unsigned long epUniqueProcessIdSource;
+    unsigned long epActiveProcessLinksSource;
+    unsigned long epThreadListHeadSource;
+    unsigned long epImageFileNameSource;
+    unsigned long etCidSource;
+    unsigned long etThreadListEntrySource;
+    unsigned long etStartAddressSource;
+    unsigned long etWin32StartAddressSource;
+    unsigned long ktProcessSource;
+    unsigned long htTableCodeSource;
+    unsigned long hteLowValueSource;
+    unsigned long pspCidTableSource;
 } KSWORD_ARK_CROSSVIEW_FIELD_OFFSETS;
 
 typedef struct _KSWORD_ARK_PROCESS_CROSSVIEW_REQUEST
@@ -239,6 +277,14 @@ typedef struct _KSWORD_ARK_PROCESS_CROSSVIEW_ROW
     unsigned long confidence;
     char imageName[16];
     char detail[KSWORD_ARK_CROSSVIEW_DETAIL_CHARS];
+    unsigned long publicProcessId;
+    unsigned long activeListProcessId;
+    unsigned long cidTableProcessId;
+    long publicWalkStatus;
+    long activeListStatus;
+    long cidTableStatus;
+    unsigned long detailStatus;
+    unsigned long denoiseFlags;
 } KSWORD_ARK_PROCESS_CROSSVIEW_ROW;
 
 typedef struct _KSWORD_ARK_PROCESS_CROSSVIEW_RESPONSE

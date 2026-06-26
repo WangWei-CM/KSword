@@ -37,6 +37,10 @@ Environment:
 #define KSWORD_ARK_KERNEL_EXEC_SCAN_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE) - sizeof(KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY))
 
+// 内核 executable scan v1 请求前缀，允许旧 R3 只传 flags/maxEntries/start/end。
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_REQUEST_V1_SIZE \
+    FIELD_OFFSET(KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST, maxBytes)
+
 // 内核 memory evidence 扫描响应头不包含尾随 rows[1]。
 #define KSWORD_ARK_MEMORY_EVIDENCE_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_RESPONSE) - sizeof(KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW))
@@ -232,7 +236,7 @@ Return Value:
     status = KswordARKRetrieveOptionalInputBuffer(
         Request,
         InputBufferLength,
-        sizeof(KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST),
+        KSWORD_ARK_KERNEL_EXEC_SCAN_REQUEST_V1_SIZE,
         &inputBuffer,
         &actualInputLength,
         &hasInput);
@@ -240,18 +244,36 @@ Return Value:
         KswordARKMemoryToolIoctlLog(Device, "Error", "R0 scan-kernel-exec ioctl: input invalid, status=0x%08X.", (unsigned int)status);
         return status;
     }
-
-    scanRequest = hasInput ?
-        (KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST*)inputBuffer :
-        &defaultRequest;
-    if ((scanRequest->flags & ~KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_ALL) != 0UL ||
-        (scanRequest->startAddress != 0ULL &&
-            scanRequest->endAddress != 0ULL &&
-            scanRequest->endAddress <= scanRequest->startAddress)) {
+    if (hasInput &&
+        actualInputLength > KSWORD_ARK_KERNEL_EXEC_SCAN_REQUEST_V1_SIZE &&
+        actualInputLength < sizeof(KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST)) {
         KswordARKMemoryToolIoctlLog(
             Device,
             "Warn",
-            "R0 scan-kernel-exec ioctl: flags/range rejected, flags=0x%08X, start=0x%I64X, end=0x%I64X.",
+            "R0 scan-kernel-exec ioctl: partial v2 input rejected, actual=%Iu.",
+            actualInputLength);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (hasInput) {
+        size_t bytesToCopy = actualInputLength;
+        if (bytesToCopy > sizeof(scanRequestCopy)) {
+            bytesToCopy = sizeof(scanRequestCopy);
+        }
+        RtlCopyMemory(&scanRequestCopy, inputBuffer, bytesToCopy);
+    }
+    scanRequest = hasInput ? &scanRequestCopy : &defaultRequest;
+    if ((scanRequest->flags & ~KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_ALL) != 0UL ||
+        scanRequest->reserved0 != 0UL ||
+        (scanRequest->startAddress != 0ULL &&
+            scanRequest->endAddress != 0ULL &&
+            scanRequest->endAddress <= scanRequest->startAddress) ||
+        scanRequest->maxBytes > KSWORD_ARK_KERNEL_EXEC_SCAN_HARD_MAX_BYTES ||
+        scanRequest->hashBytes > KSWORD_ARK_KERNEL_EXEC_FIRST_BYTES_HARD_MAX) {
+        KswordARKMemoryToolIoctlLog(
+            Device,
+            "Warn",
+            "R0 scan-kernel-exec ioctl: flags/range/budget rejected, flags=0x%08X, start=0x%I64X, end=0x%I64X.",
             (unsigned int)scanRequest->flags,
             scanRequest->startAddress,
             scanRequest->endAddress);
@@ -261,7 +283,9 @@ Return Value:
      * 中文说明：该 IOCTL 使用 METHOD_BUFFERED，输入和输出可能是同一个
      * SystemBuffer；backend 会清零响应缓冲，所以在获取输出缓冲前固定复制请求。
      */
-    RtlCopyMemory(&scanRequestCopy, scanRequest, sizeof(scanRequestCopy));
+    if (!hasInput) {
+        RtlCopyMemory(&scanRequestCopy, scanRequest, sizeof(scanRequestCopy));
+    }
 
     status = KswordARKRetrieveRequiredOutputBuffer(
         Request,

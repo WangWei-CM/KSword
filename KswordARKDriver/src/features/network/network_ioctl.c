@@ -216,3 +216,337 @@ Return Value:
 
     return status;
 }
+
+static NTSTATUS
+KswordARKNetworkIoctlRetrieveAuditBuffers(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t RequiredOutputLength,
+    _Outptr_result_maybenull_ KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST** QueryRequestOut,
+    _Outptr_result_bytebuffer_(*ActualOutputLengthOut) PVOID* OutputBufferOut,
+    _Out_ size_t* ActualOutputLengthOut
+    )
+/*++
+
+Routine Description:
+
+    提取网络审计 IOCTL 的可选请求与必需输出缓冲。中文说明：四个只读审计 handler
+    共用相同 buffer 规则，避免在每个 handler 中复制 WDF 检索分支。
+
+Arguments:
+
+    Request - 当前 WDF 请求。
+    InputBufferLength - dispatch 提供的输入长度。
+    RequiredOutputLength - 响应头最小长度。
+    QueryRequestOut - 接收可选请求；未提供时返回 NULL。
+    OutputBufferOut - 接收输出缓冲。
+    ActualOutputLengthOut - 接收输出缓冲实际长度。
+
+Return Value:
+
+    NTSTATUS from shared validation helpers.
+
+--*/
+{
+    PVOID inputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    BOOLEAN inputPresent = FALSE;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (QueryRequestOut == NULL || OutputBufferOut == NULL || ActualOutputLengthOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *QueryRequestOut = NULL;
+    *OutputBufferOut = NULL;
+    *ActualOutputLengthOut = 0U;
+
+    status = KswordARKRetrieveOptionalInputBuffer(
+        Request,
+        InputBufferLength,
+        sizeof(KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST),
+        &inputBuffer,
+        &actualInputLength,
+        &inputPresent);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    if (inputPresent) {
+        UNREFERENCED_PARAMETER(actualInputLength);
+        *QueryRequestOut = (KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST*)inputBuffer;
+    }
+
+    return KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        RequiredOutputLength,
+        OutputBufferOut,
+        ActualOutputLengthOut);
+}
+
+NTSTATUS
+KswordARKNetworkIoctlQueryTcpEndpoints(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    处理 IOCTL_KSWORD_ARK_NETWORK_QUERY_TCP_ENDPOINTS。中文说明：这是只读审计入口，
+    handler 只负责 buffer 检索，TCP 表遍历由 network_audit.c 后端负责。
+
+Arguments:
+
+    Device - WDF 设备对象。
+    Request - 当前 WDF 请求。
+    InputBufferLength - 输入长度。
+    OutputBufferLength - 输出长度。
+    BytesReturned - 返回写入字节数。
+
+Return Value:
+
+    NTSTATUS from buffer retrieval or backend.
+
+--*/
+{
+    KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST* queryRequest = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualOutputLength = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKNetworkIoctlRetrieveAuditBuffers(
+        Request,
+        InputBufferLength,
+        sizeof(KSWORD_ARK_NETWORK_ENDPOINT_RESPONSE) - sizeof(KSWORD_ARK_NETWORK_ENDPOINT_ROW),
+        &queryRequest,
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKNetworkIoctlLog(Device, "Error", "R0 network TCP audit buffer invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKNetworkQueryTcpEndpoints(
+        queryRequest,
+        outputBuffer,
+        actualOutputLength,
+        BytesReturned);
+    if (NT_SUCCESS(status) && *BytesReturned >= sizeof(KSWORD_ARK_NETWORK_ENDPOINT_RESPONSE) - sizeof(KSWORD_ARK_NETWORK_ENDPOINT_ROW)) {
+        KSWORD_ARK_NETWORK_ENDPOINT_RESPONSE* response =
+            (KSWORD_ARK_NETWORK_ENDPOINT_RESPONSE*)outputBuffer;
+        KswordARKNetworkIoctlLog(Device, "Info", "R0 network TCP audit status=%lu rows=%lu/%lu.", response->status, response->returnedRowCount, response->totalRowCount);
+    }
+
+    return status;
+}
+
+NTSTATUS
+KswordARKNetworkIoctlQueryUdpEndpoints(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    处理 IOCTL_KSWORD_ARK_NETWORK_QUERY_UDP_ENDPOINTS。中文说明：该入口只读返回 UDP
+    endpoint 审计响应，不删除连接也不改变端口隐藏策略。
+
+Arguments:
+
+    Device - WDF 设备对象。
+    Request - 当前 WDF 请求。
+    InputBufferLength - 输入长度。
+    OutputBufferLength - 输出长度。
+    BytesReturned - 返回写入字节数。
+
+Return Value:
+
+    NTSTATUS from buffer retrieval or backend.
+
+--*/
+{
+    KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST* queryRequest = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualOutputLength = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKNetworkIoctlRetrieveAuditBuffers(
+        Request,
+        InputBufferLength,
+        sizeof(KSWORD_ARK_NETWORK_ENDPOINT_RESPONSE) - sizeof(KSWORD_ARK_NETWORK_ENDPOINT_ROW),
+        &queryRequest,
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKNetworkIoctlLog(Device, "Error", "R0 network UDP audit buffer invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKNetworkQueryUdpEndpoints(
+        queryRequest,
+        outputBuffer,
+        actualOutputLength,
+        BytesReturned);
+    if (NT_SUCCESS(status) && *BytesReturned >= sizeof(KSWORD_ARK_NETWORK_ENDPOINT_RESPONSE) - sizeof(KSWORD_ARK_NETWORK_ENDPOINT_ROW)) {
+        KSWORD_ARK_NETWORK_ENDPOINT_RESPONSE* response =
+            (KSWORD_ARK_NETWORK_ENDPOINT_RESPONSE*)outputBuffer;
+        KswordARKNetworkIoctlLog(Device, "Info", "R0 network UDP audit status=%lu rows=%lu/%lu.", response->status, response->returnedRowCount, response->totalRowCount);
+    }
+
+    return status;
+}
+
+NTSTATUS
+KswordARKNetworkIoctlQueryWfpInventory(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    处理 IOCTL_KSWORD_ARK_NETWORK_QUERY_WFP_INVENTORY。中文说明：该入口只读返回
+    WFP provider/sublayer/filter/callout inventory 骨架，不禁用或删除 WFP 对象。
+
+Arguments:
+
+    Device - WDF 设备对象。
+    Request - 当前 WDF 请求。
+    InputBufferLength - 输入长度。
+    OutputBufferLength - 输出长度。
+    BytesReturned - 返回写入字节数。
+
+Return Value:
+
+    NTSTATUS from buffer retrieval or backend.
+
+--*/
+{
+    KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST* queryRequest = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualOutputLength = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKNetworkIoctlRetrieveAuditBuffers(
+        Request,
+        InputBufferLength,
+        sizeof(KSWORD_ARK_NETWORK_WFP_INVENTORY_RESPONSE) - sizeof(KSWORD_ARK_NETWORK_WFP_INVENTORY_ROW),
+        &queryRequest,
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKNetworkIoctlLog(Device, "Error", "R0 network WFP audit buffer invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKNetworkQueryWfpInventory(
+        queryRequest,
+        outputBuffer,
+        actualOutputLength,
+        BytesReturned);
+    if (NT_SUCCESS(status) && *BytesReturned >= sizeof(KSWORD_ARK_NETWORK_WFP_INVENTORY_RESPONSE) - sizeof(KSWORD_ARK_NETWORK_WFP_INVENTORY_ROW)) {
+        KSWORD_ARK_NETWORK_WFP_INVENTORY_RESPONSE* response =
+            (KSWORD_ARK_NETWORK_WFP_INVENTORY_RESPONSE*)outputBuffer;
+        KswordARKNetworkIoctlLog(Device, "Info", "R0 network WFP audit status=%lu rows=%lu/%lu.", response->status, response->returnedRowCount, response->totalRowCount);
+    }
+
+    return status;
+}
+
+NTSTATUS
+KswordARKNetworkIoctlQueryNdisChain(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    处理 IOCTL_KSWORD_ARK_NETWORK_QUERY_NDIS_CHAIN。中文说明：该入口只读返回
+    NDIS chain 骨架，不 detach、不 pause、不重排任何 NDIS 组件。
+
+Arguments:
+
+    Device - WDF 设备对象。
+    Request - 当前 WDF 请求。
+    InputBufferLength - 输入长度。
+    OutputBufferLength - 输出长度。
+    BytesReturned - 返回写入字节数。
+
+Return Value:
+
+    NTSTATUS from buffer retrieval or backend.
+
+--*/
+{
+    KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST* queryRequest = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualOutputLength = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKNetworkIoctlRetrieveAuditBuffers(
+        Request,
+        InputBufferLength,
+        sizeof(KSWORD_ARK_NETWORK_NDIS_CHAIN_RESPONSE) - sizeof(KSWORD_ARK_NETWORK_NDIS_CHAIN_ROW),
+        &queryRequest,
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKNetworkIoctlLog(Device, "Error", "R0 network NDIS audit buffer invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKNetworkQueryNdisChain(
+        queryRequest,
+        outputBuffer,
+        actualOutputLength,
+        BytesReturned);
+    if (NT_SUCCESS(status) && *BytesReturned >= sizeof(KSWORD_ARK_NETWORK_NDIS_CHAIN_RESPONSE) - sizeof(KSWORD_ARK_NETWORK_NDIS_CHAIN_ROW)) {
+        KSWORD_ARK_NETWORK_NDIS_CHAIN_RESPONSE* response =
+            (KSWORD_ARK_NETWORK_NDIS_CHAIN_RESPONSE*)outputBuffer;
+        KswordARKNetworkIoctlLog(Device, "Info", "R0 network NDIS audit status=%lu rows=%lu/%lu.", response->status, response->returnedRowCount, response->totalRowCount);
+    }
+
+    return status;
+}

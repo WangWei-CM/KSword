@@ -226,4 +226,80 @@ KswordARKDynDataApplyProfileEx(
     _Out_ size_t* BytesWrittenOut
     );
 
+VOID
+KswordARKDynDataV4Initialize(
+    VOID
+    );
+
+VOID
+KswordARKDynDataV4Uninitialize(
+    VOID
+    );
+
+NTSTATUS
+KswordARKDynDataV4ApplyProfile(
+    _In_reads_bytes_(InputBufferLength) const KSW_APPLY_DYN_PROFILE_V4_REQUEST* Request,
+    _In_ size_t InputBufferLength,
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) KSW_APPLY_DYN_PROFILE_V4_RESPONSE* Response,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
+KswordARKDynDataV4QueryModules(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
+KswordARKDynDataV4QueryCapabilityGroups(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
+KswordARKDynDataV4QueryMissingItems(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
+KswordARKDynDataIoctlApplyProfileV4(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    );
+
+NTSTATUS
+KswordARKDynDataIoctlQueryV4Modules(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    );
+
+NTSTATUS
+KswordARKDynDataIoctlQueryV4CapabilityGroups(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    );
+
+NTSTATUS
+KswordARKDynDataIoctlQueryV4MissingItems(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    );
+
 EXTERN_C_END

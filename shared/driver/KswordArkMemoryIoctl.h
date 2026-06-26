@@ -7,13 +7,15 @@
 // 作用：
 // - 定义 Phase-11 进程虚拟内存查询、读取和差异写入协议；
 // - 定义 R0 物理内存读取、受控写入和 x64 页表解析协议；
-// - 定义 R0 内核可执行页只读扫描协议，v1 仅承诺保守扫描已加载模块映像；
+// - 定义 R0 内核可执行页只读扫描协议，v2 增加预算、归属、保护和哈希证据；
 // - R3/R0 共享本文件中的结构，不在 UI 或 Client 侧重复定义；
 // - 写入协议只承载已编辑的差异块，不提供分配、释放或保护修改；
 // - 页表协议只做只读解析，不默认提供 PTE/PDE 修改能力。
 // ============================================================
 
-#define KSWORD_ARK_MEMORY_PROTOCOL_VERSION 1UL
+#define KSWORD_ARK_MEMORY_PROTOCOL_VERSION_V1 1UL
+#define KSWORD_ARK_MEMORY_PROTOCOL_VERSION_V2 2UL
+#define KSWORD_ARK_MEMORY_PROTOCOL_VERSION KSWORD_ARK_MEMORY_PROTOCOL_VERSION_V2
 
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_VIRTUAL_MEMORY 0x813UL
 #define KSWORD_ARK_IOCTL_FUNCTION_READ_VIRTUAL_MEMORY 0x814UL
@@ -214,15 +216,37 @@
 #define KSWORD_ARK_PAGE_TABLE_PAGE_SIZE_2MB (2UL * 1024UL * 1024UL)
 #define KSWORD_ARK_PAGE_TABLE_PAGE_SIZE_1GB (1024UL * 1024UL * 1024UL)
 
+// Page-table confidence values. The backend derives these from whether the
+// read-only walk reached a valid terminal mapping, stopped at a not-present
+// entry, or failed before the requested address could be trusted.
+#define KSWORD_ARK_PAGE_TABLE_CONFIDENCE_UNKNOWN 0UL
+#define KSWORD_ARK_PAGE_TABLE_CONFIDENCE_LOW     35UL
+#define KSWORD_ARK_PAGE_TABLE_CONFIDENCE_MEDIUM  65UL
+#define KSWORD_ARK_PAGE_TABLE_CONFIDENCE_HIGH    90UL
+
+// Compact protection summary used by VA translation, PTE query, and executable
+// scan rows. These bits are derived from PTE flags only; they never request or
+// imply a PTE write.
+#define KSWORD_ARK_MEMORY_PROTECTION_PRESENT 0x00000001UL
+#define KSWORD_ARK_MEMORY_PROTECTION_READ    0x00000002UL
+#define KSWORD_ARK_MEMORY_PROTECTION_WRITE   0x00000004UL
+#define KSWORD_ARK_MEMORY_PROTECTION_EXECUTE 0x00000008UL
+#define KSWORD_ARK_MEMORY_PROTECTION_NX      0x00000010UL
+#define KSWORD_ARK_MEMORY_PROTECTION_LARGE   0x00000020UL
+#define KSWORD_ARK_MEMORY_PROTECTION_GLOBAL  0x00000040UL
+#define KSWORD_ARK_MEMORY_PROTECTION_USER    0x00000080UL
+
 // 内核可执行页扫描请求 flags。中文说明：flags 为 0 时返回所有已识别的模块
 // executable 页；设置过滤位时仅返回对应分类，未知位由 R0 handler 拒绝。
 #define KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_MODULE_TEXT 0x00000001UL
 #define KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_MODULE_NON_TEXT 0x00000002UL
 #define KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_WRITABLE_EXECUTABLE 0x00000004UL
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_UNKNOWN_EXECUTABLE 0x00000008UL
 #define KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_ALL \
     (KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_MODULE_TEXT | \
      KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_MODULE_NON_TEXT | \
-     KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_WRITABLE_EXECUTABLE)
+     KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_WRITABLE_EXECUTABLE | \
+     KSWORD_ARK_KERNEL_EXEC_SCAN_FLAG_INCLUDE_UNKNOWN_EXECUTABLE)
 
 // 内核可执行页扫描响应状态。中文说明：v1 不做全内核地址空间枚举，成功扫描
 // 也返回 CONSERVATIVE/PARTIAL_CONSERVATIVE，避免 R3 误解为完整内核覆盖。
@@ -239,6 +263,7 @@
 #define KSWORD_ARK_KERNEL_EXEC_OWNER_MODULE_TEXT 1UL
 #define KSWORD_ARK_KERNEL_EXEC_OWNER_MODULE_NON_TEXT 2UL
 #define KSWORD_ARK_KERNEL_EXEC_OWNER_MODULE_WRITABLE_EXECUTABLE 3UL
+#define KSWORD_ARK_KERNEL_EXEC_OWNER_MODULE_UNKNOWN_SECTION 4UL
 
 // 内核可执行页 riskFlags。中文说明：这些位只描述扫描观察到的风险信号，
 // 不表示 R0 已经修改页面属性或尝试修复。
@@ -247,8 +272,28 @@
 #define KSWORD_ARK_KERNEL_EXEC_RISK_MODULE_NON_TEXT_EXECUTABLE 0x00000002UL
 #define KSWORD_ARK_KERNEL_EXEC_RISK_SECTION_WRITABLE 0x00000004UL
 #define KSWORD_ARK_KERNEL_EXEC_RISK_LARGE_PAGE 0x00000008UL
+#define KSWORD_ARK_KERNEL_EXEC_RISK_UNKNOWN_EXECUTABLE 0x00000010UL
+#define KSWORD_ARK_KERNEL_EXEC_RISK_FIRST_BYTES_UNREADABLE 0x00000020UL
+
+// 内核 executable scan response flags。中文说明：这些位解释 partial status 的
+// 直接原因，尤其是输出行容量和 maxBytes 预算命中。
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_RESPONSE_FLAG_TRUNCATED 0x00000001UL
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_RESPONSE_FLAG_BUDGET_EXHAUSTED 0x00000002UL
+
+// 内核 executable first-bytes hash metadata。中文说明：R0 只返回哈希和状态，
+// 默认不回传原始字节，避免把内核内容当作敏感转储暴露给 UI。
+#define KSWORD_ARK_KERNEL_EXEC_HASH_NONE 0UL
+#define KSWORD_ARK_KERNEL_EXEC_HASH_FNV1A64 1UL
+#define KSWORD_ARK_KERNEL_EXEC_HASH_STATUS_UNAVAILABLE 0UL
+#define KSWORD_ARK_KERNEL_EXEC_HASH_STATUS_OK 1UL
+#define KSWORD_ARK_KERNEL_EXEC_HASH_STATUS_READ_FAILED 2UL
+#define KSWORD_ARK_KERNEL_EXEC_FIRST_BYTES_DEFAULT 16UL
+#define KSWORD_ARK_KERNEL_EXEC_FIRST_BYTES_HARD_MAX 64UL
 
 #define KSWORD_ARK_KERNEL_EXEC_MODULE_PATH_CHARS 260U
+#define KSWORD_ARK_KERNEL_EXEC_SECTION_NAME_BYTES 8U
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_DEFAULT_MAX_BYTES (64ULL * 1024ULL * 1024ULL)
+#define KSWORD_ARK_KERNEL_EXEC_SCAN_HARD_MAX_BYTES (256ULL * 1024ULL * 1024ULL)
 
 // Kernel memory evidence scan request flags. The R0 side is read-only and every
 // enabled source is still constrained by maxRows and maxBytes. flags==0 uses a
@@ -315,6 +360,36 @@
 #define KSWORD_ARK_MEMORY_EVIDENCE_RISK_EXECUTABLE_POOL 0x00000008UL
 #define KSWORD_ARK_MEMORY_EVIDENCE_RISK_LARGE_EXECUTABLE 0x00000010UL
 #define KSWORD_ARK_MEMORY_EVIDENCE_RISK_OWNER_MISSING 0x00000020UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_RISK_RX_PRIVATE 0x00000040UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_RISK_IMAGE_LIKE_MEMORY 0x00000080UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_RISK_DELETED_FILE_MAPPED_HINT 0x00000100UL
+
+// Row-level evidence flags describe backing and enrichment signals. These bits
+// are factual observations or conservative hints; they do not trigger repair.
+#define KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_RWX_PRIVATE 0x00000001UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_RX_PRIVATE 0x00000002UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_NONMODULE_EXECUTABLE 0x00000004UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_IMAGE_LIKE_MEMORY 0x00000008UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_SECTION_OBJECT_PRESENT 0x00000010UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_CONTROL_AREA_PRESENT 0x00000020UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_DELETED_FILE_MAPPED_HINT 0x00000040UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_SECTION_HINT_UNAVAILABLE 0x00000080UL
+
+// Backing classifications are intentionally conservative. PRIVATE is used for
+// executable ranges outside SystemModuleInformation or executable BigPool rows
+// when no file-backed Section/ControlArea evidence is available.
+#define KSWORD_ARK_MEMORY_EVIDENCE_BACKING_UNKNOWN 0UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_BACKING_LOADED_MODULE 1UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_BACKING_PRIVATE 2UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_BACKING_BIGPOOL 3UL
+
+// Section/ControlArea hint status. PRESENT only means an address-like Section
+// owner was available; DELETED_FILE_HINT is reserved for future ControlArea file
+// checks and is never guessed when private fields are unavailable.
+#define KSWORD_ARK_MEMORY_EVIDENCE_SECTION_HINT_UNAVAILABLE 0UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_SECTION_HINT_NOT_APPLICABLE 1UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_SECTION_HINT_SECTION_PRESENT 2UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_SECTION_HINT_DELETED_FILE_HINT 3UL
 
 // BigPool row flags. The executable/suspected bits are separated so R3 can keep
 // hard page-table evidence distinct from conservative NonPaged pool suspicion.
@@ -345,7 +420,7 @@
 #define KSWORD_ARK_MEMORY_EVIDENCE_HARD_MAX_BYTES (64ULL * 1024ULL * 1024ULL)
 #define KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_BIGPOOL_ROWS 256UL
 #define KSWORD_ARK_MEMORY_EVIDENCE_HARD_MAX_BIGPOOL_ROWS 1024UL
-#define KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_SAMPLE_BYTES 32UL
+#define KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_SAMPLE_BYTES 0UL
 #define KSWORD_ARK_MEMORY_EVIDENCE_HARD_MAX_SAMPLE_BYTES \
     KSWORD_ARK_MEMORY_EVIDENCE_SECTION_SAMPLE_BYTES
 
@@ -523,6 +598,14 @@ typedef struct _KSWORD_ARK_PAGE_TABLE_ENTRY_INFO
     unsigned long largePageType;
     unsigned long pageSize;
     unsigned long resolved;
+    unsigned long confidence;
+    unsigned long protection;
+    unsigned long nxFlag;
+    unsigned long writeFlag;
+    unsigned long userFlag;
+    unsigned long globalFlag;
+    unsigned long largePageFlag;
+    unsigned long reserved0;
     unsigned long long virtualAddress;
     unsigned long long physicalAddress;
     unsigned long long cr3PhysicalAddress;
@@ -555,6 +638,9 @@ typedef struct _KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST
     unsigned long maxEntries;
     unsigned long long startAddress;
     unsigned long long endAddress;
+    unsigned long long maxBytes;
+    unsigned long hashBytes;
+    unsigned long reserved0;
 } KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST;
 
 // 单条内核可执行页扫描结果。中文说明：pageCount 表示连续合并后的页数量，
@@ -562,13 +648,24 @@ typedef struct _KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_REQUEST
 typedef struct _KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY
 {
     unsigned long long virtualAddress;
+    unsigned long long regionSize;
+    unsigned long long sectionOwnerBase;
+    unsigned long long contentHash;
     unsigned long pageCount;
     unsigned long pageSize;
     unsigned long effectiveFlags;
+    unsigned long protection;
     unsigned long long moduleBase;
     unsigned long moduleSize;
     unsigned long riskFlags;
     unsigned long ownerKind;
+    unsigned long sectionRva;
+    unsigned long sectionSize;
+    unsigned long hashAlgorithm;
+    unsigned long hashStatus;
+    unsigned long firstBytesHashed;
+    unsigned long unknownExecutable;
+    unsigned char sectionName[KSWORD_ARK_KERNEL_EXEC_SECTION_NAME_BYTES];
     wchar_t modulePath[KSWORD_ARK_KERNEL_EXEC_MODULE_PATH_CHARS];
 } KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY;
 
@@ -578,10 +675,16 @@ typedef struct _KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE
 {
     unsigned long version;
     unsigned long status;
+    unsigned long responseFlags;
+    unsigned long sourceFlags;
     unsigned long totalCount;
     unsigned long returnedCount;
     unsigned long moduleCount;
     unsigned long entrySize;
+    unsigned long maxEntries;
+    unsigned long reserved0;
+    unsigned long long maxBytes;
+    unsigned long long bytesScanned;
     long lastStatus;
     KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY entries[1];
 } KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE;
@@ -619,7 +722,12 @@ typedef struct _KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW
     unsigned long long moduleBase;
     unsigned long moduleSize;
     unsigned long confidence;
+    unsigned long rowFlags;
+    unsigned long backingKind;
+    unsigned long sectionHintStatus;
     unsigned long long ownerAddress;
+    unsigned long long sectionObjectAddress;
+    unsigned long long controlAreaAddress;
     long lastStatus;
     unsigned long bigPoolTag;
     unsigned long bigPoolFlags;

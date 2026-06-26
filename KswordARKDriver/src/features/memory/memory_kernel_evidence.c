@@ -16,6 +16,7 @@ Environment:
 
 #include "ark/ark_driver.h"
 #include "ark/ark_memory_evidence.h"
+#include "memory_evidence_enrichment.h"
 #include "memory_kernel_exec_scan_internal.h"
 
 #include <ntimage.h>
@@ -248,6 +249,8 @@ Return Value:
     Row->pageSize = PageSize;
     Row->ownerKind = KSWORD_ARK_MEMORY_EVIDENCE_OWNER_UNKNOWN;
     Row->confidence = KSWORD_ARK_MEMORY_EVIDENCE_CONFIDENCE_UNKNOWN;
+    Row->backingKind = KSWORD_ARK_MEMORY_EVIDENCE_BACKING_UNKNOWN;
+    Row->sectionHintStatus = KSWORD_ARK_MEMORY_EVIDENCE_SECTION_HINT_UNAVAILABLE;
     Row->lastStatus = STATUS_SUCCESS;
     Row->hashAlgorithm = KSWORD_ARK_MEMORY_EVIDENCE_HASH_NONE;
 }
@@ -1046,9 +1049,16 @@ Return Value:
     Row->ownerKind = KSWORD_ARK_MEMORY_EVIDENCE_OWNER_LOADED_MODULE;
     Row->riskFlags = riskFlags;
     Row->confidence = confidence;
+    Row->backingKind = KSWORD_ARK_MEMORY_EVIDENCE_BACKING_LOADED_MODULE;
+    Row->sectionHintStatus = KSWORD_ARK_MEMORY_EVIDENCE_SECTION_HINT_NOT_APPLICABLE;
     Row->moduleBase = (ULONG64)(ULONG_PTR)ModuleEntry->ImageBase;
     Row->moduleSize = ModuleEntry->ImageSize;
     Row->ownerAddress = Row->moduleBase;
+    if (ModuleEntry->Section != NULL) {
+        Row->sectionObjectAddress = (ULONG64)(ULONG_PTR)ModuleEntry->Section;
+        Row->rowFlags |= KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_SECTION_OBJECT_PRESENT;
+        Row->sectionHintStatus = KSWORD_ARK_MEMORY_EVIDENCE_SECTION_HINT_SECTION_PRESENT;
+    }
     Row->lastStatus = PageInfo->walkStatus;
     Row->sectionRva = SectionRva;
     Row->sectionSize = SectionSize;
@@ -1179,6 +1189,10 @@ Return Value:
         }
 
         pageSize = (pageInfo.pageSize != 0UL) ? pageInfo.pageSize : PAGE_SIZE;
+        if (pageSize > PAGE_SIZE &&
+            !KswordARKMemoryEvidenceConsumeBudget(State, (ULONG64)pageSize - (ULONG64)PAGE_SIZE)) {
+            break;
+        }
         nextAddress = pageAddress + (ULONG64)pageSize;
         if (nextAddress <= pageAddress) {
             break;
@@ -1329,7 +1343,10 @@ Return Value:
     if (Left->ownerKind != Right->ownerKind ||
         Left->permissionFlags != Right->permissionFlags ||
         Left->pageSize != Right->pageSize ||
-        Left->riskFlags != Right->riskFlags) {
+        Left->riskFlags != Right->riskFlags ||
+        Left->rowFlags != Right->rowFlags ||
+        Left->backingKind != Right->backingKind ||
+        Left->sectionHintStatus != Right->sectionHintStatus) {
         return FALSE;
     }
     if (Left->regionSize > MAXULONGLONG - Left->virtualAddress) {
@@ -1383,17 +1400,30 @@ Return Value:
     KswordARKMemoryEvidencePermissionFromPage(PageInfo, &permissionFlags, &riskFlags, &confidence);
     Row->permissionFlags = permissionFlags;
     Row->ownerKind = KSWORD_ARK_MEMORY_EVIDENCE_OWNER_NONMODULE;
+    Row->backingKind = KSWORD_ARK_MEMORY_EVIDENCE_BACKING_PRIVATE;
+    Row->rowFlags = KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_NONMODULE_EXECUTABLE |
+        KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_SECTION_HINT_UNAVAILABLE;
     Row->riskFlags = riskFlags |
         KSWORD_ARK_MEMORY_EVIDENCE_RISK_NONMODULE_EXECUTABLE |
         KSWORD_ARK_MEMORY_EVIDENCE_RISK_OWNER_MISSING;
+    if ((permissionFlags & KSWORD_ARK_MEMORY_EVIDENCE_PERMISSION_WRITE) != 0UL &&
+        (permissionFlags & KSWORD_ARK_MEMORY_EVIDENCE_PERMISSION_EXECUTE) != 0UL) {
+        Row->rowFlags |= KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_RWX_PRIVATE;
+    }
+    else if ((permissionFlags & KSWORD_ARK_MEMORY_EVIDENCE_PERMISSION_EXECUTE) != 0UL) {
+        Row->rowFlags |= KSWORD_ARK_MEMORY_EVIDENCE_ROW_FLAG_RX_PRIVATE;
+        Row->riskFlags |= KSWORD_ARK_MEMORY_EVIDENCE_RISK_RX_PRIVATE;
+    }
+    Row->sectionHintStatus = KSWORD_ARK_MEMORY_EVIDENCE_SECTION_HINT_UNAVAILABLE;
     Row->confidence = confidence;
     Row->lastStatus = PageInfo->walkStatus;
     KswordARKMemoryEvidenceCopyWideLiteral(Row->ownerName, KSWORD_ARK_MEMORY_EVIDENCE_OWNER_NAME_CHARS, L"NonModule");
     KswordARKMemoryEvidenceFillSample(Row, PageAddress, SampleBytes);
+    KswordARKMemoryEvidenceApplyImageLikeHint(Row);
     (VOID)RtlStringCchCopyW(
         Row->detail,
         KSWORD_ARK_MEMORY_EVIDENCE_DETAIL_CHARS,
-        L"bounded range executable page outside SystemModuleInformation");
+        L"bounded range executable private/non-module page; section hint unavailable");
 }
 
 static NTSTATUS
@@ -1469,6 +1499,10 @@ Return Value:
         }
 
         pageSize = (pageInfo.pageSize != 0UL) ? pageInfo.pageSize : PAGE_SIZE;
+        if (pageSize > PAGE_SIZE &&
+            !KswordARKMemoryEvidenceConsumeBudget(State, (ULONG64)pageSize - (ULONG64)PAGE_SIZE)) {
+            break;
+        }
         nextAddress = pageAddress + (ULONG64)pageSize;
         if (nextAddress <= pageAddress) {
             break;
@@ -1683,12 +1717,15 @@ Return Value:
         row.ownerKind = ownerKind;
         row.riskFlags = riskFlags;
         row.confidence = confidence;
+        row.backingKind = KSWORD_ARK_MEMORY_EVIDENCE_BACKING_BIGPOOL;
+        row.sectionHintStatus = KSWORD_ARK_MEMORY_EVIDENCE_SECTION_HINT_NOT_APPLICABLE;
         row.ownerAddress = address;
         row.lastStatus = NT_SUCCESS(status) ? pageInfo.walkStatus : status;
         row.bigPoolTag = entry->Tag.TagUlong;
         row.bigPoolFlags = bigPoolFlags;
         KswordARKMemoryEvidenceCopyWideLiteral(row.ownerName, KSWORD_ARK_MEMORY_EVIDENCE_OWNER_NAME_CHARS, L"BigPool");
         KswordARKMemoryEvidenceFillSample(&row, address, Limits->SampleBytes);
+        KswordARKMemoryEvidenceApplyImageLikeHint(&row);
         KswordARKMemoryEvidenceFillTagWide(entry->Tag.TagChars, tagText);
         (VOID)RtlStringCchPrintfW(
             row.detail,

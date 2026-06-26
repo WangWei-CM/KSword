@@ -561,6 +561,17 @@ Return Value:
                     PEPROCESS mappedProcess = (PEPROCESS)((ULONG_PTR)vad->ProcessUnion.VadsProcess & ~(ULONG_PTR)KSWORD_ARK_SECTION_MAP_TYPE_PROCESS);
                     if (mappedProcess != NULL) {
                         entry->processId = HandleToULong(PsGetProcessId(mappedProcess));
+                        if (Response->mappedProcessCount != MAXULONG) {
+                            Response->mappedProcessCount += 1UL;
+                        }
+                        if (SectionKind == KSWORD_ARK_FILE_SECTION_KIND_DATA &&
+                            Response->dataMappedProcessCount != MAXULONG) {
+                            Response->dataMappedProcessCount += 1UL;
+                        }
+                        if (SectionKind == KSWORD_ARK_FILE_SECTION_KIND_IMAGE &&
+                            Response->imageMappedProcessCount != MAXULONG) {
+                            Response->imageMappedProcessCount += 1UL;
+                        }
                     }
                 }
                 entry->startVa = (ULONG64)(ULONG_PTR)KswordARKSectionVadStartAddress(vad);
@@ -592,4 +603,7 @@ Return Value:
 
     return status;
 }
+
+
+
 
