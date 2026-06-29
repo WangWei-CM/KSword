@@ -1591,6 +1591,927 @@ namespace
         }
     }
 
+    // runtimeDetailStatusText：
+    // - 输入 detail IOCTL 返回的 KSWORD_ARK_DETAIL_STATUS_*；
+    // - 处理：转换为稳定、可读的中文/英文混合状态；
+    // - 返回：短文本，供 Process/Thread runtime detail 展示。
+    QString runtimeDetailStatusText(const std::uint32_t statusValue)
+    {
+        switch (statusValue)
+        {
+        case KSWORD_ARK_DETAIL_STATUS_OK:
+            return QStringLiteral("OK");
+        case KSWORD_ARK_DETAIL_STATUS_PARTIAL:
+            return QStringLiteral("Partial（部分字段可用）");
+        case KSWORD_ARK_DETAIL_STATUS_UNSUPPORTED:
+            return QStringLiteral("Unsupported（驱动未启用该详情协议）");
+        case KSWORD_ARK_DETAIL_STATUS_LOOKUP_FAILED:
+            return QStringLiteral("Lookup failed（目标对象不存在或不可引用）");
+        case KSWORD_ARK_DETAIL_STATUS_CAPABILITY_MISSING:
+            return QStringLiteral("Capability missing（动态偏移能力不足）");
+        case KSWORD_ARK_DETAIL_STATUS_READ_FAILED:
+            return QStringLiteral("Read failed（字段读取失败）");
+        default:
+            return QStringLiteral("Unknown");
+        }
+    }
+
+    // fixedRuntimeWideText：
+    // - 输入 shared/driver 固定 wchar_t 缓冲区；
+    // - 处理：按 NUL 截断，避免把填充区展示到详情页；
+    // - 返回：空文本统一说明“无额外说明”。
+    QString fixedRuntimeWideText(const wchar_t* const bufferPointer, const std::size_t maxChars)
+    {
+        if (bufferPointer == nullptr || maxChars == 0U)
+        {
+            return QStringLiteral("无额外说明");
+        }
+
+        std::size_t length = 0U;
+        while (length < maxChars && bufferPointer[length] != L'\0')
+        {
+            ++length;
+        }
+        if (length == 0U)
+        {
+            return QStringLiteral("无额外说明");
+        }
+        return QString::fromWCharArray(bufferPointer, static_cast<int>(length));
+    }
+
+    // fixedRuntimeImageName：
+    // - 输入 shared/driver 固定 char[16] 进程名；
+    // - 处理：按 NUL 截断并按本地 8-bit 文本显示；
+    // - 返回：空值显示 <empty>，便于区分未读取与 UI 空白。
+    QString fixedRuntimeImageName(const char* const bufferPointer, const std::size_t maxChars)
+    {
+        if (bufferPointer == nullptr || maxChars == 0U)
+        {
+            return QStringLiteral("<empty>");
+        }
+
+        std::size_t length = 0U;
+        while (length < maxChars && bufferPointer[length] != '\0')
+        {
+            ++length;
+        }
+        if (length == 0U)
+        {
+            return QStringLiteral("<empty>");
+        }
+        return QString::fromLocal8Bit(bufferPointer, static_cast<int>(length));
+    }
+
+    // runtimeCapabilityMaskText：
+    // - 输入 mask：DynData capability 或 missing capability 位图；
+    // - 处理：把每个能力位翻译成用户能理解的字段组名称；
+    // - 返回：用于最后一列/tooltip 的短文本，保留十六进制便于和日志对照。
+    QString runtimeCapabilityMaskText(const std::uint64_t mask, const bool missingMode)
+    {
+        QStringList names;
+        const auto appendName =
+            [&names, mask](const std::uint64_t bit, const QString& nameText)
+            {
+                if ((mask & bit) != 0ULL)
+                {
+                    names.push_back(nameText);
+                }
+            };
+
+        appendName(KSW_CAP_DYN_NTOS_ACTIVE, QStringLiteral("ntoskrnl profile"));
+        appendName(KSW_CAP_DYN_LXCORE_ACTIVE, QStringLiteral("lxcore profile"));
+        appendName(KSW_CAP_OBJECT_TYPE_FIELDS, QStringLiteral("对象类型字段"));
+        appendName(KSW_CAP_HANDLE_TABLE_DECODE, QStringLiteral("句柄表解码"));
+        appendName(KSW_CAP_PROCESS_OBJECT_TABLE, QStringLiteral("进程 ObjectTable"));
+        appendName(KSW_CAP_THREAD_STACK_FIELDS, QStringLiteral("线程栈边界"));
+        appendName(KSW_CAP_THREAD_IO_COUNTERS, QStringLiteral("线程 I/O 计数"));
+        appendName(KSW_CAP_ALPC_FIELDS, QStringLiteral("ALPC 字段"));
+        appendName(KSW_CAP_SECTION_CONTROL_AREA, QStringLiteral("Section/ControlArea"));
+        appendName(KSW_CAP_PROCESS_PROTECTION_PATCH, QStringLiteral("进程保护字段"));
+        appendName(KSW_CAP_WSL_LXCORE_FIELDS, QStringLiteral("WSL/lxcore 字段"));
+        appendName(KSW_CAP_ETW_GUID_FIELDS, QStringLiteral("ETW 字段"));
+        appendName(KSW_CAP_CALLBACK_NOTIFY_GLOBALS, QStringLiteral("进程/线程/镜像回调全局"));
+        appendName(KSW_CAP_CALLBACK_REGISTRY_GLOBALS, QStringLiteral("注册表回调全局"));
+        appendName(KSW_CAP_CALLBACK_OBJECT_FIELDS, QStringLiteral("对象回调字段"));
+        appendName(KSW_CAP_PROCESS_LIST_FIELDS, QStringLiteral("进程链表字段"));
+        appendName(KSW_CAP_THREAD_LIST_FIELDS, QStringLiteral("线程链表字段"));
+        appendName(KSW_CAP_CID_TABLE_WALK, QStringLiteral("CID 表遍历"));
+        appendName(KSW_CAP_KERNEL_MODULE_LIST_FIELDS, QStringLiteral("内核模块链表字段"));
+        appendName(KSW_CAP_DRIVER_OBJECT_FIELDS, QStringLiteral("驱动对象字段"));
+        appendName(KSW_CAP_KERNEL_GLOBALS, QStringLiteral("内核全局 RVA"));
+
+        if (names.isEmpty())
+        {
+            return missingMode
+                ? QStringLiteral("无缺失能力（0x0）")
+                : QStringLiteral("无已知能力（0x0）");
+        }
+
+        return QStringLiteral("%1（0x%2）")
+            .arg(names.join(QStringLiteral("、")))
+            .arg(static_cast<qulonglong>(mask), 0, 16)
+            .toUpper();
+    }
+
+    // processRuntimeFieldListText：
+    // - 输入 fieldFlags：进程 detail IOCTL 返回的字段覆盖位图；
+    // - 处理：展开为 _EPROCESS/对象字段名，避免界面只展示 0x 位图；
+    // - 返回：可读字段清单。
+    QString processRuntimeFieldListText(const std::uint32_t fieldFlags)
+    {
+        QStringList fields;
+        const auto appendField =
+            [&fields, fieldFlags](const std::uint32_t bit, const QString& fieldText)
+            {
+                if ((fieldFlags & bit) != 0U)
+                {
+                    fields.push_back(fieldText);
+                }
+            };
+
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_PUBLIC_IDENTITY, QStringLiteral("PID/镜像名"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_OBJECT_ADDRESS, QStringLiteral("EPROCESS 地址"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_UNIQUE_PROCESS_ID, QStringLiteral("_EPROCESS.UniqueProcessId"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_ACTIVE_PROCESS_LINKS, QStringLiteral("_EPROCESS.ActiveProcessLinks"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_THREAD_LIST_HEAD, QStringLiteral("_EPROCESS.ThreadListHead"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_IMAGE_FILE_NAME, QStringLiteral("_EPROCESS.ImageFileName"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_TOKEN_FASTREF, QStringLiteral("_EPROCESS.Token"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_OBJECT_TABLE, QStringLiteral("_EPROCESS.ObjectTable"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_SECTION_OBJECT, QStringLiteral("_EPROCESS.SectionObject"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_PROTECTION, QStringLiteral("_EPROCESS.Protection"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_SIGNATURE_LEVEL, QStringLiteral("_EPROCESS.SignatureLevel"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_SECTION_SIGNATURE, QStringLiteral("_EPROCESS.SectionSignatureLevel"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_OFFSET_SOURCES, QStringLiteral("偏移来源"));
+        appendField(KSWORD_ARK_PROCESS_DETAIL_FIELD_KERNEL_GLOBALS, QStringLiteral("ntoskrnl 全局 RVA"));
+
+        return fields.isEmpty()
+            ? QStringLiteral("未采集到进程运行时字段")
+            : fields.join(QStringLiteral("、"));
+    }
+
+    // threadRuntimeFieldListText：
+    // - 输入 fieldFlags：线程 detail IOCTL 返回的字段覆盖位图；
+    // - 处理：展开为 ETHREAD/KTHREAD 字段名称；
+    // - 返回：可读字段清单。
+    QString threadRuntimeFieldListText(const std::uint32_t fieldFlags)
+    {
+        QStringList fields;
+        const auto appendField =
+            [&fields, fieldFlags](const std::uint32_t bit, const QString& fieldText)
+            {
+                if ((fieldFlags & bit) != 0U)
+                {
+                    fields.push_back(fieldText);
+                }
+            };
+
+        appendField(KSWORD_ARK_THREAD_DETAIL_FIELD_PUBLIC_IDENTITY, QStringLiteral("TID/PID"));
+        appendField(KSWORD_ARK_THREAD_DETAIL_FIELD_OBJECT_ADDRESS, QStringLiteral("ETHREAD 地址"));
+        appendField(KSWORD_ARK_THREAD_DETAIL_FIELD_ETHREAD_CID, QStringLiteral("_ETHREAD.Cid"));
+        appendField(KSWORD_ARK_THREAD_DETAIL_FIELD_THREAD_LIST_ENTRY, QStringLiteral("_ETHREAD.ThreadListEntry"));
+        appendField(KSWORD_ARK_THREAD_DETAIL_FIELD_START_ADDRESS, QStringLiteral("_ETHREAD.StartAddress"));
+        appendField(KSWORD_ARK_THREAD_DETAIL_FIELD_WIN32_START_ADDRESS, QStringLiteral("_ETHREAD.Win32StartAddress"));
+        appendField(KSWORD_ARK_THREAD_DETAIL_FIELD_KTHREAD_PROCESS, QStringLiteral("_KTHREAD.Process"));
+        appendField(KSWORD_ARK_THREAD_DETAIL_FIELD_STACK_LIMITS, QStringLiteral("_KTHREAD 栈边界"));
+        appendField(KSWORD_ARK_THREAD_DETAIL_FIELD_IO_COUNTERS, QStringLiteral("_KTHREAD I/O 计数"));
+        appendField(KSWORD_ARK_THREAD_DETAIL_FIELD_OFFSET_SOURCES, QStringLiteral("偏移来源"));
+        appendField(KSWORD_ARK_THREAD_DETAIL_FIELD_KERNEL_GLOBALS, QStringLiteral("ntoskrnl 全局 RVA"));
+
+        return fields.isEmpty()
+            ? QStringLiteral("未采集到线程运行时字段")
+            : fields.join(QStringLiteral("、"));
+    }
+
+    // runtimeFieldSourceText：
+    // - 输入 source：KSW_DYN_FIELD_SOURCE_* 来源值；
+    // - 处理：转换为中文来源名称，避免 UI 展示裸数字；
+    // - 返回：PDB profile/System Informer/runtime pattern 等可读文本。
+    QString runtimeFieldSourceText(const std::uint32_t source)
+    {
+        switch (source)
+        {
+        case KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER:
+            return QStringLiteral("System Informer DynData");
+        case KSW_DYN_FIELD_SOURCE_RUNTIME_PATTERN:
+            return QStringLiteral("运行时模式识别");
+        case KSW_DYN_FIELD_SOURCE_KSWORD_EXTRA_TABLE:
+            return QStringLiteral("Ksword 扩展表");
+        case KSW_DYN_FIELD_SOURCE_PDB_PROFILE:
+            return QStringLiteral("PDB profile");
+        case KSW_DYN_FIELD_SOURCE_UNAVAILABLE:
+        default:
+            return QStringLiteral("不可用");
+        }
+    }
+
+    // runtimeOffsetPresent：
+    // - 输入 offset：shared 协议中的 offset/RVA；
+    // - 处理：过滤 unavailable/0xffff sentinel；
+    // - 返回：TRUE 表示可展示为有效偏移。
+    bool runtimeOffsetPresent(const unsigned long offset)
+    {
+        return offset != KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE && offset != 0x0000FFFFUL;
+    }
+
+    // runtimeOffsetText：
+    // - 输入 offset：shared 协议中的 offset/RVA；
+    // - 处理：可用时转十六进制，不可用时明确标注；
+    // - 返回：面向详情文本的稳定显示值。
+    QString runtimeOffsetText(const unsigned long offset)
+    {
+        if (!runtimeOffsetPresent(offset))
+        {
+            return QStringLiteral("<不可用>");
+        }
+        return uint64ToHex(static_cast<std::uint64_t>(offset));
+    }
+
+    // runtimeOffsetSourceItemText：
+    // - 输入 name/offset/source：单个字段名、偏移和来源；
+    // - 处理：组合成人可读证据片段；
+    // - 返回：例如 “_EPROCESS.Token=0x4B8(PDB profile)”。
+    QString runtimeOffsetSourceItemText(
+        const QString& name,
+        const unsigned long offset,
+        const unsigned long source)
+    {
+        return QStringLiteral("%1=%2(%3)")
+            .arg(name)
+            .arg(runtimeOffsetText(offset))
+            .arg(runtimeFieldSourceText(source));
+    }
+
+    // processRuntimeOffsetSourceText：
+    // - 输入 response：进程 runtime detail 响应；
+    // - 处理：展开进程相关 offset 与来源；
+    // - 返回：一行可读来源清单。
+    QString processRuntimeOffsetSourceText(const KSWORD_ARK_PROCESS_DETAIL_RESPONSE& response)
+    {
+        QStringList parts;
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_EPROCESS.UniqueProcessId"),
+            response.offsets.epUniqueProcessId,
+            response.sources.epUniqueProcessId));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_EPROCESS.ActiveProcessLinks"),
+            response.offsets.epActiveProcessLinks,
+            response.sources.epActiveProcessLinks));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_EPROCESS.ThreadListHead"),
+            response.offsets.epThreadListHead,
+            response.sources.epThreadListHead));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_EPROCESS.ImageFileName"),
+            response.offsets.epImageFileName,
+            response.sources.epImageFileName));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_EPROCESS.Token"),
+            response.offsets.epToken,
+            response.sources.epToken));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_EPROCESS.ObjectTable"),
+            response.offsets.epObjectTable,
+            response.sources.epObjectTable));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_EPROCESS.SectionObject"),
+            response.offsets.epSectionObject,
+            response.sources.epSectionObject));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_EPROCESS.Protection"),
+            response.offsets.epProtection,
+            response.sources.epProtection));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_EPROCESS.SignatureLevel"),
+            response.offsets.epSignatureLevel,
+            response.sources.epSignatureLevel));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_EPROCESS.SectionSignatureLevel"),
+            response.offsets.epSectionSignatureLevel,
+            response.sources.epSectionSignatureLevel));
+        return parts.join(QStringLiteral("；"));
+    }
+
+    // threadRuntimeOffsetSourceText：
+    // - 输入 response：线程 runtime detail 响应；
+    // - 处理：展开线程相关 offset 与来源；
+    // - 返回：一行可读来源清单。
+    QString threadRuntimeOffsetSourceText(const KSWORD_ARK_THREAD_DETAIL_RESPONSE& response)
+    {
+        QStringList parts;
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_ETHREAD.Cid"),
+            response.offsets.etCid,
+            response.sources.etCid));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_ETHREAD.ThreadListEntry"),
+            response.offsets.etThreadListEntry,
+            response.sources.etThreadListEntry));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_ETHREAD.StartAddress"),
+            response.offsets.etStartAddress,
+            response.sources.etStartAddress));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_ETHREAD.Win32StartAddress"),
+            response.offsets.etWin32StartAddress,
+            response.sources.etWin32StartAddress));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_KTHREAD.Process"),
+            response.offsets.ktProcess,
+            response.sources.ktProcess));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_KTHREAD.InitialStack"),
+            response.offsets.ktInitialStack,
+            response.sources.ktInitialStack));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_KTHREAD.StackLimit"),
+            response.offsets.ktStackLimit,
+            response.sources.ktStackLimit));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_KTHREAD.StackBase"),
+            response.offsets.ktStackBase,
+            response.sources.ktStackBase));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_KTHREAD.KernelStack"),
+            response.offsets.ktKernelStack,
+            response.sources.ktKernelStack));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_KTHREAD.ReadOperationCount"),
+            response.offsets.ktReadOperationCount,
+            response.sources.ktReadOperationCount));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_KTHREAD.WriteOperationCount"),
+            response.offsets.ktWriteOperationCount,
+            response.sources.ktWriteOperationCount));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_KTHREAD.OtherOperationCount"),
+            response.offsets.ktOtherOperationCount,
+            response.sources.ktOtherOperationCount));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_KTHREAD.ReadTransferCount"),
+            response.offsets.ktReadTransferCount,
+            response.sources.ktReadTransferCount));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_KTHREAD.WriteTransferCount"),
+            response.offsets.ktWriteTransferCount,
+            response.sources.ktWriteTransferCount));
+        parts.push_back(runtimeOffsetSourceItemText(
+            QStringLiteral("_KTHREAD.OtherTransferCount"),
+            response.offsets.ktOtherTransferCount,
+            response.sources.ktOtherTransferCount));
+        return parts.join(QStringLiteral("；"));
+    }
+
+    // runtimeKernelGlobalItemText：
+    // - 输入 name/rva/source/address：全局符号名称、RVA、来源和当前 VA；
+    // - 处理：把 PDB profile 的全局符号转换成人可读证据；
+    // - 返回：单个全局符号的可读片段。
+    QString runtimeKernelGlobalItemText(
+        const QString& name,
+        const unsigned long rva,
+        const unsigned long source,
+        const std::uint64_t address)
+    {
+        return QStringLiteral("%1: RVA=%2, VA=%3, 来源=%4")
+            .arg(name)
+            .arg(runtimeOffsetText(rva))
+            .arg(address == 0ULL ? QStringLiteral("<不可用>") : uint64ToHex(address))
+            .arg(runtimeFieldSourceText(source));
+    }
+
+    // runtimeKernelGlobalsText：
+    // - 输入 globals：detail 响应内 ntoskrnl 全局 RVA 包；
+    // - 处理：列出 CID/模块链表/卸载驱动/PiDDB/SSDT shadow 等关键全局符号；
+    // - 返回：可直接进入详情页或 tooltip 的多项文本。
+    QString runtimeKernelGlobalsText(const KSWORD_ARK_RUNTIME_KERNEL_GLOBALS& globals)
+    {
+        QStringList parts;
+        parts.push_back(runtimeKernelGlobalItemText(
+            QStringLiteral("PspCidTable"),
+            globals.pspCidTableRva,
+            globals.pspCidTableSource,
+            globals.pspCidTableAddress));
+        parts.push_back(runtimeKernelGlobalItemText(
+            QStringLiteral("PsLoadedModuleList"),
+            globals.psLoadedModuleListRva,
+            globals.psLoadedModuleListSource,
+            globals.psLoadedModuleListAddress));
+        parts.push_back(runtimeKernelGlobalItemText(
+            QStringLiteral("MmUnloadedDrivers"),
+            globals.mmUnloadedDriversRva,
+            globals.mmUnloadedDriversSource,
+            globals.mmUnloadedDriversAddress));
+        parts.push_back(runtimeKernelGlobalItemText(
+            QStringLiteral("PiDDBCacheTable"),
+            globals.piDdbCacheTableRva,
+            globals.piDdbCacheTableSource,
+            globals.piDdbCacheTableAddress));
+        parts.push_back(runtimeKernelGlobalItemText(
+            QStringLiteral("KeServiceDescriptorTableShadow"),
+            globals.keServiceDescriptorTableShadowRva,
+            globals.keServiceDescriptorTableShadowSource,
+            globals.keServiceDescriptorTableShadowAddress));
+        parts.push_back(runtimeKernelGlobalItemText(
+            QStringLiteral("MmLastUnloadedDriver"),
+            globals.mmLastUnloadedDriverRva,
+            globals.mmLastUnloadedDriverSource,
+            globals.mmLastUnloadedDriverAddress));
+        return parts.join(QStringLiteral("；"));
+    }
+
+    // runtimeSamplingSummaryText：
+    // - 输入 rawDetailText：驱动固定 detail 文本；
+    // - 处理：把常见英文采样日志折叠成中文说明，未知文本才保留摘要；
+    // - 返回：面向用户的采样说明，避免表格最后一列直接塞 IOCTL 日志。
+    QString runtimeSamplingSummaryText(const QString& rawDetailText, const QString& subjectText)
+    {
+        const QString trimmedText = rawDetailText.trimmed();
+        if (trimmedText.isEmpty() || trimmedText == QStringLiteral("无额外说明"))
+        {
+            return QStringLiteral("%1运行时详情无额外驱动说明。").arg(subjectText);
+        }
+        if (trimmedText.contains(QStringLiteral("sampled by"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("%1运行时字段已由驱动只读采样；字段覆盖、缺失能力和失败状态已在本行展开。")
+                .arg(subjectText);
+        }
+        if (trimmedText.contains(QStringLiteral("version mismatch"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("%1详情协议版本不匹配，请同步 R3/R0/shared 协议。").arg(subjectText);
+        }
+        if (trimmedText.contains(QStringLiteral("capability"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("%1详情受 DynData capability 限制，缺失能力已在本行列出。").arg(subjectText);
+        }
+        return trimmedText;
+    }
+
+    // readableRuntimeIoMessage：
+    // - 输入 rawMessage：ArkDriverClient::IoResult::message，subjectText：页面/能力名称；
+    // - 处理：把常见 DeviceIoControl/unsupported/capability/version/buffer 文本转换成中文说明；
+    // - 返回：适合放入详情页、状态栏或表格最后一列的可读文本。
+    QString readableRuntimeIoMessage(
+        const QString& rawMessage,
+        const QString& subjectText,
+        const QString& fallbackText,
+        const bool unsupported = false)
+    {
+        if (unsupported)
+        {
+            return QStringLiteral("%1当前驱动未提供对应只读详情入口。").arg(subjectText);
+        }
+
+        const QString trimmedText = rawMessage.trimmed();
+        if (trimmedText.isEmpty())
+        {
+            return fallbackText;
+        }
+        if (trimmedText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            trimmedText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("%1当前驱动/协议暂不支持该只读详情入口。").arg(subjectText);
+        }
+        if (trimmedText.contains(QStringLiteral("capability"), Qt::CaseInsensitive) ||
+            trimmedText.contains(QStringLiteral("DynData"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("%1动态偏移能力未满足，请查看内核 DynData/Capability 状态。").arg(subjectText);
+        }
+        if (trimmedText.contains(QStringLiteral("version mismatch"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("%1详情协议版本不匹配，请同步 R3/R0/shared 协议。").arg(subjectText);
+        }
+        if (trimmedText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("%1驱动调用失败。原始错误：%2").arg(subjectText, trimmedText);
+        }
+        if (trimmedText.contains(QStringLiteral("buffer"), Qt::CaseInsensitive) &&
+            trimmedText.contains(QStringLiteral("trunc"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("%1返回结果过多，当前只展示截断后的可用证据。").arg(subjectText);
+        }
+        return trimmedText;
+    }
+
+    // ntStatusHexText：
+    // - 输入 NTSTATUS/Win32 状态值；
+    // - 处理：统一补零大写十六进制；
+    // - 返回：可复制到调试器或日志中的稳定文本。
+    QString ntStatusHexText(const long statusValue)
+    {
+        return QStringLiteral("0x%1")
+            .arg(static_cast<quint32>(statusValue), 8, 16, QChar('0'))
+            .toUpper();
+    }
+
+    // runtimeFieldSampleStatusText：
+    // - 输入 sampler 响应级状态；
+    // - 处理：转换为中文/英文混合短状态，避免 UI 展示裸数字；
+    // - 返回：适合标题行的状态文本。
+    QString runtimeFieldSampleStatusText(const std::uint32_t statusValue)
+    {
+        switch (statusValue)
+        {
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_OK:
+            return QStringLiteral("OK");
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_PARTIAL:
+            return QStringLiteral("Partial（部分字段读取失败）");
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_LOOKUP_FAILED:
+            return QStringLiteral("LookupFailed（对象查找失败）");
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_INVALID_REQUEST:
+            return QStringLiteral("InvalidRequest（请求无效）");
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_TRUNCATED:
+            return QStringLiteral("Truncated（结果被截断）");
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_UNKNOWN:
+        default:
+            return QStringLiteral("Unknown(%1)").arg(statusValue);
+        }
+    }
+
+    // runtimeFieldSampleRowStatusText：
+    // - 输入 sampler 行级状态；
+    // - 处理：说明单字段读取是否成功、被拒绝还是读取失败；
+    // - 返回：适合逐字段证据行展示的文本。
+    QString runtimeFieldSampleRowStatusText(const std::uint32_t statusValue)
+    {
+        switch (statusValue)
+        {
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_OK:
+            return QStringLiteral("OK（已读取）");
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_OFFSET_REJECTED:
+            return QStringLiteral("OffsetRejected（偏移超过安全范围）");
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_SIZE_REJECTED:
+            return QStringLiteral("SizeRejected（字段长度不适合采样）");
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_READ_FAILED:
+            return QStringLiteral("ReadFailed（对象字段读取失败）");
+        case KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_UNKNOWN:
+        default:
+            return QStringLiteral("Unknown(%1)").arg(statusValue);
+        }
+    }
+
+    // runtimeFieldSampleBytesText：
+    // - 输入小字段原始字节；
+    // - 处理：按十六进制紧凑拼接，避免不可打印字符污染详情页；
+    // - 返回：例如 "40 04 00 00"，空值返回 <empty>。
+    QString runtimeFieldSampleBytesText(const std::vector<std::uint8_t>& bytes)
+    {
+        if (bytes.empty())
+        {
+            return QStringLiteral("<empty>");
+        }
+        QStringList parts;
+        parts.reserve(static_cast<int>(bytes.size()));
+        for (const std::uint8_t byteValue : bytes)
+        {
+            parts.push_back(QStringLiteral("%1")
+                .arg(static_cast<unsigned int>(byteValue), 2, 16, QChar('0'))
+                .toUpper());
+        }
+        return parts.join(QChar(' '));
+    }
+
+    // runtimeFieldSampleReadLeValue：
+    // - 输入 bytes/offset/byteCount：sampler 返回的小字段原始字节；
+    // - 处理：按 Windows x64 小端序解释为最多 8 字节无符号值；
+    // - 返回：成功时 valueOut 写入整数，失败返回 false。
+    bool runtimeFieldSampleReadLeValue(
+        const std::vector<std::uint8_t>& bytes,
+        const std::size_t offset,
+        const std::size_t byteCount,
+        std::uint64_t& valueOut)
+    {
+        valueOut = 0ULL;
+        if (byteCount == 0U || byteCount > sizeof(std::uint64_t))
+        {
+            return false;
+        }
+        if (offset > bytes.size() || bytes.size() - offset < byteCount)
+        {
+            return false;
+        }
+
+        for (std::size_t byteIndex = 0; byteIndex < byteCount; ++byteIndex)
+        {
+            valueOut |= static_cast<std::uint64_t>(bytes[offset + byteIndex]) << (byteIndex * 8U);
+        }
+        return true;
+    }
+
+    // runtimeFieldSampleDecimalHexText：
+    // - 输入 value：已经解释出的整数或句柄值；
+    // - 处理：同时输出十进制和十六进制，便于 PID/TID 与地址双向核对；
+    // - 返回：例如 "1234 (0x00000000000004D2)"。
+    QString runtimeFieldSampleDecimalHexText(const std::uint64_t value)
+    {
+        return QStringLiteral("%1 (%2)")
+            .arg(QString::number(static_cast<qulonglong>(value)))
+            .arg(uint64ToHex(value));
+    }
+
+    // runtimeFieldSampleAsciiText：
+    // - 输入 bytes：PDB sampler 返回的 char[] 字节；
+    // - 处理：截断到 NUL，非可打印字符用 "." 占位；
+    // - 返回：适合展示 _EPROCESS.ImageFileName 等短 ASCII 字段。
+    QString runtimeFieldSampleAsciiText(const std::vector<std::uint8_t>& bytes)
+    {
+        QString text;
+        for (const std::uint8_t byteValue : bytes)
+        {
+            if (byteValue == 0U)
+            {
+                break;
+            }
+            if (byteValue >= 0x20U && byteValue <= 0x7EU)
+            {
+                text.append(QChar(static_cast<ushort>(byteValue)));
+            }
+            else
+            {
+                text.append(QChar('.'));
+            }
+        }
+
+        if (text.isEmpty())
+        {
+            return QStringLiteral("<空字符串或不可打印>");
+        }
+        return QStringLiteral("\"%1\"").arg(text);
+    }
+
+    // runtimeFieldSampleTypeOrUnknown：
+    // - 输入 entry：R3 sampler 行；
+    // - 处理：把 PDB 字段类型转换为 QString，并为空类型补占位；
+    // - 返回：用于字段标题和解释器判断的类型文本。
+    QString runtimeFieldSampleTypeOrUnknown(const ksword::ark::RuntimeFieldSampleEntry& entry)
+    {
+        const QString typeText = QString::fromStdString(entry.type).trimmed();
+        if (typeText.isEmpty())
+        {
+            return QStringLiteral("<unknown>");
+        }
+        return typeText;
+    }
+
+    // runtimeFieldSampleNameOrId：
+    // - 输入 entry：R0 sampler 行和 R3 请求元数据；
+    // - 处理：优先使用 PDB qualifiedName，缺失时退回 runtimeItemId；
+    // - 返回：人读字段名。
+    QString runtimeFieldSampleNameOrId(const ksword::ark::RuntimeFieldSampleEntry& entry)
+    {
+        const QString nameText = QString::fromStdString(entry.name).trimmed();
+        if (!nameText.isEmpty())
+        {
+            return nameText;
+        }
+        return QStringLiteral("runtimeItemId=%1").arg(uint64ToHex(entry.runtimeItemId));
+    }
+
+    // runtimeFieldSampleUnicodeStringText：
+    // - 输入 bytes：_UNICODE_STRING 结构头采样，x64 下 Buffer 位于偏移 8；
+    // - 处理：只解释结构头，不跟随读取远程字符串，避免 UI 触发额外内核读取；
+    // - 返回：Length/MaximumLength/Buffer 三元组。
+    QString runtimeFieldSampleUnicodeStringText(const std::vector<std::uint8_t>& bytes)
+    {
+        std::uint64_t lengthValue = 0ULL;
+        std::uint64_t maximumLengthValue = 0ULL;
+        std::uint64_t bufferValue = 0ULL;
+        const bool lengthOk = runtimeFieldSampleReadLeValue(bytes, 0U, sizeof(std::uint16_t), lengthValue);
+        const bool maximumOk = runtimeFieldSampleReadLeValue(bytes, 2U, sizeof(std::uint16_t), maximumLengthValue);
+        const bool bufferOk = runtimeFieldSampleReadLeValue(bytes, 8U, sizeof(std::uint64_t), bufferValue);
+        if (!lengthOk || !maximumOk || !bufferOk)
+        {
+            return QStringLiteral("UNICODE_STRING 头部字节不足，无法解释。");
+        }
+
+        return QStringLiteral("UNICODE_STRING Length=%1, MaximumLength=%2, Buffer=%3")
+            .arg(static_cast<unsigned long long>(lengthValue))
+            .arg(static_cast<unsigned long long>(maximumLengthValue))
+            .arg(uint64ToHex(bufferValue));
+    }
+
+    // runtimeFieldSamplePairPointersText：
+    // - 输入 bytes/nameA/nameB：两个连续 x64 指针或句柄字段；
+    // - 处理：解释 CLIENT_ID、LIST_ENTRY 这类 16 字节小结构；
+    // - 返回：带字段名的双值摘要。
+    QString runtimeFieldSamplePairPointersText(
+        const std::vector<std::uint8_t>& bytes,
+        const QString& nameA,
+        const QString& nameB,
+        const bool decimalHint)
+    {
+        std::uint64_t firstValue = 0ULL;
+        std::uint64_t secondValue = 0ULL;
+        const bool firstOk = runtimeFieldSampleReadLeValue(bytes, 0U, sizeof(std::uint64_t), firstValue);
+        const bool secondOk = runtimeFieldSampleReadLeValue(bytes, 8U, sizeof(std::uint64_t), secondValue);
+        if (!firstOk || !secondOk)
+        {
+            return QStringLiteral("%1/%2 字节不足，无法解释。").arg(nameA).arg(nameB);
+        }
+
+        const QString firstText = decimalHint
+            ? runtimeFieldSampleDecimalHexText(firstValue)
+            : uint64ToHex(firstValue);
+        const QString secondText = decimalHint
+            ? runtimeFieldSampleDecimalHexText(secondValue)
+            : uint64ToHex(secondValue);
+        return QStringLiteral("%1=%2, %3=%4")
+            .arg(nameA)
+            .arg(firstText)
+            .arg(nameB)
+            .arg(secondText);
+    }
+
+    // runtimeFieldSampleFastRefText：
+    // - 输入 rawValue：_EX_FAST_REF 原始 64 位值；
+    // - 处理：拆分低 4 位 fast-ref 计数和对齐后的对象地址；
+    // - 返回：Token/ObjectTable 等 fast reference 字段的人读解释。
+    QString runtimeFieldSampleFastRefText(const std::uint64_t rawValue)
+    {
+        const std::uint64_t objectAddress = rawValue & ~0xFULL;
+        const std::uint64_t refCount = rawValue & 0xFULL;
+        return QStringLiteral("EX_FAST_REF raw=%1, object=%2, refBits=%3")
+            .arg(uint64ToHex(rawValue))
+            .arg(uint64ToHex(objectAddress))
+            .arg(static_cast<unsigned long long>(refCount));
+    }
+
+    // runtimeFieldSampleProtectionText：
+    // - 输入 rawValue：_PS_PROTECTION/UCHAR 原始保护位；
+    // - 处理：按 Type/Audit/Signer 位域拆解，方便直接看 PPL/保护等级；
+    // - 返回：进程保护字段的人读解释。
+    QString runtimeFieldSampleProtectionText(const std::uint64_t rawValue)
+    {
+        const std::uint64_t typeValue = rawValue & 0x7ULL;
+        const std::uint64_t auditValue = (rawValue >> 3U) & 0x1ULL;
+        const std::uint64_t signerValue = (rawValue >> 4U) & 0xFULL;
+        return QStringLiteral("PS_PROTECTION raw=%1, Type=%2, Audit=%3, Signer=%4")
+            .arg(uint64ToHex(rawValue & 0xFFULL))
+            .arg(static_cast<unsigned long long>(typeValue))
+            .arg(static_cast<unsigned long long>(auditValue))
+            .arg(static_cast<unsigned long long>(signerValue));
+    }
+
+    // runtimeFieldSamplePointerLike：
+    // - 输入 name/type：PDB 字段名和字段类型；
+    // - 处理：判断当前字段更适合按地址/句柄展示还是按普通整数展示；
+    // - 返回：true 表示首选 uint64ToHex 地址样式。
+    bool runtimeFieldSamplePointerLike(const QString& nameText, const QString& typeText)
+    {
+        const QString combinedText = QStringLiteral("%1 %2")
+            .arg(nameText)
+            .arg(typeText)
+            .toLower();
+        return combinedText.contains(QChar('*')) ||
+            combinedText.contains(QStringLiteral("ptr")) ||
+            combinedText.contains(QStringLiteral("pvoid")) ||
+            combinedText.contains(QStringLiteral("handle")) ||
+            combinedText.contains(QStringLiteral("address")) ||
+            combinedText.contains(QStringLiteral("objecttable")) ||
+            combinedText.contains(QStringLiteral("sectionobject")) ||
+            combinedText.contains(QStringLiteral("startaddress")) ||
+            combinedText.contains(QStringLiteral("kernelstack")) ||
+            combinedText.contains(QStringLiteral("initialstack")) ||
+            combinedText.contains(QStringLiteral("stackbase")) ||
+            combinedText.contains(QStringLiteral("stacklimit")) ||
+            combinedText.contains(QStringLiteral(".process"));
+    }
+
+    // runtimeFieldSampleInterpretedValue：
+    // - 输入 entry/name/type：sampler 单行和 PDB 元数据；
+    // - 处理：按常见内核结构字段解释短字节，避免只展示 valueU64/hex bytes；
+    // - 返回：人读解释；无法识别时仍返回整数或原始字节摘要。
+    QString runtimeFieldSampleInterpretedValue(
+        const ksword::ark::RuntimeFieldSampleEntry& entry,
+        const QString& nameText,
+        const QString& typeText)
+    {
+        const QString lowerName = nameText.toLower();
+        const QString lowerType = typeText.toLower();
+        const std::vector<std::uint8_t>& bytes = entry.sampleBytes;
+        if (entry.status != KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_OK)
+        {
+            return QStringLiteral("未解释：字段未成功读取。");
+        }
+        if (bytes.empty() || entry.bytesRead == 0U)
+        {
+            return QStringLiteral("未解释：R0 未返回字段字节。");
+        }
+
+        if (lowerName.contains(QStringLiteral("imagefilename")) ||
+            lowerType.contains(QStringLiteral("char[")))
+        {
+            return QStringLiteral("ASCII=%1").arg(runtimeFieldSampleAsciiText(bytes));
+        }
+        if (lowerType.contains(QStringLiteral("_client_id")) ||
+            lowerName.endsWith(QStringLiteral(".cid")))
+        {
+            return runtimeFieldSamplePairPointersText(
+                bytes,
+                QStringLiteral("UniqueProcess"),
+                QStringLiteral("UniqueThread"),
+                true);
+        }
+        if (lowerType.contains(QStringLiteral("_list_entry")) ||
+            lowerName.contains(QStringLiteral("activeprocesslinks")) ||
+            lowerName.contains(QStringLiteral("threadlistentry")) ||
+            lowerName.contains(QStringLiteral("threadlisthead")) ||
+            lowerName.contains(QStringLiteral("inloadorderlinks")))
+        {
+            return runtimeFieldSamplePairPointersText(
+                bytes,
+                QStringLiteral("Flink"),
+                QStringLiteral("Blink"),
+                false);
+        }
+        if (lowerType.contains(QStringLiteral("_unicode_string")))
+        {
+            return runtimeFieldSampleUnicodeStringText(bytes);
+        }
+
+        std::uint64_t rawValue = 0ULL;
+        const std::size_t readableSize = std::min<std::size_t>(
+            bytes.size(),
+            std::min<std::size_t>(entry.size, sizeof(std::uint64_t)));
+        const bool rawOk = runtimeFieldSampleReadLeValue(bytes, 0U, readableSize, rawValue);
+        if (!rawOk)
+        {
+            return QStringLiteral("原始字节=%1").arg(runtimeFieldSampleBytesText(bytes));
+        }
+        if (lowerType.contains(QStringLiteral("_ex_fast_ref")) ||
+            lowerName.endsWith(QStringLiteral(".token")))
+        {
+            return runtimeFieldSampleFastRefText(rawValue);
+        }
+        if (lowerType.contains(QStringLiteral("_ps_protection")) ||
+            lowerName.contains(QStringLiteral("protection")))
+        {
+            return runtimeFieldSampleProtectionText(rawValue);
+        }
+        if (lowerName.contains(QStringLiteral("uniqueprocessid")))
+        {
+            return QStringLiteral("PID=%1").arg(runtimeFieldSampleDecimalHexText(rawValue));
+        }
+        if (runtimeFieldSamplePointerLike(nameText, typeText))
+        {
+            return QStringLiteral("Pointer=%1").arg(uint64ToHex(rawValue));
+        }
+        return QStringLiteral("Integer=%1").arg(runtimeFieldSampleDecimalHexText(rawValue));
+    }
+
+    // runtimeFieldSampleResultText：
+    // - 输入 ArkDriverClient sampler 结果和标题；
+    // - 处理：展开 response header 与每个字段的 offset/value/status；
+    // - 返回：可直接写入 CodeEditorWidget 的人读文本。
+    QString runtimeFieldSampleResultText(
+        const ksword::ark::RuntimeFieldSampleResult& result,
+        const QString& titleText)
+    {
+        QStringList lines;
+        lines << QStringLiteral("[%1]").arg(titleText);
+        if (!result.io.ok)
+        {
+            lines << readableRuntimeIoMessage(
+                QString::fromStdString(result.io.message),
+                titleText,
+                QStringLiteral("PDB deep runtime sampler 暂不可用。"),
+                result.unsupported);
+            return lines.join(QChar('\n'));
+        }
+
+        lines << QStringLiteral("Status: %1").arg(runtimeFieldSampleStatusText(result.status));
+        lines << QStringLiteral("Object: %1").arg(uint64ToHex(result.objectAddress));
+        lines << QStringLiteral("Returned/Total: %1/%2").arg(result.returnedCount).arg(result.totalCount);
+        lines << QStringLiteral("DynDataCapability: %1").arg(uint64ToHex(result.dynDataCapabilityMask));
+        lines << QStringLiteral("LastStatus: %1").arg(ntStatusHexText(result.lastStatus));
+        if (result.entries.empty())
+        {
+            lines << QStringLiteral("  <没有返回字段行>");
+            return lines.join(QChar('\n'));
+        }
+
+        for (const ksword::ark::RuntimeFieldSampleEntry& entry : result.entries)
+        {
+            const QString nameText = runtimeFieldSampleNameOrId(entry);
+            const QString typeText = runtimeFieldSampleTypeOrUnknown(entry);
+            lines << QStringLiteral("  - %1").arg(nameText);
+            lines << QStringLiteral("      Type: %1").arg(typeText);
+            lines << QStringLiteral("      Offset/Size: %1 / %2 bytes, BytesRead=%3")
+                .arg(uint64ToHex(entry.offset))
+                .arg(entry.size)
+                .arg(entry.bytesRead);
+            lines << QStringLiteral("      Status: %1, LastStatus=%2")
+                .arg(runtimeFieldSampleRowStatusText(entry.status))
+                .arg(ntStatusHexText(entry.lastStatus));
+            lines << QStringLiteral("      Value: %1")
+                .arg(runtimeFieldSampleInterpretedValue(entry, nameText, typeText));
+            lines << QStringLiteral("      Raw: valueU64=%1, bytes=[%2], runtimeItemId=%3, flags=%4")
+                .arg(uint64ToHex(entry.valueU64))
+                .arg(runtimeFieldSampleBytesText(entry.sampleBytes))
+                .arg(uint64ToHex(entry.runtimeItemId))
+                .arg(uint64ToHex(entry.flags));
+        }
+        return lines.join(QChar('\n'));
+    }
+
     // readThreadUserStackFromTeb：
     // - 从目标进程 TEB 的 NT_TIB 起始字段读取用户栈边界；
     // - 失败只影响调用栈窗口的边界提示，不影响线程行本身展示。
@@ -1933,10 +2854,11 @@ void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
             ThreadInspectRefreshResult refreshResult{};
             const auto beginTime = std::chrono::steady_clock::now();
             std::unordered_map<std::uint32_t, const ksword::ark::ThreadEntry*> r0ThreadByTid;
+            const ksword::ark::DriverClient driverClient;
 
             // R0 线程扩展是可选增强：驱动未加载或 DynData 不满足时，R3 线程枚举继续展示。
             const ksword::ark::ThreadEnumResult r0ThreadResult =
-                ksword::ark::DriverClient().enumerateThreads(
+                driverClient.enumerateThreads(
                     KSWORD_ARK_ENUM_THREAD_FLAG_INCLUDE_ALL,
                     pidValue);
             if (r0ThreadResult.io.ok)
@@ -1952,8 +2874,15 @@ void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
             }
             else
             {
+                const QString rawThreadIoMessage =
+                    QString::fromStdString(r0ThreadResult.io.message).trimmed();
+                const QString readableThreadIoMessage = readableRuntimeIoMessage(
+                    rawThreadIoMessage,
+                    QStringLiteral("R0线程扩展"),
+                    QStringLiteral("无额外驱动消息。"),
+                    false);
                 refreshResult.diagnosticText = QStringLiteral("R0线程扩展不可用: %1")
-                    .arg(QString::fromStdString(r0ThreadResult.io.message));
+                    .arg(readableThreadIoMessage);
             }
 
             HANDLE processHandle = OpenProcess(
@@ -2105,6 +3034,89 @@ void ProcessDetailWindow::requestAsyncThreadInspectRefresh()
                             rowItem.r0InitialStack = r0It->second->initialStack;
                         }
 
+                        // 固定线程详情 IOCTL：
+                        // - 输入仅为 TID/PID，驱动重新引用 ETHREAD；
+                        // - 输出用于补齐 Cid、链表、启动地址、栈边界和 I/O 计数；
+                        // - 本页只渲染结果，不把返回的内核地址作为后续操作凭据。
+                        const ksword::ark::ThreadRuntimeDetailResult detailResult =
+                            driverClient.queryThreadRuntimeDetail(rowItem.threadId, pidValue);
+                        if (detailResult.io.ok)
+                        {
+                            const KSWORD_ARK_THREAD_DETAIL_RESPONSE& detailResponse =
+                                detailResult.response;
+                            rowItem.r0DetailStatus = detailResponse.status;
+                            rowItem.r0DetailFieldFlags = detailResponse.fieldFlags;
+                            rowItem.r0MissingCapabilityMask = detailResponse.missingCapabilityMask;
+                            rowItem.r0DetailLastStatus = detailResponse.lastStatus;
+                            rowItem.r0CapabilityMask = detailResponse.dynDataCapabilityMask != 0U
+                                ? detailResponse.dynDataCapabilityMask
+                                : rowItem.r0CapabilityMask;
+
+                            if ((detailResponse.fieldFlags & KSWORD_ARK_THREAD_DETAIL_FIELD_START_ADDRESS) != 0U)
+                            {
+                                rowItem.startAddress = detailResponse.startAddress;
+                                rowItem.startAddressText = uint64ToHex(detailResponse.startAddress);
+                            }
+                            if ((detailResponse.fieldFlags & KSWORD_ARK_THREAD_DETAIL_FIELD_WIN32_START_ADDRESS) != 0U)
+                            {
+                                rowItem.win32StartAddress = detailResponse.win32StartAddress;
+                            }
+                            if ((detailResponse.fieldFlags & KSWORD_ARK_THREAD_DETAIL_FIELD_STACK_LIMITS) != 0U)
+                            {
+                                rowItem.r0InitialStack = detailResponse.initialStack;
+                                rowItem.r0StackLimit = detailResponse.stackLimit;
+                                rowItem.r0StackBase = detailResponse.stackBase;
+                                rowItem.r0KernelStack = detailResponse.kernelStack;
+                                rowItem.r0ThreadStatus = KSWORD_ARK_THREAD_R0_STATUS_OK;
+                            }
+                            if ((detailResponse.fieldFlags & KSWORD_ARK_THREAD_DETAIL_FIELD_IO_COUNTERS) != 0U)
+                            {
+                                rowItem.r0ReadOperationCount = detailResponse.readOperationCount;
+                                rowItem.r0WriteOperationCount = detailResponse.writeOperationCount;
+                                rowItem.r0OtherOperationCount = detailResponse.otherOperationCount;
+                                rowItem.r0ReadTransferCount = detailResponse.readTransferCount;
+                                rowItem.r0WriteTransferCount = detailResponse.writeTransferCount;
+                                rowItem.r0OtherTransferCount = detailResponse.otherTransferCount;
+                            }
+
+                            rowItem.r0RuntimeDetailText = QStringLiteral(
+                                "线程详情=%1；已采集=%2；缺失能力=%3；LastStatus=%4；"
+                                "CID=%5/%6；Start=%7；Win32Start=%8；I/O=%9/%10/%11 ops, %12/%13/%14 bytes；"
+                                "偏移来源=%15；内核全局=%16；采样说明=%17")
+                                .arg(runtimeDetailStatusText(detailResponse.status))
+                                .arg(threadRuntimeFieldListText(detailResponse.fieldFlags))
+                                .arg(runtimeCapabilityMaskText(detailResponse.missingCapabilityMask, true))
+                                .arg(ntStatusHexText(detailResponse.lastStatus))
+                                .arg(static_cast<qulonglong>(detailResponse.cidUniqueProcess))
+                                .arg(static_cast<qulonglong>(detailResponse.cidUniqueThread))
+                                .arg(uint64ToHex(detailResponse.startAddress))
+                                .arg(uint64ToHex(detailResponse.win32StartAddress))
+                                .arg(static_cast<qulonglong>(detailResponse.readOperationCount))
+                                .arg(static_cast<qulonglong>(detailResponse.writeOperationCount))
+                                .arg(static_cast<qulonglong>(detailResponse.otherOperationCount))
+                                .arg(static_cast<qulonglong>(detailResponse.readTransferCount))
+                                .arg(static_cast<qulonglong>(detailResponse.writeTransferCount))
+                                .arg(static_cast<qulonglong>(detailResponse.otherTransferCount))
+                                .arg(threadRuntimeOffsetSourceText(detailResponse))
+                                .arg(runtimeKernelGlobalsText(detailResponse.kernelGlobals))
+                                .arg(runtimeSamplingSummaryText(
+                                    fixedRuntimeWideText(
+                                        detailResponse.detail,
+                                        KSWORD_ARK_RUNTIME_DETAIL_TEXT_CHARS),
+                                    QStringLiteral("线程")));
+                        }
+                        else
+                        {
+                            const QString rawMessage =
+                                QString::fromStdString(detailResult.io.message).trimmed();
+                            const QString readableMessage = readableRuntimeIoMessage(
+                                rawMessage,
+                                QStringLiteral("线程详情"),
+                                QStringLiteral("线程详情暂不可用。"),
+                                detailResult.unsupported);
+                            rowItem.r0RuntimeDetailText = readableMessage;
+                        }
+
                         refreshResult.rows.push_back(std::move(rowItem));
                     }
 
@@ -2213,6 +3225,31 @@ void ProcessDetailWindow::applyThreadInspectResult(const ThreadInspectRefreshRes
                 .arg(threadInspectR0StatusText(rowItem.r0ThreadStatus))
                 .arg(static_cast<qulonglong>(rowItem.r0CapabilityMask), 0, 16));
             m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::StackBoundary), stackBoundaryItem);
+
+            auto* runtimeDetailItem = new QTableWidgetItem(
+                rowItem.r0RuntimeDetailText.trimmed().isEmpty()
+                ? QStringLiteral("线程 runtime detail 暂不可用。")
+                : rowItem.r0RuntimeDetailText);
+            runtimeDetailItem->setToolTip(QStringLiteral(
+                "DetailStatus=%1\n"
+                "已采集字段=%2\n"
+                "缺失能力=%3\n"
+                "LastStatus=%4\n"
+                "Read/Write/Other Ops=%5/%6/%7\n"
+                "Read/Write/Other Bytes=%8/%9/%10\n\n"
+                "%11")
+                .arg(runtimeDetailStatusText(rowItem.r0DetailStatus))
+                .arg(threadRuntimeFieldListText(rowItem.r0DetailFieldFlags))
+                .arg(runtimeCapabilityMaskText(rowItem.r0MissingCapabilityMask, true))
+                .arg(ntStatusHexText(rowItem.r0DetailLastStatus))
+                .arg(static_cast<qulonglong>(rowItem.r0ReadOperationCount))
+                .arg(static_cast<qulonglong>(rowItem.r0WriteOperationCount))
+                .arg(static_cast<qulonglong>(rowItem.r0OtherOperationCount))
+                .arg(static_cast<qulonglong>(rowItem.r0ReadTransferCount))
+                .arg(static_cast<qulonglong>(rowItem.r0WriteTransferCount))
+                .arg(static_cast<qulonglong>(rowItem.r0OtherTransferCount))
+                .arg(runtimeDetailItem->text()));
+            m_threadInspectTable->setItem(row, toThreadColumnIndex(ThreadRowColumn::RuntimeDetail), runtimeDetailItem);
         }
         m_threadInspectTable->setSortingEnabled(true);
     }
@@ -2226,6 +3263,184 @@ void ProcessDetailWindow::applyThreadInspectResult(const ThreadInspectRefreshRes
     }
     updateThreadInspectStatusLabel(statusText, false);
     kPro.set(m_threadInspectRefreshProgressPid, "线程细节刷新完成", 0, 100.0f);
+}
+
+void ProcessDetailWindow::requestAsyncSelectedThreadRuntimeSample()
+{
+    // 当前线程 PDB deep runtime 采样：
+    // - 输入来自线程表当前选中 TID 与窗口 PID；
+    // - 后台只传 TID/PID/runtimeItemId/offset/size，不传 ETHREAD 地址；
+    // - 返回文本写入 CodeEditorWidget，便于审计人员复制和比对字段。
+    if (m_threadRuntimeSampleRefreshing)
+    {
+        if (m_threadInspectStatusLabel != nullptr)
+        {
+            m_threadInspectStatusLabel->setText(QStringLiteral("● 当前线程 PDB 字段采样仍在进行..."));
+        }
+        return;
+    }
+    if (m_threadInspectTable == nullptr || m_threadRuntimeSampleOutput == nullptr)
+    {
+        return;
+    }
+
+    const int currentRow = m_threadInspectTable->currentRow();
+    if (currentRow < 0)
+    {
+        m_threadRuntimeSampleOutput->setText(QStringLiteral("请先在线程表中选择一条线程记录。"));
+        return;
+    }
+
+    const QTableWidgetItem* threadIdItem =
+        m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId));
+    const std::uint32_t threadId = threadIdItem != nullptr
+        ? static_cast<std::uint32_t>(threadIdItem->data(Qt::UserRole + 1).toULongLong())
+        : 0U;
+    const std::size_t cacheIndex = threadIdItem != nullptr
+        ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
+        : static_cast<std::size_t>(m_threadInspectRows.size());
+    if (threadId == 0U || cacheIndex >= m_threadInspectRows.size())
+    {
+        m_threadRuntimeSampleOutput->setText(QStringLiteral("当前线程行缺少 TID 或缓存索引，请先刷新线程页。"));
+        return;
+    }
+
+    const ThreadInspectItem selectedRow = m_threadInspectRows[cacheIndex];
+    const std::uint32_t processId = selectedRow.processId != 0U
+        ? selectedRow.processId
+        : m_baseRecord.pid;
+    if (processId == 0U)
+    {
+        m_threadRuntimeSampleOutput->setText(QStringLiteral("当前进程 PID 不可用，无法执行线程 PDB 字段采样。"));
+        return;
+    }
+
+    m_threadRuntimeSampleRefreshing = true;
+    const std::uint64_t ticketValue = ++m_threadRuntimeSampleTicket;
+    if (m_sampleThreadRuntimeButton != nullptr)
+    {
+        m_sampleThreadRuntimeButton->setEnabled(false);
+    }
+    if (m_threadInspectStatusLabel != nullptr)
+    {
+        m_threadInspectStatusLabel->setText(QStringLiteral("● 正在采样 TID=%1 的 PDB deep 字段...").arg(threadId));
+        m_threadInspectStatusLabel->setStyleSheet(buildStateLabelStyle(KswordTheme::PrimaryBlueColor, 700));
+    }
+    m_threadRuntimeSampleOutput->setText(QStringLiteral(
+        "正在后台执行 thread_detail PDB deep runtime 字段采样...\n"
+        "请求只包含 TID/PID/offset/size，不提交 ETHREAD 地址。"));
+
+    QPointer<ProcessDetailWindow> guardThis(this);
+    auto* sampleTask = QRunnable::create(
+        [guardThis, ticketValue, processId, threadId, selectedRow]()
+        {
+            const auto beginTime = std::chrono::steady_clock::now();
+            QStringList lines;
+            lines << QStringLiteral("[Selected Thread Runtime Context]");
+            lines << QStringLiteral("TID/PID: %1/%2").arg(threadId).arg(processId);
+            lines << QStringLiteral("Start/Win32Start: %1 / %2")
+                .arg(uint64ToHex(selectedRow.startAddress))
+                .arg(uint64ToHex(selectedRow.win32StartAddress));
+            lines << QStringLiteral("TEB: %1").arg(uint64ToHex(selectedRow.tebAddress));
+            lines << QStringLiteral("R0 fixed detail: %1")
+                .arg(selectedRow.r0RuntimeDetailText.trimmed().isEmpty()
+                    ? QStringLiteral("线程 runtime detail 暂不可用。")
+                    : selectedRow.r0RuntimeDetailText);
+            lines << QString();
+
+            const ksword::ark::DriverClient driverClient;
+            const ksword::ark::DynDataStatusResult dynDataStatusResult =
+                driverClient.queryDynDataStatus();
+            QString deepIdentityGuardText;
+            bool deepIdentityMatched = false;
+            if (dynDataStatusResult.io.ok)
+            {
+                deepIdentityMatched = pdbRuntimeCatalogMatchesKernelIdentity(
+                    dynDataStatusResult.ntoskrnl.timeDateStamp,
+                    dynDataStatusResult.ntoskrnl.sizeOfImage,
+                    &deepIdentityGuardText);
+            }
+            else
+            {
+                const QString readableDynDataMessage = readableRuntimeIoMessage(
+                    QString::fromStdString(dynDataStatusResult.io.message),
+                    QStringLiteral("DynData状态"),
+                    QStringLiteral("DynData status 查询没有返回额外说明。"),
+                    false);
+                deepIdentityGuardText = QStringLiteral(
+                    "[PDB Deep Runtime Identity Guard]\n"
+                    "结论: 不匹配，跳过只读采样\n"
+                    "原因: DynData status 查询不可用，无法校验 deep offset 与当前内核 identity。%1")
+                    .arg(readableDynDataMessage);
+            }
+
+            lines << deepIdentityGuardText;
+            lines << QString();
+            const std::vector<ksword::ark::RuntimeFieldSampleRequestItem> sampleItems =
+                deepIdentityMatched
+                ? buildPdbRuntimeSampleItems(QStringLiteral("thread_detail"), 64)
+                : std::vector<ksword::ark::RuntimeFieldSampleRequestItem>{};
+            if (!deepIdentityMatched)
+            {
+                lines << QStringLiteral("[PDB Deep Runtime Sample - thread_detail]");
+                lines << QStringLiteral("deep catalog identity 未与当前 ntoskrnl 匹配，已跳过 R0 字段采样，避免错误偏移。");
+            }
+            else if (sampleItems.empty())
+            {
+                lines << QStringLiteral("[PDB Deep Runtime Sample - thread_detail]");
+                lines << QStringLiteral("profiles/pdb_deep_offsets 中没有找到可安全采样的 thread_detail 小字段。");
+            }
+            else
+            {
+                const ksword::ark::RuntimeFieldSampleResult sampleResult =
+                    driverClient.queryThreadRuntimeFieldSamples(threadId, processId, sampleItems);
+                lines << runtimeFieldSampleResultText(
+                    sampleResult,
+                    QStringLiteral("线程 PDB deep 字段采样"));
+            }
+
+            lines << QString();
+            lines << QStringLiteral("[PDB Deep Runtime Catalog - thread_detail preview]");
+            lines << buildPdbRuntimeCatalogPreview(QStringLiteral("thread_detail"), 16, 64);
+
+            const std::uint64_t elapsedMs = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - beginTime).count());
+            lines << QString();
+            lines << QStringLiteral("ElapsedMs: %1").arg(elapsedMs);
+            const QString outputText = lines.join(QChar('\n'));
+
+            QMetaObject::invokeMethod(
+                guardThis,
+                [guardThis, ticketValue, threadId, outputText, elapsedMs]()
+                {
+                    if (guardThis == nullptr || guardThis->m_threadRuntimeSampleTicket != ticketValue)
+                    {
+                        return;
+                    }
+
+                    guardThis->m_threadRuntimeSampleRefreshing = false;
+                    if (guardThis->m_sampleThreadRuntimeButton != nullptr)
+                    {
+                        guardThis->m_sampleThreadRuntimeButton->setEnabled(true);
+                    }
+                    if (guardThis->m_threadRuntimeSampleOutput != nullptr)
+                    {
+                        guardThis->m_threadRuntimeSampleOutput->setText(outputText);
+                    }
+                    if (guardThis->m_threadInspectStatusLabel != nullptr)
+                    {
+                        guardThis->m_threadInspectStatusLabel->setText(
+                            QStringLiteral("● TID=%1 PDB 字段采样完成 %2 ms")
+                            .arg(threadId)
+                            .arg(elapsedMs));
+                        guardThis->m_threadInspectStatusLabel->setStyleSheet(
+                            buildStateLabelStyle(statusIdleColor(), 600));
+                    }
+                },
+                Qt::QueuedConnection);
+        });
+    QThreadPool::globalInstance()->start(sampleTask);
 }
 
 void ProcessDetailWindow::requestAsyncTokenRefresh()
@@ -4474,8 +5689,42 @@ void ProcessDetailWindow::requestAsyncSectionRefresh()
             const auto beginTime = std::chrono::steady_clock::now();
             SectionRefreshResult refreshResult{};
             std::wstringstream textBuilder;
+            const ksword::ark::DriverClient driverClient;
 
-            const auto sectionResult = ksword::ark::DriverClient().queryProcessSection(
+            const ksword::ark::ProcessRuntimeDetailResult processDetailResult =
+                driverClient.queryProcessRuntimeDetail(processId);
+            const ksword::ark::DynDataStatusResult dynDataStatusResult =
+                driverClient.queryDynDataStatus();
+            QString deepIdentityGuardText;
+            bool deepIdentityMatched = false;
+            if (dynDataStatusResult.io.ok)
+            {
+                deepIdentityMatched = pdbRuntimeCatalogMatchesKernelIdentity(
+                    dynDataStatusResult.ntoskrnl.timeDateStamp,
+                    dynDataStatusResult.ntoskrnl.sizeOfImage,
+                    &deepIdentityGuardText);
+            }
+            else
+            {
+                const QString readableDynDataMessage = readableRuntimeIoMessage(
+                    QString::fromStdString(dynDataStatusResult.io.message),
+                    QStringLiteral("DynData状态"),
+                    QStringLiteral("DynData status 查询没有返回额外说明。"),
+                    false);
+                deepIdentityGuardText = QStringLiteral(
+                    "[PDB Deep Runtime Identity Guard]\n"
+                    "结论: 不匹配，跳过只读采样\n"
+                    "原因: DynData status 查询不可用，无法校验 deep offset 与当前内核 identity。%1")
+                    .arg(readableDynDataMessage);
+            }
+            const std::vector<ksword::ark::RuntimeFieldSampleRequestItem> processSampleItems =
+                deepIdentityMatched
+                ? buildPdbRuntimeSampleItems(QStringLiteral("process_detail"), 64)
+                : std::vector<ksword::ark::RuntimeFieldSampleRequestItem>{};
+            const ksword::ark::RuntimeFieldSampleResult processSampleResult = (!deepIdentityMatched || processSampleItems.empty())
+                ? ksword::ark::RuntimeFieldSampleResult{}
+                : driverClient.queryProcessRuntimeFieldSamples(processId, processSampleItems);
+            const auto sectionResult = driverClient.queryProcessSection(
                 processId,
                 KSWORD_ARK_SECTION_QUERY_FLAG_INCLUDE_ALL,
                 KSWORD_ARK_SECTION_MAPPING_LIMIT_DEFAULT);
@@ -4527,11 +5776,172 @@ void ProcessDetailWindow::requestAsyncSectionRefresh()
                     }
                 };
 
+            textBuilder << L"[R0 Process Runtime Detail]\n";
+            if (processDetailResult.io.ok)
+            {
+                const KSWORD_ARK_PROCESS_DETAIL_RESPONSE& processDetail =
+                    processDetailResult.response;
+                textBuilder << L"Status: "
+                    << runtimeDetailStatusText(processDetail.status).toStdWString()
+                    << L"\n";
+                textBuilder << L"PID/Image: "
+                    << processDetail.processId
+                    << L" / "
+                    << fixedRuntimeImageName(
+                        processDetail.imageName,
+                        KSWORD_ARK_RUNTIME_IMAGE_NAME_CHARS).toStdWString()
+                    << L"\n";
+                textBuilder << L"Object/UniqueProcessId: "
+                    << uint64ToHex(processDetail.processObjectAddress).toStdWString()
+                    << L" / "
+                    << uint64ToHex(processDetail.uniqueProcessIdValue).toStdWString()
+                    << L"\n";
+                textBuilder << L"ActiveProcessLinks: Flink="
+                    << uint64ToHex(processDetail.activeProcessLinksFlink).toStdWString()
+                    << L", Blink="
+                    << uint64ToHex(processDetail.activeProcessLinksBlink).toStdWString()
+                    << L"\n";
+                textBuilder << L"ThreadListHead: Flink="
+                    << uint64ToHex(processDetail.threadListHeadFlink).toStdWString()
+                    << L", Blink="
+                    << uint64ToHex(processDetail.threadListHeadBlink).toStdWString()
+                    << L"\n";
+                textBuilder << L"ObjectTable/SectionObject: "
+                    << uint64ToHex(processDetail.objectTableAddress).toStdWString()
+                    << L" / "
+                    << uint64ToHex(processDetail.sectionObjectAddress).toStdWString()
+                    << L"\n";
+                textBuilder << L"TokenFastRef/TokenObject: "
+                    << uint64ToHex(processDetail.tokenFastRef).toStdWString()
+                    << L" / "
+                    << uint64ToHex(processDetail.tokenObjectAddress).toStdWString()
+                    << L"\n";
+                textBuilder << L"Protection/Signature/SectionSignature: 0x"
+                    << QStringLiteral("%1")
+                        .arg(static_cast<unsigned int>(processDetail.protection), 2, 16, QChar('0'))
+                        .toUpper().toStdWString()
+                    << L" / 0x"
+                    << QStringLiteral("%1")
+                        .arg(static_cast<unsigned int>(processDetail.signatureLevel), 2, 16, QChar('0'))
+                        .toUpper().toStdWString()
+                    << L" / 0x"
+                    << QStringLiteral("%1")
+                        .arg(static_cast<unsigned int>(processDetail.sectionSignatureLevel), 2, 16, QChar('0'))
+                        .toUpper().toStdWString()
+                    << L"\n";
+                textBuilder << L"已采集字段: "
+                    << processRuntimeFieldListText(processDetail.fieldFlags).toStdWString()
+                    << L"\n";
+                textBuilder << L"Offsets: UniquePid="
+                    << uint64ToHex(processDetail.offsets.epUniqueProcessId).toStdWString()
+                    << L", ActiveLinks="
+                    << uint64ToHex(processDetail.offsets.epActiveProcessLinks).toStdWString()
+                    << L", ThreadList="
+                    << uint64ToHex(processDetail.offsets.epThreadListHead).toStdWString()
+                    << L", ImageFileName="
+                    << uint64ToHex(processDetail.offsets.epImageFileName).toStdWString()
+                    << L", Token="
+                    << uint64ToHex(processDetail.offsets.epToken).toStdWString()
+                    << L", ObjectTable="
+                    << uint64ToHex(processDetail.offsets.epObjectTable).toStdWString()
+                    << L", SectionObject="
+                    << uint64ToHex(processDetail.offsets.epSectionObject).toStdWString()
+                    << L"\n";
+                textBuilder << L"OffsetSources: "
+                    << processRuntimeOffsetSourceText(processDetail).toStdWString()
+                    << L"\n";
+                textBuilder << L"KernelGlobals: "
+                    << runtimeKernelGlobalsText(processDetail.kernelGlobals).toStdWString()
+                    << L"\n";
+                textBuilder << L"DynData已具备能力: "
+                    << runtimeCapabilityMaskText(processDetail.dynDataCapabilityMask, false).toStdWString()
+                    << L"\n";
+                textBuilder << L"DynData缺失能力: "
+                    << runtimeCapabilityMaskText(processDetail.missingCapabilityMask, true).toStdWString()
+                    << L"\n";
+                textBuilder << L"LastStatus: "
+                    << ntStatusHexText(processDetail.lastStatus).toStdWString()
+                    << L"\n";
+                textBuilder << L"说明: "
+                    << runtimeSamplingSummaryText(
+                        fixedRuntimeWideText(
+                            processDetail.detail,
+                            KSWORD_ARK_RUNTIME_DETAIL_TEXT_CHARS),
+                        QStringLiteral("进程")).toStdWString()
+                    << L"\n\n";
+            }
+            else
+            {
+                const QString rawMessage =
+                    QString::fromStdString(processDetailResult.io.message).trimmed();
+                const QString readableMessage = readableRuntimeIoMessage(
+                    rawMessage,
+                    QStringLiteral("进程详情"),
+                    QStringLiteral("进程 runtime detail 暂不可用。"),
+                    processDetailResult.unsupported);
+                textBuilder << L"Status: unavailable\n";
+                textBuilder << L"说明: " << readableMessage.toStdWString() << L"\n\n";
+            }
+
+            textBuilder << L"[PDB Deep Runtime Sample - process_detail]\n";
+            textBuilder << deepIdentityGuardText.toStdWString() << L"\n";
+            if (!deepIdentityMatched)
+            {
+                textBuilder << L"deep catalog identity 未与当前 ntoskrnl 匹配，已跳过 R0 字段采样，避免错误偏移。\n\n";
+            }
+            else if (processSampleItems.empty())
+            {
+                textBuilder << L"PDB deep offset JSON 未提供可安全采样的小字段，或 profiles\\pdb_deep_offsets 未找到。\n\n";
+            }
+            else
+            {
+                textBuilder << runtimeFieldSampleResultText(
+                    processSampleResult,
+                    QStringLiteral("进程 PDB deep 字段采样")).toStdWString()
+                    << L"\n\n";
+            }
+
+            textBuilder << L"[PDB Deep Runtime Catalog - process_detail]\n"
+                << buildPdbRuntimeCatalogPreview(QStringLiteral("process_detail"), 64, 1024).toStdWString()
+                << L"\n\n";
+            textBuilder << L"[PDB Deep Runtime Catalog - thread_detail]\n"
+                << buildPdbRuntimeCatalogPreview(QStringLiteral("thread_detail"), 64, 1024).toStdWString()
+                << L"\n\n";
+
+            // 追加更广的 PDB deep offset domain：
+            // - 输入：ntkrnlmp deep JSON 中已批量生成的 handle/module/memory/ipc/callback/common domain；
+            // - 处理：只展示目录预览，不发起额外 R0 调用，不扩大当前查询的权限面；
+            // - 返回：写入 CodeEditorWidget 文本，让进程详情页能直接看到备用偏移库不只是摘要。
+            const auto appendDeepCatalogPreviewDomain =
+                [&textBuilder](const QString& domainName, const QString& titleText)
+            {
+                textBuilder << L"[PDB Deep Runtime Catalog - "
+                    << titleText.toStdWString()
+                    << L"]\n"
+                    << buildPdbRuntimeCatalogPreview(domainName, 32, 256).toStdWString()
+                    << L"\n\n";
+            };
+            appendDeepCatalogPreviewDomain(QStringLiteral("handle_object_detail"), QStringLiteral("handle_object_detail"));
+            appendDeepCatalogPreviewDomain(QStringLiteral("memory_section_detail"), QStringLiteral("memory_section_detail"));
+            appendDeepCatalogPreviewDomain(QStringLiteral("module_driver_detail"), QStringLiteral("module_driver_detail"));
+            appendDeepCatalogPreviewDomain(QStringLiteral("ipc_alpc_detail"), QStringLiteral("ipc_alpc_detail"));
+            appendDeepCatalogPreviewDomain(QStringLiteral("callback_registry_security"), QStringLiteral("callback_registry_security"));
+            appendDeepCatalogPreviewDomain(QStringLiteral("common_kernel_primitives"), QStringLiteral("common_kernel_primitives"));
+            appendDeepCatalogPreviewDomain(QStringLiteral("kernel_global_detail"), QStringLiteral("kernel_global_detail"));
+
+            const QString rawSectionIoMessage =
+                QString::fromStdString(sectionResult.io.message).trimmed();
+            const QString readableSectionIoMessage = readableRuntimeIoMessage(
+                rawSectionIoMessage,
+                QStringLiteral("Section/ControlArea"),
+                QStringLiteral("无额外驱动消息。"),
+                false);
+
             textBuilder << L"[R0 Section Query]\n";
-            textBuilder << L"IO: " << QString::fromStdString(sectionResult.io.message).toStdWString() << L"\n";
+            textBuilder << L"IO说明: " << readableSectionIoMessage.toStdWString() << L"\n";
             if (!sectionResult.io.ok)
             {
-                refreshResult.diagnosticText = QString::fromStdString(sectionResult.io.message);
+                refreshResult.diagnosticText = readableSectionIoMessage;
             }
             else
             {

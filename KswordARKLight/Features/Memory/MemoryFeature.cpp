@@ -17,6 +17,8 @@ constexpr int kTabId = 52101;
 constexpr int kDriverMemoryTabIndex = 0;
 constexpr int kPhysicalMemoryTabIndex = 1;
 constexpr int kKernelEvidenceTabIndex = 2;
+constexpr int kKernelExecutableTabIndex = 3;
+constexpr int kProcessVaEvidenceTabIndex = 4;
 
 // MemoryFeaturePageState owns the tab host and all retained child HWNDs. Input
 // arrives through Win32 messages; processing never destroys a child page on tab
@@ -27,6 +29,8 @@ struct MemoryFeaturePageState {
     HWND driverMemoryView = nullptr;
     HWND physicalMemoryView = nullptr;
     HWND kernelEvidenceView = nullptr;
+    HWND kernelExecutableView = nullptr;
+    HWND processVaEvidenceView = nullptr;
     int currentTab = kDriverMemoryTabIndex;
 };
 
@@ -56,6 +60,8 @@ void ShowPages(MemoryFeaturePageState& state) {
     const bool driverVisible = state.currentTab == kDriverMemoryTabIndex;
     const bool physicalVisible = state.currentTab == kPhysicalMemoryTabIndex;
     const bool kernelVisible = state.currentTab == kKernelEvidenceTabIndex;
+    const bool kernelExecutableVisible = state.currentTab == kKernelExecutableTabIndex;
+    const bool processVaVisible = state.currentTab == kProcessVaEvidenceTabIndex;
     if (state.driverMemoryView) {
         ::ShowWindow(state.driverMemoryView, driverVisible ? SW_SHOW : SW_HIDE);
     }
@@ -64,6 +70,12 @@ void ShowPages(MemoryFeaturePageState& state) {
     }
     if (state.kernelEvidenceView) {
         ::ShowWindow(state.kernelEvidenceView, kernelVisible ? SW_SHOW : SW_HIDE);
+    }
+    if (state.kernelExecutableView) {
+        ::ShowWindow(state.kernelExecutableView, kernelExecutableVisible ? SW_SHOW : SW_HIDE);
+    }
+    if (state.processVaEvidenceView) {
+        ::ShowWindow(state.processVaEvidenceView, processVaVisible ? SW_SHOW : SW_HIDE);
     }
 }
 
@@ -91,6 +103,12 @@ void LayoutChildren(MemoryFeaturePageState& state) {
     if (state.kernelEvidenceView) {
         ::MoveWindow(state.kernelEvidenceView, display.left, display.top, pageWidth, pageHeight, TRUE);
     }
+    if (state.kernelExecutableView) {
+        ::MoveWindow(state.kernelExecutableView, display.left, display.top, pageWidth, pageHeight, TRUE);
+    }
+    if (state.processVaEvidenceView) {
+        ::MoveWindow(state.processVaEvidenceView, display.left, display.top, pageWidth, pageHeight, TRUE);
+    }
     ShowPages(state);
 }
 
@@ -105,6 +123,8 @@ bool CreateChildControls(MemoryFeaturePageState& state) {
     Ksword::Ui::AddTabPage(state.tab, kDriverMemoryTabIndex, { L"驱动内存读写" });
     Ksword::Ui::AddTabPage(state.tab, kPhysicalMemoryTabIndex, { L"物理内存布局" });
     Ksword::Ui::AddTabPage(state.tab, kKernelEvidenceTabIndex, { L"内核内存证据" });
+    Ksword::Ui::AddTabPage(state.tab, kKernelExecutableTabIndex, { L"内核可执行内存" });
+    Ksword::Ui::AddTabPage(state.tab, kProcessVaEvidenceTabIndex, { L"进程VA证据" });
     ::SendMessageW(state.tab, TCM_SETCURSEL, static_cast<WPARAM>(kDriverMemoryTabIndex), 0);
 
     RECT pageRect{};
@@ -123,7 +143,17 @@ bool CreateChildControls(MemoryFeaturePageState& state) {
         52103,
         childBounds,
         Ksword::Features::Kernel::KernelFeatureId::KernelMemoryEvidence);
-    if (!state.driverMemoryView || !state.physicalMemoryView || !state.kernelEvidenceView) {
+    state.kernelExecutableView = Ksword::Features::Kernel::CreateKernelSingleFeaturePage(
+        state.tab,
+        52104,
+        childBounds,
+        Ksword::Features::Kernel::KernelFeatureId::KernelExecutableMemory);
+    state.processVaEvidenceView = CreateProcessMemoryEvidenceView(state.tab, childBounds);
+    if (!state.driverMemoryView ||
+        !state.physicalMemoryView ||
+        !state.kernelEvidenceView ||
+        !state.kernelExecutableView ||
+        !state.processVaEvidenceView) {
         return false;
     }
     return true;

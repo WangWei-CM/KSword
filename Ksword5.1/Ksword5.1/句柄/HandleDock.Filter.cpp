@@ -328,9 +328,6 @@ void HandleDock::showHandleTableContextMenu(const QPoint& localPosition)
     QAction* copyCellAction = menu.addAction(QIcon(":/Icon/handle_copy.svg"), QStringLiteral("复制单元格"));
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/handle_copy_row.svg"), QStringLiteral("复制整行"));
     menu.addSeparator();
-    QAction* closeHandleAction = menu.addAction(QIcon(":/Icon/handle_close.svg"), QStringLiteral("关闭句柄"));
-    QAction* closeBatchAction = menu.addAction(QIcon(":/Icon/handle_close.svg"), QStringLiteral("批量关闭同类型句柄"));
-    menu.addSeparator();
     QAction* gotoTypeAction = menu.addAction(QIcon(":/Icon/process_tree.svg"), QStringLiteral("转到对象类型"));
     QAction* refreshAction = menu.addAction(QIcon(":/Icon/handle_refresh.svg"), QStringLiteral("刷新"));
 
@@ -347,16 +344,6 @@ void HandleDock::showHandleTableContextMenu(const QPoint& localPosition)
     if (selectedAction == copyRowAction)
     {
         copyCurrentHandleRow();
-        return;
-    }
-    if (selectedAction == closeHandleAction)
-    {
-        closeCurrentHandle();
-        return;
-    }
-    if (selectedAction == closeBatchAction)
-    {
-        closeSameTypeHandlesInCurrentProcess();
         return;
     }
     if (selectedAction == gotoTypeAction)

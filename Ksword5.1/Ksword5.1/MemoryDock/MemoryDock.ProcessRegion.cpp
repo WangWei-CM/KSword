@@ -10,6 +10,48 @@ using namespace ksword::memory_dock_internal;
 // - 聚焦“附加目标与地址空间概览”能力。
 // ============================================================
 
+namespace
+{
+    // processRegionTableRowText 作用：
+    // - 输入：MemoryDock 进程/区域等普通表格和行号；
+    // - 处理：按列顺序读取整行文本，隐藏列也保留，方便复制 PID/Session 上下文；
+    // - 返回：TSV 文本，行无效时返回空字符串。
+    QString processRegionTableRowText(QTableWidget* table, const int rowIndex)
+    {
+        if (table == nullptr || rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return QString();
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+            fields.push_back(item != nullptr ? item->text() : QString());
+        }
+        return fields.join(QLatin1Char('\t'));
+    }
+
+    // copyProcessRegionTableRow 作用：
+    // - 输入：目标表格和行号；
+    // - 处理：把整行 TSV 写入系统剪贴板；
+    // - 返回：无，剪贴板不可用或行无效时直接返回。
+    void copyProcessRegionTableRow(QTableWidget* table, const int rowIndex)
+    {
+        if (table == nullptr || QApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        const QString rowText = processRegionTableRowText(table, rowIndex);
+        if (!rowText.isEmpty())
+        {
+            QApplication::clipboard()->setText(rowText);
+        }
+    }
+}
+
 void MemoryDock::refreshProcessList(const bool keepSelection)
 {
     // 输出刷新入口日志，记录是否尝试保留上次选择。
@@ -703,14 +745,19 @@ void MemoryDock::showProcessTableContextMenu(const QPoint& localPosition)
         return;
     }
     const QString processName = nameItem->text().trimmed();
+    m_processTable->setCurrentCell(row, index.column());
 
     QMenu contextMenu(this);
+    contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* attachAction = contextMenu.addAction(
         QIcon(":/Icon/process_start.svg"),
         QStringLiteral("附加进程"));
     QAction* dumpAction = contextMenu.addAction(
         QIcon(":/Icon/process_details.svg"),
         QStringLiteral("Dump内存到文件"));
+    QAction* copyRowAction = contextMenu.addAction(
+        QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+        QStringLiteral("复制当前行"));
 
     QAction* selectedAction = contextMenu.exec(m_processTable->viewport()->mapToGlobal(localPosition));
     if (selectedAction == nullptr)
@@ -727,6 +774,19 @@ void MemoryDock::showProcessTableContextMenu(const QPoint& localPosition)
     if (selectedAction == dumpAction)
     {
         requestDumpProcessMemoryByPid(pid, processName);
+        return;
+    }
+
+    if (selectedAction == copyRowAction)
+    {
+        copyProcessRegionTableRow(m_processTable, row);
+        kLogEvent copyProcessRowEvent;
+        dbg << copyProcessRowEvent
+            << "[MemoryDock] 进程表右键复制当前行, row="
+            << row
+            << ", pid="
+            << pid
+            << eol;
     }
 }
 

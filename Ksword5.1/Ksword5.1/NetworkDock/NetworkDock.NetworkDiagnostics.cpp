@@ -63,6 +63,7 @@ void NetworkDock::initializeArpCacheTab()
     m_arpTable->verticalHeader()->setVisible(false);
     m_arpTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     // 横向滚动条不强制关闭：默认由全局列宽自适应压入 viewport，用户拖宽列后按需出现。
+    installCopyCurrentRowMenu(m_arpTable);
     m_arpCacheLayout->addWidget(m_arpTable, 1);
 
     m_sideTabWidget->addTab(m_arpCachePage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("ARP缓存"));
@@ -117,6 +118,7 @@ void NetworkDock::initializeDnsCacheTab()
     m_dnsTable->verticalHeader()->setVisible(false);
     m_dnsTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     // 横向滚动条不强制关闭：默认由全局列宽自适应压入 viewport，用户拖宽列后按需出现。
+    installCopyCurrentRowMenu(m_dnsTable);
     m_dnsCacheLayout->addWidget(m_dnsTable, 1);
 
     m_sideTabWidget->addTab(m_dnsCachePage, QIcon(":/Icon/process_list.svg"), QStringLiteral("DNS缓存"));
@@ -189,6 +191,7 @@ void NetworkDock::initializeAliveHostScanTab()
     m_aliveScanTable->verticalHeader()->setVisible(false);
     m_aliveScanTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     // 横向滚动条不强制关闭：默认由全局列宽自适应压入 viewport，用户拖宽列后按需出现。
+    installCopyCurrentRowMenu(m_aliveScanTable);
     m_aliveScanLayout->addWidget(m_aliveScanTable, 1);
 
     m_sideTabWidget->addTab(m_aliveScanPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("存活主机"));

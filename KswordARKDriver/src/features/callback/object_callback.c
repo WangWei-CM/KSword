@@ -18,6 +18,13 @@ Environment:
 
 static const WCHAR g_KswordArkObAltitude[] = L"385201.5142";
 
+NTSYSAPI
+PEPROCESS
+NTAPI
+PsGetThreadProcess(
+    _In_ PETHREAD Thread
+    );
+
 #ifndef PROCESS_TERMINATE
 #define PROCESS_TERMINATE 0x0001
 #endif
@@ -146,7 +153,7 @@ KswordArkObjectPreOperation(
             NULL);
     }
     else {
-        PEPROCESS threadProcess = IoThreadToProcess((PETHREAD)OperationInformation->Object);
+        PEPROCESS threadProcess = PsGetThreadProcess((PETHREAD)OperationInformation->Object);
         callbackOperationMask = operationType | KSWORD_ARK_OBJECT_OP_TYPE_THREAD;
         if (threadProcess != NULL) {
             (VOID)KswordArkResolveProcessImagePath(

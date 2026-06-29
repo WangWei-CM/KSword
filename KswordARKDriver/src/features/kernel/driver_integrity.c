@@ -18,6 +18,8 @@ Environment:
     { FIELD_OFFSET(FAST_IO_DISPATCH, FieldName), #FieldName }
 #define KSW_DRIVER_INTEGRITY_DEVICE_VISIT_LIMIT 128UL
 #define KSW_DRIVER_INTEGRITY_ATTACH_VISIT_LIMIT 32UL
+#define KSW_DRIVER_INTEGRITY_UNLOADED_SCAN_LIMIT 50UL
+#define KSW_DRIVER_INTEGRITY_RTL_AVL_TABLE_SIZE_LIMIT 0x400UL
 #ifndef STATUS_INFO_LENGTH_MISMATCH
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
 #endif
@@ -64,6 +66,18 @@ typedef struct _KSW_DRIVER_INTEGRITY_DEVICE_SNAPSHOT
     ULONG DeviceType;
     ULONG Flags;
 } KSW_DRIVER_INTEGRITY_DEVICE_SNAPSHOT, *PKSW_DRIVER_INTEGRITY_DEVICE_SNAPSHOT;
+typedef struct _KSW_DRIVER_INTEGRITY_PIDDB_AVL_SUMMARY
+{
+    ULONGLONG BalancedRootLeftChild;
+    ULONGLONG BalancedRootRightChild;
+    ULONGLONG BalancedRootParentValue;
+    ULONGLONG OrderedPointer;
+    ULONGLONG RestartKey;
+    ULONG WhichOrderedElement;
+    ULONG NumberGenericTableElements;
+    ULONG DepthOfTree;
+    ULONG DeleteCount;
+} KSW_DRIVER_INTEGRITY_PIDDB_AVL_SUMMARY, *PKSW_DRIVER_INTEGRITY_PIDDB_AVL_SUMMARY;
 NTSYSAPI
 NTSTATUS
 NTAPI
@@ -175,6 +189,133 @@ KswordARKDriverIntegrityCopyUnicode(
     }
     RtlCopyMemory(Destination, Source->Buffer, (SIZE_T)charsToCopy * sizeof(WCHAR));
     Destination[charsToCopy] = L'\0';
+}
+static BOOLEAN
+KswordARKDriverIntegrityDynOffsetPresent(
+    _In_ ULONG Offset
+    )
+
+/* Read-only helper; returns TRUE only for explicit PDB/DynData offsets. */
+{
+    return (Offset != KSW_DYN_OFFSET_UNAVAILABLE && Offset != 0x0000FFFFUL) ? TRUE : FALSE;
+}
+static BOOLEAN
+KswordARKDriverIntegrityReadUnloadedUnicodeName(
+    _In_ ULONGLONG EntryAddress,
+    _In_ ULONG NameOffset,
+    _Out_writes_(DestinationChars) PWCHAR Destination,
+    _In_ ULONG DestinationChars
+    )
+
+/* Read-only helper; reads one _UNLOADED_DRIVERS.Name safely into a bounded text buffer. */
+{
+    UNICODE_STRING nameString;
+    ULONG copyChars = 0UL;
+    if (Destination == NULL || DestinationChars == 0UL) {
+        return FALSE;
+    }
+    Destination[0] = L'\0';
+    if (EntryAddress == 0ULL || !KswordARKDriverIntegrityDynOffsetPresent(NameOffset)) {
+        return FALSE;
+    }
+    if (!KswordARKHookReadMemorySafe((const VOID*)(ULONG_PTR)(EntryAddress + (ULONGLONG)NameOffset), &nameString, sizeof(nameString))) {
+        return FALSE;
+    }
+    if (nameString.Buffer == NULL || nameString.Length == 0U || nameString.Length > 512U || nameString.MaximumLength > 1024U) {
+        return FALSE;
+    }
+    copyChars = (ULONG)(nameString.Length / sizeof(WCHAR));
+    if (copyChars >= DestinationChars) {
+        copyChars = DestinationChars - 1UL;
+    }
+    if (!KswordARKHookReadMemorySafe((const VOID*)nameString.Buffer, Destination, (SIZE_T)copyChars * sizeof(WCHAR))) {
+        Destination[0] = L'\0';
+        return FALSE;
+    }
+    Destination[copyChars] = L'\0';
+    return TRUE;
+}
+static BOOLEAN
+KswordARKDriverIntegrityReadUnloadedUlong64(
+    _In_ ULONGLONG EntryAddress,
+    _In_ ULONG FieldOffset,
+    _Out_ ULONGLONG* ValueOut
+    )
+
+/* Read-only helper; reads one pointer-sized unloaded-driver field using PDB offset evidence. */
+{
+    if (ValueOut == NULL) {
+        return FALSE;
+    }
+    *ValueOut = 0ULL;
+    if (EntryAddress == 0ULL || !KswordARKDriverIntegrityDynOffsetPresent(FieldOffset)) {
+        return FALSE;
+    }
+    return KswordARKHookReadMemorySafe((const VOID*)(ULONG_PTR)(EntryAddress + (ULONGLONG)FieldOffset), ValueOut, sizeof(*ValueOut));
+}
+static BOOLEAN
+KswordARKDriverIntegrityReadUlongByOffset(
+    _In_ ULONGLONG BaseAddress,
+    _In_ ULONG FieldOffset,
+    _Out_ ULONG* ValueOut
+    )
+
+/* Read-only helper; reads one ULONG field from a PDB-gated structure offset. */
+{
+    if (ValueOut == NULL) {
+        return FALSE;
+    }
+    *ValueOut = 0UL;
+    if (BaseAddress == 0ULL || !KswordARKDriverIntegrityDynOffsetPresent(FieldOffset)) {
+        return FALSE;
+    }
+    return KswordARKHookReadMemorySafe((const VOID*)(ULONG_PTR)(BaseAddress + (ULONGLONG)FieldOffset), ValueOut, sizeof(*ValueOut));
+}
+static BOOLEAN
+KswordARKDriverIntegrityReadPointerByOffset(
+    _In_ ULONGLONG BaseAddress,
+    _In_ ULONG FieldOffset,
+    _Out_ ULONGLONG* ValueOut
+    )
+
+/* Read-only helper; reads one pointer-sized field from a PDB-gated structure offset. */
+{
+    PVOID pointerValue = NULL;
+    if (ValueOut == NULL) {
+        return FALSE;
+    }
+    *ValueOut = 0ULL;
+    if (BaseAddress == 0ULL || !KswordARKDriverIntegrityDynOffsetPresent(FieldOffset)) {
+        return FALSE;
+    }
+    if (!KswordARKHookReadMemorySafe((const VOID*)(ULONG_PTR)(BaseAddress + (ULONGLONG)FieldOffset), &pointerValue, sizeof(pointerValue))) {
+        return FALSE;
+    }
+    *ValueOut = (ULONGLONG)(ULONG_PTR)pointerValue;
+    return TRUE;
+}
+static BOOLEAN
+KswordARKDriverIntegrityReadPointerAtOffset(
+    _In_ ULONGLONG BaseAddress,
+    _In_ ULONG FieldOffset,
+    _Out_ ULONGLONG* ValueOut
+    )
+
+/* Read-only helper; reads one pointer-sized field where offset zero is valid. */
+{
+    PVOID pointerValue = NULL;
+    if (ValueOut == NULL) {
+        return FALSE;
+    }
+    *ValueOut = 0ULL;
+    if (BaseAddress == 0ULL || FieldOffset == KSW_DYN_OFFSET_UNAVAILABLE || FieldOffset == 0x0000FFFFUL) {
+        return FALSE;
+    }
+    if (!KswordARKHookReadMemorySafe((const VOID*)(ULONG_PTR)(BaseAddress + (ULONGLONG)FieldOffset), &pointerValue, sizeof(pointerValue))) {
+        return FALSE;
+    }
+    *ValueOut = (ULONGLONG)(ULONG_PTR)pointerValue;
+    return TRUE;
 }
 static NTSTATUS
 KswordARKDriverIntegrityBuildDriverObjectName(
@@ -461,6 +602,9 @@ KswordARKDriverIntegrityFinalizeV2Rows(
         if (row->riskFlags != KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE) {
             row->statusFlags |= KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL;
         }
+        if ((row->statusFlags & KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL) != 0UL && row->entryStatus == KSWORD_ARK_DRIVER_INTEGRITY_STATUS_OK) {
+            row->entryStatus = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_PARTIAL;
+        }
         Response->fieldFlags |= row->fieldMask;
         Response->statusFlags |= row->statusFlags;
     }
@@ -563,6 +707,173 @@ KswordARKDriverIntegrityAddAuxKlibRow(
     ExFreePoolWithTag(modules, KSW_DRIVER_INTEGRITY_TAG);
 }
 static VOID
+KswordARKDriverIntegrityBuildUnloadedSummary(
+    _In_ const KSW_DYN_STATE* DynState,
+    _In_ ULONGLONG MmUnloadedAddress,
+    _In_ ULONGLONG MmLastUnloadedAddress,
+    _Out_writes_(DetailChars) PWCHAR Detail,
+    _In_ ULONG DetailChars,
+    _Out_ ULONG* ConfidenceOut,
+    _Out_ ULONG* StatusFlagsOut
+    )
+
+/* Read-only helper; summarizes bounded MmUnloadedDrivers entries when PDB offsets are present. */
+{
+    ULONG lastIndex = 0UL;
+    ULONG scanIndex = 0UL;
+    ULONG nonEmptyCount = 0UL;
+    ULONGLONG newestStart = 0ULL;
+    ULONGLONG newestEnd = 0ULL;
+    ULONGLONG newestTime = 0ULL;
+    ULONG entrySize = 0UL;
+    WCHAR newestName[96] = { 0 };
+    BOOLEAN offsetsPresent = FALSE;
+    if (Detail == NULL || DetailChars == 0UL || ConfidenceOut == NULL || StatusFlagsOut == NULL) {
+        return;
+    }
+    *ConfidenceOut = 45UL;
+    *StatusFlagsOut = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL;
+    Detail[0] = L'\0';
+    if (DynState == NULL || MmUnloadedAddress == 0ULL || MmLastUnloadedAddress == 0ULL) {
+        KswordARKDriverIntegrityFormatDetail(Detail, DetailChars, L"MmUnloadedDrivers global=0x%llX MmLastUnloadedDriver=0x%llX; global evidence incomplete.", MmUnloadedAddress, MmLastUnloadedAddress);
+        *ConfidenceOut = 20UL;
+        *StatusFlagsOut = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED | KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PDB_REQUIRED;
+        return;
+    }
+    offsetsPresent =
+        KswordARKDriverIntegrityDynOffsetPresent(DynState->Kernel.UldName) &&
+        KswordARKDriverIntegrityDynOffsetPresent(DynState->Kernel.UldStartAddress) &&
+        KswordARKDriverIntegrityDynOffsetPresent(DynState->Kernel.UldEndAddress) &&
+        KswordARKDriverIntegrityDynOffsetPresent(DynState->Kernel.UldCurrentTime) &&
+        KswordARKDriverIntegrityDynOffsetPresent(DynState->Kernel.UldTypeSize);
+    if (!offsetsPresent) {
+        KswordARKDriverIntegrityFormatDetail(Detail, DetailChars,
+            L"MmUnloadedDrivers global=0x%llX MmLastUnloadedDriver=0x%llX; _UNLOADED_DRIVERS offsets/type-size missing.",
+            MmUnloadedAddress, MmLastUnloadedAddress);
+        *StatusFlagsOut = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL | KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PDB_REQUIRED;
+        return;
+    }
+    entrySize = DynState->Kernel.UldTypeSize;
+    if (entrySize < sizeof(UNICODE_STRING) || entrySize > 0x200UL) {
+        KswordARKDriverIntegrityFormatDetail(Detail, DetailChars,
+            L"MmUnloadedDrivers global=0x%llX MmLastUnloadedDriver=0x%llX; _UNLOADED_DRIVERS TypeSize invalid: %lu.",
+            MmUnloadedAddress, MmLastUnloadedAddress, entrySize);
+        *ConfidenceOut = 35UL;
+        *StatusFlagsOut = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL | KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PDB_REQUIRED;
+        return;
+    }
+    if (!KswordARKHookReadMemorySafe((const VOID*)(ULONG_PTR)MmLastUnloadedAddress, &lastIndex, sizeof(lastIndex))) {
+        KswordARKDriverIntegrityFormatDetail(Detail, DetailChars,
+            L"MmUnloadedDrivers global=0x%llX MmLastUnloadedDriver=0x%llX; last index read failed.",
+            MmUnloadedAddress, MmLastUnloadedAddress);
+        *ConfidenceOut = 35UL;
+        return;
+    }
+    for (scanIndex = 0UL; scanIndex < KSW_DRIVER_INTEGRITY_UNLOADED_SCAN_LIMIT; ++scanIndex) {
+        const ULONGLONG entryAddress = MmUnloadedAddress + ((ULONGLONG)scanIndex * (ULONGLONG)entrySize);
+        ULONGLONG startAddress = 0ULL;
+        ULONGLONG endAddress = 0ULL;
+        ULONGLONG timeValue = 0ULL;
+        WCHAR nameText[96] = { 0 };
+        if (!KswordARKDriverIntegrityReadUnloadedUlong64(entryAddress, DynState->Kernel.UldStartAddress, &startAddress) ||
+            !KswordARKDriverIntegrityReadUnloadedUlong64(entryAddress, DynState->Kernel.UldEndAddress, &endAddress) ||
+            !KswordARKDriverIntegrityReadUnloadedUlong64(entryAddress, DynState->Kernel.UldCurrentTime, &timeValue)) {
+            continue;
+        }
+        if (startAddress == 0ULL && endAddress == 0ULL && timeValue == 0ULL) {
+            continue;
+        }
+        nonEmptyCount += 1UL;
+        if (timeValue >= newestTime) {
+            newestTime = timeValue;
+            newestStart = startAddress;
+            newestEnd = endAddress;
+            if (!KswordARKDriverIntegrityReadUnloadedUnicodeName(entryAddress, DynState->Kernel.UldName, nameText, RTL_NUMBER_OF(nameText))) {
+                (VOID)RtlStringCchCopyW(nameText, RTL_NUMBER_OF(nameText), L"<name unread>");
+            }
+            (VOID)RtlStringCchCopyW(newestName, RTL_NUMBER_OF(newestName), nameText);
+        }
+    }
+    KswordARKDriverIntegrityFormatDetail(Detail, DetailChars,
+        L"MmUnloadedDrivers global=0x%llX MmLastUnloadedDriver=0x%llX typeSize=%lu lastIndex=%lu scanned=%lu nonEmpty=%lu newest=%ws [0x%llX-0x%llX] time=0x%llX.",
+        MmUnloadedAddress, MmLastUnloadedAddress, entrySize, lastIndex, KSW_DRIVER_INTEGRITY_UNLOADED_SCAN_LIMIT,
+        nonEmptyCount, newestName[0] != L'\0' ? newestName : L"<none>", newestStart, newestEnd, newestTime);
+    *ConfidenceOut = (nonEmptyCount != 0UL) ? 70UL : 55UL;
+    *StatusFlagsOut = (nonEmptyCount != 0UL) ? 0UL : KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL;
+}
+static VOID
+KswordARKDriverIntegrityBuildPiDdbSummary(
+    _In_ const KSW_DYN_STATE* DynState,
+    _In_ ULONGLONG PiDdbAddress,
+    _Out_writes_(DetailChars) PWCHAR Detail,
+    _In_ ULONG DetailChars,
+    _Out_ ULONG* ConfidenceOut,
+    _Out_ ULONG* StatusFlagsOut
+    )
+
+/* Read-only helper; summarizes the PDB-gated _RTL_AVL_TABLE header for PiDDBCacheTable. */
+{
+    ULONGLONG balancedRootAddress = 0ULL;
+    ULONG avlTypeSize = 0UL;
+    KSW_DRIVER_INTEGRITY_PIDDB_AVL_SUMMARY summary;
+    BOOLEAN requiredOffsetsPresent = FALSE;
+    RtlZeroMemory(&summary, sizeof(summary));
+    if (Detail == NULL || DetailChars == 0UL || ConfidenceOut == NULL || StatusFlagsOut == NULL) {
+        return;
+    }
+    *ConfidenceOut = 35UL;
+    *StatusFlagsOut = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL | KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PDB_REQUIRED;
+    Detail[0] = L'\0';
+    if (DynState == NULL || PiDdbAddress == 0ULL) {
+        KswordARKDriverIntegrityFormatDetail(Detail, DetailChars, L"PiDDBCacheTable global=0x%llX; global evidence incomplete.", PiDdbAddress);
+        *ConfidenceOut = 20UL;
+        *StatusFlagsOut = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED | KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PDB_REQUIRED;
+        return;
+    }
+    requiredOffsetsPresent =
+        DynState->Kernel.RtlAvlBalancedRoot != KSW_DYN_OFFSET_UNAVAILABLE &&
+        DynState->Kernel.RtlAvlBalancedRoot != 0x0000FFFFUL &&
+        KswordARKDriverIntegrityDynOffsetPresent(DynState->Kernel.RtlAvlNumberGenericTableElements) &&
+        KswordARKDriverIntegrityDynOffsetPresent(DynState->Kernel.RtlAvlDepthOfTree) &&
+        KswordARKDriverIntegrityDynOffsetPresent(DynState->Kernel.RtlAvlTypeSize);
+    if (!requiredOffsetsPresent) {
+        KswordARKDriverIntegrityFormatDetail(Detail, DetailChars,
+            L"PiDDBCacheTable global=0x%llX; _RTL_AVL_TABLE offsets/type-size missing, entry walk disabled.",
+            PiDdbAddress);
+        return;
+    }
+    avlTypeSize = DynState->Kernel.RtlAvlTypeSize;
+    if (avlTypeSize < (sizeof(PVOID) * 3U) || avlTypeSize > KSW_DRIVER_INTEGRITY_RTL_AVL_TABLE_SIZE_LIMIT) {
+        KswordARKDriverIntegrityFormatDetail(Detail, DetailChars,
+            L"PiDDBCacheTable global=0x%llX; _RTL_AVL_TABLE TypeSize invalid: %lu.",
+            PiDdbAddress, avlTypeSize);
+        return;
+    }
+    balancedRootAddress = PiDdbAddress + (ULONGLONG)DynState->Kernel.RtlAvlBalancedRoot;
+    (VOID)KswordARKDriverIntegrityReadPointerAtOffset(balancedRootAddress, 0UL, &summary.BalancedRootLeftChild);
+    (VOID)KswordARKDriverIntegrityReadPointerAtOffset(balancedRootAddress, (ULONG)sizeof(PVOID), &summary.BalancedRootRightChild);
+    (VOID)KswordARKDriverIntegrityReadPointerAtOffset(balancedRootAddress, (ULONG)(sizeof(PVOID) * 2U), &summary.BalancedRootParentValue);
+    (VOID)KswordARKDriverIntegrityReadPointerByOffset(PiDdbAddress, DynState->Kernel.RtlAvlOrderedPointer, &summary.OrderedPointer);
+    (VOID)KswordARKDriverIntegrityReadPointerByOffset(PiDdbAddress, DynState->Kernel.RtlAvlRestartKey, &summary.RestartKey);
+    (VOID)KswordARKDriverIntegrityReadUlongByOffset(PiDdbAddress, DynState->Kernel.RtlAvlWhichOrderedElement, &summary.WhichOrderedElement);
+    if (!KswordARKDriverIntegrityReadUlongByOffset(PiDdbAddress, DynState->Kernel.RtlAvlNumberGenericTableElements, &summary.NumberGenericTableElements) ||
+        !KswordARKDriverIntegrityReadUlongByOffset(PiDdbAddress, DynState->Kernel.RtlAvlDepthOfTree, &summary.DepthOfTree)) {
+        KswordARKDriverIntegrityFormatDetail(Detail, DetailChars,
+            L"PiDDBCacheTable global=0x%llX typeSize=%lu; AVL count/depth read failed.",
+            PiDdbAddress, avlTypeSize);
+        *ConfidenceOut = 40UL;
+        return;
+    }
+    (VOID)KswordARKDriverIntegrityReadUlongByOffset(PiDdbAddress, DynState->Kernel.RtlAvlDeleteCount, &summary.DeleteCount);
+    KswordARKDriverIntegrityFormatDetail(Detail, DetailChars,
+        L"PiDDBCacheTable global=0x%llX typeSize=%lu count=%lu depth=%lu deleteCount=%lu balancedRoot=0x%llX left=0x%llX right=0x%llX parent=0x%llX ordered=0x%llX which=%lu restart=0x%llX; entry schema not yet consumed.",
+        PiDdbAddress, avlTypeSize, summary.NumberGenericTableElements, summary.DepthOfTree, summary.DeleteCount,
+        balancedRootAddress, summary.BalancedRootLeftChild, summary.BalancedRootRightChild,
+        summary.BalancedRootParentValue, summary.OrderedPointer, summary.WhichOrderedElement, summary.RestartKey);
+    *ConfidenceOut = 65UL;
+    *StatusFlagsOut = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL;
+}
+static VOID
 KswordARKDriverIntegrityAddDynRows(
     _Inout_ KSW_DRIVER_INTEGRITY_BUILDER* Builder,
     _In_ const KSW_DYN_STATE* DynState,
@@ -624,26 +935,31 @@ KswordARKDriverIntegrityAddDynRows(
     if (IncludeOptionalGlobals) {
         ULONGLONG mmUnloaded = KswordARKDriverIntegrityNtosAddressFromRva(DynState, DynState != NULL ? DynState->KernelGlobals.MmUnloadedDrivers : 0UL, sizeof(PVOID));
         ULONGLONG piDdb = KswordARKDriverIntegrityNtosAddressFromRva(DynState, DynState != NULL ? DynState->KernelGlobals.PiDDBCacheTable : 0UL, sizeof(PVOID));
+        ULONGLONG mmLastUnloaded = KswordARKDriverIntegrityNtosAddressFromRva(DynState, DynState != NULL ? DynState->KernelGlobals.MmLastUnloadedDriver : 0UL, sizeof(ULONG));
         const KSW_HOOK_SYSTEM_MODULE_ENTRY* mmOwner = KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, mmUnloaded);
         const KSW_HOOK_SYSTEM_MODULE_ENTRY* piOwner = KswordARKDriverIntegrityFindModuleForAddress(ModuleInfo, piDdb);
         ULONG mmSource = KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DYNDATA;
         ULONG piSource = KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DYNDATA;
+        ULONG mmConfidence = 45UL;
+        ULONG mmStatusFlags = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL;
+        ULONG piConfidence = 35UL;
+        ULONG piStatusFlags = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL | KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PDB_REQUIRED;
         if (mmUnloaded != 0ULL) {
             mmSource |= KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE;
         }
         if (piDdb != 0ULL) {
             piSource |= KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE;
         }
-        KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"MmUnloadedDrivers global address=0x%llX; entry schema not walked.", mmUnloaded);
+        KswordARKDriverIntegrityBuildUnloadedSummary(DynState, mmUnloaded, mmLastUnloaded, detail, RTL_NUMBER_OF(detail), &mmConfidence, &mmStatusFlags);
         KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL, mmUnloaded, 0ULL,
             (mmUnloaded == 0ULL) ? (KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE | KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE) : KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE,
-            mmSource, (mmUnloaded == 0ULL) ? 15UL : 45UL, ~0UL, ~0UL, ~0UL, mmOwner, detail);
-        row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL, mmUnloaded, 0ULL); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_OPTIONAL_GLOBAL; row->statusFlags |= KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED; }
-        KswordARKDriverIntegrityFormatDetail(detail, RTL_NUMBER_OF(detail), L"PiDDBCacheTable global address=0x%llX; table schema not walked.", piDdb);
+            mmSource, (mmUnloaded == 0ULL) ? 15UL : mmConfidence, ~0UL, ~0UL, ~0UL, mmOwner, detail);
+        row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL, mmUnloaded, 0ULL); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_OPTIONAL_GLOBAL; row->statusFlags |= (mmUnloaded == 0ULL) ? KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED : mmStatusFlags; }
+        KswordARKDriverIntegrityBuildPiDdbSummary(DynState, piDdb, detail, RTL_NUMBER_OF(detail), &piConfidence, &piStatusFlags);
         KswordARKDriverIntegrityAddEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL, piDdb, 0ULL,
             (piDdb == 0ULL) ? (KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE | KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE) : KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE,
-            piSource, (piDdb == 0ULL) ? 15UL : 45UL, ~0UL, ~0UL, ~0UL, piOwner, detail);
-        row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL, piDdb, 0ULL); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_OPTIONAL_GLOBAL; row->statusFlags |= KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED; }
+            piSource, (piDdb == 0ULL) ? 15UL : piConfidence, ~0UL, ~0UL, ~0UL, piOwner, detail);
+        row = KswordARKDriverIntegrityLastEvidence(Builder, KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL, piDdb, 0ULL); if (row != NULL) { row->fieldMask |= KSWORD_ARK_DRIVER_INTEGRITY_FIELD_OPTIONAL_GLOBAL; row->statusFlags |= (piDdb == 0ULL) ? KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED : piStatusFlags; }
     }
 }
 static VOID

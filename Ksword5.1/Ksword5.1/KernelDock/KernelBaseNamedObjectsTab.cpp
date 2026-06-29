@@ -11,12 +11,18 @@
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAction>
+#include <QClipboard>
 #include <QComboBox>
+#include <QGuiApplication>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMetaObject>
+#include <QModelIndex>
 #include <QPointer>
 #include <QPushButton>
 #include <QStringList>
@@ -86,6 +92,83 @@ namespace
         return entry.hasSessionId
             ? QStringLiteral("session:%1").arg(entry.sessionId)
             : QStringLiteral("global");
+    }
+
+    // tableMenuStyle 作用：
+    // - 输入：无；
+    // - 处理：生成不透明右键菜单样式，避免浅色主题下黑底黑字；
+    // - 返回：可直接传给 QMenu::setStyleSheet 的样式文本。
+    QString tableMenuStyle()
+    {
+        return QStringLiteral(
+            "QMenu{background:%1;color:%2;border:1px solid %3;}"
+            "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
+            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:disabled{color:%5;}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::TextSecondaryHex());
+    }
+
+    // copyTableRow 作用：
+    // - 输入 table/rowIndex：目标表格和需要复制的行号；
+    // - 处理：按可见列顺序拼成 TSV 写入剪贴板；
+    // - 返回：无，表格无效或行号越界时静默返回。
+    void copyTableRow(QTableWidget* table, const int rowIndex)
+    {
+        if (table == nullptr || QGuiApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+        if (rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return;
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+            fields.push_back(item != nullptr ? item->text() : QString());
+        }
+        QGuiApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
+    }
+
+    // installTableCopyMenu 作用：
+    // - 输入 table：BaseNamedObjects 结果表；
+    // - 处理：安装“复制当前行”右键菜单；
+    // - 返回：无，只读复制，不触发任何对象操作。
+    void installTableCopyMenu(QTableWidget* table)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        {
+            const QModelIndex clickedIndex = table->indexAt(localPosition);
+            const int rowIndex = clickedIndex.isValid() ? clickedIndex.row() : table->currentRow();
+            if (clickedIndex.isValid())
+            {
+                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu menu(table);
+            menu.setStyleSheet(tableMenuStyle());
+            QAction* copyRowAction = menu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(rowIndex >= 0 && rowIndex < table->rowCount());
+            if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+            {
+                copyTableRow(table, rowIndex);
+            }
+        });
     }
 }
 
@@ -159,6 +242,7 @@ void KernelBaseNamedObjectsTab::initializeUi()
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(static_cast<int>(BaseNamedObjectsColumn::FullPath), QHeaderView::Stretch);
+    installTableCopyMenu(m_table);
     m_rootLayout->addWidget(m_table, 1);
 }
 

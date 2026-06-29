@@ -1,6 +1,10 @@
 #include "ApplicationControlPage.h"
 
+#include "../UI/CodeEditorWidget.h"
+
 #include "../ksword/startup/startup.h"
+#include "../ArkDriverClient/ArkDriverClient.h"
+#include "../theme.h"
 
 #include <QApplication>
 #include <QAbstractItemView>
@@ -22,7 +26,6 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
-#include <QPlainTextEdit>
 #include <QPointer>
 #include <QMetaObject>
 #include <QProcess>
@@ -36,6 +39,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <exception>
 #include <thread>
 #include <utility>
 
@@ -169,6 +173,137 @@ namespace
             || lower.contains(QStringLiteral("%userprofile%"))
             || lower.contains(QStringLiteral("%localappdata%"))
             || lower.contains(QStringLiteral("%appdata%"));
+    }
+
+
+    // auditStateText：
+    // - 输入：R0 安全审计协议里的状态枚举值；
+    // - 处理：把 UNKNOWN/PRESENT/ENABLED 等数字转换为 UI 可读文本；
+    // - 返回：中文状态文本，未知枚举保留原始数字。
+    QString auditStateText(const unsigned long stateValue)
+    {
+        switch (stateValue)
+        {
+        case KSWORD_ARK_SECURITY_AUDIT_STATE_UNKNOWN:
+            return QStringLiteral("Unknown");
+        case KSWORD_ARK_SECURITY_AUDIT_STATE_PRESENT:
+            return QStringLiteral("Present");
+        case KSWORD_ARK_SECURITY_AUDIT_STATE_ABSENT:
+            return QStringLiteral("Absent");
+        case KSWORD_ARK_SECURITY_AUDIT_STATE_ENABLED:
+            return QStringLiteral("Enabled");
+        case KSWORD_ARK_SECURITY_AUDIT_STATE_DISABLED:
+            return QStringLiteral("Disabled");
+        case KSWORD_ARK_SECURITY_AUDIT_STATE_UNAVAILABLE:
+            return QStringLiteral("Unavailable");
+        case KSWORD_ARK_SECURITY_AUDIT_STATE_DEGRADED:
+            return QStringLiteral("Degraded");
+        default:
+            return QStringLiteral("Unknown(%1)").arg(stateValue);
+        }
+    }
+
+    // boolFlagText：
+    // - 输入：R0 返回的 0/1 布尔型标志；
+    // - 处理：把 0/1 转成 No/Yes，异常值保留原始数字；
+    // - 返回：适合摘要行展示的短文本。
+    QString boolFlagText(const unsigned long flagValue)
+    {
+        if (flagValue == 0UL)
+        {
+            return QStringLiteral("No");
+        }
+        if (flagValue == 1UL)
+        {
+            return QStringLiteral("Yes");
+        }
+        return QStringLiteral("Value(%1)").arg(flagValue);
+    }
+
+    // ntStatusText：
+    // - 输入：R0 或 wrapper 传播出的 NTSTATUS/状态码；
+    // - 处理：按 8 位十六进制保留原始诊断值；
+    // - 返回：0xXXXXXXXX 文本。
+    QString ntStatusText(const long statusValue)
+    {
+        return QStringLiteral("0x%1")
+            .arg(static_cast<quint32>(statusValue), 8, 16, QLatin1Char('0'))
+            .toUpper();
+    }
+
+    // hexMaskText：
+    // - 输入：fieldFlags/sourceMask 等无符号位图；
+    // - 处理：统一格式化为十六进制，避免十进制位图难以审计；
+    // - 返回：0xXXXXXXXX 文本。
+    QString hexMaskText(const unsigned long maskValue)
+    {
+        return QStringLiteral("0x%1")
+            .arg(static_cast<quint32>(maskValue), 8, 16, QLatin1Char('0'))
+            .toUpper();
+    }
+
+    // fixedWideText：
+    // - 输入：R0 固定长度 wchar_t 缓冲区和最大字符数；
+    // - 处理：只读取第一个 NUL 之前的内容，避免把尾部填充带入 UI；
+    // - 返回：trim 后的 QString，空值返回破折号。
+    QString fixedWideText(const wchar_t* bufferText, const int maxCharacters)
+    {
+        if (bufferText == nullptr || maxCharacters <= 0)
+        {
+            return QStringLiteral("—");
+        }
+
+        int textLength = 0;
+        while (textLength < maxCharacters && bufferText[textLength] != L'\0')
+        {
+            ++textLength;
+        }
+
+        const QString convertedText = QString::fromWCharArray(bufferText, textLength).trimmed();
+        return convertedText.isEmpty() ? QStringLiteral("—") : convertedText;
+    }
+
+    // r0IoMessageText：
+    // - 输入：ArkDriverClient 返回的原始 io.message；
+    // - 处理：把 DeviceIoControl/version/空消息等底层字符串归一成人可读说明；
+    // - 返回：适合放入平台安全表格“说明”列的中文文本。
+    QString r0IoMessageText(const std::string& messageText)
+    {
+        if (messageText.empty())
+        {
+            return QStringLiteral("无额外驱动消息");
+        }
+
+        const QString rawText = QString::fromStdString(messageText).trimmed();
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动接口调用失败或当前驱动版本不支持该安全审计入口");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not implemented"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动版本尚未提供该安全审计入口");
+        }
+        if (rawText.startsWith(QStringLiteral("version="), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动已返回结构化安全审计数据");
+        }
+        return rawText.isEmpty() ? QStringLiteral("无额外驱动消息") : rawText;
+    }
+
+    // ioSummaryText：
+    // - 输入：ArkDriverClient 标准 IoResult；
+    // - 处理：合并传输状态、Win32 错误、NTSTATUS、返回字节数和友好说明；
+    // - 返回：单行诊断文本，便于平台安全表格展示。
+    QString ioSummaryText(const ksword::ark::IoResult& ioResult)
+    {
+        QStringList parts;
+        parts << QStringLiteral("ok=%1").arg(ioResult.ok ? QStringLiteral("true") : QStringLiteral("false"));
+        parts << QStringLiteral("win32=%1").arg(ioResult.win32Error);
+        parts << QStringLiteral("nt=%1").arg(ntStatusText(ioResult.ntStatus));
+        parts << QStringLiteral("bytes=%1").arg(ioResult.bytesReturned);
+        parts << QStringLiteral("说明=%1").arg(r0IoMessageText(ioResult.message));
+        return parts.join(QStringLiteral(" | "));
     }
 
     // collapseSpaces：
@@ -330,12 +465,14 @@ namespace ks::misc
         m_appLockerPage = buildAppLockerPage();
         m_wdacPage = buildWdacPage();
         m_defenderPage = buildDefenderPage();
+        m_platformPage = buildPlatformPage();
         m_eventPage = buildEventLogPage();
         m_fileDiagnosisPage = buildFileDiagnosisPage();
 
         m_tabWidget->addTab(m_appLockerPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("AppLocker"));
         m_tabWidget->addTab(m_wdacPage, QIcon(QStringLiteral(":/Icon/disk_storage.svg")), QStringLiteral("WDAC / Code Integrity"));
         m_tabWidget->addTab(m_defenderPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("Defender / ASR"));
+        m_tabWidget->addTab(m_platformPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("平台安全"));
         m_tabWidget->addTab(m_eventPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("事件日志"));
         m_tabWidget->addTab(m_fileDiagnosisPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("文件诊断"));
 
@@ -350,10 +487,10 @@ namespace ks::misc
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(6);
 
-        m_appLockerSummary = new QPlainTextEdit(page);
+        m_appLockerSummary = new CodeEditorWidget(page);
         m_appLockerSummary->setReadOnly(true);
-        m_appLockerSummary->setPlaceholderText(QStringLiteral("AppLocker 摘要会在后台刷新后显示。"));
-        m_appLockerSummary->setMaximumHeight(120);
+        m_appLockerSummary->setText(QStringLiteral("AppLocker 摘要会在后台刷新后显示。"));
+        m_appLockerSummary->setMaximumHeight(160);
 
         m_appLockerTable = new QTableWidget(page);
         initializeTable(m_appLockerTable, true);
@@ -370,10 +507,10 @@ namespace ks::misc
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(6);
 
-        m_wdacSummary = new QPlainTextEdit(page);
+        m_wdacSummary = new CodeEditorWidget(page);
         m_wdacSummary->setReadOnly(true);
-        m_wdacSummary->setPlaceholderText(QStringLiteral("WDAC / Code Integrity 摘要会在后台刷新后显示。"));
-        m_wdacSummary->setMaximumHeight(120);
+        m_wdacSummary->setText(QStringLiteral("WDAC / Code Integrity 摘要会在后台刷新后显示。"));
+        m_wdacSummary->setMaximumHeight(160);
 
         m_policyFileTable = new QTableWidget(page);
         initializeTable(m_policyFileTable, true);
@@ -394,16 +531,36 @@ namespace ks::misc
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(6);
 
-        m_defenderSummary = new QPlainTextEdit(page);
+        m_defenderSummary = new CodeEditorWidget(page);
         m_defenderSummary->setReadOnly(true);
-        m_defenderSummary->setPlaceholderText(QStringLiteral("Defender 状态会在后台刷新后显示。"));
-        m_defenderSummary->setMaximumHeight(120);
+        m_defenderSummary->setText(QStringLiteral("Defender 状态会在后台刷新后显示。"));
+        m_defenderSummary->setMaximumHeight(160);
 
         m_defenderTable = new QTableWidget(page);
         initializeTable(m_defenderTable, true);
 
         layout->addWidget(m_defenderSummary, 0);
         layout->addWidget(m_defenderTable, 1);
+        return page;
+    }
+
+    QWidget* ApplicationControlPage::buildPlatformPage()
+    {
+        auto* page = new QWidget(this);
+        auto* layout = new QVBoxLayout(page);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(6);
+
+        m_platformSummary = new CodeEditorWidget(page);
+        m_platformSummary->setReadOnly(true);
+        m_platformSummary->setText(QStringLiteral("CI / VBS / Hyper-V / Driver Trust / BAM 摘要会在后台刷新后显示。"));
+        m_platformSummary->setMaximumHeight(160);
+
+        m_platformTable = new QTableWidget(page);
+        initializeTable(m_platformTable, true);
+
+        layout->addWidget(m_platformSummary, 0);
+        layout->addWidget(m_platformTable, 1);
         return page;
     }
 
@@ -446,10 +603,10 @@ namespace ks::misc
         filterLayout->addWidget(m_eventLimitCombo, 0);
         filterLayout->addStretch(1);
 
-        m_eventSummary = new QPlainTextEdit(page);
+        m_eventSummary = new CodeEditorWidget(page);
         m_eventSummary->setReadOnly(true);
-        m_eventSummary->setPlaceholderText(QStringLiteral("Code Integrity 事件摘要会在后台刷新后显示。"));
-        m_eventSummary->setMaximumHeight(88);
+        m_eventSummary->setText(QStringLiteral("Code Integrity 事件摘要会在后台刷新后显示。"));
+        m_eventSummary->setMaximumHeight(150);
 
         m_eventTable = new QTableWidget(page);
         initializeTable(m_eventTable, true);
@@ -489,10 +646,10 @@ namespace ks::misc
         inputLayout->addWidget(m_fileBrowseButton);
         inputLayout->addWidget(m_fileDiagnoseButton);
 
-        m_fileDiagnosisSummary = new QPlainTextEdit(page);
+        m_fileDiagnosisSummary = new CodeEditorWidget(page);
         m_fileDiagnosisSummary->setReadOnly(true);
-        m_fileDiagnosisSummary->setPlaceholderText(QStringLiteral("文件诊断结果会在运行后显示。"));
-        m_fileDiagnosisSummary->setMaximumHeight(140);
+        m_fileDiagnosisSummary->setText(QStringLiteral("文件诊断结果会在运行后显示。"));
+        m_fileDiagnosisSummary->setMaximumHeight(180);
 
         m_fileDiagnosisTable = new QTableWidget(page);
         initializeTable(m_fileDiagnosisTable, true);
@@ -557,8 +714,9 @@ namespace ks::misc
             }
             return m_policyFileTable;
         case 2: return m_defenderTable;
-        case 3: return m_eventTable;
-        case 4: return m_fileDiagnosisTable;
+        case 3: return m_platformTable;
+        case 4: return m_eventTable;
+        case 5: return m_fileDiagnosisTable;
         default: return nullptr;
         }
     }
@@ -581,8 +739,9 @@ namespace ks::misc
         }
 
         QMenu menu(this);
+        menu.setStyleSheet(KswordTheme::ContextMenuStyle());
         QAction* copyCellAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_copy.svg")), QStringLiteral("复制单元格"));
-        QAction* copyRowAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_clipboard.svg")), QStringLiteral("复制整行"));
+        QAction* copyRowAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_clipboard.svg")), QStringLiteral("复制当前行"));
         QAction* copySelectedAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_clipboard.svg")), QStringLiteral("复制选中行"));
         menu.addSeparator();
         QAction* exportAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_export.svg")), QStringLiteral("导出 TSV"));
@@ -1263,10 +1422,11 @@ namespace ks::misc
         {
             m_statusLabel->setText(QStringLiteral("状态: 正在刷新…"));
         }
-        if (m_appLockerSummary != nullptr) m_appLockerSummary->setPlainText(QStringLiteral("正在采集 AppLocker…"));
-        if (m_wdacSummary != nullptr) m_wdacSummary->setPlainText(QStringLiteral("正在采集 WDAC / Code Integrity…"));
-        if (m_defenderSummary != nullptr) m_defenderSummary->setPlainText(QStringLiteral("正在采集 Defender…"));
-        if (m_eventSummary != nullptr) m_eventSummary->setPlainText(QStringLiteral("正在采集事件日志…"));
+        if (m_appLockerSummary != nullptr) m_appLockerSummary->setText(QStringLiteral("正在采集 AppLocker…"));
+        if (m_wdacSummary != nullptr) m_wdacSummary->setText(QStringLiteral("正在采集 WDAC / Code Integrity…"));
+        if (m_defenderSummary != nullptr) m_defenderSummary->setText(QStringLiteral("正在采集 Defender…"));
+        if (m_platformSummary != nullptr) m_platformSummary->setText(QStringLiteral("正在采集平台安全…"));
+        if (m_eventSummary != nullptr) m_eventSummary->setText(QStringLiteral("正在采集事件日志…"));
 
         const int requestedEventLimit = selectedEventLimit();
         const QPointer<ApplicationControlPage> guardThis(this);
@@ -1275,11 +1435,29 @@ namespace ks::misc
             QVector<PolicyFileRecord> policyFiles;
             QVector<EventRecord> events;
             QVector<KeyValueRecord> defenderRows;
+            QVector<KeyValueRecord> platformRows;
             QString appLockerSummary = QStringLiteral("AppLocker: 未配置");
             QString wdacSummary = QStringLiteral("WDAC / Code Integrity: 未发现常见策略文件。");
             QString defenderSummary = QStringLiteral("Defender: 未获取到状态。");
+            QString platformSummary = QStringLiteral("平台安全: 未获取到状态。");
             QString eventSummary = QStringLiteral("未获取到 Code Integrity 事件。");
             QString statusText = QStringLiteral("刷新完成");
+            QStringList r0PlatformSummaryParts;
+
+            // appendPlatformRow：
+            // - 输入：平台安全表格的一行名称、值和说明；
+            // - 处理：追加到后台线程本地 platformRows 缓存；
+            // - 返回：无返回值，最终由 UI 线程统一刷新表格。
+            const auto appendPlatformRow = [&platformRows](
+                const QString& nameText,
+                const QString& valueText,
+                const QString& detailText) {
+                KeyValueRecord record;
+                record.nameText = nameText;
+                record.valueText = valueText;
+                record.detailText = detailText;
+                platformRows.push_back(record);
+            };
 
             // 1) WDAC / Code Integrity 文件扫描由 C++ 直接完成，避免额外脚本依赖。
             const QFileInfo sipolicyFile(QStringLiteral("C:/Windows/System32/CodeIntegrity/SIPolicy.p7b"));
@@ -1419,7 +1597,216 @@ namespace ks::misc
                 defenderSummary = QStringLiteral("Defender 模块不可用或读取失败：%1").arg(defenderErrorText);
             }
 
-            // 4) Code Integrity 事件同样通过 PowerShell 输出为 JSON 数组。
+            // 4) 平台安全 / CI / VBS / Hyper-V / Driver Trust / BAM 全部只读采集。
+            const QString platformScript = QStringLiteral(
+                "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
+                "try {"
+                "  $rows=@();"
+                "  $dg=Get-CimInstance -Namespace root\\Microsoft\\Windows\\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction Stop;"
+                "  $rows += [pscustomobject]@{Name='CI SecurityServicesConfigured'; Value=([string]::Join(',', @($dg.SecurityServicesConfigured))); Detail='DeviceGuard'};"
+                "  $rows += [pscustomobject]@{Name='CI SecurityServicesRunning'; Value=([string]::Join(',', @($dg.SecurityServicesRunning))); Detail='DeviceGuard'};"
+                "  $rows += [pscustomobject]@{Name='VirtualizationBasedSecurityStatus'; Value=$dg.VirtualizationBasedSecurityStatus; Detail='0=Off,1=Enabled,2=Running'};"
+                "  $rows += [pscustomobject]@{Name='RequiresPlatformSecurityFeatures'; Value=$dg.RequiredSecurityProperties; Detail='DeviceGuard'};"
+                "  $rows += [pscustomobject]@{Name='Hyper-V Service'; Value=((Get-Service vmms -ErrorAction SilentlyContinue).Status); Detail='Virtual Machine Management Service'};"
+                "  $rows += [pscustomobject]@{Name='VMBus Service'; Value=((Get-Service vmbus -ErrorAction SilentlyContinue).Status); Detail='Virtual Machine Bus'};"
+                "  $rows += [pscustomobject]@{Name='vSwitch Service'; Value=((Get-Service vswitch -ErrorAction SilentlyContinue).Status); Detail='Hyper-V Virtual Switch'};"
+                "  $rows += [pscustomobject]@{Name='vPCI Service'; Value=((Get-Service vpci -ErrorAction SilentlyContinue).Status); Detail='Virtual PCI'};"
+                "  $rows += [pscustomobject]@{Name='HvSocket Service'; Value=((Get-Service hvsocket -ErrorAction SilentlyContinue).Status); Detail='Hyper-V Socket'};"
+                "  $bam=@(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\bam\\State\\UserSettings\\*' -ErrorAction SilentlyContinue | Measure-Object).Count;"
+                "  $rows += [pscustomobject]@{Name='BAM Keys'; Value=$bam; Detail='HKLM\\SYSTEM\\CurrentControlSet\\Services\\bam\\State\\UserSettings'};"
+                "  $ah=@(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\amcache' -ErrorAction SilentlyContinue | Measure-Object).Count;"
+                "  $rows += [pscustomobject]@{Name='ahcache Keys'; Value=$ah; Detail='HKLM\\SYSTEM\\CurrentControlSet\\Services\\amcache'};"
+                "  $rows | ConvertTo-Json -Depth 4"
+                "} catch {"
+                "  [pscustomobject]@{Name='Platform query'; Value='Failed'; Detail=$_.Exception.Message} | ConvertTo-Json -Depth 3"
+                "}");
+            QString platformErrorText;
+            const QString platformJsonText = runPowerShellCaptureText(platformScript, 15000, &platformErrorText);
+            if (!platformJsonText.trimmed().isEmpty())
+            {
+                const auto parsedPlatform = parseDefenderJson(platformJsonText);
+                platformRows = parsedPlatform.first;
+                platformSummary = parsedPlatform.second;
+                if (!platformErrorText.trimmed().isEmpty())
+                {
+                    platformSummary += QStringLiteral("\n%1").arg(platformErrorText);
+                }
+            }
+            else if (!platformErrorText.trimmed().isEmpty())
+            {
+                platformSummary = QStringLiteral("平台安全读取失败：%1").arg(platformErrorText);
+            }
+
+
+            // 5) R0 安全态势审计通过 ArkDriverClient wrapper 查询，只追加摘要行，不替换 WMI/PowerShell baseline。
+            try
+            {
+                const ksword::ark::DriverClient arkClient;
+                const ksword::ark::SecurityStatusAuditResult securityStatus = arkClient.querySecurityStatus();
+                const ksword::ark::DriverTrustViewAuditResult driverTrust = arkClient.queryDriverTrustView();
+                const ksword::ark::HyperVSummaryAuditResult hyperVSummary = arkClient.queryHyperVSummary();
+                const ksword::ark::AppControlStatusAuditResult appControlStatus = arkClient.queryAppControlStatus();
+
+                const auto& securityResponse = securityStatus.response;
+                appendPlatformRow(
+                    QStringLiteral("R0 Security / CI"),
+                    QStringLiteral("CI=%1, UMCI=%2, Options=%3")
+                        .arg(boolFlagText(securityResponse.ciEnabled))
+                        .arg(boolFlagText(securityResponse.umciEnabled))
+                        .arg(hexMaskText(securityResponse.codeIntegrityOptions)),
+                    QStringLiteral("fieldFlags=%1, sourceMask=%2, query=%3, ciStatus=%4, io=%5")
+                        .arg(hexMaskText(securityResponse.fieldFlags))
+                        .arg(hexMaskText(securityResponse.sourceMask))
+                        .arg(ntStatusText(securityResponse.queryStatus))
+                        .arg(ntStatusText(securityResponse.codeIntegrityStatus))
+                        .arg(ioSummaryText(securityStatus.io)));
+
+                appendPlatformRow(
+                    QStringLiteral("R0 Security / VBS-HVCI-SKCI"),
+                    QStringLiteral("VBS=%1, HVCI=%2, SKCI=%3")
+                        .arg(boolFlagText(securityResponse.vbsPresent))
+                        .arg(boolFlagText(securityResponse.hvciKmciEnabled))
+                        .arg(boolFlagText(securityResponse.skciModuleLoaded)),
+                    QStringLiteral("secureKernel=%1, hvciAudit=%2, hvciStrict=%3, hvciIum=%4, moduleStatus=%5")
+                        .arg(boolFlagText(securityResponse.secureKernelModuleLoaded))
+                        .arg(boolFlagText(securityResponse.hvciAuditMode))
+                        .arg(boolFlagText(securityResponse.hvciStrictMode))
+                        .arg(boolFlagText(securityResponse.hvciIumEnabled))
+                        .arg(ntStatusText(securityResponse.moduleQueryStatus)));
+
+                appendPlatformRow(
+                    QStringLiteral("R0 Security / Test signing"),
+                    QStringLiteral("testSigning=%1, testBuild=%2")
+                        .arg(boolFlagText(securityResponse.testSigningEnabled))
+                        .arg(boolFlagText(securityResponse.testBuild)),
+                    QStringLiteral("flightBuild=%1, flighting=%2, secureBoot=%3, secureBootCapable=%4, secureBootStatus=%5")
+                        .arg(boolFlagText(securityResponse.flightBuild))
+                        .arg(boolFlagText(securityResponse.flightingEnabled))
+                        .arg(boolFlagText(securityResponse.secureBootEnabled))
+                        .arg(boolFlagText(securityResponse.secureBootCapable))
+                        .arg(ntStatusText(securityResponse.secureBootStatus)));
+
+                appendPlatformRow(
+                    QStringLiteral("R0 Security / Debug posture"),
+                    QStringLiteral("kdEnabled=%1, kdNotPresent=%2, ciDebug=%3")
+                        .arg(boolFlagText(securityResponse.kernelDebuggerEnabled))
+                        .arg(boolFlagText(securityResponse.kernelDebuggerNotPresent))
+                        .arg(boolFlagText(securityResponse.ciDebugModeEnabled)),
+                    QStringLiteral("debuggerStatus=%1, ciModuleLoaded=%2, io=%3")
+                        .arg(ntStatusText(securityResponse.debuggerStatus))
+                        .arg(boolFlagText(securityResponse.ciModuleLoaded))
+                        .arg(r0IoMessageText(securityStatus.io.message)));
+
+                const auto& hyperVResponse = hyperVSummary.response;
+                appendPlatformRow(
+                    QStringLiteral("R0 Hyper-V / Present"),
+                    QStringLiteral("present=%1, vendor=%2")
+                        .arg(boolFlagText(hyperVResponse.hypervisorPresent))
+                        .arg(fixedWideText(hyperVResponse.hypervisorVendor, KSWORD_ARK_SECURITY_AUDIT_VENDOR_CHARS)),
+                    QStringLiteral("fieldFlags=%1, sourceMask=%2, query=%3, root=%4, io=%5")
+                        .arg(hexMaskText(hyperVResponse.fieldFlags))
+                        .arg(hexMaskText(hyperVResponse.sourceMask))
+                        .arg(ntStatusText(hyperVResponse.queryStatus))
+                        .arg(auditStateText(hyperVResponse.rootPartitionStatus))
+                        .arg(ioSummaryText(hyperVSummary.io)));
+
+                appendPlatformRow(
+                    QStringLiteral("R0 Hyper-V / Modules"),
+                    QStringLiteral("vmbus=%1, vswitch=%2, vpci=%3, hvsocket=%4")
+                        .arg(auditStateText(hyperVResponse.vmbusStatus))
+                        .arg(auditStateText(hyperVResponse.vSwitchStatus))
+                        .arg(auditStateText(hyperVResponse.vPciStatus))
+                        .arg(auditStateText(hyperVResponse.hvSocketStatus)),
+                    QStringLiteral("winhv=%1, winhvruntime=%2, hvloader=%3, moduleStatus=%4")
+                        .arg(auditStateText(hyperVResponse.winHvStatus))
+                        .arg(auditStateText(hyperVResponse.winHvRuntimeStatus))
+                        .arg(auditStateText(hyperVResponse.hvLoaderStatus))
+                        .arg(ntStatusText(hyperVResponse.moduleQueryStatus)));
+
+                const auto& appControlResponse = appControlStatus.response;
+                appendPlatformRow(
+                    QStringLiteral("R0 AppControl / Summary"),
+                    QStringLiteral("AppID=%1, policy=%2, AppLocker=%3")
+                        .arg(auditStateText(appControlResponse.appidStatus))
+                        .arg(auditStateText(appControlResponse.appidPolicyStatus))
+                        .arg(auditStateText(appControlResponse.appLockerFilterStatus)),
+                    QStringLiteral("fieldFlags=%1, sourceMask=%2, query=%3, moduleStatus=%4, io=%5")
+                        .arg(hexMaskText(appControlResponse.fieldFlags))
+                        .arg(hexMaskText(appControlResponse.sourceMask))
+                        .arg(ntStatusText(appControlResponse.queryStatus))
+                        .arg(ntStatusText(appControlResponse.moduleQueryStatus))
+                        .arg(ioSummaryText(appControlStatus.io)));
+
+                appendPlatformRow(
+                    QStringLiteral("R0 AppControl / Filters"),
+                    QStringLiteral("mssecflt=%1, BAM=%2, ahcache=%3")
+                        .arg(auditStateText(appControlResponse.mssecfltStatus))
+                        .arg(auditStateText(appControlResponse.bamStatus))
+                        .arg(auditStateText(appControlResponse.ahcacheStatus)),
+                    QStringLiteral("AppLockerOwner=%1, AppLockerOwnerStatus=%2, mssecfltOwner=%3, mssecfltOwnerStatus=%4")
+                        .arg(fixedWideText(appControlResponse.appLockerOwnerModule, KSWORD_ARK_SECURITY_AUDIT_NAME_CHARS))
+                        .arg(auditStateText(appControlResponse.appLockerCallbackOwnerStatus))
+                        .arg(fixedWideText(appControlResponse.mssecfltOwnerModule, KSWORD_ARK_SECURITY_AUDIT_NAME_CHARS))
+                        .arg(auditStateText(appControlResponse.mssecfltCallbackOwnerStatus)));
+
+                appendPlatformRow(
+                    QStringLiteral("R0 DriverTrust / Counts"),
+                    QStringLiteral("returned=%1, total=%2, truncated=%3")
+                        .arg(driverTrust.returnedCount)
+                        .arg(driverTrust.totalCount)
+                        .arg(driverTrust.truncated),
+                    QStringLiteral("fieldFlags=%1, sourceMask=%2, maxAccepted=%3, moduleStatus=%4, signingStatus=%5")
+                        .arg(hexMaskText(driverTrust.fieldFlags))
+                        .arg(hexMaskText(driverTrust.sourceMask))
+                        .arg(driverTrust.maxEntriesAccepted)
+                        .arg(ntStatusText(driverTrust.moduleQueryStatus))
+                        .arg(ntStatusText(driverTrust.signingResolverStatus)));
+
+                appendPlatformRow(
+                    QStringLiteral("R0 DriverTrust / IO"),
+                    r0IoMessageText(driverTrust.io.message),
+                    ioSummaryText(driverTrust.io));
+
+                r0PlatformSummaryParts << QStringLiteral("SecurityStatus=%1/%2")
+                    .arg(securityStatus.io.ok ? QStringLiteral("OK") : QStringLiteral("Fail"))
+                    .arg(ntStatusText(securityStatus.io.ntStatus));
+                r0PlatformSummaryParts << QStringLiteral("DriverTrust returned=%1 total=%2 truncated=%3")
+                    .arg(driverTrust.returnedCount)
+                    .arg(driverTrust.totalCount)
+                    .arg(driverTrust.truncated);
+                r0PlatformSummaryParts << QStringLiteral("HyperV present=%1 vendor=%2 flags=%3")
+                    .arg(boolFlagText(hyperVResponse.hypervisorPresent))
+                    .arg(fixedWideText(hyperVResponse.hypervisorVendor, KSWORD_ARK_SECURITY_AUDIT_VENDOR_CHARS))
+                    .arg(hexMaskText(hyperVResponse.fieldFlags));
+                r0PlatformSummaryParts << QStringLiteral("AppControl AppID=%1 AppLocker=%2 mssecflt=%3 BAM=%4")
+                    .arg(auditStateText(appControlResponse.appidStatus))
+                    .arg(auditStateText(appControlResponse.appLockerFilterStatus))
+                    .arg(auditStateText(appControlResponse.mssecfltStatus))
+                    .arg(auditStateText(appControlResponse.bamStatus));
+            }
+            catch (const std::exception& exception)
+            {
+                appendPlatformRow(
+                    QStringLiteral("R0 Security / ArkDriverClient"),
+                    QStringLiteral("Exception"),
+                    QString::fromLocal8Bit(exception.what()));
+                r0PlatformSummaryParts << QStringLiteral("R0 安全态势读取异常: %1").arg(QString::fromLocal8Bit(exception.what()));
+            }
+            catch (...)
+            {
+                appendPlatformRow(
+                    QStringLiteral("R0 Security / ArkDriverClient"),
+                    QStringLiteral("Exception"),
+                    QStringLiteral("未知异常"));
+                r0PlatformSummaryParts << QStringLiteral("R0 安全态势读取异常: 未知异常");
+            }
+
+            if (!r0PlatformSummaryParts.isEmpty())
+            {
+                platformSummary += QStringLiteral("\nR0 安全态势：%1").arg(r0PlatformSummaryParts.join(QStringLiteral(" | ")));
+            }
+
+            // 5) Code Integrity 事件同样通过 PowerShell 输出为 JSON 数组。
             const QString eventScript = QStringLiteral(
                 "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
                 "try {"
@@ -1464,13 +1851,15 @@ namespace ks::misc
             QMetaObject::invokeMethod(qApp, [guardThis,
                                              statusText,
                                              appLockerSummary,
-                                             wdacSummary,
-                                             defenderSummary,
-                                             eventSummary,
-                                             appLockerRules = std::move(appLockerRules),
-                                             policyFiles = std::move(policyFiles),
-                                             events = std::move(events),
-                                             defenderRows = std::move(defenderRows)]() mutable {
+                                              wdacSummary,
+                                              defenderSummary,
+                                              platformSummary,
+                                              eventSummary,
+                                              appLockerRules = std::move(appLockerRules),
+                                              policyFiles = std::move(policyFiles),
+                                              events = std::move(events),
+                                              defenderRows = std::move(defenderRows),
+                                              platformRows = std::move(platformRows)]() mutable {
                 if (guardThis == nullptr)
                 {
                     return;
@@ -1480,11 +1869,13 @@ namespace ks::misc
                     appLockerSummary,
                     wdacSummary,
                     defenderSummary,
+                    platformSummary,
                     eventSummary,
                     std::move(appLockerRules),
                     std::move(policyFiles),
                     std::move(events),
-                    std::move(defenderRows));
+                    std::move(defenderRows),
+                    std::move(platformRows));
             }, Qt::QueuedConnection);
         }).detach();
     }
@@ -1494,11 +1885,13 @@ namespace ks::misc
         QString appLockerSummary,
         QString wdacSummary,
         QString defenderSummary,
+        QString platformSummary,
         QString eventSummary,
         QVector<AppLockerRuleRecord> appLockerRules,
         QVector<PolicyFileRecord> policyFiles,
         QVector<EventRecord> events,
-        QVector<KeyValueRecord> defenderRows)
+        QVector<KeyValueRecord> defenderRows,
+        QVector<KeyValueRecord> platformRows)
     {
         m_appLockerRules = std::move(appLockerRules);
 
@@ -1509,20 +1902,24 @@ namespace ks::misc
 
         if (m_appLockerSummary != nullptr)
         {
-            m_appLockerSummary->setPlainText(appLockerSummary);
+            m_appLockerSummary->setText(appLockerSummary);
         }
         if (m_wdacSummary != nullptr)
         {
-            m_wdacSummary->setPlainText(wdacSummary);
+            m_wdacSummary->setText(wdacSummary);
         }
         if (m_defenderSummary != nullptr)
         {
-            m_defenderSummary->setPlainText(defenderSummary);
+            m_defenderSummary->setText(defenderSummary);
+        }
+        if (m_platformSummary != nullptr)
+        {
+            m_platformSummary->setText(platformSummary);
         }
         if (m_eventSummary != nullptr)
         {
             m_eventSummary->setProperty("ks_event_base_summary", eventSummary);
-            m_eventSummary->setPlainText(eventSummary);
+            m_eventSummary->setText(eventSummary);
         }
 
         QVector<QStringList> appLockerRows;
@@ -1624,6 +2021,25 @@ namespace ks::misc
             },
             defenderRowsTable);
 
+        QVector<QStringList> platformRowsTable;
+        platformRowsTable.reserve(platformRows.size());
+        for (const KeyValueRecord& record : platformRows)
+        {
+            platformRowsTable.push_back(QStringList{
+                record.nameText,
+                record.valueText,
+                record.detailText
+            });
+        }
+        fillTable(
+            m_platformTable,
+            QStringList{
+                QStringLiteral("字段"),
+                QStringLiteral("值"),
+                QStringLiteral("说明")
+            },
+            platformRowsTable);
+
         if (m_refreshButton != nullptr)
         {
             m_refreshButton->setEnabled(true);
@@ -1689,15 +2105,15 @@ namespace ks::misc
         if (m_eventSummary != nullptr)
         {
             const QString baseSummary = m_eventSummary->property("ks_event_base_summary").toString().trimmed().isEmpty()
-                ? m_eventSummary->toPlainText().section(QStringLiteral("\n筛选："), 0, 0)
+                ? m_eventSummary->text().section(QStringLiteral("\n筛选："), 0, 0)
                 : m_eventSummary->property("ks_event_base_summary").toString();
             if (selectedVerdictText == QStringLiteral("全部分类"))
             {
-                m_eventSummary->setPlainText(baseSummary);
+                m_eventSummary->setText(baseSummary);
             }
             else
             {
-                m_eventSummary->setPlainText(QStringLiteral("%1\n筛选：%2，显示 %3 / %4。")
+                m_eventSummary->setText(QStringLiteral("%1\n筛选：%2，显示 %3 / %4。")
                     .arg(baseSummary)
                     .arg(selectedVerdictText)
                     .arg(visibleRows.size())
@@ -1774,7 +2190,7 @@ namespace ks::misc
         }
         if (m_fileDiagnosisSummary != nullptr)
         {
-            m_fileDiagnosisSummary->setPlainText(QStringLiteral("正在诊断：%1").arg(filePath));
+            m_fileDiagnosisSummary->setText(QStringLiteral("正在诊断：%1").arg(filePath));
         }
 
         const QPointer<ApplicationControlPage> guardThis(this);
@@ -1897,7 +2313,7 @@ namespace ks::misc
     {
         if (m_fileDiagnosisSummary != nullptr)
         {
-            m_fileDiagnosisSummary->setPlainText(summaryText);
+            m_fileDiagnosisSummary->setText(summaryText);
         }
 
         QVector<QStringList> tableRows;

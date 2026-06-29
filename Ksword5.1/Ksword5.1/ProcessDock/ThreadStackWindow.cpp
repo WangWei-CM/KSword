@@ -745,6 +745,11 @@ void ThreadStackWindow::showFrameContextMenu(const QPoint& localPosition)
     m_frameTable->setCurrentItem(m_frameTable->itemAt(localPosition));
 
     QMenu menu(this);
+    // 调用栈菜单样式：
+    // - 输入：当前帧表右键菜单；
+    // - 处理：显式设置主题不透明样式，避免透明父容器下菜单文字不可读；
+    // - 返回：无，只影响复制菜单展示。
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyFrameAction = menu.addAction(QIcon(":/Icon/process_copy_cell.svg"), QStringLiteral("复制当前帧"));
     QAction* copyAllAction = menu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制全部调用栈"));
 

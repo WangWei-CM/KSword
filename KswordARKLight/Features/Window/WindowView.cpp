@@ -3,6 +3,7 @@
 #include "WindowActions.h"
 #include "WindowEnumerator.h"
 #include "WindowModel.h"
+#include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
 #include "../../Ui/Controls.h"
 #include "../../Ui/ListViewUtil.h"
 #include "../../Ui/Theme.h"
@@ -14,6 +15,8 @@
 #include <memory>
 #include <string>
 #include <cstring>
+#include <cstdint>
+#include <sstream>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -30,6 +33,7 @@ constexpr int kCloseButtonId = 62006;
 constexpr int kWindowListId = 62007;
 constexpr int kDetailListId = 62008;
 constexpr int kSortComboId = 62009;
+constexpr int kAuditModeComboId = 62010;
 constexpr int kHeaderHeight = 34;
 constexpr int kGap = 6;
 constexpr int kDetailHeight = 210;
@@ -40,6 +44,56 @@ constexpr UINT kWindowMenuRestore = 62604;
 constexpr UINT kWindowMenuMinimize = 62605;
 constexpr UINT kWindowMenuMaximize = 62606;
 constexpr UINT kWindowMenuClose = 62607;
+
+// WindowViewMode controls whether this retained page shows the existing R3
+// window list or a read-only audit entry matrix. Inputs come from the toolbar
+// combo box; processing stays inside this UI module and never calls raw IOCTL.
+enum class WindowViewMode {
+    WindowList,
+    Win32kGuiAudit,
+    GpuDisplayAudit
+};
+
+// AuditEntry is one read-only audit row. Inputs are ArkDriverClient wrapper
+// results, static source labels and existing R3 observations; processing only
+// displays status and evidence mapping; return behavior is normal ListView text.
+struct AuditEntry {
+    std::wstring category;
+    std::wstring source;
+    std::wstring item;
+    std::wstring status;
+    std::wstring detail;
+};
+
+// Utf8ToWideLossy 把 ArkDriverClient 诊断消息提升为宽字符串。
+// 输入：io.message 窄字符串；处理：逐字节提升，足够展示 ASCII/UTF-8 诊断；
+// 返回：宽字符串，空输入返回空。
+std::wstring Utf8ToWideLossy(const std::string& text) {
+    std::wstring wide;
+    wide.reserve(text.size());
+    for (const char ch : text) {
+        wide.push_back(static_cast<unsigned char>(ch));
+    }
+    return wide;
+}
+
+// HexText 把地址/标志格式化为十六进制。
+// 输入：64 位值；处理：统一 0x + 大写十六进制；返回：显示字符串。
+std::wstring HexText(const std::uint64_t value) {
+    std::wostringstream stream;
+    stream << L"0x" << std::hex << std::uppercase << value;
+    return stream.str();
+}
+
+// IoStateText 把 ArkDriverClient IO 状态转换成 UI 状态。
+// 输入：ok 与 unsupported；处理：区分正常、旧驱动不支持、设备不可用；
+// 返回：表格状态文本。
+std::wstring IoStateText(const bool ok, const bool unsupported) {
+    if (ok) {
+        return L"OK";
+    }
+    return unsupported ? L"Unsupported" : L"Unavailable";
+}
 
 // Width returns non-negative rectangle width. Input is a RECT; output is pixels
 // available for child controls.
@@ -64,11 +118,14 @@ struct WindowViewState {
     HWND minimizeButton = nullptr;
     HWND maximizeButton = nullptr;
     HWND closeButton = nullptr;
+    HWND auditModeCombo = nullptr;
     HWND sortCombo = nullptr;
     HWND windowList = nullptr;
     HWND detailList = nullptr;
     HIMAGELIST processImageList = nullptr;
     WindowModel model;
+    std::vector<AuditEntry> auditRows;
+    WindowViewMode viewMode = WindowViewMode::WindowList;
     std::wstring statusText;
     std::unordered_map<std::wstring, int> processIconCache;
 };
@@ -82,6 +139,16 @@ void AddColumn(HWND list, int index, const wchar_t* title, int width) {
     column.cx = width;
     column.iSubItem = index;
     ListView_InsertColumn(list, index, &column);
+}
+
+// SetColumn updates a report-view column title and width. Inputs are list HWND,
+// column index, title and width; no value is returned.
+void SetColumn(HWND list, int index, const wchar_t* title, int width) {
+    LVCOLUMNW column{};
+    column.mask = LVCF_TEXT | LVCF_WIDTH;
+    column.pszText = const_cast<LPWSTR>(title);
+    column.cx = width;
+    ListView_SetColumn(list, index, &column);
 }
 
 // SetListText inserts or updates a report-view cell. Inputs are list HWND, row,
@@ -234,11 +301,117 @@ HWND SelectedWindow(WindowViewState* state) {
     return row ? row->hwnd : nullptr;
 }
 
+// BuildWin32kGuiAuditRows creates the GUI audit entry matrix. Inputs are the
+// current R3 window count; processing calls available ArkDriverClient win32k
+// wrappers and keeps the R3 window count as cross-view context; output is a
+// vector displayed by the audit mode.
+std::vector<AuditEntry> BuildWin32kGuiAuditRows(size_t windowCount) {
+    std::vector<AuditEntry> rows;
+    rows.push_back({ L"Window", L"R3 EnumWindows cross-view", L"Top-level HWND cross-view context", L"Ready",
+        L"当前页面已枚举 " + std::to_wstring(windowCount) + L" 个顶层窗口，用于和 ArkDriverClient::queryWin32kWindows 结果对照。" });
+    const ksword::ark::DriverClient client;
+    const auto profile = client.queryWin32kProfileStatus();
+    rows.push_back({ L"Profile", L"ArkDriverClient::queryWin32kProfileStatus", L"win32k/win32kbase/win32kfull", IoStateText(profile.io.ok, profile.unsupported),
+        L"cap=" + HexText(profile.capabilityMask) + L"; missing=" + HexText(profile.missingCapabilityMask) + L"; sessions=" + std::to_wstring(profile.entries.size()) + L"; " + Utf8ToWideLossy(profile.io.message) });
+
+    const auto windows = client.queryWin32kWindows();
+    rows.push_back({ L"Windows", L"ArkDriverClient::queryWin32kWindows", L"HWND / tagWND cross-view", IoStateText(windows.io.ok, windows.unsupported),
+        L"returned=" + std::to_wstring(windows.returnedCount) + L"/" + std::to_wstring(windows.totalCount) + L"; cap=" + HexText(windows.capabilityMask) + L"; " + Utf8ToWideLossy(windows.io.message) });
+
+    const auto guiThreads = client.queryWin32kGuiThreads();
+    rows.push_back({ L"GUI Thread", L"ArkDriverClient::queryWin32kGuiThreads", L"tagTHREADINFO / tagQ / focus/capture", IoStateText(guiThreads.io.ok, guiThreads.unsupported),
+        L"returned=" + std::to_wstring(guiThreads.returnedCount) + L"/" + std::to_wstring(guiThreads.totalCount) + L"; missing=" + HexText(guiThreads.missingCapabilityMask) + L"; 不采集消息内容。" });
+
+    const auto hotkeys = client.queryWin32kHotkeysPdb();
+    rows.push_back({ L"Hotkeys", L"ArkDriverClient::queryWin32kHotkeysPdb", L"Hotkey object chain", IoStateText(hotkeys.io.ok, hotkeys.unsupported),
+        L"returned=" + std::to_wstring(hotkeys.returnedCount) + L"/" + std::to_wstring(hotkeys.totalCount) + L"; 不删除热键。" });
+
+    const auto hooks = client.queryWin32kHooksPdb();
+    rows.push_back({ L"Hooks", L"ArkDriverClient::queryWin32kHooksPdb", L"WH_* hook chain", IoStateText(hooks.io.ok, hooks.unsupported),
+        L"returned=" + std::to_wstring(hooks.returnedCount) + L"/" + std::to_wstring(hooks.totalCount) + L"; 不 remove/unlink hook 链。" });
+
+    rows.push_back({ L"WM_COPYDATA", L"R3 monitor / ETW / snapshot", L"事件摘要边界", L"ReadOnly",
+        L"默认不读取 COPYDATASTRUCT payload，不安装全局消息 hook；当前仅记录只读边界说明。" });
+    return rows;
+}
+
+// BuildGpuDisplayAuditRows creates the GPU/display/watchdog audit entry matrix.
+// Inputs are none; processing calls the ArkDriverClient GPU/display watchdog
+// audit wrapper and supplements it with R3 configuration context rows;
+// output is displayed as read-only audit rows.
+std::vector<AuditEntry> BuildGpuDisplayAuditRows() {
+    std::vector<AuditEntry> rows;
+    const ksword::ark::DriverClient client;
+    const auto gpuAudit = client.queryGpuDisplayWatchdogAudit();
+    rows.push_back({ L"GPU", L"ArkDriverClient::queryGpuDisplayWatchdogAudit", L"dxgkrnl / dxgmms2 / watchdog", IoStateText(gpuAudit.io.ok, gpuAudit.unsupported),
+        L"drivers=" + std::to_wstring(gpuAudit.driverCount) + L"; devices=" + std::to_wstring(gpuAudit.deviceCount) + L"; rows=" + std::to_wstring(gpuAudit.entries.size()) + L"; " + Utf8ToWideLossy(gpuAudit.io.message) });
+    rows.push_back({ L"Display", L"R0 DeviceAudit + R3 display APIs", L"Adapter / monitor / display path", gpuAudit.io.ok ? L"OK" : L"Partial",
+        L"R0 设备栈已接入；R3 display API 可继续作为 cross-view，不修改显示配置。" });
+    rows.push_back({ L"Miniport", L"R0 DeviceAudit", L"Display miniport basic state", gpuAudit.io.ok ? L"OK" : L"Partial",
+        L"按 driver/device row 展示 miniport、PCI 设备和显示路径；缺失字段显示 partial。" });
+    rows.push_back({ L"TDR", L"Registry/EventLog reader", L"TDR configuration summary", L"ReadOnly",
+        L"只读摘要：TdrDelay/TdrDdiDelay/TdrLevel 和事件摘要由用户态安全读取，不修改策略。" });
+    rows.push_back({ L"Watchdog", L"ArkDriverClient::queryGpuDisplayWatchdogAudit", L"watchdog.sys integrity / status", IoStateText(gpuAudit.io.ok, gpuAudit.unsupported),
+        L"展示 watchdog 模块/驱动对象状态；不关闭 watchdog，不改 TDR 策略。" });
+    return rows;
+}
+
+// ConfigureWindowColumns restores the existing live-window list headers. Input
+// is page state; processing only updates visible ListView columns; no return.
+void ConfigureWindowColumns(WindowViewState* state) {
+    if (!state || !state->windowList) {
+        return;
+    }
+    SetColumn(state->windowList, 0, L"进程 / PID", 190);
+    SetColumn(state->windowList, 1, L"HWND", 120);
+    SetColumn(state->windowList, 2, L"Title", 300);
+    SetColumn(state->windowList, 3, L"Class", 190);
+    SetColumn(state->windowList, 4, L"State", 220);
+}
+
+// ConfigureAuditColumns switches the main list to audit-entry headers. Input is
+// page state; output is visible column metadata only.
+void ConfigureAuditColumns(WindowViewState* state) {
+    if (!state || !state->windowList) {
+        return;
+    }
+    SetColumn(state->windowList, 0, L"类别", 150);
+    SetColumn(state->windowList, 1, L"数据源", 220);
+    SetColumn(state->windowList, 2, L"入口 / 对象", 280);
+    SetColumn(state->windowList, 3, L"状态", 120);
+    SetColumn(state->windowList, 4, L"说明", 430);
+}
+
+// ShowAuditDetail refreshes the detail pane for one audit row. Inputs are state
+// and row index; processing is display-only; no value is returned.
+void ShowAuditDetail(WindowViewState* state, int rowIndex) {
+    if (!state || !state->detailList) {
+        return;
+    }
+    ListView_DeleteAllItems(state->detailList);
+    if (rowIndex < 0 || rowIndex >= static_cast<int>(state->auditRows.size())) {
+        AddDetailRow(state->detailList, 0, L"Selection", L"No audit entry selected");
+        return;
+    }
+    const AuditEntry& entry = state->auditRows[rowIndex];
+    int detailRow = 0;
+    AddDetailRow(state->detailList, detailRow++, L"类别", entry.category);
+    AddDetailRow(state->detailList, detailRow++, L"数据源", entry.source);
+    AddDetailRow(state->detailList, detailRow++, L"入口 / 对象", entry.item);
+    AddDetailRow(state->detailList, detailRow++, L"状态", entry.status);
+    AddDetailRow(state->detailList, detailRow++, L"说明", entry.detail);
+    AddDetailRow(state->detailList, detailRow++, L"安全边界", L"默认只读审计；本页不提供 patch/delete/bypass/remove/unlink 操作。");
+}
+
 // ShowDetail refreshes the detail list for one model row. Inputs are state and
 // model index; processing queries live HWND details with cached fallback; no
 // value is returned.
 void ShowDetail(WindowViewState* state, int modelIndex) {
     if (!state || !state->detailList) {
+        return;
+    }
+    if (state->viewMode != WindowViewMode::WindowList) {
+        ShowAuditDetail(state, modelIndex);
         return;
     }
     ListView_DeleteAllItems(state->detailList);
@@ -268,6 +441,26 @@ void PopulateList(WindowViewState* state) {
     }
     Ksword::Ui::ScopedListViewRedrawLock redrawLock(state->windowList);
     ListView_DeleteAllItems(state->windowList);
+    if (state->viewMode != WindowViewMode::WindowList) {
+        ConfigureAuditColumns(state);
+        for (int rowIndex = 0; rowIndex < static_cast<int>(state->auditRows.size()); ++rowIndex) {
+            const AuditEntry& row = state->auditRows[rowIndex];
+            SetListText(state->windowList, rowIndex, 0, row.category, rowIndex);
+            SetListText(state->windowList, rowIndex, 1, row.source);
+            SetListText(state->windowList, rowIndex, 2, row.item);
+            SetListText(state->windowList, rowIndex, 3, row.status);
+            SetListText(state->windowList, rowIndex, 4, row.detail);
+        }
+        if (!state->auditRows.empty()) {
+            ListView_SetItemState(state->windowList, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            ShowAuditDetail(state, 0);
+        } else {
+            ShowAuditDetail(state, -1);
+        }
+        return;
+    }
+
+    ConfigureWindowColumns(state);
     const auto& rows = state->model.rows();
     for (int rowIndex = 0; rowIndex < static_cast<int>(rows.size()); ++rowIndex) {
         const WindowSnapshotRow& row = rows[rowIndex];
@@ -299,8 +492,52 @@ void RefreshWindows(WindowViewState* state) {
         state->statusText = result.diagnosticText;
         state->model.setRows({});
     }
+    if (state->viewMode == WindowViewMode::Win32kGuiAudit) {
+        state->auditRows = BuildWin32kGuiAuditRows(state->model.rows().size());
+        state->statusText = L"Win32K GUI 审计：R0 wrapper + R3 cross-view ready";
+    } else if (state->viewMode == WindowViewMode::GpuDisplayAudit) {
+        state->auditRows = BuildGpuDisplayAuditRows();
+        state->statusText = L"GPU / Display / Watchdog 审计：R0 DeviceAudit wrapper ready";
+    }
     PopulateList(state);
     ::InvalidateRect(state->hwnd, nullptr, TRUE);
+}
+
+// UpdateViewModeFromCombo reads the audit-mode combo and switches between the
+// existing window list and read-only audit entry pages. Input is page state;
+// processing reuses RefreshWindows for R3 cross-view context; no value is
+// returned.
+void UpdateViewModeFromCombo(WindowViewState* state) {
+    if (!state || !state->auditModeCombo) {
+        return;
+    }
+    const LRESULT selected = ::SendMessageW(state->auditModeCombo, CB_GETCURSEL, 0, 0);
+    if (selected == 1) {
+        state->viewMode = WindowViewMode::Win32kGuiAudit;
+        ::EnableWindow(state->sortCombo, FALSE);
+        ::EnableWindow(state->frontButton, FALSE);
+        ::EnableWindow(state->restoreButton, FALSE);
+        ::EnableWindow(state->minimizeButton, FALSE);
+        ::EnableWindow(state->maximizeButton, FALSE);
+        ::EnableWindow(state->closeButton, FALSE);
+    } else if (selected == 2) {
+        state->viewMode = WindowViewMode::GpuDisplayAudit;
+        ::EnableWindow(state->sortCombo, FALSE);
+        ::EnableWindow(state->frontButton, FALSE);
+        ::EnableWindow(state->restoreButton, FALSE);
+        ::EnableWindow(state->minimizeButton, FALSE);
+        ::EnableWindow(state->maximizeButton, FALSE);
+        ::EnableWindow(state->closeButton, FALSE);
+    } else {
+        state->viewMode = WindowViewMode::WindowList;
+        ::EnableWindow(state->sortCombo, TRUE);
+        ::EnableWindow(state->frontButton, TRUE);
+        ::EnableWindow(state->restoreButton, TRUE);
+        ::EnableWindow(state->minimizeButton, TRUE);
+        ::EnableWindow(state->maximizeButton, TRUE);
+        ::EnableWindow(state->closeButton, TRUE);
+    }
+    RefreshWindows(state);
 }
 
 // UpdateSortModeFromCombo reads the toolbar combo-box and rebuilds the list
@@ -308,6 +545,9 @@ void RefreshWindows(WindowViewState* state) {
 // index 0 to stacking order and index 1 to process order; no value is returned.
 void UpdateSortModeFromCombo(WindowViewState* state) {
     if (!state || !state->sortCombo) {
+        return;
+    }
+    if (state->viewMode != WindowViewMode::WindowList) {
         return;
     }
 
@@ -324,6 +564,11 @@ void UpdateSortModeFromCombo(WindowViewState* state) {
 // WindowActions.* and refreshes status text; no value is returned.
 void RunAction(WindowViewState* state, int commandId) {
     if (!state) {
+        return;
+    }
+    if (state->viewMode != WindowViewMode::WindowList) {
+        state->statusText = L"Audit entries are read-only.";
+        ::InvalidateRect(state->hwnd, nullptr, TRUE);
         return;
     }
     HWND hwnd = SelectedWindow(state);
@@ -392,7 +637,7 @@ void ShowWindowContextMenu(WindowViewState* state, POINT screenPoint) {
         ShowDetail(state, SelectedModelIndex(state));
     }
 
-    const bool hasWindow = SelectedWindow(state) != nullptr;
+    const bool hasWindow = state->viewMode == WindowViewMode::WindowList && SelectedWindow(state) != nullptr;
     HMENU menu = ::CreatePopupMenu();
     if (!menu) {
         return;
@@ -462,6 +707,7 @@ void LayoutView(WindowViewState* state) {
     const int width = Width(rc);
     const int height = Height(rc);
     int x = kGap;
+    ::MoveWindow(state->auditModeCombo, x, kGap, 180, 160, TRUE); x += 186;
     ::MoveWindow(state->sortCombo, x, kGap, 150, 160, TRUE); x += 156;
     ::MoveWindow(state->refreshButton, x, kGap, 78, 24, TRUE); x += 84;
     ::MoveWindow(state->frontButton, x, kGap, 78, 24, TRUE); x += 84;
@@ -480,6 +726,18 @@ void LayoutView(WindowViewState* state) {
 // CreateChildControls creates all native controls for the Window page. Inputs are
 // state and parent HWND; output is true when every required HWND was created.
 bool CreateChildControls(WindowViewState* state, HWND hwnd) {
+    state->auditModeCombo = ::CreateWindowExW(0,
+        L"COMBOBOX",
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+        0,
+        0,
+        180,
+        160,
+        hwnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kAuditModeComboId)),
+        ::GetModuleHandleW(nullptr),
+        nullptr);
     state->sortCombo = ::CreateWindowExW(0,
         L"COMBOBOX",
         L"",
@@ -504,11 +762,16 @@ bool CreateChildControls(WindowViewState* state, HWND hwnd) {
     state->detailList = ::CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
         0, 0, 100, 100, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kDetailListId)), ::GetModuleHandleW(nullptr), nullptr);
-    if (!state->sortCombo || !state->refreshButton || !state->frontButton || !state->restoreButton || !state->minimizeButton ||
+    if (!state->auditModeCombo || !state->sortCombo || !state->refreshButton || !state->frontButton || !state->restoreButton || !state->minimizeButton ||
         !state->maximizeButton || !state->closeButton || !state->windowList || !state->detailList) {
         return false;
     }
 
+    ::SendMessageW(state->auditModeCombo, WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
+    ::SendMessageW(state->auditModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"窗口列表"));
+    ::SendMessageW(state->auditModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Win32K GUI 审计"));
+    ::SendMessageW(state->auditModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"GPU/Display 审计"));
+    ::SendMessageW(state->auditModeCombo, CB_SETCURSEL, 0, 0);
     ::SendMessageW(state->sortCombo, WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
     ::SendMessageW(state->sortCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"按堆叠顺序"));
     ::SendMessageW(state->sortCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"按进程顺序"));
@@ -567,6 +830,10 @@ bool RegisterWindowViewClass() {
                 RefreshWindows(state);
                 return 0;
             }
+            if (id == kAuditModeComboId && HIWORD(wParam) == CBN_SELCHANGE) {
+                UpdateViewModeFromCombo(state);
+                return 0;
+            }
             if (id == kSortComboId && HIWORD(wParam) == CBN_SELCHANGE) {
                 UpdateSortModeFromCombo(state);
                 return 0;
@@ -583,7 +850,11 @@ bool RegisterWindowViewClass() {
             if (state && notify && notify->idFrom == kWindowListId && notify->code == LVN_ITEMCHANGED) {
                 auto* changed = reinterpret_cast<NMLISTVIEW*>(lParam);
                 if ((changed->uNewState & LVIS_SELECTED) != 0) {
-                    ShowDetail(state, SelectedModelIndex(state));
+                    if (state->viewMode == WindowViewMode::WindowList) {
+                        ShowDetail(state, SelectedModelIndex(state));
+                    } else {
+                        ShowAuditDetail(state, changed->iItem);
+                    }
                 }
                 return 0;
             }
@@ -613,7 +884,7 @@ bool RegisterWindowViewClass() {
             RECT rc{};
             ::GetClientRect(hwnd, &rc);
             ::FillRect(dc, &rc, Ksword::Ui::AppTheme().panelBrush());
-            RECT textRc{ 668, 7, rc.right - kGap, kHeaderHeight };
+            RECT textRc{ 854, 7, rc.right - kGap, kHeaderHeight };
             const std::wstring title = state ? state->statusText : L"Windows";
             Ksword::Ui::DrawTextLine(dc, title, textRc, Ksword::Ui::AppTheme().mutedTextColor,
                 Ksword::Ui::SystemUIFont(), DT_SINGLELINE | DT_LEFT | DT_VCENTER);

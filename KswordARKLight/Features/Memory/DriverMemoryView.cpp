@@ -3,13 +3,20 @@
 #include "DriverMemoryClient.h"
 #include "DriverMemoryModel.h"
 #include "../../Ui/Controls.h"
+#include "../../Ui/ListViewUtil.h"
 #include "../../Ui/Theme.h"
 
 #include <algorithm>
 #include <cstring>
+#include <cwchar>
+#include <iomanip>
+#include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
+#include <commctrl.h>
+#include <psapi.h>
 #include <windowsx.h>
 
 namespace Ksword::Features::Memory {
@@ -480,6 +487,470 @@ bool RegisterDriverMemoryViewClass() {
     return registered;
 }
 
+constexpr wchar_t kProcessMemoryEvidenceViewClass[] = L"KswordARKLight.ProcessMemoryEvidenceView";
+constexpr int kEvidencePidEditId = 51601;
+constexpr int kEvidenceStartEditId = 51602;
+constexpr int kEvidenceLimitEditId = 51603;
+constexpr int kEvidenceRefreshButtonId = 51604;
+constexpr int kEvidenceListId = 51605;
+constexpr int kEvidenceStatusEditId = 51606;
+
+// ProcessMemoryEvidenceRow is the R3-only audit model for one VA region. Inputs
+// come from VirtualQueryEx and, when available, QueryWorkingSetEx; processing
+// derives risk columns without reading bytes or changing mappings; return
+// behavior is value storage for ListView rendering.
+struct ProcessMemoryEvidenceRow {
+    std::uint64_t baseAddress = 0;
+    std::uint64_t allocationBase = 0;
+    std::uint64_t regionSize = 0;
+    DWORD state = 0;
+    DWORD protect = 0;
+    DWORD type = 0;
+    bool workingSetKnown = false;
+    bool workingSetValid = false;
+    bool workingSetShared = false;
+    bool writableExecutable = false;
+    bool privateExecutable = false;
+    bool largePageUnknown = true;
+    bool badPage = false;
+    bool mappedFile = false;
+};
+
+// ProcessMemoryEvidenceViewState owns the R3 fallback evidence controls. Inputs
+// arrive through Win32 messages; processing performs read-only process queries;
+// no destructor-owned handles are kept after each refresh.
+struct ProcessMemoryEvidenceViewState {
+    HWND hwnd = nullptr;
+    HWND pidEdit = nullptr;
+    HWND startEdit = nullptr;
+    HWND limitEdit = nullptr;
+    HWND refreshButton = nullptr;
+    HWND list = nullptr;
+    HWND statusEdit = nullptr;
+};
+
+using QueryWorkingSetExFn = BOOL(WINAPI*)(HANDLE, PVOID, DWORD);
+
+// Hex64 formats an integer as uppercase 0x-prefixed text. Input is the numeric
+// value; processing uses iostream formatting; output is stable ListView text.
+std::wstring Hex64(const std::uint64_t value) {
+    std::wostringstream stream;
+    stream << L"0x" << std::hex << std::uppercase << value;
+    return stream.str();
+}
+
+// YesNo returns a localized boolean marker. Input is a boolean observation;
+// output is short text for risk/evidence columns.
+const wchar_t* YesNo(const bool value) {
+    return value ? L"是" : L"否";
+}
+
+// ProtectionIsExecutable checks whether a Win32 page protection allows execute.
+// Input is MEMORY_BASIC_INFORMATION.Protect or AllocationProtect; processing
+// strips guard/nocache modifiers and tests execute variants; output is true for
+// executable user-mode protections.
+bool ProtectionIsExecutable(const DWORD protect) {
+    const DWORD base = protect & 0xFFU;
+    return base == PAGE_EXECUTE ||
+        base == PAGE_EXECUTE_READ ||
+        base == PAGE_EXECUTE_READWRITE ||
+        base == PAGE_EXECUTE_WRITECOPY;
+}
+
+// ProtectionIsWritable checks whether a Win32 page protection allows writes or
+// copy-on-write writes. Input is a protection mask; output is true for writable
+// mappings used by the WX risk heuristic.
+bool ProtectionIsWritable(const DWORD protect) {
+    const DWORD base = protect & 0xFFU;
+    return base == PAGE_READWRITE ||
+        base == PAGE_WRITECOPY ||
+        base == PAGE_EXECUTE_READWRITE ||
+        base == PAGE_EXECUTE_WRITECOPY;
+}
+
+// ProtectionText converts Win32 protection bits into a compact display string.
+// Input is a protection mask; processing preserves guard/nocache/writecombine
+// suffixes; output is human-readable and never used as an authority decision.
+std::wstring ProtectionText(const DWORD protect) {
+    const DWORD base = protect & 0xFFU;
+    std::wstring text;
+    switch (base) {
+    case PAGE_NOACCESS: text = L"NOACCESS"; break;
+    case PAGE_READONLY: text = L"R"; break;
+    case PAGE_READWRITE: text = L"RW"; break;
+    case PAGE_WRITECOPY: text = L"WC"; break;
+    case PAGE_EXECUTE: text = L"X"; break;
+    case PAGE_EXECUTE_READ: text = L"RX"; break;
+    case PAGE_EXECUTE_READWRITE: text = L"RWX"; break;
+    case PAGE_EXECUTE_WRITECOPY: text = L"XWC"; break;
+    default: text = L"0x" + Hex64(base).substr(2); break;
+    }
+    if ((protect & PAGE_GUARD) != 0) {
+        text += L"|GUARD";
+    }
+    if ((protect & PAGE_NOCACHE) != 0) {
+        text += L"|NOCACHE";
+    }
+    if ((protect & PAGE_WRITECOMBINE) != 0) {
+        text += L"|WRITECOMBINE";
+    }
+    return text;
+}
+
+// StateText converts MEM_* state to display text. Input is mbi.State; output is
+// a short table value.
+std::wstring StateText(const DWORD state) {
+    switch (state) {
+    case MEM_COMMIT: return L"COMMIT";
+    case MEM_RESERVE: return L"RESERVE";
+    case MEM_FREE: return L"FREE";
+    default: return Hex64(state);
+    }
+}
+
+// TypeText converts MEM_PRIVATE/MAPPED/IMAGE values to display text. Input is
+// mbi.Type; output is a short table value.
+std::wstring TypeText(const DWORD type) {
+    switch (type) {
+    case MEM_PRIVATE: return L"PRIVATE";
+    case MEM_MAPPED: return L"MAPPED";
+    case MEM_IMAGE: return L"IMAGE";
+    case 0: return L"-";
+    default: return Hex64(type);
+    }
+}
+
+// EvidenceColumns returns the fixed report columns for the process VA evidence
+// page. There is no input; output is consumed by the shared ListView helper.
+std::vector<Ksword::Ui::ListViewColumn> EvidenceColumns() {
+    return {
+        { 0, 130, LVCFMT_LEFT, L"Base" },
+        { 1, 130, LVCFMT_LEFT, L"AllocBase" },
+        { 2, 92, LVCFMT_RIGHT, L"Size" },
+        { 3, 74, LVCFMT_LEFT, L"State" },
+        { 4, 92, LVCFMT_LEFT, L"Protect" },
+        { 5, 80, LVCFMT_LEFT, L"Type" },
+        { 6, 70, LVCFMT_LEFT, L"WX" },
+        { 7, 92, LVCFMT_LEFT, L"PrivateExec" },
+        { 8, 86, LVCFMT_LEFT, L"LargePage" },
+        { 9, 74, LVCFMT_LEFT, L"BadPage" },
+        { 10, 82, LVCFMT_LEFT, L"MappedFile" },
+        { 11, 98, LVCFMT_LEFT, L"WorkingSet" },
+    };
+}
+
+// QueryWorkingSetExDynamic calls K32QueryWorkingSetEx when the API is present.
+// Inputs are a process handle and one address; processing dynamically resolves
+// kernel32 export to avoid adding project dependencies; output reports whether
+// working-set evidence was available and fills validity/shared flags.
+bool QueryWorkingSetExDynamic(HANDLE process, void* address, bool& valid, bool& shared) {
+    valid = false;
+    shared = false;
+    HMODULE kernel32 = ::GetModuleHandleW(L"kernel32.dll");
+    if (!kernel32) {
+        return false;
+    }
+    const auto query = reinterpret_cast<QueryWorkingSetExFn>(::GetProcAddress(kernel32, "K32QueryWorkingSetEx"));
+    if (!query) {
+        return false;
+    }
+    PSAPI_WORKING_SET_EX_INFORMATION info{};
+    info.VirtualAddress = address;
+    if (!query(process, &info, static_cast<DWORD>(sizeof(info)))) {
+        return false;
+    }
+    valid = info.VirtualAttributes.Valid != 0;
+    shared = info.VirtualAttributes.Shared != 0;
+    return true;
+}
+
+// BuildEvidenceRow derives display/risk facts from one MEMORY_BASIC_INFORMATION
+// record. Inputs are mbi plus optional working-set facts; processing never reads
+// target bytes; output is a row object for the report table.
+ProcessMemoryEvidenceRow BuildEvidenceRow(
+    const MEMORY_BASIC_INFORMATION& mbi,
+    const bool workingSetKnown,
+    const bool workingSetValid,
+    const bool workingSetShared) {
+    ProcessMemoryEvidenceRow row;
+    row.baseAddress = reinterpret_cast<std::uint64_t>(mbi.BaseAddress);
+    row.allocationBase = reinterpret_cast<std::uint64_t>(mbi.AllocationBase);
+    row.regionSize = static_cast<std::uint64_t>(mbi.RegionSize);
+    row.state = mbi.State;
+    row.protect = mbi.Protect;
+    row.type = mbi.Type;
+    row.workingSetKnown = workingSetKnown;
+    row.workingSetValid = workingSetValid;
+    row.workingSetShared = workingSetShared;
+    row.writableExecutable = mbi.State == MEM_COMMIT && ProtectionIsExecutable(mbi.Protect) && ProtectionIsWritable(mbi.Protect);
+    row.privateExecutable = mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE && ProtectionIsExecutable(mbi.Protect);
+    row.badPage = mbi.State == MEM_COMMIT && ((mbi.Protect & PAGE_GUARD) != 0 || ((mbi.Protect & 0xFFU) == PAGE_NOACCESS));
+    row.mappedFile = mbi.Type == MEM_IMAGE || mbi.Type == MEM_MAPPED;
+    return row;
+}
+
+// InsertEvidenceRow appends one evidence row to the ListView. Inputs are a list
+// HWND and model row; processing converts each field to text; output is the
+// inserted row index from the shared helper.
+int InsertEvidenceRow(HWND list, const ProcessMemoryEvidenceRow& row) {
+    std::wstring workingSetText = L"未知";
+    if (row.workingSetKnown) {
+        workingSetText = row.workingSetValid ? (row.workingSetShared ? L"Valid/Shared" : L"Valid/Private") : L"Not resident";
+    }
+    return Ksword::Ui::InsertListViewTextRow(list, {
+        Hex64(row.baseAddress),
+        Hex64(row.allocationBase),
+        std::to_wstring(row.regionSize),
+        StateText(row.state),
+        ProtectionText(row.protect),
+        TypeText(row.type),
+        YesNo(row.writableExecutable),
+        YesNo(row.privateExecutable),
+        row.largePageUnknown ? L"R3未知" : L"否",
+        YesNo(row.badPage),
+        YesNo(row.mappedFile),
+        workingSetText,
+    });
+}
+
+// SetEvidenceStatus writes a status summary to the read-only status box. Inputs
+// are page state and text; processing updates the edit control; no value is
+// returned.
+void SetEvidenceStatus(ProcessMemoryEvidenceViewState& state, const std::wstring& text) {
+    if (state.statusEdit) {
+        ::SetWindowTextW(state.statusEdit, text.c_str());
+    }
+}
+
+// EnumerateProcessMemoryEvidence walks a target process VA map with R3 APIs.
+// Inputs are PID/start/limit from UI; processing uses VirtualQueryEx and an
+// optional QueryWorkingSetEx sample for each region; output is a vector of
+// read-only evidence rows plus status text.
+std::vector<ProcessMemoryEvidenceRow> EnumerateProcessMemoryEvidence(
+    const DWORD processId,
+    const std::uint64_t startAddress,
+    const std::uint64_t maxRegions,
+    std::wstring& statusText) {
+    std::vector<ProcessMemoryEvidenceRow> rows;
+    if (processId == 0 || maxRegions == 0) {
+        statusText = L"PID 和 MaxRegions 必须非零。";
+        return rows;
+    }
+
+    HANDLE process = ::OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    if (!process) {
+        statusText = L"OpenProcess 查询失败，win32=" + std::to_wstring(::GetLastError()) + L"。";
+        return rows;
+    }
+
+    std::uint64_t address = startAddress;
+    std::uint64_t queried = 0;
+    std::uint64_t workingSetKnown = 0;
+    while (queried < maxRegions) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        const SIZE_T returned = ::VirtualQueryEx(
+            process,
+            reinterpret_cast<LPCVOID>(address),
+            &mbi,
+            sizeof(mbi));
+        if (returned == 0) {
+            break;
+        }
+
+        bool wsValid = false;
+        bool wsShared = false;
+        const bool wsKnown = QueryWorkingSetExDynamic(process, mbi.BaseAddress, wsValid, wsShared);
+        if (wsKnown) {
+            ++workingSetKnown;
+        }
+        rows.push_back(BuildEvidenceRow(mbi, wsKnown, wsValid, wsShared));
+        ++queried;
+
+        const std::uint64_t base = reinterpret_cast<std::uint64_t>(mbi.BaseAddress);
+        const std::uint64_t size = static_cast<std::uint64_t>(mbi.RegionSize);
+        if (size == 0 || base + size <= address) {
+            break;
+        }
+        address = base + size;
+        if (address < base) {
+            break;
+        }
+    }
+
+    ::CloseHandle(process);
+    statusText = L"R3 fallback evidence: VirtualQueryEx regions=" + std::to_wstring(rows.size()) +
+        L"，WorkingSetEx rows=" + std::to_wstring(workingSetKnown) +
+        L"。LargePage/PTE/物理地址字段需要 R0 PTE/VA translation 支持，当前页只读降级显示未知。";
+    return rows;
+}
+
+// RefreshProcessEvidence validates UI input and rebuilds the ListView. Input is
+// the page state; processing does only read-only R3 queries; output is visible
+// table/status state.
+void RefreshProcessEvidence(ProcessMemoryEvidenceViewState& state) {
+    std::uint64_t pidValue = 0;
+    std::uint64_t startValue = 0;
+    std::uint64_t limitValue = 0;
+    std::wstring error;
+    if (!ParseUnsignedInteger(GetWindowTextString(state.pidEdit), std::numeric_limits<DWORD>::max(), L"PID", pidValue, error) ||
+        !ParseUnsignedInteger(GetWindowTextString(state.startEdit), std::numeric_limits<std::uint64_t>::max(), L"Start", startValue, error) ||
+        !ParseUnsignedInteger(GetWindowTextString(state.limitEdit), 100000ULL, L"MaxRegions", limitValue, error)) {
+        SetEvidenceStatus(state, error);
+        return;
+    }
+
+    std::wstring status;
+    const std::vector<ProcessMemoryEvidenceRow> rows = EnumerateProcessMemoryEvidence(
+        static_cast<DWORD>(pidValue),
+        startValue,
+        limitValue,
+        status);
+
+    Ksword::Ui::ScopedListViewRedrawLock redrawLock(state.list);
+    Ksword::Ui::ClearListViewRows(state.list);
+    for (const ProcessMemoryEvidenceRow& row : rows) {
+        InsertEvidenceRow(state.list, row);
+    }
+    SetEvidenceStatus(state, status);
+}
+
+// LayoutEvidenceChildren positions every control in the process VA page. Inputs
+// are page state and current client rect; processing computes a simple report
+// layout; no value is returned.
+void LayoutEvidenceChildren(ProcessMemoryEvidenceViewState& state, const RECT& rc) {
+    const int margin = 12;
+    const int editHeight = 24;
+    const int width = std::max(0, static_cast<int>(rc.right - rc.left));
+    const int height = std::max(0, static_cast<int>(rc.bottom - rc.top));
+    ::MoveWindow(state.pidEdit, 64, 36, 110, editHeight, TRUE);
+    ::MoveWindow(state.startEdit, 238, 36, 160, editHeight, TRUE);
+    ::MoveWindow(state.limitEdit, 488, 36, 100, editHeight, TRUE);
+    ::MoveWindow(state.refreshButton, 606, 35, 86, editHeight + 2, TRUE);
+    const int statusHeight = 56;
+    const int listTop = 74;
+    const int listHeight = std::max(80, height - listTop - statusHeight - margin);
+    ::MoveWindow(state.list, margin, listTop, std::max(100, width - margin * 2), listHeight, TRUE);
+    ::MoveWindow(state.statusEdit, margin, listTop + listHeight + 8, std::max(100, width - margin * 2), statusHeight, TRUE);
+}
+
+// PaintEvidenceLabels draws static labels for the R3 evidence page. Inputs are
+// page HWND and paint DC; processing draws title and field labels; no value is
+// returned.
+void PaintEvidenceLabels(HWND hwnd, HDC dc) {
+    RECT rc{};
+    ::GetClientRect(hwnd, &rc);
+    ::FillRect(dc, &rc, Ksword::Ui::AppTheme().windowBrush());
+    const COLORREF text = Ksword::Ui::AppTheme().textColor;
+    const COLORREF muted = Ksword::Ui::AppTheme().mutedTextColor;
+    Ksword::Ui::DrawTextLine(dc, L"Process VA / PTE Evidence (R3 read-only fallback)", { 12, 8, rc.right - 12, 30 }, text, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    Ksword::Ui::DrawTextLine(dc, L"PID", { 12, 36, 58, 60 }, muted, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    Ksword::Ui::DrawTextLine(dc, L"Start", { 190, 36, 232, 60 }, muted, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    Ksword::Ui::DrawTextLine(dc, L"MaxRegions", { 410, 36, 486, 60 }, muted, Ksword::Ui::SystemUIFont(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+}
+
+// StateFromEvidenceWindow returns state stored on the evidence page HWND. Input
+// is a page HWND; processing reads GWLP_USERDATA; output is null before create
+// or after destroy.
+ProcessMemoryEvidenceViewState* StateFromEvidenceWindow(HWND hwnd) {
+    return reinterpret_cast<ProcessMemoryEvidenceViewState*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+}
+
+// CreateEvidenceChildControls creates all R3 evidence controls. Input is page
+// state with hwnd set; processing creates edit/button/list/status controls and
+// columns; no direct value is returned.
+void CreateEvidenceChildControls(ProcessMemoryEvidenceViewState& state) {
+    state.pidEdit = CreateEdit(state.hwnd, kEvidencePidEditId, std::to_wstring(::GetCurrentProcessId()).c_str(), 0, 0, 0, 0, 0);
+    state.startEdit = CreateEdit(state.hwnd, kEvidenceStartEditId, L"0x0", 0, 0, 0, 0, 0);
+    state.limitEdit = CreateEdit(state.hwnd, kEvidenceLimitEditId, L"512", 0, 0, 0, 0, 0);
+    state.refreshButton = Ksword::Ui::CreateButton(state.hwnd, kEvidenceRefreshButtonId, L"Refresh", 0, 0, 0, 0);
+    state.list = Ksword::Ui::CreateReportListView(state.hwnd, kEvidenceListId, 0, 0, 0, 0, LVS_SHOWSELALWAYS);
+    Ksword::Ui::AddListViewColumns(state.list, EvidenceColumns());
+    state.statusEdit = CreateEdit(state.hwnd,
+        kEvidenceStatusEditId,
+        L"只读 R3 fallback：VirtualQueryEx / QueryWorkingSetEx。R0 PTE/VA translation 不可用时 LargePage、物理地址、PTE 位显示为未知。",
+        0,
+        0,
+        0,
+        0,
+        ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY);
+}
+
+// ProcessMemoryEvidenceWndProc dispatches page messages. Inputs are standard
+// Win32 message parameters; processing owns state lifetime, layout and refresh
+// button behavior; output is a DefWindowProc-compatible LRESULT.
+LRESULT CALLBACK ProcessMemoryEvidenceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_NCCREATE) {
+        auto state = std::make_unique<ProcessMemoryEvidenceViewState>();
+        state->hwnd = hwnd;
+        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state.release()));
+    }
+
+    ProcessMemoryEvidenceViewState* state = StateFromEvidenceWindow(hwnd);
+    switch (msg) {
+    case WM_CREATE:
+        if (state) {
+            CreateEvidenceChildControls(*state);
+        }
+        return 0;
+    case WM_SIZE:
+        if (state) {
+            RECT rc{};
+            ::GetClientRect(hwnd, &rc);
+            LayoutEvidenceChildren(*state, rc);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (state && HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kEvidenceRefreshButtonId) {
+            RefreshProcessEvidence(*state);
+            return 0;
+        }
+        break;
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        ::SetBkMode(dc, TRANSPARENT);
+        ::SetTextColor(dc, Ksword::Ui::AppTheme().textColor);
+        return reinterpret_cast<LRESULT>(Ksword::Ui::AppTheme().windowBrush());
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = ::BeginPaint(hwnd, &ps);
+        PaintEvidenceLabels(hwnd, dc);
+        ::EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_NCDESTROY:
+        delete state;
+        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        break;
+    default:
+        break;
+    }
+    return ::DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// RegisterProcessMemoryEvidenceViewClass installs the R3 evidence page class.
+// There is no input; processing is idempotent; output is true when the class can
+// be used by CreateWindowExW.
+bool RegisterProcessMemoryEvidenceViewClass() {
+    static bool registered = false;
+    if (registered) {
+        return true;
+    }
+
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = ProcessMemoryEvidenceWndProc;
+    wc.hInstance = ::GetModuleHandleW(nullptr);
+    wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = Ksword::Ui::AppTheme().windowBrush();
+    wc.lpszClassName = kProcessMemoryEvidenceViewClass;
+    if (::RegisterClassW(&wc) || ::GetLastError() == ERROR_CLASS_ALREADY_EXISTS) {
+        registered = true;
+    }
+    return registered;
+}
+
 } // namespace
 
 HWND CreateDriverMemoryView(HWND parent, const RECT& bounds) {
@@ -490,6 +961,25 @@ HWND CreateDriverMemoryView(HWND parent, const RECT& bounds) {
     return ::CreateWindowExW(0,
         kDriverMemoryViewClass,
         L"Driver Memory",
+        WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        bounds.left,
+        bounds.top,
+        bounds.right - bounds.left,
+        bounds.bottom - bounds.top,
+        parent,
+        nullptr,
+        ::GetModuleHandleW(nullptr),
+        nullptr);
+}
+
+HWND CreateProcessMemoryEvidenceView(HWND parent, const RECT& bounds) {
+    if (!RegisterProcessMemoryEvidenceViewClass()) {
+        return nullptr;
+    }
+
+    return ::CreateWindowExW(0,
+        kProcessMemoryEvidenceViewClass,
+        L"Process Memory Evidence",
         WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
         bounds.left,
         bounds.top,

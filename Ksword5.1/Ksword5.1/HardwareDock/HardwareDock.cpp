@@ -20,21 +20,29 @@
 
 #include <QAbstractScrollArea>
 #include <QAbstractItemView>
+#include <QAction>
 #include <QBrush>
+#include <QClipboard>
 #include <QDateTime>
 #include <QFrame>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QIcon>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QList>
+#include <QMenu>
 #include <QMetaObject>
+#include <QModelIndex>
 #include <QPainter>
 #include <QPen>
 #include <QPointer>
 #include <QProcess>
+#include <QPushButton>
 #include <QRegularExpression>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -46,6 +54,7 @@
 #include <QTableWidgetItem>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QVariant>
 
 #include <QtCharts/QChart>
 #include <QtCharts/QChartView>
@@ -86,6 +95,567 @@ namespace
     // - 实际定义位于同命名空间后半段。
     QString queryPowerShellTextSync(const QString& scriptText, int timeoutMs);
 
+    // createReadOnlyTextPage 作用：
+    // - 输入父控件、标题与提示文本；
+    // - 处理：创建“标题 + 说明 + CodeEditorWidget”标准只读页面；
+    // - 返回：已初始化的页面控件。
+    QWidget* createReadOnlyTextPage(
+        QWidget* parentWidget,
+        const QString& titleText,
+        const QString& hintText,
+        CodeEditorWidget** editorOut)
+    {
+        QWidget* pageWidget = new QWidget(parentWidget);
+        QVBoxLayout* pageLayout = new QVBoxLayout(pageWidget);
+        pageLayout->setContentsMargins(4, 4, 4, 4);
+        pageLayout->setSpacing(6);
+
+        QLabel* titleLabel = new QLabel(titleText, pageWidget);
+        titleLabel->setStyleSheet(
+            QStringLiteral("font-size:18px;font-weight:700;color:%1;")
+            .arg(KswordTheme::TextPrimaryHex()));
+        pageLayout->addWidget(titleLabel, 0);
+
+        QLabel* hintLabel = new QLabel(hintText, pageWidget);
+        hintLabel->setStyleSheet(
+            QStringLiteral("font-size:13px;color:%1;")
+            .arg(KswordTheme::TextSecondaryHex()));
+        pageLayout->addWidget(hintLabel, 0);
+
+        CodeEditorWidget* editor = new CodeEditorWidget(pageWidget);
+        editor->setReadOnly(true);
+        pageLayout->addWidget(editor, 1);
+
+        if (editorOut != nullptr)
+        {
+            *editorOut = editor;
+        }
+        return pageWidget;
+    }
+
+    // hardwareDeviceAuditTableHeaders 作用：
+    // - 输入：无；
+    // - 处理：集中定义硬件设备审计明细表列，三类设备页保持一致；
+    // - 返回：表头列表，调用方直接传给 QTableWidget。
+    QStringList hardwareDeviceAuditTableHeaders()
+    {
+        return QStringList{
+            QStringLiteral("Profile"),
+            QStringLiteral("行类型"),
+            QStringLiteral("角色"),
+            QStringLiteral("状态"),
+            QStringLiteral("风险"),
+            QStringLiteral("置信度"),
+            QStringLiteral("链路深度"),
+            QStringLiteral("附加深度"),
+            QStringLiteral("驱动"),
+            QStringLiteral("服务"),
+            QStringLiteral("ImagePath"),
+            QStringLiteral("设备"),
+            QStringLiteral("DriverObject"),
+            QStringLiteral("DeviceObject/AttachedDevice"),
+            QStringLiteral("Attached/NextAttached"),
+            QStringLiteral("NextDevice/Next"),
+            QStringLiteral("OwnerDriver"),
+            QStringLiteral("DeviceType"),
+            QStringLiteral("DeviceFlags"),
+            QStringLiteral("StackSize"),
+            QStringLiteral("Alignment"),
+            QStringLiteral("FieldFlags"),
+            QStringLiteral("LastStatus"),
+            QStringLiteral("IntegrityStatus"),
+            QStringLiteral("IntegrityRows"),
+            QStringLiteral("Modules"),
+            QStringLiteral("IntegrityFlags"),
+            QStringLiteral("备注")
+        };
+    }
+
+    // hardwareAuditTableCellText 作用：
+    // - 输入：表格、行号、列号；
+    // - 处理：安全读取单元格文本；
+    // - 返回：不存在时返回空字符串。
+    QString hardwareAuditTableCellText(QTableWidget* table, const int rowIndex, const int columnIndex)
+    {
+        if (table == nullptr)
+        {
+            return QString();
+        }
+        const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+        return item != nullptr ? item->text() : QString();
+    }
+
+    // copyHardwareAuditCurrentRow 作用：
+    // - 输入：目标设备审计表格；
+    // - 处理：把当前行按 TSV 写入剪贴板；
+    // - 返回：无，不触发任何 R0/R3 查询。
+    void copyHardwareAuditCurrentRow(QTableWidget* table)
+    {
+        if (table == nullptr || QGuiApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        const int rowIndex = table->currentRow();
+        if (rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return;
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            fields.push_back(hardwareAuditTableCellText(table, rowIndex, columnIndex));
+        }
+        QGuiApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
+    }
+
+    // installHardwareAuditCopyMenu 作用：
+    // - 输入：需要右键复制的设备审计表格；
+    // - 处理：安装带显式样式的“复制当前行”菜单，避免透明菜单黑底黑字；
+    // - 返回：无，菜单动作仅复制文本。
+    void installHardwareAuditCopyMenu(QTableWidget* table)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        {
+            const QModelIndex clickedIndex = table->indexAt(localPosition);
+            if (clickedIndex.isValid())
+            {
+                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu menu(table);
+            menu.setStyleSheet(KswordTheme::ContextMenuStyle());
+            QAction* copyRowAction = menu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(table->currentRow() >= 0);
+            if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+            {
+                copyHardwareAuditCurrentRow(table);
+            }
+        });
+    }
+
+    // rowMatchesDeviceAuditFilter 作用：
+    // - 输入：设备审计表、行号和过滤文本；
+    // - 处理：在该行全部可见字段中做大小写不敏感搜索；
+    // - 返回：true 表示该行保留显示，false 表示本地隐藏。
+    bool rowMatchesDeviceAuditFilter(
+        QTableWidget* table,
+        const int rowIndex,
+        const QString& filterText)
+    {
+        if (table == nullptr || filterText.trimmed().isEmpty())
+        {
+            return true;
+        }
+
+        const QString normalizedFilterText = filterText.trimmed();
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+            const QString cellText = item != nullptr ? item->text() : QString();
+            if (cellText.contains(normalizedFilterText, Qt::CaseInsensitive))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // applyDeviceAuditTableFilter 作用：
+    // - 输入：设备审计表和搜索框文本；
+    // - 处理：仅通过 setRowHidden 本地过滤，避免重复 R0 查询；
+    // - 返回：无，空表格指针直接忽略。
+    void applyDeviceAuditTableFilter(QTableWidget* table, const QString& filterText)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        const QString normalizedFilterText = filterText.trimmed();
+        for (int rowIndex = 0; rowIndex < table->rowCount(); ++rowIndex)
+        {
+            table->setRowHidden(
+                rowIndex,
+                !rowMatchesDeviceAuditFilter(table, rowIndex, normalizedFilterText));
+        }
+    }
+
+    // buildDeviceAuditSearchStyle 作用：
+    // - 输入：无；
+    // - 处理：复用全局主题色创建搜索框样式；
+    // - 返回：QLineEdit stylesheet 文本。
+    QString buildDeviceAuditSearchStyle()
+    {
+        return QStringLiteral(
+            "QLineEdit{border:1px solid %1;border-radius:4px;padding:4px 6px;color:%2;background:%3;}"
+            "QLineEdit:focus{border:1px solid %4;}")
+            .arg(KswordTheme::BorderColorHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::SurfaceColorHex())
+            .arg(KswordTheme::PrimaryBlueHex);
+    }
+
+    // deviceAuditColumnGroupA 作用：
+    // - 输入：无；
+    // - 处理：定义设备审计默认 A 组列，优先展示定位风险和链路关系所需字段；
+    // - 返回：应显示的列索引集合，调用方按索引隐藏其它列。
+    QVector<int> deviceAuditColumnGroupA()
+    {
+        return QVector<int>{
+            0,  // Profile：区分 DeviceStack/InputStack/UsbTopology。
+            1,  // 行类型：区分 DriverSummary 与 DeviceRow。
+            2,  // 角色：展示 PDO/FDO/filter/controller 等角色。
+            3,  // 状态：展示 R0 单行状态。
+            4,  // 风险：展示 Clean/IntegrityPartial/CrossDriverAttach 等风险。
+            8,  // 驱动：展示 DriverObject 名称。
+            11, // 设备：展示 DeviceObject 友好占位名。
+            22  // LastStatus：展示底层 NTSTATUS。
+        };
+    }
+
+    // deviceAuditColumnGroupB 作用：
+    // - 输入：无；
+    // - 处理：定义设备审计 B 组精简诊断列，和 A 组形成不同视角而不是扩展全集；
+    // - 返回：应显示的列索引集合，只保留少量身份列和服务/flags/integrity 诊断字段。
+    QVector<int> deviceAuditColumnGroupB()
+    {
+        return QVector<int>{
+            0,  // Profile：保留页面来源上下文。
+            8,  // 驱动：展示 DriverObject 名称。
+            6,  // 链路深度：展示 NextDevice/DeviceObject 链深度。
+            7,  // 附加深度：展示 AttachedDevice 链深度。
+            12, // DriverObject：保留对象地址上下文。
+            13, // DeviceObject/AttachedDevice：保留设备对象地址上下文。
+            14, // Attached/NextAttached：保留附加链地址上下文。
+            15, // NextDevice/Next：保留设备链地址上下文。
+            16  // OwnerDriver：展示附加对象 owner。
+        };
+    }
+
+    // deviceAuditColumnGroupC 作用：
+    // - 输入：无；
+    // - 处理：定义设备审计 C 组精简诊断列，专门承载服务路径、字段 flags 和完整性摘要；
+    // - 返回：应显示的列索引集合，和其它列组互补以降低单视图拥挤度。
+    QVector<int> deviceAuditColumnGroupC()
+    {
+        return QVector<int>{
+            0,  // Profile：保留页面来源上下文。
+            9,  // 服务：展示 service leaf。
+            10, // ImagePath：展示映像路径字段。
+            21, // FieldFlags：展示字段有效性。
+            23, // IntegrityStatus：展示 DriverIntegrity status。
+            24, // IntegrityRows：展示 returned/total。
+            25, // Modules：展示模块数量。
+            26, // IntegrityFlags：展示 DriverIntegrity statusFlags。
+            27  // 备注：展示无法结构化归列的差异信息。
+        };
+    }
+
+    // containsColumnIndex 作用：
+    // - 输入：列组和目标列号；
+    // - 处理：线性判断列号是否属于当前组；
+    // - 返回：true 表示该列应展示。
+    bool containsColumnIndex(const QVector<int>& columnGroup, const int columnIndex)
+    {
+        return std::find(columnGroup.begin(), columnGroup.end(), columnIndex) != columnGroup.end();
+    }
+
+    // buildColumnPresetButtonStyle 作用：
+    // - 输入：按钮是否处于选中预设状态；
+    // - 处理：选中时使用主题主色背景，未选中时透明背景并保留主题文字色；
+    // - 返回：QPushButton stylesheet 文本。
+    QString buildColumnPresetButtonStyle(const bool selected)
+    {
+        const QString backgroundText = selected ? KswordTheme::PrimaryBlueHex : QStringLiteral("transparent");
+        const QString borderText = selected ? KswordTheme::PrimaryBlueHex : KswordTheme::BorderColorHex();
+        const QString textColor = selected ? QStringLiteral("#FFFFFF") : KswordTheme::TextPrimaryHex();
+        return QStringLiteral(
+            "QPushButton{min-width:24px;max-width:24px;padding:3px 0;border:1px solid %1;"
+            "border-radius:0;color:%2;background:%3;font-weight:700;}"
+            "QPushButton:hover{border-color:%4;}"
+            "QPushButton:pressed{background:%4;color:#FFFFFF;}")
+            .arg(borderText)
+            .arg(textColor)
+            .arg(backgroundText)
+            .arg(KswordTheme::PrimaryBlueHex);
+    }
+
+    // updateColumnPresetButtons 作用：
+    // - 输入：表格和 A/B/C 按钮；
+    // - 处理：根据表格当前 columnPreset 属性刷新按钮着色；
+    // - 返回：无，空指针安全忽略。
+    void updateColumnPresetButtons(
+        QTableWidget* table,
+        QPushButton* buttonA,
+        QPushButton* buttonB,
+        QPushButton* buttonC)
+    {
+        if (table == nullptr || buttonA == nullptr || buttonB == nullptr || buttonC == nullptr)
+        {
+            return;
+        }
+
+        const QString presetText = table->property("kswordColumnPreset").toString();
+        buttonA->setStyleSheet(buildColumnPresetButtonStyle(presetText == QStringLiteral("A")));
+        buttonB->setStyleSheet(buildColumnPresetButtonStyle(presetText == QStringLiteral("B")));
+        buttonC->setStyleSheet(buildColumnPresetButtonStyle(presetText == QStringLiteral("C")));
+    }
+
+    // applyColumnPresetToTable 作用：
+    // - 输入：表格、要显示的列组、预设名和 A/B/C 按钮；
+    // - 处理：隐藏列组外字段，并把 A/B/C 按钮更新到对应高亮；
+    // - 返回：无，列组无效时只显示有效列。
+    void applyColumnPresetToTable(
+        QTableWidget* table,
+        const QVector<int>& columnGroup,
+        const QString& presetText,
+        QPushButton* buttonA,
+        QPushButton* buttonB,
+        QPushButton* buttonC)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            table->setColumnHidden(columnIndex, !containsColumnIndex(columnGroup, columnIndex));
+        }
+        table->setProperty("kswordColumnPreset", presetText);
+        updateColumnPresetButtons(table, buttonA, buttonB, buttonC);
+    }
+
+    // visibleColumnCount 作用：
+    // - 输入：目标表格；
+    // - 处理：统计当前未隐藏列，避免表头菜单把表格全部隐藏；
+    // - 返回：可见列数量。
+    int visibleColumnCount(QTableWidget* table)
+    {
+        if (table == nullptr)
+        {
+            return 0;
+        }
+
+        int count = 0;
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            if (!table->isColumnHidden(columnIndex))
+            {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    // createColumnPresetButton 作用：
+    // - 输入：父控件、按钮文本和 tooltip；
+    // - 处理：创建 A/B/C 短按钮，按钮文本按需求只显示单个字母；
+    // - 返回：由 Qt 父对象释放的 QPushButton。
+    QPushButton* createColumnPresetButton(
+        QWidget* parentWidget,
+        const QString& buttonText,
+        const QString& tooltipText)
+    {
+        QPushButton* button = new QPushButton(buttonText, parentWidget);
+        button->setToolTip(tooltipText);
+        button->setStyleSheet(buildColumnPresetButtonStyle(false));
+        button->setCursor(Qt::PointingHandCursor);
+        return button;
+    }
+
+    // installHeaderColumnMenu 作用：
+    // - 输入：表格、A/B/C 按钮；
+    // - 处理：在表头安装右键列显隐菜单，菜单显式设置主题样式；
+    // - 返回：无，用户手动改列后 A/B/C 均取消高亮。
+    void installHeaderColumnMenu(
+        QTableWidget* table,
+        QPushButton* buttonA,
+        QPushButton* buttonB,
+        QPushButton* buttonC)
+    {
+        if (table == nullptr || table->horizontalHeader() == nullptr)
+        {
+            return;
+        }
+
+        QHeaderView* headerView = table->horizontalHeader();
+        headerView->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(headerView, &QHeaderView::customContextMenuRequested, table, [table, headerView, buttonA, buttonB, buttonC](const QPoint& localPosition)
+        {
+            QMenu menu(table);
+            menu.setStyleSheet(KswordTheme::ContextMenuStyle());
+            for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+            {
+                const QTableWidgetItem* headerItem = table->horizontalHeaderItem(columnIndex);
+                const QString titleText = headerItem != nullptr
+                    ? headerItem->text()
+                    : QStringLiteral("Column %1").arg(columnIndex);
+                QAction* columnAction = menu.addAction(titleText);
+                columnAction->setCheckable(true);
+                columnAction->setChecked(!table->isColumnHidden(columnIndex));
+                columnAction->setData(columnIndex);
+            }
+
+            QAction* selectedAction = menu.exec(headerView->viewport()->mapToGlobal(localPosition));
+            if (selectedAction == nullptr)
+            {
+                return;
+            }
+
+            const int columnIndex = selectedAction->data().toInt();
+            const bool shouldShow = selectedAction->isChecked();
+            if (!shouldShow && visibleColumnCount(table) <= 1)
+            {
+                table->setColumnHidden(columnIndex, false);
+                return;
+            }
+
+            table->setColumnHidden(columnIndex, !shouldShow);
+            table->setProperty("kswordColumnPreset", QStringLiteral("Custom"));
+            updateColumnPresetButtons(table, buttonA, buttonB, buttonC);
+        });
+    }
+
+    // installColumnPresetControls 作用：
+    // - 输入：表格、A/B/C 按钮和三个逻辑列组；
+    // - 处理：连接 A/B/C 切换、安装表头菜单，并默认套用 A 组；
+    // - 返回：无，调用后表格进入 A 组默认列布局。
+    void installColumnPresetControls(
+        QTableWidget* table,
+        QPushButton* buttonA,
+        QPushButton* buttonB,
+        QPushButton* buttonC,
+        const QVector<int>& groupA,
+        const QVector<int>& groupB,
+        const QVector<int>& groupC)
+    {
+        if (table == nullptr || buttonA == nullptr || buttonB == nullptr || buttonC == nullptr)
+        {
+            return;
+        }
+
+        QObject::connect(buttonA, &QPushButton::clicked, table, [table, buttonA, buttonB, buttonC, groupA]()
+        {
+            applyColumnPresetToTable(table, groupA, QStringLiteral("A"), buttonA, buttonB, buttonC);
+        });
+        QObject::connect(buttonB, &QPushButton::clicked, table, [table, buttonA, buttonB, buttonC, groupB]()
+        {
+            applyColumnPresetToTable(table, groupB, QStringLiteral("B"), buttonA, buttonB, buttonC);
+        });
+        QObject::connect(buttonC, &QPushButton::clicked, table, [table, buttonA, buttonB, buttonC, groupC]()
+        {
+            applyColumnPresetToTable(table, groupC, QStringLiteral("C"), buttonA, buttonB, buttonC);
+        });
+        installHeaderColumnMenu(table, buttonA, buttonB, buttonC);
+        applyColumnPresetToTable(table, groupA, QStringLiteral("A"), buttonA, buttonB, buttonC);
+    }
+
+    // createDeviceAuditTable 作用：
+    // - 输入：父控件；
+    // - 处理：创建只读、可排序、支持复制行的设备审计表格；
+    // - 返回：QTableWidget 指针，由 Qt 父子树释放。
+    QTableWidget* createDeviceAuditTable(QWidget* parentWidget)
+    {
+        QTableWidget* table = new QTableWidget(parentWidget);
+        const QStringList headers = hardwareDeviceAuditTableHeaders();
+        table->setColumnCount(headers.size());
+        table->setHorizontalHeaderLabels(headers);
+        table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setSelectionMode(QAbstractItemView::SingleSelection);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setAlternatingRowColors(true);
+        table->setSortingEnabled(true);
+        table->verticalHeader()->setVisible(false);
+        table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        table->horizontalHeader()->setStretchLastSection(true);
+        installHardwareAuditCopyMenu(table);
+        return table;
+    }
+
+    // createDeviceAuditPage 作用：
+    // - 输入：父控件、标题、提示、输出编辑器和输出表格指针；
+    // - 处理：创建“摘要文本 + 完整 R0 行表格”的标准页；
+    // - 返回：已初始化页面控件。
+    QWidget* createDeviceAuditPage(
+        QWidget* parentWidget,
+        const QString& titleText,
+        const QString& hintText,
+        CodeEditorWidget** editorOut,
+        QTableWidget** tableOut)
+    {
+        QWidget* pageWidget = createReadOnlyTextPage(parentWidget, titleText, hintText, editorOut);
+        QVBoxLayout* pageLayout = qobject_cast<QVBoxLayout*>(pageWidget->layout());
+        if (pageLayout != nullptr)
+        {
+            QLineEdit* searchEdit = new QLineEdit(pageWidget);
+            searchEdit->setClearButtonEnabled(true);
+            searchEdit->setPlaceholderText(
+                QStringLiteral("搜索 Profile / 行类型 / 风险 / 地址 / FieldFlags / LastStatus / 备注"));
+            searchEdit->setStyleSheet(buildDeviceAuditSearchStyle());
+            QTableWidget* table = createDeviceAuditTable(pageWidget);
+
+            QHBoxLayout* tableToolLayout = new QHBoxLayout();
+            tableToolLayout->setContentsMargins(0, 0, 0, 0);
+            tableToolLayout->setSpacing(6);
+
+            QHBoxLayout* presetLayout = new QHBoxLayout();
+            presetLayout->setContentsMargins(0, 0, 0, 0);
+            presetLayout->setSpacing(0);
+
+            QPushButton* groupAButton = createColumnPresetButton(
+                pageWidget,
+                QStringLiteral("A"),
+                QStringLiteral("显示默认精简列：状态、风险、链路深度和关键对象地址。"));
+            QPushButton* groupBButton = createColumnPresetButton(
+                pageWidget,
+                QStringLiteral("B"),
+                QStringLiteral("显示 B 组精简列：链路深度和对象地址关系。"));
+            QPushButton* groupCButton = createColumnPresetButton(
+                pageWidget,
+                QStringLiteral("C"),
+                QStringLiteral("显示 C 组精简列：服务、路径、FieldFlags、integrity 和备注。"));
+            presetLayout->addWidget(groupAButton, 0);
+            presetLayout->addWidget(groupBButton, 0);
+            presetLayout->addWidget(groupCButton, 0);
+
+            tableToolLayout->addLayout(presetLayout, 0);
+            tableToolLayout->addWidget(searchEdit, 1);
+            pageLayout->addLayout(tableToolLayout, 0);
+            pageLayout->addWidget(table, 2);
+            table->setProperty("kswordDeviceAuditFilter", searchEdit->text());
+            installColumnPresetControls(
+                table,
+                groupAButton,
+                groupBButton,
+                groupCButton,
+                deviceAuditColumnGroupA(),
+                deviceAuditColumnGroupB(),
+                deviceAuditColumnGroupC());
+            QObject::connect(searchEdit, &QLineEdit::textChanged, table, [table](const QString& filterText)
+            {
+                table->setProperty("kswordDeviceAuditFilter", filterText);
+                applyDeviceAuditTableFilter(table, filterText);
+            });
+            if (tableOut != nullptr)
+            {
+                *tableOut = table;
+            }
+        }
+        return pageWidget;
+    }
+
     // CPU core chart compact layout constants:
     // - Input: used by the CPU utilization page grid and each per-core chart cell.
     // - Processing: reduce the grid gap and per-cell chrome so dense multi-core CPUs waste less blank space.
@@ -102,6 +672,604 @@ namespace
         return KswordTheme::IsDarkModeEnabled()
             ? QColor(185, 205, 225)
             : QColor(55, 80, 105);
+    }
+
+    // formatHardwareAuditHex32 作用：
+    // - 输入：R0 审计返回的 32 位状态、标志或计数字段；
+    // - 处理：统一格式化为 0xXXXXXXXX，便于和协议文档/日志比对；
+    // - 返回：Qt 字符串，不修改任何 R0/R3 状态。
+    QString formatHardwareAuditHex32(const std::uint32_t value)
+    {
+        return QStringLiteral("0x%1")
+            .arg(value, 8, 16, QChar('0'))
+            .toUpper();
+    }
+
+    // formatHardwareAuditHex64 作用：
+    // - 输入：R0 设备审计行中的 DriverObject/DeviceObject 等 64 位地址；
+    // - 处理：统一格式化为 0xXXXXXXXXXXXXXXXX；
+    // - 返回：仅用于 UI 文本展示的 QString。
+    QString formatHardwareAuditHex64(const std::uint64_t value)
+    {
+        return QStringLiteral("0x%1")
+            .arg(static_cast<qulonglong>(value), 16, 16, QChar('0'))
+            .toUpper();
+    }
+
+    // arkClientMessageToQString 作用：
+    // - 输入：ArkDriverClient IoResult::message 的窄字节诊断；
+    // - 处理：按 UTF-8 转成 Qt 字符串，空消息用占位符表示；
+    // - 返回：可直接追加到 CodeEditorWidget 的文本。
+    QString arkClientMessageToQString(const std::string& messageText)
+    {
+        if (messageText.empty())
+        {
+            return QStringLiteral("<empty>");
+        }
+        return QString::fromUtf8(messageText.data(), static_cast<int>(messageText.size()));
+    }
+
+    // friendlyHardwareIoMessage 作用：
+    // - 输入：ArkDriverClient 返回的底层 message 和 unsupported 标记；
+    // - 处理：把 DeviceIoControl/status/bytesReturned 这类工程日志折叠成人读说明；
+    // - 返回：适合摘要页、表格末列和详情文本展示的中文说明。
+    QString friendlyHardwareIoMessage(
+        const std::string& messageText,
+        const bool unsupported)
+    {
+        const QString rawText = arkClientMessageToQString(messageText).trimmed();
+        if (unsupported)
+        {
+            return QStringLiteral("当前加载的 R0 驱动不支持该硬件审计入口，请同步驱动版本。");
+        }
+        if (rawText.isEmpty() || rawText == QStringLiteral("<empty>"))
+        {
+            return QStringLiteral("驱动未返回额外说明。");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动接口调用失败或 R3/R0 协议版本不匹配。");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动不支持该只读硬件审计查询。");
+        }
+        if (rawText.contains(QStringLiteral("status="), Qt::CaseInsensitive) &&
+            rawText.contains(QStringLiteral("bytesReturned="), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动已返回结构化硬件审计结果；底层 IO 状态已在本页字段中展开。");
+        }
+        return rawText;
+    }
+
+    // friendlyDeviceAuditEntryDetail 作用：
+    // - 输入：R0 单条设备审计 entry.detail 文本；
+    // - 处理：把底层 IOCTL/DynData/unsupported 等工程提示转换为表格末列可读说明；
+    // - 返回：中文短说明，避免 DevNode/USB/HID 明细列直接塞驱动日志。
+    QString friendlyDeviceAuditEntryDetail(const QString& detailText)
+    {
+        const QString rawText = detailText.trimmed();
+        if (rawText.isEmpty())
+        {
+            return QStringLiteral("R0 返回结构化设备对象行");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("设备审计行来自失败/兼容性诊断，底层驱动接口调用未成功。");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动不支持该设备链路的深度字段，已保留基础行。");
+        }
+        if (rawText.contains(QStringLiteral("capability"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("DynData"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("profile"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("PDB/DynData 能力未完全满足，设备对象基础信息可用，深度字段暂不可用。");
+        }
+        if (rawText.contains(QStringLiteral("trunc"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("buffer"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("设备审计结果可能被缓冲区截断，当前仅展示已返回的结构化行。");
+        }
+        if (rawText.contains(QStringLiteral("access denied"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("privilege"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("权限不足，设备链路只能展示可访问的只读证据。");
+        }
+        return rawText;
+    }
+
+    // hardwareIoOkText 作用：
+    // - 输入：IoResult::ok 布尔值；
+    // - 处理：转换成中文短状态，避免详情页展示 true/false；
+    // - 返回：成功/失败文本。
+    QString hardwareIoOkText(const bool ok)
+    {
+        return ok ? QStringLiteral("成功") : QStringLiteral("失败");
+    }
+
+    // deviceAuditStatusText 作用：
+    // - 输入：shared/driver 设备审计 queryStatus；
+    // - 处理：映射为用户可读状态，同时保留未知值；
+    // - 返回：状态标签，不触发任何查询。
+    QString deviceAuditStatusText(const std::uint32_t statusValue)
+    {
+        switch (statusValue)
+        {
+        case KSWORD_ARK_DEVICE_AUDIT_STATUS_OK:
+            return QStringLiteral("OK");
+        case KSWORD_ARK_DEVICE_AUDIT_STATUS_PARTIAL:
+            return QStringLiteral("PARTIAL");
+        case KSWORD_ARK_DEVICE_AUDIT_STATUS_NOT_FOUND:
+            return QStringLiteral("NOT_FOUND");
+        case KSWORD_ARK_DEVICE_AUDIT_STATUS_BUFFER_TRUNCATED:
+            return QStringLiteral("BUFFER_TRUNCATED");
+        case KSWORD_ARK_DEVICE_AUDIT_STATUS_QUERY_FAILED:
+            return QStringLiteral("QUERY_FAILED");
+        case KSWORD_ARK_DEVICE_AUDIT_STATUS_UNSUPPORTED:
+            return QStringLiteral("UNSUPPORTED");
+        case KSWORD_ARK_DEVICE_AUDIT_STATUS_UNAVAILABLE:
+        default:
+            return QStringLiteral("UNAVAILABLE(%1)").arg(statusValue);
+        }
+    }
+
+    // deviceAuditRoleText 作用：
+    // - 输入：R0 设备审计行 roleHint；
+    // - 处理：映射 PDO/FDO/filter/controller 等角色；
+    // - 返回：用于风险行摘要的短文本。
+    QString deviceAuditRoleText(const std::uint32_t roleValue)
+    {
+        switch (roleValue)
+        {
+        case KSWORD_ARK_DEVICE_AUDIT_ROLE_PDO:
+            return QStringLiteral("PDO");
+        case KSWORD_ARK_DEVICE_AUDIT_ROLE_FDO:
+            return QStringLiteral("FDO");
+        case KSWORD_ARK_DEVICE_AUDIT_ROLE_UPPER_FILTER:
+            return QStringLiteral("UpperFilter");
+        case KSWORD_ARK_DEVICE_AUDIT_ROLE_LOWER_FILTER:
+            return QStringLiteral("LowerFilter");
+        case KSWORD_ARK_DEVICE_AUDIT_ROLE_CLASS_DRIVER:
+            return QStringLiteral("ClassDriver");
+        case KSWORD_ARK_DEVICE_AUDIT_ROLE_BUS_DRIVER:
+            return QStringLiteral("BusDriver");
+        case KSWORD_ARK_DEVICE_AUDIT_ROLE_COMPOSITE:
+            return QStringLiteral("Composite");
+        case KSWORD_ARK_DEVICE_AUDIT_ROLE_INTERFACE:
+            return QStringLiteral("Interface");
+        case KSWORD_ARK_DEVICE_AUDIT_ROLE_CONTROLLER:
+            return QStringLiteral("Controller");
+        case KSWORD_ARK_DEVICE_AUDIT_ROLE_DISPLAY:
+            return QStringLiteral("Display");
+        case KSWORD_ARK_DEVICE_AUDIT_ROLE_WATCHDOG:
+            return QStringLiteral("Watchdog");
+        default:
+            return QStringLiteral("Unknown(%1)").arg(roleValue);
+        }
+    }
+
+    // deviceAuditRiskText 作用：
+    // - 输入：R0 设备审计 riskFlags；
+    // - 处理：展开关键风险位，未命中时显示 Clean；
+    // - 返回：风险摘要文本，UI 只展示证据，不做修复动作。
+    QString deviceAuditRiskText(const std::uint32_t riskFlags)
+    {
+        QStringList riskPartList;
+        if ((riskFlags & KSWORD_ARK_DEVICE_AUDIT_RISK_UNAVAILABLE) != 0U)
+        {
+            riskPartList << QStringLiteral("Unavailable");
+        }
+        if ((riskFlags & KSWORD_ARK_DEVICE_AUDIT_RISK_QUERY_FAILED) != 0U)
+        {
+            riskPartList << QStringLiteral("QueryFailed");
+        }
+        if ((riskFlags & KSWORD_ARK_DEVICE_AUDIT_RISK_NAME_MISSING) != 0U)
+        {
+            riskPartList << QStringLiteral("NameMissing");
+        }
+        if ((riskFlags & KSWORD_ARK_DEVICE_AUDIT_RISK_IMAGE_PATH_MISSING) != 0U)
+        {
+            riskPartList << QStringLiteral("ImagePathMissing");
+        }
+        if ((riskFlags & KSWORD_ARK_DEVICE_AUDIT_RISK_DEVICE_LOOP) != 0U)
+        {
+            riskPartList << QStringLiteral("DeviceLoop");
+        }
+        if ((riskFlags & KSWORD_ARK_DEVICE_AUDIT_RISK_ATTACHED_LOOP) != 0U)
+        {
+            riskPartList << QStringLiteral("AttachedLoop");
+        }
+        if ((riskFlags & KSWORD_ARK_DEVICE_AUDIT_RISK_CROSS_DRIVER_ATTACH) != 0U)
+        {
+            riskPartList << QStringLiteral("CrossDriverAttach");
+        }
+        if ((riskFlags & KSWORD_ARK_DEVICE_AUDIT_RISK_ROLE_AMBIGUOUS) != 0U)
+        {
+            riskPartList << QStringLiteral("RoleAmbiguous");
+        }
+        if ((riskFlags & KSWORD_ARK_DEVICE_AUDIT_RISK_STACK_TRUNCATED) != 0U)
+        {
+            riskPartList << QStringLiteral("StackTruncated");
+        }
+        if ((riskFlags & KSWORD_ARK_DEVICE_AUDIT_RISK_INTEGRITY_PARTIAL) != 0U)
+        {
+            riskPartList << QStringLiteral("IntegrityPartial");
+        }
+        if (riskPartList.isEmpty())
+        {
+            return QStringLiteral("Clean");
+        }
+        return riskPartList.join(QStringLiteral("|"));
+    }
+
+    // deviceAuditResponseFlagText 作用：
+    // - 输入：R0 设备审计 responseFlags；
+    // - 处理：展开 truncated/partial/empty 等响应级状态；
+    // - 返回：用于 summary 首屏的状态文本。
+    QString deviceAuditResponseFlagText(const std::uint32_t responseFlags)
+    {
+        QStringList flagPartList;
+        if ((responseFlags & KSWORD_ARK_DEVICE_AUDIT_RESPONSE_FLAG_TRUNCATED) != 0U)
+        {
+            flagPartList << QStringLiteral("Truncated");
+        }
+        if ((responseFlags & KSWORD_ARK_DEVICE_AUDIT_RESPONSE_FLAG_PARTIAL) != 0U)
+        {
+            flagPartList << QStringLiteral("Partial");
+        }
+        if ((responseFlags & KSWORD_ARK_DEVICE_AUDIT_RESPONSE_FLAG_EMPTY) != 0U)
+        {
+            flagPartList << QStringLiteral("Empty");
+        }
+        if (flagPartList.isEmpty())
+        {
+            return QStringLiteral("None");
+        }
+        return flagPartList.join(QStringLiteral("|"));
+    }
+
+    // deviceAuditRowKindText 作用：
+    // - 输入：R0 device audit rowKind 原始枚举；
+    // - 处理：把 summary/device 两类行明确标出来，并保留枚举值，方便和驱动协议核对；
+    // - 返回：表格“行类型”列文本。
+    QString deviceAuditRowKindText(const std::uint32_t rowKind)
+    {
+        switch (rowKind)
+        {
+        case KSWORD_ARK_DEVICE_AUDIT_ROW_KIND_DRIVER_SUMMARY:
+            return QStringLiteral("DriverSummary(%1)").arg(rowKind);
+        case KSWORD_ARK_DEVICE_AUDIT_ROW_KIND_DEVICE_ROW:
+            return QStringLiteral("DeviceRow(%1)").arg(rowKind);
+        default:
+            return QStringLiteral("RowKind(%1)").arg(rowKind);
+        }
+    }
+
+    // DeviceAuditParsedDetail 作用：
+    // - 输入：由 parseDeviceAuditDetailFromR0 生成；
+    // - 处理：把驱动当前 detail 文本中的稳定键值拆分为 UI 列；
+    // - 返回：纯数据结构，无成员函数返回值。
+    struct DeviceAuditParsedDetail
+    {
+        QString ownerDriver;      // ownerDriver：AttachedDevice 行 detail 中的 OwnerDriver=0x...。
+        QString integrityStatus;  // integrityStatus：DriverSummary detail 中的 Driver integrity status。
+        QString integrityRows;    // integrityRows：DriverSummary detail 中的 rows=returned/total。
+        QString modules;          // modules：DriverSummary detail 中的 modules=...。
+        QString integrityFlags;   // integrityFlags：DriverSummary detail 中的 statusFlags=0x...。
+    };
+
+    // deviceAuditDetailValue 作用：
+    // - 输入：R0 detail 原文和稳定键名，例如 OwnerDriver/statusFlags；
+    // - 处理：按 “key=value” 形式提取到分号、句号或空白前为止；
+    // - 返回：匹配到的值；不存在时返回空字符串。
+    QString deviceAuditDetailValue(const QString& detailText, const QString& keyText)
+    {
+        const QRegularExpression expression(
+            QStringLiteral("(?:^|[;\\s])%1\\s*=\\s*([^;\\s.]+)")
+                .arg(QRegularExpression::escape(keyText)),
+            QRegularExpression::CaseInsensitiveOption);
+        const QRegularExpressionMatch match = expression.match(detailText);
+        if (!match.hasMatch())
+        {
+            return QString();
+        }
+        return match.captured(1).trimmed().toUpper();
+    }
+
+    // parseDeviceAuditDetailFromR0 作用：
+    // - 输入：KSWORD_ARK_DEVICE_AUDIT_ENTRY.detail 原文；
+    // - 处理：只解析驱动源码中稳定生成的键值，避免把整句英文诊断塞到表格主列；
+    // - 返回：可直接映射到结构化列的字段集合。
+    DeviceAuditParsedDetail parseDeviceAuditDetailFromR0(const QString& detailText)
+    {
+        DeviceAuditParsedDetail parsed;
+        parsed.ownerDriver = deviceAuditDetailValue(detailText, QStringLiteral("OwnerDriver"));
+        parsed.integrityStatus = deviceAuditDetailValue(detailText, QStringLiteral("status"));
+        parsed.integrityRows = deviceAuditDetailValue(detailText, QStringLiteral("rows"));
+        parsed.modules = deviceAuditDetailValue(detailText, QStringLiteral("modules"));
+        parsed.integrityFlags = deviceAuditDetailValue(detailText, QStringLiteral("statusFlags"));
+        return parsed;
+    }
+
+    // isStructuredDeviceAuditDetail 作用：
+    // - 输入：R0 detail 原文；
+    // - 处理：识别已经被表格列拆分的稳定格式；
+    // - 返回：true 表示不再把原文重复放到“备注”列。
+    bool isStructuredDeviceAuditDetail(const QString& detailText)
+    {
+        const QString rawText = detailText.trimmed();
+        return rawText.contains(QStringLiteral("Driver integrity status="), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("DeviceObject="), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("AttachedDevice="), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("OwnerDriver="), Qt::CaseInsensitive);
+    }
+
+    // appendDeviceAuditSummaryText 作用：
+    // - 输入：页面标题、wrapper 返回值和请求深度；
+    // - 处理：汇总 returnedCount/totalCount、maxDepth/truncated、IO 状态和风险行；
+    // - 返回：可追加到设备栈/输入链/USB 拓扑 CodeEditorWidget 的只读文本。
+    QString appendDeviceAuditSummaryText(
+        const QString& titleText,
+        const ksword::ark::DeviceAuditResult& auditResult,
+        const std::uint32_t requestedMaxDepth)
+    {
+        std::uint32_t maxObservedDepth = 0U;
+        std::uint32_t riskRowCount = 0U;
+        for (const KSWORD_ARK_DEVICE_AUDIT_ENTRY& entry : auditResult.entries)
+        {
+            maxObservedDepth = std::max(maxObservedDepth, static_cast<std::uint32_t>(entry.relationDepth));
+            maxObservedDepth = std::max(maxObservedDepth, static_cast<std::uint32_t>(entry.attachedDepth));
+            if (entry.riskFlags != KSWORD_ARK_DEVICE_AUDIT_RISK_NONE)
+            {
+                ++riskRowCount;
+            }
+        }
+
+        const bool truncatedFlag =
+            (auditResult.responseFlags & KSWORD_ARK_DEVICE_AUDIT_RESPONSE_FLAG_TRUNCATED) != 0U
+            || auditResult.returnedCount < auditResult.totalCount;
+
+        QString text;
+        text += QStringLiteral("\n\n[%1]\n").arg(titleText);
+        text += QStringLiteral("说明：以下内容来自 ArkDriverClient 只读 wrapper；UI 不直接 DeviceIoControl，不执行禁用/卸载/解绑/patch。\n");
+        text += QStringLiteral("调用状态: %1；兼容性: %2；Win32=%3；NTSTATUS=%4；返回字节=%5\n")
+            .arg(hardwareIoOkText(auditResult.io.ok))
+            .arg(auditResult.unsupported ? QStringLiteral("驱动不支持") : QStringLiteral("接口可用"))
+            .arg(auditResult.io.win32Error)
+            .arg(formatHardwareAuditHex32(static_cast<std::uint32_t>(auditResult.io.ntStatus)))
+            .arg(auditResult.io.bytesReturned);
+        text += QStringLiteral("驱动说明: %1\n")
+            .arg(friendlyHardwareIoMessage(auditResult.io.message, auditResult.unsupported));
+        text += QStringLiteral("协议状态: version=%1；queryStatus=%2；lastStatus=%3；entrySize=%4\n")
+            .arg(auditResult.version)
+            .arg(deviceAuditStatusText(auditResult.status))
+            .arg(formatHardwareAuditHex32(static_cast<std::uint32_t>(auditResult.lastStatus)))
+            .arg(auditResult.entrySize);
+        text += QStringLiteral("对象计数: returned=%1；total=%2；已解析=%3；目标=%4；驱动=%5；设备=%6\n")
+            .arg(auditResult.returnedCount)
+            .arg(auditResult.totalCount)
+            .arg(auditResult.entries.size())
+            .arg(auditResult.targetCount)
+            .arg(auditResult.driverCount)
+            .arg(auditResult.deviceCount);
+        text += QStringLiteral("链路深度: 观察最大=%1；请求上限=%2；是否截断=%3；响应标志=%4（%5）\n")
+            .arg(maxObservedDepth)
+            .arg(requestedMaxDepth)
+            .arg(truncatedFlag ? QStringLiteral("是") : QStringLiteral("否"))
+            .arg(formatHardwareAuditHex32(auditResult.responseFlags))
+            .arg(deviceAuditResponseFlagText(auditResult.responseFlags));
+        text += QStringLiteral("风险摘要: 风险行=%1；profileFlags=%2；处理建议=%3\n")
+            .arg(riskRowCount)
+            .arg(formatHardwareAuditHex32(auditResult.profileFlags))
+            .arg(riskRowCount == 0U ? QStringLiteral("未发现 R0 风险行") : QStringLiteral("请查看表格中非 Clean 的风险行"));
+
+        int shownRows = 0;
+        for (const KSWORD_ARK_DEVICE_AUDIT_ENTRY& entry : auditResult.entries)
+        {
+            if (entry.riskFlags == KSWORD_ARK_DEVICE_AUDIT_RISK_NONE && shownRows >= 8)
+            {
+                continue;
+            }
+
+            const QString driverNameText = QString::fromWCharArray(entry.driverName).trimmed();
+            const QString deviceNameText = QString::fromWCharArray(entry.deviceName).trimmed();
+            const QString detailText = QString::fromWCharArray(entry.detail).trimmed();
+            const QString readableEntryDetailText = friendlyDeviceAuditEntryDetail(detailText);
+            text += QStringLiteral("行[%1]: 角色=%2；状态=%3；风险=%4（%5）；置信度=%6；深度=%7/%8；驱动=%9；设备=%10；DriverObject=%11；DeviceObject=%12；说明=%13\n")
+                .arg(shownRows)
+                .arg(deviceAuditRoleText(entry.roleHint))
+                .arg(deviceAuditStatusText(entry.status))
+                .arg(deviceAuditRiskText(entry.riskFlags))
+                .arg(formatHardwareAuditHex32(entry.riskFlags))
+                .arg(entry.confidence)
+                .arg(entry.relationDepth)
+                .arg(entry.attachedDepth)
+                .arg(driverNameText.isEmpty() ? QStringLiteral("<unnamed>") : driverNameText)
+                .arg(deviceNameText.isEmpty() ? QStringLiteral("<unnamed>") : deviceNameText)
+                .arg(formatHardwareAuditHex64(entry.driverObjectAddress))
+                .arg(formatHardwareAuditHex64(entry.deviceObjectAddress))
+                .arg(readableEntryDetailText);
+            ++shownRows;
+            if (shownRows >= 12)
+            {
+                break;
+            }
+        }
+
+        if (auditResult.entries.empty())
+        {
+            text += QStringLiteral("明细行: <无返回行>\n");
+        }
+        return text;
+    }
+
+    // buildDeviceAuditRows 作用：
+    // - 输入：wrapper 名称和 ArkDriverClient 设备审计结果；
+    // - 处理：把全部 R0 entry 转成结构化表格行，空结果也保留一行可读诊断；
+    // - 返回：QVector<QStringList>，每行列数与 hardwareDeviceAuditTableHeaders 一致。
+    QVector<QStringList> buildDeviceAuditRows(
+        const QString& profileName,
+        const ksword::ark::DeviceAuditResult& auditResult)
+    {
+        QVector<QStringList> rows;
+        rows.reserve(static_cast<int>(auditResult.entries.size()) + 1);
+
+        if (auditResult.entries.empty())
+        {
+            const QString stateText = auditResult.io.ok
+                ? QStringLiteral("驱动接口可用，但没有返回设备行")
+                : (auditResult.unsupported
+                    ? QStringLiteral("当前驱动不支持该设备审计入口")
+                    : QStringLiteral("设备审计接口暂不可用"));
+            rows.push_back(QStringList{
+                profileName,
+                QStringLiteral("NoRows"),
+                QStringLiteral("<none>"),
+                deviceAuditStatusText(auditResult.status),
+                auditResult.unsupported ? QStringLiteral("Unsupported") : QStringLiteral("NoRows"),
+                QStringLiteral("0"),
+                QStringLiteral("0"),
+                QStringLiteral("0"),
+                QStringLiteral("<none>"),
+                QStringLiteral("<none>"),
+                QStringLiteral("<none>"),
+                QStringLiteral("<none>"),
+                QStringLiteral("0x0"),
+                QStringLiteral("0x0"),
+                QStringLiteral("0x0"),
+                QStringLiteral("0x0"),
+                QStringLiteral("0x0"),
+                formatHardwareAuditHex32(0U),
+                formatHardwareAuditHex32(0U),
+                QStringLiteral("0"),
+                QStringLiteral("0"),
+                formatHardwareAuditHex32(0U),
+                formatHardwareAuditHex32(static_cast<std::uint32_t>(auditResult.lastStatus)),
+                deviceAuditStatusText(auditResult.status),
+                QStringLiteral("%1/%2").arg(auditResult.returnedCount).arg(auditResult.totalCount),
+                QString::number(auditResult.driverCount),
+                formatHardwareAuditHex32(auditResult.responseFlags),
+                QStringLiteral("%1；returned=%2 total=%3；%4")
+                    .arg(stateText)
+                    .arg(auditResult.returnedCount)
+                    .arg(auditResult.totalCount)
+                    .arg(friendlyHardwareIoMessage(auditResult.io.message, auditResult.unsupported))
+            });
+            return rows;
+        }
+
+        for (const KSWORD_ARK_DEVICE_AUDIT_ENTRY& entry : auditResult.entries)
+        {
+            const QString driverNameText = QString::fromWCharArray(entry.driverName).trimmed();
+            const QString serviceNameText = QString::fromWCharArray(entry.serviceName).trimmed();
+            const QString deviceNameText = QString::fromWCharArray(entry.deviceName).trimmed();
+            const QString imagePathText = QString::fromWCharArray(entry.imagePath).trimmed();
+            const QString detailText = QString::fromWCharArray(entry.detail).trimmed();
+            const QString readableEntryDetailText = friendlyDeviceAuditEntryDetail(detailText);
+            const DeviceAuditParsedDetail parsedDetail = parseDeviceAuditDetailFromR0(detailText);
+            QStringList noteParts;
+            if (!detailText.isEmpty() && !isStructuredDeviceAuditDetail(detailText))
+            {
+                noteParts << readableEntryDetailText;
+            }
+            if (detailText.isEmpty())
+            {
+                noteParts << QStringLiteral("R0 未返回额外备注");
+            }
+            if (auditResult.responseFlags != 0U)
+            {
+                noteParts << QStringLiteral("responseFlags=%1(%2)")
+                    .arg(formatHardwareAuditHex32(auditResult.responseFlags))
+                    .arg(deviceAuditResponseFlagText(auditResult.responseFlags));
+            }
+            if (entry.profileFlags != auditResult.profileFlags)
+            {
+                noteParts << QStringLiteral("entryProfile=%1")
+                    .arg(formatHardwareAuditHex32(entry.profileFlags));
+            }
+
+            rows.push_back(QStringList{
+                profileName,
+                deviceAuditRowKindText(entry.rowKind),
+                deviceAuditRoleText(entry.roleHint),
+                deviceAuditStatusText(entry.status),
+                deviceAuditRiskText(entry.riskFlags),
+                QString::number(entry.confidence),
+                QString::number(entry.relationDepth),
+                QString::number(entry.attachedDepth),
+                driverNameText.isEmpty() ? QStringLiteral("<unnamed>") : driverNameText,
+                serviceNameText.isEmpty() ? QStringLiteral("<none>") : serviceNameText,
+                imagePathText.isEmpty() ? QStringLiteral("<none>") : imagePathText,
+                deviceNameText.isEmpty() ? QStringLiteral("<unnamed>") : deviceNameText,
+                formatHardwareAuditHex64(entry.driverObjectAddress),
+                formatHardwareAuditHex64(entry.deviceObjectAddress),
+                formatHardwareAuditHex64(entry.attachedDeviceAddress),
+                formatHardwareAuditHex64(entry.nextDeviceObjectAddress),
+                parsedDetail.ownerDriver.isEmpty()
+                    ? QStringLiteral("<none>")
+                    : parsedDetail.ownerDriver,
+                formatHardwareAuditHex32(entry.deviceType),
+                formatHardwareAuditHex32(entry.characteristics),
+                QString::number(entry.stackSize),
+                QString::number(entry.alignmentRequirement),
+                formatHardwareAuditHex32(entry.fieldFlags),
+                formatHardwareAuditHex32(static_cast<std::uint32_t>(entry.lastStatus)),
+                parsedDetail.integrityStatus.isEmpty()
+                    ? QString()
+                    : parsedDetail.integrityStatus,
+                parsedDetail.integrityRows,
+                parsedDetail.modules,
+                parsedDetail.integrityFlags,
+                noteParts.join(QStringLiteral("；"))
+            });
+        }
+
+        return rows;
+    }
+
+    // makeDeviceAuditItem 作用：
+    // - 输入：单元格文本；
+    // - 处理：创建只读 QTableWidgetItem；
+    // - 返回：由表格接管生命周期的 item 指针。
+    QTableWidgetItem* makeDeviceAuditItem(const QString& text)
+    {
+        QTableWidgetItem* item = new QTableWidgetItem(text);
+        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+        item->setTextAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+        return item;
+    }
+
+    // populateDeviceAuditTable 作用：
+    // - 输入：目标表格与行模型；
+    // - 处理：保持排序状态，填入全部只读行；
+    // - 返回：无，空表格指针直接忽略。
+    void populateDeviceAuditTable(QTableWidget* table, const QVector<QStringList>& rows)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        const bool wasSortingEnabled = table->isSortingEnabled();
+        table->setSortingEnabled(false);
+        table->setRowCount(rows.size());
+        for (int rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
+        {
+            const QStringList& row = rows.at(rowIndex);
+            for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+            {
+                const QString cellText = columnIndex < row.size() ? row.at(columnIndex) : QString();
+                table->setItem(rowIndex, columnIndex, makeDeviceAuditItem(cellText));
+            }
+        }
+        table->setSortingEnabled(wasSortingEnabled);
+        applyDeviceAuditTableFilter(
+            table,
+            table->property("kswordDeviceAuditFilter").toString());
     }
 
     // createHardwareDeferredPlaceholder 作用：
@@ -1579,6 +2747,10 @@ void HardwareDock::initializeUi()
     initializeDiskMonitorTab();
     initializeDeviceManagerTab();
     initializeOtherDevicesTab();
+    initializeDeviceStackTab();
+    initializeKeyboardMouseHidTab();
+    initializeUsbTopologyTab();
+    initializePnpAcpiPciTab();
 
     if (m_sideTabWidget != nullptr)
     {
@@ -1611,6 +2783,15 @@ void HardwareDock::initializeUi()
                     {
                         ensureOtherDevicesTabInitialized();
                     });
+                    return;
+                }
+
+                if (currentTabWidget == m_deviceStackPage
+                    || currentTabWidget == m_keyboardMouseHidPage
+                    || currentTabWidget == m_usbTopologyPage
+                    || currentTabWidget == m_pnpAcpiPciPage)
+                {
+                    refreshStaticHardwareTexts(true);
                     return;
                 }
 
@@ -2762,6 +3943,7 @@ void HardwareDock::initializeCpuTab()
     m_cpuDetailTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     m_cpuDetailTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
     m_cpuDetailTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
+    installHardwareAuditCopyMenu(m_cpuDetailTable);
     m_cpuLayout->addWidget(m_cpuDetailTable, 1);
 
     m_sideTabWidget->addTab(m_cpuPage, QStringLiteral("CPU"));
@@ -2848,6 +4030,49 @@ void HardwareDock::initializeOtherDevicesTab()
             QStringLiteral("切换到本页后再异步枚举设备清单，减少硬件 Dock 初次点击耗时。")),
         1);
     m_sideTabWidget->addTab(m_otherDevicesHostPage, QStringLiteral("其他设备"));
+}
+
+void HardwareDock::initializeDeviceStackTab()
+{
+    m_deviceStackPage = createDeviceAuditPage(
+        m_sideTabWidget,
+        QStringLiteral("DevNode / Device Stack"),
+        QStringLiteral("只读 cross-view：上方保留 DevNode/WMI 视角，下方表格展开 R0 DeviceObject/DriverObject、attached/next 关系和 PDB/DynData readiness。"),
+        &m_deviceStackEditor,
+        &m_deviceStackTable);
+    m_sideTabWidget->addTab(m_deviceStackPage, QStringLiteral("DevNode栈"));
+}
+
+void HardwareDock::initializeKeyboardMouseHidTab()
+{
+    m_keyboardMouseHidPage = createDeviceAuditPage(
+        m_sideTabWidget,
+        QStringLiteral("Keyboard / Mouse / HID"),
+        QStringLiteral("只读审计：键盘、鼠标、HID 与输入设备状态，默认不做消息截获与输入抓取。"),
+        &m_keyboardMouseHidEditor,
+        &m_keyboardMouseHidTable);
+    m_sideTabWidget->addTab(m_keyboardMouseHidPage, QStringLiteral("键鼠/HID"));
+}
+
+void HardwareDock::initializeUsbTopologyTab()
+{
+    m_usbTopologyPage = createDeviceAuditPage(
+        m_sideTabWidget,
+        QStringLiteral("USB Topology"),
+        QStringLiteral("只读审计：USB 拓扑、控制器、Hub、端口与设备树关系。"),
+        &m_usbTopologyEditor,
+        &m_usbTopologyTable);
+    m_sideTabWidget->addTab(m_usbTopologyPage, QStringLiteral("USB拓扑"));
+}
+
+void HardwareDock::initializePnpAcpiPciTab()
+{
+    m_pnpAcpiPciPage = createReadOnlyTextPage(
+        m_sideTabWidget,
+        QStringLiteral("PnP / ACPI / PCI"),
+        QStringLiteral("只读审计：PnP、ACPI、PCI、DevNode 状态与 cross-view 风险标记。"),
+        &m_pnpAcpiPciEditor);
+    m_sideTabWidget->addTab(m_pnpAcpiPciPage, QStringLiteral("PnP/ACPI/PCI"));
 }
 
 void HardwareDock::ensureDiskMonitorTabInitialized()
@@ -6395,13 +7620,25 @@ void HardwareDock::requestAsyncR0HardwareHealthRefresh()
                 }
                 else
                 {
+                    const QString readableCpuIoMessage = friendlyHardwareIoMessage(
+                        cpuHardwareResult.io.message,
+                        cpuHardwareResult.unsupported);
                     safeThis->m_r0CpuHardwareSummaryText = cpuHardwareResult.unsupported
                         ? QStringLiteral("R0 CPU硬件: 当前驱动不支持 CPUID 快照")
-                        : QStringLiteral("R0 CPU硬件: 查询失败 err=%1")
+                        : QStringLiteral("R0 CPU硬件: 查询失败（Win32=%1）")
                             .arg(cpuHardwareResult.io.win32Error);
                     safeThis->m_r0CpuHardwareDetailText = QStringLiteral(
-                        "R0 CPUID 查询不可用: %1")
-                        .arg(QString::fromStdString(cpuHardwareResult.io.message));
+                        "R0 CPUID 查询不可用\n"
+                        "调用状态: %1\n"
+                        "兼容性: %2\n"
+                        "Win32错误: %3\n"
+                        "NTSTATUS/LastStatus: 0x%4\n"
+                        "说明: %5")
+                        .arg(hardwareIoOkText(cpuHardwareResult.io.ok))
+                        .arg(cpuHardwareResult.unsupported ? QStringLiteral("驱动不支持") : QStringLiteral("接口可用但查询失败"))
+                        .arg(cpuHardwareResult.io.win32Error)
+                        .arg(QString::number(static_cast<std::uint32_t>(cpuHardwareResult.lastStatus), 16).rightJustified(8, QChar('0')).toUpper())
+                        .arg(readableCpuIoMessage);
                 }
 
                 if (physicalMemoryResult.io.ok)
@@ -6436,13 +7673,25 @@ void HardwareDock::requestAsyncR0HardwareHealthRefresh()
                 }
                 else
                 {
+                    const QString readablePhysicalMemoryIoMessage = friendlyHardwareIoMessage(
+                        physicalMemoryResult.io.message,
+                        physicalMemoryResult.unsupported);
                     safeThis->m_r0PhysicalMemorySummaryText = physicalMemoryResult.unsupported
                         ? QStringLiteral("R0物理内存: 当前驱动不支持布局快照")
-                        : QStringLiteral("R0物理内存: 查询失败 err=%1")
+                        : QStringLiteral("R0物理内存: 查询失败（Win32=%1）")
                             .arg(physicalMemoryResult.io.win32Error);
                     safeThis->m_r0PhysicalMemoryDetailText = QStringLiteral(
-                        "R0物理内存布局查询不可用: %1")
-                        .arg(QString::fromStdString(physicalMemoryResult.io.message));
+                        "R0物理内存布局查询不可用\n"
+                        "调用状态: %1\n"
+                        "兼容性: %2\n"
+                        "Win32错误: %3\n"
+                        "NTSTATUS/LastStatus: 0x%4\n"
+                        "说明: %5")
+                        .arg(hardwareIoOkText(physicalMemoryResult.io.ok))
+                        .arg(physicalMemoryResult.unsupported ? QStringLiteral("驱动不支持") : QStringLiteral("接口可用但查询失败"))
+                        .arg(physicalMemoryResult.io.win32Error)
+                        .arg(QString::number(static_cast<std::uint32_t>(physicalMemoryResult.lastStatus), 16).rightJustified(8, QChar('0')).toUpper())
+                        .arg(readablePhysicalMemoryIoMessage);
                 }
 
                 safeThis->m_lastR0HardwareHealthRefreshMs = nowMs;
@@ -6476,6 +7725,25 @@ void HardwareDock::refreshStaticHardwareTexts(const bool forceRefresh)
     {
         m_memoryEditor->setText(m_cachedMemoryStaticText);
     }
+    if (m_deviceStackEditor != nullptr && !m_cachedDeviceStackStaticText.isEmpty())
+    {
+        m_deviceStackEditor->setText(m_cachedDeviceStackStaticText);
+    }
+    populateDeviceAuditTable(m_deviceStackTable, m_cachedDeviceStackRows);
+    if (m_keyboardMouseHidEditor != nullptr && !m_cachedKeyboardMouseHidStaticText.isEmpty())
+    {
+        m_keyboardMouseHidEditor->setText(m_cachedKeyboardMouseHidStaticText);
+    }
+    populateDeviceAuditTable(m_keyboardMouseHidTable, m_cachedKeyboardMouseHidRows);
+    if (m_usbTopologyEditor != nullptr && !m_cachedUsbTopologyStaticText.isEmpty())
+    {
+        m_usbTopologyEditor->setText(m_cachedUsbTopologyStaticText);
+    }
+    populateDeviceAuditTable(m_usbTopologyTable, m_cachedUsbTopologyRows);
+    if (m_pnpAcpiPciEditor != nullptr && !m_cachedPnpAcpiPciStaticText.isEmpty())
+    {
+        m_pnpAcpiPciEditor->setText(m_cachedPnpAcpiPciStaticText);
+    }
 }
 
 void HardwareDock::requestAsyncStaticInfoRefresh()
@@ -6489,6 +7757,12 @@ void HardwareDock::requestAsyncStaticInfoRefresh()
 
     QPointer<HardwareDock> safeThis(this);
     std::thread([safeThis]() {
+        if (safeThis.isNull())
+        {
+            return;
+        }
+
+        HardwareDock* const dock = safeThis.data();
         const QString overviewBaseText = buildOverviewStaticTextSnapshot();
         const QString peripheralOverviewText = buildOverviewPeripheralTextSnapshot();
         const QString overviewText = overviewBaseText
@@ -6496,6 +7770,13 @@ void HardwareDock::requestAsyncStaticInfoRefresh()
             + peripheralOverviewText;
         const QString gpuText = buildGpuStaticTextSnapshot();
         const QString memoryText = buildMemoryStaticTextSnapshot();
+        const DeviceAuditViewSnapshot deviceStackSnapshot =
+            dock->buildDeviceStackAuditViewSnapshot();
+        const DeviceAuditViewSnapshot keyboardMouseHidSnapshot =
+            dock->buildKeyboardMouseHidAuditViewSnapshot();
+        const DeviceAuditViewSnapshot usbTopologySnapshot =
+            dock->buildUsbTopologyAuditViewSnapshot();
+        const QString pnpAcpiPciText = dock->buildPnpAcpiPciStaticText();
         const MemoryHardwareSummarySnapshot memorySummary = queryMemoryHardwareSummarySnapshot();
         const GpuHardwareSummarySnapshot gpuSummary = queryGpuHardwareSummarySnapshot();
 
@@ -6506,7 +7787,7 @@ void HardwareDock::requestAsyncStaticInfoRefresh()
 
         const bool invokeOk = QMetaObject::invokeMethod(
             safeThis.data(),
-            [safeThis, overviewText, gpuText, memoryText, memorySummary, gpuSummary]()
+            [safeThis, overviewText, gpuText, memoryText, deviceStackSnapshot, keyboardMouseHidSnapshot, usbTopologySnapshot, pnpAcpiPciText, memorySummary, gpuSummary]()
             {
                 if (safeThis.isNull())
                 {
@@ -6516,6 +7797,13 @@ void HardwareDock::requestAsyncStaticInfoRefresh()
                 safeThis->m_cachedOverviewStaticText = overviewText;
                 safeThis->m_cachedGpuStaticText = gpuText;
                 safeThis->m_cachedMemoryStaticText = memoryText;
+                safeThis->m_cachedDeviceStackStaticText = deviceStackSnapshot.summaryText;
+                safeThis->m_cachedKeyboardMouseHidStaticText = keyboardMouseHidSnapshot.summaryText;
+                safeThis->m_cachedUsbTopologyStaticText = usbTopologySnapshot.summaryText;
+                safeThis->m_cachedDeviceStackRows = deviceStackSnapshot.rows;
+                safeThis->m_cachedKeyboardMouseHidRows = keyboardMouseHidSnapshot.rows;
+                safeThis->m_cachedUsbTopologyRows = usbTopologySnapshot.rows;
+                safeThis->m_cachedPnpAcpiPciStaticText = pnpAcpiPciText;
                 safeThis->m_memorySpeedMhz = memorySummary.speedMhz;
                 safeThis->m_memorySlotUsed = memorySummary.usedSlots;
                 safeThis->m_memorySlotTotal = memorySummary.totalSlots;
@@ -6669,4 +7957,115 @@ QString HardwareDock::buildCpuSensorText(const bool forceRefresh)
         return m_cachedSensorText;
     }
     return QStringLiteral("N/A|N/A");
+}
+
+QString HardwareDock::buildDeviceStackStaticText() const
+{
+    return buildDeviceStackAuditViewSnapshot().summaryText;
+}
+
+HardwareDock::DeviceAuditViewSnapshot HardwareDock::buildDeviceStackAuditViewSnapshot() const
+{
+    // scriptText 用途：保留原有 Win32_PnPEntity / PnP cross-view 输出；
+    // r0AuditResult 用途：通过 ArkDriverClient 追加 R0 设备栈审计摘要和结构化行。
+    const QString scriptText = QStringLiteral(
+        "$ErrorActionPreference='SilentlyContinue'; "
+        "$rows=Get-CimInstance Win32_PnPEntity | Select-Object Name,PNPClass,Service,Status,PNPDeviceID,ConfigManagerErrorCode -First 120; "
+        "$text='[DevNode / Device Stack]\\n'; "
+        "$text += '说明：上方为 WMI/DevNode 视角；下方结构化表展示 R0 DeviceStack 行、attached/next 关系、风险标记和 PDB/DynData readiness。`n'; "
+        "$text += ($rows | Format-Table -AutoSize | Out-String); "
+        "$text += \"`n风险标记: 不执行卸载/删除/patch。\"; "
+        "Write-Output $text");
+    QString text = queryPowerShellTextSync(scriptText, 8000);
+    const ksword::ark::DriverClient client;
+    const ksword::ark::DeviceAuditResult r0AuditResult = client.queryDeviceStackAudit();
+    text += appendDeviceAuditSummaryText(
+        QStringLiteral("R0 Device Stack Audit Summary"),
+        r0AuditResult,
+        KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ATTACHED_DEPTH);
+
+    DeviceAuditViewSnapshot snapshot;
+    snapshot.summaryText = text;
+    snapshot.rows = buildDeviceAuditRows(QStringLiteral("DeviceStack"), r0AuditResult);
+    return snapshot;
+}
+
+QString HardwareDock::buildKeyboardMouseHidStaticText() const
+{
+    return buildKeyboardMouseHidAuditViewSnapshot().summaryText;
+}
+
+HardwareDock::DeviceAuditViewSnapshot HardwareDock::buildKeyboardMouseHidAuditViewSnapshot() const
+{
+    // scriptText 用途：保留原有 Keyboard/Mouse/HIDClass 的 WMI/PnP 输出；
+    // r0AuditResult 用途：追加 R0 输入设备链只读审计摘要和结构化行。
+    const QString scriptText = QStringLiteral(
+        "$ErrorActionPreference='SilentlyContinue'; "
+        "$rows=Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -in @('Keyboard','Mouse','HIDClass') -or $_.Service -match 'kbdhid|mouhid|hidusb' } | "
+        "Select-Object Name,PNPClass,Service,Status,PNPDeviceID -First 160; "
+        "$text='[Keyboard / Mouse / HID]\\n'; "
+        "$text += '说明：默认不做消息截获、不做输入抓取。`n'; "
+        "$text += ($rows | Format-Table -AutoSize | Out-String); "
+        "Write-Output $text");
+    QString text = queryPowerShellTextSync(scriptText, 8000);
+    const ksword::ark::DriverClient client;
+    const ksword::ark::DeviceAuditResult r0AuditResult = client.queryInputStackAudit();
+    text += appendDeviceAuditSummaryText(
+        QStringLiteral("R0 Input Stack Audit Summary"),
+        r0AuditResult,
+        KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ATTACHED_DEPTH);
+
+    DeviceAuditViewSnapshot snapshot;
+    snapshot.summaryText = text;
+    snapshot.rows = buildDeviceAuditRows(QStringLiteral("InputStack"), r0AuditResult);
+    return snapshot;
+}
+
+QString HardwareDock::buildUsbTopologyStaticText() const
+{
+    return buildUsbTopologyAuditViewSnapshot().summaryText;
+}
+
+HardwareDock::DeviceAuditViewSnapshot HardwareDock::buildUsbTopologyAuditViewSnapshot() const
+{
+    // scriptText 用途：保留 USB controller/hub/link 的 WMI 拓扑输出；
+    // r0AuditResult 用途：追加 R0 USB 拓扑只读审计摘要和结构化行。
+    const QString scriptText = QStringLiteral(
+        "$ErrorActionPreference='SilentlyContinue'; "
+        "$controllers=Get-CimInstance Win32_USBController | Select-Object Name,Manufacturer,DeviceID,PNPDeviceID,Status; "
+        "$hubs=Get-CimInstance Win32_USBHub | Select-Object Name,DeviceID,PNPDeviceID,Status; "
+        "$links=Get-CimInstance Win32_USBControllerDevice | Select-Object Antecedent,Dependent -First 80; "
+        "$text='[USB Topology]\\n'; "
+        "$text += \"[USB控制器]\\n\" + ($controllers | Format-Table -AutoSize | Out-String); "
+        "$text += \"`n[USB Hub]\\n\" + ($hubs | Format-Table -AutoSize | Out-String); "
+        "$text += \"`n[USB连接]\\n\" + ($links | Format-Table -AutoSize | Out-String); "
+        "Write-Output $text");
+    QString text = queryPowerShellTextSync(scriptText, 10000);
+    const ksword::ark::DriverClient client;
+    const ksword::ark::DeviceAuditResult r0AuditResult = client.queryUsbTopologyAudit();
+    text += appendDeviceAuditSummaryText(
+        QStringLiteral("R0 USB Topology Audit Summary"),
+        r0AuditResult,
+        KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ATTACHED_DEPTH);
+
+    DeviceAuditViewSnapshot snapshot;
+    snapshot.summaryText = text;
+    snapshot.rows = buildDeviceAuditRows(QStringLiteral("UsbTopology"), r0AuditResult);
+    return snapshot;
+}
+
+QString HardwareDock::buildPnpAcpiPciStaticText() const
+{
+    const QString scriptText = QStringLiteral(
+        "$ErrorActionPreference='SilentlyContinue'; "
+        "$pnp=Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPDeviceID -like 'ACPI*' -or $_.PNPDeviceID -like 'PCI*' } | "
+        "Select-Object Name,PNPClass,Service,Status,PNPDeviceID,ConfigManagerErrorCode -First 180; "
+        "$board=Get-CimInstance Win32_BaseBoard | Select-Object Manufacturer,Product,Version,SerialNumber; "
+        "$bios=Get-CimInstance Win32_BIOS | Select-Object Manufacturer,SMBIOSBIOSVersion,ReleaseDate,SerialNumber; "
+        "$text='[PnP / ACPI / PCI]\\n'; "
+        "$text += \"[主板/BIOS]\\n\" + ($board | Format-Table -AutoSize | Out-String) + \"`n\" + ($bios | Format-Table -AutoSize | Out-String); "
+        "$text += \"`n[PnP节点]\\n\" + ($pnp | Format-Table -AutoSize | Out-String); "
+        "$text += \"`n风险标记: 保持只读，不做 patch/remove/disable。\"; "
+        "Write-Output $text");
+    return queryPowerShellTextSync(scriptText, 10000);
 }

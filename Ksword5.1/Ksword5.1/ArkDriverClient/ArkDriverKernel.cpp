@@ -814,6 +814,8 @@ namespace ksword::ark
         integrityResult.queryStatus = static_cast<std::uint32_t>(responseHeader->queryStatus);
         integrityResult.flags = static_cast<std::uint32_t>(responseHeader->flags);
         integrityResult.sourceMask = static_cast<std::uint32_t>(responseHeader->sourceMask);
+        integrityResult.fieldFlags = static_cast<std::uint32_t>(responseHeader->fieldFlags);
+        integrityResult.statusFlags = static_cast<std::uint32_t>(responseHeader->statusFlags);
         integrityResult.totalCount = static_cast<std::uint32_t>(responseHeader->totalCount);
         integrityResult.returnedCount = static_cast<std::uint32_t>(responseHeader->returnedCount);
         integrityResult.cpuCount = static_cast<std::uint32_t>(responseHeader->cpuCount);
@@ -867,6 +869,40 @@ namespace ksword::ark
             row.detail = fixedKernelWideToString(
                 sourceEntry->detail,
                 KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS);
+            const auto hasTypedField = [entrySize = responseHeader->entrySize](const std::size_t fieldOffset, const std::size_t fieldBytes) -> bool
+            {
+                // 输入：R0 返回的单行大小、字段偏移和字段长度。
+                // 处理：兼容 v1/v2 DriverIntegrityEvidence 前缀，避免旧驱动缺字段时越界读取。
+                // 返回：true 表示该字段完整包含在当前 entrySize 内。
+                return static_cast<std::size_t>(entrySize) >= fieldOffset + fieldBytes;
+            };
+            if (hasTypedField(offsetof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE, deviceFlags), sizeof(sourceEntry->deviceFlags)))
+            {
+                row.entryStatus = static_cast<std::uint32_t>(sourceEntry->entryStatus);
+                row.statusFlags = static_cast<std::uint32_t>(sourceEntry->statusFlags);
+                row.fieldMask = static_cast<std::uint32_t>(sourceEntry->fieldMask);
+                row.riskScore = static_cast<std::uint32_t>(sourceEntry->riskScore);
+                row.rangeState = static_cast<std::uint32_t>(sourceEntry->rangeState);
+                row.ordinal = static_cast<std::uint32_t>(sourceEntry->ordinal);
+                row.deviceType = static_cast<std::uint32_t>(sourceEntry->deviceType);
+                row.deviceFlags = static_cast<std::uint32_t>(sourceEntry->deviceFlags);
+            }
+            if (hasTypedField(offsetof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE, kldrSizeOfImage), sizeof(sourceEntry->kldrSizeOfImage)))
+            {
+                row.driverObjectAddress = static_cast<std::uint64_t>(sourceEntry->driverObjectAddress);
+                row.driverStart = static_cast<std::uint64_t>(sourceEntry->driverStart);
+                row.driverSize = static_cast<std::uint64_t>(sourceEntry->driverSize);
+                row.driverSection = static_cast<std::uint64_t>(sourceEntry->driverSection);
+                row.driverUnload = static_cast<std::uint64_t>(sourceEntry->driverUnload);
+                row.deviceObjectAddress = static_cast<std::uint64_t>(sourceEntry->deviceObjectAddress);
+                row.nextDeviceObjectAddress = static_cast<std::uint64_t>(sourceEntry->nextDeviceObjectAddress);
+                row.attachedDeviceObjectAddress = static_cast<std::uint64_t>(sourceEntry->attachedDeviceObjectAddress);
+                row.deviceDriverObjectAddress = static_cast<std::uint64_t>(sourceEntry->deviceDriverObjectAddress);
+                row.kldrEntryAddress = static_cast<std::uint64_t>(sourceEntry->kldrEntryAddress);
+                row.kldrListHeadAddress = static_cast<std::uint64_t>(sourceEntry->kldrListHeadAddress);
+                row.kldrDllBase = static_cast<std::uint64_t>(sourceEntry->kldrDllBase);
+                row.kldrSizeOfImage = static_cast<std::uint32_t>(sourceEntry->kldrSizeOfImage);
+            }
             integrityResult.entries.push_back(std::move(row));
         }
 
@@ -878,6 +914,8 @@ namespace ksword::ark
             << ", parsed=" << integrityResult.entries.size()
             << ", cpu=" << integrityResult.cpuCount
             << ", modules=" << integrityResult.moduleCount
+            << ", fields=0x" << std::hex << integrityResult.fieldFlags
+            << ", statusFlags=0x" << integrityResult.statusFlags
             << ", lastStatus=0x" << std::hex << static_cast<unsigned long>(integrityResult.lastStatus);
         integrityResult.io.message = stream.str();
         return integrityResult;

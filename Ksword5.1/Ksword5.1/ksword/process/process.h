@@ -14,6 +14,7 @@
 #include <vector>  // std::vector：进程列表容器。
 
 #include "../../../../shared/driver/KswordArkProcessIoctl.h" // R0 进程扩展字段常量。
+#include "../../../../shared/driver/KswordArkDynDataIoctl.h" // R0 DynData 字段来源常量。
 #include "../../../../shared/driver/KswordArkThreadIoctl.h"  // R0 线程扩展字段常量。
 
 namespace ks::process

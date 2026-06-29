@@ -27,6 +27,8 @@
 #include <QColor>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGridLayout>
@@ -41,6 +43,7 @@
 #include <QMessageBox>
 #include <QModelIndex>
 #include <QModelIndexList>
+#include <QSignalBlocker>
 #include <QPlainTextEdit>
 #include <QPoint>
 #include <QPointer>
@@ -97,6 +100,7 @@ namespace ksword::driver_dock_internal
     QString formatCompactAddress(std::uint64_t addressValue);
     QString formatHex32(std::uint32_t value);
     QString formatNtStatusText(long statusValue);
+    QString friendlyDriverIoMessage(const std::string& rawMessage);
     bool isDriverSignatureLoadError(DWORD errorCode);
     QString formatWin32ErrorTextForAdvice(DWORD errorCode);
     QString buildDriverSignatureLoadAdvice(DWORD errorCode, const QString& serviceNameText, const QString& binaryPathText);

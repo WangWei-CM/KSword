@@ -42,7 +42,11 @@ enum class KernelFeatureId : std::uint32_t {
     KeyboardHotkeys,
     KeyboardHooks,
     DynDataCapabilities,
-    MinifilterBypassPids
+    MinifilterBypassPids,
+    PdbProfileStatus,
+    CidTableSummary,
+    IpcSummary,
+    HookAuditSummary
 };
 
 // KernelFeatureBackend describes where a feature obtains data. Input is fixed

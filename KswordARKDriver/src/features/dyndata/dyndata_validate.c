@@ -42,7 +42,8 @@ static const KSW_DYN_FIELD_BINDING g_KswordDynFieldBindings[] = {
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_EP_TOKEN, "_EPROCESS.Token", "Process List Fields", KSW_CAP_PROCESS_LIST_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.EpToken),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_HT_HANDLE_CONTENTION_EVENT, "HtHandleContentionEvent", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE, FALSE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.HtHandleContentionEvent),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_HT_TABLE_CODE, "_HANDLE_TABLE.TableCode", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE | KSW_CAP_CID_TABLE_WALK, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.HtTableCode),
-    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_HT_HANDLE_COUNT, "_HANDLE_TABLE.HandleCount", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.HtHandleCount),
+    /* _HANDLE_TABLE.HandleCount is diagnostic-only on current decode paths; TableCode/LowValue drive the gated handle-table walks. */
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_HT_HANDLE_COUNT, "_HANDLE_TABLE.HandleCount", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.HtHandleCount),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_HTE_LOW_VALUE, "_HANDLE_TABLE_ENTRY.LowValue", "HandleTable Decode", KSW_CAP_HANDLE_TABLE_DECODE | KSW_CAP_CID_TABLE_WALK, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.HteLowValue),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_OT_NAME, "OtName", "Object Type", KSW_CAP_OBJECT_TYPE_FIELDS | KSW_CAP_HANDLE_TABLE_DECODE, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.OtName),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_OT_INDEX, "OtIndex", "Object Type", KSW_CAP_OBJECT_TYPE_FIELDS | KSW_CAP_HANDLE_TABLE_DECODE, TRUE, KSW_DYN_FIELD_SOURCE_SYSTEM_INFORMER, Kernel.OtIndex),
@@ -101,10 +102,25 @@ static const KSW_DYN_FIELD_BINDING g_KswordDynFieldBindings[] = {
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_DO_MAJOR_FUNCTION, "_DRIVER_OBJECT.MajorFunction", "Driver Object Fields", KSW_CAP_DRIVER_OBJECT_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.DoMajorFunction),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_DO_FAST_IO_DISPATCH, "_DRIVER_OBJECT.FastIoDispatch", "Driver Object Fields", KSW_CAP_DRIVER_OBJECT_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.DoFastIoDispatch),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_DO_DRIVER_UNLOAD, "_DRIVER_OBJECT.DriverUnload", "Driver Object Fields", KSW_CAP_DRIVER_OBJECT_FIELDS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.DoDriverUnload),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_ULD_NAME, "_UNLOADED_DRIVERS.Name", "Unloaded Driver Trace Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.UldName),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_ULD_START_ADDRESS, "_UNLOADED_DRIVERS.StartAddress", "Unloaded Driver Trace Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.UldStartAddress),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_ULD_END_ADDRESS, "_UNLOADED_DRIVERS.EndAddress", "Unloaded Driver Trace Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.UldEndAddress),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_ULD_CURRENT_TIME, "_UNLOADED_DRIVERS.CurrentTime", "Unloaded Driver Trace Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.UldCurrentTime),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_ULD_TYPE_SIZE, "_UNLOADED_DRIVERS.TypeSize", "Unloaded Driver Trace Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.UldTypeSize),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_RTL_AVL_BALANCED_ROOT, "_RTL_AVL_TABLE.BalancedRoot", "PiDDB AVL Table Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.RtlAvlBalancedRoot),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_RTL_AVL_ORDERED_POINTER, "_RTL_AVL_TABLE.OrderedPointer", "PiDDB AVL Table Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.RtlAvlOrderedPointer),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_RTL_AVL_WHICH_ORDERED_ELEMENT, "_RTL_AVL_TABLE.WhichOrderedElement", "PiDDB AVL Table Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.RtlAvlWhichOrderedElement),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_RTL_AVL_NUMBER_GENERIC_TABLE_ELEMENTS, "_RTL_AVL_TABLE.NumberGenericTableElements", "PiDDB AVL Table Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.RtlAvlNumberGenericTableElements),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_RTL_AVL_DEPTH_OF_TREE, "_RTL_AVL_TABLE.DepthOfTree", "PiDDB AVL Table Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.RtlAvlDepthOfTree),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_RTL_AVL_RESTART_KEY, "_RTL_AVL_TABLE.RestartKey", "PiDDB AVL Table Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.RtlAvlRestartKey),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_RTL_AVL_DELETE_COUNT, "_RTL_AVL_TABLE.DeleteCount", "PiDDB AVL Table Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.RtlAvlDeleteCount),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_RTL_AVL_TYPE_SIZE, "_RTL_AVL_TABLE.TypeSize", "PiDDB AVL Table Fields", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, Kernel.RtlAvlTypeSize),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KG_PSP_CID_TABLE, "PspCidTable", "Kernel Globals", KSW_CAP_KERNEL_GLOBALS | KSW_CAP_CID_TABLE_WALK, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, KernelGlobals.PspCidTable),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KG_PS_LOADED_MODULE_LIST, "PsLoadedModuleList", "Kernel Globals", KSW_CAP_KERNEL_GLOBALS | KSW_CAP_KERNEL_MODULE_LIST_FIELDS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, KernelGlobals.PsLoadedModuleList),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KG_MM_UNLOADED_DRIVERS, "MmUnloadedDrivers", "Kernel Globals", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, KernelGlobals.MmUnloadedDrivers),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KG_PIDDB_CACHE_TABLE, "PiDDBCacheTable", "Kernel Globals", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, KernelGlobals.PiDDBCacheTable),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KG_KE_SERVICE_DESCRIPTOR_TABLE_SHADOW, "KeServiceDescriptorTableShadow", "Kernel Globals", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, KernelGlobals.KeServiceDescriptorTableShadow),
+    KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_KG_MM_LAST_UNLOADED_DRIVER, "MmLastUnloadedDriver", "Kernel Globals", KSW_CAP_KERNEL_GLOBALS, FALSE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, KernelGlobals.MmLastUnloadedDriver),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_PSP_CREATE_PROCESS_NOTIFY_ROUTINE, "PspCreateProcessNotifyRoutine", "Callback Notify Globals", KSW_CAP_CALLBACK_NOTIFY_GLOBALS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackGlobals.PspCreateProcessNotifyRoutine),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_PSP_CREATE_THREAD_NOTIFY_ROUTINE, "PspCreateThreadNotifyRoutine", "Callback Notify Globals", KSW_CAP_CALLBACK_NOTIFY_GLOBALS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackGlobals.PspCreateThreadNotifyRoutine),
     KSW_FIELD_BINDING(KSW_DYN_FIELD_ID_CB_PSP_LOAD_IMAGE_NOTIFY_ROUTINE, "PspLoadImageNotifyRoutine", "Callback Notify Globals", KSW_CAP_CALLBACK_NOTIFY_GLOBALS, TRUE, KSW_DYN_FIELD_SOURCE_PDB_PROFILE, CallbackGlobals.PspLoadImageNotifyRoutine),
@@ -317,6 +333,32 @@ Return Value:
         return State->KernelSources.DoFastIoDispatch;
     case KSW_DYN_FIELD_ID_DO_DRIVER_UNLOAD:
         return State->KernelSources.DoDriverUnload;
+    case KSW_DYN_FIELD_ID_ULD_NAME:
+        return State->KernelSources.UldName;
+    case KSW_DYN_FIELD_ID_ULD_START_ADDRESS:
+        return State->KernelSources.UldStartAddress;
+    case KSW_DYN_FIELD_ID_ULD_END_ADDRESS:
+        return State->KernelSources.UldEndAddress;
+    case KSW_DYN_FIELD_ID_ULD_CURRENT_TIME:
+        return State->KernelSources.UldCurrentTime;
+    case KSW_DYN_FIELD_ID_ULD_TYPE_SIZE:
+        return State->KernelSources.UldTypeSize;
+    case KSW_DYN_FIELD_ID_RTL_AVL_BALANCED_ROOT:
+        return State->KernelSources.RtlAvlBalancedRoot;
+    case KSW_DYN_FIELD_ID_RTL_AVL_ORDERED_POINTER:
+        return State->KernelSources.RtlAvlOrderedPointer;
+    case KSW_DYN_FIELD_ID_RTL_AVL_WHICH_ORDERED_ELEMENT:
+        return State->KernelSources.RtlAvlWhichOrderedElement;
+    case KSW_DYN_FIELD_ID_RTL_AVL_NUMBER_GENERIC_TABLE_ELEMENTS:
+        return State->KernelSources.RtlAvlNumberGenericTableElements;
+    case KSW_DYN_FIELD_ID_RTL_AVL_DEPTH_OF_TREE:
+        return State->KernelSources.RtlAvlDepthOfTree;
+    case KSW_DYN_FIELD_ID_RTL_AVL_RESTART_KEY:
+        return State->KernelSources.RtlAvlRestartKey;
+    case KSW_DYN_FIELD_ID_RTL_AVL_DELETE_COUNT:
+        return State->KernelSources.RtlAvlDeleteCount;
+    case KSW_DYN_FIELD_ID_RTL_AVL_TYPE_SIZE:
+        return State->KernelSources.RtlAvlTypeSize;
     case KSW_DYN_FIELD_ID_KG_PSP_CID_TABLE:
         return State->KernelGlobalSources.PspCidTable;
     case KSW_DYN_FIELD_ID_KG_PS_LOADED_MODULE_LIST:
@@ -325,6 +367,10 @@ Return Value:
         return State->KernelGlobalSources.MmUnloadedDrivers;
     case KSW_DYN_FIELD_ID_KG_PIDDB_CACHE_TABLE:
         return State->KernelGlobalSources.PiDDBCacheTable;
+    case KSW_DYN_FIELD_ID_KG_KE_SERVICE_DESCRIPTOR_TABLE_SHADOW:
+        return State->KernelGlobalSources.KeServiceDescriptorTableShadow;
+    case KSW_DYN_FIELD_ID_KG_MM_LAST_UNLOADED_DRIVER:
+        return State->KernelGlobalSources.MmLastUnloadedDriver;
     case KSW_DYN_FIELD_ID_CB_PSP_CREATE_PROCESS_NOTIFY_ROUTINE:
         return State->CallbackGlobalSources.PspCreateProcessNotifyRoutine;
     case KSW_DYN_FIELD_ID_CB_PSP_CREATE_THREAD_NOTIFY_ROUTINE:
@@ -649,7 +695,7 @@ Return Value:
     const ULONG protectionFields[] = { State->Kernel.EpProtection, State->Kernel.EpSignatureLevel, State->Kernel.EpSectionSignatureLevel };
     const ULONG etwFields[] = { State->Kernel.EgeGuid, State->Kernel.EreGuidEntry };
     const ULONG lxcoreFields[] = { State->LxcoreOffsets.LxPicoProc, State->LxcoreOffsets.LxPicoProcInfo, State->LxcoreOffsets.LxPicoProcInfoPID, State->LxcoreOffsets.LxPicoThrdInfo, State->LxcoreOffsets.LxPicoThrdInfoTID };
-    const ULONG kernelGlobalFields[] = { State->KernelGlobals.PspCidTable, State->KernelGlobals.PsLoadedModuleList, State->KernelGlobals.MmUnloadedDrivers, State->KernelGlobals.PiDDBCacheTable };
+    const ULONG kernelGlobalFields[] = { State->KernelGlobals.PspCidTable, State->KernelGlobals.PsLoadedModuleList, State->KernelGlobals.MmUnloadedDrivers, State->KernelGlobals.PiDDBCacheTable, State->KernelGlobals.KeServiceDescriptorTableShadow };
     const ULONG callbackNotifyGlobals[] = { State->CallbackGlobals.PspCreateProcessNotifyRoutine, State->CallbackGlobals.PspCreateThreadNotifyRoutine, State->CallbackGlobals.PspLoadImageNotifyRoutine };
     const ULONG callbackRegistryGlobals[] = { State->CallbackGlobals.CmCallbackListHead };
     const ULONG callbackObjectFields[] = { State->CallbackOffsets.ObjectTypeCallbackList, State->CallbackOffsets.CallbackEntryItemPreOperation, State->CallbackOffsets.CallbackEntryItemPostOperation, State->CallbackOffsets.CallbackEntryItemOperations, State->CallbackOffsets.CallbackEntryItemCallbackEntry };

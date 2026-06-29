@@ -3,13 +3,15 @@
 // ============================================================
 // HardwareDock.h
 // 作用：
-// 1) 提供“利用率/概览/CPU/显卡/内存/硬盘监控”等侧边 Tab，并让利用率拥有最高优先级；
+// 1) 提供“利用率/概览/CPU/显卡/内存/硬盘监控/设备审计”等侧边 Tab，并让利用率拥有最高优先级；
 // 2) 利用率页按任务管理器风格实现“左侧缩略卡片 + 右侧详情页”；
-// 3) CPU/显卡/内存页保留文本化详情，便于排障与审计。
+// 3) 新增的设备审计页默认只读，面向 DevNode、USB、HID、PCI、ACPI 与显示链路 cross-view。
 // ============================================================
 
 #include "../Framework.h"
 
+#include <QStringList>
+#include <QVector>
 #include <QWidget>
 
 #include <atomic>   // std::atomic_bool：异步探测任务互斥。
@@ -136,6 +138,16 @@ private:
         double minValue = 0.0;       // minValue：窗口最小值。
         double trendDelta = 0.0;    // trendDelta：当前值与窗口起点值的差值。
         int sampleCount = 0;         // sampleCount：参与统计的样本数。
+    };
+
+    // DeviceAuditViewSnapshot：
+    // - 作用：同时保存硬件设备审计页的文本摘要和完整结构化行；
+    // - 处理逻辑：后台线程查询一次 ArkDriverClient wrapper 后生成两种 UI 模型；
+    // - 返回行为：结构体本身无函数返回值，字段由 refreshStaticHardwareTexts 消费。
+    struct DeviceAuditViewSnapshot
+    {
+        QString summaryText;          // summaryText：CodeEditorWidget 中的人类可读摘要。
+        QVector<QStringList> rows;    // rows：QTableWidget 展示的全部 R0 设备审计行。
     };
 
     // UtilizationDeviceKind：
@@ -318,6 +330,10 @@ private:
     void initializeDiskMonitorTab();
     void initializeDeviceManagerTab();
     void initializeOtherDevicesTab();
+    void initializeDeviceStackTab();
+    void initializeKeyboardMouseHidTab();
+    void initializeUsbTopologyTab();
+    void initializePnpAcpiPciTab();
 
     // ensureDiskMonitorTabInitialized 作用：
     // - 输入：无，读取 m_diskMonitorHostPage 和 m_diskMonitorPage；
@@ -467,6 +483,13 @@ private:
     QString buildGpuStaticText() const;
     QString buildMemoryStaticText() const;
     QString buildCpuSensorText(bool forceRefresh);
+    QString buildDeviceStackStaticText() const;
+    QString buildKeyboardMouseHidStaticText() const;
+    QString buildUsbTopologyStaticText() const;
+    DeviceAuditViewSnapshot buildDeviceStackAuditViewSnapshot() const;
+    DeviceAuditViewSnapshot buildKeyboardMouseHidAuditViewSnapshot() const;
+    DeviceAuditViewSnapshot buildUsbTopologyAuditViewSnapshot() const;
+    QString buildPnpAcpiPciStaticText() const;
 
 private:
     // 顶层结构。
@@ -586,6 +609,17 @@ private:
     QWidget* m_otherDevicesHostPage = nullptr;     // m_otherDevicesHostPage：其他设备延迟加载宿主页。
     DiskMonitorPage* m_diskMonitorPage = nullptr;  // m_diskMonitorPage：硬盘监控真实页面，首次进入子 Tab 后创建。
     HardwareOtherDevicesPage* m_otherDevicesPage = nullptr; // m_otherDevicesPage：其他硬件设备真实页面，首次进入子 Tab 后创建。
+    QWidget* m_deviceStackPage = nullptr;          // m_deviceStackPage：DevNode/设备栈只读页。
+    CodeEditorWidget* m_deviceStackEditor = nullptr; // m_deviceStackEditor：DevNode/设备栈文本。
+    QTableWidget* m_deviceStackTable = nullptr;     // m_deviceStackTable：DevNode/设备栈 R0 明细表。
+    QWidget* m_keyboardMouseHidPage = nullptr;     // m_keyboardMouseHidPage：键鼠/HID 只读页。
+    CodeEditorWidget* m_keyboardMouseHidEditor = nullptr; // m_keyboardMouseHidEditor：键鼠/HID 文本。
+    QTableWidget* m_keyboardMouseHidTable = nullptr; // m_keyboardMouseHidTable：输入设备 R0 明细表。
+    QWidget* m_usbTopologyPage = nullptr;          // m_usbTopologyPage：USB 拓扑只读页。
+    CodeEditorWidget* m_usbTopologyEditor = nullptr; // m_usbTopologyEditor：USB 拓扑文本。
+    QTableWidget* m_usbTopologyTable = nullptr;     // m_usbTopologyTable：USB 拓扑 R0 明细表。
+    QWidget* m_pnpAcpiPciPage = nullptr;           // m_pnpAcpiPciPage：PnP/ACPI/PCI 只读页。
+    CodeEditorWidget* m_pnpAcpiPciEditor = nullptr; // m_pnpAcpiPciEditor：PnP/ACPI/PCI 文本。
 
     // 运行状态缓存。
     int m_historyLength = 60;                 // m_historyLength：曲线保留点数。
@@ -595,6 +629,13 @@ private:
     QString m_cachedOverviewStaticText;       // m_cachedOverviewStaticText：概览静态文本缓存。
     QString m_cachedGpuStaticText;            // m_cachedGpuStaticText：显卡静态文本缓存。
     QString m_cachedMemoryStaticText;         // m_cachedMemoryStaticText：内存静态文本缓存。
+    QString m_cachedDeviceStackStaticText;     // m_cachedDeviceStackStaticText：DevNode/设备栈缓存。
+    QString m_cachedKeyboardMouseHidStaticText; // m_cachedKeyboardMouseHidStaticText：键鼠/HID 缓存。
+    QString m_cachedUsbTopologyStaticText;     // m_cachedUsbTopologyStaticText：USB 拓扑缓存。
+    QVector<QStringList> m_cachedDeviceStackRows; // m_cachedDeviceStackRows：DevNode/设备栈表格行缓存。
+    QVector<QStringList> m_cachedKeyboardMouseHidRows; // m_cachedKeyboardMouseHidRows：键鼠/HID 表格行缓存。
+    QVector<QStringList> m_cachedUsbTopologyRows; // m_cachedUsbTopologyRows：USB 拓扑表格行缓存。
+    QString m_cachedPnpAcpiPciStaticText;      // m_cachedPnpAcpiPciStaticText：PnP/ACPI/PCI 缓存。
     std::atomic_bool m_staticInfoRefreshing{ false }; // m_staticInfoRefreshing：静态信息异步刷新锁。
     std::atomic_bool m_sensorRefreshing{ false };     // m_sensorRefreshing：传感器异步刷新锁。
     std::atomic_bool m_r0HardwareHealthRefreshing{ false }; // m_r0HardwareHealthRefreshing：R0硬件健康异步刷新锁。

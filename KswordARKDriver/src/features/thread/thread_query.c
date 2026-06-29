@@ -770,8 +770,18 @@ Return Value:
         if (NT_SUCCESS(lookupStatus)) {
             const ULONG ownerProcessId = HandleToULong(PsGetThreadProcessId(threadObject));
             ULONG threadFlags = KSWORD_ARK_THREAD_FLAG_KERNEL_ENUMERATED;
-            const BOOLEAN activeThreadSeen =
-                KswordARKThreadBitmapHas(ActiveThreadBitmap, ActiveThreadBitmapBytes, scanThreadId);
+            /*
+             * When the public PsGetNextProcessThread walk is unavailable, this
+             * routine is also used as a fallback without active-list bitmaps.
+             * In that mode a found CID entry is evidence, not an active-list
+             * anomaly, so the hidden-thread flag must only be set when an
+             * active thread bitmap actually exists.
+             */
+            const BOOLEAN hasActiveThreadView =
+                (ActiveThreadBitmap != NULL && ActiveThreadBitmapBytes != 0U) ? TRUE : FALSE;
+            const BOOLEAN activeThreadSeen = hasActiveThreadView
+                ? KswordARKThreadBitmapHas(ActiveThreadBitmap, ActiveThreadBitmapBytes, scanThreadId)
+                : FALSE;
             const BOOLEAN ownerProcessRepresented =
                 KswordARKThreadBitmapCanRepresent(ActiveProcessBitmapBytes, ownerProcessId);
             const BOOLEAN activeProcessSeen =
@@ -779,7 +789,7 @@ Return Value:
                 ? KswordARKThreadBitmapHas(ActiveProcessBitmap, ActiveProcessBitmapBytes, ownerProcessId)
                 : TRUE;
 
-            if (!activeThreadSeen) {
+            if (!activeThreadSeen && hasActiveThreadView) {
                 threadFlags |= KSWORD_ARK_THREAD_FLAG_HIDDEN_FROM_ACTIVE_THREAD_LIST;
             }
             if (ownerProcessRepresented && !activeProcessSeen) {
@@ -855,12 +865,6 @@ Return Value:
         return STATUS_BUFFER_TOO_SMALL;
     }
 
-    psGetNextProcess = KswordARKThreadResolvePsGetNextProcess();
-    psGetNextProcessThread = KswordARKThreadResolvePsGetNextProcessThread();
-    if (psGetNextProcess == NULL || psGetNextProcessThread == NULL) {
-        return STATUS_PROCEDURE_NOT_FOUND;
-    }
-
     if (Request != NULL) {
         requestFlags = Request->flags;
         requestProcessId = Request->processId;
@@ -880,6 +884,36 @@ Return Value:
     entryCapacity =
         (OutputBufferLength - KSWORD_ARK_THREAD_ENUM_RESPONSE_HEADER_SIZE) /
         sizeof(KSWORD_ARK_THREAD_ENTRY);
+
+    psGetNextProcess = KswordARKThreadResolvePsGetNextProcess();
+    psGetNextProcessThread = KswordARKThreadResolvePsGetNextProcessThread();
+    if (psGetNextProcess == NULL || psGetNextProcessThread == NULL) {
+        /*
+         * Some supported systems do not expose PsGetNextProcessThread through
+         * MmGetSystemRoutineAddress.  The process detail page already has an R3
+         * Toolhelp thread list, so the R0 extension should return a valid
+         * response instead of failing the IOCTL and making the UI report a
+         * protocol mismatch.  Only callers that explicitly ask for the bounded
+         * CID/TID scan pay that heavier fallback cost; the process detail page
+         * already performs per-TID detail IOCTLs from its R3 Toolhelp list.
+         */
+        if (scanCidTable) {
+            KswordARKThreadScanCidTable(
+                response,
+                entryCapacity,
+                requestProcessId,
+                requestFlags,
+                &dynState,
+                NULL,
+                0U,
+                NULL,
+                0U);
+        }
+        *BytesWrittenOut =
+            KSWORD_ARK_THREAD_ENUM_RESPONSE_HEADER_SIZE +
+            ((size_t)response->returnedCount * sizeof(KSWORD_ARK_THREAD_ENTRY));
+        return STATUS_SUCCESS;
+    }
 
     if (scanCidTable) {
         const size_t bitmapBitCount = (size_t)(KSWORD_ARK_THREAD_SCAN_MAX_ID / KSWORD_ARK_THREAD_ID_STEP) + 1U;

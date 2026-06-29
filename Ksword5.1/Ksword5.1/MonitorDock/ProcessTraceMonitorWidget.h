@@ -249,6 +249,11 @@ private:
     void refreshTargetTable();
     void removeSelectedTargetProcesses();
     void clearTargetProcesses();
+    // showAvailableContextMenu：
+    // - 作用：为“可选进程”表提供只读复制和加入监控目标菜单；
+    // - 调用：表格右键 CustomContextMenu 信号触发；
+    // - 入参 position：viewport 内部坐标；出参：无，菜单动作直接更新剪贴板或目标列表。
+    void showAvailableContextMenu(const QPoint& position);
     void showTargetContextMenu(const QPoint& position);
 
     // ========================= 事件筛选与导出 =====================

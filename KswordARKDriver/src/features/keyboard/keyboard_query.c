@@ -19,6 +19,10 @@ Environment:
 
 #include <ntstrsafe.h>
 
+#ifndef STATUS_NOT_FOUND
+#define STATUS_NOT_FOUND ((NTSTATUS)0xC0000225L)
+#endif
+
 #define KSWORD_ARK_KEYBOARD_HOTKEY_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_ENUM_KEYBOARD_HOTKEYS_RESPONSE) - sizeof(KSWORD_ARK_KEYBOARD_HOTKEY_ENTRY))
 
@@ -27,6 +31,8 @@ Environment:
 
 #define KSWORD_ARK_KEYBOARD_HOTKEY_BUCKETS 0x80UL
 #define KSWORD_ARK_KEYBOARD_CHAIN_WALK_LIMIT 512UL
+#define KSWORD_ARK_KEYBOARD_PROCESS_WALK_LIMIT 4096UL
+#define KSWORD_ARK_KEYBOARD_THREAD_WALK_LIMIT 65536UL
 
 // 当前 win32kfull!NtUserSetWindowsHookEx/IsHotKey 形态下的保守默认偏移。
 #define KSWORD_ARK_KEYBOARD_HOTKEY_THREADINFO_OFFSET 0x00UL
@@ -195,6 +201,17 @@ KswordARKKeyboardResolvePsGetNextProcessThread(
     return (KSWORD_PS_GET_NEXT_PROCESS_THREAD_FN)MmGetSystemRoutineAddress(&routineName);
 }
 
+static KSWORD_PS_GET_NEXT_PROCESS_FN
+KswordARKKeyboardResolvePsGetNextProcess(
+    VOID
+    )
+{
+    UNICODE_STRING routineName;
+
+    RtlInitUnicodeString(&routineName, L"PsGetNextProcess");
+    return (KSWORD_PS_GET_NEXT_PROCESS_FN)MmGetSystemRoutineAddress(&routineName);
+}
+
 static KSWORD_PS_GET_THREAD_WIN32_THREAD_FN
 KswordARKKeyboardResolvePsGetThreadWin32Thread(
     VOID
@@ -270,6 +287,7 @@ static BOOLEAN
 KswordARKKeyboardResolveHotkeyLayout(
     _In_ ULONG_PTR IsHotKeyAddress,
     _Out_ ULONG* TableOffsetOut,
+    _Out_ ULONG_PTR* TableBaseOut,
     _Out_ ULONG* NextOffsetOut,
     _Out_ ULONG* ModifiersOffsetOut,
     _Out_ ULONG* VkOffsetOut,
@@ -279,12 +297,14 @@ KswordARKKeyboardResolveHotkeyLayout(
     UCHAR bytes[192] = { 0 };
     ULONG index = 0UL;
     ULONG tableOffset = 0UL;
+    ULONG_PTR tableBase = 0U;
     ULONG nextOffset = 0UL;
     ULONG modifiersOffset = 0UL;
     ULONG vkOffset = 0UL;
 
     if (IsHotKeyAddress == 0U ||
         TableOffsetOut == NULL ||
+        TableBaseOut == NULL ||
         NextOffsetOut == NULL ||
         ModifiersOffsetOut == NULL ||
         VkOffsetOut == NULL ||
@@ -293,6 +313,7 @@ KswordARKKeyboardResolveHotkeyLayout(
     }
 
     *TableOffsetOut = 0UL;
+    *TableBaseOut = 0U;
     *NextOffsetOut = 0UL;
     *ModifiersOffsetOut = 0UL;
     *VkOffsetOut = 0UL;
@@ -309,13 +330,30 @@ KswordARKKeyboardResolveHotkeyLayout(
             bytes[index + 3UL] == 0xC0U) {
             RtlCopyMemory(&tableOffset, bytes + index + 4UL, sizeof(tableOffset));
         }
+        if (bytes[index] == 0x48U &&
+            bytes[index + 1UL] == 0x8DU &&
+            bytes[index + 2UL] == 0x1DU) {
+            LONG relativeOffset = 0;
+
+            RtlCopyMemory(&relativeOffset, bytes + index + 3UL, sizeof(relativeOffset));
+            tableBase = IsHotKeyAddress + index + 7UL + (LONG_PTR)relativeOffset;
+        }
         if (bytes[index] == 0x0FU &&
             bytes[index + 1UL] == 0xB7U &&
             bytes[index + 2UL] == 0x47U) {
             modifiersOffset = (ULONG)bytes[index + 3UL];
         }
+        if (bytes[index] == 0x0FU &&
+            bytes[index + 1UL] == 0xB7U &&
+            bytes[index + 2UL] == 0x43U) {
+            modifiersOffset = (ULONG)bytes[index + 3UL];
+        }
         if (bytes[index] == 0x39U &&
             bytes[index + 1UL] == 0x77U) {
+            vkOffset = (ULONG)bytes[index + 2UL];
+        }
+        if (bytes[index] == 0x39U &&
+            bytes[index + 1UL] == 0x7BU) {
             vkOffset = (ULONG)bytes[index + 2UL];
         }
         if (bytes[index] == 0x48U &&
@@ -323,13 +361,22 @@ KswordARKKeyboardResolveHotkeyLayout(
             bytes[index + 2UL] == 0x7FU) {
             nextOffset = (ULONG)bytes[index + 3UL];
         }
+        if (bytes[index] == 0x48U &&
+            bytes[index + 1UL] == 0x8BU &&
+            bytes[index + 2UL] == 0x5BU) {
+            nextOffset = (ULONG)bytes[index + 3UL];
+        }
     }
 
-    if (tableOffset == 0UL || nextOffset == 0UL || modifiersOffset == 0UL || vkOffset == 0UL) {
+    if ((tableOffset == 0UL && tableBase == 0U) ||
+        nextOffset == 0UL ||
+        modifiersOffset == 0UL ||
+        vkOffset == 0UL) {
         return FALSE;
     }
 
     *TableOffsetOut = tableOffset;
+    *TableBaseOut = tableBase;
     *NextOffsetOut = nextOffset;
     *ModifiersOffsetOut = modifiersOffset;
     *VkOffsetOut = vkOffset;
@@ -533,15 +580,6 @@ KswordARKKeyboardAppendHookEntry(
         return;
     }
 
-    if (Response->totalCount < MaxEntries) {
-        Response->totalCount += 1UL;
-    }
-
-    if (Response->returnedCount >= EntryCapacity) {
-        Response->status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_BUFFER_TRUNCATED;
-        return;
-    }
-
     RtlZeroMemory(&tempEntry, sizeof(tempEntry));
     tempEntry.source = Source;
     tempEntry.status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_OK;
@@ -556,6 +594,15 @@ KswordARKKeyboardAppendHookEntry(
     }
     if (hookType != KSWORD_ARK_KEYBOARD_HOOK_TYPE_KEYBOARD &&
         hookType != KSWORD_ARK_KEYBOARD_HOOK_TYPE_KEYBOARD_LL) {
+        return;
+    }
+
+    if (Response->totalCount < MaxEntries) {
+        Response->totalCount += 1UL;
+    }
+
+    if (Response->returnedCount >= EntryCapacity) {
+        Response->status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_BUFFER_TRUNCATED;
         return;
     }
 
@@ -711,6 +758,71 @@ KswordARKKeyboardEnumerateHookChainsForThread(
     }
 }
 
+static VOID
+KswordARKKeyboardEnumerateHookChainsForProcess(
+    _Inout_ KSWORD_ARK_ENUM_KEYBOARD_HOOKS_RESPONSE* Response,
+    _In_ ULONG EntryCapacity,
+    _In_ ULONG MaxEntries,
+    _In_ PEPROCESS ProcessObject,
+    _In_ KSWORD_PS_GET_NEXT_PROCESS_THREAD_FN PsGetNextProcessThread,
+    _In_ KSWORD_PS_GET_THREAD_WIN32_THREAD_FN PsGetThreadWin32Thread,
+    _In_ ULONG Flags
+    )
+{
+    DECLSPEC_ALIGN(16) UCHAR attachState[128];
+    BOOLEAN attached = FALSE;
+    PETHREAD threadCursor = NULL;
+    ULONG processId = 0UL;
+    ULONG threadWalkCount = 0UL;
+
+    if (Response == NULL ||
+        ProcessObject == NULL ||
+        PsGetNextProcessThread == NULL ||
+        PsGetThreadWin32Thread == NULL) {
+        return;
+    }
+
+    processId = HandleToULong(PsGetProcessId(ProcessObject));
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+        RtlZeroMemory(attachState, sizeof(attachState));
+        KeStackAttachProcess((PVOID)ProcessObject, attachState);
+        attached = TRUE;
+    }
+
+    threadCursor = PsGetNextProcessThread(ProcessObject, NULL);
+    while (threadCursor != NULL &&
+        threadWalkCount < KSWORD_ARK_KEYBOARD_THREAD_WALK_LIMIT &&
+        Response->status != KSWORD_ARK_KEYBOARD_ENUM_STATUS_BUFFER_TRUNCATED) {
+        PETHREAD nextThread = PsGetNextProcessThread(ProcessObject, threadCursor);
+
+        KswordARKKeyboardEnumerateHookChainsForThread(
+            Response,
+            EntryCapacity,
+            MaxEntries,
+            threadCursor,
+            processId,
+            PsGetThreadWin32Thread,
+            Flags);
+
+        ObDereferenceObject(threadCursor);
+        threadCursor = nextThread;
+        threadWalkCount += 1UL;
+    }
+
+    if (threadCursor != NULL) {
+        ObDereferenceObject(threadCursor);
+        threadCursor = NULL;
+        if (Response->status != KSWORD_ARK_KEYBOARD_ENUM_STATUS_BUFFER_TRUNCATED) {
+            Response->status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_PARTIAL;
+            Response->lastStatus = STATUS_BUFFER_OVERFLOW;
+        }
+    }
+
+    if (attached) {
+        KeUnstackDetachProcess(attachState);
+    }
+}
+
 NTSTATUS
 KswordARKDriverEnumerateKeyboardHotkeys(
     _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
@@ -730,6 +842,7 @@ KswordARKDriverEnumerateKeyboardHotkeys(
     ULONG entryCapacity = 0UL;
     ULONG_PTR isHotKeyAddress = 0U;
     ULONG_PTR sessionGlobals = 0U;
+    ULONG_PTR tableBase = 0U;
     ULONG tableOffset = 0UL;
     ULONG nextOffset = 0UL;
     ULONG modifiersOffset = 0UL;
@@ -784,16 +897,23 @@ KswordARKDriverEnumerateKeyboardHotkeys(
 
     response->win32kBase = (ULONG64)(ULONG_PTR)win32kfullEntry.ImageBase;
     userGetSiloGlobals = KswordARKKeyboardResolveUserGetSiloGlobals(&win32kbaseEntry);
-    if (userGetSiloGlobals == NULL ||
-        !KswordARKKeyboardResolveIsHotKeyBody(&win32kfullEntry, &isHotKeyAddress) ||
+    if (!KswordARKKeyboardResolveIsHotKeyBody(&win32kfullEntry, &isHotKeyAddress) ||
         !KswordARKKeyboardResolveHotkeyLayout(
             isHotKeyAddress,
             &tableOffset,
+            &tableBase,
             &nextOffset,
             &modifiersOffset,
             &vkOffset,
             &idOffset)) {
         response->status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_PATTERN_NOT_FOUND;
+        response->lastStatus = STATUS_NOT_FOUND;
+        goto Cleanup;
+    }
+
+    if (tableBase == 0U && userGetSiloGlobals == NULL) {
+        response->status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_SESSION_UNAVAILABLE;
+        response->lastStatus = STATUS_PROCEDURE_NOT_FOUND;
         goto Cleanup;
     }
 
@@ -820,22 +940,25 @@ KswordARKDriverEnumerateKeyboardHotkeys(
         attached = TRUE;
     }
 
-    __try {
-        sessionGlobals = (ULONG_PTR)userGetSiloGlobals();
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        sessionGlobals = 0U;
-        response->lastStatus = GetExceptionCode();
+    if (userGetSiloGlobals != NULL) {
+        __try {
+            sessionGlobals = (ULONG_PTR)userGetSiloGlobals();
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            sessionGlobals = 0U;
+            response->lastStatus = GetExceptionCode();
+        }
     }
 
-    if (sessionGlobals == 0U) {
+    if (tableBase == 0U && sessionGlobals == 0U) {
         response->status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_SESSION_UNAVAILABLE;
         goto Cleanup;
     }
     response->sessionGlobals = (ULONG64)sessionGlobals;
 
     for (bucketIndex = 0UL; bucketIndex < KSWORD_ARK_KEYBOARD_HOTKEY_BUCKETS; ++bucketIndex) {
-        ULONG_PTR listHeadAddress = sessionGlobals + tableOffset + ((ULONG_PTR)bucketIndex * sizeof(PVOID));
+        ULONG_PTR listHeadAddress = ((tableBase != 0U) ? tableBase : (sessionGlobals + tableOffset)) +
+            ((ULONG_PTR)bucketIndex * sizeof(PVOID));
         ULONG_PTR hotkeyObject = 0U;
         ULONG depth = 0UL;
 
@@ -904,6 +1027,7 @@ KswordARKDriverEnumerateKeyboardHooks(
     KSW_HOOK_SYSTEM_MODULE_INFORMATION* moduleInfo = NULL;
     ULONG moduleInfoBytes = 0UL;
     KSW_HOOK_SYSTEM_MODULE_ENTRY win32kfullEntry;
+    KSWORD_PS_GET_NEXT_PROCESS_FN psGetNextProcess = NULL;
     KSWORD_PS_GET_NEXT_PROCESS_THREAD_FN psGetNextProcessThread = NULL;
     KSWORD_PS_GET_THREAD_WIN32_THREAD_FN psGetThreadWin32Thread = NULL;
     ULONG requestFlags = KSWORD_ARK_KEYBOARD_ENUM_FLAG_INCLUDE_THREAD_HOOKS |
@@ -911,12 +1035,10 @@ KswordARKDriverEnumerateKeyboardHooks(
     ULONG maxEntries = 1024UL;
     ULONG entryCapacity = 0UL;
     PEPROCESS processObject = NULL;
+    PEPROCESS processCursor = NULL;
     BOOLEAN referencedProcess = FALSE;
-    PETHREAD threadCursor = NULL;
     NTSTATUS status = STATUS_SUCCESS;
-    ULONG processId = 0UL;
-    DECLSPEC_ALIGN(16) UCHAR attachState[128];
-    BOOLEAN attached = FALSE;
+    ULONG processWalkCount = 0UL;
 
     if (OutputBuffer == NULL || BytesWrittenOut == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -953,10 +1075,12 @@ KswordARKDriverEnumerateKeyboardHooks(
         entryCapacity = maxEntries;
     }
 
+    psGetNextProcess = KswordARKKeyboardResolvePsGetNextProcess();
     psGetNextProcessThread = KswordARKKeyboardResolvePsGetNextProcessThread();
     psGetThreadWin32Thread = KswordARKKeyboardResolvePsGetThreadWin32Thread();
     if (psGetNextProcessThread == NULL || psGetThreadWin32Thread == NULL) {
         response->status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_UNSUPPORTED;
+        response->lastStatus = STATUS_PROCEDURE_NOT_FOUND;
         goto Cleanup;
     }
 
@@ -975,43 +1099,58 @@ KswordARKDriverEnumerateKeyboardHooks(
             goto Cleanup;
         }
         referencedProcess = TRUE;
-    }
-    else {
-        processObject = PsGetCurrentProcess();
-    }
 
-    processId = HandleToULong(PsGetProcessId(processObject));
-    if (processObject != NULL && KeGetCurrentIrql() == PASSIVE_LEVEL) {
-        RtlZeroMemory(attachState, sizeof(attachState));
-        KeStackAttachProcess((PVOID)processObject, attachState);
-        attached = TRUE;
-    }
-
-    threadCursor = psGetNextProcessThread(processObject, NULL);
-    while (threadCursor != NULL) {
-        PETHREAD nextThread = psGetNextProcessThread(processObject, threadCursor);
-
-        KswordARKKeyboardEnumerateHookChainsForThread(
+        KswordARKKeyboardEnumerateHookChainsForProcess(
             response,
             entryCapacity,
             maxEntries,
-            threadCursor,
-            processId,
+            processObject,
+            psGetNextProcessThread,
             psGetThreadWin32Thread,
             requestFlags);
+    }
+    else {
+        if (psGetNextProcess == NULL) {
+            response->status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_UNSUPPORTED;
+            response->lastStatus = STATUS_PROCEDURE_NOT_FOUND;
+            goto Cleanup;
+        }
 
-        ObDereferenceObject(threadCursor);
-        threadCursor = nextThread;
+        processCursor = psGetNextProcess(NULL);
+        while (processCursor != NULL &&
+            processWalkCount < KSWORD_ARK_KEYBOARD_PROCESS_WALK_LIMIT &&
+            response->status != KSWORD_ARK_KEYBOARD_ENUM_STATUS_BUFFER_TRUNCATED) {
+            PEPROCESS nextProcess = psGetNextProcess(processCursor);
+
+            KswordARKKeyboardEnumerateHookChainsForProcess(
+                response,
+                entryCapacity,
+                maxEntries,
+                processCursor,
+                psGetNextProcessThread,
+                psGetThreadWin32Thread,
+                requestFlags);
+
+            ObDereferenceObject(processCursor);
+            processCursor = nextProcess;
+            processWalkCount += 1UL;
+        }
+
+        if (processCursor != NULL) {
+            ObDereferenceObject(processCursor);
+            processCursor = NULL;
+            if (response->status != KSWORD_ARK_KEYBOARD_ENUM_STATUS_BUFFER_TRUNCATED) {
+                response->status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_PARTIAL;
+                response->lastStatus = STATUS_BUFFER_OVERFLOW;
+            }
+        }
     }
 
-    if (response->status != KSWORD_ARK_KEYBOARD_ENUM_STATUS_BUFFER_TRUNCATED) {
+    if (response->status == KSWORD_ARK_KEYBOARD_ENUM_STATUS_UNKNOWN) {
         response->status = KSWORD_ARK_KEYBOARD_ENUM_STATUS_OK;
     }
 
 Cleanup:
-    if (attached) {
-        KeUnstackDetachProcess(attachState);
-    }
     if (referencedProcess && processObject != NULL) {
         ObDereferenceObject(processObject);
     }

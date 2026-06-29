@@ -71,6 +71,39 @@ namespace
             .arg(KswordTheme::TextPrimaryHex());
     }
 
+    // friendlyKernelHookIoMessage 作用：
+    // - 把 Hook 审计/扫描/补丁 wrapper 的底层 io.message 转成人读说明；
+    // - 输入 messageText：ArkDriverClient::IoResult::message；
+    // - 返回：适合状态栏、详情编辑器和 QMessageBox 的短文本。
+    QString friendlyKernelHookIoMessage(const std::string& messageText)
+    {
+        const QString rawText = QString::fromUtf8(messageText.data(), static_cast<int>(messageText.size())).trimmed();
+        if (rawText.isEmpty())
+        {
+            return QStringLiteral("驱动未返回额外说明。");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动接口调用失败或当前驱动版本不支持该 Hook 审计入口。");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动不支持该 Hook 审计/操作入口。");
+        }
+        if (rawText.contains(QStringLiteral("capability"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("DynData"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("动态偏移能力不足，Hook 详情暂不可用。");
+        }
+        if (rawText.contains(QStringLiteral("access"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("denied"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("请求被权限或安全策略拒绝，未修改目标。");
+        }
+        return rawText;
+    }
+
     QString kernelHookHeaderStyle()
     {
         return QStringLiteral(
@@ -1310,7 +1343,7 @@ namespace
             "服务例程地址: %9\n"
             "驱动标志: 0x%10\n\n"
             "说明: 当前 R0 参考 System Informer 的 ksyscall 思路，从 win32k.sys 的 __win32kstub_* 和 win32u.dll 的 Nt* stub 中解析 syscall index。"
-            "若服务例程地址为 0，表示本轮只完成 stub/index 解析，未解析 shadow service table 实际表项。")
+            "若已应用包含 KeServiceDescriptorTableShadow 的 PDB/DynData profile，会继续解析 shadow service table 实际表项；服务例程地址为 0 表示 profile 缺失、身份不匹配或表项暂不可读。")
             .arg(enumResult.version)
             .arg(enumResult.totalCount)
             .arg(enumResult.returnedCount)
@@ -1724,7 +1757,7 @@ void KernelDock::refreshShadowSsdtAsync()
         {
             errorText = QStringLiteral("SSSDT 解析 IOCTL 调用失败。\nWin32=%1\n详情=%2")
                 .arg(enumResult.io.win32Error)
-                .arg(QString::fromStdString(enumResult.io.message));
+                .arg(friendlyKernelHookIoMessage(enumResult.io.message));
         }
 
         QMetaObject::invokeMethod(guardThis, [guardThis, success, errorText, totalCount, returnedCount, resultRows = std::move(resultRows)]() mutable {
@@ -1826,7 +1859,7 @@ void KernelDock::refreshInlineHooksAsync()
         {
             errorText = QStringLiteral("Inline Hook 扫描 IOCTL 调用失败。\nWin32=%1\n详情=%2")
                 .arg(scanResult.io.win32Error)
-                .arg(QString::fromStdString(scanResult.io.message));
+                .arg(friendlyKernelHookIoMessage(scanResult.io.message));
         }
 
         QMetaObject::invokeMethod(guardThis, [guardThis, success, errorText, totalCount, moduleCount, lastStatus, resultRows = std::move(resultRows)]() mutable {
@@ -1942,7 +1975,7 @@ void KernelDock::refreshIatEatHooksAsync()
         {
             errorText = QStringLiteral("IAT/EAT 扫描 IOCTL 调用失败。\nWin32=%1\n详情=%2")
                 .arg(scanResult.io.win32Error)
-                .arg(QString::fromStdString(scanResult.io.message));
+                .arg(friendlyKernelHookIoMessage(scanResult.io.message));
         }
 
         QMetaObject::invokeMethod(guardThis, [guardThis, success, errorText, totalCount, moduleCount, lastStatus, resultRows = std::move(resultRows)]() mutable {
@@ -2643,7 +2676,7 @@ void KernelDock::patchSelectedInlineHookWithNop()
         QMessageBox::warning(
             this,
             QStringLiteral("Inline Hook 摘除"),
-            QStringLiteral("普通摘除请求失败：\n%1").arg(QString::fromStdString(patchResult.io.message)));
+            QStringLiteral("普通摘除请求失败：\n%1").arg(friendlyKernelHookIoMessage(patchResult.io.message)));
         return;
     }
 
@@ -2697,7 +2730,7 @@ void KernelDock::patchSelectedInlineHookWithNop()
         .arg(kernelHookStatusText(patchResult.status))
         .arg(patchResult.bytesPatched)
         .arg(kernelHookFormatNtStatus(patchResult.lastStatus))
-        .arg(QString::fromStdString(patchResult.io.message));
+        .arg(friendlyKernelHookIoMessage(patchResult.io.message));
 
     if (m_inlineHookDetailEditor != nullptr)
     {

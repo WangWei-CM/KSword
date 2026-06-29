@@ -41,6 +41,7 @@
     <ClCompile Include="src\features\kernel\cpu_hardware_query.c" />
     <ClCompile Include="src\features\kernel\driver_unload.c" />
     <ClCompile Include="src\features\kernel\kernel_object_audit.c" />
+    <ClCompile Include="src\features\kernel\kernel_ipc_summary.c" />
     <ClCompile Include="src\features\kernel\ssdt_query.c" />
     <ClCompile Include="src\features\kernel\hook_scan.c" />
     <ClCompile Include="src\features\kernel\hook_scan_support.c" />
@@ -52,6 +53,7 @@
     <ClCompile Include="src\features\log\log_channel.c" />
     <ClCompile Include="src\features\process\process_actions.c" />
     <ClCompile Include="src\features\process\process_crossview.c" />
+    <ClCompile Include="src\features\process\process_detail.c" />
     <ClCompile Include="src\features\process\process_dkom.c" />
     <ClCompile Include="src\features\process\process_flags.c" />
     <ClCompile Include="src\features\process\process_terminate.c" />
@@ -75,6 +77,7 @@
     <ClCompile Include="src\features\capability\capability_ioctl.c" />
     <ClCompile Include="src\features\thread\thread_query.c" />
     <ClCompile Include="src\features\thread\thread_crossview.c" />
+    <ClCompile Include="src\features\thread\thread_detail.c" />
     <ClCompile Include="src\features\thread\thread_ioctl.c" />
     <ClCompile Include="src\features\handle\handle_support.c" />
     <ClCompile Include="src\features\handle\handle_object_query.c" />
@@ -117,6 +120,7 @@
     <ClCompile Include="src\features\storage\storage_ioctl.c" />
     <ClCompile Include="src\features\win32k\win32k_support.c" />
     <ClCompile Include="src\features\win32k\win32k_query.c" />
+    <ClCompile Include="src\features\win32k\win32k_detail.c" />
     <ClCompile Include="src\features\win32k\win32k_ioctl.c" />
     <ClCompile Include="src\features\mutation\mutation_transaction.c" />
     <ClCompile Include="src\features\mutation\mutation_ioctl.c" />
@@ -189,6 +193,7 @@
     <ClInclude Include="src\features\kernel\driver_integrity.h" />
     <ClInclude Include="src\features\kernel\kernel_cpu_integrity.h" />
     <ClInclude Include="src\features\kernel\kernel_object_audit.h" />
+    <ClInclude Include="src\features\kernel\kernel_ipc_summary.h" />
     <ClInclude Include="src\features\mutation\mutation_transaction.h" />
     <ClInclude Include="src\features\dyndata\dyndata_v4_internal.h" />
     <ClInclude Include="src\features\win32k\win32k_support.h" />

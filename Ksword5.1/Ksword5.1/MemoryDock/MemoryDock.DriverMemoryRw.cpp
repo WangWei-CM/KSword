@@ -57,6 +57,38 @@ namespace
             .toUpper();
     }
 
+    QString driverMemoryIoMessageText(const std::string& messageText)
+    {
+        // 输入：ArkDriverClient 返回的原始 io.message。
+        // 处理：将 DeviceIoControl/unsupported/空消息等底层文本转换为用户可读说明。
+        // 返回：用于状态栏、弹窗和失败详情的中文文本。
+        if (messageText.empty())
+        {
+            return QStringLiteral("无额外驱动消息");
+        }
+
+        const QString rawText = QString::fromStdString(messageText).trimmed();
+        if (rawText.isEmpty())
+        {
+            return QStringLiteral("无额外驱动消息");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动接口调用失败或当前驱动版本不支持该内存读写入口");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not implemented"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动版本尚未提供该内存读写入口");
+        }
+        if (rawText.contains(QStringLiteral("too small"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("invalid"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动返回数据格式不完整，未更新当前内存快照");
+        }
+        return rawText;
+    }
+
     bool driverMemoryReadStatusHasUsableBytes(const std::uint32_t readStatus)
     {
         // 输入：驱动读取状态。
@@ -478,15 +510,16 @@ void MemoryDock::driverReadMemoryFromUi()
     if (!readResult.io.ok)
     {
         resetDriverMemoryRwState();
+        const QString readableIoMessage = driverMemoryIoMessageText(readResult.io.message);
         if (m_driverMemoryRangeLabel != nullptr)
         {
             m_driverMemoryRangeLabel->setText(requestRangeText + QStringLiteral(" | IOCTL失败"));
         }
         if (m_driverMemoryStatusLabel != nullptr)
         {
-            m_driverMemoryStatusLabel->setText(QString("R0读取失败：%1").arg(QString::fromStdString(readResult.io.message)));
+            m_driverMemoryStatusLabel->setText(QString("R0读取失败：%1").arg(readableIoMessage));
         }
-        QMessageBox::warning(this, "驱动内存读写", QString("R0读取失败：\n%1").arg(QString::fromStdString(readResult.io.message)));
+        QMessageBox::warning(this, "驱动内存读写", QString("R0读取失败：\n%1").arg(readableIoMessage));
         return;
     }
 
@@ -539,7 +572,7 @@ void MemoryDock::driverReadMemoryFromUi()
             .arg(readResult.bytesRead)
             .arg(readResult.io.bytesReturned)
             .arg(copyStatusText)
-            .arg(QString::fromStdString(readResult.io.message));
+            .arg(driverMemoryIoMessageText(readResult.io.message));
         resetDriverMemoryRwState();
         if (m_driverMemoryRangeLabel != nullptr)
         {
@@ -722,7 +755,7 @@ void MemoryDock::driverApplyMemoryDiffFromUi()
                     QString("驱动拒绝了普通内存写入请求。\n地址=%1\n请求=%2 字节\nR0 信息：%3")
                     .arg(formatAddress(chunkAddress))
                     .arg(chunkBytes)
-                    .arg(QString::fromStdString(writeResult.io.message));
+                    .arg(driverMemoryIoMessageText(writeResult.io.message));
                 if (!confirmForceDriverMemoryWrite(
                     chunkAddress,
                     static_cast<std::uint32_t>(chunkBytes),
@@ -757,7 +790,7 @@ void MemoryDock::driverApplyMemoryDiffFromUi()
                     .arg(writeResult.bytesWritten)
                     .arg(writeResult.writeStatus)
                     .arg(static_cast<unsigned long>(writeResult.copyStatus), 8, 16, QChar('0'))
-                    .arg(QString::fromStdString(writeResult.io.message));
+                    .arg(driverMemoryIoMessageText(writeResult.io.message));
                 break;
             }
 

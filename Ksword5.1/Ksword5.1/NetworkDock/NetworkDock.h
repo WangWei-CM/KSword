@@ -54,6 +54,7 @@ class QStandardItemModel;
 class CodeEditorWidget;
 class MultiThreadDownloadSegmentBarWidget;
 class NetworkFirewallPage;
+class NetworkAuditPage;
 
 namespace ks::network
 {
@@ -350,6 +351,11 @@ private:
     // - 作用：构建“防火墙”页（WFP 历史事件 + 实时订阅）。
     // - 返回：无。
     void initializeFirewallTab();
+
+    // initializeNetworkAuditTab：
+    // - 作用：构建“网络审计”页（TCP/UDP cross-view、AFD、WFP、NDIS、NSI）。
+    // - 返回：无。
+    void initializeNetworkAuditTab();
 
     // initializeArpCacheTab：
     // - 作用：构建“ARP缓存”页（展示 + 编辑）。
@@ -1208,6 +1214,9 @@ private:
 
     // ========================= Tab4：防火墙 ====================
     NetworkFirewallPage* m_firewallPage = nullptr;   // 防火墙页容器。
+
+    // ========================= Tab4：网络审计 ====================
+    NetworkAuditPage* m_networkAuditPage = nullptr;  // 网络审计页容器。
 
     // ========================= Tab5：请求构造 ====================
     QWidget* m_manualRequestPage = nullptr;          // 请求构造页容器。

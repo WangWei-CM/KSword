@@ -1,6 +1,7 @@
 #include "ProcessDetailCollector.h"
 
 #include "../../Core/Common.h"
+#include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -106,6 +107,112 @@ std::wstring FormatHexPointer(std::uintptr_t value) {
     stream.fill(L'0');
     stream << value;
     return stream.str();
+}
+
+// NarrowToWide converts ArkDriverClient diagnostics and row details to UI text.
+// Input is UTF-8/ASCII from the shared client; output is best-effort UTF-16.
+std::wstring NarrowToWide(const std::string& text) {
+    if (text.empty()) {
+        return {};
+    }
+
+    int chars = ::MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    UINT codePage = CP_UTF8;
+    if (chars <= 0) {
+        codePage = CP_ACP;
+        chars = ::MultiByteToWideChar(codePage, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    }
+    if (chars <= 0) {
+        return L"<decode failed>";
+    }
+
+    std::wstring wide(static_cast<std::size_t>(chars), L'\0');
+    ::MultiByteToWideChar(codePage, 0, text.data(), static_cast<int>(text.size()), wide.data(), chars);
+    return wide;
+}
+
+// HexMaskText formats raw source/anomaly masks for diagnostics. Input is a
+// protocol mask; output remains stable when future bits are added.
+std::wstring HexMaskText(ULONG value) {
+    std::wostringstream stream;
+    stream << L"0x" << std::hex << std::uppercase << value;
+    return stream.str();
+}
+
+// CrossViewSourceText renders shared process/thread source bits. Input is the
+// R0 sourceMask; output uses protocol source names shown by the GUI pages.
+std::wstring CrossViewSourceText(ULONG sourceMask) {
+    std::vector<std::wstring> parts;
+    if ((sourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_PUBLIC_WALK) != 0) {
+        parts.push_back(L"Public");
+    }
+    if ((sourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_ACTIVE_LIST) != 0) {
+        parts.push_back(L"ActiveProcessLinks");
+    }
+    if ((sourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_CID_TABLE) != 0) {
+        parts.push_back(L"CID");
+    }
+    if ((sourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_THREAD_LIST) != 0) {
+        parts.push_back(L"ThreadListHead");
+    }
+    if (parts.empty()) {
+        return L"无来源";
+    }
+
+    std::wstring text;
+    for (const std::wstring& part : parts) {
+        if (!text.empty()) {
+            text += L"+";
+        }
+        text += part;
+    }
+    return text;
+}
+
+// CrossViewAnomalyText maps known anomaly flags to readable labels. Input is
+// the raw protocol mask; output keeps unknown bits visible for audit export.
+std::wstring CrossViewAnomalyText(ULONG anomalyFlags) {
+    if (anomalyFlags == 0) {
+        return L"未见异常";
+    }
+
+    std::vector<std::wstring> parts;
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_CID_ONLY) != 0) {
+        parts.push_back(L"CID-only");
+    }
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_ACTIVE_ONLY) != 0) {
+        parts.push_back(L"Active-only");
+    }
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_MISSING_FROM_ACTIVE_LIST) != 0) {
+        parts.push_back(L"缺ActiveProcessLinks");
+    }
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_MISSING_FROM_CID_TABLE) != 0) {
+        parts.push_back(L"缺CID");
+    }
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_THREAD_ORPHAN) != 0) {
+        parts.push_back(L"孤儿线程");
+    }
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_THREAD_NOT_IN_PROCESS_LIST) != 0) {
+        parts.push_back(L"缺ThreadListHead");
+    }
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_START_ADDRESS_OUTSIDE_MODULE) != 0) {
+        parts.push_back(L"入口不在模块");
+    }
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_PID_FIELD_MISMATCH) != 0) {
+        parts.push_back(L"PID不一致");
+    }
+
+    std::wstring text;
+    for (const std::wstring& part : parts) {
+        if (!text.empty()) {
+            text += L"; ";
+        }
+        text += part;
+    }
+    if (text.empty()) {
+        text = L"未知异常位 " + HexMaskText(anomalyFlags);
+    }
+    return text;
 }
 
 // Win32ErrorText returns a compact Win32 failure string. Input is an operation
@@ -558,6 +665,82 @@ void AttachRepresentativeThreads(
     }
 }
 
+// CollectR0AuditRows queries process/thread cross-view through ArkDriverClient.
+// Inputs are a PID and status outputs; processing is read-only and bounded by
+// the shared cross-view max-node defaults; output rows are UI evidence only.
+std::vector<ProcessR0AuditInfo> CollectR0AuditRows(DWORD processId, bool& succeededOut, std::wstring& statusOut) {
+    succeededOut = false;
+    statusOut.clear();
+    std::vector<ProcessR0AuditInfo> rows;
+
+    const ksword::ark::DriverClient driverClient;
+    const ksword::ark::ProcessCrossViewResult processAudit = driverClient.queryProcessCrossView(
+        KSWORD_ARK_PROCESS_CROSSVIEW_FLAG_INCLUDE_ALL,
+        processId,
+        processId,
+        KSWORD_ARK_CROSSVIEW_DEFAULT_MAX_NODES);
+    if (!processAudit.io.ok) {
+        statusOut = L"Process cross-view failed: " + NarrowToWide(processAudit.io.message);
+    } else {
+        for (const ksword::ark::ProcessCrossViewEntry& entry : processAudit.entries) {
+            if (entry.processId != processId) {
+                continue;
+            }
+            ProcessR0AuditInfo row{};
+            row.scope = L"Process";
+            row.processId = static_cast<DWORD>(entry.processId);
+            row.objectAddress = static_cast<std::uintptr_t>(entry.objectAddress);
+            row.startAddress = static_cast<std::uintptr_t>(entry.startAddress);
+            row.sourceMask = entry.sourceMask;
+            row.anomalyFlags = entry.anomalyFlags;
+            row.confidence = entry.confidence;
+            row.sourceText = CrossViewSourceText(row.sourceMask);
+            row.anomalyText = CrossViewAnomalyText(row.anomalyFlags);
+            row.detailText = NarrowToWide(entry.detail);
+            rows.push_back(std::move(row));
+        }
+    }
+
+    const ksword::ark::ThreadCrossViewResult threadAudit = driverClient.queryThreadCrossView(
+        KSWORD_ARK_THREAD_CROSSVIEW_FLAG_INCLUDE_ALL,
+        processId,
+        0,
+        0,
+        KSWORD_ARK_CROSSVIEW_DEFAULT_MAX_NODES);
+    if (!threadAudit.io.ok) {
+        if (!statusOut.empty()) {
+            statusOut += L"; ";
+        }
+        statusOut += L"Thread cross-view failed: " + NarrowToWide(threadAudit.io.message);
+    } else {
+        for (const ksword::ark::ThreadCrossViewEntry& entry : threadAudit.entries) {
+            if (entry.processId != processId) {
+                continue;
+            }
+            ProcessR0AuditInfo row{};
+            row.scope = L"Thread";
+            row.processId = static_cast<DWORD>(entry.processId);
+            row.threadId = static_cast<DWORD>(entry.threadId);
+            row.objectAddress = static_cast<std::uintptr_t>(entry.objectAddress);
+            row.relatedObjectAddress = static_cast<std::uintptr_t>(entry.processObjectAddress);
+            row.startAddress = static_cast<std::uintptr_t>(entry.startAddress);
+            row.sourceMask = entry.sourceMask;
+            row.anomalyFlags = entry.anomalyFlags;
+            row.confidence = entry.confidence;
+            row.sourceText = CrossViewSourceText(row.sourceMask);
+            row.anomalyText = CrossViewAnomalyText(row.anomalyFlags);
+            row.detailText = NarrowToWide(entry.detail);
+            rows.push_back(std::move(row));
+        }
+    }
+
+    succeededOut = statusOut.empty();
+    if (statusOut.empty()) {
+        statusOut = L"OK";
+    }
+    return rows;
+}
+
 } // namespace
 
 ProcessDetailSnapshot ProcessDetailCollector::Collect(DWORD processId) const {
@@ -576,6 +759,12 @@ ProcessDetailSnapshot ProcessDetailCollector::Collect(DWORD processId) const {
         snapshot.errorText += L"Modules: " + moduleStatus + L"\r\n";
     }
     AttachRepresentativeThreads(snapshot.modules, snapshot.threads);
+
+    std::wstring r0AuditStatus;
+    snapshot.r0AuditRows = CollectR0AuditRows(processId, snapshot.r0AuditSucceeded, r0AuditStatus);
+    if (!snapshot.r0AuditSucceeded && !r0AuditStatus.empty()) {
+        snapshot.errorText += L"R0Audit: " + r0AuditStatus + L"\r\n";
+    }
 
     if (!snapshot.basicSucceeded && !snapshot.basic.statusText.empty()) {
         snapshot.errorText = L"Basic: " + snapshot.basic.statusText + L"\r\n" + snapshot.errorText;

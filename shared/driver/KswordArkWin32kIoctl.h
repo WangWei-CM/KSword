@@ -17,6 +17,7 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_GUI_THREADS    0x892UL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_HOTKEYS_PDB    0x893UL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_HOOKS_PDB      0x894UL
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_WINDOW_DETAIL  0x895UL
 
 #define IOCTL_KSWORD_ARK_QUERY_WIN32K_PROFILE_STATUS \
     CTL_CODE( \
@@ -50,6 +51,17 @@
     CTL_CODE( \
         KSWORD_ARK_IOCTL_DEVICE_TYPE, \
         KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_HOOKS_PDB, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+// 单窗口运行时详情协议：
+// - 输入：HWND/PID/TID 过滤信息只作为定位线索，不信任 R3 传入 tagWND 地址；
+// - 处理：当前阶段返回 profile/capability/offset readiness，后续可由 tagWND PDB profile 扩展；
+// - 输出：固定响应包，确保 UI 有稳定 unsupported/profile-missing 解释而不是空表。
+#define IOCTL_KSWORD_ARK_QUERY_WIN32K_WINDOW_DETAIL \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_WIN32K_WINDOW_DETAIL, \
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
 
@@ -97,6 +109,9 @@
 #define KSWORD_ARK_WIN32K_FIELD_RECT_PRESENT        0x00000040UL
 #define KSWORD_ARK_WIN32K_FIELD_TITLE_PRESENT       0x00000080UL
 #define KSWORD_ARK_WIN32K_FIELD_CLASS_PRESENT       0x00000100UL
+#define KSWORD_ARK_WIN32K_FIELD_DETAIL_PROFILE      0x00000200UL
+#define KSWORD_ARK_WIN32K_FIELD_DETAIL_IDENTITY     0x00000400UL
+#define KSWORD_ARK_WIN32K_FIELD_DETAIL_OFFSETS      0x00000800UL
 
 #define KSWORD_ARK_WIN32K_READ_STATUS_NOT_REQUESTED 0UL
 #define KSWORD_ARK_WIN32K_READ_STATUS_OK            1UL
@@ -132,6 +147,15 @@ typedef struct _KSWORD_ARK_WIN32K_QUERY_REQUEST
     unsigned long reserved0;
     unsigned long reserved1;
 } KSWORD_ARK_WIN32K_QUERY_REQUEST;
+
+typedef struct _KSWORD_ARK_WIN32K_WINDOW_DETAIL_REQUEST
+{
+    unsigned long version;
+    unsigned long flags;
+    unsigned long processId;
+    unsigned long threadId;
+    unsigned long long hwnd;
+} KSWORD_ARK_WIN32K_WINDOW_DETAIL_REQUEST;
 
 typedef struct _KSWORD_ARK_WIN32K_MODULE_STATE
 {
@@ -364,3 +388,29 @@ typedef struct _KSWORD_ARK_WIN32K_HOOK_SNAPSHOT_RESPONSE
     KSWORD_ARK_WIN32K_FIELD_OFFSETS fieldOffsets;
     KSWORD_ARK_WIN32K_HOOK_ENTRY entries[1];
 } KSWORD_ARK_WIN32K_HOOK_SNAPSHOT_RESPONSE;
+
+typedef struct _KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE
+{
+    unsigned long version;
+    unsigned long status;
+    unsigned long processId;
+    unsigned long threadId;
+    unsigned long fieldFlags;
+    unsigned long flags;
+    long lastStatus;
+    unsigned long reserved;
+    unsigned long long hwnd;
+    unsigned long long tagWnd;
+    unsigned long long threadInfo;
+    unsigned long long queueObject;
+    unsigned long long desktopObject;
+    unsigned long long capabilityMask;
+    unsigned long long missingCapabilityMask;
+    KSWORD_ARK_WIN32K_MODULE_STATE win32k;
+    KSWORD_ARK_WIN32K_MODULE_STATE win32kbase;
+    KSWORD_ARK_WIN32K_MODULE_STATE win32kfull;
+    KSWORD_ARK_WIN32K_FIELD_OFFSETS fieldOffsets;
+    wchar_t title[KSWORD_ARK_WIN32K_TITLE_CHARS];
+    wchar_t className[KSWORD_ARK_WIN32K_CLASS_CHARS];
+    wchar_t detail[KSWORD_ARK_RUNTIME_DETAIL_TEXT_CHARS];
+} KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE;

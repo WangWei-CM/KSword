@@ -3,6 +3,82 @@
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
 
+namespace
+{
+    QString driverTableCellText(QTableWidget* table, const int rowIndex, const int columnIndex)
+    {
+        // driverTableCellText：
+        // - 输入：表格、行号和列号；
+        // - 处理：安全读取单元格文本；
+        // - 返回：空单元格返回空字符串。
+        if (table == nullptr)
+        {
+            return QString();
+        }
+        const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+        return item != nullptr ? item->text() : QString();
+    }
+
+    void copyDriverTableCurrentRow(QTableWidget* table)
+    {
+        // copyDriverTableCurrentRow：
+        // - 输入：DriverDock 只读表格；
+        // - 处理：复制当前行 TSV；
+        // - 返回：无，剪贴板不可用或未选中时直接返回。
+        if (table == nullptr || QGuiApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        const int rowIndex = table->currentRow();
+        if (rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return;
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            fields.push_back(driverTableCellText(table, rowIndex, columnIndex));
+        }
+        QGuiApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
+    }
+
+    void installDriverTableCopyMenu(QTableWidget* table)
+    {
+        // installDriverTableCopyMenu：
+        // - 输入：无破坏动作的 DriverDock 只读证据表；
+        // - 处理：安装复制当前行菜单；
+        // - 返回：无，不触发 R0/R3 修改操作。
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        {
+            const QModelIndex clickedIndex = table->indexAt(localPosition);
+            if (clickedIndex.isValid())
+            {
+                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu contextMenu(table);
+            contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+            QAction* copyRowAction = contextMenu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(table->currentRow() >= 0);
+            if (contextMenu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+            {
+                copyDriverTableCurrentRow(table);
+            }
+        });
+    }
+}
+
 void DriverDock::initializeUi()
 {
     m_rootLayout = new QVBoxLayout(this);
@@ -16,7 +92,9 @@ void DriverDock::initializeUi()
     initializeOperateTab();
     initializeDebugOutputTab();
     initializeObjectInfoTab();
+    initializeModuleCrossViewTab();
     initializeIntegrityTab();
+    initializeUnloadedPiddbTab();
 }
 
 void DriverDock::initializeOverviewTab()
@@ -314,7 +392,8 @@ void DriverDock::initializeObjectInfoTab()
 {
     // Phase-9 对象信息页：
     // - 输入 DriverObject 名称，R0 侧自行引用对象；
-    // - UI 只展示诊断地址、MajorFunction 和 DeviceObject 链。
+    // - 页面拆成 DriverObject / DeviceObject / DriverExtension / MajorFunction / FastIo 五个子页；
+    // - 所有展示均为只读诊断，不提供写入、补丁或卸载操作。
     m_objectInfoPage = new QWidget(m_tabWidget);
     m_objectInfoLayout = new QVBoxLayout(m_objectInfoPage);
     m_objectInfoLayout->setContentsMargins(4, 4, 4, 4);
@@ -336,6 +415,10 @@ void DriverDock::initializeObjectInfoTab()
     m_queryObjectInfoButton->setFixedWidth(34);
     m_queryObjectInfoButton->setToolTip(QStringLiteral("通过 KswordARK 查询 DriverObject / DeviceObject"));
 
+    m_objectEvidenceRefreshButton = new QPushButton(QIcon(":/Icon/process_details.svg"), QString(), m_objectInfoPage);
+    m_objectEvidenceRefreshButton->setFixedWidth(34);
+    m_objectEvidenceRefreshButton->setToolTip(QStringLiteral("仅重建当前 DriverObject / Integrity 证据投影"));
+
     m_objectInfoStatusLabel = new QLabel(QStringLiteral("状态：等待查询"), m_objectInfoPage);
     m_objectInfoStatusLabel->setWordWrap(true);
 
@@ -343,49 +426,71 @@ void DriverDock::initializeObjectInfoTab()
     queryLayout->addWidget(m_objectDriverNameEdit, 1);
     queryLayout->addWidget(m_fillObjectDriverNameButton);
     queryLayout->addWidget(m_queryObjectInfoButton);
+    queryLayout->addWidget(m_objectEvidenceRefreshButton);
     queryLayout->addWidget(m_objectInfoStatusLabel, 1);
     m_objectInfoLayout->addLayout(queryLayout);
 
-    m_objectInfoSummaryEdit = new QPlainTextEdit(m_objectInfoPage);
+    // DriverObject 顶部摘要属于 R0 只读诊断文本：
+    // - 使用项目统一 CodeEditorWidget，保证深浅色与复制/查找体验一致；
+    // - 摘要下方仍有结构化表格承载具体字段，不做 summary-only 展示。
+    m_objectInfoSummaryEdit = new CodeEditorWidget(m_objectInfoPage);
     m_objectInfoSummaryEdit->setReadOnly(true);
     m_objectInfoSummaryEdit->setMaximumHeight(145);
-    m_objectInfoSummaryEdit->setPlaceholderText(QStringLiteral("DriverObject 摘要显示在这里。"));
+    m_objectInfoSummaryEdit->setText(QStringLiteral("DriverObject 摘要显示在这里。"));
     m_objectInfoLayout->addWidget(m_objectInfoSummaryEdit);
 
-    QSplitter* objectSplitter = new QSplitter(Qt::Vertical, m_objectInfoPage);
-    m_objectInfoLayout->addWidget(objectSplitter, 1);
+    m_objectDetailTabWidget = new QTabWidget(m_objectInfoPage);
+    m_objectDetailTabWidget->setDocumentMode(true);
+    m_objectInfoLayout->addWidget(m_objectDetailTabWidget, 1);
 
-    QWidget* majorContainer = new QWidget(objectSplitter);
-    QVBoxLayout* majorLayout = new QVBoxLayout(majorContainer);
-    majorLayout->setContentsMargins(0, 0, 0, 0);
-    majorLayout->setSpacing(4);
-    majorLayout->addWidget(new QLabel(QStringLiteral("MajorFunction 表"), majorContainer));
+    auto configureReadOnlyTable = [](QTableWidget* table)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+        table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setSelectionMode(QAbstractItemView::SingleSelection);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setAlternatingRowColors(true);
+        table->verticalHeader()->setVisible(false);
+        table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        installDriverTableCopyMenu(table);
+    };
 
-    m_majorFunctionTable = new QTableWidget(majorContainer);
-    m_majorFunctionTable->setColumnCount(5);
-    m_majorFunctionTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("IRP_MJ"),
-        QStringLiteral("Dispatch"),
-        QStringLiteral("模块"),
-        QStringLiteral("模块基址"),
-        QStringLiteral("位置")
+    // DriverObject 诊断页：只展示当前对象查询的基础字段和简要证据。
+    m_driverObjectPage = new QWidget(m_objectDetailTabWidget);
+    QVBoxLayout* driverObjectLayout = new QVBoxLayout(m_driverObjectPage);
+    driverObjectLayout->setContentsMargins(0, 0, 0, 0);
+    driverObjectLayout->setSpacing(4);
+    // DriverObject 子页摘要：
+    // - 只显示当前 DriverObject 的核心字段；
+    // - 详细证据继续由下方表格展示，文本控件统一为 CodeEditorWidget。
+    m_driverObjectPageSummaryEdit = new CodeEditorWidget(m_driverObjectPage);
+    m_driverObjectPageSummaryEdit->setReadOnly(true);
+    m_driverObjectPageSummaryEdit->setMaximumHeight(130);
+    m_driverObjectPageSummaryEdit->setText(QStringLiteral("DriverObject 页摘要显示在这里。"));
+    driverObjectLayout->addWidget(m_driverObjectPageSummaryEdit);
+
+    m_driverObjectEvidenceTable = new QTableWidget(m_driverObjectPage);
+    m_driverObjectEvidenceTable->setColumnCount(2);
+    m_driverObjectEvidenceTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("字段"),
+        QStringLiteral("值")
         });
-    m_majorFunctionTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_majorFunctionTable->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_majorFunctionTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_majorFunctionTable->setAlternatingRowColors(true);
-    m_majorFunctionTable->verticalHeader()->setVisible(false);
-    m_majorFunctionTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    m_majorFunctionTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
-    majorLayout->addWidget(m_majorFunctionTable, 1);
+    configureReadOnlyTable(m_driverObjectEvidenceTable);
+    m_driverObjectEvidenceTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    driverObjectLayout->addWidget(m_driverObjectEvidenceTable, 1);
+    m_objectDetailTabWidget->addTab(m_driverObjectPage, QIcon(":/Icon/process_details.svg"), QStringLiteral("DriverObject"));
 
-    QWidget* deviceContainer = new QWidget(objectSplitter);
-    QVBoxLayout* deviceLayout = new QVBoxLayout(deviceContainer);
+    // DeviceObject 诊断页：展示 DriverObject 下挂载的设备链。
+    m_deviceObjectPage = new QWidget(m_objectDetailTabWidget);
+    QVBoxLayout* deviceLayout = new QVBoxLayout(m_deviceObjectPage);
     deviceLayout->setContentsMargins(0, 0, 0, 0);
     deviceLayout->setSpacing(4);
-    deviceLayout->addWidget(new QLabel(QStringLiteral("DeviceObject / AttachedDevice 链"), deviceContainer));
+    deviceLayout->addWidget(new QLabel(QStringLiteral("DeviceObject / AttachedDevice 链"), m_deviceObjectPage));
 
-    m_deviceObjectTable = new QTableWidget(deviceContainer);
+    m_deviceObjectTable = new QTableWidget(m_deviceObjectPage);
     m_deviceObjectTable->setColumnCount(10);
     m_deviceObjectTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("关系"),
@@ -399,21 +504,201 @@ void DriverDock::initializeObjectInfoTab()
         QStringLiteral("AttachedDevice"),
         QStringLiteral("DriverObject")
         });
-    m_deviceObjectTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_deviceObjectTable->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_deviceObjectTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_deviceObjectTable->setAlternatingRowColors(true);
-    m_deviceObjectTable->verticalHeader()->setVisible(false);
-    m_deviceObjectTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    configureReadOnlyTable(m_deviceObjectTable);
     m_deviceObjectTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     deviceLayout->addWidget(m_deviceObjectTable, 1);
+    m_objectDetailTabWidget->addTab(m_deviceObjectPage, QIcon(":/Icon/process_list.svg"), QStringLiteral("DeviceObject"));
 
-    objectSplitter->addWidget(majorContainer);
-    objectSplitter->addWidget(deviceContainer);
-    objectSplitter->setStretchFactor(0, 3);
-    objectSplitter->setStretchFactor(1, 2);
+    // DriverExtension 诊断页：当前协议不直接暴露 DriverExtension 指针，因此展示关联证据。
+    m_driverExtensionPage = new QWidget(m_objectDetailTabWidget);
+    QVBoxLayout* driverExtensionLayout = new QVBoxLayout(m_driverExtensionPage);
+    driverExtensionLayout->setContentsMargins(0, 0, 0, 0);
+    driverExtensionLayout->setSpacing(4);
+    m_driverExtensionStatusLabel = new QLabel(QStringLiteral("状态：等待 DriverObject 查询。"), m_driverExtensionPage);
+    m_driverExtensionStatusLabel->setWordWrap(true);
+    driverExtensionLayout->addWidget(m_driverExtensionStatusLabel);
+    m_driverExtensionEvidenceTable = new QTableWidget(m_driverExtensionPage);
+    m_driverExtensionEvidenceTable->setColumnCount(6);
+    m_driverExtensionEvidenceTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("证据"),
+        QStringLiteral("对象"),
+        QStringLiteral("目标"),
+        QStringLiteral("风险"),
+        QStringLiteral("置信度"),
+        QStringLiteral("Detail")
+        });
+    configureReadOnlyTable(m_driverExtensionEvidenceTable);
+    m_driverExtensionEvidenceTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_driverExtensionEvidenceTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);
+    driverExtensionLayout->addWidget(m_driverExtensionEvidenceTable, 1);
+    m_objectDetailTabWidget->addTab(m_driverExtensionPage, QIcon(":/Icon/process_critical.svg"), QStringLiteral("DriverExtension"));
+
+    // MajorFunction 诊断页：展示 IRP 分发入口及其模块归属。
+    m_majorFunctionPage = new QWidget(m_objectDetailTabWidget);
+    QVBoxLayout* majorLayout = new QVBoxLayout(m_majorFunctionPage);
+    majorLayout->setContentsMargins(0, 0, 0, 0);
+    majorLayout->setSpacing(4);
+    majorLayout->addWidget(new QLabel(QStringLiteral("MajorFunction 表"), m_majorFunctionPage));
+
+    m_majorFunctionTable = new QTableWidget(m_majorFunctionPage);
+    m_majorFunctionTable->setColumnCount(5);
+    m_majorFunctionTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("IRP_MJ"),
+        QStringLiteral("Dispatch"),
+        QStringLiteral("模块"),
+        QStringLiteral("模块基址"),
+        QStringLiteral("位置")
+        });
+    configureReadOnlyTable(m_majorFunctionTable);
+    m_majorFunctionTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    majorLayout->addWidget(m_majorFunctionTable, 1);
+    m_objectDetailTabWidget->addTab(m_majorFunctionPage, QIcon(":/Icon/process_threads.svg"), QStringLiteral("MajorFunction"));
+
+    // FastIo 诊断页：当前协议只回填完整性侧证据，因此以证据表方式展示。
+    m_fastIoPage = new QWidget(m_objectDetailTabWidget);
+    QVBoxLayout* fastIoLayout = new QVBoxLayout(m_fastIoPage);
+    fastIoLayout->setContentsMargins(0, 0, 0, 0);
+    fastIoLayout->setSpacing(4);
+    m_fastIoStatusLabel = new QLabel(QStringLiteral("状态：等待 Driver Integrity 证据。"), m_fastIoPage);
+    m_fastIoStatusLabel->setWordWrap(true);
+    fastIoLayout->addWidget(m_fastIoStatusLabel);
+    m_fastIoEvidenceTable = new QTableWidget(m_fastIoPage);
+    m_fastIoEvidenceTable->setColumnCount(6);
+    m_fastIoEvidenceTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("证据"),
+        QStringLiteral("对象"),
+        QStringLiteral("目标"),
+        QStringLiteral("风险"),
+        QStringLiteral("置信度"),
+        QStringLiteral("Detail")
+        });
+    configureReadOnlyTable(m_fastIoEvidenceTable);
+    m_fastIoEvidenceTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_fastIoEvidenceTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);
+    fastIoLayout->addWidget(m_fastIoEvidenceTable, 1);
+    m_objectDetailTabWidget->addTab(m_fastIoPage, QIcon(":/Icon/process_pause.svg"), QStringLiteral("FastIo"));
+
+    if (m_objectDetailTabWidget != nullptr)
+    {
+        m_objectDetailTabWidget->setCurrentIndex(0);
+    }
+
+    rebuildDriverObjectEvidenceViews();
 
     m_tabWidget->addTab(m_objectInfoPage, QIcon(":/Icon/process_details.svg"), QStringLiteral("对象信息"));
+}
+
+void DriverDock::initializeModuleCrossViewTab()
+{
+    // 模块 Cross-View 页：
+    // - 仅从已缓存的 Driver Integrity 结果投影出 ModuleView / PsLoadedModules / DriverObject / DriverSection 等证据；
+    // - 不额外发起危险操作，也不引入新 R0 协议。
+    m_moduleCrossViewPage = new QWidget(m_tabWidget);
+    m_moduleCrossViewLayout = new QVBoxLayout(m_moduleCrossViewPage);
+    m_moduleCrossViewLayout->setContentsMargins(4, 4, 4, 4);
+    m_moduleCrossViewLayout->setSpacing(6);
+
+    m_moduleCrossViewToolLayout = new QHBoxLayout();
+    m_moduleCrossViewToolLayout->setContentsMargins(0, 0, 0, 0);
+    m_moduleCrossViewToolLayout->setSpacing(6);
+
+    m_moduleCrossViewRefreshButton = new QPushButton(m_moduleCrossViewPage);
+    m_moduleCrossViewRefreshButton->setIcon(QIcon(":/Icon/process_refresh.svg"));
+    m_moduleCrossViewRefreshButton->setToolTip(QStringLiteral("刷新 Driver Integrity 并重建模块 Cross-View"));
+    m_moduleCrossViewRefreshButton->setFixedWidth(34);
+
+    m_moduleCrossViewStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_moduleCrossViewPage);
+    m_moduleCrossViewStatusLabel->setWordWrap(true);
+
+    m_moduleCrossViewToolLayout->addWidget(m_moduleCrossViewRefreshButton);
+    m_moduleCrossViewToolLayout->addWidget(m_moduleCrossViewStatusLabel, 1);
+    m_moduleCrossViewLayout->addLayout(m_moduleCrossViewToolLayout);
+
+    m_moduleCrossViewTable = new QTableWidget(m_moduleCrossViewPage);
+    m_moduleCrossViewTable->setColumnCount(7);
+    m_moduleCrossViewTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("证据"),
+        QStringLiteral("对象"),
+        QStringLiteral("目标"),
+        QStringLiteral("风险"),
+        QStringLiteral("来源"),
+        QStringLiteral("置信度"),
+        QStringLiteral("Detail")
+        });
+    m_moduleCrossViewTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_moduleCrossViewTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_moduleCrossViewTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_moduleCrossViewTable->setAlternatingRowColors(true);
+    m_moduleCrossViewTable->verticalHeader()->setVisible(false);
+    m_moduleCrossViewTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_moduleCrossViewTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_moduleCrossViewTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Stretch);
+    installDriverTableCopyMenu(m_moduleCrossViewTable);
+    m_moduleCrossViewLayout->addWidget(m_moduleCrossViewTable, 1);
+
+    m_tabWidget->addTab(m_moduleCrossViewPage, QIcon(":/Icon/process_list.svg"), QStringLiteral("Module Cross-View"));
+    rebuildModuleCrossViewTable();
+}
+
+void DriverDock::initializeUnloadedPiddbTab()
+{
+    // Unloaded / PiDDB 页：
+    // - 当前阶段仅展示 Driver Integrity 中与 OptionalGlobal/DynData 相关的只读证据；
+    // - 页面不提供清理、删除或修复动作。
+    m_unloadedPiddbPage = new QWidget(m_tabWidget);
+    m_unloadedPiddbLayout = new QVBoxLayout(m_unloadedPiddbPage);
+    m_unloadedPiddbLayout->setContentsMargins(4, 4, 4, 4);
+    m_unloadedPiddbLayout->setSpacing(6);
+
+    m_unloadedPiddbToolLayout = new QHBoxLayout();
+    m_unloadedPiddbToolLayout->setContentsMargins(0, 0, 0, 0);
+    m_unloadedPiddbToolLayout->setSpacing(6);
+
+    m_unloadedPiddbRefreshButton = new QPushButton(m_unloadedPiddbPage);
+    m_unloadedPiddbRefreshButton->setIcon(QIcon(":/Icon/process_refresh.svg"));
+    m_unloadedPiddbRefreshButton->setToolTip(QStringLiteral("刷新 Driver Integrity 并重建 Unloaded / PiDDB 证据"));
+    m_unloadedPiddbRefreshButton->setFixedWidth(34);
+
+    m_unloadedPiddbFilterEdit = new QLineEdit(m_unloadedPiddbPage);
+    m_unloadedPiddbFilterEdit->setPlaceholderText(QStringLiteral("过滤证据/对象/目标/风险/来源/详情"));
+    m_unloadedPiddbFilterEdit->setToolTip(QStringLiteral("仅在当前 Driver Integrity 缓存内做本地模糊过滤，不重新访问驱动。"));
+
+    m_unloadedPiddbRiskOnlyCheck = new QCheckBox(QStringLiteral("仅风险/降级"), m_unloadedPiddbPage);
+    m_unloadedPiddbRiskOnlyCheck->setToolTip(QStringLiteral("隐藏正常证据，只保留 riskFlags、partial、unsupported、truncated 或 PDB-required 行。"));
+
+    m_unloadedPiddbStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_unloadedPiddbPage);
+    m_unloadedPiddbStatusLabel->setWordWrap(true);
+
+    m_unloadedPiddbToolLayout->addWidget(m_unloadedPiddbRefreshButton);
+    m_unloadedPiddbToolLayout->addWidget(m_unloadedPiddbFilterEdit, 1);
+    m_unloadedPiddbToolLayout->addWidget(m_unloadedPiddbRiskOnlyCheck);
+    m_unloadedPiddbToolLayout->addWidget(m_unloadedPiddbStatusLabel, 1);
+    m_unloadedPiddbLayout->addLayout(m_unloadedPiddbToolLayout);
+
+    m_unloadedPiddbTable = new QTableWidget(m_unloadedPiddbPage);
+    m_unloadedPiddbTable->setColumnCount(7);
+    m_unloadedPiddbTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("证据"),
+        QStringLiteral("对象"),
+        QStringLiteral("目标"),
+        QStringLiteral("风险"),
+        QStringLiteral("来源"),
+        QStringLiteral("置信度"),
+        QStringLiteral("Detail")
+        });
+    m_unloadedPiddbTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_unloadedPiddbTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_unloadedPiddbTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_unloadedPiddbTable->setAlternatingRowColors(true);
+    m_unloadedPiddbTable->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_unloadedPiddbTable->verticalHeader()->setVisible(false);
+    m_unloadedPiddbTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_unloadedPiddbTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_unloadedPiddbTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Stretch);
+    m_unloadedPiddbLayout->addWidget(m_unloadedPiddbTable, 1);
+
+    m_tabWidget->addTab(m_unloadedPiddbPage, QIcon(":/Icon/process_uncritical.svg"), QStringLiteral("Unloaded / PiDDB"));
+    rebuildUnloadedPiddbTable();
 }
 
 void DriverDock::initializeConnections()
@@ -534,6 +819,14 @@ void DriverDock::initializeConnections()
         {
             querySelectedDriverObjectInfo();
         });
+    connect(m_objectEvidenceRefreshButton, &QPushButton::clicked, this, [this]()
+        {
+            rebuildDriverObjectEvidenceViews();
+        });
+    connect(m_objectDetailTabWidget, &QTabWidget::currentChanged, this, [this](int)
+        {
+            rebuildDriverObjectEvidenceViews();
+        });
 
     // 驱动完整性页：所有动作均为只读查询或本地过滤，不提供修复/写入按钮。
     connect(m_integrityRefreshButton, &QPushButton::clicked, this, [this]()
@@ -560,5 +853,40 @@ void DriverDock::initializeConnections()
     connect(m_integrityTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int)
         {
             showSelectedDriverIntegrityDetail();
+        });
+
+    // 证据投影页：只读刷新和表内选择，不触发任何修复动作。
+    connect(m_moduleCrossViewRefreshButton, &QPushButton::clicked, this, [this]()
+        {
+            refreshDriverIntegrityAsync(false);
+        });
+    connect(m_moduleCrossViewTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int)
+        {
+            if (m_moduleCrossViewStatusLabel != nullptr && m_moduleCrossViewTable != nullptr)
+            {
+                m_moduleCrossViewStatusLabel->setText(
+                    QStringLiteral("状态：当前显示 %1 条投影证据。")
+                    .arg(m_moduleCrossViewTable->rowCount()));
+            }
+        });
+    connect(m_unloadedPiddbRefreshButton, &QPushButton::clicked, this, [this]()
+        {
+            refreshDriverIntegrityAsync(false);
+        });
+    connect(m_unloadedPiddbFilterEdit, &QLineEdit::textChanged, this, [this](const QString&)
+        {
+            rebuildUnloadedPiddbTable();
+        });
+    connect(m_unloadedPiddbRiskOnlyCheck, &QCheckBox::toggled, this, [this]()
+        {
+            rebuildUnloadedPiddbTable();
+        });
+    connect(m_unloadedPiddbTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
+        {
+            showUnloadedPiddbContextMenu(localPosition);
+        });
+    connect(m_unloadedPiddbTable, &QTableWidget::cellDoubleClicked, this, [this](int, int)
+        {
+            showSelectedUnloadedPiddbDetailDialog();
         });
 }

@@ -10,6 +10,7 @@
 #include "../theme.h"
 
 #include <QApplication>
+#include <QAbstractItemModel>
 #include <QByteArray>
 #include <QCheckBox>
 #include <QClipboard>
@@ -34,6 +35,7 @@
 #include <QList>
 #include <QMenu>
 #include <QMessageBox>
+#include <QModelIndex>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
@@ -112,6 +114,108 @@ namespace
             .arg(KswordTheme::BorderHex())
             .arg(KswordTheme::SurfaceHex())
             .arg(KswordTheme::TextPrimaryHex());
+    }
+
+    void installMonitorTableCopyMenu(QTableWidget* tableWidget)
+    {
+        // installMonitorTableCopyMenu：
+        // - 输入：监控页内只读/选择型表格；
+        // - 处理：右键定位当前行，并复制该行所有列为 TSV；
+        // - 返回：无。只复制现有 UI 文本，不启动/停止 WMI 或 ETW 会话。
+        if (tableWidget == nullptr)
+        {
+            return;
+        }
+
+        tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(tableWidget, &QTableWidget::customContextMenuRequested, tableWidget, [tableWidget](const QPoint& localPosition)
+        {
+            const auto clickedIndex = tableWidget->indexAt(localPosition);
+            if (clickedIndex.isValid())
+            {
+                tableWidget->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu menu(tableWidget);
+            // 右键菜单必须显式使用不透明主题，避免背景图/透明样式造成黑底黑字。
+            menu.setStyleSheet(KswordTheme::ContextMenuStyle());
+            QAction* copyRowAction = menu.addAction(
+                QIcon(QStringLiteral(":/Icon/log_clipboard.svg")),
+                QStringLiteral("复制整行"));
+            copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
+            if (menu.exec(tableWidget->viewport()->mapToGlobal(localPosition)) != copyRowAction)
+            {
+                return;
+            }
+
+            QClipboard* clipboardObject = QApplication::clipboard();
+            const int rowIndex = tableWidget->currentRow();
+            if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
+            {
+                return;
+            }
+
+            QStringList values;
+            values.reserve(tableWidget->columnCount());
+            for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
+            {
+                const QTableWidgetItem* item = tableWidget->item(rowIndex, columnIndex);
+                values << (item != nullptr ? item->text() : QString());
+            }
+            clipboardObject->setText(values.join(QLatin1Char('\t')));
+        });
+    }
+
+    void installMonitorTableViewCopyMenu(QTableView* tableView)
+    {
+        // installMonitorTableViewCopyMenu：
+        // - 输入：使用 QAbstractItemModel/QSortFilterProxyModel 的只读表格视图；
+        // - 处理：右键定位当前 proxy 行，并按当前显示顺序复制整行 TSV；
+        // - 返回：无。仅复制 WMI Provider 等审计列表，不启动/停止任何监控会话。
+        if (tableView == nullptr)
+        {
+            return;
+        }
+
+        tableView->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(tableView, &QTableView::customContextMenuRequested, tableView, [tableView](const QPoint& localPosition)
+        {
+            const QModelIndex clickedIndex = tableView->indexAt(localPosition);
+            if (clickedIndex.isValid())
+            {
+                tableView->setCurrentIndex(clickedIndex);
+                tableView->selectRow(clickedIndex.row());
+            }
+
+            QMenu menu(tableView);
+            // QTableView 同样必须显式使用不透明菜单样式，避免继承父级透明背景。
+            menu.setStyleSheet(KswordTheme::ContextMenuStyle());
+            QAction* copyRowAction = menu.addAction(
+                QIcon(QStringLiteral(":/Icon/log_clipboard.svg")),
+                QStringLiteral("复制整行"));
+            copyRowAction->setEnabled(tableView->currentIndex().isValid());
+            if (menu.exec(tableView->viewport()->mapToGlobal(localPosition)) != copyRowAction)
+            {
+                return;
+            }
+
+            QClipboard* clipboardObject = QApplication::clipboard();
+            QAbstractItemModel* modelObject = tableView->model();
+            const QModelIndex currentIndex = tableView->currentIndex();
+            if (clipboardObject == nullptr || modelObject == nullptr || !currentIndex.isValid())
+            {
+                return;
+            }
+
+            QStringList values;
+            values.reserve(modelObject->columnCount(currentIndex.parent()));
+            for (int columnIndex = 0; columnIndex < modelObject->columnCount(currentIndex.parent()); ++columnIndex)
+            {
+                const QModelIndex cellIndex = modelObject->index(currentIndex.row(), columnIndex, currentIndex.parent());
+                values << modelObject->data(cellIndex, Qt::DisplayRole).toString();
+            }
+            clipboardObject->setText(values.join(QLatin1Char('\t')));
+        });
     }
 
     // createMonitorDeferredPlaceholder 作用：
@@ -4723,6 +4827,7 @@ void MonitorDock::initializeWmiTab()
     m_wmiProviderTableView->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_wmiProviderTableView->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_wmiProviderTableView->verticalHeader()->setDefaultSectionSize(20);
+    installMonitorTableViewCopyMenu(m_wmiProviderTableView);
     // Provider 列表控制为较窄高度，给监听结果腾出更多可视空间。
     m_wmiProviderTableView->setMinimumHeight(120);
     m_wmiProviderTableView->setMaximumHeight(160);
@@ -4786,6 +4891,7 @@ void MonitorDock::initializeWmiTab()
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     m_wmiEventClassTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     m_wmiEventClassTable->verticalHeader()->setDefaultSectionSize(20);
+    installMonitorTableCopyMenu(m_wmiEventClassTable);
     // 事件类表先设置为可收敛尺寸策略，具体高度由 updateWmiSubscribePanelCompactLayout 动态计算。
     m_wmiEventClassTable->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
@@ -5206,6 +5312,7 @@ void MonitorDock::initializeEtwTab()
     m_etwSessionTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     m_etwSessionTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
     m_etwSessionTable->setMinimumHeight(180);
+    installMonitorTableCopyMenu(m_etwSessionTable);
     m_etwSessionPanelLayout->addWidget(m_etwSessionTable, 1);
 
     etwProviderSessionLayout->addWidget(m_etwProviderPanel, 3);
@@ -10158,4 +10265,3 @@ void MonitorDock::showEtwEventContextMenu(const QPoint& position)
         openProcessDetail(this, pid);
     }
 }
-

@@ -54,6 +54,33 @@ namespace
         diagnosticText += trimmedMessage;
     }
 
+    QString keyboardIoMessageText(const std::string& messageText)
+    {
+        // 输入：ArkDriverClient 返回的键盘热键/钩子 io.message。
+        // 处理：把底层 DeviceIoControl、unsupported 和空消息翻译成界面可读说明。
+        // 返回：用于进程热键页诊断栏的中文短句。
+        if (messageText.empty())
+        {
+            return QStringLiteral("无额外驱动消息");
+        }
+
+        const QString rawText = QString::fromStdString(messageText).trimmed();
+        if (rawText.isEmpty())
+        {
+            return QStringLiteral("无额外驱动消息");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动接口调用失败或当前驱动版本不支持键盘热键/钩子审计入口");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not implemented"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动版本尚未提供键盘热键/钩子审计入口");
+        }
+        return rawText;
+    }
+
     QString hex64Text(const std::uint64_t value)
     {
         if (value == 0U)
@@ -990,7 +1017,7 @@ namespace
         {
             appendDiagnostic(
                 diagnosticText,
-                QStringLiteral("R0热键不可用:%1").arg(QString::fromStdString(driverResult.io.message)));
+                QStringLiteral("R0热键不可用:%1").arg(keyboardIoMessageText(driverResult.io.message)));
             return;
         }
 
@@ -1052,7 +1079,7 @@ namespace
         {
             appendDiagnostic(
                 diagnosticText,
-                QStringLiteral("R0键盘钩子不可用:%1").arg(QString::fromStdString(driverResult.io.message)));
+                QStringLiteral("R0键盘钩子不可用:%1").arg(keyboardIoMessageText(driverResult.io.message)));
             return rows;
         }
 
@@ -1178,6 +1205,84 @@ namespace
         return QStringLiteral("%1...")
             .arg(trimmedText.left(kStatusTextLimit - 3));
     }
+
+    QString hotkeyTableCellText(QTableWidget* tableWidget, const int rowIndex, const int columnIndex)
+    {
+        // hotkeyTableCellText 作用：
+        // - 输入：热键/钩子审计表格以及目标行列；
+        // - 处理：只读取当前单元格显示文本，不访问任何底层审计对象；
+        // - 返回：单元格不存在时返回空字符串，方便拼接 TSV。
+        if (tableWidget == nullptr)
+        {
+            return QString();
+        }
+
+        const QTableWidgetItem* cellItem = tableWidget->item(rowIndex, columnIndex);
+        return cellItem != nullptr ? cellItem->text() : QString();
+    }
+
+    void copyHotkeyTableCurrentRow(QTableWidget* tableWidget)
+    {
+        // copyHotkeyTableCurrentRow 作用：
+        // - 输入：进程详情中的热键或键盘钩子表格；
+        // - 处理：把当前行所有可见列按 TSV 写入剪贴板；
+        // - 返回：无。该右键动作只复制审计证据，不触发任何修改操作。
+        if (tableWidget == nullptr || QApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        const int rowIndex = tableWidget->currentRow();
+        if (rowIndex < 0 || rowIndex >= tableWidget->rowCount())
+        {
+            return;
+        }
+
+        QStringList rowFields;
+        rowFields.reserve(tableWidget->columnCount());
+        for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
+        {
+            rowFields.push_back(hotkeyTableCellText(tableWidget, rowIndex, columnIndex));
+        }
+        QApplication::clipboard()->setText(rowFields.join(QLatin1Char('\t')));
+    }
+
+    void installHotkeyTableCopyMenu(QTableWidget* tableWidget)
+    {
+        // installHotkeyTableCopyMenu 作用：
+        // - 输入：需要补齐右键复制能力的热键/钩子表格；
+        // - 处理：安装显式不透明样式的右键菜单，并在点击处同步当前行；
+        // - 返回：无。菜单只暴露“复制当前行”，保持详情页只读审计语义。
+        if (tableWidget == nullptr)
+        {
+            return;
+        }
+
+        tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(
+            tableWidget,
+            &QTableWidget::customContextMenuRequested,
+            tableWidget,
+            [tableWidget](const QPoint& localPosition)
+            {
+                const QModelIndex clickedIndex = tableWidget->indexAt(localPosition);
+                if (clickedIndex.isValid())
+                {
+                    tableWidget->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                }
+
+                QMenu contextMenu(tableWidget);
+                contextMenu.setStyleSheet(buildProcessDetailMenuStyle());
+                QAction* copyRowAction = contextMenu.addAction(
+                    QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                    QStringLiteral("复制当前行"));
+                copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
+                if (contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+                {
+                    copyHotkeyTableCurrentRow(tableWidget);
+                }
+            });
+    }
 }
 
 void ProcessDetailWindow::initializeHotkeyTab()
@@ -1237,6 +1342,7 @@ void ProcessDetailWindow::initializeHotkeyTab()
     m_hotkeyTable->setColumnWidth(5, 120);
     m_hotkeyTable->setColumnWidth(6, 130);
     m_hotkeyTable->setColumnWidth(7, 120);
+    installHotkeyTableCopyMenu(m_hotkeyTable);
     hotkeyGroupLayout->addWidget(m_hotkeyTable, 1);
 
     m_hotkeyLayout->addWidget(hotkeyGroup, 1);
@@ -1534,6 +1640,7 @@ void ProcessDetailWindow::initializeKeyboardTab()
     m_keyboardHotkeyTable->setColumnWidth(5, 120);
     m_keyboardHotkeyTable->setColumnWidth(6, 150);
     m_keyboardHotkeyTable->setColumnWidth(7, 120);
+    installHotkeyTableCopyMenu(m_keyboardHotkeyTable);
     hotkeyLayout->addWidget(m_keyboardHotkeyTable, 1);
 
     m_keyboardHookTable = new QTableWidget(hookPage);
@@ -1566,6 +1673,7 @@ void ProcessDetailWindow::initializeKeyboardTab()
     m_keyboardHookTable->setColumnWidth(6, 130);
     m_keyboardHookTable->setColumnWidth(7, 160);
     m_keyboardHookTable->setColumnWidth(8, 80);
+    installHotkeyTableCopyMenu(m_keyboardHookTable);
     hookLayout->addWidget(m_keyboardHookTable, 1);
 
     m_keyboardInnerTabWidget->addTab(hotkeyPage, QIcon(":/Icon/process_hotkey.svg"), QStringLiteral("热键"));

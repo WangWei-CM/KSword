@@ -165,6 +165,19 @@ Return Value:
     Offsets->DoMajorFunction = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->DoFastIoDispatch = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->DoDriverUnload = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->UldName = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->UldStartAddress = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->UldEndAddress = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->UldCurrentTime = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->UldTypeSize = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->RtlAvlBalancedRoot = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->RtlAvlOrderedPointer = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->RtlAvlWhichOrderedElement = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->RtlAvlNumberGenericTableElements = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->RtlAvlDepthOfTree = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->RtlAvlRestartKey = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->RtlAvlDeleteCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->RtlAvlTypeSize = KSW_DYN_OFFSET_UNAVAILABLE;
 }
 
 static VOID
@@ -228,6 +241,8 @@ Return Value:
     Globals->PsLoadedModuleList = KSW_DYN_OFFSET_UNAVAILABLE;
     Globals->MmUnloadedDrivers = KSW_DYN_OFFSET_UNAVAILABLE;
     Globals->PiDDBCacheTable = KSW_DYN_OFFSET_UNAVAILABLE;
+    Globals->KeServiceDescriptorTableShadow = KSW_DYN_OFFSET_UNAVAILABLE;
+    Globals->MmLastUnloadedDriver = KSW_DYN_OFFSET_UNAVAILABLE;
 }
 
 static VOID
@@ -1466,6 +1481,58 @@ Return Value:
         *OffsetOut = &State->Kernel.DoDriverUnload;
         *SourceOut = &State->KernelSources.DoDriverUnload;
         break;
+    case KSW_DYN_FIELD_ID_ULD_NAME:
+        *OffsetOut = &State->Kernel.UldName;
+        *SourceOut = &State->KernelSources.UldName;
+        break;
+    case KSW_DYN_FIELD_ID_ULD_START_ADDRESS:
+        *OffsetOut = &State->Kernel.UldStartAddress;
+        *SourceOut = &State->KernelSources.UldStartAddress;
+        break;
+    case KSW_DYN_FIELD_ID_ULD_END_ADDRESS:
+        *OffsetOut = &State->Kernel.UldEndAddress;
+        *SourceOut = &State->KernelSources.UldEndAddress;
+        break;
+    case KSW_DYN_FIELD_ID_ULD_CURRENT_TIME:
+        *OffsetOut = &State->Kernel.UldCurrentTime;
+        *SourceOut = &State->KernelSources.UldCurrentTime;
+        break;
+    case KSW_DYN_FIELD_ID_ULD_TYPE_SIZE:
+        *OffsetOut = &State->Kernel.UldTypeSize;
+        *SourceOut = &State->KernelSources.UldTypeSize;
+        break;
+    case KSW_DYN_FIELD_ID_RTL_AVL_BALANCED_ROOT:
+        *OffsetOut = &State->Kernel.RtlAvlBalancedRoot;
+        *SourceOut = &State->KernelSources.RtlAvlBalancedRoot;
+        break;
+    case KSW_DYN_FIELD_ID_RTL_AVL_ORDERED_POINTER:
+        *OffsetOut = &State->Kernel.RtlAvlOrderedPointer;
+        *SourceOut = &State->KernelSources.RtlAvlOrderedPointer;
+        break;
+    case KSW_DYN_FIELD_ID_RTL_AVL_WHICH_ORDERED_ELEMENT:
+        *OffsetOut = &State->Kernel.RtlAvlWhichOrderedElement;
+        *SourceOut = &State->KernelSources.RtlAvlWhichOrderedElement;
+        break;
+    case KSW_DYN_FIELD_ID_RTL_AVL_NUMBER_GENERIC_TABLE_ELEMENTS:
+        *OffsetOut = &State->Kernel.RtlAvlNumberGenericTableElements;
+        *SourceOut = &State->KernelSources.RtlAvlNumberGenericTableElements;
+        break;
+    case KSW_DYN_FIELD_ID_RTL_AVL_DEPTH_OF_TREE:
+        *OffsetOut = &State->Kernel.RtlAvlDepthOfTree;
+        *SourceOut = &State->KernelSources.RtlAvlDepthOfTree;
+        break;
+    case KSW_DYN_FIELD_ID_RTL_AVL_RESTART_KEY:
+        *OffsetOut = &State->Kernel.RtlAvlRestartKey;
+        *SourceOut = &State->KernelSources.RtlAvlRestartKey;
+        break;
+    case KSW_DYN_FIELD_ID_RTL_AVL_DELETE_COUNT:
+        *OffsetOut = &State->Kernel.RtlAvlDeleteCount;
+        *SourceOut = &State->KernelSources.RtlAvlDeleteCount;
+        break;
+    case KSW_DYN_FIELD_ID_RTL_AVL_TYPE_SIZE:
+        *OffsetOut = &State->Kernel.RtlAvlTypeSize;
+        *SourceOut = &State->KernelSources.RtlAvlTypeSize;
+        break;
     default:
         return FALSE;
     }
@@ -1487,7 +1554,7 @@ Routine Description:
     Resolve one non-callback ntoskrnl global item ID into the internal
     RVA/source slots. These optional globals support future process/thread
     cross-view walks, module list validation, unloaded-driver attribution, and
-    PiDDB cache checks.
+    PiDDB cache checks, and Shadow SSDT service-routine resolution.
 
 Arguments:
 
@@ -1525,6 +1592,14 @@ Return Value:
     case KSW_DYN_FIELD_ID_KG_PIDDB_CACHE_TABLE:
         *RvaOut = &State->KernelGlobals.PiDDBCacheTable;
         *SourceOut = &State->KernelGlobalSources.PiDDBCacheTable;
+        break;
+    case KSW_DYN_FIELD_ID_KG_KE_SERVICE_DESCRIPTOR_TABLE_SHADOW:
+        *RvaOut = &State->KernelGlobals.KeServiceDescriptorTableShadow;
+        *SourceOut = &State->KernelGlobalSources.KeServiceDescriptorTableShadow;
+        break;
+    case KSW_DYN_FIELD_ID_KG_MM_LAST_UNLOADED_DRIVER:
+        *RvaOut = &State->KernelGlobals.MmLastUnloadedDriver;
+        *SourceOut = &State->KernelGlobalSources.MmLastUnloadedDriver;
         break;
     default:
         return FALSE;

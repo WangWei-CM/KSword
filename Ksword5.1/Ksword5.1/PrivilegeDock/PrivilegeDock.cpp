@@ -11,13 +11,19 @@
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAction>
+#include <QApplication>
+#include <QClipboard>
 #include <QDateTime>
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
+#include <QModelIndex>
 #include <QPushButton>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -73,6 +79,78 @@ namespace
     QString boolText(const bool value)
     {
         return value ? QStringLiteral("是") : QStringLiteral("否");
+    }
+
+    QString privilegeTableMenuStyle()
+    {
+        // 输入：无。
+        // 处理：生成不透明菜单样式，保持账号/权限表右键菜单在深浅色主题下可读。
+        // 返回：QMenu 样式表文本。
+        return QStringLiteral(
+            "QMenu{background:%1;color:%2;border:1px solid %3;}"
+            "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
+            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:disabled{color:%5;}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::TextSecondaryHex());
+    }
+
+    void copyPrivilegeTableCurrentRow(QTableWidget* table)
+    {
+        // 输入：账号表或权限表。
+        // 处理：读取当前显示行的所有列，按 TSV 复制到剪贴板。
+        // 返回：无返回值；表格/剪贴板不可用或无当前行时不做动作。
+        if (table == nullptr || QApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        const int rowIndex = table->currentRow();
+        if (rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return;
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+            fields.push_back(item != nullptr ? item->text() : QString());
+        }
+        QApplication::clipboard()->setText(fields.join(QChar('\t')));
+    }
+
+    void installPrivilegeTableCopyMenu(QTableWidget* table)
+    {
+        // 输入：需要复制当前行能力的账号/权限表。
+        // 处理：安装只读右键菜单；右键某行时先选中对应单元格。
+        // 返回：无返回值；不会触发账号创建、密码重置或权限调整。
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition) {
+            const QModelIndex clickedIndex = table->indexAt(localPosition);
+            if (clickedIndex.isValid())
+            {
+                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu menu(table);
+            menu.setStyleSheet(privilegeTableMenuStyle());
+            QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(table->currentRow() >= 0);
+            if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+            {
+                copyPrivilegeTableCurrentRow(table);
+            }
+        });
     }
 }
 
@@ -165,6 +243,7 @@ void PrivilegeDock::initializeAccountTab()
     m_accountTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     m_accountTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     m_accountTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    installPrivilegeTableCopyMenu(m_accountTable);
     m_accountLayout->addWidget(m_accountTable, 1);
 
     // 新建用户输入区：包含用户名、密码、确认密码。
@@ -256,6 +335,7 @@ void PrivilegeDock::initializePermissionTab()
     m_permissionTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_permissionTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     m_permissionTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    installPrivilegeTableCopyMenu(m_permissionTable);
     m_permissionLayout->addWidget(m_permissionTable, 1);
 
     m_tabWidget->addTab(m_permissionPage, QStringLiteral("权限"));

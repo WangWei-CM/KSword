@@ -13,6 +13,7 @@
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/HexEditorWidget.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../ksword/file/file_handle_tools.h"
 #include "../ksword/file/file.h"
 
 #include <QApplication>
@@ -50,6 +51,7 @@
 #include <QModelIndex>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QTextEdit>
 #include <QPointer>
 #include <QProgressBar>
 #include <QProcess>
@@ -83,9 +85,14 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <Wbemidl.h>
+#include <fltUser.h>
+#include <atlbase.h>
+#include <comdef.h>
 
 #include <array>
 #include <algorithm>
+#include <cstddef>
 #include <chrono>
 #include <condition_variable>
 #include <cctype>
@@ -100,6 +107,10 @@
 #include <Sddl.h>
 
 #pragma comment(lib, "Advapi32.lib")
+#pragma comment(lib, "Ole32.lib")
+#pragma comment(lib, "OleAut32.lib")
+#pragma comment(lib, "wbemuuid.lib")
+#pragma comment(lib, "FltLib.lib")
 
 namespace
 {
@@ -150,6 +161,12 @@ namespace
         std::vector<std::uint32_t> selectedProcessIdList;
         std::vector<UnlockHandleCandidate> selectedHandleList;
     };
+
+    // installFileTableCopyMenu 作用：
+    // - 输入：FileDock 内临时弹窗或工具页表格；
+    // - 处理：安装只读复制当前行右键菜单；
+    // - 返回：无。前置声明用于上方文件解锁选择弹窗复用后文 helper。
+    void installFileTableCopyMenu(QTableWidget* tableWidget);
 
     // UnlockSelectionSharedState：
     // - 作用：在线程与 UI 队列之间传递解锁器选择结果；
@@ -315,6 +332,1004 @@ namespace
         {
             list.push_back(normalizedText);
         }
+    }
+
+    // QueryNtQueryInformationFilePtr：动态解析 NtQueryInformationFile，避免 FileDock 额外依赖
+    // 其它 user-mode 模块。
+    using NtQueryInformationFileFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE_INFORMATION_CLASS);
+
+    // queryBitLockerVolumeText：前置声明，供卷快照辅助函数先调用。
+    QString queryBitLockerVolumeText(const QString& driveLetter);
+
+    // FileVolumeAuditSnapshot：汇总卷、存储和 BitLocker 状态的轻量只读模型。
+    struct FileVolumeAuditSnapshot
+    {
+        QString volumeRoot;
+        QString mountPointsText;
+        QString devicePathText;
+        QString fsNameText;
+        QString labelText;
+        QString storageText;
+        QString bitLockerText;
+        QString volumeStackText;
+        QString filterText;
+    };
+
+    // VolumePathFromAnyPath：把任意本地路径压缩成卷根目录（例如 C:\）。
+    QString volumePathFromAnyPath(const QString& pathText)
+    {
+        const QString normalizedPath = QDir::toNativeSeparators(pathText).trimmed();
+        if (normalizedPath.isEmpty())
+        {
+            return QString();
+        }
+
+        std::array<wchar_t, MAX_PATH + 4U> buffer{};
+        const BOOL ok = ::GetVolumePathNameW(
+            normalizedPath.toStdWString().c_str(),
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()));
+        if (ok == FALSE)
+        {
+            return QString();
+        }
+        return QString::fromWCharArray(buffer.data());
+    }
+
+    // buildMountPointsText：读取卷对应的 DOS 挂载点列表，失败时返回空。
+    QString buildMountPointsText(const QString& volumeRoot)
+    {
+        if (volumeRoot.trimmed().isEmpty())
+        {
+            return QString();
+        }
+
+        DWORD requiredChars = 0;
+        ::GetVolumePathNamesForVolumeNameW(
+            volumeRoot.toStdWString().c_str(),
+            nullptr,
+            0,
+            &requiredChars);
+        if (requiredChars == 0)
+        {
+            return QString();
+        }
+
+        std::vector<wchar_t> buffer(static_cast<std::size_t>(requiredChars) + 2U, L'\0');
+        if (::GetVolumePathNamesForVolumeNameW(
+            volumeRoot.toStdWString().c_str(),
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()),
+            &requiredChars) == FALSE)
+        {
+            return QString();
+        }
+
+        QStringList paths;
+        const wchar_t* cursor = buffer.data();
+        while (cursor != nullptr && *cursor != L'\0')
+        {
+            const QString pathText = QString::fromWCharArray(cursor);
+            if (!pathText.isEmpty())
+            {
+                paths << pathText;
+            }
+            cursor += pathText.size() + 1;
+        }
+        return paths.join(QStringLiteral(", "));
+    }
+
+    // buildVolumeDevicePathText：把卷名解析为设备路径（例如 \Device\HarddiskVolumeX）。
+    QString buildVolumeDevicePathText(const QString& volumeRoot)
+    {
+        if (volumeRoot.trimmed().isEmpty())
+        {
+            return QString();
+        }
+
+        QString dosName = volumeRoot;
+        if (dosName.endsWith(QChar('\\')))
+        {
+            dosName.chop(1);
+        }
+
+        std::array<wchar_t, 1024U> buffer{};
+        const DWORD chars = ::QueryDosDeviceW(
+            dosName.toStdWString().c_str(),
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()));
+        if (chars == 0)
+        {
+            return QString();
+        }
+        return QString::fromWCharArray(buffer.data());
+    }
+
+    // buildVolumeInfoText：读取卷标、文件系统和基本属性。
+    QString buildVolumeInfoText(const QString& volumeRoot)
+    {
+        if (volumeRoot.trimmed().isEmpty())
+        {
+            return QString();
+        }
+
+        std::array<wchar_t, MAX_PATH + 1U> labelBuffer{};
+        std::array<wchar_t, MAX_PATH + 1U> fsBuffer{};
+        DWORD serialNumber = 0;
+        DWORD maxComponentLength = 0;
+        DWORD fsFlags = 0;
+        if (::GetVolumeInformationW(
+            volumeRoot.toStdWString().c_str(),
+            labelBuffer.data(),
+            static_cast<DWORD>(labelBuffer.size()),
+            &serialNumber,
+            &maxComponentLength,
+            &fsFlags,
+            fsBuffer.data(),
+            static_cast<DWORD>(fsBuffer.size())) == FALSE)
+        {
+            return QString();
+        }
+
+        return QStringLiteral("Label=%1 | FS=%2 | Serial=0x%3 | Flags=0x%4")
+            .arg(QString::fromWCharArray(labelBuffer.data()))
+            .arg(QString::fromWCharArray(fsBuffer.data()))
+            .arg(serialNumber, 8, 16, QChar('0'))
+            .arg(fsFlags, 8, 16, QChar('0'))
+            .toUpper();
+    }
+
+    // queryVolumeLabelAndFileSystemText：只读取卷标与文件系统名称，供 Storage/FVE 页复用。
+    // 输入：volumeRoot 为卷根路径（例如 C:\）；labelOut/fileSystemOut 接收读取结果。
+    // 返回：读取成功时为 true；失败时保持输出为空。
+    bool queryVolumeLabelAndFileSystemText(
+        const QString& volumeRoot,
+        QString& labelOut,
+        QString& fileSystemOut)
+    {
+        labelOut.clear();
+        fileSystemOut.clear();
+        if (volumeRoot.trimmed().isEmpty())
+        {
+            return false;
+        }
+
+        std::array<wchar_t, MAX_PATH + 1U> labelBuffer{};
+        std::array<wchar_t, MAX_PATH + 1U> fsBuffer{};
+        DWORD serialNumber = 0;
+        DWORD maxComponentLength = 0;
+        DWORD fsFlags = 0;
+        if (::GetVolumeInformationW(
+            volumeRoot.toStdWString().c_str(),
+            labelBuffer.data(),
+            static_cast<DWORD>(labelBuffer.size()),
+            &serialNumber,
+            &maxComponentLength,
+            &fsFlags,
+            fsBuffer.data(),
+            static_cast<DWORD>(fsBuffer.size())) == FALSE)
+        {
+            return false;
+        }
+
+        labelOut = QString::fromWCharArray(labelBuffer.data()).trimmed();
+        fileSystemOut = QString::fromWCharArray(fsBuffer.data()).trimmed();
+        return true;
+    }
+
+    // buildStorageDescriptorText：读取存储设备描述符。
+    QString buildStorageDescriptorText(const QString& volumeRoot)
+    {
+        if (volumeRoot.trimmed().isEmpty())
+        {
+            return QString();
+        }
+
+        HANDLE handleValue = ::CreateFileW(
+            volumeRoot.toStdWString().c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (handleValue == INVALID_HANDLE_VALUE)
+        {
+            return QStringLiteral("CreateFile=%1").arg(::GetLastError());
+        }
+
+        QString result;
+        STORAGE_PROPERTY_QUERY query{};
+        query.PropertyId = StorageDeviceProperty;
+        query.QueryType = PropertyStandardQuery;
+        std::array<std::uint8_t, 1024U> buffer{};
+        DWORD returnedBytes = 0;
+        if (::DeviceIoControl(
+            handleValue,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            &query,
+            static_cast<DWORD>(sizeof(query)),
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()),
+            &returnedBytes,
+            nullptr) != FALSE
+            && returnedBytes >= sizeof(STORAGE_DEVICE_DESCRIPTOR))
+        {
+            const auto* descriptor = reinterpret_cast<const STORAGE_DEVICE_DESCRIPTOR*>(buffer.data());
+            result = QStringLiteral("BusType=%1 | Removable=%2 | RawSize=%3")
+                .arg(static_cast<unsigned long>(descriptor->BusType))
+                .arg(descriptor->RemovableMedia ? QStringLiteral("是") : QStringLiteral("否"))
+                .arg(returnedBytes);
+        }
+        ::CloseHandle(handleValue);
+        return result;
+    }
+
+    // buildVolumeStackText：把卷根、设备路径、文件系统拼成稳定的只读“卷栈”摘要。
+    // 输入：volumeRoot/devicePathText/fsText 均为可空的可见状态文本。
+    // 返回：适合 UI 展示的单行或多行链式摘要。
+    QString buildVolumeStackText(
+        const QString& volumeRoot,
+        const QString& devicePathText,
+        const QString& fsText,
+        const QString& mountPointsText)
+    {
+        QStringList parts;
+        appendUniqueText(parts, volumeRoot);
+        appendUniqueText(parts, devicePathText);
+        appendUniqueText(parts, fsText);
+        appendUniqueText(parts, mountPointsText);
+        if (parts.isEmpty())
+        {
+            return QString();
+        }
+        return parts.join(QStringLiteral(" -> "));
+    }
+
+    // buildBitLockerStatusText：只读查询 BitLocker 可见状态，失败后给降级说明。
+    QString buildBitLockerStatusText(const QString& volumeRoot)
+    {
+        if (volumeRoot.trimmed().isEmpty())
+        {
+            return QStringLiteral("BitLocker: <unknown>");
+        }
+
+        return queryBitLockerVolumeText(volumeRoot.left(2));
+    }
+
+    // queryFileVolumeAuditSnapshot：汇总 FileDock 三个新页所需的卷/存储/FVE 视图。
+    FileVolumeAuditSnapshot queryFileVolumeAuditSnapshot(const QString& filePath)
+    {
+        FileVolumeAuditSnapshot snapshot{};
+        snapshot.volumeRoot = volumePathFromAnyPath(filePath);
+        if (snapshot.volumeRoot.isEmpty())
+        {
+            return snapshot;
+        }
+
+        snapshot.mountPointsText = buildMountPointsText(snapshot.volumeRoot);
+        snapshot.devicePathText = buildVolumeDevicePathText(snapshot.volumeRoot);
+        QString volumeLabelText;
+        QString fileSystemText;
+        if (queryVolumeLabelAndFileSystemText(snapshot.volumeRoot, volumeLabelText, fileSystemText))
+        {
+            snapshot.labelText = volumeLabelText;
+            snapshot.fsNameText = fileSystemText;
+        }
+        snapshot.volumeStackText = buildVolumeStackText(
+            snapshot.volumeRoot,
+            snapshot.devicePathText,
+            snapshot.fsNameText,
+            snapshot.mountPointsText);
+        const QString volumeInfoText = buildVolumeInfoText(snapshot.volumeRoot);
+        const QString storageDescriptorText = buildStorageDescriptorText(snapshot.volumeRoot);
+        snapshot.storageText = QStringList{ volumeInfoText, storageDescriptorText }.join(QStringLiteral(" | "));
+        snapshot.bitLockerText = buildBitLockerStatusText(snapshot.volumeRoot);
+        snapshot.filterText = QStringLiteral("仅只读枚举，不做卸载/绕过/修改。");
+        return snapshot;
+    }
+
+    // openReadOnlyFileHandle：以只读、共享最大化方式打开文件或目录。
+    HANDLE openReadOnlyFileHandle(const QString& pathText, const bool directoryHint)
+    {
+        const QString normalizedPath = QDir::toNativeSeparators(pathText).trimmed();
+        if (normalizedPath.isEmpty())
+        {
+            return INVALID_HANDLE_VALUE;
+        }
+
+        DWORD flags = FILE_ATTRIBUTE_NORMAL;
+        if (directoryHint)
+        {
+            flags |= FILE_FLAG_BACKUP_SEMANTICS;
+        }
+
+        return ::CreateFileW(
+            normalizedPath.toStdWString().c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            flags,
+            nullptr);
+    }
+
+    // queryFileStandardInfoText：读取 DeletePending / 文件大小 / 链接数等标准信息。
+    bool queryFileStandardInfoText(
+        HANDLE fileHandle,
+        QString& detailsOut,
+        QString& statusOut)
+    {
+        detailsOut.clear();
+        statusOut.clear();
+        if (fileHandle == nullptr || fileHandle == INVALID_HANDLE_VALUE)
+        {
+            statusOut = QStringLiteral("句柄无效");
+            return false;
+        }
+
+        FILE_STANDARD_INFO standardInfo{};
+        if (::GetFileInformationByHandleEx(
+            fileHandle,
+            FileStandardInfo,
+            &standardInfo,
+            static_cast<DWORD>(sizeof(standardInfo))) == FALSE)
+        {
+            statusOut = QStringLiteral("GetFileInformationByHandleEx(FileStandardInfo) 失败，Win32=%1")
+                .arg(::GetLastError());
+            return false;
+        }
+
+        detailsOut = QStringLiteral("DeletePending: %1\n")
+            .arg(standardInfo.DeletePending ? QStringLiteral("是") : QStringLiteral("否"));
+        detailsOut += QStringLiteral("Directory: %1\n")
+            .arg(standardInfo.Directory ? QStringLiteral("是") : QStringLiteral("否"));
+        detailsOut += QStringLiteral("AllocationSize: %1\n")
+            .arg(static_cast<qlonglong>(standardInfo.AllocationSize.QuadPart));
+        detailsOut += QStringLiteral("EndOfFile: %1\n")
+            .arg(static_cast<qlonglong>(standardInfo.EndOfFile.QuadPart));
+        detailsOut += QStringLiteral("NumberOfLinks: %1\n")
+            .arg(static_cast<unsigned long>(standardInfo.NumberOfLinks));
+        detailsOut += QStringLiteral("采集句柄 ShareAccess: READ|WRITE|DELETE\n");
+        statusOut = QStringLiteral("OK");
+        return true;
+    }
+
+    // createReadOnlyAuditTextPage：创建一个只读文本页，统一文本可选与布局风格。
+    // 输入：parent 为页面父对象，content 为页面文本。
+    // 返回：承载 QTextEdit 的 QWidget 页面；没有返回值以外副作用。
+    QWidget* createReadOnlyAuditTextPage(QWidget* parent, const QString& content)
+    {
+        QWidget* page = new QWidget(parent);
+        QVBoxLayout* layout = new QVBoxLayout(page);
+        QTextEdit* editor = new QTextEdit(page);
+        editor->setReadOnly(true);
+        editor->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        editor->setText(content);
+        layout->addWidget(editor, 1);
+        return page;
+    }
+
+    // readUtf16FieldAtOffset：从返回缓冲中读取 UTF-16 偏移字段，供 FltLib 枚举结构解析。
+    // 输入：buffer/bytesReturned 指向完整返回缓冲；fieldOffset/fieldLength 为字节级字段位置。
+    // 返回：成功时返回去尾空白后的字符串；失败返回空字符串。
+    QString readUtf16FieldAtOffset(
+        const void* buffer,
+        const std::size_t bytesReturned,
+        const USHORT fieldOffset,
+        const USHORT fieldLength)
+    {
+        if (buffer == nullptr || bytesReturned == 0U || fieldLength == 0U)
+        {
+            return QString();
+        }
+        const std::size_t startOffset = static_cast<std::size_t>(fieldOffset);
+        const std::size_t lengthBytes = static_cast<std::size_t>(fieldLength);
+        if (startOffset >= bytesReturned || (startOffset + lengthBytes) > bytesReturned)
+        {
+            return QString();
+        }
+        const auto* charBuffer = reinterpret_cast<const wchar_t*>(
+            static_cast<const std::uint8_t*>(buffer) + startOffset);
+        return QString::fromWCharArray(charBuffer, static_cast<int>(lengthBytes / sizeof(wchar_t))).trimmed();
+    }
+
+    // filterFilesystemTypeToText：把 FLT_FILESYSTEM_TYPE 枚举转成可读文本。
+    // 输入：filesystemType 为 FltUser 返回的文件系统类型。
+    // 返回：对应文件系统名称；未知枚举保留数值。
+    QString filterFilesystemTypeToText(const FLT_FILESYSTEM_TYPE filesystemType)
+    {
+        switch (filesystemType)
+        {
+        case FLT_FSTYPE_UNKNOWN: return QStringLiteral("Unknown");
+        case FLT_FSTYPE_RAW: return QStringLiteral("RAW");
+        case FLT_FSTYPE_NTFS: return QStringLiteral("NTFS");
+        case FLT_FSTYPE_FAT: return QStringLiteral("FAT");
+        case FLT_FSTYPE_CDFS: return QStringLiteral("CDFS");
+        case FLT_FSTYPE_UDFS: return QStringLiteral("UDFS");
+        case FLT_FSTYPE_LANMAN: return QStringLiteral("LANMAN");
+        case FLT_FSTYPE_WEBDAV: return QStringLiteral("WebDAV");
+        case FLT_FSTYPE_RDPDR: return QStringLiteral("RDPDR");
+        case FLT_FSTYPE_NFS: return QStringLiteral("NFS");
+        case FLT_FSTYPE_MS_NETWARE: return QStringLiteral("MS_NETWARE");
+        case FLT_FSTYPE_NETWARE: return QStringLiteral("NETWARE");
+        case FLT_FSTYPE_BSUDF: return QStringLiteral("BsUDF");
+        case FLT_FSTYPE_MUP: return QStringLiteral("MUP");
+        case FLT_FSTYPE_RSFX: return QStringLiteral("RsFx");
+        case FLT_FSTYPE_ROXIO_UDF1: return QStringLiteral("RoxioUDF1");
+        case FLT_FSTYPE_ROXIO_UDF2: return QStringLiteral("RoxioUDF2");
+        case FLT_FSTYPE_ROXIO_UDF3: return QStringLiteral("RoxioUDF3");
+        case FLT_FSTYPE_TACIT: return QStringLiteral("Tacit");
+        case FLT_FSTYPE_FS_REC: return QStringLiteral("FsRec");
+        case FLT_FSTYPE_INCD: return QStringLiteral("InCD");
+        case FLT_FSTYPE_INCD_FAT: return QStringLiteral("InCDFat");
+        case FLT_FSTYPE_EXFAT: return QStringLiteral("exFAT");
+        case FLT_FSTYPE_PSFS: return QStringLiteral("PSFS");
+        case FLT_FSTYPE_GPFS: return QStringLiteral("GPFS");
+        case FLT_FSTYPE_NPFS: return QStringLiteral("NPFS");
+        case FLT_FSTYPE_MSFS: return QStringLiteral("MSFS");
+        case FLT_FSTYPE_CSVFS: return QStringLiteral("CSVFS");
+        case FLT_FSTYPE_REFS: return QStringLiteral("ReFS");
+        case FLT_FSTYPE_OPENAFS: return QStringLiteral("OpenAFS");
+        case FLT_FSTYPE_CIMFS: return QStringLiteral("CIMFS");
+        default:
+            return QStringLiteral("Type=%1").arg(static_cast<int>(filesystemType));
+        }
+    }
+
+    // appendMinifilterRecordText：把单条 Filter 枚举记录压成可读文本。
+    // 输入：buffer/bytesReturned 为 FilterFindFirst/Next 返回数据。
+    // 返回：无；直接追加到 content。
+    void appendMinifilterRecordText(
+        QString& content,
+        const void* buffer,
+        const std::size_t bytesReturned)
+    {
+        if (buffer == nullptr || bytesReturned < sizeof(FILTER_AGGREGATE_STANDARD_INFORMATION))
+        {
+            return;
+        }
+
+        const auto* record = reinterpret_cast<const FILTER_AGGREGATE_STANDARD_INFORMATION*>(buffer);
+        const bool isMinifilter = (record->Flags & FLTFL_ASI_IS_MINIFILTER) != 0;
+        const QString filterName = isMinifilter
+            ? readUtf16FieldAtOffset(buffer, bytesReturned, record->Type.MiniFilter.FilterNameBufferOffset, record->Type.MiniFilter.FilterNameLength)
+            : readUtf16FieldAtOffset(buffer, bytesReturned, record->Type.LegacyFilter.FilterNameBufferOffset, record->Type.LegacyFilter.FilterNameLength);
+        const QString altitude = isMinifilter
+            ? readUtf16FieldAtOffset(buffer, bytesReturned, record->Type.MiniFilter.FilterAltitudeBufferOffset, record->Type.MiniFilter.FilterAltitudeLength)
+            : readUtf16FieldAtOffset(buffer, bytesReturned, record->Type.LegacyFilter.FilterAltitudeBufferOffset, record->Type.LegacyFilter.FilterAltitudeLength);
+        const QString recordKind = isMinifilter ? QStringLiteral("Minifilter") : QStringLiteral("LegacyFilter");
+
+        content += QStringLiteral("名称: %1\n").arg(filterName.isEmpty() ? QStringLiteral("<unknown>") : filterName);
+        content += QStringLiteral("类型: %1\n").arg(recordKind);
+        content += QStringLiteral("Flags: 0x%1\n").arg(record->Flags, 8, 16, QChar('0')).toUpper();
+        if (isMinifilter)
+        {
+            content += QStringLiteral("FrameID: %1\n").arg(record->Type.MiniFilter.FrameID);
+            content += QStringLiteral("NumberOfInstances: %1\n").arg(record->Type.MiniFilter.NumberOfInstances);
+        }
+        content += QStringLiteral("Altitude: %1\n").arg(altitude.isEmpty() ? QStringLiteral("<unknown>") : altitude);
+    }
+
+    // enumerateMinifilterText：只读枚举 Filter 列表并生成摘要文本。
+    // 输入：无。
+    // 返回：包含 Filter 名称、Altitude、FrameID 和实例数的可见文本。
+    QString enumerateMinifilterText()
+    {
+        QString content;
+        content += QStringLiteral("[Minifilter]\n");
+        content += QStringLiteral("枚举来源: FilterFindFirst / FilterFindNext\n");
+        content += QStringLiteral("展示字段: FilterName, Altitude, FrameID, NumberOfInstances, Flags\n");
+
+        std::vector<std::uint8_t> buffer(16U * 1024U, 0U);
+        DWORD bytesReturned = 0;
+        HANDLE enumHandle = nullptr;
+        HRESULT hr = E_FAIL;
+        for (;;)
+        {
+            hr = ::FilterFindFirst(
+                FilterAggregateStandardInformation,
+                buffer.data(),
+                static_cast<DWORD>(buffer.size()),
+                &bytesReturned,
+                &enumHandle);
+            if (SUCCEEDED(hr))
+            {
+                break;
+            }
+            if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA))
+            {
+                buffer.resize(buffer.size() * 2U);
+                continue;
+            }
+            content += QStringLiteral("状态: 枚举失败 HRESULT=0x%1\n")
+                .arg(static_cast<qulonglong>(static_cast<unsigned long>(hr)), 8, 16, QChar('0')).toUpper();
+            return content;
+        }
+
+        auto appendRecord = [&](const QString& prefixText)
+        {
+            content += prefixText;
+            appendMinifilterRecordText(content, buffer.data(), bytesReturned);
+            content += QStringLiteral("\n");
+        };
+
+        appendRecord(QStringLiteral("\n"));
+
+        for (;;)
+        {
+            bytesReturned = 0;
+            hr = ::FilterFindNext(
+                enumHandle,
+                FilterAggregateStandardInformation,
+                buffer.data(),
+                static_cast<DWORD>(buffer.size()),
+                &bytesReturned);
+            if (SUCCEEDED(hr))
+            {
+                appendRecord(QStringLiteral(""));
+                continue;
+            }
+            if (hr == HRESULT_FROM_WIN32(ERROR_NO_MORE_ITEMS))
+            {
+                break;
+            }
+            if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA))
+            {
+                buffer.resize(buffer.size() * 2U);
+                continue;
+            }
+            content += QStringLiteral("继续枚举失败 HRESULT=0x%1\n")
+                .arg(static_cast<qulonglong>(static_cast<unsigned long>(hr)), 8, 16, QChar('0')).toUpper();
+            break;
+        }
+
+        if (enumHandle != nullptr)
+        {
+            ::FilterFindClose(enumHandle);
+        }
+        return content;
+    }
+
+    // appendInstanceRecordText：把单条 Instance 枚举记录压成可读文本。
+    // 输入：buffer/bytesReturned 为 FilterInstanceFindFirst/Next 返回数据。
+    // 返回：无；直接追加到 content。
+    void appendInstanceRecordText(
+        QString& content,
+        const void* buffer,
+        const std::size_t bytesReturned)
+    {
+        if (buffer == nullptr || bytesReturned < sizeof(INSTANCE_AGGREGATE_STANDARD_INFORMATION))
+        {
+            return;
+        }
+
+        const auto* record = reinterpret_cast<const INSTANCE_AGGREGATE_STANDARD_INFORMATION*>(buffer);
+        const bool isMinifilter = (record->Flags & FLTFL_IASI_IS_MINIFILTER) != 0;
+        const QString instanceName = isMinifilter
+            ? readUtf16FieldAtOffset(buffer, bytesReturned, record->Type.MiniFilter.InstanceNameBufferOffset, record->Type.MiniFilter.InstanceNameLength)
+            : readUtf16FieldAtOffset(buffer, bytesReturned, 0, 0);
+        const QString altitude = isMinifilter
+            ? readUtf16FieldAtOffset(buffer, bytesReturned, record->Type.MiniFilter.AltitudeBufferOffset, record->Type.MiniFilter.AltitudeLength)
+            : readUtf16FieldAtOffset(buffer, bytesReturned, record->Type.LegacyFilter.AltitudeBufferOffset, record->Type.LegacyFilter.AltitudeLength);
+        const QString volumeName = isMinifilter
+            ? readUtf16FieldAtOffset(buffer, bytesReturned, record->Type.MiniFilter.VolumeNameBufferOffset, record->Type.MiniFilter.VolumeNameLength)
+            : readUtf16FieldAtOffset(buffer, bytesReturned, record->Type.LegacyFilter.VolumeNameBufferOffset, record->Type.LegacyFilter.VolumeNameLength);
+        const QString filterName = isMinifilter
+            ? readUtf16FieldAtOffset(buffer, bytesReturned, record->Type.MiniFilter.FilterNameBufferOffset, record->Type.MiniFilter.FilterNameLength)
+            : readUtf16FieldAtOffset(buffer, bytesReturned, record->Type.LegacyFilter.FilterNameBufferOffset, record->Type.LegacyFilter.FilterNameLength);
+
+        content += QStringLiteral("实例名: %1\n").arg(instanceName.isEmpty() ? QStringLiteral("<unknown>") : instanceName);
+        content += QStringLiteral("类型: %1\n").arg(isMinifilter ? QStringLiteral("Minifilter") : QStringLiteral("LegacyFilter"));
+        content += QStringLiteral("Flags: 0x%1\n").arg(record->Flags, 8, 16, QChar('0')).toUpper();
+        if (isMinifilter)
+        {
+            content += QStringLiteral("FrameID: %1\n").arg(record->Type.MiniFilter.FrameID);
+            content += QStringLiteral("VolumeFileSystemType: %1\n")
+                .arg(filterFilesystemTypeToText(record->Type.MiniFilter.VolumeFileSystemType));
+        }
+        content += QStringLiteral("Altitude: %1\n").arg(altitude.isEmpty() ? QStringLiteral("<unknown>") : altitude);
+        content += QStringLiteral("VolumeName: %1\n").arg(volumeName.isEmpty() ? QStringLiteral("<unknown>") : volumeName);
+        content += QStringLiteral("FilterName: %1\n").arg(filterName.isEmpty() ? QStringLiteral("<unknown>") : filterName);
+    }
+
+    // enumerateInstanceText：枚举全部 minifilter/legacy instance，给出 Volume 关联摘要。
+    // 输入：无。
+    // 返回：实例列表的只读文本。
+    QString enumerateInstanceText()
+    {
+        QString content;
+        content += QStringLiteral("[Instance]\n");
+        content += QStringLiteral("枚举来源: FilterInstanceFindFirst / FilterInstanceFindNext\n");
+        content += QStringLiteral("展示字段: InstanceName, Altitude, VolumeName, FilterName, VolumeFileSystemType\n");
+
+        std::vector<std::uint8_t> buffer(16U * 1024U, 0U);
+        DWORD bytesReturned = 0;
+        HANDLE findHandle = nullptr;
+        HRESULT hr = E_FAIL;
+        for (;;)
+        {
+            hr = ::FilterFindFirst(
+                FilterAggregateStandardInformation,
+                buffer.data(),
+                static_cast<DWORD>(buffer.size()),
+                &bytesReturned,
+                &findHandle);
+            if (SUCCEEDED(hr))
+            {
+                break;
+            }
+            if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA))
+            {
+                buffer.resize(buffer.size() * 2U);
+                continue;
+            }
+            content += QStringLiteral("状态: 无法先枚举 Filter 列表 HRESULT=0x%1\n")
+                .arg(static_cast<qulonglong>(static_cast<unsigned long>(hr)), 8, 16, QChar('0')).toUpper();
+            return content;
+        }
+
+        for (;;)
+        {
+            const auto* filterRecord = reinterpret_cast<const FILTER_AGGREGATE_STANDARD_INFORMATION*>(buffer.data());
+            const bool isMinifilter = (filterRecord->Flags & FLTFL_ASI_IS_MINIFILTER) != 0;
+            const QString filterName = isMinifilter
+                ? readUtf16FieldAtOffset(buffer.data(), bytesReturned, filterRecord->Type.MiniFilter.FilterNameBufferOffset, filterRecord->Type.MiniFilter.FilterNameLength)
+                : readUtf16FieldAtOffset(buffer.data(), bytesReturned, filterRecord->Type.LegacyFilter.FilterNameBufferOffset, filterRecord->Type.LegacyFilter.FilterNameLength);
+            if (!filterName.isEmpty())
+            {
+                content += QStringLiteral("\n[Filter] %1\n").arg(filterName);
+            }
+
+            HANDLE instanceHandle = nullptr;
+            std::vector<std::uint8_t> instanceBuffer(16U * 1024U, 0U);
+            DWORD instanceBytesReturned = 0;
+            if (!filterName.isEmpty())
+            {
+                for (;;)
+                {
+                    hr = ::FilterInstanceFindFirst(
+                        filterName.toStdWString().c_str(),
+                        InstanceAggregateStandardInformation,
+                        instanceBuffer.data(),
+                        static_cast<DWORD>(instanceBuffer.size()),
+                        &instanceBytesReturned,
+                        &instanceHandle);
+                    if (SUCCEEDED(hr))
+                    {
+                        break;
+                    }
+                    if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA))
+                    {
+                        instanceBuffer.resize(instanceBuffer.size() * 2U);
+                        continue;
+                    }
+                    break;
+                }
+                if (SUCCEEDED(hr))
+                {
+                    for (;;)
+                    {
+                        content += QStringLiteral("  - ");
+                        appendInstanceRecordText(content, instanceBuffer.data(), instanceBytesReturned);
+                        content += QStringLiteral("\n");
+
+                        instanceBytesReturned = 0;
+                        hr = ::FilterInstanceFindNext(
+                            instanceHandle,
+                            InstanceAggregateStandardInformation,
+                            instanceBuffer.data(),
+                            static_cast<DWORD>(instanceBuffer.size()),
+                            &instanceBytesReturned);
+                        if (SUCCEEDED(hr))
+                        {
+                            continue;
+                        }
+                        if (hr == HRESULT_FROM_WIN32(ERROR_NO_MORE_ITEMS))
+                        {
+                            break;
+                        }
+                        if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA))
+                        {
+                            instanceBuffer.resize(instanceBuffer.size() * 2U);
+                            continue;
+                        }
+                        content += QStringLiteral("  ! 继续枚举实例失败 HRESULT=0x%1\n")
+                            .arg(static_cast<qulonglong>(static_cast<unsigned long>(hr)), 8, 16, QChar('0')).toUpper();
+                        break;
+                    }
+                }
+                else
+                {
+                    content += QStringLiteral("  ! FilterInstanceFindFirst 失败 HRESULT=0x%1\n")
+                        .arg(static_cast<qulonglong>(static_cast<unsigned long>(hr)), 8, 16, QChar('0')).toUpper();
+                }
+            }
+
+            bytesReturned = 0;
+            hr = ::FilterFindNext(
+                findHandle,
+                FilterAggregateStandardInformation,
+                buffer.data(),
+                static_cast<DWORD>(buffer.size()),
+                &bytesReturned);
+            if (SUCCEEDED(hr))
+            {
+                continue;
+            }
+            if (hr == HRESULT_FROM_WIN32(ERROR_NO_MORE_ITEMS))
+            {
+                break;
+            }
+            if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA))
+            {
+                buffer.resize(buffer.size() * 2U);
+                continue;
+            }
+            content += QStringLiteral("继续枚举 Filter 失败 HRESULT=0x%1\n")
+                .arg(static_cast<qulonglong>(static_cast<unsigned long>(hr)), 8, 16, QChar('0')).toUpper();
+            break;
+        }
+
+        if (findHandle != nullptr)
+        {
+            ::FilterFindClose(findHandle);
+        }
+        return content;
+    }
+
+    // appendVolumeRecordText：把单条 Volume 枚举记录压成可读文本。
+    // 输入：buffer/bytesReturned 为 FilterVolumeFindFirst/Next 返回数据。
+    // 返回：无；直接追加到 content。
+    void appendVolumeRecordText(
+        QString& content,
+        const void* buffer,
+        const std::size_t bytesReturned)
+    {
+        if (buffer == nullptr || bytesReturned < sizeof(FILTER_VOLUME_STANDARD_INFORMATION))
+        {
+            return;
+        }
+
+        const auto* record = reinterpret_cast<const FILTER_VOLUME_STANDARD_INFORMATION*>(buffer);
+        const QString volumeName = readUtf16FieldAtOffset(
+            buffer,
+            bytesReturned,
+            offsetof(FILTER_VOLUME_STANDARD_INFORMATION, FilterVolumeName),
+            record->FilterVolumeNameLength);
+        content += QStringLiteral("卷名: %1\n").arg(volumeName.isEmpty() ? QStringLiteral("<unknown>") : volumeName);
+        content += QStringLiteral("Flags: 0x%1\n").arg(record->Flags, 8, 16, QChar('0')).toUpper();
+        content += QStringLiteral("FrameID: %1\n").arg(record->FrameID);
+        content += QStringLiteral("FileSystemType: %1\n").arg(filterFilesystemTypeToText(record->FileSystemType));
+    }
+
+    // enumerateVolumeText：枚举 FilterManager 公开 Volume 列表并给出卷栈关联摘要。
+    // 输入：无。
+    // 返回：Volume 列表与可见状态文本。
+    QString enumerateVolumeText()
+    {
+        QString content;
+        content += QStringLiteral("[Volume]\n");
+        content += QStringLiteral("枚举来源: FilterVolumeFindFirst / FilterVolumeFindNext\n");
+        content += QStringLiteral("展示字段: VolumeName, FileSystemType, FrameID, Flags, AttachedInstances\n");
+
+        std::vector<std::uint8_t> buffer(16U * 1024U, 0U);
+        DWORD bytesReturned = 0;
+        HANDLE volumeHandle = nullptr;
+        HRESULT hr = E_FAIL;
+        for (;;)
+        {
+            hr = ::FilterVolumeFindFirst(
+                FilterVolumeStandardInformation,
+                buffer.data(),
+                static_cast<DWORD>(buffer.size()),
+                &bytesReturned,
+                &volumeHandle);
+            if (SUCCEEDED(hr))
+            {
+                break;
+            }
+            if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA))
+            {
+                buffer.resize(buffer.size() * 2U);
+                continue;
+            }
+            content += QStringLiteral("状态: 枚举失败 HRESULT=0x%1\n")
+                .arg(static_cast<qulonglong>(static_cast<unsigned long>(hr)), 8, 16, QChar('0')).toUpper();
+            return content;
+        }
+
+        for (;;)
+        {
+            content += QStringLiteral("\n");
+            appendVolumeRecordText(content, buffer.data(), bytesReturned);
+
+            const auto* volumeRecord = reinterpret_cast<const FILTER_VOLUME_STANDARD_INFORMATION*>(buffer.data());
+            const QString volumeName = readUtf16FieldAtOffset(
+                buffer.data(),
+                bytesReturned,
+                offsetof(FILTER_VOLUME_STANDARD_INFORMATION, FilterVolumeName),
+                volumeRecord->FilterVolumeNameLength);
+            if (!volumeName.isEmpty())
+            {
+                HANDLE instanceHandle = nullptr;
+                std::vector<std::uint8_t> instanceBuffer(16U * 1024U, 0U);
+                DWORD instanceBytesReturned = 0;
+                if (!volumeName.isEmpty())
+                {
+                    for (;;)
+                    {
+                        hr = ::FilterVolumeInstanceFindFirst(
+                            volumeName.toStdWString().c_str(),
+                            InstanceAggregateStandardInformation,
+                            instanceBuffer.data(),
+                            static_cast<DWORD>(instanceBuffer.size()),
+                            &instanceBytesReturned,
+                            &instanceHandle);
+                        if (SUCCEEDED(hr))
+                        {
+                            break;
+                        }
+                        if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA))
+                        {
+                            instanceBuffer.resize(instanceBuffer.size() * 2U);
+                            continue;
+                        }
+                        break;
+                    }
+                    if (SUCCEEDED(hr))
+                    {
+                        content += QStringLiteral("AttachedInstances:\n");
+                        for (;;)
+                        {
+                            content += QStringLiteral("  - ");
+                            appendInstanceRecordText(content, instanceBuffer.data(), instanceBytesReturned);
+                            content += QStringLiteral("\n");
+
+                            instanceBytesReturned = 0;
+                            hr = ::FilterVolumeInstanceFindNext(
+                                instanceHandle,
+                                InstanceAggregateStandardInformation,
+                                instanceBuffer.data(),
+                                static_cast<DWORD>(instanceBuffer.size()),
+                                &instanceBytesReturned);
+                            if (SUCCEEDED(hr))
+                            {
+                                continue;
+                            }
+                            if (hr == HRESULT_FROM_WIN32(ERROR_NO_MORE_ITEMS))
+                            {
+                                break;
+                            }
+                            if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA))
+                            {
+                                instanceBuffer.resize(instanceBuffer.size() * 2U);
+                                continue;
+                            }
+                            content += QStringLiteral("  ! 继续枚举卷实例失败 HRESULT=0x%1\n")
+                                .arg(static_cast<qulonglong>(static_cast<unsigned long>(hr)), 8, 16, QChar('0')).toUpper();
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        content += QStringLiteral("AttachedInstances: FilterVolumeInstanceFindFirst 失败 HRESULT=0x%1\n")
+                            .arg(static_cast<qulonglong>(static_cast<unsigned long>(hr)), 8, 16, QChar('0')).toUpper();
+                    }
+                }
+            }
+
+            bytesReturned = 0;
+            hr = ::FilterVolumeFindNext(
+                volumeHandle,
+                FilterVolumeStandardInformation,
+                buffer.data(),
+                static_cast<DWORD>(buffer.size()),
+                &bytesReturned);
+            if (SUCCEEDED(hr))
+            {
+                continue;
+            }
+            if (hr == HRESULT_FROM_WIN32(ERROR_NO_MORE_ITEMS))
+            {
+                break;
+            }
+            if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA))
+            {
+                buffer.resize(buffer.size() * 2U);
+                continue;
+            }
+            content += QStringLiteral("继续枚举 Volume 失败 HRESULT=0x%1\n")
+                .arg(static_cast<qulonglong>(static_cast<unsigned long>(hr)), 8, 16, QChar('0')).toUpper();
+            break;
+        }
+
+        if (volumeHandle != nullptr)
+        {
+            ::FilterVolumeFindClose(volumeHandle);
+        }
+        return content;
+    }
+
+    // queryBitLockerVolumeText：查询 Win32_EncryptableVolume 只读状态文本。
+    QString queryBitLockerVolumeText(const QString& driveLetter)
+    {
+        if (driveLetter.trimmed().isEmpty())
+        {
+            return QStringLiteral("BitLocker: <无盘符>");
+        }
+
+        const HRESULT initResult = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const bool needUninit = SUCCEEDED(initResult);
+        if (FAILED(initResult) && initResult != RPC_E_CHANGED_MODE)
+        {
+            return QStringLiteral("BitLocker WMI 初始化失败: 0x%1").arg(static_cast<unsigned long>(initResult), 0, 16).toUpper();
+        }
+
+        QString statusText = QStringLiteral("BitLocker: <未查询到>");
+        do
+        {
+            CComPtr<IWbemLocator> locator;
+            if (FAILED(::CoCreateInstance(
+                CLSID_WbemLocator,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_IWbemLocator,
+                reinterpret_cast<void**>(&locator))) || locator == nullptr)
+            {
+                statusText = QStringLiteral("BitLocker WMI: 无法创建 IWbemLocator");
+                break;
+            }
+
+            CComPtr<IWbemServices> services;
+            const HRESULT connectResult = locator->ConnectServer(
+                _bstr_t(L"ROOT\\CIMV2\\Security\\MicrosoftVolumeEncryption"),
+                nullptr,
+                nullptr,
+                nullptr,
+                0,
+                nullptr,
+                nullptr,
+                &services);
+            if (FAILED(connectResult) || services == nullptr)
+            {
+                statusText = QStringLiteral("BitLocker WMI: 连接命名空间失败 0x%1")
+                    .arg(static_cast<unsigned long>(connectResult), 0, 16)
+                    .toUpper();
+                break;
+            }
+
+            const HRESULT blanketResult = ::CoSetProxyBlanket(
+                services,
+                RPC_C_AUTHN_WINNT,
+                RPC_C_AUTHZ_NONE,
+                nullptr,
+                RPC_C_AUTHN_LEVEL_CALL,
+                RPC_C_IMP_LEVEL_IMPERSONATE,
+                nullptr,
+                EOAC_NONE);
+            if (FAILED(blanketResult))
+            {
+                statusText = QStringLiteral("BitLocker WMI: 安全上下文失败 0x%1")
+                    .arg(static_cast<unsigned long>(blanketResult), 0, 16)
+                    .toUpper();
+                break;
+            }
+
+            const QString queryText = QStringLiteral(
+                "SELECT * FROM Win32_EncryptableVolume WHERE DriveLetter='%1'")
+                .arg(driveLetter.left(2));
+            if (!queryText.isEmpty())
+            {
+                statusText = QStringLiteral("BitLocker WMI: 查询语句已准备，当前版本保留降级文本展示。");
+            }
+        } while (false);
+
+        if (needUninit)
+        {
+            ::CoUninitialize();
+        }
+        return statusText;
     }
 
     bool isCriticalProcessName(const QString& processName)
@@ -845,6 +1860,7 @@ namespace
         handleTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
         handleTable->verticalHeader()->setVisible(false);
         handleTable->horizontalHeader()->setStretchLastSection(true);
+        installFileTableCopyMenu(handleTable);
 
         QTableWidget* const processTable = new QTableWidget(static_cast<int>(processCandidateList.size()), 6, &dialog);
         processTable->setHorizontalHeaderLabels(QStringList{
@@ -859,6 +1875,7 @@ namespace
         processTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
         processTable->verticalHeader()->setVisible(false);
         processTable->horizontalHeader()->setStretchLastSection(true);
+        installFileTableCopyMenu(processTable);
 
         auto makeTableItem = [](const QString& text, const bool enabled) {
             QTableWidgetItem* const item = new QTableWidgetItem(text);
@@ -1261,6 +2278,103 @@ namespace
             .arg(KswordTheme::BorderHex())
             .arg(KswordTheme::PrimaryBlueHex)
             .arg(disabledTextColor);
+    }
+
+    void installFileTableCopyMenu(QTableWidget* tableWidget)
+    {
+        // installFileTableCopyMenu：
+        // - 输入：FileDock 内临时弹窗或工具页表格；
+        // - 处理：右键选中当前行，并把该行所有列按 TSV 复制到剪贴板；
+        // - 返回：无。只读复制，不触发删除、恢复、关闭句柄等动作。
+        if (tableWidget == nullptr)
+        {
+            return;
+        }
+
+        tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(tableWidget, &QTableWidget::customContextMenuRequested, tableWidget, [tableWidget](const QPoint& localPosition)
+        {
+            const auto clickedIndex = tableWidget->indexAt(localPosition);
+            if (clickedIndex.isValid())
+            {
+                tableWidget->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu menu(tableWidget);
+            menu.setStyleSheet(buildContextMenuStyle());
+            QAction* copyRowAction = menu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
+            if (menu.exec(tableWidget->viewport()->mapToGlobal(localPosition)) != copyRowAction)
+            {
+                return;
+            }
+
+            QClipboard* clipboardObject = QApplication::clipboard();
+            const int rowIndex = tableWidget->currentRow();
+            if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
+            {
+                return;
+            }
+
+            QStringList fields;
+            fields.reserve(tableWidget->columnCount());
+            for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
+            {
+                const QTableWidgetItem* item = tableWidget->item(rowIndex, columnIndex);
+                fields.push_back(item != nullptr ? item->text() : QString());
+            }
+            clipboardObject->setText(fields.join(QLatin1Char('\t')));
+        });
+    }
+
+    // installFileTreeCopyMenu 作用：
+    // - 输入 treeWidget：FileDock 内以树表展示的只读结果；
+    // - 处理：右键选中当前行，并把该行所有列按 TSV 复制到剪贴板；
+    // - 返回：无。只读复制，不执行解锁、关闭句柄、删除文件等动作。
+    void installFileTreeCopyMenu(QTreeWidget* treeWidget)
+    {
+        if (treeWidget == nullptr)
+        {
+            return;
+        }
+
+        treeWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(treeWidget, &QTreeWidget::customContextMenuRequested, treeWidget, [treeWidget](const QPoint& localPosition)
+        {
+            QTreeWidgetItem* clickedItem = treeWidget->itemAt(localPosition);
+            if (clickedItem != nullptr)
+            {
+                treeWidget->setCurrentItem(clickedItem);
+            }
+
+            QMenu menu(treeWidget);
+            menu.setStyleSheet(buildContextMenuStyle());
+            QAction* copyRowAction = menu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(treeWidget->currentItem() != nullptr);
+            if (menu.exec(treeWidget->viewport()->mapToGlobal(localPosition)) != copyRowAction)
+            {
+                return;
+            }
+
+            QClipboard* clipboardObject = QApplication::clipboard();
+            QTreeWidgetItem* currentItem = treeWidget->currentItem();
+            if (clipboardObject == nullptr || currentItem == nullptr)
+            {
+                return;
+            }
+
+            QStringList fields;
+            fields.reserve(treeWidget->columnCount());
+            for (int columnIndex = 0; columnIndex < treeWidget->columnCount(); ++columnIndex)
+            {
+                fields.push_back(currentItem->text(columnIndex));
+            }
+            clipboardObject->setText(fields.join(QLatin1Char('\t')));
+        });
     }
 
     // buildOpaqueStandaloneDialogStyle 作用：
@@ -1928,6 +3042,9 @@ namespace
             tabWidget->addTab(buildDeferredTab(QStringLiteral("security")), QStringLiteral("安全与权限"));
             tabWidget->addTab(buildHashTab(), QStringLiteral("哈希与完整性"));
             tabWidget->addTab(buildDeferredTab(QStringLiteral("usage")), QStringLiteral("文件占用"));
+            tabWidget->addTab(buildDeferredTab(QStringLiteral("fileobject")), QStringLiteral("FileObject / Section / ControlArea"));
+            tabWidget->addTab(buildDeferredTab(QStringLiteral("storage")), QStringLiteral("Storage / MountMgr / FVE"));
+            tabWidget->addTab(buildDeferredTab(QStringLiteral("filters")), QStringLiteral("Minifilter / Instance / Volume"));
             tabWidget->addTab(buildDeferredTab(QStringLiteral("signature")), QStringLiteral("数字签名"));
             tabWidget->addTab(buildDeferredTab(QStringLiteral("pe")), QStringLiteral("PE信息"));
             tabWidget->addTab(buildDeferredTab(QStringLiteral("dependencies")), QStringLiteral("依赖 DLL"));
@@ -1969,6 +3086,303 @@ namespace
                 .arg(static_cast<qulonglong>(static_cast<std::uint32_t>(status)), 8, 16, QChar('0'))
                 .arg(status)
                 .toUpper();
+        }
+
+        static QString formatAuditBool(const bool value)
+        {
+            // 用途：把 R0 审计布尔值统一转成中文，避免各页混用 true/false。
+            // 返回：是/否，供 IO 状态、truncated、unsupported 字段使用。
+            return value ? QStringLiteral("是") : QStringLiteral("否");
+        }
+
+        static QString friendlyFileIoMessage(const std::string& messageText)
+        {
+            // 用途：把 ArkDriverClient 的原始 io.message 翻译成文件页可读说明。
+            // 输入：messageText 为 wrapper 返回的 UTF-8/ASCII 诊断文本。
+            // 返回：中文说明；仅用于 UI 展示，不改变原始 IO 状态字段。
+            if (messageText.empty())
+            {
+                return QStringLiteral("无额外驱动消息");
+            }
+
+            const QString rawText = QString::fromStdString(messageText).trimmed();
+            if (rawText.isEmpty())
+            {
+                return QStringLiteral("无额外驱动消息");
+            }
+            if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+            {
+                return QStringLiteral("驱动接口调用失败或当前驱动版本不支持该文件审计入口");
+            }
+            if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+                rawText.contains(QStringLiteral("not implemented"), Qt::CaseInsensitive))
+            {
+                return QStringLiteral("当前驱动版本尚未提供该文件审计入口");
+            }
+            if (rawText.contains(QStringLiteral("too small"), Qt::CaseInsensitive) ||
+                rawText.contains(QStringLiteral("entrySize"), Qt::CaseInsensitive))
+            {
+                return QStringLiteral("驱动返回数据格式不完整，已保留当前页面其它只读证据");
+            }
+            if (rawText == QStringLiteral("empty nt path"))
+            {
+                return QStringLiteral("缺少可传递给驱动的 NT 路径，R0 文件信息查询已跳过");
+            }
+            if (rawText.startsWith(QStringLiteral("version="), Qt::CaseInsensitive))
+            {
+                return QStringLiteral("驱动已返回结构化文件审计数据");
+            }
+            return rawText;
+        }
+
+        static QString fixedWideAuditText(const wchar_t* const textBuffer, const std::size_t maxChars)
+        {
+            // 用途：读取 shared/driver 固定宽字符数组，避免 UI 猜测协议字段。
+            // 输入：textBuffer 为协议字段首地址，maxChars 为数组容量。
+            // 返回：遇到 NUL 截断后的 QString；空字段返回 <empty>。
+            if (textBuffer == nullptr || maxChars == 0U)
+            {
+                return QStringLiteral("<empty>");
+            }
+
+            std::size_t length = 0U;
+            while (length < maxChars && textBuffer[length] != L'\0')
+            {
+                ++length;
+            }
+            if (length == 0U)
+            {
+                return QStringLiteral("<empty>");
+            }
+            return QString::fromWCharArray(textBuffer, static_cast<int>(length));
+        }
+
+        template <std::size_t CharCount>
+        static QString fixedWideAuditText(const wchar_t (&textBuffer)[CharCount])
+        {
+            // 用途：固定数组重载，调用方不需要重复写 std::size。
+            // 返回：固定 UTF-16 字段的安全显示文本。
+            return fixedWideAuditText(textBuffer, CharCount);
+        }
+
+        template <typename AuditResult>
+        static QString formatAuditResultHeader(
+            const QString& titleText,
+            const AuditResult& result,
+            const std::uint32_t responseFlags,
+            const bool explicitTruncated)
+        {
+            // 用途：生成所有 R0 文件/存储审计 wrapper 的统一摘要头。
+            // 输入：titleText 为审计块标题，result 为 ArkDriverClient 返回结构。
+            // 返回：包含 IO、total/returned、truncated 和可读说明的多行文本。
+            const bool countTruncated = result.returnedCount < result.totalCount;
+            const bool truncated = explicitTruncated || countTruncated;
+            QString content;
+            content += QStringLiteral("[%1]\n").arg(titleText);
+            content += QStringLiteral("IO状态: %1\n").arg(result.io.ok ? QStringLiteral("OK") : QStringLiteral("FAIL"));
+            content += QStringLiteral("unsupported: %1\n").arg(formatAuditBool(result.unsupported));
+            content += QStringLiteral("version: %1\n").arg(result.version);
+            content += QStringLiteral("status: %1\n").arg(result.status);
+            content += QStringLiteral("totalCount: %1\n").arg(result.totalCount);
+            content += QStringLiteral("returnedCount: %1\n").arg(result.returnedCount);
+            content += QStringLiteral("truncated: %1\n").arg(formatAuditBool(truncated));
+            content += QStringLiteral("entrySize/rowSize: %1\n").arg(result.entrySize);
+            content += QStringLiteral("responseFlags: 0x%1\n").arg(responseFlags, 8, 16, QChar('0')).toUpper();
+            content += QStringLiteral("lastStatus: %1\n").arg(formatNtStatus(result.lastStatus));
+            content += QStringLiteral("win32Error: %1\n").arg(result.io.win32Error);
+            content += QStringLiteral("bytesReturned: %1\n").arg(result.io.bytesReturned);
+            content += QStringLiteral("说明: %1\n").arg(friendlyFileIoMessage(result.io.message));
+            return content;
+        }
+
+        static QString formatMinifilterInventoryRows(const ksword::ark::MinifilterInventoryResult& result)
+        {
+            // 用途：展开 R0 Minifilter inventory 的前若干真实行。
+            // 处理：只显示名称、Altitude、Volume、Frame、对象地址和 owner hint。
+            // 返回：可追加到 Filter topology 页的只读文本。
+            QString content;
+            const std::size_t rowLimit = std::min<std::size_t>(result.entries.size(), 16U);
+            for (std::size_t index = 0U; index < rowLimit; ++index)
+            {
+                const KSWORD_ARK_MINIFILTER_INVENTORY_ENTRY& row = result.entries[index];
+                content += QStringLiteral("  #%1 Filter=%2 Altitude=%3 Volume=%4 Instance=%5 VolumeBindings=%6 Frame=%7\n")
+                    .arg(static_cast<qulonglong>(index))
+                    .arg(fixedWideAuditText(row.filterName))
+                    .arg(fixedWideAuditText(row.altitude))
+                    .arg(fixedWideAuditText(row.volumeName))
+                    .arg(row.instanceCount)
+                    .arg(row.volumeBindingInstanceCount)
+                    .arg(row.frameId);
+                content += QStringLiteral("     FilterObject=%1 VolumeObject=%2 CallbackOwner=%3 OwnerStatus=%4 FieldFlags=0x%5 SourceFlags=0x%6 Status=%7\n")
+                    .arg(formatHex64(row.filterObject))
+                    .arg(formatHex64(row.volumeObject))
+                    .arg(fixedWideAuditText(row.callbackOwnerModule))
+                    .arg(formatNtStatus(row.callbackOwnerStatus))
+                    .arg(row.fieldFlags, 8, 16, QChar('0'))
+                    .arg(row.sourceFlags, 8, 16, QChar('0'))
+                    .arg(row.status)
+                    .toUpper();
+            }
+            if (result.entries.size() > rowLimit)
+            {
+                content += QStringLiteral("  ... 已省略 %1 行，完整数量见 returnedCount。\n")
+                    .arg(static_cast<qulonglong>(result.entries.size() - rowLimit));
+            }
+            return content;
+        }
+
+        static QString formatVolumeStackAuditRows(const ksword::ark::StorageVolumeStackAuditResult& result)
+        {
+            // 用途：展开 R0 VolumeStack 审计结果的前若干设备栈行。
+            // 输入：queryVolumeStackAudit 的返回值。
+            // 返回：包含 DeviceObject/DriverObject/风险/置信度的只读文本。
+            QString content;
+            content += QStringLiteral("fvevolPresent: %1\n").arg(result.fvevolPresent);
+            content += QStringLiteral("fvevolPosition: %1\n").arg(result.fvevolPosition);
+            content += QStringLiteral("fieldFlags: 0x%1\n")
+                .arg(result.fieldFlags, 8, 16, QChar('0'))
+                .toUpper();
+            const std::size_t rowLimit = std::min<std::size_t>(result.rows.size(), 12U);
+            for (std::size_t index = 0U; index < rowLimit; ++index)
+            {
+                const KSWORD_ARK_VOLUME_STACK_ROW& row = result.rows[index];
+                content += QStringLiteral("  #%1 StackIndex=%2 Driver=%3 Volume=%4 Confidence=%5 Risk=0x%6\n")
+                    .arg(static_cast<qulonglong>(index))
+                    .arg(row.stackIndex)
+                    .arg(fixedWideAuditText(row.driverName))
+                    .arg(fixedWideAuditText(row.volumeDeviceName))
+                    .arg(row.confidence)
+                    .arg(row.riskFlags, 8, 16, QChar('0'))
+                    .toUpper();
+                content += QStringLiteral("     DeviceObject=%1 DriverObject=%2 Attached=%3 Lower=%4 Type=0x%5 Characteristics=0x%6 Status=%7 Detail=%8\n")
+                    .arg(formatHex64(row.deviceObjectAddress))
+                    .arg(formatHex64(row.driverObjectAddress))
+                    .arg(formatHex64(row.attachedDeviceAddress))
+                    .arg(formatHex64(row.lowerDeviceAddress))
+                    .arg(row.deviceType, 8, 16, QChar('0'))
+                    .arg(row.deviceCharacteristics, 8, 16, QChar('0'))
+                    .arg(formatNtStatus(row.lastStatus))
+                    .arg(fixedWideAuditText(row.detail))
+                    .toUpper();
+            }
+            if (result.rows.size() > rowLimit)
+            {
+                content += QStringLiteral("  ... 已省略 %1 行，完整数量见 returnedCount。\n")
+                    .arg(static_cast<qulonglong>(result.rows.size() - rowLimit));
+            }
+            return content;
+        }
+
+        static QString formatBitlockerFveAuditRows(const ksword::ark::StorageBitlockerFveAuditResult& result)
+        {
+            // 用途：展开 BitLocker/FVE 安全状态摘要，明确不展示密钥材料。
+            // 输入：queryBitlockerFveAudit 的返回值。
+            // 返回：保护/转换/锁定状态、protector 类型计数和风险文本。
+            QString content;
+            content += QStringLiteral("fieldFlags: 0x%1\n")
+                .arg(result.fieldFlags, 8, 16, QChar('0'))
+                .toUpper();
+            const std::size_t rowLimit = std::min<std::size_t>(result.rows.size(), 8U);
+            for (std::size_t index = 0U; index < rowLimit; ++index)
+            {
+                const KSWORD_ARK_BITLOCKER_FVE_ROW& row = result.rows[index];
+                content += QStringLiteral("  #%1 Volume=%2 FvePresent=%3 FvePosition=%4 Protection=%5 Conversion=%6 Lock=%7 Confidence=%8 Risk=0x%9\n")
+                    .arg(static_cast<qulonglong>(index))
+                    .arg(fixedWideAuditText(row.volumeDeviceName))
+                    .arg(row.fvevolPresent)
+                    .arg(row.fvevolStackPosition)
+                    .arg(row.protectionStatus)
+                    .arg(row.conversionStatus)
+                    .arg(row.lockStatus)
+                    .arg(row.confidence)
+                    .arg(row.riskFlags, 8, 16, QChar('0'))
+                    .toUpper();
+                content += QStringLiteral("     ProtectorCounts: TPM=%1 TPM+PIN=%2 RecoveryPassword=%3 RecoveryKey=%4 StartupKey=%5 ClearOrSuspended=%6 Status=%7 Detail=%8\n")
+                    .arg(row.keyProtectorTypeCountTpm)
+                    .arg(row.keyProtectorTypeCountTpmPin)
+                    .arg(row.keyProtectorTypeCountRecoveryPassword)
+                    .arg(row.keyProtectorTypeCountRecoveryKey)
+                    .arg(row.keyProtectorTypeCountStartupKey)
+                    .arg(row.keyProtectorTypeCountClearOrSuspended)
+                    .arg(formatNtStatus(row.lastStatus))
+                    .arg(fixedWideAuditText(row.detail));
+            }
+            return content;
+        }
+
+        static QString formatMountMgrMappingAuditRows(const ksword::ark::StorageMountMgrMappingAuditResult& result)
+        {
+            // 用途：展开 MountMgr 盘符/GUID/NT 设备路径映射审计。
+            // 输入：queryMountMgrMappingAudit 的返回值。
+            // 返回：映射名称、风险、置信度和 detail 文本。
+            QString content;
+            content += QStringLiteral("fieldFlags: 0x%1\n")
+                .arg(result.fieldFlags, 8, 16, QChar('0'))
+                .toUpper();
+            const std::size_t rowLimit = std::min<std::size_t>(result.rows.size(), 16U);
+            for (std::size_t index = 0U; index < rowLimit; ++index)
+            {
+                const KSWORD_ARK_MOUNTMGR_MAPPING_ROW& row = result.rows[index];
+                content += QStringLiteral("  #%1 Drive=%2 Guid=%3 NtPath=%4 Confidence=%5 Risk=0x%6 Status=%7 Detail=%8\n")
+                    .arg(static_cast<qulonglong>(index))
+                    .arg(fixedWideAuditText(row.driveLetter))
+                    .arg(fixedWideAuditText(row.volumeGuid))
+                    .arg(fixedWideAuditText(row.ntDevicePath))
+                    .arg(row.confidence)
+                    .arg(row.riskFlags, 8, 16, QChar('0'))
+                    .arg(formatNtStatus(row.lastStatus))
+                    .arg(fixedWideAuditText(row.detail))
+                    .toUpper();
+            }
+            if (result.rows.size() > rowLimit)
+            {
+                content += QStringLiteral("  ... 已省略 %1 行，完整数量见 returnedCount。\n")
+                    .arg(static_cast<qulonglong>(result.rows.size() - rowLimit));
+            }
+            return content;
+        }
+
+        static QString formatFilesystemIntegrityAuditRows(const ksword::ark::StorageFilesystemIntegrityAuditResult& result)
+        {
+            // 用途：展开文件系统 DriverObject/FastIo/Dispatch 完整性审计行。
+            // 输入：queryFilesystemIntegrityAudit 的返回值。
+            // 返回：slot、目标地址、owner 模块、风险和置信度文本。
+            QString content;
+            content += QStringLiteral("fieldFlags: 0x%1\n")
+                .arg(result.fieldFlags, 8, 16, QChar('0'))
+                .toUpper();
+            const std::size_t rowLimit = std::min<std::size_t>(result.rows.size(), 16U);
+            for (std::size_t index = 0U; index < rowLimit; ++index)
+            {
+                const KSWORD_ARK_FILESYSTEM_INTEGRITY_ROW& row = result.rows[index];
+                content += QStringLiteral("  #%1 FsKind=%2 SlotType=%3 SlotIndex=%4 Driver=%5 Owner=%6 Confidence=%7 Risk=0x%8\n")
+                    .arg(static_cast<qulonglong>(index))
+                    .arg(row.fileSystemKind)
+                    .arg(row.slotType)
+                    .arg(row.slotIndex)
+                    .arg(fixedWideAuditText(row.driverName))
+                    .arg(fixedWideAuditText(row.ownerModuleName))
+                    .arg(row.confidence)
+                    .arg(row.riskFlags, 8, 16, QChar('0'))
+                    .toUpper();
+                content += QStringLiteral("     DriverObject=%1 DriverStart=%2 DriverSize=0x%3 SlotAddress=%4 Target=%5 OwnerBase=%6 OwnerSize=0x%7 Status=%8 Detail=%9\n")
+                    .arg(formatHex64(row.driverObjectAddress))
+                    .arg(formatHex64(row.driverStart))
+                    .arg(row.driverSize, 8, 16, QChar('0'))
+                    .arg(formatHex64(row.slotAddress))
+                    .arg(formatHex64(row.targetAddress))
+                    .arg(formatHex64(row.ownerModuleBase))
+                    .arg(row.ownerModuleSize, 8, 16, QChar('0'))
+                    .arg(formatNtStatus(row.lastStatus))
+                    .arg(fixedWideAuditText(row.detail))
+                    .toUpper();
+            }
+            if (result.rows.size() > rowLimit)
+            {
+                content += QStringLiteral("  ... 已省略 %1 行，完整数量见 returnedCount。\n")
+                    .arg(static_cast<qulonglong>(result.rows.size() - rowLimit));
+            }
+            return content;
         }
 
         static QString fileTimeToText(const std::int64_t fileTimeValue)
@@ -2080,7 +3494,7 @@ namespace
             if (!result.io.ok)
             {
                 content += QStringLiteral("状态: Unavailable\n");
-                content += QStringLiteral("原因: %1\n").arg(QString::fromStdString(result.io.message));
+                content += QStringLiteral("原因: %1\n").arg(friendlyFileIoMessage(result.io.message));
                 content += QStringLiteral("Win32错误: %1\n").arg(result.io.win32Error);
                 return content;
             }
@@ -2104,7 +3518,7 @@ namespace
             content += QStringLiteral("SectionObjectPointers: %1\n").arg(formatHex64(result.sectionObjectPointersAddress));
             content += QStringLiteral("DataSectionObject: %1\n").arg(formatHex64(result.dataSectionObjectAddress));
             content += QStringLiteral("ImageSectionObject: %1\n").arg(formatHex64(result.imageSectionObjectAddress));
-            content += QStringLiteral("R0消息: %1\n").arg(QString::fromStdString(result.io.message));
+            content += QStringLiteral("R0说明: %1\n").arg(friendlyFileIoMessage(result.io.message));
             return content;
         }
 
@@ -3526,6 +4940,18 @@ namespace
             {
                 realPage = buildUsageTab();
             }
+            else if (lazyKey == QStringLiteral("fileobject"))
+            {
+                realPage = buildFileObjectTab();
+            }
+            else if (lazyKey == QStringLiteral("storage"))
+            {
+                realPage = buildStorageTab();
+            }
+            else if (lazyKey == QStringLiteral("filters"))
+            {
+                realPage = buildFilterTopologyTab();
+            }
             else if (lazyKey == QStringLiteral("signature"))
             {
                 realPage = buildSignatureTab();
@@ -3742,6 +5168,7 @@ namespace
             {
                 aceTable->horizontalHeader()->setStretchLastSection(true);
             }
+            installFileTableCopyMenu(aceTable);
 
             CodeEditorWidget* detailEditor = new CodeEditorWidget(splitter);
             detailEditor->setReadOnly(true);
@@ -3961,12 +5388,199 @@ namespace
             {
                 table->header()->setStretchLastSection(true);
             }
+            installFileTreeCopyMenu(table);
             layout->addWidget(table, 1);
 
             connect(refreshButton, &QPushButton::clicked, this, [this, table, statusLabel, refreshButton]()
                 {
                     refreshUsageTable(table, statusLabel, refreshButton);
                 });
+            return page;
+        }
+
+        QWidget* buildFileObjectTab()
+        {
+            QWidget* page = new QWidget(this);
+            QVBoxLayout* layout = new QVBoxLayout(page);
+            // 文件对象详情属于长文本审计输出：
+            // - 使用项目统一 CodeEditorWidget，避免 QTextEdit 在透明父级下出现黑底/不可读；
+            // - 只读展示，不提供关闭句柄、解锁、删除等动作。
+            CodeEditorWidget* editor = new CodeEditorWidget(page);
+            editor->setReadOnly(true);
+            layout->addWidget(editor, 1);
+
+            const QString nativePath = QDir::toNativeSeparators(m_filePath);
+            QString content;
+            content += QStringLiteral("目标路径: %1\n").arg(nativePath);
+            content += QStringLiteral("说明: 这里只做只读对象/句柄视图，不提供解锁、删除或绕过动作。\n\n");
+
+            const QFileInfo info(m_filePath);
+            const bool directoryHint = info.isDir();
+            HANDLE fileHandle = openReadOnlyFileHandle(m_filePath, directoryHint);
+            if (fileHandle == INVALID_HANDLE_VALUE)
+            {
+                content += QStringLiteral("打开失败: %1\n").arg(::GetLastError());
+                editor->setText(content);
+                return page;
+            }
+
+            QString standardInfoText;
+            QString standardStatusText;
+            const bool standardOk = queryFileStandardInfoText(fileHandle, standardInfoText, standardStatusText);
+            content += QStringLiteral("[FileStandardInfo]\n");
+            content += standardOk ? standardInfoText : QStringLiteral("读取失败: %1\n").arg(standardStatusText);
+            content += QStringLiteral("\n[FileObject / Section / ControlArea]\n");
+            const QString ntPathText = buildDriverNtPath(m_filePath);
+            const ksword::ark::FileInfoQueryResult r0Info = queryR0FileInfo(info, ntPathText);
+            content += formatR0FileInfoText(r0Info);
+            const ksword::ark::FileSectionMappingsQueryResult sectionView =
+                ksword::ark::DriverClient().queryFileSectionMappings(
+                    ntPathText.toStdWString(),
+                    KSWORD_ARK_FILE_SECTION_QUERY_FLAG_INCLUDE_ALL,
+                    KSWORD_ARK_SECTION_MAPPING_LIMIT_DEFAULT);
+            content += QStringLiteral("\n[ControlArea Cross-View]\n");
+            if (sectionView.io.ok)
+            {
+                content += QStringLiteral("查询状态: %1\n").arg(sectionView.queryStatus);
+                content += QStringLiteral("查询说明: %1\n").arg(friendlyFileIoMessage(sectionView.io.message));
+                content += QStringLiteral("FileObject: %1\n").arg(formatHex64(sectionView.fileObjectAddress));
+                content += QStringLiteral("SectionObjectPointers: %1\n").arg(formatHex64(sectionView.sectionObjectPointersAddress));
+                content += QStringLiteral("DataControlArea: %1\n").arg(formatHex64(sectionView.dataControlAreaAddress));
+                content += QStringLiteral("ImageControlArea: %1\n").arg(formatHex64(sectionView.imageControlAreaAddress));
+                content += QStringLiteral("映射数量: %1 / %2\n")
+                    .arg(sectionView.returnedCount)
+                    .arg(sectionView.totalCount);
+                content += QStringLiteral("跨视图：R3 文件标准信息给出 DeletePending；R0 侧给出 FileObject / SectionObjectPointers / ControlArea。\n");
+            }
+            else
+            {
+                content += QStringLiteral("查询失败: %1\n").arg(friendlyFileIoMessage(sectionView.io.message));
+                content += QStringLiteral("跨视图：当前仅保留 R0 FileInfo 结果，ControlArea 查询降级。\n");
+            }
+            content += QStringLiteral("\n[Cross-View]\n");
+            content += QStringLiteral("R0 FileObject: %1\n").arg(formatHex64(r0Info.fileObjectAddress));
+            content += QStringLiteral("R0 SectionObjectPointers: %1\n").arg(formatHex64(r0Info.sectionObjectPointersAddress));
+            content += QStringLiteral("R0 DataSectionObject: %1\n").arg(formatHex64(r0Info.dataSectionObjectAddress));
+            content += QStringLiteral("R0 ImageSectionObject: %1\n").arg(formatHex64(r0Info.imageSectionObjectAddress));
+            content += QStringLiteral("R3 DeletePending/Share: 通过 FileStandardInfo 和共享只读打开侧写。\n");
+            content += QStringLiteral("R3 Shared flags: 采集句柄使用 READ|WRITE|DELETE 共享，仅用于只读探测。\n");
+            ::CloseHandle(fileHandle);
+            editor->setText(content);
+            return page;
+        }
+
+        QWidget* buildStorageTab()
+        {
+            QWidget* page = new QWidget(this);
+            QVBoxLayout* layout = new QVBoxLayout(page);
+            // 存储/BitLocker 审计会生成多段长文本：
+            // - 使用统一 CodeEditorWidget 保持复制、搜索和不透明背景体验；
+            // - 页面仍只读，不提供卸载、解锁、绕过等动作。
+            CodeEditorWidget* editor = new CodeEditorWidget(page);
+            editor->setReadOnly(true);
+            layout->addWidget(editor, 1);
+
+            const FileVolumeAuditSnapshot snapshot = queryFileVolumeAuditSnapshot(m_filePath);
+            QString content;
+            content += QStringLiteral("目标路径: %1\n").arg(QDir::toNativeSeparators(m_filePath));
+            content += QStringLiteral("卷根: %1\n").arg(snapshot.volumeRoot.isEmpty() ? QStringLiteral("<unknown>") : snapshot.volumeRoot);
+            content += QStringLiteral("卷栈: %1\n").arg(snapshot.volumeStackText.isEmpty() ? QStringLiteral("<unknown>") : snapshot.volumeStackText);
+            content += QStringLiteral("挂载点: %1\n").arg(snapshot.mountPointsText.isEmpty() ? QStringLiteral("<unknown>") : snapshot.mountPointsText);
+            content += QStringLiteral("设备路径: %1\n").arg(snapshot.devicePathText.isEmpty() ? QStringLiteral("<unknown>") : snapshot.devicePathText);
+            content += QStringLiteral("文件系统: %1\n").arg(snapshot.fsNameText.isEmpty() ? QStringLiteral("<unknown>") : snapshot.fsNameText);
+            content += QStringLiteral("卷标: %1\n").arg(snapshot.labelText.isEmpty() ? QStringLiteral("<unknown>") : snapshot.labelText);
+            content += QStringLiteral("存储描述: %1\n").arg(snapshot.storageText.isEmpty() ? QStringLiteral("<unknown>") : snapshot.storageText);
+            content += QStringLiteral("BitLocker: %1\n").arg(snapshot.bitLockerText.isEmpty() ? QStringLiteral("<unknown>") : snapshot.bitLockerText);
+            content += QStringLiteral("\n说明：本页只展示可见状态，不做解锁、卸载、绕过或密钥导出。\n");
+            content += QStringLiteral("说明：DeviceObject 在此页以卷设备路径做只读侧写，不触碰内核对象本身。\n");
+
+            // R0 审计补充：
+            // - 只通过 ArkDriverClient 调用只读 wrapper；
+            // - volumeAuditPath 优先使用 NT 设备路径，缺失时退回卷根；
+            // - 每个 wrapper 均输出 IO、计数、截断和 message，便于和 R3 侧结果交叉核对。
+            const QString volumeAuditPath = snapshot.devicePathText.isEmpty()
+                ? snapshot.volumeRoot
+                : snapshot.devicePathText;
+            const std::wstring volumeAuditPathWide = volumeAuditPath.toStdWString();
+            const ksword::ark::DriverClient driverClient;
+
+            const ksword::ark::StorageVolumeStackAuditResult volumeStackAudit =
+                driverClient.queryVolumeStackAudit(volumeAuditPathWide);
+            content += QStringLiteral("\n");
+            content += formatAuditResultHeader(
+                QStringLiteral("R0 审计补充 / VolumeStack"),
+                volumeStackAudit,
+                volumeStackAudit.responseFlags,
+                false);
+            content += formatVolumeStackAuditRows(volumeStackAudit);
+
+            const ksword::ark::StorageMountMgrMappingAuditResult mountMgrAudit =
+                driverClient.queryMountMgrMappingAudit(volumeAuditPathWide);
+            content += QStringLiteral("\n");
+            content += formatAuditResultHeader(
+                QStringLiteral("R0 审计补充 / MountMgr"),
+                mountMgrAudit,
+                mountMgrAudit.responseFlags,
+                false);
+            content += formatMountMgrMappingAuditRows(mountMgrAudit);
+
+            const ksword::ark::StorageFilesystemIntegrityAuditResult filesystemAudit =
+                driverClient.queryFilesystemIntegrityAudit(volumeAuditPathWide);
+            content += QStringLiteral("\n");
+            content += formatAuditResultHeader(
+                QStringLiteral("R0 审计补充 / FilesystemIntegrity"),
+                filesystemAudit,
+                filesystemAudit.responseFlags,
+                false);
+            content += formatFilesystemIntegrityAuditRows(filesystemAudit);
+
+            const ksword::ark::StorageBitlockerFveAuditResult bitlockerAudit =
+                driverClient.queryBitlockerFveAudit(volumeAuditPathWide);
+            content += QStringLiteral("\n");
+            content += formatAuditResultHeader(
+                QStringLiteral("R0 审计补充 / BitLocker FVE"),
+                bitlockerAudit,
+                bitlockerAudit.responseFlags,
+                false);
+            content += formatBitlockerFveAuditRows(bitlockerAudit);
+            editor->setText(content);
+            return page;
+        }
+
+        QWidget* buildFilterTopologyTab()
+        {
+            QWidget* page = new QWidget(this);
+            QVBoxLayout* layout = new QVBoxLayout(page);
+            // Minifilter 拓扑属于审计明细文本：
+            // - 使用项目统一 CodeEditorWidget，避免 QTextEdit 继承透明父级样式；
+            // - 页面只展示枚举和 R0 inventory，不提供 detach/bypass/remove。
+            CodeEditorWidget* editor = new CodeEditorWidget(page);
+            editor->setReadOnly(true);
+            layout->addWidget(editor, 1);
+
+            QString content;
+            content += QStringLiteral("目标路径: %1\n").arg(QDir::toNativeSeparators(m_filePath));
+            content += QStringLiteral("说明: 本页只展示 FilterManager 公开枚举接口与字段定义，不做卸载、绕过或拦截修改。\n\n");
+            content += enumerateMinifilterText();
+            content += QStringLiteral("\n");
+            content += enumerateInstanceText();
+            content += QStringLiteral("\n");
+            content += enumerateVolumeText();
+
+            // R0 审计补充：
+            // - queryMinifilterInventory 通过 ArkDriverClient 统一访问驱动；
+            // - 结果追加在 FilterManager 公开枚举之后，保留原有 R3 逻辑；
+            // - 不提供卸载、detach、bypass、callback 修改等动作。
+            const ksword::ark::MinifilterInventoryResult minifilterAudit =
+                ksword::ark::DriverClient().queryMinifilterInventory();
+            content += QStringLiteral("\n");
+            content += formatAuditResultHeader(
+                QStringLiteral("R0 审计补充 / MinifilterInventory"),
+                minifilterAudit,
+                minifilterAudit.responseFlags,
+                (minifilterAudit.responseFlags & KSWORD_ARK_MINIFILTER_INVENTORY_RESPONSE_FLAG_TRUNCATED) != 0U);
+            content += formatMinifilterInventoryRows(minifilterAudit);
+            editor->setText(content);
             return page;
         }
 
@@ -4040,6 +5654,7 @@ namespace
                     }
 
                     QMenu menu(table);
+                    menu.setStyleSheet(buildContextMenuStyle());
                     QAction* copyRowsAction = menu.addAction(QStringLiteral("复制选中行"));
                     QAction* copyDllAction = menu.addAction(QStringLiteral("复制 DLL 名称"));
                     QAction* selectedAction = menu.exec(table->viewport()->mapToGlobal(position));
@@ -5928,6 +7543,7 @@ void FileDock::initializeRecoveryPage()
     m_recoveryTable->verticalHeader()->setVisible(false);
     m_recoveryTable->horizontalHeader()->setStretchLastSection(true);
     m_recoveryTable->setAlternatingRowColors(true);
+    installFileTableCopyMenu(m_recoveryTable);
     recoveryLayout->addWidget(m_recoveryTable, 1);
 
     m_recoveryStatusLabel = new QLabel(QStringLiteral("请选择NTFS卷并开始扫描。"), m_fileRecoveryPage);

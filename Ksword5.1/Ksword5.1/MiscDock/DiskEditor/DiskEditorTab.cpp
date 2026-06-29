@@ -17,7 +17,9 @@
 #include "../../UI/HexEditorWidget.h"
 
 #include <QAbstractItemView>
+#include <QAction>
 #include <QBrush>
+#include <QClipboard>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCryptographicHash>
@@ -25,13 +27,16 @@
 #include <QFileDialog>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
+#include <QModelIndex>
 #include <QSignalBlocker>
 #include <QMetaObject>
 #include <QPlainTextEdit>
@@ -187,6 +192,55 @@ namespace
             .toUpper();
     }
 
+    void installDiskEditorTableCopyMenu(QTableWidget* table)
+    {
+        // installDiskEditorTableCopyMenu：
+        // - 输入：磁盘编辑器中的分区/结构/搜索结果表；
+        // - 处理：右键选中点击行，并把该行可见列复制为 TSV；
+        // - 返回：无。菜单仅复制分析结果，不执行读写扇区动作。
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        {
+            const QModelIndex clickedIndex = table->indexAt(localPosition);
+            if (clickedIndex.isValid())
+            {
+                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu contextMenu(table);
+            contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+            QAction* copyRowAction = contextMenu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(table->currentRow() >= 0);
+            if (contextMenu.exec(table->viewport()->mapToGlobal(localPosition)) != copyRowAction)
+            {
+                return;
+            }
+
+            QClipboard* clipboardObject = QGuiApplication::clipboard();
+            const int rowIndex = table->currentRow();
+            if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= table->rowCount())
+            {
+                return;
+            }
+
+            QStringList rowFields;
+            rowFields.reserve(table->columnCount());
+            for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+            {
+                const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+                rowFields.push_back(item != nullptr ? item->text() : QString());
+            }
+            clipboardObject->setText(rowFields.join(QLatin1Char('\t')));
+        });
+    }
+
     // bytesToPreviewText：
     // - 把搜索结果预览字节转成短 HEX 文本；
     // - bytes 为原始字节；
@@ -213,6 +267,7 @@ namespace
         table->horizontalHeader()->setStretchLastSection(true);
         table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         table->setStyleSheet(buildTableStyle());
+        installDiskEditorTableCopyMenu(table);
         return table;
     }
 
@@ -391,6 +446,7 @@ namespace ks::misc
         m_partitionTable->horizontalHeader()->setStretchLastSection(true);
         m_partitionTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         m_partitionTable->setStyleSheet(buildTableStyle());
+        installDiskEditorTableCopyMenu(m_partitionTable);
         leftLayout->addWidget(m_partitionTable, 0);
 
         m_hexEditor = new HexEditorWidget(leftPanel);

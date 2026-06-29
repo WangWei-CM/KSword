@@ -62,6 +62,12 @@
     <ClCompile Include="MiscDock\ApplicationControlPage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDock.ProcessMemoryEvidence.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemoryDock\MemoryDock.ProcessPteTranslate.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="MiscDock\DiskEditor\DiskEditorBackend.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -156,6 +162,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="KernelDock\KernelDock.DynData.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDockCidTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelDock\KernelDockIpcTab.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="KernelDock\KernelDock.KernelHooks.cpp">
@@ -347,6 +359,9 @@
     <ClCompile Include="NetworkDock\NetworkFirewallPage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="NetworkDock\NetworkAuditPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="NetworkDock\HttpsProxyService.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -381,6 +396,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ProcessDock\ProcessDetailWindow.Hotkey.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ProcessDock\ProcessDetailWindow.PdbCatalog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ProcessDock\ProcessDetailWindow.ActionAndUtil.cpp">
@@ -591,6 +609,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ArkDriverClient\ArkDriverClient.cpp">
+      <Filter>Source Files\ArkDriverClient</Filter>
+    </ClCompile>
+    <ClCompile Include="ArkDriverClient\ArkDriverAudit.cpp">
       <Filter>Source Files\ArkDriverClient</Filter>
     </ClCompile>
     <ClCompile Include="ArkDriverClient\ArkDriverError.cpp">
@@ -843,6 +864,9 @@
     <ClInclude Include="KernelDock\KernelDockAtomWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="KernelDock\KernelDockCidTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="KernelDock\KernelBaseNamedObjectsTab.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -868,6 +892,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="KernelDock\KernelNamedPipeWorker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelDockIpcTab.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="KernelDock\KernelObjectDirectoryDeepTab.h">
@@ -999,6 +1026,9 @@
     <QtMoc Include="NetworkDock\NetworkFirewallPage.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="NetworkDock\NetworkAuditPage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="NetworkDock\HttpsProxyService.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1021,6 +1051,12 @@
       <Filter>Profile Files</Filter>
     </None>
     <None Include="profiles\ark_dyndata_pack_v3.json">
+      <Filter>Profile Files</Filter>
+    </None>
+    <None Include="profiles\pdb_deep_offsets\ntkrnlmp_f923da2d238e7c7ce180b962b19a3781_age5_deep_offsets.json">
+      <Filter>Profile Files</Filter>
+    </None>
+    <None Include="profiles\pdb_deep_offsets\win32k_gui_public_7bd3_000a_001c_deep_offsets.json">
       <Filter>Profile Files</Filter>
     </None>
   </ItemGroup>

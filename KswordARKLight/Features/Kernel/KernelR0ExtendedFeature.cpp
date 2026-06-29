@@ -89,6 +89,26 @@ std::vector<KernelFeatureDescriptor> CreateR0ExtendedDescriptors() {
             L"驱动诊断",
             L"通过 ArkDriverClient 查询轻量 DynData capability mask 与状态。"),
         Descriptor(
+            KernelFeatureId::PdbProfileStatus,
+            L"PDB Profile 状态",
+            L"驱动诊断",
+            L"只读汇总 DynData v3/v4 profile、模块命中、capability group 和缺字段降级状态。"),
+        Descriptor(
+            KernelFeatureId::CidTableSummary,
+            L"CID 表摘要",
+            L"内核信息",
+            L"只读枚举 PspCidTable 采样行，并与进程/线程 CrossView 的 source/anomaly 证据对齐。"),
+        Descriptor(
+            KernelFeatureId::IpcSummary,
+            L"IPC 汇总",
+            L"内核信息",
+            L"只读汇总 ALPC、NamedPipe、Mailslot、SMB 相关 IPC 审计入口和当前 R0 降级状态。"),
+        Descriptor(
+            KernelFeatureId::HookAuditSummary,
+            L"Hook 审计摘要",
+            L"驱动诊断",
+            L"只读汇总 callback、SSDT/ShadowSSDT、Inline Hook、IAT/EAT 的审计入口与 capability 状态。"),
+        Descriptor(
             KernelFeatureId::MinifilterBypassPids,
             L"Minifilter 放行 PID",
             L"回调",

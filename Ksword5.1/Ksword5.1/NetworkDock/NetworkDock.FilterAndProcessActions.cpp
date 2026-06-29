@@ -72,6 +72,7 @@ namespace
         tableWidget->horizontalHeader()->setStretchLastSection(true);
         tableWidget->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
         tableWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        installCopyCurrentRowMenu(tableWidget);
     }
 
     QTableWidgetItem* createReadonlyItem(const QString& text)

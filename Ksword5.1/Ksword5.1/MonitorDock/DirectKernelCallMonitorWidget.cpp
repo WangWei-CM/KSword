@@ -2033,6 +2033,7 @@ void DirectKernelCallMonitorWidget::showEventContextMenu(const QPoint& position)
 
     const int row = itemPointer->row();
     QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* detailAction = menu.addAction(QStringLiteral("查看详情"));
     QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
     QAction* copyDetailAction = menu.addAction(QStringLiteral("复制详情"));
@@ -2089,4 +2090,3 @@ void DirectKernelCallMonitorWidget::openEventDetailViewerForRow(int rowIndex)
         detailText,
         QStringLiteral("monitor/direct-kernel-call/%1.txt").arg(rowIndex + 1));
 }
-

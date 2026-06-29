@@ -84,6 +84,27 @@ KswordARKDriverQueryProcessCrossView(
     );
 
 /*
+ * KswordARKDriverQueryProcessDetail
+ * Inputs:
+ * - Response/OutputBufferLength describe a fixed METHOD_BUFFERED response.
+ * - Request supplies a PID and read-only field groups; no R3 kernel pointer is
+ *   trusted.
+ * Processing:
+ * - References EPROCESS by PID and samples PDB/DynData-backed fields with guarded
+ *   reads.
+ * Return behavior:
+ * - Returns STATUS_SUCCESS when the response packet is valid; response.status
+ *   carries lookup/capability/read completeness.
+ */
+NTSTATUS
+KswordARKDriverQueryProcessDetail(
+    _Out_writes_bytes_(OutputBufferLength) KSWORD_ARK_PROCESS_DETAIL_RESPONSE* Response,
+    _In_ size_t OutputBufferLength,
+    _In_opt_ const KSWORD_ARK_PROCESS_DETAIL_REQUEST* Request,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+/*
  * KswordARKProcessIoctlQueryCrossView
  * Inputs:
  * - Device and Request are the WDF dispatch objects for the unregistered
@@ -98,6 +119,63 @@ KswordARKDriverQueryProcessCrossView(
  */
 NTSTATUS
 KswordARKProcessIoctlQueryCrossView(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    );
+
+/*
+ * KswordARKProcessIoctlQueryDetail
+ * Inputs:
+ * - WDF request buffers for IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL.
+ * Processing:
+ * - Retrieves fixed request/response buffers and forwards to the feature backend.
+ * Return behavior:
+ * - Returns WDF retrieval status or backend status; BytesReturned is fixed
+ *   response size on success.
+ */
+NTSTATUS
+KswordARKProcessIoctlQueryDetail(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    );
+
+/*
+ * KswordARKDriverQueryProcessRuntimeFields
+ * Inputs:
+ * - OutputBuffer/OutputBufferLength describe a variable METHOD_BUFFERED response.
+ * - Request/InputBufferLength describe PID plus PDB runtime field sample items.
+ * Processing:
+ * - References EPROCESS by PID and reads only bounded small fields from that object.
+ * Return behavior:
+ * - Returns STATUS_SUCCESS when the response header is valid; per-row statuses
+ *   describe rejected offsets, rejected sizes, and read failures.
+ */
+NTSTATUS
+KswordARKDriverQueryProcessRuntimeFields(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) KSWORD_ARK_RUNTIME_FIELD_SAMPLE_RESPONSE* Response,
+    _In_ size_t OutputBufferLength,
+    _In_reads_bytes_(InputBufferLength) const KSWORD_ARK_PROCESS_RUNTIME_FIELD_SAMPLE_REQUEST* Request,
+    _In_ size_t InputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+/*
+ * KswordARKProcessIoctlQueryRuntimeFields
+ * Inputs:
+ * - WDF request buffers for IOCTL_KSWORD_ARK_QUERY_PROCESS_RUNTIME_FIELDS.
+ * Processing:
+ * - Retrieves variable input/output buffers and forwards to the read-only backend.
+ * Return behavior:
+ * - Returns validation/backend NTSTATUS and writes the actual response byte count.
+ */
+NTSTATUS
+KswordARKProcessIoctlQueryRuntimeFields(
     _In_ WDFDEVICE Device,
     _In_ WDFREQUEST Request,
     _In_ size_t InputBufferLength,

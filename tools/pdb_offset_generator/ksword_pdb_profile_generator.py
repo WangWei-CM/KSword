@@ -89,6 +89,22 @@ FIELD_MAP: dict[str, tuple[str, str]] = {
     "DoMajorFunction": ("_DRIVER_OBJECT", "MajorFunction"),
     "DoFastIoDispatch": ("_DRIVER_OBJECT", "FastIoDispatch"),
     "DoDriverUnload": ("_DRIVER_OBJECT", "DriverUnload"),
+    "UldName": ("_UNLOADED_DRIVERS", "Name"),
+    "UldStartAddress": ("_UNLOADED_DRIVERS", "StartAddress"),
+    "UldEndAddress": ("_UNLOADED_DRIVERS", "EndAddress"),
+    "UldCurrentTime": ("_UNLOADED_DRIVERS", "CurrentTime"),
+    "RtlAvlBalancedRoot": ("_RTL_AVL_TABLE", "BalancedRoot"),
+    "RtlAvlOrderedPointer": ("_RTL_AVL_TABLE", "OrderedPointer"),
+    "RtlAvlWhichOrderedElement": ("_RTL_AVL_TABLE", "WhichOrderedElement"),
+    "RtlAvlNumberGenericTableElements": ("_RTL_AVL_TABLE", "NumberGenericTableElements"),
+    "RtlAvlDepthOfTree": ("_RTL_AVL_TABLE", "DepthOfTree"),
+    "RtlAvlRestartKey": ("_RTL_AVL_TABLE", "RestartKey"),
+    "RtlAvlDeleteCount": ("_RTL_AVL_TABLE", "DeleteCount"),
+}
+
+TYPE_SIZE_MAP: dict[str, str] = {
+    "UldTypeSize": "_UNLOADED_DRIVERS",
+    "RtlAvlTypeSize": "_RTL_AVL_TABLE",
 }
 
 CALLBACK_GLOBAL_RVA_NAMES: tuple[str, ...] = (
@@ -104,7 +120,16 @@ KERNEL_GLOBAL_RVA_NAMES: tuple[str, ...] = (
     "PsLoadedModuleList",
     "MmUnloadedDrivers",
     "PiDDBCacheTable",
+    "KeServiceDescriptorTableShadow",
+    "MmLastUnloadedDriver",
 )
+
+GLOBAL_RVA_SYMBOL_ALIASES: dict[str, tuple[str, ...]] = {
+    # Microsoft public ntoskrnl PDBs commonly publish the registry callback
+    # list as `CallbackListHead` next to `CmpCallbackListLock`, while KswordARK
+    # keeps the shared protocol field name as `CmCallbackListHead`.
+    "CmCallbackListHead": ("CmCallbackListHead", "CallbackListHead"),
+}
 
 CALLBACK_STRUCT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "_OBJECT_TYPE.CallbackList": ("_OBJECT_TYPE", "CallbackList"),
@@ -119,6 +144,7 @@ CALLBACK_STRUCT_FIELD_MAP: dict[str, tuple[str, str]] = {
 
 TYPE_HEADER_RE = re.compile(r"^\s*([0-9A-Fa-fx]+)\s*\|\s*(LF_[A-Z0-9_]+)\b")
 FIELD_LIST_RE = re.compile(r"field list:\s*(?:<fieldlist\s+)?([0-9A-Fa-fx]+)")
+TYPE_SIZE_RE = re.compile(r"(?:size|SizeOf|sizeof)\s*=\s*(0x[0-9A-Fa-f]+|\d+)")
 OFFSET_RE = re.compile(r"offset\s*=\s*(0x[0-9A-Fa-f]+|\d+)")
 TYPE_REF_RE = re.compile(r"(?:type|Type)\s*=\s*([^,\]\s]+)")
 SYMBOL_HEADER_RE = re.compile(r"^\s*([0-9A-Fa-fx]+)\s*\|\s*(S_[A-Z0-9_]+)\b.*`([^`]+)`")
@@ -549,8 +575,24 @@ def run_llvm_pdbutil_types(pdb_path: Path, pdbutil_path: str) -> str:
 
 
 def find_field_list_id(lines: list[str], struct_name: str) -> str | None:
-    """Find the LF_FIELDLIST record referenced by a concrete structure."""
-    allowed = {"LF_STRUCTURE", "LF_STRUCTURE2", "LF_CLASS", "LF_CLASS2"}
+    """Find the LF_FIELDLIST record referenced by a concrete type.
+
+    Inputs:
+    - lines: Split `llvm-pdbutil dump -types` output.
+    - struct_name: Kernel type name whose direct member list is required.
+
+    Processing:
+    - Accepts structures/classes and unions because Windows kernel PDBs expose
+      `_HANDLE_TABLE_ENTRY` as LF_UNION while other DynData records are normally
+      LF_STRUCTURE.
+    - Skips forward references so the returned field list belongs to a concrete
+      definition that can be used for offset extraction.
+
+    Return behavior:
+    - Returns the referenced LF_FIELDLIST id text when available; otherwise
+      returns None without guessing.
+    """
+    allowed = {"LF_STRUCTURE", "LF_STRUCTURE2", "LF_CLASS", "LF_CLASS2", "LF_UNION", "LF_UNION2"}
     for index, line in enumerate(lines):
         header = TYPE_HEADER_RE.match(line)
         if not header:
@@ -566,6 +608,44 @@ def find_field_list_id(lines: list[str], struct_name: str) -> str | None:
             match = FIELD_LIST_RE.search(body_line)
             if match:
                 return match.group(1)
+    return None
+
+
+def resolve_type_size(types_text: str, struct_name: str) -> int | None:
+    """Resolve a concrete structure size from llvm-pdbutil type text.
+
+    Inputs:
+    - types_text: Full `llvm-pdbutil dump -types` output.
+    - struct_name: Concrete type name such as `_UNLOADED_DRIVERS`.
+
+    Processing:
+    - Finds the non-forward LF_STRUCTURE/LF_CLASS record and reads its size
+      field from the header/body text. The parser stays conservative: missing
+      or unrecognized size text returns None instead of guessing.
+
+    Return behavior:
+    - Returns the type size in bytes on success; returns None when unavailable.
+    """
+    allowed = {"LF_STRUCTURE", "LF_STRUCTURE2", "LF_CLASS", "LF_CLASS2"}
+    lines = types_text.splitlines()
+    for index, line in enumerate(lines):
+        header = TYPE_HEADER_RE.match(line)
+        if not header:
+            continue
+        _record_id, kind = header.groups()
+        if kind not in allowed or f"`{struct_name}`" not in line or "forward ref" in line:
+            continue
+        search_lines = [line]
+        for body_line in lines[index + 1 :]:
+            if TYPE_HEADER_RE.match(body_line):
+                break
+            if "forward ref" in body_line:
+                break
+            search_lines.append(body_line)
+        for candidate in search_lines:
+            match = TYPE_SIZE_RE.search(candidate)
+            if match:
+                return parse_int(match.group(1))
     return None
 
 
@@ -737,7 +817,8 @@ def build_global_rva_items(
     - symbol_names: Candidate global symbol names to resolve.
 
     Processing:
-    - Looks up each requested symbol by exact name.
+    - Looks up each requested symbol by exact name, with narrow aliases for
+      known public-PDB naming differences.
     - Chooses a deterministic address when both globals and publics expose a
       symbol.
     - Converts the chosen section-relative address to an RVA with the PE section
@@ -752,7 +833,15 @@ def build_global_rva_items(
     missing_globals: list[dict[str, str]] = []
 
     for symbol_name in symbol_names:
-        matches = symbol_addresses.get(symbol_name, [])
+        symbol_candidates = GLOBAL_RVA_SYMBOL_ALIASES.get(symbol_name, (symbol_name,))
+        matched_symbol_name = symbol_candidates[0]
+        matches: list[SymbolAddress] = []
+        for candidate_name in symbol_candidates:
+            candidate_matches = symbol_addresses.get(candidate_name, [])
+            if candidate_matches:
+                matched_symbol_name = candidate_name
+                matches = candidate_matches
+                break
         if not matches:
             missing_globals.append({"kind": "GlobalRva", "name": symbol_name, "reason": "symbol_not_found"})
             continue
@@ -776,6 +865,7 @@ def build_global_rva_items(
                 "value": f"0x{rva:08X}",
                 "source": address.source,
                 "symbolKind": address.kind,
+                "sourceSymbol": matched_symbol_name,
                 "section": f"0x{address.section:04X}",
                 "sectionOffset": f"0x{address.offset:X}",
             }
@@ -881,6 +971,15 @@ def build_profile(
             continue
         resolved_fields[ksword_name] = f"0x{offset:04X}"
 
+    resolved_type_sizes: dict[str, str] = {}
+    missing_type_sizes: list[str] = []
+    for ksword_name, struct_name in TYPE_SIZE_MAP.items():
+        type_size = resolve_type_size(types_text, struct_name)
+        if type_size is None:
+            missing_type_sizes.append(struct_name)
+            continue
+        resolved_type_sizes[ksword_name] = f"0x{type_size:04X}"
+
     callback_items, diagnostics = build_callback_items(
         types_text=types_text,
         pe_path=pe_path,
@@ -896,11 +995,14 @@ def build_profile(
     typed_items: list[dict[str, Any]] = []
     for field_name, offset_text in sorted(resolved_fields.items()):
         typed_items.append({"kind": "StructOffset", "name": field_name, "value": offset_text})
+    for field_name, size_text in sorted(resolved_type_sizes.items()):
+        typed_items.append({"kind": "TypeSize", "name": field_name, "value": size_text})
     typed_items.extend(callback_items)
     typed_items.extend(kernel_global_items)
 
     total_candidates = (
         len(FIELD_MAP) +
+        len(TYPE_SIZE_MAP) +
         len(CALLBACK_GLOBAL_RVA_NAMES) +
         len(CALLBACK_STRUCT_FIELD_MAP) +
         len(KERNEL_GLOBAL_RVA_NAMES)
@@ -931,6 +1033,8 @@ def build_profile(
         },
         "fields": resolved_fields,
         "missingFields": missing_fields,
+        "typeSizes": resolved_type_sizes,
+        "missingTypeSizes": missing_type_sizes,
         "callbackItems": callback_items,
         "typedItems": typed_items,
         "missingGlobals": missing_globals,
@@ -938,6 +1042,7 @@ def build_profile(
         "diagnostics": {
             **diagnostics,
             "missingFields": missing_fields,
+            "missingTypeSizes": missing_type_sizes,
             "missingGlobals": missing_global_details,
         },
     }

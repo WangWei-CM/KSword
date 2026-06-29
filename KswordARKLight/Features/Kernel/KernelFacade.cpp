@@ -3,6 +3,7 @@
 #include "KernelDynDataProfiles.h"
 #include "KernelNativeQueries.h"
 #include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
+#include "../../../shared/driver/KswordArkKernelObjectIoctl.h"
 
 #include <algorithm>
 #include <memory>
@@ -97,6 +98,39 @@ std::wstring ModuleIdentityText(const ksword::ark::ArkDynModuleIdentity& identit
            << L"，SizeOfImage=" << HexText(identity.sizeOfImage)
            << L"，Base=" << HexText(identity.imageBase);
     return stream.str();
+}
+
+// FixedAnsiText converts NUL-terminated protocol char arrays into UTF-16 text.
+// Inputs are a bounded ANSI/UTF-8-ish buffer and its capacity; processing stops
+// at the first NUL and uses the same UTF-8 fallback as ArkDriverClient messages;
+// output is safe display text for profile, capability, and missing-item rows.
+std::wstring FixedAnsiText(const char* text, const std::size_t maxBytes) {
+    if (text == nullptr || maxBytes == 0U) {
+        return {};
+    }
+    std::size_t length = 0U;
+    while (length < maxBytes && text[length] != '\0') {
+        ++length;
+    }
+    if (length == 0U) {
+        return {};
+    }
+    return Utf8ToWide(std::string(text, text + length));
+}
+
+// FixedWideText converts bounded UTF-16 protocol arrays into std::wstring.
+// Inputs are a wchar_t array and its maximum element count; processing stops at
+// the first NUL to avoid over-reading non-terminated driver packets; output is a
+// normal string usable by ListView rows and detail panels.
+std::wstring FixedWideText(const wchar_t* text, const std::size_t maxChars) {
+    if (text == nullptr || maxChars == 0U) {
+        return {};
+    }
+    std::size_t length = 0U;
+    while (length < maxChars && text[length] != L'\0') {
+        ++length;
+    }
+    return std::wstring(text, text + length);
 }
 
 // DynDataSourceName keeps DriverStatus field-source summaries aligned with the
@@ -2415,6 +2449,114 @@ std::wstring CrossViewAnomalyText(const std::uint32_t flags) {
     return JoinNamesOrNormal(names);
 }
 
+// DynV4StatusText expands per-module/profile status bits. Input is the v4
+// statusFlags mask; output distinguishes exact identity match, applied profile,
+// required completeness, optional degradation, rejected identity, and validation
+// failure without guessing profile state in R3.
+std::wstring DynV4StatusText(const std::uint32_t flags) {
+    std::vector<std::wstring> names;
+    AppendFlagName(names, flags, KSW_DYN_V4_STATUS_FLAG_IDENTITY_MATCHED, L"Identity matched");
+    AppendFlagName(names, flags, KSW_DYN_V4_STATUS_FLAG_PROFILE_APPLIED, L"Profile applied");
+    AppendFlagName(names, flags, KSW_DYN_V4_STATUS_FLAG_REQUIRED_COMPLETE, L"Required complete");
+    AppendFlagName(names, flags, KSW_DYN_V4_STATUS_FLAG_OPTIONAL_DEGRADED, L"Optional degraded");
+    AppendFlagName(names, flags, KSW_DYN_V4_STATUS_FLAG_IDENTITY_REJECTED, L"Identity rejected");
+    AppendFlagName(names, flags, KSW_DYN_V4_STATUS_FLAG_VALIDATION_FAILED, L"Validation failed");
+    const std::uint32_t knownFlags =
+        KSW_DYN_V4_STATUS_FLAG_IDENTITY_MATCHED |
+        KSW_DYN_V4_STATUS_FLAG_PROFILE_APPLIED |
+        KSW_DYN_V4_STATUS_FLAG_REQUIRED_COMPLETE |
+        KSW_DYN_V4_STATUS_FLAG_OPTIONAL_DEGRADED |
+        KSW_DYN_V4_STATUS_FLAG_IDENTITY_REJECTED |
+        KSW_DYN_V4_STATUS_FLAG_VALIDATION_FAILED;
+    if ((flags & ~knownFlags) != 0U) {
+        names.push_back(std::wstring(L"unknown=") + HexText(flags & ~knownFlags));
+    }
+    return JoinNames(names);
+}
+
+// DynV4ItemKindText maps v4 item kinds to schema names. Input is the protocol
+// itemKind value; output mirrors docs/pdb_r0_audit_prep item type labels.
+const wchar_t* DynV4ItemKindText(const std::uint32_t itemKind) {
+    switch (itemKind) {
+    case KSW_DYN_V4_ITEM_KIND_STRUCT_OFFSET: return L"StructOffset";
+    case KSW_DYN_V4_ITEM_KIND_GLOBAL_RVA: return L"GlobalRva";
+    case KSW_DYN_V4_ITEM_KIND_FUNCTION_RVA: return L"FunctionRva";
+    case KSW_DYN_V4_ITEM_KIND_ENUM_VALUE: return L"EnumValue";
+    case KSW_DYN_V4_ITEM_KIND_TYPE_SIZE: return L"TypeSize";
+    case KSW_DYN_V4_ITEM_KIND_BIT_FIELD: return L"BitField";
+    case KSW_DYN_V4_ITEM_KIND_LIST_HEAD_GLOBAL: return L"ListHeadGlobal";
+    default: return L"Unknown";
+    }
+}
+
+// DynV4MissingKindText names required/optional missing item buckets. Input is a
+// protocol missing kind; output is display-only and never changes gating logic.
+const wchar_t* DynV4MissingKindText(const std::uint32_t missingKind) {
+    switch (missingKind) {
+    case KSW_DYN_V4_MISSING_KIND_REQUIRED: return L"Required";
+    case KSW_DYN_V4_MISSING_KIND_OPTIONAL: return L"Optional";
+    default: return L"Unknown";
+    }
+}
+
+// CidObjectKindText names CID table object kinds. Input is R0 expectedObjectKind;
+// output is a compact label used by the CID table summary page.
+const wchar_t* CidObjectKindText(const std::uint32_t kind) {
+    switch (kind) {
+    case KSWORD_ARK_CID_OBJECT_KIND_PROCESS: return L"Process";
+    case KSWORD_ARK_CID_OBJECT_KIND_THREAD: return L"Thread";
+    case KSWORD_ARK_CID_OBJECT_KIND_UNKNOWN:
+    default: return L"Unknown";
+    }
+}
+
+// CidEnumStatusText names aggregate CID table enumeration statuses. Input is the
+// protocol status; output explains capability/PDB degradation without implying
+// a malicious object when R0 only returned partial evidence.
+const wchar_t* CidEnumStatusText(const std::uint32_t status) {
+    switch (status) {
+    case KSWORD_ARK_CID_ENUM_STATUS_OK: return L"OK";
+    case KSWORD_ARK_CID_ENUM_STATUS_PARTIAL: return L"Partial";
+    case KSWORD_ARK_CID_ENUM_STATUS_DYNDATA_MISSING: return L"DynData missing";
+    case KSWORD_ARK_CID_ENUM_STATUS_PSPCID_UNAVAILABLE: return L"PspCidTable unavailable";
+    case KSWORD_ARK_CID_ENUM_STATUS_TYPE_UNAVAILABLE: return L"Type unavailable";
+    case KSWORD_ARK_CID_ENUM_STATUS_BUFFER_TRUNCATED: return L"Buffer truncated";
+    case KSWORD_ARK_CID_ENUM_STATUS_BUDGET_EXHAUSTED: return L"Budget exhausted";
+    case KSWORD_ARK_CID_ENUM_STATUS_UNAVAILABLE:
+    default: return L"Unavailable";
+    }
+}
+
+// CidEntryFlagsText expands CID row anomaly flags. Input is one entry flag mask;
+// output highlights dangling/type-mismatch/reference state for read-only audit.
+std::wstring CidEntryFlagsText(const std::uint32_t flags) {
+    std::vector<std::wstring> names;
+    AppendFlagName(names, flags, KSWORD_ARK_CID_ENTRY_FLAG_DANGLING, L"Dangling");
+    AppendFlagName(names, flags, KSWORD_ARK_CID_ENTRY_FLAG_TYPE_MISMATCH, L"Type mismatch");
+    AppendFlagName(names, flags, KSWORD_ARK_CID_ENTRY_FLAG_REFERENCED, L"Referenced");
+    const std::uint32_t knownFlags =
+        KSWORD_ARK_CID_ENTRY_FLAG_DANGLING |
+        KSWORD_ARK_CID_ENTRY_FLAG_TYPE_MISMATCH |
+        KSWORD_ARK_CID_ENTRY_FLAG_REFERENCED;
+    if ((flags & ~knownFlags) != 0U) {
+        names.push_back(std::wstring(L"unknown=") + HexText(flags & ~knownFlags));
+    }
+    return JoinNames(names);
+}
+
+// IpcSummaryStatusText names R0 IPC summary states. Input is one protocol status
+// value; output is a human-readable downgrade reason for IPC/ALPC/pipe rows.
+const wchar_t* IpcSummaryStatusText(const std::uint32_t status) {
+    switch (status) {
+    case KSWORD_ARK_IPC_SUMMARY_STATUS_OK: return L"OK";
+    case KSWORD_ARK_IPC_SUMMARY_STATUS_PARTIAL: return L"Partial";
+    case KSWORD_ARK_IPC_SUMMARY_STATUS_STUB: return L"LegacyStub(旧驱动占位)";
+    case KSWORD_ARK_IPC_SUMMARY_STATUS_FAILED: return L"Failed";
+    case KSWORD_ARK_IPC_SUMMARY_STATUS_UNAVAILABLE:
+    default: return L"Unavailable";
+    }
+}
+
 // CpuFeatureText renders KSWORD_ARK_CPU_FEATURE_* bits as compact badges. Input
 // is the R0 CPUID feature mask; output is suitable for the CPU hardware page and
 // falls back to "None" when no stable feature bits were returned.
@@ -2670,6 +2812,10 @@ bool IsArkDriverBacked(const KernelFeatureId id) {
     case KernelFeatureId::KeyboardHotkeys:
     case KernelFeatureId::KeyboardHooks:
     case KernelFeatureId::DynDataCapabilities:
+    case KernelFeatureId::PdbProfileStatus:
+    case KernelFeatureId::CidTableSummary:
+    case KernelFeatureId::IpcSummary:
+    case KernelFeatureId::HookAuditSummary:
     case KernelFeatureId::MinifilterBypassPids:
         return true;
     default:
@@ -3628,6 +3774,8 @@ void AppendDriverIntegrityRows(const ksword::ark::DriverIntegrityResult& query, 
         { L"Flags", HexText(query.flags) },
         { L"SourceMask", HexText(query.sourceMask) },
         { L"SourceText", DriverIntegritySourceText(query.sourceMask) },
+        { L"FieldFlags", HexText(query.fieldFlags) },
+        { L"StatusFlags", HexText(query.statusFlags) },
         { L"Total", std::to_wstring(query.totalCount) },
         { L"Returned", std::to_wstring(query.returnedCount) },
         { L"CpuCount", std::to_wstring(query.cpuCount) },
@@ -3652,6 +3800,12 @@ void AppendDriverIntegrityRows(const ksword::ark::DriverIntegrityResult& query, 
             { L"ClassText", DriverIntegrityClassText(entry.evidenceClass) },
             { L"Risk", HexText(entry.riskFlags) },
             { L"RiskText", DriverIntegrityRiskText(entry.riskFlags) },
+            { L"EntryStatus", std::to_wstring(entry.entryStatus) },
+            { L"StatusFlags", HexText(entry.statusFlags) },
+            { L"FieldMask", HexText(entry.fieldMask) },
+            { L"RiskScore", std::to_wstring(entry.riskScore) },
+            { L"RangeState", std::to_wstring(entry.rangeState) },
+            { L"Ordinal", std::to_wstring(entry.ordinal) },
             { L"Source", HexText(entry.sourceMask) },
             { L"SourceText", DriverIntegritySourceText(entry.sourceMask) },
             { L"Confidence", std::to_wstring(entry.confidence) },
@@ -3669,6 +3823,17 @@ void AppendDriverIntegrityRows(const ksword::ark::DriverIntegrityResult& query, 
             { L"OwnerModuleSize", HexText(entry.ownerModuleSize) },
             { L"OwnerModuleSizeText", SizeText(entry.ownerModuleSize) },
             { L"OwnerModule", entry.ownerModule },
+            { L"DriverObject", HexText(entry.driverObjectAddress) },
+            { L"DriverStart", HexText(entry.driverStart) },
+            { L"DriverSize", SizeText(entry.driverSize) },
+            { L"DriverSection", HexText(entry.driverSection) },
+            { L"DriverUnload", HexText(entry.driverUnload) },
+            { L"DeviceObject", HexText(entry.deviceObjectAddress) },
+            { L"AttachedDevice", HexText(entry.attachedDeviceObjectAddress) },
+            { L"KldrEntry", HexText(entry.kldrEntryAddress) },
+            { L"KldrListHead", HexText(entry.kldrListHeadAddress) },
+            { L"KldrDllBase", HexText(entry.kldrDllBase) },
+            { L"KldrSize", SizeText(entry.kldrSizeOfImage) },
             { L"LastStatus", HexText(static_cast<std::uint32_t>(query.lastStatus)) },
         }, entry.detail));
     }
@@ -3982,6 +4147,302 @@ KernelOperationResult QueryDynDataCapabilities(const KernelRequest& request) {
         { L"StatusFlags", HexText(query.statusFlags) },
         { L"CapabilityMask", HexText(query.capabilityMask) },
     }, Utf8ToWide(query.io.message)));
+    return result;
+}
+
+// QueryPdbProfileStatus summarizes DynData v3/v4 profile state through existing
+// ArkDriverClient transport. Input is the current UI request; processing reads
+// legacy status, fields, v4 module status, v4 capability groups, and missing
+// items; output is read-only rows used by the PDB Profile status page.
+KernelOperationResult QueryPdbProfileStatus(const KernelRequest& request) {
+    const ksword::ark::DriverClient client;
+    const ksword::ark::DynDataStatusResult status = client.queryDynDataStatus();
+    const ksword::ark::DynDataFieldsResult fields = client.queryDynDataFields();
+    const ksword::ark::DynDataCapabilitiesResult caps = client.queryDynDataCapabilities();
+    const ksword::ark::DynDataV4ModulesResult v4Modules = client.queryDynDataV4Modules();
+    const ksword::ark::DynDataV4CapabilityGroupsResult v4Groups = client.queryDynDataV4CapabilityGroups();
+    const ksword::ark::DynDataV4MissingItemsResult v4Missing = client.queryDynDataV4MissingItems();
+    const DynDataProfileMatch profileMatch = FindMatchingDynDataProfile(status.ntoskrnl);
+
+    KernelOperationResult result;
+    ApplyIoSummary(request, L"PDB Profile/DynData Status", status.io, result);
+    result.success = status.io.ok && fields.io.ok && caps.io.ok;
+
+    result.rows.push_back(Row({
+        { L"模块", L"ntoskrnl" },
+        { L"Module", status.ntoskrnl.moduleName },
+        { L"Class", std::to_wstring(status.ntoskrnl.classId) },
+        { L"Profile", Utf8ToWide(profileMatch.profile.profileName) },
+        { L"状态", TrustedOffsetText(status.statusFlags, profileMatch, SummarizeDynDataFields(fields)) },
+        { L"Status", HexText(status.statusFlags) },
+        { L"Capability", HexText(status.capabilityMask) },
+        { L"CapabilityMask", HexText(caps.capabilityMask) },
+        { L"缺失", fields.io.ok ? FieldCoverageText(SummarizeDynDataFields(fields), profileMatch.coveragePercent) : L"字段查询失败" },
+        { L"Identity", ModuleIdentityText(status.ntoskrnl) },
+        { L"PdbProfileName", Utf8ToWide(profileMatch.profile.profileName) },
+        { L"PdbProfilePath", profileMatch.path },
+        { L"Reason", profileMatch.message },
+    }, profileMatch.message));
+
+    result.rows.push_back(Row({
+        { L"模块", L"legacy-v3" },
+        { L"Class", std::to_wstring(status.matchedProfileClass) },
+        { L"Profile", Utf8ToWide(profileMatch.profile.profileName) },
+        { L"状态", profileMatch.matched ? L"Local pack matched" : L"Local pack not matched" },
+        { L"Capability", HexText(status.capabilityMask) },
+        { L"缺失", L"RequiredMissing=" + std::to_wstring(SummarizeDynDataFields(fields).requiredMissing) },
+        { L"Identity", ModuleIdentityText(status.ntoskrnl) },
+        { L"Detail", L"v3 兼容路径保持不破坏；应用 profile 仍需显式动作，不在刷新时修改 R0 状态。" },
+    }));
+
+    result.rows.push_back(Row({
+        { L"模块", L"v4-modules" },
+        { L"Class", L"multi-module" },
+        { L"Profile", L"profile-v4" },
+        { L"状态", v4Modules.io.ok ? L"OK" : L"Unavailable" },
+        { L"Capability", L"module status" },
+        { L"缺失", v4Modules.io.ok ? L"" : Utf8ToWide(v4Modules.io.message) },
+        { L"Identity", L"ArkDriverClient::queryDynDataV4Modules" },
+        { L"Detail", Utf8ToWide(v4Modules.io.message) },
+    }, Utf8ToWide(v4Modules.io.message)));
+    if (v4Modules.io.ok) {
+        for (const KSW_DYN_V4_MODULE_STATUS_ENTRY& entry : v4Modules.entries) {
+            const std::wstring moduleName = FixedWideText(entry.module.image.moduleName, KSW_DYN_MODULE_NAME_CHARS);
+            const std::wstring profileName = FixedAnsiText(entry.module.profileName, KSW_DYN_V4_PROFILE_NAME_CHARS);
+            const std::wstring pdbName = FixedAnsiText(entry.module.pdb.pdbName, KSW_DYN_PDB_NAME_CHARS);
+            const std::wstring pdbGuid = FixedAnsiText(entry.module.pdb.pdbGuid, KSW_DYN_PDB_GUID_CHARS);
+            std::wostringstream identity;
+            identity << moduleName
+                     << L" machine=" << HexText(entry.module.image.machine)
+                     << L" timestamp=" << HexText(entry.module.image.timeDateStamp)
+                     << L" size=" << HexText(entry.module.image.sizeOfImage)
+                     << L" pdb=" << pdbName << L"/" << pdbGuid
+                     << L"/age=" << entry.module.pdb.pdbAge;
+            result.rows.push_back(Row({
+                { L"模块", moduleName.empty() ? L"<unnamed>" : moduleName },
+                { L"Module", moduleName },
+                { L"ModuleName", moduleName },
+                { L"Class", std::to_wstring(entry.module.image.classId) },
+                { L"ModuleClassId", std::to_wstring(entry.module.image.classId) },
+                { L"Profile", profileName },
+                { L"ProfileName", profileName },
+                { L"状态", DynV4StatusText(entry.statusFlags) },
+                { L"Status", HexText(entry.statusFlags) },
+                { L"StatusFlags", HexText(entry.statusFlags) },
+                { L"Capability", std::to_wstring(entry.activeCapabilityGroupCount) + L"/" + std::to_wstring(entry.capabilityGroupCount) },
+                { L"缺失", L"required=" + std::to_wstring(entry.missingRequiredItemCount) + L", optional=" + std::to_wstring(entry.missingOptionalItemCount) },
+                { L"MissingSummary", L"required=" + std::to_wstring(entry.missingRequiredItemCount) + L", optional=" + std::to_wstring(entry.missingOptionalItemCount) },
+                { L"Identity", identity.str() },
+                { L"Detail", L"v4 module profile status row" },
+            }, identity.str()));
+        }
+    }
+
+    if (v4Groups.io.ok) {
+        for (const KSW_DYN_V4_CAPABILITY_GROUP_STATUS_ENTRY& entry : v4Groups.entries) {
+            result.rows.push_back(Row({
+                { L"模块", L"capability-group" },
+                { L"Class", std::to_wstring(entry.moduleClassId) },
+                { L"Profile", FixedAnsiText(entry.groupName, KSW_DYN_V4_CAPABILITY_NAME_CHARS) },
+                { L"状态", DynV4StatusText(entry.statusFlags) },
+                { L"Capability", L"group=" + std::to_wstring(entry.groupId) },
+                { L"Group", std::to_wstring(entry.groupId) },
+                { L"缺失", L"required " + std::to_wstring(entry.presentRequiredItemCount) + L"/" + std::to_wstring(entry.requiredItemCount) +
+                    L", optional " + std::to_wstring(entry.presentOptionalItemCount) + L"/" + std::to_wstring(entry.optionalItemCount) },
+                { L"Identity", L"ModuleClassId=" + std::to_wstring(entry.moduleClassId) },
+                { L"Detail", L"v4 capability group status row" },
+            }));
+        }
+    }
+
+    if (v4Missing.io.ok) {
+        for (const KSW_DYN_V4_MISSING_ITEM_ENTRY& entry : v4Missing.entries) {
+            const std::wstring itemName = FixedAnsiText(entry.itemName, KSW_DYN_V4_ITEM_NAME_CHARS);
+            const std::wstring reason = FixedAnsiText(entry.reason, KSW_DYN_V4_MISSING_REASON_CHARS);
+            result.rows.push_back(Row({
+                { L"模块", L"missing-item" },
+                { L"Class", std::to_wstring(entry.moduleClassId) },
+                { L"Profile", itemName },
+                { L"状态", DynV4MissingKindText(entry.missingKind) },
+                { L"Capability", L"group=" + std::to_wstring(entry.capabilityGroupId) },
+                { L"缺失", std::wstring(DynV4ItemKindText(entry.itemKind)) + L" " + itemName },
+                { L"Identity", L"ItemId=" + std::to_wstring(entry.itemId) },
+                { L"Reason", reason },
+                { L"Detail", reason },
+            }, reason));
+        }
+    }
+    return result;
+}
+
+// QueryCidTableSummary uses the ArkDriverClient high-level CID wrapper. Input
+// may contain a PID/CID filter; processing never requests mutation and leaves
+// protocol parsing inside ArkDriverClient; output preserves the existing Light
+// table columns for source/dangling/type-mismatch evidence.
+KernelOperationResult QueryCidTableSummary(const KernelRequest& request) {
+    const ksword::ark::DriverClient client;
+    const std::uint32_t cidFilter = ParseFirstPidFromText(request.filterText);
+    const ksword::ark::CidTableAuditResult query = client.enumCidTable(
+        KSWORD_ARK_CID_ENUM_FLAG_INCLUDE_ALL,
+        256,
+        8192,
+        cidFilter,
+        cidFilter);
+
+    KernelOperationResult result;
+    ApplyIoSummary(request, L"CID Table Summary", query.io, result);
+    if (!query.io.ok) {
+        return result;
+    }
+
+    result.rows.push_back(Row({
+        { L"CID", cidFilter == 0 ? L"<all>" : std::to_wstring(cidFilter) },
+        { L"对象", HexText(query.pspCidTableAddress) },
+        { L"类型", L"PspCidTable" },
+        { L"状态", CidEnumStatusText(query.status) },
+        { L"Flags", HexText(query.flags) },
+        { L"引用", L"visited=" + std::to_wstring(query.visitedCount) + L"/" + std::to_wstring(query.maxVisitCount) },
+        { L"Detail", L"total=" + std::to_wstring(query.totalCount) + L", returned=" + std::to_wstring(query.returnedCount) },
+        { L"CapabilityMask", HexText(query.dynDataCapabilityMask) },
+        { L"HT.TableCode", HexText(query.htTableCodeOffset) },
+        { L"HTE.LowValue", HexText(query.hteLowValueOffset) },
+        { L"LastStatus", HexText(static_cast<std::uint32_t>(query.lastStatus)) },
+    }));
+
+    for (const KSWORD_ARK_CID_TABLE_ENTRY& entry : query.entries) {
+        result.rows.push_back(Row({
+            { L"CID", std::to_wstring(entry.cidValue) },
+            { L"Cid", std::to_wstring(entry.cidValue) },
+            { L"对象", HexText(entry.objectAddress) },
+            { L"Object", HexText(entry.objectAddress) },
+            { L"ObjectAddress", HexText(entry.objectAddress) },
+            { L"类型", CidObjectKindText(entry.expectedObjectKind) },
+            { L"Kind", CidObjectKindText(entry.expectedObjectKind) },
+            { L"状态", HexText(static_cast<std::uint32_t>(entry.lookupStatus)) },
+            { L"Status", HexText(static_cast<std::uint32_t>(entry.lookupStatus)) },
+            { L"LookupStatus", HexText(static_cast<std::uint32_t>(entry.lookupStatus)) },
+            { L"Flags", HexText(entry.flags) },
+            { L"FlagText", CidEntryFlagsText(entry.flags) },
+            { L"引用", HexText(static_cast<std::uint32_t>(entry.referenceStatus)) },
+            { L"ReferenceStatus", HexText(static_cast<std::uint32_t>(entry.referenceStatus)) },
+            { L"HandleIndex", std::to_wstring(entry.handleIndex) },
+            { L"Detail", CidEntryFlagsText(entry.flags) },
+        }));
+    }
+    return result;
+}
+
+// QueryIpcSummary reads the R0 IPC summary protocol and augments it with the
+// KernelLight local NamedPipe/communication-endpoint entry points. Input is one
+// UI request; processing remains read-only and does not enumerate or mutate pipe
+// contents; output distinguishes ALPC, NamedPipe, Mailslot and SMB fallback.
+KernelOperationResult QueryIpcSummary(const KernelRequest& request) {
+    const ksword::ark::DriverClient client;
+    const std::uint32_t pidFilter = ParseFirstPidFromText(request.filterText);
+    const ksword::ark::IpcSummaryAuditResult query = client.queryIpcSummary(
+        pidFilter,
+        0,
+        KSWORD_ARK_IPC_QUERY_FLAG_INCLUDE_ALL,
+        128);
+    const KSWORD_ARK_QUERY_IPC_SUMMARY_RESPONSE& response = query.response;
+
+    KernelOperationResult result;
+    ApplyIoSummary(request, L"IPC Summary", query.io, result);
+    result.rows.push_back(Row({
+        { L"类别", L"ALPC" },
+        { L"Class", L"ALPC" },
+        { L"状态", query.io.ok ? IpcSummaryStatusText(response.alpcStatus) : L"Unavailable" },
+        { L"Status", query.io.ok ? IpcSummaryStatusText(response.alpcStatus) : L"Unavailable" },
+        { L"进程", pidFilter == 0 ? L"<all/current capability>" : std::to_wstring(pidFilter) },
+        { L"PID", std::to_wstring(response.processId) },
+        { L"Handle/Object", HexText(response.alpcObjectAddress) },
+        { L"Object", HexText(response.alpcObjectAddress) },
+        { L"Capability", HexText(response.dynDataCapabilityMask) },
+        { L"CapabilityMask", HexText(response.dynDataCapabilityMask) },
+        { L"来源", L"ArkDriverClient::queryIpcSummary" },
+        { L"Source", L"R0 IPC summary" },
+        { L"Detail", FixedWideText(response.detail, KSWORD_ARK_KERNEL_OBJECT_DETAIL_CHARS) },
+        { L"TypeName", FixedWideText(response.alpcTypeName, KSWORD_ARK_KERNEL_OBJECT_TYPE_NAME_CHARS) },
+        { L"LastStatus", HexText(static_cast<std::uint32_t>(response.lastStatus)) },
+    }, FixedWideText(response.detail, KSWORD_ARK_KERNEL_OBJECT_DETAIL_CHARS)));
+    result.rows.push_back(Row({
+        { L"类别", L"NamedPipe" },
+        { L"状态", query.io.ok ? IpcSummaryStatusText(response.namedPipeStatus) : L"Use NamedPipe tab" },
+        { L"进程", L"<namespace>" },
+        { L"Handle/Object", L"\\Device\\NamedPipe" },
+        { L"Capability", L"R3 Native + R0 summary" },
+        { L"来源", L"命名管道页" },
+        { L"Detail", L"切换到 IPC/命名管道子页可执行只读 NT object namespace 枚举。" },
+    }));
+    result.rows.push_back(Row({
+        { L"类别", L"Mailslot" },
+        { L"状态", query.io.ok ? IpcSummaryStatusText(response.mailslotStatus) : L"Unavailable" },
+        { L"进程", L"<namespace>" },
+        { L"Handle/Object", L"\\Device\\Mailslot" },
+        { L"Capability", HexText(response.dynDataCapabilityMask) },
+        { L"来源", L"R0 IPC summary" },
+        { L"Detail", L"当前只读摘要；缺字段时显示 partial/unavailable，不猜测对象布局。" },
+    }));
+    result.rows.push_back(Row({
+        { L"类别", L"SMB" },
+        { L"状态", L"Fallback" },
+        { L"进程", L"<system/network>" },
+        { L"Handle/Object", L"Lanman/Redirector" },
+        { L"Capability", L"network stack audit pending" },
+        { L"来源", L"docs/pdb_r0_audit_prep/04_network_stack_audit.md" },
+        { L"Detail", L"SMB 仅作为 IPC 风险入口提示；本轮不修改 Network 模块，也不新增网络 IOCTL 调用。" },
+    }));
+    return result;
+}
+
+// QueryHookAuditSummary aggregates existing read-only hook/callback audit entry
+// points. Input is the UI request; processing queries lightweight capability and
+// selected existing collectors; output is a compact routing/status table rather
+// than a destructive repair panel.
+KernelOperationResult QueryHookAuditSummary(const KernelRequest& request) {
+    KernelOperationResult result;
+    result.supported = true;
+    result.success = true;
+    result.message = L"Hook/callback 只读审计入口汇总完成。";
+
+    const KernelRequest callbackRequest{ KernelFeatureId::CallbackEnumeration, request.filterText, request.moduleFilterText, request.flags, request.startAddress, request.endAddress, 128, request.idtVectorLimit };
+    const KernelRequest inlineRequest{ KernelFeatureId::InlineHook, request.filterText, request.moduleFilterText, request.flags | KernelRequestFlagRiskOnly, request.startAddress, request.endAddress, 128, request.idtVectorLimit };
+    const KernelRequest iatEatRequest{ KernelFeatureId::IatEatHook, request.filterText, request.moduleFilterText, request.flags | KernelRequestFlagRiskOnly, request.startAddress, request.endAddress, 128, request.idtVectorLimit };
+    const KernelRequest ssdtRequest{ KernelFeatureId::Ssdt, request.filterText, request.moduleFilterText, request.flags, request.startAddress, request.endAddress, 128, request.idtVectorLimit };
+    const KernelOperationResult callbacks = QueryCallbackEnumeration(callbackRequest);
+    const KernelOperationResult inlineHooks = QueryInlineHooks(inlineRequest);
+    const KernelOperationResult iatEatHooks = QueryIatEatHooks(iatEatRequest);
+    const KernelOperationResult ssdt = QuerySsdt(ssdtRequest, false);
+
+    const auto appendSummary = [&](const wchar_t* cls, const wchar_t* entry, const KernelOperationResult& source, const wchar_t* capability) {
+        result.success = result.success && source.success;
+        result.rows.push_back(Row({
+            { L"类别", cls },
+            { L"Class", cls },
+            { L"入口", entry },
+            { L"Entry", entry },
+            { L"状态", source.success ? L"OK" : (source.supported ? L"Partial/Failed" : L"Unsupported") },
+            { L"Status", source.message },
+            { L"Capability", capability },
+            { L"Rows", std::to_wstring(source.rows.size()) },
+            { L"风险/降级", source.success ? L"只读审计可用" : source.message },
+            { L"Detail", source.message },
+        }, source.message));
+    };
+
+    appendSummary(L"Callback", L"回调遍历", callbacks, L"KSW_CAP_CALLBACK_*");
+    appendSummary(L"InlineHook", L"Inline Hook", inlineHooks, L"kernel hook scan");
+    appendSummary(L"IAT/EAT", L"IAT/EAT", iatEatHooks, L"import/export scan");
+    appendSummary(L"SSDT", L"SSDT", ssdt, L"service table scan");
+    result.rows.push_back(Row({
+        { L"类别", L"ShadowSSDT" },
+        { L"入口", L"ShadowSSDT 子页" },
+        { L"状态", L"Available on dedicated tab" },
+        { L"Capability", L"win32k/profile gated" },
+        { L"Rows", L"-" },
+        { L"风险/降级", L"请切换 Hook审计/ShadowSSDT 或原 SSSDT 解析页查看完整行。" },
+        { L"Detail", L"摘要页避免一次刷新触发过多 win32k/ShadowSSDT 查询；专页仍保持只读审计。" },
+    }));
     return result;
 }
 
@@ -4891,6 +5352,14 @@ KernelOperationResult KernelFacade::QueryArkDriverFeature(const KernelRequest& r
         return attachCapability(QueryKeyboardHooks(request));
     case KernelFeatureId::DynDataCapabilities:
         return attachCapability(QueryDynDataCapabilities(request));
+    case KernelFeatureId::PdbProfileStatus:
+        return attachCapability(QueryPdbProfileStatus(request));
+    case KernelFeatureId::CidTableSummary:
+        return attachCapability(QueryCidTableSummary(request));
+    case KernelFeatureId::IpcSummary:
+        return attachCapability(QueryIpcSummary(request));
+    case KernelFeatureId::HookAuditSummary:
+        return attachCapability(QueryHookAuditSummary(request));
     case KernelFeatureId::MinifilterBypassPids:
         return attachCapability(QueryMinifilterBypassPids(request));
     default:

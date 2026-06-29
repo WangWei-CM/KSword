@@ -97,6 +97,10 @@
     <ClCompile Include="Core\PathUtils.cpp" />
     <ClCompile Include="Core\Privilege.cpp" />
     <ClCompile Include="Docking\DockManager.cpp" />
+    <ClCompile Include="Features\AuditCommon\AuditFormatting.cpp" />
+    <ClCompile Include="Features\AuditCommon\AuditStatus.cpp" />
+    <ClCompile Include="Features\AuditCommon\AuditSummaryPanel.cpp" />
+    <ClCompile Include="Features\AuditCommon\AuditTable.cpp" />
     <ClCompile Include="Features\Driver\DriverActions.cpp" />
     <ClCompile Include="Features\Driver\DriverEnumerator.cpp" />
     <ClCompile Include="Features\Driver\DriverFeature.cpp" />
@@ -113,6 +117,9 @@
     <ClCompile Include="Features\Hardware\HardwareFeature.cpp" />
     <ClCompile Include="Features\Hardware\HardwareModel.cpp" />
     <ClCompile Include="Features\Hardware\HardwareView.cpp" />
+    <ClCompile Include="Features\Handle\HandleClient.cpp" />
+    <ClCompile Include="Features\Handle\HandleFeature.cpp" />
+    <ClCompile Include="Features\Handle\HandlePage.cpp" />
     <ClCompile Include="Features\Kernel\KernelAtomTableFeature.cpp" />
     <ClCompile Include="Features\Kernel\KernelBaseNamedObjectsFeature.cpp" />
     <ClCompile Include="Features\Kernel\KernelCallbackEnumerationFeature.cpp" />
@@ -144,12 +151,16 @@
     <ClCompile Include="Features\Memory\DriverMemoryModel.cpp" />
     <ClCompile Include="Features\Memory\DriverMemoryView.cpp" />
     <ClCompile Include="Features\Memory\MemoryFeature.cpp" />
+    <ClCompile Include="Features\Misc\MiscFeature.cpp" />
     <ClCompile Include="Features\Monitor\EtwEventModel.cpp" />
     <ClCompile Include="Features\Monitor\EtwFilterDialog.cpp" />
     <ClCompile Include="Features\Monitor\EtwFilterModel.cpp" />
     <ClCompile Include="Features\Monitor\EtwMonitorView.cpp" />
     <ClCompile Include="Features\Monitor\EtwSessionController.cpp" />
     <ClCompile Include="Features\Monitor\MonitorFeature.cpp" />
+    <ClCompile Include="Features\Network\NetworkFeature.cpp" />
+    <ClCompile Include="Features\Network\NetworkModel.cpp" />
+    <ClCompile Include="Features\Network\NetworkView.cpp" />
     <ClCompile Include="Features\Process\ProcessActions.cpp" />
     <ClCompile Include="Features\Process\ProcessEnumerator.cpp" />
     <ClCompile Include="Features\Process\ProcessFeature.cpp" />
@@ -186,6 +197,7 @@
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverCapabilities.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverCapability.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverClient.cpp" />
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverAudit.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverDynData.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverError.cpp" />
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverFile.cpp" />
@@ -207,6 +219,11 @@
     <ClInclude Include="Core\Privilege.h" />
     <ClInclude Include="Core\Win32Lean.h" />
     <ClInclude Include="Docking\DockManager.h" />
+    <ClInclude Include="Features\AuditCommon\AuditCommon.h" />
+    <ClInclude Include="Features\AuditCommon\AuditFormatting.h" />
+    <ClInclude Include="Features\AuditCommon\AuditStatus.h" />
+    <ClInclude Include="Features\AuditCommon\AuditSummaryPanel.h" />
+    <ClInclude Include="Features\AuditCommon\AuditTable.h" />
     <ClInclude Include="Features\Driver\DriverActions.h" />
     <ClInclude Include="Features\Driver\DriverEnumerator.h" />
     <ClInclude Include="Features\Driver\DriverFeature.h" />
@@ -223,6 +240,9 @@
     <ClInclude Include="Features\Hardware\HardwareFeature.h" />
     <ClInclude Include="Features\Hardware\HardwareModel.h" />
     <ClInclude Include="Features\Hardware\HardwareView.h" />
+    <ClInclude Include="Features\Handle\HandleClient.h" />
+    <ClInclude Include="Features\Handle\HandleFeature.h" />
+    <ClInclude Include="Features\Handle\HandlePage.h" />
     <ClInclude Include="Features\Kernel\KernelAtomTableFeature.h" />
     <ClInclude Include="Features\Kernel\KernelBaseNamedObjectsFeature.h" />
     <ClInclude Include="Features\Kernel\KernelCallbackEnumerationFeature.h" />
@@ -254,12 +274,16 @@
     <ClInclude Include="Features\Memory\DriverMemoryModel.h" />
     <ClInclude Include="Features\Memory\DriverMemoryView.h" />
     <ClInclude Include="Features\Memory\MemoryFeature.h" />
+    <ClInclude Include="Features\Misc\MiscFeature.h" />
     <ClInclude Include="Features\Monitor\EtwEventModel.h" />
     <ClInclude Include="Features\Monitor\EtwFilterDialog.h" />
     <ClInclude Include="Features\Monitor\EtwFilterModel.h" />
     <ClInclude Include="Features\Monitor\EtwMonitorView.h" />
     <ClInclude Include="Features\Monitor\EtwSessionController.h" />
     <ClInclude Include="Features\Monitor\MonitorFeature.h" />
+    <ClInclude Include="Features\Network\NetworkFeature.h" />
+    <ClInclude Include="Features\Network\NetworkModel.h" />
+    <ClInclude Include="Features\Network\NetworkView.h" />
     <ClInclude Include="Features\Process\ProcessActions.h" />
     <ClInclude Include="Features\Process\ProcessEnumerator.h" />
     <ClInclude Include="Features\Process\ProcessFeature.h" />
@@ -305,6 +329,8 @@
     <ClInclude Include="..\shared\driver\KswordArkCapabilityIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkDynDataIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkFileIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkFilterIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkDeviceAuditIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkKernelIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkKeyboardIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkMemoryIoctl.h" />
@@ -315,8 +341,12 @@
     <ClInclude Include="..\shared\driver\KswordArkRegistryIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkSafetyIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkSectionIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkSecurityAuditIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkStorageIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkThreadIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkTrustIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkNetworkIoctl.h" />
+    <ClInclude Include="..\shared\driver\KswordArkKernelObjectIoctl.h" />
     <ClInclude Include="..\shared\driver\KswordArkWslSiloIoctl.h" />
   </ItemGroup>
   <ItemGroup>

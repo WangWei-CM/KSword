@@ -6,13 +6,16 @@ namespace {
 
 
 const std::vector<TopLevelTabSpec> kOriginalTopLevelTabs = {
+    { L"动态偏移", KernelFeatureId::PdbProfileStatus },
     { L"对象命名空间", KernelFeatureId::ObjectNamespaceOverview },
+    { L"IPC", KernelFeatureId::IpcSummary },
     { L"原子表遍历", KernelFeatureId::AtomTable },
     { L"历史NtQuery", KernelFeatureId::NtQueryLegacy },
     { L"SSDT遍历", KernelFeatureId::Ssdt },
     { L"SSSDT解析", KernelFeatureId::ShadowSsdt },
-    { L"Inline Hook 检测 & 摘除", KernelFeatureId::InlineHook },
+    { L"Inline Hook 审计", KernelFeatureId::InlineHook },
     { L"IAT/EAT 钩子检测", KernelFeatureId::IatEatHook },
+    { L"Hook审计", KernelFeatureId::HookAuditSummary },
     { L"驱动回调", KernelFeatureId::CallbackIntercept },
     { L"回调遍历", KernelFeatureId::CallbackEnumeration },
     { L"内核可执行内存", KernelFeatureId::KernelExecutableMemory },
@@ -32,9 +35,32 @@ const std::vector<ObjectNamespaceTabSpec> kObjectNamespaceTabs = {
     { L"通信端点", KernelFeatureId::CommunicationEndpoint },
 };
 
+const std::vector<ObjectNamespaceTabSpec> kDynDataTabs = {
+    { L"PDB/Profile", KernelFeatureId::PdbProfileStatus },
+    { L"DynData字段", KernelFeatureId::DynData },
+    { L"Capability", KernelFeatureId::DynDataCapabilities },
+    { L"驱动状态", KernelFeatureId::DriverStatus },
+};
+
 const std::vector<ObjectNamespaceTabSpec> kCrossViewTabs = {
     { L"进程矩阵", KernelFeatureId::ProcessCrossView },
     { L"线程矩阵", KernelFeatureId::ThreadCrossView },
+    { L"CID表", KernelFeatureId::CidTableSummary },
+};
+
+const std::vector<ObjectNamespaceTabSpec> kIpcTabs = {
+    { L"IPC汇总", KernelFeatureId::IpcSummary },
+    { L"命名管道", KernelFeatureId::NamedPipe },
+    { L"通信端点", KernelFeatureId::CommunicationEndpoint },
+};
+
+const std::vector<ObjectNamespaceTabSpec> kHookAuditTabs = {
+    { L"审计摘要", KernelFeatureId::HookAuditSummary },
+    { L"SSDT", KernelFeatureId::Ssdt },
+    { L"ShadowSSDT", KernelFeatureId::ShadowSsdt },
+    { L"Inline", KernelFeatureId::InlineHook },
+    { L"IAT/EAT", KernelFeatureId::IatEatHook },
+    { L"回调遍历", KernelFeatureId::CallbackEnumeration },
 };
 
 const std::vector<ObjectNamespaceTabSpec> kKeyboardTabs = {
@@ -60,10 +86,16 @@ const std::vector<ObjectNamespaceTabSpec>& SecondaryTabsForPrimary(const KernelF
     // static vector whose feature ids are resolved against the live catalog by
     // KernelPage before insertion.
     switch (primaryFeatureId) {
+    case KernelFeatureId::PdbProfileStatus:
+        return kDynDataTabs;
     case KernelFeatureId::ObjectNamespaceOverview:
         return kObjectNamespaceTabs;
+    case KernelFeatureId::IpcSummary:
+        return kIpcTabs;
     case KernelFeatureId::ProcessCrossView:
         return kCrossViewTabs;
+    case KernelFeatureId::HookAuditSummary:
+        return kHookAuditTabs;
     case KernelFeatureId::KeyboardHotkeys:
         return kKeyboardTabs;
     default:
@@ -105,6 +137,10 @@ KernelPageLayoutKind LayoutKindForFeature(const KernelFeatureId featureId) {
     case KernelFeatureId::KeyboardHooks:
     case KernelFeatureId::DynDataCapabilities:
     case KernelFeatureId::MinifilterBypassPids:
+    case KernelFeatureId::PdbProfileStatus:
+    case KernelFeatureId::CidTableSummary:
+    case KernelFeatureId::IpcSummary:
+    case KernelFeatureId::HookAuditSummary:
         return KernelPageLayoutKind::TableWithDetail;
     case KernelFeatureId::DynData:
     case KernelFeatureId::DriverStatus:
@@ -192,6 +228,14 @@ std::vector<std::wstring> CanonicalColumnNames(const KernelFeatureId featureId) 
         return { L"对象", L"类型", L"范围", L"进程ID", L"线程ID", L"函数/偏移", L"模块", L"来源", L"Flags", L"详情" };
     case KernelFeatureId::DynDataCapabilities:
         return { L"Capability", L"状态", L"字段", L"原因" };
+    case KernelFeatureId::PdbProfileStatus:
+        return { L"模块", L"Class", L"Profile", L"状态", L"Capability", L"缺失", L"Identity/Detail" };
+    case KernelFeatureId::CidTableSummary:
+        return { L"CID", L"对象", L"类型", L"状态", L"Flags", L"引用", L"Detail" };
+    case KernelFeatureId::IpcSummary:
+        return { L"类别", L"状态", L"进程", L"Handle/Object", L"Capability", L"来源", L"Detail" };
+    case KernelFeatureId::HookAuditSummary:
+        return { L"类别", L"入口", L"状态", L"Capability", L"Rows", L"风险/降级", L"Detail" };
     case KernelFeatureId::MinifilterBypassPids:
         return { L"PID", L"进程", L"状态", L"来源" };
     default:
@@ -463,6 +507,42 @@ std::vector<std::wstring> ColumnAliases(const KernelFeatureId featureId, const s
         if (columnName == L"状态") return { L"状态", L"StatusFlags" };
         if (columnName == L"字段") return { L"字段", L"Fields", L"Field" };
         if (columnName == L"原因") return { L"原因", L"Reason", L"Detail" };
+    }
+    if (featureId == KernelFeatureId::PdbProfileStatus) {
+        if (columnName == L"模块") return { L"模块", L"Module", L"ModuleName" };
+        if (columnName == L"Class") return { L"Class", L"ModuleClassId" };
+        if (columnName == L"Profile") return { L"Profile", L"ProfileName", L"PdbProfileName" };
+        if (columnName == L"状态") return { L"状态", L"Status", L"StatusFlags" };
+        if (columnName == L"Capability") return { L"Capability", L"CapabilityMask", L"Group" };
+        if (columnName == L"缺失") return { L"缺失", L"Missing", L"MissingSummary" };
+        if (columnName == L"Identity/Detail") return { L"Identity", L"Detail", L"Reason" };
+    }
+    if (featureId == KernelFeatureId::CidTableSummary) {
+        if (columnName == L"CID") return { L"CID", L"Cid", L"HandleIndex" };
+        if (columnName == L"对象") return { L"对象", L"Object", L"ObjectAddress" };
+        if (columnName == L"类型") return { L"类型", L"Kind", L"ExpectedKind" };
+        if (columnName == L"状态") return { L"状态", L"Status", L"LookupStatus" };
+        if (columnName == L"Flags") return { L"Flags", L"FlagText" };
+        if (columnName == L"引用") return { L"引用", L"ReferenceStatus" };
+        if (columnName == L"Detail") return { L"Detail", L"Reason" };
+    }
+    if (featureId == KernelFeatureId::IpcSummary) {
+        if (columnName == L"类别") return { L"类别", L"Class", L"Type" };
+        if (columnName == L"状态") return { L"状态", L"Status" };
+        if (columnName == L"进程") return { L"进程", L"PID", L"Process" };
+        if (columnName == L"Handle/Object") return { L"Handle/Object", L"Handle", L"Object" };
+        if (columnName == L"Capability") return { L"Capability", L"CapabilityMask" };
+        if (columnName == L"来源") return { L"来源", L"Source" };
+        if (columnName == L"Detail") return { L"Detail", L"Reason" };
+    }
+    if (featureId == KernelFeatureId::HookAuditSummary) {
+        if (columnName == L"类别") return { L"类别", L"Class" };
+        if (columnName == L"入口") return { L"入口", L"Entry" };
+        if (columnName == L"状态") return { L"状态", L"Status" };
+        if (columnName == L"Capability") return { L"Capability", L"CapabilityMask" };
+        if (columnName == L"Rows") return { L"Rows", L"Returned", L"Count" };
+        if (columnName == L"风险/降级") return { L"风险/降级", L"Risk", L"Missing", L"Reason" };
+        if (columnName == L"Detail") return { L"Detail" };
     }
     if (featureId == KernelFeatureId::MinifilterBypassPids) {
         if (columnName == L"PID") return { L"PID", L"PidCount" };

@@ -3,9 +3,10 @@
 // ============================================================
 // HandleDock.h
 // 作用：
-// - 提供“句柄”Dock 页面，包含“句柄列表 / 对象类型”两个 Tab；
-// - 句柄列表页实现 R3 句柄枚举、过滤、右键复制与关闭句柄；
-// - 对象类型页复刻原内核对象类型视图，并为句柄页提供类型名映射。
+// - 提供“句柄”Dock 页面，包含“Handle Table / Object Header / Object Type”三个 Tab；
+// - Handle Table 页只负责句柄解码、过滤和风险标记；
+// - Object Header 页只负责当前选中句柄的对象头、类型归属和证据展示；
+// - Object Type 页复刻原内核对象类型视图，并为句柄页提供类型名映射。
 // ============================================================
 
 #include "../Framework.h"
@@ -229,20 +230,27 @@ private:
 private:
     // initializeUi 作用：
     // - 创建页面布局与多 Tab 容器；
-    // - 构建句柄列表页与对象类型页。
+    // - 构建 Handle Table / Object Header / Object Type 三个页签。
     // 调用方法：构造函数内部调用一次。
     // 传入/传出：无。
     void initializeUi();
 
     // initializeHandleListTab 作用：
-    // - 构建句柄列表 Tab 的工具栏、状态栏、表格；
+    // - 构建 Handle Table Tab 的工具栏、状态栏、表格；
     // - 绑定图标按钮与控件样式。
     // 调用方法：initializeUi 内部调用。
     // 传入/传出：无。
     void initializeHandleListTab();
 
+    // initializeObjectHeaderTab 作用：
+    // - 构建 Object Header Tab 的只读详情树；
+    // - 该页展示当前选中句柄的对象头、类型归属和风险标记。
+    // 调用方法：initializeUi 内部调用。
+    // 传入/传出：无。
+    void initializeObjectHeaderTab();
+
     // initializeObjectTypeTab 作用：
-    // - 构建对象类型 Tab（原 Kernel 对象类型视图）；
+    // - 构建 Object Type Tab（原 Kernel 对象类型视图）；
     // - 提供过滤、刷新、详情面板。
     // 调用方法：initializeUi 内部调用。
     // 传入/传出：无。
@@ -410,7 +418,7 @@ private:
 
     // showHandleTableContextMenu 作用：
     // - 在句柄表上弹出右键菜单；
-    // - 提供复制、关闭句柄、转到对象类型等动作。
+    // - 只提供复制、跳转和刷新等只读动作。
     // 调用方法：QTreeWidget::customContextMenuRequested 回调。
     // 传入 localPosition：表格局部坐标。
     // 传出：无。
@@ -462,15 +470,15 @@ private:
 
     // closeCurrentHandle 作用：
     // - 对选中句柄执行 DuplicateHandle(DUPLICATE_CLOSE_SOURCE)；
-    // - 成功后自动触发刷新。
-    // 调用方法：右键菜单“关闭句柄”。
+    // - 成功后自动触发刷新；
+    // - 当前默认 UI 不再暴露该入口。
     // 传入/传出：无。
     void closeCurrentHandle();
 
     // closeSameTypeHandlesInCurrentProcess 作用：
     // - 关闭“同 PID + 同 TypeIndex”的一组句柄；
-    // - 用于批量处置异常句柄，提升句柄管理能力。
-    // 调用方法：右键菜单“批量关闭同类型句柄”。
+    // - 用于批量处置异常句柄，提升句柄管理能力；
+    // - 当前默认 UI 不再暴露该入口。
     // 传入/传出：无。
     void closeSameTypeHandlesInCurrentProcess();
 
@@ -605,9 +613,9 @@ private:
     QVBoxLayout* m_rootLayout = nullptr;         // m_rootLayout：页面根布局。
     QTabWidget* m_tabWidget = nullptr;           // m_tabWidget：句柄模块 Tab 容器。
 
-    QWidget* m_handleListPage = nullptr;         // m_handleListPage：句柄列表页容器。
-    QVBoxLayout* m_handleListLayout = nullptr;   // m_handleListLayout：句柄列表页布局。
-    QHBoxLayout* m_toolbarLayout = nullptr;      // m_toolbarLayout：句柄列表顶部工具栏布局。
+    QWidget* m_handleListPage = nullptr;         // m_handleListPage：Handle Table 页容器。
+    QVBoxLayout* m_handleListLayout = nullptr;   // m_handleListLayout：Handle Table 页布局。
+    QHBoxLayout* m_toolbarLayout = nullptr;      // m_toolbarLayout：Handle Table 顶部工具栏布局。
     QPushButton* m_refreshButton = nullptr;      // m_refreshButton：句柄刷新按钮（图标化）。
     QLineEdit* m_pidFilterEdit = nullptr;        // m_pidFilterEdit：PID 过滤输入框。
     QLineEdit* m_keywordFilterEdit = nullptr;    // m_keywordFilterEdit：关键字过滤输入框。
@@ -619,12 +627,14 @@ private:
     QSpinBox* m_nameBudgetSpinBox = nullptr;     // m_nameBudgetSpinBox：对象名解析预算。
     QLabel* m_statusLabel = nullptr;             // m_statusLabel：句柄刷新状态文本。
     QTreeWidget* m_tableWidget = nullptr;        // m_tableWidget：句柄列表表格。
-    QLabel* m_handleDetailStatusLabel = nullptr; // m_handleDetailStatusLabel：句柄详情状态文本。
-    QTreeWidget* m_handleDetailTable = nullptr;  // m_handleDetailTable：句柄详情键值表。
+    QWidget* m_objectHeaderPage = nullptr;       // m_objectHeaderPage：Object Header 页容器。
+    QVBoxLayout* m_objectHeaderLayout = nullptr; // m_objectHeaderLayout：Object Header 页布局。
+    QLabel* m_handleDetailStatusLabel = nullptr; // m_handleDetailStatusLabel：Object Header 状态文本。
+    QTreeWidget* m_handleDetailTable = nullptr;  // m_handleDetailTable：Object Header 键值表。
 
-    QWidget* m_objectTypePage = nullptr;         // m_objectTypePage：对象类型页容器。
-    QVBoxLayout* m_objectTypeLayout = nullptr;   // m_objectTypeLayout：对象类型页布局。
-    QHBoxLayout* m_objectTypeToolLayout = nullptr; // m_objectTypeToolLayout：对象类型工具栏布局。
+    QWidget* m_objectTypePage = nullptr;         // m_objectTypePage：Object Type 页容器。
+    QVBoxLayout* m_objectTypeLayout = nullptr;   // m_objectTypeLayout：Object Type 页布局。
+    QHBoxLayout* m_objectTypeToolLayout = nullptr; // m_objectTypeToolLayout：Object Type 工具栏布局。
     QPushButton* m_refreshObjectTypeButton = nullptr; // m_refreshObjectTypeButton：对象类型刷新按钮。
     QLineEdit* m_objectTypeFilterEdit = nullptr; // m_objectTypeFilterEdit：对象类型过滤输入框。
     QLabel* m_objectTypeStatusLabel = nullptr;   // m_objectTypeStatusLabel：对象类型状态文本。

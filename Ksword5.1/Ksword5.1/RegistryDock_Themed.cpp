@@ -308,13 +308,45 @@ namespace
     // registryIoFailureText：
     // - 作用：把 DeviceIoControl 层失败转换为用户可读文本；
     // - 返回：包含 Win32 错误、NTSTATUS 和 ArkDriverClient 详情。
+    QString registryIoMessageText(const std::string& rawMessage)
+    {
+        // registryIoMessageText：
+        // - 输入：ArkDriverClient 返回的原始 io.message；
+        // - 处理：把 DeviceIoControl/unsupported/capability 等底层日志归一为中文说明；
+        // - 返回：适合 QMessageBox 和状态文本展示的短句。
+        const QString rawText = QString::fromStdString(rawMessage).trimmed();
+        if (rawText.isEmpty())
+        {
+            return QStringLiteral("驱动未提供额外说明。");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动通信失败或 R3/R0 协议不匹配，请确认驱动已加载且版本一致。");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动或协议暂不支持该注册表 R0 操作。");
+        }
+        if (rawText.contains(QStringLiteral("capability"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("DynData"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动能力或动态偏移未满足，无法完成该注册表 R0 操作。");
+        }
+        if (rawText.contains(QStringLiteral("version mismatch"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("R3/R0/shared 协议版本不一致，请同步后重试。");
+        }
+        return rawText;
+    }
+
     QString registryIoFailureText(const QString& actionText, const ksword::ark::IoResult& ioResult)
     {
         return QStringLiteral("%1失败：驱动通信失败，Win32=%2，NTSTATUS=%3，详情=%4")
             .arg(actionText)
             .arg(ioResult.win32Error)
             .arg(formatNtStatus(ioResult.ntStatus))
-            .arg(QString::fromStdString(ioResult.message));
+            .arg(registryIoMessageText(ioResult.message));
     }
 
     // registryReadFailureText：
@@ -330,7 +362,7 @@ namespace
             .arg(actionText)
             .arg(result.status)
             .arg(formatNtStatus(result.lastStatus))
-            .arg(QString::fromStdString(result.io.message));
+            .arg(registryIoMessageText(result.io.message));
     }
 
     // registryEnumFailureText：
@@ -346,7 +378,7 @@ namespace
             .arg(actionText)
             .arg(result.status)
             .arg(formatNtStatus(result.lastStatus))
-            .arg(QString::fromStdString(result.io.message));
+            .arg(registryIoMessageText(result.io.message));
     }
 
     // registryOperationFailureText：
@@ -362,7 +394,7 @@ namespace
             .arg(actionText)
             .arg(result.status)
             .arg(formatNtStatus(result.lastStatus))
-            .arg(QString::fromStdString(result.io.message));
+            .arg(registryIoMessageText(result.io.message));
     }
 
     // registryEnumUsable：
@@ -890,6 +922,7 @@ void RegistryDock::initializeUi()
     m_searchResultTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_searchResultTable->setCornerButtonEnabled(false);
     m_searchResultTable->setAlternatingRowColors(true);
+    m_searchResultTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_searchResultTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_searchResultTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_searchResultTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
@@ -956,6 +989,34 @@ void RegistryDock::initializeConnections()
     connect(m_stopSearchButton, &QPushButton::clicked, this, [this]() { stopSearch(false); });
     connect(m_searchEdit, &QLineEdit::returnPressed, this, [this]() { startSearchAsync(); });
     connect(m_searchFlushTimer, &QTimer::timeout, this, [this]() { flushPendingSearchRows(); });
+
+    connect(m_searchResultTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        // 搜索结果复制：
+        // - 输入：用户在搜索结果表中的右键位置；
+        // - 处理：同步当前行并把整行按 TSV 放入剪贴板；
+        // - 返回：无，只读复制，不修改注册表键或值。
+        const QModelIndex hit = m_searchResultTable->indexAt(pos);
+        if (hit.isValid()) m_searchResultTable->setCurrentCell(hit.row(), hit.column());
+
+        QMenu menu(this);
+        menu.setStyleSheet(KswordTheme::ContextMenuStyle());
+        QAction* copyRowAction = menu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制当前行"));
+        copyRowAction->setEnabled(m_searchResultTable->currentRow() >= 0);
+        if (menu.exec(m_searchResultTable->viewport()->mapToGlobal(pos)) != copyRowAction) return;
+
+        QClipboard* clipboard = QApplication::clipboard();
+        const int row = m_searchResultTable->currentRow();
+        if (clipboard == nullptr || row < 0 || row >= m_searchResultTable->rowCount()) return;
+
+        QStringList fields;
+        fields.reserve(m_searchResultTable->columnCount());
+        for (int column = 0; column < m_searchResultTable->columnCount(); ++column)
+        {
+            const QTableWidgetItem* item = m_searchResultTable->item(row, column);
+            fields.push_back(item != nullptr ? item->text() : QString());
+        }
+        clipboard->setText(fields.join(QLatin1Char('\t')));
+    });
 
     connect(m_searchResultTable, &QTableWidget::itemDoubleClicked, this, [this](QTableWidgetItem* item) {
         if (item == nullptr) return;
@@ -2668,7 +2729,7 @@ void RegistryDock::readRegistryValueByR0(const QString& valueName)
         << ", status="
         << readResult.status
         << ", detail="
-        << readResult.io.message
+        << registryIoMessageText(readResult.io.message).toStdString()
         << eol;
 
     updateStatusBar(QStringLiteral("R0读取注册表：%1").arg(readResult.io.ok ? QStringLiteral("完成") : QStringLiteral("失败")));
@@ -2678,7 +2739,7 @@ void RegistryDock::readRegistryValueByR0(const QString& valueName)
     }
     else
     {
-        QMessageBox::warning(this, QStringLiteral("R0读取注册表"), statusText + QStringLiteral("\n\n详情：%1").arg(QString::fromStdString(readResult.io.message)));
+        QMessageBox::warning(this, QStringLiteral("R0读取注册表"), statusText + QStringLiteral("\n\n详情：%1").arg(registryIoMessageText(readResult.io.message)));
     }
 }
 

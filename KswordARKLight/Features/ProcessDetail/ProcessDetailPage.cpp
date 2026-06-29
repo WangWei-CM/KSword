@@ -511,11 +511,13 @@ bool ProcessDetailPage::Initialize(HWND hwnd) {
     SetTabItem(tab_, 0, L"基础");
     SetTabItem(tab_, 1, L"线程");
     SetTabItem(tab_, 2, L"模块");
+    SetTabItem(tab_, 3, L"R0审计");
 
     RECT listBounds{ 0, 0, 100, 100 };
     basicList_ = CreateListView(tab_, listBounds);
     threadsList_ = CreateListView(tab_, listBounds);
     modulesList_ = CreateListView(tab_, listBounds);
+    r0AuditList_ = CreateListView(tab_, listBounds);
 
     InsertListColumn(basicList_, 0, L"字段", 160);
     InsertListColumn(basicList_, 1, L"值", 720);
@@ -534,9 +536,20 @@ bool ProcessDetailPage::Initialize(HWND hwnd) {
     InsertListColumn(modulesList_, 4, L"ThreadID", 110);
     InsertListColumn(modulesList_, 5, L"Status", 300);
 
+    InsertListColumn(r0AuditList_, 0, L"范围", 90);
+    InsertListColumn(r0AuditList_, 1, L"PID", 80);
+    InsertListColumn(r0AuditList_, 2, L"TID", 80);
+    InsertListColumn(r0AuditList_, 3, L"对象地址", 150);
+    InsertListColumn(r0AuditList_, 4, L"关联对象", 150);
+    InsertListColumn(r0AuditList_, 5, L"StartAddress", 150);
+    InsertListColumn(r0AuditList_, 6, L"来源", 180);
+    InsertListColumn(r0AuditList_, 7, L"异常", 220);
+    InsertListColumn(r0AuditList_, 8, L"置信度", 80);
+    InsertListColumn(r0AuditList_, 9, L"Detail", 360);
+
     Layout();
     Refresh();
-    return tab_ && basicList_ && threadsList_ && modulesList_;
+    return tab_ && basicList_ && threadsList_ && modulesList_ && r0AuditList_;
 }
 
 void ProcessDetailPage::Refresh() {
@@ -545,11 +558,13 @@ void ProcessDetailPage::Refresh() {
     PopulateBasic();
     PopulateThreads();
     PopulateModules();
+    PopulateR0Audit();
     UpdateVisiblePage();
 
     const std::wstring status = L"PID " + DecimalText(processId_) +
         L" | Threads " + DecimalText(snapshot_.threads.size()) +
         L" | Modules " + DecimalText(snapshot_.modules.size()) +
+        L" | R0Audit " + DecimalText(snapshot_.r0AuditRows.size()) +
         L" | " + snapshot_.errorText;
     if (statusText_) {
         ::SetWindowTextW(statusText_, status.c_str());
@@ -588,7 +603,7 @@ void ProcessDetailPage::Layout() {
 
     const int childWidth = Width(tabClient);
     const int childHeight = Height(tabClient);
-    const HWND children[] = { basicList_, threadsList_, modulesList_ };
+    const HWND children[] = { basicList_, threadsList_, modulesList_, r0AuditList_ };
     for (HWND child : children) {
         if (child) {
             ::MoveWindow(child, tabClient.left, tabClient.top, childWidth, childHeight, TRUE);
@@ -601,6 +616,7 @@ void ProcessDetailPage::UpdateVisiblePage() {
     ::ShowWindow(basicList_, selected == 0 ? SW_SHOW : SW_HIDE);
     ::ShowWindow(threadsList_, selected == 1 ? SW_SHOW : SW_HIDE);
     ::ShowWindow(modulesList_, selected == 2 ? SW_SHOW : SW_HIDE);
+    ::ShowWindow(r0AuditList_, selected == 3 ? SW_SHOW : SW_HIDE);
 }
 
 void ProcessDetailPage::PopulateBasic() {
@@ -650,6 +666,25 @@ void ProcessDetailPage::PopulateModules() {
             module.modulePath,
             module.representativeThreadId == 0 ? L"" : DecimalText(module.representativeThreadId),
             module.statusText
+        });
+    }
+}
+
+void ProcessDetailPage::PopulateR0Audit() {
+    ClearListRows(r0AuditList_);
+    int row = 0;
+    for (const ProcessR0AuditInfo& audit : snapshot_.r0AuditRows) {
+        InsertListText(r0AuditList_, row++, {
+            audit.scope,
+            DecimalText(audit.processId),
+            audit.threadId == 0 ? L"" : DecimalText(audit.threadId),
+            HexAddressText(audit.objectAddress),
+            audit.relatedObjectAddress == 0 ? L"" : HexAddressText(audit.relatedObjectAddress),
+            audit.startAddress == 0 ? L"" : HexAddressText(audit.startAddress),
+            audit.sourceText,
+            audit.anomalyText,
+            DecimalText(audit.confidence),
+            audit.detailText
         });
     }
 }

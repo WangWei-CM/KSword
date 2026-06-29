@@ -5,13 +5,18 @@
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAction>
+#include <QApplication>
 #include <QBrush>
+#include <QClipboard>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMetaObject>
+#include <QMenu>
+#include <QModelIndex>
 #include <QPointer>
 #include <QPushButton>
 #include <QStringList>
@@ -60,6 +65,15 @@ namespace
         return QStringLiteral("color:%1;font-weight:600;").arg(colorHex);
     }
 
+    // ssdtContextMenuStyle：
+    // - 输入：无，由全局主题读取菜单背景、文字、边框与选中颜色；
+    // - 处理：统一返回非透明 QMenu 样式，避免深色主题/系统主题下右键菜单不可读；
+    // - 返回：可直接传给 QMenu::setStyleSheet 的样式文本。
+    QString ssdtContextMenuStyle()
+    {
+        return KswordTheme::ContextMenuStyle();
+    }
+
     QString safeText(const QString& valueText, const QString& fallbackText = QStringLiteral("<空>"))
     {
         return valueText.trimmed().isEmpty() ? fallbackText : valueText;
@@ -70,6 +84,27 @@ namespace
         return QStringLiteral("0x%1")
             .arg(addressValue, 16, 16, QChar('0'))
             .toUpper();
+    }
+
+    // tableRowAsTsv：
+    // - 输入：SSDT 表指针与可视行号；
+    // - 处理：按当前表格列顺序读取可见文本，空单元格使用占位符，字段间使用 Tab；
+    // - 返回：适合复制到剪贴板/表格软件的 TSV 文本；输入无效时返回空字符串。
+    QString tableRowAsTsv(const QTableWidget* tableWidget, const int rowIndex)
+    {
+        if (tableWidget == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
+        {
+            return QString();
+        }
+
+        QStringList fieldList;
+        fieldList.reserve(tableWidget->columnCount());
+        for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* cellItem = tableWidget->item(rowIndex, columnIndex);
+            fieldList.push_back(cellItem != nullptr ? safeText(cellItem->text()) : QStringLiteral("<空>"));
+        }
+        return fieldList.join('\t');
     }
 
     enum class SsdtColumn : int
@@ -137,6 +172,7 @@ void KernelDock::initializeSsdtTab()
     m_ssdtTable->setAlternatingRowColors(true);
     m_ssdtTable->setStyleSheet(itemSelectionStyle());
     m_ssdtTable->setCornerButtonEnabled(false);
+    m_ssdtTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_ssdtTable->verticalHeader()->setVisible(false);
     m_ssdtTable->horizontalHeader()->setStyleSheet(headerStyle());
     m_ssdtTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
@@ -161,6 +197,40 @@ void KernelDock::initializeSsdtTab()
     });
     connect(m_ssdtTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showSsdtDetailByCurrentRow();
+    });
+    connect(m_ssdtTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        if (m_ssdtTable == nullptr)
+        {
+            return;
+        }
+
+        const QModelIndex clickedIndex = m_ssdtTable->indexAt(localPosition);
+        if (clickedIndex.isValid())
+        {
+            m_ssdtTable->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+        }
+
+        const int currentRow = m_ssdtTable->currentRow();
+        QMenu contextMenu(m_ssdtTable);
+        contextMenu.setStyleSheet(ssdtContextMenuStyle());
+
+        QAction* copyRowAction = contextMenu.addAction(
+            QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+            QStringLiteral("复制当前行"));
+        copyRowAction->setEnabled(currentRow >= 0);
+
+        QAction* selectedAction = contextMenu.exec(m_ssdtTable->viewport()->mapToGlobal(localPosition));
+        if (selectedAction != copyRowAction || currentRow < 0)
+        {
+            return;
+        }
+
+        const QString rowText = tableRowAsTsv(m_ssdtTable, currentRow);
+        QClipboard* clipboard = QApplication::clipboard();
+        if (clipboard != nullptr && !rowText.isEmpty())
+        {
+            clipboard->setText(rowText);
+        }
     });
 }
 

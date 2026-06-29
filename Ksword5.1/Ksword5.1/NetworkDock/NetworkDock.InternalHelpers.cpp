@@ -4,9 +4,15 @@
 #include "../ksword/network/network_format_tools.h"
 #include "../theme.h"
 
+#include <QAction>
+#include <QClipboard>
+#include <QGuiApplication>
+#include <QMenu>
+#include <QModelIndex>
 #include <QLabel>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QStringList>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -15,6 +21,59 @@
 
 namespace network_dock_detail
 {
+    void installCopyCurrentRowMenu(QTableWidget* tableWidget, const QString& actionText)
+    {
+        // installCopyCurrentRowMenu 作用：
+        // - 输入：任意 NetworkDock 表格和菜单项文本；
+        // - 处理：选中右键点击行，并复制所有可见列为 TSV；
+        // - 返回：无。失败时静默返回，保持监控页稳定。
+        if (tableWidget == nullptr)
+        {
+            return;
+        }
+
+        tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(
+            tableWidget,
+            &QTableWidget::customContextMenuRequested,
+            tableWidget,
+            [tableWidget, actionText](const QPoint& localPosition)
+            {
+                const QModelIndex clickedIndex = tableWidget->indexAt(localPosition);
+                if (clickedIndex.isValid())
+                {
+                    tableWidget->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                }
+
+                QMenu contextMenu(tableWidget);
+                contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+                QAction* copyRowAction = contextMenu.addAction(
+                    QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                    actionText);
+                copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
+                if (contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPosition)) != copyRowAction)
+                {
+                    return;
+                }
+
+                QClipboard* clipboardObject = QGuiApplication::clipboard();
+                const int rowIndex = tableWidget->currentRow();
+                if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
+                {
+                    return;
+                }
+
+                QStringList rowFields;
+                rowFields.reserve(tableWidget->columnCount());
+                for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
+                {
+                    const QTableWidgetItem* item = tableWidget->item(rowIndex, columnIndex);
+                    rowFields.push_back(item != nullptr ? item->text() : QString());
+                }
+                clipboardObject->setText(rowFields.join(QLatin1Char('\t')));
+            });
+    }
+
     namespace
     {
         // buildPacketDetailWindowStyle 作用：

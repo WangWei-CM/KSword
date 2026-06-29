@@ -1,4 +1,5 @@
 #include "ProcessTraceMonitorWidget.h"
+#include "../theme.h"
 
 // ============================================================
 // ProcessTraceMonitorWidget.Actions.cpp
@@ -12,6 +13,7 @@
 #include <QBrush>
 #include <QCheckBox>
 #include <QColor>
+#include <QClipboard>
 #include <QComboBox>
 #include <QItemSelectionModel>
 #include <QLabel>
@@ -45,6 +47,80 @@ namespace
     constexpr int kEventRoleProcessSearchText = Qt::UserRole + 1;
     constexpr int kEventRoleEventSearchText = Qt::UserRole + 2;
     constexpr int kEventRoleTime100nsValue = Qt::UserRole + 3;
+
+    // tableRowAsTsv：
+    // - 作用：把任意只读表格的一行转换成 TSV 文本；
+    // - 入参 tableWidget/rowIndex：目标表格与行号；
+    // - 返回：行号非法时返回空串，合法时返回当前可见列文本。
+    QString tableRowAsTsv(const QTableWidget* tableWidget, const int rowIndex)
+    {
+        if (tableWidget == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
+        {
+            return QString();
+        }
+
+        QStringList cellTextList;
+        cellTextList.reserve(tableWidget->columnCount());
+        for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* itemPointer = tableWidget->item(rowIndex, columnIndex);
+            cellTextList << (itemPointer != nullptr ? itemPointer->text() : QString());
+        }
+        return cellTextList.join('\t');
+    }
+
+    // selectedTableRows：
+    // - 作用：从 QTableWidget 当前选择中提取唯一行号；
+    // - 入参 tableWidget：目标表格；
+    // - 返回：升序行号列表，用于复制多行或判断菜单启用状态。
+    std::vector<int> selectedTableRows(const QTableWidget* tableWidget)
+    {
+        std::vector<int> rowList;
+        if (tableWidget == nullptr)
+        {
+            return rowList;
+        }
+
+        std::set<int> rowSet;
+        const QList<QTableWidgetItem*> itemList = tableWidget->selectedItems();
+        for (const QTableWidgetItem* itemPointer : itemList)
+        {
+            if (itemPointer != nullptr)
+            {
+                rowSet.insert(itemPointer->row());
+            }
+        }
+
+        rowList.assign(rowSet.begin(), rowSet.end());
+        return rowList;
+    }
+
+    // copyTableRowsToClipboard：
+    // - 作用：把若干表格行复制到系统剪贴板；
+    // - 入参 tableWidget/rowList：目标表格与待复制行；
+    // - 返回：无。空列表时保持剪贴板不变，避免误清用户内容。
+    void copyTableRowsToClipboard(const QTableWidget* tableWidget, const std::vector<int>& rowList)
+    {
+        if (tableWidget == nullptr || rowList.empty())
+        {
+            return;
+        }
+
+        QStringList lineList;
+        for (const int rowIndex : rowList)
+        {
+            const QString rowText = tableRowAsTsv(tableWidget, rowIndex);
+            if (!rowText.isEmpty())
+            {
+                lineList << rowText;
+            }
+        }
+
+        if (!lineList.isEmpty())
+        {
+            QApplication::clipboard()->setText(lineList.join('\n'));
+        }
+    }
 
     // queryLightweightProcessPath：
     // - 作用：只查询当前页面展示需要的进程路径；
@@ -265,6 +341,9 @@ void ProcessTraceMonitorWidget::initializeConnections()
         });
         connect(m_availableTable, &QTableWidget::itemDoubleClicked, this, [this](QTableWidgetItem*) {
             addSelectedAvailableProcesses();
+        });
+        connect(m_availableTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+            showAvailableContextMenu(position);
         });
     }
 
@@ -944,6 +1023,78 @@ void ProcessTraceMonitorWidget::clearTargetProcesses()
     info << event << "[ProcessTraceMonitorWidget] 已清空全部监控目标。" << eol;
 }
 
+void ProcessTraceMonitorWidget::showAvailableContextMenu(const QPoint& position)
+{
+    // showAvailableContextMenu：
+    // - 输入 position：可选进程表 viewport 坐标；
+    // - 处理：同步右键行选择，提供加入目标、复制当前行、复制选中行；
+    // - 返回：无。复制动作只写剪贴板，加入目标复用既有业务函数。
+    if (m_availableTable == nullptr)
+    {
+        return;
+    }
+
+    const QModelIndex index = m_availableTable->indexAt(position);
+    if (index.isValid())
+    {
+        const int row = index.row();
+        if (!m_availableTable->selectionModel()->isRowSelected(row, QModelIndex()))
+        {
+            m_availableTable->clearSelection();
+            m_availableTable->selectRow(row);
+        }
+        // 右键当前行同步：
+        // - 输入：鼠标所在的可选进程行；
+        // - 处理：selectRow 只保证选择状态，显式 setCurrentCell 才能让“复制当前行”稳定复制右键行；
+        // - 返回：无，后续菜单动作继续走既有只读/加入目标逻辑。
+        m_availableTable->setCurrentCell(row, 0);
+    }
+
+    const std::vector<int> selectedRows = selectedTableRows(m_availableTable);
+    const int currentRow = m_availableTable->currentRow();
+    const bool running = m_captureRunning.load();
+
+    QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
+    QAction* addSelectedAction = menu.addAction(
+        QIcon(QStringLiteral(":/Icon/process_start.svg")),
+        QStringLiteral("加入监控目标"));
+    menu.addSeparator();
+    QAction* copyCurrentAction = menu.addAction(
+        QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+        QStringLiteral("复制当前行"));
+    QAction* copySelectedAction = menu.addAction(
+        QIcon(QStringLiteral(":/Icon/log_clipboard.svg")),
+        QStringLiteral("复制选中行"));
+
+    addSelectedAction->setEnabled(!running && !selectedRows.empty());
+    copyCurrentAction->setEnabled(currentRow >= 0);
+    copySelectedAction->setEnabled(!selectedRows.empty());
+
+    QAction* selectedAction = menu.exec(m_availableTable->viewport()->mapToGlobal(position));
+    if (selectedAction == nullptr)
+    {
+        return;
+    }
+
+    if (selectedAction == addSelectedAction)
+    {
+        addSelectedAvailableProcesses();
+        return;
+    }
+
+    if (selectedAction == copyCurrentAction)
+    {
+        copyTableRowsToClipboard(m_availableTable, std::vector<int>{ currentRow });
+        return;
+    }
+
+    if (selectedAction == copySelectedAction)
+    {
+        copyTableRowsToClipboard(m_availableTable, selectedRows);
+    }
+}
+
 void ProcessTraceMonitorWidget::showTargetContextMenu(const QPoint& position)
 {
     if (m_targetTable == nullptr)
@@ -960,9 +1111,25 @@ void ProcessTraceMonitorWidget::showTargetContextMenu(const QPoint& position)
             m_targetTable->clearSelection();
             m_targetTable->selectRow(row);
         }
+        // 右键当前行同步：
+        // - 输入：鼠标所在的监控目标行；
+        // - 处理：显式同步 current cell，避免复制当前行时沿用旧焦点行；
+        // - 返回：无，不改变监控状态。
+        m_targetTable->setCurrentCell(row, 0);
     }
 
+    const std::vector<int> selectedRows = selectedTableRows(m_targetTable);
+    const int currentRow = m_targetTable->currentRow();
+
     QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
+    QAction* copyCurrentAction = menu.addAction(
+        QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+        QStringLiteral("复制当前行"));
+    QAction* copySelectedAction = menu.addAction(
+        QIcon(QStringLiteral(":/Icon/log_clipboard.svg")),
+        QStringLiteral("复制选中行"));
+    menu.addSeparator();
     QAction* removeSelectedAction = menu.addAction(
         QIcon(":/Icon/process_pause.svg"),
         QStringLiteral("移除选中目标"));
@@ -971,12 +1138,26 @@ void ProcessTraceMonitorWidget::showTargetContextMenu(const QPoint& position)
         QStringLiteral("清空全部目标"));
 
     const bool running = m_captureRunning.load();
+    copyCurrentAction->setEnabled(currentRow >= 0);
+    copySelectedAction->setEnabled(!selectedRows.empty());
     removeSelectedAction->setEnabled(!running && !m_targetTable->selectedItems().isEmpty());
     clearAllAction->setEnabled(!running && !m_targetProcessList.empty());
 
     QAction* selectedAction = menu.exec(m_targetTable->viewport()->mapToGlobal(position));
     if (selectedAction == nullptr)
     {
+        return;
+    }
+
+    if (selectedAction == copyCurrentAction)
+    {
+        copyTableRowsToClipboard(m_targetTable, std::vector<int>{ currentRow });
+        return;
+    }
+
+    if (selectedAction == copySelectedAction)
+    {
+        copyTableRowsToClipboard(m_targetTable, selectedRows);
         return;
     }
 

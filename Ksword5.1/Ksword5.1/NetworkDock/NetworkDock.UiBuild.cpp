@@ -1,5 +1,6 @@
 #include "NetworkDock.InternalCommon.h"
 #include "NetworkFirewallPage.h"
+#include "NetworkAuditPage.h"
 
 #include <QFrame>
 #include <QScrollArea>
@@ -28,6 +29,7 @@ void NetworkDock::initializeUi()
     // be restored later if a cleaner enforcement model replaces it.
     initializeConnectionManageTab();
     initializeFirewallTab();
+    initializeNetworkAuditTab();
     initializeManualRequestTab();
     initializeMultiThreadDownloadTab();
     initializeHttpsAnalyzeTab();
@@ -274,6 +276,7 @@ void NetworkDock::initializeRateLimitTab()
     // 限速表也使用 Stretch，降低定时刷新时的 UI 重排开销。
     m_rateLimitTable->horizontalHeader()->setStretchLastSection(true);
     m_rateLimitTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    installCopyCurrentRowMenu(m_rateLimitTable);
     m_rateLimitLayout->addWidget(m_rateLimitTable, 1);
 
     // 限速动作日志：便于查看挂起/恢复执行结果。
@@ -387,6 +390,19 @@ void NetworkDock::initializeFirewallTab()
         m_firewallPage,
         QIcon(QStringLiteral(":/Icon/process_critical.svg")),
         QStringLiteral("防火墙"));
+}
+
+void NetworkDock::initializeNetworkAuditTab()
+{
+    // 网络审计页：
+    // - 只读展示 TCP/UDP cross-view、AFD 关联句柄、WFP、NDIS 和 NSI 摘要；
+    // - 不向任何驱动或系统组件发送修改型请求；
+    // - 仅作为 NetworkDock 的审计视图入口。
+    m_networkAuditPage = new NetworkAuditPage(this);
+    m_sideTabWidget->addTab(
+        m_networkAuditPage,
+        QIcon(QStringLiteral(":/Icon/process_details.svg")),
+        QStringLiteral("网络审计"));
 }
 
 void NetworkDock::initializeManualRequestTab()

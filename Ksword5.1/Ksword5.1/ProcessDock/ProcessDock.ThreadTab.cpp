@@ -176,6 +176,51 @@ namespace
         }
     }
 
+    // threadIoMessageText 作用：
+    // - 输入：ArkDriverClient 返回的线程枚举 io.message；
+    // - 处理：把 DeviceIoControl/unsupported/capability/buffer 等底层文本转为人读说明；
+    // - 返回：适合线程页状态栏、诊断文本和日志展示的短文本。
+    QString threadIoMessageText(const QString& rawMessageText)
+    {
+        const QString trimmedText = rawMessageText.trimmed();
+        if (trimmedText.isEmpty())
+        {
+            return QStringLiteral("驱动未返回额外说明。");
+        }
+
+        const QString lowerText = trimmedText.toLower();
+        if (lowerText.contains(QStringLiteral("deviceiocontrol")))
+        {
+            return QStringLiteral("驱动线程枚举接口调用失败或当前驱动版本不匹配。");
+        }
+        if (lowerText.contains(QStringLiteral("unsupported")) ||
+            lowerText.contains(QStringLiteral("not supported")) ||
+            lowerText.contains(QStringLiteral("status=0xc00000bb")))
+        {
+            return QStringLiteral("当前驱动暂不支持线程 cross-view / KTHREAD 扩展枚举。");
+        }
+        if (lowerText.contains(QStringLiteral("dyndata")) ||
+            lowerText.contains(QStringLiteral("capability")))
+        {
+            return QStringLiteral("DynData 动态偏移能力未满足，线程 R0 扩展字段暂不可用。");
+        }
+        if (lowerText.contains(QStringLiteral("buffer")) &&
+            (lowerText.contains(QStringLiteral("small")) || lowerText.contains(QStringLiteral("trunc"))))
+        {
+            return QStringLiteral("驱动返回缓冲区不足，线程枚举结果可能被截断。");
+        }
+        return trimmedText;
+    }
+
+    // threadIoMessageStdString 作用：
+    // - 输入：ArkDriverClient 的 std::string 原始消息；
+    // - 处理：复用 threadIoMessageText 归一化，再转回 UTF-8；
+    // - 返回：兼容旧 diagnosticTextOut 拼接管线的 std::string。
+    std::string threadIoMessageStdString(const std::string& rawMessageText)
+    {
+        return threadIoMessageText(QString::fromStdString(rawMessageText)).toStdString();
+    }
+
     // threadR0DiagnosticText 作用：
     // - 选中线程或悬停 R0 状态列时展示字段来源与原始偏移；
     // - Phase 3 暂不新增详情页，先用状态栏/tooltip 暴露诊断信息。
@@ -264,7 +309,7 @@ namespace
                 {
                     *diagnosticTextOut += " | ";
                 }
-                *diagnosticTextOut += "R0 thread extension unavailable: " + r0Result.io.message;
+                *diagnosticTextOut += "R0 thread extension unavailable: " + threadIoMessageStdString(r0Result.io.message);
             }
             return false;
         }
@@ -347,7 +392,7 @@ namespace
             stream << "R0 thread extension merged: " << mergedCount
                 << "/" << r3BaseThreadCount
                 << ", r0OnlyAppended=" << appendedR0OnlyCount
-                << ", " << r0Result.io.message;
+                << ", " << threadIoMessageStdString(r0Result.io.message);
             *diagnosticTextOut += stream.str();
         }
         return true;

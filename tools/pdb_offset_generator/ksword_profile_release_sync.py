@@ -67,7 +67,8 @@ KSW_PACK_VERSION = KSW_DEFAULT_PACK_VERSION
 
 CALLBACK_ITEM_KIND_GLOBAL_RVA = "GlobalRva"
 CALLBACK_ITEM_KIND_STRUCT_OFFSET = "StructOffset"
-CALLBACK_ITEM_KINDS = {CALLBACK_ITEM_KIND_GLOBAL_RVA, CALLBACK_ITEM_KIND_STRUCT_OFFSET}
+CALLBACK_ITEM_KIND_TYPE_SIZE = "TypeSize"
+CALLBACK_ITEM_KINDS = {CALLBACK_ITEM_KIND_GLOBAL_RVA, CALLBACK_ITEM_KIND_STRUCT_OFFSET, CALLBACK_ITEM_KIND_TYPE_SIZE}
 
 # These names mirror the KSW_DYN_FIELD_ID_CB_* field-id additions in
 # shared/driver/KswordArkDynDataIoctl.h. The numeric values are kept here as
@@ -86,6 +87,8 @@ KERNEL_GLOBAL_RVA_FIELD_IDS = {
     "PsLoadedModuleList": 83,
     "MmUnloadedDrivers": 84,
     "PiDDBCacheTable": 85,
+    "KeServiceDescriptorTableShadow": 86,
+    "MmLastUnloadedDriver": 87,
 }
 
 CALLBACK_STRUCT_OFFSET_FIELD_IDS = {
@@ -168,6 +171,19 @@ KNOWN_FIELD_IDS = {
     "DoMajorFunction": 79,
     "DoFastIoDispatch": 80,
     "DoDriverUnload": 81,
+    "UldName": 88,
+    "UldStartAddress": 89,
+    "UldEndAddress": 90,
+    "UldCurrentTime": 91,
+    "UldTypeSize": 92,
+    "RtlAvlBalancedRoot": 93,
+    "RtlAvlOrderedPointer": 94,
+    "RtlAvlWhichOrderedElement": 95,
+    "RtlAvlNumberGenericTableElements": 96,
+    "RtlAvlDepthOfTree": 97,
+    "RtlAvlRestartKey": 98,
+    "RtlAvlDeleteCount": 99,
+    "RtlAvlTypeSize": 100,
 }
 
 LXCORE_FIELD_NAMES = {
@@ -514,6 +530,9 @@ def normalize_typed_item_name(name: str, kind: str) -> tuple[str, int] | None:
             return canonical_name, CALLBACK_STRUCT_OFFSET_FIELD_IDS[canonical_name]
         field_id = TYPED_STRUCT_OFFSET_FIELD_IDS.get(name)
         return (name, field_id) if field_id is not None else None
+    if kind == CALLBACK_ITEM_KIND_TYPE_SIZE:
+        field_id = TYPED_STRUCT_OFFSET_FIELD_IDS.get(name)
+        return (name, field_id) if field_id is not None else None
     return None
 
 
@@ -698,6 +717,9 @@ def validate_typed_items(path: Path, data: dict[str, Any], state: ValidationStat
             return None
         if kind == CALLBACK_ITEM_KIND_STRUCT_OFFSET and (value == 0xFFFFFFFF or value > KSW_DYN_PROFILE_OFFSET_MAX):
             reject(state, path, f"typed_struct_offset_invalid:{canonical_name}")
+            return None
+        if kind == CALLBACK_ITEM_KIND_TYPE_SIZE and (value == 0 or value > KSW_DYN_PROFILE_OFFSET_MAX):
+            reject(state, path, f"typed_type_size_invalid:{canonical_name}")
             return None
         if field_id in seen_field_ids:
             reject(state, path, f"typed_duplicate:{canonical_name}")

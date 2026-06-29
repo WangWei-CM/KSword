@@ -554,6 +554,7 @@ void KernelDeviceDriverObjectsTab::showTableContextMenu(const QPoint& localPosit
     const int column = clickedItem != nullptr ? clickedItem->column() : -1;
 
     QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyCellAction = menu.addAction(QStringLiteral("复制单元格"));
     QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
     QAction* copyTsvAction = menu.addAction(QStringLiteral("复制可见结果 TSV"));

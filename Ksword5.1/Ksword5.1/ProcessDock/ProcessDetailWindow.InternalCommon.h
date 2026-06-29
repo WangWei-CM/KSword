@@ -24,6 +24,7 @@
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
+#include <QDialog>
 #include <QDir>
 #include <QDirIterator>
 #include <QEvent>
@@ -41,6 +42,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QModelIndex>
 #include <QPalette>
 #include <QPainter>
 #include <QPointer>
@@ -114,6 +116,7 @@ namespace process_detail_window_internal
         Affinity,        // 亲和性信息。
         RegisterSummary, // 寄存器摘要。
         StackBoundary,   // R0/用户栈边界摘要。
+        RuntimeDetail,   // R0 运行时详情：固定 detail IOCTL 的字段覆盖和诊断。
         Count            // 列总数。
     };
 
@@ -193,6 +196,27 @@ namespace process_detail_window_internal
 
     // readRemoteUnicodeString 作用：读取远程进程中的 UNICODE_STRING 内容。
     QString readRemoteUnicodeString(HANDLE processHandle, const UNICODE_STRING& remoteUnicode);
+
+    // buildPdbRuntimeCatalogPreview 作用：
+    // - 输入 domainName 为 runtimeDetailCatalog 域名，例如 process_detail/thread_detail；
+    // - 处理时只读 Release/source profiles\pdb_deep_offsets 中的 ntkrnlmp deep JSON；
+    // - 返回一段面向详情页展示的偏移目录预览，找不到 JSON 时返回明确诊断文本。
+    QString buildPdbRuntimeCatalogPreview(const QString& domainName, int maxTypes, int maxFieldsPerType);
+
+    // pdbRuntimeCatalogMatchesKernelIdentity 作用：
+    // - 输入当前 R0 DynData 报告的 ntoskrnl TimeDateStamp/SizeOfImage；
+    // - 处理时用 deep JSON 的 PDB GUID/Age 反查本地 v3 pack profile，再比较 PE identity；
+    // - 返回 true 表示 deep offset 可用于本机 runtime sampler，false 时 detailTextOut 写明跳过原因。
+    bool pdbRuntimeCatalogMatchesKernelIdentity(
+        std::uint32_t timeDateStamp,
+        std::uint32_t sizeOfImage,
+        QString* detailTextOut);
+
+    // buildPdbRuntimeSampleItems 作用：
+    // - 输入 domainName 为 process_detail/thread_detail，maxItems 为最多采样字段数；
+    // - 处理时从 deep offset JSON 中挑选可安全小字段（<=16字节）作为 R0 sampler 请求；
+    // - 返回 ArkDriverClient 可直接提交的 runtime field sample item 列表。
+    std::vector<ksword::ark::RuntimeFieldSampleRequestItem> buildPdbRuntimeSampleItems(const QString& domainName, int maxItems);
 
     // calculateStandaloneWindowMaxWidth 作用：
     // - 输入 candidateParent 为优先参考的客户区控件，fallbackWindow 为当前独立窗口；

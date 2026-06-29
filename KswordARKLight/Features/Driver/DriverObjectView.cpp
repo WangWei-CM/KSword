@@ -3,10 +3,12 @@
 #include "DriverActions.h"
 #include "../../Ui/Controls.h"
 #include "../../Ui/ListViewUtil.h"
+#include "../../Ui/Theme.h"
 
 #include <commctrl.h>
 #include <windowsx.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -16,20 +18,38 @@ namespace {
 
 constexpr wchar_t kDriverObjectClass[] = L"KswordARKLight.DriverObjectView";
 constexpr int kObjectListId = 64011;
+constexpr int kObjectFilterId = 64012;
 constexpr UINT kObjectMenuDetail = 64201;
-constexpr UINT kObjectMenuUnload = 64202;
 constexpr UINT kObjectMenuCopyRow = 64203;
 constexpr UINT kObjectMenuCopyName = 64204;
 constexpr UINT kObjectMenuCopyPath = 64205;
 constexpr UINT kObjectMenuCopyTarget = 64206;
+constexpr wchar_t kObjectDetailClass[] = L"KswordARKLight.DriverObjectDetailDialog";
+constexpr int kObjectDetailEditId = 64221;
+constexpr int kObjectDetailCopyId = 64222;
+constexpr int kObjectDetailCloseId = 64223;
 
 // DriverObjectViewState owns the object report list and model pointer. Inputs
 // arrive through Win32 messages; processing renders the current snapshot into
 // the child list; no model ownership is transferred here.
 struct DriverObjectViewState {
     HWND hwnd = nullptr;
+    HWND filterEdit = nullptr;
     HWND listView = nullptr;
     DriverModel* model = nullptr;
+    std::vector<DriverObjectRow> visibleRows;
+};
+
+// DetailDialogState owns the read-only detail popup. Input is generated text;
+// processing creates a scrollable EDIT and copy/close controls; no return value
+// is needed because the window is modeless.
+struct DetailDialogState {
+    HWND hwnd = nullptr;
+    HWND edit = nullptr;
+    HWND copyButton = nullptr;
+    HWND closeButton = nullptr;
+    std::wstring title;
+    std::wstring text;
 };
 
 // StateFromWindow returns the view state from the HWND. Input is the child
@@ -55,14 +75,28 @@ bool SelectedObjectRow(const DriverObjectViewState& state, DriverObjectRow* rowO
         return false;
     }
     const int selected = ListView_GetNextItem(state.listView, -1, LVNI_SELECTED);
-    const auto& rows = state.model->objectRows();
-    if (selected < 0 || selected >= static_cast<int>(rows.size())) {
+    if (selected < 0 || selected >= static_cast<int>(state.visibleRows.size())) {
         return false;
     }
     if (rowOut) {
-        *rowOut = rows[static_cast<std::size_t>(selected)];
+        *rowOut = state.visibleRows[static_cast<std::size_t>(selected)];
     }
     return true;
+}
+
+// GetEditText reads the keyword filter edit. Input is a Win32 edit HWND; output
+// is the current text or empty when unavailable.
+std::wstring GetEditText(HWND edit) {
+    if (!edit) {
+        return {};
+    }
+    const int length = ::GetWindowTextLengthW(edit);
+    std::wstring text(static_cast<std::size_t>(std::max(0, length)) + 1U, L'\0');
+    if (length > 0) {
+        ::GetWindowTextW(edit, text.data(), length + 1);
+    }
+    text.resize(static_cast<std::size_t>(std::max(0, length)));
+    return text;
 }
 
 // DriverObjectNameForRow resolves the best DriverObject name for an object-grid
@@ -81,16 +115,6 @@ std::wstring DriverObjectNameForRow(const DriverObjectRow& row) {
         return L"\\Driver\\" + row.objectNameText;
     }
     return {};
-}
-
-// ShowActionResult displays an action result as a modal diagnostic. Inputs are
-// owner/title/result; processing uses MessageBoxW and does not mutate the model.
-void ShowActionResult(HWND owner, const wchar_t* title, const DriverActionResult& result) {
-    ::MessageBoxW(
-        owner,
-        result.statusText.empty() ? L"<no details>" : result.statusText.c_str(),
-        title,
-        MB_OK | (result.success ? MB_ICONINFORMATION : MB_ICONWARNING));
 }
 
 // CopyObjectText writes selected object text to the clipboard. Inputs are view
@@ -114,15 +138,128 @@ std::wstring BuildObjectRowText(const DriverObjectRow& row) {
         row.capabilityHint;
 }
 
-// ShowObjectDetail displays row-local columns and, for DriverObject rows, the
-// R0 DriverObject query output. Input is view state; processing calls
-// DriverActions only; no value is returned.
-void ShowObjectDetail(const DriverObjectViewState& state) {
-    DriverObjectRow row;
-    if (!SelectedObjectRow(state, &row)) {
+// RegisterDetailDialogClass installs the reusable object detail window class.
+// There is no input; output is true when the class is available.
+bool RegisterDetailDialogClass() {
+    static bool registered = false;
+    if (registered) {
+        return true;
+    }
+
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = [](HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
+        DetailDialogState* state = reinterpret_cast<DetailDialogState*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            state = create ? static_cast<DetailDialogState*>(create->lpCreateParams) : nullptr;
+            if (state) {
+                state->hwnd = hwnd;
+                ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+            }
+        }
+
+        switch (msg) {
+        case WM_CREATE:
+            if (state) {
+                state->edit = ::CreateWindowExW(
+                    WS_EX_CLIENTEDGE,
+                    L"EDIT",
+                    state->text.c_str(),
+                    WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_READONLY,
+                    0,
+                    0,
+                    0,
+                    0,
+                    hwnd,
+                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kObjectDetailEditId)),
+                    ::GetModuleHandleW(nullptr),
+                    nullptr);
+                state->copyButton = Ksword::Ui::CreateButton(hwnd, kObjectDetailCopyId, L"复制详情", 0, 0, 0, 0);
+                state->closeButton = Ksword::Ui::CreateButton(hwnd, kObjectDetailCloseId, L"关闭", 0, 0, 0, 0);
+                Ksword::Ui::SetWindowFontRecursive(hwnd);
+            }
+            return 0;
+        case WM_SIZE:
+            if (state) {
+                RECT rc{};
+                ::GetClientRect(hwnd, &rc);
+                const int width = rc.right - rc.left;
+                const int height = rc.bottom - rc.top;
+                const int margin = 8;
+                const int buttonHeight = 26;
+                ::MoveWindow(state->edit, margin, margin, std::max(80, width - margin * 2), std::max(80, height - buttonHeight - margin * 3), TRUE);
+                ::MoveWindow(state->copyButton, margin, std::max(margin, height - buttonHeight - margin), 96, buttonHeight, TRUE);
+                ::MoveWindow(state->closeButton, width - 88 - margin, std::max(margin, height - buttonHeight - margin), 88, buttonHeight, TRUE);
+            }
+            return 0;
+        case WM_COMMAND:
+            if (state && LOWORD(wParam) == kObjectDetailCopyId) {
+                DriverActions::CopyTextToClipboard(hwnd, state->text);
+                return 0;
+            }
+            if (state && LOWORD(wParam) == kObjectDetailCloseId) {
+                ::DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        case WM_CTLCOLORSTATIC: {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            ::SetBkMode(dc, TRANSPARENT);
+            ::SetTextColor(dc, Ksword::Ui::AppTheme().textColor);
+            return reinterpret_cast<LRESULT>(Ksword::Ui::AppTheme().windowBrush());
+        }
+        case WM_NCDESTROY:
+            delete state;
+            ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            return 0;
+        default:
+            break;
+        }
+        return ::DefWindowProcW(hwnd, msg, wParam, lParam);
+    };
+    wc.hInstance = ::GetModuleHandleW(nullptr);
+    wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = Ksword::Ui::AppTheme().windowBrush();
+    wc.lpszClassName = kObjectDetailClass;
+    registered = (::RegisterClassW(&wc) != 0) || ::GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    return registered;
+}
+
+// ShowDetailWindow creates a scrollable detail popup with copy support. Inputs
+// are owner, title, and text body; processing falls back to MessageBox only when
+// window creation fails.
+void ShowDetailWindow(HWND owner, const std::wstring& title, const std::wstring& text) {
+    if (!RegisterDetailDialogClass()) {
+        ::MessageBoxW(owner, text.c_str(), title.c_str(), MB_OK | MB_ICONINFORMATION);
         return;
     }
 
+    auto* state = new DetailDialogState();
+    state->title = title;
+    state->text = text;
+    HWND hwnd = ::CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kObjectDetailClass,
+        title.c_str(),
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        860,
+        620,
+        owner,
+        nullptr,
+        ::GetModuleHandleW(nullptr),
+        state);
+    if (!hwnd) {
+        delete state;
+        ::MessageBoxW(owner, text.c_str(), title.c_str(), MB_OK | MB_ICONINFORMATION);
+    }
+}
+
+// BuildObjectDetailText formats row-local columns and, for DriverObject rows,
+// appends R0 DriverObject query output. Input is a selected row; output is a
+// detail body suitable for the popup edit control.
+std::wstring BuildObjectDetailText(const DriverObjectRow& row) {
     std::wstring detail =
         L"Directory: " + row.directoryPathText + L"\r\n" +
         L"ObjectName: " + row.objectNameText + L"\r\n" +
@@ -140,40 +277,22 @@ void ShowObjectDetail(const DriverObjectViewState& state) {
         detail += L"\r\nR0 DriverObject query (" + driverObjectName + L"):\r\n";
         detail += r0Detail.statusText;
     }
-
-    ::MessageBoxW(state.hwnd, detail.c_str(), L"对象详细信息", MB_OK | MB_ICONINFORMATION);
+    return detail;
 }
 
-// ForceUnloadObjectDriver confirms and sends the R0 force-unload request for a
-// selected DriverObject row. Input is view state; processing routes to
-// DriverActions/ArkDriverClient; no value is returned.
-void ForceUnloadObjectDriver(DriverObjectViewState& state) {
+// ShowObjectDetail displays row-local and optional R0 details in a scrollable
+// popup. Input is view state; processing calls DriverActions only; no value is
+// returned.
+void ShowObjectDetail(const DriverObjectViewState& state) {
     DriverObjectRow row;
-    if (!SelectedObjectRow(state, &row)) {
-        return;
+    if (SelectedObjectRow(state, &row)) {
+        ShowDetailWindow(state.hwnd, L"对象详细信息", BuildObjectDetailText(row));
     }
-    const std::wstring driverObjectName = DriverObjectNameForRow(row);
-    if (driverObjectName.empty()) {
-        ::MessageBoxW(state.hwnd, L"选中行不是可卸载的 DriverObject。", L"R0 卸载驱动", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-
-    const std::wstring prompt =
-        L"确认通过 R0 IOCTL 请求卸载此 DriverObject？\r\n\r\n" +
-        driverObjectName + L"\r\n" +
-        row.statusText + L"\r\n" +
-        row.capabilityHint;
-    if (::MessageBoxW(state.hwnd, prompt.c_str(), L"确认 R0 卸载驱动", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
-        return;
-    }
-
-    const DriverActionResult result = DriverActions::ForceUnloadDriverObject(driverObjectName, 0UL);
-    ShowActionResult(state.hwnd, L"R0 卸载驱动结果", result);
 }
 
 // ShowObjectContextMenu displays the object-info right-click menu and dispatches
 // retained commands. Inputs are view state and screen point; processing selects
-// the clicked row before executing grouped copy/detail/R0 actions; no value is
+// the clicked row before executing grouped copy/detail read-only actions; no value is
 // returned.
 void ShowObjectContextMenu(DriverObjectViewState& state, POINT screenPoint) {
     POINT clientPoint = screenPoint;
@@ -188,7 +307,6 @@ void ShowObjectContextMenu(DriverObjectViewState& state, POINT screenPoint) {
 
     DriverObjectRow row;
     const bool hasSelection = SelectedObjectRow(state, &row);
-    const bool canUnload = hasSelection && !DriverObjectNameForRow(row).empty();
     HMENU menu = ::CreatePopupMenu();
     if (!menu) {
         return;
@@ -206,18 +324,11 @@ void ShowObjectContextMenu(DriverObjectViewState& state, POINT screenPoint) {
         ::AppendMenuW(detailMenu, MF_STRING | (hasSelection ? 0U : MF_GRAYED), kObjectMenuDetail, L"详细信息/R0 DriverObject");
         ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(detailMenu), L"详细信息");
     }
-    HMENU r0Menu = ::CreatePopupMenu();
-    if (r0Menu) {
-        ::AppendMenuW(r0Menu, MF_STRING | (canUnload ? 0U : MF_GRAYED), kObjectMenuUnload, L"R0 卸载驱动");
-        ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(r0Menu), L"R0 操作");
-    }
 
     const UINT command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, state.hwnd, nullptr);
     ::DestroyMenu(menu);
     if (command == kObjectMenuDetail) {
         ShowObjectDetail(state);
-    } else if (command == kObjectMenuUnload) {
-        ForceUnloadObjectDriver(state);
     } else if (command == kObjectMenuCopyRow ||
         command == kObjectMenuCopyName ||
         command == kObjectMenuCopyPath ||
@@ -263,12 +374,13 @@ void PopulateObjectList(DriverObjectViewState& state) {
     }
 
     Ksword::Ui::ClearListViewRows(state.listView);
-    const std::vector<DriverObjectRow>* rows = state.model ? &state.model->objectRows() : nullptr;
-    if (!rows) {
+    state.visibleRows.clear();
+    if (!state.model) {
         return;
     }
 
-    for (const DriverObjectRow& row : *rows) {
+    state.visibleRows = state.model->filterObjectRows({}, {}, GetEditText(state.filterEdit));
+    for (const DriverObjectRow& row : state.visibleRows) {
         Ksword::Ui::InsertListViewTextRow(state.listView, {
             row.directoryPathText,
             row.objectNameText,
@@ -288,20 +400,18 @@ void PopulateObjectList(DriverObjectViewState& state) {
 // columns displayed in the report control; output is clipboard/file ready text.
 std::wstring BuildObjectTsv(const DriverObjectViewState& state) {
     std::vector<std::vector<std::wstring>> rows;
-    if (state.model) {
-        for (const DriverObjectRow& row : state.model->objectRows()) {
-            rows.push_back({
-                row.directoryPathText,
-                row.objectNameText,
-                row.objectTypeText,
-                row.fullPathText,
-                row.targetPathText,
-                row.referenceCountText,
-                row.handleCountText,
-                row.statusText,
-                row.capabilityHint
-            });
-        }
+    for (const DriverObjectRow& row : state.visibleRows) {
+        rows.push_back({
+            row.directoryPathText,
+            row.objectNameText,
+            row.objectTypeText,
+            row.fullPathText,
+            row.targetPathText,
+            row.referenceCountText,
+            row.handleCountText,
+            row.statusText,
+            row.capabilityHint
+        });
     }
     return DriverActions::BuildTsv(
         { L"目录", L"对象名", L"类型", L"完整路径", L"目标路径", L"引用计数", L"句柄计数", L"状态", L"能力提示" },
@@ -332,12 +442,32 @@ bool RegisterDriverObjectClass() {
         switch (msg) {
         case WM_CREATE:
             if (state) {
+                state->filterEdit = ::CreateWindowExW(
+                    WS_EX_CLIENTEDGE,
+                    L"EDIT",
+                    L"",
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                    0,
+                    0,
+                    0,
+                    0,
+                    hwnd,
+                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kObjectFilterId)),
+                    ::GetModuleHandleW(nullptr),
+                    nullptr);
                 state->listView = Ksword::Ui::CreateReportListView(hwnd, kObjectListId, 0, 0, 0, 0);
+                SetChildFont(state->filterEdit);
                 SetChildFont(state->listView);
                 Ksword::Ui::AddListViewColumns(state->listView, ObjectColumns());
                 PopulateObjectList(*state);
             }
             return 0;
+        case WM_COMMAND:
+            if (state && LOWORD(wParam) == kObjectFilterId && HIWORD(wParam) == EN_CHANGE) {
+                PopulateObjectList(*state);
+                return 0;
+            }
+            break;
         case WM_NOTIFY:
             if (state) {
                 const auto* header = reinterpret_cast<const NMHDR*>(lParam);
@@ -365,7 +495,12 @@ bool RegisterDriverObjectClass() {
             if (state && state->listView) {
                 RECT rc{};
                 ::GetClientRect(hwnd, &rc);
-                ::MoveWindow(state->listView, 0, 0, rc.right - rc.left, rc.bottom - rc.top, TRUE);
+                const int width = rc.right - rc.left;
+                const int height = rc.bottom - rc.top;
+                const int margin = 6;
+                const int filterHeight = 24;
+                ::MoveWindow(state->filterEdit, margin, margin, std::max(80, width - margin * 2), filterHeight, TRUE);
+                ::MoveWindow(state->listView, 0, filterHeight + margin * 2, width, std::max(40, height - filterHeight - margin * 2), TRUE);
             }
             return 0;
         case WM_NCDESTROY:

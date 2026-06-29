@@ -732,6 +732,32 @@ std::uint32_t FieldNameToId(const std::string& rawName) {
         { "_driver_object.fastiodispatch", KSW_DYN_FIELD_ID_DO_FAST_IO_DISPATCH },
         { "dodriverunload", KSW_DYN_FIELD_ID_DO_DRIVER_UNLOAD },
         { "_driver_object.driverunload", KSW_DYN_FIELD_ID_DO_DRIVER_UNLOAD },
+        { "uldname", KSW_DYN_FIELD_ID_ULD_NAME },
+        { "_unloaded_drivers.name", KSW_DYN_FIELD_ID_ULD_NAME },
+        { "uldstartaddress", KSW_DYN_FIELD_ID_ULD_START_ADDRESS },
+        { "_unloaded_drivers.startaddress", KSW_DYN_FIELD_ID_ULD_START_ADDRESS },
+        { "uldendaddress", KSW_DYN_FIELD_ID_ULD_END_ADDRESS },
+        { "_unloaded_drivers.endaddress", KSW_DYN_FIELD_ID_ULD_END_ADDRESS },
+        { "uldcurrenttime", KSW_DYN_FIELD_ID_ULD_CURRENT_TIME },
+        { "_unloaded_drivers.currenttime", KSW_DYN_FIELD_ID_ULD_CURRENT_TIME },
+        { "uldtypesize", KSW_DYN_FIELD_ID_ULD_TYPE_SIZE },
+        { "_unloaded_drivers.typesize", KSW_DYN_FIELD_ID_ULD_TYPE_SIZE },
+        { "rtlavlbalancedroot", KSW_DYN_FIELD_ID_RTL_AVL_BALANCED_ROOT },
+        { "_rtl_avl_table.balancedroot", KSW_DYN_FIELD_ID_RTL_AVL_BALANCED_ROOT },
+        { "rtlavlorderedpointer", KSW_DYN_FIELD_ID_RTL_AVL_ORDERED_POINTER },
+        { "_rtl_avl_table.orderedpointer", KSW_DYN_FIELD_ID_RTL_AVL_ORDERED_POINTER },
+        { "rtlavlwhichorderedelement", KSW_DYN_FIELD_ID_RTL_AVL_WHICH_ORDERED_ELEMENT },
+        { "_rtl_avl_table.whichorderedelement", KSW_DYN_FIELD_ID_RTL_AVL_WHICH_ORDERED_ELEMENT },
+        { "rtlavlnumbergenerictableelements", KSW_DYN_FIELD_ID_RTL_AVL_NUMBER_GENERIC_TABLE_ELEMENTS },
+        { "_rtl_avl_table.numbergenerictableelements", KSW_DYN_FIELD_ID_RTL_AVL_NUMBER_GENERIC_TABLE_ELEMENTS },
+        { "rtlavldepthoftree", KSW_DYN_FIELD_ID_RTL_AVL_DEPTH_OF_TREE },
+        { "_rtl_avl_table.depthoftree", KSW_DYN_FIELD_ID_RTL_AVL_DEPTH_OF_TREE },
+        { "rtlavlrestartkey", KSW_DYN_FIELD_ID_RTL_AVL_RESTART_KEY },
+        { "_rtl_avl_table.restartkey", KSW_DYN_FIELD_ID_RTL_AVL_RESTART_KEY },
+        { "rtlavldeletecount", KSW_DYN_FIELD_ID_RTL_AVL_DELETE_COUNT },
+        { "_rtl_avl_table.deletecount", KSW_DYN_FIELD_ID_RTL_AVL_DELETE_COUNT },
+        { "rtlavltypesize", KSW_DYN_FIELD_ID_RTL_AVL_TYPE_SIZE },
+        { "_rtl_avl_table.typesize", KSW_DYN_FIELD_ID_RTL_AVL_TYPE_SIZE },
         { "pspcidtable", KSW_DYN_FIELD_ID_KG_PSP_CID_TABLE },
         { "kgpspcidtable", KSW_DYN_FIELD_ID_KG_PSP_CID_TABLE },
         { "psloadedmodulelist", KSW_DYN_FIELD_ID_KG_PS_LOADED_MODULE_LIST },
@@ -740,6 +766,10 @@ std::uint32_t FieldNameToId(const std::string& rawName) {
         { "kgmmunloadeddrivers", KSW_DYN_FIELD_ID_KG_MM_UNLOADED_DRIVERS },
         { "piddbcachetable", KSW_DYN_FIELD_ID_KG_PIDDB_CACHE_TABLE },
         { "kgpiddbcachetable", KSW_DYN_FIELD_ID_KG_PIDDB_CACHE_TABLE },
+        { "keservicedescriptortableshadow", KSW_DYN_FIELD_ID_KG_KE_SERVICE_DESCRIPTOR_TABLE_SHADOW },
+        { "kgkeservicedescriptortableshadow", KSW_DYN_FIELD_ID_KG_KE_SERVICE_DESCRIPTOR_TABLE_SHADOW },
+        { "mmlastunloadeddriver", KSW_DYN_FIELD_ID_KG_MM_LAST_UNLOADED_DRIVER },
+        { "kgmmlastunloadeddriver", KSW_DYN_FIELD_ID_KG_MM_LAST_UNLOADED_DRIVER },
     };
 
     std::string key = LowerAscii(rawName);
@@ -805,6 +835,9 @@ void ParseProfileFields(
 std::uint32_t ItemKindToProtocol(const std::string& kind) {
     const std::string lower = LowerAscii(kind);
     if (lower == "structoffset" || lower == "struct_offset" || lower == "offset") {
+        return KSW_DYN_PROFILE_EX_ITEM_KIND_STRUCT_OFFSET;
+    }
+    if (lower == "typesize" || lower == "type_size" || lower == "sizeof") {
         return KSW_DYN_PROFILE_EX_ITEM_KIND_STRUCT_OFFSET;
     }
     if (lower == "globalrva" || lower == "global_rva" || lower == "rva") {
@@ -1192,7 +1225,7 @@ void AppendDynDataProfileRows(KernelOperationResult& result, const DynDataProfil
             { L"Source", L"Profile EX Item" },
             { L"Index", std::to_wstring(index) },
             { L"FieldId", std::to_wstring(item.itemId) },
-            { L"Kind", item.itemKind == KSW_DYN_PROFILE_EX_ITEM_KIND_GLOBAL_RVA ? L"GlobalRva" : L"StructOffset" },
+            { L"Kind", (item.itemId == KSW_DYN_FIELD_ID_ULD_TYPE_SIZE || item.itemId == KSW_DYN_FIELD_ID_RTL_AVL_TYPE_SIZE) ? L"TypeSize" : (item.itemKind == KSW_DYN_PROFILE_EX_ITEM_KIND_GLOBAL_RVA ? L"GlobalRva" : L"StructOffset") },
             { L"Value", HexTextLocal(item.value) },
             { L"Flags", HexTextLocal(item.flags) },
             { L"Callback", (item.flags & KSW_DYN_PROFILE_EX_ITEM_FLAG_CALLBACK) != 0U ? L"是" : L"否" },

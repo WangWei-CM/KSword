@@ -235,10 +235,83 @@ names above plus optional kernel globals:
 - `PsLoadedModuleList`
 - `MmUnloadedDrivers`
 - `PiDDBCacheTable`
+- `KeServiceDescriptorTableShadow`
 
 `StructOffset` accepts the legacy field dictionary names plus the new process,
 thread, handle table, KLDR, and DRIVER_OBJECT field names documented in
 `docs/next_phase_manifests/dyndata_v3.md`.
+
+## ntoskrnl deep runtime offset catalog
+
+`ksword_ntos_pdb_deep_offsets.py` is the read-only deep catalog generator for
+runtime detail work. It parses one local `ntkrnlmp.pdb` with `llvm-pdbutil` and
+writes a large JSON/CSV field inventory for process, thread, handle/object,
+driver/module, memory/section, ALPC/IPC, callback/registry/security, and common
+kernel primitive types.
+
+Current repository deep library:
+
+```text
+Ksword5.1\Ksword5.1\profiles\pdb_deep_offsets\ntkrnlmp_f923da2d238e7c7ce180b962b19a3781_age5_deep_offsets.json
+```
+
+Important identity note: `llvm-pdbutil dump -summary` may report a PDB internal
+`Age` that differs from the Microsoft symbol-cache GUID+Age folder. Runtime
+profile matching must use the RSDS/symbol-cache identity used by the loaded PE.
+For the current checked-in library the PDB summary age is `5`, but the
+symbol-cache key is `F923DA2D238E7C7CE180B962B19A37811`, so the runtime
+`pdbAge` stored in JSON/manifest is `1` and `pdbSummaryAge` is retained only as
+diagnostic provenance.
+
+Regenerate the current library without re-dumping TPI when the raw type cache is
+already present:
+
+```powershell
+python tools\pdb_offset_generator\ksword_ntos_pdb_deep_offsets.py `
+  --pdb E:\KswordPDB\PDB\pdb-cache\amd64\ntkrnlmp.pdb\F923DA2D238E7C7CE180B962B19A37811\ntkrnlmp.pdb `
+  --llvm-pdbutil D:\Software\VS\VC\Tools\Llvm\x64\bin\llvm-pdbutil.exe `
+  --output-dir D:\Temp\ksword_pdb_deep_offsets `
+  --json-name ntkrnlmp_f923da2d238e7c7ce180b962b19a3781_age5_deep_offsets.json `
+  --csv-name ntkrnlmp_f923da2d238e7c7ce180b962b19a3781_age5_deep_offsets.csv `
+  --repo-json Ksword5.1\Ksword5.1\profiles\pdb_deep_offsets\ntkrnlmp_f923da2d238e7c7ce180b962b19a3781_age5_deep_offsets.json `
+  --dump-types-cache D:\Temp\ksword_pdb_deep_offsets\ntkrnlmp_f923da2d238e7c7ce180b962b19a3781_age5_types.txt
+```
+
+The JSON contains:
+
+- `flatFields`: all extracted fields, each with `runtimeItemId`,
+  `runtimeItemIdHex`, type name, byte offset, and bitfield metadata when present.
+- `kswordAliasFields`: fields already mapped to existing Ksword/DynData item
+  names such as `EpUniqueProcessId`, `EtCid`, `KldrDllBase`, and
+  `DoMajorFunction`.
+- `runtimeDetailCatalog`: domain/type grouping for future process/thread/handle
+  detail pages and future paged detail IOCTLs.
+
+The generated `runtimeItemId` values are deterministic CRC32-derived IDs in the
+high-bit namespace so they do not collide with existing small
+`KSW_DYN_FIELD_ID_*` values. They are catalog identifiers only; the current R0
+detail IOCTLs still consume a fixed, validated whitelist of applied DynData
+aliases. Do not add an arbitrary “R3 passes offset, R0 reads memory” interface.
+The safe next step for exposing all 2682 fields is a paged, identity-checked
+profile/catalog protocol that only reads fields from a driver-validated applied
+catalog.
+
+Validate pack coverage against checked-in deep libraries:
+
+```powershell
+python tools\pdb_offset_generator\ksword_dyndata_pack_deep_audit.py
+```
+
+The audit writes:
+
+```text
+D:\Temp\ksword_pdb_deep_offsets\ksword_dyndata_pack_deep_audit.json
+```
+
+For the current `F923...` ntoskrnl profile the audit should report strict
+identity match, `47/47` deep aliases present, and process/thread/module detail
+required fields ready. This proves the release JSON carries the required
+offsets; it does not prove a running driver has already consumed the pack.
 
 ## Driver unload research report
 

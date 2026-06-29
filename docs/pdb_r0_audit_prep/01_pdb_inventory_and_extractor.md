@@ -111,6 +111,54 @@ Generated files:
 | `tool_inventory.json` / `.csv` | Tool discovery results. |
 | `sample_validation.json` / `.csv` | Sample module read checks and GUID/Age identity. |
 
+## Bounded extractor probe prototype
+
+The inventory script proves stream availability, but it does not produce
+extractor-shaped evidence. A second read-only prototype now exists:
+
+```text
+D:\Projects\Ksword5.1\tools\pdb_audit_prep\pdb_extract_probe.py
+```
+
+Command used for the current probe:
+
+```powershell
+python D:\Projects\Ksword5.1\tools\pdb_audit_prep\pdb_extract_probe.py `
+  --timeout-seconds 8 `
+  --public-line-limit 400 `
+  --public-symbol-limit 20
+```
+
+Probe behavior:
+
+1. Reads only selected module samples from `E:\KswordPDB\PDB\pdb-cache\amd64`.
+2. Captures GUID/Age and stream flags through `llvm-pdbutil dump -summary`.
+3. Extracts bounded TPI type records by explicit type index (`0x1000`..`0x1003` by default).
+4. Probes configured globals by exact `-global-name` in isolated subprocesses.
+5. If `-globals` fails or crashes for a candidate, scans a bounded `-publics` prefix for the same name as a crash-tolerant fallback.
+6. Captures only a bounded prefix of `-publics`, then terminates the subprocess if the prefix limit is reached.
+7. Writes JSON/CSV only under `D:\Temp\ksword_pdb_audit_prep\pdb_inventory`.
+
+Additional generated files:
+
+| File | Purpose |
+| --- | --- |
+| `pdb_extractor_probe.json` | Combined module identity, type probes, global probes, and bounded public-symbol samples. |
+| `pdb_extractor_probe_modules.csv` | One row per sampled module with GUID/Age and probe counts. |
+| `pdb_extractor_probe_types.csv` | Bounded `-types -type-index=...` evidence rows. |
+| `pdb_extractor_probe_globals.csv` | Exact-name global probe results and crash/failure notes. |
+| `pdb_extractor_probe_publics.csv` | Bounded public stream prefix summaries. |
+
+Current probe result highlights:
+
+| Module | Type probes OK | Global probes OK / failed | Public sample symbols | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| `ntkrnlmp.pdb` | 4 | 5 / 0 unresolved; 5 primary crashes | 20 | `llvm-pdbutil -globals -global-name` still crashes, but bounded publics fallback resolves `PsInitialSystemProcess`, `PsLoadedModuleList`, `PspCidTable`, `KeServiceDescriptorTable`, and `KeServiceDescriptorTableShadow`. |
+| `tcpip.pdb` | 0 | 3 / 0 | 20 | Candidate globals such as `TcpPartitionTable`, `TcpCompartmentSet`, and `UdpEndpointTable` are queryable. |
+| `fltMgr.pdb` | 4 | 1 / 0 | 20 | `FltGlobals` exact-name global probe succeeds. |
+| `fvevol.pdb` | 0 | 1 / 0 | 20 | `FveGlobals` exact-name global probe succeeds. |
+| `ndis.pdb` | 4 | 3 / 0 | 20 | NDIS global list candidates are queryable. |
+
 ## Verified sample modules
 
 The current sample set was:
@@ -141,6 +189,7 @@ Important interpretation:
 - `types_ok` proves at least a bounded TPI type record query works.
 - `publics_ok` proves public symbol stream reads work for the sampled PDB.
 - `globals_filtered_ok` is not yet reliable enough to be treated as extractor readiness because `llvm-pdbutil` crashed on the sampled `ntkrnlmp.pdb` global lookup.
+- `pdb_extract_probe.py` adds stronger per-module evidence for tcpip/ndis/fltMgr/fvevol globals and public-symbol prefixes. For ntoskrnl, direct `-globals` still crashes, but the new bounded publics fallback resolves the key public global names needed by current v3/v4 DynData planning, including `KeServiceDescriptorTableShadow` for Shadow SSDT service-table resolution.
 
 ## Extractor capabilities needed next
 
@@ -187,7 +236,7 @@ The next-stage extractor should be designed around stable, versioned R0 audit ar
 
 - The cache is large enough that recursive full extraction should not be the default: this pass observed 126 module directories and 16086 instance directories.
 - `ntkrnlmp.pdb` alone has 1535 cached instances, so any extractor must support incremental/module-targeted runs.
-- `llvm-pdbutil` is useful for summary/types/publics, but filtered `-globals` crashed on the sampled `ntkrnlmp.pdb`. The extractor should consider DIA SDK, LLVM library APIs, or a robust subprocess isolation strategy for global extraction.
+- `llvm-pdbutil` is useful for summary/types/publics, but filtered `-globals` crashed on the sampled `ntkrnlmp.pdb`. The current probe mitigates this with bounded `-publics` fallback for named public globals; a production extractor should still consider DIA SDK, LLVM library APIs, or a robust subprocess isolation strategy for richer private/global extraction.
 - Do not capture unbounded `-types`, `-globals`, `-symbols`, or `-publics` output into memory for all modules. Use filtering, pagination, subprocess timeouts, and per-module output limits.
 - Treat stripped PDBs as normal. The sampled modules all reported `Is stripped: true` while still exposing type/public/global stream flags.
 - For stable R0 audit usage, never infer offsets from module name alone. Always bind extracted data to PDB GUID/Age and, later, the target image timestamp/size or PE identity.

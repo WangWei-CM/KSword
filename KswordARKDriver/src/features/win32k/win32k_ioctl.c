@@ -36,6 +36,9 @@ Environment:
 #define KSWORD_ARK_WIN32K_HOOK_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_WIN32K_HOOK_SNAPSHOT_RESPONSE) - sizeof(KSWORD_ARK_WIN32K_HOOK_ENTRY))
 
+#define KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE_SIZE \
+    sizeof(KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE)
+
 typedef NTSTATUS(*KSWORD_ARK_WIN32K_QUERY_COLLECTOR)(
     _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
     _In_ size_t OutputBufferLength,
@@ -447,4 +450,84 @@ Return Value:
         "hooks-pdb",
         KswordARKWin32kQueryHookSnapshot,
         BytesReturned);
+}
+
+NTSTATUS
+KswordARKWin32kIoctlQueryWindowDetail(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle the fixed-size read-only single-window detail readiness IOCTL.
+
+Arguments:
+
+    Device - Current framework device object, used for compact diagnostics.
+    Request - Current framework request.
+    InputBufferLength - Input length; must contain the fixed detail request.
+    OutputBufferLength - Output length; must contain the fixed detail response.
+    BytesReturned - Receives response bytes.
+
+Return Value:
+
+    NTSTATUS from buffer validation or the win32k detail backend.
+
+--*/
+{
+    KSWORD_ARK_WIN32K_WINDOW_DETAIL_REQUEST requestCopy;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t actualInputLength = 0U;
+    size_t actualOutputLength = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    if (BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesReturned = 0U;
+
+    status = KswordARKRetrieveRequiredInputBuffer(
+        Request,
+        sizeof(KSWORD_ARK_WIN32K_WINDOW_DETAIL_REQUEST),
+        &inputBuffer,
+        &actualInputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKWin32kIoctlLog(Device, "Error", "R0 win32k-window-detail ioctl: input invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    RtlZeroMemory(&requestCopy, sizeof(requestCopy));
+    RtlCopyMemory(&requestCopy, inputBuffer, sizeof(requestCopy));
+
+    status = KswordARKRetrieveRequiredOutputBuffer(
+        Request,
+        KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE_SIZE,
+        &outputBuffer,
+        &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        KswordARKWin32kIoctlLog(Device, "Error", "R0 win32k-window-detail ioctl: output invalid, status=0x%08X.", (unsigned int)status);
+        return status;
+    }
+
+    status = KswordARKWin32kQueryWindowDetail(
+        (KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE*)outputBuffer,
+        actualOutputLength,
+        &requestCopy,
+        BytesReturned);
+    KswordARKWin32kIoctlLog(
+        Device,
+        NT_SUCCESS(status) ? "Info" : "Error",
+        "R0 win32k-window-detail query completed: status=0x%08X, outBytes=%Iu.",
+        (unsigned int)status,
+        *BytesReturned);
+    return status;
 }

@@ -3,6 +3,134 @@
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
 
+namespace
+{
+    QString driverOperationTableCellText(QTableWidget* table, const int rowIndex, const int columnIndex)
+    {
+        // driverOperationTableCellText：
+        // - 输入：表格、行号、列号；
+        // - 处理：安全读取单元格文本；
+        // - 返回：单元格不存在时返回空字符串。
+        if (table == nullptr)
+        {
+            return QString();
+        }
+        const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+        return item != nullptr ? item->text() : QString();
+    }
+
+    void copyDriverOperationCurrentRow(QTableWidget* table)
+    {
+        // copyDriverOperationCurrentRow：
+        // - 输入：服务表或模块表；
+        // - 处理：复制当前行 TSV；
+        // - 返回：无，不触发任何驱动操作。
+        if (table == nullptr || QGuiApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        const int rowIndex = table->currentRow();
+        if (rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return;
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            fields.push_back(driverOperationTableCellText(table, rowIndex, columnIndex));
+        }
+        QGuiApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
+    }
+
+    // integrityClassText：
+    // - 输入：Driver Integrity 证据类别常量；
+    // - 处理：把类别映射为 DriverDock 侧可读文本；
+    // - 返回：类别名称，未知值保留数值信息。
+    QString integrityClassText(const std::uint32_t evidenceClass)
+    {
+        switch (evidenceClass)
+        {
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MODULE_VIEW: return QStringLiteral("ModuleView");
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_PS_LOADED_MODULES: return QStringLiteral("PsLoadedModules");
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_OBJECT: return QStringLiteral("DriverObject");
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_SECTION: return QStringLiteral("DriverSection");
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MAJOR_FUNCTION: return QStringLiteral("MajorFunction");
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_FAST_IO: return QStringLiteral("FastIo");
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DEVICE_CHAIN: return QStringLiteral("DeviceChain");
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_SERVICE: return QStringLiteral("Service");
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_CPU_CONTROL: return QStringLiteral("CPU");
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DESCRIPTOR_TABLE: return QStringLiteral("Descriptor");
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MSR_ENTRY: return QStringLiteral("MSR");
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_IDT_HANDLER: return QStringLiteral("IDT");
+        case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL: return QStringLiteral("OptionalGlobal");
+        default: return QStringLiteral("Class(%1)").arg(evidenceClass);
+        }
+    }
+
+    // integrityRiskText：
+    // - 输入：Driver Integrity 风险位；
+    // - 处理：转换为短文本，便于在证据页直接浏览；
+    // - 返回：空风险显示“正常”。
+    QString integrityRiskText(const std::uint32_t flags)
+    {
+        if (flags == 0U)
+        {
+            return QStringLiteral("正常");
+        }
+        QStringList parts;
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE) parts << QStringLiteral("不可用");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED) parts << QStringLiteral("查询失败");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED) parts << QStringLiteral("模块未解析");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_OWNER_MISMATCH) parts << QStringLiteral("Owner不匹配");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_OUTSIDE_DRIVER_IMAGE) parts << QStringLiteral("外跳");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_SECTION_MISMATCH) parts << QStringLiteral("Section不匹配");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_SERVICE_MISSING) parts << QStringLiteral("服务缺失");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_EMPTY_UNLOAD) parts << QStringLiteral("Unload为空");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DEVICE_LOOP) parts << QStringLiteral("Device环");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_ATTACHED_LOOP) parts << QStringLiteral("Attached环");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CROSS_DRIVER_ATTACH) parts << QStringLiteral("跨驱动挂接");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_NULL_POINTER) parts << QStringLiteral("空指针");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_IDT_NON_CORE_OWNER) parts << QStringLiteral("IDT外部Owner");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_WP_DISABLED) parts << QStringLiteral("WP关闭");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_NXE_DISABLED) parts << QStringLiteral("NXE关闭");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMEP_DISABLED) parts << QStringLiteral("SMEP关闭");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_CPU_SMAP_DISABLED) parts << QStringLiteral("SMAP关闭");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DESCRIPTOR_INVALID) parts << QStringLiteral("描述符异常");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE) parts << QStringLiteral("DynData缺失");
+        if (flags & KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED) parts << QStringLiteral("截断");
+        return parts.join(QStringLiteral(" | "));
+    }
+
+    // appendEvidenceRow：
+    // - 输入：通用证据表、行号和字段内容；
+    // - 处理：在 6 列证据表中写入一条只读行；
+    // - 返回：无。
+    void appendEvidenceRow(
+        QTableWidget* table,
+        const int rowIndex,
+        const QString& evidenceText,
+        const QString& objectText,
+        const QString& targetText,
+        const QString& riskText,
+        const QString& confidenceText,
+        const QString& detailText)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+        table->setItem(rowIndex, 0, createReadOnlyItem(evidenceText));
+        table->setItem(rowIndex, 1, createReadOnlyItem(objectText));
+        table->setItem(rowIndex, 2, createReadOnlyItem(targetText));
+        table->setItem(rowIndex, 3, createReadOnlyItem(riskText));
+        table->setItem(rowIndex, 4, createReadOnlyItem(confidenceText));
+        table->setItem(rowIndex, 5, createReadOnlyItem(detailText));
+    }
+}
+
 void DriverDock::refreshDriverServiceRecords()
 {
     kLogEvent refreshEvent;
@@ -180,6 +308,9 @@ void DriverDock::showServiceTableContextMenu(const QPoint& localPosition)
     QAction* queryObjectAction = contextMenu.addAction(
         QIcon(":/Icon/process_refresh.svg"),
         QStringLiteral("查询 DriverObject 信息"));
+    QAction* copyRowAction = contextMenu.addAction(
+        QIcon(":/Icon/process_copy_row.svg"),
+        QStringLiteral("复制当前行"));
     contextMenu.addSeparator();
     QAction* stopServiceAction = contextMenu.addAction(
         QIcon(":/Icon/process_uncritical.svg"),
@@ -209,6 +340,11 @@ void DriverDock::showServiceTableContextMenu(const QPoint& localPosition)
     {
         fillObjectDriverNameFromSelection();
         querySelectedDriverObjectInfo();
+        return;
+    }
+    if (selectedAction == copyRowAction)
+    {
+        copyDriverOperationCurrentRow(m_serviceTable);
         return;
     }
     if (selectedAction == stopServiceAction)
@@ -374,9 +510,9 @@ void DriverDock::forceUnloadDriverFromServiceRow(const int rowIndex, const bool 
                     }
 
                     const QString resultLine = QStringLiteral(
-                        "R0 强制卸载完成：%1 | IO=%2 | Status=%3 | Flags=%4 | Applied=%5 | Deleted=%6 | Last=%7 | Wait=%8 | Object=%9 | Unload=%10 | Name=%11")
+                        "R0 强制卸载完成：%1 | IO说明=%2 | Status=%3 | Flags=%4 | Applied=%5 | Deleted=%6 | Last=%7 | Wait=%8 | Object=%9 | Unload=%10 | Name=%11")
                         .arg(driverObjectNameText)
-                        .arg(QString::fromStdString(result.io.message))
+                        .arg(friendlyDriverIoMessage(result.io.message))
                         .arg(driverForceUnloadStatusText(result.status))
                         .arg(formatHex32(result.flags))
                         .arg(formatHex32(result.cleanupFlagsApplied))
@@ -433,6 +569,9 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
     QAction* copyEvidenceAction = contextMenu.addAction(
         QIcon(":/Icon/process_copy_row.svg"),
         QStringLiteral("复制当前模块证据详情"));
+    QAction* copyRowAction = contextMenu.addAction(
+        QIcon(":/Icon/process_copy_row.svg"),
+        QStringLiteral("复制当前行"));
     contextMenu.addSeparator();
     QAction* forceCleanupByBaseAction = contextMenu.addAction(
         QIcon(":/Icon/process_uncritical.svg"),
@@ -458,6 +597,11 @@ void DriverDock::showModuleTableContextMenu(const QPoint& localPosition)
         {
             QGuiApplication::clipboard()->setText(m_moduleEvidenceDetailEditor->text());
         }
+        return;
+    }
+    if (selectedAction == copyRowAction)
+    {
+        copyDriverOperationCurrentRow(m_moduleTable);
         return;
     }
     if (selectedAction == forceCleanupByBaseAction)
@@ -562,11 +706,11 @@ void DriverDock::forceUnloadDriverFromModuleRow(
                     }
 
                     const QString resultLine = QStringLiteral(
-                        "R0 模块基址%1完成：%2 | Base=%3 | IO=%4 | Status=%5 | Flags=%6 | Applied=%7 | Deleted=%8 | Last=%9 | Wait=%10 | Object=%11 | Unload=%12 | Callbacks=%13/%14 fail=%15 last=%16 | Name=%17")
+                        "R0 模块基址%1完成：%2 | Base=%3 | IO说明=%4 | Status=%5 | Flags=%6 | Applied=%7 | Deleted=%8 | Last=%9 | Wait=%10 | Object=%11 | Unload=%12 | Callbacks=%13/%14 fail=%15 last=%16 | Name=%17")
                         .arg(removeCallbacksFirst ? QStringLiteral("强力清理") : QStringLiteral("清理"))
                         .arg(moduleNameText)
                         .arg(formatCompactAddress(moduleBaseValue))
-                        .arg(QString::fromStdString(result.io.message))
+                        .arg(friendlyDriverIoMessage(result.io.message))
                         .arg(driverForceUnloadStatusText(result.status))
                         .arg(formatHex32(result.flags))
                         .arg(formatHex32(result.cleanupFlagsApplied))
@@ -659,6 +803,8 @@ void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQue
     // - 所有地址都作为诊断文本展示；
     // - 不在 UI 中将地址作为任何二次操作输入。
     m_objectInfoQuerying = false;
+    m_lastDriverObjectQueryResult = result;
+    m_hasDriverObjectQueryResult = true;
     if (m_queryObjectInfoButton != nullptr)
     {
         m_queryObjectInfoButton->setEnabled(true);
@@ -666,16 +812,18 @@ void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQue
 
     if (m_objectInfoStatusLabel != nullptr)
     {
+        const QString readableIoText = friendlyDriverIoMessage(result.io.message);
         m_objectInfoStatusLabel->setText(QStringLiteral("状态：%1 | %2")
             .arg(result.io.ok ? driverObjectQueryStatusText(result.queryStatus) : QStringLiteral("IO failed"))
-            .arg(QString::fromStdString(result.io.message)));
+            .arg(readableIoText));
     }
 
     if (m_objectInfoSummaryEdit != nullptr)
     {
+        const QString readableIoText = friendlyDriverIoMessage(result.io.message);
         QStringList summaryLines;
         summaryLines << QStringLiteral("[DriverObject]");
-        summaryLines << QStringLiteral("IO: %1").arg(QString::fromStdString(result.io.message));
+        summaryLines << QStringLiteral("IO说明: %1").arg(readableIoText);
         summaryLines << QStringLiteral("QueryStatus: %1").arg(driverObjectQueryStatusText(result.queryStatus));
         summaryLines << QStringLiteral("LastStatus: %1").arg(formatNtStatusText(result.lastStatus));
         summaryLines << QStringLiteral("DriverName: %1").arg(QString::fromStdWString(result.driverName));
@@ -694,11 +842,95 @@ void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQue
             .arg(result.majorFunctions.size())
             .arg(result.devices.size())
             .arg(result.totalDeviceCount);
-        m_objectInfoSummaryEdit->setPlainText(summaryLines.join('\n'));
+        m_objectInfoSummaryEdit->setText(summaryLines.join('\n'));
+    }
+    rebuildDriverObjectEvidenceViews();
+}
+
+void DriverDock::rebuildDriverObjectEvidenceViews()
+{
+    // 输入：当前 DriverObject 缓存与完整性缓存。
+    // 处理：仅在 UI 线程投影为只读表格，不重新访问驱动。
+    // 返回：无。
+    if (!m_hasDriverObjectQueryResult)
+    {
+        if (m_driverObjectPageSummaryEdit != nullptr)
+        {
+            m_driverObjectPageSummaryEdit->setText(QStringLiteral("请先执行 DriverObject 查询。"));
+        }
+        if (m_driverExtensionStatusLabel != nullptr)
+        {
+            m_driverExtensionStatusLabel->setText(QStringLiteral("状态：等待 DriverObject 查询。"));
+        }
+        if (m_fastIoStatusLabel != nullptr)
+        {
+            m_fastIoStatusLabel->setText(QStringLiteral("状态：等待 Driver Integrity 证据。"));
+        }
+        return;
+    }
+
+    const ksword::ark::DriverObjectQueryResult& result = m_lastDriverObjectQueryResult;
+    if (m_driverObjectPageSummaryEdit != nullptr)
+    {
+        QStringList lines;
+        lines << QStringLiteral("DriverObject: %1").arg(formatCompactAddress(result.driverObjectAddress));
+        lines << QStringLiteral("DriverStart: %1").arg(formatCompactAddress(result.driverStart));
+        lines << QStringLiteral("DriverSection: %1").arg(formatCompactAddress(result.driverSection));
+        lines << QStringLiteral("DriverUnload: %1").arg(formatCompactAddress(result.driverUnload));
+        lines << QStringLiteral("DriverSize: %1").arg(formatHex32(result.driverSize));
+        lines << QStringLiteral("DriverFlags: %1").arg(formatHex32(result.driverFlags));
+        lines << QStringLiteral("MajorFunctions: %1").arg(result.majorFunctions.size());
+        lines << QStringLiteral("DeviceObjects: %1/%2").arg(result.devices.size()).arg(result.totalDeviceCount);
+        m_driverObjectPageSummaryEdit->setText(lines.join('\n'));
+    }
+
+    if (m_driverObjectEvidenceTable != nullptr)
+    {
+        const QSignalBlocker blocker(m_driverObjectEvidenceTable);
+        m_driverObjectEvidenceTable->setSortingEnabled(false);
+        m_driverObjectEvidenceTable->setRowCount(0);
+        const QStringList rows = {
+            QStringLiteral("DriverObject"),
+            QStringLiteral("DriverStart"),
+            QStringLiteral("DriverSection"),
+            QStringLiteral("DriverUnload"),
+            QStringLiteral("DriverSize"),
+            QStringLiteral("DriverFlags"),
+            QStringLiteral("FieldFlags"),
+            QStringLiteral("MajorFunctionCount"),
+            QStringLiteral("DeviceCount")
+        };
+        const QStringList values = {
+            formatCompactAddress(result.driverObjectAddress),
+            formatCompactAddress(result.driverStart),
+            formatCompactAddress(result.driverSection),
+            formatCompactAddress(result.driverUnload),
+            formatHex32(result.driverSize),
+            formatHex32(result.driverFlags),
+            formatHex32(result.fieldFlags),
+            QString::number(result.majorFunctions.size()),
+            QStringLiteral("%1/%2").arg(result.devices.size()).arg(result.totalDeviceCount)
+        };
+        m_driverObjectEvidenceTable->setRowCount(rows.size());
+        for (int index = 0; index < rows.size(); ++index)
+        {
+            appendEvidenceRow(
+                m_driverObjectEvidenceTable,
+                index,
+                rows[index],
+                values[index],
+                QStringLiteral("-"),
+                QStringLiteral("正常"),
+                QStringLiteral("100"),
+                QStringLiteral("DriverObject 只读摘要"));
+        }
+        m_driverObjectEvidenceTable->setSortingEnabled(true);
     }
 
     if (m_majorFunctionTable != nullptr)
     {
+        const QSignalBlocker blocker(m_majorFunctionTable);
+        m_majorFunctionTable->setSortingEnabled(false);
         m_majorFunctionTable->setRowCount(0);
         for (const ksword::ark::DriverMajorFunctionEntry& majorEntry : result.majorFunctions)
         {
@@ -723,10 +955,13 @@ void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQue
                 }
             }
         }
+        m_majorFunctionTable->setSortingEnabled(true);
     }
 
     if (m_deviceObjectTable != nullptr)
     {
+        const QSignalBlocker blocker(m_deviceObjectTable);
+        m_deviceObjectTable->setSortingEnabled(false);
         m_deviceObjectTable->setRowCount(0);
         for (const ksword::ark::DriverDeviceEntry& deviceEntry : result.devices)
         {
@@ -749,6 +984,95 @@ void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQue
             m_deviceObjectTable->setItem(rowIndex, 8, createReadOnlyItem(formatCompactAddress(deviceEntry.attachedDeviceObjectAddress)));
             m_deviceObjectTable->setItem(rowIndex, 9, createReadOnlyItem(formatCompactAddress(deviceEntry.driverObjectAddress)));
         }
+        m_deviceObjectTable->setSortingEnabled(true);
+    }
+
+    if (m_driverExtensionStatusLabel != nullptr)
+    {
+        m_driverExtensionStatusLabel->setText(
+            QStringLiteral("状态：DriverExtension 未直接暴露；当前仅展示 DriverObject / DeviceChain / FastIo 关联证据。"));
+    }
+    if (m_driverExtensionEvidenceTable != nullptr)
+    {
+        const QSignalBlocker blocker(m_driverExtensionEvidenceTable);
+        m_driverExtensionEvidenceTable->setSortingEnabled(false);
+        m_driverExtensionEvidenceTable->setRowCount(0);
+        const QStringList evidenceNames = {
+            QStringLiteral("DriverExtension"),
+            QStringLiteral("DeviceChain"),
+            QStringLiteral("MajorFunction"),
+            QStringLiteral("FastIo")
+        };
+        const QStringList detailTexts = {
+            QStringLiteral("当前 R3 协议未直接返回 DriverExtension 指针。"),
+            QStringLiteral("DeviceObject 链已由对象页展示。"),
+            QStringLiteral("MajorFunction 表已由对象页展示。"),
+            QStringLiteral("FastIo 仅在完整性页中作为证据归档。")
+        };
+        m_driverExtensionEvidenceTable->setRowCount(evidenceNames.size());
+        for (int index = 0; index < evidenceNames.size(); ++index)
+        {
+            appendEvidenceRow(
+                m_driverExtensionEvidenceTable,
+                index,
+                evidenceNames[index],
+                QStringLiteral("Unavailable"),
+                QStringLiteral("-"),
+                QStringLiteral("未知"),
+                QStringLiteral("0"),
+                detailTexts[index]);
+        }
+        m_driverExtensionEvidenceTable->setSortingEnabled(true);
+    }
+
+    if (m_fastIoStatusLabel != nullptr)
+    {
+        m_fastIoStatusLabel->setText(
+            QStringLiteral("状态：FastIo 关联证据由 Driver Integrity 页回填，当前记录数 %1。")
+            .arg(m_driverIntegrityCache.size()));
+    }
+    if (m_fastIoEvidenceTable != nullptr)
+    {
+        const QSignalBlocker blocker(m_fastIoEvidenceTable);
+        m_fastIoEvidenceTable->setSortingEnabled(false);
+        m_fastIoEvidenceTable->setRowCount(0);
+        int visibleRows = 0;
+        for (const auto& row : m_driverIntegrityCache)
+        {
+            if (row.evidenceClass != KSWORD_ARK_DRIVER_INTEGRITY_CLASS_FAST_IO &&
+                row.evidenceClass != KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_OBJECT &&
+                row.evidenceClass != KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MAJOR_FUNCTION &&
+                row.evidenceClass != KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_SECTION)
+            {
+                continue;
+            }
+            const int rowIndex = m_fastIoEvidenceTable->rowCount();
+            m_fastIoEvidenceTable->insertRow(rowIndex);
+            appendEvidenceRow(
+                m_fastIoEvidenceTable,
+                rowIndex,
+                integrityClassText(row.evidenceClass),
+                formatCompactAddress(row.objectAddress),
+                formatCompactAddress(row.targetAddress),
+                integrityRiskText(row.riskFlags),
+                QString::number(row.confidence),
+                QString::fromStdWString(row.detail));
+            ++visibleRows;
+        }
+        if (visibleRows == 0)
+        {
+            m_fastIoEvidenceTable->setRowCount(1);
+            appendEvidenceRow(
+                m_fastIoEvidenceTable,
+                0,
+                QStringLiteral("FastIo"),
+                QStringLiteral("Unavailable"),
+                QStringLiteral("-"),
+                QStringLiteral("正常"),
+                QStringLiteral("0"),
+                QStringLiteral("当前 Driver Integrity 缓存未返回 FastIo 证据。"));
+        }
+        m_fastIoEvidenceTable->setSortingEnabled(true);
     }
 }
 

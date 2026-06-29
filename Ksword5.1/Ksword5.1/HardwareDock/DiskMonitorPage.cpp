@@ -11,15 +11,22 @@
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAction>
+#include <QClipboard>
 #include <QCheckBox>
 #include <QDateTime>
+#include <QGuiApplication>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
+#include <QModelIndex>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QStringList>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -77,6 +84,55 @@ namespace
     constexpr USHORT kKernelFileTaskWrite = 16;               // kKernelFileTaskWrite：写请求开始。
     constexpr USHORT kKernelFileTaskOperationEnd = 24;        // kKernelFileTaskOperationEnd：请求完成，用于响应时间。
     constexpr int kProcessIoPriorityInformationClass = 33;    // kProcessIoPriorityInformationClass：NtQueryInformationProcess(ProcessIoPriority)。
+
+    void installDiskMonitorTableCopyMenu(QTableWidget* tableWidget)
+    {
+        // installDiskMonitorTableCopyMenu：
+        // - 输入：硬盘监控页的进程速率表或文件活动表；
+        // - 处理：右键选中点击行，并复制该行所有可见列为 TSV；
+        // - 返回：无。只复制监控证据，不影响 ETW 会话或采样状态。
+        if (tableWidget == nullptr)
+        {
+            return;
+        }
+
+        tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(tableWidget, &QTableWidget::customContextMenuRequested, tableWidget, [tableWidget](const QPoint& localPosition)
+        {
+            const QModelIndex clickedIndex = tableWidget->indexAt(localPosition);
+            if (clickedIndex.isValid())
+            {
+                tableWidget->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu contextMenu(tableWidget);
+            contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+            QAction* copyRowAction = contextMenu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
+            if (contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPosition)) != copyRowAction)
+            {
+                return;
+            }
+
+            QClipboard* clipboardObject = QGuiApplication::clipboard();
+            const int rowIndex = tableWidget->currentRow();
+            if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
+            {
+                return;
+            }
+
+            QStringList rowFields;
+            rowFields.reserve(tableWidget->columnCount());
+            for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
+            {
+                const QTableWidgetItem* item = tableWidget->item(rowIndex, columnIndex);
+                rowFields.push_back(item != nullptr ? item->text() : QString());
+            }
+            clipboardObject->setText(rowFields.join(QLatin1Char('\t')));
+        });
+    }
 
     // ProcessColumn：
     // - 作用：定义进程级磁盘速率表列序；
@@ -944,6 +1000,7 @@ void DiskMonitorPage::configureTableWidget(QTableWidget* tableWidget) const
     tableWidget->verticalHeader()->setDefaultSectionSize(24);
     tableWidget->horizontalHeader()->setStretchLastSection(false);
     tableWidget->setStyleSheet(tableHeaderStyle());
+    installDiskMonitorTableCopyMenu(tableWidget);
 }
 
 void DiskMonitorPage::refreshNow()

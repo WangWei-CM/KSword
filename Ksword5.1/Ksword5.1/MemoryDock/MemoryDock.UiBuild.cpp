@@ -15,6 +15,71 @@ using namespace ksword::memory_dock_internal;
 // - 聚焦“界面与交互绑定”职责，避免与扫描算法、读写工具函数混杂。
 // ============================================================
 
+namespace
+{
+    // copyMemoryUtilityCurrentRow 作用：
+    // - 复制 MemoryDock 辅助表格当前行；
+    // - 输入 table：断点表、书签表等 QTableWidget；
+    // - 处理：逐列读取可见文本并按 TSV 写入剪贴板；
+    // - 返回：无；无选中行或剪贴板不可用时直接返回。
+    void copyMemoryUtilityCurrentRow(QTableWidget* table)
+    {
+        if (table == nullptr || QApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        const int rowIndex = table->currentRow();
+        if (rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return;
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+            fields.push_back(item != nullptr ? item->text() : QString());
+        }
+        QApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
+    }
+
+    // installMemoryUtilityCopyMenu 作用：
+    // - 给断点/书签等辅助表格安装只读复制菜单；
+    // - 输入 table：需要复制行能力的表格；
+    // - 处理：点击行时同步当前行，弹出显式不透明 QMenu；
+    // - 返回：无，不改变断点/书签状态。
+    void installMemoryUtilityCopyMenu(QTableWidget* table)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+            {
+                const QModelIndex clickedIndex = table->indexAt(localPosition);
+                if (clickedIndex.isValid())
+                {
+                    table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                }
+
+                QMenu menu(table);
+                menu.setStyleSheet(KswordTheme::ContextMenuStyle());
+                QAction* copyRowAction = menu.addAction(
+                    QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                    QStringLiteral("复制当前行"));
+                copyRowAction->setEnabled(table->currentRow() >= 0);
+                if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+                {
+                    copyMemoryUtilityCurrentRow(table);
+                }
+            });
+    }
+}
+
 MemoryDock::MemoryDock(QWidget* parent)
     : QWidget(parent)
 {
@@ -122,7 +187,7 @@ void MemoryDock::initializeTabs()
     // 记录 Tab 初始化日志：便于排查某个页面未创建的问题。
     kLogEvent tabInitEvent;
     info << tabInitEvent
-        << "[MemoryDock] initializeTabs: 开始创建 7 个功能页。"
+        << "[MemoryDock] initializeTabs: 开始创建 10 个功能页。"
         << eol;
 
     // 全部子页面统一由 QTabWidget 承载。
@@ -138,6 +203,8 @@ void MemoryDock::initializeTabs()
     initializeDriverMemoryRwTab();
     initializeKernelExecutableMemoryScanTab();
     initializeKernelMemoryEvidenceTab();
+    initializeProcessPteTranslateTab();
+    initializeProcessMemoryEvidenceTab();
 }
 
 void MemoryDock::initializeProcessModuleTab()
@@ -527,6 +594,7 @@ void MemoryDock::initializeBreakpointBookmarkTab()
     m_breakpointTable->verticalHeader()->setVisible(false);
     m_breakpointTable->horizontalHeader()->setStyleSheet(buildBlueTableHeaderStyle());
     m_breakpointTable->horizontalHeader()->setStretchLastSection(true);
+    installMemoryUtilityCopyMenu(m_breakpointTable);
     breakpointLayout->addWidget(m_breakpointTable, 1);
 
     QWidget* bookmarkPanel = new QWidget(splitter);
@@ -562,6 +630,7 @@ void MemoryDock::initializeBreakpointBookmarkTab()
     m_bookmarkTable->verticalHeader()->setVisible(false);
     m_bookmarkTable->horizontalHeader()->setStyleSheet(buildBlueTableHeaderStyle());
     m_bookmarkTable->horizontalHeader()->setStretchLastSection(true);
+    installMemoryUtilityCopyMenu(m_bookmarkTable);
     bookmarkLayout->addWidget(m_bookmarkTable, 1);
 
     splitter->addWidget(breakpointPanel);

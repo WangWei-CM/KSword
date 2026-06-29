@@ -443,6 +443,113 @@ KswordARKDriverTryResolveServiceTable(
     }
 }
 
+static BOOLEAN
+KswordARKDriverIsDynGlobalRvaPresent(
+    _In_ ULONG RvaValue
+    )
+/*++
+
+Routine Description:
+
+    判断 DynData/PDB profile 提供的全局 RVA 是否可用。中文说明：Shadow
+    SSDT 不再猜表地址，只消费已完成 ntoskrnl 身份匹配的 PDB 全局 RVA。
+
+Arguments:
+
+    RvaValue - DynData 中保存的全局变量 RVA。
+
+Return Value:
+
+    TRUE 表示可继续做映像范围校验；FALSE 表示 profile 未提供该全局。
+
+--*/
+{
+    if (RvaValue == 0UL) {
+        return FALSE;
+    }
+
+    if (RvaValue == KSW_DYN_OFFSET_UNAVAILABLE || RvaValue == 0x0000FFFFUL) {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static VOID
+KswordARKDriverTryResolveShadowServiceTable(
+    _Outptr_result_maybenull_ PVOID* tableBaseOut,
+    _Out_ ULONG* serviceCountOut
+    )
+/*++
+
+Routine Description:
+
+    从 DynData/PDB profile 的 KeServiceDescriptorTableShadow RVA 解析 GUI
+    shadow service table。中文说明：KeServiceDescriptorTableShadow 是描述符数组，
+    第 0 项对应 ntoskrnl，第 1 项对应 win32k/GUI shadow table；只有 profile
+    身份匹配且 RVA 落在当前 ntoskrnl 映像内时才读取。
+
+Arguments:
+
+    tableBaseOut - 返回 shadow service table 基址。
+    serviceCountOut - 返回 shadow service table 项数。
+
+Return Value:
+
+    None. 失败时返回 NULL/0，调用方继续保留 stub/index 降级视图。
+
+--*/
+{
+    KSW_DYN_STATE dynState;
+    ULONG tableShadowRva = 0UL;
+    ULONG64 descriptorAddress = 0ULL;
+    const KSWORD_ARK_SERVICE_TABLE_DESCRIPTOR* descriptorArray = NULL;
+
+    if (tableBaseOut == NULL || serviceCountOut == NULL) {
+        return;
+    }
+
+    *tableBaseOut = NULL;
+    *serviceCountOut = 0UL;
+    RtlZeroMemory(&dynState, sizeof(dynState));
+    KswordARKDynDataSnapshot(&dynState);
+
+    if (!dynState.Initialized ||
+        !dynState.NtosActive ||
+        dynState.Ntoskrnl.imageBase == 0ULL ||
+        dynState.Ntoskrnl.sizeOfImage == 0UL) {
+        return;
+    }
+
+    tableShadowRva = dynState.KernelGlobals.KeServiceDescriptorTableShadow;
+    if (!KswordARKDriverIsDynGlobalRvaPresent(tableShadowRva)) {
+        return;
+    }
+
+    if (tableShadowRva >= dynState.Ntoskrnl.sizeOfImage ||
+        (sizeof(KSWORD_ARK_SERVICE_TABLE_DESCRIPTOR) * 2U) > (SIZE_T)(dynState.Ntoskrnl.sizeOfImage - tableShadowRva)) {
+        return;
+    }
+
+    descriptorAddress = dynState.Ntoskrnl.imageBase + (ULONG64)tableShadowRva;
+    descriptorArray = (const KSWORD_ARK_SERVICE_TABLE_DESCRIPTOR*)(ULONG_PTR)descriptorAddress;
+
+    __try {
+        const KSWORD_ARK_SERVICE_TABLE_DESCRIPTOR* shadowDescriptor = &descriptorArray[1];
+
+        if (shadowDescriptor->serviceTableBase != NULL &&
+            shadowDescriptor->numberOfServices > 0U &&
+            shadowDescriptor->numberOfServices <= MAXULONG) {
+            *tableBaseOut = shadowDescriptor->serviceTableBase;
+            *serviceCountOut = (ULONG)shadowDescriptor->numberOfServices;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        *tableBaseOut = NULL;
+        *serviceCountOut = 0UL;
+    }
+}
+
 static ULONG_PTR
 KswordARKDriverResolveServiceRoutineAddress(
     _In_opt_ PVOID serviceTableBase,
@@ -460,12 +567,32 @@ KswordARKDriverResolveServiceRoutineAddress(
 
 #if defined(_M_AMD64)
     {
-        const LONG entryValue = ((volatile LONG*)serviceTableBase)[serviceIndex];
-        const LONG_PTR signedOffset = ((LONG_PTR)entryValue) >> 4;
-        return (ULONG_PTR)((PUCHAR)serviceTableBase + signedOffset);
+        ULONG_PTR routineAddress = 0U;
+
+        __try {
+            const LONG entryValue = ((volatile LONG*)serviceTableBase)[serviceIndex];
+            const LONG_PTR signedOffset = ((LONG_PTR)entryValue) >> 4;
+            routineAddress = (ULONG_PTR)((PUCHAR)serviceTableBase + signedOffset);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            routineAddress = 0U;
+        }
+
+        return routineAddress;
     }
 #elif defined(_M_IX86)
-    return ((volatile ULONG_PTR*)serviceTableBase)[serviceIndex];
+    {
+        ULONG_PTR routineAddress = 0U;
+
+        __try {
+            routineAddress = ((volatile ULONG_PTR*)serviceTableBase)[serviceIndex];
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            routineAddress = 0U;
+        }
+
+        return routineAddress;
+    }
 #else
     UNREFERENCED_PARAMETER(serviceTableBase);
     UNREFERENCED_PARAMETER(serviceCount);
@@ -683,6 +810,8 @@ Return Value:
     const CHAR* moduleCandidates[] = { "win32k.sys", "win32u.dll" };
     ULONG candidateIndex = 0UL;
     NTSTATUS lastStatus = STATUS_NOT_FOUND;
+    PVOID shadowServiceTableBase = NULL;
+    ULONG shadowServiceCount = 0UL;
 
     if (outputBuffer == NULL || bytesWrittenOut == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -703,6 +832,9 @@ Return Value:
     responseHeader->serviceTableBase = 0ULL;
     responseHeader->serviceCountFromTable = 0UL;
     entryCapacity = (ULONG)((outputBufferLength - g_KswordArkSsdtResponseHeaderSize) / sizeof(KSWORD_ARK_SSDT_ENTRY));
+    KswordARKDriverTryResolveShadowServiceTable(&shadowServiceTableBase, &shadowServiceCount);
+    responseHeader->serviceTableBase = (ULONGLONG)(ULONG_PTR)shadowServiceTableBase;
+    responseHeader->serviceCountFromTable = shadowServiceCount;
 
     for (candidateIndex = 0UL; candidateIndex < RTL_NUMBER_OF(moduleCandidates); ++candidateIndex) {
         PVOID imageBase = NULL;
@@ -767,6 +899,7 @@ Return Value:
                 const UCHAR* stubBytes = NULL;
                 ULONG serviceIndex = 0UL;
                 BOOLEAN indexResolved = FALSE;
+                ULONG_PTR serviceRoutineAddress = 0U;
                 KSWORD_ARK_SSDT_ENTRY* entry = NULL;
 
                 if (ordinalIndex >= exportHeader->NumberOfFunctions ||
@@ -809,6 +942,15 @@ Return Value:
                 if (indexResolved) {
                     entry->serviceIndex = serviceIndex & 0x0FFFUL;
                     entry->flags |= KSWORD_ARK_SSDT_ENTRY_FLAG_INDEX_RESOLVED;
+
+                    serviceRoutineAddress = KswordARKDriverResolveServiceRoutineAddress(
+                        shadowServiceTableBase,
+                        shadowServiceCount,
+                        entry->serviceIndex);
+                    if (serviceRoutineAddress != 0U) {
+                        entry->serviceRoutineAddress = (ULONGLONG)serviceRoutineAddress;
+                        entry->flags |= KSWORD_ARK_SSDT_ENTRY_FLAG_TABLE_ADDRESS_VALID;
+                    }
                 }
                 KswordARKDriverCopyAnsiText(entry->serviceName, sizeof(entry->serviceName), exportNameText);
                 if (KswordARKDriverStartsWithAnsi(entry->serviceName, "__win32kstub_")) {

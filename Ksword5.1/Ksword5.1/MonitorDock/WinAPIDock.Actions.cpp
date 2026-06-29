@@ -1,4 +1,5 @@
 #include "WinAPIDock.h"
+#include "../theme.h"
 
 // ============================================================
 // WinAPIDock.Actions.cpp
@@ -781,6 +782,7 @@ void WinAPIDock::showEventContextMenu(const QPoint& position)
     const int column = indexValue.column();
 
     QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyCellAction = menu.addAction(QStringLiteral("复制单元格"));
     QAction* copyRowAction = menu.addAction(QStringLiteral("复制整行"));
 

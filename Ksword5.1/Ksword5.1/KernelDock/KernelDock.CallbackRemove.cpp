@@ -37,6 +37,37 @@ namespace
         return parseOk;
     }
 
+    // callbackRemoveIoMessageText：
+    // - 输入：ArkDriverClient::CallbackRemoveResult 中的原始 IO message；
+    // - 处理：把 DeviceIoControl/unsupported/capability 等底层短语转为回调移除页可读诊断；
+    // - 返回：详情框展示文本；保留用户需要的失败原因，不直接暴露 IOCTL 调试串。
+    QString callbackRemoveIoMessageText(const QString& rawMessageText)
+    {
+        const QString trimmedText = rawMessageText.trimmed();
+        if (trimmedText.isEmpty())
+        {
+            return QStringLiteral("驱动未返回额外说明。");
+        }
+
+        const QString lowerText = trimmedText.toLower();
+        if (lowerText.contains(QStringLiteral("deviceiocontrol")))
+        {
+            return QStringLiteral("驱动 IOCTL 调用失败或 R3/R0 协议版本不匹配。");
+        }
+        if (lowerText.contains(QStringLiteral("unsupported")) ||
+            lowerText.contains(QStringLiteral("not supported")) ||
+            lowerText.contains(QStringLiteral("status=0xc00000bb")))
+        {
+            return QStringLiteral("当前驱动暂不支持该回调移除入口。");
+        }
+        if (lowerText.contains(QStringLiteral("capability")) ||
+            lowerText.contains(QStringLiteral("dyndata")))
+        {
+            return QStringLiteral("动态偏移能力未满足，回调对象或模块归属暂不可解析。");
+        }
+        return trimmedText;
+    }
+
     // callbackRemoveNormalizePath：规范化路径，便于匹配驱动服务映射。
     QString callbackRemoveNormalizePath(const QString& pathText)
     {
@@ -272,7 +303,7 @@ void KernelDock::initializeCallbackRemovePanel()
             m_callbackRemoveDetailEditor->setText(QStringLiteral("ArkDriverClient 调用失败，Win32 错误码=%1。\n地址=0x%2\n详情=%3")
                 .arg(removeResult.io.win32Error)
                 .arg(QString::number(callbackAddress, 16).toUpper())
-                .arg(QString::fromStdString(removeResult.io.message)));
+                .arg(callbackRemoveIoMessageText(QString::fromStdString(removeResult.io.message))));
             QMessageBox::warning(this, QStringLiteral("回调移除"), m_callbackRemoveStatusLabel->text());
             return;
         }

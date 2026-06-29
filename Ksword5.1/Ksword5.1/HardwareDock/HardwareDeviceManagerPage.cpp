@@ -1349,6 +1349,11 @@ void HardwareDeviceManagerPage::showDeviceContextMenu(const QPoint& localPositio
     }
 
     QMenu menu(this);
+    // 右键菜单样式：
+    // - 输入：当前设备树上下文菜单；
+    // - 处理：显式使用主题不透明背景，避免继承透明父级导致浅色模式不可读；
+    // - 返回：无，只影响菜单展示，不改变设备操作逻辑。
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* propertiesAction = menu.addAction(QStringLiteral("查看属性"));
     QAction* driverDetailsAction = menu.addAction(QStringLiteral("驱动程序详细信息"));
     QAction* copyInstanceIdAction = menu.addAction(QStringLiteral("复制 Instance ID"));

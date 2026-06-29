@@ -598,7 +598,7 @@ void ProcessDetailWindow::initializeUi()
     m_moduleTab->setObjectName(QStringLiteral("ProcessDetailTab_Module"));
     m_tokenTab->setObjectName(QStringLiteral("ProcessDetailTab_Token"));
     m_tokenSwitchTab->setObjectName(QStringLiteral("ProcessDetailTab_TokenSwitch"));
-    m_kernelObjectTab->setObjectName(QStringLiteral("ProcessDetailTab_KernelObject"));
+    m_kernelObjectTab->setObjectName(QStringLiteral("ProcessDetailTab_ProcessDetailEvidence"));
     m_hotkeyTab->setObjectName(QStringLiteral("ProcessDetailTab_Hotkey"));
     m_keyboardTab->setObjectName(QStringLiteral("ProcessDetailTab_Keyboard"));
     m_pebTab->setObjectName(QStringLiteral("ProcessDetailTab_Peb"));
@@ -621,7 +621,7 @@ void ProcessDetailWindow::initializeUi()
     m_tabWidget->addTab(m_moduleTab, QIcon(":/Icon/process_list.svg"), "模块");
     m_tabWidget->addTab(m_tokenTab, QIcon(":/Icon/process_critical.svg"), "令牌");
     m_tabWidget->addTab(m_tokenSwitchTab, QIcon(":/Icon/process_start.svg"), "令牌开关");
-    m_tabWidget->addTab(m_kernelObjectTab, QIcon(":/Icon/process_critical.svg"), "内核对象");
+    m_tabWidget->addTab(m_kernelObjectTab, QIcon(":/Icon/process_critical.svg"), "Process Detail Evidence");
     m_tabWidget->addTab(m_hotkeyTab, QIcon(":/Icon/process_hotkey.svg"), "进程热键");
     m_tabWidget->addTab(m_keyboardTab, QIcon(":/Icon/process_hotkey.svg"), "键盘");
     m_tabWidget->addTab(m_pebTab, QIcon(":/Icon/process_tree.svg"), "PEB");
@@ -1031,12 +1031,15 @@ void ProcessDetailWindow::initializeThreadTab()
     QHBoxLayout* threadTopBarLayout = new QHBoxLayout();
     m_refreshThreadInspectButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), "刷新线程", threadGroup);
     m_refreshThreadInspectButton->setToolTip("异步刷新线程枚举、TEB、起始地址与寄存器摘要");
+    m_sampleThreadRuntimeButton = new QPushButton(QIcon(":/Icon/process_tree.svg"), "采样PDB字段", threadGroup);
+    m_sampleThreadRuntimeButton->setToolTip("只读采样当前选中线程的 PDB deep runtime 字段，不批量扫描全部线程");
     auto* openThreadStackButton = new QPushButton(QIcon(":/Icon/process_threads.svg"), "查看调用栈", threadGroup);
     openThreadStackButton->setToolTip("打开当前选中线程的 Phase-8 调用栈窗口");
     m_threadInspectStatusLabel = new QLabel("● 尚未刷新", threadGroup);
     m_threadInspectStatusLabel->setStyleSheet(
         QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
     threadTopBarLayout->addWidget(m_refreshThreadInspectButton);
+    threadTopBarLayout->addWidget(m_sampleThreadRuntimeButton);
     threadTopBarLayout->addWidget(openThreadStackButton);
     threadTopBarLayout->addWidget(m_threadInspectStatusLabel, 1);
     threadGroupLayout->addLayout(threadTopBarLayout);
@@ -1062,19 +1065,162 @@ void ProcessDetailWindow::initializeThreadTab()
     m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::TebAddress), 130);
     m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::Affinity), 108);
     m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::StackBoundary), 260);
+    m_threadInspectTable->setColumnWidth(toThreadColumnIndex(ThreadRowColumn::RuntimeDetail), 360);
+    m_threadInspectTable->setContextMenuPolicy(Qt::CustomContextMenu);
     threadGroupLayout->addWidget(m_threadInspectTable, 1);
+
+    // 当前线程 deep PDB 采样详情：
+    // - 默认只显示选中行的可读 runtime detail；
+    // - 点击“采样PDB字段”后后台调用 thread runtime field sampler；
+    // - 使用 CodeEditorWidget，方便复制/搜索长字段列表。
+    m_threadRuntimeSampleOutput = new CodeEditorWidget(threadGroup);
+    m_threadRuntimeSampleOutput->setReadOnly(true);
+    m_threadRuntimeSampleOutput->setMaximumHeight(220);
+    m_threadRuntimeSampleOutput->setText(QStringLiteral(
+        "选择线程行后可查看 R0 runtime detail；点击“采样PDB字段”可按需读取 thread_detail deep JSON 小字段。"));
+    threadGroupLayout->addWidget(m_threadRuntimeSampleOutput, 0);
 
     m_threadLayout->addWidget(threadGroup, 1);
 
     const QString buttonStyle = buildBlueButtonStyle();
     m_refreshThreadInspectButton->setStyleSheet(buttonStyle);
+    m_sampleThreadRuntimeButton->setStyleSheet(buttonStyle);
     openThreadStackButton->setStyleSheet(buttonStyle);
+    connect(m_sampleThreadRuntimeButton, &QPushButton::clicked, this, [this]() {
+        requestAsyncSelectedThreadRuntimeSample();
+        });
     connect(openThreadStackButton, &QPushButton::clicked, this, [this]() {
         openSelectedThreadStackWindow();
         });
+    connect(m_threadInspectTable, &QTableWidget::currentCellChanged, this, [this](int currentRow, int, int, int) {
+        // 选中行详情：
+        // - 输入：当前表格行；
+        // - 处理：从缓存中取 ThreadInspectItem，展示固定 detail IOCTL 可读摘要；
+        // - 返回：无，不执行新的驱动调用。
+        if (m_threadRuntimeSampleOutput == nullptr)
+        {
+            return;
+        }
+        if (m_threadInspectTable == nullptr || currentRow < 0)
+        {
+            m_threadRuntimeSampleOutput->setText(QStringLiteral("请选择一条线程记录查看 runtime detail。"));
+            return;
+        }
+        const QTableWidgetItem* threadIdItem =
+            m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId));
+        const std::size_t cacheIndex = threadIdItem != nullptr
+            ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
+            : static_cast<std::size_t>(m_threadInspectRows.size());
+        if (cacheIndex >= m_threadInspectRows.size())
+        {
+            m_threadRuntimeSampleOutput->setText(QStringLiteral("当前线程行缺少缓存详情，请刷新线程页。"));
+            return;
+        }
+
+        const ThreadInspectItem& rowItem = m_threadInspectRows[cacheIndex];
+        const auto threadDetailStatusName = [](const std::uint32_t statusValue) -> QString
+        {
+            switch (statusValue)
+            {
+            case KSWORD_ARK_DETAIL_STATUS_OK:
+                return QStringLiteral("OK");
+            case KSWORD_ARK_DETAIL_STATUS_PARTIAL:
+                return QStringLiteral("Partial");
+            case KSWORD_ARK_DETAIL_STATUS_UNSUPPORTED:
+                return QStringLiteral("Unsupported");
+            case KSWORD_ARK_DETAIL_STATUS_LOOKUP_FAILED:
+                return QStringLiteral("LookupFailed");
+            case KSWORD_ARK_DETAIL_STATUS_CAPABILITY_MISSING:
+                return QStringLiteral("CapabilityMissing");
+            case KSWORD_ARK_DETAIL_STATUS_READ_FAILED:
+                return QStringLiteral("ReadFailed");
+            default:
+                return QStringLiteral("Status(%1)").arg(statusValue);
+            }
+        };
+        const auto threadStatusHexText = [](const long statusValue) -> QString
+        {
+            return QStringLiteral("0x%1")
+                .arg(static_cast<quint32>(statusValue), 8, 16, QChar('0'))
+                .toUpper();
+        };
+        QStringList detailLines;
+        detailLines << QStringLiteral("[Thread Runtime Detail]");
+        detailLines << QStringLiteral("TID/PID: %1/%2").arg(rowItem.threadId).arg(rowItem.processId);
+        detailLines << QStringLiteral("Start/Win32Start: %1 / %2")
+            .arg(uint64ToHex(rowItem.startAddress))
+            .arg(uint64ToHex(rowItem.win32StartAddress));
+        detailLines << QStringLiteral("TEB: %1").arg(uint64ToHex(rowItem.tebAddress));
+        detailLines << QStringLiteral("R0 stack: Kernel=%1 Limit=%2 Base=%3 Initial=%4")
+            .arg(uint64ToHex(rowItem.r0KernelStack))
+            .arg(uint64ToHex(rowItem.r0StackLimit))
+            .arg(uint64ToHex(rowItem.r0StackBase))
+            .arg(uint64ToHex(rowItem.r0InitialStack));
+        detailLines << QStringLiteral("I/O ops: R/W/O=%1/%2/%3")
+            .arg(static_cast<qulonglong>(rowItem.r0ReadOperationCount))
+            .arg(static_cast<qulonglong>(rowItem.r0WriteOperationCount))
+            .arg(static_cast<qulonglong>(rowItem.r0OtherOperationCount));
+        detailLines << QStringLiteral("I/O bytes: R/W/O=%1/%2/%3")
+            .arg(static_cast<qulonglong>(rowItem.r0ReadTransferCount))
+            .arg(static_cast<qulonglong>(rowItem.r0WriteTransferCount))
+            .arg(static_cast<qulonglong>(rowItem.r0OtherTransferCount));
+        detailLines << QStringLiteral("DetailStatus: %1").arg(threadDetailStatusName(rowItem.r0DetailStatus));
+        detailLines << QStringLiteral("MissingCapability: %1")
+            .arg(uint64ToHex(rowItem.r0MissingCapabilityMask));
+        detailLines << QStringLiteral("LastStatus: %1").arg(threadStatusHexText(rowItem.r0DetailLastStatus));
+        detailLines << QStringLiteral("说明: %1").arg(
+            rowItem.r0RuntimeDetailText.trimmed().isEmpty()
+            ? QStringLiteral("线程 runtime detail 暂不可用。")
+            : rowItem.r0RuntimeDetailText);
+        detailLines << QStringLiteral("\n点击“采样PDB字段”可对当前 TID 按需读取 thread_detail deep offset 小字段。");
+        m_threadRuntimeSampleOutput->setText(detailLines.join(QChar('\n')));
+        });
     connect(m_threadInspectTable, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
         openSelectedThreadStackWindow();
-        });
+    });
+    connect(m_threadInspectTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
+    {
+        // 线程表右键菜单：
+        // - 输入：用户在表格上的点击位置；
+        // - 处理：选中点击行，复制当前行的可见文本；
+        // - 返回：无，只写剪贴板，不执行线程操作。
+        if (m_threadInspectTable == nullptr)
+        {
+            return;
+        }
+
+        const QModelIndex clickedIndex = m_threadInspectTable->indexAt(localPosition);
+        if (clickedIndex.isValid())
+        {
+            m_threadInspectTable->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+        }
+
+        QMenu menu(m_threadInspectTable);
+        menu.setStyleSheet(buildProcessDetailMenuStyle());
+        QAction* copyRowAction = menu.addAction(
+            QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+            QStringLiteral("复制当前行"));
+        copyRowAction->setEnabled(m_threadInspectTable->currentRow() >= 0);
+        if (menu.exec(m_threadInspectTable->viewport()->mapToGlobal(localPosition)) != copyRowAction)
+        {
+            return;
+        }
+
+        const int rowIndex = m_threadInspectTable->currentRow();
+        if (rowIndex < 0 || QApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        QStringList rowFields;
+        rowFields.reserve(m_threadInspectTable->columnCount());
+        for (int columnIndex = 0; columnIndex < m_threadInspectTable->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = m_threadInspectTable->item(rowIndex, columnIndex);
+            rowFields.push_back(item != nullptr ? item->text() : QString());
+        }
+        QApplication::clipboard()->setText(rowFields.join('\t'));
+    });
 }
 
 void ProcessDetailWindow::initializeActionTab()
@@ -1459,12 +1605,12 @@ void ProcessDetailWindow::initializeTokenTab()
 
 void ProcessDetailWindow::initializeKernelObjectTab()
 {
-    // 内核对象页初始化：
+    // Process Detail Evidence 页初始化：
     // - 展示 Phase-2 进程扩展信息；
     // - 不执行句柄表/Section 枚举，避免 DynData 缺失时误触后续高风险路径。
     kLogEvent initKernelObjectTabEvent;
     info << initKernelObjectTabEvent
-        << "[ProcessDetailWindow] initializeKernelObjectTab: 构建内核对象页面。"
+        << "[ProcessDetailWindow] initializeKernelObjectTab: 构建 Process Detail Evidence 页面。"
         << eol;
 
     m_kernelObjectLayout = new QVBoxLayout(m_kernelObjectTab);

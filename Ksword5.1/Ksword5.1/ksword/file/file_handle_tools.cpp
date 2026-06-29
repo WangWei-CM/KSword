@@ -48,6 +48,52 @@ namespace ks::file
 #endif
         constexpr USHORT kSymbolicLinkRelativeFlag = 1U;
 
+        // ReadableArkIoMessage 作用：
+        // - 输入：ArkDriverClient 返回的 UTF-8 诊断文本和当前能力名称；
+        // - 处理：把 DeviceIoControl、unsupported、DynData、buffer 等底层英文日志转换为中文说明；
+        // - 返回：适合 FileDock/文件占用诊断展示的文本，避免直接把原始 IOCTL 日志塞进 UI。
+        std::wstring ReadableArkIoMessage(
+            const std::string& rawMessage,
+            const std::wstring& subjectText)
+        {
+            if (rawMessage.empty())
+            {
+                return subjectText + L"无额外驱动诊断";
+            }
+
+            std::string lowerMessage = rawMessage;
+            for (char& ch : lowerMessage)
+            {
+                if (ch >= 'A' && ch <= 'Z')
+                {
+                    ch = static_cast<char>(ch - 'A' + 'a');
+                }
+            }
+
+            if (lowerMessage.find("deviceiocontrol") != std::string::npos)
+            {
+                return subjectText + L"驱动调用失败或 R3/R0 协议版本不匹配";
+            }
+            if (lowerMessage.find("unsupported") != std::string::npos ||
+                lowerMessage.find("not supported") != std::string::npos)
+            {
+                return subjectText + L"当前驱动暂不支持该只读枚举入口";
+            }
+            if (lowerMessage.find("dyndata") != std::string::npos ||
+                lowerMessage.find("capability") != std::string::npos)
+            {
+                return subjectText + L"DynData capability 未满足，请查看内核动态偏移状态";
+            }
+            if (lowerMessage.find("too small") != std::string::npos ||
+                lowerMessage.find("entrysize") != std::string::npos ||
+                lowerMessage.find("invalid") != std::string::npos)
+            {
+                return subjectText + L"驱动返回结构与当前 R3 协议不匹配或缓冲区不足";
+            }
+
+            return subjectText + ks::str::Utf8ToUtf16(rawMessage);
+        }
+
         // Native mirror for SystemExtendedHandleInformation rows. Only fields used by
         // FileDock and HandleDock are modeled, and every access is bounded by buffer size.
         struct SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX_NATIVE
@@ -1538,7 +1584,9 @@ namespace ks::file
                 KSWORD_ARK_ENUM_HANDLE_FLAG_INCLUDE_ALL);
             if (!kernelResult.io.ok)
             {
-                queryDiagnosticText = L"R0 HandleTable 枚举失败: " + ks::str::Utf8ToUtf16(kernelResult.io.message);
+                queryDiagnosticText = ReadableArkIoMessage(
+                    kernelResult.io.message,
+                    L"R0 HandleTable 枚举失败: ");
             }
             else
             {
@@ -1668,7 +1716,9 @@ namespace ks::file
             const ksword::ark::ProcessEnumResult processResult = driverClient.enumerateProcesses(KSWORD_ARK_ENUM_PROCESS_FLAG_SCAN_CID_TABLE);
             if (!processResult.io.ok || processResult.entries.empty())
             {
-                result.diagnosticText = L"KernelHandleTable不可用:" + ks::str::Utf8ToUtf16(processResult.io.message);
+                result.diagnosticText = ReadableArkIoMessage(
+                    processResult.io.message,
+                    L"KernelHandleTable不可用: ");
                 return result;
             }
 

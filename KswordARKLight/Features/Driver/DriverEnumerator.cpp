@@ -4,6 +4,8 @@
 #include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
 
 #include <Psapi.h>
+#include <Softpub.h>
+#include <wintrust.h>
 #include <winternl.h>
 
 #include <algorithm>
@@ -12,6 +14,7 @@
 #include <cwchar>
 #include <cstring>
 #include <memory>
+#include <unordered_map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -34,6 +37,7 @@ constexpr LONG kStatusBufferOverflow = static_cast<LONG>(0x80000005UL);
 constexpr LONG kStatusNoMoreEntries = static_cast<LONG>(0x8000001AL);
 constexpr LONG kStatusProcedureNotFound = static_cast<LONG>(0xC000007AUL);
 constexpr std::size_t kMaxR0DriverObjectQueries = 64U;
+constexpr std::size_t kMaxIntegrityRows = 2048U;
 
 using NtOpenDirectoryObjectFn = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
 using NtQueryDirectoryObjectFn = NTSTATUS (NTAPI*)(HANDLE, PVOID, ULONG, BOOLEAN, BOOLEAN, PULONG, PULONG);
@@ -200,10 +204,130 @@ std::wstring CompactHex(const std::uint64_t value) {
     return stream.str();
 }
 
+// ParseCompactHex converts a display address produced by CompactHex or
+// FormatHexAddress back into an integer key. Input is UI text; processing
+// accepts optional 0x prefix; output is zero when the text is not parseable.
+std::uint64_t ParseCompactHex(const std::wstring& text) {
+    const wchar_t* begin = text.c_str();
+    while (*begin == L' ' || *begin == L'\t') {
+        ++begin;
+    }
+    if (begin[0] == L'0' && (begin[1] == L'x' || begin[1] == L'X')) {
+        begin += 2;
+    }
+    wchar_t* end = nullptr;
+    const unsigned long long value = ::wcstoull(begin, &end, 16);
+    return end != begin ? static_cast<std::uint64_t>(value) : 0;
+}
+
 // NtStatusText formats NTSTATUS-style values returned by R0. Input is a signed
 // NTSTATUS; output keeps the exact 32-bit diagnostic representation.
 std::wstring NtStatusText(const long status) {
     return CompactHex(static_cast<std::uint32_t>(status));
+}
+
+// ResolveKernelImagePathForTrust maps common kernel image paths into local
+// Win32 paths for signature checks. Input may be \SystemRoot\... or \??\...;
+// processing never opens kernel objects or rewrites the original path; output
+// is empty when the path cannot be safely resolved to a local file.
+std::wstring ResolveKernelImagePathForTrust(const std::wstring& path) {
+    if (path.empty()) {
+        return {};
+    }
+
+    constexpr wchar_t kSystemRootPrefix[] = L"\\SystemRoot";
+    if (_wcsnicmp(path.c_str(), kSystemRootPrefix, _countof(kSystemRootPrefix) - 1) == 0) {
+        wchar_t windowsDirectory[MAX_PATH]{};
+        const UINT length = ::GetWindowsDirectoryW(windowsDirectory, static_cast<UINT>(_countof(windowsDirectory)));
+        if (length == 0 || length >= _countof(windowsDirectory)) {
+            return {};
+        }
+        return std::wstring(windowsDirectory) + path.substr(_countof(kSystemRootPrefix) - 1);
+    }
+
+    constexpr wchar_t kDosDevicePrefix[] = L"\\??\\";
+    if (_wcsnicmp(path.c_str(), kDosDevicePrefix, _countof(kDosDevicePrefix) - 1) == 0) {
+        return path.substr(_countof(kDosDevicePrefix) - 1);
+    }
+
+    if (path.size() >= 3 && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/')) {
+        return path;
+    }
+
+    return {};
+}
+
+// VerifyDriverImageSignature performs a quiet Authenticode check for a local
+// driver image. Input is the display path from module enumeration; processing
+// uses WinVerifyTrust with UI disabled and a path-resolution guard; output is a
+// compact trust label for the overview grid.
+std::wstring VerifyDriverImageSignature(const std::wstring& displayPath) {
+    const std::wstring localPath = ResolveKernelImagePathForTrust(displayPath);
+    if (localPath.empty()) {
+        return L"未解析本地路径";
+    }
+    if (::GetFileAttributesW(localPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return L"文件不可访问";
+    }
+
+    WINTRUST_FILE_INFO fileInfo{};
+    fileInfo.cbStruct = sizeof(fileInfo);
+    fileInfo.pcwszFilePath = localPath.c_str();
+
+    WINTRUST_DATA trustData{};
+    trustData.cbStruct = sizeof(trustData);
+    trustData.dwUIChoice = WTD_UI_NONE;
+    trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trustData.dwUnionChoice = WTD_CHOICE_FILE;
+    trustData.pFile = &fileInfo;
+    trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+    trustData.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+
+    GUID policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    const LONG status = ::WinVerifyTrust(nullptr, &policy, &trustData);
+    trustData.dwStateAction = WTD_STATEACTION_CLOSE;
+    (void)::WinVerifyTrust(nullptr, &policy, &trustData);
+
+    if (status == ERROR_SUCCESS) {
+        return L"签名有效";
+    }
+    if (status == TRUST_E_NOSIGNATURE) {
+        return L"无嵌入签名";
+    }
+    if (status == CERT_E_EXPIRED) {
+        return L"证书过期";
+    }
+    if (status == TRUST_E_BAD_DIGEST) {
+        return L"摘要不匹配";
+    }
+    return L"签名失败 " + NtStatusText(status);
+}
+
+// ApplyOverviewAnomalies copies R0 integrity evidence labels into the module
+// overview rows. Inputs are overview rows and a module-base keyed anomaly map;
+// processing only updates display text; no value is returned.
+void ApplyOverviewAnomalies(
+    std::vector<DriverOverviewRow>& rows,
+    const std::unordered_map<std::uint64_t, std::wstring>& anomalies) {
+    for (DriverOverviewRow& row : rows) {
+        const std::uint64_t base = ParseCompactHex(row.baseAddressText);
+        const auto found = anomalies.find(base);
+        if (found != anomalies.end() && !found->second.empty()) {
+            row.anomalyText = found->second;
+        } else {
+            row.anomalyText = L"未发现 R0 完整性异常";
+        }
+    }
+}
+
+// ApplyOverviewIntegrityStatus writes one aggregate integrity status to every
+// module row when R0 evidence cannot prove a per-module clean/risk state. Inputs
+// are overview rows and status text; processing updates display text only; no
+// value is returned.
+void ApplyOverviewIntegrityStatus(std::vector<DriverOverviewRow>& rows, const std::wstring& statusText) {
+    for (DriverOverviewRow& row : rows) {
+        row.anomalyText = statusText;
+    }
 }
 
 // DriverObjectQueryStatusText maps shared protocol status values to concise UI
@@ -574,6 +698,212 @@ void AppendDriverObjectDeviceRows(
     }
 }
 
+// DriverIntegrityStatusText maps aggregate R0 integrity status codes into
+// compact labels. Input is KSWORD_ARK_DRIVER_INTEGRITY_STATUS_*; output is
+// display-only text for the object table and diagnostics.
+const wchar_t* DriverIntegrityStatusText(const std::uint32_t status) {
+    switch (status) {
+    case KSWORD_ARK_DRIVER_INTEGRITY_STATUS_OK: return L"OK";
+    case KSWORD_ARK_DRIVER_INTEGRITY_STATUS_PARTIAL: return L"Partial";
+    case KSWORD_ARK_DRIVER_INTEGRITY_STATUS_NOT_FOUND: return L"Not found";
+    case KSWORD_ARK_DRIVER_INTEGRITY_STATUS_BUFFER_TOO_SMALL: return L"Buffer too small";
+    case KSWORD_ARK_DRIVER_INTEGRITY_STATUS_QUERY_FAILED: return L"Query failed";
+    case KSWORD_ARK_DRIVER_INTEGRITY_STATUS_UNAVAILABLE:
+    default:
+        return L"Unavailable";
+    }
+}
+
+// DriverIntegrityClassText gives a stable evidence bucket name. Input is one
+// R0 evidenceClass value; output names DriverObject, DeviceObject, FastIo,
+// optional globals such as MmUnloadedDrivers/PiDDB, or a numbered fallback.
+std::wstring DriverIntegrityClassText(const std::uint32_t evidenceClass) {
+    switch (evidenceClass) {
+    case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MODULE_VIEW: return L"ModuleView";
+    case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_PS_LOADED_MODULES: return L"PsLoadedModules";
+    case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_OBJECT: return L"DriverObject";
+    case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_SECTION: return L"DriverSection";
+    case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MAJOR_FUNCTION: return L"MajorFunction";
+    case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_FAST_IO: return L"FastIo";
+    case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DEVICE_CHAIN: return L"DeviceObject";
+    case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_SERVICE: return L"Service";
+    case KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL: return L"MmUnloaded/PiDDB";
+    default:
+        return L"IntegrityClass" + std::to_wstring(evidenceClass);
+    }
+}
+
+// AppendRiskName appends a risk label if its bit is set. Inputs are a vector,
+// the raw risk mask, the bit and label; processing only mutates the vector; no
+// value is returned.
+void AppendRiskName(std::vector<std::wstring>& names, const std::uint32_t flags, const std::uint32_t bit, const wchar_t* label) {
+    if ((flags & bit) != 0) {
+        names.push_back(label);
+    }
+}
+
+// JoinText joins small display labels with a separator. Input is a vector of
+// labels and a fallback; output is a compact string for status/capability cells.
+std::wstring JoinText(const std::vector<std::wstring>& values, const wchar_t* fallback) {
+    if (values.empty()) {
+        return fallback;
+    }
+    std::wstring text;
+    for (const std::wstring& value : values) {
+        if (!text.empty()) {
+            text += L"|";
+        }
+        text += value;
+    }
+    return text;
+}
+
+// DriverIntegrityRiskText expands R0 risk bits into UI labels. Input is the
+// raw KSWORD_ARK_DRIVER_INTEGRITY_RISK_* mask; output is "None" or a pipe-
+// separated list that preserves unknown bits as hexadecimal evidence.
+std::wstring DriverIntegrityRiskText(const std::uint32_t flags) {
+    std::vector<std::wstring> names;
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_UNAVAILABLE, L"Unavailable");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_QUERY_FAILED, L"QueryFailed");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_MODULE_UNRESOLVED, L"ModuleUnresolved");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_OWNER_MISMATCH, L"OwnerMismatch");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_OUTSIDE_DRIVER_IMAGE, L"OutsideImage");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_SECTION_MISMATCH, L"SectionMismatch");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_SERVICE_MISSING, L"ServiceMissing");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_EMPTY_UNLOAD, L"EmptyUnload");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_DEVICE_LOOP, L"DeviceLoop");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_ATTACHED_LOOP, L"AttachedLoop");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_CROSS_DRIVER_ATTACH, L"CrossDriverAttach");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_NULL_POINTER, L"NullPointer");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_DYNDATA_UNAVAILABLE, L"DynDataUnavailable");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_RISK_TRUNCATED, L"Truncated");
+    if (flags != 0) {
+        names.push_back(L"raw=" + CompactHex(flags));
+    }
+    return JoinText(names, L"None");
+}
+
+// DriverIntegritySourceText expands the R0 source mask into compact labels.
+// Input is KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_* bits; output is "None" or a
+// pipe-separated source list for the capability hint.
+std::wstring DriverIntegritySourceText(const std::uint32_t flags) {
+    std::vector<std::wstring> names;
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE, L"SystemModule");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_AUXKLIB, L"AuxKlib");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_PS_LOADED_MODULES, L"PsLoadedModules");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT, L"DriverObject");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_SECTION, L"DriverSection");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SERVICE_REGISTRY, L"ServiceRegistry");
+    AppendRiskName(names, flags, KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DYNDATA, L"DynData");
+    return JoinText(names, L"None");
+}
+
+// AppendOverviewAnomaly records the first non-empty anomaly string for a module
+// base. Inputs are the anomaly map, base address and text; processing preserves
+// existing higher-context messages; no value is returned.
+void AppendOverviewAnomaly(std::unordered_map<std::uint64_t, std::wstring>& anomalies, const std::uint64_t moduleBase, const std::wstring& text) {
+    if (moduleBase == 0 || text.empty()) {
+        return;
+    }
+    auto& slot = anomalies[moduleBase];
+    if (slot.empty()) {
+        slot = text;
+    } else if (slot.find(text) == std::wstring::npos) {
+        slot += L"; ";
+        slot += text;
+    }
+}
+
+// AppendDriverIntegrityEvidenceRows converts the read-only DriverIntegrity
+// response into object-grid rows. Inputs are the parsed ArkDriverClient result
+// and anomaly map; processing appends local UI rows only; no R0 mutation is
+// performed or exposed.
+void AppendDriverIntegrityEvidenceRows(
+    const ksword::ark::DriverIntegrityResult& query,
+    std::vector<DriverObjectRow>& rows,
+    std::unordered_map<std::uint64_t, std::wstring>& anomalies) {
+    DriverObjectRow summary;
+    summary.directoryPathText = L"R0 DriverIntegrity";
+    summary.objectNameText = L"Summary";
+    summary.objectTypeText = L"DriverIntegrity";
+    summary.fullPathText = L"ArkDriverClient::queryDriverIntegrity";
+    summary.targetPathText = Utf8ToWide(query.io.message);
+    summary.referenceCountText = std::to_wstring(query.returnedCount);
+    summary.handleCountText = std::to_wstring(query.totalCount);
+    summary.statusText = std::wstring(DriverIntegrityStatusText(query.queryStatus)) +
+        L"; io=" + (query.io.ok ? std::wstring(L"OK") : std::wstring(L"FAIL")) +
+        L"; nt=" + NtStatusText(query.lastStatus) +
+        L"; statusFlags=" + CompactHex(query.statusFlags);
+    summary.capabilityHint = L"Source=" + DriverIntegritySourceText(query.sourceMask) +
+        L"; Modules=" + std::to_wstring(query.moduleCount) +
+        L"; FieldFlags=" + CompactHex(query.fieldFlags) +
+        L"; Read-only DriverObject/DeviceObject/MajorFunction/FastIo/MmUnloadedDrivers/PiDDB evidence";
+    summary.querySucceeded = query.io.ok;
+    rows.push_back(std::move(summary));
+
+    for (const ksword::ark::DriverIntegrityEvidenceEntry& entry : query.entries) {
+        DriverObjectRow row;
+        const std::wstring classText = DriverIntegrityClassText(entry.evidenceClass);
+        const std::wstring riskText = DriverIntegrityRiskText(entry.riskFlags);
+        row.directoryPathText = L"R0 DriverIntegrity";
+        row.objectNameText = entry.ownerModule.empty() ? classText : entry.ownerModule;
+        row.objectTypeText = classText;
+        row.fullPathText = entry.detail;
+        row.targetPathText = entry.ownerModule;
+        row.referenceCountText = CompactHex(entry.objectAddress);
+        row.handleCountText = CompactHex(entry.targetAddress);
+        row.statusText = L"risk=" + riskText +
+            L"; entryStatus=" + std::to_wstring(entry.entryStatus) +
+            L"; statusFlags=" + CompactHex(entry.statusFlags) +
+            L"; score=" + std::to_wstring(entry.riskScore) +
+            L"; confidence=" + std::to_wstring(entry.confidence);
+        row.capabilityHint = L"source=" + DriverIntegritySourceText(entry.sourceMask) +
+            L"; ownerBase=" + CompactHex(entry.ownerModuleBase) +
+            L"; ownerSize=" + CompactHex(entry.ownerModuleSize) +
+            L"; fieldMask=" + CompactHex(entry.fieldMask) +
+            L"; driverObject=" + CompactHex(entry.driverObjectAddress) +
+            L"; kldr=" + CompactHex(entry.kldrEntryAddress);
+        row.querySucceeded = query.io.ok;
+        rows.push_back(std::move(row));
+
+        if (entry.riskFlags != KSWORD_ARK_DRIVER_INTEGRITY_RISK_NONE) {
+            AppendOverviewAnomaly(anomalies, entry.ownerModuleBase, classText + L":" + riskText);
+        }
+    }
+}
+
+// EnrichDriverIntegrityWithR0 queries read-only driver integrity evidence once
+// and appends it to the object table while also returning module-base anomaly
+// labels for the overview grid. Inputs are mutable rows/warnings/anomalies;
+// processing uses ArkDriverClient only; no value is returned.
+bool EnrichDriverIntegrityWithR0(
+    std::vector<DriverObjectRow>& rows,
+    std::vector<std::wstring>& warnings,
+    std::unordered_map<std::uint64_t, std::wstring>& anomalies) {
+    const ksword::ark::DriverClient client;
+    const ksword::ark::DriverIntegrityResult query = client.queryDriverIntegrity(
+        std::wstring(),
+        0,
+        KSWORD_ARK_DRIVER_INTEGRITY_FLAG_DRIVER_OBJECT |
+            KSWORD_ARK_DRIVER_INTEGRITY_FLAG_SERVICE |
+            KSWORD_ARK_DRIVER_INTEGRITY_FLAG_OPTIONAL_GLOBALS,
+        static_cast<unsigned long>(kMaxIntegrityRows),
+        0);
+
+    if (!query.io.ok) {
+        warnings.push_back(std::wstring(L"R0 DriverIntegrity 查询跳过：") + Utf8ToWide(query.io.message));
+        return false;
+    }
+
+    AppendDriverIntegrityEvidenceRows(query, rows, anomalies);
+    warnings.push_back(std::wstring(L"R0 DriverIntegrity 只读证据完成：") +
+        DriverIntegrityStatusText(query.queryStatus) +
+        L"，Rows=" + std::to_wstring(query.entries.size()) +
+        L"/" + std::to_wstring(query.totalCount) + L"。");
+    return query.queryStatus == KSWORD_ARK_DRIVER_INTEGRITY_STATUS_OK ||
+        query.queryStatus == KSWORD_ARK_DRIVER_INTEGRITY_STATUS_PARTIAL;
+}
+
 // EnrichDriverObjectsWithR0 appends real KswordARK DriverObject evidence to the
 // object table. Inputs are existing rows and warnings; processing uses
 // ArkDriverClient only, never direct transport calls; no value is returned.
@@ -675,10 +1005,15 @@ bool QueryModuleInformation(std::vector<DriverOverviewRow>& rows, std::wstring& 
         DriverOverviewRow row;
         row.driverName = AnsiPathFromModule(module);
         row.driverName = LeafName(row.driverName);
-        row.baseAddressText = FormatHexAddress(reinterpret_cast<std::uint64_t>(module.ImageBase));
+        const std::uint64_t baseAddress = reinterpret_cast<std::uint64_t>(module.ImageBase);
+        const std::uint64_t endAddress = baseAddress + static_cast<std::uint64_t>(module.ImageSize);
+        row.baseAddressText = FormatHexAddress(baseAddress);
+        row.memoryRangeText = FormatHexAddress(baseAddress) + L"-" + FormatHexAddress(endAddress);
         row.sizeText = FormatByteSize(module.ImageSize);
         row.pathText = AnsiPathFromModule(module);
+        row.signatureText = VerifyDriverImageSignature(row.pathText);
         row.statusText = row.pathText.empty() ? L"已加载，路径不可用" : L"已加载";
+        row.anomalyText = L"等待 R0 完整性证据";
         row.capabilityHint = L"可进一步按基址或路径追踪驱动模块";
         if (row.driverName.empty()) {
             row.driverName = L"<unknown>";
@@ -723,10 +1058,14 @@ bool QueryPsapiModules(std::vector<DriverOverviewRow>& rows, std::wstring& diagn
 
         DriverOverviewRow row;
         row.driverName = nameBuffer;
-        row.baseAddressText = FormatHexAddress(reinterpret_cast<std::uint64_t>(base));
+        const std::uint64_t baseAddress = reinterpret_cast<std::uint64_t>(base);
+        row.baseAddressText = FormatHexAddress(baseAddress);
+        row.memoryRangeText = FormatHexAddress(baseAddress) + L"-未知";
         row.sizeText = L"未知";
         row.pathText = pathBuffer;
+        row.signatureText = VerifyDriverImageSignature(row.pathText);
         row.statusText = L"已加载";
+        row.anomalyText = L"Psapi 回退路径，等待 R0 完整性证据";
         row.capabilityHint = L"可进一步按基址或路径追踪驱动模块";
         rows.push_back(std::move(row));
     }
@@ -812,6 +1151,17 @@ DriverEnumerationResult EnumerateDriverSnapshot() {
     if (!library.openDirectoryObject || !library.queryDirectoryObject) {
         result.success = !result.overviewRows.empty();
         result.diagnosticText = moduleDiagnostic + L" 对象目录导出不可用。";
+        std::vector<std::wstring> warnings;
+        std::unordered_map<std::uint64_t, std::wstring> integrityAnomalies;
+        if (EnrichDriverIntegrityWithR0(result.objectRows, warnings, integrityAnomalies)) {
+            ApplyOverviewAnomalies(result.overviewRows, integrityAnomalies);
+        } else {
+            ApplyOverviewIntegrityStatus(result.overviewRows, L"R0 DriverIntegrity 不可用或未完成");
+        }
+        for (const std::wstring& warning : warnings) {
+            result.diagnosticText += L" ";
+            result.diagnosticText += warning;
+        }
         return result;
     }
 
@@ -827,6 +1177,12 @@ DriverEnumerationResult EnumerateDriverSnapshot() {
         QueryObjectDirectory(library, root, result.objectRows, warnings);
     }
     EnrichDriverObjectsWithR0(result.objectRows, warnings);
+    std::unordered_map<std::uint64_t, std::wstring> integrityAnomalies;
+    if (EnrichDriverIntegrityWithR0(result.objectRows, warnings, integrityAnomalies)) {
+        ApplyOverviewAnomalies(result.overviewRows, integrityAnomalies);
+    } else {
+        ApplyOverviewIntegrityStatus(result.overviewRows, L"R0 DriverIntegrity 不可用或未完成");
+    }
 
     if (!warnings.empty()) {
         result.diagnosticText = moduleDiagnostic;

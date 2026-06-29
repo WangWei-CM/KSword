@@ -2,15 +2,15 @@
 
 #include "HardwareEnumerator.h"
 #include "HardwareModel.h"
+#include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
 #include "../../Ui/Controls.h"
 #include "../../Ui/Theme.h"
 
 #include <commctrl.h>
-#include <setupapi.h>
 #include <windowsx.h>
 
 #include <cstring>
-#include <memory>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,10 +26,6 @@ constexpr int kGap = 6;
 constexpr int kTreeWidth = 420;
 constexpr UINT kMenuRefresh = 62001;
 constexpr UINT kMenuCopyInstanceId = 62002;
-constexpr UINT kMenuEnableDevice = 62003;
-constexpr UINT kMenuDisableDevice = 62004;
-constexpr UINT kMenuUninstallDevice = 62005;
-constexpr UINT kMenuScanHardware = 62006;
 
 // Width returns a non-negative rectangle width. Input is a RECT; output is the
 // usable pixel width used by layout code.
@@ -53,26 +49,6 @@ struct HardwareViewState {
     HWND detail = nullptr;
     HardwareModel model;
     std::wstring statusText;
-};
-
-// DevInfoSet owns an HDEVINFO handle used by one SetupAPI operation. Inputs are
-// handles returned from SetupDiGetClassDevsW; processing releases the handle in
-// the destructor; output is access through get()/valid().
-class DevInfoSet final {
-public:
-    explicit DevInfoSet(HDEVINFO handle) : handle_(handle) {}
-    ~DevInfoSet() {
-        if (valid()) {
-            ::SetupDiDestroyDeviceInfoList(handle_);
-        }
-    }
-    DevInfoSet(const DevInfoSet&) = delete;
-    DevInfoSet& operator=(const DevInfoSet&) = delete;
-    bool valid() const { return handle_ != INVALID_HANDLE_VALUE; }
-    HDEVINFO get() const { return handle_; }
-
-private:
-    HDEVINFO handle_ = INVALID_HANDLE_VALUE;
 };
 
 // AddListColumn inserts one detail list column. Inputs are list HWND, index,
@@ -142,6 +118,33 @@ bool WriteClipboardText(HWND owner, const std::wstring& text) {
     return true;
 }
 
+// Utf8ToWideLossy 将 ArkDriverClient 的窄字符诊断提升为宽字符。
+// 输入：通常是 ASCII/UTF-8 风格 message；处理：逐字节提升用于表格展示；
+// 返回：宽字符串。
+std::wstring Utf8ToWideLossy(const std::string& text) {
+    std::wstring wide;
+    wide.reserve(text.size());
+    for (const char ch : text) {
+        wide.push_back(static_cast<unsigned char>(ch));
+    }
+    return wide;
+}
+
+// DeviceAuditSummaryText 生成 R0 设备审计摘要。
+// 输入：DeviceAuditResult；处理：组合 IO 状态、行数和设备/驱动计数；
+// 返回：一行详情文本。
+std::wstring DeviceAuditSummaryText(const ksword::ark::DeviceAuditResult& result) {
+    std::wostringstream stream;
+    stream << (result.io.ok ? L"OK" : (result.unsupported ? L"Unsupported" : L"Unavailable"))
+           << L"; rows=" << result.entries.size()
+           << L"; returned=" << result.returnedCount << L"/" << result.totalCount
+           << L"; drivers=" << result.driverCount
+           << L"; devices=" << result.deviceCount
+           << L"; win32=" << result.io.win32Error
+           << L"; " << Utf8ToWideLossy(result.io.message);
+    return stream.str();
+}
+
 // SelectedDeviceIndex returns the model index stored on the selected tree item.
 // Input is the hardware page state; output is -1 when no valid tree item is
 // selected.
@@ -161,84 +164,6 @@ int SelectedDeviceIndex(HardwareViewState* state) {
         return -1;
     }
     return static_cast<int>(item.lParam);
-}
-
-// OpenDeviceInfo opens one device instance into a temporary SetupAPI device set.
-// Inputs are a device instance ID and output SP_DEVINFO_DATA; processing uses an
-// empty device-info set and SetupDiOpenDeviceInfoW; output is the owning set.
-std::unique_ptr<DevInfoSet> OpenDeviceInfo(const std::wstring& instanceId, SP_DEVINFO_DATA& data, std::wstring& errorText) {
-    data = SP_DEVINFO_DATA{};
-    data.cbSize = sizeof(data);
-    auto set = std::make_unique<DevInfoSet>(::SetupDiCreateDeviceInfoList(nullptr, nullptr));
-    if (!set->valid()) {
-        errorText = L"SetupDiCreateDeviceInfoList failed: " + std::to_wstring(::GetLastError());
-        return nullptr;
-    }
-    if (!::SetupDiOpenDeviceInfoW(set->get(), instanceId.c_str(), nullptr, 0, &data)) {
-        errorText = L"SetupDiOpenDeviceInfoW failed: " + std::to_wstring(::GetLastError());
-        return nullptr;
-    }
-    return set;
-}
-
-// ChangeDeviceState enables or disables a device through DIF_PROPERTYCHANGE.
-// Inputs are a device instance ID and target state; processing routes through
-// SetupAPI class installers; output is a concise result message.
-std::wstring ChangeDeviceState(const std::wstring& instanceId, bool enable) {
-    SP_DEVINFO_DATA data{};
-    std::wstring error;
-    std::unique_ptr<DevInfoSet> set = OpenDeviceInfo(instanceId, data, error);
-    if (!set) {
-        return error;
-    }
-
-    SP_PROPCHANGE_PARAMS params{};
-    params.ClassInstallHeader.cbSize = sizeof(SP_CLASSINSTALL_HEADER);
-    params.ClassInstallHeader.InstallFunction = DIF_PROPERTYCHANGE;
-    params.StateChange = enable ? DICS_ENABLE : DICS_DISABLE;
-    params.Scope = DICS_FLAG_GLOBAL;
-    params.HwProfile = 0;
-    if (!::SetupDiSetClassInstallParamsW(set->get(),
-            &data,
-            &params.ClassInstallHeader,
-            sizeof(params))) {
-        return L"SetupDiSetClassInstallParamsW failed: " + std::to_wstring(::GetLastError());
-    }
-    if (!::SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, set->get(), &data)) {
-        return L"SetupDiCallClassInstaller(DIF_PROPERTYCHANGE) failed: " + std::to_wstring(::GetLastError());
-    }
-    return enable ? L"设备启用请求已提交。" : L"设备禁用请求已提交。";
-}
-
-// UninstallDevice removes one device through the standard SetupAPI class
-// installer path. Input is a device instance ID; output is a user-facing result
-// string. The caller is responsible for confirmation.
-std::wstring UninstallDevice(const std::wstring& instanceId) {
-    SP_DEVINFO_DATA data{};
-    std::wstring error;
-    std::unique_ptr<DevInfoSet> set = OpenDeviceInfo(instanceId, data, error);
-    if (!set) {
-        return error;
-    }
-    if (!::SetupDiCallClassInstaller(DIF_REMOVE, set->get(), &data)) {
-        return L"SetupDiCallClassInstaller(DIF_REMOVE) failed: " + std::to_wstring(::GetLastError());
-    }
-    return L"设备卸载请求已提交。";
-}
-
-// RescanHardware asks Configuration Manager to re-enumerate the local root
-// devnode. Inputs are none; output is a human-readable result string.
-std::wstring RescanHardware() {
-    DEVINST root = 0;
-    CONFIGRET status = ::CM_Locate_DevNodeW(&root, nullptr, CM_LOCATE_DEVNODE_NORMAL);
-    if (status != CR_SUCCESS) {
-        return L"CM_Locate_DevNodeW failed: " + std::to_wstring(status);
-    }
-    status = ::CM_Reenumerate_DevNode(root, CM_REENUMERATE_NORMAL);
-    if (status != CR_SUCCESS) {
-        return L"CM_Reenumerate_DevNode failed: " + std::to_wstring(status);
-    }
-    return L"已请求重新扫描硬件。";
 }
 
 // InsertTreeNode recursively inserts a device and its children. Inputs are state,
@@ -285,6 +210,13 @@ void ShowDetail(HardwareViewState* state, int index) {
 
     int row = 0;
     AddDetailRow(state->detail, row++, L"Device", detail.title);
+    AddDetailRow(state->detail, row++, L"Audit mode", L"Read-only evidence view; no device state changes are exposed here.");
+    const ksword::ark::DriverClient client;
+    AddDetailRow(state->detail, row++, L"R0 device stack protocol", DeviceAuditSummaryText(client.queryDeviceStackAudit()));
+    AddDetailRow(state->detail, row++, L"R0 input stack protocol", DeviceAuditSummaryText(client.queryInputStackAudit()));
+    AddDetailRow(state->detail, row++, L"R0 USB topology protocol", DeviceAuditSummaryText(client.queryUsbTopologyAudit()));
+    AddDetailRow(state->detail, row++, L"Input privacy", L"Keyboard, mouse and HID rows are metadata only; no keystroke, movement or report stream is collected.");
+    AddDetailRow(state->detail, row++, L"Audit category", HardwareReadOnlyAuditDescription(*node));
     for (const HardwareProperty& property : detail.properties) {
         AddDetailRow(state->detail, row++, property.name, property.value);
     }
@@ -329,8 +261,14 @@ void RefreshDevices(HardwareViewState* state) {
     }
     HardwareEnumerationResult result = EnumerateDeviceManagerTree();
     if (result.success) {
-        state->statusText = L"Devices: " + std::to_wstring(result.devices.size());
         state->model.setDevices(std::move(result.devices));
+        const HardwareAuditSummary summary = state->model.auditSummary();
+        state->statusText = L"Devices: " + std::to_wstring(summary.totalDevices) +
+            L" | Input/HID: " + std::to_wstring(summary.inputDevices) + L"/" + std::to_wstring(summary.hidDevices) +
+            L" | USB: " + std::to_wstring(summary.usbDevices) +
+            L" | PnP PCI/ACPI: " + std::to_wstring(summary.pciDevices) + L"/" + std::to_wstring(summary.acpiDevices) +
+            L" | Filters: " + std::to_wstring(summary.filterEvidenceDevices) +
+            L" | Attention: " + std::to_wstring(summary.problemDevices);
     } else {
         state->statusText = result.diagnosticText;
         state->model.setDevices({});
@@ -339,11 +277,10 @@ void RefreshDevices(HardwareViewState* state) {
     ::InvalidateRect(state->hwnd, nullptr, TRUE);
 }
 
-// ShowDeviceContextMenu displays Device Manager actions for the selected device.
-// Inputs are module state and a screen point; processing corrects selection,
-// groups refresh/copy/device actions into submenus, executes the chosen
-// SetupAPI/CM action, and refreshes the tree after mutating actions; no value is
-// returned.
+// ShowDeviceContextMenu displays read-only evidence actions for the selected
+// device. Inputs are module state and a screen point; processing corrects
+// selection and offers only refresh/copy operations; no device configuration is
+// changed and no value is returned.
 void ShowDeviceContextMenu(HardwareViewState* state, POINT screenPoint) {
     if (!state || !state->tree) {
         return;
@@ -369,20 +306,12 @@ void ShowDeviceContextMenu(HardwareViewState* state, POINT screenPoint) {
     HMENU refreshMenu = ::CreatePopupMenu();
     if (refreshMenu) {
         ::AppendMenuW(refreshMenu, MF_STRING, kMenuRefresh, L"刷新");
-        ::AppendMenuW(refreshMenu, MF_STRING, kMenuScanHardware, L"扫描检测硬件改动");
         ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(refreshMenu), L"刷新");
     }
     HMENU copyMenu = ::CreatePopupMenu();
     if (copyMenu) {
         ::AppendMenuW(copyMenu, MF_STRING | (hasDevice ? 0U : MF_GRAYED), kMenuCopyInstanceId, L"复制实例 ID");
         ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(copyMenu), L"复制");
-    }
-    HMENU deviceMenu = ::CreatePopupMenu();
-    if (deviceMenu) {
-        ::AppendMenuW(deviceMenu, MF_STRING | (hasDevice ? 0U : MF_GRAYED), kMenuEnableDevice, L"启用设备");
-        ::AppendMenuW(deviceMenu, MF_STRING | (hasDevice ? 0U : MF_GRAYED), kMenuDisableDevice, L"禁用设备");
-        ::AppendMenuW(deviceMenu, MF_STRING | (hasDevice ? 0U : MF_GRAYED), kMenuUninstallDevice, L"卸载设备");
-        ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(deviceMenu), L"设备操作");
     }
 
     const UINT command = ::TrackPopupMenu(menu,
@@ -398,38 +327,13 @@ void ShowDeviceContextMenu(HardwareViewState* state, POINT screenPoint) {
         return;
     }
 
-    std::wstring result;
     switch (command) {
     case kMenuRefresh:
-        RefreshDevices(state);
-        return;
-    case kMenuScanHardware:
-        result = RescanHardware();
-        state->statusText = result;
         RefreshDevices(state);
         return;
     case kMenuCopyInstanceId:
         state->statusText = WriteClipboardText(state->hwnd, node->instanceId) ? L"已复制设备实例 ID。" : L"复制设备实例 ID 失败。";
         ::InvalidateRect(state->hwnd, nullptr, TRUE);
-        return;
-    case kMenuEnableDevice:
-        result = ChangeDeviceState(node->instanceId, true);
-        state->statusText = result;
-        RefreshDevices(state);
-        return;
-    case kMenuDisableDevice:
-        if (::MessageBoxW(state->hwnd, L"确定要禁用选中设备吗？", L"禁用设备", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
-            result = ChangeDeviceState(node->instanceId, false);
-            state->statusText = result;
-            RefreshDevices(state);
-        }
-        return;
-    case kMenuUninstallDevice:
-        if (::MessageBoxW(state->hwnd, L"确定要卸载选中设备吗？该操作可能需要重启或重新扫描硬件。", L"卸载设备", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
-            result = UninstallDevice(node->instanceId);
-            state->statusText = result;
-            RefreshDevices(state);
-        }
         return;
     default:
         break;
