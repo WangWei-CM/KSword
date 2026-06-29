@@ -185,6 +185,8 @@
     <ClCompile Include="KernelDock\KernelDock.KernelHooks.cpp" />
     <ClCompile Include="KernelDock\KernelDock.Runtime.cpp" />
     <ClCompile Include="KernelDock\KernelDock.Ssdt.cpp" />
+    <ClCompile Include="KernelDock\KernelDockCidTab.cpp" />
+    <ClCompile Include="KernelDock\KernelDockIpcTab.cpp" />
     <ClCompile Include="KernelDock\KernelBaseNamedObjectsTab.cpp" />
     <ClCompile Include="KernelDock\KernelBaseNamedObjectsWorker.cpp" />
     <ClCompile Include="KernelDock\KernelCommunicationEndpointTab.cpp" />
@@ -216,6 +218,8 @@
     <ClCompile Include="MemoryDock\MemoryDock.DriverMemoryRw.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.KernelExecutableMemory.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.KernelMemoryEvidence.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDock.ProcessMemoryEvidence.cpp" />
+    <ClCompile Include="MemoryDock\MemoryDock.ProcessPteTranslate.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.UiBuild.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.UiWireAndStatus.cpp" />
     <ClCompile Include="MemoryDock\MemoryDock.ProcessRegion.cpp" />
@@ -252,6 +256,7 @@
     <ClCompile Include="NetworkDock\NetworkDock.DetailAndUtils.cpp" />
     <ClCompile Include="NetworkDock\NetworkDock.InternalHelpers.cpp" />
     <ClCompile Include="NetworkDock\NetworkFirewallPage.cpp" />
+    <ClCompile Include="NetworkDock\NetworkAuditPage.cpp" />
     <ClCompile Include="NetworkDock\HttpsProxyService.cpp" />
     <ClCompile Include="OtherDock\OtherDock.DesktopCreate.cpp" />
     <ClCompile Include="OtherDock\OtherDock.Desktop.cpp" />
@@ -265,6 +270,7 @@
     <ClCompile Include="ProcessDock\ProcessDetailWindow.BaseAndUi.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.Module.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.Hotkey.cpp" />
+    <ClCompile Include="ProcessDock\ProcessDetailWindow.PdbCatalog.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.ActionAndUtil.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.ExtendedActions.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.AdvancedInfo.cpp" />
@@ -333,6 +339,7 @@
     <ClCompile Include="main.cpp" />
     <QtUic Include="WelcomeDock\Welcome.ui" />
     <ClCompile Include="ArkDriverClient\ArkDriverClient.cpp" />
+    <ClCompile Include="ArkDriverClient\ArkDriverAudit.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverError.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverCapability.cpp" />
     <ClCompile Include="ArkDriverClient\ArkDriverDynData.cpp" />
@@ -377,6 +384,8 @@
     <ClInclude Include="KernelDock\KernelDockSsdtWorker.h" />
     <ClInclude Include="KernelDock\KernelNamedPipeTab.h" />
     <ClInclude Include="KernelDock\KernelNamedPipeWorker.h" />
+    <ClInclude Include="KernelDock\KernelDockCidTab.h" />
+    <ClInclude Include="KernelDock\KernelDockIpcTab.h" />
     <ClInclude Include="KernelDock\KernelObjectDirectoryDeepTab.h" />
     <ClInclude Include="KernelDock\KernelObjectDirectoryDeepWorker.h" />
     <ClInclude Include="KernelDock\KernelObjectTypeMatrixTab.h" />
@@ -439,6 +448,7 @@
     <ClInclude Include="NetworkDock\NetworkDock.InternalCommon.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalHelpers.h" />
     <QtMoc Include="NetworkDock\NetworkFirewallPage.h" />
+    <ClInclude Include="NetworkDock\NetworkAuditPage.h" />
     <ClInclude Include="NetworkDock\HttpsProxyService.h" />
     <QtMoc Include="OtherDock\OtherDock.h" />
     <ClInclude Include="OtherDock\WindowCaptureProtection.h" />
@@ -475,6 +485,8 @@
     <None Include="qtvars.pro" />
     <None Include="profiles\ark_dyndata_pack_v2.json" />
     <None Include="profiles\ark_dyndata_pack_v3.json" />
+    <None Include="profiles\pdb_deep_offsets\ntkrnlmp_f923da2d238e7c7ce180b962b19a3781_age5_deep_offsets.json" />
+    <None Include="profiles\pdb_deep_offsets\win32k_gui_public_7bd3_000a_001c_deep_offsets.json" />
   </ItemGroup>
   <Target Name="CopyKswordArkDynDataProfilePack" AfterTargets="Build">
     <!-- v3 pack carries typed StructOffset items such as EpActiveProcessLinks; v2 is kept only as a callback-era fallback. -->
@@ -490,6 +502,17 @@
     <Delete Files="$(KswordArkDynDataLegacyPack)" Condition="Exists('$(KswordArkDynDataLegacyPack)')" />
     <Warning Condition="!Exists('$(KswordArkDynDataProfilePackV3Source)')" Text="KswordARK DynData v3 profile pack was not found: $(KswordArkDynDataProfilePackV3Source)" />
     <Warning Condition="!Exists('$(KswordArkDynDataProfilePackV2Source)')" Text="KswordARK DynData v2 profile pack was not found: $(KswordArkDynDataProfilePackV2Source)" />
+  </Target>
+  <Target Name="CopyKswordArkPdbDeepOffsetLibraries" AfterTargets="Build">
+    <!-- 深度 PDB 偏移库用于进程/线程/对象等详情页后续扩展；运行时读取本地 JSON，不依赖开发机 E: 符号缓存。 -->
+    <ItemGroup>
+      <KswordArkPdbDeepOffsetLibrary Include="$(MSBuildProjectDirectory)\profiles\pdb_deep_offsets\*.json" />
+    </ItemGroup>
+    <PropertyGroup>
+      <KswordArkPdbDeepOffsetTargetDir>$(TargetDir)profiles\pdb_deep_offsets\</KswordArkPdbDeepOffsetTargetDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(KswordArkPdbDeepOffsetTargetDir)" Condition="'@(KswordArkPdbDeepOffsetLibrary)' != ''" />
+    <Copy SourceFiles="@(KswordArkPdbDeepOffsetLibrary)" DestinationFolder="$(KswordArkPdbDeepOffsetTargetDir)" SkipUnchangedFiles="true" Condition="'@(KswordArkPdbDeepOffsetLibrary)' != ''" />
   </Target>
   <Target Name="CopyTaskmgrHijackScript" AfterTargets="Build">
     <PropertyGroup>

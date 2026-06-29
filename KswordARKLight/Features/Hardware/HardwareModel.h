@@ -3,6 +3,7 @@
 #include "../../Core/Win32Lean.h"
 
 #include <cfgmgr32.h>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -44,12 +45,34 @@ struct HardwareDeviceNode {
     std::wstring parentInstanceId;
     std::wstring displayName;
     std::wstring className;
+    std::wstring classGuid;
     std::wstring manufacturer;
     std::wstring serviceName;
     std::wstring driverKey;
     std::wstring location;
+    std::wstring locationPaths;
     std::wstring hardwareIds;
+    std::wstring compatibleIds;
+    std::wstring upperFilters;
+    std::wstring lowerFilters;
+    std::wstring classUpperFilters;
+    std::wstring classLowerFilters;
     std::vector<int> childIndices;
+};
+
+// HardwareAuditSummary is a read-only count summary for the Hardware page.
+// Inputs are the current device snapshot; processing classifies devices by
+// stable SetupAPI/CM fields; consumers display the counts without invoking R0 or
+// mutating PnP state.
+struct HardwareAuditSummary {
+    std::size_t totalDevices = 0;
+    std::size_t inputDevices = 0;
+    std::size_t hidDevices = 0;
+    std::size_t usbDevices = 0;
+    std::size_t pciDevices = 0;
+    std::size_t acpiDevices = 0;
+    std::size_t filterEvidenceDevices = 0;
+    std::size_t problemDevices = 0;
 };
 
 // HardwareDeviceDetail is the expanded detail view for one device instance. Input
@@ -104,6 +127,11 @@ public:
     // object suitable as a fallback when live querying fails.
     HardwareDeviceDetail detailFromNode(const HardwareDeviceNode& node) const;
 
+    // auditSummary classifies the current SetupAPI/CM snapshot into read-only
+    // audit buckets. There is no input; output is a value object safe to display
+    // until the next refresh.
+    HardwareAuditSummary auditSummary() const;
+
 private:
     void rebuildRoots();
 
@@ -119,5 +147,10 @@ std::wstring DeviceStateText(HardwareDeviceState state, ULONG problemCode);
 // CompactDeviceName returns the safest display label for a device node. Input is
 // a node with optional friendly name and instance ID; output is never empty.
 std::wstring CompactDeviceName(const HardwareDeviceNode& node);
+
+// HardwareReadOnlyAuditDescription returns a concise evidence category for one
+// device. Input is a cached devnode; output describes device stack, input, USB,
+// PCI or ACPI relevance using only R3 SetupAPI/CM evidence.
+std::wstring HardwareReadOnlyAuditDescription(const HardwareDeviceNode& node);
 
 } // namespace Ksword::Features::Hardware

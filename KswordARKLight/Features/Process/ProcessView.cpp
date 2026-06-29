@@ -7,6 +7,7 @@
 #include "../../Ui/Controls.h"
 #include "../../Ui/ListViewUtil.h"
 #include "../../Ui/Theme.h"
+#include "../../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
 
 #include <commctrl.h>
 #include <shellapi.h>
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -193,7 +195,10 @@ std::vector<Ksword::Ui::ListViewColumn> ColumnSet(ProcessViewMode mode) {
             { 6, 118, LVCFMT_RIGHT, L"虚拟内存" },
             { 7, 86, LVCFMT_RIGHT, L"基础优先级" },
             { 8, 70, LVCFMT_RIGHT, L"会话" },
-            { 9, 420, LVCFMT_LEFT, L"映像路径" },
+            { 9, 150, LVCFMT_RIGHT, L"EPROCESS" },
+            { 10, 150, LVCFMT_LEFT, L"R0来源" },
+            { 11, 180, LVCFMT_LEFT, L"R0异常" },
+            { 12, 420, LVCFMT_LEFT, L"映像路径" },
         };
     }
 
@@ -762,6 +767,160 @@ std::wstring SelectedRowsAsText(ProcessViewState& state, bool allColumns) {
     return text;
 }
 
+// NarrowToWide converts ArkDriverClient diagnostic strings to the native UI
+// encoding. Input is UTF-8/ASCII text from the shared wrapper; output is a
+// best-effort wide string suitable for status bars and R0 evidence cells.
+std::wstring NarrowToWide(const std::string& text) {
+    if (text.empty()) {
+        return {};
+    }
+
+    int chars = ::MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    UINT codePage = CP_UTF8;
+    if (chars <= 0) {
+        codePage = CP_ACP;
+        chars = ::MultiByteToWideChar(codePage, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    }
+    if (chars <= 0) {
+        return L"<decode failed>";
+    }
+
+    std::wstring wide(static_cast<std::size_t>(chars), L'\0');
+    ::MultiByteToWideChar(codePage, 0, text.data(), static_cast<int>(text.size()), wide.data(), chars);
+    return wide;
+}
+
+// FlagHexText formats raw source/anomaly masks without interpreting unsupported
+// future bits. Input is a protocol mask; output is stable uppercase hex.
+std::wstring FlagHexText(ULONG value) {
+    std::wostringstream stream;
+    stream << L"0x" << std::hex << std::uppercase << value;
+    return stream.str();
+}
+
+// SourceMaskText renders the process cross-view source matrix. Input is the raw
+// sourceMask from R0; processing keeps names aligned with the shared protocol.
+std::wstring SourceMaskText(ULONG sourceMask) {
+    std::vector<std::wstring> parts;
+    if ((sourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_PUBLIC_WALK) != 0) {
+        parts.push_back(L"Public");
+    }
+    if ((sourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_ACTIVE_LIST) != 0) {
+        parts.push_back(L"ActiveProcessLinks");
+    }
+    if ((sourceMask & KSWORD_ARK_CROSSVIEW_SOURCE_CID_TABLE) != 0) {
+        parts.push_back(L"CID");
+    }
+    if (parts.empty()) {
+        return L"无来源";
+    }
+
+    std::wstring text;
+    for (const std::wstring& part : parts) {
+        if (!text.empty()) {
+            text += L"+";
+        }
+        text += part;
+    }
+    return text;
+}
+
+// AnomalyMaskText renders known process/thread anomaly bits as evidence labels.
+// Input is the raw anomalyFlags mask; output keeps unknown future bits visible.
+std::wstring AnomalyMaskText(ULONG anomalyFlags) {
+    if (anomalyFlags == 0) {
+        return L"未见异常";
+    }
+
+    std::vector<std::wstring> parts;
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_CID_ONLY) != 0) {
+        parts.push_back(L"CID-only");
+    }
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_ACTIVE_ONLY) != 0) {
+        parts.push_back(L"Active-only");
+    }
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_MISSING_FROM_ACTIVE_LIST) != 0) {
+        parts.push_back(L"缺ActiveProcessLinks");
+    }
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_MISSING_FROM_CID_TABLE) != 0) {
+        parts.push_back(L"缺CID");
+    }
+    if ((anomalyFlags & KSWORD_ARK_CROSSVIEW_ANOMALY_PID_FIELD_MISMATCH) != 0) {
+        parts.push_back(L"PID不一致");
+    }
+
+    std::wstring text;
+    for (const std::wstring& part : parts) {
+        if (!text.empty()) {
+            text += L"; ";
+        }
+        text += part;
+    }
+    if (text.empty()) {
+        text = L"未知异常位 " + FlagHexText(anomalyFlags);
+    }
+    return text;
+}
+
+// ApplyR0ProcessAuditRows annotates R3 process rows with process cross-view
+// evidence. Inputs are mutable rows and a status suffix; processing calls only
+// ArkDriverClient wrappers and never issues raw DeviceIoControl from the UI.
+void ApplyR0ProcessAuditRows(std::vector<ProcessSnapshotRow>& rows, std::wstring& statusSuffix) {
+    const ksword::ark::DriverClient driverClient;
+    const ksword::ark::ProcessCrossViewResult audit = driverClient.queryProcessCrossView(
+        KSWORD_ARK_PROCESS_CROSSVIEW_FLAG_INCLUDE_ALL,
+        0,
+        0,
+        KSWORD_ARK_CROSSVIEW_DEFAULT_MAX_NODES);
+    if (!audit.io.ok) {
+        statusSuffix = L"；R0审计不可用: " + NarrowToWide(audit.io.message);
+        for (ProcessSnapshotRow& row : rows) {
+            row.r0AuditSummary = L"不可用";
+            row.r0AuditDetail = audit.unsupported ? L"驱动不支持" : L"查询失败";
+        }
+        return;
+    }
+
+    std::unordered_map<DWORD, const ksword::ark::ProcessCrossViewEntry*> auditByPid;
+    auditByPid.reserve(audit.entries.size());
+    for (const ksword::ark::ProcessCrossViewEntry& entry : audit.entries) {
+        auditByPid[static_cast<DWORD>(entry.processId)] = &entry;
+    }
+
+    std::size_t matched = 0;
+    std::size_t anomalous = 0;
+    for (ProcessSnapshotRow& row : rows) {
+        const auto found = auditByPid.find(row.processId);
+        if (found == auditByPid.end()) {
+            row.r0AuditSummary = L"R3-only";
+            row.r0AuditDetail = L"R0未返回";
+            continue;
+        }
+
+        const ksword::ark::ProcessCrossViewEntry& entry = *found->second;
+        row.r0ProcessObjectAddress = static_cast<std::uintptr_t>(entry.objectAddress);
+        row.r0SourceMask = entry.sourceMask;
+        row.r0AnomalyFlags = entry.anomalyFlags;
+        row.r0Confidence = entry.confidence;
+        row.r0AuditSummary = SourceMaskText(row.r0SourceMask);
+        row.r0AuditDetail = AnomalyMaskText(row.r0AnomalyFlags);
+        row.r0AuditDetail += L"; conf=" + std::to_wstring(row.r0Confidence);
+        if (!entry.detail.empty()) {
+            row.r0AuditDetail += L"; " + NarrowToWide(entry.detail);
+        }
+        ++matched;
+        if (row.r0AnomalyFlags != 0) {
+            ++anomalous;
+        }
+    }
+
+    statusSuffix = L"；R0审计匹配 " + std::to_wstring(matched) +
+        L"/" + std::to_wstring(rows.size()) +
+        L"，异常 " + std::to_wstring(anomalous) +
+        L"，返回 " + std::to_wstring(audit.returnedCount) +
+        L"/" + std::to_wstring(audit.totalCount);
+}
+
 // WriteClipboardText copies Unicode text to the Windows clipboard. Inputs are
 // the owner HWND and text. Processing allocates CF_UNICODETEXT global memory and
 // transfers ownership to the clipboard. Return value reports success.
@@ -811,6 +970,8 @@ void RefreshProcesses(ProcessViewState& state) {
     }
 
     std::vector<ProcessSnapshotRow> rows = result.rows;
+    std::wstring r0StatusSuffix;
+    ApplyR0ProcessAuditRows(rows, r0StatusSuffix);
     const ULONGLONG nowMs = ::GetTickCount64();
     const ULONGLONG elapsedMs = state.previousSampleTickMs == 0 ? 0 : nowMs - state.previousSampleTickMs;
     const DWORD processorCount = std::max<DWORD>(1, ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
@@ -867,7 +1028,8 @@ void RefreshProcesses(ProcessViewState& state) {
         L" 个进程；新增 " + std::to_wstring(addedCount) +
         L"，退出 " + std::to_wstring(removedCount) +
         L" 个进程；刷新 " + std::to_wstring(state.refreshIntervalSeconds) +
-        L"s；左 Ctrl 按下时跳过自动刷新。");
+        L"s" + r0StatusSuffix +
+        L"；左 Ctrl 按下时跳过自动刷新。");
 }
 
 // SwitchMode changes the visible process layout. Inputs are page state and new

@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cfgmgr32.h>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <setupapi.h>
+#include <vector>
 
 #ifndef DN_PHANTOM
 #define DN_PHANTOM 0x00004000
@@ -100,6 +102,87 @@ std::wstring QueryDeviceRegistryProperty(HDEVINFO set, SP_DEVINFO_DATA& data, DW
     return RegistryTypeToString(type, bytes);
 }
 
+// GuidToString converts a device setup class GUID to display text. Input is a
+// GUID supplied by SetupAPI; processing formats locally to avoid adding a new
+// link-time dependency; output is empty only if formatting fails.
+std::wstring GuidToString(const GUID& guid) {
+    wchar_t buffer[64] = {};
+    const int written = swprintf_s(buffer,
+        L"{%08lX-%04hX-%04hX-%02hhX%02hhX-%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX}",
+        static_cast<unsigned long>(guid.Data1),
+        guid.Data2,
+        guid.Data3,
+        guid.Data4[0],
+        guid.Data4[1],
+        guid.Data4[2],
+        guid.Data4[3],
+        guid.Data4[4],
+        guid.Data4[5],
+        guid.Data4[6],
+        guid.Data4[7]);
+    if (written <= 0) {
+        return {};
+    }
+    return std::wstring(buffer);
+}
+
+// QueryDeviceRegistryMultiSz reads REG_MULTI_SZ values from a device registry
+// key. Inputs are an HDEVINFO, device info, property scope and value name;
+// processing opens the requested key read-only; output is semicolon-separated
+// text or empty when the value/key is absent.
+std::wstring QueryDeviceRegistryMultiSz(HDEVINFO set,
+    SP_DEVINFO_DATA& data,
+    DWORD scope,
+    DWORD hardwareProfile,
+    const wchar_t* valueName) {
+    HKEY key = ::SetupDiOpenDevRegKey(set, &data, scope, hardwareProfile, DIREG_DEV, KEY_QUERY_VALUE);
+    if (key == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+
+    DWORD type = 0;
+    DWORD bytes = 0;
+    LONG status = ::RegQueryValueExW(key, valueName, nullptr, &type, nullptr, &bytes);
+    if (status != ERROR_SUCCESS || type != REG_MULTI_SZ || bytes == 0) {
+        ::RegCloseKey(key);
+        return {};
+    }
+
+    std::vector<wchar_t> buffer((bytes / sizeof(wchar_t)) + 2, L'\0');
+    status = ::RegQueryValueExW(key, valueName, nullptr, &type, reinterpret_cast<LPBYTE>(buffer.data()), &bytes);
+    ::RegCloseKey(key);
+    if (status != ERROR_SUCCESS || type != REG_MULTI_SZ) {
+        return {};
+    }
+    return JoinMultiSz(buffer);
+}
+
+// QueryClassRegistryMultiSz reads REG_MULTI_SZ class filter values. Inputs are a
+// setup class GUID and value name; processing opens the class registry key
+// read-only; output is semicolon-separated text or empty when absent.
+std::wstring QueryClassRegistryMultiSz(const GUID& classGuid, const wchar_t* valueName) {
+    HKEY key = ::SetupDiOpenClassRegKeyExW(&classGuid, KEY_QUERY_VALUE, DIOCR_INSTALLER, nullptr, nullptr);
+    if (key == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+
+    DWORD type = 0;
+    DWORD bytes = 0;
+    LONG status = ::RegQueryValueExW(key, valueName, nullptr, &type, nullptr, &bytes);
+    if (status != ERROR_SUCCESS || type != REG_MULTI_SZ || bytes == 0) {
+        ::RegCloseKey(key);
+        return {};
+    }
+
+    std::vector<wchar_t> buffer((bytes / sizeof(wchar_t)) + 2, L'\0');
+    status = ::RegQueryValueExW(key, valueName, nullptr, &type, reinterpret_cast<LPBYTE>(buffer.data()), &bytes);
+    ::RegCloseKey(key);
+    if (status != ERROR_SUCCESS || type != REG_MULTI_SZ) {
+        return {};
+    }
+    return JoinMultiSz(buffer);
+}
+
 // DevInstToInstanceId returns the stable PnP instance ID for one devnode. Input
 // is a DEVINST from SetupAPI/CM; processing uses CM_Get_Device_IDW; output is
 // empty when the devnode is invalid or was removed while enumerating.
@@ -176,6 +259,7 @@ HardwareDeviceNode PopulateNodeFromDevInfo(HDEVINFO set, SP_DEVINFO_DATA& info, 
     node.devInst = info.DevInst;
     node.instanceId = DevInstToInstanceId(info.DevInst);
     node.parentInstanceId = QueryParentInstanceId(info.DevInst);
+    node.classGuid = GuidToString(info.ClassGuid);
     node.displayName = QueryDeviceRegistryProperty(set, info, SPDRP_FRIENDLYNAME);
     if (node.displayName.empty()) {
         node.displayName = QueryDeviceRegistryProperty(set, info, SPDRP_DEVICEDESC);
@@ -185,7 +269,13 @@ HardwareDeviceNode PopulateNodeFromDevInfo(HDEVINFO set, SP_DEVINFO_DATA& info, 
     node.serviceName = QueryDeviceRegistryProperty(set, info, SPDRP_SERVICE);
     node.driverKey = QueryDeviceRegistryProperty(set, info, SPDRP_DRIVER);
     node.location = QueryDeviceRegistryProperty(set, info, SPDRP_LOCATION_INFORMATION);
+    node.locationPaths = QueryDeviceRegistryProperty(set, info, SPDRP_LOCATION_PATHS);
     node.hardwareIds = QueryDeviceRegistryProperty(set, info, SPDRP_HARDWAREID);
+    node.compatibleIds = QueryDeviceRegistryProperty(set, info, SPDRP_COMPATIBLEIDS);
+    node.upperFilters = QueryDeviceRegistryMultiSz(set, info, DICS_FLAG_GLOBAL, 0, L"UpperFilters");
+    node.lowerFilters = QueryDeviceRegistryMultiSz(set, info, DICS_FLAG_GLOBAL, 0, L"LowerFilters");
+    node.classUpperFilters = QueryClassRegistryMultiSz(info.ClassGuid, L"UpperFilters");
+    node.classLowerFilters = QueryClassRegistryMultiSz(info.ClassGuid, L"LowerFilters");
     node.state = QueryStatus(info.DevInst, node.statusFlags, node.problemCode);
     return node;
 }
@@ -232,9 +322,10 @@ void RebuildHierarchy(std::vector<HardwareDeviceNode>& devices) {
     }
 }
 
-// FindDeviceByInstanceId opens a specific device into an existing set. Inputs are
-// an HDEVINFO and instance ID; processing calls SetupDiOpenDeviceInfoW; output is
-// true when infoData has been initialized for the matching device.
+// FindDeviceByInstanceId opens a specific devnode into an existing read-only
+// enumeration set. Inputs are an HDEVINFO and instance ID; processing calls
+// SetupDiOpenDeviceInfoW only to address the devnode for property queries; output
+// is true when infoData has been initialized for the matching device.
 bool FindDeviceByInstanceId(HDEVINFO set, const std::wstring& instanceId, SP_DEVINFO_DATA& infoData) {
     infoData = {};
     infoData.cbSize = sizeof(infoData);
@@ -309,11 +400,18 @@ HardwareDeviceDetail QueryDeviceManagerDetails(const std::wstring& instanceId) {
     AppendProperty(detail, L"Instance ID", node.instanceId);
     AppendProperty(detail, L"Parent instance ID", node.parentInstanceId);
     AppendProperty(detail, L"Class", node.className);
+    AppendProperty(detail, L"Class GUID", node.classGuid);
     AppendProperty(detail, L"Manufacturer", node.manufacturer);
     AppendProperty(detail, L"Service", node.serviceName);
     AppendProperty(detail, L"Driver key", node.driverKey);
     AppendProperty(detail, L"Location", node.location);
+    AppendProperty(detail, L"Location paths", node.locationPaths);
     AppendProperty(detail, L"Hardware IDs", node.hardwareIds);
+    AppendProperty(detail, L"Compatible IDs", node.compatibleIds);
+    AppendProperty(detail, L"Device UpperFilters", node.upperFilters);
+    AppendProperty(detail, L"Device LowerFilters", node.lowerFilters);
+    AppendProperty(detail, L"Class UpperFilters", node.classUpperFilters);
+    AppendProperty(detail, L"Class LowerFilters", node.classLowerFilters);
     AppendProperty(detail, L"State", DeviceStateText(node.state, node.problemCode));
     AppendProperty(detail, L"Status flags", L"0x" + std::to_wstring(node.statusFlags));
     AppendProperty(detail, L"Problem code", std::to_wstring(node.problemCode));

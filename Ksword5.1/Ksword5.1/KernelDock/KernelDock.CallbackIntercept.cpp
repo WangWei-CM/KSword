@@ -528,6 +528,96 @@ namespace
             .arg(KswordTheme::TextDisabledColorHex());
     }
 
+    // callbackRuleIoMessageText：
+    // - 输入：ArkDriverClient 返回的原始 IO/状态 message；
+    // - 处理：识别 DeviceIoControl/unsupported/capability/buffer/version 等底层词汇；
+    // - 返回：回调拦截页日志、状态栏和详情框可直接展示的人读说明。
+    QString callbackRuleIoMessageText(const QString& rawMessageText)
+    {
+        const QString trimmedText = rawMessageText.trimmed();
+        if (trimmedText.isEmpty())
+        {
+            return QStringLiteral("驱动未返回额外说明。");
+        }
+
+        const QString lowerText = trimmedText.toLower();
+        if (lowerText.contains(QStringLiteral("deviceiocontrol")))
+        {
+            return QStringLiteral("驱动 IOCTL 调用失败或当前驱动版本不匹配。");
+        }
+        if (lowerText.contains(QStringLiteral("unsupported")) ||
+            lowerText.contains(QStringLiteral("not supported")) ||
+            lowerText.contains(QStringLiteral("status=0xc00000bb")))
+        {
+            return QStringLiteral("当前驱动暂不支持该回调/文件监控接口。");
+        }
+        if (lowerText.contains(QStringLiteral("capability")) ||
+            lowerText.contains(QStringLiteral("dyndata")))
+        {
+            return QStringLiteral("动态偏移能力未满足，相关回调或文件监控字段暂不可用。");
+        }
+        if (lowerText.contains(QStringLiteral("version mismatch")) ||
+            lowerText.contains(QStringLiteral("protocol")))
+        {
+            return QStringLiteral("R3/R0 协议版本不匹配，请同步 shared 协议与驱动。");
+        }
+        if (lowerText.contains(QStringLiteral("buffer")) &&
+            (lowerText.contains(QStringLiteral("small")) || lowerText.contains(QStringLiteral("trunc"))))
+        {
+            return QStringLiteral("驱动返回缓冲区不足，当前结果可能被截断。");
+        }
+        return trimmedText;
+    }
+
+    void installCallbackTableCopyMenu(QTableWidget* tableWidget)
+    {
+        // installCallbackTableCopyMenu：
+        // - 输入：回调拦截页内需要复制证据行的表格；
+        // - 处理：右键选中当前行，并把所有列按 TSV 写入剪贴板；
+        // - 返回：无。只读复制，不修改规则、驱动状态或监控状态。
+        if (tableWidget == nullptr)
+        {
+            return;
+        }
+
+        tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(tableWidget, &QTableWidget::customContextMenuRequested, tableWidget, [tableWidget](const QPoint& localPosition)
+        {
+            const auto clickedIndex = tableWidget->indexAt(localPosition);
+            if (clickedIndex.isValid())
+            {
+                tableWidget->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu contextMenu(tableWidget);
+            contextMenu.setStyleSheet(callbackRuleContextMenuStyle());
+            QAction* copyRowAction = contextMenu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
+            if (contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPosition)) != copyRowAction)
+            {
+                return;
+            }
+
+            QClipboard* clipboardObject = QApplication::clipboard();
+            const int rowIndex = tableWidget->currentRow();
+            if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
+            {
+                return;
+            }
+
+            QStringList rowFields;
+            rowFields.reserve(tableWidget->columnCount());
+            for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
+            {
+                const QTableWidgetItem* item = tableWidget->item(rowIndex, columnIndex);
+                rowFields.push_back(item != nullptr ? item->text() : QString());
+            }
+            clipboardObject->setText(rowFields.join(QLatin1Char('\t')));
+        });
+    }
+
     // applyCallbackTableTransparency 作用：
     // - 输入 tableWidget：驱动回调 Tab 内的表格；
     // - 处理：背景图模式下关闭表格和 viewport 的自动填充，确保背景图能透过表格空白区；
@@ -1450,6 +1540,7 @@ private:
         m_groupTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(GroupColumn::Comment), QHeaderView::Stretch);
         m_groupTable->setStyleSheet(callbackRuleTableStyle());
         applyCallbackTableTransparency(m_groupTable);
+        installCallbackTableCopyMenu(m_groupTable);
         groupLayout->addWidget(m_groupTable, 1);
 
         auto* rightPane = new QWidget(mainSplitter);
@@ -1562,6 +1653,7 @@ private:
         m_fileMonitorTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(FileMonitorColumn::Path), QHeaderView::Stretch);
         m_fileMonitorTable->setStyleSheet(callbackRuleTableStyle());
         applyCallbackTableTransparency(m_fileMonitorTable);
+        installCallbackTableCopyMenu(m_fileMonitorTable);
         fileMonitorLayout->addWidget(m_fileMonitorTable, 1);
         rootLayout->addWidget(fileMonitorFrame, 1);
 
@@ -1748,7 +1840,7 @@ private:
             0UL);
         if (!startResult.ok)
         {
-            const QString detailText = QString::fromStdString(startResult.message);
+            const QString detailText = callbackRuleIoMessageText(QString::fromStdString(startResult.message));
             m_fileMonitorStatusLabel->setText(QStringLiteral("启动失败：error=%1").arg(startResult.win32Error));
             appendAppLog(QStringLiteral("文件监控 FSCTL 启动失败：%1").arg(detailText));
             return;
@@ -1967,6 +2059,7 @@ private:
         m_minifilterBypassPidTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(MinifilterBypassPidColumn::Process), QHeaderView::Stretch);
         m_minifilterBypassPidTable->setStyleSheet(callbackRuleTableStyle());
         applyCallbackTableTransparency(m_minifilterBypassPidTable);
+        installCallbackTableCopyMenu(m_minifilterBypassPidTable);
         tabLayout->addWidget(m_minifilterBypassPidTable, 1);
 
         m_minifilterBypassStatusLabel = new QLabel(QStringLiteral("尚未从驱动刷新；编辑后点击“应用到驱动”生效。"), tabPage);
@@ -2192,7 +2285,7 @@ private:
         const ksword::ark::IoResult ioResult = driverClient.setMinifilterBypassPids(processIds);
         if (!ioResult.ok)
         {
-            const QString detailText = QString::fromStdString(ioResult.message);
+            const QString detailText = callbackRuleIoMessageText(QString::fromStdString(ioResult.message));
             if (m_minifilterBypassStatusLabel != nullptr)
             {
                 m_minifilterBypassStatusLabel->setText(QStringLiteral("应用失败：error=%1").arg(ioResult.win32Error));
@@ -2234,7 +2327,7 @@ private:
             driverClient.queryMinifilterBypassPids();
         if (!queryResult.io.ok)
         {
-            const QString detailText = QString::fromStdString(queryResult.io.message);
+            const QString detailText = callbackRuleIoMessageText(QString::fromStdString(queryResult.io.message));
             if (m_minifilterBypassStatusLabel != nullptr)
             {
                 m_minifilterBypassStatusLabel->setText(QStringLiteral("刷新失败：error=%1").arg(queryResult.io.win32Error));
@@ -3960,7 +4053,7 @@ private:
             {
                 *errorTextOut = QStringLiteral("获取驱动状态失败，error=%1，detail=%2")
                     .arg(runtimeResult.io.win32Error)
-                    .arg(QString::fromStdString(runtimeResult.io.message));
+                    .arg(callbackRuleIoMessageText(QString::fromStdString(runtimeResult.io.message)));
             }
             return false;
         }
@@ -4028,7 +4121,7 @@ private:
             appendAppLog(
                 QStringLiteral("查询文件系统微过滤器状态失败，仍尝试启动：error=%1，detail=%2")
                 .arg(beforeStatus.io.win32Error)
-                .arg(QString::fromStdString(beforeStatus.io.message)));
+                .arg(callbackRuleIoMessageText(QString::fromStdString(beforeStatus.io.message))));
         }
 
         ksword::ark::IoResult startResult = driverClient.controlFileMonitor(
@@ -4059,7 +4152,7 @@ private:
                 driverClient.queryFileMonitorStatus();
             const QString statusSuffix = failStatus.io.ok
                 ? QStringLiteral("；status=%1，flags=0x%2，mask=0x%3，register=%4，start=%5，last=%6，queued=%7，dropped=%8")
-                    .arg(QString::fromStdString(failStatus.io.message))
+                    .arg(callbackRuleIoMessageText(QString::fromStdString(failStatus.io.message)))
                     .arg(failStatus.runtimeFlags, 8, 16, QChar('0')).toUpper()
                     .arg(failStatus.operationMask, 8, 16, QChar('0')).toUpper()
                     .arg(formatCallbackNtStatusHex(failStatus.registerStatus))
@@ -4069,11 +4162,11 @@ private:
                     .arg(failStatus.droppedCount)
                 : QStringLiteral("；status-query-failed error=%1，detail=%2")
                     .arg(failStatus.io.win32Error)
-                    .arg(QString::fromStdString(failStatus.io.message));
+                    .arg(callbackRuleIoMessageText(QString::fromStdString(failStatus.io.message)));
             appendAppLog(
                 QStringLiteral("警告：文件系统微过滤器启动失败，Minifilter 自定义规则暂时不会收到文件事件：error=%1，detail=%2%3")
                 .arg(startResult.win32Error)
-                .arg(QString::fromStdString(startResult.message))
+                .arg(callbackRuleIoMessageText(QString::fromStdString(startResult.message)))
                 .arg(statusSuffix));
             return;
         }
@@ -4095,7 +4188,7 @@ private:
             appendAppLog(
                 QStringLiteral("文件系统微过滤器启动命令已下发，但状态复查失败：error=%1，detail=%2")
                 .arg(afterStatus.io.win32Error)
-                .arg(QString::fromStdString(afterStatus.io.message)));
+                .arg(callbackRuleIoMessageText(QString::fromStdString(afterStatus.io.message))));
         }
     }
 
@@ -4131,7 +4224,7 @@ private:
                 QStringLiteral("应用到驱动失败，error=%1。").arg(applyResult.win32Error));
             appendAppLog(QStringLiteral("应用到驱动失败，error=%1，detail=%2")
                 .arg(applyResult.win32Error)
-                .arg(QString::fromStdString(applyResult.message)));
+                .arg(callbackRuleIoMessageText(QString::fromStdString(applyResult.message))));
             return;
         }
 

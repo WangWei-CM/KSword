@@ -10,13 +10,19 @@
 // ============================================================
 
 #include "../UI/CodeEditorWidget.h"
+#include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAction>
+#include <QApplication>
+#include <QClipboard>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMap>
+#include <QMenu>
 #include <QMetaObject>
 #include <QPointer>
 #include <QPushButton>
@@ -158,6 +164,66 @@ namespace
         itemByPath.insert(normalizedPath, newItem);
         return newItem;
     }
+
+    QString treeItemAsTsv(const QTreeWidget* treeWidget, const QTreeWidgetItem* treeItem)
+    {
+        // 输入：目录递归结果树和当前节点。
+        // 处理：按当前列顺序读取文本，使用 Tab 分隔，便于复制到表格工具。
+        // 返回：TSV 文本；输入为空时返回空字符串。
+        if (treeWidget == nullptr || treeItem == nullptr)
+        {
+            return QString();
+        }
+
+        QStringList fieldList;
+        fieldList.reserve(treeWidget->columnCount());
+        for (int columnIndex = 0; columnIndex < treeWidget->columnCount(); ++columnIndex)
+        {
+            const QString cellText = treeItem->text(columnIndex).trimmed();
+            fieldList.push_back(cellText.isEmpty() ? QStringLiteral("<空>") : cellText);
+        }
+        return fieldList.join('\t');
+    }
+
+    void showTreeCopyRowMenu(QTreeWidget* treeWidget, const QPoint& localPosition)
+    {
+        // 输入：结果树和右键位置。
+        // 处理：同步点击节点为当前节点，显示显式样式菜单并复制当前行。
+        // 返回：无；无节点或剪贴板不可用时静默返回。
+        if (treeWidget == nullptr)
+        {
+            return;
+        }
+
+        QTreeWidgetItem* clickedItem = treeWidget->itemAt(localPosition);
+        if (clickedItem != nullptr)
+        {
+            const int clickedColumn = treeWidget->columnAt(localPosition.x());
+            treeWidget->setCurrentItem(clickedItem, clickedColumn >= 0 ? clickedColumn : 0);
+        }
+
+        QTreeWidgetItem* currentItem = treeWidget->currentItem();
+        QMenu contextMenu(treeWidget);
+        contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+
+        QAction* copyRowAction = contextMenu.addAction(
+            QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+            QStringLiteral("复制当前行"));
+        copyRowAction->setEnabled(currentItem != nullptr);
+
+        const QAction* selectedAction = contextMenu.exec(treeWidget->viewport()->mapToGlobal(localPosition));
+        if (selectedAction != copyRowAction || currentItem == nullptr)
+        {
+            return;
+        }
+
+        QClipboard* clipboard = QApplication::clipboard();
+        const QString rowText = treeItemAsTsv(treeWidget, currentItem);
+        if (clipboard != nullptr && !rowText.isEmpty())
+        {
+            clipboard->setText(rowText);
+        }
+    }
 }
 
 KernelObjectDirectoryDeepTab::KernelObjectDirectoryDeepTab(QWidget* parent)
@@ -217,6 +283,7 @@ void KernelObjectDirectoryDeepTab::initializeUi()
     m_resultTree->setAlternatingRowColors(true);
     m_resultTree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_resultTree->setRootIsDecorated(true);
+    m_resultTree->setContextMenuPolicy(Qt::CustomContextMenu);
     if (m_resultTree->header() != nullptr)
     {
         m_resultTree->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
@@ -238,6 +305,9 @@ void KernelObjectDirectoryDeepTab::initializeUi()
     });
     connect(m_resultTree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem*, QTreeWidgetItem*) {
         showCurrentItemDetail();
+    });
+    connect(m_resultTree, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        showTreeCopyRowMenu(m_resultTree, localPosition);
     });
 }
 

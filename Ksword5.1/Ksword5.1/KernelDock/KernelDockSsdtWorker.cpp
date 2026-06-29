@@ -17,6 +17,42 @@ namespace
             .arg(addressValue, 16, 16, QChar('0'))
             .toUpper();
     }
+
+    // ssdtWorkerIoMessageText：
+    // - 输入：ArkDriverClient::enumerateSsdt 返回的原始 message；
+    // - 处理：将 DeviceIoControl/unsupported/DynData/buffer 等底层日志转换成人读说明；
+    // - 返回：用于 SSDT 页错误提示的中文短文本。
+    QString ssdtWorkerIoMessageText(const QString& rawMessageText)
+    {
+        const QString trimmedText = rawMessageText.trimmed();
+        if (trimmedText.isEmpty())
+        {
+            return QStringLiteral("驱动未返回额外说明。");
+        }
+
+        const QString lowerText = trimmedText.toLower();
+        if (lowerText.contains(QStringLiteral("deviceiocontrol")))
+        {
+            return QStringLiteral("驱动 IOCTL 调用失败或当前驱动版本不匹配。");
+        }
+        if (lowerText.contains(QStringLiteral("unsupported")) ||
+            lowerText.contains(QStringLiteral("not supported")) ||
+            lowerText.contains(QStringLiteral("status=0xc00000bb")))
+        {
+            return QStringLiteral("当前驱动暂不支持 SSDT 枚举接口。");
+        }
+        if (lowerText.contains(QStringLiteral("dyndata")) ||
+            lowerText.contains(QStringLiteral("capability")))
+        {
+            return QStringLiteral("动态偏移能力未满足，SSDT 表地址或解析字段暂不可用。");
+        }
+        if (lowerText.contains(QStringLiteral("buffer")) &&
+            (lowerText.contains(QStringLiteral("small")) || lowerText.contains(QStringLiteral("trunc"))))
+        {
+            return QStringLiteral("驱动返回缓冲区不足，SSDT 结果可能被截断。");
+        }
+        return trimmedText;
+    }
 }
 
 bool runSsdtSnapshotTask(std::vector<KernelSsdtEntry>& rowsOut, QString& errorTextOut)
@@ -33,7 +69,7 @@ bool runSsdtSnapshotTask(std::vector<KernelSsdtEntry>& rowsOut, QString& errorTe
     {
         errorTextOut = QStringLiteral("查询 SSDT 失败，error=%1，detail=%2")
             .arg(enumResult.io.win32Error)
-            .arg(QString::fromStdString(enumResult.io.message));
+            .arg(ssdtWorkerIoMessageText(QString::fromStdString(enumResult.io.message)));
         return false;
     }
 

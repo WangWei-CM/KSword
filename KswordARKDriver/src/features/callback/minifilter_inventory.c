@@ -16,6 +16,7 @@ Environment:
 
 #include <fltKernel.h>
 #include "ark/ark_driver.h"
+#include "driver/KswordArkFilterIoctl.h"
 #include "../../dispatch/ioctl_validation.h"
 
 #include <ntstrsafe.h>

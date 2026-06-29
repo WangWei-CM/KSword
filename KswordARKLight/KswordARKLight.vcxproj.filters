@@ -16,6 +16,9 @@
     <Filter Include="Features">
       <UniqueIdentifier>{ACE49968-076C-57A9-8A61-55B4D58B6C5C}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Features\AuditCommon">
+      <UniqueIdentifier>{AB13C5E8-85C4-4E4C-92A4-2D95D2E8AA31}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Features\Driver">
       <UniqueIdentifier>{B61BD440-EEA9-5AFE-A6A5-67F0D6FCF9F5}</UniqueIdentifier>
     </Filter>
@@ -25,14 +28,23 @@
     <Filter Include="Features\Hardware">
       <UniqueIdentifier>{D107AF21-8A8F-57AC-8575-2BBA9F5A6E34}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Features\Handle">
+      <UniqueIdentifier>{9C7C9799-1C21-4C27-9613-650B18B2B0D5}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Features\Kernel">
       <UniqueIdentifier>{B1A17A9A-802A-535B-BBA2-D1E80C114BD7}</UniqueIdentifier>
     </Filter>
     <Filter Include="Features\Memory">
       <UniqueIdentifier>{C3822275-4E52-5F99-9826-56779BF9F4EF}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Features\Misc">
+      <UniqueIdentifier>{8288F1BA-4921-4E8C-AACD-732E18072A3F}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Features\Monitor">
       <UniqueIdentifier>{0CA44198-75D1-5533-955E-494C2EAF9068}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Features\Network">
+      <UniqueIdentifier>{E3801F92-AEB7-4F27-93F3-D51D15E83D9A}</UniqueIdentifier>
     </Filter>
     <Filter Include="Features\Process">
       <UniqueIdentifier>{28894572-6889-542D-991C-7F48A45F560E}</UniqueIdentifier>
@@ -98,6 +110,18 @@
     <ClCompile Include="Docking\DockManager.cpp">
       <Filter>Docking</Filter>
     </ClCompile>
+    <ClCompile Include="Features\AuditCommon\AuditFormatting.cpp">
+      <Filter>Features\AuditCommon</Filter>
+    </ClCompile>
+    <ClCompile Include="Features\AuditCommon\AuditStatus.cpp">
+      <Filter>Features\AuditCommon</Filter>
+    </ClCompile>
+    <ClCompile Include="Features\AuditCommon\AuditSummaryPanel.cpp">
+      <Filter>Features\AuditCommon</Filter>
+    </ClCompile>
+    <ClCompile Include="Features\AuditCommon\AuditTable.cpp">
+      <Filter>Features\AuditCommon</Filter>
+    </ClCompile>
     <ClCompile Include="Features\Driver\DriverActions.cpp">
       <Filter>Features\Driver</Filter>
     </ClCompile>
@@ -145,6 +169,15 @@
     </ClCompile>
     <ClCompile Include="Features\Hardware\HardwareView.cpp">
       <Filter>Features\Hardware</Filter>
+    </ClCompile>
+    <ClCompile Include="Features\Handle\HandleClient.cpp">
+      <Filter>Features\Handle</Filter>
+    </ClCompile>
+    <ClCompile Include="Features\Handle\HandleFeature.cpp">
+      <Filter>Features\Handle</Filter>
+    </ClCompile>
+    <ClCompile Include="Features\Handle\HandlePage.cpp">
+      <Filter>Features\Handle</Filter>
     </ClCompile>
     <ClCompile Include="Features\Kernel\KernelAtomTableFeature.cpp">
       <Filter>Features\Kernel</Filter>
@@ -239,6 +272,9 @@
     <ClCompile Include="Features\Memory\MemoryFeature.cpp">
       <Filter>Features\Memory</Filter>
     </ClCompile>
+    <ClCompile Include="Features\Misc\MiscFeature.cpp">
+      <Filter>Features\Misc</Filter>
+    </ClCompile>
     <ClCompile Include="Features\Monitor\EtwEventModel.cpp">
       <Filter>Features\Monitor</Filter>
     </ClCompile>
@@ -256,6 +292,15 @@
     </ClCompile>
     <ClCompile Include="Features\Monitor\MonitorFeature.cpp">
       <Filter>Features\Monitor</Filter>
+    </ClCompile>
+    <ClCompile Include="Features\Network\NetworkFeature.cpp">
+      <Filter>Features\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="Features\Network\NetworkModel.cpp">
+      <Filter>Features\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="Features\Network\NetworkView.cpp">
+      <Filter>Features\Network</Filter>
     </ClCompile>
     <ClCompile Include="Features\Process\ProcessActions.cpp">
       <Filter>Features\Process</Filter>
@@ -365,6 +410,9 @@
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverClient.cpp">
       <Filter>ArkDriverClient</Filter>
     </ClCompile>
+    <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverAudit.cpp">
+      <Filter>ArkDriverClient</Filter>
+    </ClCompile>
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ArkDriverClient\ArkDriverDynData.cpp">
       <Filter>ArkDriverClient</Filter>
     </ClCompile>
@@ -424,6 +472,21 @@
     <ClInclude Include="Docking\DockManager.h">
       <Filter>Docking</Filter>
     </ClInclude>
+    <ClInclude Include="Features\AuditCommon\AuditCommon.h">
+      <Filter>Features\AuditCommon</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\AuditCommon\AuditFormatting.h">
+      <Filter>Features\AuditCommon</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\AuditCommon\AuditStatus.h">
+      <Filter>Features\AuditCommon</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\AuditCommon\AuditSummaryPanel.h">
+      <Filter>Features\AuditCommon</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\AuditCommon\AuditTable.h">
+      <Filter>Features\AuditCommon</Filter>
+    </ClInclude>
     <ClInclude Include="Features\Driver\DriverActions.h">
       <Filter>Features\Driver</Filter>
     </ClInclude>
@@ -471,6 +534,15 @@
     </ClInclude>
     <ClInclude Include="Features\Hardware\HardwareView.h">
       <Filter>Features\Hardware</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\Handle\HandleClient.h">
+      <Filter>Features\Handle</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\Handle\HandleFeature.h">
+      <Filter>Features\Handle</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\Handle\HandlePage.h">
+      <Filter>Features\Handle</Filter>
     </ClInclude>
     <ClInclude Include="Features\Kernel\KernelAtomTableFeature.h">
       <Filter>Features\Kernel</Filter>
@@ -565,6 +637,9 @@
     <ClInclude Include="Features\Memory\MemoryFeature.h">
       <Filter>Features\Memory</Filter>
     </ClInclude>
+    <ClInclude Include="Features\Misc\MiscFeature.h">
+      <Filter>Features\Misc</Filter>
+    </ClInclude>
     <ClInclude Include="Features\Monitor\EtwEventModel.h">
       <Filter>Features\Monitor</Filter>
     </ClInclude>
@@ -582,6 +657,15 @@
     </ClInclude>
     <ClInclude Include="Features\Monitor\MonitorFeature.h">
       <Filter>Features\Monitor</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\Network\NetworkFeature.h">
+      <Filter>Features\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\Network\NetworkModel.h">
+      <Filter>Features\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\Network\NetworkView.h">
+      <Filter>Features\Network</Filter>
     </ClInclude>
     <ClInclude Include="Features\Process\ProcessActions.h">
       <Filter>Features\Process</Filter>
@@ -718,6 +802,12 @@
     <ClInclude Include="..\shared\driver\KswordArkFileIoctl.h">
       <Filter>Shared\driver</Filter>
     </ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkFilterIoctl.h">
+      <Filter>Shared\driver</Filter>
+    </ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkDeviceAuditIoctl.h">
+      <Filter>Shared\driver</Filter>
+    </ClInclude>
     <ClInclude Include="..\shared\driver\KswordArkKernelIoctl.h">
       <Filter>Shared\driver</Filter>
     </ClInclude>
@@ -748,10 +838,22 @@
     <ClInclude Include="..\shared\driver\KswordArkSectionIoctl.h">
       <Filter>Shared\driver</Filter>
     </ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkSecurityAuditIoctl.h">
+      <Filter>Shared\driver</Filter>
+    </ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkStorageIoctl.h">
+      <Filter>Shared\driver</Filter>
+    </ClInclude>
     <ClInclude Include="..\shared\driver\KswordArkThreadIoctl.h">
       <Filter>Shared\driver</Filter>
     </ClInclude>
     <ClInclude Include="..\shared\driver\KswordArkTrustIoctl.h">
+      <Filter>Shared\driver</Filter>
+    </ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkNetworkIoctl.h">
+      <Filter>Shared\driver</Filter>
+    </ClInclude>
+    <ClInclude Include="..\shared\driver\KswordArkKernelObjectIoctl.h">
       <Filter>Shared\driver</Filter>
     </ClInclude>
     <ClInclude Include="..\shared\driver\KswordArkWslSiloIoctl.h">

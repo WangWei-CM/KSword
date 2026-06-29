@@ -59,6 +59,34 @@ namespace ksword::driver_dock_internal
             .toUpper();
     }
 
+    // friendlyDriverIoMessage：
+    // - 输入：ArkDriverClient 返回的底层 IO 诊断字符串；
+    // - 处理：把 DeviceIoControl/unsupported/capability 等机器可读文本转成中文说明；
+    // - 返回：适合状态栏、详情区和表格末列展示的短文本。
+    QString friendlyDriverIoMessage(const std::string& rawMessage)
+    {
+        const QString rawText = QString::fromUtf8(rawMessage.data(), static_cast<int>(rawMessage.size())).trimmed();
+        if (rawText.isEmpty())
+        {
+            return QStringLiteral("无额外驱动消息");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动接口调用失败或当前驱动版本不匹配");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动不支持该只读查询入口");
+        }
+        if (rawText.contains(QStringLiteral("capability"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("DynData"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("动态偏移能力未满足，请查看内核 DynData/Capability 状态");
+        }
+        return rawText;
+    }
+
     // isDriverSignatureLoadError：
     // - 输入：StartServiceW 返回后的 Win32 错误码；
     // - 处理：识别“镜像哈希/签名/策略阻止”类加载失败；

@@ -215,6 +215,9 @@ void KernelCommunicationEndpointTab::applyRefreshResult(
     {
         m_statusLabel->setText(QStringLiteral("状态：刷新失败 - %1").arg(errorText));
         m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+        insertDiagnosticRow(
+            QStringLiteral("<刷新失败>"),
+            buildDiagnosticText(QStringLiteral("通信对象枚举失败：%1").arg(errorText)));
     }
 }
 
@@ -251,6 +254,21 @@ void KernelCommunicationEndpointTab::rebuildTable()
         .arg(static_cast<qulonglong>(m_rows.size()))
         .arg(static_cast<qulonglong>(visibleCount)));
     m_statusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#3A8F3A")));
+
+    if (visibleCount == 0U)
+    {
+        // 通信端点空结果诊断：
+        // - 输入：源数据数量与当前筛选；
+        // - 处理：插入可复制诊断行，避免新页看起来没有实现；
+        // - 返回：无返回值，仅更新表格。
+        const QString reasonText = m_rows.empty()
+            ? QStringLiteral("\\ 和 \\RPC Control 未返回可显示通信端点。")
+            : QStringLiteral("当前筛选条件没有命中通信端点。");
+        insertDiagnosticRow(
+            m_rows.empty() ? QStringLiteral("<无通信对象>") : QStringLiteral("<筛选无结果>"),
+            buildDiagnosticText(reasonText));
+        m_table->setCurrentCell(0, static_cast<int>(CommunicationEndpointColumn::Name));
+    }
 }
 
 void KernelCommunicationEndpointTab::showContextMenu(const QPoint& localPosition)
@@ -267,7 +285,9 @@ void KernelCommunicationEndpointTab::showContextMenu(const QPoint& localPosition
     }
 
     QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
+    copyRowAction->setEnabled(m_table->currentRow() >= 0);
     const QAction* selectedAction = menu.exec(m_table->viewport()->mapToGlobal(localPosition));
     if (selectedAction == copyRowAction)
     {
@@ -295,6 +315,47 @@ void KernelCommunicationEndpointTab::copyCurrentRow() const
         fields.push_back(item != nullptr ? item->text() : QString());
     }
     QApplication::clipboard()->setText(fields.join('\t'));
+}
+
+QString KernelCommunicationEndpointTab::buildDiagnosticText(const QString& reasonText) const
+{
+    // buildDiagnosticText：
+    // - 输入：空表或失败原因；
+    // - 处理：补充当前筛选、数据来源和排查建议；
+    // - 返回：适合放在表格状态列和复制文本中的诊断说明。
+    QStringList lines;
+    lines << QStringLiteral("原因：%1").arg(reasonText.trimmed().isEmpty()
+        ? QStringLiteral("<未提供>")
+        : reasonText.trimmed());
+    lines << QStringLiteral("当前筛选：%1").arg(m_filterEdit != nullptr && !m_filterEdit->text().trimmed().isEmpty()
+        ? m_filterEdit->text().trimmed()
+        : QStringLiteral("<无筛选>"));
+    lines << QStringLiteral("源记录总数：%1").arg(static_cast<qulonglong>(m_rows.size()));
+    lines << QStringLiteral("数据来源：Object Manager 目录枚举根目录与 \\RPC Control，只读聚合 ALPC/Port/RPC 相关对象。");
+    lines << QStringLiteral("建议：清空筛选，或切换到 Object Directory Deep / ALPC 页查看更具体的目录与端口关系。");
+    return lines.join(QStringLiteral(" | "));
+}
+
+void KernelCommunicationEndpointTab::insertDiagnosticRow(const QString& titleText, const QString& detailText)
+{
+    // insertDiagnosticRow：
+    // - 输入：标题和诊断文本；
+    // - 处理：写入一行只读占位，保证右键复制可获得诊断；
+    // - 返回：无返回值。
+    if (m_table == nullptr)
+    {
+        return;
+    }
+
+    m_table->setSortingEnabled(false);
+    m_table->setRowCount(1);
+    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Source), readOnlyItem(QStringLiteral("<诊断>")));
+    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Name), readOnlyItem(titleText));
+    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Type), readOnlyItem(QStringLiteral("Diagnostic")));
+    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::FullPath), readOnlyItem(QStringLiteral("<无路径>")));
+    m_table->setItem(0, static_cast<int>(CommunicationEndpointColumn::Status), readOnlyItem(detailText));
+    m_table->setSortingEnabled(true);
+    m_table->setCurrentCell(0, static_cast<int>(CommunicationEndpointColumn::Name));
 }
 
 bool KernelCommunicationEndpointTab::rowMatchesFilter(const KernelObjectDirectoryDeepEntry& entry) const

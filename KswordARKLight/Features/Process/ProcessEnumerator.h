@@ -29,6 +29,12 @@ struct ProcessSnapshotRow {
     double cpuUsagePercent = 0.0;
     std::wstring imageName;
     std::wstring imagePath;
+    std::uintptr_t r0ProcessObjectAddress = 0;
+    ULONG r0SourceMask = 0;
+    ULONG r0AnomalyFlags = 0;
+    ULONG r0Confidence = 0;
+    std::wstring r0AuditSummary;
+    std::wstring r0AuditDetail;
 };
 
 // ProcessEnumerationResult groups all rows from one enumeration pass. success is

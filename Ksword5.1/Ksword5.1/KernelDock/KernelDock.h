@@ -34,6 +34,8 @@ class QVBoxLayout;
 class QShowEvent;
 class CodeEditorWidget;
 class CallbackInterceptController;
+class KernelDockCidTab;
+class KernelDockIpcTab;
 
 // ============================================================
 // KernelObjectTypeEntry
@@ -289,6 +291,26 @@ struct KernelDynDataSummary
     QString pdbProfilePathText;           // pdbProfilePathText：匹配 profile 文件路径。
     QString pdbProfileMessageText;        // pdbProfileMessageText：R0/R3 profile 诊断消息。
     QString pdbProfileIoMessageText;      // pdbProfileIoMessageText：apply IOCTL 传输诊断。
+    bool dynDataV4ModulesQueryOk = false; // dynDataV4ModulesQueryOk：v4 modules 状态查询是否成功。
+    bool dynDataV4ModulesUnsupported = false; // dynDataV4ModulesUnsupported：旧驱动是否缺少 v4 modules 查询入口。
+    std::uint32_t dynDataV4ModulesTotalCount = 0; // dynDataV4ModulesTotalCount：R0 观察到的 v4 module 总数。
+    std::uint32_t dynDataV4ModulesReturnedCount = 0; // dynDataV4ModulesReturnedCount：R0 本次返回的 v4 module 行数。
+    QString dynDataV4ModulesIoMessageText; // dynDataV4ModulesIoMessageText：v4 modules 查询 IO 诊断文本。
+    bool dynDataV4CapabilityGroupsQueryOk = false; // dynDataV4CapabilityGroupsQueryOk：v4 capability groups 查询是否成功。
+    bool dynDataV4CapabilityGroupsUnsupported = false; // dynDataV4CapabilityGroupsUnsupported：旧驱动是否缺少 capability groups 查询入口。
+    std::uint32_t dynDataV4CapabilityGroupsTotalCount = 0; // dynDataV4CapabilityGroupsTotalCount：R0 观察到的 capability group 总数。
+    std::uint32_t dynDataV4CapabilityGroupsReturnedCount = 0; // dynDataV4CapabilityGroupsReturnedCount：R0 本次返回的 capability group 行数。
+    QString dynDataV4CapabilityGroupsIoMessageText; // dynDataV4CapabilityGroupsIoMessageText：capability groups 查询 IO 诊断文本。
+    bool dynDataV4MissingItemsQueryOk = false; // dynDataV4MissingItemsQueryOk：v4 missing items 查询是否成功。
+    bool dynDataV4MissingItemsUnsupported = false; // dynDataV4MissingItemsUnsupported：旧驱动是否缺少 missing items 查询入口。
+    std::uint32_t dynDataV4MissingItemsTotalCount = 0; // dynDataV4MissingItemsTotalCount：R0 观察到的 missing item 总数。
+    std::uint32_t dynDataV4MissingItemsReturnedCount = 0; // dynDataV4MissingItemsReturnedCount：R0 本次返回的 missing item 行数。
+    QString dynDataV4MissingItemsIoMessageText; // dynDataV4MissingItemsIoMessageText：missing items 查询 IO 诊断文本。
+    bool dynDataV4ItemsQueryOk = false; // dynDataV4ItemsQueryOk：v4 已接受 item 清单查询是否成功。
+    bool dynDataV4ItemsUnsupported = false; // dynDataV4ItemsUnsupported：旧驱动是否缺少 v4 items 查询入口。
+    std::uint32_t dynDataV4ItemsTotalCount = 0; // dynDataV4ItemsTotalCount：R0 观察到的 accepted item 总数。
+    std::uint32_t dynDataV4ItemsReturnedCount = 0; // dynDataV4ItemsReturnedCount：R0 本次返回的 accepted item 行数。
+    QString dynDataV4ItemsIoMessageText; // dynDataV4ItemsIoMessageText：v4 items 查询 IO 诊断文本。
 };
 
 // ============================================================
@@ -309,6 +331,27 @@ struct KernelDynDataFieldEntry
     QString featureNameText;             // featureNameText：所属功能名。
     QString statusText;                  // statusText：可用/缺失状态。
     QString detailText;                  // detailText：详情面板文本。
+};
+
+// ============================================================
+// KernelDynDataV4ItemEntry
+// 作用：
+// - 表示 DynData v4 accepted item 表的一行；
+// - 保存 R0 已接受并缓存的 PDB item，便于确认 profile 不是只有摘要。
+// ============================================================
+struct KernelDynDataV4ItemEntry
+{
+    std::uint32_t moduleClassId = 0;      // moduleClassId：KSW_DYN_PROFILE_CLASS_* 模块类别。
+    std::uint32_t itemIndex = 0;          // itemIndex：该模块内的 R0 存储序号。
+    std::uint32_t itemId = 0;             // itemId：v4 item 稳定编号。
+    std::uint32_t itemKind = 0;           // itemKind：StructOffset/GlobalRva/FunctionRva 等类型。
+    std::uint32_t flags = 0;              // flags：required/optional 等 item 标志。
+    std::uint32_t capabilityGroupId = 0;  // capabilityGroupId：所属 capability group。
+    std::uint64_t value = 0;              // value：valueLow/valueHigh 合并后的 64 位值。
+    QString kindText;                     // kindText：itemKind 的人类可读文本。
+    QString flagsText;                    // flagsText：flags 的人类可读文本。
+    QString auxText;                      // auxText：aux0..aux3 辅助字段摘要。
+    QString detailText;                   // detailText：完整明细文本。
 };
 
 // ============================================================
@@ -507,6 +550,14 @@ private:
     // - 作用：创建“IAT/EAT 钩子检测”页签，展示导入/导出表可疑指针。
     void initializeIatEatHookTab();
 
+    // initializeCrossViewTab：
+    // - 作用：创建只读 CID / cross-view 页。
+    void initializeCrossViewTab();
+
+    // initializeIpcTab：
+    // - 作用：创建只读 IPC / NamedPipe / ALPC 聚合页。
+    void initializeIpcTab();
+
     // initializeConnections：
     // - 作用：绑定按钮、筛选框、表格联动与右键菜单。
     void initializeConnections();
@@ -612,6 +663,11 @@ private:
     // - 作用：根据筛选关键词重建动态偏移字段表。
     // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
     void rebuildDynDataFieldTable(const QString& filterKeyword);
+
+    // rebuildDynDataV4ItemTable：
+    // - 作用：重建 v4 accepted item 明细表。
+    // - 参数 filterKeyword：预留筛选关键词，当前与字段筛选框共用。
+    void rebuildDynDataV4ItemTable(const QString& filterKeyword);
 
     // rebuildDriverCapabilityTable：
     // - 作用：根据筛选关键词重建驱动能力矩阵。
@@ -834,6 +890,8 @@ private:
     int m_shadowSsdtTabIndex = -1;       // m_shadowSsdtTabIndex：SSSDT 解析页签索引。
     int m_inlineHookTabIndex = -1;       // m_inlineHookTabIndex：Inline Hook 页签索引。
     int m_iatEatHookTabIndex = -1;       // m_iatEatHookTabIndex：IAT/EAT Hook 页签索引。
+    int m_crossViewTabIndex = -1;        // m_crossViewTabIndex：CID/交叉视图页签索引。
+    int m_ipcTabIndex = -1;              // m_ipcTabIndex：IPC/NamedPipe/ALPC 页签索引。
     bool m_objectNamespaceTabInitialized = false; // m_objectNamespaceTabInitialized：对象命名空间页是否已初始化。
     bool m_atomTabInitialized = false;            // m_atomTabInitialized：原子表页是否已初始化。
     bool m_ssdtTabInitialized = false;            // m_ssdtTabInitialized：SSDT 页是否已初始化。
@@ -845,6 +903,8 @@ private:
     bool m_shadowSsdtTabInitialized = false;      // m_shadowSsdtTabInitialized：SSSDT 页是否已初始化。
     bool m_inlineHookTabInitialized = false;      // m_inlineHookTabInitialized：Inline Hook 页是否已初始化。
     bool m_iatEatHookTabInitialized = false;      // m_iatEatHookTabInitialized：IAT/EAT 页是否已初始化。
+    bool m_crossViewTabInitialized = false;       // m_crossViewTabInitialized：CID 页是否已初始化。
+    bool m_ipcTabInitialized = false;             // m_ipcTabInitialized：IPC 页是否已初始化。
 
     // ==================== 对象命名空间页 ====================
     QWidget* m_objectNamespacePage = nullptr;                  // m_objectNamespacePage：对象命名空间页容器。
@@ -914,6 +974,8 @@ private:
 
     // ==================== IAT/EAT Hook 页 ====================
     QWidget* m_iatEatHookPage = nullptr;                    // m_iatEatHookPage：IAT/EAT 页容器。
+    QWidget* m_crossViewPage = nullptr;                    // m_crossViewPage：CID / cross-view 页容器。
+    QWidget* m_ipcPage = nullptr;                          // m_ipcPage：IPC / ALPC / NamedPipe 页容器。
     QVBoxLayout* m_iatEatHookLayout = nullptr;              // m_iatEatHookLayout：IAT/EAT 页布局。
     QHBoxLayout* m_iatEatHookToolLayout = nullptr;          // m_iatEatHookToolLayout：IAT/EAT 工具栏布局。
     QPushButton* m_refreshIatEatHookButton = nullptr;       // m_refreshIatEatHookButton：刷新按钮。
@@ -936,6 +998,15 @@ private:
     QTableWidget* m_dynDataSummaryTable = nullptr;     // m_dynDataSummaryTable：动态偏移摘要表。
     QTableWidget* m_dynDataFieldTable = nullptr;       // m_dynDataFieldTable：动态偏移字段表。
     CodeEditorWidget* m_dynDataDetailEditor = nullptr; // m_dynDataDetailEditor：动态偏移详情编辑器（只读）。
+    QTabWidget* m_dynDataInnerTabWidget = nullptr;     // m_dynDataInnerTabWidget：动态偏移内部页签容器。
+    QWidget* m_dynDataOverviewPage = nullptr;          // m_dynDataOverviewPage：动态偏移总览页。
+    QVBoxLayout* m_dynDataOverviewLayout = nullptr;    // m_dynDataOverviewLayout：动态偏移总览页布局。
+    QWidget* m_dynDataProfilePage = nullptr;           // m_dynDataProfilePage：PDB profile 状态页。
+    QVBoxLayout* m_dynDataProfileLayout = nullptr;     // m_dynDataProfileLayout：PDB profile 状态页布局。
+    QLabel* m_dynDataProfileStatusLabel = nullptr;     // m_dynDataProfileStatusLabel：PDB profile 状态标签。
+    QTableWidget* m_dynDataProfileSummaryTable = nullptr; // m_dynDataProfileSummaryTable：PDB profile 摘要表。
+    QTableWidget* m_dynDataV4ItemTable = nullptr; // m_dynDataV4ItemTable：PDB profile v4 accepted item 明细表。
+    CodeEditorWidget* m_dynDataProfileDetailEditor = nullptr; // m_dynDataProfileDetailEditor：PDB profile 详情编辑器。
 
     // ==================== 驱动状态页 ====================
     QWidget* m_driverStatusPage = nullptr;                  // m_driverStatusPage：驱动状态页容器。
@@ -976,6 +1047,7 @@ private:
     std::vector<KernelSsdtEntry> m_ssdtRows;                       // m_ssdtRows：SSDT 快照行。
     KernelDynDataSummary m_dynDataSummary;                         // m_dynDataSummary：动态偏移摘要快照。
     std::vector<KernelDynDataFieldEntry> m_dynDataRows;            // m_dynDataRows：动态偏移字段快照行。
+    std::vector<KernelDynDataV4ItemEntry> m_dynDataV4ItemRows;      // m_dynDataV4ItemRows：v4 accepted item 快照行。
     KernelDriverStatusSummary m_driverStatusSummary;               // m_driverStatusSummary：统一驱动状态摘要快照。
     std::vector<KernelDriverCapabilityEntry> m_driverCapabilityRows; // m_driverCapabilityRows：能力矩阵快照行。
     std::vector<KernelCallbackEnumEntry> m_callbackEnumRows;        // m_callbackEnumRows：回调遍历快照行。

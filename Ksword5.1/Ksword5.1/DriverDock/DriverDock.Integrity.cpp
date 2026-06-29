@@ -21,11 +21,31 @@ namespace
         Count
     };
 
+    enum class UnloadedPiddbColumn : int
+    {
+        Evidence = 0,
+        Object,
+        Target,
+        Risk,
+        Source,
+        Confidence,
+        Detail,
+        Count
+    };
+
     int integrityColumnIndex(const IntegrityColumn column)
     {
         // 输入：完整性表列枚举。
         // 处理：转换为 QTableWidget 列号。
         // 返回：列索引。
+        return static_cast<int>(column);
+    }
+
+    int unloadedPiddbColumnIndex(const UnloadedPiddbColumn column)
+    {
+        // 输入：Unloaded/PiDDB 表列枚举。
+        // 处理：转换为 QTableWidget 列号。
+        // 返回：列索引，供写表和复制逻辑复用。
         return static_cast<int>(column);
     }
 
@@ -96,6 +116,48 @@ namespace
         return parts.join(QStringLiteral(" | "));
     }
 
+    QString entryStatusText(const std::uint32_t statusValue)
+    {
+        // 输入：单条完整性证据的 entryStatus。
+        // 处理：把常见协议状态映射为人可读文字，未知值保留数字。
+        // 返回：表格摘要使用的短状态。
+        switch (statusValue)
+        {
+        case KSWORD_ARK_DRIVER_INTEGRITY_STATUS_OK: return QStringLiteral("OK");
+        case KSWORD_ARK_DRIVER_INTEGRITY_STATUS_PARTIAL: return QStringLiteral("Partial");
+        case KSWORD_ARK_DRIVER_INTEGRITY_STATUS_NOT_FOUND: return QStringLiteral("NotFound");
+        case KSWORD_ARK_DRIVER_INTEGRITY_STATUS_BUFFER_TOO_SMALL: return QStringLiteral("BufferTooSmall");
+        case KSWORD_ARK_DRIVER_INTEGRITY_STATUS_QUERY_FAILED: return QStringLiteral("QueryFailed");
+        case KSWORD_ARK_DRIVER_INTEGRITY_STATUS_UNAVAILABLE: return QStringLiteral("Unavailable");
+        default: return QStringLiteral("Status(%1)").arg(statusValue);
+        }
+    }
+
+    QString integritySourceText(const std::uint32_t sourceMask)
+    {
+        // 输入：KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_* 位集合。
+        // 处理：转换为来源摘要，帮助阅读最后一列而不是只看十六进制掩码。
+        // 返回：来源文本。
+        if (sourceMask == 0U)
+        {
+            return QStringLiteral("无来源");
+        }
+
+        QStringList parts;
+        if (sourceMask & KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SYSTEM_MODULE) parts << QStringLiteral("SystemModule");
+        if (sourceMask & KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_AUXKLIB) parts << QStringLiteral("AuxKlib");
+        if (sourceMask & KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_PS_LOADED_MODULES) parts << QStringLiteral("PsLoadedModules");
+        if (sourceMask & KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_OBJECT) parts << QStringLiteral("DriverObject");
+        if (sourceMask & KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DRIVER_SECTION) parts << QStringLiteral("DriverSection");
+        if (sourceMask & KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_SERVICE_REGISTRY) parts << QStringLiteral("ServiceRegistry");
+        if (sourceMask & KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_CPU_REGISTER) parts << QStringLiteral("CPU");
+        if (sourceMask & KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_IDT) parts << QStringLiteral("IDT");
+        if (sourceMask & KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_GDT) parts << QStringLiteral("GDT");
+        if (sourceMask & KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_MSR) parts << QStringLiteral("MSR");
+        if (sourceMask & KSWORD_ARK_DRIVER_INTEGRITY_SOURCE_DYNDATA) parts << QStringLiteral("DynData");
+        return parts.join(QStringLiteral(" | "));
+    }
+
     class NumericItem final : public QTableWidgetItem
     {
     public:
@@ -136,6 +198,127 @@ namespace
         return item;
     }
 
+    QString tableCellText(QTableWidget* table, const int rowIndex, const int columnIndex)
+    {
+        // 输入：目标表格、行号和列号。
+        // 处理：安全读取单元格文本，空 item 归一化为空字符串。
+        // 返回：可用于 TSV 或详情展示的文本。
+        if (table == nullptr)
+        {
+            return QString();
+        }
+        QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+        return item != nullptr ? item->text() : QString();
+    }
+
+    QString escapeTsvCell(QString value)
+    {
+        // 输入：单元格原始文本。
+        // 处理：把换行和 Tab 规整为空格，避免复制后破坏列结构。
+        // 返回：TSV 安全文本。
+        value.replace(QLatin1Char('\t'), QLatin1Char(' '));
+        value.replace(QLatin1Char('\r'), QLatin1Char(' '));
+        value.replace(QLatin1Char('\n'), QLatin1Char(' '));
+        return value.trimmed();
+    }
+
+    void copyIntegrityTableCurrentRow(QTableWidget* table)
+    {
+        // copyIntegrityTableCurrentRow：
+        // - 输入：完整性证据表；
+        // - 处理：复制当前行 TSV；
+        // - 返回：无，不执行修复、卸载或清理动作。
+        if (table == nullptr || QGuiApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        const int currentRow = table->currentRow();
+        if (currentRow < 0)
+        {
+            return;
+        }
+
+        QStringList cells;
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            cells << escapeTsvCell(tableCellText(table, currentRow, columnIndex));
+        }
+        QGuiApplication::clipboard()->setText(cells.join(QLatin1Char('\t')));
+    }
+
+    void installIntegrityTableCopyMenu(QTableWidget* table)
+    {
+        // installIntegrityTableCopyMenu：
+        // - 输入：完整性证据表；
+        // - 处理：安装复制当前行菜单；
+        // - 返回：无，仅做 UI/剪贴板操作。
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition) {
+            const QModelIndex clickedIndex = table->indexAt(localPosition);
+            if (clickedIndex.isValid())
+            {
+                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu contextMenu(table);
+            contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+            QAction* copyRowAction = contextMenu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(table->currentRow() >= 0);
+            if (contextMenu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+            {
+                copyIntegrityTableCurrentRow(table);
+            }
+        });
+    }
+
+    bool isUnloadedPiddbRiskOrDegradedRow(const ksword::ark::DriverIntegrityEvidenceEntry& row)
+    {
+        // 输入：Driver Integrity 证据行。
+        // 处理：识别风险、partial、unsupported、truncated、PDB-required 等需要人工关注的行。
+        // 返回：true 表示“仅风险/降级”模式下仍应显示。
+        constexpr std::uint32_t degradedFlags =
+            KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL |
+            KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED |
+            KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_TRUNCATED |
+            KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PDB_REQUIRED;
+        return row.riskFlags != 0U || (row.statusFlags & degradedFlags) != 0U || row.entryStatus != 0U;
+    }
+
+    bool unloadedPiddbRowMatchesKeyword(
+        const ksword::ark::DriverIntegrityEvidenceEntry& row,
+        const QString& keywordText)
+    {
+        // 输入：证据行和用户关键词。
+        // 处理：在类别、地址、风险、来源、置信度、详情和 owner 中做大小写不敏感匹配。
+        // 返回：true 表示该行通过关键词过滤。
+        if (keywordText.trimmed().isEmpty())
+        {
+            return true;
+        }
+
+        QStringList haystackParts;
+        haystackParts << classText(row.evidenceClass);
+        haystackParts << hex64(row.objectAddress);
+        haystackParts << hex64(row.targetAddress);
+        haystackParts << riskText(row.riskFlags);
+        haystackParts << QStringLiteral("0x%1").arg(row.sourceMask, 8, 16, QChar('0'));
+        haystackParts << QString::number(row.confidence);
+        haystackParts << QString::fromStdWString(row.ownerModule);
+        haystackParts << QString::fromStdWString(row.detail);
+        haystackParts << QString::number(row.entryStatus);
+        haystackParts << QStringLiteral("0x%1").arg(row.statusFlags, 8, 16, QChar('0'));
+        const QString haystackText = haystackParts.join(QStringLiteral("\n"));
+        return haystackText.contains(keywordText.trimmed(), Qt::CaseInsensitive);
+    }
+
     QTableWidgetItem* numericItem(const QString& text, const qulonglong value)
     {
         // 输入：展示文本和排序数值。
@@ -170,18 +353,73 @@ namespace
         text += QStringLiteral("Class: %1 (%2)\n").arg(classText(row.evidenceClass)).arg(row.evidenceClass);
         text += QStringLiteral("RiskFlags: %1 (0x%2)\n").arg(riskText(row.riskFlags)).arg(row.riskFlags, 8, 16, QChar('0'));
         text += QStringLiteral("SourceMask: 0x%1\n").arg(row.sourceMask, 8, 16, QChar('0'));
+        text += QStringLiteral("EntryStatus: %1\n").arg(row.entryStatus);
+        text += QStringLiteral("StatusFlags: 0x%1\n").arg(row.statusFlags, 8, 16, QChar('0'));
+        text += QStringLiteral("FieldMask: 0x%1\n").arg(row.fieldMask, 8, 16, QChar('0'));
+        text += QStringLiteral("RiskScore: %1\n").arg(row.riskScore);
         text += QStringLiteral("Confidence: %1\n").arg(row.confidence);
         text += QStringLiteral("ObjectAddress: %1\n").arg(hex64(row.objectAddress));
         text += QStringLiteral("TargetAddress: %1\n").arg(hex64(row.targetAddress));
         text += QStringLiteral("OwnerModule: %1\n").arg(QString::fromStdWString(row.ownerModule));
         text += QStringLiteral("OwnerModuleBase: %1\n").arg(hex64(row.ownerModuleBase));
         text += QStringLiteral("OwnerModuleSize: %1\n").arg(row.ownerModuleSize);
+        text += QStringLiteral("DriverObject: %1 DriverStart: %2 DriverSize: %3\n")
+            .arg(hex64(row.driverObjectAddress))
+            .arg(hex64(row.driverStart))
+            .arg(hex64(row.driverSize));
+        text += QStringLiteral("KLDR: entry=%1 listHead=%2 dllBase=%3 size=0x%4\n")
+            .arg(hex64(row.kldrEntryAddress))
+            .arg(hex64(row.kldrListHeadAddress))
+            .arg(hex64(row.kldrDllBase))
+            .arg(row.kldrSizeOfImage, 8, 16, QChar('0'));
         text += QStringLiteral("CPU: group=%1 cpu=%2 vector=%3\n")
             .arg(row.processorGroup)
             .arg(row.processorNumber)
             .arg(row.vector);
         text += QStringLiteral("Detail: %1\n").arg(QString::fromStdWString(row.detail));
         return text;
+    }
+
+    QString integritySummaryText(const ksword::ark::DriverIntegrityEvidenceEntry& row)
+    {
+        // 输入：完整性证据行。
+        // 处理：生成表格末列摘要，避免把 R0 原始 detail 直接塞入表格。
+        // 返回：一行中文说明；完整原始 detail 保留在详情编辑器/弹窗。
+        const QString rawDetailText = QString::fromStdWString(row.detail).trimmed();
+        const QString detailSummaryText = rawDetailText.isEmpty()
+            ? QStringLiteral("驱动未返回额外说明")
+            : rawDetailText.left(160);
+        return QStringLiteral("%1；状态=%2；来源=%3；%4")
+            .arg(riskText(row.riskFlags))
+            .arg(entryStatusText(row.entryStatus))
+            .arg(integritySourceText(row.sourceMask))
+            .arg(detailSummaryText);
+    }
+
+    // appendEvidenceRow：
+    // - 输入：证据表和单元格文本；
+    // - 处理：一次性写入一行只读证据；
+    // - 返回：无。
+    void appendEvidenceRow(
+        QTableWidget* table,
+        const int rowIndex,
+        const QString& evidenceText,
+        const QString& objectText,
+        const QString& targetText,
+        const QString& riskText,
+        const QString& confidenceText,
+        const QString& detailTextValue)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+        table->setItem(rowIndex, 0, textItem(evidenceText));
+        table->setItem(rowIndex, 1, textItem(objectText));
+        table->setItem(rowIndex, 2, textItem(targetText));
+        table->setItem(rowIndex, 3, textItem(riskText));
+        table->setItem(rowIndex, 4, textItem(confidenceText));
+        table->setItem(rowIndex, 5, textItem(detailTextValue));
     }
 }
 
@@ -253,7 +491,7 @@ void DriverDock::initializeIntegrityTab()
         QStringLiteral("CPU/Vector"),
         QStringLiteral("风险"),
         QStringLiteral("置信度"),
-        QStringLiteral("Detail")
+        QStringLiteral("说明")
         });
     m_integrityTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_integrityTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -263,16 +501,21 @@ void DriverDock::initializeIntegrityTab()
     m_integrityTable->verticalHeader()->setVisible(false);
     m_integrityTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_integrityTable->horizontalHeader()->setSectionResizeMode(integrityColumnIndex(IntegrityColumn::Detail), QHeaderView::Stretch);
+    installIntegrityTableCopyMenu(m_integrityTable);
     splitter->addWidget(m_integrityTable);
 
-    m_integrityDetailEdit = new QPlainTextEdit(splitter);
+    // 完整性详情区使用项目统一 CodeEditorWidget，方便复制、查找和查看多行 R0 证据。
+    m_integrityDetailEdit = new CodeEditorWidget(splitter);
     m_integrityDetailEdit->setReadOnly(true);
-    m_integrityDetailEdit->setPlaceholderText(QStringLiteral("选择一条完整性证据查看 DriverObject / MajorFunction / FastIo / LDR / CPU entry 详情。"));
+    m_integrityDetailEdit->setText(QStringLiteral("选择一条完整性证据查看 DriverObject / MajorFunction / FastIo / LDR / CPU entry 详情。"));
     splitter->addWidget(m_integrityDetailEdit);
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
 
     m_tabWidget->addTab(m_integrityPage, QIcon(QStringLiteral(":/Icon/process_critical.svg")), QStringLiteral("驱动完整性"));
+
+    rebuildModuleCrossViewTable();
+    rebuildUnloadedPiddbTable();
 }
 
 void DriverDock::refreshDriverIntegrityAsync(const bool cpuOnly)
@@ -333,6 +576,8 @@ void DriverDock::refreshDriverIntegrityAsync(const bool cpuOnly)
             guardThis->m_lastDriverIntegrityResult = result;
             guardThis->m_driverIntegrityCache = result.entries;
             guardThis->rebuildDriverIntegrityTable();
+            guardThis->rebuildModuleCrossViewTable();
+            guardThis->rebuildUnloadedPiddbTable();
             guardThis->showSelectedDriverIntegrityDetail();
 
             if (guardThis->m_integrityStatusLabel != nullptr)
@@ -341,18 +586,29 @@ void DriverDock::refreshDriverIntegrityAsync(const bool cpuOnly)
                 {
                     guardThis->m_integrityStatusLabel->setText(result.unsupported
                         ? QStringLiteral("状态：未集成/驱动过旧，等待 R0 支持")
-                        : QStringLiteral("状态：查询失败 %1").arg(QString::fromStdString(result.io.message)));
+                        : QStringLiteral("状态：查询失败 %1").arg(friendlyDriverIoMessage(result.io.message)));
                     guardThis->m_integrityStatusLabel->setStyleSheet(QStringLiteral("color:#B23A3A; font-weight:700;"));
                 }
                 else
                 {
+                    const bool degraded =
+                        (result.statusFlags &
+                            (KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL |
+                                KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED |
+                                KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_TRUNCATED |
+                                KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PDB_REQUIRED)) != 0U;
                     guardThis->m_integrityStatusLabel->setText(
-                        QStringLiteral("状态：返回 %1/%2，CPU %3，模块 %4")
+                        QStringLiteral("状态：%1，返回 %2/%3，CPU %4，模块 %5，FieldFlags=0x%6，StatusFlags=0x%7")
+                        .arg(degraded ? QStringLiteral("Partial/Degraded") : QStringLiteral("OK"))
                         .arg(result.entries.size())
                         .arg(result.totalCount)
                         .arg(result.cpuCount)
-                        .arg(result.moduleCount));
-                    guardThis->m_integrityStatusLabel->setStyleSheet(QStringLiteral("color:#2F7D32; font-weight:700;"));
+                        .arg(result.moduleCount)
+                        .arg(result.fieldFlags, 8, 16, QChar('0'))
+                        .arg(result.statusFlags, 8, 16, QChar('0')));
+                    guardThis->m_integrityStatusLabel->setStyleSheet(degraded
+                        ? QStringLiteral("color:#9A6A00; font-weight:700;")
+                        : QStringLiteral("color:#2F7D32; font-weight:700;"));
                 }
             }
         }, Qt::QueuedConnection);
@@ -399,7 +655,7 @@ void DriverDock::rebuildDriverIntegrityTable()
             textItem(QStringLiteral("G%1 CPU%2 V%3").arg(row.processorGroup).arg(row.processorNumber).arg(row.vector)));
         m_integrityTable->setItem(rowIndex, integrityColumnIndex(IntegrityColumn::Risk), textItem(riskText(row.riskFlags)));
         m_integrityTable->setItem(rowIndex, integrityColumnIndex(IntegrityColumn::Confidence), numericItem(QString::number(row.confidence), row.confidence));
-        m_integrityTable->setItem(rowIndex, integrityColumnIndex(IntegrityColumn::Detail), textItem(QString::fromStdWString(row.detail)));
+        m_integrityTable->setItem(rowIndex, integrityColumnIndex(IntegrityColumn::Detail), textItem(integritySummaryText(row)));
     }
     if (m_integrityTable->rowCount() > 0 && m_integrityTable->currentRow() < 0)
     {
@@ -407,6 +663,302 @@ void DriverDock::rebuildDriverIntegrityTable()
     }
     m_integrityTable->setSortingEnabled(true);
     ks::ui::RequestTableColumnAutoFit(m_integrityTable);
+}
+
+void DriverDock::rebuildModuleCrossViewTable()
+{
+    // 输入：当前完整性缓存。
+    // 处理：从 DriverObject / DriverSection / DeviceChain / Service 等证据中投影可读行。
+    // 返回：无。
+    if (m_moduleCrossViewTable == nullptr)
+    {
+        return;
+    }
+
+    const QSignalBlocker blocker(m_moduleCrossViewTable);
+    m_moduleCrossViewTable->setSortingEnabled(false);
+    m_moduleCrossViewTable->setRowCount(0);
+
+    int visibleRows = 0;
+    for (const auto& row : m_driverIntegrityCache)
+    {
+        if (row.evidenceClass != KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MODULE_VIEW &&
+            row.evidenceClass != KSWORD_ARK_DRIVER_INTEGRITY_CLASS_PS_LOADED_MODULES &&
+            row.evidenceClass != KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_OBJECT &&
+            row.evidenceClass != KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DRIVER_SECTION &&
+            row.evidenceClass != KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DEVICE_CHAIN &&
+            row.evidenceClass != KSWORD_ARK_DRIVER_INTEGRITY_CLASS_SERVICE)
+        {
+            continue;
+        }
+
+        const int rowIndex = m_moduleCrossViewTable->rowCount();
+        m_moduleCrossViewTable->insertRow(rowIndex);
+        appendEvidenceRow(
+            m_moduleCrossViewTable,
+            rowIndex,
+            classText(row.evidenceClass),
+            hex64(row.objectAddress),
+            hex64(row.targetAddress),
+            riskText(row.riskFlags),
+            QString::number(row.confidence),
+            integritySummaryText(row));
+        ++visibleRows;
+    }
+
+    if (visibleRows == 0)
+    {
+        m_moduleCrossViewTable->setRowCount(1);
+        appendEvidenceRow(
+            m_moduleCrossViewTable,
+            0,
+            QStringLiteral("ModuleView"),
+            QStringLiteral("Unavailable"),
+            QStringLiteral("-"),
+            QStringLiteral("正常"),
+            QStringLiteral("0"),
+            QStringLiteral("当前完整性缓存没有可投影的模块交叉视图证据。"));
+    }
+
+    if (m_moduleCrossViewStatusLabel != nullptr)
+    {
+        m_moduleCrossViewStatusLabel->setText(
+            QStringLiteral("状态：模块 Cross-View 已更新，显示 %1 条。").arg(m_moduleCrossViewTable->rowCount()));
+    }
+    m_moduleCrossViewTable->setSortingEnabled(true);
+}
+
+void DriverDock::rebuildUnloadedPiddbTable()
+{
+    // 输入：当前完整性缓存。
+    // 处理：筛选 OptionalGlobal / DynData 相关证据，并叠加关键词和风险过滤。
+    // 返回：无。
+    if (m_unloadedPiddbTable == nullptr)
+    {
+        return;
+    }
+
+    const QSignalBlocker blocker(m_unloadedPiddbTable);
+    m_unloadedPiddbTable->setSortingEnabled(false);
+    m_unloadedPiddbTable->setRowCount(0);
+
+    const QString keywordText = m_unloadedPiddbFilterEdit != nullptr
+        ? m_unloadedPiddbFilterEdit->text().trimmed()
+        : QString();
+    const bool riskOnly =
+        m_unloadedPiddbRiskOnlyCheck != nullptr &&
+        m_unloadedPiddbRiskOnlyCheck->isChecked();
+    int visibleRows = 0;
+    for (std::size_t cacheIndex = 0; cacheIndex < m_driverIntegrityCache.size(); ++cacheIndex)
+    {
+        const auto& row = m_driverIntegrityCache[cacheIndex];
+        if (row.evidenceClass != KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL &&
+            row.evidenceClass != KSWORD_ARK_DRIVER_INTEGRITY_CLASS_PS_LOADED_MODULES)
+        {
+            continue;
+        }
+        if (riskOnly && !isUnloadedPiddbRiskOrDegradedRow(row))
+        {
+            continue;
+        }
+        if (!unloadedPiddbRowMatchesKeyword(row, keywordText))
+        {
+            continue;
+        }
+
+        const int rowIndex = m_unloadedPiddbTable->rowCount();
+        m_unloadedPiddbTable->insertRow(rowIndex);
+
+        QTableWidgetItem* evidenceItem = textItem(classText(row.evidenceClass));
+        evidenceItem->setData(Qt::UserRole + 1, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(cacheIndex)));
+        m_unloadedPiddbTable->setItem(rowIndex, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Evidence), evidenceItem);
+        m_unloadedPiddbTable->setItem(rowIndex, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Object), numericItem(hex64(row.objectAddress), row.objectAddress));
+        m_unloadedPiddbTable->setItem(rowIndex, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Target), numericItem(hex64(row.targetAddress), row.targetAddress));
+        m_unloadedPiddbTable->setItem(rowIndex, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Risk), textItem(riskText(row.riskFlags)));
+        m_unloadedPiddbTable->setItem(rowIndex, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Source), textItem(QStringLiteral("0x%1").arg(row.sourceMask, 8, 16, QChar('0'))));
+        m_unloadedPiddbTable->setItem(rowIndex, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Confidence), numericItem(QString::number(row.confidence), row.confidence));
+        m_unloadedPiddbTable->setItem(rowIndex, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Detail), textItem(integritySummaryText(row)));
+        ++visibleRows;
+    }
+
+    if (visibleRows == 0)
+    {
+        m_unloadedPiddbTable->setRowCount(1);
+        m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Evidence), textItem(QStringLiteral("OptionalGlobal")));
+        m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Object), textItem(QStringLiteral("Unavailable")));
+        m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Target), textItem(QStringLiteral("-")));
+        m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Risk), textItem(QStringLiteral("正常")));
+        m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Source), textItem(QStringLiteral("-")));
+        m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Confidence), textItem(QStringLiteral("0")));
+        m_unloadedPiddbTable->setItem(0, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Detail), textItem(QStringLiteral("当前完整性缓存没有可投影的 Unloaded / PiDDB 证据。")));
+    }
+
+    if (m_unloadedPiddbStatusLabel != nullptr)
+    {
+        m_unloadedPiddbStatusLabel->setText(
+            QStringLiteral("状态：Unloaded / PiDDB 已更新，显示 %1 条，过滤=\"%2\"，风险/降级=%3。")
+            .arg(m_unloadedPiddbTable->rowCount())
+            .arg(keywordText.isEmpty() ? QStringLiteral("<无>") : keywordText)
+            .arg(riskOnly ? QStringLiteral("开") : QStringLiteral("关")));
+    }
+    m_unloadedPiddbTable->setSortingEnabled(true);
+}
+
+void DriverDock::showUnloadedPiddbContextMenu(const QPoint& localPosition)
+{
+    // 输入：表格局部坐标。
+    // 处理：只提供复制和详情查看动作，不提供清理卸载记录或 PiDDB 修改入口。
+    // 返回：无。
+    if (m_unloadedPiddbTable == nullptr)
+    {
+        return;
+    }
+
+    const QModelIndex clickedIndex = m_unloadedPiddbTable->indexAt(localPosition);
+    if (clickedIndex.isValid())
+    {
+        m_unloadedPiddbTable->selectRow(clickedIndex.row());
+    }
+
+    QMenu contextMenu(this);
+    contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+    QAction* detailAction = contextMenu.addAction(
+        QIcon(QStringLiteral(":/Icon/process_details.svg")),
+        QStringLiteral("查看完整证据详情"));
+    QAction* copyRowAction = contextMenu.addAction(
+        QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+        QStringLiteral("复制当前行"));
+    QAction* copyVisibleAction = contextMenu.addAction(
+        QIcon(QStringLiteral(":/Icon/log_copy.svg")),
+        QStringLiteral("复制可见行"));
+
+    QAction* selectedAction = contextMenu.exec(m_unloadedPiddbTable->viewport()->mapToGlobal(localPosition));
+    if (selectedAction == detailAction)
+    {
+        showSelectedUnloadedPiddbDetailDialog();
+        return;
+    }
+    if (selectedAction == copyRowAction)
+    {
+        copySelectedUnloadedPiddbRow();
+        return;
+    }
+    if (selectedAction == copyVisibleAction)
+    {
+        copyVisibleUnloadedPiddbRows();
+        return;
+    }
+}
+
+void DriverDock::showSelectedUnloadedPiddbDetailDialog()
+{
+    // 输入：当前表格选择。
+    // 处理：从 UserRole 缓存索引读取完整 Driver Integrity 行，使用 CodeEditorWidget 展示。
+    // 返回：无；弹窗为只读并显式设置不透明样式。
+    if (m_unloadedPiddbTable == nullptr)
+    {
+        return;
+    }
+
+    const int currentRow = m_unloadedPiddbTable->currentRow();
+    if (currentRow < 0)
+    {
+        return;
+    }
+
+    QTableWidgetItem* evidenceItem =
+        m_unloadedPiddbTable->item(currentRow, unloadedPiddbColumnIndex(UnloadedPiddbColumn::Evidence));
+    bool ok = false;
+    const qulonglong cacheIndex = evidenceItem != nullptr
+        ? evidenceItem->data(Qt::UserRole + 1).toULongLong(&ok)
+        : 0ULL;
+    if (!ok || cacheIndex >= static_cast<qulonglong>(m_driverIntegrityCache.size()))
+    {
+        return;
+    }
+
+    QDialog detailDialog(this);
+    detailDialog.setObjectName(QStringLiteral("driverDockUnloadedPiddbDetailDialog"));
+    detailDialog.setWindowTitle(QStringLiteral("Unloaded / PiDDB 证据详情"));
+    detailDialog.resize(860, 620);
+    detailDialog.setStyleSheet(KswordTheme::OpaqueDialogStyle(detailDialog.objectName()));
+
+    QVBoxLayout* dialogLayout = new QVBoxLayout(&detailDialog);
+    dialogLayout->setContentsMargins(10, 10, 10, 10);
+    dialogLayout->setSpacing(8);
+
+    CodeEditorWidget* detailEditor = new CodeEditorWidget(&detailDialog);
+    detailEditor->setReadOnly(true);
+    detailEditor->setText(detailText(m_driverIntegrityCache[static_cast<std::size_t>(cacheIndex)]));
+    dialogLayout->addWidget(detailEditor, 1);
+
+    QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &detailDialog);
+    QPushButton* copyButton = buttonBox->addButton(QStringLiteral("复制详情"), QDialogButtonBox::ActionRole);
+    QObject::connect(copyButton, &QPushButton::clicked, &detailDialog, [detailEditor]()
+        {
+            if (detailEditor != nullptr && QGuiApplication::clipboard() != nullptr)
+            {
+                QGuiApplication::clipboard()->setText(detailEditor->text());
+            }
+        });
+    QObject::connect(buttonBox, &QDialogButtonBox::rejected, &detailDialog, &QDialog::reject);
+    dialogLayout->addWidget(buttonBox);
+    detailDialog.exec();
+}
+
+void DriverDock::copySelectedUnloadedPiddbRow()
+{
+    // 输入：当前表格选择。
+    // 处理：复制单行 TSV，便于粘贴到表格或工单。
+    // 返回：无。
+    if (m_unloadedPiddbTable == nullptr || QGuiApplication::clipboard() == nullptr)
+    {
+        return;
+    }
+
+    const int currentRow = m_unloadedPiddbTable->currentRow();
+    if (currentRow < 0)
+    {
+        return;
+    }
+
+    QStringList cells;
+    for (int columnIndex = 0; columnIndex < m_unloadedPiddbTable->columnCount(); ++columnIndex)
+    {
+        cells << escapeTsvCell(tableCellText(m_unloadedPiddbTable, currentRow, columnIndex));
+    }
+    QGuiApplication::clipboard()->setText(cells.join(QLatin1Char('\t')));
+}
+
+void DriverDock::copyVisibleUnloadedPiddbRows()
+{
+    // 输入：当前表格可见内容。
+    // 处理：复制表头和所有行，保留当前过滤后的视图。
+    // 返回：无。
+    if (m_unloadedPiddbTable == nullptr || QGuiApplication::clipboard() == nullptr)
+    {
+        return;
+    }
+
+    QStringList lines;
+    QStringList headerCells;
+    for (int columnIndex = 0; columnIndex < m_unloadedPiddbTable->columnCount(); ++columnIndex)
+    {
+        QTableWidgetItem* headerItem = m_unloadedPiddbTable->horizontalHeaderItem(columnIndex);
+        headerCells << escapeTsvCell(headerItem != nullptr ? headerItem->text() : QString());
+    }
+    lines << headerCells.join(QLatin1Char('\t'));
+
+    for (int rowIndex = 0; rowIndex < m_unloadedPiddbTable->rowCount(); ++rowIndex)
+    {
+        QStringList rowCells;
+        for (int columnIndex = 0; columnIndex < m_unloadedPiddbTable->columnCount(); ++columnIndex)
+        {
+            rowCells << escapeTsvCell(tableCellText(m_unloadedPiddbTable, rowIndex, columnIndex));
+        }
+        lines << rowCells.join(QLatin1Char('\t'));
+    }
+    QGuiApplication::clipboard()->setText(lines.join(QLatin1Char('\n')));
 }
 
 void DriverDock::showSelectedDriverIntegrityDetail()
@@ -421,7 +973,7 @@ void DriverDock::showSelectedDriverIntegrityDetail()
     const int currentRow = m_integrityTable->currentRow();
     if (currentRow < 0)
     {
-        m_integrityDetailEdit->setPlainText(QStringLiteral("请选择一条驱动完整性证据。"));
+        m_integrityDetailEdit->setText(QStringLiteral("请选择一条驱动完整性证据。"));
         return;
     }
     const QTableWidgetItem* classItem = m_integrityTable->item(currentRow, integrityColumnIndex(IntegrityColumn::Class));
@@ -431,5 +983,5 @@ void DriverDock::showSelectedDriverIntegrityDetail()
     {
         return;
     }
-    m_integrityDetailEdit->setPlainText(detailText(m_driverIntegrityCache[static_cast<std::size_t>(cacheIndex)]));
+    m_integrityDetailEdit->setText(detailText(m_driverIntegrityCache[static_cast<std::size_t>(cacheIndex)]));
 }

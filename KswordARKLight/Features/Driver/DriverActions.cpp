@@ -92,31 +92,6 @@ const wchar_t* DriverObjectQueryStatusText(const std::uint32_t status) {
     }
 }
 
-// DriverUnloadStatusText maps the shared force-unload aggregate status to a
-// concise label. Input is a KSWORD_ARK_DRIVER_UNLOAD_STATUS_* value; output is
-// display text for confirmation/results.
-const wchar_t* DriverUnloadStatusText(const std::uint32_t status) {
-    switch (status) {
-    case KSWORD_ARK_DRIVER_UNLOAD_STATUS_UNLOADED: return L"Unloaded";
-    case KSWORD_ARK_DRIVER_UNLOAD_STATUS_UNLOAD_ROUTINE_MISSING: return L"Unload routine missing";
-    case KSWORD_ARK_DRIVER_UNLOAD_STATUS_REFERENCE_FAILED: return L"Reference failed";
-    case KSWORD_ARK_DRIVER_UNLOAD_STATUS_THREAD_FAILED: return L"Thread failed";
-    case KSWORD_ARK_DRIVER_UNLOAD_STATUS_WAIT_TIMEOUT: return L"Wait timeout";
-    case KSWORD_ARK_DRIVER_UNLOAD_STATUS_OPERATION_FAILED: return L"Operation failed";
-    case KSWORD_ARK_DRIVER_UNLOAD_STATUS_FORCED_CLEANUP: return L"Forced cleanup";
-    case KSWORD_ARK_DRIVER_UNLOAD_STATUS_CLEANUP_FAILED: return L"Cleanup failed";
-    default: return L"Unknown";
-    }
-}
-
-// DriverUnloadSucceeded reports whether the R0 response represents a completed
-// unload path. Input is the aggregate status; output controls the result's
-// success flag without hiding the detailed status text.
-bool DriverUnloadSucceeded(const std::uint32_t status) {
-    return status == KSWORD_ARK_DRIVER_UNLOAD_STATUS_UNLOADED ||
-        status == KSWORD_ARK_DRIVER_UNLOAD_STATUS_FORCED_CLEANUP;
-}
-
 // MajorFunctionName returns a standard IRP_MJ_* name for one dispatch slot.
 // Input is a major-function index; output falls back to a numeric label when
 // the value is not in the common Windows range.
@@ -162,31 +137,6 @@ void AppendLine(std::wstring& text, const std::wstring& label, const std::wstrin
     text += L": ";
     text += value;
     text += L"\r\n";
-}
-
-// BuildUnloadResultText formats a DriverForceUnloadResult. Input is the parsed
-// ArkDriverClient response; processing preserves IO, NTSTATUS and cleanup
-// diagnostics; output is suitable for a MessageBox and status bar.
-std::wstring BuildUnloadResultText(const ksword::ark::DriverForceUnloadResult& unload) {
-    std::wstring text;
-    AppendLine(text, L"IO", unload.io.ok ? L"OK" : L"FAIL");
-    AppendLine(text, L"Win32", std::to_wstring(unload.io.win32Error));
-    AppendLine(text, L"BytesReturned", std::to_wstring(unload.io.bytesReturned));
-    AppendLine(text, L"Status", std::wstring(DriverUnloadStatusText(unload.status)) + L" (" + std::to_wstring(unload.status) + L")");
-    AppendLine(text, L"DriverName", unload.driverName);
-    AppendLine(text, L"DriverObject", HexText(unload.driverObjectAddress));
-    AppendLine(text, L"DriverUnload", HexText(unload.driverUnloadAddress));
-    AppendLine(text, L"Flags", HexText(unload.flags));
-    AppendLine(text, L"CleanupFlagsApplied", HexText(unload.cleanupFlagsApplied));
-    AppendLine(text, L"DeletedDeviceCount", std::to_wstring(unload.deletedDeviceCount));
-    AppendLine(text, L"LastStatus", NtStatusText(unload.lastStatus));
-    AppendLine(text, L"WaitStatus", NtStatusText(unload.waitStatus));
-    AppendLine(text, L"CallbackCandidates", std::to_wstring(unload.callbackCandidates));
-    AppendLine(text, L"CallbacksRemoved", std::to_wstring(unload.callbacksRemoved));
-    AppendLine(text, L"CallbackFailures", std::to_wstring(unload.callbackFailures));
-    AppendLine(text, L"CallbackLastStatus", NtStatusText(unload.callbackLastStatus));
-    AppendLine(text, L"Message", Utf8ToWide(unload.io.message));
-    return text;
 }
 
 } // namespace
@@ -315,39 +265,6 @@ DriverActionResult DriverActions::BuildDriverObjectDetailText(const std::wstring
     }
 
     result.statusText = text;
-    return result;
-}
-
-DriverActionResult DriverActions::ForceUnloadDriverObject(const std::wstring& driverObjectName, const unsigned long flags) {
-    DriverActionResult result;
-    if (driverObjectName.empty()) {
-        result.statusText = L"DriverObject 名称为空，无法调用 R0 卸载。";
-        return result;
-    }
-
-    const ksword::ark::DriverClient client;
-    const ksword::ark::DriverForceUnloadResult unload = client.forceUnloadDriver(driverObjectName, flags, 3000UL);
-    result.success = unload.io.ok && DriverUnloadSucceeded(unload.status);
-    result.statusText = BuildUnloadResultText(unload);
-    return result;
-}
-
-DriverActionResult DriverActions::ForceUnloadDriverByModuleBase(
-    const std::uint64_t moduleBase,
-    const std::wstring& fallbackDriverName,
-    const unsigned long flags) {
-    DriverActionResult result;
-    if (moduleBase == 0 && fallbackDriverName.empty()) {
-        result.statusText = L"模块基址和 DriverObject 名称均为空，无法调用 R0 卸载。";
-        return result;
-    }
-
-    const ksword::ark::DriverClient client;
-    const ksword::ark::DriverForceUnloadResult unload = moduleBase != 0
-        ? client.forceUnloadDriverByModuleBase(moduleBase, fallbackDriverName, flags, 3000UL)
-        : client.forceUnloadDriver(fallbackDriverName, flags, 3000UL);
-    result.success = unload.io.ok && DriverUnloadSucceeded(unload.status);
-    result.statusText = BuildUnloadResultText(unload);
     return result;
 }
 

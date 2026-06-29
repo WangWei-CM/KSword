@@ -98,6 +98,14 @@ namespace network_dock_detail
     // - 创建统一的只读表格单元格。
     QTableWidgetItem* createPacketCell(const QString& cellText);
 
+    // installCopyCurrentRowMenu 作用：
+    // - 输入 tableWidget 为需要右键复制的只读/审计表格，actionText 为菜单文本；
+    // - 处理：安装显式主题样式的右键菜单，把当前行按 TSV 写入剪贴板；
+    // - 返回：无。该 helper 不触发任何网络动作，只复制 UI 可见证据。
+    void installCopyCurrentRowMenu(
+        QTableWidget* tableWidget,
+        const QString& actionText = QStringLiteral("复制当前行"));
+
     // populatePacketRow 作用：
     // - 把报文实体按统一列定义写入目标表格行。
     void populatePacketRow(
@@ -111,4 +119,3 @@ namespace network_dock_detail
     // - 以非模态独立窗口展示报文详情并激活窗口。
     void showPacketDetailWindow(const ks::network::PacketRecord& packetRecord);
 }
-

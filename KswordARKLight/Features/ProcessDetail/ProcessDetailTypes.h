@@ -48,6 +48,25 @@ struct ProcessModuleInfo {
     std::wstring statusText;
 };
 
+// ProcessR0AuditInfo is one read-only R0 evidence row shown in the audit tab.
+// Inputs come from ArkDriverClient cross-view wrappers; consumers only render
+// the object/source/anomaly/status fields and must not treat addresses as
+// writable operation handles.
+struct ProcessR0AuditInfo {
+    std::wstring scope;
+    DWORD processId = 0;
+    DWORD threadId = 0;
+    std::uintptr_t objectAddress = 0;
+    std::uintptr_t relatedObjectAddress = 0;
+    std::uintptr_t startAddress = 0;
+    ULONG sourceMask = 0;
+    ULONG anomalyFlags = 0;
+    ULONG confidence = 0;
+    std::wstring sourceText;
+    std::wstring anomalyText;
+    std::wstring detailText;
+};
+
 // ProcessDetailSnapshot is a complete page refresh result. Input is a target
 // PID; processing is performed by ProcessDetailCollector; output is copied into
 // the page and remains valid without holding process handles.
@@ -55,10 +74,12 @@ struct ProcessDetailSnapshot {
     ProcessBasicInfo basic;
     std::vector<ProcessThreadInfo> threads;
     std::vector<ProcessModuleInfo> modules;
+    std::vector<ProcessR0AuditInfo> r0AuditRows;
     std::wstring errorText;
     bool basicSucceeded = false;
     bool threadsSucceeded = false;
     bool modulesSucceeded = false;
+    bool r0AuditSucceeded = false;
 };
 
 } // namespace Ksword::Features::ProcessDetail

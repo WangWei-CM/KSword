@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../theme.h"
+#include "../UI/CodeEditorWidget.h"
 
 #include <QAbstractItemView>
 #include <QAction>
@@ -21,7 +22,6 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMetaObject>
-#include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
 #include <QRunnable>
@@ -181,10 +181,14 @@ void KernelNamedPipeTab::initializeUi()
         m_resultTable->header()->setStretchLastSection(false);
     }
 
-    m_detailEdit = new QPlainTextEdit(this);
+    // m_detailEdit 使用项目内置 CodeEditorWidget：
+    // - 输入：NPFS 枚举说明、候选路径状态和当前行详情；
+    // - 处理：以只读代码/日志视图展示多行文本；
+    // - 返回：无，控件由 Qt 父子关系释放。
+    m_detailEdit = new CodeEditorWidget(this);
     m_detailEdit->setReadOnly(true);
     m_detailEdit->setMinimumHeight(150);
-    m_detailEdit->setPlainText(QStringLiteral(
+    m_detailEdit->setText(QStringLiteral(
         "说明：命名管道属于 NPFS 文件系统目录枚举，本页使用 NtOpenFile + NtQueryDirectoryFile 读取 \\Device\\NamedPipe。"
         "\n这不是 NtQueryDirectoryObject 下钻，也不是系统句柄表枚举。"));
 
@@ -377,7 +381,7 @@ void KernelNamedPipeTab::updateDetailPanel()
     detailLines << buildDirectoryStatusText(m_lastSnapshot);
     detailLines << QString();
     detailLines << buildSelectedRowDetailText(selectedRow());
-    m_detailEdit->setPlainText(detailLines.join('\n'));
+    m_detailEdit->setText(detailLines.join('\n'));
 }
 
 void KernelNamedPipeTab::copyCurrentRow()
@@ -410,6 +414,7 @@ void KernelNamedPipeTab::showContextMenu(const QPoint& localPosition)
     m_resultTable->setCurrentItem(clickedItem);
 
     QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/handle_copy_row.svg"), QStringLiteral("复制当前行"));
     QAction* detailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("刷新详情"));
 

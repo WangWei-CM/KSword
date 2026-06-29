@@ -25,6 +25,8 @@
 
 #pragma comment(lib, "Winhttp.lib")
 
+using namespace network_dock_detail;
+
 namespace
 {
     enum MultiDownloadTaskColumn
@@ -845,6 +847,7 @@ void NetworkDock::initializeMultiThreadDownloadTab()
     m_multiDownloadTaskTable->verticalHeader()->setVisible(false);
     m_multiDownloadTaskTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     // 横向滚动条不强制关闭：默认由全局列宽自适应压入 viewport，用户拖宽列后按需出现。
+    installCopyCurrentRowMenu(m_multiDownloadTaskTable);
     m_multiThreadDownloadLayout->addWidget(m_multiDownloadTaskTable, 1);
 
     QLabel* progressTitleLabel = new QLabel(
@@ -873,6 +876,7 @@ void NetworkDock::initializeMultiThreadDownloadTab()
     m_multiDownloadSegmentTable->verticalHeader()->setVisible(false);
     m_multiDownloadSegmentTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     // 横向滚动条不强制关闭：默认由全局列宽自适应压入 viewport，用户拖宽列后按需出现。
+    installCopyCurrentRowMenu(m_multiDownloadSegmentTable);
     m_multiThreadDownloadLayout->addWidget(m_multiDownloadSegmentTable, 1);
 
     m_sideTabWidget->addTab(

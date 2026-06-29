@@ -4,7 +4,7 @@
 
 namespace Ksword::Features::Hardware {
 
-// EnumerateDeviceManagerTree builds the device-manager-only hardware view. There
+// EnumerateDeviceManagerTree builds the read-only hardware audit baseline. There
 // is no input; processing uses SetupAPI for device records and Configuration
 // Manager for parent/status data; output contains a tree-ready snapshot.
 HardwareEnumerationResult EnumerateDeviceManagerTree();

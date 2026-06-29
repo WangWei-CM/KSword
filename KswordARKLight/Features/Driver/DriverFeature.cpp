@@ -27,9 +27,8 @@ constexpr int kOverviewTabIndex = 0;
 constexpr int kObjectTabIndex = 1;
 constexpr int kIntegrityTabIndex = 2;
 constexpr int kDynDataCapabilitiesTabIndex = 3;
-constexpr int kMinifilterBypassPidsTabIndex = 4;
-constexpr int kDriverStatusTabIndex = 5;
-constexpr int kDynDataTabIndex = 6;
+constexpr int kDriverStatusTabIndex = 4;
+constexpr int kDynDataTabIndex = 5;
 
 // DriverFeaturePageState owns the root page HWND, local driver views, and
 // retained KernelPage-backed migration tabs. Inputs arrive through Win32
@@ -45,7 +44,6 @@ struct DriverFeaturePageState {
     HWND objectView = nullptr;
     HWND integrityView = nullptr;
     HWND dynDataCapabilitiesView = nullptr;
-    HWND minifilterBypassPidsView = nullptr;
     HWND driverStatusView = nullptr;
     HWND dynDataView = nullptr;
     DriverModel model;
@@ -80,7 +78,6 @@ void ShowChildPages(DriverFeaturePageState& state) {
     const bool objectVisible = state.currentTab == kObjectTabIndex;
     const bool integrityVisible = state.currentTab == kIntegrityTabIndex;
     const bool dynDataCapabilitiesVisible = state.currentTab == kDynDataCapabilitiesTabIndex;
-    const bool minifilterBypassPidsVisible = state.currentTab == kMinifilterBypassPidsTabIndex;
     const bool driverStatusVisible = state.currentTab == kDriverStatusTabIndex;
     const bool dynDataVisible = state.currentTab == kDynDataTabIndex;
     if (state.overviewView) {
@@ -94,9 +91,6 @@ void ShowChildPages(DriverFeaturePageState& state) {
     }
     if (state.dynDataCapabilitiesView) {
         ::ShowWindow(state.dynDataCapabilitiesView, dynDataCapabilitiesVisible ? SW_SHOW : SW_HIDE);
-    }
-    if (state.minifilterBypassPidsView) {
-        ::ShowWindow(state.minifilterBypassPidsView, minifilterBypassPidsVisible ? SW_SHOW : SW_HIDE);
     }
     if (state.driverStatusView) {
         ::ShowWindow(state.driverStatusView, driverStatusVisible ? SW_SHOW : SW_HIDE);
@@ -139,7 +133,6 @@ void LayoutChildren(DriverFeaturePageState& state) {
         state.objectView,
         state.integrityView,
         state.dynDataCapabilitiesView,
-        state.minifilterBypassPidsView,
         state.driverStatusView,
         state.dynDataView
     };
@@ -180,7 +173,6 @@ void CopyCurrentTabTsv(DriverFeaturePageState& state) {
         tsv = ExportDriverObjectViewTsv(state.objectView);
     } else if (state.currentTab == kIntegrityTabIndex ||
         state.currentTab == kDynDataCapabilitiesTabIndex ||
-        state.currentTab == kMinifilterBypassPidsTabIndex ||
         state.currentTab == kDriverStatusTabIndex ||
         state.currentTab == kDynDataTabIndex) {
         SetStatus(state, L"当前页由内核模块渲染，请在该页内使用其右键菜单复制/导出。");
@@ -212,7 +204,6 @@ bool CreateChildControls(DriverFeaturePageState& state) {
     Ksword::Ui::AddTabPage(state.tab, kObjectTabIndex, { L"对象信息" });
     Ksword::Ui::AddTabPage(state.tab, kIntegrityTabIndex, { L"驱动完整性" });
     Ksword::Ui::AddTabPage(state.tab, kDynDataCapabilitiesTabIndex, { L"DynData能力" });
-    Ksword::Ui::AddTabPage(state.tab, kMinifilterBypassPidsTabIndex, { L"Minifilter放行PID" });
     Ksword::Ui::AddTabPage(state.tab, kDriverStatusTabIndex, { L"驱动状态" });
     Ksword::Ui::AddTabPage(state.tab, kDynDataTabIndex, { L"动态偏移 / DynData" });
     ::SendMessageW(state.tab, TCM_SETCURSEL, static_cast<WPARAM>(kOverviewTabIndex), 0);
@@ -237,26 +228,20 @@ bool CreateChildControls(DriverFeaturePageState& state) {
         65006,
         childBounds,
         Ksword::Features::Kernel::KernelFeatureId::DynDataCapabilities);
-    state.minifilterBypassPidsView = Ksword::Features::Kernel::CreateKernelSingleFeaturePage(
-        state.tab,
-        65007,
-        childBounds,
-        Ksword::Features::Kernel::KernelFeatureId::MinifilterBypassPids);
     state.driverStatusView = Ksword::Features::Kernel::CreateKernelSingleFeaturePage(
         state.tab,
-        65008,
+        65007,
         childBounds,
         Ksword::Features::Kernel::KernelFeatureId::DriverStatus);
     state.dynDataView = Ksword::Features::Kernel::CreateKernelSingleFeaturePage(
         state.tab,
-        65009,
+        65008,
         childBounds,
         Ksword::Features::Kernel::KernelFeatureId::DynData);
     if (!state.overviewView ||
         !state.objectView ||
         !state.integrityView ||
         !state.dynDataCapabilitiesView ||
-        !state.minifilterBypassPidsView ||
         !state.driverStatusView ||
         !state.dynDataView) {
         return false;

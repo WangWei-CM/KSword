@@ -1,11 +1,15 @@
 #include "MonitorDock.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../UI/CodeEditorWidget.h"
 #include "../UI/TableColumnAutoFit.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAction>
+#include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -19,10 +23,11 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QModelIndex>
 #include <QPointer>
-#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRunnable>
 #include <QSignalBlocker>
@@ -73,6 +78,28 @@ namespace
         return value.empty() ? QString() : QString::fromStdString(value);
     }
 
+    QString friendlyIoMessage(const std::string& value)
+    {
+        // 输入：ArkDriverClient io.message 原始文本。
+        // 处理：把 DeviceIoControl/unsupported/空消息转换为适合状态栏和风险明细的中文说明。
+        // 返回：可直接拼入 ARK 风险中心摘要行的短文本。
+        const QString rawText = narrowText(value).trimmed();
+        if (rawText.isEmpty())
+        {
+            return QStringLiteral("无额外驱动消息");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动接口调用失败或当前驱动版本不支持该审计入口");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not implemented"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动版本尚未提供该审计入口");
+        }
+        return rawText;
+    }
+
     double clampScore(const double score)
     {
         // Input: arbitrary risk score. Processing: clamp to the risk-center range. Return: 0..100 score.
@@ -88,17 +115,91 @@ namespace
     QString ioSummary(const ksword::ark::IoResult& io)
     {
         // Input: ArkDriverClient I/O result. Processing: compact transport/protocol diagnostics. Return: one line.
-        return QStringLiteral("ok=%1 win32=%2 nt=%3 bytes=%4 %5")
+        return QStringLiteral("ok=%1 win32=%2 nt=%3 bytes=%4 说明=%5")
             .arg(io.ok ? QStringLiteral("true") : QStringLiteral("false"))
             .arg(io.win32Error)
             .arg(hex32(static_cast<std::uint32_t>(io.ntStatus)))
             .arg(io.bytesReturned)
-            .arg(QString::fromStdString(io.message));
+            .arg(friendlyIoMessage(io.message));
+    }
+
+    QString arkRiskTableMenuStyle()
+    {
+        // 输入：无。
+        // 处理：生成不透明 QMenu 样式，避免深色主题下右键菜单透明或文字不可读。
+        // 返回：可直接 setStyleSheet 到表格右键菜单的样式文本。
+        return QStringLiteral(
+            "QMenu{background:%1;color:%2;border:1px solid %3;}"
+            "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
+            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:disabled{color:%5;}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::TextSecondaryHex());
+    }
+
+    void copyArkRiskTableCurrentRow(QTableWidget* table)
+    {
+        // 输入：风险中心表格。
+        // 处理：读取当前显示行的所有列，按 TSV 写入剪贴板。
+        // 返回：无返回值；无当前行或剪贴板不可用时静默返回。
+        if (table == nullptr || QApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        const int rowIndex = table->currentRow();
+        if (rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return;
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+            fields.push_back(item != nullptr ? item->text() : QString());
+        }
+        QApplication::clipboard()->setText(fields.join(QChar('\t')));
+    }
+
+    void installArkRiskTableCopyMenu(QTableWidget* table)
+    {
+        // 输入：需要右键复制能力的风险中心表格。
+        // 处理：安装只读“复制当前行”菜单；右键点击行时同步当前单元格。
+        // 返回：无返回值；不触发任何审计动作或系统修改。
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition) {
+            const QModelIndex clickedIndex = table->indexAt(localPosition);
+            if (clickedIndex.isValid())
+            {
+                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu menu(table);
+            menu.setStyleSheet(arkRiskTableMenuStyle());
+            QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(table->currentRow() >= 0);
+            if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+            {
+                copyArkRiskTableCurrentRow(table);
+            }
+        });
     }
 
     QJsonObject payloadBase(const QString& source, const QString& category, const QString& title, const QString& detail, const double score)
     {
-        // Input: common risk fields. Processing: build JSON root. Return: payload object for export/details.
+        // 输入：风险来源、分类、标题、详情和分数。
+        // 处理：构造导出和详情区复用的 JSON 根对象。
+        // 返回：包含风险基础字段的 payload 对象。
         QJsonObject payload;
         payload.insert(QStringLiteral("source"), source);
         payload.insert(QStringLiteral("category"), category);
@@ -650,11 +751,12 @@ void MonitorDock::initializeArkRiskCenterTab()
     m_arkRiskTable->verticalHeader()->setVisible(false);
     m_arkRiskTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_arkRiskTable->horizontalHeader()->setSectionResizeMode(riskColumnIndex(RiskColumn::Detail), QHeaderView::Stretch);
+    installArkRiskTableCopyMenu(m_arkRiskTable);
     splitter->addWidget(m_arkRiskTable);
 
-    m_arkRiskDetailEdit = new QPlainTextEdit(splitter);
+    m_arkRiskDetailEdit = new CodeEditorWidget(splitter);
     m_arkRiskDetailEdit->setReadOnly(true);
-    m_arkRiskDetailEdit->setPlainText(QStringLiteral("ARK 风险中心为只读聚合页。\n不提供任意写、修复、提交 mutation 或驱动卸载按钮；Mutation 仅展示 dry-run/audit/rollback 状态。"));
+    m_arkRiskDetailEdit->setText(QStringLiteral("ARK 风险中心为只读聚合页。\n不提供任意写、修复、提交 mutation 或驱动卸载按钮；Mutation 仅展示 dry-run/audit/rollback 状态。"));
     splitter->addWidget(m_arkRiskDetailEdit);
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
@@ -839,7 +941,7 @@ void MonitorDock::showArkRiskCenterDetailForCurrentRow() const
     const int row = m_arkRiskTable->currentRow();
     if (row < 0)
     {
-        m_arkRiskDetailEdit->setPlainText(QStringLiteral("请选择一条风险记录。"));
+        m_arkRiskDetailEdit->setText(QStringLiteral("请选择一条风险记录。"));
         return;
     }
     const QTableWidgetItem* scoreItem = m_arkRiskTable->item(row, riskColumnIndex(RiskColumn::Score));
@@ -847,7 +949,7 @@ void MonitorDock::showArkRiskCenterDetailForCurrentRow() const
     const qulonglong cacheIndex = scoreItem != nullptr ? scoreItem->data(Qt::UserRole + 1).toULongLong(&ok) : 0ULL;
     if (!ok || cacheIndex >= static_cast<qulonglong>(m_arkRiskCenterEntries.size()))
     {
-        m_arkRiskDetailEdit->setPlainText(QStringLiteral("当前行缓存索引无效。"));
+        m_arkRiskDetailEdit->setText(QStringLiteral("当前行缓存索引无效。"));
         return;
     }
     const auto& entry = m_arkRiskCenterEntries[static_cast<std::size_t>(cacheIndex)];
@@ -856,7 +958,7 @@ void MonitorDock::showArkRiskCenterDetailForCurrentRow() const
     detail += QStringLiteral("riskScore: %1\nsource: %2\ncategory: %3\ntitle: %4\ndetail: %5\n\n")
         .arg(entry.riskScoreText, entry.sourceName, entry.category, entry.title, entry.detail);
     detail += QString::fromUtf8(QJsonDocument(entry.payload).toJson(QJsonDocument::Indented));
-    m_arkRiskDetailEdit->setPlainText(detail);
+    m_arkRiskDetailEdit->setText(detail);
 }
 
 void MonitorDock::exportArkRiskCenterAsJson() const

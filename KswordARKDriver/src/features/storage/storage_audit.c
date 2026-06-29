@@ -67,6 +67,12 @@ ObReferenceObjectByName(
 
 extern POBJECT_TYPE* IoDriverObjectType;
 
+NTKERNELAPI
+PDEVICE_OBJECT
+IoGetLowerDeviceObject(
+    _In_ PDEVICE_OBJECT DeviceObject
+    );
+
 static const KSW_STORAGE_FAST_IO_FIELD g_KswordStorageFastIoFields[] = {
     KSW_STORAGE_FAST_IO_FIELD(FastIoCheckIfPossible),
     KSW_STORAGE_FAST_IO_FIELD(FastIoRead),

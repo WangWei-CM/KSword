@@ -101,6 +101,42 @@ namespace
         return valueText.trimmed().isEmpty() ? fallbackText : valueText;
     }
 
+    // callbackEnumIoMessageText：
+    // - 输入：ArkDriverClient 返回的原始 message 文本；
+    // - 处理：把 DeviceIoControl/unsupported/capability/buffer 等底层词汇转换成回调枚举页可读说明；
+    // - 返回：适合详情框和表格末列展示的中文短句，避免直接暴露 IOCTL 调试日志。
+    QString callbackEnumIoMessageText(const QString& rawMessageText)
+    {
+        const QString trimmedText = rawMessageText.trimmed();
+        if (trimmedText.isEmpty())
+        {
+            return QStringLiteral("驱动未返回额外说明。");
+        }
+
+        const QString lowerText = trimmedText.toLower();
+        if (lowerText.contains(QStringLiteral("deviceiocontrol")))
+        {
+            return QStringLiteral("驱动 IOCTL 调用失败或当前驱动版本不匹配。");
+        }
+        if (lowerText.contains(QStringLiteral("unsupported")) ||
+            lowerText.contains(QStringLiteral("not supported")) ||
+            lowerText.contains(QStringLiteral("status=0xc00000bb")))
+        {
+            return QStringLiteral("当前驱动暂不支持该回调枚举/移除接口。");
+        }
+        if (lowerText.contains(QStringLiteral("capability")) ||
+            lowerText.contains(QStringLiteral("dyndata")))
+        {
+            return QStringLiteral("动态偏移能力未满足，回调结构或全局地址暂不可用。");
+        }
+        if (lowerText.contains(QStringLiteral("buffer")) &&
+            (lowerText.contains(QStringLiteral("small")) || lowerText.contains(QStringLiteral("trunc"))))
+        {
+            return QStringLiteral("驱动返回缓冲区不足，结果可能被截断。");
+        }
+        return trimmedText;
+    }
+
     QString callbackEnumFormatAddress(const std::uint64_t value)
     {
         return QStringLiteral("0x%1")
@@ -828,7 +864,7 @@ namespace
             .arg(QString::number(static_cast<qulonglong>(responsePacket.moduleSize), 16).toUpper())
             .arg(serviceName.isEmpty() ? QStringLiteral("<未匹配>") : serviceName)
             .arg(messageText.isEmpty() ? QStringLiteral("<无>") : messageText)
-            .arg(QString::fromStdString(removeResult.io.message));
+            .arg(callbackEnumIoMessageText(QString::fromStdString(removeResult.io.message)));
     }
 
     QString callbackEnumLegacyRemoveDetailText(
@@ -873,7 +909,7 @@ namespace
             .arg(callbackEnumFormatAddress(responsePacket.moduleBase))
             .arg(QString::number(static_cast<qulonglong>(responsePacket.moduleSize), 16).toUpper())
             .arg(serviceName.isEmpty() ? QStringLiteral("<未匹配>") : serviceName)
-            .arg(QString::fromStdString(removeResult.io.message));
+            .arg(callbackEnumIoMessageText(QString::fromStdString(removeResult.io.message)));
     }
 
     bool callbackEnumConfirmSafeRemove(QWidget* parentWidget, const KernelCallbackEnumEntry& entry)
@@ -1476,7 +1512,7 @@ void KernelDock::refreshCallbackEnumAsync()
         {
             errorText = QStringLiteral("回调遍历 IOCTL 调用失败。\nWin32=%1\n详情=%2")
                 .arg(enumResult.io.win32Error)
-                .arg(QString::fromStdString(enumResult.io.message));
+                .arg(callbackEnumIoMessageText(QString::fromStdString(enumResult.io.message)));
         }
 
         QMetaObject::invokeMethod(guardThis, [guardThis, success, errorText, responseFlags, resultRows = std::move(resultRows)]() mutable {

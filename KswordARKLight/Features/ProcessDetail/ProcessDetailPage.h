@@ -61,6 +61,11 @@ private:
     // processing rewrites the module list view; no value is returned.
     void PopulateModules();
 
+    // PopulateR0Audit renders the read-only R0 audit tab. Input is
+    // snapshot_.r0AuditRows; processing rewrites the evidence list; no value is
+    // returned.
+    void PopulateR0Audit();
+
     // HandleListContextMenu routes thread/module right-click and keyboard menu
     // requests. Inputs are the list HWND and screen point; processing selects
     // the hit row and opens the proper popup menu; output reports handled state.
@@ -146,6 +151,7 @@ private:
     HWND basicList_ = nullptr;
     HWND threadsList_ = nullptr;
     HWND modulesList_ = nullptr;
+    HWND r0AuditList_ = nullptr;
     int lastThreadContextColumn_ = 0;
     int lastModuleContextColumn_ = 0;
     ProcessDetailSnapshot snapshot_{};

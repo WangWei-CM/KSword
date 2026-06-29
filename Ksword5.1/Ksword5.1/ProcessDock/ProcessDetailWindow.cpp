@@ -19,7 +19,8 @@ namespace process_detail_window_internal
         "TEB地址",
         "亲和性",
         "寄存器",
-        "R0栈边界"
+        "R0栈边界",
+        "R0详情"
     };
 
     int toThreadColumnIndex(const ThreadRowColumn column)

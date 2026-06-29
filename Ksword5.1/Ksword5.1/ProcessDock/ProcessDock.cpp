@@ -1597,6 +1597,51 @@ namespace
         }
     }
 
+    // processDockIoMessageText：
+    // - 输入：ArkDriverClient 返回给 ProcessDock 的原始 message 文本；
+    // - 处理：将 DeviceIoControl/unsupported/DynData/buffer 等底层诊断转成用户可读提示；
+    // - 返回：用于进程页状态串的中文说明，避免把 IOCTL 调试日志直接拼进 UI。
+    QString processDockIoMessageText(const QString& rawMessageText)
+    {
+        const QString trimmedText = rawMessageText.trimmed();
+        if (trimmedText.isEmpty())
+        {
+            return QStringLiteral("驱动未返回额外说明。");
+        }
+
+        const QString lowerText = trimmedText.toLower();
+        if (lowerText.contains(QStringLiteral("deviceiocontrol")))
+        {
+            return QStringLiteral("驱动 IOCTL 调用失败或当前驱动版本不匹配。");
+        }
+        if (lowerText.contains(QStringLiteral("unsupported")) ||
+            lowerText.contains(QStringLiteral("not supported")) ||
+            lowerText.contains(QStringLiteral("status=0xc00000bb")))
+        {
+            return QStringLiteral("当前驱动暂不支持该进程 DynData 查询入口。");
+        }
+        if (lowerText.contains(QStringLiteral("dyndata")) ||
+            lowerText.contains(QStringLiteral("capability")))
+        {
+            return QStringLiteral("DynData 动态偏移能力未满足，请先刷新或应用 PDB profile。");
+        }
+        if (lowerText.contains(QStringLiteral("buffer")) &&
+            (lowerText.contains(QStringLiteral("small")) || lowerText.contains(QStringLiteral("trunc"))))
+        {
+            return QStringLiteral("驱动返回缓冲区不足，结果可能被截断。");
+        }
+        return trimmedText;
+    }
+
+    // processDockIoMessageStdString：
+    // - 输入：ArkDriverClient 返回的 std::string 原始消息；
+    // - 处理：复用 ProcessDock 的友好化文本转换，并转回 UTF-8 std::string；
+    // - 返回：可继续交给旧 detailTextOut 管线的可读说明。
+    std::string processDockIoMessageStdString(const std::string& rawMessageText)
+    {
+        return processDockIoMessageText(QString::fromStdString(rawMessageText)).toStdString();
+    }
+
     // isProcessR0ExtensionVisible 作用：
     // - 判断一行是否真正携带 R0 扩展字段；
     // - 全部 Unavailable 时 UI 会自动隐藏内核专属列，避免误导用户以为 R3 字段异常。
@@ -1640,7 +1685,7 @@ namespace
             static_cast<long>(0xC0000005u));
         if (detailTextOut != nullptr)
         {
-            *detailTextOut = result.message;
+            *detailTextOut = processDockIoMessageStdString(result.message);
         }
         return result.ok;
     }
@@ -1668,7 +1713,7 @@ namespace
         const ksword::ark::IoResult result = driverClient.suspendProcess(targetPid);
         if (detailTextOut != nullptr)
         {
-            *detailTextOut = result.message;
+            *detailTextOut = processDockIoMessageStdString(result.message);
         }
         return result.ok;
     }
@@ -1699,7 +1744,7 @@ namespace
         const ksword::ark::IoResult result = driverClient.setProcessProtection(targetPid, protectionLevel);
         if (detailTextOut != nullptr)
         {
-            *detailTextOut = result.message;
+            *detailTextOut = processDockIoMessageStdString(result.message);
         }
         return result.ok;
     }
@@ -1744,7 +1789,7 @@ namespace
                 result.status == KSWORD_ARK_PROCESS_VISIBILITY_STATUS_CLEARED);
         if (detailTextOut != nullptr)
         {
-            *detailTextOut = result.io.message;
+            *detailTextOut = processDockIoMessageStdString(result.io.message);
             if (!actionSucceeded)
             {
                 if (!detailTextOut->empty())
@@ -1782,7 +1827,7 @@ namespace
             driverClient.setProcessSpecialFlags(targetPid, action);
         if (detailTextOut != nullptr)
         {
-            *detailTextOut = result.io.message;
+            *detailTextOut = processDockIoMessageStdString(result.io.message);
         }
         return result.io.ok &&
             result.lastStatus >= 0 &&
@@ -1814,7 +1859,7 @@ namespace
             driverClient.dkomProcess(targetPid, action);
         if (detailTextOut != nullptr)
         {
-            *detailTextOut = result.io.message;
+            *detailTextOut = processDockIoMessageStdString(result.io.message);
         }
         return result.io.ok &&
             result.lastStatus >= 0 &&
@@ -1987,14 +2032,14 @@ namespace
         else
         {
             diagnosticParts << QStringLiteral("DynDataStatus unavailable: %1")
-                .arg(QString::fromStdString(statusResult.io.message));
+                .arg(processDockIoMessageText(QString::fromStdString(statusResult.io.message)));
         }
 
         const ksword::ark::DynDataFieldsResult fieldsResult = driverClient.queryDynDataFields();
         if (!fieldsResult.io.ok)
         {
             diagnosticParts << QStringLiteral("DynData ActiveProcessLinks unavailable: %1")
-                .arg(QString::fromStdString(fieldsResult.io.message));
+                .arg(processDockIoMessageText(QString::fromStdString(fieldsResult.io.message)));
             return diagnosticParts.join(QStringLiteral(" | ")).toStdString();
         }
 
@@ -2170,7 +2215,7 @@ namespace
         {
             if (detailTextOut != nullptr)
             {
-                *detailTextOut = enumResult.io.message;
+                *detailTextOut = processDockIoMessageStdString(enumResult.io.message);
             }
             return false;
         }
@@ -2210,7 +2255,7 @@ namespace
 
         if (detailTextOut != nullptr)
         {
-            *detailTextOut = enumResult.io.message;
+            *detailTextOut = processDockIoMessageStdString(enumResult.io.message);
         }
         return true;
     }
@@ -3965,6 +4010,44 @@ void ProcessDock::initializeCreateProcessPage()
     m_tokenPrivilegeTable->setSelectionMode(QAbstractItemView::NoSelection);
     m_tokenPrivilegeTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tokenPrivilegeTable->setAlternatingRowColors(true);
+    m_tokenPrivilegeTable->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_tokenPrivilegeTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
+        {
+            // Token 特权表复制菜单：
+            // - 输入：用户右键点击的特权行；
+            // - 处理：读取 Privilege 单元格和 Action 下拉框当前文本，拼成 TSV；
+            // - 返回：仅写入剪贴板，不修改 Token、不调用 AdjustTokenPrivileges。
+            if (m_tokenPrivilegeTable == nullptr)
+            {
+                return;
+            }
+
+            const int rowIndex = m_tokenPrivilegeTable->rowAt(localPosition.y());
+            if (rowIndex < 0 || rowIndex >= m_tokenPrivilegeTable->rowCount())
+            {
+                return;
+            }
+
+            m_tokenPrivilegeTable->setCurrentCell(rowIndex, 0);
+
+            QMenu contextMenu(m_tokenPrivilegeTable);
+            contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+            QAction* copyRowAction = contextMenu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            if (contextMenu.exec(m_tokenPrivilegeTable->viewport()->mapToGlobal(localPosition)) != copyRowAction)
+            {
+                return;
+            }
+
+            const QTableWidgetItem* privilegeItem = m_tokenPrivilegeTable->item(rowIndex, 0);
+            const QComboBox* actionCombo = qobject_cast<QComboBox*>(m_tokenPrivilegeTable->cellWidget(rowIndex, 1));
+            QStringList rowFields;
+            rowFields.reserve(2);
+            rowFields << (privilegeItem != nullptr ? privilegeItem->text() : QString());
+            rowFields << (actionCombo != nullptr ? actionCombo->currentText() : QString());
+            QApplication::clipboard()->setText(rowFields.join(QChar('\t')));
+        });
 
     for (int row = 0; row < CommonPrivilegeNames.size(); ++row)
     {
@@ -8268,6 +8351,7 @@ void ProcessDock::showHeaderContextMenu(const QPoint& localPosition)
 
     // 每列一个勾选动作，允许用户动态显示/隐藏。
     QMenu columnMenu(this);
+    columnMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
     for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
     {
         QAction* toggleAction = columnMenu.addAction(ProcessTableHeaders.at(columnIndex));

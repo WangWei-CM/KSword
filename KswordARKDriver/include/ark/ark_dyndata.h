@@ -74,6 +74,19 @@ typedef struct _KSW_DYN_KERNEL_OFFSETS
     ULONG DoMajorFunction;
     ULONG DoFastIoDispatch;
     ULONG DoDriverUnload;
+    ULONG UldName;
+    ULONG UldStartAddress;
+    ULONG UldEndAddress;
+    ULONG UldCurrentTime;
+    ULONG UldTypeSize;
+    ULONG RtlAvlBalancedRoot;
+    ULONG RtlAvlOrderedPointer;
+    ULONG RtlAvlWhichOrderedElement;
+    ULONG RtlAvlNumberGenericTableElements;
+    ULONG RtlAvlDepthOfTree;
+    ULONG RtlAvlRestartKey;
+    ULONG RtlAvlDeleteCount;
+    ULONG RtlAvlTypeSize;
 } KSW_DYN_KERNEL_OFFSETS, *PKSW_DYN_KERNEL_OFFSETS;
 
 typedef struct _KSW_DYN_LXCORE_OFFSETS
@@ -102,6 +115,8 @@ typedef struct _KSW_DYN_KERNEL_GLOBALS
     ULONG PsLoadedModuleList;
     ULONG MmUnloadedDrivers;
     ULONG PiDDBCacheTable;
+    ULONG KeServiceDescriptorTableShadow;
+    ULONG MmLastUnloadedDriver;
 } KSW_DYN_KERNEL_GLOBALS, *PKSW_DYN_KERNEL_GLOBALS;
 
 typedef struct _KSW_DYN_CALLBACK_GLOBALS
@@ -267,6 +282,13 @@ KswordARKDynDataV4QueryMissingItems(
     );
 
 NTSTATUS
+KswordARKDynDataV4QueryItems(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    );
+
+NTSTATUS
 KswordARKDynDataIoctlApplyProfileV4(
     _In_ WDFDEVICE Device,
     _In_ WDFREQUEST Request,
@@ -295,6 +317,15 @@ KswordARKDynDataIoctlQueryV4CapabilityGroups(
 
 NTSTATUS
 KswordARKDynDataIoctlQueryV4MissingItems(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    );
+
+NTSTATUS
+KswordARKDynDataIoctlQueryV4Items(
     _In_ WDFDEVICE Device,
     _In_ WDFREQUEST Request,
     _In_ size_t InputBufferLength,

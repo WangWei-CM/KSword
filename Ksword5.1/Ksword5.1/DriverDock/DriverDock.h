@@ -6,7 +6,9 @@
 // 1) 提供驱动服务枚举与状态查看能力；
 // 2) 提供驱动服务注册、更新、挂载、卸载、删除能力；
 // 3) 提供已加载内核模块枚举能力；
-// 4) 提供调试输出捕获（DBWIN 兼容）能力。
+// 4) 提供调试输出捕获（DBWIN 兼容）能力；
+// 5) 提供只读 DriverObject / DeviceObject / MajorFunction / FastIo 诊断页；
+// 6) 提供 Module Cross-View、Driver Integrity 和 Unloaded/PiDDB 证据页。
 // ============================================================
 
 #include "../Framework.h"
@@ -138,11 +140,23 @@ private:
     // - 通过 ArkDriverClient 查询 DriverObject、MajorFunction 和 DeviceObject 链。
     void initializeObjectInfoTab();
 
+    // initializeModuleCrossViewTab：
+    // - 构建只读 Module Cross-View 证据页；
+    // - 主要展示 DriverObject / DriverSection / DeviceChain / Service 相关证据；
+    // - 不提供修复、补丁或任意写按钮。
+    void initializeModuleCrossViewTab();
+
     // initializeIntegrityTab：
     // - 构建“驱动完整性”页；
     // - 展示 DriverObject、MajorFunction、FastIo、LDR 和 CPU entry evidence；
     // - 不提供卸载、修复或任意写操作。
     void initializeIntegrityTab();
+
+    // initializeUnloadedPiddbTab：
+    // - 构建只读 Unloaded / PiDDB 证据页；
+    // - 主要展示 OptionalGlobal / DynData / PDB 可用性证据；
+    // - 不做删除、清理或绕过动作。
+    void initializeUnloadedPiddbTab();
 
     // initializeConnections：
     // - 作用：连接全部控件信号与业务槽函数。
@@ -185,6 +199,12 @@ private:
     // - 参数 result 为 ArkDriverClient 解析后的结构化响应。
     void applyDriverObjectQueryResult(const ksword::ark::DriverObjectQueryResult& result);
 
+    // rebuildDriverObjectEvidenceViews：
+    // - 作用：按当前 DriverObject 查询结果和完整性缓存刷新 DriverObject / DriverExtension / FastIo 子页；
+    // - 处理逻辑：只做本地表格投影，不重新访问驱动；
+    // - 返回：无。
+    void rebuildDriverObjectEvidenceViews();
+
     // fillObjectDriverNameFromSelection：
     // - 从概览页当前选中服务名推导 \Driver\Name；
     // - 便于用户双击服务后直接查询对象。
@@ -202,11 +222,47 @@ private:
     // - 返回：无。
     void rebuildDriverIntegrityTable();
 
+    // rebuildModuleCrossViewTable：
+    // - 作用：按当前 Driver Integrity 缓存重绘 Module Cross-View 证据表；
+    // - 处理逻辑：只显示 ModuleView / PsLoadedModules / DriverObject / DriverSection / DeviceChain / Service 等证据；
+    // - 返回：无。
+    void rebuildModuleCrossViewTable();
+
+    // rebuildUnloadedPiddbTable：
+    // - 作用：按当前 Driver Integrity 缓存重绘 Unloaded / PiDDB 证据表；
+    // - 处理逻辑：只显示 OptionalGlobal 相关证据；
+    // - 返回：无。
+    void rebuildUnloadedPiddbTable();
+
     // showSelectedDriverIntegrityDetail：
     // - 展示当前选中完整性证据行的详情文本；
     // - 处理逻辑：通过表格 UserRole 中的缓存索引读取 m_driverIntegrityCache；
     // - 返回：无。
     void showSelectedDriverIntegrityDetail();
+
+    // showUnloadedPiddbContextMenu：
+    // - 输入：Unloaded / PiDDB 表格内的局部坐标；
+    // - 处理逻辑：弹出只读复制/详情菜单，不提供删除 PiDDB 或清理卸载记录动作；
+    // - 返回：无，用户选择后执行本地 UI 操作。
+    void showUnloadedPiddbContextMenu(const QPoint& localPosition);
+
+    // showSelectedUnloadedPiddbDetailDialog：
+    // - 输入：无，读取当前选中的 Unloaded / PiDDB 表格行；
+    // - 处理逻辑：用缓存索引展开完整 Driver Integrity 证据，并放入 CodeEditorWidget 弹窗；
+    // - 返回：无，弹窗关闭后不修改任何 R0/R3 状态。
+    void showSelectedUnloadedPiddbDetailDialog();
+
+    // copySelectedUnloadedPiddbRow：
+    // - 输入：无，读取当前选中表格行；
+    // - 处理逻辑：把可见列序列化为 TSV 后写入剪贴板；
+    // - 返回：无。
+    void copySelectedUnloadedPiddbRow();
+
+    // copyVisibleUnloadedPiddbRows：
+    // - 输入：无，遍历当前筛选后的全部可见行；
+    // - 处理逻辑：把表头和全部可见行序列化为 TSV 后写入剪贴板；
+    // - 返回：无。
+    void copyVisibleUnloadedPiddbRows();
 
     // showServiceTableContextMenu：
     // - 在驱动服务列表右键弹出操作菜单；
@@ -420,19 +476,42 @@ private:
     // ========================= 页签4：对象信息 =========================
     QWidget* m_objectInfoPage = nullptr;              // 对象信息页容器。
     QVBoxLayout* m_objectInfoLayout = nullptr;        // 对象信息页主布局。
+    QHBoxLayout* m_objectInfoToolLayout = nullptr;    // 对象信息页工具栏布局。
     QLineEdit* m_objectDriverNameEdit = nullptr;      // \Driver\Name 输入框。
     QPushButton* m_fillObjectDriverNameButton = nullptr; // 从选中服务填充按钮。
     QPushButton* m_queryObjectInfoButton = nullptr;   // R0 查询按钮。
+    QPushButton* m_objectEvidenceRefreshButton = nullptr; // 刷新 Driver/Integrity 证据按钮。
     QLabel* m_objectInfoStatusLabel = nullptr;        // 查询状态标签。
-    QPlainTextEdit* m_objectInfoSummaryEdit = nullptr;// DriverObject 摘要。
+    CodeEditorWidget* m_objectInfoSummaryEdit = nullptr;// DriverObject 摘要。
+    QTabWidget* m_objectDetailTabWidget = nullptr;    // DriverObject 细分页签容器。
+    QWidget* m_driverObjectPage = nullptr;            // DriverObject 诊断页。
+    QWidget* m_deviceObjectPage = nullptr;            // DeviceObject 诊断页。
+    QWidget* m_driverExtensionPage = nullptr;         // DriverExtension 诊断页。
+    QWidget* m_majorFunctionPage = nullptr;           // MajorFunction 诊断页。
+    QWidget* m_fastIoPage = nullptr;                  // FastIo 诊断页。
+    CodeEditorWidget* m_driverObjectPageSummaryEdit = nullptr; // DriverObject 页摘要。
+    QTableWidget* m_driverObjectEvidenceTable = nullptr;      // DriverObject / DriverSection 证据表。
     QTableWidget* m_majorFunctionTable = nullptr;     // MajorFunction 表。
     QTableWidget* m_deviceObjectTable = nullptr;      // DeviceObject/AttachedDevice 表。
+    QTableWidget* m_driverExtensionEvidenceTable = nullptr;   // DriverExtension / DeviceChain 证据表。
+    QTableWidget* m_fastIoEvidenceTable = nullptr;             // FastIo 证据表。
+    QLabel* m_driverExtensionStatusLabel = nullptr;   // DriverExtension 页状态标签。
+    QLabel* m_fastIoStatusLabel = nullptr;            // FastIo 页状态标签。
     bool m_objectInfoQuerying = false;                // 查询中标记。
     std::uint64_t m_objectInfoQueryTicket = 0;        // 查询序号。
+
+    // ========================= 页签5：模块 Cross-View =========================
+    QWidget* m_moduleCrossViewPage = nullptr;         // 模块 Cross-View 页容器。
+    QVBoxLayout* m_moduleCrossViewLayout = nullptr;   // 模块 Cross-View 主布局。
+    QHBoxLayout* m_moduleCrossViewToolLayout = nullptr; // 模块 Cross-View 工具栏布局。
+    QPushButton* m_moduleCrossViewRefreshButton = nullptr; // 刷新按钮。
+    QLabel* m_moduleCrossViewStatusLabel = nullptr;    // 状态标签。
+    QTableWidget* m_moduleCrossViewTable = nullptr;    // 模块 Cross-View 表。
 
     // ========================= 页签5：驱动完整性 =========================
     QWidget* m_integrityPage = nullptr;               // 驱动完整性页容器。
     QVBoxLayout* m_integrityLayout = nullptr;         // 完整性页主布局。
+    QHBoxLayout* m_integrityToolLayout = nullptr;     // 完整性页工具栏布局。
     QLineEdit* m_integrityDriverNameEdit = nullptr;   // 可选 \Driver\Name 输入框。
     QLineEdit* m_integrityModuleBaseEdit = nullptr;   // 可选模块基址输入框。
     QPushButton* m_integrityFillFromSelectionButton = nullptr; // 从当前选择填充 DriverObject 名称。
@@ -442,16 +521,28 @@ private:
     QSpinBox* m_integrityMaxRowsSpin = nullptr;       // 最大返回行数。
     QLabel* m_integrityStatusLabel = nullptr;         // 查询状态标签。
     QTableWidget* m_integrityTable = nullptr;         // 完整性证据表。
-    QPlainTextEdit* m_integrityDetailEdit = nullptr;  // 完整性详情文本。
+    CodeEditorWidget* m_integrityDetailEdit = nullptr; // 完整性详情编辑器，只读展示原始 R0 明细。
     bool m_integrityQuerying = false;                 // 完整性查询中标记。
     std::uint64_t m_integrityQueryTicket = 0;         // 完整性查询序号。
+
+    // ========================= 页签6：Unloaded / PiDDB =========================
+    QWidget* m_unloadedPiddbPage = nullptr;           // Unloaded / PiDDB 页容器。
+    QVBoxLayout* m_unloadedPiddbLayout = nullptr;     // Unloaded / PiDDB 主布局。
+    QHBoxLayout* m_unloadedPiddbToolLayout = nullptr; // Unloaded / PiDDB 工具栏布局。
+    QPushButton* m_unloadedPiddbRefreshButton = nullptr; // 刷新按钮。
+    QLineEdit* m_unloadedPiddbFilterEdit = nullptr;   // 关键词过滤输入框。
+    QCheckBox* m_unloadedPiddbRiskOnlyCheck = nullptr; // 仅显示风险/降级证据。
+    QLabel* m_unloadedPiddbStatusLabel = nullptr;     // 状态标签。
+    QTableWidget* m_unloadedPiddbTable = nullptr;     // Unloaded / PiDDB 表。
 
     // ========================= 数据缓存 =========================
     std::vector<DriverServiceRecord> m_driverServiceCache;      // 驱动服务缓存。
     std::vector<LoadedKernelModuleRecord> m_loadedModuleCache;  // 已加载模块缓存。
     std::vector<LoadedModuleEvidenceRecord> m_loadedModuleEvidenceCache; // 模块证据缓存。
+    ksword::ark::DriverObjectQueryResult m_lastDriverObjectQueryResult; // 最近一次 DriverObject 查询结果缓存。
     std::vector<ksword::ark::DriverIntegrityEvidenceEntry> m_driverIntegrityCache; // 驱动完整性证据缓存。
     ksword::ark::DriverIntegrityResult m_lastDriverIntegrityResult; // 最近一次完整性查询元信息。
+    bool m_hasDriverObjectQueryResult = false;          // 是否已有 DriverObject 查询结果可回填。
     bool m_initialRefreshDone = false;                          // 首次显示时是否已完成首轮刷新。
 
     // ========================= 调试捕获线程状态 =========================

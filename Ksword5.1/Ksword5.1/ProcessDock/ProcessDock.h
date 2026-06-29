@@ -56,6 +56,7 @@ class QVBoxLayout;
 class QHBoxLayout;
 class QPoint;
 class QWidget;
+class CodeEditorWidget;
 class ProcessDetailWindow;
 class ProcessActivityChartWidget;
 class ProcessActivityTimelineSlider;
@@ -719,7 +720,7 @@ private:
     QLabel* m_crossViewStatusLabel = nullptr; // Cross-View 查询状态。
     QTableWidget* m_processCrossViewTable = nullptr; // 进程来源矩阵表。
     QTableWidget* m_threadCrossViewTable = nullptr; // 线程来源矩阵表。
-    QPlainTextEdit* m_crossViewDetailEdit = nullptr; // 详情文本，只读。
+    CodeEditorWidget* m_crossViewDetailEdit = nullptr; // Cross-View 详情文本编辑器，只读。
 
     // ======== 创建进程页 - 通用参数 ========
     QComboBox* m_createMethodCombo = nullptr; // CreateProcessW / Token 路径。

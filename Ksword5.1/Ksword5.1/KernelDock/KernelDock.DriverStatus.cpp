@@ -5,6 +5,7 @@
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAction>
 #include <QApplication>
 #include <QBrush>
 #include <QClipboard>
@@ -22,7 +23,9 @@
 #include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMetaObject>
+#include <QModelIndex>
 #include <QPointer>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -145,6 +148,83 @@ namespace
         return QStringLiteral("QTableWidget::item:selected{background:%1;color:#FFFFFF;}").arg(KswordTheme::PrimaryBlueHex);
     }
 
+    // driverStatusCopyMenuStyle：
+    // - 输入：无；
+    // - 处理：显式设置右键菜单背景、文字、选中态和禁用态；
+    // - 返回：可直接应用到 QMenu 的样式。
+    QString driverStatusCopyMenuStyle()
+    {
+        return QStringLiteral(
+            "QMenu{background:%1;color:%2;border:1px solid %3;}"
+            "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
+            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:disabled{color:%5;}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::TextSecondaryHex());
+    }
+
+    // driverStatusRowText：
+    // - 输入 table/rowIndex：驱动状态表和目标行；
+    // - 处理：按列读取单元格文本并拼接为 TSV；
+    // - 返回：可复制文本，行无效时返回空字符串。
+    QString driverStatusRowText(QTableWidget* table, const int rowIndex)
+    {
+        if (table == nullptr || rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return QString();
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+            fields.push_back(item != nullptr ? item->text() : QString());
+        }
+        return fields.join(QLatin1Char('\t'));
+    }
+
+    // installDriverStatusCopyMenu：
+    // - 输入 table：驱动状态摘要表或能力矩阵表；
+    // - 处理：安装复制当前行的只读右键菜单；
+    // - 返回：无，不执行任何 R0 查询或写入动作。
+    void installDriverStatusCopyMenu(QTableWidget* table)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        {
+            const QModelIndex clickedIndex = table->indexAt(localPosition);
+            const int rowIndex = clickedIndex.isValid() ? clickedIndex.row() : table->currentRow();
+            if (clickedIndex.isValid())
+            {
+                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu menu(table);
+            menu.setStyleSheet(driverStatusCopyMenuStyle());
+            QAction* copyRowAction = menu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(rowIndex >= 0 && rowIndex < table->rowCount());
+            if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+            {
+                QClipboard* clipboard = QApplication::clipboard();
+                if (clipboard != nullptr)
+                {
+                    clipboard->setText(driverStatusRowText(table, rowIndex));
+                }
+            }
+        });
+    }
+
     QString statusLabelStyle(const QString& colorHex)
     {
         return QStringLiteral("color:%1;font-weight:600;").arg(colorHex);
@@ -158,6 +238,34 @@ namespace
     QString stringToQString(const std::string& valueText)
     {
         return QString::fromUtf8(valueText.c_str(), static_cast<int>(valueText.size()));
+    }
+
+    // friendlyDriverStatusIoMessage：
+    // - 输入 valueText：ArkDriverClient 返回的 io.message；
+    // - 处理：把 DeviceIoControl/unsupported/DynData 等底层短语转为中文诊断；
+    // - 返回：驱动状态摘要表和详情报告可直接展示的文本。
+    QString friendlyDriverStatusIoMessage(const std::string& valueText)
+    {
+        const QString rawText = stringToQString(valueText).trimmed();
+        if (rawText.isEmpty())
+        {
+            return QStringLiteral("驱动未返回额外说明。");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动通信失败或当前驱动版本不支持该状态查询入口。");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动不支持该状态/能力查询入口。");
+        }
+        if (rawText.contains(QStringLiteral("capability"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("DynData"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("动态偏移能力不足，部分驱动能力会显示为不可用。");
+        }
+        return rawText;
     }
 
     // wideStringToQString：
@@ -1015,12 +1123,12 @@ namespace
         rowsOut.clear();
         summaryOut.queryOk = queryResult.io.ok;
         summaryOut.driverLoaded = queryResult.io.ok || queryResult.io.win32Error != ERROR_FILE_NOT_FOUND;
-        summaryOut.ioMessageText = QString::fromStdString(queryResult.io.message);
+        summaryOut.ioMessageText = friendlyDriverStatusIoMessage(queryResult.io.message);
 
         summaryOut.dynDataStatusQueryOk = statusResult.io.ok;
         summaryOut.dynDataFieldsQueryOk = fieldsResult.io.ok;
-        summaryOut.dynDataStatusIoMessageText = QString::fromStdString(statusResult.io.message);
-        summaryOut.dynDataFieldsIoMessageText = QString::fromStdString(fieldsResult.io.message);
+        summaryOut.dynDataStatusIoMessageText = friendlyDriverStatusIoMessage(statusResult.io.message);
+        summaryOut.dynDataFieldsIoMessageText = friendlyDriverStatusIoMessage(fieldsResult.io.message);
 
         if (queryResult.io.ok)
         {
@@ -1229,6 +1337,7 @@ void KernelDock::initializeDriverStatusTab()
     m_driverStatusSummaryTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_driverStatusSummaryTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(DriverSummaryColumn::Value), QHeaderView::Stretch);
     m_driverStatusSummaryTable->setColumnWidth(static_cast<int>(DriverSummaryColumn::Name), 220);
+    installDriverStatusCopyMenu(m_driverStatusSummaryTable);
 
     QSplitter* lowerSplitter = new QSplitter(Qt::Horizontal, verticalSplitter);
     m_driverCapabilityTable = new QTableWidget(lowerSplitter);
@@ -1250,6 +1359,7 @@ void KernelDock::initializeDriverStatusTab()
     m_driverCapabilityTable->setColumnWidth(static_cast<int>(DriverCapabilityColumn::RequiredDyn), 180);
     m_driverCapabilityTable->setColumnWidth(static_cast<int>(DriverCapabilityColumn::PresentDyn), 180);
     m_driverCapabilityTable->setColumnWidth(static_cast<int>(DriverCapabilityColumn::Dependency), 280);
+    installDriverStatusCopyMenu(m_driverCapabilityTable);
 
     m_driverCapabilityDetailEditor = new CodeEditorWidget(lowerSplitter);
     m_driverCapabilityDetailEditor->setReadOnly(true);

@@ -48,20 +48,9 @@ public:
     // DeviceIoControl directly; output is a detailed diagnostic string.
     static DriverActionResult BuildDriverObjectDetailText(const std::wstring& driverObjectName);
 
-    // ForceUnloadDriverObject requests the R0 force-unload IOCTL by
-    // DriverObject name. Inputs are an object name and protocol flags;
-    // processing routes through ArkDriverClient; output summarizes the R0
-    // response and whether the aggregate unload status is successful.
-    static DriverActionResult ForceUnloadDriverObject(const std::wstring& driverObjectName, unsigned long flags = 0UL);
-
-    // ForceUnloadDriverByModuleBase requests the R0 force-unload IOCTL by
-    // kernel module base. Inputs are the base address, optional fallback name
-    // and flags; processing routes through ArkDriverClient; output summarizes
-    // the R0 response.
-    static DriverActionResult ForceUnloadDriverByModuleBase(
-        std::uint64_t moduleBase,
-        const std::wstring& fallbackDriverName,
-        unsigned long flags = 0UL);
+    // DriverActions deliberately exposes only read-only DriverObject detail
+    // and export helpers in KswordARKLight. Inputs that would unload, patch, or
+    // unlink drivers are not surfaced from this module by design.
 };
 
 } // namespace Ksword::Features::Driver

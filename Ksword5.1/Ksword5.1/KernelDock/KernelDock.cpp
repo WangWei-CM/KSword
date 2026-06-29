@@ -12,6 +12,8 @@
 #include "../UI/CodeEditorWidget.h"
 #include "KernelBaseNamedObjectsTab.h"
 #include "KernelCommunicationEndpointTab.h"
+#include "KernelDockCidTab.h"
+#include "KernelDockIpcTab.h"
 #include "KernelDeviceDriverObjectsTab.h"
 #include "KernelNamedPipeTab.h"
 #include "KernelObjectDirectoryDeepTab.h"
@@ -21,7 +23,9 @@
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAction>
 #include <QApplication>
+#include <QClipboard>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDir>
@@ -32,6 +36,8 @@
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
+#include <QModelIndex>
 #include <QPainter>
 #include <QPixmap>
 #include <QProgressBar>
@@ -86,6 +92,73 @@ namespace
             "QTableWidget::item:selected{background:%1;color:#FFFFFF;}"
             "QTreeWidget::item:selected{background:%1;color:#FFFFFF;}")
             .arg(KswordTheme::PrimaryBlueHex);
+    }
+
+    // tableRowAsTsv：
+    // - 输入 tableWidget 为只读表格，rowIndex 为当前可视行；
+    // - 处理：按列顺序提取单元格文本，空值用 <空> 占位，字段使用 Tab 分隔；
+    // - 返回：适合粘贴到文本编辑器或电子表格的 TSV；输入无效时返回空字符串。
+    QString tableRowAsTsv(const QTableWidget* tableWidget, const int rowIndex)
+    {
+        if (tableWidget == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
+        {
+            return QString();
+        }
+
+        QStringList fieldList;
+        fieldList.reserve(tableWidget->columnCount());
+        for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* cellItem = tableWidget->item(rowIndex, columnIndex);
+            fieldList.push_back(cellItem != nullptr && !cellItem->text().trimmed().isEmpty()
+                ? cellItem->text()
+                : QStringLiteral("<空>"));
+        }
+        return fieldList.join('\t');
+    }
+
+    // showCopyRowContextMenu：
+    // - 输入 tableWidget 为目标表格，localPosition 为右键位置，selectClickedRow 控制是否同步当前行；
+    // - 处理：显示显式主题样式菜单，并将当前/点击行复制为 TSV；
+    // - 返回：无返回值；剪贴板不可用或行无效时静默跳过。
+    void showCopyRowContextMenu(
+        QTableWidget* tableWidget,
+        const QPoint& localPosition,
+        const bool selectClickedRow)
+    {
+        if (tableWidget == nullptr)
+        {
+            return;
+        }
+
+        const QModelIndex clickedIndex = tableWidget->indexAt(localPosition);
+        int rowIndex = clickedIndex.isValid() ? clickedIndex.row() : tableWidget->currentRow();
+        if (selectClickedRow && clickedIndex.isValid())
+        {
+            tableWidget->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            rowIndex = clickedIndex.row();
+        }
+
+        QMenu contextMenu(tableWidget);
+        contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+
+        QAction* copyRowAction = contextMenu.addAction(
+            QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+            QStringLiteral("复制当前行"));
+        copyRowAction->setEnabled(rowIndex >= 0);
+
+        const QAction* selectedAction = contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPosition));
+        if (selectedAction != copyRowAction || rowIndex < 0)
+        {
+            return;
+        }
+
+        QClipboard* clipboard = QApplication::clipboard();
+        const QString rowText = tableRowAsTsv(tableWidget, rowIndex);
+        if (clipboard != nullptr && !rowText.isEmpty())
+        {
+            clipboard->setText(rowText);
+        }
     }
 
     // kernelDockBackgroundImageReady 作用：
@@ -383,6 +456,8 @@ void KernelDock::initializeUi()
     m_shadowSsdtPage = new QWidget(m_tabWidget);
     m_inlineHookPage = new QWidget(m_tabWidget);
     m_iatEatHookPage = new QWidget(m_tabWidget);
+    m_crossViewPage = new QWidget(m_tabWidget);
+    m_ipcPage = new QWidget(m_tabWidget);
 
     m_objectNamespaceTabIndex = m_tabWidget->addTab(
         m_objectNamespacePage,
@@ -405,26 +480,38 @@ void KernelDock::initializeUi()
     m_ssdtTabIndex = m_tabWidget->addTab(
         m_ssdtPage,
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
-        QStringLiteral("SSDT遍历"));
+        QStringLiteral("SSDT"));
     m_tabWidget->setTabToolTip(m_ssdtTabIndex, QStringLiteral("驱动侧 SSDT 服务索引遍历结果"));
 
     m_shadowSsdtTabIndex = m_tabWidget->addTab(
         m_shadowSsdtPage,
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
-        QStringLiteral("SSSDT解析"));
+        QStringLiteral("SSSDT"));
     m_tabWidget->setTabToolTip(m_shadowSsdtTabIndex, QStringLiteral("参考 System Informer 的 win32k/win32u shadow syscall 解析"));
 
     m_inlineHookTabIndex = m_tabWidget->addTab(
         m_inlineHookPage,
         tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
-        QStringLiteral("Inline Hook 检测 & 摘除"));
+        QStringLiteral("Inline Hook"));
     m_tabWidget->setTabToolTip(m_inlineHookTabIndex, QStringLiteral("扫描内核模块导出函数头部跳转补丁，并提供 force 后 NOP 摘除"));
 
     m_iatEatHookTabIndex = m_tabWidget->addTab(
         m_iatEatHookPage,
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("IAT/EAT 钩子检测"));
+        QStringLiteral("IAT/EAT"));
     m_tabWidget->setTabToolTip(m_iatEatHookTabIndex, QStringLiteral("检测内核模块导入表和导出表可疑目标指针"));
+
+    m_crossViewTabIndex = m_tabWidget->addTab(
+        m_crossViewPage,
+        tabIcon(QStringLiteral(":/Icon/process_list.svg")),
+        QStringLiteral("CID表"));
+    m_tabWidget->setTabToolTip(m_crossViewTabIndex, QStringLiteral("只读 CID / cross-view 证据聚合"));
+
+    m_ipcTabIndex = m_tabWidget->addTab(
+        m_ipcPage,
+        tabIcon(QStringLiteral(":/Icon/process_details.svg")),
+        QStringLiteral("IPC"));
+    m_tabWidget->setTabToolTip(m_ipcTabIndex, QStringLiteral("只读 NamedPipe / ALPC / 通信对象"));
 
     m_dynDataTabIndex = m_tabWidget->addTab(
         m_dynDataPage,
@@ -501,6 +588,8 @@ void KernelDock::updateTabIconContrast()
     m_tabWidget->setTabIcon(m_shadowSsdtTabIndex, tabIcon(QStringLiteral(":/Icon/process_list.svg")));
     m_tabWidget->setTabIcon(m_inlineHookTabIndex, tabIcon(QStringLiteral(":/Icon/process_critical.svg")));
     m_tabWidget->setTabIcon(m_iatEatHookTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
+    m_tabWidget->setTabIcon(m_crossViewTabIndex, tabIcon(QStringLiteral(":/Icon/process_list.svg")));
+    m_tabWidget->setTabIcon(m_ipcTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
     m_tabWidget->setTabIcon(m_dynDataTabIndex, tabIcon(QStringLiteral(":/Icon/process_priority.svg")));
     m_tabWidget->setTabIcon(m_driverStatusTabIndex, tabIcon(QStringLiteral(":/Icon/process_details.svg")));
     m_tabWidget->setTabIcon(m_callbackTabIndex, tabIcon(QStringLiteral(":/Icon/process_critical.svg")));
@@ -531,6 +620,14 @@ void KernelDock::updateTabIconContrast()
         m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_critical.svg")));
     }
     else if (currentIndex == m_iatEatHookTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_details.svg")));
+    }
+    else if (currentIndex == m_crossViewTabIndex)
+    {
+        m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_list.svg")));
+    }
+    else if (currentIndex == m_ipcTabIndex)
     {
         m_tabWidget->setTabIcon(currentIndex, selectedTabIcon(QStringLiteral(":/Icon/process_details.svg")));
     }
@@ -664,6 +761,7 @@ void KernelDock::initializeObjectNamespaceTab()
     m_objectNamespacePropertyTable->setSelectionMode(QAbstractItemView::NoSelection);
     m_objectNamespacePropertyTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_objectNamespacePropertyTable->setAlternatingRowColors(true);
+    m_objectNamespacePropertyTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_objectNamespacePropertyTable->setStyleSheet(itemSelectionStyle());
     m_objectNamespacePropertyTable->setCornerButtonEnabled(false);
     m_objectNamespacePropertyTable->verticalHeader()->setVisible(false);
@@ -694,6 +792,9 @@ void KernelDock::initializeObjectNamespaceTab()
     });
     connect(m_objectNamespaceTree, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showObjectNamespaceContextMenu(localPosition);
+    });
+    connect(m_objectNamespacePropertyTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        showCopyRowContextMenu(m_objectNamespacePropertyTable, localPosition, false);
     });
 }
 
@@ -824,6 +925,7 @@ void KernelDock::initializeNtQueryTab()
     m_ntQueryTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_ntQueryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_ntQueryTable->setAlternatingRowColors(true);
+    m_ntQueryTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_ntQueryTable->setStyleSheet(itemSelectionStyle());
     m_ntQueryTable->setCornerButtonEnabled(false);
     m_ntQueryTable->verticalHeader()->setVisible(false);
@@ -845,6 +947,9 @@ void KernelDock::initializeNtQueryTab()
     connect(m_ntQueryTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showNtQueryDetailByCurrentRow();
     });
+    connect(m_ntQueryTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        showCopyRowContextMenu(m_ntQueryTable, localPosition, true);
+    });
 }
 
 void KernelDock::initializeConnections()
@@ -854,6 +959,38 @@ void KernelDock::initializeConnections()
         updateTabIconContrast();
         ensureTabInitialized(tabIndex);
     });
+}
+
+void KernelDock::initializeCrossViewTab()
+{
+    if (m_crossViewPage == nullptr)
+    {
+        return;
+    }
+
+    // 只读 CID / cross-view 页直接复用独立组件，避免在主容器里再复制一套采集逻辑。
+    auto* layout = new QVBoxLayout(m_crossViewPage);
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setSpacing(0);
+
+    auto* tab = new KernelDockCidTab(m_crossViewPage);
+    layout->addWidget(tab, 1);
+}
+
+void KernelDock::initializeIpcTab()
+{
+    if (m_ipcPage == nullptr)
+    {
+        return;
+    }
+
+    // 只读 IPC 页直接复用独立组件，聚合 NamedPipe、ALPC 与通信端点。
+    auto* layout = new QVBoxLayout(m_ipcPage);
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setSpacing(0);
+
+    auto* tab = new KernelDockIpcTab(m_ipcPage);
+    layout->addWidget(tab, 1);
 }
 
 void KernelDock::ensureTabInitialized(const int tabIndex)
@@ -925,6 +1062,24 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         m_iatEatHookTabInitialized = true;
         hideTabInitializingProgress();
         refreshIatEatHooksAsync();
+        return;
+    }
+
+    if (tabIndex == m_crossViewTabIndex && !m_crossViewTabInitialized)
+    {
+        showTabInitializingProgress(tabIndex, QStringLiteral("CID表"));
+        initializeCrossViewTab();
+        m_crossViewTabInitialized = true;
+        hideTabInitializingProgress();
+        return;
+    }
+
+    if (tabIndex == m_ipcTabIndex && !m_ipcTabInitialized)
+    {
+        showTabInitializingProgress(tabIndex, QStringLiteral("IPC"));
+        initializeIpcTab();
+        m_ipcTabInitialized = true;
+        hideTabInitializingProgress();
         return;
     }
 

@@ -262,6 +262,85 @@ Return Value:
     return STATUS_SUCCESS;
 }
 
+NTSTATUS
+KswordARKDynDataV4QueryItems(
+    _Out_writes_bytes_to_(OutputBufferLength, *BytesWrittenOut) PVOID OutputBuffer,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesWrittenOut
+    )
+/*++
+
+Routine Description:
+
+    Return cached v4 accepted item rows. This is a read-only audit query; it
+    exposes the compact PDB facts that have already passed v4 identity and
+    validation checks, without applying them to any feature path.
+
+Arguments:
+
+    OutputBuffer - METHOD_BUFFERED output buffer.
+    OutputBufferLength - Writable byte count.
+    BytesWrittenOut - Receives bytes written.
+
+Return Value:
+
+    STATUS_SUCCESS when the response header is written.
+
+--*/
+{
+    KSW_QUERY_DYN_V4_ITEMS_RESPONSE* response = NULL;
+    ULONG moduleIndex = 0UL;
+    ULONG itemIndex = 0UL;
+    ULONG itemCount = 0UL;
+    ULONG totalCount = 0UL;
+    ULONG returnedCount = 0UL;
+    ULONG capacity = 0UL;
+
+    if (OutputBuffer == NULL || BytesWrittenOut == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BytesWrittenOut = 0U;
+    if (OutputBufferLength < KSW_QUERY_DYN_V4_ITEMS_RESPONSE_HEADER_SIZE) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlZeroMemory(OutputBuffer, OutputBufferLength);
+    response = (KSW_QUERY_DYN_V4_ITEMS_RESPONSE*)OutputBuffer;
+    response->version = KSW_DYN_V4_PROTOCOL_VERSION;
+    response->entrySize = sizeof(KSW_DYN_V4_ITEM_STATUS_ENTRY);
+    capacity = (ULONG)((OutputBufferLength - KSW_QUERY_DYN_V4_ITEMS_RESPONSE_HEADER_SIZE) / sizeof(KSW_DYN_V4_ITEM_STATUS_ENTRY));
+
+    ExAcquirePushLockShared(&g_KswordDynDataV4Lock);
+    for (moduleIndex = 0UL; moduleIndex < KSW_DYN_V4_MAX_MODULES; ++moduleIndex) {
+        const KSW_DYN_V4_MODULE_STATE* moduleState = &g_KswordDynDataV4State.Modules[moduleIndex];
+        if (!moduleState->Occupied) {
+            continue;
+        }
+
+        itemCount = moduleState->StoredItemCount;
+        if (itemCount > KSW_DYN_V4_MAX_ITEMS_PER_MODULE) {
+            itemCount = KSW_DYN_V4_MAX_ITEMS_PER_MODULE;
+        }
+
+        for (itemIndex = 0UL; itemIndex < itemCount; ++itemIndex) {
+            totalCount += 1UL;
+            if (returnedCount < capacity) {
+                response->entries[returnedCount].moduleClassId = moduleState->PublicEntry.module.image.classId;
+                response->entries[returnedCount].itemIndex = itemIndex;
+                response->entries[returnedCount].item = moduleState->Items[itemIndex];
+                returnedCount += 1UL;
+            }
+        }
+    }
+    ExReleasePushLockShared(&g_KswordDynDataV4Lock);
+
+    response->totalCount = totalCount;
+    response->returnedCount = returnedCount;
+    response->size = (ULONG)(KSW_QUERY_DYN_V4_ITEMS_RESPONSE_HEADER_SIZE + ((size_t)returnedCount * sizeof(KSW_DYN_V4_ITEM_STATUS_ENTRY)));
+    *BytesWrittenOut = response->size;
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 KswordARKDynDataV4RetrieveOutput(
     _In_ WDFREQUEST Request,
@@ -492,4 +571,47 @@ Return Value:
         return status;
     }
     return KswordARKDynDataV4QueryMissingItems(outputBuffer, actualOutputLength, BytesReturned);
+}
+
+NTSTATUS
+KswordARKDynDataIoctlQueryV4Items(
+    _In_ WDFDEVICE Device,
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+/*++
+
+Routine Description:
+
+    Handle the v4 accepted item inventory query IOCTL.
+
+Arguments:
+
+    Device - WDF device reserved for parity with other handlers.
+    Request - WDF IOCTL request.
+    InputBufferLength - Unused query input length.
+    OutputBufferLength - Dispatcher-supplied output length.
+    BytesReturned - Receives response bytes.
+
+Return Value:
+
+    NTSTATUS from buffer retrieval or query construction.
+
+--*/
+{
+    PVOID outputBuffer = NULL;
+    size_t actualOutputLength = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(Device);
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    status = KswordARKDynDataV4RetrieveOutput(Request, KSW_QUERY_DYN_V4_ITEMS_RESPONSE_HEADER_SIZE, &outputBuffer, &actualOutputLength);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    return KswordARKDynDataV4QueryItems(outputBuffer, actualOutputLength, BytesReturned);
 }

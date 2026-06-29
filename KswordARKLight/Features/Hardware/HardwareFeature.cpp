@@ -19,7 +19,7 @@ constexpr int kCpuSnapshotTabIndex = 2;
 constexpr int kEmbeddedKernelPrimaryTabId = 51001;
 constexpr int kEmbeddedKernelSecondaryTabId = 51002;
 
-// HardwareFeaturePageState owns the device-manager page plus both CPU-related
+// HardwareFeaturePageState owns the hardware audit page plus both CPU-related
 // KernelPage embeds. Inputs arrive through Win32 messages; processing preserves
 // child HWND state across tab switches by hiding instead of destroying pages.
 struct HardwareFeaturePageState {
@@ -115,7 +115,7 @@ void LayoutChildren(HardwareFeaturePageState& state) {
     ShowPages(state);
 }
 
-// CreateChildControls creates the tab host plus retained device and CPU pages.
+// CreateChildControls creates the tab host plus retained hardware audit and CPU pages.
 // Input is state with hwnd set; processing embeds existing KernelPage features
 // for CPU/IDT integrity and CPU hardware snapshot; output is true when all
 // required HWNDs exist.
@@ -124,7 +124,7 @@ bool CreateChildControls(HardwareFeaturePageState& state) {
     if (!state.tab) {
         return false;
     }
-    Ksword::Ui::AddTabPage(state.tab, kDeviceManagerTabIndex, { L"设备管理器" });
+    Ksword::Ui::AddTabPage(state.tab, kDeviceManagerTabIndex, { L"设备/输入链审计" });
     Ksword::Ui::AddTabPage(state.tab, kCpuIntegrityTabIndex, { L"CPU/IDT 完整性" });
     Ksword::Ui::AddTabPage(state.tab, kCpuSnapshotTabIndex, { L"CPU 硬件快照" });
     ::SendMessageW(state.tab, TCM_SETCURSEL, static_cast<WPARAM>(kDeviceManagerTabIndex), 0);

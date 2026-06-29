@@ -39,6 +39,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <string>
 #include <utility>
 
 namespace
@@ -174,6 +175,48 @@ namespace
         default:
             return QStringLiteral("Unavailable");
         }
+    }
+
+    // fileSectionIoMessageText 作用：
+    // - 将 ArkDriverClient 的低层 IO 文本翻译成文件映射窗口可直接展示的诊断；
+    // - 参数 messageText：DriverClient 返回的窄字符串，可能包含 DeviceIoControl/operation 等内部字段；
+    // - 返回：面向用户的中文说明，保留 unsupported/unavailable 等关键信号但隐藏实现噪声。
+    QString fileSectionIoMessageText(const std::string& messageText)
+    {
+        const QString rawMessageText = QString::fromStdString(messageText).trimmed();
+        if (rawMessageText.isEmpty())
+        {
+            return QStringLiteral("驱动未返回额外说明。");
+        }
+
+        const QString lowerMessageText = rawMessageText.toLower();
+        if (lowerMessageText.contains(QStringLiteral("unsupported")) ||
+            lowerMessageText.contains(QStringLiteral("not supported")) ||
+            lowerMessageText.contains(QStringLiteral("status=0xc00000bb")))
+        {
+            return QStringLiteral("当前驱动未支持文件 Section/ControlArea 反查 IOCTL。");
+        }
+        if (lowerMessageText.contains(QStringLiteral("unavailable")) ||
+            lowerMessageText.contains(QStringLiteral("device handle unavailable")))
+        {
+            return QStringLiteral("KswordARK 驱动当前不可用或尚未打开。");
+        }
+        if (lowerMessageText.contains(QStringLiteral("buffer too small")) ||
+            lowerMessageText.contains(QStringLiteral("buffer_too_small")))
+        {
+            return QStringLiteral("驱动返回缓冲区不足，结果可能被截断。");
+        }
+        if (lowerMessageText.contains(QStringLiteral("deviceiocontrol")))
+        {
+            return QStringLiteral("驱动 IOCTL 调用失败，建议确认驱动版本、权限与 DynData 偏移状态。");
+        }
+        if (lowerMessageText.contains(QStringLiteral("file-section path invalid")) ||
+            lowerMessageText.contains(QStringLiteral("path invalid")))
+        {
+            return QStringLiteral("传入驱动的 NT 文件路径无效。");
+        }
+
+        return rawMessageText;
     }
 
     // collectProcessNameMap 作用：采集 PID -> 进程名映射，避免每行重复 Toolhelp。
@@ -390,7 +433,7 @@ void FileMappedProcessWindow::requestRefresh(const bool forceRefresh)
                     appendUniqueLine(
                         diagnosticLines,
                         QStringLiteral("%1: IO失败 %2")
-                            .arg(QDir::toNativeSeparators(targetPath), QString::fromStdString(queryResult.io.message)));
+                            .arg(QDir::toNativeSeparators(targetPath), fileSectionIoMessageText(queryResult.io.message)));
                     continue;
                 }
 
@@ -620,6 +663,7 @@ void FileMappedProcessWindow::showTableContextMenu(const QPoint& localPosition)
     m_resultTable->setCurrentItem(clickedItem);
 
     QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* openProcessAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/handle_copy_row.svg"), QStringLiteral("复制整行"));
 

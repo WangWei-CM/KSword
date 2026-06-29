@@ -173,6 +173,32 @@ private:
         QByteArray lastValueBytes;      // 上次刷新值（用于变化观察）。
     };
 
+public:
+    // ProcessMemoryEvidenceEntry：
+    // - 作用：表示单个虚拟地址的 PTE / 工作集 / 风险证据。
+    // - 说明：同时服务 Tab9 / Tab10 的只读展示。
+    struct ProcessMemoryEvidenceEntry
+    {
+        std::uint64_t virtualAddress = 0;   // 虚拟地址。
+        std::uint64_t regionBaseAddress = 0; // 区域基址。
+        std::uint64_t regionSize = 0;       // 区域大小。
+        std::uint32_t protect = 0;          // VirtualQueryEx 保护位。
+        std::uint32_t state = 0;            // VirtualQueryEx 状态。
+        std::uint32_t type = 0;             // VirtualQueryEx 类型。
+        std::uint32_t win32Protection = 0;  // QueryWorkingSetEx 保护位。
+        std::uint32_t shareCount = 0;       // 共享计数。
+        std::uint32_t node = 0;             // NUMA 节点号。
+        bool valid = false;                 // WorkingSet 是否有效。
+        bool shared = false;                // WorkingSet 是否共享。
+        bool locked = false;                // WorkingSet 是否锁定。
+        bool largePage = false;             // WorkingSet 是否大页。
+        bool bad = false;                   // WorkingSet 是否坏页。
+        QString mappedFilePath;             // 映射文件路径。
+        QString riskText;                   // 风险摘要。
+        QString detailText;                 // 详情文本。
+    };
+
+private:
     // DriverDiffBlock：
     // - 作用：保存“修改后缓存”和“读取备份”比对出的连续差异块；
     // - R3 只把这些差异块提交给 R0，避免整页重复写入。
@@ -254,6 +280,18 @@ private:
     // - 处理逻辑：只创建只读查询入口、结果表和详情区，所有 R0 访问交给 ArkDriverClient。
     // - 返回：无。
     void initializeKernelMemoryEvidenceTab();
+
+    // initializeProcessPteTranslateTab：
+    // - 作用：构建 Tab9（PTE / VA 翻译）界面。
+    // - 处理逻辑：只读取当前附加进程的工作集 / 虚拟内存属性，不提供任何写入动作。
+    // - 返回：无。
+    void initializeProcessPteTranslateTab();
+
+    // initializeProcessMemoryEvidenceTab：
+    // - 作用：构建 Tab10（进程内存证据）界面。
+    // - 处理逻辑：以 VirtualQueryEx / QueryWorkingSetEx 为基础整理只读证据。
+    // - 返回：无。
+    void initializeProcessMemoryEvidenceTab();
 
     // initializeConnections：
     // - 作用：统一连接各控件交互逻辑。
@@ -521,6 +559,36 @@ private:
     // - 处理逻辑：通过表格 UserRole 中的虚拟地址反查缓存。
     // - 返回：无。
     void showKernelMemoryEvidenceDetailByCurrentRow();
+
+    // refreshProcessPteTranslateAsync：
+    // - 作用：异步采集当前进程的 PTE / VA 翻译信息。
+    // - 返回：无。
+    void refreshProcessPteTranslateAsync();
+
+    // rebuildProcessPteTranslateTable：
+    // - 作用：按当前过滤条件重建 PTE / VA 翻译表格。
+    // - 返回：无。
+    void rebuildProcessPteTranslateTable();
+
+    // showProcessPteTranslateDetailByCurrentRow：
+    // - 作用：把当前选中翻译记录展开到详情编辑器。
+    // - 返回：无。
+    void showProcessPteTranslateDetailByCurrentRow();
+
+    // refreshProcessMemoryEvidenceAsync：
+    // - 作用：异步采集当前进程内存证据。
+    // - 返回：无。
+    void refreshProcessMemoryEvidenceAsync();
+
+    // rebuildProcessMemoryEvidenceTable：
+    // - 作用：按过滤条件重建进程内存证据表。
+    // - 返回：无。
+    void rebuildProcessMemoryEvidenceTable();
+
+    // showProcessMemoryEvidenceDetailByCurrentRow：
+    // - 作用：把当前选中证据记录展开到详情编辑器。
+    // - 返回：无。
+    void showProcessMemoryEvidenceDetailByCurrentRow();
 
     // updateDriverMemoryBaseComboFromProcessCache：
     // - 作用：用当前进程缓存重建 Tab6 的“偏移基址/目标进程”下拉框。
@@ -822,6 +890,35 @@ private:
     QTableWidget* m_kernelMemoryEvidenceTable = nullptr;     // 证据结果表格。
     CodeEditorWidget* m_kernelMemoryEvidenceDetailEditor = nullptr; // 证据详情编辑器。
 
+    // ========================================================
+    // Tab9：PTE / VA 翻译
+    // ========================================================
+
+    QWidget* m_tabProcessPteTranslate = nullptr;              // Tab9 页面容器。
+    QPushButton* m_processPteTranslateRefreshButton = nullptr; // 刷新按钮。
+    QCheckBox* m_processPteTranslateRiskOnlyCheck = nullptr;    // 仅风险项过滤。
+    QLineEdit* m_processPteTranslateAddressEdit = nullptr;      // VA 输入框。
+    QSpinBox* m_processPteTranslatePageCountSpin = nullptr;     // 采样页数。
+    QLabel* m_processPteTranslateStatusLabel = nullptr;         // 状态标签。
+    QTableWidget* m_processPteTranslateTable = nullptr;         // 翻译结果表。
+    CodeEditorWidget* m_processPteTranslateDetailEditor = nullptr; // 详情编辑器。
+
+    // ========================================================
+    // Tab10：进程内存证据
+    // ========================================================
+
+    QWidget* m_tabProcessMemoryEvidence = nullptr;              // Tab10 页面容器。
+    QPushButton* m_processMemoryEvidenceRefreshButton = nullptr; // 刷新按钮。
+    QCheckBox* m_processMemoryEvidenceRiskOnlyCheck = nullptr;    // 仅风险项过滤。
+    QCheckBox* m_processMemoryEvidenceImageOnlyCheck = nullptr;   // 仅映像区域。
+    QLineEdit* m_processMemoryEvidenceStartEdit = nullptr;        // 起始地址。
+    QLineEdit* m_processMemoryEvidenceEndEdit = nullptr;          // 结束地址。
+    QLineEdit* m_processMemoryEvidenceFilterEdit = nullptr;       // 文本过滤。
+    QSpinBox* m_processMemoryEvidenceMaxRowsSpin = nullptr;       // 最大行数。
+    QLabel* m_processMemoryEvidenceStatusLabel = nullptr;         // 状态标签。
+    QTableWidget* m_processMemoryEvidenceTable = nullptr;         // 证据结果表。
+    CodeEditorWidget* m_processMemoryEvidenceDetailEditor = nullptr; // 详情编辑器。
+
 private:
     // ========================================================
     // 运行时状态与缓存
@@ -868,6 +965,16 @@ private:
     std::atomic<bool> m_kernelMemoryEvidenceRefreshInProgress{ false }; // Tab8 是否正在刷新。
     std::atomic<std::uint64_t> m_kernelMemoryEvidenceRefreshTicket{ 0 }; // Tab8 刷新票据。
     std::size_t m_kernelMemoryEvidenceVisibleCount = 0; // Tab8 当前可见行数。
+
+    std::vector<ProcessMemoryEvidenceEntry> m_processPteTranslateCache; // Tab9 证据缓存。
+    std::atomic<bool> m_processPteTranslateRefreshInProgress{ false }; // Tab9 是否正在刷新。
+    std::atomic<std::uint64_t> m_processPteTranslateRefreshTicket{ 0 }; // Tab9 刷新票据。
+    std::size_t m_processPteTranslateVisibleCount = 0; // Tab9 当前可见行数。
+
+    std::vector<ProcessMemoryEvidenceEntry> m_processMemoryEvidenceCache; // Tab10 证据缓存。
+    std::atomic<bool> m_processMemoryEvidenceRefreshInProgress{ false }; // Tab10 是否正在刷新。
+    std::atomic<std::uint64_t> m_processMemoryEvidenceRefreshTicket{ 0 }; // Tab10 刷新票据。
+    std::size_t m_processMemoryEvidenceVisibleCount = 0; // Tab10 当前可见行数。
 
     std::vector<BreakpointEntry> m_breakpointCache;    // 断点缓存（Tab5）。
     std::vector<BookmarkEntry> m_bookmarkCache;        // 书签缓存（Tab5）。

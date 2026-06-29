@@ -5767,29 +5767,25 @@ void MainWindow::stopR0DriverLogPoller()
 
 void MainWindow::runR0DriverLogPollerLoop()
 {
-    HANDLE logDeviceHandle = INVALID_HANDLE_VALUE;
+    ksword::ark::DriverHandle logDeviceHandle;
     std::string pendingPayloadText;
     pendingPayloadText.reserve(2048);
     bool waitingDeviceLogged = false;
     static const std::string endMarkerText = KSWORD_ARK_LOG_END_MARKER;
+    const ksword::ark::DriverClient driverClient;
 
     kLogEvent& logEvent = sharedR0DriverLogEvent();
     info << logEvent << "[MainWindow][R0Log] 轮询线程已启动。" << eol;
 
     while (m_r0DriverLogPollerRunning.load())
     {
-        if (logDeviceHandle == INVALID_HANDLE_VALUE)
+        if (!logDeviceHandle.isValid())
         {
-            logDeviceHandle = ::CreateFileW(
-                KSWORD_ARK_LOG_WIN32_PATH,
-                GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                nullptr,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                nullptr);
+            // 通过 ArkDriverClient 统一打开 KswordARK 日志设备，避免 MainWindow
+            // 直接散落 CreateFileW(\\.\KswordARKLog) 访问；返回值仍是 RAII 句柄。
+            logDeviceHandle = driverClient.open(GENERIC_READ);
 
-            if (logDeviceHandle == INVALID_HANDLE_VALUE)
+            if (!logDeviceHandle.isValid())
             {
                 if (!waitingDeviceLogged)
                 {
@@ -5806,7 +5802,7 @@ void MainWindow::runR0DriverLogPollerLoop()
 
         char readBuffer[1024] = { 0 };
         DWORD bytesRead = 0;
-        if (::ReadFile(logDeviceHandle, readBuffer, static_cast<DWORD>(sizeof(readBuffer)), &bytesRead, nullptr) != FALSE)
+        if (::ReadFile(logDeviceHandle.native(), readBuffer, static_cast<DWORD>(sizeof(readBuffer)), &bytesRead, nullptr) != FALSE)
         {
             if (bytesRead == 0U)
             {
@@ -5844,16 +5840,11 @@ void MainWindow::runR0DriverLogPollerLoop()
             << readError
             << ", 将重新连接。"
             << eol;
-        ::CloseHandle(logDeviceHandle);
-        logDeviceHandle = INVALID_HANDLE_VALUE;
+        logDeviceHandle.reset();
         std::this_thread::sleep_for(std::chrono::milliseconds(kR0LogConnectRetrySleepMs));
     }
 
-    if (logDeviceHandle != INVALID_HANDLE_VALUE)
-    {
-        ::CloseHandle(logDeviceHandle);
-        logDeviceHandle = INVALID_HANDLE_VALUE;
-    }
+    logDeviceHandle.reset();
 
     info << logEvent << "[MainWindow][R0Log] 轮询线程已退出。" << eol;
 }

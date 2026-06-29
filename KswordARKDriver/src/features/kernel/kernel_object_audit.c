@@ -616,93 +616,6 @@ Return Value:
     return STATUS_SUCCESS;
 }
 NTSTATUS
-KswordARKDriverQueryIpcSummary(
-    _Out_writes_bytes_(OutputBufferLength) PVOID OutputBuffer,
-    _In_ size_t OutputBufferLength,
-    _In_ const KSWORD_ARK_QUERY_IPC_SUMMARY_REQUEST* Request,
-    _Out_ size_t* BytesWrittenOut
-    )
-/*++
-Routine Description:
-    Build a read-only IPC summary. ALPC can delegate to the existing ALPC query;
-    Named Pipe and Mailslot are explicit stubs for future object-manager work.
-Arguments:
-    OutputBuffer - METHOD_BUFFERED response buffer.
-    OutputBufferLength - Output buffer length.
-    Request - Query selector.
-    BytesWrittenOut - Receives fixed response size.
-Return Value:
-    STATUS_SUCCESS when a response packet was produced.
---*/
-{
-    KSWORD_ARK_QUERY_IPC_SUMMARY_RESPONSE* response =
-        (KSWORD_ARK_QUERY_IPC_SUMMARY_RESPONSE*)OutputBuffer;
-    KSW_DYN_STATE dynState;
-    ULONG flags = KSWORD_ARK_IPC_QUERY_FLAG_INCLUDE_ALL;
-    NTSTATUS status = STATUS_SUCCESS;
-    if (BytesWrittenOut == NULL) {
-        return STATUS_INVALID_PARAMETER;
-    }
-    *BytesWrittenOut = 0U;
-    if (OutputBuffer == NULL || OutputBufferLength < sizeof(*response) || Request == NULL) {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-    RtlZeroMemory(response, sizeof(*response));
-    response->version = KSWORD_ARK_KERNEL_OBJECT_PROTOCOL_VERSION;
-    response->size = sizeof(*response);
-    response->processId = Request->processId;
-    response->handleValue = Request->handleValue;
-    response->status = KSWORD_ARK_IPC_SUMMARY_STATUS_UNAVAILABLE;
-    KswordARKDynDataSnapshot(&dynState);
-    response->dynDataCapabilityMask = dynState.CapabilityMask;
-    flags = Request->flags & KSWORD_ARK_IPC_QUERY_FLAG_INCLUDE_ALL;
-    if (flags == 0UL) {
-        flags = KSWORD_ARK_IPC_QUERY_FLAG_INCLUDE_ALL;
-    }
-    if ((flags & KSWORD_ARK_IPC_QUERY_FLAG_INCLUDE_ALPC) != 0UL &&
-        Request->processId != 0UL &&
-        Request->handleValue != 0ULL) {
-        KSWORD_ARK_QUERY_ALPC_PORT_REQUEST alpcRequest;
-        KSWORD_ARK_QUERY_ALPC_PORT_RESPONSE alpcResponse;
-        size_t alpcBytes = 0U;
-        RtlZeroMemory(&alpcRequest, sizeof(alpcRequest));
-        RtlZeroMemory(&alpcResponse, sizeof(alpcResponse));
-        alpcRequest.flags = KSWORD_ARK_ALPC_QUERY_FLAG_INCLUDE_BASIC | KSWORD_ARK_ALPC_QUERY_FLAG_INCLUDE_NAMES;
-        alpcRequest.processId = Request->processId;
-        alpcRequest.handleValue = Request->handleValue;
-        status = KswordARKDriverQueryAlpcPort(&alpcResponse, sizeof(alpcResponse), &alpcRequest, &alpcBytes);
-        response->lastStatus = status;
-        response->alpcStatus = NT_SUCCESS(status) ?
-            alpcResponse.queryStatus :
-            KSWORD_ARK_IPC_SUMMARY_STATUS_FAILED;
-        if (NT_SUCCESS(status)) {
-            response->alpcObjectAddress = alpcResponse.queryPort.objectAddress;
-            response->dynDataCapabilityMask = alpcResponse.dynDataCapabilityMask;
-            RtlCopyMemory(response->alpcTypeName, alpcResponse.typeName, sizeof(response->alpcTypeName));
-        }
-    }
-    else {
-        response->alpcStatus = KSWORD_ARK_IPC_SUMMARY_STATUS_STUB;
-    }
-    response->namedPipeStatus = ((flags & KSWORD_ARK_IPC_QUERY_FLAG_INCLUDE_PIPE) != 0UL) ?
-        KSWORD_ARK_IPC_SUMMARY_STATUS_STUB :
-        KSWORD_ARK_IPC_SUMMARY_STATUS_UNAVAILABLE;
-    response->mailslotStatus = ((flags & KSWORD_ARK_IPC_QUERY_FLAG_INCLUDE_MAILSLOT) != 0UL) ?
-        KSWORD_ARK_IPC_SUMMARY_STATUS_STUB :
-        KSWORD_ARK_IPC_SUMMARY_STATUS_UNAVAILABLE;
-    response->status =
-        (response->alpcStatus == KSWORD_ARK_ALPC_QUERY_STATUS_OK ||
-            response->alpcStatus == KSWORD_ARK_ALPC_QUERY_STATUS_PARTIAL) ?
-        KSWORD_ARK_IPC_SUMMARY_STATUS_PARTIAL :
-        KSWORD_ARK_IPC_SUMMARY_STATUS_STUB;
-    (VOID)RtlStringCchPrintfW(
-        response->detail,
-        KSWORD_ARK_KERNEL_OBJECT_DETAIL_CHARS,
-        L"IPC summary is read-only; Named Pipe and Mailslot are protocol stubs in this phase.");
-    *BytesWrittenOut = sizeof(*response);
-    return STATUS_SUCCESS;
-}
-NTSTATUS
 KswordARKKernelObjectIoctlEnumCidTable(
     _In_ WDFDEVICE Device,
     _In_ WDFREQUEST Request,
@@ -801,6 +714,7 @@ Return Value:
     size_t actualInputLength = 0U;
     size_t actualOutputLength = 0U;
     NTSTATUS status = STATUS_SUCCESS;
+    UNREFERENCED_PARAMETER(InputBufferLength);
     UNREFERENCED_PARAMETER(OutputBufferLength);
     if (BytesReturned == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -848,6 +762,7 @@ Return Value:
     size_t actualInputLength = 0U;
     size_t actualOutputLength = 0U;
     NTSTATUS status = STATUS_SUCCESS;
+    UNREFERENCED_PARAMETER(InputBufferLength);
     UNREFERENCED_PARAMETER(OutputBufferLength);
     if (BytesReturned == NULL) {
         return STATUS_INVALID_PARAMETER;

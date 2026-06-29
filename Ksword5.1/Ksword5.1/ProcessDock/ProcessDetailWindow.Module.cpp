@@ -314,7 +314,7 @@ void ProcessDetailWindow::showModuleContextMenu(const QPoint& localPosition)
     QAction* copyCellAction = contextMenu.addAction(QIcon(":/Icon/process_copy_cell.svg"), "复制单元格");
     QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), "复制行");
     contextMenu.addSeparator();
-    QAction* gotoModuleAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), "转到模块（预留）");
+    QAction* gotoModuleAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), "查看模块详情");
     QAction* openFolderAction = contextMenu.addAction(QIcon(":/Icon/process_open_folder.svg"), "打开文件夹");
     QAction* unloadAction = contextMenu.addAction(QIcon(":/Icon/process_terminate.svg"), "卸载");
     QAction* suspendThreadAction = contextMenu.addAction(QIcon(":/Icon/process_suspend.svg"), "挂起Thread");
@@ -329,11 +329,7 @@ void ProcessDetailWindow::showModuleContextMenu(const QPoint& localPosition)
 
     if (selectedAction == copyCellAction) { copyCurrentModuleCell(); return; }
     if (selectedAction == copyRowAction) { copyCurrentModuleRow(); return; }
-    if (selectedAction == gotoModuleAction)
-    {
-        QMessageBox::information(this, "转到模块", "该功能保留备用，暂未实现。");
-        return;
-    }
+    if (selectedAction == gotoModuleAction) { showCurrentModuleDetailDialog(); return; }
     if (selectedAction == openFolderAction) { openCurrentModuleFolder(); return; }
     if (selectedAction == unloadAction) { unloadCurrentModule(); return; }
     if (selectedAction == suspendThreadAction) { suspendCurrentModuleThread(); return; }
@@ -381,6 +377,102 @@ void ProcessDetailWindow::copyCurrentModuleRow()
     dbg << copyModuleRowEvent
         << "[ProcessDetailWindow] copyCurrentModuleRow: 完成复制整行。"
         << eol;
+}
+
+void ProcessDetailWindow::showCurrentModuleDetailDialog()
+{
+    // showCurrentModuleDetailDialog 作用：
+    // - 将模块表当前行映射回 ProcessModuleRecord；
+    // - 构造只读详情文本并放入项目内置 CodeEditorWidget；
+    // - 返回：无，用户可复制全部或打开模块所在目录。
+    ks::process::ProcessModuleRecord* moduleRecord = selectedModuleRecord();
+    if (moduleRecord == nullptr)
+    {
+        return;
+    }
+
+    const QString modulePathText = QString::fromStdString(moduleRecord->modulePath);
+    const QString detailText = QStringList({
+        QStringLiteral("ProcessId: %1").arg(m_baseRecord.pid),
+        QStringLiteral("ProcessName: %1").arg(QString::fromStdString(m_baseRecord.processName)),
+        QStringLiteral("ModulePath: %1").arg(modulePathText),
+        QStringLiteral("ModuleBase: %1").arg(formatHexText(moduleRecord->moduleBaseAddress)),
+        QStringLiteral("ModuleSize: %1").arg(formatModuleSizeText(moduleRecord->moduleSizeBytes)),
+        QStringLiteral("EntryPointRva: %1").arg(formatHexText(moduleRecord->entryPointRva)),
+        QStringLiteral("SignatureState: %1").arg(QString::fromStdString(moduleRecord->signatureState)),
+        QStringLiteral("SignatureTrusted: %1").arg(moduleRecord->signatureTrusted ? QStringLiteral("true") : QStringLiteral("false")),
+        QStringLiteral("RunningState: %1").arg(QString::fromStdString(moduleRecord->runningState)),
+        QStringLiteral("RepresentativeThreadId: %1").arg(moduleRecord->representativeThreadId),
+        QStringLiteral("ThreadIdText: %1").arg(QString::fromStdString(moduleRecord->threadIdText))
+    }).join(QChar('\n'));
+
+    QDialog detailDialog(this);
+    detailDialog.setWindowTitle(QStringLiteral("模块详情 - %1").arg(QFileInfo(modulePathText).fileName()));
+    detailDialog.resize(760, 520);
+    detailDialog.setStyleSheet(QStringLiteral(
+        "QDialog{background:%1;color:%2;}"
+        "QPushButton{background:%3;color:%2;border:1px solid %4;border-radius:4px;padding:5px 10px;}"
+        "QPushButton:hover{background:%5;}")
+        .arg(KswordTheme::SurfaceHex())
+        .arg(KswordTheme::TextPrimaryHex())
+        .arg(KswordTheme::SurfaceAltColorHex())
+        .arg(KswordTheme::BorderHex())
+        .arg(KswordTheme::PrimaryBlueHex));
+
+    QVBoxLayout* dialogLayout = new QVBoxLayout(&detailDialog);
+    dialogLayout->setContentsMargins(10, 10, 10, 10);
+    dialogLayout->setSpacing(8);
+
+    QLabel* summaryLabel = new QLabel(
+        QStringLiteral("模块基址 %1 | 大小 %2 | 签名 %3")
+            .arg(formatHexText(moduleRecord->moduleBaseAddress))
+            .arg(formatModuleSizeText(moduleRecord->moduleSizeBytes))
+            .arg(QString::fromStdString(moduleRecord->signatureState)),
+        &detailDialog);
+    summaryLabel->setWordWrap(true);
+    dialogLayout->addWidget(summaryLabel);
+
+    CodeEditorWidget* detailEditor = new CodeEditorWidget(&detailDialog);
+    detailEditor->setReadOnly(true);
+    detailEditor->setText(detailText);
+    dialogLayout->addWidget(detailEditor, 1);
+
+    QHBoxLayout* buttonLayout = new QHBoxLayout();
+    buttonLayout->addStretch(1);
+
+    QPushButton* copyButton = new QPushButton(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制全部"), &detailDialog);
+    copyButton->setToolTip(QStringLiteral("复制当前模块详情文本"));
+    buttonLayout->addWidget(copyButton);
+
+    QPushButton* openFolderButton = new QPushButton(QIcon(":/Icon/process_open_folder.svg"), QStringLiteral("打开目录"), &detailDialog);
+    openFolderButton->setToolTip(QStringLiteral("打开当前模块所在文件夹"));
+    buttonLayout->addWidget(openFolderButton);
+
+    QPushButton* closeButton = new QPushButton(QStringLiteral("关闭"), &detailDialog);
+    closeButton->setToolTip(QStringLiteral("关闭模块详情窗口"));
+    buttonLayout->addWidget(closeButton);
+    dialogLayout->addLayout(buttonLayout);
+
+    connect(copyButton, &QPushButton::clicked, &detailDialog, [detailText]()
+    {
+        QApplication::clipboard()->setText(detailText);
+    });
+    connect(openFolderButton, &QPushButton::clicked, &detailDialog, [modulePathText]()
+    {
+        std::string detailTextLocal;
+        ks::process::OpenFolderByPath(modulePathText.toStdString(), &detailTextLocal);
+    });
+    connect(closeButton, &QPushButton::clicked, &detailDialog, &QDialog::accept);
+
+    kLogEvent moduleDetailEvent;
+    info << moduleDetailEvent
+        << "[ProcessDetailWindow] showCurrentModuleDetailDialog: path="
+        << moduleRecord->modulePath
+        << ", base="
+        << formatHexText(moduleRecord->moduleBaseAddress).toStdString()
+        << eol;
+
+    detailDialog.exec();
 }
 
 void ProcessDetailWindow::openCurrentModuleFolder()

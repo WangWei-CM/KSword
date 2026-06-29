@@ -228,7 +228,10 @@ void ProcessTraceMonitorWidget::initializeUi()
     m_availableTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_availableTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_availableTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    m_availableTable->setContextMenuPolicy(Qt::NoContextMenu);
+    // 可选进程表也允许右键复制当前/选中行：
+    // - 复制动作不改变监控状态；
+    // - 加入目标仍在 Actions.cpp 中统一判断运行态，避免采集中修改根目标。
+    m_availableTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_availableTable->setSortingEnabled(false);
     m_availableTable->verticalHeader()->setVisible(false);
     m_availableTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());

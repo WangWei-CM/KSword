@@ -20,6 +20,21 @@ std::wstring NumberText(ULONGLONG value) {
     return buffer;
 }
 
+// HexPointerText formats R0 object addresses for read-only audit columns. Input
+// is an integer address copied from ArkDriverClient; output is "-" when absent.
+std::wstring HexPointerText(std::uintptr_t value) {
+    if (value == 0) {
+        return L"-";
+    }
+
+    wchar_t buffer[32]{};
+    ::swprintf_s(buffer,
+        L"0x%0*llX",
+        sizeof(void*) == 8 ? 16 : 8,
+        static_cast<unsigned long long>(value));
+    return buffer;
+}
+
 std::wstring PercentText(double value) {
     wchar_t buffer[32]{};
     ::swprintf_s(buffer, L"%.1f%%", value);
@@ -71,7 +86,10 @@ std::wstring ProcessModel::textForColumn(const ProcessDisplayRow& displayRow, in
         case 6: return FormatByteSize(static_cast<ULONGLONG>(row->virtualSizeBytes));
         case 7: return NumberText(static_cast<ULONGLONG>(row->basePriority));
         case 8: return NumberText(row->sessionId);
-        case 9: return row->imagePath.empty() ? L"<access denied>" : row->imagePath;
+        case 9: return HexPointerText(row->r0ProcessObjectAddress);
+        case 10: return row->r0AuditSummary.empty() ? L"-" : row->r0AuditSummary;
+        case 11: return row->r0AuditDetail.empty() ? L"-" : row->r0AuditDetail;
+        case 12: return row->imagePath.empty() ? L"<access denied>" : row->imagePath;
         default: return {};
         }
     }

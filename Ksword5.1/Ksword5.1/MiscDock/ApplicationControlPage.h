@@ -4,7 +4,7 @@
 // ApplicationControlPage.h
 // 作用：
 // 1) 在 MiscDock 内提供“应用控制”只读诊断页；
-// 2) 聚合 AppLocker、WDAC / Code Integrity、Defender / ASR、事件日志和文件诊断；
+// 2) 聚合 AppLocker、WDAC / Code Integrity、Defender / ASR、平台安全、事件日志和文件诊断；
 // 3) 仅做查看、复制和导出，不做任何策略写入/删除/禁用。
 // ============================================================
 
@@ -19,7 +19,7 @@
 class QLabel;
 class QComboBox;
 class QLineEdit;
-class QPlainTextEdit;
+class CodeEditorWidget;
 class QPushButton;
 class QTabWidget;
 class QTableWidget;
@@ -30,7 +30,7 @@ namespace ks::misc
 {
     // ApplicationControlPage：
     // - 输入：Qt 父控件；
-    // - 处理：异步采集 AppLocker / WDAC / Defender / CodeIntegrity / 文件诊断信息；
+    // - 处理：异步采集 AppLocker / WDAC / Defender / Platform / CodeIntegrity / 文件诊断信息；
     // - 输出：通过表格、状态标签和文本框展示，只读无副作用。
     class ApplicationControlPage final : public QWidget
     {
@@ -109,6 +109,11 @@ namespace ks::misc
         // - 无输入参数，无返回值。
         QWidget* buildDefenderPage();
 
+        // buildPlatformPage：
+        // - 构建 CI / VBS / Hyper-V / Driver Trust / BAM 只读诊断页；
+        // - 无输入参数，无返回值。
+        QWidget* buildPlatformPage();
+
         // buildEventLogPage：
         // - 构建事件日志页；
         // - 无输入参数，无返回值。
@@ -138,11 +143,13 @@ namespace ks::misc
             QString appLockerSummary,
             QString wdacSummary,
             QString defenderSummary,
+            QString platformSummary,
             QString eventSummary,
             QVector<AppLockerRuleRecord> appLockerRules,
             QVector<PolicyFileRecord> policyFiles,
             QVector<EventRecord> events,
-            QVector<KeyValueRecord> defenderRows);
+            QVector<KeyValueRecord> defenderRows,
+            QVector<KeyValueRecord> platformRows);
 
         // runFileDiagnosisAsync：
         // - 对输入文件路径做只读诊断；
@@ -257,24 +264,28 @@ namespace ks::misc
         QWidget* m_eventPage = nullptr;             // m_eventPage：事件日志页面。
         QWidget* m_fileDiagnosisPage = nullptr;      // m_fileDiagnosisPage：文件诊断页面。
 
-        QPlainTextEdit* m_appLockerSummary = nullptr;   // m_appLockerSummary：AppLocker 说明文本。
+        CodeEditorWidget* m_appLockerSummary = nullptr;   // m_appLockerSummary：AppLocker 说明文本。
         QTableWidget* m_appLockerTable = nullptr;       // m_appLockerTable：AppLocker 规则表。
-        QPlainTextEdit* m_wdacSummary = nullptr;        // m_wdacSummary：WDAC 说明文本。
+        CodeEditorWidget* m_wdacSummary = nullptr;        // m_wdacSummary：WDAC 说明文本。
         QTableWidget* m_policyFileTable = nullptr;      // m_policyFileTable：WDAC 策略文件表。
         QTableWidget* m_codeIntegrityEventTable = nullptr; // m_codeIntegrityEventTable：Code Integrity 事件表。
-        QPlainTextEdit* m_defenderSummary = nullptr;    // m_defenderSummary：Defender 状态文本。
+        CodeEditorWidget* m_defenderSummary = nullptr;    // m_defenderSummary：Defender 状态文本。
         QTableWidget* m_defenderTable = nullptr;        // m_defenderTable：Defender 键值表。
-        QPlainTextEdit* m_eventSummary = nullptr;       // m_eventSummary：事件日志文本。
+        QWidget* m_platformPage = nullptr;              // m_platformPage：平台安全页面。
+        CodeEditorWidget* m_platformSummary = nullptr;    // m_platformSummary：平台安全状态文本。
+        QTableWidget* m_platformTable = nullptr;        // m_platformTable：平台安全键值表。
+        CodeEditorWidget* m_eventSummary = nullptr;       // m_eventSummary：事件日志文本。
         QTableWidget* m_eventTable = nullptr;           // m_eventTable：事件表。
         QComboBox* m_eventVerdictFilterCombo = nullptr; // m_eventVerdictFilterCombo：事件分类筛选器。
         QComboBox* m_eventLimitCombo = nullptr;         // m_eventLimitCombo：事件读取数量选择。
         QLineEdit* m_filePathEdit = nullptr;            // m_filePathEdit：文件诊断输入框。
         QPushButton* m_fileBrowseButton = nullptr;      // m_fileBrowseButton：浏览按钮。
         QPushButton* m_fileDiagnoseButton = nullptr;    // m_fileDiagnoseButton：诊断按钮。
-        QPlainTextEdit* m_fileDiagnosisSummary = nullptr; // m_fileDiagnosisSummary：文件诊断说明文本。
+        CodeEditorWidget* m_fileDiagnosisSummary = nullptr; // m_fileDiagnosisSummary：文件诊断说明文本。
         QTableWidget* m_fileDiagnosisTable = nullptr;   // m_fileDiagnosisTable：文件诊断结果表。
 
         QVector<AppLockerRuleRecord> m_appLockerRules;  // m_appLockerRules：最近一次 AppLocker 规则快照。
         QVector<EventRecord> m_eventRows;               // m_eventRows：最近一次完整事件日志缓存。
+        QVector<KeyValueRecord> m_platformRows;         // m_platformRows：最近一次平台安全诊断缓存。
     };
 }

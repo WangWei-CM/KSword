@@ -81,6 +81,12 @@ void NetworkDock::initializeConnections()
             {
                 return;
             }
+            // 右键锚定：
+            // - 输入：用户鼠标所在告警行；
+            // - 处理：先同步当前行，再展示菜单，避免“复制告警行”复制到旧选中行或详情定位不一致；
+            // - 返回：无，后续动作仍然只读。
+            m_nidsAlertTable->setCurrentCell(index.row(), index.column());
+            m_nidsAlertTable->selectRow(index.row());
 
             QMenu contextMenu(this);
             contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
@@ -618,6 +624,15 @@ void NetworkDock::initializeConnections()
             if (!index.isValid() && !hasSelection)
             {
                 return;
+            }
+            if (index.isValid() && !hasSelection)
+            {
+                // 单行右键锚定：
+                // - 输入：当前鼠标所在报文行；
+                // - 处理：没有多选时把右键行设为当前行，复制/详情/跟踪都使用同一个 anchor；
+                // - 返回：无；已有多选时不破坏用户选择。
+                m_packetTable->setCurrentCell(index.row(), index.column());
+                m_packetTable->selectRow(index.row());
             }
 
             // collectTargetRows 作用：

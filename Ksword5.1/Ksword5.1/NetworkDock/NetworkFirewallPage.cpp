@@ -12,20 +12,27 @@
 #include "../UI/GlobalDialogTheme.h"
 
 #include <QAbstractItemView>
+#include <QAction>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QGuiApplication>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QModelIndex>
 #include <QPointer>
 #include <QPushButton>
+#include <QStringList>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -78,6 +85,59 @@ namespace
         ColumnTimestamp,
         ColumnCount
     };
+
+    void installFirewallTableCopyMenu(QTableWidget* tableWidget)
+    {
+        // installFirewallTableCopyMenu 作用：
+        // - 输入：WFP 事件表或规则表；
+        // - 处理：右键点击时同步当前行，并复制该行所有可见列为 TSV；
+        // - 返回：无。该菜单只复制审计/规则证据，不修改防火墙状态。
+        if (tableWidget == nullptr)
+        {
+            return;
+        }
+
+        tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(
+            tableWidget,
+            &QTableWidget::customContextMenuRequested,
+            tableWidget,
+            [tableWidget](const QPoint& localPosition)
+            {
+                const QModelIndex clickedIndex = tableWidget->indexAt(localPosition);
+                if (clickedIndex.isValid())
+                {
+                    tableWidget->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                }
+
+                QMenu contextMenu(tableWidget);
+                contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+                QAction* copyRowAction = contextMenu.addAction(
+                    QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                    QStringLiteral("复制当前行"));
+                copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
+                if (contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPosition)) != copyRowAction)
+                {
+                    return;
+                }
+
+                QClipboard* clipboardObject = QGuiApplication::clipboard();
+                const int rowIndex = tableWidget->currentRow();
+                if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
+                {
+                    return;
+                }
+
+                QStringList rowFields;
+                rowFields.reserve(tableWidget->columnCount());
+                for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
+                {
+                    const QTableWidgetItem* item = tableWidget->item(rowIndex, columnIndex);
+                    rowFields.push_back(item != nullptr ? item->text() : QString());
+                }
+                clipboardObject->setText(rowFields.join(QLatin1Char('\t')));
+            });
+    }
 
     // FirewallRuleTableColumn：
     // - 作用：定义规则管理表列索引；
@@ -1094,6 +1154,7 @@ void NetworkFirewallPage::initializeEventMonitorUi()
     m_eventTable->setColumnWidth(ColumnLocalAddress, 130);
     m_eventTable->setColumnWidth(ColumnRemoteAddress, 130);
     m_eventTable->setColumnWidth(ColumnTimestamp, 170);
+    installFirewallTableCopyMenu(m_eventTable);
     pageLayout->addWidget(m_eventTable, 1);
 
     if (m_innerTabWidget != nullptr)
@@ -1167,6 +1228,7 @@ void NetworkFirewallPage::initializeRuleManagerUi()
     m_ruleTable->setColumnWidth(RuleColumnApplication, 220);
     m_ruleTable->setColumnWidth(RuleColumnGrouping, 150);
     m_ruleTable->setColumnWidth(RuleColumnDescription, 220);
+    installFirewallTableCopyMenu(m_ruleTable);
     pageLayout->addWidget(m_ruleTable, 1);
 
     if (m_innerTabWidget != nullptr)

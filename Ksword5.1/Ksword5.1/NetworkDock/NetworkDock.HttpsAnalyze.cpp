@@ -377,17 +377,36 @@ void NetworkDock::initializeHttpsAnalyzeTab()
                 return;
             }
 
+            const int rowIndex = clickedItem->row();
+            m_httpsParsedTable->setCurrentCell(rowIndex, clickedItem->column());
+
             QMenu contextMenu(this);
+            contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* detailAction = contextMenu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("查看详情"));
-            QAction* copyAction = contextMenu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制详情文本"));
+            QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制当前行"));
+            QAction* copyDetailAction = contextMenu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制详情文本"));
             QAction* selectedAction = contextMenu.exec(m_httpsParsedTable->viewport()->mapToGlobal(localPosition));
             if (selectedAction == detailAction)
             {
-                openHttpsParsedDetailByRow(clickedItem->row());
+                openHttpsParsedDetailByRow(rowIndex);
             }
-            else if (selectedAction == copyAction)
+            else if (selectedAction == copyRowAction)
             {
-                const int rowIndex = clickedItem->row();
+                // 复制当前行：
+                // - 输入：用户右键选中的 HTTPS 解析行；
+                // - 处理：逐列读取单元格文本并用 TSV 格式拼接；
+                // - 输出：写入系统剪贴板，方便粘贴到表格或工单。
+                QStringList rowTextParts;
+                rowTextParts.reserve(HttpsParsedColumnCount);
+                for (int columnIndex = 0; columnIndex < HttpsParsedColumnCount; ++columnIndex)
+                {
+                    const QTableWidgetItem* cellItem = m_httpsParsedTable->item(rowIndex, columnIndex);
+                    rowTextParts.append(cellItem != nullptr ? cellItem->text() : QString());
+                }
+                QApplication::clipboard()->setText(rowTextParts.join(QChar('\t')));
+            }
+            else if (selectedAction == copyDetailAction)
+            {
                 if (rowIndex >= 0 && rowIndex < static_cast<int>(m_httpsParsedEntryCache.size()))
                 {
                     const ks::network::HttpsProxyParsedEntry& parsedEntry = m_httpsParsedEntryCache[static_cast<std::size_t>(rowIndex)];

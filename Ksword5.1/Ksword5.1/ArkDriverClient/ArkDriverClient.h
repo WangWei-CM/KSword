@@ -104,6 +104,18 @@ namespace ksword::ark
             std::uint32_t startTid = 0,
             std::uint32_t endTid = 0,
             unsigned long maxNodes = KSWORD_ARK_CROSSVIEW_DEFAULT_MAX_NODES) const;
+        // query*RuntimeDetail：
+        // - 输入：PID/TID 和只读字段组 flags。
+        // - 处理：封装 R0 PDB/DynData detail IOCTL，失败时返回 unsupported/unavailable。
+        // - 返回：固定响应结构；不把对象地址作为后续写操作凭据。
+        ProcessRuntimeDetailResult queryProcessRuntimeDetail(std::uint32_t processId, unsigned long flags = KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_ALL) const;
+        ThreadRuntimeDetailResult queryThreadRuntimeDetail(std::uint32_t threadId, std::uint32_t processId = 0, unsigned long flags = KSWORD_ARK_THREAD_DETAIL_FLAG_INCLUDE_ALL) const;
+        // query*RuntimeFieldSamples：
+        // - 输入：deep PDB catalog 选出的字段 offset/size 列表。
+        // - 处理：封装只读小字段采样 IOCTL，R0 不接受对象地址。
+        // - 返回：每字段状态、字节样本和 U64 摘要，旧驱动返回 unsupported。
+        RuntimeFieldSampleResult queryProcessRuntimeFieldSamples(std::uint32_t processId, const std::vector<RuntimeFieldSampleRequestItem>& items, unsigned long flags = 0UL) const;
+        RuntimeFieldSampleResult queryThreadRuntimeFieldSamples(std::uint32_t threadId, std::uint32_t processId, const std::vector<RuntimeFieldSampleRequestItem>& items, unsigned long flags = 0UL) const;
         KernelInlineHookScanResult scanInlineHooks(unsigned long flags = 0UL, unsigned long maxEntries = KSWORD_ARK_KERNEL_HOOK_DEFAULT_MAX_ENTRIES, const std::wstring& moduleName = std::wstring()) const;
         // scanKernelExecutableMemory：
         // - 作用：调用 Prompt 1 定义的内核可执行页扫描 IOCTL，并解析变长响应为 R3 模型。
@@ -176,5 +188,60 @@ namespace ksword::ark
         DynDataCapabilitiesResult queryDynDataCapabilities() const;
         DynDataProfileApplyResult applyDynDataProfile(const DynDataProfileApplyInput& profile) const;
         DynDataProfileApplyExResult applyDynDataProfileEx(const DynDataProfileApplyExInput& profile) const;
+        // applyDynDataProfileV4 / queryDynDataV4*：
+        // - 输入：PDB extractor 生成的 v4 profile 或只读查询预算；
+        // - 处理：封装 DynData v4 IOCTL，验证固定/变长响应头；
+        // - 返回：R3 友好结果；unsupported=true 表示旧驱动未注册 v4 IOCTL。
+        DynDataV4ApplyResult applyDynDataProfileV4(const DynDataV4ApplyInput& profile) const;
+        DynDataV4ModulesResult queryDynDataV4Modules(unsigned long maxRows = KSW_DYN_V4_MAX_MODULES) const;
+        DynDataV4CapabilityGroupsResult queryDynDataV4CapabilityGroups(unsigned long maxRows = KSW_DYN_V4_MAX_MODULES * KSW_DYN_V4_MAX_CAPABILITY_GROUPS_PER_MODULE) const;
+        DynDataV4MissingItemsResult queryDynDataV4MissingItems(unsigned long maxRows = KSW_DYN_V4_MAX_MISSING_SUMMARY) const;
+        DynDataV4ItemsResult queryDynDataV4Items(unsigned long maxRows = KSW_DYN_V4_MAX_MODULES * KSW_DYN_V4_MAX_ITEMS_PER_MODULE) const;
+        // queryNetwork*：
+        // - 输入：只读网络审计 flags 和最大行数；
+        // - 处理：封装 TCP/UDP/WFP/NDIS PDB-backed 审计 IOCTL；
+        // - 返回：变长审计行；不执行断连、禁用、detach 或规则修改。
+        NetworkEndpointAuditResult queryNetworkTcpEndpoints(unsigned long flags = KSWORD_ARK_NETWORK_AUDIT_QUERY_FLAG_INCLUDE_ALL, unsigned long maxRows = KSWORD_ARK_NETWORK_AUDIT_MAX_REQUESTED_ROWS) const;
+        NetworkEndpointAuditResult queryNetworkUdpEndpoints(unsigned long flags = KSWORD_ARK_NETWORK_AUDIT_QUERY_FLAG_INCLUDE_ALL, unsigned long maxRows = KSWORD_ARK_NETWORK_AUDIT_MAX_REQUESTED_ROWS) const;
+        NetworkWfpInventoryResult queryNetworkWfpInventory(unsigned long flags = KSWORD_ARK_NETWORK_AUDIT_QUERY_FLAG_INCLUDE_ALL, unsigned long maxRows = KSWORD_ARK_NETWORK_AUDIT_MAX_REQUESTED_ROWS) const;
+        NetworkNdisChainResult queryNetworkNdisChain(unsigned long flags = KSWORD_ARK_NETWORK_AUDIT_QUERY_FLAG_INCLUDE_ALL, unsigned long maxRows = KSWORD_ARK_NETWORK_AUDIT_MAX_REQUESTED_ROWS) const;
+        // File/filter/storage audit wrappers：
+        // - 输入：只读 flags、预算和可选卷路径；
+        // - 处理：封装 Minifilter/Storage/BitLocker/MountMgr/Filesystem integrity IOCTL；
+        // - 返回：协议行数组；BitLocker wrapper 不返回密钥材料。
+        MinifilterInventoryResult queryMinifilterInventory(unsigned long flags = KSWORD_ARK_MINIFILTER_INVENTORY_FLAG_INCLUDE_ALL, unsigned long maxRows = 256UL) const;
+        StorageVolumeStackAuditResult queryVolumeStackAudit(const std::wstring& volumePath = std::wstring(), unsigned long flags = KSWORD_ARK_STORAGE_AUDIT_FLAG_INCLUDE_DEFAULT, unsigned long maxRows = KSWORD_ARK_STORAGE_DEFAULT_MAX_ROWS, unsigned long maxDepth = KSWORD_ARK_STORAGE_DEFAULT_STACK_DEPTH) const;
+        StorageBitlockerFveAuditResult queryBitlockerFveAudit(const std::wstring& volumePath = std::wstring(), unsigned long flags = KSWORD_ARK_STORAGE_AUDIT_FLAG_INCLUDE_DEFAULT, unsigned long maxRows = KSWORD_ARK_STORAGE_DEFAULT_MAX_ROWS, unsigned long maxDepth = KSWORD_ARK_STORAGE_DEFAULT_STACK_DEPTH) const;
+        StorageMountMgrMappingAuditResult queryMountMgrMappingAudit(const std::wstring& volumePath = std::wstring(), unsigned long flags = KSWORD_ARK_STORAGE_AUDIT_FLAG_INCLUDE_DEFAULT, unsigned long maxRows = KSWORD_ARK_STORAGE_DEFAULT_MAX_ROWS, unsigned long maxDepth = KSWORD_ARK_STORAGE_DEFAULT_STACK_DEPTH) const;
+        StorageFilesystemIntegrityAuditResult queryFilesystemIntegrityAudit(const std::wstring& volumePath = std::wstring(), unsigned long flags = KSWORD_ARK_STORAGE_AUDIT_FLAG_INCLUDE_DEFAULT, unsigned long maxRows = KSWORD_ARK_STORAGE_DEFAULT_MAX_ROWS, unsigned long maxDepth = KSWORD_ARK_STORAGE_DEFAULT_STACK_DEPTH) const;
+        // Security audit wrappers：
+        // - 输入：只读 flags 或行预算；
+        // - 处理：封装 Security/CI/VBS/Hyper-V/AppControl IOCTL；
+        // - 返回：固定或变长结果，不修改任何安全策略。
+        SecurityStatusAuditResult querySecurityStatus(unsigned long flags = 0UL) const;
+        DriverTrustViewAuditResult queryDriverTrustView(unsigned long flags = KSWORD_ARK_DRIVER_TRUST_QUERY_FLAG_DEFAULT, unsigned long maxEntries = KSWORD_ARK_SECURITY_AUDIT_DEFAULT_DRIVER_ROWS) const;
+        HyperVSummaryAuditResult queryHyperVSummary() const;
+        AppControlStatusAuditResult queryAppControlStatus() const;
+        // Win32K GUI audit wrappers：
+        // - 输入：session/pid/tid 过滤和最大行数；
+        // - 处理：封装 win32k PDB 只读快照 IOCTL；
+        // - 返回：窗口、GUI 线程、hotkey、hook 诊断行；不安装或移除 hook。
+        Win32kProfileStatusResult queryWin32kProfileStatus(unsigned long flags = KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_ALL, unsigned long sessionId = 0UL, unsigned long maxEntries = KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES) const;
+        Win32kWindowsResult queryWin32kWindows(unsigned long flags = KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_ALL, unsigned long sessionId = 0UL, unsigned long processId = 0UL, unsigned long threadId = 0UL, unsigned long maxEntries = KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES) const;
+        Win32kGuiThreadsResult queryWin32kGuiThreads(unsigned long flags = KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_ALL, unsigned long sessionId = 0UL, unsigned long processId = 0UL, unsigned long threadId = 0UL, unsigned long maxEntries = KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES) const;
+        Win32kHotkeysPdbResult queryWin32kHotkeysPdb(unsigned long flags = KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_ALL, unsigned long sessionId = 0UL, unsigned long processId = 0UL, unsigned long threadId = 0UL, unsigned long maxEntries = KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES) const;
+        Win32kHooksPdbResult queryWin32kHooksPdb(unsigned long flags = KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_ALL, unsigned long sessionId = 0UL, unsigned long processId = 0UL, unsigned long threadId = 0UL, unsigned long maxEntries = KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES) const;
+        Win32kWindowRuntimeDetailResult queryWin32kWindowDetail(std::uint64_t hwnd, unsigned long processId = 0UL, unsigned long threadId = 0UL, unsigned long flags = KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_DIAGNOSTICS) const;
+        // Device/kernel-object audit wrappers：
+        // - 输入：只读 profile、目标名或 CID/IPC 参数；
+        // - 处理：封装 DeviceAudit、CID、KernelObjectSummary、IPCSummary IOCTL；
+        // - 返回：诊断行或固定摘要，不执行 DKOM/卸载/解绑。
+        DeviceAuditResult queryDeviceStackAudit(const std::wstring& targetName = std::wstring(), unsigned long maxRows = KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ROWS, unsigned long maxAttachedDepth = KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ATTACHED_DEPTH) const;
+        DeviceAuditResult queryInputStackAudit(const std::wstring& targetName = std::wstring(), unsigned long maxRows = KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ROWS, unsigned long maxAttachedDepth = KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ATTACHED_DEPTH) const;
+        DeviceAuditResult queryUsbTopologyAudit(const std::wstring& targetName = std::wstring(), unsigned long maxRows = KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ROWS, unsigned long maxAttachedDepth = KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ATTACHED_DEPTH) const;
+        DeviceAuditResult queryGpuDisplayWatchdogAudit(const std::wstring& targetName = std::wstring(), unsigned long maxRows = KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ROWS, unsigned long maxAttachedDepth = KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ATTACHED_DEPTH) const;
+        CidTableAuditResult enumCidTable(unsigned long flags = KSWORD_ARK_CID_ENUM_FLAG_INCLUDE_ALL, unsigned long maxEntries = 4096UL, unsigned long maxVisitCount = 65536UL, unsigned long startCid = 0UL, unsigned long endCid = 0UL) const;
+        KernelObjectSummaryAuditResult queryKernelObjectSummary(unsigned long targetKind, unsigned long cidValue = 0UL, std::uint64_t expectedObjectAddress = 0ULL, unsigned long flags = KSWORD_ARK_OBJECT_SUMMARY_FLAG_INCLUDE_ALL) const;
+        IpcSummaryAuditResult queryIpcSummary(unsigned long processId = 0UL, std::uint64_t handleValue = 0ULL, unsigned long flags = KSWORD_ARK_IPC_QUERY_FLAG_INCLUDE_ALL, unsigned long maxEntries = 64UL) const;
     };
 }

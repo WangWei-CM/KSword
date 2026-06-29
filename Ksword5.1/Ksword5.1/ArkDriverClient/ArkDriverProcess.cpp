@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 namespace ksword::ark
@@ -63,6 +65,18 @@ namespace ksword::ark
             offsets.hteLowValue = static_cast<std::uint32_t>(source.hteLowValue);
             offsets.pspCidTableRva = static_cast<std::uint32_t>(source.pspCidTableRva);
             offsets.pspCidTableAddress = static_cast<std::uint64_t>(source.pspCidTableAddress);
+            offsets.epUniqueProcessIdSource = static_cast<std::uint32_t>(source.epUniqueProcessIdSource);
+            offsets.epActiveProcessLinksSource = static_cast<std::uint32_t>(source.epActiveProcessLinksSource);
+            offsets.epThreadListHeadSource = static_cast<std::uint32_t>(source.epThreadListHeadSource);
+            offsets.epImageFileNameSource = static_cast<std::uint32_t>(source.epImageFileNameSource);
+            offsets.etCidSource = static_cast<std::uint32_t>(source.etCidSource);
+            offsets.etThreadListEntrySource = static_cast<std::uint32_t>(source.etThreadListEntrySource);
+            offsets.etStartAddressSource = static_cast<std::uint32_t>(source.etStartAddressSource);
+            offsets.etWin32StartAddressSource = static_cast<std::uint32_t>(source.etWin32StartAddressSource);
+            offsets.ktProcessSource = static_cast<std::uint32_t>(source.ktProcessSource);
+            offsets.htTableCodeSource = static_cast<std::uint32_t>(source.htTableCodeSource);
+            offsets.hteLowValueSource = static_cast<std::uint32_t>(source.hteLowValueSource);
+            offsets.pspCidTableSource = static_cast<std::uint32_t>(source.pspCidTableSource);
             return offsets;
         }
     }
@@ -279,6 +293,14 @@ namespace ksword::ark
             row.fieldOffsets = copyCrossViewOffsets(sourceRow->fieldOffsets);
             row.lastStatus = static_cast<long>(sourceRow->lastStatus);
             row.confidence = static_cast<std::uint32_t>(sourceRow->confidence);
+            row.publicProcessId = static_cast<std::uint32_t>(sourceRow->publicProcessId);
+            row.activeListProcessId = static_cast<std::uint32_t>(sourceRow->activeListProcessId);
+            row.cidTableProcessId = static_cast<std::uint32_t>(sourceRow->cidTableProcessId);
+            row.publicWalkStatus = static_cast<long>(sourceRow->publicWalkStatus);
+            row.activeListStatus = static_cast<long>(sourceRow->activeListStatus);
+            row.cidTableStatus = static_cast<long>(sourceRow->cidTableStatus);
+            row.detailStatus = static_cast<std::uint32_t>(sourceRow->detailStatus);
+            row.denoiseFlags = static_cast<std::uint32_t>(sourceRow->denoiseFlags);
             row.imageName = fixedAnsiToString(sourceRow->imageName, sizeof(sourceRow->imageName));
             row.detail = fixedAnsiToString(sourceRow->detail, sizeof(sourceRow->detail));
             crossViewResult.entries.push_back(std::move(row));
@@ -401,6 +423,18 @@ namespace ksword::ark
             row.fieldOffsets = copyCrossViewOffsets(sourceRow->fieldOffsets);
             row.lastStatus = static_cast<long>(sourceRow->lastStatus);
             row.confidence = static_cast<std::uint32_t>(sourceRow->confidence);
+            row.publicThreadId = static_cast<std::uint32_t>(sourceRow->publicThreadId);
+            row.threadListThreadId = static_cast<std::uint32_t>(sourceRow->threadListThreadId);
+            row.cidTableThreadId = static_cast<std::uint32_t>(sourceRow->cidTableThreadId);
+            row.publicProcessId = static_cast<std::uint32_t>(sourceRow->publicProcessId);
+            row.threadListProcessId = static_cast<std::uint32_t>(sourceRow->threadListProcessId);
+            row.cidTableProcessId = static_cast<std::uint32_t>(sourceRow->cidTableProcessId);
+            row.publicWalkStatus = static_cast<long>(sourceRow->publicWalkStatus);
+            row.threadListStatus = static_cast<long>(sourceRow->threadListStatus);
+            row.cidTableStatus = static_cast<long>(sourceRow->cidTableStatus);
+            row.startAddressStatus = static_cast<long>(sourceRow->startAddressStatus);
+            row.detailStatus = static_cast<std::uint32_t>(sourceRow->detailStatus);
+            row.denoiseFlags = static_cast<std::uint32_t>(sourceRow->denoiseFlags);
             row.imageName = fixedAnsiToString(sourceRow->imageName, sizeof(sourceRow->imageName));
             row.detail = fixedAnsiToString(sourceRow->detail, sizeof(sourceRow->detail));
             crossViewResult.entries.push_back(std::move(row));
@@ -417,4 +451,380 @@ namespace ksword::ark
         crossViewResult.io.message = stream.str();
         return crossViewResult;
     }
+
+    namespace
+    {
+        bool isUnsupportedRuntimeDetailResponse(
+            const unsigned long detailStatus,
+            const long lastStatus)
+        {
+            // 输入：R0 固定详情响应中的语义 status 与 NTSTATUS。
+            // 处理：识别旧驱动/协议版本/未实现路径，不把它当成 UI 崩溃或解析失败。
+            // 返回：true 表示调用方应展示 unsupported/unavailable。
+            return detailStatus == KSWORD_ARK_DETAIL_STATUS_UNSUPPORTED ||
+                static_cast<unsigned long>(lastStatus) == 0xC00000BBUL ||
+                static_cast<unsigned long>(lastStatus) == 0xC0000010UL;
+        }
+
+        std::string buildRuntimeDetailMessage(
+            const char* const operationName,
+            const unsigned long detailStatus,
+            const unsigned long fieldFlags,
+            const unsigned long long missingCapabilityMask,
+            const long lastStatus,
+            const unsigned long bytesReturned)
+        {
+            // 输入：固定详情响应的核心诊断字段。
+            // 处理：生成一行稳定摘要，供 UI 最后一列/详情区展示。
+            // 返回：包含 status、字段位、缺失 capability 和字节数的 std::string。
+            std::ostringstream stream;
+            stream << (operationName != nullptr ? operationName : "runtime detail")
+                << " status=" << detailStatus
+                << ", fields=0x" << std::hex << std::uppercase << fieldFlags
+                << ", missingCaps=0x" << missingCapabilityMask
+                << ", lastStatus=0x" << static_cast<unsigned long>(lastStatus)
+                << std::dec << ", bytesReturned=" << bytesReturned;
+            return stream.str();
+        }
+    }
+
+    ProcessRuntimeDetailResult DriverClient::queryProcessRuntimeDetail(
+        const std::uint32_t processId,
+        const unsigned long flags) const
+    {
+        // 输入：目标 PID 和字段组 flags。
+        // 处理：封装 IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL，固定响应不足时给出明确错误。
+        // 返回：ProcessRuntimeDetailResult；unsupported=true 表示旧驱动缺入口或 R0 明确未实现。
+        constexpr const char* operationName = "IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL";
+        ProcessRuntimeDetailResult detailResult{};
+        KSWORD_ARK_PROCESS_DETAIL_REQUEST request{};
+        request.version = KSWORD_ARK_RUNTIME_DETAIL_PROTOCOL_VERSION;
+        request.flags = flags;
+        request.processId = processId;
+
+        detailResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            &detailResult.response,
+            static_cast<unsigned long>(sizeof(detailResult.response)));
+        if (!detailResult.io.ok)
+        {
+            detailResult.unsupported = isUnsupportedIoctlError(detailResult.io.win32Error);
+            detailResult.io.message = detailResult.unsupported
+                ? "IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL unsupported or driver version is too old"
+                : "DeviceIoControl(IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL) failed, error=" +
+                    std::to_string(detailResult.io.win32Error);
+            return detailResult;
+        }
+
+        if (detailResult.io.bytesReturned < sizeof(detailResult.response))
+        {
+            detailResult.io.ok = false;
+            detailResult.io.win32Error = ERROR_INSUFFICIENT_BUFFER;
+            detailResult.io.message =
+                "process runtime detail response too small, bytesReturned=" +
+                std::to_string(detailResult.io.bytesReturned);
+            return detailResult;
+        }
+
+        detailResult.io.ntStatus = detailResult.response.lastStatus;
+        detailResult.unsupported = isUnsupportedRuntimeDetailResponse(
+            detailResult.response.status,
+            detailResult.response.lastStatus);
+        detailResult.io.message = buildRuntimeDetailMessage(
+            operationName,
+            detailResult.response.status,
+            detailResult.response.fieldFlags,
+            detailResult.response.missingCapabilityMask,
+            detailResult.response.lastStatus,
+            detailResult.io.bytesReturned);
+        return detailResult;
+    }
+
+    ThreadRuntimeDetailResult DriverClient::queryThreadRuntimeDetail(
+        const std::uint32_t threadId,
+        const std::uint32_t processId,
+        const unsigned long flags) const
+    {
+        // 输入：目标 TID、可选 PID 约束和字段组 flags。
+        // 处理：封装 IOCTL_KSWORD_ARK_QUERY_THREAD_DETAIL；PID 不匹配由 R0 写入语义状态。
+        // 返回：ThreadRuntimeDetailResult；调用方只展示证据，不执行线程动作。
+        constexpr const char* operationName = "IOCTL_KSWORD_ARK_QUERY_THREAD_DETAIL";
+        ThreadRuntimeDetailResult detailResult{};
+        KSWORD_ARK_THREAD_DETAIL_REQUEST request{};
+        request.version = KSWORD_ARK_RUNTIME_DETAIL_PROTOCOL_VERSION;
+        request.flags = flags;
+        request.threadId = threadId;
+        request.processId = processId;
+
+        detailResult.io = deviceIoControl(
+            IOCTL_KSWORD_ARK_QUERY_THREAD_DETAIL,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            &detailResult.response,
+            static_cast<unsigned long>(sizeof(detailResult.response)));
+        if (!detailResult.io.ok)
+        {
+            detailResult.unsupported = isUnsupportedIoctlError(detailResult.io.win32Error);
+            detailResult.io.message = detailResult.unsupported
+                ? "IOCTL_KSWORD_ARK_QUERY_THREAD_DETAIL unsupported or driver version is too old"
+                : "DeviceIoControl(IOCTL_KSWORD_ARK_QUERY_THREAD_DETAIL) failed, error=" +
+                    std::to_string(detailResult.io.win32Error);
+            return detailResult;
+        }
+
+        if (detailResult.io.bytesReturned < sizeof(detailResult.response))
+        {
+            detailResult.io.ok = false;
+            detailResult.io.win32Error = ERROR_INSUFFICIENT_BUFFER;
+            detailResult.io.message =
+                "thread runtime detail response too small, bytesReturned=" +
+                std::to_string(detailResult.io.bytesReturned);
+            return detailResult;
+        }
+
+        detailResult.io.ntStatus = detailResult.response.lastStatus;
+        detailResult.unsupported = isUnsupportedRuntimeDetailResponse(
+            detailResult.response.status,
+            detailResult.response.lastStatus);
+        detailResult.io.message = buildRuntimeDetailMessage(
+            operationName,
+            detailResult.response.status,
+            detailResult.response.fieldFlags,
+            detailResult.response.missingCapabilityMask,
+            detailResult.response.lastStatus,
+            detailResult.io.bytesReturned);
+        return detailResult;
+    }
+
+    namespace
+    {
+        std::size_t runtimeFieldSampleResponseHeaderSize()
+        {
+            // 输入：无。
+            // 处理：扣除 entries[1] 占位，得到变长响应头长度。
+            // 返回：用于解析 R0 runtime field sample 响应的 header size。
+            return sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_RESPONSE) -
+                sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW);
+        }
+
+        std::size_t processRuntimeFieldSampleRequestHeaderSize()
+        {
+            // 输入：无。
+            // 处理：扣除 items[1] 占位，得到进程 sample 请求头长度。
+            // 返回：用于构造 IOCTL 输入缓冲区的 header size。
+            return sizeof(KSWORD_ARK_PROCESS_RUNTIME_FIELD_SAMPLE_REQUEST) -
+                sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ITEM_REQUEST);
+        }
+
+        std::size_t threadRuntimeFieldSampleRequestHeaderSize()
+        {
+            // 输入：无。
+            // 处理：扣除 items[1] 占位，得到线程 sample 请求头长度。
+            // 返回：用于构造 IOCTL 输入缓冲区的 header size。
+            return sizeof(KSWORD_ARK_THREAD_RUNTIME_FIELD_SAMPLE_REQUEST) -
+                sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ITEM_REQUEST);
+        }
+
+        std::string buildRuntimeFieldSampleMessage(
+            const char* const operationName,
+            const RuntimeFieldSampleResult& result,
+            const unsigned long bytesReturned)
+        {
+            // 输入：sampler 操作名、解析后的响应和 DeviceIoControl 返回字节数。
+            // 处理：生成 UI 可读的一行稳定诊断。
+            // 返回：std::string，供详情页转换为中文说明或直接调试。
+            std::ostringstream stream;
+            stream << (operationName != nullptr ? operationName : "runtime field sample")
+                << " status=" << result.status
+                << ", returned=" << result.returnedCount
+                << "/" << result.totalCount
+                << ", object=0x" << std::hex << std::uppercase << result.objectAddress
+                << ", dynCaps=0x" << result.dynDataCapabilityMask
+                << ", lastStatus=0x" << static_cast<unsigned long>(result.lastStatus)
+                << std::dec << ", bytesReturned=" << bytesReturned;
+            return stream.str();
+        }
+
+        RuntimeFieldSampleResult parseRuntimeFieldSampleResponse(
+            IoResult ioResult,
+            const std::vector<std::uint8_t>& responseBuffer,
+            const std::vector<RuntimeFieldSampleRequestItem>& requestedItems,
+            const char* const operationName)
+        {
+            // 输入：DeviceIoControl 结果、原始响应缓冲区和请求元数据。
+            // 处理：校验变长响应头/entrySize，并把 R0 row 转成 R3 模型。
+            // 返回：RuntimeFieldSampleResult；失败时 io.ok=false 且保留明确 message。
+            RuntimeFieldSampleResult result{};
+            const std::size_t headerSize = runtimeFieldSampleResponseHeaderSize();
+            result.io = ioResult;
+
+            if (!result.io.ok)
+            {
+                result.unsupported = isUnsupportedIoctlError(result.io.win32Error);
+                result.io.message = result.unsupported
+                    ? std::string(operationName) + " unsupported or driver version is too old"
+                    : std::string("DeviceIoControl(") + operationName + ") failed, error=" +
+                        std::to_string(result.io.win32Error);
+                return result;
+            }
+            if (result.io.bytesReturned < headerSize || responseBuffer.size() < headerSize)
+            {
+                result.io.ok = false;
+                result.io.win32Error = ERROR_INSUFFICIENT_BUFFER;
+                result.io.message = std::string(operationName) +
+                    " response too small, bytesReturned=" +
+                    std::to_string(result.io.bytesReturned);
+                return result;
+            }
+
+            const auto* response = reinterpret_cast<const KSWORD_ARK_RUNTIME_FIELD_SAMPLE_RESPONSE*>(responseBuffer.data());
+            result.version = static_cast<std::uint32_t>(response->version);
+            result.status = static_cast<std::uint32_t>(response->status);
+            result.totalCount = static_cast<std::uint32_t>(response->totalCount);
+            result.returnedCount = static_cast<std::uint32_t>(response->returnedCount);
+            result.entrySize = static_cast<std::uint32_t>(response->entrySize);
+            result.flags = static_cast<std::uint32_t>(response->flags);
+            result.lastStatus = response->lastStatus;
+            result.objectAddress = static_cast<std::uint64_t>(response->objectAddress);
+            result.dynDataCapabilityMask = static_cast<std::uint64_t>(response->dynDataCapabilityMask);
+            result.io.ntStatus = response->lastStatus;
+
+            if (result.entrySize < sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW))
+            {
+                result.io.ok = false;
+                result.io.win32Error = ERROR_INVALID_DATA;
+                result.io.message = std::string(operationName) + " invalid entrySize=" +
+                    std::to_string(result.entrySize);
+                return result;
+            }
+
+            const std::size_t availableRows =
+                (result.io.bytesReturned - headerSize) / result.entrySize;
+            const std::size_t parsedRows = std::min<std::size_t>(
+                availableRows,
+                static_cast<std::size_t>(result.returnedCount));
+            result.entries.reserve(parsedRows);
+            for (std::size_t rowIndex = 0; rowIndex < parsedRows; ++rowIndex)
+            {
+                const auto* row = reinterpret_cast<const KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW*>(
+                    responseBuffer.data() + headerSize + (rowIndex * result.entrySize));
+                RuntimeFieldSampleEntry entry{};
+                entry.runtimeItemId = static_cast<std::uint32_t>(row->runtimeItemId);
+                entry.offset = static_cast<std::uint32_t>(row->offset);
+                entry.size = static_cast<std::uint32_t>(row->size);
+                entry.status = static_cast<std::uint32_t>(row->status);
+                entry.bytesRead = static_cast<std::uint32_t>(row->bytesRead);
+                entry.flags = static_cast<std::uint32_t>(row->flags);
+                entry.lastStatus = row->lastStatus;
+                entry.valueU64 = static_cast<std::uint64_t>(row->valueU64);
+                const std::size_t byteCount = std::min<std::size_t>(
+                    row->bytesRead,
+                    KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_VALUE_BYTES);
+                entry.sampleBytes.assign(row->sampleBytes, row->sampleBytes + byteCount);
+                if (rowIndex < requestedItems.size())
+                {
+                    entry.name = requestedItems[rowIndex].name;
+                    entry.type = requestedItems[rowIndex].type;
+                }
+                result.entries.push_back(std::move(entry));
+            }
+
+            result.io.message = buildRuntimeFieldSampleMessage(
+                operationName,
+                result,
+                result.io.bytesReturned);
+            return result;
+        }
+    }
+
+    RuntimeFieldSampleResult DriverClient::queryProcessRuntimeFieldSamples(
+        const std::uint32_t processId,
+        const std::vector<RuntimeFieldSampleRequestItem>& items,
+        const unsigned long flags) const
+    {
+        // 输入：目标 PID 与 deep PDB 字段列表。
+        // 处理：构造变长请求，调用只读 0x83E sampler。
+        // 返回：RuntimeFieldSampleResult；旧驱动或协议缺失时 unsupported=true。
+        constexpr const char* operationName = "IOCTL_KSWORD_ARK_QUERY_PROCESS_RUNTIME_FIELDS";
+        const std::size_t itemCount = std::min<std::size_t>(items.size(), KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_ITEMS);
+        const std::size_t headerSize = processRuntimeFieldSampleRequestHeaderSize();
+        const std::size_t inputSize = headerSize +
+            (itemCount * sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ITEM_REQUEST));
+        const std::size_t outputSize = runtimeFieldSampleResponseHeaderSize() +
+            (itemCount * sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW));
+        std::vector<std::uint8_t> inputBuffer(inputSize, 0U);
+        std::vector<std::uint8_t> outputBuffer(outputSize, 0U);
+        auto* request = reinterpret_cast<KSWORD_ARK_PROCESS_RUNTIME_FIELD_SAMPLE_REQUEST*>(inputBuffer.data());
+        request->version = KSWORD_ARK_RUNTIME_FIELD_SAMPLE_PROTOCOL_VERSION;
+        request->flags = flags;
+        request->processId = processId;
+        request->itemCount = static_cast<unsigned long>(itemCount);
+        for (std::size_t itemIndex = 0; itemIndex < itemCount; ++itemIndex)
+        {
+            request->items[itemIndex].runtimeItemId = items[itemIndex].runtimeItemId;
+            request->items[itemIndex].offset = items[itemIndex].offset;
+            request->items[itemIndex].size = items[itemIndex].size;
+            request->items[itemIndex].flags = items[itemIndex].flags;
+        }
+
+        IoResult ioResult = deviceIoControl(
+            IOCTL_KSWORD_ARK_QUERY_PROCESS_RUNTIME_FIELDS,
+            inputBuffer.data(),
+            static_cast<unsigned long>(inputBuffer.size()),
+            outputBuffer.data(),
+            static_cast<unsigned long>(outputBuffer.size()));
+        return parseRuntimeFieldSampleResponse(
+            ioResult,
+            outputBuffer,
+            items,
+            operationName);
+    }
+
+    RuntimeFieldSampleResult DriverClient::queryThreadRuntimeFieldSamples(
+        const std::uint32_t threadId,
+        const std::uint32_t processId,
+        const std::vector<RuntimeFieldSampleRequestItem>& items,
+        const unsigned long flags) const
+    {
+        // 输入：目标 TID、可选 PID 和 deep PDB 字段列表。
+        // 处理：构造变长请求，调用只读 0x83F sampler。
+        // 返回：RuntimeFieldSampleResult；旧驱动或协议缺失时 unsupported=true。
+        constexpr const char* operationName = "IOCTL_KSWORD_ARK_QUERY_THREAD_RUNTIME_FIELDS";
+        const std::size_t itemCount = std::min<std::size_t>(items.size(), KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_ITEMS);
+        const std::size_t headerSize = threadRuntimeFieldSampleRequestHeaderSize();
+        const std::size_t inputSize = headerSize +
+            (itemCount * sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ITEM_REQUEST));
+        const std::size_t outputSize = runtimeFieldSampleResponseHeaderSize() +
+            (itemCount * sizeof(KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW));
+        std::vector<std::uint8_t> inputBuffer(inputSize, 0U);
+        std::vector<std::uint8_t> outputBuffer(outputSize, 0U);
+        auto* request = reinterpret_cast<KSWORD_ARK_THREAD_RUNTIME_FIELD_SAMPLE_REQUEST*>(inputBuffer.data());
+        request->version = KSWORD_ARK_RUNTIME_FIELD_SAMPLE_PROTOCOL_VERSION;
+        request->flags = flags;
+        request->threadId = threadId;
+        request->processId = processId;
+        request->itemCount = static_cast<unsigned long>(itemCount);
+        for (std::size_t itemIndex = 0; itemIndex < itemCount; ++itemIndex)
+        {
+            request->items[itemIndex].runtimeItemId = items[itemIndex].runtimeItemId;
+            request->items[itemIndex].offset = items[itemIndex].offset;
+            request->items[itemIndex].size = items[itemIndex].size;
+            request->items[itemIndex].flags = items[itemIndex].flags;
+        }
+
+        IoResult ioResult = deviceIoControl(
+            IOCTL_KSWORD_ARK_QUERY_THREAD_RUNTIME_FIELDS,
+            inputBuffer.data(),
+            static_cast<unsigned long>(inputBuffer.size()),
+            outputBuffer.data(),
+            static_cast<unsigned long>(outputBuffer.size()));
+        return parseRuntimeFieldSampleResponse(
+            ioResult,
+            outputBuffer,
+            items,
+            operationName);
+    }
+
 }

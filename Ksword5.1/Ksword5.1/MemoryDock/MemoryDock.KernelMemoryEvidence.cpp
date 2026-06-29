@@ -34,6 +34,38 @@ namespace
         return value.empty() ? QString() : QString::fromStdWString(value);
     }
 
+    QString memoryEvidenceIoMessageText(const std::string& messageText)
+    {
+        // 输入：ArkDriverClient 返回的原始 io.message。
+        // 处理：将 DeviceIoControl/unsupported/空消息等底层字符串转换为用户可读说明。
+        // 返回：适合状态栏和详情区展示的中文文本。
+        if (messageText.empty())
+        {
+            return QStringLiteral("无额外驱动消息");
+        }
+
+        const QString rawText = QString::fromStdString(messageText).trimmed();
+        if (rawText.isEmpty())
+        {
+            return QStringLiteral("无额外驱动消息");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动接口调用失败或当前驱动版本不支持该内存证据入口");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not implemented"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动版本尚未提供该内存证据入口");
+        }
+        if (rawText.contains(QStringLiteral("too small"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("invalid"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动返回数据格式不完整，当前证据表已清空等待下次刷新");
+        }
+        return rawText;
+    }
+
     QString bytesToHex(const std::vector<std::uint8_t>& bytes)
     {
         // 输入：样本字节数组。
@@ -214,12 +246,131 @@ namespace
         return item;
     }
 
+    QString evidenceCopyMenuStyle()
+    {
+        // 输入：无。
+        // 处理：生成不透明右键菜单样式，防止继承透明背景。
+        // 返回：可直接用于 QMenu::setStyleSheet 的字符串。
+        return QStringLiteral(
+            "QMenu{background:%1;color:%2;border:1px solid %3;}"
+            "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
+            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:disabled{color:%5;}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::TextSecondaryHex());
+    }
+
+    QString evidenceRowText(QTableWidget* table, const int rowIndex)
+    {
+        // 输入：内核内存证据表和目标行号。
+        // 处理：读取当前行所有列并以 Tab 分隔。
+        // 返回：可复制的 TSV 文本；行无效时返回空字符串。
+        if (table == nullptr || rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return QString();
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+            fields.push_back(item != nullptr ? item->text() : QString());
+        }
+        return fields.join(QLatin1Char('\t'));
+    }
+
+    void installEvidenceCopyMenu(QTableWidget* table)
+    {
+        // 输入：内核内存证据表。
+        // 处理：安装“复制当前行”右键菜单。
+        // 返回：无，只复制 UI 证据，不触发任何写操作。
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        {
+            const QModelIndex clickedIndex = table->indexAt(localPosition);
+            const int rowIndex = clickedIndex.isValid() ? clickedIndex.row() : table->currentRow();
+            if (clickedIndex.isValid())
+            {
+                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                table->selectRow(clickedIndex.row());
+            }
+
+            QMenu menu(table);
+            menu.setStyleSheet(evidenceCopyMenuStyle());
+            QAction* copyRowAction = menu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(rowIndex >= 0 && rowIndex < table->rowCount());
+            if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+            {
+                QClipboard* clipboard = QApplication::clipboard();
+                if (clipboard != nullptr)
+                {
+                    clipboard->setText(evidenceRowText(table, rowIndex));
+                }
+            }
+        });
+    }
+
+    void setEvidenceDiagnosticRow(
+        QTableWidget* table,
+        const QString& addressText,
+        const QString& detailText)
+    {
+        // setEvidenceDiagnosticRow：
+        // - 输入：目标表格、首列提示和详情文本；
+        // - 处理：补一行可复制诊断，避免空缓存/过滤条件导致表格完全空白；
+        // - 返回：无，完整诊断保存到 UserRole+2 供详情区读取。
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setRowCount(1);
+        QTableWidgetItem* addressItem = textItem(addressText);
+        addressItem->setData(Qt::UserRole + 2, detailText);
+        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Address), addressItem);
+        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Size), textItem(QStringLiteral("N/A")));
+        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Kind), textItem(QStringLiteral("诊断")));
+        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Owner), textItem(QStringLiteral("N/A")));
+        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Permissions), textItem(QStringLiteral("N/A")));
+        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Risk), textItem(QStringLiteral("提示")));
+        table->setItem(0, evidenceColumnIndex(EvidenceColumn::TextHash), textItem(QStringLiteral("N/A")));
+        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Detail), textItem(detailText));
+        table->setCurrentCell(0, evidenceColumnIndex(EvidenceColumn::Address));
+    }
+
     QTableWidgetItem* numericItem(const QString& text, const qulonglong value)
     {
         // 输入：展示文本和排序数值。
         // 处理：创建带数值排序能力的 item。
         // 返回：交给 QTableWidget 接管生命周期的 item。
         return new EvidenceNumericItem(text, value);
+    }
+
+    QString evidenceTableDetailText(const ksword::ark::KernelMemoryEvidenceEntry& entry)
+    {
+        // 输入：内核内存证据行。
+        // 处理：为表格末列生成中文摘要，避免直接展示原始 R0 detail 长串。
+        // 返回：单行摘要；完整原始 detail 仍放在详情编辑器。
+        const QString rawDetail = wideToQString(entry.detail).trimmed();
+        const QString riskSummary = riskText(entry.riskFlags);
+        const QString detailSummary = rawDetail.isEmpty()
+            ? QStringLiteral("驱动未返回额外说明")
+            : rawDetail.left(160);
+        return QStringLiteral("%1；Owner=%2；%3")
+            .arg(riskSummary)
+            .arg(ownerKindText(entry.ownerKind))
+            .arg(detailSummary);
     }
 
     bool entryMatchesFilter(const ksword::ark::KernelMemoryEvidenceEntry& entry, const QString& filter)
@@ -376,6 +527,7 @@ void MemoryDock::initializeKernelMemoryEvidenceTab()
     m_kernelMemoryEvidenceTable->setSortingEnabled(true);
     m_kernelMemoryEvidenceTable->verticalHeader()->setVisible(false);
     m_kernelMemoryEvidenceTable->horizontalHeader()->setStyleSheet(buildBlueTableHeaderStyle());
+    installEvidenceCopyMenu(m_kernelMemoryEvidenceTable);
     splitter->addWidget(m_kernelMemoryEvidenceTable);
 
     m_kernelMemoryEvidenceDetailEditor = new CodeEditorWidget(splitter);
@@ -476,7 +628,7 @@ void MemoryDock::refreshKernelMemoryEvidenceAsync()
                     guardThis->rebuildKernelMemoryEvidenceTable();
                     const QString message = result.unsupported
                         ? QStringLiteral("未集成/驱动过旧，等待 R0 支持")
-                        : QStringLiteral("查询失败: %1").arg(QString::fromStdString(result.io.message));
+                        : QStringLiteral("查询失败: %1").arg(memoryEvidenceIoMessageText(result.io.message));
                     if (guardThis->m_kernelMemoryEvidenceStatusLabel != nullptr)
                     {
                         guardThis->m_kernelMemoryEvidenceStatusLabel->setText(QStringLiteral("状态：%1").arg(message));
@@ -557,7 +709,18 @@ void MemoryDock::rebuildKernelMemoryEvidenceTable()
         m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::Permissions), textItem(permissionText(entry.permissionFlags)));
         m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::Risk), textItem(riskText(entry.riskFlags)));
         m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::TextHash), textItem(hashText(entry)));
-        m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::Detail), textItem(wideToQString(entry.detail)));
+        m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::Detail), textItem(evidenceTableDetailText(entry)));
+    }
+    if (visibleIndexes.empty())
+    {
+        const QString detailText = m_kernelMemoryEvidenceCache.empty()
+            ? QStringLiteral("内核内存证据当前没有缓存行；可能是驱动未返回结果、查询失败或尚未刷新。")
+            : QStringLiteral("当前过滤条件隐藏了全部 %1 条内核内存证据；请清空过滤或关闭“仅风险项”。")
+                .arg(static_cast<qulonglong>(m_kernelMemoryEvidenceCache.size()));
+        setEvidenceDiagnosticRow(
+            m_kernelMemoryEvidenceTable,
+            QStringLiteral("<无内核内存证据>"),
+            detailText);
     }
     if (m_kernelMemoryEvidenceTable->rowCount() > 0 && m_kernelMemoryEvidenceTable->currentRow() < 0)
     {
@@ -587,6 +750,13 @@ void MemoryDock::showKernelMemoryEvidenceDetailByCurrentRow()
     {
         return;
     }
+    const QString diagnosticText = addressItem->data(Qt::UserRole + 2).toString();
+    if (!diagnosticText.isEmpty())
+    {
+        m_kernelMemoryEvidenceDetailEditor->setText(QStringLiteral("内核内存证据诊断\n%1").arg(diagnosticText));
+        return;
+    }
+
     bool ok = false;
     const qulonglong cacheIndex = addressItem->data(Qt::UserRole + 1).toULongLong(&ok);
     if (!ok || cacheIndex >= static_cast<qulonglong>(m_kernelMemoryEvidenceCache.size()))

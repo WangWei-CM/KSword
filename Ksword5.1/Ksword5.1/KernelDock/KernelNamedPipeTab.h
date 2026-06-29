@@ -19,7 +19,7 @@ class QLabel;
 class QLineEdit;
 class QPoint;
 class QPushButton;
-class QPlainTextEdit;
+class CodeEditorWidget;
 class QResizeEvent;
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -124,7 +124,7 @@ private:
     QLineEdit* m_filterEdit = nullptr;
     QLabel* m_statusLabel = nullptr;
     QTreeWidget* m_resultTable = nullptr;
-    QPlainTextEdit* m_detailEdit = nullptr;
+    CodeEditorWidget* m_detailEdit = nullptr;
 
     std::vector<KernelNamedPipeEntry> m_rows;
     KernelNamedPipeSnapshot m_lastSnapshot;

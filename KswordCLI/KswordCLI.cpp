@@ -1,7 +1,12 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <WinSock2.h>
 #include <Windows.h>
+#include <iphlpapi.h>
+#include <tcpmib.h>
+#include <udpmib.h>
+#include <ws2tcpip.h>
 
 #include <algorithm>
 #include <array>
@@ -28,11 +33,14 @@
 #include "../shared/driver/KswordArkCallbackIoctl.h"
 #include "../shared/driver/KswordArkCapabilityIoctl.h"
 #include "../shared/driver/KswordArkDynDataIoctl.h"
+#include "../shared/driver/KswordArkDeviceAuditIoctl.h"
 #include "../shared/driver/KswordArkFileIoctl.h"
 #include "../shared/driver/KswordArkFileMonitorIoctl.h"
+#include "../shared/driver/KswordArkFilterIoctl.h"
 #include "../shared/driver/KswordArkHandleIoctl.h"
 #include "../shared/driver/KswordArkKeyboardIoctl.h"
 #include "../shared/driver/KswordArkKernelIoctl.h"
+#include "../shared/driver/KswordArkKernelObjectIoctl.h"
 #include "../shared/driver/KswordArkMemoryIoctl.h"
 #include "../shared/driver/KswordArkMutationIoctl.h"
 #include "../shared/driver/KswordArkNetworkIoctl.h"
@@ -41,10 +49,16 @@
 #include "../shared/driver/KswordArkRedirectIoctl.h"
 #include "../shared/driver/KswordArkRegistryIoctl.h"
 #include "../shared/driver/KswordArkSafetyIoctl.h"
+#include "../shared/driver/KswordArkSecurityAuditIoctl.h"
 #include "../shared/driver/KswordArkSectionIoctl.h"
+#include "../shared/driver/KswordArkStorageIoctl.h"
 #include "../shared/driver/KswordArkThreadIoctl.h"
 #include "../shared/driver/KswordArkTrustIoctl.h"
+#include "../shared/driver/KswordArkWin32kIoctl.h"
 #include "../shared/driver/KswordArkWslSiloIoctl.h"
+
+#pragma comment(lib, "Iphlpapi.lib")
+#pragma comment(lib, "Ws2_32.lib")
 
 namespace
 {
@@ -150,6 +164,12 @@ namespace
     // CLI. Inputs are raw argv tokens; return values are unsigned scalars.
     std::uint32_t parseU32(const wchar_t* token, const char* name);
     std::uint64_t parseU64(const wchar_t* token, const char* name);
+
+    // queryCallbackInventory is implemented after the kernel command family in
+    // this single translation unit. Inputs are parsed named arguments for the
+    // callback inventory command; processing issues the read-only callback
+    // enumeration IOCTL; return value is the CLI process exit code.
+    int queryCallbackInventory(const NamedArgs& args);
 
     // printWin32Error renders a failed Win32 operation in a compact form.
     // Inputs: operation describes the API/IOCTL; error is GetLastError output.
@@ -489,6 +509,29 @@ namespace
             ++length;
         }
         return std::wstring(text, text + length);
+    }
+
+    // ipcSummaryStatusName renders KSWORD_ARK_IPC_SUMMARY_STATUS_* values.
+    // Inputs: status is a shared protocol enum returned by query IPC summary.
+    // Processing: keeps legacy STUB distinguishable from current unavailable
+    // states so acceptance does not confuse old-driver fallback with R0 evidence.
+    // Returns: a stable human-readable status label for CLI output.
+    const wchar_t* ipcSummaryStatusName(std::uint32_t status)
+    {
+        switch (status)
+        {
+        case KSWORD_ARK_IPC_SUMMARY_STATUS_OK:
+            return L"OK";
+        case KSWORD_ARK_IPC_SUMMARY_STATUS_PARTIAL:
+            return L"Partial";
+        case KSWORD_ARK_IPC_SUMMARY_STATUS_STUB:
+            return L"LegacyStub";
+        case KSWORD_ARK_IPC_SUMMARY_STATUS_FAILED:
+            return L"Failed";
+        case KSWORD_ARK_IPC_SUMMARY_STATUS_UNAVAILABLE:
+        default:
+            return L"Unavailable";
+        }
     }
 
     // fixedUtf16 copies unsigned-short UTF-16 protocol fields into std::wstring.
@@ -1050,12 +1093,16 @@ namespace
             << L"Families and subcommands:\n"
             << L"  process   terminate | suspend | set-ppl | enum | set-visibility | set-special-flags | dkom | crossview\n"
             << L"  memory    query-va | read-va | write-va | read-phys | write-phys | translate-va | query-pte | scan-kexec | scan-evidence\n"
-            << L"  file      delete-path | query-info | monitor-control | monitor-drain | monitor-status\n"
-            << L"  kernel    ssdt | shadow-ssdt | scan-inline-hooks | patch-inline-hook | enum-iat-eat-hooks | query-driver-object | query-driver-integrity | force-unload-driver | query-cpu | query-phys-layout\n"
+            << L"  file      delete-path | query-info | fileobject | minifilter | section | bitlocker | storage | mountmgr | filesystem | monitor-control | monitor-drain | monitor-status\n"
+            << L"  kernel    ssdt | shadow-ssdt | scan-inline-hooks | enum-iat-eat-hooks | query-driver-object | query-driver-integrity | query-cpu | query-phys-layout | cid | ipc | callbacks | hooks\n"
             << L"  callback  set-rules | runtime-state | wait-event | answer-event | cancel-pending | remove | remove-ex | enum | set-minifilter-bypass-pids | query-minifilter-bypass-pids\n"
-            << L"  dyn       status | fields | capabilities | apply-profile | apply-profile-ex\n"
+            << L"  dyn       status | profile | fields | capabilities | v4-modules | v4-capabilities | v4-missing | apply-profile | apply-profile-ex | apply-profile-v4\n"
             << L"  thread    enum | crossview\n"
-            << L"  handle    enum | query-object\n"
+            << L"  handle    enum | object-table | query-object | object-header | type-matrix\n"
+            << L"  driver    integrity | detail | device | major | fastio | unloaded | piddb\n"
+            << L"  hardware  audit | input | usb | pnp\n"
+            << L"  window    win32k | gui | gui-threads | gpu | display | watchdog\n"
+            << L"  misc      security | ci | vbs | hyperv | applocker | bam | driver-trust\n"
             << L"  alpc      query-port\n"
             << L"  section   query-process | query-file-mappings\n"
             << L"  trust     query-image\n"
@@ -1063,7 +1110,7 @@ namespace
             << L"  preflight query\n"
             << L"  registry  read-value | enum-key | set-value | delete-value | create-key | delete-key | rename-value | rename-key\n"
             << L"  redirect  set-rules | query-status\n"
-            << L"  network   set-rules | query-status\n"
+            << L"  network   set-rules | query-status | audit | tcp | udp | afd | wfp | ndis | nsi\n"
             << L"  keyboard  enum-hotkeys | enum-hooks\n"
             << L"  mutation  prepare | commit | rollback | query-audit\n"
             << L"  capability query-driver-capabilities\n"
@@ -1080,16 +1127,49 @@ namespace
     }
 
     // printCountHeader renders the common variable-response metadata.
-    // Inputs: protocol count fields and returned byte count.
-    // Processing: prints stable names that are easy to compare across commands.
+    // Inputs: protocol version, total row count, returned row count, row byte size,
+    // and DeviceIoControl bytesReturned.
+    // Processing: prints the normalized acceptance fields first
+    // (version/returned/total/entrySize/rowSize/bytesReturned/truncated), then keeps
+    // legacy totalCount/returnedCount aliases so older scripts remain compatible.
     // Returns: no value.
     void printCountHeader(std::uint32_t version, std::uint32_t total, std::uint32_t returned, std::uint32_t entrySize, DWORD bytesReturned)
     {
         std::wcout << L"version=" << version
-                   << L" totalCount=" << total
-                   << L" returnedCount=" << returned
+                   << L" returned=" << returned
+                   << L" total=" << total
                    << L" entrySize=" << entrySize
-                   << L" bytesReturned=" << bytesReturned << L"\n";
+                   << L" rowSize=" << entrySize
+                   << L" bytesReturned=" << bytesReturned
+                   << L" truncated=" << ((returned < total) ? 1U : 0U)
+                   << L" totalCount=" << total
+                   << L" returnedCount=" << returned << L"\n";
+    }
+
+    // containsIgnoreCase 作用：在 CLI 文本投影中做宽字符包含匹配。
+    // 输入：haystack 为待搜索文本，needle 为目标片段。
+    // 处理：逐字符转小写后比较，避免不同 R0 detail 大小写导致漏报。
+    // 返回：命中返回 true；needle 为空时按“不过滤”返回 true。
+    bool containsIgnoreCase(const std::wstring& haystack, const wchar_t* needle)
+    {
+        if (needle == nullptr || needle[0] == L'\0')
+        {
+            return true;
+        }
+
+        std::wstring loweredHaystack;
+        loweredHaystack.reserve(haystack.size());
+        for (const wchar_t ch : haystack)
+        {
+            loweredHaystack.push_back(static_cast<wchar_t>(std::towlower(ch)));
+        }
+
+        std::wstring loweredNeedle;
+        for (const wchar_t* cursor = needle; *cursor != L'\0'; ++cursor)
+        {
+            loweredNeedle.push_back(static_cast<wchar_t>(std::towlower(*cursor)));
+        }
+        return loweredHaystack.find(loweredNeedle) != std::wstring::npos;
     }
 
     // validateVariable validates header + variable entries before parsing rows.
@@ -1109,6 +1189,172 @@ namespace
             throw std::runtime_error("entry size");
         }
         return (static_cast<std::size_t>(bytesReturned) - headerSize) / static_cast<std::size_t>(entrySize);
+    }
+
+    // isUnsupportedTransportError recognizes old-driver or missing-IOCTL results.
+    // Inputs: Win32 error returned by DeviceIoControl.
+    // Processing: maps common unsupported/unimplemented transport statuses.
+    // Returns: true when the caller should print "unsupported / unavailable".
+    bool isUnsupportedTransportError(DWORD error)
+    {
+        return error == ERROR_INVALID_FUNCTION ||
+               error == ERROR_NOT_SUPPORTED ||
+               error == ERROR_CALL_NOT_IMPLEMENTED ||
+               error == ERROR_PROC_NOT_FOUND;
+    }
+
+    // normalizeIoctlRc keeps new audit commands graceful on older drivers.
+    // Inputs: feature label, IoctlResult and the raw helper return code.
+    // Processing: rewrites missing IOCTL failures into a clear audit message.
+    // Returns: CLI exit code; 5 means supported by CLI but unavailable in driver.
+    int normalizeIoctlRc(const wchar_t* feature, const IoctlResult& io, int rc)
+    {
+        if (rc == 3 && isUnsupportedTransportError(io.win32Error))
+        {
+            std::wcout << L"unsupported / unavailable: " << feature
+                       << L" (driver does not expose this read-only IOCTL)\n";
+            return 5;
+        }
+        return rc;
+    }
+
+    // commandUnsupported reports a known command whose protocol is not present.
+    // Inputs: feature and reason strings.
+    // Processing: prints a stable phrase required by acceptance checks.
+    // Returns: non-zero CLI status to let scripts detect degraded support.
+    int commandUnsupported(const wchar_t* feature, const wchar_t* reason)
+    {
+        std::wcout << L"unsupported / unavailable: " << feature
+                   << L" (" << reason << L")\n";
+        return 5;
+    }
+
+    std::wstring fixedAnsiWide(const char* text, std::size_t maxBytes);
+    bool copyOptionalWideOption(const NamedArgs& args, const wchar_t* key, wchar_t* destination, std::size_t capacity);
+    void printModuleIdentity(const wchar_t* label, const KSW_DYN_MODULE_IDENTITY_PACKET& module);
+
+    // printV4ModuleIdentity renders DynData v4 module and PDB identity.
+    // Inputs: v4 module packet from the shared protocol.
+    // Processing: prints image identity first, then profile/PDB identity.
+    // Returns: no value.
+    void printV4ModuleIdentity(const KSW_DYN_V4_MODULE_IDENTITY_PACKET& module)
+    {
+        printModuleIdentity(L"image", module.image);
+        std::wcout << L"    pdbName='" << fixedAnsiWide(module.pdb.pdbName, KSW_DYN_PDB_NAME_CHARS)
+                   << L"' pdbGuid='" << fixedAnsiWide(module.pdb.pdbGuid, KSW_DYN_PDB_GUID_CHARS)
+                   << L"' pdbAge=" << module.pdb.pdbAge
+                   << L" profile='" << fixedAnsiWide(module.profileName, KSW_DYN_V4_PROFILE_NAME_CHARS) << L"'\n";
+    }
+
+    // queryDynV4Modules prints the applied multi-module profile state.
+    // Inputs: parsed command options.
+    // Processing: issues the read-only v4 modules IOCTL and bounds row output.
+    // Returns: CLI exit code.
+    int queryDynV4Modules(const NamedArgs& args)
+    {
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kSmallResponseBytes, 0U);
+        const int rc = sendRawIoctl(
+            L"IOCTL_KSWORD_ARK_QUERY_DYN_V4_MODULES",
+            IOCTL_KSWORD_ARK_QUERY_DYN_V4_MODULES,
+            nullptr,
+            0U,
+            buffer,
+            io);
+        if (rc != 0) return normalizeIoctlRc(L"dyn v4 modules", io, rc);
+        constexpr std::size_t headerSize = KSW_QUERY_DYN_V4_MODULES_RESPONSE_HEADER_SIZE;
+        const auto* response = reinterpret_cast<const KSW_QUERY_DYN_V4_MODULES_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSW_DYN_V4_MODULE_STATUS_ENTRY), L"dyn v4 modules"); }
+        catch (...) { return 4; }
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 64U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* entry = reinterpret_cast<const KSW_DYN_V4_MODULE_STATUS_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] moduleIndex=" << entry->moduleIndex
+                       << L" statusFlags=0x" << std::hex << entry->statusFlags
+                       << std::dec << L" itemCount=" << entry->itemCount
+                       << L" groupCount=" << entry->capabilityGroupCount
+                       << L" activeGroups=" << entry->activeCapabilityGroupCount
+                       << L" missingRequired=" << entry->missingRequiredItemCount
+                       << L" missingOptional=" << entry->missingOptionalItemCount << L"\n";
+            printV4ModuleIdentity(entry->module);
+        }
+        return 0;
+    }
+
+    // queryDynV4CapabilityGroups prints v4 capability coverage rows.
+    // Inputs: parsed command options.
+    // Processing: reads active/required/optional counts per group.
+    // Returns: CLI exit code.
+    int queryDynV4CapabilityGroups(const NamedArgs& args)
+    {
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kSmallResponseBytes, 0U);
+        const int rc = sendRawIoctl(
+            L"IOCTL_KSWORD_ARK_QUERY_DYN_V4_CAPABILITY_GROUPS",
+            IOCTL_KSWORD_ARK_QUERY_DYN_V4_CAPABILITY_GROUPS,
+            nullptr,
+            0U,
+            buffer,
+            io);
+        if (rc != 0) return normalizeIoctlRc(L"dyn v4 capability groups", io, rc);
+        constexpr std::size_t headerSize = KSW_QUERY_DYN_V4_CAPABILITY_GROUPS_RESPONSE_HEADER_SIZE;
+        const auto* response = reinterpret_cast<const KSW_QUERY_DYN_V4_CAPABILITY_GROUPS_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSW_DYN_V4_CAPABILITY_GROUP_STATUS_ENTRY), L"dyn v4 capability groups"); }
+        catch (...) { return 4; }
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* entry = reinterpret_cast<const KSW_DYN_V4_CAPABILITY_GROUP_STATUS_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] moduleClass=" << entry->moduleClassId
+                       << L" groupId=" << entry->groupId
+                       << L" statusFlags=0x" << std::hex << entry->statusFlags
+                       << std::dec << L" required=" << entry->presentRequiredItemCount << L"/" << entry->requiredItemCount
+                       << L" optional=" << entry->presentOptionalItemCount << L"/" << entry->optionalItemCount
+                       << L" group='" << fixedAnsiWide(entry->groupName, KSW_DYN_V4_CAPABILITY_NAME_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // queryDynV4MissingItems prints required/optional item gaps.
+    // Inputs: parsed command options.
+    // Processing: queries missing item summaries and prints bounded rows.
+    // Returns: CLI exit code.
+    int queryDynV4MissingItems(const NamedArgs& args)
+    {
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kSmallResponseBytes, 0U);
+        const int rc = sendRawIoctl(
+            L"IOCTL_KSWORD_ARK_QUERY_DYN_V4_MISSING_ITEMS",
+            IOCTL_KSWORD_ARK_QUERY_DYN_V4_MISSING_ITEMS,
+            nullptr,
+            0U,
+            buffer,
+            io);
+        if (rc != 0) return normalizeIoctlRc(L"dyn v4 missing items", io, rc);
+        constexpr std::size_t headerSize = KSW_QUERY_DYN_V4_MISSING_ITEMS_RESPONSE_HEADER_SIZE;
+        const auto* response = reinterpret_cast<const KSW_QUERY_DYN_V4_MISSING_ITEMS_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSW_DYN_V4_MISSING_ITEM_ENTRY), L"dyn v4 missing items"); }
+        catch (...) { return 4; }
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* entry = reinterpret_cast<const KSW_DYN_V4_MISSING_ITEM_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] moduleClass=" << entry->moduleClassId
+                       << L" itemId=" << entry->itemId
+                       << L" kind=" << entry->itemKind
+                       << L" groupId=" << entry->capabilityGroupId
+                       << L" missingKind=" << entry->missingKind
+                       << L" item='" << fixedAnsiWide(entry->itemName, KSW_DYN_V4_ITEM_NAME_CHARS)
+                       << L"' reason='" << fixedAnsiWide(entry->reason, KSW_DYN_V4_MISSING_REASON_CHARS) << L"'\n";
+        }
+        return 0;
     }
 
     // commandLogFamily reads the non-IOCTL log ReadFile channel.
@@ -1282,7 +1528,7 @@ namespace
             const std::uint32_t limit = getOptionU32(args, L"--limit", 128U);
             std::vector<std::uint8_t> buffer(kHugeResponseBytes, 0U);
             const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_PROCESS_CROSSVIEW", IOCTL_KSWORD_ARK_QUERY_PROCESS_CROSSVIEW, &request, sizeof(request), buffer, io);
-            if (rc != 0) return rc;
+            if (rc != 0) return normalizeIoctlRc(L"process crossview", io, rc);
             constexpr std::size_t headerSize = sizeof(KSWORD_ARK_PROCESS_CROSSVIEW_RESPONSE) - sizeof(KSWORD_ARK_PROCESS_CROSSVIEW_ROW);
             if (io.bytesReturned < headerSize) { std::wcerr << L"error: process crossview response too small\n"; return 4; }
             const auto* response = reinterpret_cast<const KSWORD_ARK_PROCESS_CROSSVIEW_RESPONSE*>(buffer.data());
@@ -1490,7 +1736,10 @@ namespace
             else
             {
                 KSWORD_ARK_QUERY_PAGE_TABLE_ENTRY_RESPONSE response{};
-                if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_PAGE_TABLE_ENTRY, L"IOCTL_KSWORD_ARK_QUERY_PAGE_TABLE_ENTRY", request, response, io)) return 3;
+                if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_PAGE_TABLE_ENTRY, L"IOCTL_KSWORD_ARK_QUERY_PAGE_TABLE_ENTRY", request, response, io))
+                {
+                    return normalizeIoctlRc(L"memory pte", io, 3);
+                }
                 printPageTableInfo(response.info, io.bytesReturned);
             }
             return 0;
@@ -1506,7 +1755,7 @@ namespace
             const std::uint32_t limit = getOptionU32(args, L"--limit", 128U);
             std::vector<std::uint8_t> buffer(kHugeResponseBytes, 0U);
             const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY", IOCTL_KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY, &request, sizeof(request), buffer, io);
-            if (rc != 0) return rc;
+            if (rc != 0) return normalizeIoctlRc(L"memory kernel-exec", io, rc);
             constexpr std::size_t headerSize = sizeof(KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE) - sizeof(KSWORD_ARK_KERNEL_EXECUTABLE_MEMORY_ENTRY);
             if (io.bytesReturned < headerSize) { std::wcerr << L"error: scan-kexec response too small\n"; return 4; }
             const auto* response = reinterpret_cast<const KSWORD_ARK_SCAN_KERNEL_EXECUTABLE_MEMORY_RESPONSE*>(buffer.data());
@@ -1543,7 +1792,7 @@ namespace
             const std::uint32_t limit = getOptionU32(args, L"--limit", 128U);
             std::vector<std::uint8_t> buffer(kHugeResponseBytes, 0U);
             const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE", IOCTL_KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE, &request, sizeof(request), buffer, io);
-            if (rc != 0) return rc;
+            if (rc != 0) return normalizeIoctlRc(L"memory evidence", io, rc);
             constexpr std::size_t headerSize = sizeof(KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_RESPONSE) - sizeof(KSWORD_ARK_KERNEL_MEMORY_EVIDENCE_ROW);
             if (io.bytesReturned < headerSize) { std::wcerr << L"error: scan-evidence response too small\n"; return 4; }
             const auto* response = reinterpret_cast<const KSWORD_ARK_SCAN_KERNEL_MEMORY_EVIDENCE_RESPONSE*>(buffer.data());
@@ -1602,6 +1851,924 @@ namespace
         dumpWideText(L"objectName", fixedWide(response.objectName, KSWORD_ARK_FILE_INFO_OBJECT_NAME_MAX_CHARS));
     }
 
+    // queryMinifilterInventory issues the read-only fltMgr public inventory IOCTL.
+    // Inputs: parsed options for flags/max rows/visible row limit.
+    // Processing: validates the variable response and prints filter/volume rows.
+    // Returns: CLI exit code, including graceful unavailable status for old drivers.
+    int queryMinifilterInventory(const NamedArgs& args)
+    {
+        KSWORD_ARK_QUERY_MINIFILTER_INVENTORY_REQUEST request{};
+        request.size = sizeof(request);
+        request.version = KSWORD_ARK_FILTER_PROTOCOL_VERSION;
+        request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_MINIFILTER_INVENTORY_FLAG_INCLUDE_ALL);
+        request.maxRows = getOptionU32(args, L"--max-rows", 256U);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_MINIFILTER_INVENTORY", IOCTL_KSWORD_ARK_QUERY_MINIFILTER_INVENTORY, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"file minifilter", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_QUERY_MINIFILTER_INVENTORY_RESPONSE) - sizeof(KSWORD_ARK_MINIFILTER_INVENTORY_ENTRY);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_QUERY_MINIFILTER_INVENTORY_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_MINIFILTER_INVENTORY_ENTRY), L"minifilter inventory"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->queryStatus, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        std::wcout << L"size=" << response->size << L" flags=0x" << std::hex << response->flags << std::dec << L"\n";
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_MINIFILTER_INVENTORY_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] status=" << row->status
+                       << L" fields=0x" << std::hex << row->fieldFlags
+                       << L" source=0x" << row->sourceFlags
+                       << L" filter=" << hex64(row->filterObject)
+                       << L" volume=" << hex64(row->volumeObject)
+                       << std::dec << L" instances=" << row->instanceCount
+                       << L" volumeInstances=" << row->volumeBindingInstanceCount
+                       << L" frameId=" << row->frameId
+                       << L" name='" << fixedWide(row->filterName, KSWORD_ARK_MINIFILTER_INVENTORY_NAME_CHARS)
+                       << L"' altitude='" << fixedWide(row->altitude, KSWORD_ARK_MINIFILTER_INVENTORY_ALTITUDE_CHARS)
+                       << L"' volumeName='" << fixedWide(row->volumeName, KSWORD_ARK_MINIFILTER_INVENTORY_VOLUME_NAME_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // buildStorageRequest normalizes common storage audit CLI options.
+    // Inputs: parsed args and optional --volume path text.
+    // Processing: fills protocol version, flags, row/depth limits and fixed path.
+    // Returns: request packet ready for a read-only storage IOCTL.
+    KSWORD_ARK_STORAGE_AUDIT_REQUEST buildStorageRequest(const NamedArgs& args)
+    {
+        KSWORD_ARK_STORAGE_AUDIT_REQUEST request{};
+        request.version = KSWORD_ARK_STORAGE_PROTOCOL_VERSION;
+        request.size = sizeof(request);
+        request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_STORAGE_AUDIT_FLAG_INCLUDE_DEFAULT);
+        request.maxRows = getOptionU32(args, L"--max-rows", KSWORD_ARK_STORAGE_DEFAULT_MAX_ROWS);
+        request.maxDepth = getOptionU32(args, L"--max-depth", KSWORD_ARK_STORAGE_DEFAULT_STACK_DEPTH);
+        if (const std::wstring* volume = getOptionText(args, L"--volume"))
+        {
+            request.volumePathLengthChars = boundedPathLength(*volume, KSWORD_ARK_STORAGE_VOLUME_PATH_CHARS);
+            copyWideToFixed(request.volumePath, KSWORD_ARK_STORAGE_VOLUME_PATH_CHARS, *volume);
+        }
+        return request;
+    }
+
+    // queryVolumeStackAudit prints R0 volume/device-stack audit rows.
+    // Inputs: parsed storage options.
+    // Processing: uses the read-only volume stack IOCTL and prints bounded rows.
+    // Returns: CLI exit code.
+    int queryVolumeStackAudit(const NamedArgs& args)
+    {
+        KSWORD_ARK_STORAGE_AUDIT_REQUEST request = buildStorageRequest(args);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_VOLUME_STACK_AUDIT", IOCTL_KSWORD_ARK_QUERY_VOLUME_STACK_AUDIT, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"storage volume stack", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_QUERY_VOLUME_STACK_RESPONSE) - sizeof(KSWORD_ARK_VOLUME_STACK_ROW);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_QUERY_VOLUME_STACK_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->rowSize, sizeof(KSWORD_ARK_VOLUME_STACK_ROW), L"volume stack"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->queryStatus, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalRows, response->returnedRows, response->rowSize, io.bytesReturned);
+        std::wcout << L"fieldFlags=0x" << std::hex << response->fieldFlags
+                   << std::dec << L" fvevolPresent=" << response->fvevolPresent
+                   << L" fvevolPosition=" << response->fvevolPosition << L"\n";
+        const std::size_t parsed = responseCountLimit(response->returnedRows, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_VOLUME_STACK_ROW*>(buffer.data() + headerSize + (i * response->rowSize));
+            std::wcout << L"  [" << i << L"] stackIndex=" << row->stackIndex
+                       << L" deviceType=0x" << std::hex << row->deviceType
+                       << L" fields=0x" << row->fieldFlags
+                       << L" risk=0x" << row->riskFlags
+                       << L" device=" << hex64(row->deviceObjectAddress)
+                       << L" driverObject=" << hex64(row->driverObjectAddress)
+                       << L" attached=" << hex64(row->attachedDeviceAddress)
+                       << std::dec << L" confidence=" << row->confidence
+                       << L" driver='" << fixedWide(row->driverName, KSWORD_ARK_STORAGE_DRIVER_NAME_CHARS)
+                       << L"' volume='" << fixedWide(row->volumeDeviceName, KSWORD_ARK_STORAGE_VOLUME_PATH_CHARS)
+                       << L"' detail='" << fixedWide(row->detail, KSWORD_ARK_STORAGE_DETAIL_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // queryBitlockerAudit prints safe BitLocker/FVE status rows only.
+    // Inputs: parsed storage options.
+    // Processing: never serializes key material; it only renders protocol labels.
+    // Returns: CLI exit code.
+    int queryBitlockerAudit(const NamedArgs& args)
+    {
+        KSWORD_ARK_STORAGE_AUDIT_REQUEST request = buildStorageRequest(args);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_BITLOCKER_FVE_AUDIT", IOCTL_KSWORD_ARK_QUERY_BITLOCKER_FVE_AUDIT, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"file bitlocker", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_QUERY_BITLOCKER_FVE_RESPONSE) - sizeof(KSWORD_ARK_BITLOCKER_FVE_ROW);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_QUERY_BITLOCKER_FVE_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->rowSize, sizeof(KSWORD_ARK_BITLOCKER_FVE_ROW), L"bitlocker fve"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->queryStatus, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalRows, response->returnedRows, response->rowSize, io.bytesReturned);
+        const std::size_t parsed = responseCountLimit(response->returnedRows, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_BITLOCKER_FVE_ROW*>(buffer.data() + headerSize + (i * response->rowSize));
+            std::wcout << L"  [" << i << L"] fields=0x" << std::hex << row->fieldFlags
+                       << L" risk=0x" << row->riskFlags
+                       << std::dec << L" fvevolPresent=" << row->fvevolPresent
+                       << L" fvevolPosition=" << row->fvevolStackPosition
+                       << L" protection=" << row->protectionStatus
+                       << L" conversion=" << row->conversionStatus
+                       << L" lock=" << row->lockStatus
+                       << L" confidence=" << row->confidence
+                       << L" volume='" << fixedWide(row->volumeDeviceName, KSWORD_ARK_STORAGE_VOLUME_PATH_CHARS)
+                       << L"' detail='" << fixedWide(row->detail, KSWORD_ARK_STORAGE_DETAIL_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // queryMountMgrAudit prints drive-letter and Volume GUID cross-view rows.
+    // Inputs: parsed storage options.
+    // Processing: renders only symbolic mapping evidence.
+    // Returns: CLI exit code.
+    int queryMountMgrAudit(const NamedArgs& args)
+    {
+        KSWORD_ARK_STORAGE_AUDIT_REQUEST request = buildStorageRequest(args);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_MOUNTMGR_MAPPING_AUDIT", IOCTL_KSWORD_ARK_QUERY_MOUNTMGR_MAPPING_AUDIT, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"storage mountmgr", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_QUERY_MOUNTMGR_MAPPING_RESPONSE) - sizeof(KSWORD_ARK_MOUNTMGR_MAPPING_ROW);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_QUERY_MOUNTMGR_MAPPING_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->rowSize, sizeof(KSWORD_ARK_MOUNTMGR_MAPPING_ROW), L"mountmgr mapping"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->queryStatus, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalRows, response->returnedRows, response->rowSize, io.bytesReturned);
+        const std::size_t parsed = responseCountLimit(response->returnedRows, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_MOUNTMGR_MAPPING_ROW*>(buffer.data() + headerSize + (i * response->rowSize));
+            std::wcout << L"  [" << i << L"] fields=0x" << std::hex << row->fieldFlags
+                       << L" risk=0x" << row->riskFlags
+                       << std::dec << L" confidence=" << row->confidence
+                       << L" drive='" << fixedWide(row->driveLetter, KSWORD_ARK_STORAGE_DRIVE_LETTER_CHARS)
+                       << L"' guid='" << fixedWide(row->volumeGuid, KSWORD_ARK_STORAGE_VOLUME_GUID_CHARS)
+                       << L"' nt='" << fixedWide(row->ntDevicePath, KSWORD_ARK_STORAGE_VOLUME_PATH_CHARS)
+                       << L"' detail='" << fixedWide(row->detail, KSWORD_ARK_STORAGE_DETAIL_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // queryFilesystemIntegrityAudit prints FS dispatch/FastIo owner evidence.
+    // Inputs: parsed storage options.
+    // Processing: emits read-only driver/slot/risk rows.
+    // Returns: CLI exit code.
+    int queryFilesystemIntegrityAudit(const NamedArgs& args)
+    {
+        KSWORD_ARK_STORAGE_AUDIT_REQUEST request = buildStorageRequest(args);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_FILESYSTEM_INTEGRITY_AUDIT", IOCTL_KSWORD_ARK_QUERY_FILESYSTEM_INTEGRITY_AUDIT, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"file storage filesystem integrity", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_QUERY_FILESYSTEM_INTEGRITY_RESPONSE) - sizeof(KSWORD_ARK_FILESYSTEM_INTEGRITY_ROW);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_QUERY_FILESYSTEM_INTEGRITY_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->rowSize, sizeof(KSWORD_ARK_FILESYSTEM_INTEGRITY_ROW), L"filesystem integrity"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->queryStatus, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalRows, response->returnedRows, response->rowSize, io.bytesReturned);
+        const std::size_t parsed = responseCountLimit(response->returnedRows, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_FILESYSTEM_INTEGRITY_ROW*>(buffer.data() + headerSize + (i * response->rowSize));
+            std::wcout << L"  [" << i << L"] fs=" << row->fileSystemKind
+                       << L" slotType=" << row->slotType
+                       << L" slotIndex=" << row->slotIndex
+                       << L" risk=0x" << std::hex << row->riskFlags
+                       << L" driverObject=" << hex64(row->driverObjectAddress)
+                       << L" target=" << hex64(row->targetAddress)
+                       << L" ownerBase=" << hex64(row->ownerModuleBase)
+                       << std::dec << L" confidence=" << row->confidence
+                       << L" driver='" << fixedWide(row->driverName, KSWORD_ARK_STORAGE_DRIVER_NAME_CHARS)
+                       << L"' owner='" << fixedWide(row->ownerModuleName, KSWORD_ARK_STORAGE_MODULE_NAME_CHARS)
+                       << L"' detail='" << fixedWide(row->detail, KSWORD_ARK_STORAGE_DETAIL_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // buildNetworkAuditRequest fills the common bounded network audit request.
+    // Inputs: parsed args with optional flags/max rows.
+    // Processing: uses conservative protocol defaults and never requests mutation.
+    // Returns: fixed query request for network endpoint/WFP/NDIS IOCTLs.
+    KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST buildNetworkAuditRequest(const NamedArgs& args)
+    {
+        KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST request{};
+        request.version = KSWORD_ARK_NETWORK_PROTOCOL_VERSION;
+        request.size = sizeof(request);
+        request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_NETWORK_AUDIT_QUERY_FLAG_INCLUDE_ALL);
+        request.maxRows = getOptionU32(args, L"--max-rows", KSWORD_ARK_NETWORK_AUDIT_MAX_REQUESTED_ROWS);
+        return request;
+    }
+
+    // queryNetworkEndpoints prints TCP or UDP R0 endpoint audit rows.
+    // Inputs: parsed args plus IOCTL code and display labels.
+    // Processing: validates variable response rows and renders endpoint evidence.
+    // Returns: CLI exit code.
+    int queryNetworkEndpoints(const NamedArgs& args, DWORD code, const wchar_t* ioctlLabel, const wchar_t* featureLabel)
+    {
+        KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST request = buildNetworkAuditRequest(args);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(ioctlLabel, code, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(featureLabel, io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_NETWORK_ENDPOINT_RESPONSE) - sizeof(KSWORD_ARK_NETWORK_ENDPOINT_ROW);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_NETWORK_ENDPOINT_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_NETWORK_ENDPOINT_ROW), featureLabel); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->status, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalRowCount, response->returnedRowCount, response->entrySize, io.bytesReturned);
+        std::wcout << L"flags=0x" << std::hex << response->flags
+                   << L" source=0x" << response->sourceFlags
+                   << std::dec << L" budgetRows=" << response->budgetRows
+                   << L" generation=" << response->generation << L"\n";
+        const std::size_t parsed = responseCountLimit(response->returnedRowCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_NETWORK_ENDPOINT_ROW*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] rowId=" << row->rowId
+                       << L" af=" << row->addressFamily
+                       << L" proto=" << row->protocol
+                       << L" state=" << row->state
+                       << L" pid=" << row->owningPid
+                       << L" localPort=" << row->localPort
+                       << L" remotePort=" << row->remotePort
+                       << L" flags=0x" << std::hex << row->flags
+                       << L" source=0x" << row->sourceFlags
+                       << L" endpoint=" << hex64(row->endpointObject)
+                       << L" processObject=" << hex64(row->owningProcessObject)
+                       << L" transport=" << hex64(row->transportObject)
+                       << std::dec << L"\n";
+        }
+        return 0;
+    }
+
+    // queryNetworkWfp prints WFP provider/filter/callout inventory rows.
+    // Inputs: parsed network options.
+    // Processing: supports audit-stub responses without treating them as crashes.
+    // Returns: CLI exit code.
+    int queryNetworkWfp(const NamedArgs& args)
+    {
+        KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST request = buildNetworkAuditRequest(args);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_NETWORK_QUERY_WFP_INVENTORY", IOCTL_KSWORD_ARK_NETWORK_QUERY_WFP_INVENTORY, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"network wfp", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_NETWORK_WFP_INVENTORY_RESPONSE) - sizeof(KSWORD_ARK_NETWORK_WFP_INVENTORY_ROW);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_NETWORK_WFP_INVENTORY_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_NETWORK_WFP_INVENTORY_ROW), L"network wfp"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->status, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalRowCount, response->returnedRowCount, response->entrySize, io.bytesReturned);
+        const std::size_t parsed = responseCountLimit(response->returnedRowCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_NETWORK_WFP_INVENTORY_ROW*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] rowId=" << row->rowId
+                       << L" kind=" << row->objectKind
+                       << L" layer=" << row->layerId
+                       << L" calloutId=" << row->calloutId
+                       << L" filterId=" << row->filterId
+                       << L" classify=" << hex64(row->classifyAddress)
+                       << L" notify=" << hex64(row->notifyAddress)
+                       << L" flowDelete=" << hex64(row->flowDeleteAddress)
+                       << L" ownerBase=" << hex64(row->ownerImageBase)
+                       << L" owner='" << fixedWide(row->ownerModule, KSWORD_ARK_NETWORK_NAME_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // queryNetworkNdis prints NDIS miniport/filter/protocol/binding rows.
+    // Inputs: parsed network options.
+    // Processing: renders object graph hints without changing bindings.
+    // Returns: CLI exit code.
+    int queryNetworkNdis(const NamedArgs& args)
+    {
+        KSWORD_ARK_NETWORK_AUDIT_QUERY_REQUEST request = buildNetworkAuditRequest(args);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_NETWORK_QUERY_NDIS_CHAIN", IOCTL_KSWORD_ARK_NETWORK_QUERY_NDIS_CHAIN, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"network ndis", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_NETWORK_NDIS_CHAIN_RESPONSE) - sizeof(KSWORD_ARK_NETWORK_NDIS_CHAIN_ROW);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_NETWORK_NDIS_CHAIN_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_NETWORK_NDIS_CHAIN_ROW), L"network ndis"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->status, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalRowCount, response->returnedRowCount, response->entrySize, io.bytesReturned);
+        const std::size_t parsed = responseCountLimit(response->returnedRowCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_NETWORK_NDIS_CHAIN_ROW*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] rowId=" << row->rowId
+                       << L" kind=" << row->objectKind
+                       << L" ifIndex=" << row->ifIndex
+                       << L" order=" << row->filterOrder
+                       << L" object=" << hex64(row->objectAddress)
+                       << L" parent=" << hex64(row->parentObjectAddress)
+                       << L" driverObject=" << hex64(row->driverObject)
+                       << L" imageBase=" << hex64(row->imageBase)
+                       << L" component='" << fixedWide(row->componentName, KSWORD_ARK_NETWORK_NAME_CHARS)
+                       << L"' owner='" << fixedWide(row->ownerModule, KSWORD_ARK_NETWORK_NAME_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // ipv4AddressToText 作用：把 IP Helper 返回的 IPv4 地址转为宽字符文本。
+    // 输入：address 为 MIB_* 表中的 IPv4 地址，保持系统 API 返回的字节序。
+    // 处理：调用 InetNtopW，失败时输出占位诊断，避免 CLI 崩溃。
+    // 返回：可直接打印的 IPv4 文本。
+    std::wstring ipv4AddressToText(const DWORD address)
+    {
+        IN_ADDR inAddress{};
+        inAddress.S_un.S_addr = address;
+
+        wchar_t addressText[INET_ADDRSTRLEN]{};
+        if (::InetNtopW(AF_INET, &inAddress, addressText, static_cast<DWORD>(sizeof(addressText) / sizeof(addressText[0]))) == nullptr)
+        {
+            return L"<invalid-ipv4>";
+        }
+        return addressText;
+    }
+
+    // ipv6AddressToText 作用：把 IP Helper 返回的 IPv6 地址转为宽字符文本。
+    // 输入：addressBytes 指向 16 字节 IPv6 地址，scopeId 是接口 scope。
+    // 处理：格式化地址并在存在 scopeId 时追加 %scope，便于定位链路本地地址。
+    // 返回：可直接打印的 IPv6 文本。
+    std::wstring ipv6AddressToText(const UCHAR addressBytes[16], const DWORD scopeId)
+    {
+        IN6_ADDR inAddress{};
+        std::memcpy(&inAddress, addressBytes, sizeof(inAddress));
+
+        wchar_t addressText[INET6_ADDRSTRLEN]{};
+        if (::InetNtopW(AF_INET6, &inAddress, addressText, static_cast<DWORD>(sizeof(addressText) / sizeof(addressText[0]))) == nullptr)
+        {
+            return L"<invalid-ipv6>";
+        }
+
+        std::wostringstream stream;
+        stream << addressText;
+        if (scopeId != 0U)
+        {
+            stream << L"%" << scopeId;
+        }
+        return stream.str();
+    }
+
+    // networkPortToHost 作用：把 IP Helper 表中的网络字节序端口转为主机字节序。
+    // 输入：portValue 为 DWORD 存储的端口字段。
+    // 处理：截取低 16 位并调用 ntohs。
+    // 返回：可读端口号。
+    std::uint16_t networkPortToHost(const DWORD portValue)
+    {
+        return ntohs(static_cast<u_short>(portValue));
+    }
+
+    // printAfdTcp4Fallback 作用：打印 AFD fallback 的 IPv4 TCP owner rows。
+    // 输入：limit 为最大输出行数，printedRows 引用累计已打印数量。
+    // 处理：GetExtendedTcpTable 只读获取 owner PID 表，不访问 R0 AFD 私有结构。
+    // 返回：Win32 状态码，ERROR_SUCCESS 表示成功枚举或无行。
+    DWORD printAfdTcp4Fallback(const std::size_t limit, std::size_t& printedRows)
+    {
+        ULONG bufferBytes = 0U;
+        DWORD status = ::GetExtendedTcpTable(
+            nullptr,
+            &bufferBytes,
+            FALSE,
+            AF_INET,
+            TCP_TABLE_OWNER_PID_ALL,
+            0U);
+        if (status != ERROR_INSUFFICIENT_BUFFER || bufferBytes == 0U)
+        {
+            return status;
+        }
+
+        std::vector<std::uint8_t> buffer(bufferBytes, 0U);
+        status = ::GetExtendedTcpTable(
+            buffer.data(),
+            &bufferBytes,
+            FALSE,
+            AF_INET,
+            TCP_TABLE_OWNER_PID_ALL,
+            0U);
+        if (status != ERROR_SUCCESS)
+        {
+            return status;
+        }
+
+        const auto* table = reinterpret_cast<const MIB_TCPTABLE_OWNER_PID*>(buffer.data());
+        for (DWORD rowIndex = 0U; rowIndex < table->dwNumEntries && printedRows < limit; ++rowIndex)
+        {
+            const MIB_TCPROW_OWNER_PID& row = table->table[rowIndex];
+            std::wcout << L"  afd-fallback[tcp4][" << printedRows << L"] pid=" << row.dwOwningPid
+                       << L" local=" << ipv4AddressToText(row.dwLocalAddr) << L":" << networkPortToHost(row.dwLocalPort)
+                       << L" remote=" << ipv4AddressToText(row.dwRemoteAddr) << L":" << networkPortToHost(row.dwRemotePort)
+                       << L" state=" << row.dwState
+                       << L" source=GetExtendedTcpTable\n";
+            ++printedRows;
+        }
+        return ERROR_SUCCESS;
+    }
+
+    // printAfdUdp4Fallback 作用：打印 AFD fallback 的 IPv4 UDP owner rows。
+    // 输入：limit 为最大输出行数，printedRows 引用累计已打印数量。
+    // 处理：GetExtendedUdpTable 只读获取 UDP owner PID 表。
+    // 返回：Win32 状态码。
+    DWORD printAfdUdp4Fallback(const std::size_t limit, std::size_t& printedRows)
+    {
+        ULONG bufferBytes = 0U;
+        DWORD status = ::GetExtendedUdpTable(
+            nullptr,
+            &bufferBytes,
+            FALSE,
+            AF_INET,
+            UDP_TABLE_OWNER_PID,
+            0U);
+        if (status != ERROR_INSUFFICIENT_BUFFER || bufferBytes == 0U)
+        {
+            return status;
+        }
+
+        std::vector<std::uint8_t> buffer(bufferBytes, 0U);
+        status = ::GetExtendedUdpTable(
+            buffer.data(),
+            &bufferBytes,
+            FALSE,
+            AF_INET,
+            UDP_TABLE_OWNER_PID,
+            0U);
+        if (status != ERROR_SUCCESS)
+        {
+            return status;
+        }
+
+        const auto* table = reinterpret_cast<const MIB_UDPTABLE_OWNER_PID*>(buffer.data());
+        for (DWORD rowIndex = 0U; rowIndex < table->dwNumEntries && printedRows < limit; ++rowIndex)
+        {
+            const MIB_UDPROW_OWNER_PID& row = table->table[rowIndex];
+            std::wcout << L"  afd-fallback[udp4][" << printedRows << L"] pid=" << row.dwOwningPid
+                       << L" local=" << ipv4AddressToText(row.dwLocalAddr) << L":" << networkPortToHost(row.dwLocalPort)
+                       << L" source=GetExtendedUdpTable\n";
+            ++printedRows;
+        }
+        return ERROR_SUCCESS;
+    }
+
+    // commandNetworkAfdFallback 作用：为 network afd 提供只读降级证据。
+    // 输入：CLI 参数，支持 --limit 控制打印行数。
+    // 处理：明确声明无专用 R0 IOCTL，并用 documented IP Helper owner 表展示 AFD 近似证据。
+    // 返回：0 表示 fallback 查询完成；非 0 表示系统 API 不可用或失败。
+    int commandNetworkAfdFallback(const NamedArgs& args)
+    {
+        const std::size_t limit = getOptionU32(args, L"--limit", 128U);
+        std::size_t printedRows = 0U;
+
+        std::wcout << L"network afd: degraded fallback\n"
+                   << L"status=degraded unsupportedR0=1 reason='no dedicated AFD audit IOCTL is present in shared protocol'\n"
+                   << L"source=R3 documented IP Helper owner PID tables\n";
+
+        const DWORD tcp4Status = printAfdTcp4Fallback(limit, printedRows);
+        const DWORD udp4Status = printAfdUdp4Fallback(limit, printedRows);
+
+        std::wcout << L"summary rows=" << printedRows
+                   << L" limit=" << limit
+                   << L" tcp4Status=" << tcp4Status
+                   << L" udp4Status=" << udp4Status
+                   << L" ipv6OwnerPid='covered by network nsi fallback; SDK hides MIB_*6_OWNER_PID in this build context'\n";
+
+        if (tcp4Status != ERROR_SUCCESS && udp4Status != ERROR_SUCCESS)
+        {
+            std::wcerr << L"unsupported / unavailable: network afd fallback APIs failed\n";
+            return 5;
+        }
+        return 0;
+    }
+
+    // socketAddressToText 作用：把 GetAdaptersAddresses 的 SOCKET_ADDRESS 格式化。
+    // 输入：socketAddress 为适配器地址节点中的原始 socket 地址。
+    // 处理：按 AF_INET/AF_INET6 分支转换，未知地址族返回诊断文本。
+    // 返回：可打印地址文本。
+    std::wstring socketAddressToText(const SOCKET_ADDRESS& socketAddress)
+    {
+        if (socketAddress.lpSockaddr == nullptr)
+        {
+            return L"<null-address>";
+        }
+        if (socketAddress.lpSockaddr->sa_family == AF_INET)
+        {
+            const auto* ipv4 = reinterpret_cast<const SOCKADDR_IN*>(socketAddress.lpSockaddr);
+            return ipv4AddressToText(ipv4->sin_addr.S_un.S_addr);
+        }
+        if (socketAddress.lpSockaddr->sa_family == AF_INET6)
+        {
+            const auto* ipv6 = reinterpret_cast<const SOCKADDR_IN6*>(socketAddress.lpSockaddr);
+            return ipv6AddressToText(ipv6->sin6_addr.u.Byte, ipv6->sin6_scope_id);
+        }
+        return L"<unsupported-address-family>";
+    }
+
+    // commandNetworkNsiFallback 作用：为 network nsi 提供只读降级证据。
+    // 输入：CLI 参数，支持 --limit 控制打印的单播地址数量。
+    // 处理：使用 GetAdaptersAddresses 投影接口/地址状态，替代缺失的专用 NSI R0 IOCTL。
+    // 返回：0 表示 fallback 查询完成；非 0 表示系统 API 不可用或失败。
+    int commandNetworkNsiFallback(const NamedArgs& args)
+    {
+        const std::size_t limit = getOptionU32(args, L"--limit", 128U);
+        ULONG bufferBytes = 16U * 1024U;
+        std::vector<std::uint8_t> buffer(bufferBytes, 0U);
+        constexpr ULONG queryFlags =
+            GAA_FLAG_INCLUDE_PREFIX |
+            GAA_FLAG_INCLUDE_GATEWAYS |
+            GAA_FLAG_INCLUDE_ALL_INTERFACES;
+
+        DWORD status = ::GetAdaptersAddresses(AF_UNSPEC, queryFlags, nullptr, reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data()), &bufferBytes);
+        if (status == ERROR_BUFFER_OVERFLOW)
+        {
+            buffer.assign(bufferBytes, 0U);
+            status = ::GetAdaptersAddresses(AF_UNSPEC, queryFlags, nullptr, reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data()), &bufferBytes);
+        }
+
+        std::wcout << L"network nsi: degraded fallback\n"
+                   << L"status=degraded unsupportedR0=1 reason='no dedicated NSI audit IOCTL is present in shared protocol'\n"
+                   << L"source=R3 documented GetAdaptersAddresses interface projection\n";
+
+        if (status != ERROR_SUCCESS)
+        {
+            std::wcerr << L"unsupported / unavailable: GetAdaptersAddresses failed, win32=" << status
+                       << L" (0x" << std::hex << status << std::dec << L")\n";
+            return 5;
+        }
+
+        std::size_t adapterCount = 0U;
+        std::size_t printedAdapterCount = 0U;
+        std::size_t addressCount = 0U;
+        const auto* adapter = reinterpret_cast<const IP_ADAPTER_ADDRESSES*>(buffer.data());
+        for (; adapter != nullptr; adapter = adapter->Next)
+        {
+            ++adapterCount;
+            if (printedAdapterCount >= limit)
+            {
+                continue;
+            }
+            std::wcout << L"  nsi-adapter[" << (adapterCount - 1U) << L"] ifIndex=" << adapter->IfIndex
+                       << L" ipv6IfIndex=" << adapter->Ipv6IfIndex
+                       << L" operStatus=" << adapter->OperStatus
+                       << L" ifType=" << adapter->IfType
+                       << L" mtu=" << adapter->Mtu
+                       << L" name='" << (adapter->FriendlyName != nullptr ? adapter->FriendlyName : L"")
+                       << L"' description='" << (adapter->Description != nullptr ? adapter->Description : L"")
+                       << L"'\n";
+            ++printedAdapterCount;
+
+            const IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress;
+            for (; unicast != nullptr && addressCount < limit; unicast = unicast->Next)
+            {
+                std::wcout << L"    nsi-unicast[" << addressCount << L"] address="
+                           << socketAddressToText(unicast->Address)
+                           << L" prefixLength=" << static_cast<unsigned int>(unicast->OnLinkPrefixLength)
+                           << L" dadState=" << unicast->DadState
+                           << L" validLifetime=" << unicast->ValidLifetime
+                           << L" preferredLifetime=" << unicast->PreferredLifetime
+                           << L"\n";
+                ++addressCount;
+            }
+        }
+
+        std::wcout << L"summary adapters=" << adapterCount
+                   << L" printedAdapters=" << printedAdapterCount
+                   << L" addresses=" << addressCount
+                   << L" limit=" << limit
+                   << L" truncated=" << ((adapterCount > printedAdapterCount || addressCount >= limit) ? 1U : 0U) << L"\n";
+        return 0;
+    }
+
+    // queryDeviceAudit prints device/input/USB/GPU audit rows.
+    // Inputs: parsed args plus protocol code/profile and labels.
+    // Processing: sends a read-only request and renders bounded device evidence rows.
+    // Returns: CLI exit code.
+    int queryDeviceAudit(const NamedArgs& args, DWORD code, unsigned long profileFlags, const wchar_t* ioctlLabel, const wchar_t* featureLabel)
+    {
+        KSWORD_ARK_QUERY_DEVICE_AUDIT_REQUEST request{};
+        request.size = sizeof(request);
+        request.version = KSWORD_ARK_DEVICE_AUDIT_PROTOCOL_VERSION;
+        request.profileFlags = getOptionU32(args, L"--profile-flags", profileFlags);
+        request.maxRows = getOptionU32(args, L"--max-rows", KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ROWS);
+        request.maxAttachedDepth = getOptionU32(args, L"--max-attached", KSWORD_ARK_DEVICE_AUDIT_DEFAULT_MAX_ATTACHED_DEPTH);
+        copyOptionalWideOption(args, L"--target", request.targetName, KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(ioctlLabel, code, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(featureLabel, io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_QUERY_DEVICE_AUDIT_RESPONSE) - sizeof(KSWORD_ARK_DEVICE_AUDIT_ENTRY);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_QUERY_DEVICE_AUDIT_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_DEVICE_AUDIT_ENTRY), featureLabel); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->queryStatus, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        std::wcout << L"profileFlags=0x" << std::hex << response->profileFlags
+                   << L" responseFlags=0x" << response->responseFlags
+                   << std::dec << L" targetCount=" << response->targetCount
+                   << L" driverCount=" << response->driverCount
+                   << L" deviceCount=" << response->deviceCount << L"\n";
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_DEVICE_AUDIT_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] kind=" << row->rowKind
+                       << L" role=" << row->roleHint
+                       << L" status=" << row->status
+                       << L" risk=0x" << std::hex << row->riskFlags
+                       << L" driverObject=" << hex64(row->driverObjectAddress)
+                       << L" deviceObject=" << hex64(row->deviceObjectAddress)
+                       << L" attached=" << hex64(row->attachedDeviceAddress)
+                       << L" next=" << hex64(row->nextDeviceObjectAddress)
+                       << std::dec << L" confidence=" << row->confidence
+                       << L" depth=" << row->relationDepth
+                       << L" attachedDepth=" << row->attachedDepth
+                       << L" driver='" << fixedWide(row->driverName, KSWORD_ARK_DEVICE_AUDIT_DRIVER_NAME_CHARS)
+                       << L"' service='" << fixedWide(row->serviceName, KSWORD_ARK_DEVICE_AUDIT_SERVICE_NAME_CHARS)
+                       << L"' device='" << fixedWide(row->deviceName, KSWORD_ARK_DEVICE_AUDIT_DEVICE_NAME_CHARS)
+                       << L"' detail='" << fixedWide(row->detail, KSWORD_ARK_DEVICE_AUDIT_DETAIL_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // buildWin32kRequest fills common win32k audit query fields.
+    // Inputs: parsed args for session/pid/tid/limits.
+    // Processing: keeps request bounded and current-session by default.
+    // Returns: fixed win32k query request.
+    KSWORD_ARK_WIN32K_QUERY_REQUEST buildWin32kRequest(const NamedArgs& args)
+    {
+        KSWORD_ARK_WIN32K_QUERY_REQUEST request{};
+        request.version = KSWORD_ARK_WIN32K_PROTOCOL_VERSION;
+        request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_WIN32K_QUERY_FLAG_INCLUDE_ALL);
+        request.sessionId = getOptionU32(args, L"--session-id", 0U);
+        request.processId = getOptionU32(args, L"--pid", 0U);
+        request.threadId = getOptionU32(args, L"--tid", 0U);
+        request.maxEntries = getOptionU32(args, L"--max-entries", KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES);
+        return request;
+    }
+
+    // queryWin32kProfileStatus prints module/profile/session readiness.
+    // Inputs: parsed window options.
+    // Processing: validates the variable session row response.
+    // Returns: CLI exit code.
+    int queryWin32kProfileStatus(const NamedArgs& args)
+    {
+        KSWORD_ARK_WIN32K_QUERY_REQUEST request = buildWin32kRequest(args);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_WIN32K_PROFILE_STATUS", IOCTL_KSWORD_ARK_QUERY_WIN32K_PROFILE_STATUS, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"window win32k", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_WIN32K_PROFILE_STATUS_RESPONSE) - sizeof(KSWORD_ARK_WIN32K_SESSION_ENTRY);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_WIN32K_PROFILE_STATUS_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_WIN32K_SESSION_ENTRY), L"win32k profile"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->status, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        std::wcout << L"capability=0x" << std::hex << response->capabilityMask
+                   << L" missing=0x" << response->missingCapabilityMask
+                   << L" userGetSiloGlobals=" << hex64(response->userGetSiloGlobals)
+                   << std::dec << L"\n";
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 64U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_WIN32K_SESSION_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] session=" << row->sessionId
+                       << L" status=" << row->status
+                       << L" processCount=" << row->processCount
+                       << L" guiThreadCount=" << row->guiThreadCount
+                       << L" representativePid=" << row->representativeProcessId
+                       << L" representativeTid=" << row->representativeThreadId
+                       << L" capability=0x" << std::hex << row->capabilityMask
+                       << std::dec << L" detail='" << fixedWide(row->detail, KSWORD_ARK_WIN32K_DETAIL_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // queryWin32kWindows prints HWND/tagWND cross-view rows.
+    // Inputs: parsed window options.
+    // Processing: renders only snapshot evidence; no message interception.
+    // Returns: CLI exit code.
+    int queryWin32kWindows(const NamedArgs& args)
+    {
+        KSWORD_ARK_WIN32K_QUERY_REQUEST request = buildWin32kRequest(args);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_WIN32K_WINDOWS", IOCTL_KSWORD_ARK_QUERY_WIN32K_WINDOWS, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"window gui", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_WIN32K_WINDOW_SNAPSHOT_RESPONSE) - sizeof(KSWORD_ARK_WIN32K_WINDOW_ENTRY);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_WIN32K_WINDOW_SNAPSHOT_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_WIN32K_WINDOW_ENTRY), L"win32k windows"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->status, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_WIN32K_WINDOW_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] hwnd=" << hex64(row->hwnd)
+                       << L" tagWnd=" << hex64(row->tagWnd)
+                       << L" pid=" << row->processId
+                       << L" tid=" << row->threadId
+                       << L" session=" << row->sessionId
+                       << L" status=" << row->status
+                       << L" fields=0x" << std::hex << row->fieldFlags
+                       << std::dec << L" title='" << fixedWide(row->title, KSWORD_ARK_WIN32K_TITLE_CHARS)
+                       << L"' class='" << fixedWide(row->className, KSWORD_ARK_WIN32K_CLASS_CHARS)
+                       << L"' detail='" << fixedWide(row->detail, KSWORD_ARK_WIN32K_DETAIL_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // queryWin32kGuiThreads prints GUI thread/queue rows.
+    // Inputs: parsed window options.
+    // Processing: reports focus/capture/active evidence only.
+    // Returns: CLI exit code.
+    int queryWin32kGuiThreads(const NamedArgs& args)
+    {
+        KSWORD_ARK_WIN32K_QUERY_REQUEST request = buildWin32kRequest(args);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_WIN32K_GUI_THREADS", IOCTL_KSWORD_ARK_QUERY_WIN32K_GUI_THREADS, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"window gui threads", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_WIN32K_GUI_THREAD_SNAPSHOT_RESPONSE) - sizeof(KSWORD_ARK_WIN32K_GUI_THREAD_ENTRY);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_WIN32K_GUI_THREAD_SNAPSHOT_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_WIN32K_GUI_THREAD_ENTRY), L"win32k gui threads"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->status, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_WIN32K_GUI_THREAD_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] pid=" << row->processId
+                       << L" tid=" << row->threadId
+                       << L" session=" << row->sessionId
+                       << L" status=" << row->status
+                       << L" threadInfo=" << hex64(row->threadInfo)
+                       << L" queue=" << hex64(row->queueObject)
+                       << L" active=" << hex64(row->activeHwnd)
+                       << L" focus=" << hex64(row->focusHwnd)
+                       << L" capture=" << hex64(row->captureHwnd)
+                       << L" detail='" << fixedWide(row->detail, KSWORD_ARK_WIN32K_DETAIL_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // querySecurityStatus prints CI/VBS/SKCI/test-signing posture.
+    // Inputs: parsed args with optional flags.
+    // Processing: sends the fixed read-only security status IOCTL.
+    // Returns: CLI exit code.
+    int querySecurityStatus(const NamedArgs& args)
+    {
+        KSWORD_ARK_QUERY_SECURITY_STATUS_REQUEST request{};
+        KSWORD_ARK_QUERY_SECURITY_STATUS_RESPONSE response{};
+        request.size = sizeof(request);
+        request.version = KSWORD_ARK_SECURITY_AUDIT_PROTOCOL_VERSION;
+        request.flags = getOptionU32(args, L"--flags", 0U);
+        IoctlResult io{};
+        if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_SECURITY_STATUS, L"IOCTL_KSWORD_ARK_QUERY_SECURITY_STATUS", request, response, io))
+        {
+            return normalizeIoctlRc(L"misc security", io, 3);
+        }
+        printResponseBanner(response.version, static_cast<std::uint32_t>(response.queryStatus), response.codeIntegrityStatus, io.bytesReturned);
+        std::wcout << L"fields=0x" << std::hex << response.fieldFlags
+                   << L" source=0x" << response.sourceMask
+                   << L" ciOptions=0x" << response.codeIntegrityOptions
+                   << std::dec << L" secureBoot=" << response.secureBootEnabled
+                   << L" secureBootCapable=" << response.secureBootCapable
+                   << L" ciEnabled=" << response.ciEnabled
+                   << L" umci=" << response.umciEnabled
+                   << L" hvciKmci=" << response.hvciKmciEnabled
+                   << L" hvciAudit=" << response.hvciAuditMode
+                   << L" hvciStrict=" << response.hvciStrictMode
+                   << L" vbsPresent=" << response.vbsPresent
+                   << L" testSigning=" << response.testSigningEnabled
+                   << L" ciDebug=" << response.ciDebugModeEnabled
+                   << L" kernelDebuggerEnabled=" << response.kernelDebuggerEnabled
+                   << L" kernelDebuggerNotPresent=" << response.kernelDebuggerNotPresent
+                   << L" ciModuleLoaded=" << response.ciModuleLoaded
+                   << L" secureKernelLoaded=" << response.secureKernelModuleLoaded
+                   << L" skciLoaded=" << response.skciModuleLoaded << L"\n";
+        return 0;
+    }
+
+    // queryDriverTrustView prints bounded loaded-driver signing posture rows.
+    // Inputs: parsed args with flags/max rows/limit.
+    // Processing: validates variable trust rows and prints conflict flags.
+    // Returns: CLI exit code.
+    int queryDriverTrustView(const NamedArgs& args)
+    {
+        KSWORD_ARK_QUERY_DRIVER_TRUST_VIEW_REQUEST request{};
+        request.size = sizeof(request);
+        request.version = KSWORD_ARK_SECURITY_AUDIT_PROTOCOL_VERSION;
+        request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_DRIVER_TRUST_QUERY_FLAG_DEFAULT);
+        request.maxEntries = getOptionU32(args, L"--max-entries", KSWORD_ARK_SECURITY_AUDIT_DEFAULT_DRIVER_ROWS);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_DRIVER_TRUST_VIEW", IOCTL_KSWORD_ARK_QUERY_DRIVER_TRUST_VIEW, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"misc security driver trust", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_QUERY_DRIVER_TRUST_VIEW_RESPONSE) - sizeof(KSWORD_ARK_DRIVER_TRUST_VIEW_ENTRY);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_QUERY_DRIVER_TRUST_VIEW_RESPONSE*>(buffer.data());
+        const std::uint32_t entrySize = sizeof(KSWORD_ARK_DRIVER_TRUST_VIEW_ENTRY);
+        const std::size_t available = (io.bytesReturned < headerSize) ? 0U : ((io.bytesReturned - headerSize) / entrySize);
+        if (io.bytesReturned < headerSize) { std::wcerr << L"error: driver trust response too small\n"; return 4; }
+        printResponseBanner(response->version, static_cast<std::uint32_t>(response->queryStatus), response->moduleQueryStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalModuleCount, response->entryCount, entrySize, io.bytesReturned);
+        std::wcout << L"fields=0x" << std::hex << response->fieldFlags
+                   << L" source=0x" << response->sourceMask
+                   << std::dec << L" maxEntriesAccepted=" << response->maxEntriesAccepted
+                   << L" truncated=" << response->truncated << L"\n";
+        const std::size_t parsed = responseCountLimit(response->entryCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* row = reinterpret_cast<const KSWORD_ARK_DRIVER_TRUST_VIEW_ENTRY*>(buffer.data() + headerSize + (i * entrySize));
+            std::wcout << L"  [" << i << L"] base=" << hex64(row->imageBase)
+                       << L" size=" << row->imageSize
+                       << L" fields=0x" << std::hex << row->fieldFlags
+                       << L" source=0x" << row->sourceMask
+                       << L" conflict=0x" << row->conflictFlags
+                       << L" pathHash=0x" << row->pathHash
+                       << std::dec << L" signingLevel=" << row->signingLevel
+                       << L" signingStatus=0x" << std::hex << static_cast<unsigned long>(row->signingStatus)
+                       << std::dec << L" module='" << fixedWide(row->moduleName, KSWORD_ARK_SECURITY_AUDIT_NAME_CHARS) << L"'\n";
+        }
+        return 0;
+    }
+
+    // queryHypervSummary prints fixed Hyper-V/VBS module availability posture.
+    // Inputs: none beyond parsed args for future compatibility.
+    // Processing: sends a no-input fixed response IOCTL.
+    // Returns: CLI exit code.
+    int queryHypervSummary(const NamedArgs&)
+    {
+        KSWORD_ARK_QUERY_HYPERV_SUMMARY_RESPONSE response{};
+        IoctlResult io{};
+        if (!sendFixedNoInput(IOCTL_KSWORD_ARK_QUERY_HYPERV_SUMMARY, L"IOCTL_KSWORD_ARK_QUERY_HYPERV_SUMMARY", response, io))
+        {
+            return normalizeIoctlRc(L"misc hyperv", io, 3);
+        }
+        printResponseBanner(response.version, static_cast<std::uint32_t>(response.queryStatus), response.moduleQueryStatus, io.bytesReturned);
+        std::wcout << L"fields=0x" << std::hex << response.fieldFlags
+                   << L" source=0x" << response.sourceMask
+                   << std::dec << L" hypervisorPresent=" << response.hypervisorPresent
+                   << L" rootPartition=" << response.rootPartitionStatus
+                   << L" vmbus=" << response.vmbusStatus
+                   << L" vSwitch=" << response.vSwitchStatus
+                   << L" vPci=" << response.vPciStatus
+                   << L" hvSocket=" << response.hvSocketStatus
+                   << L" winHv=" << response.winHvStatus
+                   << L" vendor='" << fixedWide(response.hypervisorVendor, KSWORD_ARK_SECURITY_AUDIT_VENDOR_CHARS) << L"'\n";
+        return 0;
+    }
+
+    // queryAppControlStatus prints AppID/AppLocker/mssecflt/BAM summary posture.
+    // Inputs: none beyond parsed args for future compatibility.
+    // Processing: sends fixed app-control status IOCTL.
+    // Returns: CLI exit code.
+    int queryAppControlStatus(const NamedArgs&)
+    {
+        KSWORD_ARK_QUERY_APP_CONTROL_STATUS_RESPONSE response{};
+        IoctlResult io{};
+        if (!sendFixedNoInput(IOCTL_KSWORD_ARK_QUERY_APP_CONTROL_STATUS, L"IOCTL_KSWORD_ARK_QUERY_APP_CONTROL_STATUS", response, io))
+        {
+            return normalizeIoctlRc(L"misc applocker", io, 3);
+        }
+        printResponseBanner(response.version, static_cast<std::uint32_t>(response.queryStatus), response.moduleQueryStatus, io.bytesReturned);
+        std::wcout << L"fields=0x" << std::hex << response.fieldFlags
+                   << L" source=0x" << response.sourceMask
+                   << std::dec << L" appid=" << response.appidStatus
+                   << L" appidPolicy=" << response.appidPolicyStatus
+                   << L" applockerFilter=" << response.appLockerFilterStatus
+                   << L" applockerOwner=" << response.appLockerCallbackOwnerStatus
+                   << L" mssecflt=" << response.mssecfltStatus
+                   << L" mssecfltOwner=" << response.mssecfltCallbackOwnerStatus
+                   << L" ahcache=" << response.ahcacheStatus
+                   << L" bam=" << response.bamStatus
+                   << L" applockerOwnerModule='" << fixedWide(response.appLockerOwnerModule, KSWORD_ARK_SECURITY_AUDIT_NAME_CHARS)
+                   << L"' mssecfltOwnerModule='" << fixedWide(response.mssecfltOwnerModule, KSWORD_ARK_SECURITY_AUDIT_NAME_CHARS) << L"'\n";
+        return 0;
+    }
+
     // commandFileFamily implements file and file-monitor IOCTLs.
     // Inputs: argc/argv from wmain.
     // Processing: handles delete/query and monitor control/status/drain.
@@ -1633,6 +2800,43 @@ namespace
             if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_FILE_INFO, L"IOCTL_KSWORD_ARK_QUERY_FILE_INFO", request, response, io)) return 3;
             printFileInfoResponse(response, io.bytesReturned);
             return 0;
+        }
+        if (sub == L"fileobject")
+        {
+            std::wcout << L"alias: file fileobject -> file query-info\n";
+            KSWORD_ARK_QUERY_FILE_INFO_REQUEST request{};
+            KSWORD_ARK_QUERY_FILE_INFO_RESPONSE response{};
+            request.flags = getOptionU32(args, L"--flags", 0U);
+            const std::wstring& pathText = requireOptionText(args, L"--path");
+            request.pathLengthChars = boundedPathLength(pathText, KSWORD_ARK_FILE_INFO_PATH_MAX_CHARS);
+            copyWideToFixed(request.path, KSWORD_ARK_FILE_INFO_PATH_MAX_CHARS, pathText);
+            if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_FILE_INFO, L"IOCTL_KSWORD_ARK_QUERY_FILE_INFO", request, response, io)) return 3;
+            printFileInfoResponse(response, io.bytesReturned);
+            return 0;
+        }
+        if (sub == L"minifilter")
+        {
+            return queryMinifilterInventory(args);
+        }
+        if (sub == L"section")
+        {
+            return commandUnsupported(L"file section", L"use section query-file-mappings --path <path> for the existing read-only Section protocol");
+        }
+        if (sub == L"bitlocker")
+        {
+            return queryBitlockerAudit(args);
+        }
+        if (sub == L"storage")
+        {
+            return queryVolumeStackAudit(args);
+        }
+        if (sub == L"mountmgr")
+        {
+            return queryMountMgrAudit(args);
+        }
+        if (sub == L"filesystem")
+        {
+            return queryFilesystemIntegrityAudit(args);
         }
         if (sub == L"monitor-control")
         {
@@ -2137,6 +3341,108 @@ namespace
                        << L" estimatedAddressSpaceGapBytes=" << response.estimatedAddressSpaceGapBytes << L"\n";
             return 0;
         }
+        if (sub == L"cid")
+        {
+            KSWORD_ARK_ENUM_CID_TABLE_REQUEST request{};
+            request.version = KSWORD_ARK_KERNEL_OBJECT_PROTOCOL_VERSION;
+            request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_CID_ENUM_FLAG_INCLUDE_ALL);
+            request.maxEntries = getOptionU32(args, L"--max-entries", 4096U);
+            request.maxVisitCount = getOptionU32(args, L"--max-visits", 65536U);
+            request.startCid = getOptionU32(args, L"--start-cid", 0U);
+            request.endCid = getOptionU32(args, L"--end-cid", 0U);
+            std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+            const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_ENUM_CID_TABLE", IOCTL_KSWORD_ARK_ENUM_CID_TABLE, &request, sizeof(request), buffer, io);
+            if (rc != 0) return normalizeIoctlRc(L"kernel cid", io, rc);
+            constexpr std::size_t headerSize = sizeof(KSWORD_ARK_ENUM_CID_TABLE_RESPONSE) - sizeof(KSWORD_ARK_CID_TABLE_ENTRY);
+            const auto* response = reinterpret_cast<const KSWORD_ARK_ENUM_CID_TABLE_RESPONSE*>(buffer.data());
+            std::size_t available = 0U;
+            try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_CID_TABLE_ENTRY), L"kernel cid"); }
+            catch (...) { return 4; }
+            printResponseBanner(response->version, response->status, response->lastStatus, io.bytesReturned);
+            printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+            std::wcout << L"flags=0x" << std::hex << response->flags
+                       << L" pspCidTable=" << hex64(response->pspCidTableAddress)
+                       << L" dyn=0x" << response->dynDataCapabilityMask
+                       << std::dec << L" visited=" << response->visitedCount
+                       << L" maxVisitCount=" << response->maxVisitCount << L"\n";
+            const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
+            for (std::size_t i = 0; i < parsed; ++i)
+            {
+                const auto* entry = reinterpret_cast<const KSWORD_ARK_CID_TABLE_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+                std::wcout << L"  [" << i << L"] cid=" << entry->cidValue
+                           << L" index=" << entry->handleIndex
+                           << L" kind=" << entry->expectedObjectKind
+                           << L" lookup=" << entry->lookupStatus
+                           << L" flags=0x" << std::hex << entry->flags
+                           << L" object=" << hex64(entry->objectAddress)
+                           << L" refStatus=0x" << static_cast<unsigned long>(entry->referenceStatus)
+                           << std::dec << L"\n";
+            }
+            return 0;
+        }
+        if (sub == L"ipc")
+        {
+            KSWORD_ARK_QUERY_IPC_SUMMARY_REQUEST request{};
+            KSWORD_ARK_QUERY_IPC_SUMMARY_RESPONSE response{};
+            request.version = KSWORD_ARK_KERNEL_OBJECT_PROTOCOL_VERSION;
+            request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_IPC_QUERY_FLAG_INCLUDE_ALL);
+            request.processId = getOptionU32(args, L"--pid", 0U);
+            request.handleValue = getOptionU64(args, L"--handle", 0ULL);
+            request.maxEntries = getOptionU32(args, L"--max-entries", 128U);
+            if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_IPC_SUMMARY, L"IOCTL_KSWORD_ARK_QUERY_IPC_SUMMARY", request, response, io))
+            {
+                return normalizeIoctlRc(L"kernel ipc", io, 3);
+            }
+            printResponseBanner(response.version, response.status, response.lastStatus, io.bytesReturned);
+            std::wcout << L"size=" << response.size
+                       << L" fields=0x" << std::hex << response.fieldFlags
+                       << L" handle=" << hex64(response.handleValue)
+                       << L" alpcObject=" << hex64(response.alpcObjectAddress)
+                       << L" dyn=0x" << response.dynDataCapabilityMask
+                       << std::dec << L" pid=" << response.processId
+                       << L" alpcStatus=" << ipcSummaryStatusName(response.alpcStatus)
+                       << L"(" << response.alpcStatus << L")"
+                       << L" pipeStatus=" << ipcSummaryStatusName(response.namedPipeStatus)
+                       << L"(" << response.namedPipeStatus << L")"
+                       << L" mailslotStatus=" << ipcSummaryStatusName(response.mailslotStatus)
+                       << L"(" << response.mailslotStatus << L")"
+                       << L" type='" << fixedWide(response.alpcTypeName, KSWORD_ARK_KERNEL_OBJECT_TYPE_NAME_CHARS)
+                       << L"' detail='" << fixedWide(response.detail, KSWORD_ARK_KERNEL_OBJECT_DETAIL_CHARS) << L"'\n";
+            return 0;
+        }
+        if (sub == L"callbacks")
+        {
+            return queryCallbackInventory(args);
+        }
+        if (sub == L"hooks")
+        {
+            KSWORD_ARK_SCAN_KERNEL_HOOKS_REQUEST request{};
+            request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_KERNEL_SCAN_FLAG_INCLUDE_CLEAN | KSWORD_ARK_KERNEL_SCAN_FLAG_INCLUDE_INTERNAL);
+            request.maxEntries = getOptionU32(args, L"--max-entries", KSWORD_ARK_KERNEL_HOOK_DEFAULT_MAX_ENTRIES);
+            copyOptionalWideOption(args, L"--module", request.moduleName, KSWORD_ARK_KERNEL_HOOK_MODULE_CHARS);
+            std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+            const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_SCAN_INLINE_HOOKS", IOCTL_KSWORD_ARK_SCAN_INLINE_HOOKS, &request, sizeof(request), buffer, io);
+            if (rc != 0) return normalizeIoctlRc(L"kernel hooks", io, rc);
+            constexpr std::size_t headerSize = sizeof(KSWORD_ARK_SCAN_INLINE_HOOKS_RESPONSE) - sizeof(KSWORD_ARK_INLINE_HOOK_ENTRY);
+            const auto* response = reinterpret_cast<const KSWORD_ARK_SCAN_INLINE_HOOKS_RESPONSE*>(buffer.data());
+            std::size_t available = 0U;
+            try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_INLINE_HOOK_ENTRY), L"kernel hooks"); }
+            catch (...) { return 4; }
+            printResponseBanner(response->version, response->status, response->lastStatus, io.bytesReturned);
+            printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+            const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
+            for (std::size_t i = 0; i < parsed; ++i)
+            {
+                const auto* entry = reinterpret_cast<const KSWORD_ARK_INLINE_HOOK_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+                std::wcout << L"  [" << i << L"] status=" << entry->status
+                           << L" type=" << entry->hookType
+                           << L" function=" << hex64(entry->functionAddress)
+                           << L" target=" << hex64(entry->targetAddress)
+                           << L" module='" << fixedWide(entry->moduleName, KSWORD_ARK_KERNEL_HOOK_MODULE_CHARS)
+                           << L"' functionName='" << fixedAnsiWide(entry->functionName, sizeof(entry->functionName)) << L"'\n";
+            }
+            return 0;
+        }
 
         std::wcerr << L"error: unknown kernel subcommand '" << sub << L"'\n";
         return 1;
@@ -2172,6 +3478,50 @@ namespace
         dumpWideText(L"ruleTargetPattern", fixedWide(packet.ruleTargetPattern, KSWORD_ARK_CALLBACK_EVENT_MAX_PATTERN_CHARS));
         dumpWideText(L"groupName", fixedWide(packet.groupName, KSWORD_ARK_CALLBACK_EVENT_MAX_NAME_CHARS));
         dumpWideText(L"ruleName", fixedWide(packet.ruleName, KSWORD_ARK_CALLBACK_EVENT_MAX_NAME_CHARS));
+    }
+
+    // queryCallbackInventory prints read-only callback/hook/filter evidence rows.
+    // Inputs: parsed args for flags/max entries/visible limit.
+    // Processing: sends callback enum IOCTL; it never calls removal controls.
+    // Returns: CLI exit code.
+    int queryCallbackInventory(const NamedArgs& args)
+    {
+        KSWORD_ARK_ENUM_CALLBACKS_REQUEST request{};
+        request.size = sizeof(request);
+        request.version = KSWORD_ARK_CALLBACK_ENUM_PROTOCOL_VERSION;
+        request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_ENUM_CALLBACK_FLAG_INCLUDE_ALL);
+        request.maxEntries = getOptionU32(args, L"--max-entries", 512U);
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_ENUM_CALLBACKS", IOCTL_KSWORD_ARK_ENUM_CALLBACKS, &request, sizeof(request), buffer, io);
+        if (rc != 0) return normalizeIoctlRc(L"callback inventory", io, rc);
+        constexpr std::size_t headerSize = sizeof(KSWORD_ARK_ENUM_CALLBACKS_RESPONSE) - sizeof(KSWORD_ARK_CALLBACK_ENUM_ENTRY);
+        const auto* response = reinterpret_cast<const KSWORD_ARK_ENUM_CALLBACKS_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_CALLBACK_ENUM_ENTRY), L"callback enum"); }
+        catch (...) { return 4; }
+        printResponseBanner(response->version, response->flags, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
+        for (std::size_t i = 0; i < parsed; ++i)
+        {
+            const auto* entry = reinterpret_cast<const KSWORD_ARK_CALLBACK_ENUM_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
+            std::wcout << L"  [" << i << L"] class=" << entry->callbackClass
+                       << L" source=" << entry->source
+                       << L" status=" << entry->status
+                       << L" fields=0x" << std::hex << entry->fieldFlags
+                       << L" callback=" << hex64(entry->callbackAddress)
+                       << L" context=" << hex64(entry->contextAddress)
+                       << L" registration=" << hex64(entry->registrationAddress)
+                       << L" rawStorage=" << hex64(entry->rawStorageValue)
+                       << L" moduleBase=" << hex64(entry->moduleBase)
+                       << std::dec << L" operationMask=0x" << std::hex << entry->operationMask
+                       << L" objectTypeMask=0x" << entry->objectTypeMask
+                       << std::dec << L" name='" << fixedWide(entry->name, KSWORD_ARK_CALLBACK_ENUM_NAME_CHARS)
+                       << L"' altitude='" << fixedWide(entry->altitude, KSWORD_ARK_CALLBACK_ENUM_ALTITUDE_CHARS)
+                       << L"' detail='" << fixedWide(entry->detail, KSWORD_ARK_CALLBACK_ENUM_DETAIL_CHARS) << L"'\n";
+        }
+        return 0;
     }
 
     // commandCallbackFamily implements callback rule/control IOCTLs.
@@ -2344,38 +3694,7 @@ namespace
         }
         if (sub == L"enum")
         {
-            KSWORD_ARK_ENUM_CALLBACKS_REQUEST request{};
-            request.size = sizeof(request);
-            request.version = KSWORD_ARK_CALLBACK_ENUM_PROTOCOL_VERSION;
-            request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_ENUM_CALLBACK_FLAG_INCLUDE_ALL);
-            request.maxEntries = getOptionU32(args, L"--max-entries", 512U);
-            std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
-            const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_ENUM_CALLBACKS", IOCTL_KSWORD_ARK_ENUM_CALLBACKS, &request, sizeof(request), buffer, io);
-            if (rc != 0) return rc;
-            constexpr std::size_t headerSize = sizeof(KSWORD_ARK_ENUM_CALLBACKS_RESPONSE) - sizeof(KSWORD_ARK_CALLBACK_ENUM_ENTRY);
-            const auto* response = reinterpret_cast<const KSWORD_ARK_ENUM_CALLBACKS_RESPONSE*>(buffer.data());
-            std::size_t available = 0U;
-            try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_CALLBACK_ENUM_ENTRY), L"callback enum"); }
-            catch (...) { return 4; }
-            printResponseBanner(response->version, response->flags, response->lastStatus, io.bytesReturned);
-            printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
-            const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
-            for (std::size_t i = 0; i < parsed; ++i)
-            {
-                const auto* entry = reinterpret_cast<const KSWORD_ARK_CALLBACK_ENUM_ENTRY*>(buffer.data() + headerSize + (i * response->entrySize));
-                std::wcout << L"  [" << i << L"] class=" << entry->callbackClass
-                           << L" source=" << entry->source
-                           << L" status=" << entry->status
-                           << L" fields=0x" << std::hex << entry->fieldFlags
-                           << L" callback=" << hex64(entry->callbackAddress)
-                           << L" context=" << hex64(entry->contextAddress)
-                           << L" registration=" << hex64(entry->registrationAddress)
-                           << L" moduleBase=" << hex64(entry->moduleBase)
-                           << std::dec << L" name='" << fixedWide(entry->name, KSWORD_ARK_CALLBACK_ENUM_NAME_CHARS)
-                           << L"' altitude='" << fixedWide(entry->altitude, KSWORD_ARK_CALLBACK_ENUM_ALTITUDE_CHARS)
-                           << L"' detail='" << fixedWide(entry->detail, KSWORD_ARK_CALLBACK_ENUM_DETAIL_CHARS) << L"'\n";
-            }
-            return 0;
+            return queryCallbackInventory(args);
         }
         std::wcerr << L"error: unknown callback subcommand '" << sub << L"'\n";
         return 1;
@@ -2395,7 +3714,10 @@ namespace
         if (sub == L"status")
         {
             KSW_QUERY_DYN_STATUS_RESPONSE response{};
-            if (!sendFixedNoInput(IOCTL_KSWORD_ARK_QUERY_DYN_STATUS, L"IOCTL_KSWORD_ARK_QUERY_DYN_STATUS", response, io)) return 3;
+            if (!sendFixedNoInput(IOCTL_KSWORD_ARK_QUERY_DYN_STATUS, L"IOCTL_KSWORD_ARK_QUERY_DYN_STATUS", response, io))
+            {
+                return normalizeIoctlRc(L"dyn status", io, 3);
+            }
             printResponseBanner(response.version, response.statusFlags, response.lastStatus, io.bytesReturned);
             std::wcout << L"size=" << response.size
                        << L" systemInformerDataVersion=" << response.systemInformerDataVersion
@@ -2414,7 +3736,7 @@ namespace
         {
             std::vector<std::uint8_t> buffer(kSmallResponseBytes, 0U);
             const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_DYN_FIELDS", IOCTL_KSWORD_ARK_QUERY_DYN_FIELDS, nullptr, 0U, buffer, io);
-            if (rc != 0) return rc;
+            if (rc != 0) return normalizeIoctlRc(L"dyn fields", io, rc);
             constexpr std::size_t headerSize = sizeof(KSW_QUERY_DYN_FIELDS_RESPONSE) - sizeof(KSW_DYN_FIELD_ENTRY);
             const auto* response = reinterpret_cast<const KSW_QUERY_DYN_FIELDS_RESPONSE*>(buffer.data());
             std::size_t available = 0U;
@@ -2439,11 +3761,65 @@ namespace
         if (sub == L"capabilities")
         {
             KSW_QUERY_CAPABILITIES_RESPONSE response{};
-            if (!sendFixedNoInput(IOCTL_KSWORD_ARK_QUERY_CAPABILITIES, L"IOCTL_KSWORD_ARK_QUERY_CAPABILITIES", response, io)) return 3;
+            if (!sendFixedNoInput(IOCTL_KSWORD_ARK_QUERY_CAPABILITIES, L"IOCTL_KSWORD_ARK_QUERY_CAPABILITIES", response, io))
+            {
+                return normalizeIoctlRc(L"dyn capabilities", io, 3);
+            }
             printResponseBanner(response.version, response.statusFlags, 0, io.bytesReturned);
             std::wcout << L"size=" << response.size
                        << L" capabilityMask=0x" << std::hex << response.capabilityMask
                        << std::dec << L" reserved=" << response.reserved << L"\n";
+            return 0;
+        }
+        if (sub == L"profile" || sub == L"v4-modules")
+        {
+            return queryDynV4Modules(args);
+        }
+        if (sub == L"v4-capabilities" || sub == L"capability-groups")
+        {
+            return queryDynV4CapabilityGroups(args);
+        }
+        if (sub == L"v4-missing" || sub == L"missing-items")
+        {
+            return queryDynV4MissingItems(args);
+        }
+        if (sub == L"apply-profile-v4")
+        {
+            // apply-profile-v4 用途：
+            // - 输入：--blob 指向由 PDB extractor 后续生成的 KSW_APPLY_DYN_PROFILE_V4_REQUEST 原始包；
+            // - 处理：仅做 CLI 透传，不在用户态重复定义协议字段或猜测偏移；
+            // - 返回：打印驱动侧校验/应用摘要，旧驱动缺 IOCTL 时稳定返回 unsupported / unavailable。
+            const std::size_t maxBytes =
+                KSW_APPLY_DYN_PROFILE_V4_REQUEST_HEADER_SIZE +
+                (static_cast<std::size_t>(KSW_DYN_V4_MAX_ITEMS_PER_MODULE) * sizeof(KSW_DYN_V4_ITEM_PACKET));
+            std::vector<std::uint8_t> blob = readRequiredBlobOption(args, L"--blob", maxBytes);
+            KSW_APPLY_DYN_PROFILE_V4_RESPONSE response{};
+            if (!sendBlobFixedResponse(
+                    IOCTL_KSWORD_ARK_APPLY_DYN_PROFILE_V4,
+                    L"IOCTL_KSWORD_ARK_APPLY_DYN_PROFILE_V4",
+                    blob,
+                    response,
+                    io,
+                    GENERIC_READ))
+            {
+                if (isUnsupportedTransportError(io.win32Error))
+                {
+                    return commandUnsupported(L"dyn apply-profile-v4", L"driver does not expose IOCTL_KSWORD_ARK_APPLY_DYN_PROFILE_V4");
+                }
+                return 3;
+            }
+            printResponseBanner(response.version, static_cast<std::uint32_t>(response.status), response.status, io.bytesReturned);
+            std::wcout << L"size=" << response.size
+                       << L" statusFlags=0x" << std::hex << response.statusFlags
+                       << std::dec << L" appliedItemCount=" << response.appliedItemCount
+                       << L" rejectedItemCount=" << response.rejectedItemCount
+                       << L" required=" << response.presentRequiredItemCount << L"/" << response.requiredItemCount
+                       << L" optional=" << response.presentOptionalItemCount << L"/" << response.optionalItemCount
+                       << L" activeCapabilityGroupCount=" << response.activeCapabilityGroupCount
+                       << L" missingRequired=" << response.missingRequiredItemCount
+                       << L" missingOptional=" << response.missingOptionalItemCount << L"\n";
+            printV4ModuleIdentity(response.module);
+            dumpWideText(L"message", fixedWide(response.message, KSW_DYN_REASON_CHARS));
             return 0;
         }
         if (sub == L"apply-profile")
@@ -2576,7 +3952,7 @@ namespace
             request.maxNodes = getOptionU32(args, L"--max-nodes", KSWORD_ARK_CROSSVIEW_DEFAULT_MAX_NODES);
             std::vector<std::uint8_t> buffer(kHugeResponseBytes, 0U);
             const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_THREAD_CROSSVIEW", IOCTL_KSWORD_ARK_QUERY_THREAD_CROSSVIEW, &request, sizeof(request), buffer, io);
-            if (rc != 0) return rc;
+            if (rc != 0) return normalizeIoctlRc(L"thread crossview", io, rc);
             constexpr std::size_t headerSize = sizeof(KSWORD_ARK_THREAD_CROSSVIEW_RESPONSE) - sizeof(KSWORD_ARK_THREAD_CROSSVIEW_ROW);
             const auto* response = reinterpret_cast<const KSWORD_ARK_THREAD_CROSSVIEW_RESPONSE*>(buffer.data());
             std::size_t available = 0U;
@@ -2618,14 +3994,14 @@ namespace
         const std::wstring sub = argv[2];
         const NamedArgs args = parseNamedArgs(argc, argv, 3);
         IoctlResult io{};
-        if (sub == L"enum")
+        if (sub == L"enum" || sub == L"object-table")
         {
             KSWORD_ARK_ENUM_PROCESS_HANDLES_REQUEST request{};
             request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_ENUM_HANDLE_FLAG_INCLUDE_ALL);
             request.processId = requireOptionU32(args, L"--pid");
             std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
             const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_ENUM_PROCESS_HANDLES", IOCTL_KSWORD_ARK_ENUM_PROCESS_HANDLES, &request, sizeof(request), buffer, io);
-            if (rc != 0) return rc;
+            if (rc != 0) return normalizeIoctlRc(L"handle object table", io, rc);
             constexpr std::size_t headerSize = sizeof(KSWORD_ARK_ENUM_PROCESS_HANDLES_RESPONSE) - sizeof(KSWORD_ARK_HANDLE_ENTRY);
             const auto* response = reinterpret_cast<const KSWORD_ARK_ENUM_PROCESS_HANDLES_RESPONSE*>(buffer.data());
             std::size_t available = 0U;
@@ -2650,7 +4026,7 @@ namespace
             }
             return 0;
         }
-        if (sub == L"query-object")
+        if (sub == L"query-object" || sub == L"object-header" || sub == L"type-matrix")
         {
             KSWORD_ARK_QUERY_HANDLE_OBJECT_REQUEST request{};
             KSWORD_ARK_QUERY_HANDLE_OBJECT_RESPONSE response{};
@@ -2658,7 +4034,10 @@ namespace
             request.processId = requireOptionU32(args, L"--pid");
             request.handleValue = requireOptionU64(args, L"--handle");
             request.requestedAccess = getOptionU32(args, L"--access", 0U);
-            if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_HANDLE_OBJECT, L"IOCTL_KSWORD_ARK_QUERY_HANDLE_OBJECT", request, response, io)) return 3;
+            if (!sendFixedRequestResponse(IOCTL_KSWORD_ARK_QUERY_HANDLE_OBJECT, L"IOCTL_KSWORD_ARK_QUERY_HANDLE_OBJECT", request, response, io))
+            {
+                return normalizeIoctlRc(L"handle object details", io, 3);
+            }
             printResponseBanner(response.version, response.queryStatus, response.objectReferenceStatus, io.bytesReturned);
             std::wcout << L"size=" << response.size
                        << L" pid=" << response.processId
@@ -3257,7 +4636,10 @@ namespace
         if (sub == L"query-status")
         {
             KSWORD_ARK_NETWORK_STATUS_RESPONSE response{};
-            if (!sendFixedNoInput(IOCTL_KSWORD_ARK_NETWORK_QUERY_STATUS, L"IOCTL_KSWORD_ARK_NETWORK_QUERY_STATUS", response, io)) return 3;
+            if (!sendFixedNoInput(IOCTL_KSWORD_ARK_NETWORK_QUERY_STATUS, L"IOCTL_KSWORD_ARK_NETWORK_QUERY_STATUS", response, io))
+            {
+                return normalizeIoctlRc(L"network status", io, 3);
+            }
             printResponseBanner(response.version, response.status, response.registerStatus, io.bytesReturned);
             std::wcout << L"runtimeFlags=0x" << std::hex << response.runtimeFlags
                        << std::dec << L" ruleCount=" << response.ruleCount
@@ -3286,6 +4668,35 @@ namespace
                            << L" remotePort=" << rule.remotePort << L"\n";
             }
             return 0;
+        }
+        if (sub == L"audit")
+        {
+            std::wcout << L"network audit: querying TCP endpoint audit first; use wfp/ndis for chain-specific views\n";
+            return queryNetworkEndpoints(args, IOCTL_KSWORD_ARK_NETWORK_QUERY_TCP_ENDPOINTS, L"IOCTL_KSWORD_ARK_NETWORK_QUERY_TCP_ENDPOINTS", L"network audit");
+        }
+        if (sub == L"tcp")
+        {
+            return queryNetworkEndpoints(args, IOCTL_KSWORD_ARK_NETWORK_QUERY_TCP_ENDPOINTS, L"IOCTL_KSWORD_ARK_NETWORK_QUERY_TCP_ENDPOINTS", L"network tcp");
+        }
+        if (sub == L"udp")
+        {
+            return queryNetworkEndpoints(args, IOCTL_KSWORD_ARK_NETWORK_QUERY_UDP_ENDPOINTS, L"IOCTL_KSWORD_ARK_NETWORK_QUERY_UDP_ENDPOINTS", L"network udp");
+        }
+        if (sub == L"wfp")
+        {
+            return queryNetworkWfp(args);
+        }
+        if (sub == L"ndis")
+        {
+            return queryNetworkNdis(args);
+        }
+        if (sub == L"afd")
+        {
+            return commandNetworkAfdFallback(args);
+        }
+        if (sub == L"nsi")
+        {
+            return commandNetworkNsiFallback(args);
         }
         std::wcerr << L"error: unknown network subcommand '" << sub << L"'\n";
         return 1;
@@ -3386,6 +4797,294 @@ namespace
             return 0;
         }
         std::wcerr << L"error: unknown keyboard subcommand '" << sub << L"'\n";
+        return 1;
+    }
+
+    // queryDriverOptionalGlobalEvidence 作用：复用 Driver Integrity 的可选全局证据。
+    // 输入：CLI 参数、命令标签、detail 过滤关键字和展示名。
+    // 处理：只读查询 OPTIONAL_GLOBALS，不新增协议，不枚举/修改内核表内容。
+    // 返回：0 表示成功打印 R0 证据；5 表示旧驱动不支持或没有返回目标证据。
+    int queryDriverOptionalGlobalEvidence(
+        const NamedArgs& args,
+        const wchar_t* featureLabel,
+        const wchar_t* detailNeedle,
+        const wchar_t* displayName)
+    {
+        KSWORD_ARK_QUERY_DRIVER_INTEGRITY_REQUEST request{};
+        request.version = KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION;
+        request.flags =
+            getOptionU32(args, L"--flags", KSWORD_ARK_DRIVER_INTEGRITY_FLAG_OPTIONAL_GLOBALS) |
+            KSWORD_ARK_DRIVER_INTEGRITY_FLAG_OPTIONAL_GLOBALS;
+        request.maxRows = getOptionU32(args, L"--max-rows", 32U);
+        request.maxIdtVectorsPerCpu = getOptionU32(args, L"--max-idt-vectors", 0U);
+        request.maxDevices = getOptionU32(args, L"--max-devices", 0U);
+        request.maxAttachedDevices = getOptionU32(args, L"--max-attached", 0U);
+        request.targetModuleBase = getOptionU64(args, L"--module-base", 0ULL);
+
+        IoctlResult io{};
+        std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+        const int rc = sendRawIoctl(
+            L"IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY",
+            IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY,
+            &request,
+            sizeof(request),
+            buffer,
+            io);
+        if (rc != 0)
+        {
+            return normalizeIoctlRc(featureLabel, io, rc);
+        }
+
+        constexpr std::size_t headerSize =
+            sizeof(KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE) -
+            sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE);
+        const auto* response =
+            reinterpret_cast<const KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE*>(buffer.data());
+        std::size_t available = 0U;
+        try
+        {
+            available = validateVariable(
+                io.bytesReturned,
+                headerSize,
+                response->entrySize,
+                sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE),
+                featureLabel);
+        }
+        catch (...)
+        {
+            return 4;
+        }
+
+        printResponseBanner(response->version, response->queryStatus, response->lastStatus, io.bytesReturned);
+        printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+        std::wcout << L"projection=" << displayName
+                   << L" source=driver-integrity optional-globals"
+                   << L" fieldFlags=0x" << std::hex << response->fieldFlags
+                   << L" statusFlags=0x" << response->statusFlags
+                   << std::dec << L"\n";
+
+        const std::size_t limit = getOptionU32(args, L"--limit", 16U);
+        const std::size_t parsed = responseCountLimit(response->returnedCount, available, limit);
+        std::size_t matchedCount = 0U;
+        for (std::size_t index = 0U; index < parsed; ++index)
+        {
+            const auto* entry = reinterpret_cast<const KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE*>(
+                buffer.data() + headerSize + (index * response->entrySize));
+            const std::wstring detailText = fixedWide(entry->detail, KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS);
+            const bool optionalGlobalRow =
+                entry->evidenceClass == KSWORD_ARK_DRIVER_INTEGRITY_CLASS_OPTIONAL_GLOBAL;
+            if (!optionalGlobalRow || !containsIgnoreCase(detailText, detailNeedle))
+            {
+                continue;
+            }
+
+            ++matchedCount;
+            std::wcout << L"  [" << index << L"] class=" << entry->evidenceClass
+                       << L" statusFlags=0x" << std::hex << entry->statusFlags
+                       << L" risk=0x" << entry->riskFlags
+                       << L" fieldMask=0x" << entry->fieldMask
+                       << L" object=" << hex64(entry->objectAddress)
+                       << L" target=" << hex64(entry->targetAddress)
+                       << L" ownerBase=" << hex64(entry->ownerModuleBase)
+                       << std::dec << L" confidence=" << entry->confidence
+                       << L" owner='" << fixedWide(entry->ownerModule, KSWORD_ARK_DRIVER_INTEGRITY_OWNER_CHARS)
+                       << L"' detail='" << detailText << L"'\n";
+        }
+
+        if (matchedCount == 0U)
+        {
+            std::wcout << L"unsupported / unavailable: " << featureLabel
+                       << L" (Driver Integrity returned no matching optional-global evidence for "
+                       << displayName << L")\n";
+            return 5;
+        }
+        return 0;
+    }
+
+    // commandDriverFamily exposes driver audit aliases requested by PDB R0 work.
+    // Inputs: argc/argv from wmain.
+    // Processing: routes read-only aliases to existing kernel/storage queries.
+    // Returns: process exit code.
+    int commandDriverFamily(int argc, wchar_t* argv[])
+    {
+        if (argc < 3) { std::wcerr << L"error: driver requires a subcommand\n"; return 1; }
+        const std::wstring sub = argv[2];
+        const NamedArgs args = parseNamedArgs(argc, argv, 3);
+        if (sub == L"integrity")
+        {
+            KSWORD_ARK_QUERY_DRIVER_INTEGRITY_REQUEST request{};
+            request.version = KSWORD_ARK_DRIVER_INTEGRITY_PROTOCOL_VERSION;
+            request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_DRIVER_INTEGRITY_FLAG_DEFAULT);
+            request.maxRows = getOptionU32(args, L"--max-rows", KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_MAX_ROWS);
+            request.maxIdtVectorsPerCpu = getOptionU32(args, L"--max-idt-vectors", KSWORD_ARK_DRIVER_INTEGRITY_DEFAULT_IDT_VECTORS);
+            request.maxDevices = getOptionU32(args, L"--max-devices", KSWORD_ARK_DRIVER_DEVICE_LIMIT_DEFAULT);
+            request.maxAttachedDevices = getOptionU32(args, L"--max-attached", KSWORD_ARK_DRIVER_ATTACHED_LIMIT_DEFAULT);
+            request.targetModuleBase = getOptionU64(args, L"--module-base", 0ULL);
+            copyOptionalWideOption(args, L"--driver", request.driverName, KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS);
+            IoctlResult io{};
+            std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+            const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY", IOCTL_KSWORD_ARK_QUERY_DRIVER_INTEGRITY, &request, sizeof(request), buffer, io);
+            if (rc != 0) return normalizeIoctlRc(L"driver integrity", io, rc);
+            constexpr std::size_t headerSize = sizeof(KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE) - sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE);
+            const auto* response = reinterpret_cast<const KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE*>(buffer.data());
+            std::size_t available = 0U;
+            try { available = validateVariable(io.bytesReturned, headerSize, response->entrySize, sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE), L"driver integrity"); }
+            catch (...) { return 4; }
+            printResponseBanner(response->version, response->queryStatus, response->lastStatus, io.bytesReturned);
+            printCountHeader(response->version, response->totalCount, response->returnedCount, response->entrySize, io.bytesReturned);
+            std::wcout << L"fieldFlags=0x" << std::hex << response->fieldFlags
+                       << L" statusFlags=0x" << response->statusFlags
+                       << L" sourceMask=0x" << response->sourceMask
+                       << std::dec << L" cpuCount=" << response->cpuCount
+                       << L" moduleCount=" << response->moduleCount << L"\n";
+            const std::size_t parsed = responseCountLimit(response->returnedCount, available, getOptionU32(args, L"--limit", 128U));
+            for (std::size_t i = 0; i < parsed; ++i)
+            {
+                const auto* entry = reinterpret_cast<const KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE*>(buffer.data() + headerSize + (i * response->entrySize));
+                std::wcout << L"  [" << i << L"] class=" << entry->evidenceClass
+                           << L" risk=0x" << std::hex << entry->riskFlags
+                           << L" source=0x" << entry->sourceMask
+                           << L" object=" << hex64(entry->objectAddress)
+                           << L" target=" << hex64(entry->targetAddress)
+                           << L" ownerBase=" << hex64(entry->ownerModuleBase)
+                           << std::dec << L" confidence=" << entry->confidence
+                           << L" owner='" << fixedWide(entry->ownerModule, KSWORD_ARK_DRIVER_INTEGRITY_OWNER_CHARS)
+                           << L"' detail='" << fixedWide(entry->detail, KSWORD_ARK_DRIVER_INTEGRITY_DETAIL_CHARS) << L"'\n";
+            }
+            return 0;
+        }
+        if (sub == L"detail")
+        {
+            KSWORD_ARK_QUERY_DRIVER_OBJECT_REQUEST request{};
+            request.flags = getOptionU32(args, L"--flags", KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_ALL);
+            request.maxDevices = getOptionU32(args, L"--max-devices", KSWORD_ARK_DRIVER_DEVICE_LIMIT_DEFAULT);
+            request.maxAttachedDevices = getOptionU32(args, L"--max-attached", KSWORD_ARK_DRIVER_ATTACHED_LIMIT_DEFAULT);
+            copyRequiredWideOption(args, L"--driver", request.driverName, KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS);
+            IoctlResult io{};
+            std::vector<std::uint8_t> buffer(kLargeResponseBytes, 0U);
+            const int rc = sendRawIoctl(L"IOCTL_KSWORD_ARK_QUERY_DRIVER_OBJECT", IOCTL_KSWORD_ARK_QUERY_DRIVER_OBJECT, &request, sizeof(request), buffer, io);
+            if (rc != 0) return normalizeIoctlRc(L"driver detail", io, rc);
+            constexpr std::size_t headerSize = sizeof(KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE) - sizeof(KSWORD_ARK_DRIVER_DEVICE_ENTRY);
+            const auto* response = reinterpret_cast<const KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE*>(buffer.data());
+            std::size_t available = 0U;
+            try { available = validateVariable(io.bytesReturned, headerSize, response->deviceEntrySize, sizeof(KSWORD_ARK_DRIVER_DEVICE_ENTRY), L"driver detail"); }
+            catch (...) { return 4; }
+            printResponseBanner(response->version, response->queryStatus, response->lastStatus, io.bytesReturned);
+            printCountHeader(response->version, response->totalDeviceCount, response->returnedDeviceCount, response->deviceEntrySize, io.bytesReturned);
+            std::wcout << L"driverObject=" << hex64(response->driverObjectAddress)
+                       << L" driverStart=" << hex64(response->driverStart)
+                       << L" driverSection=" << hex64(response->driverSection)
+                       << L" driverUnload=" << hex64(response->driverUnload)
+                       << L" driver='" << fixedWide(response->driverName, KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS)
+                       << L"' service='" << fixedWide(response->serviceKeyName, KSWORD_ARK_DRIVER_SERVICE_KEY_CHARS) << L"'\n";
+            const std::size_t parsed = responseCountLimit(response->returnedDeviceCount, available, getOptionU32(args, L"--limit", 64U));
+            for (std::size_t i = 0; i < parsed; ++i)
+            {
+                const auto* device = reinterpret_cast<const KSWORD_ARK_DRIVER_DEVICE_ENTRY*>(buffer.data() + headerSize + (i * response->deviceEntrySize));
+                std::wcout << L"  device[" << i << L"] depth=" << device->relationDepth
+                           << L" object=" << hex64(device->deviceObjectAddress)
+                           << L" attached=" << hex64(device->attachedDeviceObjectAddress)
+                           << L" driver=" << hex64(device->driverObjectAddress)
+                           << L" name='" << fixedWide(device->deviceName, KSWORD_ARK_DRIVER_DEVICE_NAME_CHARS) << L"'\n";
+            }
+            return 0;
+        }
+        if (sub == L"device" || sub == L"major" || sub == L"fastio")
+        {
+            return queryDeviceAudit(args, IOCTL_KSWORD_ARK_QUERY_DEVICE_STACK_AUDIT, KSWORD_ARK_DEVICE_AUDIT_PROFILE_DEVICE_STACK, L"IOCTL_KSWORD_ARK_QUERY_DEVICE_STACK_AUDIT", L"driver device");
+        }
+        if (sub == L"unloaded")
+        {
+            return queryDriverOptionalGlobalEvidence(args, L"driver unloaded", L"MmUnloadedDrivers", L"MmUnloadedDrivers");
+        }
+        if (sub == L"piddb")
+        {
+            return queryDriverOptionalGlobalEvidence(args, L"driver piddb", L"PiDDBCacheTable", L"PiDDBCacheTable");
+        }
+        std::wcerr << L"error: unknown driver subcommand '" << sub << L"'\n";
+        return 1;
+    }
+
+    // commandHardwareFamily exposes input/USB/PnP/GPU device audit commands.
+    // Inputs: argc/argv from wmain.
+    // Processing: routes to read-only device audit IOCTLs where present.
+    // Returns: process exit code.
+    int commandHardwareFamily(int argc, wchar_t* argv[])
+    {
+        if (argc < 3) { std::wcerr << L"error: hardware requires a subcommand\n"; return 1; }
+        const std::wstring sub = argv[2];
+        const NamedArgs args = parseNamedArgs(argc, argv, 3);
+        if (sub == L"audit" || sub == L"pnp")
+        {
+            return queryDeviceAudit(args, IOCTL_KSWORD_ARK_QUERY_DEVICE_STACK_AUDIT, KSWORD_ARK_DEVICE_AUDIT_PROFILE_DEVICE_STACK, L"IOCTL_KSWORD_ARK_QUERY_DEVICE_STACK_AUDIT", L"hardware audit");
+        }
+        if (sub == L"input")
+        {
+            return queryDeviceAudit(args, IOCTL_KSWORD_ARK_QUERY_INPUT_STACK_AUDIT, KSWORD_ARK_DEVICE_AUDIT_PROFILE_INPUT_STACK, L"IOCTL_KSWORD_ARK_QUERY_INPUT_STACK_AUDIT", L"hardware input");
+        }
+        if (sub == L"usb")
+        {
+            return queryDeviceAudit(args, IOCTL_KSWORD_ARK_QUERY_USB_TOPOLOGY_AUDIT, KSWORD_ARK_DEVICE_AUDIT_PROFILE_USB_TOPOLOGY, L"IOCTL_KSWORD_ARK_QUERY_USB_TOPOLOGY_AUDIT", L"hardware usb");
+        }
+        std::wcerr << L"error: unknown hardware subcommand '" << sub << L"'\n";
+        return 1;
+    }
+
+    // commandWindowFamily exposes read-only win32k/GUI/GPU/display commands.
+    // Inputs: argc/argv from wmain.
+    // Processing: uses win32k and device-audit protocols; unsupported pieces report clearly.
+    // Returns: process exit code.
+    int commandWindowFamily(int argc, wchar_t* argv[])
+    {
+        if (argc < 3) { std::wcerr << L"error: window requires a subcommand\n"; return 1; }
+        const std::wstring sub = argv[2];
+        const NamedArgs args = parseNamedArgs(argc, argv, 3);
+        if (sub == L"win32k")
+        {
+            return queryWin32kProfileStatus(args);
+        }
+        if (sub == L"gui")
+        {
+            return queryWin32kWindows(args);
+        }
+        if (sub == L"gui-threads")
+        {
+            return queryWin32kGuiThreads(args);
+        }
+        if (sub == L"gpu" || sub == L"display" || sub == L"watchdog")
+        {
+            return queryDeviceAudit(args, IOCTL_KSWORD_ARK_QUERY_GPU_DISPLAY_WATCHDOG_AUDIT, KSWORD_ARK_DEVICE_AUDIT_PROFILE_GPU_DISPLAY_WATCHDOG, L"IOCTL_KSWORD_ARK_QUERY_GPU_DISPLAY_WATCHDOG_AUDIT", L"window gpu/display/watchdog");
+        }
+        std::wcerr << L"error: unknown window subcommand '" << sub << L"'\n";
+        return 1;
+    }
+
+    // commandMiscFamily exposes security/CI/VBS/Hyper-V/AppLocker/BAM posture.
+    // Inputs: argc/argv from wmain.
+    // Processing: routes to fixed read-only security audit queries.
+    // Returns: process exit code.
+    int commandMiscFamily(int argc, wchar_t* argv[])
+    {
+        if (argc < 3) { std::wcerr << L"error: misc requires a subcommand\n"; return 1; }
+        const std::wstring sub = argv[2];
+        const NamedArgs args = parseNamedArgs(argc, argv, 3);
+        if (sub == L"security" || sub == L"ci" || sub == L"vbs")
+        {
+            return querySecurityStatus(args);
+        }
+        if (sub == L"hyperv")
+        {
+            return queryHypervSummary(args);
+        }
+        if (sub == L"applocker" || sub == L"bam")
+        {
+            return queryAppControlStatus(args);
+        }
+        if (sub == L"driver-trust")
+        {
+            return queryDriverTrustView(args);
+        }
+        std::wcerr << L"error: unknown misc subcommand '" << sub << L"'\n";
         return 1;
     }
 
@@ -3537,6 +5236,10 @@ namespace
         if (family == L"dyn") return commandDynFamily(argc, argv);
         if (family == L"thread") return commandThreadFamily(argc, argv);
         if (family == L"handle") return commandHandleFamily(argc, argv);
+        if (family == L"driver") return commandDriverFamily(argc, argv);
+        if (family == L"hardware") return commandHardwareFamily(argc, argv);
+        if (family == L"window") return commandWindowFamily(argc, argv);
+        if (family == L"misc") return commandMiscFamily(argc, argv);
         if (family == L"alpc") return commandAlpcFamily(argc, argv);
         if (family == L"section") return commandSectionFamily(argc, argv);
         if (family == L"trust") return commandTrustFamily(argc, argv);

@@ -37,6 +37,10 @@ std::wstring ToDisplayName(const KernelFeatureId id) {
     case KernelFeatureId::KeyboardHooks: return L"键盘钩子枚举";
     case KernelFeatureId::DynDataCapabilities: return L"DynData 能力";
     case KernelFeatureId::MinifilterBypassPids: return L"Minifilter 放行 PID";
+    case KernelFeatureId::PdbProfileStatus: return L"PDB Profile 状态";
+    case KernelFeatureId::CidTableSummary: return L"CID 表摘要";
+    case KernelFeatureId::IpcSummary: return L"IPC 汇总";
+    case KernelFeatureId::HookAuditSummary: return L"Hook 审计摘要";
     default: return L"未知内核功能";
     }
 }

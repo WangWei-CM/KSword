@@ -8,6 +8,68 @@ using namespace ksword::memory_dock_internal;
 // 作用：承载信号槽连接与状态栏/定时器初始化代码。
 // ============================================================
 
+namespace
+{
+    // memoryTableRowText 作用：
+    // - 输入：MemoryDock 中的普通表格和目标行号；
+    // - 处理：按当前列顺序读取文本并使用 TSV 拼接；
+    // - 返回：可直接写入剪贴板的整行文本。
+    QString memoryTableRowText(QTableWidget* table, const int rowIndex)
+    {
+        if (table == nullptr || rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return QString();
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+            fields.push_back(item != nullptr ? item->text() : QString());
+        }
+        return fields.join(QLatin1Char('\t'));
+    }
+
+    // copyMemoryTableRow 作用：
+    // - 输入：MemoryDock 表格和目标行号；
+    // - 处理：复制当前行全部列，包含隐藏列，便于审计时保留 PID/会话等上下文；
+    // - 返回：无，剪贴板不可用或行无效时静默返回。
+    void copyMemoryTableRow(QTableWidget* table, const int rowIndex)
+    {
+        if (table == nullptr || QApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        const QString rowText = memoryTableRowText(table, rowIndex);
+        if (!rowText.isEmpty())
+        {
+            QApplication::clipboard()->setText(rowText);
+        }
+    }
+
+    // copyMemoryTreeRow 作用：
+    // - 输入：模块树和当前节点；
+    // - 处理：复制当前节点所有列，保持和模块表可见字段一致；
+    // - 返回：无，剪贴板不可用或节点为空时直接返回。
+    void copyMemoryTreeRow(QTreeWidget* tree, QTreeWidgetItem* item)
+    {
+        if (tree == nullptr || item == nullptr || QApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        QStringList fields;
+        fields.reserve(tree->columnCount());
+        for (int columnIndex = 0; columnIndex < tree->columnCount(); ++columnIndex)
+        {
+            fields.push_back(item->text(columnIndex));
+        }
+        QApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
+    }
+}
+
 void MemoryDock::initializeConnections()
 {
     // 信号槽连接日志：用于确认所有交互通道都已挂接。
@@ -72,6 +134,16 @@ void MemoryDock::initializeConnections()
         if (tabIndex == 7)
         {
             refreshKernelMemoryEvidenceAsync();
+            return;
+        }
+        if (tabIndex == 8)
+        {
+            refreshProcessPteTranslateAsync();
+            return;
+        }
+        if (tabIndex == 9)
+        {
+            refreshProcessMemoryEvidenceAsync();
         }
         });
 
@@ -374,7 +446,9 @@ void MemoryDock::initializeConnections()
         const QString baseText = formatAddress(baseAddress);
 
         QMenu menu(this);
+        menu.setStyleSheet(KswordTheme::ContextMenuStyle());
         QAction* copyBaseAction = menu.addAction("复制基址");
+        QAction* copyRowAction = menu.addAction("复制当前行");
         QAction* jumpViewerAction = menu.addAction("跳转到内存查看器");
         QAction* selectedAction = menu.exec(m_moduleTable->viewport()->mapToGlobal(localPosition));
         if (selectedAction == nullptr)
@@ -388,6 +462,16 @@ void MemoryDock::initializeConnections()
             kLogEvent copyBaseEvent;
             dbg << copyBaseEvent
                 << "[MemoryDock] 模块表右键复制基址, text="
+                << baseText.toStdString()
+                << eol;
+            return;
+        }
+        if (selectedAction == copyRowAction)
+        {
+            copyMemoryTreeRow(m_moduleTable, clickedItem);
+            kLogEvent copyRowEvent;
+            dbg << copyRowEvent
+                << "[MemoryDock] 模块表右键复制当前行, base="
                 << baseText.toStdString()
                 << eol;
             return;
@@ -456,10 +540,14 @@ void MemoryDock::initializeConnections()
             ? m_regionTable->item(row, 0)->text()
             : QString();
 
+        m_regionTable->setCurrentCell(row, clickedItem->column());
+
         QMenu menu(this);
+        menu.setStyleSheet(KswordTheme::ContextMenuStyle());
         QAction* viewAction = menu.addAction("查看此区域");
         QAction* r0ReadAction = menu.addAction("R0读取此区域");
         QAction* copyAction = menu.addAction("复制基址");
+        QAction* copyRowAction = menu.addAction("复制当前行");
         QAction* searchAction = menu.addAction("搜索此区域");
         QAction* selectedAction = menu.exec(m_regionTable->viewport()->mapToGlobal(localPosition));
         if (selectedAction == nullptr)
@@ -474,6 +562,16 @@ void MemoryDock::initializeConnections()
             dbg << regionCopyEvent
                 << "[MemoryDock] 区域表右键复制基址, text="
                 << baseText.toStdString()
+                << eol;
+            return;
+        }
+        if (selectedAction == copyRowAction)
+        {
+            copyMemoryTableRow(m_regionTable, row);
+            kLogEvent regionCopyRowEvent;
+            dbg << regionCopyRowEvent
+                << "[MemoryDock] 区域表右键复制当前行, row="
+                << row
                 << eol;
             return;
         }
@@ -645,11 +743,15 @@ void MemoryDock::initializeConnections()
             return;
         }
 
+        m_searchResultTable->setCurrentCell(row, clickedItem->column());
+
         QMenu menu(this);
+        menu.setStyleSheet(KswordTheme::ContextMenuStyle());
         QAction* viewAction = menu.addAction("查看此地址");
         QAction* addBookmarkAction = menu.addAction("添加到书签");
         QAction* copyAddressAction = menu.addAction("复制地址");
         QAction* copyValueAction = menu.addAction("复制值");
+        QAction* copyRowAction = menu.addAction("复制当前行");
         QAction* selectedAction = menu.exec(m_searchResultTable->viewport()->mapToGlobal(localPosition));
         if (selectedAction == nullptr)
         {
@@ -695,6 +797,16 @@ void MemoryDock::initializeConnections()
             kLogEvent resultCopyValueEvent;
             dbg << resultCopyValueEvent
                 << "[MemoryDock] 搜索结果右键复制值, row="
+                << row
+                << eol;
+            return;
+        }
+        if (selectedAction == copyRowAction)
+        {
+            copyMemoryTableRow(m_searchResultTable, row);
+            kLogEvent resultCopyRowEvent;
+            dbg << resultCopyRowEvent
+                << "[MemoryDock] 搜索结果右键复制当前行, row="
                 << row
                 << eol;
         }
@@ -766,6 +878,7 @@ void MemoryDock::initializeConnections()
                 return;
             }
 
+            menu->setStyleSheet(KswordTheme::ContextMenuStyle());
             menu->addSeparator();
             QAction* addBookmarkAction = menu->addAction("添加书签");
             QAction* addBreakpointAction = menu->addAction("添加断点");
@@ -1115,6 +1228,83 @@ void MemoryDock::initializeConnections()
 
     connect(m_kernelMemoryEvidenceTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showKernelMemoryEvidenceDetailByCurrentRow();
+        });
+
+    // ========================================================
+    // Tab9：PTE / VA 翻译
+    // ========================================================
+
+    connect(m_processPteTranslateRefreshButton, &QPushButton::clicked, this, [this]() {
+        kLogEvent refreshPteTranslateEvent;
+        info << refreshPteTranslateEvent
+            << "[MemoryDock] PTE / VA 翻译点击刷新。"
+            << eol;
+        refreshProcessPteTranslateAsync();
+        });
+
+    connect(m_processPteTranslateRiskOnlyCheck, &QCheckBox::toggled, this, [this]() {
+        rebuildProcessPteTranslateTable();
+        showProcessPteTranslateDetailByCurrentRow();
+        });
+
+    connect(m_processPteTranslateAddressEdit, &QLineEdit::textChanged, this, [this]() {
+        rebuildProcessPteTranslateTable();
+        showProcessPteTranslateDetailByCurrentRow();
+        });
+
+    connect(m_processPteTranslatePageCountSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) {
+        rebuildProcessPteTranslateTable();
+        showProcessPteTranslateDetailByCurrentRow();
+        });
+
+    connect(m_processPteTranslateTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+        showProcessPteTranslateDetailByCurrentRow();
+        });
+
+    // ========================================================
+    // Tab10：进程内存证据
+    // ========================================================
+
+    connect(m_processMemoryEvidenceRefreshButton, &QPushButton::clicked, this, [this]() {
+        kLogEvent refreshProcessMemoryEvidenceEvent;
+        info << refreshProcessMemoryEvidenceEvent
+            << "[MemoryDock] 进程内存证据点击刷新。"
+            << eol;
+        refreshProcessMemoryEvidenceAsync();
+        });
+
+    connect(m_processMemoryEvidenceRiskOnlyCheck, &QCheckBox::toggled, this, [this]() {
+        rebuildProcessMemoryEvidenceTable();
+        showProcessMemoryEvidenceDetailByCurrentRow();
+        });
+
+    connect(m_processMemoryEvidenceImageOnlyCheck, &QCheckBox::toggled, this, [this]() {
+        rebuildProcessMemoryEvidenceTable();
+        showProcessMemoryEvidenceDetailByCurrentRow();
+        });
+
+    connect(m_processMemoryEvidenceStartEdit, &QLineEdit::textChanged, this, [this]() {
+        rebuildProcessMemoryEvidenceTable();
+        showProcessMemoryEvidenceDetailByCurrentRow();
+        });
+
+    connect(m_processMemoryEvidenceEndEdit, &QLineEdit::textChanged, this, [this]() {
+        rebuildProcessMemoryEvidenceTable();
+        showProcessMemoryEvidenceDetailByCurrentRow();
+        });
+
+    connect(m_processMemoryEvidenceFilterEdit, &QLineEdit::textChanged, this, [this]() {
+        rebuildProcessMemoryEvidenceTable();
+        showProcessMemoryEvidenceDetailByCurrentRow();
+        });
+
+    connect(m_processMemoryEvidenceMaxRowsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) {
+        rebuildProcessMemoryEvidenceTable();
+        showProcessMemoryEvidenceDetailByCurrentRow();
+        });
+
+    connect(m_processMemoryEvidenceTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+        showProcessMemoryEvidenceDetailByCurrentRow();
         });
 }
 

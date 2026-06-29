@@ -1,4 +1,5 @@
 #include "ProcessTraceMonitorWidget.h"
+#include "../theme.h"
 
 // ============================================================
 // ProcessTraceMonitorWidget.Export.cpp
@@ -97,6 +98,7 @@ void ProcessTraceMonitorWidget::showEventContextMenu(const QPoint& position)
     const int column = index.column();
 
     QMenu menu(this);
+    menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* viewDetailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("查看返回详情"));
     menu.addSeparator();
     QAction* copyDetailAction = menu.addAction(QIcon(":/Icon/log_copy.svg"), QStringLiteral("复制返回详情文本"));

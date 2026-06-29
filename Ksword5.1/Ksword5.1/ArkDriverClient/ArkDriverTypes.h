@@ -25,6 +25,13 @@
 #include "../../../shared/driver/KswordArkAlpcIoctl.h"
 #include "../../../shared/driver/KswordArkSectionIoctl.h"
 #include "../../../shared/driver/KswordArkRegistryIoctl.h"
+#include "../../../shared/driver/KswordArkNetworkIoctl.h"
+#include "../../../shared/driver/KswordArkStorageIoctl.h"
+#include "../../../shared/driver/KswordArkSecurityAuditIoctl.h"
+#include "../../../shared/driver/KswordArkWin32kIoctl.h"
+#include "../../../shared/driver/KswordArkDeviceAuditIoctl.h"
+#include "../../../shared/driver/KswordArkFilterIoctl.h"
+#include "../../../shared/driver/KswordArkKernelObjectIoctl.h"
 
 namespace ksword::ark
 {
@@ -670,6 +677,18 @@ namespace ksword::ark
         std::uint32_t hteLowValue = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
         std::uint32_t pspCidTableRva = KSWORD_ARK_PROCESS_OFFSET_UNAVAILABLE;
         std::uint64_t pspCidTableAddress = 0;
+        std::uint32_t epUniqueProcessIdSource = 0;
+        std::uint32_t epActiveProcessLinksSource = 0;
+        std::uint32_t epThreadListHeadSource = 0;
+        std::uint32_t epImageFileNameSource = 0;
+        std::uint32_t etCidSource = 0;
+        std::uint32_t etThreadListEntrySource = 0;
+        std::uint32_t etStartAddressSource = 0;
+        std::uint32_t etWin32StartAddressSource = 0;
+        std::uint32_t ktProcessSource = 0;
+        std::uint32_t htTableCodeSource = 0;
+        std::uint32_t hteLowValueSource = 0;
+        std::uint32_t pspCidTableSource = 0;
     };
 
     // ProcessCrossViewEntry is one EPROCESS cross-view evidence row.
@@ -689,6 +708,14 @@ namespace ksword::ark
         CrossViewFieldOffsets fieldOffsets;
         long lastStatus = 0;
         std::uint32_t confidence = 0;
+        std::uint32_t publicProcessId = 0;
+        std::uint32_t activeListProcessId = 0;
+        std::uint32_t cidTableProcessId = 0;
+        long publicWalkStatus = 0;
+        long activeListStatus = 0;
+        long cidTableStatus = 0;
+        std::uint32_t detailStatus = 0;
+        std::uint32_t denoiseFlags = 0;
         std::string imageName;
         std::string detail;
     };
@@ -712,6 +739,70 @@ namespace ksword::ark
         std::vector<ProcessCrossViewEntry> entries;
     };
 
+    // ProcessRuntimeDetailResult 承载单进程 PDB/DynData 运行时详情。
+    // 输入：queryProcessRuntimeDetail 返回。
+    // 处理：response 直接保存 shared\driver 固定响应，避免 UI 重新定义偏移字段。
+    // 返回行为：只读展示 EPROCESS 字段，不修改进程对象。
+    struct ProcessRuntimeDetailResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        KSWORD_ARK_PROCESS_DETAIL_RESPONSE response{};
+    };
+
+    // RuntimeFieldSampleRequestItem 是 deep PDB runtime catalog 到 R0 sampler 的一项请求。
+    // 输入：runtimeItemId/offset/size 来自 profiles\pdb_deep_offsets JSON。
+    // 处理：R0 会按对象基址 + offset 安全读取最多 16 字节。
+    // 返回行为：该结构只作为 R3 请求模型，不保存对象地址。
+    struct RuntimeFieldSampleRequestItem
+    {
+        std::uint32_t runtimeItemId = 0;
+        std::uint32_t offset = 0;
+        std::uint32_t size = 0;
+        std::uint32_t flags = 0;
+        std::string name;
+        std::string type;
+    };
+
+    // RuntimeFieldSampleEntry 是 R0 返回的一项小字段采样结果。
+    // 输入：queryProcessRuntimeFieldSamples/queryThreadRuntimeFieldSamples 返回。
+    // 处理：sampleBytes 保留原始字节，valueU64 仅用于 <=8 字节字段的摘要展示。
+    // 返回行为：只读证据行，不可作为写入或 patch 凭据。
+    struct RuntimeFieldSampleEntry
+    {
+        std::uint32_t runtimeItemId = 0;
+        std::uint32_t offset = 0;
+        std::uint32_t size = 0;
+        std::uint32_t status = KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_UNKNOWN;
+        std::uint32_t bytesRead = 0;
+        std::uint32_t flags = 0;
+        long lastStatus = 0;
+        std::uint64_t valueU64 = 0;
+        std::vector<std::uint8_t> sampleBytes;
+        std::string name;
+        std::string type;
+    };
+
+    // RuntimeFieldSampleResult 承载 process/thread 通用 deep PDB 字段采样响应。
+    // 输入：ArkDriverClient 对 0x83E/0x83F 只读 IOCTL 的解析结果。
+    // 处理：objectAddress 只用于显示 R0 实际 lookup 到的对象，不回喂任何写操作。
+    // 返回行为：unsupported=true 表示旧驱动缺少 sampler IOCTL。
+    struct RuntimeFieldSampleResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        std::uint32_t version = 0;
+        std::uint32_t status = KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_UNKNOWN;
+        std::uint32_t totalCount = 0;
+        std::uint32_t returnedCount = 0;
+        std::uint32_t entrySize = 0;
+        std::uint32_t flags = 0;
+        long lastStatus = 0;
+        std::uint64_t objectAddress = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
+        std::vector<RuntimeFieldSampleEntry> entries;
+    };
+
     // ThreadCrossViewEntry is one ETHREAD/KTHREAD cross-view evidence row.
     // Input: copied from KSWORD_ARK_THREAD_CROSSVIEW_ROW.
     // Processing: target addresses are diagnostic-only and never used as operation credentials.
@@ -729,6 +820,18 @@ namespace ksword::ark
         CrossViewFieldOffsets fieldOffsets;
         long lastStatus = 0;
         std::uint32_t confidence = 0;
+        std::uint32_t publicThreadId = 0;
+        std::uint32_t threadListThreadId = 0;
+        std::uint32_t cidTableThreadId = 0;
+        std::uint32_t publicProcessId = 0;
+        std::uint32_t threadListProcessId = 0;
+        std::uint32_t cidTableProcessId = 0;
+        long publicWalkStatus = 0;
+        long threadListStatus = 0;
+        long cidTableStatus = 0;
+        long startAddressStatus = 0;
+        std::uint32_t detailStatus = 0;
+        std::uint32_t denoiseFlags = 0;
         std::string imageName;
         std::string detail;
     };
@@ -752,6 +855,17 @@ namespace ksword::ark
         std::vector<ThreadCrossViewEntry> entries;
     };
 
+    // ThreadRuntimeDetailResult 承载单线程 PDB/DynData 运行时详情。
+    // 输入：queryThreadRuntimeDetail 返回。
+    // 处理：response 保存 ETHREAD/KTHREAD Cid、链表、栈和 I/O counter 字段。
+    // 返回行为：只读展示线程对象，不挂起、不终止、不改链表。
+    struct ThreadRuntimeDetailResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        KSWORD_ARK_THREAD_DETAIL_RESPONSE response{};
+    };
+
     // DriverIntegrityEvidenceEntry is one driver/kernel integrity evidence row.
     // Input: copied from KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE.
     // Processing: evidenceClass groups DriverObject, LDR, FastIo, MajorFunction, CPU,
@@ -772,6 +886,27 @@ namespace ksword::ark
         std::uint64_t ownerModuleBase = 0;
         std::wstring ownerModule;
         std::wstring detail;
+        std::uint32_t entryStatus = 0;              // entryStatus：v2 单行状态，老驱动返回 0。
+        std::uint32_t statusFlags = 0;              // statusFlags：partial/unsupported/PDB required 等位。
+        std::uint32_t fieldMask = 0;                // fieldMask：本行实际填充的 typed 字段位。
+        std::uint32_t riskScore = 0;                // riskScore：R0 汇总风险分，0-100。
+        std::uint32_t rangeState = 0;               // rangeState：目标地址相对所属驱动镜像的位置。
+        std::uint32_t ordinal = 0;                  // ordinal：IRP major/FastIo/attached depth 等序号。
+        std::uint32_t deviceType = 0;               // deviceType：DeviceObject 类型字段。
+        std::uint32_t deviceFlags = 0;              // deviceFlags：DeviceObject flags。
+        std::uint64_t driverObjectAddress = 0;      // driverObjectAddress：关联 DriverObject。
+        std::uint64_t driverStart = 0;              // driverStart：DriverObject.DriverStart。
+        std::uint64_t driverSize = 0;               // driverSize：DriverObject.DriverSize。
+        std::uint64_t driverSection = 0;            // driverSection：DriverObject.DriverSection。
+        std::uint64_t driverUnload = 0;             // driverUnload：DriverObject.DriverUnload。
+        std::uint64_t deviceObjectAddress = 0;      // deviceObjectAddress：DeviceObject 地址。
+        std::uint64_t nextDeviceObjectAddress = 0;  // nextDeviceObjectAddress：NextDevice。
+        std::uint64_t attachedDeviceObjectAddress = 0; // attachedDeviceObjectAddress：AttachedDevice。
+        std::uint64_t deviceDriverObjectAddress = 0; // deviceDriverObjectAddress：DeviceObject.DriverObject。
+        std::uint64_t kldrEntryAddress = 0;         // kldrEntryAddress：KLDR_DATA_TABLE_ENTRY 地址。
+        std::uint64_t kldrListHeadAddress = 0;      // kldrListHeadAddress：PsLoadedModuleList 链表头。
+        std::uint64_t kldrDllBase = 0;              // kldrDllBase：KLDR.DllBase。
+        std::uint32_t kldrSizeOfImage = 0;          // kldrSizeOfImage：KLDR.SizeOfImage。
     };
 
     // DriverIntegrityResult carries DriverObject/LDR/CPU integrity evidence.
@@ -786,6 +921,8 @@ namespace ksword::ark
         std::uint32_t queryStatus = KSWORD_ARK_DRIVER_INTEGRITY_STATUS_UNAVAILABLE;
         std::uint32_t flags = 0;
         std::uint32_t sourceMask = 0;
+        std::uint32_t fieldFlags = 0;        // fieldFlags：R0 汇总本次响应实际填充的 evidence 字段位。
+        std::uint32_t statusFlags = 0;       // statusFlags：R0 汇总 partial/unsupported/truncated/PDB-required 状态位。
         std::uint32_t totalCount = 0;
         std::uint32_t returnedCount = 0;
         std::uint32_t cpuCount = 0;
@@ -1449,6 +1586,353 @@ namespace ksword::ark
         std::string lastErrorSource;
         std::string lastErrorSummary;
         std::vector<DriverFeatureCapabilityEntry> entries;
+    };
+
+
+    // VariableAuditResultBase 保存所有新增只读审计 wrapper 共用的 IO 状态。
+    // 输入：由 ArkDriverAudit.cpp 在解析 METHOD_BUFFERED 响应时填充。
+    // 处理：unsupported 用于区分旧驱动未注册 IOCTL 与协议解析失败。
+    // 返回行为：结构体本身无函数返回；调用方读取字段展示 R0 审计状态。
+    struct VariableAuditResultBase
+    {
+        IoResult io;                         // io：底层 DeviceIoControl 与协议解析结果。
+        bool unsupported = false;            // unsupported：旧驱动缺少该 IOCTL 或明确返回不支持。
+        std::uint32_t version = 0;           // version：共享协议版本。
+        std::uint32_t status = 0;            // status：协议定义的总体状态。
+        std::uint32_t flags = 0;             // flags：响应级标志或查询标志。
+        std::uint32_t totalCount = 0;        // totalCount：R0 观察到的总行数。
+        std::uint32_t returnedCount = 0;     // returnedCount：R0 写入输出缓冲的行数。
+        std::uint32_t entrySize = 0;         // entrySize：单行协议结构大小。
+        long lastStatus = 0;                 // lastStatus：R0 最近一次 NTSTATUS。
+    };
+
+    // NetworkEndpointAuditResult 承载 TCP/UDP endpoint 的 PDB/R0 只读审计结果。
+    // 输入：queryNetworkTcpEndpoints/queryNetworkUdpEndpoints 返回。
+    // 处理：entries 直接保存 shared/driver 协议行，避免 UI 重新定义字段。
+    // 返回行为：io.ok 表示传输和协议解析成功，unsupported 表示旧驱动缺入口。
+    struct NetworkEndpointAuditResult : VariableAuditResultBase
+    {
+        std::uint32_t sourceFlags = 0;        // sourceFlags：tcpip/netio/runtime 等证据来源。
+        std::uint32_t budgetRows = 0;         // budgetRows：R0 实际接受的行预算。
+        std::uint32_t generation = 0;         // generation：R0 快照代数。
+        std::vector<KSWORD_ARK_NETWORK_ENDPOINT_ROW> entries;
+    };
+
+    // NetworkWfpInventoryResult 承载 WFP provider/sublayer/filter/callout 只读审计结果。
+    // 输入：queryNetworkWfpInventory 返回。
+    // 处理：每行包含对象类型、GUID、函数地址和 owner module 提示。
+    // 返回行为：不包含任何禁用、detach 或删除动作。
+    struct NetworkWfpInventoryResult : VariableAuditResultBase
+    {
+        std::uint32_t sourceFlags = 0;
+        std::uint32_t budgetRows = 0;
+        std::uint32_t generation = 0;
+        std::vector<KSWORD_ARK_NETWORK_WFP_INVENTORY_ROW> entries;
+    };
+
+    // NetworkNdisChainResult 承载 NDIS miniport/filter/protocol/binding 链只读审计结果。
+    // 输入：queryNetworkNdisChain 返回。
+    // 处理：每行保留对象地址、父对象、驱动对象和 owner module 诊断字段。
+    // 返回行为：不执行 NDIS detach、pause、restart 或 filter 操作。
+    struct NetworkNdisChainResult : VariableAuditResultBase
+    {
+        std::uint32_t sourceFlags = 0;
+        std::uint32_t budgetRows = 0;
+        std::uint32_t generation = 0;
+        std::vector<KSWORD_ARK_NETWORK_NDIS_CHAIN_ROW> entries;
+    };
+
+    // MinifilterInventoryResult 承载 fltMgr 过滤器与实例绑定清单。
+    // 输入：queryMinifilterInventory 返回。
+    // 处理：entries 保存 filter/altitude/volume/callback-owner 状态。
+    // 返回行为：仅用于展示，不卸载、不 detach、不改 callback。
+    struct MinifilterInventoryResult : VariableAuditResultBase
+    {
+        std::uint32_t responseFlags = 0;
+        std::vector<KSWORD_ARK_MINIFILTER_INVENTORY_ENTRY> entries;
+    };
+
+    // StorageVolumeStackAuditResult 承载卷设备栈和 fvevol 位置审计结果。
+    // 输入：queryVolumeStackAudit 返回。
+    // 处理：rows 保存设备对象、驱动对象、栈深度、风险和置信度。
+    // 返回行为：不返回 BitLocker 密钥材料，也不改变存储栈。
+    struct StorageVolumeStackAuditResult : VariableAuditResultBase
+    {
+        std::uint32_t responseFlags = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t maxRows = 0;
+        std::uint32_t fvevolPresent = 0;
+        std::uint32_t fvevolPosition = 0xFFFFFFFFUL;
+        std::vector<KSWORD_ARK_VOLUME_STACK_ROW> rows;
+    };
+
+    // StorageBitlockerFveAuditResult 承载 BitLocker/FVE 安全状态摘要。
+    // 输入：queryBitlockerFveAudit 返回。
+    // 处理：rows 只包含保护状态、转换状态、锁定状态和 protector 类型计数。
+    // 返回行为：协议不承载密钥、恢复密码或元数据 payload。
+    struct StorageBitlockerFveAuditResult : VariableAuditResultBase
+    {
+        std::uint32_t responseFlags = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t maxRows = 0;
+        std::vector<KSWORD_ARK_BITLOCKER_FVE_ROW> rows;
+    };
+
+    // StorageMountMgrMappingAuditResult 承载 MountMgr 盘符/GUID/NT 路径映射审计结果。
+    // 输入：queryMountMgrMappingAudit 返回。
+    // 处理：rows 保存符号名和风险标志，不解析卷内数据。
+    // 返回行为：仅展示映射关系，不修改挂载点。
+    struct StorageMountMgrMappingAuditResult : VariableAuditResultBase
+    {
+        std::uint32_t responseFlags = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t maxRows = 0;
+        std::vector<KSWORD_ARK_MOUNTMGR_MAPPING_ROW> rows;
+    };
+
+    // StorageFilesystemIntegrityAuditResult 承载文件系统 DriverObject/FastIo/dispatch 完整性行。
+    // 输入：queryFilesystemIntegrityAudit 返回。
+    // 处理：rows 保存 slot owner、target address 和风险，不写任何函数指针。
+    // 返回行为：只读审计结果。
+    struct StorageFilesystemIntegrityAuditResult : VariableAuditResultBase
+    {
+        std::uint32_t responseFlags = 0;
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t maxRows = 0;
+        std::vector<KSWORD_ARK_FILESYSTEM_INTEGRITY_ROW> rows;
+    };
+
+    // SecurityStatusAuditResult 承载 CI/SecureBoot/VBS/SKCI/调试态固定响应。
+    // 输入：querySecurityStatus 返回。
+    // 处理：response 直接保留共享协议固定结构，便于 UI 展示所有字段。
+    // 返回行为：unsupported 表示旧驱动缺安全审计入口。
+    struct SecurityStatusAuditResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        KSWORD_ARK_QUERY_SECURITY_STATUS_RESPONSE response{};
+    };
+
+    // DriverTrustViewAuditResult 承载已加载驱动签名/模块 cross-view 行。
+    // 输入：queryDriverTrustView 返回。
+    // 处理：entries 保存模块名、imageBase、signingLevel 和 conflictFlags。
+    // 返回行为：不执行签名策略修改或 CI 绕过。
+    struct DriverTrustViewAuditResult : VariableAuditResultBase
+    {
+        std::uint32_t fieldFlags = 0;
+        std::uint32_t sourceMask = 0;
+        std::uint32_t maxEntriesAccepted = 0;
+        std::uint32_t truncated = 0;
+        long moduleQueryStatus = 0;
+        long signingResolverStatus = 0;
+        std::vector<KSWORD_ARK_DRIVER_TRUST_VIEW_ENTRY> entries;
+    };
+
+    // HyperVSummaryAuditResult 承载 Hyper-V/VBS 相关模块和 CPUID 固定摘要。
+    // 输入：queryHyperVSummary 返回。
+    // 处理：response 保留 vendor、module status 和 sourceMask。
+    // 返回行为：只读展示，不关闭 Hyper-V 或 VBS。
+    struct HyperVSummaryAuditResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        KSWORD_ARK_QUERY_HYPERV_SUMMARY_RESPONSE response{};
+    };
+
+    // AppControlStatusAuditResult 承载 AppID/AppLocker/mssecflt/BAM 只读状态。
+    // 输入：queryAppControlStatus 返回。
+    // 处理：response 保留 callback owner module 和模块状态。
+    // 返回行为：不改 AppLocker/WDAC/CI 策略。
+    struct AppControlStatusAuditResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        KSWORD_ARK_QUERY_APP_CONTROL_STATUS_RESPONSE response{};
+    };
+
+    // Win32kProfileStatusResult 承载 win32k/win32kbase/win32kfull profile 和 session 摘要。
+    // 输入：queryWin32kProfileStatus 返回。
+    // 处理：sessions 保存 per-session readiness；fieldOffsets 保存 PDB offset 状态。
+    // 返回行为：只读状态，不安装窗口 hook。
+    struct Win32kProfileStatusResult : VariableAuditResultBase
+    {
+        std::uint64_t capabilityMask = 0;
+        std::uint64_t missingCapabilityMask = 0;
+        std::uint64_t userGetSiloGlobals = 0;
+        KSWORD_ARK_WIN32K_MODULE_STATE win32k{};
+        KSWORD_ARK_WIN32K_MODULE_STATE win32kbase{};
+        KSWORD_ARK_WIN32K_MODULE_STATE win32kfull{};
+        KSWORD_ARK_WIN32K_FIELD_OFFSETS fieldOffsets{};
+        std::vector<KSWORD_ARK_WIN32K_SESSION_ENTRY> entries;
+    };
+
+    // Win32kWindowsResult 承载 HWND/tagWND cross-view 行。
+    // 输入：queryWin32kWindows 返回。
+    // 处理：entries 保存 HWND、PID/TID、desktop、rect、title/class 状态。
+    // 返回行为：不读取消息 payload，不改变窗口状态。
+    struct Win32kWindowsResult : VariableAuditResultBase
+    {
+        std::uint64_t capabilityMask = 0;
+        std::uint64_t missingCapabilityMask = 0;
+        KSWORD_ARK_WIN32K_FIELD_OFFSETS fieldOffsets{};
+        std::vector<KSWORD_ARK_WIN32K_WINDOW_ENTRY> entries;
+    };
+
+    // Win32kGuiThreadsResult 承载 GUI thread/tagQ/focus/capture/caret 快照。
+    // 输入：queryWin32kGuiThreads 返回。
+    // 处理：entries 保存队列对象和活跃 HWND 诊断地址。
+    // 返回行为：不 hook、不阻断、不重放窗口消息。
+    struct Win32kGuiThreadsResult : VariableAuditResultBase
+    {
+        std::uint64_t capabilityMask = 0;
+        std::uint64_t missingCapabilityMask = 0;
+        KSWORD_ARK_WIN32K_FIELD_OFFSETS fieldOffsets{};
+        std::vector<KSWORD_ARK_WIN32K_GUI_THREAD_ENTRY> entries;
+    };
+
+    // Win32kHotkeysPdbResult 承载 PDB-backed hotkey 快照。
+    // 输入：queryWin32kHotkeysPdb 返回。
+    // 处理：entries 保存 hotkey object、VK/modifiers 和关联 HWND/threadInfo。
+    // 返回行为：不删除热键，不修改链表。
+    struct Win32kHotkeysPdbResult : VariableAuditResultBase
+    {
+        std::uint64_t capabilityMask = 0;
+        std::uint64_t missingCapabilityMask = 0;
+        KSWORD_ARK_WIN32K_FIELD_OFFSETS fieldOffsets{};
+        std::vector<KSWORD_ARK_WIN32K_HOTKEY_ENTRY> entries;
+    };
+
+    // Win32kHooksPdbResult 承载 PDB-backed hook 链快照。
+    // 输入：queryWin32kHooksPdb 返回。
+    // 处理：entries 保存 hook object、procedure、moduleBase 和 target threadInfo。
+    // 返回行为：不 remove/unlink hook 链。
+    struct Win32kHooksPdbResult : VariableAuditResultBase
+    {
+        std::uint64_t capabilityMask = 0;
+        std::uint64_t missingCapabilityMask = 0;
+        KSWORD_ARK_WIN32K_FIELD_OFFSETS fieldOffsets{};
+        std::vector<KSWORD_ARK_WIN32K_HOOK_ENTRY> entries;
+    };
+
+    // Win32kWindowRuntimeDetailResult 承载单 HWND 的 win32k readiness/detail。
+    // 输入：queryWin32kWindowDetail 返回。
+    // 处理：response 保存 module/profile/capability/offset 状态；tagWND reader 未启用时也能解释原因。
+    // 返回行为：只读展示，不安装窗口 hook，不读取消息 payload。
+    struct Win32kWindowRuntimeDetailResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        KSWORD_ARK_WIN32K_WINDOW_DETAIL_RESPONSE response{};
+    };
+
+    // DeviceAuditResult 承载 Device/Input/USB/GPU 统一只读设备审计结果。
+    // 输入：queryDeviceStackAudit/queryInputStackAudit/queryUsbTopologyAudit/queryGpuDisplayWatchdogAudit 返回。
+    // 处理：entries 保存 DriverObject、DeviceObject、attached/next 链和风险标志。
+    // 返回行为：不禁用设备、不卸载驱动、不 detach stack。
+    struct DeviceAuditResult : VariableAuditResultBase
+    {
+        std::uint32_t profileFlags = 0;
+        std::uint32_t responseFlags = 0;
+        std::uint32_t targetCount = 0;
+        std::uint32_t driverCount = 0;
+        std::uint32_t deviceCount = 0;
+        std::vector<KSWORD_ARK_DEVICE_AUDIT_ENTRY> entries;
+    };
+
+    // CidTableAuditResult 承载 PspCidTable 只读枚举行。
+    // 输入：enumCidTable 返回。
+    // 处理：entries 保存 CID、对象类型、引用状态和对象地址。
+    // 返回行为：不删除 CID，不隐藏进程/线程。
+    struct CidTableAuditResult : VariableAuditResultBase
+    {
+        std::uint32_t visitedCount = 0;
+        std::uint32_t maxVisitCount = 0;
+        std::uint64_t pspCidTableAddress = 0;
+        std::uint64_t dynDataCapabilityMask = 0;
+        std::uint32_t htTableCodeOffset = KSWORD_ARK_KERNEL_OBJECT_OFFSET_UNAVAILABLE;
+        std::uint32_t hteLowValueOffset = KSWORD_ARK_KERNEL_OBJECT_OFFSET_UNAVAILABLE;
+        std::vector<KSWORD_ARK_CID_TABLE_ENTRY> entries;
+    };
+
+    // KernelObjectSummaryAuditResult 承载单对象 header/type/counter 摘要。
+    // 输入：queryKernelObjectSummary 返回。
+    // 处理：response 直接保存共享固定响应结构。
+    // 返回行为：只读展示对象元数据，不改对象头或引用计数。
+    struct KernelObjectSummaryAuditResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        KSWORD_ARK_QUERY_KERNEL_OBJECT_SUMMARY_RESPONSE response{};
+    };
+
+    // IpcSummaryAuditResult 承载 ALPC/Pipe/Mailslot IPC 摘要。
+    // 输入：queryIpcSummary 返回。
+    // 处理：response 保留句柄、对象地址、typeName 和降级详情。
+    // 返回行为：不关闭句柄、不发送消息、不修改 IPC 对象。
+    struct IpcSummaryAuditResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        KSWORD_ARK_QUERY_IPC_SUMMARY_RESPONSE response{};
+    };
+
+    // DynDataV4ApplyInput 是 v4 PDB profile 的 R3 打包输入。
+    // 输入：module/capabilityGroups/items 来自 PDB extractor 生成的已校验 profile。
+    // 处理：ArkDriverClient 只负责长度校验和协议传输。
+    // 返回行为：传入 applyDynDataProfileV4 后得到 DynDataV4ApplyResult。
+    struct DynDataV4ApplyInput
+    {
+        KSW_DYN_V4_MODULE_IDENTITY_PACKET module{};
+        std::vector<KSW_DYN_V4_CAPABILITY_GROUP_PACKET> capabilityGroups;
+        std::vector<KSW_DYN_V4_ITEM_PACKET> items;
+        std::uint32_t flags = 0;
+    };
+
+    // DynDataV4ApplyResult 承载 R0 接收 v4 module profile 后的固定响应。
+    // 输入：无，由 applyDynDataProfileV4 返回。
+    // 处理：response 保留模块身份、statusFlags、capabilityMask 和消息。
+    // 返回行为：io.ok 表示传输/协议成功，unsupported 表示旧驱动缺 v4 入口。
+    struct DynDataV4ApplyResult
+    {
+        IoResult io;
+        bool unsupported = false;
+        KSW_APPLY_DYN_PROFILE_V4_RESPONSE response{};
+    };
+
+    // DynDataV4ModulesResult 承载已加载 v4 module profile 状态。
+    // 输入：queryDynDataV4Modules 返回。
+    // 处理：entries 保存每个模块 class/profile/status/capability 状态。
+    // 返回行为：只读查询当前 R0 v4 profile cache。
+    struct DynDataV4ModulesResult : VariableAuditResultBase
+    {
+        std::vector<KSW_DYN_V4_MODULE_STATUS_ENTRY> entries;
+    };
+
+    // DynDataV4CapabilityGroupsResult 承载 v4 capability group 完整性状态。
+    // 输入：queryDynDataV4CapabilityGroups 返回。
+    // 处理：entries 保存 required/optional present/missing 计数。
+    // 返回行为：只读展示 profile 缺口。
+    struct DynDataV4CapabilityGroupsResult : VariableAuditResultBase
+    {
+        std::vector<KSW_DYN_V4_CAPABILITY_GROUP_STATUS_ENTRY> entries;
+    };
+
+    // DynDataV4MissingItemsResult 承载 v4 required/optional missing 摘要。
+    // 输入：queryDynDataV4MissingItems 返回。
+    // 处理：entries 保存 itemName/reason，供 UI 展示 profile 缺失项。
+    // 返回行为：只读查询，不修改 DynData 状态。
+    struct DynDataV4MissingItemsResult : VariableAuditResultBase
+    {
+        std::vector<KSW_DYN_V4_MISSING_ITEM_ENTRY> entries;
+    };
+
+    // DynDataV4ItemsResult 承载 v4 已接受 item 的只读清单。
+    // 输入：queryDynDataV4Items 返回。
+    // 处理：entries 保存 moduleClassId、itemIndex 和完整 KSW_DYN_V4_ITEM_PACKET。
+    // 返回行为：只读查询，不重新应用 profile，也不把 item 接入业务路径。
+    struct DynDataV4ItemsResult : VariableAuditResultBase
+    {
+        std::vector<KSW_DYN_V4_ITEM_STATUS_ENTRY> entries;
     };
 
     // AsyncIoResult reports an overlapped DeviceIoControl issue attempt. A false

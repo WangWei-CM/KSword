@@ -1,5 +1,8 @@
 #include "NetworkDock.InternalCommon.h"
 
+#include "../theme.h"
+
+#include <QApplication>
 #include <QBrush>
 
 using namespace network_dock_detail;
@@ -54,6 +57,75 @@ namespace
     int nidsSeverityIndex(const ks::network::NidsAlertSeverity severity)
     {
         return static_cast<int>(severity);
+    }
+
+    // nidsTableRowText：
+    // - 输入：NIDS 表格指针和行号；
+    // - 处理：按当前列顺序读取整行，使用 TSV 拼接；
+    // - 返回：可直接复制到剪贴板或表格工具的文本。
+    QString nidsTableRowText(QTableWidget* table, const int rowIndex)
+    {
+        if (table == nullptr || rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return QString();
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+            fields.push_back(item != nullptr ? item->text() : QString());
+        }
+        return fields.join(QLatin1Char('\t'));
+    }
+
+    // nidsSelectedRows：
+    // - 输入：NIDS 表格指针；
+    // - 处理：收集选择模型中的行号并去重排序，空选择时回退当前行；
+    // - 返回：需要复制的行号列表。
+    std::vector<int> nidsSelectedRows(QTableWidget* table)
+    {
+        std::set<int> rowSet;
+        if (table != nullptr)
+        {
+            for (const QModelIndex& index : table->selectionModel()->selectedRows())
+            {
+                rowSet.insert(index.row());
+            }
+            if (rowSet.empty() && table->currentRow() >= 0)
+            {
+                rowSet.insert(table->currentRow());
+            }
+        }
+        return std::vector<int>(rowSet.begin(), rowSet.end());
+    }
+
+    // copyNidsRowsToClipboard：
+    // - 输入：NIDS 表格和待复制行号；
+    // - 处理：逐行生成 TSV，多行使用换行分隔；
+    // - 返回：无，复制失败时静默保持 UI 稳定。
+    void copyNidsRowsToClipboard(QTableWidget* table, const std::vector<int>& rowList)
+    {
+        if (table == nullptr || QApplication::clipboard() == nullptr || rowList.empty())
+        {
+            return;
+        }
+
+        QStringList rowTexts;
+        rowTexts.reserve(static_cast<int>(rowList.size()));
+        for (const int rowIndex : rowList)
+        {
+            const QString rowText = nidsTableRowText(table, rowIndex);
+            if (!rowText.isEmpty())
+            {
+                rowTexts.push_back(rowText);
+            }
+        }
+        if (!rowTexts.isEmpty())
+        {
+            QApplication::clipboard()->setText(rowTexts.join(QChar('\n')));
+        }
     }
 }
 
@@ -118,6 +190,55 @@ void NetworkDock::initializeNidsTab()
     m_nidsAlertTable->horizontalHeader()->setStretchLastSection(true);
     m_nidsAlertTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     m_nidsLayout->addWidget(m_nidsAlertTable, 1);
+
+    connect(m_nidsAlertTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
+    {
+        // 右键菜单：
+        // - 输入：用户在 NIDS 告警表中的点击位置；
+        // - 处理：定位当前行，提供单元格/当前行/多选行复制；
+        // - 返回：无，菜单只复制审计证据，不修改规则或连接。
+        if (m_nidsAlertTable == nullptr)
+        {
+            return;
+        }
+
+        const QModelIndex clickedIndex = m_nidsAlertTable->indexAt(localPosition);
+        if (clickedIndex.isValid())
+        {
+            m_nidsAlertTable->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+        }
+
+        QMenu menu(m_nidsAlertTable);
+        menu.setStyleSheet(KswordTheme::ContextMenuStyle());
+        QAction* copyCellAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_copy.svg")), QStringLiteral("复制单元格"));
+        QAction* copyRowAction = menu.addAction(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), QStringLiteral("复制当前行"));
+        QAction* copySelectedRowsAction = menu.addAction(QIcon(QStringLiteral(":/Icon/log_clipboard.svg")), QStringLiteral("复制选中行"));
+        const bool hasCurrentCell = m_nidsAlertTable->currentRow() >= 0 && m_nidsAlertTable->currentColumn() >= 0;
+        const bool hasCurrentRow = m_nidsAlertTable->currentRow() >= 0;
+        copyCellAction->setEnabled(hasCurrentCell);
+        copyRowAction->setEnabled(hasCurrentRow);
+        copySelectedRowsAction->setEnabled(!nidsSelectedRows(m_nidsAlertTable).empty());
+
+        const QAction* selectedAction = menu.exec(m_nidsAlertTable->viewport()->mapToGlobal(localPosition));
+        if (selectedAction == copyCellAction)
+        {
+            const QTableWidgetItem* item = m_nidsAlertTable->item(
+                m_nidsAlertTable->currentRow(),
+                m_nidsAlertTable->currentColumn());
+            if (item != nullptr && QApplication::clipboard() != nullptr)
+            {
+                QApplication::clipboard()->setText(item->text());
+            }
+        }
+        else if (selectedAction == copyRowAction)
+        {
+            copyNidsRowsToClipboard(m_nidsAlertTable, std::vector<int>{ m_nidsAlertTable->currentRow() });
+        }
+        else if (selectedAction == copySelectedRowsAction)
+        {
+            copyNidsRowsToClipboard(m_nidsAlertTable, nidsSelectedRows(m_nidsAlertTable));
+        }
+    });
 
     updateNidsStatusLabel();
     m_sideTabWidget->addTab(m_nidsPage, QIcon(":/Icon/process_critical.svg"), QStringLiteral("NIDS"));

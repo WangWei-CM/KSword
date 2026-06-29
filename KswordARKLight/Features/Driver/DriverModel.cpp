@@ -66,9 +66,12 @@ std::vector<DriverOverviewRow> DriverModel::filterOverviewRows(const std::wstrin
     for (const DriverOverviewRow& row : overviewRows_) {
         if (containsIgnoreCase(row.driverName, keyword)
             || containsIgnoreCase(row.baseAddressText, keyword)
+            || containsIgnoreCase(row.memoryRangeText, keyword)
             || containsIgnoreCase(row.sizeText, keyword)
             || containsIgnoreCase(row.pathText, keyword)
+            || containsIgnoreCase(row.signatureText, keyword)
             || containsIgnoreCase(row.statusText, keyword)
+            || containsIgnoreCase(row.anomalyText, keyword)
             || containsIgnoreCase(row.capabilityHint, keyword)) {
             filtered.push_back(row);
         }
@@ -222,4 +225,3 @@ std::wstring FormatByteSize(const std::uint64_t bytes) {
 }
 
 } // namespace Ksword::Features::Driver
-

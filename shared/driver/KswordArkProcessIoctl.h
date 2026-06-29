@@ -46,6 +46,8 @@
 #define KSWORD_ARK_IOCTL_FUNCTION_SET_PROCESS_SPECIAL_FLAGS 0x824UL
 #define KSWORD_ARK_IOCTL_FUNCTION_DKOM_PROCESS 0x825UL
 #define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_CROSSVIEW 0x836UL
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_DETAIL 0x83CUL
+#define KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_RUNTIME_FIELDS 0x83EUL
 
 #define IOCTL_KSWORD_ARK_TERMINATE_PROCESS \
     CTL_CODE( \
@@ -309,6 +311,234 @@ typedef struct _KSWORD_ARK_PROCESS_CROSSVIEW_RESPONSE
         KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_CROSSVIEW, \
         METHOD_BUFFERED, \
         FILE_ANY_ACCESS)
+
+// 进程运行时详情协议：
+// - 输入：只接受 PID 和展示 flags，不接受 R3 传入的 EPROCESS 地址；
+// - 处理：R0 通过 PsLookupProcessByProcessId 定位对象，再按 DynData/PDB 偏移只读采样；
+// - 输出：固定响应包，字段缺失时用 fieldFlags/missingCapabilityMask/detail 解释原因。
+#define IOCTL_KSWORD_ARK_QUERY_PROCESS_DETAIL \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_DETAIL, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define IOCTL_KSWORD_ARK_QUERY_PROCESS_RUNTIME_FIELDS \
+    CTL_CODE( \
+        KSWORD_ARK_IOCTL_DEVICE_TYPE, \
+        KSWORD_ARK_IOCTL_FUNCTION_QUERY_PROCESS_RUNTIME_FIELDS, \
+        METHOD_BUFFERED, \
+        FILE_ANY_ACCESS)
+
+#define KSWORD_ARK_RUNTIME_DETAIL_PROTOCOL_VERSION 1UL
+#define KSWORD_ARK_RUNTIME_DETAIL_TEXT_CHARS 256U
+#define KSWORD_ARK_RUNTIME_IMAGE_NAME_CHARS 16U
+
+// 通用 runtime field sample 协议：
+// - 输入：R3 只提交 PDB deep JSON 中的 runtimeItemId、offset、size；
+// - 处理：R0 仅从自身 lookup/reference 得到的 EPROCESS/ETHREAD 基址读取小字段；
+// - 返回：每个字段的状态、原始小字节和值摘要，不接受也不回写任意 R3 内核指针。
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_PROTOCOL_VERSION 1UL
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_ITEMS 64UL
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_VALUE_BYTES 16UL
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_OFFSET 0x8000UL
+
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_UNKNOWN         0UL
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_OK              1UL
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_PARTIAL         2UL
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_LOOKUP_FAILED   3UL
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_INVALID_REQUEST 4UL
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_STATUS_TRUNCATED       5UL
+
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_UNKNOWN         0UL
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_OK              1UL
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_OFFSET_REJECTED 2UL
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_SIZE_REJECTED   3UL
+#define KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW_STATUS_READ_FAILED     4UL
+
+typedef struct _KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ITEM_REQUEST
+{
+    unsigned long runtimeItemId;
+    unsigned long offset;
+    unsigned long size;
+    unsigned long flags;
+} KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ITEM_REQUEST;
+
+typedef struct _KSWORD_ARK_PROCESS_RUNTIME_FIELD_SAMPLE_REQUEST
+{
+    unsigned long version;
+    unsigned long flags;
+    unsigned long processId;
+    unsigned long itemCount;
+    unsigned long reserved0;
+    unsigned long reserved1;
+    unsigned long reserved2;
+    unsigned long reserved3;
+    KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ITEM_REQUEST items[1];
+} KSWORD_ARK_PROCESS_RUNTIME_FIELD_SAMPLE_REQUEST;
+
+typedef struct _KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW
+{
+    unsigned long runtimeItemId;
+    unsigned long offset;
+    unsigned long size;
+    unsigned long status;
+    unsigned long bytesRead;
+    unsigned long flags;
+    long lastStatus;
+    unsigned long reserved;
+    unsigned long long valueU64;
+    unsigned char sampleBytes[KSWORD_ARK_RUNTIME_FIELD_SAMPLE_MAX_VALUE_BYTES];
+} KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW;
+
+typedef struct _KSWORD_ARK_RUNTIME_FIELD_SAMPLE_RESPONSE
+{
+    unsigned long version;
+    unsigned long status;
+    unsigned long totalCount;
+    unsigned long returnedCount;
+    unsigned long entrySize;
+    unsigned long flags;
+    long lastStatus;
+    unsigned long reserved;
+    unsigned long long objectAddress;
+    unsigned long long dynDataCapabilityMask;
+    KSWORD_ARK_RUNTIME_FIELD_SAMPLE_ROW entries[1];
+} KSWORD_ARK_RUNTIME_FIELD_SAMPLE_RESPONSE;
+
+#define KSWORD_ARK_DETAIL_STATUS_UNKNOWN            0UL
+#define KSWORD_ARK_DETAIL_STATUS_OK                 1UL
+#define KSWORD_ARK_DETAIL_STATUS_PARTIAL            2UL
+#define KSWORD_ARK_DETAIL_STATUS_UNSUPPORTED        3UL
+#define KSWORD_ARK_DETAIL_STATUS_LOOKUP_FAILED      4UL
+#define KSWORD_ARK_DETAIL_STATUS_CAPABILITY_MISSING 5UL
+#define KSWORD_ARK_DETAIL_STATUS_READ_FAILED        6UL
+
+#define KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_PUBLIC_IDENTITY 0x00000001UL
+#define KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_LIST_LINKS      0x00000002UL
+#define KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_OBJECT_POINTERS 0x00000004UL
+#define KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_TOKEN_FASTREF   0x00000008UL
+#define KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_PROTECTION      0x00000010UL
+#define KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_ALL \
+    (KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_PUBLIC_IDENTITY | \
+     KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_LIST_LINKS | \
+     KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_OBJECT_POINTERS | \
+     KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_TOKEN_FASTREF | \
+     KSWORD_ARK_PROCESS_DETAIL_FLAG_INCLUDE_PROTECTION)
+
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_PUBLIC_IDENTITY       0x00000001UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_OBJECT_ADDRESS        0x00000002UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_UNIQUE_PROCESS_ID     0x00000004UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_ACTIVE_PROCESS_LINKS  0x00000008UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_THREAD_LIST_HEAD      0x00000010UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_IMAGE_FILE_NAME       0x00000020UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_TOKEN_FASTREF         0x00000040UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_OBJECT_TABLE          0x00000080UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_SECTION_OBJECT        0x00000100UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_PROTECTION            0x00000200UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_SIGNATURE_LEVEL       0x00000400UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_SECTION_SIGNATURE     0x00000800UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_OFFSET_SOURCES        0x00001000UL
+#define KSWORD_ARK_PROCESS_DETAIL_FIELD_KERNEL_GLOBALS        0x00002000UL
+
+// 运行时 detail 通用内核全局 RVA 包：
+// - 输入：R0 DynData/PDB profile EX 中已校验的 GlobalRva item；
+// - 处理：R0 返回 RVA、来源以及按当前 ntoskrnl imageBase 推导出的只读地址；
+// - 返回：结构体本身无返回值，仅供 R3 展示 PspCidTable/模块链表等证据来源。
+typedef struct _KSWORD_ARK_RUNTIME_KERNEL_GLOBALS
+{
+    unsigned long pspCidTableRva;
+    unsigned long psLoadedModuleListRva;
+    unsigned long mmUnloadedDriversRva;
+    unsigned long piDdbCacheTableRva;
+    unsigned long keServiceDescriptorTableShadowRva;
+    unsigned long mmLastUnloadedDriverRva;
+    unsigned long pspCidTableSource;
+    unsigned long psLoadedModuleListSource;
+    unsigned long mmUnloadedDriversSource;
+    unsigned long piDdbCacheTableSource;
+    unsigned long keServiceDescriptorTableShadowSource;
+    unsigned long mmLastUnloadedDriverSource;
+    unsigned long long pspCidTableAddress;
+    unsigned long long psLoadedModuleListAddress;
+    unsigned long long mmUnloadedDriversAddress;
+    unsigned long long piDdbCacheTableAddress;
+    unsigned long long keServiceDescriptorTableShadowAddress;
+    unsigned long long mmLastUnloadedDriverAddress;
+} KSWORD_ARK_RUNTIME_KERNEL_GLOBALS;
+
+typedef struct _KSWORD_ARK_PROCESS_DETAIL_OFFSETS
+{
+    unsigned long epUniqueProcessId;
+    unsigned long epActiveProcessLinks;
+    unsigned long epThreadListHead;
+    unsigned long epImageFileName;
+    unsigned long epToken;
+    unsigned long epObjectTable;
+    unsigned long epSectionObject;
+    unsigned long epProtection;
+    unsigned long epSignatureLevel;
+    unsigned long epSectionSignatureLevel;
+} KSWORD_ARK_PROCESS_DETAIL_OFFSETS;
+
+// 进程 detail 偏移来源包：
+// - 输入：R0 当前 KSW_DYN_STATE.KernelSources；
+// - 处理：与 offsets 同名一一对应，记录 System Informer/PDB profile/runtime pattern；
+// - 返回：结构体本身无返回值，仅用于 UI 把 offset 解释成人可读来源。
+typedef struct _KSWORD_ARK_PROCESS_DETAIL_SOURCES
+{
+    unsigned long epUniqueProcessId;
+    unsigned long epActiveProcessLinks;
+    unsigned long epThreadListHead;
+    unsigned long epImageFileName;
+    unsigned long epToken;
+    unsigned long epObjectTable;
+    unsigned long epSectionObject;
+    unsigned long epProtection;
+    unsigned long epSignatureLevel;
+    unsigned long epSectionSignatureLevel;
+} KSWORD_ARK_PROCESS_DETAIL_SOURCES;
+
+typedef struct _KSWORD_ARK_PROCESS_DETAIL_REQUEST
+{
+    unsigned long version;
+    unsigned long flags;
+    unsigned long processId;
+    unsigned long reserved;
+} KSWORD_ARK_PROCESS_DETAIL_REQUEST;
+
+typedef struct _KSWORD_ARK_PROCESS_DETAIL_RESPONSE
+{
+    unsigned long version;
+    unsigned long status;
+    unsigned long processId;
+    unsigned long fieldFlags;
+    unsigned long requestedFlags;
+    unsigned long reserved;
+    long lastStatus;
+    unsigned long reserved2;
+    unsigned long long dynDataCapabilityMask;
+    unsigned long long missingCapabilityMask;
+    unsigned long long processObjectAddress;
+    unsigned long long uniqueProcessIdValue;
+    unsigned long long activeProcessLinksFlink;
+    unsigned long long activeProcessLinksBlink;
+    unsigned long long threadListHeadFlink;
+    unsigned long long threadListHeadBlink;
+    unsigned long long tokenFastRef;
+    unsigned long long tokenObjectAddress;
+    unsigned long long objectTableAddress;
+    unsigned long long sectionObjectAddress;
+    unsigned char protection;
+    unsigned char signatureLevel;
+    unsigned char sectionSignatureLevel;
+    unsigned char reservedByte;
+    char imageName[KSWORD_ARK_RUNTIME_IMAGE_NAME_CHARS];
+    KSWORD_ARK_PROCESS_DETAIL_OFFSETS offsets;
+    KSWORD_ARK_PROCESS_DETAIL_SOURCES sources;
+    KSWORD_ARK_RUNTIME_KERNEL_GLOBALS kernelGlobals;
+    wchar_t detail[KSWORD_ARK_RUNTIME_DETAIL_TEXT_CHARS];
+} KSWORD_ARK_PROCESS_DETAIL_RESPONSE;
 
 typedef struct _KSWORD_ARK_ENUM_PROCESS_REQUEST
 {

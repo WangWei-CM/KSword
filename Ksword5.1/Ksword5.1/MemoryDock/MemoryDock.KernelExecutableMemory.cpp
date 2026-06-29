@@ -38,6 +38,38 @@ namespace
         return text.empty() ? QString() : QString::fromStdWString(text);
     }
 
+    QString kernelExecutableIoMessageText(const std::string& messageText)
+    {
+        // 输入：ArkDriverClient 返回的原始 io.message。
+        // 处理：将 DeviceIoControl/unsupported/空消息等底层字符串转换为用户可读说明。
+        // 返回：适合状态栏和详情区展示的中文文本。
+        if (messageText.empty())
+        {
+            return QStringLiteral("无额外驱动消息");
+        }
+
+        const QString rawText = QString::fromStdString(messageText).trimmed();
+        if (rawText.isEmpty())
+        {
+            return QStringLiteral("无额外驱动消息");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动接口调用失败或当前驱动版本不支持内核可执行页扫描入口");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not implemented"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动版本尚未提供内核可执行页扫描入口");
+        }
+        if (rawText.contains(QStringLiteral("too small"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("invalid"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动返回数据格式不完整，当前扫描结果已丢弃");
+        }
+        return rawText;
+    }
+
     QString hexValue(const std::uint64_t value)
     {
         // 输入：64 位诊断值。
@@ -165,6 +197,107 @@ namespace
         QTableWidgetItem* item = new QTableWidgetItem(text);
         item->setTextAlignment(Qt::AlignVCenter | Qt::AlignLeft);
         return item;
+    }
+
+    QString kernelExecutableCopyMenuStyle()
+    {
+        // 输入：无。
+        // 处理：生成不透明右键菜单样式，避免透明父容器造成黑底黑字。
+        // 返回：可直接设置到 QMenu 的样式字符串。
+        return QStringLiteral(
+            "QMenu{background:%1;color:%2;border:1px solid %3;}"
+            "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
+            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:disabled{color:%5;}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::TextSecondaryHex());
+    }
+
+    QString kernelExecutableRowText(QTableWidget* table, const int rowIndex)
+    {
+        // 输入：内核可执行页表和目标行号。
+        // 处理：按当前列顺序读取单元格，拼接为 TSV。
+        // 返回：可写入剪贴板的单行文本。
+        if (table == nullptr || rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return QString();
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+            fields.push_back(item != nullptr ? item->text() : QString());
+        }
+        return fields.join(QLatin1Char('\t'));
+    }
+
+    void installKernelExecutableCopyMenu(QTableWidget* table)
+    {
+        // 输入：内核可执行页扫描表。
+        // 处理：安装只读“复制当前行”菜单。
+        // 返回：无，不触发任何 R0 操作。
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        {
+            const QModelIndex clickedIndex = table->indexAt(localPosition);
+            const int rowIndex = clickedIndex.isValid() ? clickedIndex.row() : table->currentRow();
+            if (clickedIndex.isValid())
+            {
+                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                table->selectRow(clickedIndex.row());
+            }
+
+            QMenu menu(table);
+            menu.setStyleSheet(kernelExecutableCopyMenuStyle());
+            QAction* copyRowAction = menu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(rowIndex >= 0 && rowIndex < table->rowCount());
+            if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+            {
+                QClipboard* clipboard = QApplication::clipboard();
+                if (clipboard != nullptr)
+                {
+                    clipboard->setText(kernelExecutableRowText(table, rowIndex));
+                }
+            }
+        });
+    }
+
+    void setKernelExecutableDiagnosticRow(
+        QTableWidget* table,
+        const QString& detailText)
+    {
+        // setKernelExecutableDiagnosticRow：
+        // - 输入：目标表格与诊断文本；
+        // - 处理：写入一行可复制诊断，UserRole+2 保存完整说明；
+        // - 返回：无。用于 R0 空结果或过滤空结果时避免页面只剩空表。
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setRowCount(1);
+        QTableWidgetItem* vaItem = createTextItem(QStringLiteral("<无可执行页证据>"));
+        vaItem->setData(Qt::UserRole + 2, detailText);
+        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::Va), vaItem);
+        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::PageCount), createTextItem(QStringLiteral("N/A")));
+        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::PageSize), createTextItem(QStringLiteral("N/A")));
+        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::Permissions), createTextItem(QStringLiteral("N/A")));
+        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::Owner), createTextItem(QStringLiteral("诊断")));
+        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::ModulePath), createTextItem(QStringLiteral("N/A")));
+        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::RiskFlags), createTextItem(detailText));
+        table->setCurrentCell(0, kernelExecutableColumnIndex(KernelExecutableColumn::Va));
     }
 
     QTableWidgetItem* createNumericItem(const QString& text, const qulonglong numericValue)
@@ -306,6 +439,7 @@ void MemoryDock::initializeKernelExecutableMemoryScanTab()
     m_kernelExecutableTable->setColumnWidth(kernelExecutableColumnIndex(KernelExecutableColumn::Va), 170);
     m_kernelExecutableTable->setColumnWidth(kernelExecutableColumnIndex(KernelExecutableColumn::Owner), 180);
     m_kernelExecutableTable->setColumnWidth(kernelExecutableColumnIndex(KernelExecutableColumn::RiskFlags), 220);
+    installKernelExecutableCopyMenu(m_kernelExecutableTable);
     splitter->addWidget(m_kernelExecutableTable);
 
     QWidget* detailPanel = new QWidget(splitter);
@@ -416,7 +550,7 @@ void MemoryDock::refreshKernelExecutableMemoryScanAsync()
                             ? QStringLiteral("不支持/驱动版本过旧。\n\n当前驱动未提供 Prompt 1 的内核可执行页扫描 IOCTL，或协议版本过旧。")
                             : QStringLiteral("内核可执行页扫描失败。\n\nWin32: %1\n详情: %2")
                                 .arg(scanResult.io.win32Error)
-                                .arg(QString::fromStdString(scanResult.io.message)));
+                                .arg(kernelExecutableIoMessageText(scanResult.io.message)));
                     }
                     return;
                 }
@@ -493,6 +627,14 @@ void MemoryDock::rebuildKernelExecutableMemoryScanTable()
         m_kernelExecutableTable->setItem(row, kernelExecutableColumnIndex(KernelExecutableColumn::RiskFlags),
             createTextItem(riskFlagsText(entry.riskFlags)));
     }
+    if (visibleEntries.empty())
+    {
+        const QString detailText = m_kernelExecutableCache.empty()
+            ? QStringLiteral("内核可执行页扫描当前没有缓存行；可能是驱动未返回结果、扫描失败或尚未刷新。")
+            : QStringLiteral("当前过滤条件隐藏了全部 %1 条内核可执行页记录；请清空模块过滤或关闭“仅风险项”。")
+                .arg(static_cast<qulonglong>(m_kernelExecutableCache.size()));
+        setKernelExecutableDiagnosticRow(m_kernelExecutableTable, detailText);
+    }
     if (m_kernelExecutableTable->rowCount() > 0 && m_kernelExecutableTable->currentRow() < 0)
     {
         m_kernelExecutableTable->setCurrentCell(0, kernelExecutableColumnIndex(KernelExecutableColumn::Va));
@@ -520,6 +662,12 @@ void MemoryDock::showKernelExecutableMemoryDetailByCurrentRow()
     const QTableWidgetItem* vaItem = m_kernelExecutableTable->item(currentRow, kernelExecutableColumnIndex(KernelExecutableColumn::Va));
     if (vaItem == nullptr)
     {
+        return;
+    }
+    const QString diagnosticText = vaItem->data(Qt::UserRole + 2).toString();
+    if (!diagnosticText.isEmpty())
+    {
+        m_kernelExecutableDetailEditor->setText(QStringLiteral("内核可执行页诊断\n%1").arg(diagnosticText));
         return;
     }
 

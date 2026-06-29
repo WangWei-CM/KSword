@@ -5,6 +5,7 @@
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAction>
 #include <QApplication>
 #include <QBrush>
 #include <QClipboard>
@@ -21,12 +22,15 @@
 #include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMetaObject>
+#include <QModelIndex>
 #include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
 #include <QStringList>
 #include <QSplitter>
+#include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
@@ -93,6 +97,275 @@ namespace
         std::uint32_t callbackItemCount = 0;            // callbackItemCount：原始 callbackItems 条目数。
         std::uint32_t typedItemCount = 0;               // typedItemCount：v3 items/typedItems 条目数。
     };
+
+    QString safeText(const QString& valueText, const QString& fallbackText = QStringLiteral("<空>"));
+    QString formatHex32(std::uint32_t value);
+    QString formatHex64(std::uint64_t value);
+    QString formatNtStatus(long statusValue);
+    QString formatOffset(std::uint32_t offsetValue);
+    QString boolText(bool enabled);
+    QString moduleClassText(std::uint32_t classId);
+    bool statusFlagEnabled(std::uint32_t flags, std::uint32_t flag);
+
+    // v4CountText：
+    // - 输入 returnedCount/totalCount：ArkDriverClient 从 R0 响应解析出的返回行数和总行数；
+    // - 处理：统一压缩成“returned / total”文本，便于 profile 表格和详情复用；
+    // - 返回：可直接展示的计数字符串。
+    QString v4CountText(std::uint32_t returnedCount, std::uint32_t totalCount)
+    {
+        return QStringLiteral("%1 / %2")
+            .arg(returnedCount)
+            .arg(totalCount);
+    }
+
+    // v4IoStateText：
+    // - 输入 queryOk/unsupported：ArkDriverClient wrapper 的 IO 成功状态和旧驱动兼容标记；
+    // - 处理：把传输成功、旧驱动不支持和失败三类状态转成短文本；
+    // - 返回：profile 摘要表使用的状态文本。
+    QString v4IoStateText(bool queryOk, bool unsupported)
+    {
+        if (queryOk)
+        {
+            return QStringLiteral("成功");
+        }
+
+        return unsupported
+            ? QStringLiteral("旧驱动不支持")
+            : QStringLiteral("失败");
+    }
+
+    // appendV4StatusLine：
+    // - 输入 lines/name/queryOk/unsupported/returnedCount/totalCount/messageText：单类 v4 查询状态；
+    // - 处理：向详情文本追加 count、IO 状态和 ArkDriverClient message；
+    // - 返回：无，lines 通过引用被追加。
+    void appendV4StatusLine(
+        QStringList& lines,
+        const QString& name,
+        bool queryOk,
+        bool unsupported,
+        std::uint32_t returnedCount,
+        std::uint32_t totalCount,
+        const QString& messageText)
+    {
+        lines << QStringLiteral("%1: count=%2, io=%3, message=%4")
+            .arg(name)
+            .arg(v4CountText(returnedCount, totalCount))
+            .arg(v4IoStateText(queryOk, unsupported))
+            .arg(safeText(messageText));
+    }
+
+    // appendV4ProfileSummaryLines：
+    // - 输入 lines/summary：详情文本缓冲和 DynData 摘要快照；
+    // - 处理：追加 v4 modules、capability groups、missing items、accepted items 四组只读查询状态；
+    // - 返回：无，lines 通过引用被追加。
+    void appendV4ProfileSummaryLines(QStringList& lines, const KernelDynDataSummary& summary)
+    {
+        lines << QStringLiteral("");
+        lines << QStringLiteral("DynData V4 profile query status:");
+        appendV4StatusLine(
+            lines,
+            QStringLiteral("modules"),
+            summary.dynDataV4ModulesQueryOk,
+            summary.dynDataV4ModulesUnsupported,
+            summary.dynDataV4ModulesReturnedCount,
+            summary.dynDataV4ModulesTotalCount,
+            summary.dynDataV4ModulesIoMessageText);
+        appendV4StatusLine(
+            lines,
+            QStringLiteral("capability groups"),
+            summary.dynDataV4CapabilityGroupsQueryOk,
+            summary.dynDataV4CapabilityGroupsUnsupported,
+            summary.dynDataV4CapabilityGroupsReturnedCount,
+            summary.dynDataV4CapabilityGroupsTotalCount,
+            summary.dynDataV4CapabilityGroupsIoMessageText);
+        appendV4StatusLine(
+            lines,
+            QStringLiteral("missing items"),
+            summary.dynDataV4MissingItemsQueryOk,
+            summary.dynDataV4MissingItemsUnsupported,
+            summary.dynDataV4MissingItemsReturnedCount,
+            summary.dynDataV4MissingItemsTotalCount,
+            summary.dynDataV4MissingItemsIoMessageText);
+        appendV4StatusLine(
+            lines,
+            QStringLiteral("accepted items"),
+            summary.dynDataV4ItemsQueryOk,
+            summary.dynDataV4ItemsUnsupported,
+            summary.dynDataV4ItemsReturnedCount,
+            summary.dynDataV4ItemsTotalCount,
+            summary.dynDataV4ItemsIoMessageText);
+    }
+
+    // v4ItemKindText：
+    // - 输入 itemKind：R0 返回的 KSW_DYN_V4_ITEM_KIND_* 数值；
+    // - 处理：转换为 schema 中的稳定英文类型名；
+    // - 返回：表格可读文本，未知值保留数值便于排查协议版本差异。
+    QString v4ItemKindText(const std::uint32_t itemKind)
+    {
+        switch (itemKind)
+        {
+        case KSW_DYN_V4_ITEM_KIND_STRUCT_OFFSET:
+            return QStringLiteral("StructOffset");
+        case KSW_DYN_V4_ITEM_KIND_GLOBAL_RVA:
+            return QStringLiteral("GlobalRva");
+        case KSW_DYN_V4_ITEM_KIND_FUNCTION_RVA:
+            return QStringLiteral("FunctionRva");
+        case KSW_DYN_V4_ITEM_KIND_ENUM_VALUE:
+            return QStringLiteral("EnumValue");
+        case KSW_DYN_V4_ITEM_KIND_TYPE_SIZE:
+            return QStringLiteral("TypeSize");
+        case KSW_DYN_V4_ITEM_KIND_BIT_FIELD:
+            return QStringLiteral("BitField");
+        case KSW_DYN_V4_ITEM_KIND_LIST_HEAD_GLOBAL:
+            return QStringLiteral("ListHeadGlobal");
+        default:
+            return QStringLiteral("Unknown(%1)").arg(itemKind);
+        }
+    }
+
+    // v4ItemFlagsText：
+    // - 输入 flags：R0 返回的 v4 item flags；
+    // - 处理：把 required/optional 位拆成人读文本，同时保留十六进制；
+    // - 返回：表格“Flags”列文本。
+    QString v4ItemFlagsText(const std::uint32_t flags)
+    {
+        QStringList parts;
+        if ((flags & KSW_DYN_V4_ITEM_FLAG_REQUIRED) != 0U)
+        {
+            parts << QStringLiteral("required");
+        }
+        if ((flags & KSW_DYN_V4_ITEM_FLAG_OPTIONAL) != 0U)
+        {
+            parts << QStringLiteral("optional");
+        }
+        if (parts.isEmpty())
+        {
+            parts << QStringLiteral("none");
+        }
+        parts << formatHex32(flags);
+        return parts.join(QStringLiteral(" / "));
+    }
+
+    // v4ItemValueText：
+    // - 输入 item：R0 返回的完整 v4 item packet；
+    // - 处理：合并 valueLow/valueHigh，并根据 item kind 添加偏移/RVA/大小语义；
+    // - 返回：表格“值”列文本。
+    QString v4ItemValueText(const KSW_DYN_V4_ITEM_PACKET& item)
+    {
+        const std::uint64_t value =
+            (static_cast<std::uint64_t>(item.valueHigh) << 32U) |
+            static_cast<std::uint64_t>(item.valueLow);
+        const QString hexText = formatHex64(value);
+        switch (item.itemKind)
+        {
+        case KSW_DYN_V4_ITEM_KIND_STRUCT_OFFSET:
+            return QStringLiteral("offset %1").arg(hexText);
+        case KSW_DYN_V4_ITEM_KIND_GLOBAL_RVA:
+        case KSW_DYN_V4_ITEM_KIND_FUNCTION_RVA:
+        case KSW_DYN_V4_ITEM_KIND_LIST_HEAD_GLOBAL:
+            return QStringLiteral("RVA %1").arg(hexText);
+        case KSW_DYN_V4_ITEM_KIND_TYPE_SIZE:
+            return QStringLiteral("size %1").arg(hexText);
+        default:
+            return hexText;
+        }
+    }
+
+    // v4ItemMatchesFilter：
+    // - 输入 entry/filterKeyword：v4 item 行和用户筛选文本；
+    // - 处理：在模块、kind、id、group、value 和 aux 文本中做包含匹配；
+    // - 返回：true 表示该行应该显示。
+    bool v4ItemMatchesFilter(const KernelDynDataV4ItemEntry& entry, const QString& filterKeyword)
+    {
+        if (filterKeyword.isEmpty())
+        {
+            return true;
+        }
+
+        const QString haystack = QStringLiteral("%1 %2 %3 %4 %5 %6 %7")
+            .arg(moduleClassText(entry.moduleClassId))
+            .arg(entry.kindText)
+            .arg(entry.itemId)
+            .arg(entry.itemIndex)
+            .arg(entry.capabilityGroupId)
+            .arg(formatHex64(entry.value))
+            .arg(entry.auxText);
+        return haystack.contains(filterKeyword, Qt::CaseInsensitive);
+    }
+
+    // profileSummaryText：
+    // - 输入 summary：DynData 当前摘要；
+    // - 处理：拼装用于 profile 状态页的紧凑说明；
+    // - 返回：多行文本。
+    QString profileSummaryText(const KernelDynDataSummary& summary)
+    {
+        QStringList lines;
+        lines << QStringLiteral("ntoskrnl: %1").arg(safeText(summary.ntoskrnl.moduleNameText));
+        lines << QStringLiteral("classId: %1").arg(moduleClassText(summary.ntoskrnl.classId));
+        lines << QStringLiteral("machine: %1").arg(formatHex32(summary.ntoskrnl.machine));
+        lines << QStringLiteral("timeDateStamp: %1").arg(formatHex32(summary.ntoskrnl.timeDateStamp));
+        lines << QStringLiteral("sizeOfImage: %1").arg(formatHex32(summary.ntoskrnl.sizeOfImage));
+        lines << QStringLiteral("imageBase: %1").arg(formatHex64(summary.ntoskrnl.imageBase));
+        lines << QStringLiteral("PDB profile active: %1")
+            .arg(boolText(statusFlagEnabled(summary.statusFlags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE)));
+        lines << QStringLiteral("PDB profile scan attempted: %1").arg(boolText(summary.pdbProfileScanAttempted));
+        lines << QStringLiteral("PDB profile found: %1").arg(boolText(summary.pdbProfileFound));
+        lines << QStringLiteral("PDB profile applied: %1").arg(boolText(summary.pdbProfileApplied));
+        lines << QStringLiteral("PDB profile source: %1").arg(safeText(summary.pdbProfileSourceText));
+        lines << QStringLiteral("PDB profile name: %1").arg(safeText(summary.pdbProfileNameText));
+        lines << QStringLiteral("PDB profile path: %1").arg(safeText(summary.pdbProfilePathText));
+        lines << QStringLiteral("PDB profile status: %1").arg(formatNtStatus(summary.pdbProfileStatus));
+        lines << QStringLiteral("PDB profile fields: applied=%1 rejected=%2 unknown=%3 ignoredJson=%4")
+            .arg(summary.pdbProfileAppliedFields)
+            .arg(summary.pdbProfileRejectedFields)
+            .arg(summary.pdbProfileUnknownFields)
+            .arg(summary.pdbProfileIgnoredJsonFields);
+        lines << QStringLiteral("message: %1").arg(safeText(summary.pdbProfileMessageText));
+        lines << QStringLiteral("io: %1").arg(safeText(summary.pdbProfileIoMessageText));
+        appendV4ProfileSummaryLines(lines, summary);
+        return lines.join(QStringLiteral("\n"));
+    }
+
+    // buildProfileReport：
+    // - 输入 summary/rows：当前 DynData 摘要和字段列表；
+    // - 处理：把 profile 激活信息和字段状态压成纯文本，供复制和详情显示；
+    // - 返回：报告文本。
+    QString buildProfileReport(const KernelDynDataSummary& summary, const std::vector<KernelDynDataFieldEntry>& rows)
+    {
+        QStringList lines;
+        lines << QStringLiteral("Ksword DynData PDB Profile Report");
+        lines << QStringLiteral("StatusFlags: %1").arg(formatHex32(summary.statusFlags));
+        lines << QStringLiteral("CapabilityMask: %1").arg(formatHex64(summary.capabilityMask));
+        lines << QStringLiteral("PdbProfileActive: %1").arg(boolText(statusFlagEnabled(summary.statusFlags, KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE)));
+        lines << QStringLiteral("PdbProfileScanAttempted: %1").arg(boolText(summary.pdbProfileScanAttempted));
+        lines << QStringLiteral("PdbProfileFound: %1").arg(boolText(summary.pdbProfileFound));
+        lines << QStringLiteral("PdbProfileApplied: %1").arg(boolText(summary.pdbProfileApplied));
+        lines << QStringLiteral("PdbProfileStatus: %1").arg(formatNtStatus(summary.pdbProfileStatus));
+        lines << QStringLiteral("PdbProfileAppliedFields: %1").arg(summary.pdbProfileAppliedFields);
+        lines << QStringLiteral("PdbProfileRejectedFields: %1").arg(summary.pdbProfileRejectedFields);
+        lines << QStringLiteral("PdbProfileUnknownFields: %1").arg(summary.pdbProfileUnknownFields);
+        lines << QStringLiteral("PdbProfileIgnoredJsonFields: %1").arg(summary.pdbProfileIgnoredJsonFields);
+        lines << QStringLiteral("PdbProfileSource: %1").arg(safeText(summary.pdbProfileSourceText));
+        lines << QStringLiteral("PdbProfileName: %1").arg(safeText(summary.pdbProfileNameText));
+        lines << QStringLiteral("PdbProfilePath: %1").arg(safeText(summary.pdbProfilePathText));
+        lines << QStringLiteral("PdbProfileMessage: %1").arg(safeText(summary.pdbProfileMessageText));
+        lines << QStringLiteral("PdbProfileIo: %1").arg(safeText(summary.pdbProfileIoMessageText));
+        lines << QStringLiteral("");
+        lines << profileSummaryText(summary);
+        lines << QStringLiteral("");
+        lines << QStringLiteral("Fields:");
+        for (const KernelDynDataFieldEntry& entry : rows)
+        {
+            lines << QStringLiteral("%1\t%2\t%3\t%4\t%5\t%6")
+                .arg(safeText(entry.fieldNameText))
+                .arg(formatOffset(entry.offset))
+                .arg(safeText(entry.statusText))
+                .arg(safeText(entry.sourceNameText))
+                .arg(safeText(entry.featureNameText))
+                .arg(formatHex64(entry.capabilityMask));
+        }
+        return lines.join(QStringLiteral("\n"));
+    }
 
     // kCapabilities：
     // - 作用：枚举 Phase 0 暴露的全部 capability；
@@ -168,6 +441,83 @@ namespace
             .arg(KswordTheme::PrimaryBlueHex);
     }
 
+    // copyMenuStyle：
+    // - 输入：无；
+    // - 处理：为 DynData 表格右键菜单提供不透明背景和明确选中态；
+    // - 返回：可直接应用到 QMenu 的样式文本。
+    QString copyMenuStyle()
+    {
+        return QStringLiteral(
+            "QMenu{background:%1;color:%2;border:1px solid %3;}"
+            "QMenu::item{padding:5px 24px 5px 24px;background:transparent;}"
+            "QMenu::item:selected{background:%4;color:#FFFFFF;}"
+            "QMenu::item:disabled{color:%5;}")
+            .arg(KswordTheme::SurfaceHex())
+            .arg(KswordTheme::TextPrimaryHex())
+            .arg(KswordTheme::BorderHex())
+            .arg(KswordTheme::PrimaryBlueHex)
+            .arg(KswordTheme::TextSecondaryHex());
+    }
+
+    // tableRowText：
+    // - 输入 table/rowIndex：目标表格和源行号；
+    // - 处理：读取每列当前文本并用 Tab 拼接；
+    // - 返回：可复制到剪贴板的 TSV 行。
+    QString tableRowText(QTableWidget* table, const int rowIndex)
+    {
+        if (table == nullptr || rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return QString();
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+            fields.push_back(item != nullptr ? item->text() : QString());
+        }
+        return fields.join(QLatin1Char('\t'));
+    }
+
+    // installDynDataCopyMenu：
+    // - 输入 table：DynData 摘要、字段或 profile 表；
+    // - 处理：安装“复制当前行”右键菜单，兼容 NoSelection 摘要表；
+    // - 返回：无，只读复制，不改变驱动状态。
+    void installDynDataCopyMenu(QTableWidget* table)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        {
+            const QModelIndex clickedIndex = table->indexAt(localPosition);
+            const int rowIndex = clickedIndex.isValid() ? clickedIndex.row() : table->currentRow();
+            if (clickedIndex.isValid())
+            {
+                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            }
+
+            QMenu menu(table);
+            menu.setStyleSheet(copyMenuStyle());
+            QAction* copyRowAction = menu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(rowIndex >= 0 && rowIndex < table->rowCount());
+            if (menu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+            {
+                QClipboard* clipboard = QApplication::clipboard();
+                if (clipboard != nullptr)
+                {
+                    clipboard->setText(tableRowText(table, rowIndex));
+                }
+            }
+        });
+    }
+
     // statusLabelStyle：
     // - 输入 colorHex：目标文字颜色；
     // - 处理：拼接 QLabel 样式；
@@ -181,7 +531,7 @@ namespace
     // - 输入 valueText/fallbackText：待展示文本和兜底文本；
     // - 处理：去除首尾空白后判断是否为空；
     // - 返回：非空原文或兜底占位符。
-    QString safeText(const QString& valueText, const QString& fallbackText = QStringLiteral("<空>"))
+    QString safeText(const QString& valueText, const QString& fallbackText)
     {
         return valueText.trimmed().isEmpty() ? fallbackText : valueText;
     }
@@ -193,6 +543,33 @@ namespace
     QString stringToQString(const std::string& valueText)
     {
         return QString::fromUtf8(valueText.c_str(), static_cast<int>(valueText.size()));
+    }
+
+    // friendlyDynDataIoMessage：
+    // - 输入 valueText：DynData wrapper 的 io.message；
+    // - 处理：把底层 IOCTL/unsupported/capability 文本转为可读说明；
+    // - 返回：摘要表、profile 报告和详情区可以直接展示的文本。
+    QString friendlyDynDataIoMessage(const std::string& valueText)
+    {
+        const QString rawText = stringToQString(valueText).trimmed();
+        if (rawText.isEmpty())
+        {
+            return QStringLiteral("驱动未返回额外说明。");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动通信失败或当前驱动版本不支持该 DynData 查询入口。");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动不支持该 DynData 协议版本。");
+        }
+        if (rawText.contains(QStringLiteral("capability"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("DynData 能力未满足，相关运行时详情暂不可用。");
+        }
+        return rawText;
     }
 
     // wideStringToQString：
@@ -430,10 +807,47 @@ namespace
             { "_DRIVER_OBJECT.FastIoDispatch", KSW_DYN_FIELD_ID_DO_FAST_IO_DISPATCH },
             { "DoDriverUnload", KSW_DYN_FIELD_ID_DO_DRIVER_UNLOAD },
             { "_DRIVER_OBJECT.DriverUnload", KSW_DYN_FIELD_ID_DO_DRIVER_UNLOAD },
+            // 卸载驱动记录字段：
+            // - 输入：PDB profile generator 输出的短字段名或 type.field 名称；
+            // - 处理：映射到 shared DynData ID，供后续 apply-profile(-ex) 写入 R0；
+            // - 返回：本表不返回值，调用方通过 fieldIdOut 获得协议字段编号。
+            { "UldName", KSW_DYN_FIELD_ID_ULD_NAME },
+            { "_UNLOADED_DRIVERS.Name", KSW_DYN_FIELD_ID_ULD_NAME },
+            { "UldStartAddress", KSW_DYN_FIELD_ID_ULD_START_ADDRESS },
+            { "_UNLOADED_DRIVERS.StartAddress", KSW_DYN_FIELD_ID_ULD_START_ADDRESS },
+            { "UldEndAddress", KSW_DYN_FIELD_ID_ULD_END_ADDRESS },
+            { "_UNLOADED_DRIVERS.EndAddress", KSW_DYN_FIELD_ID_ULD_END_ADDRESS },
+            { "UldCurrentTime", KSW_DYN_FIELD_ID_ULD_CURRENT_TIME },
+            { "_UNLOADED_DRIVERS.CurrentTime", KSW_DYN_FIELD_ID_ULD_CURRENT_TIME },
+            { "UldTypeSize", KSW_DYN_FIELD_ID_ULD_TYPE_SIZE },
+            { "_UNLOADED_DRIVERS.TypeSize", KSW_DYN_FIELD_ID_ULD_TYPE_SIZE },
+            { "RtlAvlBalancedRoot", KSW_DYN_FIELD_ID_RTL_AVL_BALANCED_ROOT },
+            { "_RTL_AVL_TABLE.BalancedRoot", KSW_DYN_FIELD_ID_RTL_AVL_BALANCED_ROOT },
+            { "RtlAvlOrderedPointer", KSW_DYN_FIELD_ID_RTL_AVL_ORDERED_POINTER },
+            { "_RTL_AVL_TABLE.OrderedPointer", KSW_DYN_FIELD_ID_RTL_AVL_ORDERED_POINTER },
+            { "RtlAvlWhichOrderedElement", KSW_DYN_FIELD_ID_RTL_AVL_WHICH_ORDERED_ELEMENT },
+            { "_RTL_AVL_TABLE.WhichOrderedElement", KSW_DYN_FIELD_ID_RTL_AVL_WHICH_ORDERED_ELEMENT },
+            { "RtlAvlNumberGenericTableElements", KSW_DYN_FIELD_ID_RTL_AVL_NUMBER_GENERIC_TABLE_ELEMENTS },
+            { "_RTL_AVL_TABLE.NumberGenericTableElements", KSW_DYN_FIELD_ID_RTL_AVL_NUMBER_GENERIC_TABLE_ELEMENTS },
+            { "RtlAvlDepthOfTree", KSW_DYN_FIELD_ID_RTL_AVL_DEPTH_OF_TREE },
+            { "_RTL_AVL_TABLE.DepthOfTree", KSW_DYN_FIELD_ID_RTL_AVL_DEPTH_OF_TREE },
+            { "RtlAvlRestartKey", KSW_DYN_FIELD_ID_RTL_AVL_RESTART_KEY },
+            { "_RTL_AVL_TABLE.RestartKey", KSW_DYN_FIELD_ID_RTL_AVL_RESTART_KEY },
+            { "RtlAvlDeleteCount", KSW_DYN_FIELD_ID_RTL_AVL_DELETE_COUNT },
+            { "_RTL_AVL_TABLE.DeleteCount", KSW_DYN_FIELD_ID_RTL_AVL_DELETE_COUNT },
+            { "RtlAvlTypeSize", KSW_DYN_FIELD_ID_RTL_AVL_TYPE_SIZE },
+            { "_RTL_AVL_TABLE.TypeSize", KSW_DYN_FIELD_ID_RTL_AVL_TYPE_SIZE },
             { "PspCidTable", KSW_DYN_FIELD_ID_KG_PSP_CID_TABLE },
             { "PsLoadedModuleList", KSW_DYN_FIELD_ID_KG_PS_LOADED_MODULE_LIST },
             { "MmUnloadedDrivers", KSW_DYN_FIELD_ID_KG_MM_UNLOADED_DRIVERS },
             { "PiDDBCacheTable", KSW_DYN_FIELD_ID_KG_PIDDB_CACHE_TABLE },
+            // Kernel Global RVA 映射：
+            // - 输入：PDB profile pack 中的 Shadow SSDT 全局符号名；
+            // - 处理：映射到 shared DynData 字段 ID，避免 EX apply 将该项计入 ignored；
+            // - 返回：本表不返回值，调用方通过 fieldIdOut 获得协议字段编号。
+            { "KeServiceDescriptorTableShadow", KSW_DYN_FIELD_ID_KG_KE_SERVICE_DESCRIPTOR_TABLE_SHADOW },
+            { "KgKeServiceDescriptorTableShadow", KSW_DYN_FIELD_ID_KG_KE_SERVICE_DESCRIPTOR_TABLE_SHADOW },
+            { "MmLastUnloadedDriver", KSW_DYN_FIELD_ID_KG_MM_LAST_UNLOADED_DRIVER },
             { "PspCreateProcessNotifyRoutine", KSW_DYN_FIELD_ID_CB_PSP_CREATE_PROCESS_NOTIFY_ROUTINE },
             { "PspCreateThreadNotifyRoutine", KSW_DYN_FIELD_ID_CB_PSP_CREATE_THREAD_NOTIFY_ROUTINE },
             { "PspLoadImageNotifyRoutine", KSW_DYN_FIELD_ID_CB_PSP_LOAD_IMAGE_NOTIFY_ROUTINE },
@@ -493,6 +907,8 @@ namespace
         case KSW_DYN_FIELD_ID_KG_PS_LOADED_MODULE_LIST:
         case KSW_DYN_FIELD_ID_KG_MM_UNLOADED_DRIVERS:
         case KSW_DYN_FIELD_ID_KG_PIDDB_CACHE_TABLE:
+        case KSW_DYN_FIELD_ID_KG_KE_SERVICE_DESCRIPTOR_TABLE_SHADOW:
+        case KSW_DYN_FIELD_ID_KG_MM_LAST_UNLOADED_DRIVER:
             return true;
         default:
             return false;
@@ -571,6 +987,10 @@ namespace
         if (normalized.compare(QStringLiteral("StructOffset"), Qt::CaseInsensitive) == 0)
         {
             return QStringLiteral("StructOffset");
+        }
+        if (normalized.compare(QStringLiteral("TypeSize"), Qt::CaseInsensitive) == 0)
+        {
+            return QStringLiteral("TypeSize");
         }
         return normalized;
     }
@@ -697,6 +1117,15 @@ namespace
                 exItem.flags = KSW_DYN_PROFILE_EX_ITEM_FLAG_REQUIRED | KSW_DYN_PROFILE_EX_ITEM_FLAG_CALLBACK;
                 profile.applyExInput.items.push_back(exItem);
             }
+            else if (itemKind == QStringLiteral("TypeSize"))
+            {
+                if (!fieldIdIsStructOffset(fieldId))
+                {
+                    diagnostics << QStringLiteral("callbackItems 语义不匹配: %1 不是 type size").arg(itemName);
+                    return false;
+                }
+                appendProfileExItem(profile, fieldId, KSW_DYN_PROFILE_EX_ITEM_KIND_STRUCT_OFFSET, value, true);
+            }
             else
             {
                 diagnostics << QStringLiteral("callbackItems kind 不支持: %1").arg(itemName);
@@ -786,6 +1215,20 @@ namespace
                 if (value == 0xFFFFFFFFU || value > KSW_DYN_PROFILE_OFFSET_MAX)
                 {
                     diagnostics << QStringLiteral("typed items struct offset 越界: %1").arg(itemName);
+                    return false;
+                }
+                appendProfileExItem(profile, fieldId, KSW_DYN_PROFILE_EX_ITEM_KIND_STRUCT_OFFSET, value, required);
+            }
+            else if (itemKind == QStringLiteral("TypeSize"))
+            {
+                if (!fieldIdIsStructOffset(fieldId))
+                {
+                    diagnostics << QStringLiteral("typed items 语义不匹配: %1 不是 type size").arg(itemName);
+                    return false;
+                }
+                if (value == 0U || value > KSW_DYN_PROFILE_OFFSET_MAX)
+                {
+                    diagnostics << QStringLiteral("typed items type size 越界: %1").arg(itemName);
                     return false;
                 }
                 appendProfileExItem(profile, fieldId, KSW_DYN_PROFILE_EX_ITEM_KIND_STRUCT_OFFSET, value, required);
@@ -1768,6 +2211,62 @@ namespace
         table->setSortingEnabled(false);
     }
 
+    // populateProfileStatusTable：
+    // - 输入 table/summary：profile 状态页表格和 DynData 摘要；
+    // - 处理：仅展示 PDB profile 相关状态，便于确认命中、回退和降级情况；
+    // - 返回：无。
+    void populateProfileStatusTable(QTableWidget* table, const KernelDynDataSummary& summary)
+    {
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setSortingEnabled(false);
+        table->setRowCount(0);
+        appendSummaryRow(table, QStringLiteral("扫描尝试"), boolText(summary.pdbProfileScanAttempted));
+        appendSummaryRow(table, QStringLiteral("找到匹配"), boolText(summary.pdbProfileFound));
+        appendSummaryRow(table, QStringLiteral("已应用"), boolText(summary.pdbProfileApplied));
+        appendSummaryRow(table, QStringLiteral("R0 状态"), formatNtStatus(summary.pdbProfileStatus));
+        appendSummaryRow(table, QStringLiteral("已应用字段"), QString::number(summary.pdbProfileAppliedFields));
+        appendSummaryRow(table, QStringLiteral("拒绝字段"), QString::number(summary.pdbProfileRejectedFields));
+        appendSummaryRow(table, QStringLiteral("未知字段"), QString::number(summary.pdbProfileUnknownFields));
+        appendSummaryRow(table, QStringLiteral("忽略 JSON 字段"), QString::number(summary.pdbProfileIgnoredJsonFields));
+        appendSummaryRow(table, QStringLiteral("来源"), profileSourceDisplayText(summary.pdbProfileSourceText));
+        appendSummaryRow(table, QStringLiteral("名称"), safeText(summary.pdbProfileNameText));
+        appendSummaryRow(table, QStringLiteral("路径"), safeText(summary.pdbProfilePathText));
+        appendSummaryRow(table, QStringLiteral("消息"), safeText(summary.pdbProfileMessageText));
+        appendSummaryRow(table, QStringLiteral("IO 消息"), safeText(summary.pdbProfileIoMessageText));
+        appendSummaryRow(table, QStringLiteral("V4 modules"), QStringLiteral("%1, io=%2, %3")
+            .arg(v4CountText(summary.dynDataV4ModulesReturnedCount, summary.dynDataV4ModulesTotalCount))
+            .arg(v4IoStateText(summary.dynDataV4ModulesQueryOk, summary.dynDataV4ModulesUnsupported))
+            .arg(safeText(summary.dynDataV4ModulesIoMessageText)));
+        appendSummaryRow(table, QStringLiteral("V4 capability groups"), QStringLiteral("%1, io=%2, %3")
+            .arg(v4CountText(summary.dynDataV4CapabilityGroupsReturnedCount, summary.dynDataV4CapabilityGroupsTotalCount))
+            .arg(v4IoStateText(summary.dynDataV4CapabilityGroupsQueryOk, summary.dynDataV4CapabilityGroupsUnsupported))
+            .arg(safeText(summary.dynDataV4CapabilityGroupsIoMessageText)));
+        appendSummaryRow(table, QStringLiteral("V4 missing items"), QStringLiteral("%1, io=%2, %3")
+            .arg(v4CountText(summary.dynDataV4MissingItemsReturnedCount, summary.dynDataV4MissingItemsTotalCount))
+            .arg(v4IoStateText(summary.dynDataV4MissingItemsQueryOk, summary.dynDataV4MissingItemsUnsupported))
+            .arg(safeText(summary.dynDataV4MissingItemsIoMessageText)));
+        appendSummaryRow(table, QStringLiteral("V4 accepted items"), QStringLiteral("%1, io=%2, %3")
+            .arg(v4CountText(summary.dynDataV4ItemsReturnedCount, summary.dynDataV4ItemsTotalCount))
+            .arg(v4IoStateText(summary.dynDataV4ItemsQueryOk, summary.dynDataV4ItemsUnsupported))
+            .arg(safeText(summary.dynDataV4ItemsIoMessageText)));
+        appendSummaryRow(table, QStringLiteral("字段统计"), QStringLiteral("applied=%1 rejected=%2 unknown=%3 ignoredJson=%4")
+            .arg(summary.pdbProfileAppliedFields)
+            .arg(summary.pdbProfileRejectedFields)
+            .arg(summary.pdbProfileUnknownFields)
+            .arg(summary.pdbProfileIgnoredJsonFields));
+        appendSummaryRow(table, QStringLiteral("匹配模块"), safeText(summary.ntoskrnl.moduleNameText));
+        appendSummaryRow(table, QStringLiteral("classId"), moduleClassText(summary.ntoskrnl.classId));
+        appendSummaryRow(table, QStringLiteral("machine"), formatHex32(summary.ntoskrnl.machine));
+        appendSummaryRow(table, QStringLiteral("timestamp"), formatHex32(summary.ntoskrnl.timeDateStamp));
+        appendSummaryRow(table, QStringLiteral("imageSize"), formatHex32(summary.ntoskrnl.sizeOfImage));
+        appendSummaryRow(table, QStringLiteral("imageBase"), formatHex64(summary.ntoskrnl.imageBase));
+        table->setSortingEnabled(false);
+    }
+
     // shouldShowField：
     // - 输入 entry/filterKeyword：字段行和筛选关键字；
     // - 处理：在字段名、偏移、来源、功能、状态和能力名中匹配；
@@ -1788,10 +2287,13 @@ namespace
     }
 
     // queryDynDataSnapshot：
-    // - 输入 summaryOut/rowsOut：输出摘要和字段缓存；
-    // - 处理：通过 ArkDriverClient 查询三个 DynData IOCTL 并转换模型；
+    // - 输入 summaryOut/rowsOut/v4ItemRowsOut：输出摘要、字段缓存和 v4 accepted item 缓存；
+    // - 处理：通过 ArkDriverClient 查询 DynData 基础/v4 IOCTL 并转换模型；
     // - 返回：true 表示至少 status 和 fields 查询都成功。
-    bool queryDynDataSnapshot(KernelDynDataSummary& summaryOut, std::vector<KernelDynDataFieldEntry>& rowsOut)
+    bool queryDynDataSnapshot(
+        KernelDynDataSummary& summaryOut,
+        std::vector<KernelDynDataFieldEntry>& rowsOut,
+        std::vector<KernelDynDataV4ItemEntry>& v4ItemRowsOut)
     {
         ksword::ark::DriverClient client;
         const ksword::ark::DynDataStatusResult initialStatusResult = client.queryDynDataStatus();
@@ -1863,7 +2365,7 @@ namespace
                         {
                             const ksword::ark::DynDataProfileApplyResult applyResult =
                                 client.applyDynDataProfile(profile.applyInput);
-                            pdbProfileIoMessageText = QString::fromStdString(applyResult.io.message);
+                            pdbProfileIoMessageText = friendlyDynDataIoMessage(applyResult.io.message);
                             pdbProfileStatus = applyResult.status;
                             pdbProfileAppliedFields = applyResult.appliedFieldCount;
                             pdbProfileRejectedFields = applyResult.rejectedFieldCount;
@@ -1883,7 +2385,7 @@ namespace
                             {
                                 pdbProfileIoMessageText += QStringLiteral(" | ");
                             }
-                            pdbProfileIoMessageText += QString::fromStdString(applyExResult.io.message);
+                            pdbProfileIoMessageText += friendlyDynDataIoMessage(applyExResult.io.message);
                             pdbProfileStatus = applyExResult.status;
                             pdbProfileAppliedFields += applyExResult.appliedItemCount;
                             pdbProfileRejectedFields += applyExResult.rejectedItemCount;
@@ -1908,7 +2410,7 @@ namespace
         else
         {
             pdbProfileMessageText = QStringLiteral("DynData status 查询失败，无法确认 ntoskrnl identity，跳过 PDB profile 扫描。");
-            pdbProfileIoMessageText = QString::fromStdString(initialStatusResult.io.message);
+            pdbProfileIoMessageText = friendlyDynDataIoMessage(initialStatusResult.io.message);
         }
 
         ksword::ark::DynDataStatusResult statusResult = initialStatusResult;
@@ -1921,20 +2423,28 @@ namespace
             }
             else if (pdbProfileIoMessageText.isEmpty())
             {
-                pdbProfileIoMessageText = QString::fromStdString(refreshedStatusResult.io.message);
+                pdbProfileIoMessageText = friendlyDynDataIoMessage(refreshedStatusResult.io.message);
             }
         }
 
         const ksword::ark::DynDataFieldsResult fieldsResult = client.queryDynDataFields();
         const ksword::ark::DynDataCapabilitiesResult capabilitiesResult = client.queryDynDataCapabilities();
+        const ksword::ark::DynDataV4ModulesResult v4ModulesResult = client.queryDynDataV4Modules();
+        const ksword::ark::DynDataV4CapabilityGroupsResult v4CapabilityGroupsResult =
+            client.queryDynDataV4CapabilityGroups();
+        const ksword::ark::DynDataV4MissingItemsResult v4MissingItemsResult =
+            client.queryDynDataV4MissingItems();
+        const ksword::ark::DynDataV4ItemsResult v4ItemsResult =
+            client.queryDynDataV4Items();
 
         summaryOut = KernelDynDataSummary{};
         rowsOut.clear();
+        v4ItemRowsOut.clear();
 
         summaryOut.statusQueryOk = statusResult.io.ok;
         summaryOut.fieldsQueryOk = fieldsResult.io.ok;
-        summaryOut.statusIoMessageText = QString::fromStdString(statusResult.io.message);
-        summaryOut.fieldsIoMessageText = QString::fromStdString(fieldsResult.io.message);
+        summaryOut.statusIoMessageText = friendlyDynDataIoMessage(statusResult.io.message);
+        summaryOut.fieldsIoMessageText = friendlyDynDataIoMessage(fieldsResult.io.message);
         summaryOut.pdbProfileScanAttempted = pdbProfileScanAttempted;
         summaryOut.pdbProfileFound = pdbProfileFound;
         summaryOut.pdbProfileApplied = pdbProfileApplied;
@@ -1948,6 +2458,69 @@ namespace
         summaryOut.pdbProfilePathText = pdbProfilePathText;
         summaryOut.pdbProfileMessageText = pdbProfileMessageText;
         summaryOut.pdbProfileIoMessageText = pdbProfileIoMessageText;
+        summaryOut.dynDataV4ModulesQueryOk = v4ModulesResult.io.ok;
+        summaryOut.dynDataV4ModulesUnsupported = v4ModulesResult.unsupported;
+        summaryOut.dynDataV4ModulesTotalCount = v4ModulesResult.totalCount;
+        summaryOut.dynDataV4ModulesReturnedCount = v4ModulesResult.returnedCount;
+        summaryOut.dynDataV4ModulesIoMessageText = friendlyDynDataIoMessage(v4ModulesResult.io.message);
+        summaryOut.dynDataV4CapabilityGroupsQueryOk = v4CapabilityGroupsResult.io.ok;
+        summaryOut.dynDataV4CapabilityGroupsUnsupported = v4CapabilityGroupsResult.unsupported;
+        summaryOut.dynDataV4CapabilityGroupsTotalCount = v4CapabilityGroupsResult.totalCount;
+        summaryOut.dynDataV4CapabilityGroupsReturnedCount = v4CapabilityGroupsResult.returnedCount;
+        summaryOut.dynDataV4CapabilityGroupsIoMessageText = friendlyDynDataIoMessage(v4CapabilityGroupsResult.io.message);
+        summaryOut.dynDataV4MissingItemsQueryOk = v4MissingItemsResult.io.ok;
+        summaryOut.dynDataV4MissingItemsUnsupported = v4MissingItemsResult.unsupported;
+        summaryOut.dynDataV4MissingItemsTotalCount = v4MissingItemsResult.totalCount;
+        summaryOut.dynDataV4MissingItemsReturnedCount = v4MissingItemsResult.returnedCount;
+        summaryOut.dynDataV4MissingItemsIoMessageText = friendlyDynDataIoMessage(v4MissingItemsResult.io.message);
+        summaryOut.dynDataV4ItemsQueryOk = v4ItemsResult.io.ok;
+        summaryOut.dynDataV4ItemsUnsupported = v4ItemsResult.unsupported;
+        summaryOut.dynDataV4ItemsTotalCount = v4ItemsResult.totalCount;
+        summaryOut.dynDataV4ItemsReturnedCount = v4ItemsResult.returnedCount;
+        summaryOut.dynDataV4ItemsIoMessageText = friendlyDynDataIoMessage(v4ItemsResult.io.message);
+
+        v4ItemRowsOut.reserve(v4ItemsResult.entries.size());
+        for (const KSW_DYN_V4_ITEM_STATUS_ENTRY& sourceEntry : v4ItemsResult.entries)
+        {
+            const KSW_DYN_V4_ITEM_PACKET& sourceItem = sourceEntry.item;
+            KernelDynDataV4ItemEntry row{};
+            row.moduleClassId = sourceEntry.moduleClassId;
+            row.itemIndex = sourceEntry.itemIndex;
+            row.itemId = sourceItem.itemId;
+            row.itemKind = sourceItem.itemKind;
+            row.flags = sourceItem.flags;
+            row.capabilityGroupId = sourceItem.capabilityGroupId;
+            row.value =
+                (static_cast<std::uint64_t>(sourceItem.valueHigh) << 32U) |
+                static_cast<std::uint64_t>(sourceItem.valueLow);
+            row.kindText = v4ItemKindText(sourceItem.itemKind);
+            row.flagsText = v4ItemFlagsText(sourceItem.flags);
+            row.auxText = QStringLiteral("aux0=%1; aux1=%2; aux2=%3; aux3=%4")
+                .arg(formatHex32(sourceItem.aux0))
+                .arg(formatHex32(sourceItem.aux1))
+                .arg(formatHex32(sourceItem.aux2))
+                .arg(formatHex32(sourceItem.aux3));
+            row.detailText = QStringLiteral(
+                "module=%1 (%2)\n"
+                "itemIndex=%3\n"
+                "itemId=%4\n"
+                "kind=%5 (%6)\n"
+                "flags=%7\n"
+                "capabilityGroupId=%8\n"
+                "value=%9\n"
+                "%10")
+                .arg(moduleClassText(row.moduleClassId))
+                .arg(row.moduleClassId)
+                .arg(row.itemIndex)
+                .arg(row.itemId)
+                .arg(row.kindText)
+                .arg(row.itemKind)
+                .arg(row.flagsText)
+                .arg(row.capabilityGroupId)
+                .arg(v4ItemValueText(sourceItem))
+                .arg(row.auxText);
+            v4ItemRowsOut.push_back(row);
+        }
 
         if (statusResult.io.ok)
         {
@@ -2008,34 +2581,43 @@ void KernelDock::initializeDynDataTab()
         return;
     }
 
-    // 顶层布局：工具栏 + 上下分割区域。上半部分摘要，下半部分字段表和详情。
+    // 动态偏移页改成内层页签：总览 + PDB profile 状态页。
     m_dynDataLayout = new QVBoxLayout(m_dynDataPage);
     m_dynDataLayout->setContentsMargins(4, 4, 4, 4);
     m_dynDataLayout->setSpacing(6);
+
+    m_dynDataInnerTabWidget = new QTabWidget(m_dynDataPage);
+    m_dynDataInnerTabWidget->setIconSize(QSize(16, 16));
+    m_dynDataLayout->addWidget(m_dynDataInnerTabWidget, 1);
+
+    m_dynDataOverviewPage = new QWidget(m_dynDataInnerTabWidget);
+    m_dynDataOverviewLayout = new QVBoxLayout(m_dynDataOverviewPage);
+    m_dynDataOverviewLayout->setContentsMargins(0, 0, 0, 0);
+    m_dynDataOverviewLayout->setSpacing(6);
 
     m_dynDataToolLayout = new QHBoxLayout();
     m_dynDataToolLayout->setContentsMargins(0, 0, 0, 0);
     m_dynDataToolLayout->setSpacing(6);
 
-    m_refreshDynDataButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QString(), m_dynDataPage);
+    m_refreshDynDataButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QString(), m_dynDataOverviewPage);
     m_refreshDynDataButton->setToolTip(QStringLiteral("刷新 R0 DynData 状态和字段表"));
     m_refreshDynDataButton->setStyleSheet(blueButtonStyle());
     m_refreshDynDataButton->setFixedWidth(34);
 
-    m_copyDynDataReportButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), QStringLiteral("复制诊断"), m_dynDataPage);
+    m_copyDynDataReportButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), QStringLiteral("复制诊断"), m_dynDataOverviewPage);
     m_copyDynDataReportButton->setToolTip(QStringLiteral("复制 DynData 状态、能力和字段列表到剪贴板"));
     m_copyDynDataReportButton->setStyleSheet(blueButtonStyle());
 
-    m_dynDataFilterEdit = new QLineEdit(m_dynDataPage);
+    m_dynDataFilterEdit = new QLineEdit(m_dynDataOverviewPage);
     m_dynDataFilterEdit->setPlaceholderText(QStringLiteral("按字段名/偏移/状态/来源/功能/capability 筛选"));
     m_dynDataFilterEdit->setToolTip(QStringLiteral("输入关键字后实时过滤动态偏移字段表"));
     m_dynDataFilterEdit->setClearButtonEnabled(true);
     m_dynDataFilterEdit->setStyleSheet(blueInputStyle());
 
-    m_dynDataStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_dynDataPage);
+    m_dynDataStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_dynDataOverviewPage);
     m_dynDataStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
 
-    m_dynDataKernelBadge = new QLabel(m_dynDataPage);
+    m_dynDataKernelBadge = new QLabel(m_dynDataOverviewPage);
     m_dynDataKernelBadge->setToolTip(QStringLiteral("Kernel/R0 数据来源标识"));
     m_dynDataKernelBadge->setPixmap(QPixmap(QStringLiteral(":/Image/kernel_badge.png")).scaled(20, 20, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     m_dynDataKernelBadge->setFixedSize(24, 24);
@@ -2045,10 +2627,10 @@ void KernelDock::initializeDynDataTab()
     m_dynDataToolLayout->addWidget(m_dynDataFilterEdit, 1);
     m_dynDataToolLayout->addWidget(m_dynDataKernelBadge, 0);
     m_dynDataToolLayout->addWidget(m_dynDataStatusLabel, 0);
-    m_dynDataLayout->addLayout(m_dynDataToolLayout);
+    m_dynDataOverviewLayout->addLayout(m_dynDataToolLayout);
 
-    QSplitter* verticalSplitter = new QSplitter(Qt::Vertical, m_dynDataPage);
-    m_dynDataLayout->addWidget(verticalSplitter, 1);
+    QSplitter* verticalSplitter = new QSplitter(Qt::Vertical, m_dynDataOverviewPage);
+    m_dynDataOverviewLayout->addWidget(verticalSplitter, 1);
 
     m_dynDataSummaryTable = new QTableWidget(verticalSplitter);
     m_dynDataSummaryTable->setColumnCount(static_cast<int>(SummaryColumn::Count));
@@ -2064,6 +2646,7 @@ void KernelDock::initializeDynDataTab()
     m_dynDataSummaryTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(SummaryColumn::Value), QHeaderView::Stretch);
     m_dynDataSummaryTable->setColumnWidth(static_cast<int>(SummaryColumn::Name), 220);
     m_dynDataSummaryTable->setToolTip(QStringLiteral("DynData 精确匹配、模块身份和 capability 摘要"));
+    installDynDataCopyMenu(m_dynDataSummaryTable);
 
     QSplitter* lowerSplitter = new QSplitter(Qt::Horizontal, verticalSplitter);
 
@@ -2092,6 +2675,7 @@ void KernelDock::initializeDynDataTab()
     m_dynDataFieldTable->setColumnWidth(static_cast<int>(DynDataColumn::Source), 180);
     m_dynDataFieldTable->setColumnWidth(static_cast<int>(DynDataColumn::Feature), 180);
     m_dynDataFieldTable->setColumnWidth(static_cast<int>(DynDataColumn::Capability), 180);
+    installDynDataCopyMenu(m_dynDataFieldTable);
 
     m_dynDataDetailEditor = new CodeEditorWidget(lowerSplitter);
     m_dynDataDetailEditor->setReadOnly(true);
@@ -2101,6 +2685,76 @@ void KernelDock::initializeDynDataTab()
     verticalSplitter->setStretchFactor(1, 5);
     lowerSplitter->setStretchFactor(0, 3);
     lowerSplitter->setStretchFactor(1, 2);
+
+    m_dynDataInnerTabWidget->addTab(
+        m_dynDataOverviewPage,
+        QIcon(QStringLiteral(":/Icon/process_priority.svg")),
+        QStringLiteral("总览"));
+
+    m_dynDataProfilePage = new QWidget(m_dynDataInnerTabWidget);
+    m_dynDataProfileLayout = new QVBoxLayout(m_dynDataProfilePage);
+    m_dynDataProfileLayout->setContentsMargins(4, 4, 4, 4);
+    m_dynDataProfileLayout->setSpacing(6);
+
+    m_dynDataProfileStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_dynDataProfilePage);
+    m_dynDataProfileStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::TextSecondaryHex()));
+    m_dynDataProfileLayout->addWidget(m_dynDataProfileStatusLabel, 0);
+
+    QSplitter* profileSplitter = new QSplitter(Qt::Vertical, m_dynDataProfilePage);
+    m_dynDataProfileLayout->addWidget(profileSplitter, 1);
+
+    m_dynDataProfileSummaryTable = new QTableWidget(profileSplitter);
+    m_dynDataProfileSummaryTable->setColumnCount(2);
+    m_dynDataProfileSummaryTable->setHorizontalHeaderLabels(QStringList{ QStringLiteral("项目"), QStringLiteral("值") });
+    m_dynDataProfileSummaryTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_dynDataProfileSummaryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_dynDataProfileSummaryTable->setAlternatingRowColors(true);
+    m_dynDataProfileSummaryTable->setStyleSheet(itemSelectionStyle());
+    m_dynDataProfileSummaryTable->setCornerButtonEnabled(false);
+    m_dynDataProfileSummaryTable->verticalHeader()->setVisible(false);
+    m_dynDataProfileSummaryTable->horizontalHeader()->setStyleSheet(headerStyle());
+    m_dynDataProfileSummaryTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_dynDataProfileSummaryTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    installDynDataCopyMenu(m_dynDataProfileSummaryTable);
+
+    m_dynDataV4ItemTable = new QTableWidget(profileSplitter);
+    m_dynDataV4ItemTable->setColumnCount(9);
+    m_dynDataV4ItemTable->setHorizontalHeaderLabels(QStringList{
+        QStringLiteral("模块"),
+        QStringLiteral("序号"),
+        QStringLiteral("ItemId"),
+        QStringLiteral("Kind"),
+        QStringLiteral("Group"),
+        QStringLiteral("Flags"),
+        QStringLiteral("Value"),
+        QStringLiteral("Aux"),
+        QStringLiteral("说明")
+        });
+    m_dynDataV4ItemTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_dynDataV4ItemTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_dynDataV4ItemTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_dynDataV4ItemTable->setAlternatingRowColors(true);
+    m_dynDataV4ItemTable->setStyleSheet(itemSelectionStyle());
+    m_dynDataV4ItemTable->setCornerButtonEnabled(false);
+    m_dynDataV4ItemTable->verticalHeader()->setVisible(false);
+    m_dynDataV4ItemTable->horizontalHeader()->setStyleSheet(headerStyle());
+    m_dynDataV4ItemTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_dynDataV4ItemTable->horizontalHeader()->setSectionResizeMode(8, QHeaderView::Stretch);
+    m_dynDataV4ItemTable->setToolTip(QStringLiteral("R0 已接受并缓存的 DynData v4 PDB item 清单，只读展示，不触发业务消费。"));
+    installDynDataCopyMenu(m_dynDataV4ItemTable);
+
+    m_dynDataProfileDetailEditor = new CodeEditorWidget(profileSplitter);
+    m_dynDataProfileDetailEditor->setReadOnly(true);
+    m_dynDataProfileDetailEditor->setText(QStringLiteral("请先刷新动态偏移，再查看 PDB profile 管理状态。"));
+
+    profileSplitter->setStretchFactor(0, 2);
+    profileSplitter->setStretchFactor(1, 3);
+    profileSplitter->setStretchFactor(2, 2);
+
+    m_dynDataInnerTabWidget->addTab(
+        m_dynDataProfilePage,
+        QIcon(QStringLiteral(":/Icon/process_details.svg")),
+        QStringLiteral("PDB Profile"));
 
     // 信号连接：刷新、筛选、当前行详情和报告复制都在本页内部完成。
     connect(m_refreshDynDataButton, &QPushButton::clicked, this, [this]() {
@@ -2116,6 +2770,7 @@ void KernelDock::initializeDynDataTab()
     });
     connect(m_dynDataFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
         rebuildDynDataFieldTable(filterText.trimmed());
+        rebuildDynDataV4ItemTable(filterText.trimmed());
     });
     connect(m_dynDataFieldTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showDynDataDetailByCurrentRow();
@@ -2150,9 +2805,10 @@ void KernelDock::refreshDynDataAsync()
     std::thread([guardThis]() {
         KernelDynDataSummary summary;
         std::vector<KernelDynDataFieldEntry> rows;
-        const bool success = queryDynDataSnapshot(summary, rows);
+        std::vector<KernelDynDataV4ItemEntry> v4ItemRows;
+        const bool success = queryDynDataSnapshot(summary, rows, v4ItemRows);
 
-        QMetaObject::invokeMethod(guardThis, [guardThis, success, summary = std::move(summary), rows = std::move(rows)]() mutable {
+        QMetaObject::invokeMethod(guardThis, [guardThis, success, summary = std::move(summary), rows = std::move(rows), v4ItemRows = std::move(v4ItemRows)]() mutable {
             if (guardThis == nullptr)
             {
                 return;
@@ -2162,12 +2818,14 @@ void KernelDock::refreshDynDataAsync()
             guardThis->m_refreshDynDataButton->setEnabled(true);
             guardThis->m_dynDataSummary = std::move(summary);
             guardThis->m_dynDataRows = std::move(rows);
+            guardThis->m_dynDataV4ItemRows = std::move(v4ItemRows);
 
             populateSummaryTable(
                 guardThis->m_dynDataSummaryTable,
                 guardThis->m_dynDataSummary,
                 guardThis->m_dynDataRows.size());
             guardThis->rebuildDynDataFieldTable(guardThis->m_dynDataFilterEdit->text().trimmed());
+            guardThis->rebuildDynDataV4ItemTable(guardThis->m_dynDataFilterEdit->text().trimmed());
 
             const std::size_t missingRequiredCount = static_cast<std::size_t>(
                 std::count_if(
@@ -2183,6 +2841,18 @@ void KernelDock::refreshDynDataAsync()
                 guardThis->m_dynDataStatusLabel->setText(QStringLiteral("状态：刷新失败"));
                 guardThis->m_dynDataStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
                 guardThis->m_dynDataDetailEditor->setText(buildDynDataReport(guardThis->m_dynDataSummary, guardThis->m_dynDataRows));
+                populateProfileStatusTable(guardThis->m_dynDataProfileSummaryTable, guardThis->m_dynDataSummary);
+                if (guardThis->m_dynDataProfileStatusLabel != nullptr)
+                {
+                    guardThis->m_dynDataProfileStatusLabel->setText(QStringLiteral("状态：profile 诊断失败，保留现有摘要"));
+                    guardThis->m_dynDataProfileStatusLabel->setStyleSheet(statusLabelStyle(QStringLiteral("#B23A3A")));
+                }
+                if (guardThis->m_dynDataProfileDetailEditor != nullptr)
+                {
+                    guardThis->m_dynDataProfileDetailEditor->setText(
+                        profileSummaryText(guardThis->m_dynDataSummary) + QStringLiteral("\n\n") +
+                        buildDynDataReport(guardThis->m_dynDataSummary, guardThis->m_dynDataRows));
+                }
             }
             else
             {
@@ -2204,6 +2874,23 @@ void KernelDock::refreshDynDataAsync()
                 else
                 {
                     guardThis->m_dynDataDetailEditor->setText(QStringLiteral("当前筛选条件下没有动态偏移字段。"));
+                }
+
+                populateProfileStatusTable(guardThis->m_dynDataProfileSummaryTable, guardThis->m_dynDataSummary);
+                if (guardThis->m_dynDataProfileStatusLabel != nullptr)
+                {
+                    guardThis->m_dynDataProfileStatusLabel->setText(
+                        QStringLiteral("状态：%1，profile %2")
+                        .arg(ntosActive ? QStringLiteral("ntos profile 已命中") : QStringLiteral("ntos profile 未命中"))
+                        .arg(pdbProfileActive ? QStringLiteral("已启用") : QStringLiteral("未启用")));
+                    guardThis->m_dynDataProfileStatusLabel->setStyleSheet(
+                        statusLabelStyle(ntosActive && pdbProfileActive ? QStringLiteral("#3A8F3A") : QStringLiteral("#D77A00")));
+                }
+                if (guardThis->m_dynDataProfileDetailEditor != nullptr)
+                {
+                    guardThis->m_dynDataProfileDetailEditor->setText(
+                        profileSummaryText(guardThis->m_dynDataSummary) + QStringLiteral("\n\n") +
+                        buildDynDataReport(guardThis->m_dynDataSummary, guardThis->m_dynDataRows));
                 }
             }
 
@@ -2269,6 +2956,71 @@ void KernelDock::rebuildDynDataFieldTable(const QString& filterKeyword)
     }
 
     m_dynDataFieldTable->setSortingEnabled(true);
+}
+
+void KernelDock::rebuildDynDataV4ItemTable(const QString& filterKeyword)
+{
+    if (m_dynDataV4ItemTable == nullptr)
+    {
+        return;
+    }
+
+    // insertReadonlyCell：
+    // - 输入 row/column/text：目标单元格位置和展示文本；
+    // - 处理：创建不可编辑 item 并写入 v4 item 表；
+    // - 返回：无，表格所有列均为只读审计信息。
+    const auto insertReadonlyCell = [this](const int row, const int column, const QString& text)
+    {
+        QTableWidgetItem* item = new QTableWidgetItem(text);
+        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+        m_dynDataV4ItemTable->setItem(row, column, item);
+    };
+
+    m_dynDataV4ItemTable->setSortingEnabled(false);
+    m_dynDataV4ItemTable->setRowCount(0);
+
+    for (const KernelDynDataV4ItemEntry& entry : m_dynDataV4ItemRows)
+    {
+        if (!v4ItemMatchesFilter(entry, filterKeyword))
+        {
+            continue;
+        }
+
+        const int rowIndex = m_dynDataV4ItemTable->rowCount();
+        m_dynDataV4ItemTable->insertRow(rowIndex);
+        insertReadonlyCell(rowIndex, 0, moduleClassText(entry.moduleClassId));
+        insertReadonlyCell(rowIndex, 1, QString::number(entry.itemIndex));
+        insertReadonlyCell(rowIndex, 2, QString::number(entry.itemId));
+        insertReadonlyCell(rowIndex, 3, entry.kindText);
+        insertReadonlyCell(rowIndex, 4, QString::number(entry.capabilityGroupId));
+        insertReadonlyCell(rowIndex, 5, entry.flagsText);
+        insertReadonlyCell(rowIndex, 6, formatHex64(entry.value));
+        insertReadonlyCell(rowIndex, 7, entry.auxText);
+        insertReadonlyCell(rowIndex, 8, QString(entry.detailText).replace(QStringLiteral("\n"), QStringLiteral("; ")));
+    }
+
+    if (m_dynDataV4ItemTable->rowCount() == 0)
+    {
+        const QString stateText = v4IoStateText(m_dynDataSummary.dynDataV4ItemsQueryOk, m_dynDataSummary.dynDataV4ItemsUnsupported);
+        const QString detailText = QStringLiteral("V4 accepted item 查询状态：%1；返回 %2/%3；%4")
+            .arg(stateText)
+            .arg(m_dynDataSummary.dynDataV4ItemsReturnedCount)
+            .arg(m_dynDataSummary.dynDataV4ItemsTotalCount)
+            .arg(safeText(m_dynDataSummary.dynDataV4ItemsIoMessageText));
+        const int rowIndex = m_dynDataV4ItemTable->rowCount();
+        m_dynDataV4ItemTable->insertRow(rowIndex);
+        insertReadonlyCell(rowIndex, 0, QStringLiteral("<无v4 item>"));
+        insertReadonlyCell(rowIndex, 1, QStringLiteral("N/A"));
+        insertReadonlyCell(rowIndex, 2, QStringLiteral("N/A"));
+        insertReadonlyCell(rowIndex, 3, stateText);
+        insertReadonlyCell(rowIndex, 4, QStringLiteral("N/A"));
+        insertReadonlyCell(rowIndex, 5, QStringLiteral("N/A"));
+        insertReadonlyCell(rowIndex, 6, QStringLiteral("N/A"));
+        insertReadonlyCell(rowIndex, 7, QStringLiteral("N/A"));
+        insertReadonlyCell(rowIndex, 8, detailText);
+    }
+
+    m_dynDataV4ItemTable->setSortingEnabled(true);
 }
 
 bool KernelDock::currentDynDataFieldSourceIndex(std::size_t& sourceIndexOut) const

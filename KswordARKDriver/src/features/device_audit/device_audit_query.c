@@ -226,10 +226,13 @@ Return Value:
 
     scratchBytes = KSW_DEVICE_AUDIT_INTEGRITY_RESPONSE_HEADER_SIZE +
         ((size_t)scratchRows * sizeof(KSWORD_ARK_DRIVER_INTEGRITY_EVIDENCE));
+#pragma warning(push)
+#pragma warning(disable:4996)
     integrityResponse = (KSWORD_ARK_QUERY_DRIVER_INTEGRITY_RESPONSE*)ExAllocatePoolWithTag(
         NonPagedPoolNx,
         scratchBytes,
         KSW_DEVICE_AUDIT_POOL_TAG);
+#pragma warning(pop)
     if (integrityResponse == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }

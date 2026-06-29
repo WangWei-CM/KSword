@@ -163,12 +163,12 @@ namespace
         const ksword::ark::IoResult& ioResult)
     {
         detailLines << QStringLiteral("[%1]").arg(titleText);
-        detailLines << QStringLiteral("ok=%1 win32=%2 nt=%3 bytes=%4 message=%5")
+        detailLines << QStringLiteral("ok=%1 win32=%2 nt=%3 bytes=%4 说明=%5")
             .arg(ioResult.ok ? QStringLiteral("true") : QStringLiteral("false"))
             .arg(ioResult.win32Error)
             .arg(formatNtStatusText(ioResult.ntStatus))
             .arg(ioResult.bytesReturned)
-            .arg(QString::fromStdString(ioResult.message));
+            .arg(friendlyDriverIoMessage(ioResult.message));
     }
 
     // evidenceModuleNameMatches：判断 R0 返回模块名是否对应目标模块。
@@ -396,7 +396,7 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         if (!iatEatResult.io.ok)
         {
             evidence.hasScanError = true;
-            detailLines << QStringLiteral("扫描失败: %1").arg(QString::fromStdString(iatEatResult.io.message));
+            detailLines << QStringLiteral("扫描失败: %1").arg(friendlyDriverIoMessage(iatEatResult.io.message));
         }
         else
         {
@@ -438,7 +438,7 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         if (!inlineResult.io.ok)
         {
             evidence.hasScanError = true;
-            detailLines << QStringLiteral("扫描失败: %1").arg(QString::fromStdString(inlineResult.io.message));
+            detailLines << QStringLiteral("扫描失败: %1").arg(friendlyDriverIoMessage(inlineResult.io.message));
         }
         else
         {
@@ -478,7 +478,7 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         if (!callbackResult.io.ok)
         {
             evidence.hasScanError = true;
-            detailLines << QStringLiteral("枚举失败: %1").arg(QString::fromStdString(callbackResult.io.message));
+            detailLines << QStringLiteral("枚举失败: %1").arg(friendlyDriverIoMessage(callbackResult.io.message));
         }
         else
         {

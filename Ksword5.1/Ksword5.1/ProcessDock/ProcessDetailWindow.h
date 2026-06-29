@@ -110,6 +110,17 @@ private:
         std::uint64_t r0InitialStack = 0;  // KTHREAD.InitialStack。
         std::uint32_t r0ThreadStatus = KSWORD_ARK_THREAD_R0_STATUS_UNAVAILABLE; // R0 线程状态。
         std::uint64_t r0CapabilityMask = 0; // R0 capability。
+        QString r0RuntimeDetailText;       // R0 运行时详情可读摘要。
+        std::uint32_t r0DetailStatus = KSWORD_ARK_DETAIL_STATUS_UNKNOWN; // detail IOCTL 总体状态。
+        std::uint32_t r0DetailFieldFlags = 0; // detail IOCTL 实际返回字段位图。
+        std::uint64_t r0MissingCapabilityMask = 0; // detail IOCTL 缺失能力位图。
+        long r0DetailLastStatus = 0;        // detail IOCTL 最近 NTSTATUS。
+        std::uint64_t r0ReadOperationCount = 0; // KTHREAD 读操作计数。
+        std::uint64_t r0WriteOperationCount = 0; // KTHREAD 写操作计数。
+        std::uint64_t r0OtherOperationCount = 0; // KTHREAD 其他操作计数。
+        std::uint64_t r0ReadTransferCount = 0; // KTHREAD 读传输字节。
+        std::uint64_t r0WriteTransferCount = 0; // KTHREAD 写传输字节。
+        std::uint64_t r0OtherTransferCount = 0; // KTHREAD 其他传输字节。
     };
 
     // ThreadInspectRefreshResult：线程细节异步刷新结果。
@@ -216,7 +227,7 @@ private:
     void initializeModuleTab();
     void initializeTokenTab();
     // initializeKernelObjectTab 作用：
-    // - 构建 Phase-2 “内核对象”页面；
+    // - 构建 Process Detail Evidence 页面；
     // - 展示 R0 扩展字段、DynData capability、字段来源和可用性；
     // - 仅显示 ObjectTable/SectionObject 可用状态，不在本页直接枚举句柄表或 Section。
     // 调用方式：initializeUi 中创建 m_kernelObjectTab 后调用。
@@ -271,7 +282,7 @@ private:
     // 返回：无。
     void requestInitialRefreshForCurrentTab();
     // refreshKernelObjectTabTexts 作用：
-    // - 根据 m_baseRecord 刷新“内核对象”页所有标签；
+    // - 根据 m_baseRecord 刷新“Process Detail Evidence”页所有标签；
     // - DynData 未命中时显示 Unavailable，避免误导用户可直接进入后续句柄/Section 枚举。
     // 调用方式：refreshDetailTabTexts 和 updateBaseRecord 间接调用。
     // 参数：无。
@@ -282,6 +293,14 @@ private:
     void requestAsyncThreadInspectRefresh();
     void applyThreadInspectResult(const ThreadInspectRefreshResult& refreshResult);
     void updateThreadInspectStatusLabel(const QString& statusText, bool refreshing);
+    // requestAsyncSelectedThreadRuntimeSample 作用：
+    // - 对线程表当前选中 TID 执行 PDB deep runtime 小字段采样；
+    // - 只传 TID/PID 和 JSON offset/size，不把 ETHREAD 地址作为输入；
+    // - 后台执行，避免 UI 线程因为旧驱动或大量字段阻塞。
+    // 调用方式：线程页“采样PDB字段”按钮触发。
+    // 参数：无。
+    // 返回：无。
+    void requestAsyncSelectedThreadRuntimeSample();
     // openSelectedThreadStackWindow 作用：
     // - 根据线程页当前选中行打开 Phase-8 调用栈窗口；
     // - 使用最近一次线程刷新缓存中的 TID/PID/栈边界构造目标。
@@ -362,6 +381,11 @@ private:
     void showModuleContextMenu(const QPoint& localPosition);
     void copyCurrentModuleCell();
     void copyCurrentModuleRow();
+    // showCurrentModuleDetailDialog 作用：
+    // - 打开当前选中模块的只读详情弹窗；
+    // - 输入来自模块表当前行和 m_moduleRecords 缓存；
+    // - 返回：无，弹窗关闭后自动释放。
+    void showCurrentModuleDetailDialog();
     void openCurrentModuleFolder();
     void unloadCurrentModule();
     void suspendCurrentModuleThread();
@@ -478,7 +502,7 @@ private:
     QWidget* m_moduleTab = nullptr;            // “模块”页。
     QWidget* m_tokenTab = nullptr;             // “令牌”页。
     QWidget* m_tokenSwitchTab = nullptr;       // “令牌开关”页。
-    QWidget* m_kernelObjectTab = nullptr;      // “内核对象”页。
+    QWidget* m_kernelObjectTab = nullptr;      // “Process Detail Evidence”页。
     QWidget* m_hotkeyTab = nullptr;            // “进程热键”页。
     QWidget* m_keyboardTab = nullptr;          // “键盘”页。
     QWidget* m_pebTab = nullptr;               // “PEB”页。
@@ -513,8 +537,10 @@ private:
     // ======== 线程页控件 ========
     QVBoxLayout* m_threadLayout = nullptr;     // 线程页总布局。
     QPushButton* m_refreshThreadInspectButton = nullptr; // 刷新线程细节按钮。
+    QPushButton* m_sampleThreadRuntimeButton = nullptr; // 当前线程 PDB 字段采样按钮。
     QLabel* m_threadInspectStatusLabel = nullptr; // 线程细节刷新状态。
     QTableWidget* m_threadInspectTable = nullptr; // 线程细节表格。
+    CodeEditorWidget* m_threadRuntimeSampleOutput = nullptr; // 当前线程 PDB deep 采样详情。
 
     // ======== 操作页控件 ========
     QVBoxLayout* m_actionLayout = nullptr;     // 操作页总布局。
@@ -565,11 +591,13 @@ private:
     bool m_threadInspectRefreshing = false;        // 线程细节是否正在刷新。
     bool m_threadInspectInitialRefreshStarted = false; // 线程页首次刷新是否已经按需启动。
     std::uint64_t m_threadInspectRefreshTicket = 0;// 线程细节刷新序号。
+    bool m_threadRuntimeSampleRefreshing = false;  // 当前线程 PDB 采样是否正在进行。
+    std::uint64_t m_threadRuntimeSampleTicket = 0; // 当前线程 PDB 采样防乱序序号。
     int m_threadInspectRefreshProgressPid = 0;     // 线程细节刷新对应进度 PID。
     std::vector<ThreadInspectItem> m_threadInspectRows; // 线程详情页最近一次刷新缓存。
 
-    // ======== 内核对象页控件 ========
-    QVBoxLayout* m_kernelObjectLayout = nullptr; // 内核对象页总布局。
+    // ======== Process Detail Evidence 页控件 ========
+    QVBoxLayout* m_kernelObjectLayout = nullptr; // Process Detail Evidence 页总布局。
     QLabel* m_kernelObjectR0StatusValue = nullptr; // R0 扩展读取状态。
     QLabel* m_kernelObjectCapabilityValue = nullptr; // DynData capability 位图。
     QLabel* m_kernelObjectProtectionValue = nullptr; // EPROCESS.Protection 原始值。

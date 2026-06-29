@@ -47,6 +47,39 @@ namespace
             .toUpper();
     }
 
+    // friendlyHandleIoMessage 作用：
+    // - 把 ArkDriverClient/IOCTL 返回的底层 message 转成详情页可读说明；
+    // - 输入 messageText：IoResult::message 原始窄字符串；
+    // - 返回：中文短句，避免 Object Header 表直接展示 DeviceIoControl/raw log。
+    QString friendlyHandleIoMessage(const std::string& messageText)
+    {
+        const QString rawText = QString::fromUtf8(messageText.data(), static_cast<int>(messageText.size())).trimmed();
+        if (rawText.isEmpty())
+        {
+            return QStringLiteral("驱动未返回额外说明。");
+        }
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动接口调用失败或当前驱动版本不支持该句柄对象详情入口。");
+        }
+        if (rawText.contains(QStringLiteral("unsupported"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("not supported"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("当前驱动不支持该句柄对象详情查询。");
+        }
+        if (rawText.contains(QStringLiteral("capability"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("DynData"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("动态偏移能力不足，无法安全解码该句柄对象详情。");
+        }
+        if (rawText.contains(QStringLiteral("access"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("denied"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("访问被系统策略或目标对象权限限制，已保留可用的只读证据。");
+        }
+        return rawText;
+    }
+
     // objectQueryStatusText 作用：把 R0 对象查询状态转换成详情页可读文本。
     QString objectQueryStatusText(const std::uint32_t status)
     {
@@ -309,12 +342,14 @@ HandleDock::HandleDetailRefreshResult HandleDock::buildHandleDetailRefreshResult
             result.fields.push_back(std::move(field));
         };
 
+    addField(QStringLiteral("Object Header Snapshot"), QStringLiteral("Read only"));
     addField(QStringLiteral("PID"), QString::number(row.processId));
     addField(QStringLiteral("进程名"), row.processName);
     addField(QStringLiteral("句柄值"), formatHex(row.handleValue, 0));
-    addField(QStringLiteral("TypeIndex"), QString::number(row.typeIndex));
-    addField(QStringLiteral("类型"), row.typeName);
     addField(QStringLiteral("对象地址"), formatHex(row.objectAddress, 0));
+    addField(QStringLiteral("对象类型索引"), QString::number(row.typeIndex));
+    addField(QStringLiteral("对象类型"), row.typeName);
+    addField(QStringLiteral("对象名"), formatObjectNameDisplayText(row));
     addField(QStringLiteral("访问掩码"), formatHex(row.grantedAccess, 8));
     addField(QStringLiteral("访问掩码语义"), decodeGrantedAccessText(row.typeName, row.grantedAccess));
     addField(QStringLiteral("属性"), formatHandleAttributes(row.attributes));
@@ -323,6 +358,9 @@ HandleDock::HandleDetailRefreshResult HandleDock::buildHandleDetailRefreshResult
     addField(QStringLiteral("来源"), formatHandleSourceText(row.sourceMode));
     addField(QStringLiteral("解码状态"), formatHandleDecodeStatusText(row.decodeStatus));
     addField(QStringLiteral("差异状态"), formatHandleDiffStatusText(row.diffStatus));
+    addField(QStringLiteral("风险标记"), QStringLiteral("%1 / %2")
+        .arg(formatHandleDiffStatusText(row.diffStatus))
+        .arg(formatHandleDecodeStatusText(row.decodeStatus)));
     addField(QStringLiteral("R0字段位"), formatHex(row.r0FieldFlags, 8));
     addField(QStringLiteral("DynData Capability"), formatHex(row.r0DynDataCapabilityMask, 0));
     addField(QStringLiteral("EPROCESS.ObjectTable偏移"), formatHex(row.epObjectTableOffset, 0));
@@ -331,7 +369,6 @@ HandleDock::HandleDetailRefreshResult HandleDock::buildHandleDetailRefreshResult
     addField(QStringLiteral("ObAttributesShift"), QString::number(row.obAttributesShift));
     addField(QStringLiteral("OBJECT_TYPE.Name偏移"), formatHex(row.otNameOffset, 0));
     addField(QStringLiteral("OBJECT_TYPE.Index偏移"), formatHex(row.otIndexOffset, 0));
-    addField(QStringLiteral("对象名"), formatObjectNameDisplayText(row));
 
     {
         const auto r0ObjectResult = ksword::ark::DriverClient().queryHandleObject(
@@ -339,7 +376,7 @@ HandleDock::HandleDetailRefreshResult HandleDock::buildHandleDetailRefreshResult
             row.handleValue,
             KSWORD_ARK_QUERY_OBJECT_FLAG_INCLUDE_ALL,
             row.grantedAccess);
-        addField(QStringLiteral("R0对象查询IO"), QString::fromStdString(r0ObjectResult.io.message));
+        addField(QStringLiteral("R0对象查询说明"), friendlyHandleIoMessage(r0ObjectResult.io.message));
         if (r0ObjectResult.io.ok)
         {
             const QString r0TypeName = wideToQString(r0ObjectResult.typeName);
@@ -366,7 +403,7 @@ HandleDock::HandleDetailRefreshResult HandleDock::buildHandleDetailRefreshResult
                     row.processId,
                     row.handleValue,
                     KSWORD_ARK_ALPC_QUERY_FLAG_INCLUDE_ALL);
-                addField(QStringLiteral("R0 ALPC查询IO"), QString::fromStdString(alpcResult.io.message));
+                addField(QStringLiteral("R0 ALPC查询说明"), friendlyHandleIoMessage(alpcResult.io.message));
                 if (alpcResult.io.ok)
                 {
                     const auto appendAlpcPort = [&addField](const ksword::ark::AlpcPortInfo& portInfo, const std::uint32_t responseFieldFlags)
@@ -440,6 +477,19 @@ HandleDock::HandleDetailRefreshResult HandleDock::buildHandleDetailRefreshResult
                 }
             }
         }
+    }
+
+    if (row.diffStatus == HandleDiffStatus::KernelOnly)
+    {
+        addField(QStringLiteral("风险说明"), QStringLiteral("仅内核可见，优先关注对象头与类型归属。"));
+    }
+    else if (row.diffStatus == HandleDiffStatus::UserOnly)
+    {
+        addField(QStringLiteral("风险说明"), QStringLiteral("仅用户态可见，可能存在枚举缺口或访问限制。"));
+    }
+    else if (row.diffStatus == HandleDiffStatus::NotCompared)
+    {
+        addField(QStringLiteral("风险说明"), QStringLiteral("当前未启用双源对比。"));
     }
 
     HANDLE processHandle = ::OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, row.processId);

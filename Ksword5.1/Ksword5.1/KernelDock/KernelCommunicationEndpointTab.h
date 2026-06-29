@@ -37,6 +37,18 @@ private:
     void showContextMenu(const QPoint& localPosition);
     void copyCurrentRow() const;
 
+    // buildDiagnosticText：
+    // - 输入：通信对象枚举失败、无结果或筛选无命中的原因；
+    // - 处理：补充筛选关键字和通信对象页的数据来源说明；
+    // - 返回：可放入状态列/复制行的紧凑诊断文本。
+    QString buildDiagnosticText(const QString& reasonText) const;
+
+    // insertDiagnosticRow：
+    // - 输入：诊断标题和详情文本；
+    // - 处理：向表格插入一行可复制的诊断占位；
+    // - 返回：无返回值，只更新 UI。
+    void insertDiagnosticRow(const QString& titleText, const QString& detailText);
+
     bool rowMatchesFilter(const KernelObjectDirectoryDeepEntry& entry) const;
     static bool isCommunicationEndpoint(const KernelObjectDirectoryDeepEntry& entry);
     static QTableWidgetItem* readOnlyItem(const QString& text);

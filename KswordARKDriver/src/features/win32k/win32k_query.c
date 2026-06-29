@@ -16,6 +16,9 @@ Environment:
 
 #include "win32k_query.h"
 #include "win32k_support.h"
+#include "ark/ark_keyboard.h"
+
+#include <ntstrsafe.h>
 
 #define KSWORD_ARK_WIN32K_PROFILE_RESPONSE_HEADER_SIZE \
     (sizeof(KSWORD_ARK_WIN32K_PROFILE_STATUS_RESPONSE) - sizeof(KSWORD_ARK_WIN32K_SESSION_ENTRY))
@@ -35,6 +38,8 @@ Environment:
 #ifndef STATUS_NOT_FOUND
 #define STATUS_NOT_FOUND ((NTSTATUS)0xC0000225L)
 #endif
+
+#define KSWORD_ARK_WIN32K_BRIDGE_TAG 'B3WK'
 
 static NTSTATUS
 KswordARKWin32kPrepareProfileHeader(
@@ -80,6 +85,143 @@ Return Value:
     (*ResponseOut)->lastStatus = STATUS_SUCCESS;
     KswordARKWin32kInitializeOffsets(&(*ResponseOut)->fieldOffsets);
     return STATUS_SUCCESS;
+}
+
+static ULONG
+KswordARKWin32kMapKeyboardStatus(
+    _In_ ULONG KeyboardStatus
+    )
+/*++
+
+Routine Description:
+
+    Map the legacy keyboard hotkey/hook status space to the Win32k audit status space.
+
+Arguments:
+
+    KeyboardStatus - Status returned by the keyboard enumeration backend.
+
+Return Value:
+
+    A KSWORD_ARK_WIN32K_STATUS_* value that preserves the backend failure meaning.
+
+--*/
+{
+    switch (KeyboardStatus) {
+    case KSWORD_ARK_KEYBOARD_ENUM_STATUS_OK:
+        return KSWORD_ARK_WIN32K_STATUS_OK;
+    case KSWORD_ARK_KEYBOARD_ENUM_STATUS_PARTIAL:
+        return KSWORD_ARK_WIN32K_STATUS_PARTIAL;
+    case KSWORD_ARK_KEYBOARD_ENUM_STATUS_UNSUPPORTED:
+        return KSWORD_ARK_WIN32K_STATUS_UNSUPPORTED;
+    case KSWORD_ARK_KEYBOARD_ENUM_STATUS_WIN32K_NOT_FOUND:
+        return KSWORD_ARK_WIN32K_STATUS_WIN32K_NOT_FOUND;
+    case KSWORD_ARK_KEYBOARD_ENUM_STATUS_PATTERN_NOT_FOUND:
+    case KSWORD_ARK_KEYBOARD_ENUM_STATUS_SESSION_UNAVAILABLE:
+        return KSWORD_ARK_WIN32K_STATUS_ENUM_FAILED;
+    case KSWORD_ARK_KEYBOARD_ENUM_STATUS_BUFFER_TRUNCATED:
+        return KSWORD_ARK_WIN32K_STATUS_BUFFER_TRUNCATED;
+    case KSWORD_ARK_KEYBOARD_ENUM_STATUS_READ_FAILED:
+        return KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
+    default:
+        return KSWORD_ARK_WIN32K_STATUS_PROFILE_MISSING;
+    }
+}
+
+static VOID
+KswordARKWin32kFillKeyboardBridgeRequest(
+    _Out_ KSWORD_ARK_ENUM_KEYBOARD_REQUEST* KeyboardRequest,
+    _In_opt_ const KSWORD_ARK_WIN32K_QUERY_REQUEST* Request,
+    _In_ ULONG DefaultFlags
+    )
+/*++
+
+Routine Description:
+
+    Convert a Win32k audit request into the existing read-only keyboard request shape.
+
+Arguments:
+
+    KeyboardRequest - Receives the keyboard request packet.
+    Request - Optional Win32k request from user mode.
+    DefaultFlags - Keyboard enumeration defaults for hotkey or hook mode.
+
+Return Value:
+
+    None. Invalid inputs are ignored by leaving a zeroed request.
+
+--*/
+{
+    if (KeyboardRequest == NULL) {
+        return;
+    }
+
+    RtlZeroMemory(KeyboardRequest, sizeof(*KeyboardRequest));
+    KeyboardRequest->version = KSWORD_ARK_KEYBOARD_PROTOCOL_VERSION;
+    KeyboardRequest->flags = DefaultFlags;
+    KeyboardRequest->maxEntries = KSWORD_ARK_WIN32K_DEFAULT_MAX_ENTRIES;
+    if (Request != NULL) {
+        KeyboardRequest->processId = Request->processId;
+        if (Request->maxEntries != 0UL) {
+            KeyboardRequest->maxEntries = KswordARKWin32kNormalizeMaxEntries(Request->maxEntries);
+        }
+    }
+}
+
+static VOID
+KswordARKWin32kCopyKeyboardDetail(
+    _Out_writes_(DestinationChars) PWCHAR Destination,
+    _In_ ULONG DestinationChars,
+    _In_reads_(SourceChars) const WCHAR* Source,
+    _In_ ULONG SourceChars,
+    _In_z_ PCWSTR Prefix
+    )
+/*++
+
+Routine Description:
+
+    Build a bounded detail string for a Win32k row converted from keyboard audit data.
+
+Arguments:
+
+    Destination - Win32k protocol detail field.
+    DestinationChars - Destination WCHAR capacity.
+    Source - Keyboard backend detail field.
+    SourceChars - Source WCHAR capacity.
+    Prefix - Short conversion prefix.
+
+Return Value:
+
+    None. The destination is always terminated when capacity is nonzero.
+
+--*/
+{
+    WCHAR sourceBuffer[KSWORD_ARK_KEYBOARD_DETAIL_CHARS];
+    ULONG sourceIndex = 0UL;
+
+    if (Destination == NULL || DestinationChars == 0UL) {
+        return;
+    }
+
+    Destination[0] = L'\0';
+    RtlZeroMemory(sourceBuffer, sizeof(sourceBuffer));
+    if (Source != NULL && SourceChars != 0UL) {
+        for (sourceIndex = 0UL;
+            sourceIndex + 1UL < RTL_NUMBER_OF(sourceBuffer) &&
+            sourceIndex < SourceChars &&
+            Source[sourceIndex] != L'\0';
+            ++sourceIndex) {
+            sourceBuffer[sourceIndex] = Source[sourceIndex];
+        }
+    }
+
+    (VOID)RtlStringCchPrintfW(
+        Destination,
+        DestinationChars,
+        L"%ws%ws",
+        (Prefix != NULL) ? Prefix : L"",
+        sourceBuffer);
+    Destination[DestinationChars - 1UL] = L'\0';
 }
 
 NTSTATUS
@@ -479,6 +621,14 @@ Return Value:
 --*/
 {
     KSWORD_ARK_WIN32K_HOTKEY_SNAPSHOT_RESPONSE* response = NULL;
+    KSWORD_ARK_ENUM_KEYBOARD_REQUEST keyboardRequest;
+    KSWORD_ARK_ENUM_KEYBOARD_HOTKEYS_RESPONSE* keyboardResponse = NULL;
+    ULONG entryCapacity = 0UL;
+    ULONG copyCount = 0UL;
+    ULONG index = 0UL;
+    size_t keyboardBufferLength = 0U;
+    size_t keyboardBytesWritten = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
 
     if (BytesWrittenOut == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -494,14 +644,99 @@ Return Value:
     RtlZeroMemory(OutputBuffer, OutputBufferLength);
     response = (KSWORD_ARK_WIN32K_HOTKEY_SNAPSHOT_RESPONSE*)OutputBuffer;
     response->version = KSWORD_ARK_WIN32K_PROTOCOL_VERSION;
-    response->status = KSWORD_ARK_WIN32K_STATUS_PROFILE_MISSING;
+    response->status = KSWORD_ARK_WIN32K_STATUS_UNKNOWN;
     response->entrySize = sizeof(KSWORD_ARK_WIN32K_HOTKEY_ENTRY);
     response->flags = (Request != NULL) ? Request->flags : 0UL;
-    response->lastStatus = STATUS_NOT_FOUND;
-    response->missingCapabilityMask = KSWORD_ARK_WIN32K_CAP_HOTKEY_PROFILE;
+    response->lastStatus = STATUS_SUCCESS;
+    response->capabilityMask = KSWORD_ARK_WIN32K_CAP_HOTKEY_PROFILE;
     KswordARKWin32kInitializeOffsets(&response->fieldOffsets);
 
-    *BytesWrittenOut = KSWORD_ARK_WIN32K_HOTKEY_RESPONSE_HEADER_SIZE;
+    entryCapacity = (ULONG)((OutputBufferLength - KSWORD_ARK_WIN32K_HOTKEY_RESPONSE_HEADER_SIZE) /
+        sizeof(KSWORD_ARK_WIN32K_HOTKEY_ENTRY));
+    KswordARKWin32kFillKeyboardBridgeRequest(
+        &keyboardRequest,
+        Request,
+        KSWORD_ARK_KEYBOARD_ENUM_FLAG_INCLUDE_SYSTEM |
+        KSWORD_ARK_KEYBOARD_ENUM_FLAG_INCLUDE_DIAGNOSTICS);
+
+    keyboardBufferLength = sizeof(KSWORD_ARK_ENUM_KEYBOARD_HOTKEYS_RESPONSE) +
+        ((size_t)keyboardRequest.maxEntries * sizeof(KSWORD_ARK_KEYBOARD_HOTKEY_ENTRY));
+    keyboardResponse = (KSWORD_ARK_ENUM_KEYBOARD_HOTKEYS_RESPONSE*)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED,
+        keyboardBufferLength,
+        KSWORD_ARK_WIN32K_BRIDGE_TAG);
+    if (keyboardResponse == NULL) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
+        response->lastStatus = STATUS_INSUFFICIENT_RESOURCES;
+        *BytesWrittenOut = KSWORD_ARK_WIN32K_HOTKEY_RESPONSE_HEADER_SIZE;
+        return STATUS_SUCCESS;
+    }
+
+    status = KswordARKDriverEnumerateKeyboardHotkeys(
+        keyboardResponse,
+        keyboardBufferLength,
+        &keyboardRequest,
+        &keyboardBytesWritten);
+    response->lastStatus = status;
+    if (!NT_SUCCESS(status) ||
+        keyboardBytesWritten < (sizeof(KSWORD_ARK_ENUM_KEYBOARD_HOTKEYS_RESPONSE) - sizeof(KSWORD_ARK_KEYBOARD_HOTKEY_ENTRY))) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
+        if (NT_SUCCESS(status)) {
+            response->lastStatus = STATUS_BUFFER_TOO_SMALL;
+        }
+        ExFreePoolWithTag(keyboardResponse, KSWORD_ARK_WIN32K_BRIDGE_TAG);
+        *BytesWrittenOut = KSWORD_ARK_WIN32K_HOTKEY_RESPONSE_HEADER_SIZE;
+        return STATUS_SUCCESS;
+    }
+
+    response->totalCount = keyboardResponse->totalCount;
+    response->returnedCount = 0UL;
+    response->status = KswordARKWin32kMapKeyboardStatus(keyboardResponse->status);
+    response->lastStatus = keyboardResponse->lastStatus;
+    response->fieldOffsets.hotkeyNext = keyboardResponse->hotkeyNextOffset;
+    response->fieldOffsets.hotkeyModifiers = keyboardResponse->hotkeyModifiersOffset;
+    response->fieldOffsets.hotkeyVirtualKey = keyboardResponse->hotkeyVkOffset;
+    response->fieldOffsets.hotkeyId = keyboardResponse->hotkeyIdOffset;
+
+    copyCount = keyboardResponse->returnedCount;
+    if (copyCount > entryCapacity) {
+        copyCount = entryCapacity;
+        response->status = KSWORD_ARK_WIN32K_STATUS_BUFFER_TRUNCATED;
+        response->missingCapabilityMask |= KSWORD_ARK_WIN32K_CAP_HOTKEY_PROFILE;
+    }
+
+    for (index = 0UL; index < copyCount; ++index) {
+        const KSWORD_ARK_KEYBOARD_HOTKEY_ENTRY* sourceEntry = &keyboardResponse->entries[index];
+        KSWORD_ARK_WIN32K_HOTKEY_ENTRY* targetEntry = &response->entries[index];
+
+        RtlZeroMemory(targetEntry, sizeof(*targetEntry));
+        targetEntry->source = sourceEntry->source;
+        targetEntry->status = KswordARKWin32kMapKeyboardStatus(sourceEntry->status);
+        targetEntry->flags = sourceEntry->flags;
+        targetEntry->processId = sourceEntry->processId;
+        targetEntry->threadId = sourceEntry->threadId;
+        targetEntry->modifiers = sourceEntry->modifiers;
+        targetEntry->virtualKey = sourceEntry->virtualKey;
+        targetEntry->hotkeyId = sourceEntry->hotkeyId;
+        targetEntry->depth = sourceEntry->depth;
+        targetEntry->lastStatus = sourceEntry->lastStatus;
+        targetEntry->hotkeyObject = sourceEntry->hotkeyObject;
+        targetEntry->nextHotkeyObject = sourceEntry->nextHotkeyObject;
+        targetEntry->hwnd = sourceEntry->windowObject;
+        targetEntry->tagWnd = sourceEntry->windowObject;
+        targetEntry->threadInfo = sourceEntry->threadInfo;
+        KswordARKWin32kCopyKeyboardDetail(
+            targetEntry->detail,
+            KSWORD_ARK_WIN32K_DETAIL_CHARS,
+            sourceEntry->detail,
+            KSWORD_ARK_KEYBOARD_DETAIL_CHARS,
+            L"keyboard bridge: ");
+    }
+    response->returnedCount = copyCount;
+
+    ExFreePoolWithTag(keyboardResponse, KSWORD_ARK_WIN32K_BRIDGE_TAG);
+    *BytesWrittenOut = KSWORD_ARK_WIN32K_HOTKEY_RESPONSE_HEADER_SIZE +
+        ((size_t)response->returnedCount * sizeof(KSWORD_ARK_WIN32K_HOTKEY_ENTRY));
     return STATUS_SUCCESS;
 }
 
@@ -532,6 +767,14 @@ Return Value:
 --*/
 {
     KSWORD_ARK_WIN32K_HOOK_SNAPSHOT_RESPONSE* response = NULL;
+    KSWORD_ARK_ENUM_KEYBOARD_REQUEST keyboardRequest;
+    KSWORD_ARK_ENUM_KEYBOARD_HOOKS_RESPONSE* keyboardResponse = NULL;
+    ULONG entryCapacity = 0UL;
+    ULONG copyCount = 0UL;
+    ULONG index = 0UL;
+    size_t keyboardBufferLength = 0U;
+    size_t keyboardBytesWritten = 0U;
+    NTSTATUS status = STATUS_SUCCESS;
 
     if (BytesWrittenOut == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -547,13 +790,100 @@ Return Value:
     RtlZeroMemory(OutputBuffer, OutputBufferLength);
     response = (KSWORD_ARK_WIN32K_HOOK_SNAPSHOT_RESPONSE*)OutputBuffer;
     response->version = KSWORD_ARK_WIN32K_PROTOCOL_VERSION;
-    response->status = KSWORD_ARK_WIN32K_STATUS_PROFILE_MISSING;
+    response->status = KSWORD_ARK_WIN32K_STATUS_UNKNOWN;
     response->entrySize = sizeof(KSWORD_ARK_WIN32K_HOOK_ENTRY);
     response->flags = (Request != NULL) ? Request->flags : 0UL;
-    response->lastStatus = STATUS_NOT_FOUND;
-    response->missingCapabilityMask = KSWORD_ARK_WIN32K_CAP_HOOK_PROFILE;
+    response->lastStatus = STATUS_SUCCESS;
+    response->capabilityMask = KSWORD_ARK_WIN32K_CAP_HOOK_PROFILE;
     KswordARKWin32kInitializeOffsets(&response->fieldOffsets);
 
-    *BytesWrittenOut = KSWORD_ARK_WIN32K_HOOK_RESPONSE_HEADER_SIZE;
+    entryCapacity = (ULONG)((OutputBufferLength - KSWORD_ARK_WIN32K_HOOK_RESPONSE_HEADER_SIZE) /
+        sizeof(KSWORD_ARK_WIN32K_HOOK_ENTRY));
+    KswordARKWin32kFillKeyboardBridgeRequest(
+        &keyboardRequest,
+        Request,
+        KSWORD_ARK_KEYBOARD_ENUM_FLAG_INCLUDE_GLOBAL_HOOKS |
+        KSWORD_ARK_KEYBOARD_ENUM_FLAG_INCLUDE_THREAD_HOOKS |
+        KSWORD_ARK_KEYBOARD_ENUM_FLAG_INCLUDE_DIAGNOSTICS);
+
+    keyboardBufferLength = sizeof(KSWORD_ARK_ENUM_KEYBOARD_HOOKS_RESPONSE) +
+        ((size_t)keyboardRequest.maxEntries * sizeof(KSWORD_ARK_KEYBOARD_HOOK_ENTRY));
+    keyboardResponse = (KSWORD_ARK_ENUM_KEYBOARD_HOOKS_RESPONSE*)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED,
+        keyboardBufferLength,
+        KSWORD_ARK_WIN32K_BRIDGE_TAG);
+    if (keyboardResponse == NULL) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
+        response->lastStatus = STATUS_INSUFFICIENT_RESOURCES;
+        *BytesWrittenOut = KSWORD_ARK_WIN32K_HOOK_RESPONSE_HEADER_SIZE;
+        return STATUS_SUCCESS;
+    }
+
+    status = KswordARKDriverEnumerateKeyboardHooks(
+        keyboardResponse,
+        keyboardBufferLength,
+        &keyboardRequest,
+        &keyboardBytesWritten);
+    response->lastStatus = status;
+    if (!NT_SUCCESS(status) ||
+        keyboardBytesWritten < (sizeof(KSWORD_ARK_ENUM_KEYBOARD_HOOKS_RESPONSE) - sizeof(KSWORD_ARK_KEYBOARD_HOOK_ENTRY))) {
+        response->status = KSWORD_ARK_WIN32K_STATUS_READ_FAILED;
+        if (NT_SUCCESS(status)) {
+            response->lastStatus = STATUS_BUFFER_TOO_SMALL;
+        }
+        ExFreePoolWithTag(keyboardResponse, KSWORD_ARK_WIN32K_BRIDGE_TAG);
+        *BytesWrittenOut = KSWORD_ARK_WIN32K_HOOK_RESPONSE_HEADER_SIZE;
+        return STATUS_SUCCESS;
+    }
+
+    response->totalCount = keyboardResponse->totalCount;
+    response->returnedCount = 0UL;
+    response->status = KswordARKWin32kMapKeyboardStatus(keyboardResponse->status);
+    response->lastStatus = keyboardResponse->lastStatus;
+    response->fieldOffsets.tagHookNext = keyboardResponse->hookNextOffset;
+    response->fieldOffsets.tagHookType = keyboardResponse->hookTypeOffset;
+    response->fieldOffsets.tagHookProcedure = keyboardResponse->hookProcedureOffset;
+    response->fieldOffsets.tagHookTargetThreadInfo = keyboardResponse->hookTargetThreadInfoOffset;
+
+    copyCount = keyboardResponse->returnedCount;
+    if (copyCount > entryCapacity) {
+        copyCount = entryCapacity;
+        response->status = KSWORD_ARK_WIN32K_STATUS_BUFFER_TRUNCATED;
+        response->missingCapabilityMask |= KSWORD_ARK_WIN32K_CAP_HOOK_PROFILE;
+    }
+
+    for (index = 0UL; index < copyCount; ++index) {
+        const KSWORD_ARK_KEYBOARD_HOOK_ENTRY* sourceEntry = &keyboardResponse->entries[index];
+        KSWORD_ARK_WIN32K_HOOK_ENTRY* targetEntry = &response->entries[index];
+
+        RtlZeroMemory(targetEntry, sizeof(*targetEntry));
+        targetEntry->source = sourceEntry->source;
+        targetEntry->status = KswordARKWin32kMapKeyboardStatus(sourceEntry->status);
+        targetEntry->flags = sourceEntry->flags;
+        targetEntry->processId = sourceEntry->processId;
+        targetEntry->threadId = sourceEntry->threadId;
+        targetEntry->hookType = sourceEntry->hookType;
+        targetEntry->hookScope = sourceEntry->hookScope;
+        targetEntry->lastStatus = sourceEntry->lastStatus;
+        targetEntry->hookObject = sourceEntry->hookObject;
+        targetEntry->chainHead = sourceEntry->chainHead;
+        targetEntry->nextHookObject = sourceEntry->nextHookObject;
+        targetEntry->threadInfo = sourceEntry->threadInfo;
+        targetEntry->targetThreadInfo = sourceEntry->targetThreadInfo;
+        targetEntry->desktopObject = sourceEntry->desktopInfo;
+        targetEntry->procedureAddress = sourceEntry->procedureAddress;
+        targetEntry->moduleBase = sourceEntry->moduleBase;
+        KswordARKWin32kCopyKeyboardDetail(
+            targetEntry->detail,
+            KSWORD_ARK_WIN32K_DETAIL_CHARS,
+            sourceEntry->detail,
+            KSWORD_ARK_KEYBOARD_DETAIL_CHARS,
+            L"keyboard bridge: ");
+    }
+    response->returnedCount = copyCount;
+
+    ExFreePoolWithTag(keyboardResponse, KSWORD_ARK_WIN32K_BRIDGE_TAG);
+    *BytesWrittenOut = KSWORD_ARK_WIN32K_HOOK_RESPONSE_HEADER_SIZE +
+        ((size_t)response->returnedCount * sizeof(KSWORD_ARK_WIN32K_HOOK_ENTRY));
     return STATUS_SUCCESS;
 }

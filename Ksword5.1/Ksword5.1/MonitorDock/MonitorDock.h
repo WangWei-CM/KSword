@@ -53,6 +53,7 @@ class QBarSet;
 class QChartView;
 class QLineSeries;
 class QValueAxis;
+class CodeEditorWidget;
 class WinAPIDock;
 class ProcessTraceMonitorWidget;
 class DirectKernelCallMonitorWidget;
@@ -603,7 +604,7 @@ private:
     QCheckBox* m_arkRiskHighOnlyCheck = nullptr; // 仅显示高风险记录。
     QLabel* m_arkRiskStatusLabel = nullptr; // 风险中心状态标签。
     QTableWidget* m_arkRiskTable = nullptr; // 风险中心结果表。
-    QPlainTextEdit* m_arkRiskDetailEdit = nullptr; // 风险中心详情文本。
+    CodeEditorWidget* m_arkRiskDetailEdit = nullptr; // 风险中心详情文本，使用统一只读代码编辑器。
 
     QChartView* m_cpuChartView = nullptr;      // CPU 条形图视图。
     QChartView* m_memoryChartView = nullptr;   // 内存条形图视图。

@@ -6,17 +6,23 @@
 #include "../UI/TableColumnAutoFit.h"
 
 #include <QAbstractItemView>
+#include <QAction>
 #include <QCheckBox>
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMetaObject>
+#include <QModelIndex>
 #include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
 #include <QRunnable>
+#include <QRegularExpression>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QSplitter>
@@ -27,8 +33,10 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVariant>
+#include <QVector>
 
 #include <algorithm>
+#include <limits>
 #include <string>
 
 namespace
@@ -38,12 +46,28 @@ namespace
     {
         Class = 0,
         Cpu,
+        Source,
+        Status,
         Object,
         Target,
         Owner,
         Risk,
         Confidence,
-        Detail,
+        Cr0,
+        Cr4,
+        Efer,
+        MsrLstar,
+        SysenterEip,
+        IdtrBase,
+        IdtrLimit,
+        GdtrBase,
+        GdtrLimit,
+        Selector,
+        Attributes,
+        FieldMask,
+        StatusFlags,
+        RiskScore,
+        Remark,
         Count
     };
 
@@ -93,6 +117,29 @@ namespace
         return value.empty() ? QString() : QString::fromStdWString(value);
     }
 
+    QString friendlyHardwareIoMessage(const std::string& messageText)
+    {
+        // friendlyHardwareIoMessage：
+        // - 输入：ArkDriverClient 的原始 io.message；
+        // - 处理：把 IOCTL/协议错误转换为用户可读说明；
+        // - 返回：适合详情区展示的短文本。
+        if (messageText.empty())
+        {
+            return QStringLiteral("无额外驱动消息。");
+        }
+        const QString rawText = QString::fromStdString(messageText).trimmed();
+        if (rawText.contains(QStringLiteral("DeviceIoControl"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动接口调用失败或当前驱动版本不支持该硬件证据入口。");
+        }
+        if (rawText.contains(QStringLiteral("too small"), Qt::CaseInsensitive) ||
+            rawText.contains(QStringLiteral("entrySize"), Qt::CaseInsensitive))
+        {
+            return QStringLiteral("驱动返回数据格式不完整，当前页只保留已解析出的证据。");
+        }
+        return rawText;
+    }
+
     QString buildBlueButtonStyle()
     {
         // 输入：无。
@@ -138,6 +185,252 @@ namespace
         // 处理：生成状态标签 CSS。
         // 返回：stylesheet 文本。
         return QStringLiteral("color:%1; font-weight:700;").arg(colorText);
+    }
+
+    QVector<int> r0EvidenceColumnGroupA()
+    {
+        // 输入：无。
+        // 处理：定义 R0 证据默认 A 组，只保留定位异常所需的核心上下文。
+        // 返回：列索引集合，调用方据此隐藏其它列。
+        return QVector<int>{
+            columnIndex(R0EvidenceColumn::Class),
+            columnIndex(R0EvidenceColumn::Cpu),
+            columnIndex(R0EvidenceColumn::Source),
+            columnIndex(R0EvidenceColumn::Status),
+            columnIndex(R0EvidenceColumn::Object),
+            columnIndex(R0EvidenceColumn::Target),
+            columnIndex(R0EvidenceColumn::Owner),
+            columnIndex(R0EvidenceColumn::Risk),
+            columnIndex(R0EvidenceColumn::Confidence)
+        };
+    }
+
+    QVector<int> r0EvidenceColumnGroupB()
+    {
+        // 输入：无。
+        // 处理：定义 R0 证据 B 组，重点展示控制寄存器和 MSR 入口字段。
+        // 返回：列索引集合，允许与 A 组重复少量上下文列。
+        return QVector<int>{
+            columnIndex(R0EvidenceColumn::Class),
+            columnIndex(R0EvidenceColumn::Cpu),
+            columnIndex(R0EvidenceColumn::Cr0),
+            columnIndex(R0EvidenceColumn::Cr4),
+            columnIndex(R0EvidenceColumn::Efer),
+            columnIndex(R0EvidenceColumn::MsrLstar),
+            columnIndex(R0EvidenceColumn::SysenterEip)
+        };
+    }
+
+    QVector<int> r0EvidenceColumnGroupC()
+    {
+        // 输入：无。
+        // 处理：定义 R0 证据 C 组，重点展示描述符表和 IDT/GDT 诊断字段。
+        // 返回：列索引集合，和其它列组互补以降低单视图拥挤度。
+        return QVector<int>{
+            columnIndex(R0EvidenceColumn::Class),
+            columnIndex(R0EvidenceColumn::Cpu),
+            columnIndex(R0EvidenceColumn::IdtrBase),
+            columnIndex(R0EvidenceColumn::IdtrLimit),
+            columnIndex(R0EvidenceColumn::GdtrBase),
+            columnIndex(R0EvidenceColumn::GdtrLimit),
+            columnIndex(R0EvidenceColumn::Selector),
+            columnIndex(R0EvidenceColumn::Attributes),
+            columnIndex(R0EvidenceColumn::StatusFlags)
+        };
+    }
+
+    bool containsColumnIndex(const QVector<int>& columnGroup, const int columnIndexValue)
+    {
+        // 输入：列组和候选列号。
+        // 处理：线性检查列号是否属于该组。
+        // 返回：true 表示列应该显示。
+        return std::find(columnGroup.begin(), columnGroup.end(), columnIndexValue) != columnGroup.end();
+    }
+
+    QString buildColumnPresetButtonStyle(const bool selected)
+    {
+        // 输入：按钮是否代表当前列预设。
+        // 处理：选中时使用主题主色背景，未选中时保持透明和主题文字色。
+        // 返回：stylesheet 文本。
+        const QString backgroundText = selected ? KswordTheme::PrimaryBlueHex : QStringLiteral("transparent");
+        const QString borderText = selected ? KswordTheme::PrimaryBlueHex : KswordTheme::BorderColorHex();
+        const QString textColor = selected ? QStringLiteral("#FFFFFF") : KswordTheme::TextPrimaryHex();
+        return QStringLiteral(
+            "QPushButton{min-width:24px;max-width:24px;padding:3px 0;border:1px solid %1;"
+            "border-radius:0;color:%2;background:%3;font-weight:700;}"
+            "QPushButton:hover{border-color:%4;}"
+            "QPushButton:pressed{background:%4;color:#FFFFFF;}")
+            .arg(borderText)
+            .arg(textColor)
+            .arg(backgroundText)
+            .arg(KswordTheme::PrimaryBlueHex);
+    }
+
+    void updateColumnPresetButtons(
+        QTableWidget* table,
+        QPushButton* buttonA,
+        QPushButton* buttonB,
+        QPushButton* buttonC)
+    {
+        // 输入：目标表格和 A/B/C 按钮。
+        // 处理：读取表格属性并刷新按钮着色；Custom 状态下三个按钮均不着色。
+        // 返回：无。
+        if (table == nullptr || buttonA == nullptr || buttonB == nullptr || buttonC == nullptr)
+        {
+            return;
+        }
+
+        const QString presetText = table->property("kswordColumnPreset").toString();
+        buttonA->setStyleSheet(buildColumnPresetButtonStyle(presetText == QStringLiteral("A")));
+        buttonB->setStyleSheet(buildColumnPresetButtonStyle(presetText == QStringLiteral("B")));
+        buttonC->setStyleSheet(buildColumnPresetButtonStyle(presetText == QStringLiteral("C")));
+    }
+
+    void applyColumnPresetToTable(
+        QTableWidget* table,
+        const QVector<int>& columnGroup,
+        const QString& presetText,
+        QPushButton* buttonA,
+        QPushButton* buttonB,
+        QPushButton* buttonC)
+    {
+        // 输入：表格、列组、预设名以及 A/B/C 按钮。
+        // 处理：按列组显示字段并更新当前预设；不改动行过滤条件。
+        // 返回：无。
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        for (int columnIndexValue = 0; columnIndexValue < table->columnCount(); ++columnIndexValue)
+        {
+            table->setColumnHidden(columnIndexValue, !containsColumnIndex(columnGroup, columnIndexValue));
+        }
+        table->setProperty("kswordColumnPreset", presetText);
+        updateColumnPresetButtons(table, buttonA, buttonB, buttonC);
+        ks::ui::RequestTableColumnAutoFit(table);
+    }
+
+    int visibleColumnCount(QTableWidget* table)
+    {
+        // 输入：目标表格。
+        // 处理：统计当前未隐藏列，防止手动菜单隐藏最后一列。
+        // 返回：可见列数量。
+        if (table == nullptr)
+        {
+            return 0;
+        }
+
+        int count = 0;
+        for (int columnIndexValue = 0; columnIndexValue < table->columnCount(); ++columnIndexValue)
+        {
+            if (!table->isColumnHidden(columnIndexValue))
+            {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    QPushButton* createColumnPresetButton(
+        QWidget* parentWidget,
+        const QString& buttonText,
+        const QString& tooltipText)
+    {
+        // 输入：父控件、按钮文本和提示。
+        // 处理：创建 A/B/C 紧凑按钮，按钮表面只显示单个字母。
+        // 返回：由 Qt 父子树释放的按钮。
+        QPushButton* button = new QPushButton(buttonText, parentWidget);
+        button->setToolTip(tooltipText);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setStyleSheet(buildColumnPresetButtonStyle(false));
+        return button;
+    }
+
+    void installHeaderColumnMenu(
+        QTableWidget* table,
+        QPushButton* buttonA,
+        QPushButton* buttonB,
+        QPushButton* buttonC)
+    {
+        // 输入：目标表格和 A/B/C 按钮。
+        // 处理：给表头安装显式主题样式的列显隐菜单；手动改列后进入 Custom 状态。
+        // 返回：无。
+        if (table == nullptr || table->horizontalHeader() == nullptr)
+        {
+            return;
+        }
+
+        QHeaderView* headerView = table->horizontalHeader();
+        headerView->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(headerView, &QHeaderView::customContextMenuRequested, table, [table, headerView, buttonA, buttonB, buttonC](const QPoint& localPosition)
+        {
+            QMenu menu(table);
+            menu.setStyleSheet(KswordTheme::ContextMenuStyle());
+            for (int columnIndexValue = 0; columnIndexValue < table->columnCount(); ++columnIndexValue)
+            {
+                const QTableWidgetItem* headerItem = table->horizontalHeaderItem(columnIndexValue);
+                const QString headerText = headerItem != nullptr
+                    ? headerItem->text()
+                    : QStringLiteral("Column %1").arg(columnIndexValue);
+                QAction* columnAction = menu.addAction(headerText);
+                columnAction->setCheckable(true);
+                columnAction->setChecked(!table->isColumnHidden(columnIndexValue));
+                columnAction->setData(columnIndexValue);
+            }
+
+            QAction* selectedAction = menu.exec(headerView->viewport()->mapToGlobal(localPosition));
+            if (selectedAction == nullptr)
+            {
+                return;
+            }
+
+            const int columnIndexValue = selectedAction->data().toInt();
+            const bool shouldShow = selectedAction->isChecked();
+            if (!shouldShow && visibleColumnCount(table) <= 1)
+            {
+                table->setColumnHidden(columnIndexValue, false);
+                return;
+            }
+
+            table->setColumnHidden(columnIndexValue, !shouldShow);
+            table->setProperty("kswordColumnPreset", QStringLiteral("Custom"));
+            updateColumnPresetButtons(table, buttonA, buttonB, buttonC);
+            ks::ui::RequestTableColumnAutoFit(table);
+        });
+    }
+
+    void installColumnPresetControls(
+        QTableWidget* table,
+        QPushButton* buttonA,
+        QPushButton* buttonB,
+        QPushButton* buttonC,
+        const QVector<int>& groupA,
+        const QVector<int>& groupB,
+        const QVector<int>& groupC)
+    {
+        // 输入：表格、A/B/C 按钮和三组列定义。
+        // 处理：绑定按钮切换、安装表头菜单，并默认应用 A 组。
+        // 返回：无。
+        if (table == nullptr || buttonA == nullptr || buttonB == nullptr || buttonC == nullptr)
+        {
+            return;
+        }
+
+        QObject::connect(buttonA, &QPushButton::clicked, table, [table, buttonA, buttonB, buttonC, groupA]()
+        {
+            applyColumnPresetToTable(table, groupA, QStringLiteral("A"), buttonA, buttonB, buttonC);
+        });
+        QObject::connect(buttonB, &QPushButton::clicked, table, [table, buttonA, buttonB, buttonC, groupB]()
+        {
+            applyColumnPresetToTable(table, groupB, QStringLiteral("B"), buttonA, buttonB, buttonC);
+        });
+        QObject::connect(buttonC, &QPushButton::clicked, table, [table, buttonA, buttonB, buttonC, groupC]()
+        {
+            applyColumnPresetToTable(table, groupC, QStringLiteral("C"), buttonA, buttonB, buttonC);
+        });
+        installHeaderColumnMenu(table, buttonA, buttonB, buttonC);
+        applyColumnPresetToTable(table, groupA, QStringLiteral("A"), buttonA, buttonB, buttonC);
     }
 
     QString classText(const std::uint32_t evidenceClass)
@@ -270,6 +563,150 @@ namespace
         }
     }
 
+    QString integrityStatusFlagText(const std::uint32_t statusFlags)
+    {
+        // 输入：KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_* 位集合。
+        // 处理：展开 partial/unsupported/truncated/PDB-required 等状态，空集合显示 None。
+        // 返回：表格和详情区可读状态标记。
+        if (statusFlags == 0U)
+        {
+            return QStringLiteral("None");
+        }
+        QStringList parts;
+        if ((statusFlags & KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PARTIAL) != 0U)
+        {
+            parts << QStringLiteral("Partial");
+        }
+        if ((statusFlags & KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_UNSUPPORTED) != 0U)
+        {
+            parts << QStringLiteral("Unsupported");
+        }
+        if ((statusFlags & KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_TRUNCATED) != 0U)
+        {
+            parts << QStringLiteral("Truncated");
+        }
+        if ((statusFlags & KSWORD_ARK_DRIVER_INTEGRITY_STATUS_FLAG_PDB_REQUIRED) != 0U)
+        {
+            parts << QStringLiteral("PdbRequired");
+        }
+        return parts.join(QStringLiteral("|"));
+    }
+
+    QString cpuEvidenceDetailValue(const QString& detailText, const QString& keyText)
+    {
+        // 输入：R0 CPU evidence detail 原文和稳定键名。
+        // 处理：按 key=0x... 提取十六进制值，兼容分号/空格/句号分隔。
+        // 返回：提取到的十六进制文本；不存在时返回空字符串。
+        const QRegularExpression expression(
+            QStringLiteral("%1\\s*=\\s*(0x[0-9A-Fa-f]+)")
+                .arg(QRegularExpression::escape(keyText)),
+            QRegularExpression::CaseInsensitiveOption);
+        const QRegularExpressionMatch match = expression.match(detailText);
+        if (!match.hasMatch())
+        {
+            return QString();
+        }
+        return match.captured(1).trimmed().toUpper();
+    }
+
+    QString cpuEvidenceIdtValue(const QString& detailText, const QString& keyText)
+    {
+        // 输入：R0 IDT 行 detail 和 gate/handler/selector/attr 键名。
+        // 处理：提取 IDT[n] 详情中的十六进制字段。
+        // 返回：提取到的值；不存在时返回空字符串。
+        return cpuEvidenceDetailValue(detailText, keyText);
+    }
+
+    // CpuEvidenceParsedDetail 说明：
+    // - 输入：来自 parseCpuEvidenceDetail 的拆分结果；
+    // - 处理：字段名保持驱动 detail 中的语义；
+    // - 返回行为：纯数据结构，无函数返回值。
+    struct CpuEvidenceParsedDetail
+    {
+        QString cr0;
+        QString cr4;
+        QString efer;
+        QString msrLstar;
+        QString sysenterEip;
+        QString idtrBase;
+        QString idtrLimit;
+        QString gdtrBase;
+        QString gdtrLimit;
+        QString selector;
+        QString attributes;
+        QString gate;
+        QString handler;
+    };
+
+    CpuEvidenceParsedDetail parseCpuEvidenceDetail(const ksword::ark::DriverIntegrityEvidenceEntry& row)
+    {
+        // 输入：一条 DriverIntegrityEvidenceEntry。
+        // 处理：只解析驱动源码固定输出的 CR/MSR/IDTR/GDTR/IDT 键值；
+        // 返回：结构化字段，供表格列使用，未匹配字段保持空字符串。
+        const QString rawDetailText = wideToQString(row.detail).trimmed();
+        CpuEvidenceParsedDetail parsed;
+        parsed.cr0 = cpuEvidenceDetailValue(rawDetailText, QStringLiteral("CR0"));
+        parsed.cr4 = cpuEvidenceDetailValue(rawDetailText, QStringLiteral("CR4"));
+        parsed.efer = cpuEvidenceDetailValue(rawDetailText, QStringLiteral("EFER"));
+        parsed.msrLstar = cpuEvidenceDetailValue(rawDetailText, QStringLiteral("MSR_LSTAR"));
+        parsed.sysenterEip = cpuEvidenceDetailValue(rawDetailText, QStringLiteral("SYSENTER_EIP"));
+        parsed.idtrBase = cpuEvidenceDetailValue(rawDetailText, QStringLiteral("IDTR base"));
+        parsed.idtrLimit = cpuEvidenceDetailValue(rawDetailText, QStringLiteral("limit"));
+
+        const QRegularExpression gdtrExpression(
+            QStringLiteral("GDTR\\s+base\\s*=\\s*(0x[0-9A-Fa-f]+)\\s+limit\\s*=\\s*(0x[0-9A-Fa-f]+)"),
+            QRegularExpression::CaseInsensitiveOption);
+        const QRegularExpressionMatch gdtrMatch = gdtrExpression.match(rawDetailText);
+        if (gdtrMatch.hasMatch())
+        {
+            parsed.gdtrBase = gdtrMatch.captured(1).trimmed().toUpper();
+            parsed.gdtrLimit = gdtrMatch.captured(2).trimmed().toUpper();
+        }
+
+        parsed.selector = cpuEvidenceIdtValue(rawDetailText, QStringLiteral("selector"));
+        parsed.attributes = cpuEvidenceIdtValue(rawDetailText, QStringLiteral("attr"));
+        parsed.gate = cpuEvidenceIdtValue(rawDetailText, QStringLiteral("gate"));
+        parsed.handler = cpuEvidenceIdtValue(rawDetailText, QStringLiteral("handler"));
+        if (parsed.sysenterEip.isEmpty() &&
+            row.evidenceClass == KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MSR_ENTRY &&
+            rawDetailText.contains(QStringLiteral("SYSENTER_EIP captured"), Qt::CaseInsensitive))
+        {
+            parsed.sysenterEip = hex64(row.targetAddress);
+        }
+        if (parsed.idtrBase.isEmpty() && row.evidenceClass == KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DESCRIPTOR_TABLE)
+        {
+            parsed.idtrBase = hex64(row.objectAddress);
+        }
+        if (parsed.gdtrBase.isEmpty() && row.evidenceClass == KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DESCRIPTOR_TABLE)
+        {
+            parsed.gdtrBase = hex64(row.targetAddress);
+        }
+        if (parsed.gate.isEmpty() && row.evidenceClass == KSWORD_ARK_DRIVER_INTEGRITY_CLASS_IDT_HANDLER)
+        {
+            parsed.gate = hex64(row.objectAddress);
+        }
+        if (parsed.handler.isEmpty() && row.evidenceClass == KSWORD_ARK_DRIVER_INTEGRITY_CLASS_IDT_HANDLER)
+        {
+            parsed.handler = hex64(row.targetAddress);
+        }
+        return parsed;
+    }
+
+    bool isStructuredCpuEvidenceDetail(
+        const ksword::ark::DriverIntegrityEvidenceEntry& row,
+        const QString& rawDetailText)
+    {
+        // 输入：证据行和原始 detail。
+        // 处理：识别已经拆进表格列的驱动固定格式。
+        // 返回：true 表示备注列不再重复整句原文。
+        return rawDetailText.contains(QStringLiteral("CR0="), Qt::CaseInsensitive) ||
+            rawDetailText.contains(QStringLiteral("MSR_LSTAR="), Qt::CaseInsensitive) ||
+            rawDetailText.contains(QStringLiteral("IDTR base="), Qt::CaseInsensitive) ||
+            rawDetailText.contains(QStringLiteral("IDT["), Qt::CaseInsensitive) ||
+            row.evidenceClass == KSWORD_ARK_DRIVER_INTEGRITY_CLASS_DESCRIPTOR_TABLE ||
+            row.evidenceClass == KSWORD_ARK_DRIVER_INTEGRITY_CLASS_MSR_ENTRY;
+    }
+
     QString cpuVectorText(const ksword::ark::DriverIntegrityEvidenceEntry& row)
     {
         // 输入：R0 evidence 行。
@@ -309,14 +746,31 @@ namespace
         {
             return true;
         }
+        const CpuEvidenceParsedDetail parsedDetail = parseCpuEvidenceDetail(row);
         const QStringList fields{
             classText(row.evidenceClass),
             cpuVectorText(row),
+            sourceMaskText(row.sourceMask),
+            queryStatusText(row.entryStatus),
             hex64(row.objectAddress),
             hex64(row.targetAddress),
             wideToQString(row.ownerModule),
             riskText(row.riskFlags),
-            sourceMaskText(row.sourceMask),
+            hex32(row.fieldMask),
+            hex32(row.statusFlags),
+            integrityStatusFlagText(row.statusFlags),
+            QString::number(row.riskScore),
+            parsedDetail.cr0,
+            parsedDetail.cr4,
+            parsedDetail.efer,
+            parsedDetail.msrLstar,
+            parsedDetail.sysenterEip,
+            parsedDetail.idtrBase,
+            parsedDetail.idtrLimit,
+            parsedDetail.gdtrBase,
+            parsedDetail.gdtrLimit,
+            parsedDetail.selector,
+            parsedDetail.attributes,
             wideToQString(row.detail)
         };
         for (const QString& field : fields)
@@ -351,6 +805,16 @@ namespace
         text += QStringLiteral("SourceMask: %1 (%2)\n").arg(sourceMaskText(row.sourceMask), hex32(row.sourceMask));
         text += QStringLiteral("RiskFlags: %1 (%2)\n").arg(riskText(row.riskFlags), hex32(row.riskFlags));
         text += QStringLiteral("Confidence: %1\n").arg(row.confidence);
+        text += QStringLiteral("EntryStatus: %1 (%2)\n")
+            .arg(queryStatusText(row.entryStatus))
+            .arg(row.entryStatus);
+        text += QStringLiteral("StatusFlags: %1 (%2)\n")
+            .arg(integrityStatusFlagText(row.statusFlags))
+            .arg(hex32(row.statusFlags));
+        text += QStringLiteral("FieldMask: %1\n").arg(hex32(row.fieldMask));
+        text += QStringLiteral("RiskScore: %1\n").arg(row.riskScore);
+        text += QStringLiteral("RangeState: %1\n").arg(row.rangeState);
+        text += QStringLiteral("Ordinal: %1\n").arg(row.ordinal);
         text += QStringLiteral("Detail: %1\n").arg(wideToQString(row.detail));
         return text;
     }
@@ -403,6 +867,80 @@ namespace
         return new NumericItem(text, value);
     }
 
+    QString hardwareTableCellText(QTableWidget* table, const int rowIndex, const int columnIndex)
+    {
+        // hardwareTableCellText：
+        // - 输入：表格、行号、列号；
+        // - 处理：安全读取当前单元格；
+        // - 返回：不存在时返回空字符串。
+        if (table == nullptr)
+        {
+            return QString();
+        }
+        const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
+        return item != nullptr ? item->text() : QString();
+    }
+
+    void copyHardwareTableCurrentRow(QTableWidget* table)
+    {
+        // copyHardwareTableCurrentRow：
+        // - 输入：R0 硬件证据表；
+        // - 处理：复制当前行 TSV；
+        // - 返回：无，不触发额外 R0 查询或写操作。
+        if (table == nullptr || QGuiApplication::clipboard() == nullptr)
+        {
+            return;
+        }
+
+        const int rowIndex = table->currentRow();
+        if (rowIndex < 0 || rowIndex >= table->rowCount())
+        {
+            return;
+        }
+
+        QStringList fields;
+        fields.reserve(table->columnCount());
+        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        {
+            fields.push_back(hardwareTableCellText(table, rowIndex, columnIndex));
+        }
+        QGuiApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
+    }
+
+    void installHardwareTableCopyMenu(QTableWidget* table)
+    {
+        // installHardwareTableCopyMenu：
+        // - 输入：R0 硬件证据表；
+        // - 处理：安装只读复制菜单；
+        // - 返回：无，菜单只写剪贴板。
+        if (table == nullptr)
+        {
+            return;
+        }
+
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        {
+            const QModelIndex clickedIndex = table->indexAt(localPosition);
+            if (clickedIndex.isValid())
+            {
+                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                table->selectRow(clickedIndex.row());
+            }
+
+            QMenu contextMenu(table);
+            contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
+            QAction* copyRowAction = contextMenu.addAction(
+                QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
+                QStringLiteral("复制当前行"));
+            copyRowAction->setEnabled(table->currentRow() >= 0);
+            if (contextMenu.exec(table->viewport()->mapToGlobal(localPosition)) == copyRowAction)
+            {
+                copyHardwareTableCurrentRow(table);
+            }
+        });
+    }
+
     struct R0EvidenceQueryBundle
     {
         // capabilityResult：驱动统一能力查询结果，仅用于页头诊断。
@@ -437,6 +975,26 @@ void HardwareR0EvidencePage::initializeUi()
     toolLayout->setContentsMargins(0, 0, 0, 0);
     toolLayout->setSpacing(8);
 
+    QHBoxLayout* presetLayout = new QHBoxLayout();
+    presetLayout->setContentsMargins(0, 0, 0, 0);
+    presetLayout->setSpacing(0);
+
+    QPushButton* groupAButton = createColumnPresetButton(
+        this,
+        QStringLiteral("A"),
+        QStringLiteral("显示默认精简列：类别、CPU、来源、状态、对象、Owner、风险和置信度。"));
+    QPushButton* groupBButton = createColumnPresetButton(
+        this,
+        QStringLiteral("B"),
+        QStringLiteral("显示 B 组精简列：CR0/CR4/EFER/MSR 入口字段。"));
+    QPushButton* groupCButton = createColumnPresetButton(
+        this,
+        QStringLiteral("C"),
+        QStringLiteral("显示 C 组精简列：IDTR/GDTR/Selector/Attr/StatusFlags。"));
+    presetLayout->addWidget(groupAButton, 0);
+    presetLayout->addWidget(groupBButton, 0);
+    presetLayout->addWidget(groupCButton, 0);
+
     m_refreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新R0证据"), this);
     m_refreshButton->setToolTip(QStringLiteral("通过 ArkDriverClient 查询 R0 CPU/MSR/IDT/GDT 证据；不执行任何写操作。"));
     m_refreshButton->setStyleSheet(buildBlueButtonStyle());
@@ -446,7 +1004,7 @@ void HardwareR0EvidencePage::initializeUi()
 
     m_filterEdit = new QLineEdit(this);
     m_filterEdit->setClearButtonEnabled(true);
-    m_filterEdit->setPlaceholderText(QStringLiteral("过滤 class / CPU / owner / risk / detail"));
+    m_filterEdit->setPlaceholderText(QStringLiteral("搜索 类别/CPU/来源/状态/Owner/风险/CR/MSR/IDTR/GDTR/FieldMask/StatusFlags"));
     m_filterEdit->setStyleSheet(buildBlueInputStyle());
 
     m_maxRowsSpin = new QSpinBox(this);
@@ -463,6 +1021,7 @@ void HardwareR0EvidencePage::initializeUi()
     m_statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_statusLabel->setStyleSheet(statusStyle(KswordTheme::TextSecondaryHex()));
 
+    toolLayout->addLayout(presetLayout, 0);
     toolLayout->addWidget(m_refreshButton, 0);
     toolLayout->addWidget(m_riskOnlyCheck, 0);
     toolLayout->addWidget(new QLabel(QStringLiteral("行数:"), this), 0);
@@ -481,12 +1040,28 @@ void HardwareR0EvidencePage::initializeUi()
     m_evidenceTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("类别"),
         QStringLiteral("CPU/Vector"),
+        QStringLiteral("来源"),
+        QStringLiteral("状态"),
         QStringLiteral("对象/寄存器"),
         QStringLiteral("目标/入口"),
         QStringLiteral("Owner模块"),
         QStringLiteral("风险"),
         QStringLiteral("置信度"),
-        QStringLiteral("Detail")
+        QStringLiteral("CR0"),
+        QStringLiteral("CR4"),
+        QStringLiteral("EFER"),
+        QStringLiteral("MSR_LSTAR"),
+        QStringLiteral("SYSENTER_EIP"),
+        QStringLiteral("IDTR base"),
+        QStringLiteral("IDTR limit"),
+        QStringLiteral("GDTR base"),
+        QStringLiteral("GDTR limit"),
+        QStringLiteral("Selector"),
+        QStringLiteral("Attr"),
+        QStringLiteral("FieldMask"),
+        QStringLiteral("StatusFlags"),
+        QStringLiteral("RiskScore"),
+        QStringLiteral("备注")
         });
     m_evidenceTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_evidenceTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -496,7 +1071,16 @@ void HardwareR0EvidencePage::initializeUi()
     m_evidenceTable->verticalHeader()->setVisible(false);
     m_evidenceTable->horizontalHeader()->setStyleSheet(buildHeaderStyle());
     m_evidenceTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    m_evidenceTable->horizontalHeader()->setSectionResizeMode(columnIndex(R0EvidenceColumn::Detail), QHeaderView::Stretch);
+    m_evidenceTable->horizontalHeader()->setSectionResizeMode(columnIndex(R0EvidenceColumn::Remark), QHeaderView::Stretch);
+    installHardwareTableCopyMenu(m_evidenceTable);
+    installColumnPresetControls(
+        m_evidenceTable,
+        groupAButton,
+        groupBButton,
+        groupCButton,
+        r0EvidenceColumnGroupA(),
+        r0EvidenceColumnGroupB(),
+        r0EvidenceColumnGroupC());
     splitter->addWidget(m_evidenceTable);
 
     QWidget* detailPanel = new QWidget(splitter);
@@ -623,7 +1207,7 @@ void HardwareR0EvidencePage::refreshEvidenceAsync(const bool forceRefresh)
             {
                 const QString message = bundle.integrityResult.unsupported
                     ? QStringLiteral("状态：当前 R0 驱动未支持 CPU Integrity IOCTL")
-                    : QStringLiteral("状态：R0 查询失败 %1").arg(QString::fromStdString(bundle.integrityResult.io.message));
+                    : QStringLiteral("状态：R0 查询不可用：%1").arg(friendlyHardwareIoMessage(bundle.integrityResult.io.message));
                 safeThis->setStatusText(message, QStringLiteral("#B23A3A"));
                 return;
             }
@@ -689,10 +1273,27 @@ void HardwareR0EvidencePage::rebuildEvidenceTable()
     {
         const std::size_t cacheIndex = visibleIndexes[static_cast<std::size_t>(rowIndex)];
         const auto& row = m_evidenceCache[cacheIndex];
+        const CpuEvidenceParsedDetail parsedDetail = parseCpuEvidenceDetail(row);
+        const QString rawDetailText = wideToQString(row.detail).trimmed();
+        QStringList remarkParts;
+        if (!rawDetailText.isEmpty() && !isStructuredCpuEvidenceDetail(row, rawDetailText))
+        {
+            remarkParts << rawDetailText;
+        }
+        if (row.rangeState != 0U)
+        {
+            remarkParts << QStringLiteral("rangeState=%1").arg(row.rangeState);
+        }
+        if (row.ordinal != 0U && row.ordinal != std::numeric_limits<std::uint32_t>::max())
+        {
+            remarkParts << QStringLiteral("ordinal=%1").arg(row.ordinal);
+        }
         QTableWidgetItem* classItem = textItem(classText(row.evidenceClass));
         classItem->setData(Qt::UserRole + 1, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(cacheIndex)));
         m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Class), classItem);
         m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Cpu), textItem(cpuVectorText(row)));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Source), textItem(sourceMaskText(row.sourceMask)));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Status), textItem(queryStatusText(row.entryStatus)));
         m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Object), numericItem(hex64(row.objectAddress), row.objectAddress));
         m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Target), numericItem(hex64(row.targetAddress), row.targetAddress));
         m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Owner), textItem(
@@ -701,7 +1302,24 @@ void HardwareR0EvidencePage::rebuildEvidenceTable()
             .arg(hex64(row.ownerModuleBase))));
         m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Risk), textItem(riskText(row.riskFlags)));
         m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Confidence), numericItem(QString::number(row.confidence), row.confidence));
-        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Detail), textItem(wideToQString(row.detail)));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Cr0), textItem(parsedDetail.cr0));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Cr4), textItem(parsedDetail.cr4));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Efer), textItem(parsedDetail.efer));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::MsrLstar), textItem(parsedDetail.msrLstar));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::SysenterEip), textItem(parsedDetail.sysenterEip));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::IdtrBase), textItem(parsedDetail.idtrBase));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::IdtrLimit), textItem(parsedDetail.idtrLimit));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::GdtrBase), textItem(parsedDetail.gdtrBase));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::GdtrLimit), textItem(parsedDetail.gdtrLimit));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Selector), textItem(parsedDetail.selector));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Attributes), textItem(parsedDetail.attributes));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::FieldMask), textItem(hex32(row.fieldMask)));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::StatusFlags), textItem(
+            QStringLiteral("%1 (%2)")
+            .arg(hex32(row.statusFlags))
+            .arg(integrityStatusFlagText(row.statusFlags))));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::RiskScore), numericItem(QString::number(row.riskScore), row.riskScore));
+        m_evidenceTable->setItem(rowIndex, columnIndex(R0EvidenceColumn::Remark), textItem(remarkParts.join(QStringLiteral("；"))));
     }
 
     if (m_evidenceTable->rowCount() > 0 && m_evidenceTable->currentRow() < 0)
@@ -759,6 +1377,10 @@ void HardwareR0EvidencePage::showSelectedEvidenceDetail()
     text += QStringLiteral("QueryStatus: %1 (%2)\n").arg(queryStatusText(m_lastIntegrityResult.queryStatus)).arg(m_lastIntegrityResult.queryStatus);
     text += QStringLiteral("Flags: %1\n").arg(hex32(m_lastIntegrityResult.flags));
     text += QStringLiteral("SourceMask: %1 (%2)\n").arg(sourceMaskText(m_lastIntegrityResult.sourceMask), hex32(m_lastIntegrityResult.sourceMask));
+    text += QStringLiteral("ResponseFieldFlags: %1\n").arg(hex32(m_lastIntegrityResult.fieldFlags));
+    text += QStringLiteral("ResponseStatusFlags: %1 (%2)\n")
+        .arg(integrityStatusFlagText(m_lastIntegrityResult.statusFlags))
+        .arg(hex32(m_lastIntegrityResult.statusFlags));
     text += QStringLiteral("Total/Returned/Parsed: %1/%2/%3\n")
         .arg(m_lastIntegrityResult.totalCount)
         .arg(m_lastIntegrityResult.returnedCount)
@@ -766,7 +1388,7 @@ void HardwareR0EvidencePage::showSelectedEvidenceDetail()
     text += QStringLiteral("CpuCount: %1\n").arg(m_lastIntegrityResult.cpuCount);
     text += QStringLiteral("ModuleCount: %1\n").arg(m_lastIntegrityResult.moduleCount);
     text += QStringLiteral("LastStatus: %1\n").arg(ntStatusText(m_lastIntegrityResult.lastStatus));
-    text += QStringLiteral("IoMessage: %1\n\n").arg(QString::fromStdString(m_lastIntegrityResult.io.message));
+    text += QStringLiteral("驱动返回说明: %1\n\n").arg(friendlyHardwareIoMessage(m_lastIntegrityResult.io.message));
     text += detailText(m_evidenceCache[static_cast<std::size_t>(cacheIndex)]);
     m_detailEditor->setText(text);
 }

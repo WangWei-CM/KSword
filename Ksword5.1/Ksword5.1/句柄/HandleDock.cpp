@@ -65,6 +65,50 @@ namespace
             .arg(KswordTheme::SurfaceHex());
     }
 
+    // installReadOnlyTreeCopyMenu 作用：
+    // - 给只读 QTreeWidget 安装“复制当前行”右键菜单；
+    // - 输入 treeWidget：Object Header / Object Type 等只读树表；
+    // - 处理：点击行时按可见列拼接 TSV，并写入剪贴板；
+    // - 返回：无；剪贴板或行为空时静默返回，不触发任何句柄写操作。
+    void installReadOnlyTreeCopyMenu(QTreeWidget* treeWidget)
+    {
+        if (treeWidget == nullptr)
+        {
+            return;
+        }
+
+        treeWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(treeWidget, &QTreeWidget::customContextMenuRequested, treeWidget, [treeWidget](const QPoint& localPosition)
+            {
+                QTreeWidgetItem* clickedItem = treeWidget->itemAt(localPosition);
+                if (clickedItem != nullptr)
+                {
+                    treeWidget->setCurrentItem(clickedItem);
+                }
+
+                QMenu menu(treeWidget);
+                menu.setStyleSheet(KswordTheme::ContextMenuStyle());
+                QAction* copyRowAction = menu.addAction(
+                    QIcon(QStringLiteral(":/Icon/handle_copy_row.svg")),
+                    QStringLiteral("复制当前行"));
+                copyRowAction->setEnabled(clickedItem != nullptr);
+                if (menu.exec(treeWidget->viewport()->mapToGlobal(localPosition)) != copyRowAction ||
+                    clickedItem == nullptr ||
+                    QApplication::clipboard() == nullptr)
+                {
+                    return;
+                }
+
+                QStringList fields;
+                fields.reserve(treeWidget->columnCount());
+                for (int columnIndex = 0; columnIndex < treeWidget->columnCount(); ++columnIndex)
+                {
+                    fields.push_back(clickedItem->text(columnIndex));
+                }
+                QApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
+            });
+    }
+
     // buildLineEditStyle 作用：统一过滤输入框视觉风格。
     QString buildLineEditStyle()
     {
@@ -243,6 +287,7 @@ void HandleDock::initializeUi()
     m_rootLayout->addWidget(m_tabWidget, 1);
 
     initializeHandleListTab();
+    initializeObjectHeaderTab();
     initializeObjectTypeTab();
 }
 
@@ -338,10 +383,30 @@ void HandleDock::initializeHandleListTab()
 
     m_handleListLayout->addLayout(m_toolbarLayout);
     m_handleListLayout->addWidget(m_statusLabel);
-    m_handleDetailStatusLabel = new QLabel(QStringLiteral("● 请选择一个句柄查看详情"), m_handleListPage);
+    m_handleListLayout->addWidget(m_tableWidget, 1);
+
+    m_tabWidget->addTab(m_handleListPage, QIcon(":/Icon/process_list.svg"), QStringLiteral("Handle Table"));
+}
+
+void HandleDock::initializeObjectHeaderTab()
+{
+    m_objectHeaderPage = new QWidget(m_tabWidget);
+    m_objectHeaderLayout = new QVBoxLayout(m_objectHeaderPage);
+    m_objectHeaderLayout->setContentsMargins(6, 6, 6, 6);
+    m_objectHeaderLayout->setSpacing(6);
+
+    // Object Header 页只做只读证据展示，不承载关闭/修改类动作。
+    QLabel* headerHintLabel = new QLabel(
+        QStringLiteral("本页展示当前选中句柄的对象头、对象类型归属、解码状态和风险标记。"),
+        m_objectHeaderPage);
+    headerHintLabel->setWordWrap(true);
+    headerHintLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
+    m_objectHeaderLayout->addWidget(headerHintLabel);
+
+    m_handleDetailStatusLabel = new QLabel(QStringLiteral("● 请选择一个句柄查看对象头证据"), m_objectHeaderPage);
     m_handleDetailStatusLabel->setStyleSheet(
         QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
-    m_handleDetailTable = new QTreeWidget(m_handleListPage);
+    m_handleDetailTable = new QTreeWidget(m_objectHeaderPage);
     m_handleDetailTable->setColumnCount(2);
     m_handleDetailTable->setHeaderLabels(QStringList{ QStringLiteral("字段"), QStringLiteral("值") });
     m_handleDetailTable->setRootIsDecorated(false);
@@ -349,6 +414,7 @@ void HandleDock::initializeHandleListTab()
     m_handleDetailTable->setAlternatingRowColors(true);
     m_handleDetailTable->setSelectionMode(QAbstractItemView::NoSelection);
     m_handleDetailTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    installReadOnlyTreeCopyMenu(m_handleDetailTable);
     if (m_handleDetailTable->header() != nullptr)
     {
         m_handleDetailTable->header()->setStyleSheet(buildHeaderStyle());
@@ -356,11 +422,10 @@ void HandleDock::initializeHandleListTab()
         m_handleDetailTable->header()->setSectionResizeMode(1, QHeaderView::Stretch);
     }
 
-    m_handleListLayout->addWidget(m_tableWidget, 3);
-    m_handleListLayout->addWidget(m_handleDetailStatusLabel);
-    m_handleListLayout->addWidget(m_handleDetailTable, 2);
+    m_objectHeaderLayout->addWidget(m_handleDetailStatusLabel);
+    m_objectHeaderLayout->addWidget(m_handleDetailTable, 1);
 
-    m_tabWidget->addTab(m_handleListPage, QIcon(":/Icon/process_list.svg"), QStringLiteral("句柄列表"));
+    m_tabWidget->addTab(m_objectHeaderPage, QIcon(":/Icon/process_critical.svg"), QStringLiteral("Object Header"));
 }
 
 void HandleDock::initializeObjectTypeTab()
@@ -398,12 +463,14 @@ void HandleDock::initializeObjectTypeTab()
     m_objectTypeTable = new QTreeWidget(m_objectTypePage);
     m_objectTypeDetailTable = new QTreeWidget(m_objectTypePage);
     initializeObjectTypeTable();
+    installReadOnlyTreeCopyMenu(m_objectTypeTable);
+    installReadOnlyTreeCopyMenu(m_objectTypeDetailTable);
 
     m_objectTypeLayout->addLayout(m_objectTypeToolLayout);
     m_objectTypeLayout->addWidget(m_objectTypeTable, 3);
     m_objectTypeLayout->addWidget(m_objectTypeDetailTable, 2);
 
-    m_tabWidget->addTab(m_objectTypePage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("对象类型"));
+    m_tabWidget->addTab(m_objectTypePage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("Object Type"));
 }
 
 void HandleDock::initializeHandleTable()
