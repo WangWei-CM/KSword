@@ -20,18 +20,38 @@
 
 #include <QtConcurrent/QtConcurrentRun>
 
+#ifndef WINVER
+#define WINVER 0x0601
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <Windows.h>
 #include <TlHelp32.h>
 #include <Psapi.h>
+#include <Pdh.h>
+#include <pdhmsg.h>
+#include <iphlpapi.h>
+#include <tcpestats.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
+#include <mutex>
+#include <vector>
 
 #pragma comment(lib, "Psapi.lib")
+#pragma comment(lib, "Pdh.lib")
+#pragma comment(lib, "Iphlpapi.lib")
 
 namespace
 {
@@ -67,6 +87,373 @@ namespace
         unsignedValue.LowPart = fileTimeValue.dwLowDateTime;
         unsignedValue.HighPart = fileTimeValue.dwHighDateTime;
         return unsignedValue.QuadPart;
+    }
+
+    quint32 extractPidFromGpuEngineInstanceName(const QString& instanceNameText)
+    {
+        // Inputs: a PDH GPU Engine wildcard instance name such as "pid_1234_luid_..._engtype_3D".
+        // Processing: find the "pid_" marker and parse the following decimal digits only.
+        // Return: the owning process ID, or 0 when the counter instance does not expose a PID.
+        const QString lowerText = instanceNameText.toLower();
+        const int pidMarkerIndex = lowerText.indexOf(QStringLiteral("pid_"));
+        if (pidMarkerIndex < 0)
+        {
+            return 0;
+        }
+
+        QString pidText;
+        int characterIndex = pidMarkerIndex + 4;
+        while (characterIndex < lowerText.size() && lowerText.at(characterIndex).isDigit())
+        {
+            pidText.append(lowerText.at(characterIndex));
+            ++characterIndex;
+        }
+
+        bool parseOk = false;
+        const uint pidValue = pidText.toUInt(&parseOk);
+        return parseOk ? static_cast<quint32>(pidValue) : 0;
+    }
+
+    QHash<quint32, double> sampleProcessGpuUsagePercentByPid()
+    {
+        // Inputs: none; the Windows PDH "GPU Engine(*)\\Utilization Percentage" counter is sampled.
+        // Processing: keep one process-wide PDH wildcard query, parse PID-bearing GPU engine instances,
+        //             and add all active engine usage for the same PID with a 100% display cap.
+        // Return: PID -> current GPU utilization percent; an empty map is valid on first sample or PDH failure.
+        static std::mutex samplerMutex;
+        static PDH_HQUERY queryHandle = nullptr;
+        static PDH_HCOUNTER counterHandle = nullptr;
+
+        std::lock_guard<std::mutex> lockGuard(samplerMutex);
+        QHash<quint32, double> usagePercentByPid;
+
+        if (queryHandle == nullptr)
+        {
+            PDH_HQUERY newQueryHandle = nullptr;
+            if (::PdhOpenQueryW(nullptr, 0, &newQueryHandle) != ERROR_SUCCESS || newQueryHandle == nullptr)
+            {
+                return usagePercentByPid;
+            }
+
+            PDH_HCOUNTER newCounterHandle = nullptr;
+            const PDH_STATUS addStatus = ::PdhAddEnglishCounterW(
+                newQueryHandle,
+                L"\\GPU Engine(*)\\Utilization Percentage",
+                0,
+                &newCounterHandle);
+            if (addStatus != ERROR_SUCCESS || newCounterHandle == nullptr)
+            {
+                ::PdhCloseQuery(newQueryHandle);
+                return usagePercentByPid;
+            }
+
+            queryHandle = newQueryHandle;
+            counterHandle = newCounterHandle;
+            ::PdhCollectQueryData(queryHandle);
+            return usagePercentByPid;
+        }
+
+        if (::PdhCollectQueryData(queryHandle) != ERROR_SUCCESS)
+        {
+            ::PdhCloseQuery(queryHandle);
+            queryHandle = nullptr;
+            counterHandle = nullptr;
+            return usagePercentByPid;
+        }
+
+        DWORD bufferSize = 0;
+        DWORD itemCount = 0;
+        PDH_STATUS queryStatus = ::PdhGetFormattedCounterArrayW(
+            counterHandle,
+            PDH_FMT_DOUBLE,
+            &bufferSize,
+            &itemCount,
+            nullptr);
+        if (queryStatus != PDH_MORE_DATA || bufferSize == 0 || itemCount == 0)
+        {
+            return usagePercentByPid;
+        }
+
+        std::vector<unsigned char> rawBuffer(bufferSize);
+        auto* itemPointer = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(rawBuffer.data());
+        queryStatus = ::PdhGetFormattedCounterArrayW(
+            counterHandle,
+            PDH_FMT_DOUBLE,
+            &bufferSize,
+            &itemCount,
+            itemPointer);
+        if (queryStatus != ERROR_SUCCESS)
+        {
+            return usagePercentByPid;
+        }
+
+        for (DWORD itemIndex = 0; itemIndex < itemCount; ++itemIndex)
+        {
+            const PDH_FMT_COUNTERVALUE_ITEM_W& itemValue = itemPointer[itemIndex];
+            if (itemValue.FmtValue.CStatus != ERROR_SUCCESS)
+            {
+                continue;
+            }
+
+            const QString instanceNameText = QString::fromWCharArray(
+                itemValue.szName != nullptr ? itemValue.szName : L"");
+            const quint32 pidValue = extractPidFromGpuEngineInstanceName(instanceNameText);
+            if (pidValue == 0)
+            {
+                continue;
+            }
+
+            const double boundedUsagePercent = qBound(0.0, itemValue.FmtValue.doubleValue, 100.0);
+            const double accumulatedUsagePercent =
+                usagePercentByPid.value(pidValue, 0.0) + boundedUsagePercent;
+            usagePercentByPid.insert(pidValue, qBound(0.0, accumulatedUsagePercent, 100.0));
+        }
+
+        return usagePercentByPid;
+    }
+
+    bool tcpStateCanCarryData(const DWORD stateValue)
+    {
+        // Inputs: a MIB_TCP_STATE numeric value from the TCP owner-PID tables.
+        // Processing: skip passive/terminal rows that cannot produce meaningful byte deltas.
+        // Return: true when querying TCP EStats data counters is worthwhile for this connection.
+        return stateValue != static_cast<DWORD>(MIB_TCP_STATE_CLOSED)
+            && stateValue != static_cast<DWORD>(MIB_TCP_STATE_LISTEN)
+            && stateValue != static_cast<DWORD>(MIB_TCP_STATE_TIME_WAIT)
+            && stateValue != static_cast<DWORD>(MIB_TCP_STATE_DELETE_TCB);
+    }
+
+    quint64 cumulativeTcpDataBytes(const TCP_ESTATS_DATA_ROD_v0& dataStats)
+    {
+        // Inputs: one TCP EStats data snapshot for a live connection.
+        // Processing: prefer direct data-byte counters, while tolerating systems that populate throughput counters.
+        // Return: cumulative inbound plus outbound bytes for later per-PID rate delta calculation.
+        const quint64 directDataBytes =
+            static_cast<quint64>(dataStats.DataBytesIn)
+            + static_cast<quint64>(dataStats.DataBytesOut);
+        const quint64 throughputBytes =
+            static_cast<quint64>(dataStats.ThruBytesReceived)
+            + static_cast<quint64>(dataStats.ThruBytesAcked);
+        return std::max(directDataBytes, throughputBytes);
+    }
+
+    bool queryTcp4DataStats(const MIB_TCPROW_OWNER_PID& ownerRow, TCP_ESTATS_DATA_ROD_v0* dataStatsOut)
+    {
+        // Inputs: one IPv4 TCP owner-PID row and an output buffer.
+        // Processing: enable TCP EStats collection for the row, then read the read-only data counters.
+        // Return: true when dataStatsOut receives a valid cumulative byte snapshot.
+        if (dataStatsOut == nullptr)
+        {
+            return false;
+        }
+
+        MIB_TCPROW tcpRow{};
+        tcpRow.dwState = ownerRow.dwState;
+        tcpRow.dwLocalAddr = ownerRow.dwLocalAddr;
+        tcpRow.dwLocalPort = ownerRow.dwLocalPort;
+        tcpRow.dwRemoteAddr = ownerRow.dwRemoteAddr;
+        tcpRow.dwRemotePort = ownerRow.dwRemotePort;
+
+        TCP_ESTATS_DATA_RW_v0 rwStats{};
+        rwStats.EnableCollection = TRUE;
+        ::SetPerTcpConnectionEStats(
+            &tcpRow,
+            TcpConnectionEstatsData,
+            reinterpret_cast<PUCHAR>(&rwStats),
+            0,
+            sizeof(rwStats),
+            0);
+
+        TCP_ESTATS_DATA_ROD_v0 rodStats{};
+        const ULONG queryStatus = ::GetPerTcpConnectionEStats(
+            &tcpRow,
+            TcpConnectionEstatsData,
+            nullptr,
+            0,
+            0,
+            nullptr,
+            0,
+            0,
+            reinterpret_cast<PUCHAR>(&rodStats),
+            0,
+            sizeof(rodStats));
+        if (queryStatus != NO_ERROR)
+        {
+            return false;
+        }
+
+        *dataStatsOut = rodStats;
+        return true;
+    }
+
+    bool queryTcp6DataStats(const MIB_TCP6ROW_OWNER_PID& ownerRow, TCP_ESTATS_DATA_ROD_v0* dataStatsOut)
+    {
+        // Inputs: one IPv6 TCP owner-PID row and an output buffer.
+        // Processing: build the plain MIB_TCP6ROW key required by IP Helper EStats APIs.
+        // Return: true when dataStatsOut receives a valid cumulative byte snapshot.
+        if (dataStatsOut == nullptr)
+        {
+            return false;
+        }
+
+        MIB_TCP6ROW tcpRow{};
+        std::memcpy(&tcpRow.LocalAddr, ownerRow.ucLocalAddr, sizeof(tcpRow.LocalAddr));
+        tcpRow.dwLocalScopeId = ownerRow.dwLocalScopeId;
+        tcpRow.dwLocalPort = ownerRow.dwLocalPort;
+        std::memcpy(&tcpRow.RemoteAddr, ownerRow.ucRemoteAddr, sizeof(tcpRow.RemoteAddr));
+        tcpRow.dwRemoteScopeId = ownerRow.dwRemoteScopeId;
+        tcpRow.dwRemotePort = ownerRow.dwRemotePort;
+        tcpRow.State = static_cast<MIB_TCP_STATE>(ownerRow.dwState);
+
+        TCP_ESTATS_DATA_RW_v0 rwStats{};
+        rwStats.EnableCollection = TRUE;
+        ::SetPerTcp6ConnectionEStats(
+            &tcpRow,
+            TcpConnectionEstatsData,
+            reinterpret_cast<PUCHAR>(&rwStats),
+            0,
+            sizeof(rwStats),
+            0);
+
+        TCP_ESTATS_DATA_ROD_v0 rodStats{};
+        const ULONG queryStatus = ::GetPerTcp6ConnectionEStats(
+            &tcpRow,
+            TcpConnectionEstatsData,
+            nullptr,
+            0,
+            0,
+            nullptr,
+            0,
+            0,
+            reinterpret_cast<PUCHAR>(&rodStats),
+            0,
+            sizeof(rodStats));
+        if (queryStatus != NO_ERROR)
+        {
+            return false;
+        }
+
+        *dataStatsOut = rodStats;
+        return true;
+    }
+
+    void collectTcp4NetworkBytesByPid(QHash<quint32, quint64>* networkBytesByPid)
+    {
+        // Inputs: mutable PID -> bytes map.
+        // Processing: enumerate IPv4 TCP connections with owner PIDs and aggregate cumulative EStats bytes.
+        // Return behavior: no value is returned; unsupported or denied rows are skipped.
+        if (networkBytesByPid == nullptr)
+        {
+            return;
+        }
+
+        ULONG tableSize = 0;
+        ULONG tableStatus = ::GetExtendedTcpTable(
+            nullptr,
+            &tableSize,
+            FALSE,
+            AF_INET,
+            TCP_TABLE_OWNER_PID_ALL,
+            0);
+        if ((tableStatus != ERROR_INSUFFICIENT_BUFFER && tableStatus != NO_ERROR) || tableSize == 0)
+        {
+            return;
+        }
+
+        std::vector<unsigned char> tableBuffer(tableSize);
+        auto* tablePointer = reinterpret_cast<PMIB_TCPTABLE_OWNER_PID>(tableBuffer.data());
+        tableStatus = ::GetExtendedTcpTable(
+            tablePointer,
+            &tableSize,
+            FALSE,
+            AF_INET,
+            TCP_TABLE_OWNER_PID_ALL,
+            0);
+        if (tableStatus != NO_ERROR)
+        {
+            return;
+        }
+
+        for (DWORD rowIndex = 0; rowIndex < tablePointer->dwNumEntries; ++rowIndex)
+        {
+            const MIB_TCPROW_OWNER_PID& rowValue = tablePointer->table[rowIndex];
+            const quint32 pidValue = static_cast<quint32>(rowValue.dwOwningPid);
+            if (pidValue == 0 || !tcpStateCanCarryData(rowValue.dwState))
+            {
+                continue;
+            }
+
+            TCP_ESTATS_DATA_ROD_v0 dataStats{};
+            if (queryTcp4DataStats(rowValue, &dataStats))
+            {
+                (*networkBytesByPid)[pidValue] += cumulativeTcpDataBytes(dataStats);
+            }
+        }
+    }
+
+    void collectTcp6NetworkBytesByPid(QHash<quint32, quint64>* networkBytesByPid)
+    {
+        // Inputs: mutable PID -> bytes map.
+        // Processing: enumerate IPv6 TCP connections with owner PIDs and aggregate cumulative EStats bytes.
+        // Return behavior: no value is returned; unsupported or denied rows are skipped.
+        if (networkBytesByPid == nullptr)
+        {
+            return;
+        }
+
+        ULONG tableSize = 0;
+        ULONG tableStatus = ::GetExtendedTcpTable(
+            nullptr,
+            &tableSize,
+            FALSE,
+            AF_INET6,
+            TCP_TABLE_OWNER_PID_ALL,
+            0);
+        if ((tableStatus != ERROR_INSUFFICIENT_BUFFER && tableStatus != NO_ERROR) || tableSize == 0)
+        {
+            return;
+        }
+
+        std::vector<unsigned char> tableBuffer(tableSize);
+        auto* tablePointer = reinterpret_cast<PMIB_TCP6TABLE_OWNER_PID>(tableBuffer.data());
+        tableStatus = ::GetExtendedTcpTable(
+            tablePointer,
+            &tableSize,
+            FALSE,
+            AF_INET6,
+            TCP_TABLE_OWNER_PID_ALL,
+            0);
+        if (tableStatus != NO_ERROR)
+        {
+            return;
+        }
+
+        for (DWORD rowIndex = 0; rowIndex < tablePointer->dwNumEntries; ++rowIndex)
+        {
+            const MIB_TCP6ROW_OWNER_PID& rowValue = tablePointer->table[rowIndex];
+            const quint32 pidValue = static_cast<quint32>(rowValue.dwOwningPid);
+            if (pidValue == 0 || !tcpStateCanCarryData(rowValue.dwState))
+            {
+                continue;
+            }
+
+            TCP_ESTATS_DATA_ROD_v0 dataStats{};
+            if (queryTcp6DataStats(rowValue, &dataStats))
+            {
+                (*networkBytesByPid)[pidValue] += cumulativeTcpDataBytes(dataStats);
+            }
+        }
+    }
+
+    QHash<quint32, quint64> sampleTcpNetworkBytesByPid()
+    {
+        // Inputs: none; Windows IP Helper owner-PID TCP tables are sampled.
+        // Processing: collect IPv4 and IPv6 TCP EStats byte counters keyed by owning PID.
+        // Return: PID -> cumulative TCP bytes. UDP and driver-attributed traffic are intentionally absent.
+        QHash<quint32, quint64> networkBytesByPid;
+        collectTcp4NetworkBytesByPid(&networkBytesByPid);
+        collectTcp6NetworkBytesByPid(&networkBytesByPid);
+        return networkBytesByPid;
     }
 
     // EnumWindows callback used by collectVisibleWindowPidSet().
@@ -629,6 +1016,8 @@ HudProcessListPanel::RefreshResult HudProcessListPanel::collectRefreshResult(
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     const QSet<quint32> visibleWindowPidSet = collectVisibleWindowPidSet();
     const QString windowsDirectoryPath = normalizedWindowsDirectoryPath();
+    const QHash<quint32, double> gpuUsagePercentByPid = sampleProcessGpuUsagePercentByPid();
+    const QHash<quint32, quint64> networkBytesByPid = sampleTcpNetworkBytesByPid();
 
     HANDLE snapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshotHandle == INVALID_HANDLE_VALUE)
@@ -656,6 +1045,7 @@ HudProcessListPanel::RefreshResult HudProcessListPanel::collectRefreshResult(
 
         CounterSample nextSample{};
         nextSample.sampleMs = nowMs;
+        nextSample.networkBytes = networkBytesByPid.value(entry.pid, 0);
 
         HANDLE processHandle = ::OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
@@ -752,11 +1142,17 @@ HudProcessListPanel::RefreshResult HudProcessListPanel::collectRefreshResult(
                     : 0;
                 entry.diskMBps =
                     (static_cast<double>(ioDeltaBytes) / std::max(0.001, elapsedSeconds)) / (1024.0 * 1024.0);
+
+                const quint64 networkDeltaBytes =
+                    nextSample.networkBytes >= previousIterator->networkBytes
+                    ? (nextSample.networkBytes - previousIterator->networkBytes)
+                    : 0;
+                entry.netKBps =
+                    (static_cast<double>(networkDeltaBytes) / std::max(0.001, elapsedSeconds)) / 1024.0;
             }
         }
 
-        entry.gpuPercent = 0.0;
-        entry.netKBps = 0.0;
+        entry.gpuPercent = gpuUsagePercentByPid.value(entry.pid, 0.0);
 
         result.entries.push_back(entry);
         result.nextSamples.insert(entry.pid, nextSample);
@@ -825,14 +1221,9 @@ void HudProcessListPanel::applyRefreshResult(const RefreshResult& result)
 
     const auto processSorter = [](const ProcessEntry& left, const ProcessEntry& right)
     {
-        if (std::abs(left.cpuPercent - right.cpuPercent) > 0.001)
-        {
-            return left.cpuPercent > right.cpuPercent;
-        }
-        if (std::abs(left.ramMB - right.ramMB) > 0.001)
-        {
-            return left.ramMB > right.ramMB;
-        }
+        // Inputs: two rows from the same visual group.
+        // Processing: sort by process/application name first so the default tree is alphabetic.
+        // Return: true when the left entry should appear before the right entry.
         if (left.processName.compare(right.processName, Qt::CaseInsensitive) != 0)
         {
             return left.processName.compare(right.processName, Qt::CaseInsensitive) < 0;
@@ -876,6 +1267,7 @@ void HudProcessListPanel::applyRefreshResult(const RefreshResult& result)
             applicationGroupItem,
             expansionKeyForGroup(ProcessGroupType::Application),
             true);
+        const bool expandApplicationSubtreeByDefault = applicationGroupItem->isExpanded();
 
         for (QVector<ProcessEntry>& applicationBucket : applicationBuckets)
         {
@@ -897,7 +1289,8 @@ void HudProcessListPanel::applyRefreshResult(const RefreshResult& result)
             restoreExpandedState(
                 applicationRootItem,
                 expansionKeyForApplication(aggregateEntry.pid),
-                false);
+                expandApplicationSubtreeByDefault);
+            applicationRootItem->setExpanded(expandApplicationSubtreeByDefault);
 
             QHash<quint32, QTreeWidgetItem*> childItemByPid;
             childItemByPid.reserve(applicationBucket.size());
@@ -934,7 +1327,8 @@ void HudProcessListPanel::applyRefreshResult(const RefreshResult& result)
                     restoreExpandedState(
                         childTreeItem,
                         expansionKeyForProcess(childEntry.pid),
-                        false);
+                        expandApplicationSubtreeByDefault);
+                    childTreeItem->setExpanded(expandApplicationSubtreeByDefault);
                     childItemByPid.insert(childEntry.pid, childTreeItem);
                     self(self, childEntry.pid, childTreeItem);
                 }
@@ -960,7 +1354,8 @@ void HudProcessListPanel::applyRefreshResult(const RefreshResult& result)
                     restoreExpandedState(
                         rootProcessItem,
                         expansionKeyForProcess(rootEntryIterator->pid),
-                        false);
+                        expandApplicationSubtreeByDefault);
+                    rootProcessItem->setExpanded(expandApplicationSubtreeByDefault);
                     childItemByPid.insert(rootEntryIterator->pid, rootProcessItem);
                     appendChildrenRecursive(appendChildrenRecursive, rootEntryIterator->pid, rootProcessItem);
                 }
@@ -987,7 +1382,8 @@ void HudProcessListPanel::applyRefreshResult(const RefreshResult& result)
                 restoreExpandedState(
                     childTreeItem,
                     expansionKeyForProcess(childEntry.pid),
-                    false);
+                    expandApplicationSubtreeByDefault);
+                childTreeItem->setExpanded(expandApplicationSubtreeByDefault);
                 childItemByPid.insert(childEntry.pid, childTreeItem);
                 appendChildrenRecursive(appendChildrenRecursive, childEntry.pid, childTreeItem);
             }

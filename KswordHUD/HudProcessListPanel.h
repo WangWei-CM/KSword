@@ -52,6 +52,7 @@ private:
     {
         quint64 cpuTime100ns = 0;
         quint64 ioBytes = 0;
+        quint64 networkBytes = 0;
         qint64 sampleMs = 0;
     };
 

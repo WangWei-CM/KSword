@@ -1037,7 +1037,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_shadowSsdtTabIndex && !m_shadowSsdtTabInitialized)
     {
-        showTabInitializingProgress(tabIndex, QStringLiteral("SSSDT解析"));
+        showTabInitializingProgress(tabIndex, QStringLiteral("SSSDT"));
         initializeShadowSsdtTab();
         m_shadowSsdtTabInitialized = true;
         hideTabInitializingProgress();
@@ -1047,7 +1047,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_inlineHookTabIndex && !m_inlineHookTabInitialized)
     {
-        showTabInitializingProgress(tabIndex, QStringLiteral("Inline Hook 检测"));
+        showTabInitializingProgress(tabIndex, QStringLiteral("Inline Hook"));
         initializeInlineHookTab();
         m_inlineHookTabInitialized = true;
         hideTabInitializingProgress();
@@ -1057,7 +1057,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
 
     if (tabIndex == m_iatEatHookTabIndex && !m_iatEatHookTabInitialized)
     {
-        showTabInitializingProgress(tabIndex, QStringLiteral("IAT/EAT 钩子检测"));
+        showTabInitializingProgress(tabIndex, QStringLiteral("IAT/EAT"));
         initializeIatEatHookTab();
         m_iatEatHookTabInitialized = true;
         hideTabInitializingProgress();

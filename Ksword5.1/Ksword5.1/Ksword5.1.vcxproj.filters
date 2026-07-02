@@ -1053,12 +1053,6 @@
     <None Include="profiles\ark_dyndata_pack_v3.json">
       <Filter>Profile Files</Filter>
     </None>
-    <None Include="profiles\pdb_deep_offsets\ntkrnlmp_f923da2d238e7c7ce180b962b19a3781_age5_deep_offsets.json">
-      <Filter>Profile Files</Filter>
-    </None>
-    <None Include="profiles\pdb_deep_offsets\win32k_gui_public_7bd3_000a_001c_deep_offsets.json">
-      <Filter>Profile Files</Filter>
-    </None>
   </ItemGroup>
   <ItemGroup>
     <QtUic Include="WelcomeDock\Welcome.ui">

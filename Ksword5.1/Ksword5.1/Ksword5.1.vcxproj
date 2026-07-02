@@ -485,8 +485,6 @@
     <None Include="qtvars.pro" />
     <None Include="profiles\ark_dyndata_pack_v2.json" />
     <None Include="profiles\ark_dyndata_pack_v3.json" />
-    <None Include="profiles\pdb_deep_offsets\ntkrnlmp_f923da2d238e7c7ce180b962b19a3781_age5_deep_offsets.json" />
-    <None Include="profiles\pdb_deep_offsets\win32k_gui_public_7bd3_000a_001c_deep_offsets.json" />
   </ItemGroup>
   <Target Name="CopyKswordArkDynDataProfilePack" AfterTargets="Build">
     <!-- v3 pack carries typed StructOffset items such as EpActiveProcessLinks; v2 is kept only as a callback-era fallback. -->
