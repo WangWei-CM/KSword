@@ -8066,9 +8066,6 @@ void MainWindow::applyAppearanceSettings(
     // startupTopMostEnabled 作用：设置页和启动配置统一控制主窗口最高级置顶。
     setPinnedWindowState(m_currentAppearanceSettings.startupTopMostEnabled, false);
 
-    // startupTopMostEnabled 作用：设置页和启动配置统一控制主窗口最高级置顶。
-    setPinnedWindowState(m_currentAppearanceSettings.startupTopMostEnabled, false);
-
     const bool darkModeEnabled = isDarkModeEffective(settings);
     KswordTheme::SetDarkModeEnabled(darkModeEnabled);
     const QColor windowBackgroundColor = KswordTheme::WindowColor();
