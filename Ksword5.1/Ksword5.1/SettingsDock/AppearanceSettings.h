@@ -35,6 +35,8 @@ namespace ks::settings
     // useWideScrollBars：是否使用宽滚动条（false=默认窄版）；
     // scrollBarAutoHideEnabled：滚动条是否启用自动隐藏/悬停展开；
     // sliderWheelAdjustEnabled：是否允许滚轮直接调整滑块值。
+    // virusTotalApiKey：VirusTotal 在线扫描 API Key，供 OnlineScan 模块运行时读取。
+    // threatBookApiKey：ThreatBook（微步在线）在线扫描 API Key，供 OnlineScan 模块运行时读取。
     struct AppearanceSettings
     {
         ThemeMode themeMode = ThemeMode::FollowSystem;
@@ -50,6 +52,8 @@ namespace ks::settings
         bool useWideScrollBars = false;
         bool scrollBarAutoHideEnabled = false;
         bool sliderWheelAdjustEnabled = false;
+        QString virusTotalApiKey;
+        QString threatBookApiKey;
     };
 
     // themeModeToJsonText 作用：

@@ -172,6 +172,7 @@ SettingsDock::SettingsDock(QWidget* parent)
 
     initializeUi();
     initializeAppearanceTab();
+    initializeOnlineScanTab();
     loadSettingsFromJson();
 
     info << settingsInitEvent << "[SettingsDock] 设置页初始化完成，界面与启动配置已加载。" << eol;
@@ -592,6 +593,18 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
         m_startupWindowScaleFactorEdit->setText(formatScaleFactorText(normalizedScaleFactor));
     }
 
+    // 在线扫描 API Key 回填：
+    // - 设置页只显示用户保存过的 Key；
+    // - PasswordEchoOnEdit 会在未编辑时隐藏文本，避免旁观泄露。
+    if (m_virusTotalApiKeyEdit != nullptr)
+    {
+        m_virusTotalApiKeyEdit->setText(settings.virusTotalApiKey);
+    }
+    if (m_threatBookApiKeyEdit != nullptr)
+    {
+        m_threatBookApiKeyEdit->setText(settings.threatBookApiKey);
+    }
+
     updateOpacityValueLabel(settings.backgroundOpacityPercent);
     updateWindowScaleFactorHintLabel(
         ks::settings::normalizeWindowScaleFactor(settings.startupWindowScaleFactor));
@@ -647,6 +660,15 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
         (m_scrollBarAutoHideCheckBox != nullptr) && m_scrollBarAutoHideCheckBox->isChecked();
     collectedSettings.sliderWheelAdjustEnabled =
         (m_sliderWheelAdjustCheckBox != nullptr) && m_sliderWheelAdjustCheckBox->isChecked();
+    // 在线扫描 API Key：
+    // - 从在线扫描标签页读取；
+    // - 保存时统一 trim，OnlineScan 运行时只读取配置，不硬编码密钥。
+    collectedSettings.virusTotalApiKey = (m_virusTotalApiKeyEdit != nullptr)
+        ? m_virusTotalApiKeyEdit->text().trimmed()
+        : m_currentAppearanceSettings.virusTotalApiKey;
+    collectedSettings.threatBookApiKey = (m_threatBookApiKeyEdit != nullptr)
+        ? m_threatBookApiKeyEdit->text().trimmed()
+        : m_currentAppearanceSettings.threatBookApiKey;
 
     return collectedSettings;
 }
@@ -665,16 +687,25 @@ void SettingsDock::markPendingChanges(const QString& triggerReason)
 
 void SettingsDock::updateApplyButtonState()
 {
-    if (m_applySettingsButton == nullptr)
+    if (m_applySettingsButton != nullptr)
     {
-        return;
+        m_applySettingsButton->setEnabled(m_hasPendingChanges);
+        m_applySettingsButton->setToolTip(
+            m_hasPendingChanges
+            ? QStringLiteral("应用当前设置改动（主题/背景和系统右键菜单立即生效，部分启动选项下次启动生效）")
+            : QStringLiteral("当前设置已应用，无待提交改动"));
     }
 
-    m_applySettingsButton->setEnabled(m_hasPendingChanges);
-    m_applySettingsButton->setToolTip(
-        m_hasPendingChanges
-        ? QStringLiteral("应用当前设置改动（主题/背景和系统右键菜单立即生效，部分启动选项下次启动生效）")
-        : QStringLiteral("当前设置已应用，无待提交改动"));
+    // 在线扫描页保存按钮与外观页“应用”按钮共用同一个待保存状态，
+    // 这样用户在任意设置页点击保存都会落盘完整配置。
+    if (m_saveOnlineScanKeysButton != nullptr)
+    {
+        m_saveOnlineScanKeysButton->setEnabled(m_hasPendingChanges);
+        m_saveOnlineScanKeysButton->setToolTip(
+            m_hasPendingChanges
+            ? QStringLiteral("保存当前 API Key 与其它待提交设置")
+            : QStringLiteral("当前 API Key 已保存，无待提交改动"));
+    }
 }
 
 void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
@@ -703,7 +734,9 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         && nextSettings.unlockerShellContextMenuEnabled == m_currentAppearanceSettings.unlockerShellContextMenuEnabled
         && nextSettings.useWideScrollBars == m_currentAppearanceSettings.useWideScrollBars
         && nextSettings.scrollBarAutoHideEnabled == m_currentAppearanceSettings.scrollBarAutoHideEnabled
-        && nextSettings.sliderWheelAdjustEnabled == m_currentAppearanceSettings.sliderWheelAdjustEnabled)
+        && nextSettings.sliderWheelAdjustEnabled == m_currentAppearanceSettings.sliderWheelAdjustEnabled
+        && nextSettings.virusTotalApiKey == m_currentAppearanceSettings.virusTotalApiKey
+        && nextSettings.threatBookApiKey == m_currentAppearanceSettings.threatBookApiKey)
     {
         m_hasPendingChanges = false;
         updateApplyButtonState();
@@ -760,6 +793,14 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         m_startupWindowScaleFactorEdit->setText(
             formatScaleFactorText(m_currentAppearanceSettings.startupWindowScaleFactor));
     }
+    if (m_virusTotalApiKeyEdit != nullptr)
+    {
+        m_virusTotalApiKeyEdit->setText(m_currentAppearanceSettings.virusTotalApiKey);
+    }
+    if (m_threatBookApiKeyEdit != nullptr)
+    {
+        m_threatBookApiKeyEdit->setText(m_currentAppearanceSettings.threatBookApiKey);
+    }
     updateWindowScaleFactorHintLabel(m_currentAppearanceSettings.startupWindowScaleFactor);
     m_isApplyingUiState = false;
     m_hasPendingChanges = false;
@@ -792,6 +833,10 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         << (m_currentAppearanceSettings.scrollBarAutoHideEnabled ? "true" : "false")
         << "，滚轮调整滑块="
         << (m_currentAppearanceSettings.sliderWheelAdjustEnabled ? "true" : "false")
+        << "，VirusTotal API Key已配置="
+        << (!m_currentAppearanceSettings.virusTotalApiKey.trimmed().isEmpty() ? "true" : "false")
+        << "，ThreatBook API Key已配置="
+        << (!m_currentAppearanceSettings.threatBookApiKey.trimmed().isEmpty() ? "true" : "false")
         << eol;
 
     emit appearanceSettingsChanged(m_currentAppearanceSettings);

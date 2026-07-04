@@ -2,8 +2,13 @@
 
 #include "Common.h"
 #include "PathUtils.h"
+#include "resource.h"
 #include "../../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <vector>
 #include <winsvc.h>
 
 namespace Ksword::Core {
@@ -11,6 +16,233 @@ namespace {
 constexpr wchar_t kDriverFileName[] = L"KswordARK.sys";
 constexpr wchar_t kDriverServiceName[] = L"KswordARK";
 constexpr wchar_t kDriverDisplayName[] = L"KswordARK R0 Driver";
+constexpr DWORD kDriverIoChunkBytes = 64 * 1024;
+
+// EmbeddedDriverPayload describes the immutable bytes loaded from the EXE
+// resource table. Inputs are provided by LoadEmbeddedDriverPayload; processing
+// keeps only a pointer/size view owned by the module; there is no destructor work
+// because Win32 owns the mapped resource for the lifetime of the process.
+struct EmbeddedDriverPayload {
+    const std::uint8_t* bytes = nullptr;
+    DWORD size = 0;
+};
+
+// LoadEmbeddedDriverPayload locates the RCDATA driver payload in this module.
+// There is no input; processing calls FindResource/LoadResource/LockResource;
+// output is true with a valid byte view, or false with a user-facing error.
+bool LoadEmbeddedDriverPayload(EmbeddedDriverPayload& payload, std::wstring& error) {
+    payload = {};
+    error.clear();
+
+    HMODULE module = ::GetModuleHandleW(nullptr);
+    if (!module) {
+        error = L"GetModuleHandleW failed: " + LastErrorMessage();
+        return false;
+    }
+
+    HRSRC resource = ::FindResourceW(module, MAKEINTRESOURCEW(IDR_KSWORDARKLIGHT_DRIVER_SYS), RT_RCDATA);
+    if (!resource) {
+        error = L"FindResourceW(IDR_KSWORDARKLIGHT_DRIVER_SYS) failed: " + LastErrorMessage();
+        return false;
+    }
+
+    const DWORD size = ::SizeofResource(module, resource);
+    if (size == 0) {
+        error = L"Embedded KswordARK.sys resource is empty.";
+        return false;
+    }
+
+    HGLOBAL loaded = ::LoadResource(module, resource);
+    if (!loaded) {
+        error = L"LoadResource(IDR_KSWORDARKLIGHT_DRIVER_SYS) failed: " + LastErrorMessage();
+        return false;
+    }
+
+    const void* bytes = ::LockResource(loaded);
+    if (!bytes) {
+        error = L"LockResource(IDR_KSWORDARKLIGHT_DRIVER_SYS) returned no data.";
+        return false;
+    }
+
+    payload.bytes = static_cast<const std::uint8_t*>(bytes);
+    payload.size = size;
+    return true;
+}
+
+// EmbeddedDriverPayloadAvailable checks whether the EXE carries the driver
+// resource. There is no input; processing performs the same resource lookup used
+// by extraction; output is a boolean for status text only.
+bool EmbeddedDriverPayloadAvailable() {
+    EmbeddedDriverPayload payload;
+    std::wstring ignoredError;
+    return LoadEmbeddedDriverPayload(payload, ignoredError);
+}
+
+// ExistingDriverMatchesPayload compares the on-disk driver with the embedded
+// resource without rewriting it. Inputs are the path and payload view; processing
+// reads the file in bounded chunks; output is true when comparison succeeded and
+// writes the equality result to matches.
+bool ExistingDriverMatchesPayload(
+    const std::wstring& path,
+    const EmbeddedDriverPayload& payload,
+    bool& matches,
+    std::wstring& error) {
+    matches = false;
+    error.clear();
+
+    UniqueHandle file(::CreateFileW(
+        path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr));
+    if (!file.valid()) {
+        error = L"CreateFileW for existing driver failed: " + LastErrorMessage();
+        return false;
+    }
+
+    LARGE_INTEGER fileSize{};
+    if (!::GetFileSizeEx(file.get(), &fileSize)) {
+        error = L"GetFileSizeEx for existing driver failed: " + LastErrorMessage();
+        return false;
+    }
+    if (fileSize.QuadPart != static_cast<LONGLONG>(payload.size)) {
+        return true;
+    }
+
+    std::vector<std::uint8_t> buffer(kDriverIoChunkBytes);
+    DWORD offset = 0;
+    while (offset < payload.size) {
+        const DWORD expected = std::min<DWORD>(payload.size - offset, kDriverIoChunkBytes);
+        DWORD read = 0;
+        if (!::ReadFile(file.get(), buffer.data(), expected, &read, nullptr)) {
+            error = L"ReadFile for existing driver failed: " + LastErrorMessage();
+            return false;
+        }
+        if (read != expected) {
+            return true;
+        }
+        if (std::memcmp(buffer.data(), payload.bytes + offset, read) != 0) {
+            return true;
+        }
+        offset += read;
+    }
+
+    matches = true;
+    return true;
+}
+
+// WritePayloadAtomically writes the embedded driver to disk through a temporary
+// file. Inputs are the target path and payload; processing writes all bytes,
+// flushes them, and replaces the final file with MoveFileEx; output is true only
+// after the final path contains the embedded bytes.
+bool WritePayloadAtomically(
+    const std::wstring& targetPath,
+    const EmbeddedDriverPayload& payload,
+    std::wstring& error) {
+    error.clear();
+
+    const std::wstring tempPath = targetPath + L".embedded.tmp";
+    ::DeleteFileW(tempPath.c_str());
+
+    UniqueHandle file(::CreateFileW(
+        tempPath.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr));
+    if (!file.valid()) {
+        error = L"CreateFileW for temporary embedded driver failed: " + LastErrorMessage();
+        return false;
+    }
+
+    DWORD offset = 0;
+    while (offset < payload.size) {
+        const DWORD chunkBytes = std::min<DWORD>(payload.size - offset, kDriverIoChunkBytes);
+        DWORD written = 0;
+        if (!::WriteFile(file.get(), payload.bytes + offset, chunkBytes, &written, nullptr)) {
+            const DWORD writeError = ::GetLastError();
+            file.reset();
+            ::DeleteFileW(tempPath.c_str());
+            error = L"WriteFile for temporary embedded driver failed: " + LastErrorMessage(writeError);
+            return false;
+        }
+        if (written == 0) {
+            file.reset();
+            ::DeleteFileW(tempPath.c_str());
+            error = L"WriteFile for temporary embedded driver wrote zero bytes.";
+            return false;
+        }
+        offset += written;
+    }
+
+    if (!::FlushFileBuffers(file.get())) {
+        const DWORD flushError = ::GetLastError();
+        file.reset();
+        ::DeleteFileW(tempPath.c_str());
+        error = L"FlushFileBuffers for temporary embedded driver failed: " + LastErrorMessage(flushError);
+        return false;
+    }
+    file.reset();
+
+    if (!::MoveFileExW(tempPath.c_str(), targetPath.c_str(),
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD moveError = ::GetLastError();
+        ::DeleteFileW(tempPath.c_str());
+        error = L"MoveFileExW failed while installing embedded driver payload: " + LastErrorMessage(moveError);
+        return false;
+    }
+
+    return true;
+}
+
+// EnsureDriverFileFromEmbeddedResource makes KswordARK.sys available beside the
+// executable. Input is the final service ImagePath; processing compares any
+// existing file with the embedded resource and rewrites only when bytes differ;
+// output is true when the final file can be used by SCM.
+bool EnsureDriverFileFromEmbeddedResource(const std::wstring& driverPath, std::wstring& note, std::wstring& error) {
+    note.clear();
+    error.clear();
+    if (driverPath.empty()) {
+        error = L"driver output path is empty.";
+        return false;
+    }
+
+    EmbeddedDriverPayload payload;
+    std::wstring loadError;
+    if (!LoadEmbeddedDriverPayload(payload, loadError)) {
+        if (FileExists(driverPath)) {
+            return true;
+        }
+        error = loadError;
+        return false;
+    }
+
+    if (FileExists(driverPath)) {
+        bool matches = false;
+        std::wstring compareError;
+        if (!ExistingDriverMatchesPayload(driverPath, payload, matches, compareError)) {
+            error = compareError;
+            return false;
+        }
+        if (matches) {
+            return true;
+        }
+    }
+
+    std::wstring writeError;
+    if (!WritePayloadAtomically(driverPath, payload, writeError)) {
+        error = writeError;
+        return false;
+    }
+
+    note = L"Embedded KswordARK.sys was written beside the executable.";
+    return true;
+}
 
 // UniqueServiceHandle owns an SCM handle. Inputs are SC_HANDLE values returned
 // by service APIs; processing calls CloseServiceHandle on reset/destruction;
@@ -129,7 +361,9 @@ DriverRuntimeStatus QueryDriverStatus() {
     if (!service.valid()) {
         status.message = status.driverFilePresent
             ? L"Driver file found; service is not installed."
-            : L"KswordARK.sys not found beside the executable.";
+            : (EmbeddedDriverPayloadAvailable()
+                ? L"KswordARK.sys is embedded in this executable and will be written beside the executable during installation."
+                : L"KswordARK.sys not found beside the executable.");
         ProbeControlDevice(status);
         status.message = AppendControlDeviceMessage(status.message, status);
         return status;
@@ -145,6 +379,19 @@ DriverRuntimeStatus QueryDriverStatus() {
 
 DriverRuntimeStatus InstallAndStartDriver() {
     DriverRuntimeStatus status = QueryDriverStatus();
+    std::wstring driverPreparationNote;
+    std::wstring driverPreparationError;
+    // The running-driver case deliberately avoids replacing an already loaded
+    // image. Inputs are the status flags from QueryDriverStatus; processing only
+    // materializes the embedded payload when start/install still needs a file;
+    // there is no return value because errors are folded into status.message.
+    if ((!status.serviceRunning || !status.driverFilePresent)
+        && !EnsureDriverFileFromEmbeddedResource(status.driverPath, driverPreparationNote, driverPreparationError)) {
+        status.driverFilePresent = FileExists(status.driverPath);
+        status.message = L"Cannot prepare R0 driver file from embedded resource: " + driverPreparationError;
+        return status;
+    }
+    status.driverFilePresent = FileExists(status.driverPath);
     if (!status.driverFilePresent) {
         status.message = L"Cannot install R0 driver because KswordARK.sys was not found: " + status.driverPath;
         return status;
@@ -208,6 +455,9 @@ DriverRuntimeStatus InstallAndStartDriver() {
     FillServiceState(service.get(), status);
     ProbeControlDevice(status);
     status.message = status.serviceRunning ? L"R0 driver installed and running." : L"R0 driver installed; start state is pending or stopped.";
+    if (!driverPreparationNote.empty()) {
+        status.message = driverPreparationNote + L" " + status.message;
+    }
     status.message = AppendControlDeviceMessage(status.message, status);
     return status;
 }

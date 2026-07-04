@@ -31,8 +31,9 @@ std::wstring ResolveDriverPath();
 DriverRuntimeStatus QueryDriverStatus();
 
 // InstallAndStartDriver ensures the service exists and is running. There is no
-// input; processing creates/updates the kernel-driver service from KswordARK.sys
-// beside the executable and starts it; output describes success/failure details.
+// input; processing restores KswordARK.sys from the embedded EXE resource when
+// needed, creates/updates the kernel-driver service from that file, and starts
+// it; output describes success/failure details.
 DriverRuntimeStatus InstallAndStartDriver();
 
 // StopDriverService asks SCM to stop the service. There is no input; processing

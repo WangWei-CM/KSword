@@ -353,6 +353,31 @@
     <Image Include="..\Ksword5.1\Ksword5.1\Resource\Logo\KswordLogo.ico" />
     <Image Include="..\Ksword5.1\Ksword5.1\Resource\Logo\Mainlogo.png" />
   </ItemGroup>
+  <Target Name="PrepareKswordArkLightEmbeddedDriver" BeforeTargets="ResourceCompile">
+    <!--
+      Inputs:
+        - $(TargetDir)KswordARK.sys, which is the generated driver location used
+          by standalone KswordARKLight builds.
+        - During solution builds, Ksword5.1.sln orders KswordARKDriver before
+          KswordARKLight, and the driver project writes KswordARK.sys into this
+          same generated directory.
+      Processing:
+        - Copy the selected driver into a project-local generated path referenced
+          by KswordARKLight.rc, because .rc files cannot expand MSBuild
+          properties inside RCDATA filenames.
+      Return behavior:
+        - There is no return value; the target fails early with an actionable
+          error if the driver binary is missing.
+    -->
+    <PropertyGroup>
+      <KswordArkLightDriverOutputPath>$(TargetDir)KswordARK.sys</KswordArkLightDriverOutputPath>
+      <KswordArkLightEmbeddedDriverDir>$(MSBuildProjectDirectory)\generated\</KswordArkLightEmbeddedDriverDir>
+      <KswordArkLightEmbeddedDriverPath>$(KswordArkLightEmbeddedDriverDir)KswordARK.sys</KswordArkLightEmbeddedDriverPath>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(KswordArkLightDriverOutputPath)')" Text="KswordARKLight cannot embed KswordARK.sys because it was not found at $(KswordArkLightDriverOutputPath). Build KswordARKDriver first when building the solution, or place KswordARK.sys in the KswordARKLight generated output directory for a standalone project build." />
+    <MakeDir Directories="$(KswordArkLightEmbeddedDriverDir)" />
+    <Copy SourceFiles="$(KswordArkLightDriverOutputPath)" DestinationFiles="$(KswordArkLightEmbeddedDriverPath)" SkipUnchangedFiles="false" />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>

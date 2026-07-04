@@ -365,6 +365,15 @@
     <ClCompile Include="NetworkDock\HttpsProxyService.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="OnlineScan\OnlineScanSupport.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="OnlineScan\ThreatBookScan.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="OnlineScan\VirusTotalOnlineScan.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="OtherDock\OtherDock.DesktopCreate.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -423,6 +432,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SettingsDock\SettingsDock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SettingsDock\SettingsDock.OnlineScan.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="WelcomeDock\WelcomeDock.cpp">
@@ -573,6 +585,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="RegistryDock_Themed.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="RegistryDock\RegistryOptimizationPage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="HardwareDock\HardwareDock.cpp">
@@ -760,6 +775,9 @@
     <QtMoc Include="RegistryDock\RegistryDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="RegistryDock\RegistryOptimizationPage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <QtMoc Include="ProcessDock\ProcessDetailWindow.h">
       <Filter>Header Files</Filter>
     </QtMoc>
@@ -1030,6 +1048,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="NetworkDock\HttpsProxyService.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="OnlineScan\OnlineScanSupport.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="OnlineScan\ThreatBookScan.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="OnlineScan\VirusTotalOnlineScan.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\PerformanceNavCard.h">

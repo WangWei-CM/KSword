@@ -52,11 +52,24 @@ private:
     // 调用方式：initializeUi 内部调用。
     void initializeAppearanceTab();
 
+    // initializeOnlineScanTab 作用：
+    // - 创建“在线扫描”标签页控件（VirusTotal/ThreatBook API Key 输入与保存按钮）。
+    // 调用方式：initializeUi 后、读取配置前调用。
+    // 返回：无。
+    void initializeOnlineScanTab();
+
     // bindAppearanceSignals 作用：
     // - 绑定外观页所有控件事件到“待应用”流程；
     // - 仅在点击应用按钮后才触发保存与生效。
     // 调用方式：initializeAppearanceTab 末尾调用。
     void bindAppearanceSignals();
+
+    // bindOnlineScanSignals 作用：
+    // - 绑定在线扫描 API Key 输入框和保存按钮；
+    // - 输入变更只标记待保存，点击保存后复用统一设置落盘流程。
+    // 调用方式：initializeOnlineScanTab 末尾调用。
+    // 返回：无。
+    void bindOnlineScanSignals();
 
     // loadSettingsFromJson 作用：
     // - 读取 JSON 配置并刷新 UI。
@@ -146,6 +159,9 @@ private:
     // m_appearanceTab 作用：外观与启动设置页 QWidget 容器。
     QWidget* m_appearanceTab = nullptr;
 
+    // m_onlineScanTab 作用：在线扫描 API Key 设置页 QWidget 容器。
+    QWidget* m_onlineScanTab = nullptr;
+
     // m_themeButtonGroup 作用：三种主题按钮的互斥分组。
     QButtonGroup* m_themeButtonGroup = nullptr;
 
@@ -206,8 +222,17 @@ private:
     // m_startupWindowScaleHintLabel 作用：显示缩放因子对应百分比提示文本。
     QLabel* m_startupWindowScaleHintLabel = nullptr;
 
+    // m_virusTotalApiKeyEdit 作用：编辑 VirusTotal 在线扫描 API Key。
+    QLineEdit* m_virusTotalApiKeyEdit = nullptr;
+
+    // m_threatBookApiKeyEdit 作用：编辑 ThreatBook（微步在线）在线扫描 API Key。
+    QLineEdit* m_threatBookApiKeyEdit = nullptr;
+
     // m_applySettingsButton 作用：统一提交当前设置改动并触发实际生效。
     QPushButton* m_applySettingsButton = nullptr;
+
+    // m_saveOnlineScanKeysButton 作用：在线扫描页单独保存 API Key 的按钮。
+    QPushButton* m_saveOnlineScanKeysButton = nullptr;
 
     // m_currentAppearanceSettings 作用：缓存当前有效界面与启动配置。
     ks::settings::AppearanceSettings m_currentAppearanceSettings;

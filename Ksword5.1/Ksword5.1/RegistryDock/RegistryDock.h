@@ -32,6 +32,7 @@ class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
+class RegistryOptimizationPage;
 
 // ============================================================
 // RegistryDock
@@ -218,6 +219,10 @@ private:
 private:
     // ===================== 顶层布局 =====================
     QVBoxLayout* m_rootLayout = nullptr;         // 根布局。
+    QTabWidget* m_registryTabWidget = nullptr;   // 注册表 Dock 顶层 Tab（编辑/系统优化）。
+    QWidget* m_registryEditorPage = nullptr;     // 现有注册表编辑页容器。
+    QVBoxLayout* m_registryEditorLayout = nullptr; // 注册表编辑页内部布局。
+    RegistryOptimizationPage* m_optimizationPage = nullptr; // JSON 驱动的系统优化页。
     QWidget* m_toolBarWidget = nullptr;          // 顶部工具栏容器。
     QHBoxLayout* m_toolBarLayout = nullptr;      // 顶部工具栏布局。
 

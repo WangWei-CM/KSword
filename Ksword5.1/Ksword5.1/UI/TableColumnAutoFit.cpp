@@ -16,6 +16,7 @@
 #include <QMouseEvent>
 #include <QPointer>
 #include <QSignalBlocker>
+#include <QSize>
 #include <QTableView>
 #include <QTimer>
 #include <QTreeView>
@@ -28,6 +29,7 @@ namespace
     constexpr const char* AutoFitInstalledProperty = "_ksword_table_column_auto_fit_installed";
     constexpr const char* AutoFitScheduledProperty = "_ksword_table_column_auto_fit_scheduled";
     constexpr const char* AutoFitUserAdjustedProperty = "_ksword_table_column_auto_fit_user_adjusted";
+    constexpr const char* AutoFitDisabledProperty = "_ksword_table_column_auto_fit_disabled";
     constexpr const char* AutoFitHeaderHookedProperty = "_ksword_table_column_auto_fit_header_hooked";
     constexpr const char* AutoFitResizePendingProperty = "_ksword_table_column_auto_fit_resize_pending";
     constexpr const char* AutoFitResizePressPositionProperty = "_ksword_table_column_auto_fit_resize_press_position";
@@ -70,13 +72,26 @@ namespace
     // - 只有这类动作会被视作手动调列宽，普通点击排序不禁用自动 fit。
     constexpr int kResizeGripMargin = 6;
 
+    // kCellWidgetHorizontalPadding 作用：
+    // - 给 setCellWidget/indexWidget 创建的真实控件预留单元格边距；
+    // - 避免下拉框、复选框、按钮刚进入表格时被列宽算法压缩到错误位置；
+    // - 该值只作为自动列宽下限/首选宽度补偿，不改变控件自身样式。
+    constexpr int kCellWidgetHorizontalPadding = 10;
+
     struct VisibleSection
     {
         int logicalIndex = -1;  // logicalIndex：QHeaderView 逻辑列号。
         int currentWidth = 0;   // currentWidth：自动 fit 前的当前列宽快照，保留给调试与后续扩展。
+        int minimumWidth = 0;   // minimumWidth：本轮压缩不应低于的列宽，控件列会把真实控件宽度计入此值。
         int preferredWidth = 0; // preferredWidth：根据表头和抽样内容估算出的首选列宽。
         int fittedWidth = 0;    // fittedWidth：压缩/扩展后的目标列宽。
         bool prefersViewportExpansion = false; // prefersViewportExpansion：业务层原本声明为 Stretch 的填充候选列。
+    };
+
+    struct SectionWidthHints
+    {
+        int minimumWidth = 0;   // minimumWidth：必须保留的列宽下限。
+        int preferredWidth = 0; // preferredWidth：内容舒适显示时的目标宽度。
     };
 
     // horizontalHeaderForView 作用：
@@ -159,6 +174,40 @@ namespace
         return qobject_cast<QTableView*>(view) != nullptr || qobject_cast<QTreeView*>(view) != nullptr;
     }
 
+    // isAutoFitEnabled 作用：
+    // - 输入：候选表格/树表视图；
+    // - 处理：读取业务层可设置的禁用属性，允许文件管理器等自管列宽的视图退出全局列宽逻辑；
+    // - 返回：true 表示全局自动列宽可以处理该视图，false 表示必须跳过。
+    bool isAutoFitEnabled(QAbstractItemView* view)
+    {
+        return isSupportedTableView(view) && !view->property(AutoFitDisabledProperty).toBool();
+    }
+
+    // eventObjectToSupportedView 作用：
+    // - 输入：全局事件过滤器收到的 QObject；
+    // - 处理：既识别 QTableView/QTreeView 本体，也识别其 viewport 子控件；
+    // - 返回：需要执行列宽自适应的视图；非表格对象返回 nullptr。
+    QAbstractItemView* eventObjectToSupportedView(QObject* watchedObject)
+    {
+        if (QAbstractItemView* directView = qobject_cast<QAbstractItemView*>(watchedObject))
+        {
+            return isAutoFitEnabled(directView) ? directView : nullptr;
+        }
+
+        QWidget* watchedWidget = qobject_cast<QWidget*>(watchedObject);
+        if (watchedWidget == nullptr)
+        {
+            return nullptr;
+        }
+
+        QAbstractItemView* parentView = qobject_cast<QAbstractItemView*>(watchedWidget->parentWidget());
+        if (!isAutoFitEnabled(parentView) || parentView->viewport() != watchedWidget)
+        {
+            return nullptr;
+        }
+        return parentView;
+    }
+
     // measuredTextWidth 作用：
     // - 用指定字体度量一段显示文本所需宽度；
     // - 对换行文本取单行化后的前缀，避免超长内容把某列权重无限放大；
@@ -205,18 +254,53 @@ namespace
         return textWidth + kHeaderHorizontalPadding + sortIndicatorReserve;
     }
 
-    // sampleIndexPreferredWidth 作用：
-    // - 估算单个模型索引的显示内容所需宽度；
-    // - DisplayRole 负责文字，DecorationRole/CheckStateRole 只按固定占位补偿；
-    // - treeIndentWidth 用于 QTreeView 第 0 列，补偿展开层级缩进。
-    int sampleIndexPreferredWidth(
-        const QModelIndex& index,
-        const QFontMetrics& fontMetrics,
-        const int treeIndentWidth)
+    // widgetWidthHint 作用：
+    // - 输入：单元格中通过 setCellWidget/indexWidget 放入的真实控件；
+    // - 处理：读取 minimumWidth、minimumSizeHint 和可选 sizeHint，得到控件不可压缩/舒适显示宽度；
+    // - 返回：控件宽度加上单元格边距；无控件或控件无有效宽度时返回 0。
+    int widgetWidthHint(QWidget* cellWidget, const bool includePreferredSize)
     {
-        if (!index.isValid())
+        if (cellWidget == nullptr)
         {
             return 0;
+        }
+
+        int widthValue = std::max(0, cellWidget->minimumWidth());
+        const QSize minimumHint = cellWidget->minimumSizeHint();
+        if (minimumHint.isValid() && minimumHint.width() > 0)
+        {
+            widthValue = std::max(widthValue, minimumHint.width());
+        }
+        if (includePreferredSize)
+        {
+            const QSize preferredHint = cellWidget->sizeHint();
+            if (preferredHint.isValid() && preferredHint.width() > 0)
+            {
+                widthValue = std::max(widthValue, preferredHint.width());
+            }
+        }
+
+        return widthValue > 0 ? widthValue + kCellWidgetHorizontalPadding : 0;
+    }
+
+    // sampleIndexWidthHints 作用：
+    // - 输入：目标视图、模型索引、字体度量、树缩进和本轮基础最小宽度；
+    // - 处理：综合 DisplayRole、DecorationRole、CheckStateRole、SizeHintRole 与 indexWidget 控件尺寸；
+    // - 返回：该单元格贡献给列的最小/首选宽度，控件列不会再被压缩到控件自身宽度以下。
+    SectionWidthHints sampleIndexWidthHints(
+        QAbstractItemView* view,
+        const QModelIndex& index,
+        const QFontMetrics& fontMetrics,
+        const int treeIndentWidth,
+        const int minimumWidth)
+    {
+        SectionWidthHints hints;
+        hints.minimumWidth = std::max(0, minimumWidth);
+        hints.preferredWidth = hints.minimumWidth;
+
+        if (!index.isValid())
+        {
+            return hints;
         }
 
         int widthValue = measuredTextWidth(fontMetrics, index.data(Qt::DisplayRole).toString());
@@ -229,20 +313,58 @@ namespace
             widthValue += 18;
         }
 
-        return widthValue + treeIndentWidth + kCellHorizontalPadding;
+        if (widthValue > 0)
+        {
+            hints.preferredWidth = std::max(
+                hints.preferredWidth,
+                widthValue + treeIndentWidth + kCellHorizontalPadding);
+        }
+
+        const QSize itemSizeHint = index.data(Qt::SizeHintRole).toSize();
+        if (itemSizeHint.isValid() && itemSizeHint.width() > 0)
+        {
+            const int itemHintWidth = itemSizeHint.width() + treeIndentWidth;
+            hints.minimumWidth = std::max(hints.minimumWidth, itemHintWidth);
+            hints.preferredWidth = std::max(hints.preferredWidth, itemHintWidth);
+        }
+
+        QWidget* cellWidget = view == nullptr ? nullptr : view->indexWidget(index);
+        const int widgetMinimumWidth = widgetWidthHint(cellWidget, false);
+        if (widgetMinimumWidth > 0)
+        {
+            hints.minimumWidth = std::max(
+                hints.minimumWidth,
+                widgetMinimumWidth + treeIndentWidth);
+        }
+
+        const int widgetPreferredWidth = widgetWidthHint(cellWidget, true);
+        if (widgetPreferredWidth > 0)
+        {
+            hints.preferredWidth = std::max(
+                hints.preferredWidth,
+                widgetPreferredWidth + treeIndentWidth);
+        }
+
+        hints.preferredWidth = std::max(hints.preferredWidth, hints.minimumWidth);
+        return hints;
     }
 
-    // contentPreferredWidth 作用：
-    // - 抽样模型前若干行，估算某列内容首选宽度；
-    // - QTreeView 会在已展开节点内继续浅层采样，避免树表子项内容完全被忽略；
-    // - 返回值包含单元格 padding，可直接参与列宽首选值计算。
-    int contentPreferredWidth(
+    // contentWidthHints 作用：
+    // - 输入：目标视图、逻辑列号和本轮基础最小宽度；
+    // - 处理：抽样模型前若干行，同时考虑真实单元格控件的 minimumSizeHint/sizeHint；
+    // - 返回：该列内容贡献的最小/首选宽度；无可采样内容时返回基础最小宽度。
+    SectionWidthHints contentWidthHints(
         QAbstractItemView* view,
-        const int logicalIndex)
+        const int logicalIndex,
+        const int minimumWidth)
     {
+        SectionWidthHints hints;
+        hints.minimumWidth = std::max(0, minimumWidth);
+        hints.preferredWidth = hints.minimumWidth;
+
         if (view == nullptr || logicalIndex < 0 || view->model() == nullptr)
         {
-            return 0;
+            return hints;
         }
 
         QAbstractItemModel* model = view->model();
@@ -250,12 +372,11 @@ namespace
         const QFontMetrics cellFontMetrics(view->font());
         const QModelIndex rootIndex = view->rootIndex();
         int sampledRowCount = 0;
-        int preferredWidth = 0;
 
         // sampleParent 作用：
         // - 从 parentIndex 下按顺序采样若干行；
         // - 对展开的树节点递归采样，直到达到全局抽样上限；
-        // - 返回行为：无返回值，通过 sampledRowCount/preferredWidth 累积结果。
+        // - 返回行为：无返回值，通过 sampledRowCount/hints 累积结果。
         auto sampleParent =
             [&](const QModelIndex& parentIndex, const int depthValue, auto&& sampleParentRef) -> void
             {
@@ -276,9 +397,14 @@ namespace
                             treeView != nullptr && logicalIndex == 0
                             ? std::max(0, depthValue) * treeView->indentation()
                             : 0;
-                        preferredWidth = std::max(
-                            preferredWidth,
-                            sampleIndexPreferredWidth(cellIndex, cellFontMetrics, treeIndentWidth));
+                        const SectionWidthHints cellHints = sampleIndexWidthHints(
+                            view,
+                            cellIndex,
+                            cellFontMetrics,
+                            treeIndentWidth,
+                            minimumWidth);
+                        hints.minimumWidth = std::max(hints.minimumWidth, cellHints.minimumWidth);
+                        hints.preferredWidth = std::max(hints.preferredWidth, cellHints.preferredWidth);
                         ++sampledRowCount;
                     }
 
@@ -296,22 +422,37 @@ namespace
             };
 
         sampleParent(rootIndex, 0, sampleParent);
-        return preferredWidth;
+        hints.preferredWidth = std::max(hints.preferredWidth, hints.minimumWidth);
+        return hints;
     }
 
-    // sectionPreferredWidth 作用：
-    // - 综合表头、抽样内容、当前最小列宽，得到某列的内容感知首选宽度；
-    // - 返回值不会低于 minimumWidth，但可能高于 viewport，后续 fit 阶段会统一压缩。
-    int sectionPreferredWidth(
+    // sectionWidthHints 作用：
+    // - 输入：目标视图、表头、逻辑列号和本轮基础最小宽度；
+    // - 处理：综合表头文本、抽样内容、SizeHintRole、真实单元格控件和 Fixed 列当前宽度；
+    // - 返回：本列的最小/首选宽度，后续压缩不会低于 minimumWidth。
+    SectionWidthHints sectionWidthHints(
         QAbstractItemView* view,
         QHeaderView* header,
         const int logicalIndex,
         const int minimumWidth)
     {
-        const int preferredWidth = std::max(
-            headerPreferredWidth(view, header, logicalIndex),
-            contentPreferredWidth(view, logicalIndex));
-        return std::max(minimumWidth, preferredWidth);
+        SectionWidthHints hints = contentWidthHints(view, logicalIndex, minimumWidth);
+        hints.minimumWidth = std::max(hints.minimumWidth, minimumWidth);
+
+        if (header != nullptr &&
+            logicalIndex >= 0 &&
+            logicalIndex < header->count() &&
+            header->sectionResizeMode(logicalIndex) == QHeaderView::Fixed)
+        {
+            hints.minimumWidth = std::max(
+                hints.minimumWidth,
+                std::max(0, header->sectionSize(logicalIndex)));
+        }
+
+        hints.preferredWidth = std::max(
+            hints.minimumWidth,
+            std::max(headerPreferredWidth(view, header, logicalIndex), hints.preferredWidth));
+        return hints;
     }
 
     // sectionHasRememberedStretchIntent 作用：
@@ -403,7 +544,7 @@ namespace
             }
 
             const int sectionWidth = std::max(header->sectionSize(logicalIndex), minimumWidth);
-            const int preferredWidth = sectionPreferredWidth(
+            const SectionWidthHints widthHints = sectionWidthHints(
                 view,
                 header,
                 logicalIndex,
@@ -411,8 +552,9 @@ namespace
             visibleSections.push_back({
                 logicalIndex,
                 sectionWidth,
-                preferredWidth,
-                preferredWidth,
+                widthHints.minimumWidth,
+                widthHints.preferredWidth,
+                widthHints.preferredWidth,
                 sectionPrefersViewportExpansion(header, logicalIndex) });
         }
 
@@ -446,17 +588,16 @@ namespace
 
     // fitWidthsToAvailableSpace 作用：
     // - 先按内容感知 preferredWidth 排列列宽；
-    // - 若总宽超过 viewport，则按“首选宽度 - 最小宽度”的权重压缩到 availableWidth 内；
+    // - 若总宽超过 viewport，则按“首选宽度 - 每列最小宽度”的权重压缩到 availableWidth 内；
     // - 若总宽小于 viewport，则只把剩余空间分给长内容列，短字段列不会被强行均分放大；
+    // - 控件列的 minimumWidth 来自真实控件尺寸，宁可出现横向滚动条也不把控件挤坏；
     // - 不隐藏列，不改变滚动条策略。
     // 参数 sections：可见列集合，会原地写入 fittedWidth。
     // 参数 availableWidth：当前 viewport 可用宽度。
-    // 参数 minimumWidth：本轮 fit 使用的最小列宽。
     // 返回值：无。
     void fitWidthsToAvailableSpace(
         std::vector<VisibleSection>& sections,
-        const int availableWidth,
-        const int minimumWidth)
+        const int availableWidth)
     {
         if (sections.empty() || availableWidth <= 0)
         {
@@ -466,7 +607,8 @@ namespace
         const int sectionCount = static_cast<int>(sections.size());
         for (VisibleSection& section : sections)
         {
-            section.fittedWidth = std::max(minimumWidth, section.preferredWidth);
+            section.minimumWidth = std::max(1, section.minimumWidth);
+            section.fittedWidth = std::max(section.minimumWidth, section.preferredWidth);
         }
 
         const auto totalFittedWidth =
@@ -587,19 +729,16 @@ namespace
             return;
         }
 
-        const int minimumTotalWidth = sectionCount * minimumWidth;
+        int minimumTotalWidth = 0;
+        for (const VisibleSection& section : sections)
+        {
+            minimumTotalWidth += section.minimumWidth;
+        }
         if (minimumTotalWidth >= availableWidth)
         {
-            const int baseWidth = std::max(1, availableWidth / sectionCount);
-            int remainingWidth = availableWidth - baseWidth * sectionCount;
             for (VisibleSection& section : sections)
             {
-                section.fittedWidth = baseWidth;
-                if (remainingWidth > 0)
-                {
-                    ++section.fittedWidth;
-                    --remainingWidth;
-                }
+                section.fittedWidth = section.minimumWidth;
             }
             return;
         }
@@ -608,12 +747,12 @@ namespace
         int totalContentWeight = 0;
         for (const VisibleSection& section : sections)
         {
-            totalContentWeight += std::max(0, section.preferredWidth - minimumWidth);
+            totalContentWeight += std::max(0, section.preferredWidth - section.minimumWidth);
         }
 
         for (VisibleSection& section : sections)
         {
-            section.fittedWidth = minimumWidth;
+            section.fittedWidth = section.minimumWidth;
         }
 
         if (totalContentWeight <= 0)
@@ -632,7 +771,7 @@ namespace
 
         for (VisibleSection& section : sections)
         {
-            const int contentWeight = std::max(0, section.preferredWidth - minimumWidth);
+            const int contentWeight = std::max(0, section.preferredWidth - section.minimumWidth);
             const int extraWidth =
                 remainingAssignableWidth * contentWeight / totalContentWeight;
             section.fittedWidth += extraWidth;
@@ -666,12 +805,40 @@ namespace
                 {
                     return leftSection.fittedWidth < rightSection.fittedWidth;
                 });
-            if (targetIt == sections.end() || targetIt->fittedWidth <= minimumWidth)
+            if (targetIt == sections.end() || targetIt->fittedWidth <= targetIt->minimumWidth)
             {
                 break;
             }
             --targetIt->fittedWidth;
             --finalTotalWidth;
+        }
+    }
+
+    // refreshViewGeometryAfterFit 作用：
+    // - 输入：已经完成列宽调整的表格/树表和横向表头；
+    // - 处理：触发 QAbstractItemView 重新布局 indexWidget/setCellWidget 控件几何，并刷新 viewport/header；
+    // - 返回：无。该函数只修复显示几何，不修改模型数据或选择状态。
+    void refreshViewGeometryAfterFit(QAbstractItemView* view, QHeaderView* header)
+    {
+        if (view == nullptr)
+        {
+            return;
+        }
+
+        view->doItemsLayout();
+        view->updateGeometry();
+        if (view->viewport() != nullptr)
+        {
+            view->viewport()->updateGeometry();
+            view->viewport()->update();
+        }
+        if (header != nullptr)
+        {
+            header->updateGeometry();
+            if (header->viewport() != nullptr)
+            {
+                header->viewport()->update();
+            }
         }
     }
 
@@ -683,7 +850,8 @@ namespace
     // 返回值：true=执行过有效 fit；false=当前视图暂不可处理。
     bool fitViewColumnsToViewport(QAbstractItemView* view)
     {
-        if (!isSupportedTableView(view) ||
+        if (!isAutoFitEnabled(view) ||
+            !view->isVisible() ||
             view->property(AutoFitUserAdjustedProperty).toBool())
         {
             return false;
@@ -691,6 +859,10 @@ namespace
 
         QHeaderView* header = horizontalHeaderForView(view);
         if (header == nullptr || header->count() <= 0 || view->viewport() == nullptr)
+        {
+            return false;
+        }
+        if (!view->viewport()->isVisible())
         {
             return false;
         }
@@ -722,30 +894,34 @@ namespace
             return false;
         }
 
-        fitWidthsToAvailableSpace(visibleSections, availableWidth, dynamicMinimumWidth);
+        fitWidthsToAvailableSpace(visibleSections, availableWidth);
 
-        const QSignalBlocker headerSignalBlocker(header);
-        header->setStretchLastSection(false);
-        for (const VisibleSection& section : visibleSections)
         {
-            header->setSectionResizeMode(section.logicalIndex, QHeaderView::Interactive);
-        }
-        for (const VisibleSection& section : visibleSections)
-        {
-            header->resizeSection(section.logicalIndex, section.fittedWidth);
+            const QSignalBlocker headerSignalBlocker(header);
+            header->setStretchLastSection(false);
+            for (const VisibleSection& section : visibleSections)
+            {
+                header->setSectionResizeMode(section.logicalIndex, QHeaderView::Interactive);
+            }
+            for (const VisibleSection& section : visibleSections)
+            {
+                header->resizeSection(section.logicalIndex, section.fittedWidth);
+            }
         }
 
+        refreshViewGeometryAfterFit(view, header);
         return true;
     }
 
     // scheduleColumnFit 作用：
-    // - 把多次 show/resize/layout 事件合并为一次延迟 fit；
-    // - 确保 Dock 内部先完成自己的 setColumnWidth/setHeader 配置后，再统一压入 viewport。
+    // - 把多次 show/resize/layout/viewport resize 事件合并为一次队列尾部 fit；
+    // - viewport resize 事件发生时尺寸已经更新，singleShot(0) 只用于等当前 Qt 事件处理完成；
+    // - 用户拖拽列宽后会由 AutoFitUserAdjustedProperty 跳过，避免覆盖用户布局。
     // 参数 view：目标表格/树表视图。
     // 返回值：无。
     void scheduleColumnFit(QAbstractItemView* view)
     {
-        if (!isSupportedTableView(view) ||
+        if (!isAutoFitEnabled(view) ||
             view->property(AutoFitScheduledProperty).toBool() ||
             view->property(AutoFitUserAdjustedProperty).toBool())
         {
@@ -774,7 +950,7 @@ namespace
     // 返回值：无。重复调用会由属性去重。
     void installHeaderAutoFitHooks(QAbstractItemView* view)
     {
-        if (!isSupportedTableView(view))
+        if (!isAutoFitEnabled(view))
         {
             return;
         }
@@ -968,8 +1144,8 @@ namespace
         {
             updateUserColumnResizeState(watchedObject, eventObject);
 
-            QAbstractItemView* view = qobject_cast<QAbstractItemView*>(watchedObject);
-            if (isSupportedTableView(view) && eventObject != nullptr)
+            QAbstractItemView* view = eventObjectToSupportedView(watchedObject);
+            if (view != nullptr && eventObject != nullptr)
             {
                 installHeaderAutoFitHooks(view);
 
@@ -1006,6 +1182,27 @@ namespace ks::ui
 
     void RequestTableColumnAutoFit(QAbstractItemView* view)
     {
+        scheduleColumnFit(view);
+    }
+
+    // SetTableColumnAutoFitEnabled 作用：
+    // - 输入：目标表格/树表视图和启用状态；
+    // - 处理：通过 QObject 动态属性让特定视图退出或恢复全局列宽自适应；
+    // - 返回：无返回值；恢复启用时会立即排队一次单次 fit，关闭时清理待执行请求。
+    void SetTableColumnAutoFitEnabled(QAbstractItemView* view, const bool enabled)
+    {
+        if (!isSupportedTableView(view))
+        {
+            return;
+        }
+
+        view->setProperty(AutoFitDisabledProperty, !enabled);
+        if (!enabled)
+        {
+            view->setProperty(AutoFitScheduledProperty, false);
+            return;
+        }
+
         scheduleColumnFit(view);
     }
 }

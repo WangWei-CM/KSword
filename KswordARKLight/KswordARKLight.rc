@@ -4,3 +4,9 @@
 // branding assets while staying independent from the legacy GUI resource wrappers.
 IDI_KSWORDARKLIGHT_APP ICON "..\\Ksword5.1\\Ksword5.1\\Resource\\Logo\\KswordLogo.ico"
 IDR_KSWORDARKLIGHT_LOGO_PNG RCDATA "..\\Ksword5.1\\Ksword5.1\\Resource\\Logo\\Mainlogo.png"
+
+// The driver binary is copied here by the MSBuild
+// PrepareKswordArkLightEmbeddedDriver target immediately before ResourceCompile.
+// Standalone KswordARKLight builds consume $(TargetDir)\KswordARK.sys; solution
+// builds get a fresh file because KswordARKLight depends on KswordARKDriver.
+IDR_KSWORDARKLIGHT_DRIVER_SYS RCDATA "generated\\KswordARK.sys"

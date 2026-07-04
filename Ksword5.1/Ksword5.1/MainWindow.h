@@ -402,9 +402,9 @@ private:
     bool isDarkModeEffective(const ks::settings::AppearanceSettings& settings) const;
 
     // rebuildWindowBackgroundBrush 作用：
-    // - 依据当前配置重建窗口背景画刷（纯色 + 背景图透明叠加）。
+    // - 依据当前配置重建窗口背景画刷（纯色 + 可选背景图透明叠加）。
     // 调用方式：外观变更与窗口 resize 后调用。
-    void rebuildWindowBackgroundBrush();
+    void rebuildWindowBackgroundBrush(bool includeBackgroundImage = true);
 
     // scheduleWindowBackgroundBrushRebuild 作用：
     // - 对窗口 resize 触发的背景重建做短延迟合并；
@@ -516,6 +516,7 @@ private:
     bool m_startupWindowVisibilityAdjusted = false; // m_startupWindowVisibilityAdjusted：是否已完成首次显示区域修正。
     bool m_deferredDockInitializationStarted = false; // m_deferredDockInitializationStarted：是否已启动显示后补载流程。
     bool m_dockLayoutRestoredFromConfig = false;     // m_dockLayoutRestoredFromConfig：启动时是否已从配置恢复 ADS 布局。
+    bool m_pendingR0DynDataRefresh = false;          // m_pendingR0DynDataRefresh：KernelDock 惰性创建后是否需要补跑 DynData 刷新。
     std::size_t m_nextDeferredDockIndex = 0;          // m_nextDeferredDockIndex：下一个待补载 Dock 队列索引。
     std::vector<ads::CDockWidget*> m_deferredDockLoadQueue; // m_deferredDockLoadQueue：显示后依次补载的 Dock 队列。
 };

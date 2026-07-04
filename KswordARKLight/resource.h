@@ -5,4 +5,5 @@
 // with standard Win32 APIs; there is no runtime behavior in this header.
 #define IDI_KSWORDARKLIGHT_APP 101
 #define IDR_KSWORDARKLIGHT_LOGO_PNG 201
+#define IDR_KSWORDARKLIGHT_DRIVER_SYS 202
 #define IDS_KSWORDARKLIGHT_APP_TITLE 301

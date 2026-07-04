@@ -365,6 +365,8 @@ namespace
         defaultSettings.useWideScrollBars = false;
         defaultSettings.scrollBarAutoHideEnabled = false;
         defaultSettings.sliderWheelAdjustEnabled = false;
+        defaultSettings.virusTotalApiKey.clear();
+        defaultSettings.threatBookApiKey.clear();
         return defaultSettings;
     }
 }
@@ -531,6 +533,15 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     loadedSettings.sliderWheelAdjustEnabled = rootObject
         .value(QStringLiteral("slider_wheel_adjust_enabled"))
         .toBool(loadedSettings.sliderWheelAdjustEnabled);
+    // 在线扫描 API Key 作用：
+    // - 读取设置页“在线扫描”标签保存的密钥；
+    // - OnlineScan 模块只读取该配置，不在代码中硬编码任何密钥。
+    loadedSettings.virusTotalApiKey = rootObject
+        .value(QStringLiteral("virustotal_api_key"))
+        .toString(loadedSettings.virusTotalApiKey);
+    loadedSettings.threatBookApiKey = rootObject
+        .value(QStringLiteral("threatbook_api_key"))
+        .toString(loadedSettings.threatBookApiKey);
 
     return loadedSettings;
 }
@@ -585,6 +596,15 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
     rootObject.insert(
         QStringLiteral("slider_wheel_adjust_enabled"),
         settings.sliderWheelAdjustEnabled);
+    // 在线扫描 API Key 保存：
+    // - 与其它设置共用 appearance_settings.json；
+    // - 仅保存用户输入，不在日志中输出真实 Key。
+    rootObject.insert(
+        QStringLiteral("virustotal_api_key"),
+        settings.virusTotalApiKey.trimmed());
+    rootObject.insert(
+        QStringLiteral("threatbook_api_key"),
+        settings.threatBookApiKey.trimmed());
 
     const QJsonDocument jsonDocument(rootObject);
     const QByteArray jsonBytes = jsonDocument.toJson(QJsonDocument::Indented);

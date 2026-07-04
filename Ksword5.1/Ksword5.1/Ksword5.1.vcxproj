@@ -84,7 +84,7 @@
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$(QTDIR)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>qtadvanceddockingd.lib;Ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>qtadvanceddockingd.lib;Ole32.lib;Shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>"/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'" %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
@@ -100,7 +100,7 @@
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$(QTDIR)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>qtadvanceddocking.lib;Ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>qtadvanceddocking.lib;Ole32.lib;Shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>"/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'" %(AdditionalOptions)</AdditionalOptions>
       <UACUIAccess>false</UACUIAccess>
     </Link>
@@ -258,6 +258,9 @@
     <ClCompile Include="NetworkDock\NetworkFirewallPage.cpp" />
     <ClCompile Include="NetworkDock\NetworkAuditPage.cpp" />
     <ClCompile Include="NetworkDock\HttpsProxyService.cpp" />
+    <ClCompile Include="OnlineScan\OnlineScanSupport.cpp" />
+    <ClCompile Include="OnlineScan\ThreatBookScan.cpp" />
+    <ClCompile Include="OnlineScan\VirusTotalOnlineScan.cpp" />
     <ClCompile Include="OtherDock\OtherDock.DesktopCreate.cpp" />
     <ClCompile Include="OtherDock\OtherDock.Desktop.cpp" />
     <ClCompile Include="OtherDock\OtherDock.DesktopSwitch.cpp" />
@@ -266,6 +269,7 @@
     <ClCompile Include="OtherDock\WindowCaptureProtection.cpp" />
     <ClCompile Include="PrivilegeDock\PrivilegeDock.cpp" />
     <ClCompile Include="RegistryDock_Themed.cpp" />
+    <ClCompile Include="RegistryDock\RegistryOptimizationPage.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.BaseAndUi.cpp" />
     <ClCompile Include="ProcessDock\ProcessDetailWindow.Module.cpp" />
@@ -280,6 +284,7 @@
     <ClCompile Include="ProcessDock\ThreadStackWindow.cpp" />
     <ClCompile Include="ProcessDock\Process_Tool.cpp" />
     <ClCompile Include="SettingsDock\AppearanceSettings.cpp" />
+    <ClCompile Include="SettingsDock\SettingsDock.OnlineScan.cpp" />
     <ClCompile Include="SettingsDock\SettingsDock.cpp" />
     <ClCompile Include="ServerDock\ServiceDock.cpp" />
     <ClCompile Include="ServerDock\ServiceDock.Actions.cpp" />
@@ -450,10 +455,14 @@
     <QtMoc Include="NetworkDock\NetworkFirewallPage.h" />
     <ClInclude Include="NetworkDock\NetworkAuditPage.h" />
     <ClInclude Include="NetworkDock\HttpsProxyService.h" />
+    <ClInclude Include="OnlineScan\OnlineScanSupport.h" />
+    <ClInclude Include="OnlineScan\ThreatBookScan.h" />
+    <ClInclude Include="OnlineScan\VirusTotalOnlineScan.h" />
     <QtMoc Include="OtherDock\OtherDock.h" />
     <ClInclude Include="OtherDock\WindowCaptureProtection.h" />
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h" />
     <QtMoc Include="RegistryDock\RegistryDock.h" />
+    <ClInclude Include="RegistryDock\RegistryOptimizationPage.h" />
     <QtMoc Include="ProcessDock\ProcessDetailWindow.h" />
     <ClInclude Include="ProcessDock\ProcessDetailWindow.InternalCommon.h" />
     <ClInclude Include="ProcessDock\ThreadStackWindow.h" />
@@ -500,6 +509,22 @@
     <Delete Files="$(KswordArkDynDataLegacyPack)" Condition="Exists('$(KswordArkDynDataLegacyPack)')" />
     <Warning Condition="!Exists('$(KswordArkDynDataProfilePackV3Source)')" Text="KswordARK DynData v3 profile pack was not found: $(KswordArkDynDataProfilePackV3Source)" />
     <Warning Condition="!Exists('$(KswordArkDynDataProfilePackV2Source)')" Text="KswordARK DynData v2 profile pack was not found: $(KswordArkDynDataProfilePackV2Source)" />
+  </Target>
+  <Target Name="CopyRegistryOptimizationProfile" AfterTargets="Build">
+    <!-- 系统优化页运行时读取 profiles\registry_optimization_items.json；源文件是本地提取资产，已加入 .gitignore。 -->
+    <ItemGroup>
+      <KswordRegistryOptimizationAsset Include="$(MSBuildProjectDirectory)\profiles\registry_optimization_assets\**\*.*" />
+    </ItemGroup>
+    <PropertyGroup>
+      <KswordRegistryOptimizationProfileSource>$(MSBuildProjectDirectory)\profiles\registry_optimization_items.json</KswordRegistryOptimizationProfileSource>
+      <KswordRegistryOptimizationProfileTargetDir>$(TargetDir)profiles\</KswordRegistryOptimizationProfileTargetDir>
+      <KswordRegistryOptimizationAssetTargetDir>$(TargetDir)profiles\registry_optimization_assets\</KswordRegistryOptimizationAssetTargetDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(KswordRegistryOptimizationProfileTargetDir)" Condition="Exists('$(KswordRegistryOptimizationProfileSource)')" />
+    <Copy SourceFiles="$(KswordRegistryOptimizationProfileSource)" DestinationFolder="$(KswordRegistryOptimizationProfileTargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(KswordRegistryOptimizationProfileSource)')" />
+    <MakeDir Directories="$(KswordRegistryOptimizationAssetTargetDir)" Condition="'@(KswordRegistryOptimizationAsset)' != ''" />
+    <Copy SourceFiles="@(KswordRegistryOptimizationAsset)" DestinationFiles="@(KswordRegistryOptimizationAsset->'$(KswordRegistryOptimizationAssetTargetDir)%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" Condition="'@(KswordRegistryOptimizationAsset)' != ''" />
+    <Warning Condition="!Exists('$(KswordRegistryOptimizationProfileSource)')" Text="Registry optimization profile was not found; System Optimization tab will show an empty profile list: $(KswordRegistryOptimizationProfileSource)" />
   </Target>
   <Target Name="CopyKswordArkPdbDeepOffsetLibraries" AfterTargets="Build">
     <!-- 深度 PDB 偏移库用于进程/线程/对象等详情页后续扩展；运行时读取本地 JSON，不依赖开发机 E: 符号缓存。 -->

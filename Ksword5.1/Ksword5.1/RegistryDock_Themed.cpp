@@ -1,6 +1,7 @@
 ﻿#include "RegistryDock/RegistryDock.h"
 
 #include "ArkDriverClient/ArkDriverClient.h"
+#include "RegistryDock/RegistryOptimizationPage.h"
 
 // ============================================================
 // RegistryDock.cpp
@@ -817,7 +818,15 @@ void RegistryDock::initializeUi()
     m_rootLayout->setContentsMargins(4, 4, 4, 4);
     m_rootLayout->setSpacing(6);
 
-    m_toolBarWidget = new QWidget(this);
+    m_registryTabWidget = new QTabWidget(this);
+    m_rootLayout->addWidget(m_registryTabWidget, 1);
+
+    m_registryEditorPage = new QWidget(m_registryTabWidget);
+    m_registryEditorLayout = new QVBoxLayout(m_registryEditorPage);
+    m_registryEditorLayout->setContentsMargins(0, 0, 0, 0);
+    m_registryEditorLayout->setSpacing(6);
+
+    m_toolBarWidget = new QWidget(m_registryEditorPage);
     m_toolBarLayout = new QHBoxLayout(m_toolBarWidget);
     m_toolBarLayout->setContentsMargins(0, 0, 0, 0);
     m_toolBarLayout->setSpacing(4);
@@ -883,10 +892,10 @@ void RegistryDock::initializeUi()
     m_toolBarLayout->addWidget(m_searchButton);
     m_toolBarLayout->addWidget(m_stopSearchButton);
 
-    m_rootLayout->addWidget(m_toolBarWidget, 0);
+    m_registryEditorLayout->addWidget(m_toolBarWidget, 0);
 
-    m_mainSplitter = new QSplitter(Qt::Horizontal, this);
-    m_rootLayout->addWidget(m_mainSplitter, 1);
+    m_mainSplitter = new QSplitter(Qt::Horizontal, m_registryEditorPage);
+    m_registryEditorLayout->addWidget(m_mainSplitter, 1);
 
     m_keyTree = new QTreeWidget(m_mainSplitter);
     m_keyTree->setColumnCount(1);
@@ -936,17 +945,21 @@ void RegistryDock::initializeUi()
     m_mainSplitter->setStretchFactor(0, 1);
     m_mainSplitter->setStretchFactor(1, 2);
 
-    m_statusBar = new QStatusBar(this);
+    m_statusBar = new QStatusBar(m_registryEditorPage);
     m_pathStatusLabel = new QLabel(QStringLiteral("路径: -"), m_statusBar);
     m_summaryStatusLabel = new QLabel(QStringLiteral("状态: 就绪"), m_statusBar);
     m_statusBar->addWidget(m_pathStatusLabel, 1);
     m_statusBar->addPermanentWidget(m_summaryStatusLabel, 0);
-    m_rootLayout->addWidget(m_statusBar, 0);
+    m_registryEditorLayout->addWidget(m_statusBar, 0);
 
     m_searchFlushTimer = new QTimer(this);
     m_searchFlushTimer->setInterval(100);
     m_stopSearchButton->setEnabled(false);
     refreshRegistryDriverModeIndicator();
+
+    m_optimizationPage = new RegistryOptimizationPage(m_registryTabWidget);
+    m_registryTabWidget->addTab(m_registryEditorPage, QStringLiteral("注册表编辑"));
+    m_registryTabWidget->addTab(m_optimizationPage, QStringLiteral("系统优化"));
 }
 
 void RegistryDock::initializeConnections()

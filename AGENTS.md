@@ -47,6 +47,8 @@ $profileDir=Join-Path $stage 'profiles'
 if (!(Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir | Out-Null }
 Copy-Item 'Ksword5.1\Ksword5.1\x64\Release\profiles\ark_dyndata_pack_v3.json' $profileDir -Force
 Copy-Item 'Ksword5.1\Ksword5.1\x64\Release\profiles\ark_dyndata_pack_v2.json' $profileDir -Force
+Copy-Item 'Ksword5.1\Ksword5.1\x64\Release\profiles\registry_optimization_items.json' $profileDir -Force
+Copy-Item 'Ksword5.1\Ksword5.1\x64\Release\profiles\registry_optimization_assets' $profileDir -Recurse -Force
 
 $driverDir=Join-Path $stage 'KswordARKDriver'
 if (!(Test-Path $driverDir)) { New-Item -ItemType Directory -Path $driverDir | Out-Null }
@@ -78,7 +80,7 @@ if ($exit -ne 0) { exit $exit }
 ```powershell
 $seven='C:\Users\Felix\CLionProjects\Wisdom-Weasel\7z.exe'
 & $seven t $archive
-& $seven l $archive 'Release\Ksword5.1.exe' 'Release\Taskbar.exe' 'Release\KswordHUD.exe' 'Release\APIMonitor_x64.dll' 'Release\KswordARK.sys' 'Release\KswordARKDriver\KswordARK.sys' 'Release\profiles\ark_dyndata_pack_v3.json' 'Release\platforms\qwindows.dll'
+& $seven l $archive 'Release\Ksword5.1.exe' 'Release\Taskbar.exe' 'Release\KswordHUD.exe' 'Release\APIMonitor_x64.dll' 'Release\KswordARK.sys' 'Release\KswordARKDriver\KswordARK.sys' 'Release\profiles\ark_dyndata_pack_v3.json' 'Release\profiles\registry_optimization_items.json' 'Release\profiles\registry_optimization_assets\Config\Data.zip' 'Release\platforms\qwindows.dll'
 ```
 
 校验通过时，`7z t` 输出应包含 `Everything is Ok`。本流程生成的包根目录必须是 `Release\`，不要把 `dist\KswordARK-release-work\` 或其它临时目录打进包里。

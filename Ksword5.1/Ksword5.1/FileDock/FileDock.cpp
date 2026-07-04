@@ -12,6 +12,7 @@
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../UI/HexEditorWidget.h"
+#include "../UI/TableColumnAutoFit.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../ksword/file/file_handle_tools.h"
 #include "../ksword/file/file.h"
@@ -61,6 +62,7 @@
 #include <QScreen>
 #include <QScrollArea>
 #include <QShortcut>
+#include <QSizePolicy>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
 #include <QStandardItemModel>
@@ -5845,6 +5847,10 @@ void FileDock::initializeUi()
     managerLayout->setSpacing(0);
 
     m_mainSplitter = new QSplitter(Qt::Horizontal, m_fileManagerPage);
+    // 文件管理双栏的分界线必须由用户和可用 viewport 决定：
+    // - 不允许某一侧文件列表因长文件名/表头列宽变化把对侧挤开；
+    // - 子面板不可折叠，避免极窄窗口下某侧被内容最小宽度吞掉。
+    m_mainSplitter->setChildrenCollapsible(false);
     managerLayout->addWidget(m_mainSplitter, 1);
 
     initializePanel(m_leftPanel, QStringLiteral("左侧面板"));
@@ -5876,6 +5882,12 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     }
 
     panel.rootWidget = new QWidget(m_mainSplitter);
+    // 文件面板根容器横向可收缩：
+    // - 输入：QSplitter 分配的当前宽度；
+    // - 处理：忽略内部文件列表的动态 sizeHint，防止选中文件或目录加载时推动分界线；
+    // - 返回：无返回值，实际布局仍由 rootLayout 管理。
+    panel.rootWidget->setMinimumWidth(0);
+    panel.rootWidget->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
     panel.rootLayout = new QVBoxLayout(panel.rootWidget);
     panel.rootLayout->setContentsMargins(4, 4, 4, 4);
     panel.rootLayout->setSpacing(4);
@@ -6021,6 +6033,12 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     panel.manualProxyModel->setFilterKeyColumn(static_cast<int>(ManualModelColumn::Name));
 
     panel.fileView = new QTreeView(panel.rootWidget);
+    // 文件列表由 FileDock 自己管理列宽和滚动行为：
+    // - 禁用全局 TableColumnAutoFit，避免 QFileSystemModel 某些长名称/类型列在选择或加载时重算列宽；
+    // - 横向 size policy 使用 Ignored，确保 QTreeView 的 header/内容宽度不会反向撑大 QSplitter 子面板。
+    panel.fileView->setMinimumWidth(0);
+    panel.fileView->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+    ks::ui::SetTableColumnAutoFitEnabled(panel.fileView, false);
     panel.fileView->setModel(panel.proxyModel);
     configureFileViewSelection(panel);
     panel.fileView->setEditTriggers(QAbstractItemView::EditKeyPressed);

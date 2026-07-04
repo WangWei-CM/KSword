@@ -13,6 +13,7 @@
 #include <QTimer>
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
@@ -60,6 +61,7 @@
 #include "Framework/CustomTitleBar.h"
 #include "include/ads/AutoHideTab.h"
 #include "include/ads/DockComponentsFactory.h"
+#include "include/ads/DockAreaWidget.h"
 #include "include/ads/DockWidgetTab.h"
 #include "include/ads/FloatingDockContainer.h"
 #include "ArkDriverClient/ArkDriverClient.h"
@@ -85,6 +87,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <utility>
 #include <unordered_map>
 #include <cstring>
 #include <vector>
@@ -479,6 +482,29 @@ namespace
             configureDockTabStyleSurface(autoHideTab, kKswordAutoHideTabPropertyName);
             applyDockTabTextColor(autoHideTab, autoHideTab->property("activeTab").toBool());
         }
+    }
+
+    bool isDockWidgetActiveForLazyInitialization(
+        ads::CDockWidget* dockWidget,
+        ads::CDockWidget* focusedDockWidget)
+    {
+        if (dockWidget == nullptr)
+        {
+            return false;
+        }
+
+        if (dockWidget == focusedDockWidget || dockWidget->isCurrentTab())
+        {
+            return true;
+        }
+
+        ads::CDockAreaWidget* dockAreaWidget = dockWidget->dockAreaWidget();
+        if (dockAreaWidget != nullptr)
+        {
+            return dockAreaWidget->isVisible() && dockAreaWidget->currentDockWidget() == dockWidget;
+        }
+
+        return dockWidget->isVisible();
     }
 
     // KswordAdsDockWidgetTab 作用：
@@ -2709,6 +2735,53 @@ namespace
         return rawOpacityPercent;
     }
 
+    const QPixmap* cachedBackgroundSourcePixmap(const QString& imagePath)
+    {
+        static QString cachedImagePath;
+        static qint64 cachedImageLastModifiedMs = -1;
+        static qint64 cachedImageSizeBytes = -1;
+        static QPixmap cachedImagePixmap;
+
+        const QString cleanImagePath = QDir::cleanPath(imagePath.trimmed());
+        if (cleanImagePath.isEmpty())
+        {
+            return nullptr;
+        }
+
+        const QFileInfo imageFileInfo(cleanImagePath);
+        if (!imageFileInfo.exists() || !imageFileInfo.isFile() || !imageFileInfo.isReadable())
+        {
+            return nullptr;
+        }
+
+        const qint64 imageLastModifiedMs = imageFileInfo.lastModified().toMSecsSinceEpoch();
+        const qint64 imageSizeBytes = imageFileInfo.size();
+        const bool cacheHit =
+            cleanImagePath == cachedImagePath
+            && imageLastModifiedMs == cachedImageLastModifiedMs
+            && imageSizeBytes == cachedImageSizeBytes
+            && !cachedImagePixmap.isNull();
+        if (!cacheHit)
+        {
+            QPixmap loadedPixmap(cleanImagePath);
+            if (loadedPixmap.isNull())
+            {
+                cachedImagePath.clear();
+                cachedImageLastModifiedMs = -1;
+                cachedImageSizeBytes = -1;
+                cachedImagePixmap = QPixmap();
+                return nullptr;
+            }
+
+            cachedImagePath = cleanImagePath;
+            cachedImageLastModifiedMs = imageLastModifiedMs;
+            cachedImageSizeBytes = imageSizeBytes;
+            cachedImagePixmap = std::move(loadedPixmap);
+        }
+
+        return cachedImagePixmap.isNull() ? nullptr : &cachedImagePixmap;
+    }
+
     // buildBackgroundBrush 作用：
     // - 按“纯色底 + 可选背景图 + 透明度”组合一张画刷贴图；
     // - 用于主窗口与 Dock 管理器统一背景绘制。
@@ -2728,27 +2801,30 @@ namespace
         QPixmap composedPixmap(safeSize);
         composedPixmap.fill(baseColor);
 
-        if (!imagePath.trimmed().isEmpty())
+        const int normalizedOpacityPercent = normalizeOpacityPercent(imageOpacityPercent);
+        if (normalizedOpacityPercent <= 0)
         {
-            QPixmap sourceImage(imagePath);
-            if (!sourceImage.isNull())
-            {
-                QPainter painter(&composedPixmap);
-                painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-                painter.setOpacity(static_cast<double>(normalizeOpacityPercent(imageOpacityPercent)) / 100.0);
+            return QBrush(composedPixmap);
+        }
 
-                // scaledImageSize 作用：按“覆盖整个窗口”策略计算缩放尺寸。
-                QSizeF scaledImageSize = sourceImage.size();
-                scaledImageSize.scale(safeSize, Qt::KeepAspectRatioByExpanding);
+        const QPixmap* sourceImage = cachedBackgroundSourcePixmap(imagePath);
+        if (sourceImage != nullptr)
+        {
+            QPainter painter(&composedPixmap);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            painter.setOpacity(static_cast<double>(normalizedOpacityPercent) / 100.0);
 
-                const QRectF targetRect(
-                    (static_cast<double>(safeSize.width()) - scaledImageSize.width()) / 2.0,
-                    (static_cast<double>(safeSize.height()) - scaledImageSize.height()) / 2.0,
-                    scaledImageSize.width(),
-                    scaledImageSize.height());
+            // scaledImageSize 作用：按“覆盖整个窗口”策略计算缩放尺寸。
+            QSizeF scaledImageSize = sourceImage->size();
+            scaledImageSize.scale(safeSize, Qt::KeepAspectRatioByExpanding);
 
-                painter.drawPixmap(targetRect, sourceImage, QRectF(QPointF(0, 0), sourceImage.size()));
-            }
+            const QRectF targetRect(
+                (static_cast<double>(safeSize.width()) - scaledImageSize.width()) / 2.0,
+                (static_cast<double>(safeSize.height()) - scaledImageSize.height()) / 2.0,
+                scaledImageSize.width(),
+                scaledImageSize.height());
+
+            painter.drawPixmap(targetRect, *sourceImage, QRectF(QPointF(0, 0), sourceImage->size()));
         }
 
         return QBrush(composedPixmap);
@@ -3582,8 +3658,6 @@ void MainWindow::showEvent(QShowEvent* event)
     }
 
     m_deferredDockInitializationStarted = true;
-    ensureVisibleLazyDocksInitialized(QStringLiteral("showEvent-immediate"));
-    repairKernelDockAfterLayoutRestore(QStringLiteral("showEvent-immediate"));
     QTimer::singleShot(0, this, [this]()
         {
             ensureVisibleLazyDocksInitialized(QStringLiteral("showEvent-deferred-0"));
@@ -5717,33 +5791,25 @@ void MainWindow::refreshR0DynDataAfterServiceStart()
 {
     // R0 服务启动后立即把本地 PDB profile pack 下发到驱动：
     // - 复用 KernelDock 现有的 profile 匹配、v3 typed item 解析和 APPLY_DYN_PROFILE_EX；
-    // - 不切换当前 Dock，只确保惰性 KernelDock 内容已初始化；
+    // - 不再为了后台刷新强行创建 KernelDock UI，避免启动期拉起重页面；
+    // - KernelDock 尚未初始化时只记录待刷新标记，首次打开内核页后再补跑；
     // - 失败只进入日志/KernelDock 状态，具体 R0 功能仍有驱动侧运行时偏移兜底。
     QTimer::singleShot(0, this, [this]() {
         kLogEvent logEvent;
-        if (m_dockKernel == nullptr)
+        if (m_dockKernel == nullptr || m_kernelWidget == nullptr)
         {
-            QTimer::singleShot(1000, this, [this]() {
-                kLogEvent retryEvent;
-                if (m_dockKernel == nullptr)
-                {
-                    warn << retryEvent
-                        << "[MainWindow][R0] DynData 自动载入延迟重试跳过：KernelDock 壳尚未创建。"
-                        << eol;
-                    return;
-                }
-                refreshR0DynDataAfterServiceStart();
-                });
+            m_pendingR0DynDataRefresh = true;
+            info << logEvent
+                << "[MainWindow][R0] DynData 自动刷新已延后：KernelDock UI 尚未初始化。"
+                << eol;
             return;
         }
-        if (m_dockKernel != nullptr)
+        if (!m_dockKernel->property("ks_lazy_initialized").toBool() ||
+            m_dockKernel->property("ks_lazy_initializing").toBool())
         {
-            ensureDockContentInitialized(m_dockKernel);
-        }
-        if (m_kernelWidget == nullptr)
-        {
-            warn << logEvent
-                << "[MainWindow][R0] DynData 自动载入跳过：KernelDock 未初始化。"
+            m_pendingR0DynDataRefresh = true;
+            info << logEvent
+                << "[MainWindow][R0] DynData 自动刷新已延后：KernelDock 正在惰性初始化。"
                 << eol;
             return;
         }
@@ -6802,14 +6868,23 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     {
         return;
     }
+    if (dockWidget->property("ks_lazy_initializing").toBool())
+    {
+        kLogEvent lazyDockReentryEvent;
+        dbg << lazyDockReentryEvent
+            << "[MainWindow][LazyDock] 跳过重入初始化, dock="
+            << dockWidget->property("ks_lazy_key").toString().toStdString()
+            << eol;
+        return;
+    }
 
     const QString dockKey = dockWidget->property("ks_lazy_key").toString().trimmed().toLower();
     const QString dockTitleText = dockWidget->windowTitle().trimmed().isEmpty()
         ? dockKey
         : dockWidget->windowTitle().trimmed();
+    dockWidget->setProperty("ks_lazy_initializing", true);
     const int progressPid = kPro.add("页面", QStringLiteral("打开%1页").arg(dockTitleText).toStdString());
     kPro.set(progressPid, QStringLiteral("准备加载%1页").arg(dockTitleText).toStdString(), 0, 8.0f);
-    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
     const bool isNetworkDock = (dockKey == QStringLiteral("network"));
     const bool isKernelDock = (dockKey == QStringLiteral("kernel"));
@@ -6893,11 +6968,11 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     if (realWidget == nullptr)
     {
         kPro.set(progressPid, QStringLiteral("%1页无需加载").arg(dockTitleText).toStdString(), 0, 100.0f);
+        dockWidget->setProperty("ks_lazy_initializing", false);
         return;
     }
 
     kPro.set(progressPid, QStringLiteral("正在创建%1页内容").arg(dockTitleText).toStdString(), 0, 45.0f);
-    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
     // KernelDock 挂载策略：
     // - 没有背景图时保持根控件自绘，避免 ADS 恢复布局后露出黑色父容器；
@@ -6942,6 +7017,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         realWidget,
         shouldSuppressOuterScrollArea ? ads::CDockWidget::ForceNoScrollArea : ads::CDockWidget::AutoScrollArea);
     dockWidget->setProperty("ks_lazy_initialized", true);
+    dockWidget->setProperty("ks_lazy_initializing", false);
     configureAdsDockTabVisualIdentity(dockWidget);
     if (oldWidget != nullptr)
     {
@@ -6958,6 +7034,19 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     realWidget->update();
     dockWidget->update();
     kPro.set(progressPid, QStringLiteral("%1页加载完成").arg(dockTitleText).toStdString(), 0, 100.0f);
+
+    if (realWidget == m_kernelWidget && m_pendingR0DynDataRefresh)
+    {
+        m_pendingR0DynDataRefresh = false;
+        QPointer<KernelDock> kernelDockGuard(m_kernelWidget);
+        QTimer::singleShot(0, this, [kernelDockGuard]()
+            {
+                if (kernelDockGuard != nullptr)
+                {
+                    kernelDockGuard->requestDynDataRefresh();
+                }
+            });
+    }
 }
 
 void MainWindow::configureDockWidgetPersistentIdentity(
@@ -7031,9 +7120,12 @@ bool MainWindow::restoreDockLayoutFromConfig()
         return false;
     }
 
+    QElapsedTimer restoreTimer;
+    restoreTimer.start();
     const bool restoreOk = m_pDockManager->restoreState(
         savedStateBytes,
         kDockLayoutConfigFileVersion);
+    const qint64 restoreElapsedMs = restoreTimer.elapsed();
     m_dockLayoutRestoredFromConfig = restoreOk;
 
     kLogEvent layoutEvent;
@@ -7044,14 +7136,14 @@ bool MainWindow::restoreDockLayoutFromConfig()
         << layoutConfigPath.toStdString()
         << ", bytes="
         << savedStateBytes.size()
+        << ", elapsedMs="
+        << restoreElapsedMs
         << eol;
     if (restoreOk)
     {
         // ADS 恢复当前激活 Dock 时不会重新触发用户点击事件：
-        // 如果恢复到惰性占位页（典型是上次退出时停在“内核”Dock），这里主动加载一次，
-        // 避免启动后看到纯黑 placeholder 而没有真实内容挂载。
-        ensureVisibleLazyDocksInitialized(QStringLiteral("restoreDockLayout"));
-        repairKernelDockAfterLayoutRestore(QStringLiteral("restoreDockLayout"));
+        // 如果恢复到惰性占位页（典型是上次退出时停在“内核”Dock），排到事件循环首轮加载，
+        // 避免在“整理 Dock 布局”阶段同步创建重页面。
         QTimer::singleShot(0, this, [this]()
             {
                 ensureVisibleLazyDocksInitialized(QStringLiteral("restoreDockLayout-deferred-0"));
@@ -7174,11 +7266,7 @@ void MainWindow::ensureVisibleLazyDocksInitialized(const QString& reasonText)
             continue;
         }
 
-        const bool shouldInitialize =
-            dockWidget == focusedDockWidget ||
-            dockWidget->isCurrentTab() ||
-            dockWidget->isVisible();
-        if (!shouldInitialize)
+        if (!isDockWidgetActiveForLazyInitialization(dockWidget, focusedDockWidget))
         {
             continue;
         }
@@ -7205,9 +7293,32 @@ void MainWindow::repairKernelDockAfterLayoutRestore(const QString& reasonText)
         return;
     }
 
+    ads::CDockWidget* focusedDockWidget = (m_pDockManager != nullptr)
+        ? m_pDockManager->focusedDockWidget()
+        : nullptr;
+    if (!isDockWidgetActiveForLazyInitialization(m_dockKernel, focusedDockWidget))
+    {
+        kLogEvent repairSkipEvent;
+        info << repairSkipEvent
+            << "[MainWindow][KernelDockRepair] skip inactive kernel dock, reason="
+            << reasonText.toStdString()
+            << ", initialized="
+            << (m_dockKernel->property("ks_lazy_initialized").toBool() ? "true" : "false")
+            << ", current="
+            << (m_dockKernel->isCurrentTab() ? "true" : "false")
+            << ", visible="
+            << (m_dockKernel->isVisible() ? "true" : "false")
+            << eol;
+        return;
+    }
+
     if (m_kernelWidget == nullptr)
     {
-        m_kernelWidget = new KernelDock(this);
+        ensureDockContentInitialized(m_dockKernel);
+        if (m_kernelWidget == nullptr)
+        {
+            return;
+        }
     }
 
     QWidget* mountedWidget = m_dockKernel->widget();
@@ -7291,10 +7402,7 @@ void MainWindow::initDockWidgets()
     if (shouldEagerLoad(QStringLiteral("memory"))) { m_memoryWidget = new MemoryDock(this); }
     if (shouldEagerLoad(QStringLiteral("file"))) { m_fileWidget = new FileDock(this); }
     if (shouldEagerLoad(QStringLiteral("driver"))) { m_driverWidget = new DriverDock(this); }
-    // KernelDock 不再参与主 Dock 惰性占位：
-    // - 它是启动恢复黑屏的唯一复现场景；
-    // - 真实创建成本可控，且能避免 ADS restoreState 把占位页/空容器恢复为当前页。
-    m_kernelWidget = new KernelDock(this);
+    if (shouldEagerLoad(QStringLiteral("kernel"))) { m_kernelWidget = new KernelDock(this); }
     if (shouldEagerLoad(QStringLiteral("monitor"))) { m_monitorWidget = new MonitorDock(this); }
     if (shouldEagerLoad(QStringLiteral("hardware"))) { m_hardwareWidget = new HardwareDock(this); }
     if (shouldEagerLoad(QStringLiteral("privilege"))) { m_privilegeWidget = new PrivilegeDock(this); }
@@ -7336,11 +7444,12 @@ void MainWindow::initDockWidgets()
         dock->setAttribute(Qt::WA_StyledBackground, false);
         if (widget != nullptr)
         {
+            const bool isRealKernelContent = isKernelDock && widget == m_kernelWidget;
             // KernelDock paints its own tab surface.  Do not convert it to a transparent root here,
             // otherwise a restored startup kernel dock can inherit the dark ADS background before
             // its internal pages get a chance to repaint.
-            widget->setAutoFillBackground(isKernelDock);
-            widget->setAttribute(Qt::WA_StyledBackground, isKernelDock);
+            widget->setAutoFillBackground(isRealKernelContent);
+            widget->setAttribute(Qt::WA_StyledBackground, isRealKernelContent);
         }
         configureAdsDockTabVisualIdentity(dock);
         return dock;
@@ -7486,6 +7595,9 @@ void MainWindow::initDockWidgets()
 #define ADS_TABIFY_DOCK_WIDGET_AVAILABLE
 void MainWindow::setupDockLayout()
 {
+    QElapsedTimer layoutTimer;
+    layoutTimer.start();
+
     // 1. 初始化DockManager（若未在构造函数中初始化）
     if (!m_pDockManager) {
         QWidget* dockParentWidget = (m_mainRootContainer != nullptr)
@@ -7505,6 +7617,13 @@ void MainWindow::setupDockLayout()
             setCentralWidget(m_pDockManager);
         }
     }
+
+    const bool mainWindowUpdatesWereEnabled = updatesEnabled();
+    const bool dockManagerUpdatesWereEnabled = m_pDockManager->updatesEnabled();
+    setUpdatesEnabled(false);
+    m_pDockManager->setUpdatesEnabled(false);
+
+    reportStartupProgress(76, QStringLiteral("正在注册主 Dock 页签..."));
 
     // 2. 左侧区域：先添加第一个DockWidget，获取其所在的DockArea
     auto leftDockArea = m_pDockManager->addDockWidget(ads::LeftDockWidgetArea, m_dockWelcome);
@@ -7530,6 +7649,8 @@ void MainWindow::setupDockLayout()
     // 方法2: 或者使用addDockWidget并指定CenterDockWidgetArea
     // m_pDockManager->addDockWidget(ads::CenterDockWidgetArea, m_dockProcess, leftDockArea);
 
+    reportStartupProgress(78, QStringLiteral("正在注册辅助 Dock 区域..."));
+
     // 4. 右侧区域：同理
     auto rightDockArea = m_pDockManager->addDockWidget(ads::RightDockWidgetArea, m_dockCurrentOp);
 
@@ -7551,8 +7672,21 @@ void MainWindow::setupDockLayout()
     // 7. 默认布局搭建完成后再恢复用户布局：
     // - ADS restoreState 要求所有 DockWidget 已注册；
     // - objectName 已在 initDockWidgets 中固定为英文 key，避免中文标题变化破坏恢复。
+    reportStartupProgress(80, QStringLiteral("正在恢复上次 Dock 布局..."));
     restoreDockLayoutFromConfig();
+    reportStartupProgress(82, QStringLiteral("正在刷新 Dock 标签状态..."));
     refreshAdsDockTabVisualIdentities(m_pDockManager);
+
+    m_pDockManager->setUpdatesEnabled(dockManagerUpdatesWereEnabled);
+    setUpdatesEnabled(mainWindowUpdatesWereEnabled);
+    m_pDockManager->updateGeometry();
+    m_pDockManager->update();
+
+    kLogEvent layoutTimingEvent;
+    info << layoutTimingEvent
+        << "[MainWindow][StartupTiming] setupDockLayout elapsedMs="
+        << layoutTimer.elapsed()
+        << eol;
 }
 
 void MainWindow::focusHandleDockByPid(const quint32 pid)
@@ -7920,8 +8054,11 @@ void MainWindow::applyAppearanceSettings(
 {
     // appearanceApplyEvent 作用：本次“外观应用”过程统一日志事件对象。
     kLogEvent appearanceApplyEvent;
+    QElapsedTimer appearanceApplyTimer;
+    appearanceApplyTimer.start();
 
     m_currentAppearanceSettings = settings;
+    const bool isInitialAppearanceApply = (triggerReason == QStringLiteral("初始化加载"));
 
     // startupTopMostEnabled 作用：设置页和启动配置统一控制主窗口最高级置顶。
     setPinnedWindowState(m_currentAppearanceSettings.startupTopMostEnabled, false);
@@ -8040,22 +8177,32 @@ void MainWindow::applyAppearanceSettings(
             darkModeEnabled,
             enableDockTransparencyForBackgroundImage);
 
-    setStyleSheet(appearanceStyleSheet);
+    QElapsedTimer styleSheetApplyTimer;
+    styleSheetApplyTimer.start();
+    const bool mainStyleSheetChanged = (styleSheet() != appearanceStyleSheet);
+    if (mainStyleSheetChanged)
+    {
+        setStyleSheet(appearanceStyleSheet);
+    }
     applyResizeBorderOverlayStyle();
     updateResizeBorderOverlays();
     if (m_pDockManager != nullptr)
     {
         // DockManager 清空局部样式表，改为继承 MainWindow 的统一样式；
         // 避免局部样式覆盖背景画刷导致背景图不可见。
-        m_pDockManager->setStyleSheet(QString());
+        if (!m_pDockManager->styleSheet().isEmpty())
+        {
+            m_pDockManager->setStyleSheet(QString());
+        }
         m_pDockManager->setAttribute(Qt::WA_StyledBackground, false);
         refreshAdsDockTabVisualIdentities(m_pDockManager);
     }
+    const qint64 styleSheetApplyElapsedMs = styleSheetApplyTimer.elapsed();
 
     // 启动进度拆分：
     // - applyAppearanceSettings 不只设置 QPalette/QSS，还会刷新若干主题关联控件；
     // - 仅在初始化加载时上报，避免用户运行期切换主题时干扰启动画面状态。
-    if (triggerReason == QStringLiteral("初始化加载"))
+    if (isInitialAppearanceApply)
     {
         reportStartupProgress(90, QStringLiteral("正在刷新主题关联控件..."));
     }
@@ -8068,11 +8215,18 @@ void MainWindow::applyAppearanceSettings(
 
     // 内核 Dock 修复是为了避免 ADS 恢复布局后出现黑屏占位页。它属于启动布局校正，
     // 不是单纯的“应用样式”，因此启动提示单独拆出，便于判断耗时是否来自这里。
-    if (triggerReason == QStringLiteral("初始化加载"))
+    if (isInitialAppearanceApply)
     {
-        reportStartupProgress(91, QStringLiteral("正在确认内核 Dock 显示状态..."));
+        reportStartupProgress(91, QStringLiteral("正在排队确认内核 Dock 显示状态..."));
+        QTimer::singleShot(0, this, [this]()
+            {
+                repairKernelDockAfterLayoutRestore(QStringLiteral("applyAppearanceSettings-deferred-0"));
+            });
     }
-    repairKernelDockAfterLayoutRestore(QStringLiteral("applyAppearanceSettings"));
+    else
+    {
+        repairKernelDockAfterLayoutRestore(QStringLiteral("applyAppearanceSettings"));
+    }
 
     if (m_customTitleBar != nullptr)
     {
@@ -8083,7 +8237,19 @@ void MainWindow::applyAppearanceSettings(
     }
 
     applyNativeWindowFrameVisualStyle();
-    rebuildWindowBackgroundBrush();
+    rebuildWindowBackgroundBrush(!isInitialAppearanceApply);
+    if (isInitialAppearanceApply && enableDockTransparencyForBackgroundImage)
+    {
+        QTimer::singleShot(0, this, [this]()
+            {
+                rebuildWindowBackgroundBrush(true);
+                update();
+                if (m_pDockManager != nullptr)
+                {
+                    m_pDockManager->update();
+                }
+            });
+    }
     refreshPrivilegeStatusButtons();
     refreshTopActionButtonStyles();
     if (m_progressWidget != nullptr)
@@ -8105,7 +8271,12 @@ void MainWindow::applyAppearanceSettings(
         << settings.backgroundImagePath.toStdString()
         << "，opacity="
         << settings.backgroundOpacityPercent
-        << "%"
+        << "%，styleChanged="
+        << (mainStyleSheetChanged ? "true" : "false")
+        << "，styleElapsedMs="
+        << styleSheetApplyElapsedMs
+        << "，elapsedMs="
+        << appearanceApplyTimer.elapsed()
         << eol;
 }
 
@@ -8128,14 +8299,15 @@ bool MainWindow::isDarkModeEffective(const ks::settings::AppearanceSettings& set
     return styleHints->colorScheme() == Qt::ColorScheme::Dark;
 }
 
-void MainWindow::rebuildWindowBackgroundBrush()
+void MainWindow::rebuildWindowBackgroundBrush(const bool includeBackgroundImage)
 {
     const bool darkModeEnabled = isDarkModeEffective(m_currentAppearanceSettings);
     const QColor baseColor = darkModeEnabled ? QColor(0, 0, 0) : QColor(255, 255, 255);
 
     // resolvedImagePath 作用：把配置路径解析成可加载的绝对路径。
-    const QString resolvedImagePath = ks::settings::resolveBackgroundImagePathForLoad(
-        m_currentAppearanceSettings.backgroundImagePath);
+    const QString resolvedImagePath = includeBackgroundImage
+        ? ks::settings::resolveBackgroundImagePathForLoad(m_currentAppearanceSettings.backgroundImagePath)
+        : QString();
 
     const QBrush backgroundBrush = buildBackgroundBrush(
         size(),

@@ -34,11 +34,20 @@ Directory.Build.props
 # KswordSetup build-generated embedded payload resource lists.
 /KswordSetup/generated/
 
+# KswordARKLight copies KswordARK.sys here right before ResourceCompile so the
+# executable can embed the driver without committing build binaries.
+/KswordARKLight/generated/
+
 # PDB deep offset libraries are generated local/runtime assets.
 # Keep them outside Git because they can be hundreds of thousands of lines.
 /Ksword5.1/Ksword5.1/profiles/pdb_deep_offsets/*.json
 
+# Dism++ extracted registry optimization profile is a large local/runtime asset.
+/Ksword5.1/Ksword5.1/profiles/registry_optimization_items.json
+/Ksword5.1/Ksword5.1/profiles/registry_optimization_assets/
+
 # Scratch task notes/screenshots and Python bytecode caches are local-only.
 /Ksword5.1/Task/
+/_codex_backups/
 __pycache__/
 *.py[cod]
