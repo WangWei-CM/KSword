@@ -96,6 +96,20 @@ Ksword5.1 是面向 Windows 的开源 ARK、内核调试与系统取证分析工
 - 默认审计页应只读；卸载、删除、patch、bypass、磁盘写入等 mutation 类能力必须走独立入口、风险提示和回滚/审计策略。
 - 新增源码必须同步更新对应 `.vcxproj` 和 `.vcxproj.filters`；第三方代码接入必须带 LICENSE 和 NOTICE。
 
+
+### ARK 协作架构约定
+- R0/R3 共享协议统一位于 `shared/driver/`。
+- 驱动 IOCTL 分发采用 `KswordARKDriver/src/dispatch/ioctl_registry.c` 注册表模式；`ioctl_dispatch.c` 只负责查表、调用 handler、日志和完成请求。
+- 用户态访问 KswordARK 驱动统一通过 `Ksword5.1/Ksword5.1/ArkDriverClient/`。ProcessDock、FileDock、KernelDock 等 UI 模块不直接打开 KswordARK 设备或调用其 IOCTL。
+- DynData 第一阶段使用 `third_party/systeminformer_dyn/` 中 vendored System Informer 动态偏移数据；Ksword 只接入 `KphDynConfig` 数据和轻量解析器，不引入 KPH 通信层、对象系统或 session token。
+- DynData R0/R3 协议集中在 `shared/driver/KswordArkDynDataIoctl.h`，KernelDock 的“动态偏移”页通过 `ArkDriverClient` 展示 profile 命中、字段来源和 capability gating；KswordARK 驱动装载后主窗口会立即触发 DynData profile 自动刷新与下发。
+- 进程扩展信息使用 `shared/driver/KswordArkProcessIoctl.h` v2 协议传递 Session、完整镜像路径、Protection/SignatureLevel、ObjectTable/SectionObject 可用性、字段来源和 DynData capability；ProcessDock/ProcessDetail 只展示可用性，不在 DynData 缺失时直接枚举句柄表或 Section。
+- R0 可恢复进程隐藏使用 `IOCTL_KSWORD_ARK_SET_PROCESS_VISIBILITY`，驱动同时修改 `_EPROCESS.UniqueProcessId` 并摘除 `ActiveProcessLinks`，保留 PspCidTable 记录以便按原 PID 恢复。
+- 驱动统一状态/能力协议集中在 `shared/driver/KswordArkCapabilityIoctl.h`；KernelDock 的“驱动状态”页展示 Driver Loaded/Missing、Protocol Mismatch、DynData Missing、Limited、安全策略、最近 R0 错误和功能能力矩阵。
+- 依赖未公开字段的 R0 功能必须在 `ioctl_registry.c` 声明所需 `KSW_CAP_*`，由 dispatch 层在 handler 前统一执行 capability gate。
+- R0 PPL 修改必须依赖 `KSW_CAP_PROCESS_PROTECTION_PATCH`，并在用户态确认框展示当前/目标 Protection、SignatureLevel 影响、字段来源和回滚风险。
+- 新功能按模块分 owner 与写入范围，新增源码需同步更新 `.vcxproj` 和 `.filters`。
+
 ### 工程结构
 - `Ksword5.1/`：主解决方案与 Qt/ADS 主程序源码。
 - `KswordARKLight/`：轻量原生 Win32 ARK。

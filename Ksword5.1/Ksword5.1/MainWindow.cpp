@@ -7402,7 +7402,10 @@ void MainWindow::initDockWidgets()
     if (shouldEagerLoad(QStringLiteral("memory"))) { m_memoryWidget = new MemoryDock(this); }
     if (shouldEagerLoad(QStringLiteral("file"))) { m_fileWidget = new FileDock(this); }
     if (shouldEagerLoad(QStringLiteral("driver"))) { m_driverWidget = new DriverDock(this); }
-    if (shouldEagerLoad(QStringLiteral("kernel"))) { m_kernelWidget = new KernelDock(this); }
+    // KernelDock 不再参与主 Dock 惰性占位：
+    // - 它是启动恢复黑屏的唯一复现场景；
+    // - 真实创建成本可控，且能避免 ADS restoreState 把占位页/空容器恢复为当前页。
+    m_kernelWidget = new KernelDock(this);
     if (shouldEagerLoad(QStringLiteral("monitor"))) { m_monitorWidget = new MonitorDock(this); }
     if (shouldEagerLoad(QStringLiteral("hardware"))) { m_hardwareWidget = new HardwareDock(this); }
     if (shouldEagerLoad(QStringLiteral("privilege"))) { m_privilegeWidget = new PrivilegeDock(this); }
@@ -8059,6 +8062,9 @@ void MainWindow::applyAppearanceSettings(
 
     m_currentAppearanceSettings = settings;
     const bool isInitialAppearanceApply = (triggerReason == QStringLiteral("初始化加载"));
+
+    // startupTopMostEnabled 作用：设置页和启动配置统一控制主窗口最高级置顶。
+    setPinnedWindowState(m_currentAppearanceSettings.startupTopMostEnabled, false);
 
     // startupTopMostEnabled 作用：设置页和启动配置统一控制主窗口最高级置顶。
     setPinnedWindowState(m_currentAppearanceSettings.startupTopMostEnabled, false);
