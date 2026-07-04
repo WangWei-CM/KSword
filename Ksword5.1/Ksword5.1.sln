@@ -26,6 +26,9 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KswordSetup", "..\KswordSet
 	EndProjectSection
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KswordARKLight", "..\KswordARKLight\KswordARKLight.vcxproj", "{44CC7D72-182E-4B28-9D88-531B09C77C41}"
+	ProjectSection(ProjectDependencies) = postProject
+		{E4B6A5CC-D9ED-FCA2-46D5-5035E8728524} = {E4B6A5CC-D9ED-FCA2-46D5-5035E8728524}
+	EndProjectSection
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
