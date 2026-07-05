@@ -119,61 +119,55 @@ KswordARKDriverResolvePsGetProcessSectionBaseAddress(
 }
 
 static NTSTATUS
-KswordARKDriverOpenProcessHandleForMemoryZero(
-    _In_ ULONG processId,
-    _Out_ HANDLE* processHandleOut,
-    _Out_ PEPROCESS* processObjectOut
+KswordARKDriverOpenProcessHandleForMemoryZeroByObject(
+    _In_ PEPROCESS processObject,
+    _Out_ HANDLE* processHandleOut
     )
+/*++
+
+Routine Description:
+
+    Open a process handle for the memory-zero fallback from an already resolved
+    EPROCESS object. 中文说明：隐藏进程的 UniqueProcessId 可能不可信，因此
+    兜底阶段不再重新按 PID 打开进程。
+
+Arguments:
+
+    processObject - Referenced target EPROCESS.
+    processHandleOut - Receives a kernel handle with query/write access.
+
+Return Value:
+
+    STATUS_SUCCESS or ObOpenObjectByPointer status.
+
+--*/
 {
-    OBJECT_ATTRIBUTES objectAttributes;
-    CLIENT_ID clientId;
     HANDLE processHandle = NULL;
-    PEPROCESS processObject = NULL;
     NTSTATUS status = STATUS_SUCCESS;
     const ACCESS_MASK desiredAccess =
         PROCESS_QUERY_INFORMATION |
         PROCESS_VM_OPERATION |
         PROCESS_VM_WRITE;
 
-    if (processHandleOut == NULL || processObjectOut == NULL) {
+    if (processObject == NULL || processHandleOut == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
 
     *processHandleOut = NULL;
-    *processObjectOut = NULL;
 
-    status = PsLookupProcessByProcessId(ULongToHandle(processId), &processObject);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    InitializeObjectAttributes(&objectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
-    clientId.UniqueProcess = ULongToHandle(processId);
-    clientId.UniqueThread = NULL;
-    status = ZwOpenProcess(
-        &processHandle,
+    status = ObOpenObjectByPointer(
+        processObject,
+        OBJ_KERNEL_HANDLE,
+        NULL,
         desiredAccess,
-        &objectAttributes,
-        &clientId);
-    if (!NT_SUCCESS(status)) {
-        status = ObOpenObjectByPointer(
-            processObject,
-            OBJ_KERNEL_HANDLE,
-            NULL,
-            desiredAccess,
-            *PsProcessType,
-            KernelMode,
-            &processHandle);
-    }
+        *PsProcessType,
+        KernelMode,
+        &processHandle);
 
-    if (!NT_SUCCESS(status)) {
-        ObDereferenceObject(processObject);
-        return status;
+    if (NT_SUCCESS(status)) {
+        *processHandleOut = processHandle;
     }
-
-    *processHandleOut = processHandle;
-    *processObjectOut = processObject;
-    return STATUS_SUCCESS;
+    return status;
 }
 
 static BOOLEAN
@@ -195,14 +189,34 @@ KswordARKDriverIsWritableProtection(
 }
 
 NTSTATUS
-KswordARKDriverZeroProcessUserMemoryByPid(
+KswordARKDriverZeroProcessUserMemoryByObject(
     _In_opt_ WDFDEVICE device,
-    _In_ ULONG processId
+    _In_ ULONG processId,
+    _In_ PEPROCESS processObject
     )
+/*++
+
+Routine Description:
+
+    Zero writable user-mode memory regions for an already resolved process.
+    中文说明：processId 仅用于日志，实际查询/写入都围绕 ProcessObject，避免
+    被改写 PID 让第三阶段兜底失效。
+
+Arguments:
+
+    device - Optional WDF device used for logs.
+    processId - Display/request PID used in diagnostic messages.
+    processObject - Referenced target EPROCESS.
+
+Return Value:
+
+    STATUS_SUCCESS when at least one writable chunk was zeroed; otherwise the
+    best failure status.
+
+--*/
 {
     KSWORD_PS_GET_PROCESS_SECTION_BASE_ADDRESS_FN psGetSectionBaseAddress = NULL;
     HANDLE processHandle = NULL;
-    PEPROCESS processObject = NULL;
     PUCHAR zeroChunkBuffer = NULL;
     ULONG_PTR queryAddress = KSWORD_ARK_MEMORY_SCAN_LOW_ADDRESS;
     ULONG_PTR upperUserAddress = 0;
@@ -216,10 +230,13 @@ KswordARKDriverZeroProcessUserMemoryByPid(
     ULONG successfulWriteCount = 0UL;
     SIZE_T totalBytesZeroed = 0U;
 
-    status = KswordARKDriverOpenProcessHandleForMemoryZero(
-        processId,
-        &processHandle,
-        &processObject);
+    if (processObject == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = KswordARKDriverOpenProcessHandleForMemoryZeroByObject(
+        processObject,
+        &processHandle);
     if (!NT_SUCCESS(status)) {
         KswordARKDriverLogTerminateMessage(
             device,
@@ -374,11 +391,45 @@ Exit:
         ZwClose(processHandle);
         processHandle = NULL;
     }
-    if (processObject != NULL) {
-        ObDereferenceObject(processObject);
-        processObject = NULL;
+    return finalStatus;
+}
+
+NTSTATUS
+KswordARKDriverZeroProcessUserMemoryByPid(
+    _In_opt_ WDFDEVICE device,
+    _In_ ULONG processId
+    )
+/*++
+
+Routine Description:
+
+    Compatibility wrapper that resolves a process by PID, then runs the object
+    based memory-zero fallback.
+
+Arguments:
+
+    device - Optional WDF device used for logs.
+    processId - Target process ID.
+
+Return Value:
+
+    STATUS_SUCCESS or lookup/fallback status.
+
+--*/
+{
+    PEPROCESS processObject = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    status = PsLookupProcessByProcessId(ULongToHandle(processId), &processObject);
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
-    return finalStatus;
+    status = KswordARKDriverZeroProcessUserMemoryByObject(
+        device,
+        processId,
+        processObject);
+    ObDereferenceObject(processObject);
+    return status;
 }
 

@@ -16,6 +16,7 @@ Environment:
 
 #include "ark/ark_driver.h"
 #include "..\..\platform\process_resolver.h"
+#include "process_crossview.h"
 #include "process_extended.h"
 #include <ntstrsafe.h>
 #include <stdarg.h>
@@ -91,6 +92,7 @@ PsGetProcessImageFileName(
 #define KSWORD_ARK_ENUM_PID_STEP 4UL
 #define KSWORD_ARK_ENUM_SCAN_MAX_PID 0x00400000UL
 #define KSWORD_ARK_ENUM_SCAN_MIN_PID KSWORD_ARK_ENUM_PID_STEP
+#define KSWORD_ARK_ENUM_CID_WALK_MAX_NODES 0x00100000UL
 #define KSWORD_ARK_PROCESS_HIDE_MAX_PIDS 256UL
 #define KSWORD_ARK_PROCESS_OFFSET_SCAN_LIMIT 0x2000UL
 #define KSWORD_ARK_PROCESS_HIDDEN_PID_TAG 0xE0000000UL
@@ -99,6 +101,12 @@ PsGetProcessImageFileName(
 #ifndef STATUS_NOT_FOUND
 #define STATUS_NOT_FOUND ((NTSTATUS)0xC0000225L)
 #endif
+
+#ifndef STATUS_BUFFER_OVERFLOW
+#define STATUS_BUFFER_OVERFLOW ((NTSTATUS)0x80000005L)
+#endif
+
+extern POBJECT_TYPE* PsProcessType;
 
 typedef PEPROCESS(NTAPI* KSWORD_PS_GET_NEXT_PROCESS_FN)(
     _In_opt_ PEPROCESS Process
@@ -126,6 +134,18 @@ typedef struct _KSWORD_ARK_PROCESS_HIDE_STATE
     ULONG Count;
     KSWORD_ARK_PROCESS_HIDE_RECORD Records[KSWORD_ARK_PROCESS_HIDE_MAX_PIDS];
 } KSWORD_ARK_PROCESS_HIDE_STATE;
+
+typedef struct _KSWORD_ARK_ENUM_PROCESS_CID_CONTEXT
+{
+    KSWORD_ARK_ENUM_PROCESS_RESPONSE* Response;
+    size_t EntryCapacity;
+    const KSW_DYN_STATE* DynState;
+    const UCHAR* ActivePidBitmap;
+    size_t ActivePidBitmapBytes;
+    ULONG ScanStartPid;
+    ULONG ScanEndPid;
+    BOOLEAN ActiveWalkAvailable;
+} KSWORD_ARK_ENUM_PROCESS_CID_CONTEXT;
 
 static KSWORD_ARK_PROCESS_HIDE_STATE g_KswordArkProcessHideState;
 
@@ -1106,8 +1126,200 @@ KswordARKDriverAppendProcessEntry(
     entry->parentProcessId = parentProcessId;
     entry->flags = processFlags;
     KswordARKDriverCopyImageName(entry->imageName, imageName);
-    KswordARKProcessPopulateExtendedEntry(entry, processObject);
+    if (processObject != NULL) {
+        KswordARKProcessPopulateExtendedEntry(entry, processObject);
+    }
+    else {
+        /*
+         * CID-only placeholder:
+         * - Inputs: a decoded PspCidTable row whose object type matched Process
+         *   but could not be safely referenced for detail sampling.
+         * - Processing: keep the CID value visible and mark the detail state as
+         *   read-failed instead of dropping the row.
+         * - Return behavior: no return value; the partially populated row still
+         *   lets R3 offer object-based R0 actions by CID.
+         */
+        entry->r0Status = KSWORD_ARK_PROCESS_R0_STATUS_READ_FAILED;
+    }
     response->returnedCount += 1UL;
+}
+
+static VOID
+KswordARKDriverEnumProcessCidCallback(
+    _In_ const KSW_CROSSVIEW_CID_ENTRY* Entry,
+    _Inout_opt_ PVOID Context
+    )
+/*++
+
+Routine Description:
+
+    Merge one direct PspCidTable process candidate into the normal process
+    enumeration response. 中文说明：CID 表命中的进程必须可见；即使对象无法
+    reference 或已进入 terminating，也只降级成灰色诊断行，不再丢弃。
+
+Arguments:
+
+    Entry - CID walker payload.
+    Context - KSWORD_ARK_ENUM_PROCESS_CID_CONTEXT.
+
+Return Value:
+
+    None. The response buffer is updated in place.
+
+--*/
+{
+    KSWORD_ARK_ENUM_PROCESS_CID_CONTEXT* enumContext =
+        (KSWORD_ARK_ENUM_PROCESS_CID_CONTEXT*)Context;
+    ULONG processFlags =
+        KSWORD_ARK_PROCESS_FLAG_KERNEL_ENUMERATED |
+        KSWORD_ARK_PROCESS_FLAG_CID_TABLE_ENUMERATED;
+    ULONG parentProcessId = 0UL;
+    const CHAR* imageName = "CIDOnly";
+
+    if (enumContext == NULL || Entry == NULL) {
+        return;
+    }
+    if (!KswordARKDriverPidInScanRange(
+            Entry->CidValue,
+            enumContext->ScanStartPid,
+            enumContext->ScanEndPid)) {
+        return;
+    }
+    if (enumContext->ActivePidBitmap != NULL &&
+        enumContext->ActivePidBitmapBytes != 0U &&
+        KswordARKDriverBitmapHasPid(
+            enumContext->ActivePidBitmap,
+            enumContext->ActivePidBitmapBytes,
+            Entry->CidValue)) {
+        return;
+    }
+
+    if (enumContext->ActiveWalkAvailable) {
+        processFlags |= KSWORD_ARK_PROCESS_FLAG_HIDDEN_FROM_ACTIVE_LIST;
+    }
+    if (KswordARKDriverIsProcessHiddenByUi(Entry->CidValue)) {
+        processFlags |= KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI;
+    }
+
+    if (Entry->Referenced && Entry->Object != NULL) {
+        PEPROCESS processObject = (PEPROCESS)Entry->Object;
+        if (KswordARKDriverShouldSkipTerminatingProcess(processObject, enumContext->DynState)) {
+            processFlags |= KSWORD_ARK_PROCESS_FLAG_TERMINATING_OR_EXITED;
+        }
+        parentProcessId = HandleToULong(PsGetProcessInheritedFromUniqueProcessId(processObject));
+        imageName = PsGetProcessImageFileName(processObject);
+        KswordARKDriverAppendProcessEntry(
+            enumContext->Response,
+            enumContext->EntryCapacity,
+            Entry->CidValue,
+            parentProcessId,
+            processFlags,
+            imageName,
+            processObject);
+        return;
+    }
+
+    processFlags |= KSWORD_ARK_PROCESS_FLAG_CID_TABLE_REFERENCE_FAILED;
+    KswordARKDriverAppendProcessEntry(
+        enumContext->Response,
+        enumContext->EntryCapacity,
+        Entry->CidValue,
+        parentProcessId,
+        processFlags,
+        imageName,
+        NULL);
+}
+
+static NTSTATUS
+KswordARKDriverEnumerateProcessesByCidTable(
+    _Inout_ KSWORD_ARK_ENUM_PROCESS_RESPONSE* Response,
+    _In_ size_t EntryCapacity,
+    _In_ const KSW_DYN_STATE* DynState,
+    _In_reads_bytes_opt_(ActivePidBitmapBytes) const UCHAR* ActivePidBitmap,
+    _In_ size_t ActivePidBitmapBytes,
+    _In_ ULONG ScanStartPid,
+    _In_ ULONG ScanEndPid,
+    _In_ BOOLEAN ActiveWalkAvailable
+    )
+/*++
+
+Routine Description:
+
+    Enumerate process rows directly from PspCidTable. 中文说明：这替代旧的
+    “按 PID 步进 + PsLookupProcessByProcessId”扫描，避免 PsLookup 被 hook
+    或候选对象处于特殊状态时把 CID 表证据行隐藏。
+
+Arguments:
+
+    Response - Mutable enum-process response.
+    EntryCapacity - Maximum number of entries that fit in Response.
+    DynState - DynData snapshot captured by the caller.
+    ActivePidBitmap - Optional bitmap of PIDs already seen by PsGetNextProcess.
+    ActivePidBitmapBytes - Byte length of ActivePidBitmap.
+    ScanStartPid - Lower inclusive CID range.
+    ScanEndPid - Upper inclusive CID range.
+    ActiveWalkAvailable - TRUE when ActivePidBitmap represents an active walk.
+
+Return Value:
+
+    STATUS_SUCCESS when the CID table walk completed or was bounded; otherwise
+    resolver/walker status for diagnostics. Rows already appended remain valid.
+
+--*/
+{
+    KSWORD_ARK_CROSSVIEW_FIELD_OFFSETS fieldOffsets;
+    KSWORD_ARK_ENUM_PROCESS_CID_CONTEXT enumContext;
+    PVOID pspCidTableAddress = NULL;
+    ULONG64 missingCapabilityMask = 0ULL;
+    ULONG visitedEntries = 0UL;
+    BOOLEAN usedDynDataGlobal = FALSE;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (Response == NULL || DynState == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (PsProcessType == NULL || *PsProcessType == NULL) {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    RtlZeroMemory(&fieldOffsets, sizeof(fieldOffsets));
+    RtlZeroMemory(&enumContext, sizeof(enumContext));
+    KswordARKCrossViewFillFieldOffsets(DynState, &fieldOffsets);
+
+    status = KswordARKCrossViewResolvePspCidTableAddress(
+        DynState,
+        &fieldOffsets,
+        &pspCidTableAddress,
+        &missingCapabilityMask,
+        &usedDynDataGlobal);
+    UNREFERENCED_PARAMETER(missingCapabilityMask);
+    UNREFERENCED_PARAMETER(usedDynDataGlobal);
+    if (!NT_SUCCESS(status) || pspCidTableAddress == NULL) {
+        return NT_SUCCESS(status) ? STATUS_NOT_FOUND : status;
+    }
+
+    enumContext.Response = Response;
+    enumContext.EntryCapacity = EntryCapacity;
+    enumContext.DynState = DynState;
+    enumContext.ActivePidBitmap = ActivePidBitmap;
+    enumContext.ActivePidBitmapBytes = ActivePidBitmapBytes;
+    enumContext.ScanStartPid = ScanStartPid;
+    enumContext.ScanEndPid = ScanEndPid;
+    enumContext.ActiveWalkAvailable = ActiveWalkAvailable;
+
+    status = KswordARKCrossViewWalkCidTable(
+        DynState,
+        pspCidTableAddress,
+        *PsProcessType,
+        KSWORD_ARK_ENUM_CID_WALK_MAX_NODES,
+        KswordARKDriverEnumProcessCidCallback,
+        &enumContext,
+        &visitedEntries);
+    UNREFERENCED_PARAMETER(visitedEntries);
+    if (status == STATUS_BUFFER_OVERFLOW) {
+        return STATUS_SUCCESS;
+    }
+    return status;
 }
 
 static NTSTATUS
@@ -1616,6 +1828,7 @@ KswordARKDriverEnumerateProcesses(
     UCHAR* pidBitmap = NULL;
     size_t pidBitmapBytes = 0;
     ULONG scanPid = 0;
+    NTSTATUS cidWalkStatus = STATUS_SUCCESS;
     KSWORD_PS_GET_NEXT_PROCESS_FN psGetNextProcess = NULL;
     PEPROCESS processCursor = NULL;
     KSW_DYN_STATE dynState;
@@ -1700,22 +1913,23 @@ KswordARKDriverEnumerateProcesses(
             const CHAR* imageName = PsGetProcessImageFileName(processCursor);
             ULONG processFlags = KSWORD_ARK_PROCESS_FLAG_KERNEL_ENUMERATED;
             PEPROCESS nextProcess = NULL;
-            const BOOLEAN skipTerminatingProcess =
+            const BOOLEAN terminatingProcess =
                 KswordARKDriverShouldSkipTerminatingProcess(processCursor, &dynState);
 
-            if (!skipTerminatingProcess) {
-                if (KswordARKDriverIsProcessHiddenByUi(processId)) {
-                    processFlags |= KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI;
-                }
-                KswordARKDriverAppendProcessEntry(
-                    response,
-                    entryCapacity,
-                    processId,
-                    parentProcessId,
-                    processFlags,
-                    imageName,
-                    processCursor);
+            if (terminatingProcess) {
+                processFlags |= KSWORD_ARK_PROCESS_FLAG_TERMINATING_OR_EXITED;
             }
+            if (KswordARKDriverIsProcessHiddenByUi(processId)) {
+                processFlags |= KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI;
+            }
+            KswordARKDriverAppendProcessEntry(
+                response,
+                entryCapacity,
+                processId,
+                parentProcessId,
+                processFlags,
+                imageName,
+                processCursor);
 
             if (scanCidTable && KswordARKDriverPidInScanRange(processId, scanStartPid, scanEndPid)) {
                 KswordARKDriverBitmapSetPid(pidBitmap, pidBitmapBytes, processId);
@@ -1728,6 +1942,18 @@ KswordARKDriverEnumerateProcesses(
     }
 
     if (scanCidTable) {
+        cidWalkStatus = KswordARKDriverEnumerateProcessesByCidTable(
+            response,
+            entryCapacity,
+            &dynState,
+            pidBitmap,
+            pidBitmapBytes,
+            scanStartPid,
+            scanEndPid,
+            (psGetNextProcess != NULL && pidBitmap != NULL) ? TRUE : FALSE);
+    }
+
+    if (scanCidTable && !NT_SUCCESS(cidWalkStatus)) {
         scanPid = scanStartPid;
         for (;;) {
             PEPROCESS hiddenProcessObject = NULL;
@@ -1745,24 +1971,27 @@ KswordARKDriverEnumerateProcesses(
                         HandleToULong(PsGetProcessInheritedFromUniqueProcessId(hiddenProcessObject));
                     const CHAR* imageName = PsGetProcessImageFileName(hiddenProcessObject);
                     ULONG processFlags = KSWORD_ARK_PROCESS_FLAG_KERNEL_ENUMERATED;
+                    const BOOLEAN terminatingProcess =
+                        KswordARKDriverShouldSkipTerminatingProcess(hiddenProcessObject, &dynState);
 
                     if (psGetNextProcess != NULL && pidBitmap != NULL) {
                         processFlags |= KSWORD_ARK_PROCESS_FLAG_HIDDEN_FROM_ACTIVE_LIST;
+                    }
+                    if (terminatingProcess) {
+                        processFlags |= KSWORD_ARK_PROCESS_FLAG_TERMINATING_OR_EXITED;
                     }
                     if (KswordARKDriverIsProcessHiddenByUi(scanPid)) {
                         processFlags |= KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI;
                     }
 
-                    if (!KswordARKDriverShouldSkipTerminatingProcess(hiddenProcessObject, &dynState)) {
-                        KswordARKDriverAppendProcessEntry(
-                            response,
-                            entryCapacity,
-                            scanPid,
-                            parentProcessId,
-                            processFlags,
-                            imageName,
-                            hiddenProcessObject);
-                    }
+                    KswordARKDriverAppendProcessEntry(
+                        response,
+                        entryCapacity,
+                        scanPid,
+                        parentProcessId,
+                        processFlags,
+                        imageName,
+                        hiddenProcessObject);
                     ObDereferenceObject(hiddenProcessObject);
                 }
             }

@@ -5427,15 +5427,25 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
                 kernelOnlyRecord.pid = kernelProcess.processId;
                 kernelOnlyRecord.parentPid = kernelProcess.parentProcessId;
                 mergeKernelProcessExtension(kernelOnlyRecord, kernelProcess);
+                const bool cidTableWeakEvidence =
+                    (kernelProcess.flags &
+                        (KSWORD_ARK_PROCESS_FLAG_CID_TABLE_REFERENCE_FAILED |
+                            KSWORD_ARK_PROCESS_FLAG_TERMINATING_OR_EXITED)) != 0U;
                 kernelOnlyRecord.creationTime100ns =
                     KernelOnlyCreationTimeSeed + static_cast<std::uint64_t>(kernelProcess.processId);
                 kernelOnlyRecord.processName = kernelProcess.imageName.empty()
                     ? std::string("[R0] Unknown")
                     : std::string("[R0] ") + kernelProcess.imageName;
-                kernelOnlyRecord.imagePath = "[仅内核枚举可见]";
-                kernelOnlyRecord.commandLine = "[仅内核枚举可见]";
+                kernelOnlyRecord.imagePath = cidTableWeakEvidence
+                    ? "[CID Table命中：对象引用失败或已退出]"
+                    : "[仅内核枚举可见]";
+                kernelOnlyRecord.commandLine = cidTableWeakEvidence
+                    ? "[CID Table命中：保留显示，可尝试R0结束]"
+                    : "[仅内核枚举可见]";
                 kernelOnlyRecord.userName = "-";
-                kernelOnlyRecord.signatureState = "KernelOnly(Hidden?)";
+                kernelOnlyRecord.signatureState = cidTableWeakEvidence
+                    ? "CIDTable(Weak)"
+                    : "KernelOnly(Hidden?)";
                 kernelOnlyRecord.signaturePublisher.clear();
                 kernelOnlyRecord.signatureTrusted = false;
                 kernelOnlyRecord.startTimeText = "-";
@@ -7143,8 +7153,17 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
         ? QColor(255, 140, 140)
         : QColor(220, 50, 47);
 
-    // 退出保留进程灰色高亮；仅内核可见进程红色高亮；普通新增进程绿色高亮。
+    // 退出保留进程灰色高亮；CID 表弱引用/terminating 行灰色高亮；
+    // 仅内核可见进程红色高亮；普通新增进程绿色高亮。
     if (tableRow.isExited)
+    {
+        return role == Qt::BackgroundRole
+            ? QVariant(QBrush(KswordTheme::ExitedRowBackgroundColor()))
+            : QVariant(QBrush(KswordTheme::ExitedRowForegroundColor()));
+    }
+    if ((processRecord.r0Flags &
+        (KSWORD_ARK_PROCESS_FLAG_CID_TABLE_REFERENCE_FAILED |
+            KSWORD_ARK_PROCESS_FLAG_TERMINATING_OR_EXITED)) != 0U)
     {
         return role == Qt::BackgroundRole
             ? QVariant(QBrush(KswordTheme::ExitedRowBackgroundColor()))
@@ -8201,24 +8220,35 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
     r0HideLegacyBothAction->setToolTip(QStringLiteral("兼容旧版：同时修改 UniqueProcessId 并摘除 ActiveProcessLinks；风险最高，仅用于复现实验。"));
     r0UnhideProcessAction->setToolTip(QStringLiteral("恢复由 Ksword 记录的 UniqueProcessId 和进程链表位置；若原位置不再相邻，则挂回 System 链头后。"));
     r0ClearHiddenProcessAction->setToolTip(QStringLiteral("恢复所有由 Ksword 摘链的进程，并清空驱动内记录。"));
+    QMenu* criticalProcessSubMenu = contextMenu.addMenu(
+        blueTintedIcon(":/Icon/process_critical.svg"),
+        QStringLiteral("关键进程 / BreakOnTermination"));
+    QAction* setCriticalAction = criticalProcessSubMenu->addAction(
+        blueTintedIcon(":/Icon/process_critical.svg"),
+        QStringLiteral("R3设为关键进程"));
+    QAction* clearCriticalAction = criticalProcessSubMenu->addAction(
+        blueTintedIcon(":/Icon/process_uncritical.svg"),
+        QStringLiteral("R3取消关键进程"));
+    criticalProcessSubMenu->addSeparator();
+    QAction* r0EnableBreakAction = criticalProcessSubMenu->addAction(
+        buildR0ActionIcon(":/Icon/process_critical.svg"),
+        QStringLiteral("R0启用 BreakOnTermination"));
+    QAction* r0DisableBreakAction = criticalProcessSubMenu->addAction(
+        buildR0ActionIcon(":/Icon/process_uncritical.svg"),
+        QStringLiteral("R0关闭 BreakOnTermination"));
+    setCriticalAction->setToolTip(QStringLiteral("R3 调用 NtSetInformationProcess(ProcessBreakOnTermination=1)。"));
+    clearCriticalAction->setToolTip(QStringLiteral("R3 调用 NtSetInformationProcess(ProcessBreakOnTermination=0)。"));
+    r0EnableBreakAction->setToolTip(QStringLiteral("R0 优先 ZwSetInformationProcess，失败后按 PDB DynData 的 _EPROCESS.Flags 偏移置位。"));
+    r0DisableBreakAction->setToolTip(QStringLiteral("R0 优先 ZwSetInformationProcess，失败后按 PDB DynData 的 _EPROCESS.Flags 偏移清位。"));
     QMenu* r0DangerSubMenu = contextMenu.addMenu(
         buildR0ActionIcon(":/Icon/process_uncritical.svg"),
         QStringLiteral("R0危险进程标志/DKOM"));
-    QAction* r0EnableBreakAction = r0DangerSubMenu->addAction(
-        buildR0ActionIcon(":/Icon/process_critical.svg"),
-        QStringLiteral("启用 BreakOnTermination"));
-    QAction* r0DisableBreakAction = r0DangerSubMenu->addAction(
-        buildR0ActionIcon(":/Icon/process_uncritical.svg"),
-        QStringLiteral("关闭 BreakOnTermination"));
     QAction* r0DisableApcAction = r0DangerSubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_suspend.svg"),
         QStringLiteral("禁止APC插入(现有线程)"));
-    r0DangerSubMenu->addSeparator();
     QAction* r0DkomCidRemoveAction = r0DangerSubMenu->addAction(
         buildR0ActionIcon(":/Icon/process_uncritical.svg"),
         QStringLiteral("DKOM从PspCidTable删除"));
-    r0EnableBreakAction->setToolTip(QStringLiteral("调用 ZwSetInformationProcess(ProcessBreakOnTermination=1)。"));
-    r0DisableBreakAction->setToolTip(QStringLiteral("调用 ZwSetInformationProcess(ProcessBreakOnTermination=0)。"));
     r0DisableApcAction->setToolTip(QStringLiteral("清除目标进程现有线程 ETHREAD ApcQueueable 位；新建线程不自动继承。"));
     r0DkomCidRemoveAction->setToolTip(QStringLiteral("从 PspCidTable 清零目标 EPROCESS 的 CID 表项；高风险且不可通过本菜单恢复。"));
     contextMenu.addSeparator();
@@ -8236,8 +8266,6 @@ void ProcessDock::showTableContextMenu(const QPoint& localPosition)
         enableEfficiencyAction->setEnabled(!contextProcessRecord->efficiencyModeEnabled);
         disableEfficiencyAction->setEnabled(contextProcessRecord->efficiencyModeEnabled);
     }
-    QAction* setCriticalAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_critical.svg"), "设为关键进程");
-    QAction* clearCriticalAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_uncritical.svg"), "取消关键进程");
     QAction* openFolderAction = contextMenu.addAction(blueTintedIcon(":/Icon/process_open_folder.svg"), "打开所在目录");
     QAction* openMemoryAction = contextMenu.addAction(
         blueTintedIcon(":/Icon/process_details.svg"),

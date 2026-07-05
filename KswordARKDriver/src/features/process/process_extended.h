@@ -18,4 +18,12 @@ KswordARKProcessPatchProtectionByDynData(
     _In_ UCHAR SectionSignatureLevel
     );
 
+NTSTATUS
+KswordARKProcessPatchProtectionByDynDataObject(
+    _In_ PEPROCESS ProcessObject,
+    _In_ UCHAR ProtectionLevel,
+    _In_ UCHAR SignatureLevel,
+    _In_ UCHAR SectionSignatureLevel
+    );
+
 EXTERN_C_END

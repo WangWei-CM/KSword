@@ -16,6 +16,8 @@ Environment:
 
 #include "process_extended.h"
 
+#include "..\..\platform\process_resolver.h"
+
 #include <ntstrsafe.h>
 
 typedef NTSTATUS(NTAPI* KSWORD_ZW_QUERY_INFORMATION_PROCESS_FN)(
@@ -130,6 +132,132 @@ Return Value:
         return KSWORD_ARK_PROCESS_FIELD_SOURCE_PDB_PROFILE;
     }
     return KSWORD_ARK_PROCESS_FIELD_SOURCE_UNAVAILABLE;
+}
+
+static BOOLEAN
+KswordARKProcessRuntimeProtectionOffsets(
+    _Out_ ULONG* ProtectionOffsetOut,
+    _Out_ ULONG* SignatureOffsetOut,
+    _Out_ ULONG* SectionSignatureOffsetOut
+    )
+/*++
+
+Routine Description:
+
+    Resolve PP/PPL byte offsets from live ntoskrnl helpers. 中文说明：强制结束
+    进程时，DynData 可能缺失或没有加载到当前内核 profile；此函数使用
+    PsIsProtectedProcess/PsIsProtectedProcessLight 的指令形态反推
+    EPROCESS.Protection，并按 Windows 布局推导 SignatureLevel 两个字节。
+
+Arguments:
+
+    ProtectionOffsetOut - Receives EPROCESS.Protection offset.
+    SignatureOffsetOut - Receives EPROCESS.SignatureLevel offset.
+    SectionSignatureOffsetOut - Receives EPROCESS.SectionSignatureLevel offset.
+
+Return Value:
+
+    TRUE when all three offsets are available and bounded; otherwise FALSE.
+
+--*/
+{
+    const LONG protectionOffset = KswordARKDriverResolveProcessProtectionOffset();
+    const LONG signatureOffset = KswordARKDriverResolveProcessSignatureLevelOffset();
+    const LONG sectionSignatureOffset = KswordARKDriverResolveProcessSectionSignatureLevelOffset();
+
+    if (ProtectionOffsetOut == NULL ||
+        SignatureOffsetOut == NULL ||
+        SectionSignatureOffsetOut == NULL) {
+        return FALSE;
+    }
+    *ProtectionOffsetOut = KSW_DYN_OFFSET_UNAVAILABLE;
+    *SignatureOffsetOut = KSW_DYN_OFFSET_UNAVAILABLE;
+    *SectionSignatureOffsetOut = KSW_DYN_OFFSET_UNAVAILABLE;
+
+    if (protectionOffset <= 0 ||
+        signatureOffset <= 0 ||
+        sectionSignatureOffset <= 0 ||
+        protectionOffset > 0x3000L ||
+        signatureOffset > 0x3000L ||
+        sectionSignatureOffset > 0x3000L) {
+        return FALSE;
+    }
+
+    *ProtectionOffsetOut = (ULONG)protectionOffset;
+    *SignatureOffsetOut = (ULONG)signatureOffset;
+    *SectionSignatureOffsetOut = (ULONG)sectionSignatureOffset;
+    return TRUE;
+}
+
+static NTSTATUS
+KswordARKProcessPatchProtectionByOffsets(
+    _In_ PEPROCESS ProcessObject,
+    _In_ ULONG ProtectionOffset,
+    _In_ ULONG SignatureOffset,
+    _In_ ULONG SectionSignatureOffset,
+    _In_ UCHAR ProtectionLevel,
+    _In_ UCHAR SignatureLevel,
+    _In_ UCHAR SectionSignatureLevel
+    )
+/*++
+
+Routine Description:
+
+    Patch the three EPROCESS protection-related bytes through validated offsets.
+
+Arguments:
+
+    ProcessObject - Referenced target EPROCESS.
+    ProtectionOffset - Offset of EPROCESS.Protection.
+    SignatureOffset - Offset of EPROCESS.SignatureLevel.
+    SectionSignatureOffset - Offset of EPROCESS.SectionSignatureLevel.
+    ProtectionLevel - Target PS_PROTECTION raw byte.
+    SignatureLevel - Target process signature level.
+    SectionSignatureLevel - Target section signature level.
+
+Return Value:
+
+    STATUS_SUCCESS when all bytes were written and verified; otherwise a read or
+    validation status.
+
+--*/
+{
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (ProcessObject == NULL ||
+        !KswordARKProcessIsOffsetPresent(ProtectionOffset) ||
+        !KswordARKProcessIsOffsetPresent(SignatureOffset) ||
+        !KswordARKProcessIsOffsetPresent(SectionSignatureOffset)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    __try {
+        PUCHAR processBase = (PUCHAR)ProcessObject;
+        UCHAR* protectionByte = processBase + ProtectionOffset;
+        UCHAR* signatureByte = processBase + SignatureOffset;
+        UCHAR* sectionSignatureByte = processBase + SectionSignatureOffset;
+        UCHAR verifyProtection = 0U;
+        UCHAR verifySignature = 0U;
+        UCHAR verifySectionSignature = 0U;
+
+        RtlCopyMemory(protectionByte, &ProtectionLevel, sizeof(ProtectionLevel));
+        RtlCopyMemory(signatureByte, &SignatureLevel, sizeof(SignatureLevel));
+        RtlCopyMemory(sectionSignatureByte, &SectionSignatureLevel, sizeof(SectionSignatureLevel));
+        RtlCopyMemory(&verifyProtection, protectionByte, sizeof(verifyProtection));
+        RtlCopyMemory(&verifySignature, signatureByte, sizeof(verifySignature));
+        RtlCopyMemory(&verifySectionSignature, sectionSignatureByte, sizeof(verifySectionSignature));
+
+        if (verifyProtection != ProtectionLevel ||
+            verifySignature != SignatureLevel ||
+            verifySectionSignature != SectionSignatureLevel) {
+            status = STATUS_UNSUCCESSFUL;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+    }
+
+    return status;
 }
 
 static ULONG
@@ -635,6 +763,94 @@ Return Value:
 }
 
 NTSTATUS
+KswordARKProcessPatchProtectionByDynDataObject(
+    _In_ PEPROCESS ProcessObject,
+    _In_ UCHAR ProtectionLevel,
+    _In_ UCHAR SignatureLevel,
+    _In_ UCHAR SectionSignatureLevel
+    )
+/*++
+
+Routine Description:
+
+    Patch EPROCESS protection bytes on an already referenced process object.
+    中文说明：终止隐藏进程时 PID 字段可能已被改写，因此实际写入逻辑不能
+    再依赖 PsLookupProcessByProcessId；调用方负责提供已解析且有效的
+    EPROCESS 引用，本函数只按 DynData 偏移写 Protection/Signature 字节。
+
+Arguments:
+
+    ProcessObject - Referenced target EPROCESS.
+    ProtectionLevel - Target PS_PROTECTION raw byte.
+    SignatureLevel - Target process signature level.
+    SectionSignatureLevel - Target section signature level.
+
+Return Value:
+
+    STATUS_SUCCESS or a defensive failure status. The caller keeps ownership of
+    ProcessObject and must dereference it outside this function.
+
+--*/
+{
+    KSW_DYN_STATE dynState;
+    ULONG protectionOffset = KSW_DYN_OFFSET_UNAVAILABLE;
+    ULONG signatureOffset = KSW_DYN_OFFSET_UNAVAILABLE;
+    ULONG sectionSignatureOffset = KSW_DYN_OFFSET_UNAVAILABLE;
+    NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS dynDataStatus = STATUS_PROCEDURE_NOT_FOUND;
+
+    if (ProcessObject == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /*
+     * 处理顺序：
+     * 1. 优先使用运行时 PsIsProtectedProcess* 反推的偏移。它来自当前已加载
+     *    内核代码，能覆盖 profile 未命中或 DynData 旧包的情况。
+     * 2. 运行时解析失败时再回退到 DynData profile。
+     * 返回：只要任一来源完成写入并回读验证即成功；否则返回更具体的失败。
+     */
+    if (KswordARKProcessRuntimeProtectionOffsets(
+            &protectionOffset,
+            &signatureOffset,
+            &sectionSignatureOffset)) {
+        status = KswordARKProcessPatchProtectionByOffsets(
+            ProcessObject,
+            protectionOffset,
+            signatureOffset,
+            sectionSignatureOffset,
+            ProtectionLevel,
+            SignatureLevel,
+            SectionSignatureLevel);
+        if (NT_SUCCESS(status)) {
+            return STATUS_SUCCESS;
+        }
+    }
+
+    RtlZeroMemory(&dynState, sizeof(dynState));
+    KswordARKDynDataSnapshot(&dynState);
+    if ((dynState.CapabilityMask & KSW_CAP_PROCESS_PROTECTION_PATCH) !=
+        KSW_CAP_PROCESS_PROTECTION_PATCH) {
+        return NT_SUCCESS(status) ? STATUS_NOT_SUPPORTED : status;
+    }
+    if (!KswordARKProcessIsOffsetPresent(dynState.Kernel.EpProtection) ||
+        !KswordARKProcessIsOffsetPresent(dynState.Kernel.EpSignatureLevel) ||
+        !KswordARKProcessIsOffsetPresent(dynState.Kernel.EpSectionSignatureLevel)) {
+        return NT_SUCCESS(status) ? STATUS_PROCEDURE_NOT_FOUND : status;
+    }
+
+    dynDataStatus = KswordARKProcessPatchProtectionByOffsets(
+        ProcessObject,
+        dynState.Kernel.EpProtection,
+        dynState.Kernel.EpSignatureLevel,
+        dynState.Kernel.EpSectionSignatureLevel,
+        ProtectionLevel,
+        SignatureLevel,
+        SectionSignatureLevel);
+    return dynDataStatus;
+}
+
+NTSTATUS
 KswordARKProcessPatchProtectionByDynData(
     _In_ ULONG ProcessId,
     _In_ UCHAR ProtectionLevel,
@@ -645,7 +861,9 @@ KswordARKProcessPatchProtectionByDynData(
 
 Routine Description:
 
-    Patch EPROCESS protection bytes by using the unified DynData state.
+    Patch EPROCESS protection bytes by resolving the target from a PID first.
+    中文说明：该入口保留给现有 R3 设置 PPL 功能；隐藏进程终止链路会走
+    KswordARKProcessPatchProtectionByDynDataObject，避免被改写 PID 阻断。
 
 Arguments:
 
@@ -660,52 +878,19 @@ Return Value:
 
 --*/
 {
-    KSW_DYN_STATE dynState;
     PEPROCESS processObject = NULL;
     NTSTATUS status = STATUS_SUCCESS;
-
-    RtlZeroMemory(&dynState, sizeof(dynState));
-    KswordARKDynDataSnapshot(&dynState);
-    if ((dynState.CapabilityMask & KSW_CAP_PROCESS_PROTECTION_PATCH) !=
-        KSW_CAP_PROCESS_PROTECTION_PATCH) {
-        return STATUS_NOT_SUPPORTED;
-    }
-    if (!KswordARKProcessIsOffsetPresent(dynState.Kernel.EpProtection) ||
-        !KswordARKProcessIsOffsetPresent(dynState.Kernel.EpSignatureLevel) ||
-        !KswordARKProcessIsOffsetPresent(dynState.Kernel.EpSectionSignatureLevel)) {
-        return STATUS_PROCEDURE_NOT_FOUND;
-    }
 
     status = PsLookupProcessByProcessId(ULongToHandle(ProcessId), &processObject);
     if (!NT_SUCCESS(status)) {
         return status;
     }
 
-    __try {
-        PUCHAR processBase = (PUCHAR)processObject;
-        UCHAR* protectionByte = processBase + dynState.Kernel.EpProtection;
-        UCHAR* signatureByte = processBase + dynState.Kernel.EpSignatureLevel;
-        UCHAR* sectionSignatureByte = processBase + dynState.Kernel.EpSectionSignatureLevel;
-        UCHAR verifyProtection = 0U;
-        UCHAR verifySignature = 0U;
-        UCHAR verifySectionSignature = 0U;
-
-        RtlCopyMemory(protectionByte, &ProtectionLevel, sizeof(ProtectionLevel));
-        RtlCopyMemory(signatureByte, &SignatureLevel, sizeof(SignatureLevel));
-        RtlCopyMemory(sectionSignatureByte, &SectionSignatureLevel, sizeof(SectionSignatureLevel));
-        RtlCopyMemory(&verifyProtection, protectionByte, sizeof(verifyProtection));
-        RtlCopyMemory(&verifySignature, signatureByte, sizeof(verifySignature));
-        RtlCopyMemory(&verifySectionSignature, sectionSignatureByte, sizeof(verifySectionSignature));
-
-        if (verifyProtection != ProtectionLevel ||
-            verifySignature != SignatureLevel ||
-            verifySectionSignature != SectionSignatureLevel) {
-            status = STATUS_UNSUCCESSFUL;
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        status = GetExceptionCode();
-    }
+    status = KswordARKProcessPatchProtectionByDynDataObject(
+        processObject,
+        ProtectionLevel,
+        SignatureLevel,
+        SectionSignatureLevel);
 
     ObDereferenceObject(processObject);
     return status;

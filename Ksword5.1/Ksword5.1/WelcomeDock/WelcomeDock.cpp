@@ -69,7 +69,7 @@ WelcomeDock::WelcomeDock(QWidget* parent) : QWidget(parent) {
     m_contributors = new QLabel(this);
     // 文本格式：使用 HTML 加粗标题，名单保持纯文本便于后续追加。
     m_contributors->setText(QStringLiteral(
-        "<b>贡献者：</b>WangWei_CM.，OB_BUFF，KALI_MC"));
+        "<b>贡献者：</b>WangWei_CM.，OB_BUFF，PipExitThread"));
     // 自动换行：当 Dock 宽度较窄时，贡献者名单可自然折行。
     m_contributors->setWordWrap(true);
     // 允许复制：用户可以直接复制贡献者名单。
@@ -83,6 +83,17 @@ WelcomeDock::WelcomeDock(QWidget* parent) : QWidget(parent) {
     m_referenceTitle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     // 标题文本无需换行，但保留富文本显示能力。
     m_referenceTitle->setTextFormat(Qt::RichText);
+
+    // 捐赠者信息：放在欢迎页底部扩展信息末尾，用于公开感谢当前捐赠者。
+    m_donors = new QLabel(this);
+    // 文本格式：使用 HTML 加粗标题，名单保持纯文本，便于后续追加更多捐赠者。
+    m_donors->setText(QStringLiteral("<b>捐赠者：</b>NtKrnl64,一花一树叶,hzh"));
+    // 自动换行：当 Dock 宽度较窄时，捐赠者名单可自然折行。
+    m_donors->setWordWrap(true);
+    // 允许复制：用户可以直接复制捐赠者名单。
+    m_donors->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    // 高度策略：仅占用文本所需高度，不挤压上方按钮区域。
+    m_donors->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
     // 按钮样式：根据当前深浅色状态选择欢迎页按钮样式。
     // welcomeButtonStyle 作用：根据当前深浅色状态选择欢迎页按钮样式。
@@ -139,6 +150,8 @@ WelcomeDock::WelcomeDock(QWidget* parent) : QWidget(parent) {
     m_leftLayout->addWidget(m_referenceTitle);
     // 参考项目按钮：作为可点击仓库入口，不使用普通文本链接。
     m_leftLayout->addLayout(m_referenceLayout);
+    // 捐赠者：放在欢迎页扩展信息最下方、弹性留白之前。
+    m_leftLayout->addWidget(m_donors);
     // 底部留白由 stretch 承担，避免重复添加按钮布局。
     m_leftLayout->addStretch(1);
     m_leftLayout->setSpacing(20); // 组件间距

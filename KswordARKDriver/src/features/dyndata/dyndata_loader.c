@@ -109,6 +109,87 @@ Return Value:
     Offsets->EpThreadListHead = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EpImageFileName = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EpToken = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpFlags = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpFlags2 = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpRundownProtect = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpProcessLock = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpCreateTime = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpExitTime = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpExitStatus = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpPeb = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpSession = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpWin32Process = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpWow64Process = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpInheritedFromUniqueProcessId = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpSeAuditProcessCreationInfo = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpJob = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpDeviceMap = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpDebugPort = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpExceptionPortData = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpSectionBaseAddress = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpImageFilePointer = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpPriorityClass = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpActiveThreads = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpVadRoot = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpVadHint = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpCloneRoot = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpNumberOfPrivatePages = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpNumberOfLockedPages = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpCommitCharge = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpCommitChargePeak = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpPeakVirtualSize = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpVirtualSize = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpSessionProcessLinks = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpMitigationFlags = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpMitigationFlags2 = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpProcessQuotaUsage = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpProcessQuotaPeak = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpAddressCreationLock = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpPageTableCommitmentLock = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpRotateInProgress = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpForkInProgress = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpCommitChargeJob = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpCookie = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpWorkingSetWatch = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpWin32WindowStation = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpOwnerProcessId = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpQuotaBlock = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpEtwDataSource = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpPageDirectoryPte = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpSecurityPort = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpJobLinks = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpHighestUserAddress = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpImagePathHash = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpDefaultHardErrorProcessing = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpLastThreadExitStatus = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpPrefetchTrace = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpLockedPagesList = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpReadOperationCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpWriteOperationCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpOtherOperationCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpReadTransferCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpWriteTransferCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpOtherTransferCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpCommitChargeLimit = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpVm = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpMmProcessLinks = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpModifiedPageCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpVadCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpVadPhysicalPages = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpVadPhysicalPagesLimit = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpAlpcContext = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpTimerResolutionLink = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpTimerResolutionStackRecord = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpRequestedTimerResolution = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpSmallestTimerResolution = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpInvertedFunctionTable = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpInvertedFunctionTableLock = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpActiveThreadsHighWatermark = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpLargePrivateVadCount = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpThreadListLock = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpWnfContext = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpFlags3 = KSW_DYN_OFFSET_UNAVAILABLE;
+    Offsets->EpDiskCounters = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EtCid = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EtThreadListEntry = KSW_DYN_OFFSET_UNAVAILABLE;
     Offsets->EtStartAddress = KSW_DYN_OFFSET_UNAVAILABLE;
@@ -1256,6 +1337,330 @@ Return Value:
     case KSW_DYN_FIELD_ID_EP_TOKEN:
         *OffsetOut = &State->Kernel.EpToken;
         *SourceOut = &State->KernelSources.EpToken;
+        break;
+    case KSW_DYN_FIELD_ID_EP_FLAGS:
+        *OffsetOut = &State->Kernel.EpFlags;
+        *SourceOut = &State->KernelSources.EpFlags;
+        break;
+    case KSW_DYN_FIELD_ID_EP_FLAGS2:
+        *OffsetOut = &State->Kernel.EpFlags2;
+        *SourceOut = &State->KernelSources.EpFlags2;
+        break;
+    case KSW_DYN_FIELD_ID_EP_RUNDOWN_PROTECT:
+        *OffsetOut = &State->Kernel.EpRundownProtect;
+        *SourceOut = &State->KernelSources.EpRundownProtect;
+        break;
+    case KSW_DYN_FIELD_ID_EP_PROCESS_LOCK:
+        *OffsetOut = &State->Kernel.EpProcessLock;
+        *SourceOut = &State->KernelSources.EpProcessLock;
+        break;
+    case KSW_DYN_FIELD_ID_EP_CREATE_TIME:
+        *OffsetOut = &State->Kernel.EpCreateTime;
+        *SourceOut = &State->KernelSources.EpCreateTime;
+        break;
+    case KSW_DYN_FIELD_ID_EP_EXIT_TIME:
+        *OffsetOut = &State->Kernel.EpExitTime;
+        *SourceOut = &State->KernelSources.EpExitTime;
+        break;
+    case KSW_DYN_FIELD_ID_EP_EXIT_STATUS:
+        *OffsetOut = &State->Kernel.EpExitStatus;
+        *SourceOut = &State->KernelSources.EpExitStatus;
+        break;
+    case KSW_DYN_FIELD_ID_EP_PEB:
+        *OffsetOut = &State->Kernel.EpPeb;
+        *SourceOut = &State->KernelSources.EpPeb;
+        break;
+    case KSW_DYN_FIELD_ID_EP_SESSION:
+        *OffsetOut = &State->Kernel.EpSession;
+        *SourceOut = &State->KernelSources.EpSession;
+        break;
+    case KSW_DYN_FIELD_ID_EP_WIN32_PROCESS:
+        *OffsetOut = &State->Kernel.EpWin32Process;
+        *SourceOut = &State->KernelSources.EpWin32Process;
+        break;
+    case KSW_DYN_FIELD_ID_EP_WOW64_PROCESS:
+        *OffsetOut = &State->Kernel.EpWow64Process;
+        *SourceOut = &State->KernelSources.EpWow64Process;
+        break;
+    case KSW_DYN_FIELD_ID_EP_INHERITED_FROM_UNIQUE_PROCESS_ID:
+        *OffsetOut = &State->Kernel.EpInheritedFromUniqueProcessId;
+        *SourceOut = &State->KernelSources.EpInheritedFromUniqueProcessId;
+        break;
+    case KSW_DYN_FIELD_ID_EP_SE_AUDIT_PROCESS_CREATION_INFO:
+        *OffsetOut = &State->Kernel.EpSeAuditProcessCreationInfo;
+        *SourceOut = &State->KernelSources.EpSeAuditProcessCreationInfo;
+        break;
+    case KSW_DYN_FIELD_ID_EP_JOB:
+        *OffsetOut = &State->Kernel.EpJob;
+        *SourceOut = &State->KernelSources.EpJob;
+        break;
+    case KSW_DYN_FIELD_ID_EP_DEVICE_MAP:
+        *OffsetOut = &State->Kernel.EpDeviceMap;
+        *SourceOut = &State->KernelSources.EpDeviceMap;
+        break;
+    case KSW_DYN_FIELD_ID_EP_DEBUG_PORT:
+        *OffsetOut = &State->Kernel.EpDebugPort;
+        *SourceOut = &State->KernelSources.EpDebugPort;
+        break;
+    case KSW_DYN_FIELD_ID_EP_EXCEPTION_PORT_DATA:
+        *OffsetOut = &State->Kernel.EpExceptionPortData;
+        *SourceOut = &State->KernelSources.EpExceptionPortData;
+        break;
+    case KSW_DYN_FIELD_ID_EP_SECTION_BASE_ADDRESS:
+        *OffsetOut = &State->Kernel.EpSectionBaseAddress;
+        *SourceOut = &State->KernelSources.EpSectionBaseAddress;
+        break;
+    case KSW_DYN_FIELD_ID_EP_IMAGE_FILE_POINTER:
+        *OffsetOut = &State->Kernel.EpImageFilePointer;
+        *SourceOut = &State->KernelSources.EpImageFilePointer;
+        break;
+    case KSW_DYN_FIELD_ID_EP_PRIORITY_CLASS:
+        *OffsetOut = &State->Kernel.EpPriorityClass;
+        *SourceOut = &State->KernelSources.EpPriorityClass;
+        break;
+    case KSW_DYN_FIELD_ID_EP_ACTIVE_THREADS:
+        *OffsetOut = &State->Kernel.EpActiveThreads;
+        *SourceOut = &State->KernelSources.EpActiveThreads;
+        break;
+    case KSW_DYN_FIELD_ID_EP_VAD_ROOT:
+        *OffsetOut = &State->Kernel.EpVadRoot;
+        *SourceOut = &State->KernelSources.EpVadRoot;
+        break;
+    case KSW_DYN_FIELD_ID_EP_VAD_HINT:
+        *OffsetOut = &State->Kernel.EpVadHint;
+        *SourceOut = &State->KernelSources.EpVadHint;
+        break;
+    case KSW_DYN_FIELD_ID_EP_CLONE_ROOT:
+        *OffsetOut = &State->Kernel.EpCloneRoot;
+        *SourceOut = &State->KernelSources.EpCloneRoot;
+        break;
+    case KSW_DYN_FIELD_ID_EP_NUMBER_OF_PRIVATE_PAGES:
+        *OffsetOut = &State->Kernel.EpNumberOfPrivatePages;
+        *SourceOut = &State->KernelSources.EpNumberOfPrivatePages;
+        break;
+    case KSW_DYN_FIELD_ID_EP_NUMBER_OF_LOCKED_PAGES:
+        *OffsetOut = &State->Kernel.EpNumberOfLockedPages;
+        *SourceOut = &State->KernelSources.EpNumberOfLockedPages;
+        break;
+    case KSW_DYN_FIELD_ID_EP_COMMIT_CHARGE:
+        *OffsetOut = &State->Kernel.EpCommitCharge;
+        *SourceOut = &State->KernelSources.EpCommitCharge;
+        break;
+    case KSW_DYN_FIELD_ID_EP_COMMIT_CHARGE_PEAK:
+        *OffsetOut = &State->Kernel.EpCommitChargePeak;
+        *SourceOut = &State->KernelSources.EpCommitChargePeak;
+        break;
+    case KSW_DYN_FIELD_ID_EP_PEAK_VIRTUAL_SIZE:
+        *OffsetOut = &State->Kernel.EpPeakVirtualSize;
+        *SourceOut = &State->KernelSources.EpPeakVirtualSize;
+        break;
+    case KSW_DYN_FIELD_ID_EP_VIRTUAL_SIZE:
+        *OffsetOut = &State->Kernel.EpVirtualSize;
+        *SourceOut = &State->KernelSources.EpVirtualSize;
+        break;
+    case KSW_DYN_FIELD_ID_EP_SESSION_PROCESS_LINKS:
+        *OffsetOut = &State->Kernel.EpSessionProcessLinks;
+        *SourceOut = &State->KernelSources.EpSessionProcessLinks;
+        break;
+    case KSW_DYN_FIELD_ID_EP_MITIGATION_FLAGS:
+        *OffsetOut = &State->Kernel.EpMitigationFlags;
+        *SourceOut = &State->KernelSources.EpMitigationFlags;
+        break;
+    case KSW_DYN_FIELD_ID_EP_MITIGATION_FLAGS2:
+        *OffsetOut = &State->Kernel.EpMitigationFlags2;
+        *SourceOut = &State->KernelSources.EpMitigationFlags2;
+        break;
+    case KSW_DYN_FIELD_ID_EP_PROCESS_QUOTA_USAGE:
+        *OffsetOut = &State->Kernel.EpProcessQuotaUsage;
+        *SourceOut = &State->KernelSources.EpProcessQuotaUsage;
+        break;
+    case KSW_DYN_FIELD_ID_EP_PROCESS_QUOTA_PEAK:
+        *OffsetOut = &State->Kernel.EpProcessQuotaPeak;
+        *SourceOut = &State->KernelSources.EpProcessQuotaPeak;
+        break;
+    case KSW_DYN_FIELD_ID_EP_ADDRESS_CREATION_LOCK:
+        *OffsetOut = &State->Kernel.EpAddressCreationLock;
+        *SourceOut = &State->KernelSources.EpAddressCreationLock;
+        break;
+    case KSW_DYN_FIELD_ID_EP_PAGE_TABLE_COMMITMENT_LOCK:
+        *OffsetOut = &State->Kernel.EpPageTableCommitmentLock;
+        *SourceOut = &State->KernelSources.EpPageTableCommitmentLock;
+        break;
+    case KSW_DYN_FIELD_ID_EP_ROTATE_IN_PROGRESS:
+        *OffsetOut = &State->Kernel.EpRotateInProgress;
+        *SourceOut = &State->KernelSources.EpRotateInProgress;
+        break;
+    case KSW_DYN_FIELD_ID_EP_FORK_IN_PROGRESS:
+        *OffsetOut = &State->Kernel.EpForkInProgress;
+        *SourceOut = &State->KernelSources.EpForkInProgress;
+        break;
+    case KSW_DYN_FIELD_ID_EP_COMMIT_CHARGE_JOB:
+        *OffsetOut = &State->Kernel.EpCommitChargeJob;
+        *SourceOut = &State->KernelSources.EpCommitChargeJob;
+        break;
+    case KSW_DYN_FIELD_ID_EP_COOKIE:
+        *OffsetOut = &State->Kernel.EpCookie;
+        *SourceOut = &State->KernelSources.EpCookie;
+        break;
+    case KSW_DYN_FIELD_ID_EP_WORKING_SET_WATCH:
+        *OffsetOut = &State->Kernel.EpWorkingSetWatch;
+        *SourceOut = &State->KernelSources.EpWorkingSetWatch;
+        break;
+    case KSW_DYN_FIELD_ID_EP_WIN32_WINDOW_STATION:
+        *OffsetOut = &State->Kernel.EpWin32WindowStation;
+        *SourceOut = &State->KernelSources.EpWin32WindowStation;
+        break;
+    case KSW_DYN_FIELD_ID_EP_OWNER_PROCESS_ID:
+        *OffsetOut = &State->Kernel.EpOwnerProcessId;
+        *SourceOut = &State->KernelSources.EpOwnerProcessId;
+        break;
+    case KSW_DYN_FIELD_ID_EP_QUOTA_BLOCK:
+        *OffsetOut = &State->Kernel.EpQuotaBlock;
+        *SourceOut = &State->KernelSources.EpQuotaBlock;
+        break;
+    case KSW_DYN_FIELD_ID_EP_ETW_DATA_SOURCE:
+        *OffsetOut = &State->Kernel.EpEtwDataSource;
+        *SourceOut = &State->KernelSources.EpEtwDataSource;
+        break;
+    case KSW_DYN_FIELD_ID_EP_PAGE_DIRECTORY_PTE:
+        *OffsetOut = &State->Kernel.EpPageDirectoryPte;
+        *SourceOut = &State->KernelSources.EpPageDirectoryPte;
+        break;
+    case KSW_DYN_FIELD_ID_EP_SECURITY_PORT:
+        *OffsetOut = &State->Kernel.EpSecurityPort;
+        *SourceOut = &State->KernelSources.EpSecurityPort;
+        break;
+    case KSW_DYN_FIELD_ID_EP_JOB_LINKS:
+        *OffsetOut = &State->Kernel.EpJobLinks;
+        *SourceOut = &State->KernelSources.EpJobLinks;
+        break;
+    case KSW_DYN_FIELD_ID_EP_HIGHEST_USER_ADDRESS:
+        *OffsetOut = &State->Kernel.EpHighestUserAddress;
+        *SourceOut = &State->KernelSources.EpHighestUserAddress;
+        break;
+    case KSW_DYN_FIELD_ID_EP_IMAGE_PATH_HASH:
+        *OffsetOut = &State->Kernel.EpImagePathHash;
+        *SourceOut = &State->KernelSources.EpImagePathHash;
+        break;
+    case KSW_DYN_FIELD_ID_EP_DEFAULT_HARD_ERROR_PROCESSING:
+        *OffsetOut = &State->Kernel.EpDefaultHardErrorProcessing;
+        *SourceOut = &State->KernelSources.EpDefaultHardErrorProcessing;
+        break;
+    case KSW_DYN_FIELD_ID_EP_LAST_THREAD_EXIT_STATUS:
+        *OffsetOut = &State->Kernel.EpLastThreadExitStatus;
+        *SourceOut = &State->KernelSources.EpLastThreadExitStatus;
+        break;
+    case KSW_DYN_FIELD_ID_EP_PREFETCH_TRACE:
+        *OffsetOut = &State->Kernel.EpPrefetchTrace;
+        *SourceOut = &State->KernelSources.EpPrefetchTrace;
+        break;
+    case KSW_DYN_FIELD_ID_EP_LOCKED_PAGES_LIST:
+        *OffsetOut = &State->Kernel.EpLockedPagesList;
+        *SourceOut = &State->KernelSources.EpLockedPagesList;
+        break;
+    case KSW_DYN_FIELD_ID_EP_READ_OPERATION_COUNT:
+        *OffsetOut = &State->Kernel.EpReadOperationCount;
+        *SourceOut = &State->KernelSources.EpReadOperationCount;
+        break;
+    case KSW_DYN_FIELD_ID_EP_WRITE_OPERATION_COUNT:
+        *OffsetOut = &State->Kernel.EpWriteOperationCount;
+        *SourceOut = &State->KernelSources.EpWriteOperationCount;
+        break;
+    case KSW_DYN_FIELD_ID_EP_OTHER_OPERATION_COUNT:
+        *OffsetOut = &State->Kernel.EpOtherOperationCount;
+        *SourceOut = &State->KernelSources.EpOtherOperationCount;
+        break;
+    case KSW_DYN_FIELD_ID_EP_READ_TRANSFER_COUNT:
+        *OffsetOut = &State->Kernel.EpReadTransferCount;
+        *SourceOut = &State->KernelSources.EpReadTransferCount;
+        break;
+    case KSW_DYN_FIELD_ID_EP_WRITE_TRANSFER_COUNT:
+        *OffsetOut = &State->Kernel.EpWriteTransferCount;
+        *SourceOut = &State->KernelSources.EpWriteTransferCount;
+        break;
+    case KSW_DYN_FIELD_ID_EP_OTHER_TRANSFER_COUNT:
+        *OffsetOut = &State->Kernel.EpOtherTransferCount;
+        *SourceOut = &State->KernelSources.EpOtherTransferCount;
+        break;
+    case KSW_DYN_FIELD_ID_EP_COMMIT_CHARGE_LIMIT:
+        *OffsetOut = &State->Kernel.EpCommitChargeLimit;
+        *SourceOut = &State->KernelSources.EpCommitChargeLimit;
+        break;
+    case KSW_DYN_FIELD_ID_EP_VM:
+        *OffsetOut = &State->Kernel.EpVm;
+        *SourceOut = &State->KernelSources.EpVm;
+        break;
+    case KSW_DYN_FIELD_ID_EP_MM_PROCESS_LINKS:
+        *OffsetOut = &State->Kernel.EpMmProcessLinks;
+        *SourceOut = &State->KernelSources.EpMmProcessLinks;
+        break;
+    case KSW_DYN_FIELD_ID_EP_MODIFIED_PAGE_COUNT:
+        *OffsetOut = &State->Kernel.EpModifiedPageCount;
+        *SourceOut = &State->KernelSources.EpModifiedPageCount;
+        break;
+    case KSW_DYN_FIELD_ID_EP_VAD_COUNT:
+        *OffsetOut = &State->Kernel.EpVadCount;
+        *SourceOut = &State->KernelSources.EpVadCount;
+        break;
+    case KSW_DYN_FIELD_ID_EP_VAD_PHYSICAL_PAGES:
+        *OffsetOut = &State->Kernel.EpVadPhysicalPages;
+        *SourceOut = &State->KernelSources.EpVadPhysicalPages;
+        break;
+    case KSW_DYN_FIELD_ID_EP_VAD_PHYSICAL_PAGES_LIMIT:
+        *OffsetOut = &State->Kernel.EpVadPhysicalPagesLimit;
+        *SourceOut = &State->KernelSources.EpVadPhysicalPagesLimit;
+        break;
+    case KSW_DYN_FIELD_ID_EP_ALPC_CONTEXT:
+        *OffsetOut = &State->Kernel.EpAlpcContext;
+        *SourceOut = &State->KernelSources.EpAlpcContext;
+        break;
+    case KSW_DYN_FIELD_ID_EP_TIMER_RESOLUTION_LINK:
+        *OffsetOut = &State->Kernel.EpTimerResolutionLink;
+        *SourceOut = &State->KernelSources.EpTimerResolutionLink;
+        break;
+    case KSW_DYN_FIELD_ID_EP_TIMER_RESOLUTION_STACK_RECORD:
+        *OffsetOut = &State->Kernel.EpTimerResolutionStackRecord;
+        *SourceOut = &State->KernelSources.EpTimerResolutionStackRecord;
+        break;
+    case KSW_DYN_FIELD_ID_EP_REQUESTED_TIMER_RESOLUTION:
+        *OffsetOut = &State->Kernel.EpRequestedTimerResolution;
+        *SourceOut = &State->KernelSources.EpRequestedTimerResolution;
+        break;
+    case KSW_DYN_FIELD_ID_EP_SMALLEST_TIMER_RESOLUTION:
+        *OffsetOut = &State->Kernel.EpSmallestTimerResolution;
+        *SourceOut = &State->KernelSources.EpSmallestTimerResolution;
+        break;
+    case KSW_DYN_FIELD_ID_EP_INVERTED_FUNCTION_TABLE:
+        *OffsetOut = &State->Kernel.EpInvertedFunctionTable;
+        *SourceOut = &State->KernelSources.EpInvertedFunctionTable;
+        break;
+    case KSW_DYN_FIELD_ID_EP_INVERTED_FUNCTION_TABLE_LOCK:
+        *OffsetOut = &State->Kernel.EpInvertedFunctionTableLock;
+        *SourceOut = &State->KernelSources.EpInvertedFunctionTableLock;
+        break;
+    case KSW_DYN_FIELD_ID_EP_ACTIVE_THREADS_HIGH_WATERMARK:
+        *OffsetOut = &State->Kernel.EpActiveThreadsHighWatermark;
+        *SourceOut = &State->KernelSources.EpActiveThreadsHighWatermark;
+        break;
+    case KSW_DYN_FIELD_ID_EP_LARGE_PRIVATE_VAD_COUNT:
+        *OffsetOut = &State->Kernel.EpLargePrivateVadCount;
+        *SourceOut = &State->KernelSources.EpLargePrivateVadCount;
+        break;
+    case KSW_DYN_FIELD_ID_EP_THREAD_LIST_LOCK:
+        *OffsetOut = &State->Kernel.EpThreadListLock;
+        *SourceOut = &State->KernelSources.EpThreadListLock;
+        break;
+    case KSW_DYN_FIELD_ID_EP_WNF_CONTEXT:
+        *OffsetOut = &State->Kernel.EpWnfContext;
+        *SourceOut = &State->KernelSources.EpWnfContext;
+        break;
+    case KSW_DYN_FIELD_ID_EP_FLAGS3:
+        *OffsetOut = &State->Kernel.EpFlags3;
+        *SourceOut = &State->KernelSources.EpFlags3;
+        break;
+    case KSW_DYN_FIELD_ID_EP_DISK_COUNTERS:
+        *OffsetOut = &State->Kernel.EpDiskCounters;
+        *SourceOut = &State->KernelSources.EpDiskCounters;
         break;
     case KSW_DYN_FIELD_ID_ET_CID:
         *OffsetOut = &State->Kernel.EtCid;

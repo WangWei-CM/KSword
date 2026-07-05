@@ -106,6 +106,20 @@ typedef struct _KSWORD_ARK_SET_PPL_LEVEL_REQUEST
 #define KSWORD_ARK_PROCESS_FLAG_KERNEL_ENUMERATED 0x00000001UL
 #define KSWORD_ARK_PROCESS_FLAG_HIDDEN_FROM_ACTIVE_LIST 0x00000002UL
 #define KSWORD_ARK_PROCESS_FLAG_HIDDEN_BY_KSWORD_UI 0x00000004UL
+// CID-table specific evidence flags.
+// Inputs:
+// - CID_TABLE_ENUMERATED marks rows observed directly through PspCidTable.
+// - CID_TABLE_REFERENCE_FAILED marks rows whose CID slot decoded to a process
+//   object type, but R0 could not take a stable reference for detail sampling.
+// - TERMINATING_OR_EXITED marks rows whose EPROCESS.ObjectTable is already NULL.
+// Processing:
+// - R3 should still display these rows because the CID table evidence exists.
+// Return behavior:
+// - These flags are display/diagnostic hints only; the row PID remains the CID
+//   table value so R0 actions can still attempt object-based resolution.
+#define KSWORD_ARK_PROCESS_FLAG_CID_TABLE_ENUMERATED       0x00000008UL
+#define KSWORD_ARK_PROCESS_FLAG_CID_TABLE_REFERENCE_FAILED 0x00000010UL
+#define KSWORD_ARK_PROCESS_FLAG_TERMINATING_OR_EXITED      0x00000020UL
 
 #define KSWORD_ARK_PROCESS_VISIBILITY_ACTION_HIDE 1UL
 #define KSWORD_ARK_PROCESS_VISIBILITY_ACTION_UNHIDE 2UL

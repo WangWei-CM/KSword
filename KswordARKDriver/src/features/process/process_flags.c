@@ -30,10 +30,8 @@ PsLookupProcessByProcessId(
 #define KSWORD_ARK_PROCESS_INFORMATION_BREAK_ON_TERMINATION 29UL
 /* 中文说明：EPROCESS.Flags 中 BreakOnTermination 对应 bit 13，SKT64 同样使用该位。 */
 #define KSWORD_ARK_EPROCESS_FLAGS_BREAK_ON_TERMINATION_MASK 0x00002000UL
-/* 中文说明：现代 Windows 10/11 x64 的 EPROCESS.Flags 常用偏移。 */
-#define KSWORD_ARK_EPROCESS_FLAGS_OFFSET_WIN10_X64 0x464UL
-/* 中文说明：旧 Windows 7 x64 兼容偏移，仅在版本探测明确命中时使用。 */
-#define KSWORD_ARK_EPROCESS_FLAGS_OFFSET_WIN7_X64 0x1F4UL
+/* 中文说明：EPROCESS 结构体偏移必须来自 DynData/PDB，超过该上限视为异常 profile。 */
+#define KSWORD_ARK_EPROCESS_FLAGS_OFFSET_MAX 0x3000UL
 /* 中文说明：Windows x64 ETHREAD.CrossThreadFlags/ApcQueueable 的保守偏移候选。 */
 #define KSWORD_ARK_ETHREAD_APC_QUEUEABLE_OFFSET_X64 0x74UL
 /* 中文说明：ApcQueueable 位在 CrossThreadFlags 中通常对应 bit 18。 */
@@ -140,46 +138,35 @@ KswordARKProcessFlagsSetBreakOnTerminationByZw(
     return status;
 }
 
-/* 中文说明：解析 EPROCESS.Flags 偏移；只在明确支持的 x64 构建上返回成功。 */
+/* 中文说明：解析 EPROCESS.Flags 偏移；只接受已应用的 DynData/PDB profile。 */
 static NTSTATUS
 KswordARKProcessFlagsResolveEprocessFlagsOffset(
     _Out_ ULONG* FlagsOffsetOut
     )
 {
-    NTSTATUS status = STATUS_SUCCESS;
-    RTL_OSVERSIONINFOW versionInfo;
+    KSW_DYN_STATE dynState;
 
     if (FlagsOffsetOut == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
     *FlagsOffsetOut = 0UL;
 
-#if defined(_M_X64)
-    RtlZeroMemory(&versionInfo, sizeof(versionInfo));
-    versionInfo.dwOSVersionInfoSize = sizeof(versionInfo);
-    status = RtlGetVersion(&versionInfo);
-    if (!NT_SUCCESS(status)) {
-        return status;
+    /*
+     * 中文说明：这里禁止按 Windows 版本猜偏移。R3 必须先把与当前
+     * ntoskrnl identity 精确匹配的 PDB profile 下发到 DynData；否则
+     * R0 直接写 EPROCESS.Flags 会拒绝执行，避免误写邻近字段。
+     */
+    RtlZeroMemory(&dynState, sizeof(dynState));
+    KswordARKDynDataSnapshot(&dynState);
+    if (dynState.Kernel.EpFlags == KSW_DYN_OFFSET_UNAVAILABLE ||
+        dynState.Kernel.EpFlags == 0UL ||
+        dynState.Kernel.EpFlags > KSWORD_ARK_EPROCESS_FLAGS_OFFSET_MAX ||
+        dynState.KernelSources.EpFlags == KSW_DYN_FIELD_SOURCE_UNAVAILABLE) {
+        return STATUS_NOT_SUPPORTED;
     }
 
-    /* 中文说明：Windows 10/11 x64 的 Flags 偏移与 SKT64 当前路径一致。 */
-    if (versionInfo.dwMajorVersion >= 10UL) {
-        *FlagsOffsetOut = KSWORD_ARK_EPROCESS_FLAGS_OFFSET_WIN10_X64;
-        return STATUS_SUCCESS;
-    }
-
-    /* 中文说明：仅对 Windows 7 x64 做保守兼容，其它 6.x 版本拒绝硬写。 */
-    if (versionInfo.dwMajorVersion == 6UL && versionInfo.dwMinorVersion == 1UL) {
-        *FlagsOffsetOut = KSWORD_ARK_EPROCESS_FLAGS_OFFSET_WIN7_X64;
-        return STATUS_SUCCESS;
-    }
-
-    return STATUS_NOT_SUPPORTED;
-#else
-    /* 中文说明：非 x64 没有维护 EPROCESS.Flags 偏移表，不进入硬写路径。 */
-    UNREFERENCED_PARAMETER(status);
-    return STATUS_NOT_SUPPORTED;
-#endif
+    *FlagsOffsetOut = dynState.Kernel.EpFlags;
+    return STATUS_SUCCESS;
 }
 
 /* 中文说明：通过直接写 EPROCESS.Flags 兜底设置 BreakOnTermination。 */
@@ -199,7 +186,7 @@ KswordARKProcessFlagsSetBreakOnTerminationByEprocess(
     if (!NT_SUCCESS(status)) {
         return status;
     }
-    if (flagsOffset == 0UL || flagsOffset > 0x1000UL) {
+    if (flagsOffset == 0UL || flagsOffset > KSWORD_ARK_EPROCESS_FLAGS_OFFSET_MAX) {
         return STATUS_NOT_SUPPORTED;
     }
 

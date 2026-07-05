@@ -18,6 +18,7 @@ public:
     QLabel* m_copyright;       // 版权信息：展示版权、版本号和编译时间。
     QLabel* m_contributors;    // 贡献者信息：展示当前参与名单。
     QLabel* m_referenceTitle;  // 参考项目标题：说明下方按钮均为外部参考仓库入口。
+    QLabel* m_donors;          // 捐赠者信息：展示当前公开感谢的捐赠者名单。
     QPushButton* m_githubBtn;  // Github按钮：打开项目仓库入口。
     QPushButton* m_qqBtn;      // QQ群按钮：保留项目交流群入口。
     QPushButton* m_pplControlBtn;      // PPLcontrol按钮：打开 PPLcontrol 参考仓库。
